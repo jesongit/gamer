@@ -1,0 +1,12 @@
+# GameBot 本机开发配置
+port = 8443
+data_dir = "./data"
+adb_path = "adb"
+ffmpeg_path = "C:/Users/Jeson/AppData/Local/Microsoft/WinGet/Packages/Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe/ffmpeg-9.0-full_build/bin/ffmpeg.exe"
+scrcpy_server = "./assets/scrcpy-server.jar"
+password = "admin123"
+default_threshold = 0.85
+decode_frames = true
+max_size = 0
+bitrate_mbps = 20
+fps = 15

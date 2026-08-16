@@ -1,0 +1,48 @@
+[package]
+name = "gamer-server"
+version = "0.1.0"
+edition = "2021"
+description = "GameBot 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
+
+# release 构建保留 debug_assertions：tracing 的 debug/trace 宏默认在
+# release 下被编译掉（影响排障），开启后保留全部日志（性能影响可忽略）
+[profile.release]
+debug-assertions = true
+
+[dependencies]
+# Web 框架
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# WebRTC
+webrtc = "0.13"
+
+# 图像处理（模板匹配）
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rayon = "1"
+
+# 定时任务
+cron = "0.12"
+
+# 数据库
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# 工具
+anyhow = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+futures-util = "0.3"
+parking_lot = "0.12"
+bytes = "1"
+async-recursion = "1"

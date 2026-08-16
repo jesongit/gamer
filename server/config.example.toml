@@ -1,0 +1,12 @@
+# GameBot 服务端配置（复制为 config.toml 修改）
+port = 8443
+data_dir = "./data"
+adb_path = "adb"
+ffmpeg_path = "ffmpeg"
+scrcpy_server = "./assets/scrcpy-server.jar"
+password = "admin123"
+default_threshold = 0.85
+decode_frames = true
+max_size = 0
+bitrate_mbps = 20
+fps = 0

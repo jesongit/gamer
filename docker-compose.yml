@@ -1,0 +1,37 @@
+# GameBot 一键部署：服务端 + redroid 云手机（可选）
+
+services:
+  gamer:
+    build: ./server
+    container_name: gamer-server
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./data:/app/data
+      - ./server/assets/scrcpy-server.jar:/app/assets/scrcpy-server.jar
+      # 前端构建产物挂载（web-dist）
+      - ./web/dist:/app/web-dist
+    environment:
+      - GB_CONFIG=/app/config.toml
+    restart: unless-stopped
+    # USB 设备直通（物理手机场景，按需开启）
+    # devices:
+    #   - "/dev/bus/usb:/dev/bus/usb"
+    privileged: true
+
+  # redroid 云手机（按需启用）
+  redroid:
+    image: redroid/redroid:12.0.0-latest
+    container_name: redroid-phone
+    privileged: true
+    volumes:
+      - ./redroid-data:/data
+    ports:
+      - "5555:5555"
+    environment:
+      - androidboot.redroid_gpu_mode=guest
+      - androidboot.redroid_width=1080
+      - androidboot.redroid_height=2400
+      - androidboot.redroid_dpi=480
+    restart: unless-stopped
+    profiles: ["redroid"]
