@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -339,7 +339,20 @@ async fn api_update_device(State(st): State<AppState>, Path(id): Path<String>, J
         fps: req.fps,
         created_at: existing.created_at,
     };
-    // 配置变更后自动断开重连
+    // 配置变更后自动断开重连；先踢掉该设备的活跃 viewer（pusher 停止 + peer 关闭），
+    // 浏览器端 onclose → 自动重连（前端带页面锁，会重新建立会话并恢复画面），
+    // 否则旧 viewer 的 pusher 悬挂在已关闭的帧队列上，浏览器画面定格/黑屏
+    let kicked = {
+        let mut map = st.viewers.lock().unwrap();
+        map.remove(&id)
+    };
+    if let Some((running, peer_weak)) = kicked {
+        running.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(p) = peer_weak.upgrade() {
+            let _ = p.close().await;
+        }
+        info!(device = %id, "config changed, kicked viewer");
+    }
     st.devices.disconnect_device(&id).await;
     match st.devices.upsert_device(&device).await {
         Ok(_) => Json(serde_json::json!({"ok": true, "id": device.id})).into_response(),

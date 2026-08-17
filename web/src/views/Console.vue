@@ -2,6 +2,23 @@
   <div class="console">
     <!-- 左：画面区 -->
     <div class="stage">
+      <!-- 顶部工具条 -->
+      <div class="toolbar">
+        <button class="btn btn-sm" @click="shot">📷 截图</button>
+        <button class="btn btn-sm" @click="rotate">🔄 旋转</button>
+        <button class="btn btn-sm" @click="key('HOME')">🏠 Home</button>
+        <button class="btn btn-sm" @click="key('BACK')">⬅ 返回</button>
+        <button class="btn btn-sm" @click="key('APP_SWITCH')">🪟 最近</button>
+        <button class="btn btn-sm" @click="key('VOL_UP')">🔊＋</button>
+        <button class="btn btn-sm" @click="key('VOL_DOWN')">🔊－</button>
+        <button class="btn btn-sm" @click="toggleAudio" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'">{{ audioMuted ? '🔇' : '🔊' }}</button>
+        <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (currentPkg || '未配置包名')">🚀 启动游戏</button>
+        <div class="tb-sep"></div>
+        <button class="btn btn-sm" :class="{ active: picking }" @click="togglePick">✂️ 框选模板</button>
+        <button class="btn btn-sm" @click="clipboard">📋 剪贴板</button>
+        <span class="tb-tip">鼠标左键=触控 · 滚轮=滑动 · 支持多点触控</span>
+      </div>
+
       <div class="video-wrap" ref="videoWrap">
         <video
           ref="videoElement"
@@ -38,7 +55,7 @@
           <div v-else>
             <div class="v-empty-icon">📴</div>
             <div class="v-empty-text">{{ errorMsg || '未连接设备' }}</div>
-            <button class="btn btn-primary" @click="connect">连接 {{ currentName }}</button>
+            <button class="btn btn-primary" @click="connect(true)">连接 {{ currentName }}</button>
           </div>
         </div>
 
@@ -51,101 +68,115 @@
 
         <button class="v-fs" @click="fullscreen" title="全屏">⛶</button>
       </div>
-
-      <!-- 底部工具条 -->
-      <div class="toolbar">
-        <button class="btn btn-sm" @click="shot">📷 截图</button>
-        <button class="btn btn-sm" @click="rotate">🔄 旋转</button>
-        <button class="btn btn-sm" @click="key('HOME')">🏠 Home</button>
-        <button class="btn btn-sm" @click="key('BACK')">⬅ 返回</button>
-        <button class="btn btn-sm" @click="key('APP_SWITCH')">🪟 最近</button>
-        <button class="btn btn-sm" @click="key('VOL_UP')">🔊＋</button>
-        <button class="btn btn-sm" @click="key('VOL_DOWN')">🔊－</button>
-        <button class="btn btn-sm" @click="toggleAudio" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'">{{ audioMuted ? '🔇' : '🔊' }}</button>
-        <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (currentPkg || '未配置包名')">🚀 启动游戏</button>
-        <div class="tb-sep"></div>
-        <button class="btn btn-sm" :class="{ active: picking }" @click="togglePick">✂️ 框选模板</button>
-        <button class="btn btn-sm" @click="clipboard">📋 剪贴板</button>
-        <span class="tb-tip">鼠标左键=触控 · 滚轮=滑动 · 支持多点触控</span>
-      </div>
     </div>
 
-    <!-- 右：控制面板 -->
+    <!-- 右：控制面板（页签切换） -->
     <aside class="panel">
-      <!-- 设备信息 -->
-      <div class="panel-sec">
-        <div class="ps-head">
-          <span class="dot" :class="connected ? 'ok' : 'off'"></span>
-          <span class="ps-title">{{ currentName }}</span>
-          <span class="tag" :class="connected ? 'info' : ''">{{ connected ? '已连接' : '离线' }}</span>
-        </div>
-        <div class="ps-sub mono">{{ currentAddr }}</div>
-        <div class="ps-sub" v-if="connected">
-          🖥️ {{ currentScreenMode === 'virtual' ? `虚拟屏 ${currentVdRes} · 模板通用分辨率` : '镜像主屏' }}
-        </div>
+      <div class="panel-tabs">
+        <button v-for="t in tabs" :key="t.key" class="tab-btn" :class="{ active: activeTab === t.key, hidden: t.key === 'crop' && !crop.active }" @click="activeTab = t.key">
+          {{ t.icon }}<span class="tab-label">{{ t.label }}</span>
+        </button>
       </div>
 
-      <!-- 自动化 -->
-      <div class="panel-sec">
-        <div class="ps-head">
-          <span class="ps-title">🤖 自动化</span>
-          <button class="btn btn-sm btn-ghost" @click="openScripts">管理脚本 →</button>
-        </div>
-        <div class="auto-run">
-          <select v-model="selScript" class="select mono">
-            <option value="">选择要运行的脚本…</option>
-            <option v-for="s in scripts" :key="s.id" :value="s.id">{{ s.name }}</option>
-          </select>
-          <button v-if="!store.running" class="btn btn-primary" :disabled="!selScript" @click="runScript">▶ 运行</button>
-          <button v-else class="btn btn-danger" @click="stopScript">■ 停止</button>
-        </div>
-
-        <!-- 运行状态 -->
-        <div v-if="store.running" class="run-progress">
-          <div class="rp-head">
-            <span class="mono rp-script">{{ store.runScript }}</span>
-            <span class="rp-pct">{{ store.runProgress }}%</span>
+      <div class="tab-body">
+        <!-- 设备信息 -->
+        <div v-show="activeTab === 'info'" class="panel-sec">
+          <div class="ps-head">
+            <span class="dot" :class="connected ? 'ok' : 'off'"></span>
+            <span class="ps-title">{{ currentName }}</span>
+            <span class="tag" :class="connected ? 'info' : ''">{{ connected ? '已连接' : '离线' }}</span>
           </div>
-          <div class="rp-bar"><div class="rp-fill" :style="{ width: store.runProgress + '%' }"></div></div>
-          <div class="rp-step mono">{{ store.runStep }}</div>
-        </div>
-
-        <!-- 实时日志 -->
-        <div class="live-logs mono">
-          <div v-for="(l, i) in liveLogs" :key="i" class="ll" :class="l.level">
-            <span class="ll-time">{{ l.time }}</span>
-            <span class="ll-msg">{{ l.msg }}</span>
+          <div class="ps-sub mono">{{ currentAddr }}</div>
+          <div class="ps-sub" v-if="connected">
+            🖥️ {{ currentScreenMode === 'virtual' ? `虚拟屏 ${currentVdRes} · 模板通用分辨率` : '镜像主屏' }}
           </div>
-        </div>
-      </div>
+          <div class="ps-stats" v-if="connected">
+            <span class="st">🖥️ {{ res }}</span>
+            <span class="st">{{ fps }} fps</span>
+            <span class="st">延迟 {{ delay }}ms</span>
+          </div>
 
-      <!-- 模板快捷测试 -->
-      <div class="panel-sec">
-        <div class="ps-head"><span class="ps-title">🖼️ 模板</span></div>
-        <div class="tpl-quick">
-          <div v-for="t in templates" :key="t.name" class="tpl-chip" @click="testMatch(t.name)">
-            <span class="tpl-thumb"><img :src="tplThumbUrl(t.name)" alt="" loading="lazy" @error="e => e.target.style.visibility = 'hidden'" /></span>
-            <span>{{ t.name }}</span>
+          <!-- 配置修改（下拉框，选项与设备列表预设一致） -->
+          <div class="cfg-box">
+            <div class="form-item" v-if="currentScreenMode === 'virtual'">
+              <label>分辨率</label>
+              <select v-model="selRes" class="select mono" @change="applyDeviceConfig" :disabled="connecting || configApplying">
+                <option v-for="v in vdResOptions" :key="v" :value="v">{{ v.replace('@', ' · ') }}dpi</option>
+              </select>
+            </div>
+            <div class="form-item">
+              <label>帧率</label>
+              <select v-model="selFps" class="select mono" @change="applyDeviceConfig" :disabled="connecting || configApplying">
+                <option :value="''">自动</option>
+                <option v-for="f in fpsPresets" :key="f" :value="f">{{ f }} fps</option>
+              </select>
+            </div>
+            <div class="cfg-hint">修改后自动重连设备生效</div>
           </div>
         </div>
-        <div class="ps-sub">点击模板 → 在当前画面测试匹配</div>
-      </div>
 
-      <!-- 二次裁切（框选后出现） -->
-      <div class="panel-sec" v-if="crop.active" ref="cropSec">
-        <div class="ps-head">
-          <span class="ps-title">✂️ 二次裁切</span>
-          <span class="ps-sub mono">{{ cropSize }}</span>
+        <!-- 自动化 -->
+        <div v-show="activeTab === 'auto'" class="panel-sec">
+          <div class="ps-head">
+            <span class="ps-title">🤖 自动化</span>
+            <button class="btn btn-sm btn-ghost" @click="openScripts">管理脚本 →</button>
+          </div>
+          <div class="auto-run">
+            <select v-model="selScript" class="select mono">
+              <option value="">选择要运行的脚本…</option>
+              <option v-for="s in scripts" :key="s.id" :value="s.id">{{ s.name }}</option>
+            </select>
+            <button v-if="!store.running" class="btn btn-primary" :disabled="!selScript" @click="runScript">▶ 运行</button>
+            <button v-else class="btn btn-danger" @click="stopScript">■ 停止</button>
+          </div>
+
+          <!-- 运行状态 -->
+          <div v-if="store.running" class="run-progress">
+            <div class="rp-head">
+              <span class="mono rp-script">{{ store.runScript }}</span>
+              <span class="rp-pct">{{ store.runProgress }}%</span>
+            </div>
+            <div class="rp-bar"><div class="rp-fill" :style="{ width: store.runProgress + '%' }"></div></div>
+            <div class="rp-step mono">{{ store.runStep }}</div>
+          </div>
+
+          <!-- 实时日志 -->
+          <div class="live-logs mono">
+            <div v-for="(l, i) in liveLogs" :key="i" class="ll" :class="l.level">
+              <span class="ll-time">{{ l.time }}</span>
+              <span class="ll-msg">{{ l.msg }}</span>
+            </div>
+          </div>
         </div>
-        <div class="crop-stage">
-          <canvas ref="cropCanvas" class="crop-canvas" @mousedown="cropMouseDown" @mousemove="cropMouseMove" @mouseup="cropMouseUp" @mouseleave="cropMouseLeave"></canvas>
-          <div class="crop-hint">拖动边框/角二次裁切（向外拖扩大范围）· 拖框内移动位置</div>
+
+        <!-- 模板 -->
+        <div v-show="activeTab === 'tpl'" class="panel-sec">
+          <div class="ps-head"><span class="ps-title">🖼️ 模板</span></div>
+          <div class="tpl-quick">
+            <div v-for="t in templates" :key="t.name" class="tpl-chip" @click="testMatch(t.name)">
+              <span class="tpl-thumb"><img :src="tplThumbUrl(t.name)" alt="" loading="lazy" @error="e => e.target.style.visibility = 'hidden'" /></span>
+              <span>{{ t.name }}</span>
+            </div>
+          </div>
+          <div class="ps-sub">点击模板 → 在当前画面测试匹配</div>
         </div>
-        <input v-model="crop.name" class="input mono" placeholder="模板名称（默认自动生成）" @keydown.enter="saveTemplate" />
-        <div class="crop-actions">
-          <button class="btn btn-sm" @click="cancelCrop">取消</button>
-          <button class="btn btn-sm btn-ghost" @click="repick">重新框选</button>
-          <button class="btn btn-sm btn-primary" :disabled="saving" @click="saveTemplate">{{ saving ? '保存中…' : '💾 保存模板' }}</button>
+
+        <!-- 二次裁切（框选后出现） -->
+        <div v-show="activeTab === 'crop'" class="panel-sec" v-if="crop.active" ref="cropSec">
+          <div class="ps-head">
+            <span class="ps-title">✂️ 二次裁切</span>
+            <span class="ps-sub mono">{{ cropSize }}</span>
+          </div>
+          <div class="crop-stage">
+            <canvas ref="cropCanvas" class="crop-canvas" @mousedown="cropMouseDown" @mousemove="cropMouseMove" @mouseup="cropMouseUp" @mouseleave="cropMouseLeave"></canvas>
+            <div class="crop-hint">拖动边框/角二次裁切（向外拖扩大范围）· 拖框内移动位置</div>
+          </div>
+          <input v-model="crop.name" class="input mono" placeholder="模板名称（默认自动生成）" @keydown.enter="saveTemplate" />
+          <div class="crop-actions">
+            <button class="btn btn-sm" @click="cancelCrop">取消</button>
+            <button class="btn btn-sm btn-ghost" @click="repick">重新框选</button>
+            <button class="btn btn-sm btn-primary" :disabled="saving" @click="saveTemplate">{{ saving ? '保存中…' : '💾 保存模板' }}</button>
+          </div>
         </div>
       </div>
     </aside>
@@ -153,7 +184,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { store, devicesData, scriptsData, templatesData, useToast } from '../store'
 import { api } from '../api'
@@ -199,6 +230,115 @@ let logTimer = null
 // 连接同步锁：防止并发 connect() 创建多个 PeerConnection（双连接 → 串流 → 画面定格）
 let connectLock = false
 
+// ---------- 多页面互斥锁 + 自动重连 ----------
+// 同一设备同一时刻只允许一个页面持有 WebRTC 连接（服务端单 viewer 设计）。
+// 多个浏览器页面/标签页同时操作时会互相踢连接导致黑屏：
+//  - 连接成功即持有 localStorage 锁并心跳续期
+//  - 被踢（被动断开）时检查锁：他人持有 → 提示且不重连（避免互踢死循环）；
+//    锁在自己手里/已过期 → 自动重连（3/6/12s 退避，上限 3 次）
+//  - 用户手动操作（点连接 / 切换配置）→ 强制抢锁
+const LOCK_KEY = 'gb_webrtc_lock'
+const LOCK_TTL = 15000
+const lock = reactive({ pageId: Math.random().toString(36).slice(2, 10), deviceId: null, ts: 0 })
+let lockTimer = null
+let reconnectTimer = null
+let reconnectAttempts = 0
+let manualClose = false
+
+function readLock() {
+  try { return JSON.parse(localStorage.getItem(LOCK_KEY) || 'null') } catch (e) { return null }
+}
+
+function acquireLock(force = false) {
+  const cur = readLock()
+  const heldByOther = cur && cur.deviceId === store.deviceId && cur.pageId !== lock.pageId && Date.now() - cur.ts < LOCK_TTL
+  if (heldByOther && !force) return false
+  const l = { pageId: lock.pageId, deviceId: store.deviceId, ts: Date.now() }
+  localStorage.setItem(LOCK_KEY, JSON.stringify(l))
+  lock.deviceId = store.deviceId
+  lock.ts = l.ts
+  return true
+}
+
+function releaseLock() {
+  const cur = readLock()
+  if (cur && cur.pageId === lock.pageId) localStorage.removeItem(LOCK_KEY)
+  lock.deviceId = null
+}
+
+function startLockHeartbeat() {
+  stopLockHeartbeat()
+  lockTimer = setInterval(() => {
+    if (connected.value) acquireLock(false)
+  }, 8000)
+}
+
+function stopLockHeartbeat() {
+  if (lockTimer) { clearInterval(lockTimer); lockTimer = null }
+}
+
+/** 被动断开后的自动重连调度：他人持锁则不重连，否则按退避时间重连 */
+function scheduleReconnect() {
+  if (reconnectTimer || !store.deviceId) return
+  const cur = readLock()
+  if (cur && cur.deviceId === store.deviceId && cur.pageId !== lock.pageId && Date.now() - cur.ts < LOCK_TTL) {
+    errorMsg.value = '设备正在其他页面使用，画面已断开'
+    return
+  }
+  const delay = [3000, 6000, 12000][Math.min(reconnectAttempts, 2)]
+  reconnectAttempts++
+  toast(`连接已断开，${delay / 1000} 秒后自动重连…`, 'warn')
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    // 延迟后二次检查锁：被踢后其他页面可能已抢锁（连接竞态窗口），
+    // 此时不再自动重连，避免多页面互踢死循环
+    const cur2 = readLock()
+    if (cur2 && cur2.deviceId === store.deviceId && cur2.pageId !== lock.pageId && Date.now() - cur2.ts < LOCK_TTL) {
+      errorMsg.value = '设备正在其他页面使用，画面已断开'
+      return
+    }
+    connect(false) // 自动重连不强抢锁（锁在自己手里会成功；在别人手里已在上方拦截）
+  }, delay)
+}
+
+function onChannelOpen() {
+  connected.value = true
+  connecting.value = false
+  reconnectAttempts = 0
+  acquireLock(true) // 能建立连接说明服务端已踢掉旧 viewer，锁归本页
+  startLockHeartbeat()
+  toast('WebRTC 连接建立', 'success')
+}
+
+function onChannelClose() {
+  connected.value = false
+  stopLockHeartbeat()
+  if (!manualClose) scheduleReconnect()
+  manualClose = false
+}
+
+// 右侧面板页签
+const activeTab = ref('info')
+const tabs = [
+  { key: 'info', icon: 'ℹ️', label: '设备' },
+  { key: 'auto', icon: '🤖', label: '自动化' },
+  { key: 'tpl', icon: '🖼️', label: '模板' },
+  { key: 'crop', icon: '✂️', label: '裁切' }
+]
+
+// 设备配置修改（下拉框，选项与设备列表预设一致）
+const vdPresets = [
+  { res: '1920x1080', dpi: 420 },
+  { res: '1080x1920', dpi: 420 },
+  { res: '1280x720', dpi: 320 },
+  { res: '2340x1080', dpi: 440 }
+]
+const fpsPresets = [15, 30, 60, 120]
+const selRes = ref('1920x1080@420')
+const selFps = ref('')
+// 配置修改串行化标志：防止下拉框连续变更叠加触发多次重连
+const configApplying = ref(false)
+
 const devices = computed(() => devicesData.value)
 const scripts = computed(() => scriptsData.value)
 const templates = computed(() => templatesData.value)
@@ -209,6 +349,53 @@ const currentAddr = computed(() => current.value?.addr || '—')
 const currentPkg = computed(() => current.value?.pkg || '')
 const currentVdRes = computed(() => current.value?.vd_res || '1920x1080')
 const currentScreenMode = computed(() => current.value?.screen_mode || 'mirror')
+
+// 当前设备分辨率若不在预设中，追加一个选项展示（只读当前值，仍只能从预设里选）
+const vdResOptions = computed(() => {
+  const presets = vdPresets.map(p => `${p.res}@${p.dpi}`)
+  const cur = `${current.value?.vd_res}@${current.value?.vd_dpi}`
+  return cur && cur !== '@' && !presets.includes(cur) ? [...presets, cur] : presets
+})
+
+watch(current, (d) => {
+  if (!d) return
+  selRes.value = d.vd_res && d.vd_dpi ? `${d.vd_res}@${d.vd_dpi}` : '1920x1080@420'
+  selFps.value = d.fps || ''
+}, { immediate: true })
+
+/** 应用分辨率/帧率修改：更新配置 → 服务端自动断开旧会话 → 重新连接 → 重连 WebRTC 画面 */
+async function applyDeviceConfig() {
+  if (configApplying.value) return
+  const d = current.value
+  if (!d) return
+  const [res, dpi] = selRes.value.split('@')
+  const fps = selFps.value === '' ? null : Number(selFps.value)
+  // 无变化则不动作
+  if (d.vd_res === res && String(d.vd_dpi) === String(dpi) && (d.fps || null) === fps) return
+  const payload = {
+    name: d.name,
+    kind: d.kind,
+    addr: d.addr,
+    screen_mode: d.screen_mode,
+    vd_res: res,
+    vd_dpi: Number(dpi),
+    pkg: d.pkg,
+    fps
+  }
+  configApplying.value = true
+  try {
+    toast('配置已更新，正在自动重连…', 'info')
+    await api.updateDevice(d.id, payload)
+    await loadData()
+    // 服务端已踢掉本页 viewer（config changed, kicked viewer）→ 触发 onclose →
+    // 自动重连逻辑（scheduleReconnect）重新建立会话与 WebRTC，无需在此手动重连，
+    // 避免与自动重连并发导致双连接
+  } catch (e) {
+    toast('配置更新失败：' + e.message, 'error')
+  } finally {
+    configApplying.value = false
+  }
+}
 
 const selStyle = computed(() => ({
   left: Math.min(selStart.x, selEnd.x) + 'px',
@@ -257,11 +444,17 @@ function toggleAudio() {
   }
 }
 
-async function connect() {
+async function connect(force = false) {
   // 幂等：同步锁 + 状态检查，杜绝并发/重复调用创建多个 PC
   // （服务端会因多连接出现多推流，video.srcObject 被串流覆盖 → 画面定格）
   if (connectLock || connecting.value || connected.value) {
     console.warn('[webrtc] connect ignored (lock/connecting/connected)')
+    return
+  }
+  // force=true 仅限用户手动操作（点连接按钮）：强制抢锁；
+  // 自动重连（force=false）不抢锁——锁在他人手里时已由 scheduleReconnect 拦截
+  if (!acquireLock(force)) {
+    errorMsg.value = '设备正在其他页面使用'
     return
   }
   connectLock = true
@@ -275,8 +468,8 @@ async function connect() {
 
 async function doConnect() {
   if (!store.deviceId) return toast('请先在设备列表选择设备', 'error')
-  // 重连场景：若有残留 pc（连接失败但未清理干净），先释放
-  if (pc) cleanup()
+  // 重连场景：若有残留 pc（连接失败但未清理干净），先释放（主动关闭，不触发自动重连）
+  if (pc) cleanup(true)
   errorMsg.value = ''
   connecting.value = true
 
@@ -310,8 +503,8 @@ async function doConnect() {
     // 控制 DataChannel 必须由 offerer 创建：否则 offer 里没有 m=application，
     // answer 也不会有（webrtc-rs 只镜像 offer 的 media section），SCTP 永不建立
     controlChannel = pc.createDataChannel('control')
-    controlChannel.onopen = () => { connected.value = true; connecting.value = false; toast('WebRTC 连接建立', 'success') }
-    controlChannel.onclose = () => { connected.value = false }
+    controlChannel.onopen = onChannelOpen
+    controlChannel.onclose = onChannelClose
 
     pc.ontrack = (e) => {
       // 只接受当前 pc 的轨道：残留/旧连接的 ontrack 不得覆盖 srcObject（串流 → 定格）
@@ -336,8 +529,8 @@ async function doConnect() {
 
     pc.ondatachannel = (e) => {
       controlChannel = e.channel
-      controlChannel.onopen = () => { connected.value = true; connecting.value = false; toast('WebRTC 连接建立', 'success') }
-      controlChannel.onclose = () => { connected.value = false }
+      controlChannel.onopen = onChannelOpen
+      controlChannel.onclose = onChannelClose
     }
 
     // 4. offer 交换
@@ -363,25 +556,66 @@ async function doConnect() {
     console.error('webrtc connect:', e)
     connecting.value = false
     errorMsg.value = e.message
-    cleanup()
+    cleanup(true)
   }
 }
 
-function cleanup() {
+/** 释放 WebRTC 资源；manual=true 表示主动关闭（不触发自动重连） */
+function cleanup(manual = false) {
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null }
   if (logTimer) { clearInterval(logTimer); logTimer = null }
-  if (pc) { try { pc.close() } catch (e) {} pc = null }
+  stopLockHeartbeat()
+  if (pc) {
+    manualClose = manual // 主动关闭时标记：pc.close() 触发的 onclose 不触发自动重连
+    try { pc.close() } catch (e) {}
+    pc = null
+  }
   if (ws) { try { ws.close() } catch (e) {} ws = null }
   controlChannel = null
   mediaStream = null
   connected.value = false
+  hadVideo = false
+  stillFrames = 0
+  // 清空画面：断开后避免旧帧定格残留（overlay 会显示连接提示）
+  if (videoElement.value) videoElement.value.srcObject = null
   hideLoupe()
+}
+
+// ---------- 视频静默检测 ----------
+// 被踢/断流时服务端不再向本页推帧（或已推给其他页面），video.currentTime 停止推进
+// → 判定断流，走与 onclose 相同的自动重连逻辑（带页面锁检查）。
+// 服务端有静止补帧（RTP 时间戳单调推进），正常连接下 currentTime 持续前进，
+// 静止画面不会误判；仅真正无帧流入（被踢/断流/看门狗重建窗口）才会触发。
+let lastVideoTime = 0
+let stillFrames = 0
+let hadVideo = false
+
+function handleVideoSilence() {
+  if (manualClose || !connected.value || !store.deviceId) return
+  console.warn('[webrtc] video stream silent, treating as disconnected')
+  connected.value = false
+  stopLockHeartbeat()
+  scheduleReconnect()
 }
 
 function startStats() {
   if (statsTimer) clearInterval(statsTimer)
   statsTimer = setInterval(async () => {
     if (!pc) return
+    // 视频静默检测：仅在见过画面后启用（连接初期 currentTime=0 不误判）
+    const v = videoElement.value
+    if (connected.value && v && v.videoWidth > 0) {
+      hadVideo = true
+      if (Math.abs(v.currentTime - lastVideoTime) < 0.001) {
+        if (++stillFrames >= 2) { // 连续 ~4s 无新帧
+          stillFrames = 0
+          handleVideoSilence()
+        }
+      } else {
+        stillFrames = 0
+        lastVideoTime = v.currentTime
+      }
+    }
     try {
       const stats = await pc.getStats()
       let fpsCount = 0
@@ -550,6 +784,7 @@ function openCrop(rect) {
   crop.rect = { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) }
   crop.name = defaultTplName()
   crop.active = true
+  activeTab.value = 'crop'
   nextTick(() => {
     renderCropFrame()
     refreshCropPreview()
@@ -557,9 +792,18 @@ function openCrop(rect) {
   })
 }
 
-function cancelCrop() { crop.active = false; hideLoupe() }
+function cancelCrop() {
+  crop.active = false
+  hideLoupe()
+  if (activeTab.value === 'crop') activeTab.value = 'info'
+}
 
-function repick() { crop.active = false; picking.value = true; toast('在画面上重新框选', 'info') }
+function repick() {
+  crop.active = false
+  picking.value = true
+  if (activeTab.value === 'crop') activeTab.value = 'info'
+  toast('在画面上重新框选', 'info')
+}
 
 /** 画布适配尺寸：只显示框选区域，小图适当放大、大图缩到面板宽度内 */
 function cropFit() {
@@ -722,6 +966,7 @@ async function saveTemplate() {
     templatesData.value = await api.listTemplates()
     crop.active = false
     hideLoupe()
+    if (activeTab.value === 'crop') activeTab.value = 'tpl'
     toast(`模板 ${name} 已保存`, 'success')
     pushLog('success', `模板 ${name} 已保存（${cropSize.value}）`)
   } catch (e) {
@@ -880,10 +1125,17 @@ function fullscreen() {
 
 onMounted(() => {
   loadData()
-  if (store.deviceId) connect()
+  // 页面关闭时释放页面锁（其他页面才能接管）
+  window.addEventListener('beforeunload', releaseLock)
+  if (store.deviceId) connect(false)
 })
 
-onUnmounted(() => { cleanup() })
+onUnmounted(() => {
+  window.removeEventListener('beforeunload', releaseLock)
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  releaseLock()
+  cleanup(true)
+})
 </script>
 
 <style scoped>
@@ -966,6 +1218,7 @@ onUnmounted(() => { cleanup() })
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   background: var(--bg-1); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 8px 10px;
+  min-height: 45px; box-sizing: border-box;
 }
 .tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
 .tb-tip { margin-left: auto; font-size: 11px; color: var(--text-2); }
@@ -973,12 +1226,41 @@ onUnmounted(() => { cleanup() })
 
 /* ===== 右侧面板 ===== */
 .panel {
-  width: 320px; flex-shrink: 0; display: flex; flex-direction: column; gap: 12px;
-  overflow: auto;
+  width: 320px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px;
+  overflow: hidden;
 }
+.panel-tabs {
+  display: flex; gap: 4px; flex-shrink: 0;
+  background: var(--bg-1); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 4px 6px;
+  height: 45px; box-sizing: border-box;
+}
+.tab-btn {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px;
+  padding: 7px 2px; border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-2); font-size: 12px; cursor: pointer;
+  transition: all .15s; white-space: nowrap;
+}
+.tab-btn:hover { color: var(--text-0); background: var(--bg-3); }
+.tab-btn.active { background: rgba(34,211,165,.1); color: var(--accent); font-weight: 600; }
+.tab-btn.hidden { display: none; }
+.tab-body { flex: 1; display: flex; flex-direction: column; gap: 12px; overflow: auto; min-height: 0; }
+.ps-stats { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* 设备配置修改区 */
+.cfg-box {
+  display: flex; flex-direction: column; gap: 8px;
+  border-top: 1px solid var(--border); padding-top: 10px;
+}
+.cfg-box .form-item { display: flex; align-items: center; gap: 8px; }
+.cfg-box label { font-size: 12px; color: var(--text-1); flex-shrink: 0; width: 44px; }
+.cfg-box .select { flex: 1; padding: 5px 8px; font-size: 12px; }
+.cfg-hint { font-size: 10px; color: var(--text-2); }
+
 .panel-sec {
   background: var(--bg-1); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  flex-shrink: 0;
 }
 .ps-head { display: flex; align-items: center; gap: 8px; }
 .ps-title { font-size: 13px; font-weight: 600; }

@@ -399,8 +399,13 @@ impl ViewerSession {
                     };
                     *last_ts.lock() = ts;
 
-                    // config 帧（SPS/PPS）交给 payloader 缓存，随下个关键帧打 STAP-A
+                    // config 帧（SPS/PPS）：缓存进 config_nalu（供后续关键帧前重发）
+                    // + 交给 payloader 缓存随下个关键帧打 STAP-A。
+                    // 必须更新 config_nalu：若 viewer 连接早于帧缓存首帧（配置切换重连、
+                    // 会话刚建立的空窗期），initial_frames 为 None，此处是浏览器拿到
+                    // SPS/PPS 的唯一机会——否则错过会话开头的 config 帧就永久黑屏。
                     if frame.is_config {
+                        *config_nalu.lock() = Some(Bytes::from(frame.data.clone()));
                         let _ = payloader.payload(1200, &Bytes::from(frame.data));
                         continue;
                     }

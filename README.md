@@ -50,12 +50,34 @@ gamer/
 │   │   ├── engine.rs       # YAML 脚本解释器
 │   │   ├── scheduler.rs    # cron 定时任务
 │   │   └── store.rs        # SQLite 持久化
-│   ├── assets/scrcpy-server.jar   # 官方 v3.3.3（构建时下载）
+│   ├── assets/scrcpy-server.jar   # 官方 v3.3.3（仓库自带）
 │   └── Dockerfile          # 多阶段构建，内置 adb + ffmpeg
 ├── web/                    # Vue3 + Vite 前端（精简版）
 ├── docker-compose.yml      # server + redroid 一键拉起
 └── docs/                   # 文档
 ```
+
+## 依赖清单（Windows / scoop 安装示例）
+
+| 依赖 | 用途 | scoop 安装 |
+|---|---|---|
+| Rust 工具链（stable） | 编译 Rust 服务端 | `scoop install rustup`，或免 VS 的 GNU 工具链 `scoop install rust` |
+| Android platform-tools（adb） | 设备发现 / 连接 / 推送 scrcpy-server | `scoop install adb` |
+| ffmpeg | 视频软解码帧缓存（截图 / 模板匹配 / WebRTC 初始 GOP 重放） | `scoop install ffmpeg` |
+| Node.js ≥ 18 | 前端 Vite dev / 构建 | `scoop install nodejs-lts` |
+| scrcpy-server.jar | 设备端采集端（v3.3.3，**仓库已自带** `server/assets/`） | 无需安装 |
+
+一键安装示例（PowerShell）：
+
+```powershell
+scoop install git rustup adb ffmpeg nodejs-lts   # 或 scoop install rust 替代 rustup
+rustup default stable                            # MSVC 工具链需先装 VS Build Tools（C++ 生成工具）
+```
+
+> scoop 安装的 `adb` / `ffmpeg` 会自动加入 PATH，`server/config.toml` 的 `adb_path` / `ffmpeg_path`
+> 保持默认值 `"adb"` / `"ffmpeg"` 即可；也可写绝对路径。
+> ⚠️ ffmpeg 路径失效会直接导致**连接控制后无画面**（帧缓存启动失败 → WebRTC 无法重放
+> SPS/PPS + GOP → 浏览器 H.264 解码器无法初始化），详见下方「已知坑」。
 
 ## 快速开始
 
@@ -178,6 +200,11 @@ steps:
     会导致 scrcpy server 关闭连接——视频 socket 必须保留整个 TcpStream
   - `max_fps=0` / `max_size=0` 等 0 值参数不要传给 scrcpy server（与官方客户端行为一致）
   - 模板匹配引擎会把截图与模板等比缩放到最长边 540px 加速，命中坐标会映射回原图
+  - **ffmpeg 路径失效 → 连接控制黑屏**：`config.toml` 的 `ffmpeg_path` 指向不存在的
+    可执行文件时，帧缓存（FrameCache）启动失败，WebRTC 新 viewer 的初始推流帧
+    （SPS/PPS + 最近 GOP）为 None；scrcpy 只在会话开始时发一次 SPS/PPS，后连接的
+    浏览器永远收不到参数集，H.264 解码器无法初始化 → 即使 RTP 帧在流也一直黑屏。
+    排查：服务端日志出现 `frame cache unavailable` 且无 `pusher replayed initial GOP`。
 
 ## 真机联调记录（2026-08-16，红米 25079RPDCC / Android 16）
 
