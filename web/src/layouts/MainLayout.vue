@@ -36,7 +36,7 @@
     <div class="main">
       <header class="topbar">
         <div class="tb-left">
-          <router-link to="/devices" class="tb-device" :class="{ on: store.deviceId }">
+          <router-link to="/console" class="tb-device" :class="{ on: store.deviceId }">
             <span class="dot" :class="store.deviceId ? 'ok' : 'off'"></span>
             {{ store.deviceId ? currentDeviceName : '未选择设备' }}
           </router-link>
@@ -66,7 +66,6 @@ import { store, logout, devicesData } from '../store'
 
 const router = useRouter()
 const navs = [
-  { path: '/devices', name: '设备列表', icon: '📱' },
   { path: '/console', name: '投屏控制', icon: '🖥️' },
   { path: '/templates', name: '模板管理', icon: '🖼️' },
   { path: '/scripts', name: '脚本编辑', icon: '📜' },

@@ -37,7 +37,7 @@ async function onLogin() {
   // 不 await 时 Promise 恒为 truthy，router.push 在 token 写入前执行，
   // 路由守卫（无 token）会把页面弹回登录页 → 登录成功却不跳转
   if (await login(user.value, pass.value)) {
-    router.push('/devices')
+    router.push('/console')
   } else {
     alert('用户名或密码错误')
   }
