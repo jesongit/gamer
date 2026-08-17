@@ -39,7 +39,7 @@ impl Default for Config {
             ffmpeg_path: "ffmpeg".into(),
             scrcpy_server: PathBuf::from("./assets/scrcpy-server.jar"),
             password: "admin123".into(),
-            default_threshold: 0.85,
+            default_threshold: 0.8,
             decode_frames: true,
             max_size: 0,
             bitrate_mbps: 20,
@@ -62,6 +62,7 @@ impl Config {
             Self::default()
         };
         std::fs::create_dir_all(&cfg.data_dir)?;
+        std::fs::create_dir_all(cfg.data_dir.join("templates"))?;
         Ok(cfg)
     }
 

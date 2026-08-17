@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">脚本编辑</div>
-        <div class="page-sub">YAML 自动化脚本 · 支持 find / click / swipe / text / key / loop / if / goto / call / random_delay</div>
+        <div class="page-sub">YAML 自动化脚本 · 支持 find / click / tap / swipe / text / key / until / loop / goto / call / wait</div>
       </div>
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
@@ -24,7 +24,7 @@
           </div>
         </div>
         <div class="sl-foot">
-          <span>YAML v1 语法说明</span>
+          <span>YAML 语法说明</span>
           <button class="btn btn-sm btn-ghost" @click="showHelp = true">?</button>
         </div>
       </div>
@@ -55,26 +55,35 @@
         <div class="modal-body">
           <div class="help-block">
             <div class="hb-title">🎬 动作</div>
-            <pre class="hb-code mono">- wait: 2000                          # 等待毫秒
-- click: {x: 540, y: 1680}           # 点击坐标
-- click: "@found"                    # 点击上一个 find 的命中点
-- swipe: {from: [500,1800], to: [500,600], duration: 800}
+            <pre class="hb-code mono">- wait: [500, 1500]                   # 随机延时
+- tap: [0.500, 0.500]                # 相对坐标点击
+- click: shop.png                    # 模板点击（自带成功/失败日志）
+  threshold: 0.85
+  region: a
+  log: "点击成功"
+  else:
+    - log: "点击失败"
+- swipe:
+    from: [0.500, 0.800]
+    to: [0.500, 0.200]
+    time: 800
 - text: "hello world"                # 输入文本
-- key: HOME                          # HOME/BACK/APP_SWITCH/VOL_UP…
-- start_app: {package: "com.game.xxx"}
-- random_delay: {min: 500, max: 1500} # 随机延时（模拟人工）</pre>
+- key: HOME                          # HOME/BACK/APP_SWITCH/VOL_UP…</pre>
           </div>
           <div class="help-block">
             <div class="hb-title">🔍 找图</div>
-            <pre class="hb-code mono">- find: {template: sign_btn.png, timeout: 10000, threshold: 0.85}
+            <pre class="hb-code mono">- find: sign_btn.png
+  threshold: 0.85
+  region: a
   then:
-    - click: "@found"
+    - tap: [0.500, 0.500]
   else:
     - log: "未找到签到按钮"
 
-- loop_until_find: {template: done.png, timeout: 30000, steps:
-    - wait: 1000
-    - swipe: {from: [500,1800], to: [500,600], duration: 500}}</pre>
+- until: done.png
+  timeout: 0
+  else:
+    - log: "等待超时"</pre>
           </div>
           <div class="help-block">
             <div class="hb-title">🔁 逻辑</div>
@@ -82,7 +91,6 @@
 - goto: label_name
 - label: label_name
 - call: 子脚本.yml
-- if_find: {template: x.png, then: [...], else: [...]}
 - log: "输出到运行日志"</pre>
           </div>
         </div>
@@ -105,16 +113,13 @@ const valid = ref(null)
 const showHelp = ref(false)
 
 const DEFAULT_CODE = `name: 每日签到
-device: auto
 
 steps:
-  - wait: 2000
-  - find:
-      template: sign_btn.png
-      timeout: 10000
-      threshold: 0.85
-    then:
-      - click: "@found"
+  - wait: [300, 800]
+  - click: sign_btn.png
+    threshold: 0.85
+    region: a
+    log: "点击签到按钮"
     else:
       - log: "未找到签到按钮，重试"
       - goto: retry
@@ -122,8 +127,11 @@ steps:
   - loop:
       times: 3
       steps:
-        - swipe: {from: [500, 1800], to: [500, 600], duration: 800}
-        - random_delay: {min: 300, max: 900}
+        - swipe:
+            from: [0.500, 0.800]
+            to: [0.500, 0.200]
+            time: 800
+        - wait: [300, 900]
   - key: HOME
   - log: "签到完成"
 `
@@ -164,7 +172,7 @@ async function save() {
 
 async function run() {
   if (!sel.value?.id) return toast('请先保存脚本', 'error')
-  if (!store.deviceId) return toast('请先在设备列表选择设备', 'error')
+  if (!store.deviceId) return toast('请先选择设备（投屏控制 → 设备页签）', 'error')
   try {
     await api.runScript(sel.value.id, store.deviceId)
     store.running = true

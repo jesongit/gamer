@@ -26,15 +26,19 @@ pub struct MatchRequest {
     pub screen_png: Vec<u8>,
     /// 模板 PNG 字节
     pub template_png: Vec<u8>,
-    /// 阈值 0~1（默认 0.85）
+    /// 阈值 0~1（默认 0.8）
     pub threshold: Option<f32>,
     /// 搜索区域（原始截图坐标系，None = 全图）
     pub region: Option<[u32; 4]>,
 }
 
 pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>> {
-    let screen = image::load_from_memory(&req.screen_png)?.to_rgb8();
-    let template = image::load_from_memory(&req.template_png)?.to_rgb8();
+    let screen = image::load_from_memory(&req.screen_png)
+        .map_err(|e| anyhow::anyhow!("解析截图失败 ({} bytes): {}", req.screen_png.len(), e))?
+        .to_rgb8();
+    let template = image::load_from_memory(&req.template_png)
+        .map_err(|e| anyhow::anyhow!("解析模板失败 ({} bytes): {}", req.template_png.len(), e))?
+        .to_rgb8();
 
     let (sw, sh) = (screen.width(), screen.height());
     let (tw, th) = (template.width(), template.height());
@@ -151,7 +155,7 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
         }
     }
 
-    let threshold = req.threshold.unwrap_or(0.85);
+    let threshold = req.threshold.unwrap_or(0.8);
     if best_score < threshold {
         return Ok(None);
     }

@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">模板管理</div>
-        <div class="page-sub">图片模板用于 YAML 脚本中的 find / if_find / loop_until_find</div>
+        <div class="page-sub">图片模板用于 YAML 脚本中的 find / click / until</div>
       </div>
       <div class="head-actions">
         <label class="btn" for="tpl-upload">⬆️ 上传模板</label>
