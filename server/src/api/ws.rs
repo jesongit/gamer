@@ -1,5 +1,7 @@
 //! WebSocket 信令：浏览器连接 /ws/device/:id → 交换 SDP → 建立 WebRTC
 
+use std::time::Duration;
+
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::response::Response;
@@ -10,6 +12,7 @@ use tracing::{debug, info, warn};
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use super::AppState;
+use crate::device::scrcpy::VideoFrame;
 use crate::webrtc::{make_audio_queue, make_frame_queue, ViewerSession};
 
 pub async fn ws_device(ws: WebSocketUpgrade, State(st): State<AppState>, Path(device_id): Path<String>) -> Response {
@@ -75,8 +78,30 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                 Some(tx) => make_audio_queue(tx.clone()),
                                 None => tokio::sync::mpsc::channel(8).1,
                             };
-                            // 初始推流帧（SPS/PPS + 最近 GOP）：pusher 先重放，浏览器立即出画面
-                            let initial_frames = st.devices.frame_cache(&device_id).and_then(|fc| fc.initial_frames());
+                            // 初始推流帧（SPS/PPS + 最近 GOP）：pusher 先重放，浏览器立即出画面。
+                            // 缓存不足（会话刚建立 / MTK 等关键帧稀疏设备，GOP 可能几十秒才更新一次）：
+                            //  1. 请求设备重置视频编码（RESET_VIDEO → MediaCodec EOS → 新 SPS/PPS + IDR）；
+                            //  2. 轮询等待缓存捕获，最多 ~3s。
+                            // 否则新 viewer 拿不到参数集，错过会话开头的 config 帧就永久黑屏。
+                            let mut initial_frames = st.devices.frame_cache(&device_id).and_then(|fc| fc.initial_frames());
+                            let has_gop = |f: &Option<Vec<VideoFrame>>| f.as_ref().map(|v| v.iter().any(|x| x.is_keyframe)).unwrap_or(false);
+                            if !has_gop(&initial_frames) {
+                                let _ = session.reset_video().await;
+                                for _ in 0..30 {
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                    let f = st.devices.frame_cache(&device_id).and_then(|fc| fc.initial_frames());
+                                    if has_gop(&f) {
+                                        initial_frames = f;
+                                        break;
+                                    }
+                                    if f.is_some() {
+                                        initial_frames = f; // 至少拿到 SPS/PPS
+                                    }
+                                }
+                                if initial_frames.is_some() {
+                                    info!(device = %device_id, "waited for initial frames after reset_video");
+                                }
+                            }
                             match ViewerSession::create(&st.cfg, session.clone(), frame_rx, audio_rx, offer, initial_frames).await {
                                 Ok(vs) => {
                                     // 单 viewer 限制：同一设备的新连接踢掉旧连接

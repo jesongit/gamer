@@ -95,6 +95,11 @@ impl ScrcpySession {
             .unwrap_or(0);
         now.saturating_sub(last) / 1000
     }
+
+    /// 当前视频分辨率（虚拟屏模式下 = 虚拟屏分辨率）
+    pub fn video_size(&self) -> (u32, u32) {
+        (*self.width.lock(), *self.height.lock())
+    }
 }
 
 /// connect() 的返回值：会话 + 视频帧接收端 + 音频帧接收端
@@ -466,6 +471,15 @@ impl ScrcpySession {
     /// 旋转设备
     pub async fn rotate_device(&self) -> anyhow::Result<()> {
         self.send_control(&[11]).await
+    }
+
+    /// 请求设备重置视频编码（scrcpy ControlMsg type 17 RESET_VIDEO，无 payload）。
+    /// server 收到后对 MediaCodec 调 signalEndOfInputStream()，编码器会立即输出
+    /// 新的 SPS/PPS（config 帧）+ IDR 关键帧。
+    /// 用途：新 viewer 连接时若帧缓存还没有 GOP（会话刚建立 / MTK 等关键帧稀疏
+    /// 的设备），请求设备尽快产出可解码初始帧，避免浏览器拿不到参数集而黑屏。
+    pub async fn reset_video(&self) -> anyhow::Result<()> {
+        self.send_control(&[17]).await
     }
 
     /// 设置剪贴板

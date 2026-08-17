@@ -138,7 +138,7 @@ async fn run_task(runner: &Arc<Runner>, devices: &Arc<DeviceManager>, db: &Db, t
     }
 
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let logs = runner.run(&task.device_id, &task.script_id, &script.content, stop).await;
+    let logs = runner.run(&task.device_id, &task.script_id, &script.content, stop, None).await;
     match logs {
         Ok(entries) => {
             let success = entries.iter().any(|(l, _)| l == "error");

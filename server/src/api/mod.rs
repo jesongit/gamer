@@ -700,13 +700,19 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
     let device_id = req.device_id.clone();
     let script_id = id.clone();
     let content = script.content.clone();
+    // 实时日志：脚本每产生一条日志就立刻写入 DB，前端轮询即可实时显示
+    let db_stream = st.db.clone();
+    let log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>> = {
+        let device_id = device_id.clone();
+        let script_id = script_id.clone();
+        Some(Arc::new(move |level, msg| {
+            let _ = db_stream.add_log(&device_id, &script_id, &level, &msg);
+        }))
+    };
     tokio::spawn(async move {
-        let logs = runner.run(&device_id, &script_id, &content, stop).await;
+        let logs = runner.run(&device_id, &script_id, &content, stop, log_cb).await;
         match logs {
-            Ok(entries) => {
-                for (level, msg) in &entries {
-                    let _ = db.add_log(&device_id, &script_id, level, msg);
-                }
+            Ok(_entries) => {
                 let _ = db.add_log(&device_id, &script_id, "success", "脚本执行完成");
             }
             Err(e) => {

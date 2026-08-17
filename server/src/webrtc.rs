@@ -266,7 +266,13 @@ impl ViewerSession {
                 let total_bytes: usize = frames.iter().map(|f| f.data.len()).sum();
                 for f in frames {
                     if f.is_config {
-                        let _ = payloader.payload(1200, &Bytes::from(f.data));
+                        let _ = payloader.payload(1200, &Bytes::from(f.data.clone()));
+                        // 直接把 SPS/PPS 作为 RTP（STAP-A）发出去：浏览器可提前初始化
+                        // H.264 解码器，之后首个 IDR 到达即可立即出画面；
+                        // 仅依赖"关键帧前重发"时，错过重发窗口就永久黑屏
+                        if !push_rtp(&track, &mut payloader, &f, payload_type, ssrc, &mut seq, 0).await {
+                            break;
+                        }
                         continue;
                     }
                     if base.is_none() {

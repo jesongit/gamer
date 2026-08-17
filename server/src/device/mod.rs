@@ -367,17 +367,31 @@ impl DeviceManager {
         };
         if let Some(fc) = cache {
             if let Some(png) = fc.latest_png() {
+                debug!("screenshot from frame cache: {} bytes", png.len());
                 return Ok(png);
             }
         }
         let serial = if device.addr.is_empty() { "usb".to_string() } else { device.addr.clone() };
-        // 虚拟屏模式：screencap 默认截物理屏，需指定虚拟屏 display id
+        // 虚拟屏模式：优先截 scrcpy 虚拟屏；部分设备 adb screencap -d 不支持该虚拟屏，
+        // 会返回非图片错误文本，此时回退到物理屏截图，避免模板匹配拿到无效 PNG。
         if device.screen_mode == ScreenMode::Virtual {
             if let Some(did) = self.virtual_display_id(&serial, device.vd_res.as_deref()).await {
-                return self.adb.screencap_display(&serial, did).await;
+                match self.adb.screencap_display(&serial, did).await {
+                    Ok(png) if image::load_from_memory(&png).is_ok() => {
+                        debug!("screenshot from adb virtual display: {} bytes", png.len());
+                        return Ok(png);
+                    }
+                    Ok(png) => warn!(
+                        "virtual display screencap returned invalid image ({} bytes), fallback to physical screencap",
+                        png.len()
+                    ),
+                    Err(e) => warn!("virtual display screencap failed: {}, fallback to physical screencap", e),
+                }
             }
         }
-        self.adb.screencap(&serial).await
+        let png = self.adb.screencap(&serial).await?;
+        debug!("screenshot from adb screencap: {} bytes", png.len());
+        Ok(png)
     }
 
     /// 解析虚拟屏 display id（dumpsys display 中 type=VIRTUAL 且分辨率匹配 scrcpy 虚拟屏）
