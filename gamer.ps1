@@ -1,0 +1,366 @@
+﻿<#
+.SYNOPSIS
+  GameBot (gamer) 项目启动管理脚本：同时管理后端 gamer-server 与前端 Vite。
+
+.DESCRIPTION
+  start / stop / restart / status 默认同时作用于前后端：
+  - 后端：Rust gamer-server（端口从 server/config.toml 读取，默认 8443）
+  - 前端：Vite dev server（端口 5173，代理 /api、/ws 到后端）
+  停止时均通过「端口 + 进程名」定位进程，避免误杀其他程序。
+
+.EXAMPLE
+  .\gamer.ps1 start              # 启动后端 + 前端（依赖缺失时自动安装/构建）
+  .\gamer.ps1 start -Build       # 后端强制重新构建后启动
+  .\gamer.ps1 start -BackendOnly # 只启动后端
+  .\gamer.ps1 start -FrontendOnly# 只启动前端
+  .\gamer.ps1 stop               # 停止后端 + 前端（端口+进程名定位）
+  .\gamer.ps1 restart            # 重启前后端
+  .\gamer.ps1 status             # 查看前后端运行状态、最近日志
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)]
+    [ValidateSet('start', 'stop', 'restart', 'status', 'help')]
+    [string]$Command = 'status',
+
+    # 后端端口，0 = 自动从 server/config.toml 读取（默认 8443）
+    [int]$Port = 0,
+
+    # 只操作后端（默认前后端一起）
+    [switch]$BackendOnly,
+
+    # 只操作前端（默认前后端一起）
+    [switch]$FrontendOnly,
+
+    # 启动后端前强制重新构建
+    [switch]$Build,
+
+    # 后端使用 release 构建（默认 debug）
+    [switch]$Release
+)
+
+$ErrorActionPreference = 'Stop'
+
+$Root         = $PSScriptRoot
+$ServerDir    = Join-Path $Root 'server'
+$WebDir       = Join-Path $Root 'web'
+$ConfigFile   = Join-Path $ServerDir 'config.toml'
+
+# 后端
+$BackendName   = 'gamer-server'                             # 进程名匹配模式
+$BackendLog    = Join-Path $ServerDir 'gamer-server.log'    # 主日志（追加）
+$BackendErrLog = Join-Path $ServerDir 'gamer-server.err.log'
+
+# 前端（端口与 vite.config.js 保持一致）
+$FrontendPort  = 5173
+$FrontendLog   = Join-Path $WebDir 'vite.log'
+$FrontendErrLog = Join-Path $WebDir 'vite.err.log'
+
+# ---------- 基础工具 ----------
+
+function Get-ServerPort {
+    if ($Port -gt 0) { return $Port }
+    if (Test-Path $ConfigFile) {
+        $m = Select-String -Path $ConfigFile -Pattern '^\s*port\s*=\s*(\d+)' | Select-Object -First 1
+        if ($m) { return [int]$m.Matches[0].Groups[1].Value }
+    }
+    return 8443
+}
+
+function Get-BinaryPath {
+    $profile = if ($Release) { 'release' } else { 'debug' }
+    return Join-Path $ServerDir "target\$profile\$BackendName.exe"
+}
+
+function Test-PortListening([int]$p) {
+    return [bool](Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue)
+}
+
+function Get-PortOwner([int]$p) {
+    Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $o = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+            "    PID $($_.OwningProcess) $($o.ProcessName)"
+        } | Select-Object -Unique
+}
+
+# 通过「端口 + 进程名」定位后端 gamer-server 进程
+function Get-BackendProcs {
+    # 1) 先查监听端口的进程，再按名字过滤（端口优先，精确锁定）
+    $portPids = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique)
+    $found = @()
+    foreach ($procId in $portPids) {
+        $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if ($p -and $p.ProcessName -like "$BackendName*") { $found += $p }
+    }
+    # 2) 再按进程名补充（覆盖端口已释放但仍存活的残留进程）
+    foreach ($p in @(Get-Process -Name "$BackendName*" -ErrorAction SilentlyContinue)) {
+        if ($found.Id -notcontains $p.Id) { $found += $p }
+    }
+    return @($found | Sort-Object Id -Unique)
+}
+
+# 通过「端口 + 名字/命令行」定位前端 vite 进程（node 名太通用，须端口优先）
+function Get-FrontendProcs {
+    $found = @()
+    # 1) 端口 5173 优先：监听进程必须为 node
+    $portPids = @(Get-NetTCPConnection -LocalPort $FrontendPort -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique)
+    foreach ($procId in $portPids) {
+        $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if ($p -and $p.ProcessName -eq 'node') { $found += $p }
+    }
+    # 2) 兜底：命令行含 vite / npm run dev 的残留进程（node 与 npm/cmd 包装）
+    $cims = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match 'vite' -or $_.CommandLine -match 'npm run dev' }
+    foreach ($c in $cims) {
+        $p = Get-Process -Id $c.ProcessId -ErrorAction SilentlyContinue
+        if ($p -and $found.Id -notcontains $p.Id) { $found += $p }
+    }
+    return @($found | Sort-Object Id -Unique)
+}
+
+# ---------- 状态 ----------
+
+function Show-Status {
+    $beProcs = @(Get-BackendProcs)
+    $feProcs = @(Get-FrontendProcs)
+
+    # --- 后端 ---
+    Write-Host "【后端】gamer-server（端口 $Port）"
+    if ($beProcs.Count -eq 0) {
+        if (Test-PortListening $Port) {
+            Write-Host "  未运行，但端口 $Port 被其他进程占用：" -ForegroundColor Red
+            Get-PortOwner $Port | ForEach-Object { Write-Host $_ }
+        } else {
+            Write-Host "  未运行" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  运行中  http://localhost:$Port" -ForegroundColor Green
+        foreach ($p in $beProcs) {
+            Write-Host ("  进程: {0} (PID {1})" -f $p.ProcessName, $p.Id)
+            if ($p.StartTime) {
+                $up = (Get-Date) - $p.StartTime
+                Write-Host ("  启动于: {0:yyyy-MM-dd HH:mm:ss}，已运行 {1:dd\.hh\:mm\:ss}" -f $p.StartTime, $up)
+            }
+        }
+    }
+    if (Test-Path $BackendLog) {
+        Write-Host "  最近日志:"
+        Get-Content $BackendLog -Tail 3 | ForEach-Object { Write-Host "    $_" }
+    }
+
+    # --- 前端 ---
+    Write-Host ""
+    Write-Host "【前端】Vite dev（端口 $FrontendPort）"
+    if ($feProcs.Count -eq 0) {
+        if (Test-PortListening $FrontendPort) {
+            Write-Host "  未运行，但端口 $FrontendPort 被其他进程占用：" -ForegroundColor Red
+            Get-PortOwner $FrontendPort | ForEach-Object { Write-Host $_ }
+        } else {
+            Write-Host "  未运行" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  运行中  http://localhost:$FrontendPort" -ForegroundColor Green
+        foreach ($p in $feProcs) {
+            Write-Host ("  进程: {0} (PID {1})" -f $p.ProcessName, $p.Id)
+            if ($p.StartTime) {
+                $up = (Get-Date) - $p.StartTime
+                Write-Host ("  启动于: {0:yyyy-MM-dd HH:mm:ss}，已运行 {1:dd\.hh\:mm\:ss}" -f $p.StartTime, $up)
+            }
+        }
+    }
+    if (Test-Path $FrontendLog) {
+        Write-Host "  最近日志:"
+        Get-Content $FrontendLog -Tail 3 | ForEach-Object { Write-Host "    $_" }
+    }
+}
+
+# ---------- 停止 ----------
+
+function Stop-Backend {
+    $procs = @(Get-BackendProcs)
+    if ($procs.Count -eq 0) {
+        Write-Host "后端: 没有运行中的 gamer-server 进程（端口 $Port 无监听且无匹配进程名）" -ForegroundColor Yellow
+        return $false
+    }
+    foreach ($p in $procs) {
+        Write-Host ("后端: 停止进程 {0} (PID {1}) ..." -f $p.ProcessName, $p.Id)
+        Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
+    }
+    # 等待优雅退出（最多 10 秒），仍未退出则强制结束
+    $deadline = (Get-Date).AddSeconds(10)
+    while (@(Get-BackendProcs).Count -gt 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+    foreach ($p in @(Get-BackendProcs)) {
+        Write-Host ("后端: 进程未退出，强制结束 {0} (PID {1})" -f $p.ProcessName, $p.Id) -ForegroundColor Yellow
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 500
+    if (Test-PortListening $Port) {
+        Write-Host "后端: 端口 $Port 仍被占用（可能为其他程序）：" -ForegroundColor Red
+        Get-PortOwner $Port | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "后端: 已停止。" -ForegroundColor Green
+    }
+    return $true
+}
+
+function Stop-Frontend {
+    $procs = @(Get-FrontendProcs)
+    if ($procs.Count -eq 0) {
+        Write-Host "前端: 没有运行中的 vite 进程（端口 $FrontendPort 无监听且无匹配进程）" -ForegroundColor Yellow
+        return $false
+    }
+    foreach ($p in $procs) {
+        Write-Host ("前端: 停止进程 {0} (PID {1}) ..." -f $p.ProcessName, $p.Id)
+        Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
+    }
+    $deadline = (Get-Date).AddSeconds(10)
+    while (@(Get-FrontendProcs).Count -gt 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+    foreach ($p in @(Get-FrontendProcs)) {
+        Write-Host ("前端: 进程未退出，强制结束 {0} (PID {1})" -f $p.ProcessName, $p.Id) -ForegroundColor Yellow
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 500
+    if (Test-PortListening $FrontendPort) {
+        Write-Host "前端: 端口 $FrontendPort 仍被占用（可能为其他程序）：" -ForegroundColor Red
+        Get-PortOwner $FrontendPort | ForEach-Object { Write-Host $_ }
+    } else {
+        Write-Host "前端: 已停止。" -ForegroundColor Green
+    }
+    return $true
+}
+
+# ---------- 启动 ----------
+
+function Start-Backend {
+    # 已在运行：直接报状态（区分是否被其他程序占端口）
+    if (@(Get-BackendProcs).Count -gt 0) {
+        Write-Host "后端: 已在运行，无需重复启动" -ForegroundColor Yellow
+        return
+    }
+    if (Test-PortListening $Port) {
+        Write-Host "后端: 端口 $Port 已被其他进程占用，无法启动：" -ForegroundColor Red
+        Get-PortOwner $Port | ForEach-Object { Write-Host $_ }
+        return
+    }
+
+    $exe = Get-BinaryPath
+    if (-not (Test-Path $exe) -or $Build) {
+        Write-Host "后端: 构建 $exe ..."
+        Push-Location $ServerDir
+        try {
+            if ($Release) { & cargo build --release } else { & cargo build }
+        } finally {
+            Pop-Location
+        }
+        if ($LASTEXITCODE -ne 0) { throw "后端: cargo build 失败（exit code $LASTEXITCODE）" }
+    }
+    if (-not (Test-Path $exe)) { throw "后端: 未找到服务端二进制: $exe" }
+
+    Write-Host ("后端: 启动 {0}（端口 {1}）..." -f $exe, $Port)
+    Write-Host ("后端日志: {0}（追加），stderr: {1}" -f $BackendLog, $BackendErrLog)
+
+    # 服务端支持 GB_LOG=<文件> 自带文件日志（追加模式），不依赖 stdout 重定向
+    $env:GB_LOG = $BackendLog
+    try {
+        $proc = Start-Process -FilePath $exe `
+            -WorkingDirectory $ServerDir `
+            -WindowStyle Hidden `
+            -RedirectStandardError $BackendErrLog `
+            -PassThru
+    } finally {
+        Remove-Item Env:GB_LOG -ErrorAction SilentlyContinue
+    }
+
+    # 等待端口监听（最多 60 秒）
+    $deadline = (Get-Date).AddSeconds(60)
+    while (-not (Test-PortListening $Port) -and (Get-Date) -lt $deadline) {
+        if ($proc.HasExited) {
+            throw "后端: 进程启动后立即退出（exit code $($proc.ExitCode)），请查看日志: $BackendLog / $BackendErrLog"
+        }
+        Start-Sleep -Seconds 1
+    }
+    if (-not (Test-PortListening $Port)) {
+        throw "后端: 等待超时，端口 $Port 未监听，请查看日志: $BackendLog / $BackendErrLog"
+    }
+    Write-Host "后端: 启动成功  http://localhost:$Port" -ForegroundColor Green
+}
+
+function Start-Frontend {
+    if (@(Get-FrontendProcs).Count -gt 0) {
+        Write-Host "前端: 已在运行，无需重复启动" -ForegroundColor Yellow
+        return
+    }
+    if (Test-PortListening $FrontendPort) {
+        Write-Host "前端: 端口 $FrontendPort 已被其他进程占用，无法启动：" -ForegroundColor Red
+        Get-PortOwner $FrontendPort | ForEach-Object { Write-Host $_ }
+        return
+    }
+
+    # 依赖缺失时自动安装
+    if (-not (Test-Path (Join-Path $WebDir 'node_modules'))) {
+        Write-Host "前端: node_modules 不存在，执行 npm install ..."
+        Push-Location $WebDir
+        try {
+            & npm install --no-audit --no-fund
+        } finally {
+            Pop-Location
+        }
+        if ($LASTEXITCODE -ne 0) { throw "前端: npm install 失败（exit code $LASTEXITCODE）" }
+    }
+
+    Write-Host "前端: 启动 vite dev（端口 $FrontendPort）..."
+    Write-Host ("前端日志: {0}，stderr: {1}" -f $FrontendLog, $FrontendErrLog)
+
+    # npm.cmd 是包装进程，node 才是真正的 vite；等待期间包装退出不代表失败
+    $proc = Start-Process -FilePath "npm.cmd" -ArgumentList "run", "dev" `
+        -WorkingDirectory $WebDir `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $FrontendLog `
+        -RedirectStandardError $FrontendErrLog `
+        -PassThru
+
+    $deadline = (Get-Date).AddSeconds(60)
+    $wrapperExit = $null
+    while (-not (Test-PortListening $FrontendPort) -and (Get-Date) -lt $deadline) {
+        if ($proc.HasExited -and $null -eq $wrapperExit) { $wrapperExit = $proc.ExitCode }
+        Start-Sleep -Seconds 1
+    }
+    if (-not (Test-PortListening $FrontendPort)) {
+        $code = if ($null -eq $wrapperExit) { '未知（仍在启动）' } else { $wrapperExit }
+        throw "前端: 启动失败（npm 退出码 $code），请查看日志: $FrontendLog / $FrontendErrLog"
+    }
+    Write-Host "前端: 启动成功  http://localhost:$FrontendPort" -ForegroundColor Green
+}
+
+# ---------- 入口 ----------
+
+$Port = Get-ServerPort
+$Both = -not $BackendOnly -and -not $FrontendOnly
+Write-Host ("== gamer.ps1：GameBot 前后端管理（后端端口 {0} / 前端端口 {1}）==" -f $Port, $FrontendPort)
+
+switch ($Command) {
+    'start' {
+        if ($Both -or $BackendOnly) { Start-Backend }
+        if ($Both -or $FrontendOnly) { Start-Frontend }
+        Write-Host ""
+        Show-Status
+    }
+    'stop' {
+        if ($Both -or $FrontendOnly) { Stop-Frontend | Out-Null }
+        if ($Both -or $BackendOnly) { Stop-Backend | Out-Null }
+    }
+    'restart' {
+        if ($Both -or $FrontendOnly) { Stop-Frontend | Out-Null }
+        if ($Both -or $BackendOnly) { Stop-Backend | Out-Null }
+        Write-Host ""
+        if ($Both -or $BackendOnly) { Start-Backend }
+        if ($Both -or $FrontendOnly) { Start-Frontend }
+        Write-Host ""
+        Show-Status
+    }
+    'status' { Show-Status }
+    'help'   { Get-Help -Path $MyInvocation.MyCommand.Path -Detailed }
+}
