@@ -543,8 +543,10 @@ async fn api_list_templates(State(st): State<AppState>) -> Response {
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
-            if e.path().extension().map(|x| x == "png").unwrap_or(false) {
-                let name = e.file_name().to_string_lossy().to_string();
+            // 模板目录专用：列出所有非隐藏文件（模板名可能带 .png/.jpg，也可能是 随机名字#x1_y1_x2_y2 这种带小数点无后缀名）
+            let fname = e.file_name().to_string_lossy().to_string();
+            if e.path().is_file() && !fname.starts_with('.') {
+                let name = fname;
                 let size = e.metadata().map(|m| m.len()).unwrap_or(0);
                 out.push(serde_json::json!({"name": name, "size": size}));
             }
@@ -839,7 +841,7 @@ fn err_response(status: StatusCode, msg: &str) -> Response {
 fn sanitize_filename(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' || c == ' ' || c == '#' { c } else { '_' })
         .collect();
     if cleaned.is_empty() { "unnamed.png".into() } else { cleaned }
 }

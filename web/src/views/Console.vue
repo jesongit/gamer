@@ -301,22 +301,42 @@
         <div v-show="activeTab === 'script'" class="panel-sec script-tab">
           <!-- 模板功能（放上面） -->
           <div class="script-tpl">
-            <div class="tpl-top">
-              <input v-model.number="testThreshold" class="input input-sm mono" type="number" min="0" max="1" step="0.01" placeholder="测试阈值 0~1" title="模板测试阈值，默认 0.8" />
-              <button class="btn btn-sm" :class="{ active: picking }" @click="togglePick" :disabled="!connected" title="在画面上框选区域保存为模板">✂️ 框选模板</button>
-            </div>
-            <div class="tpl-quick">
-              <div v-for="t in templates" :key="t.name" class="tpl-chip" @click="onTemplateChipClick($event, t.name)">
-                <span class="tpl-thumb"><img :src="tplThumbUrl(t.name)" alt="" loading="lazy" @error="e => e.target.style.visibility = 'hidden'" /></span>
-                <span>{{ t.name }}</span>
+            <!-- 模板文件列表（非裁切时） -->
+            <template v-if="!crop.active">
+              <div class="tpl-top">
+                <input v-model.number="testThreshold" class="input input-sm mono" type="number" min="0" max="1" step="0.01" placeholder="测试阈值 0~1" title="模板测试阈值，默认 0.8" />
+                <button class="btn btn-sm" :class="{ active: picking }" @click="togglePick" :disabled="!connected" title="在画面上框选区域保存为模板">✂️ 框选</button>
+                <button class="btn btn-sm" @click="$refs.tplUpload.click()" title="上传图片模板">⬆️ 上传</button>
+                <input ref="tplUpload" type="file" accept="image/png,image/jpeg" hidden @change="onTplUpload" />
               </div>
-            </div>
-            <div class="tpl-tools">
-              <span class="ps-sub">{{ scriptMode === 'edit' ? '点击模板 → 测试匹配 / Alt 或 alt 模式 → 生成记录' : '点击模板 → 在当前画面测试匹配' }}</span>
-            </div>
+              <div class="tpl-list-wrap">
+                <div class="tpl-list-head">
+                  <span class="tpl-cell thumb">缩略图</span>
+                  <span class="tpl-cell name">文件名</span>
+                  <span class="tpl-cell ops">操作</span>
+                </div>
+                <div class="tpl-list">
+                  <div v-for="t in templates" :key="t.name" class="tpl-row" :class="{ 'del-confirm': confirmDelTpl === t.name }" @click="onTplRowClick($event, t)">
+                    <span class="tpl-cell thumb">
+                      <span class="tpl-thumb"><img :src="tplThumbUrl(t.name)" alt="" loading="lazy" @error="e => e.target.style.visibility = 'hidden'" /></span>
+                    </span>
+                    <span class="tpl-cell name mono" :title="t.name">{{ t.name }}</span>
+                    <span class="tpl-cell ops">
+                      <button class="btn btn-sm" @click.stop="openTplView(t.name)">查看</button>
+                      <button class="btn btn-sm" :class="{ 'tpl-del-confirm': confirmDelTpl === t.name }" @click.stop="onTplDeleteClick(t)">{{ confirmDelTpl === t.name ? '确认' : '删除' }}</button>
+                      <button class="btn btn-sm" @click.stop="onTplMatchClick(t)">匹配</button>
+                    </span>
+                  </div>
+                  <div v-if="!templates.length" class="tpl-empty">暂无模板，点击「框选」或「上传」创建</div>
+                </div>
+              </div>
+              <div class="tpl-tools">
+                <span class="ps-sub">{{ scriptMode === 'edit' ? '点击模板 → 测试匹配 / Alt 或 alt 模式 → 生成记录' : '点击模板 → 在当前画面测试匹配' }}</span>
+              </div>
+            </template>
 
-            <!-- 二次裁切（框选后出现） -->
-            <div v-if="crop.active" class="crop-panel" ref="cropSec">
+            <!-- 二次裁切（框选后占满整个模板区域） -->
+            <div v-else class="crop-panel crop-panel-full" ref="cropSec">
               <div class="ps-head">
                 <span class="ps-title">✂️ 二次裁切</span>
                 <span class="ps-sub mono">{{ cropSize }}</span>
@@ -332,8 +352,16 @@
                 <button class="btn btn-sm btn-primary" :disabled="saving" @click="saveTemplate">{{ saving ? '保存中…' : '💾 保存模板' }}</button>
               </div>
             </div>
-          </div>
 
+            <!-- 模板查看大图 -->
+            <div v-if="viewTpl" class="tpl-view-mask" @click.self="closeTplView">
+              <div class="tpl-view-modal">
+                <button class="tpl-view-close" @click="closeTplView" title="关闭">✕</button>
+                <img :src="tplThumbUrl(viewTpl)" alt="模板预览" />
+                <div class="tpl-view-name mono">{{ viewTpl }}</div>
+              </div>
+            </div>
+          </div>
           <!-- 脚本功能：运行模式 -->
           <div v-if="scriptMode === 'run'" class="script-run">
             <div class="auto-run">
@@ -350,6 +378,7 @@
               <button class="btn btn-primary" :disabled="!selScript || !store.deviceId" @click="runScript">▶ 运行</button>
               <button class="btn" @click="startNewScript">新建</button>
               <button class="btn" :disabled="!selScript" @click="editCurrentScript">编辑</button>
+              <button class="btn btn-danger" :disabled="!selScript" @click="deleteCurrentScript">删除</button>
             </div>
 
             <div ref="logBox" class="live-logs script-logs mono">
@@ -369,6 +398,11 @@
               <button class="btn btn-primary" :disabled="scriptSaving" @click="saveEditScript">{{ scriptSaving ? '保存中…' : '💾 保存' }}</button>
               <button class="btn" @click="cancelEditScript">取消</button>
               <button class="btn" :class="{ active: altMode }" @click="toggleAltMode" title="开启后点击模板/投屏只生成操作记录，不发送控制指令">⌥ alt 模式</button>
+            </div>
+            <div class="edit-interval">
+              <span>操作间隔</span>
+              <input v-model.number="stepInterval" class="input input-sm mono" type="number" min="0" step="50" title="每个操作后自动追加 wait 的毫秒数" />
+              <span>ms</span>
             </div>
             <div class="op-record">
               <div v-if="!opRecords.length" class="op-record-empty">请在alt模式下进行操作生成记录</div>
@@ -425,6 +459,8 @@ const editScriptCode = ref(DEFAULT_SCRIPT_CODE)
 // 编辑模式当前编辑的脚本 id（null=新建）
 const editScriptId = ref(null)
 const scriptSaving = ref(false)
+// 每个操作后自动追加的默认间隔（可配置）
+const stepInterval = ref(200)
 // alt 模式：仅在脚本编辑模式生效；开启后模板/投屏点击只生成操作记录
 const altMode = ref(false)
 // 操作记录区：最多展示 3 行，每行可点击追加到编辑区
@@ -441,6 +477,9 @@ let rawLogs = []
 let runStartTime = 0
 const picking = ref(false)
 const testThreshold = ref(0.8)
+// 模板列表：查看大图 / 删除二次确认
+const viewTpl = ref(null)
+const confirmDelTpl = ref(null)
 const selecting = ref(false)
 const selStart = reactive({ x: 0, y: 0 })
 const selEnd = reactive({ x: 0, y: 0 })
@@ -1162,6 +1201,10 @@ let hadVideo = false
 // 传输码率统计（按两次 getStats 的 bytesReceived 差值计算）
 let lastBytesReceived = 0
 let lastBitrateTs = 0
+// 画面延迟统计：jitterBufferDelay 增量 / 新播出帧数 = 每帧在 jitter buffer 的平均停留
+// 时间（≈ 画面滞后于设备的时间下限；服务端推流节奏正常时 ~100-300ms）
+let lastJbd = 0
+let lastJbe = 0
 // 连接建立时间：用于"连接后长时间无视频帧（黑屏）"看门狗
 let videoConnectTs = 0
 
@@ -1213,6 +1256,18 @@ function startStats() {
       stats.forEach(s => {
         if (s.type === 'inbound-rtp' && s.kind === 'video') {
           if (s.framesPerSecond) fpsCount = Math.round(s.framesPerSecond)
+          // 画面延迟：jitterBufferDelay 规范单位为秒（个别 Chromium 版本报 ms，自适应：
+          // 单帧均值 >50s 视为 ms 直读，否则按秒换算）。只统计增量窗口，避免累计均值失真
+          if (typeof s.jitterBufferDelay === 'number' && s.jitterBufferEmittedCount > 0) {
+            if (lastJbe > 0 && s.jitterBufferEmittedCount > lastJbe) {
+              const perFrame = (s.jitterBufferDelay - lastJbd) / (s.jitterBufferEmittedCount - lastJbe)
+              if (perFrame >= 0 && perFrame < 50) {
+                delay.value = Math.round(perFrame * 1000)
+              }
+            }
+            lastJbd = s.jitterBufferDelay
+            lastJbe = s.jitterBufferEmittedCount
+          }
           // 传输码率：按字节增量 / 时间增量估算
           if (typeof s.bytesReceived === 'number') {
             const now = Date.now()
@@ -1287,7 +1342,6 @@ function startLogPolling() {
 function sendControl(obj) {
   if (controlChannel && controlChannel.readyState === 'open') {
     controlChannel.send(JSON.stringify(obj))
-    console.log('[control] sent', JSON.stringify(obj))
     return true
   }
   console.warn('[control] channel not open, fallback REST', JSON.stringify(obj))
@@ -1312,6 +1366,27 @@ function toDeviceCoord(clientX, clientY) {
 
 // 触控状态
 const touchState = reactive({ active: false, lastX: 0, lastY: 0 })
+
+// 拖动 move 事件合并：鼠标高频事件（数百 Hz）逐条发送会打爆 DataChannel/服务端日志，
+// 这里按 rAF（约 60Hz）合并发送，拖拽手感不受影响，但延迟和负载大幅下降。
+let pendingMove = null
+let moveRaf = 0
+function flushPendingMove() {
+  moveRaf = 0
+  if (pendingMove) {
+    const p = pendingMove
+    pendingMove = null
+    sendControl(p)
+  }
+}
+function scheduleMove(x, y) {
+  pendingMove = { type: 'touch', action: 'move', x, y }
+  if (!moveRaf) moveRaf = requestAnimationFrame(flushPendingMove)
+}
+function cancelPendingMove() {
+  if (moveRaf) { cancelAnimationFrame(moveRaf); moveRaf = 0 }
+  pendingMove = null
+}
 
 function onMouseDown(e) {
   // alt 模式/按住 Alt：点击/滑动只生成操作记录，不发送控制指令
@@ -1340,6 +1415,7 @@ function onMouseDown(e) {
     return
   }
   if (!connected.value) return
+  cancelPendingMove()
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
   touchState.active = true
   touchState.lastX = x; touchState.lastY = y
@@ -1380,11 +1456,12 @@ function onMouseMove(e) {
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
   if (Math.abs(x - touchState.lastX) + Math.abs(y - touchState.lastY) > 6) {
     touchState.lastX = x; touchState.lastY = y
-    sendControl({ type: 'touch', action: 'move', x, y })
+    scheduleMove(x, y)
   }
 }
 
 function togglePick() {
+  confirmDelTpl.value = null
   if (!connected.value) return toast('请先连接设备', 'error')
   picking.value = !picking.value
   if (!picking.value) hideLoupe()
@@ -1410,6 +1487,7 @@ function onMouseUp(e) {
     return
   }
   if (!touchState.active) return
+  cancelPendingMove()
   touchState.active = false
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
   sendControl({ type: 'touch', action: 'up', x, y })
@@ -1442,10 +1520,20 @@ function selToDeviceRect() {
   return { x: cx, y: cy, w: Math.min(w, vw - cx), h: Math.min(h, vh - cy) }
 }
 
-function defaultTplName() {
-  const d = new Date()
-  const p = n => String(n).padStart(2, '0')
-  return `tpl_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}.png`
+function randomTplBase() {
+  return 'tpl_' + Math.random().toString(36).slice(2, 8)
+}
+
+/** 生成默认模板名：随机名字#x1_y1_x2_y2（相对坐标 0~1，去掉小数点、固定 4 位，不带 .png 后缀） */
+function defaultTplName(rect) {
+  const vw = videoElement.value?.videoWidth || 1920
+  const vh = videoElement.value?.videoHeight || 1080
+  const toFixed4 = v => String(Math.round(v * 10000)).padStart(4, '0')
+  const x1 = toFixed4(rect.x / vw)
+  const y1 = toFixed4(rect.y / vh)
+  const x2 = toFixed4((rect.x + rect.w) / vw)
+  const y2 = toFixed4((rect.y + rect.h) / vh)
+  return `${randomTplBase()}#${x1}_${y1}_${x2}_${y2}`
 }
 
 // ---------- 二次裁切 ----------
@@ -1454,6 +1542,7 @@ const cropSize = computed(() => `${Math.round(crop.rect.w)}×${Math.round(crop.r
 
 /** 框选完成后打开右侧裁切区 */
 function openCrop(rect) {
+  confirmDelTpl.value = null
   const video = videoElement.value
   if (!video?.videoWidth) return toast('无法截取画面，请稍后重试', 'error')
   crop.imgW = video.videoWidth
@@ -1468,7 +1557,7 @@ function openCrop(rect) {
   cropBaseCanvas.height = crop.baseH
   cropBaseCanvas.getContext('2d').drawImage(video, crop.originX, crop.originY, crop.baseW, crop.baseH, 0, 0, crop.baseW, crop.baseH)
   crop.rect = { x: 0, y: 0, w: crop.baseW, h: crop.baseH }
-  crop.name = defaultTplName()
+  crop.name = defaultTplName(rect)
   crop.active = true
   activeTab.value = 'script'
   nextTick(() => {
@@ -1768,6 +1857,81 @@ function openScripts() { router.push('/scripts') }
 
 function tplThumbUrl(name) { return `/api/templates/${encodeURIComponent(name)}/image` }
 
+/** 模板列表：查看大图 */
+function openTplView(name) {
+  confirmDelTpl.value = null
+  viewTpl.value = name
+}
+function closeTplView() {
+  viewTpl.value = null
+}
+
+/** 模板列表：点击行（非按钮区域）→ 原模板点击行为（alt 模式生成记录 / 否则测试匹配） */
+function onTplRowClick(e, t) {
+  confirmDelTpl.value = null
+  onTemplateChipClick(e, t.name)
+}
+
+/** 模板列表：匹配按钮（原测试匹配） */
+function onTplMatchClick(t) {
+  confirmDelTpl.value = null
+  testMatch(t.name)
+}
+
+/** 模板列表：删除按钮（第一次变确认，第二次删除；其他操作自动取消） */
+async function onTplDeleteClick(t) {
+  if (confirmDelTpl.value === t.name) {
+    confirmDelTpl.value = null
+    try {
+      await api.deleteTemplate(t.name)
+      templatesData.value = await api.listTemplates()
+      if (viewTpl.value === t.name) viewTpl.value = null
+      toast('模板已删除', 'success')
+    } catch (e) {
+      toast('删除失败：' + e.message, 'error')
+    }
+  } else {
+    confirmDelTpl.value = t.name
+  }
+}
+
+/** 模板列表：上传图片模板 */
+async function onTplUpload(e) {
+  confirmDelTpl.value = null
+  const file = e.target.files[0]
+  e.target.value = ''
+  if (!file) return
+  let name = file.name
+  if (!/\.(png|jpe?g)$/i.test(name)) name += '.png'
+  try {
+    const b64 = await fileToBase64(file)
+    await api.uploadTemplate(name, b64)
+    templatesData.value = await api.listTemplates()
+    toast('模板已上传', 'success')
+  } catch (err) {
+    toast('上传失败：' + err.message, 'error')
+  }
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader()
+    fr.onload = () => resolve(fr.result.split(',')[1])
+    fr.onerror = reject
+    fr.readAsDataURL(file)
+  })
+}
+
+/** 全局按键：Esc 关闭模板大图 / 取消删除确认 */
+function onGlobalKeydown(e) {
+  if (e.key !== 'Escape') return
+  if (viewTpl.value) {
+    closeTplView()
+  } else if (confirmDelTpl.value) {
+    confirmDelTpl.value = null
+  }
+}
+
 function pushLog(level, msg) {
   const now = new Date()
   const t = now.toTimeString().slice(0, 8) + '.' + String(now.getMilliseconds()).padStart(3, '0')
@@ -1809,27 +1973,67 @@ function onTemplateChipClick(e, name) {
   testMatch(name)
 }
 
+/** 从模板名解析 #x1_y1_x2_y2（只认新格式 0125_0481_0469_1222，÷10000 还原），返回 [x1,y1,x2,y2] 或 null */
+function parseTplRegion(name) {
+  const base = name.replace(/\.(png|jpe?g)$/i, '')
+  const idx = base.lastIndexOf('#')
+  if (idx < 0) return null
+  const parts = base.slice(idx + 1).split('_')
+  if (parts.length !== 4) return null
+  const nums = parts.map(s => /^\d{4,5}$/.test(s) ? Number(s) / 10000 : NaN)
+  if (!nums.every(n => Number.isFinite(n) && n >= 0 && n <= 1) || !(nums[2] > nums[0]) || !(nums[3] > nums[1])) return null
+  return nums
+}
+
+/** 从模板名解析 #x1_y1_x2_y2，返回带缩进的 region 行；无匹配时回退 region: a */
+function templateRegionLine(name) {
+  const nums = parseTplRegion(name)
+  if (nums) return `  region: [${nums.map(n => String(n)).join(', ')}]`
+  return '  region: a'
+}
+
+/** 从模板名解析 #x1_y1_x2_y2 并转为设备像素搜索区域 [x, y, w, h]；无匹配时返回 null */
+function templateRegionPixels(name) {
+  const nums = parseTplRegion(name)
+  if (!nums) return null
+  const vw = current.value?.width || videoElement.value?.videoWidth || 1920
+  const vh = current.value?.height || videoElement.value?.videoHeight || 1080
+  const x = Math.round(nums[0] * vw)
+  const y = Math.round(nums[1] * vh)
+  const w = Math.round((nums[2] - nums[0]) * vw)
+  const h = Math.round((nums[3] - nums[1]) * vh)
+  return [x, y, w, h]
+}
+
+/** 当前配置的操作间隔 wait 片段（<=0 时为空） */
+function intervalWaitYaml() {
+  const ms = Number(stepInterval.value) || 0
+  return ms > 0 ? `- wait: ${ms}` : ''
+}
+
 function buildFindYaml(name) {
   return [
     `- find: ${name}`,
     '  threshold: 0.8',
-    '  region: a',
+    templateRegionLine(name),
     '  then:',
     '    - tap: [0.500, 0.500]',
     '  else:',
-    '    - log: "未找到"'
-  ].join('\n')
+    '    - log: "未找到"',
+    intervalWaitYaml()
+  ].filter(Boolean).join('\n')
 }
 
 function buildClickYaml(name) {
   return [
     `- click: ${name}`,
     '  threshold: 0.8',
-    '  region: a',
+    templateRegionLine(name),
     '  log: "点击成功"',
     '  else:',
-    '    - log: "点击失败"'
-  ].join('\n')
+    '    - log: "点击失败"',
+    intervalWaitYaml()
+  ].filter(Boolean).join('\n')
 }
 
 function buildUntilYaml(name) {
@@ -1837,10 +2041,11 @@ function buildUntilYaml(name) {
     `- until: ${name}`,
     '  timeout: 0',
     '  threshold: 0.8',
-    '  region: a',
+    templateRegionLine(name),
     '  else:',
-    '    - log: "等待超时"'
-  ].join('\n')
+    '    - log: "等待超时"',
+    intervalWaitYaml()
+  ].filter(Boolean).join('\n')
 }
 
 /** 把生成的 YAML 片段以 2 空格缩进追加到脚本的 steps 列表里 */
@@ -1896,13 +2101,16 @@ function setTapRecord(p) {
   const vh = videoElement.value?.videoHeight || 1080
   const rx = (p.x / vw).toFixed(4)
   const ry = (p.y / vh).toFixed(4)
-  opRecords.value = [
+  const records = [
     { id: ++opRecordSeq, text: `- tap [${rx}, ${ry}]`, yaml: `- tap: [${rx}, ${ry}]` }
   ]
+  const wait = intervalWaitYaml()
+  if (wait) records.push({ id: ++opRecordSeq, text: `- wait ${stepInterval.value}ms`, yaml: wait })
+  opRecords.value = records
   showAltFeedback('tap', p.x, p.y)
 }
 
-/** 投屏滑动 → 生成 swipe + region 两行记录 */
+/** 投屏滑动 → 生成 swipe + region + wait 记录 */
 function setSwipeRecords(from, to) {
   const vw = videoElement.value?.videoWidth || 1920
   const vh = videoElement.value?.videoHeight || 1080
@@ -1927,6 +2135,8 @@ function setSwipeRecords(from, to) {
       yaml: `  region: [${fx}, ${fy}, ${tx}, ${ty}]`
     }
   ]
+  const wait = intervalWaitYaml()
+  if (wait) opRecords.value.push({ id: ++opRecordSeq, text: `- wait ${stepInterval.value}ms`, yaml: wait })
   const rx = Math.min(from.x, to.x)
   const ry = Math.min(from.y, to.y)
   const rw = Math.abs(to.x - from.x)
@@ -1957,6 +2167,21 @@ function editCurrentScript() {
   editScriptCode.value = s.content
   scriptMode.value = 'edit'
   resetAltState()
+}
+
+/** 运行模式：删除当前选中的脚本 */
+async function deleteCurrentScript() {
+  const s = scripts.value.find(x => x.id === selScript.value)
+  if (!s) return toast('请先选择脚本', 'error')
+  if (!confirm(`删除脚本 ${s.name}？`)) return
+  try {
+    await api.deleteScript(s.id)
+    await loadData()
+    if (selScript.value === s.id) selScript.value = ''
+    toast('脚本已删除', 'success')
+  } catch (e) {
+    toast('删除失败：' + e.message, 'error')
+  }
 }
 
 /** 保存前校验 YAML：语法 / steps / 坐标范围 / 模板存在 */
@@ -2103,7 +2328,8 @@ async function testMatch(name) {
   if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
   showHit.value = false
   try {
-    const r = await api.testTemplate(name, store.deviceId, Number(testThreshold.value) || 0.8, null)
+    const region = templateRegionPixels(name)
+    const r = await api.testTemplate(name, store.deviceId, Number(testThreshold.value) || 0.8, region)
     if (r.hit) {
       hit.x = r.x; hit.y = r.y; hit.w = r.width; hit.h = r.height
       hitLabel.value = `${name} ${r.score.toFixed(2)}`
@@ -2136,11 +2362,13 @@ onMounted(async () => {
   else { mode.value = 'edit'; store.deviceId = null }
   // 页面关闭时释放页面锁（其他页面才能接管）
   window.addEventListener('beforeunload', releaseLock)
+  window.addEventListener('keydown', onGlobalKeydown)
   if (preselected && store.deviceId) connect(false)
 })
 
 onUnmounted(() => {
   window.removeEventListener('beforeunload', releaseLock)
+  window.removeEventListener('keydown', onGlobalKeydown)
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
   if (savedTimer) { clearTimeout(savedTimer); savedTimer = null }
@@ -2404,20 +2632,22 @@ onUnmounted(() => {
 .run-actions .btn { flex: 1; }
 
 /* 脚本页签 */
-.panel-sec.script-tab { flex: 1; min-height: 0; }
-.script-tpl { display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+.panel-sec.script-tab { flex: 1; min-height: 0; overflow: hidden; }
+.script-tpl { flex: 4; min-height: 0; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
 .tpl-top { display: flex; align-items: center; gap: 8px; }
 .tpl-top .input { flex: 1; min-width: 0; }
 .tpl-top .btn { flex-shrink: 0; }
 .tpl-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.script-run { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.script-run { flex: 6; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .script-logs { flex: 1; min-height: 120px; max-height: none; }
-.script-edit { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.script-edit { flex: 6; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .edit-name-row { display: flex; }
 .edit-name-row .input { flex: 1; min-width: 0; width: 100%; }
 .edit-actions { display: flex; gap: 8px; }
 .edit-actions .btn { flex: 1; justify-content: center; }
 .edit-actions .btn.active { border-color: var(--accent-2); color: var(--accent-2); background: rgba(56,189,248,.08); }
+.edit-interval { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); }
+.edit-interval .input { width: 80px; padding: 4px 8px; }
 .op-record {
   flex-shrink: 0; height: 77px; display: flex; flex-direction: column;
   background: var(--bg-0); border: 1px solid var(--border);
@@ -2461,16 +2691,55 @@ onUnmounted(() => {
 .ll.warn .ll-msg { color: var(--warn); }
 .ll.error .ll-msg { color: var(--danger); }
 
-.tpl-quick { display: flex; flex-wrap: wrap; gap: 8px; }
-.tpl-chip {
-  display: flex; align-items: center; gap: 6px; padding: 5px 10px;
-  background: var(--bg-3); border: 1px solid var(--border); border-radius: 20px;
-  font-size: 12px; color: var(--text-1); cursor: pointer; transition: all .15s;
+/* 模板文件列表 */
+.tpl-list-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 4px; }
+.tpl-list-head, .tpl-row { display: flex; align-items: center; gap: 8px; padding: 3px 8px; }
+.tpl-list-head { font-size: 11px; color: var(--text-2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tpl-list { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 2px; min-height: 0; }
+.tpl-row {
+  cursor: pointer; border-radius: var(--radius-sm); border: 1px solid transparent;
+  transition: background .15s;
 }
-.tpl-chip:hover { border-color: var(--accent); color: var(--accent); }
+.tpl-row:hover { background: var(--bg-3); }
+.tpl-row.del-confirm { background: rgba(248,113,113,.08); border-color: rgba(248,113,113,.35); }
+.tpl-empty { padding: 16px 8px; text-align: center; font-size: 11px; color: var(--text-2); }
+.tpl-cell.thumb { width: 30px; flex-shrink: 0; display: flex; align-items: center; }
+.tpl-cell.name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-0); }
+.tpl-cell.ops { display: flex; gap: 6px; flex-shrink: 0; }
+.tpl-cell.ops .btn { padding: 2px 8px; font-size: 11px; }
 .tpl-thumb { font-size: 12px; position: relative; display: inline-flex; }
 .tpl-thumb::before { content: '▦'; }
 .tpl-thumb img {
-  position: relative; z-index: 1; width: 14px; height: 14px; object-fit: contain;
+  position: relative; z-index: 1; width: 24px; height: 24px; object-fit: contain;
 }
+.tpl-del-confirm {
+  background: var(--danger); border-color: var(--danger); color: #fff;
+}
+.tpl-del-confirm:hover { background: #ef4444; color: #fff; }
+
+/* 模板查看大图 */
+.tpl-view-mask {
+  position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center;
+  background: rgba(8,10,16,.78); backdrop-filter: blur(2px);
+}
+.tpl-view-modal {
+  position: relative; display: flex; flex-direction: column; gap: 8px;
+  max-width: 92vw; max-height: 92vh;
+}
+.tpl-view-modal img {
+  max-width: 92vw; max-height: 82vh; object-fit: contain;
+  border-radius: var(--radius-sm); border: 1px solid var(--border); background: #000;
+}
+.tpl-view-close {
+  position: absolute; top: 8px; right: 8px; width: 28px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: 50%;
+  color: var(--text-1); cursor: pointer; font-size: 13px; z-index: 1;
+}
+.tpl-view-close:hover { color: var(--danger); border-color: var(--danger); }
+.tpl-view-name { text-align: center; font-size: 12px; color: var(--text-1); word-break: break-all; }
+
+/* 二次裁切占满整个模板区域 */
+.crop-panel-full { flex: 1; min-height: 0; border-top: none; padding-top: 0; }
+.crop-panel-full .crop-stage { flex: 1; min-height: 0; justify-content: center; }
 </style>

@@ -55,8 +55,8 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
         anyhow::bail!("invalid search region");
     }
 
-    // 缩放：最长边 ≤ 540（截图和模板同比例缩放）
-    let scale = (540.0 / sw.max(sh) as f32).min(1.0);
+    // 有搜索区域时用原始分辨率精匹配（区域小、小模板更准）；无区域全图搜索时缩到 ≤540 保证性能
+    let scale = if req.region.is_some() { 1.0 } else { (540.0 / sw.max(sh) as f32).min(1.0) };
     let (sw2, sh2) = ((sw as f32 * scale).max(1.0) as u32, (sh as f32 * scale).max(1.0) as u32);
     let screen_small = if scale < 1.0 {
         DynamicImage::ImageRgb8(screen).resize(sw2, sh2, image::imageops::FilterType::Triangle)
