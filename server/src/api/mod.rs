@@ -234,15 +234,25 @@ async fn api_scan_devices(State(st): State<AppState>) -> Response {
             .find_map(|p| p.strip_prefix("model:"))
             .map(|m| m.replace('_', " "));
         let kind = infer_device_kind(&serial);
-        // 去重：非空 addr 按 serial 匹配；旧格式 USB（addr 为空）按 kind 匹配
-        let exists = existing.iter().any(|d| {
+        // 去重 + 地址同步：精确/子串/model 匹配（USB↔无线切换、无线 IP 变化后
+        // serial 会变，见 adb.rs resolve_serial）；匹配到的旧设备更新 addr/kind，
+        // 避免同一台设备重复入库
+        let matched = existing.iter_mut().find(|d| {
             if !d.addr.is_empty() {
                 d.addr == serial
+                    || (!serial.is_empty() && d.addr.contains(&serial))
+                    || (!d.addr.is_empty() && serial.contains(&d.addr))
+                    || (model.is_some() && model.as_deref() == Some(d.name.as_str()))
             } else {
                 kind == "usb" && d.kind == "usb"
             }
         });
-        if exists {
+        if let Some(old) = matched {
+            if old.addr != serial || old.kind != kind {
+                old.addr = serial.clone();
+                old.kind = kind.to_string();
+                let _ = st.devices.upsert_device(old).await;
+            }
             continue;
         }
         let name = model.clone().unwrap_or_else(|| short_serial(&serial));

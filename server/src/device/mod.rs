@@ -147,6 +147,22 @@ impl DeviceManager {
 
         self.set_status(id, DeviceStatus::Connecting, None);
 
+        // 解析 adb transport：设备连接方式变化后（USB ↔ 无线调试 mDNS/IP:port），
+        // 配置里的 serial 与 `adb devices` 显示名会失配（resolve_serial 按
+        // 精确/子串/model 匹配），否则 push/reverse/-s 全部找不到设备。
+        let mut device = device;
+        {
+            let resolved = self.adb.resolve_serial(&device.addr, &device.name).await;
+            if !resolved.is_empty() && resolved != device.addr {
+                info!(device = %device.name, from = %device.addr, to = %resolved, "adb transport resolved");
+                device.addr = resolved.clone();
+                // 写回运行时设备：后续截图/屏幕保活等 adb 操作直接使用解析后的 transport
+                if let Some(rt) = self.devices.write().get_mut(id) {
+                    rt.device.addr = resolved;
+                }
+            }
+        }
+
         info!(device = %device.name, "connecting...");
         let result = ScrcpySession::connect(&self.adb, &self.cfg, &device).await;
         let handle: SessionHandle = match result {
