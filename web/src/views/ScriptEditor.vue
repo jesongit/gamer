@@ -7,7 +7,8 @@
       </div>
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
-        <button class="btn btn-primary" @click="run">▶ 运行</button>
+        <button v-if="!store.running" class="btn btn-primary" @click="run">▶ 运行</button>
+        <button v-else class="btn btn-danger" @click="stop">■ 停止</button>
         <button class="btn" @click="save">💾 保存</button>
       </div>
     </div>
@@ -102,7 +103,7 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { scriptsData, devicesData, store, useToast } from '../store'
 import { api } from '../api'
 
@@ -210,17 +211,57 @@ async function save() {
   }
 }
 
+// 运行状态轮询：服务端异步执行脚本（run 接口立即返回），
+// 轮询 status 直到脚本真正结束，才复位运行状态（按钮/顶栏芯片随之恢复）
+let runStatusTimer = null
+
+function startRunStatusPoll() {
+  if (runStatusTimer) clearInterval(runStatusTimer)
+  checkRunStatus()
+  runStatusTimer = setInterval(checkRunStatus, 1000)
+}
+
+function stopRunStatusPoll() {
+  if (runStatusTimer) { clearInterval(runStatusTimer); runStatusTimer = null }
+}
+
+async function checkRunStatus() {
+  if (!store.running || !store.runScriptId) { stopRunStatusPoll(); return }
+  try {
+    const st = await api.scriptStatus(store.runScriptId)
+    if (!st.running) {
+      store.running = false
+      store.runScriptId = null
+      stopRunStatusPoll()
+      toast('脚本已结束', 'info')
+    }
+  } catch (e) {}
+}
+
 async function run() {
   if (!sel.value?.id) return toast('请先保存脚本', 'error')
   if (!store.deviceId) return toast('请先选择设备（投屏控制 → 设备页签）', 'error')
   try {
-    await api.runScript(sel.value.id, store.deviceId)
     store.running = true
     store.runScript = sel.value.name
+    store.runScriptId = sel.value.id
+    await api.runScript(sel.value.id, store.deviceId)
     toast('脚本已开始运行', 'success')
+    startRunStatusPoll()
   } catch (e) {
+    store.running = false
+    store.runScriptId = null
     toast('运行失败：' + e.message, 'error')
   }
+}
+
+function stop() {
+  if (!store.runScriptId) return
+  api.stopScript(store.runScriptId).catch(() => {})
+  store.running = false
+  store.runScriptId = null
+  stopRunStatusPoll()
+  toast('已发送停止指令，脚本将在当前步骤结束后停止', 'warn')
 }
 
 async function removeScript(s) {
@@ -243,7 +284,12 @@ async function loadDevices() {
   try { devices.value = await api.listDevices() } catch (e) {}
 }
 
-onMounted(() => { loadScripts(); loadDevices() })
+onMounted(() => {
+  loadScripts(); loadDevices()
+  // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
+  if (store.running && store.runScriptId) startRunStatusPoll()
+})
+onUnmounted(() => stopRunStatusPoll())
 </script>
 
 <style scoped>

@@ -59,8 +59,9 @@ export const api = {
   listScripts: () => req('GET', '/api/scripts'),
   saveScript: (s) => req('POST', '/api/scripts', s),
   deleteScript: (id) => req('DELETE', `/api/scripts/${id}`),
-  runScript: (id, deviceId) => req('POST', `/api/scripts/${id}/run`, { device_id: deviceId }),
+  runScript: (id, deviceId, startIndex) => req('POST', `/api/scripts/${id}/run`, { device_id: deviceId, start_index: startIndex || 0 }),
   stopScript: (id) => req('POST', `/api/scripts/${id}/stop`),
+  scriptStatus: (id) => req('GET', `/api/scripts/${id}/status`),
 
   // 定时任务
   listTasks: () => req('GET', '/api/tasks'),

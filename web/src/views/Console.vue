@@ -395,18 +395,35 @@
               </select>
             </div>
             <div class="run-actions">
-              <button class="btn btn-primary" :disabled="!selScript || !store.deviceId" @click="runScript">▶ 运行</button>
+              <button v-if="!store.running" class="btn btn-primary" :disabled="!selScript || !store.deviceId" @click="runScript">▶ 运行</button>
+              <button v-else class="btn btn-danger" @click="stopScript">■ 停止</button>
               <button class="btn" @click="startNewScript">新建</button>
               <button class="btn" :disabled="!selScript" @click="editCurrentScript">编辑</button>
               <button class="btn btn-danger" :disabled="!selScript" @click="deleteCurrentScript">删除</button>
             </div>
 
-            <div ref="logBox" class="live-logs script-logs mono">
+            <!-- 运行中：实时日志；其他情况：脚本内容（只读） -->
+            <div v-if="store.running" ref="logBox" class="live-logs script-logs mono">
               <div v-for="(l, i) in liveLogs" :key="i" class="ll" :class="l.level">
                 <span class="ll-time">{{ l.time }}</span>
                 <span class="ll-msg">{{ l.msg }}</span>
               </div>
             </div>
+            <template v-else>
+              <div v-if="!selScript" class="script-view-empty">请选择脚本</div>
+              <div v-else class="script-view-wrap">
+                <div class="run-hint">点击「- 」开头的逻辑行 → 从该逻辑开始运行；点击 click / then / else 等行 → 从头运行</div>
+                <div class="script-view mono">
+                  <div
+                    v-for="(line, idx) in scriptLines"
+                    :key="idx"
+                    class="sv-line"
+                    :class="{ sel: selectedLine === idx, selectable: isSelectableLine(line) }"
+                    @click="onScriptLineClick(idx, line)"
+                  >{{ line || ' ' }}</div>
+                </div>
+              </div>
+            </template>
           </div>
 
           <!-- 脚本功能：编辑模式（新建脚本） -->
@@ -2560,30 +2577,116 @@ async function saveEditScript() {
   }
 }
 
+// 运行状态轮询：服务端异步执行脚本（run 接口立即返回），
+// 轮询 status 直到脚本真正结束，才复位运行状态（按钮/顶栏芯片随之恢复）
+let runStatusTimer = null
+
+function startRunStatusPoll() {
+  if (runStatusTimer) clearInterval(runStatusTimer)
+  checkRunStatus()
+  runStatusTimer = setInterval(checkRunStatus, 1000)
+}
+
+function stopRunStatusPoll() {
+  if (runStatusTimer) { clearInterval(runStatusTimer); runStatusTimer = null }
+}
+
+async function checkRunStatus() {
+  if (!store.running || !store.runScriptId) { stopRunStatusPoll(); return }
+  try {
+    const st = await api.scriptStatus(store.runScriptId)
+    if (!st.running) {
+      store.running = false
+      store.runScriptId = null
+      stopRunStatusPoll()
+      toast('脚本已结束', 'info')
+    }
+  } catch (e) {}
+}
+
+// ---------- 运行模式：只读脚本内容 + 逻辑行选中 ----------
+// 未运行/非编辑时展示脚本内容（不可编辑）；"- " 开头且与顶层步骤同缩进的行 = 一个逻辑的开始，
+// 点击选中后运行从该逻辑开始；点击 click/then/else 等属性行取消选中（从头运行）。
+const selectedLine = ref(null)
+
+const scriptContent = computed(() => {
+  const s = scripts.value.find(x => x.id === selScript.value)
+  return s ? s.content : ''
+})
+const scriptLines = computed(() => scriptContent.value.split('\n'))
+
+/** 顶层 steps 项的前导缩进：首个 "- " 行的缩进长度 */
+const stepIndent = computed(() => {
+  let inSteps = false
+  for (const l of scriptLines.value) {
+    if (!inSteps) {
+      if (/^steps:/.test(l)) inSteps = true
+      continue
+    }
+    const m = l.match(/^(\s*)-\s/)
+    if (m) return m[1].length
+  }
+  return 2
+})
+
+/** 可选行判定："- " 开头且缩进与顶层步骤一致（loop/then 内的子步骤不可选） */
+function isSelectableLine(line) {
+  const m = line.match(/^(\s*)-\s/)
+  return !!m && m[1].length === stepIndent.value
+}
+
+/** 点击行：可选行 → 选中；click/then/else 等其他行 → 取消选中 */
+function onScriptLineClick(idx, line) {
+  selectedLine.value = isSelectableLine(line) ? idx : null
+}
+
+/** 选中行对应的 step 序号（该行之前可选行的个数）；无选中返回 0（从头） */
+function startIndexFromSelection() {
+  if (selectedLine.value == null) return 0
+  let k = 0
+  for (let i = 0; i < selectedLine.value; i++) {
+    if (isSelectableLine(scriptLines.value[i])) k++
+  }
+  return k
+}
+
+// 切换脚本时清除行选中
+watch(() => selScript.value, () => { selectedLine.value = null })
+
 function runScript() {
   if (!selScript.value) return
   const s = scripts.value.find(x => x.id === selScript.value)
   if (!s) return
+  const startIndex = startIndexFromSelection()
   // 每次运行清空日志区域，只显示本次运行产生的日志
   runStartTime = Date.now()
   rawLogs = []
   liveLogs.value = []
   store.running = true
   store.runScript = s.name
-  api.runScript(s.id, store.deviceId).then(() => {
-    setTimeout(() => { store.running = false }, 1500)
+  store.runScriptId = s.id
+  api.runScript(s.id, store.deviceId, startIndex).then(() => {
+    toast('脚本已开始运行', 'success')
+    // POST 成功（服务端已登记 run_stops 条目）后才开始轮询，
+    // 避免设备离线时 connect_device 耗时较长、status 先于 run 返回导致状态被提前复位
+    startRunStatusPoll()
   }).catch(e => {
     store.running = false
+    store.runScriptId = null
     pushLog('error', `执行失败：${e.message}`)
     toast('脚本执行失败', 'error')
   })
 }
 
 function stopScript() {
-  if (!selScript.value) return
-  api.stopScript(selScript.value).catch(() => {})
+  const id = store.runScriptId || selScript.value
+  if (!id) return
+  api.stopScript(id).catch(() => {})
   store.running = false
-  toast('脚本已停止', 'warn')
+  store.runScriptId = null
+  stopRunStatusPoll()
+  pushLog('warn', '已发送停止指令，脚本将在当前步骤结束后停止')
+  toast('已发送停止指令', 'warn')
 }
 
 async function testMatch(name) {
@@ -2627,6 +2730,8 @@ onMounted(async () => {
   window.addEventListener('beforeunload', releaseLock)
   window.addEventListener('keydown', onGlobalKeydown)
   if (preselected && store.deviceId) connect(false)
+  // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
+  if (store.running && store.runScriptId) startRunStatusPoll()
 })
 
 onUnmounted(() => {
@@ -2637,6 +2742,7 @@ onUnmounted(() => {
   if (savedTimer) { clearTimeout(savedTimer); savedTimer = null }
   if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
   if (altFeedbackTimer) { clearTimeout(altFeedbackTimer); altFeedbackTimer = null }
+  stopRunStatusPoll()
   releaseLock()
   cleanup(true)
 })
@@ -2915,6 +3021,26 @@ onUnmounted(() => {
 .tpl-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .script-run { flex: 6; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .script-logs { flex: 1; min-height: 120px; max-height: none; }
+.run-hint { font-size: 11px; color: var(--text-2); flex-shrink: 0; }
+.script-view-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
+.script-view {
+  flex: 1; min-height: 0; overflow: auto; background: var(--bg-0);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 10px 12px; font-size: 12px; line-height: 1.65; color: #c9d4e8;
+  user-select: none;
+}
+.sv-line { white-space: pre; border-radius: 4px; padding: 0 6px; margin: 0 -6px; }
+.sv-line.selectable { cursor: pointer; }
+.sv-line.selectable:hover { background: var(--bg-3); }
+.sv-line.sel {
+  background: rgba(34,211,165,.12); color: var(--accent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.script-view-empty {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--text-2); font-size: 12px; background: var(--bg-0);
+  border: 1px dashed var(--border); border-radius: var(--radius-sm);
+}
 .script-edit { flex: 6; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .edit-name-row { display: flex; }
 .edit-name-row .input { flex: 1; min-width: 0; width: 100%; }

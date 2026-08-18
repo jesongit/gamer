@@ -6,6 +6,7 @@ export const store = reactive({
   deviceId: null,           // 当前控制的设备
   running: false,           // 当前设备脚本运行状态
   runScript: null,          // 正在运行的脚本名
+  runScriptId: null,        // 正在运行的脚本 id（停止 / 状态轮询用）
   runStep: '',              // 当前步骤描述
   runProgress: 0,           // 0-100
 })

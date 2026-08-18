@@ -79,6 +79,7 @@ pub fn build_router(db: Db, devices: Arc<DeviceManager>, scheduler: Arc<Schedule
         .route("/api/scripts/:id", delete(api_delete_script))
         .route("/api/scripts/:id/run", post(api_run_script))
         .route("/api/scripts/:id/stop", post(api_stop_script))
+        .route("/api/scripts/:id/status", get(api_script_status))
         .route("/api/tasks", get(api_list_tasks).post(api_save_task))
         .route("/api/tasks/:id", delete(api_delete_task))
         .route("/api/tasks/:id/run", post(api_run_task_now))
@@ -723,6 +724,9 @@ async fn api_delete_script(State(st): State<AppState>, Path(id): Path<String>) -
 #[derive(Deserialize)]
 struct RunScriptReq {
     device_id: String,
+    /// 从第几个 step 开始运行（0=从头；前端选中某个 "- " 逻辑行时传入）
+    #[serde(default)]
+    start_index: Option<usize>,
 }
 
 async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json(req): Json<RunScriptReq>) -> Response {
@@ -732,6 +736,13 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
     }) else {
         return err_response(StatusCode::NOT_FOUND, "脚本不存在");
     };
+    // 同一脚本同时只允许一个运行实例（run_stops 条目存在 = 正在运行）
+    {
+        let stops = st.run_stops.lock().unwrap();
+        if stops.contains_key(&id) {
+            return err_response(StatusCode::CONFLICT, "脚本正在运行中");
+        }
+    }
     // 连接设备（若离线）
     if let Err(e) = st.devices.connect_device(&req.device_id).await {
         return err_response(StatusCode::BAD_GATEWAY, &format!("设备连接失败: {}", e));
@@ -741,8 +752,10 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
     let runner = st.runner.clone();
     let devices = st.devices.clone();
     let db = st.db.clone();
+    let run_stops = st.run_stops.clone();
     let device_id = req.device_id.clone();
     let script_id = id.clone();
+    let start_index = req.start_index.unwrap_or(0);
     let content = script.content.clone();
     // 实时日志：脚本每产生一条日志就立刻写入 DB，前端轮询即可实时显示
     let db_stream = st.db.clone();
@@ -754,7 +767,7 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
         }))
     };
     tokio::spawn(async move {
-        let logs = runner.run(&device_id, &script_id, &content, stop, log_cb).await;
+        let logs = runner.run(&device_id, &script_id, &content, stop.clone(), log_cb, start_index).await;
         match logs {
             Ok(_entries) => {
                 let _ = db.add_log(&device_id, &script_id, "success", "脚本执行完成");
@@ -764,6 +777,13 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
             }
         }
         let _ = devices;
+        // 运行结束：移除停止标志（条目存在与否同时作为"脚本是否在运行"的状态依据）
+        let mut stops = run_stops.lock().unwrap();
+        if let Some(cur) = stops.get(&script_id) {
+            if Arc::ptr_eq(cur, &stop) {
+                stops.remove(&script_id);
+            }
+        }
     });
     Json(serde_json::json!({"ok": true})).into_response()
 }
@@ -773,6 +793,12 @@ async fn api_stop_script(State(st): State<AppState>, Path(id): Path<String>) -> 
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     Json(serde_json::json!({"ok": true})).into_response()
+}
+
+/// 查询脚本是否正在运行（run_stops 条目存在 = 运行中，运行结束由 spawn 任务移除）
+async fn api_script_status(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    let running = st.run_stops.lock().unwrap().contains_key(&id);
+    Json(serde_json::json!({"running": running})).into_response()
 }
 
 // ---------- 定时任务 ----------

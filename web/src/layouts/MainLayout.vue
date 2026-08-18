@@ -46,6 +46,7 @@
             <span class="dot run"></span>
             <span>{{ store.runScript }}</span>
             <span class="run-step">{{ store.runStep }}</span>
+            <button class="run-stop" title="停止脚本" @click="stopRunning">■</button>
           </div>
           <router-link to="/console" class="btn btn-sm" :class="{ 'btn-primary': !store.running }">进入控制台</router-link>
           <button class="btn btn-sm btn-ghost" @click="onLogout">退出</button>
@@ -100,6 +101,14 @@ onMounted(() => {
 function onLogout() {
   logout()
   router.push('/login')
+}
+
+/** 顶栏芯片上的停止按钮：任何页面都能手动停止当前脚本 */
+function stopRunning() {
+  if (!store.runScriptId) { store.running = false; return }
+  api.stopScript(store.runScriptId).catch(() => {})
+  store.running = false
+  store.runScriptId = null
 }
 </script>
 
@@ -172,6 +181,12 @@ function onLogout() {
   background: rgba(34,211,165,.08); border: 1px solid rgba(34,211,165,.3);
 }
 .run-step { color: var(--text-1); }
+.run-stop {
+  width: 20px; height: 20px; border-radius: 50%; border: 1px solid rgba(255, 80, 80, .4);
+  background: rgba(255, 80, 80, .15); color: #ff6b6b; font-size: 9px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0;
+}
+.run-stop:hover { background: rgba(255, 80, 80, .3); }
 
 .content { flex: 1; overflow: hidden; }
 </style>

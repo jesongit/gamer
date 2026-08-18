@@ -63,6 +63,7 @@ impl Runner {
     }
 
     /// 运行脚本内容（YAML 文本）
+    /// `start_step`：从第几个 step 开始运行（0=从头；超出范围时从头）
     pub async fn run(
         &self,
         device_id: &str,
@@ -70,6 +71,7 @@ impl Runner {
         content: &str,
         stop: Arc<std::sync::atomic::AtomicBool>,
         log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
+        start_step: usize,
     ) -> anyhow::Result<Vec<(String, String)>> {
         let doc: Value = serde_yaml::from_str(content)?;
         let steps = doc.get("steps").and_then(|v| v.as_sequence()).cloned().ok_or_else(|| anyhow::anyhow!("missing steps"))?;
@@ -93,7 +95,7 @@ impl Runner {
             }
         }
 
-        let mut i = 0usize;
+        let mut i = if start_step > 0 && start_step < steps.len() { start_step } else { 0 };
         let mut guard_count = 0usize;
         while i < steps.len() {
             if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
@@ -219,7 +221,7 @@ impl Runner {
             let scripts = self.db.list_scripts()?;
             if let Some(s) = scripts.iter().find(|s| s.name == script_name) {
                 ctx.log("debug", format!("调用子脚本 {}", script_name));
-                let sub_log = self.run(&ctx.device_id, &s.id, &s.content, ctx.stop.clone(), ctx.log_cb.clone()).await?;
+                let sub_log = self.run(&ctx.device_id, &s.id, &s.content, ctx.stop.clone(), ctx.log_cb.clone(), 0).await?;
                 ctx.log.extend(sub_log);
             } else {
                 anyhow::bail!("子脚本不存在: {}", script_name);
