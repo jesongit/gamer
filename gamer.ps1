@@ -48,8 +48,14 @@ $ConfigFile   = Join-Path $ServerDir 'config.toml'
 
 # 后端
 $BackendName   = 'gamer-server'                             # 进程名匹配模式
-$BackendLog    = Join-Path $ServerDir 'gamer-server.log'    # 主日志（追加）
+$BackendLog    = Join-Path $ServerDir 'gamer-server.log'    # 主日志（追加，GB_LOG 文件模式）
+$BackendOutLog = Join-Path $ServerDir 'gamer-server.out.log' # stdout 重定向（GB_LOG 模式下通常为空）
 $BackendErrLog = Join-Path $ServerDir 'gamer-server.err.log'
+
+# 子进程 stdin 统一重定向到空文件：防止 server / vite 继承控制台键盘输入，
+# 也避免任何继承的 stdout/stderr 句柄让父控制台/管道永远等不到 EOF（表现为控制台卡死）
+$NullInputFile = Join-Path $env:TEMP 'gamer-stdin-empty.txt'
+if (-not (Test-Path $NullInputFile)) { New-Item -ItemType File -Path $NullInputFile -Force | Out-Null }
 
 # 前端（端口与 vite.config.js 保持一致）
 $FrontendPort  = 5173
@@ -82,6 +88,42 @@ function Get-PortOwner([int]$p) {
             $o = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
             "    PID $($_.OwningProcess) $($o.ProcessName)"
         } | Select-Object -Unique
+}
+
+# ---------- 后台进程启动（句柄隔离） ----------
+
+<#
+  Start-BackgroundProcess：以「句柄隔离」方式启动后台服务进程（gamer-server / vite）。
+
+  背景：直接在本进程里 Start-Process 时，子进程会继承父进程句柄表中所有「可继承」句柄。
+  当脚本输出被管道 / 终端捕获时（cmd 管道、GUI 终端、任务系统等），管道写端句柄会被
+  gamer-server / node 继承且永不关闭 → 读端永远等不到 EOF → 控制台看起来卡死。
+
+  方案：通过 WMI（Win32_Process.Create）启动一个隐藏的 powershell 包装进程，再由它
+  Start-Process 真正的服务。WMI 创建进程时由 wmiprvse 服务代为创建，进程句柄表干净，
+  没有任何管道句柄可继承；包装进程退出后，服务进程与父控制台完全脱离。
+#>
+function Start-BackgroundProcess {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,      # 服务可执行文件
+        [string]$ArgumentList,                        # 附加参数（可空）
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [Parameter(Mandatory)][string]$OutputFile,
+        [Parameter(Mandatory)][string]$ErrorFile,
+        [Parameter(Mandatory)][string]$InputFile,
+        [string]$EnvBlock = ''                        # 形如 "GB_LOG=D:\...\x.log" 的环境变量（可选）
+    )
+    $inner = "Start-Process -FilePath '{0}' -WorkingDirectory '{1}' -WindowStyle Hidden -RedirectStandardOutput '{2}' -RedirectStandardError '{3}' -RedirectStandardInput '{4}' -PassThru | Out-Null" -f `
+        $FilePath, $WorkingDirectory, $OutputFile, $ErrorFile, $InputFile
+    if ($ArgumentList) { $inner = "Start-Process -FilePath '{0}' -ArgumentList '{1}' -WorkingDirectory '{2}' -WindowStyle Hidden -RedirectStandardOutput '{3}' -RedirectStandardError '{4}' -RedirectStandardInput '{5}' -PassThru | Out-Null" -f `
+        $FilePath, $ArgumentList, $WorkingDirectory, $OutputFile, $ErrorFile, $InputFile }
+    $cmd = if ($EnvBlock) { "$EnvBlock; $inner" } else { $inner }
+    $wmiCmd = 'powershell -NoProfile -WindowStyle Hidden -Command "' + $cmd + '"'
+    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $wmiCmd }
+    if ($r.ReturnValue -ne 0) {
+        throw "后台进程启动失败（WMI returnValue=$($r.ReturnValue)），命令: $wmiCmd"
+    }
+    return $r.ProcessId  # 包装进程 PID（退出很快，仅用于诊断）
 }
 
 # 通过「端口 + 进程名」定位后端 gamer-server 进程
@@ -260,25 +302,28 @@ function Start-Backend {
     if (-not (Test-Path $exe)) { throw "后端: 未找到服务端二进制: $exe" }
 
     Write-Host ("后端: 启动 {0}（端口 {1}）..." -f $exe, $Port)
-    Write-Host ("后端日志: {0}（追加），stderr: {1}" -f $BackendLog, $BackendErrLog)
+    Write-Host ("后端日志: {0}（追加），stdout: {1}，stderr: {2}" -f $BackendLog, $BackendOutLog, $BackendErrLog)
 
-    # 服务端支持 GB_LOG=<文件> 自带文件日志（追加模式），不依赖 stdout 重定向
-    $env:GB_LOG = $BackendLog
-    try {
-        $proc = Start-Process -FilePath $exe `
-            -WorkingDirectory $ServerDir `
-            -WindowStyle Hidden `
-            -RedirectStandardError $BackendErrLog `
-            -PassThru
-    } finally {
-        Remove-Item Env:GB_LOG -ErrorAction SilentlyContinue
-    }
+    # 服务端支持 GB_LOG=<文件> 自带文件日志（追加模式），不依赖 stdout 重定向；
+    # GB_LOG 在 WMI 包装进程内设置（包装进程与当前控制台无句柄关联）
+    $launchTime = Get-Date
+    $null = Start-BackgroundProcess -FilePath $exe `
+        -WorkingDirectory $ServerDir `
+        -OutputFile $BackendOutLog `
+        -ErrorFile $BackendErrLog `
+        -InputFile $NullInputFile `
+        -EnvBlock ("`$env:GB_LOG='{0}'" -f $BackendLog)
 
     # 等待端口监听（最多 60 秒）
     $deadline = (Get-Date).AddSeconds(60)
     while (-not (Test-PortListening $Port) -and (Get-Date) -lt $deadline) {
-        if ($proc.HasExited) {
-            throw "后端: 进程启动后立即退出（exit code $($proc.ExitCode)），请查看日志: $BackendLog / $BackendErrLog"
+        # 启动后 5 秒仍无 gamer-server 进程 → 判定为启动后立即退出
+        if ((Get-Date) - $launchTime -gt [TimeSpan]::FromSeconds(5)) {
+            $be = @(Get-Process -Name "$BackendName*" -ErrorAction SilentlyContinue |
+                Where-Object { $_.StartTime -ge $launchTime })
+            if ($be.Count -eq 0) {
+                throw "后端: 进程启动后立即退出，请查看日志: $BackendLog / $BackendErrLog"
+            }
         }
         Start-Sleep -Seconds 1
     }
@@ -314,23 +359,33 @@ function Start-Frontend {
     Write-Host "前端: 启动 vite dev（端口 $FrontendPort）..."
     Write-Host ("前端日志: {0}，stderr: {1}" -f $FrontendLog, $FrontendErrLog)
 
-    # npm.cmd 是包装进程，node 才是真正的 vite；等待期间包装退出不代表失败
-    $proc = Start-Process -FilePath "npm.cmd" -ArgumentList "run", "dev" `
+    # 直接启动 node 运行 vite（等价于 npm run dev，但少一层 cmd 包装进程，
+    # 进程树更干净、stop 时不需要额外杀 cmd）
+    $nodeExe = (Get-Command node.exe -ErrorAction Stop).Source
+    $viteJs  = Join-Path $WebDir (Join-Path 'node_modules' (Join-Path 'vite' (Join-Path 'bin' 'vite.js')))
+    if (-not (Test-Path $viteJs)) { throw "前端: 未找到 vite 入口: $viteJs" }
+
+    $launchTime = Get-Date
+    $null = Start-BackgroundProcess -FilePath $nodeExe -ArgumentList $viteJs `
         -WorkingDirectory $WebDir `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $FrontendLog `
-        -RedirectStandardError $FrontendErrLog `
-        -PassThru
+        -OutputFile $FrontendLog `
+        -ErrorFile $FrontendErrLog `
+        -InputFile $NullInputFile
 
     $deadline = (Get-Date).AddSeconds(60)
-    $wrapperExit = $null
     while (-not (Test-PortListening $FrontendPort) -and (Get-Date) -lt $deadline) {
-        if ($proc.HasExited -and $null -eq $wrapperExit) { $wrapperExit = $proc.ExitCode }
+        # 启动后 5 秒仍无 node 进程 → 判定为启动后立即退出
+        if ((Get-Date) - $launchTime -gt [TimeSpan]::FromSeconds(5)) {
+            $fe = @(Get-Process -Name 'node' -ErrorAction SilentlyContinue |
+                Where-Object { $_.StartTime -ge $launchTime })
+            if ($fe.Count -eq 0) {
+                throw "前端: vite 启动后立即退出，请查看日志: $FrontendLog / $FrontendErrLog"
+            }
+        }
         Start-Sleep -Seconds 1
     }
     if (-not (Test-PortListening $FrontendPort)) {
-        $code = if ($null -eq $wrapperExit) { '未知（仍在启动）' } else { $wrapperExit }
-        throw "前端: 启动失败（npm 退出码 $code），请查看日志: $FrontendLog / $FrontendErrLog"
+        throw "前端: 启动失败（60 秒内端口未监听），请查看日志: $FrontendLog / $FrontendErrLog"
     }
     Write-Host "前端: 启动成功  http://localhost:$FrontendPort" -ForegroundColor Green
 }
