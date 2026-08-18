@@ -460,6 +460,8 @@ const connecting = ref(false)
 const errorMsg = ref('')
 const fps = ref(0)
 const delay = ref(0)
+// 延迟看门狗计数：连续两次采样（~4s）延迟超阈值才重连，防瞬时抖动误触发
+let delaySpikes = 0
 const res = ref('—')
 const bitrate = ref('—')
 const selScript = ref('')
@@ -1105,6 +1107,13 @@ function toggleAudio() {
   const v = videoElement.value
   if (v) {
     v.muted = audioMuted.value
+    // 静音时禁用音频轨（关键）：音频轨参与浏览器 A/V 同步（主时钟），scrcpy
+    // 虚拟屏音频流在 Chrome 侧播放时钟异常会把视频 jitter buffer 目标延迟单调
+    // 拉高——挂机（静止画面）时延迟从 ~87ms 累积到 3s+ 且不回落（见 AGENTS.md
+    // 已知坑）。禁用该轨后视频独立播放，延迟不再累积；要听声音再启用。
+    if (mediaStream) {
+      for (const t of mediaStream.getAudioTracks()) t.enabled = !audioMuted.value
+    }
     // 取消静音时浏览器要求用户手势后播放（已处于点击事件内，直接 play 即可）
     if (!audioMuted.value) v.play().catch(() => {})
   }
@@ -1177,6 +1186,8 @@ async function doConnect() {
       if (e.target !== pc) return
       // 兜底：对端 SDP 无 a=msid 时 e.streams 可能为空，用 track 自建 MediaStream
       mediaStream = e.streams[0] || new MediaStream([e.track])
+      // 默认静音场景直接禁用音频轨（A/V 同步拖延迟问题，见 toggleAudio 注释）
+      if (e.track.kind === 'audio') e.track.enabled = !audioMuted.value
       if (videoElement.value) {
         videoElement.value.srcObject = mediaStream
         videoElement.value.play().catch(() => {})
@@ -1323,6 +1334,19 @@ function startStats() {
               const perFrame = (s.jitterBufferDelay - lastJbd) / (s.jitterBufferEmittedCount - lastJbe)
               if (perFrame >= 0 && perFrame < 50) {
                 delay.value = Math.round(perFrame * 1000)
+              }
+              // 延迟看门狗：音频轨 A/V 同步异常会把 jitter buffer 目标延迟单调拉高
+              // （挂机静止画面 87ms → 3s+ 且不回落，见 AGENTS.md 已知坑）。连续两次
+              // 采样超阈值（~4s）→ 走断流重连路径重置缓冲（含页面锁二次检查）
+              if (delay.value > 1500) {
+                if (++delaySpikes >= 2) {
+                  delaySpikes = 0
+                  console.warn('[webrtc] latency watchdog: delay=' + delay.value + 'ms, reconnecting')
+                  handleVideoSilence()
+                  return
+                }
+              } else {
+                delaySpikes = 0
               }
             }
             lastJbd = s.jitterBufferDelay

@@ -289,6 +289,15 @@ impl ViewerSession {
             // 真实时间锚点（(墙钟, 对应 RTP ts)）：媒体时钟的绝对基准，首帧建立。
             // 设备 PTS 快漂（实测 ~26%）时靠它把 ts 钳制在墙钟附近（见发送循环）
             let mut ts_anchor: Option<(std::time::Instant, u32)> = None;
+            // 发送节奏（帧级 pacer）：固定 ~16.7ms（60fps 兜底上限）节奏发送。
+            // 虚拟屏固定 60fps 编码（fps 配置不生效，见 scrcpy.rs），设备帧率仍有
+            // 波动（静止低帧率 ↔ 运动 60fps、USB 批量到达）→ 无 pacer 时帧到达
+            // 呈块状，浏览器 jitter buffer 目标延迟被顶到 ~300ms（实测 perF
+            // 180~466ms 波动、渲染帧间隔 59% <10ms，见 AGENTS.md 已知坑）。
+            // pacer：帧到早 → 等发送时刻；积压（生产 >60fps / 处理慢）→ 立即发
+            // 并重置节奏追赶（backlog 跳帧兜底）。浏览器到达均匀 → target 收敛。
+            let pacer_interval = Duration::from_millis(16);
+            let mut next_tx_at = std::time::Instant::now();
 
             // 初始 GOP 重放：config 帧喂给 payloader（缓存 SPS/PPS，后续 IDR 自动拼 STAP-A）；
             // GOP 帧按原帧节奏发送（ts 基于 GOP 首帧 PTS，与后续实时流同一时间轴）。
@@ -420,9 +429,26 @@ impl ViewerSession {
                     // 静止补帧：idle_repeat_ms 内无新帧 → 重发最后一帧。
                     // 重复帧内容相同且参考链完整（该帧此前已成功发送），解码器可正常渲染；
                     // RTP 时间戳单调推进，浏览器帧率统计不掉。
+                    // ts 与实时帧同源（墙钟锚点 + 单调保底）：旧实现固定步进
+                    // (ts0 + idle_repeat*90) 与墙钟有速率差，与实时帧交替时 ts 跳变，
+                    // 浏览器 jitter buffer 目标延迟被扰动（见 AGENTS.md 已知坑）。
                     if peer_connected.load(std::sync::atomic::Ordering::SeqCst) {
-                        if let Some((last, ts0)) = &last_sent {
-                            let ts = ts0.wrapping_add((idle_repeat_ms as u32) * 90);
+                        if let Some((last, _)) = &last_sent {
+                            let ts = {
+                                let real_ts = match ts_anchor {
+                                    Some((aw, at)) => at.wrapping_add(((aw.elapsed().as_micros() as u64) * 90 / 1000) as u32),
+                                    None => {
+                                        ts_anchor = Some((std::time::Instant::now(), last_rtp_ts));
+                                        last_rtp_ts
+                                    }
+                                };
+                                if real_ts <= last_rtp_ts && frame_no > 1 {
+                                    ts_anchor = Some((std::time::Instant::now(), last_rtp_ts));
+                                    last_rtp_ts + 3000
+                                } else {
+                                    real_ts
+                                }
+                            };
                             if push_rtp(&track, &mut payloader, last, payload_type, ssrc, &mut seq, ts).await {
                                 *last_ts.lock() = ts;
                                 last_rtp_ts = ts;
@@ -435,9 +461,8 @@ impl ViewerSession {
                     continue;
                 }
 
-                // 一次取到多帧说明消费慢于输入：全力追赶（帧率上限仅对单帧批次生效）
+                // 一次取到多帧说明消费慢于输入：统一走 pacer 限速追赶
                 // 注意：to_send 在 for 循环中被移动，paced 必须在循环外计算
-                let paced = to_send.len() == 1;
                 for frame in to_send {
                     frame_no += 1;
                     // 诊断：实时循环心跳（验证帧缓冲是否收到设备帧）
@@ -445,29 +470,17 @@ impl ViewerSession {
                         debug!("pusher recv: no={} key={} cfg={} pts={} peer={}", frame_no, frame.is_keyframe, frame.is_config, frame.pts_us, peer_connected.load(std::sync::atomic::Ordering::SeqCst));
                     }
 
-                    // 节流：仅对"单帧批次"（正常节奏）应用最小帧间隔（帧率上限——
-                    // "设置 30fps"就是硬上限，设备端 60fps 输入会被限到 ~30fps）。
-                    // 关键：**批量取出 = 消费慢于输入（积压），批次内绝不再逐帧 sleep**。
-                    // 旧逻辑对批次内每一帧都 sleep(min_interval - elapsed)：积压 45 帧要
-                    // ~700ms 才能发完，期间生产端又补进 ~45 帧 → 队列永远清不空，内容
-                    // 永久滞后 ~0.7s 且随积压增长（"操作延迟大"的结构性根因，日志特征
-                    // q=30~62 持续不降 + 周期性 skip-to-keyframe 跳帧）。积压时应全速
-                    // 追赶：RTP 时间戳已携带媒体节奏，浏览器 jitter buffer 会平滑播出，
-                    // 提前到达的帧只占 ~百毫秒缓冲，不会引入可感知延迟。
-                    // 单帧批次（正常节奏）时距上次发送已 ≥ min_interval，sleep 实际为 0，
-                    // 节流不会产生额外延迟；真正的上限约束靠 backlog 跳帧兜底。
+                    // 帧级 pacer：等待本帧发送时刻。
+                    // - 单帧正常节奏：帧以 ~60fps 到达、next_tx_at 已到 → 零等待，
+                    //   到达节奏 = 设备节奏（均匀）；旧 min_interval(33ms) 节流与
+                    //   设备 60fps 生产不匹配（虚拟屏 fps 配置不生效），单帧 30fps
+                    //   与批量全速交替 → 块状到达。
+                    // - 积压（消费慢于输入）：next_tx_at 落后 → 立即发并重置节奏
+                    //   （见下方重置），追赶快于生产 2 倍以上，不会永久滞后；
+                    //   旧"批量全速连发"（~1ms/帧）是块状到达的直接来源。
                     // 定时器精度由 main.rs 的 timeBeginPeriod(1) 保证（见该处注释）。
-                    let mut sleep_ms = 0u64;
-                    if paced && min_frame_interval_ms > 0 {
-                        if let Some(t) = last_tx {
-                            let elapsed_ms = t.elapsed().as_millis() as u64;
-                            if elapsed_ms < min_frame_interval_ms {
-                                sleep_ms = sleep_ms.max(min_frame_interval_ms - elapsed_ms);
-                            }
-                        }
-                    }
-                    if sleep_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    if let Some(remain) = next_tx_at.checked_duration_since(std::time::Instant::now()) {
+                        tokio::time::sleep(remain).await;
                     }
 
                     // RTP 时间戳：90kHz，**媒体时钟 == 墙钟**（真实时间锚点 + 墙钟流逝）。
@@ -528,6 +541,13 @@ impl ViewerSession {
                     let t_send = std::time::Instant::now();
                     if !push_rtp(&track, &mut payloader, &frame, payload_type, ssrc, &mut seq, ts).await {
                         break;
+                    }
+                    // pacer：推进发送时刻；积压（落后 >20ms ≈ 超过 1 个 pacer 周期，
+                    // 如关键帧 11ms 平滑耗时）→ 重置节奏立即发下一帧，避免积压被
+                    // 缓慢摊开（backlog 跳帧仍兜底内容滞后）
+                    next_tx_at += pacer_interval;
+                    if next_tx_at < std::time::Instant::now() - Duration::from_millis(20) {
+                        next_tx_at = std::time::Instant::now();
                     }
                     send_time_us += t_send.elapsed().as_micros() as u64;
                     send_samples += 1;
@@ -670,8 +690,18 @@ async fn push_rtp(
         }
     };
     let n = payloads.len();
+    // 关键帧发送平滑（pacer 简化版）：设备 i-frame-interval=1s，每秒产一个
+    // ~200KB 关键帧（170+ 个 RTP 包）。全部瞬时写入会形成 burst（~3ms 发完），
+    // 浏览器 jitter buffer 目标延迟被周期性拉高（见 AGENTS.md 已知坑）。
+    // 中间一次 8ms sleep 分批发：总耗时 ~11ms，**必须小于帧级 pacer 间隔
+    // (16ms)**——旧实现每 8 包 sleep 1ms（170 包 ~21ms）超过 pacer 周期，
+    // 每秒净积压 ~1 帧，延迟缓慢爬升。8ms 摊开 burst 因子 ~4 倍，足够平滑。
+    let smooth = n > 48; // >~57KB 视为关键帧（P 帧通常 ≤20 包）
     let mut written = 0usize;
     for (i, payload) in payloads.into_iter().enumerate() {
+        if smooth && i == n / 2 {
+            tokio::time::sleep(Duration::from_millis(8)).await;
+        }
         let pkt = Packet {
             header: Header {
                 version: 2,

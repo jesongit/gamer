@@ -159,10 +159,13 @@ impl ScrcpySession {
             "send_frame_meta=true".into(),
             "cleanup=true".into(),
             // 关键帧间隔 2s：WebRTC 新 viewer 连接后需要定期 IDR 才能快速出画面
-            // （静态画面下编码器默认长时间不产 IDR，浏览器将无法开始解码）
+            // （静态画面下编码器默认长时间不产 IDR，浏览器将无法开始解码）；
+            // 同时也限制每秒关键帧 burst 对浏览器 jitter buffer 目标延迟的扰动
+            // （1s 时实测 perF 缓慢爬升，见 AGENTS.md 已知坑；2s 后扰动减半，
+            // 断链跳帧恢复 ≤2s 可接受）
             // repeat-previous-headers=1：每个关键帧前重复 SPS/PPS，
             // 浏览器即使错过连接瞬间的参数集也能随时开始解码
-            "video_codec_options=i-frame-interval=1,repeat-previous-headers=1".into(),
+            "video_codec_options=i-frame-interval=2,repeat-previous-headers=1".into(),
         ];
         // 与官方客户端一致：0 值参数不传（max_fps=0 会导致 server 端除零）
         if cfg.max_size > 0 {
