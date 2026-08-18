@@ -1,33 +1,33 @@
 <template>
   <div class="layout">
     <!-- 侧边栏 -->
-    <aside class="sidebar">
-      <div class="logo">
+    <aside class="sidebar" :class="{ collapsed }">
+      <div class="logo" @click="toggleSidebar" :title="collapsed ? '展开侧边栏' : '收起侧边栏'">
         <span class="logo-icon">🎮</span>
-        <div>
+        <div class="logo-text">
           <div class="logo-name">GameBot</div>
           <div class="logo-sub">游戏自动化助手</div>
         </div>
       </div>
 
       <nav class="nav">
-        <router-link v-for="item in navs" :key="item.path" :to="item.path" class="nav-item" :class="{ active: $route.path === item.path }">
+        <router-link v-for="item in navs" :key="item.path" :to="item.path" class="nav-item" :class="{ active: $route.path === item.path }" :title="item.name">
           <span class="nav-icon">{{ item.icon }}</span>
-          <span>{{ item.name }}</span>
+          <span class="nav-label">{{ item.name }}</span>
           <span v-if="item.path === '/logs'" class="nav-badge">3</span>
         </router-link>
       </nav>
 
       <div class="sidebar-foot">
-        <div class="sys-state">
+        <div class="sys-state" title="服务运行中 v0.1.0">
           <span class="dot ok"></span>
-          <span>服务运行中</span>
+          <span class="sys-text">服务运行中</span>
           <span class="sys-ver">v0.1.0</span>
         </div>
-        <div class="sys-state">
-          <span class="dot ok"></span>
-          <span>2 台设备在线</span>
-          <span class="sys-ver">任务 2</span>
+        <div class="sys-state" :title="`${onlineCount} 台设备在线 · 定时任务 ${taskCount} 个`">
+          <span class="dot" :class="onlineCount ? 'ok' : 'off'"></span>
+          <span class="sys-text">{{ onlineCount }} 台设备在线</span>
+          <span class="sys-ver">任务 {{ taskCount }}</span>
         </div>
       </div>
     </aside>
@@ -60,9 +60,10 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, provide, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { store, logout, devicesData } from '../store'
+import { store, logout, devicesData, tasksData } from '../store'
+import { api } from '../api'
 
 const router = useRouter()
 const navs = [
@@ -74,9 +75,26 @@ const navs = [
   { path: '/settings', name: '设置', icon: '⚙️' }
 ]
 
+// 侧边栏收起状态（图标模式）：localStorage 持久化，provide 给子页面（投屏页据此调整布局）
+const collapsed = ref(localStorage.getItem('gb_sidebar_collapsed') === '1')
+provide('sidebarCollapsed', collapsed)
+function toggleSidebar() {
+  collapsed.value = !collapsed.value
+  localStorage.setItem('gb_sidebar_collapsed', collapsed.value ? '1' : '0')
+}
+
+const onlineCount = computed(() => devicesData.value.filter(d => d.status === 'online').length)
+const taskCount = computed(() => tasksData.value.length)
+
 const currentDeviceName = computed(() => {
   const d = devicesData.value.find(x => x.id === store.deviceId)
   return d ? d.name : ''
+})
+
+onMounted(() => {
+  // 侧边栏底部状态：在线设备数 / 定时任务数
+  api.listDevices().then(d => { devicesData.value = d }).catch(() => {})
+  api.listTasks().then(t => { tasksData.value = t }).catch(() => {})
 })
 
 function onLogout() {
@@ -92,8 +110,25 @@ function onLogout() {
   width: 200px; flex-shrink: 0; background: var(--bg-1);
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column;
+  transition: width .18s ease; overflow: hidden;
 }
-.logo { display: flex; align-items: center; gap: 10px; padding: 18px 16px 14px; }
+/* 收起：只显示图标（宽 52px，投屏页据此把释放的 148px 让给右侧操作区） */
+.sidebar.collapsed { width: 52px; }
+.sidebar.collapsed .logo { justify-content: center; padding: 18px 0 14px; }
+.sidebar.collapsed .logo-text,
+.sidebar.collapsed .nav-label,
+.sidebar.collapsed .sys-text,
+.sidebar.collapsed .sys-ver { display: none; }
+.sidebar.collapsed .nav-item { justify-content: center; gap: 0; padding: 9px 0; }
+.sidebar.collapsed .nav-badge {
+  position: absolute; top: 5px; right: 7px; margin-left: 0;
+  width: 8px; height: 8px; padding: 0; border-radius: 50%;
+  font-size: 0; line-height: 0;
+}
+.sidebar.collapsed .sidebar-foot { padding: 10px 0; align-items: center; gap: 12px; }
+.sidebar.collapsed .sys-state { justify-content: center; }
+
+.logo { display: flex; align-items: center; gap: 10px; padding: 18px 16px 14px; cursor: pointer; user-select: none; }
 .logo-icon { font-size: 26px; }
 .logo-name { font-size: 17px; font-weight: 800; letter-spacing: .5px; }
 .logo-sub { font-size: 11px; color: var(--text-2); margin-top: 1px; }
