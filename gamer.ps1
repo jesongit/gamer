@@ -3,10 +3,12 @@
   GameBot (gamer) 项目启动管理脚本：同时管理后端 gamer-server 与前端 Vite。
 
 .DESCRIPTION
-  start / stop / restart / status 默认同时作用于前后端：
+  start / stop / restart / rebuild / status 默认同时作用于前后端：
   - 后端：Rust gamer-server（端口从 server/config.toml 读取，默认 8443）
   - 前端：Vite dev server（端口 5173，代理 /api、/ws 到后端）
   停止时均通过「端口 + 进程名」定位进程，避免误杀其他程序。
+  rebuild：停止前后端 → 重新编译（后端 cargo build，前端 vite build 产物输出到
+  server/web-dist 由后端静态托管）→ 再启动（-Release 可指定 release 构建）。
 
 .EXAMPLE
   .\gamer.ps1 start              # 启动后端 + 前端（依赖缺失时自动安装/构建）
@@ -15,12 +17,13 @@
   .\gamer.ps1 start -FrontendOnly# 只启动前端
   .\gamer.ps1 stop               # 停止后端 + 前端（端口+进程名定位）
   .\gamer.ps1 restart            # 重启前后端
+  .\gamer.ps1 rebuild            # 重新编译前后端（cargo build + vite build）并重启
   .\gamer.ps1 status             # 查看前后端运行状态、最近日志
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'stop', 'restart', 'status', 'help')]
+    [ValidateSet('start', 'stop', 'restart', 'rebuild', 'status', 'help')]
     [string]$Command = 'status',
 
     # 后端端口，0 = 自动从 server/config.toml 读取（默认 8443）
@@ -40,6 +43,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# PS 7.3+ 默认会把原生命令（cargo/npm）的 stderr 输出当成错误记录，
+# 在 EAP=Stop 下直接抛 NativeCommandError 中断脚本（cargo 编译进度就是走 stderr 的）。
+# 显式关闭，让原生命令的 stderr 只作普通输出显示。
+$PSNativeCommandUseErrorActionPreference = $false
 
 $Root         = $PSScriptRoot
 $ServerDir    = Join-Path $Root 'server'
@@ -61,6 +68,7 @@ if (-not (Test-Path $NullInputFile)) { New-Item -ItemType File -Path $NullInputF
 $FrontendPort  = 5173
 $FrontendLog   = Join-Path $WebDir 'vite.log'
 $FrontendErrLog = Join-Path $WebDir 'vite.err.log'
+$WebDistDir    = Join-Path $ServerDir 'web-dist'  # 前端构建产物（vite build 输出），由后端静态托管
 
 # ---------- 基础工具 ----------
 
@@ -119,7 +127,16 @@ function Start-BackgroundProcess {
         $FilePath, $ArgumentList, $WorkingDirectory, $OutputFile, $ErrorFile, $InputFile }
     $cmd = if ($EnvBlock) { "$EnvBlock; $inner" } else { $inner }
     $wmiCmd = 'powershell -NoProfile -WindowStyle Hidden -Command "' + $cmd + '"'
-    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $wmiCmd }
+    # 必须通过 Win32_ProcessStartup 显式传 ShowWindow=0（SW_HIDE）：
+    # WMI 创建的控制台进程默认 SW_SHOWNORMAL，黑框会在包装进程处理
+    # "-WindowStyle Hidden" 之前先弹出来（前后端各一个，即启动时闪两个黑框的来源）。
+    # 从创建时刻就隐藏，窗口完全不出现。
+    # 注意 ShowWindow 必须是 UInt16：直接写 0 会被推断成 Int32，WMI 报「类型不匹配」
+    $startup = New-CimInstance -ClassName Win32_ProcessStartup -Property @{ ShowWindow = [UInt16]0 } -ClientOnly
+    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine               = $wmiCmd
+        ProcessStartupInformation = $startup
+    }
     if ($r.ReturnValue -ne 0) {
         throw "后台进程启动失败（WMI returnValue=$($r.ReturnValue)），命令: $wmiCmd"
     }
@@ -274,6 +291,58 @@ function Stop-Frontend {
     return $true
 }
 
+# ---------- 构建 ----------
+
+<#
+  构建期间临时把 $ErrorActionPreference 切回 Continue：
+  cargo / npm 的编译进度输出走 stderr，在 EAP=Stop 下会被当成错误中断脚本
+ （Windows PowerShell 5.1 与 PS 7.3+ 通病），成败只看 $LASTEXITCODE。
+#>
+function Invoke-NativeChecked {
+    param([string]$Desc, [scriptblock]$Cmd)
+    Write-Host $Desc
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Cmd } finally { $ErrorActionPreference = $prev }
+    if ($LASTEXITCODE -ne 0) { throw "$Desc 失败（exit code $LASTEXITCODE）" }
+}
+
+function Build-Backend {
+    $exe = Get-BinaryPath
+    Invoke-NativeChecked -Desc "后端: 构建 $exe ..." -Cmd {
+        Push-Location $ServerDir
+        try {
+            if ($Release) { & cargo build --release } else { & cargo build }
+        } finally {
+            Pop-Location
+        }
+    }
+}
+
+function Ensure-FrontendDeps {
+    if (Test-Path (Join-Path $WebDir 'node_modules')) { return }
+    Invoke-NativeChecked -Desc "前端: node_modules 不存在，执行 npm install ..." -Cmd {
+        Push-Location $WebDir
+        try {
+            & npm install --no-audit --no-fund
+        } finally {
+            Pop-Location
+        }
+    }
+}
+
+function Build-Frontend {
+    Ensure-FrontendDeps
+    Invoke-NativeChecked -Desc "前端: vite build → $WebDistDir（后端静态托管目录）..." -Cmd {
+        Push-Location $WebDir
+        try {
+            & npm run build
+        } finally {
+            Pop-Location
+        }
+    }
+}
+
 # ---------- 启动 ----------
 
 function Start-Backend {
@@ -289,16 +358,7 @@ function Start-Backend {
     }
 
     $exe = Get-BinaryPath
-    if (-not (Test-Path $exe) -or $Build) {
-        Write-Host "后端: 构建 $exe ..."
-        Push-Location $ServerDir
-        try {
-            if ($Release) { & cargo build --release } else { & cargo build }
-        } finally {
-            Pop-Location
-        }
-        if ($LASTEXITCODE -ne 0) { throw "后端: cargo build 失败（exit code $LASTEXITCODE）" }
-    }
+    if (-not (Test-Path $exe) -or $Build) { Build-Backend }
     if (-not (Test-Path $exe)) { throw "后端: 未找到服务端二进制: $exe" }
 
     Write-Host ("后端: 启动 {0}（端口 {1}）..." -f $exe, $Port)
@@ -345,16 +405,7 @@ function Start-Frontend {
     }
 
     # 依赖缺失时自动安装
-    if (-not (Test-Path (Join-Path $WebDir 'node_modules'))) {
-        Write-Host "前端: node_modules 不存在，执行 npm install ..."
-        Push-Location $WebDir
-        try {
-            & npm install --no-audit --no-fund
-        } finally {
-            Pop-Location
-        }
-        if ($LASTEXITCODE -ne 0) { throw "前端: npm install 失败（exit code $LASTEXITCODE）" }
-    }
+    Ensure-FrontendDeps
 
     Write-Host "前端: 启动 vite dev（端口 $FrontendPort）..."
     Write-Host ("前端日志: {0}，stderr: {1}" -f $FrontendLog, $FrontendErrLog)
@@ -410,6 +461,19 @@ switch ($Command) {
     'restart' {
         if ($Both -or $FrontendOnly) { Stop-Frontend | Out-Null }
         if ($Both -or $BackendOnly) { Stop-Backend | Out-Null }
+        Write-Host ""
+        if ($Both -or $BackendOnly) { Start-Backend }
+        if ($Both -or $FrontendOnly) { Start-Frontend }
+        Write-Host ""
+        Show-Status
+    }
+    'rebuild' {
+        # Windows 锁定运行中的可执行文件，必须先停后端 cargo 才能覆盖 exe
+        if ($Both -or $FrontendOnly) { Stop-Frontend | Out-Null }
+        if ($Both -or $BackendOnly) { Stop-Backend | Out-Null }
+        Write-Host ""
+        if ($Both -or $BackendOnly) { Build-Backend }
+        if ($Both -or $FrontendOnly) { Build-Frontend }
         Write-Host ""
         if ($Both -or $BackendOnly) { Start-Backend }
         if ($Both -or $FrontendOnly) { Start-Frontend }

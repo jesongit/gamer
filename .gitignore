@@ -21,3 +21,4 @@ desktop.ini
 .chrome-test-profile/
 tools/mcp-client/node_modules/
 tools/mcp-client/out/
+server/web-dist/
