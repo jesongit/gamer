@@ -88,6 +88,9 @@ impl FrameCache {
                 "-i", "pipe:0",
                 "-f", "image2pipe",
                 "-vcodec", "png",
+                // PNG 压缩级别 1：帧缓存 PNG 只用于截图/模板匹配，不必追求最小体积；
+                // 低压缩级别显著降低软编 PNG 的 CPU 占用（帧率高时不再拖垮推流）
+                "-compression_level", "1",
                 // 输出限 5fps：模板匹配/截图只需"最新帧"，无需每帧 PNG 编解码。
                 // 3008x1880 全帧率 PNG 编解码会让单核跑满（CPU 100% 持续 → 拖垮推流）。
                 // ffmpeg 仍解码全部输入帧（保持解码器连续），只是 PNG 输出抽样。
@@ -136,6 +139,7 @@ impl FrameCache {
                     Ok(n) => {
                         pending.lock().extend_from_slice(&buf[..n]);
                         // 提取完整 PNG（IEND 结尾）
+                        let mut cached = 0u64;
                         loop {
                             let mut p = pending.lock();
                             if p.len() < 8 {
@@ -166,7 +170,10 @@ impl FrameCache {
                                         *width.write() = img.width();
                                         *height.write() = img.height();
                                         *latest.write() = Some(png);
-                                        debug!("frame cached {}x{}", img.width(), img.height());
+                                        cached += 1;
+                                        if cached % 100 == 1 {
+                                            debug!("frame cached {}x{}", img.width(), img.height());
+                                        }
                                     }
                                 }
                                 None => break,

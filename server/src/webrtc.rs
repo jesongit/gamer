@@ -2,12 +2,13 @@
 //! - 把 scrcpy 的 H.264 帧打包成 RTP 通过 video track 推给浏览器（不转码，零画质损失）
 //! - DataChannel "control" 接收浏览器的触控/按键/文本等控制消息，转发给 scrcpy 控制 socket
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use parking_lot::Mutex;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
@@ -60,7 +61,9 @@ impl ViewerSession {
     pub async fn create(
         cfg: &Config,
         session: Arc<ScrcpySession>,
-        frame_rx: tokio::sync::mpsc::Receiver<VideoFrame>,
+        frame_q: Arc<Mutex<VecDeque<VideoFrame>>>,
+        frame_notify: Arc<Notify>,
+        overflowed: Arc<std::sync::atomic::AtomicBool>,
         audio_rx: tokio::sync::mpsc::Receiver<AudioFrame>,
         offer: RTCSessionDescription,
         initial_frames: Option<Vec<VideoFrame>>,
@@ -113,20 +116,35 @@ impl ViewerSession {
         // webrtc-rs 的 answer 只镜像 offer 中的 media section（generate_matched_sdp，
         // include_unmatched=false），answerer 端 create_data_channel 无法把
         // m=application 加进 answer，SCTP 永远不会协商。这里用 on_data_channel 接收。
+        //
+        // 控制消息必须**串行、保序**写入 scrcpy 控制 socket（DOWN/MOVE/UP 乱序会
+        // 导致拖拽错乱）。旧实现每条消息 tokio::spawn 一个任务，拖动时每秒几十上百
+        // 个任务并发抢锁，顺序无法保证且开销大。这里改为单消费者队列：
+        // DataChannel 回调只入队，专用任务按到达顺序逐条处理。
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let s_worker = session.clone();
+        tokio::spawn(async move {
+            while let Some(data) = control_rx.recv().await {
+                if let Err(e) = handle_control_msg(&s_worker, &data).await {
+                    debug!("control msg error: {}", e);
+                }
+            }
+        });
+
         let session_dc = session.clone();
         peer.on_data_channel(Box::new(move |dc: Arc<webrtc::data_channel::RTCDataChannel>| {
             info!("control data channel opened: {}", dc.label());
             let s = session_dc.clone();
+            let tx = control_tx.clone();
             dc.on_message(Box::new(move |msg| {
                 let data = msg.data.to_vec();
                 let s2 = s.clone();
-                // 打印消息内容：验证坐标映射（浏览器点击 → 设备坐标）
-                info!("control msg: {} bytes: {}", data.len(), String::from_utf8_lossy(&data));
-                tokio::spawn(async move {
-                    if let Err(e) = handle_control_msg(&s2, &data).await {
-                        debug!("control msg error: {}", e);
-                    }
-                });
+                // 只记录长度，不打印内容：拖动时每秒几十上百条消息，
+                // 逐条格式化打印会让服务端日志成为性能瓶颈（全局日志锁串行化）
+                debug!("control msg: {} bytes", data.len());
+                if tx.send(data).is_err() {
+                    debug!("control queue closed, dropping msg for {}", s2.device.name);
+                }
                 Box::pin(async {})
             }));
             Box::pin(async {})
@@ -204,27 +222,39 @@ impl ViewerSession {
             payload_type,
             peer_closed_rx,
         };
-        // 静止补帧间隔：画面无新帧时按此节奏重发上一帧，维持浏览器端帧率稳定
-        // （max_fps 是上限不是下限——内容不动时设备不产新帧，不补帧则 fps 显示会掉到 1 以下；
-        //   补帧只重发相同内容，新帧到达立即恢复实时。补帧节奏封顶 30fps 防浪费带宽）
         let fps = session.device.fps.or_else(|| (cfg.fps > 0).then_some(cfg.fps));
+        // 静止补帧间隔：画面无新帧时按此节奏重发上一帧（也是该配置下的最小帧间隔）
         let idle_repeat_ms = fps.filter(|&f| f > 0).map(|f| (1000 / f).max(33) as u64).unwrap_or(33);
-        vs.spawn_pusher(rtp_sender, frame_rx, payload_type, ssrc, initial_frames, conn_rx, peer_connected.clone(), idle_repeat_ms);
+        // 硬性帧率上限：即使设备端实际输出 60fps，pusher 也按这里的最小间隔发送，
+        // 避免“设置了 30fps 实际却跑到 60fps”（scrcpy 侧不再传 max_fps，见 scrcpy.rs）
+        let min_frame_interval_ms = fps.filter(|&f| f > 0).map(|f| (1000 / f).max(1) as u64).unwrap_or(0);
+        vs.spawn_pusher(rtp_sender, frame_q, frame_notify, overflowed, payload_type, ssrc, initial_frames, conn_rx, peer_connected.clone(), idle_repeat_ms, min_frame_interval_ms);
         vs.spawn_audio_pusher(audio_track, audio_rx, audio_payload_type, audio_ssrc, peer_connected);
         Ok(vs)
     }
 
-    /// 视频推流循环：从帧队列取帧，H.264 payload 化 → RTP 写 track
+    /// 视频推流循环：从环形帧缓冲取帧，H.264 payload 化 → RTP 写 track
+    ///
+    /// 延迟控制（核心）：帧缓冲是"丢最旧保最新"的环形队列（见 make_frame_queue），
+    /// 且这里按**帧数积压**剪裁——队列深度超过 ~1s 的帧数时，丢弃队首到最近关键帧
+    /// 之间的旧帧，从关键帧重新开始（用帧数而非 PTS 时间差：设备编码器重启/虚拟屏
+    /// 重建时 PTS 会整体跳变，时间差不可靠）。配合设备端 i-frame-interval=1s，
+    /// 画面内容滞后被钳制在 ~1s 以内：写路径慢于设备出帧时，旧帧被跳过而不是排队
+    /// 积压（旧 mpsc 实现满队列丢新帧，pusher 永远消费几秒前的旧帧 → 画面滞后 5s+
+    /// → "操作延迟很久"的根因）。
     fn spawn_pusher(
         &self,
         rtp_sender: Arc<RTCRtpSender>,
-        mut frame_rx: tokio::sync::mpsc::Receiver<VideoFrame>,
+        frame_q: Arc<Mutex<VecDeque<VideoFrame>>>,
+        frame_notify: Arc<Notify>,
+        overflowed: Arc<std::sync::atomic::AtomicBool>,
         payload_type: u8,
         ssrc: u32,
         initial_frames: Option<Vec<VideoFrame>>,
         mut conn_rx: tokio::sync::mpsc::Receiver<()>,
         peer_connected: Arc<std::sync::atomic::AtomicBool>,
         idle_repeat_ms: u64,
+        min_frame_interval_ms: u64,
     ) {
         let track = self.track.clone();
         let running = self.running.clone();
@@ -256,6 +286,9 @@ impl ViewerSession {
             // 上次成功发送的时刻（动态时间戳下限用：ts 增量 ≥ 真实发送耗时，
             // 防止帧大/处理慢时 RTP 时间戳超前于实际发送 → 浏览器 jitter buffer 欠账卡顿）
             let mut last_tx: Option<std::time::Instant> = None;
+            // 真实时间锚点（(墙钟, 对应 RTP ts)）：媒体时钟的绝对基准，首帧建立。
+            // 设备 PTS 快漂（实测 ~26%）时靠它把 ts 钳制在墙钟附近（见发送循环）
+            let mut ts_anchor: Option<(std::time::Instant, u32)> = None;
 
             // 初始 GOP 重放：config 帧喂给 payloader（缓存 SPS/PPS，后续 IDR 自动拼 STAP-A）；
             // GOP 帧按原帧节奏发送（ts 基于 GOP 首帧 PTS，与后续实时流同一时间轴）。
@@ -278,10 +311,12 @@ impl ViewerSession {
                     if base.is_none() {
                         base = Some(f.pts_us);
                     }
-                    // 按原帧间隔节流发送，避免瞬时大流量打爆浏览器 jitter buffer / UDP 丢包
+                    // 按原帧间隔节流发送，避免瞬时大流量打爆浏览器 jitter buffer / UDP 丢包；
+                    // 下限 16ms（≈60fps）保证重放不超过源节奏的 2 倍——旧实现 clamp(5,40)
+                    // 会把 1~2s 的 GOP 在 ~0.5s 内快放完，表现为连接后"画面突然加速"。
                     if let Some(lp) = last_pts {
                         let gap = f.pts_us.saturating_sub(lp);
-                        let sleep_ms = (gap / 1000).clamp(5, 40);
+                        let sleep_ms = (gap / 1000).clamp(16, 40);
                         tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                     }
                     last_pts = Some(f.pts_us);
@@ -300,106 +335,165 @@ impl ViewerSession {
                 info!("pusher replayed initial GOP: {} frames, {} bytes", sent, total_bytes);
             }
 
-            // 断链保护 + 积压批处理（修复"塌缩成只发关键帧"问题）：
-            // H.264 的 P 帧依赖前序参考帧。上游（编码器）可能以 30~60fps 投帧，
-            // 而 RTP 写入较慢，队列必然积压。旧实现的"追最新帧 + 等关键帧"策略
-            // 在积压时把中间 P 帧全丢、只发关键帧 → 浏览器每 1~5 秒才见一帧新画面
-            // （实测 pusher 收到的帧 frame_no 全部 key=true）——"30fps 却卡成 1fps"
-            // 的真正根因。新策略：积压帧按序收成一批（上限 BATCH_MAX_FRAMES 防
-            // 延迟无限累积），批内从最后一个关键帧起发（其前的帧依赖更早参考链，
-            // 丢弃），整批按序发送：
-            //   - 链路完整 → 连续播放，无跳变、无塌缩；
-            //   - 链路已断（批内无关键帧且此前等待中）→ 整批丢弃，等下一个 IDR
-            //     重建（i-frame-interval=1 → ≤1s）。
-            // 代价：积压时最多落后一批（≈0.75~1.5s），远好于画面定格。
-            const BATCH_MAX_FRAMES: usize = 45;
+            // 延迟控制（核心）：帧缓冲是"丢最旧保最新"的环形队列（见 make_frame_queue），
+            // 这里按**帧数积压**剪裁——队列深度超过 ~1s 的帧数时，丢弃队首到最近关键帧
+            // 之间的旧帧，从关键帧重新开始发送（用帧数而非 PTS 时间差：设备编码器重启/
+            // 虚拟屏重建时 PTS 会整体跳变，时间差不可靠）。
+            //   - 写路径跟得上设备帧率 → 队列始终很短（1~5 帧），零额外延迟，连续播放；
+            //   - 写路径慢（CPU 竞争 / 网络抖动）→ 旧帧被跳过而不是排队，画面滞后
+            //     被钳制在 ~1s 内且不会越积越多。旧 mpsc 实现满队列丢"新帧"保"旧帧"，
+            //     pusher 永远消费几秒前的旧帧（画面滞后 5s+ → "操作延迟很久"的根因）。
+            // 参考链保护（重要）：正常运转时队列里几乎全是 P 帧——关键帧已在上轮发出，
+            // 这些 P 帧直接延续"已发送的帧链"，完全可解码，必须照常发送。绝不能因
+            // "队内无关键帧"就整队丢弃（那会把流塌缩成每秒一个关键帧，画面每秒跳一下
+            // ——曾因该误判导致推流塌缩，表现"更卡"）。真正断链只有一种情况：
+            // 环形缓冲溢出（forwarder 丢过最旧帧），此时用 overflowed 标志通知，
+            // pusher 清空队列等待下一个 IDR 重建（i-frame-interval=1 → ≤1s）。
+            let backlog_limit = if min_frame_interval_ms > 0 {
+                (1000 / min_frame_interval_ms) as usize // ≈1s 的帧数（fps 上限换算）
+            } else {
+                45
+            };
             let mut waiting_key = false;
-            let mut batch_drops = 0u64;
+            let mut drops_broken = 0u64;
+            let mut drops_wait = 0u64;
+            let mut drops_to_key = 0u64;
+            // 诊断探针：每 300 帧输出平均单帧 RTP 发送耗时（不含节流 sleep）与队列深度
+            let mut send_time_us = 0u64;
+            let mut send_samples = 0u64;
+            let mut last_q_len = 0usize;
 
             while running.load(std::sync::atomic::Ordering::SeqCst) {
-                let recv = tokio::time::timeout(Duration::from_millis(idle_repeat_ms), frame_rx.recv()).await;
-                let mut batch: Vec<VideoFrame> = match recv {
-                    Ok(Some(f)) => vec![f],
-                    Ok(None) => break, // 帧队列关闭
-                    Err(_) => {
-                        // 静止补帧：idle_repeat_ms 内无新帧 → 重发最后一帧。
-                        // 重复帧内容相同且参考链完整（该帧此前已成功发送），解码器可正常渲染；
-                        // RTP 时间戳单调推进，浏览器帧率统计不掉。
-                        if peer_connected.load(std::sync::atomic::Ordering::SeqCst) {
-                            if let Some((last, ts0)) = &last_sent {
-                                let ts = ts0.wrapping_add((idle_repeat_ms as u32) * 90);
-                                if push_rtp(&track, &mut payloader, last, payload_type, ssrc, &mut seq, ts).await {
-                                    *last_ts.lock() = ts;
-                                    last_rtp_ts = ts;
-                                    last_tx = Some(std::time::Instant::now());
-                                } else {
-                                    break;
+                // 等待新帧（notify）或静止补帧超时（idle_repeat_ms）
+                tokio::select! {
+                    _ = frame_notify.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(idle_repeat_ms)) => {}
+                }
+                if !running.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+
+                // 锁内只做队列剪裁/取出（不 await）：取出"从最近关键帧起的连续帧链"
+                let mut to_send: Vec<VideoFrame> = Vec::new();
+                {
+                    let mut q = frame_q.lock();
+                    if !q.is_empty() {
+                        // 环形缓冲溢出 → 参考链断裂：清空队列，等下一个 IDR 重建
+                        if overflowed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                            drops_broken += 1;
+                            if drops_broken % 20 == 1 {
+                                info!("pusher chain broken (ring overflow), dropped {} frames, drops={}", q.len(), drops_broken);
+                            }
+                            q.clear();
+                            waiting_key = true;
+                        }
+                        if waiting_key {
+                            // 断链恢复中：丢弃 P 帧直到新的关键帧出现
+                            if let Some(ki) = q.iter().position(|f| f.is_keyframe) {
+                                waiting_key = false;
+                                q.drain(..ki); // 关键帧之前的 P 帧来自断链段，丢弃
+                                to_send = q.drain(..).collect();
+                            } else {
+                                drops_wait += 1;
+                                q.clear();
+                            }
+                        } else {
+                            // 积压跳帧：队列深度超过 ~1s 的帧数 → 跳到最近关键帧
+                            // （其前帧依赖更早参考链，丢弃）。正常运转时队列 1~5 帧，不触发。
+                            if q.len() > backlog_limit {
+                                let ki = q.iter().rposition(|f| f.is_keyframe).unwrap_or(0);
+                                if ki > 0 {
+                                    drops_to_key += 1;
+                                    if drops_to_key % 20 == 1 {
+                                        info!("pusher skipped {} stale frames to keyframe (queue {}), skips={}", ki, q.len(), drops_to_key);
+                                    }
+                                    q.drain(..ki);
                                 }
                             }
+                            to_send = q.drain(..).collect();
+                            last_q_len = to_send.len(); // 本轮取出的帧数（≈ 队列积压深度）
                         }
-                        continue;
-                    }
-                };
-                // 收集积压帧（按序，不丢中间帧）
-                while let Ok(f2) = frame_rx.try_recv() {
-                    batch.push(f2);
-                    if batch.len() >= BATCH_MAX_FRAMES {
-                        break;
                     }
                 }
-                // 批内有关键帧 → 从最后一个关键帧开始发（其前帧依赖更早参考链，丢弃）
-                if let Some(ki) = batch.iter().rposition(|f| f.is_keyframe) {
-                    if ki > 0 {
-                        debug!("pusher batch: dropping {} stale frames to keyframe", ki);
-                        batch.drain(..ki);
-                    }
-                    waiting_key = false;
-                } else if waiting_key {
-                    // 链路已断且批内无关键帧：丢弃整批，等下个 IDR 重建
-                    batch_drops += 1;
-                    if batch_drops % 50 == 1 {
-                        info!("pusher batch dropped (waiting keyframe), drops={}", batch_drops);
+
+                if to_send.is_empty() {
+                    // 静止补帧：idle_repeat_ms 内无新帧 → 重发最后一帧。
+                    // 重复帧内容相同且参考链完整（该帧此前已成功发送），解码器可正常渲染；
+                    // RTP 时间戳单调推进，浏览器帧率统计不掉。
+                    if peer_connected.load(std::sync::atomic::Ordering::SeqCst) {
+                        if let Some((last, ts0)) = &last_sent {
+                            let ts = ts0.wrapping_add((idle_repeat_ms as u32) * 90);
+                            if push_rtp(&track, &mut payloader, last, payload_type, ssrc, &mut seq, ts).await {
+                                *last_ts.lock() = ts;
+                                last_rtp_ts = ts;
+                                last_tx = Some(std::time::Instant::now());
+                            } else {
+                                break;
+                            }
+                        }
                     }
                     continue;
                 }
-                // 本批是否有积压（>1 帧说明消费慢于输入）：有积压时跳过节流 sleep 全力追赶
-                let have_backlog = batch.len() > 1;
-                for frame in batch {
+
+                // 一次取到多帧说明消费慢于输入：全力追赶（帧率上限仅对单帧批次生效）
+                // 注意：to_send 在 for 循环中被移动，paced 必须在循环外计算
+                let paced = to_send.len() == 1;
+                for frame in to_send {
                     frame_no += 1;
-                    // 诊断：实时循环心跳（验证 frame_rx 是否收到设备帧）
-                    if frame_no % 5 == 0 || frame_no <= 3 {
+                    // 诊断：实时循环心跳（验证帧缓冲是否收到设备帧）
+                    if frame_no % 300 == 1 {
                         debug!("pusher recv: no={} key={} cfg={} pts={} peer={}", frame_no, frame.is_keyframe, frame.is_config, frame.pts_us, peer_connected.load(std::sync::atomic::Ordering::SeqCst));
                     }
 
-                    // 实时节流：仅当本批无积压时按源帧间隔 sleep（平滑节奏）；
-                    // 有积压（帧大/处理慢导致队列堆积）时立即发送追赶——
-                    // 否则 pusher 永远慢于输入 → 时间戳超前 → 浏览器 jitter buffer 欠账卡顿。
-                    if !have_backlog {
-                        if let Some(lp) = last_pts {
-                            let gap = frame.pts_us.saturating_sub(lp);
-                            // 帧间隔 clamp 到 5~40ms（对应 25~60fps 上限节奏）
-                            let sleep_ms = (gap / 1000).clamp(5, 40);
-                            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    // 节流：仅对"单帧批次"（正常节奏）应用最小帧间隔（帧率上限——
+                    // "设置 30fps"就是硬上限，设备端 60fps 输入会被限到 ~30fps）。
+                    // 关键：**批量取出 = 消费慢于输入（积压），批次内绝不再逐帧 sleep**。
+                    // 旧逻辑对批次内每一帧都 sleep(min_interval - elapsed)：积压 45 帧要
+                    // ~700ms 才能发完，期间生产端又补进 ~45 帧 → 队列永远清不空，内容
+                    // 永久滞后 ~0.7s 且随积压增长（"操作延迟大"的结构性根因，日志特征
+                    // q=30~62 持续不降 + 周期性 skip-to-keyframe 跳帧）。积压时应全速
+                    // 追赶：RTP 时间戳已携带媒体节奏，浏览器 jitter buffer 会平滑播出，
+                    // 提前到达的帧只占 ~百毫秒缓冲，不会引入可感知延迟。
+                    // 单帧批次（正常节奏）时距上次发送已 ≥ min_interval，sleep 实际为 0，
+                    // 节流不会产生额外延迟；真正的上限约束靠 backlog 跳帧兜底。
+                    // 定时器精度由 main.rs 的 timeBeginPeriod(1) 保证（见该处注释）。
+                    let mut sleep_ms = 0u64;
+                    if paced && min_frame_interval_ms > 0 {
+                        if let Some(t) = last_tx {
+                            let elapsed_ms = t.elapsed().as_millis() as u64;
+                            if elapsed_ms < min_frame_interval_ms {
+                                sleep_ms = sleep_ms.max(min_frame_interval_ms - elapsed_ms);
+                            }
                         }
                     }
-                    last_pts = Some(frame.pts_us);
+                    if sleep_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                    }
 
-                    // RTP 时间戳：90kHz，基于 PTS 差值累积，保证单调。
-                    // 动态下限：ts 增量 ≥ 真实发送耗时（距上次成功发送），
-                    // 帧大/处理慢时时间戳跟随实际节奏，浏览器不会因"帧还没到、时间已到"而卡顿。
-                    let pts = frame.pts_us;
+                    // RTP 时间戳：90kHz，**媒体时钟 == 墙钟**（真实时间锚点 + 墙钟流逝）。
+                    // 设备 PTS（MTK 虚拟屏编码器）实测与墙钟严重不同步：快时可领先 ~26%，
+                    // 且偶发停滞/回退/30fps 节奏（33ms 间隔）。若 ts 跟随 PTS，浏览器
+                    // jitter buffer 认为帧"早到/迟到"，目标延迟被拉高到数秒 → 缓冲
+                    // 积压满后整段丢弃 → 只有关键帧可解码 → 画面掉到 1fps 并频繁冻结。
+                    // 首帧以当前已发送时间轴锚定（与初始 GOP 重放无缝衔接），此后 ts
+                    // 只按墙钟推进：帧以 ~60fps 到达、ts 以同节奏前进 → 浏览器 1.0x
+                    // 平滑播放，jitter buffer 目标收敛到最小值（实测 ~150ms）。
+                    // 单调保底（real_ts ≤ last_rtp_ts，正常不会触发）：重新锚定到当前
+                    // ts，避免 +3000 自持循环把媒体时钟推到 2 倍墙钟速率。
                     let ts = {
-                        let mut base = ts_base.lock();
-                        if base.is_none() {
-                            *base = Some(pts);
-                        }
-                        let delta = pts.saturating_sub(base.unwrap());
-                        let src_ts = ((delta * 90) / 1000) as u32;
-                        let floor_ts = last_tx
-                            .map(|t| last_rtp_ts.wrapping_add((t.elapsed().as_micros() as u32) * 90 / 1000))
-                            .unwrap_or(0);
-                        let ts = src_ts.max(floor_ts);
-                        let ts = if ts <= last_rtp_ts && frame_no > 1 { last_rtp_ts + 3000 } else { ts };
+                        let real_ts = match ts_anchor {
+                            Some((aw, at)) => at.wrapping_add(((aw.elapsed().as_micros() as u64) * 90 / 1000) as u32),
+                            None => {
+                                ts_anchor = Some((std::time::Instant::now(), last_rtp_ts));
+                                last_rtp_ts
+                            }
+                        };
+                        let ts = if real_ts <= last_rtp_ts && frame_no > 1 {
+                            ts_anchor = Some((std::time::Instant::now(), last_rtp_ts));
+                            last_rtp_ts + 3000
+                        } else {
+                            real_ts
+                        };
                         last_rtp_ts = ts;
                         ts
                     };
@@ -431,14 +525,20 @@ impl ViewerSession {
                         }
                     }
 
+                    let t_send = std::time::Instant::now();
                     if !push_rtp(&track, &mut payloader, &frame, payload_type, ssrc, &mut seq, ts).await {
                         break;
                     }
+                    send_time_us += t_send.elapsed().as_micros() as u64;
+                    send_samples += 1;
                     sent_packets += 1;
                     sent_bytes += frame.data.len() as u64;
-                    // 诊断：实时推帧日志（调试用，每 25 帧）
-                    if frame_no % 25 == 0 {
-                        info!("pusher live: frame_no={} key={} ts={} peer={} size={}", frame_no, frame.is_keyframe, ts, peer_connected.load(std::sync::atomic::Ordering::SeqCst), frame.data.len());
+                    // 诊断：实时推帧日志（每 300 帧，含平均 RTP 发送耗时与队列深度）
+                    if frame_no % 300 == 1 {
+                        let avg = if send_samples > 0 { send_time_us / send_samples / 1000 } else { 0 };
+                        info!("pusher live: frame_no={} key={} ts={} peer={} size={} send_avg={}ms q={}", frame_no, frame.is_keyframe, ts, peer_connected.load(std::sync::atomic::Ordering::SeqCst), frame.data.len(), avg, last_q_len);
+                        send_time_us = 0;
+                        send_samples = 0;
                     }
                     last_sent = Some((frame, ts));
                     last_tx = Some(std::time::Instant::now());
@@ -464,6 +564,10 @@ impl ViewerSession {
             let mut seq: u16 = rand::random();
             let mut last_ts: Option<u32> = None;
             let mut sent: u64 = 0;
+            // 音频真实时间锚点：与视频同理，设备音频 PTS 也可能快漂（虚拟屏
+            // remote_submix 时钟），若 ts 跟着漂，浏览器音频 jitter buffer 目标
+            // 被拉高 → A/V 同步把整个画面拖慢数秒。钳制在 [real, real+40ms]。
+            let mut audio_anchor: Option<(std::time::Instant, u32)> = None;
             while running.load(std::sync::atomic::Ordering::SeqCst) {
                 let Some(frame) = audio_rx.recv().await else { break };
                 // OPUS 参数集帧（OpusHead）无需发送：WebRTC 用 SDP fmtp 描述参数
@@ -473,11 +577,21 @@ impl ViewerSession {
                 if !peer_connected.load(std::sync::atomic::Ordering::SeqCst) {
                     continue;
                 }
-                // 48kHz 时间戳：pts_us → ticks（×48/1000）；单调保底 +20ms
-                let ts = ((frame.pts_us.saturating_mul(48)) / 1000) as u32;
-                let ts = match last_ts {
-                    Some(lt) if ts <= lt => lt + 960,
-                    _ => ts,
+                // 48kHz 时间戳：pts_us → ticks（×48/1000）；锚定真实时间；单调保底 +20ms
+                let ts = {
+                    let src_ts = ((frame.pts_us.saturating_mul(48)) / 1000) as u32;
+                    let real_ts = match audio_anchor {
+                        Some((aw, at)) => at.wrapping_add(((aw.elapsed().as_micros() as u64) * 48 / 1000) as u32),
+                        None => {
+                            audio_anchor = Some((std::time::Instant::now(), src_ts));
+                            src_ts
+                        }
+                    };
+                    let ts = src_ts.max(real_ts).min(real_ts.saturating_add(2 * 960)); // 领先 ≤40ms
+                    match last_ts {
+                        Some(lt) if ts <= lt => lt + 960,
+                        _ => ts,
+                    }
                 };
                 last_ts = Some(ts);
                 let payloads = match payloader.payload(1200, &Bytes::from(frame.data.clone())) {
@@ -675,34 +789,65 @@ async fn handle_control_msg(session: &ScrcpySession, data: &[u8]) -> anyhow::Res
     Ok(())
 }
 
-/// 订阅设备帧广播 → 转 mpsc 队列（每个 viewer 独立）
+/// 订阅设备帧广播 → 有界环形缓冲（每个 viewer 独立）
 ///
+/// 与旧 mpsc 队列的关键区别：**满队列时丢最旧、保最新**（pop_front + push_back），
+/// pusher 永远消费最近到达的帧；配合 pusher 的积压跳帧（见 spawn_pusher），
+/// 画面内容滞后被钳制在 ~1s（关键帧间隔）以内，而不是随积压无限增长——
+/// 旧实现满队列丢"新帧"，pusher 永远在消费几秒前的旧帧（操作延迟大的根因之一）。
 /// 注意：broadcast::RecvError::Lagged 表示订阅者消费太慢被丢帧（正常现象），
 /// 必须 continue 继续消费，绝不能 break——否则实时帧流会永久断开（黑屏）。
-/// mpsc 队列满时丢新帧；pusher 端会 drain 追最新帧（见 spawn_pusher）。
-pub fn make_frame_queue(frames: broadcast::Sender<VideoFrame>) -> tokio::sync::mpsc::Receiver<VideoFrame> {    let (tx, rx) = tokio::sync::mpsc::channel(256);
+/// 丢最旧帧会切断 H.264 参考链，必须置位 overflowed 标志通知 pusher 清空等待
+/// 下一个 IDR（否则 pusher 会把无法解码的 P 帧发给浏览器）。
+/// forwarder 通过 queue 的 Weak 引用检测 viewer 注销（唯一强引用释放）后退出，
+/// 避免任务泄漏（浏览器刷新/断线频繁时泄漏任务累积，长时间运行拖垮服务）。
+pub fn make_frame_queue(
+    frames: broadcast::Sender<VideoFrame>,
+) -> (
+    Arc<Mutex<VecDeque<VideoFrame>>>,
+    Arc<Notify>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    const QUEUE_CAP: usize = 256;
+    let queue: Arc<Mutex<VecDeque<VideoFrame>>> = Arc::new(Mutex::new(VecDeque::with_capacity(QUEUE_CAP)));
+    let queue2 = queue.clone();
+    let notify = Arc::new(Notify::new());
+    let notify2 = notify.clone();
+    let overflowed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let overflowed2 = overflowed.clone();
+    let weak = Arc::downgrade(&queue);
     let mut sub = frames.subscribe();
     let mut dropped = 0u64;
     let mut fwd = 0u64;
     tokio::spawn(async move {
         loop {
-            // viewer 注销后 rx 被 drop → tx.closed() 完成 → 转发任务退出，
-            // 避免泄漏：否则任务会永远 recv broadcast + try_send 失败空转
-            // （浏览器刷新/断线频繁时泄漏任务累积，长时间运行拖垮服务）
             tokio::select! {
-                _ = tx.closed() => break,
+                // 无新帧时定期检查 viewer 是否已注销（weak 失效即退出）
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    if weak.upgrade().is_none() {
+                        break;
+                    }
+                }
                 f = sub.recv() => {
                     match f {
                         Ok(f) => {
                             fwd += 1;
-                            // 诊断：转发心跳（每帧）
-                            debug!("fq fwd: {} key={} cfg={} pts={}", fwd, f.is_keyframe, f.is_config, f.pts_us);
-                            if tx.try_send(f).is_err() {
+                            // 诊断：转发心跳（降频，默认 info 级别不输出）
+                            if fwd % 300 == 1 {
+                                debug!("fq fwd: {} key={} cfg={} pts={}", fwd, f.is_keyframe, f.is_config, f.pts_us);
+                            }
+                            let mut q = queue2.lock();
+                            if q.len() >= QUEUE_CAP {
+                                q.pop_front(); // 满队列：丢最旧保最新（参考链断裂，通知 pusher）
+                                overflowed2.store(true, std::sync::atomic::Ordering::SeqCst);
                                 dropped += 1;
                                 if dropped % 1000 == 1 {
-                                    debug!("frame queue full, dropped={}", dropped);
+                                    debug!("frame queue ring full, dropped oldest, dropped={}", dropped);
                                 }
                             }
+                            q.push_back(f);
+                            drop(q);
+                            notify2.notify_one();
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(broadcast::error::RecvError::Closed) => break,
@@ -711,7 +856,7 @@ pub fn make_frame_queue(frames: broadcast::Sender<VideoFrame>) -> tokio::sync::m
             }
         }
     });
-    rx
+    (queue, notify, overflowed)
 }
 
 /// 订阅设备音频广播 → 转 mpsc 队列（每个 viewer 独立；满队列丢新帧，音频实时性优先）

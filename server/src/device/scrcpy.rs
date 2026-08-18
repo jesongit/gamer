@@ -172,7 +172,7 @@ impl ScrcpySession {
         //   传 max_fps=15/30/60 时，编码器配合 repeat-previous-frame-after 输出大量
         //   空 keep-alive 缓冲（size==0），scrcpy 跳过空缓冲 → 服务端只收到 ~1fps；
         //   不传该 key 时编码器按自身默认节奏输出真实帧（实测 ~15fps，15 倍提升）。
-        //   帧率上限改由服务端 pusher 控制（静止补帧 idle_repeat + 推流节流）。
+        //   帧率上限改由服务端 pusher 控制（pusher 最小帧间隔硬限 + 静止补帧 idle_repeat）。
         // 注：全局配置 cfg.fps 与设备 fps 仍用于 pusher 的补帧/节流节奏（见 webrtc.rs）。
         // 屏幕模式：虚拟屏 or 镜像主屏
         match &device.screen_mode {

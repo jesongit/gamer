@@ -20,11 +20,27 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Windows 定时器分辨率：默认 15.6ms 粒度会让 tokio::time::sleep(16ms) 实际睡
+    // ~31ms，pusher 的帧率上限（60fps → 16ms 间隔）被砍半 → 设备帧爆发时队列积压
+    // （内容滞后 + 画面跳动）。多媒体应用（OBS/游戏）都会调用 timeBeginPeriod(1)
+    // 把全局定时器精度提到 1ms；进程退出时系统自动恢复，无需 timeEndPeriod。
+    // 零依赖 FFI（winmm.dll），仅 Windows 需要。
+    #[cfg(target_os = "windows")]
+    {
+        #[link(name = "winmm")]
+        extern "system" {
+            fn timeBeginPeriod(uPeriod: u32) -> u32;
+        }
+        unsafe {
+            timeBeginPeriod(1);
+        }
+    }
+
     // 日志：默认 stdout；设置 GB_LOG=<文件路径> 时写入文件（追加模式）。
     // 文件模式用于生产部署——不依赖 shell 重定向管道，
     // 避免"重定向句柄异常导致进程假死/日志丢失"的问题。
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info,gamer_server=debug".into());
+        .unwrap_or_else(|_| "info".into());
     if let Ok(path) = std::env::var("GB_LOG") {
         let file = std::fs::OpenOptions::new()
             .create(true)

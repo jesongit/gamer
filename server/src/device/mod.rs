@@ -184,17 +184,28 @@ impl DeviceManager {
         tokio::spawn(async move {
             let mut rx = handle.video_rx;
             let cache = frame_cache2;
+            let mut bc_no_viewer = 0u64;
             while let Some(frame) = rx.recv().await {
                 if let Some(fc) = &cache {
                     fc.feed(&frame);
                 }
-                // 诊断：广播 send 结果（接收者数 / 错误）。
+                // 诊断：广播 send 结果（接收者数 / 错误），降频避免每帧刷日志。
                 // 注意：无任何 viewer 时 tokio broadcast 返回 Err(SendError)（含整帧数据），
                 // 不能打印 e（会刷巨型日志），只记录计数。
                 match tx2.send(frame) {
-                    Ok(0) => debug!(device = %dn1, "broadcast: no receivers"),
+                    Ok(0) => {
+                        bc_no_viewer += 1;
+                        if bc_no_viewer % 300 == 1 {
+                            debug!(device = %dn1, "broadcast: no receivers");
+                        }
+                    }
                     Ok(_) => {}
-                    Err(_) => debug!(device = %dn1, "broadcast: no viewers, frame skipped"),
+                    Err(_) => {
+                        bc_no_viewer += 1;
+                        if bc_no_viewer % 300 == 1 {
+                            debug!(device = %dn1, "broadcast: no viewers, frame skipped");
+                        }
+                    }
                 }
                 if !s2.connected.load(std::sync::atomic::Ordering::SeqCst) {
                     warn!(device = %dn1, "session disconnected");

@@ -72,7 +72,7 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                     break;
                                 }
                             };
-                            let frame_rx = make_frame_queue(frames_tx.clone());
+                            let (frame_q, frame_notify, overflowed) = make_frame_queue(frames_tx.clone());
                             // 音频队列（无音频源时给空 channel：音频 pusher 立即退出）
                             let audio_rx = match &audio_frames_tx {
                                 Some(tx) => make_audio_queue(tx.clone()),
@@ -102,7 +102,7 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                     info!(device = %device_id, "waited for initial frames after reset_video");
                                 }
                             }
-                            match ViewerSession::create(&st.cfg, session.clone(), frame_rx, audio_rx, offer, initial_frames).await {
+                            match ViewerSession::create(&st.cfg, session.clone(), frame_q, frame_notify, overflowed, audio_rx, offer, initial_frames).await {
                                 Ok(vs) => {
                                     // 单 viewer 限制：同一设备的新连接踢掉旧连接
                                     // （旧 pusher 停止 + 旧 peer 关闭），避免多连接多推流
