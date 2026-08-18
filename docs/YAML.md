@@ -7,39 +7,45 @@
 
 ```yaml
 name: 每日签到          # 脚本名（可选）
+action_wait: 500        # 操作间隔：每个操作执行后的默认等待毫秒数（可选，默认 500）
 steps:                  # 必填，按顺序执行的动作列表
   - wait: 1000
   - log: "开始"
 ```
 
-每个 `steps` 列表项是一个动作。动作可以只有一行，也可以带参数和子分支。
+- `action_wait` 是当前脚本的操作间隔：每个操作（除 `wait` 动作本身）执行完后
+  默认等待这么多毫秒。单个步骤可用 `wait` 参数覆盖（如 `wait: 200`，`0` 不等待）。
+- 每个 `steps` 列表项是一个动作。动作可以只有一行，也可以带参数和子分支。
 
 ## 书写约定
 
 - 每个动作以 `- 动作名:` 开始
 - 动作的参数与动作键同级缩进（即都缩在 `-` 下面）
 - `then` / `else` 与动作键同级，是当前步骤的分支
-- `find` / `click` / `until` 只使用字符串模板写法，不兼容对象写法：
+- `find` 只使用字符串模板写法，不兼容对象写法：
 
 ```yaml
 - find: sign_btn.png
   threshold: 0.85
   region: u
+  click: true
   then:
-    - tap: [0.500, 0.500]
+    - log: "找到并点击"
   else:
     - log: "未找到"
 ```
 
 ## 通用参数
 
-### 找图参数（find / click / until）
+### 找图参数（find）
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
+| `interval` | `500` | 检测间隔毫秒：没找到时多久重试一次 |
+| `timeout` | `6000` | 超时毫秒；`0` 表示一直找（不超时） |
+| `click` | `false` | 找到后如何点击，见下文 |
 | `threshold` | `0.8` | 匹配阈值 0~1，越大越严格 |
 | `region` | `a` | 搜索区域，见下表 |
-| `timeout` | 仅 `until` 支持 | 超时毫秒；`0` 表示死等 |
 
 `region` 支持字符串和相对坐标数组两种写法。
 
@@ -62,8 +68,30 @@ steps:                  # 必填，按顺序执行的动作列表
 ```yaml
 - find: sign_btn.png
   region: [0.000, 0.000, 0.500, 0.500]   # 左上四分之一
-- click: shop.png
+- find: shop.png
   region: [0.250, 0.250, 0.750, 0.750]   # 中间区域
+```
+
+### find 的 click 参数
+
+`click` 控制找到模板后是否点击、点哪里，默认 `false`（只找不点）：
+
+| 取值 | 行为 |
+|---|---|
+| `false` / 不写 | 只判断模板是否出现，不点击 |
+| `true` | 点击模板中心点 |
+| `button.png`（模板名） | 在找到的模板**区域内**再找 `button.png`，找到就点击它的中心点；区域内没找到则继续循环查找，直到超时走 `else` |
+| `[x1, y1]` | 点击模板区域内的相对坐标（`0~1`），如 `[0.5, 0.5]` 是模板中心点 |
+
+```yaml
+- find: dialog.png          # 对话框出现后，点它内部的关闭按钮
+  click: close_btn.png      # 在 dialog.png 区域内找 close_btn.png 并点击
+  else:
+    - log: "对话框没出现"
+
+- find: dialog.png
+  click: [0.5, 0.1]         # 点击对话框区域内顶部中间的位置
+  timeout: 0                # 一直等对话框出现
 ```
 
 ### 相对坐标
@@ -112,68 +140,53 @@ steps:                  # 必填，按顺序执行的动作列表
 
 ```yaml
 - swipe:
-    from: [0.500, 0.800]
+    fm: [0.500, 0.800]
     to: [0.500, 0.200]
     time: 1000          # 1000ms 内完成滑动
 ```
 
-### 7. click —— 点击模板（自带成功/失败日志）
+### 7. find —— 查找模板（找图/点击/等待统一入口）
 
-`click` 只用于“找到模板并点击它”，没有 `timeout`，每次只尝试一次；
-`else` 表示模板没找到。
+`find` 每 `interval` 毫秒检测一次模板是否出现，直到出现或 `timeout` 超时：
+
+- 找到 → 按 `click` 参数点击（如有）→ 执行 `then`
+- 超时未找到 → 执行 `else`
 
 ```yaml
-- click: shop.png
-  threshold: 0.85       # 可选，默认 0.8
-  region: a             # 可选，默认 a（全屏）
-  log: "点击商店成功"     # 可选，覆盖默认成功日志
-  else:
+- find: shop.png
+  interval: 500         # 检测间隔 ms（默认 500）
+  timeout: 6000         # 超时 ms（默认 6000，0 = 一直找）
+  click: true           # 找到后点击模板中心（默认 false）
+  threshold: 0.85       # 匹配阈值（默认 0.8）
+  region: a             # 搜索区域（默认 a）
+  then:                 # 找到并点击成功后执行
+    - log: "点击商店成功"
+  else:                 # 超时未找到执行
     - log: "没有找到商店按钮"
-```
-
-### 8. find —— 找图条件分支
-
-`find` 只判断一次模板是否出现，没有 `timeout`；
-`then` 在找到时执行，`else` 在没找到时执行。
-
-```yaml
-- find: sign_btn.png
-  threshold: 0.85
-  region: u            # 只在上半屏找
-  then:
-    - tap: [0.500, 0.500]
-  else:
-    - log: "未找到签到按钮"
     - goto: retry
 ```
 
-### 9. until —— 等待模板出现
-
-`until` 会一直等待模板出现，适合等加载完成、等动画结束。
-`timeout` 只在这里支持，默认 `0` 表示不超时（死等）；超时后执行 `else`。
+等待模板出现（相当于旧的 `until`，不点击）：
 
 ```yaml
-- until: done.png
-  timeout: 0            # 0 = 死等，默认就是 0
-  threshold: 0.85
-  region: a
-  else:                 # 超时触发
-    - log: "等待超时"
-```
-
-有限超时：
-
-```yaml
-- until: loading_done.png
+- find: loading_done.png
   timeout: 30000        # 30 秒后仍未出现则走 else
+  interval: 500
   else:
     - log: "加载超时"
     - goto: fail
 ```
 
-开始等待时引擎会默认打印日志：`等待模板 xxx 出现，超时 ...`。
+一直等到出现（`timeout: 0`）：
 
-### 10. loop —— 次数循环
+```yaml
+- find: done.png
+  timeout: 0            # 0 = 一直找，不超时
+```
+
+开始查找时引擎会默认打印日志：`查找模板 xxx，超时 ...，检测间隔 ...ms`。
+
+### 8. loop —— 次数循环
 
 ```yaml
 - loop:
@@ -183,14 +196,14 @@ steps:                  # 必填，按顺序执行的动作列表
       - wait: 500
 ```
 
-### 11. goto / label —— 跳转
+### 9. goto / label —— 跳转
 
 ```yaml
 - label: retry
 - goto: retry
 ```
 
-### 12. call —— 调用子脚本
+### 10. call —— 调用子脚本
 
 ```yaml
 - call: 子脚本.yml
@@ -200,17 +213,21 @@ steps:                  # 必填，按顺序执行的动作列表
 
 ```yaml
 name: 每日签到
+action_wait: 500
+
 steps:
-  - until: main_page.png
+  - find: main_page.png
     timeout: 30000
     else:
       - log: "进入主界面超时"
       - goto: fail
 
-  - click: sign_btn.png
+  - find: sign_btn.png
     threshold: 0.85
     region: u
-    log: "点击签到按钮"
+    click: true
+    then:
+      - log: "点击签到按钮"
     else:
       - log: "签到按钮不存在"
       - goto: retry
@@ -224,7 +241,7 @@ steps:
       - wait: [300, 800]
 
   - swipe:
-      from: [0.500, 0.800]
+      fm: [0.500, 0.800]
       to: [0.500, 0.200]
       time: 800
   - wait: [500, 1000]

@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">脚本编辑</div>
-        <div class="page-sub">YAML 自动化脚本 · 支持 find / click / tap / swipe / text / key / until / loop / goto / call / wait</div>
+        <div class="page-sub">YAML 自动化脚本 · 支持 find / tap / swipe / text / key / loop / goto / call / wait；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms）</div>
       </div>
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
@@ -40,7 +40,7 @@
 
         <div class="editor">
           <div class="gutter mono"><div v-for="(_, i) in codeLines" :key="i">{{ i + 1 }}</div></div>
-          <textarea v-model="code" class="code-area mono" spellcheck="false" @input="valid = null"></textarea>
+          <textarea v-model="code" class="code-area mono" spellcheck="false" @input="valid = null" @keydown.tab.prevent="onEditorTab"></textarea>
         </div>
       </div>
     </div>
@@ -57,33 +57,35 @@
             <div class="hb-title">🎬 动作</div>
             <pre class="hb-code mono">- wait: [500, 1500]                   # 随机延时
 - tap: [0.500, 0.500]                # 相对坐标点击
-- click: shop.png                    # 模板点击（自带成功/失败日志）
-  threshold: 0.85
-  region: a
-  log: "点击成功"
-  else:
-    - log: "点击失败"
+  wait: 200                          # 操作后等待（默认取脚本 action_wait，0 不等待）
 - swipe:
-    from: [0.500, 0.800]
-    to: [0.500, 0.200]
-    time: 800
+    fm: [0.500, 0.800]               # 滑动起点
+    to: [0.500, 0.200]               # 滑动终点
+    time: 800                        # 滑动时长 ms
 - text: "hello world"                # 输入文本
 - key: HOME                          # HOME/BACK/APP_SWITCH/VOL_UP…</pre>
           </div>
           <div class="help-block">
-            <div class="hb-title">🔍 找图</div>
-            <pre class="hb-code mono">- find: sign_btn.png
-  threshold: 0.85
-  region: a
-  then:
-    - tap: [0.500, 0.500]
-  else:
-    - log: "未找到签到按钮"
+            <div class="hb-title">🔍 找图 find</div>
+            <pre class="hb-code mono">- find: sign_btn.png     # 查找模板
+  interval: 500          # 检测间隔 ms（默认 500）
+  timeout: 6000          # 超时 ms（默认 6000，0=一直找）
+  click: true            # 找到后点击模板中心（默认 false）
+  threshold: 0.85        # 匹配阈值（默认 0.8）
+  region: a              # 搜索区域（默认 a=全屏）
+  then:                  # 找到后执行
+    - log: "找到并点击"
+  else:                  # 超时未找到执行
+    - log: "等待超时"
 
-- until: done.png
-  timeout: 0
+- find: dialog.png       # click 也可以是模板名或相对坐标
+  click: close_btn.png   # 在 dialog.png 区域内找 close_btn.png，找到点击其中心
   else:
-    - log: "等待超时"</pre>
+    - log: "对话框没出现"
+
+- find: dialog.png
+  click: [0.5, 0.1]      # 点击 dialog.png 区域内的相对坐标 [0.5,0.1]
+  timeout: 0             # 不超时（一直找）</pre>
           </div>
           <div class="help-block">
             <div class="hb-title">🔁 逻辑</div>
@@ -100,7 +102,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
 import { scriptsData, devicesData, store, useToast } from '../store'
 import { api } from '../api'
 
@@ -113,13 +115,15 @@ const valid = ref(null)
 const showHelp = ref(false)
 
 const DEFAULT_CODE = `name: 每日签到
+action_wait: 500
 
 steps:
   - wait: [300, 800]
-  - click: sign_btn.png
+  - find: sign_btn.png
     threshold: 0.85
-    region: a
-    log: "点击签到按钮"
+    click: true
+    then:
+      - log: "点击签到按钮"
     else:
       - log: "未找到签到按钮，重试"
       - goto: retry
@@ -128,7 +132,7 @@ steps:
       times: 3
       steps:
         - swipe:
-            from: [0.500, 0.800]
+            fm: [0.500, 0.800]
             to: [0.500, 0.200]
             time: 800
         - wait: [300, 900]
@@ -149,6 +153,42 @@ function newScript() {
   sel.value = { id: null, name: '新脚本.yml', content: DEFAULT_CODE, updated_at: '' }
   code.value = DEFAULT_CODE
   valid.value = null
+}
+
+/** 编辑区 Tab 键：插入 2 个空格（代替切换焦点）；多行选中时逐行缩进，Shift+Tab 行首退格 */
+function onEditorTab(e) {
+  const ta = e.target
+  const start = ta.selectionStart
+  const end = ta.selectionEnd
+  const v = code.value
+  if (start === end) {
+    const lineStart = v.lastIndexOf('\n', start - 1) + 1
+    const before = v.slice(lineStart, start)
+    if (e.shiftKey) {
+      // Shift+Tab：删除行首 1~2 个空格
+      const m = before.match(/^ {1,2}/)
+      if (m) {
+        code.value = v.slice(0, lineStart) + v.slice(lineStart + m[0].length)
+        nextTick(() => { ta.selectionStart = ta.selectionEnd = start - m[0].length })
+      }
+      return
+    }
+    code.value = v.slice(0, start) + '  ' + v.slice(end)
+    nextTick(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
+    return
+  }
+  const sel = v.slice(start, end)
+  if (sel.includes('\n')) {
+    // 多行选中：每行前插 2 空格
+    const lineStart = v.lastIndexOf('\n', start - 1) + 1
+    const indented = v.slice(lineStart, end).split('\n').map(l => '  ' + l).join('\n')
+    code.value = v.slice(0, lineStart) + indented + v.slice(end)
+    const newEnd = lineStart + indented.length
+    nextTick(() => { ta.selectionStart = lineStart; ta.selectionEnd = newEnd })
+  } else {
+    code.value = v.slice(0, start) + '  ' + v.slice(end)
+    nextTick(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
+  }
 }
 
 function validate() {
