@@ -162,14 +162,9 @@ impl DeviceManager {
         let (tx, _) = broadcast::channel::<VideoFrame>(128);
         // 音频广播（OPUS 帧 → WebRTC 音频轨）
         let (audio_tx, _) = broadcast::channel::<AudioFrame>(128);
+        // 帧缓存（帧环 + 按需解码，供截图/模板匹配与 WebRTC 初始重放）
         let frame_cache = if self.cfg.decode_frames {
-            match FrameCache::start(device.clone(), &self.cfg.ffmpeg_path) {
-                Ok(fc) => Some(fc),
-                Err(e) => {
-                    warn!(device = %device.name, "frame cache unavailable: {}", e);
-                    None
-                }
-            }
+            Some(FrameCache::start(&self.cfg.ffmpeg_path))
         } else {
             None
         };
@@ -315,10 +310,8 @@ impl DeviceManager {
         if let Some(s) = &rt.session {
             s.connected.store(false, std::sync::atomic::Ordering::SeqCst);
         }
-        // 停止帧缓存（退出专用线程、杀 ffmpeg），避免重连时线程/子进程泄漏
-        if let Some(fc) = &rt.frame_cache {
-            fc.stop();
-        }
+        // 停止帧缓存（释放引用）；按需解码无常驻线程/子进程，无需额外清理
+        rt.frame_cache = None;
         rt.session = None;
         rt.frames = None;
         rt.audio_frames = None;
@@ -369,7 +362,8 @@ impl DeviceManager {
         map.get(id)?.frame_cache.clone()
     }
 
-    /// 鎴浘锛圥NG锛夛細浼樺厛甯х紦瀛橈紝fallback adb screencap
+    /// 截图（PNG）：帧缓存按需解码（每次全新解码最新帧，天然实时），
+    /// 不可用/失败时回退 adb 虚拟屏截图，再失败直接报错（不静默回退物理屏）。
     pub async fn screenshot(&self, id: &str) -> anyhow::Result<Vec<u8>> {
         let (device, cache) = {
             let map = self.devices.read();
@@ -377,14 +371,19 @@ impl DeviceManager {
             (rt.device.clone(), rt.frame_cache.clone())
         };
         if let Some(fc) = cache {
-            if let Some(png) = fc.latest_png() {
-                debug!("screenshot from frame cache: {} bytes", png.len());
-                return Ok(png);
+            match fc.decode_latest_png().await {
+                Ok(Some(png)) => {
+                    debug!("screenshot decoded on demand: {} bytes", png.len());
+                    return Ok(png);
+                }
+                Ok(None) => debug!("frame cache: no decodable frames yet (waiting first IDR)"),
+                Err(e) => warn!("frame cache decode failed: {}", e),
             }
         }
         let serial = if device.addr.is_empty() { "usb".to_string() } else { device.addr.clone() };
         // 虚拟屏模式：优先截 scrcpy 虚拟屏；部分设备 adb screencap -d 不支持该虚拟屏，
-        // 会返回非图片错误文本，此时回退到物理屏截图，避免模板匹配拿到无效 PNG。
+        // 会返回非图片错误文本，此时**不再回退物理屏**——物理屏与虚拟屏内容/分辨率不同，
+        // 静默回退会让模板匹配拿到错误的画面（如主屏竖屏数据）。
         if device.screen_mode == ScreenMode::Virtual {
             if let Some(did) = self.virtual_display_id(&serial, device.vd_res.as_deref()).await {
                 match self.adb.screencap_display(&serial, did).await {
@@ -393,12 +392,13 @@ impl DeviceManager {
                         return Ok(png);
                     }
                     Ok(png) => warn!(
-                        "virtual display screencap returned invalid image ({} bytes), fallback to physical screencap",
+                        "virtual display screencap returned invalid image ({} bytes)",
                         png.len()
                     ),
-                    Err(e) => warn!("virtual display screencap failed: {}, fallback to physical screencap", e),
+                    Err(e) => warn!("virtual display screencap failed: {}", e),
                 }
             }
+            anyhow::bail!("虚拟屏截图失败：帧缓存解码无帧/失败且 adb 虚拟屏 screencap 失败");
         }
         let png = self.adb.screencap(&serial).await?;
         debug!("screenshot from adb screencap: {} bytes", png.len());
