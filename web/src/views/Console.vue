@@ -1,5 +1,5 @@
 <template>
-  <div class="console">
+  <div class="console" :class="{ 'sb-collapsed': sidebarCollapsed }">
     <!-- 左：画面区 -->
     <div class="stage">
       <!-- 顶部工具条 -->
@@ -305,6 +305,18 @@
             <template v-if="!crop.active">
               <div class="tpl-top">
                 <input v-model.number="testThreshold" class="input input-sm mono" type="number" min="0" max="1" step="0.01" placeholder="测试阈值 0~1" title="模板测试阈值，默认 0.8" />
+                <select v-model="testRegion" class="select mono tpl-region" title="模板匹配区域：默认=按模板名自动识别（名字带 #x1_y1_x2_y2 用对应矩形，带 #a/#u/#d/#l/#r/#ul/#ur/#dl/#dr 用对应半区，否则等价 a 全屏）；手动选择后，测试匹配与生成记录都使用该区域">
+                  <option value="">默认（自动识别）</option>
+                  <option value="a">a · 全屏</option>
+                  <option value="u">u · 上半屏</option>
+                  <option value="d">d · 下半屏</option>
+                  <option value="l">l · 左半屏</option>
+                  <option value="r">r · 右半屏</option>
+                  <option value="ul">ul · 左上</option>
+                  <option value="ur">ur · 右上</option>
+                  <option value="dl">dl · 左下</option>
+                  <option value="dr">dr · 右下</option>
+                </select>
                 <button class="btn btn-sm" :class="{ active: picking }" @click="togglePick" :disabled="!connected" title="在画面上框选区域保存为模板">✂️ 框选</button>
                 <button class="btn btn-sm" @click="$refs.tplUpload.click()" title="上传图片模板">⬆️ 上传</button>
                 <input ref="tplUpload" type="file" accept="image/png,image/jpeg" hidden @change="onTplUpload" />
@@ -316,13 +328,17 @@
                   <span class="tpl-cell ops">操作</span>
                 </div>
                 <div class="tpl-list">
-                  <div v-for="t in templates" :key="t.name" class="tpl-row" :class="{ 'del-confirm': confirmDelTpl === t.name }" @click="onTplRowClick($event, t)">
+                  <div v-for="t in templates" :key="t.name" class="tpl-row" :class="{ 'del-confirm': confirmDelTpl === t.name, renaming: renaming === t.name }" @click="onTplRowClick($event, t)">
                     <span class="tpl-cell thumb">
                       <span class="tpl-thumb"><img :src="tplThumbUrl(t.name)" alt="" loading="lazy" @error="e => e.target.style.visibility = 'hidden'" /></span>
                     </span>
-                    <span class="tpl-cell name mono" :title="t.name">{{ t.name }}</span>
+                    <span class="tpl-cell name mono" :title="t.name">
+                      <input v-if="renaming === t.name" :ref="el => renameInputEl = el" v-model="renameVal" class="input rename-input mono" @keydown.enter="confirmRename(t)" @keydown.esc="cancelRename" @blur="cancelRename" @click.stop />
+                      <template v-else>{{ t.name }}</template>
+                    </span>
                     <span class="tpl-cell ops">
-                      <button class="btn btn-sm" @click.stop="openTplView(t.name)">查看</button>
+                      <button v-if="renaming === t.name" class="btn btn-sm btn-primary" @mousedown.prevent @click.stop="confirmRename(t)">确认</button>
+                      <button v-else class="btn btn-sm" @click.stop="startRename(t)">重命名</button>
                       <button class="btn btn-sm" :class="{ 'tpl-del-confirm': confirmDelTpl === t.name }" @click.stop="onTplDeleteClick(t)">{{ confirmDelTpl === t.name ? '确认' : '删除' }}</button>
                       <button class="btn btn-sm" @click.stop="onTplMatchClick(t)">匹配</button>
                     </span>
@@ -331,7 +347,7 @@
                 </div>
               </div>
               <div class="tpl-tools">
-                <span class="ps-sub">{{ scriptMode === 'edit' ? '点击模板 → 测试匹配 / Alt 或 alt 模式 → 生成记录' : '点击模板 → 在当前画面测试匹配' }}</span>
+                <span class="ps-sub">点击 → 查看大图（编辑模式 Alt / alt 模式点击直接生成 find 记录）· 匹配 → 测试匹配 · 重命名 → 修改模板名</span>
               </div>
             </template>
 
@@ -339,12 +355,12 @@
             <div v-else class="crop-panel crop-panel-full" ref="cropSec">
               <div class="ps-head">
                 <span class="ps-title">✂️ 二次裁切</span>
-                <span class="ps-sub mono">{{ cropSize }}</span>
+                <span class="ps-sub mono">{{ cropSize }} · {{ cropZoomPct }}</span>
               </div>
               <div class="crop-stage">
-                <canvas ref="cropCanvas" class="crop-canvas" @mousedown="cropMouseDown" @mousemove="cropMouseMove" @mouseup="cropMouseUp" @mouseleave="cropMouseLeave"></canvas>
-                <div class="crop-hint">拖动边框/角调整选框（只动遮罩框）· 拖框内移动位置</div>
+                <canvas ref="cropCanvas" class="crop-canvas" @mousedown="cropMouseDown" @mousemove="cropMouseMove" @mouseup="cropMouseUp" @mouseleave="cropMouseLeave" @wheel="cropWheel"></canvas>
               </div>
+              <div class="crop-hint">滚轮缩放（50%~800%）· 拖动边框/角调整选框（只动遮罩框）· 拖框内移动位置</div>
               <input v-model="crop.name" class="input mono" placeholder="模板名称（默认自动生成）" @keydown.enter="saveTemplate" />
               <div class="crop-actions">
                 <button class="btn btn-sm" @click="cancelCrop">取消</button>
@@ -357,8 +373,12 @@
             <div v-if="viewTpl" class="tpl-view-mask" @click.self="closeTplView">
               <div class="tpl-view-modal">
                 <button class="tpl-view-close" @click="closeTplView" title="关闭">✕</button>
-                <img :src="tplThumbUrl(viewTpl)" alt="模板预览" />
+                <div class="tpl-view-img">
+                  <img :src="tplThumbUrl(viewTpl)" alt="模板预览" @mousemove="onTplViewMove" @mouseleave="tplViewPos.show = false" @click="onTplViewClick" />
+                  <div v-if="tplViewPos.show" class="tpl-view-pos mono" :style="{ left: tplViewPos.x + 'px', top: tplViewPos.y + 'px' }">{{ tplViewPos.text }}</div>
+                </div>
                 <div class="tpl-view-name mono">{{ viewTpl }}</div>
+                <div v-if="scriptMode === 'edit'" class="tpl-view-tip">编辑模式：点击图片任意位置 → 追加 find + click 相对坐标记录</div>
               </div>
             </div>
           </div>
@@ -397,12 +417,7 @@
             <div class="edit-actions">
               <button class="btn btn-primary" :disabled="scriptSaving" @click="saveEditScript">{{ scriptSaving ? '保存中…' : '💾 保存' }}</button>
               <button class="btn" @click="cancelEditScript">取消</button>
-              <button class="btn" :class="{ active: altMode }" @click="toggleAltMode" title="开启后点击模板/投屏只生成操作记录，不发送控制指令">⌥ alt 模式</button>
-            </div>
-            <div class="edit-interval">
-              <span>操作间隔</span>
-              <input v-model.number="stepInterval" class="input input-sm mono" type="number" min="0" step="50" title="每个操作后自动追加 wait 的毫秒数" />
-              <span>ms</span>
+              <button class="btn" :class="{ active: altMode }" @click="toggleAltMode" title="开启后投屏点击/滑动只生成操作记录，不发送控制指令">⌥ alt 模式</button>
             </div>
             <div class="op-record">
               <div v-if="!opRecords.length" class="op-record-empty">请在alt模式下进行操作生成记录</div>
@@ -410,7 +425,7 @@
                 {{ r.text }}
               </div>
             </div>
-            <textarea v-model="editScriptCode" class="script-editor mono" spellcheck="false" placeholder="# YAML 脚本&#10;name: 脚本名&#10;&#10;steps:&#10;  - log: hello"></textarea>
+            <textarea ref="scriptEditor" v-model="editScriptCode" class="script-editor mono" spellcheck="false" placeholder="# YAML 脚本&#10;name: 脚本名&#10;action_wait: 500&#10;&#10;steps:&#10;  - find: 模板名.png&#10;    click: true" @keydown.tab.prevent="onEditorTab"></textarea>
           </div>
         </div>
       </div>
@@ -425,7 +440,7 @@ const APP_CACHE_TTL = 5 * 60 * 1000
 </script>
 
 <script setup>
-import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, inject } from 'vue'
 import { load as yamlLoad } from 'js-yaml'
 import { useRouter } from 'vue-router'
 import { store, devicesData, scriptsData, templatesData, useToast } from '../store'
@@ -433,6 +448,9 @@ import { api } from '../api'
 
 const router = useRouter()
 const toast = useToast()
+
+// 侧边栏收起状态（MainLayout provide）：收起时释放的宽度让给右侧操作区，投屏区保持不变
+const sidebarCollapsed = inject('sidebarCollapsed', ref(false))
 
 const videoWrap = ref(null)
 const videoElement = ref(null)
@@ -447,6 +465,7 @@ const bitrate = ref('—')
 const selScript = ref('')
 // 脚本页签：运行/编辑模式 + 日志级别
 const DEFAULT_SCRIPT_CODE = `name: 新脚本
+action_wait: 500
 
 steps:
   - wait: 1000
@@ -456,18 +475,54 @@ const scriptMode = ref('run')
 const logLevel = ref('info')
 const editScriptName = ref('新脚本')
 const editScriptCode = ref(DEFAULT_SCRIPT_CODE)
+// 编辑区 textarea：追加操作记录时读取光标位置
+const scriptEditor = ref(null)
 // 编辑模式当前编辑的脚本 id（null=新建）
 const editScriptId = ref(null)
 const scriptSaving = ref(false)
-// 每个操作后自动追加的默认间隔（可配置）
-const stepInterval = ref(200)
+// 操作记录 YAML 模板：alt 模式把操作追加到编辑区时使用的格式。
+// 由服务端 config.toml 的 [op_templates] 配置，前端启动时拉取；失败时用内置默认。
+// 占位符：{name} 模板名 · {region} 区域块(region: a 或 region: {fm,to}) · {x}/{y} 点击坐标
+//         {fx}/{fy}/{tx}/{ty} 滑动起终点 · {time} 滑动实际时长 ms · {cx}/{cy} 模板图内相对百分比坐标
+// 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制
+const DEFAULT_OP_TPL = {
+  find: '- find: {name}\n  threshold: 0.8\n  {region}\n  click: true\n  then:\n    - log: "点击成功"\n  else:\n    - log: "点击失败"',
+  find_wait: '- find: {name}\n  timeout: 0\n  threshold: 0.8\n  {region}\n  click: true',
+  find_click_pos: '- find: {name}\n  {region}\n  click: [{cx}, {cy}]',
+  tap: '- tap: [{x}, {y}]',
+  swipe: '- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}',
+  swipe_region: 'region:\n  fm: [{fx}, {fy}]\n  to: [{tx}, {ty}]'
+}
+const opTpls = reactive({ ...DEFAULT_OP_TPL })
+api.getOpTemplates().then(t => {
+  if (!t || typeof t !== 'object') return
+  for (const k of Object.keys(DEFAULT_OP_TPL)) {
+    if (typeof t[k] === 'string' && t[k].trim()) opTpls[k] = t[k]
+  }
+}).catch(e => {
+  console.warn('op-templates 拉取失败，使用内置默认模板（服务端未重启或接口缺失）', e)
+})
+/** 用变量渲染操作记录模板；未提供的占位符保留原样。
+ *  多行值（如 {region} 的 fm/to 续行）缩进跟随占位符所在行 +2（吞掉值自带的续行缩进），保证嵌套层级正确 */
+function renderOpTpl(tpl, vars) {
+  let out = tpl || ''
+  for (const [k, v] of Object.entries(vars)) {
+    const val = v ?? ''
+    out = out.split('\n').map(line => {
+      if (!line.includes('{' + k + '}')) return line
+      const indent = (line.match(/^(\s*)/) || ['', ''])[1]
+      return line.split('{' + k + '}').join(val.replace(/\n\s*/g, '\n' + indent + '  '))
+    }).join('\n')
+  }
+  return out.replace(/\n{3,}/g, '\n\n').trim()
+}
 // alt 模式：仅在脚本编辑模式生效；开启后模板/投屏点击只生成操作记录
 const altMode = ref(false)
 // 操作记录区：最多展示 3 行，每行可点击追加到编辑区
 const opRecords = ref([])
 let opRecordSeq = 0
 // alt 手势（点击/滑动投屏时记录，不发送控制指令）
-const altGesture = reactive({ active: false, moved: false, start: { x: 0, y: 0 }, last: { x: 0, y: 0 } })
+const altGesture = reactive({ active: false, moved: false, start: { x: 0, y: 0 }, last: { x: 0, y: 0 }, startT: 0 })
 // alt 模式点击/滑动画面反馈（点击圆点 / 滑动 region 框）
 const altFeedback = reactive({ show: false, kind: '', x: 0, y: 0, w: 0, h: 0 })
 let altFeedbackTimer = null
@@ -477,9 +532,14 @@ let rawLogs = []
 let runStartTime = 0
 const picking = ref(false)
 const testThreshold = ref(0.8)
-// 模板列表：查看大图 / 删除二次确认
+// 模板匹配区域：'' = 默认（按模板名自动识别），否则 a/u/d/l/r/ul/ur/dl/dr（测试匹配与生成记录共用）
+const testRegion = ref('')
+// 模板列表：查看大图 / 删除二次确认 / 重命名
 const viewTpl = ref(null)
 const confirmDelTpl = ref(null)
+const renaming = ref(null)   // 正在重命名的模板名（null=不在重命名）
+const renameVal = ref('')    // 重命名输入框内容
+let renameInputEl = null     // 重命名输入框元素（自动聚焦/全选）
 const selecting = ref(false)
 const selStart = reactive({ x: 0, y: 0 })
 const selEnd = reactive({ x: 0, y: 0 })
@@ -490,7 +550,7 @@ let hitTimer = null
 const liveLogs = ref([])
 const logBox = ref(null)
 // 二次裁切（右侧面板）
-const crop = reactive({ active: false, imgW: 0, imgH: 0, baseW: 0, baseH: 0, originX: 0, originY: 0, rect: { x: 0, y: 0, w: 0, h: 0 }, preview: '', name: '' })
+const crop = reactive({ active: false, imgW: 0, imgH: 0, baseW: 0, baseH: 0, originX: 0, originY: 0, rect: { x: 0, y: 0, w: 0, h: 0 }, preview: '', name: '', zoom: 1 })
 const cropCanvas = ref(null)
 const cropSec = ref(null)
 // 二次裁切底图：框选时冻结的初始画面，拖动时只动遮罩框
@@ -1396,6 +1456,7 @@ function onMouseDown(e) {
     altGesture.moved = false
     altGesture.start = { x, y }
     altGesture.last = { x, y }
+    altGesture.startT = Date.now()
     // 先显示点击位置，滑动时再切换成 region 框
     if (altFeedbackTimer) clearTimeout(altFeedbackTimer)
     altFeedback.show = true
@@ -1472,8 +1533,9 @@ function onMouseUp(e) {
     const { x, y } = toDeviceCoord(e.clientX, e.clientY)
     const start = altGesture.start
     const moved = altGesture.moved || Math.hypot(x - start.x, y - start.y) > 8
+    const dur = Math.max(50, Date.now() - altGesture.startT)
     altGesture.active = false
-    if (moved) setSwipeRecords(start, { x, y })
+    if (moved) setSwipeRecords(start, { x, y }, dur)
     else setTapRecord({ x, y })
     return
   }
@@ -1524,21 +1586,24 @@ function randomTplBase() {
   return 'tpl_' + Math.random().toString(36).slice(2, 8)
 }
 
-/** 生成默认模板名：随机名字#x1_y1_x2_y2（相对坐标 0~1，去掉小数点、固定 4 位，不带 .png 后缀） */
+/** 生成默认模板名：随机名字#x1_y1_x2_y2（相对坐标 0~1，×1000 存 3 位整数，如 0.123→123，不带 .png 后缀） */
 function defaultTplName(rect) {
   const vw = videoElement.value?.videoWidth || 1920
   const vh = videoElement.value?.videoHeight || 1080
-  const toFixed4 = v => String(Math.round(v * 10000)).padStart(4, '0')
-  const x1 = toFixed4(rect.x / vw)
-  const y1 = toFixed4(rect.y / vh)
-  const x2 = toFixed4((rect.x + rect.w) / vw)
-  const y2 = toFixed4((rect.y + rect.h) / vh)
+  // ×1000 取整，3 位定宽补零；1.0 边缘收敛到 999，避免出现 4 位数与旧格式混淆
+  const toInt3 = v => String(Math.min(999, Math.round(v * 1000))).padStart(3, '0')
+  const x1 = toInt3(rect.x / vw)
+  const y1 = toInt3(rect.y / vh)
+  const x2 = toInt3((rect.x + rect.w) / vw)
+  const y2 = toInt3((rect.y + rect.h) / vh)
   return `${randomTplBase()}#${x1}_${y1}_${x2}_${y2}`
 }
 
 // ---------- 二次裁切 ----------
 
 const cropSize = computed(() => `${Math.round(crop.rect.w)}×${Math.round(crop.rect.h)} px`)
+/** 当前显示缩放（100% = 自适应适配），滚轮调整 */
+const cropZoomPct = computed(() => `${Math.round(crop.zoom * 100)}%`)
 
 /** 框选完成后打开右侧裁切区 */
 function openCrop(rect) {
@@ -1551,6 +1616,7 @@ function openCrop(rect) {
   crop.originY = Math.round(rect.y)
   crop.baseW = Math.round(rect.w)
   crop.baseH = Math.round(rect.h)
+  crop.zoom = 1
   // 冻结初始框选画面，二次裁切时底图不动，只动遮罩框
   cropBaseCanvas = document.createElement('canvas')
   cropBaseCanvas.width = crop.baseW
@@ -1570,22 +1636,54 @@ function openCrop(rect) {
 function cancelCrop() {
   crop.active = false
   cropBaseCanvas = null
+  crop.zoom = 1
   hideLoupe()
 }
 
 function repick() {
   crop.active = false
   cropBaseCanvas = null
+  crop.zoom = 1
   picking.value = true
   toast('在画面上重新框选', 'info')
 }
 
-/** 画布适配尺寸：展示冻结的初始框选画面，可适当放大 */
+/** 画布适配尺寸：展示冻结的初始框选画面，可适当放大（再乘滚轮缩放 crop.zoom） */
 function cropFit() {
   const w = Math.max(1, crop.baseW)
   const h = Math.max(1, crop.baseH)
-  const scale = Math.min(260 / w, 220 / h, 3)
+  const scale = Math.min(260 / w, 220 / h, 3) * crop.zoom
   return { w: Math.max(1, Math.round(w * scale)), h: Math.max(1, Math.round(h * scale)), scale: Math.round(w * scale) / w }
+}
+
+/** 滚轮缩放裁切底图：以光标下的图像点为锚点放大/缩小，缩放后画布超出区域可滚动查看 */
+function cropWheel(e) {
+  const canvas = cropCanvas.value
+  const stage = cropSec.value?.querySelector('.crop-stage')
+  if (!canvas || !stage) return
+  e.preventDefault()
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
+  const next = Math.max(0.5, Math.min(8, crop.zoom * factor))
+  if (next === crop.zoom) return
+  const cr = canvas.getBoundingClientRect()
+  const sr = stage.getBoundingClientRect()
+  // 光标在画布内的位置（画布 CSS 像素 = 画布像素）
+  const mx = e.clientX - cr.left
+  const my = e.clientY - cr.top
+  // 画布原点在滚动内容中的位置
+  const ox = cr.left - sr.left + stage.scrollLeft
+  const oy = cr.top - sr.top + stage.scrollTop
+  const oldW = canvas.width
+  const oldH = canvas.height
+  crop.zoom = next
+  renderCropFrame()
+  const kx = canvas.width / oldW
+  const ky = canvas.height / oldH
+  // 保持光标下的图像点不动：margin:auto 居中时原点 = max(0, (区域宽 - 画布宽)/2)
+  const ox1 = Math.max(0, (stage.clientWidth - canvas.width) / 2)
+  const oy1 = Math.max(0, (stage.clientHeight - canvas.height) / 2)
+  stage.scrollLeft += ox1 + mx * kx - ox - mx
+  stage.scrollTop += oy1 + my * ky - oy - my
 }
 
 /** 在裁切画布上绘制冻结的框选画面 + 可拖动的遮罩框（拖动时只改框，不动底图） */
@@ -1857,6 +1955,19 @@ function openScripts() { router.push('/scripts') }
 
 function tplThumbUrl(name) { return `/api/templates/${encodeURIComponent(name)}/image` }
 
+/** 模板列表：行点击 → 查看大图；
+ *  编辑模式下按住 Alt 或 alt 模式开启 → 直接生成 find 记录（含 region）追加到编辑区 */
+function onTplRowClick(e, t) {
+  confirmDelTpl.value = null
+  if (isAltAction(e)) {
+    const yaml = renderOpTpl(opTpls.find, { name: t.name, region: templateRegionValue(t.name) })
+    appendYamlToScript(yaml)
+    toast(`已追加：find ${t.name}`, 'success')
+    return
+  }
+  viewTpl.value = t.name
+}
+
 /** 模板列表：查看大图 */
 function openTplView(name) {
   confirmDelTpl.value = null
@@ -1864,15 +1975,83 @@ function openTplView(name) {
 }
 function closeTplView() {
   viewTpl.value = null
+  tplViewPos.show = false
 }
 
-/** 模板列表：点击行（非按钮区域）→ 原模板点击行为（alt 模式生成记录 / 否则测试匹配） */
-function onTplRowClick(e, t) {
+// 模板查看：悬停实时显示基于模板的相对百分比坐标（供 find 的 click 参数用）
+const tplViewPos = reactive({ show: false, x: 0, y: 0, text: '' })
+
+/** 鼠标相对模板图的位置：返回 0~1 百分比坐标 + 相对 img 的偏移 */
+function tplViewRel(e) {
+  const img = e.currentTarget
+  const r = img.getBoundingClientRect()
+  if (r.width < 1 || r.height < 1) return null
+  return {
+    x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
+    y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
+    left: e.clientX - r.left,
+    top: e.clientY - r.top
+  }
+}
+
+function onTplViewMove(e) {
+  const p = tplViewRel(e)
+  if (!p) return
+  tplViewPos.x = p.left
+  tplViewPos.y = p.top
+  tplViewPos.text = `(${p.x.toFixed(3)}, ${p.y.toFixed(3)})`
+  tplViewPos.show = true
+}
+
+/** 编辑模式点击模板图 → 生成 find + click 相对坐标记录并追加到编辑区 */
+function onTplViewClick(e) {
+  if (scriptMode.value !== 'edit') return
+  const p = tplViewRel(e)
+  if (!p || !viewTpl.value) return
+  const cx = p.x.toFixed(3)
+  const cy = p.y.toFixed(3)
+  const yaml = renderOpTpl(opTpls.find_click_pos, { name: viewTpl.value, region: templateRegionValue(viewTpl.value), cx, cy })
+  appendYamlToScript(yaml)
+  toast(`已追加：find ${viewTpl.value} → click [${cx}, ${cy}]`, 'success')
+}
+
+// ---------- 模板重命名 ----------
+
+/** 重命名输入框初始值：去掉图片后缀 */
+function renameBase(name) {
+  return name.replace(/\.(png|jpe?g)$/i, '')
+}
+
+function startRename(t) {
   confirmDelTpl.value = null
-  onTemplateChipClick(e, t.name)
+  renaming.value = t.name
+  renameVal.value = renameBase(t.name)
+  nextTick(() => renameInputEl?.select())
 }
 
-/** 模板列表：匹配按钮（原测试匹配） */
+/** 输入框失焦 / Esc → 取消重命名（不保存） */
+function cancelRename() {
+  renaming.value = null
+}
+
+/** 确认重命名：名称去空格、自动补 .png 后缀、重名校验，成功后刷新列表 */
+async function confirmRename(t) {
+  const raw = renameVal.value.trim()
+  if (!raw) return toast('名称不能为空', 'warn')
+  const newName = /\.(png|jpe?g)$/i.test(raw) ? raw : raw + '.png'
+  renaming.value = null
+  if (newName === t.name) return
+  if (templatesData.value.some(x => x.name === newName)) return toast(`已存在同名模板：${newName}`, 'warn')
+  try {
+    await api.renameTemplate(t.name, newName)
+    templatesData.value = await api.listTemplates()
+    toast(`模板已重命名为 ${newName}`, 'success')
+  } catch (e) {
+    toast('重命名失败：' + e.message, 'error')
+  }
+}
+
+/** 模板列表：匹配按钮（测试匹配） */
 function onTplMatchClick(t) {
   confirmDelTpl.value = null
   testMatch(t.name)
@@ -1960,107 +2139,93 @@ function isAltAction(e) {
   return scriptMode.value === 'edit' && (altMode.value || (e && e.altKey))
 }
 
-/** 模板点击：编辑模式下按 Alt 或 alt 模式开启时生成 find/click/until 三行记录 */
-function onTemplateChipClick(e, name) {
-  if (isAltAction(e)) {
-    opRecords.value = [
-      { id: ++opRecordSeq, text: `- find: ${name}`, yaml: buildFindYaml(name) },
-      { id: ++opRecordSeq, text: `- click: ${name}`, yaml: buildClickYaml(name) },
-      { id: ++opRecordSeq, text: `- until: ${name}`, yaml: buildUntilYaml(name) }
-    ]
-    return
-  }
-  testMatch(name)
-}
-
-/** 从模板名解析 #x1_y1_x2_y2（只认新格式 0125_0481_0469_1222，÷10000 还原），返回 [x1,y1,x2,y2] 或 null */
+/** 从模板名解析 #x1_y1_x2_y2（相对坐标 ×1000 存 3 位整数，如 123→0.123），返回 [x1,y1,x2,y2] 或 null */
 function parseTplRegion(name) {
   const base = name.replace(/\.(png|jpe?g)$/i, '')
   const idx = base.lastIndexOf('#')
   if (idx < 0) return null
   const parts = base.slice(idx + 1).split('_')
   if (parts.length !== 4) return null
-  const nums = parts.map(s => /^\d{4,5}$/.test(s) ? Number(s) / 10000 : NaN)
+  const nums = parts.map(s => /^\d{1,3}$/.test(s) ? Number(s) / 1000 : NaN)
   if (!nums.every(n => Number.isFinite(n) && n >= 0 && n <= 1) || !(nums[2] > nums[0]) || !(nums[3] > nums[1])) return null
   return nums
 }
 
-/** 从模板名解析 #x1_y1_x2_y2，返回带缩进的 region 行；无匹配时回退 region: a */
-function templateRegionLine(name) {
-  const nums = parseTplRegion(name)
-  if (nums) return `  region: [${nums.map(n => String(n)).join(', ')}]`
-  return '  region: a'
+/** 从模板名解析半区代码后缀（#a/#u/#d/#l/#r/#ul/#ur/#dl/#dr），如 task_item#l.png → 'l'；无 → null */
+function parseTplRegionCode(name) {
+  const base = name.replace(/\.(png|jpe?g)$/i, '')
+  const idx = base.lastIndexOf('#')
+  if (idx < 0) return null
+  const code = base.slice(idx + 1).toLowerCase()
+  return ['a', 'u', 'd', 'l', 'r', 'ul', 'ur', 'dl', 'dr'].includes(code) ? code : null
 }
 
-/** 从模板名解析 #x1_y1_x2_y2 并转为设备像素搜索区域 [x, y, w, h]；无匹配时返回 null */
+/** 生成记录的 region 块：下拉框手动选择时优先（region: a/u/...），
+ *  否则按模板名自动识别（#x1_y1_x2_y2 → region: {fm,to}；#l/#r/... → region: 对应半区；无 → region: a） */
+function templateRegionValue(name) {
+  if (testRegion.value) return 'region: ' + testRegion.value
+  const nums = parseTplRegion(name)
+  if (nums) {
+    const [x1, y1, x2, y2] = nums.map(n => n.toFixed(3))
+    return `region:\n  fm: [${x1}, ${y1}]\n  to: [${x2}, ${y2}]`
+  }
+  const code = parseTplRegionCode(name)
+  if (code) return 'region: ' + code
+  return 'region: a'
+}
+
+/** 模板名半区代码 → 设备像素搜索区域 [x, y, w, h] */
+function regionCodePixels(code, vw, vh) {
+  const hw = Math.round(vw / 2)
+  const hh = Math.round(vh / 2)
+  const map = {
+    a: null,
+    u: [0, 0, vw, hh],
+    d: [0, vh - hh, vw, hh],
+    l: [0, 0, hw, vh],
+    r: [vw - hw, 0, hw, vh],
+    ul: [0, 0, hw, hh],
+    ur: [vw - hw, 0, hw, hh],
+    dl: [0, vh - hh, hw, hh],
+    dr: [vw - hw, vh - hh, hw, hh]
+  }
+  return map[code] ?? null
+}
+
+/** 测试匹配的搜索区域：下拉框手动选择优先，否则按模板名自动识别
+ *  （#x1_y1_x2_y2 → 对应矩形区域；#l/#r/... → 对应半区；无 → 全屏） */
 function templateRegionPixels(name) {
+  // 实际视频尺寸优先：虚拟屏分辨率/方向会被游戏改变，设备配置里的 width/height 可能过期
+  const vw = videoElement.value?.videoWidth || current.value?.width || 1920
+  const vh = videoElement.value?.videoHeight || current.value?.height || 1080
+  if (testRegion.value) return regionCodePixels(testRegion.value, vw, vh)
   const nums = parseTplRegion(name)
-  if (!nums) return null
-  const vw = current.value?.width || videoElement.value?.videoWidth || 1920
-  const vh = current.value?.height || videoElement.value?.videoHeight || 1080
-  const x = Math.round(nums[0] * vw)
-  const y = Math.round(nums[1] * vh)
-  const w = Math.round((nums[2] - nums[0]) * vw)
-  const h = Math.round((nums[3] - nums[1]) * vh)
-  return [x, y, w, h]
+  if (nums) {
+    const x = Math.round(nums[0] * vw)
+    const y = Math.round(nums[1] * vh)
+    const w = Math.round((nums[2] - nums[0]) * vw)
+    const h = Math.round((nums[3] - nums[1]) * vh)
+    return [x, y, w, h]
+  }
+  const code = parseTplRegionCode(name)
+  if (code) return regionCodePixels(code, vw, vh)
+  return null
 }
 
-/** 当前配置的操作间隔 wait 片段（<=0 时为空） */
-function intervalWaitYaml() {
-  const ms = Number(stepInterval.value) || 0
-  return ms > 0 ? `- wait: ${ms}` : ''
-}
-
-function buildFindYaml(name) {
-  return [
-    `- find: ${name}`,
-    '  threshold: 0.8',
-    templateRegionLine(name),
-    '  then:',
-    '    - tap: [0.500, 0.500]',
-    '  else:',
-    '    - log: "未找到"',
-    intervalWaitYaml()
-  ].filter(Boolean).join('\n')
-}
-
-function buildClickYaml(name) {
-  return [
-    `- click: ${name}`,
-    '  threshold: 0.8',
-    templateRegionLine(name),
-    '  log: "点击成功"',
-    '  else:',
-    '    - log: "点击失败"',
-    intervalWaitYaml()
-  ].filter(Boolean).join('\n')
-}
-
-function buildUntilYaml(name) {
-  return [
-    `- until: ${name}`,
-    '  timeout: 0',
-    '  threshold: 0.8',
-    templateRegionLine(name),
-    '  else:',
-    '    - log: "等待超时"',
-    intervalWaitYaml()
-  ].filter(Boolean).join('\n')
-}
-
-/** 把生成的 YAML 片段以 2 空格缩进追加到脚本的 steps 列表里 */
+/** 把生成的 YAML 片段以 2 空格缩进插入到脚本：光标在 steps 列表内 → 光标所在行的下一行；
+ *  光标在 steps 之外（或从未点过编辑区）→ 追加到 steps 列表末尾。插入后光标移到新记录之后，方便连续追加 */
 function appendYamlToScript(snippet) {
   const lines = editScriptCode.value.split('\n')
   const indented = snippet.split('\n').map(l => (l ? '  ' + l : l)).join('\n')
   const stepsIdx = lines.findIndex(l => /^steps\s*:/.test(l))
-  // 没有 steps 时补一个最小可运行脚本结构
+  // 没有 steps 时补一个最小可运行脚本结构（顶层 action_wait 控制操作后等待）
   if (stepsIdx === -1) {
     const base = editScriptCode.value.trim()
-    const block = `name: 新脚本\n\nsteps:\n${indented}`
+    const block = `name: 新脚本\naction_wait: 500\n\nsteps:\n${indented}`
     editScriptCode.value = base ? base + '\n\n' + block : block
     return
   }
-  // 找到 steps 列表的结束位置：下一个非空且不缩进的根级键之前
+  // 默认插入点：steps 列表末尾（下一个非空且不缩进的根级键之前）
   let insertIdx = lines.length
   for (let i = stepsIdx + 1; i < lines.length; i++) {
     const line = lines[i]
@@ -2069,11 +2234,28 @@ function appendYamlToScript(snippet) {
       break
     }
   }
+  // 光标在 steps 列表内部（缩进行/空行/注释行）→ 插到光标所在行的下一行
+  const ta = scriptEditor.value
+  if (ta && typeof ta.selectionStart === 'number') {
+    const lineIdx = editScriptCode.value.slice(0, ta.selectionStart).split('\n').length - 1
+    const cur = lines[lineIdx] || ''
+    if (lineIdx > stepsIdx && (!cur.trim() || /^\s/.test(cur) || /^\s*#/.test(cur))) {
+      insertIdx = lineIdx + 1
+    }
+  }
   const before = lines.slice(0, insertIdx)
   const after = lines.slice(insertIdx)
   while (before.length && before[before.length - 1].trim() === '') before.pop()
-  const text = before.join('\n') + (before.length ? '\n' : '') + indented + '\n' + after.join('\n')
-  editScriptCode.value = text.replace(/\n{3,}/g, '\n\n')
+  while (after.length && after[0].trim() === '') after.shift()
+  const text = before.join('\n') + (before.length ? '\n' : '') + indented + (after.length ? '\n' + after.join('\n') : '')
+  editScriptCode.value = text
+  // 光标移到插入的记录之后，连续追加时依次往下排
+  nextTick(() => {
+    const ta2 = scriptEditor.value
+    if (!ta2) return
+    const pos = (before.join('\n').length + (before.length ? 1 : 0)) + indented.length
+    ta2.selectionStart = ta2.selectionEnd = pos
+  })
 }
 
 /** 点击操作记录行：把对应的 YAML 追加到编辑区 */
@@ -2081,6 +2263,43 @@ function applyOpRecord(r) {
   if (scriptMode.value !== 'edit') return
   appendYamlToScript(r.yaml)
   toast('已追加：' + r.text, 'success')
+}
+
+/** 编辑区 Tab 键：插入 2 个空格（代替切换焦点）；多行选中时逐行缩进，Shift+Tab 行首退格 */
+function onEditorTab(e) {
+  const ta = e.target
+  const start = ta.selectionStart
+  const end = ta.selectionEnd
+  const v = editScriptCode.value
+  if (start === end) {
+    const lineStart = v.lastIndexOf('\n', start - 1) + 1
+    const before = v.slice(lineStart, start)
+    if (e.shiftKey) {
+      // Shift+Tab：删除行首 1~2 个空格
+      const m = before.match(/^ {1,2}/)
+      if (m) {
+        editScriptCode.value = v.slice(0, lineStart) + v.slice(lineStart + m[0].length)
+        nextTick(() => { ta.selectionStart = ta.selectionEnd = start - m[0].length })
+      }
+      return
+    }
+    editScriptCode.value = v.slice(0, start) + '  ' + v.slice(end)
+    nextTick(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
+    return
+  }
+  const sel = v.slice(start, end)
+  if (sel.includes('\n')) {
+    // 多行选中：每行前插 2 空格
+    const lineStart = v.lastIndexOf('\n', start - 1) + 1
+    const indented = v.slice(lineStart, end).split('\n').map(l => '  ' + l).join('\n')
+    editScriptCode.value = v.slice(0, lineStart) + indented + v.slice(end)
+    const newEnd = lineStart + indented.length
+    nextTick(() => { ta.selectionStart = lineStart; ta.selectionEnd = newEnd })
+  } else {
+    // 单点插入：光标处插 2 空格
+    editScriptCode.value = v.slice(0, start) + '  ' + v.slice(end)
+    nextTick(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
+  }
 }
 
 /** 显示 alt 模式画面反馈（2 秒后自动消失） */
@@ -2101,42 +2320,33 @@ function setTapRecord(p) {
   const vh = videoElement.value?.videoHeight || 1080
   const rx = (p.x / vw).toFixed(4)
   const ry = (p.y / vh).toFixed(4)
-  const records = [
-    { id: ++opRecordSeq, text: `- tap [${rx}, ${ry}]`, yaml: `- tap: [${rx}, ${ry}]` }
+  opRecords.value = [
+    { id: ++opRecordSeq, text: `- tap [${rx}, ${ry}]`, yaml: renderOpTpl(opTpls.tap, { x: rx, y: ry }) }
   ]
-  const wait = intervalWaitYaml()
-  if (wait) records.push({ id: ++opRecordSeq, text: `- wait ${stepInterval.value}ms`, yaml: wait })
-  opRecords.value = records
   showAltFeedback('tap', p.x, p.y)
 }
 
-/** 投屏滑动 → 生成 swipe + region + wait 记录 */
-function setSwipeRecords(from, to) {
+/** 投屏滑动 → 生成 swipe + region 记录（time 用实际滑动时长） */
+function setSwipeRecords(from, to, durationMs) {
   const vw = videoElement.value?.videoWidth || 1920
   const vh = videoElement.value?.videoHeight || 1080
   const fx = (from.x / vw).toFixed(4)
   const fy = (from.y / vh).toFixed(4)
   const tx = (to.x / vw).toFixed(4)
   const ty = (to.y / vh).toFixed(4)
+  const dur = Math.max(1, Math.round(durationMs || 1000))
   opRecords.value = [
     {
       id: ++opRecordSeq,
-      text: `- swipe [${fx}, ${fy}] -> [${tx}, ${ty}] 1000ms`,
-      yaml: [
-        '- swipe:',
-        `    from: [${fx}, ${fy}]`,
-        `    to: [${tx}, ${ty}]`,
-        '    time: 1000'
-      ].join('\n')
+      text: `- swipe [${fx}, ${fy}] -> [${tx}, ${ty}] ${dur}ms`,
+      yaml: renderOpTpl(opTpls.swipe, { fx, fy, tx, ty, time: String(dur) })
     },
     {
       id: ++opRecordSeq,
       text: `  region [${fx}, ${fy}, ${tx}, ${ty}]`,
-      yaml: `  region: [${fx}, ${fy}, ${tx}, ${ty}]`
+      yaml: renderOpTpl(opTpls.swipe_region, { fx, fy, tx, ty })
     }
   ]
-  const wait = intervalWaitYaml()
-  if (wait) opRecords.value.push({ id: ++opRecordSeq, text: `- wait ${stepInterval.value}ms`, yaml: wait })
   const rx = Math.min(from.x, to.x)
   const ry = Math.min(from.y, to.y)
   const rw = Math.abs(to.x - from.x)
@@ -2191,6 +2401,13 @@ function validateScriptCode(content) {
   try {
     doc = yamlLoad(content)
   } catch (e) {
+    // 常见笔误提示：`region:l` / `timeout:0` 冒号后缺空格
+    const lines = content.split('\n')
+    const bad = lines.map((l, i) => ({ l, i })).find(({ l }) => /^\s*-?\s*[\w\u4e00-\u9fa5-]+:(?!\s|$)/.test(l))
+    if (bad) {
+      const line = bad.l.trim()
+      return [`YAML 语法错误（第 ${bad.i + 1} 行）：${line} 冒号后缺少空格，应为 "${line.replace(/:(?!\s|$)/, ': ')}"`]
+    }
     return ['YAML 语法错误：' + e.message]
   }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return ['脚本必须是 YAML 对象']
@@ -2222,8 +2439,19 @@ function validateScriptCode(content) {
           errors.push(`${at} region 需要 x2 > x1 且 y2 > y1`)
         }
       }
+    } else if (region && typeof region === 'object') {
+      const fm = region.fm, to = region.to
+      if (!Array.isArray(fm) || fm.length < 2 || !Array.isArray(to) || to.length < 2) {
+        errors.push(`${at} region 需要 fm/to 两个 [x, y] 坐标`)
+      } else {
+        checkRel(`${at} region.fm`, Number(fm[0]), Number(fm[1]))
+        checkRel(`${at} region.to`, Number(to[0]), Number(to[1]))
+        if (Number(fm[0]) >= Number(to[0]) || Number(fm[1]) >= Number(to[1])) {
+          errors.push(`${at} region 需要 to > fm`)
+        }
+      }
     } else {
-      errors.push(`${at} region 只支持 a/u/d/l/r/ul/ur/dl/dr 或 [x1, y1, x2, y2]`)
+      errors.push(`${at} region 只支持 a/u/d/l/r/ul/ur/dl/dr / [x1, y1, x2, y2] / {fm, to}`)
     }
   }
 
@@ -2243,32 +2471,43 @@ function validateScriptCode(content) {
         errors.push(`${at} tap 需要 [x, y] 相对坐标`)
       }
     }
-    if (step.click !== undefined) {
-      const v = step.click
+    // 旧动作键只在非 find 步骤时报废弃（find 步骤里的 click 是合法参数）
+    if (step.find === undefined) {
+      if (step.click !== undefined) errors.push(`${at} click 已删除，请改用 find 的 click 参数（true/模板名/[x, y]）`)
+      if (step.click_find !== undefined) errors.push(`${at} click_find 已删除，请改用 find 的 click: true`)
+      if (step.until !== undefined) errors.push(`${at} until 已删除，请改用 find（timeout: 0 表示一直找）`)
+    }
+    if (step.find !== undefined) {
+      const v = step.find
       if (typeof v !== 'string') {
-        errors.push(`${at} click 只支持模板字符串写法，如 click: shop.png`)
+        errors.push(`${at} find 只支持模板字符串写法，如 find: shop.png`)
       } else {
         if (!tplNames.has(v)) errors.push(`${at} 模板不存在：${v}`)
-        if (step.timeout !== undefined) errors.push(`${at} timeout 只支持 until`)
         checkRegion(at, step.region)
       }
+      // click 参数：true/false / 模板名（在模板区域内找并点击）/ [x, y] 相对坐标
+      if (step.click !== undefined) {
+        const c = step.click
+        if (typeof c === 'string') {
+          if (!tplNames.has(c)) errors.push(`${at} click 模板不存在：${c}`)
+        } else if (Array.isArray(c)) {
+          if (c.length !== 2) errors.push(`${at} click 数组需要 [x, y] 2 个相对坐标`)
+          else checkRel(`${at} click`, Number(c[0]), Number(c[1]))
+        } else if (typeof c !== 'boolean') {
+          errors.push(`${at} click 只支持 true/false、模板名或 [x, y] 相对坐标`)
+        }
+      }
+      if (step.timeout !== undefined && (!Number.isFinite(Number(step.timeout)) || Number(step.timeout) < 0)) errors.push(`${at} timeout 需要非负毫秒数（0=一直找）`)
+      if (step.interval !== undefined && (!Number.isFinite(Number(step.interval)) || Number(step.interval) <= 0)) errors.push(`${at} interval 需要大于 0 的毫秒数`)
+      if (step.then !== undefined && !Array.isArray(step.then)) errors.push(`${at} then 需要步骤列表`)
+      if (step.else !== undefined && !Array.isArray(step.else)) errors.push(`${at} else 需要步骤列表`)
     }
     if (step.swipe) {
       if (step.swipe.duration !== undefined) errors.push(`${at} swipe 请使用 time，不支持 duration`)
-      const from = step.swipe.from, to = step.swipe.to
-      if (Array.isArray(from) && from.length >= 2) checkRel(`${at} swipe from`, Number(from[0]), Number(from[1]))
+      const from = step.swipe.fm !== undefined ? step.swipe.fm : step.swipe.from
+      const to = step.swipe.to
+      if (Array.isArray(from) && from.length >= 2) checkRel(`${at} swipe fm`, Number(from[0]), Number(from[1]))
       if (Array.isArray(to) && to.length >= 2) checkRel(`${at} swipe to`, Number(to[0]), Number(to[1]))
-    }
-    for (const key of ['find', 'until']) {
-      const v = step[key]
-      if (v === undefined) continue
-      if (typeof v !== 'string') {
-        errors.push(`${at} ${key} 只支持模板字符串写法，如 ${key}: shop.png`)
-        continue
-      }
-      if (!tplNames.has(v)) errors.push(`${at} 模板不存在：${v}`)
-      if (key === 'find' && step.timeout !== undefined) errors.push(`${at} timeout 只支持 until`)
-      checkRegion(at, step.region)
     }
   })
   return errors
@@ -2380,7 +2619,11 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.console { display: flex; height: 100%; padding: 14px; gap: 14px; }
+.console {
+  display: flex; height: 100%; padding: 14px; gap: 14px;
+  /* 侧边栏收起时释放的宽度（展开 200px - 收起 52px，见 MainLayout.vue） */
+  --sb-free-w: 148px;
+}
 
 /* ===== 画面区 ===== */
 .stage { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
@@ -2442,9 +2685,14 @@ onUnmounted(() => {
 }
 
 /* 二次裁切区 */
-.crop-stage { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.crop-canvas {
+.crop-stage {
+  display: flex; overflow: auto;
   border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: #000;
+}
+.crop-stage .crop-canvas { margin: auto; }
+.crop-canvas {
+  border-radius: var(--radius-sm);
   cursor: crosshair; background: #000; touch-action: none;
 }
 .crop-hint { font-size: 10px; color: var(--text-2); align-self: flex-start; }
@@ -2492,8 +2740,10 @@ onUnmounted(() => {
 /* ===== 右侧面板 ===== */
 .panel {
   width: 340px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px;
-  overflow: hidden;
+  overflow: hidden; transition: width .18s ease;
 }
+/* 侧边栏收起：释放宽度全部给右侧操作区（340 + 148），中间投屏区宽度保持不变 */
+.console.sb-collapsed .panel { width: calc(340px + var(--sb-free-w)); }
 .panel-tabs {
   display: flex; gap: 4px; flex-shrink: 0;
   background: var(--bg-1); border: 1px solid var(--border);
@@ -2637,6 +2887,7 @@ onUnmounted(() => {
 .tpl-top { display: flex; align-items: center; gap: 8px; }
 .tpl-top .input { flex: 1; min-width: 0; }
 .tpl-top .btn { flex-shrink: 0; }
+.tpl-top .tpl-region { flex: 0 0 auto; width: 138px; padding: 4px 6px; font-size: 11px; }
 .tpl-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .script-run { flex: 6; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .script-logs { flex: 1; min-height: 120px; max-height: none; }
@@ -2646,8 +2897,6 @@ onUnmounted(() => {
 .edit-actions { display: flex; gap: 8px; }
 .edit-actions .btn { flex: 1; justify-content: center; }
 .edit-actions .btn.active { border-color: var(--accent-2); color: var(--accent-2); background: rgba(56,189,248,.08); }
-.edit-interval { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); }
-.edit-interval .input { width: 80px; padding: 4px 8px; }
 .op-record {
   flex-shrink: 0; height: 77px; display: flex; flex-direction: column;
   background: var(--bg-0); border: 1px solid var(--border);
@@ -2702,15 +2951,16 @@ onUnmounted(() => {
 }
 .tpl-row:hover { background: var(--bg-3); }
 .tpl-row.del-confirm { background: rgba(248,113,113,.08); border-color: rgba(248,113,113,.35); }
+.tpl-row.renaming { background: rgba(56,189,248,.08); border-color: rgba(56,189,248,.35); }
 .tpl-empty { padding: 16px 8px; text-align: center; font-size: 11px; color: var(--text-2); }
 .tpl-cell.thumb { width: 30px; flex-shrink: 0; display: flex; align-items: center; }
 .tpl-cell.name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-0); }
 .tpl-cell.ops { display: flex; gap: 6px; flex-shrink: 0; }
 .tpl-cell.ops .btn { padding: 2px 8px; font-size: 11px; }
-.tpl-thumb { font-size: 12px; position: relative; display: inline-flex; }
-.tpl-thumb::before { content: '▦'; }
+.rename-input { width: 100%; min-width: 0; padding: 2px 6px; font-size: 12px; }
+.tpl-thumb { display: inline-flex; }
 .tpl-thumb img {
-  position: relative; z-index: 1; width: 24px; height: 24px; object-fit: contain;
+  width: 24px; height: 24px; object-fit: contain;
 }
 .tpl-del-confirm {
   background: var(--danger); border-color: var(--danger); color: #fff;
@@ -2726,9 +2976,16 @@ onUnmounted(() => {
   position: relative; display: flex; flex-direction: column; gap: 8px;
   max-width: 92vw; max-height: 92vh;
 }
-.tpl-view-modal img {
-  max-width: 92vw; max-height: 82vh; object-fit: contain;
+.tpl-view-img { position: relative; align-self: center; }
+.tpl-view-img img {
+  display: block; max-width: 92vw; max-height: 82vh; object-fit: contain;
   border-radius: var(--radius-sm); border: 1px solid var(--border); background: #000;
+}
+.tpl-view-pos {
+  position: absolute; z-index: 2; pointer-events: none; white-space: nowrap;
+  background: rgba(8,10,16,.88); border: 1px solid var(--accent); color: var(--accent);
+  font-size: 11px; line-height: 1; padding: 3px 7px; border-radius: 6px;
+  transform: translate(12px, 16px);
 }
 .tpl-view-close {
   position: absolute; top: 8px; right: 8px; width: 28px; height: 28px;
@@ -2738,8 +2995,9 @@ onUnmounted(() => {
 }
 .tpl-view-close:hover { color: var(--danger); border-color: var(--danger); }
 .tpl-view-name { text-align: center; font-size: 12px; color: var(--text-1); word-break: break-all; }
+.tpl-view-tip { text-align: center; font-size: 11px; color: var(--accent-2); }
 
 /* 二次裁切占满整个模板区域 */
 .crop-panel-full { flex: 1; min-height: 0; border-top: none; padding-top: 0; }
-.crop-panel-full .crop-stage { flex: 1; min-height: 0; justify-content: center; }
+.crop-panel-full .crop-stage { flex: 1; min-height: 0; min-width: 0; }
 </style>

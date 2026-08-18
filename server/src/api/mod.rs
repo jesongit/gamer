@@ -72,7 +72,7 @@ pub fn build_router(db: Db, devices: Arc<DeviceManager>, scheduler: Arc<Schedule
         .route("/api/devices/:id/screenshot", post(api_screenshot))
         .route("/api/devices/:id/control", post(api_control))
         .route("/api/templates", get(api_list_templates).post(api_upload_template))
-        .route("/api/templates/:name", delete(api_delete_template))
+        .route("/api/templates/:name", delete(api_delete_template).put(api_rename_template))
         .route("/api/templates/:name/image", get(api_get_template_image))
         .route("/api/templates/:name/test", post(api_test_template))
         .route("/api/scripts", get(api_list_scripts).post(api_save_script))
@@ -83,6 +83,7 @@ pub fn build_router(db: Db, devices: Arc<DeviceManager>, scheduler: Arc<Schedule
         .route("/api/tasks/:id", delete(api_delete_task))
         .route("/api/tasks/:id/run", post(api_run_task_now))
         .route("/api/logs", get(api_list_logs).delete(api_clear_logs))
+        .route("/api/op-templates", get(api_op_templates))
         .route("/ws/device/:id", get(ws::ws_device))
         .fallback_service(ServeDir::new("./web-dist").fallback(ServeDir::new("./web-dist/index.html")))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
@@ -588,6 +589,37 @@ async fn api_delete_template(State(st): State<AppState>, Path(name): Path<String
     }
 }
 
+#[derive(Deserialize)]
+struct RenameTemplateReq {
+    name: String,
+}
+
+/// 重命名模板：把旧文件字节写入新文件名，再删除旧文件
+async fn api_rename_template(State(st): State<AppState>, Path(old_name): Path<String>, Json(req): Json<RenameTemplateReq>) -> Response {
+    let dir = templates_dir(&st);
+    let old_path = dir.join(sanitize_filename(&old_name));
+    let new_name = sanitize_filename(&req.name);
+    if new_name == sanitize_filename(&old_name) {
+        return err_response(StatusCode::BAD_REQUEST, "名称未变化");
+    }
+    let new_path = dir.join(&new_name);
+    if new_path.exists() {
+        return err_response(StatusCode::BAD_REQUEST, "已存在同名模板");
+    }
+    let bytes = match std::fs::read(&old_path) {
+        Ok(b) => b,
+        Err(_) => return err_response(StatusCode::NOT_FOUND, "模板不存在"),
+    };
+    if let Err(e) = std::fs::write(&new_path, &bytes) {
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
+    if std::fs::remove_file(&old_path).is_err() {
+        let _ = std::fs::remove_file(&new_path);
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, "旧模板删除失败");
+    }
+    Json(serde_json::json!({"ok": true, "name": new_name})).into_response()
+}
+
 /// 返回模板图片原始字节（PNG/JPEG），供前端缩略图与预览使用。
 /// Cache-Control: no-cache —— 模板被同名覆盖上传后浏览器必须重新拉取。
 async fn api_get_template_image(State(st): State<AppState>, Path(name): Path<String>) -> Response {
@@ -830,6 +862,11 @@ async fn api_clear_logs(State(st): State<AppState>) -> Response {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
+}
+
+/// 操作记录 YAML 模板（前端 alt 模式追加到编辑区用，来源 config.toml [op_templates]）
+async fn api_op_templates(State(st): State<AppState>) -> Response {
+    Json(st.cfg.op_templates.clone()).into_response()
 }
 
 // ---------- 工具 ----------

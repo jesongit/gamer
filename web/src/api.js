@@ -47,9 +47,13 @@ export const api = {
   // 模板
   listTemplates: () => req('GET', '/api/templates'),
   uploadTemplate: (name, dataB64) => req('POST', '/api/templates', { name, data_b64: dataB64 }),
+  renameTemplate: (oldName, newName) => req('PUT', `/api/templates/${encodeURIComponent(oldName)}`, { name: newName }),
   deleteTemplate: (name) => req('DELETE', `/api/templates/${encodeURIComponent(name)}`),
   testTemplate: (name, deviceId, threshold, region) =>
     req('POST', `/api/templates/${encodeURIComponent(name)}/test`, { device_id: deviceId, threshold, region }),
+
+  // 配置：操作记录 YAML 模板（config.toml [op_templates]）
+  getOpTemplates: () => req('GET', '/api/op-templates'),
 
   // 脚本
   listScripts: () => req('GET', '/api/scripts'),

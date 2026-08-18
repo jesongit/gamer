@@ -4,6 +4,53 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式
+///
+/// 占位符：{name} 模板名 · {region} 区域块（region: a 或 region: {fm,to}）·
+/// {x}/{y} 点击坐标 · {fx}/{fy}/{tx}/{ty} 滑动起终点 · {time} 滑动实际时长 ms ·
+/// {cx}/{cy} 模板图内相对百分比坐标（find 的 click 参数）
+///
+/// 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制，
+/// 需要个别覆盖时手动在步骤里加 wait
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpTemplates {
+    /// find：查找模板并点击中心（默认超时 6000ms）
+    #[serde(default)]
+    pub find: String,
+    /// find_wait：一直查找直到模板出现并点击（timeout: 0）
+    #[serde(default)]
+    pub find_wait: String,
+    /// find_click_pos：查看模板大图时点击图片生成 find + click 相对坐标记录
+    #[serde(default)]
+    pub find_click_pos: String,
+    /// 屏幕点击
+    #[serde(default)]
+    pub tap: String,
+    /// 屏幕滑动
+    #[serde(default)]
+    pub swipe: String,
+    /// 滑动区域片段（作为 region 参数使用）
+    #[serde(default)]
+    pub swipe_region: String,
+    /// （已废弃）独立的 wait 操作记录，不再生成
+    #[serde(default)]
+    pub wait: String,
+}
+
+impl Default for OpTemplates {
+    fn default() -> Self {
+        Self {
+            find: "- find: {name}\n  threshold: 0.8\n  {region}\n  click: true\n  then:\n    - log: \"点击成功\"\n  else:\n    - log: \"点击失败\"".into(),
+            find_wait: "- find: {name}\n  timeout: 0\n  threshold: 0.8\n  {region}\n  click: true".into(),
+            find_click_pos: "- find: {name}\n  {region}\n  click: [{cx}, {cy}]".into(),
+            tap: "- tap: [{x}, {y}]".into(),
+            swipe: "- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}".into(),
+            swipe_region: "region:\n  fm: [{fx}, {fy}]\n  to: [{tx}, {ty}]".into(),
+            wait: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// HTTP 监听端口
@@ -28,11 +75,13 @@ pub struct Config {
     pub bitrate_mbps: u32,
     /// 帧率上限（0 = 默认）
     pub fps: u32,
+    /// 操作记录 YAML 模板（config.toml [op_templates]，可自定义）
+    #[serde(default)]
+    pub op_templates: OpTemplates,
 }
 
 impl Default for Config {
-    fn default() -> Self {
-        Self {
+    fn default() -> Self {        Self {
             port: 8443,
             data_dir: PathBuf::from("./data"),
             adb_path: "adb".into(),
@@ -46,6 +95,7 @@ impl Default for Config {
             // 默认 15fps：防止无 config.toml 时 scrcpy 全速发帧（55fps+），
             // 服务端 ffmpeg 软解 + PNG 编解码单核跑满（CPU 100% 持续拖垮进程）
             fps: 15,
+            op_templates: OpTemplates::default(),
         }
     }
 }

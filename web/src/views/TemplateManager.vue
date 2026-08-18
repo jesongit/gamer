@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">模板管理</div>
-        <div class="page-sub">图片模板用于 YAML 脚本中的 find / click / until</div>
+        <div class="page-sub">图片模板用于 YAML 脚本中的 find 模板匹配</div>
       </div>
       <div class="head-actions">
         <label class="btn" for="tpl-upload">⬆️ 上传模板</label>
@@ -45,7 +45,10 @@
 
         <!-- 预览 -->
         <div class="td-preview">
-          <img :src="tplUrl(sel.name)" alt="模板预览" @load="onPreviewLoad" @error="dim = null" />
+          <div class="td-preview-img">
+            <img :src="tplUrl(sel.name)" alt="模板预览" @load="onPreviewLoad" @error="dim = null" @mousemove="onPreviewMove" @mouseleave="prevPos.show = false" />
+            <div v-if="prevPos.show" class="td-preview-pos mono" :style="{ left: prevPos.x + 'px', top: prevPos.y + 'px' }">{{ prevPos.text }}</div>
+          </div>
         </div>
 
         <!-- 测试匹配 -->
@@ -82,7 +85,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { devicesData, templatesData, useToast } from '../store'
 import { api } from '../api'
 
@@ -104,6 +107,20 @@ function onThumbErr(e) { e.target.style.visibility = 'hidden' }
 function onPreviewLoad(e) {
   const img = e.target
   dim.value = { w: img.naturalWidth, h: img.naturalHeight }
+}
+
+// 预览悬停：实时显示基于模板的相对百分比坐标（供 find 的 click 参数用）
+const prevPos = reactive({ show: false, x: 0, y: 0, text: '' })
+function onPreviewMove(e) {
+  const img = e.currentTarget
+  const r = img.getBoundingClientRect()
+  if (r.width < 1 || r.height < 1) return
+  const rx = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width))
+  const ry = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height))
+  prevPos.x = e.clientX - r.left
+  prevPos.y = e.clientY - r.top
+  prevPos.text = `(${rx.toFixed(3)}, ${ry.toFixed(3)})`
+  prevPos.show = true
 }
 
 function fmtSize(n) {
@@ -222,7 +239,14 @@ onMounted(() => { loadTemplates(); loadDevices() })
   display: flex; align-items: center; justify-content: center;
   min-height: 160px; padding: 16px; overflow: auto;
 }
-.td-preview img { max-width: 100%; max-height: 320px; object-fit: contain; }
+.td-preview-img { position: relative; display: inline-flex; }
+.td-preview-img img { display: block; max-width: 100%; max-height: 320px; object-fit: contain; }
+.td-preview-pos {
+  position: absolute; z-index: 2; pointer-events: none; white-space: nowrap;
+  background: rgba(8,10,16,.88); border: 1px solid var(--accent); color: var(--accent);
+  font-size: 11px; line-height: 1; padding: 3px 7px; border-radius: 6px;
+  transform: translate(12px, 16px);
+}
 
 .td-label { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
 .td-label .mono { color: var(--accent); font-size: 13px; }
