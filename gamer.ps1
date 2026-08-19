@@ -19,11 +19,13 @@
   .\gamer.ps1 restart            # 重启前后端
   .\gamer.ps1 rebuild            # 重新编译前后端（cargo build + vite build）并重启
   .\gamer.ps1 status             # 查看前后端运行状态、最近日志
+  .\gamer.ps1 test_adb           # USB/adb 链路体检（选择性暂停 / 空闲稳定性 / push 突发流量）
+  .\gamer.ps1 test_adb -IdleSeconds 60   # 空闲观察延长到 60 秒
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('start', 'stop', 'restart', 'rebuild', 'status', 'help')]
+    [ValidateSet('start', 'stop', 'restart', 'rebuild', 'status', 'test_adb', 'help')]
     [string]$Command = 'status',
 
     # 后端端口，0 = 自动从 server/config.toml 读取（默认 8443）
@@ -39,7 +41,10 @@ param(
     [switch]$Build,
 
     # 后端使用 release 构建（默认 debug）
-    [switch]$Release
+    [switch]$Release,
+
+    # test_adb：空闲稳定性测试时长（秒），建议 ≥ 30（历史病例空闲 15~25s 掉线）
+    [int]$IdleSeconds = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -441,6 +446,173 @@ function Start-Frontend {
     Write-Host "前端: 启动成功  http://localhost:$FrontendPort" -ForegroundColor Green
 }
 
+# ---------- ADB / USB 链路诊断（test_adb） ----------
+
+<#
+  USB/adb 链路体检，覆盖两类历史真凶（完整排障记录见 AGENTS.md 已知坑）：
+  ① Windows「USB 选择性暂停」：USB 空闲 15~25s 后被系统挂起 → adb 掉线
+     （设备从 adb devices 消失或转 offline）
+  ② USB 口/线接触不良：大流量传输（push/pull）瞬间断开（push 报
+     "failed to read copy response: EOF"），手机 adbd 常楔死 offline 只能拔插
+
+  判定逻辑：空闲期掉线 → 指向①；传输中掉线 → 指向②。
+#>
+function Test-AdbUsb {
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # adb/powercfg 的 stderr 不当作异常，成败看 exit code/输出
+
+    $idleFail = $false
+    $burstFail = $false
+
+    # ---- 1/5 adb 可用性 ----
+    Write-Host ""
+    Write-Host "【1/5】adb 可用性" -ForegroundColor Cyan
+    $adbVer = (& adb version 2>$null | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0 -or -not $adbVer) {
+        Write-Host "  ✗ adb 不可用（不在 PATH），无法测试" -ForegroundColor Red
+        $ErrorActionPreference = $prevEap
+        return
+    }
+    Write-Host "  ✓ $adbVer"
+
+    # ---- 2/5 Windows USB 选择性暂停 ----
+    Write-Host ""
+    Write-Host "【2/5】Windows USB 选择性暂停（空闲掉线真凶①）" -ForegroundColor Cyan
+    $usbSub = '2a737441-1930-4402-8d77-b2bebba308a3'
+    $usbSet = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'
+    $suspendOn = $false
+    try {
+        $pq = (powercfg /q SCHEME_CURRENT $usbSub $usbSet 2>$null) -join "`n"
+        $acOn = $pq -match '交流电源设置索引:\s*0x0*1\b'
+        $dcOn = $pq -match '直流电源设置索引:\s*0x0*1\b'
+        $suspendOn = $acOn -or $dcOn
+    } catch { $suspendOn = $false }
+    if (-not $suspendOn) {
+        Write-Host "  ✓ 已禁用" -ForegroundColor Green
+    } else {
+        Write-Host "  ✗ 已启用（AC=$(if($acOn){'开'}else{'关'}) DC=$(if($dcOn){'开'}else{'关'})）—— 空闲 15~25 秒 Windows 会挂起 USB 设备导致 adb 掉线" -ForegroundColor Red
+        $ans = Read-Host "  现在禁用它？（修改电源计划，需要管理员权限）[Y/n]"
+        if ($ans -eq '' -or $ans -match '^[yY]') {
+            powercfg /SETACVALUEINDEX SCHEME_CURRENT $usbSub $usbSet 0 2>$null | Out-Null
+            powercfg /SETDCVALUEINDEX SCHEME_CURRENT $usbSub $usbSet 0 2>$null | Out-Null
+            powercfg /SETACTIVE SCHEME_CURRENT 2>$null | Out-Null
+            $pq2 = (powercfg /q SCHEME_CURRENT $usbSub $usbSet 2>$null) -join "`n"
+            if ($pq2 -match '设置索引:\s*0x0*1\b') {
+                Write-Host "  ✗ 自动修复失败（大概率权限不足）。请用管理员 PowerShell 执行：" -ForegroundColor Red
+                Write-Host "    powercfg /SETACVALUEINDEX SCHEME_CURRENT $usbSub $usbSet 0"
+                Write-Host "    powercfg /SETDCVALUEINDEX SCHEME_CURRENT $usbSub $usbSet 0"
+                Write-Host "    powercfg /SETACTIVE SCHEME_CURRENT"
+            } else {
+                Write-Host "  ✓ 已禁用" -ForegroundColor Green
+            }
+        } else {
+            Write-Host "  ! 跳过修复（保持启用），空闲稳定性测试大概率会失败" -ForegroundColor Yellow
+        }
+    }
+
+    # ---- 3/5 设备检测 ----
+    Write-Host ""
+    Write-Host "【3/5】设备检测" -ForegroundColor Cyan
+    $devLines = @(& adb devices -l 2>$null | Select-Object -Skip 1 | Where-Object { $_.Trim() })
+    if ($devLines.Count -eq 0) {
+        Write-Host "  ✗ 无设备。插好 USB（必要时换口/换线）后重试；手机熄屏不影响本测试" -ForegroundColor Red
+        $ErrorActionPreference = $prevEap
+        return
+    }
+    $targets = @()
+    foreach ($l in $devLines) {
+        $parts = $l -split '\s+'
+        $serial = $parts[0]; $state = $parts[1]
+        if ($state -eq 'device') {
+            $targets += $serial
+            Write-Host "  ✓ $serial" -ForegroundColor Green
+        } elseif ($state -eq 'offline') {
+            Write-Host "  ✗ $serial offline —— adbd 楔死，adb reconnect 通常救不回，只能拔插 USB" -ForegroundColor Red
+        } else {
+            Write-Host "  ! $serial（$state）—— 手机上确认 USB 调试授权弹窗" -ForegroundColor Yellow
+        }
+    }
+    if ($targets.Count -eq 0) {
+        Write-Host "  ✗ 无可用（device 状态）设备，测试终止" -ForegroundColor Red
+        $ErrorActionPreference = $prevEap
+        return
+    }
+
+    # ---- 4/5 突发流量（push/pull 分级） ----
+    Write-Host ""
+    Write-Host "【4/5】突发流量测试（口/线接触不良真凶②，逐级加量）..." -ForegroundColor Cyan
+    $tmpDir = Join-Path $env:TEMP 'gamer-adbtest'
+    New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+    $f1k   = Join-Path $tmpDir 't1k.bin';   [IO.File]::WriteAllBytes($f1k, (New-Object byte[] 1024))
+    $f100k = Join-Path $tmpDir 't100k.bin'; [IO.File]::WriteAllBytes($f100k, (New-Object byte[] 102400))
+    foreach ($s in $targets) {
+        if ($burstFail) { break }
+        Write-Host "  设备 $s："
+        $steps = @(
+            @{ n = 'push 1KB x2';   cmd = { 1..2 | ForEach-Object { adb -s $s push $f1k /data/local/tmp/gamer-t1k.bin } } },
+            @{ n = 'push 100KB x2'; cmd = { 1..2 | ForEach-Object { adb -s $s push $f100k /data/local/tmp/gamer-t100k.bin } } },
+            @{ n = 'pull 100KB';    cmd = { adb -s $s pull /data/local/tmp/gamer-t100k.bin (Join-Path $tmpDir 'back.bin') } }
+        )
+        foreach ($st in $steps) {
+            $null = (& $st.cmd) 2>&1
+            $code = $LASTEXITCODE
+            $map = @{}
+            foreach ($l in @(& adb devices 2>$null | Select-Object -Skip 1 | Where-Object { $_.Trim() })) {
+                $p = $l -split '\s+'; $map[$p[0]] = $p[1]
+            }
+            if ($code -ne 0 -or $map[$s] -ne 'device') {
+                Write-Host ("    ✗ {0} 失败（exit={1}, 状态={2}）—— 传输中掉线，指向「口/线接触不良」：换口/换线后重测" -f $st.n, $code, $map[$s]) -ForegroundColor Red
+                $burstFail = $true
+                break
+            }
+            Write-Host ("    ✓ {0}" -f $st.n) -ForegroundColor Green
+        }
+        # 清理设备端测试文件（连接已死则跳过）
+        if ($map[$s] -eq 'device') { $null = (& adb -s $s shell rm -f /data/local/tmp/gamer-t1k.bin /data/local/tmp/gamer-t100k.bin) 2>&1 }
+    }
+    Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    # ---- 5/5 空闲稳定性 ----
+    if ($burstFail) {
+        Write-Host ""
+        Write-Host "【5/5】空闲稳定性测试跳过（突发流量已打死连接，先解决硬件问题）" -ForegroundColor Yellow
+    } else {
+        Write-Host ""
+        Write-Host ("【5/5】空闲稳定性测试（{0}s，每 5s 检查一次；历史病例：空闲 15~25s 掉线）..." -f $IdleSeconds) -ForegroundColor Cyan
+        $deadline = (Get-Date).AddSeconds($IdleSeconds)
+        while ((Get-Date) -lt $deadline -and -not $idleFail) {
+            Start-Sleep -Seconds 5
+            $map = @{}
+            foreach ($l in @(& adb devices 2>$null | Select-Object -Skip 1 | Where-Object { $_.Trim() })) {
+                $p = $l -split '\s+'; $map[$p[0]] = $p[1]
+            }
+            foreach ($s in $targets) {
+                if ($map[$s] -ne 'device') {
+                    Write-Host ("  ✗ {0} 于 {1} 掉线（状态: {2}）—— 空闲期断开，指向「USB 选择性暂停」" -f $s, (Get-Date -Format HH:mm:ss), $map[$s]) -ForegroundColor Red
+                    $idleFail = $true
+                    break
+                }
+            }
+            if (-not $idleFail) { Write-Host ("  · {0} 在线" -f (Get-Date -Format HH:mm:ss)) -ForegroundColor DarkGray }
+        }
+        if (-not $idleFail) { Write-Host "  ✓ 空闲 $IdleSeconds 秒稳定" -ForegroundColor Green }
+    }
+
+    # ---- 结论 ----
+    Write-Host ""
+    Write-Host "==== 诊断结论 ====" -ForegroundColor Cyan
+    if (-not $idleFail -and -not $burstFail) {
+        Write-Host "  ✓ USB/adb 链路健康（空闲稳定 + 突发流量稳定），可以正常跑挂机" -ForegroundColor Green
+    }
+    if ($idleFail) {
+        Write-Host "  → 空闲期掉线：检查第 2 步「USB 选择性暂停」是否已禁用（换电脑/重装系统后该设置会丢失需重做）" -ForegroundColor Yellow
+    }
+    if ($burstFail) {
+        Write-Host "  → 传输中掉线：USB 口/线接触不良。换口换线后重测；若手机停在 offline，只能拔插" -ForegroundColor Yellow
+    }
+    $ErrorActionPreference = $prevEap
+}
+
 # ---------- 入口 ----------
 
 $Port = Get-ServerPort
@@ -481,5 +653,6 @@ switch ($Command) {
         Show-Status
     }
     'status' { Show-Status }
+    'test_adb' { Test-AdbUsb }
     'help'   { Get-Help -Path $MyInvocation.MyCommand.Path -Detailed }
 }
