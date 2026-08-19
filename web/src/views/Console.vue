@@ -49,6 +49,17 @@
           <span class="alt-label">region</span>
         </div>
 
+        <!-- 脚本运行可视化：引擎 tap/swipe/匹配命中（服务端经 control DataChannel 推送，样式复用 alt/hit） -->
+        <div v-if="scriptFx.tap.show" class="alt-tap" :style="fxTapStyle">
+          <span class="alt-label">tap</span>
+        </div>
+        <div v-if="scriptFx.swipe.show" class="alt-region" :style="fxSwipeStyle">
+          <span class="alt-label">swipe</span>
+        </div>
+        <div v-if="scriptFx.hit.show" class="hit-box" :style="fxHitStyle">
+          <span class="hit-label">{{ scriptFx.hit.label }}</span>
+        </div>
+
         <!-- 放大预览镜 -->
         <div class="loupe" v-show="loupe.show" :style="{ left: loupe.x + 'px', top: loupe.y + 'px' }">
           <canvas ref="loupeCanvas" width="300" height="300"></canvas>
@@ -389,10 +400,6 @@
                 <option value="">选择要运行的脚本…</option>
                 <option v-for="s in scripts" :key="s.id" :value="s.id">{{ s.name }}</option>
               </select>
-              <select v-model="logLevel" class="select mono log-level" title="日志级别">
-                <option value="info">info</option>
-                <option value="debug">debug</option>
-              </select>
             </div>
             <div class="run-actions">
               <button v-if="!store.running" class="btn btn-primary" :disabled="!selScript || !store.deviceId" @click="runScript">▶ 运行</button>
@@ -420,7 +427,10 @@
                     class="sv-line"
                     :class="{ sel: selectedLine === idx, selectable: isSelectableLine(line) }"
                     @click="onScriptLineClick(idx, line)"
-                  >{{ line || ' ' }}</div>
+                  ><!-- sv-line 为 white-space:pre，插值必须紧贴标签，避免格式化空白泄入渲染 -->
+                    <template v-if="callLinks[idx]">{{ callLinks[idx].prefix }}<span class="call-link" title="点击预览脚本内容" @click.stop="openCallPreview(callLinks[idx].name)">{{ callLinks[idx].name }}</span>{{ callLinks[idx].suffix }}</template>
+                    <template v-else>{{ line || ' ' }}</template>
+                  </div>
                 </div>
               </div>
             </template>
@@ -442,11 +452,24 @@
                 {{ r.text }}
               </div>
             </div>
-            <textarea ref="scriptEditor" v-model="editScriptCode" class="script-editor mono" spellcheck="false" placeholder="# YAML 脚本&#10;name: 脚本名&#10;action_wait: 500&#10;&#10;steps:&#10;  - find: 模板名.png&#10;    click: true" @keydown.tab.prevent="onEditorTab"></textarea>
+            <textarea ref="scriptEditor" v-model="editScriptCode" class="script-editor mono" spellcheck="false" placeholder="# YAML 脚本&#10;action_wait: 500&#10;log_level: info&#10;&#10;steps:&#10;  - find: 模板名.png&#10;    click: true" @keydown.tab.prevent="onEditorTab"></textarea>
           </div>
         </div>
       </div>
     </aside>
+
+    <!-- call 子脚本预览弹窗（ESC / ✕ / 点遮罩关闭） -->
+    <div v-if="previewScript" class="modal-mask" @click.self="closeCallPreview">
+      <div class="modal preview-modal">
+        <div class="modal-head">
+          <span class="title mono">{{ previewScript.name }}</span>
+          <button class="btn btn-ghost btn-sm" @click="closeCallPreview">✕</button>
+        </div>
+        <div class="modal-body">
+          <pre class="preview-code mono">{{ previewScript.content }}</pre>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -483,15 +506,14 @@ const res = ref('—')
 const bitrate = ref('—')
 const selScript = ref('')
 // 脚本页签：运行/编辑模式 + 日志级别
-const DEFAULT_SCRIPT_CODE = `name: 新脚本
-action_wait: 500
+const DEFAULT_SCRIPT_CODE = `action_wait: 500
+log_level: info
 
 steps:
   - wait: 1000
   - log: "脚本开始运行"
 `
 const scriptMode = ref('run')
-const logLevel = ref('info')
 const editScriptName = ref('新脚本')
 const editScriptCode = ref(DEFAULT_SCRIPT_CODE)
 // 编辑区 textarea：追加操作记录时读取光标位置
@@ -505,8 +527,8 @@ const scriptSaving = ref(false)
 //         {fx}/{fy}/{tx}/{ty} 滑动起终点 · {time} 滑动实际时长 ms · {cx}/{cy} 模板图内相对百分比坐标
 // 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制
 const DEFAULT_OP_TPL = {
-  find: '- find: {name}\n  threshold: 0.8\n  {region}\n  click: true\n  then:\n    - log: "点击成功"\n  else:\n    - log: "点击失败"',
-  find_wait: '- find: {name}\n  timeout: 0\n  threshold: 0.8\n  {region}\n  click: true',
+  find: '- find: {name}\n  threshold: 0.8\n  {region}\n  then:\n    - log: "点击成功"\n  else:\n    - log: "点击失败"',
+  until: '- until: {name}\n  threshold: 0.8\n  {region}',
   find_click_pos: '- find: {name}\n  {region}\n  click: [{cx}, {cy}]',
   tap: '- tap: [{x}, {y}]',
   swipe: '- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}',
@@ -545,6 +567,16 @@ const altGesture = reactive({ active: false, moved: false, start: { x: 0, y: 0 }
 // alt 模式点击/滑动画面反馈（点击圆点 / 滑动 region 框）
 const altFeedback = reactive({ show: false, kind: '', x: 0, y: 0, w: 0, h: 0 })
 let altFeedbackTimer = null
+// 脚本运行可视化效果：服务端经 control DataChannel 推送 tap/swipe/hit 事件（设备像素坐标），
+// 与手动 alt 反馈状态独立（脚本运行时用户仍可手动操作，两类效果互不覆盖）
+const scriptFx = reactive({
+  tap: { show: false, x: 0, y: 0 },
+  swipe: { show: false, x: 0, y: 0, w: 0, h: 0 },
+  hit: { show: false, x: 0, y: 0, w: 0, h: 0, label: '' },
+})
+let fxTapTimer = null
+let fxSwipeTimer = null
+let fxHitTimer = null
 // 日志原始数据（未过滤），用于按级别切换显示
 let rawLogs = []
 // 本次运行开始时间：清空日志区后只显示本次运行产生的日志
@@ -906,8 +938,6 @@ watch(form, () => {
   saveTimer = setTimeout(autoSaveConfig, 800)
 }, { deep: true })
 
-watch(logLevel, () => applyLogFilter())
-
 async function autoSaveConfig() {
   saveTimer = null
   if (mode.value !== 'edit') return
@@ -1103,6 +1133,32 @@ const altFeedbackStyle = computed(() => {
   return { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' }
 })
 
+/** 设备像素矩形 → 显示坐标样式（object-fit: contain 的 letterbox 映射；脚本事件效果用） */
+function deviceRectStyle(x, y, w = 0, h = 0) {
+  const vw = videoWrap.value
+  if (!vw) return {}
+  const rect = vw.getBoundingClientRect()
+  const vw_ = rect.width, vh = rect.height
+  const sw = videoElement.value?.videoWidth || 1920
+  const sh = videoElement.value?.videoHeight || 1080
+  const ratio = Math.min(vw_ / sw, vh / sh)
+  return {
+    left: (x * ratio) + (vw_ - sw * ratio) / 2 + 'px',
+    top: (y * ratio) + (vh - sh * ratio) / 2 + 'px',
+    width: w * ratio + 'px',
+    height: h * ratio + 'px',
+  }
+}
+
+/** 脚本运行可视化效果位置（tap 圆点居中偏移由 .alt-tap 的 transform 处理） */
+const fxTapStyle = computed(() => (scriptFx.tap.show ? deviceRectStyle(scriptFx.tap.x, scriptFx.tap.y) : {}))
+const fxSwipeStyle = computed(() => (scriptFx.swipe.show
+  ? deviceRectStyle(scriptFx.swipe.x, scriptFx.swipe.y, scriptFx.swipe.w, scriptFx.swipe.h)
+  : {}))
+const fxHitStyle = computed(() => (scriptFx.hit.show
+  ? deviceRectStyle(scriptFx.hit.x, scriptFx.hit.y, scriptFx.hit.w, scriptFx.hit.h)
+  : {}))
+
 async function loadData() {
   try {
     devicesData.value = await api.listDevices()
@@ -1197,6 +1253,7 @@ async function doConnect() {
     controlChannel = pc.createDataChannel('control')
     controlChannel.onopen = onChannelOpen
     controlChannel.onclose = onChannelClose
+    controlChannel.onmessage = onControlMessage
 
     pc.ontrack = (e) => {
       // 只接受当前 pc 的轨道：残留/旧连接的 ontrack 不得覆盖 srcObject（串流 → 定格）
@@ -1225,6 +1282,7 @@ async function doConnect() {
       controlChannel = e.channel
       controlChannel.onopen = onChannelOpen
       controlChannel.onclose = onChannelClose
+      controlChannel.onmessage = onControlMessage
     }
 
     // 4. offer 交换
@@ -1295,6 +1353,12 @@ let lastJbd = 0
 let lastJbe = 0
 // 连接建立时间：用于"连接后长时间无视频帧（黑屏）"看门狗
 let videoConnectTs = 0
+// PLI 自愈：浏览器解码器失步（花屏/卡顿）时自动发 RTCP PLI 请求关键帧，
+// 但服务端（webrtc-rs）不响应 PLI，只能等设备固定 IDR（i-frame-interval=2s）——
+// 花屏最长要 2s 才恢复。检测 inbound-rtp.pliCount 增量 → 经 control DataChannel
+// 通知服务端 reset_video（scrcpy 控制消息 17）→ 设备立即输出新 config+IDR → ~200ms 恢复
+let lastPliCount = 0
+let lastPliResetAt = 0
 
 function handleVideoSilence() {
   if (manualClose || !connected.value || !store.deviceId) return
@@ -1379,6 +1443,20 @@ function startStats() {
             lastBytesReceived = s.bytesReceived
             lastBitrateTs = now
           }
+          // 花屏自愈：解码器失步（PLI 增量）→ 请求设备立即出关键帧。
+          // 限频 2s：持续丢包（WiFi 差）时最多每 2s 重置一次，不会打爆编码器
+          if (typeof s.pliCount === 'number') {
+            if (s.pliCount < lastPliCount) lastPliCount = s.pliCount // 重连后回退
+            if (s.pliCount > lastPliCount) {
+              lastPliCount = s.pliCount
+              const now = Date.now()
+              if (connected.value && now - lastPliResetAt > 2000) {
+                lastPliResetAt = now
+                console.warn('[webrtc] decoder desync (pliCount=' + s.pliCount + '), requesting IDR via reset_video')
+                sendControl({ type: 'reset_video' })
+              }
+            }
+          }
           // 诊断：每 3 次打印一次接收统计
           if (!window.__rtpStatsCount) window.__rtpStatsCount = 0
           if (++window.__rtpStatsCount % 3 === 0) {
@@ -1396,7 +1474,8 @@ function startStats() {
       })
       if (fpsCount) fps.value = fpsCount
     } catch (e) {}
-  }, 2000)
+    // 1s 轮询：比 2s 更快发现花屏（PLI 自愈延迟减半）与延迟/静默异常
+  }, 1000)
 }
 
 function parseLogTime(s) {
@@ -1413,9 +1492,8 @@ function scrollLogsToBottom() {
 }
 
 function applyLogFilter() {
+  // 日志级别由脚本顶层 log_level 在服务端过滤（debug/info），前端只按运行开始时间截取
   const filtered = (rawLogs || []).filter(l => {
-    // info 模式只显示 YAML log（level=info）；debug 模式显示全部日志
-    if (logLevel.value === 'info' && l.level !== 'info') return false
     if (runStartTime && parseLogTime(l.time) < runStartTime) return false
     return true
   })
@@ -1449,6 +1527,39 @@ function sendControl(obj) {
   // fallback：REST API
   api.control(store.deviceId, obj).catch(e => toast('控制失败：' + e.message, 'error'))
   return false
+}
+
+/** 服务端→浏览器脚本可视化事件（{"type":"se","ev":"tap"|"swipe"|"hit", ...}，设备像素坐标）：
+ *  引擎执行 tap/swipe、模板匹配命中时推送到投屏画面（样式复用 alt 反馈/测试匹配命中框） */
+function onControlMessage(e) {
+  let msg
+  try { msg = JSON.parse(e.data) } catch (err) { return }
+  if (!msg || msg.type !== 'se') return
+  if (msg.ev === 'tap') {
+    scriptFx.tap.x = msg.x || 0
+    scriptFx.tap.y = msg.y || 0
+    scriptFx.tap.show = true
+    if (fxTapTimer) clearTimeout(fxTapTimer)
+    fxTapTimer = setTimeout(() => { scriptFx.tap.show = false }, 2000)
+  } else if (msg.ev === 'swipe') {
+    const { x1 = 0, y1 = 0, x2 = 0, y2 = 0 } = msg
+    scriptFx.swipe.x = Math.min(x1, x2)
+    scriptFx.swipe.y = Math.min(y1, y2)
+    scriptFx.swipe.w = Math.abs(x2 - x1)
+    scriptFx.swipe.h = Math.abs(y2 - y1)
+    scriptFx.swipe.show = true
+    if (fxSwipeTimer) clearTimeout(fxSwipeTimer)
+    fxSwipeTimer = setTimeout(() => { scriptFx.swipe.show = false }, 2000)
+  } else if (msg.ev === 'hit') {
+    scriptFx.hit.x = msg.x || 0
+    scriptFx.hit.y = msg.y || 0
+    scriptFx.hit.w = msg.w || 0
+    scriptFx.hit.h = msg.h || 0
+    scriptFx.hit.label = `${msg.tpl || ''} ${Number(msg.score || 0).toFixed(2)}`
+    scriptFx.hit.show = true
+    if (fxHitTimer) clearTimeout(fxHitTimer)
+    fxHitTimer = setTimeout(() => { scriptFx.hit.show = false }, 3000)
+  }
 }
 
 /** 鼠标坐标 → 设备坐标（object-fit: contain 换算） */
@@ -1997,13 +2108,17 @@ function openScripts() { router.push('/scripts') }
 function tplThumbUrl(name) { return `/api/templates/${encodeURIComponent(name)}/image` }
 
 /** 模板列表：行点击 → 查看大图；
- *  编辑模式下按住 Alt 或 alt 模式开启 → 直接生成 find 记录（含 region）追加到编辑区 */
+ *  编辑模式下按住 Alt 或 alt 模式开启 → 在操作记录区生成 find / until 两条候选记录（含 region），
+ *  点选其中一条追加到编辑区（类似 swipe 生成两条记录） */
 function onTplRowClick(e, t) {
   confirmDelTpl.value = null
   if (isAltAction(e)) {
-    const yaml = renderOpTpl(opTpls.find, { name: t.name, region: templateRegionValue(t.name) })
-    appendYamlToScript(yaml)
-    toast(`已追加：find ${t.name}`, 'success')
+    const region = templateRegionValue(t.name)
+    opRecords.value = [
+      { id: ++opRecordSeq, text: `- find ${t.name}（限时查找+点击）`, yaml: renderOpTpl(opTpls.find, { name: t.name, region }) },
+      { id: ++opRecordSeq, text: `- until ${t.name}（等到出现+点击）`, yaml: renderOpTpl(opTpls.until, { name: t.name, region }) }
+    ]
+    toast(`已生成 ${t.name} 的 find / until 记录，点击选择追加`, 'success')
     return
   }
   viewTpl.value = t.name
@@ -2142,10 +2257,12 @@ function fileToBase64(file) {
   })
 }
 
-/** 全局按键：Esc 关闭模板大图 / 取消删除确认 */
+/** 全局按键：Esc 关闭 call 子脚本预览 / 模板大图 / 取消删除确认 */
 function onGlobalKeydown(e) {
   if (e.key !== 'Escape') return
-  if (viewTpl.value) {
+  if (previewScript.value) {
+    closeCallPreview()
+  } else if (viewTpl.value) {
     closeTplView()
   } else if (confirmDelTpl.value) {
     confirmDelTpl.value = null
@@ -2496,11 +2613,20 @@ function validateScriptCode(content) {
     }
   }
 
-  doc.steps.forEach((step, idx) => {
+  doc.steps.forEach((rawStep, idx) => {
     const at = `第 ${idx + 1} 步`
+    // 裸标量步骤（- str_app / - cls_app）等价 {str_app: null}，与引擎 exec_step 的规范化一致
+    const step = typeof rawStep === 'string' ? { [rawStep]: null } : rawStep
     if (!step || typeof step !== 'object' || Array.isArray(step)) {
       errors.push(`${at}格式错误`)
       return
+    }
+    for (const k of ['str_app', 'cls_app']) {
+      const v = step[k]
+      if (v === undefined || v === null) continue
+      if (typeof v !== 'string' || !/^[A-Za-z0-9_.]+$/.test(v.trim())) {
+        errors.push(`${at} ${k} 需要应用包名（仅字母数字点下划线）或省略`)
+      }
     }
     if (step.tap !== undefined) {
       const v = step.tap
@@ -2512,16 +2638,16 @@ function validateScriptCode(content) {
         errors.push(`${at} tap 需要 [x, y] 相对坐标`)
       }
     }
-    // 旧动作键只在非 find 步骤时报废弃（find 步骤里的 click 是合法参数）
-    if (step.find === undefined) {
-      if (step.click !== undefined) errors.push(`${at} click 已删除，请改用 find 的 click 参数（true/模板名/[x, y]）`)
+    // 旧动作键只在非 find/until 步骤时报废弃（find/until 步骤里的 click 是合法参数）
+    if (step.find === undefined && step.until === undefined) {
+      if (step.click !== undefined) errors.push(`${at} click 已删除，请改用 find/until 的 click 参数（true/模板名/[x, y]）`)
       if (step.click_find !== undefined) errors.push(`${at} click_find 已删除，请改用 find 的 click: true`)
-      if (step.until !== undefined) errors.push(`${at} until 已删除，请改用 find（timeout: 0 表示一直找）`)
     }
-    if (step.find !== undefined) {
-      const v = step.find
+    for (const key of ['find', 'until']) {
+      if (step[key] === undefined) continue
+      const v = step[key]
       if (typeof v !== 'string') {
-        errors.push(`${at} find 只支持模板字符串写法，如 find: shop.png`)
+        errors.push(`${at} ${key} 只支持模板字符串写法，如 ${key}: shop.png`)
       } else {
         if (!tplNames.has(v)) errors.push(`${at} 模板不存在：${v}`)
         checkRegion(at, step.region)
@@ -2538,10 +2664,16 @@ function validateScriptCode(content) {
           errors.push(`${at} click 只支持 true/false、模板名或 [x, y] 相对坐标`)
         }
       }
-      if (step.timeout !== undefined && (!Number.isFinite(Number(step.timeout)) || Number(step.timeout) < 0)) errors.push(`${at} timeout 需要非负毫秒数（0=一直找）`)
-      if (step.interval !== undefined && (!Number.isFinite(Number(step.interval)) || Number(step.interval) <= 0)) errors.push(`${at} interval 需要大于 0 的毫秒数`)
-      if (step.then !== undefined && !Array.isArray(step.then)) errors.push(`${at} then 需要步骤列表`)
-      if (step.else !== undefined && !Array.isArray(step.else)) errors.push(`${at} else 需要步骤列表`)
+      if (key === 'find') {
+        if (step.timeout !== undefined && (!Number.isFinite(Number(step.timeout)) || Number(step.timeout) <= 0)) {
+          errors.push(`${at} find timeout 需要大于 0 的毫秒数（一直找请用 until）`)
+        }
+      } else if (step.timeout !== undefined) {
+        errors.push(`${at} until 不支持 timeout（它本身就是一直等到模板出现）`)
+      }
+      if (step.interval !== undefined && (!Number.isFinite(Number(step.interval)) || Number(step.interval) <= 0)) errors.push(`${at} ${key} interval 需要大于 0 的毫秒数`)
+      if (step.then !== undefined && !Array.isArray(step.then)) errors.push(`${at} ${key} then 需要步骤列表`)
+      if (step.else !== undefined && !Array.isArray(step.else)) errors.push(`${at} ${key} else 需要步骤列表`)
     }
     if (step.swipe) {
       if (step.swipe.duration !== undefined) errors.push(`${at} swipe 请使用 time，不支持 duration`)
@@ -2614,6 +2746,27 @@ const scriptContent = computed(() => {
   return s ? s.content : ''
 })
 const scriptLines = computed(() => scriptContent.value.split('\n'))
+
+/** call 行解析（与 scriptLines 平行）：`- call: test.yaml` → { prefix, name, suffix }，其余行 → null */
+const callLinks = computed(() => scriptLines.value.map(line => {
+  const m = line.match(/^(\s*(?:-\s+)?call:\s*)(\S+)\s*(.*)$/)
+  if (!m) return null
+  const name = m[2].replace(/^["']|["']$/g, '')
+  return name ? { prefix: m[1], name, suffix: m[3] } : null
+}))
+
+// call 子脚本预览弹窗（点脚本名打开；ESC / ✕ / 点遮罩关闭）
+const previewScript = ref(null)
+
+function openCallPreview(name) {
+  const s = scripts.value.find(x => x.name === name)
+  if (!s) return toast(`子脚本不存在：${name}`, 'warn')
+  previewScript.value = s
+}
+
+function closeCallPreview() {
+  previewScript.value = null
+}
 
 /** 顶层 steps 项的前导缩进：首个 "- " 行的缩进长度 */
 const stepIndent = computed(() => {
@@ -2742,6 +2895,9 @@ onUnmounted(() => {
   if (savedTimer) { clearTimeout(savedTimer); savedTimer = null }
   if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
   if (altFeedbackTimer) { clearTimeout(altFeedbackTimer); altFeedbackTimer = null }
+  if (fxTapTimer) { clearTimeout(fxTapTimer); fxTapTimer = null }
+  if (fxSwipeTimer) { clearTimeout(fxSwipeTimer); fxSwipeTimer = null }
+  if (fxHitTimer) { clearTimeout(fxHitTimer); fxHitTimer = null }
   stopRunStatusPoll()
   releaseLock()
   cleanup(true)
@@ -3007,7 +3163,6 @@ onUnmounted(() => {
 
 .auto-run { display: flex; flex-wrap: wrap; gap: 8px; }
 .auto-run .select { flex: 1; min-width: 120px; }
-.auto-run .log-level { flex: 0 0 90px; }
 .run-actions { display: flex; gap: 8px; }
 .run-actions .btn { flex: 1; }
 
@@ -3035,6 +3190,17 @@ onUnmounted(() => {
 .sv-line.sel {
   background: rgba(34,211,165,.12); color: var(--accent);
   box-shadow: inset 2px 0 0 var(--accent);
+}
+/* call 子脚本名链接：悬停下划线，点击弹窗预览（脚本视图 user-select:none，需单独放开） */
+.call-link { color: var(--accent-2); cursor: pointer; }
+.call-link:hover { text-decoration: underline; }
+
+/* call 子脚本预览弹窗（modal-mask/.modal/.modal-head/.modal-body 为全局样式） */
+.preview-modal { min-width: 520px; width: 520px; }
+.preview-code {
+  background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 10px 12px; font-size: 12px; line-height: 1.65; color: #c9d4e8;
+  overflow: auto; max-height: 60vh; white-space: pre; margin: 0;
 }
 .script-view-empty {
   flex: 1; display: flex; align-items: center; justify-content: center;

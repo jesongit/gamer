@@ -1,38 +1,66 @@
 //! YAML 自动化脚本引擎
 //!
+//! 顶层字段：steps（必需）/ action_wait（操作后默认等待，500ms）/
+//!           log_level（debug|info，默认 info：info 级别不记录 debug 日志）
+//!
 //! 支持动作：
 //!   wait / log / key / text / tap / swipe /
-//!   find(查找模板：interval 检测间隔默认 500ms；timeout 超时默认 6000ms（0=一直找）；
-//!        click 支持 true / 模板名 / [x,y] 相对坐标，找到后的点击方式；threshold；region；
-//!        then 找到后执行 / else 超时后执行) /
+//!   str_app(冷启动应用：先 force-stop 再启动，包名可省略回退设备配置) /
+//!   cls_app(关闭应用：adb force-stop，不碰会话/投屏) /
+//!   find(查找模板：interval 检测间隔默认 500ms；timeout 必须 > 0，默认 6000ms；
+//!        click 支持 true（默认，点击模板中心）/ false（不点击）/ 模板名 / [x,y] 相对坐标；
+//!        threshold；region；then 找到后执行 / else 超时后执行) /
+//!   until(一直等到模板出现：等价于 timeout 为 0 的 find，参数与 find 完全一致，
+//!        永不超时，故 else 不会执行) /
 //!   loop / goto / label / call
 //!
 //! 每个操作（除 wait 动作本身）可用 wait 参数指定操作后的等待毫秒数，
-//! 未指定时取脚本顶层 action_wait（如 `action_wait: 500`），脚本也未定义时默认 500ms
+//! 未指定时取脚本顶层 action_wait（如 `action_wait: 500`），脚本也未定义时默认 500ms；
+//! str_app 例外：应用启动要 1~3s，未显式指定时默认等 3000ms
 //!
 //! 找图：截图（帧缓存优先）→ 模板匹配
 //! region 支持 a/u/d/l/r/ul/ur/dl/dr 半区/四分之一区
+//!
+//! 可视化事件：tap/swipe/匹配命中时经 control DataChannel 推送给浏览器投屏页面
+//! （emit → ViewerMap 查当前 viewer；无 viewer 时静默丢弃）
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_recursion::async_recursion;
 use image::GenericImageView;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use tracing::warn;
 
 use crate::device::DeviceManager;
 use crate::matcher;
 use crate::store::Db;
+use crate::webrtc::ViewerMap;
 
 /// 脚本未定义顶层 action_wait 时，操作后的默认等待毫秒数
 const DEFAULT_ACTION_WAIT: u64 = 500;
+
+/// 脚本运行可视化事件（服务端 → 浏览器，经 control DataChannel，JSON 格式 {"type":"se","ev":...}）
+/// 注意 rename_all="snake_case"：内部标签默认用变体名原样（"Tap"），
+/// 前端按小写 "tap"/"swipe"/"hit" 匹配（曾因大小写不匹配事件全部被忽略）
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "ev", rename_all = "snake_case")]
+pub enum ScriptEvent {
+    /// 引擎点击（设备像素坐标）
+    Tap { x: u32, y: u32 },
+    /// 引擎滑动（设备像素坐标）
+    Swipe { x1: u32, y1: u32, x2: u32, y2: u32 },
+    /// 模板匹配命中（设备像素坐标 + 置信度）
+    Hit { tpl: String, x: u32, y: u32, w: u32, h: u32, score: f32 },
+}
 
 /// 运行器
 pub struct Runner {
     pub db: Db,
     pub devices: Arc<DeviceManager>,
+    /// 每设备活跃 viewer 注册表：脚本 tap/swipe/命中可视化事件推送用
+    pub viewers: ViewerMap,
 }
 
 /// 脚本运行上下文
@@ -44,12 +72,18 @@ pub struct Ctx {
     pub stop: Arc<std::sync::atomic::AtomicBool>,
     /// 脚本顶层 action_wait：步骤未显式写 wait 时操作后的默认等待毫秒数
     pub action_wait: u64,
+    /// 脚本顶层 log_level=debug 时记录 debug 日志（默认 info：debug 日志不记录）
+    pub log_debug: bool,
     pub log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
 }
 
 impl Ctx {
-    /// 记录日志：实时回调（如有）并同时收集到 ctx.log
+    /// 记录日志：实时回调（如有）并同时收集到 ctx.log；
+    /// log_level=info 时丢弃 debug 日志（不回调、不收集）
     fn log(&mut self, level: &str, msg: String) {
+        if level == "debug" && !self.log_debug {
+            return;
+        }
         if let Some(cb) = &self.log_cb {
             cb(level.to_string(), msg.clone());
         }
@@ -58,8 +92,31 @@ impl Ctx {
 }
 
 impl Runner {
-    pub fn new(db: Db, devices: Arc<DeviceManager>) -> Self {
-        Self { db, devices }
+    pub fn new(db: Db, devices: Arc<DeviceManager>, viewers: ViewerMap) -> Self {
+        Self { db, devices, viewers }
+    }
+
+    /// 推送脚本可视化事件给该设备当前的 viewer（无 viewer / 通道未开 / 发送失败均静默忽略）
+    async fn emit(&self, device_id: &str, ev: ScriptEvent) {
+        let dc = {
+            let map = self.viewers.lock().unwrap();
+            map.get(device_id)
+                .and_then(|h| h.control_dc.lock().clone())
+        };
+        let Some(dc) = dc else {
+            tracing::debug!(device = %device_id, "script event dropped: no viewer control_dc");
+            return;
+        };
+        let mut v = match serde_json::to_value(&ev) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        if let Some(o) = v.as_object_mut() {
+            o.insert("type".into(), serde_json::json!("se"));
+        }
+        if let Err(e) = dc.send_text(v.to_string()).await {
+            tracing::warn!(device = %device_id, "script event send failed: {}", e);
+        }
     }
 
     /// 运行脚本内容（YAML 文本）
@@ -77,6 +134,8 @@ impl Runner {
         let steps = doc.get("steps").and_then(|v| v.as_sequence()).cloned().ok_or_else(|| anyhow::anyhow!("missing steps"))?;
         // 脚本顶层 action_wait：步骤未显式写 wait 时的操作后默认等待
         let action_wait = doc.get("action_wait").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_ACTION_WAIT);
+        // 脚本顶层 log_level：debug 记录全部日志，info（默认）不记录 debug 日志
+        let log_debug = doc.get("log_level").and_then(|v| v.as_str()).map(|s| s.eq_ignore_ascii_case("debug")).unwrap_or(false);
 
         let mut ctx = Ctx {
             device_id: device_id.to_string(),
@@ -85,6 +144,7 @@ impl Runner {
             log: Vec::new(),
             stop,
             action_wait,
+            log_debug,
             log_cb,
         };
 
@@ -126,13 +186,25 @@ impl Runner {
 
     #[async_recursion]
     async fn exec_step(&self, ctx: &mut Ctx, step: &Value) -> anyhow::Result<()> {
+        // 无参动作简写：`- str_app` / `- cls_app`（纯标量步骤）等价 `- str_app:`
+        // （YAML 里两者解析类型不同：标量 vs 映射，这里统一转成值为 null 的映射）
+        let scalar_owned;
+        let step = match step.as_str() {
+            Some(key) => {
+                let mut m = serde_yaml::Mapping::new();
+                m.insert(Value::String(key.to_string()), Value::Null);
+                scalar_owned = Value::Mapping(m);
+                &scalar_owned
+            }
+            None => step,
+        };
         // label 不执行
         if step.get("label").is_some() {
             return Ok(());
         }
         // 动作键（除 wait 外）：用于区分 `wait` 动作与操作级 `wait` 参数
-        const ACTION_KEYS: [&str; 9] = [
-            "log", "key", "text", "tap", "swipe", "find", "loop", "call", "goto",
+        const ACTION_KEYS: [&str; 12] = [
+            "log", "key", "text", "tap", "swipe", "find", "until", "loop", "call", "goto", "str_app", "cls_app",
         ];
         let has_action = ACTION_KEYS.iter().any(|k| step.get(*k).is_some());
         if step.get("wait").is_some() && !has_action {
@@ -182,6 +254,7 @@ impl Runner {
             let x = (rx * w as f32).round().clamp(0.0, w as f32) as u32;
             let y = (ry * h as f32).round().clamp(0.0, h as f32) as u32;
             ctx.log("debug", format!("点击坐标 ({:.3}, {:.3}) → 像素 ({}, {})", rx, ry, x, y));
+            self.emit(&ctx.device_id, ScriptEvent::Tap { x, y }).await;
             s.tap(x as f32, y as f32).await?;
         }
         if let Some(v) = step.get("swipe") {
@@ -198,10 +271,13 @@ impl Runner {
             let x2 = (rx2 * w as f32).round().clamp(0.0, w as f32) as u32;
             let y2 = (ry2 * h as f32).round().clamp(0.0, h as f32) as u32;
             ctx.log("debug", format!("滑动 ({:.3},{:.3})→({:.3},{:.3}) {}ms", rx1, ry1, rx2, ry2, dur));
+            self.emit(&ctx.device_id, ScriptEvent::Swipe { x1, y1, x2, y2 }).await;
             s.swipe(x1 as f32, y1 as f32, x2 as f32, y2 as f32, dur).await?;
         }
-        if step.get("find").is_some() {
-            self.exec_find(ctx, step).await?;
+        if step.get("find").is_some() || step.get("until").is_some() {
+            // find 与 until 共用实现：until 等价于 timeout 为 0 的 find（一直找到出现为止）
+            let key = if step.get("until").is_some() { "until" } else { "find" };
+            self.exec_find(ctx, step, key).await?;
         }
         if let Some(v) = step.get("loop") {
             let times = v.get("times").and_then(|x| x.as_u64()).unwrap_or(1);
@@ -227,10 +303,33 @@ impl Runner {
                 anyhow::bail!("子脚本不存在: {}", script_name);
             }
         }
+        if let Some(v) = step.get("str_app") {
+            let pkg = self.resolve_app_pkg(ctx, v)?;
+            // "+" 前缀：先 force-stop 再启动（scrcpy 定制控制消息，
+            // 虚拟屏模式下自动启动到虚拟屏，不要用 adb am start——会落到主屏）
+            let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+            ctx.log("info", format!("冷启动应用 {}", pkg));
+            s.start_app(&format!("+{}", pkg)).await?;
+        }
+        if let Some(v) = step.get("cls_app") {
+            let pkg = self.resolve_app_pkg(ctx, v)?;
+            let serial = self
+                .devices
+                .snapshot(&ctx.device_id)
+                .map(|(d, _, _)| d.addr)
+                .filter(|a| !a.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("设备不存在或未解析出 adb serial"))?;
+            ctx.log("info", format!("关闭应用 {}", pkg));
+            // adb force-stop：不碰 scrcpy 会话（屏幕/投屏不中断）；幂等，应用未运行也无害。
+            // 虚拟屏上应用被杀后画面变桌面或黑屏，流不断，属预期
+            self.devices.adb.shell(&serial, &format!("am force-stop {}", pkg), Duration::from_secs(8)).await?;
+        }
         // 操作后统一等待：除 wait 动作本身外，每个操作可用 wait 参数指定操作后的等待毫秒数，
-        // 未指定时取脚本顶层 action_wait（脚本未定义时默认 500ms）
+        // 未指定时取脚本顶层 action_wait（脚本未定义时默认 500ms）；
+        // str_app 例外：应用启动要 1~3s，未显式指定时默认等 3000ms
         if has_action {
-            let wait_ms = step.get("wait").and_then(|x| x.as_u64()).unwrap_or(ctx.action_wait);
+            let default_wait = if step.get("str_app").is_some() { 3000 } else { ctx.action_wait };
+            let wait_ms = step.get("wait").and_then(|x| x.as_u64()).unwrap_or(default_wait);
             if wait_ms > 0 {
                 ctx.log("debug", format!("操作后等待 {}ms", wait_ms));
                 tokio::time::sleep(Duration::from_millis(wait_ms)).await;
@@ -239,38 +338,71 @@ impl Runner {
         Ok(())
     }
 
-    /// find：循环查找模板（默认检测间隔 500ms、超时 6000ms，0=一直找），
-    /// 找到后按 click 参数处理并执行 then，超时未找到执行 else
+    /// str_app/cls_app 的应用包名解析：显式值优先，回退设备配置 pkg；
+    /// 校验仅允许 [A-Za-z0-9_.]（cls_app 要拼进 adb shell 命令，防注入）
+    fn resolve_app_pkg(&self, ctx: &Ctx, v: &Value) -> anyhow::Result<String> {
+        let pkg = v
+            .as_str()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.devices.snapshot(&ctx.device_id).and_then(|(d, _, _)| d.pkg))
+            .unwrap_or_default();
+        if pkg.is_empty() {
+            anyhow::bail!("缺少应用包名（步骤未指定且设备未配置 pkg）");
+        }
+        if !pkg.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') {
+            anyhow::bail!("应用包名字符非法: {}", pkg);
+        }
+        Ok(pkg)
+    }
+
+    /// find：循环查找模板（检测间隔 interval 默认 500ms；timeout 必须 > 0，默认 6000ms），
+    /// 找到后按 click 参数处理并执行 then，超时未找到执行 else；
+    /// until：等价于 timeout 为 0 的 find——一直循环查找直到模板出现（永不超时，else 不会执行），
+    /// 其余参数（interval/click/threshold/region/then）与 find 完全一致
     #[async_recursion]
-    async fn exec_find(&self, ctx: &mut Ctx, step: &Value) -> anyhow::Result<()> {
-        let template = self.template_name(step, "find")?;
-        let interval_ms = self.opt_u64(step, "find", "interval").unwrap_or(500);
-        let timeout_ms = self.opt_u64(step, "find", "timeout").unwrap_or(6000);
-        let threshold = self.opt_f64(step, "find", "threshold")
+    async fn exec_find(&self, ctx: &mut Ctx, step: &Value, key: &str) -> anyhow::Result<()> {
+        let forever = key == "until";
+        let template = self.template_name(step, key)?;
+        let interval_ms = self.opt_u64(step, key, "interval").unwrap_or(500);
+        let timeout_ms = if forever {
+            0
+        } else {
+            let t = self.opt_u64(step, key, "timeout").unwrap_or(6000);
+            if t == 0 {
+                anyhow::bail!("find 的 timeout 必须大于 0（一直找请用 until）");
+            }
+            t
+        };
+        let threshold = self.opt_f64(step, key, "threshold")
             .map(|x| x as f32)
             .unwrap_or(self.devices.cfg.default_threshold);
-        let timeout_desc = if timeout_ms == 0 {
-            "不超时（一直找）".to_string()
+        let timeout_desc = if forever {
+            "直到出现（不超时）".to_string()
         } else {
             format!("{}ms", timeout_ms)
         };
         ctx.log("info", format!("查找模板 {}，超时 {}，检测间隔 {}ms", template, timeout_desc, interval_ms));
-        let then_steps = self.opt_value(step, "find", "then").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
-        let else_steps = self.opt_value(step, "find", "else").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
+        let then_steps = self.opt_value(step, key, "then").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
+        let else_steps = self.opt_value(step, key, "else").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
         let start = std::time::Instant::now();
         loop {
             if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
-            if timeout_ms > 0 && start.elapsed().as_millis() as u64 > timeout_ms {
+            if !forever && start.elapsed().as_millis() as u64 > timeout_ms {
                 ctx.log("warn", format!("查找模板 {} 超时", template));
                 for sub in &else_steps {
                     self.exec_step(ctx, sub).await?;
                 }
                 break;
             }
-            if let Some(m) = self.find_once(ctx, step, threshold).await? {
+            if let Some(m) = self.find_once(ctx, step, key, threshold).await? {
                 ctx.log("success", format!("模板 {} 已找到 @ ({}, {})", template, m.x, m.y));
+                self.emit(&ctx.device_id, ScriptEvent::Hit {
+                    tpl: template.clone(),
+                    x: m.x, y: m.y, w: m.width, h: m.height, score: m.score,
+                }).await;
                 if self.exec_find_click(ctx, step, threshold, &m).await? {
                     // click 成功（或未配置 click）→ 执行 then 并结束
                     for sub in &then_steps {
@@ -287,15 +419,13 @@ impl Runner {
     }
 
     /// 处理 find 的 click 参数，返回是否成功点击：
-    ///   true            → 点击模板中心
-    ///   false/未配置     → 不点击（视为成功，直接执行 then）
+    ///   true/未配置（默认）→ 点击模板中心
+    ///   false           → 不点击（视为成功，直接执行 then）
     ///   模板名           → 在模板区域内查找该模板，找到后点击其中心（未找到返回 false，继续循环）
     ///   [x, y]          → 点击模板区域内的相对坐标（0~1，如 [0.5, 0.5] = 中心）
     async fn exec_find_click(&self, ctx: &mut Ctx, step: &Value, threshold: f32, m: &matcher::MatchResult) -> anyhow::Result<bool> {
-        let click = match step.get("click") {
-            Some(v) => v,
-            None => return Ok(true),
-        };
+        let default_click = Value::Bool(true);
+        let click = step.get("click").unwrap_or(&default_click);
         let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
         let box_region = [m.x, m.y, m.width, m.height];
         if let Some(b) = click.as_bool() {
@@ -304,6 +434,7 @@ impl Runner {
             }
             let (cx, cy) = (m.x + m.width / 2, m.y + m.height / 2);
             ctx.log("success", format!("点击模板中心 @ ({}, {})", cx, cy));
+            self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
             s.tap(cx as f32, cy as f32).await?;
             return Ok(true);
         }
@@ -314,6 +445,11 @@ impl Runner {
                 Some(inner) => {
                     let (cx, cy) = (inner.x + inner.width / 2, inner.y + inner.height / 2);
                     ctx.log("success", format!("模板区域内找到 {}，点击 @ ({}, {})", name, cx, cy));
+                    self.emit(&ctx.device_id, ScriptEvent::Hit {
+                        tpl: name.to_string(),
+                        x: inner.x, y: inner.y, w: inner.width, h: inner.height, score: inner.score,
+                    }).await;
+                    self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
                     s.tap(cx as f32, cy as f32).await?;
                     Ok(true)
                 }
@@ -334,6 +470,7 @@ impl Runner {
             let cx = m.x + (rx * m.width as f64).round() as u32;
             let cy = m.y + (ry * m.height as f64).round() as u32;
             ctx.log("success", format!("点击模板内相对坐标 ({:.3}, {:.3}) @ ({}, {})", rx, ry, cx, cy));
+            self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
             s.tap(cx as f32, cy as f32).await?;
             return Ok(true);
         } else {
@@ -341,9 +478,9 @@ impl Runner {
         }
     }
 
-    /// 执行一次 find 查找（不重试）：解析 region 后匹配，返回完整匹配结果
-    async fn find_once(&self, ctx: &Ctx, step: &Value, threshold: f32) -> anyhow::Result<Option<matcher::MatchResult>> {
-        let template = self.template_name(step, "find")?;
+    /// 执行一次 find/until 查找（不重试）：解析 region 后匹配，返回完整匹配结果
+    async fn find_once(&self, ctx: &Ctx, step: &Value, key: &str, threshold: f32) -> anyhow::Result<Option<matcher::MatchResult>> {
+        let template = self.template_name(step, key)?;
         let screen = self.devices.screenshot(&ctx.device_id).await
             .map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
         let (w, h) = self.screen_size(ctx, &screen);

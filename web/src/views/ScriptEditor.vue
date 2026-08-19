@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">脚本编辑</div>
-        <div class="page-sub">YAML 自动化脚本 · 支持 find / tap / swipe / text / key / loop / goto / call / wait；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms）</div>
+        <div class="page-sub">YAML 自动化脚本 · 支持 find / until / tap / swipe / text / key / str_app / cls_app / loop / goto / call / wait；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms；str_app 默认 3000ms）</div>
       </div>
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
@@ -55,6 +55,11 @@
         </div>
         <div class="modal-body">
           <div class="help-block">
+            <div class="hb-title">⚙ 顶层配置</div>
+            <pre class="hb-code mono">action_wait: 500       # 每个操作后的默认等待 ms（默认 500）
+log_level: info        # 日志级别：info=精简（默认） / debug=详细</pre>
+          </div>
+          <div class="help-block">
             <div class="hb-title">🎬 动作</div>
             <pre class="hb-code mono">- wait: [500, 1500]                   # 随机延时
 - tap: [0.500, 0.500]                # 相对坐标点击
@@ -68,10 +73,10 @@
           </div>
           <div class="help-block">
             <div class="hb-title">🔍 找图 find</div>
-            <pre class="hb-code mono">- find: sign_btn.png     # 查找模板
+            <pre class="hb-code mono">- find: sign_btn.png     # 查找模板（timeout 必须 > 0）
   interval: 500          # 检测间隔 ms（默认 500）
-  timeout: 6000          # 超时 ms（默认 6000，0=一直找）
-  click: true            # 找到后点击模板中心（默认 false）
+  timeout: 6000          # 超时 ms（默认 6000，一直找请用 until）
+  click: true            # 找到后点击模板中心（默认 true，false 不点击）
   threshold: 0.85        # 匹配阈值（默认 0.8）
   region: a              # 搜索区域（默认 a=全屏）
   then:                  # 找到后执行
@@ -84,9 +89,8 @@
   else:
     - log: "对话框没出现"
 
-- find: dialog.png
-  click: [0.5, 0.1]      # 点击 dialog.png 区域内的相对坐标 [0.5,0.1]
-  timeout: 0             # 不超时（一直找）</pre>
+- until: done.png        # 一直等到模板出现（等价于旧 find timeout: 0，永不超时）
+  interval: 500          # 参数与 find 一致：click/threshold/region/then（else 不会执行）</pre>
           </div>
           <div class="help-block">
             <div class="hb-title">🔁 逻辑</div>
@@ -115,14 +119,13 @@ const code = ref('')
 const valid = ref(null)
 const showHelp = ref(false)
 
-const DEFAULT_CODE = `name: 每日签到
-action_wait: 500
+const DEFAULT_CODE = `action_wait: 500
+log_level: info
 
 steps:
   - wait: [300, 800]
   - find: sign_btn.png
     threshold: 0.85
-    click: true
     then:
       - log: "点击签到按钮"
     else:
