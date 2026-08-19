@@ -38,16 +38,21 @@ pub struct AppState {
     pub cfg: Config,
     /// 脚本运行停止标志
     pub run_stops: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
-    /// 每设备的活跃 viewer（WebRTC 会话）注册表：
-    /// device_id → (pusher running 标志, peer 弱引用)。
+    /// 每设备的活跃 viewer（WebRTC 会话）注册表（main.rs 创建，与 Scheduler 共享）：
     /// 同一设备只允许一个活跃 viewer——新连接踢掉旧连接（旧 pusher 停止 + 旧 peer 关闭），
     /// 避免多连接多推流导致浏览器端 srcObject 串流/资源浪费。
-    pub viewers:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, (Arc<std::sync::atomic::AtomicBool>, std::sync::Weak<webrtc::peer_connection::RTCPeerConnection>)>>>,
+    /// control_dc 字段供引擎反向推送脚本可视化事件（tap/swipe/匹配命中）。
+    pub viewers: crate::webrtc::ViewerMap,
 }
 
-pub fn build_router(db: Db, devices: Arc<DeviceManager>, scheduler: Arc<Scheduler>, cfg: Config) -> Router {
-    let runner = Arc::new(Runner::new(db.clone(), devices.clone()));
+pub fn build_router(
+    db: Db,
+    devices: Arc<DeviceManager>,
+    scheduler: Arc<Scheduler>,
+    cfg: Config,
+    viewers: crate::webrtc::ViewerMap,
+) -> Router {
+    let runner = Arc::new(Runner::new(db.clone(), devices.clone(), viewers.clone()));
     let state = AppState {
         db,
         devices,
@@ -55,7 +60,7 @@ pub fn build_router(db: Db, devices: Arc<DeviceManager>, scheduler: Arc<Schedule
         runner,
         cfg,
         run_stops: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        viewers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        viewers,
     };
 
     // 视频静默看门狗：自动重连断流设备（见 spawn_watchdog）
@@ -92,30 +97,65 @@ pub fn build_router(db: Db, devices: Arc<DeviceManager>, scheduler: Arc<Schedule
         .with_state(state)
 }
 
-/// 视频静默看门狗：设备在线但视频流超过阈值无新帧时，自动重连 scrcpy 会话
-/// 并踢掉旧 viewer（pusher 停止 + peer 关闭 → ws.rs 退出清理）。
+/// 视频静默看门狗：设备在线但视频流超过阈值无新帧时的处置。
 /// 兜底一切"静默断流"场景：无线 adb 隧道假死、scrcpy-server 卡死、
 /// 设备编码器停摆等——否则浏览器画面会永久定格在最后一帧。
+///
+/// 注意虚拟屏**无应用时编码器完全不出帧**（黑屏 0 帧，连 i-frame-interval 的
+/// IDR 都没有）——静默≠故障：
+/// - 无 viewer 且无脚本：静默大多是黑屏空转，重连只会白白 churn（重建会话/
+///   虚拟屏，还可能触发 adb 异常），直接断开进低功耗，下次脚本/投屏自动重连
+/// - 有 viewer 或脚本运行中：先 reset_video 请求关键帧探测编码器是否存活
+///   （黑屏虚拟屏重连后照样黑）；探测后仍静默才断开重连（真断流兜底，慢 15s）
 const VIDEO_IDLE_RECONNECT_MS: u64 = 20_000;
+/// reset_video 探测后等待新帧的宽限期，超过则认定编码器/链路已死，升级为重连
+const VIDEO_NUDGE_GRACE: Duration = Duration::from_secs(15);
 
 fn spawn_watchdog(st: AppState) {
     tokio::spawn(async move {
+        // 已发过 reset_video 探测的设备 → 探测时刻
+        let mut nudged: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             for (id, session) in st.devices.online_sessions() {
                 let idle = session.video_idle_ms();
                 if idle < VIDEO_IDLE_RECONNECT_MS {
+                    nudged.remove(&id);
                     continue;
                 }
-                warn!(device = %id, idle_ms = idle, "video stream silent, auto-reconnecting scrcpy session");
-                // 踢旧 viewer：pusher 停止 + peer 关闭 → 浏览器端连接断开，可重新连接
+                let has_viewer = st.viewers.lock().unwrap().contains_key(&id);
+                let running = st.devices.has_running_scripts(&id);
+                if !has_viewer && !running {
+                    warn!(device = %id, idle_ms = idle, "video silent, no viewer/script: disconnect (low-power)");
+                    nudged.remove(&id);
+                    st.devices.disconnect_device(&id).await;
+                    continue;
+                }
+                match nudged.get(&id).copied() {
+                    None => {
+                        // 第一轮：reset_video 请求 config+IDR——编码器活着会立即出帧，
+                        // idle 归零回到健康分支，避免黑屏空转被误判为断流
+                        if let Some(s) = st.devices.session(&id) {
+                            let _ = s.reset_video().await;
+                        }
+                        nudged.insert(id.clone(), std::time::Instant::now());
+                        continue;
+                    }
+                    Some(t) if t.elapsed() < VIDEO_NUDGE_GRACE => continue,
+                    Some(_) => {
+                        nudged.remove(&id);
+                    }
+                }
+                warn!(device = %id, idle_ms = idle, "video stream silent after keyframe nudge, auto-reconnecting scrcpy session");
+                // 踢旧 viewer：pusher 停止 + peer 关闭 → ws.rs 退出清理
                 let kicked = {
                     let mut map = st.viewers.lock().unwrap();
                     map.remove(&id)
                 };
-                if let Some((running, peer_weak)) = kicked {
-                    running.store(false, std::sync::atomic::Ordering::SeqCst);
-                    if let Some(p) = peer_weak.upgrade() {
+                if let Some(h) = kicked {
+                    h.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(p) = h.peer.upgrade() {
                         let _ = p.close().await;
                     }
                 }
@@ -211,92 +251,12 @@ fn device_views(st: &AppState) -> Vec<DeviceView> {
 /// 扫描 `adb devices -l`，自动注册新发现的设备（USB / 无线 adb / 模拟器），
 /// 已注册的跳过；返回完整设备列表（前端"刷新"时调用）
 async fn api_scan_devices(State(st): State<AppState>) -> Response {
-    let out = match st.devices.adb.run(&["devices", "-l"], Duration::from_secs(10)).await {
-        Ok(o) => o,
+    // 解析/去重/入库逻辑在 DeviceManager::scan_and_sync（与启动自举共用）
+    let added = match st.devices.scan_and_sync().await {
+        Ok(n) => n,
         Err(e) => return err_response(StatusCode::BAD_GATEWAY, &format!("adb devices 失败: {}", e)),
     };
-    let mut existing = match st.db.list_devices() {
-        Ok(d) => d,
-        Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    };
-    let mut added: usize = 0;
-    for line in out.lines().skip(1) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        // 格式: <serial> device product:... model:... device:... transport_id:N
-        if parts.len() < 2 || parts[1] != "device" {
-            continue; // offline / unauthorized 不注册
-        }
-        let serial = parts[0].to_string();
-        if serial.is_empty() || serial == "localhost" {
-            continue;
-        }
-        let model = parts
-            .iter()
-            .find_map(|p| p.strip_prefix("model:"))
-            .map(|m| m.replace('_', " "));
-        let kind = infer_device_kind(&serial);
-        // 去重 + 地址同步：精确/子串/model 匹配（USB↔无线切换、无线 IP 变化后
-        // serial 会变，见 adb.rs resolve_serial）；匹配到的旧设备更新 addr/kind，
-        // 避免同一台设备重复入库
-        let matched = existing.iter_mut().find(|d| {
-            if !d.addr.is_empty() {
-                d.addr == serial
-                    || (!serial.is_empty() && d.addr.contains(&serial))
-                    || (!d.addr.is_empty() && serial.contains(&d.addr))
-                    || (model.is_some() && model.as_deref() == Some(d.name.as_str()))
-            } else {
-                kind == "usb" && d.kind == "usb"
-            }
-        });
-        if let Some(old) = matched {
-            if old.addr != serial || old.kind != kind {
-                old.addr = serial.clone();
-                old.kind = kind.to_string();
-                let _ = st.devices.upsert_device(old).await;
-            }
-            continue;
-        }
-        let name = model.clone().unwrap_or_else(|| short_serial(&serial));
-        let device = Device {
-            id: Uuid::new_v4().simple().to_string(),
-            name,
-            kind: kind.to_string(),
-            addr: serial,
-            screen_mode: ScreenMode::Mirror,
-            vd_res: None,
-            vd_dpi: None,
-            pkg: None,
-            fps: None,
-            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-        };
-        if let Err(e) = st.devices.upsert_device(&device).await {
-            return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
-        }
-        existing.push(device);
-        added += 1;
-    }
     Json(serde_json::json!({"ok": true, "added": added, "devices": device_views(&st)})).into_response()
-}
-
-/// 从 adb serial 推断接入方式：emulator-* → 模拟器；ip:port / adb-*（mDNS）→ 无线；其余 → USB
-fn infer_device_kind(serial: &str) -> &'static str {
-    if serial.starts_with("emulator-") {
-        "emu"
-    } else if serial.contains(':') || serial.starts_with("adb-") {
-        "wifi"
-    } else {
-        "usb"
-    }
-}
-
-/// 缩短过长的 serial（如 mDNS 形式）用于默认设备名
-fn short_serial(serial: &str) -> String {
-    if serial.len() > 24 {
-        let head: String = serial.chars().take(20).collect();
-        format!("{}…", head)
-    } else {
-        serial.to_string()
-    }
 }
 
 #[derive(Deserialize)]
@@ -358,9 +318,9 @@ async fn api_update_device(State(st): State<AppState>, Path(id): Path<String>, J
         let mut map = st.viewers.lock().unwrap();
         map.remove(&id)
     };
-    if let Some((running, peer_weak)) = kicked {
-        running.store(false, std::sync::atomic::Ordering::SeqCst);
-        if let Some(p) = peer_weak.upgrade() {
+    if let Some(h) = kicked {
+        h.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(p) = h.peer.upgrade() {
             let _ = p.close().await;
         }
         info!(device = %id, "config changed, kicked viewer");
@@ -749,6 +709,8 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
     }
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     st.run_stops.lock().unwrap().insert(id.clone(), stop.clone());
+    // 设备运行计数 +1（空闲断开守卫；spawn 结束时 run_end 归零）
+    st.devices.run_begin(&req.device_id);
     let runner = st.runner.clone();
     let devices = st.devices.clone();
     let db = st.db.clone();
@@ -768,6 +730,9 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
     };
     tokio::spawn(async move {
         let logs = runner.run(&device_id, &script_id, &content, stop.clone(), log_cb, start_index).await;
+        devices.run_end(&device_id);
+        // 空闲低功耗：N 秒后无脚本运行且无 viewer → 断开 scrcpy 会话（adb 保留）
+        devices.schedule_idle_disconnect(&device_id);
         match logs {
             Ok(_entries) => {
                 let _ = db.add_log(&device_id, &script_id, "success", "脚本执行完成");
@@ -776,7 +741,6 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
                 let _ = db.add_log(&device_id, &script_id, "error", &format!("脚本执行失败: {}", e));
             }
         }
-        let _ = devices;
         // 运行结束：移除停止标志（条目存在与否同时作为"脚本是否在运行"的状态依据）
         let mut stops = run_stops.lock().unwrap();
         if let Some(cur) = stops.get(&script_id) {

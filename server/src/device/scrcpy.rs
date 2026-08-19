@@ -116,9 +116,23 @@ impl ScrcpySession {
         let serial = if device.addr.is_empty() { "usb".to_string() } else { device.addr.clone() };
         info!(device = %device.name, serial = %serial, "connecting scrcpy session");
 
-        // 1. 网络设备先 adb connect（已连接的跳过，mDNS serial 无需 connect）
-        if !device.addr.is_empty() && !adb.is_connected(&serial).await {
-            adb.connect(&device.addr).await?;
+        // 1. 确保 adb transport 可用。只有网络地址（IP:port）才用 adb connect；
+        //    USB serial / mDNS 名传给 adb connect 会被当主机名解析 →
+        //    "cannot resolve host" 假错误，掩盖真实的 offline/未授权/拔出状态。
+        //    USB/mDNS 掉到 offline 时先 adb reconnect offline 恢复一次（免拔线）
+        if !adb.is_connected(&serial).await {
+            if device.addr.contains(':') {
+                adb.connect(&device.addr).await?;
+            } else {
+                let _ = adb.run(&["reconnect", "offline"], Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+            }
+            if !adb.is_connected(&serial).await {
+                anyhow::bail!(
+                    "设备不在线：adb devices 中无 {}（offline/未授权/已拔出？USB 请重新插拔或重开 USB 调试，无线请确认无线调试已开启）",
+                    serial
+                );
+            }
         }
 
         // 1.5 清理旧 reverse 隧道（残留隧道可能干扰新连接）

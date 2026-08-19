@@ -62,16 +62,20 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Arc::new(store::Store::open(&cfg)?);
 
-    // 设备管理器：负责 adb 发现 + scrcpy 会话
-    let devices = Arc::new(device::DeviceManager::new(db.clone(), cfg.clone()));
+    // 每设备活跃 viewer 注册表：AppState / Scheduler / DeviceManager（空闲断开守卫）共享
+    // （引擎经 control DataChannel 反向推送脚本可视化事件，定时任务运行时同样生效）
+    let viewers: webrtc::ViewerMap = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+
+    // 设备管理器：负责 adb 发现 + scrcpy 会话（start 内含启动扫描自举 + WiFi adb 保活）
+    let devices = Arc::new(device::DeviceManager::new(db.clone(), cfg.clone(), viewers.clone()));
     devices.start().await?;
 
     // 调度器：cron 定时任务
-    let scheduler = Arc::new(scheduler::Scheduler::new(db.clone(), devices.clone()));
+    let scheduler = Arc::new(scheduler::Scheduler::new(db.clone(), devices.clone(), viewers.clone()));
     scheduler.start().await;
 
     // HTTP + WebSocket API
-    let app = api::build_router(db, devices, scheduler, cfg.clone());
+    let app = api::build_router(db, devices, scheduler, cfg.clone(), viewers);
     let listener = TcpListener::bind(cfg.listen_addr()).await?;
     info!("GameBot server ready on http://{}", cfg.listen_addr());
     axum::serve(listener, app).await?;

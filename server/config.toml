@@ -8,8 +8,12 @@ password = "admin123"
 default_threshold = 0.8
 decode_frames = true
 max_size = 0
-bitrate_mbps = 20
+bitrate_mbps = 40
 fps = 15
+# scrcpy 编码器名（空=设备默认；可指定 c2.android.avc.encoder 软件编码器避开 MTK 硬件块效应）
+encoder_name = ""
+# 脚本运行结束后的空闲自动断开秒数（断 scrcpy 会话进低功耗，adb 保留；无脚本运行且无 viewer 时才触发；0=关闭）
+idle_disconnect_secs = 60
 
 # 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式（可自定义）
 # 占位符：
@@ -22,12 +26,10 @@ fps = 15
 # 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制，需要个别覆盖时手动加 wait
 [op_templates]
 find = """- find: {name}
-  {region}
-  click: true"""
-find_wait = """- find: {name}
-  timeout: 0
-  {region}
-  click: true"""
+  {region}"""
+until = """- until: {name}
+  threshold: 0.8
+  {region}"""
 find_click_pos = """- find: {name}
   {region}
   click: [{cx}, {cy}]"""

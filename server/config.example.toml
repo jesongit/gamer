@@ -10,3 +10,32 @@ decode_frames = true
 max_size = 0
 bitrate_mbps = 20
 fps = 0
+# 脚本运行结束后的空闲自动断开秒数（断 scrcpy 会话进低功耗，adb 保留；无脚本运行且无 viewer 时才触发；0=关闭）
+idle_disconnect_secs = 60
+
+# 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式（可自定义）
+# 占位符：
+#   {name}     模板名
+#   {region}   区域块（region: a 或 region: {fm: [x1,y1], to: [x2,y2]}）
+#   {x}/{y}    点击相对坐标
+#   {fx}/{fy}/{tx}/{ty} 滑动起终点相对坐标
+#   {time}     滑动实际时长（ms）
+#   {cx}/{cy}  模板图内相对百分比坐标（find 的 click 参数）
+# 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制，需要个别覆盖时手动加 wait
+[op_templates]
+find = """- find: {name}
+  {region}"""
+until = """- until: {name}
+  threshold: 0.8
+  {region}"""
+find_click_pos = """- find: {name}
+  {region}
+  click: [{cx}, {cy}]"""
+tap = """- tap: [{x}, {y}]"""
+swipe = """- swipe:
+    fm: [{fx}, {fy}]
+    to: [{tx}, {ty}]
+    time: {time}"""
+swipe_region = """region:
+  fm: [{fx}, {fy}]
+  to: [{tx}, {ty}]"""

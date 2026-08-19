@@ -17,9 +17,9 @@ pub struct OpTemplates {
     /// find：查找模板并点击中心（默认超时 6000ms）
     #[serde(default)]
     pub find: String,
-    /// find_wait：一直查找直到模板出现并点击（timeout: 0）
-    #[serde(default)]
-    pub find_wait: String,
+    /// until：一直等待模板出现并点击（等价于 timeout 为 0 的 find，永不超时）
+    #[serde(default, alias = "find_wait")]
+    pub until: String,
     /// find_click_pos：查看模板大图时点击图片生成 find + click 相对坐标记录
     #[serde(default)]
     pub find_click_pos: String,
@@ -41,7 +41,7 @@ impl Default for OpTemplates {
     fn default() -> Self {
         Self {
             find: "- find: {name}\n  threshold: 0.8\n  {region}\n  click: true\n  then:\n    - log: \"点击成功\"\n  else:\n    - log: \"点击失败\"".into(),
-            find_wait: "- find: {name}\n  timeout: 0\n  threshold: 0.8\n  {region}\n  click: true".into(),
+            until: "- until: {name}\n  threshold: 0.8\n  {region}".into(),
             find_click_pos: "- find: {name}\n  {region}\n  click: [{cx}, {cy}]".into(),
             tap: "- tap: [{x}, {y}]".into(),
             swipe: "- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}".into(),
@@ -75,9 +75,20 @@ pub struct Config {
     pub bitrate_mbps: u32,
     /// 帧率上限（0 = 默认）
     pub fps: u32,
+    /// scrcpy 编码器名（空 = 设备默认；可指定 c2.android.avc.encoder 软编避开 MTK 硬件块效应）
+    #[serde(default)]
+    pub encoder_name: String,
     /// 操作记录 YAML 模板（config.toml [op_templates]，可自定义）
     #[serde(default)]
     pub op_templates: OpTemplates,
+    /// 脚本运行结束后的空闲自动断开秒数（低功耗：断 scrcpy 会话，adb 链路保留）。
+    /// 触发前检查该设备无运行中脚本且无 viewer；0 = 关闭
+    #[serde(default = "default_idle_disconnect_secs")]
+    pub idle_disconnect_secs: u64,
+}
+
+fn default_idle_disconnect_secs() -> u64 {
+    60
 }
 
 impl Default for Config {
@@ -96,6 +107,7 @@ impl Default for Config {
             // 服务端 ffmpeg 软解 + PNG 编解码单核跑满（CPU 100% 持续拖垮进程）
             fps: 15,
             op_templates: OpTemplates::default(),
+            idle_disconnect_secs: default_idle_disconnect_secs(),
         }
     }
 }
