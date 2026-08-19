@@ -14,6 +14,20 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::device::scrcpy::{AudioFrame, ScrcpySession, VideoFrame};
 
+/// 每设备活跃 viewer 注册表条目：
+/// - running/peer 用于"新连接踢旧连接"（停旧 pusher + 关旧 peer）
+/// - control_dc 供服务端反向给浏览器推消息（脚本 tap/swipe/匹配命中可视化事件）
+#[derive(Clone)]
+pub struct ViewerHandle {
+    pub running: Arc<std::sync::atomic::AtomicBool>,
+    pub peer: std::sync::Weak<webrtc::peer_connection::RTCPeerConnection>,
+    pub control_dc: Arc<Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
+}
+
+/// device_id → 活跃 viewer（main.rs 创建，AppState / Scheduler / ws.rs 共享）
+pub type ViewerMap =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, ViewerHandle>>>;
+
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
@@ -48,8 +62,14 @@ pub struct ViewerSession {
     pub payload_type: u8,
     /// peer Failed/Closed 通知：ws.rs 收到后立即退出 ws 循环、释放 viewer
     /// （浏览器 TCP 断开时 axum socket.next() 可能不返回，导致 viewer 泄漏——
-    /// 泄漏的 mDNS 实例会让后续连接 ICE 协商失败 → 黑屏）
+    /// 泄漏的 mDNS 实例会让后续 ICE 协商失败 → 黑屏）
     pub peer_closed_rx: tokio::sync::watch::Receiver<bool>,
+    /// 浏览器创建的 control DataChannel（on_data_channel 时捕获）：
+    /// 服务端→浏览器方向推送脚本运行可视化事件（引擎 emit 查注册表发送）
+    pub control_dc: Arc<Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
+    /// scrcpy 会话引用：pusher 初始重放全部 0 字节（SRTP 未就绪）时
+    /// 请求编码器重置（RESET_VIDEO → 新 SPS/PPS + IDR），让浏览器快速恢复
+    pub session: Arc<ScrcpySession>,
 }
 
 impl ViewerSession {
@@ -132,8 +152,13 @@ impl ViewerSession {
         });
 
         let session_dc = session.clone();
+        // control DataChannel 捕获：on_data_channel 回调触发时存入，
+        // 供服务端反向推送（脚本事件）——浏览器只会创建 "control" 一个通道
+        let control_dc: Arc<Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>> = Arc::new(Mutex::new(None));
+        let dc_holder = control_dc.clone();
         peer.on_data_channel(Box::new(move |dc: Arc<webrtc::data_channel::RTCDataChannel>| {
             info!("control data channel opened: {}", dc.label());
+            *dc_holder.lock() = Some(dc.clone());
             let s = session_dc.clone();
             let tx = control_tx.clone();
             dc.on_message(Box::new(move |msg| {
@@ -221,6 +246,8 @@ impl ViewerSession {
             answer: answer_sdp,
             payload_type,
             peer_closed_rx,
+            control_dc,
+            session: session.clone(),
         };
         let fps = session.device.fps.or_else(|| (cfg.fps > 0).then_some(cfg.fps));
         // 静止补帧间隔：画面无新帧时按此节奏重发上一帧（也是该配置下的最小帧间隔）
@@ -228,7 +255,7 @@ impl ViewerSession {
         // 硬性帧率上限：即使设备端实际输出 60fps，pusher 也按这里的最小间隔发送，
         // 避免“设置了 30fps 实际却跑到 60fps”（scrcpy 侧不再传 max_fps，见 scrcpy.rs）
         let min_frame_interval_ms = fps.filter(|&f| f > 0).map(|f| (1000 / f).max(1) as u64).unwrap_or(0);
-        vs.spawn_pusher(rtp_sender, frame_q, frame_notify, overflowed, payload_type, ssrc, initial_frames, conn_rx, peer_connected.clone(), idle_repeat_ms, min_frame_interval_ms);
+        vs.spawn_pusher(rtp_sender, frame_q, frame_notify, overflowed, payload_type, ssrc, initial_frames, conn_rx, peer_connected.clone(), idle_repeat_ms, min_frame_interval_ms, cfg.ffmpeg_path.clone());
         vs.spawn_audio_pusher(audio_track, audio_rx, audio_payload_type, audio_ssrc, peer_connected);
         Ok(vs)
     }
@@ -255,12 +282,14 @@ impl ViewerSession {
         peer_connected: Arc<std::sync::atomic::AtomicBool>,
         idle_repeat_ms: u64,
         min_frame_interval_ms: u64,
+        ffmpeg_path: String,
     ) {
         let track = self.track.clone();
         let running = self.running.clone();
         let ts_base = self.ts_base.clone();
         let last_ts = self.last_ts.clone();
         let config_nalu = self.config_nalu.clone();
+        let session = self.session.clone();
         tokio::spawn(async move {
             // 等待 peer connected（DTLS/SRTP 就绪）再开始推流：
             // answer 已在 ws.rs 发给浏览器，浏览器开始 ICE/DTLS 握手；
@@ -298,50 +327,103 @@ impl ViewerSession {
             // 并重置节奏追赶（backlog 跳帧兜底）。浏览器到达均匀 → target 收敛。
             let pacer_interval = Duration::from_millis(16);
             let mut next_tx_at = std::time::Instant::now();
+            // 断链恢复中：丢 P 帧直到新的关键帧出现（overflow 断链 / 初始重放无 IDR 时置位）
+            let mut waiting_key = false;
 
             // 初始 GOP 重放：config 帧喂给 payloader（缓存 SPS/PPS，后续 IDR 自动拼 STAP-A）；
             // GOP 帧按原帧节奏发送（ts 基于 GOP 首帧 PTS，与后续实时流同一时间轴）。
             // 浏览器收到第一个 IDR 即开始渲染，之后无缝追到实时。
+            // 重放节流：GOP 可能很大（MTK 关键帧间隔 ~25s ≈ 750 帧），clamp(2,10)ms
+            // 保证重放总时长 ≤ ~6s（旧 clamp(16,40) 会把大 GOP 放 25s+，连接后长时间
+            // 停留在旧画面）。浏览器从重放首帧（IDR）起就有画面，短暂快进追平可接受。
+            let mut replayed_had_key = false;
             if let Some(frames) = initial_frames {
-                let mut base: Option<u64> = None;
-                let mut sent = 0usize;
                 let total_bytes: usize = frames.iter().map(|f| f.data.len()).sum();
-                for f in frames {
-                    if f.is_config {
-                        let _ = payloader.payload(1200, &Bytes::from(f.data.clone()));
-                        // 直接把 SPS/PPS 作为 RTP（STAP-A）发出去：浏览器可提前初始化
-                        // H.264 解码器，之后首个 IDR 到达即可立即出画面；
-                        // 仅依赖"关键帧前重发"时，错过重发窗口就永久黑屏
-                        if !push_rtp(&track, &mut payloader, &f, payload_type, ssrc, &mut seq, 0).await {
+                // 重放可能整体 0 字节（SRTP session 实际未就绪时 webrtc-rs 的
+                // write_rtp 静默返回 Ok(0)，实证：connected +300ms 后重放 109 帧
+                // 仍全部 0 字节）。此时浏览器一帧都收不到，若直接进实时流，
+                // waiting_key 未置位 → P 帧裸推 → 花屏。检测 written==0 →
+                // 短暂等待重试；仍失败则请求编码器重置（RESET_VIDEO → 新
+                // config+IDR，~200ms 到达）并置 waiting_key（丢 P 帧等 IDR）。
+                let mut replay_ok = false;
+                let mut replay_sent = 0usize;
+                for attempt in 0..3 {
+                    let mut base: Option<u64> = None;
+                    let mut sent = 0usize;
+                    let mut written_total = 0usize;
+                    let mut ok = true;
+                    for f in &frames {
+                        if f.is_config {
+                            let _ = payloader.payload(1200, &Bytes::from(f.data.clone()));
+                            // SPS/PPS 独立单 NALU 包直接发送（见 send_config_nalus 注释：
+                            // H264Payloader 的 STAP-A 在 IDR slice 超限时会静默丢弃参数集）。
+                            if !send_config_nalus(&track, &Bytes::from(f.data.clone()), payload_type, ssrc, &mut seq, 0).await {
+                                ok = false;
+                                break;
+                            }
+                            continue;
+                        }
+                        if f.is_keyframe {
+                            replayed_had_key = true;
+                        }
+                        if base.is_none() {
+                            base = Some(f.pts_us);
+                        }
+                        // 按原帧间隔节流发送，避免瞬时大流量打爆浏览器 jitter buffer / UDP 丢包；
+                        // 下限 16ms（≈60fps）保证重放不超过源节奏的 2 倍——旧实现 clamp(5,40)
+                        // 会把 1~2s 的 GOP 在 ~0.5s 内快放完，表现为连接后"画面突然加速"。
+                        if let Some(lp) = last_pts {
+                            let gap = f.pts_us.saturating_sub(lp);
+                            let sleep_ms = (gap / 1000).clamp(2, 10);
+                            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                        }
+                        last_pts = Some(f.pts_us);
+                        let ts = ((f.pts_us.saturating_sub(base.unwrap()) * 90) / 1000) as u32;
+                        let (cont, w) = push_rtp(&track, &mut payloader, f, payload_type, ssrc, &mut seq, ts).await;
+                        written_total += w;
+                        if !cont {
+                            ok = false;
                             break;
                         }
-                        continue;
+                        last_rtp_ts = ts;
+                        last_sent = Some((f.clone(), ts));
+                        last_tx = Some(std::time::Instant::now());
+                        sent += 1;
                     }
-                    if base.is_none() {
-                        base = Some(f.pts_us);
+                    if let Some(b) = base {
+                        *ts_base.lock() = Some(b);
                     }
-                    // 按原帧间隔节流发送，避免瞬时大流量打爆浏览器 jitter buffer / UDP 丢包；
-                    // 下限 16ms（≈60fps）保证重放不超过源节奏的 2 倍——旧实现 clamp(5,40)
-                    // 会把 1~2s 的 GOP 在 ~0.5s 内快放完，表现为连接后"画面突然加速"。
-                    if let Some(lp) = last_pts {
-                        let gap = f.pts_us.saturating_sub(lp);
-                        let sleep_ms = (gap / 1000).clamp(16, 40);
-                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
-                    }
-                    last_pts = Some(f.pts_us);
-                    let ts = ((f.pts_us.saturating_sub(base.unwrap()) * 90) / 1000) as u32;
-                    if !push_rtp(&track, &mut payloader, &f, payload_type, ssrc, &mut seq, ts).await {
+                    if !ok {
+                        // 硬失败（连接已断），pusher 即将退出，不再重试
                         break;
                     }
-                    last_rtp_ts = ts;
-                    last_sent = Some((f, ts));
-                    last_tx = Some(std::time::Instant::now());
-                    sent += 1;
+                    if written_total > 0 || frames.is_empty() {
+                        replay_ok = true;
+                        replay_sent = sent;
+                        break;
+                    }
+                    // 全部 0 字节：SRTP 未就绪，等一会重试
+                    info!("initial GOP replay wrote 0 bytes (SRTP not ready?), retrying {}/2", attempt + 1);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
                 }
-                if let Some(b) = base {
-                    *ts_base.lock() = Some(b);
+                if replay_ok {
+                    info!("pusher replayed initial GOP: {} frames, {} bytes", replay_sent, total_bytes);
+                } else {
+                    // 重放彻底失败（3 次全 0 字节）：请求编码器立即出 IDR，
+                    // 等 IDR 期间丢 P 帧——浏览器保持黑屏而非花屏
+                    waiting_key = true;
+                    info!("initial GOP replay failed (0 bytes after retries), requesting reset_video, dropping P frames until IDR");
+                    let _ = session.reset_video().await;
                 }
-                info!("pusher replayed initial GOP: {} frames, {} bytes", sent, total_bytes);
+                if !replayed_had_key {
+                    // 初始帧里没有 IDR（reset_video 兜底超时路径，只剩 SPS/PPS）：
+                    // 必须等实时流第一个 IDR 再推 P 帧——否则浏览器解码器用参数集
+                    // 初始化后收到无参考的 P 帧，错误传播成花屏，直到 ~25s 后自然 IDR
+                    // （MTK 忽略 i-frame-interval）才恢复。等 IDR 期间浏览器保持无画面
+                    // （黑屏/定格），IDR 一到即干净出画。
+                    waiting_key = true;
+                    info!("no keyframe in initial frames, dropping P frames until first IDR");
+                }
             }
 
             // 延迟控制（核心）：帧缓冲是"丢最旧保最新"的环形队列（见 make_frame_queue），
@@ -363,7 +445,9 @@ impl ViewerSession {
             } else {
                 45
             };
-            let mut waiting_key = false;
+            // 参数集切换窗口标志：config 帧（新 SPS/PPS）已到、新 IDR 未到。
+            // 窗口内禁止静止补帧（见取帧/补帧处注释），IDR 发送时复位。
+            let mut pending_config = false;
             let mut drops_broken = 0u64;
             let mut drops_wait = 0u64;
             let mut drops_to_key = 0u64;
@@ -387,6 +471,24 @@ impl ViewerSession {
                 {
                     let mut q = frame_q.lock();
                     if !q.is_empty() {
+                        // 参数集（SPS/PPS）帧：先于一切剪裁提取——只更新 config_nalu
+                        // 并置 pending_config（新 IDR 到达前禁止静止补帧），不进入发送
+                        // 列表（参数集只在 IDR 时经 H264Payloader 合成 STAP-A 下发）。
+                        // 绝不能被 backlog 跳帧 / waiting_key 的 drain 丢掉：config 丢了，
+                        // IDR 前重发的就是旧参数集，浏览器用旧 SPS 初始化新分辨率 IDR
+                        // → 花屏。若 viewer 连接早于帧缓存首帧（会话刚建立的空窗期），
+                        // 此处也是浏览器拿到 SPS/PPS 的唯一机会——错过则永久黑屏。
+                        let mut i = 0;
+                        while i < q.len() {
+                            if q[i].is_config {
+                                if let Some(cf) = q.remove(i) {
+                                    *config_nalu.lock() = Some(Bytes::from(cf.data));
+                                    pending_config = true;
+                                }
+                            } else {
+                                i += 1;
+                            }
+                        }
                         // 环形缓冲溢出 → 参考链断裂：清空队列，等下一个 IDR 重建
                         if overflowed.swap(false, std::sync::atomic::Ordering::SeqCst) {
                             drops_broken += 1;
@@ -417,6 +519,22 @@ impl ViewerSession {
                                         info!("pusher skipped {} stale frames to keyframe (queue {}), skips={}", ki, q.len(), drops_to_key);
                                     }
                                     q.drain(..ki);
+                                } else {
+                                    // **断链跳帧（静默花屏根源）**：队内无未发送关键帧
+                                    // （IDR 每 ~4s 一个，若积压恰好发生在 IDR 刚发完的
+                                    // 窗口，队内全是 P 帧）→ rposition 返回 None → 旧代码
+                                    // 直接全量发送——这些 P 帧引用的是浏览器**没收到**的
+                                    // 更早帧，解码器用断裂参考链解码 → **黑白马赛克/彩色块
+                                    // 点直到下个 IDR**（~4s，偶发、瞬态、截图抓不到，
+                                    // "点击后花屏"的又一真凶；触发：点击引发大帧积压）。
+                                    // 修复：与环形缓冲溢出同路径——清空队列 + waiting_key，
+                                    // 丢 P 帧等下一个 IDR（浏览器保持最后干净帧，不花屏）。
+                                    drops_broken += 1;
+                                    if drops_broken % 20 == 1 {
+                                        info!("pusher backlog without keyframe in queue, dropped {} frames (reference chain broken), drops={}", q.len(), drops_broken);
+                                    }
+                                    q.clear();
+                                    waiting_key = true;
                                 }
                             }
                             to_send = q.drain(..).collect();
@@ -426,6 +544,18 @@ impl ViewerSession {
                 }
 
                 if to_send.is_empty() {
+                    // 参数集切换窗口（config 已到、新 IDR 未到，典型触发：点击投屏画面
+                    // 后游戏切分辨率/编码器重启）：禁止重发旧帧。H264Payloader 对关键帧/
+                    // 非关键帧一视同仁——只要缓存了 SPS/PPS，下一个 NALU 就会被合成
+                    // STAP-A 下发；此时重发旧分辨率帧 = "新参数集 + 旧帧"，浏览器用新
+                    // 参数初始化解码器后再解旧帧 → 解码器失步 → 画面慢慢浮现黑白/彩色
+                    // 块点、卡顿（见 AGENTS.md 已知坑）。跳过补帧 → 画面定格在最后一
+                    // 帧，新 IDR 一到即干净恢复（通常 ≤1s，远低于前端 ~4s 静默检测）。
+                    // waiting_key（断链/无 IDR 起点）同理：last_sent 属于断裂参考链，
+                    // 重发只会维持花屏，等新 IDR 重建后再补帧。
+                    if pending_config || waiting_key {
+                        continue;
+                    }
                     // 静止补帧：idle_repeat_ms 内无新帧 → 重发最后一帧。
                     // 重复帧内容相同且参考链完整（该帧此前已成功发送），解码器可正常渲染；
                     // RTP 时间戳单调推进，浏览器帧率统计不掉。
@@ -449,13 +579,13 @@ impl ViewerSession {
                                     real_ts
                                 }
                             };
-                            if push_rtp(&track, &mut payloader, last, payload_type, ssrc, &mut seq, ts).await {
-                                *last_ts.lock() = ts;
-                                last_rtp_ts = ts;
-                                last_tx = Some(std::time::Instant::now());
-                            } else {
+                            let (cont, _w) = push_rtp(&track, &mut payloader, last, payload_type, ssrc, &mut seq, ts).await;
+                            if !cont {
                                 break;
                             }
+                            *last_ts.lock() = ts;
+                            last_rtp_ts = ts;
+                            last_tx = Some(std::time::Instant::now());
                         }
                     }
                     continue;
@@ -512,34 +642,58 @@ impl ViewerSession {
                     };
                     *last_ts.lock() = ts;
 
-                    // config 帧（SPS/PPS）：缓存进 config_nalu（供后续关键帧前重发）
-                    // + 交给 payloader 缓存随下个关键帧打 STAP-A。
-                    // 必须更新 config_nalu：若 viewer 连接早于帧缓存首帧（配置切换重连、
-                    // 会话刚建立的空窗期），initial_frames 为 None，此处是浏览器拿到
-                    // SPS/PPS 的唯一机会——否则错过会话开头的 config 帧就永久黑屏。
-                    if frame.is_config {
-                        *config_nalu.lock() = Some(Bytes::from(frame.data.clone()));
-                        let _ = payloader.payload(1200, &Bytes::from(frame.data));
-                        continue;
-                    }
-
                     // ICE 抖动（Disconnected）期间跳过发送，等待恢复；连接恢复后继续推
                     if !peer_connected.load(std::sync::atomic::Ordering::SeqCst) {
                         debug!("peer disconnected, skipping frame {}", frame_no);
+                        // 跳过的是关键帧 → 参考链断裂：恢复后丢弃到下一个 IDR 的 P 帧，
+                        // 否则浏览器用断裂的参考链解码（花屏直到下个 IDR）
+                        if frame.is_keyframe {
+                            waiting_key = true;
+                        }
                         continue;
                     }
 
-                    // 关键帧前重发 SPS/PPS：保证浏览器随时能拿到参数集初始化解码器。
-                    // scrcpy 只在会话开始时发一次 config，若浏览器错过初始 STAP-A（SRTP 时序/丢包），
-                    // 后续 IDR 不带参数集且服务端无 PLI 响应 → 永久黑屏。
+                    // 关键帧（IDR）：参数集切换窗口结束（复位 pending_config，恢复静止
+                    // 补帧许可），并把最近一次 SPS/PPS（取帧阶段维护的 config_nalu）发
+                    // 出去——**独立单 NALU 包**（send_config_nalus）保证参数集必定到达：
+                    // H264Payloader 的 STAP-A 打包在总长 > mtu（1200B）时**静默丢弃整包**
+                    // （含 SPS/PPS），而 IDR slice 通常几十 KB（首 NALU 即超限），只有
+                    // IDR 帧恰好以小 SEI 开头时参数集才侥幸发出——"切分辨率/编码器重启
+                    // 后偶发花屏直到下个自然 IDR（~25s）"的直接机制。参数集包与 IDR 同
+                    // ts、marker=false → 浏览器 jitter buffer 视为同一帧，FFmpeg 先解析
+                    // 参数集再解 IDR slice，干净出画。同时仍喂 payloader（STAP-A 冗余，
+                    // 无害）。config 帧本身不进发送列表，静止补帧重发的旧帧因此永远不
+                    // 会带新参数集前缀。
                     if frame.is_keyframe {
-                        if let Some(cfg) = config_nalu.lock().clone() {
+                        pending_config = false;
+                        // 先 clone 出锁内容再 await（MutexGuard 非 Send，不能跨 await 存活）
+                        let cfg = config_nalu.lock().clone();
+                        if let Some(cfg) = cfg {
+                            if !send_config_nalus(&track, &cfg, payload_type, ssrc, &mut seq, ts).await {
+                                break;
+                            }
                             let _ = payloader.payload(1200, &cfg);
                         }
                     }
 
                     let t_send = std::time::Instant::now();
-                    if !push_rtp(&track, &mut payloader, &frame, payload_type, ssrc, &mut seq, ts).await {
+                    // 编码器输出质量探针（转场块效应定位）：抽样帧（关键帧全查 + P 帧
+                    // 1/30）用 ffmpeg 解码原始 H.264 → 宏块网格块效应检测。报 >1.25 说明
+                    // **编码器输出帧本身有块效应**（浏览器/传输无辜）；不报说明编码器
+                    // 干净、块效应在浏览器解码路径（jitter buffer/丢帧）。
+                    if frame.is_keyframe || frame_no % 30 == 0 {
+                        let cfg = config_nalu.lock().clone();
+                        let fdata = frame.data.clone();
+                        let ff = ffmpeg_path.clone();
+                        let fn_ = frame_no;
+                        let fk = frame.is_keyframe;
+                        let fs = frame.data.len();
+                        tokio::spawn(async move {
+                            probe_encoder_blockiness(&ff, cfg, &fdata, fn_, fk, fs);
+                        });
+                    }
+                    let (cont, _w) = push_rtp(&track, &mut payloader, &frame, payload_type, ssrc, &mut seq, ts).await;
+                    if !cont {
                         break;
                     }
                     // pacer：推进发送时刻；积压（落后 >20ms ≈ 超过 1 个 pacer 周期，
@@ -672,7 +826,10 @@ impl ViewerSession {
     }
 }
 
-/// 把一帧 H.264 打成 RTP 包写入 track；返回是否继续推流（写失败 = 连接已断）
+/// 把一帧 H.264 打成 RTP 包写入 track。
+/// 返回 (是否继续推流, 实际写入字节数)：写失败 = 连接已断（false）；
+/// 写入 0 字节 = SRTP 未就绪时 webrtc-rs 静默返回 Ok(0)（连接初期窗口，重放逻辑
+/// 据此检测并重试，见 spawn_pusher）。
 async fn push_rtp(
     track: &Arc<TrackLocalStaticRTP>,
     payloader: &mut Box<dyn Payloader + Send + Sync>,
@@ -681,14 +838,26 @@ async fn push_rtp(
     ssrc: u32,
     seq: &mut u16,
     ts: u32,
-) -> bool {
+) -> (bool, usize) {
     let payloads = match payloader.payload(1200, &Bytes::from(frame.data.clone())) {
         Ok(p) => p,
         Err(e) => {
             debug!("payload error: {}", e);
-            return true;
+            return (true, 0);
         }
     };
+    // 诊断探针（关键帧全查 + P 帧抽样 1/30，开销可忽略）：把本帧 RTP payloads 重组为
+    // Annex-B 并与原始帧逐 NALU 比对。一致 ⇒ 服务端打包无损，花屏在浏览器解码侧；
+    // 不一致 ⇒ 打包路径损毁数据（花屏根因），日志精确到第几个 NALU。
+    // 注：关键帧 ~25s 才一个（MTK 编码器忽略 i-frame-interval=2），若坏帧在 P 帧，
+    // 只查关键帧会漏——P 帧按 seq 抽样。
+    let mut probe = frame.is_keyframe;
+    if !probe {
+        probe = *seq % 30 == 0;
+    }
+    if probe {
+        verify_rtp_rebuild(frame, &payloads);
+    }
     let n = payloads.len();
     // 关键帧发送平滑（pacer 简化版）：设备 i-frame-interval=1s，每秒产一个
     // ~200KB 关键帧（170+ 个 RTP 包）。全部瞬时写入会形成 burst（~3ms 发完），
@@ -728,20 +897,244 @@ async fn push_rtp(
             Ok(Ok(m)) => written += m,
             Ok(Err(e)) => {
                 debug!("write_rtp error: {}", e);
-                return false;
+                return (false, written);
             }
             Err(_) => {
                 warn!("write_rtp timed out (3s), connection stalled, stopping pusher");
+                return (false, written);
+            }
+        }
+        *seq = seq.wrapping_add(1);
+    }
+    if written == 0 && n > 0 {
+        // SRTP 未就绪时 webrtc-rs 静默返回 Ok(0) 丢弃整包——连接初期窗口
+        debug!("rtp write returned 0 bytes (SRTP not ready?), frame {} bytes, {} packets", frame.data.len(), n);
+    }
+    (true, written)
+}
+
+/// 把 SPS/PPS 配置帧作为**独立单 NALU RTP 包**发送（RFC 6184 允许 type 7/8 单包）。
+///
+/// 为什么必须独立发送：H264Payloader 的 STAP-A 打包只在 `stap_a_nalu.len() <= mtu`
+/// 时才 push，超限时**静默丢弃整个 STAP-A（含 SPS/PPS）并清空缓存**（rtp-0.13.0
+/// codecs/h264/mod.rs）。而 IDR slice 通常几十 KB（MTK 单 slice，日志实测 85~92KB），
+/// 首个 NALU 就远超 1200B——除非 IDR 帧恰好以小 SEI 开头，SPS/PPS 永远到不了浏览器。
+/// 后果：切分辨率/编码器重启后浏览器用旧参数集解码新流 → 解码失败 → 花屏，直到
+/// 下一个"侥幸带小 SEI 前缀"的 IDR（MTK 忽略 i-frame-interval，间隔 ~25s）——
+/// "点击后偶发花屏、卡顿、非必现"的直接机制。
+///
+/// 参数集包与后续 IDR 帧**同 ts、marker=false**：浏览器 jitter buffer 把 [SPS][PPS]
+/// [IDR 包们] 视为同一帧，FFmpeg 先解析参数集再解 IDR slice，干净初始化。
+async fn send_config_nalus(
+    track: &Arc<TrackLocalStaticRTP>,
+    cfg: &Bytes,
+    payload_type: u8,
+    ssrc: u32,
+    seq: &mut u16,
+    ts: u32,
+) -> bool {
+    // Annex-B start code 切分 NALU
+    let d = cfg.as_ref();
+    let mut nals: Vec<&[u8]> = Vec::new();
+    let mut pos = 0usize;
+    while pos < d.len() {
+        let sc_len = if pos + 4 <= d.len() && d[pos..pos + 4] == [0, 0, 0, 1] {
+            4
+        } else if pos + 3 <= d.len() && d[pos..pos + 3] == [0, 0, 1] {
+            3
+        } else {
+            0
+        };
+        if sc_len == 0 {
+            pos += 1;
+            continue;
+        }
+        let ns = pos + sc_len;
+        let mut ne = d.len();
+        let mut zc = 0usize;
+        for i in ns..d.len() {
+            if d[i] == 0 {
+                zc += 1;
+                continue;
+            }
+            if d[i] == 1 && zc >= 2 {
+                ne = i - zc;
+                break;
+            }
+            zc = 0;
+        }
+        if ne > ns {
+            nals.push(&d[ns..ne]);
+        }
+        pos = ne;
+    }
+    if nals.is_empty() {
+        return true;
+    }
+    let mut sent_any = false;
+    for nal in &nals {
+        let t = nal[0] & 0x1F;
+        if t != 7 && t != 8 {
+            continue; // 只发 SPS/PPS
+        }
+        if nal.len() > 1200 {
+            continue; // 理论不会发生（SPS/PPS 通常 ~几十字节）
+        }
+        let pkt = Packet {
+            header: Header {
+                version: 2,
+                padding: false,
+                extension: false,
+                marker: false, // 与后续 IDR 同帧组（同 ts）
+                payload_type,
+                sequence_number: *seq,
+                timestamp: ts,
+                ssrc,
+                ..Default::default()
+            },
+            payload: Bytes::copy_from_slice(nal),
+            ..Default::default()
+        };
+        match tokio::time::timeout(
+            Duration::from_millis(3000),
+            track.write_rtp_with_extensions_attributes(&pkt, &[], &Attributes::new()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => sent_any = true,
+            Ok(Err(e)) => {
+                debug!("write_rtp error sending SPS/PPS: {}", e);
+                return false;
+            }
+            Err(_) => {
+                warn!("write_rtp timed out sending SPS/PPS, connection stalled");
                 return false;
             }
         }
         *seq = seq.wrapping_add(1);
     }
-    if written == 0 {
-        // SRTP 未就绪时 webrtc-rs 静默返回 Ok(0) 丢弃整包——必须等待连接就绪后再推
-        warn!("rtp write returned 0 bytes (SRTP not ready?), frame {} bytes, {} packets", frame.data.len(), n);
+    if sent_any {
+        info!("config SPS/PPS sent as single NALUs: {} nalu(s), {} bytes, ts={}", nals.len(), d.len(), ts);
     }
     true
+}
+
+/// 诊断：把一帧的 RTP payloads 重组为 Annex-B NALU 序列，与原始帧逐 NALU 比对。
+/// 忽略差异：STAP-A 注入的 SPS/PPS（type 7/8，IDR 前由 config_nalu 喂入）与
+/// 被 payloader 丢弃的 AUD/FILLER（type 9/12）。不一致 → warn 定位（打包路径损毁数据）。
+fn verify_rtp_rebuild(frame: &VideoFrame, payloads: &[Bytes]) {
+    // 1. payloads → NALU 列表（STAP-A 拆包 / FU-A 拼接 / 单包直出）
+    let mut nals: Vec<(u8, Bytes)> = Vec::new();
+    for p in payloads {
+        if p.is_empty() {
+            continue;
+        }
+        let t = p[0] & 0x1F;
+        match t {
+            24 => {
+                // STAP-A：拆出各 NALU
+                let mut off = 1usize;
+                while off + 2 <= p.len() {
+                    let len = ((p[off] as usize) << 8) | p[off + 1] as usize;
+                    off += 2;
+                    if off + len > p.len() {
+                        break;
+                    }
+                    let n = p.slice(off..off + len);
+                    if !n.is_empty() {
+                        nals.push((n[0] & 0x1F, n));
+                    }
+                    off += len;
+                }
+            }
+            28 | 29 => {
+                // FU-A/FU-B：按 S/E 位拼接
+                let start = p[1] & 0x80 != 0;
+                let typ = p[1] & 0x1F;
+                let data = p.slice(2..);
+                if start {
+                    let nri = p[0] & 0x60;
+                    let mut nal = Vec::with_capacity(data.len() + 1);
+                    nal.push(nri | typ);
+                    nal.extend_from_slice(&data);
+                    nals.push((typ, Bytes::from(nal)));
+                } else if let Some((_, last)) = nals.last_mut() {
+                    let mut merged = last.to_vec();
+                    merged.extend_from_slice(&data);
+                    *last = Bytes::from(merged);
+                }
+            }
+            1..=23 => {
+                nals.push((t, p.clone()));
+            }
+            _ => {}
+        }
+    }
+    // 2. 解析原始帧（Annex-B start code 切分）
+    let mut orig: Vec<(u8, Vec<u8>)> = Vec::new();
+    let d = &frame.data;
+    let mut pos = 0usize;
+    while pos < d.len() {
+        let sc_len = if pos + 4 <= d.len() && d[pos..pos + 4] == [0, 0, 0, 1] {
+            4
+        } else if pos + 3 <= d.len() && d[pos..pos + 3] == [0, 0, 1] {
+            3
+        } else {
+            0
+        };
+        if sc_len == 0 {
+            pos += 1;
+            continue;
+        }
+        let ns = pos + sc_len;
+        let mut ne = d.len();
+        let mut zc = 0usize;
+        for i in ns..d.len() {
+            if d[i] == 0 {
+                zc += 1;
+                continue;
+            }
+            if d[i] == 1 && zc >= 2 {
+                ne = i - zc;
+                break;
+            }
+            zc = 0;
+        }
+        if ne > ns {
+            let n = &d[ns..ne];
+            if !n.is_empty() {
+                let t = n[0] & 0x1F;
+                if t != 9 && t != 12 {
+                    orig.push((t, n.to_vec()));
+                }
+            }
+        }
+        pos = ne;
+    }
+    // 3. 比对（过滤 SPS/PPS 与 AUD/FILLER 后逐 NALU 数据一致）
+    let a: Vec<&(u8, Vec<u8>)> = orig.iter().filter(|(t, _)| *t != 7 && *t != 8).collect();
+    let b: Vec<&(u8, Bytes)> = nals.iter().filter(|(t, _)| *t != 7 && *t != 8).collect();
+    if a.len() != b.len() {
+        warn!(
+            "RTP rebuild MISMATCH (frame {}B): orig {} NALU vs rebuilt {} NALU",
+            frame.data.len(),
+            a.len(),
+            b.len()
+        );
+        return;
+    }
+    for i in 0..a.len() {
+        if a[i].1.as_slice() != b[i].1.as_ref() {
+            warn!(
+                "RTP rebuild MISMATCH at NALU {}: type {} orig {}B vs rebuilt {}B",
+                i,
+                a[i].0,
+                a[i].1.len(),
+                b[i].1.len()
+            );
+            return;
+        }
+    }
 }
 
 /// DataChannel 控制消息协议（JSON）
@@ -810,6 +1203,13 @@ async fn handle_control_msg(session: &ScrcpySession, data: &[u8]) -> anyhow::Res
         }
         "rotate" => {
             session.rotate_device().await?;
+        }
+        // 花屏自愈：浏览器解码器失步时自动发 RTCP PLI，但 webrtc-rs 不响应 PLI，
+        // 只能等设备固定 IDR（i-frame-interval=2s）。前端检测到 pliCount 增量后
+        // 经此消息请求设备立即重置编码器（输出新 config+IDR，~200ms 恢复）。
+        "reset_video" => {
+            info!(device = %session.device.name, "reset_video requested by viewer (decoder desync)");
+            session.reset_video().await?;
         }
         "back" => {
             session.back_or_screen_on(0).await?;
@@ -944,4 +1344,102 @@ fn parse_opus_payload_type(sdp: &str) -> Option<u8> {
         }
     }
     None
+}
+
+/// 编码器输出质量探针：用 ffmpeg 解码"原始 H.264 帧（config + 本帧）"，做宏块网格
+/// 块效应检测（16px 规则网格边缘强度 vs 非边界基线）。ratio > 1.25 → 该帧是编码器
+/// 输出的低质量帧（块效应）。用于区分：编码器坏帧 vs 浏览器解码路径问题。
+fn probe_encoder_blockiness(ffmpeg_path: &str, cfg: Option<bytes::Bytes>, frame: &[u8], frame_no: u64, is_key: bool, size: usize) {
+    use std::io::Write;
+    let dir = std::env::temp_dir();
+    let h264_path = dir.join(format!("gamer-probe-{}.h264", std::process::id()));
+    let mut data = Vec::with_capacity(cfg.as_ref().map(|c| c.len()).unwrap_or(0) + frame.len());
+    if let Some(c) = &cfg {
+        data.extend_from_slice(c);
+    }
+    data.extend_from_slice(frame);
+    if std::fs::File::create(&h264_path).and_then(|mut f| f.write_all(&data)).is_err() {
+        return;
+    }
+    let out = std::process::Command::new(ffmpeg_path)
+        .args(["-y", "-loglevel", "error", "-f", "h264", "-i"])
+        .arg(&h264_path)
+        .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+        .output();
+    let _ = std::fs::remove_file(&h264_path);
+    let Ok(out) = out else { return };
+    if !out.status.success() || out.stdout.len() < 1000 {
+        return;
+    }
+    let buf = &out.stdout;
+    // 从解码输出大小推断分辨率（常见组合）
+    let (w, h) = [(1920usize, 1080usize), (1440, 2560), (1080, 2400), (1440, 3200)]
+        .into_iter()
+        .find(|&(w, h)| buf.len() >= w * h * 3)
+        .unwrap_or((0, 0));
+    if w == 0 || h == 0 {
+        return;
+    }
+    let lum = |x: usize, y: usize| -> f64 {
+        let i = (y * w + x) * 3;
+        0.299 * buf[i] as f64 + 0.587 * buf[i + 1] as f64 + 0.114 * buf[i + 2] as f64
+    };
+    let mut edge_diff = 0f64;
+    let mut edge_n = 0u64;
+    let mut base_diff = 0f64;
+    let mut base_n = 0u64;
+    // 垂直宏块边界（x=16k）
+    let mut x = 16usize;
+    while x < w {
+        let mut y = 8usize;
+        while y + 8 < h {
+            let d = (lum(x - 1, y) - lum(x, y)).abs() + (lum(x, y) - lum(x + 1, y)).abs();
+            edge_diff += d;
+            edge_n += 1;
+            y += 4;
+        }
+        x += 16;
+    }
+    // 水平宏块边界（y=16k）
+    let mut y = 16usize;
+    while y < h {
+        let mut x = 8usize;
+        while x + 8 < w {
+            let d = (lum(x, y - 1) - lum(x, y)).abs() + (lum(x, y) - lum(x, y + 1)).abs();
+            edge_diff += d;
+            edge_n += 1;
+            x += 4;
+        }
+        y += 16;
+    }
+    // 基线：非边界（偏移 8px）
+    let mut x = 24usize;
+    while x < w {
+        let mut y = 8usize;
+        while y + 8 < h {
+            let d = (lum(x - 1, y) - lum(x, y)).abs() + (lum(x, y) - lum(x + 1, y)).abs();
+            base_diff += d;
+            base_n += 1;
+            y += 4;
+        }
+        x += 16;
+    }
+    let mut y = 24usize;
+    while y < h {
+        let mut x = 8usize;
+        while x + 8 < w {
+            let d = (lum(x, y - 1) - lum(x, y)).abs() + (lum(x, y) - lum(x, y + 1)).abs();
+            base_diff += d;
+            base_n += 1;
+            x += 4;
+        }
+        y += 16;
+    }
+    if edge_n == 0 || base_n == 0 {
+        return;
+    }
+    let ratio = (edge_diff / edge_n as f64) / (base_diff / base_n as f64);
+    if ratio > 1.25 {
+        warn!("ENCODER FRAME blockiness: frame_no={} key={} size={} ratio={:.2} {}x{}", frame_no, is_key, size, ratio, w, h);
+    }
 }

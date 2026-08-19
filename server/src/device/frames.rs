@@ -29,9 +29,13 @@ fn png_dims(png: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
-/// GOP 缓存上限（帧数与字节数，超限丢弃整个 GOP 等下一个 IDR 重建）
-const GOP_MAX_FRAMES: usize = 400;
-const GOP_MAX_BYTES: usize = 8 * 1024 * 1024;
+/// GOP 缓存上限（帧数与字节数，超限丢弃整个 GOP 等下一个 IDR 重建）。
+/// 注意：MTK 编码器实测忽略 i-frame-interval=2，关键帧实际间隔 ~20-25s
+/// （@30fps/20Mbps ≈ 750 帧 / 60MB）——上限必须覆盖一个完整 IDR 周期，
+/// 否则新 viewer 重放拿不到含 IDR 的完整 GOP（旧值 400 帧/8MB 在 IDR 后
+/// ~3s 就清空），连接只能靠 reset_video 兜底，兜底失败就裸推 P 帧 → 花屏
+const GOP_MAX_FRAMES: usize = 800;
+const GOP_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// 按需解码超时（spawn + 解码 + PNG 编码的预算）
 const DECODE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -64,7 +68,18 @@ impl FrameCache {
     /// 注意：本方法由视频消费任务调用，必须保持轻量（只做内存拷贝）。
     pub fn feed(&self, frame: &VideoFrame) {
         if frame.is_config {
-            *self.config_buf.lock() = frame.data.clone();
+            let mut cb = self.config_buf.lock();
+            if cb.is_empty() || *cb != frame.data {
+                // 参数集变化（分辨率/编码参数切换，如游戏切横竖屏、编码器重启）：
+                // 旧 GOP 与新参数不匹配，清空等新 IDR 重建——否则 WebRTC 初始重放
+                // 与按需解码会把"新 SPS/PPS + 旧 GOP"喂给解码器 → 花屏/解码失败
+                // （repeat-previous-headers 会周期性重发相同参数集，字节相同则不清）
+                if !cb.is_empty() {
+                    self.gop.lock().clear();
+                    debug!("SPS/PPS changed ({}B → {}B), GOP cleared", cb.len(), frame.data.len());
+                }
+                *cb = frame.data.clone();
+            }
             return;
         }
         // GOP 缓存维护：IDR 清空重建；P 帧追加；超限丢弃整个 GOP（等待下一个 IDR）

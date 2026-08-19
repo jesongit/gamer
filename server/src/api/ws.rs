@@ -13,7 +13,7 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use super::AppState;
 use crate::device::scrcpy::VideoFrame;
-use crate::webrtc::{make_audio_queue, make_frame_queue, ViewerSession};
+use crate::webrtc::{make_audio_queue, make_frame_queue, ViewerHandle, ViewerSession};
 
 pub async fn ws_device(ws: WebSocketUpgrade, State(st): State<AppState>, Path(device_id): Path<String>) -> Response {
     ws.on_upgrade(move |socket| handle_ws(socket, st, device_id))
@@ -106,17 +106,20 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                 Ok(vs) => {
                                     // 单 viewer 限制：同一设备的新连接踢掉旧连接
                                     // （旧 pusher 停止 + 旧 peer 关闭），避免多连接多推流
-                                    let running = vs.running.clone();
-                                    let peer_weak = std::sync::Arc::downgrade(&vs.peer);
+                                    let handle = ViewerHandle {
+                                        running: vs.running.clone(),
+                                        peer: std::sync::Arc::downgrade(&vs.peer),
+                                        control_dc: vs.control_dc.clone(),
+                                    };
                                     let old_pair = {
                                         st.viewers
                                             .lock()
                                             .unwrap()
-                                            .insert(device_id.clone(), (running, peer_weak))
+                                            .insert(device_id.clone(), handle)
                                     };
-                                    if let Some((old_running, old_peer)) = old_pair {
-                                        old_running.store(false, std::sync::atomic::Ordering::SeqCst);
-                                        if let Some(p) = old_peer.upgrade() {
+                                    if let Some(old) = old_pair {
+                                        old.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        if let Some(p) = old.peer.upgrade() {
                                             let _ = p.close().await;
                                         }
                                         info!(device = %device_id, "kicked previous viewer");
@@ -167,7 +170,7 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
         let is_mine = {
             let map = st.viewers.lock().unwrap();
             map.get(&device_id)
-                .map(|(r, _)| std::sync::Arc::ptr_eq(r, &v.running))
+                .map(|h| std::sync::Arc::ptr_eq(&h.running, &v.running))
                 .unwrap_or(false)
         };
         if is_mine {
