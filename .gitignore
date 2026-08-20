@@ -23,3 +23,6 @@ desktop.ini
 tools/mcp-client/node_modules/
 tools/mcp-client/out/
 server/web-dist/
+
+# ===== 本地任务笔记 =====
+prompt.md
