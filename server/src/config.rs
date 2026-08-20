@@ -92,7 +92,8 @@ fn default_idle_disconnect_secs() -> u64 {
 }
 
 impl Default for Config {
-    fn default() -> Self {        Self {
+    fn default() -> Self {
+        Self {
             port: 8443,
             data_dir: PathBuf::from("./data"),
             adb_path: "adb".into(),
@@ -106,6 +107,7 @@ impl Default for Config {
             // 默认 15fps：防止无 config.toml 时 scrcpy 全速发帧（55fps+），
             // 服务端 ffmpeg 软解 + PNG 编解码单核跑满（CPU 100% 持续拖垮进程）
             fps: 15,
+            encoder_name: String::new(),
             op_templates: OpTemplates::default(),
             idle_disconnect_secs: default_idle_disconnect_secs(),
         }
