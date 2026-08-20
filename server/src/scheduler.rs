@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 
 use crate::device::DeviceManager;
 use crate::engine::Runner;
+use crate::scripts::ScriptStore;
 use crate::store::{Db, Task};
 
 /// 将 5 字段标准 cron（分 时 日 月 周）规范化为 cron crate 的 7 字段格式
@@ -36,17 +37,25 @@ pub struct Scheduler {
     db: Db,
     devices: Arc<DeviceManager>,
     runner: Arc<Runner>,
+    /// 脚本文件存储：任务运行时按 script_id（package/name）取脚本内容
+    scripts: Arc<ScriptStore>,
     /// task_id -> (是否运行中, 上次处理的触发时刻)
     running: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (bool, Option<DateTime<Local>>)>>>,
 }
 
 impl Scheduler {
-    pub fn new(db: Db, devices: Arc<DeviceManager>, viewers: crate::webrtc::ViewerMap) -> Self {
-        let runner = Arc::new(Runner::new(db.clone(), devices.clone(), viewers));
+    pub fn new(
+        db: Db,
+        devices: Arc<DeviceManager>,
+        viewers: crate::webrtc::ViewerMap,
+        scripts: Arc<ScriptStore>,
+    ) -> Self {
+        let runner = Arc::new(Runner::new(db.clone(), devices.clone(), viewers, scripts.clone()));
         Self {
             db,
             devices,
             runner,
+            scripts,
             running: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
@@ -56,6 +65,7 @@ impl Scheduler {
         let db = self.db.clone();
         let devices = self.devices.clone();
         let runner = self.runner.clone();
+        let scripts = self.scripts.clone();
         let running = self.running.clone();
         info!("scheduler started");
         tokio::spawn(async move {
@@ -101,11 +111,12 @@ impl Scheduler {
                         let runner2 = runner.clone();
                         let devices2 = devices.clone();
                         let db2 = db.clone();
+                        let scripts2 = scripts.clone();
                         let task2 = task.clone();
                         let running2 = running.clone();
                         tokio::spawn(async move {
                             info!(task = %task2.name, "scheduled run triggered");
-                            let result = run_task(&runner2, &devices2, &db2, &task2).await;
+                            let result = run_task(&runner2, &devices2, &db2, &scripts2, &task2).await;
                             let _ = result;
                             // 只复位运行标志，保留 entry（含已处理的触发时刻）：
                             // 若直接 remove，下个 tick 会把同一触发点再执行一次（任务每 10s 重复触发的 bug）
@@ -123,13 +134,19 @@ impl Scheduler {
     /// 立即运行任务（手动触发）
     pub async fn run_now(&self, task: &Task) {
         info!(task = %task.name, "manual trigger");
-        let _ = run_task(&self.runner, &self.devices, &self.db, task).await;
+        let _ = run_task(&self.runner, &self.devices, &self.db, &self.scripts, task).await;
     }
 }
 
-async fn run_task(runner: &Arc<Runner>, devices: &Arc<DeviceManager>, db: &Db, task: &Task) -> anyhow::Result<()> {
-    let script = db
-        .get_script(&task.script_id)?
+async fn run_task(
+    runner: &Arc<Runner>,
+    devices: &Arc<DeviceManager>,
+    db: &Db,
+    scripts: &Arc<ScriptStore>,
+    task: &Task,
+) -> anyhow::Result<()> {
+    let script = scripts
+        .get(&task.script_id)?
         .ok_or_else(|| anyhow::anyhow!("script not found: {}", task.script_id))?;
 
     // 确保设备在线

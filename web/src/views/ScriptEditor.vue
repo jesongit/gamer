@@ -20,7 +20,7 @@
         <div class="sl-items">
           <div v-for="s in scripts" :key="s.id" class="sl-item" :class="{ sel: s.id === sel?.id }" @click="select(s)">
             <div class="sl-name">{{ s.name }}</div>
-            <div class="sl-meta mono">{{ fmtTime(s.updated_at) }}</div>
+            <div class="sl-meta mono"><span class="sl-pkg">{{ s.package }}</span> · {{ fmtTime(s.updated_at) }}</div>
             <button class="sl-del" @click.stop="removeScript(s)" title="删除">🗑</button>
           </div>
         </div>
@@ -33,7 +33,7 @@
       <!-- 右：编辑器 -->
       <div class="editor-wrap card">
         <div class="ed-head">
-          <span class="mono">{{ sel?.name || '未命名.yml' }}</span>
+          <span class="mono">{{ sel ? sel.package + '/' + sel.name : '未命名.yml' }}</span>
           <div class="ed-status">
             <span class="tag" :class="valid ? 'ok' : 'err'">{{ valid ? '✓ 语法正确' : '✗ 语法错误' }}</span>
           </div>
@@ -56,7 +56,8 @@
         <div class="modal-body">
           <div class="help-block">
             <div class="hb-title">⚙ 顶层配置</div>
-            <pre class="hb-code mono">action_wait: 500       # 每个操作后的默认等待 ms（默认 500）
+            <pre class="hb-code mono">package default        # 脚本包：决定存放目录 data/scripts/&lt;package&gt;/（缺省 default）
+action_wait: 500       # 每个操作后的默认等待 ms（默认 500）
 log_level: info        # 日志级别：info=精简（默认） / debug=详细</pre>
           </div>
           <div class="help-block">
@@ -119,7 +120,8 @@ const code = ref('')
 const valid = ref(null)
 const showHelp = ref(false)
 
-const DEFAULT_CODE = `action_wait: 500
+const DEFAULT_CODE = `package default
+action_wait: 500
 log_level: info
 
 steps:
@@ -195,8 +197,20 @@ function onEditorTab(e) {
   }
 }
 
+/** 剥离首行 package 指令（非标准 YAML，校验前去掉，与服务端一致） */
+function stripPackageLine(text) {
+  const lines = text.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim()
+    if (!t || t.startsWith('#')) continue
+    if (/^package\s+\S+$/.test(t)) lines.splice(i, 1)
+    return lines.join('\n')
+  }
+  return lines.join('\n')
+}
+
 function validate() {
-  valid.value = code.value.includes('steps:')
+  valid.value = stripPackageLine(code.value).includes('steps:')
   toast(valid.value ? '语法校验通过' : '缺少 steps: 根节点', valid.value ? 'success' : 'error')
 }
 
@@ -204,10 +218,10 @@ async function save() {
   if (!sel.value) return toast('请先选择或新建脚本', 'error')
   if (!sel.value.name) return toast('请填写脚本名称', 'error')
   try {
-    await api.saveScript({ id: sel.value.id, name: sel.value.name, content: code.value })
+    const r = await api.saveScript({ id: sel.value.id, name: sel.value.name, content: code.value })
     await loadScripts()
-    const saved = scripts.value.find(s => s.name === sel.value.name) || scripts.value[0]
-    sel.value = saved || sel.value
+    // package/名称可能变化（id 变化），按返回 id 重新定位
+    sel.value = scripts.value.find(s => s.id === r.id) || sel.value
     toast('已保存', 'success')
   } catch (e) {
     toast('保存失败：' + e.message, 'error')
@@ -311,6 +325,7 @@ onUnmounted(() => stopRunStatusPoll())
 .sl-item.sel { background: rgba(34,211,165,.08); border-color: rgba(34,211,165,.35); }
 .sl-name { font-size: 13px; font-weight: 600; padding-right: 32px; }
 .sl-meta { font-size: 11px; color: var(--text-2); margin-top: 4px; }
+.sl-pkg { color: var(--accent-2); }
 .sl-del {
   position: absolute; right: 8px; top: 10px; background: none; border: none;
   color: var(--text-2); cursor: pointer; font-size: 12px;

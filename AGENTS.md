@@ -11,7 +11,7 @@ scrcpy 采集 Android 设备画面 → WebRTC（H.264 视频轨 + DataChannel �
 - `server/` — Rust 服务端，监听 **8443**，静态托管 `web-dist/`（构建产物）
 - `web/` — Vue3 + Vite，dev 监听 **5173**，`/api`、`/ws` 代理到 8443；路由为 hash 模式
 - `server/config.toml` — 关键项：`adb_path`、`ffmpeg_path`、`scrcpy_server`、`password`（默认 admin/admin123，前端无鉴权拦截，token 仅本地标记）
-- `server/data/gamer.db` — SQLite（设备/脚本/任务/日志）；`data/templates/` 模板图片
+- `server/data/gamer.db` — SQLite（设备/任务/日志；脚本已改文件存储）；`data/templates/` 模板图片；`data/scripts/<package>/` YAML 脚本
 
 ## 常用命令
 
@@ -31,6 +31,7 @@ cd web && npm run dev                   # 单起前端
 - 配置变更（PUT /api/devices/:id）会踢该设备 viewer（pusher 停 + peer close），前端 onclose → 自动重连恢复画面
 - 设备扫描：`POST /api/devices/scan` 执行 `adb devices -l`，按 addr 去重自动入库（逻辑在 `DeviceManager::scan_and_sync`，服务器启动时也自动跑一次）
 - App 生命周期 / 低功耗空闲：连接**不再自动启动应用**（由脚本 `str_app`（冷启动，"+" 前缀控制消息）或 Console 启动按钮显式触发）；脚本结束后 `idle_disconnect_secs`（默认 60，0=关）秒内该设备无运行脚本且无 viewer → 自动 `disconnect_device` 进低功耗（熄屏恢复/编码停止/虚拟屏销毁，**adb 链路保留**：WiFi/emu 设备每 60s 补 `adb connect` 保活，启动时自举扫描+连接、不建会话不启动应用）；下次运行脚本/定时任务自动重连（~2-4s）
+- 脚本存储（2026-08-21 起文件系统，取代 SQLite scripts 表）：`data/scripts/<package>/<name>.yaml`，package 由 YAML 首个有效行 `package <名字>` 指定（缺省 default，**非标准 YAML 指令，解析前必须剥离**——后端 `scripts::strip_package_line`，前端 Console 校验/ScriptEditor 校验各有同款）；脚本 id = `package/name.yaml`（**含 `/`，前端拼 URL 必须整体 encodeURIComponent**，axum 会对 `%2F` 解码）；改 package/名即移动文件；`call` 子脚本按名解析（优先同 package）；导出 zip（`GET /api/scripts/:id/export`，递归收集 call 依赖 + find/until/click 模板）布局 `templates/<名>` + `script/<package>/<名>.yaml`，导入（`POST /api/scripts/import`，body=原始 zip，`?confirm=1` 落盘）同名冲突先 dry-run 报告再二次确认，导入的 yaml package 指令统一改写为所在目录；旧库脚本在启动时一次性迁移（`scripts::migrate_from_db`，含 tasks.script_id 重映射）
 
 ## 关键文件
 
@@ -42,8 +43,10 @@ cd web && npm run dev                   # 单起前端
 | `server/src/device/scrcpy.rs` | scrcpy 会话：视频/音频/控制 socket 协议（v3.3.3） |
 | `server/src/device/frames.rs` | 帧缓存：帧环（SPS/PPS + GOP）+ 按需解码截图 |
 | `server/src/device/mod.rs` | DeviceManager：连接生命周期 / 状态 / 广播 |
-| `server/src/store.rs` | SQLite 持久化 |
+| `server/src/store.rs` | SQLite 持久化（设备/任务/日志；scripts 表已退役，仅留迁移读取） |
+| `server/src/scripts.rs` | 脚本文件存储（package 目录 / 指令解析 / 依赖扫描 / zip 导入导出 / 旧库迁移） |
 | `server/src/engine.rs` / `matcher.rs` / `scheduler.rs` | YAML 脚本引擎 / NCC 模板匹配 / cron 调度 |
+| `web/src/components/ScriptPicker.vue` | 脚本选择器：package + 脚本双下拉（Console / TaskScheduler 共用；导入导出在 Console 脚本区「更多」菜单） |
 | `web/src/views/DeviceList.vue` | 设备列表：刷新(scan) / 连接 / 删除 |
 | `web/src/views/Console.vue` | 投屏控制：WebRTC 前端（连接锁防双 PC / 坐标映射 / 框选模板） |
 

@@ -1,7 +1,8 @@
 //! YAML 自动化脚本引擎
 //!
 //! 顶层字段：steps（必需）/ action_wait（操作后默认等待，500ms）/
-//!           log_level（debug|info，默认 info：info 级别不记录 debug 日志）
+//!           log_level（debug|info，默认 info：info 级别不记录 debug 日志）；
+//!           首行可写 `package <名字>` 指令（决定文件存放目录，非标准 YAML，解析前剥离）
 //!
 //! 支持动作：
 //!   wait / log / key / text / tap / swipe /
@@ -35,6 +36,7 @@ use tracing::warn;
 
 use crate::device::DeviceManager;
 use crate::matcher;
+use crate::scripts::{ScriptStore, DEFAULT_PACKAGE};
 use crate::store::Db;
 use crate::webrtc::ViewerMap;
 
@@ -61,6 +63,8 @@ pub struct Runner {
     pub devices: Arc<DeviceManager>,
     /// 每设备活跃 viewer 注册表：脚本 tap/swipe/命中可视化事件推送用
     pub viewers: ViewerMap,
+    /// 脚本文件存储（data/scripts/<package>/）：call 子脚本解析用
+    pub scripts: Arc<ScriptStore>,
 }
 
 /// 脚本运行上下文
@@ -92,8 +96,8 @@ impl Ctx {
 }
 
 impl Runner {
-    pub fn new(db: Db, devices: Arc<DeviceManager>, viewers: ViewerMap) -> Self {
-        Self { db, devices, viewers }
+    pub fn new(db: Db, devices: Arc<DeviceManager>, viewers: ViewerMap, scripts: Arc<ScriptStore>) -> Self {
+        Self { db, devices, viewers, scripts }
     }
 
     /// 推送脚本可视化事件给该设备当前的 viewer（无 viewer / 通道未开 / 发送失败均静默忽略）
@@ -130,7 +134,8 @@ impl Runner {
         log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
         start_step: usize,
     ) -> anyhow::Result<Vec<(String, String)>> {
-        let doc: Value = serde_yaml::from_str(content)?;
+        // 首行 package 指令不是合法 YAML，解析前剥离
+        let doc: Value = serde_yaml::from_str(crate::scripts::strip_package_line(content).as_ref())?;
         let steps = doc.get("steps").and_then(|v| v.as_sequence()).cloned().ok_or_else(|| anyhow::anyhow!("missing steps"))?;
         // 脚本顶层 action_wait：步骤未显式写 wait 时的操作后默认等待
         let action_wait = doc.get("action_wait").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_ACTION_WAIT);
@@ -294,13 +299,15 @@ impl Runner {
         }
         if let Some(v) = step.get("call") {
             let script_name = v.as_str().unwrap_or("");
-            let scripts = self.db.list_scripts()?;
-            if let Some(s) = scripts.iter().find(|s| s.name == script_name) {
-                ctx.log("debug", format!("调用子脚本 {}", script_name));
-                let sub_log = self.run(&ctx.device_id, &s.id, &s.content, ctx.stop.clone(), ctx.log_cb.clone(), 0).await?;
-                ctx.log.extend(sub_log);
-            } else {
-                anyhow::bail!("子脚本不存在: {}", script_name);
+            // 子脚本按名解析：优先调用者同 package，其次全局（缺扩展名自动补全）
+            let caller_pkg = ctx.script_id.split('/').next().unwrap_or(DEFAULT_PACKAGE);
+            match self.scripts.resolve_call(caller_pkg, script_name)? {
+                Some(s) => {
+                    ctx.log("debug", format!("调用子脚本 {}", script_name));
+                    let sub_log = self.run(&ctx.device_id, &s.id, &s.content, ctx.stop.clone(), ctx.log_cb.clone(), 0).await?;
+                    ctx.log.extend(sub_log);
+                }
+                None => anyhow::bail!("子脚本不存在: {}", script_name),
             }
         }
         if let Some(v) = step.get("str_app") {

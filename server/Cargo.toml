@@ -46,3 +46,6 @@ futures-util = "0.3"
 parking_lot = "0.12"
 bytes = "1"
 async-recursion = "1"
+
+# 脚本包导出/导入（zip）
+zip = "2"

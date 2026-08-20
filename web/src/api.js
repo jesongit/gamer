@@ -1,6 +1,12 @@
 // 后端 API 封装（Rust 服务端）
 const BASE = ''
 
+async function errMsg(r) {
+  let msg = `HTTP ${r.status}`
+  try { const j = await r.json(); if (j.error) msg = j.error } catch (e) {}
+  return msg
+}
+
 async function req(method, path, body) {
   const opt = { method, headers: {} }
   if (body !== undefined) {
@@ -8,11 +14,7 @@ async function req(method, path, body) {
     opt.body = typeof body === 'string' ? body : JSON.stringify(body)
   }
   const r = await fetch(BASE + path, opt)
-  if (!r.ok) {
-    let msg = `HTTP ${r.status}`
-    try { const j = await r.json(); if (j.error) msg = j.error } catch (e) {}
-    throw new Error(msg)
-  }
+  if (!r.ok) throw new Error(await errMsg(r))
   const ct = r.headers.get('content-type') || ''
   if (ct.includes('application/json')) return r.json()
   return r
@@ -55,13 +57,33 @@ export const api = {
   // 配置：操作记录 YAML 模板（config.toml [op_templates]）
   getOpTemplates: () => req('GET', '/api/op-templates'),
 
-  // 脚本
+  // 脚本（id 形如 "package/name.yaml"，含 '/'，拼 URL 必须整体 encodeURIComponent）
   listScripts: () => req('GET', '/api/scripts'),
   saveScript: (s) => req('POST', '/api/scripts', s),
-  deleteScript: (id) => req('DELETE', `/api/scripts/${id}`),
-  runScript: (id, deviceId, startIndex) => req('POST', `/api/scripts/${id}/run`, { device_id: deviceId, start_index: startIndex || 0 }),
-  stopScript: (id) => req('POST', `/api/scripts/${id}/stop`),
-  scriptStatus: (id) => req('GET', `/api/scripts/${id}/status`),
+  deleteScript: (id) => req('DELETE', `/api/scripts/${encodeURIComponent(id)}`),
+  runScript: (id, deviceId, startIndex) => req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, { device_id: deviceId, start_index: startIndex || 0 }),
+  stopScript: (id) => req('POST', `/api/scripts/${encodeURIComponent(id)}/stop`),
+  scriptStatus: (id) => req('GET', `/api/scripts/${encodeURIComponent(id)}/status`),
+  // 导出脚本包 zip（脚本 + call 依赖 + 模板）→ { blob, filename }
+  exportScript: async (id) => {
+    const r = await fetch(`/api/scripts/${encodeURIComponent(id)}/export`)
+    if (!r.ok) throw new Error(await errMsg(r))
+    const cd = r.headers.get('content-disposition') || ''
+    let filename = ''
+    const m = cd.match(/filename\*=UTF-8''([^;\s]+)/) || cd.match(/filename="?([^";\s]+)"?/)
+    if (m) { try { filename = decodeURIComponent(m[1]) } catch (e) { filename = m[1] } }
+    return { blob: await r.blob(), filename }
+  },
+  // 导入脚本包 zip：confirm=false 只探测冲突，true 落盘（同名替换）
+  importScripts: async (file, confirm) => {
+    const r = await fetch(`/api/scripts/import?confirm=${confirm ? 1 : 0}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/zip' },
+      body: file
+    })
+    if (!r.ok) throw new Error(await errMsg(r))
+    return r.json()
+  },
 
   // 定时任务
   listTasks: () => req('GET', '/api/tasks'),

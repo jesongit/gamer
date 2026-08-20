@@ -62,6 +62,10 @@ body {
 .input:focus, .select:focus, .textarea:focus { border-color: var(--accent); }
 .textarea { font-family: var(--mono); line-height: 1.6; resize: vertical; }
 .select option { background: var(--bg-1); }
+/* number 输入去掉浏览器自带的上下箭头（DPI、测试阈值等） */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
 
 .card {
   background: var(--bg-1); border: 1px solid var(--border);

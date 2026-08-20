@@ -27,7 +27,8 @@ use crate::device::DeviceManager;
 use crate::engine::Runner;
 use crate::matcher;
 use crate::scheduler::{next_run, Scheduler};
-use crate::store::{Db, Device, LogEntry, Script, ScreenMode, Task};
+use crate::scripts::ScriptStore;
+use crate::store::{Db, Device, LogEntry, ScreenMode, Task};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -36,6 +37,8 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     pub runner: Arc<Runner>,
     pub cfg: Config,
+    /// 脚本文件存储（data/scripts/<package>/）
+    pub scripts: Arc<ScriptStore>,
     /// 脚本运行停止标志
     pub run_stops: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
     /// 每设备的活跃 viewer（WebRTC 会话）注册表（main.rs 创建，与 Scheduler 共享）：
@@ -51,14 +54,16 @@ pub fn build_router(
     scheduler: Arc<Scheduler>,
     cfg: Config,
     viewers: crate::webrtc::ViewerMap,
+    scripts: Arc<ScriptStore>,
 ) -> Router {
-    let runner = Arc::new(Runner::new(db.clone(), devices.clone(), viewers.clone()));
+    let runner = Arc::new(Runner::new(db.clone(), devices.clone(), viewers.clone(), scripts.clone()));
     let state = AppState {
         db,
         devices,
         scheduler,
         runner,
         cfg,
+        scripts,
         run_stops: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         viewers,
     };
@@ -85,6 +90,8 @@ pub fn build_router(
         .route("/api/scripts/:id/run", post(api_run_script))
         .route("/api/scripts/:id/stop", post(api_stop_script))
         .route("/api/scripts/:id/status", get(api_script_status))
+        .route("/api/scripts/:id/export", get(api_export_script))
+        .route("/api/scripts/import", post(api_import_script))
         .route("/api/tasks", get(api_list_tasks).post(api_save_task))
         .route("/api/tasks/:id", delete(api_delete_task))
         .route("/api/tasks/:id/run", post(api_run_task_now))
@@ -672,7 +679,7 @@ async fn api_test_template(State(st): State<AppState>, Path(name): Path<String>,
 // ---------- 脚本 ----------
 
 async fn api_list_scripts(State(st): State<AppState>) -> Response {
-    match st.db.list_scripts() {
+    match st.scripts.list() {
         Ok(s) => Json(s).into_response(),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -686,23 +693,58 @@ struct SaveScriptReq {
 }
 
 async fn api_save_script(State(st): State<AppState>, Json(req): Json<SaveScriptReq>) -> Response {
-    let id = req.id.unwrap_or_else(|| Uuid::new_v4().simple().to_string());
-    let script = Script {
-        id,
-        name: req.name,
-        content: req.content,
-        updated_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-    };
-    match st.db.upsert_script(&script) {
-        Ok(_) => Json(serde_json::json!({"ok": true, "id": script.id})).into_response(),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    if req.name.trim().is_empty() {
+        return err_response(StatusCode::BAD_REQUEST, "脚本名不能为空");
+    }
+    match st.scripts.save(req.id.as_deref(), &req.name, &req.content) {
+        Ok(s) => Json(serde_json::json!({"ok": true, "id": s.id, "package": s.package, "name": s.name})).into_response(),
+        Err(e) => err_response(StatusCode::BAD_REQUEST, &e.to_string()),
     }
 }
 
 async fn api_delete_script(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    match st.db.delete_script(&id) {
+    match st.scripts.delete(&id) {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+/// 导出脚本包 zip：脚本 + 递归 call 依赖 + 引用的模板
+async fn api_export_script(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    match st.scripts.export(&id) {
+        Ok((filename, bytes)) => {
+            // 文件名可能是 unicode：用 RFC 5987 filename*（percent-encoded UTF-8），
+            // 直接塞非 ASCII 进 header 会被 hyper 拒绝
+            let enc: String = filename.bytes().map(|b| format!("%{:02X}", b)).collect();
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/zip")
+                .header(header::CONTENT_DISPOSITION, format!("attachment; filename*=UTF-8''{}", enc))
+                .body(Body::from(bytes))
+                .unwrap()
+        }
+        Err(e) => err_response(StatusCode::NOT_FOUND, &e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct ImportQuery {
+    #[serde(default)]
+    confirm: Option<String>,
+}
+
+/// 导入脚本包 zip（body 为原始 zip 字节）。
+/// confirm 缺省/false：只解析并返回同名冲突列表（前端二次确认）；
+/// confirm=1/true：落盘，同名替换。
+async fn api_import_script(
+    State(st): State<AppState>,
+    Query(q): Query<ImportQuery>,
+    body: axum::body::Bytes,
+) -> Response {
+    let confirm = matches!(q.confirm.as_deref(), Some("1") | Some("true"));
+    match st.scripts.import(&body, confirm) {
+        Ok(rep) => Json(rep).into_response(),
+        Err(e) => err_response(StatusCode::BAD_REQUEST, &e.to_string()),
     }
 }
 
@@ -715,7 +757,7 @@ struct RunScriptReq {
 }
 
 async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json(req): Json<RunScriptReq>) -> Response {
-    let Some(script) = (match st.db.get_script(&id) {
+    let Some(script) = (match st.scripts.get(&id) {
         Ok(s) => s,
         Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }) else {

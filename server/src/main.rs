@@ -10,6 +10,7 @@ mod device;
 mod engine;
 mod matcher;
 mod scheduler;
+mod scripts;
 mod store;
 mod webrtc;
 
@@ -62,6 +63,10 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Arc::new(store::Store::open(&cfg)?);
 
+    // 脚本文件存储（data/scripts/<package>/）+ 旧 SQLite scripts 表一次性迁移
+    let scripts = Arc::new(scripts::ScriptStore::open(&cfg)?);
+    scripts::migrate_from_db(&db, &scripts)?;
+
     // 每设备活跃 viewer 注册表：AppState / Scheduler / DeviceManager（空闲断开守卫）共享
     // （引擎经 control DataChannel 反向推送脚本可视化事件，定时任务运行时同样生效）
     let viewers: webrtc::ViewerMap = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -71,11 +76,11 @@ async fn main() -> anyhow::Result<()> {
     devices.start().await?;
 
     // 调度器：cron 定时任务
-    let scheduler = Arc::new(scheduler::Scheduler::new(db.clone(), devices.clone(), viewers.clone()));
+    let scheduler = Arc::new(scheduler::Scheduler::new(db.clone(), devices.clone(), viewers.clone(), scripts.clone()));
     scheduler.start().await;
 
     // HTTP + WebSocket API
-    let app = api::build_router(db, devices, scheduler, cfg.clone(), viewers);
+    let app = api::build_router(db, devices, scheduler, cfg.clone(), viewers, scripts);
     let listener = TcpListener::bind(cfg.listen_addr()).await?;
     info!("GameBot server ready on http://{}", cfg.listen_addr());
     axum::serve(listener, app).await?;

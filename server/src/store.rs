@@ -1,4 +1,5 @@
-//! SQLite 持久化：设备、脚本、定时任务、运行日志
+//! SQLite 持久化：设备、定时任务、运行日志
+//! （脚本已改为文件系统存储 data/scripts/<package>/，见 scripts.rs；scripts 表仅留迁移读取）
 
 use std::sync::{Arc, Mutex};
 
@@ -34,14 +35,6 @@ pub struct Device {
     /// 视频帧率上限（None = 跟随全局配置 / 自动）
     pub fps: Option<u32>,
     pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Script {
-    pub id: String,
-    pub name: String,
-    pub content: String,
-    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,33 +189,15 @@ impl Store {
         Ok(())
     }
 
-    // ---------- 脚本 ----------
+    // ---------- 脚本（已迁移到文件系统存储，见 scripts.rs） ----------
 
-    pub fn list_scripts(&self) -> anyhow::Result<Vec<Script>> {
+    /// 旧版 scripts 表读取：(id, name, content)。
+    /// 仅供一次性迁移到 data/scripts/ 使用（scripts::migrate_from_db），新代码勿用。
+    pub fn legacy_scripts(&self) -> anyhow::Result<Vec<(String, String, String)>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT id, name, content, updated_at FROM scripts ORDER BY updated_at DESC")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Script { id: r.get(0)?, name: r.get(1)?, content: r.get(2)?, updated_at: r.get(3)? })
-        })?;
+        let mut stmt = conn.prepare("SELECT id, name, content FROM scripts")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
-    }
-
-    pub fn get_script(&self, id: &str) -> anyhow::Result<Option<Script>> {
-        Ok(self.list_scripts()?.into_iter().find(|s| s.id == id))
-    }
-
-    pub fn upsert_script(&self, s: &Script) -> anyhow::Result<()> {
-        self.lock().execute(
-            r#"INSERT INTO scripts (id, name, content, updated_at) VALUES (?1, ?2, ?3, ?4)
-               ON CONFLICT(id) DO UPDATE SET name=?2, content=?3, updated_at=?4"#,
-            rusqlite::params![s.id, s.name, s.content, s.updated_at],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_script(&self, id: &str) -> anyhow::Result<()> {
-        self.lock().execute("DELETE FROM scripts WHERE id = ?1", [id])?;
-        Ok(())
     }
 
     // ---------- 定时任务 ----------

@@ -78,9 +78,7 @@
           <div class="form-row">
             <div class="form-item">
               <label>脚本</label>
-              <select v-model="form.script_id" class="select mono">
-                <option v-for="s in scripts" :key="s.id" :value="s.id">{{ s.name }}</option>
-              </select>
+              <ScriptPicker v-model="form.script_id" />
             </div>
             <div class="form-item">
               <label>设备</label>
@@ -103,6 +101,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { tasksData, scriptsData, devicesData, useToast } from '../store'
 import { api } from '../api'
+import ScriptPicker from '../components/ScriptPicker.vue'
 
 const toast = useToast()
 const tasks = tasksData
@@ -122,7 +121,11 @@ const presets = [
   { name: '每周一 9:00', cron: '0 9 * * 1' }
 ]
 
-function scriptName(id) { return scripts.value.find(s => s.id === id)?.name || id }
+function scriptName(id) {
+  const s = scripts.value.find(s => s.id === id)
+  if (!s) return id
+  return s.package === 'default' ? s.name : `${s.package}/${s.name}`
+}
 function deviceName(id) { return devices.value.find(d => d.id === id)?.name || id }
 function lastTag(last) {
   if (last === '成功') return 'ok'
@@ -177,6 +180,7 @@ function applyPreset(p) { form.cron = p.cron }
 
 async function saveTask() {
   if (!form.name || !form.cron) return toast('请填写名称和 cron 表达式', 'error')
+  if (!form.script_id) return toast('请选择脚本', 'error')
   try {
     await api.saveTask({
       id: form.id, name: form.name, cron: form.cron,

@@ -317,7 +317,7 @@
               <div class="tpl-top">
                 <input v-model.number="testThreshold" class="input input-sm mono" type="number" min="0" max="1" step="0.01" placeholder="测试阈值 0~1" title="模板测试阈值，默认 0.8" />
                 <select v-model="testRegion" class="select mono tpl-region" title="模板匹配区域：默认=按模板名自动识别（名字带 #x1_y1_x2_y2 用对应矩形，带 #a/#u/#d/#l/#r/#ul/#ur/#dl/#dr 用对应半区，否则等价 a 全屏）；手动选择后，测试匹配与生成记录都使用该区域">
-                  <option value="">默认（自动识别）</option>
+                  <option value="">默认</option>
                   <option value="a">a · 全屏</option>
                   <option value="u">u · 上半屏</option>
                   <option value="d">d · 下半屏</option>
@@ -396,17 +396,23 @@
           <!-- 脚本功能：运行模式 -->
           <div v-if="scriptMode === 'run'" class="script-run">
             <div class="auto-run">
-              <select v-model="selScript" class="select mono">
-                <option value="">选择要运行的脚本…</option>
-                <option v-for="s in scripts" :key="s.id" :value="s.id">{{ s.name }}</option>
-              </select>
+              <ScriptPicker v-model="selScript" />
             </div>
             <div class="run-actions">
               <button v-if="!store.running" class="btn btn-primary" :disabled="!selScript || !store.deviceId" @click="runScript">▶ 运行</button>
               <button v-else class="btn btn-danger" @click="stopScript">■ 停止</button>
-              <button class="btn" @click="startNewScript">新建</button>
               <button class="btn" :disabled="!selScript" @click="editCurrentScript">编辑</button>
-              <button class="btn btn-danger" :disabled="!selScript" @click="deleteCurrentScript">删除</button>
+              <div class="more-wrap">
+                <button class="btn" :class="{ active: moreOpen }" @click="moreOpen = !moreOpen">更多 ▾</button>
+                <div v-if="moreOpen" class="more-mask" @click="moreOpen = false"></div>
+                <div v-if="moreOpen" class="more-dropdown">
+                  <button class="more-item" @click="moreOpen = false; startNewScript()">＋ 新建</button>
+                  <button class="more-item danger" :disabled="!selScript" @click="moreOpen = false; deleteCurrentScript()">🗑 删除</button>
+                  <button class="more-item" :disabled="!selScript" @click="moreOpen = false; exportCurrentScript()">⬆ 导出</button>
+                  <button class="more-item" @click="moreOpen = false; $refs.impFile.click()">⬇ 导入</button>
+                </div>
+              </div>
+              <input ref="impFile" type="file" accept=".zip" hidden @change="onImportFile" />
             </div>
 
             <!-- 运行中：实时日志；其他情况：脚本内容（只读） -->
@@ -485,6 +491,7 @@ import { load as yamlLoad } from 'js-yaml'
 import { useRouter } from 'vue-router'
 import { store, devicesData, scriptsData, templatesData, useToast } from '../store'
 import { api } from '../api'
+import ScriptPicker from '../components/ScriptPicker.vue'
 
 const router = useRouter()
 const toast = useToast()
@@ -506,7 +513,8 @@ const res = ref('—')
 const bitrate = ref('—')
 const selScript = ref('')
 // 脚本页签：运行/编辑模式 + 日志级别
-const DEFAULT_SCRIPT_CODE = `action_wait: 500
+const DEFAULT_SCRIPT_CODE = `package default
+action_wait: 500
 log_level: info
 
 steps:
@@ -2572,12 +2580,63 @@ async function deleteCurrentScript() {
   }
 }
 
+// ---------- 更多菜单（新建 / 删除 / 导入 / 导出） ----------
+const moreOpen = ref(false)
+
+/** 导出当前选中脚本：脚本 + call 依赖 + 模板 → zip 下载 */
+async function exportCurrentScript() {
+  if (!selScript.value) return toast('请先选择脚本', 'error')
+  try {
+    const { blob, filename } = await api.exportScript(selScript.value)
+    const name = filename || ((selScript.value.split('/')[1] || 'script').replace(/\.ya?ml$/i, '') + '.zip')
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = name
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000)
+    toast(`已导出 ${name}`, 'success')
+  } catch (e) {
+    toast('导出失败：' + e.message, 'error')
+  }
+}
+
+/** 导入脚本包 zip：先探测冲突，同名文件替换前二次确认 */
+async function onImportFile(e) {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  if (!file) return
+  try {
+    const dry = await api.importScripts(file, false)
+    if (dry.conflicts?.length) {
+      const list = dry.conflicts.join('\n')
+      if (!confirm(`导入会替换以下 ${dry.conflicts.length} 个同名文件：\n\n${list}\n\n确认替换导入？`)) return
+    }
+    const rep = await api.importScripts(file, true)
+    await loadData()
+    toast(`导入完成：新增 ${rep.imported.length} 个，替换 ${rep.replaced.length} 个`, 'success')
+  } catch (err) {
+    toast('导入失败：' + err.message, 'error')
+  }
+}
+
 /** 保存前校验 YAML：语法 / steps / 坐标范围 / 模板存在 */
+/** 剥离首行 package 指令（`package xxx` 非标准 YAML，前后端解析前都需去掉） */
+function stripPackageLine(content) {
+  const lines = content.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim()
+    if (!t || t.startsWith('#')) continue
+    if (/^package\s+\S+$/.test(t)) lines.splice(i, 1)
+    return lines.join('\n')
+  }
+  return lines.join('\n')
+}
+
 function validateScriptCode(content) {
   const errors = []
   let doc
   try {
-    doc = yamlLoad(content)
+    doc = yamlLoad(stripPackageLine(content))
   } catch (e) {
     // 常见笔误提示：`region:l` / `timeout:0` 冒号后缺空格
     const lines = content.split('\n')
@@ -3178,17 +3237,36 @@ onUnmounted(() => {
 .mono { font-family: var(--mono); font-size: 11px; color: var(--text-1); }
 
 .auto-run { display: flex; flex-wrap: wrap; gap: 8px; }
+.auto-run .spicker { flex: 1 1 auto; }
 .auto-run .select { flex: 1; min-width: 120px; }
 .run-actions { display: flex; gap: 8px; }
 .run-actions .btn { flex: 1; }
+.run-actions .more-wrap { position: relative; flex: 1; }
+.run-actions .more-wrap .btn { width: 100%; }
+.more-mask { position: fixed; inset: 0; z-index: 20; }
+.more-dropdown {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 30;
+  display: flex; flex-direction: column; min-width: 120px; padding: 4px; gap: 2px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+}
+.more-item {
+  display: flex; align-items: center; gap: 6px; text-align: left; white-space: nowrap;
+  padding: 6px 10px; border: none; background: none; border-radius: var(--radius-sm);
+  color: var(--text-0); font-size: 12px; cursor: pointer;
+}
+.more-item:hover { background: var(--bg-3); }
+.more-item:disabled { color: var(--text-2); opacity: .5; cursor: not-allowed; }
+.more-item.danger:hover { color: var(--danger); }
 
 /* 脚本页签 */
 .panel-sec.script-tab { flex: 1; min-height: 0; overflow: hidden; }
 .script-tpl { flex: 4; min-height: 0; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
 .tpl-top { display: flex; align-items: center; gap: 8px; }
-.tpl-top .input { flex: 1; min-width: 0; }
-.tpl-top .btn { flex-shrink: 0; }
-.tpl-top .tpl-region { flex: 0 0 auto; width: 138px; padding: 4px 6px; font-size: 11px; }
+/* 阈值输入 : 区域下拉 : 框选按钮 : 上传按钮 = 2:4:3:3 */
+.tpl-top .input { flex: 2 1 0%; min-width: 0; }
+.tpl-top .tpl-region { flex: 4 1 0%; min-width: 0; padding: 4px 6px; font-size: 11px; }
+.tpl-top .btn { flex: 3 1 0%; min-width: 0; }
 .tpl-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .script-run { flex: 6; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .script-logs { flex: 1; min-height: 120px; max-height: none; }

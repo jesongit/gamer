@@ -63,7 +63,11 @@ let timer = null
 const LEVELS = { info: 'INFO', success: 'OK', warn: 'WARN', error: 'ERR' }
 function levelBadge(l) { return LEVELS[l] || l }
 function deviceName(id) { return devices.value.find(d => d.id === id)?.name || id }
-function scriptName(id) { return scripts.value.find(s => s.id === id)?.name || id }
+function scriptName(id) {
+  const s = scripts.value.find(s => s.id === id)
+  if (!s) return id
+  return s.package === 'default' ? s.name : `${s.package}/${s.name}`
+}
 
 async function load() {
   try {
