@@ -8,10 +8,15 @@ password = "admin123"
 default_threshold = 0.8
 decode_frames = true
 max_size = 0
-bitrate_mbps = 40
+# 码率：不宜超 ~12——设备虚拟屏固定 60fps 编码，40Mbps 时单帧 50~75KB，
+# pusher 单帧 RTP 发送 ~20ms > 16.7ms 帧预算 → 发送饱和积压 → 周期性
+# 断链清队冻结（投屏延迟高的根因之一）。12Mbps 下单帧 ~20KB、发送 ~6ms
+bitrate_mbps = 12
 fps = 15
 # scrcpy 编码器名（空=设备默认；可指定 c2.android.avc.encoder 软件编码器避开 MTK 硬件块效应）
 encoder_name = ""
+# 编码器块效应诊断探针（默认关，见 config.rs 注释）
+probe_encoder = false
 # 脚本运行结束后的空闲自动断开秒数（断 scrcpy 会话进低功耗，adb 保留；无脚本运行且无 viewer 时才触发；0=关闭）
 idle_disconnect_secs = 60
 

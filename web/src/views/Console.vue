@@ -622,59 +622,27 @@ let logTimer = null
 // 连接同步锁：防止并发 connect() 创建多个 PeerConnection（双连接 → 串流 → 画面定格）
 let connectLock = false
 
-// ---------- 多页面互斥锁 + 自动重连 ----------
-// 同一设备同一时刻只允许一个页面持有 WebRTC 连接（服务端单 viewer 设计）。
-// 多个浏览器页面/标签页同时操作时会互相踢连接导致黑屏：
-//  - 连接成功即持有 localStorage 锁并心跳续期
-//  - 被踢（被动断开）时检查锁：他人持有 → 提示且不重连（避免互踢死循环）；
-//    锁在自己手里/已过期 → 自动重连（3/6/12s 退避，上限 3 次）
-//  - 用户手动操作（点连接 / 切换配置）→ 强制抢锁
-const LOCK_KEY = 'gb_webrtc_lock'
-const LOCK_TTL = 15000
-const lock = reactive({ pageId: Math.random().toString(36).slice(2, 10), deviceId: null, ts: 0 })
-let lockTimer = null
+// ---------- 多页面互斥 + 自动重连 ----------
+// 同一设备同一时刻只有一个活跃 viewer，由服务端 viewers 注册表仲裁
+// （取代旧 localStorage 锁——它只能管同一浏览器，跨浏览器/跨 PC 管不到）：
+//  - 新页面连接时若已有活跃 viewer：服务端回 conflict → 手动连接（点连接按钮）
+//    弹窗确认后带 force 重发 offer 顶替；仅换浏览器↔服务端链路，设备 scrcpy
+//    会话保持不断，新 viewer 无缝接管
+//  - 被顶替页面经信令 ws 收到 taken_over → 直接断开且不再自动重连（防互顶）
+//  - 自动重连（非手动）遇 conflict → 直接放弃并提示（不弹窗、不抢连接）
 let reconnectTimer = null
 let reconnectAttempts = 0
 let manualClose = false
+// 被其他页面 force 顶替（已收 taken_over）：断开后不再自动重连
+let superseded = false
+// 本次 offer 是否带 force（conflict 确认后顶替重连用）
+let forceTakeover = false
 
-function readLock() {
-  try { return JSON.parse(localStorage.getItem(LOCK_KEY) || 'null') } catch (e) { return null }
-}
-
-function acquireLock(force = false) {
-  const cur = readLock()
-  const heldByOther = cur && cur.deviceId === store.deviceId && cur.pageId !== lock.pageId && Date.now() - cur.ts < LOCK_TTL
-  if (heldByOther && !force) return false
-  const l = { pageId: lock.pageId, deviceId: store.deviceId, ts: Date.now() }
-  localStorage.setItem(LOCK_KEY, JSON.stringify(l))
-  lock.deviceId = store.deviceId
-  lock.ts = l.ts
-  return true
-}
-
-function releaseLock() {
-  const cur = readLock()
-  if (cur && cur.pageId === lock.pageId) localStorage.removeItem(LOCK_KEY)
-  lock.deviceId = null
-}
-
-function startLockHeartbeat() {
-  stopLockHeartbeat()
-  lockTimer = setInterval(() => {
-    if (connected.value) acquireLock(false)
-  }, 8000)
-}
-
-function stopLockHeartbeat() {
-  if (lockTimer) { clearInterval(lockTimer); lockTimer = null }
-}
-
-/** 被动断开后的自动重连调度：他人持锁则不重连，否则按退避时间重连 */
+/** 被动断开后的自动重连调度：被顶替不重连，否则按退避时间重连 */
 function scheduleReconnect() {
   if (reconnectTimer || !store.deviceId) return
-  const cur = readLock()
-  if (cur && cur.deviceId === store.deviceId && cur.pageId !== lock.pageId && Date.now() - cur.ts < LOCK_TTL) {
-    errorMsg.value = '设备正在其他页面使用，画面已断开'
+  if (superseded) {
+    errorMsg.value = '连接已被其他页面接管'
     return
   }
   const delay = [3000, 6000, 12000][Math.min(reconnectAttempts, 2)]
@@ -682,14 +650,11 @@ function scheduleReconnect() {
   toast(`连接已断开，${delay / 1000} 秒后自动重连…`, 'warn')
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
-    // 延迟后二次检查锁：被踢后其他页面可能已抢锁（连接竞态窗口），
-    // 此时不再自动重连，避免多页面互踢死循环
-    const cur2 = readLock()
-    if (cur2 && cur2.deviceId === store.deviceId && cur2.pageId !== lock.pageId && Date.now() - cur2.ts < LOCK_TTL) {
-      errorMsg.value = '设备正在其他页面使用，画面已断开'
+    if (superseded) {
+      errorMsg.value = '连接已被其他页面接管'
       return
     }
-    connect(false) // 自动重连不强抢锁（锁在自己手里会成功；在别人手里已在上方拦截）
+    connect(false) // 自动重连非 force：他页已连接时服务端回 conflict → 放弃
   }, delay)
 }
 
@@ -698,15 +663,17 @@ function onChannelOpen() {
   connecting.value = false
   reconnectAttempts = 0
   videoConnectTs = Date.now()
-  acquireLock(true) // 能建立连接说明服务端已踢掉旧 viewer，锁归本页
-  startLockHeartbeat()
+  // 音频按需发送：告知服务端本页是否要音频（默认静音 → 服务端零音频包）。
+  // 仅靠 track.enabled=false 不够：部分浏览器内核仍把音频流选为 A/V 同步
+  // 主时钟，虚拟屏音频时钟慢漂会把视频延迟单调拉高（见 toggleAudio 注释）
+  sendControl({ type: 'audio', on: !audioMuted.value })
   toast('WebRTC 连接建立', 'success')
 }
 
 function onChannelClose() {
   connected.value = false
-  stopLockHeartbeat()
-  if (!manualClose) scheduleReconnect()
+  // 被顶替（taken_over）不自动重连，防互顶死循环
+  if (!manualClose && !superseded) scheduleReconnect()
   manualClose = false
 }
 
@@ -879,7 +846,6 @@ function onDeviceSelect() {
   if (connected.value || reconnectTimer) {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
     cleanup(true)
-    releaseLock()
   }
   reconnectAttempts = 0
   errorMsg.value = ''
@@ -993,7 +959,6 @@ async function addDevice() {
     if (connected.value || reconnectTimer) {
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
       cleanup(true)
-      releaseLock()
     }
     store.deviceId = r.id
     const nd = devices.value.find(x => x.id === r.id)
@@ -1014,7 +979,6 @@ async function removeDevice() {
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
       cleanup(true)
     }
-    releaseLock()
     devicesData.value = devices.value.filter(x => x.id !== d.id)
     if (devices.value.length) {
       store.deviceId = devices.value[0].id
@@ -1034,7 +998,6 @@ function disconnect() {
   if (!store.deviceId) return
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
   cleanup(true)
-  releaseLock()
   api.disconnectDevice(store.deviceId).catch(() => {})
   toast('已断开连接', 'info')
 }
@@ -1190,25 +1153,44 @@ function toggleAudio() {
     // 取消静音时浏览器要求用户手势后播放（已处于点击事件内，直接 play 即可）
     if (!audioMuted.value) v.play().catch(() => {})
   }
+  // 同步服务端音频转发开关（默认不发音频，开启后才开始转发）
+  if (connected.value) sendControl({ type: 'audio', on: !audioMuted.value })
 }
 
-async function connect(force = false) {
+async function connect(manual = false) {
   // 幂等：同步锁 + 状态检查，杜绝并发/重复调用创建多个 PC
   // （服务端会因多连接出现多推流，video.srcObject 被串流覆盖 → 画面定格）
   if (connectLock || connecting.value || connected.value) {
     console.warn('[webrtc] connect ignored (lock/connecting/connected)')
     return
   }
-  // force=true 仅限用户手动操作（点连接按钮）：强制抢锁；
-  // 自动重连（force=false）不抢锁——锁在他人手里时已由 scheduleReconnect 拦截
-  if (!acquireLock(force)) {
-    errorMsg.value = '设备正在其他页面使用'
-    return
-  }
   connectLock = true
   console.log('[webrtc] connect called (pc exists:', !!pc, ')')
   try {
     await doConnect()
+  } catch (e) {
+    if (e && e.conflict) {
+      // 已有其他页面在投屏：手动连接（点连接按钮）→ 弹窗确认后 force 顶替；
+      // 自动重连 → 直接放弃（不弹窗、不抢连接，防互顶死循环）
+      if (manual) {
+        if (confirm(`设备 ${currentName.value} 正在其他页面投屏。\n\n确认接管连接？对方页面将断开且不会自动重连。`)) {
+          forceTakeover = true
+          try {
+            await doConnect()
+          } finally {
+            forceTakeover = false
+          }
+        } else {
+          connecting.value = false
+          errorMsg.value = '设备正在其他页面使用'
+        }
+      } else {
+        connecting.value = false
+        errorMsg.value = '设备已在其他页面连接，本页已停止重连'
+        toast(errorMsg.value, 'warn')
+      }
+    }
+    // 常规错误：doConnect 内部已置 errorMsg 并 cleanup
   } finally {
     connectLock = false
   }
@@ -1218,6 +1200,7 @@ async function doConnect() {
   if (!store.deviceId) return toast('请先选择设备（设备页签下拉框）', 'error')
   // 重连场景：若有残留 pc（连接失败但未清理干净），先释放（主动关闭，不触发自动重连）
   if (pc) cleanup(true)
+  superseded = false
   errorMsg.value = ''
   connecting.value = true
 
@@ -1285,7 +1268,8 @@ async function doConnect() {
       controlChannel.onmessage = onControlMessage
     }
 
-    // 4. offer 交换
+    // 4. offer 交换（force: conflict 确认后的顶替重连；首轮 false——
+    //    他页已连接时服务端回 conflict，由 connect() 弹窗协商）
     const offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
     const answer = await new Promise((resolve, reject) => {
@@ -1293,13 +1277,27 @@ async function doConnect() {
         try {
           const msg = JSON.parse(evt.data)
           if (msg.type === 'answer') resolve(msg.sdp)
+          else if (msg.type === 'conflict') reject({ conflict: true })
           else if (msg.type === 'error') reject(new Error(msg.error || '信令错误'))
         } catch (e) { reject(e) }
       }
-      ws.send(JSON.stringify({ type: 'offer', sdp: offer }))
+      ws.send(JSON.stringify({ type: 'offer', sdp: offer, force: forceTakeover }))
       setTimeout(() => reject(new Error('信令超时')), 10000)
     })
     await pc.setRemoteDescription(new RTCSessionDescription(answer))
+
+    // 信令 ws 后续消息：被其他页面 force 顶替的通知（收到后本页断开且不再
+    // 自动重连，防互顶；随后 peer close 由 onChannelClose 兜底清理）
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data)
+        if (msg.type === 'taken_over') {
+          superseded = true
+          console.warn('[webrtc] taken over by another page')
+          toast('连接已被其他页面接管', 'warn')
+        }
+      } catch (e) {}
+    }
 
     // 5. 统计定时器
     startStats()
@@ -1307,6 +1305,10 @@ async function doConnect() {
   } catch (e) {
     console.error('webrtc connect:', e)
     connecting.value = false
+    if (e && e.conflict) {
+      cleanup(true)
+      throw e // conflict 上抛给 connect()：手动连接弹窗确认接管 / 自动重连放弃
+    }
     errorMsg.value = e.message
     cleanup(true)
   }
@@ -1316,7 +1318,6 @@ async function doConnect() {
 function cleanup(manual = false) {
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null }
   if (logTimer) { clearInterval(logTimer); logTimer = null }
-  stopLockHeartbeat()
   if (pc) {
     manualClose = manual // 主动关闭时标记：pc.close() 触发的 onclose 不触发自动重连
     try { pc.close() } catch (e) {}
@@ -1337,13 +1338,17 @@ function cleanup(manual = false) {
 }
 
 // ---------- 视频静默检测 ----------
-// 被踢/断流时服务端不再向本页推帧（或已推给其他页面），video.currentTime 停止推进
-// → 判定断流，走与 onclose 相同的自动重连逻辑（带页面锁检查）。
-// 服务端有静止补帧（RTP 时间戳单调推进），正常连接下 currentTime 持续前进，
-// 静止画面不会误判；仅真正无帧流入（被踢/断流/看门狗重建窗口）才会触发。
+// 被踢/断流时服务端不再向本页推帧（或已推给其他页面）→ 判定断流，走与
+// onclose 相同的自动重连逻辑（带页面锁检查）。
+// 双条件（currentTime 冻结 && 统计窗口零新增字节）：静止屏下服务端补帧重发
+// 的是重复 P 帧——H.264 相同 frame_num 的重复 slice 会被 Chrome 静默丢弃
+// （不解码、currentTime 不推进），画面定格本就是静态屏的正确渲染，字节仍在
+// 到达 = 链路活着，不算断流；真断流（被踢/断链/scrcpy 死）两者同时冻结
 let lastVideoTime = 0
 let stillFrames = 0
 let hadVideo = false
+// 上一统计窗口视频轨是否有新增字节（链路活性，见上方注释）
+let videoBytesAdvanced = false
 // 传输码率统计（按两次 getStats 的 bytesReceived 差值计算）
 let lastBytesReceived = 0
 let lastBitrateTs = 0
@@ -1359,12 +1364,14 @@ let videoConnectTs = 0
 // 通知服务端 reset_video（scrcpy 控制消息 17）→ 设备立即输出新 config+IDR → ~200ms 恢复
 let lastPliCount = 0
 let lastPliResetAt = 0
+// PLI reset 退避：reset 后 pliCount 仍在涨 = reset 无效（黑屏/静态屏编码器
+// 不吐 IDR），连续无效就指数退避（2s → 15s → 60s），避免每 3s 重启一次编码器
+let pliResetStreak = 0
 
 function handleVideoSilence() {
   if (manualClose || !connected.value || !store.deviceId) return
   console.warn('[webrtc] video stream silent, treating as disconnected')
   connected.value = false
-  stopLockHeartbeat()
   scheduleReconnect()
 }
 
@@ -1392,8 +1399,8 @@ function startStats() {
     // 视频静默检测：仅在见过画面后启用（连接初期 currentTime=0 不误判）
     if (connected.value && v && v.videoWidth > 0) {
       hadVideo = true
-      if (Math.abs(v.currentTime - lastVideoTime) < 0.001) {
-        if (++stillFrames >= 2) { // 连续 ~4s 无新帧
+      if (Math.abs(v.currentTime - lastVideoTime) < 0.001 && !videoBytesAdvanced) {
+        if (++stillFrames >= 2) { // 连续 ~4s：currentTime 冻结且零新增字节
           stillFrames = 0
           handleVideoSilence()
         }
@@ -1440,6 +1447,9 @@ function startStats() {
               const dt = (now - lastBitrateTs) / 1000
               if (dt > 0) bitrate.value = formatBitrate(((s.bytesReceived - lastBytesReceived) * 8) / dt)
             }
+            // 链路活性（静默检测双条件用，见检测处注释）；重连后计数回退
+            videoBytesAdvanced = s.bytesReceived > lastBytesReceived
+            if (s.bytesReceived < lastBytesReceived) lastBytesReceived = 0
             lastBytesReceived = s.bytesReceived
             lastBitrateTs = now
           }
@@ -1449,12 +1459,22 @@ function startStats() {
             if (s.pliCount < lastPliCount) lastPliCount = s.pliCount // 重连后回退
             if (s.pliCount > lastPliCount) {
               lastPliCount = s.pliCount
+              // 连接初期（~6s 内）Chrome 加入流时会例行发 PLI 请求关键帧，不是失步：
+              // 静态屏（无应用/挂机静止）编码器对 reset 响应极慢（MTK 要多次才吐
+              // IDR），reset 反而打断静止补帧 → 浏览器断供 4s 被静默检测杀掉 →
+              // "连上一会儿就断"死循环。真失步（解码中突发花屏）不受此窗口限制
+              const joinWindow = Date.now() - videoConnectTs < 6000
               const now = Date.now()
-              if (connected.value && now - lastPliResetAt > 2000) {
+              const backoff = pliResetStreak >= 4 ? 60000 : pliResetStreak >= 2 ? 15000 : 2000
+              if (!joinWindow && connected.value && now - lastPliResetAt > backoff) {
                 lastPliResetAt = now
-                console.warn('[webrtc] decoder desync (pliCount=' + s.pliCount + '), requesting IDR via reset_video')
+                pliResetStreak++
+                console.warn('[webrtc] decoder desync (pliCount=' + s.pliCount + ', streak=' + pliResetStreak + '), requesting IDR via reset_video')
                 sendControl({ type: 'reset_video' })
               }
+            } else if (s.pliCount === lastPliCount && lastPliCount > 0) {
+              // 一整个统计周期无新 PLI：解码器已满足，退避复位
+              pliResetStreak = 0
             }
           }
           // 诊断：每 3 次打印一次接收统计
@@ -2879,8 +2899,6 @@ onMounted(async () => {
   const d = current.value
   if (d) loadForm(d)
   else { mode.value = 'edit'; store.deviceId = null }
-  // 页面关闭时释放页面锁（其他页面才能接管）
-  window.addEventListener('beforeunload', releaseLock)
   window.addEventListener('keydown', onGlobalKeydown)
   if (preselected && store.deviceId) connect(false)
   // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
@@ -2888,7 +2906,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  window.removeEventListener('beforeunload', releaseLock)
   window.removeEventListener('keydown', onGlobalKeydown)
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
@@ -2899,7 +2916,6 @@ onUnmounted(() => {
   if (fxSwipeTimer) { clearTimeout(fxSwipeTimer); fxSwipeTimer = null }
   if (fxHitTimer) { clearTimeout(fxHitTimer); fxHitTimer = null }
   stopRunStatusPoll()
-  releaseLock()
   cleanup(true)
 })
 </script>

@@ -111,6 +111,13 @@ const VIDEO_IDLE_RECONNECT_MS: u64 = 20_000;
 /// reset_video 探测后等待新帧的宽限期，超过则认定编码器/链路已死，升级为重连
 const VIDEO_NUDGE_GRACE: Duration = Duration::from_secs(15);
 
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 fn spawn_watchdog(st: AppState) {
     tokio::spawn(async move {
         // 已发过 reset_video 探测的设备 → 探测时刻
@@ -124,12 +131,30 @@ fn spawn_watchdog(st: AppState) {
                     nudged.remove(&id);
                     continue;
                 }
-                let has_viewer = st.viewers.lock().unwrap().contains_key(&id);
+                let (has_viewer, served_ago_ms) = {
+                    let map = st.viewers.lock().unwrap();
+                    match map.get(&id) {
+                        Some(h) => {
+                            let t = h.last_serve.load(std::sync::atomic::Ordering::Relaxed);
+                            (true, if t == 0 { i64::MAX } else { now_unix_ms() - t })
+                        }
+                        None => (false, i64::MAX),
+                    }
+                };
                 let running = st.devices.has_running_scripts(&id);
                 if !has_viewer && !running {
                     warn!(device = %id, idle_ms = idle, "video silent, no viewer/script: disconnect (low-power)");
                     nudged.remove(&id);
                     st.devices.disconnect_device(&id).await;
+                    continue;
+                }
+                // viewer 正在被投喂（设备 0 帧是静态屏常态，pusher 静止补帧还活着）
+                // → 会话对 viewer 是健康的：不 nudge（reset 反而打断补帧，MTK 静态
+                // 屏 reset 后长时间不出 IDR → 浏览器断供被前端杀连接），也不走
+                // 35s 兜底重连（静态屏挂机会话会被无限循环重连踢 viewer）。
+                // 真断流时 pusher 退出、last_serve 过期，仍走 nudge → 15s → 重连兜底
+                if has_viewer && served_ago_ms.max(0) < 10_000 {
+                    nudged.remove(&id);
                     continue;
                 }
                 match nudged.get(&id).copied() {

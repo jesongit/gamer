@@ -22,6 +22,14 @@ pub struct ViewerHandle {
     pub running: Arc<std::sync::atomic::AtomicBool>,
     pub peer: std::sync::Weak<webrtc::peer_connection::RTCPeerConnection>,
     pub control_dc: Arc<Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
+    /// pusher 最近一次向浏览器发送（实时帧或静止补帧）的 unix 毫秒：
+    /// api 静默看门狗据此区分"设备 0 帧（静态屏常态，viewer 仍被补帧投喂）"
+    /// 与"真断流（pusher 停止供帧）"，避免静态屏被 35s 周期兜底重连踢 viewer
+    pub last_serve: Arc<std::sync::atomic::AtomicI64>,
+    /// 反向通知通道（该 viewer 的信令 ws 发送端）：被新页面 force 顶替时推
+    /// {"type":"taken_over"}，旧页面收到后不再自动重连（防互顶死循环）。
+    /// None = 尚未注册或已被取用
+    pub notify: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
 }
 
 /// device_id → 活跃 viewer（main.rs 创建，AppState / Scheduler / ws.rs 共享）
@@ -56,6 +64,8 @@ pub struct ViewerSession {
     pub last_ts: Arc<Mutex<u32>>,
     /// 最近一次 SPS/PPS 配置帧数据：每个关键帧前重发，保证浏览器随时可初始化解码器
     pub config_nalu: Arc<Mutex<Option<Bytes>>>,
+    /// pusher 最近一次发送（实时帧/补帧）的 unix 毫秒（与 ViewerHandle.last_serve 同源）
+    pub last_serve: Arc<std::sync::atomic::AtomicI64>,
     /// 本地 answer SDP（协商完成后保存，避免 async 上下文 block_on）
     pub answer: RTCSessionDescription,
     /// 协商后的 H264 payload type
@@ -142,10 +152,19 @@ impl ViewerSession {
         // 个任务并发抢锁，顺序无法保证且开销大。这里改为单消费者队列：
         // DataChannel 回调只入队，专用任务按到达顺序逐条处理。
         let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        // 音频按需发送（默认不发）：静音时也持续发音频 RTP 的话，部分浏览器
+        // 内核即使音频轨 enabled=false 仍把它选为 A/V 同步主时钟（实测 ZCode
+        // IAB webview；Chrome 无此问题），而虚拟屏 remote_submix 音频时钟有
+        // ~1% 慢漂 → 视频 jitter buffer 目标延迟以 ~12ms/s 单调累积（200ms →
+        // 看门狗 1.5s 阈值 → 重连清零 → 再累积，循环）。viewer 通过
+        // {"type":"audio","on":bool} 显式开启后才开始转发，静音时零音频包，
+        // 任何内核都无法拿音频做主时钟
+        let audio_on = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let s_worker = session.clone();
+        let worker_audio_on = audio_on.clone();
         tokio::spawn(async move {
             while let Some(data) = control_rx.recv().await {
-                if let Err(e) = handle_control_msg(&s_worker, &data).await {
+                if let Err(e) = handle_control_msg(&s_worker, &worker_audio_on, &data).await {
                     debug!("control msg error: {}", e);
                 }
             }
@@ -243,6 +262,7 @@ impl ViewerSession {
             config_nalu: Arc::new(Mutex::new(initial_frames.as_ref().and_then(|f| {
                 f.iter().find(|x| x.is_config).map(|x| Bytes::from(x.data.clone()))
             }))),
+            last_serve: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             answer: answer_sdp,
             payload_type,
             peer_closed_rx,
@@ -255,8 +275,8 @@ impl ViewerSession {
         // 硬性帧率上限：即使设备端实际输出 60fps，pusher 也按这里的最小间隔发送，
         // 避免“设置了 30fps 实际却跑到 60fps”（scrcpy 侧不再传 max_fps，见 scrcpy.rs）
         let min_frame_interval_ms = fps.filter(|&f| f > 0).map(|f| (1000 / f).max(1) as u64).unwrap_or(0);
-        vs.spawn_pusher(rtp_sender, frame_q, frame_notify, overflowed, payload_type, ssrc, initial_frames, conn_rx, peer_connected.clone(), idle_repeat_ms, min_frame_interval_ms, cfg.ffmpeg_path.clone());
-        vs.spawn_audio_pusher(audio_track, audio_rx, audio_payload_type, audio_ssrc, peer_connected);
+        vs.spawn_pusher(rtp_sender, frame_q, frame_notify, overflowed, payload_type, ssrc, initial_frames, conn_rx, peer_connected.clone(), idle_repeat_ms, min_frame_interval_ms, cfg.ffmpeg_path.clone(), cfg.probe_encoder);
+        vs.spawn_audio_pusher(audio_track, audio_rx, audio_payload_type, audio_ssrc, peer_connected, audio_on);
         Ok(vs)
     }
 
@@ -283,9 +303,11 @@ impl ViewerSession {
         idle_repeat_ms: u64,
         min_frame_interval_ms: u64,
         ffmpeg_path: String,
+        probe_encoder: bool,
     ) {
         let track = self.track.clone();
         let running = self.running.clone();
+        let last_serve = self.last_serve.clone();
         let ts_base = self.ts_base.clone();
         let last_ts = self.last_ts.clone();
         let config_nalu = self.config_nalu.clone();
@@ -381,6 +403,7 @@ impl ViewerSession {
                         let ts = ((f.pts_us.saturating_sub(base.unwrap()) * 90) / 1000) as u32;
                         let (cont, w) = push_rtp(&track, &mut payloader, f, payload_type, ssrc, &mut seq, ts).await;
                         written_total += w;
+                        last_serve.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                         if !cont {
                             ok = false;
                             break;
@@ -441,9 +464,13 @@ impl ViewerSession {
             // 环形缓冲溢出（forwarder 丢过最旧帧），此时用 overflowed 标志通知，
             // pusher 清空队列等待下一个 IDR 重建（i-frame-interval=1 → ≤1s）。
             let backlog_limit = if min_frame_interval_ms > 0 {
-                (1000 / min_frame_interval_ms) as usize // ≈1s 的帧数（fps 上限换算）
+                // ≈1s 的帧数。设备实际按 60fps 出帧（虚拟屏忽略 fps 配置，见
+                // scrcpy.rs），只按配置 fps 换算会把阈值压到远小于 1s（fps=15 →
+                // 15 帧 ≈ 250ms@60fps）：消费稍慢即触发跳帧清队。下限 60 帧
+                //（60fps 下 1s）恢复本意，配置 fps 更高时取配置值
+                (1000 / min_frame_interval_ms).max(60) as usize
             } else {
-                45
+                60
             };
             // 参数集切换窗口标志：config 帧（新 SPS/PPS）已到、新 IDR 未到。
             // 窗口内禁止静止补帧（见取帧/补帧处注释），IDR 发送时复位。
@@ -451,6 +478,15 @@ impl ViewerSession {
             let mut drops_broken = 0u64;
             let mut drops_wait = 0u64;
             let mut drops_to_key = 0u64;
+            // 断链清队后主动请求 IDR（锁内置位，锁外 await——MutexGuard 不能跨
+            // await 存活），限频 2s 防编码器重启风暴
+            let mut need_idr = false;
+            let mut last_idr_req = std::time::Instant::now();
+            // 补帧压制限时跟踪（见 to_send.is_empty 分支）：压制窗口（参数集切换/
+            // 断链等 IDR）超过 3s 仍无 IDR 时恢复补帧，防止浏览器断供被前端静默
+            // 检测杀掉（MTK 静态屏 reset 后长时间不出 IDR 是常态）
+            let mut suppress_started: Option<std::time::Instant> = None;
+            let mut was_suppressed = false;
             // 诊断探针：每 300 帧输出平均单帧 RTP 发送耗时（不含节流 sleep）与队列深度
             let mut send_time_us = 0u64;
             let mut send_samples = 0u64;
@@ -497,6 +533,7 @@ impl ViewerSession {
                             }
                             q.clear();
                             waiting_key = true;
+                            need_idr = true;
                         }
                         if waiting_key {
                             // 断链恢复中：丢弃 P 帧直到新的关键帧出现
@@ -535,12 +572,38 @@ impl ViewerSession {
                                     }
                                     q.clear();
                                     waiting_key = true;
+                                    need_idr = true;
                                 }
                             }
                             to_send = q.drain(..).collect();
                             last_q_len = to_send.len(); // 本轮取出的帧数（≈ 队列积压深度）
                         }
                     }
+                }
+
+                // 断链清队后主动向编码器要 IDR（RESET_VIDEO，~200ms 出新 config+IDR），
+                // 而不是干等自然 IDR（i-frame-interval=2s → 平均冻结 ~1s、最高 2s，
+                // 游戏高码率下发送饱和时每几秒一次 → "投屏延迟高"的直接体感来源）。
+                // 与前端 PLI 触发的 reset_video 同一链路；waiting_key 会丢到 IDR 前的
+                // P 帧，浏览器定格 ≤200ms 后干净恢复
+                if need_idr {
+                    need_idr = false;
+                    if last_idr_req.elapsed() >= Duration::from_secs(2) {
+                        last_idr_req = std::time::Instant::now();
+                        info!("chain broken without keyframe, requesting IDR via reset_video");
+                        let _ = session.reset_video().await;
+                    }
+                }
+
+                // 压制窗口跟踪：进入压制（pending_config/waiting_key 置位）记起点
+                {
+                    let supp = pending_config || waiting_key;
+                    if supp && !was_suppressed {
+                        suppress_started = Some(std::time::Instant::now());
+                    } else if !supp {
+                        suppress_started = None;
+                    }
+                    was_suppressed = supp;
                 }
 
                 if to_send.is_empty() {
@@ -551,12 +614,25 @@ impl ViewerSession {
                     // 参数初始化解码器后再解旧帧 → 解码器失步 → 画面慢慢浮现黑白/彩色
                     // 块点、卡顿（见 AGENTS.md 已知坑）。跳过补帧 → 画面定格在最后一
                     // 帧，新 IDR 一到即干净恢复（通常 ≤1s，远低于前端 ~4s 静默检测）。
-                    // waiting_key（断链/无 IDR 起点）同理：last_sent 属于断裂参考链，
-                    // 重发只会维持花屏，等新 IDR 重建后再补帧。
-                    if pending_config || waiting_key {
+                    // waiting_key（断链/无 IDR 起点）同理：等新 IDR 重建后再补帧。
+                    // **限时 3s**：MTK 静态屏对 reset_video 响应极慢（实测要多次 reset、
+                    // 最长 6s+ 才吐 config+IDR，甚至不吐），无限期压制 = 浏览器断供
+                    // → 前端 4s 静默检测杀连接 → 重连 → PLI → 再 reset → 死循环
+                    // （"连上一会儿就断"）。超时后恢复补帧是安全的：last_sent 属于
+                    // 已成功发送的旧参考链，payloader 缓存的仍是旧参数集（新参数集
+                    // 只在 IDR 时喂入），旧帧 + 旧参数自洽可解码
+                    if (pending_config || waiting_key)
+                        && suppress_started.map_or(false, |t| t.elapsed() < Duration::from_secs(3))
+                    {
                         continue;
                     }
                     // 静止补帧：idle_repeat_ms 内无新帧 → 重发最后一帧。
+                    // **注意**：Chrome 会静默丢弃重复 P 帧（相同 frame_num 的 slice
+                    // 被视为冗余副本，不解码、currentTime 不推进）——补帧的作用是
+                    // 维持**链路活性**（字节持续到达 → 前端静默检测/码率/RTCP 正常），
+                    // 不是维持解码帧率；静态屏画面定格是正确渲染。正因如此前端静默
+                    // 检测是双条件（currentTime 冻结 && 零新增字节），且补帧保持
+                    // P 帧形态（不换 IDR 重复）：唤醒后新 P 帧直接续参考链，无花屏。
                     // 重复帧内容相同且参考链完整（该帧此前已成功发送），解码器可正常渲染；
                     // RTP 时间戳单调推进，浏览器帧率统计不掉。
                     // ts 与实时帧同源（墙钟锚点 + 单调保底）：旧实现固定步进
@@ -583,6 +659,7 @@ impl ViewerSession {
                             if !cont {
                                 break;
                             }
+                            last_serve.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                             *last_ts.lock() = ts;
                             last_rtp_ts = ts;
                             last_tx = Some(std::time::Instant::now());
@@ -681,7 +758,10 @@ impl ViewerSession {
                     // 1/30）用 ffmpeg 解码原始 H.264 → 宏块网格块效应检测。报 >1.25 说明
                     // **编码器输出帧本身有块效应**（浏览器/传输无辜）；不报说明编码器
                     // 干净、块效应在浏览器解码路径（jitter buffer/丢帧）。
-                    if frame.is_keyframe || frame_no % 30 == 0 {
+                    // 默认关闭（config probe_encoder）：60fps 下 ~2.5 进程/秒的阻塞
+                    // ffmpeg 抢 tokio worker，实测把单帧 RTP 发送耗时推高 3~4 倍
+                    // （send_avg 6→20ms），发送饱和 → 积压断链 → 周期性冻结
+                    if probe_encoder && (frame.is_keyframe || frame_no % 30 == 0) {
                         let cfg = config_nalu.lock().clone();
                         let fdata = frame.data.clone();
                         let ff = ffmpeg_path.clone();
@@ -696,6 +776,7 @@ impl ViewerSession {
                     if !cont {
                         break;
                     }
+                    last_serve.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                     // pacer：推进发送时刻；积压（落后 >20ms ≈ 超过 1 个 pacer 周期，
                     // 如关键帧 11ms 平滑耗时）→ 重置节奏立即发下一帧，避免积压被
                     // 缓慢摊开（backlog 跳帧仍兜底内容滞后）
@@ -731,6 +812,7 @@ impl ViewerSession {
         payload_type: u8,
         ssrc: u32,
         peer_connected: Arc<std::sync::atomic::AtomicBool>,
+        audio_on: Arc<std::sync::atomic::AtomicBool>,
     ) {
         let running = self.running.clone();
         tokio::spawn(async move {
@@ -746,6 +828,11 @@ impl ViewerSession {
                 let Some(frame) = audio_rx.recv().await else { break };
                 // OPUS 参数集帧（OpusHead）无需发送：WebRTC 用 SDP fmtp 描述参数
                 if frame.is_config {
+                    continue;
+                }
+                // viewer 未请求音频：丢弃但保持排空（audio channel 满了会背压
+                // 阻塞 scrcpy 音频读取任务）
+                if !audio_on.load(std::sync::atomic::Ordering::SeqCst) {
                     continue;
                 }
                 if !peer_connected.load(std::sync::atomic::Ordering::SeqCst) {
@@ -824,6 +911,14 @@ impl ViewerSession {
     pub fn local_description(&self) -> RTCSessionDescription {
         self.answer.clone()
     }
+}
+
+/// 当前 unix 毫秒（ViewerHandle.last_serve 用）
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 /// 把一帧 H.264 打成 RTP 包写入 track。
@@ -1139,7 +1234,8 @@ fn verify_rtp_rebuild(frame: &VideoFrame, payloads: &[Bytes]) {
 
 /// DataChannel 控制消息协议（JSON）
 /// { "type": "tap"|"swipe"|"key"|"press"|"text"|"scroll"|"clipboard"|"start_app"|"rotate"|"back", ... }
-async fn handle_control_msg(session: &ScrcpySession, data: &[u8]) -> anyhow::Result<()> {
+/// viewer 级消息：{"type":"reset_video"}（请求 IDR）、{"type":"audio","on":bool}（音频转发开关）
+async fn handle_control_msg(session: &ScrcpySession, audio_on: &Arc<std::sync::atomic::AtomicBool>, data: &[u8]) -> anyhow::Result<()> {
     let msg: serde_json::Value = serde_json::from_slice(data)?;
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match t {
@@ -1210,6 +1306,12 @@ async fn handle_control_msg(session: &ScrcpySession, data: &[u8]) -> anyhow::Res
         "reset_video" => {
             info!(device = %session.device.name, "reset_video requested by viewer (decoder desync)");
             session.reset_video().await?;
+        }
+        "audio" => {
+            // 音频转发开关（默认不发，见 spawn 处 audio_on 注释）
+            let on = msg.get("on").and_then(|v| v.as_bool()).unwrap_or(false);
+            audio_on.store(on, std::sync::atomic::Ordering::SeqCst);
+            info!(device = %session.device.name, on, "audio forwarding toggled by viewer");
         }
         "back" => {
             session.back_or_screen_on(0).await?;

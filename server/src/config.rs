@@ -78,6 +78,11 @@ pub struct Config {
     /// scrcpy 编码器名（空 = 设备默认；可指定 c2.android.avc.encoder 软编避开 MTK 硬件块效应）
     #[serde(default)]
     pub encoder_name: String,
+    /// 编码器输出质量探针（关键帧 + 1/30 P 帧起 ffmpeg 解码检测块效应）。
+    /// 纯诊断用：60fps 游戏画面下 ~2.5 进程/秒 + ~15MB/s 管道流量抢 pusher 的
+    /// CPU/worker，推高单帧 RTP 发送耗时（饱和 → 积压 → 冻结跳帧），默认关闭
+    #[serde(default)]
+    pub probe_encoder: bool,
     /// 操作记录 YAML 模板（config.toml [op_templates]，可自定义）
     #[serde(default)]
     pub op_templates: OpTemplates,
@@ -108,6 +113,7 @@ impl Default for Config {
             // 服务端 ffmpeg 软解 + PNG 编解码单核跑满（CPU 100% 持续拖垮进程）
             fps: 15,
             encoder_name: String::new(),
+            probe_encoder: false,
             op_templates: OpTemplates::default(),
             idle_disconnect_secs: default_idle_disconnect_secs(),
         }

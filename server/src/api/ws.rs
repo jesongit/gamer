@@ -33,6 +33,10 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
     };
     let audio_frames_tx = st.devices.audio_frames_tx(&device_id);
 
+    // 服务端 → 浏览器反向消息通道：viewer 被新页面 force 顶替时经此推送
+    // taken_over 通知（select 中转发给 socket），旧页面收到后不再自动重连
+    let (notify_tx, mut notify_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
     // 等待浏览器发来 offer
     let mut viewer: Option<ViewerSession> = None;
     let mut first_message = true;
@@ -53,7 +57,6 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                 match msg {
                     Message::Text(text) => {
                         if first_message {
-                            first_message = false;
                             let v: serde_json::Value = match serde_json::from_str(&text) {
                                 Ok(v) => v,
                                 Err(_) => {
@@ -65,6 +68,25 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                 let _ = socket.send(Message::Text(json!({"type": "error", "error": "expected offer"}).to_string())).await;
                                 break;
                             }
+                            // 多页面接管协商：已有活跃 viewer 且非 force → 不直接顶替，
+                            // 回 conflict 让新页面弹窗确认；用户确认后带 force 重发
+                            // offer 才真正接管（仅换浏览器↔服务端链路，设备会话不动）。
+                            // conflict 不消耗 first_message：下一条消息仍按 offer 解析
+                            let force = v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
+                            if !force {
+                                let occupied = {
+                                    let map = st.viewers.lock().unwrap();
+                                    map.get(&device_id)
+                                        .map(|h| h.running.load(std::sync::atomic::Ordering::SeqCst))
+                                        .unwrap_or(false)
+                                };
+                                if occupied {
+                                    info!(device = %device_id, "ws offer rejected: another viewer active (conflict)");
+                                    let _ = socket.send(Message::Text(json!({"type": "conflict"}).to_string())).await;
+                                    continue;
+                                }
+                            }
+                            first_message = false;
                             let offer: RTCSessionDescription = match serde_json::from_value(v["sdp"].clone()) {
                                 Ok(s) => s,
                                 Err(e) => {
@@ -110,6 +132,8 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                         running: vs.running.clone(),
                                         peer: std::sync::Arc::downgrade(&vs.peer),
                                         control_dc: vs.control_dc.clone(),
+                                        last_serve: vs.last_serve.clone(),
+                                        notify: std::sync::Arc::new(parking_lot::Mutex::new(Some(notify_tx.clone()))),
                                     };
                                     let old_pair = {
                                         st.viewers
@@ -118,11 +142,18 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                             .insert(device_id.clone(), handle)
                                     };
                                     if let Some(old) = old_pair {
+                                        // 先通知旧页面被接管（经其信令 ws 下发，页面收到后不再
+                                        // 自动重连），再关 peer；旧 ws 循环在 peer 关闭后有
+                                        // 冲刷窗口保证通知先于 close 到达。仅断浏览器↔服务端
+                                        // 链路，设备 scrcpy 会话保持不动（新 viewer 无缝接管）
+                                        if let Some(tx) = old.notify.lock().take() {
+                                            let _ = tx.send(json!({"type": "taken_over"}).to_string());
+                                        }
                                         old.running.store(false, std::sync::atomic::Ordering::SeqCst);
                                         if let Some(p) = old.peer.upgrade() {
                                             let _ = p.close().await;
                                         }
-                                        info!(device = %device_id, "kicked previous viewer");
+                                        info!(device = %device_id, "kicked previous viewer (takeover)");
                                     }
                                     let answer = vs.local_description();
                                     let _ = socket
@@ -155,8 +186,27 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                     std::future::pending::<()>().await;
                 }
             } => {
+                // peer 已死：退出前给 taken_over 通知一个送达窗口（被顶替时页面
+                // 先收通知再收 peer close，据此跳过自动重连，防互顶）
+                let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+                loop {
+                    tokio::select! {
+                        msg = notify_rx.recv() => {
+                            match msg {
+                                Some(m) => { if socket.send(Message::Text(m)).await.is_err() { break } }
+                                None => break,
+                            }
+                        }
+                        _ = tokio::time::sleep_until(deadline) => break,
+                    }
+                }
                 debug!("peer closed signal, closing ws loop");
                 break;
+            }
+            Some(text) = notify_rx.recv() => {
+                if socket.send(Message::Text(text)).await.is_err() {
+                    break;
+                }
             }
         }
     }
