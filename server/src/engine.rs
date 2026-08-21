@@ -36,7 +36,7 @@ use tracing::warn;
 
 use crate::device::DeviceManager;
 use crate::matcher;
-use crate::scripts::{ScriptStore, DEFAULT_PACKAGE};
+use crate::scripts::ScriptStore;
 use crate::store::Db;
 use crate::webrtc::ViewerMap;
 
@@ -134,8 +134,7 @@ impl Runner {
         log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
         start_step: usize,
     ) -> anyhow::Result<Vec<(String, String)>> {
-        // 首行 package 指令不是合法 YAML，解析前剥离
-        let doc: Value = serde_yaml::from_str(crate::scripts::strip_package_line(content).as_ref())?;
+        let doc: Value = serde_yaml::from_str(content)?;
         let steps = doc.get("steps").and_then(|v| v.as_sequence()).cloned().ok_or_else(|| anyhow::anyhow!("missing steps"))?;
         // 脚本顶层 action_wait：步骤未显式写 wait 时的操作后默认等待
         let action_wait = doc.get("action_wait").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_ACTION_WAIT);
@@ -299,8 +298,8 @@ impl Runner {
         }
         if let Some(v) = step.get("call") {
             let script_name = v.as_str().unwrap_or("");
-            // 子脚本按名解析：优先调用者同 package，其次全局（缺扩展名自动补全）
-            let caller_pkg = ctx.script_id.split('/').next().unwrap_or(DEFAULT_PACKAGE);
+            // 子脚本按名解析：优先调用者同分区，其次跨分区（缺扩展名自动补全）
+            let caller_pkg = ctx.script_id.split('/').next().unwrap_or_default();
             match self.scripts.resolve_call(caller_pkg, script_name)? {
                 Some(s) => {
                     ctx.log("debug", format!("调用子脚本 {}", script_name));
@@ -503,7 +502,9 @@ impl Runner {
 
     /// 在给定截图上匹配模板（region 为搜索区域，None=全屏）
     async fn match_on_screen(&self, ctx: &Ctx, template: &str, threshold: f32, region: Option<[u32; 4]>, screen: Vec<u8>) -> anyhow::Result<Option<matcher::MatchResult>> {
-        let tpl_dir = self.devices.cfg.data_dir.join("templates");
+        // 模板按脚本所在应用分区解析：data/<pkg>/tmpl/（script_id 首段 = 分区）
+        let pkg = ctx.script_id.split('/').next().unwrap_or_default();
+        let tpl_dir = self.devices.cfg.data_dir.join(pkg).join("tmpl");
         // 目录不存在时先创建，避免 std::fs::read 报“系统找不到指定的路径”
         let _ = std::fs::create_dir_all(&tpl_dir);
         let tpl_path = tpl_dir.join(template);

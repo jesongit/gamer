@@ -6,6 +6,10 @@
         <div class="page-sub">图片模板用于 YAML 脚本中的 find 模板匹配</div>
       </div>
       <div class="head-actions">
+        <select v-model="uploadPkg" class="select" title="上传目标应用分区">
+          <option value="" disabled>目标分区…</option>
+          <option v-for="p in partitions" :key="p" :value="p">{{ p }}</option>
+        </select>
         <label class="btn" for="tpl-upload">⬆️ 上传模板</label>
         <input id="tpl-upload" type="file" accept="image/png,image/jpeg" hidden @change="onUpload" />
       </div>
@@ -15,17 +19,21 @@
       <!-- 左：模板列表 -->
       <div class="tpl-list card">
         <div class="tl-head">
-          <span>模板（{{ templates.length }}）</span>
+          <span>模板（{{ filtered.length }}）</span>
+          <select v-model="pkgFilter" class="select input-sm" title="按应用分区过滤">
+            <option value="">全部分区</option>
+            <option v-for="p in partitions" :key="p" :value="p">{{ p }}</option>
+          </select>
           <input v-model="kw" class="input input-sm" placeholder="搜索…" />
         </div>
         <div class="tl-items">
-          <div v-for="t in filtered" :key="t.name" class="tl-item" :class="{ sel: t.name === sel?.name }" @click="select(t)">
+          <div v-for="t in filtered" :key="t.pkg + '/' + t.name" class="tl-item" :class="{ sel: sel && t.pkg === sel.pkg && t.name === sel.name }" @click="select(t)">
             <div class="tl-thumb">
-              <img :src="tplUrl(t.name)" alt="" loading="lazy" @error="onThumbErr" />
+              <img :src="tplUrl(t)" alt="" loading="lazy" @error="onThumbErr" />
             </div>
             <div class="tl-info">
               <div class="tl-name">{{ t.name }}</div>
-              <div class="tl-meta mono">{{ fmtSize(t.size) }}</div>
+              <div class="tl-meta mono">{{ t.pkg }} · {{ fmtSize(t.size) }}</div>
             </div>
           </div>
         </div>
@@ -36,7 +44,7 @@
         <div class="td-head">
           <div>
             <div class="td-name">{{ sel.name }}</div>
-            <div class="td-meta mono">{{ fmtSize(sel.size) }}<template v-if="dim"> · {{ dim.w }}×{{ dim.h }} px</template></div>
+            <div class="td-meta mono">{{ sel.pkg }} · {{ fmtSize(sel.size) }}<template v-if="dim"> · {{ dim.w }}×{{ dim.h }} px</template></div>
           </div>
           <div class="td-actions">
             <button class="btn btn-danger btn-sm" @click="remove">删除</button>
@@ -46,7 +54,7 @@
         <!-- 预览 -->
         <div class="td-preview">
           <div class="td-preview-img">
-            <img :src="tplUrl(sel.name)" alt="模板预览" @load="onPreviewLoad" @error="dim = null" @mousemove="onPreviewMove" @mouseleave="prevPos.show = false" />
+            <img :src="tplUrl(sel)" alt="模板预览" @load="onPreviewLoad" @error="dim = null" @mousemove="onPreviewMove" @mouseleave="prevPos.show = false" />
             <div v-if="prevPos.show" class="td-preview-pos mono" :style="{ left: prevPos.x + 'px', top: prevPos.y + 'px' }">{{ prevPos.text }}</div>
           </div>
         </div>
@@ -85,7 +93,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { devicesData, templatesData, useToast } from '../store'
 import { api } from '../api'
 
@@ -97,10 +105,20 @@ const kw = ref('')
 const testDev = ref('')
 const result = ref(null)
 const dim = ref(null)
+// 应用分区过滤（''=全部）/ 上传目标分区
+const pkgFilter = ref('')
+const uploadPkg = ref('')
 
-const filtered = computed(() => templates.value.filter(t => t.name.includes(kw.value)))
+const partitions = computed(() =>
+  [...new Set(templates.value.map(t => t.pkg).filter(Boolean))].sort())
+const filtered = computed(() => templates.value.filter(t =>
+  (!pkgFilter.value || t.pkg === pkgFilter.value) && t.name.includes(kw.value)))
 
-function tplUrl(name) { return `/api/templates/${encodeURIComponent(name)}/image` }
+// 上传目标默认第一个分区；过滤选中具体分区时跟随
+watch(partitions, list => { if (!uploadPkg.value && list.length) uploadPkg.value = list[0] })
+watch(pkgFilter, v => { if (v) uploadPkg.value = v })
+
+function tplUrl(t) { return api.tplImageUrl(t.name, t.pkg) }
 
 function onThumbErr(e) { e.target.style.visibility = 'hidden' }
 
@@ -134,13 +152,14 @@ async function onUpload(e) {
   const file = e.target.files[0]
   e.target.value = ''
   if (!file) return
+  if (!uploadPkg.value) return toast('请先选择上传目标分区', 'warn')
   const name = file.name.toLowerCase().endsWith('.png') ? file.name : file.name + '.png'
   try {
     const b64 = await fileToBase64(file)
-    await api.uploadTemplate(name, b64)
+    await api.uploadTemplate(name, b64, uploadPkg.value)
     await loadTemplates()
-    sel.value = templates.value.find(t => t.name === name) || null
-    toast('模板已上传', 'success')
+    sel.value = templates.value.find(t => t.pkg === uploadPkg.value && t.name === name) || null
+    toast(`模板已上传到 ${uploadPkg.value}`, 'success')
   } catch (err) {
     toast('上传失败：' + err.message, 'error')
   }
@@ -157,10 +176,11 @@ function fileToBase64(file) {
 
 async function remove() {
   if (!sel.value) return
-  if (!confirm(`删除模板 ${sel.value.name}？`)) return
+  if (!confirm(`删除模板 ${sel.value.name}（${sel.value.pkg}）？`)) return
   try {
-    await api.deleteTemplate(sel.value.name)
-    templates.value = templates.value.filter(t => t.name !== sel.value.name)
+    await api.deleteTemplate(sel.value.name, sel.value.pkg)
+    const { name, pkg } = sel.value
+    templates.value = templates.value.filter(t => !(t.pkg === pkg && t.name === name))
     sel.value = null
     toast('模板已删除', 'success')
   } catch (e) {
@@ -172,7 +192,7 @@ async function testMatch() {
   if (!testDev.value || !sel.value) return
   result.value = null
   try {
-    const r = await api.testTemplate(sel.value.name, testDev.value, 0.8, null)
+    const r = await api.testTemplate(sel.value.name, testDev.value, 0.8, null, sel.value.pkg)
     result.value = r
     if (r.hit) toast(`匹配成功：置信度 ${r.score.toFixed(2)}`, 'success')
     else toast('未找到匹配', 'warn')
@@ -192,12 +212,14 @@ onMounted(() => { loadTemplates(); loadDevices() })
 </script>
 
 <style scoped>
-.head-actions { display: flex; gap: 10px; }
+.head-actions { display: flex; gap: 10px; align-items: center; }
+.head-actions .select { min-width: 180px; }
 
 .tpl-layout { display: grid; grid-template-columns: 300px 1fr; gap: 14px; flex: 1; min-height: 0; }
 
 .tpl-list { display: flex; flex-direction: column; gap: 10px; overflow: hidden; padding: 12px; }
-.tl-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 600; }
+.tl-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 13px; font-weight: 600; }
+.tl-head .select { max-width: 100px; font-size: 11px; padding: 4px 6px; font-weight: 400; }
 .input-sm { width: 110px; padding: 5px 10px; font-size: 12px; }
 .tl-items { display: flex; flex-direction: column; gap: 6px; overflow: auto; flex: 1; }
 .tl-item {

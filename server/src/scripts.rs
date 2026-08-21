@@ -1,11 +1,14 @@
-//! 脚本文件存储：data/scripts/<package>/<name>.yaml（取代 SQLite scripts 表）
+//! 脚本/模板文件存储：按应用分区 `data/<pkg>/yaml/` + `data/<pkg>/tmpl/`
 //!
-//! package 语法：YAML 首个有效行写 `package <名字>`（非标准 YAML 指令，引擎解析前剥离），
-//! 缺省 default。文件所在目录即 package；保存时按内容里的 package 归档，改名/改包即移动文件。
+//! 分区 = 设备配置的应用包名（如 com.miHoYo.hkrpg），无 default 兜底；
+//! 脚本 id = `<pkg>/<name>.yaml`（含 `/`，前端拼 URL 必须整体 encodeURIComponent）。
+//! 旧 `package <名字>` YAML 指令已废除（引擎直接解析 YAML，残留指令行 = 解析报错），
+//! 旧目录布局由 migrate_fs_layout 启动时一次性迁移并顺手剥离指令行。
 //!
-//! 脚本包 zip 布局（导出/导入）：
-//!   templates/<模板名>            （脚本依赖的模板图片，名字与 data/templates 下文件一致）
-//!   script/<package>/<name>.yaml  （脚本自身 + call 递归依赖的子脚本）
+//! 脚本包 zip = 分区快照（导出/导入同构）：
+//!   yaml/<name>.yaml   脚本自身 + call 递归依赖的子脚本
+//!   tmpl/<模板名>       脚本引用的模板图片
+//! 导入必须显式指定目标分区（?pkg=）；两目录均可缺省。
 
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
@@ -15,10 +18,7 @@ use serde::Serialize;
 
 use crate::config::Config;
 
-/// 未写 package 指令时的默认脚本包
-pub const DEFAULT_PACKAGE: &str = "default";
-
-/// 磁盘上的一个脚本文件（id = `package/name`，name 含 .yaml/.yml 扩展名）
+/// 磁盘上的一个脚本文件（id = `<pkg>/<name>`，name 含 .yaml/.yml 扩展名；package 字段 = 应用分区）
 #[derive(Debug, Clone, Serialize)]
 pub struct ScriptFile {
     pub id: String,
@@ -28,52 +28,9 @@ pub struct ScriptFile {
     pub updated_at: String,
 }
 
-/// 解析脚本内容里的 package 指令：首个有效行 `package <名字>`
-/// （空行与 # 注释行跳过；首个有效行不是指令则视为缺省，返回 None）
-pub fn parse_package(content: &str) -> Option<String> {
-    for line in content.lines() {
-        let t = line.trim();
-        if t.is_empty() || t.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = t.strip_prefix("package") {
-            if rest.starts_with(' ') || rest.starts_with('\t') {
-                let pkg = rest.trim();
-                if !pkg.is_empty() {
-                    return Some(pkg.to_string());
-                }
-            }
-        }
-        return None;
-    }
-    None
-}
-
-/// 剥离 package 指令行（指令不是合法 YAML，serde_yaml 解析前必须去掉）
-pub fn strip_package_line(content: &str) -> String {
-    let mut out = String::with_capacity(content.len());
-    let mut stripped = false;
-    for line in content.lines() {
-        let t = line.trim();
-        let is_directive = !stripped
-            && !t.is_empty()
-            && !t.starts_with('#')
-            && t.strip_prefix("package")
-                .map(|r| r.starts_with(' ') || r.starts_with('\t'))
-                .unwrap_or(false);
-        if is_directive {
-            stripped = true;
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-/// 校验路径部件（package / 脚本文件名）：
+/// 校验路径部件（应用包名 / 脚本文件名）：
 /// 允许 unicode 字母数字与 `. - _`；禁止空、路径分隔符、`..`、前导点
-fn sanitize_part(s: &str) -> Option<String> {
+pub fn sanitize_part(s: &str) -> Option<String> {
     let t = s.trim();
     if t.is_empty() || t == "." || t == ".." || t.starts_with('.') {
         return None;
@@ -97,17 +54,39 @@ fn sanitize_template_name(s: &str) -> Option<String> {
 }
 
 pub struct ScriptStore {
-    /// 脚本根目录（data/scripts），一级子目录 = package
+    /// 数据根目录（data/），一级子目录 = 应用分区（内含 yaml/ 与 tmpl/）
     root: PathBuf,
-    /// 模板目录（data/templates），导出时按依赖收集
-    templates_dir: PathBuf,
 }
 
 impl ScriptStore {
     pub fn open(cfg: &Config) -> anyhow::Result<Self> {
-        let root = cfg.data_dir.join("scripts");
-        std::fs::create_dir_all(root.join(DEFAULT_PACKAGE))?;
-        Ok(Self { root, templates_dir: cfg.data_dir.join("templates") })
+        Ok(Self { root: cfg.data_dir.clone() })
+    }
+
+    /// 分区 yaml 脚本目录
+    pub fn yaml_dir(&self, pkg: &str) -> PathBuf {
+        self.root.join(pkg).join("yaml")
+    }
+
+    /// 分区模板目录
+    pub fn tmpl_dir(&self, pkg: &str) -> PathBuf {
+        self.root.join(pkg).join("tmpl")
+    }
+
+    /// 磁盘上全部分区名（存在 yaml/ 或 tmpl/ 子目录的一级目录，字典序）
+    pub fn partitions(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let Ok(rd) = std::fs::read_dir(&self.root) else {
+            return out;
+        };
+        for d in rd.flatten() {
+            let p = d.path();
+            if p.is_dir() && (p.join("yaml").is_dir() || p.join("tmpl").is_dir()) {
+                out.push(d.file_name().to_string_lossy().to_string());
+            }
+        }
+        out.sort();
+        out
     }
 
     fn fmt_mtime(p: &std::path::Path) -> String {
@@ -120,15 +99,15 @@ impl ScriptStore {
             .unwrap_or_default()
     }
 
-    fn load_file(&self, package: &str, name: &str) -> Option<ScriptFile> {
-        let p = self.root.join(package).join(name);
+    fn load_file(&self, pkg: &str, name: &str) -> Option<ScriptFile> {
+        let p = self.yaml_dir(pkg).join(name);
         if !p.is_file() {
             return None;
         }
         let content = std::fs::read_to_string(&p).ok()?;
         Some(ScriptFile {
-            id: format!("{}/{}", package, name),
-            package: package.to_string(),
+            id: format!("{}/{}", pkg, name),
+            package: pkg.to_string(),
             name: name.to_string(),
             content,
             updated_at: Self::fmt_mtime(&p),
@@ -138,21 +117,17 @@ impl ScriptStore {
     /// 列出全部脚本（按修改时间倒序，与旧 DB 版行为一致）
     pub fn list(&self) -> anyhow::Result<Vec<ScriptFile>> {
         let mut out = Vec::new();
-        let Ok(rd) = std::fs::read_dir(&self.root) else {
-            return Ok(out);
-        };
-        for pkg_dir in rd.flatten() {
-            if !pkg_dir.path().is_dir() {
+        for pkg in self.partitions() {
+            let Ok(rd) = std::fs::read_dir(self.yaml_dir(&pkg)) else {
                 continue;
-            }
-            let package = pkg_dir.file_name().to_string_lossy().to_string();
-            for f in std::fs::read_dir(pkg_dir.path())?.flatten() {
+            };
+            for f in rd.flatten() {
                 let name = f.file_name().to_string_lossy().to_string();
                 let low = name.to_lowercase();
                 if !(low.ends_with(".yaml") || low.ends_with(".yml")) {
                     continue;
                 }
-                if let Some(s) = self.load_file(&package, &name) {
+                if let Some(s) = self.load_file(&pkg, &name) {
                     out.push(s);
                 }
             }
@@ -168,12 +143,11 @@ impl ScriptStore {
         Ok(self.load_file(pkg, name))
     }
 
-    /// 保存脚本：package 取内容指令（缺省 default），name 缺扩展名时补 .yaml；
+    /// 保存脚本到指定应用分区，name 缺扩展名时补 .yaml；
     /// old_id 存在且归档位置变化时移动（删旧文件）。返回落盘后的脚本。
-    pub fn save(&self, old_id: Option<&str>, name: &str, content: &str) -> anyhow::Result<ScriptFile> {
-        let pkg_raw = parse_package(content).unwrap_or_else(|| DEFAULT_PACKAGE.to_string());
-        let package = sanitize_part(&pkg_raw)
-            .ok_or_else(|| anyhow::anyhow!("package 名非法（只允许字母数字 . _ -）: {}", pkg_raw))?;
+    pub fn save(&self, old_id: Option<&str>, pkg: &str, name: &str, content: &str) -> anyhow::Result<ScriptFile> {
+        let package = sanitize_part(pkg)
+            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {}", pkg))?;
         let name_raw = name.trim();
         let mut name = sanitize_part(name_raw)
             .ok_or_else(|| anyhow::anyhow!("脚本名非法（只允许字母数字 . _ -）: {}", name_raw))?;
@@ -181,7 +155,7 @@ impl ScriptStore {
         if !(low.ends_with(".yaml") || low.ends_with(".yml")) {
             name.push_str(".yaml");
         }
-        let dir = self.root.join(&package);
+        let dir = self.yaml_dir(&package);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(&name);
         std::fs::write(&path, content)?;
@@ -189,13 +163,10 @@ impl ScriptStore {
         if let Some(old) = old_id {
             if old != new_id {
                 if let Some((opkg, oname)) = old.split_once('/') {
-                    let old_path = self.root.join(opkg).join(oname);
+                    let old_path = self.yaml_dir(opkg).join(oname);
                     if old_path != path && old_path.is_file() {
                         std::fs::remove_file(&old_path)?;
-                        // 旧 package 目录已空则顺手删掉（default 保留）
-                        if opkg != DEFAULT_PACKAGE {
-                            let _ = std::fs::remove_dir(self.root.join(opkg));
-                        }
+                        self.cleanup_partition(opkg);
                     }
                 }
             }
@@ -213,15 +184,20 @@ impl ScriptStore {
         let Some((pkg, name)) = id.split_once('/') else {
             anyhow::bail!("非法脚本 id: {}", id);
         };
-        let path = self.root.join(pkg).join(name);
+        let path = self.yaml_dir(pkg).join(name);
         std::fs::remove_file(&path).map_err(|e| anyhow::anyhow!("删除失败: {} ({})", e, path.display()))?;
-        if pkg != DEFAULT_PACKAGE {
-            let _ = std::fs::remove_dir(self.root.join(pkg)); // 目录非空时失败，忽略
-        }
+        self.cleanup_partition(pkg);
         Ok(())
     }
 
-    /// call 子脚本按名解析：优先调用者同 package，其次全局；
+    /// 旧分区 yaml/tmpl 都已空时删掉分区目录（避免残留空目录被当成有效分区）
+    pub fn cleanup_partition(&self, pkg: &str) {
+        let _ = std::fs::remove_dir(self.yaml_dir(pkg)); // 非空时失败，忽略
+        let _ = std::fs::remove_dir(self.tmpl_dir(pkg));
+        let _ = std::fs::remove_dir(self.root.join(pkg));
+    }
+
+    /// call 子脚本按名解析：优先调用者同分区，其次跨分区；
     /// 名字缺 .yaml/.yml 扩展名时自动补全再试（call 写 `子脚本` 或 `子脚本.yml` 均可）
     pub fn resolve_call(&self, caller_pkg: &str, name: &str) -> anyhow::Result<Option<ScriptFile>> {
         let all = self.list()?;
@@ -246,7 +222,25 @@ impl ScriptStore {
         Ok(None)
     }
 
-    /// 导出脚本包：脚本 + 递归 call 依赖的子脚本 + 全部引用的模板 → zip 字节。
+    /// 按模板名查找文件：本分区 tmpl → 其他分区 tmpl（模板放错分区时的兜底）
+    pub fn find_template(&self, pkg: &str, name: &str) -> Option<PathBuf> {
+        let own = self.tmpl_dir(pkg).join(name);
+        if own.is_file() {
+            return Some(own);
+        }
+        for p in self.partitions() {
+            if p == pkg {
+                continue;
+            }
+            let path = self.tmpl_dir(&p).join(name);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// 导出分区快照 zip：脚本 + 递归 call 依赖的子脚本 + 全部引用的模板 → zip 字节。
     /// 缺失的模板跳过并 warn（不阻断导出）。返回（建议文件名, zip 字节）。
     pub fn export(&self, id: &str) -> anyhow::Result<(String, Vec<u8>)> {
         let start = self.get(id)?.ok_or_else(|| anyhow::anyhow!("脚本不存在: {}", id))?;
@@ -273,16 +267,15 @@ impl ScriptStore {
             let opts = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
             for s in &scripts {
-                zw.start_file(format!("script/{}/{}", s.package, s.name), opts)?;
+                zw.start_file(format!("yaml/{}", s.name), opts)?;
                 zw.write_all(s.content.as_bytes())?;
             }
             for t in &templates {
-                let p = self.templates_dir.join(t);
-                if !p.is_file() {
+                let Some(p) = self.find_template(&start.package, t) else {
                     tracing::warn!(tpl = %t, "导出跳过缺失模板");
                     continue;
-                }
-                zw.start_file(format!("templates/{}", t), opts)?;
+                };
+                zw.start_file(format!("tmpl/{}", t), opts)?;
                 zw.write_all(&std::fs::read(&p)?)?;
             }
             zw.finish()?;
@@ -298,13 +291,15 @@ impl ScriptStore {
         Ok((format!("{}.zip", stem), buf))
     }
 
-    /// 导入脚本包。confirm=false 时只解析并报告同名冲突（前端二次确认），
-    /// confirm=true 时落盘（同名替换）。包内 yaml 的 package 指令统一改写为所在目录。
-    pub fn import(&self, bytes: &[u8], confirm: bool) -> anyhow::Result<ImportReport> {
+    /// 导入分区快照 zip 到指定应用分区。confirm=false 时只解析并报告同名冲突
+    /// （前端二次确认），confirm=true 时落盘（同名替换）。只认 yaml/ 与 tmpl/ 布局。
+    pub fn import(&self, bytes: &[u8], pkg: &str, confirm: bool) -> anyhow::Result<ImportReport> {
+        let package = sanitize_part(pkg)
+            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {}", pkg))?;
         let mut rep = ImportReport::default();
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
         // 先全部解析到内存（zip-slip 防护 + 布局校验），无错才考虑落盘
-        let mut files: Vec<(String, PathBuf, Option<String>, Vec<u8>)> = Vec::new();
+        let mut files: Vec<(String, PathBuf, Vec<u8>)> = Vec::new();
         for i in 0..archive.len() {
             let mut f = archive.by_index(i)?;
             if f.is_dir() {
@@ -318,34 +313,29 @@ impl ScriptStore {
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().to_string())
                 .collect();
-            let (zip_path, dest, pkg): (String, PathBuf, Option<String>) = match comps.as_slice() {
-                [t, name] if t == "templates" => {
-                    let name = sanitize_template_name(name).ok_or_else(|| anyhow::anyhow!("模板名非法: {}", name))?;
-                    (format!("templates/{}", name), self.templates_dir.join(name), None)
-                }
-                [s, pkg, name] if s == "script" => {
-                    let pkg = sanitize_part(pkg).ok_or_else(|| anyhow::anyhow!("package 名非法: {}", pkg))?;
+            let (zip_path, dest): (String, PathBuf) = match comps.as_slice() {
+                [y, name] if y == "yaml" => {
                     let name = sanitize_part(name).ok_or_else(|| anyhow::anyhow!("脚本名非法: {}", name))?;
                     let low = name.to_lowercase();
                     if !(low.ends_with(".yaml") || low.ends_with(".yml")) {
-                        anyhow::bail!("script/ 下只支持 .yaml/.yml 文件: {}", name);
+                        anyhow::bail!("yaml/ 下只支持 .yaml/.yml 文件: {}", name);
                     }
-                    (format!("script/{}/{}", pkg, name), self.root.join(&pkg).join(&name), Some(pkg))
+                    (format!("yaml/{}", name), self.yaml_dir(&package).join(&name))
                 }
-                _ => anyhow::bail!("包内路径需为 templates/<文件> 或 script/<package>/<脚本>: {}", f.name()),
+                [t, name] if t == "tmpl" => {
+                    let name = sanitize_template_name(name).ok_or_else(|| anyhow::anyhow!("模板名非法: {}", name))?;
+                    (format!("tmpl/{}", name), self.tmpl_dir(&package).join(&name))
+                }
+                _ => anyhow::bail!("包内路径需为 yaml/<脚本> 或 tmpl/<模板>: {}", f.name()),
             };
             let mut buf = Vec::new();
             f.read_to_end(&mut buf)?;
-            files.push((zip_path, dest, pkg, buf));
+            files.push((zip_path, dest, buf));
         }
         if files.is_empty() {
             anyhow::bail!("包内没有可导入的文件");
         }
-        for (zip_path, dest, pkg, buf) in &mut files {
-            if let Some(pkg) = &pkg {
-                let content = String::from_utf8_lossy(buf).to_string();
-                *buf = set_package_line(&content, pkg).into_bytes();
-            }
+        for (zip_path, dest, _) in &files {
             rep.entries.push(zip_path.clone());
             if dest.exists() {
                 rep.conflicts.push(zip_path.clone());
@@ -354,7 +344,7 @@ impl ScriptStore {
         if !confirm {
             return Ok(rep);
         }
-        for (zip_path, dest, _, buf) in files {
+        for (zip_path, dest, buf) in files {
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -392,7 +382,7 @@ pub struct Deps {
 /// （递归遍历 steps / loop.steps / then / else 嵌套结构）
 pub fn scan_deps(content: &str) -> Deps {
     let mut deps = Deps { templates: vec![], calls: vec![] };
-    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&strip_package_line(content)) else {
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
         return deps;
     };
     if let Some(steps) = doc.get("steps").and_then(|v| v.as_sequence()) {
@@ -429,54 +419,112 @@ fn walk_deps(v: &serde_yaml::Value, deps: &mut Deps) {
     }
 }
 
-/// 设置/替换内容中的 package 指令行（导入时把包内脚本归一到所在目录的 package，
-/// 避免「文件在 foo/ 目录、内容却写 package bar」导致下次保存时被移走）
-fn set_package_line(content: &str, pkg: &str) -> String {
-    let directive = format!("package {}", pkg);
-    if parse_package(content).is_some() {
-        for line in content.lines() {
-            let t = line.trim();
-            let is_directive = !t.is_empty()
-                && !t.starts_with('#')
-                && t.strip_prefix("package")
-                    .map(|r| r.starts_with(' ') || r.starts_with('\t'))
-                    .unwrap_or(false);
-            if is_directive {
-                return content.replacen(line, &directive, 1);
-            }
+/// 剥离旧 `package <名字>` 指令行（仅 migrate_fs_layout 清理旧文件残留用，
+/// 运行时已不识别该指令——残留行会导致 YAML 解析报错）
+fn strip_directive_line(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut stripped = false;
+    for line in content.lines() {
+        let t = line.trim();
+        let is_directive = !stripped
+            && !t.is_empty()
+            && !t.starts_with('#')
+            && t.strip_prefix("package")
+                .map(|r| r.starts_with(' ') || r.starts_with('\t'))
+                .unwrap_or(false);
+        if is_directive {
+            stripped = true;
+            continue;
         }
+        out.push_str(line);
+        out.push('\n');
     }
-    format!("{}\n{}", directive, content)
+    out
 }
 
-/// 一次性迁移：SQLite scripts 表 → 文件系统（data/scripts/<package>/），
-/// 并把 tasks.script_id 从旧 uuid 映射为 `<package>/<name>`。
-/// 目录里已有脚本（迁移过/手动放过文件）时跳过。
-pub fn migrate_from_db(db: &crate::store::Store, store: &ScriptStore) -> anyhow::Result<()> {
-    if !store.list()?.is_empty() {
+/// 目录内（含子目录）是否有文件
+fn dir_has_any_file(dir: &std::path::Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        if e.path().is_file() {
+            return true;
+        }
+        if e.path().is_dir() && dir_has_any_file(&e.path()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// 一次性迁移：旧布局（data/scripts/<package>/ + data/templates/）→ 应用分区
+/// （data/<目标pkg>/yaml|tmpl）。目标 = DB 首个配置了应用包名的设备；
+/// 无设备 pkg 或目标分区已有数据时跳过（旧目录保留）。脚本内容顺手剥离旧指令行。
+pub fn migrate_fs_layout(db: &crate::store::Store, store: &ScriptStore) -> anyhow::Result<()> {
+    let old_scripts = store.root.join("scripts");
+    let old_templates = store.root.join("templates");
+    if !dir_has_any_file(&old_scripts) && !dir_has_any_file(&old_templates) {
         return Ok(());
     }
-    let legacy = db.legacy_scripts()?;
-    if legacy.is_empty() {
+    let Some(pkg) = db
+        .list_devices()?
+        .into_iter()
+        .filter_map(|d| d.pkg)
+        .map(|p| p.trim().to_string())
+        .find(|p| !p.is_empty())
+    else {
+        tracing::warn!("存在旧布局脚本/模板但无设备配置应用包名，跳过迁移（旧目录保留）");
+        return Ok(());
+    };
+    let target_yaml = store.yaml_dir(&pkg);
+    let target_tmpl = store.tmpl_dir(&pkg);
+    if dir_has_any_file(&target_yaml) || dir_has_any_file(&target_tmpl) {
+        tracing::warn!(pkg = %pkg, "目标分区已有数据，跳过旧布局迁移（旧目录保留）");
         return Ok(());
     }
-    let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for (old_id, name, content) in legacy {
-        match store.save(None, &name, &content) {
-            Ok(s) => {
-                tracing::info!(from = %old_id, to = %s.id, "脚本迁移");
-                map.insert(old_id, s.id);
+    std::fs::create_dir_all(&target_yaml)?;
+    std::fs::create_dir_all(&target_tmpl)?;
+    if old_scripts.is_dir() {
+        for pkg_dir in std::fs::read_dir(&old_scripts)?.flatten() {
+            if !pkg_dir.path().is_dir() {
+                continue;
             }
-            Err(e) => tracing::warn!(name = %name, "脚本迁移失败: {}", e),
+            for f in std::fs::read_dir(pkg_dir.path())?.flatten() {
+                let name = f.file_name().to_string_lossy().to_string();
+                let low = name.to_lowercase();
+                if !(low.ends_with(".yaml") || low.ends_with(".yml")) {
+                    continue;
+                }
+                let dest = target_yaml.join(&name);
+                if dest.exists() {
+                    tracing::warn!(name = %name, "目标已存在同名脚本，跳过（旧文件保留）");
+                    continue;
+                }
+                let content = std::fs::read_to_string(f.path())?;
+                std::fs::write(&dest, strip_directive_line(&content))?;
+                let _ = std::fs::remove_file(f.path());
+                tracing::info!(from = %f.path().display(), to = %dest.display(), "脚本迁移至应用分区");
+            }
+            let _ = std::fs::remove_dir(pkg_dir.path()); // 非空（有跳过文件）时失败，忽略
         }
+        let _ = std::fs::remove_dir(&old_scripts);
     }
-    for mut t in db.list_tasks()? {
-        if let Some(new_id) = map.get(&t.script_id) {
-            let old = t.script_id.clone();
-            t.script_id = new_id.clone();
-            db.upsert_task(&t)?;
-            tracing::info!(task = %t.name, from = %old, to = %new_id, "任务脚本引用已更新");
+    if old_templates.is_dir() {
+        for f in std::fs::read_dir(&old_templates)?.flatten() {
+            if !f.path().is_file() {
+                continue;
+            }
+            let name = f.file_name().to_string_lossy().to_string();
+            let dest = target_tmpl.join(&name);
+            if dest.exists() {
+                tracing::warn!(name = %name, "目标已存在同名模板，跳过（旧文件保留）");
+                continue;
+            }
+            std::fs::rename(f.path(), &dest)?;
+            tracing::info!(from = %f.path().display(), to = %dest.display(), "模板迁移至应用分区");
         }
+        let _ = std::fs::remove_dir(&old_templates);
     }
     Ok(())
 }
@@ -486,22 +534,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn package_directive() {
-        assert_eq!(parse_package("package test\nsteps:\n  - log x\n").as_deref(), Some("test"));
-        assert_eq!(parse_package("# 注释\n\npackage foo\nsteps: []").as_deref(), Some("foo"));
-        assert_eq!(parse_package("steps:\n  - log x\n"), None);
-        assert_eq!(parse_package(""), None);
-        // package 后无名字 / 带冒号的 YAML 键 → 不算指令
-        assert_eq!(parse_package("package\nsteps: []"), None);
-        assert_eq!(parse_package("package: test\nsteps: []"), None);
-        let stripped = strip_package_line("package test\nsteps:\n  - log x\n");
-        assert_eq!(stripped, "steps:\n  - log x\n");
-    }
-
-    #[test]
     fn deps_scan() {
         let yaml = r#"
-package demo
 steps:
   - find: btn.png
     click: inner.png
@@ -521,9 +555,19 @@ steps:
     }
 
     #[test]
-    fn set_package_directive() {
-        assert_eq!(set_package_line("steps: []", "foo"), "package foo\nsteps: []");
-        let replaced = set_package_line("package bar\nsteps: []", "foo");
-        assert_eq!(replaced, "package foo\nsteps: []");
+    fn strip_legacy_directive() {
+        assert_eq!(strip_directive_line("package test\nsteps:\n  - log x\n"), "steps:\n  - log x\n");
+        assert_eq!(strip_directive_line("# 注释\n\npackage foo\nsteps: []"), "# 注释\n\nsteps: []\n");
+        // 无指令行原样（补尾部换行）
+        assert_eq!(strip_directive_line("steps: []"), "steps: []\n");
+    }
+
+    #[test]
+    fn sanitize() {
+        assert_eq!(sanitize_part("com.miHoYo.hkrpg").as_deref(), Some("com.miHoYo.hkrpg"));
+        assert_eq!(sanitize_part(""), None);
+        assert_eq!(sanitize_part(".."), None);
+        assert_eq!(sanitize_part("a/b"), None);
+        assert_eq!(sanitize_part("测试_1-2"), Some("测试_1-2".into()));
     }
 }

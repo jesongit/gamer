@@ -132,7 +132,6 @@ impl Config {
             Self::default()
         };
         std::fs::create_dir_all(&cfg.data_dir)?;
-        std::fs::create_dir_all(cfg.data_dir.join("templates"))?;
         Ok(cfg)
     }
 

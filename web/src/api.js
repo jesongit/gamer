@@ -46,25 +46,29 @@ export const api = {
   listApps: (id) => req('GET', `/api/devices/${id}/apps`),
   listAppsByAddr: (addr) => req('GET', `/api/apps?addr=${encodeURIComponent(addr)}`),
 
-  // 模板
-  listTemplates: () => req('GET', '/api/templates'),
-  uploadTemplate: (name, dataB64) => req('POST', '/api/templates', { name, data_b64: dataB64 }),
-  renameTemplate: (oldName, newName) => req('PUT', `/api/templates/${encodeURIComponent(oldName)}`, { name: newName }),
-  deleteTemplate: (name) => req('DELETE', `/api/templates/${encodeURIComponent(name)}`),
-  testTemplate: (name, deviceId, threshold, region) =>
-    req('POST', `/api/templates/${encodeURIComponent(name)}/test`, { device_id: deviceId, threshold, region }),
+  // 模板（按应用分区 data/<pkg>/tmpl；pkg 缺省=跨分区全列）
+  listTemplates: (pkg) => req('GET', `/api/templates${pkg ? `?pkg=${encodeURIComponent(pkg)}` : ''}`),
+  uploadTemplate: (name, dataB64, pkg) => req('POST', '/api/templates', { name, data_b64: dataB64, pkg }),
+  renameTemplate: (oldName, newName, pkg) =>
+    req('PUT', `/api/templates/${encodeURIComponent(oldName)}?pkg=${encodeURIComponent(pkg)}`, { name: newName }),
+  deleteTemplate: (name, pkg) =>
+    req('DELETE', `/api/templates/${encodeURIComponent(name)}?pkg=${encodeURIComponent(pkg)}`),
+  testTemplate: (name, deviceId, threshold, region, pkg) =>
+    req('POST', `/api/templates/${encodeURIComponent(name)}/test`, { device_id: deviceId, threshold, region, pkg }),
+  // 模板缩略图/预览 URL（<img :src> 用；pkg 必填）
+  tplImageUrl: (name, pkg) => `/api/templates/${encodeURIComponent(name)}/image?pkg=${encodeURIComponent(pkg)}`,
 
   // 配置：操作记录 YAML 模板（config.toml [op_templates]）
   getOpTemplates: () => req('GET', '/api/op-templates'),
 
-  // 脚本（id 形如 "package/name.yaml"，含 '/'，拼 URL 必须整体 encodeURIComponent）
+  // 脚本（id 形如 "<pkg>/<name>.yaml"，含 '/'，拼 URL 必须整体 encodeURIComponent；保存需 pkg=应用分区）
   listScripts: () => req('GET', '/api/scripts'),
   saveScript: (s) => req('POST', '/api/scripts', s),
   deleteScript: (id) => req('DELETE', `/api/scripts/${encodeURIComponent(id)}`),
   runScript: (id, deviceId, startIndex) => req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, { device_id: deviceId, start_index: startIndex || 0 }),
   stopScript: (id) => req('POST', `/api/scripts/${encodeURIComponent(id)}/stop`),
   scriptStatus: (id) => req('GET', `/api/scripts/${encodeURIComponent(id)}/status`),
-  // 导出脚本包 zip（脚本 + call 依赖 + 模板）→ { blob, filename }
+  // 导出分区快照 zip（脚本 + call 依赖 + 模板）→ { blob, filename }
   exportScript: async (id) => {
     const r = await fetch(`/api/scripts/${encodeURIComponent(id)}/export`)
     if (!r.ok) throw new Error(await errMsg(r))
@@ -74,9 +78,9 @@ export const api = {
     if (m) { try { filename = decodeURIComponent(m[1]) } catch (e) { filename = m[1] } }
     return { blob: await r.blob(), filename }
   },
-  // 导入脚本包 zip：confirm=false 只探测冲突，true 落盘（同名替换）
-  importScripts: async (file, confirm) => {
-    const r = await fetch(`/api/scripts/import?confirm=${confirm ? 1 : 0}`, {
+  // 导入分区快照 zip 到指定应用分区：confirm=false 只探测冲突，true 落盘（同名替换）
+  importScripts: async (file, confirm, pkg) => {
+    const r = await fetch(`/api/scripts/import?confirm=${confirm ? 1 : 0}&pkg=${encodeURIComponent(pkg)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/zip' },
       body: file

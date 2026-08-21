@@ -82,12 +82,6 @@ impl Store {
                 fps INTEGER,
                 created_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS scripts (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                content TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -187,17 +181,6 @@ impl Store {
     pub fn delete_device(&self, id: &str) -> anyhow::Result<()> {
         self.lock().execute("DELETE FROM devices WHERE id = ?1", [id])?;
         Ok(())
-    }
-
-    // ---------- 脚本（已迁移到文件系统存储，见 scripts.rs） ----------
-
-    /// 旧版 scripts 表读取：(id, name, content)。
-    /// 仅供一次性迁移到 data/scripts/ 使用（scripts::migrate_from_db），新代码勿用。
-    pub fn legacy_scripts(&self) -> anyhow::Result<Vec<(String, String, String)>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare("SELECT id, name, content FROM scripts")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     // ---------- 定时任务 ----------

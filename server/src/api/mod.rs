@@ -536,23 +536,44 @@ async fn api_control(State(st): State<AppState>, Path(id): Path<String>, Json(re
     }
 }
 
-// ---------- 模板 ----------
+// ---------- 模板（按应用分区 data/<pkg>/tmpl） ----------
 
-fn templates_dir(st: &AppState) -> std::path::PathBuf {
-    st.cfg.data_dir.join("templates")
+#[derive(Deserialize)]
+struct PkgQuery {
+    pkg: Option<String>,
 }
 
-async fn api_list_templates(State(st): State<AppState>) -> Response {
-    let dir = templates_dir(&st);
+/// 校验必需的 pkg 参数（应用包名 = 分区名），非法/缺失返回 400 Response
+fn require_pkg(raw: Option<&str>) -> Result<String, Response> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => match crate::scripts::sanitize_part(p) {
+            Some(v) => Ok(v),
+            None => Err(err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）")),
+        },
+        None => Err(err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）")),
+    }
+}
+
+/// 列出模板：?pkg= 指定分区时只列该分区，否则跨分区全列（条目带 pkg 字段）
+async fn api_list_templates(State(st): State<AppState>, Query(q): Query<PkgQuery>) -> Response {
+    let pkgs: Vec<String> = match q.pkg.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => match crate::scripts::sanitize_part(p) {
+            Some(v) => vec![v],
+            None => return err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）"),
+        },
+        None => st.scripts.partitions(),
+    };
     let mut out = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        for e in entries.flatten() {
-            // 模板目录专用：列出所有非隐藏文件（模板名可能带 .png/.jpg，也可能是 随机名字#x1_y1_x2_y2 这种带小数点无后缀名）
-            let fname = e.file_name().to_string_lossy().to_string();
-            if e.path().is_file() && !fname.starts_with('.') {
-                let name = fname;
-                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                out.push(serde_json::json!({"name": name, "size": size}));
+    for pkg in pkgs {
+        let dir = st.scripts.tmpl_dir(&pkg);
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                // 模板目录专用：列出所有非隐藏文件（模板名可能带 .png/.jpg，也可能是 随机名字#x1_y1_x2_y2 这种带小数点无后缀名）
+                let fname = e.file_name().to_string_lossy().to_string();
+                if e.path().is_file() && !fname.starts_with('.') {
+                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                    out.push(serde_json::json!({"name": fname, "size": size, "pkg": pkg}));
+                }
             }
         }
     }
@@ -563,9 +584,13 @@ async fn api_list_templates(State(st): State<AppState>) -> Response {
 struct UploadTemplateReq {
     name: String,
     data_b64: String,
+    pkg: String,
 }
 
 async fn api_upload_template(State(st): State<AppState>, Json(req): Json<UploadTemplateReq>) -> Response {
+    let Ok(pkg) = require_pkg(Some(&req.pkg)) else {
+        return err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）");
+    };
     let bytes = match base64::engine::general_purpose::STANDARD.decode(&req.data_b64) {
         Ok(b) => b,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, &format!("base64 解码失败: {}", e)),
@@ -574,8 +599,10 @@ async fn api_upload_template(State(st): State<AppState>, Json(req): Json<UploadT
     if image::load_from_memory(&bytes).is_err() {
         return err_response(StatusCode::BAD_REQUEST, "不是有效的图片");
     }
-    let dir = templates_dir(&st);
-    std::fs::create_dir_all(&dir).ok();
+    let dir = st.scripts.tmpl_dir(&pkg);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+    }
     let name = sanitize_filename(&req.name);
     let path = dir.join(&name);
     if let Err(e) = std::fs::write(&path, bytes) {
@@ -584,10 +611,16 @@ async fn api_upload_template(State(st): State<AppState>, Json(req): Json<UploadT
     Json(serde_json::json!({"ok": true, "name": name})).into_response()
 }
 
-async fn api_delete_template(State(st): State<AppState>, Path(name): Path<String>) -> Response {
-    let path = templates_dir(&st).join(sanitize_filename(&name));
+async fn api_delete_template(State(st): State<AppState>, Path(name): Path<String>, Query(q): Query<PkgQuery>) -> Response {
+    let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
+        return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
+    };
+    let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
     match std::fs::remove_file(&path) {
-        Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
+        Ok(_) => {
+            st.scripts.cleanup_partition(&pkg); // 分区 yaml/tmpl 都空了则清理目录
+            Json(serde_json::json!({"ok": true})).into_response()
+        }
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
@@ -598,8 +631,11 @@ struct RenameTemplateReq {
 }
 
 /// 重命名模板：把旧文件字节写入新文件名，再删除旧文件
-async fn api_rename_template(State(st): State<AppState>, Path(old_name): Path<String>, Json(req): Json<RenameTemplateReq>) -> Response {
-    let dir = templates_dir(&st);
+async fn api_rename_template(State(st): State<AppState>, Path(old_name): Path<String>, Query(q): Query<PkgQuery>, Json(req): Json<RenameTemplateReq>) -> Response {
+    let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
+        return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
+    };
+    let dir = st.scripts.tmpl_dir(&pkg);
     let old_path = dir.join(sanitize_filename(&old_name));
     let new_name = sanitize_filename(&req.name);
     if new_name == sanitize_filename(&old_name) {
@@ -625,8 +661,11 @@ async fn api_rename_template(State(st): State<AppState>, Path(old_name): Path<St
 
 /// 返回模板图片原始字节（PNG/JPEG），供前端缩略图与预览使用。
 /// Cache-Control: no-cache —— 模板被同名覆盖上传后浏览器必须重新拉取。
-async fn api_get_template_image(State(st): State<AppState>, Path(name): Path<String>) -> Response {
-    let path = templates_dir(&st).join(sanitize_filename(&name));
+async fn api_get_template_image(State(st): State<AppState>, Path(name): Path<String>, Query(q): Query<PkgQuery>) -> Response {
+    let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
+        return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
+    };
+    let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(_) => return err_response(StatusCode::NOT_FOUND, "模板不存在"),
@@ -651,10 +690,14 @@ struct TestTemplateReq {
     device_id: String,
     threshold: Option<f32>,
     region: Option<[u32; 4]>,
+    pkg: String,
 }
 
 async fn api_test_template(State(st): State<AppState>, Path(name): Path<String>, Json(req): Json<TestTemplateReq>) -> Response {
-    let tpl_path = templates_dir(&st).join(sanitize_filename(&name));
+    let Ok(pkg) = require_pkg(Some(&req.pkg)) else {
+        return err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）");
+    };
+    let tpl_path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
     let tpl_bytes = match std::fs::read(&tpl_path) {
         Ok(b) => b,
         Err(_) => return err_response(StatusCode::NOT_FOUND, "模板不存在"),
@@ -690,13 +733,18 @@ struct SaveScriptReq {
     id: Option<String>,
     name: String,
     content: String,
+    /// 目标应用分区（设备配置的应用包名）
+    pkg: String,
 }
 
 async fn api_save_script(State(st): State<AppState>, Json(req): Json<SaveScriptReq>) -> Response {
     if req.name.trim().is_empty() {
         return err_response(StatusCode::BAD_REQUEST, "脚本名不能为空");
     }
-    match st.scripts.save(req.id.as_deref(), &req.name, &req.content) {
+    if crate::scripts::sanitize_part(&req.pkg).is_none() {
+        return err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）");
+    }
+    match st.scripts.save(req.id.as_deref(), &req.pkg, &req.name, &req.content) {
         Ok(s) => Json(serde_json::json!({"ok": true, "id": s.id, "package": s.package, "name": s.name})).into_response(),
         Err(e) => err_response(StatusCode::BAD_REQUEST, &e.to_string()),
     }
@@ -731,9 +779,12 @@ async fn api_export_script(State(st): State<AppState>, Path(id): Path<String>) -
 struct ImportQuery {
     #[serde(default)]
     confirm: Option<String>,
+    /// 目标应用分区（应用包名，必填）
+    #[serde(default)]
+    pkg: Option<String>,
 }
 
-/// 导入脚本包 zip（body 为原始 zip 字节）。
+/// 导入分区快照 zip（body 为原始 zip 字节，?pkg= 指定目标分区）。
 /// confirm 缺省/false：只解析并返回同名冲突列表（前端二次确认）；
 /// confirm=1/true：落盘，同名替换。
 async fn api_import_script(
@@ -742,7 +793,10 @@ async fn api_import_script(
     body: axum::body::Bytes,
 ) -> Response {
     let confirm = matches!(q.confirm.as_deref(), Some("1") | Some("true"));
-    match st.scripts.import(&body, confirm) {
+    let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
+        return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
+    };
+    match st.scripts.import(&body, &pkg, confirm) {
         Ok(rep) => Json(rep).into_response(),
         Err(e) => err_response(StatusCode::BAD_REQUEST, &e.to_string()),
     }

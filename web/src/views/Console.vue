@@ -308,8 +308,18 @@
           </template>
         </div>
 
-        <!-- 脚本（模板功能 + 脚本运行/编辑） -->
+        <!-- 脚本（模板功能 + 脚本运行/编辑），按应用分区存储（data/<pkg>/tmpl|yaml） -->
         <div v-show="activeTab === 'script'" class="panel-sec script-tab">
+          <!-- 应用分区切换：模板与脚本数据随分区切换（默认跟随设备页签的应用包名） -->
+          <div class="pkg-bar">
+            <span class="pkg-label">应用</span>
+            <select v-model="activePkg" class="select mono pkg-select" title="应用分区（data/<应用包名>/tmpl|yaml），默认跟随设备页签配置的应用包名">
+              <option v-if="!pkgOptions.length" value="">（未配置应用包名）</option>
+              <option v-for="p in pkgOptions" :key="p" :value="p">{{ p }}</option>
+            </select>
+          </div>
+          <div v-if="!activePkg" class="pkg-empty">暂无应用分区：请先在「设备」页签配置应用包名（模板与脚本按应用分区存储）</div>
+          <template v-else>
           <!-- 模板功能（放上面） -->
           <div class="script-tpl">
             <!-- 模板文件列表（非裁切时） -->
@@ -396,7 +406,7 @@
           <!-- 脚本功能：运行模式 -->
           <div v-if="scriptMode === 'run'" class="script-run">
             <div class="auto-run">
-              <ScriptPicker v-model="selScript" />
+              <ScriptPicker v-model="selScript" :package="activePkg" />
             </div>
             <div class="run-actions">
               <button v-if="!store.running" class="btn btn-primary" :disabled="!selScript || !store.deviceId" @click="runScript">▶ 运行</button>
@@ -460,6 +470,7 @@
             </div>
             <textarea ref="scriptEditor" v-model="editScriptCode" class="script-editor mono" spellcheck="false" placeholder="# YAML 脚本&#10;action_wait: 500&#10;log_level: info&#10;&#10;steps:&#10;  - find: 模板名.png&#10;    click: true" @keydown.tab.prevent="onEditorTab"></textarea>
           </div>
+          </template>
         </div>
       </div>
     </aside>
@@ -513,14 +524,16 @@ const res = ref('—')
 const bitrate = ref('—')
 const selScript = ref('')
 // 脚本页签：运行/编辑模式 + 日志级别
-const DEFAULT_SCRIPT_CODE = `package default
-action_wait: 500
+const DEFAULT_SCRIPT_CODE = `action_wait: 500
 log_level: info
 
 steps:
   - wait: 1000
   - log: "脚本开始运行"
 `
+// 脚本页签当前应用分区（= 应用包名）：默认/自动跟随设备页签配置的 pkg，可手动切换；
+// 模板列表、脚本选择、模板/脚本读写都按该分区进行（后端 data/<pkg>/tmpl|yaml）
+const activePkg = ref('')
 const scriptMode = ref('run')
 const editScriptName = ref('新脚本')
 const editScriptCode = ref(DEFAULT_SCRIPT_CODE)
@@ -727,7 +740,30 @@ const appHint = ref('')
 
 const devices = computed(() => devicesData.value)
 const scripts = computed(() => scriptsData.value)
-const templates = computed(() => templatesData.value)
+// 模板列表按当前应用分区过滤（templatesData 为跨分区全量，条目带 pkg 字段）
+const templates = computed(() => templatesData.value.filter(t => t.pkg === activePkg.value))
+
+/** 应用分区下拉选项：设备页签配置的包名 ∪ 脚本分区 ∪ 模板分区（字典序） */
+const pkgOptions = computed(() => {
+  const set = new Set()
+  const dp = (form.pkg || '').trim()
+  if (dp) set.add(dp)
+  for (const s of scripts.value) if (s.package) set.add(s.package)
+  for (const t of templatesData.value) if (t.pkg) set.add(t.pkg)
+  return [...set].sort((a, b) => a.localeCompare(b))
+})
+
+// 设备页签应用包名变化（含未保存草稿、切换设备）→ 分区自动跟随；
+// 清空包名时保持当前分区（磁盘分区仍在），仅从未选择时兜底选第一个分区
+watch(() => form.pkg, v => {
+  const t = (v || '').trim()
+  if (t) activePkg.value = t
+  else if (!activePkg.value) activePkg.value = pkgOptions.value[0] || ''
+})
+watch(pkgOptions, list => {
+  if (!activePkg.value) activePkg.value = list[0] || ''
+  else if (!list.includes(activePkg.value)) activePkg.value = list[0] || ''
+})
 
 const current = computed(() => devices.value.find(d => d.id === store.deviceId) || null)
 const currentName = computed(() => current.value?.name || '未选择设备')
@@ -2033,10 +2069,11 @@ function cropMouseLeave() {
 async function saveTemplate() {
   const raw = crop.name.trim()
   if (!raw) return toast('请输入模板名称', 'warn')
+  if (!activePkg.value) return toast('请先选择应用分区', 'warn')
   const name = raw.toLowerCase().endsWith('.png') ? raw : raw + '.png'
   saving.value = true
   try {
-    await api.uploadTemplate(name, crop.preview.split(',')[1])
+    await api.uploadTemplate(name, crop.preview.split(',')[1], activePkg.value)
     templatesData.value = await api.listTemplates()
     crop.active = false
     cropBaseCanvas = null
@@ -2133,7 +2170,7 @@ function launchGame() {
 
 function openScripts() { router.push('/scripts') }
 
-function tplThumbUrl(name) { return `/api/templates/${encodeURIComponent(name)}/image` }
+function tplThumbUrl(name) { return api.tplImageUrl(name, activePkg.value) }
 
 /** 模板列表：行点击 → 查看大图；
  *  编辑模式下按住 Alt 或 alt 模式开启 → 在操作记录区生成 find / until 两条候选记录（含 region），
@@ -2225,9 +2262,9 @@ async function confirmRename(t) {
   const newName = /\.(png|jpe?g)$/i.test(raw) ? raw : raw + '.png'
   renaming.value = null
   if (newName === t.name) return
-  if (templatesData.value.some(x => x.name === newName)) return toast(`已存在同名模板：${newName}`, 'warn')
+  if (templatesData.value.some(x => x.pkg === activePkg.value && x.name === newName)) return toast(`已存在同名模板：${newName}`, 'warn')
   try {
-    await api.renameTemplate(t.name, newName)
+    await api.renameTemplate(t.name, newName, activePkg.value)
     templatesData.value = await api.listTemplates()
     toast(`模板已重命名为 ${newName}`, 'success')
   } catch (e) {
@@ -2246,7 +2283,7 @@ async function onTplDeleteClick(t) {
   if (confirmDelTpl.value === t.name) {
     confirmDelTpl.value = null
     try {
-      await api.deleteTemplate(t.name)
+      await api.deleteTemplate(t.name, activePkg.value)
       templatesData.value = await api.listTemplates()
       if (viewTpl.value === t.name) viewTpl.value = null
       toast('模板已删除', 'success')
@@ -2268,7 +2305,7 @@ async function onTplUpload(e) {
   if (!/\.(png|jpe?g)$/i.test(name)) name += '.png'
   try {
     const b64 = await fileToBase64(file)
-    await api.uploadTemplate(name, b64)
+    await api.uploadTemplate(name, b64, activePkg.value)
     templatesData.value = await api.listTemplates()
     toast('模板已上传', 'success')
   } catch (err) {
@@ -2547,6 +2584,7 @@ function cancelEditScript() {
 }
 
 function startNewScript() {
+  if (!activePkg.value) return toast('请先选择应用分区（设备页签配置应用包名）', 'warn')
   editScriptId.value = null
   editScriptName.value = '新脚本'
   editScriptCode.value = DEFAULT_SCRIPT_CODE
@@ -2600,18 +2638,19 @@ async function exportCurrentScript() {
   }
 }
 
-/** 导入脚本包 zip：先探测冲突，同名文件替换前二次确认 */
+/** 导入分区快照 zip（模板+脚本）到当前应用分区：先探测冲突，同名文件替换前二次确认 */
 async function onImportFile(e) {
   const file = e.target.files?.[0]
   e.target.value = ''
   if (!file) return
+  if (!activePkg.value) return toast('请先选择应用分区', 'warn')
   try {
-    const dry = await api.importScripts(file, false)
+    const dry = await api.importScripts(file, false, activePkg.value)
     if (dry.conflicts?.length) {
       const list = dry.conflicts.join('\n')
-      if (!confirm(`导入会替换以下 ${dry.conflicts.length} 个同名文件：\n\n${list}\n\n确认替换导入？`)) return
+      if (!confirm(`导入到 ${activePkg.value} 会替换以下 ${dry.conflicts.length} 个同名文件：\n\n${list}\n\n确认替换导入？`)) return
     }
-    const rep = await api.importScripts(file, true)
+    const rep = await api.importScripts(file, true, activePkg.value)
     await loadData()
     toast(`导入完成：新增 ${rep.imported.length} 个，替换 ${rep.replaced.length} 个`, 'success')
   } catch (err) {
@@ -2619,24 +2658,12 @@ async function onImportFile(e) {
   }
 }
 
-/** 保存前校验 YAML：语法 / steps / 坐标范围 / 模板存在 */
-/** 剥离首行 package 指令（`package xxx` 非标准 YAML，前后端解析前都需去掉） */
-function stripPackageLine(content) {
-  const lines = content.split('\n')
-  for (let i = 0; i < lines.length; i++) {
-    const t = lines[i].trim()
-    if (!t || t.startsWith('#')) continue
-    if (/^package\s+\S+$/.test(t)) lines.splice(i, 1)
-    return lines.join('\n')
-  }
-  return lines.join('\n')
-}
-
+/** 保存前校验 YAML：语法 / steps / 坐标范围 / 模板存在（模板按当前应用分区校验） */
 function validateScriptCode(content) {
   const errors = []
   let doc
   try {
-    doc = yamlLoad(stripPackageLine(content))
+    doc = yamlLoad(content)
   } catch (e) {
     // 常见笔误提示：`region:l` / `timeout:0` 冒号后缺空格
     const lines = content.split('\n')
@@ -2652,7 +2679,7 @@ function validateScriptCode(content) {
 
   const vw = current.value?.width || 1920
   const vh = current.value?.height || 1080
-  const tplNames = new Set((templatesData.value || []).map(t => t.name))
+  const tplNames = new Set((templatesData.value || []).filter(t => t.pkg === activePkg.value).map(t => t.name))
   const inRange = (x, y) => Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 && x <= vw && y <= vh
   const checkCoord = (label, x, y) => { if (!inRange(x, y)) errors.push(`${label} 坐标超出画面范围 (${x}, ${y})`) }
   const checkRel = (label, x, y) => {
@@ -2765,16 +2792,17 @@ function validateScriptCode(content) {
   return errors
 }
 
-/** 保存新建脚本：先校验再保存，名称自动补 .yml */
+/** 保存新建/编辑脚本：先校验再保存（落盘到当前应用分区），名称自动补 .yml */
 async function saveEditScript() {
   const rawName = editScriptName.value.trim()
   if (!rawName) return toast('请填写脚本名称', 'error')
+  if (!activePkg.value) return toast('请先选择应用分区', 'warn')
   const name = /\.(ya?ml)$/i.test(rawName) ? rawName : rawName + '.yml'
   const errors = validateScriptCode(editScriptCode.value)
   if (errors.length) return toast('校验未通过：' + errors.slice(0, 3).join('；'), 'error')
   scriptSaving.value = true
   try {
-    const r = await api.saveScript({ id: editScriptId.value, name, content: editScriptCode.value })
+    const r = await api.saveScript({ id: editScriptId.value, name, content: editScriptCode.value, pkg: activePkg.value })
     await loadData()
     editScriptId.value = null
     scriptMode.value = 'run'
@@ -2927,7 +2955,7 @@ async function testMatch(name) {
   showHit.value = false
   try {
     const region = templateRegionPixels(name)
-    const r = await api.testTemplate(name, store.deviceId, Number(testThreshold.value) || 0.8, region)
+    const r = await api.testTemplate(name, store.deviceId, Number(testThreshold.value) || 0.8, region, activePkg.value)
     if (r.hit) {
       hit.x = r.x; hit.y = r.y; hit.w = r.width; hit.h = r.height
       hitLabel.value = `${name} ${r.score.toFixed(2)}`
@@ -3261,6 +3289,11 @@ onUnmounted(() => {
 
 /* 脚本页签 */
 .panel-sec.script-tab { flex: 1; min-height: 0; overflow: hidden; }
+/* 应用分区下拉：模板/脚本数据随分区切换（默认跟随设备页签的应用包名） */
+.pkg-bar { flex: none; display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.pkg-bar .pkg-label { flex: none; font-size: 12px; color: var(--text-2); }
+.pkg-bar .pkg-select { flex: 1; min-width: 0; }
+.pkg-empty { flex: none; padding: 24px 10px; text-align: center; font-size: 12px; color: var(--text-2); }
 .script-tpl { flex: 4; min-height: 0; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
 .tpl-top { display: flex; align-items: center; gap: 8px; }
 /* 阈值输入 : 区域下拉 : 框选按钮 : 上传按钮 = 2:4:3:3 */

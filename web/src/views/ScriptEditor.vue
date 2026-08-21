@@ -33,7 +33,13 @@
       <!-- 右：编辑器 -->
       <div class="editor-wrap card">
         <div class="ed-head">
-          <span class="mono">{{ sel ? sel.package + '/' + sel.name : '未命名.yml' }}</span>
+          <div class="ed-file mono">
+            <select v-model="edPkg" class="select mono ed-pkg" title="应用分区（保存到 data/<应用包名>/yaml；编辑已有脚本时切换分区，保存后即移动）">
+              <option v-if="!pkgOptions.length" value="">（无分区）</option>
+              <option v-for="p in pkgOptions" :key="p" :value="p">{{ p }}</option>
+            </select>
+            <span>{{ sel?.name || '未命名.yml' }}</span>
+          </div>
           <div class="ed-status">
             <span class="tag" :class="valid ? 'ok' : 'err'">{{ valid ? '✓ 语法正确' : '✗ 语法错误' }}</span>
           </div>
@@ -56,7 +62,7 @@
         <div class="modal-body">
           <div class="help-block">
             <div class="hb-title">⚙ 顶层配置</div>
-            <pre class="hb-code mono">package default        # 脚本包：决定存放目录 data/scripts/&lt;package&gt;/（缺省 default）
+            <pre class="hb-code mono"># 脚本按应用分区存放（data/&lt;应用包名&gt;/yaml，分区由编辑器顶部分区下拉决定）
 action_wait: 500       # 每个操作后的默认等待 ms（默认 500）
 log_level: info        # 日志级别：info=精简（默认） / debug=详细</pre>
           </div>
@@ -108,7 +114,7 @@ log_level: info        # 日志级别：info=精简（默认） / debug=详细</
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
 import { scriptsData, devicesData, store, useToast } from '../store'
 import { api } from '../api'
 
@@ -119,9 +125,10 @@ const sel = ref(null)
 const code = ref('')
 const valid = ref(null)
 const showHelp = ref(false)
+// 保存目标应用分区（= 应用包名）：编辑已有脚本=其所在分区，新建=当前设备 pkg
+const edPkg = ref('')
 
-const DEFAULT_CODE = `package default
-action_wait: 500
+const DEFAULT_CODE = `action_wait: 500
 log_level: info
 
 steps:
@@ -149,15 +156,28 @@ steps:
 const codeLines = computed(() => code.value.split('\n'))
 const fmtTime = s => (s || '').slice(0, 16)
 
+/** 分区下拉选项：当前设备配置的应用包名 ∪ 已有脚本分区 */
+const pkgOptions = computed(() => {
+  const set = new Set()
+  const dp = (devices.value.find(d => d.id === store.deviceId)?.pkg || '').trim()
+  if (dp) set.add(dp)
+  for (const s of scripts.value) if (s.package) set.add(s.package)
+  return [...set].sort()
+})
+watch(pkgOptions, list => { if (!edPkg.value) edPkg.value = list[0] || '' }, { immediate: true })
+
 function select(s) {
   sel.value = s
   code.value = s.content
+  edPkg.value = s.package || ''
   valid.value = null
 }
 
 function newScript() {
   sel.value = { id: null, name: '新脚本.yml', content: DEFAULT_CODE, updated_at: '' }
   code.value = DEFAULT_CODE
+  const dp = (devices.value.find(d => d.id === store.deviceId)?.pkg || '').trim()
+  edPkg.value = dp || pkgOptions.value[0] || ''
   valid.value = null
 }
 
@@ -197,30 +217,19 @@ function onEditorTab(e) {
   }
 }
 
-/** 剥离首行 package 指令（非标准 YAML，校验前去掉，与服务端一致） */
-function stripPackageLine(text) {
-  const lines = text.split('\n')
-  for (let i = 0; i < lines.length; i++) {
-    const t = lines[i].trim()
-    if (!t || t.startsWith('#')) continue
-    if (/^package\s+\S+$/.test(t)) lines.splice(i, 1)
-    return lines.join('\n')
-  }
-  return lines.join('\n')
-}
-
 function validate() {
-  valid.value = stripPackageLine(code.value).includes('steps:')
+  valid.value = code.value.includes('steps:')
   toast(valid.value ? '语法校验通过' : '缺少 steps: 根节点', valid.value ? 'success' : 'error')
 }
 
 async function save() {
   if (!sel.value) return toast('请先选择或新建脚本', 'error')
   if (!sel.value.name) return toast('请填写脚本名称', 'error')
+  if (!edPkg.value) return toast('请先选择应用分区', 'warn')
   try {
-    const r = await api.saveScript({ id: sel.value.id, name: sel.value.name, content: code.value })
+    const r = await api.saveScript({ id: sel.value.id, name: sel.value.name, content: code.value, pkg: edPkg.value })
     await loadScripts()
-    // package/名称可能变化（id 变化），按返回 id 重新定位
+    // 分区/名称可能变化（id 变化），按返回 id 重新定位
     sel.value = scripts.value.find(s => s.id === r.id) || sel.value
     toast('已保存', 'success')
   } catch (e) {
@@ -335,7 +344,9 @@ onUnmounted(() => stopRunStatusPoll())
 
 .editor-wrap { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 12px; }
 .ed-head { display: flex; justify-content: space-between; align-items: center; }
-.ed-head .mono { font-size: 13px; color: var(--text-0); font-weight: 600; }
+.ed-file { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ed-file > span { font-size: 13px; color: var(--text-0); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ed-pkg { max-width: 220px; font-size: 12px; }
 
 .editor { flex: 1; position: relative; display: flex; background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: auto; min-height: 200px; }
 .gutter {

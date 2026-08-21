@@ -11,7 +11,7 @@ scrcpy 采集 Android 设备画面 → WebRTC（H.264 视频轨 + DataChannel �
 - `server/` — Rust 服务端，监听 **8443**，静态托管 `web-dist/`（构建产物）
 - `web/` — Vue3 + Vite，dev 监听 **5173**，`/api`、`/ws` 代理到 8443；路由为 hash 模式
 - `server/config.toml` — 关键项：`adb_path`、`ffmpeg_path`、`scrcpy_server`、`password`（默认 admin/admin123，前端无鉴权拦截，token 仅本地标记）
-- `server/data/gamer.db` — SQLite（设备/任务/日志；脚本已改文件存储）；`data/templates/` 模板图片；`data/scripts/<package>/` YAML 脚本
+- `server/data/gamer.db` — SQLite（设备/任务/日志）；模板/脚本按应用分区文件存储：`data/<应用包名>/tmpl/` 模板图片、`data/<应用包名>/yaml/` YAML 脚本（分区名=设备配置的 pkg，无 default 兜底）
 
 ## 常用命令
 
@@ -31,7 +31,7 @@ cd web && npm run dev                   # 单起前端
 - 配置变更（PUT /api/devices/:id）会踢该设备 viewer（pusher 停 + peer close），前端 onclose → 自动重连恢复画面
 - 设备扫描：`POST /api/devices/scan` 执行 `adb devices -l`，按 addr 去重自动入库（逻辑在 `DeviceManager::scan_and_sync`，服务器启动时也自动跑一次）
 - App 生命周期 / 低功耗空闲：连接**不再自动启动应用**（由脚本 `str_app`（冷启动，"+" 前缀控制消息）或 Console 启动按钮显式触发）；脚本结束后 `idle_disconnect_secs`（默认 60，0=关）秒内该设备无运行脚本且无 viewer → 自动 `disconnect_device` 进低功耗（熄屏恢复/编码停止/虚拟屏销毁，**adb 链路保留**：WiFi/emu 设备每 60s 补 `adb connect` 保活，启动时自举扫描+连接、不建会话不启动应用）；下次运行脚本/定时任务自动重连（~2-4s）
-- 脚本存储（2026-08-21 起文件系统，取代 SQLite scripts 表）：`data/scripts/<package>/<name>.yaml`，package 由 YAML 首个有效行 `package <名字>` 指定（缺省 default，**非标准 YAML 指令，解析前必须剥离**——后端 `scripts::strip_package_line`，前端 Console 校验/ScriptEditor 校验各有同款）；脚本 id = `package/name.yaml`（**含 `/`，前端拼 URL 必须整体 encodeURIComponent**，axum 会对 `%2F` 解码）；改 package/名即移动文件；`call` 子脚本按名解析（优先同 package）；导出 zip（`GET /api/scripts/:id/export`，递归收集 call 依赖 + find/until/click 模板）布局 `templates/<名>` + `script/<package>/<名>.yaml`，导入（`POST /api/scripts/import`，body=原始 zip，`?confirm=1` 落盘）同名冲突先 dry-run 报告再二次确认，导入的 yaml package 指令统一改写为所在目录；旧库脚本在启动时一次性迁移（`scripts::migrate_from_db`，含 tasks.script_id 重映射）
+- 模板/脚本存储（2026-08-21 起按应用分区，取代旧 `data/scripts/<package>/` + 全局 `data/templates/`）：**分区 = 设备配置的应用包名（pkg）**，目录 `data/<pkg>/tmpl/` + `data/<pkg>/yaml/`，无 default 兜底；脚本 id = `<pkg>/<name>.yaml`（**含 `/`，前端拼 URL 必须整体 encodeURIComponent**，axum 会对 `%2F` 解码；tasks.script_id 同格式零改动）。**旧 `package <名字>` YAML 指令已彻底删除**（引擎直接解析 YAML，残留指令行=解析报错）；模板/脚本 API 全部带 pkg 参数（模板 list 可省略=跨分区全列、条目带 pkg 字段，其余必填），`POST /api/scripts` body 加 `pkg`，导入 `POST /api/scripts/import?pkg=<分区>&confirm=1`（pkg 必填）；zip = 分区快照（`yaml/<名>` + `tmpl/<模板>`，两目录均可缺省，不认旧布局）；引擎模板查找 = `data/<script_id 首段>/tmpl/`（script_id 首段即分区，跨分区不回退，导出时才跨分区收集）；`call` 子脚本按名解析（优先同分区）；旧目录布局启动时一次性迁移到 DB 首个配置了 pkg 的设备分区（`scripts::migrate_fs_layout`，目标分区已有数据则跳过）；Console 脚本页签顶部包名下拉（默认/自动跟随设备页签 pkg）统一切换模板+脚本区；ScriptPicker 加 `package` prop 传入则隐藏自带分区下拉（Console 用，TaskScheduler 仍双下拉）
 
 ## 关键文件
 
@@ -43,10 +43,10 @@ cd web && npm run dev                   # 单起前端
 | `server/src/device/scrcpy.rs` | scrcpy 会话：视频/音频/控制 socket 协议（v3.3.3） |
 | `server/src/device/frames.rs` | 帧缓存：帧环（SPS/PPS + GOP）+ 按需解码截图 |
 | `server/src/device/mod.rs` | DeviceManager：连接生命周期 / 状态 / 广播 |
-| `server/src/store.rs` | SQLite 持久化（设备/任务/日志；scripts 表已退役，仅留迁移读取） |
-| `server/src/scripts.rs` | 脚本文件存储（package 目录 / 指令解析 / 依赖扫描 / zip 导入导出 / 旧库迁移） |
+| `server/src/store.rs` | SQLite 持久化（设备/任务/日志；scripts 表已随文件存储退役） |
+| `server/src/scripts.rs` | 按应用分区的脚本/模板文件存储（分区寻址 / 依赖扫描 / zip 分区快照导入导出 / 旧目录迁移） |
 | `server/src/engine.rs` / `matcher.rs` / `scheduler.rs` | YAML 脚本引擎 / NCC 模板匹配 / cron 调度 |
-| `web/src/components/ScriptPicker.vue` | 脚本选择器：package + 脚本双下拉（Console / TaskScheduler 共用；导入导出在 Console 脚本区「更多」菜单） |
+| `web/src/components/ScriptPicker.vue` | 脚本选择器：`package` prop 传入则锁定分区单下拉（Console），否则分区+脚本双下拉（TaskScheduler） |
 | `web/src/views/DeviceList.vue` | 设备列表：刷新(scan) / 连接 / 删除 |
 | `web/src/views/Console.vue` | 投屏控制：WebRTC 前端（连接锁防双 PC / 坐标映射 / 框选模板） |
 
@@ -75,7 +75,7 @@ cd web && npm run dev                   # 单起前端
 - **静态屏（无应用/挂机静止）"连上一会儿就断、一直连不上"的死循环**（2026-08-20，三层叠加）：虚拟屏无内容时编码器 0 帧（正常），断链点在 ①**Chrome 静默丢弃静止补帧的重复 P 帧**——相同 frame_num 的重复 slice 被当冗余副本不解码，`currentTime` 冻结（画面定格本是正确渲染），但前端静默检测只看 currentTime → ~4s 杀连接 → 重连 → 循环（实证：补帧 30fps 严格 1.0x 发出且 write_rtp 有字节，`webkitDecodedFrameCount` 卡死不动）；②**Chrome 入流时例行发 PLI** 被前端当"解码失步"→ reset_video，而 MTK 静态屏对 reset 响应极慢（实测要多次 reset、最长 6s+ 才吐 config+IDR，甚至不吐）→ 补帧被 pending_config 压制 → 浏览器断供加速死亡；③服务端静默看门狗（20s 静默+15s 宽限）在补帧正常投喂时仍按"设备 0 帧"整会话重连踢 viewer（35s 周期）。修复：前端静默检测改**双条件**（currentTime 冻结 && 统计窗口零新增字节，Console.vue `videoBytesAdvanced`）；入流 6s 内 PLI 不触发 reset；pusher 补帧压制（pending_config/waiting_key）限时 3s 自动恢复（旧帧+旧参数集自洽可解码，安全）；`ViewerHandle.last_serve`（pusher 每次发送刷新）让看门狗识别"viewer 正被补帧投喂=会话健康"跳过 nudge/重连。**补帧保持 P 帧形态不要改成重复 IDR**：唤醒后新 P 帧直接续参考链无花屏（IDR 重复会清 DPB，唤醒首个 P 帧必花屏要靠 PLI 兜底）；实测静态屏 96s+ 稳定、点击唤醒后 29fps 干净恢复、ct 1.0x 追平墙钟
 - 设备连接方式变化（USB ↔ Android 11+ 无线调试）后 `adb devices` 显示名与配置 serial 失配（`adb -s` 直接 not found）→ 服务端 `resolve_serial`（精确/子串/model 匹配，`adb.rs`）在 `connect_device` 时解析并写回运行时 device.addr；`api_scan_devices` 去重同步更新 addr/kind，避免重复入库。**判断当前传输方式**：`adb devices -l` 显示 `IP:port`=无线、`serial`=USB、`adb-<serial>-..._tcp`=mDNS 无线；无线传输延迟/波动明显高于 USB 直连（插回 USB 线延迟更低，serial 精确匹配自动生效）
 - 设备掉到 `offline`（MIUI/USB 偶发，`adb devices` 只认 `device` 状态）时连接报 "cannot resolve host" 是**假错误**：旧代码对非空 addr 一律 `adb connect`，USB serial 被当主机名解析。已修（scrcpy.rs）：仅 `IP:port` 走 adb connect，USB/mDNS 先 `adb reconnect offline` 自救一次，仍不在则明确报"设备不在线"；救不回只能物理拔插/重开 USB 调试。`adb kill-server` 后传输重置，设备也可能从 offline 变成彻底消失（需重新枚举）
-- 用 PowerShell `Invoke-WebRequest` 计时大响应接口（MB 级 PNG）会虚高到秒级（客户端缓冲开销），计时用 `curl.exe -w`
+- 用 PowerShell `Invoke-WebRequest` 计时大响应接口（MB 级 PNG）会虚高到秒级（客户端缓冲开销），且 PS 5.1 对部分二进制/无 charset 响应直接抛 `NullReferenceException`（非服务端问题）——验证 HTTP 一律用 `curl.exe`
 - 点击投屏画面后画面**慢慢浮现黑白/彩色块点并卡顿**（非必现）→ 游戏切分辨率/编码器重启时 scrcpy 发新 SPS/PPS（config 帧）：旧实现 config 一到就喂给 H264Payloader（它不分关键帧，缓存了参数集后**下一个 NALU 必合成 STAP-A**），config 与新 IDR 之间（编码器重启窗口 50~500ms）静止补帧把"新参数集 + 旧分辨率帧"发出去 → 浏览器解码器失步花屏直到下个 IDR；backlog 跳帧的 drain 丢掉 config 帧同理（IDR 前重发旧参数集）。修复（webrtc.rs）：config 帧在取帧阶段提取、只更新 config_nalu（永不丢）、新 IDR 到达前禁止静止补帧、IDR 时才喂参数集合成 STAP-A；frames.rs：config 字节变化即清空 GOP（避免初始重放/按需解码跨参数混喂）
 - **花屏自愈链路（PLI 兜底）**：webrtc-rs 默认 interceptor 只有 NACK（responder/generator），**不响应 RTCP PLI**——浏览器解码器失步（丢包/解码错误）发的关键帧请求被静默丢弃，花屏只能等设备固定 IDR（i-frame-interval=2s）。修复：前端 stats 轮询（1s）检测 `inbound-rtp.pliCount` 增量（= 浏览器已请求关键帧 = 解码器失步）→ 经 control DataChannel 发 `{"type":"reset_video"}`（限频 2s）→ 服务端 `handle_control_msg` 调 `session.reset_video()`（scrcpy 控制消息 17，编码器立即输出新 config+IDR）→ ~200ms 自愈。另：ICE 抖动期间跳过 IDR 后须置 `waiting_key`（参考链已断，恢复后丢到下一个 IDR 的 P 帧）。**两个防误伤**（2026-08-20）：连接初期 ~6s 的 PLI 是 Chrome 入流的例行关键帧请求，不触发 reset（静态屏 reset 会打断补帧引发断连死循环）；reset 后 pliCount 仍在涨 = reset 无效（黑屏/静态屏编码器不吐 IDR），指数退避 2s→15s→60s（`pliResetStreak`，一个统计周期无新 PLI 即复位），避免每 3s 重启一次编码器空转
 - **点击投屏画面后花屏的隐蔽根因（重放链断裂）**：MTK 编码器实测**忽略 `i-frame-interval=2`**，关键帧实际间隔 ~20-25s（日志特征：config 帧 ~25s 一条而非 2s）→ 帧缓存 GOP 旧上限（400 帧/8MB）在 IDR 后 ~3s 就被字节上限清空 → 新 viewer 连接时帧缓存无完整 GOP → ws.rs reset_video 兜底轮询 3s 拿不到 IDR 时，initial_frames 只有 SPS/PPS → pusher 重放后**裸推实时 P 帧**（解码器有参数集无参考帧）→ 花屏直到 25s 后自然 IDR，表现为"点击后慢慢浮现块点、卡住、非必现"（触发条件=该时刻发生重连/重放）。修复（frames.rs/webrtc.rs）：GOP 上限扩到 800 帧/64MB（覆盖一个完整 IDR 周期）；重放后无 IDR → `waiting_key=true`（丢 P 帧等 IDR，期间禁静止补帧，浏览器保持定格而非花屏）；重放节流 clamp(16,40)→clamp(2,10)ms（大 GOP 重放 ≤~6s，避免连接后长时间停在旧画面）
