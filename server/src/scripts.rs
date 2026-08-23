@@ -5,12 +5,11 @@
 //! 旧 `package <名字>` YAML 指令已废除（引擎直接解析 YAML，残留指令行 = 解析报错），
 //! 旧目录布局由 migrate_fs_layout 启动时一次性迁移并顺手剥离指令行。
 //!
-//! 脚本包 zip = 分区快照（导出/导入同构）：
-//!   yaml/<name>.yaml   脚本自身 + call 递归依赖的子脚本
-//!   tmpl/<模板名>       脚本引用的模板图片
+//! 分区快照 zip = 导出/导入同构（导出为整分区全量，不再按单个脚本收集依赖闭包）：
+//!   yaml/<name>.yaml   分区内全部脚本
+//!   tmpl/<模板名>       分区内全部模板图片
 //! 导入必须显式指定目标分区（?pkg=）；两目录均可缺省。
 
-use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
@@ -240,55 +239,52 @@ impl ScriptStore {
         None
     }
 
-    /// 导出分区快照 zip：脚本 + 递归 call 依赖的子脚本 + 全部引用的模板 → zip 字节。
-    /// 缺失的模板跳过并 warn（不阻断导出）。返回（建议文件名, zip 字节）。
-    pub fn export(&self, id: &str) -> anyhow::Result<(String, Vec<u8>)> {
-        let start = self.get(id)?.ok_or_else(|| anyhow::anyhow!("脚本不存在: {}", id))?;
-        let mut scripts = vec![start.clone()];
-        let mut templates: BTreeSet<String> = BTreeSet::new();
-        let mut i = 0usize;
-        while i < scripts.len() {
-            let deps = scan_deps(&scripts[i].content);
-            for c in &deps.calls {
-                if let Some(sub) = self.resolve_call(&scripts[i].package, c)? {
-                    if !scripts.iter().any(|s| s.id == sub.id) {
-                        scripts.push(sub);
-                    }
+    /// 导出整分区快照 zip：yaml/ 全部脚本 + tmpl/ 全部模板 → zip 字节。
+    /// 分区没有任何可导出文件时报错。返回（建议文件名, zip 字节）。
+    pub fn export_partition(&self, pkg: &str) -> anyhow::Result<(String, Vec<u8>)> {
+        let package = sanitize_part(pkg)
+            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {}", pkg))?;
+        // 收集规则与导入校验一致：yaml 只认 .yaml/.yml，tmpl 全部非隐藏文件
+        let mut yaml_files: Vec<String> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(self.yaml_dir(&package)) {
+            for f in rd.flatten() {
+                let name = f.file_name().to_string_lossy().to_string();
+                let low = name.to_lowercase();
+                if f.path().is_file() && (low.ends_with(".yaml") || low.ends_with(".yml")) {
+                    yaml_files.push(name);
                 }
             }
-            for t in deps.templates {
-                templates.insert(t);
-            }
-            i += 1;
         }
+        let mut tmpl_files: Vec<String> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(self.tmpl_dir(&package)) {
+            for f in rd.flatten() {
+                let name = f.file_name().to_string_lossy().to_string();
+                if f.path().is_file() && !name.starts_with('.') {
+                    tmpl_files.push(name);
+                }
+            }
+        }
+        if yaml_files.is_empty() && tmpl_files.is_empty() {
+            anyhow::bail!("分区 {} 没有可导出的脚本/模板", package);
+        }
+        yaml_files.sort();
+        tmpl_files.sort();
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
             let opts = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
-            for s in &scripts {
-                zw.start_file(format!("yaml/{}", s.name), opts)?;
-                zw.write_all(s.content.as_bytes())?;
+            for name in &yaml_files {
+                zw.start_file(format!("yaml/{}", name), opts)?;
+                zw.write_all(&std::fs::read(self.yaml_dir(&package).join(name))?)?;
             }
-            for t in &templates {
-                let Some(p) = self.find_template(&start.package, t) else {
-                    tracing::warn!(tpl = %t, "导出跳过缺失模板");
-                    continue;
-                };
-                zw.start_file(format!("tmpl/{}", t), opts)?;
-                zw.write_all(&std::fs::read(&p)?)?;
+            for name in &tmpl_files {
+                zw.start_file(format!("tmpl/{}", name), opts)?;
+                zw.write_all(&std::fs::read(self.tmpl_dir(&package).join(name))?)?;
             }
             zw.finish()?;
         }
-        let low = start.name.to_lowercase();
-        let stem = if low.ends_with(".yaml") {
-            &start.name[..start.name.len() - 5]
-        } else if low.ends_with(".yml") {
-            &start.name[..start.name.len() - 4]
-        } else {
-            start.name.as_str()
-        };
-        Ok((format!("{}.zip", stem), buf))
+        Ok((format!("{}.zip", package), buf))
     }
 
     /// 导入分区快照 zip 到指定应用分区。confirm=false 时只解析并报告同名冲突
@@ -370,53 +366,6 @@ pub struct ImportReport {
     pub imported: Vec<String>,
     /// 实际替换（confirm=true）
     pub replaced: Vec<String>,
-}
-
-/// 依赖扫描结果
-pub struct Deps {
-    pub templates: Vec<String>,
-    pub calls: Vec<String>,
-}
-
-/// 扫描脚本依赖：find/until 的模板名、click 为字符串时的模板名、call 的子脚本名
-/// （递归遍历 steps / loop.steps / then / else 嵌套结构）
-pub fn scan_deps(content: &str) -> Deps {
-    let mut deps = Deps { templates: vec![], calls: vec![] };
-    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(content) else {
-        return deps;
-    };
-    if let Some(steps) = doc.get("steps").and_then(|v| v.as_sequence()) {
-        for s in steps {
-            walk_deps(s, &mut deps);
-        }
-    }
-    deps
-}
-
-fn walk_deps(v: &serde_yaml::Value, deps: &mut Deps) {
-    if let Some(seq) = v.as_sequence() {
-        for s in seq {
-            walk_deps(s, deps);
-        }
-        return;
-    }
-    let Some(map) = v.as_mapping() else { return };
-    for (k, val) in map {
-        match k.as_str().unwrap_or("") {
-            "find" | "until" | "click" => {
-                if let Some(t) = val.as_str() {
-                    deps.templates.push(t.to_string());
-                }
-            }
-            "call" => {
-                if let Some(t) = val.as_str() {
-                    deps.calls.push(t.to_string());
-                }
-            }
-            "loop" | "then" | "else" | "steps" => walk_deps(val, deps),
-            _ => {}
-        }
-    }
 }
 
 /// 剥离旧 `package <名字>` 指令行（仅 migrate_fs_layout 清理旧文件残留用，
@@ -532,27 +481,6 @@ pub fn migrate_fs_layout(db: &crate::store::Store, store: &ScriptStore) -> anyho
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn deps_scan() {
-        let yaml = r#"
-steps:
-  - find: btn.png
-    click: inner.png
-    then:
-      - until: done.png
-    else:
-      - call: sub.yml
-  - loop:
-      times: 2
-      steps:
-        - call: sub2
-  - tap: [0.5, 0.5]
-"#;
-        let deps = scan_deps(yaml);
-        assert_eq!(deps.templates, vec!["btn.png", "inner.png", "done.png"]);
-        assert_eq!(deps.calls, vec!["sub.yml", "sub2"]);
-    }
 
     #[test]
     fn strip_legacy_directive() {

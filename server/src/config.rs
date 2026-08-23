@@ -86,14 +86,16 @@ pub struct Config {
     /// 操作记录 YAML 模板（config.toml [op_templates]，可自定义）
     #[serde(default)]
     pub op_templates: OpTemplates,
-    /// 脚本运行结束后的空闲自动断开秒数（低功耗：断 scrcpy 会话，adb 链路保留）。
-    /// 触发前检查该设备无运行中脚本且无 viewer；0 = 关闭
-    #[serde(default = "default_idle_disconnect_secs")]
-    pub idle_disconnect_secs: u64,
+    /// 空闲低功耗秒数：周期检查（无 viewer 且无脚本运行持续 N 秒）后——
+    /// 虚拟屏拆 scrcpy 会话（编码停止/虚拟屏销毁，adb 链路保留，下次脚本/
+    /// 投屏自动重连）；镜像模式关物理屏（会话保留，消费者回来即唤醒）。
+    /// 0 = 关闭（空闲会话永不进低功耗）
+    #[serde(default = "default_idle_power_secs")]
+    pub idle_power_secs: u64,
 }
 
-fn default_idle_disconnect_secs() -> u64 {
-    60
+fn default_idle_power_secs() -> u64 {
+    300
 }
 
 impl Default for Config {
@@ -115,7 +117,7 @@ impl Default for Config {
             encoder_name: String::new(),
             probe_encoder: false,
             op_templates: OpTemplates::default(),
-            idle_disconnect_secs: default_idle_disconnect_secs(),
+            idle_power_secs: default_idle_power_secs(),
         }
     }
 }

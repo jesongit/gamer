@@ -41,16 +41,28 @@ pub struct DeviceRuntime {
     pub error: Option<String>,
 }
 
+/// 单设备空闲低功耗状态（idle_power_loop 维护）
+struct IdleState {
+    /// 空闲起始时刻；None = 当前有消费者（viewer/脚本）
+    idle_since: Option<std::time::Instant>,
+    /// 镜像模式已主动关屏（消费者回来时需唤醒）
+    slept: bool,
+    /// 镜像模式上次 WAKEUP 补醒时刻（30s 节流兜底）
+    last_wake: std::time::Instant,
+}
+
 /// 设备管理器
 pub struct DeviceManager {
     pub db: Db,
     pub cfg: Config,
     pub adb: Adb,
     pub devices: RwLock<HashMap<String, DeviceRuntime>>,
-    /// 每设备活跃 viewer（空闲断开守卫：有 viewer = 有人在投屏，不进低功耗）
+    /// 每设备活跃 viewer（空闲低功耗守卫：有 viewer = 有人在投屏，不进低功耗）
     pub viewers: ViewerMap,
-    /// 每设备脚本运行计数（空闲断开守卫；归零时移除条目）
+    /// 每设备脚本运行计数（空闲低功耗守卫；归零时移除条目）
     run_counts: std::sync::Mutex<HashMap<String, u32>>,
+    /// 空闲低功耗状态（idle_power_loop / notify_activity 共享）
+    idle: std::sync::Mutex<HashMap<String, IdleState>>,
 }
 
 impl DeviceManager {
@@ -62,6 +74,7 @@ impl DeviceManager {
             adb,
             viewers,
             run_counts: std::sync::Mutex::new(HashMap::new()),
+            idle: std::sync::Mutex::new(HashMap::new()),
             devices: RwLock::new(HashMap::new()),
         }
     }
@@ -101,6 +114,11 @@ impl DeviceManager {
                 dm.connect_wireless_adb().await;
             }
         });
+
+        // 空闲低功耗循环：会话存活的唯一管理者——周期检查"无 viewer 且无
+        // 脚本运行"持续时长，超 idle_power_secs 后虚拟屏拆会话/镜像关屏
+        let dm = self.clone();
+        tokio::spawn(dm.idle_power_loop());
         Ok(())
     }
 
@@ -125,9 +143,10 @@ impl DeviceManager {
     }
 
     pub async fn delete_device(&self, id: &str) -> anyhow::Result<()> {
-        self.disconnect_device(id).await;
+        self.disconnect_device(id, true).await;
         self.db.delete_device(id)?;
         self.devices.write().remove(id);
+        self.idle.lock().unwrap().remove(id);
         Ok(())
     }
 
@@ -150,6 +169,14 @@ impl DeviceManager {
         let map = self.devices.read();
         map.values()
             .map(|rt| (rt.device.clone(), rt.status, rt.error.clone()))
+            .collect()
+    }
+
+    /// 全量快照（含设备 id；idle_power_loop 遍历用）
+    fn list_snapshot_full(&self) -> Vec<(String, Device, DeviceStatus)> {
+        let map = self.devices.read();
+        map.iter()
+            .map(|(id, rt)| (id.clone(), rt.device.clone(), rt.status))
             .collect()
     }
 
@@ -296,8 +323,9 @@ impl DeviceManager {
 
         // 主屏保活仅限**镜像会话**：镜像内容来自物理屏管线，屏幕休眠后显示管线
         // 停止出帧，流静默定格（"连接后画面卡住"）。
-        // 策略：连接时把 screen_off_timeout 调到最大 + 唤醒一次（解锁尽力而为）；
-        // 每 30s 补一次唤醒兜底；会话结束（connected=false）时恢复原超时值。
+        // 策略：连接时把 screen_off_timeout 调到最大 + 唤醒一次（解锁尽力而为），
+        // 会话结束（connected=false）时恢复原超时值。周期补醒（30s）与空闲关屏
+        // （keyevent 223）由 idle_power_loop 按"有无消费者"统一管理。
         // 虚拟屏会话跳过：编码不依赖物理屏管线，熄屏照常出帧，主屏保持熄屏省电。
         // （曾因误判"熄屏杀 USB adb"短暂改为全模式保活——真实根因是 Windows
         // USB 选择性暂停 + 接触不良的 USB 口，已排除，见 AGENTS 已知坑）
@@ -321,12 +349,12 @@ impl DeviceManager {
                 let _ = adb2.shell(&serial2, "input keyevent 224", Duration::from_secs(8)).await;
                 // 无 PIN 锁时直接进桌面；有 PIN 锁则停在锁屏（画面仍实时）
                 let _ = adb2.shell(&serial2, "wm dismiss-keyguard", Duration::from_secs(8)).await;
+                // 只等会话结束以恢复熄屏超时；补醒/关屏已移交 idle_power_loop
                 loop {
-                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                     if !s3.connected.load(std::sync::atomic::Ordering::SeqCst) {
                         break;
                     }
-                    let _ = adb2.shell(&serial2, "input keyevent 224", Duration::from_secs(8)).await;
                 }
                 if !orig.is_empty() && orig != "null" {
                     let _ = adb2
@@ -336,12 +364,51 @@ impl DeviceManager {
                 info!(device = %dn2, orig_timeout = %orig, "screen keepalive stopped, screen_off_timeout restored");
             });
         } else {
-            info!(device = %device.name, "virtual display: skip screen keepalive (main screen stays off)");
+            // 虚拟屏模式：主屏改**面板级软关屏**（不再留物理屏点亮，也不再放任
+            // 系统超时真睡眠）。Android 15+ 主屏真睡眠（power 键/超时）时，副屏
+            // 应用会在 ~10-30s 无交互后被系统整体冻结（do_freezer_trap，实测
+            // 星穹铁道账号弹窗必现：输入注入超时、零渲染、ANR trace 全线程
+            // freezer trap，见 AGENTS.md 已知坑）——唤醒主屏即可解冻。
+            // 软关屏 = 面板熄灭但逻辑显示状态 ON，副屏应用保持活跃，与原生
+            // scrcpy --turn-screen-off 行为一致；配合 scrcpy 参数 stay_awake=true
+            // （server 持唤醒锁，系统不会超时再睡眠）。用户按 power 键强制睡眠
+            // 的自愈由 idle_power_loop 周期检测兜底。
+            let adb2 = self.adb.clone();
+            let serial2 = device.addr.clone();
+            let s3 = session.clone();
+            let dn2 = device_name.clone();
+            tokio::spawn(async move {
+                // 已真睡眠则先唤醒（睡眠态下软关屏无效）；已软关屏则 224 不点亮
+                // 面板（面板电源与唤醒状态正交），均幂等
+                let wakefulness = adb2
+                    .shell(&serial2, "dumpsys power | grep mWakefulness=", Duration::from_secs(8))
+                    .await
+                    .unwrap_or_default();
+                if !wakefulness.contains("Awake") {
+                    let _ = adb2.shell(&serial2, "input keyevent 224", Duration::from_secs(8)).await;
+                    let _ = adb2.shell(&serial2, "wm dismiss-keyguard", Duration::from_secs(8)).await;
+                    // 给系统 ~600ms 完成唤醒再软关屏
+                    tokio::time::sleep(Duration::from_millis(600)).await;
+                }
+                if s3.connected.load(std::sync::atomic::Ordering::SeqCst) {
+                    match s3.set_display_power(false).await {
+                        Ok(_) => info!(device = %dn2, "virtual display: main screen soft-off (panel off, display state on)"),
+                        Err(e) => warn!(device = %dn2, err = %e, "soft screen-off failed (apps on virtual display may freeze)"),
+                    }
+                }
+            });
         }
         Ok(())
     }
 
-    pub async fn disconnect_device(&self, id: &str) {
+    /// 拆 scrcpy 会话（编码停止/虚拟屏销毁；adb 链路保留，下次消费者触发自动重连）。
+    /// 运行守卫：脚本运行中拒绝拆除（虚拟屏销毁会杀掉屏上游戏、脚本上下文全丢），
+    /// 仅 force=true（删除设备/看门狗确认死链路/显式管理动作）可绕过
+    pub async fn disconnect_device(&self, id: &str, force: bool) {
+        if !force && self.has_running_scripts(id) {
+            warn!(device = %id, "script running, skip disconnect (use force to override)");
+            return;
+        }
         let mut map = self.devices.write();
         let Some(rt) = map.get_mut(id) else { return };
         // 立即标记会话结束：屏幕保活任务 / 帧消费任务据此退出，及时恢复熄屏超时
@@ -359,10 +426,13 @@ impl DeviceManager {
         // 注意：scrcpy server 端 cleanup=true，socket 关闭即清理
     }
 
-    /// 脚本运行开始：设备运行计数 +1（空闲断开守卫）
+    /// 脚本运行开始：设备运行计数 +1（空闲低功耗守卫）+ 消费者出现
+    /// （打断空闲计时，镜像模式唤醒已关的屏）
     pub fn run_begin(&self, id: &str) {
         let mut counts = self.run_counts.lock().unwrap();
         *counts.entry(id.to_string()).or_insert(0) += 1;
+        drop(counts);
+        self.notify_activity(id);
     }
 
     /// 脚本运行结束：计数 -1，归零移除条目（防 map 无限增长）
@@ -381,34 +451,165 @@ impl DeviceManager {
         self.run_counts.lock().unwrap().contains_key(id)
     }
 
-    /// 脚本运行结束后安排空闲断开（低功耗模式）：延迟 cfg.idle_disconnect_secs
-    /// 秒后检查——该设备无运行中脚本、无 viewer 且在线，才 disconnect_device
-    /// （断 scrcpy 会话：恢复熄屏超时 / 停设备侧编码 / 销毁虚拟屏，adb 链路保留）。
-    /// 不做任务取消：延迟期间有新脚本/新 viewer 则触发时检查不过、直接跳过，
-    /// 新脚本结束时自己会再排一次
-    pub fn schedule_idle_disconnect(self: &Arc<Self>, id: &str) {
-        let secs = self.cfg.idle_disconnect_secs;
-        if secs == 0 {
-            return; // 配置关闭
-        }
-        let dm = self.clone();
-        let device_id = id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(secs)).await;
-            let running = dm.run_counts.lock().unwrap().contains_key(&device_id);
-            let has_viewer = dm.viewers.lock().unwrap().contains_key(&device_id);
-            let online = dm
-                .devices
-                .read()
-                .get(&device_id)
-                .map(|rt| rt.status == DeviceStatus::Online)
-                .unwrap_or(false);
-            if running || has_viewer || !online {
-                return;
+    /// 消费者出现（viewer 注册 / 脚本开始）：打断空闲计时；镜像模式若已
+    /// 空闲关屏则立即唤醒（224 + dismiss-keyguard，幂等），避免 viewer 连上
+    /// 黑屏等下一轮周期检查
+    pub fn notify_activity(&self, id: &str) {
+        let wake_needed = {
+            let mut idle = self.idle.lock().unwrap();
+            match idle.get_mut(id) {
+                Some(st) => {
+                    st.idle_since = None;
+                    std::mem::replace(&mut st.slept, false)
+                }
+                None => false,
             }
-            info!(device = %device_id, "idle {}s: disconnect scrcpy session (low-power)", secs);
-            dm.disconnect_device(&device_id).await;
+        };
+        if wake_needed {
+            self.wake_screen(id);
+        }
+    }
+
+    /// 镜像模式唤醒物理屏（spawn 执行，不阻塞调用方；幂等）
+    fn wake_screen(&self, id: &str) {
+        let Some((device, _, _)) = self.snapshot(id) else { return };
+        if device.screen_mode != ScreenMode::Mirror || device.addr.is_empty() {
+            return;
+        }
+        let adb = self.adb.clone();
+        let serial = device.addr.clone();
+        let dn = device.name.clone();
+        tokio::spawn(async move {
+            let _ = adb.shell(&serial, "input keyevent 224", Duration::from_secs(8)).await;
+            let _ = adb.shell(&serial, "wm dismiss-keyguard", Duration::from_secs(8)).await;
+            info!(device = %dn, "idle screen woke up (viewer/script active)");
         });
+    }
+
+    /// 虚拟屏防冻结自愈（idle_power_loop 每个周期调用，有消费者时）：
+    /// 主屏被真睡眠（用户按 power 键 / 厂商行为覆盖唤醒锁）时，副屏应用会被
+    /// 系统冻结（见 connect_device 虚拟屏分支注释）。检测 mWakefulness=Asleep →
+    /// 唤醒（唤醒本身即可解冻，实测）+ 重新软关屏恢复"面板关/逻辑开"状态。
+    /// Awake 时零成本返回（grep 在设备端执行，只回传一行）。镜像模式不适用。
+    async fn heal_virtual_screen(&self, id: &str) {
+        let Some((device, _, _)) = self.snapshot(id) else { return };
+        if device.screen_mode != ScreenMode::Virtual || device.addr.is_empty() {
+            return;
+        }
+        let Some(session) = self.session(id) else { return };
+        let Ok(out) = self
+            .adb
+            .shell(&device.addr, "dumpsys power | grep mWakefulness=", Duration::from_secs(6))
+            .await
+        else {
+            return;
+        };
+        if out.contains("Awake") {
+            return;
+        }
+        warn!(device = %device.name, "main display asleep while virtual session active (apps frozen?), waking + re-applying soft-off");
+        let serial = device.addr.clone();
+        let adb = self.adb.clone();
+        let _ = adb.shell(&serial, "input keyevent 224", Duration::from_secs(6)).await;
+        let _ = adb.shell(&serial, "wm dismiss-keyguard", Duration::from_secs(6)).await;
+        // 给系统 ~600ms 完成唤醒再软关屏（睡眠态下 requestDisplayPower 无效）
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        if session.connected.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Err(e) = session.set_display_power(false).await {
+                warn!(device = %device.name, err = %e, "re-apply soft screen-off failed");
+            }
+        }
+    }
+
+    /// 空闲低功耗循环（start 时 spawn，10s 周期）：会话存活的唯一管理者。
+    /// 无 viewer 且无脚本运行持续 cfg.idle_power_secs 秒 → 虚拟屏拆 scrcpy
+    /// 会话（adb 保留，下次消费者自动重连 ~2-4s）；镜像模式关物理屏
+    /// （keyevent 223，会话保留，消费者回来 notify_activity 唤醒）。
+    /// 有消费者时镜像模式每 30s 补一次 WAKEUP 兜底（用户按电源键等）
+    async fn idle_power_loop(self: Arc<Self>) {
+        let mut tick = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            tick.tick().await;
+            if self.cfg.idle_power_secs == 0 {
+                self.idle.lock().unwrap().clear();
+                // 低功耗管理关闭时仍保留虚拟屏防冻结自愈（正确性问题，非省电特性）
+                for (id, device, status) in self.list_snapshot_full() {
+                    let has_consumers =
+                        self.viewers.lock().unwrap().contains_key(&id) || self.has_running_scripts(&id);
+                    if status == DeviceStatus::Online
+                        && device.screen_mode == ScreenMode::Virtual
+                        && has_consumers
+                    {
+                        self.heal_virtual_screen(&id).await;
+                    }
+                }
+                continue;
+            }
+            for (id, device, status) in self.list_snapshot_full() {
+                if status != DeviceStatus::Online {
+                    self.idle.lock().unwrap().remove(&id);
+                    continue;
+                }
+                let active = self.viewers.lock().unwrap().contains_key(&id) || self.has_running_scripts(&id);
+                if active {
+                    // 锁内改状态、锁外做异步动作（guard 不能跨 await 存活）
+                    let (slept, wake_expired) = {
+                        let mut idle = self.idle.lock().unwrap();
+                        let st = idle.entry(id.clone()).or_insert_with(|| IdleState {
+                            idle_since: None,
+                            slept: false,
+                            last_wake: std::time::Instant::now(),
+                        });
+                        st.idle_since = None;
+                        let slept = std::mem::replace(&mut st.slept, false);
+                        let wake_expired = st.last_wake.elapsed() >= Duration::from_secs(30);
+                        if wake_expired {
+                            st.last_wake = std::time::Instant::now();
+                        }
+                        (slept, wake_expired)
+                    };
+                    // 镜像模式：保活补醒（30s 节流）或唤醒已关的屏
+                    if device.screen_mode == ScreenMode::Mirror && (slept || wake_expired) {
+                        self.wake_screen(&id);
+                    }
+                    // 虚拟屏模式：主屏被真睡眠（用户按 power 键等）时副屏应用会被
+                    // 冻结，周期检测唤醒态并自愈（唤醒即解冻 + 重下软关屏）
+                    if device.screen_mode == ScreenMode::Virtual {
+                        self.heal_virtual_screen(&id).await;
+                    }
+                    continue;
+                }
+                let (slept, since) = {
+                    let mut idle = self.idle.lock().unwrap();
+                    let st = idle.entry(id.clone()).or_insert_with(|| IdleState {
+                        idle_since: Some(std::time::Instant::now()),
+                        slept: false,
+                        last_wake: std::time::Instant::now(),
+                    });
+                    (st.slept, *st.idle_since.get_or_insert_with(std::time::Instant::now))
+                };
+                // 已关屏 = 镜像低功耗态已就位，等消费者回来（notify_activity 唤醒）
+                if slept || since.elapsed() < Duration::from_secs(self.cfg.idle_power_secs) {
+                    continue;
+                }
+                // 空闲超时：按屏幕模式进低功耗
+                if device.screen_mode == ScreenMode::Mirror {
+                    if let Some(st) = self.idle.lock().unwrap().get_mut(&id) {
+                        st.slept = true;
+                    }
+                    let serial = device.addr.clone();
+                    let dn = device.name.clone();
+                    let adb = self.adb.clone();
+                    info!(device = %dn, idle_secs = self.cfg.idle_power_secs, "idle: turn off mirror screen (session kept)");
+                    tokio::spawn(async move {
+                        let _ = adb.shell(&serial, "input keyevent 223", Duration::from_secs(8)).await;
+                    });
+                } else {
+                    info!(device = %device.name, idle_secs = self.cfg.idle_power_secs, "idle: disconnect scrcpy session (low-power, adb kept)");
+                    self.disconnect_device(&id, false).await;
+                }
+            }
+        }
     }
 
     /// 对 wifi/emu 设备执行 adb connect（幂等，已连接无副作用）。

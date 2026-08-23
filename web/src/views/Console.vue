@@ -317,6 +317,9 @@
               <option v-if="!pkgOptions.length" value="">（未配置应用包名）</option>
               <option v-for="p in pkgOptions" :key="p" :value="p">{{ p }}</option>
             </select>
+            <button class="btn btn-sm" :disabled="!activePkg" @click="exportPartition" title="导出当前应用分区的全部脚本与模板（zip 分区快照，导入导出同构）">⬆ 导出</button>
+            <button class="btn btn-sm" :disabled="!activePkg" @click="$refs.impFile.click()" title="导入分区快照 zip 到当前应用分区（同名文件替换前二次确认）">⬇ 导入</button>
+            <input ref="impFile" type="file" accept=".zip" hidden @change="onImportFile" />
           </div>
           <div v-if="!activePkg" class="pkg-empty">暂无应用分区：请先在「设备」页签配置应用包名（模板与脚本按应用分区存储）</div>
           <template v-else>
@@ -418,11 +421,8 @@
                 <div v-if="moreOpen" class="more-dropdown">
                   <button class="more-item" @click="moreOpen = false; startNewScript()">＋ 新建</button>
                   <button class="more-item danger" :disabled="!selScript" @click="moreOpen = false; deleteCurrentScript()">🗑 删除</button>
-                  <button class="more-item" :disabled="!selScript" @click="moreOpen = false; exportCurrentScript()">⬆ 导出</button>
-                  <button class="more-item" @click="moreOpen = false; $refs.impFile.click()">⬇ 导入</button>
                 </div>
               </div>
-              <input ref="impFile" type="file" accept=".zip" hidden @change="onImportFile" />
             </div>
 
             <!-- 运行中：实时日志；其他情况：脚本内容（只读） -->
@@ -1037,13 +1037,14 @@ async function removeDevice() {
   }
 }
 
-/** 主动断开（停止本页 WebRTC + 服务端会话，不触发自动重连） */
+/** 主动断开（只停本页 WebRTC，不拆服务端↔设备会话，不触发自动重连；
+ *  设备会话由服务端空闲低功耗统一管理：无 viewer 无脚本 5 分钟后
+ *  虚拟屏拆会话/镜像关屏） */
 function disconnect() {
   if (!store.deviceId) return
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
   cleanup(true)
-  api.disconnectDevice(store.deviceId).catch(() => {})
-  toast('已断开连接', 'info')
+  toast('已断开投屏（设备会话保留）', 'info')
 }
 
 /** 从设备读取已安装应用（scrcpy list_apps，带真实软件名），带缓存避免重复读取 */
@@ -1373,6 +1374,9 @@ function cleanup(manual = false) {
   connected.value = false
   hadVideo = false
   stillFrames = 0
+  renderFpLast = ''
+  renderFpFrozen = 0
+  stallResetSent = false
   lastBytesReceived = 0
   lastBitrateTs = 0
   bitrate.value = '—'
@@ -1411,6 +1415,21 @@ let lastPliResetAt = 0
 // PLI reset 退避：reset 后 pliCount 仍在涨 = reset 无效（黑屏/静态屏编码器
 // 不吐 IDR），连续无效就指数退避（2s → 15s → 60s），避免每 3s 重启一次编码器
 let pliResetStreak = 0
+
+// 画面停滞看门狗（2026-08-23）：长时间静止补帧 + 运动突发后，Chrome jitter
+// buffer 的目标延迟可膨胀到秒级（实测静止 23min 后 676ms，滚动突发后飙到 4.9s），
+// 表现为"包在到、framesDecoded 在涨、画面却逐位冻结或残缺（花屏）"——此时
+// currentTime 照常 1.0x 推进、bytesReceived 照常增长、pliCount 不动（静默参考
+// 链损坏不触发 PLI），静默/延迟/PLI 三个现有看门狗全部失明，用户只能手动刷新。
+// 唯一彻底解药是重连（重建 jitter buffer，实测重连后同场景恢复正常渲染）。
+// 检测：用户刚做过拖动/滚轮（预期画面变化）但渲染像素指纹连续 ~5s 逐位未变
+// → 先 reset_video 请求 IDR；仍冻结则重连。指纹取 24x14 亮度哈希，开销可忽略。
+let renderFpLast = ''
+let renderFpFrozen = 0
+let lastDragInputAt = 0
+let stallResetSent = false
+let fpCanvas = null
+let fpCtx = null
 
 function handleVideoSilence() {
   if (manualClose || !connected.value || !store.deviceId) return
@@ -1451,6 +1470,43 @@ function startStats() {
       } else {
         stillFrames = 0
         lastVideoTime = v.currentTime
+      }
+      // 画面停滞看门狗（原理见变量处注释）：渲染像素指纹连续未变 + 近期有
+      // 拖动/滚轮输入（画面本应变化）。先 reset_video，5s 后仍冻结才重连，
+      // 避免对"拖不动/本就静止"的界面频繁误重连
+      if (connected.value && hadVideo) {
+        let fp = ''
+        try {
+          if (!fpCanvas) {
+            fpCanvas = document.createElement('canvas')
+            fpCanvas.width = 24; fpCanvas.height = 14
+            fpCtx = fpCanvas.getContext('2d', { willReadFrequently: true })
+          }
+          fpCtx.drawImage(v, 0, 0, 24, 14)
+          const d = fpCtx.getImageData(0, 0, 24, 14).data
+          let h = 5381
+          for (let i = 0; i < d.length; i += 4) h = ((h * 33) ^ (d[i] + d[i+1] + d[i+2])) >>> 0
+          fp = String(h)
+        } catch (err) { /* drawImage 失败（如视频未就绪）跳过本轮 */ }
+        if (fp && fp === renderFpLast) {
+          renderFpFrozen++
+        } else {
+          renderFpFrozen = 0
+          if (fp) stallResetSent = false
+        }
+        renderFpLast = fp
+        if (renderFpFrozen >= 5 && Date.now() - lastDragInputAt < 8000) {
+          renderFpFrozen = 0
+          if (!stallResetSent) {
+            stallResetSent = true
+            console.warn('[webrtc] picture frozen after drag/scroll input, requesting IDR via reset_video')
+            sendControl({ type: 'reset_video' })
+          } else {
+            stallResetSent = false
+            console.warn('[webrtc] picture still frozen after reset_video, reconnecting to rebuild jitter buffer')
+            handleVideoSilence()
+          }
+        }
       }
     }
     try {
@@ -1583,6 +1639,11 @@ function startLogPolling() {
 // ---------- 控制（走 DataChannel） ----------
 
 function sendControl(obj) {
+  // 拖动/滚轮类输入打标（画面停滞看门狗用）：这类操作预期画面变化，
+  // 若随后渲染指纹持续冻结则流已病态（见 startStats 处注释）
+  if ((obj.type === 'touch' && obj.action === 'move') || obj.type === 'scroll' || obj.type === 'swipe') {
+    lastDragInputAt = Date.now()
+  }
   if (controlChannel && controlChannel.readyState === 'open') {
     controlChannel.send(JSON.stringify(obj))
     return true
@@ -2066,6 +2127,13 @@ function cropMouseLeave() {
   if (cropDrag.mode) { cropDrag.mode = null; refreshCropPreview() }
 }
 
+/** 上传响应的体积提示：823KB → 96KB（服务端灰度 PNG 重编码） */
+function tplSizeHint(rep) {
+  if (!rep?.size || !rep?.orig_size) return ''
+  const fmt = n => n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + 'MB' : n >= 1024 ? Math.round(n / 1024) + 'KB' : n + 'B'
+  return `（${fmt(rep.orig_size)} → ${fmt(rep.size)}）`
+}
+
 async function saveTemplate() {
   const raw = crop.name.trim()
   if (!raw) return toast('请输入模板名称', 'warn')
@@ -2073,12 +2141,12 @@ async function saveTemplate() {
   const name = raw.toLowerCase().endsWith('.png') ? raw : raw + '.png'
   saving.value = true
   try {
-    await api.uploadTemplate(name, crop.preview.split(',')[1], activePkg.value)
+    const rep = await api.uploadTemplate(name, crop.preview.split(',')[1], activePkg.value)
     templatesData.value = await api.listTemplates()
     crop.active = false
     cropBaseCanvas = null
     hideLoupe()
-    toast(`模板 ${name} 已保存`, 'success')
+    toast(`模板 ${name} 已保存${tplSizeHint(rep)}`, 'success')
   } catch (e) {
     toast('保存失败：' + e.message, 'error')
   } finally {
@@ -2305,9 +2373,9 @@ async function onTplUpload(e) {
   if (!/\.(png|jpe?g)$/i.test(name)) name += '.png'
   try {
     const b64 = await fileToBase64(file)
-    await api.uploadTemplate(name, b64, activePkg.value)
+    const rep = await api.uploadTemplate(name, b64, activePkg.value)
     templatesData.value = await api.listTemplates()
-    toast('模板已上传', 'success')
+    toast(`模板已上传${tplSizeHint(rep)}`, 'success')
   } catch (err) {
     toast('上传失败：' + err.message, 'error')
   }
@@ -2618,15 +2686,15 @@ async function deleteCurrentScript() {
   }
 }
 
-// ---------- 更多菜单（新建 / 删除 / 导入 / 导出） ----------
+// ---------- 更多菜单（新建 / 删除）；导入/导出在脚本页签顶部应用下拉旁 ----------
 const moreOpen = ref(false)
 
-/** 导出当前选中脚本：脚本 + call 依赖 + 模板 → zip 下载 */
-async function exportCurrentScript() {
-  if (!selScript.value) return toast('请先选择脚本', 'error')
+/** 导出当前应用分区快照（yaml/ + tmpl/ 全量）→ zip 下载 */
+async function exportPartition() {
+  if (!activePkg.value) return toast('请先选择应用分区', 'warn')
   try {
-    const { blob, filename } = await api.exportScript(selScript.value)
-    const name = filename || ((selScript.value.split('/')[1] || 'script').replace(/\.ya?ml$/i, '') + '.zip')
+    const { blob, filename } = await api.exportPartition(activePkg.value)
+    const name = filename || `${activePkg.value}.zip`
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
     a.download = name
@@ -3293,6 +3361,7 @@ onUnmounted(() => {
 .pkg-bar { flex: none; display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
 .pkg-bar .pkg-label { flex: none; font-size: 12px; color: var(--text-2); }
 .pkg-bar .pkg-select { flex: 1; min-width: 0; }
+.pkg-bar .btn { flex: none; }
 .pkg-empty { flex: none; padding: 24px 10px; text-align: center; font-size: 12px; color: var(--text-2); }
 .script-tpl { flex: 4; min-height: 0; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
 .tpl-top { display: flex; align-items: center; gap: 8px; }

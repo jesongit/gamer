@@ -219,6 +219,30 @@ fn to_gray(img: &DynamicImage) -> GrayImage {
     }
 }
 
+/// 模板落盘重编码：任意图片字节 → 8-bit 灰度 PNG（最高压缩 + 自适应滤波）。
+///
+/// 匹配只消费灰度（match_template 内统一 to_luma8），存灰度 = 存匹配器
+/// 实际读取的像素值——对匹配**零损失**（区域匹配逐位一致；全图缩放路径
+/// 仅存在 ±1 灰度级的滤波舍入差，对 NCC 分数影响 <0.001），体积较
+/// RGB PNG（尤其画布直出 PNG）典型下降 60~75%。缩略图/预览变灰是
+/// 已知取舍：颜色信息匹配从不使用（选型依据：灰度图上 WebP 无损相对
+/// PNG 无优势，无需引入新解码依赖）。JPEG 上传模板顺带摆脱再压缩损伤。
+pub fn reencode_template_gray_png(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| anyhow::anyhow!("不是有效的图片: {}", e))?;
+    let gray = img.to_luma8();
+    let mut out = Vec::new();
+    let enc = image::codecs::png::PngEncoder::new_with_quality(
+        &mut out,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    DynamicImage::ImageLuma8(gray)
+        .write_with_encoder(enc)
+        .map_err(|e| anyhow::anyhow!("PNG 编码失败: {}", e))?;
+    Ok(out)
+}
+
 // Arc 辅助（为后续缓存接口预留）
 #[allow(dead_code)]
 pub type SharedMatcher = Arc<Matcher>;
@@ -274,6 +298,24 @@ mod tests {
         assert!((m.x as i64 - 140).abs() <= 2, "x={}", m.x);
         assert!((m.y as i64 - 190).abs() <= 2, "y={}", m.y);
         assert!(m.score > 0.9, "score={}", m.score);
+    }
+
+    #[test]
+    fn test_template_reencode_gray_roundtrip() {
+        // RGB 渐变图重编码后：解码灰度 == 原图直接 to_luma8（匹配零损失的核心不变式）
+        let mut tpl = RgbImage::new(64, 48);
+        for (x, y, p) in tpl.enumerate_pixels_mut() {
+            *p = Rgb([(x * 4) as u8, (y * 5) as u8, ((x + y) * 2) as u8]);
+        }
+        let mut src = Vec::new();
+        tpl.write_to(&mut std::io::Cursor::new(&mut src), image::ImageFormat::Png).unwrap();
+        let out = reencode_template_gray_png(&src).unwrap();
+        let expect = DynamicImage::ImageRgb8(tpl).to_luma8();
+        let got = image::load_from_memory(&out).unwrap().to_luma8();
+        assert_eq!(got.dimensions(), expect.dimensions());
+        assert_eq!(got.into_raw(), expect.into_raw());
+        // 无效输入报错而非 panic
+        assert!(reencode_template_gray_png(b"not an image").is_err());
     }
 
     #[test]

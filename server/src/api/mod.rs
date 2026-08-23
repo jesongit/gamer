@@ -90,7 +90,7 @@ pub fn build_router(
         .route("/api/scripts/:id/run", post(api_run_script))
         .route("/api/scripts/:id/stop", post(api_stop_script))
         .route("/api/scripts/:id/status", get(api_script_status))
-        .route("/api/scripts/:id/export", get(api_export_script))
+        .route("/api/scripts/export", get(api_export_partition))
         .route("/api/scripts/import", post(api_import_script))
         .route("/api/tasks", get(api_list_tasks).post(api_save_task))
         .route("/api/tasks/:id", delete(api_delete_task))
@@ -105,15 +105,16 @@ pub fn build_router(
 }
 
 /// 视频静默看门狗：设备在线但视频流超过阈值无新帧时的处置。
-/// 兜底一切"静默断流"场景：无线 adb 隧道假死、scrcpy-server 卡死、
-/// 设备编码器停摆等——否则浏览器画面会永久定格在最后一帧。
 ///
-/// 注意虚拟屏**无应用时编码器完全不出帧**（黑屏 0 帧，连 i-frame-interval 的
-/// IDR 都没有）——静默≠故障：
-/// - 无 viewer 且无脚本：静默大多是黑屏空转，重连只会白白 churn（重建会话/
-///   虚拟屏，还可能触发 adb 异常），直接断开进低功耗，下次脚本/投屏自动重连
-/// - 有 viewer 或脚本运行中：先 reset_video 请求关键帧探测编码器是否存活
-///   （黑屏虚拟屏重连后照样黑）；探测后仍静默才断开重连（真断流兜底，慢 15s）
+/// 判死以 `session.connected`（video socket 读取循环退出即 false）为准，
+/// **视频静默 ≠ 链路死亡**：虚拟屏无应用/静态画面时编码器 0 帧是正常态。
+/// - 会话确死（connected=false）：拆会话；有脚本或 viewer 在跑则立即重连
+///   （脚本引擎逐步重新取 session，可接续；无消费者则等下次触发连接）
+/// - 脚本运行中 + 会话活着 + 静默：不处置（静态屏正常态；判死看控制
+///   socket——引擎 tap 失败会报错终止脚本，不需要看门狗拆会话帮倒忙）
+/// - 无 viewer 无脚本 + 会话活着 + 静默：交给 idle_power_loop 空闲低功耗
+/// - viewer 在看且未被补帧投喂 + 会话活着 + 静默：reset_video 探测，
+///   15s 仍静默才拆开重连（pusher 卡死等边缘兜底，踢 viewer）
 const VIDEO_IDLE_RECONNECT_MS: u64 = 20_000;
 /// reset_video 探测后等待新帧的宽限期，超过则认定编码器/链路已死，升级为重连
 const VIDEO_NUDGE_GRACE: Duration = Duration::from_secs(15);
@@ -138,21 +139,42 @@ fn spawn_watchdog(st: AppState) {
                     nudged.remove(&id);
                     continue;
                 }
-                let (has_viewer, served_ago_ms) = {
-                    let map = st.viewers.lock().unwrap();
-                    match map.get(&id) {
-                        Some(h) => {
-                            let t = h.last_serve.load(std::sync::atomic::Ordering::Relaxed);
-                            (true, if t == 0 { i64::MAX } else { now_unix_ms() - t })
-                        }
-                        None => (false, i64::MAX),
-                    }
-                };
                 let running = st.devices.has_running_scripts(&id);
-                if !has_viewer && !running {
-                    warn!(device = %id, idle_ms = idle, "video silent, no viewer/script: disconnect (low-power)");
+                // 会话确死（video socket 已关）：唯一允许脚本运行中强拆重连的
+                // 路径——控制 socket 同链路已死，不重连脚本会永远卡死
+                if !session.connected.load(std::sync::atomic::Ordering::SeqCst) {
+                    warn!(device = %id, idle_ms = idle, "session dead (video socket closed), tearing down");
                     nudged.remove(&id);
-                    st.devices.disconnect_device(&id).await;
+                    // 踢 viewer：旧 pusher 挂在旧帧通道上，重连建新通道后不会
+                    // 自动迁移；踢掉让前端 onclose 立即重连到新会话
+                    let kicked = {
+                        let mut map = st.viewers.lock().unwrap();
+                        map.remove(&id)
+                    };
+                    if let Some(h) = kicked {
+                        h.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                        if let Some(p) = h.peer.upgrade() {
+                            let _ = p.close().await;
+                        }
+                    }
+                    st.devices.disconnect_device(&id, true).await;
+                    if running {
+                        if let Err(e) = st.devices.connect_device(&id).await {
+                            warn!(device = %id, err = %e, "auto-reconnect failed");
+                        }
+                    }
+                    continue;
+                }
+                // 脚本运行中 + 静默 = 静态屏正常态（虚拟屏编码器 0 帧），
+                // 不处置；会话真死由上面的 connected 分支兜底
+                if running {
+                    nudged.remove(&id);
+                    continue;
+                }
+                // 无消费者：空闲低功耗统一交给 idle_power_loop
+                let has_viewer = st.viewers.lock().unwrap().contains_key(&id);
+                if !has_viewer {
+                    nudged.remove(&id);
                     continue;
                 }
                 // viewer 正在被投喂（设备 0 帧是静态屏常态，pusher 静止补帧还活着）
@@ -160,7 +182,17 @@ fn spawn_watchdog(st: AppState) {
                 // 屏 reset 后长时间不出 IDR → 浏览器断供被前端杀连接），也不走
                 // 35s 兜底重连（静态屏挂机会话会被无限循环重连踢 viewer）。
                 // 真断流时 pusher 退出、last_serve 过期，仍走 nudge → 15s → 重连兜底
-                if has_viewer && served_ago_ms.max(0) < 10_000 {
+                let served_ago_ms = {
+                    let map = st.viewers.lock().unwrap();
+                    match map.get(&id) {
+                        Some(h) => {
+                            let t = h.last_serve.load(std::sync::atomic::Ordering::Relaxed);
+                            if t == 0 { i64::MAX } else { now_unix_ms() - t }
+                        }
+                        None => i64::MAX,
+                    }
+                };
+                if served_ago_ms.max(0) < 10_000 {
                     nudged.remove(&id);
                     continue;
                 }
@@ -191,7 +223,7 @@ fn spawn_watchdog(st: AppState) {
                         let _ = p.close().await;
                     }
                 }
-                st.devices.disconnect_device(&id).await;
+                st.devices.disconnect_device(&id, false).await;
                 if let Err(e) = st.devices.connect_device(&id).await {
                     warn!(device = %id, err = %e, "auto-reconnect failed");
                 }
@@ -343,21 +375,26 @@ async fn api_update_device(State(st): State<AppState>, Path(id): Path<String>, J
         fps: req.fps,
         created_at: existing.created_at,
     };
-    // 配置变更后自动断开重连；先踢掉该设备的活跃 viewer（pusher 停止 + peer 关闭），
-    // 浏览器端 onclose → 自动重连（前端带页面锁，会重新建立会话并恢复画面），
-    // 否则旧 viewer 的 pusher 悬挂在已关闭的帧队列上，浏览器画面定格/黑屏
-    let kicked = {
-        let mut map = st.viewers.lock().unwrap();
-        map.remove(&id)
-    };
-    if let Some(h) = kicked {
-        h.running.store(false, std::sync::atomic::Ordering::SeqCst);
-        if let Some(p) = h.peer.upgrade() {
-            let _ = p.close().await;
+    // 配置变更后断开重连以生效。脚本运行中：会话被运行守卫拦下（旧参数跑完
+    // 当前脚本，新配置下次连接生效），viewer 也无需踢、画面不闪断。
+    // 空闲时：踢掉活跃 viewer（pusher 停止 + peer 关闭）→ 断开 → 浏览器端
+    // onclose 自动重连恢复画面，否则旧 pusher 悬挂在已关闭的帧队列上画面定格
+    if st.devices.has_running_scripts(&id) {
+        info!(device = %id, "config changed while script running, session kept (applied on next connect)");
+    } else {
+        let kicked = {
+            let mut map = st.viewers.lock().unwrap();
+            map.remove(&id)
+        };
+        if let Some(h) = kicked {
+            h.running.store(false, std::sync::atomic::Ordering::SeqCst);
+            if let Some(p) = h.peer.upgrade() {
+                let _ = p.close().await;
+            }
+            info!(device = %id, "config changed, kicked viewer");
         }
-        info!(device = %id, "config changed, kicked viewer");
+        st.devices.disconnect_device(&id, false).await;
     }
-    st.devices.disconnect_device(&id).await;
     match st.devices.upsert_device(&device).await {
         Ok(_) => Json(serde_json::json!({"ok": true, "id": device.id})).into_response(),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -479,8 +516,10 @@ async fn api_connect_device(State(st): State<AppState>, Path(id): Path<String>) 
     }
 }
 
+/// 强制断开（管理动作，绕过运行守卫）：拆 scrcpy 会话。注意前端"断开连接"
+/// 按钮已不再调用此接口（只断本地 WebRTC，会话交给空闲低功耗管理）
 async fn api_disconnect_device(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    st.devices.disconnect_device(&id).await;
+    st.devices.disconnect_device(&id, true).await;
     Json(serde_json::json!({"ok": true})).into_response()
 }
 
@@ -591,24 +630,25 @@ async fn api_upload_template(State(st): State<AppState>, Json(req): Json<UploadT
     let Ok(pkg) = require_pkg(Some(&req.pkg)) else {
         return err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）");
     };
-    let bytes = match base64::engine::general_purpose::STANDARD.decode(&req.data_b64) {
+    let orig = match base64::engine::general_purpose::STANDARD.decode(&req.data_b64) {
         Ok(b) => b,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, &format!("base64 解码失败: {}", e)),
     };
-    // 校验是 PNG
-    if image::load_from_memory(&bytes).is_err() {
-        return err_response(StatusCode::BAD_REQUEST, "不是有效的图片");
-    }
+    // 统一重编码为灰度 PNG（匹配零损失 + 大幅减小体积，见 reencode_template_gray_png）
+    let bytes = match matcher::reencode_template_gray_png(&orig) {
+        Ok(b) => b,
+        Err(e) => return err_response(StatusCode::BAD_REQUEST, &e.to_string()),
+    };
     let dir = st.scripts.tmpl_dir(&pkg);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
     let name = sanitize_filename(&req.name);
     let path = dir.join(&name);
-    if let Err(e) = std::fs::write(&path, bytes) {
+    if let Err(e) = std::fs::write(&path, &bytes) {
         return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
-    Json(serde_json::json!({"ok": true, "name": name})).into_response()
+    Json(serde_json::json!({"ok": true, "name": name, "size": bytes.len(), "orig_size": orig.len()})).into_response()
 }
 
 async fn api_delete_template(State(st): State<AppState>, Path(name): Path<String>, Query(q): Query<PkgQuery>) -> Response {
@@ -757,22 +797,27 @@ async fn api_delete_script(State(st): State<AppState>, Path(id): Path<String>) -
     }
 }
 
-/// 导出脚本包 zip：脚本 + 递归 call 依赖 + 引用的模板
-async fn api_export_script(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    match st.scripts.export(&id) {
-        Ok((filename, bytes)) => {
-            // 文件名可能是 unicode：用 RFC 5987 filename*（percent-encoded UTF-8），
-            // 直接塞非 ASCII 进 header 会被 hyper 拒绝
-            let enc: String = filename.bytes().map(|b| format!("%{:02X}", b)).collect();
-            Response::builder()
-                .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, "application/zip")
-                .header(header::CONTENT_DISPOSITION, format!("attachment; filename*=UTF-8''{}", enc))
-                .body(Body::from(bytes))
-                .unwrap()
-        }
+/// 导出整分区快照 zip（?pkg= 指定应用分区）：yaml/ 全部脚本 + tmpl/ 全部模板
+async fn api_export_partition(State(st): State<AppState>, Query(q): Query<PkgQuery>) -> Response {
+    let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
+        return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
+    };
+    match st.scripts.export_partition(&pkg) {
+        Ok((filename, bytes)) => zip_response(&filename, bytes),
         Err(e) => err_response(StatusCode::NOT_FOUND, &e.to_string()),
     }
+}
+
+/// zip 下载响应：文件名可能是 unicode，用 RFC 5987 filename*
+/// （percent-encoded UTF-8），直接塞非 ASCII 进 header 会被 hyper 拒绝
+fn zip_response(filename: &str, bytes: Vec<u8>) -> Response {
+    let enc: String = filename.bytes().map(|b| format!("%{:02X}", b)).collect();
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/zip")
+        .header(header::CONTENT_DISPOSITION, format!("attachment; filename*=UTF-8''{}", enc))
+        .body(Body::from(bytes))
+        .unwrap()
 }
 
 #[derive(Deserialize)]
@@ -852,8 +897,7 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
     tokio::spawn(async move {
         let logs = runner.run(&device_id, &script_id, &content, stop.clone(), log_cb, start_index).await;
         devices.run_end(&device_id);
-        // 空闲低功耗：N 秒后无脚本运行且无 viewer → 断开 scrcpy 会话（adb 保留）
-        devices.schedule_idle_disconnect(&device_id);
+        // 空闲低功耗（拆会话/关屏）由 DeviceManager::idle_power_loop 周期统一管理
         match logs {
             Ok(_entries) => {
                 let _ = db.add_log(&device_id, &script_id, "success", "脚本执行完成");

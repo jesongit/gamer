@@ -17,8 +17,10 @@ fps = 15
 encoder_name = ""
 # 编码器块效应诊断探针（默认关，见 config.rs 注释）
 probe_encoder = false
-# 脚本运行结束后的空闲自动断开秒数（断 scrcpy 会话进低功耗，adb 保留；无脚本运行且无 viewer 时才触发；0=关闭）
-idle_disconnect_secs = 60
+# 空闲低功耗秒数（无 viewer 且无脚本运行持续 N 秒后触发）：
+# 虚拟屏模式拆 scrcpy 会话（停编码/销毁虚拟屏，adb 保留，下次脚本/投屏自动重连 ~2-4s）；
+# 镜像模式关物理屏（会话保留，viewer/脚本回来即自动唤醒）；0=关闭
+idle_power_secs = 300
 
 # 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式（可自定义）
 # 占位符：

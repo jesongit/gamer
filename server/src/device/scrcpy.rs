@@ -202,6 +202,10 @@ impl ScrcpySession {
                     format!("{}x{}", w, h)
                 };
                 args.push(format!("new_display={}", vd));
+                // server 持唤醒锁防止系统超时睡眠：主屏真睡眠会让副屏应用被冻结
+                // （见 set_display_power 注释/AGENTS.md 已知坑），软关屏的前提是
+                // 逻辑显示始终 ON——原生 scrcpy --turn-screen-off 同样隐含 stay-awake
+                args.push("stay_awake=true".into());
                 info!(device = %device.name, vd = %vd, "using virtual display");
             }
             ScreenMode::Mirror => {
@@ -497,6 +501,18 @@ impl ScrcpySession {
     /// 的设备），请求设备尽快产出可解码初始帧，避免浏览器拿不到参数集而黑屏。
     pub async fn reset_video(&self) -> anyhow::Result<()> {
         self.send_control(&[17]).await
+    }
+
+    /// 主屏软关屏/亮屏（scrcpy ControlMsg type 10 SET_DISPLAY_POWER，payload 1 字节
+    /// bool）。new-display 会话下 server 端固定作用于**物理主屏**（Controller.
+    /// setDisplayPower 对虚拟屏会话 target displayId=0）：仅关面板电源，逻辑显示
+    /// 状态保持 ON。这是关键防冻结手段——主屏真睡眠（power 键/超时）时，副屏
+    /// 应用会在 ~10-30s 无交互后被系统整体冻结（do_freezer_trap：输入注入超时、
+    /// 零渲染，ANR trace 可证），面板级软关屏则不会触发（同原生 scrcpy
+    /// --turn-screen-off，见 AGENTS.md 已知坑）。server 收到 on=false 时自动注册
+    /// 退出恢复电源（cleanup restoreDisplayPower），会话销毁无需手动还原。
+    pub async fn set_display_power(&self, on: bool) -> anyhow::Result<()> {
+        self.send_control(&[10, on as u8]).await
     }
 
     /// 设置剪贴板

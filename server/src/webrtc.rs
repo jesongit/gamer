@@ -270,8 +270,13 @@ impl ViewerSession {
             session: session.clone(),
         };
         let fps = session.device.fps.or_else(|| (cfg.fps > 0).then_some(cfg.fps));
-        // 静止补帧间隔：画面无新帧时按此节奏重发上一帧（也是该配置下的最小帧间隔）
-        let idle_repeat_ms = fps.filter(|&f| f > 0).map(|f| (1000 / f).max(33) as u64).unwrap_or(33);
+        // 静止补帧心跳（2026-08-23 从 33ms 降到 500ms）：30fps 重复帧让 Chrome
+        // jitter buffer 的统计持续累积，目标延迟随运行时间膨胀（实测静止 23min
+        // 后 676ms，滚动突发后飙到 4.9s——包在到、帧在解码计数、画面却逐位冻结
+        // /残缺花屏，见 AGENTS.md 已知坑）。降到 2fps 心跳只为维持链路活性：
+        // 前端静默看门狗需要 bytesReceived 增长、api 看门狗需要 last_serve 新鲜。
+        // 唤醒无延迟代价：新帧到达经 frame_notify 立即唤醒，不睡满 500ms。
+        let idle_repeat_ms = 500u64;
         // 硬性帧率上限：即使设备端实际输出 60fps，pusher 也按这里的最小间隔发送，
         // 避免“设置了 30fps 实际却跑到 60fps”（scrcpy 侧不再传 max_fps，见 scrcpy.rs）
         let min_frame_interval_ms = fps.filter(|&f| f > 0).map(|f| (1000 / f).max(1) as u64).unwrap_or(0);
@@ -722,11 +727,11 @@ impl ViewerSession {
                     // ICE 抖动（Disconnected）期间跳过发送，等待恢复；连接恢复后继续推
                     if !peer_connected.load(std::sync::atomic::Ordering::SeqCst) {
                         debug!("peer disconnected, skipping frame {}", frame_no);
-                        // 跳过的是关键帧 → 参考链断裂：恢复后丢弃到下一个 IDR 的 P 帧，
-                        // 否则浏览器用断裂的参考链解码（花屏直到下个 IDR）
-                        if frame.is_keyframe {
-                            waiting_key = true;
-                        }
+                        // 任何被跳过的帧都切断参考链：P 帧的后继帧引用它，关键帧
+                        // 丢失则后继 P 帧失去修复点。恢复后必须丢到下一个 IDR，
+                        // 否则浏览器用断裂参考链解码——花屏且无 PLI/NACK 信号
+                        // （协议层无丢包，解码器不知情），只能等自然 IDR
+                        waiting_key = true;
                         continue;
                     }
 

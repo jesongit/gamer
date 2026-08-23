@@ -154,12 +154,11 @@ async fn run_task(
         devices.connect_device(&task.device_id).await?;
     }
 
-    // 设备运行计数（空闲断开守卫；运行结束归零后安排空闲低功耗断开）
+    // 设备运行计数（空闲低功耗守卫；空闲拆会话/关屏由 idle_power_loop 统一管理）
     devices.run_begin(&task.device_id);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let logs = runner.run(&task.device_id, &task.script_id, &script.content, stop, None, 0).await;
     devices.run_end(&task.device_id);
-    devices.schedule_idle_disconnect(&task.device_id);
     match logs {
         Ok(entries) => {
             let success = entries.iter().any(|(l, _)| l == "error");

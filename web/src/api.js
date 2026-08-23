@@ -68,9 +68,9 @@ export const api = {
   runScript: (id, deviceId, startIndex) => req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, { device_id: deviceId, start_index: startIndex || 0 }),
   stopScript: (id) => req('POST', `/api/scripts/${encodeURIComponent(id)}/stop`),
   scriptStatus: (id) => req('GET', `/api/scripts/${encodeURIComponent(id)}/status`),
-  // 导出分区快照 zip（脚本 + call 依赖 + 模板）→ { blob, filename }
-  exportScript: async (id) => {
-    const r = await fetch(`/api/scripts/${encodeURIComponent(id)}/export`)
+  // 导出整分区快照 zip（yaml/ + tmpl/ 全量，?pkg= 指定分区）→ { blob, filename }
+  exportPartition: async (pkg) => {
+    const r = await fetch(`/api/scripts/export?pkg=${encodeURIComponent(pkg)}`)
     if (!r.ok) throw new Error(await errMsg(r))
     const cd = r.headers.get('content-disposition') || ''
     let filename = ''

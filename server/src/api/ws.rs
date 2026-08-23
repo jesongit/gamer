@@ -155,6 +155,8 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                         }
                                         info!(device = %device_id, "kicked previous viewer (takeover)");
                                     }
+                                    // 消费者出现：打断空闲低功耗计时（镜像模式若已关屏则唤醒）
+                                    st.devices.notify_activity(&device_id);
                                     let answer = vs.local_description();
                                     let _ = socket
                                         .send(Message::Text(json!({"type": "answer", "sdp": answer}).to_string()))
