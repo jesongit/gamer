@@ -1,0 +1,33 @@
+action_wait: 500
+log_level: info
+
+steps:
+  - click: phone.png
+    check: mon_crd.png
+  - until: guide.png
+  - until: tsk_rev.png
+  - until: tsk_go.png
+  - until: itm_rev.png
+  - until: itm_cls.png
+  - until: close.png
+  - until: tsk_rev.png
+  - until: tsk_go.png
+  # 遗器本
+  - until: target.png
+  - until: yiqi_etr.png
+  - until: cnt_add.png
+  - until: cnt_add.png
+  - until: cnt_add.png
+  - until: cnt_add.png
+  - until: cnt_add.png
+  - until: yiqi_str.png
+  - until: btl_str.png
+  - until: btl_qut.png
+  - until: close.png
+
+  # 领奖
+  - until: phone.png
+  - until: guide.png
+  - until: tsk_rev.png
+  - until: tsk_rev.png
+  - until: tsk_rev2.png

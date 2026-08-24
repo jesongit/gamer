@@ -1,9 +1,0 @@
-action_wait: 5000
-log_level: info
-
-steps:
-  - str_app:
-  - until: login.png
-  - click: act_swt.png
-    check: swt_etr.png
-  - until: gmr_etr.png

@@ -1,0 +1,14 @@
+action_wait: 500
+log_level: info
+
+steps:
+  - str_app:
+  - click: login.png
+    check: act_cls.png
+  - click: act_swt.png
+    check: swt_etr.png
+  - until: act_136.png
+  - until: gmr_etr.png
+  - until: gmr_str.png
+  - until: clk_etr.png
+  - call: 日常遗器.yml
