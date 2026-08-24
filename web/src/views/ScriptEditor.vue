@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">脚本编辑</div>
-        <div class="page-sub">YAML 自动化脚本 · 支持 find / until / tap / swipe / text / key / str_app / cls_app / loop / goto / call / wait，以及 click+check 简写；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms；str_app 默认 3000ms）</div>
+        <div class="page-sub">YAML 自动化脚本 · 支持 find / until / color / tap / swipe / text / key / str_app / cls_app / loop / goto / call / wait，以及 click+check 简写；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms；str_app 默认 3000ms）</div>
       </div>
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
@@ -118,6 +118,18 @@ log_level: info        # 日志级别：info=精简（默认） / debug=详细</
                          # 等价 until: login.png, act_cls.png + then 分支 act_cls.png: - until: login.png
   wait: 200              # wait/timeout/interval/threshold/region/else/then 等参数照常透传
                          # click/check 均支持逗号分隔多模板或列表 [a.png, b.png]</pre>
+          </div>
+          <div class="help-block">
+            <div class="hb-title">🎨 取点比色 color</div>
+            <pre class="hb-code mono">- color: [0.5123, 0.8456]   # 采样点相对坐标 0~1（同 tap；alt 模式点投屏自动生成记录+采样）
+  check: ff8800             # 期望颜色：6 位十六进制 RRGGBB（也接受 "#ff8800" / [255, 136, 0]）
+  tol: 30                   # 每通道容差 |实际-期望| ≤ tol 判命中（默认 30：H.264 有损压缩帧间像素会抖动）
+  count: 1                  # 检测次数（默认 1）：最多检测 count 次，任一次命中走 then
+  cnt_ivl: 50               # 相邻检测间隔 ms（默认 50，支持 100 / "100ms"）
+  then:                     # 命中执行
+    - click: buy_btn.png
+  else:                     # 全部未命中执行
+    - log: "体力没恢复"</pre>
           </div>
           <div class="help-block">
             <div class="hb-title">🔁 逻辑</div>

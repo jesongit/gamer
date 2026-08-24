@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// 占位符：{name} 模板名 · {region} 区域块（region: a 或 region: {fm,to}）·
 /// {x}/{y} 点击坐标 · {fx}/{fy}/{tx}/{ty} 滑动起终点 · {time} 滑动实际时长 ms ·
-/// {cx}/{cy} 模板图内相对百分比坐标（find 的 click 参数）
+/// {cx}/{cy} 模板图内相对百分比坐标（find 的 click 参数）·
+/// {color} 采样的十六进制颜色（color 记录）
 ///
 /// 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制，
 /// 需要个别覆盖时手动在步骤里加 wait
@@ -26,6 +27,9 @@ pub struct OpTemplates {
     /// 屏幕点击
     #[serde(default)]
     pub tap: String,
+    /// 取点比色检测（{color} 为 alt 点击时采样的十六进制颜色）
+    #[serde(default)]
+    pub color: String,
     /// 屏幕滑动
     #[serde(default)]
     pub swipe: String,
@@ -44,6 +48,7 @@ impl Default for OpTemplates {
             until: "- until: {name}\n  threshold: 0.8\n  {region}".into(),
             find_click_pos: "- find: {name}\n  {region}\n  click: [{cx}, {cy}]".into(),
             tap: "- tap: [{x}, {y}]".into(),
+            color: "- color: [{x}, {y}]\n  check: {color}\n  then:\n    - click:".into(),
             swipe: "- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}".into(),
             swipe_region: "region:\n  fm: [{fx}, {fy}]\n  to: [{tx}, {ty}]".into(),
             wait: String::new(),

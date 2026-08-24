@@ -28,6 +28,16 @@
 //!        click 模板；click/check 均支持逗号分隔多模板或列表（多模板任一出现点命中的
 //!        那个），wait/timeout/interval/threshold/region/then/else 等参数照常透传，
 //!        本步 then 在 click 目标点击后执行 /
+//!   find/until 连击（2026-08-25）：命中点击后按 count 补足点击次数——
+//!        count 总点击次数（含首击，默认 2）；cnt_chk 第 2 次起每次点击前是否
+//!        重新匹配命中模板（默认 true：命中才点、坐标随新命中更新，未命中即
+//!        提前结束；false 直接重复首击坐标）；cnt_ivl 相邻点击间隔（默认 50ms，
+//!        支持 100 或 "100ms" 写法）；click: false 时不生效 /
+//!   color(取点比色（2026-08-25）：color: [x, y] 相对坐标 + check: ff8800 期望颜色
+//!        （6 位十六进制 RRGGBB，宽容接受 "#ff8800"/[r,g,b]/0x 前缀写法）；
+//!        tol 每通道容差默认 30——H.264 有损压缩帧间像素抖动，精确匹配不可用；
+//!        count 检测次数默认 1、cnt_ivl 检测间隔默认 50ms：任一次命中执行 then、
+//!        全部未命中执行 else） /
 //!   loop / goto / label / call
 //!
 //! 每个操作（除 wait 动作本身）可用 wait 参数指定操作后的等待毫秒数，
@@ -237,14 +247,15 @@ impl Runner {
         let step = if step.get("click").is_some() && step.get("find").is_none() && step.get("until").is_none() {
             expanded_owned = Self::expand_click_check(step)?;
             &expanded_owned
-        } else if step.get("check").is_some() {
+        } else if step.get("check").is_some() && step.get("color").is_none() {
+            // color 步骤的 check 是颜色值（如 check: ff8800），与简写的障碍模板无关
             anyhow::bail!("check 只能与 click 简写配合使用（写法：- click: 主模板, check: 障碍模板）");
         } else {
             step
         };
         // 动作键（除 wait 外）：用于区分 `wait` 动作与操作级 `wait` 参数
-        const ACTION_KEYS: [&str; 12] = [
-            "log", "key", "text", "tap", "swipe", "find", "until", "loop", "call", "goto", "str_app", "cls_app",
+        const ACTION_KEYS: [&str; 13] = [
+            "log", "key", "text", "tap", "swipe", "find", "until", "color", "loop", "call", "goto", "str_app", "cls_app",
         ];
         let has_action = ACTION_KEYS.iter().any(|k| step.get(*k).is_some());
         if step.get("wait").is_some() && !has_action {
@@ -313,6 +324,9 @@ impl Runner {
             ctx.log("debug", format!("滑动 ({:.3},{:.3})→({:.3},{:.3}) {}ms", rx1, ry1, rx2, ry2, dur));
             self.emit(&ctx.device_id, ScriptEvent::Swipe { x1, y1, x2, y2 }).await;
             s.swipe(x1 as f32, y1 as f32, x2 as f32, y2 as f32, dur).await?;
+        }
+        if let Some(v) = step.get("color") {
+            self.exec_color(ctx, step, v).await?;
         }
         if step.get("find").is_some() || step.get("until").is_some() {
             // find 与 until 共用实现：until 等价于 timeout 为 0 的 find（一直找到出现为止）
@@ -399,7 +413,8 @@ impl Runner {
     }
 
     /// find：循环查找模板（检测间隔 interval 默认 500ms；timeout 必须 > 0，默认 6000ms），
-    /// 找到后按 click 参数处理并执行 then（支持按命中模板分支，见 parse_then），超时未找到执行 else；
+    /// 找到后按 click 参数处理（count 连击补点，见 exec_count_clicks）并执行 then
+    /// （支持按命中模板分支，见 parse_then），超时未找到执行 else；
     /// until：参数与 find 一致，但 and_or 默认 or、timeout 默认 30 分钟
     /// （显式 timeout: 0 = 永不超时，此时 else 不会执行）。
     /// 多模板（2026-08-24）：模板列表支持逗号分隔字符串或 YAML 列表；
@@ -494,7 +509,7 @@ impl Runner {
                     }).await;
                 }
                 // click 作用目标：and = 第一个模板，or = 命中的模板（命中即停只有一个）
-                if self.exec_find_click(ctx, step, threshold, &hits[0].1).await? {
+                if self.exec_find_click(ctx, step, threshold, &hits[0].0, &hits[0].1).await? {
                     // click 成功（或未配置 click）→ 执行命中分支并结束：
                     // then 分支 = 书写顺序第一个模板在命中列表里的（or=命中的恰为一个
                     // 模板即命中谁走谁，and=全命中取先写的），没有则执行兜底步骤
@@ -523,45 +538,145 @@ impl Runner {
         Ok(())
     }
 
+    /// color：取点比色（截图指定像素与 check 期望色比对，每通道容差 tol）。
+    ///   color: [x, y]   相对坐标 0~1（同 tap）
+    ///   check: ff8800   期望颜色（6 位十六进制 RRGGBB；宽容接受 "#ff8800"/[r,g,b]/0x 前缀）
+    ///   tol: 30         每通道容差（|实际-期望| ≤ tol 判命中）。默认 30：H.264 有损压缩，
+    ///                   同一像素帧间会抖动，精确匹配（tol: 0）实际不可用
+    ///   count: 1        检测次数：最多检测 count 次（隔 cnt_ivl），任一次命中执行 then、
+    ///                   全部未命中执行 else
+    ///   cnt_ivl: 50     相邻检测间隔 ms（支持 100 / "100ms"）
+    /// 截图与模板匹配同一条解码链路（帧缓存按需解码最新一帧），取色时刻与检测
+    /// 时刻的画面/压缩抖动靠 tol 吸收；alt 模式取色样本同样走服务端截图，
+    /// 前端 video→canvas 取色有 YUV→RGB 矩阵差异（BT.601/709）会对不上
+    async fn exec_color(&self, ctx: &mut Ctx, step: &Value, v: &Value) -> anyhow::Result<()> {
+        let (rx, ry) = self.relative_pair(v)?;
+        let (er, eg, eb) = match step.get("check") {
+            Some(cv) => Self::parse_color(cv)?,
+            None => anyhow::bail!("color 步骤缺少 check 颜色（写法：check: ff8800）"),
+        };
+        let tol = match step.get("tol") {
+            Some(v) => {
+                let t = v.as_u64().ok_or_else(|| anyhow::anyhow!("tol 需要 0~255 的数字"))?;
+                if t > 255 {
+                    anyhow::bail!("tol 必须在 0~255 之间，收到: {}", t);
+                }
+                t as i32
+            }
+            None => 30,
+        };
+        let count = match step.get("count") {
+            Some(v) => Self::parse_count(v, "count")?,
+            None => 1,
+        };
+        if count == 0 {
+            anyhow::bail!("count 需要 ≥ 1（color 检测次数），收到: 0");
+        }
+        if count > 100_000 {
+            anyhow::bail!("count 过大（上限 100000），收到: {}", count);
+        }
+        let cnt_ivl = match step.get("cnt_ivl") {
+            Some(v) => Self::parse_ms(v, "cnt_ivl")?,
+            None => 50,
+        };
+        let then_steps = step.get("then").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
+        let else_steps = step.get("else").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
+        let exp = format!("{:02x}{:02x}{:02x}", er, eg, eb);
+        ctx.log("info", format!("检测颜色 {} @ ({:.3}, {:.3})，容差 {}，{} 次间隔 {}ms", exp, rx, ry, tol, count, cnt_ivl));
+        for i in 1..=count {
+            if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(());
+            }
+            let screen = self.devices.screenshot(&ctx.device_id).await
+                .map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
+            let img = image::load_from_memory(&screen)
+                .map_err(|e| anyhow::anyhow!("解析截图失败: {}", e))?;
+            let (w, h) = img.dimensions();
+            if w == 0 || h == 0 {
+                anyhow::bail!("无法获取屏幕尺寸");
+            }
+            let px = ((rx * w as f32).round() as i64).clamp(0, w as i64 - 1) as u32;
+            let py = ((ry * h as f32).round() as i64).clamp(0, h as i64 - 1) as u32;
+            let p = img.to_rgb8().get_pixel(px, py).0;
+            let (ar, ag, ab) = (p[0] as i32, p[1] as i32, p[2] as i32);
+            if (ar - er as i32).abs() <= tol && (ag - eg as i32).abs() <= tol && (ab - eb as i32).abs() <= tol {
+                ctx.log("success", format!("颜色命中 {}（实际 {:02x}{:02x}{:02x}）@ 像素 ({}, {})，第 {}/{} 次", exp, ar, ag, ab, px, py, i, count));
+                // 可视化：以采样点为中心的小框（复用模板命中框样式与前端渲染）
+                self.emit(&ctx.device_id, ScriptEvent::Hit {
+                    tpl: format!("clr {}", exp),
+                    x: px.saturating_sub(12), y: py.saturating_sub(12), w: 24, h: 24, score: 1.0,
+                }).await;
+                for sub in &then_steps {
+                    self.exec_step(ctx, sub).await?;
+                }
+                return Ok(());
+            }
+            ctx.log("debug", format!("颜色未命中：期望 {} 实际 {:02x}{:02x}{:02x} @ ({}, {})，第 {}/{} 次", exp, ar, ag, ab, px, py, i, count));
+            if i < count {
+                tokio::time::sleep(Duration::from_millis(cnt_ivl)).await;
+            }
+        }
+        ctx.log("info", format!("颜色 {} 未命中（{} 次检测），执行 else", exp, count));
+        for sub in &else_steps {
+            self.exec_step(ctx, sub).await?;
+        }
+        Ok(())
+    }
+
     /// 处理 find 的 click 参数，返回是否成功点击：
     ///   true/未配置（默认）→ 点击模板中心
-    ///   false           → 不点击（视为成功，直接执行 then）
+    ///   false           → 不点击（视为成功，直接执行 then；count 连击不生效）
     ///   模板名           → 在模板区域内查找该模板，找到后点击其中心（未找到返回 false，继续循环）
     ///   [x, y]          → 点击模板区域内的相对坐标（0~1，如 [0.5, 0.5] = 中心）
-    /// 多模板命中时 m 为 click 的作用目标：and = 第一个模板，or = 命中的模板
-    async fn exec_find_click(&self, ctx: &mut Ctx, step: &Value, threshold: f32, m: &matcher::MatchResult) -> anyhow::Result<bool> {
+    /// 多模板命中时 m 为 click 的作用目标：and = 第一个模板，or = 命中的模板；
+    /// 首击完成后按 count 参数连击补点（见 exec_count_clicks）
+    async fn exec_find_click(&self, ctx: &mut Ctx, step: &Value, threshold: f32, tpl: &str, m: &matcher::MatchResult) -> anyhow::Result<bool> {
         let default_click = Value::Bool(true);
         let click = step.get("click").unwrap_or(&default_click);
-        let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-        let box_region = [m.x, m.y, m.width, m.height];
-        if let Some(b) = click.as_bool() {
-            if !b {
-                return Ok(true);
-            }
-            let (cx, cy) = (m.x + m.width / 2, m.y + m.height / 2);
-            ctx.log("success", format!("点击模板中心 @ ({}, {})", cx, cy));
-            self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
-            s.tap(cx as f32, cy as f32).await?;
+        if click.as_bool() == Some(false) {
             return Ok(true);
         }
+        let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+        // 首击坐标：true → 命中模板中心；模板名/[x, y] → 统一经 resolve_click_point 解析
+        let (cx, cy, desc) = if click.as_bool() == Some(true) {
+            (m.x + m.width / 2, m.y + m.height / 2, "模板中心".to_string())
+        } else {
+            match self.resolve_click_point(ctx, click, threshold, m).await? {
+                Some(r) => r,
+                None => {
+                    ctx.log("debug", "click 目标未就绪，继续查找".to_string());
+                    return Ok(false);
+                }
+            }
+        };
+        ctx.log("success", format!("点击{} @ ({}, {})", desc, cx, cy));
+        self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
+        s.tap(cx as f32, cy as f32).await?;
+        self.exec_count_clicks(ctx, step, threshold, tpl, click, (cx, cy)).await?;
+        Ok(true)
+    }
+
+    /// 解析 click 点击坐标（外层命中 m 已知，返回 (cx, cy, 位置描述)）：
+    ///   模板名 → 在 m 区域内再找该模板、点击其中心（内层命中 emit Hit 可视化；
+    ///            未找到 → None，调用方继续循环等或提前结束连击）
+    ///   [x, y] → m 区域内相对坐标（0~1）
+    /// click=true/false 由调用方处理，这里只管模板名与相对坐标两种形式
+    async fn resolve_click_point(&self, ctx: &mut Ctx, click: &Value, threshold: f32, m: &matcher::MatchResult) -> anyhow::Result<Option<(u32, u32, String)>> {
         if let Some(name) = click.as_str() {
             let screen = self.devices.screenshot(&ctx.device_id).await
                 .map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
-            match self.match_on_screen(ctx, name, threshold, Some(box_region), screen).await? {
+            match self.match_on_screen(ctx, name, threshold, Some([m.x, m.y, m.width, m.height]), screen).await? {
                 Some(inner) => {
                     let (cx, cy) = (inner.x + inner.width / 2, inner.y + inner.height / 2);
-                    ctx.log("success", format!("模板区域内找到 {}，点击 @ ({}, {})", name, cx, cy));
                     self.emit(&ctx.device_id, ScriptEvent::Hit {
                         tpl: name.to_string(),
                         x: inner.x, y: inner.y, w: inner.width, h: inner.height, score: inner.score,
                     }).await;
-                    self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
-                    s.tap(cx as f32, cy as f32).await?;
-                    Ok(true)
+                    Ok(Some((cx, cy, format!("模板区域内找到 {}", name))))
                 }
                 None => {
                     ctx.log("debug", format!("模板区域内未找到 {}", name));
-                    Ok(false)
+                    Ok(None)
                 }
             }
         } else if let Some(seq) = click.as_sequence() {
@@ -575,13 +690,134 @@ impl Runner {
             }
             let cx = m.x + (rx * m.width as f64).round() as u32;
             let cy = m.y + (ry * m.height as f64).round() as u32;
-            ctx.log("success", format!("点击模板内相对坐标 ({:.3}, {:.3}) @ ({}, {})", rx, ry, cx, cy));
-            self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
-            s.tap(cx as f32, cy as f32).await?;
-            return Ok(true);
+            Ok(Some((cx, cy, format!("模板内相对坐标 ({:.3}, {:.3})", rx, ry))))
         } else {
             anyhow::bail!("click 只支持 true/false、模板名或 [x, y] 相对坐标");
         }
+    }
+
+    /// find/until 的 count 连击（2026-08-25）：首击（find/until 命中后的 click）完成后补足点击次数。
+    ///   count   总点击次数（含首击），默认 2（即默认补点 1 次）；count ≤ 1 = 仅首击
+    ///   cnt_chk true（默认）= 第 2 次起每次点击前重新匹配命中的模板（独立取最新截图），
+    ///           命中才点击、坐标随新命中更新；未命中 = 目标已消失/界面已翻页，提前结束。
+    ///           false = 不再匹配，直接重复点击首击坐标
+    ///   cnt_ivl 相邻两次点击的间隔，默认 50ms
+    /// cnt_chk 只控制第 2 次起的判断——第 1 次点击本身就是 find/until 命中后点的
+    async fn exec_count_clicks(&self, ctx: &mut Ctx, step: &Value, threshold: f32, tpl: &str, click: &Value, first: (u32, u32)) -> anyhow::Result<()> {
+        let count = match step.get("count") {
+            Some(v) => Self::parse_count(v, "count")?,
+            None => 2,
+        };
+        if count <= 1 {
+            return Ok(());
+        }
+        if count > 100_000 {
+            anyhow::bail!("count 过大（上限 100000），收到: {}", count);
+        }
+        let cnt_chk = match step.get("cnt_chk") {
+            Some(v) => v.as_bool().ok_or_else(|| anyhow::anyhow!("cnt_chk 只支持 true/false"))?,
+            None => true,
+        };
+        let cnt_ivl = match step.get("cnt_ivl") {
+            Some(v) => Self::parse_ms(v, "cnt_ivl")?,
+            None => 50,
+        };
+        let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+        for i in 2..=count {
+            if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(cnt_ivl)).await;
+            if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+            let target = if !cnt_chk {
+                Some((first.0, first.1, "首击坐标".to_string()))
+            } else {
+                match self.match_one(ctx, step, tpl, threshold).await? {
+                    Some(m2) if click.as_bool() == Some(true) => {
+                        Some((m2.x + m2.width / 2, m2.y + m2.height / 2, "模板中心".to_string()))
+                    }
+                    Some(m2) => self.resolve_click_point(ctx, click, threshold, &m2).await?,
+                    None => None,
+                }
+            };
+            let Some((cx, cy, desc)) = target else {
+                ctx.log("info", format!("模板 {} 已不存在，连击提前结束（已点 {}/{} 次）", tpl, i - 1, count));
+                return Ok(());
+            };
+            ctx.log("debug", format!("连击 {}/{}：{} @ ({}, {})", i, count, desc, cx, cy));
+            self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
+            s.tap(cx as f32, cy as f32).await?;
+        }
+        Ok(())
+    }
+
+    /// 解析点击次数参数：YAML 数字（6）；带引号的数字字符串（"6"）容忍
+    fn parse_count(v: &Value, opt: &str) -> anyhow::Result<u64> {
+        if let Some(n) = v.as_u64() {
+            return Ok(n);
+        }
+        if let Some(s) = v.as_str() {
+            if let Ok(n) = s.trim().parse::<u64>() {
+                return Ok(n);
+            }
+        }
+        anyhow::bail!("{} 需要正整数（如 6），收到: {:?}", opt, v)
+    }
+
+    /// 解析毫秒参数：数字（100）或带 ms 后缀的字符串（"100ms"/"100 ms"）——
+    /// YAML 里 `cnt_ivl: 100ms` 解析为字符串，as_u64 拿不到，两种写法都要支持
+    fn parse_ms(v: &Value, opt: &str) -> anyhow::Result<u64> {
+        if let Some(n) = v.as_u64() {
+            return Ok(n);
+        }
+        if let Some(s) = v.as_str() {
+            let t = s.trim().trim_end_matches("ms").trim();
+            if let Ok(n) = t.parse::<u64>() {
+                return Ok(n);
+            }
+        }
+        anyhow::bail!("{} 需要毫秒数（如 100 或 100ms），收到: {:?}", opt, v)
+    }
+
+    /// 解析 color 步骤的 check 颜色：6 位十六进制 RRGGBB（可带 # / 0x 前缀、
+    /// 大小写不限）或 [r, g, b] 数字数组（0~255）；整数（YAML 解析器把 0xff8800
+    /// 直接解析成数字时）按 0xRRGGBB 解码
+    fn parse_color(v: &Value) -> anyhow::Result<(u8, u8, u8)> {
+        if let Some(s) = v.as_str() {
+            let t = s.trim().trim_start_matches('#').trim_start_matches("0x").to_ascii_lowercase();
+            if t.len() == 6 && t.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Ok((
+                    u8::from_str_radix(&t[0..2], 16).unwrap(),
+                    u8::from_str_radix(&t[2..4], 16).unwrap(),
+                    u8::from_str_radix(&t[4..6], 16).unwrap(),
+                ));
+            }
+            anyhow::bail!("check 颜色需要 6 位十六进制（如 ff8800 或 \"#ff8800\"）或 [r, g, b]，收到: {}", s);
+        }
+        if let Some(n) = v.as_u64() {
+            if n <= 0xFF_FFFF {
+                return Ok(((n >> 16) as u8, (n >> 8) as u8, n as u8));
+            }
+        }
+        if let Some(seq) = v.as_sequence() {
+            if seq.len() == 3 {
+                let c = seq
+                    .iter()
+                    .map(|x| {
+                        let n = x.as_u64().or_else(|| x.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+                            .ok_or_else(|| anyhow::anyhow!("check 颜色数组需要 [r, g, b] 数字（0~255）"))?;
+                        if n > 255 {
+                            anyhow::bail!("check 颜色分量必须在 0~255，收到: {}", n);
+                        }
+                        Ok(n as u8)
+                    })
+                    .collect::<anyhow::Result<Vec<u8>>>()?;
+                return Ok((c[0], c[1], c[2]));
+            }
+        }
+        anyhow::bail!("check 颜色只支持 6 位十六进制（ff8800）或 [r, g, b] 数组，收到: {:?}", v)
     }
 
     /// 匹配单个模板一次（独立取最新截图，不重试）：解析 region 后在全屏/区域内匹配。
@@ -596,7 +832,9 @@ impl Runner {
         }
         let region = match step.get("region") {
             Some(rv) => Self::parse_region(rv, w, h)?,
-            None => Self::tpl_region_from_name(template, w, h)?,
+            // 短名引用时 #后缀在**实际文件名**上（脚本写 login.png 引用
+            // login#910_159_972_716.png），区域须按解析结果取名才生效
+            None => Self::tpl_region_from_name(&Self::region_source_name(&self.tpl_dir_of(ctx), template), w, h)?,
         };
         self.match_on_screen(ctx, &template, threshold, region, screen).await
     }
@@ -604,8 +842,7 @@ impl Runner {
     /// 在给定截图上匹配模板（region 为搜索区域，None=全屏）
     async fn match_on_screen(&self, ctx: &Ctx, template: &str, threshold: f32, region: Option<[u32; 4]>, screen: Vec<u8>) -> anyhow::Result<Option<matcher::MatchResult>> {
         // 模板按脚本所在应用分区解析：data/<pkg>/tmpl/（script_id 首段 = 分区）
-        let pkg = ctx.script_id.split('/').next().unwrap_or_default();
-        let tpl_dir = self.devices.cfg.data_dir.join(pkg).join("tmpl");
+        let tpl_dir = self.tpl_dir_of(ctx);
         // 目录不存在时先创建，避免 std::fs::read 报“系统找不到指定的路径”
         let _ = std::fs::create_dir_all(&tpl_dir);
         let tpl_path = Self::resolve_template_file(&tpl_dir, template)?;
@@ -652,6 +889,23 @@ impl Runner {
         }
     }
 
+    /// 脚本所在分区的模板目录：data/<pkg>/tmpl/（script_id 首段 = 分区）
+    fn tpl_dir_of(&self, ctx: &Ctx) -> std::path::PathBuf {
+        let pkg = ctx.script_id.split('/').next().unwrap_or_default();
+        self.devices.cfg.data_dir.join(pkg).join("tmpl")
+    }
+
+    /// #区域后缀的解析来源名：短名引用时后缀在**实际文件名**上（脚本写
+    /// login.png → login#910_159_972_716.png，区域随解析结果生效）；
+    /// 解析不出文件（不存在/多候选）时回退书写的名字——真正的错误由
+    /// match_on_screen 的 resolve_template_file 统一报出，这里不重复报
+    fn region_source_name(tpl_dir: &std::path::Path, template: &str) -> String {
+        Self::resolve_template_file(tpl_dir, template)
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| template.to_string())
+    }
+
     /// 从步骤中取模板名列表：支持单模板字符串 `find: a.png`、逗号分隔多模板
     /// `find: a.png, b.png` 与 YAML 列表 `find: [a.png, b.png]` 三种写法
     fn template_names(&self, step: &Value, key: &str) -> anyhow::Result<Vec<String>> {
@@ -687,7 +941,9 @@ impl Runner {
     /// 语义：等 click 模板出现并点击（多模板 = 任一出现，点命中的那个，until 默认 or）；
     /// check 模板（弹窗等障碍）先出现时点击关闭，然后继续等 click 模板。
     /// click/check 均支持逗号分隔多模板或列表；其余参数（wait/timeout/interval/
-    /// threshold/region/else/label/goto）原样透传；本步 then 在 click 目标点击后执行
+    /// threshold/region/else/label/goto）原样透传；count/cnt_chk/cnt_ivl 连击参数
+    /// 除留在外层（无障碍直接命中路径）外还复制进每个 check 分支内的 until；
+    /// 本步 then 在 click 目标点击后执行
     /// （先关过 check 障碍同样执行——追加进每个 check 分支末尾 + 兜底各一份）
     fn expand_click_check(step: &Value) -> anyhow::Result<Value> {
         let click_names = Self::parse_tpl_names(
@@ -719,10 +975,16 @@ impl Runner {
         if !check_names.is_empty() {
             let mut then_seq: Vec<Value> = Vec::new();
             for c in &check_names {
-                // 分支步骤：先 `until: <click 列表>`（关闭障碍后继续等主目标），再跟用户 then
+                // 分支步骤：先 `until: <click 列表>`（关闭障碍后继续等主目标），再跟用户 then；
+                // count/cnt_chk/cnt_ivl 连击参数复制进分支内 until（主目标连击在障碍处理后同样生效）
                 let mut branch_steps: Vec<Value> = Vec::new();
                 let mut wait_map = serde_yaml::Mapping::new();
                 wait_map.insert(Value::String("until".to_string()), Value::String(click_list.clone()));
+                for k in ["count", "cnt_chk", "cnt_ivl"] {
+                    if let Some(v) = step.get(k) {
+                        wait_map.insert(Value::String(k.to_string()), v.clone());
+                    }
+                }
                 branch_steps.push(Value::Mapping(wait_map));
                 branch_steps.extend(user_then.iter().cloned());
                 let mut branch_map = serde_yaml::Mapping::new();
@@ -766,8 +1028,8 @@ impl Runner {
     fn parse_then(v: &Value, key: &str, templates: &[String]) -> anyhow::Result<(Vec<(String, Vec<Value>)>, Vec<Value>)> {
         // 单键 + 列表值 + 键非动作名 = 疑似模板名写错的分支（如扩展名拼错），
         // 不报错会被当普通步骤静默跳过，分支永远不生效
-        const STEP_KEYS: [&str; 14] = [
-            "wait", "log", "key", "text", "tap", "swipe", "find", "until", "loop", "call", "goto", "label", "str_app", "cls_app",
+        const STEP_KEYS: [&str; 15] = [
+            "wait", "log", "key", "text", "tap", "swipe", "find", "until", "color", "loop", "call", "goto", "label", "str_app", "cls_app",
         ];
         let seq = v.as_sequence().cloned().unwrap_or_default();
         let mut branches = Vec::new();
@@ -1145,6 +1407,33 @@ mod tests {
         cleanup();
     }
 
+    /// 短名引用的区域后缀：区域从**解析后的实际文件名**取（脚本写 login.png →
+    /// login#910_159_972_716.png 的后缀生效，否则短名会退化成全屏低分辨率匹配）；
+    /// 精确名照旧；文件不存在 → 回退书写名（错误由 match_on_screen 报）
+    #[test]
+    fn short_name_region_from_resolved_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-tplregion-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cleanup = || { let _ = std::fs::remove_dir_all(&dir); };
+        std::fs::write(dir.join("login#910_159_972_716.png"), b"x").unwrap();
+        std::fs::write(dir.join("shop.png"), b"x").unwrap();
+        // 短名 → 解析到带后缀文件 → 区域生效（×1000 相对坐标 → 1920x1080 像素区域）
+        let name = Runner::region_source_name(&dir, "login.png");
+        assert_eq!(name, "login#910_159_972_716.png");
+        assert_eq!(
+            Runner::tpl_region_from_name(&name, 1920, 1080).unwrap(),
+            Some([1747, 172, 119, 602])
+        );
+        // 精确名（无后缀）→ 原名；不存在 → 回退书写名
+        assert_eq!(Runner::region_source_name(&dir, "shop.png"), "shop.png");
+        assert_eq!(Runner::region_source_name(&dir, "nope.png"), "nope.png");
+        cleanup();
+    }
+
     /// click/check 简写展开（expand_click_check）：
     /// click → until 列表；check → then 分支（分支步骤 = until click 列表 + 用户 then），
     /// 用户 then 同时作兜底；其余参数透传；重复模板 / 非法 click 值 → 报错
@@ -1199,5 +1488,62 @@ mod tests {
         assert!(Runner::expand_click_check(v.get(0).unwrap()).is_err());
         let v = parse("- click: \"\"\n");
         assert!(Runner::expand_click_check(v.get(0).unwrap()).is_err());
+    }
+
+    /// count 连击参数解析：count 支持 YAML 数字与带引号数字串；
+    /// cnt_ivl 支持 100 与 "100ms"/"80 ms" 字符串写法（YAML 裸 100ms 是字符串）；非法值报错
+    #[test]
+    fn count_params_parse() {
+        assert_eq!(Runner::parse_count(&parse("6"), "count").unwrap(), 6);
+        assert_eq!(Runner::parse_count(&parse("\"6\""), "count").unwrap(), 6);
+        assert!(Runner::parse_count(&parse("many"), "count").is_err());
+        assert_eq!(Runner::parse_ms(&parse("100"), "cnt_ivl").unwrap(), 100);
+        assert_eq!(Runner::parse_ms(&parse("100ms"), "cnt_ivl").unwrap(), 100);
+        assert_eq!(Runner::parse_ms(&parse("\"80 ms\""), "cnt_ivl").unwrap(), 80);
+        assert!(Runner::parse_ms(&parse("fast"), "cnt_ivl").is_err());
+    }
+
+    /// click/check 简写：count/cnt_chk/cnt_ivl 连击参数保留在外层步骤
+    /// （无障碍直接命中路径生效）同时复制进 check 分支内的 until（障碍处理后同样生效）
+    #[test]
+    fn click_check_expand_count() {
+        let v = parse("- click: login.png\n  check: act_cls.png\n  count: 6\n  cnt_chk: false\n  cnt_ivl: 100ms\n");
+        let m = Runner::expand_click_check(v.get(0).unwrap()).unwrap().as_mapping().unwrap().clone();
+        // 外层保留（未从展开结果中移除）
+        assert_eq!(m.get("count").and_then(|v| v.as_u64()), Some(6));
+        assert_eq!(m.get("cnt_chk").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(m.get("cnt_ivl").and_then(|v| v.as_str()), Some("100ms"));
+        // 分支内 until 同样带上三个参数
+        let then = m.get("then").and_then(|v| v.as_sequence()).unwrap();
+        let steps = then[0].as_mapping().unwrap().iter().next().unwrap().1.as_sequence().unwrap();
+        let inner = steps[0].as_mapping().unwrap();
+        assert_eq!(inner.get("until").and_then(|v| v.as_str()), Some("login.png"));
+        assert_eq!(inner.get("count").and_then(|v| v.as_u64()), Some(6));
+        assert_eq!(inner.get("cnt_chk").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(inner.get("cnt_ivl").and_then(|v| v.as_str()), Some("100ms"));
+        // 不写则不注入（分支内 until 保持干净）
+        let v = parse("- click: login.png\n  check: act_cls.png\n");
+        let m = Runner::expand_click_check(v.get(0).unwrap()).unwrap().as_mapping().unwrap().clone();
+        let then = m.get("then").and_then(|v| v.as_sequence()).unwrap();
+        let steps = then[0].as_mapping().unwrap().iter().next().unwrap().1.as_sequence().unwrap();
+        let inner = steps[0].as_mapping().unwrap();
+        assert!(inner.get("count").is_none() && inner.get("cnt_chk").is_none() && inner.get("cnt_ivl").is_none());
+    }
+
+    /// color 步骤的 check 颜色解析：6 位十六进制（不带 #，宽容接受 # / 0x 前缀、
+    /// 大小写）、[r, g, b] 数组、0x 整数；位数不对 / 非法字符 / 分量越界报错
+    #[test]
+    fn color_check_parse() {
+        let c = |yaml: &str| Runner::parse_color(&parse(yaml)).unwrap();
+        assert_eq!(c("ff8800"), (0xff, 0x88, 0x00));
+        assert_eq!(c("\"#FF8800\""), (0xff, 0x88, 0x00));
+        assert_eq!(c("0xff8800"), (0xff, 0x88, 0x00));
+        assert_eq!(c("[255, 136, 0]"), (255, 136, 0));
+        assert!(Runner::parse_color(&parse("\"ff880\"")).is_err()); // 5 位
+        assert!(Runner::parse_color(&parse("\"ff88000\"")).is_err()); // 7 位
+        assert!(Runner::parse_color(&parse("red")).is_err()); // 非十六进制
+        assert!(Runner::parse_color(&parse("[255, 136, 256]")).is_err()); // 分量越界
+        assert!(Runner::parse_color(&parse("[255, 136]")).is_err()); // 不足 3 元
+        assert!(Runner::parse_color(&parse("[a, b, c]")).is_err()); // 非数字
     }
 }

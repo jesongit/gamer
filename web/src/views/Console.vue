@@ -545,7 +545,8 @@ const scriptSaving = ref(false)
 // 操作记录 YAML 模板：alt 模式把操作追加到编辑区时使用的格式。
 // 由服务端 config.toml 的 [op_templates] 配置，前端启动时拉取；失败时用内置默认。
 // 占位符：{name} 模板名 · {x}/{y} 点击坐标 · {fx}/{fy}/{tx}/{ty} 滑动起终点 ·
-//         {time} 滑动实际时长 ms · {cx}/{cy} 模板图内相对百分比坐标
+//         {time} 滑动实际时长 ms · {cx}/{cy} 模板图内相对百分比坐标 ·
+//         {color} 点击处采样的十六进制颜色
 //         搜索区域不再有占位符：由模板名 #后缀（hp#l / xx#0_0_500_500）决定，引擎自动解析
 // 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制
 const DEFAULT_OP_TPL = {
@@ -553,6 +554,7 @@ const DEFAULT_OP_TPL = {
   until: '- until: {name}\n  threshold: 0.8',
   find_click_pos: '- find: {name}\n  click: [{cx}, {cy}]',
   tap: '- tap: [{x}, {y}]',
+  color: '- color: [{x}, {y}]\n  check: {color}\n  then:\n    - click:',
   swipe: '- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}',
   swipe_region: 'region:\n  fm: [{fx}, {fy}]\n  to: [{tx}, {ty}]'
 }
@@ -2650,16 +2652,53 @@ function showAltFeedback(kind, x, y, w = 0, h = 0) {
   altFeedbackTimer = setTimeout(() => { altFeedback.show = false }, 2000)
 }
 
-/** 投屏点击 → 生成 tap 记录 */
+/** 投屏点击 → 生成 tap 记录，并异步采样点击处像素追加 color 记录 */
 function setTapRecord(p) {
   const vw = videoElement.value?.videoWidth || 1920
   const vh = videoElement.value?.videoHeight || 1080
   const rx = (p.x / vw).toFixed(4)
   const ry = (p.y / vh).toFixed(4)
+  const tapId = opRecordSeq + 1
   opRecords.value = [
-    { id: ++opRecordSeq, text: `- tap [${rx}, ${ry}]`, yaml: renderOpTpl(opTpls.tap, { x: rx, y: ry }) }
+    { id: tapId, text: `- tap [${rx}, ${ry}]`, yaml: renderOpTpl(opTpls.tap, { x: rx, y: ry }) }
   ]
   showAltFeedback('tap', p.x, p.y)
+  appendColorRecord(p, rx, ry, tapId)
+}
+
+/** 采样点击处像素 → 追加 `- color clr_xxx` 操作记录。
+ *  颜色样本取自服务端截图（帧缓存 ffmpeg 解码，与引擎 color 检测同一条解码
+ *  链路，颜色体系一致）；浏览器 video→canvas 取色有 YUV→RGB 矩阵差异
+ *  （BT.601/709），可能与服务端对不上，不用。
+ *  异步返回时操作记录区已被后续操作整体替换（所有记录生成路径都是整体重置）
+ *  → 丢弃过期采样；截图偶发失败静默跳过（tap 记录已生成，不该被阻断） */
+function appendColorRecord(p, rx, ry, tapId) {
+  if (!store.deviceId) return
+  api.screenshot(store.deviceId).then(dataUrl => {
+    const img = new Image()
+    img.onload = () => {
+      if (!opRecords.value.some(r => r.id === tapId)) return
+      // 截图与视频流分辨率不一致（分辨率切换窗口）时按比例映射采样点
+      const vw = videoElement.value?.videoWidth || img.width
+      const vh = videoElement.value?.videoHeight || img.height
+      const px = Math.max(0, Math.min(img.width - 1, Math.round(p.x * img.width / vw)))
+      const py = Math.max(0, Math.min(img.height - 1, Math.round(p.y * img.height / vh)))
+      const cv = document.createElement('canvas')
+      cv.width = img.width
+      cv.height = img.height
+      const g = cv.getContext('2d', { willReadFrequently: true })
+      g.drawImage(img, 0, 0)
+      const d = g.getImageData(px, py, 1, 1).data
+      const hex = [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('')
+      opRecords.value.push({
+        id: ++opRecordSeq,
+        text: `- color clr_${hex}`,
+        yaml: renderOpTpl(opTpls.color, { x: rx, y: ry, color: hex })
+      })
+    }
+    img.onerror = () => {}
+    img.src = dataUrl
+  }).catch(() => {})
 }
 
 /** 投屏滑动 → 生成 swipe + region 记录（time 用实际滑动时长） */
