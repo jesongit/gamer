@@ -281,3 +281,9 @@ pub async fn write_all(sock: &mut tokio::net::TcpStream, data: &[u8]) -> anyhow:
     sock.write_all(data).await?;
     Ok(())
 }
+
+/// 拼进 adb shell 命令的包名安全校验：仅 [A-Za-z0-9_.]，防注入；
+/// 非包名输入（如中文应用名）返回 false，调用方据此跳过 pidof 探测等拼串操作
+pub fn is_safe_pkg(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+}

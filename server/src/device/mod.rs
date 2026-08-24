@@ -576,17 +576,17 @@ impl DeviceManager {
     }
 
     /// 拆 scrcpy 会话（编码停止/虚拟屏销毁；adb 链路保留，下次消费者触发自动重连）。
-    /// 运行守卫：脚本运行中拒绝拆除（虚拟屏销毁会杀掉屏上游戏、脚本上下文全丢），
-    /// 仅 force=true（删除设备/看门狗确认死链路/显式管理动作）可绕过
+    /// 运行守卫：脚本运行中拒绝拆除（虚拟屏销毁会杀掉屏上游戏 activity、脚本
+    /// 上下文全丢），仅 force=true（删除设备/看门狗确认死链路/显式管理动作）可绕过
     pub async fn disconnect_device(&self, id: &str, force: bool) {
         if !force && self.has_running_scripts(id) {
             warn!(device = %id, "script running, skip disconnect (use force to override)");
             return;
         }
-        let (addr, mode) = {
+        let (addr, mode, pkg) = {
             let map = self.devices.read();
             let Some(rt) = map.get(id) else { return };
-            (rt.device.addr.clone(), rt.device.screen_mode.clone())
+            (rt.device.addr.clone(), rt.device.screen_mode.clone(), rt.device.pkg.clone())
         };
         {
             let mut map = self.devices.write();
@@ -608,6 +608,20 @@ impl DeviceManager {
         // 上面的写锁 guard 已随块结束释放（guard 不能跨 await 存活，Send 约束）
         if mode == ScreenMode::Virtual {
             restore_virtual_overrides(&self.adb, &self.cfg.data_dir, &addr).await;
+            // 虚拟屏销毁只杀 activity、游戏进程不死：滞留后台被 HyperOS Greeze
+            // 冻结成空壳，下次启动 warm start 踩冻结陷阱（黑等 20~40s，见
+            // AGENTS.md 已知坑）。force-stop 清僵尸 + 释放内存，下次启动保证真
+            // 冷启动路径；镜像模式不杀（游戏跑在物理主屏，用户可能正在用）
+            if let Some(pkg) = pkg.filter(|p| adb::is_safe_pkg(p)) {
+                match self
+                    .adb
+                    .shell(&addr, &format!("am force-stop {}", pkg), Duration::from_secs(6))
+                    .await
+                {
+                    Ok(_) => info!(device = %id, pkg = %pkg, "virtual display torn down: app force-stopped (no zombie)"),
+                    Err(e) => warn!(device = %id, pkg = %pkg, "app force-stop after teardown failed: {}", e),
+                }
+            }
         }
     }
 

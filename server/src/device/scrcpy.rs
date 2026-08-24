@@ -68,6 +68,8 @@ pub const CODEC_H264: u32 = 0x68323634; // "h264"
 /// scrcpy 会话：一条已建立的设备连接
 pub struct ScrcpySession {
     pub device: Device,
+    /// adb 句柄（start_app 的 pidof 探测用；Clone 廉价，内部仅命令路径）
+    pub adb: Adb,
     pub meta: Mutex<Option<VideoMeta>>,
     /// tokio Mutex：控制 socket 写入可能跨 await
     control: tokio::sync::Mutex<Option<TcpStream>>,
@@ -259,6 +261,7 @@ impl ScrcpySession {
         let (video_tx, video_rx) = mpsc::channel::<VideoFrame>(64);
         let session = Arc::new(Self {
             device: device.clone(),
+            adb: adb.clone(),
             meta: Mutex::new(Some(meta)),
             control: tokio::sync::Mutex::new(Some(control)),
             width: Mutex::new(width),
@@ -519,7 +522,47 @@ impl ScrcpySession {
 
     /// 启动应用（new-display 模式下自动启动到虚拟屏）
     /// name 支持：包名；"+" 前缀先 force-stop；"?" 前缀按应用名搜索
-    pub async fn start_app(&self, name: &str) -> anyhow::Result<()> {
+    ///
+    /// 无前缀纯包名先探测进程状态：**冻结**（HyperOS Greeze 后台空壳/挂起，
+    /// `cached_apps_freezer_enabled=0` 管不住，见 AGENTS.md 已知坑）→ 升级 "+"
+    /// 强启（force-stop 冻结空壳极快，清掉走真冷启动）；**存活未冻结**（游戏
+    /// 正在跑）→ 保持裸 start（前台切换，不重启）；不存在 → 裸 start。
+    /// 另 spawn 启动冻结自愈看门狗：Greeze 在启动窗口（activity 切换瞬间）
+    /// 也会把进程按 tobg 冻结 → 黑屏卡死，看门狗探测冻结后裸 start 捅醒
+    pub async fn start_app(self: &Arc<Self>, name: &str) -> anyhow::Result<()> {
+        let plain = !name.starts_with('+') && !name.starts_with('?') && super::adb::is_safe_pkg(name);
+        let effective = if plain {
+            match self.app_pidof(name).await {
+                Some(pid) if self.app_frozen(&pid).await => {
+                    info!(device = %self.device.name, app = %name,
+                        "app process frozen, upgrade to force-stop start (greeze freeze trap)");
+                    format!("+{}", name)
+                }
+                _ => name.to_string(),
+            }
+        } else {
+            name.to_string()
+        };
+        // 冻结自愈看门狗：虚拟屏模式 + 可 pidof 的包名（裸包名或 "+" 前缀；
+        // "?" 按名搜索解析不出包名，跳过）
+        let pkg_for_watch = if plain {
+            Some(name.to_string())
+        } else if let Some(stripped) = name.strip_prefix('+') {
+            Some(stripped.to_string())
+        } else {
+            None
+        };
+        if let Some(pkg) = pkg_for_watch {
+            if self.device.screen_mode == ScreenMode::Virtual && super::adb::is_safe_pkg(&pkg) {
+                let s = self.clone();
+                tokio::spawn(async move { s.watch_launch_freeze(&pkg).await });
+            }
+        }
+        self.send_start_control(&effective).await
+    }
+
+    /// 发送 TYPE_START_APP 控制消息（name 原样透传，"+"/"?" 前缀由设备端解析）
+    async fn send_start_control(&self, name: &str) -> anyhow::Result<()> {
         let bytes = name.as_bytes();
         let len = bytes.len().min(255);
         let mut buf = Vec::with_capacity(1 + len);
@@ -527,6 +570,61 @@ impl ScrcpySession {
         buf.push(len as u8);
         buf.extend_from_slice(&bytes[..len]);
         self.send_control(&buf).await
+    }
+
+    /// 应用主进程 pid（无/探测失败返回 None）
+    async fn app_pidof(&self, pkg: &str) -> Option<String> {
+        self.adb
+            .shell(&self.device.addr, &format!("pidof {}", pkg), Duration::from_secs(3))
+            .await
+            .ok()
+            .and_then(|out| out.trim().split_whitespace().next().map(|s| s.to_string()))
+    }
+
+    /// Greeze 冻结探针：1 秒内 utime+stime 零增长 = 进程被冻结（cgroup freezer
+    /// 下进程完全不调度）。cgroup.freeze 文件 shell 读不到（SELinux）；帧空闲
+    /// 不可靠（挂机静止画面本就无新帧）。stat 读取失败按未冻结处理（保守）
+    async fn app_frozen(&self, pid: &str) -> bool {
+        let Some(a) = self.read_proc_stat(pid).await else { return false };
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        match self.read_proc_stat(pid).await {
+            Some(b) => a == b,
+            None => false,
+        }
+    }
+
+    /// 读 /proc/<pid>/stat 的 utime+stime 总 tick 数
+    async fn read_proc_stat(&self, pid: &str) -> Option<u64> {
+        let out = self
+            .adb
+            .shell(&self.device.addr, &format!("cat /proc/{}/stat", pid), Duration::from_secs(3))
+            .await
+            .ok()?;
+        parse_stat_cpu_ticks(&out)
+    }
+
+    /// 启动后冻结自愈：+6s 首查、之后每 +8s 复查，探测到冻结就裸 start 捅醒
+    /// （Activity Start 会强制 THAW，实测有效；不走 start_app 以免其 pidof
+    /// 判定叠加 "+" 又把刚捅醒的进程 force-stop 掉）。两捅仍冻结 → 告警放弃，
+    /// 用户手动重点击即走 "+" 强启兜底
+    async fn watch_launch_freeze(self: Arc<Self>, pkg: &str) {
+        let mut attempt = 0u32;
+        loop {
+            tokio::time::sleep(Duration::from_secs(if attempt == 0 { 6 } else { 8 })).await;
+            let Some(pid) = self.app_pidof(pkg).await else { return };
+            if !self.app_frozen(&pid).await {
+                return; // 正常启动 / 已恢复 / 会话已拆
+            }
+            attempt += 1;
+            if attempt > 2 {
+                warn!(device = %self.device.name, pkg = %pkg,
+                    "app still frozen after 2 pokes, manual restart (click again) recommended");
+                return;
+            }
+            warn!(device = %self.device.name, pkg = %pkg, attempt,
+                "app frozen in launch window (greeze), poking with plain start to thaw");
+            let _ = self.send_start_control(pkg).await;
+        }
     }
 }
 
@@ -538,6 +636,34 @@ fn parse_vd_res(s: &str) -> (u32, u32) {
         (w, h)
     } else {
         (1920, 1080)
+    }
+}
+
+/// /proc/<pid>/stat 的 utime+stime（第 14/15 字段，单位 tick）。comm 可含空格，
+/// 以最后一个 ')' 切分；')' 前还有 "pid (" 两段，切分后索引 0=state（第 3 字段），
+/// 故 utime=索引 11、stime=索引 12。解析失败返回 None（调用方按未冻结处理）
+fn parse_stat_cpu_ticks(stat: &str) -> Option<u64> {
+    let (_, rest) = stat.rsplit_once(')')?;
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_stat_cpu_ticks;
+
+    /// /proc stat 解析：comm 带空格/括号安全、字段偏移正确、垃圾输入返回 None
+    #[test]
+    fn proc_stat_cpu_ticks() {
+        // 真实格式：pid (comm) 之后索引 0=state(第3字段) … utime=索引11 stime=索引12
+        let s = "2865 (com.miHoYo.hkrpg) R 1209 1209 1209 0 0 4148 256 0 12 3 25671 25835 0 0 3 0 12049 0";
+        assert_eq!(parse_stat_cpu_ticks(s), Some(25671 + 25835));
+        // comm 带空格 + 括号（取最后一个 ')' 之后）
+        let s2 = "1 (some (weird) name) R 0 0 0 0 0 1 0 0 0 0 5 7 0 0 0 0 99 0";
+        assert_eq!(parse_stat_cpu_ticks(s2), Some(12));
+        // 垃圾/截断输入 → None
+        assert_eq!(parse_stat_cpu_ticks("no parens"), None);
+        assert_eq!(parse_stat_cpu_ticks("1 (x) R 1 2"), None);
     }
 }
 

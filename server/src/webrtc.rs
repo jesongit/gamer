@@ -1240,7 +1240,7 @@ fn verify_rtp_rebuild(frame: &VideoFrame, payloads: &[Bytes]) {
 /// DataChannel 控制消息协议（JSON）
 /// { "type": "tap"|"swipe"|"key"|"press"|"text"|"scroll"|"clipboard"|"start_app"|"rotate"|"back", ... }
 /// viewer 级消息：{"type":"reset_video"}（请求 IDR）、{"type":"audio","on":bool}（音频转发开关）
-async fn handle_control_msg(session: &ScrcpySession, audio_on: &Arc<std::sync::atomic::AtomicBool>, data: &[u8]) -> anyhow::Result<()> {
+async fn handle_control_msg(session: &Arc<ScrcpySession>, audio_on: &Arc<std::sync::atomic::AtomicBool>, data: &[u8]) -> anyhow::Result<()> {
     let msg: serde_json::Value = serde_json::from_slice(data)?;
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match t {
