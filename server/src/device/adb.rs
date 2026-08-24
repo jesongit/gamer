@@ -30,13 +30,16 @@ impl Adb {
         let mut err = String::new();
         let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
         let (mut out_buf, mut err_buf) = (Vec::new(), Vec::new());
-        tokio::select! {
-            r = tokio::time::timeout(timeout, async {
-                so.read_to_end(&mut out_buf).await?;
-                se.read_to_end(&mut err_buf).await?;
-                anyhow::Ok(())
-            }) => { r??; }
-            _ = tokio::time::sleep(timeout) => {
+        // 超时必须 kill 子进程：泄漏的 adb.exe 会持有 USB transport，可能卡死后续 adb 调用。
+        // 不用 select! 双分支（timeout(inner) vs sleep 同时到期时竞态走 Elapsed 分支：
+        // 报裸 "deadline has elapsed" 且不 kill）
+        match tokio::time::timeout(timeout, async {
+            so.read_to_end(&mut out_buf).await?;
+            se.read_to_end(&mut err_buf).await?;
+            anyhow::Ok(())
+        }).await {
+            Ok(r) => { r?; }
+            Err(_) => {
                 let _ = child.kill().await;
                 anyhow::bail!("adb timeout: {:?}", args);
             }
@@ -58,13 +61,14 @@ impl Adb {
         let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
         let mut buf = Vec::new();
         let mut err_buf = Vec::new();
-        tokio::select! {
-            r = tokio::time::timeout(timeout, async {
-                so.read_to_end(&mut buf).await?;
-                se.read_to_end(&mut err_buf).await?;
-                anyhow::Ok(())
-            }) => { r??; }
-            _ = tokio::time::sleep(timeout) => {
+        // 同 run()：超时统一 kill 子进程 + 明确报错（不用 select! 双分支，见 run() 注释）
+        match tokio::time::timeout(timeout, async {
+            so.read_to_end(&mut buf).await?;
+            se.read_to_end(&mut err_buf).await?;
+            anyhow::Ok(())
+        }).await {
+            Ok(r) => { r?; }
+            Err(_) => {
                 let _ = child.kill().await;
                 anyhow::bail!("adb timeout: {:?}", args);
             }

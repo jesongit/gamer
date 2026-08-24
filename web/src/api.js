@@ -68,6 +68,8 @@ export const api = {
   runScript: (id, deviceId, startIndex) => req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, { device_id: deviceId, start_index: startIndex || 0 }),
   stopScript: (id) => req('POST', `/api/scripts/${encodeURIComponent(id)}/stop`),
   scriptStatus: (id) => req('GET', `/api/scripts/${encodeURIComponent(id)}/status`),
+  // 设备当前运行中的脚本（页面刷新后恢复运行态用）→ {running, script_id?, script_name?}
+  deviceRun: (id) => req('GET', `/api/devices/${id}/run`),
   // 导出整分区快照 zip（yaml/ + tmpl/ 全量，?pkg= 指定分区）→ { blob, filename }
   exportPartition: async (pkg) => {
     const r = await fetch(`/api/scripts/export?pkg=${encodeURIComponent(pkg)}`)

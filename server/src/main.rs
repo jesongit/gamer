@@ -79,11 +79,18 @@ async fn main() -> anyhow::Result<()> {
     let scheduler = Arc::new(scheduler::Scheduler::new(db.clone(), devices.clone(), viewers.clone(), scripts.clone()));
     scheduler.start().await;
 
-    // HTTP + WebSocket API
-    let app = api::build_router(db, devices, scheduler, cfg.clone(), viewers, scripts);
+    // HTTP + WebSocket API；优雅停机信号（POST /api/shutdown 拆完会话后触发）
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let app = api::build_router(db, devices, scheduler, cfg.clone(), viewers, scripts, shutdown_tx);
     let listener = TcpListener::bind(cfg.listen_addr()).await?;
     info!("GameBot server ready on http://{}", cfg.listen_addr());
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.changed().await;
+            info!("graceful shutdown: http server draining");
+        })
+        .await?;
+    info!("server exited");
 
     Ok(())
 }

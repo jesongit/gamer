@@ -81,11 +81,11 @@ log_level: info        # 日志级别：info=精简（默认） / debug=详细</
           <div class="help-block">
             <div class="hb-title">🔍 找图 find</div>
             <pre class="hb-code mono">- find: sign_btn.png     # 查找模板（timeout 必须 > 0）
-  interval: 500          # 检测间隔 ms（默认 500）
+  interval: 500          # 检测间隔 ms（默认 500，一轮未命中后隔此重试）
   timeout: 6000          # 超时 ms（默认 6000，一直找请用 until）
   click: true            # 找到后点击模板中心（默认 true，false 不点击）
   threshold: 0.85        # 匹配阈值（默认 0.8）
-  region: a              # 搜索区域（默认 a=全屏）
+  region: a              # 搜索区域（默认 a=全屏；模板名可带 #后缀 区域各自指定）
   then:                  # 找到后执行
     - log: "找到并点击"
   else:                  # 超时未找到执行
@@ -96,8 +96,22 @@ log_level: info        # 日志级别：info=精简（默认） / debug=详细</
   else:
     - log: "对话框没出现"
 
-- until: done.png        # 一直等到模板出现（等价于旧 find timeout: 0，永不超时）
-  interval: 500          # 参数与 find 一致：click/threshold/region/then（else 不会执行）</pre>
+- find: a.png, b.png     # 多模板：逗号分隔（或列表 [a.png, b.png]）
+  and_or: and            # and=全部找到才命中（默认，未命中即停不匹配后面）
+  click: true            # and 点第一个模板；or（until 默认）点命中的那个
+                         # 各模板区域不同 → 名字带 #后缀：hp#l.png（左半）xx#0_0_500_500.png（左上 1/4）
+                         # 脚本也可写短名 login.png（引擎自动解析唯一 login#*.png，区域照常生效）
+
+- find: a.png, b.png     # then 按命中模板分支：单键「模板名: 步骤列表」= 专属分支，and/or 通用
+  and_or: or             # or：命中谁走谁；and：全命中取书写顺序第一个分支
+  then:
+    - b.png:             # 命中的是 b.png 走这里
+        - log: "命中了 b"
+    - log: "兜底"        # 命中的模板没有专属分支时执行（即原 then 语义）
+
+- until: page_a.png, page_b.png   # 等到模板出现（and_or 默认 or 任一命中）
+  timeout: 1800000       # 超时 ms（默认 30 分钟，0=永不超时）
+  interval: 500          # 其余参数与 find 一致</pre>
           </div>
           <div class="help-block">
             <div class="hb-title">🔁 逻辑</div>

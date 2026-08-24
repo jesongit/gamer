@@ -51,6 +51,172 @@ struct IdleState {
     last_wake: std::time::Instant,
 }
 
+// ---------- 虚拟屏会话的设备侧状态改写（freezer 禁用 + 媒体静音） ----------
+
+/// 崩溃自愈标记（data/pending_restore.json，键 = adb serial）：改写设备设置
+/// **之前**落盘、恢复之后删除；进程被硬杀时设备侧不会自己还原，由服务启动
+/// 时读该文件兜底恢复。
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct PendingRestore {
+    /// cached_apps_freezer_enabled 原值；"null" = 原本未设置（恢复用 settings delete）
+    freezer: Option<String>,
+    /// STREAM_MUSIC 原音量索引
+    media_volume: Option<u32>,
+}
+
+fn pending_restore_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("pending_restore.json")
+}
+
+fn load_pending(data_dir: &std::path::Path) -> HashMap<String, PendingRestore> {
+    std::fs::read_to_string(pending_restore_path(data_dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_pending(data_dir: &std::path::Path, map: &HashMap<String, PendingRestore>) {
+    let p = pending_restore_path(data_dir);
+    if map.is_empty() {
+        let _ = std::fs::remove_file(p);
+        return;
+    }
+    match serde_json::to_string_pretty(map) {
+        Ok(s) => {
+            if let Err(e) = std::fs::write(&p, s) {
+                warn!("pending_restore.json 写入失败: {}", e);
+            }
+        }
+        Err(e) => warn!("pending_restore.json 序列化失败: {}", e),
+    }
+}
+
+/// 读 STREAM_MUSIC 音量索引。注意：HyperOS 上 `media` 命令不存在，
+/// `cmd media_session volume --set/--adj` 报成功但实际不生效（实测），
+/// 必须走 `cmd audio set-volume`。
+async fn get_media_volume(adb: &Adb, addr: &str) -> Option<u32> {
+    let out = adb
+        .shell(addr, "cmd audio get-stream-volume 3", Duration::from_secs(8))
+        .await
+        .ok()?;
+    // 输出形如 "AudioManager.getStreamVolume(3) -> 54"
+    let num = out
+        .split("-> ")
+        .nth(1)?
+        .trim()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()?;
+    num.parse().ok()
+}
+
+/// 虚拟屏会话建立时的设备侧改写：
+/// ① cached_apps_freezer_enabled=0——Android 15 主屏真睡眠时 cached apps
+///   freezer 会把虚拟屏应用整体冻结（do_freezer_trap，scrcpy #5604），禁用后
+///   主屏可自然睡眠/唤醒，用户随时能按电源键用手机（取代旧的软关屏 +
+///   stay_awake + 周期唤醒自愈，那套机制用户永远点不亮主屏）；
+/// ② STREAM_MUSIC 静音——audio_source=output 的 remote submix 重定向在
+///   HyperOS 上静默失效（扬声器照常外放，见 AGENTS 已知坑），音量置 0 是唯一
+///   可靠的"手机不响"手段（副作用：浏览器音频大概率随媒体音量一起变静）。
+/// 改写前先落盘标记，disconnect_device 统一恢复。
+async fn apply_virtual_overrides(adb: &Adb, data_dir: &std::path::Path, addr: &str) {
+    if addr.is_empty() {
+        return;
+    }
+    let mut map = load_pending(data_dir);
+    map.entry(addr.to_string()).or_default();
+
+    if map[addr].freezer.is_none() {
+        match adb
+            .shell(addr, "settings get global cached_apps_freezer_enabled", Duration::from_secs(8))
+            .await
+        {
+            Ok(cur) => {
+                let cur = cur.trim().to_string();
+                if cur != "0" {
+                    map.get_mut(addr).unwrap().freezer = Some(cur);
+                    save_pending(data_dir, &map);
+                    if let Err(e) = adb
+                        .shell(addr, "settings put global cached_apps_freezer_enabled 0", Duration::from_secs(8))
+                        .await
+                    {
+                        warn!(addr = %addr, err = %e, "禁用 freezer 失败（主屏睡眠时虚拟屏应用可能被冻结）");
+                    }
+                }
+            }
+            Err(e) => warn!(addr = %addr, err = %e, "读取 freezer 设置失败"),
+        }
+    }
+
+    if map[addr].media_volume.is_none() {
+        match get_media_volume(adb, addr).await {
+            Some(v) if v > 0 => {
+                map.get_mut(addr).unwrap().media_volume = Some(v);
+                save_pending(data_dir, &map);
+                if let Err(e) = adb
+                    .shell(addr, "cmd audio set-volume 3 0", Duration::from_secs(8))
+                    .await
+                {
+                    warn!(addr = %addr, err = %e, "媒体音量静音失败");
+                }
+            }
+            Some(_) => {}
+            None => warn!(addr = %addr, "读取媒体音量失败（跳过静音）"),
+        }
+    }
+    info!(addr = %addr, "虚拟屏会话设备侧改写完成（freezer 已禁用 + 媒体已静音）");
+}
+
+/// 恢复设备侧改写（disconnect_device 统一调用；无标记则零操作）。
+/// 恢复失败（设备不在线等）保留标记，下次启动自愈/会话结束时再试。
+async fn restore_virtual_overrides(adb: &Adb, data_dir: &std::path::Path, addr: &str) {
+    if addr.is_empty() {
+        return;
+    }
+    let mut map = load_pending(data_dir);
+    let Some(mut entry) = map.remove(addr) else { return };
+    let mut ok = true;
+    if let Some(v) = entry.freezer.take() {
+        let cmd = if v == "null" {
+            "settings delete global cached_apps_freezer_enabled".to_string()
+        } else {
+            format!("settings put global cached_apps_freezer_enabled {}", v)
+        };
+        if let Err(e) = adb.shell(addr, &cmd, Duration::from_secs(8)).await {
+            warn!(addr = %addr, err = %e, "恢复 freezer 设置失败");
+            entry.freezer = Some(v);
+            ok = false;
+        }
+    }
+    if let Some(vol) = entry.media_volume.take() {
+        if let Err(e) = adb
+            .shell(addr, &format!("cmd audio set-volume 3 {}", vol), Duration::from_secs(8))
+            .await
+        {
+            warn!(addr = %addr, err = %e, "恢复媒体音量失败");
+            entry.media_volume = Some(vol);
+            ok = false;
+        }
+    }
+    if !ok {
+        map.insert(addr.to_string(), entry);
+    } else {
+        info!(addr = %addr, "虚拟屏会话设备侧改写已恢复（freezer + 媒体音量）");
+    }
+    save_pending(data_dir, &map);
+}
+
+/// 启动自愈：进程曾被硬杀时设备侧改写无人恢复，读标记逐设备还原
+async fn restore_all_pending(adb: &Adb, data_dir: &std::path::Path) {
+    let map = load_pending(data_dir);
+    if map.is_empty() {
+        return;
+    }
+    warn!("发现 {} 条设备侧改写残留（上次进程异常退出？），正在恢复", map.len());
+    for addr in map.keys().cloned().collect::<Vec<_>>() {
+        restore_virtual_overrides(adb, data_dir, &addr).await;
+    }
+}
+
 /// 设备管理器
 pub struct DeviceManager {
     pub db: Db,
@@ -97,6 +263,13 @@ impl DeviceManager {
             );
         }
         info!("device manager started, {} devices registered", self.devices.read().len());
+
+        // 崩溃自愈：进程曾被硬杀时，虚拟屏会话的设备侧改写（freezer/媒体音量）
+        // 无人恢复——读 pending_restore.json 标记逐设备还原（设备不在线则留待下次）
+        let dm0 = self.clone();
+        tokio::spawn(async move {
+            restore_all_pending(&dm0.adb, &dm0.cfg.data_dir).await;
+        });
 
         // 启动自举 + adb 保活：低功耗空闲模式的基础——adb 链路常连
         // （WiFi/emu 设备周期补 adb connect，幂等），scrcpy 会话只在
@@ -317,10 +490,6 @@ impl DeviceManager {
         }
         info!(device = %device.name, "online");
 
-        // 虚拟屏音频：scrcpy 以 audio_source=output 捕获虚拟屏音频（路由到
-        // remote_submix），不进真机扬声器——不再需要静音媒体音量（静音会
-        // 误伤真机其他用途，如用户自己听歌）。
-
         // 主屏保活仅限**镜像会话**：镜像内容来自物理屏管线，屏幕休眠后显示管线
         // 停止出帧，流静默定格（"连接后画面卡住"）。
         // 策略：连接时把 screen_off_timeout 调到最大 + 唤醒一次（解锁尽力而为），
@@ -364,39 +533,17 @@ impl DeviceManager {
                 info!(device = %dn2, orig_timeout = %orig, "screen keepalive stopped, screen_off_timeout restored");
             });
         } else {
-            // 虚拟屏模式：主屏改**面板级软关屏**（不再留物理屏点亮，也不再放任
-            // 系统超时真睡眠）。Android 15+ 主屏真睡眠（power 键/超时）时，副屏
-            // 应用会在 ~10-30s 无交互后被系统整体冻结（do_freezer_trap，实测
-            // 星穹铁道账号弹窗必现：输入注入超时、零渲染、ANR trace 全线程
-            // freezer trap，见 AGENTS.md 已知坑）——唤醒主屏即可解冻。
-            // 软关屏 = 面板熄灭但逻辑显示状态 ON，副屏应用保持活跃，与原生
-            // scrcpy --turn-screen-off 行为一致；配合 scrcpy 参数 stay_awake=true
-            // （server 持唤醒锁，系统不会超时再睡眠）。用户按 power 键强制睡眠
-            // 的自愈由 idle_power_loop 周期检测兜底。
-            let adb2 = self.adb.clone();
-            let serial2 = device.addr.clone();
-            let s3 = session.clone();
-            let dn2 = device_name.clone();
-            tokio::spawn(async move {
-                // 已真睡眠则先唤醒（睡眠态下软关屏无效）；已软关屏则 224 不点亮
-                // 面板（面板电源与唤醒状态正交），均幂等
-                let wakefulness = adb2
-                    .shell(&serial2, "dumpsys power | grep mWakefulness=", Duration::from_secs(8))
-                    .await
-                    .unwrap_or_default();
-                if !wakefulness.contains("Awake") {
-                    let _ = adb2.shell(&serial2, "input keyevent 224", Duration::from_secs(8)).await;
-                    let _ = adb2.shell(&serial2, "wm dismiss-keyguard", Duration::from_secs(8)).await;
-                    // 给系统 ~600ms 完成唤醒再软关屏
-                    tokio::time::sleep(Duration::from_millis(600)).await;
-                }
-                if s3.connected.load(std::sync::atomic::Ordering::SeqCst) {
-                    match s3.set_display_power(false).await {
-                        Ok(_) => info!(device = %dn2, "virtual display: main screen soft-off (panel off, display state on)"),
-                        Err(e) => warn!(device = %dn2, err = %e, "soft screen-off failed (apps on virtual display may freeze)"),
-                    }
-                }
-            });
+            // 虚拟屏模式：不动主屏电源、不传 stay_awake——防冻结改为禁用
+            // cached apps freezer（Android 15 主屏真睡眠时副屏应用会被 freezer
+            // 整体冻结，do_freezer_trap，scrcpy #5604；实测软关屏 + stay_awake
+            // 的旧方案代价是主屏永远无法点亮）。禁用后主屏自然睡眠/唤醒，
+            // 用户随时可按电源键正常使用手机。同时媒体音量置 0：remote submix
+            // 重定向在 HyperOS 上静默失效（扬声器照常外放，见 AGENTS 已知坑），
+            // 静音是唯一可靠的"手机不响"手段（浏览器音频大概率随之变静）。
+            // 两者改写前落盘 pending_restore.json，disconnect 统一恢复。
+            let addr = device.addr.clone();
+            apply_virtual_overrides(&self.adb, &self.cfg.data_dir, &addr).await;
+            info!(device = %device.name, "virtual display: main screen natural (freezer disabled + media muted)");
         }
         Ok(())
     }
@@ -409,21 +556,59 @@ impl DeviceManager {
             warn!(device = %id, "script running, skip disconnect (use force to override)");
             return;
         }
-        let mut map = self.devices.write();
-        let Some(rt) = map.get_mut(id) else { return };
-        // 立即标记会话结束：屏幕保活任务 / 帧消费任务据此退出，及时恢复熄屏超时
-        if let Some(s) = &rt.session {
-            s.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+        let (addr, mode) = {
+            let map = self.devices.read();
+            let Some(rt) = map.get(id) else { return };
+            (rt.device.addr.clone(), rt.device.screen_mode.clone())
+        };
+        {
+            let mut map = self.devices.write();
+            let Some(rt) = map.get_mut(id) else { return };
+            // 立即标记会话结束：屏幕保活任务 / 帧消费任务据此退出，及时恢复熄屏超时
+            if let Some(s) = &rt.session {
+                s.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            // 停止帧缓存（释放引用）；按需解码无常驻线程/子进程，无需额外清理
+            rt.frame_cache = None;
+            rt.session = None;
+            rt.frames = None;
+            rt.audio_frames = None;
+            rt.frame_cache = None;
+            rt.status = DeviceStatus::Offline;
         }
-        // 停止帧缓存（释放引用）；按需解码无常驻线程/子进程，无需额外清理
-        rt.frame_cache = None;
-        rt.session = None;
-        rt.frames = None;
-        rt.audio_frames = None;
-        rt.frame_cache = None;
-        rt.status = DeviceStatus::Offline;
-        drop(map);
         // 注意：scrcpy server 端 cleanup=true，socket 关闭即清理
+        // 恢复虚拟屏会话的设备侧改写（freezer/媒体音量；无标记则零操作）。
+        // 上面的写锁 guard 已随块结束释放（guard 不能跨 await 存活，Send 约束）
+        if mode == ScreenMode::Virtual {
+            restore_virtual_overrides(&self.adb, &self.cfg.data_dir, &addr).await;
+        }
+    }
+
+    /// 优雅停机（POST /api/shutdown → gamer.ps1 stop/rebuild 先调再兜底硬杀）：
+    /// force 拆所有 scrcpy 会话并清 reverse 隧道——control socket 随会话 drop 关闭，
+    /// 设备端 server（cleanup=true）退出、adb shell 子进程正常收尾；硬杀进程则这些
+    /// 全变孤儿，曾有孤儿 teardown 期 adb 短暂楔死后续连接的坑（见 AGENTS.md 已知坑）
+    pub async fn shutdown_all(&self) {
+        let snap = self.list_snapshot_full();
+        for (id, d, status) in &snap {
+            if *status != DeviceStatus::Online {
+                continue;
+            }
+            info!(device = %d.name, "shutdown: disconnecting scrcpy session");
+            self.disconnect_device(id, true).await;
+        }
+        // 留退场时间：control socket 关闭 → 设备端 server cleanup 需要一点传播时间
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // 清残留 reverse 隧道（下次 connect 的 --remove-all 也会清，这里主动清更干净）
+        for (_, d, _) in &snap {
+            if d.addr.is_empty() {
+                continue;
+            }
+            let _ = self
+                .adb
+                .run(&["-s", &d.addr, "reverse", "--remove-all"], Duration::from_secs(5))
+                .await;
+        }
     }
 
     /// 脚本运行开始：设备运行计数 +1（空闲低功耗守卫）+ 消费者出现
@@ -486,41 +671,6 @@ impl DeviceManager {
         });
     }
 
-    /// 虚拟屏防冻结自愈（idle_power_loop 每个周期调用，有消费者时）：
-    /// 主屏被真睡眠（用户按 power 键 / 厂商行为覆盖唤醒锁）时，副屏应用会被
-    /// 系统冻结（见 connect_device 虚拟屏分支注释）。检测 mWakefulness=Asleep →
-    /// 唤醒（唤醒本身即可解冻，实测）+ 重新软关屏恢复"面板关/逻辑开"状态。
-    /// Awake 时零成本返回（grep 在设备端执行，只回传一行）。镜像模式不适用。
-    async fn heal_virtual_screen(&self, id: &str) {
-        let Some((device, _, _)) = self.snapshot(id) else { return };
-        if device.screen_mode != ScreenMode::Virtual || device.addr.is_empty() {
-            return;
-        }
-        let Some(session) = self.session(id) else { return };
-        let Ok(out) = self
-            .adb
-            .shell(&device.addr, "dumpsys power | grep mWakefulness=", Duration::from_secs(6))
-            .await
-        else {
-            return;
-        };
-        if out.contains("Awake") {
-            return;
-        }
-        warn!(device = %device.name, "main display asleep while virtual session active (apps frozen?), waking + re-applying soft-off");
-        let serial = device.addr.clone();
-        let adb = self.adb.clone();
-        let _ = adb.shell(&serial, "input keyevent 224", Duration::from_secs(6)).await;
-        let _ = adb.shell(&serial, "wm dismiss-keyguard", Duration::from_secs(6)).await;
-        // 给系统 ~600ms 完成唤醒再软关屏（睡眠态下 requestDisplayPower 无效）
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        if session.connected.load(std::sync::atomic::Ordering::SeqCst) {
-            if let Err(e) = session.set_display_power(false).await {
-                warn!(device = %device.name, err = %e, "re-apply soft screen-off failed");
-            }
-        }
-    }
-
     /// 空闲低功耗循环（start 时 spawn，10s 周期）：会话存活的唯一管理者。
     /// 无 viewer 且无脚本运行持续 cfg.idle_power_secs 秒 → 虚拟屏拆 scrcpy
     /// 会话（adb 保留，下次消费者自动重连 ~2-4s）；镜像模式关物理屏
@@ -532,17 +682,6 @@ impl DeviceManager {
             tick.tick().await;
             if self.cfg.idle_power_secs == 0 {
                 self.idle.lock().unwrap().clear();
-                // 低功耗管理关闭时仍保留虚拟屏防冻结自愈（正确性问题，非省电特性）
-                for (id, device, status) in self.list_snapshot_full() {
-                    let has_consumers =
-                        self.viewers.lock().unwrap().contains_key(&id) || self.has_running_scripts(&id);
-                    if status == DeviceStatus::Online
-                        && device.screen_mode == ScreenMode::Virtual
-                        && has_consumers
-                    {
-                        self.heal_virtual_screen(&id).await;
-                    }
-                }
                 continue;
             }
             for (id, device, status) in self.list_snapshot_full() {
@@ -571,11 +710,6 @@ impl DeviceManager {
                     // 镜像模式：保活补醒（30s 节流）或唤醒已关的屏
                     if device.screen_mode == ScreenMode::Mirror && (slept || wake_expired) {
                         self.wake_screen(&id);
-                    }
-                    // 虚拟屏模式：主屏被真睡眠（用户按 power 键等）时副屏应用会被
-                    // 冻结，周期检测唤醒态并自愈（唤醒即解冻 + 重下软关屏）
-                    if device.screen_mode == ScreenMode::Virtual {
-                        self.heal_virtual_screen(&id).await;
                     }
                     continue;
                 }

@@ -249,7 +249,20 @@ function Stop-Backend {
         Write-Host "后端: 没有运行中的 gamer-server 进程（端口 $Port 无监听且无匹配进程名）" -ForegroundColor Yellow
         return $false
     }
-    foreach ($p in $procs) {
+    # 优雅停机：先调 /api/shutdown 让服务端拆 scrcpy 会话/清 adb reverse 隧道再退出
+    # （硬杀会留孤儿 adb 子进程，曾致 adb 短暂楔死后续连接，见 AGENTS.md 已知坑）。
+    # curl 失败/超时无所谓——下面照旧兜底硬杀
+    if (Test-PortListening $Port) {
+        Write-Host "后端: 请求优雅停机（POST /api/shutdown）..."
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & curl.exe -s -m 20 -X POST "http://127.0.0.1:$Port/api/shutdown" 2>$null | Out-Null } catch {}
+        finally { $ErrorActionPreference = $prev }
+        # 响应返回时会话已拆完，通常随即自然退出；稍等未退再走硬杀
+        $deadline = (Get-Date).AddSeconds(5)
+        while (@(Get-BackendProcs).Count -gt 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+    }
+    foreach ($p in @(Get-BackendProcs)) {
         Write-Host ("后端: 停止进程 {0} (PID {1}) ..." -f $p.ProcessName, $p.Id)
         Stop-Process -Id $p.Id -ErrorAction SilentlyContinue
     }

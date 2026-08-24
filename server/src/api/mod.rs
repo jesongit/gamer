@@ -30,6 +30,13 @@ use crate::scheduler::{next_run, Scheduler};
 use crate::scripts::ScriptStore;
 use crate::store::{Db, Device, LogEntry, ScreenMode, Task};
 
+/// 脚本运行句柄：停止标志 + 运行设备（run_stops 的表项）
+#[derive(Clone)]
+pub struct RunHandle {
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
+    pub device_id: String,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
@@ -39,13 +46,16 @@ pub struct AppState {
     pub cfg: Config,
     /// 脚本文件存储（data/scripts/<package>/）
     pub scripts: Arc<ScriptStore>,
-    /// 脚本运行停止标志
-    pub run_stops: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    /// 脚本运行注册表：script_id → 运行句柄（条目存在 = 正在运行）。
+    /// device_id 供页面刷新后按设备查询运行中的脚本（恢复运行态）
+    pub run_stops: Arc<std::sync::Mutex<std::collections::HashMap<String, RunHandle>>>,
     /// 每设备的活跃 viewer（WebRTC 会话）注册表（main.rs 创建，与 Scheduler 共享）：
     /// 同一设备只允许一个活跃 viewer——新连接踢掉旧连接（旧 pusher 停止 + 旧 peer 关闭），
     /// 避免多连接多推流导致浏览器端 srcObject 串流/资源浪费。
     /// control_dc 字段供引擎反向推送脚本可视化事件（tap/swipe/匹配命中）。
     pub viewers: crate::webrtc::ViewerMap,
+    /// 优雅停机信号（POST /api/shutdown 拆完会话后触发，main 的 axum 优雅退出）
+    pub shutdown: tokio::sync::watch::Sender<bool>,
 }
 
 pub fn build_router(
@@ -55,6 +65,7 @@ pub fn build_router(
     cfg: Config,
     viewers: crate::webrtc::ViewerMap,
     scripts: Arc<ScriptStore>,
+    shutdown: tokio::sync::watch::Sender<bool>,
 ) -> Router {
     let runner = Arc::new(Runner::new(db.clone(), devices.clone(), viewers.clone(), scripts.clone()));
     let state = AppState {
@@ -66,6 +77,7 @@ pub fn build_router(
         scripts,
         run_stops: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         viewers,
+        shutdown,
     };
 
     // 视频静默看门狗：自动重连断流设备（见 spawn_watchdog）
@@ -90,6 +102,7 @@ pub fn build_router(
         .route("/api/scripts/:id/run", post(api_run_script))
         .route("/api/scripts/:id/stop", post(api_stop_script))
         .route("/api/scripts/:id/status", get(api_script_status))
+        .route("/api/devices/:id/run", get(api_device_run))
         .route("/api/scripts/export", get(api_export_partition))
         .route("/api/scripts/import", post(api_import_script))
         .route("/api/tasks", get(api_list_tasks).post(api_save_task))
@@ -97,6 +110,7 @@ pub fn build_router(
         .route("/api/tasks/:id/run", post(api_run_task_now))
         .route("/api/logs", get(api_list_logs).delete(api_clear_logs))
         .route("/api/op-templates", get(api_op_templates))
+        .route("/api/shutdown", post(api_shutdown))
         .route("/ws/device/:id", get(ws::ws_device))
         .fallback_service(ServeDir::new("./web-dist").fallback(ServeDir::new("./web-dist/index.html")))
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
@@ -611,7 +625,11 @@ async fn api_list_templates(State(st): State<AppState>, Query(q): Query<PkgQuery
                 let fname = e.file_name().to_string_lossy().to_string();
                 if e.path().is_file() && !fname.starts_with('.') {
                     let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                    out.push(serde_json::json!({"name": fname, "size": size, "pkg": pkg}));
+                    // mtime（unix 秒）：前端按修改时间倒序排模板列表
+                    let mtime = e.metadata().and_then(|m| m.modified()).ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs()).unwrap_or(0);
+                    out.push(serde_json::json!({"name": fname, "size": size, "mtime": mtime, "pkg": pkg}));
                 }
             }
         }
@@ -874,7 +892,7 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
         return err_response(StatusCode::BAD_GATEWAY, &format!("设备连接失败: {}", e));
     }
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    st.run_stops.lock().unwrap().insert(id.clone(), stop.clone());
+    st.run_stops.lock().unwrap().insert(id.clone(), RunHandle { stop: stop.clone(), device_id: req.device_id.clone() });
     // 设备运行计数 +1（空闲断开守卫；spawn 结束时 run_end 归零）
     st.devices.run_begin(&req.device_id);
     let runner = st.runner.clone();
@@ -909,7 +927,7 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
         // 运行结束：移除停止标志（条目存在与否同时作为"脚本是否在运行"的状态依据）
         let mut stops = run_stops.lock().unwrap();
         if let Some(cur) = stops.get(&script_id) {
-            if Arc::ptr_eq(cur, &stop) {
+            if Arc::ptr_eq(&cur.stop, &stop) {
                 stops.remove(&script_id);
             }
         }
@@ -918,8 +936,8 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
 }
 
 async fn api_stop_script(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    if let Some(stop) = st.run_stops.lock().unwrap().get(&id) {
-        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    if let Some(h) = st.run_stops.lock().unwrap().get(&id) {
+        h.stop.store(true, std::sync::atomic::Ordering::SeqCst);
     }
     Json(serde_json::json!({"ok": true})).into_response()
 }
@@ -928,6 +946,31 @@ async fn api_stop_script(State(st): State<AppState>, Path(id): Path<String>) -> 
 async fn api_script_status(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     let running = st.run_stops.lock().unwrap().contains_key(&id);
     Json(serde_json::json!({"running": running})).into_response()
+}
+
+/// 查询设备当前运行中的脚本（页面刷新后恢复运行态用）：
+/// 运行注册表按 device_id 反查首个运行中的脚本（同设备并发多脚本时取任一）
+async fn api_device_run(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    let found = st
+        .run_stops
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(_, h)| h.device_id == id)
+        .map(|(sid, _)| sid.clone());
+    match found {
+        Some(script_id) => {
+            let name = st
+                .scripts
+                .get(&script_id)
+                .ok()
+                .flatten()
+                .map(|s| s.name)
+                .unwrap_or_else(|| script_id.rsplit('/').next().unwrap_or(&script_id).trim_end_matches(".yml").trim_end_matches(".yaml").to_string());
+            Json(serde_json::json!({"running": true, "script_id": script_id, "script_name": name})).into_response()
+        }
+        None => Json(serde_json::json!({"running": false})).into_response(),
+    }
 }
 
 // ---------- 定时任务 ----------
@@ -1032,6 +1075,27 @@ async fn api_clear_logs(State(st): State<AppState>) -> Response {
 /// 操作记录 YAML 模板（前端 alt 模式追加到编辑区用，来源 config.toml [op_templates]）
 async fn api_op_templates(State(st): State<AppState>) -> Response {
     Json(st.cfg.op_templates.clone()).into_response()
+}
+
+/// 优雅停机（gamer.ps1 stop/rebuild 先调此端点，超时才兜底硬杀）：
+/// 踢所有 viewer（只关 peer 不发 taken_over——那是"被顶替"信号会让页面放弃自动
+/// 重连；普通断开页面会在服务重启后自动重连）→ 拆所有 scrcpy 会话/清 reverse
+/// 隧道（防孤儿 adb 楔死后续连接，见 DeviceManager::shutdown_all）→ 触发进程退出
+async fn api_shutdown(State(st): State<AppState>) -> Response {
+    info!("graceful shutdown requested (POST /api/shutdown)");
+    // 踢 viewer：关 WebRTC peer（ws 循环随 peer_closed 退出），否则常驻 WS 连接
+    // 会让 axum 的 graceful drain 一直等不到收尾
+    let viewers = st.viewers.lock().unwrap().clone();
+    for (id, vh) in &viewers {
+        info!(device = %id, "shutdown: closing viewer peer");
+        vh.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(p) = vh.peer.upgrade() {
+            let _ = p.close().await;
+        }
+    }
+    st.devices.shutdown_all().await;
+    let _ = st.shutdown.send(true);
+    Json(serde_json::json!({"ok": true})).into_response()
 }
 
 // ---------- 工具 ----------

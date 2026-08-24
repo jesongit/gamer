@@ -8,11 +8,19 @@
 //!   wait / log / key / text / tap / swipe /
 //!   str_app(冷启动应用：先 force-stop 再启动，包名可省略回退设备配置) /
 //!   cls_app(关闭应用：adb force-stop，不碰会话/投屏) /
-//!   find(查找模板：interval 检测间隔默认 500ms；timeout 必须 > 0，默认 6000ms；
-//!        click 支持 true（默认，点击模板中心）/ false（不点击）/ 模板名 / [x,y] 相对坐标；
-//!        threshold；region；then 找到后执行 / else 超时后执行) /
-//!   until(一直等到模板出现：等价于 timeout 为 0 的 find，参数与 find 完全一致，
-//!        永不超时，故 else 不会执行) /
+//!   find(查找模板：支持多模板 `find: a.png, b.png`（逗号分隔）或列表写法，
+//!        一轮按配置顺序连续匹配全部模板（各自独立截图），未命中隔 interval（默认 500ms）重开一轮；
+//!        and_or=and（默认）一轮内全部找到才命中 / or 任一找到即命中（命中即停，
+//!        不再匹配后续模板）；timeout 必须 > 0，默认 6000ms；
+//!        click 支持 true（默认，点击模板中心；多模板时 and 点第一个、or 点命中的那个）/
+//!        false（不点击）/ 模板名 / [x,y] 相对坐标；
+//!        threshold；region（显式参数统一作用于全部模板；未显式时模板名可自带
+//!        #后缀区域各自匹配：xx#l / xx#0_0_500_500，见 tpl_region_from_name）；
+//!        then 找到后执行——列表项支持「模板名: 步骤列表」单键
+//!        映射做按命中模板分支（and/or 通用：命中模板有分支走分支，取书写顺序
+//!        第一个匹配的；无匹配分支走其余普通步骤兜底）；else 超时后执行) /
+//!   until(一直等到模板出现：参数与 find 完全一致，但 and_or 默认 or、
+//!        timeout 默认 30 分钟（1800000ms，显式 0 = 永不超时），超时后执行 else) /
 //!   loop / goto / label / call
 //!
 //! 每个操作（除 wait 动作本身）可用 wait 参数指定操作后的等待毫秒数，
@@ -42,6 +50,16 @@ use crate::webrtc::ViewerMap;
 
 /// 脚本未定义顶层 action_wait 时，操作后的默认等待毫秒数
 const DEFAULT_ACTION_WAIT: u64 = 500;
+
+/// until 未显式指定 timeout 时的默认超时毫秒数（30 分钟；显式 timeout: 0 = 永不超时）
+const UNTIL_DEFAULT_TIMEOUT_MS: u64 = 1_800_000;
+
+/// find/until 多模板组合逻辑：And=一轮内全部命中，Or=任一命中（命中即停）
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AndOr {
+    And,
+    Or,
+}
 
 /// 脚本运行可视化事件（服务端 → 浏览器，经 control DataChannel，JSON 格式 {"type":"se","ev":...}）
 /// 注意 rename_all="snake_case"：内部标签默认用变体名原样（"Tap"），
@@ -363,16 +381,23 @@ impl Runner {
     }
 
     /// find：循环查找模板（检测间隔 interval 默认 500ms；timeout 必须 > 0，默认 6000ms），
-    /// 找到后按 click 参数处理并执行 then，超时未找到执行 else；
-    /// until：等价于 timeout 为 0 的 find——一直循环查找直到模板出现（永不超时，else 不会执行），
-    /// 其余参数（interval/click/threshold/region/then）与 find 完全一致
+    /// 找到后按 click 参数处理并执行 then（支持按命中模板分支，见 parse_then），超时未找到执行 else；
+    /// until：参数与 find 一致，但 and_or 默认 or、timeout 默认 30 分钟
+    /// （显式 timeout: 0 = 永不超时，此时 else 不会执行）。
+    /// 多模板（2026-08-24）：模板列表支持逗号分隔字符串或 YAML 列表；
+    /// 一轮 = 按配置顺序连续匹配全部模板（每个模板独立取最新截图、模板间不等待），
+    /// 本轮未命中隔 interval 重开一轮（又从第一个模板开始）；
+    /// and_or=and 一轮内全部找到才命中（任一未命中本轮即失败），
+    /// or 逐个匹配、任一找到即命中（后续模板不再匹配）；
+    /// 单模板写法与旧版完全兼容（and_or 退化为普通命中）
     #[async_recursion]
     async fn exec_find(&self, ctx: &mut Ctx, step: &Value, key: &str) -> anyhow::Result<()> {
-        let forever = key == "until";
-        let template = self.template_name(step, key)?;
+        let is_until = key == "until";
+        let templates = self.template_names(step, key)?;
+        let and_or = self.parse_and_or(step, if is_until { "or" } else { "and" })?;
         let interval_ms = self.opt_u64(step, key, "interval").unwrap_or(500);
-        let timeout_ms = if forever {
-            0
+        let timeout_ms = if is_until {
+            self.opt_u64(step, key, "timeout").unwrap_or(UNTIL_DEFAULT_TIMEOUT_MS)
         } else {
             let t = self.opt_u64(step, key, "timeout").unwrap_or(6000);
             if t == 0 {
@@ -383,42 +408,98 @@ impl Runner {
         let threshold = self.opt_f64(step, key, "threshold")
             .map(|x| x as f32)
             .unwrap_or(self.devices.cfg.default_threshold);
-        let timeout_desc = if forever {
+        let timeout_desc = if timeout_ms == 0 {
             "直到出现（不超时）".to_string()
         } else {
             format!("{}ms", timeout_ms)
         };
-        ctx.log("info", format!("查找模板 {}，超时 {}，检测间隔 {}ms", template, timeout_desc, interval_ms));
-        let then_steps = self.opt_value(step, key, "then").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
+        let tpl_desc = templates.join("、");
+        if templates.len() > 1 {
+            let mode = if and_or == AndOr::And { "and 全部命中" } else { "or 任一命中" };
+            ctx.log("info", format!("查找模板 {}（{}），超时 {}，检测间隔 {}ms", tpl_desc, mode, timeout_desc, interval_ms));
+        } else {
+            ctx.log("info", format!("查找模板 {}，超时 {}，检测间隔 {}ms", tpl_desc, timeout_desc, interval_ms));
+        }
+        let (then_branches, then_steps) = match self.opt_value(step, key, "then") {
+            Some(v) => Self::parse_then(v, key, &templates)?,
+            None => (Vec::new(), Vec::new()),
+        };
         let else_steps = self.opt_value(step, key, "else").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
         let start = std::time::Instant::now();
         loop {
             if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
-            if !forever && start.elapsed().as_millis() as u64 > timeout_ms {
-                ctx.log("warn", format!("查找模板 {} 超时", template));
+            if timeout_ms > 0 && start.elapsed().as_millis() as u64 > timeout_ms {
+                ctx.log("warn", format!("查找模板 {} 超时", tpl_desc));
                 for sub in &else_steps {
                     self.exec_step(ctx, sub).await?;
                 }
                 break;
             }
-            if let Some(m) = self.find_once(ctx, step, key, threshold).await? {
-                ctx.log("success", format!("模板 {} 已找到 @ ({}, {})", template, m.x, m.y));
-                self.emit(&ctx.device_id, ScriptEvent::Hit {
-                    tpl: template.clone(),
-                    x: m.x, y: m.y, w: m.width, h: m.height, score: m.score,
-                }).await;
-                if self.exec_find_click(ctx, step, threshold, &m).await? {
-                    // click 成功（或未配置 click）→ 执行 then 并结束
-                    for sub in &then_steps {
-                        self.exec_step(ctx, sub).await?;
+            // 一轮：按配置顺序连续逐个匹配（独立截图、模板间不等待）；
+            // and 任一未命中即本轮失败，or 命中即本轮成功（后续模板不再匹配）
+            let mut hits: Vec<(String, matcher::MatchResult)> = Vec::new();
+            let mut stopped = false;
+            for tpl in &templates {
+                if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    stopped = true;
+                    break;
+                }
+                match self.match_one(ctx, step, tpl, threshold).await? {
+                    Some(m) => {
+                        hits.push((tpl.clone(), m));
+                        if and_or == AndOr::Or {
+                            break;
+                        }
+                    }
+                    None => {
+                        if and_or == AndOr::And {
+                            break;
+                        }
+                    }
+                }
+            }
+            if stopped {
+                break;
+            }
+            let hit_round = match and_or {
+                AndOr::Or => !hits.is_empty(),
+                AndOr::And => hits.len() == templates.len(),
+            };
+            if hit_round {
+                for (name, m) in &hits {
+                    ctx.log("success", format!("模板 {} 已找到 @ ({}, {})", name, m.x, m.y));
+                    self.emit(&ctx.device_id, ScriptEvent::Hit {
+                        tpl: name.clone(),
+                        x: m.x, y: m.y, w: m.width, h: m.height, score: m.score,
+                    }).await;
+                }
+                // click 作用目标：and = 第一个模板，or = 命中的模板（命中即停只有一个）
+                if self.exec_find_click(ctx, step, threshold, &hits[0].1).await? {
+                    // click 成功（或未配置 click）→ 执行命中分支并结束：
+                    // then 分支 = 书写顺序第一个模板在命中列表里的（or=命中的恰为一个
+                    // 模板即命中谁走谁，and=全命中取先写的），没有则执行兜底步骤
+                    let hit_names: Vec<&str> = hits.iter().map(|(n, _)| n.as_str()).collect();
+                    match then_branches.iter().find(|(n, _)| hit_names.contains(&n.as_str())) {
+                        Some((name, steps)) => {
+                            ctx.log("info", format!("命中模板 {}，执行 then 分支", name));
+                            for sub in steps {
+                                self.exec_step(ctx, sub).await?;
+                            }
+                        }
+                        None => {
+                            for sub in &then_steps {
+                                self.exec_step(ctx, sub).await?;
+                            }
+                        }
                     }
                     break;
                 }
                 // click 目标（如模板区域内的按钮）尚未找到 → 继续循环
                 ctx.log("debug", "click 目标未就绪，继续查找".to_string());
             }
+            // 本轮未命中（或 click 目标未就绪）→ 间隔 interval 后从第一个模板重开一轮
             tokio::time::sleep(Duration::from_millis(interval_ms)).await;
         }
         Ok(())
@@ -429,6 +510,7 @@ impl Runner {
     ///   false           → 不点击（视为成功，直接执行 then）
     ///   模板名           → 在模板区域内查找该模板，找到后点击其中心（未找到返回 false，继续循环）
     ///   [x, y]          → 点击模板区域内的相对坐标（0~1，如 [0.5, 0.5] = 中心）
+    /// 多模板命中时 m 为 click 的作用目标：and = 第一个模板，or = 命中的模板
     async fn exec_find_click(&self, ctx: &mut Ctx, step: &Value, threshold: f32, m: &matcher::MatchResult) -> anyhow::Result<bool> {
         let default_click = Value::Bool(true);
         let click = step.get("click").unwrap_or(&default_click);
@@ -484,9 +566,10 @@ impl Runner {
         }
     }
 
-    /// 执行一次 find/until 查找（不重试）：解析 region 后匹配，返回完整匹配结果
-    async fn find_once(&self, ctx: &Ctx, step: &Value, key: &str, threshold: f32) -> anyhow::Result<Option<matcher::MatchResult>> {
-        let template = self.template_name(step, key)?;
+    /// 匹配单个模板一次（独立取最新截图，不重试）：解析 region 后在全屏/区域内匹配。
+    /// region 优先级：显式 region 参数（全部模板统一） > 模板名 #后缀（各自独立，
+    /// 见 tpl_region_from_name） > 全屏（a）——多模板区域不同时靠模板名后缀区分
+    async fn match_one(&self, ctx: &Ctx, step: &Value, template: &str, threshold: f32) -> anyhow::Result<Option<matcher::MatchResult>> {
         let screen = self.devices.screenshot(&ctx.device_id).await
             .map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
         let (w, h) = self.screen_size(ctx, &screen);
@@ -494,8 +577,8 @@ impl Runner {
             anyhow::bail!("无法获取屏幕尺寸");
         }
         let region = match step.get("region") {
-            Some(rv) => self.parse_region(rv, w, h)?,
-            None => None,
+            Some(rv) => Self::parse_region(rv, w, h)?,
+            None => Self::tpl_region_from_name(template, w, h)?,
         };
         self.match_on_screen(ctx, &template, threshold, region, screen).await
     }
@@ -507,7 +590,7 @@ impl Runner {
         let tpl_dir = self.devices.cfg.data_dir.join(pkg).join("tmpl");
         // 目录不存在时先创建，避免 std::fs::read 报“系统找不到指定的路径”
         let _ = std::fs::create_dir_all(&tpl_dir);
-        let tpl_path = tpl_dir.join(template);
+        let tpl_path = Self::resolve_template_file(&tpl_dir, template)?;
         let tpl_bytes = std::fs::read(&tpl_path)
             .map_err(|e| anyhow::anyhow!("读取模板 {} 失败: {} (path={})", template, e, tpl_path.display()))?;
         let req = matcher::MatchRequest {
@@ -519,12 +602,115 @@ impl Runner {
         matcher::match_template(&req).map_err(|e| anyhow::anyhow!("模板匹配失败: {}", e))
     }
 
-    /// 从步骤中取模板名：只支持 `find: shop.png` 字符串写法
-    fn template_name(&self, step: &Value, key: &str) -> anyhow::Result<String> {
+    /// 模板文件解析：精确名优先（写全名永远可用）；文件不存在时按**短名**解析——
+    /// 基名（去扩展名）+ `#` 前缀在同扩展名文件中唯一匹配（如脚本写 login.png
+    /// 引用 login#907_160_973_717.png，#后缀区域照常生效）。
+    /// 多个候选 → 报错列出候选要求写全名消歧；零候选 → 报不存在
+    fn resolve_template_file(tpl_dir: &std::path::Path, template: &str) -> anyhow::Result<std::path::PathBuf> {
+        let exact = tpl_dir.join(template);
+        if exact.is_file() {
+            return Ok(exact);
+        }
+        let Some((base, ext)) = template.rsplit_once('.') else {
+            anyhow::bail!("模板 {} 不存在 (path={})", template, exact.display());
+        };
+        let prefix = format!("{}#", base.to_ascii_lowercase());
+        let dotted = format!(".{}", ext.to_ascii_lowercase());
+        let mut candidates: Vec<String> = std::fs::read_dir(tpl_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| {
+                let lower = n.to_ascii_lowercase();
+                lower.starts_with(&prefix) && lower.ends_with(&dotted)
+            })
+            .collect();
+        candidates.sort();
+        match candidates.len() {
+            1 => Ok(tpl_dir.join(&candidates[0])),
+            0 => anyhow::bail!("模板 {} 不存在 (path={})", template, exact.display()),
+            _ => anyhow::bail!("模板 {} 匹配到多个候选：{}，请用完整文件名指定", template, candidates.join("、")),
+        }
+    }
+
+    /// 从步骤中取模板名列表：支持单模板字符串 `find: a.png`、逗号分隔多模板
+    /// `find: a.png, b.png` 与 YAML 列表 `find: [a.png, b.png]` 三种写法
+    fn template_names(&self, step: &Value, key: &str) -> anyhow::Result<Vec<String>> {
         let v = step.get(key).ok_or_else(|| anyhow::anyhow!("缺少 {}", key))?;
-        v.as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| anyhow::anyhow!("{} 只支持字符串模板写法，如 `{}: shop.png`", key, key))
+        let names: Vec<String> = match v {
+            Value::String(s) => s.split(',').map(|p| p.trim().to_string()).collect(),
+            Value::Sequence(seq) => seq
+                .iter()
+                .map(|item| item.as_str().map(|s| s.trim().to_string()))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| anyhow::anyhow!("{} 列表项必须是字符串模板名", key))?,
+            _ => anyhow::bail!("{} 只支持模板名字符串（多模板逗号分隔）或列表，如 `{}: a.png, b.png`", key, key),
+        };
+        if names.is_empty() || names.iter().any(|n| n.is_empty()) {
+            anyhow::bail!("{} 模板名不能为空", key);
+        }
+        Ok(names)
+    }
+
+    /// 解析 and_or 参数：and=一轮内全部命中 / or=任一命中（命中即停）；
+    /// def 为默认值（find=and，until=or）
+    fn parse_and_or(&self, step: &Value, def: &str) -> anyhow::Result<AndOr> {
+        let s = step
+            .get("and_or")
+            .and_then(|v| v.as_str())
+            .unwrap_or(def)
+            .trim()
+            .to_ascii_lowercase();
+        match s.as_str() {
+            "and" => Ok(AndOr::And),
+            "or" => Ok(AndOr::Or),
+            other => anyhow::bail!("and_or 只支持 and / or，收到: {}", other),
+        }
+    }
+
+    /// 解析 find/until 命中后的 then 步骤（按模板分支增强版，and/or 模式通用）：
+    ///   then:
+    ///     - test1.png:        # 单键映射且键在模板列表中 = 模板专属分支
+    ///         - log: "命中 test1"
+    ///     - test2.png:
+    ///         - log: "命中 test2"
+    ///     - log: "兜底"       # 其余普通步骤 = 兜底，命中的模板没有专属分支时执行
+    /// 命中后取**书写顺序第一个**模板在命中列表里的分支执行（or=命中的恰为一个模板，
+    /// and=全命中取先写的），没有匹配分支则执行兜底步骤。
+    /// 纯普通步骤列表（旧写法）不产生分支，行为与旧版完全一致；
+    /// 键为 wait/log 等动作的普通步骤不会撞模板名（分支键必须在模板列表中）
+    fn parse_then(v: &Value, key: &str, templates: &[String]) -> anyhow::Result<(Vec<(String, Vec<Value>)>, Vec<Value>)> {
+        // 单键 + 列表值 + 键非动作名 = 疑似模板名写错的分支（如扩展名拼错），
+        // 不报错会被当普通步骤静默跳过，分支永远不生效
+        const STEP_KEYS: [&str; 14] = [
+            "wait", "log", "key", "text", "tap", "swipe", "find", "until", "loop", "call", "goto", "label", "str_app", "cls_app",
+        ];
+        let seq = v.as_sequence().cloned().unwrap_or_default();
+        let mut branches = Vec::new();
+        let mut fallback = Vec::new();
+        for item in seq {
+            if let Some(map) = item.as_mapping() {
+                if map.len() == 1 {
+                    let (k, val) = map.iter().next().unwrap();
+                    if let Some(name) = k.as_str() {
+                        if templates.iter().any(|t| t == name) {
+                            let steps = val
+                                .as_sequence()
+                                .cloned()
+                                .ok_or_else(|| anyhow::anyhow!("then 的 {} 分支步骤必须是列表", name))?;
+                            branches.push((name.to_string(), steps));
+                            continue;
+                        }
+                        if val.is_sequence() && !STEP_KEYS.contains(&name) {
+                            anyhow::bail!("then 的 {} 不在 {} 的模板列表中（分支写法：- 模板名: 换行缩进的步骤列表）", name, key);
+                        }
+                    }
+                }
+            }
+            fallback.push(item);
+        }
+        Ok((branches, fallback))
     }
 
     /// 取步骤参数：新语法下参数与动作键同级
@@ -540,8 +726,50 @@ impl Runner {
         self.opt_value(step, key, opt).and_then(|x| x.as_u64())
     }
 
+    /// 从模板名解析自带区域后缀（未显式写 region 参数时使用，与前端
+    /// parseTplRegion / parseTplRegionCode 同一套格式）：
+    ///   xx#a / xx#l …   → region 参数同款半区码（a/u/d/l/r/ul/ur/dl/dr）
+    ///   xx#x1_y1_x2_y2  → 相对坐标 ×1000 的 1~3 位整数（123 → 0.123，0~999），
+    ///                      需 x2 > x1 且 y2 > y1（框选生成区域模板的自动命名格式）
+    /// 后缀在扩展名之前（xx#l.png）；无 # / 后缀解析不出区域 → None（全屏），
+    /// 解析失败不报错（# 属于合法文件名字符，按普通模板名全屏匹配）
+    fn tpl_region_from_name(template: &str, w: u32, h: u32) -> anyhow::Result<Option<[u32; 4]>> {
+        let lower = template.to_ascii_lowercase();
+        let stem = if lower.ends_with(".jpeg") {
+            &template[..template.len() - 5]
+        } else if lower.ends_with(".png") || lower.ends_with(".jpg") {
+            &template[..template.len() - 4]
+        } else {
+            template
+        };
+        let Some(idx) = stem.rfind('#') else {
+            return Ok(None);
+        };
+        let suffix = stem[idx + 1..].trim().to_ascii_lowercase();
+        if suffix.is_empty() {
+            return Ok(None);
+        }
+        // 半区码：与 region 参数的字符串写法完全一致（a → 全屏 None）
+        if let Ok(r) = Self::parse_region(&Value::String(suffix.clone()), w, h) {
+            return Ok(r);
+        }
+        // 数字坐标：4 段 1~3 位整数 ×1000 → 相对坐标，复用 region 数组写法的校验与换算；
+        // 校验不过（如 x2 <= x1）视为无区域 → 全屏，不报错
+        let nums: Option<Vec<f64>> = suffix
+            .split('_')
+            .map(|p| p.parse::<u32>().ok().filter(|n| *n <= 999).map(|n| n as f64 / 1000.0))
+            .collect();
+        if let Some(nums) = nums {
+            let seq = Value::Sequence(nums.into_iter().map(Value::from).collect());
+            if let Ok(r) = Self::parse_region(&seq, w, h) {
+                return Ok(r);
+            }
+        }
+        Ok(None)
+    }
+
     /// 解析 region：支持 a/u/d/l/r/ul/ur/dl/dr / [x1, y1, x2, y2] / {fm: [x,y], to: [x,y]}（0~1）
-    fn parse_region(&self, v: &Value, w: u32, h: u32) -> anyhow::Result<Option<[u32; 4]>> {
+    fn parse_region(v: &Value, w: u32, h: u32) -> anyhow::Result<Option<[u32; 4]>> {
         if let Some(s) = v.as_str() {
             let (x, y, rw, rh) = match s.to_ascii_lowercase().as_str() {
                 "a" => return Ok(None),
@@ -578,8 +806,8 @@ impl Runner {
             return Ok(Some([x, y, rw, rh]));
         }
         if let Some(map) = v.as_mapping() {
-            let (x1, y1) = self.parse_rel_coord(map.get("fm").ok_or_else(|| anyhow::anyhow!("region 缺少 fm"))?)?;
-            let (x2, y2) = self.parse_rel_coord(map.get("to").ok_or_else(|| anyhow::anyhow!("region 缺少 to"))?)?;
+            let (x1, y1) = Self::parse_rel_coord(map.get("fm").ok_or_else(|| anyhow::anyhow!("region 缺少 fm"))?)?;
+            let (x2, y2) = Self::parse_rel_coord(map.get("to").ok_or_else(|| anyhow::anyhow!("region 缺少 to"))?)?;
             if x2 <= x1 || y2 <= y1 {
                 anyhow::bail!("region 需要 to > fm");
             }
@@ -593,7 +821,7 @@ impl Runner {
     }
 
     /// 解析 region 内的相对坐标点 [x, y]（0~1）
-    fn parse_rel_coord(&self, v: &Value) -> anyhow::Result<(f64, f64)> {
+    fn parse_rel_coord(v: &Value) -> anyhow::Result<(f64, f64)> {
         let seq = v.as_sequence().ok_or_else(|| anyhow::anyhow!("region fm/to 需要 [x, y] 数组"))?;
         if seq.len() != 2 {
             anyhow::bail!("region fm/to 需要 [x, y] 2 个相对坐标");
@@ -692,4 +920,145 @@ pub fn key_code(key: &str) -> u32 {
 pub struct RunRequest {
     pub device_id: String,
     pub script_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(yaml: &str) -> Value {
+        serde_yaml::from_str(yaml).expect("yaml parse")
+    }
+
+    fn tpls(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// then 按模板分支：单键映射且键在模板列表 = 分支，其余 = 兜底步骤；
+    /// 旧写法（纯普通步骤）不产生分支，完全兼容
+    #[test]
+    fn then_branches_parse() {
+        let (branches, fallback) = Runner::parse_then(
+            &parse("- test1.png:\n    - log: \"1\"\n- test2.png:\n    - log: \"2\"\n- log: \"3\"\n"),
+            "find",
+            &tpls(&["test1.png", "test2.png"]),
+        )
+        .unwrap();
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0].0, "test1.png");
+        assert_eq!(branches[0].1.len(), 1);
+        assert_eq!(branches[1].0, "test2.png");
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].get("log").and_then(|v| v.as_str()), Some("3"));
+
+        // 旧写法：无分支，全部兜底（wait 等单键+列表值的普通步骤不受影响）
+        let (b2, f2) = Runner::parse_then(
+            &parse("- wait: [500, 1000]\n- log: y\n"),
+            "find",
+            &tpls(&["test1.png"]),
+        )
+        .unwrap();
+        assert!(b2.is_empty());
+        assert_eq!(f2.len(), 2);
+    }
+
+    /// 分支模板名不在 find 模板列表（如扩展名拼错）→ 报错，
+    /// 避免被当普通步骤静默跳过、分支永远不生效
+    #[test]
+    fn then_branches_validation() {
+        // 键不在模板列表 + 值是列表 → 报错
+        assert!(Runner::parse_then(
+            &parse("- test1.bmp:\n    - log: \"1\"\n"),
+            "find",
+            &tpls(&["test1.png"]),
+        )
+        .is_err());
+        // 分支步骤不是列表 → 报错
+        assert!(Runner::parse_then(
+            &parse("- test1.png: log\n"),
+            "find",
+            &tpls(&["test1.png"]),
+        )
+        .is_err());
+    }
+
+    /// 命中后分支选择（exec_find 同款规则）：书写顺序第一个模板在命中列表里的分支；
+    /// or=命中的恰为一个模板（命中谁走谁），and=全命中取先写的；无匹配走兜底
+    #[test]
+    fn then_branches_selection() {
+        let (branches, fallback) = Runner::parse_then(
+            &parse("- test1.png:\n    - log: \"1\"\n- test2.png:\n    - log: \"2\"\n- log: \"3\"\n"),
+            "find",
+            &tpls(&["test1.png", "test2.png"]),
+        )
+        .unwrap();
+        let pick = |hits: &[&str]| {
+            branches
+                .iter()
+                .find(|(n, _)| hits.contains(&n.as_str()))
+                .map(|(n, _)| n.as_str())
+                .unwrap_or("fallback")
+        };
+        // or：命中的恰为 test2 → test2 分支；命中 test1 → test1 分支
+        assert_eq!(pick(&["test2.png"]), "test2.png");
+        assert_eq!(pick(&["test1.png"]), "test1.png");
+        // and：全命中 → 书写顺序第一个（test1）
+        assert_eq!(pick(&["test1.png", "test2.png"]), "test1.png");
+        // 命中的模板没有分支（单模板 find 复用分支时）→ 兜底
+        assert_eq!(pick(&["test3.png"]), "fallback");
+        assert_eq!(fallback.len(), 1);
+    }
+
+    /// 模板名 #后缀区域（与前端 parseTplRegion / parseTplRegionCode 同一套格式）：
+    /// 半区码 xx#a/xx#l…、数字坐标 xx#x1_y1_x2_y2（×1000 的 1~3 位整数）；
+    /// 无 # / 解析不出 → 全屏（None），不报错
+    #[test]
+    fn tpl_region_from_name_suffix() {
+        let (w, h) = (1920u32, 1080u32);
+        let r = |name: &str| Runner::tpl_region_from_name(name, w, h).unwrap();
+        // 半区码：a=全屏 None、l=左半屏
+        assert_eq!(r("xx#a.png"), None);
+        assert_eq!(r("xx#l.png"), Some([0, 0, w / 2, h]));
+        assert_eq!(r("xx#DR.png"), Some([w / 2, h / 2, w - w / 2, h - h / 2]));
+        // 数字坐标：0_0_500_500 → 左上四分之一
+        assert_eq!(r("xx#0_0_500_500.png"), Some([0, 0, w / 2, h / 2]));
+        // 带扩展名 .jpeg / 无扩展名
+        assert_eq!(r("xx#u.jpeg"), Some([0, 0, w, h / 2]));
+        assert_eq!(r("xx#u"), Some([0, 0, w, h / 2]));
+        // 无 # / 后缀非法（字母不在码表、段数不对、超 3 位、x2<=x1）→ 全屏不报错
+        assert_eq!(r("xx.png"), None);
+        assert_eq!(r("xx#foo.png"), None);
+        assert_eq!(r("xx#100_200.png"), None);
+        assert_eq!(r("xx#1000_0_500_500.png"), None);
+        assert_eq!(r("xx#500_0_100_500.png"), None);
+    }
+
+    /// 模板短名解析：精确名优先；短名（login.png）唯一匹配 login#*.png；
+    /// 多候选报错列名；零候选报不存在
+    #[test]
+    fn template_short_name_resolution() {
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-tpl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cleanup = || { let _ = std::fs::remove_dir_all(&dir); };
+        std::fs::write(dir.join("login#907_160_973_717.png"), b"x").unwrap();
+        std::fs::write(dir.join("shop.png"), b"x").unwrap();
+        // 短名 → 唯一后缀文件
+        let p = Runner::resolve_template_file(&dir, "login.png").unwrap();
+        assert!(p.file_name().unwrap().to_string_lossy().starts_with("login#"));
+        // 精确名直用
+        assert!(Runner::resolve_template_file(&dir, "shop.png").unwrap().file_name().unwrap() == "shop.png");
+        // 不存在
+        assert!(Runner::resolve_template_file(&dir, "nope.png").is_err());
+        // 同基名多后缀 → 报错消歧；有精确同名文件时精确优先不歧义
+        std::fs::write(dir.join("hp#l.png"), b"x").unwrap();
+        std::fs::write(dir.join("hp#r.png"), b"x").unwrap();
+        assert!(Runner::resolve_template_file(&dir, "hp.png").is_err());
+        std::fs::write(dir.join("hp.png"), b"x").unwrap();
+        assert!(Runner::resolve_template_file(&dir, "hp.png").unwrap().file_name().unwrap() == "hp.png");
+        cleanup();
+    }
 }

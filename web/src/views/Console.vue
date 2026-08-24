@@ -352,13 +352,13 @@
                   <span class="tpl-cell ops">操作</span>
                 </div>
                 <div class="tpl-list">
-                  <div v-for="t in templates" :key="t.name" class="tpl-row" :class="{ 'del-confirm': confirmDelTpl === t.name, renaming: renaming === t.name }" @click="onTplRowClick($event, t)">
-                    <span class="tpl-cell thumb">
+                    <div v-for="t in templates" :key="t.name" class="tpl-row" :class="{ 'del-confirm': confirmDelTpl === t.name, renaming: renaming === t.name }" @click="onTplRowClick($event, t)">
+                    <span class="tpl-cell thumb" @click.stop="onTplThumbClick($event, t)" title="点击查看大图；Alt/alt 模式点击生成 find/until 记录">
                       <span class="tpl-thumb"><img :src="tplThumbUrl(t.name)" alt="" loading="lazy" @error="e => e.target.style.visibility = 'hidden'" /></span>
                     </span>
-                    <span class="tpl-cell name mono" :title="t.name">
+                    <span class="tpl-cell name mono" :title="t.name" @click.stop="onTplNameClick($event, t)">
                       <input v-if="renaming === t.name" :ref="el => renameInputEl = el" v-model="renameVal" class="input rename-input mono" @keydown.enter="confirmRename(t)" @keydown.esc="cancelRename" @blur="cancelRename" @click.stop />
-                      <template v-else>{{ t.name }}</template>
+                      <template v-else>{{ tplShortName(t.name) }}<span v-if="tplRegionBadge(t.name)" class="tpl-region-badge" :title="`${t.name}（区域后缀，脚本可写短名 ${tplShortName(t.name)}）`">{{ tplRegionBadge(t.name) }}</span></template>
                     </span>
                     <span class="tpl-cell ops">
                       <button v-if="renaming === t.name" class="btn btn-sm btn-primary" @mousedown.prevent @click.stop="confirmRename(t)">确认</button>
@@ -371,7 +371,7 @@
                 </div>
               </div>
               <div class="tpl-tools">
-                <span class="ps-sub">点击 → 查看大图（编辑模式 Alt / alt 模式点击直接生成 find 记录）· 匹配 → 测试匹配 · 重命名 → 修改模板名</span>
+                <span class="ps-sub">缩略图 → 查看大图（Alt / alt 模式 → 生成 find 记录）· alt 模式点文件名 → 复制模板名 · 匹配 → 测试匹配 · 重命名 → 修改模板名</span>
               </div>
             </template>
 
@@ -544,13 +544,14 @@ const editScriptId = ref(null)
 const scriptSaving = ref(false)
 // 操作记录 YAML 模板：alt 模式把操作追加到编辑区时使用的格式。
 // 由服务端 config.toml 的 [op_templates] 配置，前端启动时拉取；失败时用内置默认。
-// 占位符：{name} 模板名 · {region} 区域块(region: a 或 region: {fm,to}) · {x}/{y} 点击坐标
-//         {fx}/{fy}/{tx}/{ty} 滑动起终点 · {time} 滑动实际时长 ms · {cx}/{cy} 模板图内相对百分比坐标
+// 占位符：{name} 模板名 · {x}/{y} 点击坐标 · {fx}/{fy}/{tx}/{ty} 滑动起终点 ·
+//         {time} 滑动实际时长 ms · {cx}/{cy} 模板图内相对百分比坐标
+//         搜索区域不再有占位符：由模板名 #后缀（hp#l / xx#0_0_500_500）决定，引擎自动解析
 // 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制
 const DEFAULT_OP_TPL = {
-  find: '- find: {name}\n  threshold: 0.8\n  {region}\n  then:\n    - log: "点击成功"\n  else:\n    - log: "点击失败"',
-  until: '- until: {name}\n  threshold: 0.8\n  {region}',
-  find_click_pos: '- find: {name}\n  {region}\n  click: [{cx}, {cy}]',
+  find: '- find: {name}\n  threshold: 0.8\n  then:\n    - log: "点击成功"\n  else:\n    - log: "点击失败"',
+  until: '- until: {name}\n  threshold: 0.8',
+  find_click_pos: '- find: {name}\n  click: [{cx}, {cy}]',
   tap: '- tap: [{x}, {y}]',
   swipe: '- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}',
   swipe_region: 'region:\n  fm: [{fx}, {fy}]\n  to: [{tx}, {ty}]'
@@ -565,6 +566,7 @@ api.getOpTemplates().then(t => {
   console.warn('op-templates 拉取失败，使用内置默认模板（服务端未重启或接口缺失）', e)
 })
 /** 用变量渲染操作记录模板；未提供的占位符保留原样。
+ *  值为空的占位符若独占一行（如省略 region）则整行删除；
  *  多行值（如 {region} 的 fm/to 续行）缩进跟随占位符所在行 +2（吞掉值自带的续行缩进），保证嵌套层级正确 */
 function renderOpTpl(tpl, vars) {
   let out = tpl || ''
@@ -572,9 +574,10 @@ function renderOpTpl(tpl, vars) {
     const val = v ?? ''
     out = out.split('\n').map(line => {
       if (!line.includes('{' + k + '}')) return line
+      if (String(val).trim() === '' && line.replace('{' + k + '}', '').trim() === '') return null
       const indent = (line.match(/^(\s*)/) || ['', ''])[1]
       return line.split('{' + k + '}').join(val.replace(/\n\s*/g, '\n' + indent + '  '))
-    }).join('\n')
+    }).filter(l => l !== null).join('\n')
   }
   return out.replace(/\n{3,}/g, '\n\n').trim()
 }
@@ -740,8 +743,8 @@ const appHint = ref('')
 
 const devices = computed(() => devicesData.value)
 const scripts = computed(() => scriptsData.value)
-// 模板列表按当前应用分区过滤（templatesData 为跨分区全量，条目带 pkg 字段）
-const templates = computed(() => templatesData.value.filter(t => t.pkg === activePkg.value))
+// 模板列表按当前应用分区过滤（templatesData 为跨分区全量，条目带 pkg 字段），按修改时间倒序（最新在上）
+const templates = computed(() => templatesData.value.filter(t => t.pkg === activePkg.value).sort((a, b) => (b.mtime || 0) - (a.mtime || 0)))
 
 /** 应用分区下拉选项：设备页签配置的包名 ∪ 脚本分区 ∪ 模板分区（字典序） */
 const pkgOptions = computed(() => {
@@ -2240,21 +2243,59 @@ function openScripts() { router.push('/scripts') }
 
 function tplThumbUrl(name) { return api.tplImageUrl(name, activePkg.value) }
 
-/** 模板列表：行点击 → 查看大图；
- *  编辑模式下按住 Alt 或 alt 模式开启 → 在操作记录区生成 find / until 两条候选记录（含 region），
- *  点选其中一条追加到编辑区（类似 swipe 生成两条记录） */
+/** 模板列表：行空白区点击 → 查看大图（缩略图/文件名单元格有各自的交互） */
 function onTplRowClick(e, t) {
   confirmDelTpl.value = null
+  openTplView(t.name)
+}
+
+/** 模板列表缩略图：alt（按住 Alt / alt 模式）→ 生成 find / until 操作记录；普通 → 查看大图 */
+function onTplThumbClick(e, t) {
+  confirmDelTpl.value = null
   if (isAltAction(e)) {
-    const region = templateRegionValue(t.name)
+    // 生成的记录写短名（login.png）：引擎自动解析到带 #后缀 的文件，区域照常生效
+    const name = tplShortName(t.name)
+    // region 传空串：旧/自定义服务端模板若仍带 {region} 占位符，空值整行删除（区域由模板名 #后缀 决定）
     opRecords.value = [
-      { id: ++opRecordSeq, text: `- find ${t.name}（限时查找+点击）`, yaml: renderOpTpl(opTpls.find, { name: t.name, region }) },
-      { id: ++opRecordSeq, text: `- until ${t.name}（等到出现+点击）`, yaml: renderOpTpl(opTpls.until, { name: t.name, region }) }
+      { id: ++opRecordSeq, text: `- find ${name}（限时查找+点击）`, yaml: renderOpTpl(opTpls.find, { name, region: '' }) },
+      { id: ++opRecordSeq, text: `- until ${name}（等到出现+点击）`, yaml: renderOpTpl(opTpls.until, { name, region: '' }) }
     ]
-    toast(`已生成 ${t.name} 的 find / until 记录，点击选择追加`, 'success')
+    toast(`已生成 ${name} 的 find / until 记录，点击选择追加`, 'success')
     return
   }
-  viewTpl.value = t.name
+  openTplView(t.name)
+}
+
+/** 模板列表文件名：alt → 复制文件名到剪贴板；普通 → 查看大图 */
+async function onTplNameClick(e, t) {
+  if (renaming.value === t.name) return
+  confirmDelTpl.value = null
+  if (isAltAction(e)) {
+    const ok = await copyText(t.name)
+    toast(ok ? `已复制 ${t.name}` : '复制失败', ok ? 'success' : 'warn')
+    return
+  }
+  openTplView(t.name)
+}
+
+/** 复制文本到剪贴板：navigator.clipboard 需安全上下文（localhost），
+ *  LAN http 访问时回退 execCommand（临时 textarea） */
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch { /* 回退 execCommand */ }
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  const ok = document.execCommand('copy')
+  ta.remove()
+  return ok
 }
 
 /** 模板列表：查看大图 */
@@ -2299,9 +2340,10 @@ function onTplViewClick(e) {
   if (!p || !viewTpl.value) return
   const cx = p.x.toFixed(3)
   const cy = p.y.toFixed(3)
-  const yaml = renderOpTpl(opTpls.find_click_pos, { name: viewTpl.value, region: templateRegionValue(viewTpl.value), cx, cy })
+  const name = tplShortName(viewTpl.value)
+  const yaml = renderOpTpl(opTpls.find_click_pos, { name, region: '', cx, cy })
   appendYamlToScript(yaml)
-  toast(`已追加：find ${viewTpl.value} → click [${cx}, ${cy}]`, 'success')
+  toast(`已追加：find ${name} → click [${cx}, ${cy}]`, 'success')
 }
 
 // ---------- 模板重命名 ----------
@@ -2451,18 +2493,21 @@ function parseTplRegionCode(name) {
   return ['a', 'u', 'd', 'l', 'r', 'ul', 'ur', 'dl', 'dr'].includes(code) ? code : null
 }
 
-/** 生成记录的 region 块：下拉框手动选择时优先（region: a/u/...），
- *  否则按模板名自动识别（#x1_y1_x2_y2 → region: {fm,to}；#l/#r/... → region: 对应半区；无 → region: a） */
-function templateRegionValue(name) {
-  if (testRegion.value) return 'region: ' + testRegion.value
-  const nums = parseTplRegion(name)
-  if (nums) {
-    const [x1, y1, x2, y2] = nums.map(n => n.toFixed(3))
-    return `region:\n  fm: [${x1}, ${y1}]\n  to: [${x2}, ${y2}]`
-  }
-  const code = parseTplRegionCode(name)
-  if (code) return 'region: ' + code
-  return 'region: a'
+/** 模板短名：去掉 #区域后缀（login#0_0_500_500.png → login.png），无后缀原样返回。
+ *  脚本里写短名即可，引擎自动解析到唯一匹配的带后缀文件（区域照常生效） */
+function tplShortName(name) {
+  return name.replace(/#[^#./\\]+(\.(png|jpe?g))$/i, '$1')
+}
+
+/** 模板名区域徽标文本：半区码直接显示码字（l/r/dr…），数字坐标显示 ◧（悬停看全名） */
+function tplRegionBadge(name) {
+  const base = name.replace(/\.(png|jpe?g)$/i, '')
+  const idx = base.lastIndexOf('#')
+  if (idx < 0) return ''
+  const s = base.slice(idx + 1).toLowerCase()
+  if (['a', 'u', 'd', 'l', 'r', 'ul', 'ur', 'dl', 'dr'].includes(s)) return s
+  if (/^\d{1,3}(_\d{1,3}){3}$/.test(s)) return '◧'
+  return ''
 }
 
 /** 模板名半区代码 → 设备像素搜索区域 [x, y, w, h] */
@@ -2733,12 +2778,25 @@ function validateScriptCode(content) {
   try {
     doc = yamlLoad(content)
   } catch (e) {
-    // 常见笔误提示：`region:l` / `timeout:0` 冒号后缺空格
     const lines = content.split('\n')
+    // 常见笔误提示：`region:l` / `timeout:0` 冒号后缺空格
     const bad = lines.map((l, i) => ({ l, i })).find(({ l }) => /^\s*-?\s*[\w\u4e00-\u9fa5-]+:(?!\s|$)/.test(l))
     if (bad) {
       const line = bad.l.trim()
       return [`YAML 语法错误（第 ${bad.i + 1} 行）：${line} 冒号后缺少空格，应为 "${line.replace(/:(?!\s|$)/, ': ')}"`]
+    }
+    // 标量列表项后跟更深缩进行：子内容挂不到标量上——多半是 then 按模板分支
+    // 的「- 模板名」漏写冒号（js-yaml 会误报到下一行的缩进上）
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(\s*)-\s+(.+?)\s*$/)
+      if (!m || m[2].includes(':')) continue
+      let j = i + 1
+      while (j < lines.length && !lines[j].trim()) j++
+      if (j >= lines.length) break
+      const nm = lines[j].match(/^(\s*)\S/)
+      if (nm && nm[1].length > m[1].length) {
+        return [`YAML 语法错误（第 ${i + 1} 行）："- ${m[2]}" 后要接子步骤需带冒号，应为 "- ${m[2]}:"（如 then 按模板分支：- 模板名: 换行缩进步骤）`]
+      }
     }
     return ['YAML 语法错误：' + e.message]
   }
@@ -2748,6 +2806,21 @@ function validateScriptCode(content) {
   const vw = current.value?.width || 1920
   const vh = current.value?.height || 1080
   const tplNames = new Set((templatesData.value || []).filter(t => t.pkg === activePkg.value).map(t => t.name))
+  // 短名支持（与引擎 resolve_template_file 一致）：login.png 可引用 login#*.png，
+  // 区域后缀照常生效；同基名多个后缀文件 → 短名歧义，要求写全名消歧
+  const shortOf = n => n.replace(/#[^#./\\]+(\.(png|jpe?g))$/i, '$1')
+  const byShort = new Map()
+  for (const f of tplNames) {
+    const s = shortOf(f)
+    if (s !== f) byShort.set(s, (byShort.get(s) || []).concat(f))
+  }
+  const tplCheck = n => {
+    if (tplNames.has(n)) return null
+    const cands = byShort.get(n)
+    if (cands && cands.length === 1) return null
+    if (cands && cands.length > 1) return `模板 ${n} 匹配到多个：${cands.join('、')}，请用完整文件名`
+    return `模板不存在：${n}`
+  }
   const inRange = (x, y) => Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 && x <= vw && y <= vh
   const checkCoord = (label, x, y) => { if (!inRange(x, y)) errors.push(`${label} 坐标超出画面范围 (${x}, ${y})`) }
   const checkRel = (label, x, y) => {
@@ -2820,17 +2893,38 @@ function validateScriptCode(content) {
     for (const key of ['find', 'until']) {
       if (step[key] === undefined) continue
       const v = step[key]
-      if (typeof v !== 'string') {
-        errors.push(`${at} ${key} 只支持模板字符串写法，如 ${key}: shop.png`)
+      // 模板列表解析与引擎 template_names 一致：逗号分隔字符串或 YAML 列表（#后缀区域是文件名一部分，原样校验）
+      const names = typeof v === 'string'
+        ? v.split(',').map(s => s.trim())
+        : Array.isArray(v) ? v.map(x => (typeof x === 'string' ? x.trim() : x)) : null
+      if (!names || names.some(n => typeof n !== 'string' || !n)) {
+        errors.push(`${at} ${key} 只支持模板名字符串（多模板逗号分隔）或列表，如 ${key}: a.png, b.png`)
       } else {
-        if (!tplNames.has(v)) errors.push(`${at} 模板不存在：${v}`)
+        for (const n of names) {
+          const terr = tplCheck(n)
+          if (terr) errors.push(`${at} ${terr}`)
+        }
         checkRegion(at, step.region)
+        // then 按模板分支（与引擎 parse_then 一致）：单键映射 + 列表值 = 分支，
+        // 键必须是本步骤模板之一；键非动作名又不在模板列表 → 拼错，运行时会被静默跳过
+        const ACTION_KEYS = ['wait', 'log', 'key', 'text', 'tap', 'swipe', 'find', 'until', 'loop', 'call', 'goto', 'label', 'str_app', 'cls_app']
+        if (Array.isArray(step.then)) {
+          for (const item of step.then) {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+            const ks = Object.keys(item)
+            if (ks.length !== 1 || !Array.isArray(item[ks[0]])) continue
+            if (!names.includes(ks[0]) && !ACTION_KEYS.includes(ks[0])) {
+              errors.push(`${at} then 分支模板不存在：${ks[0]}（须是 ${key} 模板列表中的名字）`)
+            }
+          }
+        }
       }
       // click 参数：true/false / 模板名（在模板区域内找并点击）/ [x, y] 相对坐标
       if (step.click !== undefined) {
         const c = step.click
         if (typeof c === 'string') {
-          if (!tplNames.has(c)) errors.push(`${at} click 模板不存在：${c}`)
+          const cerr = tplCheck(c)
+          if (cerr) errors.push(`${at} click ${cerr}`)
         } else if (Array.isArray(c)) {
           if (c.length !== 2) errors.push(`${at} click 数组需要 [x, y] 2 个相对坐标`)
           else checkRel(`${at} click`, Number(c[0]), Number(c[1]))
@@ -3044,20 +3138,47 @@ function fullscreen() {
 }
 
 onMounted(async () => {
-  // 进入控制台前是否已选定设备（从其他页面跳转/会话恢复 → 自动重连恢复画面；
-  // 首次进入仅选中第一台设备，等待用户点连接）
-  const preselected = !!store.deviceId
+  // SPA 内跳转（store 存活）→ 自动重连恢复画面；页面刷新 → localStorage 恢复设备选择；
+  // 首次进入仅选中第一台设备，等待用户点连接（不主动建会话，尊重空闲低功耗）
+  const spaPreselected = !!store.deviceId
   await loadData()
-  if (!store.deviceId && devices.value.length) {
-    store.deviceId = devices.value[0].id
+  if (!store.deviceId) {
+    const saved = localStorage.getItem('gb_device_id')
+    store.deviceId = (saved && devices.value.find(d => d.id === saved)) ? saved : (devices.value[0]?.id || null)
   }
   const d = current.value
   if (d) loadForm(d)
   else { mode.value = 'edit'; store.deviceId = null }
   window.addEventListener('keydown', onGlobalKeydown)
-  if (preselected && store.deviceId) connect(false)
+
+  // 刷新恢复运行态：刷新前页面发起的脚本在服务端继续执行——按设备查询运行中的
+  // 脚本，恢复运行状态/选中脚本/状态轮询与日志（不依赖投屏连接是否恢复成功）
+  if (store.deviceId) {
+    try {
+      const run = await api.deviceRun(store.deviceId)
+      if (run && run.running && run.script_id && !store.running) {
+        store.running = true
+        store.runScriptId = run.script_id
+        store.runScript = run.script_name || run.script_id
+        selScript.value = run.script_id
+        scriptMode.value = 'run'
+        runStartTime = 0   // 不按开始时间过滤，恢复最近日志
+        startLogPolling()
+        startRunStatusPoll()
+        toast(`检测到 ${store.runScript} 正在运行，已恢复状态`, 'info')
+      }
+    } catch (e) { /* 恢复失败不影响进入页面 */ }
+  }
+  // 画面恢复：SPA 内返回（store 存活）或刷新后脚本运行中/设备会话在线（此前正在
+  // 投屏）→ 自动连接；设备空闲离线则保持首次进入行为；遇 conflict 不抢（connect 内处理）
+  if (store.deviceId && (spaPreselected || store.running || current.value?.status === 'online')) connect(false)
   // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
   if (store.running && store.runScriptId) startRunStatusPoll()
+})
+
+// 设备选择持久化：刷新后自动恢复选中设备（运行态/画面恢复的前提）
+watch(() => store.deviceId, id => {
+  if (id) localStorage.setItem('gb_device_id', id)
 })
 
 onUnmounted(() => {
@@ -3465,11 +3586,18 @@ onUnmounted(() => {
 .tpl-row.del-confirm { background: rgba(248,113,113,.08); border-color: rgba(248,113,113,.35); }
 .tpl-row.renaming { background: rgba(56,189,248,.08); border-color: rgba(56,189,248,.35); }
 .tpl-empty { padding: 16px 8px; text-align: center; font-size: 11px; color: var(--text-2); }
-.tpl-cell.thumb { width: 30px; flex-shrink: 0; display: flex; align-items: center; }
+.tpl-cell.thumb { width: 40px; flex-shrink: 0; display: flex; align-items: center; }
+.tpl-list-head .tpl-cell.thumb { white-space: nowrap; }
 .tpl-cell.name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-0); }
 .tpl-cell.ops { display: flex; gap: 6px; flex-shrink: 0; }
 .tpl-cell.ops .btn { padding: 2px 8px; font-size: 11px; }
 .rename-input { width: 100%; min-width: 0; padding: 2px 6px; font-size: 12px; }
+.tpl-region-badge {
+  display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px;
+  background: var(--bg-3); border: 1px solid var(--border);
+  color: var(--accent); font-size: 10px; line-height: 16px; vertical-align: 1px;
+  cursor: help; user-select: none;
+}
 .tpl-thumb { display: inline-flex; }
 .tpl-thumb img {
   width: 24px; height: 24px; object-fit: contain;
