@@ -2821,6 +2821,16 @@ function validateScriptCode(content) {
     if (cands && cands.length > 1) return `模板 ${n} 匹配到多个：${cands.join('、')}，请用完整文件名`
     return `模板不存在：${n}`
   }
+  // 模板名列表解析（与引擎 parse_tpl_names 一致）：字符串可逗号分隔多模板，或 YAML 字符串列表
+  const parseTplNames = (v, key) => {
+    const names = typeof v === 'string'
+      ? v.split(',').map(s => s.trim())
+      : Array.isArray(v) && v.every(x => typeof x === 'string')
+        ? v.map(s => s.trim())
+        : null
+    if (!names || names.length === 0 || names.some(n => !n)) return null
+    return names
+  }
   const inRange = (x, y) => Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 && x <= vw && y <= vh
   const checkCoord = (label, x, y) => { if (!inRange(x, y)) errors.push(`${label} 坐标超出画面范围 (${x}, ${y})`) }
   const checkRel = (label, x, y) => {
@@ -2885,10 +2895,50 @@ function validateScriptCode(content) {
         errors.push(`${at} tap 需要 [x, y] 相对坐标`)
       }
     }
-    // 旧动作键只在非 find/until 步骤时报废弃（find/until 步骤里的 click 是合法参数）
+    // 旧动作键：click_find 已彻底删除；click 在无 find/until 步骤 = click/check 简写
+    // （2026-08-25 引擎 expand_click_check：展开为 until + check 分支），值须为模板名；
+    // true/模板名/[x, y] 那些取值只属于 find/until 步骤里的 click 参数
+    // check 只能与 click 简写（无 find/until）搭配，其余位置一律报错（与引擎 exec_step 一致）
+    const clickShorthand = step.click !== undefined && step.find === undefined && step.until === undefined
+    if (step.check !== undefined && !clickShorthand) {
+      errors.push(`${at} check 只能与 click 简写配合使用（写法：- click: 主模板, check: 障碍模板）`)
+    }
     if (step.find === undefined && step.until === undefined) {
-      if (step.click !== undefined) errors.push(`${at} click 已删除，请改用 find/until 的 click 参数（true/模板名/[x, y]）`)
       if (step.click_find !== undefined) errors.push(`${at} click_find 已删除，请改用 find 的 click: true`)
+      if (clickShorthand) {
+        const clickNames = parseTplNames(step.click, 'click')
+        if (clickNames === null) {
+          errors.push(`${at} click 简写只支持模板名字符串（多模板逗号分隔）或列表，如 click: login.png`)
+        } else {
+          for (const n of clickNames) {
+            const terr = tplCheck(n)
+            if (terr) errors.push(`${at} ${terr}`)
+          }
+          if (step.check !== undefined) {
+            const checkNames = parseTplNames(step.check, 'check')
+            if (checkNames === null) {
+              errors.push(`${at} check 只支持模板名字符串（多模板逗号分隔）或列表，如 check: act_cls.png`)
+            } else {
+              const dup = checkNames.find(c => clickNames.includes(c))
+              if (dup) errors.push(`${at} check 模板 ${dup} 与 click 模板重复`)
+              for (const n of checkNames) {
+                const terr = tplCheck(n)
+                if (terr) errors.push(`${at} ${terr}`)
+              }
+            }
+          }
+          checkRegion(at, step.region)
+          if (step.timeout !== undefined) {
+            const t = Number(step.timeout)
+            if (!Number.isFinite(t) || t < 0) errors.push(`${at} click 简写 timeout 需要 ≥ 0 的毫秒数（0 = 永不超时）`)
+          }
+          if (step.interval !== undefined && (!Number.isFinite(Number(step.interval)) || Number(step.interval) <= 0)) {
+            errors.push(`${at} click 简写 interval 需要大于 0 的毫秒数`)
+          }
+          if (step.then !== undefined && !Array.isArray(step.then)) errors.push(`${at} click 简写 then 需要步骤列表`)
+          if (step.else !== undefined && !Array.isArray(step.else)) errors.push(`${at} click 简写 else 需要步骤列表`)
+        }
+      }
     }
     for (const key of ['find', 'until']) {
       if (step[key] === undefined) continue
@@ -2932,12 +2982,17 @@ function validateScriptCode(content) {
           errors.push(`${at} click 只支持 true/false、模板名或 [x, y] 相对坐标`)
         }
       }
-      if (key === 'find') {
-        if (step.timeout !== undefined && (!Number.isFinite(Number(step.timeout)) || Number(step.timeout) <= 0)) {
-          errors.push(`${at} find timeout 需要大于 0 的毫秒数（一直找请用 until）`)
+      // timeout：find 必须 > 0（0 报错提示用 until）；until 支持显式 timeout
+      // （引擎默认 30 分钟，0 = 永不超时，此时 else 不执行）
+      if (step.timeout !== undefined) {
+        const t = Number(step.timeout)
+        if (!Number.isFinite(t)) {
+          errors.push(`${at} ${key} timeout 需要毫秒数`)
+        } else if (key === 'find' ? t <= 0 : t < 0) {
+          errors.push(key === 'find'
+            ? `${at} find timeout 需要大于 0 的毫秒数（一直找请用 until）`
+            : `${at} until timeout 不能为负数（0 = 永不超时）`)
         }
-      } else if (step.timeout !== undefined) {
-        errors.push(`${at} until 不支持 timeout（它本身就是一直等到模板出现）`)
       }
       if (step.interval !== undefined && (!Number.isFinite(Number(step.interval)) || Number(step.interval) <= 0)) errors.push(`${at} ${key} interval 需要大于 0 的毫秒数`)
       if (step.then !== undefined && !Array.isArray(step.then)) errors.push(`${at} ${key} then 需要步骤列表`)

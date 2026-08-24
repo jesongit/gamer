@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">脚本编辑</div>
-        <div class="page-sub">YAML 自动化脚本 · 支持 find / until / tap / swipe / text / key / str_app / cls_app / loop / goto / call / wait；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms；str_app 默认 3000ms）</div>
+        <div class="page-sub">YAML 自动化脚本 · 支持 find / until / tap / swipe / text / key / str_app / cls_app / loop / goto / call / wait，以及 click+check 简写；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms；str_app 默认 3000ms）</div>
       </div>
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
@@ -111,7 +111,13 @@ log_level: info        # 日志级别：info=精简（默认） / debug=详细</
 
 - until: page_a.png, page_b.png   # 等到模板出现（and_or 默认 or 任一命中）
   timeout: 1800000       # 超时 ms（默认 30 分钟，0=永不超时）
-  interval: 500          # 其余参数与 find 一致</pre>
+  interval: 500          # 其余参数与 find 一致
+
+- click: login.png       # 简写：等 login.png 出现并点击（无 find/until 键时触发）
+  check: act_cls.png     # 可选：check 模板先出现时点击关闭（弹窗等障碍），再继续等 click 目标
+                         # 等价 until: login.png, act_cls.png + then 分支 act_cls.png: - until: login.png
+  wait: 200              # wait/timeout/interval/threshold/region/else/then 等参数照常透传
+                         # click/check 均支持逗号分隔多模板或列表 [a.png, b.png]</pre>
           </div>
           <div class="help-block">
             <div class="hb-title">🔁 逻辑</div>

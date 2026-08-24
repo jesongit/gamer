@@ -1,6 +1,8 @@
 # ===== Rust (server) =====
 server/target/
-server/data/
+# 运行时产物不入库；模板/脚本分区目录 server/data/<pkg>/{tmpl,yaml} 需入库
+server/data/gamer.db
+server/data/pending_restore.json
 
 # ===== Node (web) =====
 web/node_modules/
@@ -8,7 +10,7 @@ web/dist/
 
 # ===== 运行时/调试产物 =====
 mcp-test/
-data/
+/data/   # 仅忽略仓库根目录遗留的旧 data/；server/data/<pkg> 分区需入库
 *.log
 run-body.json
 

@@ -243,6 +243,50 @@ function Show-Status {
 
 # ---------- 停止 ----------
 
+<#
+  后端停止后重置 adb server：活 scrcpy 会话拆除/隧道 teardown 会把 adb server 楔死
+  （AGENTS.md 已知坑：2~3 分钟甚至更久 push/reverse 全部挂起）。kill-server 礼貌
+  请求，3 秒未退出（server 主循环被卡）才强制结束 5037 监听进程 + 残留 adb 进程，
+  最后 start-server 拉起全新 server——下次连接立即可用，不用等自愈。
+  注意：强杀是最后手段（传输中途强杀可能让设备端 USB 状态变差，重插变
+  "设备描述符请求失败"），能靠 kill-server 解决就不走强杀分支。
+#>
+function Reset-AdbServer {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $adbExe = (Get-Command adb -ErrorAction SilentlyContinue).Source
+        if (-not $adbExe) {
+            Write-Host "后端: 未找到 adb（不在 PATH），跳过 adb server 重置" -ForegroundColor Yellow
+            return
+        }
+        Write-Host "后端: 重置 adb server（kill-server → 兜底强杀 → start-server）..."
+        # 注意：一律 -PassThru + WaitForExit(ms) 有界等待，不要用 -Wait——
+        # adb 会派生 daemon 子进程（fork-server），PS 5.1 的 Start-Process -Wait
+        # 可能永远不返回（实测卡死，见 AGENTS 已知坑）
+        $p = Start-Process -FilePath $adbExe -ArgumentList 'kill-server' -WindowStyle Hidden -PassThru
+        if (-not $p.WaitForExit(3000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            # kill-server 不响应 = server 主循环被卡：强杀 5037 监听进程与残留 adb 客户端
+            Get-NetTCPConnection -LocalPort 5037 -State Listen -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty OwningProcess -Unique |
+                ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+            Get-Process adb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 800
+        }
+        $p = Start-Process -FilePath $adbExe -ArgumentList 'start-server' -WindowStyle Hidden -PassThru
+        if (-not $p.WaitForExit(5000)) {
+            # server 已拉起，卡住的是客户端本身（派生 daemon 后可能不退）——杀客户端即可
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        }
+        Write-Host "后端: adb server 已重置" -ForegroundColor Green
+    } catch {
+        Write-Host "后端: adb server 重置失败（可忽略，adb 会在下次调用时自动拉起）" -ForegroundColor Yellow
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
 function Stop-Backend {
     $procs = @(Get-BackendProcs)
     if ($procs.Count -eq 0) {
@@ -280,6 +324,8 @@ function Stop-Backend {
     } else {
         Write-Host "后端: 已停止。" -ForegroundColor Green
     }
+    # 后端已退出：重置 adb server，避免活会话 teardown 把 adb 楔死影响下次连接
+    Reset-AdbServer
     return $true
 }
 

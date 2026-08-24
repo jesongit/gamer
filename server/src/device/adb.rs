@@ -80,6 +80,45 @@ impl Adb {
         Ok(buf)
     }
 
+    /// 轻量健康探测（2s 超时）：adb 客户端能否与 server 快速往返一次。
+    /// server 主循环被卡（scrcpy 隧道 teardown 楔死，见 AGENTS 已知坑）时该调用超时
+    pub async fn probe(&self) -> bool {
+        self.run(&["version"], Duration::from_secs(2)).await.is_ok()
+    }
+
+    /// 重置 adb server（楔死自愈）：礼貌 kill-server（3s 超时，server 主循环被卡时
+    /// 不响应）；仅当 kill-server 超时（进程未退出）才强制结束全部 adb 进程兜底
+    /// （Windows taskkill /F /IM，Linux pkill -9）。下次任何 adb 调用自动拉起全新
+    /// server。调用方应在 probe/连接连续超时（疑似楔死）时调用。
+    /// 注意：强制结束是最后手段——传输中途强杀可能把设备端 USB 状态搞差
+    /// （重插变"设备描述符请求失败"，见 AGENTS 已知坑），能靠 kill-server 就别强杀
+    pub async fn reset_server(&self) {
+        let graceful = self.run(&["kill-server"], Duration::from_secs(3)).await;
+        if graceful.is_ok() {
+            return;
+        }
+        // kill-server 挂起 = server 主循环被卡，进程仍活着 → 强制结束兜底
+        let bin = self.bin.clone();
+        let (prog, args): (String, Vec<String>) = if cfg!(windows) {
+            let name = std::path::Path::new(&bin)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "adb.exe".to_string());
+            ("taskkill".to_string(), vec!["/F".into(), "/IM".into(), name])
+        } else {
+            let name = std::path::Path::new(&bin)
+                .file_stem()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "adb".to_string());
+            ("pkill".to_string(), vec!["-9".into(), name])
+        };
+        match tokio::process::Command::new(&prog).args(&args).output().await {
+            Ok(o) if o.status.success() => tracing::warn!("adb reset: kill-server 超时，已强制结束 adb 进程（{}）", prog),
+            Ok(_) => tracing::debug!("adb reset: 无残留 adb 进程（{} 未找到目标）", prog),
+            Err(e) => tracing::warn!("adb reset: 强制结束失败: {}", e),
+        }
+    }
+
     /// 建立 TCP 隧道：设备端 localabstract -> 本机 localhost:port（adb reverse）
     pub async fn reverse(&self, serial: &str, abstract_name: &str, port: u16) -> anyhow::Result<()> {
         self.run(

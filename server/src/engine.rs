@@ -21,6 +21,13 @@
 //!        第一个匹配的；无匹配分支走其余普通步骤兜底）；else 超时后执行) /
 //!   until(一直等到模板出现：参数与 find 完全一致，但 and_or 默认 or、
 //!        timeout 默认 30 分钟（1800000ms，显式 0 = 永不超时），超时后执行 else) /
+//!   click/check(2026-08-25 简写：步骤无 find/until 键时触发)——
+//!        `- click: login.png, check: act_cls.png` 等价
+//!        `- until: login.png, act_cls.png` + then 分支 `act_cls.png: - until: login.png`：
+//!        等 click 模板出现并点击；check 模板（弹窗等障碍）先出现则点击关闭、继续等
+//!        click 模板；click/check 均支持逗号分隔多模板或列表（多模板任一出现点命中的
+//!        那个），wait/timeout/interval/threshold/region/then/else 等参数照常透传，
+//!        本步 then 在 click 目标点击后执行 /
 //!   loop / goto / label / call
 //!
 //! 每个操作（除 wait 动作本身）可用 wait 参数指定操作后的等待毫秒数，
@@ -224,6 +231,17 @@ impl Runner {
         if step.get("label").is_some() {
             return Ok(());
         }
+        // click/check 简写（2026-08-25）：步骤无 find/until 键时，`- click: login.png, check: act_cls.png`
+        // 展开为 until + then 分支长形式（见 expand_click_check），再走常规流程
+        let expanded_owned;
+        let step = if step.get("click").is_some() && step.get("find").is_none() && step.get("until").is_none() {
+            expanded_owned = Self::expand_click_check(step)?;
+            &expanded_owned
+        } else if step.get("check").is_some() {
+            anyhow::bail!("check 只能与 click 简写配合使用（写法：- click: 主模板, check: 障碍模板）");
+        } else {
+            step
+        };
         // 动作键（除 wait 外）：用于区分 `wait` 动作与操作级 `wait` 参数
         const ACTION_KEYS: [&str; 12] = [
             "log", "key", "text", "tap", "swipe", "find", "until", "loop", "call", "goto", "str_app", "cls_app",
@@ -638,6 +656,11 @@ impl Runner {
     /// `find: a.png, b.png` 与 YAML 列表 `find: [a.png, b.png]` 三种写法
     fn template_names(&self, step: &Value, key: &str) -> anyhow::Result<Vec<String>> {
         let v = step.get(key).ok_or_else(|| anyhow::anyhow!("缺少 {}", key))?;
+        Self::parse_tpl_names(v, key)
+    }
+
+    /// 解析模板名列表：字符串（可逗号分隔多模板）或 YAML 字符串列表
+    fn parse_tpl_names(v: &Value, key: &str) -> anyhow::Result<Vec<String>> {
         let names: Vec<String> = match v {
             Value::String(s) => s.split(',').map(|p| p.trim().to_string()).collect(),
             Value::Sequence(seq) => seq
@@ -651,6 +674,66 @@ impl Runner {
             anyhow::bail!("{} 模板名不能为空", key);
         }
         Ok(names)
+    }
+
+    /// click/check 简写展开（2026-08-25，静态 fn 供 exec_step 与单元测试使用）：
+    ///   - click: login.png
+    ///     check: act_cls.png
+    /// ≡ 长形式（与手写完全等价，参数/分支逻辑全部复用 find/until 现有实现）：
+    ///   - until: login.png, act_cls.png
+    ///     then:
+    ///       - act_cls.png:
+    ///         - until: login.png
+    /// 语义：等 click 模板出现并点击（多模板 = 任一出现，点命中的那个，until 默认 or）；
+    /// check 模板（弹窗等障碍）先出现时点击关闭，然后继续等 click 模板。
+    /// click/check 均支持逗号分隔多模板或列表；其余参数（wait/timeout/interval/
+    /// threshold/region/else/label/goto）原样透传；本步 then 在 click 目标点击后执行
+    /// （先关过 check 障碍同样执行——追加进每个 check 分支末尾 + 兜底各一份）
+    fn expand_click_check(step: &Value) -> anyhow::Result<Value> {
+        let click_names = Self::parse_tpl_names(
+            step.get("click").ok_or_else(|| anyhow::anyhow!("缺少 click"))?,
+            "click",
+        )?;
+        let check_names = match step.get("check") {
+            Some(v) => Self::parse_tpl_names(v, "check")?,
+            None => Vec::new(),
+        };
+        // check 与 click 重复无意义（同一模板同时是主目标与障碍），显式报错防手误
+        if let Some(dup) = check_names.iter().find(|c| click_names.contains(c)) {
+            anyhow::bail!("check 模板 {} 与 click 模板重复", dup);
+        }
+        let user_then: Vec<Value> = step
+            .get("then")
+            .and_then(|v| v.as_sequence())
+            .cloned()
+            .unwrap_or_default();
+        // until 列表 = click 目标 + check 障碍（or 模式任一命中）；分支内继续等的目标 = 仅 click
+        let click_list = click_names.join(", ");
+        let mut until_names = click_names.clone();
+        until_names.extend(check_names.iter().cloned());
+        let until_list = until_names.join(", ");
+        let mut m = step.as_mapping().cloned().unwrap_or_default();
+        m.remove("click");
+        m.remove("check");
+        m.insert(Value::String("until".to_string()), Value::String(until_list));
+        if !check_names.is_empty() {
+            let mut then_seq: Vec<Value> = Vec::new();
+            for c in &check_names {
+                // 分支步骤：先 `until: <click 列表>`（关闭障碍后继续等主目标），再跟用户 then
+                let mut branch_steps: Vec<Value> = Vec::new();
+                let mut wait_map = serde_yaml::Mapping::new();
+                wait_map.insert(Value::String("until".to_string()), Value::String(click_list.clone()));
+                branch_steps.push(Value::Mapping(wait_map));
+                branch_steps.extend(user_then.iter().cloned());
+                let mut branch_map = serde_yaml::Mapping::new();
+                branch_map.insert(Value::String(c.clone()), Value::Sequence(branch_steps));
+                then_seq.push(Value::Mapping(branch_map));
+            }
+            // 兜底：click 目标直接命中（无 check 分支可走）时执行用户 then
+            then_seq.extend(user_then.iter().cloned());
+            m.insert(Value::String("then".to_string()), Value::Sequence(then_seq));
+        }
+        Ok(Value::Mapping(m))
     }
 
     /// 解析 and_or 参数：and=一轮内全部命中 / or=任一命中（命中即停）；
@@ -1060,5 +1143,61 @@ mod tests {
         std::fs::write(dir.join("hp.png"), b"x").unwrap();
         assert!(Runner::resolve_template_file(&dir, "hp.png").unwrap().file_name().unwrap() == "hp.png");
         cleanup();
+    }
+
+    /// click/check 简写展开（expand_click_check）：
+    /// click → until 列表；check → then 分支（分支步骤 = until click 列表 + 用户 then），
+    /// 用户 then 同时作兜底；其余参数透传；重复模板 / 非法 click 值 → 报错
+    #[test]
+    fn click_check_expand() {
+        // 基本：click + check → until（click 在前）+ then 分支（分支内再等 click 列表）
+        let v = parse("- click: login.png\n  check: act_cls.png\n  wait: 200\n");
+        let m = Runner::expand_click_check(v.get(0).unwrap()).unwrap().as_mapping().unwrap().clone();
+        assert_eq!(m.get("until").and_then(|v| v.as_str()), Some("login.png, act_cls.png"));
+        assert!(m.get("click").is_none() && m.get("check").is_none());
+        assert_eq!(m.get("wait").and_then(|v| v.as_u64()), Some(200));
+        let then = m.get("then").and_then(|v| v.as_sequence()).unwrap();
+        assert_eq!(then.len(), 1); // 1 个 check 分支（无用户 then → 无兜底）
+        let (k, val) = then[0].as_mapping().unwrap().iter().next().unwrap();
+        assert_eq!(k.as_str(), Some("act_cls.png"));
+        let steps = val.as_sequence().unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].get("until").and_then(|v| v.as_str()), Some("login.png"));
+
+        // 多 click + 多 check + 用户 then：每个分支 = until click 列表 + 用户 then；末尾兜底 = 用户 then
+        let v = parse("- click: login.png, retry.png\n  check: act_cls.png, pop.png\n  then:\n    - log: ok\n");
+        let m = Runner::expand_click_check(v.get(0).unwrap()).unwrap().as_mapping().unwrap().clone();
+        assert_eq!(m.get("until").and_then(|v| v.as_str()), Some("login.png, retry.png, act_cls.png, pop.png"));
+        let then = m.get("then").and_then(|v| v.as_sequence()).unwrap();
+        assert_eq!(then.len(), 3); // 2 check 分支 + 1 兜底
+        for i in 0..2 {
+            let (k, val) = then[i].as_mapping().unwrap().iter().next().unwrap();
+            assert!(k.as_str().unwrap().starts_with("act_cls.png") || k.as_str().unwrap().starts_with("pop.png"));
+            let steps = val.as_sequence().unwrap();
+            assert_eq!(steps.len(), 2);
+            assert_eq!(steps[1].get("log").and_then(|v| v.as_str()), Some("ok"));
+        }
+        assert_eq!(then[2].get("log").and_then(|v| v.as_str()), Some("ok"));
+
+        // 纯 click（无 check）：等价 until，不生成 then
+        let v = parse("- click: login.png\n");
+        let m = Runner::expand_click_check(v.get(0).unwrap()).unwrap().as_mapping().unwrap().clone();
+        assert_eq!(m.get("until").and_then(|v| v.as_str()), Some("login.png"));
+        assert!(m.get("then").is_none());
+
+        // 列表写法：click/check 均支持 [a.png, b.png]
+        let v = parse("- click: [a.png, b.png]\n  check: [c.png]\n");
+        let m = Runner::expand_click_check(v.get(0).unwrap()).unwrap().as_mapping().unwrap().clone();
+        assert_eq!(m.get("until").and_then(|v| v.as_str()), Some("a.png, b.png, c.png"));
+
+        // 错误：check 与 click 重复；click 值为 find 风格 true / 相对坐标 / 空名
+        let v = parse("- click: login.png\n  check: login.png\n");
+        assert!(Runner::expand_click_check(v.get(0).unwrap()).is_err());
+        let v = parse("- click: true\n");
+        assert!(Runner::expand_click_check(v.get(0).unwrap()).is_err());
+        let v = parse("- click: [0.5, 0.5]\n");
+        assert!(Runner::expand_click_check(v.get(0).unwrap()).is_err());
+        let v = parse("- click: \"\"\n");
+        assert!(Runner::expand_click_check(v.get(0).unwrap()).is_err());
     }
 }

@@ -376,6 +376,15 @@ impl DeviceManager {
 
         self.set_status(id, DeviceStatus::Connecting, None);
 
+        // adb 健康探测（2s）：server 被隧道 teardown 楔死时（AGENTS 已知坑）先重置，
+        // 避免连接卡在 is_connected/reverse/push 上 70s+ 超时后失败；正常时 ~50ms
+        if !self.adb.probe().await {
+            warn!(device = %device.name, "adb probe 超时，疑似 server 楔死，重置 adb server");
+            self.adb.reset_server().await;
+            // 给全新 server 一点 USB 重新枚举时间
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+        }
+
         // 解析 adb transport：设备连接方式变化后（USB ↔ 无线调试 mDNS/IP:port），
         // 配置里的 serial 与 `adb devices` 显示名会失配（resolve_serial 按
         // 精确/子串/model 匹配），否则 push/reverse/-s 全部找不到设备。
@@ -397,9 +406,27 @@ impl DeviceManager {
         let handle: SessionHandle = match result {
             Ok(h) => h,
             Err(e) => {
-                error!(device = %device.name, "connect failed: {:#}", e);
-                self.set_status(id, DeviceStatus::Offline, Some(e.to_string()));
-                return Err(e);
+                let msg = format!("{:#}", e);
+                // adb 楔死自愈：连接失败根因是 adb 超时（push/reverse/shell）→ 重置
+                // server 后重试一次（楔死期重试必失败；重置后全新 server 通常秒连，
+                // 设备侧也坏了则明确报"设备不在线"，不再无限 70s 挂起）
+                if msg.contains("adb timeout") {
+                    warn!(device = %device.name, "connect adb timeout（{}），重置 adb server 后重试一次", msg);
+                    self.adb.reset_server().await;
+                    tokio::time::sleep(Duration::from_millis(1500)).await;
+                    match ScrcpySession::connect(&self.adb, &self.cfg, &device).await {
+                        Ok(h) => h,
+                        Err(e2) => {
+                            error!(device = %device.name, "connect failed after adb reset: {:#}", e2);
+                            self.set_status(id, DeviceStatus::Offline, Some(e2.to_string()));
+                            return Err(e2);
+                        }
+                    }
+                } else {
+                    error!(device = %device.name, "connect failed: {:#}", e);
+                    self.set_status(id, DeviceStatus::Offline, Some(e.to_string()));
+                    return Err(e);
+                }
             }
         };
 

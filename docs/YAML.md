@@ -141,6 +141,38 @@ steps:                  # 必填，按顺序执行的动作列表
   click: [0.5, 0.1]         # 点击对话框区域内顶部中间的位置
 ```
 
+### click/check 简写
+
+步骤**没有 `find`/`until` 键**时，`click` 键是"等模板出现并点击"的简写（2026-08-25，
+引擎 `expand_click_check`），此时 `click` 的值只能是**模板名**（`true` / `[x, y]`
+只属于 `find`/`until` 步骤里的 `click` 参数）：
+
+```yaml
+- click: login.png                  # 等价：- until: login.png（出现即点击）
+- click: login.png
+  check: act_cls.png                # 等价长形式见下
+```
+
+- `click` 支持逗号分隔多模板或列表：**任一**出现即点击命中的那个（`until` 的 or 语义）
+- 可选 `check`（同为模板名，支持多模板）：障碍模板（弹窗等）**先出现**时点击关闭，
+  然后继续等 `click` 目标
+- `check` 与 `click` 模板重复会报错；`check` 不能脱离 `click` 单独使用
+- `wait` / `timeout` / `interval` / `threshold` / `region` / `else` / `label` / `goto`
+  原样透传；本步 `then` 在 `click` 目标点击后执行（先关过 check 障碍同样执行）
+
+```yaml
+- click: login.png
+  check: act_cls.png
+  then:
+    - log: "登录成功"
+# 等价长形式：
+- until: login.png, act_cls.png
+  then:
+    - act_cls.png:            # 先弹了广告 → 点掉后继续等 login.png
+        - until: login.png
+    - log: "登录成功"          # 直接命中 login.png 的兜底
+```
+
 ### 多模板查找（and_or）
 
 `find` / `until` 的模板支持逗号分隔或列表写法，配合 `and_or` 组合判定：
