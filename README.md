@@ -10,7 +10,7 @@
 - ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网 <10ms
 - 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先取自视频流软解码帧缓存，<50ms；fallback adb screencap）
-- 📜 **YAML 自动化**：find / until / tap / swipe / text / key / str_app / cls_app / loop / goto / call / wait（语法见 [docs/YAML.md](docs/YAML.md)）
+- 📜 **YAML 自动化**：until（找图等待+点击，before 障碍）/ color 取点比色 / tap / swipe / text / key / str_app / cls_app / loop / goto / call / exit / wait（语法见 [docs/YAML.md](docs/YAML.md)）
 - ⏰ **定时任务**：cron 表达式，服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
@@ -184,7 +184,7 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAM
 - ✅ 控制注入：tap / swipe / 文本 / HOME / BACK / 音量按键
 - ✅ `start_app` 启动星穹铁道（com.miHoYo.hkrpg）成功
 - ✅ 模板匹配：真实游戏画面命中（置信度 0.98 / 0.85）
-- ✅ YAML 脚本：find → click(模板) → wait → tap 全链路执行并输出日志
+- ✅ YAML 脚本：until（模板出现并点击）→ wait → tap 全链路执行并输出日志
 - ✅ 定时任务：cron 触发 + 立即执行 + 触发点防重复
 
 ### 虚拟屏模式（new_display=1920x1080/420）✅ 重点验证

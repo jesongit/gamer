@@ -157,7 +157,7 @@ async fn run_task(
     // 设备运行计数（空闲低功耗守卫；空闲拆会话/关屏由 idle_power_loop 统一管理）
     devices.run_begin(&task.device_id);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let logs = runner.run(&task.device_id, &task.script_id, &script.content, stop, None, 0).await;
+    let logs = runner.run(&task.device_id, &task.script_id, &script.content, stop, None, 0, None).await;
     devices.run_end(&task.device_id);
     match logs {
         Ok(entries) => {

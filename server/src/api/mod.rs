@@ -913,7 +913,7 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
         }))
     };
     tokio::spawn(async move {
-        let logs = runner.run(&device_id, &script_id, &content, stop.clone(), log_cb, start_index).await;
+        let logs = runner.run(&device_id, &script_id, &content, stop.clone(), log_cb, start_index, None).await;
         devices.run_end(&device_id);
         // 空闲低功耗（拆会话/关屏）由 DeviceManager::idle_power_loop 周期统一管理
         match logs {

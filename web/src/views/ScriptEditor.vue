@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">脚本编辑</div>
-        <div class="page-sub">YAML 自动化脚本 · 支持 find / until / color / tap / swipe / text / key / str_app / cls_app / loop / goto / call / wait，以及 click+check 简写；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms；str_app 默认 3000ms）</div>
+        <div class="page-sub">YAML 自动化脚本 · 支持 until（找图等待 + before 障碍）/ color / tap / swipe / text / key / str_app / cls_app / loop / goto / call / exit / wait；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms；str_app 默认 3000ms）</div>
       </div>
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
@@ -79,57 +79,44 @@ log_level: info        # 日志级别：info=精简（默认） / debug=详细</
 - key: HOME                          # HOME/BACK/APP_SWITCH/VOL_UP…</pre>
           </div>
           <div class="help-block">
-            <div class="hb-title">🔍 找图 find</div>
-            <pre class="hb-code mono">- find: sign_btn.png     # 查找模板（timeout 必须 > 0）
-  interval: 500          # 检测间隔 ms（默认 500，一轮未命中后隔此重试）
-  timeout: 6000          # 超时 ms（默认 6000，一直找请用 until）
-  click: true            # 找到后点击模板中心（默认 true，false 不点击）
-  threshold: 0.85        # 匹配阈值（默认 0.8）
-  region: a              # 搜索区域（默认 a=全屏；模板名可带 #后缀 区域各自指定）
-  then:                  # 找到后执行
+            <div class="hb-title">🔍 找图 until（find / click-check 简写 / and_or / click 参数已删除，统一用 until）</div>
+            <pre class="hb-code mono">- until: sign_btn.png   # 超时时间内循环等模板出现并点击（恒点模板中心）
+  timeout: 30min        # 超时：必须 > 0（默认 30min；写法 500 / 500ms / 2s / 1h / 1d）
+  interval: 500ms       # 轮询间隔（默认 500ms，写法同 timeout）
+  before: [pop.png, ad.png]  # 障碍模板：每轮先依序匹配，命中即点击关闭后继续；
+                         # 未命中等 img_ivl 匹配下一个（无论命中与否都不结束本轮）
+                         # 单个可写 before: pop.png（不用 []）
+  img_ivl: 50ms         # 一轮内相邻模板匹配的间隔（before → 主模板之间，默认 50ms）
+  threshold: 0.85       # 匹配阈值（默认 0.8）
+  region: a             # 搜索区域（默认 a=全屏；模板名可带 #后缀 区域各自指定）
+  count: 1              # 连击：总点击次数含首击（默认 1 单击；cnt_chk 已删除，
+                         # 命中后按首击坐标无条件连点；cnt_ivl 默认 50ms 间隔；
+                         # 对 before 障碍点击同样生效）
+  then:                 # 超时时间内出现主模板执行
     - log: "找到并点击"
-  else:                  # 超时未找到执行
+  else:                 # 超时执行
     - log: "等待超时"
 
-- find: dialog.png       # click 也可以是模板名或相对坐标
-  click: close_btn.png   # 在 dialog.png 区域内找 close_btn.png，找到点击其中心
-  else:
-    - log: "对话框没出现"
-
-- find: a.png, b.png     # 多模板：逗号分隔（或列表 [a.png, b.png]）
-  and_or: and            # and=全部找到才命中（默认，未命中即停不匹配后面）
-  click: true            # and 点第一个模板；or（until 默认）点命中的那个
+- until: a.png           # 只支持单个主模板（多目标请拆成多步；挡路的写 before）
                          # 各模板区域不同 → 名字带 #后缀：hp#l.png（左半）xx#0_0_500_500.png（左上 1/4）
                          # 脚本也可写短名 login.png（引擎自动解析唯一 login#*.png，区域照常生效）
-
-- find: a.png, b.png     # then 按命中模板分支：单键「模板名: 步骤列表」= 专属分支，and/or 通用
-  and_or: or             # or：命中谁走谁；and：全命中取书写顺序第一个分支
-  then:
-    - b.png:             # 命中的是 b.png 走这里
-        - log: "命中了 b"
-    - log: "兜底"        # 命中的模板没有专属分支时执行（即原 then 语义）
-
-- until: page_a.png, page_b.png   # 等到模板出现（and_or 默认 or 任一命中）
-  timeout: 1800000       # 超时 ms（默认 30 分钟，0=永不超时）
-  interval: 500          # 其余参数与 find 一致
-
-- click: login.png       # 简写：等 login.png 出现并点击（无 find/until 键时触发）
-  check: act_cls.png     # 可选：check 模板先出现时点击关闭（弹窗等障碍），再继续等 click 目标
-                         # 等价 until: login.png, act_cls.png + then 分支 act_cls.png: - until: login.png
-  wait: 200              # wait/timeout/interval/threshold/region/else/then 等参数照常透传
-                         # click/check 均支持逗号分隔多模板或列表 [a.png, b.png]</pre>
+  then:                 # 普通步骤列表（「模板名: 步骤列表」分支写法已删除）
+    - log: "命中了"</pre>
           </div>
           <div class="help-block">
-            <div class="hb-title">🎨 取点比色 color</div>
-            <pre class="hb-code mono">- color: [0.5123, 0.8456]   # 采样点相对坐标 0~1（同 tap；alt 模式点投屏自动生成记录+采样）
-  check: ff8800             # 期望颜色：6 位十六进制 RRGGBB（也接受 "#ff8800" / [255, 136, 0]）
-  tol: 30                   # 每通道容差 |实际-期望| ≤ tol 判命中（默认 30：H.264 有损压缩帧间像素会抖动）
-  count: 1                  # 检测次数（默认 1）：最多检测 count 次，任一次命中走 then
-  cnt_ivl: 50               # 相邻检测间隔 ms（默认 50，支持 100 / "100ms"）
-  then:                     # 命中执行
-    - click: buy_btn.png
-  else:                     # 全部未命中执行
-    - log: "体力没恢复"</pre>
+            <div class="hb-title">🎨 取点比色 color（多检查点，超时轮询，兄弟键 2 空格与 until 同构）</div>
+            <pre class="hb-code mono">- color:                 # 值留空；timeout/interval/check/then/else 为兄弟键
+  timeout: 5min          # 超时：默认 5min（必须 > 0；写法 500 / 500ms / 2s / 1h / 1d）
+  interval: 500ms        # 检测间隔：默认 500ms（每轮新截图）
+  check:                 # 检查点列表（至少一项）：超时时间内任一命中执行 then，超时执行 else
+    - [0.5123, 0.8456]: ff8800   # 该点像素是否为 ff8800（6 位十六进制，不带 #）
+    - [0.3000, 0.2000]: ff8899   # 可写多个检查点，任一命中即触发
+  then:                  # 命中执行（如需多步，列表项再 +2 空格）
+    - log: "颜色命中"
+  else:                  # 超时未命中执行
+    - log: "体力没恢复"
+# 二次裁切区 Alt/alt 模式点击任意处 → 自动生成 color 记录（所见即所得取色）
+# 旧写法（- color: [x, y] + check: 色值 + tol/count/cnt_ivl）已删除</pre>
           </div>
           <div class="help-block">
             <div class="hb-title">🔁 逻辑</div>
@@ -137,6 +124,8 @@ log_level: info        # 日志级别：info=精简（默认） / debug=详细</
 - goto: label_name
 - label: label_name
 - call: 子脚本.yml
+- exit                  # 结束脚本运行（无参数打印"结束运行脚本"）
+- exit: 体力不足        # 带原因：打印"因 体力不足 结束运行脚本"
 - log: "输出到运行日志"</pre>
           </div>
         </div>
@@ -165,7 +154,8 @@ log_level: info
 
 steps:
   - wait: [300, 800]
-  - find: sign_btn.png
+  - until: sign_btn.png
+    timeout: 6s
     threshold: 0.85
     then:
       - log: "点击签到按钮"

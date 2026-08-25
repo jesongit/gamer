@@ -28,20 +28,15 @@ idle_power_secs = 300
 #   {x}/{y}    点击相对坐标
 #   {fx}/{fy}/{tx}/{ty} 滑动起终点相对坐标
 #   {time}     滑动实际时长（ms）
-#   {cx}/{cy}  模板图内相对百分比坐标（find 的 click 参数）
 #   {color}    alt 点击采样的十六进制颜色（color 记录）
 # 搜索区域不再有占位符：由模板名 #后缀（hp#l / xx#0_0_500_500）决定，引擎自动解析
 # 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制，需要个别覆盖时手动加 wait
 [op_templates]
-find = """- find: {name}"""
 until = """- until: {name}"""
-find_click_pos = """- find: {name}
-  click: [{cx}, {cy}]"""
 tap = """- tap: [{x}, {y}]"""
-color = """- color: [{x}, {y}]
-  check: {color}
-  then:
-    - click:"""
+color = """- color:
+  check:
+    - [{x}, {y}]: {color}"""
 swipe = """- swipe:
     fm: [{fx}, {fy}]
     to: [{tx}, {ty}]

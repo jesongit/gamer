@@ -353,7 +353,7 @@
                 </div>
                 <div class="tpl-list">
                     <div v-for="t in templates" :key="t.name" class="tpl-row" :class="{ 'del-confirm': confirmDelTpl === t.name, renaming: renaming === t.name }" @click="onTplRowClick($event, t)">
-                    <span class="tpl-cell thumb" @click.stop="onTplThumbClick($event, t)" title="点击查看大图；Alt/alt 模式点击生成 find/until 记录">
+                    <span class="tpl-cell thumb" @click.stop="onTplThumbClick($event, t)" title="点击查看大图；Alt/alt 模式点击生成 until 记录">
                       <span class="tpl-thumb"><img :src="tplThumbUrl(t.name)" alt="" loading="lazy" @error="e => e.target.style.visibility = 'hidden'" /></span>
                     </span>
                     <span class="tpl-cell name mono" :title="t.name" @click.stop="onTplNameClick($event, t)">
@@ -371,7 +371,7 @@
                 </div>
               </div>
               <div class="tpl-tools">
-                <span class="ps-sub">缩略图 → 查看大图（Alt / alt 模式 → 生成 find 记录）· alt 模式点文件名 → 复制模板名 · 匹配 → 测试匹配 · 重命名 → 修改模板名</span>
+                <span class="ps-sub">缩略图 → 查看大图（Alt / alt 模式 → 生成 until 记录）· alt 模式点文件名 → 复制模板名 · 匹配 → 测试匹配 · 重命名 → 修改模板名</span>
               </div>
             </template>
 
@@ -384,7 +384,7 @@
               <div class="crop-stage">
                 <canvas ref="cropCanvas" class="crop-canvas" @mousedown="cropMouseDown" @mousemove="cropMouseMove" @mouseup="cropMouseUp" @mouseleave="cropMouseLeave" @wheel="cropWheel"></canvas>
               </div>
-              <div class="crop-hint">滚轮缩放（50%~800%）· 拖动边框/角调整选框（只动遮罩框）· 拖框内移动位置</div>
+              <div class="crop-hint">滚轮缩放（50%~800%）· 拖动边框/角调整选框（只动遮罩框）· 拖框内移动位置 · Alt/alt 模式点击任意处 → 取色生成 color 记录</div>
               <input v-model="crop.name" class="input mono" placeholder="模板名称（默认自动生成）" @keydown.enter="saveTemplate" />
               <div class="crop-actions">
                 <button class="btn btn-sm" @click="cancelCrop">取消</button>
@@ -398,11 +398,9 @@
               <div class="tpl-view-modal">
                 <button class="tpl-view-close" @click="closeTplView" title="关闭">✕</button>
                 <div class="tpl-view-img">
-                  <img :src="tplThumbUrl(viewTpl)" alt="模板预览" @mousemove="onTplViewMove" @mouseleave="tplViewPos.show = false" @click="onTplViewClick" />
-                  <div v-if="tplViewPos.show" class="tpl-view-pos mono" :style="{ left: tplViewPos.x + 'px', top: tplViewPos.y + 'px' }">{{ tplViewPos.text }}</div>
+                  <img :src="tplThumbUrl(viewTpl)" alt="模板预览" />
                 </div>
                 <div class="tpl-view-name mono">{{ viewTpl }}</div>
-                <div v-if="scriptMode === 'edit'" class="tpl-view-tip">编辑模式：点击图片任意位置 → 追加 find + click 相对坐标记录</div>
               </div>
             </div>
           </div>
@@ -468,7 +466,7 @@
                 {{ r.text }}
               </div>
             </div>
-            <textarea ref="scriptEditor" v-model="editScriptCode" class="script-editor mono" spellcheck="false" placeholder="# YAML 脚本&#10;action_wait: 500&#10;log_level: info&#10;&#10;steps:&#10;  - find: 模板名.png&#10;    click: true" @keydown.tab.prevent="onEditorTab"></textarea>
+            <textarea ref="scriptEditor" v-model="editScriptCode" class="script-editor mono" spellcheck="false" placeholder="# YAML 脚本&#10;action_wait: 500&#10;log_level: info&#10;&#10;steps:&#10;  - until: 模板名.png&#10;    before: 障碍模板.png" @keydown.tab.prevent="onEditorTab"></textarea>
           </div>
           </template>
         </div>
@@ -545,16 +543,13 @@ const scriptSaving = ref(false)
 // 操作记录 YAML 模板：alt 模式把操作追加到编辑区时使用的格式。
 // 由服务端 config.toml 的 [op_templates] 配置，前端启动时拉取；失败时用内置默认。
 // 占位符：{name} 模板名 · {x}/{y} 点击坐标 · {fx}/{fy}/{tx}/{ty} 滑动起终点 ·
-//         {time} 滑动实际时长 ms · {cx}/{cy} 模板图内相对百分比坐标 ·
-//         {color} 点击处采样的十六进制颜色
+//         {time} 滑动实际时长 ms · {color} 二次裁切区点击处采样的十六进制颜色
 //         搜索区域不再有占位符：由模板名 #后缀（hp#l / xx#0_0_500_500）决定，引擎自动解析
 // 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制
 const DEFAULT_OP_TPL = {
-  find: '- find: {name}\n  threshold: 0.8\n  then:\n    - log: "点击成功"\n  else:\n    - log: "点击失败"',
   until: '- until: {name}\n  threshold: 0.8',
-  find_click_pos: '- find: {name}\n  click: [{cx}, {cy}]',
   tap: '- tap: [{x}, {y}]',
-  color: '- color: [{x}, {y}]\n  check: {color}\n  then:\n    - click:',
+  color: '- color:\n  check:\n    - [{x}, {y}]: {color}',
   swipe: '- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}',
   swipe_region: 'region:\n  fm: [{fx}, {fy}]\n  to: [{tx}, {ty}]'
 }
@@ -2040,7 +2035,36 @@ function cropEventDev(e) {
   }
 }
 
+/** 二次裁切底图（冻结的框选画面）上 alt 点击 → 取色生成 color 操作记录：
+ *  颜色直接从 cropBaseCanvas 采样（所见即所得，同步生成无延迟）；
+ *  点击点在底图上的设备坐标 = p + (originX, originY)，换算成相对坐标写进记录 */
+function cropPickColor(e) {
+  const p = cropEventDev(e)
+  const base = cropBaseCanvas
+  const px = Math.max(0, Math.min(base.width - 1, Math.round(p.x)))
+  const py = Math.max(0, Math.min(base.height - 1, Math.round(p.y)))
+  const g = base.getContext('2d', { willReadFrequently: true })
+  const d = g.getImageData(px, py, 1, 1).data
+  const hex = [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('')
+  const vw = crop.imgW || 1920
+  const vh = crop.imgH || 1080
+  const rx = ((crop.originX + px) / vw).toFixed(4)
+  const ry = ((crop.originY + py) / vh).toFixed(4)
+  opRecords.value = [
+    { id: ++opRecordSeq, text: `- color #${hex}`, yaml: renderOpTpl(opTpls.color, { x: rx, y: ry, color: hex }) }
+  ]
+  toast(`已生成 ${hex} 的 color 记录，点击选择追加`, 'success')
+}
+
 function cropMouseDown(e) {
+  // Alt/alt 模式点击 → 取色生成 color 操作记录（底图坐标 = 冻结的框选画面，
+  // 颜色直接从 cropBaseCanvas 采样——与服务端截图同源 YUV→RGB 体系有差异，
+  // 但二次裁切底图就是浏览器画面本身，此处取的是"所见即所得"）
+  if (isAltAction(e) && cropBaseCanvas) {
+    cropPickColor(e)
+    e.preventDefault()
+    return
+  }
   const p = cropEventDev(e)
   const r = crop.rect
   const HIT = 12 / (cropCanvas.value.width / crop.baseW) // 底图像素命中半径
@@ -2251,7 +2275,7 @@ function onTplRowClick(e, t) {
   openTplView(t.name)
 }
 
-/** 模板列表缩略图：alt（按住 Alt / alt 模式）→ 生成 find / until 操作记录；普通 → 查看大图 */
+/** 模板列表缩略图：alt（按住 Alt / alt 模式）→ 生成 until 操作记录；普通 → 查看大图 */
 function onTplThumbClick(e, t) {
   confirmDelTpl.value = null
   if (isAltAction(e)) {
@@ -2259,10 +2283,9 @@ function onTplThumbClick(e, t) {
     const name = tplShortName(t.name)
     // region 传空串：旧/自定义服务端模板若仍带 {region} 占位符，空值整行删除（区域由模板名 #后缀 决定）
     opRecords.value = [
-      { id: ++opRecordSeq, text: `- find ${name}（限时查找+点击）`, yaml: renderOpTpl(opTpls.find, { name, region: '' }) },
       { id: ++opRecordSeq, text: `- until ${name}（等到出现+点击）`, yaml: renderOpTpl(opTpls.until, { name, region: '' }) }
     ]
-    toast(`已生成 ${name} 的 find / until 记录，点击选择追加`, 'success')
+    toast(`已生成 ${name} 的 until 记录，点击选择追加`, 'success')
     return
   }
   openTplView(t.name)
@@ -2307,46 +2330,9 @@ function openTplView(name) {
 }
 function closeTplView() {
   viewTpl.value = null
-  tplViewPos.show = false
 }
 
-// 模板查看：悬停实时显示基于模板的相对百分比坐标（供 find 的 click 参数用）
-const tplViewPos = reactive({ show: false, x: 0, y: 0, text: '' })
-
-/** 鼠标相对模板图的位置：返回 0~1 百分比坐标 + 相对 img 的偏移 */
-function tplViewRel(e) {
-  const img = e.currentTarget
-  const r = img.getBoundingClientRect()
-  if (r.width < 1 || r.height < 1) return null
-  return {
-    x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)),
-    y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)),
-    left: e.clientX - r.left,
-    top: e.clientY - r.top
-  }
-}
-
-function onTplViewMove(e) {
-  const p = tplViewRel(e)
-  if (!p) return
-  tplViewPos.x = p.left
-  tplViewPos.y = p.top
-  tplViewPos.text = `(${p.x.toFixed(3)}, ${p.y.toFixed(3)})`
-  tplViewPos.show = true
-}
-
-/** 编辑模式点击模板图 → 生成 find + click 相对坐标记录并追加到编辑区 */
-function onTplViewClick(e) {
-  if (scriptMode.value !== 'edit') return
-  const p = tplViewRel(e)
-  if (!p || !viewTpl.value) return
-  const cx = p.x.toFixed(3)
-  const cy = p.y.toFixed(3)
-  const name = tplShortName(viewTpl.value)
-  const yaml = renderOpTpl(opTpls.find_click_pos, { name, region: '', cx, cy })
-  appendYamlToScript(yaml)
-  toast(`已追加：find ${name} → click [${cx}, ${cy}]`, 'success')
-}
+// 模板查看：悬停坐标读数已随 until 的 click 参数删除一并移除（命中恒点模板中心）
 
 // ---------- 模板重命名 ----------
 
@@ -2652,53 +2638,16 @@ function showAltFeedback(kind, x, y, w = 0, h = 0) {
   altFeedbackTimer = setTimeout(() => { altFeedback.show = false }, 2000)
 }
 
-/** 投屏点击 → 生成 tap 记录，并异步采样点击处像素追加 color 记录 */
+/** 投屏点击（alt 模式）→ 生成 tap 记录（color 取色记录改在二次裁切区内生成，见 cropPickColor） */
 function setTapRecord(p) {
   const vw = videoElement.value?.videoWidth || 1920
   const vh = videoElement.value?.videoHeight || 1080
   const rx = (p.x / vw).toFixed(4)
   const ry = (p.y / vh).toFixed(4)
-  const tapId = opRecordSeq + 1
   opRecords.value = [
-    { id: tapId, text: `- tap [${rx}, ${ry}]`, yaml: renderOpTpl(opTpls.tap, { x: rx, y: ry }) }
+    { id: ++opRecordSeq, text: `- tap [${rx}, ${ry}]`, yaml: renderOpTpl(opTpls.tap, { x: rx, y: ry }) }
   ]
   showAltFeedback('tap', p.x, p.y)
-  appendColorRecord(p, rx, ry, tapId)
-}
-
-/** 采样点击处像素 → 追加 `- color clr_xxx` 操作记录。
- *  颜色样本取自服务端截图（帧缓存 ffmpeg 解码，与引擎 color 检测同一条解码
- *  链路，颜色体系一致）；浏览器 video→canvas 取色有 YUV→RGB 矩阵差异
- *  （BT.601/709），可能与服务端对不上，不用。
- *  异步返回时操作记录区已被后续操作整体替换（所有记录生成路径都是整体重置）
- *  → 丢弃过期采样；截图偶发失败静默跳过（tap 记录已生成，不该被阻断） */
-function appendColorRecord(p, rx, ry, tapId) {
-  if (!store.deviceId) return
-  api.screenshot(store.deviceId).then(dataUrl => {
-    const img = new Image()
-    img.onload = () => {
-      if (!opRecords.value.some(r => r.id === tapId)) return
-      // 截图与视频流分辨率不一致（分辨率切换窗口）时按比例映射采样点
-      const vw = videoElement.value?.videoWidth || img.width
-      const vh = videoElement.value?.videoHeight || img.height
-      const px = Math.max(0, Math.min(img.width - 1, Math.round(p.x * img.width / vw)))
-      const py = Math.max(0, Math.min(img.height - 1, Math.round(p.y * img.height / vh)))
-      const cv = document.createElement('canvas')
-      cv.width = img.width
-      cv.height = img.height
-      const g = cv.getContext('2d', { willReadFrequently: true })
-      g.drawImage(img, 0, 0)
-      const d = g.getImageData(px, py, 1, 1).data
-      const hex = [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('')
-      opRecords.value.push({
-        id: ++opRecordSeq,
-        text: `- color clr_${hex}`,
-        yaml: renderOpTpl(opTpls.color, { x: rx, y: ry, color: hex })
-      })
-    }
-    img.onerror = () => {}
-    img.src = dataUrl
-  }).catch(() => {})
 }
 
 /** 投屏滑动 → 生成 swipe + region 记录（time 用实际滑动时长） */
@@ -2934,108 +2883,126 @@ function validateScriptCode(content) {
         errors.push(`${at} tap 需要 [x, y] 相对坐标`)
       }
     }
-    // 旧动作键：click_find 已彻底删除；click 在无 find/until 步骤 = click/check 简写
-    // （2026-08-25 引擎 expand_click_check：展开为 until + check 分支），值须为模板名；
-    // true/模板名/[x, y] 那些取值只属于 find/until 步骤里的 click 参数
-    // check 只能与 click 简写（无 find/until）搭配，其余位置一律报错（与引擎 exec_step 一致）
-    const clickShorthand = step.click !== undefined && step.find === undefined && step.until === undefined
-    if (step.check !== undefined && !clickShorthand) {
-      errors.push(`${at} check 只能与 click 简写配合使用（写法：- click: 主模板, check: 障碍模板）`)
+    // 旧写法迁移引导（2026-08-25 重构：find / click-check 简写 / and_or / click 参数
+    // 均已删除，引擎 exec_step / exec_until 同样报错）；check 键只属于 color 的期望颜色
+    if (step.find !== undefined) {
+      errors.push(`${at} find 已删除，请改用 until（timeout 默认 30min，可写 6s / 1min 等单位时长）`)
     }
-    if (step.find === undefined && step.until === undefined) {
-      if (step.click_find !== undefined) errors.push(`${at} click_find 已删除，请改用 find 的 click: true`)
-      if (clickShorthand) {
-        const clickNames = parseTplNames(step.click, 'click')
-        if (clickNames === null) {
-          errors.push(`${at} click 简写只支持模板名字符串（多模板逗号分隔）或列表，如 click: login.png`)
-        } else {
-          for (const n of clickNames) {
-            const terr = tplCheck(n)
-            if (terr) errors.push(`${at} ${terr}`)
+    if (step.click !== undefined) {
+      errors.push(`${at} click 已删除：until 命中恒点击模板中心（障碍模板写 before）`)
+    }
+    if (step.and_or !== undefined) {
+      errors.push(`${at} and_or 已删除（多主模板写法已同步删除）：until 只支持单个主模板，命中恒点击模板中心`)
+    }
+    if (step.check !== undefined && step.color === undefined) {
+      errors.push(`${at} check 只能与 color 配合使用（- color: 后接兄弟键 check 检查点列表）；until 的障碍模板请写 before`)
+    }
+    // color 新语法（2026-08-25，兄弟键 2 空格与 until 同构）：- color: 值留空，
+    // timeout/interval/check/then/else 为兄弟键；check 检查点列表至少一项
+    if (step.color !== undefined) {
+      if (step.color !== null && step.color !== undefined) {
+        errors.push(`${at} color 动作键值留空；旧写法（- color: [x, y] + check: 色值）已删除`)
+      }
+      const cv = step
+      if (cv.tol !== undefined || cv.count !== undefined || cv.cnt_ivl !== undefined) {
+        errors.push(`${at} color 的 tol/count/cnt_ivl 参数已删除：改定时长 timeout/interval + check 检查点列表`)
+      }
+      if (cv.timeout !== undefined && !/^\s*\d+(?:\.\d+)?\s*(ms|min|[shd])?\s*$/i.test(String(cv.timeout))) {
+        errors.push(`${at} color timeout 需要毫秒数或带单位时长（如 500 / 500ms / 2s / 30min / 1h / 1d）`)
+      }
+      if (cv.interval !== undefined && !/^\s*\d+(?:\.\d+)?\s*(ms|min|[shd])?\s*$/i.test(String(cv.interval))) {
+        errors.push(`${at} color interval 需要毫秒数或带单位时长`)
+      }
+      if (!Array.isArray(cv.check) || cv.check.length === 0) {
+        errors.push(`${at} color 需要 check 检查点列表（如 - [0.5, 0.5]: ff8800）`)
+      } else {
+        for (const item of cv.check) {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) {
+            errors.push(`${at} color 检查点需要单键映射 - [x, y]: 色值`)
+            continue
           }
-          if (step.check !== undefined) {
-            const checkNames = parseTplNames(step.check, 'check')
-            if (checkNames === null) {
-              errors.push(`${at} check 只支持模板名字符串（多模板逗号分隔）或列表，如 check: act_cls.png`)
-            } else {
-              const dup = checkNames.find(c => clickNames.includes(c))
-              if (dup) errors.push(`${at} check 模板 ${dup} 与 click 模板重复`)
-              for (const n of checkNames) {
-                const terr = tplCheck(n)
-                if (terr) errors.push(`${at} ${terr}`)
-              }
-            }
+          const ks = Object.keys(item)
+          if (ks.length !== 1) {
+            errors.push(`${at} color 检查点需要单键映射 - [x, y]: 色值`)
+            continue
           }
-          checkRegion(at, step.region)
-          if (step.timeout !== undefined) {
-            const t = Number(step.timeout)
-            if (!Number.isFinite(t) || t < 0) errors.push(`${at} click 简写 timeout 需要 ≥ 0 的毫秒数（0 = 永不超时）`)
+          const pt = ks[0]
+          const m = pt.match(/^\s*\[\s*([\d.]+)\s*,\s*([\d.]+)\s*\]\s*$/)
+          if (!m) {
+            errors.push(`${at} color 检查点坐标需要 [x, y] 相对坐标（0~1），收到: ${pt}`)
+            continue
           }
-          if (step.interval !== undefined && (!Number.isFinite(Number(step.interval)) || Number(step.interval) <= 0)) {
-            errors.push(`${at} click 简写 interval 需要大于 0 的毫秒数`)
+          checkRel(`${at} color 检查点`, Number(m[1]), Number(m[2]))
+          const color = item[pt]
+          if (typeof color !== 'string' || !/^#?[0-9a-fA-F]{6}$/.test(color.trim())) {
+            errors.push(`${at} color 期望色值需要 6 位十六进制（如 ff8800，不带 #），收到: ${color}`)
           }
-          if (step.then !== undefined && !Array.isArray(step.then)) errors.push(`${at} click 简写 then 需要步骤列表`)
-          if (step.else !== undefined && !Array.isArray(step.else)) errors.push(`${at} click 简写 else 需要步骤列表`)
         }
       }
+      if (cv.then !== undefined && !Array.isArray(cv.then)) errors.push(`${at} color then 需要步骤列表`)
+      if (cv.else !== undefined && !Array.isArray(cv.else)) errors.push(`${at} color else 需要步骤列表`)
     }
-    for (const key of ['find', 'until']) {
-      if (step[key] === undefined) continue
-      const v = step[key]
-      // 模板列表解析与引擎 template_names 一致：逗号分隔字符串或 YAML 列表（#后缀区域是文件名一部分，原样校验）
-      const names = typeof v === 'string'
-        ? v.split(',').map(s => s.trim())
-        : Array.isArray(v) ? v.map(x => (typeof x === 'string' ? x.trim() : x)) : null
-      if (!names || names.some(n => typeof n !== 'string' || !n)) {
-        errors.push(`${at} ${key} 只支持模板名字符串（多模板逗号分隔）或列表，如 ${key}: a.png, b.png`)
+    // exit：- exit 结束脚本运行（可带结束原因字符串）
+    if (step.exit !== undefined && step.exit !== null && typeof step.exit !== 'string') {
+      errors.push(`${at} exit 只需裸写或带结束原因字符串（如 - exit: 体力不足）`)
+    }
+    if (step.until !== undefined) {
+      const v = step.until
+      // 与引擎 exec_until 一致：until 只支持单个主模板字符串（逗号/列表已删除，多目标拆成多步）
+      if (typeof v !== 'string' || !v.trim() || v.includes(',')) {
+        errors.push(`${at} until 只支持单个模板名字符串（多个目标请拆成多步；障碍模板写 before）`)
       } else {
-        for (const n of names) {
-          const terr = tplCheck(n)
-          if (terr) errors.push(`${at} ${terr}`)
+        const terr = tplCheck(v.trim())
+        if (terr) errors.push(`${at} ${terr}`)
+        // before 障碍模板：字符串（逗号分隔多模板）/ YAML 列表 / 单个，与主模板重复报错
+        if (step.before !== undefined) {
+          const before = parseTplNames(step.before, 'before')
+          if (before === null) {
+            errors.push(`${at} before 只支持模板名字符串（多模板逗号分隔）或列表，如 before: pop.png, ad.png`)
+          } else {
+            const dup = before.find(b => b === v.trim())
+            if (dup) errors.push(`${at} before 模板 ${dup} 与 until 主模板重复`)
+            for (const n of before) {
+              const terr = tplCheck(n)
+              if (terr) errors.push(`${at} ${terr}`)
+            }
+          }
         }
         checkRegion(at, step.region)
-        // then 按模板分支（与引擎 parse_then 一致）：单键映射 + 列表值 = 分支，
-        // 键必须是本步骤模板之一；键非动作名又不在模板列表 → 拼错，运行时会被静默跳过
-        const ACTION_KEYS = ['wait', 'log', 'key', 'text', 'tap', 'swipe', 'find', 'until', 'loop', 'call', 'goto', 'label', 'str_app', 'cls_app']
-        if (Array.isArray(step.then)) {
-          for (const item of step.then) {
-            if (!item || typeof item !== 'object' || Array.isArray(item)) continue
-            const ks = Object.keys(item)
-            if (ks.length !== 1 || !Array.isArray(item[ks[0]])) continue
-            if (!names.includes(ks[0]) && !ACTION_KEYS.includes(ks[0])) {
-              errors.push(`${at} then 分支模板不存在：${ks[0]}（须是 ${key} 模板列表中的名字）`)
-            }
-          }
+        // 已删除参数（除 color 外）：engine exec_step / exec_until 同样显式报错
+        if (step.cnt_chk !== undefined) {
+          errors.push(`${at} cnt_chk 已删除：命中后按首击坐标无条件连点（想防误点请拆成多步 until）`)
+        }
+        for (const k of ['and_or', 'click']) {
+          if (step[k] !== undefined) errors.push(`${at} until ${k} 参数已删除（命中恒点击模板中心）`)
+        }
+        // count 连击：非负整数（含首击，默认 1；引擎对 count ≤ 1 不补点、>100000 报错）
+        if (step.count !== undefined && !((typeof step.count === 'number' && Number.isInteger(step.count) && step.count >= 0) || /^\d+$/.test(String(step.count).trim()))) {
+          errors.push(`${at} until count 需要非负整数（总点击次数，含首击，如 3）`)
         }
       }
-      // click 参数：true/false / 模板名（在模板区域内找并点击）/ [x, y] 相对坐标
-      if (step.click !== undefined) {
-        const c = step.click
-        if (typeof c === 'string') {
-          const cerr = tplCheck(c)
-          if (cerr) errors.push(`${at} click ${cerr}`)
-        } else if (Array.isArray(c)) {
-          if (c.length !== 2) errors.push(`${at} click 数组需要 [x, y] 2 个相对坐标`)
-          else checkRel(`${at} click`, Number(c[0]), Number(c[1]))
-        } else if (typeof c !== 'boolean') {
-          errors.push(`${at} click 只支持 true/false、模板名或 [x, y] 相对坐标`)
+      // 时长参数（与引擎 parse_duration 一致）：纯数字 = ms；1ms/1s/1min/1h/1d（可小数）
+      // timeout 必须 > 0（默认 30min，0 已不表示永不超时）；interval > 0；img_ivl/cnt_ivl ≥ 0
+      const DUR_RE = /^\s*(\d+(?:\.\d+)?)\s*(ms|min|[shd])?\s*$/i
+      const checkDur = (key, min) => {
+        if (step[key] === undefined) return
+        const v = step[key]
+        const m = typeof v === 'string' ? v.match(DUR_RE) : null
+        const num = typeof v === 'number' && Number.isFinite(v) ? v : m ? Number(m[1]) : NaN
+        if (!Number.isFinite(num)) {
+          errors.push(`${at} until ${key} 需要毫秒数或带单位时长（如 500 / 500ms / 2s / 30min / 1h / 1d）`)
+        } else if ((min === 'pos' && num <= 0) || num < 0) {
+          errors.push(min === 'nonneg'
+            ? `${at} until ${key} 不能为负数`
+            : `${at} until ${key} 必须 > 0`)
         }
       }
-      // timeout：find 必须 > 0（0 报错提示用 until）；until 支持显式 timeout
-      // （引擎默认 30 分钟，0 = 永不超时，此时 else 不执行）
-      if (step.timeout !== undefined) {
-        const t = Number(step.timeout)
-        if (!Number.isFinite(t)) {
-          errors.push(`${at} ${key} timeout 需要毫秒数`)
-        } else if (key === 'find' ? t <= 0 : t < 0) {
-          errors.push(key === 'find'
-            ? `${at} find timeout 需要大于 0 的毫秒数（一直找请用 until）`
-            : `${at} until timeout 不能为负数（0 = 永不超时）`)
-        }
-      }
-      if (step.interval !== undefined && (!Number.isFinite(Number(step.interval)) || Number(step.interval) <= 0)) errors.push(`${at} ${key} interval 需要大于 0 的毫秒数`)
-      if (step.then !== undefined && !Array.isArray(step.then)) errors.push(`${at} ${key} then 需要步骤列表`)
-      if (step.else !== undefined && !Array.isArray(step.else)) errors.push(`${at} ${key} else 需要步骤列表`)
+      checkDur('timeout', 'pos')
+      checkDur('interval', 'pos')
+      checkDur('img_ivl', 'nonneg')
+      checkDur('cnt_ivl', 'nonneg')
+      if (step.then !== undefined && !Array.isArray(step.then)) errors.push(`${at} until then 需要步骤列表`)
+      if (step.else !== undefined && !Array.isArray(step.else)) errors.push(`${at} until else 需要步骤列表`)
     }
     if (step.swipe) {
       if (step.swipe.duration !== undefined) errors.push(`${at} swipe 请使用 time，不支持 duration`)
@@ -3715,12 +3682,6 @@ onUnmounted(() => {
   display: block; max-width: 92vw; max-height: 82vh; object-fit: contain;
   border-radius: var(--radius-sm); border: 1px solid var(--border); background: #000;
 }
-.tpl-view-pos {
-  position: absolute; z-index: 2; pointer-events: none; white-space: nowrap;
-  background: rgba(8,10,16,.88); border: 1px solid var(--accent); color: var(--accent);
-  font-size: 11px; line-height: 1; padding: 3px 7px; border-radius: 6px;
-  transform: translate(12px, 16px);
-}
 .tpl-view-close {
   position: absolute; top: 8px; right: 8px; width: 28px; height: 28px;
   display: flex; align-items: center; justify-content: center;
@@ -3729,7 +3690,6 @@ onUnmounted(() => {
 }
 .tpl-view-close:hover { color: var(--danger); border-color: var(--danger); }
 .tpl-view-name { text-align: center; font-size: 12px; color: var(--text-1); word-break: break-all; }
-.tpl-view-tip { text-align: center; font-size: 11px; color: var(--accent-2); }
 
 /* 二次裁切占满整个模板区域 */
 .crop-panel-full { flex: 1; min-height: 0; border-top: none; padding-top: 0; }

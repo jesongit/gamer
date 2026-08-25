@@ -8,26 +8,19 @@ use serde::{Deserialize, Serialize};
 ///
 /// 占位符：{name} 模板名 · {region} 区域块（region: a 或 region: {fm,to}）·
 /// {x}/{y} 点击坐标 · {fx}/{fy}/{tx}/{ty} 滑动起终点 · {time} 滑动实际时长 ms ·
-/// {cx}/{cy} 模板图内相对百分比坐标（find 的 click 参数）·
 /// {color} 采样的十六进制颜色（color 记录）
 ///
 /// 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制，
 /// 需要个别覆盖时手动在步骤里加 wait
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpTemplates {
-    /// find：查找模板并点击中心（默认超时 6000ms）
-    #[serde(default)]
-    pub find: String,
-    /// until：一直等待模板出现并点击（等价于 timeout 为 0 的 find，永不超时）
+    /// until：等模板出现并点击（2026-08-25 重构：find 与 click 参数已删除，统一 until）
     #[serde(default, alias = "find_wait")]
     pub until: String,
-    /// find_click_pos：查看模板大图时点击图片生成 find + click 相对坐标记录
-    #[serde(default)]
-    pub find_click_pos: String,
     /// 屏幕点击
     #[serde(default)]
     pub tap: String,
-    /// 取点比色检测（{color} 为 alt 点击时采样的十六进制颜色）
+    /// 取点比色检测（{color} 为二次裁切区 alt 点击采样的十六进制颜色）
     #[serde(default)]
     pub color: String,
     /// 屏幕滑动
@@ -44,11 +37,9 @@ pub struct OpTemplates {
 impl Default for OpTemplates {
     fn default() -> Self {
         Self {
-            find: "- find: {name}\n  threshold: 0.8\n  {region}\n  click: true\n  then:\n    - log: \"点击成功\"\n  else:\n    - log: \"点击失败\"".into(),
-            until: "- until: {name}\n  threshold: 0.8\n  {region}".into(),
-            find_click_pos: "- find: {name}\n  {region}\n  click: [{cx}, {cy}]".into(),
+            until: "- until: {name}\n  threshold: 0.8".into(),
             tap: "- tap: [{x}, {y}]".into(),
-            color: "- color: [{x}, {y}]\n  check: {color}\n  then:\n    - click:".into(),
+            color: "- color:\n  check:\n    - [{x}, {y}]: {color}".into(),
             swipe: "- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}".into(),
             swipe_region: "region:\n  fm: [{fx}, {fy}]\n  to: [{tx}, {ty}]".into(),
             wait: String::new(),
