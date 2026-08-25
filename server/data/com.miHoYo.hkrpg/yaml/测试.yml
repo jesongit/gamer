@@ -2,5 +2,10 @@ action_wait: 500
 log_level: info
 
 steps:
-  - wait: 1000
-  - log: "脚本开始运行"
+  - cond:
+    - c74f36:
+      - log 1
+      pos: [0.7625, 0.9130]
+    else:
+      - log 2
+  - wait: 1h

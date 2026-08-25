@@ -1,0 +1,7 @@
+action_wait: 500
+log_level: info
+
+steps:
+  - call: 通用日常.yml act_136.png
+  - call: 通用日常.yml act_155.png
+  - call: 通用日常.yml act_188.png

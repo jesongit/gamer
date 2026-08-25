@@ -3,7 +3,7 @@ log_level: info
 
 steps:
   - until: phone.png
-    before: mon_crd.png
+    check: mon_crd.png
   - until: guide.png
   - until: tsk_rev.png
   - until: tsk_go.png
@@ -14,7 +14,7 @@ steps:
   - until: tsk_go.png
   # 遗器本
   - until: target.png
-  - until: yiqi_etr.png
+  - until: cult_etr.png
   - until: tili_use.png
     timeout: 2s
   - until: cnt_add.png
@@ -26,7 +26,7 @@ steps:
   - until: btl_str.png
   - until: btl_qut.png
   - until: close.png
-
+    verify: true
   # 领奖
   - until: phone.png
   - until: guide.png

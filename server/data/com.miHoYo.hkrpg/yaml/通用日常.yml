@@ -4,10 +4,10 @@ log_level: info
 steps:
   - str_app:
   - until: login.png
-    before: act_cls.png
+    check: act_cls.png
   - until: act_swt.png
-    before: swt_etr.png
-  - until: act_136.png
+    check: swt_etr.png
+  - until: $1
   - until: gmr_etr.png
   - until: gmr_str.png
   - until: clk_etr.png
