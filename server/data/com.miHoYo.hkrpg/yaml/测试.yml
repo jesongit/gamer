@@ -1,0 +1,6 @@
+action_wait: 500
+log_level: info
+
+steps:
+  - wait: 1000
+  - log: "脚本开始运行"
