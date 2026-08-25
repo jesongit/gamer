@@ -466,7 +466,7 @@
                 {{ r.text }}
               </div>
             </div>
-            <textarea ref="scriptEditor" v-model="editScriptCode" class="script-editor mono" spellcheck="false" placeholder="# YAML 脚本&#10;action_wait: 500&#10;log_level: info&#10;&#10;steps:&#10;  - until: 模板名.png&#10;    before: 障碍模板.png" @keydown.tab.prevent="onEditorTab"></textarea>
+            <textarea ref="scriptEditor" v-model="editScriptCode" class="script-editor mono" spellcheck="false" placeholder="# YAML 脚本&#10;action_wait: 500&#10;log_level: info&#10;&#10;steps:&#10;  - until: 模板名.png&#10;    check: 障碍模板.png" @keydown.tab.prevent="onEditorTab"></textarea>
           </div>
           </template>
         </div>
@@ -549,7 +549,7 @@ const scriptSaving = ref(false)
 const DEFAULT_OP_TPL = {
   until: '- until: {name}\n  threshold: 0.8',
   tap: '- tap: [{x}, {y}]',
-  color: '- color:\n  check:\n    - [{x}, {y}]: {color}',
+  cond: '- cond:\n  - {color}:\n    pos: [{x}, {y}]',
   swipe: '- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}',
   swipe_region: 'region:\n  fm: [{fx}, {fy}]\n  to: [{tx}, {ty}]'
 }
@@ -2035,9 +2035,9 @@ function cropEventDev(e) {
   }
 }
 
-/** 二次裁切底图（冻结的框选画面）上 alt 点击 → 取色生成 color 操作记录：
+/** 二次裁切底图（冻结的框选画面）上 alt 点击 → 取色生成 cond 颜色条件记录：
  *  颜色直接从 cropBaseCanvas 采样（所见即所得，同步生成无延迟）；
- *  点击点在底图上的设备坐标 = p + (originX, originY)，换算成相对坐标写进记录 */
+ *  点击点在底图上的设备坐标 = p + (originX, originY)，换算成相对坐标写进 pos */
 function cropPickColor(e) {
   const p = cropEventDev(e)
   const base = cropBaseCanvas
@@ -2051,13 +2051,13 @@ function cropPickColor(e) {
   const rx = ((crop.originX + px) / vw).toFixed(4)
   const ry = ((crop.originY + py) / vh).toFixed(4)
   opRecords.value = [
-    { id: ++opRecordSeq, text: `- color #${hex}`, yaml: renderOpTpl(opTpls.color, { x: rx, y: ry, color: hex }) }
+    { id: ++opRecordSeq, text: `- cond 颜色 #${hex} @ (${rx}, ${ry})`, yaml: renderOpTpl(opTpls.cond, { x: rx, y: ry, color: hex }) }
   ]
-  toast(`已生成 ${hex} 的 color 记录，点击选择追加`, 'success')
+  toast(`已生成 ${hex} 的颜色条件记录，点击选择追加`, 'success')
 }
 
 function cropMouseDown(e) {
-  // Alt/alt 模式点击 → 取色生成 color 操作记录（底图坐标 = 冻结的框选画面，
+  // Alt/alt 模式点击 → 取色生成 cond 颜色条件记录（底图坐标 = 冻结的框选画面，
   // 颜色直接从 cropBaseCanvas 采样——与服务端截图同源 YUV→RGB 体系有差异，
   // 但二次裁切底图就是浏览器画面本身，此处取的是"所见即所得"）
   if (isAltAction(e) && cropBaseCanvas) {
@@ -2759,12 +2759,25 @@ async function onImportFile(e) {
   }
 }
 
+/** 解析 YAML 为普通对象。数组键（- [x, y]: 色值）是已删除的 color/cond 旧语法，
+ *  js-yaml object 构造直接抛 "complex keys"——换成明确的迁移提示 */
+function yamlParse(content) {
+  try {
+    return yamlLoad(content)
+  } catch (e) {
+    if (/complex keys/.test(e.reason || e.message || '')) {
+      throw new Error('color 动作与数组键写法（- [x, y]: 色值）已删除：颜色判断改用 cond（- ff8800: 命中步骤 + pos: [x, y]）')
+    }
+    throw e
+  }
+}
+
 /** 保存前校验 YAML：语法 / steps / 坐标范围 / 模板存在（模板按当前应用分区校验） */
 function validateScriptCode(content) {
   const errors = []
   let doc
   try {
-    doc = yamlLoad(content)
+    doc = yamlParse(content)
   } catch (e) {
     const lines = content.split('\n')
     // 常见笔误提示：`region:l` / `timeout:0` 冒号后缺空格
@@ -2783,7 +2796,7 @@ function validateScriptCode(content) {
       if (j >= lines.length) break
       const nm = lines[j].match(/^(\s*)\S/)
       if (nm && nm[1].length > m[1].length) {
-        return [`YAML 语法错误（第 ${i + 1} 行）："- ${m[2]}" 后要接子步骤需带冒号，应为 "- ${m[2]}:"（如 then 按模板分支：- 模板名: 换行缩进步骤）`]
+        return [`YAML 语法错误（第 ${i + 1} 行）："- ${m[2]}" 后要接子步骤需带冒号，应为 "- ${m[2]}:"（如 - cond: 后接条件列表 / then 步骤同理：键: 换行缩进内容）`]
       }
     }
     return ['YAML 语法错误：' + e.message]
@@ -2809,6 +2822,8 @@ function validateScriptCode(content) {
     if (cands && cands.length > 1) return `模板 ${n} 匹配到多个：${cands.join('、')}，请用完整文件名`
     return `模板不存在：${n}`
   }
+  // call 传参占位：$1/$2… 引用实参模板名，在本脚本无法校验存在性（until/cond 模板共用）
+  const argOrTplCheck = n => (/^\$\d+$/.test(n) ? null : tplCheck(n))
   // 模板名列表解析（与引擎 parse_tpl_names 一致）：字符串可逗号分隔多模板，或 YAML 字符串列表
   const parseTplNames = (v, key) => {
     const names = typeof v === 'string'
@@ -2873,6 +2888,13 @@ function validateScriptCode(content) {
         errors.push(`${at} ${k} 需要应用包名（仅字母数字点下划线）或省略`)
       }
     }
+    // call：`- call: 子脚本.yml 实参1 实参2`（空格分隔；子脚本内 $1/$2… 引用实参，
+    // YAML 裸标量 @ 开头非法所以用 $；引擎 substitute_args 替换全部字符串键值）
+    if (step.call !== undefined) {
+      if (typeof step.call !== 'string' || !step.call.trim()) {
+        errors.push(`${at} call 需要 "子脚本名 [实参...]" 字符串（如 - call: test2.yml a.png b.png）`)
+      }
+    }
     if (step.tap !== undefined) {
       const v = step.tap
       if (Array.isArray(v) && v.length >= 2) {
@@ -2883,64 +2905,104 @@ function validateScriptCode(content) {
         errors.push(`${at} tap 需要 [x, y] 相对坐标`)
       }
     }
-    // 旧写法迁移引导（2026-08-25 重构：find / click-check 简写 / and_or / click 参数
-    // 均已删除，引擎 exec_step / exec_until 同样报错）；check 键只属于 color 的期望颜色
+    // 已删除动作守卫（引擎 exec_step 同样报错）：find / click 简写已删，check 键
+    // 只属于 until 的障碍模板（旧名 before），color 动作已删除
     if (step.find !== undefined) {
       errors.push(`${at} find 已删除，请改用 until（timeout 默认 30min，可写 6s / 1min 等单位时长）`)
     }
     if (step.click !== undefined) {
-      errors.push(`${at} click 已删除：until 命中恒点击模板中心（障碍模板写 before）`)
+      errors.push(`${at} click 已删除：until 命中恒点击模板中心（障碍模板写 check）`)
     }
     if (step.and_or !== undefined) {
       errors.push(`${at} and_or 已删除（多主模板写法已同步删除）：until 只支持单个主模板，命中恒点击模板中心`)
     }
-    if (step.check !== undefined && step.color === undefined) {
-      errors.push(`${at} check 只能与 color 配合使用（- color: 后接兄弟键 check 检查点列表）；until 的障碍模板请写 before`)
+    if (step.check !== undefined && step.until === undefined) {
+      errors.push(`${at} check 只能与 until 配合使用（障碍模板，旧名 before）`)
     }
-    // color 新语法（2026-08-25，兄弟键 2 空格与 until 同构）：- color: 值留空，
-    // timeout/interval/check/then/else 为兄弟键；check 检查点列表至少一项
+    // color 动作已删除（2026-08-25）：颜色判断并入 cond 的颜色条件
     if (step.color !== undefined) {
-      if (step.color !== null && step.color !== undefined) {
-        errors.push(`${at} color 动作键值留空；旧写法（- color: [x, y] + check: 色值）已删除`)
-      }
-      const cv = step
-      if (cv.tol !== undefined || cv.count !== undefined || cv.cnt_ivl !== undefined) {
-        errors.push(`${at} color 的 tol/count/cnt_ivl 参数已删除：改定时长 timeout/interval + check 检查点列表`)
-      }
-      if (cv.timeout !== undefined && !/^\s*\d+(?:\.\d+)?\s*(ms|min|[shd])?\s*$/i.test(String(cv.timeout))) {
-        errors.push(`${at} color timeout 需要毫秒数或带单位时长（如 500 / 500ms / 2s / 30min / 1h / 1d）`)
-      }
-      if (cv.interval !== undefined && !/^\s*\d+(?:\.\d+)?\s*(ms|min|[shd])?\s*$/i.test(String(cv.interval))) {
-        errors.push(`${at} color interval 需要毫秒数或带单位时长`)
-      }
-      if (!Array.isArray(cv.check) || cv.check.length === 0) {
-        errors.push(`${at} color 需要 check 检查点列表（如 - [0.5, 0.5]: ff8800）`)
+      errors.push(`${at} color 已删除：颜色判断改用 cond（- ff8800: 命中步骤 + pos: [x, y]）`)
+    }
+    // until 的 before 障碍模板已改名 check（2026-08-25）：字符串值 / 列表里混模板名
+    // = 旧写法；before/after 现在是每轮检测前/未命中后执行的步骤列表（与引擎 parse_round_steps 一致）
+    const roundStepsErr = (v, key) => {
+      if (v === undefined) return null
+      if (!Array.isArray(v)) return `${at} ${key} 需要步骤列表（每轮检测前/未命中后执行）`
+      return null
+    }
+    if (step.until !== undefined && step.before !== undefined) {
+      const bv = step.before
+      const looksOld = typeof bv === 'string'
+        || (Array.isArray(bv) && bv.some(x => typeof x === 'string' && /\.(png|jpe?g)$/i.test(x)))
+      if (looksOld) {
+        errors.push(`${at} until 的 before 障碍模板已改名 check（before: a.png → check: a.png）；before 现在是每轮匹配前执行的步骤列表`)
       } else {
-        for (const item of cv.check) {
-          if (!item || typeof item !== 'object' || Array.isArray(item)) {
-            errors.push(`${at} color 检查点需要单键映射 - [x, y]: 色值`)
-            continue
+        const e = roundStepsErr(bv, 'before')
+        if (e) errors.push(e)
+      }
+    }
+    if (step.until !== undefined) {
+      const e = roundStepsErr(step.after, 'after')
+      if (e) errors.push(e)
+    }
+    // cond 条件分支（2026-08-25，与引擎 exec_cond 一致；color 动作已删除、颜色
+    // 判断并入于此）：条件按序匹配命中即执行该条件步骤并结束；模板条件=单键映射
+    // （- 模板名: 步骤，冒号必须写），颜色条件=色值键（- ff8800: 步骤，可留空）
+    // + pos: [x, y] 兄弟键；else 是 cond 的兄弟键
+    if (step.cond !== undefined) {
+      if (!Array.isArray(step.cond) || step.cond.length === 0) {
+        errors.push(`${at} cond 需要条件列表（至少一个）`)
+      } else {
+        const COND_RESERVED = new Set(['wait', 'log', 'key', 'text', 'tap', 'swipe', 'until', 'color', 'cond', 'loop', 'call', 'goto', 'label', 'str_app', 'cls_app', 'exit', 'then', 'else', 'steps', 'check', 'before', 'after', 'pos'])
+        step.cond.forEach((item, ci) => {
+          const cat = `${at} cond 第 ${ci + 1} 个条件`
+          if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+            errors.push(`${cat} 格式错误：模板条件 - 模板名: 步骤（冒号必须写）；颜色条件 - 色值: 步骤 + pos: [x, y]`)
+            return
           }
           const ks = Object.keys(item)
-          if (ks.length !== 1) {
-            errors.push(`${at} color 检查点需要单键映射 - [x, y]: 色值`)
-            continue
+          // pos 兄弟键 = 颜色条件：恰好一个色值键 + pos
+          if (ks.includes('pos')) {
+            if (ks.length !== 2) {
+              errors.push(`${cat} 颜色条件需要恰好一个色值键 + pos（- ff8800: 步骤 + pos: [x, y]）`)
+            } else {
+              const hexKey = ks.find(k => k !== 'pos')
+              if (!/^#?(0x)?[0-9a-fA-F]{6}$/.test(hexKey.trim())) {
+                errors.push(`${cat} 色值键需要 6 位十六进制（如 ff8800），收到: ${hexKey}`)
+              }
+              const pv = item.pos
+              if (Array.isArray(pv) && pv.length >= 2) {
+                checkRel(`${cat} pos`, Number(pv[0]), Number(pv[1]))
+              } else {
+                errors.push(`${cat} pos 需要 [x, y] 相对坐标`)
+              }
+              const sv = item[hexKey]
+              if (sv !== null && sv !== undefined && !Array.isArray(sv)) {
+                errors.push(`${cat} 色值键的值需要步骤列表（- 色值: 换行缩进步骤）或留空`)
+              }
+            }
+          } else if (ks.length === 1) {
+            const name = ks[0].trim()
+            if (COND_RESERVED.has(name)) {
+              errors.push(`${cat} 键 ${name} 是保留字（条件键应为模板名）`)
+            } else if (name.includes(',')) {
+              errors.push(`${cat} 只支持单个模板名（多个目标拆成多个条件项）`)
+            } else if (/^#?(0x)?[0-9a-fA-F]{6}$/.test(name)) {
+              errors.push(`${cat} 键 ${name} 是色值：颜色条件需要 pos: [x, y] 兄弟键给采样坐标`)
+            } else {
+              const terr = argOrTplCheck(name)
+              if (terr) errors.push(`${at} ${terr}`)
+              const sv = item[ks[0]]
+              if (sv !== null && sv !== undefined && !Array.isArray(sv)) {
+                errors.push(`${cat} ${name} 的步骤需要列表（- 模板名: 换行缩进步骤）或留空`)
+              }
+            }
+          } else {
+            errors.push(`${cat} 格式错误：模板条件=单键映射（- 模板名: 步骤列表），颜色条件=- 色值: 步骤列表 + pos: [x, y]`)
           }
-          const pt = ks[0]
-          const m = pt.match(/^\s*\[\s*([\d.]+)\s*,\s*([\d.]+)\s*\]\s*$/)
-          if (!m) {
-            errors.push(`${at} color 检查点坐标需要 [x, y] 相对坐标（0~1），收到: ${pt}`)
-            continue
-          }
-          checkRel(`${at} color 检查点`, Number(m[1]), Number(m[2]))
-          const color = item[pt]
-          if (typeof color !== 'string' || !/^#?[0-9a-fA-F]{6}$/.test(color.trim())) {
-            errors.push(`${at} color 期望色值需要 6 位十六进制（如 ff8800，不带 #），收到: ${color}`)
-          }
-        }
+        })
       }
-      if (cv.then !== undefined && !Array.isArray(cv.then)) errors.push(`${at} color then 需要步骤列表`)
-      if (cv.else !== undefined && !Array.isArray(cv.else)) errors.push(`${at} color else 需要步骤列表`)
+      if (step.else !== undefined && !Array.isArray(step.else)) errors.push(`${at} cond else 需要步骤列表`)
     }
     // exit：- exit 结束脚本运行（可带结束原因字符串）
     if (step.exit !== undefined && step.exit !== null && typeof step.exit !== 'string') {
@@ -2950,26 +3012,26 @@ function validateScriptCode(content) {
       const v = step.until
       // 与引擎 exec_until 一致：until 只支持单个主模板字符串（逗号/列表已删除，多目标拆成多步）
       if (typeof v !== 'string' || !v.trim() || v.includes(',')) {
-        errors.push(`${at} until 只支持单个模板名字符串（多个目标请拆成多步；障碍模板写 before）`)
+        errors.push(`${at} until 只支持单个模板名字符串（多个目标请拆成多步；障碍模板写 check）`)
       } else {
-        const terr = tplCheck(v.trim())
+        const terr = argOrTplCheck(v.trim())
         if (terr) errors.push(`${at} ${terr}`)
-        // before 障碍模板：字符串（逗号分隔多模板）/ YAML 列表 / 单个，与主模板重复报错
-        if (step.before !== undefined) {
-          const before = parseTplNames(step.before, 'before')
-          if (before === null) {
-            errors.push(`${at} before 只支持模板名字符串（多模板逗号分隔）或列表，如 before: pop.png, ad.png`)
+        // check 障碍模板（旧名 before）：字符串（逗号分隔多模板）/ YAML 列表 / 单个，与主模板重复报错
+        if (step.check !== undefined) {
+          const check = parseTplNames(step.check, 'check')
+          if (check === null) {
+            errors.push(`${at} check 只支持模板名字符串（多模板逗号分隔）或列表，如 check: pop.png, ad.png`)
           } else {
-            const dup = before.find(b => b === v.trim())
-            if (dup) errors.push(`${at} before 模板 ${dup} 与 until 主模板重复`)
-            for (const n of before) {
-              const terr = tplCheck(n)
+            const dup = check.find(b => b === v.trim())
+            if (dup) errors.push(`${at} check 模板 ${dup} 与 until 主模板重复`)
+            for (const n of check) {
+              const terr = argOrTplCheck(n)
               if (terr) errors.push(`${at} ${terr}`)
             }
           }
         }
         checkRegion(at, step.region)
-        // 已删除参数（除 color 外）：engine exec_step / exec_until 同样显式报错
+        // 已删除参数：engine exec_until 同样显式报错
         if (step.cnt_chk !== undefined) {
           errors.push(`${at} cnt_chk 已删除：命中后按首击坐标无条件连点（想防误点请拆成多步 until）`)
         }
@@ -2979,6 +3041,10 @@ function validateScriptCode(content) {
         // count 连击：非负整数（含首击，默认 1；引擎对 count ≤ 1 不补点、>100000 报错）
         if (step.count !== undefined && !((typeof step.count === 'number' && Number.isInteger(step.count) && step.count >= 0) || /^\d+$/.test(String(step.count).trim()))) {
           errors.push(`${at} until count 需要非负整数（总点击次数，含首击，如 3）`)
+        }
+        // verify：布尔（true=点击后每 50ms 复查主模板、消失才走 then，超时走 else）
+        if (step.verify !== undefined && typeof step.verify !== 'boolean') {
+          errors.push(`${at} until verify 需要 true / false`)
         }
       }
       // 时长参数（与引擎 parse_duration 一致）：纯数字 = ms；1ms/1s/1min/1h/1d（可小数）
@@ -3079,7 +3145,9 @@ const scriptLines = computed(() => scriptContent.value.split('\n'))
 
 /** call 行解析（与 scriptLines 平行）：`- call: test.yaml` → { prefix, name, suffix }，其余行 → null */
 const callLinks = computed(() => scriptLines.value.map(line => {
-  const m = line.match(/^(\s*(?:-\s+)?call:\s*)(\S+)\s*(.*)$/)
+  // call 传参后行内还有实参（- call: 通用日常.yml act_136.png）：分隔空格划入
+  // suffix（m[3] 以 \s+ 开头），否则渲染时脚本名和实参贴在一起
+  const m = line.match(/^(\s*(?:-\s+)?call:\s*)(\S+)((?:\s+.*)?)$/)
   if (!m) return null
   const name = m[2].replace(/^["']|["']$/g, '')
   return name ? { prefix: m[1], name, suffix: m[3] } : null

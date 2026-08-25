@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 
 /// 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式
 ///
-/// 占位符：{name} 模板名 · {region} 区域块（region: a 或 region: {fm,to}）·
-/// {x}/{y} 点击坐标 · {fx}/{fy}/{tx}/{ty} 滑动起终点 · {time} 滑动实际时长 ms ·
-/// {color} 采样的十六进制颜色（color 记录）
+/// 占位符：{name} 模板名 · {x}/{y} 点击坐标（cond 颜色条件的 pos 采样点同用）·
+/// {fx}/{fy}/{tx}/{ty} 滑动起终点 · {time} 滑动实际时长 ms ·
+/// {color} 二次裁切区点击处采样的十六进制颜色（cond 颜色条件的色值键）
 ///
 /// 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制，
 /// 需要个别覆盖时手动在步骤里加 wait
@@ -20,9 +20,9 @@ pub struct OpTemplates {
     /// 屏幕点击
     #[serde(default)]
     pub tap: String,
-    /// 取点比色检测（{color} 为二次裁切区 alt 点击采样的十六进制颜色）
+    /// cond 颜色条件记录（{color} 为二次裁切区 alt 点击采样的十六进制颜色）
     #[serde(default)]
-    pub color: String,
+    pub cond: String,
     /// 屏幕滑动
     #[serde(default)]
     pub swipe: String,
@@ -39,7 +39,7 @@ impl Default for OpTemplates {
         Self {
             until: "- until: {name}\n  threshold: 0.8".into(),
             tap: "- tap: [{x}, {y}]".into(),
-            color: "- color:\n  check:\n    - [{x}, {y}]: {color}".into(),
+            cond: "- cond:\n  - {color}:\n    pos: [{x}, {y}]".into(),
             swipe: "- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}".into(),
             swipe_region: "region:\n  fm: [{fx}, {fy}]\n  to: [{tx}, {ty}]".into(),
             wait: String::new(),

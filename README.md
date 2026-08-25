@@ -10,7 +10,7 @@
 - ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网 <10ms
 - 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先取自视频流软解码帧缓存，<50ms；fallback adb screencap）
-- 📜 **YAML 自动化**：until（找图等待+点击，before 障碍）/ color 取点比色 / tap / swipe / text / key / str_app / cls_app / loop / goto / call / exit / wait（语法见 [docs/YAML.md](docs/YAML.md)）
+- 📜 **YAML 自动化**：until（找图等待+点击，check 障碍、before/after 每轮步骤）（cond 条件分支支持模板/颜色条件）/ tap / swipe / text / key / str_app / cls_app / loop / goto / call / exit / wait（语法见 [docs/YAML.md](docs/YAML.md)）
 - ⏰ **定时任务**：cron 表达式，服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 

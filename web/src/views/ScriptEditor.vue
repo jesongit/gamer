@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">脚本编辑</div>
-        <div class="page-sub">YAML 自动化脚本 · 支持 until（找图等待 + before 障碍）/ color / tap / swipe / text / key / str_app / cls_app / loop / goto / call / exit / wait；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms；str_app 默认 3000ms）</div>
+        <div class="page-sub">YAML 自动化脚本 · 支持 until（找图等待 + check 障碍）/ cond 条件分支（模板/颜色）/ tap / swipe / text / key / str_app / cls_app / loop / goto / call（可传参 $N）/ exit / wait；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms；str_app 默认 3000ms）</div>
       </div>
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
@@ -79,44 +79,51 @@ log_level: info        # 日志级别：info=精简（默认） / debug=详细</
 - key: HOME                          # HOME/BACK/APP_SWITCH/VOL_UP…</pre>
           </div>
           <div class="help-block">
-            <div class="hb-title">🔍 找图 until（find / click-check 简写 / and_or / click 参数已删除，统一用 until）</div>
+            <div class="hb-title">🔍 找图 until</div>
             <pre class="hb-code mono">- until: sign_btn.png   # 超时时间内循环等模板出现并点击（恒点模板中心）
   timeout: 30min        # 超时：必须 > 0（默认 30min；写法 500 / 500ms / 2s / 1h / 1d）
   interval: 500ms       # 轮询间隔（默认 500ms，写法同 timeout）
-  before: [pop.png, ad.png]  # 障碍模板：每轮先依序匹配，命中即点击关闭后继续；
-                         # 未命中等 img_ivl 匹配下一个（无论命中与否都不结束本轮）
-                         # 单个可写 before: pop.png（不用 []）
-  img_ivl: 50ms         # 一轮内相邻模板匹配的间隔（before → 主模板之间，默认 50ms）
+  before:               # 每轮匹配前执行的步骤（可选）：如先点掉/触发什么再找图
+    - log: "先刷新一下"
+  check:                # 障碍模板：每轮先依序匹配，命中即点击关闭后继续；
+    - pop.png           # 未命中等 img_ivl 匹配下一个（无论命中与否都不结束本轮）；
+    - ad.png            # 单个可写 check: pop.png
+  img_ivl: 50ms         # 一轮内相邻模板匹配的间隔（check → 主模板之间，默认 50ms）
+  after:                # 每轮未命中后执行的步骤（可选；命中走 then、超时走 else 均不执行）
+    - swipe:            # 经典用法：滚动翻页直到找到目标
+        fm: [0.500, 0.800]
+        to: [0.500, 0.500]
+        time: 300
   threshold: 0.85       # 匹配阈值（默认 0.8）
   region: a             # 搜索区域（默认 a=全屏；模板名可带 #后缀 区域各自指定）
-  count: 1              # 连击：总点击次数含首击（默认 1 单击；cnt_chk 已删除，
-                         # 命中后按首击坐标无条件连点；cnt_ivl 默认 50ms 间隔；
-                         # 对 before 障碍点击同样生效）
+  count: 1              # 连击：总点击次数含首击（默认 1 单击；命中后按首击坐标
+                         # 无条件连点；cnt_ivl 默认 50ms 间隔；对 check 障碍同样生效）
+  verify: true          # 生效验证（默认 false 无逻辑）：点击后每 50ms 复查主模板，
+                         # 消失（点击生效/页面翻走）才走 then；持续命中到超时走 else
   then:                 # 超时时间内出现主模板执行
     - log: "找到并点击"
   else:                 # 超时执行
     - log: "等待超时"
 
-- until: a.png           # 只支持单个主模板（多目标请拆成多步；挡路的写 before）
+- until: a.png           # 只支持单个主模板（多目标请拆成多步；挡路的写 check）
                          # 各模板区域不同 → 名字带 #后缀：hp#l.png（左半）xx#0_0_500_500.png（左上 1/4）
                          # 脚本也可写短名 login.png（引擎自动解析唯一 login#*.png，区域照常生效）
-  then:                 # 普通步骤列表（「模板名: 步骤列表」分支写法已删除）
+  then:
     - log: "命中了"</pre>
           </div>
           <div class="help-block">
-            <div class="hb-title">🎨 取点比色 color（多检查点，超时轮询，兄弟键 2 空格与 until 同构）</div>
-            <pre class="hb-code mono">- color:                 # 值留空；timeout/interval/check/then/else 为兄弟键
-  timeout: 5min          # 超时：默认 5min（必须 > 0；写法 500 / 500ms / 2s / 1h / 1d）
-  interval: 500ms        # 检测间隔：默认 500ms（每轮新截图）
-  check:                 # 检查点列表（至少一项）：超时时间内任一命中执行 then，超时执行 else
-    - [0.5123, 0.8456]: ff8800   # 该点像素是否为 ff8800（6 位十六进制，不带 #）
-    - [0.3000, 0.2000]: ff8899   # 可写多个检查点，任一命中即触发
-  then:                  # 命中执行（如需多步，列表项再 +2 空格）
-    - log: "颜色命中"
-  else:                  # 超时未命中执行
-    - log: "体力没恢复"
-# 二次裁切区 Alt/alt 模式点击任意处 → 自动生成 color 记录（所见即所得取色）
-# 旧写法（- color: [x, y] + check: 色值 + tol/count/cnt_ivl）已删除</pre>
+            <div class="hb-title">🔀 条件分支 cond（按序匹配，命中即执行对应步骤并结束）</div>
+            <pre class="hb-code mono">- cond:                 # 一次截图按序判定条件：命中一个 → 执行其步骤 → 结束本步
+  - test.png:           # 模板条件（单键映射，**模板名后的冒号必须写**）
+    - log: "命中模板"   # 命中执行的步骤写在模板名下（同列或缩进 +2 均可）
+  - ff8800:             # 颜色条件：键 = 6 位十六进制色值（容差固定 30）
+    - log: "命中颜色"   # 命中步骤写在色值键正下方（pos 之后不能跟同列 - 行）
+    pos: [0.5123, 0.8456]   # pos 兄弟键 = 采样相对坐标（有 pos 即颜色条件）
+  else:                  # 全部未命中执行（cond 的兄弟键，与条件项同列、不带 -）
+    - log: "都没命中"
+# 单遍判定不轮询不超时（要"等出现再分支"用 until，要重试套 loop/goto）
+# threshold / region 作用于模板条件；$1 等实参占位同样可用
+# 二次裁切区 Alt/alt 模式点击任意处 → 自动生成颜色条件记录（所见即所得取色）</pre>
           </div>
           <div class="help-block">
             <div class="hb-title">🔁 逻辑</div>
@@ -124,6 +131,12 @@ log_level: info        # 日志级别：info=精简（默认） / debug=详细</
 - goto: label_name
 - label: label_name
 - call: 子脚本.yml
+- call: 子脚本.yml a.png b.png   # call 传参：空格分隔实参，子脚本内 $1/$2… 引用
+                                 # （@ 开头裸标量是 YAML 保留字符非法，故用 $；
+                                 #  替换作用于子脚本全部字符串，嵌套 call 转发 $N 同样生效）
+# test2.yml 内：
+#   - until: $1        # ← 即 a.png
+#   - log: "第二个参数 $2"
 - exit                  # 结束脚本运行（无参数打印"结束运行脚本"）
 - exit: 体力不足        # 带原因：打印"因 体力不足 结束运行脚本"
 - log: "输出到运行日志"</pre>
