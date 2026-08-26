@@ -1,0 +1,49 @@
+func:
+  # 领取邮件  
+  - mail_recv:
+    cond: phone.png
+    steps:
+      - find: phone.png
+      - find: mail_have.png
+        timeout: 500ms
+        then:
+          - find: mail_rev.png
+          - find: itm_cls.png
+          - find: close.png
+  # 领取委托
+  - itm_recv:
+    - find: tsk_go.png
+    - find: itm_rev.png
+      timeout: 500ms
+      then: # 正确进入委托
+        - find: itm_cls.png
+        - find: close.png
+        - find: tsk_rev.png
+      else: # 如果没进委托一般是进了生存索引，切回任务界面
+        - find: task_list.png
+          timeout: 1s
+          else:
+            - throw: 未知界面
+
+  # 清体力
+  - ap_burn:
+    - find: target.png
+    - find: cult_etr.png
+    - find: tili_use.png
+      timeout: 500ms
+    - find: cnt_add.png
+    - find: cnt_add.png
+    - find: cnt_add.png
+    - find: cnt_add.png
+    - find: cnt_add.png
+    - find: yiqi_str.png
+    - find: btl_str.png
+    - find: btl_qut.png
+    - find: close.png
+      verify: true
+  # 领取大月卡
+  - bp_recv:
+    - find: bp.png
+      block:
+        - bp_str.png
+        - spc_cls.png 
