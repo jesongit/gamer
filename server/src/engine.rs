@@ -6,6 +6,9 @@
 //!            覆盖）均可；键 = interval / threshold / log_level
 //!   func:    可选，自定义函数定义（见下）
 //!   steps:   必需，步骤列表
+//! 单段脚本可省略段落键直接写内容（normalize_top 归一化，2026-08-27）：
+//!   顶层序列 = steps；顶层映射且不含 config/func/steps 任何键 = func
+//!   （纯函数库简写；config 不能省略——其子键不是函数名，无法判定归属）。
 //!
 //! 动作（步骤键，一个步骤只能有一个动作键）：
 //!   find:  找图轮询（取代旧 until）。`- find: 主模板`（单个字符串）+ 兄弟键：
@@ -223,7 +226,8 @@ impl Runner {
     /// `start_step`：从第几个 step 开始运行（0=从头；超出范围时从头）
     /// `run_func`：Some(函数名) = 不跑顶层 steps，直接运行该函数体（同样受
     ///             start_step 控制；无实参，体内 `$N` 保持字面量不替换）——
-    ///             Console「从某行运行」点击函数体内的行时使用
+    ///             Console「从某行运行」点击函数体内的行时使用；start_step=0
+    ///             （点击函数名行）时先检查函数 cond，未命中则不执行函数体
     /// `exit`：throw 动作共享标志（call 子脚本传父脚本的，子脚本里 throw 同样
     ///         结束整个任务；None=新建）
     /// `args`：call 传入的实参（主脚本运行传空）——子脚本内 `$1`/`$2`… 引用
@@ -240,21 +244,10 @@ impl Runner {
         exit: Option<Arc<AtomicBool>>,
         args: Vec<String>,
     ) -> anyhow::Result<Vec<(String, String)>> {
-        let mut doc: Value = serde_yaml::from_str(content)?;
-        // 顶层键白名单：只允许 config / func / steps
-        if let Some(m) = doc.as_mapping() {
-            for k in m.keys() {
-                match k.as_str() {
-                    Some("config" | "func" | "steps") => {}
-                    Some("action_wait") => anyhow::bail!(
-                        "顶层 action_wait 已删除：操作间隔统一为 config interval（仅轮询类等待，步骤间不再等待）"
-                    ),
-                    Some("log_level") => anyhow::bail!("顶层 log_level 已删除：改用 config: 段（config.toml 可配全局默认）"),
-                    Some("name") => anyhow::bail!("顶层 name 已删除（脚本名即文件名）"),
-                    other => anyhow::bail!("未知顶层键 {:?}（只支持 config / func / steps）", other),
-                }
-            }
-        }
+        let doc: Value = serde_yaml::from_str(content)?;
+        // 顶层段落归一化：单段脚本可省略段落键直接写内容（省略写法与显式
+        // 写法经归一化后走同一条解析路径，config 不能省略）
+        let mut doc = Self::normalize_top(doc)?;
         // func 段原样取出（函数体内 $N 永远指函数实参，不参与脚本级替换），
         // 其余部分（config / steps）做 $N → 实参全文替换
         let funcs_raw = Self::take_funcs_and_substitute(&mut doc, &args)?;
@@ -280,18 +273,24 @@ impl Runner {
             log_cb,
         };
 
-        // 直接运行函数体模式：steps 换成函数体（无实参，$N 保持字面量不替换；
-        // 函数 cond 条件不检查——调试用，只跑函数体本身）
+        // 直接运行函数体模式：steps 换成函数体（无实参，$N 保持字面量不替换）。
+        // 从头运行（start_step=0，Console 点击函数名行）先检查 cond 条件——
+        // cond 未命中时函数体不执行（与正常调用语义一致，cond 逻辑可测试）；
+        // start_step>0（点击函数体内某行）跳过 cond 直接从该步执行
         let steps = match run_func {
             Some(name) => {
-                let body = ctx
+                let def = ctx
                     .funcs
                     .get(name)
                     .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("函数 {} 未定义（func: 段里没有该函数名）", name))?
-                    .body;
+                    .ok_or_else(|| anyhow::anyhow!("函数 {} 未定义（func: 段里没有该函数名）", name))?;
                 ctx.log("info", format!("直接运行函数 {}（无实参，体内 $N 不替换）", name));
-                body
+                if start_step == 0 && !self.check_func_cond(&mut ctx, &def.cond).await? {
+                    ctx.log("info", format!("函数 {} 条件未命中，函数体不执行", name));
+                    Vec::new()
+                } else {
+                    def.body
+                }
             }
             None => match steps_raw {
                 Some(s) => s,
@@ -328,6 +327,64 @@ impl Runner {
         }
 
         Ok(ctx.log)
+    }
+
+    /// 顶层段落归一化：单段脚本可省略 `steps:` / `func:` 段落键直接写内容，
+    /// 按内容形态判定归属（config 不能省略——它的子键 interval/threshold/
+    /// log_level 不是函数名，省了无法区分）：
+    /// - 顶层**序列** → `steps`（函数定义的列表简写与步骤序列无法区分，省略
+    ///   func 时一律用映射形式）
+    /// - 顶层**映射**且不含 config/func/steps 任何一键 → 整个映射视为 `func`
+    ///   段（纯函数库简写：函数定义直接写在顶层）
+    /// - 含任一段落键的映射维持白名单校验（未知顶层键报错）
+    /// 返回带段落键的归一化文档；旧顶层键（action_wait/log_level/name）无论
+    /// 何种形态都先定向报错
+    fn normalize_top(doc: Value) -> anyhow::Result<Value> {
+        match &doc {
+            Value::Sequence(_) => {
+                let mut m = serde_yaml::Mapping::new();
+                m.insert(Value::String("steps".into()), doc);
+                Ok(Value::Mapping(m))
+            }
+            Value::Mapping(m) => {
+                for k in m.keys() {
+                    match k.as_str() {
+                        Some("action_wait") => anyhow::bail!(
+                            "顶层 action_wait 已删除：操作间隔统一为 config interval（仅轮询类等待，步骤间不再等待）"
+                        ),
+                        Some("log_level") => anyhow::bail!("顶层 log_level 已删除：改用 config: 段（config.toml 可配全局默认）"),
+                        Some("name") => anyhow::bail!("顶层 name 已删除（脚本名即文件名）"),
+                        _ => {}
+                    }
+                }
+                let has_section = m.keys().any(|k| matches!(k.as_str(), Some("config" | "func" | "steps")));
+                if has_section {
+                    for k in m.keys() {
+                        if !matches!(k.as_str(), Some("config" | "func" | "steps")) {
+                            anyhow::bail!(
+                                "未知顶层键 {:?}（只支持 config / func / steps；单段简写：顶层序列 = steps，无段落键的顶层映射 = func）",
+                                k.as_str()
+                            );
+                        }
+                    }
+                    Ok(doc)
+                } else {
+                    // 省略 func: 的纯函数库简写；config 子键混进顶层是常见笔误，定向报错
+                    for k in m.keys() {
+                        if matches!(k.as_str(), Some("interval" | "threshold")) {
+                            anyhow::bail!(
+                                "顶层 {:?} 是 config: 段参数（省略段落键的简写只支持纯 steps 序列或纯 func 函数定义，config 必须写 config: 键）",
+                                k.as_str()
+                            );
+                        }
+                    }
+                    let mut out = serde_yaml::Mapping::new();
+                    out.insert(Value::String("func".into()), doc);
+                    Ok(Value::Mapping(out))
+                }
+            }
+            _ => Ok(doc),
+        }
     }
 
     /// 从文档取出 func 段（原样返回，不参与 $N 替换）并对剩余部分做实参替换。
@@ -1076,9 +1133,11 @@ impl Runner {
             .scripts
             .resolve_call(caller_pkg, script_name)?
             .ok_or_else(|| anyhow::anyhow!("子脚本不存在: {}", script_name))?;
-        // 解析被引用脚本的 func 段（函数体 $N 不参与子脚本级替换，由调用点实参替换）
+        // 解析被引用脚本的 func 段（函数体 $N 不参与子脚本级替换，由调用点实参替换）；
+        // 先做顶层归一化（省略 func: 的纯函数库简写同样可被跨文件调用）
         let doc: Value = serde_yaml::from_str(&s.content)
             .map_err(|e| anyhow::anyhow!("子脚本 {} 解析失败: {}", script_name, e))?;
+        let doc = Self::normalize_top(doc).map_err(|e| anyhow::anyhow!("子脚本 {}: {}", script_name, e))?;
         let sub_funcs = Self::parse_funcs(doc.get("func").filter(|v| !v.is_null()).cloned())?;
         let def = sub_funcs
             .get(func_name)
@@ -2342,6 +2401,10 @@ mod tests {
         // run_func 直接运行函数库脚本的函数体（无 steps 时同样合法）
         let logs = runner.run("dev", "com.test/lib_only.yaml", "func:\n  - hello:\n    - log: lib hello", stop.clone(), None, 0, Some("hello"), None, vec![]).await.unwrap();
         assert!(logs.iter().any(|(_, m)| m == "lib hello"));
+        // 省略 func: 的简写函数库（顶层映射直接写函数定义）同样可被跨文件调用
+        runner.scripts.save(None, "com.test", "lib_bare.yaml", "hello:\n  - log: bare hello").unwrap();
+        let logs = runner.run("dev", "com.test/t.yml", "steps:\n  - lib_bare:hello", stop.clone(), None, 0, None, None, vec![]).await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "bare hello"));
     }
 
     async fn run_step(runner: &Runner, ctx: &mut Ctx, yaml: &str) -> anyhow::Result<()> {
@@ -2364,8 +2427,24 @@ mod tests {
         assert!(run_yaml(&runner, &stop,"name: x\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("name 已删除"));
         assert!(run_yaml(&runner, &stop,"foo: 1\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("未知顶层键"));
         // steps 与 func 都没有 → 报错；改后文案明确提示纯函数库需要至少一个函数
-        assert!(run_yaml(&runner, &stop,"- log: x").await.unwrap_err().to_string().contains("需要 steps 或 func"));
         assert!(run_yaml(&runner, &stop,"config:\n  interval: 500ms").await.unwrap_err().to_string().contains("需要 steps 或 func"));
+        assert!(run_yaml(&runner, &stop,"").await.unwrap_err().to_string().contains("需要 steps 或 func"));
+        // 顶层序列 = 省略 steps: 的单段脚本（旧版本此写法报"需要 steps 或 func"）
+        let logs = run_yaml(&runner, &stop,"- log: a\n- log: b").await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "a"));
+        assert!(logs.iter().any(|(_, m)| m == "b"));
+        // 无段落键的顶层映射 = 省略 func: 的纯函数库简写（直接运行不做动作）
+        let lib = "f1:\n  cond: a.png\n  steps:\n    - log: in f1\nf2:\n  - log: in f2";
+        let logs = run_yaml(&runner, &stop, lib).await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作"));
+        assert!(!logs.iter().any(|(_, m)| m.contains("in f")));
+        // run_func 直接运行简写函数库的函数体
+        let logs = runner.run("dev", "com.test/t.yaml", lib, stop.clone(), None, 0, Some("f2"), None, vec![]).await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "in f2"));
+        // config 子键裸写顶层（无段落键）→ 定向报错（不能当函数名）
+        assert!(run_yaml(&runner, &stop,"interval: 500ms").await.unwrap_err().to_string().contains("config: 段参数"));
+        // 顶层映射值不是函数体形态 → parse_funcs 报函数体错误
+        assert!(run_yaml(&runner, &stop,"foo: 1").await.unwrap_err().to_string().contains("函数体需要步骤列表"));
         // 合法脚本：log 正常执行
         let logs = run_yaml(&runner, &stop,"steps:\n  - log: hello").await.unwrap();
         assert!(logs.iter().any(|(_, m)| m == "hello"));
@@ -2422,5 +2501,36 @@ mod tests {
         let yaml2 = "func:\n  - f2:\n    - log: $1\nsteps:\n  - f2: x";
         let logs = runner.run("dev", "com.test/t.yaml", yaml2, stop.clone(), None, 0, Some("f2"), None, vec![]).await.unwrap();
         assert!(logs.iter().any(|(_, m)| m == "$1"));
+        // 从头运行（start_step=0）先检查 cond——Console 点击函数名行 = 整函数
+        // 从头跑：cond 需要截图，测试环境无设备 → 报截图失败（证明 cond 被检查）；
+        // start_step=1（点击函数体内行）跳过 cond 直接执行体内第 2 步
+        let yamlc = "func:\n  - fc:\n    cond: a.png\n    steps:\n      - log: c1\n      - log: c2\nsteps:\n  - log: top";
+        let err = runner.run("dev", "com.test/t.yaml", yamlc, stop.clone(), None, 0, Some("fc"), None, vec![])
+            .await.unwrap_err().to_string();
+        assert!(err.contains("截图失败"), "cond 应被检查（截图失败），实际: {}", err);
+        let logs = runner.run("dev", "com.test/t.yaml", yamlc, stop.clone(), None, 1, Some("fc"), None, vec![]).await.unwrap();
+        assert!(!logs.iter().any(|(_, m)| m == "c1"));
+        assert!(logs.iter().any(|(_, m)| m == "c2"));
+    }
+
+    /// 顶层段落归一化：单段脚本省略 steps:/func:（2026-08-27）
+    #[test]
+    fn normalize_top_omission() {
+        let p = |yaml: &str| Runner::normalize_top(parse(yaml)).unwrap();
+        // 顶层序列 → steps
+        let steps = p("- log: a\n- log: b").get("steps").cloned().unwrap();
+        assert_eq!(steps.as_sequence().map(|s| s.len()), Some(2));
+        // 无段落键的顶层映射 → func（纯函数库简写）
+        let func = p("f1:\n  cond: a.png\n  steps:\n    - log: x\nf2:\n  - log: y").get("func").cloned().unwrap();
+        let m = Runner::parse_funcs(Some(func)).unwrap();
+        assert_eq!(m.get("f1").unwrap().cond, vec!["a.png"]);
+        assert_eq!(m.get("f2").unwrap().body.len(), 1);
+        // 显式段落键原样保留（不重复包裹）
+        assert!(p("steps:\n  - log: a").get("func").is_none());
+        assert!(p("func:\n  f1:\n    - log: a").get("steps").is_none());
+        // 含段落键时未知顶层键报错；config 子键裸写顶层定向报错
+        assert!(Runner::normalize_top(parse("foo: 1\nsteps: []")).unwrap_err().to_string().contains("未知顶层键"));
+        assert!(Runner::normalize_top(parse("threshold: 0.9")).unwrap_err().to_string().contains("config: 段参数"));
+        assert!(Runner::normalize_top(parse("threshold: 0.9\nf1:\n  - log: a")).unwrap_err().to_string().contains("config: 段参数"));
     }
 }

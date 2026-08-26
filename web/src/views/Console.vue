@@ -434,7 +434,7 @@
             <template v-else>
               <div v-if="!selScript" class="script-view-empty">请选择脚本</div>
               <div v-else class="script-view-wrap">
-                <div class="run-hint">点击「- 」开头的逻辑行（含函数体内步骤）→ 从该逻辑开始运行；再次点击选中行取消（从头运行）</div>
+                <div class="run-hint">点击「- 」开头的逻辑行（含函数体内步骤）→ 从该步骤开始运行；点击函数名行 → 从头运行整个函数（先判 cond 再跑函数体）；再次点击选中行取消（从头运行）</div>
                 <div class="script-view mono">
                   <div
                     v-for="(line, idx) in scriptLines"
@@ -2555,15 +2555,22 @@ function templateRegionPixels(name) {
 
 /** 把生成的 YAML 片段以对应缩进插入到脚本的光标下一行：
  *  - 光标在 steps 列表内 → 2 空格缩进插到光标所在行的下一行
- *  - 光标在 func 函数体内 → 以函数体缩进（默认 4 空格；cond+steps 写法取 steps
- *    列表项缩进）插到光标所在行的下一行；光标在「- 函数名:」行 / func: 行 →
+ *  - 光标在 func 函数体内 → 以函数体缩进（默认 defIndent+2；cond+steps 写法取
+ *    steps 列表项缩进）插到光标所在行的下一行；光标在「- 函数名:」行 / func: 行 →
  *    插到该函数体末尾（无函数定义时回到 steps 逻辑）
+ *  - 省略段落键的简写脚本同样支持：顶层 steps 序列按序列项缩进追加；省略 func:
+ *    的顶层函数定义按定义缩进 0 定位函数体（兜底追加到最后一个函数体末尾）
  *  - 其余（steps 之外或无光标）→ 追加到 steps 列表末尾；没有 steps 时补一个
  *    最小可运行脚本结构。插入后光标移到新记录之后，方便连续追加 */
 function appendYamlToScript(snippet) {
   const lines = editScriptCode.value.split('\n')
   const stepsIdx = lines.findIndex(l => /^steps\s*:/.test(l))
   const funcIdx = lines.findIndex(l => /^func\s*:/.test(l))
+  // 省略段落键的简写（与引擎 normalize_top 判定一致）：无 steps:/func: 根键时
+  // 顶层序列 = steps、顶层映射 = func（函数定义在缩进 0；config 不能省略）
+  const firstContent = lines.find(l => l.trim() && !/^\s*#/.test(l)) || ''
+  const impliedSteps = stepsIdx === -1 && funcIdx === -1 && /^\s*-\s/.test(firstContent)
+  const impliedFunc = stepsIdx === -1 && funcIdx === -1 && !impliedSteps && !!firstContent
   const ta = scriptEditor.value
   let cursorLine = -1
   if (ta && typeof ta.selectionStart === 'number') {
@@ -2573,55 +2580,73 @@ function appendYamlToScript(snippet) {
 
   let insertIdx = -1
   let indent = '  '
-  // —— 光标在 func 段内：插入到光标所属函数体 ——
-  if (funcIdx !== -1 && cursorLine >= funcIdx) {
+  // —— 光标在 func 段内（显式 func: 或省略简写的顶层映射）：插入到光标所属函数体 ——
+  if ((funcIdx !== -1 || impliedFunc) && cursorLine >= funcIdx) {
+    const defIndent = impliedFunc ? 0 : 2 // 函数定义行缩进（简写 = 顶层）
+    // 函数定义行（「名称:」或「- 名称:」，值留空；cond/steps 挂在下一层）
+    const isDef = l => {
+      const t = l.trim()
+      return indOf(l) === defIndent && /^(- )?[\w.-]+\s*:\s*(#.*)?$/.test(t)
+    }
+    // 函数体末尾 = 下一个缩进 ≤defIndent 的非空行（函数定义 / 根级键）之前；
+    // 函数体缩进 = 第一个「- 」项行（cond+steps 写法里 steps 列表项的缩进），
+    // 无项行时若紧跟 steps: 键则取其 +2，默认 defIndent+2
+    const insertIntoFuncBody = defIdx => {
+      let bodyEnd = defIdx
+      for (let i = defIdx + 1; i < lines.length; i++) {
+        const l = lines[i]
+        if (l.trim() && indOf(l) <= defIndent) break
+        if (l.trim()) bodyEnd = i
+      }
+      let bi = defIndent + 2
+      for (let i = defIdx + 1; i <= bodyEnd; i++) {
+        const l = lines[i]
+        if (!l.trim()) continue
+        const ind = indOf(l)
+        if (ind <= defIndent) break
+        if (/^\s*-\s/.test(l)) { bi = ind; break }
+        if (/^steps\s*:\s*$/.test(l.trim())) bi = ind + 2
+      }
+      indent = ' '.repeat(bi)
+      // 光标在函数体内（含函数体行/嵌套行）→ 光标下一行；否则函数体末尾
+      insertIdx = cursorLine > defIdx && cursorLine <= bodyEnd ? cursorLine + 1 : bodyEnd + 1
+    }
     let inFunc = false
     for (let i = cursorLine; i >= 0; i--) {
       if (lines[i].trim() && indOf(lines[i]) === 0) {
-        inFunc = /^func\s*:/.test(lines[i])
+        // 简写：顶层函数定义行即段起点；显式：func: 行
+        inFunc = impliedFunc ? isDef(lines[i]) : /^func\s*:/.test(lines[i])
         break
       }
     }
     if (inFunc) {
-      // 函数定义行（缩进 2 的「名称:」或「- 名称:」）；光标在 func: 行 / 首个
-      // 函数之前 → 第一个函数
-      const isDef = l => {
-        const t = l.trim()
-        return indOf(l) === 2 && /^(- )?[\w.-]+\s*:\s*(#.*)?$/.test(t)
-      }
+      // 光标所属函数；光标在 func: 行 / 首个函数之前 → 第一个函数
       let defIdx = -1
       for (let i = cursorLine; i > funcIdx; i--) {
         if (isDef(lines[i])) { defIdx = i; break }
       }
       if (defIdx === -1) {
-        for (let i = funcIdx + 1; i < lines.length; i++) {
-          if (lines[i].trim() && indOf(lines[i]) === 0) break
+        for (let i = impliedFunc ? 0 : funcIdx + 1; i < lines.length; i++) {
+          if (!impliedFunc && lines[i].trim() && indOf(lines[i]) === 0) break
           if (isDef(lines[i])) { defIdx = i; break }
         }
       }
-      if (defIdx !== -1) {
-        // 函数体末尾：下一个缩进 ≤2 的非空行（函数定义 / 根级键）之前
-        let bodyEnd = defIdx
-        for (let i = defIdx + 1; i < lines.length; i++) {
-          const l = lines[i]
-          if (l.trim() && indOf(l) <= 2) break
-          if (l.trim()) bodyEnd = i
-        }
-        // 函数体缩进：第一个「- 」项行（cond+steps 写法里 steps 列表项的缩进）；
-        // 无项行时若紧跟 steps: 键则取其 +2（cond 无步骤的空函数体），默认 4
-        let bodyIndent = 4
-        for (let i = defIdx + 1; i <= bodyEnd; i++) {
-          const l = lines[i]
-          if (!l.trim()) continue
-          const ind = indOf(l)
-          if (ind <= 2) break
-          if (/^\s*-\s/.test(l)) { bodyIndent = ind; break }
-          if (/^steps\s*:\s*$/.test(l.trim())) bodyIndent = ind + 2
-        }
-        indent = ' '.repeat(bodyIndent)
-        // 光标在函数体内（含函数体行/嵌套行）→ 光标下一行；否则函数体末尾
-        insertIdx = cursorLine > defIdx && cursorLine <= bodyEnd ? cursorLine + 1 : bodyEnd + 1
-      }
+      if (defIdx !== -1) insertIntoFuncBody(defIdx)
+    } else if (impliedFunc) {
+      // 简写库兜底（光标在函数外/注释区）：追加到最后一个函数体末尾
+      let lastDef = -1
+      for (let i = 0; i < lines.length; i++) if (isDef(lines[i])) lastDef = i
+      if (lastDef !== -1) insertIntoFuncBody(lastDef)
+    }
+  }
+  // —— 省略 steps: 的顶层序列：按序列项缩进追加（光标行后优先，否则列表末尾）——
+  if (impliedSteps && insertIdx === -1) {
+    const firstDash = lines.findIndex(l => /^\s*-\s/.test(l))
+    indent = ' '.repeat(indOf(lines[firstDash]))
+    insertIdx = lines.length
+    if (cursorLine >= firstDash) {
+      const cur = lines[cursorLine] || ''
+      if (!cur.trim() || /^\s/.test(cur) || /^\s*#/.test(cur)) insertIdx = cursorLine + 1
     }
   }
   // —— 没有 steps 时补一个最小可运行脚本结构 ——
@@ -2923,14 +2948,32 @@ function validateScriptCode(content) {
     }
     return ['YAML 语法错误：' + e.message]
   }
-  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return ['脚本必须是 YAML 对象']
-  // 顶层键白名单（与引擎 run 一致）：只允许 config / func / steps
-  for (const k of Object.keys(doc)) {
-    if (k === 'config' || k === 'func' || k === 'steps') continue
-    if (k === 'action_wait') errors.push('顶层 action_wait 已删除：操作间隔统一为 config interval（仅轮询类等待，步骤间不再等待）')
-    else if (k === 'log_level') errors.push('顶层 log_level 已删除：改用 config: 段（config.toml 可配全局默认）')
-    else if (k === 'name') errors.push('顶层 name 已删除（脚本名即文件名）')
-    else errors.push(`未知顶层键 ${k}（只支持 config / func / steps）`)
+  // 顶层段落归一化（与引擎 normalize_top 一致）：单段脚本可省略段落键——
+  // 顶层序列 = steps；顶层映射且不含 config/func/steps 任何键 = func（纯函数库
+  // 简写，函数定义直接写在顶层）；config 不能省略
+  if (Array.isArray(doc)) {
+    doc = { steps: doc }
+  } else if (!doc || typeof doc !== 'object') {
+    return ['脚本必须是 YAML 对象或步骤列表']
+  } else if (!('config' in doc) && !('func' in doc) && !('steps' in doc)) {
+    for (const k of Object.keys(doc)) {
+      if (k === 'action_wait') return ['顶层 action_wait 已删除：操作间隔统一为 config interval（仅轮询类等待，步骤间不再等待）']
+      if (k === 'log_level') return ['顶层 log_level 已删除：改用 config: 段（config.toml 可配全局默认）']
+      if (k === 'name') return ['顶层 name 已删除（脚本名即文件名）']
+      if (k === 'interval' || k === 'threshold') {
+        return [`顶层 ${k} 是 config: 段参数（省略段落键的简写只支持纯 steps 序列或纯 func 函数定义，config 必须写 config: 键）`]
+      }
+    }
+    doc = { func: doc }
+  } else {
+    // 顶层键白名单（与引擎 run 一致）：只允许 config / func / steps
+    for (const k of Object.keys(doc)) {
+      if (k === 'config' || k === 'func' || k === 'steps') continue
+      if (k === 'action_wait') errors.push('顶层 action_wait 已删除：操作间隔统一为 config interval（仅轮询类等待，步骤间不再等待）')
+      else if (k === 'log_level') errors.push('顶层 log_level 已删除：改用 config: 段（config.toml 可配全局默认）')
+      else if (k === 'name') errors.push('顶层 name 已删除（脚本名即文件名）')
+      else errors.push(`未知顶层键 ${k}（只支持 config / func / steps；单段简写：顶层序列 = steps，无段落键的顶层映射 = func）`)
+    }
   }
   // steps 可缺省：纯函数库脚本（只有 func）供其他脚本通过 脚本名:函数名 调用；
   // steps 与 func 都没有 → 报错
@@ -3370,9 +3413,11 @@ async function checkRunStatus() {
 // ---------- 运行模式：只读脚本内容 + 逻辑行选中 ----------
 // 未运行/非编辑时展示脚本内容（不可编辑）。可点击选中的「逻辑行」：
 // steps: 段内与首项同缩进的 "- " 行（从该步骤起跑顶层）+ func: 段内每个
-// 函数体中与函数体首项同缩进的 "- " 行（直接运行该函数体，从该步骤起）。
-// then/else/loop 子步骤、config 段与函数名行不可选；索引按所在段落各自计数，
+// 函数名行（从头运行整函数：引擎先判 cond 再跑函数体）与函数体中与函数体
+// 首项同缩进的 "- " 行（直接运行该函数体，从该步骤起）。
+// then/else/loop 子步骤、config 段不可选；索引按所在段落各自计数，
 // 不再受 func/config 段条目数量的偏移影响。
+// 省略段落键的简写脚本（顶层序列/顶层映射直接写内容）同样支持行选中。
 const selectedLine = ref(null)
 
 const scriptContent = computed(() => {
@@ -3423,23 +3468,35 @@ function closeCallPreview() {
 }
 
 /** 行 → 运行目标映射（与 scriptLines 平行）：可选逻辑行 → { func: 函数名|null,
- *  index: 步骤序号 }，其余行 → null。按根段落（config/func/steps，缩进 0）扫描：
+ * index: 步骤序号 }，其余行 → null。按根段落（config/func/steps，缩进 0）扫描：
  * steps 段首个 "- " 行确立顶层缩进；func 段首个条目行（"- 名:" 列表形式 /
- * "名:" 映射形式）确立条目缩进，函数体内首个 "- " 行确立函数体缩进 */
+ * "名:" 映射形式）确立条目缩进，函数体内首个 "- " 行确立函数体缩进。
+ * 省略段落键的简写（与引擎 normalize_top 一致）：无 config:/func:/steps: 根键
+ * 时顶层序列按 steps、顶层映射按 func 扫描（条目缩进 0）。
+ * 函数名行也可选：点击 = 从头运行整个函数（引擎先判 cond 再跑函数体），
+ * 与函数体内首行同目标（func + index 0） */
 function computeRunLineMap(lines) {
+  // 省略段落键判定：无任何段落根键时，首个内容行是 "- " → steps，否则 → func
+  let implied = ''
+  if (!lines.some(l => /^(config|func|steps):(?:\s|$)/.test(l))) {
+    const first = lines.find(l => l.trim() && !/^\s*#/.test(l)) || ''
+    implied = /^\s*-\s/.test(first) ? 'steps' : 'func'
+  }
   const map = new Array(lines.length).fill(null)
-  let section = ''        // 当前根段落：steps / func / ''（其他或未入段）
+  let section = implied         // 当前根段落：steps / func / ''（其他或未入段；省略写法全程不变）
   let stepsIndent = -1, stepCount = 0
   let entryIndent = -1, entryDash = null, bodyIndent = -1, funcName = null, bodyCount = 0
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]
     if (!line.trim() || /^\s*#/.test(line)) continue
-    const root = line.match(/^(\S+?):(?:\s|$)/)
-    if (root) {
-      section = root[1] === 'steps' || root[1] === 'func' ? root[1] : ''
-      stepsIndent = -1; stepCount = 0
-      entryIndent = -1; entryDash = null; bodyIndent = -1; funcName = null; bodyCount = 0
-      continue
+    if (!implied) {
+      const root = line.match(/^(\S+?):(?:\s|$)/)
+      if (root) {
+        section = root[1] === 'steps' || root[1] === 'func' ? root[1] : ''
+        stepsIndent = -1; stepCount = 0
+        entryIndent = -1; entryDash = null; bodyIndent = -1; funcName = null; bodyCount = 0
+        continue
+      }
     }
     const dash = line.match(/^(\s*)-\s/)
     const indent = dash ? dash[1].length : (line.match(/^(\s*)\S/) || ['', ''])[1].length
@@ -3461,6 +3518,7 @@ function computeRunLineMap(lines) {
         entryDash = !!dash
         funcName = em ? em[1] : null
         bodyIndent = -1; bodyCount = 0
+        if (funcName) map[i] = { func: funcName, index: 0 }
       } else if (funcName && dash && indent > entryIndent) {
         // 函数体顶层步骤（首个确立函数体缩进；then/else 等更深子步骤不选）
         if (bodyIndent < 0) bodyIndent = indent

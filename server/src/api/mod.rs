@@ -871,8 +871,9 @@ struct RunScriptReq {
     /// 从第几个 step 开始运行（0=从头；前端选中某个 "- " 逻辑行时传入）
     #[serde(default)]
     start_index: Option<usize>,
-    /// 直接运行指定函数体（Console 选中函数体内的行时传入）；
-    /// start_index 此时是函数体内的步骤序号
+    /// 直接运行指定函数体（Console 选中函数名行 / 函数体内的行时传入）；
+    /// start_index 此时是函数体内的步骤序号——0（函数名行）先检查函数 cond，
+    /// >0（体内行）跳过 cond 从该步执行
     #[serde(default)]
     func: Option<String>,
 }

@@ -69,7 +69,14 @@ config:                 # 可选：覆盖 config.toml 默认（也可写成映�
   log_level: info       # debug / info（默认）/ warn / error，低于等级的日志丢弃
 func:                   # 可选：自定义函数（见下）
 steps:                  # 必需：步骤列表
-  - log: "开始"</pre>
+  - log: "开始"
+
+# —— 另一种独立写法：单段脚本省略段落键（config 不能省）——
+# ① 顶层序列 = steps：
+- log: "直接写步骤"
+# ② 顶层映射（不含 config/func/steps 任何键）= func 纯函数库简写（另一个脚本）：
+wait_tpl:
+  - find: $1</pre>
           </div>
           <div class="help-block">
             <div class="hb-title">🎬 基础动作</div>
@@ -255,8 +262,14 @@ function onEditorTab(e) {
 }
 
 function validate() {
-  valid.value = code.value.includes('steps:')
-  toast(valid.value ? '语法校验通过' : '缺少 steps: 根节点', valid.value ? 'success' : 'error')
+  const c = code.value
+  // 段落判定（与引擎 normalize_top 一致）：显式 config:/func:/steps: 根键，
+  // 或省略段落键的单段简写（顶层步骤序列 / 无段落键的顶层函数映射）
+  const hasSection = /^(config|func|steps):/m.test(c)
+  const first = (c.split('\n').find(l => l.trim() && !/^\s*#/.test(l)) || '').trim()
+  const implied = !hasSection && (first.startsWith('- ') || /^[\w\u4e00-\u9fa5.-]+\s*:(\s|$)/.test(first))
+  valid.value = hasSection || implied
+  toast(valid.value ? '语法校验通过' : '缺少脚本内容（steps/func 段落键，或顶层直接写步骤列表/函数定义）', valid.value ? 'success' : 'error')
 }
 
 async function save() {
