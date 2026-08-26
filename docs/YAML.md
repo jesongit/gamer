@@ -1,276 +1,263 @@
 # YAML 自动化脚本语法
 
-GameBot 脚本为 YAML 列表式步骤，语法以服务端引擎（`server/src/engine.rs`）为准。
+GameBot 脚本为 YAML 步骤列表，语法以服务端引擎（`server/src/engine.rs`）为准（2026-08-26 语法精简重写，不兼容旧语法——旧写法引擎与前端校验均显式报错引导迁移）。
 模板按应用分区存放于 `data/<应用包名>/tmpl/`，脚本中写文件名即可（如 `shop.png`）。
 
 ## 脚本结构
 
+顶层键只允许 `config` / `func` / `steps`（未知顶层键报错）：
+
 ```yaml
-name: 每日签到          # 脚本名（可选，仅标识）
-action_wait: 500        # 每个操作后的默认等待 ms（默认 500；str_app 为 3000）
-log_level: info         # info=精简日志（默认） / debug=详细
+config:                 # 可选：覆盖 config.toml 默认值（也可写成映射列表按序覆盖）
+  interval: 500ms       # 轮询类间隔（find 每轮重试 / verify 复查）
+  threshold: 0.85       # 模板匹配阈值
+  log_level: info       # debug / info（默认）/ warn / error，低于等级的日志丢弃
+func:                   # 可选：自定义函数定义（见「自定义函数」）
+  - wait_tpl:
+    - find: $1
+    - return: false
 steps:                  # 必填，按顺序执行的动作列表
-  - wait: 1000
+  - wait: 1s
   - log: "开始"
 ```
 
 - 动作参数与动作键同级缩进；无参动作可省略冒号：`- str_app` ≡ `- str_app:`
-- 每个步骤可用 `wait` 参数覆盖操作后等待（如 `wait: 200`，`0` 不等待）
+- 一个步骤只能有一个动作键
 - 所有坐标均为相对坐标 0~1，与设备分辨率解耦
+- **时间参数一律强制带单位**：`1ms / 2s / 1m / 30min / 1h / 1d`（m ≡ min，可小数如 `1.5s`），裸数字报错
+- `interval` 只作用于轮询类等待（find 每轮重试、verify 复查）；**步骤之间不再统一等待**（旧 `action_wait` / 步骤级 `wait` 参数已删除）
 
-## 找图 until —— 等模板出现并点击
-
-唯一找图动作：超时时间内循环匹配，命中即点击模板中心并执行 `then`；超时执行 `else`。
+## find —— 等模板出现并点击
 
 ```yaml
-- until: sign_btn.png       # 主模板（必填，单个模板名）
-  before:                   # 每轮匹配前执行的步骤（可选）：如先点击触发刷新
-    - log: "先刷新一下"
-  check: [ad.png, pop.png]  # 障碍模板（可选，旧名 before）：单个 / 逗号分隔 / 列表
-  interval: 500             # 一轮全未命中后的重开间隔（默认 500，必须 > 0）
-  img_ivl: 50               # 一轮内相邻两次匹配的间隔（默认 50）
-  timeout: 30min            # 超时（默认 30 分钟，必须 > 0）
-  threshold: 0.85           # 匹配阈值 0~1（默认取设备配置 default_threshold，=0.8）
-  region: u                 # 搜索区域（默认 a=全屏）
-  count: 3                  # 连击：总点击次数（含首击），默认 1 单击；命中后按首击坐标无条件连点
-  cnt_ivl: 50               # 连击相邻点击间隔（默认 50）
-  verify: true              # 生效验证（默认 false 无逻辑）：点击后每 50ms 复查主模板，
-                            # 消失（点击生效/页面翻走）才走 then；持续命中到超时走 else
-  after:                    # 每轮未命中后执行的步骤（可选；命中走 then、超时走 else 均不执行）
-    - swipe:                # 经典用法：滚动翻页直到找到目标
-        fm: [0.500, 0.800]
-        to: [0.500, 0.500]
-        time: 300
-  then:                     # 命中主模板并点击后执行
-    - log: "点击成功"
-  else:                     # 超时未命中执行
-    - log: "没找到"
+- find: sign_btn.png    # 主模板（单个字符串；多目标拆成多步，挡路的写 block）
+  timeout: 30min        # 超时执行 else（默认 30min，必须 > 0）
+  block:                # 障碍模板（旧名 check）：主模板未命中后依序匹配，
+    - pop.png           # 命中即点击其中心并结束本轮；单个可写 block: pop.png
+    - ad.png            # （逗号分隔或列表均可）
+  verify: false         # 默认 false；true = 命中点击后等 interval 重匹配主模板，
+                        # 仍命中再补一击（共两击，不循环、不判超时）
+  then:                 # 命中执行
+    - log: "找到并点击"
+  else:                 # 超时执行
+    - log: "等待超时"
 ```
 
-**每轮匹配顺序**：`before` 步骤全部 → 依序匹配 `check` 全部（命中即点击关闭；
-未命中等 `img_ivl` 匹配下一个；无论命中与否都不结束本轮）→ 匹配主模板
-（命中即点击中心 → `then` → 结束步骤，本轮不执行 `after`）→ 全未命中执行
-`after` 步骤、隔 `interval` 从 before 重开一轮。
+每轮流程：
 
-要点：
-
-- **命中恒点击模板中心**——没有 `click: false`；只想"判断出现"不点击用 `cond` 模板条件
-- `count` 为总点击次数（含首击），上限 100000；命中后按首击坐标**无条件连点**
-  （每两次点击隔 `cnt_ivl`，默认 50ms）——不再重新匹配（cnt_chk 已删除）；
-  对 check 障碍同样生效
-- `check` 与主模板重复会报错；多模板目标请拆成多步，挡路的写 `check`
-- `verify: true`：命中点击（含 count 连击）后每 50ms 复查主模板，
-  **从屏上消失**才算完成走 `then`——用于"点了但不确定生效"的场景（如按钮
-  滞后响应、需确认弹窗已弹出）；验证阶段共用步骤 `timeout`/`threshold`/`region`，
-  模板持续命中到超时走 `else`
-- `before`/`after` 是普通步骤列表（执行后等待同普通步骤，取脚本 `action_wait`）
-- 时长参数（timeout/interval/img_ivl/cnt_ivl）写法统一：
-  纯数字 `500`（ms）或带单位 `1ms` / `1s` / `30min` / `1h` / `1d`
-  （大小写不敏感、可小数 `1.5s`、`ms` 先于 `s` 判定；timeout、interval 必须 > 0）
-
-### 搜索区域 region
-
-| 值 | 含义 |
-|---|---|
-| `a` | 全屏（默认） |
-| `u` / `d` / `l` / `r` | 上 / 下 / 左 / 右半屏 |
-| `ul` / `ur` / `dl` / `dr` | 四个四分之一区 |
-
-也支持相对坐标数组 `[x1, y1, x2, y2]` 或对象 `{fm: [x, y], to: [x, y]}`（0~1，
-需 x2 > x1、y2 > y1）。显式 `region` 统一作用于本步骤全部模板。
-
-**模板名自带区域后缀**（未显式写 `region` 时按各自后缀匹配，写在扩展名前，大小写不敏感）：
-
-- `xx#l` / `xx#dr`：半区码（同上表）
-- `xx#0_0_500_500`：相对坐标 ×1000 的整数（`500` → 0.500）——框选生成的区域模板就是这种命名
-- 优先级：显式 `region` > 模板名后缀 > 全屏；后缀解析不出区域则全屏匹配不报错
-
-**短名引用**：写去后缀短名即可引用唯一匹配的带后缀文件，区域照常生效；
-同基名多个后缀文件时需写全名消歧。
-
-```yaml
-- until: hp#l.png          # hp 只搜左半屏
-- until: login.png         # 短名 → 自动解析到 login#910_159_972_716.png
+```
+主模板（新截图）命中 → 点击中心 → verify（若 true）→ then → 结束
+主模板未命中 → block 依序匹配 → 命中：点击其中心、结束本轮
+                              → 全未命中：等 interval 重开一轮
+超时（timeout）→ else
 ```
 
-## 条件分支 cond —— 多条件按序匹配，命中即走对应分支
+- 所有模板（主模板与 block）命中都**点击模板中心**，无"只匹配不点击"
+- `^1` = 主模板名、`^2..` = block 名（书写顺序），在 then/else 子树内可引用（见「^N 上下文引用」）
+- 匹配阈值全局配置（`config:` 段或 config.toml `threshold`），无步骤级参数
+- 搜索区域由**模板名 `#` 后缀**决定（见下节）；模板无 `#` 后缀时回退全屏搜索（即 `#a` 语义），运行日志会记一条提醒（每次运行每模板一条）
 
-一次截图按顺序逐个判定条件，**命中一个 → 执行该条件的步骤并结束本步**
-（后续条件不再判定）；全部未命中 → 执行 `else`。
+### 搜索区域：模板名 # 后缀
+
+- `hp#l.png` / `xx#dr.png` —— 半区码：`a`=全屏（默认回退值）、`u/d/l/r`=上下左右半、`ul/ur/dl/dr`=四分之一
+- `xx#0_0_500_500.png` —— 相对坐标 ×1000（`0.0,0.0 ~ 0.5,0.5` 即左上四分之一），框选生成区域模板的自动命名格式
+- **短名引用**：脚本写 `login.png`，精确文件不存在时引擎在同扩展名文件中唯一匹配 `login#*.png`（区域后缀照常生效）；多个候选报错要求写全名
+
+## color —— 找色分支
 
 ```yaml
-- cond:
-  - test.png:              # 模板条件：键=模板名（冒号必须写——标量项后挂不了缩进内容）
-    - log: "命中模板"      # 命中执行的步骤写在模板名下（同列或缩进 +2 均可）
-  - ff8800:                # 颜色条件：键=6 位十六进制色值（容差固定 30）
-    - log: "命中颜色"      # 命中步骤写在色值键正下方（pos 之后不能跟同列 - 行）
-    pos: [0.5123, 0.8456]  # pos 兄弟键=采样相对坐标 [x, y]（有 pos 即颜色条件）
-  else:                    # 全部未命中执行（cond 的兄弟键，与条件项同列、不带 -）
+- color: [0.5123, 0.8456]   # 采样相对坐标
+  ff8800:                   # 色值键（6 位十六进制，宽容 # / 0x 前缀；容差固定 30/通道）
+    - log: "命中颜色"       # 命中执行的步骤（写在色值键正下方，可留空）
+  ff8811:
+  else:                     # 全部未命中执行
     - log: "都没命中"
 ```
 
-- 条件可以只写模板、只写颜色或混写，按书写顺序判定
-- 色值键是合法 6 位十六进制但漏写 `pos` 会报错引导补上；
-  采样点像素与色值每通道差 ≤30 即命中（H.264 压缩帧间抖动，精确匹配不可用）
-- `threshold` / `region`（含模板名 `#后缀` 区域）只作用于模板条件；
-  颜色条件坐标即位置
-- 单遍判定：**不轮询、无 timeout**——要"等某个出现再分支"用 `until`，
-  要重试整个判定套 `loop` / `goto`
-- 模板名支持 `$1` 等实参占位与短名引用（同 until）
-- 二次裁切区 Alt/alt 模式点击任意处会自动生成颜色条件记录（所见即所得取色）
+- 一次截图按序判定，命中一个执行其步骤并结束本步；全部未命中走 `else`
+- 不轮询、无超时（要重试套 `loop`）
+- `^1` = `"[x, y]"` 坐标串、`^2..` = 色值键（书写顺序）
+- 前端二次裁切区 Alt/alt 模式点击任意处 → 自动生成 color 记录（所见即所得取色）
 
-## exit —— 结束脚本运行
+## ^N 上下文引用
+
+find 的 then/else、color 的命中步骤/else 子树内，`^N` 引用当前步骤的上下文（find：`^1` 主模板、`^2..` block；color：`^1` 坐标串、`^2..` 色值）：
 
 ```yaml
-- exit            # 无参数：打印"结束运行脚本"并立即结束
-- exit: 体力不足  # 带参数：打印"因 体力不足 结束运行脚本"并立即结束
+- find: menu.png
+  block: ad.png
+  then:
+    - wait_tpl: ^1          # 把主模板名传给函数
+    - call: 处理.yml ^2     # 把障碍模板名传给子脚本
+  else:
+    - log: "没等到 ^1"
 ```
 
-- 立即结束整个脚本运行（call 子脚本内 `exit` 同样结束整个任务）
-- 用于"条件不满足提前收工"（如 cond 全未命中的 else 里直接 exit）
+- 嵌套 find/color 的内层绑定自然覆盖外层（每步执行时按最内层绑定替换）
+- `^` 不是 YAML 保留字符，裸写合法（`&` 是锚点保留字符——值会变 null，故弃用）
+
+## 自定义函数 func
+
+```yaml
+func:
+  - wait_tpl:               # 函数名不能是保留字（动作键 / then / else / steps…）
+    - find: $1
+      timeout: 6s
+    - return: true          # return 仅函数内合法：true / false，立即返回；
+                            # 函数体执行完未 return 视为返回 false
+
+steps:
+  - wait_tpl: sign_btn.png [0.5, 0.6] ff8800   # 调用：空格分隔实参 + then / else
+    then:
+      - log: "出现了"
+    else:
+      - log: "没等到"
+```
+
+- 实参空格分隔、**括号感知切分**：`[x, y]` 内部的空格不算分隔符；无参写 `- wait_tpl:` 或 `- wait_tpl`
+- 函数体内 `$1`/`$2`… 指函数实参（`func:` 段不参与脚本级 `$N` 替换）
+- 函数体可用全部动作（含 call/throw/嵌套函数调用，嵌套上限 32 层）
+- `return: true` → 执行 then；`false`（含 fall-through）→ 执行 else
+
+## loop —— 循环
+
+```yaml
+- loop:
+  times: 3              # 省略或 0 = 无限循环
+  steps:
+    - log: "每一轮"
+```
+
+`times`/`steps` 两种缩进均可：与 `loop` 同级（如上，YAML 会解析成步骤兄弟键）或缩进到 `loop` 值内（`- loop:\n    times: 3`）。
+
+## call —— 调用子脚本（可传参）
+
+```yaml
+- call: 子脚本.yml
+- call: 通用日常.yml act_136.png          # 空格分隔实参（括号感知，[x, y] 不切分）
+- call: 处理.yml a.png [0.5, 0.6] ff8800
+```
+
+- 子脚本按名解析：优先同分区，其次跨分区（缺扩展名自动补全）
+- 子脚本内 `$1`/`$2`… 引用实参（替换作用于子脚本 config/steps 全部字符串，嵌套 call 转发 `$N` 同样生效；`func:` 段除外）
+- 含 `$N` 的脚本被直接运行（未传参）→ 启动即报错
+- YAML 裸标量 `@` 开头是保留字符非法，参数引用必须用 `$`（不能用 `@1`）
+
+## throw —— 结束任务
+
+```yaml
+- throw                  # 打印"结束运行脚本"，立即结束整个任务
+- throw: 体力不足        # 打印"因 体力不足 结束运行脚本"
+```
+
+跨 call 子脚本同样结束整个任务（原 `exit` 改名）。
 
 ## 动作清单
 
-### wait —— 等待 / 随机延时
+### wait
 
 ```yaml
-- wait: 1000            # 固定等待 1000ms
-- wait: [500, 1500]     # 随机等待 500~1500ms
-- wait: {min: 300, max: 900}   # 等价写法
+- wait: 2s               # 固定等待
+- wait: [1s, 3s]         # 随机区间
 ```
 
-### log —— 输出日志
+### log
 
 ```yaml
-- log: "任务完成"
+- log: 输出文本
 ```
 
-### key —— 按键
+### key
 
 ```yaml
-- key: HOME
+- key: HOME              # HOME/BACK/APP_SWITCH(RECENTS)/MENU/VOL_*/POWER/ENTER/DEL/TAB/SPACE/ESC/…/数字，或原始 keycode
 ```
 
-常用：`HOME` / `BACK` / `APP_SWITCH`(或 `RECENTS`) / `MENU` / `VOL_UP` /
-`VOL_DOWN` / `POWER` / `ENTER` / `DEL`(或 `BACKSPACE`) / `TAB` / `SPACE` /
-`ESC` / `SEARCH` / `CAMERA` / `FOCUS` / `NOTIFICATION` / `SETTINGS` / `MUTE` /
-`HEADSETHOOK` / `WAKEUP` / `SLEEP` / 数字键 `0`~`9`，也支持直接写 keycode 数字。
-
-### text —— 输入文本
+### text
 
 ```yaml
 - text: "hello world"
 ```
 
-### tap —— 点击
+### tap
 
 ```yaml
-- tap: [0.500, 0.500]   # 相对坐标（0~1）
-- tap: {x: 0.5, y: 0.5} # 等价对象写法
+- tap: [0.500, 0.500]
 ```
 
-### swipe —— 滑动
+### swipe
 
 ```yaml
 - swipe:
-    fm: [0.500, 0.800]   # 起点（旧写法 from 兼容）
+    fm: [0.500, 0.800]   # 起点
     to: [0.500, 0.200]   # 终点
-    time: 1000           # 时长 ms（默认 500）
+    time: 800ms          # 时长（省略默认 500ms；书写必须带单位）
 ```
 
-### str_app —— 冷启动应用
-
-先 force-stop 再启动，保证进入干净状态；虚拟屏设备自动启动到虚拟屏。
-应用启动要 1~3 秒，`str_app` 后的默认等待是 **3000ms**。
+### str_app / cls_app
 
 ```yaml
-- str_app: com.x.y        # 包名省略 → 用设备配置的应用包名
+- str_app                # 冷启动应用（scrcpy 控制消息，虚拟屏模式自动进虚拟屏）；
+                         # 只支持裸写，包名 = 设备分区（设备配置 pkg）
+- cls_app                # 关闭应用（adb am force-stop，不碰会话/投屏；幂等）
 ```
 
-### cls_app —— 关闭应用
+## 已删除的旧写法（显式报错引导迁移）
 
-`adb force-stop`，不碰会话/投屏；幂等，适合放脚本开头确保冷状态。
-虚拟屏上应用被杀后画面变桌面/黑屏，流不断，属预期。
-
-```yaml
-- cls_app: com.x.y
-```
-
-### loop —— 次数循环
-
-```yaml
-- loop:
-    times: 3
-    steps:
-      - tap: [0.500, 0.800]
-```
-
-### goto / label —— 跳转
-
-`label` 不执行操作，只作跳转目标（goto 只支持向后跳转）。
-
-```yaml
-- label: retry
-- goto: retry
-```
-
-### call —— 调用子脚本（可传参）
-
-子脚本从 `steps` 开头执行，日志合并到当前脚本；不存在时报错。
-
-```yaml
-- call: 子脚本.yml
-- call: 子脚本.yml a.png b.png   # 空格分隔传参：子脚本内 $1=a.png、$2=b.png
-```
-
-- 实参引用写 `$1` / `$2`…（参数从 `$1` 开始）——**不能用 `@1`**：
-  YAML 裸标量 `@` 开头是保留字符，解析直接报错；`$` 开头合法
-- 替换作用于子脚本**全部字符串**（until/check 模板名、log 文本、call 行等，
-  映射键值、列表项都替换）；`$` 后非数字保持原样（`"100$"` 不受影响）
-- 嵌套 call 转发：子脚本里 `- call: 三级.yml $1 x.png` 会带着收到的实参继续传
-- 引用超出实参数量（含 `$N` 的脚本被直接运行、或参数传少）运行时报错
-- call 子脚本内 `exit` 同样结束整个任务
-
-### exit —— 结束脚本运行
-
-见上文「exit —— 结束脚本运行」。
+| 旧写法 | 迁移目标 |
+|---|---|
+| `until` | `find`（障碍模板 `check` → `block`） |
+| `cond` | 颜色条件 → `color`；模板条件 → `find`（短 timeout）+ then/else 或 func 封装 |
+| `exit` | `throw` |
+| `goto` / `label` | `loop` |
+| `count` / `cnt_ivl` / `cnt_chk` / `img_ivl` / `and_or` / `click` / `before` / `after` | 已删除（find 语义内置：命中恒点中心、每轮统一 interval） |
+| 步骤级 `threshold` / `region` 参数 | `config:` 段配置阈值；区域用模板名 `#` 后缀 |
+| 步骤级 `wait` 参数 / 顶层 `action_wait` | 已删除：步骤间不等待，轮询间隔用 `config: interval` |
+| 顶层 `log_level` / `name` | `config: log_level`；name 删除（脚本名即文件名） |
+| 顶层 `package <名字>` 指令 | 已删除（分区 = 设备配置的 pkg） |
 
 ## 完整示例
 
 ```yaml
-name: 每日签到
-action_wait: 500
-log_level: info
+config:
+  interval: 500ms
+  log_level: info
+
+func:
+  - login_ok:            # 等登录页出现并点掉（障碍弹窗自动关闭）
+    - find: login.png
+      block: act_cls.png
+      timeout: 60s
+    - return: true
 
 steps:
-  - str_app: com.game.example   # 冷启动游戏
-  - until: main_page.png        # 等主界面出现并点击
-    timeout: 30s
-    else:
-      - log: "进入主界面超时"
-      - goto: fail
-
-  - until: sign_btn.png         # 等签到按钮出现并点击
-    threshold: 0.85
-    region: u
+  - str_app
+  - login_ok:
     then:
-      - log: "点击签到按钮"
+      - log: "已进登录页"
     else:
-      - log: "签到按钮不存在"
-
-  - until: dialog.png           # 先点掉弹窗，再等签到完成
-    check: [act_cls.png, ad.png]
-    timeout: 60s
-    then:
-      - log: "签到完成"
-      - goto: end
-
-  - label: end
-  - cls_app: com.game.example
-
-  - label: fail
-  - log: "任务失败"
+      - throw: 启动超时
+  - find: act_swt.png
+    block: swt_etr.png
+  - find: tili_use.png
+    timeout: 2s
+  - find: close.png
+    verify: true         # 点完等 interval 复查，仍命中补一击
+  - loop:
+    times: 3
+    steps:
+      - find: cnt_add.png
+        timeout: 5s
+  - color: [0.7625, 0.9130]
+    c74f36:
+      - log: "体力确认按钮亮起"
+    else:
+      - log: "未亮起"
+  - call: 日常遗器.yml
+  - cls_app
+  - log: "日常完成"
 ```
 
-脚本结束后无需手动断开：空闲 `idle_power_secs`（config.toml，默认 300，0 关闭）
-且无人投屏时，服务端自动断开会话进低功耗，adb 链路保留待命。
+---
+
+附：空闲自动断开 `idle_power_secs`（config.toml，默认 300s，0=关）——无 viewer 且无脚本运行持续 N 秒后拆会话进低功耗，下次运行自动重连。

@@ -6,43 +6,35 @@ use serde::{Deserialize, Serialize};
 
 /// 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式
 ///
-/// 占位符：{name} 模板名 · {x}/{y} 点击坐标（cond 颜色条件的 pos 采样点同用）·
+/// 占位符：{name} 模板名 · {x}/{y} 点击相对坐标（color 的采样点同用）·
 /// {fx}/{fy}/{tx}/{ty} 滑动起终点 · {time} 滑动实际时长 ms ·
-/// {color} 二次裁切区点击处采样的十六进制颜色（cond 颜色条件的色值键）
+/// {color} 二次裁切区点击处采样的十六进制颜色（color 色值键）
 ///
-/// 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制，
-/// 需要个别覆盖时手动在步骤里加 wait
+/// 生成的操作记录不写等待参数：步骤间不再统一等待，
+/// 轮询类间隔由 config interval 控制（config.toml 或脚本 config: 段）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpTemplates {
-    /// until：等模板出现并点击（2026-08-25 重构：find 与 click 参数已删除，统一 until）
-    #[serde(default, alias = "find_wait")]
-    pub until: String,
+    /// find：等模板出现并点击
+    #[serde(default)]
+    pub find: String,
     /// 屏幕点击
     #[serde(default)]
     pub tap: String,
-    /// cond 颜色条件记录（{color} 为二次裁切区 alt 点击采样的十六进制颜色）
+    /// color 颜色判断记录（{color} 为二次裁切区 alt 点击采样的十六进制颜色）
     #[serde(default)]
-    pub cond: String,
+    pub color: String,
     /// 屏幕滑动
     #[serde(default)]
     pub swipe: String,
-    /// 滑动区域片段（作为 region 参数使用）
-    #[serde(default)]
-    pub swipe_region: String,
-    /// （已废弃）独立的 wait 操作记录，不再生成
-    #[serde(default)]
-    pub wait: String,
 }
 
 impl Default for OpTemplates {
     fn default() -> Self {
         Self {
-            until: "- until: {name}\n  threshold: 0.8".into(),
+            find: "- find: {name}".into(),
             tap: "- tap: [{x}, {y}]".into(),
-            cond: "- cond:\n  - {color}:\n    pos: [{x}, {y}]".into(),
-            swipe: "- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}".into(),
-            swipe_region: "region:\n  fm: [{fx}, {fy}]\n  to: [{tx}, {ty}]".into(),
-            wait: String::new(),
+            color: "- color: [{x}, {y}]\n  {color}:".into(),
+            swipe: "- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}ms".into(),
         }
     }
 }
@@ -61,8 +53,16 @@ pub struct Config {
     pub scrcpy_server: PathBuf,
     /// 管理员密码
     pub password: String,
-    /// 默认匹配阈值
-    pub default_threshold: f32,
+    /// 脚本引擎默认 interval（轮询类间隔，带单位时长串如 "500ms"；
+    /// 可被脚本内 config: 段覆盖；裸数字非法——引擎 parse_duration 强制单位）
+    #[serde(default = "default_interval")]
+    pub interval: String,
+    /// 默认模板匹配阈值（可被脚本内 config: 段覆盖）
+    #[serde(default = "default_threshold")]
+    pub threshold: f32,
+    /// 引擎日志等级 debug|info|warn|error（可被脚本内 config: 段覆盖）
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
     /// 视频流软解码（供模板匹配取帧）
     pub decode_frames: bool,
     /// scrcpy 最大分辨率（0 = 原始）
@@ -94,6 +94,18 @@ fn default_idle_power_secs() -> u64 {
     300
 }
 
+fn default_interval() -> String {
+    "500ms".into()
+}
+
+fn default_threshold() -> f32 {
+    0.85
+}
+
+fn default_log_level() -> String {
+    "info".into()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -103,7 +115,9 @@ impl Default for Config {
             ffmpeg_path: "ffmpeg".into(),
             scrcpy_server: PathBuf::from("./assets/scrcpy-server.jar"),
             password: "admin123".into(),
-            default_threshold: 0.8,
+            interval: default_interval(),
+            threshold: default_threshold(),
+            log_level: default_log_level(),
             decode_frames: true,
             max_size: 0,
             bitrate_mbps: 20,

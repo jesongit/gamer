@@ -1,35 +1,32 @@
-action_wait: 500
-log_level: info
-
 steps:
-  - until: phone.png
-    check: mon_crd.png
-  - until: guide.png
-  - until: tsk_rev.png
-  - until: tsk_go.png
-  - until: itm_rev.png
-  - until: itm_cls.png
-  - until: close.png
-  - until: tsk_rev.png
-  - until: tsk_go.png
+  - find: phone.png
+    block: mon_crd.png
+  - find: guide.png
+  - find: tsk_rev.png
+  - find: tsk_go.png
+  - find: itm_rev.png
+  - find: itm_cls.png
+  - find: close.png
+  - find: tsk_rev.png
+  - find: tsk_go.png
   # 遗器本
-  - until: target.png
-  - until: cult_etr.png
-  - until: tili_use.png
+  - find: target.png
+  - find: cult_etr.png
+  - find: tili_use.png
     timeout: 2s
-  - until: cnt_add.png
-  - until: cnt_add.png
-  - until: cnt_add.png
-  - until: cnt_add.png
-  - until: cnt_add.png
-  - until: yiqi_str.png
-  - until: btl_str.png
-  - until: btl_qut.png
-  - until: close.png
+  - find: cnt_add.png
+  - find: cnt_add.png
+  - find: cnt_add.png
+  - find: cnt_add.png
+  - find: cnt_add.png
+  - find: yiqi_str.png
+  - find: btl_str.png
+  - find: btl_qut.png
+  - find: close.png
     verify: true
   # 领奖
-  - until: phone.png
-  - until: guide.png
-  - until: tsk_rev.png
-  - until: tsk_rev.png
-  - until: tsk_rev2.png
+  - find: phone.png
+  - find: guide.png
+  - find: tsk_rev.png
+  - find: tsk_rev.png
+  - find: tsk_rev2.png

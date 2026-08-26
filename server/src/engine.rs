@@ -1,65 +1,73 @@
-//! YAML 自动化脚本引擎
+//! YAML 自动化脚本引擎（2026-08-26 语法精简重写，不兼容旧语法）
 //!
-//! 顶层字段：steps（必需）/ action_wait（操作后默认等待，500ms）/
-//!           log_level（debug|info，默认 info：info 级别不记录 debug 日志）；
-//!           （旧 `package <名字>` 指令已删除：引擎直接解析 YAML，残留指令行 = 解析报错）
+//! 顶层键只允许 config / func / steps（未知顶层键报错，顺带拦住
+//! action_wait / log_level / name 残留）：
+//!   config:  可选，覆盖 config.toml 默认；mapping 或 mapping 列表（按序
+//!            覆盖）均可；键 = interval / threshold / log_level
+//!   func:    可选，自定义函数定义（见下）
+//!   steps:   必需，步骤列表
 //!
-//! 支持动作：
-//!   wait / log / key / text / tap / swipe /
-//!   str_app(冷启动应用：先 force-stop 再启动，包名可省略回退设备配置) /
-//!   cls_app(关闭应用：adb force-stop，不碰会话/投屏) /
-//!   until(等模板出现并点击（2026-08-25 重构，找图统一写法）：
-//!        `until: a.png` 单个主模板（字符串；多主模板/列表已删除——多目标
-//!        拆成多步、挡路的模板写 check）；
-//!        check 障碍模板（`check: b.png` / `b.png, c.png` / [b.png, c.png]，
-//!        与主模板重复报错；2026-08-25 前叫 before）每轮开头依序匹配：命中即
-//!        点击关闭、未命中等 img_ivl 匹配下一个——无论命中与否都不结束本轮；
-//!        一轮 = before 步骤全部 → check 障碍全部 → 主模板（相邻两次匹配隔
-//!        img_ivl，默认 50ms）；
-//!        主模板命中即点击模板中心并执行 then 结束步骤，本轮不执行 after；
-//!        未命中执行 after 步骤后隔 interval（必须 > 0，默认 500ms）重开一轮
-//!        （又从 before 开始）；timeout 超时（必须 > 0，默认 30min，支持
-//!        500 / 500ms / 2s / 30min / 1h / 1d 写法）超时执行 else；
-//!        then/else/before/after 为普通步骤列表（before=每轮匹配前执行、
-//!        after=每轮未命中后执行；「模板名: 步骤列表」分支写法已删除）；
-//!        threshold 匹配阈值（默认 config default_threshold）；region 搜索区域
-//!        （统一作用于全部模板；未显式时模板名可自带 #后缀区域：
-//!        xx#l / xx#0_0_500_500，见 tpl_region_from_name）；
-//!        count 连击补点：总点击次数含首击、默认 1（单击），命中后按首击
-//!        坐标无条件重复点击、cnt_ivl 相邻点击间隔默认 50ms（写法同 timeout）；
-//!        对主模板与 check 障碍模板的点击同样生效（cnt_chk 已删除，写了报错）；
-//!        verify 生效验证（2026-08-25 增，默认 false 无逻辑）：true 时点击
-//!        （含 count 连击）后每 50ms 复查主模板是否仍在屏上，**模板消失**
-//!        （点击生效/页面翻走）才执行 then 结束步骤，持续命中到 timeout 执行
-//!        else；verify 阶段共用步骤 timeout 与 threshold/region；
-//!        find / click-check 简写及 and_or / click / cnt_chk 参数已删除，写了报错) /
-//!   cond(条件分支（2026-08-25 增，`engine::exec_cond`；**color 动作已删除**，
-//!        颜色判断并入 cond）：`- cond:` 条件列表按序**一次截图**判定，命中
-//!        一个 → 执行该条件步骤并结束本步，全部未命中 → 执行 else（cond 兄弟
-//!        键）。条件 = 单键映射「条件键: 命中步骤列表」：模板条件键 = 模板名
-//!        （- test.png: + 缩进步骤，**冒号必须写**——标量项后挂不了缩进内容）；
-//!        颜色条件键 = 6 位十六进制色值（- ff8800:）+ `pos: [x, y]` 兄弟键给
-//!        采样相对坐标（**pos 的存在即颜色条件的标志**；容差固定 30）。注意
-//!        颜色条件的步骤行须写在色值键**正下方**或缩进 +2（映射键之间不能插
-//!        序列项，pos 之后不能跟同列 `- ` 行）。单遍判定不轮询不超时（要重试
-//!        套 loop/goto）；threshold/region 只作用于模板条件) /
-//!   exit(结束脚本运行：- exit 无参数打印"结束运行脚本"；- exit: 原因 打印
-//!        "因 原因 结束运行脚本"；call 子脚本内 exit 同样结束整个任务) /
-//!   loop / goto / label /
-//!   call(调用子脚本可传参：`- call: 子脚本.yml 实参1 实参2`（空格分隔），
-//!        子脚本内 `$1`/`$2`… 引用实参（YAML 裸标量 @ 开头是保留字符非法，
-//!        故用 $；替换作用于子脚本全部字符串键值，嵌套 call 转发 $N 同样生效）)
+//! 动作（步骤键，一个步骤只能有一个动作键）：
+//!   find:  找图轮询（取代旧 until）。`- find: 主模板`（单个字符串）+ 兄弟键：
+//!          block（障碍模板：单模板字符串 / 逗号分隔 / 列表；与主模板重复报错；
+//!          每轮主模板未命中后依序尝试，命中即点击其中心并结束本轮）、
+//!          verify（bool 默认 false：命中点击后等 interval 重匹配主模板，
+//!          仍命中再补一击——共两击，不循环）、timeout（默认 30min，必须 > 0）、
+//!          then（命中执行）/ else（超时执行）。
+//!          每轮：主模板（新截图）命中 → 点中心 + verify + then 结束；未命中 →
+//!          block 依序（命中点中心结束本轮）→ 全未命中等 interval 重开一轮。
+//!          所有模板命中都点击中心；threshold 全局（config）；region 由模板名
+//!          #后缀 决定（无后缀回退全屏并记一条日志提醒）。
+//!          ^1 = 主模板名、^2.. = block 名（依序），then/else 子树内可引用。
+//!   color: 找色分支（取代旧 cond，颜色条件之外的形式已删除）。
+//!          `- color: [x, y]`（相对坐标）+ 兄弟键 = 6 位十六进制色值（宽容
+//!          # / 0x 前缀；容差固定 30/通道）挂命中步骤（可留空）+ else（全未
+//!          命中执行）。一次截图按序判定，命中一个执行其步骤结束本步；
+//!          不轮询无超时（重试套 loop）。^1 = "[x, y]" 坐标串、^2.. = 色值键
+//!          （书写顺序），命中步骤/else 子树内可引用。
+//!   loop:  `- loop:` + times（默认 0 = 无限循环）+ steps（必需步骤列表）。
+//!   tap / swipe / key / text / log / wait / call / throw / str_app / cls_app：
+//!          tap [x,y]（相对）；swipe {fm, to, time}（time 默认 500ms，书写必须
+//!          带单位）；wait 2s 或 [1s, 3s] 随机（强制带单位）；call
+//!          `子脚本.yml 实参…`（空格分隔 + 括号感知：[x, y] 内部不切分；子脚本
+//!          内 $N 引用实参）；throw（原 exit 改名）立即结束整个任务（跨 call）；
+//!          str_app / cls_app 只支持裸写（包名 = 设备分区 pkg）。
+//!   return: 仅自定义函数内合法，`- return: true|false` 立即返回；
+//!          函数体执行完未 return 视为返回 false。
 //!
-//! 每个操作（除 wait 动作本身）可用 wait 参数指定操作后的等待毫秒数，
-//! 未指定时取脚本顶层 action_wait（如 `action_wait: 500`），脚本也未定义时默认 500ms；
-//! str_app 例外：应用启动要 1~3s，未显式指定时默认等 3000ms
+//! func 自定义函数：
+//!   func:
+//!     - func1:            # 函数名不能是保留字
+//!       - find: $1
+//!       - return: false
+//!   调用：`- func1: 实参1 实参2`（空格分隔 + 括号感知；无参写 `- func1:`）+
+//!         then（返回 true 执行）/ else（返回 false 执行）。函数体内 $N 指函数
+//!         实参（func 段不参与脚本级 $N 替换）；函数体可用全部动作含 call/throw；
+//!         嵌套调用上限 32 层。
 //!
-//! 找图：截图（帧缓存优先）→ 模板匹配
-//! region 支持 a/u/d/l/r/ul/ur/dl/dr 半区/四分之一区
+//! 时间参数（interval / timeout / wait / swipe time）统一强制带单位：
+//!   1ms / 1s / 1m / 30min / 1h / 1d（m ≡ min，可小数如 1.5s），裸数字报错。
+//! config.toml 默认：interval = "500ms"、threshold = 0.85、log_level = "info"
+//!   （debug|info|warn|error，低于配置等级的日志丢弃）；脚本 config: 段可覆盖。
+//! interval 只作用于轮询类等待（find 每轮重试、verify 复查）；步骤之间不再
+//!   统一等待（旧 action_wait / 步骤级 wait 参数已删除）。
+//!
+//! 模板引用：短名唯一匹配（写 login.png 引用 login#*.png）；#后缀 = 搜索区域
+//!   （半区码 a/u/d/l/r/ul/ur/dl/dr 或 xx#x1_y1_x2_y2 ×1000 相对坐标）；
+//!   无 #后缀回退全屏（#a 语义）并记一条日志提醒（每次运行每模板一条）。
+//!
+//! 已删除（写了显式报错引导迁移）：until（→find）、check（→block）、cond
+//!   （→color）、exit（→throw）、goto/label、count/cnt_ivl/cnt_chk/img_ivl/
+//!   and_or/click、before/after、步骤级 threshold/region/wait、顶层
+//!   action_wait/log_level/name。
+//!
+//! 找图：截图（帧缓存优先）→ 模板匹配（NCC）
 //!
 //! 可视化事件：tap/swipe/匹配命中时经 control DataChannel 推送给浏览器投屏页面
-//! （emit → ViewerMap 查当前 viewer；无 viewer 时静默丢弃）
+//!   （emit → ViewerMap 查当前 viewer；无 viewer 时静默丢弃）
 
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,14 +83,11 @@ use crate::scripts::ScriptStore;
 use crate::store::Db;
 use crate::webrtc::ViewerMap;
 
-/// 脚本未定义顶层 action_wait 时，操作后的默认等待毫秒数
-const DEFAULT_ACTION_WAIT: u64 = 500;
+/// find 未显式指定 timeout 时的默认超时毫秒数（30 分钟）
+const FIND_DEFAULT_TIMEOUT_MS: u64 = 1_800_000;
 
-/// until 未显式指定 timeout 时的默认超时毫秒数（30 分钟）
-const UNTIL_DEFAULT_TIMEOUT_MS: u64 = 1_800_000;
-
-/// until verify=true 时点击后复查主模板的间隔毫秒数
-const UNTIL_VERIFY_INTERVAL_MS: u64 = 50;
+/// 自定义函数嵌套调用上限（防无限递归）
+const MAX_FUNC_DEPTH: usize = 32;
 
 /// 脚本运行可视化事件（服务端 → 浏览器，经 control DataChannel，JSON 格式 {"type":"se","ev":...}）
 /// 注意 rename_all="snake_case"：内部标签默认用变体名原样（"Tap"），
@@ -112,23 +117,56 @@ pub struct Runner {
 pub struct Ctx {
     pub device_id: String,
     pub script_id: String,
-    pub label_index: std::collections::HashMap<String, usize>,
     pub log: Vec<(String, String)>, // (level, msg)
-    pub stop: Arc<std::sync::atomic::AtomicBool>,
-    /// exit 动作已触发（跨 call 子脚本共享）：run 主循环据此提前结束整个脚本运行
-    pub exit: Arc<std::sync::atomic::AtomicBool>,
-    /// 脚本顶层 action_wait：步骤未显式写 wait 时操作后的默认等待毫秒数
-    pub action_wait: u64,
-    /// 脚本顶层 log_level=debug 时记录 debug 日志（默认 info：debug 日志不记录）
-    pub log_debug: bool,
+    pub stop: Arc<AtomicBool>,
+    /// throw 动作已触发（跨 call 子脚本共享）：run 主循环据此提前结束整个脚本运行
+    pub exit: Arc<AtomicBool>,
+    /// 轮询类间隔（find 每轮重试 / verify 复查），config: 段 > config.toml
+    pub interval_ms: u64,
+    /// 模板匹配阈值，config: 段 > config.toml
+    pub threshold: f32,
+    /// 日志等级（0=debug 1=info 2=warn 3=error），低于该等级的日志丢弃
+    pub log_level_rank: u8,
+    /// 本脚本文件内定义的自定义函数（函数体未经 $N 替换，调用时按实参替换）
+    pub funcs: HashMap<String, Vec<Value>>,
+    /// 当前函数嵌套深度（防无限递归）
+    pub func_depth: usize,
+    /// return 动作的返回值（Some = 正在向上冒泡结束函数）
+    pub return_value: Option<bool>,
+    /// ^N 上下文绑定栈：find/color 的 then/else 子树执行期间压栈，
+    /// 栈顶（最内层）绑定生效
+    pub ref_stack: Vec<Vec<String>>,
+    /// 已提醒过"无 #区域后缀回退全屏"的模板（每次运行每模板一条）
+    pub region_warned: HashSet<String>,
     pub log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
 }
 
 impl Ctx {
+    /// 日志等级 → 排序值（success 视同 info：info 级即可见）
+    fn level_rank(level: &str) -> u8 {
+        match level {
+            "debug" => 0,
+            "info" | "success" => 1,
+            "warn" => 2,
+            _ => 3,
+        }
+    }
+
+    /// 配置字符串 → 等级排序值
+    fn parse_level(s: &str) -> Option<u8> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "debug" => Some(0),
+            "info" => Some(1),
+            "warn" | "warning" => Some(2),
+            "error" => Some(3),
+            _ => None,
+        }
+    }
+
     /// 记录日志：实时回调（如有）并同时收集到 ctx.log；
-    /// log_level=info 时丢弃 debug 日志（不回调、不收集）
+    /// 低于配置等级（log_level）的日志丢弃（不回调、不收集）
     fn log(&mut self, level: &str, msg: String) {
-        if level == "debug" && !self.log_debug {
+        if Self::level_rank(level) < self.log_level_rank {
             return;
         }
         if let Some(cb) = &self.log_cb {
@@ -168,79 +206,82 @@ impl Runner {
 
     /// 运行脚本内容（YAML 文本）
     /// `start_step`：从第几个 step 开始运行（0=从头；超出范围时从头）
-    /// `exit`：exit 动作共享标志（call 子脚本传父脚本的，子脚本里 exit 同样结束整个任务；None=新建）
-    /// `args`：call 传入的实参（主脚本运行传空）——子脚本内 `$1`/`$2`… 引用，
-    /// 解析后先做全文替换（见 substitute_args）；引用超出实参数量直接报错
+    /// `exit`：throw 动作共享标志（call 子脚本传父脚本的，子脚本里 throw 同样
+    ///         结束整个任务；None=新建）
+    /// `args`：call 传入的实参（主脚本运行传空）——子脚本内 `$1`/`$2`… 引用
+    /// （func 段除外，见 take_funcs_and_substitute）；引用超出实参数量直接报错
     pub async fn run(
         &self,
         device_id: &str,
         script_id: &str,
         content: &str,
-        stop: Arc<std::sync::atomic::AtomicBool>,
+        stop: Arc<AtomicBool>,
         log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
         start_step: usize,
-        exit: Option<Arc<std::sync::atomic::AtomicBool>>,
+        exit: Option<Arc<AtomicBool>>,
         args: Vec<String>,
     ) -> anyhow::Result<Vec<(String, String)>> {
         let mut doc: Value = serde_yaml::from_str(content)?;
-        // call 传参替换：$N（N 从 1 起）→ 实参；含 $N 而未提供足够实参（主脚本
-        // 直接运行/参数传少）在这里就报错，不会拖到模板匹配才失败
-        Self::substitute_args(&mut doc, &args)?;
-        let steps = doc.get("steps").and_then(|v| v.as_sequence()).cloned().ok_or_else(|| anyhow::anyhow!("missing steps"))?;
-        // 脚本顶层 action_wait：步骤未显式写 wait 时的操作后默认等待
-        let action_wait = doc.get("action_wait").and_then(|v| v.as_u64()).unwrap_or(DEFAULT_ACTION_WAIT);
-        // 脚本顶层 log_level：debug 记录全部日志，info（默认）不记录 debug 日志
-        let log_debug = doc.get("log_level").and_then(|v| v.as_str()).map(|s| s.eq_ignore_ascii_case("debug")).unwrap_or(false);
+        // 顶层键白名单：只允许 config / func / steps
+        if let Some(m) = doc.as_mapping() {
+            for k in m.keys() {
+                match k.as_str() {
+                    Some("config" | "func" | "steps") => {}
+                    Some("action_wait") => anyhow::bail!(
+                        "顶层 action_wait 已删除：操作间隔统一为 config interval（仅轮询类等待，步骤间不再等待）"
+                    ),
+                    Some("log_level") => anyhow::bail!("顶层 log_level 已删除：改用 config: 段（config.toml 可配全局默认）"),
+                    Some("name") => anyhow::bail!("顶层 name 已删除（脚本名即文件名）"),
+                    other => anyhow::bail!("未知顶层键 {:?}（只支持 config / func / steps）", other),
+                }
+            }
+        }
+        // func 段原样取出（函数体内 $N 永远指函数实参，不参与脚本级替换），
+        // 其余部分（config / steps）做 $N → 实参全文替换
+        let funcs_raw = Self::take_funcs_and_substitute(&mut doc, &args)?;
+        let (interval_ms, threshold, log_level_rank) = self.parse_script_config(&doc)?;
+        let funcs = Self::parse_funcs(funcs_raw)?;
+        let steps = doc
+            .get("steps")
+            .and_then(|v| v.as_sequence())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing steps"))?;
 
         let mut ctx = Ctx {
             device_id: device_id.to_string(),
             script_id: script_id.to_string(),
-            label_index: std::collections::HashMap::new(),
             log: Vec::new(),
             stop,
-            exit: exit.unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false))),
-            action_wait,
-            log_debug,
+            exit: exit.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+            interval_ms,
+            threshold,
+            log_level_rank,
+            funcs,
+            func_depth: 0,
+            return_value: None,
+            ref_stack: Vec::new(),
+            region_warned: HashSet::new(),
             log_cb,
         };
-
-        // 预扫描 label
-        for (i, step) in steps.iter().enumerate() {
-            if let Some(lbl) = step.get("label").and_then(|v| v.as_str()) {
-                ctx.label_index.insert(lbl.to_string(), i);
-            }
-        }
 
         let mut i = if start_step > 0 && start_step < steps.len() { start_step } else { 0 };
         let mut guard_count = 0usize;
         while i < steps.len() {
-            if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
+            if ctx.stop.load(Ordering::SeqCst) {
                 ctx.log("warn", "脚本被停止".to_string());
                 break;
             }
-            if ctx.exit.load(std::sync::atomic::Ordering::SeqCst) {
-                // exit 动作已在 exec_step 里打印结束日志（含 call 子脚本），这里直接结束
+            if ctx.exit.load(Ordering::SeqCst) {
+                // throw 动作已在 exec_step 里打印结束日志（含 call 子脚本），这里直接结束
                 break;
             }
             guard_count += 1;
             if guard_count > 100_000 {
                 anyhow::bail!("脚本执行次数超限，疑似死循环");
             }
-            let step = &steps[i];
-            self.exec_step(&mut ctx, step).await?;
-            // exit 动作已触发（含 call 子脚本）：直接结束，不再处理 goto/后续步骤
-            if ctx.exit.load(std::sync::atomic::Ordering::SeqCst) {
+            self.exec_step(&mut ctx, &steps[i]).await?;
+            if ctx.exit.load(Ordering::SeqCst) {
                 break;
-            }
-            // goto 通过 label_index 处理
-            if let Some(target) = step.get("goto").and_then(|v| v.as_str()) {
-                match ctx.label_index.get(target) {
-                    Some(&idx) => {
-                        i = idx;
-                        continue;
-                    }
-                    None => anyhow::bail!("label not found: {}", target),
-                }
             }
             i += 1;
         }
@@ -248,9 +289,140 @@ impl Runner {
         Ok(ctx.log)
     }
 
+    /// 从文档取出 func 段（原样返回，不参与 $N 替换）并对剩余部分做实参替换。
+    /// 返回 func 段的值（None = 未定义）
+    fn take_funcs_and_substitute(doc: &mut Value, args: &[String]) -> anyhow::Result<Option<Value>> {
+        let funcs = doc.get("func").filter(|v| !v.is_null()).cloned();
+        if funcs.is_some() {
+            if let Some(m) = doc.as_mapping_mut() {
+                let old = std::mem::take(m);
+                for (k, v) in old {
+                    if k.as_str() != Some("func") {
+                        m.insert(k, v);
+                    }
+                }
+            }
+        }
+        Self::substitute_args(doc, args)?;
+        Ok(funcs)
+    }
+
+    /// config: 段解析（mapping 或 mapping 列表按序覆盖）：
+    /// interval / threshold / log_level，默认取 config.toml 同名键
+    fn parse_script_config(&self, doc: &Value) -> anyhow::Result<(u64, f32, u8)> {
+        let mut interval_ms = Self::parse_duration(&Value::String(self.devices.cfg.interval.clone()), "config.toml interval")?;
+        if interval_ms == 0 {
+            anyhow::bail!("config.toml interval 必须 > 0");
+        }
+        let mut threshold = self.devices.cfg.threshold;
+        let mut level = Ctx::parse_level(&self.devices.cfg.log_level).ok_or_else(|| {
+            anyhow::anyhow!("config.toml log_level 需要 debug/info/warn/error，收到: {}", self.devices.cfg.log_level)
+        })?;
+        match doc.get("config") {
+            None | Some(Value::Null) => {}
+            Some(Value::Mapping(m)) => Self::apply_config_map(m, &mut interval_ms, &mut threshold, &mut level)?,
+            Some(Value::Sequence(seq)) => {
+                for (i, item) in seq.iter().enumerate() {
+                    let m = item
+                        .as_mapping()
+                        .ok_or_else(|| anyhow::anyhow!("config 列表第 {} 项需要映射（键值按序覆盖）", i + 1))?;
+                    Self::apply_config_map(m, &mut interval_ms, &mut threshold, &mut level)?;
+                }
+            }
+            Some(_) => anyhow::bail!("config 需要 mapping（或 mapping 列表按序覆盖）"),
+        }
+        Ok((interval_ms, threshold, level))
+    }
+
+    fn apply_config_map(m: &serde_yaml::Mapping, interval_ms: &mut u64, threshold: &mut f32, level: &mut u8) -> anyhow::Result<()> {
+        for (k, v) in m {
+            match k.as_str() {
+                Some("interval") => {
+                    let ms = Self::parse_duration(v, "config.interval")?;
+                    if ms == 0 {
+                        anyhow::bail!("config.interval 必须 > 0（轮询间隔，如 500ms）");
+                    }
+                    *interval_ms = ms;
+                }
+                Some("threshold") => {
+                    let t = v.as_f64().ok_or_else(|| anyhow::anyhow!("config.threshold 需要数字（0~1）"))?;
+                    if !(0.0..=1.0).contains(&t) || t <= 0.0 {
+                        anyhow::bail!("config.threshold 需要在 (0, 1] 之间，收到: {}", t);
+                    }
+                    *threshold = t as f32;
+                }
+                Some("log_level") => {
+                    let s = v
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("config.log_level 需要 debug/info/warn/error 字符串"))?;
+                    *level = Ctx::parse_level(s)
+                        .ok_or_else(|| anyhow::anyhow!("config.log_level 需要 debug/info/warn/error，收到: {}", s))?;
+                }
+                other => anyhow::bail!("config 不支持的键 {:?}（可用：interval / threshold / log_level）", other),
+            }
+        }
+        Ok(())
+    }
+
+    /// func 段解析：mapping（函数名: 步骤列表）或 mapping 列表（每项单键）均可；
+    /// 函数名不得是保留字；函数体 = 步骤列表（null 视为空，执行完返回 false）
+    fn parse_funcs(v: Option<Value>) -> anyhow::Result<HashMap<String, Vec<Value>>> {
+        let mut map = HashMap::new();
+        let Some(v) = v else { return Ok(map) };
+        let items: Vec<(Value, Value)> = match &v {
+            Value::Null => return Ok(map),
+            Value::Mapping(m) => m.iter().map(|(k, val)| (k.clone(), val.clone())).collect(),
+            Value::Sequence(seq) => {
+                let mut out = Vec::new();
+                for (i, item) in seq.iter().enumerate() {
+                    let m = item
+                        .as_mapping()
+                        .ok_or_else(|| anyhow::anyhow!("func 第 {} 项需要单键映射（函数名: 步骤列表）", i + 1))?;
+                    if m.len() != 1 {
+                        anyhow::bail!("func 第 {} 项需要恰好一个 函数名: 键（收到 {} 个）", i + 1, m.len());
+                    }
+                    let (k, val) = m.iter().next().unwrap();
+                    out.push((k.clone(), val.clone()));
+                }
+                out
+            }
+            _ => anyhow::bail!("func 需要 函数名: 步骤列表 的映射或映射列表"),
+        };
+        // 保留字：动作键 + 结构键 + 已删除的旧动作名（防止函数调用撞上迁移报错）
+        const RESERVED: [&str; 26] = [
+            "log", "key", "text", "tap", "swipe", "find", "color", "loop", "call", "throw", "str_app", "cls_app",
+            "wait", "return", "then", "else", "steps", "times", "block", "verify", "timeout", "config", "func",
+            "until", "cond", "exit",
+        ];
+        for (k, body) in items {
+            let name = k
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("func 的函数名需要字符串"))?
+                .to_string();
+            if RESERVED.contains(&name.as_str()) {
+                anyhow::bail!("函数名 {} 是保留字（动作键 / 结构键）", name);
+            }
+            let steps = match body {
+                Value::Null => Vec::new(),
+                Value::Sequence(seq) => seq.clone(),
+                _ => anyhow::bail!("函数 {} 的函数体需要步骤列表", name),
+            };
+            if map.insert(name.clone(), steps).is_some() {
+                anyhow::bail!("函数 {} 重复定义", name);
+            }
+        }
+        Ok(map)
+    }
+
     #[async_recursion]
     async fn exec_step(&self, ctx: &mut Ctx, step: &Value) -> anyhow::Result<()> {
-        // 无参动作简写：`- str_app` / `- cls_app`（纯标量步骤）等价 `- str_app:`
+        // return 冒泡中：嵌套步骤全部跳过（函数体逐层收口）
+        if ctx.return_value.is_some() {
+            return Ok(());
+        }
+        // 无参动作简写：`- str_app` / `- throw` 等纯标量步骤等价 `- str_app:`
         // （YAML 里两者解析类型不同：标量 vs 映射，这里统一转成值为 null 的映射）
         let scalar_owned;
         let step = match step.as_str() {
@@ -262,204 +434,594 @@ impl Runner {
             }
             None => step,
         };
-        // label 不执行
-        if step.get("label").is_some() {
+        let Some(m) = step.as_mapping() else {
+            anyhow::bail!("步骤需要映射（动作键: 值）或无参动作简写（如 - str_app），收到: {:?}", step);
+        };
+        if m.is_empty() {
             return Ok(());
         }
-        // exit：立即结束整个脚本运行（含 call 子脚本场景，经 ctx.exit 共享标志）。
-        // `- exit` 无参数打印通用提示；`- exit: 体力不足` 按参数打印
-        if step.get("exit").is_some() {
-            let msg = step.get("exit").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty());
-            match msg {
-                Some(m) => ctx.log("info", format!("因 {} 结束运行脚本", m)),
-                None => ctx.log("info", "结束运行脚本".to_string()),
-            }
-            ctx.exit.store(true, std::sync::atomic::Ordering::SeqCst);
-            return Ok(());
-        }
-        // 旧写法显式报错引导迁移（2026-08-25 重构：find 与 click/check 简写已删除）
-        if step.get("find").is_some() {
-            anyhow::bail!("find 已删除：统一改用 until（限时查找写 until + timeout: 6s，默认 30min）");
-        }
-        // click 键已删除（原 click/check 简写与 until 的 click 点击参数都不再存在）：
-        // until 命中恒点击模板中心，check 障碍同样点中心
-        if step.get("click").is_some() && step.get("until").is_none() {
-            anyhow::bail!("click 已删除：改写 `- until: 主模板` + `check: 障碍模板`（命中恒点击模板中心）");
-        }
-        // color 动作已删除（2026-08-25）：颜色判断并入 cond 的颜色条件
-        if step.get("color").is_some() {
-            anyhow::bail!("color 已删除：颜色判断改用 cond（- ff8800: 命中步骤 + pos: [x, y]）；要轮询等颜色出现用 loop/goto + cond");
-        }
-        // check 键：until 的障碍模板列表（2026-08-25 前叫 before）；其余场合报错
-        if step.get("check").is_some() && step.get("until").is_none() {
-            anyhow::bail!("check 只能与 until 配合使用（障碍模板，旧名 before）");
-        }
-        // 动作键（除 wait 外）：用于区分 `wait` 动作与操作级 `wait` 参数
-        const ACTION_KEYS: [&str; 13] = [
-            "log", "key", "text", "tap", "swipe", "until", "cond", "loop", "call", "goto", "str_app", "cls_app", "exit",
-        ];
-        let has_action = ACTION_KEYS.iter().any(|k| step.get(*k).is_some());
-        if step.get("wait").is_some() && !has_action {
-            let v = step.get("wait").unwrap();
-            let (min, max) = match v {
-                Value::Sequence(seq) => (
-                    seq.get(0).and_then(|x| x.as_u64()).unwrap_or(0),
-                    seq.get(1).and_then(|x| x.as_u64()).unwrap_or(0),
-                ),
-                Value::Mapping(_) => (
-                    v.get("min").and_then(|x| x.as_u64()).unwrap_or(0),
-                    v.get("max").and_then(|x| x.as_u64()).unwrap_or(0),
-                ),
-                _ => (v.as_u64().unwrap_or(0), v.as_u64().unwrap_or(0)),
-            };
-            let ms = if max > min { min + rand::random::<u64>() % (max - min) } else { min };
-            ctx.log("debug", format!("等待 {}ms", ms));
-            tokio::time::sleep(Duration::from_millis(ms)).await;
-        }
-        if let Some(v) = step.get("log") {
-            let msg = v.as_str().unwrap_or("");
-            ctx.log("info", msg.to_string());
-        }
-        if let Some(v) = step.get("key") {
-            let key = v.as_str().unwrap_or("");
-            let code = key_code(key);
-            ctx.log("debug", format!("按键 {}", key));
-            if let Some(s) = self.devices.session(&ctx.device_id) {
-                s.press_key(code).await?;
-            } else {
-                anyhow::bail!("设备未连接");
-            }
-        }
-        if let Some(v) = step.get("text") {
-            let text = v.as_str().unwrap_or("");
-            ctx.log("debug", format!("输入文本 {}", text));
-            if let Some(s) = self.devices.session(&ctx.device_id) {
-                s.inject_text(text).await?;
-            } else {
-                anyhow::bail!("设备未连接");
-            }
-        }
-        if let Some(v) = step.get("tap") {
-            let (rx, ry) = self.resolve_relative_point(ctx, v)?;
-            let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-            let (w, h) = s.video_size();
-            let x = (rx * w as f32).round().clamp(0.0, w as f32) as u32;
-            let y = (ry * h as f32).round().clamp(0.0, h as f32) as u32;
-            ctx.log("debug", format!("点击坐标 ({:.3}, {:.3}) → 像素 ({}, {})", rx, ry, x, y));
-            self.emit(&ctx.device_id, ScriptEvent::Tap { x, y }).await;
-            s.tap(x as f32, y as f32).await?;
-        }
-        if let Some(v) = step.get("swipe") {
-            // 新格式 fm/to；兼容旧写法 from/to
-            let from = v.get("fm").or_else(|| v.get("from")).cloned().unwrap_or(Value::Null);
-            let to = v.get("to").cloned().unwrap_or(Value::Null);
-            let (rx1, ry1) = self.relative_pair(&from)?;
-            let (rx2, ry2) = self.relative_pair(&to)?;
-            let dur = v.get("time").and_then(|x| x.as_u64()).unwrap_or(500);
-            let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-            let (w, h) = s.video_size();
-            let x1 = (rx1 * w as f32).round().clamp(0.0, w as f32) as u32;
-            let y1 = (ry1 * h as f32).round().clamp(0.0, h as f32) as u32;
-            let x2 = (rx2 * w as f32).round().clamp(0.0, w as f32) as u32;
-            let y2 = (ry2 * h as f32).round().clamp(0.0, h as f32) as u32;
-            ctx.log("debug", format!("滑动 ({:.3},{:.3})→({:.3},{:.3}) {}ms", rx1, ry1, rx2, ry2, dur));
-            self.emit(&ctx.device_id, ScriptEvent::Swipe { x1, y1, x2, y2 }).await;
-            s.swipe(x1 as f32, y1 as f32, x2 as f32, y2 as f32, dur).await?;
-        }
-        if let Some(v) = step.get("cond") {
-            self.exec_cond(ctx, step, v).await?;
-        }
+        // ^N 上下文替换（find/color 的命中步骤/then/else 子树执行期间，栈顶绑定生效）
+        let refs_owned;
+        let step = if let Some(refs) = ctx.ref_stack.last() {
+            refs_owned = Self::substitute_refs(step, refs)?;
+            &refs_owned
+        } else {
+            step
+        };
+        // 已删除动作/参数显式报错引导迁移（2026-08-26 语法精简）
         if step.get("until").is_some() {
-            self.exec_until(ctx, step).await?;
+            anyhow::bail!("until 已改名 find：- find: 主模板 + block: 障碍模板");
         }
-        if let Some(v) = step.get("loop") {
-            let times = v.get("times").and_then(|x| x.as_u64()).unwrap_or(1);
-            let sub_steps = v.get("steps").and_then(|x| x.as_sequence()).cloned().unwrap_or_default();
-            for n in 0..times {
-                if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) || ctx.exit.load(std::sync::atomic::Ordering::SeqCst) {
+        if step.get("check").is_some() {
+            anyhow::bail!("check 已改名 block（find 的障碍模板）");
+        }
+        if step.get("cond").is_some() {
+            anyhow::bail!("cond 已改名 color：颜色判断写 `- color: [x, y]` + 色值键步骤；模板分支用 find + then/else");
+        }
+        if step.get("exit").is_some() {
+            anyhow::bail!("exit 已改名 throw");
+        }
+        if step.get("goto").is_some() || step.get("label").is_some() {
+            anyhow::bail!("goto/label 已删除：循环重试用 loop");
+        }
+        for k in ["count", "cnt_ivl", "cnt_chk", "img_ivl", "and_or", "click", "before", "after"] {
+            if step.get(k).is_some() {
+                anyhow::bail!("{} 已删除（2026-08-26 语法精简）", k);
+            }
+        }
+        if step.get("threshold").is_some() {
+            anyhow::bail!("threshold 步骤参数已删除：匹配阈值全局配置（config: 段或 config.toml threshold）");
+        }
+        if step.get("region").is_some() {
+            anyhow::bail!("region 步骤参数已删除：搜索区域由模板名 #后缀 决定（无后缀回退全屏）");
+        }
+        // 动作键解析：一个步骤只能有一个
+        const ACTION_KEYS: [&str; 14] = [
+            "log", "key", "text", "tap", "swipe", "find", "color", "loop", "call", "throw", "str_app", "cls_app",
+            "wait", "return",
+        ];
+        let hits: Vec<&str> = ACTION_KEYS.iter().copied().filter(|k| step.get(*k).is_some()).collect();
+        let action: String = if let Some(&first) = hits.first() {
+            if hits.len() > 1 {
+                if hits.contains(&"wait") {
+                    anyhow::bail!(
+                        "一个步骤只能有一个动作键（{:?}）：wait 是独立动作，操作后等待参数已删除（步骤间不再统一等待，轮询间隔由 config interval 控制）",
+                        hits
+                    );
+                }
+                anyhow::bail!("一个步骤只能有一个动作键，收到 {:?}", hits);
+            }
+            first.to_string()
+        } else {
+            // 无动作键：恰好是已定义函数名 → 函数调用；否则报未知动作
+            let names: Vec<String> = m.keys().filter_map(|k| k.as_str().map(|s| s.to_string())).collect();
+            if names.is_empty() {
+                anyhow::bail!("步骤键需要字符串（旧数组键写法已删除）");
+            }
+            match names.iter().find(|n| ctx.funcs.contains_key(n.as_str())) {
+                Some(name) => name.clone(),
+                None => anyhow::bail!(
+                    "未知动作 {}（可用：find / color / loop / tap / swipe / key / text / log / call / throw / str_app / cls_app / wait / return / 自定义函数；一个步骤只能有一个动作键）",
+                    names.join("、")
+                ),
+            }
+        };
+
+        match action.as_str() {
+            "log" => {
+                Self::ensure_only_keys(step, "log", &["log"])?;
+                let msg = step.get("log").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                ctx.log("info", msg);
+            }
+            "key" => {
+                Self::ensure_only_keys(step, "key", &["key"])?;
+                let key = step.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                let code = key_code(key);
+                ctx.log("debug", format!("按键 {}", key));
+                if let Some(s) = self.devices.session(&ctx.device_id) {
+                    s.press_key(code).await?;
+                } else {
+                    anyhow::bail!("设备未连接");
+                }
+            }
+            "text" => {
+                Self::ensure_only_keys(step, "text", &["text"])?;
+                let text = step.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                ctx.log("debug", format!("输入文本 {}", text));
+                if let Some(s) = self.devices.session(&ctx.device_id) {
+                    s.inject_text(text).await?;
+                } else {
+                    anyhow::bail!("设备未连接");
+                }
+            }
+            "tap" => {
+                Self::ensure_only_keys(step, "tap", &["tap"])?;
+                let (rx, ry) = self.relative_pair(step.get("tap").unwrap_or(&Value::Null))?;
+                let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+                let (w, h) = s.video_size();
+                let x = (rx * w as f32).round().clamp(0.0, w as f32) as u32;
+                let y = (ry * h as f32).round().clamp(0.0, h as f32) as u32;
+                ctx.log("debug", format!("点击坐标 ({:.3}, {:.3}) → 像素 ({}, {})", rx, ry, x, y));
+                self.emit(&ctx.device_id, ScriptEvent::Tap { x, y }).await;
+                s.tap(x as f32, y as f32).await?;
+            }
+            "swipe" => {
+                Self::ensure_only_keys(step, "swipe", &["swipe"])?;
+                let v = step.get("swipe").unwrap();
+                let sm = v
+                    .as_mapping()
+                    .ok_or_else(|| anyhow::anyhow!("swipe 需要 {{fm: [x,y], to: [x,y], time: 500ms}} 映射"))?;
+                for k in sm.keys() {
+                    match k.as_str() {
+                        Some("fm" | "to" | "time") => {}
+                        Some("from") => anyhow::bail!("swipe 的 from 已改名 fm"),
+                        other => anyhow::bail!("swipe 不支持参数 {:?}", other),
+                    }
+                }
+                let from = sm.get(&Value::String("fm".into())).cloned().ok_or_else(|| anyhow::anyhow!("swipe 缺少 fm"))?;
+                let to = sm.get(&Value::String("to".into())).cloned().ok_or_else(|| anyhow::anyhow!("swipe 缺少 to"))?;
+                let dur = match sm.get(&Value::String("time".into())) {
+                    Some(t) => Self::parse_duration(t, "swipe time")?,
+                    None => 500,
+                };
+                let (rx1, ry1) = self.relative_pair(&from)?;
+                let (rx2, ry2) = self.relative_pair(&to)?;
+                let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+                let (w, h) = s.video_size();
+                let x1 = (rx1 * w as f32).round().clamp(0.0, w as f32) as u32;
+                let y1 = (ry1 * h as f32).round().clamp(0.0, h as f32) as u32;
+                let x2 = (rx2 * w as f32).round().clamp(0.0, w as f32) as u32;
+                let y2 = (ry2 * h as f32).round().clamp(0.0, h as f32) as u32;
+                ctx.log("debug", format!("滑动 ({:.3},{:.3})→({:.3},{:.3}) {}ms", rx1, ry1, rx2, ry2, dur));
+                self.emit(&ctx.device_id, ScriptEvent::Swipe { x1, y1, x2, y2 }).await;
+                s.swipe(x1 as f32, y1 as f32, x2 as f32, y2 as f32, dur).await?;
+            }
+            "wait" => {
+                Self::ensure_only_keys(step, "wait", &["wait"])?;
+                let ms = match step.get("wait").unwrap() {
+                    Value::Sequence(seq) if seq.len() == 2 => {
+                        let a = Self::parse_duration(&seq[0], "wait")?;
+                        let b = Self::parse_duration(&seq[1], "wait")?;
+                        if b > a {
+                            a + rand::random::<u64>() % (b - a)
+                        } else {
+                            a
+                        }
+                    }
+                    Value::Sequence(_) => anyhow::bail!("wait 区间需要 [最小, 最大] 两个带单位时长（如 [1s, 3s]）"),
+                    other => Self::parse_duration(other, "wait")?,
+                };
+                ctx.log("debug", format!("等待 {}ms", ms));
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+            }
+            "find" => self.exec_find(ctx, step).await?,
+            "color" => self.exec_color(ctx, step).await?,
+            "loop" => self.exec_loop(ctx, step).await?,
+            "call" => {
+                Self::ensure_only_keys(step, "call", &["call"])?;
+                let line = step
+                    .get("call")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("call 需要 \"子脚本名 [实参...]\" 字符串（如 - call: test2.yml a.png [0.5, 0.6]）"))?;
+                // 空格分隔 + 括号感知：[x, y] 内部的空格不切分
+                let parts = Self::split_args(line);
+                let (script_name, args) = parts
+                    .split_first()
+                    .map(|(n, rest)| (n.clone(), rest.to_vec()))
+                    .ok_or_else(|| anyhow::anyhow!("call 缺少子脚本名"))?;
+                // 子脚本按名解析：优先调用者同分区，其次跨分区（缺扩展名自动补全）
+                let caller_pkg = ctx.script_id.split('/').next().unwrap_or_default();
+                match self.scripts.resolve_call(caller_pkg, &script_name)? {
+                    Some(s) => {
+                        if args.is_empty() {
+                            ctx.log("debug", format!("调用子脚本 {}", script_name));
+                        } else {
+                            ctx.log("debug", format!("调用子脚本 {}（实参 {}）", script_name, args.join(" ")));
+                        }
+                        let sub_log = self
+                            .run(&ctx.device_id, &s.id, &s.content, ctx.stop.clone(), ctx.log_cb.clone(), 0, Some(ctx.exit.clone()), args)
+                            .await?;
+                        ctx.log.extend(sub_log);
+                    }
+                    None => anyhow::bail!("子脚本不存在: {}", script_name),
+                }
+            }
+            "throw" => {
+                Self::ensure_only_keys(step, "throw", &["throw"])?;
+                let msg = step
+                    .get("throw")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty());
+                match msg {
+                    Some(m) => ctx.log("info", format!("因 {} 结束运行脚本", m)),
+                    None => ctx.log("info", "结束运行脚本".to_string()),
+                }
+                ctx.exit.store(true, Ordering::SeqCst);
+            }
+            "str_app" => {
+                Self::ensure_only_keys(step, "str_app", &["str_app"])?;
+                Self::ensure_bare_value(step, "str_app")?;
+                let pkg = self.resolve_app_pkg(ctx)?;
+                // "+" 前缀：先 force-stop 再启动（scrcpy 定制控制消息，
+                // 虚拟屏模式下自动启动到虚拟屏，不要用 adb am start——会落到主屏）
+                let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+                ctx.log("info", format!("冷启动应用 {}", pkg));
+                s.start_app(&format!("+{}", pkg)).await?;
+            }
+            "cls_app" => {
+                Self::ensure_only_keys(step, "cls_app", &["cls_app"])?;
+                Self::ensure_bare_value(step, "cls_app")?;
+                let pkg = self.resolve_app_pkg(ctx)?;
+                let serial = self
+                    .devices
+                    .snapshot(&ctx.device_id)
+                    .map(|(d, _, _)| d.addr)
+                    .filter(|a| !a.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("设备不存在或未解析出 adb serial"))?;
+                ctx.log("info", format!("关闭应用 {}", pkg));
+                // adb force-stop：不碰 scrcpy 会话（屏幕/投屏不中断）；幂等，应用未运行也无害。
+                // 虚拟屏上应用被杀后画面变桌面或黑屏，流不断，属预期
+                self.devices.adb.shell(&serial, &format!("am force-stop {}", pkg), Duration::from_secs(8)).await?;
+            }
+            "return" => {
+                Self::ensure_only_keys(step, "return", &["return"])?;
+                let b = step
+                    .get("return")
+                    .and_then(|v| v.as_bool())
+                    .ok_or_else(|| anyhow::anyhow!("return 需要 true / false"))?;
+                if ctx.func_depth == 0 {
+                    anyhow::bail!("return 仅可在自定义函数内使用");
+                }
+                ctx.log("debug", format!("函数 return {}", b));
+                ctx.return_value = Some(b);
+            }
+            name => self.exec_func(ctx, name, step).await?,
+        }
+        Ok(())
+    }
+
+    /// find：超时时间内轮询等主模板出现并点击。每轮：主模板（新截图）命中 →
+    /// 点击中心 → verify（true = 等 interval 重匹配、仍命中补一击，共两击）→
+    /// then 结束；未命中 → block 依序匹配（命中即点击中心并结束本轮）→
+    /// 全未命中等 interval 重开一轮；超时 → else。
+    /// ^1 = 主模板名、^2.. = block 名，then/else 子树内可引用。
+    /// threshold 取 ctx（config: 段 > config.toml）；region 由模板名 #后缀决定
+    #[async_recursion]
+    async fn exec_find(&self, ctx: &mut Ctx, step: &Value) -> anyhow::Result<()> {
+        Self::ensure_only_keys(step, "find", &["find", "verify", "timeout", "block", "then", "else"])?;
+        let template = match step.get("find") {
+            Some(Value::String(s)) => {
+                let t = s.trim().to_string();
+                if t.is_empty() {
+                    anyhow::bail!("find 模板名不能为空");
+                }
+                if t.contains(',') {
+                    anyhow::bail!("find 只支持单个主模板（多个目标请拆成多步；挡路的模板写 block）");
+                }
+                t
+            }
+            Some(_) => anyhow::bail!("find 只支持单个主模板名字符串（障碍模板写 block）"),
+            None => anyhow::bail!("缺少 find"),
+        };
+        let blocks = match step.get("block") {
+            Some(v) => Self::parse_tpl_names(v, "block")?,
+            None => Vec::new(),
+        };
+        if blocks.iter().any(|b| b == &template) {
+            anyhow::bail!("block 模板 {} 与 find 主模板重复", template);
+        }
+        let verify = match step.get("verify") {
+            Some(v) => v
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("verify 需要 true / false（true=点击后等 interval 重匹配，仍命中补点一次）"))?,
+            None => false,
+        };
+        let timeout_ms = match Self::opt_duration(step, "timeout")? {
+            Some(t) if t > 0 => t,
+            Some(_) => anyhow::bail!("find 的 timeout 必须 > 0（默认 30min；支持 500ms / 2s / 1m / 30min / 1h / 1d 写法）"),
+            None => FIND_DEFAULT_TIMEOUT_MS,
+        };
+        let then_steps = match step.get("then") {
+            Some(v) => Self::steps_value(v)?,
+            None => Vec::new(),
+        };
+        let else_steps = match step.get("else") {
+            Some(v) => Self::steps_value(v)?,
+            None => Vec::new(),
+        };
+        let refs: Vec<String> = std::iter::once(template.clone()).chain(blocks.iter().cloned()).collect();
+        if blocks.is_empty() {
+            ctx.log("info", format!("等待模板 {}，超时 {}ms，轮询 {}ms", template, timeout_ms, ctx.interval_ms));
+        } else {
+            ctx.log("info", format!(
+                "等待模板 {}（障碍 {}），超时 {}ms，轮询 {}ms",
+                template, blocks.join("、"), timeout_ms, ctx.interval_ms
+            ));
+        }
+        let start = std::time::Instant::now();
+        loop {
+            if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+                break;
+            }
+            if start.elapsed().as_millis() as u64 > timeout_ms {
+                ctx.log("warn", format!("等待模板 {} 超时（{}ms）", template, timeout_ms));
+                self.run_branch(ctx, &else_steps, &refs).await?;
+                break;
+            }
+            if let Some(mm) = self.match_one(ctx, &template).await? {
+                self.emit(&ctx.device_id, ScriptEvent::Hit {
+                    tpl: template.clone(),
+                    x: mm.x, y: mm.y, w: mm.width, h: mm.height, score: mm.score,
+                })
+                .await;
+                ctx.log("success", format!("模板 {} 已找到 @ ({}, {})", template, mm.x, mm.y));
+                self.click_center(ctx, &mm).await?;
+                if verify {
+                    tokio::time::sleep(Duration::from_millis(ctx.interval_ms)).await;
+                    if let Some(m2) = self.match_one(ctx, &template).await? {
+                        self.emit(&ctx.device_id, ScriptEvent::Hit {
+                            tpl: template.clone(),
+                            x: m2.x, y: m2.y, w: m2.width, h: m2.height, score: m2.score,
+                        })
+                        .await;
+                        ctx.log("info", format!("verify：模板 {} 仍存在，补点一次 @ ({}, {})", template, m2.x, m2.y));
+                        self.click_center(ctx, &m2).await?;
+                    } else {
+                        ctx.log("debug", format!("verify：模板 {} 已消失，点击已生效", template));
+                    }
+                }
+                self.run_branch(ctx, &then_steps, &refs).await?;
+                break;
+            }
+            // 主模板未命中 → block 依序（命中即点击其中心并结束本轮）
+            for b in &blocks {
+                if ctx.stop.load(Ordering::SeqCst) {
                     break;
                 }
-                ctx.log("debug", format!("循环第 {}/{} 次", n + 1, times));
-                for sub in &sub_steps {
-                    self.exec_step(ctx, sub).await?;
-                    if ctx.exit.load(std::sync::atomic::Ordering::SeqCst) {
-                        break;
-                    }
+                if let Some(mm) = self.match_one(ctx, b).await? {
+                    self.emit(&ctx.device_id, ScriptEvent::Hit {
+                        tpl: b.clone(),
+                        x: mm.x, y: mm.y, w: mm.width, h: mm.height, score: mm.score,
+                    })
+                    .await;
+                    ctx.log("success", format!("障碍模板 {} 出现，点击关闭 @ ({}, {})", b, mm.x, mm.y));
+                    self.click_center(ctx, &mm).await?;
+                    break;
                 }
             }
+            if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(ctx.interval_ms)).await;
         }
-        if let Some(v) = step.get("call") {
-            // `- call: 子脚本.yml 实参1 实参2`：首段=子脚本名，其余空格分隔=实参，
-            // 子脚本内 `$1`/`$2`… 引用（见 substitute_args）
-            let line = v
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("call 需要 \"子脚本名 [实参...]\" 字符串（如 - call: test2.yml a.png b.png）"))?;
-            let mut parts = line.split_whitespace();
-            let script_name = parts.next().unwrap_or_default();
-            let args: Vec<String> = parts.map(str::to_string).collect();
-            // 子脚本按名解析：优先调用者同分区，其次跨分区（缺扩展名自动补全）
-            let caller_pkg = ctx.script_id.split('/').next().unwrap_or_default();
-            match self.scripts.resolve_call(caller_pkg, script_name)? {
-                Some(s) => {
-                    if args.is_empty() {
-                        ctx.log("debug", format!("调用子脚本 {}", script_name));
-                    } else {
-                        ctx.log("debug", format!("调用子脚本 {}（实参 {}）", script_name, args.join(" ")));
-                    }
-                    let sub_log = self.run(&ctx.device_id, &s.id, &s.content, ctx.stop.clone(), ctx.log_cb.clone(), 0, Some(ctx.exit.clone()), args).await?;
-                    ctx.log.extend(sub_log);
+        Ok(())
+    }
+
+    /// color：`- color: [x, y]`（相对坐标）+ 色值键（6 位十六进制，容差固定
+    /// 30/通道）挂命中步骤 + else。一次截图按序判定，命中一个执行其步骤结束
+    /// 本步；全未命中走 else。不轮询无超时（重试套 loop）。
+    /// ^1 = "[x, y]" 坐标串、^2.. = 色值键（书写顺序）
+    #[async_recursion]
+    async fn exec_color(&self, ctx: &mut Ctx, step: &Value) -> anyhow::Result<()> {
+        let pos_v = step.get("color").ok_or_else(|| anyhow::anyhow!("缺少 color 坐标"))?;
+        let (rx, ry) = Self::parse_rel_coord(pos_v).map_err(|e| anyhow::anyhow!("color 坐标: {}", e))?;
+        let m = step.as_mapping().unwrap();
+        let mut cases: Vec<((u8, u8, u8), String, Vec<Value>)> = Vec::new(); // (rgb, 规范化 hex, 命中步骤)
+        let mut else_steps: Vec<Value> = Vec::new();
+        for (k, v) in m {
+            match k.as_str() {
+                Some("color") => continue,
+                Some("else") => {
+                    else_steps = Self::steps_value(v).map_err(|e| anyhow::anyhow!("color 的 else: {}", e))?;
                 }
-                None => anyhow::bail!("子脚本不存在: {}", script_name),
+                Some(_) => {
+                    let (r, g, b) = Self::parse_color(k).map_err(|e| anyhow::anyhow!("color 的色值键: {}", e))?;
+                    let steps = Self::steps_value(v).map_err(|e| anyhow::anyhow!("color 的色值键: {}", e))?;
+                    cases.push(((r, g, b), format!("{:02x}{:02x}{:02x}", r, g, b), steps));
+                }
+                None => anyhow::bail!("color 的兄弟键需要色值（6 位十六进制）或 else（旧数组键写法已删除）"),
             }
         }
-        if let Some(v) = step.get("str_app") {
-            let pkg = self.resolve_app_pkg(ctx, v)?;
-            // "+" 前缀：先 force-stop 再启动（scrcpy 定制控制消息，
-            // 虚拟屏模式下自动启动到虚拟屏，不要用 adb am start——会落到主屏）
-            let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-            ctx.log("info", format!("冷启动应用 {}", pkg));
-            s.start_app(&format!("+{}", pkg)).await?;
+        if cases.is_empty() {
+            anyhow::bail!("color 至少需要一个色值键（如 `ff8800:` 挂命中步骤）");
         }
-        if let Some(v) = step.get("cls_app") {
-            let pkg = self.resolve_app_pkg(ctx, v)?;
-            let serial = self
-                .devices
-                .snapshot(&ctx.device_id)
-                .map(|(d, _, _)| d.addr)
-                .filter(|a| !a.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("设备不存在或未解析出 adb serial"))?;
-            ctx.log("info", format!("关闭应用 {}", pkg));
-            // adb force-stop：不碰 scrcpy 会话（屏幕/投屏不中断）；幂等，应用未运行也无害。
-            // 虚拟屏上应用被杀后画面变桌面或黑屏，流不断，属预期
-            self.devices.adb.shell(&serial, &format!("am force-stop {}", pkg), Duration::from_secs(8)).await?;
+        let refs: Vec<String> = std::iter::once(format!("[{}, {}]", rx, ry))
+            .chain(cases.iter().map(|(_, hex, _)| hex.clone()))
+            .collect();
+        let screen = self.devices.screenshot(&ctx.device_id).await.map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
+        let (w, h) = self.screen_size(ctx, &screen);
+        if w == 0 || h == 0 {
+            anyhow::bail!("无法获取屏幕尺寸");
         }
-        // 操作后统一等待：除 wait 动作本身外，每个操作可用 wait 参数指定操作后的等待毫秒数，
-        // 未指定时取脚本顶层 action_wait（脚本未定义时默认 500ms）；
-        // str_app 例外：应用启动要 1~3s，未显式指定时默认等 3000ms
-        if has_action {
-            let default_wait = if step.get("str_app").is_some() { 3000 } else { ctx.action_wait };
-            let wait_ms = step.get("wait").and_then(|x| x.as_u64()).unwrap_or(default_wait);
-            if wait_ms > 0 {
-                ctx.log("debug", format!("操作后等待 {}ms", wait_ms));
-                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+        let img = image::load_from_memory(&screen)
+            .map_err(|e| anyhow::anyhow!("解析截图失败: {}", e))?
+            .to_rgb8();
+        // 每通道容差固定 30（H.264 有损压缩帧间像素抖动，精确匹配实际不可用）
+        const TOL: i32 = 30;
+        let px = ((rx * w as f64).round() as i64).clamp(0, w as i64 - 1) as u32;
+        let py = ((ry * h as f64).round() as i64).clamp(0, h as i64 - 1) as u32;
+        let p = img.get_pixel(px, py).0;
+        let (ar, ag, ab) = (p[0] as i32, p[1] as i32, p[2] as i32);
+        for ((er, eg, eb), hex, steps) in &cases {
+            if (ar - *er as i32).abs() <= TOL && (ag - *eg as i32).abs() <= TOL && (ab - *eb as i32).abs() <= TOL {
+                ctx.log(
+                    "success",
+                    format!("颜色命中 {}（实际 {:02x}{:02x}{:02x}）@ 像素 ({}, {})", hex, ar, ag, ab, px, py),
+                );
+                self.emit(&ctx.device_id, ScriptEvent::Hit {
+                    tpl: format!("clr {}", hex),
+                    x: px.saturating_sub(12), y: py.saturating_sub(12), w: 24, h: 24, score: 1.0,
+                })
+                .await;
+                self.run_branch(ctx, steps, &refs).await?;
+                return Ok(());
+            }
+            ctx.log("debug", format!("颜色未命中：期望 {} 实际 {:02x}{:02x}{:02x} @ ({}, {})", hex, ar, ag, ab, px, py));
+        }
+        ctx.log("info", "颜色全部未命中，执行 else".to_string());
+        self.run_branch(ctx, &else_steps, &refs).await?;
+        Ok(())
+    }
+
+    /// loop：times（默认 0 = 无限循环）+ steps（必需）。
+    /// times/steps 两种缩进均可：写在 loop 值里（- loop:\n    times: 3）或与
+    /// loop 同级作步骤兄弟键（- loop:\n  times: 3——映射值同级会被 YAML 解析成
+    /// 兄弟键，干脆两种都认）
+    #[async_recursion]
+    async fn exec_loop(&self, ctx: &mut Ctx, step: &Value) -> anyhow::Result<()> {
+        Self::ensure_only_keys(step, "loop", &["loop", "times", "steps"])?;
+        let inner = step.get("loop").and_then(|v| v.as_mapping());
+        let get = |k: &str| inner.and_then(|m| m.get(k)).or_else(|| step.get(k));
+        let times = get("times").and_then(|x| x.as_u64()).unwrap_or(0);
+        let sub_steps = get("steps")
+            .and_then(|x| x.as_sequence())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("loop 需要 steps 步骤列表"))?;
+        let mut n: u64 = 0;
+        loop {
+            if times > 0 && n >= times {
+                break;
+            }
+            if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+                break;
+            }
+            ctx.log("debug", format!("循环第 {} 次", n + 1));
+            for sub in &sub_steps {
+                if ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+                    break;
+                }
+                self.exec_step(ctx, sub).await?;
+            }
+            n += 1;
+        }
+        Ok(())
+    }
+
+    /// 自定义函数调用：`- 函数名: 实参1 实参2`（空格分隔 + 括号感知）+
+    /// then（返回 true）/ else（返回 false）。函数体副本先做 $N → 实参替换，
+    /// 执行完未 return 视为 false；嵌套上限 32 层。
+    #[async_recursion]
+    async fn exec_func(&self, ctx: &mut Ctx, name: &str, step: &Value) -> anyhow::Result<()> {
+        Self::ensure_only_keys(step, name, &[name, "then", "else"])?;
+        if ctx.func_depth >= MAX_FUNC_DEPTH {
+            anyhow::bail!("自定义函数嵌套过深（上限 {}）：疑似无限递归", MAX_FUNC_DEPTH);
+        }
+        let args = match step.get(name) {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::String(s)) => {
+                let t = s.trim();
+                if t.is_empty() {
+                    Vec::new()
+                } else {
+                    Self::split_args(t)
+                }
+            }
+            Some(_) => anyhow::bail!("函数 {} 的实参需要空格分隔字符串（坐标写 [x, y]，整体不用引号）", name),
+        };
+        let body_val = Value::Sequence(
+            ctx.funcs
+                .get(name)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("函数 {} 未定义（func: 段里没有该函数名）", name))?,
+        );
+        let mut body_val = body_val;
+        Self::substitute_args(&mut body_val, &args)?;
+        let body = body_val.as_sequence().cloned().unwrap_or_default();
+        if args.is_empty() {
+            ctx.log("debug", format!("调用函数 {}", name));
+        } else {
+            ctx.log("debug", format!("调用函数 {}（实参 {}）", name, args.join(" ")));
+        }
+        ctx.func_depth += 1;
+        ctx.return_value = None;
+        for sub in &body {
+            if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) {
+                break;
+            }
+            self.exec_step(ctx, sub).await?;
+            if ctx.return_value.is_some() {
+                break;
+            }
+        }
+        ctx.func_depth -= 1;
+        let ret = ctx.return_value.take().unwrap_or(false);
+        let branch = if ret { "then" } else { "else" };
+        if let Some(steps) = step.get(branch).and_then(|v| v.as_sequence()) {
+            for sub in steps {
+                if ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+                    break;
+                }
+                self.exec_step(ctx, sub).await?;
             }
         }
         Ok(())
     }
 
-    /// str_app/cls_app 的应用包名解析：显式值优先，回退设备配置 pkg；
+    /// 在 ^N 绑定下执行分支步骤（find 的 then/else、color 的命中步骤/else）：
+    /// 压栈 → 逐步执行（每步各自按栈顶绑定做替换，嵌套 find/color 内层覆盖
+    /// 外层）→ 出栈
+    async fn run_branch(&self, ctx: &mut Ctx, steps: &[Value], refs: &[String]) -> anyhow::Result<()> {
+        if steps.is_empty() {
+            return Ok(());
+        }
+        ctx.ref_stack.push(refs.to_vec());
+        for sub in steps {
+            if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+                break;
+            }
+            self.exec_step(ctx, sub).await?;
+        }
+        ctx.ref_stack.pop();
+        Ok(())
+    }
+
+    /// 点击命中模板的中心（find 主模板与 block 障碍模板共用）
+    async fn click_center(&self, ctx: &mut Ctx, m: &matcher::MatchResult) -> anyhow::Result<()> {
+        let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+        let (cx, cy) = (m.x + m.width / 2, m.y + m.height / 2);
+        ctx.log("debug", format!("点击模板中心 @ ({}, {})", cx, cy));
+        self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
+        s.tap(cx as f32, cy as f32).await?;
+        Ok(())
+    }
+
+    /// 步骤的兄弟键白名单校验：出现白名单外的键（含拼写错误/已删除参数残留）
+    /// 显式报错，防静默失效
+    fn ensure_only_keys(step: &Value, action: &str, allowed: &[&str]) -> anyhow::Result<()> {
+        let m = step.as_mapping().unwrap();
+        for k in m.keys() {
+            let Some(name) = k.as_str() else {
+                anyhow::bail!("{} 不支持非字符串参数键（旧数组键写法已删除）", action);
+            };
+            if !allowed.contains(&name) {
+                anyhow::bail!("{} 不支持参数 {}（可用：{}）", action, name, allowed.join(" / "));
+            }
+        }
+        Ok(())
+    }
+
+    /// str_app / cls_app 只接受裸写（值必须为 null 或空串），带值报错
+    fn ensure_bare_value(step: &Value, action: &str) -> anyhow::Result<()> {
+        match step.get(action) {
+            None | Some(Value::Null) => Ok(()),
+            Some(Value::String(s)) if s.trim().is_empty() => Ok(()),
+            Some(_) => anyhow::bail!("{} 不支持参数：应用包名固定为设备分区（设备配置 pkg）", action),
+        }
+    }
+
+    /// str_app/cls_app 的应用包名：固定取设备配置 pkg；
     /// 校验仅允许 [A-Za-z0-9_.]（cls_app 要拼进 adb shell 命令，防注入）
-    fn resolve_app_pkg(&self, ctx: &Ctx, v: &Value) -> anyhow::Result<String> {
-        let pkg = v
-            .as_str()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| self.devices.snapshot(&ctx.device_id).and_then(|(d, _, _)| d.pkg))
+    fn resolve_app_pkg(&self, ctx: &Ctx) -> anyhow::Result<String> {
+        let pkg = self
+            .devices
+            .snapshot(&ctx.device_id)
+            .and_then(|(d, _, _)| d.pkg)
             .unwrap_or_default();
         if pkg.is_empty() {
-            anyhow::bail!("缺少应用包名（步骤未指定且设备未配置 pkg）");
+            anyhow::bail!("缺少应用包名（设备未配置 pkg）");
         }
         if !pkg.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') {
             anyhow::bail!("应用包名字符非法: {}", pkg);
@@ -467,438 +1029,41 @@ impl Runner {
         Ok(pkg)
     }
 
-    /// until：超时时间内循环等主模板（单个）出现并点击（轮询间隔 interval
-    /// 默认 500ms），出现执行 then，超时执行 else。
-    /// 一轮 = before 步骤全部 → check 障碍模板全部（依序：命中即点击关闭，
-    /// 未命中等 img_ivl 匹配下一个——无论命中与否都不结束本轮）→ 主模板
-    /// （命中即点击并结束步骤，本轮不执行 after）；未命中执行 after 步骤后
-    /// 隔 interval 重开一轮（又从 before 开始）。相邻两次模板匹配之间隔
-    /// img_ivl（默认 50ms）。
-    /// threshold/region/count（连击，总次数含首击默认 1，按首击坐标无条件连点）/cnt_ivl 规则
-    /// 见模块头；时长参数统一 500 / 500ms / 2s / 30min / 1h / 1d 写法
-    /// （见 parse_duration）；timeout 必须 > 0（默认 30 分钟）。
-    /// verify（2026-08-25 增，默认 false 无逻辑）：true 时命中点击（含 count 连击）
-    /// 后每 50ms 复查主模板，**消失**才走 then；持续命中到 timeout 走 else。
-    /// 2026-08-25：find 动作、click-check 简写、and_or/click/cnt_chk 参数、
-    /// 多主模板（逗号/列表）与 then 按模板分支均已删除；
-    /// 障碍模板 before 改名 check，before/after 转为每轮检测前/未命中后执行的步骤列表
-    #[async_recursion]
-    async fn exec_until(&self, ctx: &mut Ctx, step: &Value) -> anyhow::Result<()> {
-        // 已删除参数显式报错（防写了静默失效）
-        for k in ["and_or", "click"] {
-            if step.get(k).is_some() {
-                anyhow::bail!("until 的 {} 参数已删除（命中恒点击模板中心）", k);
-            }
-        }
-        if step.get("cnt_chk").is_some() {
-            anyhow::bail!("cnt_chk 已删除：命中后按首击坐标无条件连点（想防误点请拆成多步 until）");
-        }
-        // 主模板只支持单个（字符串；逗号/列表是已删除的多模板写法）
-        let template = match step.get("until") {
-            Some(Value::String(s)) => {
-                let t = s.trim().to_string();
-                if t.is_empty() {
-                    anyhow::bail!("until 模板名不能为空");
+    /// 空格分隔 + 括号感知的实参切分：`[x, y]` 内部的空格不算分隔符。
+    /// call 与自定义函数调用共用
+    fn split_args(line: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        let mut depth = 0usize;
+        for ch in line.chars() {
+            match ch {
+                '[' => {
+                    depth += 1;
+                    cur.push(ch);
                 }
-                if t.contains(',') {
-                    anyhow::bail!("until 只支持单个主模板（多个目标请拆成多步；障碍模板写 check）");
+                ']' => {
+                    depth = depth.saturating_sub(1);
+                    cur.push(ch);
                 }
-                t
-            }
-            Some(_) => anyhow::bail!("until 只支持单个主模板名字符串（障碍模板列表用 check）"),
-            None => anyhow::bail!("缺少 until"),
-        };
-        // check 障碍模板（2026-08-25 前叫 before，旧写法显式报错引导迁移）
-        let checks = match step.get("check") {
-            Some(v) => Self::parse_tpl_names(v, "check")?,
-            None => Vec::new(),
-        };
-        // 旧写法残留：before 值是字符串 / 列表里混模板名（.png 等）= 当年的障碍
-        // 模板写法，静默当步骤列表会把 "a.png" 规范成无动作空步骤，显式报错
-        if let Some(bv) = step.get("before") {
-            let looks_old = match bv {
-                Value::String(_) => true,
-                Value::Sequence(seq) => seq.iter().any(|item| matches!(item, Value::String(s) if s.contains('.'))),
-                _ => false,
-            };
-            if looks_old {
-                anyhow::bail!("until 的 before 障碍模板已改名 check（`before: a.png` → `check: a.png`）；before 现在是每轮匹配前执行的步骤列表");
-            }
-        }
-        // before/after：每轮检测前 / 未命中后执行的步骤列表
-        let before_steps = Self::parse_round_steps(step, "before")?;
-        let after_steps = Self::parse_round_steps(step, "after")?;
-        // check 与主模板重复无意义（同一模板既是障碍又是主目标），显式报错防手误
-        if checks.iter().any(|b| b == &template) {
-            anyhow::bail!("check 模板 {} 与 until 主模板重复", template);
-        }
-        let interval_ms = self.opt_duration(step, "interval")?.unwrap_or(500);
-        if interval_ms == 0 {
-            anyhow::bail!("interval 必须大于 0（轮询间隔，支持 500ms / 2s 等写法）");
-        }
-        let img_ivl_ms = self.opt_duration(step, "img_ivl")?.unwrap_or(50);
-        let timeout_ms = match self.opt_duration(step, "timeout")? {
-            Some(t) => {
-                if t == 0 {
-                    anyhow::bail!("until 的 timeout 必须 > 0（默认 30 分钟；支持 500 / 500ms / 2s / 30min / 1h / 1d 写法）");
-                }
-                t
-            }
-            None => UNTIL_DEFAULT_TIMEOUT_MS,
-        };
-        let threshold = self.opt_f64(step, "until", "threshold")
-            .map(|x| x as f32)
-            .unwrap_or(self.devices.cfg.default_threshold);
-        // verify 生效验证（默认 false 无逻辑）：true = 点击后复查主模板、消失才结束
-        let verify = match step.get("verify") {
-            Some(v) => v.as_bool().ok_or_else(|| anyhow::anyhow!("verify 需要 true / false（true=点击后每 50ms 复查主模板，消失才结束）"))?,
-            None => false,
-        };
-        if checks.is_empty() && before_steps.is_empty() {
-            ctx.log("info", format!("等待模板 {}，超时 {}ms，轮询 {}ms", template, timeout_ms, interval_ms));
-        } else {
-            ctx.log("info", format!(
-                "等待模板 {}（先处理障碍 {}），超时 {}ms，轮询 {}ms，模板间隔 {}ms",
-                template, checks.join("、"), timeout_ms, interval_ms, img_ivl_ms
-            ));
-        }
-        let then_steps = self.opt_value(step, "until", "then").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
-        let else_steps = self.opt_value(step, "until", "else").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
-        let start = std::time::Instant::now();
-        loop {
-            if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) || ctx.exit.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            if start.elapsed().as_millis() as u64 > timeout_ms {
-                ctx.log("warn", format!("等待模板 {} 超时（{}ms）", template, timeout_ms));
-                for sub in &else_steps {
-                    self.exec_step(ctx, sub).await?;
-                }
-                break;
-            }
-            // 每轮检测前步骤（before）：如提前触发刷新/关闭干扰物
-            for sub in &before_steps {
-                self.exec_step(ctx, sub).await?;
-            }
-            if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) || ctx.exit.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            // 一轮：check 障碍依序匹配（命中即点击关闭，未命中等 img_ivl 匹配
-            // 下一个——无论命中与否都不结束本轮）→ 主模板（命中即点击并结束
-            // 步骤）；相邻匹配隔 img_ivl
-            let mut hit = false;
-            let mut stopped = false;
-            let total = checks.len() + 1;
-            for i in 0..total {
-                if i > 0 && img_ivl_ms > 0 {
-                    tokio::time::sleep(Duration::from_millis(img_ivl_ms)).await;
-                }
-                if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
-                    stopped = true;
-                    break;
-                }
-                let is_check = i < checks.len();
-                let tpl = if is_check { &checks[i] } else { &template };
-                if let Some(m) = self.match_one(ctx, step, tpl, threshold).await? {
-                    self.emit(&ctx.device_id, ScriptEvent::Hit {
-                        tpl: tpl.clone(),
-                        x: m.x, y: m.y, w: m.width, h: m.height, score: m.score,
-                    }).await;
-                    if is_check {
-                        ctx.log("success", format!("障碍模板 {} 出现，点击关闭 @ ({}, {})", tpl, m.x, m.y));
-                        self.click_center(ctx, step, &m).await?;
-                    } else {
-                        ctx.log("success", format!("模板 {} 已找到 @ ({}, {})", tpl, m.x, m.y));
-                        self.click_center(ctx, step, &m).await?;
-                        hit = true;
-                        break;
+                c if c.is_whitespace() && depth == 0 => {
+                    if !cur.is_empty() {
+                        out.push(std::mem::take(&mut cur));
                     }
                 }
+                c => cur.push(c),
             }
-            if stopped {
-                break;
-            }
-            if hit {
-                // verify 生效验证：点击（含 count 连击，click_center 内已完成）后每
-                // 50ms 复查主模板——消失（点击生效/页面翻走）才走 then；持续命中
-                // 到 timeout 走 else；stop/exit 直接结束、不执行 then/else
-                if verify {
-                    ctx.log("info", format!("verify：等待模板 {} 消失（每 {}ms 复查）", template, UNTIL_VERIFY_INTERVAL_MS));
-                    let mut gone = false;
-                    let mut interrupted = false;
-                    loop {
-                        if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) || ctx.exit.load(std::sync::atomic::Ordering::SeqCst) {
-                            interrupted = true;
-                            break;
-                        }
-                        if start.elapsed().as_millis() as u64 > timeout_ms {
-                            ctx.log("warn", format!("verify：等待模板 {} 消失超时（{}ms）", template, timeout_ms));
-                            break;
-                        }
-                        if self.match_one(ctx, step, &template, threshold).await?.is_none() {
-                            ctx.log("success", format!("verify：模板 {} 已消失，点击已生效", template));
-                            gone = true;
-                            break;
-                        }
-                        ctx.log("debug", format!("verify：模板 {} 仍在屏上，{}ms 后复查", template, UNTIL_VERIFY_INTERVAL_MS));
-                        tokio::time::sleep(Duration::from_millis(UNTIL_VERIFY_INTERVAL_MS)).await;
-                    }
-                    if !gone {
-                        if !interrupted {
-                            for sub in &else_steps {
-                                self.exec_step(ctx, sub).await?;
-                            }
-                        }
-                        break;
-                    }
-                }
-                for sub in &then_steps {
-                    self.exec_step(ctx, sub).await?;
-                }
-                break;
-            }
-            // 本轮主模板未命中 → after 步骤 → 间隔 interval 后从 before 重开一轮
-            for sub in &after_steps {
-                self.exec_step(ctx, sub).await?;
-            }
-            if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) || ctx.exit.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
         }
-        Ok(())
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+        out
     }
 
-    /// until 的 before/after 步骤列表解析：值必须是步骤列表（YAML 列表），
-    /// 非列表（字符串等）报错——until 的 before 原是障碍模板字符串（已改名
-    /// check），字符串值直接按旧写法报错防静默失效
-    fn parse_round_steps(step: &Value, key: &str) -> anyhow::Result<Vec<Value>> {
-        let Some(v) = step.get(key) else {
-            return Ok(Vec::new());
-        };
-        v.as_sequence()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("{} 需要步骤列表（until 每轮匹配前/未命中后执行）；until 的障碍模板请写 check", key))
-    }
-
-    /// 条件键的命中步骤值：步骤列表，或留空（null）= 无步骤
-    fn opt_steps(v: &Value) -> anyhow::Result<Vec<Value>> {
-        match v {
-            Value::Null => Ok(Vec::new()),
-            Value::Sequence(seq) => Ok(seq.clone()),
-            _ => anyhow::bail!("需要步骤列表（- 条件键: 换行缩进步骤）或留空"),
-        }
-    }
-
-
-    /// cond：条件分支（2026-08-25 增，color 动作已删除、颜色判断并入于此）。
-    /// 条件列表按序**一次截图**逐个判定，命中一个 → 执行该条件的步骤并结束
-    /// 本步（后续条件不再判定）；全部未命中 → 执行 else（cond 的兄弟键）。写法：
-    ///   - cond:
-    ///     - test.png:              # 模板条件：键=模板名，值=命中执行的步骤列表
-    ///       - log: 命中模板        #   （YAML 标量项后不能挂缩进内容，模板名后的冒号必须写）
-    ///     - ff8800:                # 颜色条件：键=6 位十六进制色值，
-    ///       - log: 命中颜色        #   值=命中步骤（写在色值键正下方或缩进 +2，
-    ///       pos: [0.5123, 0.8456]  #   pos 之后不能跟同列 - 行——映射键之间不能插序列项），
-    ///     else:                    #   pos 兄弟键=采样相对坐标（容差固定 30）
-    ///       - log: 都没中
-    /// 单遍判定不轮询、无 timeout（要"等出现再分支"用 until，要重试套 loop/goto）；
-    /// threshold/region（含模板名 #后缀）只作用于模板条件（颜色条件坐标即位置）。
-    #[async_recursion]
-    async fn exec_cond(&self, ctx: &mut Ctx, step: &Value, v: &Value) -> anyhow::Result<()> {
-        let seq = v
-            .as_sequence()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("cond 需要条件列表（模板：- 模板名: 步骤；颜色：- ff8800: 步骤 + pos: [x, y]）"))?;
-        if seq.is_empty() {
-            anyhow::bail!("cond 至少需要一个条件");
-        }
-        // 预解析条件：全部校验集中在截图前（无设备也能报格式错）
-        enum CondCase {
-            Tpl(String, Vec<Value>),
-            Clr(f64, f64, u8, u8, u8, Vec<Value>),
-        }
-        // 模板条件键撞保留字（如把 pos/then/else 当模板名）→ 报错防静默失效
-        const RESERVED: [&str; 23] = [
-            "wait", "log", "key", "text", "tap", "swipe", "until", "color", "cond", "loop", "call", "goto", "label",
-            "str_app", "cls_app", "exit", "then", "else", "steps", "check", "before", "after", "pos",
-        ];
-        let mut cases = Vec::new();
-        for (i, item) in seq.iter().enumerate() {
-            let at = format!("cond 第 {} 个条件", i + 1);
-            let m = item.as_mapping().ok_or_else(|| anyhow::anyhow!(
-                "{} 需要映射：模板条件 - 模板名: 步骤；颜色条件 - ff8800: 步骤 + pos: [x, y]（条件键后的冒号必须写）", at))?;
-            // 有 pos 兄弟键 = 颜色条件：除 pos 外恰好一个键 = 色值，值 = 命中步骤（可省略）
-            if let Some(pos_v) = m.get(&Value::String("pos".into())) {
-                if m.len() != 2 {
-                    anyhow::bail!("{} 的颜色条件需要恰好一个色值键 + pos（收到 {} 个键）", at, m.len());
-                }
-                let (k, val) = m.iter().find(|(k, _)| k.as_str() != Some("pos")).unwrap();
-                let (r, g, b) = Self::parse_color(k).map_err(|e| anyhow::anyhow!("{}: {}", at, e))?;
-                let (rx, ry) = Self::parse_rel_coord(pos_v).map_err(|e| anyhow::anyhow!("{} 的 pos: {}", at, e))?;
-                let steps = Self::opt_steps(val).map_err(|e| anyhow::anyhow!("{} 的色值键: {}", at, e))?;
-                cases.push(CondCase::Clr(rx, ry, r, g, b, steps));
-                continue;
-            }
-            // 单键字符串映射 = 模板条件（值为命中执行的步骤列表，可省略）
-            if m.len() == 1 {
-                let (k, val) = m.iter().next().unwrap();
-                let name = k
-                    .as_str()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("{} 的键需要模板名字符串", at))?;
-                if RESERVED.contains(&name.as_str()) {
-                    anyhow::bail!("{} 的键 {} 是保留字（条件键应为模板名）", at, name);
-                }
-                if name.contains(',') {
-                    anyhow::bail!("{} 只支持单个模板名（多个目标拆成多个条件项）", at);
-                }
-                // 键是合法色值但没有 pos → 疑似颜色条件漏写 pos，报错引导
-                if Self::parse_color(k).is_ok() {
-                    anyhow::bail!("{} 的键 {} 是色值：颜色条件需要 pos: [x, y] 兄弟键给采样坐标", at, name);
-                }
-                let steps = Self::opt_steps(val).map_err(|e| anyhow::anyhow!("{} {} 的值: {}", at, name, e))?;
-                cases.push(CondCase::Tpl(name, steps));
-                continue;
-            }
-            anyhow::bail!("{} 格式不对：模板条件=单键映射（- 模板名: 步骤列表），颜色条件=- 色值: 步骤列表 + pos: [x, y]", at);
-        }
-        let else_steps = step.get("else").and_then(|v| v.as_sequence()).cloned().unwrap_or_default();
-        // 一张截图判定全部条件：模板按序 match_on_screen，颜色按序采样像素
-        let screen = self.devices.screenshot(&ctx.device_id).await
-            .map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
-        let (w, h) = self.screen_size(ctx, &screen);
-        if w == 0 || h == 0 {
-            anyhow::bail!("无法获取屏幕尺寸");
-        }
-        let threshold = self.opt_f64(step, "cond", "threshold")
-            .map(|x| x as f32)
-            .unwrap_or(self.devices.cfg.default_threshold);
-        // 只在有颜色条件时才解码像素（模板条件用不到 RGB）
-        let rgb = if cases.iter().any(|c| matches!(c, CondCase::Clr(..))) {
-            Some(image::load_from_memory(&screen).map_err(|e| anyhow::anyhow!("解析截图失败: {}", e))?.to_rgb8())
-        } else {
-            None
-        };
-        // 每通道容差固定 30（H.264 有损压缩帧间像素抖动，精确匹配实际不可用）
-        const TOL: i32 = 30;
-        for case in &cases {
-            if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) || ctx.exit.load(std::sync::atomic::Ordering::SeqCst) {
-                return Ok(());
-            }
-            match case {
-                CondCase::Tpl(name, steps) => {
-                    let region = self.resolve_region_for(ctx, step, name, w, h)?;
-                    if let Some(mm) = self.match_on_screen(ctx, name, threshold, region, screen.clone()).await? {
-                        self.emit(&ctx.device_id, ScriptEvent::Hit {
-                            tpl: name.clone(), x: mm.x, y: mm.y, w: mm.width, h: mm.height, score: mm.score,
-                        }).await;
-                        ctx.log("success", format!("cond：命中模板 {} @ ({}, {})", name, mm.x, mm.y));
-                        for sub in steps {
-                            self.exec_step(ctx, sub).await?;
-                        }
-                        return Ok(());
-                    }
-                    ctx.log("debug", format!("cond：模板 {} 未命中", name));
-                }
-                CondCase::Clr(rx, ry, er, eg, eb, steps) => {
-                    let img = rgb.as_ref().unwrap();
-                    let px = ((rx * w as f64).round() as i64).clamp(0, w as i64 - 1) as u32;
-                    let py = ((ry * h as f64).round() as i64).clamp(0, h as i64 - 1) as u32;
-                    let p = img.get_pixel(px, py).0;
-                    let (ar, ag, ab) = (p[0] as i32, p[1] as i32, p[2] as i32);
-                    let exp = format!("{:02x}{:02x}{:02x}", er, eg, eb);
-                    if (ar - *er as i32).abs() <= TOL && (ag - *eg as i32).abs() <= TOL && (ab - *eb as i32).abs() <= TOL {
-                        ctx.log("success", format!("cond：颜色命中 {}（实际 {:02x}{:02x}{:02x}）@ 像素 ({}, {})", exp, ar, ag, ab, px, py));
-                        self.emit(&ctx.device_id, ScriptEvent::Hit {
-                            tpl: format!("clr {}", exp),
-                            x: px.saturating_sub(12), y: py.saturating_sub(12), w: 24, h: 24, score: 1.0,
-                        }).await;
-                        for sub in steps {
-                            self.exec_step(ctx, sub).await?;
-                        }
-                        return Ok(());
-                    }
-                    ctx.log("debug", format!("cond：颜色未命中：期望 {} 实际 {:02x}{:02x}{:02x} @ ({}, {})", exp, ar, ag, ab, px, py));
-                }
-            }
-        }
-        ctx.log("info", "cond：全部条件未命中，执行 else".to_string());
-        for sub in &else_steps {
-            self.exec_step(ctx, sub).await?;
-        }
-        Ok(())
-    }
-
-    /// 点击命中模板的中心并按 count 连击补点（check 障碍模板与主模板共用）：
-    ///   count   总点击次数（含首击），默认 1（单击，不补点）；count ≤ 1 = 仅首击；
-    ///           命中后按首击坐标无条件重复点击，不重新匹配（cnt_chk 参数已删除）
-    ///   cnt_ivl 相邻两次点击的间隔，默认 50ms（写法同 timeout，见 parse_duration）
-    async fn click_center(&self, ctx: &mut Ctx, step: &Value, m: &matcher::MatchResult) -> anyhow::Result<()> {
-        let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-        let (cx, cy) = (m.x + m.width / 2, m.y + m.height / 2);
-        ctx.log("debug", format!("点击模板中心 @ ({}, {})", cx, cy));
-        self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
-        s.tap(cx as f32, cy as f32).await?;
-        self.exec_count_clicks(ctx, step, (cx, cy)).await
-    }
-
-    /// until 命中点击后的 count 连击补点：
-    ///   count   总点击次数（含首击），默认 1（单击，不补点）；count ≤ 1 = 仅首击
-    ///   cnt_ivl 相邻两次点击的间隔，默认 50ms（写法同 timeout，见 parse_duration）
-    /// 第 2 次起无条件重复点击首击坐标（目标消失/翻页时可能点到原地，由脚本结构保证）；
-    /// 不再重新匹配（cnt_chk 已删除，防止误点新出现的同模板，屏幕变化场景可拆多步）
-    async fn exec_count_clicks(&self, ctx: &mut Ctx, step: &Value, first: (u32, u32)) -> anyhow::Result<()> {
-        let count = match step.get("count") {
-            Some(v) => Self::parse_count(v, "count")?,
-            None => 1,
-        };
-        if count <= 1 {
-            return Ok(());
-        }
-        if count > 100_000 {
-            anyhow::bail!("count 过大（上限 100000），收到: {}", count);
-        }
-        let cnt_ivl = match step.get("cnt_ivl") {
-            Some(v) => Self::parse_duration(v, "cnt_ivl")?,
-            None => 50,
-        };
-        let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-        let (cx, cy) = first;
-        for i in 2..=count {
-            if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(cnt_ivl)).await;
-            if ctx.stop.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            ctx.log("debug", format!("连击 {}/{}：首击坐标 @ ({}, {})", i, count, cx, cy));
-            self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
-            s.tap(cx as f32, cy as f32).await?;
-        }
-        Ok(())
-    }
-
-    /// 解析点击次数参数：YAML 数字（6）；带引号的数字字符串（"6"）容忍
-    fn parse_count(v: &Value, opt: &str) -> anyhow::Result<u64> {
-        if let Some(n) = v.as_u64() {
-            return Ok(n);
-        }
-        if let Some(s) = v.as_str() {
-            if let Ok(n) = s.trim().parse::<u64>() {
-                return Ok(n);
-            }
-        }
-        anyhow::bail!("{} 需要正整数（如 6），收到: {:?}", opt, v)
-    }
-
-    /// call 子脚本参数替换（2026-08-25）：把文档里全部 `$N`（N≥1，如 `$1`）
-    /// 替换为实参。递归作用于所有字符串（映射键与值、列表项）——until/check
-    /// 模板名、log 文本、call 行（嵌套转发 $N）等全部生效；`$` 后非数字保持
-    /// 原样（"100$" 不受影响）。引用 `$N` 超出实参数量 → 报错（含 $N 占位的
-    /// 脚本被直接运行、或 call 实参传少，都在此拦截）
+    /// call/函数实参替换：把 `$N`（N≥1）替换为实参。递归作用于所有字符串
+    /// （映射键与值、列表项）——find/color 模板名、log 文本、call 行（嵌套
+    /// 转发 $N）等全部生效；`$` 后非数字保持原样（"100$" 不受影响）。
+    /// 引用 `$N` 超出实参数量 → 报错（含 $N 占位的脚本被直接运行、或实参
+    /// 传少，都在此拦截）
     fn substitute_args(v: &mut Value, args: &[String]) -> anyhow::Result<()> {
         match v {
             Value::String(s) => *s = Self::substitute_str(s, args)?,
@@ -908,7 +1073,7 @@ impl Runner {
                 }
             }
             Value::Mapping(m) => {
-                // 键也要替换（如 color 检查点的 [x, y] 键），iter_mut 的键不可变 → 重建
+                // 键也要替换（如 color 的色值键），iter_mut 的键不可变 → 重建
                 let old = std::mem::take(m);
                 for (mut k, mut val) in old {
                     Self::substitute_args(&mut k, args)?;
@@ -938,7 +1103,7 @@ impl Runner {
             let n: usize = digits.parse().unwrap();
             let Some(arg) = args.get(n.checked_sub(1).unwrap_or(usize::MAX)) else {
                 anyhow::bail!(
-                    "参数引用 ${} 超出实参数量（{} 个）：含 $N 占位的脚本需经 call 传参运行（参数从 $1 开始）",
+                    "参数引用 ${} 超出实参数量（{} 个）：含 $N 占位的脚本需经 call/函数调用传参运行（参数从 $1 开始）",
                     digits, args.len()
                 );
             };
@@ -949,19 +1114,103 @@ impl Runner {
         Ok(out)
     }
 
-    /// 解析时长参数（timeout/interval/img_ivl/cnt_ivl 共用）：
-    /// 纯数字 = 毫秒（500，YAML 数字或裸数字字符串均可）；
-    /// 字符串支持单位 1ms / 1s / 1min / 1h / 1d（大小写不敏感、可带小数如 "1.5s"）
-    fn parse_duration(v: &Value, opt: &str) -> anyhow::Result<u64> {
-        if let Some(n) = v.as_u64() {
-            return Ok(n);
+    /// ^N 上下文替换（find/color 分支子树）：递归替换字符串（含映射键），但
+    /// 序列里的映射项（步骤）不替换——留给各自执行时按当时的栈顶绑定替换，
+    /// 嵌套 find/color 的内层绑定自然覆盖外层；序列里的字符串项（block 模板
+    /// 名 / wait 区间等）照常替换。^N 越界报错
+    fn substitute_refs(v: &Value, refs: &[String]) -> anyhow::Result<Value> {
+        match v {
+            Value::String(s) => Ok(Value::String(Self::substitute_ref_str(s, refs)?)),
+            Value::Sequence(seq) => {
+                let mut out = Vec::with_capacity(seq.len());
+                for item in seq {
+                    out.push(match item {
+                        Value::String(s) => Value::String(Self::substitute_ref_str(s, refs)?),
+                        other => other.clone(),
+                    });
+                }
+                Ok(Value::Sequence(out))
+            }
+            Value::Mapping(m) => {
+                let mut out = serde_yaml::Mapping::new();
+                for (k, val) in m {
+                    let nk = match k {
+                        Value::String(s) => Value::String(Self::substitute_ref_str(s, refs)?),
+                        other => other.clone(),
+                    };
+                    let nv = match val {
+                        Value::String(s) => Value::String(Self::substitute_ref_str(s, refs)?),
+                        Value::Sequence(seq) => {
+                            let mut ns = Vec::with_capacity(seq.len());
+                            for item in seq {
+                                ns.push(match item {
+                                    Value::String(s) => Value::String(Self::substitute_ref_str(s, refs)?),
+                                    other => other.clone(),
+                                });
+                            }
+                            Value::Sequence(ns)
+                        }
+                        Value::Mapping(_) => Self::substitute_refs(val, refs)?,
+                        other => other.clone(),
+                    };
+                    out.insert(nk, nv);
+                }
+                Ok(Value::Mapping(out))
+            }
+            other => Ok(other.clone()),
         }
+    }
+
+    /// 单字符串的 ^N 替换：`^` 后跟数字（取最长数字串）= 上下文引用，越界
+    /// 报错；`^` 后非数字 = 字面 ^ 原样保留。^ 不是 YAML 保留字符（& 是——
+    /// 锚点，故弃用 &N 选 ^N）
+    fn substitute_ref_str(s: &str, refs: &[String]) -> anyhow::Result<String> {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        while let Some(pos) = rest.find('^') {
+            out.push_str(&rest[..pos]);
+            let after = &rest[pos + 1..];
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                out.push('^');
+                rest = after;
+                continue;
+            }
+            let n: usize = digits.parse().unwrap();
+            let Some(r) = refs.get(n.checked_sub(1).unwrap_or(usize::MAX)) else {
+                anyhow::bail!(
+                    "上下文引用 ^{} 超出数量（{} 个：^1 主模板/坐标，^2.. 障碍模板/颜色）",
+                    digits, refs.len()
+                );
+            };
+            out.push_str(r);
+            rest = &after[digits.len()..];
+        }
+        out.push_str(rest);
+        Ok(out)
+    }
+
+    /// 解析时长参数（timeout / interval / wait / swipe time 共用）：
+    /// **强制带单位**——字符串支持 1ms / 1s / 1m / 30min / 1h / 1d
+    /// （m ≡ min，大小写不敏感、可带小数如 "1.5s"）；裸数字（YAML 数字或
+    /// 纯数字串）不再接受，直接报错（2026-08-26 语法精简）
+    fn parse_duration(v: &Value, opt: &str) -> anyhow::Result<u64> {
         let Some(s) = v.as_str() else {
-            anyhow::bail!("{} 需要毫秒数或带单位时长（如 500 / 500ms / 2s / 30min / 1h / 1d），收到: {:?}", opt, v);
+            anyhow::bail!(
+                "{} 需要带单位时长（如 500ms / 2s / 1m / 30min / 1h / 1d）；裸数字不再接受，收到: {:?}",
+                opt, v
+            );
         };
         let t = s.trim().to_ascii_lowercase();
-        // 后缀匹配：ms 必须在 s 前判（"1ms" 剥掉 "s" 会剩 "1m" 解析失败）
-        for (suffix, mult) in [("ms", 1.0f64), ("min", 60_000.0), ("s", 1_000.0), ("h", 3_600_000.0), ("d", 86_400_000.0)] {
+        // 后缀匹配顺序：ms 必须在 m 前判（"1ms" 剥掉 "s" 会剩 "1m"）；min 在 m 前
+        for (suffix, mult) in [
+            ("ms", 1.0f64),
+            ("min", 60_000.0),
+            ("m", 60_000.0),
+            ("s", 1_000.0),
+            ("h", 3_600_000.0),
+            ("d", 86_400_000.0),
+        ] {
             if let Some(num) = t.strip_suffix(suffix) {
                 if let Ok(val) = num.trim().parse::<f64>() {
                     if val >= 0.0 {
@@ -970,14 +1219,28 @@ impl Runner {
                 }
             }
         }
-        if let Ok(n) = t.parse::<u64>() {
-            return Ok(n);
-        }
-        anyhow::bail!("{} 需要毫秒数或带单位时长（如 500 / 500ms / 2s / 30min / 1h / 1d），收到: {}", opt, s)
+        anyhow::bail!("{} 需要带单位时长（如 500ms / 2s / 1m / 30min / 1h / 1d），收到: {}", opt, s)
     }
 
-    /// 解析 cond 颜色条件的色值键：6 位十六进制 RRGGBB（可带 # / 0x 前缀、
-    /// 大小写不限）或 [r, g, b] 数字数组（0~255）；整数（YAML 解析器把 0xff8800
+    /// 取步骤时长参数（timeout），缺失返回 None；解析失败（格式非法）向上传播
+    fn opt_duration(step: &Value, opt: &str) -> anyhow::Result<Option<u64>> {
+        match step.get(opt) {
+            Some(v) => Self::parse_duration(v, opt).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// 步骤列表值：列表，或留空（null）= 无步骤
+    fn steps_value(v: &Value) -> anyhow::Result<Vec<Value>> {
+        match v {
+            Value::Null => Ok(Vec::new()),
+            Value::Sequence(seq) => Ok(seq.clone()),
+            _ => anyhow::bail!("需要步骤列表（- 键: 换行缩进步骤）或留空"),
+        }
+    }
+
+    /// 解析 color 的色值键：6 位十六进制 RRGGBB（可带 # / 0x 前缀、大小写
+    /// 不限）或 [r, g, b] 数字数组（0~255）；整数（YAML 解析器把 0xff8800
     /// 直接解析成数字时）按 0xRRGGBB 解码
     fn parse_color(v: &Value) -> anyhow::Result<(u8, u8, u8)> {
         if let Some(s) = v.as_str() {
@@ -989,7 +1252,7 @@ impl Runner {
                     u8::from_str_radix(&t[4..6], 16).unwrap(),
                 ));
             }
-            anyhow::bail!("check 颜色需要 6 位十六进制（如 ff8800 或 \"#ff8800\"）或 [r, g, b]，收到: {}", s);
+            anyhow::bail!("色值需要 6 位十六进制（如 ff8800 或 \"#ff8800\"）或 [r, g, b]，收到: {}", s);
         }
         if let Some(n) = v.as_u64() {
             if n <= 0xFF_FFFF {
@@ -1001,10 +1264,12 @@ impl Runner {
                 let c = seq
                     .iter()
                     .map(|x| {
-                        let n = x.as_u64().or_else(|| x.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-                            .ok_or_else(|| anyhow::anyhow!("check 颜色数组需要 [r, g, b] 数字（0~255）"))?;
+                        let n = x
+                            .as_u64()
+                            .or_else(|| x.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+                            .ok_or_else(|| anyhow::anyhow!("色值数组需要 [r, g, b] 数字（0~255）"))?;
                         if n > 255 {
-                            anyhow::bail!("check 颜色分量必须在 0~255，收到: {}", n);
+                            anyhow::bail!("色值分量必须在 0~255，收到: {}", n);
                         }
                         Ok(n as u8)
                     })
@@ -1012,34 +1277,49 @@ impl Runner {
                 return Ok((c[0], c[1], c[2]));
             }
         }
-        anyhow::bail!("check 颜色只支持 6 位十六进制（ff8800）或 [r, g, b] 数组，收到: {:?}", v)
+        anyhow::bail!("色值只支持 6 位十六进制（ff8800）或 [r, g, b] 数组，收到: {:?}", v)
     }
 
-    /// 匹配单个模板一次（独立取最新截图，不重试）：解析 region 后在全屏/区域内匹配
-    async fn match_one(&self, ctx: &Ctx, step: &Value, template: &str, threshold: f32) -> anyhow::Result<Option<matcher::MatchResult>> {
-        let screen = self.devices.screenshot(&ctx.device_id).await
-            .map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
+    /// 匹配单个模板一次（独立取最新截图，不重试）：按模板名 #后缀解析区域后匹配
+    async fn match_one(&self, ctx: &mut Ctx, template: &str) -> anyhow::Result<Option<matcher::MatchResult>> {
+        let screen = self.devices.screenshot(&ctx.device_id).await.map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
         let (w, h) = self.screen_size(ctx, &screen);
         if w == 0 || h == 0 {
             anyhow::bail!("无法获取屏幕尺寸");
         }
-        let region = self.resolve_region_for(ctx, step, template, w, h)?;
-        self.match_on_screen(ctx, template, threshold, region, screen).await
+        let region = self.region_for(ctx, template, w, h)?;
+        self.match_on_screen(ctx, template, ctx.threshold, region, screen).await
     }
 
-    /// region 解析（match_one 与 cond 的模板条件共用）：显式 region 参数
-    /// （全部模板统一） > 模板名 #后缀（各自独立，见 tpl_region_from_name） > 全屏。
+    /// 搜索区域：模板名 #后缀（各自独立，见 tpl_region_from_name）> 全屏。
     /// 短名引用时 #后缀在**实际文件名**上（脚本写 login.png 引用
-    /// login#910_159_972_716.png），区域须按解析结果取名才生效
-    fn resolve_region_for(&self, ctx: &Ctx, step: &Value, template: &str, w: u32, h: u32) -> anyhow::Result<Option<[u32; 4]>> {
-        match step.get("region") {
-            Some(rv) => Self::parse_region(rv, w, h),
-            None => Self::tpl_region_from_name(&Self::region_source_name(&self.tpl_dir_of(ctx), template), w, h),
+    /// login#910_159_972_716.png，区域须按解析结果取名才生效）。
+    /// 无 #后缀（且回退全屏）时记一条日志提醒（每次运行每模板一条）
+    fn region_for(&self, ctx: &mut Ctx, template: &str, w: u32, h: u32) -> anyhow::Result<Option<[u32; 4]>> {
+        let dir = self.tpl_dir_of(ctx);
+        let resolved = Self::resolve_template_file(&dir, template).ok();
+        let src = resolved
+            .as_ref()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| template.to_string());
+        let r = Self::tpl_region_from_name(&src, w, h)?;
+        if r.is_none() && resolved.is_some() && !src.contains('#') {
+            if ctx.region_warned.insert(src.clone()) {
+                ctx.log("info", format!("模板 {} 未带 #区域后缀，回退全屏搜索（区域写法：xx#l / xx#0_0_500_500）", src));
+            }
         }
+        Ok(r)
     }
 
     /// 在给定截图上匹配模板（region 为搜索区域，None=全屏）
-    async fn match_on_screen(&self, ctx: &Ctx, template: &str, threshold: f32, region: Option<[u32; 4]>, screen: Vec<u8>) -> anyhow::Result<Option<matcher::MatchResult>> {
+    async fn match_on_screen(
+        &self,
+        ctx: &Ctx,
+        template: &str,
+        threshold: f32,
+        region: Option<[u32; 4]>,
+        screen: Vec<u8>,
+    ) -> anyhow::Result<Option<matcher::MatchResult>> {
         // 模板按脚本所在应用分区解析：data/<pkg>/tmpl/（script_id 首段 = 分区）
         let tpl_dir = self.tpl_dir_of(ctx);
         // 目录不存在时先创建，避免 std::fs::read 报“系统找不到指定的路径”
@@ -1094,19 +1374,7 @@ impl Runner {
         self.devices.cfg.data_dir.join(pkg).join("tmpl")
     }
 
-    /// #区域后缀的解析来源名：短名引用时后缀在**实际文件名**上（脚本写
-    /// login.png → login#910_159_972_716.png，区域随解析结果生效）；
-    /// 解析不出文件（不存在/多候选）时回退书写的名字——真正的错误由
-    /// match_on_screen 的 resolve_template_file 统一报出，这里不重复报
-    fn region_source_name(tpl_dir: &std::path::Path, template: &str) -> String {
-        Self::resolve_template_file(tpl_dir, template)
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| template.to_string())
-    }
-
-
-    /// 解析模板名列表：字符串（可逗号分隔多模板）或 YAML 字符串列表
+    /// 解析模板名列表（find 的 block）：字符串（可逗号分隔多模板）或 YAML 字符串列表
     fn parse_tpl_names(v: &Value, key: &str) -> anyhow::Result<Vec<String>> {
         let names: Vec<String> = match v {
             Value::String(s) => s.split(',').map(|p| p.trim().to_string()).collect(),
@@ -1123,26 +1391,8 @@ impl Runner {
         Ok(names)
     }
 
-    /// 取步骤参数：新语法下参数与动作键同级
-    fn opt_value<'a>(&self, step: &'a Value, _key: &str, opt: &str) -> Option<&'a Value> {
-        step.get(opt)
-    }
-
-    fn opt_f64(&self, step: &Value, key: &str, opt: &str) -> Option<f64> {
-        self.opt_value(step, key, opt).and_then(|x| x.as_f64())
-    }
-
-    /// 取步骤时长参数（timeout/interval/img_ivl），缺失返回 None；
-    /// 解析失败（格式非法）向上传播错误
-    fn opt_duration(&self, step: &Value, opt: &str) -> anyhow::Result<Option<u64>> {
-        match step.get(opt) {
-            Some(v) => Self::parse_duration(v, opt).map(Some),
-            None => Ok(None),
-        }
-    }
-
-    /// 从模板名解析自带区域后缀（未显式写 region 参数时使用，与前端
-    /// parseTplRegion / parseTplRegionCode 同一套格式）：
+    /// 从模板名解析自带区域后缀（与前端 parseTplRegion / parseTplRegionCode
+    /// 同一套格式）：
     ///   xx#a / xx#l …   → region 参数同款半区码（a/u/d/l/r/ul/ur/dl/dr）
     ///   xx#x1_y1_x2_y2  → 相对坐标 ×1000 的 1~3 位整数（123 → 0.123，0~999），
     ///                      需 x2 > x1 且 y2 > y1（框选生成区域模板的自动命名格式）
@@ -1164,7 +1414,7 @@ impl Runner {
         if suffix.is_empty() {
             return Ok(None);
         }
-        // 半区码：与 region 参数的字符串写法完全一致（a → 全屏 None）
+        // 半区码：a → 全屏 None
         if let Ok(r) = Self::parse_region(&Value::String(suffix.clone()), w, h) {
             return Ok(r);
         }
@@ -1235,16 +1485,16 @@ impl Runner {
         anyhow::bail!("region 只支持 a/u/d/l/r/ul/ur/dl/dr / [x1, y1, x2, y2] / {{fm: [x,y], to: [x,y]}}")
     }
 
-    /// 解析 region 内的相对坐标点 [x, y]（0~1）
+    /// 解析相对坐标点 [x, y]（0~1）：tap / color 坐标 / region fm-to 共用
     fn parse_rel_coord(v: &Value) -> anyhow::Result<(f64, f64)> {
-        let seq = v.as_sequence().ok_or_else(|| anyhow::anyhow!("region fm/to 需要 [x, y] 数组"))?;
+        let seq = v.as_sequence().ok_or_else(|| anyhow::anyhow!("需要 [x, y] 数组（相对坐标 0~1）"))?;
         if seq.len() != 2 {
-            anyhow::bail!("region fm/to 需要 [x, y] 2 个相对坐标");
+            anyhow::bail!("需要 [x, y] 2 个相对坐标");
         }
-        let x = seq[0].as_f64().ok_or_else(|| anyhow::anyhow!("region 坐标必须是数字"))?;
-        let y = seq[1].as_f64().ok_or_else(|| anyhow::anyhow!("region 坐标必须是数字"))?;
+        let x = seq[0].as_f64().ok_or_else(|| anyhow::anyhow!("坐标必须是数字"))?;
+        let y = seq[1].as_f64().ok_or_else(|| anyhow::anyhow!("坐标必须是数字"))?;
         if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
-            anyhow::bail!("region 相对坐标必须在 0~1 之间");
+            anyhow::bail!("相对坐标必须在 0~1 之间");
         }
         Ok((x, y))
     }
@@ -1276,12 +1526,6 @@ impl Runner {
         }
         anyhow::bail!("相对坐标需要 [x, y] 或 {{x, y}}")
     }
-
-    /// 解析 tap 相对坐标（百分比 0~1）
-    fn resolve_relative_point(&self, _ctx: &Ctx, v: &Value) -> anyhow::Result<(f32, f32)> {
-        self.relative_pair(v)
-    }
-
 }
 
 /// 常用按键映射（Android keycode）
@@ -1344,6 +1588,11 @@ mod tests {
     fn parse(yaml: &str) -> Value {
         serde_yaml::from_str(yaml).expect("yaml parse")
     }
+
+    fn parse_steps(yaml: &str) -> Vec<Value> {
+        parse(yaml).as_sequence().unwrap().clone()
+    }
+
     /// 模板名 #后缀区域（与前端 parseTplRegion / parseTplRegionCode 同一套格式）：
     /// 半区码 xx#a/xx#l…、数字坐标 xx#x1_y1_x2_y2（×1000 的 1~3 位整数）；
     /// 无 # / 解析不出 → 全屏（None），不报错
@@ -1378,7 +1627,9 @@ mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let cleanup = || { let _ = std::fs::remove_dir_all(&dir); };
+        let cleanup = || {
+            let _ = std::fs::remove_dir_all(&dir);
+        };
         std::fs::write(dir.join("login#907_160_973_717.png"), b"x").unwrap();
         std::fs::write(dir.join("shop.png"), b"x").unwrap();
         // 短名 → 唯一后缀文件
@@ -1397,76 +1648,35 @@ mod tests {
         cleanup();
     }
 
-    /// 短名引用的区域后缀：区域从**解析后的实际文件名**取（脚本写 login.png →
-    /// login#910_159_972_716.png 的后缀生效，否则短名会退化成全屏低分辨率匹配）；
-    /// 精确名照旧；文件不存在 → 回退书写名（错误由 match_on_screen 报）
-    #[test]
-    fn short_name_region_from_resolved_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "gamer-tplregion-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cleanup = || { let _ = std::fs::remove_dir_all(&dir); };
-        std::fs::write(dir.join("login#910_159_972_716.png"), b"x").unwrap();
-        std::fs::write(dir.join("shop.png"), b"x").unwrap();
-        // 短名 → 解析到带后缀文件 → 区域生效（×1000 相对坐标 → 1920x1080 像素区域）
-        let name = Runner::region_source_name(&dir, "login.png");
-        assert_eq!(name, "login#910_159_972_716.png");
-        assert_eq!(
-            Runner::tpl_region_from_name(&name, 1920, 1080).unwrap(),
-            Some([1747, 172, 119, 602])
-        );
-        // 精确名（无后缀）→ 原名；不存在 → 回退书写名
-        assert_eq!(Runner::region_source_name(&dir, "shop.png"), "shop.png");
-        assert_eq!(Runner::region_source_name(&dir, "nope.png"), "nope.png");
-        cleanup();
-    }
-
-    /// 时长参数解析（parse_duration）：纯数字（YAML 数字/裸数字串）= ms；
-    /// 单位串 1ms/1s/1min/1h/1d（大小写不敏感、支持小数如 1.5s）；
-    /// 非法值（无数字、未知单位、负数）报错
+    /// 时长参数解析（parse_duration，强制带单位）：单位串 1ms/1s/1m/30min/1h/1d
+    /// （大小写不敏感、支持小数如 1.5s、m ≡ min）；裸数字（YAML 数字或纯数字
+    /// 串）不再接受；非法值（无数字、未知单位、负数）报错
     #[test]
     fn duration_parse() {
         let d = |yaml: &str| Runner::parse_duration(&parse(yaml), "timeout").unwrap();
-        // 纯数字：YAML 数字与裸数字字符串
-        assert_eq!(d("500"), 500);
-        assert_eq!(d("\"500\""), 500);
-        // 单位（ms 前置于 s 判定，"1ms" 不会被 "s" 剥成 "1m"）
-        assert_eq!(d("1ms"), 1);
+        assert_eq!(d("\"1ms\""), 1);
         assert_eq!(d("2s"), 2_000);
-        assert_eq!(d("30min"), 1_800_000);
+        assert_eq!(d("\"1m\""), 60_000);
+        assert_eq!(d("\"30min\""), 1_800_000);
         assert_eq!(d("1h"), 3_600_000);
         assert_eq!(d("1d"), 86_400_000);
         assert_eq!(d("\"1.5s\""), 1_500);
         assert_eq!(d("\"80 ms\""), 80);
-        assert_eq!(d("30MIN"), 1_800_000);
+        assert_eq!(d("\"30MIN\""), 1_800_000);
+        // 裸数字强制单位：YAML 数字与纯数字字符串都报错
+        assert!(Runner::parse_duration(&parse("500"), "timeout").is_err());
+        assert!(Runner::parse_duration(&parse("\"500\""), "timeout").is_err());
         // 非法：未知单位 / 空数字 / 负数 / 非字符串非数字
         assert!(Runner::parse_duration(&parse("fast"), "timeout").is_err());
         assert!(Runner::parse_duration(&parse("\"ms\""), "timeout").is_err());
-        assert!(Runner::parse_duration(&parse("\"1m\""), "timeout").is_err());
         assert!(Runner::parse_duration(&parse("\"-5s\""), "timeout").is_err());
         assert!(Runner::parse_duration(&parse("true"), "timeout").is_err());
     }
 
-    /// count 连击参数解析：count 支持 YAML 数字与带引号数字串；
-    /// cnt_ivl 走 parse_duration（数字 / 各单位串）；非法值报错
+    /// color 色值键解析：6 位十六进制（不带 #，宽容接受 # / 0x 前缀、大小写）、
+    /// [r, g, b] 数组、0x 整数；位数不对 / 非法字符 / 分量越界报错
     #[test]
-    fn count_params_parse() {
-        assert_eq!(Runner::parse_count(&parse("6"), "count").unwrap(), 6);
-        assert_eq!(Runner::parse_count(&parse("\"6\""), "count").unwrap(), 6);
-        assert!(Runner::parse_count(&parse("many"), "count").is_err());
-        assert_eq!(Runner::parse_duration(&parse("100"), "cnt_ivl").unwrap(), 100);
-        assert_eq!(Runner::parse_duration(&parse("100ms"), "cnt_ivl").unwrap(), 100);
-        assert_eq!(Runner::parse_duration(&parse("\"80 ms\""), "cnt_ivl").unwrap(), 80);
-        assert!(Runner::parse_duration(&parse("fast"), "cnt_ivl").is_err());
-    }
-
-    /// cond 颜色条件的色值键解析：6 位十六进制（不带 #，宽容接受 # / 0x 前缀、
-    /// 大小写）、[r, g, b] 数组、0x 整数；位数不对 / 非法字符 / 分量越界报错
-    #[test]
-    fn cond_color_key_parse() {
+    fn color_key_parse() {
         let c = |yaml: &str| Runner::parse_color(&parse(yaml)).unwrap();
         assert_eq!(c("ff8800"), (0xff, 0x88, 0x00));
         assert_eq!(c("\"#FF8800\""), (0xff, 0x88, 0x00));
@@ -1480,88 +1690,141 @@ mod tests {
         assert!(Runner::parse_color(&parse("[a, b, c]")).is_err()); // 非数字
     }
 
-    /// call 传参替换（2026-08-25）：`$N`（N≥1）递归替换子脚本全部字符串键值
-    /// （模板名/log 文本/call 行转发/cond 条件键）；`$` 后非数字原样保留；
-    /// 引用越界报错。另证 YAML 裸标量 `@` 开头非法（保留字符）——
-    /// 参数引用必须用 `$1` 不能用 `@1`
+    /// 空格分隔 + 括号感知的实参切分：[x, y] 内部的空格不算分隔符
+    #[test]
+    fn split_args_bracket_aware() {
+        assert_eq!(Runner::split_args("a.png b.png"), vec!["a.png", "b.png"]);
+        assert_eq!(
+            Runner::split_args("sub.yml a.png [0.5, 0.6] ff8800"),
+            vec!["sub.yml", "a.png", "[0.5, 0.6]", "ff8800"]
+        );
+        assert_eq!(Runner::split_args("  f1  "), vec!["f1"]);
+        assert!(Runner::split_args("").is_empty());
+    }
+
+    /// call/函数实参替换（$N）：替换作用于 steps 与 config（映射键一起），
+    /// **func 段排除**（函数体内 $N 永远指函数实参，调用时才替换）；
+    /// `$` 后非数字原样保留；引用越界报错。
+    /// 另证 YAML 裸标量 `@` 开头非法（保留字符）——参数引用必须用 `$1` 不能用 `@1`
     #[test]
     fn call_args_substitution() {
         let args: Vec<String> = vec!["a.png".into(), "b.png".into()];
-        let mut v = parse("steps:\n  - until: $1\n  - log: \"$2 和 $1\"\n  - call: other.yml $1 x.png\n  - cond:\n    - $1:\n        - log: x\n");
-        Runner::substitute_args(&mut v, &args).unwrap();
+        let mut v = parse(
+            "steps:\n  - find: $1\n  - log: \"$2 和 $1\"\n  - call: other.yml $1 x.png\n\
+             config:\n  interval: 500ms\nfunc:\n  - f1:\n    - find: $1\n    - return: true\n",
+        );
+        let funcs_raw = Runner::take_funcs_and_substitute(&mut v, &args).unwrap();
         let steps = v.get("steps").unwrap().as_sequence().unwrap();
-        assert_eq!(steps[0].get("until").and_then(|x| x.as_str()), Some("a.png"));
+        assert_eq!(steps[0].get("find").and_then(|x| x.as_str()), Some("a.png"));
         assert_eq!(steps[1].get("log").and_then(|x| x.as_str()), Some("b.png 和 a.png"));
-        // 嵌套 call 转发 $N（替换发生在子脚本加载时，转发值不再二次展开）
+        // 嵌套 call 转发 $N（替换发生在加载时，转发值不再二次展开）
         assert_eq!(steps[2].get("call").and_then(|x| x.as_str()), Some("other.yml a.png x.png"));
-        // cond 的模板条件键同样替换（substitute_args 连映射键一起替换）
-        let cond = steps[3].get("cond").unwrap().as_sequence().unwrap();
-        assert_eq!(cond[0].as_mapping().unwrap().iter().next().unwrap().0.as_str(), Some("a.png"));
-        // `$` 后非数字原样保留（"100$" / "$涨"）
-        let mut v2 = parse("steps:\n  - text: \"100$\"\n  - log: \"$涨\"\n");
+        // func 段未被替换（$1 留给函数调用时）
+        let funcs_val = funcs_raw.unwrap();
+        let f = funcs_val.as_sequence().unwrap()[0].as_mapping().unwrap();
+        let body = f.get(&Value::String("f1".into())).unwrap().as_sequence().unwrap();
+        assert_eq!(body[0].get("find").and_then(|x| x.as_str()), Some("$1"));
+        // color 的色值键（映射键）替换
+        let mut v2 = parse("steps:\n  - color: [0.5, 0.5]\n    $1:\n      - log: x\n");
         Runner::substitute_args(&mut v2, &args).unwrap();
-        let s2 = v2.get("steps").unwrap().as_sequence().unwrap();
-        assert_eq!(s2[0].get("text").and_then(|x| x.as_str()), Some("100$"));
-        assert_eq!(s2[1].get("log").and_then(|x| x.as_str()), Some("$涨"));
+        let c = v2.get("steps").unwrap().as_sequence().unwrap()[0].as_mapping().unwrap();
+        assert!(c.get(&Value::String("a.png".into())).is_some());
+        // `$` 后非数字原样保留（"100$" / "$涨"）
+        let mut v3 = parse("steps:\n  - text: \"100$\"\n  - log: \"$涨\"\n");
+        Runner::substitute_args(&mut v3, &args).unwrap();
+        let s3 = v3.get("steps").unwrap().as_sequence().unwrap();
+        assert_eq!(s3[0].get("text").and_then(|x| x.as_str()), Some("100$"));
+        assert_eq!(s3[1].get("log").and_then(|x| x.as_str()), Some("$涨"));
         // 实参含 "$1" 不二次展开（替换值不重扫）
-        let mut v3 = parse("steps:\n  - log: $1\n");
-        Runner::substitute_args(&mut v3, &["$1".to_string()]).unwrap();
-        assert_eq!(v3.get("steps").unwrap().as_sequence().unwrap()[0].get("log").and_then(|x| x.as_str()), Some("$1"));
-        // 引用越界：未提供实参（主脚本直接运行）/ 序号超出
-        let mut v4 = parse("steps:\n  - until: $1\n");
-        assert!(Runner::substitute_args(&mut v4, &[]).is_err());
-        let mut v5 = parse("steps:\n  - until: $3\n");
-        assert!(Runner::substitute_args(&mut v5, &args).is_err());
-        // $N 取最长数字串：$12 是第 12 参（不是 $1 + "2"）
-        let mut v6 = parse("steps:\n  - log: $12\n");
+        let mut v4 = parse("steps:\n  - log: $1\n");
+        Runner::substitute_args(&mut v4, &["$1".to_string()]).unwrap();
+        assert_eq!(v4.get("steps").unwrap().as_sequence().unwrap()[0].get("log").and_then(|x| x.as_str()), Some("$1"));
+        // 引用越界：未提供实参（主脚本直接运行）/ 序号超出 / 取最长数字串
+        let mut v5 = parse("steps:\n  - find: $1\n");
+        assert!(Runner::substitute_args(&mut v5, &[]).is_err());
+        let mut v6 = parse("steps:\n  - find: $3\n");
         assert!(Runner::substitute_args(&mut v6, &args).is_err());
+        let mut v7 = parse("steps:\n  - log: $12\n");
+        assert!(Runner::substitute_args(&mut v7, &args).is_err());
         // YAML 裸标量 @ 开头是保留字符，解析直接失败——参数引用必须用 $（不能用 @1）
-        assert!(serde_yaml::from_str::<Value>("steps:\n  - until: @1").is_err());
-        assert_eq!(parse("steps:\n  - until: $1").get("steps").unwrap().as_sequence().unwrap()[0].get("until").and_then(|x| x.as_str()), Some("$1"));
+        assert!(serde_yaml::from_str::<Value>("steps:\n  - find: @1").is_err());
+        assert_eq!(
+            parse("steps:\n  - find: $1").get("steps").unwrap().as_sequence().unwrap()[0]
+                .get("find")
+                .and_then(|x| x.as_str()),
+            Some("$1")
+        );
     }
 
-    /// cond 条件分支的 YAML 结构（serde_yaml 与前端 js-yaml 同构）：
-    /// 模板条件=单键映射（键=模板名，值=步骤列表）；颜色条件=色值字符串键 +
-    /// pos 兄弟键（值=步骤列表，可留空）；else 是 cond 的**兄弟键**（与条件项
+    /// ^N 上下文替换：步骤自身的标量值（含拼接串）替换；then/else 等步骤列表
+    /// （映射项）不替换——留给各自执行时按当时的栈顶绑定；越界报错。
+    /// ^ 不是 YAML 保留字符（& 是——锚点），裸写 ^1 合法
+    #[test]
+    fn ref_substitution() {
+        let refs = vec!["main.png".to_string(), "b1.png".to_string()];
+        // exec_step 以步骤映射本身调用 substitute_refs（非步骤序列）
+        let step = parse("- func1: ^1 ^2\n  then:\n    - log: got ^1\n  else:\n    - call: sub.yml ^2")
+            .get(0)
+            .unwrap()
+            .clone();
+        let out = Runner::substitute_refs(&step, &refs).unwrap();
+        let m = out.as_mapping().unwrap();
+        assert_eq!(m.get(&Value::String("func1".into())).and_then(|v| v.as_str()), Some("main.png b1.png"));
+        // then/else 子树（映射步骤项）不替换
+        let then = m.get(&Value::String("then".into())).unwrap().as_sequence().unwrap();
+        assert_eq!(then[0].get("log").and_then(|v| v.as_str()), Some("got ^1"));
+        let els = m.get(&Value::String("else".into())).unwrap().as_sequence().unwrap();
+        assert_eq!(els[0].get("call").and_then(|v| v.as_str()), Some("sub.yml ^2"));
+        // block 列表（字符串项）替换
+        let f = parse("- find: ^1\n  block:\n    - ^2\n    - other.png").get(0).unwrap().clone();
+        let out2 = Runner::substitute_refs(&f, &refs).unwrap();
+        let fm = out2.as_mapping().unwrap();
+        assert_eq!(
+            fm.get(&Value::String("block".into())).and_then(|v| v.as_sequence().cloned()),
+            Some(vec![Value::String("b1.png".into()), Value::String("other.png".into())])
+        );
+        // ^ 后非数字原样保留；越界报错
+        assert_eq!(
+            Runner::substitute_ref_str("a^b 100^", &refs).unwrap(),
+            "a^b 100^"
+        );
+        assert!(Runner::substitute_ref_str("^3", &refs).is_err());
+        // ^ 裸标量合法（& 会变锚点导致值丢失——弃用 &N 的原因）
+        assert_eq!(parse("steps:\n  - func1: ^1").get("steps").unwrap().as_sequence().unwrap()[0]
+            .get("func1").and_then(|x| x.as_str()), Some("^1"));
+        let anchored: Value = serde_yaml::from_str("steps:\n  - func1: &1").unwrap();
+        assert!(anchored.get("steps").unwrap().as_sequence().unwrap()[0]
+            .get("func1").unwrap().is_null());
+    }
+
+    /// color 步骤的 YAML 结构（serde_yaml 与前端 js-yaml 同构）：
+    /// 色值键挂步骤列表（可留空 null）；else 是 color 的**兄弟键**（与色值键
     /// 同列、不带 -，序列在非 dash 行自动收口回到步骤映射——同 `a:\n- 1\nb: 2` 机制）
     #[test]
-    fn cond_syntax_parse() {
+    fn color_syntax_parse() {
         let doc = parse(
-            "steps:\n  - cond:\n    - test.png:\n        - log: tpl\n    - ff8800:\n        - log: clr\n      pos: [0.5, 0.5]\n    - aa8899:\n      pos: [0.2, 0.3]\n    else:\n      - log: none\n",
+            "steps:\n  - color: [0.5, 0.5]\n    ff8800:\n      - log: hit\n    aa8899:\n    else:\n      - log: none\n",
         );
         let step = &doc.get("steps").unwrap().as_sequence().unwrap()[0];
-        let conds = step.get("cond").unwrap().as_sequence().unwrap();
-        assert_eq!(conds.len(), 3);
-        // 模板条件：单键映射
-        let t = conds[0].as_mapping().unwrap();
-        let (k, v) = t.iter().next().unwrap();
-        assert_eq!(k.as_str(), Some("test.png"));
-        assert!(v.as_sequence().is_some());
-        // 颜色条件（带步骤）：色值键 + pos 兄弟键
-        let c = conds[1].as_mapping().unwrap();
-        assert!(c.get(&Value::String("ff8800".into())).unwrap().as_sequence().is_some());
-        assert_eq!(c.get(&Value::String("pos".into())).unwrap().as_sequence().unwrap().len(), 2);
-        // 颜色条件（步骤留空）：色值键值 null + pos
-        let c2 = conds[2].as_mapping().unwrap();
-        assert!(c2.get(&Value::String("aa8899".into())).unwrap().is_null());
-        assert!(c2.get(&Value::String("pos".into())).unwrap().as_sequence().is_some());
-        // else 是 cond 的兄弟键（不在 cond 序列里）
-        assert_eq!(conds.iter().filter(|i| i.as_mapping().map_or(false, |m| m.contains_key(&Value::String("else".into())))).count(), 0);
+        let m = step.as_mapping().unwrap();
+        assert_eq!(m.get(&Value::String("color".into())).unwrap().as_sequence().unwrap().len(), 2);
+        assert!(m.get(&Value::String("ff8800".into())).unwrap().as_sequence().is_some());
+        assert!(m.get(&Value::String("aa8899".into())).unwrap().is_null());
         assert!(step.get("else").unwrap().as_sequence().is_some());
-        // $N 替换覆盖 cond 的条件键（substitute_args 替换映射键）
-        let mut d2 = parse("steps:\n  - cond:\n    - $1:\n        - log: x\n");
-        Runner::substitute_args(&mut d2, &["a.png".into()]).unwrap();
+        // else 不在色值键里（是兄弟键）
+        assert_eq!(
+            m.get(&Value::String("else".into())).and_then(|v| v.as_sequence()).map(|s| s.len()),
+            Some(1)
+        );
+        // $N 替换覆盖色值键（substitute_args 替换映射键）
+        let mut d2 = parse("steps:\n  - color: [0.5, 0.5]\n    $1:\n      - log: x\n");
+        Runner::substitute_args(&mut d2, &["ff8800".into()]).unwrap();
         let s2 = d2.get("steps").unwrap().as_sequence().unwrap();
-        let m2 = s2[0].get("cond").unwrap().as_sequence().unwrap()[0].as_mapping().unwrap();
-        assert_eq!(m2.iter().next().unwrap().0.as_str(), Some("a.png"));
+        assert!(s2[0].as_mapping().unwrap().get(&Value::String("ff8800".into())).is_some());
     }
 
-    /// exec_step / exec_until 的解析期校验回归（2026-08-25 重构后）：
-    /// 旧写法（find / click 简写 / 裸 check / until 的 before 障碍）显式报错引导
-    /// 迁移；until 参数校验（timeout 必须 > 0、interval > 0、check 与主模板重复）
-    /// 都在触碰设备/截图之前报错；合法 until 步骤解析通过、进入匹配循环后在截图处失败（无设备）
-    #[tokio::test]
-    async fn until_step_validation() {
+    /// 构建测试 Runner/Ctx（不依赖设备）
+    fn test_runner_ctx() -> (Runner, Ctx) {
         let dir = std::env::temp_dir().join(format!(
             "gamer-engine-{}-{}",
             std::process::id(),
@@ -1576,85 +1839,203 @@ mod tests {
         let devices = std::sync::Arc::new(crate::device::DeviceManager::new(db.clone(), cfg.clone(), viewers.clone()));
         let scripts = std::sync::Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
         let runner = Runner::new(db, devices, viewers, scripts);
-        let mut ctx = Ctx {
+        let ctx = Ctx {
             device_id: "test-dev".into(),
             script_id: "com.test/t.yaml".into(),
-            label_index: Default::default(),
             log: Vec::new(),
-            stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            action_wait: 0,
-            log_debug: true,
+            stop: Arc::new(AtomicBool::new(false)),
+            exit: Arc::new(AtomicBool::new(false)),
+            interval_ms: 5,
+            threshold: 0.85,
+            log_level_rank: 0,
+            funcs: HashMap::new(),
+            func_depth: 0,
+            return_value: None,
+            ref_stack: Vec::new(),
+            region_warned: HashSet::new(),
             log_cb: None,
         };
+        (runner, ctx)
+    }
+
+    /// exec_step 的解析期校验回归（2026-08-26 语法精简后）：
+    /// 旧写法（until / check / cond / exit / goto / count 等）显式报错引导迁移；
+    /// find/color/loop 参数校验都在触碰设备/截图之前报错
+    #[tokio::test]
+    async fn step_validation() {
+        let (runner, mut ctx) = test_runner_ctx();
         async fn run(runner: &Runner, ctx: &mut Ctx, yaml: &str) -> anyhow::Result<()> {
             let step = parse(yaml).get(0).unwrap().clone();
             runner.exec_step(ctx, &step).await
         }
-        // 旧写法：find / click 简写 / 裸 check / check+click
-        assert!(run(&runner, &mut ctx, "- find: a.png").await.unwrap_err().to_string().contains("find 已删除"));
-        assert!(run(&runner, &mut ctx, "- click: a.png").await.unwrap_err().to_string().contains("click 已删除"));
-        assert!(run(&runner, &mut ctx, "- click: a.png\n  check: b.png").await.unwrap_err().to_string().contains("click 已删除"));
-        assert!(run(&runner, &mut ctx, "- check: b.png").await.unwrap_err().to_string().contains("check 只能与"));
-        // until 已删除参数（and_or / click / cnt_chk）显式报错
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  and_or: and").await.unwrap_err().to_string().contains("and_or 参数已删除"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  click: false").await.unwrap_err().to_string().contains("click 参数已删除"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  click: btn.png").await.unwrap_err().to_string().contains("click 参数已删除"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  cnt_chk: true").await.unwrap_err().to_string().contains("cnt_chk 已删除"));
-        // until 障碍模板 before 已改名 check：字符串 / 模板名列表写法显式报错
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  before: b.png").await.unwrap_err().to_string().contains("已改名 check"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  before: [b.png, c.png]").await.unwrap_err().to_string().contains("已改名 check"));
-        // until 参数校验（均在截图前报错，无需设备）
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  timeout: 0").await.unwrap_err().to_string().contains("timeout 必须 > 0"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  timeout: 0s").await.unwrap_err().to_string().contains("timeout 必须 > 0"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  interval: 0").await.unwrap_err().to_string().contains("interval 必须大于 0"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  interval: -1").await.unwrap_err().to_string().contains("interval"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  check: a.png").await.unwrap_err().to_string().contains("与 until 主模板重复"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  timeout: fast").await.unwrap_err().to_string().contains("带单位时长"));
-        // 合法步骤：解析通过、进入循环，无设备在截图处失败（证明校验未误伤）；
-        // before/after 步骤列表先于截图执行（log 无需设备）
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  timeout: 30min\n  interval: 500ms\n  check: b.png, c.png\n  img_ivl: 50ms").await.unwrap_err().to_string().contains("截图失败"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  before:\n    - log: pre\n  after:\n    - log: post\n  check: b.png").await.unwrap_err().to_string().contains("截图失败"));
-        // until 的 before 值是数字等非列表 → 步骤列表报错（字符串值已被上面的旧写法守卫拦截）
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  before: 123").await.unwrap_err().to_string().contains("before 需要步骤列表"));
-        // 保留参数 threshold/region/count/cnt_ivl 合法（同样走到截图才失败）
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  threshold: 0.9\n  region: l\n  count: 3\n  cnt_ivl: 80ms").await.unwrap_err().to_string().contains("截图失败"));
-        // verify：布尔（默认 false 无逻辑）；true 合法、非布尔报错（均在截图前）
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  verify: true").await.unwrap_err().to_string().contains("截图失败"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  verify: false").await.unwrap_err().to_string().contains("截图失败"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  verify: 123").await.unwrap_err().to_string().contains("verify 需要 true / false"));
-        assert!(run(&runner, &mut ctx, "- until: a.png\n  verify: yes请写true").await.unwrap_err().to_string().contains("verify 需要 true / false"));
-        // color 动作已删除（颜色判断并入 cond），残留步骤显式报错
-        assert!(run(&runner, &mut ctx, "- color:\n  check:\n    - [0.5, 0.5]: ff8800").await.unwrap_err().to_string().contains("color 已删除"));
-        assert!(run(&runner, &mut ctx, "- color: [0.5, 0.5]").await.unwrap_err().to_string().contains("color 已删除"));
-        // cond 条件分支：格式校验均在截图前报错，合法写法走到截图才失败
-        assert!(run(&runner, &mut ctx, "- cond: x").await.unwrap_err().to_string().contains("cond 需要条件列表"));
-        assert!(run(&runner, &mut ctx, "- cond: []").await.unwrap_err().to_string().contains("至少需要一个条件"));
-        // 标量条件项（用户易写 `- test.png` 漏冒号——带子步骤时 YAML 直接解析失败，纯标量到这里报）
-        assert!(run(&runner, &mut ctx, "- cond:\n  - a.png").await.unwrap_err().to_string().contains("冒号必须写"));
-        // 模板条件值非步骤列表 / 保留字键 / 逗号多模板
-        assert!(run(&runner, &mut ctx, "- cond:\n  - a.png: log x").await.unwrap_err().to_string().contains("步骤列表"));
-        assert!(run(&runner, &mut ctx, "- cond:\n  - then:\n      - log: x").await.unwrap_err().to_string().contains("保留字"));
-        assert!(run(&runner, &mut ctx, "- cond:\n  - a.png, b.png:\n      - log: x").await.unwrap_err().to_string().contains("单个模板名"));
-        // 颜色条件：色值键是合法色值但缺 pos → 引导补 pos；pos 坐标越界；
-        // 色值键非法；色值键的步骤值非列表
-        assert!(run(&runner, &mut ctx, "- cond:\n  - ff8800:\n      - log: x").await.unwrap_err().to_string().contains("需要 pos"));
-        assert!(run(&runner, &mut ctx, "- cond:\n  - ff8800:\n    pos: [1.5, 0.5]").await.unwrap_err().to_string().contains("0~1"));
-        assert!(run(&runner, &mut ctx, "- cond:\n  - red:\n    pos: [0.5, 0.5]").await.unwrap_err().to_string().contains("cond 第 1 个条件"));
-        assert!(run(&runner, &mut ctx, "- cond:\n  - ff8800: log x\n    pos: [0.5, 0.5]").await.unwrap_err().to_string().contains("步骤列表"));
-        // 旧数组键颜色写法（- [x, y]: 色值，已删除）→ 键不是字符串报错
-        assert!(run(&runner, &mut ctx, "- cond:\n  - [0.5, 0.5]: ff8800").await.unwrap_err().to_string().contains("模板名字符串"));
-        // 合法 cond（模板 + 颜色 + else）→ 无设备在截图处失败
-        assert!(run(&runner, &mut ctx, "- cond:\n  - a.png:\n      - log: tpl\n  - ff8800:\n      - log: clr\n    pos: [0.5, 0.5]\n  else:\n    - log: none").await.unwrap_err().to_string().contains("截图失败"));
-        // exit：无参 / 带参均立即设置 exit 标志并打印日志（无需设备）
-        ctx.exit.store(false, std::sync::atomic::Ordering::SeqCst);
-        run(&runner, &mut ctx, "- exit").await.unwrap();
-        assert!(ctx.exit.load(std::sync::atomic::Ordering::SeqCst));
+        // 旧动作改名：until → find、check → block、cond → color、exit → throw
+        assert!(run(&runner, &mut ctx, "- until: a.png").await.unwrap_err().to_string().contains("until 已改名 find"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  check: b.png").await.unwrap_err().to_string().contains("check 已改名 block"));
+        assert!(run(&runner, &mut ctx, "- cond:\n  - a.png: x").await.unwrap_err().to_string().contains("cond 已改名 color"));
+        assert!(run(&runner, &mut ctx, "- exit").await.unwrap_err().to_string().contains("exit 已改名 throw"));
+        assert!(run(&runner, &mut ctx, "- goto: x").await.unwrap_err().to_string().contains("goto/label 已删除"));
+        assert!(run(&runner, &mut ctx, "- label: x").await.unwrap_err().to_string().contains("goto/label 已删除"));
+        // 已删除参数
+        for k in ["count", "cnt_ivl", "cnt_chk", "img_ivl", "and_or", "click", "before", "after"] {
+            assert!(run(&runner, &mut ctx, &format!("- find: a.png\n  {}: 1", k))
+                .await.unwrap_err().to_string().contains("已删除"));
+        }
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  threshold: 0.9").await.unwrap_err().to_string().contains("threshold 步骤参数已删除"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  region: l").await.unwrap_err().to_string().contains("region 步骤参数已删除"));
+        // 步骤级 wait 参数已删除（wait 现在是独立动作 → 多动作键报错）
+        assert!(run(&runner, &mut ctx, "- tap: [0.1, 0.1]\n  wait: 1s").await.unwrap_err().to_string().contains("wait 是独立动作"));
+        assert!(run(&runner, &mut ctx, "- tap: [0.1, 0.1]\n  log: x").await.unwrap_err().to_string().contains("一个步骤只能有一个动作键"));
+        // 未知动作
+        assert!(run(&runner, &mut ctx, "- var: x").await.unwrap_err().to_string().contains("未知动作"));
+        // find 校验（截图前报错）
+        assert!(run(&runner, &mut ctx, "- find: a.png, b.png").await.unwrap_err().to_string().contains("单个主模板"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  block: a.png").await.unwrap_err().to_string().contains("与 find 主模板重复"));
+        // timeout 裸数字（含 0）先触发强制单位；带单位的 0 才是"必须 > 0"
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 0").await.unwrap_err().to_string().contains("带单位"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 0s").await.unwrap_err().to_string().contains("timeout 必须 > 0"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 500").await.unwrap_err().to_string().contains("带单位"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: fast").await.unwrap_err().to_string().contains("带单位"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  verify: 123").await.unwrap_err().to_string().contains("verify 需要 true / false"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  foo: 1").await.unwrap_err().to_string().contains("不支持参数 foo"));
+        // 合法 find → 无设备在截图处失败（证明校验未误伤）
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 30min\n  block: b.png, c.png\n  verify: true")
+            .await.unwrap_err().to_string().contains("截图失败"));
+        // color 校验
+        assert!(run(&runner, &mut ctx, "- color: [0.5, 0.5]").await.unwrap_err().to_string().contains("至少需要一个色值键"));
+        assert!(run(&runner, &mut ctx, "- color: [0.5, 0.5]\n  red:\n    - log: x").await.unwrap_err().to_string().contains("色值键"));
+        assert!(run(&runner, &mut ctx, "- color: [0.5, 0.5]\n  ff8800: log x").await.unwrap_err().to_string().contains("步骤列表"));
+        assert!(run(&runner, &mut ctx, "- color: [1.5, 0.5]\n  ff8800:").await.unwrap_err().to_string().contains("0~1"));
+        assert!(run(&runner, &mut ctx, "- color: x\n  ff8800:").await.unwrap_err().to_string().contains("color 坐标"));
+        // 合法 color → 截图处失败
+        assert!(run(&runner, &mut ctx, "- color: [0.5, 0.5]\n  ff8800:\n    - log: x\n  else:\n    - log: none")
+            .await.unwrap_err().to_string().contains("截图失败"));
+        // loop：缺 steps 报错；times=3 执行 3 次（log 无需设备）
+        assert!(run(&runner, &mut ctx, "- loop:\n  times: 3").await.unwrap_err().to_string().contains("需要 steps"));
+        ctx.log.clear();
+        run(&runner, &mut ctx, "- loop:\n  times: 3\n  steps:\n    - log: x").await.unwrap();
+        assert_eq!(ctx.log.iter().filter(|(_, m)| m == "x").count(), 3);
+        // wait：裸数字报错；带单位可执行
+        assert!(run(&runner, &mut ctx, "- wait: 100").await.unwrap_err().to_string().contains("带单位"));
+        run(&runner, &mut ctx, "- wait: 1ms").await.unwrap();
+        run(&runner, &mut ctx, "- wait: [1ms, 2ms]").await.unwrap();
+        assert!(run(&runner, &mut ctx, "- wait: [1ms]").await.unwrap_err().to_string().contains("[最小, 最大]"));
+        // swipe：from 别名报错、time 裸数字报错
+        assert!(run(&runner, &mut ctx, "- swipe:\n    from: [0.1, 0.1]\n    to: [0.2, 0.2]").await.unwrap_err().to_string().contains("from 已改名 fm"));
+        assert!(run(&runner, &mut ctx, "- swipe:\n    fm: [0.1, 0.1]\n    to: [0.2, 0.2]\n    time: 300").await.unwrap_err().to_string().contains("带单位"));
+        // throw：无参 / 带参均立即设置 exit 标志并打印日志（无需设备）
+        ctx.exit.store(false, Ordering::SeqCst);
+        run(&runner, &mut ctx, "- throw").await.unwrap();
+        assert!(ctx.exit.load(Ordering::SeqCst));
         assert!(ctx.log.iter().any(|(_, m)| m == "结束运行脚本"));
-        ctx.exit.store(false, std::sync::atomic::Ordering::SeqCst);
-        run(&runner, &mut ctx, "- exit: 体力不足").await.unwrap();
-        assert!(ctx.exit.load(std::sync::atomic::Ordering::SeqCst));
+        ctx.exit.store(false, Ordering::SeqCst);
+        run(&runner, &mut ctx, "- throw: 体力不足").await.unwrap();
+        assert!(ctx.exit.load(Ordering::SeqCst));
         assert!(ctx.log.iter().any(|(_, m)| m == "因 体力不足 结束运行脚本"));
-        let _ = std::fs::remove_dir_all(&dir);
+        // str_app：带值报错（裸写才合法）
+        assert!(run(&runner, &mut ctx, "- str_app: com.x.y").await.unwrap_err().to_string().contains("不支持参数"));
+        assert!(run(&runner, &mut ctx, "- cls_app: com.x.y").await.unwrap_err().to_string().contains("不支持参数"));
+        // return 只能在函数内
+        assert!(run(&runner, &mut ctx, "- return: true").await.unwrap_err().to_string().contains("return 仅可在自定义函数内使用"));
+        assert!(run(&runner, &mut ctx, "- return").await.unwrap_err().to_string().contains("return 需要 true / false"));
+    }
+
+    /// 自定义函数：$N 实参替换、return true/false 分支、fall-through=false、
+    /// 函数调用步骤的 then/else 生效（log/loop 均无需设备）
+    #[tokio::test]
+    async fn func_call_and_return() {
+        let (runner, mut ctx) = test_runner_ctx();
+        // f1：log 实参 + return true；f2：无 return（fall-through false）
+        ctx.funcs.insert(
+            "f1".into(),
+            parse_steps("- log: got $1\n- return: true"),
+        );
+        ctx.funcs.insert("f2".into(), parse_steps("- log: always"));
+        // f1 返回 true → then 分支
+        ctx.log.clear();
+        run_step(&runner, &mut ctx, "- f1: hello\n  then:\n    - log: T\n  else:\n    - log: F").await.unwrap();
+        assert!(ctx.log.iter().any(|(_, m)| m == "got hello"));
+        assert!(ctx.log.iter().any(|(_, m)| m == "T"));
+        assert!(!ctx.log.iter().any(|(_, m)| m == "F"));
+        // f2 fall-through → false → else 分支
+        ctx.log.clear();
+        run_step(&runner, &mut ctx, "- f2:\n  then:\n    - log: T\n  else:\n    - log: F").await.unwrap();
+        assert!(ctx.log.iter().any(|(_, m)| m == "always"));
+        assert!(ctx.log.iter().any(|(_, m)| m == "F"));
+        assert!(!ctx.log.iter().any(|(_, m)| m == "T"));
+        // 函数实参越界（体内 $2 但只传 1 个）
+        ctx.funcs.insert("f3".into(), parse_steps("- log: $2"));
+        assert!(run_step(&runner, &mut ctx, "- f3: only-one").await.unwrap_err().to_string().contains("超出实参数量"));
+        // 函数调用步骤带非法参数
+        assert!(run_step(&runner, &mut ctx, "- f1: x\n  foo: 1").await.unwrap_err().to_string().contains("不支持参数"));
+        // return 后函数体剩余步骤跳过（return 冒泡）
+        ctx.funcs.insert(
+            "f4".into(),
+            parse_steps("- return: false\n- log: skipped"),
+        );
+        ctx.log.clear();
+        run_step(&runner, &mut ctx, "- f4:").await.unwrap();
+        assert!(!ctx.log.iter().any(|(_, m)| m == "skipped"));
+        // 嵌套函数：f5 调 f1（内层 return 不影响外层继续执行）
+        ctx.funcs.insert(
+            "f5".into(),
+            parse_steps("- f1: inner\n  else:\n    - log: inner-else\n- log: after-inner\n- return: true"),
+        );
+        ctx.log.clear();
+        run_step(&runner, &mut ctx, "- f5:\n  then:\n    - log: outer-T").await.unwrap();
+        assert!(ctx.log.iter().any(|(_, m)| m == "got inner"));
+        assert!(!ctx.log.iter().any(|(_, m)| m == "inner-else"));
+        assert!(ctx.log.iter().any(|(_, m)| m == "after-inner"));
+        assert!(ctx.log.iter().any(|(_, m)| m == "outer-T"));
+    }
+
+    async fn run_step(runner: &Runner, ctx: &mut Ctx, yaml: &str) -> anyhow::Result<()> {
+        let step = parse(yaml).get(0).unwrap().clone();
+        runner.exec_step(ctx, &step).await
+    }
+
+    /// run() 顶层校验 + config: 段 + log_level 过滤 + $N 越界（无需设备，
+    /// 步骤用 log）
+    #[tokio::test]
+    async fn run_top_level_and_config() {
+        let (runner, _ctx) = test_runner_ctx();
+        let stop = Arc::new(AtomicBool::new(false));
+        async fn run_yaml(runner: &Runner, stop: &Arc<AtomicBool>, yaml: &str) -> anyhow::Result<Vec<(String, String)>> {
+            runner.run("dev", "com.test/t.yaml", yaml, stop.clone(), None, 0, None, vec![]).await
+        }
+        // 顶层键白名单：旧 action_wait / log_level / name / 未知键报错
+        assert!(run_yaml(&runner, &stop,"action_wait: 500\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("action_wait 已删除"));
+        assert!(run_yaml(&runner, &stop,"log_level: info\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("log_level 已删除"));
+        assert!(run_yaml(&runner, &stop,"name: x\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("name 已删除"));
+        assert!(run_yaml(&runner, &stop,"foo: 1\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("未知顶层键"));
+        assert!(run_yaml(&runner, &stop,"- log: x").await.unwrap_err().to_string().contains("missing steps"));
+        // 合法脚本：log 正常执行
+        let logs = run_yaml(&runner, &stop,"steps:\n  - log: hello").await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "hello"));
+        // config 段：interval 裸数字报错；log_level=warn 丢弃 info 日志
+        assert!(run_yaml(&runner, &stop,"config:\n  interval: 100\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("带单位"));
+        assert!(run_yaml(&runner, &stop,"config:\n  foo: 1\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("不支持的键"));
+        let logs = run_yaml(&runner, &stop,"config:\n  interval: 100ms\nsteps:\n  - log: hello").await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "hello"));
+        let logs = run_yaml(&runner, &stop,"config:\n  log_level: warn\nsteps:\n  - log: dropped").await.unwrap();
+        assert!(!logs.iter().any(|(_, m)| m == "dropped"));
+        // 列表形式 config（按序覆盖）
+        let logs = run_yaml(&runner, &stop,"config:\n  - log_level: error\n  - log_level: debug\nsteps:\n  - log: kept").await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "kept"));
+        // 主脚本直接运行含 $N 的脚本 → 越界报错（func 段除外）
+        assert!(run_yaml(&runner, &stop,"steps:\n  - find: $1").await.unwrap_err().to_string().contains("超出实参数量"));
+        let logs = run_yaml(&runner, &stop,"func:\n  - f1:\n    - log: $1\nsteps:\n  - f1: ok").await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "ok"));
+        // func 定义校验：保留字函数名 / 重复定义 / 非法函数体
+        assert!(run_yaml(&runner, &stop,"func:\n  - find:\n    - log: x\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("保留字"));
+        assert!(run_yaml(&runner, &stop,"func:\n  - f1: 123\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("函数体需要步骤列表"));
+        assert!(run_yaml(
+            &runner,
+            &stop,
+            "func:\n  - f1:\n    - log: a\n  - f1:\n    - log: b\nsteps:\n  - log: x"
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("重复定义"));
     }
 }

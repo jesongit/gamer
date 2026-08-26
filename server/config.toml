@@ -5,7 +5,10 @@ adb_path = "adb"
 ffmpeg_path = "D:/Scoop/apps/ffmpeg/current/bin/ffmpeg.exe"
 scrcpy_server = "./assets/scrcpy-server.jar"
 password = "admin123"
-default_threshold = 0.8
+# 脚本引擎默认配置（可被脚本内 config: 段按脚本覆盖）
+interval = "500ms"     # 轮询类间隔（find 每轮重试 / verify 复查）；带单位，裸数字非法
+threshold = 0.85       # 模板匹配阈值
+log_level = "info"     # debug / info / warn / error，低于等级的引擎日志丢弃
 decode_frames = true
 max_size = 0
 # 码率：不宜超 ~12——设备虚拟屏固定 60fps 编码，40Mbps 时单帧 50~75KB，
@@ -25,22 +28,18 @@ idle_power_secs = 300
 # 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式（可自定义）
 # 占位符：
 #   {name}     模板名
-#   {x}/{y}    点击相对坐标（cond 颜色条件的 pos 采样点同用）
+#   {x}/{y}    点击相对坐标（color 的采样点同用）
 #   {fx}/{fy}/{tx}/{ty} 滑动起终点相对坐标
 #   {time}     滑动实际时长（ms）
-#   {color}    二次裁切区点击处采样的十六进制颜色（cond 颜色条件的色值键）
+#   {color}    二次裁切区点击处采样的十六进制颜色（color 色值键）
 # 搜索区域不再有占位符：由模板名 #后缀（hp#l / xx#0_0_500_500）决定，引擎自动解析
-# 生成的操作记录不写 wait 参数：操作后等待由脚本顶层 action_wait 统一控制，需要个别覆盖时手动加 wait
+# 生成的操作记录不写等待参数：步骤间不再统一等待，轮询间隔由 config interval 控制
 [op_templates]
-until = """- until: {name}"""
+find = """- find: {name}"""
 tap = """- tap: [{x}, {y}]"""
-cond = """- cond:
-  - {color}:
-    pos: [{x}, {y}]"""
+color = """- color: [{x}, {y}]
+  {color}:"""
 swipe = """- swipe:
     fm: [{fx}, {fy}]
     to: [{tx}, {ty}]
-    time: {time}"""
-swipe_region = """region:
-  fm: [{fx}, {fy}]
-  to: [{tx}, {ty}]"""
+    time: {time}ms"""

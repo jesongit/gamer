@@ -10,7 +10,7 @@
 - ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网 <10ms
 - 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先取自视频流软解码帧缓存，<50ms；fallback adb screencap）
-- 📜 **YAML 自动化**：until（找图等待+点击，check 障碍、before/after 每轮步骤）（cond 条件分支支持模板/颜色条件）/ tap / swipe / text / key / str_app / cls_app / loop / goto / call / exit / wait（语法见 [docs/YAML.md](docs/YAML.md)）
+- 📜 **YAML 自动化**：find（找图等待+点击，block 障碍、verify 补点）/ color 颜色分支 / loop / func 自定义函数（$N 传参 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait（语法见 [docs/YAML.md](docs/YAML.md)）
 - ⏰ **定时任务**：cron 表达式，服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
@@ -127,7 +127,7 @@ VITE_PROXY_TARGET=http://localhost:8443 npm run dev
 ## YAML 脚本语法
 
 YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAML.md](docs/YAML.md)**。
-模板文件放在 `data/templates/`（web 端「模板管理」页上传/测试）。
+模板与脚本按应用分区存放在 `data/<应用包名>/tmpl|yaml/`（web 端 Console 页框选/上传模板）。
 
 ## API 一览
 

@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">模板管理</div>
-        <div class="page-sub">图片模板用于 YAML 脚本中的 until 模板匹配</div>
+        <div class="page-sub">图片模板用于 YAML 脚本中的 find 模板匹配</div>
       </div>
       <div class="head-actions">
         <select v-model="uploadPkg" class="select" title="上传目标应用分区">

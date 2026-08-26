@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">脚本编辑</div>
-        <div class="page-sub">YAML 自动化脚本 · 支持 until（找图等待 + check 障碍）/ cond 条件分支（模板/颜色）/ tap / swipe / text / key / str_app / cls_app / loop / goto / call（可传参 $N）/ exit / wait；每个操作可用 wait 参数控制操作后等待（默认取脚本顶层 action_wait，500ms；str_app 默认 3000ms）</div>
+        <div class="page-sub">YAML 自动化脚本 · 支持 find（找图等待 + block 障碍）/ color 颜色分支 / loop / func 自定义函数（$N 传参 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait；时间参数一律带单位（1ms / 2s / 1m / 30min / 1h / 1d），间隔与阈值用 config: 段配置</div>
       </div>
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
@@ -61,85 +61,82 @@
         </div>
         <div class="modal-body">
           <div class="help-block">
-            <div class="hb-title">⚙ 顶层配置</div>
+            <div class="hb-title">⚙ 顶层结构（只允许 config / func / steps）</div>
             <pre class="hb-code mono"># 脚本按应用分区存放（data/&lt;应用包名&gt;/yaml，分区由编辑器顶部分区下拉决定）
-action_wait: 500       # 每个操作后的默认等待 ms（默认 500）
-log_level: info        # 日志级别：info=精简（默认） / debug=详细</pre>
+config:                 # 可选：覆盖 config.toml 默认（也可写成映射列表按序覆盖）
+  interval: 500ms       # 轮询类间隔（find 每轮重试 / verify 复查）；步骤间不等待
+  threshold: 0.85       # 模板匹配阈值
+  log_level: info       # debug / info（默认）/ warn / error，低于等级的日志丢弃
+func:                   # 可选：自定义函数（见下）
+steps:                  # 必需：步骤列表
+  - log: "开始"</pre>
           </div>
           <div class="help-block">
-            <div class="hb-title">🎬 动作</div>
-            <pre class="hb-code mono">- wait: [500, 1500]                   # 随机延时
-- tap: [0.500, 0.500]                # 相对坐标点击
-  wait: 200                          # 操作后等待（默认取脚本 action_wait，0 不等待）
+            <div class="hb-title">🎬 基础动作</div>
+            <pre class="hb-code mono">- wait: 2s               # 等待（也可 [1s, 3s] 随机区间）；时间一律带单位
+- tap: [0.500, 0.500]    # 相对坐标点击
 - swipe:
-    fm: [0.500, 0.800]               # 滑动起点
-    to: [0.500, 0.200]               # 滑动终点
-    time: 800                        # 滑动时长 ms
-- text: "hello world"                # 输入文本
-- key: HOME                          # HOME/BACK/APP_SWITCH/VOL_UP…</pre>
+    fm: [0.500, 0.800]   # 滑动起点
+    to: [0.500, 0.200]   # 滑动终点
+    time: 800ms          # 滑动时长（省略默认 500ms）
+- text: "hello world"    # 输入文本
+- key: HOME              # HOME/BACK/APP_SWITCH/VOL_UP…
+- log: "输出到运行日志"
+- str_app                # 冷启动应用（只写裸名，包名 = 设备分区）
+- cls_app                # 关闭应用（adb force-stop，不碰投屏）
+- throw                  # 结束整个任务（跨 call）；- throw: 体力不足 带原因</pre>
           </div>
           <div class="help-block">
-            <div class="hb-title">🔍 找图 until</div>
-            <pre class="hb-code mono">- until: sign_btn.png   # 超时时间内循环等模板出现并点击（恒点模板中心）
-  timeout: 30min        # 超时：必须 > 0（默认 30min；写法 500 / 500ms / 2s / 1h / 1d）
-  interval: 500ms       # 轮询间隔（默认 500ms，写法同 timeout）
-  before:               # 每轮匹配前执行的步骤（可选）：如先点掉/触发什么再找图
-    - log: "先刷新一下"
-  check:                # 障碍模板：每轮先依序匹配，命中即点击关闭后继续；
-    - pop.png           # 未命中等 img_ivl 匹配下一个（无论命中与否都不结束本轮）；
-    - ad.png            # 单个可写 check: pop.png
-  img_ivl: 50ms         # 一轮内相邻模板匹配的间隔（check → 主模板之间，默认 50ms）
-  after:                # 每轮未命中后执行的步骤（可选；命中走 then、超时走 else 均不执行）
-    - swipe:            # 经典用法：滚动翻页直到找到目标
-        fm: [0.500, 0.800]
-        to: [0.500, 0.500]
-        time: 300
-  threshold: 0.85       # 匹配阈值（默认 0.8）
-  region: a             # 搜索区域（默认 a=全屏；模板名可带 #后缀 区域各自指定）
-  count: 1              # 连击：总点击次数含首击（默认 1 单击；命中后按首击坐标
-                         # 无条件连点；cnt_ivl 默认 50ms 间隔；对 check 障碍同样生效）
-  verify: true          # 生效验证（默认 false 无逻辑）：点击后每 50ms 复查主模板，
-                         # 消失（点击生效/页面翻走）才走 then；持续命中到超时走 else
-  then:                 # 超时时间内出现主模板执行
-    - log: "找到并点击"
+            <div class="hb-title">🔍 找图 find（超时内轮询等模板出现并点击，恒点模板中心）</div>
+            <pre class="hb-code mono">- find: sign_btn.png   # 单个主模板（多目标拆成多步；挡路的写 block）
+  timeout: 30min        # 超时执行 else（默认 30min，必须 > 0）
+  block:                # 障碍模板：主模板未命中后依序匹配，命中即点击其中心
+    - pop.png           # 并结束本轮；单个可写 block: pop.png
+    - ad.png
+  verify: true          # 生效验证（默认 false）：命中点击后等 interval 重匹配主模板，
+                         # 仍命中再补一击（共两击，不循环）
+  then:                 # 命中执行（^1 = 主模板名、^2.. = block 名，可传参引用）
+    - log: "找到 ^1"
   else:                 # 超时执行
-    - log: "等待超时"
-
-- until: a.png           # 只支持单个主模板（多目标请拆成多步；挡路的写 check）
-                         # 各模板区域不同 → 名字带 #后缀：hp#l.png（左半）xx#0_0_500_500.png（左上 1/4）
-                         # 脚本也可写短名 login.png（引擎自动解析唯一 login#*.png，区域照常生效）
-  then:
-    - log: "命中了"</pre>
+    - log: "等待 ^1 超时"
+# 每轮：主模板（新截图）→ 命中点击 + verify + then；未命中 → block 依序 →
+# 全未命中等 interval 重开一轮。threshold 用 config 配置；
+# 搜索区域由模板名 #后缀 决定：hp#l.png（左半）/ xx#0_0_500_500.png（左上 1/4），
+# 无后缀回退全屏（运行日志有提醒）；可写短名 login.png（引擎解析唯一 login#*.png）</pre>
           </div>
           <div class="help-block">
-            <div class="hb-title">🔀 条件分支 cond（按序匹配，命中即执行对应步骤并结束）</div>
-            <pre class="hb-code mono">- cond:                 # 一次截图按序判定条件：命中一个 → 执行其步骤 → 结束本步
-  - test.png:           # 模板条件（单键映射，**模板名后的冒号必须写**）
-    - log: "命中模板"   # 命中执行的步骤写在模板名下（同列或缩进 +2 均可）
-  - ff8800:             # 颜色条件：键 = 6 位十六进制色值（容差固定 30）
-    - log: "命中颜色"   # 命中步骤写在色值键正下方（pos 之后不能跟同列 - 行）
-    pos: [0.5123, 0.8456]   # pos 兄弟键 = 采样相对坐标（有 pos 即颜色条件）
-  else:                  # 全部未命中执行（cond 的兄弟键，与条件项同列、不带 -）
+            <div class="hb-title">🎨 找色 color（一次截图按序判定，命中即执行其步骤并结束）</div>
+            <pre class="hb-code mono">- color: [0.5123, 0.8456]   # 采样相对坐标
+  ff8800:                   # 色值键 = 6 位十六进制（容差固定 30），挂命中步骤（可留空）
+    - log: "命中颜色"
+  ff8811:
+  else:                     # 全部未命中执行
     - log: "都没命中"
-# 单遍判定不轮询不超时（要"等出现再分支"用 until，要重试套 loop/goto）
-# threshold / region 作用于模板条件；$1 等实参占位同样可用
-# 二次裁切区 Alt/alt 模式点击任意处 → 自动生成颜色条件记录（所见即所得取色）</pre>
+# 不轮询无超时（重试套 loop）。^1 = "[x, y]" 坐标串、^2.. = 色值键（书写顺序）
+# 二次裁切区 Alt/alt 模式点击任意处 → 自动生成 color 记录（所见即所得取色）</pre>
           </div>
           <div class="help-block">
-            <div class="hb-title">🔁 逻辑</div>
-            <pre class="hb-code mono">- loop: {times: 3, steps: [...]}
-- goto: label_name
-- label: label_name
-- call: 子脚本.yml
-- call: 子脚本.yml a.png b.png   # call 传参：空格分隔实参，子脚本内 $1/$2… 引用
-                                 # （@ 开头裸标量是 YAML 保留字符非法，故用 $；
-                                 #  替换作用于子脚本全部字符串，嵌套 call 转发 $N 同样生效）
-# test2.yml 内：
-#   - until: $1        # ← 即 a.png
-#   - log: "第二个参数 $2"
-- exit                  # 结束脚本运行（无参数打印"结束运行脚本"）
-- exit: 体力不足        # 带原因：打印"因 体力不足 结束运行脚本"
-- log: "输出到运行日志"</pre>
+            <div class="hb-title">🔁 loop / call / func 自定义函数</div>
+            <pre class="hb-code mono">- loop:                # times 省略或 0 = 无限循环
+  times: 3
+  steps:
+    - log: "每一轮"
+- call: 子脚本.yml a.png [0.5, 0.6]   # 空格分隔实参（[x, y] 括号内不切分），
+                                       # 子脚本内 $1/$2… 引用（替换全部字符串，
+                                       # 嵌套 call 转发 $N 同样生效）
+
+func:                   # 自定义函数定义（函数体只能在本脚本内调用）
+  - wait_tpl:           # 函数名不能是保留字；体内 $N 指函数实参
+    - find: $1
+      timeout: 6s
+    - return: true      # return 仅函数内合法：立即返回；函数体执行完未 return = false
+steps:
+  - wait_tpl: sign_btn.png   # 调用：空格分隔实参 + then（返回 true）/ else（false）
+    then:
+      - log: "出现了"
+    else:
+      - log: "没等到"
+# 嵌套函数调用上限 32 层；throw 在函数内同样结束整个任务</pre>
           </div>
         </div>
       </div>
@@ -162,28 +159,30 @@ const showHelp = ref(false)
 // 保存目标应用分区（= 应用包名）：编辑已有脚本=其所在分区，新建=当前设备 pkg
 const edPkg = ref('')
 
-const DEFAULT_CODE = `action_wait: 500
-log_level: info
+const DEFAULT_CODE = `config:
+  interval: 500ms
+
+func:
+  - wait_tpl:
+    - find: $1
+      timeout: 6s
+    - return: true
 
 steps:
-  - wait: [300, 800]
-  - until: sign_btn.png
-    timeout: 6s
-    threshold: 0.85
+  - wait: [300ms, 800ms]
+  - wait_tpl: sign_btn.png
     then:
       - log: "点击签到按钮"
     else:
-      - log: "未找到签到按钮，重试"
-      - goto: retry
-  - label: retry
+      - log: "未找到签到按钮，滑动后重试"
   - loop:
-      times: 3
-      steps:
-        - swipe:
-            fm: [0.500, 0.800]
-            to: [0.500, 0.200]
-            time: 800
-        - wait: [300, 900]
+    times: 3
+    steps:
+      - swipe:
+          fm: [0.500, 0.800]
+          to: [0.500, 0.200]
+          time: 800ms
+      - wait: [300ms, 900ms]
   - key: HOME
   - log: "签到完成"
 `

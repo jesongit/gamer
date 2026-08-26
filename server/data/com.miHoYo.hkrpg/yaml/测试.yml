@@ -1,11 +1,7 @@
-action_wait: 500
-log_level: info
-
 steps:
-  - cond:
-    - c74f36:
-      - log 1
-      pos: [0.7625, 0.9130]
+  - color: [0.7625, 0.9130]
+    c74f36:
+      - log: "1"
     else:
-      - log 2
+      - log: "2"
   - wait: 1h
