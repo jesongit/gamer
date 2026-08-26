@@ -33,17 +33,22 @@
 //!          内 $N 引用实参）；throw（原 exit 改名）立即结束整个任务（跨 call）；
 //!          str_app / cls_app 只支持裸写（包名 = 设备分区 pkg）。
 //!   return: 仅自定义函数内合法，`- return: true|false` 立即返回；
-//!          函数体执行完未 return 视为返回 false。
+//!          函数体执行完未 return 视为返回 true（2026-08-27 改，旧语义为 false）。
 //!
 //! func 自定义函数：
 //!   func:
 //!     - func1:            # 函数名不能是保留字
-//!       - find: $1
-//!       - return: false
+//!       cond: gate.png    # 可选：执行条件模板（单模板字符串 / 逗号分隔 / 列表）
+//!       steps:            # 函数体（与 cond 同为函数定义兄弟键）
+//!         - find: $1
 //!   调用：`- func1: 实参1 实参2`（空格分隔 + 括号感知；无参写 `- func1:`）+
 //!         then（返回 true 执行）/ else（返回 false 执行）。函数体内 $N 指函数
 //!         实参（func 段不参与脚本级 $N 替换）；函数体可用全部动作含 call/throw；
 //!         嵌套调用上限 32 层。
+//!   cond 语义：每个条件模板各取一张新截图匹配一次（不点击），全部命中才执行
+//!         函数体；任一未命中 → 函数返回 false。函数体走完未 return → 返回 true。
+//!   跨文件调用：`- 子脚本:函数名: 实参…`（子脚本名与 call 同规则解析：优先
+//!         同分区、缺扩展名自动补全），函数体与 cond 取自该脚本 func 段。
 //!
 //! 时间参数（interval / timeout / wait / swipe time）统一强制带单位：
 //!   1ms / 1s / 1m / 30min / 1h / 1d（m ≡ min，可小数如 1.5s），裸数字报错。
@@ -113,6 +118,16 @@ pub struct Runner {
     pub scripts: Arc<ScriptStore>,
 }
 
+/// 自定义函数定义：可选 cond 模板条件 + 函数体
+#[derive(Clone, Debug)]
+pub struct FuncDef {
+    /// 函数执行条件模板（cond: 单模板字符串 / 逗号分隔 / 列表）；每个模板各取
+    /// 一张新截图匹配一次（不点击），全部命中才执行函数体；任一未命中 → 返回 false
+    pub cond: Vec<String>,
+    /// 函数体步骤（未经 $N 替换，调用时按实参替换）
+    pub body: Vec<Value>,
+}
+
 /// 脚本运行上下文
 pub struct Ctx {
     pub device_id: String,
@@ -127,8 +142,8 @@ pub struct Ctx {
     pub threshold: f32,
     /// 日志等级（0=debug 1=info 2=warn 3=error），低于该等级的日志丢弃
     pub log_level_rank: u8,
-    /// 本脚本文件内定义的自定义函数（函数体未经 $N 替换，调用时按实参替换）
-    pub funcs: HashMap<String, Vec<Value>>,
+    /// 本脚本文件内定义的自定义函数（函数体/条件未经 $N 替换，调用时按实参替换）
+    pub funcs: HashMap<String, FuncDef>,
     /// 当前函数嵌套深度（防无限递归）
     pub func_depth: usize,
     /// return 动作的返回值（Some = 正在向上冒泡结束函数）
@@ -206,6 +221,9 @@ impl Runner {
 
     /// 运行脚本内容（YAML 文本）
     /// `start_step`：从第几个 step 开始运行（0=从头；超出范围时从头）
+    /// `run_func`：Some(函数名) = 不跑顶层 steps，直接运行该函数体（同样受
+    ///             start_step 控制；无实参，体内 `$N` 保持字面量不替换）——
+    ///             Console「从某行运行」点击函数体内的行时使用
     /// `exit`：throw 动作共享标志（call 子脚本传父脚本的，子脚本里 throw 同样
     ///         结束整个任务；None=新建）
     /// `args`：call 传入的实参（主脚本运行传空）——子脚本内 `$1`/`$2`… 引用
@@ -218,6 +236,7 @@ impl Runner {
         stop: Arc<AtomicBool>,
         log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
         start_step: usize,
+        run_func: Option<&str>,
         exit: Option<Arc<AtomicBool>>,
         args: Vec<String>,
     ) -> anyhow::Result<Vec<(String, String)>> {
@@ -241,11 +260,8 @@ impl Runner {
         let funcs_raw = Self::take_funcs_and_substitute(&mut doc, &args)?;
         let (interval_ms, threshold, log_level_rank) = self.parse_script_config(&doc)?;
         let funcs = Self::parse_funcs(funcs_raw)?;
-        let steps = doc
-            .get("steps")
-            .and_then(|v| v.as_sequence())
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("missing steps"))?;
+        // steps 可缺省：纯函数库脚本（只有 func）供其他脚本通过 脚本名:函数名 调用
+        let steps_raw = doc.get("steps").and_then(|v| v.as_sequence()).cloned();
 
         let mut ctx = Ctx {
             device_id: device_id.to_string(),
@@ -262,6 +278,31 @@ impl Runner {
             ref_stack: Vec::new(),
             region_warned: HashSet::new(),
             log_cb,
+        };
+
+        // 直接运行函数体模式：steps 换成函数体（无实参，$N 保持字面量不替换；
+        // 函数 cond 条件不检查——调试用，只跑函数体本身）
+        let steps = match run_func {
+            Some(name) => {
+                let body = ctx
+                    .funcs
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("函数 {} 未定义（func: 段里没有该函数名）", name))?
+                    .body;
+                ctx.log("info", format!("直接运行函数 {}（无实参，体内 $N 不替换）", name));
+                body
+            }
+            None => match steps_raw {
+                Some(s) => s,
+                None => {
+                    if ctx.funcs.is_empty() {
+                        anyhow::bail!("脚本需要 steps 或 func 根节点（纯函数库脚本也至少要定义一个函数，供其他脚本通过 脚本名:函数名 调用）");
+                    }
+                    ctx.log("info", "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作".to_string());
+                    Vec::new()
+                }
+            },
         };
 
         let mut i = if start_step > 0 && start_step < steps.len() { start_step } else { 0 };
@@ -365,27 +406,30 @@ impl Runner {
     }
 
     /// func 段解析：mapping（函数名: 步骤列表）或 mapping 列表（每项单键）均可；
-    /// 函数名不得是保留字；函数体 = 步骤列表（null 视为空，执行完返回 false）
-    fn parse_funcs(v: Option<Value>) -> anyhow::Result<HashMap<String, Vec<Value>>> {
+    /// 函数名不得是保留字；函数体 = 步骤列表（null 视为空，执行完返回 true）。
+    /// 函数可带 cond 条件与 steps 键（与函数名同级的兄弟键，YAML 把映射值同级
+    /// 缩进的行解析成兄弟键——与 loop 的 times/steps 同构），也兼容 cond 写在
+    /// 函数体之后的兄弟键形式：
+    ///   - fun1:
+    ///     cond: test.png      # 可选：单模板字符串 / 逗号分隔 / 列表
+    ///     steps:
+    ///       - find: $1
+    /// 映射形式（func:\n  fun1:\n    cond: …\n    steps: …）cond/steps 嵌套在
+    /// 函数名值里，同样支持
+    fn parse_funcs(v: Option<Value>) -> anyhow::Result<HashMap<String, FuncDef>> {
         let mut map = HashMap::new();
         let Some(v) = v else { return Ok(map) };
-        let items: Vec<(Value, Value)> = match &v {
+        let items: Vec<Value> = match &v {
             Value::Null => return Ok(map),
-            Value::Mapping(m) => m.iter().map(|(k, val)| (k.clone(), val.clone())).collect(),
-            Value::Sequence(seq) => {
-                let mut out = Vec::new();
-                for (i, item) in seq.iter().enumerate() {
-                    let m = item
-                        .as_mapping()
-                        .ok_or_else(|| anyhow::anyhow!("func 第 {} 项需要单键映射（函数名: 步骤列表）", i + 1))?;
-                    if m.len() != 1 {
-                        anyhow::bail!("func 第 {} 项需要恰好一个 函数名: 键（收到 {} 个）", i + 1, m.len());
-                    }
-                    let (k, val) = m.iter().next().unwrap();
-                    out.push((k.clone(), val.clone()));
-                }
-                out
-            }
+            Value::Mapping(m) => m
+                .iter()
+                .map(|(k, val)| {
+                    let mut item = serde_yaml::Mapping::new();
+                    item.insert(k.clone(), val.clone());
+                    Value::Mapping(item)
+                })
+                .collect(),
+            Value::Sequence(seq) => seq.clone(),
             _ => anyhow::bail!("func 需要 函数名: 步骤列表 的映射或映射列表"),
         };
         // 保留字：动作键 + 结构键 + 已删除的旧动作名（防止函数调用撞上迁移报错）
@@ -394,22 +438,92 @@ impl Runner {
             "wait", "return", "then", "else", "steps", "times", "block", "verify", "timeout", "config", "func",
             "until", "cond", "exit",
         ];
-        for (k, body) in items {
-            let name = k
+        for (i, item) in items.iter().enumerate() {
+            let m = item
+                .as_mapping()
+                .ok_or_else(|| anyhow::anyhow!("func 第 {} 项需要映射（函数名: 步骤列表）", i + 1))?;
+            // 分离 cond / steps 兄弟键与函数名键
+            let mut name_k: Option<(&Value, &Value)> = None;
+            let mut cond_v: Option<&Value> = None;
+            let mut steps_v: Option<&Value> = None;
+            for (k, val) in m {
+                match k.as_str() {
+                    Some("cond") => cond_v = Some(val),
+                    Some("steps") => steps_v = Some(val),
+                    _ => {
+                        if name_k.is_some() {
+                            anyhow::bail!("func 第 {} 项需要恰好一个 函数名: 键（收到 {} 个）", i + 1, m.len());
+                        }
+                        name_k = Some((k, val));
+                    }
+                }
+            }
+            let (name_v, body_v) = match name_k {
+                Some(kv) => kv,
+                None => {
+                    if m.len() == 1 && m.contains_key(&Value::String("cond".into())) {
+                        anyhow::bail!(
+                            "函数名 cond 是保留字（cond 是函数条件参数键）——若这是函数体的步骤，说明函数体缩进不对：函数体要比 \"- 函数名:\" 行多缩进（如 4 空格）"
+                        );
+                    }
+                    anyhow::bail!("func 第 {} 项缺少函数名键（收到 {} 个键）", i + 1, m.len());
+                }
+            };
+            let name = name_v
                 .as_str()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("func 的函数名需要字符串"))?
                 .to_string();
             if RESERVED.contains(&name.as_str()) {
-                anyhow::bail!("函数名 {} 是保留字（动作键 / 结构键）", name);
+                anyhow::bail!(
+                    "函数名 {} 是保留字（动作键 / 结构键）——若这是函数体的步骤，说明函数体缩进不对：函数体要比 \"- 函数名:\" 行多缩进（如 4 空格）",
+                    name
+                );
             }
-            let steps = match body {
-                Value::Null => Vec::new(),
-                Value::Sequence(seq) => seq.clone(),
-                _ => anyhow::bail!("函数 {} 的函数体需要步骤列表", name),
+            // 函数体判定：函数名键值为序列（旧写法）/ 空（找 steps 兄弟键）/
+            // 映射（映射形式嵌套 cond/steps）
+            let (body, cond_v) = match body_v {
+                Value::Sequence(seq) => {
+                    if steps_v.is_some() {
+                        anyhow::bail!("函数 {} 的函数体既直接挂在函数名键，又写了 steps 键（只用一种写法）", name);
+                    }
+                    (seq.clone(), cond_v)
+                }
+                Value::Null => {
+                    let b = match steps_v {
+                        None | Some(Value::Null) => Vec::new(),
+                        Some(Value::Sequence(seq)) => seq.clone(),
+                        Some(_) => anyhow::bail!("函数 {} 的 steps 需要步骤列表", name),
+                    };
+                    (b, cond_v)
+                }
+                Value::Mapping(mm) => {
+                    let mut nested_cond = None;
+                    let mut nested_steps = None;
+                    for (k, val) in mm {
+                        match k.as_str() {
+                            Some("cond") => nested_cond = Some(val),
+                            Some("steps") => nested_steps = Some(val),
+                            Some(other) => anyhow::bail!("函数 {} 的函数体映射只支持 cond / steps 键（收到 {}）", name, other),
+                            None => anyhow::bail!("函数 {} 的函数体映射键需要字符串", name),
+                        }
+                    }
+                    let b = match nested_steps {
+                        None | Some(Value::Null) => Vec::new(),
+                        Some(Value::Sequence(seq)) => seq.clone(),
+                        Some(_) => anyhow::bail!("函数 {} 的 steps 需要步骤列表", name),
+                    };
+                    (b, nested_cond.or(cond_v))
+                }
+                _ => anyhow::bail!("函数 {} 的函数体需要步骤列表（或写 cond: + steps:）", name),
             };
-            if map.insert(name.clone(), steps).is_some() {
+            let cond = match cond_v {
+                None => Vec::new(),
+                Some(c) => Self::parse_tpl_names(c, "cond")
+                    .map_err(|e| anyhow::anyhow!("函数 {} 的 cond: {}", name, e))?,
+            };
+            if map.insert(name.clone(), FuncDef { cond, body }).is_some() {
                 anyhow::bail!("函数 {} 重复定义", name);
             }
         }
@@ -456,6 +570,9 @@ impl Runner {
             anyhow::bail!("check 已改名 block（find 的障碍模板）");
         }
         if step.get("cond").is_some() {
+            if ctx.func_depth > 0 {
+                anyhow::bail!("cond 是函数级条件（写在 \"- 函数名:\" 行下、与 steps 键同级），函数体步骤不支持 cond；旧颜色判断请用 color");
+            }
             anyhow::bail!("cond 已改名 color：颜色判断写 `- color: [x, y]` + 色值键步骤；模板分支用 find + then/else");
         }
         if step.get("exit").is_some() {
@@ -481,6 +598,7 @@ impl Runner {
             "wait", "return",
         ];
         let hits: Vec<&str> = ACTION_KEYS.iter().copied().filter(|k| step.get(*k).is_some()).collect();
+        let mut cross_qual: Option<String> = None;
         let action: String = if let Some(&first) = hits.first() {
             if hits.len() > 1 {
                 if hits.contains(&"wait") {
@@ -493,17 +611,32 @@ impl Runner {
             }
             first.to_string()
         } else {
-            // 无动作键：恰好是已定义函数名 → 函数调用；否则报未知动作
+            // 无动作键：已定义函数名 → 函数调用；`脚本名:函数名` → 跨文件函数调用；
+            // 否则报未知动作
             let names: Vec<String> = m.keys().filter_map(|k| k.as_str().map(|s| s.to_string())).collect();
             if names.is_empty() {
                 anyhow::bail!("步骤键需要字符串（旧数组键写法已删除）");
             }
             match names.iter().find(|n| ctx.funcs.contains_key(n.as_str())) {
                 Some(name) => name.clone(),
-                None => anyhow::bail!(
-                    "未知动作 {}（可用：find / color / loop / tap / swipe / key / text / log / call / throw / str_app / cls_app / wait / return / 自定义函数；一个步骤只能有一个动作键）",
-                    names.join("、")
-                ),
+                None => match names.iter().find(|n| n.contains(':')) {
+                    // then/else 键不含冒号，不会误配；本地函数名含冒号的情况也走此分支
+                    Some(qual) => {
+                        cross_qual = Some(qual.clone());
+                        qual.clone()
+                    }
+                    None => {
+                        // 带值动作漏写冒号（`- throw 未知界面` 被解析成标量步骤
+                        // "throw 未知界面"）→ 定向提示应写成 `- throw: 未知界面`
+                        if let Some(hint) = Self::missing_colon_hint(&names) {
+                            anyhow::bail!(hint);
+                        }
+                        anyhow::bail!(
+                            "未知动作 {}（可用：find / color / loop / tap / swipe / key / text / log / call / throw / str_app / cls_app / wait / return / 自定义函数 / 脚本名:函数名 跨文件调用；一个步骤只能有一个动作键）",
+                            names.join("、")
+                        )
+                    }
+                },
             }
         };
 
@@ -621,7 +754,7 @@ impl Runner {
                             ctx.log("debug", format!("调用子脚本 {}（实参 {}）", script_name, args.join(" ")));
                         }
                         let sub_log = self
-                            .run(&ctx.device_id, &s.id, &s.content, ctx.stop.clone(), ctx.log_cb.clone(), 0, Some(ctx.exit.clone()), args)
+                            .run(&ctx.device_id, &s.id, &s.content, ctx.stop.clone(), ctx.log_cb.clone(), 0, None, Some(ctx.exit.clone()), args)
                             .await?;
                         ctx.log.extend(sub_log);
                     }
@@ -678,7 +811,13 @@ impl Runner {
                 ctx.log("debug", format!("函数 return {}", b));
                 ctx.return_value = Some(b);
             }
-            name => self.exec_func(ctx, name, step).await?,
+            name => {
+                if let Some(qual) = cross_qual {
+                    self.exec_cross_func(ctx, &qual, step).await?;
+                } else {
+                    self.exec_func(ctx, name, step).await?;
+                }
+            }
         }
         Ok(())
     }
@@ -901,63 +1040,181 @@ impl Runner {
     }
 
     /// 自定义函数调用：`- 函数名: 实参1 实参2`（空格分隔 + 括号感知）+
-    /// then（返回 true）/ else（返回 false）。函数体副本先做 $N → 实参替换，
-    /// 执行完未 return 视为 false；嵌套上限 32 层。
+    /// then（返回 true）/ else（返回 false）。
+    /// cond 条件（可选）：每个条件模板各取一张新截图匹配一次（不点击），全部
+    /// 命中才执行函数体；任一未命中 → 函数返回 false（不执行函数体）。
+    /// 函数体副本先做 $N → 实参替换；执行完未 return 视为返回 true；嵌套上限 32 层。
     #[async_recursion]
     async fn exec_func(&self, ctx: &mut Ctx, name: &str, step: &Value) -> anyhow::Result<()> {
         Self::ensure_only_keys(step, name, &[name, "then", "else"])?;
+        let def = ctx
+            .funcs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("函数 {} 未定义（func: 段里没有该函数名）", name))?;
+        let args = Self::func_args(step, name)?;
+        let ret = self.run_func_core(ctx, def, &args, name).await?;
+        self.run_func_branch(ctx, step, ret).await
+    }
+
+    /// 跨文件自定义函数调用：`- 脚本名:函数名: 实参…`（脚本名与 call 同规则
+    /// 解析：优先同分区、缺扩展名自动补全；函数体/cond 取自该脚本 func 段，
+    /// 体内 `$N` 由调用点实参替换——函数体执行期间该脚本函数可见，调用者函数
+    /// 兜底；return 冒泡、嵌套上限与本地函数一致
+    #[async_recursion]
+    async fn exec_cross_func(&self, ctx: &mut Ctx, qual: &str, step: &Value) -> anyhow::Result<()> {
+        Self::ensure_only_keys(step, qual, &[qual, "then", "else"])?;
+        let (script_part, func_part) = qual.split_once(':').expect("含冒号才进此分支");
+        let script_name = script_part.trim();
+        let func_name = func_part.trim();
+        if script_name.is_empty() || func_name.is_empty() {
+            anyhow::bail!("跨文件函数调用需要 \"脚本名:函数名\"（如 - test1:fun1: 实参…）");
+        }
+        // 子脚本按名解析：优先调用者同分区，其次跨分区（缺扩展名自动补全）
+        let caller_pkg = ctx.script_id.split('/').next().unwrap_or_default();
+        let s = self
+            .scripts
+            .resolve_call(caller_pkg, script_name)?
+            .ok_or_else(|| anyhow::anyhow!("子脚本不存在: {}", script_name))?;
+        // 解析被引用脚本的 func 段（函数体 $N 不参与子脚本级替换，由调用点实参替换）
+        let doc: Value = serde_yaml::from_str(&s.content)
+            .map_err(|e| anyhow::anyhow!("子脚本 {} 解析失败: {}", script_name, e))?;
+        let sub_funcs = Self::parse_funcs(doc.get("func").filter(|v| !v.is_null()).cloned())?;
+        let def = sub_funcs
+            .get(func_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("子脚本 {} 未定义函数 {}", s.name, func_name))?;
+        let args = Self::func_args(step, qual)?;
+        // 函数体执行期间被引用脚本的函数可见（体内裸函数名按该脚本解析），
+        // 调用者函数兜底；执行结束恢复（避免子脚本函数泄漏到后续步骤）
+        let mut merged = sub_funcs;
+        for (k, v) in ctx.funcs.iter() {
+            merged.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        let saved = std::mem::replace(&mut ctx.funcs, merged);
+        // 模板按被引用脚本所在分区解析（与 call 一致；通常与调用者同分区）
+        let saved_id = std::mem::replace(&mut ctx.script_id, s.id.clone());
+        let ret = self
+            .run_func_core(ctx, def, &args, &format!("{}:{}", s.name, func_name))
+            .await;
+        ctx.script_id = saved_id;
+        ctx.funcs = saved;
+        let ret = ret?;
+        self.run_func_branch(ctx, step, ret).await
+    }
+
+    /// 执行函数体（本地/跨文件共用核心）：cond 条件检查 → 函数体 $N → 实参
+    /// 替换 → 顺序执行 → return 冒泡。函数体执行完未 return 视为返回 true。
+    /// 返回函数返回值；调用点的 then/else 由调用方按返回值选择
+    async fn run_func_core(&self, ctx: &mut Ctx, def: FuncDef, args: &[String], label: &str) -> anyhow::Result<bool> {
         if ctx.func_depth >= MAX_FUNC_DEPTH {
             anyhow::bail!("自定义函数嵌套过深（上限 {}）：疑似无限递归", MAX_FUNC_DEPTH);
         }
-        let args = match step.get(name) {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::String(s)) => {
-                let t = s.trim();
-                if t.is_empty() {
-                    Vec::new()
-                } else {
-                    Self::split_args(t)
-                }
-            }
-            Some(_) => anyhow::bail!("函数 {} 的实参需要空格分隔字符串（坐标写 [x, y]，整体不用引号）", name),
-        };
-        let body_val = Value::Sequence(
-            ctx.funcs
-                .get(name)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("函数 {} 未定义（func: 段里没有该函数名）", name))?,
-        );
-        let mut body_val = body_val;
-        Self::substitute_args(&mut body_val, &args)?;
-        let body = body_val.as_sequence().cloned().unwrap_or_default();
         if args.is_empty() {
-            ctx.log("debug", format!("调用函数 {}", name));
+            ctx.log("debug", format!("调用函数 {}", label));
         } else {
-            ctx.log("debug", format!("调用函数 {}（实参 {}）", name, args.join(" ")));
+            ctx.log("debug", format!("调用函数 {}（实参 {}）", label, args.join(" ")));
         }
+        let mut body_val = Value::Sequence(def.body);
+        Self::substitute_args(&mut body_val, args)?;
+        let body = body_val.as_sequence().cloned().unwrap_or_default();
         ctx.func_depth += 1;
         ctx.return_value = None;
-        for sub in &body {
-            if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) {
-                break;
-            }
-            self.exec_step(ctx, sub).await?;
-            if ctx.return_value.is_some() {
-                break;
+        if !self.check_func_cond(ctx, &def.cond).await? {
+            // 条件未命中：函数返回 false（不执行函数体）
+            ctx.return_value = Some(false);
+        } else {
+            for sub in &body {
+                if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) {
+                    break;
+                }
+                self.exec_step(ctx, sub).await?;
+                if ctx.return_value.is_some() {
+                    break;
+                }
             }
         }
         ctx.func_depth -= 1;
-        let ret = ctx.return_value.take().unwrap_or(false);
+        Ok(ctx.return_value.take().unwrap_or(true))
+    }
+
+    /// 函数 cond 条件检查：每个条件模板各取一张新截图匹配一次（不点击）；
+    /// 全部命中 → 执行函数体；任一未命中 → 函数返回 false
+    async fn check_func_cond(&self, ctx: &mut Ctx, cond: &[String]) -> anyhow::Result<bool> {
+        if cond.is_empty() {
+            return Ok(true);
+        }
+        for tpl in cond {
+            match self.match_one(ctx, tpl).await? {
+                Some(mm) => {
+                    self.emit(&ctx.device_id, ScriptEvent::Hit {
+                        tpl: tpl.clone(),
+                        x: mm.x, y: mm.y, w: mm.width, h: mm.height, score: mm.score,
+                    })
+                    .await;
+                    ctx.log("success", format!("函数条件模板 {} 已匹配 @ ({}, {})", tpl, mm.x, mm.y));
+                }
+                None => {
+                    ctx.log("info", format!("函数条件模板 {} 未匹配，函数返回 false", tpl));
+                    return Ok(false);
+                }
+            }
+        }
+        ctx.log("debug", format!("函数条件全部匹配（{}）", cond.join("、")));
+        Ok(true)
+    }
+
+    /// 按函数返回值执行调用点的 then（返回 true）/ else（返回 false）分支
+    async fn run_func_branch(&self, ctx: &mut Ctx, step: &Value, ret: bool) -> anyhow::Result<()> {
         let branch = if ret { "then" } else { "else" };
         if let Some(steps) = step.get(branch).and_then(|v| v.as_sequence()) {
             for sub in steps {
-                if ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+                if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
                     break;
                 }
                 self.exec_step(ctx, sub).await?;
             }
         }
         Ok(())
+    }
+
+    /// 函数调用实参解析：值 = null / 空串 → 无参；字符串 → 空格分隔 + 括号感知切分
+    fn func_args(step: &Value, key: &str) -> anyhow::Result<Vec<String>> {
+        match step.get(key) {
+            None | Some(Value::Null) => Ok(Vec::new()),
+            Some(Value::String(s)) => {
+                let t = s.trim();
+                if t.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Ok(Self::split_args(t))
+                }
+            }
+            Some(_) => anyhow::bail!("函数 {} 的实参需要空格分隔字符串（坐标写 [x, y]，整体不用引号）", key),
+        }
+    }
+
+    /// 带值动作漏写冒号的定向提示：`- throw 未知界面` 会被 YAML 解析成标量步骤
+    /// （键 = "throw 未知界面"），用户本意是 `- throw: 未知界面`。返回提示（无匹配
+    /// 返回 None）。动作名后必须跟空白才算带值（函数名 "finder" 不会误伤 find）
+    fn missing_colon_hint(names: &[String]) -> Option<String> {
+        const ACTIONS: [&str; 14] = [
+            "log", "key", "text", "tap", "swipe", "find", "color", "loop", "call", "throw", "str_app", "cls_app",
+            "wait", "return",
+        ];
+        for n in names {
+            for act in ACTIONS {
+                if let Some(rest) = n.strip_prefix(act) {
+                    if rest.starts_with(char::is_whitespace) {
+                        return Some(format!(
+                            "\"{}\" 是标量步骤（YAML 把 \"- {}\" 解析成字符串）——带值/带原因的动作需写冒号：应为 \"- {}: {}\"（裸写仅限无参动作，如 - str_app / - throw）",
+                            n, n, act, rest.trim_start()
+                        ));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// 在 ^N 绑定下执行分支步骤（find 的 then/else、color 的命中步骤/else）：
@@ -1887,6 +2144,11 @@ mod tests {
         assert!(run(&runner, &mut ctx, "- tap: [0.1, 0.1]\n  log: x").await.unwrap_err().to_string().contains("一个步骤只能有一个动作键"));
         // 未知动作
         assert!(run(&runner, &mut ctx, "- var: x").await.unwrap_err().to_string().contains("未知动作"));
+        // 带值动作漏写冒号（标量步骤）→ 定向提示补冒号
+        let e = run(&runner, &mut ctx, "- throw 未知界面").await.unwrap_err().to_string();
+        assert!(e.contains("需写冒号") && e.contains("- throw: 未知界面"), "{}", e);
+        let e = run(&runner, &mut ctx, "- log abc").await.unwrap_err().to_string();
+        assert!(e.contains("- log: abc"), "{}", e);
         // find 校验（截图前报错）
         assert!(run(&runner, &mut ctx, "- find: a.png, b.png").await.unwrap_err().to_string().contains("单个主模板"));
         assert!(run(&runner, &mut ctx, "- find: a.png\n  block: a.png").await.unwrap_err().to_string().contains("与 find 主模板重复"));
@@ -1939,46 +2201,48 @@ mod tests {
         assert!(run(&runner, &mut ctx, "- return").await.unwrap_err().to_string().contains("return 需要 true / false"));
     }
 
-    /// 自定义函数：$N 实参替换、return true/false 分支、fall-through=false、
-    /// 函数调用步骤的 then/else 生效（log/loop 均无需设备）
+    /// 自定义函数：$N 实参替换、return true/false 分支、fall-through=true
+    /// （2026-08-27 改，旧语义为 false）、函数调用步骤的 then/else 生效
+    /// （log/loop 均无需设备）
     #[tokio::test]
     async fn func_call_and_return() {
         let (runner, mut ctx) = test_runner_ctx();
-        // f1：log 实参 + return true；f2：无 return（fall-through false）
-        ctx.funcs.insert(
-            "f1".into(),
-            parse_steps("- log: got $1\n- return: true"),
-        );
-        ctx.funcs.insert("f2".into(), parse_steps("- log: always"));
+        let f = |body: &str| FuncDef { cond: Vec::new(), body: parse_steps(body) };
+        // f1：log 实参 + return true；f2：无 return（fall-through 默认 true）
+        ctx.funcs.insert("f1".into(), f("- log: got $1\n- return: true"));
+        ctx.funcs.insert("f2".into(), f("- log: always"));
         // f1 返回 true → then 分支
         ctx.log.clear();
         run_step(&runner, &mut ctx, "- f1: hello\n  then:\n    - log: T\n  else:\n    - log: F").await.unwrap();
         assert!(ctx.log.iter().any(|(_, m)| m == "got hello"));
         assert!(ctx.log.iter().any(|(_, m)| m == "T"));
         assert!(!ctx.log.iter().any(|(_, m)| m == "F"));
-        // f2 fall-through → false → else 分支
+        // f2 无 return → 默认 true → then 分支（旧语义为 false 走 else）
         ctx.log.clear();
         run_step(&runner, &mut ctx, "- f2:\n  then:\n    - log: T\n  else:\n    - log: F").await.unwrap();
         assert!(ctx.log.iter().any(|(_, m)| m == "always"));
+        assert!(ctx.log.iter().any(|(_, m)| m == "T"));
+        assert!(!ctx.log.iter().any(|(_, m)| m == "F"));
+        // 显式 return: false → else 分支
+        ctx.funcs.insert("f2b".into(), f("- log: always\n- return: false"));
+        ctx.log.clear();
+        run_step(&runner, &mut ctx, "- f2b:\n  then:\n    - log: T\n  else:\n    - log: F").await.unwrap();
         assert!(ctx.log.iter().any(|(_, m)| m == "F"));
         assert!(!ctx.log.iter().any(|(_, m)| m == "T"));
         // 函数实参越界（体内 $2 但只传 1 个）
-        ctx.funcs.insert("f3".into(), parse_steps("- log: $2"));
+        ctx.funcs.insert("f3".into(), f("- log: $2"));
         assert!(run_step(&runner, &mut ctx, "- f3: only-one").await.unwrap_err().to_string().contains("超出实参数量"));
         // 函数调用步骤带非法参数
         assert!(run_step(&runner, &mut ctx, "- f1: x\n  foo: 1").await.unwrap_err().to_string().contains("不支持参数"));
         // return 后函数体剩余步骤跳过（return 冒泡）
-        ctx.funcs.insert(
-            "f4".into(),
-            parse_steps("- return: false\n- log: skipped"),
-        );
+        ctx.funcs.insert("f4".into(), f("- return: false\n- log: skipped"));
         ctx.log.clear();
         run_step(&runner, &mut ctx, "- f4:").await.unwrap();
         assert!(!ctx.log.iter().any(|(_, m)| m == "skipped"));
         // 嵌套函数：f5 调 f1（内层 return 不影响外层继续执行）
         ctx.funcs.insert(
             "f5".into(),
-            parse_steps("- f1: inner\n  else:\n    - log: inner-else\n- log: after-inner\n- return: true"),
+            f("- f1: inner\n  else:\n    - log: inner-else\n- log: after-inner\n- return: true"),
         );
         ctx.log.clear();
         run_step(&runner, &mut ctx, "- f5:\n  then:\n    - log: outer-T").await.unwrap();
@@ -1986,6 +2250,98 @@ mod tests {
         assert!(!ctx.log.iter().any(|(_, m)| m == "inner-else"));
         assert!(ctx.log.iter().any(|(_, m)| m == "after-inner"));
         assert!(ctx.log.iter().any(|(_, m)| m == "outer-T"));
+    }
+
+    /// func 段解析（parse_funcs）：旧写法（函数体直接挂函数名键）与 cond/steps
+    /// 写法（兄弟键 / 映射嵌套 / cond 在函数体之后）都解析出 cond + 函数体；
+    /// cond 单模板字符串 / 逗号分隔 / 列表；错误场景（函数名 cond 保留字、
+    /// 函数体非法）报错。注：cond/steps 缩进在 **func: 段内**（项 dash 在 2 列）
+    /// 是函数名键的同列兄弟键；单元测试按真实脚本形态（func: 包裹）解析
+    #[test]
+    fn func_def_parse() {
+        let p = |yaml: &str| {
+            let doc = parse(yaml);
+            Runner::parse_funcs(Some(doc.get("func").cloned().unwrap())).unwrap()
+        };
+        // 旧写法：无 cond
+        let m = p("func:\n  - f1:\n    - log: x");
+        assert!(m.get("f1").unwrap().cond.is_empty());
+        assert_eq!(m.get("f1").unwrap().body.len(), 1);
+        // cond + steps 兄弟键（列表形式）
+        let m = p("func:\n  - f1:\n    cond: test.png\n    steps:\n      - log: x");
+        assert_eq!(m.get("f1").unwrap().cond, vec!["test.png"]);
+        assert_eq!(m.get("f1").unwrap().body.len(), 1);
+        // cond 多模板列表
+        let m = p("func:\n  - f1:\n    cond:\n      - a.png\n      - b.png\n    steps:\n      - log: x");
+        assert_eq!(m.get("f1").unwrap().cond, vec!["a.png", "b.png"]);
+        // cond 逗号分隔字符串
+        let m = p("func:\n  - f1:\n    cond: a.png, b.png\n    steps:\n      - log: x");
+        assert_eq!(m.get("f1").unwrap().cond, vec!["a.png", "b.png"]);
+        // cond 在函数体之后（兄弟键）
+        let m = p("func:\n  - f1:\n    - log: x\n    cond: test.png");
+        assert_eq!(m.get("f1").unwrap().cond, vec!["test.png"]);
+        // 映射形式（cond/steps 嵌套在函数名值里）
+        let m = p("func:\n  f1:\n    cond: test.png\n    steps:\n      - log: x");
+        assert_eq!(m.get("f1").unwrap().cond, vec!["test.png"]);
+        // 错误：函数名 cond 是保留字（仅含 cond 键的项）
+        assert!(Runner::parse_funcs(Some(parse("func:\n  - cond:\n    - log: x").get("func").cloned().unwrap()))
+            .unwrap_err().to_string().contains("cond 是保留字"));
+        // 错误：函数体非法（标量非列表）
+        assert!(Runner::parse_funcs(Some(parse("func:\n  - f1: 123").get("func").cloned().unwrap()))
+            .unwrap_err().to_string().contains("函数体需要步骤列表"));
+        // 错误：cond 模板列表项非法（非字符串）
+        assert!(Runner::parse_funcs(Some(parse("func:\n  - f1:\n    cond:\n      - 123\n    steps:\n      - log: x").get("func").cloned().unwrap()))
+            .unwrap_err().to_string().contains("cond"));
+    }
+
+    /// 跨文件函数调用（exec_cross_func）：子脚本按名解析（同分区优先、缺扩展名
+    /// 自动补全）、函数体 $N 按调用点实参替换、子脚本内裸函数名解析、调用者
+    /// 函数兜底且不泄漏、fall-through 默认 true、函数不存在/子脚本不存在报错、
+    /// 模板按被引用脚本分区解析（log 步骤无需设备/模板）
+    #[tokio::test]
+    async fn cross_file_func_call() {
+        let (runner, _ctx) = test_runner_ctx();
+        let stop = Arc::new(AtomicBool::new(false));
+        // 先落盘子脚本 test1.yaml（与测试分区 com.test 一致）
+        let sub = "func:\n  - fun1:\n    - log: cross $1\n    - return: true\n  - fun2:\n    - log: f2 called\n    - fun1: inner\n      then:\n        - log: f2-inner-ok\nsteps:\n  - log: sub-top";
+        runner.scripts.save(None, "com.test", "test1.yaml", sub).unwrap();
+        // 同分区调用（写短名 test1）+ 无参调用 + 子脚本内裸函数名互调（fun2 → f1）
+        let caller = "func:\n  - own:\n    - log: own $1\nsteps:\n  - test1:fun1: hello\n    then:\n      - log: T1\n    else:\n      - log: F1\n  - test1:fun2:\n    then:\n      - log: T2\n  - test1.yaml:fun1: world\n  - own: back";
+        let logs = runner.run("dev", "com.test/t.yml", caller, stop.clone(), None, 0, None, None, vec![]).await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "cross hello"));
+        assert!(logs.iter().any(|(_, m)| m == "cross world"));
+        assert!(logs.iter().any(|(_, m)| m == "T1"));
+        assert!(!logs.iter().any(|(_, m)| m == "F1"));
+        assert!(logs.iter().any(|(_, m)| m == "f2 called"));
+        assert!(logs.iter().any(|(_, m)| m == "cross inner")); // 子脚本内 fun2 → fun1 互调
+        assert!(logs.iter().any(|(_, m)| m == "f2-inner-ok"));
+        assert!(logs.iter().any(|(_, m)| m == "T2")); // fun2 无 return → 默认 true → then
+        // 调用者函数在跨文件调用后仍可用（不泄漏子脚本函数：own 在后）
+        assert!(logs.iter().any(|(_, m)| m == "own back"));
+        // 子脚本不存在
+        let caller = "steps:\n  - nope:fun1: x";
+        assert!(runner.run("dev", "com.test/t.yml", caller, stop.clone(), None, 0, None, None, vec![])
+            .await.unwrap_err().to_string().contains("子脚本不存在"));
+        // 子脚本无该函数
+        let caller = "steps:\n  - test1:nope";
+        assert!(runner.run("dev", "com.test/t.yml", caller, stop.clone(), None, 0, None, None, vec![])
+            .await.unwrap_err().to_string().contains("未定义函数"));
+        // 纯函数库脚本（无 steps）：直接运行不报错且不做动作；跨文件函数可正常调用
+        runner.scripts.save(None, "com.test", "lib_only.yaml", "func:\n  - hello:\n    - log: lib hello\nsteps: ~").unwrap();
+        let logs = runner.run("dev", "com.test/lib_only.yaml", "func:\n  - hello:\n    - log: lib hello", stop.clone(), None, 0, None, None, vec![]).await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作"));
+        assert!(!logs.iter().any(|(_, m)| m == "lib hello"));
+        // call 一个纯函数库脚本：无动作 + 提示日志（不报错）
+        let caller = "steps:\n  - call: lib_only.yaml";
+        let logs = runner.run("dev", "com.test/t.yml", caller, stop.clone(), None, 0, None, None, vec![]).await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作"));
+        // 跨文件函数调用纯函数库：正常执行函数体
+        let caller = "steps:\n  - lib_only:hello";
+        let logs = runner.run("dev", "com.test/t.yml", caller, stop.clone(), None, 0, None, None, vec![]).await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "lib hello"));
+        // run_func 直接运行函数库脚本的函数体（无 steps 时同样合法）
+        let logs = runner.run("dev", "com.test/lib_only.yaml", "func:\n  - hello:\n    - log: lib hello", stop.clone(), None, 0, Some("hello"), None, vec![]).await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "lib hello"));
     }
 
     async fn run_step(runner: &Runner, ctx: &mut Ctx, yaml: &str) -> anyhow::Result<()> {
@@ -2000,14 +2356,16 @@ mod tests {
         let (runner, _ctx) = test_runner_ctx();
         let stop = Arc::new(AtomicBool::new(false));
         async fn run_yaml(runner: &Runner, stop: &Arc<AtomicBool>, yaml: &str) -> anyhow::Result<Vec<(String, String)>> {
-            runner.run("dev", "com.test/t.yaml", yaml, stop.clone(), None, 0, None, vec![]).await
+            runner.run("dev", "com.test/t.yaml", yaml, stop.clone(), None, 0, None, None, vec![]).await
         }
         // 顶层键白名单：旧 action_wait / log_level / name / 未知键报错
         assert!(run_yaml(&runner, &stop,"action_wait: 500\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("action_wait 已删除"));
         assert!(run_yaml(&runner, &stop,"log_level: info\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("log_level 已删除"));
         assert!(run_yaml(&runner, &stop,"name: x\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("name 已删除"));
         assert!(run_yaml(&runner, &stop,"foo: 1\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("未知顶层键"));
-        assert!(run_yaml(&runner, &stop,"- log: x").await.unwrap_err().to_string().contains("missing steps"));
+        // steps 与 func 都没有 → 报错；改后文案明确提示纯函数库需要至少一个函数
+        assert!(run_yaml(&runner, &stop,"- log: x").await.unwrap_err().to_string().contains("需要 steps 或 func"));
+        assert!(run_yaml(&runner, &stop,"config:\n  interval: 500ms").await.unwrap_err().to_string().contains("需要 steps 或 func"));
         // 合法脚本：log 正常执行
         let logs = run_yaml(&runner, &stop,"steps:\n  - log: hello").await.unwrap();
         assert!(logs.iter().any(|(_, m)| m == "hello"));
@@ -2037,5 +2395,32 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("重复定义"));
+    }
+
+    /// run_func 直接运行函数体：不跑顶层 steps、start_step 定位函数体内、
+    /// 函数未定义报错、体内 $N 保持字面量（无实参不替换）
+    #[tokio::test]
+    async fn run_func_body() {
+        let (runner, _ctx) = test_runner_ctx();
+        let stop = Arc::new(AtomicBool::new(false));
+        let yaml = "func:\n  - f1:\n    - log: a\n    - log: b\nsteps:\n  - log: top";
+        // 从头跑函数体：只执行 f1（顶层 steps 不跑）
+        let logs = runner.run("dev", "com.test/t.yaml", yaml, stop.clone(), None, 0, Some("f1"), None, vec![]).await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "a"));
+        assert!(!logs.iter().any(|(_, m)| m == "top"));
+        // start_step=1：函数体内从第 2 步开始
+        let logs = runner.run("dev", "com.test/t.yaml", yaml, stop.clone(), None, 1, Some("f1"), None, vec![]).await.unwrap();
+        assert!(!logs.iter().any(|(_, m)| m == "a"));
+        assert!(logs.iter().any(|(_, m)| m == "b"));
+        // 未定义函数
+        assert!(runner.run("dev", "com.test/t.yaml", yaml, stop.clone(), None, 0, Some("nope"), None, vec![])
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("未定义"));
+        // 体内 $N 字面量保留：直接运行含 $1 的函数体不报越界（模板解析期才失败）
+        let yaml2 = "func:\n  - f2:\n    - log: $1\nsteps:\n  - f2: x";
+        let logs = runner.run("dev", "com.test/t.yaml", yaml2, stop.clone(), None, 0, Some("f2"), None, vec![]).await.unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "$1"));
     }
 }

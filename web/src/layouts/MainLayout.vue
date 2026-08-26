@@ -76,8 +76,9 @@ const navs = [
   { path: '/settings', name: '设置', icon: '⚙️' }
 ]
 
-// 侧边栏收起状态（图标模式）：localStorage 持久化，provide 给子页面（投屏页据此调整布局）
-const collapsed = ref(localStorage.getItem('gb_sidebar_collapsed') === '1')
+// 侧边栏收起状态（图标模式）：默认收起；localStorage 持久化用户手动展开/收起的选择
+// （无记录或记录为 '1' = 收起；'0' = 用户显式展开过），provide 给子页面（投屏页据此调整布局）
+const collapsed = ref(localStorage.getItem('gb_sidebar_collapsed') !== '0')
 provide('sidebarCollapsed', collapsed)
 function toggleSidebar() {
   collapsed.value = !collapsed.value

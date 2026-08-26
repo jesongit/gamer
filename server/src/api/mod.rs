@@ -871,6 +871,10 @@ struct RunScriptReq {
     /// 从第几个 step 开始运行（0=从头；前端选中某个 "- " 逻辑行时传入）
     #[serde(default)]
     start_index: Option<usize>,
+    /// 直接运行指定函数体（Console 选中函数体内的行时传入）；
+    /// start_index 此时是函数体内的步骤序号
+    #[serde(default)]
+    func: Option<String>,
 }
 
 async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json(req): Json<RunScriptReq>) -> Response {
@@ -902,6 +906,7 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
     let device_id = req.device_id.clone();
     let script_id = id.clone();
     let start_index = req.start_index.unwrap_or(0);
+    let run_func = req.func.filter(|s| !s.trim().is_empty());
     let content = script.content.clone();
     // 实时日志：脚本每产生一条日志就立刻写入 DB，前端轮询即可实时显示
     let db_stream = st.db.clone();
@@ -913,7 +918,7 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
         }))
     };
     tokio::spawn(async move {
-        let logs = runner.run(&device_id, &script_id, &content, stop.clone(), log_cb, start_index, None, vec![]).await;
+        let logs = runner.run(&device_id, &script_id, &content, stop.clone(), log_cb, start_index, run_func.as_deref(), None, vec![]).await;
         devices.run_end(&device_id);
         // 空闲低功耗（拆会话/关屏）由 DeviceManager::idle_power_loop 周期统一管理
         match logs {

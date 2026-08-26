@@ -1,0 +1,6 @@
+steps:
+  - find: mail.png
+    then:
+      - find: mail_rev.png
+      - find: itm_cls.png
+      - find: close.png

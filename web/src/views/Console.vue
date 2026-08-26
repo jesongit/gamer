@@ -341,6 +341,7 @@
                   <option value="dl">dl · 左下</option>
                   <option value="dr">dr · 右下</option>
                 </select>
+                <input v-model="tplSearch" class="input input-sm mono tpl-search" placeholder="🔍 模糊搜索模板…" title="模糊搜索模板名（短名/带 #后缀 全名均可，按匹配位置排序）" />
                 <button class="btn btn-sm" :class="{ active: picking }" @click="togglePick" :disabled="!connected" title="在画面上框选区域保存为模板">✂️ 框选</button>
                 <button class="btn btn-sm" @click="$refs.tplUpload.click()" title="上传图片模板">⬆️ 上传</button>
                 <input ref="tplUpload" type="file" accept="image/png,image/jpeg" hidden @change="onTplUpload" />
@@ -353,10 +354,10 @@
                 </div>
                 <div class="tpl-list">
                     <div v-for="t in templates" :key="t.name" class="tpl-row" :class="{ 'del-confirm': confirmDelTpl === t.name, renaming: renaming === t.name }" @click="onTplRowClick($event, t)">
-                    <span class="tpl-cell thumb" @click.stop="onTplThumbClick($event, t)" title="点击查看大图；Alt/alt 模式点击生成 find 记录">
+                    <span class="tpl-cell thumb" @click.stop="onTplThumbClick($event, t)" title="点击查看大图；Alt/alt 模式点击复制模板名">
                       <span class="tpl-thumb"><img :src="tplThumbUrl(t.name)" alt="" loading="lazy" @error="e => e.target.style.visibility = 'hidden'" /></span>
                     </span>
-                    <span class="tpl-cell name mono" :title="t.name" @click.stop="onTplNameClick($event, t)">
+                    <span class="tpl-cell name mono" :title="`${t.name}（点击查看大图；Alt/alt 模式点击生成 find 记录）`" @click.stop="onTplNameClick($event, t)">
                       <input v-if="renaming === t.name" :ref="el => renameInputEl = el" v-model="renameVal" class="input rename-input mono" @keydown.enter="confirmRename(t)" @keydown.esc="cancelRename" @blur="cancelRename" @click.stop />
                       <template v-else>{{ tplShortName(t.name) }}<span v-if="tplRegionBadge(t.name)" class="tpl-region-badge" :title="`${t.name}（区域后缀，脚本可写短名 ${tplShortName(t.name)}）`">{{ tplRegionBadge(t.name) }}</span></template>
                     </span>
@@ -367,11 +368,11 @@
                       <button class="btn btn-sm" @click.stop="onTplMatchClick(t)">匹配</button>
                     </span>
                   </div>
-                  <div v-if="!templates.length" class="tpl-empty">暂无模板，点击「框选」或「上传」创建</div>
+                  <div v-if="!templates.length" class="tpl-empty">{{ tplSearch.trim() ? '没有匹配的模板' : '暂无模板，点击「框选」或「上传」创建' }}</div>
                 </div>
               </div>
               <div class="tpl-tools">
-                <span class="ps-sub">缩略图 → 查看大图（Alt / alt 模式 → 生成 find 记录）· alt 模式点文件名 → 复制模板名 · 匹配 → 测试匹配 · 重命名 → 修改模板名</span>
+                <span class="ps-sub">缩略图 → 查看大图（Alt / alt 模式 → 复制模板名）· alt 模式点文件名 → 生成 find 记录 · 匹配 → 测试匹配 · 重命名 → 修改模板名</span>
               </div>
             </template>
 
@@ -433,16 +434,16 @@
             <template v-else>
               <div v-if="!selScript" class="script-view-empty">请选择脚本</div>
               <div v-else class="script-view-wrap">
-                <div class="run-hint">点击「- 」开头的逻辑行 → 从该逻辑开始运行；点击 then / else 等行 → 从头运行</div>
+                <div class="run-hint">点击「- 」开头的逻辑行（含函数体内步骤）→ 从该逻辑开始运行；再次点击选中行取消（从头运行）</div>
                 <div class="script-view mono">
                   <div
                     v-for="(line, idx) in scriptLines"
                     :key="idx"
                     class="sv-line"
-                    :class="{ sel: selectedLine === idx, selectable: isSelectableLine(line) }"
-                    @click="onScriptLineClick(idx, line)"
+                    :class="{ sel: selectedLine === idx, selectable: !!runLineMap[idx] }"
+                    @click="onScriptLineClick(idx)"
                   ><!-- sv-line 为 white-space:pre，插值必须紧贴标签，避免格式化空白泄入渲染 -->
-                    <template v-if="callLinks[idx]">{{ callLinks[idx].prefix }}<span class="call-link" title="点击预览脚本内容" @click.stop="openCallPreview(callLinks[idx].name)">{{ callLinks[idx].name }}</span>{{ callLinks[idx].suffix }}</template>
+                    <template v-if="callLinks[idx]">{{ callLinks[idx].prefix }}<span class="call-link" title="点击预览脚本内容" @click.stop="openCallPreview(callLinks[idx].name)">{{ callLinks[idx].label || callLinks[idx].name }}</span>{{ callLinks[idx].suffix }}</template>
                     <template v-else>{{ line || ' ' }}</template>
                   </div>
                 </div>
@@ -739,8 +740,26 @@ const appHint = ref('')
 
 const devices = computed(() => devicesData.value)
 const scripts = computed(() => scriptsData.value)
-// 模板列表按当前应用分区过滤（templatesData 为跨分区全量，条目带 pkg 字段），按修改时间倒序（最新在上）
-const templates = computed(() => templatesData.value.filter(t => t.pkg === activePkg.value).sort((a, b) => (b.mtime || 0) - (a.mtime || 0)))
+// 模板模糊搜索词（短名/带 #后缀 全名均可命中）
+const tplSearch = ref('')
+// 模板列表：当前应用分区过滤（templatesData 为跨分区全量，条目带 pkg 字段）；
+// 有搜索词时按子串匹配位置排序（短名优先同级按修改时间倒序），无搜索词按修改时间倒序
+const templates = computed(() => {
+  let list = templatesData.value.filter(t => t.pkg === activePkg.value)
+  const q = tplSearch.value.trim().toLowerCase()
+  if (q) {
+    list = list.map(t => {
+      const short = tplShortName(t.name)
+      const fi = t.name.toLowerCase().indexOf(q)
+      const si = short.toLowerCase().indexOf(q)
+      const idx = fi === -1 ? si : (si === -1 ? fi : Math.min(fi, si))
+      return idx === -1 ? null : { t, idx }
+    }).filter(Boolean).sort((a, b) => a.idx - b.idx || (b.t.mtime || 0) - (a.t.mtime || 0)).map(x => x.t)
+  } else {
+    list = list.sort((a, b) => (b.mtime || 0) - (a.mtime || 0))
+  }
+  return list
+})
 
 /** 应用分区下拉选项：设备页签配置的包名 ∪ 脚本分区 ∪ 模板分区（字典序） */
 const pkgOptions = computed(() => {
@@ -2274,8 +2293,20 @@ function onTplRowClick(e, t) {
   openTplView(t.name)
 }
 
-/** 模板列表缩略图：alt（按住 Alt / alt 模式）→ 生成 find 操作记录；普通 → 查看大图 */
-function onTplThumbClick(e, t) {
+/** 模板列表缩略图：alt（按住 Alt / alt 模式）→ 复制模板名；普通 → 查看大图 */
+async function onTplThumbClick(e, t) {
+  confirmDelTpl.value = null
+  if (isAltAction(e)) {
+    const ok = await copyText(t.name)
+    toast(ok ? `已复制 ${t.name}` : '复制失败', ok ? 'success' : 'warn')
+    return
+  }
+  openTplView(t.name)
+}
+
+/** 模板列表文件名：alt → 生成 find 操作记录；普通 → 查看大图 */
+function onTplNameClick(e, t) {
+  if (renaming.value === t.name) return
   confirmDelTpl.value = null
   if (isAltAction(e)) {
     // 生成的记录写短名（login.png）：引擎自动解析到带 #后缀 的文件，区域照常生效
@@ -2284,18 +2315,6 @@ function onTplThumbClick(e, t) {
       { id: ++opRecordSeq, text: `- find ${name}（等到出现+点击）`, yaml: renderOpTpl(opTpls.find, { name }) }
     ]
     toast(`已生成 ${name} 的 find 记录，点击选择追加`, 'success')
-    return
-  }
-  openTplView(t.name)
-}
-
-/** 模板列表文件名：alt → 复制文件名到剪贴板；普通 → 查看大图 */
-async function onTplNameClick(e, t) {
-  if (renaming.value === t.name) return
-  confirmDelTpl.value = null
-  if (isAltAction(e)) {
-    const ok = await copyText(t.name)
-    toast(ok ? `已复制 ${t.name}` : '复制失败', ok ? 'success' : 'warn')
     return
   }
   openTplView(t.name)
@@ -2534,37 +2553,103 @@ function templateRegionPixels(name) {
   return null
 }
 
-/** 把生成的 YAML 片段以 2 空格缩进插入到脚本：光标在 steps 列表内 → 光标所在行的下一行；
- *  光标在 steps 之外（或从未点过编辑区）→ 追加到 steps 列表末尾。插入后光标移到新记录之后，方便连续追加 */
+/** 把生成的 YAML 片段以对应缩进插入到脚本的光标下一行：
+ *  - 光标在 steps 列表内 → 2 空格缩进插到光标所在行的下一行
+ *  - 光标在 func 函数体内 → 以函数体缩进（默认 4 空格；cond+steps 写法取 steps
+ *    列表项缩进）插到光标所在行的下一行；光标在「- 函数名:」行 / func: 行 →
+ *    插到该函数体末尾（无函数定义时回到 steps 逻辑）
+ *  - 其余（steps 之外或无光标）→ 追加到 steps 列表末尾；没有 steps 时补一个
+ *    最小可运行脚本结构。插入后光标移到新记录之后，方便连续追加 */
 function appendYamlToScript(snippet) {
   const lines = editScriptCode.value.split('\n')
-  const indented = snippet.split('\n').map(l => (l ? '  ' + l : l)).join('\n')
   const stepsIdx = lines.findIndex(l => /^steps\s*:/.test(l))
-  // 没有 steps 时补一个最小可运行脚本结构
-  if (stepsIdx === -1) {
+  const funcIdx = lines.findIndex(l => /^func\s*:/.test(l))
+  const ta = scriptEditor.value
+  let cursorLine = -1
+  if (ta && typeof ta.selectionStart === 'number') {
+    cursorLine = editScriptCode.value.slice(0, ta.selectionStart).split('\n').length - 1
+  }
+  const indOf = l => (l.match(/^(\s*)/) || ['', ''])[1].length
+
+  let insertIdx = -1
+  let indent = '  '
+  // —— 光标在 func 段内：插入到光标所属函数体 ——
+  if (funcIdx !== -1 && cursorLine >= funcIdx) {
+    let inFunc = false
+    for (let i = cursorLine; i >= 0; i--) {
+      if (lines[i].trim() && indOf(lines[i]) === 0) {
+        inFunc = /^func\s*:/.test(lines[i])
+        break
+      }
+    }
+    if (inFunc) {
+      // 函数定义行（缩进 2 的「名称:」或「- 名称:」）；光标在 func: 行 / 首个
+      // 函数之前 → 第一个函数
+      const isDef = l => {
+        const t = l.trim()
+        return indOf(l) === 2 && /^(- )?[\w.-]+\s*:\s*(#.*)?$/.test(t)
+      }
+      let defIdx = -1
+      for (let i = cursorLine; i > funcIdx; i--) {
+        if (isDef(lines[i])) { defIdx = i; break }
+      }
+      if (defIdx === -1) {
+        for (let i = funcIdx + 1; i < lines.length; i++) {
+          if (lines[i].trim() && indOf(lines[i]) === 0) break
+          if (isDef(lines[i])) { defIdx = i; break }
+        }
+      }
+      if (defIdx !== -1) {
+        // 函数体末尾：下一个缩进 ≤2 的非空行（函数定义 / 根级键）之前
+        let bodyEnd = defIdx
+        for (let i = defIdx + 1; i < lines.length; i++) {
+          const l = lines[i]
+          if (l.trim() && indOf(l) <= 2) break
+          if (l.trim()) bodyEnd = i
+        }
+        // 函数体缩进：第一个「- 」项行（cond+steps 写法里 steps 列表项的缩进）；
+        // 无项行时若紧跟 steps: 键则取其 +2（cond 无步骤的空函数体），默认 4
+        let bodyIndent = 4
+        for (let i = defIdx + 1; i <= bodyEnd; i++) {
+          const l = lines[i]
+          if (!l.trim()) continue
+          const ind = indOf(l)
+          if (ind <= 2) break
+          if (/^\s*-\s/.test(l)) { bodyIndent = ind; break }
+          if (/^steps\s*:\s*$/.test(l.trim())) bodyIndent = ind + 2
+        }
+        indent = ' '.repeat(bodyIndent)
+        // 光标在函数体内（含函数体行/嵌套行）→ 光标下一行；否则函数体末尾
+        insertIdx = cursorLine > defIdx && cursorLine <= bodyEnd ? cursorLine + 1 : bodyEnd + 1
+      }
+    }
+  }
+  // —— 没有 steps 时补一个最小可运行脚本结构 ——
+  if (stepsIdx === -1 && insertIdx === -1) {
+    const indented = snippet.split('\n').map(l => (l ? '  ' + l : l)).join('\n')
     const base = editScriptCode.value.trim()
     const block = `steps:\n${indented}`
     editScriptCode.value = base ? base + '\n\n' + block : block
     return
   }
-  // 默认插入点：steps 列表末尾（下一个非空且不缩进的根级键之前）
-  let insertIdx = lines.length
-  for (let i = stepsIdx + 1; i < lines.length; i++) {
-    const line = lines[i]
-    if (line.trim() && !/^\s/.test(line)) {
-      insertIdx = i
-      break
+  // —— steps 列表（或兜底）：光标在 steps 内部 → 光标下一行，否则 steps 末尾 ——
+  if (insertIdx === -1) {
+    insertIdx = lines.length
+    for (let i = stepsIdx + 1; i < lines.length; i++) {
+      const line = lines[i]
+      if (line.trim() && !/^\s/.test(line)) {
+        insertIdx = i
+        break
+      }
+    }
+    if (cursorLine > stepsIdx) {
+      const cur = lines[cursorLine] || ''
+      if (!cur.trim() || /^\s/.test(cur) || /^\s*#/.test(cur)) {
+        insertIdx = cursorLine + 1
+      }
     }
   }
-  // 光标在 steps 列表内部（缩进行/空行/注释行）→ 插到光标所在行的下一行
-  const ta = scriptEditor.value
-  if (ta && typeof ta.selectionStart === 'number') {
-    const lineIdx = editScriptCode.value.slice(0, ta.selectionStart).split('\n').length - 1
-    const cur = lines[lineIdx] || ''
-    if (lineIdx > stepsIdx && (!cur.trim() || /^\s/.test(cur) || /^\s*#/.test(cur))) {
-      insertIdx = lineIdx + 1
-    }
-  }
+  const indented = snippet.split('\n').map(l => (l ? indent + l : l)).join('\n')
   const before = lines.slice(0, insertIdx)
   const after = lines.slice(insertIdx)
   while (before.length && before[before.length - 1].trim() === '') before.pop()
@@ -2587,7 +2672,7 @@ function applyOpRecord(r) {
   toast('已追加：' + r.text, 'success')
 }
 
-/** 编辑区 Tab 键：插入 2 个空格（代替切换焦点）；多行选中时逐行缩进，Shift+Tab 行首退格 */
+/** 编辑区 Tab 键：插入 2 个空格（代替切换焦点）；Shift+Tab 反向缩进（每行行首退 1~2 个空格） */
 function onEditorTab(e) {
   const ta = e.target
   const start = ta.selectionStart
@@ -2597,7 +2682,7 @@ function onEditorTab(e) {
     const lineStart = v.lastIndexOf('\n', start - 1) + 1
     const before = v.slice(lineStart, start)
     if (e.shiftKey) {
-      // Shift+Tab：删除行首 1~2 个空格
+      // Shift+Tab：当前行行首退 1~2 个空格（光标在行内任意位置均可）
       const m = before.match(/^ {1,2}/)
       if (m) {
         editScriptCode.value = v.slice(0, lineStart) + v.slice(lineStart + m[0].length)
@@ -2611,8 +2696,20 @@ function onEditorTab(e) {
   }
   const sel = v.slice(start, end)
   if (sel.includes('\n')) {
-    // 多行选中：每行前插 2 空格
     const lineStart = v.lastIndexOf('\n', start - 1) + 1
+    if (e.shiftKey) {
+      // Shift+Tab 多行选中：各行行首退 1~2 个空格
+      const lines = v.slice(lineStart, end).split('\n')
+      const removed = lines.map(l => (l.match(/^ {1,2}/) || ['', ''])[0].length)
+      const dedented = lines.map((l, i) => l.slice(removed[i])).join('\n')
+      editScriptCode.value = v.slice(0, lineStart) + dedented + v.slice(end)
+      const shrink = removed.reduce((a, b) => a + b, 0)
+      const newEnd = Math.max(lineStart, end - shrink)
+      const newStart = Math.min(start - Math.min(removed[0], start - lineStart), newEnd)
+      nextTick(() => { ta.selectionStart = newStart; ta.selectionEnd = newEnd })
+      return
+    }
+    // 多行选中：每行前插 2 空格
     const indented = v.slice(lineStart, end).split('\n').map(l => '  ' + l).join('\n')
     editScriptCode.value = v.slice(0, lineStart) + indented + v.slice(end)
     const newEnd = lineStart + indented.length
@@ -2792,6 +2889,38 @@ function validateScriptCode(content) {
         return [`YAML 语法错误（第 ${i + 1} 行）："- ${m[2]}" 后要接子步骤需带冒号，应为 "- ${m[2]}:"（如 - find: 主模板 / then 步骤同理：键: 换行缩进内容）`]
       }
     }
+    // 「键: 值」后跟更深缩进的 "- " 步骤行：子步骤不挂在任何键上——多半是漏写
+    // then/else 分支键（如 - find: x 的 else 子步骤必须写在 else: 正下方一层）
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(\s*)[\w\u4e00-\u9fa5-]+:\s*([^#\s].*)$/)
+      if (!m) continue
+      let j = i + 1
+      while (j < lines.length && !lines[j].trim()) j++
+      const nm = lines[j].match(/^(\s*)-\s/)
+      if (nm && nm[1].length > m[1].length) {
+        return [`YAML 语法错误（第 ${i + 1} 行）：「${m[0].trim()}」后跟着更深缩进的 "- " 步骤行——子步骤不挂在任何键上（漏写分支键）：find 的步骤须写在 then:/else: 键正下方，如
+      - find: task_list.png
+        timeout: 1s
+        else:
+          - throw: 未知界面`]
+      }
+    }
+    // 「键: 值」后直接跟同列 "- " 步骤行（bad indentation，映射键间不能插同列
+    // dash 行）：子内容须挂在分支键（then/else）或 steps: 键正下方
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(/^(\s*)[\w\u4e00-\u9fa5-]+:\s*([^#\s].*)$/)
+      if (!m) continue
+      let j = i + 1
+      while (j < lines.length && !lines[j].trim()) j++
+      const nm = lines[j].match(/^(\s*)-\s/)
+      if (nm && nm[1].length === m[1].length) {
+        return [`YAML 语法错误（第 ${i + 1} 行）：「${m[0].trim()}」后不能直接跟同列 "- " 步骤行（bad indentation）——子步骤缩进时须挂在分支键（then / else）或步骤列表键正下方，如
+      - find: task_list.png
+        timeout: 1s
+        else:
+          - throw: 未知界面`]
+      }
+    }
     return ['YAML 语法错误：' + e.message]
   }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return ['脚本必须是 YAML 对象']
@@ -2803,7 +2932,13 @@ function validateScriptCode(content) {
     else if (k === 'name') errors.push('顶层 name 已删除（脚本名即文件名）')
     else errors.push(`未知顶层键 ${k}（只支持 config / func / steps）`)
   }
-  if (!Array.isArray(doc.steps)) return ['缺少 steps 根节点']
+  // steps 可缺省：纯函数库脚本（只有 func）供其他脚本通过 脚本名:函数名 调用；
+  // steps 与 func 都没有 → 报错
+  const hasFuncs = doc.func !== undefined && doc.func !== null
+    && (Array.isArray(doc.func) ? doc.func.length > 0 : (typeof doc.func === 'object' && Object.keys(doc.func).length > 0))
+  if (!Array.isArray(doc.steps) && !hasFuncs) {
+    return ['脚本需要 steps 或 func 根节点（纯函数库脚本也至少要定义一个函数，供其他脚本通过 脚本名:函数名 调用）']
+  }
 
   const tplNames = new Set((templatesData.value || []).filter(t => t.pkg === activePkg.value).map(t => t.name))
   // 短名支持（与引擎 resolve_template_file 一致）：login.png 可引用 login#*.png，
@@ -2871,7 +3006,9 @@ function validateScriptCode(content) {
     }
   })
 
-  // func: 段（函数名保留字 / 函数体结构；函数体步骤递归校验在主 steps 之后，return 合法）
+  // func: 段（函数名保留字 / 函数体结构；cond 条件 + steps 键与函数名同级——
+  // 与 loop 的 times/steps 同构，也兼容映射形式嵌套在函数名值里；
+  // 函数体步骤递归校验在主 steps 之后，return 合法）
   const funcs = []
   if (doc.func !== undefined && doc.func !== null) {
     const items = Array.isArray(doc.func) ? doc.func : [doc.func]
@@ -2881,22 +3018,53 @@ function validateScriptCode(content) {
         errors.push(`${at} 需要 函数名: 步骤列表`)
         return
       }
-      const ks = Object.keys(it)
+      const ks = Object.keys(it).filter(k => k !== 'cond' && k !== 'steps')
       if (ks.length !== 1) {
-        errors.push(`${at} 需要恰好一个 函数名: 键（收到 ${ks.length} 个）`)
+        errors.push(`${at} 需要恰好一个 函数名: 键（收到 ${ks.length} 个；cond / steps 是函数定义参数键）`)
         return
       }
       const name = ks[0].trim()
-      if (FUNC_RESERVED.has(name)) errors.push(`${at} 函数名 ${name} 是保留字（动作键 / 结构键）`)
+      if (FUNC_RESERVED.has(name)) {
+        errors.push(`${at} 函数名 ${name} 是保留字（动作键 / 结构键）——若这是函数体的步骤，说明函数体缩进不对：函数体要比 "- 函数名:" 行多缩进（如 4 空格）`)
+      }
       else if (funcs.some(f => f.name === name)) errors.push(`函数 ${name} 重复定义`)
-      const body = it[ks[0]]
-      if (body !== null && body !== undefined && !Array.isArray(body)) errors.push(`${at} ${name} 的函数体需要步骤列表`)
+      // cond / steps 取值：列表形式是 it 的兄弟键；映射形式嵌套在函数名值里
+      let condVal = it.cond
+      let body = it[name]
+      if (body && typeof body === 'object' && !Array.isArray(body) && Object.keys(body).every(k => k === 'cond' || k === 'steps')) {
+        if (condVal === undefined) condVal = body.cond
+        body = body.steps
+      }
+      if (it.steps !== undefined) body = it.steps
+      if (body !== null && body !== undefined && !Array.isArray(body)) {
+        errors.push(`${at} ${name} 的函数体需要步骤列表（函数名键值或 steps 键）`)
+      }
+      // cond 条件模板：字符串（可逗号分隔）或字符串列表；模板存在性按分区校验
+      if (condVal !== undefined && condVal !== null) {
+        const condNames = parseTplNames(condVal, 'cond')
+        if (!condNames) {
+          errors.push(`${at} ${name} 的 cond 需要模板名字符串（多模板逗号分隔）或列表，如 cond: a.png, b.png`)
+        } else {
+          for (const n of condNames) {
+            const terr = argOrTplCheck(n)
+            if (terr) errors.push(`${at} ${name} 的 cond ${terr}`)
+          }
+        }
+      }
       funcs.push({ name, body: Array.isArray(body) ? body : [] })
     })
   }
 
   // 步骤递归校验（steps / then / else / loop steps / func 函数体共用；与引擎 exec_step 一致）
   function validateStep(rawStep, at, inFunc) {
+    // 带值动作漏写冒号（`- throw 未知界面` 被解析成标量步骤）→ 定向提示
+    if (typeof rawStep === 'string') {
+      const m = rawStep.match(/^(\w+)\s+(.+)$/)
+      if (m && ACTION_KEYS.includes(m[1])) {
+        errors.push(`${at} "${rawStep}" 是标量步骤（YAML 把 "- ${rawStep}" 解析成字符串）——带值/带原因的动作需写冒号：应为 "- ${m[1]}: ${m[2]}"（裸写仅限无参动作，如 - str_app / - throw）`)
+        return
+      }
+    }
     // 裸标量步骤（- str_app / - throw）等价 {键: null}，与引擎 exec_step 的规范化一致
     const step = typeof rawStep === 'string' ? { [rawStep]: null } : rawStep
     if (!step || typeof step !== 'object' || Array.isArray(step)) {
@@ -2906,7 +3074,11 @@ function validateScriptCode(content) {
     const ks = Object.keys(step)
     // 已删除动作/参数守卫（与引擎 exec_step 一致，显式报错引导迁移）
     if ('until' in step) errors.push(`${at} until 已改名 find：- find: 主模板 + block: 障碍模板`)
-    if ('cond' in step) errors.push(`${at} cond 已改名 color：颜色判断写 - color: [x, y] + 色值键步骤；模板分支用 find + then/else`)
+    if ('cond' in step) {
+      errors.push(inFunc
+        ? `${at} cond 是函数级条件（写在 "- 函数名:" 行下、与 steps 键同级），函数体步骤不支持 cond；旧颜色判断用 color`
+        : `${at} cond 已改名 color：颜色判断写 - color: [x, y] + 色值键步骤；模板分支用 find + then/else`)
+    }
     if ('exit' in step) errors.push(`${at} exit 已改名 throw`)
     if ('goto' in step || 'label' in step) errors.push(`${at} goto/label 已删除：循环重试用 loop`)
     for (const k of ['check', 'count', 'cnt_ivl', 'cnt_chk', 'img_ivl', 'and_or', 'click', 'before', 'after']) {
@@ -2979,7 +3151,9 @@ function validateScriptCode(content) {
           errors.push(`${at} call 需要 "子脚本名 [实参...]" 字符串（如 - call: test2.yml a.png [0.5, 0.6]）`)
         }
       }
-      if (a === 'throw' && step.throw !== null && step.throw !== undefined && typeof step.throw !== 'string') {
+      // throw 值与引擎对齐：非字符串标量（YAML 把 404/true 解析成数字/布尔）
+      // 引擎按无原因处理，不报错；仅数组/映射属明显笔误
+      if (a === 'throw' && step.throw !== null && step.throw !== undefined && (Array.isArray(step.throw) || typeof step.throw === 'object')) {
         errors.push(`${at} throw 只需裸写或带结束原因字符串（如 - throw: 体力不足）`)
       }
       if ((a === 'str_app' || a === 'cls_app') && step[a] !== null && step[a] !== undefined && String(step[a]).trim() !== '') {
@@ -3053,7 +3227,8 @@ function validateScriptCode(content) {
       }
       return
     }
-    // 无动作键：自定义函数调用（- 函数名: 实参…）或未知动作
+    // 无动作键：自定义函数调用（- 函数名: 实参…）/ 跨文件函数调用（- 脚本名:函数名: 实参…）
+    // 或未知动作
     if (ks.length === 0) return
     const cand = ks.find(k => funcs.some(f => f.name === k.trim()))
     if (cand) {
@@ -3067,7 +3242,68 @@ function validateScriptCode(content) {
       recurse('then', 'then')
       recurse('else', 'else')
     } else {
-      errors.push(`${at} 未知动作 ${ks.join('、')}（可用：find / color / loop / tap / swipe / key / text / log / call / throw / str_app / cls_app / wait / return / 自定义函数）`)
+      // 跨文件函数调用：- 脚本名:函数名: 实参…（脚本名解析与 call 一致：
+      // 同分区优先 → 跨分区；缺 .yaml/.yml 扩展名自动补全）
+      const cross = ks.find(k => k !== 'then' && k !== 'else' && k.includes(':'))
+      if (cross) {
+        for (const k of ks) {
+          if (k !== cross && k !== 'then' && k !== 'else') errors.push(`${at} ${cross} 调用不支持参数 ${k}（可用：then / else）`)
+        }
+        const parts = cross.split(':').map(x => x.trim())
+        const v = step[cross]
+        if (v !== null && v !== undefined && typeof v !== 'string') {
+          errors.push(`${at} ${cross} 的实参需要空格分隔字符串（坐标写 [x, y]，整体不用引号）`)
+        }
+        if (parts.length !== 2 || !parts[0] || !parts[1]) {
+          errors.push(`${at} 跨文件函数调用需要 "脚本名:函数名"（如 - test1:fun1: 实参…）`)
+        } else {
+          const [sName, fName] = parts
+          const findSub = name => {
+            const all = scriptsData.value || []
+            const pick = cond => all.find(cond)
+            const isYaml = /\.(ya?ml)$/i.test(name)
+            const own = pick(s => s.package === activePkg.value && s.name === name)
+            if (own) return own
+            const any = pick(s => s.name === name)
+            if (any) return any
+            if (!isYaml) {
+              for (const ext of ['.yaml', '.yml']) {
+                const c2 = pick(s => s.package === activePkg.value && s.name === name + ext)
+                if (c2) return c2
+                const c3 = pick(s => s.name === name + ext)
+                if (c3) return c3
+              }
+            }
+            return null
+          }
+          const sub = findSub(sName)
+          if (!sub) {
+            errors.push(`${at} 子脚本不存在：${sName}`)
+          } else {
+            // 函数存在性：解析子脚本 func 段（与引擎 parse_funcs 取函数名的规则一致）
+            try {
+              const sdoc = yamlParse(sub.content)
+              const subFuncs = new Set()
+              if (sdoc && sdoc.func && typeof sdoc.func === 'object') {
+                const sitems = Array.isArray(sdoc.func) ? sdoc.func : [sdoc.func]
+                for (const it of sitems) {
+                  if (!it || typeof it !== 'object') continue
+                  for (const k of Object.keys(it)) {
+                    if (k !== 'cond' && k !== 'steps') subFuncs.add(k.trim())
+                  }
+                }
+              }
+              if (!subFuncs.has(fName)) errors.push(`${at} 子脚本 ${sub.name} 未定义函数 ${fName}`)
+            } catch (e) {
+              errors.push(`${at} 子脚本 ${sub.name || sName} 解析失败：${e.message}`)
+            }
+          }
+        }
+        recurse('then', 'then')
+        recurse('else', 'else')
+      } else {
+        errors.push(`${at} 未知动作 ${ks.join('、')}（可用：find / color / loop / tap / swipe / key / text / log / call / throw / str_app / cls_app / wait / return / 自定义函数 / 脚本名:函数名 跨文件调用）`)
+      }
     }
   }
 
@@ -3075,7 +3311,7 @@ function validateScriptCode(content) {
     list.forEach((s, i) => validateStep(s, `${at}第 ${i + 1} 步`, inFunc))
   }
 
-  validateSteps(doc.steps, '', false)
+  if (Array.isArray(doc.steps)) validateSteps(doc.steps, '', false)
   for (const f of funcs) validateSteps(f.body, `函数 ${f.name} `, true)
   return errors
 }
@@ -3132,8 +3368,11 @@ async function checkRunStatus() {
 }
 
 // ---------- 运行模式：只读脚本内容 + 逻辑行选中 ----------
-// 未运行/非编辑时展示脚本内容（不可编辑）；"- " 开头且与顶层步骤同缩进的行 = 一个逻辑的开始，
-// 点击选中后运行从该逻辑开始；点击 click/then/else 等属性行取消选中（从头运行）。
+// 未运行/非编辑时展示脚本内容（不可编辑）。可点击选中的「逻辑行」：
+// steps: 段内与首项同缩进的 "- " 行（从该步骤起跑顶层）+ func: 段内每个
+// 函数体中与函数体首项同缩进的 "- " 行（直接运行该函数体，从该步骤起）。
+// then/else/loop 子步骤、config 段与函数名行不可选；索引按所在段落各自计数，
+// 不再受 func/config 段条目数量的偏移影响。
 const selectedLine = ref(null)
 
 const scriptContent = computed(() => {
@@ -3142,21 +3381,39 @@ const scriptContent = computed(() => {
 })
 const scriptLines = computed(() => scriptContent.value.split('\n'))
 
-/** call 行解析（与 scriptLines 平行）：`- call: test.yaml` → { prefix, name, suffix }，其余行 → null */
+/** call / 跨文件函数调用行解析（与 scriptLines 平行）：
+ *  `- call: test.yaml` → { prefix, name, suffix }；`- test1:fun1: 实参…` →
+ *  { prefix, name: 脚本名, label: 完整键, suffix }，其余行 → null */
 const callLinks = computed(() => scriptLines.value.map(line => {
   // call 传参后行内还有实参（- call: 通用日常.yml act_136.png）：分隔空格划入
   // suffix（m[3] 以 \s+ 开头），否则渲染时脚本名和实参贴在一起
   const m = line.match(/^(\s*(?:-\s+)?call:\s*)(\S+)((?:\s+.*)?)$/)
-  if (!m) return null
-  const name = m[2].replace(/^["']|["']$/g, '')
-  return name ? { prefix: m[1], name, suffix: m[3] } : null
+  if (m) {
+    const name = m[2].replace(/^["']|["']$/g, '')
+    return name ? { prefix: m[1], name, suffix: m[3] } : null
+  }
+  // 跨文件函数调用 - 脚本名:函数名: 实参…：链接预览子脚本内容
+  const x = line.match(/^(\s*(?:-\s+)?)(\S+:[^\s:]+)((?:\s+.*)?)$/)
+  if (x) {
+    const script = x[2].split(':')[0]
+    return script ? { prefix: x[1], name: script, label: x[2], suffix: x[3] } : null
+  }
+  return null
 }))
 
 // call 子脚本预览弹窗（点脚本名打开；ESC / ✕ / 点遮罩关闭）
 const previewScript = ref(null)
 
 function openCallPreview(name) {
-  const s = scripts.value.find(x => x.name === name)
+  // 与引擎 resolve_call 一致：缺 .yaml/.yml 扩展名自动补全
+  const find = n => scripts.value.find(x => x.name === n)
+  let s = find(name)
+  if (!s && !/\.(ya?ml)$/i.test(name)) {
+    for (const ext of ['.yaml', '.yml']) {
+      s = find(name + ext)
+      if (s) break
+    }
+  }
   if (!s) return toast(`子脚本不存在：${name}`, 'warn')
   previewScript.value = s
 }
@@ -3165,39 +3422,61 @@ function closeCallPreview() {
   previewScript.value = null
 }
 
-/** 顶层 steps 项的前导缩进：首个 "- " 行的缩进长度 */
-const stepIndent = computed(() => {
-  let inSteps = false
-  for (const l of scriptLines.value) {
-    if (!inSteps) {
-      if (/^steps:/.test(l)) inSteps = true
+/** 行 → 运行目标映射（与 scriptLines 平行）：可选逻辑行 → { func: 函数名|null,
+ *  index: 步骤序号 }，其余行 → null。按根段落（config/func/steps，缩进 0）扫描：
+ * steps 段首个 "- " 行确立顶层缩进；func 段首个条目行（"- 名:" 列表形式 /
+ * "名:" 映射形式）确立条目缩进，函数体内首个 "- " 行确立函数体缩进 */
+function computeRunLineMap(lines) {
+  const map = new Array(lines.length).fill(null)
+  let section = ''        // 当前根段落：steps / func / ''（其他或未入段）
+  let stepsIndent = -1, stepCount = 0
+  let entryIndent = -1, entryDash = null, bodyIndent = -1, funcName = null, bodyCount = 0
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (!line.trim() || /^\s*#/.test(line)) continue
+    const root = line.match(/^(\S+?):(?:\s|$)/)
+    if (root) {
+      section = root[1] === 'steps' || root[1] === 'func' ? root[1] : ''
+      stepsIndent = -1; stepCount = 0
+      entryIndent = -1; entryDash = null; bodyIndent = -1; funcName = null; bodyCount = 0
       continue
     }
-    const m = l.match(/^(\s*)-\s/)
-    if (m) return m[1].length
+    const dash = line.match(/^(\s*)-\s/)
+    const indent = dash ? dash[1].length : (line.match(/^(\s*)\S/) || ['', ''])[1].length
+    if (indent < 0) continue
+    if (section === 'steps') {
+      if (dash) {
+        if (stepsIndent < 0) stepsIndent = indent
+        if (indent === stepsIndent) map[i] = { func: null, index: stepCount++ }
+      }
+    } else if (section === 'func') {
+      if (entryDash === false && dash && indent === entryIndent) {
+        // 映射形式条目（"名:" 无 -）的同列 "- " 行 = 函数体（YAML 序列值同列特例）
+        if (bodyIndent < 0) bodyIndent = indent
+        map[i] = { func: funcName, index: bodyCount++ }
+      } else if (indent === entryIndent || entryIndent < 0) {
+        // 函数条目行（首个条目确立条目缩进）："- 名:"（列表形式）或 "名:"（映射形式）
+        const em = line.match(/^\s*(?:-\s+)?([^:\s]+)\s*:/)
+        entryIndent = indent
+        entryDash = !!dash
+        funcName = em ? em[1] : null
+        bodyIndent = -1; bodyCount = 0
+      } else if (funcName && dash && indent > entryIndent) {
+        // 函数体顶层步骤（首个确立函数体缩进；then/else 等更深子步骤不选）
+        if (bodyIndent < 0) bodyIndent = indent
+        if (indent === bodyIndent) map[i] = { func: funcName, index: bodyCount++ }
+      }
+    }
   }
-  return 2
-})
-
-/** 可选行判定："- " 开头且缩进与顶层步骤一致（loop/then 内的子步骤不可选） */
-function isSelectableLine(line) {
-  const m = line.match(/^(\s*)-\s/)
-  return !!m && m[1].length === stepIndent.value
+  return map
 }
+const runLineMap = computed(() => computeRunLineMap(scriptLines.value))
 
-/** 点击行：可选行 → 选中；click/then/else 等其他行 → 取消选中 */
-function onScriptLineClick(idx, line) {
-  selectedLine.value = isSelectableLine(line) ? idx : null
-}
-
-/** 选中行对应的 step 序号（该行之前可选行的个数）；无选中返回 0（从头） */
-function startIndexFromSelection() {
-  if (selectedLine.value == null) return 0
-  let k = 0
-  for (let i = 0; i < selectedLine.value; i++) {
-    if (isSelectableLine(scriptLines.value[i])) k++
-  }
-  return k
+/** 点击行：可选逻辑行选中；再次点击已选中行取消（从头运行）；
+ *  点击 then/else 等非逻辑行不改变当前选中 */
+function onScriptLineClick(idx) {
+  if (!runLineMap.value[idx]) return
+  selectedLine.value = selectedLine.value === idx ? null : idx
 }
 
 // 切换脚本时清除行选中
@@ -3207,15 +3486,18 @@ function runScript() {
   if (!selScript.value) return
   const s = scripts.value.find(x => x.id === selScript.value)
   if (!s) return
-  const startIndex = startIndexFromSelection()
+  // 选中行 → 运行目标：顶层 steps 序号，或函数体（func + 体内序号）
+  const target = selectedLine.value != null ? runLineMap.value[selectedLine.value] : null
+  const startIndex = target ? target.index : 0
+  const funcName = target?.func || null
   // 每次运行清空日志区域，只显示本次运行产生的日志
   runStartTime = Date.now()
   rawLogs = []
   liveLogs.value = []
   store.running = true
-  store.runScript = s.name
+  store.runScript = funcName ? `${s.name} · ${funcName}()` : s.name
   store.runScriptId = s.id
-  api.runScript(s.id, store.deviceId, startIndex).then(() => {
+  api.runScript(s.id, store.deviceId, startIndex, funcName).then(() => {
     toast('脚本已开始运行', 'success')
     // POST 成功（服务端已登记 run_stops 条目）后才开始轮询，
     // 避免设备离线时 connect_device 耗时较长、status 先于 run 返回导致状态被提前复位
@@ -3614,9 +3896,10 @@ onUnmounted(() => {
 .pkg-empty { flex: none; padding: 24px 10px; text-align: center; font-size: 12px; color: var(--text-2); }
 .script-tpl { flex: 4; min-height: 0; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
 .tpl-top { display: flex; align-items: center; gap: 8px; }
-/* 阈值输入 : 区域下拉 : 框选按钮 : 上传按钮 = 2:4:3:3 */
+/* 阈值输入 : 区域下拉 : 搜索框 : 框选按钮 : 上传按钮 = 2:4:5:3:3 */
 .tpl-top .input { flex: 2 1 0%; min-width: 0; }
 .tpl-top .tpl-region { flex: 4 1 0%; min-width: 0; padding: 4px 6px; font-size: 11px; }
+.tpl-top .tpl-search { flex: 5 1 0%; min-width: 0; font-size: 11px; }
 .tpl-top .btn { flex: 3 1 0%; min-width: 0; }
 .tpl-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .script-run { flex: 6; display: flex; flex-direction: column; gap: 10px; min-height: 0; }

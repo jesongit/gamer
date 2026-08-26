@@ -3,7 +3,7 @@
     <div class="page-head">
       <div>
         <div class="page-title">脚本编辑</div>
-        <div class="page-sub">YAML 自动化脚本 · 支持 find（找图等待 + block 障碍）/ color 颜色分支 / loop / func 自定义函数（$N 传参 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait；时间参数一律带单位（1ms / 2s / 1m / 30min / 1h / 1d），间隔与阈值用 config: 段配置</div>
+        <div class="page-sub">YAML 自动化脚本 · 支持 find（找图等待 + block 障碍）/ color 颜色分支 / loop / func 自定义函数（$N 传参 + return + cond 条件）/ 跨文件函数调用（脚本名:函数名）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait；时间参数一律带单位（1ms / 2s / 1m / 30min / 1h / 1d），间隔与阈值用 config: 段配置</div>
       </div>
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
@@ -125,17 +125,20 @@ steps:                  # 必需：步骤列表
                                        # 子脚本内 $1/$2… 引用（替换全部字符串，
                                        # 嵌套 call 转发 $N 同样生效）
 
-func:                   # 自定义函数定义（函数体只能在本脚本内调用）
+func:                   # 自定义函数定义（本脚本内调用；cond 可选执行条件）
   - wait_tpl:           # 函数名不能是保留字；体内 $N 指函数实参
-    - find: $1
-      timeout: 6s
-    - return: true      # return 仅函数内合法：立即返回；函数体执行完未 return = false
+    cond: gate.png      # 可选：必须匹配条件模板才执行函数体，否则函数返回 false
+    steps:              # 函数体（与 cond 同级；多模板写 cond: [a.png, b.png]）
+      - find: $1
+        timeout: 6s
+      - return: true    # return 仅函数内合法：立即返回；函数体执行完未 return = true
 steps:
   - wait_tpl: sign_btn.png   # 调用：空格分隔实参 + then（返回 true）/ else（false）
     then:
       - log: "出现了"
     else:
       - log: "没等到"
+  - 通用日常:fun1: a.png     # 跨文件调用：脚本名:函数名 + 实参（解析同 call）
 # 嵌套函数调用上限 32 层；throw 在函数内同样结束整个任务</pre>
           </div>
         </div>

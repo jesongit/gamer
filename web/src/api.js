@@ -65,7 +65,7 @@ export const api = {
   listScripts: () => req('GET', '/api/scripts'),
   saveScript: (s) => req('POST', '/api/scripts', s),
   deleteScript: (id) => req('DELETE', `/api/scripts/${encodeURIComponent(id)}`),
-  runScript: (id, deviceId, startIndex) => req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, { device_id: deviceId, start_index: startIndex || 0 }),
+  runScript: (id, deviceId, startIndex, func) => req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, { device_id: deviceId, start_index: startIndex || 0, ...(func ? { func } : {}) }),
   stopScript: (id) => req('POST', `/api/scripts/${encodeURIComponent(id)}/stop`),
   scriptStatus: (id) => req('GET', `/api/scripts/${encodeURIComponent(id)}/status`),
   // 设备当前运行中的脚本（页面刷新后恢复运行态用）→ {running, script_id?, script_name?}

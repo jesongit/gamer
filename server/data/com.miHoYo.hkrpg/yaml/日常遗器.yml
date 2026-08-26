@@ -1,32 +1,72 @@
+func:
+  # 领取邮件  
+  - mail_recv:
+    - find: mail.png
+      then:
+        - find: mail_rev.png
+        - find: itm_cls.png
+        - find: close.png
+  # 领取委托
+  - itm_recv:
+    - find: tsk_go.png
+    - find: itm_rev.png
+      timeout: 500ms
+      then: # 正确进入委托
+        - find: itm_cls.png
+        - find: close.png
+        - find: tsk_rev.png
+      else: # 如果没进委托一般是进了生存索引，切回任务界面
+        - find: task_list.png
+          timeout: 1s
+          else:
+            - throw: 未知界面
+
+  # 清体力
+  - ap_burn:
+    - find: target.png
+    - find: cult_etr.png
+    - find: tili_use.png
+      timeout: 500ms
+    - find: cnt_add.png
+    - find: cnt_add.png
+    - find: cnt_add.png
+    - find: cnt_add.png
+    - find: cnt_add.png
+    - find: yiqi_str.png
+    - find: btl_str.png
+    - find: btl_qut.png
+    - find: close.png
+      verify: true
+  # 领取大月卡
+  - bp_recv:
+    - find: bp.png
+      block:
+        - bp_str.png
+        - spc_cls.png
 steps:
+  # 进入手机
   - find: phone.png
     block: mon_crd.png
+  - mail_recv
+
+  # 进入每日任务
   - find: guide.png
-  - find: tsk_rev.png
-  - find: tsk_go.png
-  - find: itm_rev.png
-  - find: itm_cls.png
-  - find: close.png
-  - find: tsk_rev.png
+  - find: task_list.png
+  - find: task_done.png
+    then:
+      - throw: 任务已全部完成
+  - find: tsk_rev.png # 尝试领取登录奖励
+    timeout: 200ms
+  - itm_recv          # 领取委托
   - find: tsk_go.png
   # 遗器本
-  - find: target.png
-  - find: cult_etr.png
-  - find: tili_use.png
-    timeout: 2s
-  - find: cnt_add.png
-  - find: cnt_add.png
-  - find: cnt_add.png
-  - find: cnt_add.png
-  - find: cnt_add.png
-  - find: yiqi_str.png
-  - find: btl_str.png
-  - find: btl_qut.png
-  - find: close.png
-    verify: true
+  - ap_burn
   # 领奖
   - find: phone.png
   - find: guide.png
   - find: tsk_rev.png
+    timeout: 500ms
   - find: tsk_rev.png
+    timeout: 500ms
   - find: tsk_rev2.png
+    timeout: 500ms

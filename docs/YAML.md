@@ -5,7 +5,7 @@ GameBot 脚本为 YAML 步骤列表，语法以服务端引擎（`server/src/eng
 
 ## 脚本结构
 
-顶层键只允许 `config` / `func` / `steps`（未知顶层键报错）：
+顶层键只允许 `config` / `func` / `steps`（未知顶层键报错）；`steps` 可缺省——**纯函数库脚本**（只有 `func`）供其他脚本通过「脚本名:函数名」跨文件调用：
 
 ```yaml
 config:                 # 可选：覆盖 config.toml 默认值（也可写成映射列表按序覆盖）
@@ -16,7 +16,7 @@ func:                   # 可选：自定义函数定义（见「自定义函数
   - wait_tpl:
     - find: $1
     - return: false
-steps:                  # 必填，按顺序执行的动作列表
+steps:                  # 可选（纯函数库可省略）：按顺序执行的动作列表
   - wait: 1s
   - log: "开始"
 ```
@@ -104,7 +104,12 @@ func:
     - find: $1
       timeout: 6s
     - return: true          # return 仅函数内合法：true / false，立即返回；
-                            # 函数体执行完未 return 视为返回 false
+                            # 函数体执行完未 return 视为返回 true
+  - need_gate:              # 带执行条件（cond）的函数
+    cond: gate.png          # 可选：必须匹配该模板才执行函数体，否则函数返回 false
+    steps:                  # 函数体（与 cond 同为函数定义兄弟键，用 steps 键包住）
+      - find: $1
+        timeout: 6s
 
 steps:
   - wait_tpl: sign_btn.png [0.5, 0.6] ff8800   # 调用：空格分隔实参 + then / else
@@ -112,12 +117,51 @@ steps:
       - log: "出现了"
     else:
       - log: "没等到"
+  - need_gate: act.png
 ```
 
 - 实参空格分隔、**括号感知切分**：`[x, y]` 内部的空格不算分隔符；无参写 `- wait_tpl:` 或 `- wait_tpl`
 - 函数体内 `$1`/`$2`… 指函数实参（`func:` 段不参与脚本级 `$N` 替换）
 - 函数体可用全部动作（含 call/throw/嵌套函数调用，嵌套上限 32 层）
-- `return: true` → 执行 then；`false`（含 fall-through）→ 执行 else
+- `return: true` → 执行 then；`false` → 执行 else；**函数体正常走完未写 return → 默认返回 true**（2026-08-27 改，旧语义为 false）
+- `cond`（可选）：执行条件模板，支持单个（`cond: test.png`）、逗号分隔（`cond: a.png, b.png`）或列表：
+
+```yaml
+func:
+  - fun1:
+    cond:                 # 多模板：每个模板各取一张新截图匹配一次
+      - test1.png         # （不点击），全部命中才执行函数体；
+      - test2.png         # 任一未命中 → 函数返回 false（不执行函数体）
+    steps:
+      - find: $1
+```
+
+  - 兼容两种写法：`cond:` + `steps:` 兄弟键（如上，推荐），或 cond 写在函数体之后（`- fun1:` 下先步骤列表、最后 `cond: test.png`）
+  - 注意 YAML 规则：**cond 后不能直接跟同列 `- ` 步骤行**（bad indentation），必须用 `steps:` 键包住函数体
+
+### 跨文件函数调用
+
+子脚本里的函数可直接调用（脚本名与 call 同规则解析：优先同分区、跨分区兜底、缺扩展名自动补全）；**纯函数库脚本**（只定义 func、没有 steps）同样作为调用对象：
+
+```yaml
+# test1.yaml
+func:
+  - fun1:
+    - find: $1
+    - find: $2
+  - fun2:
+    - log xxx
+
+# test2.yaml
+steps:
+  - test1:fun1: test.png test2.png   # 调用 test1.yaml 的 fun1，实参同本地函数
+  - test1:fun2                       # 无参调用
+```
+
+- 函数体/cond 取自被引用脚本的 func 段；体内 `$N` 由调用点实参替换
+- 函数体执行期间被引用脚本的函数可见（体内裸函数名按被引用脚本解析），调用者函数兜底
+- 返回语义与本地函数一致（return / fall-through 默认 true）；then/else、嵌套、上限 32 层同样适用
+- 带 then/else 的无参调用记得写冒号：`- test1:fun2:`（否则被解析成标量字符串步骤）
 
 ## loop —— 循环
 
@@ -207,7 +251,7 @@ steps:
 | 旧写法 | 迁移目标 |
 |---|---|
 | `until` | `find`（障碍模板 `check` → `block`） |
-| `cond` | 颜色条件 → `color`；模板条件 → `find`（短 timeout）+ then/else 或 func 封装 |
+| `cond` | 颜色条件 → `color`；模板条件 → `find`（短 timeout）+ then/else 或 func 封装（func 新增 `cond` 函数级执行条件，2026-08-27） |
 | `exit` | `throw` |
 | `goto` / `label` | `loop` |
 | `count` / `cnt_ivl` / `cnt_chk` / `img_ivl` / `and_or` / `click` / `before` / `after` | 已删除（find 语义内置：命中恒点中心、每轮统一 interval） |
