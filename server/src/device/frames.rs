@@ -63,6 +63,7 @@ where
     owner: &'a InFlight<K, T, E>,
     key: K,
     entry: Arc<InFlightEntry<T, E>>,
+    completed: bool,
 }
 
 impl<K, T, E> Drop for InFlightWaiter<'_, K, T, E>
@@ -72,10 +73,12 @@ where
     E: Send + Sync + 'static,
 {
     fn drop(&mut self) {
-        if self.entry.waiters.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // If this was the last waiter, removing the identity-checked entry also drops
-            // the last Shared future. A cancelled ffmpeg operation therefore observes
-            // kill_on_drop instead of leaving a permanently occupied key behind.
+        let last_waiter = self.entry.waiters.fetch_sub(1, Ordering::AcqRel) == 1;
+        if self.completed || last_waiter {
+            // A completed waiter removes the map entry even when other waiters still consume
+            // its result, so a later request cannot re-use a completed old PNG. A cancelled
+            // ffmpeg operation is removed when it was the last waiter, allowing its future
+            // (and the child process's kill_on_drop) to be dropped.
             self.owner.remove_if_same(&self.key, &self.entry);
         }
     }
@@ -92,7 +95,7 @@ pub struct InFlight<K, T, E> {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct FrameKey {
-    /// Identifies the exact config + GOP snapshot used as decode input.
+    /// Identifies the stable config + GOP generation used to merge an in-flight decode.
     snapshot_generation: u64,
     /// Explicitly separates a parameter-set replacement from an ordinary GOP update.
     config_generation: u64,
@@ -108,12 +111,17 @@ struct FrameSnapshot {
     latest_frame_at: Instant,
 }
 
+struct DecodedFrame {
+    png: Vec<u8>,
+    frame_sequence: u64,
+}
+
 struct FrameState {
     config_buf: Vec<u8>,
     gop: Vec<VideoFrame>,
     /// Counts every received video frame, including repeated config frames.
     frame_sequence: u64,
-    /// Advances only when the bytes that form a decodable snapshot change.
+    /// Advances when a decodable GOP is replaced or invalidated, not for ordinary P frames.
     snapshot_generation: u64,
     config_generation: u64,
     latest_frame_at: Option<Instant>,
@@ -213,12 +221,14 @@ where
         };
 
         entry.waiters.fetch_add(1, Ordering::AcqRel);
-        let waiter = InFlightWaiter {
+        let mut waiter = InFlightWaiter {
             owner: self,
             key,
             entry,
+            completed: false,
         };
         let result = waiter.entry.result.clone().await;
+        waiter.completed = true;
         drop(waiter);
         result
     }
@@ -239,7 +249,7 @@ pub struct FrameCache {
     /// 配置帧、GOP、序号和到达时间必须在同一把锁下观察，避免撕裂快照。
     state: Mutex<FrameState>,
     /// 同一个稳定快照只允许一个真实 ffmpeg 解码，结果/错误由所有 waiter 共享。
-    decode_in_flight: InFlight<FrameKey, Vec<u8>, String>,
+    decode_in_flight: InFlight<FrameKey, DecodedFrame, String>,
     /// 帧尺寸（最近一次成功解码的 PNG 尺寸，供设备信息展示）
     width: RwLock<u32>,
     height: RwLock<u32>,
@@ -338,8 +348,9 @@ impl FrameCache {
         self.state.lock().snapshot()
     }
 
-    fn is_snapshot_current(&self, key: FrameKey) -> bool {
-        self.current_key() == Some(key)
+    fn is_snapshot_current(&self, key: FrameKey, frame_sequence: u64) -> bool {
+        let state = self.state.lock();
+        !state.gop.is_empty() && state.key() == key && state.frame_sequence == frame_sequence
     }
 
     fn current_key(&self) -> Option<FrameKey> {
@@ -391,15 +402,19 @@ impl FrameCache {
                 .run(key, move || async move {
                     Self::decode_once(&ffmpeg_for_decode, &config, &gop)
                         .await
+                        .map(|png| DecodedFrame {
+                            png,
+                            frame_sequence: snapshot_frame_sequence,
+                        })
                         .map_err(|error| error.to_string())
                 })
                 .await;
 
             match decoded {
-                Ok(png) => {
-                    if self.is_snapshot_current(key) {
-                        self.record_png_dims(&png);
-                        return Ok(Some((*png).clone()));
+                Ok(decoded) => {
+                    if self.is_snapshot_current(key, decoded.frame_sequence) {
+                        self.record_png_dims(&decoded.png);
+                        return Ok(Some(decoded.png.clone()));
                     }
 
                     // 不能返回被替换的 config/GOP。只刷新一次，避免视频持续到达时无限追帧；
@@ -408,7 +423,7 @@ impl FrameCache {
                         refreshed_after_stale = true;
                         debug!(
                             "frame snapshot superseded during decode: seq={}, age={:?}",
-                            snapshot_frame_sequence,
+                            decoded.frame_sequence,
                             snapshot_latest_frame_at.elapsed()
                         );
                         continue;
@@ -589,6 +604,7 @@ mod tests {
 
         cache.feed(&video_frame(2, false, true));
         let first = cache.snapshot().expect("keyframe creates a snapshot");
+        assert!(cache.is_snapshot_current(first.key, first.frame_sequence));
         cache.feed(&video_frame(3, false, false));
         let second = cache.snapshot().expect("P frame extends the snapshot");
 
@@ -600,6 +616,8 @@ mod tests {
         assert_eq!(second.key.config_generation, first.key.config_generation);
         assert!(second.frame_sequence > first.frame_sequence);
         assert!(second.latest_frame_at >= first.latest_frame_at);
+        assert!(!cache.is_snapshot_current(first.key, first.frame_sequence));
+        assert!(cache.is_snapshot_current(second.key, second.frame_sequence));
     }
 
     #[test]
@@ -614,7 +632,7 @@ mod tests {
         let current = cache.snapshot().expect("replacement snapshot");
 
         assert_ne!(old.key, current.key);
-        assert!(!cache.is_snapshot_current(old.key));
+        assert!(!cache.is_snapshot_current(old.key, old.frame_sequence));
         assert!(!cache.clear_gop_if_same(old.key));
 
         let preserved = cache.snapshot().expect("new GOP remains available");
