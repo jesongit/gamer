@@ -341,7 +341,7 @@
                   <option value="dl">dl · 左下</option>
                   <option value="dr">dr · 右下</option>
                 </select>
-                <input v-model="tplSearch" class="input input-sm mono tpl-search" placeholder="🔍 模糊搜索模板…" title="模糊搜索模板名（短名/带 #后缀 全名均可，按匹配位置排序）" />
+                <input v-model="tplSearch" class="input input-sm mono tpl-search" placeholder="🔍 模糊/拼音首字母搜索…" title="模糊搜索模板名（短名/带 #后缀 全名均可，按匹配位置排序）；中文名支持拼音首字母，如 rcyq 命中 日常遗器.png；三类命中并列展示，文字命中排前" />
                 <button class="btn btn-sm" :class="{ active: picking }" @click="togglePick" :disabled="!connected" title="在画面上框选区域保存为模板">✂️ 框选</button>
                 <button class="btn btn-sm" @click="$refs.tplUpload.click()" title="上传图片模板">⬆️ 上传</button>
                 <input ref="tplUpload" type="file" accept="image/png,image/jpeg" hidden @change="onTplUpload" />
@@ -498,6 +498,7 @@ const APP_CACHE_TTL = 5 * 60 * 1000
 <script setup>
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, inject } from 'vue'
 import { load as yamlLoad } from 'js-yaml'
+import { pinyin } from 'pinyin-pro'
 import { useRouter } from 'vue-router'
 import { store, devicesData, scriptsData, templatesData, useToast } from '../store'
 import { api } from '../api'
@@ -744,17 +745,36 @@ const devices = computed(() => devicesData.value)
 const scripts = computed(() => scriptsData.value)
 // 模板模糊搜索词（短名/带 #后缀 全名均可命中）
 const tplSearch = ref('')
+// 模板名拼音首字母缓存（非汉字字符原样保留）：「日常遗器.png」→ "rcyq.png"，供搜索匹配
+const tplPyCache = new Map()
+function tplPinyinInitials(name) {
+  let s = tplPyCache.get(name)
+  if (s === undefined) {
+    s = pinyin(name, { pattern: 'first', toneType: 'none', type: 'array' })
+      .join('').replace(/\s+/g, '').toLowerCase()
+    tplPyCache.set(name, s)
+  }
+  return s
+}
+
 // 模板列表：当前应用分区过滤（templatesData 为跨分区全量，条目带 pkg 字段）；
-// 有搜索词时按子串匹配位置排序（短名优先同级按修改时间倒序），无搜索词按修改时间倒序
+// 有搜索词时三口径并列匹配（全名/短名子串 + 中文名拼音首字母），任一命中即展示，
+// 排序按最早命中位置（拼音命中加偏移恒排文字命中之后），同级按修改时间倒序；无搜索词按修改时间倒序
 const templates = computed(() => {
   let list = templatesData.value.filter(t => t.pkg === activePkg.value)
   const q = tplSearch.value.trim().toLowerCase()
   if (q) {
+    // 首字母串不含中文，查询词含中文时跳过该口径（必然无交集）
+    const pyAble = !/[\u4e00-\u9fff]/.test(q)
+    const PY_OFFSET = 1e4
     list = list.map(t => {
-      const short = tplShortName(t.name)
-      const fi = t.name.toLowerCase().indexOf(q)
-      const si = short.toLowerCase().indexOf(q)
-      const idx = fi === -1 ? si : (si === -1 ? fi : Math.min(fi, si))
+      let idx = t.name.toLowerCase().indexOf(q)
+      const si = tplShortName(t.name).toLowerCase().indexOf(q)
+      if (idx === -1 || (si !== -1 && si < idx)) idx = si
+      if (idx === -1 && pyAble) {
+        const pi = tplPinyinInitials(t.name).indexOf(q)
+        if (pi !== -1) idx = PY_OFFSET + pi
+      }
       return idx === -1 ? null : { t, idx }
     }).filter(Boolean).sort((a, b) => a.idx - b.idx || (b.t.mtime || 0) - (a.t.mtime || 0)).map(x => x.t)
   } else {
