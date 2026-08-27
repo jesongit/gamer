@@ -157,6 +157,25 @@ describe('③ 启动 202 快速返回（run_id 即刻主键，不等终态）', 
     expect(storeMod.getActiveRun('dev-4')?.script_id).toBe('p/fast.yml')
   })
 
+  it('run_id 查询响应推进 running → success，终态后不再保留设备占用', async () => {
+    storeMod.store.deviceId = 'dev-4b'
+    storeMod.applyRunRecord({ run_id: 'run-query', state: 'starting', device_id: 'dev-4b', script_id: 'p/q.yml' })
+    fetch.mockResolvedValueOnce(res(200, {
+      run_id: 'run-query', state: 'running', device_id: 'dev-4b', script_id: 'p/q.yml',
+    }))
+    const running = await api.getRun('run-query')
+    expect(fetch.mock.calls[0][0]).toBe('/api/runs/run-query')
+    storeMod.applyRunRecord(running)
+    expect(storeMod.store.runId).toBe('run-query')
+
+    fetch.mockResolvedValueOnce(res(200, {
+      run_id: 'run-query', state: 'success', device_id: 'dev-4b', script_id: 'p/q.yml',
+    }))
+    storeMod.applyRunRecord(await api.getRun('run-query'))
+    expect(storeMod.getActiveRun('dev-4b')).toBeNull()
+    expect(storeMod.store.running).toBe(false)
+  })
+
   it('任务立即执行 202 {run_id} → shortRunId 截取组成「已触发（run xxxxxxxx）」提示', async () => {
     fetch.mockResolvedValueOnce(res(202, { run_id: '550e8400-e29b-41d4-a716-446655440000' }))
     const rep = await api.runTaskNow('task-1')
@@ -220,6 +239,22 @@ describe('④ 取消与终态状态机迁移', () => {
     // 5xx 是真实服务端错误：api 层抛出的错误带 status，不得静默降级
     const e500 = Object.assign(new Error('internal'), { status: 500 })
     expect(runs.isMissingEndpointError(e500)).toBe(false)
+  })
+
+  it('取消按 run_id 定位且 202 后保持 stopping，只有缺失端点才需要旧 script_id 降级', async () => {
+    storeMod.store.deviceId = 'dev-7'
+    storeMod.applyRunRecord({ run_id: 'run-stop', state: 'running', device_id: 'dev-7', script_id: 'p/stop.yml' })
+    storeMod.beginCancel('run-stop')
+    expect(storeMod.getActiveRun('dev-7')?.state).toBe('stopping')
+
+    fetch.mockResolvedValueOnce(res(202, { cancelling: true }))
+    await api.cancelRun('run-stop')
+    expect(fetch.mock.calls[0][0]).toBe('/api/runs/run-stop/cancel')
+    expect(fetch.mock.calls[0][1].method).toBe('POST')
+
+    fetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    await expect(api.cancelRun('run-stop')).rejects.toThrow('Failed to fetch')
+    expect(runs.isMissingEndpointError(new TypeError('Failed to fetch'))).toBe(true)
   })
 })
 

@@ -8,7 +8,7 @@
       <div class="head-actions">
         <button class="btn" @click="validate">✔ 校验</button>
         <button v-if="!store.running" class="btn btn-primary" @click="run">▶ 运行</button>
-        <button v-else class="btn btn-danger" @click="stop">■ 停止</button>
+        <button v-else class="btn btn-danger" :disabled="runStopping" @click="stop">{{ runStopping ? '■ 停止中…' : '■ 停止' }}</button>
         <button class="btn" @click="save">💾 保存</button>
       </div>
     </div>
@@ -151,13 +151,23 @@ steps:
         </div>
       </div>
     </div>
+    <RunConflictModal />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
-import { scriptsData, devicesData, store, useToast } from '../store'
+import {
+  scriptsData, devicesData, store, useToast,
+  applyRunRecord, beginCancel, findRun, resetStoreRunState, pushRunConflict,
+} from '../store'
 import { api } from '../api'
+import {
+  normalizeActiveRunResponse, normalizeStartReply,
+  isMissingEndpointError, isDeviceBusyConflict, isTerminalRunState, terminalLabel,
+  describeConflict,
+} from '../runs'
+import RunConflictModal from '../components/RunConflictModal.vue'
 
 const toast = useToast()
 const scripts = scriptsData
@@ -168,6 +178,10 @@ const valid = ref(null)
 const showHelp = ref(false)
 // 保存目标应用分区（= 应用包名）：编辑已有脚本=其所在分区，新建=当前设备 pkg
 const edPkg = ref('')
+const runStopping = computed(() => {
+  const rec = store.runId ? findRun(store.runId) : null
+  return rec?.state === 'stopping'
+})
 
 const DEFAULT_CODE = `config:
   interval: 500ms
@@ -287,8 +301,9 @@ async function save() {
   }
 }
 
-// 运行状态轮询：服务端异步执行脚本（run 接口立即返回），
-// 轮询 status 直到脚本真正结束，才复位运行状态（按钮/顶栏芯片随之恢复）
+// 运行状态轮询：服务端异步执行脚本（run 接口立即返回）。
+// 新后端以 run_id 查询并驱动状态机；旧后端只有在新端点明确缺失（404/网络错）时
+// 才退回 script_id status，避免同一脚本的多个执行实例互相覆盖状态。
 let runStatusTimer = null
 
 function startRunStatusPoll() {
@@ -302,12 +317,43 @@ function stopRunStatusPoll() {
 }
 
 async function checkRunStatus() {
-  if (!store.running || !store.runScriptId) { stopRunStatusPoll(); return }
+  if (!store.running) { stopRunStatusPoll(); return }
+  if (store.runId) {
+    const rid = store.runId
+    let rec = null
+    try {
+      rec = await api.getRun(rid)
+    } catch (e) {
+      if (!isMissingEndpointError(e)) return
+      const sid = findRun(rid)?.script_id || store.runScriptId
+      if (!sid) { stopRunStatusPoll(); resetStoreRunState(); return }
+      try {
+        const st = await api.scriptStatus(sid)
+        rec = {
+          run_id: rid,
+          device_id: store.deviceId,
+          script_id: sid,
+          state: st.running ? 'running' : 'cancelled',
+          degraded: true,
+        }
+      } catch (e2) { return }
+    }
+    if (!rec || !rec.run_id) return
+    const merged = applyRunRecord(rec)
+    if (merged && isTerminalRunState(merged.state)) {
+      stopRunStatusPoll()
+      const detail = merged.degraded ? '' : `：${terminalLabel(merged.state)}${merged.error ? `（${merged.error}）` : ''}`
+      toast(`脚本已结束${detail}`, merged.degraded || merged.state === 'success' ? 'info' : 'warn')
+    }
+    return
+  }
+
+  // 兼容旧后端或旧页面会话：此分支没有执行实例 ID，只能使用旧 script_id 接口。
+  if (!store.runScriptId) { stopRunStatusPoll(); return }
   try {
     const st = await api.scriptStatus(store.runScriptId)
     if (!st.running) {
-      store.running = false
-      store.runScriptId = null
+      resetStoreRunState()
       stopRunStatusPoll()
       toast('脚本已结束', 'info')
     }
@@ -318,24 +364,57 @@ async function run() {
   if (!sel.value?.id) return toast('请先保存脚本', 'error')
   if (!store.deviceId) return toast('请先选择设备（投屏控制 → 设备页签）', 'error')
   try {
-    store.running = true
-    store.runScript = sel.value.name
-    store.runScriptId = sel.value.id
-    await api.runScript(sel.value.id, store.deviceId)
+    const rep = await api.runScript(sel.value.id, store.deviceId)
+    const started = normalizeStartReply(rep)
+    if (started) {
+      // 202 {run_id}：登记实例后再开始轮询，运行状态不再以 script_id 表示。
+      applyRunRecord({
+        run_id: started.run_id,
+        state: started.state,
+        device_id: store.deviceId,
+        script_id: sel.value.id,
+        source: 'manual',
+        display: sel.value.name,
+      })
+    } else {
+      // 旧后端 200 {ok:true}：保留原有 script_id 兼容句柄。
+      store.running = true
+      store.runScript = sel.value.name
+      store.runScriptId = sel.value.id
+    }
     toast('脚本已开始运行', 'success')
     startRunStatusPoll()
   } catch (e) {
-    store.running = false
-    store.runScriptId = null
-    toast('运行失败：' + e.message, 'error')
+    if (isDeviceBusyConflict(e)) {
+      const info = { ...(e.data || {}), device_id: store.deviceId }
+      pushRunConflict(info)
+      toast(describeConflict(info), 'warn')
+    } else {
+      toast('运行失败：' + e.message, 'error')
+    }
   }
 }
 
 function stop() {
+  if (store.runId) {
+    const rid = store.runId
+    beginCancel(rid)
+    api.cancelRun(rid).catch(e => {
+      if (isMissingEndpointError(e)) {
+        const sid = findRun(rid)?.script_id || store.runScriptId
+        if (sid) api.stopScript(sid).catch(() => {})
+      }
+    })
+    // 保留 stopping 状态和轮询，直到服务端返回终态；避免停止请求尚未生效时
+    // 立即恢复运行按钮造成同设备并行启动。
+    toast('已发送停止指令，等待脚本退出…', 'warn')
+    return
+  }
+
+  // 兼容旧后端会话：没有 run_id 时才使用 script_id 停止并立即恢复旧 UI。
   if (!store.runScriptId) return
   api.stopScript(store.runScriptId).catch(() => {})
-  store.running = false
-  store.runScriptId = null
+  resetStoreRunState()
   stopRunStatusPoll()
   toast('已发送停止指令，脚本将在当前步骤结束后停止', 'warn')
 }
@@ -360,12 +439,46 @@ async function loadDevices() {
   try { devices.value = await api.listDevices() } catch (e) {}
 }
 
-onMounted(() => {
-  loadScripts(); loadDevices()
-  // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
-  if (store.running && store.runScriptId) startRunStatusPoll()
+onMounted(async () => {
+  await Promise.all([loadScripts(), loadDevices()])
+  // 直接刷新在脚本页时 store 尚未经过 Console 初始化：复用 Console 保存的设备选择，
+  // 这样后续 deviceRun 查询仍能恢复该设备上正在执行的 run_id。
+  if (!store.deviceId) {
+    const saved = localStorage.getItem('gb_device_id')
+    if (saved && devices.value.some(d => d.id === saved)) store.deviceId = saved
+  }
+  // 刷新后 store 是空内存态：按当前设备恢复服务端活动 run；SPA 切页时则复用已有 run。
+  if (!store.running) await restoreRunState()
+  // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）。
+  if (store.running && (store.runId || store.runScriptId)) startRunStatusPoll()
 })
 onUnmounted(() => stopRunStatusPoll())
+
+/** 页面刷新后按设备恢复活动运行实例；旧后端响应保留 script_id 降级路径。 */
+async function restoreRunState() {
+  if (!store.deviceId || store.running) return
+  let rep
+  try {
+    rep = await api.deviceRun(store.deviceId)
+  } catch (e) {
+    return
+  }
+  const rec = normalizeActiveRunResponse(rep)
+  if (!rec) return
+
+  const script = scripts.value.find(s => s.id === rec.script_id)
+  const display = rec.script_name || script?.name || rec.script_id
+  if (rec.run_id) {
+    applyRunRecord({ ...rec, device_id: store.deviceId, display })
+  } else {
+    store.running = true
+    store.runScript = display
+    store.runScriptId = rec.script_id
+  }
+  sel.value = script || { id: rec.script_id, name: display, content: '' }
+  startRunStatusPoll()
+  toast(`检测到 ${display} 正在运行，已恢复状态`, 'info')
+}
 </script>
 
 <style scoped>

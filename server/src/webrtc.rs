@@ -14,6 +14,9 @@ use tracing::{debug, info, warn};
 use crate::config::Config;
 use crate::device::scrcpy::{AudioFrame, ScrcpySession, VideoFrame};
 
+#[path = "webrtc_protocol.rs"]
+mod protocol;
+
 /// 每设备活跃 viewer 注册表条目：
 /// - running/peer 用于"新连接踢旧连接"（停旧 pusher + 关旧 peer）
 /// - control_dc 供服务端反向给浏览器推消息（脚本 tap/swipe/匹配命中可视化事件）
@@ -264,7 +267,7 @@ impl ViewerSession {
             .local_description()
             .await
             .ok_or_else(|| anyhow::anyhow!("no local description"))?;
-        let payload_type = parse_h264_payload_type(&answer_sdp.sdp).unwrap_or(96);
+        let payload_type = protocol::payload_type_for(&answer_sdp.sdp, "H264/90000").unwrap_or(96);
         let ssrc = rtp_sender
             .get_parameters()
             .await
@@ -272,7 +275,8 @@ impl ViewerSession {
             .first()
             .map(|e| e.ssrc)
             .unwrap_or(12345);
-        let audio_payload_type = parse_opus_payload_type(&answer_sdp.sdp).unwrap_or(111);
+        let audio_payload_type =
+            protocol::payload_type_for(&answer_sdp.sdp, "opus/48000").unwrap_or(111);
         let audio_ssrc = audio_rtp_sender
             .get_parameters()
             .await
@@ -1163,39 +1167,7 @@ async fn send_config_nalus(
 ) -> bool {
     // Annex-B start code 切分 NALU
     let d = cfg.as_ref();
-    let mut nals: Vec<&[u8]> = Vec::new();
-    let mut pos = 0usize;
-    while pos < d.len() {
-        let sc_len = if pos + 4 <= d.len() && d[pos..pos + 4] == [0, 0, 0, 1] {
-            4
-        } else if pos + 3 <= d.len() && d[pos..pos + 3] == [0, 0, 1] {
-            3
-        } else {
-            0
-        };
-        if sc_len == 0 {
-            pos += 1;
-            continue;
-        }
-        let ns = pos + sc_len;
-        let mut ne = d.len();
-        let mut zc = 0usize;
-        for (i, b) in d.iter().enumerate().skip(ns) {
-            if *b == 0 {
-                zc += 1;
-                continue;
-            }
-            if *b == 1 && zc >= 2 {
-                ne = i - zc;
-                break;
-            }
-            zc = 0;
-        }
-        if ne > ns {
-            nals.push(&d[ns..ne]);
-        }
-        pos = ne;
-    }
+    let nals = protocol::annexb_nalus(d);
     if nals.is_empty() {
         return true;
     }

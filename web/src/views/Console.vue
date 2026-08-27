@@ -513,6 +513,12 @@ import ScriptPicker from '../components/ScriptPicker.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import { createScriptValidator } from '../script-language/validate'
 import { computeRunLineMap } from '../script-language/line-map'
+import {
+  defaultTemplateName,
+  deviceRectStyle as mapDeviceRectStyle,
+  selectionToDeviceRect,
+  toDeviceCoord as mapToDeviceCoord,
+} from '../console/geometry'
 
 const router = useRouter()
 const toast = useToast()
@@ -1196,16 +1202,7 @@ function deviceRectStyle(x, y, w = 0, h = 0) {
   const vw = videoWrap.value
   if (!vw) return {}
   const rect = vw.getBoundingClientRect()
-  const vw_ = rect.width, vh = rect.height
-  const sw = videoElement.value?.videoWidth || 1920
-  const sh = videoElement.value?.videoHeight || 1080
-  const ratio = Math.min(vw_ / sw, vh / sh)
-  return {
-    left: (x * ratio) + (vw_ - sw * ratio) / 2 + 'px',
-    top: (y * ratio) + (vh - sh * ratio) / 2 + 'px',
-    width: w * ratio + 'px',
-    height: h * ratio + 'px',
-  }
+  return mapDeviceRectStyle(x, y, w, h, rect, videoElement.value?.videoWidth, videoElement.value?.videoHeight)
 }
 
 /** 脚本运行可视化效果位置（tap 圆点居中偏移由 .alt-tap 的 transform 处理） */
@@ -1755,14 +1752,7 @@ function onControlMessage(e) {
 function toDeviceCoord(clientX, clientY) {
   const video = videoElement.value
   const rect = video.getBoundingClientRect()
-  const vw = video.videoWidth || 1920
-  const vh = video.videoHeight || 1080
-  const ratio = Math.min(rect.width / vw, rect.height / vh)
-  const dispW = vw * ratio, dispH = vh * ratio
-  const offX = (rect.width - dispW) / 2, offY = (rect.height - dispH) / 2
-  const x = Math.round((clientX - rect.left - offX) / dispW * vw)
-  const y = Math.round((clientY - rect.top - offY) / dispH * vh)
-  return { x: Math.max(0, Math.min(vw, x)), y: Math.max(0, Math.min(vh, y)) }
+  return mapToDeviceCoord(clientX, clientY, rect, video.videoWidth, video.videoHeight)
 }
 
 // 触控状态
@@ -1909,35 +1899,13 @@ function onVideoMouseLeave() {
 /** 框选矩形（容器 CSS 坐标）→ 设备像素坐标，自动裁剪 letterbox 黑边并夹取到画面内 */
 function selToDeviceRect() {
   const video = videoElement.value
-  const vw = video?.videoWidth || 1920
-  const vh = video?.videoHeight || 1080
   const rect = videoWrap.value.getBoundingClientRect()
-  const ratio = Math.min(rect.width / vw, rect.height / vh)
-  const dispW = vw * ratio, dispH = vh * ratio
-  const offX = (rect.width - dispW) / 2, offY = (rect.height - dispH) / 2
-  const toDev = p => ({ x: (p.x - offX) / dispW * vw, y: (p.y - offY) / dispH * vh })
-  const p1 = toDev(selStart), p2 = toDev(selEnd)
-  const x = Math.round(Math.min(p1.x, p2.x)), y = Math.round(Math.min(p1.y, p2.y))
-  const w = Math.round(Math.abs(p2.x - p1.x)), h = Math.round(Math.abs(p2.y - p1.y))
-  const cx = Math.max(0, Math.min(vw, x)), cy = Math.max(0, Math.min(vh, y))
-  return { x: cx, y: cy, w: Math.min(w, vw - cx), h: Math.min(h, vh - cy) }
-}
-
-function randomTplBase() {
-  return 'tpl_' + Math.random().toString(36).slice(2, 8)
+  return selectionToDeviceRect(selStart, selEnd, rect, video?.videoWidth, video?.videoHeight)
 }
 
 /** 生成默认模板名：随机名字#x1_y1_x2_y2（相对坐标 0~1，×1000 存 3 位整数，如 0.123→123，不带 .png 后缀） */
 function defaultTplName(rect) {
-  const vw = videoElement.value?.videoWidth || 1920
-  const vh = videoElement.value?.videoHeight || 1080
-  // ×1000 取整，3 位定宽补零；1.0 边缘收敛到 999，避免出现 4 位数与旧格式混淆
-  const toInt3 = v => String(Math.min(999, Math.round(v * 1000))).padStart(3, '0')
-  const x1 = toInt3(rect.x / vw)
-  const y1 = toInt3(rect.y / vh)
-  const x2 = toInt3((rect.x + rect.w) / vw)
-  const y2 = toInt3((rect.y + rect.h) / vh)
-  return `${randomTplBase()}#${x1}_${y1}_${x2}_${y2}`
+  return defaultTemplateName(rect, videoElement.value?.videoWidth, videoElement.value?.videoHeight)
 }
 
 // ---------- 二次裁切 ----------

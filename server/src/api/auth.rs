@@ -22,9 +22,11 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{header, header::HeaderMap, Method, Request, StatusCode};
@@ -53,15 +55,71 @@ const MAX_TRACKED_IPS: usize = 10_000;
 pub enum Credential {
     /// 环境变量 GAMER_ADMIN_PASSWORD（优先级最高）
     EnvPassword(String),
-    /// config [auth].password_hash = sha256$salt$hex
+    /// config [auth].password_hash = sha256$salt$hex（仅兼容旧配置，成功登录后升级）
     Hash { salt: Vec<u8>, digest: Vec<u8> },
-    /// 兼容旧明文 password 字段（默认 admin/admin123）
+    /// Argon2id PHC 哈希（推荐配置格式）
+    Argon2(String),
+    /// 兼容旧明文 password 字段（默认 admin/admin123）；成功登录后仅在内存中升级
     Plain(String),
 }
 
-/// 解析 `sha256$salt$hex` 口令哈希格式。
-/// salt：hex 编码、≥8 字节（16 hex 字符）；digest：sha256 摘要 32 字节的 hex（64 字符）。
+/// 解析 Argon2id PHC 或旧版 `sha256$salt$hex` 口令哈希格式。
+///
+/// 旧格式只为迁移期保留，不能作为新配置生成格式；Argon2 参数和摘要格式
+/// 交由 password-hash 解析器校验，避免自行重新实现 PHC 语法。
 pub fn parse_password_hash(s: &str) -> Result<Credential, String> {
+    let trimmed = s.trim();
+    if trimmed.starts_with("$argon2id$") {
+        validate_argon2_phc(trimmed)?;
+        return Ok(Credential::Argon2(trimmed.to_string()));
+    }
+
+    parse_legacy_sha256_hash(trimmed)
+}
+
+fn validate_argon2_phc(s: &str) -> Result<(), String> {
+    let parts: Vec<&str> = s.split('$').collect();
+    if parts.len() != 6 || !parts[0].is_empty() || parts[1] != "argon2id" {
+        return Err("argon2id PHC 哈希段数或算法非法".into());
+    }
+    if parts[2] != "v=19" {
+        return Err("argon2id 仅支持 v=19".into());
+    }
+    let mut memory_kib = None;
+    let mut iterations = None;
+    let mut lanes = None;
+    for parameter in parts[3].split(',') {
+        let (name, value) = parameter
+            .split_once('=')
+            .ok_or_else(|| "argon2id 参数格式非法".to_string())?;
+        let value = value
+            .parse::<u32>()
+            .map_err(|_| "argon2id 参数值非法".to_string())?;
+        match name {
+            "m" if memory_kib.is_none() => memory_kib = Some(value),
+            "t" if iterations.is_none() => iterations = Some(value),
+            "p" if lanes.is_none() => lanes = Some(value),
+            _ => return Err("argon2id 参数集合非法".into()),
+        }
+    }
+    let memory_kib = memory_kib.ok_or_else(|| "argon2id 缺少 m 参数".to_string())?;
+    let iterations = iterations.ok_or_else(|| "argon2id 缺少 t 参数".to_string())?;
+    let lanes = lanes.ok_or_else(|| "argon2id 缺少 p 参数".to_string())?;
+    if !(8 * 1024..=1024 * 1024).contains(&memory_kib)
+        || !(1..=10).contains(&iterations)
+        || !(1..=16).contains(&lanes)
+        || parts[4].is_empty()
+        || parts[5].is_empty()
+    {
+        return Err("argon2id 参数超出安全范围或摘要为空".into());
+    }
+    PasswordHash::new(s).map_err(|_| "argon2id PHC 哈希编码非法".to_string())?;
+    Ok(())
+}
+
+/// 解析仅用于兼容的 `sha256$salt$hex` 口令哈希格式。
+/// salt：hex 编码、≥8 字节（16 hex 字符）；digest：sha256 摘要 32 字节的 hex（64 字符）。
+fn parse_legacy_sha256_hash(s: &str) -> Result<Credential, String> {
     let parts: Vec<&str> = s.trim().split('$').collect();
     if parts.len() != 3 || parts[0] != "sha256" {
         return Err(format!("段数 {} 不符或算法前缀不是 sha256", parts.len()));
@@ -75,6 +133,17 @@ pub fn parse_password_hash(s: &str) -> Result<Credential, String> {
         return Err(format!("digest 长 {} 字节，sha256 应为 32", digest.len()));
     }
     Ok(Credential::Hash { salt, digest })
+}
+
+/// 生成可直接放入 `[auth].password_hash` 的 Argon2id PHC 哈希。
+///
+/// 调用方只能得到不可逆哈希；密码不会写日志，也不会由本模块落盘。
+pub fn hash_password(password: &str) -> Result<String, String> {
+    let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|_| "argon2id 口令哈希生成失败".to_string())
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
@@ -136,7 +205,7 @@ pub enum LoginError {
 
 pub struct AuthState {
     inner: Mutex<Inner>,
-    credential: Credential,
+    credential: RwLock<Credential>,
     secure_cookies: bool,
     /// 回环管理令牌（None = 通道禁用）
     admin_token: Option<String>,
@@ -162,7 +231,7 @@ impl AuthState {
                 sessions: HashMap::new(),
                 fails: HashMap::new(),
             }),
-            credential,
+            credential: RwLock::new(credential),
             secure_cookies,
             admin_token,
             cfg,
@@ -171,9 +240,9 @@ impl AuthState {
 
     /// 当前生效的凭据来源描述（启动摘要日志用，绝不含凭据内容）
     pub fn credential_source(&self) -> &'static str {
-        match &self.credential {
+        match &*self.credential.read().unwrap() {
             Credential::EnvPassword(_) => "env:GAMER_ADMIN_PASSWORD",
-            Credential::Hash { .. } => "config:password_hash",
+            Credential::Hash { .. } | Credential::Argon2(_) => "config:password_hash",
             Credential::Plain(_) => "config:password(legacy plain)",
         }
     }
@@ -182,10 +251,19 @@ impl AuthState {
         self.secure_cookies
     }
 
-    /// 凭据核验：一律比较定长 sha256 摘要，规避时序侧信道（api 模块测试亦复用）
+    /// 凭据核验：新配置使用 Argon2id；旧格式仅作为迁移兼容路径。
     pub(crate) fn verify_credentials(&self, input: &str) -> bool {
-        match &self.credential {
+        match &*self.credential.read().unwrap() {
+            Credential::Argon2(encoded) => {
+                let Ok(parsed) = PasswordHash::new(encoded) else {
+                    return false;
+                };
+                Argon2::default()
+                    .verify_password(input.as_bytes(), &parsed)
+                    .is_ok()
+            }
             Credential::EnvPassword(p) | Credential::Plain(p) => {
+                // 迁移兼容：不再作为新配置格式；成功登录后会替换为 Argon2id。
                 ct_eq(&sha256(input.as_bytes()), &sha256(p.as_bytes()))
             }
             Credential::Hash { salt, digest } => {
@@ -248,6 +326,10 @@ impl AuthState {
             return Err(LoginError::Invalid);
         }
 
+        // 旧明文/旧 SHA-256 只在成功认证后于内存中升级；不回写配置文件，
+        // 不记录 password，也不把 password 带入错误信息。下次进程启动时仍
+        // 可读取旧配置，直到管理员将新 PHC 哈希写入 password_hash。
+        self.upgrade_legacy_credential(password);
         g.fails.remove(ip_key); // 成功即清空该来源失败计数
         let sid = random_hex_id(32); // 256bit 高熵 ID
         g.sessions.insert(
@@ -259,6 +341,19 @@ impl AuthState {
             },
         );
         Ok((sid, "admin".to_string()))
+    }
+
+    fn upgrade_legacy_credential(&self, password: &str) {
+        let Ok(encoded) = hash_password(password) else {
+            return;
+        };
+        let mut credential = self.credential.write().unwrap();
+        if matches!(
+            &*credential,
+            Credential::EnvPassword(_) | Credential::Hash { .. } | Credential::Plain(_)
+        ) {
+            *credential = Credential::Argon2(encoded);
+        }
     }
 
     /// 校验并滑动续期：命中返回用户名；绝对/空闲到期均即时销毁并拒绝
@@ -621,6 +716,71 @@ mod tests {
     }
 
     #[test]
+    fn argon2id_hash_roundtrip_and_wrong_password() {
+        let encoded = hash_password("argon-secret").unwrap();
+        assert!(encoded.starts_with("$argon2id$"), "{encoded}");
+        let credential = parse_password_hash(&encoded).unwrap();
+        assert!(matches!(credential, Credential::Argon2(_)));
+        let st = state(credential, 60, 60, 10, 300);
+        assert!(st.verify_credentials("argon-secret"));
+        assert!(!st.verify_credentials("wrong-password"));
+    }
+
+    #[test]
+    fn argon2id_hash_format_and_parameter_boundaries_are_rejected() {
+        for bad in [
+            "$argon2i$v=19$m=19456,t=2,p=1$c2FsdA$YWJjZA",
+            "$argon2id$v=19$m=19456,t=2,p=1$not-base64$not-base64",
+            "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$",
+            "$argon2id$v=18$m=19456,t=2,p=1$c2FsdA$YWJjZA",
+            "$argon2id$v=19$m=0,t=2,p=1$c2FsdA$YWJjZA",
+        ] {
+            assert!(parse_password_hash(bad).is_err(), "{bad} 不应解析成功");
+        }
+    }
+
+    #[test]
+    fn legacy_credentials_upgrade_in_memory_after_successful_login() {
+        let salt = vec![0x42; 16];
+        let mut digest_input = salt.clone();
+        digest_input.extend_from_slice(b"legacy-secret");
+        let digest = sha256(&digest_input).to_vec();
+        let st = state(Credential::Hash { salt, digest }, 60, 60, 10, 300);
+
+        assert!(st.verify_credentials("legacy-secret"));
+        let (sid, _) = st
+            .attempt_login("admin", "legacy-secret", "legacy-ip")
+            .unwrap();
+        assert!(st.validate(&sid).is_some());
+        assert!(matches!(
+            &*st.credential.read().unwrap(),
+            Credential::Argon2(encoded) if encoded.starts_with("$argon2id$")
+                && !encoded.contains("legacy-secret")
+        ));
+        assert!(st.verify_credentials("legacy-secret"));
+        assert!(!st.verify_credentials("wrong-password"));
+    }
+
+    #[test]
+    fn legacy_plain_password_is_not_retained_after_successful_login() {
+        let st = state(
+            Credential::Plain("legacy-plain-secret".into()),
+            60,
+            60,
+            10,
+            300,
+        );
+        let (sid, _) = st
+            .attempt_login("admin", "legacy-plain-secret", "plain-ip")
+            .unwrap();
+        assert!(st.validate(&sid).is_some());
+        assert!(matches!(
+            &*st.credential.read().unwrap(),
+            Credential::Argon2(encoded) if !encoded.contains("legacy-plain-secret")
+        ));
+    }
+
+    #[test]
     fn session_lifecycle_absolute_and_sliding() {
         let st = state(
             Credential::Plain("pw".into()),
@@ -652,7 +812,7 @@ mod tests {
         assert_eq!(st.validate(&sid), None, "空闲超期未活动应失效");
 
         // 活动即续期：idle=1s 下每 600ms 探一次，远小于 abs，永远活着
-        let st2 = state(Credential::Plain("pw".into()), 1, 10_000, 10, 300);
+        let st2 = state(Credential::Plain("pw".into()), 2, 10_000, 10, 300);
         let (sid2, _) = st2.attempt_login("admin", "pw", "ipC").unwrap();
         for _ in 0..4 {
             sleep_ms(600);
