@@ -54,6 +54,7 @@ export function createScriptValidator({ templatesData, scriptsData, activePkg })
         if (!m) continue
         let j = i + 1
         while (j < lines.length && !lines[j].trim()) j++
+        if (j >= lines.length) continue // 末尾「键: 值」行 + 空行到 EOF：越界防御，落通用兜底提示
         const nm = lines[j].match(/^(\s*)-\s/)
         if (nm && nm[1].length > m[1].length) {
           return [`YAML 语法错误（第 ${i + 1} 行）：「${m[0].trim()}」后跟着更深缩进的 "- " 步骤行——子步骤不挂在任何键上（漏写分支键）：find 的步骤须写在 then:/else: 键正下方，如
@@ -70,6 +71,7 @@ export function createScriptValidator({ templatesData, scriptsData, activePkg })
         if (!m) continue
         let j = i + 1
         while (j < lines.length && !lines[j].trim()) j++
+        if (j >= lines.length) continue // 同上：越界防御
         const nm = lines[j].match(/^(\s*)-\s/)
         if (nm && nm[1].length === m[1].length) {
           return [`YAML 语法错误（第 ${i + 1} 行）：「${m[0].trim()}」后不能直接跟同列 "- " 步骤行（bad indentation）——子步骤缩进时须挂在分支键（then / else）或步骤列表键正下方，如

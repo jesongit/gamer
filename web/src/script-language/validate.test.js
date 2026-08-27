@@ -567,9 +567,28 @@ describe('YAML 语法兜底提示', () => {
   })
 
   it('非法结构回退通用 js-yaml 错误', () => {
-    // 多文档流非法输入，末尾留注释行避免进入校验器 catch 内 lines[j] 越界
-    // 的启发式扫描（该 NPE 为已知前端缺陷，见最终报告）
-    const errs = v(['---', 'a: 1', '---', 'b: 2', '# tail'].join('\n'))
+    // 多文档流非法输入：启发式扫描须自带末尾越界防御（历史 NPE 已修，
+    // 不再依赖末尾注释行规避进入越界扫描路径）
+    const errs = v(['---', 'a: 1', '---', 'b: 2'].join('\n'))
     expect(errs[0].startsWith('YAML 语法错误')).toBe(true)
   })
+})
+
+describe('YAML 解析失败后的启发式扫描防御（历史 NPE 回归）', () => {
+  // 历史缺陷：YAML 抛错后的启发式扫描里 lines[j].match 在 j 越界时抛
+  // TypeError，而非给出校验提示；三种破损形态均须走通用语法错误兜底
+  const v = makeValidator()
+  const CASES = [
+    ['未闭合 flow 序列收尾', '- a\nb: [\n'],
+    ['未闭合引号收尾', 'title: "未闭合引号\n'],
+    ['「键: 值」行后仅空行到 EOF', '- a\nb: c\n\n\n'],
+  ]
+  for (const [label, content] of CASES) {
+    it(`${label} 不抛 TypeError，回退为通用语法错误提示`, () => {
+      let errs
+      expect(() => { errs = v(content) }).not.toThrow()
+      expect(Array.isArray(errs)).toBe(true)
+      expect(errs[0]).toContain('YAML 语法错误')
+    })
+  }
 })
