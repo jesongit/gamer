@@ -8,6 +8,7 @@ mod api;
 mod config;
 mod device;
 mod engine;
+mod logging;
 mod matcher;
 mod scheduler;
 mod scripts;
@@ -37,26 +38,19 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 日志：默认 stdout；设置 GB_LOG=<文件路径> 时写入文件（追加模式）。
-    // 文件模式用于生产部署——不依赖 shell 重定向管道，
-    // 避免"重定向句柄异常导致进程假死/日志丢失"的问题。
-    let filter =
-        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    if let Ok(path) = std::env::var("GB_LOG") {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .unwrap_or_else(|e| panic!("cannot open GB_LOG {}: {}", path, e));
-        tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_writer(std::sync::Mutex::new(file))
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(filter).init();
+    // 配置先于日志初始化加载：滚动文件的保留天数取自 config.toml（log_retain_days），
+    // 加载失败时进程非零退出（此时尚未有任何 logger，错误只走 stderr）。
+    let cfg = config::Config::load()?;
+
+    // 日志（OPS-003）：GB_LOG 未设置/留空/="stdout" → 纯 stdout，容器部署天然处于
+    // 此形态，轮转与保留交给容器日志驱动；其余值视作基准路径，按天滚动写出
+    // <路径>.YYYY-MM-DD 并统一经非阻塞 worker 落盘——guard 绑定在 main 栈帧上，
+    // 进程退出时 drop 冲刷残余日志。旧"单文件无限追加"模式已移除。
+    let (log_target, _log_guard) = logging::init(cfg.log_retain_days)?;
+    if let logging::LogTarget::RollingFile { dir, .. } = &log_target {
+        info!(dir = %dir.display(), "file logging with daily rotation enabled");
     }
 
-    let cfg = config::Config::load()?;
     info!("GameBot server v{} starting...", env!("CARGO_PKG_VERSION"));
     info!("listen: {}", cfg.listen_addr());
     info!("data dir: {}", cfg.data_dir.display());

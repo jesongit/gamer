@@ -89,10 +89,19 @@ pub struct Config {
     /// 0 = 关闭（空闲会话永不进低功耗）
     #[serde(default = "default_idle_power_secs")]
     pub idle_power_secs: u64,
+    /// 服务端文件日志按天轮转的保留天数（含今天；文件形如
+    /// gamer-server.log.YYYY-MM-DD，超窗旧文件启动及每日零点各清理一次）。
+    /// 仅 GB_LOG 指向文件时生效；0 = 永不清理
+    #[serde(default = "default_log_retain_days")]
+    pub log_retain_days: u32,
 }
 
 fn default_idle_power_secs() -> u64 {
     300
+}
+
+fn default_log_retain_days() -> u32 {
+    14
 }
 
 fn default_interval() -> String {
@@ -129,6 +138,7 @@ impl Default for Config {
             probe_encoder: false,
             op_templates: OpTemplates::default(),
             idle_power_secs: default_idle_power_secs(),
+            log_retain_days: default_log_retain_days(),
         }
     }
 }
