@@ -99,7 +99,7 @@ const MAX_FUNC_DEPTH: usize = 32;
 
 /// 脚本运行可视化事件（服务端 → 浏览器，经 control DataChannel，JSON 格式 {"type":"se","ev":...}）
 /// 注意 rename_all="snake_case"：内部标签默认用变体名原样（"Tap"），
-/// 前端按小写 "tap"/"swipe"/"hit" 匹配（曾因大小写不匹配事件全部被忽略）
+/// 前端按小写 "tap"/"swipe"/"hit"/"miss" 匹配（曾因大小写不匹配事件全部被忽略）
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum ScriptEvent {
@@ -109,6 +109,9 @@ pub enum ScriptEvent {
     Swipe { x1: u32, y1: u32, x2: u32, y2: u32 },
     /// 模板匹配命中（设备像素坐标 + 置信度）
     Hit { tpl: String, x: u32, y: u32, w: u32, h: u32, score: f32 },
+    /// 模板匹配未命中（可视化本次搜索区域，设备像素坐标；
+    /// 调试定位"在哪找、没找到"——轮询期内每轮刷新，命中前持续可见）
+    Miss { tpl: String, x: u32, y: u32, w: u32, h: u32 },
 }
 
 /// 运行器
@@ -1596,7 +1599,9 @@ impl Runner {
         anyhow::bail!("色值只支持 6 位十六进制（ff8800）或 [r, g, b] 数组，收到: {:?}", v)
     }
 
-    /// 匹配单个模板一次（独立取最新截图，不重试）：按模板名 #后缀解析区域后匹配
+    /// 匹配单个模板一次（独立取最新截图，不重试）：按模板名 #后缀解析区域后匹配。
+    /// 未命中时推送 Miss 可视化事件（搜索区域）——find 主模板/block/verify/函数
+    /// cond 都经这里，四条路径统一获得"在哪找、没找到"的调试反馈
     async fn match_one(&self, ctx: &mut Ctx, template: &str) -> anyhow::Result<Option<matcher::MatchResult>> {
         let screen = self.devices.screenshot(&ctx.device_id).await.map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
         let (w, h) = self.screen_size(ctx, &screen);
@@ -1604,7 +1609,12 @@ impl Runner {
             anyhow::bail!("无法获取屏幕尺寸");
         }
         let region = self.region_for(ctx, template, w, h)?;
-        self.match_on_screen(ctx, template, ctx.threshold, region, screen).await
+        let mm = self.match_on_screen(ctx, template, ctx.threshold, region, screen).await?;
+        if mm.is_none() {
+            let [x, y, rw, rh] = region.unwrap_or([0, 0, w, h]);
+            self.emit(&ctx.device_id, ScriptEvent::Miss { tpl: template.to_string(), x, y, w: rw, h: rh }).await;
+        }
+        Ok(mm)
     }
 
     /// 搜索区域：模板名 #后缀（各自独立，见 tpl_region_from_name）> 全屏。

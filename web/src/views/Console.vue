@@ -34,7 +34,7 @@
         ></video>
 
         <!-- 找图命中框演示（模板测试） -->
-        <div v-if="showHit" class="hit-box" :style="hitStyle">
+        <div v-if="showHit" class="hit-box" :class="{ 'hit-miss': hitMiss }" :style="hitStyle">
           <span class="hit-label">{{ hitLabel }}</span>
         </div>
 
@@ -56,7 +56,7 @@
         <div v-if="scriptFx.swipe.show" class="alt-region" :style="fxSwipeStyle">
           <span class="alt-label">swipe</span>
         </div>
-        <div v-if="scriptFx.hit.show" class="hit-box" :style="fxHitStyle">
+        <div v-if="scriptFx.hit.show" class="hit-box" :class="{ 'hit-miss': scriptFx.hit.miss }" :style="fxHitStyle">
           <span class="hit-label">{{ scriptFx.hit.label }}</span>
         </div>
 
@@ -588,12 +588,12 @@ const altGesture = reactive({ active: false, moved: false, start: { x: 0, y: 0 }
 // alt 模式点击/滑动画面反馈（点击圆点 / 滑动 region 框）
 const altFeedback = reactive({ show: false, kind: '', x: 0, y: 0, w: 0, h: 0 })
 let altFeedbackTimer = null
-// 脚本运行可视化效果：服务端经 control DataChannel 推送 tap/swipe/hit 事件（设备像素坐标），
+// 脚本运行可视化效果：服务端经 control DataChannel 推送 tap/swipe/hit/miss 事件（设备像素坐标），
 // 与手动 alt 反馈状态独立（脚本运行时用户仍可手动操作，两类效果互不覆盖）
 const scriptFx = reactive({
   tap: { show: false, x: 0, y: 0 },
   swipe: { show: false, x: 0, y: 0, w: 0, h: 0 },
-  hit: { show: false, x: 0, y: 0, w: 0, h: 0, label: '' },
+  hit: { show: false, x: 0, y: 0, w: 0, h: 0, label: '', miss: false },
 })
 let fxTapTimer = null
 let fxSwipeTimer = null
@@ -618,6 +618,8 @@ const selEnd = reactive({ x: 0, y: 0 })
 const showHit = ref(false)
 const hit = reactive({ x: 0, y: 0, w: 0, h: 0 })
 const hitLabel = ref('')
+// true = 展示的是未命中的搜索区域框（虚线红），false = 命中框（实线绿）
+const hitMiss = ref(false)
 let hitTimer = null
 const liveLogs = ref([])
 const logBox = ref(null)
@@ -1672,8 +1674,10 @@ function sendControl(obj) {
   return false
 }
 
-/** 服务端→浏览器脚本可视化事件（{"type":"se","ev":"tap"|"swipe"|"hit", ...}，设备像素坐标）：
- *  引擎执行 tap/swipe、模板匹配命中时推送到投屏画面（样式复用 alt 反馈/测试匹配命中框） */
+/** 服务端→浏览器脚本可视化事件（{"type":"se","ev":"tap"|"swipe"|"hit"|"miss", ...}，设备像素坐标）：
+ *  引擎执行 tap/swipe、模板匹配命中/未命中时推送到投屏画面
+ *  （样式复用 alt 反馈/测试匹配命中框；miss 显示搜索区域，虚线红框）
+ *  同一轮匹配的多个模板事件会互相顶替，显示的是最新一次 */
 function onControlMessage(e) {
   let msg
   try { msg = JSON.parse(e.data) } catch (err) { return }
@@ -1699,6 +1703,18 @@ function onControlMessage(e) {
     scriptFx.hit.w = msg.w || 0
     scriptFx.hit.h = msg.h || 0
     scriptFx.hit.label = `${msg.tpl || ''} ${Number(msg.score || 0).toFixed(2)}`
+    scriptFx.hit.miss = false
+    scriptFx.hit.show = true
+    if (fxHitTimer) clearTimeout(fxHitTimer)
+    fxHitTimer = setTimeout(() => { scriptFx.hit.show = false }, 3000)
+  } else if (msg.ev === 'miss') {
+    // 未命中：显示本次搜索区域（引擎无 #后缀回退全屏时推 [0,0,w,h] 全屏框）
+    scriptFx.hit.x = msg.x || 0
+    scriptFx.hit.y = msg.y || 0
+    scriptFx.hit.w = msg.w || 0
+    scriptFx.hit.h = msg.h || 0
+    scriptFx.hit.label = `${msg.tpl || ''} 未命中`
+    scriptFx.hit.miss = true
     scriptFx.hit.show = true
     if (fxHitTimer) clearTimeout(fxHitTimer)
     fxHitTimer = setTimeout(() => { scriptFx.hit.show = false }, 3000)
@@ -3589,11 +3605,21 @@ async function testMatch(name) {
     if (r.hit) {
       hit.x = r.x; hit.y = r.y; hit.w = r.width; hit.h = r.height
       hitLabel.value = `${name} ${r.score.toFixed(2)}`
+      hitMiss.value = false
       showHit.value = true
       // 匹配框只展示 3 秒，避免一直留在画面上
       hitTimer = setTimeout(() => { showHit.value = false }, 3000)
       toast(`匹配成功：${name} 置信度 ${r.score.toFixed(2)}`, 'success')
     } else {
+      // 未命中也画框：显示本次搜索区域（与引擎 miss 可视化同语义，便于发现区域配错）
+      const vw2 = videoElement.value?.videoWidth || current.value?.width || 1920
+      const vh2 = videoElement.value?.videoHeight || current.value?.height || 1080
+      const [rx, ry, rw2, rh2] = region || [0, 0, vw2, vh2]
+      hit.x = rx; hit.y = ry; hit.w = rw2; hit.h = rh2
+      hitLabel.value = `${name} 未命中`
+      hitMiss.value = true
+      showHit.value = true
+      hitTimer = setTimeout(() => { showHit.value = false }, 3000)
       toast(`未找到：${name}`, 'warn')
     }
   } catch (e) {
@@ -3691,6 +3717,9 @@ onUnmounted(() => {
   position: absolute; top: -22px; left: 0; background: var(--accent); color: #06251c;
   font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; white-space: nowrap;
 }
+/* 未命中的搜索区域框：虚线红、无光晕（区别于命中实线绿），大区域时半透明填充提示范围 */
+.hit-miss { border-style: dashed; border-color: var(--danger); box-shadow: none; background: rgba(239,68,68,.06); }
+.hit-miss .hit-label { background: var(--danger); color: #fff; }
 
 .select-box {
   position: absolute; border: 2px dashed var(--accent-2);
