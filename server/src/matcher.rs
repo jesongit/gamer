@@ -56,8 +56,15 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
     }
 
     // 有搜索区域时用原始分辨率精匹配（区域小、小模板更准）；无区域全图搜索时缩到 ≤540 保证性能
-    let scale = if req.region.is_some() { 1.0 } else { (540.0 / sw.max(sh) as f32).min(1.0) };
-    let (sw2, sh2) = ((sw as f32 * scale).max(1.0) as u32, (sh as f32 * scale).max(1.0) as u32);
+    let scale = if req.region.is_some() {
+        1.0
+    } else {
+        (540.0 / sw.max(sh) as f32).min(1.0)
+    };
+    let (sw2, sh2) = (
+        (sw as f32 * scale).max(1.0) as u32,
+        (sh as f32 * scale).max(1.0) as u32,
+    );
     let screen_small = if scale < 1.0 {
         DynamicImage::ImageRgb8(screen).resize(sw2, sh2, image::imageops::FilterType::Triangle)
     } else {
@@ -65,8 +72,13 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
     };
     let screen_gray = to_gray(&screen_small);
     let template_gray = if scale < 1.0 {
-        let (tw2, th2) = ((tw as f32 * scale).max(1.0) as u32, (th as f32 * scale).max(1.0) as u32);
-        DynamicImage::ImageRgb8(template).resize(tw2, th2, image::imageops::FilterType::Triangle).to_luma8()
+        let (tw2, th2) = (
+            (tw as f32 * scale).max(1.0) as u32,
+            (th as f32 * scale).max(1.0) as u32,
+        );
+        DynamicImage::ImageRgb8(template)
+            .resize(tw2, th2, image::imageops::FilterType::Triangle)
+            .to_luma8()
     } else {
         to_gray(&DynamicImage::ImageRgb8(template))
     };
@@ -79,7 +91,11 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
     }
 
     // 模板统计
-    let t_data: Vec<f32> = template_gray.as_raw().iter().map(|&v| v as f32 / 255.0).collect();
+    let t_data: Vec<f32> = template_gray
+        .as_raw()
+        .iter()
+        .map(|&v| v as f32 / 255.0)
+        .collect();
     let t_mean = t_data.iter().sum::<f32>() / t_data.len() as f32;
     let t_var: f32 = t_data.iter().map(|&v| (v - t_mean) * (v - t_mean)).sum();
     if t_var < 1e-6 {
@@ -122,11 +138,16 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
             }
             local_best
         })
-        .reduce(|| None, |a, b| match (a, b) {
-            (Some((s1, x1, y1)), Some((s2, x2, y2))) => Some(if s1 >= s2 { (s1, x1, y1) } else { (s2, x2, y2) }),
-            (Some(v), None) | (None, Some(v)) => Some(v),
-            (None, None) => None,
-        });
+        .reduce(
+            || None,
+            |a, b| match (a, b) {
+                (Some((s1, x1, y1)), Some((s2, x2, y2))) => {
+                    Some(if s1 >= s2 { (s1, x1, y1) } else { (s2, x2, y2) })
+                }
+                (Some(v), None) | (None, Some(v)) => Some(v),
+                (None, None) => None,
+            },
+        );
 
     let Some((score, bx, by)) = best else {
         return Ok(None);
@@ -162,7 +183,10 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
 
     // 映射回原始坐标系
     let inv = 1.0 / scale;
-    let (ox, oy) = ((best_pos.0 as f32 * inv) as u32, (best_pos.1 as f32 * inv) as u32);
+    let (ox, oy) = (
+        (best_pos.0 as f32 * inv) as u32,
+        (best_pos.1 as f32 * inv) as u32,
+    );
     Ok(Some(MatchResult {
         x: ox,
         y: oy,
@@ -228,8 +252,8 @@ fn to_gray(img: &DynamicImage) -> GrayImage {
 /// 已知取舍：颜色信息匹配从不使用（选型依据：灰度图上 WebP 无损相对
 /// PNG 无优势，无需引入新解码依赖）。JPEG 上传模板顺带摆脱再压缩损伤。
 pub fn reencode_template_gray_png(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let img = image::load_from_memory(bytes)
-        .map_err(|e| anyhow::anyhow!("不是有效的图片: {}", e))?;
+    let img =
+        image::load_from_memory(bytes).map_err(|e| anyhow::anyhow!("不是有效的图片: {}", e))?;
     let gray = img.to_luma8();
     let mut out = Vec::new();
     let enc = image::codecs::png::PngEncoder::new_with_quality(
@@ -285,8 +309,17 @@ mod tests {
         }
         let mut screen_bytes = Vec::new();
         let mut tpl_bytes = Vec::new();
-        screen.write_to(&mut std::io::Cursor::new(&mut screen_bytes), image::ImageFormat::Png).unwrap();
-        tpl.write_to(&mut std::io::Cursor::new(&mut tpl_bytes), image::ImageFormat::Png).unwrap();
+        screen
+            .write_to(
+                &mut std::io::Cursor::new(&mut screen_bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        tpl.write_to(
+            &mut std::io::Cursor::new(&mut tpl_bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
 
         let req = MatchRequest {
             screen_png: screen_bytes,
@@ -308,7 +341,8 @@ mod tests {
             *p = Rgb([(x * 4) as u8, (y * 5) as u8, ((x + y) * 2) as u8]);
         }
         let mut src = Vec::new();
-        tpl.write_to(&mut std::io::Cursor::new(&mut src), image::ImageFormat::Png).unwrap();
+        tpl.write_to(&mut std::io::Cursor::new(&mut src), image::ImageFormat::Png)
+            .unwrap();
         let out = reencode_template_gray_png(&src).unwrap();
         let expect = DynamicImage::ImageRgb8(tpl).to_luma8();
         let got = image::load_from_memory(&out).unwrap().to_luma8();
@@ -332,8 +366,17 @@ mod tests {
         }
         let mut screen_bytes = Vec::new();
         let mut tpl_bytes = Vec::new();
-        screen.write_to(&mut std::io::Cursor::new(&mut screen_bytes), image::ImageFormat::Png).unwrap();
-        tpl.write_to(&mut std::io::Cursor::new(&mut tpl_bytes), image::ImageFormat::Png).unwrap();
+        screen
+            .write_to(
+                &mut std::io::Cursor::new(&mut screen_bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        tpl.write_to(
+            &mut std::io::Cursor::new(&mut tpl_bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
         let req = MatchRequest {
             screen_png: screen_bytes,
             template_png: tpl_bytes,

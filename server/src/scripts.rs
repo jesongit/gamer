@@ -34,7 +34,9 @@ pub fn sanitize_part(s: &str) -> Option<String> {
     if t.is_empty() || t == "." || t == ".." || t.starts_with('.') {
         return None;
     }
-    if t.chars().any(|c| !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_'))) {
+    if t.chars()
+        .any(|c| !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_')))
+    {
         return None;
     }
     Some(t.to_string())
@@ -46,7 +48,9 @@ fn sanitize_template_name(s: &str) -> Option<String> {
     if t.is_empty() || t == "." || t == ".." || t.starts_with('.') {
         return None;
     }
-    if t.chars().any(|c| !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '#' | ' '))) {
+    if t.chars()
+        .any(|c| !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '#' | ' ')))
+    {
         return None;
     }
     Some(t.to_string())
@@ -59,7 +63,9 @@ pub struct ScriptStore {
 
 impl ScriptStore {
     pub fn open(cfg: &Config) -> anyhow::Result<Self> {
-        Ok(Self { root: cfg.data_dir.clone() })
+        Ok(Self {
+            root: cfg.data_dir.clone(),
+        })
     }
 
     /// 分区 yaml 脚本目录
@@ -144,7 +150,13 @@ impl ScriptStore {
 
     /// 保存脚本到指定应用分区，name 缺扩展名时补 .yaml；
     /// old_id 存在且归档位置变化时移动（删旧文件）。返回落盘后的脚本。
-    pub fn save(&self, old_id: Option<&str>, pkg: &str, name: &str, content: &str) -> anyhow::Result<ScriptFile> {
+    pub fn save(
+        &self,
+        old_id: Option<&str>,
+        pkg: &str,
+        name: &str,
+        content: &str,
+    ) -> anyhow::Result<ScriptFile> {
         let package = sanitize_part(pkg)
             .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {}", pkg))?;
         let name_raw = name.trim();
@@ -184,7 +196,8 @@ impl ScriptStore {
             anyhow::bail!("非法脚本 id: {}", id);
         };
         let path = self.yaml_dir(pkg).join(name);
-        std::fs::remove_file(&path).map_err(|e| anyhow::anyhow!("删除失败: {} ({})", e, path.display()))?;
+        std::fs::remove_file(&path)
+            .map_err(|e| anyhow::anyhow!("删除失败: {} ({})", e, path.display()))?;
         self.cleanup_partition(pkg);
         Ok(())
     }
@@ -200,7 +213,10 @@ impl ScriptStore {
     /// 名字缺 .yaml/.yml 扩展名时自动补全再试（call 写 `子脚本` 或 `子脚本.yml` 均可）
     pub fn resolve_call(&self, caller_pkg: &str, name: &str) -> anyhow::Result<Option<ScriptFile>> {
         let all = self.list()?;
-        if let Some(i) = all.iter().position(|s| s.package == caller_pkg && s.name == name) {
+        if let Some(i) = all
+            .iter()
+            .position(|s| s.package == caller_pkg && s.name == name)
+        {
             let mut all = all;
             return Ok(Some(all.swap_remove(i)));
         }
@@ -311,16 +327,24 @@ impl ScriptStore {
                 .collect();
             let (zip_path, dest): (String, PathBuf) = match comps.as_slice() {
                 [y, name] if y == "yaml" => {
-                    let name = sanitize_part(name).ok_or_else(|| anyhow::anyhow!("脚本名非法: {}", name))?;
+                    let name = sanitize_part(name)
+                        .ok_or_else(|| anyhow::anyhow!("脚本名非法: {}", name))?;
                     let low = name.to_lowercase();
                     if !(low.ends_with(".yaml") || low.ends_with(".yml")) {
                         anyhow::bail!("yaml/ 下只支持 .yaml/.yml 文件: {}", name);
                     }
-                    (format!("yaml/{}", name), self.yaml_dir(&package).join(&name))
+                    (
+                        format!("yaml/{}", name),
+                        self.yaml_dir(&package).join(&name),
+                    )
                 }
                 [t, name] if t == "tmpl" => {
-                    let name = sanitize_template_name(name).ok_or_else(|| anyhow::anyhow!("模板名非法: {}", name))?;
-                    (format!("tmpl/{}", name), self.tmpl_dir(&package).join(&name))
+                    let name = sanitize_template_name(name)
+                        .ok_or_else(|| anyhow::anyhow!("模板名非法: {}", name))?;
+                    (
+                        format!("tmpl/{}", name),
+                        self.tmpl_dir(&package).join(&name),
+                    )
                 }
                 _ => anyhow::bail!("包内路径需为 yaml/<脚本> 或 tmpl/<模板>: {}", f.name()),
             };
@@ -484,15 +508,24 @@ mod tests {
 
     #[test]
     fn strip_legacy_directive() {
-        assert_eq!(strip_directive_line("package test\nsteps:\n  - log x\n"), "steps:\n  - log x\n");
-        assert_eq!(strip_directive_line("# 注释\n\npackage foo\nsteps: []"), "# 注释\n\nsteps: []\n");
+        assert_eq!(
+            strip_directive_line("package test\nsteps:\n  - log x\n"),
+            "steps:\n  - log x\n"
+        );
+        assert_eq!(
+            strip_directive_line("# 注释\n\npackage foo\nsteps: []"),
+            "# 注释\n\nsteps: []\n"
+        );
         // 无指令行原样（补尾部换行）
         assert_eq!(strip_directive_line("steps: []"), "steps: []\n");
     }
 
     #[test]
     fn sanitize() {
-        assert_eq!(sanitize_part("com.miHoYo.hkrpg").as_deref(), Some("com.miHoYo.hkrpg"));
+        assert_eq!(
+            sanitize_part("com.miHoYo.hkrpg").as_deref(),
+            Some("com.miHoYo.hkrpg")
+        );
         assert_eq!(sanitize_part(""), None);
         assert_eq!(sanitize_part(".."), None);
         assert_eq!(sanitize_part("a/b"), None);

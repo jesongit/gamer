@@ -34,7 +34,8 @@ impl Default for OpTemplates {
             find: "- find: {name}".into(),
             tap: "- tap: [{x}, {y}]".into(),
             color: "- color: [{x}, {y}]\n  {color}:".into(),
-            swipe: "- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}ms".into(),
+            swipe: "- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}ms"
+                .into(),
         }
     }
 }

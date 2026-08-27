@@ -76,7 +76,11 @@ impl FrameCache {
                 // （repeat-previous-headers 会周期性重发相同参数集，字节相同则不清）
                 if !cb.is_empty() {
                     self.gop.lock().clear();
-                    debug!("SPS/PPS changed ({}B → {}B), GOP cleared", cb.len(), frame.data.len());
+                    debug!(
+                        "SPS/PPS changed ({}B → {}B), GOP cleared",
+                        cb.len(),
+                        frame.data.len()
+                    );
                 }
                 *cb = frame.data.clone();
             }
@@ -179,15 +183,26 @@ impl FrameCache {
     /// 用临时 ffmpeg 解码 config+GOP，输出 GOP 最后一帧的 PNG。
     /// select=gte(n\,N)（N = GOP 帧数-1）：demuxer 会把配置帧也算进帧索引，
     /// gte 容忍 ±1~2 帧偏移，最多取到倒数第 3 帧（~100ms 旧），仍是实时画面。
-    async fn decode_once(&self, ffmpeg: &str, config: &[u8], gop: &[VideoFrame]) -> anyhow::Result<Vec<u8>> {
+    async fn decode_once(
+        &self,
+        ffmpeg: &str,
+        config: &[u8],
+        gop: &[VideoFrame],
+    ) -> anyhow::Result<Vec<u8>> {
         tokio::time::timeout(DECODE_TIMEOUT, self.decode_inner(ffmpeg, config, gop))
             .await
             .map_err(|_| anyhow::anyhow!("ffmpeg 解码超时（3s 未产出 PNG）"))?
     }
 
-    async fn decode_inner(&self, ffmpeg: &str, config: &[u8], gop: &[VideoFrame]) -> anyhow::Result<Vec<u8>> {
+    async fn decode_inner(
+        &self,
+        ffmpeg: &str,
+        config: &[u8],
+        gop: &[VideoFrame],
+    ) -> anyhow::Result<Vec<u8>> {
         let n = gop.len().saturating_sub(1);
-        let mut input = Vec::with_capacity(config.len() + gop.iter().map(|f| f.data.len()).sum::<usize>());
+        let mut input =
+            Vec::with_capacity(config.len() + gop.iter().map(|f| f.data.len()).sum::<usize>());
         input.extend_from_slice(config);
         for f in gop {
             input.extend_from_slice(&f.data);
@@ -195,14 +210,22 @@ impl FrameCache {
         let filter = format!("select=gte(n\\,{})", n);
         let mut child = tokio::process::Command::new(ffmpeg)
             .args([
-                "-loglevel", "error",
-                "-f", "h264",
-                "-i", "pipe:0",
-                "-vf", filter.as_str(),
-                "-frames:v", "1",
-                "-f", "image2pipe",
-                "-vcodec", "png",
-                "-compression_level", "1",
+                "-loglevel",
+                "error",
+                "-f",
+                "h264",
+                "-i",
+                "pipe:0",
+                "-vf",
+                filter.as_str(),
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "png",
+                "-compression_level",
+                "1",
                 "pipe:1",
             ])
             .stdin(std::process::Stdio::piped())
@@ -211,7 +234,10 @@ impl FrameCache {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| anyhow::anyhow!("启动 ffmpeg 失败: {}", e))?;
-        let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("ffmpeg 无 stdin"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("ffmpeg 无 stdin"))?;
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
         // 写输入与读输出并发：若先写完再读，ffmpeg 输出管道满时会堵住解码（死锁）
@@ -240,14 +266,22 @@ impl FrameCache {
                 "ffmpeg 解码失败（exit={}，输入 {} 帧）: {}",
                 status,
                 gop.len(),
-                if tail.is_empty() { "无错误输出" } else { &tail }
+                if tail.is_empty() {
+                    "无错误输出"
+                } else {
+                    &tail
+                }
             );
         }
         if let Some((w, h)) = png_dims(&out) {
             *self.width.write() = w;
             *self.height.write() = h;
         }
-        debug!("frame decoded on demand: {} bytes ({} frames)", out.len(), gop.len());
+        debug!(
+            "frame decoded on demand: {} bytes ({} frames)",
+            out.len(),
+            gop.len()
+        );
         Ok(out)
     }
 }

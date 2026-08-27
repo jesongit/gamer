@@ -96,7 +96,11 @@ fn save_pending(data_dir: &std::path::Path, map: &HashMap<String, PendingRestore
 /// 必须走 `cmd audio set-volume`。
 async fn get_media_volume(adb: &Adb, addr: &str) -> Option<u32> {
     let out = adb
-        .shell(addr, "cmd audio get-stream-volume 3", Duration::from_secs(8))
+        .shell(
+            addr,
+            "cmd audio get-stream-volume 3",
+            Duration::from_secs(8),
+        )
         .await
         .ok()?;
     // 输出形如 "AudioManager.getStreamVolume(3) -> 54"
@@ -127,7 +131,11 @@ async fn apply_virtual_overrides(adb: &Adb, data_dir: &std::path::Path, addr: &s
 
     if map[addr].freezer.is_none() {
         match adb
-            .shell(addr, "settings get global cached_apps_freezer_enabled", Duration::from_secs(8))
+            .shell(
+                addr,
+                "settings get global cached_apps_freezer_enabled",
+                Duration::from_secs(8),
+            )
             .await
         {
             Ok(cur) => {
@@ -136,7 +144,11 @@ async fn apply_virtual_overrides(adb: &Adb, data_dir: &std::path::Path, addr: &s
                     map.get_mut(addr).unwrap().freezer = Some(cur);
                     save_pending(data_dir, &map);
                     if let Err(e) = adb
-                        .shell(addr, "settings put global cached_apps_freezer_enabled 0", Duration::from_secs(8))
+                        .shell(
+                            addr,
+                            "settings put global cached_apps_freezer_enabled 0",
+                            Duration::from_secs(8),
+                        )
                         .await
                     {
                         warn!(addr = %addr, err = %e, "禁用 freezer 失败（主屏睡眠时虚拟屏应用可能被冻结）");
@@ -173,7 +185,9 @@ async fn restore_virtual_overrides(adb: &Adb, data_dir: &std::path::Path, addr: 
         return;
     }
     let mut map = load_pending(data_dir);
-    let Some(mut entry) = map.remove(addr) else { return };
+    let Some(mut entry) = map.remove(addr) else {
+        return;
+    };
     let mut ok = true;
     if let Some(v) = entry.freezer.take() {
         let cmd = if v == "null" {
@@ -189,7 +203,11 @@ async fn restore_virtual_overrides(adb: &Adb, data_dir: &std::path::Path, addr: 
     }
     if let Some(vol) = entry.media_volume.take() {
         if let Err(e) = adb
-            .shell(addr, &format!("cmd audio set-volume 3 {}", vol), Duration::from_secs(8))
+            .shell(
+                addr,
+                &format!("cmd audio set-volume 3 {}", vol),
+                Duration::from_secs(8),
+            )
             .await
         {
             warn!(addr = %addr, err = %e, "恢复媒体音量失败");
@@ -211,7 +229,10 @@ async fn restore_all_pending(adb: &Adb, data_dir: &std::path::Path) {
     if map.is_empty() {
         return;
     }
-    warn!("发现 {} 条设备侧改写残留（上次进程异常退出？），正在恢复", map.len());
+    warn!(
+        "发现 {} 条设备侧改写残留（上次进程异常退出？），正在恢复",
+        map.len()
+    );
     for addr in map.keys().cloned().collect::<Vec<_>>() {
         restore_virtual_overrides(adb, data_dir, &addr).await;
     }
@@ -262,7 +283,10 @@ impl DeviceManager {
                 },
             );
         }
-        info!("device manager started, {} devices registered", self.devices.read().len());
+        info!(
+            "device manager started, {} devices registered",
+            self.devices.read().len()
+        );
 
         // 崩溃自愈：进程曾被硬杀时，虚拟屏会话的设备侧改写（freezer/媒体音量）
         // 无人恢复——读 pending_restore.json 标记逐设备还原（设备不在线则留待下次）
@@ -357,7 +381,9 @@ impl DeviceManager {
     pub async fn connect_device(&self, id: &str) -> anyhow::Result<()> {
         let (device, busy) = {
             let map = self.devices.read();
-            let rt = map.get(id).ok_or_else(|| anyhow::anyhow!("device not found: {}", id))?;
+            let rt = map
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("device not found: {}", id))?;
             if rt.status == DeviceStatus::Online {
                 return Ok(()); // 已连接
             }
@@ -494,7 +520,10 @@ impl DeviceManager {
                     Ok(_) => {}
                     Err(_) => debug!(device = %dn_a, "audio broadcast: no viewers, frame skipped"),
                 }
-                if !session_a.connected.load(std::sync::atomic::Ordering::SeqCst) {
+                if !session_a
+                    .connected
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     break;
                 }
             }
@@ -532,19 +561,31 @@ impl DeviceManager {
             let dn2 = device_name.clone();
             tokio::spawn(async move {
                 let orig = adb2
-                    .shell(&serial2, "settings get system screen_off_timeout", Duration::from_secs(8))
+                    .shell(
+                        &serial2,
+                        "settings get system screen_off_timeout",
+                        Duration::from_secs(8),
+                    )
                     .await
                     .map(|s| s.trim().to_string())
                     .unwrap_or_default();
                 if !orig.is_empty() && orig != "null" {
                     let _ = adb2
-                        .shell(&serial2, "settings put system screen_off_timeout 2147483647", Duration::from_secs(8))
+                        .shell(
+                            &serial2,
+                            "settings put system screen_off_timeout 2147483647",
+                            Duration::from_secs(8),
+                        )
                         .await;
                 }
                 // KEYCODE_WAKEUP（224）：屏幕若已熄则唤醒（唤醒后锁屏也会出帧）
-                let _ = adb2.shell(&serial2, "input keyevent 224", Duration::from_secs(8)).await;
+                let _ = adb2
+                    .shell(&serial2, "input keyevent 224", Duration::from_secs(8))
+                    .await;
                 // 无 PIN 锁时直接进桌面；有 PIN 锁则停在锁屏（画面仍实时）
-                let _ = adb2.shell(&serial2, "wm dismiss-keyguard", Duration::from_secs(8)).await;
+                let _ = adb2
+                    .shell(&serial2, "wm dismiss-keyguard", Duration::from_secs(8))
+                    .await;
                 // 只等会话结束以恢复熄屏超时；补醒/关屏已移交 idle_power_loop
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -554,7 +595,11 @@ impl DeviceManager {
                 }
                 if !orig.is_empty() && orig != "null" {
                     let _ = adb2
-                        .shell(&serial2, &format!("settings put system screen_off_timeout {}", orig), Duration::from_secs(8))
+                        .shell(
+                            &serial2,
+                            &format!("settings put system screen_off_timeout {}", orig),
+                            Duration::from_secs(8),
+                        )
                         .await;
                 }
                 info!(device = %dn2, orig_timeout = %orig, "screen keepalive stopped, screen_off_timeout restored");
@@ -586,14 +631,19 @@ impl DeviceManager {
         let (addr, mode, pkg) = {
             let map = self.devices.read();
             let Some(rt) = map.get(id) else { return };
-            (rt.device.addr.clone(), rt.device.screen_mode.clone(), rt.device.pkg.clone())
+            (
+                rt.device.addr.clone(),
+                rt.device.screen_mode.clone(),
+                rt.device.pkg.clone(),
+            )
         };
         {
             let mut map = self.devices.write();
             let Some(rt) = map.get_mut(id) else { return };
             // 立即标记会话结束：屏幕保活任务 / 帧消费任务据此退出，及时恢复熄屏超时
             if let Some(s) = &rt.session {
-                s.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+                s.connected
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
             }
             // 停止帧缓存（释放引用）；按需解码无常驻线程/子进程，无需额外清理
             rt.frame_cache = None;
@@ -615,11 +665,19 @@ impl DeviceManager {
             if let Some(pkg) = pkg.filter(|p| adb::is_safe_pkg(p)) {
                 match self
                     .adb
-                    .shell(&addr, &format!("am force-stop {}", pkg), Duration::from_secs(6))
+                    .shell(
+                        &addr,
+                        &format!("am force-stop {}", pkg),
+                        Duration::from_secs(6),
+                    )
                     .await
                 {
-                    Ok(_) => info!(device = %id, pkg = %pkg, "virtual display torn down: app force-stopped (no zombie)"),
-                    Err(e) => warn!(device = %id, pkg = %pkg, "app force-stop after teardown failed: {}", e),
+                    Ok(_) => {
+                        info!(device = %id, pkg = %pkg, "virtual display torn down: app force-stopped (no zombie)")
+                    }
+                    Err(e) => {
+                        warn!(device = %id, pkg = %pkg, "app force-stop after teardown failed: {}", e)
+                    }
                 }
             }
         }
@@ -647,7 +705,10 @@ impl DeviceManager {
             }
             let _ = self
                 .adb
-                .run(&["-s", &d.addr, "reverse", "--remove-all"], Duration::from_secs(5))
+                .run(
+                    &["-s", &d.addr, "reverse", "--remove-all"],
+                    Duration::from_secs(5),
+                )
                 .await;
         }
     }
@@ -698,7 +759,9 @@ impl DeviceManager {
 
     /// 镜像模式唤醒物理屏（spawn 执行，不阻塞调用方；幂等）
     fn wake_screen(&self, id: &str) {
-        let Some((device, _, _)) = self.snapshot(id) else { return };
+        let Some((device, _, _)) = self.snapshot(id) else {
+            return;
+        };
         if device.screen_mode != ScreenMode::Mirror || device.addr.is_empty() {
             return;
         }
@@ -706,8 +769,12 @@ impl DeviceManager {
         let serial = device.addr.clone();
         let dn = device.name.clone();
         tokio::spawn(async move {
-            let _ = adb.shell(&serial, "input keyevent 224", Duration::from_secs(8)).await;
-            let _ = adb.shell(&serial, "wm dismiss-keyguard", Duration::from_secs(8)).await;
+            let _ = adb
+                .shell(&serial, "input keyevent 224", Duration::from_secs(8))
+                .await;
+            let _ = adb
+                .shell(&serial, "wm dismiss-keyguard", Duration::from_secs(8))
+                .await;
             info!(device = %dn, "idle screen woke up (viewer/script active)");
         });
     }
@@ -730,7 +797,8 @@ impl DeviceManager {
                     self.idle.lock().unwrap().remove(&id);
                     continue;
                 }
-                let active = self.viewers.lock().unwrap().contains_key(&id) || self.has_running_scripts(&id);
+                let active =
+                    self.viewers.lock().unwrap().contains_key(&id) || self.has_running_scripts(&id);
                 if active {
                     // 锁内改状态、锁外做异步动作（guard 不能跨 await 存活）
                     let (slept, wake_expired) = {
@@ -761,7 +829,10 @@ impl DeviceManager {
                         slept: false,
                         last_wake: std::time::Instant::now(),
                     });
-                    (st.slept, *st.idle_since.get_or_insert_with(std::time::Instant::now))
+                    (
+                        st.slept,
+                        *st.idle_since.get_or_insert_with(std::time::Instant::now),
+                    )
                 };
                 // 已关屏 = 镜像低功耗态已就位，等消费者回来（notify_activity 唤醒）
                 if slept || since.elapsed() < Duration::from_secs(self.cfg.idle_power_secs) {
@@ -777,7 +848,9 @@ impl DeviceManager {
                     let adb = self.adb.clone();
                     info!(device = %dn, idle_secs = self.cfg.idle_power_secs, "idle: turn off mirror screen (session kept)");
                     tokio::spawn(async move {
-                        let _ = adb.shell(&serial, "input keyevent 223", Duration::from_secs(8)).await;
+                        let _ = adb
+                            .shell(&serial, "input keyevent 223", Duration::from_secs(8))
+                            .await;
                     });
                 } else {
                     info!(device = %device.name, idle_secs = self.cfg.idle_power_secs, "idle: disconnect scrcpy session (low-power, adb kept)");
@@ -802,7 +875,10 @@ impl DeviceManager {
     /// 扫描 adb 设备并同步入库（`adb devices -l` 解析 + 去重 + addr/kind 更新），
     /// 返回新增设备数。启动自举与 REST 扫描共用（原 api_scan_devices 逻辑）
     pub async fn scan_and_sync(&self) -> anyhow::Result<usize> {
-        let out = self.adb.run(&["devices", "-l"], Duration::from_secs(10)).await?;
+        let out = self
+            .adb
+            .run(&["devices", "-l"], Duration::from_secs(10))
+            .await?;
         let mut existing = self.db.list_devices()?;
         let mut added = 0usize;
         for line in out.lines().skip(1) {
@@ -907,7 +983,9 @@ impl DeviceManager {
     pub async fn screenshot(&self, id: &str) -> anyhow::Result<Vec<u8>> {
         let (device, cache) = {
             let map = self.devices.read();
-            let rt = map.get(id).ok_or_else(|| anyhow::anyhow!("device not found"))?;
+            let rt = map
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("device not found"))?;
             (rt.device.clone(), rt.frame_cache.clone())
         };
         if let Some(fc) = cache {
@@ -920,12 +998,19 @@ impl DeviceManager {
                 Err(e) => warn!("frame cache decode failed: {}", e),
             }
         }
-        let serial = if device.addr.is_empty() { "usb".to_string() } else { device.addr.clone() };
+        let serial = if device.addr.is_empty() {
+            "usb".to_string()
+        } else {
+            device.addr.clone()
+        };
         // 虚拟屏模式：优先截 scrcpy 虚拟屏；部分设备 adb screencap -d 不支持该虚拟屏，
         // 会返回非图片错误文本，此时**不再回退物理屏**——物理屏与虚拟屏内容/分辨率不同，
         // 静默回退会让模板匹配拿到错误的画面（如主屏竖屏数据）。
         if device.screen_mode == ScreenMode::Virtual {
-            if let Some(did) = self.virtual_display_id(&serial, device.vd_res.as_deref()).await {
+            if let Some(did) = self
+                .virtual_display_id(&serial, device.vd_res.as_deref())
+                .await
+            {
                 match self.adb.screencap_display(&serial, did).await {
                     Ok(png) if image::load_from_memory(&png).is_ok() => {
                         debug!("screenshot from adb virtual display: {} bytes", png.len());
@@ -947,14 +1032,25 @@ impl DeviceManager {
 
     /// 解析虚拟屏 display id（dumpsys display 中 type=VIRTUAL 且分辨率匹配 scrcpy 虚拟屏）
     async fn virtual_display_id(&self, serial: &str, vd_res: Option<&str>) -> Option<i64> {
-        let out = self.adb.shell(serial, "dumpsys display", Duration::from_secs(10)).await.ok()?;
+        let out = self
+            .adb
+            .shell(serial, "dumpsys display", Duration::from_secs(10))
+            .await
+            .ok()?;
         let (vw, vh) = parse_vd_size(vd_res.unwrap_or("1920x1080"))?;
         // mViewports=[DisplayViewport{...}, DisplayViewport{...}] 单行包含多个，需分段解析
         for seg in out.split("DisplayViewport{") {
             if !seg.contains("type=VIRTUAL") {
                 continue;
             }
-            let did = seg.split("displayId=").nth(1)?.split(',').next()?.trim().parse::<i64>().ok()?;
+            let did = seg
+                .split("displayId=")
+                .nth(1)?
+                .split(',')
+                .next()?
+                .trim()
+                .parse::<i64>()
+                .ok()?;
             if let Some(rect) = extract_rect(seg) {
                 if rect == (vw, vh) || rect == (vh, vw) {
                     return Some(did);

@@ -67,7 +67,12 @@ pub fn build_router(
     scripts: Arc<ScriptStore>,
     shutdown: tokio::sync::watch::Sender<bool>,
 ) -> Router {
-    let runner = Arc::new(Runner::new(db.clone(), devices.clone(), viewers.clone(), scripts.clone()));
+    let runner = Arc::new(Runner::new(
+        db.clone(),
+        devices.clone(),
+        viewers.clone(),
+        scripts.clone(),
+    ));
     let state = AppState {
         db,
         devices,
@@ -84,17 +89,29 @@ pub fn build_router(
     spawn_watchdog(state.clone());
     Router::new()
         .route("/api/login", post(api_login))
-        .route("/api/devices", get(api_list_devices).post(api_create_device))
+        .route(
+            "/api/devices",
+            get(api_list_devices).post(api_create_device),
+        )
         .route("/api/devices/scan", post(api_scan_devices))
-        .route("/api/devices/:id", delete(api_delete_device).put(api_update_device))
+        .route(
+            "/api/devices/:id",
+            delete(api_delete_device).put(api_update_device),
+        )
         .route("/api/devices/:id/apps", get(api_device_apps))
         .route("/api/apps", get(api_apps_by_addr))
         .route("/api/devices/:id/connect", post(api_connect_device))
         .route("/api/devices/:id/disconnect", post(api_disconnect_device))
         .route("/api/devices/:id/screenshot", post(api_screenshot))
         .route("/api/devices/:id/control", post(api_control))
-        .route("/api/templates", get(api_list_templates).post(api_upload_template))
-        .route("/api/templates/:name", delete(api_delete_template).put(api_rename_template))
+        .route(
+            "/api/templates",
+            get(api_list_templates).post(api_upload_template),
+        )
+        .route(
+            "/api/templates/:name",
+            delete(api_delete_template).put(api_rename_template),
+        )
         .route("/api/templates/:name/image", get(api_get_template_image))
         .route("/api/templates/:name/test", post(api_test_template))
         .route("/api/scripts", get(api_list_scripts).post(api_save_script))
@@ -112,7 +129,9 @@ pub fn build_router(
         .route("/api/op-templates", get(api_op_templates))
         .route("/api/shutdown", post(api_shutdown))
         .route("/ws/device/:id", get(ws::ws_device))
-        .fallback_service(ServeDir::new("./web-dist").fallback(ServeDir::new("./web-dist/index.html")))
+        .fallback_service(
+            ServeDir::new("./web-dist").fallback(ServeDir::new("./web-dist/index.html")),
+        )
         .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -201,7 +220,11 @@ fn spawn_watchdog(st: AppState) {
                     match map.get(&id) {
                         Some(h) => {
                             let t = h.last_serve.load(std::sync::atomic::Ordering::Relaxed);
-                            if t == 0 { i64::MAX } else { now_unix_ms() - t }
+                            if t == 0 {
+                                i64::MAX
+                            } else {
+                                now_unix_ms() - t
+                            }
                         }
                         None => i64::MAX,
                     }
@@ -261,9 +284,16 @@ struct LoginResp {
 
 async fn api_login(State(st): State<AppState>, Json(req): Json<LoginReq>) -> Response {
     if req.user == "admin" && req.password == st.cfg.password {
-        Json(LoginResp { token: "demo-token".into() }).into_response()
+        Json(LoginResp {
+            token: "demo-token".into(),
+        })
+        .into_response()
     } else {
-        (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "用户名或密码错误"}))).into_response()
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "用户名或密码错误"})),
+        )
+            .into_response()
     }
 }
 
@@ -298,7 +328,11 @@ fn device_views(st: &AppState) -> Vec<DeviceView> {
     };
     let mut out = Vec::new();
     for d in devices {
-        let (_, status, error) = st.devices.snapshot(&d.id).map(|(_, s, e)| ((), s, e)).unwrap_or(((), crate::device::DeviceStatus::Offline, None));
+        let (_, status, error) = st
+            .devices
+            .snapshot(&d.id)
+            .map(|(_, s, e)| ((), s, e))
+            .unwrap_or(((), crate::device::DeviceStatus::Offline, None));
         let (width, height) = st
             .devices
             .frame_cache(&d.id)
@@ -317,7 +351,11 @@ fn device_views(st: &AppState) -> Vec<DeviceView> {
             vd_dpi: d.vd_dpi,
             pkg: d.pkg.clone(),
             fps: d.fps,
-            status: serde_json::to_value(status).unwrap().as_str().unwrap_or("offline").to_string(),
+            status: serde_json::to_value(status)
+                .unwrap()
+                .as_str()
+                .unwrap_or("offline")
+                .to_string(),
             error,
             width: if width > 0 { Some(width) } else { None },
             height: if height > 0 { Some(height) } else { None },
@@ -332,9 +370,12 @@ async fn api_scan_devices(State(st): State<AppState>) -> Response {
     // 解析/去重/入库逻辑在 DeviceManager::scan_and_sync（与启动自举共用）
     let added = match st.devices.scan_and_sync().await {
         Ok(n) => n,
-        Err(e) => return err_response(StatusCode::BAD_GATEWAY, &format!("adb devices 失败: {}", e)),
+        Err(e) => {
+            return err_response(StatusCode::BAD_GATEWAY, &format!("adb devices 失败: {}", e))
+        }
     };
-    Json(serde_json::json!({"ok": true, "added": added, "devices": device_views(&st)})).into_response()
+    Json(serde_json::json!({"ok": true, "added": added, "devices": device_views(&st)}))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -349,14 +390,21 @@ struct CreateDeviceReq {
     fps: Option<u32>,
 }
 
-async fn api_create_device(State(st): State<AppState>, Json(req): Json<CreateDeviceReq>) -> Response {
+async fn api_create_device(
+    State(st): State<AppState>,
+    Json(req): Json<CreateDeviceReq>,
+) -> Response {
     let id = Uuid::new_v4().simple().to_string();
     let device = Device {
         id,
         name: req.name,
         kind: req.kind,
         addr: req.addr.unwrap_or_default(),
-        screen_mode: if req.screen_mode.as_deref() == Some("virtual") { ScreenMode::Virtual } else { ScreenMode::Mirror },
+        screen_mode: if req.screen_mode.as_deref() == Some("virtual") {
+            ScreenMode::Virtual
+        } else {
+            ScreenMode::Mirror
+        },
         vd_res: req.vd_res,
         vd_dpi: req.vd_dpi,
         pkg: req.pkg,
@@ -370,7 +418,11 @@ async fn api_create_device(State(st): State<AppState>, Json(req): Json<CreateDev
 }
 
 /// 更新设备配置（屏幕模式/虚拟屏参数/游戏包名等）
-async fn api_update_device(State(st): State<AppState>, Path(id): Path<String>, Json(req): Json<CreateDeviceReq>) -> Response {
+async fn api_update_device(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateDeviceReq>,
+) -> Response {
     let Some(existing) = (match st.db.get_device(&id) {
         Ok(d) => d,
         Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -382,7 +434,11 @@ async fn api_update_device(State(st): State<AppState>, Path(id): Path<String>, J
         name: req.name,
         kind: req.kind,
         addr: req.addr.unwrap_or(existing.addr),
-        screen_mode: if req.screen_mode.as_deref() == Some("virtual") { ScreenMode::Virtual } else { ScreenMode::Mirror },
+        screen_mode: if req.screen_mode.as_deref() == Some("virtual") {
+            ScreenMode::Virtual
+        } else {
+            ScreenMode::Mirror
+        },
         vd_res: req.vd_res,
         vd_dpi: req.vd_dpi,
         pkg: req.pkg,
@@ -433,14 +489,25 @@ async fn api_device_apps(State(st): State<AppState>, Path(id): Path<String>) -> 
         Ok(None) => return err_response(StatusCode::NOT_FOUND, "设备不存在"),
         Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    let serial = if device.addr.is_empty() { "usb".to_string() } else { device.addr.clone() };
+    let serial = if device.addr.is_empty() {
+        "usb".to_string()
+    } else {
+        device.addr.clone()
+    };
     list_device_apps(&st, &serial).await
 }
 
 /// 按地址查询（添加设备弹窗里还没建记录时用）
-async fn api_apps_by_addr(State(st): State<AppState>, Query(q): Query<std::collections::HashMap<String, String>>) -> Response {
+async fn api_apps_by_addr(
+    State(st): State<AppState>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
     let addr = q.get("addr").cloned().unwrap_or_default();
-    let serial = if addr.is_empty() { "usb".to_string() } else { addr };
+    let serial = if addr.is_empty() {
+        "usb".to_string()
+    } else {
+        addr
+    };
     list_device_apps(&st, &serial).await
 }
 
@@ -460,12 +527,22 @@ async fn list_device_apps(st: &AppState, serial: &str) -> Response {
             "CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server {} list_apps=true",
             crate::device::scrcpy::SCRCPY_VERSION
         );
-        match st.devices.adb.run(&["-s", serial, "shell", &shell_cmd], Duration::from_secs(90)).await {
+        match st
+            .devices
+            .adb
+            .run(
+                &["-s", serial, "shell", &shell_cmd],
+                Duration::from_secs(90),
+            )
+            .await
+        {
             Ok(out) => {
                 // 输出形如 " * 应用商店   com.xiaomi.market"（系统应用）/ " - 崩坏：星穹铁道  com.miHoYo.hkrpg"（第三方）
                 for line in out.lines() {
                     let line = line.trim();
-                    let Some(rest) = line.strip_prefix("- ") else { continue };
+                    let Some(rest) = line.strip_prefix("- ") else {
+                        continue;
+                    };
                     let rest = rest.trim();
                     if rest.is_empty() {
                         continue;
@@ -485,18 +562,30 @@ async fn list_device_apps(st: &AppState, serial: &str) -> Response {
     }
     // 兜底：pm list packages -3（只有包名，无显示名）
     if apps.is_empty() {
-        match st.devices.adb.run(&["-s", serial, "shell", "pm", "list", "packages", "-3"], Duration::from_secs(20)).await {
+        match st
+            .devices
+            .adb
+            .run(
+                &["-s", serial, "shell", "pm", "list", "packages", "-3"],
+                Duration::from_secs(20),
+            )
+            .await
+        {
             Ok(out) => {
                 for l in out.lines() {
                     if let Some(pkg) = l.strip_prefix("package:") {
                         let pkg = pkg.trim().to_string();
                         if !pkg.is_empty() {
-                            apps.push(serde_json::json!({ "label": pretty_app_label(&pkg), "pkg": pkg }));
+                            apps.push(
+                                serde_json::json!({ "label": pretty_app_label(&pkg), "pkg": pkg }),
+                            );
                         }
                     }
                 }
             }
-            Err(e) => return err_response(StatusCode::BAD_GATEWAY, &format!("读取应用列表失败: {}", e)),
+            Err(e) => {
+                return err_response(StatusCode::BAD_GATEWAY, &format!("读取应用列表失败: {}", e))
+            }
         }
     }
     apps.sort_by(|a, b| a["label"].as_str().cmp(&b["label"].as_str()));
@@ -564,15 +653,31 @@ struct ControlReq {
     app: Option<String>,
 }
 
-async fn api_control(State(st): State<AppState>, Path(id): Path<String>, Json(req): Json<ControlReq>) -> Response {
+async fn api_control(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ControlReq>,
+) -> Response {
     let Some(session) = st.devices.session(&id) else {
         return err_response(StatusCode::CONFLICT, "设备未连接");
     };
     let result = match req.cmd.as_str() {
-        "tap" => session.tap(req.x.unwrap_or(0.0), req.y.unwrap_or(0.0)).await,
-        "swipe" => session
-            .swipe(req.x1.unwrap_or(0.0), req.y1.unwrap_or(0.0), req.x2.unwrap_or(0.0), req.y2.unwrap_or(0.0), req.duration.unwrap_or(300))
-            .await,
+        "tap" => {
+            session
+                .tap(req.x.unwrap_or(0.0), req.y.unwrap_or(0.0))
+                .await
+        }
+        "swipe" => {
+            session
+                .swipe(
+                    req.x1.unwrap_or(0.0),
+                    req.y1.unwrap_or(0.0),
+                    req.x2.unwrap_or(0.0),
+                    req.y2.unwrap_or(0.0),
+                    req.duration.unwrap_or(300),
+                )
+                .await
+        }
         "text" => session.inject_text(req.text.as_deref().unwrap_or("")).await,
         "press" => session.press_key(req.keycode.unwrap_or(0)).await,
         "home" => session.press_key(3).await,
@@ -580,7 +685,11 @@ async fn api_control(State(st): State<AppState>, Path(id): Path<String>, Json(re
         "recents" => session.press_key(187).await,
         "start_app" => session.start_app(req.app.as_deref().unwrap_or("")).await,
         "rotate" => session.rotate_device().await,
-        "clipboard" => session.set_clipboard(req.text.as_deref().unwrap_or(""), false).await,
+        "clipboard" => {
+            session
+                .set_clipboard(req.text.as_deref().unwrap_or(""), false)
+                .await
+        }
         _ => return err_response(StatusCode::BAD_REQUEST, "unknown command"),
     };
     match result {
@@ -601,9 +710,15 @@ fn require_pkg(raw: Option<&str>) -> Result<String, Response> {
     match raw.map(str::trim).filter(|s| !s.is_empty()) {
         Some(p) => match crate::scripts::sanitize_part(p) {
             Some(v) => Ok(v),
-            None => Err(err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）")),
+            None => Err(err_response(
+                StatusCode::BAD_REQUEST,
+                "应用包名非法（只允许字母数字 . _ -）",
+            )),
         },
-        None => Err(err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）")),
+        None => Err(err_response(
+            StatusCode::BAD_REQUEST,
+            "缺少 pkg 参数（应用包名）",
+        )),
     }
 }
 
@@ -612,7 +727,12 @@ async fn api_list_templates(State(st): State<AppState>, Query(q): Query<PkgQuery
     let pkgs: Vec<String> = match q.pkg.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(p) => match crate::scripts::sanitize_part(p) {
             Some(v) => vec![v],
-            None => return err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）"),
+            None => {
+                return err_response(
+                    StatusCode::BAD_REQUEST,
+                    "应用包名非法（只允许字母数字 . _ -）",
+                )
+            }
         },
         None => st.scripts.partitions(),
     };
@@ -626,9 +746,13 @@ async fn api_list_templates(State(st): State<AppState>, Query(q): Query<PkgQuery
                 if e.path().is_file() && !fname.starts_with('.') {
                     let size = e.metadata().map(|m| m.len()).unwrap_or(0);
                     // mtime（unix 秒）：前端按修改时间倒序排模板列表
-                    let mtime = e.metadata().and_then(|m| m.modified()).ok()
+                    let mtime = e
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .ok()
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs()).unwrap_or(0);
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
                     out.push(serde_json::json!({"name": fname, "size": size, "mtime": mtime, "pkg": pkg}));
                 }
             }
@@ -644,9 +768,15 @@ struct UploadTemplateReq {
     pkg: String,
 }
 
-async fn api_upload_template(State(st): State<AppState>, Json(req): Json<UploadTemplateReq>) -> Response {
+async fn api_upload_template(
+    State(st): State<AppState>,
+    Json(req): Json<UploadTemplateReq>,
+) -> Response {
     let Ok(pkg) = require_pkg(Some(&req.pkg)) else {
-        return err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）");
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            "应用包名非法（只允许字母数字 . _ -）",
+        );
     };
     let orig = match base64::engine::general_purpose::STANDARD.decode(&req.data_b64) {
         Ok(b) => b,
@@ -666,10 +796,17 @@ async fn api_upload_template(State(st): State<AppState>, Json(req): Json<UploadT
     if let Err(e) = std::fs::write(&path, &bytes) {
         return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
-    Json(serde_json::json!({"ok": true, "name": name, "size": bytes.len(), "orig_size": orig.len()})).into_response()
+    Json(
+        serde_json::json!({"ok": true, "name": name, "size": bytes.len(), "orig_size": orig.len()}),
+    )
+    .into_response()
 }
 
-async fn api_delete_template(State(st): State<AppState>, Path(name): Path<String>, Query(q): Query<PkgQuery>) -> Response {
+async fn api_delete_template(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<PkgQuery>,
+) -> Response {
     let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
         return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
     };
@@ -689,7 +826,12 @@ struct RenameTemplateReq {
 }
 
 /// 重命名模板：把旧文件字节写入新文件名，再删除旧文件
-async fn api_rename_template(State(st): State<AppState>, Path(old_name): Path<String>, Query(q): Query<PkgQuery>, Json(req): Json<RenameTemplateReq>) -> Response {
+async fn api_rename_template(
+    State(st): State<AppState>,
+    Path(old_name): Path<String>,
+    Query(q): Query<PkgQuery>,
+    Json(req): Json<RenameTemplateReq>,
+) -> Response {
     let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
         return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
     };
@@ -719,7 +861,11 @@ async fn api_rename_template(State(st): State<AppState>, Path(old_name): Path<St
 
 /// 返回模板图片原始字节（PNG/JPEG），供前端缩略图与预览使用。
 /// Cache-Control: no-cache —— 模板被同名覆盖上传后浏览器必须重新拉取。
-async fn api_get_template_image(State(st): State<AppState>, Path(name): Path<String>, Query(q): Query<PkgQuery>) -> Response {
+async fn api_get_template_image(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<PkgQuery>,
+) -> Response {
     let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
         return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
     };
@@ -728,7 +874,13 @@ async fn api_get_template_image(State(st): State<AppState>, Path(name): Path<Str
         Ok(b) => b,
         Err(_) => return err_response(StatusCode::NOT_FOUND, "模板不存在"),
     };
-    let mime = match path.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+    let mime = match path
+        .extension()
+        .and_then(|x| x.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "jpg" | "jpeg" => "image/jpeg",
         _ => "image/png",
     };
@@ -751,9 +903,16 @@ struct TestTemplateReq {
     pkg: String,
 }
 
-async fn api_test_template(State(st): State<AppState>, Path(name): Path<String>, Json(req): Json<TestTemplateReq>) -> Response {
+async fn api_test_template(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<TestTemplateReq>,
+) -> Response {
     let Ok(pkg) = require_pkg(Some(&req.pkg)) else {
-        return err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）");
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            "应用包名非法（只允许字母数字 . _ -）",
+        );
     };
     let tpl_path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
     let tpl_bytes = match std::fs::read(&tpl_path) {
@@ -800,10 +959,19 @@ async fn api_save_script(State(st): State<AppState>, Json(req): Json<SaveScriptR
         return err_response(StatusCode::BAD_REQUEST, "脚本名不能为空");
     }
     if crate::scripts::sanitize_part(&req.pkg).is_none() {
-        return err_response(StatusCode::BAD_REQUEST, "应用包名非法（只允许字母数字 . _ -）");
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            "应用包名非法（只允许字母数字 . _ -）",
+        );
     }
-    match st.scripts.save(req.id.as_deref(), &req.pkg, &req.name, &req.content) {
-        Ok(s) => Json(serde_json::json!({"ok": true, "id": s.id, "package": s.package, "name": s.name})).into_response(),
+    match st
+        .scripts
+        .save(req.id.as_deref(), &req.pkg, &req.name, &req.content)
+    {
+        Ok(s) => {
+            Json(serde_json::json!({"ok": true, "id": s.id, "package": s.package, "name": s.name}))
+                .into_response()
+        }
         Err(e) => err_response(StatusCode::BAD_REQUEST, &e.to_string()),
     }
 }
@@ -833,7 +1001,10 @@ fn zip_response(filename: &str, bytes: Vec<u8>) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/zip")
-        .header(header::CONTENT_DISPOSITION, format!("attachment; filename*=UTF-8''{}", enc))
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename*=UTF-8''{}", enc),
+        )
         .body(Body::from(bytes))
         .unwrap()
 }
@@ -878,7 +1049,11 @@ struct RunScriptReq {
     func: Option<String>,
 }
 
-async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json(req): Json<RunScriptReq>) -> Response {
+async fn api_run_script(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RunScriptReq>,
+) -> Response {
     let Some(script) = (match st.scripts.get(&id) {
         Ok(s) => s,
         Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -897,7 +1072,13 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
         return err_response(StatusCode::BAD_GATEWAY, &format!("设备连接失败: {}", e));
     }
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    st.run_stops.lock().unwrap().insert(id.clone(), RunHandle { stop: stop.clone(), device_id: req.device_id.clone() });
+    st.run_stops.lock().unwrap().insert(
+        id.clone(),
+        RunHandle {
+            stop: stop.clone(),
+            device_id: req.device_id.clone(),
+        },
+    );
     // 设备运行计数 +1（空闲断开守卫；spawn 结束时 run_end 归零）
     st.devices.run_begin(&req.device_id);
     let runner = st.runner.clone();
@@ -919,7 +1100,19 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
         }))
     };
     tokio::spawn(async move {
-        let logs = runner.run(&device_id, &script_id, &content, stop.clone(), log_cb, start_index, run_func.as_deref(), None, vec![]).await;
+        let logs = runner
+            .run(
+                &device_id,
+                &script_id,
+                &content,
+                stop.clone(),
+                log_cb,
+                start_index,
+                run_func.as_deref(),
+                None,
+                vec![],
+            )
+            .await;
         devices.run_end(&device_id);
         // 空闲低功耗（拆会话/关屏）由 DeviceManager::idle_power_loop 周期统一管理
         match logs {
@@ -927,7 +1120,12 @@ async fn api_run_script(State(st): State<AppState>, Path(id): Path<String>, Json
                 let _ = db.add_log(&device_id, &script_id, "success", "脚本执行完成");
             }
             Err(e) => {
-                let _ = db.add_log(&device_id, &script_id, "error", &format!("脚本执行失败: {}", e));
+                let _ = db.add_log(
+                    &device_id,
+                    &script_id,
+                    "error",
+                    &format!("脚本执行失败: {}", e),
+                );
             }
         }
         // 运行结束：移除停止标志（条目存在与否同时作为"脚本是否在运行"的状态依据）
@@ -972,8 +1170,17 @@ async fn api_device_run(State(st): State<AppState>, Path(id): Path<String>) -> R
                 .ok()
                 .flatten()
                 .map(|s| s.name)
-                .unwrap_or_else(|| script_id.rsplit('/').next().unwrap_or(&script_id).trim_end_matches(".yml").trim_end_matches(".yaml").to_string());
-            Json(serde_json::json!({"running": true, "script_id": script_id, "script_name": name})).into_response()
+                .unwrap_or_else(|| {
+                    script_id
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&script_id)
+                        .trim_end_matches(".yml")
+                        .trim_end_matches(".yaml")
+                        .to_string()
+                });
+            Json(serde_json::json!({"running": true, "script_id": script_id, "script_name": name}))
+                .into_response()
         }
         None => Json(serde_json::json!({"running": false})).into_response(),
     }
@@ -1016,18 +1223,29 @@ async fn api_save_task(State(st): State<AppState>, Json(req): Json<SaveTaskReq>)
     if !crate::scheduler::validate_cron(&req.cron) {
         return err_response(StatusCode::BAD_REQUEST, "cron 表达式无效");
     }
-    let id = req.id.unwrap_or_else(|| Uuid::new_v4().simple().to_string());
-    let existing = st.db.list_tasks().ok().and_then(|ts| ts.into_iter().find(|t| t.id == id));
+    let id = req
+        .id
+        .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+    let existing = st
+        .db
+        .list_tasks()
+        .ok()
+        .and_then(|ts| ts.into_iter().find(|t| t.id == id));
     let task = Task {
         id,
         name: req.name,
         cron: req.cron,
         script_id: req.script_id,
         device_id: req.device_id,
-        enabled: req.enabled.unwrap_or(existing.as_ref().map(|t| t.enabled).unwrap_or(true)),
+        enabled: req
+            .enabled
+            .unwrap_or(existing.as_ref().map(|t| t.enabled).unwrap_or(true)),
         last_result: existing.as_ref().and_then(|t| t.last_result.clone()),
         last_run_at: existing.as_ref().and_then(|t| t.last_run_at.clone()),
-        created_at: existing.as_ref().map(|t| t.created_at.clone()).unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+        created_at: existing
+            .as_ref()
+            .map(|t| t.created_at.clone())
+            .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
     };
     match st.db.upsert_task(&task) {
         Ok(_) => Json(serde_json::json!({"ok": true, "id": task.id})).into_response(),
@@ -1065,7 +1283,11 @@ struct LogQuery {
 }
 
 async fn api_list_logs(State(st): State<AppState>, Query(q): Query<LogQuery>) -> Response {
-    match st.db.list_logs(q.device_id.as_deref(), q.level.as_deref(), q.limit.unwrap_or(200)) {
+    match st.db.list_logs(
+        q.device_id.as_deref(),
+        q.level.as_deref(),
+        q.limit.unwrap_or(200),
+    ) {
         Ok(logs) => Json(logs).into_response(),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
@@ -1113,9 +1335,19 @@ fn err_response(status: StatusCode, msg: &str) -> Response {
 fn sanitize_filename(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' || c == ' ' || c == '#' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' || c == ' ' || c == '#' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    if cleaned.is_empty() { "unnamed.png".into() } else { cleaned }
+    if cleaned.is_empty() {
+        "unnamed.png".into()
+    } else {
+        cleaned
+    }
 }
 
 #[allow(dead_code)]

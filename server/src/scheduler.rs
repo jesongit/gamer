@@ -40,7 +40,8 @@ pub struct Scheduler {
     /// 脚本文件存储：任务运行时按 script_id（package/name）取脚本内容
     scripts: Arc<ScriptStore>,
     /// task_id -> (是否运行中, 上次处理的触发时刻)
-    running: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (bool, Option<DateTime<Local>>)>>>,
+    running:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, (bool, Option<DateTime<Local>>)>>>,
 }
 
 impl Scheduler {
@@ -50,7 +51,12 @@ impl Scheduler {
         viewers: crate::webrtc::ViewerMap,
         scripts: Arc<ScriptStore>,
     ) -> Self {
-        let runner = Arc::new(Runner::new(db.clone(), devices.clone(), viewers, scripts.clone()));
+        let runner = Arc::new(Runner::new(
+            db.clone(),
+            devices.clone(),
+            viewers,
+            scripts.clone(),
+        ));
         Self {
             db,
             devices,
@@ -116,7 +122,8 @@ impl Scheduler {
                         let running2 = running.clone();
                         tokio::spawn(async move {
                             info!(task = %task2.name, "scheduled run triggered");
-                            let result = run_task(&runner2, &devices2, &db2, &scripts2, &task2).await;
+                            let result =
+                                run_task(&runner2, &devices2, &db2, &scripts2, &task2).await;
                             let _ = result;
                             // 只复位运行标志，保留 entry（含已处理的触发时刻）：
                             // 若直接 remove，下个 tick 会把同一触发点再执行一次（任务每 10s 重复触发的 bug）
@@ -157,7 +164,19 @@ async fn run_task(
     // 设备运行计数（空闲低功耗守卫；空闲拆会话/关屏由 idle_power_loop 统一管理）
     devices.run_begin(&task.device_id);
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let logs = runner.run(&task.device_id, &task.script_id, &script.content, stop, None, 0, None, None, vec![]).await;
+    let logs = runner
+        .run(
+            &task.device_id,
+            &task.script_id,
+            &script.content,
+            stop,
+            None,
+            0,
+            None,
+            None,
+            vec![],
+        )
+        .await;
     devices.run_end(&task.device_id);
     match logs {
         Ok(entries) => {
@@ -177,7 +196,12 @@ async fn run_task(
             Ok(())
         }
         Err(e) => {
-            let _ = db.add_log(&task.device_id, &task.script_id, "error", &format!("任务执行失败: {}", e));
+            let _ = db.add_log(
+                &task.device_id,
+                &task.script_id,
+                "error",
+                &format!("任务执行失败: {}", e),
+            );
             let mut t = task.clone();
             t.last_result = Some("失败".into());
             t.last_run_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
@@ -190,5 +214,8 @@ async fn run_task(
 /// 计算 cron 下次执行时间（用于 API 预览）
 pub fn next_run(cron_expr: &str) -> Option<DateTime<Local>> {
     let sched = Schedule::from_str(&normalize_cron(cron_expr)).ok()?;
-    sched.after(&Local::now()).next().map(|t| Local.timestamp_opt(t.timestamp(), 0).unwrap())
+    sched
+        .after(&Local::now())
+        .next()
+        .map(|t| Local.timestamp_opt(t.timestamp(), 0).unwrap())
 }

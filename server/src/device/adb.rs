@@ -18,7 +18,9 @@ pub struct Adb {
 
 impl Adb {
     pub fn new(cfg: &Config) -> Self {
-        Self { bin: cfg.adb_path.clone() }
+        Self {
+            bin: cfg.adb_path.clone(),
+        }
     }
 
     /// 运行 adb 命令并返回 stdout（UTF-8）
@@ -37,8 +39,12 @@ impl Adb {
             so.read_to_end(&mut out_buf).await?;
             se.read_to_end(&mut err_buf).await?;
             anyhow::Ok(())
-        }).await {
-            Ok(r) => { r?; }
+        })
+        .await
+        {
+            Ok(r) => {
+                r?;
+            }
             Err(_) => {
                 let _ = child.kill().await;
                 anyhow::bail!("adb timeout: {:?}", args);
@@ -66,8 +72,12 @@ impl Adb {
             so.read_to_end(&mut buf).await?;
             se.read_to_end(&mut err_buf).await?;
             anyhow::Ok(())
-        }).await {
-            Ok(r) => { r?; }
+        })
+        .await
+        {
+            Ok(r) => {
+                r?;
+            }
             Err(_) => {
                 let _ = child.kill().await;
                 anyhow::bail!("adb timeout: {:?}", args);
@@ -75,7 +85,11 @@ impl Adb {
         }
         let status = child.wait().await?;
         if !status.success() {
-            anyhow::bail!("adb {:?} failed: {}", args, String::from_utf8_lossy(&err_buf).trim());
+            anyhow::bail!(
+                "adb {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&err_buf).trim()
+            );
         }
         Ok(buf)
     }
@@ -104,7 +118,10 @@ impl Adb {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "adb.exe".to_string());
-            ("taskkill".to_string(), vec!["/F".into(), "/IM".into(), name])
+            (
+                "taskkill".to_string(),
+                vec!["/F".into(), "/IM".into(), name],
+            )
         } else {
             let name = std::path::Path::new(&bin)
                 .file_stem()
@@ -112,17 +129,35 @@ impl Adb {
                 .unwrap_or_else(|| "adb".to_string());
             ("pkill".to_string(), vec!["-9".into(), name])
         };
-        match tokio::process::Command::new(&prog).args(&args).output().await {
-            Ok(o) if o.status.success() => tracing::warn!("adb reset: kill-server 超时，已强制结束 adb 进程（{}）", prog),
+        match tokio::process::Command::new(&prog)
+            .args(&args)
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => tracing::warn!(
+                "adb reset: kill-server 超时，已强制结束 adb 进程（{}）",
+                prog
+            ),
             Ok(_) => tracing::debug!("adb reset: 无残留 adb 进程（{} 未找到目标）", prog),
             Err(e) => tracing::warn!("adb reset: 强制结束失败: {}", e),
         }
     }
 
     /// 建立 TCP 隧道：设备端 localabstract -> 本机 localhost:port（adb reverse）
-    pub async fn reverse(&self, serial: &str, abstract_name: &str, port: u16) -> anyhow::Result<()> {
+    pub async fn reverse(
+        &self,
+        serial: &str,
+        abstract_name: &str,
+        port: u16,
+    ) -> anyhow::Result<()> {
         self.run(
-            &["-s", serial, "reverse", &format!("localabstract:{}", abstract_name), &format!("tcp:{}", port)],
+            &[
+                "-s",
+                serial,
+                "reverse",
+                &format!("localabstract:{}", abstract_name),
+                &format!("tcp:{}", port),
+            ],
             Duration::from_secs(10),
         )
         .await?;
@@ -131,12 +166,21 @@ impl Adb {
 
     /// 推送文件到设备
     pub async fn push(&self, serial: &str, local: &str, remote: &str) -> anyhow::Result<()> {
-        self.run(&["-s", serial, "push", local, remote], Duration::from_secs(60)).await?;
+        self.run(
+            &["-s", serial, "push", local, remote],
+            Duration::from_secs(60),
+        )
+        .await?;
         Ok(())
     }
 
     /// 执行设备端 shell 命令
-    pub async fn shell(&self, serial: &str, cmd: &str, timeout: Duration) -> anyhow::Result<String> {
+    pub async fn shell(
+        &self,
+        serial: &str,
+        cmd: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<String> {
         self.run(&["-s", serial, "shell", cmd], timeout).await
     }
 
@@ -187,21 +231,43 @@ impl Adb {
 
     /// 截屏（PNG 字节）—— 视频流取帧的 fallback
     pub async fn screencap(&self, serial: &str) -> anyhow::Result<Vec<u8>> {
-        let bytes = self.run_bytes(&["-s", serial, "exec-out", "screencap", "-p"], Duration::from_secs(15)).await?;
+        let bytes = self
+            .run_bytes(
+                &["-s", serial, "exec-out", "screencap", "-p"],
+                Duration::from_secs(15),
+            )
+            .await?;
         Ok(bytes)
     }
 
     /// 指定 display 截屏（虚拟屏模式）
-    pub async fn screencap_display(&self, serial: &str, display_id: i64) -> anyhow::Result<Vec<u8>> {
+    pub async fn screencap_display(
+        &self,
+        serial: &str,
+        display_id: i64,
+    ) -> anyhow::Result<Vec<u8>> {
         let bytes = self
-            .run_bytes(&["-s", serial, "exec-out", "screencap", "-d", &display_id.to_string(), "-p"], Duration::from_secs(15))
+            .run_bytes(
+                &[
+                    "-s",
+                    serial,
+                    "exec-out",
+                    "screencap",
+                    "-d",
+                    &display_id.to_string(),
+                    "-p",
+                ],
+                Duration::from_secs(15),
+            )
             .await?;
         Ok(bytes)
     }
 
     /// 连接网络设备（redroid / 无线 adb / 模拟器）
     pub async fn connect(&self, addr: &str) -> anyhow::Result<()> {
-        let out = self.run(&["connect", addr], Duration::from_secs(15)).await?;
+        let out = self
+            .run(&["connect", addr], Duration::from_secs(15))
+            .await?;
         if out.contains("failed") || out.contains("cannot") {
             anyhow::bail!("adb connect {} failed: {}", addr, out.trim());
         }
@@ -209,7 +275,9 @@ impl Adb {
     }
 
     pub async fn disconnect(&self, addr: &str) -> anyhow::Result<()> {
-        let _ = self.run(&["disconnect", addr], Duration::from_secs(10)).await;
+        let _ = self
+            .run(&["disconnect", addr], Duration::from_secs(10))
+            .await;
         Ok(())
     }
 
@@ -237,7 +305,10 @@ impl Adb {
     /// 匹配优先级：精确 → 子串（双向）→ model == 设备 name。
     /// 全部失配时原样返回配置 serial（保持旧行为，错误信息更清晰）。
     pub async fn resolve_serial(&self, configured: &str, name: &str) -> String {
-        let out = self.run(&["devices", "-l"], Duration::from_secs(10)).await.unwrap_or_default();
+        let out = self
+            .run(&["devices", "-l"], Duration::from_secs(10))
+            .await
+            .unwrap_or_default();
         let mut by_model: Option<String> = None;
         for line in out.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -249,10 +320,15 @@ impl Adb {
                 return ts;
             }
             // mDNS 名包含 serial（adb-<serial>-...）；反向子串（serial 恰好是 transport 前缀等）
-            if (ts.contains(configured) && !configured.is_empty()) || (configured.contains(&ts) && !ts.is_empty()) {
+            if (ts.contains(configured) && !configured.is_empty())
+                || (configured.contains(&ts) && !ts.is_empty())
+            {
                 return ts;
             }
-            let model = parts.iter().find_map(|p| p.strip_prefix("model:")).unwrap_or("");
+            let model = parts
+                .iter()
+                .find_map(|p| p.strip_prefix("model:"))
+                .unwrap_or("");
             if !model.is_empty() && model == name && by_model.is_none() {
                 by_model = Some(ts);
             }
@@ -264,14 +340,18 @@ impl Adb {
     pub async fn is_connected(&self, serial: &str) -> bool {
         match self.list_devices().await {
             // 子串匹配兜底：传入的 serial 可能是 mDNS 名/IP:port（与配置 serial 不同）
-            Ok(list) => list.iter().any(|s| s == serial || (s.contains(serial) && !serial.is_empty())),
+            Ok(list) => list
+                .iter()
+                .any(|s| s == serial || (s.contains(serial) && !serial.is_empty())),
             Err(_) => false,
         }
     }
 
     /// 获取设备属性（ro.product.model 等）
     pub async fn getprop(&self, serial: &str, prop: &str) -> anyhow::Result<String> {
-        let out = self.shell(serial, &format!("getprop {}", prop), Duration::from_secs(8)).await?;
+        let out = self
+            .shell(serial, &format!("getprop {}", prop), Duration::from_secs(8))
+            .await?;
         Ok(out.trim().to_string())
     }
 }
@@ -285,5 +365,7 @@ pub async fn write_all(sock: &mut tokio::net::TcpStream, data: &[u8]) -> anyhow:
 /// 拼进 adb shell 命令的包名安全校验：仅 [A-Za-z0-9_.]，防注入；
 /// 非包名输入（如中文应用名）返回 false，调用方据此跳过 pidof 探测等拼串操作
 pub fn is_safe_pkg(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
 }

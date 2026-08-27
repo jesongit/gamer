@@ -114,7 +114,9 @@ impl Store {
         if !has_fps {
             conn.execute("ALTER TABLE devices ADD COLUMN fps INTEGER", [])?;
         }
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -179,7 +181,8 @@ impl Store {
     }
 
     pub fn delete_device(&self, id: &str) -> anyhow::Result<()> {
-        self.lock().execute("DELETE FROM devices WHERE id = ?1", [id])?;
+        self.lock()
+            .execute("DELETE FROM devices WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -222,14 +225,23 @@ impl Store {
     }
 
     pub fn delete_task(&self, id: &str) -> anyhow::Result<()> {
-        self.lock().execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+        self.lock()
+            .execute("DELETE FROM tasks WHERE id = ?1", [id])?;
         Ok(())
     }
 
     // ---------- 日志 ----------
 
-    pub fn add_log(&self, device_id: &str, script_id: &str, level: &str, msg: &str) -> anyhow::Result<()> {
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    pub fn add_log(
+        &self,
+        device_id: &str,
+        script_id: &str,
+        level: &str,
+        msg: &str,
+    ) -> anyhow::Result<()> {
+        let now = chrono::Local::now()
+            .format("%Y-%m-%d %H:%M:%S%.3f")
+            .to_string();
         self.lock().execute(
             "INSERT INTO logs (time, device_id, script_id, level, msg) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![now, device_id, script_id, level, msg],
@@ -237,7 +249,12 @@ impl Store {
         Ok(())
     }
 
-    pub fn list_logs(&self, device_id: Option<&str>, level: Option<&str>, limit: i64) -> anyhow::Result<Vec<LogEntry>> {
+    pub fn list_logs(
+        &self,
+        device_id: Option<&str>,
+        level: Option<&str>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<LogEntry>> {
         let conn = self.lock();
         let mut sql = String::from("SELECT id, time, device_id, script_id, level, msg FROM logs");
         let mut conds = Vec::new();
@@ -257,16 +274,19 @@ impl Store {
         sql.push_str(" ORDER BY id DESC LIMIT ?");
         params.push(Box::new(limit));
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())), |r| {
-            Ok(LogEntry {
-                id: r.get(0)?,
-                time: r.get(1)?,
-                device_id: r.get(2)?,
-                script_id: r.get(3)?,
-                level: r.get(4)?,
-                msg: r.get(5)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |r| {
+                Ok(LogEntry {
+                    id: r.get(0)?,
+                    time: r.get(1)?,
+                    device_id: r.get(2)?,
+                    script_id: r.get(3)?,
+                    level: r.get(4)?,
+                    msg: r.get(5)?,
+                })
+            },
+        )?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 

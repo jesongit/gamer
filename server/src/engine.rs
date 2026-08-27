@@ -108,10 +108,23 @@ pub enum ScriptEvent {
     /// 引擎滑动（设备像素坐标）
     Swipe { x1: u32, y1: u32, x2: u32, y2: u32 },
     /// 模板匹配命中（设备像素坐标 + 置信度）
-    Hit { tpl: String, x: u32, y: u32, w: u32, h: u32, score: f32 },
+    Hit {
+        tpl: String,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        score: f32,
+    },
     /// 模板匹配未命中（可视化本次搜索区域，设备像素坐标；
     /// 调试定位"在哪找、没找到"——轮询期内每轮刷新，命中前持续可见）
-    Miss { tpl: String, x: u32, y: u32, w: u32, h: u32 },
+    Miss {
+        tpl: String,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    },
 }
 
 /// 运行器
@@ -198,16 +211,25 @@ impl Ctx {
 }
 
 impl Runner {
-    pub fn new(db: Db, devices: Arc<DeviceManager>, viewers: ViewerMap, scripts: Arc<ScriptStore>) -> Self {
-        Self { db, devices, viewers, scripts }
+    pub fn new(
+        db: Db,
+        devices: Arc<DeviceManager>,
+        viewers: ViewerMap,
+        scripts: Arc<ScriptStore>,
+    ) -> Self {
+        Self {
+            db,
+            devices,
+            viewers,
+            scripts,
+        }
     }
 
     /// 推送脚本可视化事件给该设备当前的 viewer（无 viewer / 通道未开 / 发送失败均静默忽略）
     async fn emit(&self, device_id: &str, ev: ScriptEvent) {
         let dc = {
             let map = self.viewers.lock().unwrap();
-            map.get(device_id)
-                .and_then(|h| h.control_dc.lock().clone())
+            map.get(device_id).and_then(|h| h.control_dc.lock().clone())
         };
         let Some(dc) = dc else {
             tracing::debug!(device = %device_id, "script event dropped: no viewer control_dc");
@@ -282,12 +304,13 @@ impl Runner {
         // start_step>0（点击函数体内某行）跳过 cond 直接从该步执行
         let steps = match run_func {
             Some(name) => {
-                let def = ctx
-                    .funcs
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("函数 {} 未定义（func: 段里没有该函数名）", name))?;
-                ctx.log("info", format!("直接运行函数 {}（无实参，体内 $N 不替换）", name));
+                let def = ctx.funcs.get(name).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("函数 {} 未定义（func: 段里没有该函数名）", name)
+                })?;
+                ctx.log(
+                    "info",
+                    format!("直接运行函数 {}（无实参，体内 $N 不替换）", name),
+                );
                 if start_step == 0 && !self.check_func_cond(&mut ctx, &def.cond).await? {
                     ctx.log("info", format!("函数 {} 条件未命中，函数体不执行", name));
                     Vec::new()
@@ -301,13 +324,20 @@ impl Runner {
                     if ctx.funcs.is_empty() {
                         anyhow::bail!("脚本需要 steps 或 func 根节点（纯函数库脚本也至少要定义一个函数，供其他脚本通过 脚本名:函数名 调用）");
                     }
-                    ctx.log("info", "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作".to_string());
+                    ctx.log(
+                        "info",
+                        "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作".to_string(),
+                    );
                     Vec::new()
                 }
             },
         };
 
-        let mut i = if start_step > 0 && start_step < steps.len() { start_step } else { 0 };
+        let mut i = if start_step > 0 && start_step < steps.len() {
+            start_step
+        } else {
+            0
+        };
         let mut guard_count = 0usize;
         while i < steps.len() {
             if ctx.stop.load(Ordering::SeqCst) {
@@ -360,7 +390,9 @@ impl Runner {
                         _ => {}
                     }
                 }
-                let has_section = m.keys().any(|k| matches!(k.as_str(), Some("config" | "func" | "steps")));
+                let has_section = m
+                    .keys()
+                    .any(|k| matches!(k.as_str(), Some("config" | "func" | "steps")));
                 if has_section {
                     for k in m.keys() {
                         if !matches!(k.as_str(), Some("config" | "func" | "steps")) {
@@ -392,7 +424,10 @@ impl Runner {
 
     /// 从文档取出 func 段（原样返回，不参与 $N 替换）并对剩余部分做实参替换。
     /// 返回 func 段的值（None = 未定义）
-    fn take_funcs_and_substitute(doc: &mut Value, args: &[String]) -> anyhow::Result<Option<Value>> {
+    fn take_funcs_and_substitute(
+        doc: &mut Value,
+        args: &[String],
+    ) -> anyhow::Result<Option<Value>> {
         let funcs = doc.get("func").filter(|v| !v.is_null()).cloned();
         if funcs.is_some() {
             if let Some(m) = doc.as_mapping_mut() {
@@ -411,22 +446,30 @@ impl Runner {
     /// config: 段解析（mapping 或 mapping 列表按序覆盖）：
     /// interval / threshold / log_level，默认取 config.toml 同名键
     fn parse_script_config(&self, doc: &Value) -> anyhow::Result<(u64, f32, u8)> {
-        let mut interval_ms = Self::parse_duration(&Value::String(self.devices.cfg.interval.clone()), "config.toml interval")?;
+        let mut interval_ms = Self::parse_duration(
+            &Value::String(self.devices.cfg.interval.clone()),
+            "config.toml interval",
+        )?;
         if interval_ms == 0 {
             anyhow::bail!("config.toml interval 必须 > 0");
         }
         let mut threshold = self.devices.cfg.threshold;
         let mut level = Ctx::parse_level(&self.devices.cfg.log_level).ok_or_else(|| {
-            anyhow::anyhow!("config.toml log_level 需要 debug/info/warn/error，收到: {}", self.devices.cfg.log_level)
+            anyhow::anyhow!(
+                "config.toml log_level 需要 debug/info/warn/error，收到: {}",
+                self.devices.cfg.log_level
+            )
         })?;
         match doc.get("config") {
             None | Some(Value::Null) => {}
-            Some(Value::Mapping(m)) => Self::apply_config_map(m, &mut interval_ms, &mut threshold, &mut level)?,
+            Some(Value::Mapping(m)) => {
+                Self::apply_config_map(m, &mut interval_ms, &mut threshold, &mut level)?
+            }
             Some(Value::Sequence(seq)) => {
                 for (i, item) in seq.iter().enumerate() {
-                    let m = item
-                        .as_mapping()
-                        .ok_or_else(|| anyhow::anyhow!("config 列表第 {} 项需要映射（键值按序覆盖）", i + 1))?;
+                    let m = item.as_mapping().ok_or_else(|| {
+                        anyhow::anyhow!("config 列表第 {} 项需要映射（键值按序覆盖）", i + 1)
+                    })?;
                     Self::apply_config_map(m, &mut interval_ms, &mut threshold, &mut level)?;
                 }
             }
@@ -435,7 +478,12 @@ impl Runner {
         Ok((interval_ms, threshold, level))
     }
 
-    fn apply_config_map(m: &serde_yaml::Mapping, interval_ms: &mut u64, threshold: &mut f32, level: &mut u8) -> anyhow::Result<()> {
+    fn apply_config_map(
+        m: &serde_yaml::Mapping,
+        interval_ms: &mut u64,
+        threshold: &mut f32,
+        level: &mut u8,
+    ) -> anyhow::Result<()> {
         for (k, v) in m {
             match k.as_str() {
                 Some("interval") => {
@@ -446,20 +494,26 @@ impl Runner {
                     *interval_ms = ms;
                 }
                 Some("threshold") => {
-                    let t = v.as_f64().ok_or_else(|| anyhow::anyhow!("config.threshold 需要数字（0~1）"))?;
+                    let t = v
+                        .as_f64()
+                        .ok_or_else(|| anyhow::anyhow!("config.threshold 需要数字（0~1）"))?;
                     if !(0.0..=1.0).contains(&t) || t <= 0.0 {
                         anyhow::bail!("config.threshold 需要在 (0, 1] 之间，收到: {}", t);
                     }
                     *threshold = t as f32;
                 }
                 Some("log_level") => {
-                    let s = v
-                        .as_str()
-                        .ok_or_else(|| anyhow::anyhow!("config.log_level 需要 debug/info/warn/error 字符串"))?;
-                    *level = Ctx::parse_level(s)
-                        .ok_or_else(|| anyhow::anyhow!("config.log_level 需要 debug/info/warn/error，收到: {}", s))?;
+                    let s = v.as_str().ok_or_else(|| {
+                        anyhow::anyhow!("config.log_level 需要 debug/info/warn/error 字符串")
+                    })?;
+                    *level = Ctx::parse_level(s).ok_or_else(|| {
+                        anyhow::anyhow!("config.log_level 需要 debug/info/warn/error，收到: {}", s)
+                    })?;
                 }
-                other => anyhow::bail!("config 不支持的键 {:?}（可用：interval / threshold / log_level）", other),
+                other => anyhow::bail!(
+                    "config 不支持的键 {:?}（可用：interval / threshold / log_level）",
+                    other
+                ),
             }
         }
         Ok(())
@@ -494,14 +548,14 @@ impl Runner {
         };
         // 保留字：动作键 + 结构键 + 已删除的旧动作名（防止函数调用撞上迁移报错）
         const RESERVED: [&str; 26] = [
-            "log", "key", "text", "tap", "swipe", "find", "color", "loop", "call", "throw", "str_app", "cls_app",
-            "wait", "return", "then", "else", "steps", "times", "block", "verify", "timeout", "config", "func",
-            "until", "cond", "exit",
+            "log", "key", "text", "tap", "swipe", "find", "color", "loop", "call", "throw",
+            "str_app", "cls_app", "wait", "return", "then", "else", "steps", "times", "block",
+            "verify", "timeout", "config", "func", "until", "cond", "exit",
         ];
         for (i, item) in items.iter().enumerate() {
-            let m = item
-                .as_mapping()
-                .ok_or_else(|| anyhow::anyhow!("func 第 {} 项需要映射（函数名: 步骤列表）", i + 1))?;
+            let m = item.as_mapping().ok_or_else(|| {
+                anyhow::anyhow!("func 第 {} 项需要映射（函数名: 步骤列表）", i + 1)
+            })?;
             // 分离 cond / steps 兄弟键与函数名键
             let mut name_k: Option<(&Value, &Value)> = None;
             let mut cond_v: Option<&Value> = None;
@@ -512,7 +566,11 @@ impl Runner {
                     Some("steps") => steps_v = Some(val),
                     _ => {
                         if name_k.is_some() {
-                            anyhow::bail!("func 第 {} 项需要恰好一个 函数名: 键（收到 {} 个）", i + 1, m.len());
+                            anyhow::bail!(
+                                "func 第 {} 项需要恰好一个 函数名: 键（收到 {} 个）",
+                                i + 1,
+                                m.len()
+                            );
                         }
                         name_k = Some((k, val));
                     }
@@ -546,7 +604,10 @@ impl Runner {
             let (body, cond_v) = match body_v {
                 Value::Sequence(seq) => {
                     if steps_v.is_some() {
-                        anyhow::bail!("函数 {} 的函数体既直接挂在函数名键，又写了 steps 键（只用一种写法）", name);
+                        anyhow::bail!(
+                            "函数 {} 的函数体既直接挂在函数名键，又写了 steps 键（只用一种写法）",
+                            name
+                        );
                     }
                     (seq.clone(), cond_v)
                 }
@@ -565,7 +626,11 @@ impl Runner {
                         match k.as_str() {
                             Some("cond") => nested_cond = Some(val),
                             Some("steps") => nested_steps = Some(val),
-                            Some(other) => anyhow::bail!("函数 {} 的函数体映射只支持 cond / steps 键（收到 {}）", name, other),
+                            Some(other) => anyhow::bail!(
+                                "函数 {} 的函数体映射只支持 cond / steps 键（收到 {}）",
+                                name,
+                                other
+                            ),
                             None => anyhow::bail!("函数 {} 的函数体映射键需要字符串", name),
                         }
                     }
@@ -609,7 +674,10 @@ impl Runner {
             None => step,
         };
         let Some(m) = step.as_mapping() else {
-            anyhow::bail!("步骤需要映射（动作键: 值）或无参动作简写（如 - str_app），收到: {:?}", step);
+            anyhow::bail!(
+                "步骤需要映射（动作键: 值）或无参动作简写（如 - str_app），收到: {:?}",
+                step
+            );
         };
         if m.is_empty() {
             return Ok(());
@@ -641,23 +709,31 @@ impl Runner {
         if step.get("goto").is_some() || step.get("label").is_some() {
             anyhow::bail!("goto/label 已删除：循环重试用 loop");
         }
-        for k in ["count", "cnt_ivl", "cnt_chk", "img_ivl", "and_or", "click", "before", "after"] {
+        for k in [
+            "count", "cnt_ivl", "cnt_chk", "img_ivl", "and_or", "click", "before", "after",
+        ] {
             if step.get(k).is_some() {
                 anyhow::bail!("{} 已删除（2026-08-26 语法精简）", k);
             }
         }
         if step.get("threshold").is_some() {
-            anyhow::bail!("threshold 步骤参数已删除：匹配阈值全局配置（config: 段或 config.toml threshold）");
+            anyhow::bail!(
+                "threshold 步骤参数已删除：匹配阈值全局配置（config: 段或 config.toml threshold）"
+            );
         }
         if step.get("region").is_some() {
             anyhow::bail!("region 步骤参数已删除：搜索区域由模板名 #后缀 决定（无后缀回退全屏）");
         }
         // 动作键解析：一个步骤只能有一个
         const ACTION_KEYS: [&str; 14] = [
-            "log", "key", "text", "tap", "swipe", "find", "color", "loop", "call", "throw", "str_app", "cls_app",
-            "wait", "return",
+            "log", "key", "text", "tap", "swipe", "find", "color", "loop", "call", "throw",
+            "str_app", "cls_app", "wait", "return",
         ];
-        let hits: Vec<&str> = ACTION_KEYS.iter().copied().filter(|k| step.get(*k).is_some()).collect();
+        let hits: Vec<&str> = ACTION_KEYS
+            .iter()
+            .copied()
+            .filter(|k| step.get(*k).is_some())
+            .collect();
         let mut cross_qual: Option<String> = None;
         let action: String = if let Some(&first) = hits.first() {
             if hits.len() > 1 {
@@ -673,7 +749,10 @@ impl Runner {
         } else {
             // 无动作键：已定义函数名 → 函数调用；`脚本名:函数名` → 跨文件函数调用；
             // 否则报未知动作
-            let names: Vec<String> = m.keys().filter_map(|k| k.as_str().map(|s| s.to_string())).collect();
+            let names: Vec<String> = m
+                .keys()
+                .filter_map(|k| k.as_str().map(|s| s.to_string()))
+                .collect();
             if names.is_empty() {
                 anyhow::bail!("步骤键需要字符串（旧数组键写法已删除）");
             }
@@ -703,7 +782,11 @@ impl Runner {
         match action.as_str() {
             "log" => {
                 Self::ensure_only_keys(step, "log", &["log"])?;
-                let msg = step.get("log").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let msg = step
+                    .get("log")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 ctx.log("info", msg);
             }
             "key" => {
@@ -730,20 +813,26 @@ impl Runner {
             "tap" => {
                 Self::ensure_only_keys(step, "tap", &["tap"])?;
                 let (rx, ry) = self.relative_pair(step.get("tap").unwrap_or(&Value::Null))?;
-                let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+                let s = self
+                    .devices
+                    .session(&ctx.device_id)
+                    .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
                 let (w, h) = s.video_size();
                 let x = (rx * w as f32).round().clamp(0.0, w as f32) as u32;
                 let y = (ry * h as f32).round().clamp(0.0, h as f32) as u32;
-                ctx.log("debug", format!("点击坐标 ({:.3}, {:.3}) → 像素 ({}, {})", rx, ry, x, y));
+                ctx.log(
+                    "debug",
+                    format!("点击坐标 ({:.3}, {:.3}) → 像素 ({}, {})", rx, ry, x, y),
+                );
                 self.emit(&ctx.device_id, ScriptEvent::Tap { x, y }).await;
                 s.tap(x as f32, y as f32).await?;
             }
             "swipe" => {
                 Self::ensure_only_keys(step, "swipe", &["swipe"])?;
                 let v = step.get("swipe").unwrap();
-                let sm = v
-                    .as_mapping()
-                    .ok_or_else(|| anyhow::anyhow!("swipe 需要 {{fm: [x,y], to: [x,y], time: 500ms}} 映射"))?;
+                let sm = v.as_mapping().ok_or_else(|| {
+                    anyhow::anyhow!("swipe 需要 {{fm: [x,y], to: [x,y], time: 500ms}} 映射")
+                })?;
                 for k in sm.keys() {
                     match k.as_str() {
                         Some("fm" | "to" | "time") => {}
@@ -751,23 +840,40 @@ impl Runner {
                         other => anyhow::bail!("swipe 不支持参数 {:?}", other),
                     }
                 }
-                let from = sm.get(&Value::String("fm".into())).cloned().ok_or_else(|| anyhow::anyhow!("swipe 缺少 fm"))?;
-                let to = sm.get(&Value::String("to".into())).cloned().ok_or_else(|| anyhow::anyhow!("swipe 缺少 to"))?;
+                let from = sm
+                    .get(&Value::String("fm".into()))
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("swipe 缺少 fm"))?;
+                let to = sm
+                    .get(&Value::String("to".into()))
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("swipe 缺少 to"))?;
                 let dur = match sm.get(&Value::String("time".into())) {
                     Some(t) => Self::parse_duration(t, "swipe time")?,
                     None => 500,
                 };
                 let (rx1, ry1) = self.relative_pair(&from)?;
                 let (rx2, ry2) = self.relative_pair(&to)?;
-                let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+                let s = self
+                    .devices
+                    .session(&ctx.device_id)
+                    .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
                 let (w, h) = s.video_size();
                 let x1 = (rx1 * w as f32).round().clamp(0.0, w as f32) as u32;
                 let y1 = (ry1 * h as f32).round().clamp(0.0, h as f32) as u32;
                 let x2 = (rx2 * w as f32).round().clamp(0.0, w as f32) as u32;
                 let y2 = (ry2 * h as f32).round().clamp(0.0, h as f32) as u32;
-                ctx.log("debug", format!("滑动 ({:.3},{:.3})→({:.3},{:.3}) {}ms", rx1, ry1, rx2, ry2, dur));
-                self.emit(&ctx.device_id, ScriptEvent::Swipe { x1, y1, x2, y2 }).await;
-                s.swipe(x1 as f32, y1 as f32, x2 as f32, y2 as f32, dur).await?;
+                ctx.log(
+                    "debug",
+                    format!(
+                        "滑动 ({:.3},{:.3})→({:.3},{:.3}) {}ms",
+                        rx1, ry1, rx2, ry2, dur
+                    ),
+                );
+                self.emit(&ctx.device_id, ScriptEvent::Swipe { x1, y1, x2, y2 })
+                    .await;
+                s.swipe(x1 as f32, y1 as f32, x2 as f32, y2 as f32, dur)
+                    .await?;
             }
             "wait" => {
                 Self::ensure_only_keys(step, "wait", &["wait"])?;
@@ -781,7 +887,9 @@ impl Runner {
                             a
                         }
                     }
-                    Value::Sequence(_) => anyhow::bail!("wait 区间需要 [最小, 最大] 两个带单位时长（如 [1s, 3s]）"),
+                    Value::Sequence(_) => {
+                        anyhow::bail!("wait 区间需要 [最小, 最大] 两个带单位时长（如 [1s, 3s]）")
+                    }
                     other => Self::parse_duration(other, "wait")?,
                 };
                 ctx.log("debug", format!("等待 {}ms", ms));
@@ -811,10 +919,23 @@ impl Runner {
                         if args.is_empty() {
                             ctx.log("debug", format!("调用子脚本 {}", script_name));
                         } else {
-                            ctx.log("debug", format!("调用子脚本 {}（实参 {}）", script_name, args.join(" ")));
+                            ctx.log(
+                                "debug",
+                                format!("调用子脚本 {}（实参 {}）", script_name, args.join(" ")),
+                            );
                         }
                         let sub_log = self
-                            .run(&ctx.device_id, &s.id, &s.content, ctx.stop.clone(), ctx.log_cb.clone(), 0, None, Some(ctx.exit.clone()), args)
+                            .run(
+                                &ctx.device_id,
+                                &s.id,
+                                &s.content,
+                                ctx.stop.clone(),
+                                ctx.log_cb.clone(),
+                                0,
+                                None,
+                                Some(ctx.exit.clone()),
+                                args,
+                            )
                             .await?;
                         ctx.log.extend(sub_log);
                     }
@@ -840,7 +961,10 @@ impl Runner {
                 let pkg = self.resolve_app_pkg(ctx)?;
                 // "+" 前缀：先 force-stop 再启动（scrcpy 定制控制消息，
                 // 虚拟屏模式下自动启动到虚拟屏，不要用 adb am start——会落到主屏）
-                let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+                let s = self
+                    .devices
+                    .session(&ctx.device_id)
+                    .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
                 ctx.log("info", format!("冷启动应用 {}", pkg));
                 s.start_app(&format!("+{}", pkg)).await?;
             }
@@ -857,7 +981,14 @@ impl Runner {
                 ctx.log("info", format!("关闭应用 {}", pkg));
                 // adb force-stop：不碰 scrcpy 会话（屏幕/投屏不中断）；幂等，应用未运行也无害。
                 // 虚拟屏上应用被杀后画面变桌面或黑屏，流不断，属预期
-                self.devices.adb.shell(&serial, &format!("am force-stop {}", pkg), Duration::from_secs(8)).await?;
+                self.devices
+                    .adb
+                    .shell(
+                        &serial,
+                        &format!("am force-stop {}", pkg),
+                        Duration::from_secs(8),
+                    )
+                    .await?;
             }
             "return" => {
                 Self::ensure_only_keys(step, "return", &["return"])?;
@@ -890,7 +1021,11 @@ impl Runner {
     /// threshold 取 ctx（config: 段 > config.toml）；region 由模板名 #后缀决定
     #[async_recursion]
     async fn exec_find(&self, ctx: &mut Ctx, step: &Value) -> anyhow::Result<()> {
-        Self::ensure_only_keys(step, "find", &["find", "verify", "timeout", "block", "then", "else"])?;
+        Self::ensure_only_keys(
+            step,
+            "find",
+            &["find", "verify", "timeout", "block", "then", "else"],
+        )?;
         let template = match step.get("find") {
             Some(Value::String(s)) => {
                 let t = s.trim().to_string();
@@ -898,7 +1033,9 @@ impl Runner {
                     anyhow::bail!("find 模板名不能为空");
                 }
                 if t.contains(',') {
-                    anyhow::bail!("find 只支持单个主模板（多个目标请拆成多步；挡路的模板写 block）");
+                    anyhow::bail!(
+                        "find 只支持单个主模板（多个目标请拆成多步；挡路的模板写 block）"
+                    );
                 }
                 t
             }
@@ -913,9 +1050,11 @@ impl Runner {
             anyhow::bail!("block 模板 {} 与 find 主模板重复", template);
         }
         let verify = match step.get("verify") {
-            Some(v) => v
-                .as_bool()
-                .ok_or_else(|| anyhow::anyhow!("verify 需要 true / false（true=点击后等 interval 重匹配，仍命中补点一次）"))?,
+            Some(v) => v.as_bool().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "verify 需要 true / false（true=点击后等 interval 重匹配，仍命中补点一次）"
+                )
+            })?,
             None => false,
         };
         let timeout_ms = match Self::opt_duration(step, "timeout")? {
@@ -931,45 +1070,91 @@ impl Runner {
             Some(v) => Self::steps_value(v)?,
             None => Vec::new(),
         };
-        let refs: Vec<String> = std::iter::once(template.clone()).chain(blocks.iter().cloned()).collect();
+        let refs: Vec<String> = std::iter::once(template.clone())
+            .chain(blocks.iter().cloned())
+            .collect();
         if blocks.is_empty() {
-            ctx.log("info", format!("等待模板 {}，超时 {}ms，轮询 {}ms", template, timeout_ms, ctx.interval_ms));
+            ctx.log(
+                "info",
+                format!(
+                    "等待模板 {}，超时 {}ms，轮询 {}ms",
+                    template, timeout_ms, ctx.interval_ms
+                ),
+            );
         } else {
-            ctx.log("info", format!(
-                "等待模板 {}（障碍 {}），超时 {}ms，轮询 {}ms",
-                template, blocks.join("、"), timeout_ms, ctx.interval_ms
-            ));
+            ctx.log(
+                "info",
+                format!(
+                    "等待模板 {}（障碍 {}），超时 {}ms，轮询 {}ms",
+                    template,
+                    blocks.join("、"),
+                    timeout_ms,
+                    ctx.interval_ms
+                ),
+            );
         }
         let start = std::time::Instant::now();
         loop {
-            if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+            if ctx.stop.load(Ordering::SeqCst)
+                || ctx.exit.load(Ordering::SeqCst)
+                || ctx.return_value.is_some()
+            {
                 break;
             }
             if start.elapsed().as_millis() as u64 > timeout_ms {
-                ctx.log("warn", format!("等待模板 {} 超时（{}ms）", template, timeout_ms));
+                ctx.log(
+                    "warn",
+                    format!("等待模板 {} 超时（{}ms）", template, timeout_ms),
+                );
                 self.run_branch(ctx, &else_steps, &refs).await?;
                 break;
             }
             if let Some(mm) = self.match_one(ctx, &template).await? {
-                self.emit(&ctx.device_id, ScriptEvent::Hit {
-                    tpl: template.clone(),
-                    x: mm.x, y: mm.y, w: mm.width, h: mm.height, score: mm.score,
-                })
+                self.emit(
+                    &ctx.device_id,
+                    ScriptEvent::Hit {
+                        tpl: template.clone(),
+                        x: mm.x,
+                        y: mm.y,
+                        w: mm.width,
+                        h: mm.height,
+                        score: mm.score,
+                    },
+                )
                 .await;
-                ctx.log("success", format!("模板 {} 已找到 @ ({}, {})", template, mm.x, mm.y));
+                ctx.log(
+                    "success",
+                    format!("模板 {} 已找到 @ ({}, {})", template, mm.x, mm.y),
+                );
                 self.click_center(ctx, &mm).await?;
                 if verify {
                     tokio::time::sleep(Duration::from_millis(ctx.interval_ms)).await;
                     if let Some(m2) = self.match_one(ctx, &template).await? {
-                        self.emit(&ctx.device_id, ScriptEvent::Hit {
-                            tpl: template.clone(),
-                            x: m2.x, y: m2.y, w: m2.width, h: m2.height, score: m2.score,
-                        })
+                        self.emit(
+                            &ctx.device_id,
+                            ScriptEvent::Hit {
+                                tpl: template.clone(),
+                                x: m2.x,
+                                y: m2.y,
+                                w: m2.width,
+                                h: m2.height,
+                                score: m2.score,
+                            },
+                        )
                         .await;
-                        ctx.log("info", format!("verify：模板 {} 仍存在，补点一次 @ ({}, {})", template, m2.x, m2.y));
+                        ctx.log(
+                            "info",
+                            format!(
+                                "verify：模板 {} 仍存在，补点一次 @ ({}, {})",
+                                template, m2.x, m2.y
+                            ),
+                        );
                         self.click_center(ctx, &m2).await?;
                     } else {
-                        ctx.log("debug", format!("verify：模板 {} 已消失，点击已生效", template));
+                        ctx.log(
+                            "debug",
+                            format!("verify：模板 {} 已消失，点击已生效", template),
+                        );
                     }
                 }
                 self.run_branch(ctx, &then_steps, &refs).await?;
@@ -981,17 +1166,30 @@ impl Runner {
                     break;
                 }
                 if let Some(mm) = self.match_one(ctx, b).await? {
-                    self.emit(&ctx.device_id, ScriptEvent::Hit {
-                        tpl: b.clone(),
-                        x: mm.x, y: mm.y, w: mm.width, h: mm.height, score: mm.score,
-                    })
+                    self.emit(
+                        &ctx.device_id,
+                        ScriptEvent::Hit {
+                            tpl: b.clone(),
+                            x: mm.x,
+                            y: mm.y,
+                            w: mm.width,
+                            h: mm.height,
+                            score: mm.score,
+                        },
+                    )
                     .await;
-                    ctx.log("success", format!("障碍模板 {} 出现，点击关闭 @ ({}, {})", b, mm.x, mm.y));
+                    ctx.log(
+                        "success",
+                        format!("障碍模板 {} 出现，点击关闭 @ ({}, {})", b, mm.x, mm.y),
+                    );
                     self.click_center(ctx, &mm).await?;
                     break;
                 }
             }
-            if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+            if ctx.stop.load(Ordering::SeqCst)
+                || ctx.exit.load(Ordering::SeqCst)
+                || ctx.return_value.is_some()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(ctx.interval_ms)).await;
@@ -1005,8 +1203,11 @@ impl Runner {
     /// ^1 = "[x, y]" 坐标串、^2.. = 色值键（书写顺序）
     #[async_recursion]
     async fn exec_color(&self, ctx: &mut Ctx, step: &Value) -> anyhow::Result<()> {
-        let pos_v = step.get("color").ok_or_else(|| anyhow::anyhow!("缺少 color 坐标"))?;
-        let (rx, ry) = Self::parse_rel_coord(pos_v).map_err(|e| anyhow::anyhow!("color 坐标: {}", e))?;
+        let pos_v = step
+            .get("color")
+            .ok_or_else(|| anyhow::anyhow!("缺少 color 坐标"))?;
+        let (rx, ry) =
+            Self::parse_rel_coord(pos_v).map_err(|e| anyhow::anyhow!("color 坐标: {}", e))?;
         let m = step.as_mapping().unwrap();
         let mut cases: Vec<((u8, u8, u8), String, Vec<Value>)> = Vec::new(); // (rgb, 规范化 hex, 命中步骤)
         let mut else_steps: Vec<Value> = Vec::new();
@@ -1014,14 +1215,19 @@ impl Runner {
             match k.as_str() {
                 Some("color") => continue,
                 Some("else") => {
-                    else_steps = Self::steps_value(v).map_err(|e| anyhow::anyhow!("color 的 else: {}", e))?;
+                    else_steps = Self::steps_value(v)
+                        .map_err(|e| anyhow::anyhow!("color 的 else: {}", e))?;
                 }
                 Some(_) => {
-                    let (r, g, b) = Self::parse_color(k).map_err(|e| anyhow::anyhow!("color 的色值键: {}", e))?;
-                    let steps = Self::steps_value(v).map_err(|e| anyhow::anyhow!("color 的色值键: {}", e))?;
+                    let (r, g, b) = Self::parse_color(k)
+                        .map_err(|e| anyhow::anyhow!("color 的色值键: {}", e))?;
+                    let steps = Self::steps_value(v)
+                        .map_err(|e| anyhow::anyhow!("color 的色值键: {}", e))?;
                     cases.push(((r, g, b), format!("{:02x}{:02x}{:02x}", r, g, b), steps));
                 }
-                None => anyhow::bail!("color 的兄弟键需要色值（6 位十六进制）或 else（旧数组键写法已删除）"),
+                None => anyhow::bail!(
+                    "color 的兄弟键需要色值（6 位十六进制）或 else（旧数组键写法已删除）"
+                ),
             }
         }
         if cases.is_empty() {
@@ -1030,7 +1236,11 @@ impl Runner {
         let refs: Vec<String> = std::iter::once(format!("[{}, {}]", rx, ry))
             .chain(cases.iter().map(|(_, hex, _)| hex.clone()))
             .collect();
-        let screen = self.devices.screenshot(&ctx.device_id).await.map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
+        let screen = self
+            .devices
+            .screenshot(&ctx.device_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
         let (w, h) = self.screen_size(ctx, &screen);
         if w == 0 || h == 0 {
             anyhow::bail!("无法获取屏幕尺寸");
@@ -1045,20 +1255,39 @@ impl Runner {
         let p = img.get_pixel(px, py).0;
         let (ar, ag, ab) = (p[0] as i32, p[1] as i32, p[2] as i32);
         for ((er, eg, eb), hex, steps) in &cases {
-            if (ar - *er as i32).abs() <= TOL && (ag - *eg as i32).abs() <= TOL && (ab - *eb as i32).abs() <= TOL {
+            if (ar - *er as i32).abs() <= TOL
+                && (ag - *eg as i32).abs() <= TOL
+                && (ab - *eb as i32).abs() <= TOL
+            {
                 ctx.log(
                     "success",
-                    format!("颜色命中 {}（实际 {:02x}{:02x}{:02x}）@ 像素 ({}, {})", hex, ar, ag, ab, px, py),
+                    format!(
+                        "颜色命中 {}（实际 {:02x}{:02x}{:02x}）@ 像素 ({}, {})",
+                        hex, ar, ag, ab, px, py
+                    ),
                 );
-                self.emit(&ctx.device_id, ScriptEvent::Hit {
-                    tpl: format!("clr {}", hex),
-                    x: px.saturating_sub(12), y: py.saturating_sub(12), w: 24, h: 24, score: 1.0,
-                })
+                self.emit(
+                    &ctx.device_id,
+                    ScriptEvent::Hit {
+                        tpl: format!("clr {}", hex),
+                        x: px.saturating_sub(12),
+                        y: py.saturating_sub(12),
+                        w: 24,
+                        h: 24,
+                        score: 1.0,
+                    },
+                )
                 .await;
                 self.run_branch(ctx, steps, &refs).await?;
                 return Ok(());
             }
-            ctx.log("debug", format!("颜色未命中：期望 {} 实际 {:02x}{:02x}{:02x} @ ({}, {})", hex, ar, ag, ab, px, py));
+            ctx.log(
+                "debug",
+                format!(
+                    "颜色未命中：期望 {} 实际 {:02x}{:02x}{:02x} @ ({}, {})",
+                    hex, ar, ag, ab, px, py
+                ),
+            );
         }
         ctx.log("info", "颜色全部未命中，执行 else".to_string());
         self.run_branch(ctx, &else_steps, &refs).await?;
@@ -1084,7 +1313,10 @@ impl Runner {
             if times > 0 && n >= times {
                 break;
             }
-            if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+            if ctx.stop.load(Ordering::SeqCst)
+                || ctx.exit.load(Ordering::SeqCst)
+                || ctx.return_value.is_some()
+            {
                 break;
             }
             ctx.log("debug", format!("循环第 {} 次", n + 1));
@@ -1140,7 +1372,8 @@ impl Runner {
         // 先做顶层归一化（省略 func: 的纯函数库简写同样可被跨文件调用）
         let doc: Value = serde_yaml::from_str(&s.content)
             .map_err(|e| anyhow::anyhow!("子脚本 {} 解析失败: {}", script_name, e))?;
-        let doc = Self::normalize_top(doc).map_err(|e| anyhow::anyhow!("子脚本 {}: {}", script_name, e))?;
+        let doc = Self::normalize_top(doc)
+            .map_err(|e| anyhow::anyhow!("子脚本 {}: {}", script_name, e))?;
         let sub_funcs = Self::parse_funcs(doc.get("func").filter(|v| !v.is_null()).cloned())?;
         let def = sub_funcs
             .get(func_name)
@@ -1168,14 +1401,26 @@ impl Runner {
     /// 执行函数体（本地/跨文件共用核心）：cond 条件检查 → 函数体 $N → 实参
     /// 替换 → 顺序执行 → return 冒泡。函数体执行完未 return 视为返回 true。
     /// 返回函数返回值；调用点的 then/else 由调用方按返回值选择
-    async fn run_func_core(&self, ctx: &mut Ctx, def: FuncDef, args: &[String], label: &str) -> anyhow::Result<bool> {
+    async fn run_func_core(
+        &self,
+        ctx: &mut Ctx,
+        def: FuncDef,
+        args: &[String],
+        label: &str,
+    ) -> anyhow::Result<bool> {
         if ctx.func_depth >= MAX_FUNC_DEPTH {
-            anyhow::bail!("自定义函数嵌套过深（上限 {}）：疑似无限递归", MAX_FUNC_DEPTH);
+            anyhow::bail!(
+                "自定义函数嵌套过深（上限 {}）：疑似无限递归",
+                MAX_FUNC_DEPTH
+            );
         }
         if args.is_empty() {
             ctx.log("debug", format!("调用函数 {}", label));
         } else {
-            ctx.log("debug", format!("调用函数 {}（实参 {}）", label, args.join(" ")));
+            ctx.log(
+                "debug",
+                format!("调用函数 {}（实参 {}）", label, args.join(" ")),
+            );
         }
         let mut body_val = Value::Sequence(def.body);
         Self::substitute_args(&mut body_val, args)?;
@@ -1209,15 +1454,28 @@ impl Runner {
         for tpl in cond {
             match self.match_one(ctx, tpl).await? {
                 Some(mm) => {
-                    self.emit(&ctx.device_id, ScriptEvent::Hit {
-                        tpl: tpl.clone(),
-                        x: mm.x, y: mm.y, w: mm.width, h: mm.height, score: mm.score,
-                    })
+                    self.emit(
+                        &ctx.device_id,
+                        ScriptEvent::Hit {
+                            tpl: tpl.clone(),
+                            x: mm.x,
+                            y: mm.y,
+                            w: mm.width,
+                            h: mm.height,
+                            score: mm.score,
+                        },
+                    )
                     .await;
-                    ctx.log("success", format!("函数条件模板 {} 已匹配 @ ({}, {})", tpl, mm.x, mm.y));
+                    ctx.log(
+                        "success",
+                        format!("函数条件模板 {} 已匹配 @ ({}, {})", tpl, mm.x, mm.y),
+                    );
                 }
                 None => {
-                    ctx.log("info", format!("函数条件模板 {} 未匹配，函数返回 false", tpl));
+                    ctx.log(
+                        "info",
+                        format!("函数条件模板 {} 未匹配，函数返回 false", tpl),
+                    );
                     return Ok(false);
                 }
             }
@@ -1231,7 +1489,10 @@ impl Runner {
         let branch = if ret { "then" } else { "else" };
         if let Some(steps) = step.get(branch).and_then(|v| v.as_sequence()) {
             for sub in steps {
-                if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+                if ctx.stop.load(Ordering::SeqCst)
+                    || ctx.exit.load(Ordering::SeqCst)
+                    || ctx.return_value.is_some()
+                {
                     break;
                 }
                 self.exec_step(ctx, sub).await?;
@@ -1252,7 +1513,10 @@ impl Runner {
                     Ok(Self::split_args(t))
                 }
             }
-            Some(_) => anyhow::bail!("函数 {} 的实参需要空格分隔字符串（坐标写 [x, y]，整体不用引号）", key),
+            Some(_) => anyhow::bail!(
+                "函数 {} 的实参需要空格分隔字符串（坐标写 [x, y]，整体不用引号）",
+                key
+            ),
         }
     }
 
@@ -1261,8 +1525,8 @@ impl Runner {
     /// 返回 None）。动作名后必须跟空白才算带值（函数名 "finder" 不会误伤 find）
     fn missing_colon_hint(names: &[String]) -> Option<String> {
         const ACTIONS: [&str; 14] = [
-            "log", "key", "text", "tap", "swipe", "find", "color", "loop", "call", "throw", "str_app", "cls_app",
-            "wait", "return",
+            "log", "key", "text", "tap", "swipe", "find", "color", "loop", "call", "throw",
+            "str_app", "cls_app", "wait", "return",
         ];
         for n in names {
             for act in ACTIONS {
@@ -1282,13 +1546,21 @@ impl Runner {
     /// 在 ^N 绑定下执行分支步骤（find 的 then/else、color 的命中步骤/else）：
     /// 压栈 → 逐步执行（每步各自按栈顶绑定做替换，嵌套 find/color 内层覆盖
     /// 外层）→ 出栈
-    async fn run_branch(&self, ctx: &mut Ctx, steps: &[Value], refs: &[String]) -> anyhow::Result<()> {
+    async fn run_branch(
+        &self,
+        ctx: &mut Ctx,
+        steps: &[Value],
+        refs: &[String],
+    ) -> anyhow::Result<()> {
         if steps.is_empty() {
             return Ok(());
         }
         ctx.ref_stack.push(refs.to_vec());
         for sub in steps {
-            if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+            if ctx.stop.load(Ordering::SeqCst)
+                || ctx.exit.load(Ordering::SeqCst)
+                || ctx.return_value.is_some()
+            {
                 break;
             }
             self.exec_step(ctx, sub).await?;
@@ -1299,10 +1571,14 @@ impl Runner {
 
     /// 点击命中模板的中心（find 主模板与 block 障碍模板共用）
     async fn click_center(&self, ctx: &mut Ctx, m: &matcher::MatchResult) -> anyhow::Result<()> {
-        let s = self.devices.session(&ctx.device_id).ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+        let s = self
+            .devices
+            .session(&ctx.device_id)
+            .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
         let (cx, cy) = (m.x + m.width / 2, m.y + m.height / 2);
         ctx.log("debug", format!("点击模板中心 @ ({}, {})", cx, cy));
-        self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy }).await;
+        self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy })
+            .await;
         s.tap(cx as f32, cy as f32).await?;
         Ok(())
     }
@@ -1316,7 +1592,12 @@ impl Runner {
                 anyhow::bail!("{} 不支持非字符串参数键（旧数组键写法已删除）", action);
             };
             if !allowed.contains(&name) {
-                anyhow::bail!("{} 不支持参数 {}（可用：{}）", action, name, allowed.join(" / "));
+                anyhow::bail!(
+                    "{} 不支持参数 {}（可用：{}）",
+                    action,
+                    name,
+                    allowed.join(" / ")
+                );
             }
         }
         Ok(())
@@ -1327,7 +1608,10 @@ impl Runner {
         match step.get(action) {
             None | Some(Value::Null) => Ok(()),
             Some(Value::String(s)) if s.trim().is_empty() => Ok(()),
-            Some(_) => anyhow::bail!("{} 不支持参数：应用包名固定为设备分区（设备配置 pkg）", action),
+            Some(_) => anyhow::bail!(
+                "{} 不支持参数：应用包名固定为设备分区（设备配置 pkg）",
+                action
+            ),
         }
     }
 
@@ -1342,7 +1626,10 @@ impl Runner {
         if pkg.is_empty() {
             anyhow::bail!("缺少应用包名（设备未配置 pkg）");
         }
-        if !pkg.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') {
+        if !pkg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+        {
             anyhow::bail!("应用包名字符非法: {}", pkg);
         }
         Ok(pkg)
@@ -1463,7 +1750,9 @@ impl Runner {
                             let mut ns = Vec::with_capacity(seq.len());
                             for item in seq {
                                 ns.push(match item {
-                                    Value::String(s) => Value::String(Self::substitute_ref_str(s, refs)?),
+                                    Value::String(s) => {
+                                        Value::String(Self::substitute_ref_str(s, refs)?)
+                                    }
                                     other => other.clone(),
                                 });
                             }
@@ -1499,7 +1788,8 @@ impl Runner {
             let Some(r) = refs.get(n.checked_sub(1).unwrap_or(usize::MAX)) else {
                 anyhow::bail!(
                     "上下文引用 ^{} 超出数量（{} 个：^1 主模板/坐标，^2.. 障碍模板/颜色）",
-                    digits, refs.len()
+                    digits,
+                    refs.len()
                 );
             };
             out.push_str(r);
@@ -1538,7 +1828,11 @@ impl Runner {
                 }
             }
         }
-        anyhow::bail!("{} 需要带单位时长（如 500ms / 2s / 1m / 30min / 1h / 1d），收到: {}", opt, s)
+        anyhow::bail!(
+            "{} 需要带单位时长（如 500ms / 2s / 1m / 30min / 1h / 1d），收到: {}",
+            opt,
+            s
+        )
     }
 
     /// 取步骤时长参数（timeout），缺失返回 None；解析失败（格式非法）向上传播
@@ -1563,7 +1857,11 @@ impl Runner {
     /// 直接解析成数字时）按 0xRRGGBB 解码
     fn parse_color(v: &Value) -> anyhow::Result<(u8, u8, u8)> {
         if let Some(s) = v.as_str() {
-            let t = s.trim().trim_start_matches('#').trim_start_matches("0x").to_ascii_lowercase();
+            let t = s
+                .trim()
+                .trim_start_matches('#')
+                .trim_start_matches("0x")
+                .to_ascii_lowercase();
             if t.len() == 6 && t.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Ok((
                     u8::from_str_radix(&t[0..2], 16).unwrap(),
@@ -1571,7 +1869,10 @@ impl Runner {
                     u8::from_str_radix(&t[4..6], 16).unwrap(),
                 ));
             }
-            anyhow::bail!("色值需要 6 位十六进制（如 ff8800 或 \"#ff8800\"）或 [r, g, b]，收到: {}", s);
+            anyhow::bail!(
+                "色值需要 6 位十六进制（如 ff8800 或 \"#ff8800\"）或 [r, g, b]，收到: {}",
+                s
+            );
         }
         if let Some(n) = v.as_u64() {
             if n <= 0xFF_FFFF {
@@ -1586,7 +1887,9 @@ impl Runner {
                         let n = x
                             .as_u64()
                             .or_else(|| x.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-                            .ok_or_else(|| anyhow::anyhow!("色值数组需要 [r, g, b] 数字（0~255）"))?;
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("色值数组需要 [r, g, b] 数字（0~255）")
+                            })?;
                         if n > 255 {
                             anyhow::bail!("色值分量必须在 0~255，收到: {}", n);
                         }
@@ -1596,23 +1899,46 @@ impl Runner {
                 return Ok((c[0], c[1], c[2]));
             }
         }
-        anyhow::bail!("色值只支持 6 位十六进制（ff8800）或 [r, g, b] 数组，收到: {:?}", v)
+        anyhow::bail!(
+            "色值只支持 6 位十六进制（ff8800）或 [r, g, b] 数组，收到: {:?}",
+            v
+        )
     }
 
     /// 匹配单个模板一次（独立取最新截图，不重试）：按模板名 #后缀解析区域后匹配。
     /// 未命中时推送 Miss 可视化事件（搜索区域）——find 主模板/block/verify/函数
     /// cond 都经这里，四条路径统一获得"在哪找、没找到"的调试反馈
-    async fn match_one(&self, ctx: &mut Ctx, template: &str) -> anyhow::Result<Option<matcher::MatchResult>> {
-        let screen = self.devices.screenshot(&ctx.device_id).await.map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
+    async fn match_one(
+        &self,
+        ctx: &mut Ctx,
+        template: &str,
+    ) -> anyhow::Result<Option<matcher::MatchResult>> {
+        let screen = self
+            .devices
+            .screenshot(&ctx.device_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
         let (w, h) = self.screen_size(ctx, &screen);
         if w == 0 || h == 0 {
             anyhow::bail!("无法获取屏幕尺寸");
         }
         let region = self.region_for(ctx, template, w, h)?;
-        let mm = self.match_on_screen(ctx, template, ctx.threshold, region, screen).await?;
+        let mm = self
+            .match_on_screen(ctx, template, ctx.threshold, region, screen)
+            .await?;
         if mm.is_none() {
             let [x, y, rw, rh] = region.unwrap_or([0, 0, w, h]);
-            self.emit(&ctx.device_id, ScriptEvent::Miss { tpl: template.to_string(), x, y, w: rw, h: rh }).await;
+            self.emit(
+                &ctx.device_id,
+                ScriptEvent::Miss {
+                    tpl: template.to_string(),
+                    x,
+                    y,
+                    w: rw,
+                    h: rh,
+                },
+            )
+            .await;
         }
         Ok(mm)
     }
@@ -1621,7 +1947,13 @@ impl Runner {
     /// 短名引用时 #后缀在**实际文件名**上（脚本写 login.png 引用
     /// login#910_159_972_716.png，区域须按解析结果取名才生效）。
     /// 无 #后缀（且回退全屏）时记一条日志提醒（每次运行每模板一条）
-    fn region_for(&self, ctx: &mut Ctx, template: &str, w: u32, h: u32) -> anyhow::Result<Option<[u32; 4]>> {
+    fn region_for(
+        &self,
+        ctx: &mut Ctx,
+        template: &str,
+        w: u32,
+        h: u32,
+    ) -> anyhow::Result<Option<[u32; 4]>> {
         let dir = self.tpl_dir_of(ctx);
         let resolved = Self::resolve_template_file(&dir, template).ok();
         let src = resolved
@@ -1631,7 +1963,13 @@ impl Runner {
         let r = Self::tpl_region_from_name(&src, w, h)?;
         if r.is_none() && resolved.is_some() && !src.contains('#') {
             if ctx.region_warned.insert(src.clone()) {
-                ctx.log("info", format!("模板 {} 未带 #区域后缀，回退全屏搜索（区域写法：xx#l / xx#0_0_500_500）", src));
+                ctx.log(
+                    "info",
+                    format!(
+                        "模板 {} 未带 #区域后缀，回退全屏搜索（区域写法：xx#l / xx#0_0_500_500）",
+                        src
+                    ),
+                );
             }
         }
         Ok(r)
@@ -1651,8 +1989,14 @@ impl Runner {
         // 目录不存在时先创建，避免 std::fs::read 报“系统找不到指定的路径”
         let _ = std::fs::create_dir_all(&tpl_dir);
         let tpl_path = Self::resolve_template_file(&tpl_dir, template)?;
-        let tpl_bytes = std::fs::read(&tpl_path)
-            .map_err(|e| anyhow::anyhow!("读取模板 {} 失败: {} (path={})", template, e, tpl_path.display()))?;
+        let tpl_bytes = std::fs::read(&tpl_path).map_err(|e| {
+            anyhow::anyhow!(
+                "读取模板 {} 失败: {} (path={})",
+                template,
+                e,
+                tpl_path.display()
+            )
+        })?;
         let req = matcher::MatchRequest {
             screen_png: screen,
             template_png: tpl_bytes,
@@ -1666,7 +2010,10 @@ impl Runner {
     /// 基名（去扩展名）+ `#` 前缀在同扩展名文件中唯一匹配（如脚本写 login.png
     /// 引用 login#907_160_973_717.png，#后缀区域照常生效）。
     /// 多个候选 → 报错列出候选要求写全名消歧；零候选 → 报不存在
-    fn resolve_template_file(tpl_dir: &std::path::Path, template: &str) -> anyhow::Result<std::path::PathBuf> {
+    fn resolve_template_file(
+        tpl_dir: &std::path::Path,
+        template: &str,
+    ) -> anyhow::Result<std::path::PathBuf> {
         let exact = tpl_dir.join(template);
         if exact.is_file() {
             return Ok(exact);
@@ -1690,7 +2037,11 @@ impl Runner {
         match candidates.len() {
             1 => Ok(tpl_dir.join(&candidates[0])),
             0 => anyhow::bail!("模板 {} 不存在 (path={})", template, exact.display()),
-            _ => anyhow::bail!("模板 {} 匹配到多个候选：{}，请用完整文件名指定", template, candidates.join("、")),
+            _ => anyhow::bail!(
+                "模板 {} 匹配到多个候选：{}，请用完整文件名指定",
+                template,
+                candidates.join("、")
+            ),
         }
     }
 
@@ -1709,7 +2060,11 @@ impl Runner {
                 .map(|item| item.as_str().map(|s| s.trim().to_string()))
                 .collect::<Option<Vec<_>>>()
                 .ok_or_else(|| anyhow::anyhow!("{} 列表项必须是字符串模板名", key))?,
-            _ => anyhow::bail!("{} 只支持模板名字符串（多模板逗号分隔）或列表，如 `{}: a.png, b.png`", key, key),
+            _ => anyhow::bail!(
+                "{} 只支持模板名字符串（多模板逗号分隔）或列表，如 `{}: a.png, b.png`",
+                key,
+                key
+            ),
         };
         if names.is_empty() || names.iter().any(|n| n.is_empty()) {
             anyhow::bail!("{} 模板名不能为空", key);
@@ -1748,7 +2103,12 @@ impl Runner {
         // 校验不过（如 x2 <= x1）视为无区域 → 全屏，不报错
         let nums: Option<Vec<f64>> = suffix
             .split('_')
-            .map(|p| p.parse::<u32>().ok().filter(|n| *n <= 999).map(|n| n as f64 / 1000.0))
+            .map(|p| {
+                p.parse::<u32>()
+                    .ok()
+                    .filter(|n| *n <= 999)
+                    .map(|n| n as f64 / 1000.0)
+            })
             .collect();
         if let Some(nums) = nums {
             let seq = Value::Sequence(nums.into_iter().map(Value::from).collect());
@@ -1780,11 +2140,23 @@ impl Runner {
             if seq.len() != 4 {
                 anyhow::bail!("region 数组需要 [x1, y1, x2, y2] 4 个相对坐标");
             }
-            let x1 = seq[0].as_f64().ok_or_else(|| anyhow::anyhow!("region 坐标必须是数字"))?;
-            let y1 = seq[1].as_f64().ok_or_else(|| anyhow::anyhow!("region 坐标必须是数字"))?;
-            let x2 = seq[2].as_f64().ok_or_else(|| anyhow::anyhow!("region 坐标必须是数字"))?;
-            let y2 = seq[3].as_f64().ok_or_else(|| anyhow::anyhow!("region 坐标必须是数字"))?;
-            if !(0.0..=1.0).contains(&x1) || !(0.0..=1.0).contains(&y1) || !(0.0..=1.0).contains(&x2) || !(0.0..=1.0).contains(&y2) {
+            let x1 = seq[0]
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("region 坐标必须是数字"))?;
+            let y1 = seq[1]
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("region 坐标必须是数字"))?;
+            let x2 = seq[2]
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("region 坐标必须是数字"))?;
+            let y2 = seq[3]
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("region 坐标必须是数字"))?;
+            if !(0.0..=1.0).contains(&x1)
+                || !(0.0..=1.0).contains(&y1)
+                || !(0.0..=1.0).contains(&x2)
+                || !(0.0..=1.0).contains(&y2)
+            {
                 anyhow::bail!("region 相对坐标必须在 0~1 之间");
             }
             if x2 <= x1 || y2 <= y1 {
@@ -1797,8 +2169,14 @@ impl Runner {
             return Ok(Some([x, y, rw, rh]));
         }
         if let Some(map) = v.as_mapping() {
-            let (x1, y1) = Self::parse_rel_coord(map.get("fm").ok_or_else(|| anyhow::anyhow!("region 缺少 fm"))?)?;
-            let (x2, y2) = Self::parse_rel_coord(map.get("to").ok_or_else(|| anyhow::anyhow!("region 缺少 to"))?)?;
+            let (x1, y1) = Self::parse_rel_coord(
+                map.get("fm")
+                    .ok_or_else(|| anyhow::anyhow!("region 缺少 fm"))?,
+            )?;
+            let (x2, y2) = Self::parse_rel_coord(
+                map.get("to")
+                    .ok_or_else(|| anyhow::anyhow!("region 缺少 to"))?,
+            )?;
             if x2 <= x1 || y2 <= y1 {
                 anyhow::bail!("region 需要 to > fm");
             }
@@ -1808,17 +2186,25 @@ impl Runner {
             let rh = (((y2 - y1) * h as f64).round() as u32).max(1);
             return Ok(Some([x, y, rw, rh]));
         }
-        anyhow::bail!("region 只支持 a/u/d/l/r/ul/ur/dl/dr / [x1, y1, x2, y2] / {{fm: [x,y], to: [x,y]}}")
+        anyhow::bail!(
+            "region 只支持 a/u/d/l/r/ul/ur/dl/dr / [x1, y1, x2, y2] / {{fm: [x,y], to: [x,y]}}"
+        )
     }
 
     /// 解析相对坐标点 [x, y]（0~1）：tap / color 坐标 / region fm-to 共用
     fn parse_rel_coord(v: &Value) -> anyhow::Result<(f64, f64)> {
-        let seq = v.as_sequence().ok_or_else(|| anyhow::anyhow!("需要 [x, y] 数组（相对坐标 0~1）"))?;
+        let seq = v
+            .as_sequence()
+            .ok_or_else(|| anyhow::anyhow!("需要 [x, y] 数组（相对坐标 0~1）"))?;
         if seq.len() != 2 {
             anyhow::bail!("需要 [x, y] 2 个相对坐标");
         }
-        let x = seq[0].as_f64().ok_or_else(|| anyhow::anyhow!("坐标必须是数字"))?;
-        let y = seq[1].as_f64().ok_or_else(|| anyhow::anyhow!("坐标必须是数字"))?;
+        let x = seq[0]
+            .as_f64()
+            .ok_or_else(|| anyhow::anyhow!("坐标必须是数字"))?;
+        let y = seq[1]
+            .as_f64()
+            .ok_or_else(|| anyhow::anyhow!("坐标必须是数字"))?;
         if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
             anyhow::bail!("相对坐标必须在 0~1 之间");
         }
@@ -1950,7 +2336,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "gamer-tpl-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let cleanup = || {
@@ -1960,9 +2349,19 @@ mod tests {
         std::fs::write(dir.join("shop.png"), b"x").unwrap();
         // 短名 → 唯一后缀文件
         let p = Runner::resolve_template_file(&dir, "login.png").unwrap();
-        assert!(p.file_name().unwrap().to_string_lossy().starts_with("login#"));
+        assert!(p
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("login#"));
         // 精确名直用
-        assert!(Runner::resolve_template_file(&dir, "shop.png").unwrap().file_name().unwrap() == "shop.png");
+        assert!(
+            Runner::resolve_template_file(&dir, "shop.png")
+                .unwrap()
+                .file_name()
+                .unwrap()
+                == "shop.png"
+        );
         // 不存在
         assert!(Runner::resolve_template_file(&dir, "nope.png").is_err());
         // 同基名多后缀 → 报错消歧；有精确同名文件时精确优先不歧义
@@ -1970,7 +2369,13 @@ mod tests {
         std::fs::write(dir.join("hp#r.png"), b"x").unwrap();
         assert!(Runner::resolve_template_file(&dir, "hp.png").is_err());
         std::fs::write(dir.join("hp.png"), b"x").unwrap();
-        assert!(Runner::resolve_template_file(&dir, "hp.png").unwrap().file_name().unwrap() == "hp.png");
+        assert!(
+            Runner::resolve_template_file(&dir, "hp.png")
+                .unwrap()
+                .file_name()
+                .unwrap()
+                == "hp.png"
+        );
         cleanup();
     }
 
@@ -2042,18 +2447,30 @@ mod tests {
         let funcs_raw = Runner::take_funcs_and_substitute(&mut v, &args).unwrap();
         let steps = v.get("steps").unwrap().as_sequence().unwrap();
         assert_eq!(steps[0].get("find").and_then(|x| x.as_str()), Some("a.png"));
-        assert_eq!(steps[1].get("log").and_then(|x| x.as_str()), Some("b.png 和 a.png"));
+        assert_eq!(
+            steps[1].get("log").and_then(|x| x.as_str()),
+            Some("b.png 和 a.png")
+        );
         // 嵌套 call 转发 $N（替换发生在加载时，转发值不再二次展开）
-        assert_eq!(steps[2].get("call").and_then(|x| x.as_str()), Some("other.yml a.png x.png"));
+        assert_eq!(
+            steps[2].get("call").and_then(|x| x.as_str()),
+            Some("other.yml a.png x.png")
+        );
         // func 段未被替换（$1 留给函数调用时）
         let funcs_val = funcs_raw.unwrap();
         let f = funcs_val.as_sequence().unwrap()[0].as_mapping().unwrap();
-        let body = f.get(&Value::String("f1".into())).unwrap().as_sequence().unwrap();
+        let body = f
+            .get(&Value::String("f1".into()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
         assert_eq!(body[0].get("find").and_then(|x| x.as_str()), Some("$1"));
         // color 的色值键（映射键）替换
         let mut v2 = parse("steps:\n  - color: [0.5, 0.5]\n    $1:\n      - log: x\n");
         Runner::substitute_args(&mut v2, &args).unwrap();
-        let c = v2.get("steps").unwrap().as_sequence().unwrap()[0].as_mapping().unwrap();
+        let c = v2.get("steps").unwrap().as_sequence().unwrap()[0]
+            .as_mapping()
+            .unwrap();
         assert!(c.get(&Value::String("a.png".into())).is_some());
         // `$` 后非数字原样保留（"100$" / "$涨"）
         let mut v3 = parse("steps:\n  - text: \"100$\"\n  - log: \"$涨\"\n");
@@ -2064,7 +2481,12 @@ mod tests {
         // 实参含 "$1" 不二次展开（替换值不重扫）
         let mut v4 = parse("steps:\n  - log: $1\n");
         Runner::substitute_args(&mut v4, &["$1".to_string()]).unwrap();
-        assert_eq!(v4.get("steps").unwrap().as_sequence().unwrap()[0].get("log").and_then(|x| x.as_str()), Some("$1"));
+        assert_eq!(
+            v4.get("steps").unwrap().as_sequence().unwrap()[0]
+                .get("log")
+                .and_then(|x| x.as_str()),
+            Some("$1")
+        );
         // 引用越界：未提供实参（主脚本直接运行）/ 序号超出 / 取最长数字串
         let mut v5 = parse("steps:\n  - find: $1\n");
         assert!(Runner::substitute_args(&mut v5, &[]).is_err());
@@ -2075,7 +2497,11 @@ mod tests {
         // YAML 裸标量 @ 开头是保留字符，解析直接失败——参数引用必须用 $（不能用 @1）
         assert!(serde_yaml::from_str::<Value>("steps:\n  - find: @1").is_err());
         assert_eq!(
-            parse("steps:\n  - find: $1").get("steps").unwrap().as_sequence().unwrap()[0]
+            parse("steps:\n  - find: $1")
+                .get("steps")
+                .unwrap()
+                .as_sequence()
+                .unwrap()[0]
                 .get("find")
                 .and_then(|x| x.as_str()),
             Some("$1")
@@ -2089,25 +2515,48 @@ mod tests {
     fn ref_substitution() {
         let refs = vec!["main.png".to_string(), "b1.png".to_string()];
         // exec_step 以步骤映射本身调用 substitute_refs（非步骤序列）
-        let step = parse("- func1: ^1 ^2\n  then:\n    - log: got ^1\n  else:\n    - call: sub.yml ^2")
+        let step =
+            parse("- func1: ^1 ^2\n  then:\n    - log: got ^1\n  else:\n    - call: sub.yml ^2")
+                .get(0)
+                .unwrap()
+                .clone();
+        let out = Runner::substitute_refs(&step, &refs).unwrap();
+        let m = out.as_mapping().unwrap();
+        assert_eq!(
+            m.get(&Value::String("func1".into()))
+                .and_then(|v| v.as_str()),
+            Some("main.png b1.png")
+        );
+        // then/else 子树（映射步骤项）不替换
+        let then = m
+            .get(&Value::String("then".into()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        assert_eq!(then[0].get("log").and_then(|v| v.as_str()), Some("got ^1"));
+        let els = m
+            .get(&Value::String("else".into()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        assert_eq!(
+            els[0].get("call").and_then(|v| v.as_str()),
+            Some("sub.yml ^2")
+        );
+        // block 列表（字符串项）替换
+        let f = parse("- find: ^1\n  block:\n    - ^2\n    - other.png")
             .get(0)
             .unwrap()
             .clone();
-        let out = Runner::substitute_refs(&step, &refs).unwrap();
-        let m = out.as_mapping().unwrap();
-        assert_eq!(m.get(&Value::String("func1".into())).and_then(|v| v.as_str()), Some("main.png b1.png"));
-        // then/else 子树（映射步骤项）不替换
-        let then = m.get(&Value::String("then".into())).unwrap().as_sequence().unwrap();
-        assert_eq!(then[0].get("log").and_then(|v| v.as_str()), Some("got ^1"));
-        let els = m.get(&Value::String("else".into())).unwrap().as_sequence().unwrap();
-        assert_eq!(els[0].get("call").and_then(|v| v.as_str()), Some("sub.yml ^2"));
-        // block 列表（字符串项）替换
-        let f = parse("- find: ^1\n  block:\n    - ^2\n    - other.png").get(0).unwrap().clone();
         let out2 = Runner::substitute_refs(&f, &refs).unwrap();
         let fm = out2.as_mapping().unwrap();
         assert_eq!(
-            fm.get(&Value::String("block".into())).and_then(|v| v.as_sequence().cloned()),
-            Some(vec![Value::String("b1.png".into()), Value::String("other.png".into())])
+            fm.get(&Value::String("block".into()))
+                .and_then(|v| v.as_sequence().cloned()),
+            Some(vec![
+                Value::String("b1.png".into()),
+                Value::String("other.png".into())
+            ])
         );
         // ^ 后非数字原样保留；越界报错
         assert_eq!(
@@ -2116,11 +2565,21 @@ mod tests {
         );
         assert!(Runner::substitute_ref_str("^3", &refs).is_err());
         // ^ 裸标量合法（& 会变锚点导致值丢失——弃用 &N 的原因）
-        assert_eq!(parse("steps:\n  - func1: ^1").get("steps").unwrap().as_sequence().unwrap()[0]
-            .get("func1").and_then(|x| x.as_str()), Some("^1"));
+        assert_eq!(
+            parse("steps:\n  - func1: ^1")
+                .get("steps")
+                .unwrap()
+                .as_sequence()
+                .unwrap()[0]
+                .get("func1")
+                .and_then(|x| x.as_str()),
+            Some("^1")
+        );
         let anchored: Value = serde_yaml::from_str("steps:\n  - func1: &1").unwrap();
         assert!(anchored.get("steps").unwrap().as_sequence().unwrap()[0]
-            .get("func1").unwrap().is_null());
+            .get("func1")
+            .unwrap()
+            .is_null());
     }
 
     /// color 步骤的 YAML 结构（serde_yaml 与前端 js-yaml 同构）：
@@ -2133,20 +2592,37 @@ mod tests {
         );
         let step = &doc.get("steps").unwrap().as_sequence().unwrap()[0];
         let m = step.as_mapping().unwrap();
-        assert_eq!(m.get(&Value::String("color".into())).unwrap().as_sequence().unwrap().len(), 2);
-        assert!(m.get(&Value::String("ff8800".into())).unwrap().as_sequence().is_some());
+        assert_eq!(
+            m.get(&Value::String("color".into()))
+                .unwrap()
+                .as_sequence()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(m
+            .get(&Value::String("ff8800".into()))
+            .unwrap()
+            .as_sequence()
+            .is_some());
         assert!(m.get(&Value::String("aa8899".into())).unwrap().is_null());
         assert!(step.get("else").unwrap().as_sequence().is_some());
         // else 不在色值键里（是兄弟键）
         assert_eq!(
-            m.get(&Value::String("else".into())).and_then(|v| v.as_sequence()).map(|s| s.len()),
+            m.get(&Value::String("else".into()))
+                .and_then(|v| v.as_sequence())
+                .map(|s| s.len()),
             Some(1)
         );
         // $N 替换覆盖色值键（substitute_args 替换映射键）
         let mut d2 = parse("steps:\n  - color: [0.5, 0.5]\n    $1:\n      - log: x\n");
         Runner::substitute_args(&mut d2, &["ff8800".into()]).unwrap();
         let s2 = d2.get("steps").unwrap().as_sequence().unwrap();
-        assert!(s2[0].as_mapping().unwrap().get(&Value::String("ff8800".into())).is_some());
+        assert!(s2[0]
+            .as_mapping()
+            .unwrap()
+            .get(&Value::String("ff8800".into()))
+            .is_some());
     }
 
     /// 构建测试 Runner/Ctx（不依赖设备）
@@ -2154,7 +2630,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "gamer-engine-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let mut cfg = crate::config::Config::default();
@@ -2162,7 +2641,11 @@ mod tests {
         let db: crate::store::Db = std::sync::Arc::new(crate::store::Store::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let devices = std::sync::Arc::new(crate::device::DeviceManager::new(db.clone(), cfg.clone(), viewers.clone()));
+        let devices = std::sync::Arc::new(crate::device::DeviceManager::new(
+            db.clone(),
+            cfg.clone(),
+            viewers.clone(),
+        ));
         let scripts = std::sync::Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
         let runner = Runner::new(db, devices, viewers, scripts);
         let ctx = Ctx {
@@ -2195,64 +2678,231 @@ mod tests {
             runner.exec_step(ctx, &step).await
         }
         // 旧动作改名：until → find、check → block、cond → color、exit → throw
-        assert!(run(&runner, &mut ctx, "- until: a.png").await.unwrap_err().to_string().contains("until 已改名 find"));
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  check: b.png").await.unwrap_err().to_string().contains("check 已改名 block"));
-        assert!(run(&runner, &mut ctx, "- cond:\n  - a.png: x").await.unwrap_err().to_string().contains("cond 已改名 color"));
-        assert!(run(&runner, &mut ctx, "- exit").await.unwrap_err().to_string().contains("exit 已改名 throw"));
-        assert!(run(&runner, &mut ctx, "- goto: x").await.unwrap_err().to_string().contains("goto/label 已删除"));
-        assert!(run(&runner, &mut ctx, "- label: x").await.unwrap_err().to_string().contains("goto/label 已删除"));
+        assert!(run(&runner, &mut ctx, "- until: a.png")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("until 已改名 find"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  check: b.png")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("check 已改名 block"));
+        assert!(run(&runner, &mut ctx, "- cond:\n  - a.png: x")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cond 已改名 color"));
+        assert!(run(&runner, &mut ctx, "- exit")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("exit 已改名 throw"));
+        assert!(run(&runner, &mut ctx, "- goto: x")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("goto/label 已删除"));
+        assert!(run(&runner, &mut ctx, "- label: x")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("goto/label 已删除"));
         // 已删除参数
-        for k in ["count", "cnt_ivl", "cnt_chk", "img_ivl", "and_or", "click", "before", "after"] {
-            assert!(run(&runner, &mut ctx, &format!("- find: a.png\n  {}: 1", k))
-                .await.unwrap_err().to_string().contains("已删除"));
+        for k in [
+            "count", "cnt_ivl", "cnt_chk", "img_ivl", "and_or", "click", "before", "after",
+        ] {
+            assert!(
+                run(&runner, &mut ctx, &format!("- find: a.png\n  {}: 1", k))
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("已删除")
+            );
         }
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  threshold: 0.9").await.unwrap_err().to_string().contains("threshold 步骤参数已删除"));
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  region: l").await.unwrap_err().to_string().contains("region 步骤参数已删除"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  threshold: 0.9")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("threshold 步骤参数已删除"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  region: l")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("region 步骤参数已删除"));
         // 步骤级 wait 参数已删除（wait 现在是独立动作 → 多动作键报错）
-        assert!(run(&runner, &mut ctx, "- tap: [0.1, 0.1]\n  wait: 1s").await.unwrap_err().to_string().contains("wait 是独立动作"));
-        assert!(run(&runner, &mut ctx, "- tap: [0.1, 0.1]\n  log: x").await.unwrap_err().to_string().contains("一个步骤只能有一个动作键"));
+        assert!(run(&runner, &mut ctx, "- tap: [0.1, 0.1]\n  wait: 1s")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("wait 是独立动作"));
+        assert!(run(&runner, &mut ctx, "- tap: [0.1, 0.1]\n  log: x")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("一个步骤只能有一个动作键"));
         // 未知动作
-        assert!(run(&runner, &mut ctx, "- var: x").await.unwrap_err().to_string().contains("未知动作"));
+        assert!(run(&runner, &mut ctx, "- var: x")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("未知动作"));
         // 带值动作漏写冒号（标量步骤）→ 定向提示补冒号
-        let e = run(&runner, &mut ctx, "- throw 未知界面").await.unwrap_err().to_string();
-        assert!(e.contains("需写冒号") && e.contains("- throw: 未知界面"), "{}", e);
-        let e = run(&runner, &mut ctx, "- log abc").await.unwrap_err().to_string();
+        let e = run(&runner, &mut ctx, "- throw 未知界面")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("需写冒号") && e.contains("- throw: 未知界面"),
+            "{}",
+            e
+        );
+        let e = run(&runner, &mut ctx, "- log abc")
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("- log: abc"), "{}", e);
         // find 校验（截图前报错）
-        assert!(run(&runner, &mut ctx, "- find: a.png, b.png").await.unwrap_err().to_string().contains("单个主模板"));
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  block: a.png").await.unwrap_err().to_string().contains("与 find 主模板重复"));
+        assert!(run(&runner, &mut ctx, "- find: a.png, b.png")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("单个主模板"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  block: a.png")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("与 find 主模板重复"));
         // timeout 裸数字（含 0）先触发强制单位；带单位的 0 才是"必须 > 0"
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 0").await.unwrap_err().to_string().contains("带单位"));
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 0s").await.unwrap_err().to_string().contains("timeout 必须 > 0"));
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 500").await.unwrap_err().to_string().contains("带单位"));
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: fast").await.unwrap_err().to_string().contains("带单位"));
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  verify: 123").await.unwrap_err().to_string().contains("verify 需要 true / false"));
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  foo: 1").await.unwrap_err().to_string().contains("不支持参数 foo"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 0")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("带单位"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 0s")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("timeout 必须 > 0"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 500")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("带单位"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: fast")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("带单位"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  verify: 123")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("verify 需要 true / false"));
+        assert!(run(&runner, &mut ctx, "- find: a.png\n  foo: 1")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("不支持参数 foo"));
         // 合法 find → 无设备在截图处失败（证明校验未误伤）
-        assert!(run(&runner, &mut ctx, "- find: a.png\n  timeout: 30min\n  block: b.png, c.png\n  verify: true")
-            .await.unwrap_err().to_string().contains("截图失败"));
+        assert!(run(
+            &runner,
+            &mut ctx,
+            "- find: a.png\n  timeout: 30min\n  block: b.png, c.png\n  verify: true"
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("截图失败"));
         // color 校验
-        assert!(run(&runner, &mut ctx, "- color: [0.5, 0.5]").await.unwrap_err().to_string().contains("至少需要一个色值键"));
-        assert!(run(&runner, &mut ctx, "- color: [0.5, 0.5]\n  red:\n    - log: x").await.unwrap_err().to_string().contains("色值键"));
-        assert!(run(&runner, &mut ctx, "- color: [0.5, 0.5]\n  ff8800: log x").await.unwrap_err().to_string().contains("步骤列表"));
-        assert!(run(&runner, &mut ctx, "- color: [1.5, 0.5]\n  ff8800:").await.unwrap_err().to_string().contains("0~1"));
-        assert!(run(&runner, &mut ctx, "- color: x\n  ff8800:").await.unwrap_err().to_string().contains("color 坐标"));
+        assert!(run(&runner, &mut ctx, "- color: [0.5, 0.5]")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("至少需要一个色值键"));
+        assert!(run(
+            &runner,
+            &mut ctx,
+            "- color: [0.5, 0.5]\n  red:\n    - log: x"
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("色值键"));
+        assert!(
+            run(&runner, &mut ctx, "- color: [0.5, 0.5]\n  ff8800: log x")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("步骤列表")
+        );
+        assert!(run(&runner, &mut ctx, "- color: [1.5, 0.5]\n  ff8800:")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("0~1"));
+        assert!(run(&runner, &mut ctx, "- color: x\n  ff8800:")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("color 坐标"));
         // 合法 color → 截图处失败
-        assert!(run(&runner, &mut ctx, "- color: [0.5, 0.5]\n  ff8800:\n    - log: x\n  else:\n    - log: none")
-            .await.unwrap_err().to_string().contains("截图失败"));
+        assert!(run(
+            &runner,
+            &mut ctx,
+            "- color: [0.5, 0.5]\n  ff8800:\n    - log: x\n  else:\n    - log: none"
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("截图失败"));
         // loop：缺 steps 报错；times=3 执行 3 次（log 无需设备）
-        assert!(run(&runner, &mut ctx, "- loop:\n  times: 3").await.unwrap_err().to_string().contains("需要 steps"));
+        assert!(run(&runner, &mut ctx, "- loop:\n  times: 3")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("需要 steps"));
         ctx.log.clear();
-        run(&runner, &mut ctx, "- loop:\n  times: 3\n  steps:\n    - log: x").await.unwrap();
+        run(
+            &runner,
+            &mut ctx,
+            "- loop:\n  times: 3\n  steps:\n    - log: x",
+        )
+        .await
+        .unwrap();
         assert_eq!(ctx.log.iter().filter(|(_, m)| m == "x").count(), 3);
         // wait：裸数字报错；带单位可执行
-        assert!(run(&runner, &mut ctx, "- wait: 100").await.unwrap_err().to_string().contains("带单位"));
+        assert!(run(&runner, &mut ctx, "- wait: 100")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("带单位"));
         run(&runner, &mut ctx, "- wait: 1ms").await.unwrap();
         run(&runner, &mut ctx, "- wait: [1ms, 2ms]").await.unwrap();
-        assert!(run(&runner, &mut ctx, "- wait: [1ms]").await.unwrap_err().to_string().contains("[最小, 最大]"));
+        assert!(run(&runner, &mut ctx, "- wait: [1ms]")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("[最小, 最大]"));
         // swipe：from 别名报错、time 裸数字报错
-        assert!(run(&runner, &mut ctx, "- swipe:\n    from: [0.1, 0.1]\n    to: [0.2, 0.2]").await.unwrap_err().to_string().contains("from 已改名 fm"));
-        assert!(run(&runner, &mut ctx, "- swipe:\n    fm: [0.1, 0.1]\n    to: [0.2, 0.2]\n    time: 300").await.unwrap_err().to_string().contains("带单位"));
+        assert!(run(
+            &runner,
+            &mut ctx,
+            "- swipe:\n    from: [0.1, 0.1]\n    to: [0.2, 0.2]"
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("from 已改名 fm"));
+        assert!(run(
+            &runner,
+            &mut ctx,
+            "- swipe:\n    fm: [0.1, 0.1]\n    to: [0.2, 0.2]\n    time: 300"
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("带单位"));
         // throw：无参 / 带参均立即设置 exit 标志并打印日志（无需设备）
         ctx.exit.store(false, Ordering::SeqCst);
         run(&runner, &mut ctx, "- throw").await.unwrap();
@@ -2263,11 +2913,27 @@ mod tests {
         assert!(ctx.exit.load(Ordering::SeqCst));
         assert!(ctx.log.iter().any(|(_, m)| m == "因 体力不足 结束运行脚本"));
         // str_app：带值报错（裸写才合法）
-        assert!(run(&runner, &mut ctx, "- str_app: com.x.y").await.unwrap_err().to_string().contains("不支持参数"));
-        assert!(run(&runner, &mut ctx, "- cls_app: com.x.y").await.unwrap_err().to_string().contains("不支持参数"));
+        assert!(run(&runner, &mut ctx, "- str_app: com.x.y")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("不支持参数"));
+        assert!(run(&runner, &mut ctx, "- cls_app: com.x.y")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("不支持参数"));
         // return 只能在函数内
-        assert!(run(&runner, &mut ctx, "- return: true").await.unwrap_err().to_string().contains("return 仅可在自定义函数内使用"));
-        assert!(run(&runner, &mut ctx, "- return").await.unwrap_err().to_string().contains("return 需要 true / false"));
+        assert!(run(&runner, &mut ctx, "- return: true")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("return 仅可在自定义函数内使用"));
+        assert!(run(&runner, &mut ctx, "- return")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("return 需要 true / false"));
     }
 
     /// 自定义函数：$N 实参替换、return true/false 分支、fall-through=true
@@ -2276,35 +2942,67 @@ mod tests {
     #[tokio::test]
     async fn func_call_and_return() {
         let (runner, mut ctx) = test_runner_ctx();
-        let f = |body: &str| FuncDef { cond: Vec::new(), body: parse_steps(body) };
+        let f = |body: &str| FuncDef {
+            cond: Vec::new(),
+            body: parse_steps(body),
+        };
         // f1：log 实参 + return true；f2：无 return（fall-through 默认 true）
-        ctx.funcs.insert("f1".into(), f("- log: got $1\n- return: true"));
+        ctx.funcs
+            .insert("f1".into(), f("- log: got $1\n- return: true"));
         ctx.funcs.insert("f2".into(), f("- log: always"));
         // f1 返回 true → then 分支
         ctx.log.clear();
-        run_step(&runner, &mut ctx, "- f1: hello\n  then:\n    - log: T\n  else:\n    - log: F").await.unwrap();
+        run_step(
+            &runner,
+            &mut ctx,
+            "- f1: hello\n  then:\n    - log: T\n  else:\n    - log: F",
+        )
+        .await
+        .unwrap();
         assert!(ctx.log.iter().any(|(_, m)| m == "got hello"));
         assert!(ctx.log.iter().any(|(_, m)| m == "T"));
         assert!(!ctx.log.iter().any(|(_, m)| m == "F"));
         // f2 无 return → 默认 true → then 分支（旧语义为 false 走 else）
         ctx.log.clear();
-        run_step(&runner, &mut ctx, "- f2:\n  then:\n    - log: T\n  else:\n    - log: F").await.unwrap();
+        run_step(
+            &runner,
+            &mut ctx,
+            "- f2:\n  then:\n    - log: T\n  else:\n    - log: F",
+        )
+        .await
+        .unwrap();
         assert!(ctx.log.iter().any(|(_, m)| m == "always"));
         assert!(ctx.log.iter().any(|(_, m)| m == "T"));
         assert!(!ctx.log.iter().any(|(_, m)| m == "F"));
         // 显式 return: false → else 分支
-        ctx.funcs.insert("f2b".into(), f("- log: always\n- return: false"));
+        ctx.funcs
+            .insert("f2b".into(), f("- log: always\n- return: false"));
         ctx.log.clear();
-        run_step(&runner, &mut ctx, "- f2b:\n  then:\n    - log: T\n  else:\n    - log: F").await.unwrap();
+        run_step(
+            &runner,
+            &mut ctx,
+            "- f2b:\n  then:\n    - log: T\n  else:\n    - log: F",
+        )
+        .await
+        .unwrap();
         assert!(ctx.log.iter().any(|(_, m)| m == "F"));
         assert!(!ctx.log.iter().any(|(_, m)| m == "T"));
         // 函数实参越界（体内 $2 但只传 1 个）
         ctx.funcs.insert("f3".into(), f("- log: $2"));
-        assert!(run_step(&runner, &mut ctx, "- f3: only-one").await.unwrap_err().to_string().contains("超出实参数量"));
+        assert!(run_step(&runner, &mut ctx, "- f3: only-one")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("超出实参数量"));
         // 函数调用步骤带非法参数
-        assert!(run_step(&runner, &mut ctx, "- f1: x\n  foo: 1").await.unwrap_err().to_string().contains("不支持参数"));
+        assert!(run_step(&runner, &mut ctx, "- f1: x\n  foo: 1")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("不支持参数"));
         // return 后函数体剩余步骤跳过（return 冒泡）
-        ctx.funcs.insert("f4".into(), f("- return: false\n- log: skipped"));
+        ctx.funcs
+            .insert("f4".into(), f("- return: false\n- log: skipped"));
         ctx.log.clear();
         run_step(&runner, &mut ctx, "- f4:").await.unwrap();
         assert!(!ctx.log.iter().any(|(_, m)| m == "skipped"));
@@ -2314,7 +3012,9 @@ mod tests {
             f("- f1: inner\n  else:\n    - log: inner-else\n- log: after-inner\n- return: true"),
         );
         ctx.log.clear();
-        run_step(&runner, &mut ctx, "- f5:\n  then:\n    - log: outer-T").await.unwrap();
+        run_step(&runner, &mut ctx, "- f5:\n  then:\n    - log: outer-T")
+            .await
+            .unwrap();
         assert!(ctx.log.iter().any(|(_, m)| m == "got inner"));
         assert!(!ctx.log.iter().any(|(_, m)| m == "inner-else"));
         assert!(ctx.log.iter().any(|(_, m)| m == "after-inner"));
@@ -2341,7 +3041,9 @@ mod tests {
         assert_eq!(m.get("f1").unwrap().cond, vec!["test.png"]);
         assert_eq!(m.get("f1").unwrap().body.len(), 1);
         // cond 多模板列表
-        let m = p("func:\n  - f1:\n    cond:\n      - a.png\n      - b.png\n    steps:\n      - log: x");
+        let m = p(
+            "func:\n  - f1:\n    cond:\n      - a.png\n      - b.png\n    steps:\n      - log: x",
+        );
         assert_eq!(m.get("f1").unwrap().cond, vec!["a.png", "b.png"]);
         // cond 逗号分隔字符串
         let m = p("func:\n  - f1:\n    cond: a.png, b.png\n    steps:\n      - log: x");
@@ -2353,14 +3055,32 @@ mod tests {
         let m = p("func:\n  f1:\n    cond: test.png\n    steps:\n      - log: x");
         assert_eq!(m.get("f1").unwrap().cond, vec!["test.png"]);
         // 错误：函数名 cond 是保留字（仅含 cond 键的项）
-        assert!(Runner::parse_funcs(Some(parse("func:\n  - cond:\n    - log: x").get("func").cloned().unwrap()))
-            .unwrap_err().to_string().contains("cond 是保留字"));
+        assert!(Runner::parse_funcs(Some(
+            parse("func:\n  - cond:\n    - log: x")
+                .get("func")
+                .cloned()
+                .unwrap()
+        ))
+        .unwrap_err()
+        .to_string()
+        .contains("cond 是保留字"));
         // 错误：函数体非法（标量非列表）
-        assert!(Runner::parse_funcs(Some(parse("func:\n  - f1: 123").get("func").cloned().unwrap()))
-            .unwrap_err().to_string().contains("函数体需要步骤列表"));
+        assert!(Runner::parse_funcs(Some(
+            parse("func:\n  - f1: 123").get("func").cloned().unwrap()
+        ))
+        .unwrap_err()
+        .to_string()
+        .contains("函数体需要步骤列表"));
         // 错误：cond 模板列表项非法（非字符串）
-        assert!(Runner::parse_funcs(Some(parse("func:\n  - f1:\n    cond:\n      - 123\n    steps:\n      - log: x").get("func").cloned().unwrap()))
-            .unwrap_err().to_string().contains("cond"));
+        assert!(Runner::parse_funcs(Some(
+            parse("func:\n  - f1:\n    cond:\n      - 123\n    steps:\n      - log: x")
+                .get("func")
+                .cloned()
+                .unwrap()
+        ))
+        .unwrap_err()
+        .to_string()
+        .contains("cond"));
     }
 
     /// 跨文件函数调用（exec_cross_func）：子脚本按名解析（同分区优先、缺扩展名
@@ -2373,10 +3093,26 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         // 先落盘子脚本 test1.yaml（与测试分区 com.test 一致）
         let sub = "func:\n  - fun1:\n    - log: cross $1\n    - return: true\n  - fun2:\n    - log: f2 called\n    - fun1: inner\n      then:\n        - log: f2-inner-ok\nsteps:\n  - log: sub-top";
-        runner.scripts.save(None, "com.test", "test1.yaml", sub).unwrap();
+        runner
+            .scripts
+            .save(None, "com.test", "test1.yaml", sub)
+            .unwrap();
         // 同分区调用（写短名 test1）+ 无参调用 + 子脚本内裸函数名互调（fun2 → f1）
         let caller = "func:\n  - own:\n    - log: own $1\nsteps:\n  - test1:fun1: hello\n    then:\n      - log: T1\n    else:\n      - log: F1\n  - test1:fun2:\n    then:\n      - log: T2\n  - test1.yaml:fun1: world\n  - own: back";
-        let logs = runner.run("dev", "com.test/t.yml", caller, stop.clone(), None, 0, None, None, vec![]).await.unwrap();
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/t.yml",
+                caller,
+                stop.clone(),
+                None,
+                0,
+                None,
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "cross hello"));
         assert!(logs.iter().any(|(_, m)| m == "cross world"));
         assert!(logs.iter().any(|(_, m)| m == "T1"));
@@ -2385,35 +3121,148 @@ mod tests {
         assert!(logs.iter().any(|(_, m)| m == "cross inner")); // 子脚本内 fun2 → fun1 互调
         assert!(logs.iter().any(|(_, m)| m == "f2-inner-ok"));
         assert!(logs.iter().any(|(_, m)| m == "T2")); // fun2 无 return → 默认 true → then
-        // 调用者函数在跨文件调用后仍可用（不泄漏子脚本函数：own 在后）
+                                                      // 调用者函数在跨文件调用后仍可用（不泄漏子脚本函数：own 在后）
         assert!(logs.iter().any(|(_, m)| m == "own back"));
         // 子脚本不存在
         let caller = "steps:\n  - nope:fun1: x";
-        assert!(runner.run("dev", "com.test/t.yml", caller, stop.clone(), None, 0, None, None, vec![])
-            .await.unwrap_err().to_string().contains("子脚本不存在"));
+        assert!(runner
+            .run(
+                "dev",
+                "com.test/t.yml",
+                caller,
+                stop.clone(),
+                None,
+                0,
+                None,
+                None,
+                vec![]
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("子脚本不存在"));
         // 子脚本无该函数
         let caller = "steps:\n  - test1:nope";
-        assert!(runner.run("dev", "com.test/t.yml", caller, stop.clone(), None, 0, None, None, vec![])
-            .await.unwrap_err().to_string().contains("未定义函数"));
+        assert!(runner
+            .run(
+                "dev",
+                "com.test/t.yml",
+                caller,
+                stop.clone(),
+                None,
+                0,
+                None,
+                None,
+                vec![]
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("未定义函数"));
         // 纯函数库脚本（无 steps）：直接运行不报错且不做动作；跨文件函数可正常调用
-        runner.scripts.save(None, "com.test", "lib_only.yaml", "func:\n  - hello:\n    - log: lib hello\nsteps: ~").unwrap();
-        let logs = runner.run("dev", "com.test/lib_only.yaml", "func:\n  - hello:\n    - log: lib hello", stop.clone(), None, 0, None, None, vec![]).await.unwrap();
-        assert!(logs.iter().any(|(_, m)| m == "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作"));
+        runner
+            .scripts
+            .save(
+                None,
+                "com.test",
+                "lib_only.yaml",
+                "func:\n  - hello:\n    - log: lib hello\nsteps: ~",
+            )
+            .unwrap();
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/lib_only.yaml",
+                "func:\n  - hello:\n    - log: lib hello",
+                stop.clone(),
+                None,
+                0,
+                None,
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(logs
+            .iter()
+            .any(|(_, m)| m == "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作"));
         assert!(!logs.iter().any(|(_, m)| m == "lib hello"));
         // call 一个纯函数库脚本：无动作 + 提示日志（不报错）
         let caller = "steps:\n  - call: lib_only.yaml";
-        let logs = runner.run("dev", "com.test/t.yml", caller, stop.clone(), None, 0, None, None, vec![]).await.unwrap();
-        assert!(logs.iter().any(|(_, m)| m == "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作"));
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/t.yml",
+                caller,
+                stop.clone(),
+                None,
+                0,
+                None,
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(logs
+            .iter()
+            .any(|(_, m)| m == "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作"));
         // 跨文件函数调用纯函数库：正常执行函数体
         let caller = "steps:\n  - lib_only:hello";
-        let logs = runner.run("dev", "com.test/t.yml", caller, stop.clone(), None, 0, None, None, vec![]).await.unwrap();
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/t.yml",
+                caller,
+                stop.clone(),
+                None,
+                0,
+                None,
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "lib hello"));
         // run_func 直接运行函数库脚本的函数体（无 steps 时同样合法）
-        let logs = runner.run("dev", "com.test/lib_only.yaml", "func:\n  - hello:\n    - log: lib hello", stop.clone(), None, 0, Some("hello"), None, vec![]).await.unwrap();
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/lib_only.yaml",
+                "func:\n  - hello:\n    - log: lib hello",
+                stop.clone(),
+                None,
+                0,
+                Some("hello"),
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "lib hello"));
         // 省略 func: 的简写函数库（顶层映射直接写函数定义）同样可被跨文件调用
-        runner.scripts.save(None, "com.test", "lib_bare.yaml", "hello:\n  - log: bare hello").unwrap();
-        let logs = runner.run("dev", "com.test/t.yml", "steps:\n  - lib_bare:hello", stop.clone(), None, 0, None, None, vec![]).await.unwrap();
+        runner
+            .scripts
+            .save(
+                None,
+                "com.test",
+                "lib_bare.yaml",
+                "hello:\n  - log: bare hello",
+            )
+            .unwrap();
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/t.yml",
+                "steps:\n  - lib_bare:hello",
+                stop.clone(),
+                None,
+                0,
+                None,
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "bare hello"));
     }
 
@@ -2428,53 +3277,180 @@ mod tests {
     async fn run_top_level_and_config() {
         let (runner, _ctx) = test_runner_ctx();
         let stop = Arc::new(AtomicBool::new(false));
-        async fn run_yaml(runner: &Runner, stop: &Arc<AtomicBool>, yaml: &str) -> anyhow::Result<Vec<(String, String)>> {
-            runner.run("dev", "com.test/t.yaml", yaml, stop.clone(), None, 0, None, None, vec![]).await
+        async fn run_yaml(
+            runner: &Runner,
+            stop: &Arc<AtomicBool>,
+            yaml: &str,
+        ) -> anyhow::Result<Vec<(String, String)>> {
+            runner
+                .run(
+                    "dev",
+                    "com.test/t.yaml",
+                    yaml,
+                    stop.clone(),
+                    None,
+                    0,
+                    None,
+                    None,
+                    vec![],
+                )
+                .await
         }
         // 顶层键白名单：旧 action_wait / log_level / name / 未知键报错
-        assert!(run_yaml(&runner, &stop,"action_wait: 500\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("action_wait 已删除"));
-        assert!(run_yaml(&runner, &stop,"log_level: info\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("log_level 已删除"));
-        assert!(run_yaml(&runner, &stop,"name: x\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("name 已删除"));
-        assert!(run_yaml(&runner, &stop,"foo: 1\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("未知顶层键"));
+        assert!(
+            run_yaml(&runner, &stop, "action_wait: 500\nsteps:\n  - log: x")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("action_wait 已删除")
+        );
+        assert!(
+            run_yaml(&runner, &stop, "log_level: info\nsteps:\n  - log: x")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("log_level 已删除")
+        );
+        assert!(run_yaml(&runner, &stop, "name: x\nsteps:\n  - log: x")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("name 已删除"));
+        assert!(run_yaml(&runner, &stop, "foo: 1\nsteps:\n  - log: x")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("未知顶层键"));
         // steps 与 func 都没有 → 报错；改后文案明确提示纯函数库需要至少一个函数
-        assert!(run_yaml(&runner, &stop,"config:\n  interval: 500ms").await.unwrap_err().to_string().contains("需要 steps 或 func"));
-        assert!(run_yaml(&runner, &stop,"").await.unwrap_err().to_string().contains("需要 steps 或 func"));
+        assert!(run_yaml(&runner, &stop, "config:\n  interval: 500ms")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("需要 steps 或 func"));
+        assert!(run_yaml(&runner, &stop, "")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("需要 steps 或 func"));
         // 顶层序列 = 省略 steps: 的单段脚本（旧版本此写法报"需要 steps 或 func"）
-        let logs = run_yaml(&runner, &stop,"- log: a\n- log: b").await.unwrap();
+        let logs = run_yaml(&runner, &stop, "- log: a\n- log: b")
+            .await
+            .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "a"));
         assert!(logs.iter().any(|(_, m)| m == "b"));
         // 无段落键的顶层映射 = 省略 func: 的纯函数库简写（直接运行不做动作）
         let lib = "f1:\n  cond: a.png\n  steps:\n    - log: in f1\nf2:\n  - log: in f2";
         let logs = run_yaml(&runner, &stop, lib).await.unwrap();
-        assert!(logs.iter().any(|(_, m)| m == "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作"));
+        assert!(logs
+            .iter()
+            .any(|(_, m)| m == "纯函数库脚本（无 steps）：仅提供函数，直接运行不做任何动作"));
         assert!(!logs.iter().any(|(_, m)| m.contains("in f")));
         // run_func 直接运行简写函数库的函数体
-        let logs = runner.run("dev", "com.test/t.yaml", lib, stop.clone(), None, 0, Some("f2"), None, vec![]).await.unwrap();
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/t.yaml",
+                lib,
+                stop.clone(),
+                None,
+                0,
+                Some("f2"),
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "in f2"));
         // config 子键裸写顶层（无段落键）→ 定向报错（不能当函数名）
-        assert!(run_yaml(&runner, &stop,"interval: 500ms").await.unwrap_err().to_string().contains("config: 段参数"));
+        assert!(run_yaml(&runner, &stop, "interval: 500ms")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("config: 段参数"));
         // 顶层映射值不是函数体形态 → parse_funcs 报函数体错误
-        assert!(run_yaml(&runner, &stop,"foo: 1").await.unwrap_err().to_string().contains("函数体需要步骤列表"));
+        assert!(run_yaml(&runner, &stop, "foo: 1")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("函数体需要步骤列表"));
         // 合法脚本：log 正常执行
-        let logs = run_yaml(&runner, &stop,"steps:\n  - log: hello").await.unwrap();
+        let logs = run_yaml(&runner, &stop, "steps:\n  - log: hello")
+            .await
+            .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "hello"));
         // config 段：interval 裸数字报错；log_level=warn 丢弃 info 日志
-        assert!(run_yaml(&runner, &stop,"config:\n  interval: 100\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("带单位"));
-        assert!(run_yaml(&runner, &stop,"config:\n  foo: 1\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("不支持的键"));
-        let logs = run_yaml(&runner, &stop,"config:\n  interval: 100ms\nsteps:\n  - log: hello").await.unwrap();
+        assert!(run_yaml(
+            &runner,
+            &stop,
+            "config:\n  interval: 100\nsteps:\n  - log: x"
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("带单位"));
+        assert!(
+            run_yaml(&runner, &stop, "config:\n  foo: 1\nsteps:\n  - log: x")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("不支持的键")
+        );
+        let logs = run_yaml(
+            &runner,
+            &stop,
+            "config:\n  interval: 100ms\nsteps:\n  - log: hello",
+        )
+        .await
+        .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "hello"));
-        let logs = run_yaml(&runner, &stop,"config:\n  log_level: warn\nsteps:\n  - log: dropped").await.unwrap();
+        let logs = run_yaml(
+            &runner,
+            &stop,
+            "config:\n  log_level: warn\nsteps:\n  - log: dropped",
+        )
+        .await
+        .unwrap();
         assert!(!logs.iter().any(|(_, m)| m == "dropped"));
         // 列表形式 config（按序覆盖）
-        let logs = run_yaml(&runner, &stop,"config:\n  - log_level: error\n  - log_level: debug\nsteps:\n  - log: kept").await.unwrap();
+        let logs = run_yaml(
+            &runner,
+            &stop,
+            "config:\n  - log_level: error\n  - log_level: debug\nsteps:\n  - log: kept",
+        )
+        .await
+        .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "kept"));
         // 主脚本直接运行含 $N 的脚本 → 越界报错（func 段除外）
-        assert!(run_yaml(&runner, &stop,"steps:\n  - find: $1").await.unwrap_err().to_string().contains("超出实参数量"));
-        let logs = run_yaml(&runner, &stop,"func:\n  - f1:\n    - log: $1\nsteps:\n  - f1: ok").await.unwrap();
+        assert!(run_yaml(&runner, &stop, "steps:\n  - find: $1")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("超出实参数量"));
+        let logs = run_yaml(
+            &runner,
+            &stop,
+            "func:\n  - f1:\n    - log: $1\nsteps:\n  - f1: ok",
+        )
+        .await
+        .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "ok"));
         // func 定义校验：保留字函数名 / 重复定义 / 非法函数体
-        assert!(run_yaml(&runner, &stop,"func:\n  - find:\n    - log: x\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("保留字"));
-        assert!(run_yaml(&runner, &stop,"func:\n  - f1: 123\nsteps:\n  - log: x").await.unwrap_err().to_string().contains("函数体需要步骤列表"));
+        assert!(run_yaml(
+            &runner,
+            &stop,
+            "func:\n  - find:\n    - log: x\nsteps:\n  - log: x"
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("保留字"));
+        assert!(
+            run_yaml(&runner, &stop, "func:\n  - f1: 123\nsteps:\n  - log: x")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("函数体需要步骤列表")
+        );
         assert!(run_yaml(
             &runner,
             &stop,
@@ -2494,31 +3470,111 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let yaml = "func:\n  - f1:\n    - log: a\n    - log: b\nsteps:\n  - log: top";
         // 从头跑函数体：只执行 f1（顶层 steps 不跑）
-        let logs = runner.run("dev", "com.test/t.yaml", yaml, stop.clone(), None, 0, Some("f1"), None, vec![]).await.unwrap();
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/t.yaml",
+                yaml,
+                stop.clone(),
+                None,
+                0,
+                Some("f1"),
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "a"));
         assert!(!logs.iter().any(|(_, m)| m == "top"));
         // start_step=1：函数体内从第 2 步开始
-        let logs = runner.run("dev", "com.test/t.yaml", yaml, stop.clone(), None, 1, Some("f1"), None, vec![]).await.unwrap();
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/t.yaml",
+                yaml,
+                stop.clone(),
+                None,
+                1,
+                Some("f1"),
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
         assert!(!logs.iter().any(|(_, m)| m == "a"));
         assert!(logs.iter().any(|(_, m)| m == "b"));
         // 未定义函数
-        assert!(runner.run("dev", "com.test/t.yaml", yaml, stop.clone(), None, 0, Some("nope"), None, vec![])
+        assert!(runner
+            .run(
+                "dev",
+                "com.test/t.yaml",
+                yaml,
+                stop.clone(),
+                None,
+                0,
+                Some("nope"),
+                None,
+                vec![]
+            )
             .await
             .unwrap_err()
             .to_string()
             .contains("未定义"));
         // 体内 $N 字面量保留：直接运行含 $1 的函数体不报越界（模板解析期才失败）
         let yaml2 = "func:\n  - f2:\n    - log: $1\nsteps:\n  - f2: x";
-        let logs = runner.run("dev", "com.test/t.yaml", yaml2, stop.clone(), None, 0, Some("f2"), None, vec![]).await.unwrap();
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/t.yaml",
+                yaml2,
+                stop.clone(),
+                None,
+                0,
+                Some("f2"),
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
         assert!(logs.iter().any(|(_, m)| m == "$1"));
         // 从头运行（start_step=0）先检查 cond——Console 点击函数名行 = 整函数
         // 从头跑：cond 需要截图，测试环境无设备 → 报截图失败（证明 cond 被检查）；
         // start_step=1（点击函数体内行）跳过 cond 直接执行体内第 2 步
         let yamlc = "func:\n  - fc:\n    cond: a.png\n    steps:\n      - log: c1\n      - log: c2\nsteps:\n  - log: top";
-        let err = runner.run("dev", "com.test/t.yaml", yamlc, stop.clone(), None, 0, Some("fc"), None, vec![])
-            .await.unwrap_err().to_string();
-        assert!(err.contains("截图失败"), "cond 应被检查（截图失败），实际: {}", err);
-        let logs = runner.run("dev", "com.test/t.yaml", yamlc, stop.clone(), None, 1, Some("fc"), None, vec![]).await.unwrap();
+        let err = runner
+            .run(
+                "dev",
+                "com.test/t.yaml",
+                yamlc,
+                stop.clone(),
+                None,
+                0,
+                Some("fc"),
+                None,
+                vec![],
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("截图失败"),
+            "cond 应被检查（截图失败），实际: {}",
+            err
+        );
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/t.yaml",
+                yamlc,
+                stop.clone(),
+                None,
+                1,
+                Some("fc"),
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
         assert!(!logs.iter().any(|(_, m)| m == "c1"));
         assert!(logs.iter().any(|(_, m)| m == "c2"));
     }
@@ -2531,7 +3587,10 @@ mod tests {
         let steps = p("- log: a\n- log: b").get("steps").cloned().unwrap();
         assert_eq!(steps.as_sequence().map(|s| s.len()), Some(2));
         // 无段落键的顶层映射 → func（纯函数库简写）
-        let func = p("f1:\n  cond: a.png\n  steps:\n    - log: x\nf2:\n  - log: y").get("func").cloned().unwrap();
+        let func = p("f1:\n  cond: a.png\n  steps:\n    - log: x\nf2:\n  - log: y")
+            .get("func")
+            .cloned()
+            .unwrap();
         let m = Runner::parse_funcs(Some(func)).unwrap();
         assert_eq!(m.get("f1").unwrap().cond, vec!["a.png"]);
         assert_eq!(m.get("f2").unwrap().body.len(), 1);
@@ -2539,8 +3598,19 @@ mod tests {
         assert!(p("steps:\n  - log: a").get("func").is_none());
         assert!(p("func:\n  f1:\n    - log: a").get("steps").is_none());
         // 含段落键时未知顶层键报错；config 子键裸写顶层定向报错
-        assert!(Runner::normalize_top(parse("foo: 1\nsteps: []")).unwrap_err().to_string().contains("未知顶层键"));
-        assert!(Runner::normalize_top(parse("threshold: 0.9")).unwrap_err().to_string().contains("config: 段参数"));
-        assert!(Runner::normalize_top(parse("threshold: 0.9\nf1:\n  - log: a")).unwrap_err().to_string().contains("config: 段参数"));
+        assert!(Runner::normalize_top(parse("foo: 1\nsteps: []"))
+            .unwrap_err()
+            .to_string()
+            .contains("未知顶层键"));
+        assert!(Runner::normalize_top(parse("threshold: 0.9"))
+            .unwrap_err()
+            .to_string()
+            .contains("config: 段参数"));
+        assert!(
+            Runner::normalize_top(parse("threshold: 0.9\nf1:\n  - log: a"))
+                .unwrap_err()
+                .to_string()
+                .contains("config: 段参数")
+        );
     }
 }

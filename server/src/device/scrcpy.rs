@@ -113,9 +113,17 @@ pub struct SessionHandle {
 
 impl ScrcpySession {
     /// 建立 scrcpy 会话：push server → reverse 隧道 → 启动 → accept 两个 socket
-    pub async fn connect(adb: &Adb, cfg: &Config, device: &Device) -> anyhow::Result<SessionHandle> {
+    pub async fn connect(
+        adb: &Adb,
+        cfg: &Config,
+        device: &Device,
+    ) -> anyhow::Result<SessionHandle> {
         let adb = adb.clone();
-        let serial = if device.addr.is_empty() { "usb".to_string() } else { device.addr.clone() };
+        let serial = if device.addr.is_empty() {
+            "usb".to_string()
+        } else {
+            device.addr.clone()
+        };
         info!(device = %device.name, serial = %serial, "connecting scrcpy session");
 
         // 1. 确保 adb transport 可用。只有网络地址（IP:port）才用 adb connect；
@@ -126,7 +134,9 @@ impl ScrcpySession {
             if device.addr.contains(':') {
                 adb.connect(&device.addr).await?;
             } else {
-                let _ = adb.run(&["reconnect", "offline"], Duration::from_secs(5)).await;
+                let _ = adb
+                    .run(&["reconnect", "offline"], Duration::from_secs(5))
+                    .await;
                 tokio::time::sleep(Duration::from_millis(2500)).await;
             }
             if !adb.is_connected(&serial).await {
@@ -138,7 +148,12 @@ impl ScrcpySession {
         }
 
         // 1.5 清理旧 reverse 隧道（残留隧道可能干扰新连接）
-        let _ = adb.run(&["-s", &serial, "reverse", "--remove-all"], Duration::from_secs(10)).await;
+        let _ = adb
+            .run(
+                &["-s", &serial, "reverse", "--remove-all"],
+                Duration::from_secs(10),
+            )
+            .await;
 
         // 2. 生成 scid 与 socket 名
         let scid = rand::random::<u32>() & 0x7fffffff;
@@ -146,7 +161,8 @@ impl ScrcpySession {
 
         // 3. 推送 scrcpy-server
         let server_path = cfg.scrcpy_server.to_string_lossy().to_string();
-        adb.push(&serial, &server_path, "/data/local/tmp/scrcpy-server.jar").await?;
+        adb.push(&serial, &server_path, "/data/local/tmp/scrcpy-server.jar")
+            .await?;
 
         // 4. 本地监听 + adb reverse 隧道
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -256,7 +272,12 @@ impl ScrcpySession {
         let width = u32::from_be_bytes(meta_buf[4..8].try_into()?);
         let height = u32::from_be_bytes(meta_buf[8..12].try_into()?);
         info!(device = %device.name, codec_id, width, height, "video meta received");
-        let meta = VideoMeta { codec_id, width, height, device_name };
+        let meta = VideoMeta {
+            codec_id,
+            width,
+            height,
+            device_name,
+        };
 
         let (video_tx, video_rx) = mpsc::channel::<VideoFrame>(64);
         let session = Arc::new(Self {
@@ -330,7 +351,12 @@ impl ScrcpySession {
                 }
                 // 诊断：SPS/PPS 配置帧打印前 40 字节（含 profile/level，验证与协商 fmtp 匹配）
                 if frame.is_config {
-                    let hex: String = frame.data.iter().take(40).map(|b| format!("{:02x}", b)).collect();
+                    let hex: String = frame
+                        .data
+                        .iter()
+                        .take(40)
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
                     info!(device = %s2.device.name, "config frame {} bytes: {}", frame.data.len(), hex);
                 }
                 if video_tx.send(frame).await.is_err() {
@@ -338,7 +364,8 @@ impl ScrcpySession {
                     break; // 消费者已关闭
                 }
             }
-            s2.connected.store(false, std::sync::atomic::Ordering::SeqCst);
+            s2.connected
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         });
 
         // 9.5 音频读取循环（后台任务）：解析 OPUS 帧 → audio channel 转发给 viewer。
@@ -375,7 +402,11 @@ impl ScrcpySession {
                 bytes += size as u64;
                 let is_config = pts_and_flags & PACKET_FLAG_CONFIG != 0;
                 let pts = pts_and_flags & !(PACKET_FLAG_CONFIG | PACKET_FLAG_KEY_FRAME);
-                let frame = AudioFrame { data: buf, pts_us: pts, is_config };
+                let frame = AudioFrame {
+                    data: buf,
+                    pts_us: pts,
+                    is_config,
+                };
                 if audio_tx.send(frame).await.is_err() {
                     break; // 消费者已关闭
                 }
@@ -386,7 +417,11 @@ impl ScrcpySession {
             info!(device = %s_audio.device.name, frames, bytes, "audio stream ended");
         });
 
-        Ok(SessionHandle { session, video_rx, audio_rx })
+        Ok(SessionHandle {
+            session,
+            video_rx,
+            audio_rx,
+        })
     }
 
     // ---------- 控制消息注入 ----------
@@ -402,7 +437,14 @@ impl ScrcpySession {
     }
 
     /// 注入触控：action=DOWN/UP/MOVE，坐标基于视频分辨率（0..width, 0..height）
-    pub async fn inject_touch(&self, action: u8, pointer_id: u64, x: f32, y: f32, pressure: f32) -> anyhow::Result<()> {
+    pub async fn inject_touch(
+        &self,
+        action: u8,
+        pointer_id: u64,
+        x: f32,
+        y: f32,
+        pressure: f32,
+    ) -> anyhow::Result<()> {
         let (w, h) = (*self.width.lock(), *self.height.lock());
         let x = (x.max(0.0).min(w as f32 - 1.0)) as u32;
         let y = (y.max(0.0).min(h as f32 - 1.0)) as u32;
@@ -428,7 +470,14 @@ impl ScrcpySession {
     }
 
     /// 滑动
-    pub async fn swipe(&self, x1: f32, y1: f32, x2: f32, y2: f32, duration_ms: u64) -> anyhow::Result<()> {
+    pub async fn swipe(
+        &self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        duration_ms: u64,
+    ) -> anyhow::Result<()> {
         self.inject_touch(ACTION_DOWN, 0, x1, y1, 1.0).await?;
         let steps = 20u64;
         for i in 1..=steps {
@@ -442,7 +491,13 @@ impl ScrcpySession {
     }
 
     /// 按键注入（Android keycode）
-    pub async fn inject_keycode(&self, action: u8, keycode: u32, repeat: u32, meta: u32) -> anyhow::Result<()> {
+    pub async fn inject_keycode(
+        &self,
+        action: u8,
+        keycode: u32,
+        repeat: u32,
+        meta: u32,
+    ) -> anyhow::Result<()> {
         let mut buf = [0u8; 14];
         buf[0] = 0; // TYPE_INJECT_KEYCODE
         buf[1] = action;
@@ -471,7 +526,13 @@ impl ScrcpySession {
     }
 
     /// 滚轮（scroll_x/y 为像素值，会被 /16 归一化）
-    pub async fn inject_scroll(&self, x: f32, y: f32, scroll_x: f32, scroll_y: f32) -> anyhow::Result<()> {
+    pub async fn inject_scroll(
+        &self,
+        x: f32,
+        y: f32,
+        scroll_x: f32,
+        scroll_y: f32,
+    ) -> anyhow::Result<()> {
         let (w, h) = (*self.width.lock(), *self.height.lock());
         let mut buf = [0u8; 21];
         buf[0] = 3; // TYPE_INJECT_SCROLL_EVENT
@@ -530,7 +591,8 @@ impl ScrcpySession {
     /// 另 spawn 启动冻结自愈看门狗：Greeze 在启动窗口（activity 切换瞬间）
     /// 也会把进程按 tobg 冻结 → 黑屏卡死，看门狗探测冻结后裸 start 捅醒
     pub async fn start_app(self: &Arc<Self>, name: &str) -> anyhow::Result<()> {
-        let plain = !name.starts_with('+') && !name.starts_with('?') && super::adb::is_safe_pkg(name);
+        let plain =
+            !name.starts_with('+') && !name.starts_with('?') && super::adb::is_safe_pkg(name);
         let effective = if plain {
             match self.app_pidof(name).await {
                 Some(pid) if self.app_frozen(&pid).await => {
@@ -575,7 +637,11 @@ impl ScrcpySession {
     /// 应用主进程 pid（无/探测失败返回 None）
     async fn app_pidof(&self, pkg: &str) -> Option<String> {
         self.adb
-            .shell(&self.device.addr, &format!("pidof {}", pkg), Duration::from_secs(3))
+            .shell(
+                &self.device.addr,
+                &format!("pidof {}", pkg),
+                Duration::from_secs(3),
+            )
             .await
             .ok()
             .and_then(|out| out.trim().split_whitespace().next().map(|s| s.to_string()))
@@ -585,7 +651,9 @@ impl ScrcpySession {
     /// 下进程完全不调度）。cgroup.freeze 文件 shell 读不到（SELinux）；帧空闲
     /// 不可靠（挂机静止画面本就无新帧）。stat 读取失败按未冻结处理（保守）
     async fn app_frozen(&self, pid: &str) -> bool {
-        let Some(a) = self.read_proc_stat(pid).await else { return false };
+        let Some(a) = self.read_proc_stat(pid).await else {
+            return false;
+        };
         tokio::time::sleep(Duration::from_secs(1)).await;
         match self.read_proc_stat(pid).await {
             Some(b) => a == b,
@@ -597,7 +665,11 @@ impl ScrcpySession {
     async fn read_proc_stat(&self, pid: &str) -> Option<u64> {
         let out = self
             .adb
-            .shell(&self.device.addr, &format!("cat /proc/{}/stat", pid), Duration::from_secs(3))
+            .shell(
+                &self.device.addr,
+                &format!("cat /proc/{}/stat", pid),
+                Duration::from_secs(3),
+            )
             .await
             .ok()?;
         parse_stat_cpu_ticks(&out)
@@ -611,7 +683,9 @@ impl ScrcpySession {
         let mut attempt = 0u32;
         loop {
             tokio::time::sleep(Duration::from_secs(if attempt == 0 { 6 } else { 8 })).await;
-            let Some(pid) = self.app_pidof(pkg).await else { return };
+            let Some(pid) = self.app_pidof(pkg).await else {
+                return;
+            };
             if !self.app_frozen(&pid).await {
                 return; // 正常启动 / 已恢复 / 会话已拆
             }
@@ -667,7 +741,10 @@ mod tests {
     }
 }
 
-async fn accept_with_timeout(listener: &TcpListener, timeout: Duration) -> Option<(TcpStream, SocketAddr)> {
+async fn accept_with_timeout(
+    listener: &TcpListener,
+    timeout: Duration,
+) -> Option<(TcpStream, SocketAddr)> {
     match tokio::time::timeout(timeout, listener.accept()).await {
         Ok(Ok((s, a))) => Some((s, a)),
         _ => None,

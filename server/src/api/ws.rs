@@ -15,7 +15,11 @@ use super::AppState;
 use crate::device::scrcpy::VideoFrame;
 use crate::webrtc::{make_audio_queue, make_frame_queue, ViewerHandle, ViewerSession};
 
-pub async fn ws_device(ws: WebSocketUpgrade, State(st): State<AppState>, Path(device_id): Path<String>) -> Response {
+pub async fn ws_device(
+    ws: WebSocketUpgrade,
+    State(st): State<AppState>,
+    Path(device_id): Path<String>,
+) -> Response {
     ws.on_upgrade(move |socket| handle_ws(socket, st, device_id))
 }
 
@@ -24,11 +28,19 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
 
     // 设备必须在线
     let Some(session) = st.devices.session(&device_id) else {
-        let _ = socket.send(Message::Text(json!({"type": "error", "error": "device offline"}).to_string())).await;
+        let _ = socket
+            .send(Message::Text(
+                json!({"type": "error", "error": "device offline"}).to_string(),
+            ))
+            .await;
         return;
     };
     let Some(frames_tx) = st.devices.frames_tx(&device_id) else {
-        let _ = socket.send(Message::Text(json!({"type": "error", "error": "device not streaming"}).to_string())).await;
+        let _ = socket
+            .send(Message::Text(
+                json!({"type": "error", "error": "device not streaming"}).to_string(),
+            ))
+            .await;
         return;
     };
     let audio_frames_tx = st.devices.audio_frames_tx(&device_id);

@@ -33,8 +33,7 @@ pub struct ViewerHandle {
 }
 
 /// device_id → 活跃 viewer（main.rs 创建，AppState / Scheduler / ws.rs 共享）
-pub type ViewerMap =
-    Arc<std::sync::Mutex<std::collections::HashMap<String, ViewerHandle>>>;
+pub type ViewerMap = Arc<std::sync::Mutex<std::collections::HashMap<String, ViewerHandle>>>;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -102,16 +101,28 @@ impl ViewerSession {
         m.register_default_codecs()?;
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut m)?;
-        let api = APIBuilder::new().with_media_engine(m).with_interceptor_registry(registry).build();
+        let api = APIBuilder::new()
+            .with_media_engine(m)
+            .with_interceptor_registry(registry)
+            .build();
 
         let ice = if let Ok(s) = std::env::var("ICE_SERVERS") {
             s.split(';')
-                .map(|u| RTCIceServer { urls: vec![u.to_string()], ..Default::default() })
+                .map(|u| RTCIceServer {
+                    urls: vec![u.to_string()],
+                    ..Default::default()
+                })
                 .collect()
         } else {
-            vec![RTCIceServer { urls: vec!["stun:stun.l.google.com:19302".into()], ..Default::default() }]
+            vec![RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".into()],
+                ..Default::default()
+            }]
         };
-        let config = RTCConfiguration { ice_servers: ice, ..Default::default() };
+        let config = RTCConfiguration {
+            ice_servers: ice,
+            ..Default::default()
+        };
 
         let peer = Arc::new(api.new_peer_connection(config).await?);
 
@@ -124,10 +135,15 @@ impl ViewerSession {
             mime_type: "video/H264".into(),
             clock_rate: 90000,
             channels: 0,
-            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".into(),
+            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                .into(),
             rtcp_feedback: vec![],
         };
-        let track = Arc::new(TrackLocalStaticRTP::new(codec, "video".into(), "gamer".into()));
+        let track = Arc::new(TrackLocalStaticRTP::new(
+            codec,
+            "video".into(),
+            "gamer".into(),
+        ));
         let rtp_sender: Arc<RTCRtpSender> = peer.add_track(track.clone()).await?;
 
         // OPUS 音频轨：转发真机虚拟屏音频（浏览器默认静音，用户自行取消）。
@@ -139,7 +155,11 @@ impl ViewerSession {
             sdp_fmtp_line: "minptime=10;useinbandfec=1".into(),
             rtcp_feedback: vec![],
         };
-        let audio_track = Arc::new(TrackLocalStaticRTP::new(audio_codec, "audio".into(), "gamer".into()));
+        let audio_track = Arc::new(TrackLocalStaticRTP::new(
+            audio_codec,
+            "audio".into(),
+            "gamer".into(),
+        ));
         let audio_rtp_sender: Arc<RTCRtpSender> = peer.add_track(audio_track.clone()).await?;
 
         // 控制 DataChannel：必须由 offerer（浏览器）创建。
@@ -173,26 +193,29 @@ impl ViewerSession {
         let session_dc = session.clone();
         // control DataChannel 捕获：on_data_channel 回调触发时存入，
         // 供服务端反向推送（脚本事件）——浏览器只会创建 "control" 一个通道
-        let control_dc: Arc<Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>> = Arc::new(Mutex::new(None));
+        let control_dc: Arc<Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>> =
+            Arc::new(Mutex::new(None));
         let dc_holder = control_dc.clone();
-        peer.on_data_channel(Box::new(move |dc: Arc<webrtc::data_channel::RTCDataChannel>| {
-            info!("control data channel opened: {}", dc.label());
-            *dc_holder.lock() = Some(dc.clone());
-            let s = session_dc.clone();
-            let tx = control_tx.clone();
-            dc.on_message(Box::new(move |msg| {
-                let data = msg.data.to_vec();
-                let s2 = s.clone();
-                // 只记录长度，不打印内容：拖动时每秒几十上百条消息，
-                // 逐条格式化打印会让服务端日志成为性能瓶颈（全局日志锁串行化）
-                debug!("control msg: {} bytes", data.len());
-                if tx.send(data).is_err() {
-                    debug!("control queue closed, dropping msg for {}", s2.device.name);
-                }
+        peer.on_data_channel(Box::new(
+            move |dc: Arc<webrtc::data_channel::RTCDataChannel>| {
+                info!("control data channel opened: {}", dc.label());
+                *dc_holder.lock() = Some(dc.clone());
+                let s = session_dc.clone();
+                let tx = control_tx.clone();
+                dc.on_message(Box::new(move |msg| {
+                    let data = msg.data.to_vec();
+                    let s2 = s.clone();
+                    // 只记录长度，不打印内容：拖动时每秒几十上百条消息，
+                    // 逐条格式化打印会让服务端日志成为性能瓶颈（全局日志锁串行化）
+                    debug!("control msg: {} bytes", data.len());
+                    if tx.send(data).is_err() {
+                        debug!("control queue closed, dropping msg for {}", s2.device.name);
+                    }
+                    Box::pin(async {})
+                }));
                 Box::pin(async {})
-            }));
-            Box::pin(async {})
-        }));
+            },
+        ));
 
         // ICE 状态回调：连接就绪信号（pusher 必须等 SRTP 就绪后才推流，
         // 否则 webrtc-rs 的 write_rtp 在 SRTP 未就绪时静默返回 Ok(0) 丢包——黑屏根因）
@@ -236,11 +259,26 @@ impl ViewerSession {
         let _ = tokio::time::timeout(Duration::from_secs(5), gather_complete.recv()).await;
 
         // 保存本地 answer + 从 answer SDP 解析协商后的 payload type
-        let answer_sdp = peer.local_description().await.ok_or_else(|| anyhow::anyhow!("no local description"))?;
+        let answer_sdp = peer
+            .local_description()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("no local description"))?;
         let payload_type = parse_h264_payload_type(&answer_sdp.sdp).unwrap_or(96);
-        let ssrc = rtp_sender.get_parameters().await.encodings.first().map(|e| e.ssrc).unwrap_or(12345);
+        let ssrc = rtp_sender
+            .get_parameters()
+            .await
+            .encodings
+            .first()
+            .map(|e| e.ssrc)
+            .unwrap_or(12345);
         let audio_payload_type = parse_opus_payload_type(&answer_sdp.sdp).unwrap_or(111);
-        let audio_ssrc = audio_rtp_sender.get_parameters().await.encodings.first().map(|e| e.ssrc).unwrap_or(22345);
+        let audio_ssrc = audio_rtp_sender
+            .get_parameters()
+            .await
+            .encodings
+            .first()
+            .map(|e| e.ssrc)
+            .unwrap_or(22345);
         debug!(
             "negotiated video: payload_type={} ssrc={}; audio: payload_type={} ssrc={}",
             payload_type, ssrc, audio_payload_type, audio_ssrc
@@ -248,7 +286,16 @@ impl ViewerSession {
         // 诊断：打印协商 SDP 关键行（m 行 / direction / rtpmap / fmtp / ssrc / msid）
         for line in answer_sdp.sdp.lines() {
             let l = line.trim();
-            if l.starts_with("m=") || l.starts_with("a=send") || l.starts_with("a=recv") || l.starts_with("a=rtpmap") || l.starts_with("a=fmtp") || l.starts_with("a=ssrc") || l.starts_with("a=msid") || l.starts_with("a=group") || l.starts_with("a=extmap") {
+            if l.starts_with("m=")
+                || l.starts_with("a=send")
+                || l.starts_with("a=recv")
+                || l.starts_with("a=rtpmap")
+                || l.starts_with("a=fmtp")
+                || l.starts_with("a=ssrc")
+                || l.starts_with("a=msid")
+                || l.starts_with("a=group")
+                || l.starts_with("a=extmap")
+            {
                 debug!("answer sdp: {}", l);
             }
         }
@@ -260,7 +307,9 @@ impl ViewerSession {
             ts_base: Arc::new(Mutex::new(None)),
             last_ts: Arc::new(Mutex::new(0)),
             config_nalu: Arc::new(Mutex::new(initial_frames.as_ref().and_then(|f| {
-                f.iter().find(|x| x.is_config).map(|x| Bytes::from(x.data.clone()))
+                f.iter()
+                    .find(|x| x.is_config)
+                    .map(|x| Bytes::from(x.data.clone()))
             }))),
             last_serve: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             answer: answer_sdp,
@@ -269,7 +318,10 @@ impl ViewerSession {
             control_dc,
             session: session.clone(),
         };
-        let fps = session.device.fps.or_else(|| (cfg.fps > 0).then_some(cfg.fps));
+        let fps = session
+            .device
+            .fps
+            .or_else(|| (cfg.fps > 0).then_some(cfg.fps));
         // 静止补帧心跳（2026-08-23 从 33ms 降到 500ms）：30fps 重复帧让 Chrome
         // jitter buffer 的统计持续累积，目标延迟随运行时间膨胀（实测静止 23min
         // 后 676ms，滚动突发后飙到 4.9s——包在到、帧在解码计数、画面却逐位冻结
@@ -279,9 +331,33 @@ impl ViewerSession {
         let idle_repeat_ms = 500u64;
         // 硬性帧率上限：即使设备端实际输出 60fps，pusher 也按这里的最小间隔发送，
         // 避免“设置了 30fps 实际却跑到 60fps”（scrcpy 侧不再传 max_fps，见 scrcpy.rs）
-        let min_frame_interval_ms = fps.filter(|&f| f > 0).map(|f| (1000 / f).max(1) as u64).unwrap_or(0);
-        vs.spawn_pusher(rtp_sender, frame_q, frame_notify, overflowed, payload_type, ssrc, initial_frames, conn_rx, peer_connected.clone(), idle_repeat_ms, min_frame_interval_ms, cfg.ffmpeg_path.clone(), cfg.probe_encoder);
-        vs.spawn_audio_pusher(audio_track, audio_rx, audio_payload_type, audio_ssrc, peer_connected, audio_on);
+        let min_frame_interval_ms = fps
+            .filter(|&f| f > 0)
+            .map(|f| (1000 / f).max(1) as u64)
+            .unwrap_or(0);
+        vs.spawn_pusher(
+            rtp_sender,
+            frame_q,
+            frame_notify,
+            overflowed,
+            payload_type,
+            ssrc,
+            initial_frames,
+            conn_rx,
+            peer_connected.clone(),
+            idle_repeat_ms,
+            min_frame_interval_ms,
+            cfg.ffmpeg_path.clone(),
+            cfg.probe_encoder,
+        );
+        vs.spawn_audio_pusher(
+            audio_track,
+            audio_rx,
+            audio_payload_type,
+            audio_ssrc,
+            peer_connected,
+            audio_on,
+        );
         Ok(vs)
     }
 
@@ -330,7 +406,8 @@ impl ViewerSession {
                 return;
             }
             info!("SRTP ready, starting pusher");
-            let mut payloader: Box<dyn Payloader + Send + Sync> = Box::new(H264Payloader::default());
+            let mut payloader: Box<dyn Payloader + Send + Sync> =
+                Box::new(H264Payloader::default());
             let mut seq: u16 = rand::random();
             let mut last_rtp_ts = 0u32;
             let mut frame_no = 0u64;
@@ -384,7 +461,16 @@ impl ViewerSession {
                             let _ = payloader.payload(1200, &Bytes::from(f.data.clone()));
                             // SPS/PPS 独立单 NALU 包直接发送（见 send_config_nalus 注释：
                             // H264Payloader 的 STAP-A 在 IDR slice 超限时会静默丢弃参数集）。
-                            if !send_config_nalus(&track, &Bytes::from(f.data.clone()), payload_type, ssrc, &mut seq, 0).await {
+                            if !send_config_nalus(
+                                &track,
+                                &Bytes::from(f.data.clone()),
+                                payload_type,
+                                ssrc,
+                                &mut seq,
+                                0,
+                            )
+                            .await
+                            {
                                 ok = false;
                                 break;
                             }
@@ -406,7 +492,9 @@ impl ViewerSession {
                         }
                         last_pts = Some(f.pts_us);
                         let ts = ((f.pts_us.saturating_sub(base.unwrap()) * 90) / 1000) as u32;
-                        let (cont, w) = push_rtp(&track, &mut payloader, f, payload_type, ssrc, &mut seq, ts).await;
+                        let (cont, w) =
+                            push_rtp(&track, &mut payloader, f, payload_type, ssrc, &mut seq, ts)
+                                .await;
                         written_total += w;
                         last_serve.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                         if !cont {
@@ -431,11 +519,17 @@ impl ViewerSession {
                         break;
                     }
                     // 全部 0 字节：SRTP 未就绪，等一会重试
-                    info!("initial GOP replay wrote 0 bytes (SRTP not ready?), retrying {}/2", attempt + 1);
+                    info!(
+                        "initial GOP replay wrote 0 bytes (SRTP not ready?), retrying {}/2",
+                        attempt + 1
+                    );
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
                 if replay_ok {
-                    info!("pusher replayed initial GOP: {} frames, {} bytes", replay_sent, total_bytes);
+                    info!(
+                        "pusher replayed initial GOP: {} frames, {} bytes",
+                        replay_sent, total_bytes
+                    );
                 } else {
                     // 重放彻底失败（3 次全 0 字节）：请求编码器立即出 IDR，
                     // 等 IDR 期间丢 P 帧——浏览器保持黑屏而非花屏
@@ -647,7 +741,9 @@ impl ViewerSession {
                         if let Some((last, _)) = &last_sent {
                             let ts = {
                                 let real_ts = match ts_anchor {
-                                    Some((aw, at)) => at.wrapping_add(((aw.elapsed().as_micros() as u64) * 90 / 1000) as u32),
+                                    Some((aw, at)) => at.wrapping_add(
+                                        ((aw.elapsed().as_micros() as u64) * 90 / 1000) as u32,
+                                    ),
                                     None => {
                                         ts_anchor = Some((std::time::Instant::now(), last_rtp_ts));
                                         last_rtp_ts
@@ -660,7 +756,16 @@ impl ViewerSession {
                                     real_ts
                                 }
                             };
-                            let (cont, _w) = push_rtp(&track, &mut payloader, last, payload_type, ssrc, &mut seq, ts).await;
+                            let (cont, _w) = push_rtp(
+                                &track,
+                                &mut payloader,
+                                last,
+                                payload_type,
+                                ssrc,
+                                &mut seq,
+                                ts,
+                            )
+                            .await;
                             if !cont {
                                 break;
                             }
@@ -679,7 +784,14 @@ impl ViewerSession {
                     frame_no += 1;
                     // 诊断：实时循环心跳（验证帧缓冲是否收到设备帧）
                     if frame_no % 300 == 1 {
-                        debug!("pusher recv: no={} key={} cfg={} pts={} peer={}", frame_no, frame.is_keyframe, frame.is_config, frame.pts_us, peer_connected.load(std::sync::atomic::Ordering::SeqCst));
+                        debug!(
+                            "pusher recv: no={} key={} cfg={} pts={} peer={}",
+                            frame_no,
+                            frame.is_keyframe,
+                            frame.is_config,
+                            frame.pts_us,
+                            peer_connected.load(std::sync::atomic::Ordering::SeqCst)
+                        );
                     }
 
                     // 帧级 pacer：等待本帧发送时刻。
@@ -691,7 +803,9 @@ impl ViewerSession {
                     //   （见下方重置），追赶快于生产 2 倍以上，不会永久滞后；
                     //   旧"批量全速连发"（~1ms/帧）是块状到达的直接来源。
                     // 定时器精度由 main.rs 的 timeBeginPeriod(1) 保证（见该处注释）。
-                    if let Some(remain) = next_tx_at.checked_duration_since(std::time::Instant::now()) {
+                    if let Some(remain) =
+                        next_tx_at.checked_duration_since(std::time::Instant::now())
+                    {
                         tokio::time::sleep(remain).await;
                     }
 
@@ -707,7 +821,9 @@ impl ViewerSession {
                     // ts，避免 +3000 自持循环把媒体时钟推到 2 倍墙钟速率。
                     let ts = {
                         let real_ts = match ts_anchor {
-                            Some((aw, at)) => at.wrapping_add(((aw.elapsed().as_micros() as u64) * 90 / 1000) as u32),
+                            Some((aw, at)) => at.wrapping_add(
+                                ((aw.elapsed().as_micros() as u64) * 90 / 1000) as u32,
+                            ),
                             None => {
                                 ts_anchor = Some((std::time::Instant::now(), last_rtp_ts));
                                 last_rtp_ts
@@ -751,7 +867,9 @@ impl ViewerSession {
                         // 先 clone 出锁内容再 await（MutexGuard 非 Send，不能跨 await 存活）
                         let cfg = config_nalu.lock().clone();
                         if let Some(cfg) = cfg {
-                            if !send_config_nalus(&track, &cfg, payload_type, ssrc, &mut seq, ts).await {
+                            if !send_config_nalus(&track, &cfg, payload_type, ssrc, &mut seq, ts)
+                                .await
+                            {
                                 break;
                             }
                             let _ = payloader.payload(1200, &cfg);
@@ -777,7 +895,16 @@ impl ViewerSession {
                             probe_encoder_blockiness(&ff, cfg, &fdata, fn_, fk, fs);
                         });
                     }
-                    let (cont, _w) = push_rtp(&track, &mut payloader, &frame, payload_type, ssrc, &mut seq, ts).await;
+                    let (cont, _w) = push_rtp(
+                        &track,
+                        &mut payloader,
+                        &frame,
+                        payload_type,
+                        ssrc,
+                        &mut seq,
+                        ts,
+                    )
+                    .await;
                     if !cont {
                         break;
                     }
@@ -795,7 +922,11 @@ impl ViewerSession {
                     sent_bytes += frame.data.len() as u64;
                     // 诊断：实时推帧日志（每 300 帧，含平均 RTP 发送耗时与队列深度）
                     if frame_no % 300 == 1 {
-                        let avg = if send_samples > 0 { send_time_us / send_samples / 1000 } else { 0 };
+                        let avg = if send_samples > 0 {
+                            send_time_us / send_samples / 1000
+                        } else {
+                            0
+                        };
                         info!("pusher live: frame_no={} key={} ts={} peer={} size={} send_avg={}ms q={}", frame_no, frame.is_keyframe, ts, peer_connected.load(std::sync::atomic::Ordering::SeqCst), frame.data.len(), avg, last_q_len);
                         send_time_us = 0;
                         send_samples = 0;
@@ -821,7 +952,8 @@ impl ViewerSession {
     ) {
         let running = self.running.clone();
         tokio::spawn(async move {
-            let mut payloader: Box<dyn Payloader + Send + Sync> = Box::new(OpusPayloader::default());
+            let mut payloader: Box<dyn Payloader + Send + Sync> =
+                Box::new(OpusPayloader::default());
             let mut seq: u16 = rand::random();
             let mut last_ts: Option<u32> = None;
             let mut sent: u64 = 0;
@@ -830,7 +962,9 @@ impl ViewerSession {
             // 被拉高 → A/V 同步把整个画面拖慢数秒。钳制在 [real, real+40ms]。
             let mut audio_anchor: Option<(std::time::Instant, u32)> = None;
             while running.load(std::sync::atomic::Ordering::SeqCst) {
-                let Some(frame) = audio_rx.recv().await else { break };
+                let Some(frame) = audio_rx.recv().await else {
+                    break;
+                };
                 // OPUS 参数集帧（OpusHead）无需发送：WebRTC 用 SDP fmtp 描述参数
                 if frame.is_config {
                     continue;
@@ -847,7 +981,9 @@ impl ViewerSession {
                 let ts = {
                     let src_ts = ((frame.pts_us.saturating_mul(48)) / 1000) as u32;
                     let real_ts = match audio_anchor {
-                        Some((aw, at)) => at.wrapping_add(((aw.elapsed().as_micros() as u64) * 48 / 1000) as u32),
+                        Some((aw, at)) => {
+                            at.wrapping_add(((aw.elapsed().as_micros() as u64) * 48 / 1000) as u32)
+                        }
                         None => {
                             audio_anchor = Some((std::time::Instant::now(), src_ts));
                             src_ts
@@ -888,7 +1024,11 @@ impl ViewerSession {
                     seq = seq.wrapping_add(1);
                     match tokio::time::timeout(
                         Duration::from_millis(3000),
-                        audio_track.write_rtp_with_extensions_attributes(&pkt, &[], &Attributes::new()),
+                        audio_track.write_rtp_with_extensions_attributes(
+                            &pkt,
+                            &[],
+                            &Attributes::new(),
+                        ),
                     )
                     .await
                     {
@@ -1008,7 +1148,11 @@ async fn push_rtp(
     }
     if written == 0 && n > 0 {
         // SRTP 未就绪时 webrtc-rs 静默返回 Ok(0) 丢弃整包——连接初期窗口
-        debug!("rtp write returned 0 bytes (SRTP not ready?), frame {} bytes, {} packets", frame.data.len(), n);
+        debug!(
+            "rtp write returned 0 bytes (SRTP not ready?), frame {} bytes, {} packets",
+            frame.data.len(),
+            n
+        );
     }
     (true, written)
 }
@@ -1114,7 +1258,12 @@ async fn send_config_nalus(
         *seq = seq.wrapping_add(1);
     }
     if sent_any {
-        info!("config SPS/PPS sent as single NALUs: {} nalu(s), {} bytes, ts={}", nals.len(), d.len(), ts);
+        info!(
+            "config SPS/PPS sent as single NALUs: {} nalu(s), {} bytes, ts={}",
+            nals.len(),
+            d.len(),
+            ts
+        );
     }
     true
 }
@@ -1240,7 +1389,11 @@ fn verify_rtp_rebuild(frame: &VideoFrame, payloads: &[Bytes]) {
 /// DataChannel 控制消息协议（JSON）
 /// { "type": "tap"|"swipe"|"key"|"press"|"text"|"scroll"|"clipboard"|"start_app"|"rotate"|"back", ... }
 /// viewer 级消息：{"type":"reset_video"}（请求 IDR）、{"type":"audio","on":bool}（音频转发开关）
-async fn handle_control_msg(session: &Arc<ScrcpySession>, audio_on: &Arc<std::sync::atomic::AtomicBool>, data: &[u8]) -> anyhow::Result<()> {
+async fn handle_control_msg(
+    session: &Arc<ScrcpySession>,
+    audio_on: &Arc<std::sync::atomic::AtomicBool>,
+    data: &[u8],
+) -> anyhow::Result<()> {
     let msg: serde_json::Value = serde_json::from_slice(data)?;
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match t {
@@ -1346,7 +1499,8 @@ pub fn make_frame_queue(
     Arc<std::sync::atomic::AtomicBool>,
 ) {
     const QUEUE_CAP: usize = 256;
-    let queue: Arc<Mutex<VecDeque<VideoFrame>>> = Arc::new(Mutex::new(VecDeque::with_capacity(QUEUE_CAP)));
+    let queue: Arc<Mutex<VecDeque<VideoFrame>>> =
+        Arc::new(Mutex::new(VecDeque::with_capacity(QUEUE_CAP)));
     let queue2 = queue.clone();
     let notify = Arc::new(Notify::new());
     let notify2 = notify.clone();
@@ -1397,7 +1551,9 @@ pub fn make_frame_queue(
 }
 
 /// 订阅设备音频广播 → 转 mpsc 队列（每个 viewer 独立；满队列丢新帧，音频实时性优先）
-pub fn make_audio_queue(audio: broadcast::Sender<AudioFrame>) -> tokio::sync::mpsc::Receiver<AudioFrame> {
+pub fn make_audio_queue(
+    audio: broadcast::Sender<AudioFrame>,
+) -> tokio::sync::mpsc::Receiver<AudioFrame> {
     let (tx, rx) = tokio::sync::mpsc::channel(128);
     let mut sub = audio.subscribe();
     tokio::spawn(async move {
@@ -1456,7 +1612,14 @@ fn parse_opus_payload_type(sdp: &str) -> Option<u8> {
 /// 编码器输出质量探针：用 ffmpeg 解码"原始 H.264 帧（config + 本帧）"，做宏块网格
 /// 块效应检测（16px 规则网格边缘强度 vs 非边界基线）。ratio > 1.25 → 该帧是编码器
 /// 输出的低质量帧（块效应）。用于区分：编码器坏帧 vs 浏览器解码路径问题。
-fn probe_encoder_blockiness(ffmpeg_path: &str, cfg: Option<bytes::Bytes>, frame: &[u8], frame_no: u64, is_key: bool, size: usize) {
+fn probe_encoder_blockiness(
+    ffmpeg_path: &str,
+    cfg: Option<bytes::Bytes>,
+    frame: &[u8],
+    frame_no: u64,
+    is_key: bool,
+    size: usize,
+) {
     use std::io::Write;
     let dir = std::env::temp_dir();
     let h264_path = dir.join(format!("gamer-probe-{}.h264", std::process::id()));
@@ -1465,7 +1628,10 @@ fn probe_encoder_blockiness(ffmpeg_path: &str, cfg: Option<bytes::Bytes>, frame:
         data.extend_from_slice(c);
     }
     data.extend_from_slice(frame);
-    if std::fs::File::create(&h264_path).and_then(|mut f| f.write_all(&data)).is_err() {
+    if std::fs::File::create(&h264_path)
+        .and_then(|mut f| f.write_all(&data))
+        .is_err()
+    {
         return;
     }
     let out = std::process::Command::new(ffmpeg_path)
@@ -1480,10 +1646,15 @@ fn probe_encoder_blockiness(ffmpeg_path: &str, cfg: Option<bytes::Bytes>, frame:
     }
     let buf = &out.stdout;
     // 从解码输出大小推断分辨率（常见组合）
-    let (w, h) = [(1920usize, 1080usize), (1440, 2560), (1080, 2400), (1440, 3200)]
-        .into_iter()
-        .find(|&(w, h)| buf.len() >= w * h * 3)
-        .unwrap_or((0, 0));
+    let (w, h) = [
+        (1920usize, 1080usize),
+        (1440, 2560),
+        (1080, 2400),
+        (1440, 3200),
+    ]
+    .into_iter()
+    .find(|&(w, h)| buf.len() >= w * h * 3)
+    .unwrap_or((0, 0));
     if w == 0 || h == 0 {
         return;
     }
@@ -1547,6 +1718,9 @@ fn probe_encoder_blockiness(ffmpeg_path: &str, cfg: Option<bytes::Bytes>, frame:
     }
     let ratio = (edge_diff / edge_n as f64) / (base_diff / base_n as f64);
     if ratio > 1.25 {
-        warn!("ENCODER FRAME blockiness: frame_no={} key={} size={} ratio={:.2} {}x{}", frame_no, is_key, size, ratio, w, h);
+        warn!(
+            "ENCODER FRAME blockiness: frame_no={} key={} size={} ratio={:.2} {}x{}",
+            frame_no, is_key, size, ratio, w, h
+        );
     }
 }
