@@ -237,24 +237,6 @@ impl ScriptStore {
         Ok(None)
     }
 
-    /// 按模板名查找文件：本分区 tmpl → 其他分区 tmpl（模板放错分区时的兜底）
-    pub fn find_template(&self, pkg: &str, name: &str) -> Option<PathBuf> {
-        let own = self.tmpl_dir(pkg).join(name);
-        if own.is_file() {
-            return Some(own);
-        }
-        for p in self.partitions() {
-            if p == pkg {
-                continue;
-            }
-            let path = self.tmpl_dir(&p).join(name);
-            if path.is_file() {
-                return Some(path);
-            }
-        }
-        None
-    }
-
     /// 导出整分区快照 zip：yaml/ 全部脚本 + tmpl/ 全部模板 → zip 字节。
     /// 分区没有任何可导出文件时报错。返回（建议文件名, zip 字节）。
     pub fn export_partition(&self, pkg: &str) -> anyhow::Result<(String, Vec<u8>)> {

@@ -347,14 +347,6 @@ impl DeviceManager {
         Ok(())
     }
 
-    pub fn get(&self, id: &str) -> Option<parking_lot::RwLockReadGuard<'_, DeviceRuntime>> {
-        let map = self.devices.read();
-        // 直接返回 guard 需要特殊处理，这里简化
-        drop(map);
-        let _ = id;
-        None
-    }
-
     /// 获取设备运行时（克隆信息）
     pub fn snapshot(&self, id: &str) -> Option<(Device, DeviceStatus, Option<String>)> {
         let map = self.devices.read();

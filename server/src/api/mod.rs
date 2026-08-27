@@ -16,7 +16,6 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
@@ -68,7 +67,6 @@ pub fn build_router(
     shutdown: tokio::sync::watch::Sender<bool>,
 ) -> Router {
     let runner = Arc::new(Runner::new(
-        db.clone(),
         devices.clone(),
         viewers.clone(),
         scripts.clone(),

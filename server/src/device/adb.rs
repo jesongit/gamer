@@ -6,7 +6,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::config::Config;
@@ -28,8 +28,6 @@ impl Adb {
         let mut cmd = Command::new(&self.bin);
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn()?;
-        let mut out = String::new();
-        let mut err = String::new();
         let (mut so, mut se) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
         let (mut out_buf, mut err_buf) = (Vec::new(), Vec::new());
         // 超时必须 kill 子进程：泄漏的 adb.exe 会持有 USB transport，可能卡死后续 adb 调用。
@@ -50,8 +48,8 @@ impl Adb {
                 anyhow::bail!("adb timeout: {:?}", args);
             }
         }
-        out = String::from_utf8_lossy(&out_buf).into_owned();
-        err = String::from_utf8_lossy(&err_buf).into_owned();
+        let out = String::from_utf8_lossy(&out_buf).into_owned();
+        let err = String::from_utf8_lossy(&err_buf).into_owned();
         let status = child.wait().await?;
         if !status.success() && out.is_empty() {
             anyhow::bail!("adb {:?} failed: {}", args, err.trim());
@@ -274,13 +272,6 @@ impl Adb {
         Ok(())
     }
 
-    pub async fn disconnect(&self, addr: &str) -> anyhow::Result<()> {
-        let _ = self
-            .run(&["disconnect", addr], Duration::from_secs(10))
-            .await;
-        Ok(())
-    }
-
     /// 查询设备在线状态（serial 列表）
     pub async fn list_devices(&self) -> anyhow::Result<Vec<String>> {
         let out = self.run(&["devices"], Duration::from_secs(10)).await?;
@@ -346,20 +337,6 @@ impl Adb {
             Err(_) => false,
         }
     }
-
-    /// 获取设备属性（ro.product.model 等）
-    pub async fn getprop(&self, serial: &str, prop: &str) -> anyhow::Result<String> {
-        let out = self
-            .shell(serial, &format!("getprop {}", prop), Duration::from_secs(8))
-            .await?;
-        Ok(out.trim().to_string())
-    }
-}
-
-/// 向已连接的 TCP socket 写入全部数据
-pub async fn write_all(sock: &mut tokio::net::TcpStream, data: &[u8]) -> anyhow::Result<()> {
-    sock.write_all(data).await?;
-    Ok(())
 }
 
 /// 拼进 adb shell 命令的包名安全校验：仅 [A-Za-z0-9_.]，防注入；

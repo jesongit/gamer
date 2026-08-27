@@ -40,7 +40,10 @@ pub struct VideoFrame {
     pub pts_us: u64,
     pub is_config: bool,
     pub is_keyframe: bool,
-    /// 视频编码器输出是否为 Annex-B 格式（含 start code）
+    /// 视频编码器输出是否为 Annex-B 格式（含 start code）。当前所有生产方恒为
+    /// true（scrcpy 原始 H.264 流即 Annex-B），消费方（ffmpeg 截图解码、帧环
+    /// GOP 重放）隐式依赖该格式；暂无读取方，保留作为帧格式的显式契约
+    #[allow(dead_code)]
     pub annex_b: bool,
 }
 
@@ -54,8 +57,11 @@ pub struct AudioFrame {
     pub is_config: bool,
 }
 
-/// 视频流元信息
+/// 视频流元信息（scrcpy hello 包解析结果）：协商编解码参数的显式记录，
+/// 含设备端上报的原始设备名（区别于用户配置名）；当前仅随会话存于
+/// session.meta 供诊断/API 扩展用，暂无读取方
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct VideoMeta {
     pub codec_id: u32,
     pub width: u32,
@@ -63,6 +69,10 @@ pub struct VideoMeta {
     pub device_name: String,
 }
 
+/// scrcpy 视频流编解码标识 "h264"（hello 包首 4 字节，大端）。
+/// 非 H264 流不被支持；当前仅出现在 "video meta received" 日志里，
+/// 保留常量作为协议文档
+#[allow(dead_code)]
 pub const CODEC_H264: u32 = 0x68323634; // "h264"
 
 /// scrcpy 会话：一条已建立的设备连接
@@ -70,6 +80,9 @@ pub struct ScrcpySession {
     pub device: Device,
     /// adb 句柄（start_app 的 pidof 探测用；Clone 廉价，内部仅命令路径）
     pub adb: Adb,
+    /// hello 包协商参数（编解码/分辨率/设备名）：写一次不读，供诊断与
+    /// 后续 API 暴露协商信息扩展
+    #[allow(dead_code)]
     pub meta: Mutex<Option<VideoMeta>>,
     /// tokio Mutex：控制 socket 写入可能跨 await
     control: tokio::sync::Mutex<Option<TcpStream>>,
@@ -77,8 +90,6 @@ pub struct ScrcpySession {
     pub width: Mutex<u32>,
     pub height: Mutex<u32>,
     pub connected: Arc<std::sync::atomic::AtomicBool>,
-    /// 帧计数（用于 RTP 时间戳）
-    pub frame_seq: Mutex<u64>,
     /// 最近一帧视频的到达时间（unix 微秒；0 = 尚无帧），
     /// 供视频静默看门狗检测断流并自动重连
     pub last_frame_at: std::sync::atomic::AtomicU64,
@@ -288,7 +299,6 @@ impl ScrcpySession {
             width: Mutex::new(width),
             height: Mutex::new(height),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            frame_seq: Mutex::new(0),
             last_frame_at: std::sync::atomic::AtomicU64::new(0),
         });
 

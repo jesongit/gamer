@@ -51,12 +51,7 @@ impl Scheduler {
         viewers: crate::webrtc::ViewerMap,
         scripts: Arc<ScriptStore>,
     ) -> Self {
-        let runner = Arc::new(Runner::new(
-            db.clone(),
-            devices.clone(),
-            viewers,
-            scripts.clone(),
-        ));
+        let runner = Arc::new(Runner::new(devices.clone(), viewers, scripts.clone()));
         Self {
             db,
             devices,

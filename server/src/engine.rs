@@ -88,7 +88,6 @@ use tracing::warn;
 use crate::device::DeviceManager;
 use crate::matcher;
 use crate::scripts::ScriptStore;
-use crate::store::Db;
 use crate::webrtc::ViewerMap;
 
 /// find 未显式指定 timeout 时的默认超时毫秒数（30 分钟）
@@ -129,7 +128,6 @@ pub enum ScriptEvent {
 
 /// 运行器
 pub struct Runner {
-    pub db: Db,
     pub devices: Arc<DeviceManager>,
     /// 每设备活跃 viewer 注册表：脚本 tap/swipe/命中可视化事件推送用
     pub viewers: ViewerMap,
@@ -211,14 +209,8 @@ impl Ctx {
 }
 
 impl Runner {
-    pub fn new(
-        db: Db,
-        devices: Arc<DeviceManager>,
-        viewers: ViewerMap,
-        scripts: Arc<ScriptStore>,
-    ) -> Self {
+    pub fn new(devices: Arc<DeviceManager>, viewers: ViewerMap, scripts: Arc<ScriptStore>) -> Self {
         Self {
-            db,
             devices,
             viewers,
             scripts,
@@ -2647,7 +2639,7 @@ mod tests {
             viewers.clone(),
         ));
         let scripts = std::sync::Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
-        let runner = Runner::new(db, devices, viewers, scripts);
+        let runner = Runner::new(devices, viewers, scripts);
         let ctx = Ctx {
             device_id: "test-dev".into(),
             script_id: "com.test/t.yaml".into(),

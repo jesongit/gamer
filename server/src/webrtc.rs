@@ -67,8 +67,6 @@ pub struct ViewerSession {
     pub last_serve: Arc<std::sync::atomic::AtomicI64>,
     /// 本地 answer SDP（协商完成后保存，避免 async 上下文 block_on）
     pub answer: RTCSessionDescription,
-    /// 协商后的 H264 payload type
-    pub payload_type: u8,
     /// peer Failed/Closed 通知：ws.rs 收到后立即退出 ws 循环、释放 viewer
     /// （浏览器 TCP 断开时 axum socket.next() 可能不返回，导致 viewer 泄漏——
     /// 泄漏的 mDNS 实例会让后续 ICE 协商失败 → 黑屏）
@@ -224,7 +222,7 @@ impl ViewerSession {
         // peer 是否处于 Connected：Disconnected（ICE 抖动）期间 pusher 跳过发送但不退出
         let peer_connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let peer_connected2 = peer_connected.clone();
-        let (conn_tx, mut conn_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let (conn_tx, conn_rx) = tokio::sync::mpsc::channel::<()>(1);
         let conn_tx2 = conn_tx.clone();
         // peer 死亡通知（Failed/Closed）：ws.rs 据此退出 ws 循环，释放 viewer（mDNS 等）
         let (peer_closed_tx, peer_closed_rx) = tokio::sync::watch::channel(false);
@@ -313,7 +311,6 @@ impl ViewerSession {
             }))),
             last_serve: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             answer: answer_sdp,
-            payload_type,
             peer_closed_rx,
             control_dc,
             session: session.clone(),
@@ -411,14 +408,9 @@ impl ViewerSession {
             let mut seq: u16 = rand::random();
             let mut last_rtp_ts = 0u32;
             let mut frame_no = 0u64;
-            let mut sent_packets = 0u64;
-            let mut sent_bytes = 0u64;
             let mut last_pts: Option<u64> = None;
             // 最近成功发送的一帧（静止补帧用）
             let mut last_sent: Option<(VideoFrame, u32)> = None;
-            // 上次成功发送的时刻（动态时间戳下限用：ts 增量 ≥ 真实发送耗时，
-            // 防止帧大/处理慢时 RTP 时间戳超前于实际发送 → 浏览器 jitter buffer 欠账卡顿）
-            let mut last_tx: Option<std::time::Instant> = None;
             // 真实时间锚点（(墙钟, 对应 RTP ts)）：媒体时钟的绝对基准，首帧建立。
             // 设备 PTS 快漂（实测 ~26%）时靠它把 ts 钳制在墙钟附近（见发送循环）
             let mut ts_anchor: Option<(std::time::Instant, u32)> = None;
@@ -503,7 +495,6 @@ impl ViewerSession {
                         }
                         last_rtp_ts = ts;
                         last_sent = Some((f.clone(), ts));
-                        last_tx = Some(std::time::Instant::now());
                         sent += 1;
                     }
                     if let Some(b) = base {
@@ -575,7 +566,6 @@ impl ViewerSession {
             // 窗口内禁止静止补帧（见取帧/补帧处注释），IDR 发送时复位。
             let mut pending_config = false;
             let mut drops_broken = 0u64;
-            let mut drops_wait = 0u64;
             let mut drops_to_key = 0u64;
             // 断链清队后主动请求 IDR（锁内置位，锁外 await——MutexGuard 不能跨
             // await 存活），限频 2s 防编码器重启风暴
@@ -641,7 +631,6 @@ impl ViewerSession {
                                 q.drain(..ki); // 关键帧之前的 P 帧来自断链段，丢弃
                                 to_send = q.drain(..).collect();
                             } else {
-                                drops_wait += 1;
                                 q.clear();
                             }
                         } else {
@@ -772,7 +761,6 @@ impl ViewerSession {
                             last_serve.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                             *last_ts.lock() = ts;
                             last_rtp_ts = ts;
-                            last_tx = Some(std::time::Instant::now());
                         }
                     }
                     continue;
@@ -918,8 +906,6 @@ impl ViewerSession {
                     }
                     send_time_us += t_send.elapsed().as_micros() as u64;
                     send_samples += 1;
-                    sent_packets += 1;
-                    sent_bytes += frame.data.len() as u64;
                     // 诊断：实时推帧日志（每 300 帧，含平均 RTP 发送耗时与队列深度）
                     if frame_no % 300 == 1 {
                         let avg = if send_samples > 0 {
@@ -932,7 +918,6 @@ impl ViewerSession {
                         send_samples = 0;
                     }
                     last_sent = Some((frame, ts));
-                    last_tx = Some(std::time::Instant::now());
                 }
             }
             let _ = rtp_sender.stop().await;
