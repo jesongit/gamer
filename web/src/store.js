@@ -1,8 +1,8 @@
-// 轻量全局状态
+// 轻量全局状态（鉴权会话在 ./auth.js：Cookie 会话只存内存态，
+// 不再有 localStorage 伪 token；authed 判定以 session.username 为准）
 import { reactive, ref } from 'vue'
 
 export const store = reactive({
-  authed: localStorage.getItem('gb_token') === 'demo',
   deviceId: null,           // 当前控制的设备
   running: false,           // 当前设备脚本运行状态
   runScript: null,          // 正在运行的脚本名
@@ -10,30 +10,6 @@ export const store = reactive({
   runStep: '',              // 当前步骤描述
   runProgress: 0,           // 0-100
 })
-
-export function login(user, pass) {
-  return new Promise((resolve, reject) => {
-    // 通过 API 登录
-    fetch('/api/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user, password: pass })
-    }).then(r => {
-      if (r.ok) {
-        localStorage.setItem('gb_token', 'demo')
-        store.authed = true
-        resolve(true)
-      } else {
-        resolve(false)
-      }
-    }).catch(() => resolve(false))
-  })
-}
-
-export function logout() {
-  localStorage.removeItem('gb_token')
-  store.authed = false
-}
 
 // 简易 toast
 export function useToast() {

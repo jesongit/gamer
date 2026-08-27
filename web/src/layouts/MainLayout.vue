@@ -49,7 +49,8 @@
             <button class="run-stop" title="停止脚本" @click="stopRunning">■</button>
           </div>
           <router-link to="/console" class="btn btn-sm" :class="{ 'btn-primary': !store.running }">进入控制台</router-link>
-          <button class="btn btn-sm btn-ghost" @click="onLogout">退出</button>
+          <span v-if="session.username" class="tb-user" :title="`当前登录：${session.username}`">👤 {{ session.username }}</span>
+          <button class="btn btn-sm btn-ghost" @click="onLogout">退出登录</button>
         </div>
       </header>
 
@@ -62,11 +63,9 @@
 
 <script setup>
 import { computed, ref, provide, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
-import { store, logout, devicesData, tasksData } from '../store'
+import { store, devicesData, tasksData } from '../store'
+import { session, doLogout } from '../auth'
 import { api } from '../api'
-
-const router = useRouter()
 const navs = [
   { path: '/console', name: '投屏控制', icon: '🖥️' },
   { path: '/templates', name: '模板管理', icon: '🖼️' },
@@ -99,9 +98,9 @@ onMounted(() => {
   api.listTasks().then(t => { tasksData.value = t }).catch(() => {})
 })
 
-function onLogout() {
-  logout()
-  router.push('/login')
+// 退出登录：POST /api/logout（幂等，成败均清本地态）→ doLogout 内部落回 #/login
+async function onLogout() {
+  await doLogout()
 }
 
 /** 顶栏芯片上的停止按钮：任何页面都能手动停止当前脚本 */
@@ -175,6 +174,7 @@ function stopRunning() {
 .tb-device { display: flex; align-items: center; gap: 8px; color: var(--text-1); text-decoration: none; font-size: 13px; }
 .tb-device.on { color: var(--text-0); font-weight: 600; }
 .tb-right { display: flex; align-items: center; gap: 10px; }
+.tb-user { color: var(--text-2); font-size: 12px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .run-chip {
   display: flex; align-items: center; gap: 8px; padding: 5px 12px;

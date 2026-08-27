@@ -1,10 +1,25 @@
 // 后端 API 封装（Rust 服务端）
+// 全站鉴权拦截（阶段 2）：除登录/探测/退出三个豁免端点外，任何响应 401 →
+// 清本地缓存态并跳 #/login（保留回跳参数），各视图不改调用方式。
+import { handleUnauthorized } from './auth'
+
 const BASE = ''
+
+// 认证三端点自身管理 401 语义，不走全站拦截（否则登录失败会被误跳转/死循环）
+function authExempt(url) {
+  return url.startsWith('/api/login') || url.startsWith('/api/session') || url.startsWith('/api/logout')
+}
 
 async function errMsg(r) {
   let msg = `HTTP ${r.status}`
   try { const j = await r.json(); if (j.error) msg = j.error } catch (e) {}
   return msg
+}
+
+async function readResult(r) {
+  const ct = r.headers.get('content-type') || ''
+  if (ct.includes('application/json')) return r.json()
+  return r
 }
 
 async function req(method, path, body) {
@@ -14,15 +29,18 @@ async function req(method, path, body) {
     opt.body = typeof body === 'string' ? body : JSON.stringify(body)
   }
   const r = await fetch(BASE + path, opt)
-  if (!r.ok) throw new Error(await errMsg(r))
-  const ct = r.headers.get('content-type') || ''
-  if (ct.includes('application/json')) return r.json()
-  return r
+  if (!r.ok) {
+    if (r.status === 401 && !authExempt(path)) {
+      handleUnauthorized()                    // 会话过期/未认证：清态 + 跳登录
+      throw new Error(await errMsg(r))        // 调用方 catch 里仍能拿到原因
+    }
+    throw new Error(await errMsg(r))
+  }
+  return readResult(r)
 }
 
 export const api = {
-  // 认证
-  login: (user, password) => req('POST', '/api/login', { user, password }),
+  // 登录/会话/退出见 src/auth.js（阶段 2 Cookie 会话；本封装不持有认证端点）
 
   // 设备
   listDevices: () => req('GET', '/api/devices'),
@@ -73,7 +91,10 @@ export const api = {
   // 导出整分区快照 zip（yaml/ + tmpl/ 全量，?pkg= 指定分区）→ { blob, filename }
   exportPartition: async (pkg) => {
     const r = await fetch(`/api/scripts/export?pkg=${encodeURIComponent(pkg)}`)
-    if (!r.ok) throw new Error(await errMsg(r))
+    if (!r.ok) {
+      if (r.status === 401) handleUnauthorized()
+      throw new Error(await errMsg(r))
+    }
     const cd = r.headers.get('content-disposition') || ''
     let filename = ''
     const m = cd.match(/filename\*=UTF-8''([^;\s]+)/) || cd.match(/filename="?([^";\s]+)"?/)
@@ -87,7 +108,10 @@ export const api = {
       headers: { 'Content-Type': 'application/zip' },
       body: file
     })
-    if (!r.ok) throw new Error(await errMsg(r))
+    if (!r.ok) {
+      if (r.status === 401) handleUnauthorized()
+      throw new Error(await errMsg(r))
+    }
     return r.json()
   },
 
