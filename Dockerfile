@@ -59,6 +59,9 @@ WORKDIR /app
 COPY --from=rust-builder /build/gamer-server /usr/local/bin/gamer-server
 COPY --from=web-builder /web/dist /app/web-dist
 COPY server/assets/scrcpy-server.jar /app/assets/scrcpy-server.jar
+# 服务端不再自建 data 目录（配置加载即校验路径），预建以便裸 docker run 可直接启动；
+# compose 场景该目录被 ./server/data 绑定挂载覆盖
+RUN mkdir -p /app/data
 EXPOSE 8443
 # 容器视角固定配置路径；镜像不内置 config.toml——缺省时代码默认值生效
 # （端口 8443 / 数据目录 ./data→/app/data），自定义配置挂载到此路径即可
