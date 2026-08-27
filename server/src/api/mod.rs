@@ -451,8 +451,12 @@ struct LoginReq {
 async fn api_login(
     State(st): State<AppState>,
     Extension(ip): Extension<auth::IpKey>,
+    headers: HeaderMap,
     Json(req): Json<LoginReq>,
 ) -> Response {
+    if !auth::origin_allows_headers(&headers) {
+        return err_response(StatusCode::FORBIDDEN, "forbidden_origin");
+    }
     // 形状粗校验：缺字段/超长直接 400，不进限流与凭据比对
     if req.username.is_empty()
         || req.password.is_empty()
@@ -496,6 +500,9 @@ async fn api_session(State(st): State<AppState>, headers: HeaderMap) -> Response
 
 /// 登出：销毁当前会话 + 下发过期 Cookie；无会话时同样 204（幂等）
 async fn api_logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if !auth::origin_allows_headers(&headers) {
+        return err_response(StatusCode::FORBIDDEN, "forbidden_origin");
+    }
     if let Some(sid) = auth::AuthState::extract_sid(&headers) {
         st.auth.destroy(&sid);
     }
@@ -1694,6 +1701,7 @@ mod sec_tests {
     use super::*;
     use axum::extract::ConnectInfo;
     use axum::http::{Request as HttpRequest, Response as HttpResponse};
+    use std::io::Write as _;
     use std::net::SocketAddr;
     use tower::ServiceExt;
 
@@ -1844,6 +1852,23 @@ mod sec_tests {
         }
     }
 
+    fn req_bytes(
+        method: &str,
+        uri: &str,
+        remote: Option<&str>,
+        headers: &[(String, String)],
+        body: Vec<u8>,
+    ) -> HttpRequest<Body> {
+        let mut b = HttpRequest::builder().method(method).uri(uri);
+        if let Some(r) = remote {
+            b = b.extension(ConnectInfo::<SocketAddr>(r.parse().unwrap()));
+        }
+        for (k, v) in headers {
+            b = b.header(k.as_str(), v);
+        }
+        b.body(Body::from(body)).unwrap()
+    }
+
     async fn send(app: &Router, r: HttpRequest<Body>) -> HttpResponse<Body> {
         app.clone().oneshot(r).await.unwrap()
     }
@@ -1873,6 +1898,50 @@ mod sec_tests {
 
     const JSON_CT: &str = "application/json";
     const ADMIN_JSON: &str = r#"{"username":"admin","password":"admin123"}"#;
+
+    fn craft_zip(entries: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, data) in entries {
+                zw.start_file(name, opts).unwrap();
+                zw.write_all(&data).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    fn pixel_bomb_png(width: u32, height: u32) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc: u32 = 0xFFFF_FFFF;
+            for &b in data {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+        let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        let ihdr = [
+            13u32.to_be_bytes().as_slice(),
+            b"IHDR".as_slice(),
+            &width.to_be_bytes()[..],
+            &height.to_be_bytes()[..],
+            &[8u8, 0, 0, 0, 0],
+        ]
+        .concat();
+        out.extend_from_slice(&ihdr);
+        out.extend_from_slice(&crc32(&ihdr[4..]).to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(b"IEND");
+        out.extend_from_slice(&crc32(b"IEND").to_be_bytes());
+        out
+    }
 
     async fn send_json_login(app: &Router, remote: Option<&str>, body: &str) -> HttpResponse<Body> {
         send(
@@ -1930,6 +1999,29 @@ mod sec_tests {
         // 进程仍存活：后续请求正常应答
         let alive = send(&t.app, req("GET", "/health/live", None, &[], None)).await;
         assert_eq!(alive.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_high_risk_endpoints_are_all_401() {
+        let t = build_app(
+            "401highrisk",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let cases = [
+            ("POST", "/api/shutdown"),
+            ("POST", "/api/devices/missing/control"),
+            ("POST", "/api/scripts/missing/run"),
+            ("POST", "/api/scripts/missing/stop"),
+            ("DELETE", "/api/templates/missing?pkg=com.test.app"),
+            ("POST", "/api/scripts/import?pkg=com.test.app"),
+        ];
+        for (method, uri) in cases {
+            let resp = send(&t.app, req(method, uri, None, &[], None)).await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+            let body = json_body(resp).await;
+            assert_eq!(body["error"], "unauthorized", "{method} {uri}");
+        }
     }
 
     #[tokio::test]
@@ -2131,6 +2223,59 @@ mod sec_tests {
     }
 
     #[tokio::test]
+    async fn cross_origin_login_and_logout_are_rejected_without_state_change() {
+        let t = build_app(
+            "csrf-public",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let evil = [
+            (header::ORIGIN.to_string(), "https://evil.example".into()),
+            (header::HOST.to_string(), "localhost:8443".into()),
+            (header::CONTENT_TYPE.to_string(), JSON_CT.into()),
+        ];
+        let resp = send(
+            &t.app,
+            req("POST", "/api/login", None, &evil, Some(ADMIN_JSON.into())),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let cookie = cookie_of(&login(&t.app).await);
+        let sid = first_cookie_pair(&cookie);
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/logout",
+                None,
+                &[
+                    (header::COOKIE.to_string(), sid.clone()),
+                    (header::ORIGIN.to_string(), "https://evil.example".into()),
+                    (header::HOST.to_string(), "localhost:8443".into()),
+                ],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // 被拒绝的跨源 logout 不能销毁会话。
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/session",
+                None,
+                &[(header::COOKIE.to_string(), sid)],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn cross_origin_state_change_is_403_but_matching_origin_passes() {
         let t = build_app(
             "origin",
@@ -2258,6 +2403,53 @@ mod sec_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn cross_origin_high_risk_endpoints_are_all_403_after_authentication() {
+        let t = build_app(
+            "403highrisk",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+        let cases = [
+            ("POST", "/api/shutdown", None),
+            (
+                "POST",
+                "/api/devices/missing/control",
+                Some(r#"{"type":"home"}"#),
+            ),
+            (
+                "POST",
+                "/api/scripts/missing/run",
+                Some(r#"{"device_id":"d1"}"#),
+            ),
+            ("POST", "/api/scripts/missing/stop", None),
+            ("DELETE", "/api/templates/missing?pkg=com.test.app", None),
+            (
+                "POST",
+                "/api/scripts/import?pkg=com.test.app",
+                Some("not-a-zip"),
+            ),
+        ];
+        for (method, uri, body) in cases {
+            let mut headers = vec![
+                (header::COOKIE.to_string(), sid.clone()),
+                (header::ORIGIN.to_string(), "https://evil.example".into()),
+                (header::HOST.to_string(), "localhost:8443".into()),
+            ];
+            if body.is_some() {
+                headers.push((header::CONTENT_TYPE.to_string(), JSON_CT.into()));
+            }
+            let resp = send(
+                &t.app,
+                req(method, uri, None, &headers, body.map(str::to_string)),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+            assert_eq!(json_body(resp).await["error"], "forbidden_origin");
+        }
     }
 
     #[tokio::test]
@@ -2493,6 +2685,140 @@ mod sec_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn template_upload_rejects_byte_and_pixel_bombs_with_4xx() {
+        let t = build_app(
+            "tmpllimits",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+        let headers = |cookie: String| {
+            vec![
+                (header::COOKIE.to_string(), cookie),
+                (header::CONTENT_TYPE.to_string(), JSON_CT.into()),
+            ]
+        };
+
+        let bomb_b64 =
+            base64::engine::general_purpose::STANDARD.encode(pixel_bomb_png(30_000, 30_000));
+        let body = serde_json::json!({
+            "name": "bomb.png",
+            "pkg": "com.test.app",
+            "data_b64": bomb_b64,
+        })
+        .to_string();
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/templates",
+                None,
+                &headers(sid.clone()),
+                Some(body),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // 构造超过原始模板字节上限的 base64，但保持请求体低于 16MiB 路由上限，
+        // 断言 API 在解码前直接以 400 拒绝，不分配/解码图片。
+        let too_large_b64 = "A".repeat((matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 2) * 4);
+        let body = serde_json::json!({
+            "name": "large.png",
+            "pkg": "com.test.app",
+            "data_b64": too_large_b64,
+        })
+        .to_string();
+        let resp = send(
+            &t.app,
+            req("POST", "/api/templates", None, &headers(sid), Some(body)),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn zip_import_rejects_slip_duplicate_and_pixel_bomb_with_4xx() {
+        let t = build_app(
+            "ziplimits",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+        let headers = |cookie: String| {
+            vec![
+                (header::COOKIE.to_string(), cookie),
+                (header::CONTENT_TYPE.to_string(), "application/zip".into()),
+            ]
+        };
+        let cases = [
+            craft_zip(vec![("yaml/../escape.yaml", b"steps: []\n".to_vec())]),
+            craft_zip(vec![
+                ("yaml/one.yaml", b"steps: []\n".to_vec()),
+                ("yaml/ONE.yaml", b"steps: []\n".to_vec()),
+            ]),
+            craft_zip(vec![("tmpl/bomb.png", pixel_bomb_png(30_000, 30_000))]),
+        ];
+        for zip_bytes in cases {
+            let resp = send(
+                &t.app,
+                req_bytes(
+                    "POST",
+                    "/api/scripts/import?pkg=com.test.app&confirm=1",
+                    None,
+                    &headers(sid.clone()),
+                    zip_bytes,
+                ),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn request_body_limits_reject_oversize_json_and_zip_with_413() {
+        let t = build_app(
+            "bodylimits",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+        let json_headers = [
+            (header::COOKIE.to_string(), sid.clone()),
+            (header::CONTENT_TYPE.to_string(), JSON_CT.into()),
+        ];
+        let resp = send(
+            &t.app,
+            req_bytes(
+                "POST",
+                "/api/devices",
+                None,
+                &json_headers,
+                vec![b'x'; BODY_LIMIT_JSON + 1],
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let zip_headers = [
+            (header::COOKIE.to_string(), sid),
+            (header::CONTENT_TYPE.to_string(), "application/zip".into()),
+        ];
+        let resp = send(
+            &t.app,
+            req_bytes(
+                "POST",
+                "/api/scripts/import?pkg=com.test.app",
+                None,
+                &zip_headers,
+                vec![0u8; BODY_LIMIT_ZIP_IMPORT + 1],
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]

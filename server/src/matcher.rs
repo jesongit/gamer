@@ -76,8 +76,7 @@ fn cached_template_source(bytes: &[u8]) -> anyhow::Result<([u8; 32], Arc<Dynamic
     let key = template_key(bytes);
     let mut cache = template_cache().lock();
     if !cache.entries.contains_key(&key) {
-        let source = image::load_from_memory(bytes)
-            .map_err(|e| anyhow::anyhow!("解析模板失败 ({} bytes): {}", bytes.len(), e))?;
+        let source = decode_image_limited(bytes, TEMPLATE_MAX_INPUT_BYTES, "模板")?;
         if cache.entries.len() >= TEMPLATE_CACHE_CAPACITY {
             if let Some(evicted) = cache.entries.keys().next().copied() {
                 cache.entries.remove(&evicted);
@@ -154,9 +153,7 @@ fn cached_prepared_template(
 }
 
 pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>> {
-    let screen = image::load_from_memory(&req.screen_png)
-        .map_err(|e| anyhow::anyhow!("解析截图失败 ({} bytes): {}", req.screen_png.len(), e))?
-        .to_rgb8();
+    let screen = decode_image_limited(&req.screen_png, SCREEN_MAX_INPUT_BYTES, "截图")?.to_rgb8();
     let (template_key, template_source) = cached_template_source(&req.template_png)?;
 
     let (sw, sh) = (screen.width(), screen.height());
@@ -366,39 +363,7 @@ fn to_gray(img: &DynamicImage) -> GrayImage {
 /// （单边尺寸/总分配）+ 解码后像素总量复核——三层挡"像素炸弹"
 /// （小体积声明超大分辨率，数十倍放大内存占用）。超限报清晰 4xx 文案。
 pub fn reencode_template_gray_png(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-    if bytes.len() > TEMPLATE_MAX_INPUT_BYTES {
-        anyhow::bail!(
-            "图片 {} 字节超过上传上限 {} MiB，请裁剪后再试",
-            bytes.len(),
-            TEMPLATE_MAX_INPUT_BYTES / (1024 * 1024)
-        );
-    }
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(TEMPLATE_MAX_DIM);
-    limits.max_image_height = Some(TEMPLATE_MAX_DIM);
-    // 灰度/RGB/RGBA 多通道叠加的内存上界（≈8 字节/像素）
-    limits.max_alloc = Some(TEMPLATE_MAX_PIXELS * 8);
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
-    reader.limits(limits);
-    let img = reader
-        .with_guessed_format()
-        .map_err(|e| anyhow::anyhow!("识别图片格式失败: {e}"))?
-        .decode()
-        .map_err(|e| match e {
-            image::ImageError::Limits(_) => anyhow::anyhow!(
-                "图片尺寸或内存占用超限（像素预算 {TEMPLATE_MAX_PIXELS_MB} MP / 单边 ≤{TEMPLATE_MAX_DIM}px），疑似像素炸弹，已拒绝"
-            ),
-            other => anyhow::anyhow!("不是有效的图片: {}", other),
-        })?;
-    if img.width() as u64 * img.height() as u64 > TEMPLATE_MAX_PIXELS {
-        anyhow::bail!(
-            "图片 {}x{} 共 {:.1} MP 超过像素预算 {} MP",
-            img.width(),
-            img.height(),
-            img.width() as f64 * img.height() as f64 / 1_000_000.0,
-            TEMPLATE_MAX_PIXELS_MB
-        );
-    }
+    let img = decode_image_limited(bytes, TEMPLATE_MAX_INPUT_BYTES, "图片")?;
     let gray = img.to_luma8();
     let mut out = Vec::new();
     let enc = image::codecs::png::PngEncoder::new_with_quality(
@@ -412,9 +377,65 @@ pub fn reencode_template_gray_png(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// 在所有图片解码入口统一执行字节数、单边尺寸、解码分配和像素总量限制。
+/// `image::load_from_memory` 本身不带这些业务上限，不能直接用于来自设备、ZIP
+/// 或 HTTP 的不可信字节。
+fn decode_image_limited(
+    bytes: &[u8],
+    max_input_bytes: usize,
+    label: &str,
+) -> anyhow::Result<DynamicImage> {
+    if bytes.len() > max_input_bytes {
+        let limit_label = if label == "图片" || label == "模板" {
+            "上传上限"
+        } else {
+            "输入上限"
+        };
+        anyhow::bail!(
+            "{} {} 字节超过{} {} MiB",
+            label,
+            bytes.len(),
+            limit_label,
+            max_input_bytes / (1024 * 1024)
+        );
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(TEMPLATE_MAX_DIM);
+    limits.max_image_height = Some(TEMPLATE_MAX_DIM);
+    // 灰度/RGB/RGBA 多通道叠加的内存上界（≈8 字节/像素）
+    limits.max_alloc = Some(TEMPLATE_MAX_PIXELS * 8);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+    reader.limits(limits);
+    let img = reader
+        .with_guessed_format()
+        .map_err(|e| anyhow::anyhow!("识别{}格式失败: {e}", label))?
+        .decode()
+        .map_err(|e| match e {
+            image::ImageError::Limits(_) => anyhow::anyhow!(
+                "{}尺寸或内存占用超限（像素预算 {TEMPLATE_MAX_PIXELS_MB} MP / 单边 ≤{TEMPLATE_MAX_DIM}px），疑似像素炸弹，已拒绝",
+                label
+            ),
+            other => anyhow::anyhow!("不是有效的{}: {}", label, other),
+        })?;
+    if img.width() as u64 * img.height() as u64 > TEMPLATE_MAX_PIXELS {
+        anyhow::bail!(
+            "{} {}x{} 共 {:.1} MP 超过像素预算 {} MP",
+            label,
+            img.width(),
+            img.height(),
+            img.width() as f64 * img.height() as f64 / 1_000_000.0,
+            TEMPLATE_MAX_PIXELS_MB
+        );
+    }
+    Ok(img)
+}
+
 /// 模板上传原始字节上限（10MiB；ZIP 导入内模板条目同一口径；api 层 base64
 /// 护栏同源于此值）
 pub(crate) const TEMPLATE_MAX_INPUT_BYTES: usize = 10 * 1024 * 1024;
+/// 截图输入上限：设备截图通常大于模板，但仍必须有字节硬限，避免不可信
+/// 响应体在解码前无限增长。
+const SCREEN_MAX_INPUT_BYTES: usize = 32 * 1024 * 1024;
 /// 像素总量预算 32MP（典型截图 1080p≈2MP、4K≈8.3MP，富余 3 倍以上）
 const TEMPLATE_MAX_PIXELS: u64 = 32_000_000;
 /// 像素预算换算的展示值（MP）
@@ -518,6 +539,40 @@ mod tests {
 
         // ④ 无效数据仍然报原本的"不是有效的图片"
         assert!(reencode_template_gray_png(b"not an image").is_err());
+    }
+
+    #[test]
+    fn match_template_applies_decode_limits_to_screen_and_template() {
+        let mut screen = RgbImage::new(10, 10);
+        for (_, _, p) in screen.enumerate_pixels_mut() {
+            *p = Rgb([10, 20, 30]);
+        }
+        let mut screen_png = Vec::new();
+        screen
+            .write_to(
+                &mut std::io::Cursor::new(&mut screen_png),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+
+        let oversized_template = vec![0u8; TEMPLATE_MAX_INPUT_BYTES + 1];
+        let err = match_template(&MatchRequest {
+            screen_png: screen_png.clone(),
+            template_png: oversized_template,
+            threshold: None,
+            region: None,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("模板"), "{}", err);
+
+        let err = match_template(&MatchRequest {
+            screen_png: pixel_bomb_png(30_000, 30_000),
+            template_png: screen_png,
+            threshold: None,
+            region: None,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("截图"), "{}", err);
     }
 
     #[test]

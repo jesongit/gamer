@@ -432,6 +432,7 @@ impl ScriptStore {
         }
         // 全部解析到内存（zip-slip 防护 + 布局校验 + 实际读取计数），无错才考虑落盘
         let mut actual_total: usize = 0;
+        let mut materialized_total: usize = 0;
         let mut seen_paths = std::collections::HashSet::new();
         let mut files: Vec<(String, PathBuf, Vec<u8>)> = Vec::new();
         for i in 0..archive.len() {
@@ -472,7 +473,7 @@ impl ScriptStore {
                 }
                 _ => anyhow::bail!("包内路径需为 yaml/<脚本> 或 tmpl/<模板>: {}", f.name()),
             };
-            if !seen_paths.insert(zip_path.clone()) {
+            if !seen_paths.insert(zip_path.to_ascii_lowercase()) {
                 anyhow::bail!("包内存在重复文件: {zip_path}");
             }
             // 双保险之实际读取计数：按 cap 截读，多读 1 字节即暴露超限/声明造假
@@ -489,6 +490,28 @@ impl ScriptStore {
             if actual_total > IMPORT_MAX_TOTAL_BYTES {
                 anyhow::bail!(
                     "总解压量超过上限（>{} MiB），中止导入",
+                    IMPORT_MAX_TOTAL_BYTES / (1024 * 1024)
+                );
+            }
+            // ZIP 内模板不能绕过 HTTP 上传的图片安全闸门：在任何落盘前
+            // 用同一套字节/尺寸/像素限额解码，并统一归一化为灰度 PNG。
+            // 否则一个 10MiB 以内的像素炸弹会在后续匹配时才触发高额分配。
+            let buf = if zip_path.starts_with("tmpl/") {
+                crate::matcher::reencode_template_gray_png(&buf)
+                    .map_err(|e| anyhow::anyhow!("{zip_path} 模板校验失败: {e}"))?
+            } else {
+                buf
+            };
+            if buf.len() > cap {
+                anyhow::bail!(
+                    "{zip_path} 归一化后 {bytes} 字节超限（该类文件上限 {cap_display_mib} MiB）",
+                    bytes = buf.len()
+                );
+            }
+            materialized_total = materialized_total.saturating_add(buf.len());
+            if materialized_total > IMPORT_MAX_TOTAL_BYTES {
+                anyhow::bail!(
+                    "归一化后总数据量超过上限（>{} MiB），中止导入",
                     IMPORT_MAX_TOTAL_BYTES / (1024 * 1024)
                 );
             }
@@ -809,6 +832,50 @@ mod tests {
         buf
     }
 
+    fn valid_template_png() -> Vec<u8> {
+        let mut img = image::GrayImage::new(8, 8);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            p.0[0] = if (x + y) % 2 == 0 { 32 } else { 224 };
+        }
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    fn pixel_bomb_png(width: u32, height: u32) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc: u32 = 0xFFFF_FFFF;
+            for &b in data {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+        let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        let ihdr = [
+            13u32.to_be_bytes().as_slice(),
+            b"IHDR".as_slice(),
+            &width.to_be_bytes()[..],
+            &height.to_be_bytes()[..],
+            &[8u8, 0, 0, 0, 0],
+        ]
+        .concat();
+        out.extend_from_slice(&ihdr);
+        out.extend_from_slice(&crc32(&ihdr[4..]).to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
+        out.extend_from_slice(b"IEND");
+        out.extend_from_slice(&crc32(b"IEND").to_be_bytes());
+        out
+    }
+
     fn expect_import_err(store: &ScriptStore, zip_bytes: &[u8], marker: &str, context: &str) {
         let err = store.import(zip_bytes, "com.test.app", false).unwrap_err();
         let msg = err.to_string();
@@ -865,7 +932,7 @@ mod tests {
         let (store, dir) = temp_store("happy");
         let z = craft_zip(vec![
             ("yaml/main.yaml".into(), b"steps:\n  - log ok\n".to_vec()),
-            ("tmpl/a#0_0_10_10.png".into(), vec![7u8; 64]),
+            ("tmpl/a#0_0_10_10.png".into(), valid_template_png()),
         ]);
         let rep = store.import(&z, "com.test.app", true).unwrap();
         assert_eq!(rep.imported.len(), 2);
@@ -877,5 +944,14 @@ mod tests {
         let rep2 = store.import(&z, "com.test.app", true).unwrap();
         assert_eq!(rep2.replaced.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_rejects_template_pixel_bomb_before_commit() {
+        let (store, dir) = temp_store("tmplpixelbomb");
+        let bomb = pixel_bomb_png(30_000, 30_000);
+        let z = craft_zip(vec![("tmpl/bomb.png".into(), bomb)]);
+        expect_import_err(&store, &z, "像素", "ZIP 模板像素炸弹应在落盘前拒绝");
+        assert!(!dir.join("com.test.app/tmpl/bomb.png").exists());
     }
 }

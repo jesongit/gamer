@@ -64,6 +64,9 @@ pub enum Credential {
     Argon2(String),
     /// 兼容旧明文 password 字段（默认 admin/admin123）；成功登录后仅在内存中升级
     Plain(String),
+    /// 凭据配置非法或生产模式没有强凭据时的 fail-closed 状态。
+    /// 不携带原始配置内容，避免误把口令/哈希带入调试输出。
+    Unavailable,
 }
 
 /// 解析 Argon2id PHC 或旧版 `sha256$salt$hex` 口令哈希格式。
@@ -247,6 +250,7 @@ impl AuthState {
             Credential::EnvPassword(_) => "env:GAMER_ADMIN_PASSWORD",
             Credential::Hash { .. } | Credential::Argon2(_) => "config:password_hash",
             Credential::Plain(_) => "config:password(legacy plain)",
+            Credential::Unavailable => "unavailable:invalid-or-missing-credential",
         }
     }
 
@@ -275,6 +279,7 @@ impl AuthState {
                 m.update(input.as_bytes());
                 ct_eq(&m.finalize(), digest)
             }
+            Credential::Unavailable => false,
         }
     }
 
@@ -482,12 +487,17 @@ pub fn origin_allows(origin: Option<&str>, host: Option<&str>) -> bool {
     let Some(host) = host.map(str::trim).filter(|h| !h.is_empty()) else {
         return false;
     };
-    let rest = origin
+    let Some(rest) = origin
         .strip_prefix("http://")
         .or_else(|| origin.strip_prefix("https://"))
-        .unwrap_or(origin);
+    else {
+        return false;
+    };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    authority.eq_ignore_ascii_case(host)
+    !authority.is_empty()
+        && !authority.contains('@')
+        && !authority.chars().any(char::is_whitespace)
+        && authority.eq_ignore_ascii_case(host)
 }
 
 fn is_state_changing(method: &Method) -> bool {
@@ -546,10 +556,7 @@ fn admit(
     }
     // 2. 同源防护（WS 升级即使是 GET 也必须校验——建连同样是状态敏感动作）
     if is_state_changing(method) || is_ws_upgrade(headers) {
-        if !origin_allows(
-            header_str(headers, header::ORIGIN),
-            header_str(headers, header::HOST),
-        ) {
+        if !origin_allows_headers(headers) {
             return Decision::Forbidden;
         }
     }
@@ -575,6 +582,20 @@ fn is_ws_upgrade(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
 }
 
+/// 重复 Origin/Host 头按畸形请求拒绝，避免不同 HTTP 栈对重复头取首值/末值
+/// 不一致而产生同源校验绕过。
+pub fn origin_allows_headers(headers: &HeaderMap) -> bool {
+    if headers.get_all(header::ORIGIN).iter().count() > 1
+        || headers.get_all(header::HOST).iter().count() > 1
+    {
+        return false;
+    }
+    origin_allows(
+        header_str(headers, header::ORIGIN),
+        header_str(headers, header::HOST),
+    )
+}
+
 pub(crate) fn unauthorized_response() -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -598,17 +619,48 @@ pub(crate) fn spawn_sweeper(auth: std::sync::Arc<AuthState>) {
 /// 管理口令来源链路：环境变量 GAMER_ADMIN_PASSWORD（最高）>
 /// config [auth].password_hash > 兼容旧明文 password 字段。
 pub fn resolve_credential(cfg: &crate::config::Config) -> Credential {
-    if let Ok(p) = std::env::var("GAMER_ADMIN_PASSWORD") {
-        let p = p.trim().to_string();
-        if !p.is_empty() {
-            return Credential::EnvPassword(p);
-        }
+    resolve_credential_for_profile(cfg, crate::config::Profile::from_env())
+}
+
+/// 按显式 profile 解析管理凭据。生产环境不接受配置文件中的明文或旧
+/// SHA-256，也不允许非法 password_hash 静默回落到明文；异常配置统一
+/// 进入 [`Credential::Unavailable`]，使认证 fail closed。
+pub fn resolve_credential_for_profile(
+    cfg: &crate::config::Config,
+    profile: crate::config::Profile,
+) -> Credential {
+    resolve_credential_with_password(
+        cfg,
+        profile,
+        std::env::var("GAMER_ADMIN_PASSWORD").ok().as_deref(),
+    )
+}
+
+fn resolve_credential_with_password(
+    cfg: &crate::config::Config,
+    profile: crate::config::Profile,
+    env_password: Option<&str>,
+) -> Credential {
+    if let Some(p) = env_password.map(str::trim).filter(|p| !p.is_empty()) {
+        return Credential::EnvPassword(p.to_string());
     }
     if !cfg.auth.password_hash.trim().is_empty() {
-        // 格式合法性已在启动期校验；此处兜底解析失败则静默回落明文链路
-        if let Ok(c) = parse_password_hash(cfg.auth.password_hash.trim()) {
-            return c;
+        match parse_password_hash(cfg.auth.password_hash.trim()) {
+            Ok(Credential::Argon2(encoded)) => return Credential::Argon2(encoded),
+            Ok(Credential::Hash { .. }) if profile == crate::config::Profile::Prod => {
+                warn!("生产模式拒绝旧 SHA-256 管理凭据；请改用 Argon2id password_hash");
+                return Credential::Unavailable;
+            }
+            Ok(c) => return c,
+            Err(_) => {
+                warn!("管理 password_hash 配置非法，认证已 fail closed");
+                return Credential::Unavailable;
+            }
         }
+    }
+    if profile == crate::config::Profile::Prod {
+        warn!("生产模式未配置 GAMER_ADMIN_PASSWORD 或 Argon2id password_hash，认证已 fail closed");
+        return Credential::Unavailable;
     }
     Credential::Plain(cfg.password.clone())
 }
@@ -986,6 +1038,62 @@ mod tests {
                 "日志提示不得出现敏感字段名 {sensitive:?}"
             );
         }
+    }
+
+    #[test]
+    fn origin_headers_reject_duplicate_security_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ORIGIN, "http://localhost:8443".parse().unwrap());
+        headers.insert(header::HOST, "localhost:8443".parse().unwrap());
+        assert!(origin_allows_headers(&headers));
+
+        headers.append(header::ORIGIN, "http://evil.example".parse().unwrap());
+        assert!(!origin_allows_headers(&headers));
+
+        let mut host_dupe = HeaderMap::new();
+        host_dupe.insert(header::ORIGIN, "http://localhost:8443".parse().unwrap());
+        host_dupe.insert(header::HOST, "localhost:8443".parse().unwrap());
+        host_dupe.append(header::HOST, "evil.example".parse().unwrap());
+        assert!(!origin_allows_headers(&host_dupe));
+    }
+
+    #[test]
+    fn production_credential_resolution_fails_closed_without_strong_secret() {
+        let mut cfg = crate::config::Config::default();
+        cfg.auth.password_hash = "sha256$aabbccdd11223344$".to_string() + &"ab".repeat(32);
+
+        let legacy = resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None);
+        assert!(matches!(legacy, Credential::Unavailable));
+        assert!(
+            !AuthState::new(legacy, Default::default(), true, None).verify_credentials("admin123")
+        );
+
+        cfg.auth.password_hash = "not-a-password-hash".into();
+        assert!(matches!(
+            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None),
+            Credential::Unavailable
+        ));
+
+        cfg.auth.password_hash.clear();
+        assert!(matches!(
+            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None),
+            Credential::Unavailable
+        ));
+    }
+
+    #[test]
+    fn environment_password_has_priority_over_config_hash() {
+        let mut cfg = crate::config::Config::default();
+        cfg.auth.password_hash = hash_password("config-secret").unwrap();
+        let credential = resolve_credential_with_password(
+            &cfg,
+            crate::config::Profile::Prod,
+            Some("env-secret"),
+        );
+        assert!(matches!(credential, Credential::EnvPassword(ref value) if value == "env-secret"));
+        let st = AuthState::new(credential, Default::default(), true, None);
+        assert!(st.verify_credentials("env-secret"));
+        assert!(!st.verify_credentials("config-secret"));
     }
 
     /// 测试专用决策入口：按参数拼装请求头后走与中间件相同的 admit 内核
