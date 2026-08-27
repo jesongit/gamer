@@ -85,6 +85,9 @@ impl ViewerSession {
     /// `initial_frames`：SPS/PPS 配置帧 + 最近完整 GOP（来自帧缓存）。
     /// pusher 启动时先重放这些帧：浏览器无需等待下一个 IDR 即可开始解码
     /// （静态画面下编码器可能长时间不产 IDR，否则浏览器将一直黑屏）
+    // 参数较多源于会话组装所需的全部资源句柄；拆分 viewer 生命周期
+    //（OPTIMIZATION_PLAN 阶段 6 webrtc 模块化）时再收敛
+    #[allow(clippy::too_many_arguments)]
     pub async fn create(
         cfg: &Config,
         session: Arc<ScrcpySession>,
@@ -367,6 +370,9 @@ impl ViewerSession {
     /// 画面内容滞后被钳制在 ~1s 以内：写路径慢于设备出帧时，旧帧被跳过而不是排队
     /// 积压（旧 mpsc 实现满队列丢新帧，pusher 永远消费几秒前的旧帧 → 画面滞后 5s+
     /// → "操作延迟很久"的根因）。
+    // 参数为推流循环依赖的全部资源与协商参数；pusher 状态机拆分
+    //（OPTIMIZATION_PLAN 阶段 6）时再收敛为结构体
+    #[allow(clippy::too_many_arguments)]
     fn spawn_pusher(
         &self,
         rtp_sender: Arc<RTCRtpSender>,
@@ -553,15 +559,15 @@ impl ViewerSession {
             // ——曾因该误判导致推流塌缩，表现"更卡"）。真正断链只有一种情况：
             // 环形缓冲溢出（forwarder 丢过最旧帧），此时用 overflowed 标志通知，
             // pusher 清空队列等待下一个 IDR 重建（i-frame-interval=1 → ≤1s）。
-            let backlog_limit = if min_frame_interval_ms > 0 {
-                // ≈1s 的帧数。设备实际按 60fps 出帧（虚拟屏忽略 fps 配置，见
-                // scrcpy.rs），只按配置 fps 换算会把阈值压到远小于 1s（fps=15 →
-                // 15 帧 ≈ 250ms@60fps）：消费稍慢即触发跳帧清队。下限 60 帧
-                //（60fps 下 1s）恢复本意，配置 fps 更高时取配置值
-                (1000 / min_frame_interval_ms).max(60) as usize
-            } else {
-                60
-            };
+            // ≈1s 的帧数。设备实际按 60fps 出帧（虚拟屏忽略 fps 配置，见
+            // scrcpy.rs），只按配置 fps 换算会把阈值压到远小于 1s（fps=15 →
+            // 15 帧 ≈ 250ms@60fps）：消费稍慢即触发跳帧清队。下限 60 帧
+            //（60fps 下 1s）恢复本意，配置 fps 更高时取配置值
+            //（min_frame_interval_ms=0 时按无配置处理，同样取下限 60）
+            let backlog_limit = 1000u64
+                .checked_div(min_frame_interval_ms)
+                .map(|fps| fps.max(60) as usize)
+                .unwrap_or(60);
             // 参数集切换窗口标志：config 帧（新 SPS/PPS）已到、新 IDR 未到。
             // 窗口内禁止静止补帧（见取帧/补帧处注释），IDR 发送时复位。
             let mut pending_config = false;
@@ -710,7 +716,7 @@ impl ViewerSession {
                     // 已成功发送的旧参考链，payloader 缓存的仍是旧参数集（新参数集
                     // 只在 IDR 时喂入），旧帧 + 旧参数自洽可解码
                     if (pending_config || waiting_key)
-                        && suppress_started.map_or(false, |t| t.elapsed() < Duration::from_secs(3))
+                        && suppress_started.is_some_and(|t| t.elapsed() < Duration::from_secs(3))
                     {
                         continue;
                     }
@@ -872,7 +878,7 @@ impl ViewerSession {
                     // 默认关闭（config probe_encoder）：60fps 下 ~2.5 进程/秒的阻塞
                     // ffmpeg 抢 tokio worker，实测把单帧 RTP 发送耗时推高 3~4 倍
                     // （send_avg 6→20ms），发送饱和 → 积压断链 → 周期性冻结
-                    if probe_encoder && (frame.is_keyframe || frame_no % 30 == 0) {
+                    if probe_encoder && (frame.is_keyframe || frame_no.is_multiple_of(30)) {
                         let cfg = config_nalu.lock().clone();
                         let fdata = frame.data.clone();
                         let ff = ffmpeg_path.clone();
@@ -908,11 +914,7 @@ impl ViewerSession {
                     send_samples += 1;
                     // 诊断：实时推帧日志（每 300 帧，含平均 RTP 发送耗时与队列深度）
                     if frame_no % 300 == 1 {
-                        let avg = if send_samples > 0 {
-                            send_time_us / send_samples / 1000
-                        } else {
-                            0
-                        };
+                        let avg = send_time_us.checked_div(send_samples).unwrap_or(0) / 1000;
                         info!("pusher live: frame_no={} key={} ts={} peer={} size={} send_avg={}ms q={}", frame_no, frame.is_keyframe, ts, peer_connected.load(std::sync::atomic::Ordering::SeqCst), frame.data.len(), avg, last_q_len);
                         send_time_us = 0;
                         send_samples = 0;
@@ -937,8 +939,7 @@ impl ViewerSession {
     ) {
         let running = self.running.clone();
         tokio::spawn(async move {
-            let mut payloader: Box<dyn Payloader + Send + Sync> =
-                Box::new(OpusPayloader::default());
+            let mut payloader: Box<dyn Payloader + Send + Sync> = Box::new(OpusPayloader);
             let mut seq: u16 = rand::random();
             let mut last_ts: Option<u32> = None;
             let mut sent: u64 = 0;
@@ -1004,7 +1005,6 @@ impl ViewerSession {
                             ..Default::default()
                         },
                         payload,
-                        ..Default::default()
                     };
                     seq = seq.wrapping_add(1);
                     match tokio::time::timeout(
@@ -1078,7 +1078,7 @@ async fn push_rtp(
     // 只查关键帧会漏——P 帧按 seq 抽样。
     let mut probe = frame.is_keyframe;
     if !probe {
-        probe = *seq % 30 == 0;
+        probe = (*seq).is_multiple_of(30);
     }
     if probe {
         verify_rtp_rebuild(frame, &payloads);
@@ -1109,7 +1109,6 @@ async fn push_rtp(
                 ..Default::default()
             },
             payload,
-            ..Default::default()
         };
         // 写 RTP 加 3s 超时兜底：若底层传输卡死（异常情况下 webrtc-rs 的
         // write 可能一直不返回），超时后放弃该连接，避免 pusher 永久挂起
@@ -1181,12 +1180,12 @@ async fn send_config_nalus(
         let ns = pos + sc_len;
         let mut ne = d.len();
         let mut zc = 0usize;
-        for i in ns..d.len() {
-            if d[i] == 0 {
+        for (i, b) in d.iter().enumerate().skip(ns) {
+            if *b == 0 {
                 zc += 1;
                 continue;
             }
-            if d[i] == 1 && zc >= 2 {
+            if *b == 1 && zc >= 2 {
                 ne = i - zc;
                 break;
             }
@@ -1222,7 +1221,6 @@ async fn send_config_nalus(
                 ..Default::default()
             },
             payload: Bytes::copy_from_slice(nal),
-            ..Default::default()
         };
         match tokio::time::timeout(
             Duration::from_millis(3000),
@@ -1323,12 +1321,12 @@ fn verify_rtp_rebuild(frame: &VideoFrame, payloads: &[Bytes]) {
         let ns = pos + sc_len;
         let mut ne = d.len();
         let mut zc = 0usize;
-        for i in ns..d.len() {
-            if d[i] == 0 {
+        for (i, b) in d.iter().enumerate().skip(ns) {
+            if *b == 0 {
                 zc += 1;
                 continue;
             }
-            if d[i] == 1 && zc >= 2 {
+            if *b == 1 && zc >= 2 {
                 ne = i - zc;
                 break;
             }

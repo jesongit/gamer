@@ -356,7 +356,7 @@ impl ScrcpySession {
                     annex_b: true,
                 };
                 // 关键帧日志（验证 i-frame-interval 生效）与周期采样
-                if frame_count <= 3 || frame_count % 300 == 0 || frame.is_keyframe {
+                if frame_count <= 3 || frame_count.is_multiple_of(300) || frame.is_keyframe {
                     debug!(device = %s2.device.name, frame_count, size, config = frame.is_config, key = frame.is_keyframe, "frame");
                 }
                 // 诊断：SPS/PPS 配置帧打印前 40 字节（含 profile/level，验证与协商 fmtp 匹配）
@@ -619,10 +619,8 @@ impl ScrcpySession {
         // "?" 按名搜索解析不出包名，跳过）
         let pkg_for_watch = if plain {
             Some(name.to_string())
-        } else if let Some(stripped) = name.strip_prefix('+') {
-            Some(stripped.to_string())
         } else {
-            None
+            name.strip_prefix('+').map(|s| s.to_string())
         };
         if let Some(pkg) = pkg_for_watch {
             if self.device.screen_mode == ScreenMode::Virtual && super::adb::is_safe_pkg(&pkg) {
@@ -654,7 +652,7 @@ impl ScrcpySession {
             )
             .await
             .ok()
-            .and_then(|out| out.trim().split_whitespace().next().map(|s| s.to_string()))
+            .and_then(|out| out.split_whitespace().next().map(|s| s.to_string()))
     }
 
     /// Greeze 冻结探针：1 秒内 utime+stime 零增长 = 进程被冻结（cgroup freezer
@@ -732,6 +730,16 @@ fn parse_stat_cpu_ticks(stat: &str) -> Option<u64> {
     Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
 }
 
+async fn accept_with_timeout(
+    listener: &TcpListener,
+    timeout: Duration,
+) -> Option<(TcpStream, SocketAddr)> {
+    match tokio::time::timeout(timeout, listener.accept()).await {
+        Ok(Ok((s, a))) => Some((s, a)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_stat_cpu_ticks;
@@ -748,15 +756,5 @@ mod tests {
         // 垃圾/截断输入 → None
         assert_eq!(parse_stat_cpu_ticks("no parens"), None);
         assert_eq!(parse_stat_cpu_ticks("1 (x) R 1 2"), None);
-    }
-}
-
-async fn accept_with_timeout(
-    listener: &TcpListener,
-    timeout: Duration,
-) -> Option<(TcpStream, SocketAddr)> {
-    match tokio::time::timeout(timeout, listener.accept()).await {
-        Ok(Ok((s, a))) => Some((s, a)),
-        _ => None,
     }
 }

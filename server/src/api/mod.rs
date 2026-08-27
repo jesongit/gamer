@@ -703,21 +703,12 @@ struct PkgQuery {
     pkg: Option<String>,
 }
 
-/// 校验必需的 pkg 参数（应用包名 = 分区名），非法/缺失返回 400 Response
-fn require_pkg(raw: Option<&str>) -> Result<String, Response> {
-    match raw.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(p) => match crate::scripts::sanitize_part(p) {
-            Some(v) => Ok(v),
-            None => Err(err_response(
-                StatusCode::BAD_REQUEST,
-                "应用包名非法（只允许字母数字 . _ -）",
-            )),
-        },
-        None => Err(err_response(
-            StatusCode::BAD_REQUEST,
-            "缺少 pkg 参数（应用包名）",
-        )),
-    }
+/// 校验必需的 pkg 参数（应用包名 = 分区名）：缺失/空串/非法包名均返回 None
+/// （调用方各自回 400，不直接透出内部 Response，避免大 Err 载荷）
+fn require_pkg(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(crate::scripts::sanitize_part)
 }
 
 /// 列出模板：?pkg= 指定分区时只列该分区，否则跨分区全列（条目带 pkg 字段）
@@ -770,7 +761,7 @@ async fn api_upload_template(
     State(st): State<AppState>,
     Json(req): Json<UploadTemplateReq>,
 ) -> Response {
-    let Ok(pkg) = require_pkg(Some(&req.pkg)) else {
+    let Some(pkg) = require_pkg(Some(&req.pkg)) else {
         return err_response(
             StatusCode::BAD_REQUEST,
             "应用包名非法（只允许字母数字 . _ -）",
@@ -805,7 +796,7 @@ async fn api_delete_template(
     Path(name): Path<String>,
     Query(q): Query<PkgQuery>,
 ) -> Response {
-    let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
+    let Some(pkg) = require_pkg(q.pkg.as_deref()) else {
         return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
     };
     let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
@@ -830,7 +821,7 @@ async fn api_rename_template(
     Query(q): Query<PkgQuery>,
     Json(req): Json<RenameTemplateReq>,
 ) -> Response {
-    let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
+    let Some(pkg) = require_pkg(q.pkg.as_deref()) else {
         return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
     };
     let dir = st.scripts.tmpl_dir(&pkg);
@@ -864,7 +855,7 @@ async fn api_get_template_image(
     Path(name): Path<String>,
     Query(q): Query<PkgQuery>,
 ) -> Response {
-    let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
+    let Some(pkg) = require_pkg(q.pkg.as_deref()) else {
         return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
     };
     let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
@@ -906,7 +897,7 @@ async fn api_test_template(
     Path(name): Path<String>,
     Json(req): Json<TestTemplateReq>,
 ) -> Response {
-    let Ok(pkg) = require_pkg(Some(&req.pkg)) else {
+    let Some(pkg) = require_pkg(Some(&req.pkg)) else {
         return err_response(
             StatusCode::BAD_REQUEST,
             "应用包名非法（只允许字母数字 . _ -）",
@@ -983,7 +974,7 @@ async fn api_delete_script(State(st): State<AppState>, Path(id): Path<String>) -
 
 /// 导出整分区快照 zip（?pkg= 指定应用分区）：yaml/ 全部脚本 + tmpl/ 全部模板
 async fn api_export_partition(State(st): State<AppState>, Query(q): Query<PkgQuery>) -> Response {
-    let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
+    let Some(pkg) = require_pkg(q.pkg.as_deref()) else {
         return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
     };
     match st.scripts.export_partition(&pkg) {
@@ -1025,7 +1016,7 @@ async fn api_import_script(
     body: axum::body::Bytes,
 ) -> Response {
     let confirm = matches!(q.confirm.as_deref(), Some("1") | Some("true"));
-    let Ok(pkg) = require_pkg(q.pkg.as_deref()) else {
+    let Some(pkg) = require_pkg(q.pkg.as_deref()) else {
         return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
     };
     match st.scripts.import(&body, &pkg, confirm) {

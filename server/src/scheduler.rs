@@ -1,5 +1,6 @@
 //! 定时任务调度：cron 表达式 + tokio 后台调度（Docker 内 7×24 运行）
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,11 @@ pub fn validate_cron(expr: &str) -> bool {
     Schedule::from_str(&normalize_cron(expr)).is_ok()
 }
 
+/// 上次处理的触发时刻
+type LastTrigger = Option<DateTime<Local>>;
+/// 任务运行表：task_id -> (是否运行中, 上次处理的触发时刻)
+type RunningMap = Arc<tokio::sync::Mutex<HashMap<String, (bool, LastTrigger)>>>;
+
 pub struct Scheduler {
     db: Db,
     devices: Arc<DeviceManager>,
@@ -40,8 +46,7 @@ pub struct Scheduler {
     /// 脚本文件存储：任务运行时按 script_id（package/name）取脚本内容
     scripts: Arc<ScriptStore>,
     /// task_id -> (是否运行中, 上次处理的触发时刻)
-    running:
-        Arc<tokio::sync::Mutex<std::collections::HashMap<String, (bool, Option<DateTime<Local>>)>>>,
+    running: RunningMap,
 }
 
 impl Scheduler {

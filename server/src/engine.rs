@@ -249,6 +249,9 @@ impl Runner {
     ///         结束整个任务；None=新建）
     /// `args`：call 传入的实参（主脚本运行传空）——子脚本内 `$1`/`$2`… 引用
     /// （func 段除外，见 take_funcs_and_substitute）；引用超出实参数量直接报错
+    // 参数较多为历史签名 + Console「从某行运行」run_func/start_step 组合所需；
+    // 统一 RunManager / 模块拆分（OPTIMIZATION_PLAN 阶段 3/6）时再收敛参数对象
+    #[allow(clippy::too_many_arguments)]
     pub async fn run(
         &self,
         device_id: &str,
@@ -362,6 +365,7 @@ impl Runner {
     /// - 顶层**映射**且不含 config/func/steps 任何一键 → 整个映射视为 `func`
     ///   段（纯函数库简写：函数定义直接写在顶层）
     /// - 含任一段落键的映射维持白名单校验（未知顶层键报错）
+    ///
     /// 返回带段落键的归一化文档；旧顶层键（action_wait/log_level/name）无论
     /// 何种形态都先定向报错
     fn normalize_top(doc: Value) -> anyhow::Result<Value> {
@@ -520,6 +524,7 @@ impl Runner {
     ///     cond: test.png      # 可选：单模板字符串 / 逗号分隔 / 列表
     ///     steps:
     ///       - find: $1
+    ///
     /// 映射形式（func:\n  fun1:\n    cond: …\n    steps: …）cond/steps 嵌套在
     /// 函数名值里，同样支持
     fn parse_funcs(v: Option<Value>) -> anyhow::Result<HashMap<String, FuncDef>> {
@@ -571,7 +576,7 @@ impl Runner {
             let (name_v, body_v) = match name_k {
                 Some(kv) => kv,
                 None => {
-                    if m.len() == 1 && m.contains_key(&Value::String("cond".into())) {
+                    if m.len() == 1 && m.contains_key(Value::String("cond".into())) {
                         anyhow::bail!(
                             "函数名 cond 是保留字（cond 是函数条件参数键）——若这是函数体的步骤，说明函数体缩进不对：函数体要比 \"- 函数名:\" 行多缩进（如 4 空格）"
                         );
@@ -833,14 +838,14 @@ impl Runner {
                     }
                 }
                 let from = sm
-                    .get(&Value::String("fm".into()))
+                    .get(Value::String("fm".into()))
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("swipe 缺少 fm"))?;
                 let to = sm
-                    .get(&Value::String("to".into()))
+                    .get(Value::String("to".into()))
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("swipe 缺少 to"))?;
-                let dur = match sm.get(&Value::String("time".into())) {
+                let dur = match sm.get(Value::String("time".into())) {
                     Some(t) => Self::parse_duration(t, "swipe time")?,
                     None => 500,
                 };
@@ -1201,7 +1206,8 @@ impl Runner {
         let (rx, ry) =
             Self::parse_rel_coord(pos_v).map_err(|e| anyhow::anyhow!("color 坐标: {}", e))?;
         let m = step.as_mapping().unwrap();
-        let mut cases: Vec<((u8, u8, u8), String, Vec<Value>)> = Vec::new(); // (rgb, 规范化 hex, 命中步骤)
+        type ColorCase = ((u8, u8, u8), String, Vec<Value>); // (rgb, 规范化 hex, 命中步骤)
+        let mut cases: Vec<ColorCase> = Vec::new();
         let mut else_steps: Vec<Value> = Vec::new();
         for (k, v) in m {
             match k.as_str() {
@@ -1953,16 +1959,18 @@ impl Runner {
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| template.to_string());
         let r = Self::tpl_region_from_name(&src, w, h)?;
-        if r.is_none() && resolved.is_some() && !src.contains('#') {
-            if ctx.region_warned.insert(src.clone()) {
-                ctx.log(
-                    "info",
-                    format!(
-                        "模板 {} 未带 #区域后缀，回退全屏搜索（区域写法：xx#l / xx#0_0_500_500）",
-                        src
-                    ),
-                );
-            }
+        if r.is_none()
+            && resolved.is_some()
+            && !src.contains('#')
+            && ctx.region_warned.insert(src.clone())
+        {
+            ctx.log(
+                "info",
+                format!(
+                    "模板 {} 未带 #区域后缀，回退全屏搜索（区域写法：xx#l / xx#0_0_500_500）",
+                    src
+                ),
+            );
         }
         Ok(r)
     }
@@ -2219,7 +2227,7 @@ impl Runner {
     /// 解析相对坐标（百分比 0~1）：支持数组 [x, y] 或对象 {x, y}
     fn relative_pair(&self, v: &Value) -> anyhow::Result<(f32, f32)> {
         if let Some(seq) = v.as_sequence() {
-            let x = seq.get(0).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+            let x = seq.first().and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
             let y = seq.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
             return Ok((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
         }
@@ -2452,7 +2460,7 @@ mod tests {
         let funcs_val = funcs_raw.unwrap();
         let f = funcs_val.as_sequence().unwrap()[0].as_mapping().unwrap();
         let body = f
-            .get(&Value::String("f1".into()))
+            .get(Value::String("f1".into()))
             .unwrap()
             .as_sequence()
             .unwrap();
@@ -2463,7 +2471,7 @@ mod tests {
         let c = v2.get("steps").unwrap().as_sequence().unwrap()[0]
             .as_mapping()
             .unwrap();
-        assert!(c.get(&Value::String("a.png".into())).is_some());
+        assert!(c.get(Value::String("a.png".into())).is_some());
         // `$` 后非数字原样保留（"100$" / "$涨"）
         let mut v3 = parse("steps:\n  - text: \"100$\"\n  - log: \"$涨\"\n");
         Runner::substitute_args(&mut v3, &args).unwrap();
@@ -2515,19 +2523,19 @@ mod tests {
         let out = Runner::substitute_refs(&step, &refs).unwrap();
         let m = out.as_mapping().unwrap();
         assert_eq!(
-            m.get(&Value::String("func1".into()))
+            m.get(Value::String("func1".into()))
                 .and_then(|v| v.as_str()),
             Some("main.png b1.png")
         );
         // then/else 子树（映射步骤项）不替换
         let then = m
-            .get(&Value::String("then".into()))
+            .get(Value::String("then".into()))
             .unwrap()
             .as_sequence()
             .unwrap();
         assert_eq!(then[0].get("log").and_then(|v| v.as_str()), Some("got ^1"));
         let els = m
-            .get(&Value::String("else".into()))
+            .get(Value::String("else".into()))
             .unwrap()
             .as_sequence()
             .unwrap();
@@ -2543,7 +2551,7 @@ mod tests {
         let out2 = Runner::substitute_refs(&f, &refs).unwrap();
         let fm = out2.as_mapping().unwrap();
         assert_eq!(
-            fm.get(&Value::String("block".into()))
+            fm.get(Value::String("block".into()))
                 .and_then(|v| v.as_sequence().cloned()),
             Some(vec![
                 Value::String("b1.png".into()),
@@ -2585,7 +2593,7 @@ mod tests {
         let step = &doc.get("steps").unwrap().as_sequence().unwrap()[0];
         let m = step.as_mapping().unwrap();
         assert_eq!(
-            m.get(&Value::String("color".into()))
+            m.get(Value::String("color".into()))
                 .unwrap()
                 .as_sequence()
                 .unwrap()
@@ -2593,15 +2601,15 @@ mod tests {
             2
         );
         assert!(m
-            .get(&Value::String("ff8800".into()))
+            .get(Value::String("ff8800".into()))
             .unwrap()
             .as_sequence()
             .is_some());
-        assert!(m.get(&Value::String("aa8899".into())).unwrap().is_null());
+        assert!(m.get(Value::String("aa8899".into())).unwrap().is_null());
         assert!(step.get("else").unwrap().as_sequence().is_some());
         // else 不在色值键里（是兄弟键）
         assert_eq!(
-            m.get(&Value::String("else".into()))
+            m.get(Value::String("else".into()))
                 .and_then(|v| v.as_sequence())
                 .map(|s| s.len()),
             Some(1)
@@ -2613,7 +2621,7 @@ mod tests {
         assert!(s2[0]
             .as_mapping()
             .unwrap()
-            .get(&Value::String("ff8800".into()))
+            .get(Value::String("ff8800".into()))
             .is_some());
     }
 
@@ -2628,8 +2636,10 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut cfg = crate::config::Config::default();
-        cfg.data_dir = dir.clone();
+        let cfg = crate::config::Config {
+            data_dir: dir.clone(),
+            ..Default::default()
+        };
         let db: crate::store::Db = std::sync::Arc::new(crate::store::Store::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));

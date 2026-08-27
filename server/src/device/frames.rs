@@ -21,7 +21,7 @@ const PNG_SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
 /// 从 PNG 头（IHDR）取宽高：8 字节签名 + 4 长度 + 4 "IHDR" → width@16 / height@20（大端）
 fn png_dims(png: &[u8]) -> Option<(u32, u32)> {
-    if png.len() < 24 || &png[..8] != &PNG_SIG {
+    if png.len() < 24 || png[..8] != PNG_SIG {
         return None;
     }
     let w = u32::from_be_bytes(png[16..20].try_into().ok()?);

@@ -132,7 +132,7 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
             for &y0 in &ys {
                 let y0 = y0 as usize;
                 let score = ncc_at(s_raw, s_w, &t_data, t_w, t_h, x0, y0, t_mean, t_var);
-                if local_best.map_or(true, |(b, _, _)| score > b) {
+                if local_best.is_none_or(|(b, _, _)| score > b) {
                     local_best = Some((score, x0, y0));
                 }
             }
