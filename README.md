@@ -7,12 +7,14 @@
 
 - 🖥️ **统一分辨率虚拟屏**（scrcpy new-display）：所有设备可用相同分辨率（如 1920x1080）游玩，
   一套模板通吃所有设备，彻底解决模板匹配兼容性问题；也支持镜像主屏模式
-- ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网 <10ms
+- ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网低延迟
 - 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
-- 🔍 **模板匹配**：Rust NCC 引擎（截图优先取自视频流软解码帧缓存，<50ms；fallback adb screencap）
+- 🔍 **模板匹配**：Rust NCC 引擎（截图优先从 H.264 GOP 帧环按需调用 ffmpeg 解码最新帧；无 ffmpeg 时 fallback adb screencap）；固定夹具 benchmark 脚本已兼容 Windows PowerShell 5.1（parser=0），正式跨平台 p50/p95 报告仍在计划中
 - 📜 **YAML 自动化**：find（找图等待+点击，block 障碍、verify 补点）/ color 颜色分支 / loop / func 自定义函数（$N 传参 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait（语法见 [docs/YAML.md](docs/YAML.md)）
 - ⏰ **定时任务**：cron 表达式，服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
+
+> 优化计划尚未整体验收完成：阶段 0/1 已完成，阶段 2/3 主体能力已有自动化证据；真实设备 DataChannel 与设备回归矩阵、干净 Docker 构建、正式跨平台性能报告及全面模块化仍待验证，详见 [docs/OPTIMIZATION_PLAN.md](docs/OPTIMIZATION_PLAN.md)。
 
 ## 架构
 
@@ -23,7 +25,7 @@
 └────────────┘                                            └──────────────────┘                        └──────────────┘
                                                                     │
                                                                     ├─ 自动化引擎：YAML 脚本解释器
-                                                                    ├─ 模板匹配：NCC + 帧缓存（ffmpeg 软解）
+                                                                    ├─ 模板匹配：NCC + H.264 GOP 帧环（按需 ffmpeg 解码）
                                                                     ├─ 定时任务：cron + tokio 调度
                                                                     ├─ 设备管理：adb 直连
                                                                     └─ 持久化：SQLite + 模板图片
@@ -33,7 +35,7 @@
   客户端角色驱动：`adb push` → `adb reverse` 隧道 → `app_process` 启动 → 读视频 socket（H.264 帧 + PTS 头）/
   控制 socket（触控/按键/文本/剪贴板/启动应用）
 - **虚拟屏**：启动参数 `new_display=1920x1080/420`，scrcpy server 在设备上创建虚拟显示器；
-  游戏通过 StartApp 控制消息（type 16）自动启动到虚拟屏，**无需自己探测 display id**
+  连接不会自动启动应用，由 Console 启动按钮或脚本 `str_app` 显式启动到虚拟屏，**无需自己探测 display id**
 
 ## 目录结构
 
@@ -98,7 +100,7 @@ docker compose --profile redroid up -d  # gamer + redroid 云手机
 docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d
 ```
 
-- 访问 `http://<服务器IP>:8443`，默认账号 `admin / admin123`
+- 访问 `http://<服务器IP>:8443`，使用配置的管理员账号登录（默认开发配置为 `admin / admin123`）。登录成功后服务端通过 `HttpOnly; SameSite=Strict` Cookie 维护会话，前端不再依赖 localStorage 伪 token；生产部署请立即更换默认密码并通过 HTTPS 反向代理暴露。
 - `gamer` 容器默认**不带特权**运行；网络类设备（redroid / WiFi adb / 模拟器）
   无需宿主机特权，USB 直通所需的 device 映射由 `docker-compose.usb.yml` 承载
 - **运行数据目录**（唯一口径 = 仓库的 `server/data/`，容器内 `/app/data`）：
@@ -143,7 +145,7 @@ VITE_PROXY_TARGET=http://localhost:8443 pnpm dev
 **屏幕模式**：
 - `镜像主屏`：投物理屏幕，各设备分辨率不同
 - `虚拟屏`：统一分辨率（预设 1920x1080 / 1080x1920 / 1280x720，可自定义宽高+DPI），
-  需 Android 10+，连接后自动把配置的游戏包名启动到虚拟屏（`+` 前缀可 force-stop 后启动）
+  需 Android 10+；连接只建立投屏会话，应用由 Console 启动按钮或脚本 `str_app` 显式启动
 
 ## YAML 脚本语法
 
@@ -155,6 +157,7 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAM
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | /api/login | 登录 |
+| POST | /api/logout | 退出并立即使当前 Cookie 会话失效 |
 | GET/POST | /api/devices | 设备列表 / 创建 |
 | POST | /api/devices/scan | 扫描 `adb devices -l` 并自动注册新设备（前端"刷新"时调用） |
 | PUT/DELETE | /api/devices/:id | 更新配置（变更后自动重连）/ 删除 |
@@ -170,6 +173,8 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAM
 | GET/DELETE | /api/logs | 运行日志 / 清空 |
 | WS | /ws/device/:id | WebRTC 信令（offer → answer） |
 
+脚本运行以 `run_id` 标识一次执行实例。启动脚本或“立即运行任务”采用异步返回：接受后返回 HTTP `202` 和 `run_id`，前端按 `run_id` 查询、恢复和停止；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同脚本并发控制同一设备。
+
 ## 技术要点
 
 - **scrcpy 协议**（对齐 v3.3.3）：视频 socket 先 64B 设备名 + 12B codec meta
@@ -182,8 +187,7 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAM
   - 服务端帧缓存维护**最近完整 GOP**（自最近 IDR 起的所有帧），
     新 viewer 连接时 pusher **先重放 GOP**（config+IDR+P 帧，RTP 时间戳与实时流同一时间轴），
     浏览器无需等待下一个 IDR 即可开始解码——静态画面下也能立即出画面
-- **帧缓存**：ffmpeg 软解视频流缓存最新帧 PNG，模板匹配/截图 <50ms；
-  无 ffmpeg 时自动降级 `adb exec-out screencap -p`
+- **帧缓存**：内存保留 SPS/PPS 与最近完整 GOP；截图/模板匹配时按精确帧序号临时调用 ffmpeg 解码，同设备同一帧的并发请求共享一次解码；延迟以固定夹具基准为准，无 ffmpeg 时自动降级 `adb exec-out screencap -p`
 - **设备自动发现**：前端"刷新"会调用 `/api/devices/scan`（`adb devices -l`），
   自动注册未入库的设备（USB/无线/模拟器自动识别类型与型号，默认镜像模式），
   已注册设备跳过；注册后可在设备列表 ✏️ 编辑为虚拟屏等配置
@@ -211,7 +215,7 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAM
 ### 虚拟屏模式（new_display=1920x1080/420）✅ 重点验证
 - ✅ scrcpy-server 以 `new_display=1920x1080/420` 启动，设备端创建虚拟显示器（id=91，FLAG_PRESENTATION）
 - ✅ 视频流 meta 为 **1920x1080**（虚拟屏分辨率，非物理屏 3008x1880）
-- ✅ 连接后自动 `start_app` 把星穹铁道启动到虚拟屏（`on display 91`）
+- ✅ 已验证 `start_app` 把星穹铁道启动到虚拟屏（`on display 91`）；当前版本由 Console 或脚本显式触发
 - ✅ 截图（ffmpeg 帧缓存软解视频流）返回 **1920x1080** 虚拟屏画面
 - ✅ 模板匹配在虚拟屏分辨率下工作：命中 (757,401) 置信度 **0.97**
 - ✅ 触控注入作用于虚拟屏坐标系（1920x1080 归一化）
