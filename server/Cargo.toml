@@ -4,11 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "GameBot 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
 
-# release 构建保留 debug_assertions：tracing 的 debug/trace 宏默认在
-# release 下被编译掉（影响排障），开启后保留全部日志（性能影响可忽略）
-[profile.release]
-debug-assertions = true
-
 [dependencies]
 # Web 框架
 axum = { version = "0.7", features = ["ws"] }
