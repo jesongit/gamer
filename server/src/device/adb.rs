@@ -346,3 +346,35 @@ pub fn is_safe_pkg(s: &str) -> bool {
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_pkg;
+
+    #[test]
+    fn shell_package_boundary_rejects_argument_and_command_injection() {
+        for valid in ["com.example.game", "com.miHoYo.hkrpg", "pkg_1"] {
+            assert!(is_safe_pkg(valid), "合法包名被拒: {valid:?}");
+        }
+        for injected in [
+            "",
+            "com.example.game;id",
+            "com.example.game&&id",
+            "com.example.game|id",
+            "com.example.game$(id)",
+            "com.example.game`id`",
+            "com.example.game\nid",
+            "com.example.game --user 0",
+            "--user",
+            "+com.example.game",
+            "?Example Game",
+            "com/example/game",
+            "com\\example\\game",
+        ] {
+            assert!(
+                !is_safe_pkg(injected),
+                "进入 adb shell 拼接前应拒绝注入载荷: {injected:?}"
+            );
+        }
+    }
+}
