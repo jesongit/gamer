@@ -48,7 +48,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-# PS 7.3+ 默认会把原生命令（cargo/npm）的 stderr 输出当成错误记录，
+# PS 7.3+ 默认会把原生命令（cargo/pnpm）的 stderr 输出当成错误记录，
 # 在 EAP=Stop 下直接抛 NativeCommandError 中断脚本（cargo 编译进度就是走 stderr 的）。
 # 显式关闭，让原生命令的 stderr 只作普通输出显示。
 $PSNativeCommandUseErrorActionPreference = $false
@@ -175,9 +175,9 @@ function Get-FrontendProcs {
         $p = Get-Process -Id $procId -ErrorAction SilentlyContinue
         if ($p -and $p.ProcessName -eq 'node') { $found += $p }
     }
-    # 2) 兜底：命令行含 vite / npm run dev 的残留进程（node 与 npm/cmd 包装）
+    # 2) 兜底：命令行含 vite / npm/pnpm dev 的残留进程（node 与包管理器包装）
     $cims = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'vite' -or $_.CommandLine -match 'npm run dev' }
+        Where-Object { $_.CommandLine -match 'vite' -or $_.CommandLine -match '(npm|pnpm)( run)? dev' }
     foreach ($c in $cims) {
         $p = Get-Process -Id $c.ProcessId -ErrorAction SilentlyContinue
         if ($p -and $found.Id -notcontains $p.Id) { $found += $p }
@@ -359,7 +359,7 @@ function Stop-Frontend {
 
 <#
   构建期间临时把 $ErrorActionPreference 切回 Continue：
-  cargo / npm 的编译进度输出走 stderr，在 EAP=Stop 下会被当成错误中断脚本
+  cargo / pnpm 的编译进度输出走 stderr，在 EAP=Stop 下会被当成错误中断脚本
  （Windows PowerShell 5.1 与 PS 7.3+ 通病），成败只看 $LASTEXITCODE。
 #>
 function Invoke-NativeChecked {
@@ -385,10 +385,10 @@ function Build-Backend {
 
 function Ensure-FrontendDeps {
     if (Test-Path (Join-Path $WebDir 'node_modules')) { return }
-    Invoke-NativeChecked -Desc "前端: node_modules 不存在，执行 npm install ..." -Cmd {
+    Invoke-NativeChecked -Desc "前端: node_modules 不存在，执行 pnpm install ..." -Cmd {
         Push-Location $WebDir
         try {
-            & npm install --no-audit --no-fund
+            & pnpm install
         } finally {
             Pop-Location
         }
@@ -400,7 +400,7 @@ function Build-Frontend {
     Invoke-NativeChecked -Desc "前端: vite build → $WebDistDir（后端静态托管目录）..." -Cmd {
         Push-Location $WebDir
         try {
-            & npm run build
+            & pnpm build
         } finally {
             Pop-Location
         }
@@ -474,8 +474,8 @@ function Start-Frontend {
     Write-Host "前端: 启动 vite dev（端口 $FrontendPort）..."
     Write-Host ("前端日志: {0}，stderr: {1}" -f $FrontendLog, $FrontendErrLog)
 
-    # 直接启动 node 运行 vite（等价于 npm run dev，但少一层 cmd 包装进程，
-    # 进程树更干净、stop 时不需要额外杀 cmd）
+    # 直接启动 node 运行 vite（等价于 pnpm dev，但少一层包装进程，
+    # 进程树更干净、stop 时不需要额外杀包管理器包装进程）
     $nodeExe = (Get-Command node.exe -ErrorAction Stop).Source
     $viteJs  = Join-Path $WebDir (Join-Path 'node_modules' (Join-Path 'vite' (Join-Path 'bin' 'vite.js')))
     if (-not (Test-Path $viteJs)) { throw "前端: 未找到 vite 入口: $viteJs" }

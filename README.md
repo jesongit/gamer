@@ -64,7 +64,7 @@ gamer/
 | Rust 工具链（stable） | 编译 Rust 服务端 | `scoop install rustup`，或免 VS 的 GNU 工具链 `scoop install rust` |
 | Android platform-tools（adb） | 设备发现 / 连接 / 推送 scrcpy-server | `scoop install adb` |
 | ffmpeg | 视频软解码帧缓存（截图 / 模板匹配 / WebRTC 初始 GOP 重放） | `scoop install ffmpeg` |
-| Node.js ≥ 18 | 前端 Vite dev / 构建 | `scoop install nodejs-lts` |
+| Node.js ≥ 20（自带 Corepack） | 前端 Vite dev / 构建（pnpm，`package.json#packageManager` 固定版本） | `scoop install nodejs-lts` |
 | scrcpy-server.jar | 设备端采集端（v3.3.3，**仓库已自带** `server/assets/`） | 无需安装 |
 
 一键安装示例（PowerShell）：
@@ -105,8 +105,9 @@ cargo run
 
 # 前端（开发热更新，代理到 8443）
 cd web
-npm install
-VITE_PROXY_TARGET=http://localhost:8443 npm run dev
+corepack enable pnpm    # 首次使用执行一次；Corepack 按 packageManager 字段自动用对 pnpm 版本
+pnpm install
+VITE_PROXY_TARGET=http://localhost:8443 pnpm dev
 # 打开 http://localhost:5173
 ```
 
