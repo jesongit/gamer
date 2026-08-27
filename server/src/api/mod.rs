@@ -768,44 +768,139 @@ struct ControlReq {
     app: Option<String>,
 }
 
+/// 坐标合法性：有限 + 常规显示分辨率范围（scrcpy 按视频分辨率像素注入，
+/// 下游 clamp 到 0..w-1；这里只挡 NaN/Infinity/天文数字）
+fn valid_coord(v: f32) -> bool {
+    v.is_finite() && (0.0..=100_000.0).contains(&v)
+}
+
+/// Android keycode 合法范围（0=UNKNOWN 不放行，上限留足到自定义厂商键值）
+fn valid_keycode(kc: u32) -> bool {
+    (1..=1000).contains(&kc)
+}
+
+/// 校验后的控制动作（借用请求字段；不再有隐式缺省）
+enum Ctl<'a> {
+    Tap(f32, f32),
+    Swipe(f32, f32, f32, f32, u64),
+    Text(&'a str),
+    Press(u32),
+    Home,
+    Back,
+    Recents,
+    StartApp(&'a str),
+    Rotate,
+    Clipboard(&'a str),
+}
+
+/// 控制命令解析与校验（纯函数，可单测）：
+/// 坐标/时长/文本长度/包名不合格一律显式拒绝，替代旧 unwrap_or 静默缺省
+fn parse_ctl(req: &ControlReq) -> Result<Ctl<'_>, String> {
+    match req.cmd.as_str() {
+        "tap" => match (req.x, req.y) {
+            (Some(x), Some(y)) if valid_coord(x) && valid_coord(y) => Ok(Ctl::Tap(x, y)),
+            _ => Err("缺少或非法的 tap 坐标 x/y".into()),
+        },
+        "swipe" => {
+            let (Some(x1), Some(y1), Some(x2), Some(y2)) = (req.x1, req.y1, req.x2, req.y2) else {
+                return Err("缺少或非法的 swipe 坐标 x1/y1/x2/y2".into());
+            };
+            if ![x1, y1, x2, y2].iter().all(|v| valid_coord(*v)) {
+                return Err("swipe 坐标超出合法范围".into());
+            }
+            if req.duration.is_some_and(|d| !(1..=600_000).contains(&d)) {
+                return Err("duration 必须在 1..600000 ms 内".into());
+            }
+            Ok(Ctl::Swipe(x1, y1, x2, y2, req.duration.unwrap_or(300)))
+        }
+        "text" => {
+            let text = req
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .ok_or("text 不能为空")?;
+            // scrcpy 控制协议单条文本上限 300 字节，超长下游静默截断——显式拒绝
+            if text.len() > 300 {
+                return Err("text 超过 300 字节（协议上限）".into());
+            }
+            Ok(Ctl::Text(text))
+        }
+        "press" => {
+            let kc = req
+                .keycode
+                .filter(|k| valid_keycode(*k))
+                .ok_or("keycode 缺失或不在 1..1000")?;
+            Ok(Ctl::Press(kc))
+        }
+        "home" => Ok(Ctl::Home),
+        "back" => Ok(Ctl::Back),
+        "recents" => Ok(Ctl::Recents),
+        "start_app" => {
+            let app = req
+                .app
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .ok_or("app 包名不能为空")?;
+            if app.len() > 255 {
+                return Err("app 包名超过 255 字节".into());
+            }
+            // "+" 强启 / "?" 按名搜索允许透传；裸包名必须是安全包名字符集
+            if let Some(pkg) = app.strip_prefix('+') {
+                if pkg.is_empty() || !crate::device::adb::is_safe_pkg(pkg) {
+                    return Err("+ 前缀后须为合法包名".into());
+                }
+            } else if let Some(name) = app.strip_prefix('?') {
+                if name.trim().len() < 2 {
+                    return Err("? 搜索名过短".into());
+                }
+            } else if !crate::device::adb::is_safe_pkg(app) {
+                return Err("包名非法（只允许字母数字 . _）".into());
+            }
+            Ok(Ctl::StartApp(app))
+        }
+        "rotate" => Ok(Ctl::Rotate),
+        "clipboard" => {
+            let text = req
+                .text
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .ok_or("clipboard 文本不能为空")?;
+            // scrcpy 剪贴板协议上限 128KiB，超长下游静默截断——显式拒绝
+            if text.len() > 131_072 {
+                return Err("clipboard 文本超过 131072 字节（协议上限）".into());
+            }
+            Ok(Ctl::Clipboard(text))
+        }
+        _ => Err("unknown command".into()),
+    }
+}
+
 async fn api_control(
     State(st): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<ControlReq>,
 ) -> Response {
+    // 先纯校验（与设备无关，离线设备也能拿到明确 400），再取会话执行
+    let ctl = match parse_ctl(&req) {
+        Ok(c) => c,
+        Err(msg) => return err_response(StatusCode::BAD_REQUEST, &msg),
+    };
     let Some(session) = st.devices.session(&id) else {
         return err_response(StatusCode::CONFLICT, "设备未连接");
     };
-    let result = match req.cmd.as_str() {
-        "tap" => {
-            session
-                .tap(req.x.unwrap_or(0.0), req.y.unwrap_or(0.0))
-                .await
-        }
-        "swipe" => {
-            session
-                .swipe(
-                    req.x1.unwrap_or(0.0),
-                    req.y1.unwrap_or(0.0),
-                    req.x2.unwrap_or(0.0),
-                    req.y2.unwrap_or(0.0),
-                    req.duration.unwrap_or(300),
-                )
-                .await
-        }
-        "text" => session.inject_text(req.text.as_deref().unwrap_or("")).await,
-        "press" => session.press_key(req.keycode.unwrap_or(0)).await,
-        "home" => session.press_key(3).await,
-        "back" => session.press_key(4).await,
-        "recents" => session.press_key(187).await,
-        "start_app" => session.start_app(req.app.as_deref().unwrap_or("")).await,
-        "rotate" => session.rotate_device().await,
-        "clipboard" => {
-            session
-                .set_clipboard(req.text.as_deref().unwrap_or(""), false)
-                .await
-        }
-        _ => return err_response(StatusCode::BAD_REQUEST, "unknown command"),
+    let result = match ctl {
+        Ctl::Tap(x, y) => session.tap(x, y).await,
+        Ctl::Swipe(x1, y1, x2, y2, duration_ms) => session.swipe(x1, y1, x2, y2, duration_ms).await,
+        Ctl::Text(text) => session.inject_text(text).await,
+        Ctl::Press(kc) => session.press_key(kc).await,
+        Ctl::Home => session.press_key(3).await,
+        Ctl::Back => session.press_key(4).await,
+        Ctl::Recents => session.press_key(187).await,
+        Ctl::StartApp(app) => session.start_app(app).await,
+        Ctl::Rotate => session.rotate_device().await,
+        Ctl::Clipboard(text) => session.set_clipboard(text, false).await,
     };
     match result {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
@@ -884,11 +979,20 @@ async fn api_upload_template(
             "应用包名非法（只允许字母数字 . _ -）",
         );
     };
+    // base64 合法性与体积先于解码校验（4/3 膨胀后 16MiB ≈ 原始 12MiB 内的护栏）
+    const MAX_B64_LEN: usize = (matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 1) * 4;
+    if req.data_b64.len() > MAX_B64_LEN {
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            "图片超过上传上限（10 MiB），请裁剪后再试",
+        );
+    }
     let orig = match base64::engine::general_purpose::STANDARD.decode(&req.data_b64) {
         Ok(b) => b,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, &format!("base64 解码失败: {}", e)),
     };
-    // 统一重编码为灰度 PNG（匹配零损失 + 大幅减小体积，见 reencode_template_gray_png）
+    // 统一重编码为灰度 PNG（匹配零损失 + 大幅减小体积；字节数/像素炸弹
+    // 双层硬限在 reencode_template_gray_png 内收口）
     let bytes = match matcher::reencode_template_gray_png(&orig) {
         Ok(b) => b,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, &e.to_string()),
@@ -1388,11 +1492,21 @@ struct LogQuery {
     limit: Option<i64>,
 }
 
+/// 日志查询条数钳制：1..=1000（阶段 2 SEC-004），缺省 200。
+/// 非法值钳进合法区间而非报错——前端只需要"少拿点"，不存在语义歧义
+fn clamp_log_limit(limit: Option<i64>) -> i64 {
+    match limit {
+        Some(n) if n < 1 => 1,
+        Some(n) => n.min(1000),
+        None => 200,
+    }
+}
+
 async fn api_list_logs(State(st): State<AppState>, Query(q): Query<LogQuery>) -> Response {
     match st.db.list_logs(
         q.device_id.as_deref(),
         q.level.as_deref(),
-        q.limit.unwrap_or(200),
+        clamp_log_limit(q.limit),
     ) {
         Ok(logs) => Json(logs).into_response(),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -2011,5 +2125,119 @@ mod sec_tests {
         assert_eq!(st2.credential_source(), "config:password_hash");
         assert!(st2.verify_credentials("hashed-pw"));
         assert!(!st2.verify_credentials("admin123"));
+    }
+
+    // ---------- Wave 2：输入与资源限额（SEC-004） ----------
+
+    fn ctl_req(json: &str) -> ControlReq {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn control_parse_rejects_missing_and_invalid_fields() {
+        // tap 缺坐标 / 越界 / 负值（NaN/Infinity 在 JSON 层即反序列化失败）
+        assert!(parse_ctl(&ctl_req(r#"{"type":"tap"}"#)).is_err());
+        assert!(
+            parse_ctl(&ctl_req(r#"{"type":"tap","x":500}"#)).is_err(),
+            "缺 y 拒绝"
+        );
+        assert!(parse_ctl(&ctl_req(r#"{"type":"tap","x":1e30,"y":0}"#)).is_err());
+        assert!(parse_ctl(&ctl_req(r#"{"type":"tap","x":-1,"y":0}"#)).is_err());
+
+        // swipe 缺坐标 / duration 非法
+        assert!(parse_ctl(&ctl_req(r#"{"type":"swipe","x1":1,"y1":1,"x2":2}"#)).is_err());
+        assert!(parse_ctl(&ctl_req(
+            r#"{"type":"swipe","x1":1,"y1":1,"x2":2,"y2":2,"duration":999999999}"#
+        ))
+        .is_err());
+        assert!(
+            parse_ctl(&ctl_req(
+                r#"{"type":"swipe","x1":1,"y1":1,"x2":2,"y2":2,"duration":300}"#
+            ))
+            .is_ok(),
+            "合法 swipe 带时长放行"
+        );
+
+        // text 空 / 超 300 字节协议上限；多字节字符按字节计
+        assert!(parse_ctl(&ctl_req(r#"{"type":"text"}"#)).is_err());
+        assert!(parse_ctl(&ctl_req(r#"{"type":"text","text":""}"#)).is_err());
+        let long = format!("{{\"type\":\"text\",\"text\":\"{}\"}}", "字".repeat(101)); // 303 字节
+        assert!(parse_ctl(&ctl_req(&long)).is_err());
+        let ok_len = format!("{{\"type\":\"text\",\"text\":\"{}\"}}", "a".repeat(299));
+        assert!(parse_ctl(&ctl_req(&ok_len)).is_ok());
+
+        // press keycode 0 与越界拒绝，合法值放行
+        assert!(parse_ctl(&ctl_req(r#"{"type":"press"}"#)).is_err());
+        assert!(parse_ctl(&ctl_req(r#"{"type":"press","keycode":0}"#)).is_err());
+        assert!(parse_ctl(&ctl_req(r#"{"type":"press","keycode":1001}"#)).is_err());
+        assert!(parse_ctl(&ctl_req(r#"{"type":"press","keycode":187}"#)).is_ok());
+
+        // start_app 包名校验
+        assert!(parse_ctl(&ctl_req(r#"{"type":"start_app"}"#)).is_err());
+        assert!(parse_ctl(&ctl_req(r#"{"type":"start_app","app":"bad pkg!"}"#)).is_err());
+        assert!(parse_ctl(&ctl_req(
+            r#"{"type":"start_app","app":"+com.miHoYo.hkrpg"}"#
+        ))
+        .is_ok());
+        assert!(
+            parse_ctl(&ctl_req(r#"{"type":"start_app","app":"+bad/pkg"}"#)).is_err(),
+            "+ 后非法包名拒绝"
+        );
+        assert!(
+            parse_ctl(&ctl_req(r#"{"type":"start_app","app":"?崩坏星穹铁道"}"#)).is_ok(),
+            "? 按名搜索透传"
+        );
+        assert!(parse_ctl(&ctl_req(r#"{"type":"start_app","app":"?"}"#)).is_err());
+        assert!(parse_ctl(&ctl_req(r#"{"type":"start_app","app":"com.miHoYo.hkrpg"}"#)).is_ok());
+
+        // clipboard 上限与空值
+        assert!(parse_ctl(&ctl_req(r#"{"type":"clipboard","text":""}"#)).is_err());
+
+        // 无参动作不受影响
+        assert!(parse_ctl(&ctl_req(r#"{"type":"home"}"#)).is_ok());
+        assert!(parse_ctl(&ctl_req(r#"{"type":"rotate"}"#)).is_ok());
+
+        // 未知命令仍 400 文案
+        match parse_ctl(&ctl_req(r#"{"type":"touch","action":"down"}"#)) {
+            Err(e) => assert_eq!(e, "unknown command"),
+            Ok(_) => panic!("touch 不属于 REST 控制命令"),
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_control_payload_is_400_even_offline() {
+        let t = build_app(
+            "ctl400",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let ck = cookie_of(&login(&t.app).await);
+        let sid = first_cookie_pair(&ck);
+        // 设备不存在：先经过输入校验（400），轮不到会话检查（409）
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/devices/nope/control",
+                None,
+                &[
+                    (header::COOKIE.to_string(), sid),
+                    (header::CONTENT_TYPE.to_string(), JSON_CT.into()),
+                ],
+                Some(r#"{"type":"tap"}"#.into()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn log_limit_clamped_to_1_1000() {
+        assert_eq!(clamp_log_limit(None), 200);
+        assert_eq!(clamp_log_limit(Some(50)), 50);
+        assert_eq!(clamp_log_limit(Some(0)), 1);
+        assert_eq!(clamp_log_limit(Some(-100)), 1);
+        assert_eq!(clamp_log_limit(Some(1001)), 1000);
+        assert_eq!(clamp_log_limit(Some(1_000_000)), 1000);
     }
 }

@@ -251,9 +251,44 @@ fn to_gray(img: &DynamicImage) -> GrayImage {
 /// RGB PNG（尤其画布直出 PNG）典型下降 60~75%。缩略图/预览变灰是
 /// 已知取舍：颜色信息匹配从不使用（选型依据：灰度图上 WebP 无损相对
 /// PNG 无优势，无需引入新解码依赖）。JPEG 上传模板顺带摆脱再压缩损伤。
+///
+/// 资源防护（阶段 2 SEC-004）：解码前字节数预检 + image crate 解码限额
+/// （单边尺寸/总分配）+ 解码后像素总量复核——三层挡"像素炸弹"
+/// （小体积声明超大分辨率，数十倍放大内存占用）。超限报清晰 4xx 文案。
 pub fn reencode_template_gray_png(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let img =
-        image::load_from_memory(bytes).map_err(|e| anyhow::anyhow!("不是有效的图片: {}", e))?;
+    if bytes.len() > TEMPLATE_MAX_INPUT_BYTES {
+        anyhow::bail!(
+            "图片 {} 字节超过上传上限 {} MiB，请裁剪后再试",
+            bytes.len(),
+            TEMPLATE_MAX_INPUT_BYTES / (1024 * 1024)
+        );
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(TEMPLATE_MAX_DIM);
+    limits.max_image_height = Some(TEMPLATE_MAX_DIM);
+    // 灰度/RGB/RGBA 多通道叠加的内存上界（≈8 字节/像素）
+    limits.max_alloc = Some(TEMPLATE_MAX_PIXELS * 8);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+    reader.limits(limits);
+    let img = reader
+        .with_guessed_format()
+        .map_err(|e| anyhow::anyhow!("识别图片格式失败: {e}"))?
+        .decode()
+        .map_err(|e| match e {
+            image::ImageError::Limits(_) => anyhow::anyhow!(
+                "图片尺寸或内存占用超限（像素预算 {TEMPLATE_MAX_PIXELS_MB} MP / 单边 ≤{TEMPLATE_MAX_DIM}px），疑似像素炸弹，已拒绝"
+            ),
+            other => anyhow::anyhow!("不是有效的图片: {}", other),
+        })?;
+    if img.width() as u64 * img.height() as u64 > TEMPLATE_MAX_PIXELS {
+        anyhow::bail!(
+            "图片 {}x{} 共 {:.1} MP 超过像素预算 {} MP",
+            img.width(),
+            img.height(),
+            img.width() as f64 * img.height() as f64 / 1_000_000.0,
+            TEMPLATE_MAX_PIXELS_MB
+        );
+    }
     let gray = img.to_luma8();
     let mut out = Vec::new();
     let enc = image::codecs::png::PngEncoder::new_with_quality(
@@ -266,6 +301,16 @@ pub fn reencode_template_gray_png(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("PNG 编码失败: {}", e))?;
     Ok(out)
 }
+
+/// 模板上传原始字节上限（10MiB；ZIP 导入内模板条目同一口径；api 层 base64
+/// 护栏同源于此值）
+pub(crate) const TEMPLATE_MAX_INPUT_BYTES: usize = 10 * 1024 * 1024;
+/// 像素总量预算 32MP（典型截图 1080p≈2MP、4K≈8.3MP，富余 3 倍以上）
+const TEMPLATE_MAX_PIXELS: u64 = 32_000_000;
+/// 像素预算换算的展示值（MP）
+const TEMPLATE_MAX_PIXELS_MB: u64 = TEMPLATE_MAX_PIXELS / 1_000_000;
+/// 图片单边硬上限：直接拒绝畸变分辨率（解码器在触达该限后中止分配）
+const TEMPLATE_MAX_DIM: u32 = 16384;
 
 // Arc 辅助（为后续缓存接口预留）
 #[allow(dead_code)]
@@ -291,6 +336,76 @@ impl Matcher {
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
+
+    /// 手工构造最小 PNG（签名 + IHDR + IEND），IHDR 声明指定分辨率——
+    /// 合法头但超大声明：解码器在分配任何像素缓冲前即被限额拦截
+    fn pixel_bomb_png(width: u32, height: u32) -> Vec<u8> {
+        fn crc32(data: &[u8]) -> u32 {
+            let mut crc: u32 = 0xFFFF_FFFF;
+            for &b in data {
+                crc ^= b as u32;
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+        let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
+        let ihdr = [
+            (13u32.to_be_bytes().as_slice()),
+            b"IHDR".as_slice(),
+            &width.to_be_bytes()[..],
+            &height.to_be_bytes()[..],
+            &[8u8, 0, 0, 0, 0], // 8bit 灰度，无压缩/滤波/隔行修饰位全默认
+        ]
+        .concat();
+        out.extend_from_slice(&ihdr);
+        out.extend_from_slice(&crc32(&ihdr[4..]).to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes()); // IEND 长度
+        out.extend_from_slice(b"IEND");
+        out.extend_from_slice(&crc32(b"IEND").to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn pixel_bomb_and_oversize_input_rejected_before_allocation() {
+        // ① 像素炸弹：几百字节的 PNG 声明 30000x30000（≈900MP >> 32MP 预算）
+        let bomb = pixel_bomb_png(30_000, 30_000);
+        assert!(bomb.len() < 256, "样本必须是极小体积的大图");
+        let err = reencode_template_gray_png(&bomb).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("超限") && msg.contains("像素"), "{msg}");
+
+        // ② 单边畸变分辨率（65535px）同样在解码前被拒
+        let err = reencode_template_gray_png(&pixel_bomb_png(65_535, 5)).unwrap_err();
+        assert!(err.to_string().contains("超限"), "{}", err);
+
+        // ③ 字节数预检：>10MiB 的垃圾输入不解码直接拒绝
+        let junk = vec![0u8; 10 * 1024 * 1024 + 128];
+        let err = reencode_template_gray_png(&junk).unwrap_err();
+        assert!(err.to_string().contains("上传上限"), "{}", err);
+
+        // ④ 无效数据仍然报原本的"不是有效的图片"
+        assert!(reencode_template_gray_png(b"not an image").is_err());
+    }
+
+    #[test]
+    fn legit_large_template_within_budget_passes_guard() {
+        // 2048x2048（4MP）灰度渐变图在预算内，完整走通重编码
+        let mut img = GrayImage::new(2048, 2048);
+        for y in 0..64 {
+            for x in 0..64 {
+                img.put_pixel(x, y, image::Luma([((x * y) % 255) as u8]));
+            }
+        }
+        let mut src = Vec::new();
+        DynamicImage::ImageLuma8(img)
+            .write_to(&mut std::io::Cursor::new(&mut src), image::ImageFormat::Png)
+            .unwrap();
+        let out = reencode_template_gray_png(&src).unwrap();
+        assert!(!out.is_empty());
+    }
 
     #[test]
     fn test_template_match_hit() {

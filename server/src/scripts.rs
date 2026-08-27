@@ -17,6 +17,12 @@ use serde::Serialize;
 
 use crate::config::Config;
 
+/// ZIP 导入资源硬限（阶段 2 SEC-004；传输层另有 20MiB body 闸门）
+pub const IMPORT_MAX_TOTAL_BYTES: usize = 100 * 1024 * 1024; // 总解压量 ≤100MiB
+pub const IMPORT_MAX_ENTRIES: usize = 500; // 条目数 ≤500
+pub const IMPORT_MAX_YAML_BYTES: usize = 1024 * 1024; // 单 YAML ≤1MiB
+pub const IMPORT_MAX_TMPL_BYTES: usize = 10 * 1024 * 1024; // 单模板 ≤10MiB
+
 /// 磁盘上的一个脚本文件（id = `<pkg>/<name>`，name 含 .yaml/.yml 扩展名；package 字段 = 应用分区）
 #[derive(Debug, Clone, Serialize)]
 pub struct ScriptFile {
@@ -287,12 +293,35 @@ impl ScriptStore {
 
     /// 导入分区快照 zip 到指定应用分区。confirm=false 时只解析并报告同名冲突
     /// （前端二次确认），confirm=true 时落盘（同名替换）。只认 yaml/ 与 tmpl/ 布局。
+    ///
+    /// 资源硬限（阶段 2 SEC-004，传输层另有 20MiB body 闸门）：
+    /// - 条目数 ≤ [`IMPORT_MAX_ENTRIES`]；
+    /// - 总解压量 ≤ [`IMPORT_MAX_TOTAL_BYTES`]——条目声明尺寸预检 + 实际读取计数
+    ///   双保险，防"声明造假"（压缩炸弹以小博大）；
+    /// - 单 YAML ≤ 1MiB、单模板 ≤ 10MiB（按实际读取字节判定，声明只做预检参考）；
+    /// - zip-slip 由 `enclosed_name` 拒绝绝对路径与 `..`；目录条目不计入限额。
     pub fn import(&self, bytes: &[u8], pkg: &str, confirm: bool) -> anyhow::Result<ImportReport> {
         let package = sanitize_part(pkg)
             .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {}", pkg))?;
         let mut rep = ImportReport::default();
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-        // 先全部解析到内存（zip-slip 防护 + 布局校验），无错才考虑落盘
+        // 预检 ① 条目数（含目录条目——给攻击者的预算更紧，合法包不受影响）
+        if archive.len() > IMPORT_MAX_ENTRIES {
+            anyhow::bail!("包内条目数 {} 超过上限 {IMPORT_MAX_ENTRIES}", archive.len());
+        }
+        // 预检 ② 声明解压总量（不可信值，仅作快速拒绝大头；真实防线在实际读取计数）
+        let mut declared_total: u64 = 0;
+        for i in 0..archive.len() {
+            declared_total = declared_total.saturating_add(archive.by_index(i)?.size());
+            if declared_total > IMPORT_MAX_TOTAL_BYTES as u64 {
+                anyhow::bail!(
+                    "声明解压总量超过上限（>{} MiB），疑似压缩炸弹",
+                    IMPORT_MAX_TOTAL_BYTES / (1024 * 1024)
+                );
+            }
+        }
+        // 全部解析到内存（zip-slip 防护 + 布局校验 + 实际读取计数），无错才考虑落盘
+        let mut actual_total: usize = 0;
         let mut files: Vec<(String, PathBuf, Vec<u8>)> = Vec::new();
         for i in 0..archive.len() {
             let mut f = archive.by_index(i)?;
@@ -307,7 +336,7 @@ impl ScriptStore {
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().to_string())
                 .collect();
-            let (zip_path, dest): (String, PathBuf) = match comps.as_slice() {
+            let (cap, zip_path, dest): (usize, String, PathBuf) = match comps.as_slice() {
                 [y, name] if y == "yaml" => {
                     let name = sanitize_part(name)
                         .ok_or_else(|| anyhow::anyhow!("脚本名非法: {}", name))?;
@@ -316,6 +345,7 @@ impl ScriptStore {
                         anyhow::bail!("yaml/ 下只支持 .yaml/.yml 文件: {}", name);
                     }
                     (
+                        IMPORT_MAX_YAML_BYTES,
                         format!("yaml/{}", name),
                         self.yaml_dir(&package).join(&name),
                     )
@@ -324,14 +354,30 @@ impl ScriptStore {
                     let name = sanitize_template_name(name)
                         .ok_or_else(|| anyhow::anyhow!("模板名非法: {}", name))?;
                     (
+                        IMPORT_MAX_TMPL_BYTES,
                         format!("tmpl/{}", name),
                         self.tmpl_dir(&package).join(&name),
                     )
                 }
                 _ => anyhow::bail!("包内路径需为 yaml/<脚本> 或 tmpl/<模板>: {}", f.name()),
             };
+            // 双保险之实际读取计数：按 cap 截读，多读 1 字节即暴露超限/声明造假
+            let cap_display_mib = cap / (1024 * 1024);
             let mut buf = Vec::new();
-            f.read_to_end(&mut buf)?;
+            (&mut f).take(cap as u64 + 1).read_to_end(&mut buf)?;
+            if buf.len() > cap {
+                anyhow::bail!(
+                    "{zip_path} 解压后 {bytes} 字节超限（该类文件上限 {cap_display_mib} MiB）",
+                    bytes = buf.len()
+                );
+            }
+            actual_total += buf.len();
+            if actual_total > IMPORT_MAX_TOTAL_BYTES {
+                anyhow::bail!(
+                    "总解压量超过上限（>{} MiB），中止导入",
+                    IMPORT_MAX_TOTAL_BYTES / (1024 * 1024)
+                );
+            }
             files.push((zip_path, dest, buf));
         }
         if files.is_empty() {
@@ -359,8 +405,7 @@ impl ScriptStore {
         }
         Ok(rep)
     }
-}
-
+} // impl ScriptStore
 /// 导入结果报告
 #[derive(Debug, Default, Serialize)]
 pub struct ImportReport {
@@ -512,5 +557,108 @@ mod tests {
         assert_eq!(sanitize_part(".."), None);
         assert_eq!(sanitize_part("a/b"), None);
         assert_eq!(sanitize_part("测试_1-2"), Some("测试_1-2".into()));
+    }
+
+    // ---------- 导入资源硬限（阶段 2 SEC-004） ----------
+
+    fn temp_store(tag: &str) -> (ScriptStore, std::path::PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-scripttest-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = ScriptStore { root: dir.clone() };
+        (store, dir)
+    }
+
+    /// 内存构造 zip（Deflated）：name → 原始字节
+    fn craft_zip(entries: Vec<(String, Vec<u8>)>) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, data) in entries {
+                zw.start_file(name, opts).unwrap();
+                zw.write_all(&data).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    fn expect_import_err(store: &ScriptStore, zip_bytes: &[u8], marker: &str, context: &str) {
+        let err = store.import(zip_bytes, "com.test.app", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(marker),
+            "{context}: 期望错误含 {marker:?}，实际 {msg}"
+        );
+    }
+
+    #[test]
+    fn import_rejects_entry_count_over_500() {
+        let (store, _dir) = temp_store("count");
+        let entries: Vec<(String, Vec<u8>)> = (0..501)
+            .map(|i| (format!("yaml/s{i}.yaml"), b"steps: []\n".to_vec()))
+            .collect();
+        let z = craft_zip(entries);
+        expect_import_err(&store, &z, "条目数", "501 个条目应被拒");
+    }
+
+    #[test]
+    fn import_rejects_single_yaml_over_1mib_actual_bytes() {
+        let (store, _dir) = temp_store("yamlcap");
+        // 全零压缩后很小——模拟"声明小/传输小但解压大"的压缩炸弹形态
+        let big = vec![0u8; IMPORT_MAX_YAML_BYTES + 1024];
+        let z = craft_zip(vec![("yaml/big.yaml".into(), big)]);
+        expect_import_err(&store, &z, "超限", "单 YAML 实际解压超 1MiB 应被拒");
+    }
+
+    #[test]
+    fn import_rejects_single_template_over_10mib_actual_bytes() {
+        let (store, _dir) = temp_store("tmplcap");
+        let big = vec![0u8; IMPORT_MAX_TMPL_BYTES + 4096];
+        let z = craft_zip(vec![("tmpl/bomb.png".into(), big)]);
+        expect_import_err(&store, &z, "超限", "单模板实际解压超 10MiB 应被拒");
+    }
+
+    #[test]
+    fn import_rejects_total_decompressed_budget_breach_mid_read() {
+        let (store, _dir) = temp_store("totalcap");
+        // 多个 <1MiB YAML 叠加越过 100MiB 总预算：声明总量预检与实际计数
+        // 双保险，任一都会拦下；断言不 panic 且报预算类错误即可
+        let per = IMPORT_MAX_YAML_BYTES / 4; // 256KiB ×400 = 100MiB+
+        let count = 420;
+        let small = vec![b'a'; per];
+        let entries: Vec<(String, Vec<u8>)> = (0..count)
+            .map(|i| (format!("yaml/p{i}.yaml"), small.clone()))
+            .collect();
+        let z = craft_zip(entries);
+        expect_import_err(&store, &z, "上限", "总解压量超预算应被拒");
+    }
+
+    #[test]
+    fn import_happy_path_under_limits_and_report() {
+        let (store, dir) = temp_store("happy");
+        let z = craft_zip(vec![
+            ("yaml/main.yaml".into(), b"steps:\n  - log ok\n".to_vec()),
+            ("tmpl/a#0_0_10_10.png".into(), vec![7u8; 64]),
+        ]);
+        let rep = store.import(&z, "com.test.app", true).unwrap();
+        assert_eq!(rep.imported.len(), 2);
+        assert_eq!(rep.conflicts.len(), 0);
+        let root: PathBuf = dir.clone();
+        assert!(root.join("com.test.app/yaml/main.yaml").is_file());
+        assert!(root.join("com.test.app/tmpl/a#0_0_10_10.png").is_file());
+        // 再导入一次（confirm 覆盖同名）：全部进 replaced
+        let rep2 = store.import(&z, "com.test.app", true).unwrap();
+        assert_eq!(rep2.replaced.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
