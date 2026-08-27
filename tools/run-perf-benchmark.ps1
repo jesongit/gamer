@@ -1,4 +1,4 @@
-# run-perf-benchmark.ps1 —— PERF-002/003 固定夹具匹配基准
+﻿# run-perf-benchmark.ps1 —— PERF-002/003 固定夹具匹配基准
 #
 # 只执行被 #[ignore] 标记的 Rust 基准测试；输入来自 server/testdata/perf，
 # 输出为实际测得的 p50/p95/max 微秒值，不写回仓库、不伪造目标或对比数据。
@@ -34,7 +34,7 @@ if ($FullScreen) {
     Remove-Item Env:GAMER_PERF_FULL_SCREEN -ErrorAction SilentlyContinue
 }
 
-Write-Host "[perf] fixture=$fixture iterations=$Iterations warmup=$Warmup release=$Release full_screen=$FullScreen"
+Write-Host ('{0} fixture={1} iterations={2} warmup={3} release={4} full_screen={5}' -f '[perf]', $fixture, $Iterations, $Warmup, $Release, $FullScreen)
 Push-Location $server
 try {
     if ($Release) {
@@ -42,8 +42,9 @@ try {
     } else {
         & cargo test matcher::tests::fixed_fixture_benchmark_p50_p95 -- --ignored --nocapture
     }
-    if ($LASTEXITCODE -ne 0) {
-        throw "Rust 固定夹具基准失败（exit=$LASTEXITCODE）"
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw ('Rust 固定夹具基准失败（exit={0}）' -f $exitCode)
     }
 } finally {
     Pop-Location
