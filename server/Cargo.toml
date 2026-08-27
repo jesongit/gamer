@@ -46,3 +46,7 @@ async-recursion = "1"
 
 # 脚本包导出/导入（zip）
 zip = "2"
+
+[dev-dependencies]
+# router 集成测试用 oneshot 驱动（tower ServiceExt）
+tower = { version = "0.4", features = ["util"] }

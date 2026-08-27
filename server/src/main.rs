@@ -82,6 +82,21 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Arc::new(store::Store::open(&cfg)?);
 
+    // 鉴权状态（阶段 2）：凭据链路解析 + 回环管理通道令牌 + 会话治理参数
+    let credential = api::auth::resolve_credential(&cfg);
+    let admin_token = api::auth::resolve_admin_token(loaded.profile);
+    let auth = Arc::new(api::auth::AuthState::new(
+        credential,
+        cfg.auth.clone(),
+        loaded.profile == config::Profile::Prod,
+        admin_token,
+    ));
+    info!(
+        source = %auth.credential_source(),
+        secure_cookies = auth.secure_cookies(),
+        "auth enabled (session cookies; /api/** requires login)"
+    );
+
     // 脚本/模板按应用分区存储（data/<pkg>/yaml|tmpl）+ 旧目录布局一次性迁移
     let scripts = Arc::new(scripts::ScriptStore::open(&cfg)?);
     scripts::migrate_fs_layout(&db, &scripts)?;
@@ -118,15 +133,19 @@ async fn main() -> anyhow::Result<()> {
         viewers,
         scripts,
         shutdown_tx,
+        auth,
     );
     let listener = TcpListener::bind(cfg.listen_addr()).await?;
     info!("GameBot server ready on http://{}", cfg.listen_addr());
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.changed().await;
-            info!("graceful shutdown: http server draining");
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx.changed().await;
+        info!("graceful shutdown: http server draining");
+    })
+    .await?;
     info!("server exited");
 
     Ok(())

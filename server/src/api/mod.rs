@@ -2,21 +2,32 @@
 //!
 //! REST: 设备 CRUD / 连接控制 / 截图 / 模板 / 脚本 / 任务 / 日志 / 认证
 //! WS:   WebRTC 信令（/ws/device/:id）
-
+//!
+//! 鉴权（阶段 2 SEC，见 auth.rs）：
+//! - 公开豁免组（public）：POST /api/login、GET /api/session、POST /api/logout
+//!   （三者自身实现契约语义）、GET /health/live、静态资源 fallback；
+//! - 受保护组（protected）：其余全部 /api/** 与 /ws/device/:id——统一经 auth_guard：
+//!   未认证 401 {"error":"unauthorized"}；状态变更/WS 升级 Origin≠Host 403；
+//!   回环 + X-Admin-Token 快捷通道放行本机管理脚本；
+//! - 分路由 body 限额：普通 JSON ≤256KiB；模板上传/脚本保存 JSON ≤16MiB
+//!   （data_b64/base64 膨胀需要余量，真实图片字节上限在 matcher 收口）；
+//!   ZIP 导入 ≤20MiB。CORS 层已整体移除（vite 代理同源不受影响）。
 mod ws;
+
+pub mod auth;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware as axmw;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -28,6 +39,16 @@ use crate::matcher;
 use crate::scheduler::{next_run, Scheduler};
 use crate::scripts::ScriptStore;
 use crate::store::{Db, Device, LogEntry, ScreenMode, Task};
+
+/// 普通 JSON API 请求体上限（256KiB）
+const BODY_LIMIT_JSON: usize = 256 * 1024;
+/// 模板上传 / 脚本保存的 JSON 上限：data_b64 base64 有 4/3 膨胀，模板真实字节
+/// 上限另有 matcher 侧 10MiB 硬闸；脚本 YAML 实际由导入侧 1MiB 对齐口径
+const BODY_LIMIT_UPLOAD: usize = 16 * 1024 * 1024;
+/// ZIP 导入请求体上限（解压侧硬限见 scripts.rs import 常量）
+const BODY_LIMIT_ZIP_IMPORT: usize = 20 * 1024 * 1024;
+/// 公开豁免组请求体上限（登录等极小 JSON）
+const BODY_LIMIT_PUBLIC: usize = 64 * 1024;
 
 /// 脚本运行句柄：停止标志 + 运行设备（run_stops 的表项）
 #[derive(Clone)]
@@ -55,6 +76,8 @@ pub struct AppState {
     pub viewers: crate::webrtc::ViewerMap,
     /// 优雅停机信号（POST /api/shutdown 拆完会话后触发，main 的 axum 优雅退出）
     pub shutdown: tokio::sync::watch::Sender<bool>,
+    /// 鉴权状态：会话表 / 登录限流 / 凭据 / 回环管理令牌（阶段 2）
+    pub auth: Arc<auth::AuthState>,
 }
 
 pub fn build_router(
@@ -65,6 +88,7 @@ pub fn build_router(
     viewers: crate::webrtc::ViewerMap,
     scripts: Arc<ScriptStore>,
     shutdown: tokio::sync::watch::Sender<bool>,
+    auth: Arc<auth::AuthState>,
 ) -> Router {
     let runner = Arc::new(Runner::new(
         devices.clone(),
@@ -76,17 +100,36 @@ pub fn build_router(
         devices,
         scheduler,
         runner,
-        cfg,
+        cfg: cfg.clone(),
         scripts,
         run_stops: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         viewers,
         shutdown,
+        auth,
     };
 
-    // 视频静默看门狗：自动重连断流设备（见 spawn_watchdog）
+    // 视频静默看门狗 + 会话过期清扫
     spawn_watchdog(state.clone());
-    Router::new()
+    auth::spawn_sweeper(state.auth.clone());
+
+    // ---- 公开豁免组：登录三端点自身实现契约语义；health 存活探针匿名；
+    //      静态资源兜底（前端 SPA）。这些路径不经过 auth_guard。
+    let public: Router<()> = Router::new()
         .route("/api/login", post(api_login))
+        .route("/api/session", get(api_session))
+        .route("/api/logout", post(api_logout))
+        .route("/health/live", get(|| async { (StatusCode::OK, "ok") }))
+        .fallback_service(
+            ServeDir::new("./web-dist").fallback(ServeDir::new("./web-dist/index.html")),
+        )
+        .with_state(state.clone())
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_PUBLIC));
+
+    // ---- 受保护组（普通 JSON API，≤256KiB）：设备 / 截图 / 控制 / 模板查询删除 /
+    //      脚本运行停止状态导出 / 任务 / 日志 / op-templates / shutdown。
+    //      高风险接口标注（专项测试见文件尾 tests）：shutdown、设备控制
+    //      （api_control）、脚本运行·停止、模板删除（api_delete_template）。
+    let protected_json: Router<()> = Router::new()
         .route(
             "/api/devices",
             get(api_list_devices).post(api_create_device),
@@ -103,36 +146,64 @@ pub fn build_router(
         .route("/api/devices/:id/screenshot", post(api_screenshot))
         .route("/api/devices/:id/control", post(api_control))
         .route(
-            "/api/templates",
-            get(api_list_templates).post(api_upload_template),
-        )
-        .route(
             "/api/templates/:name",
             delete(api_delete_template).put(api_rename_template),
         )
         .route("/api/templates/:name/image", get(api_get_template_image))
         .route("/api/templates/:name/test", post(api_test_template))
-        .route("/api/scripts", get(api_list_scripts).post(api_save_script))
         .route("/api/scripts/:id", delete(api_delete_script))
         .route("/api/scripts/:id/run", post(api_run_script))
         .route("/api/scripts/:id/stop", post(api_stop_script))
         .route("/api/scripts/:id/status", get(api_script_status))
         .route("/api/devices/:id/run", get(api_device_run))
         .route("/api/scripts/export", get(api_export_partition))
-        .route("/api/scripts/import", post(api_import_script))
         .route("/api/tasks", get(api_list_tasks).post(api_save_task))
         .route("/api/tasks/:id", delete(api_delete_task))
         .route("/api/tasks/:id/run", post(api_run_task_now))
         .route("/api/logs", get(api_list_logs).delete(api_clear_logs))
         .route("/api/op-templates", get(api_op_templates))
         .route("/api/shutdown", post(api_shutdown))
+        // WS 信令与 REST 同守卫：升级握手完成前由 auth_guard 判定
         .route("/ws/device/:id", get(ws::ws_device))
-        .fallback_service(
-            ServeDir::new("./web-dist").fallback(ServeDir::new("./web-dist/index.html")),
+        .with_state(state.clone())
+        .route_layer(axmw::from_fn_with_state(
+            state.auth.clone(),
+            auth::auth_guard,
+        ))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_JSON));
+
+    // ---- 受保护组（大 JSON，≤16MiB）：模板上传（data_b64）/ 脚本保存+列表。
+    //      GET 与 POST 同路径注册在一组以避免 merge 冲突，GET 本身无 body 不受限额影响。
+    let protected_upload: Router<()> = Router::new()
+        .route(
+            "/api/templates",
+            get(api_list_templates).post(api_upload_template),
         )
-        .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+        .route("/api/scripts", get(api_list_scripts).post(api_save_script))
+        .with_state(state.clone())
+        .route_layer(axmw::from_fn_with_state(
+            state.auth.clone(),
+            auth::auth_guard,
+        ))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_UPLOAD));
+
+    // ---- 受保护组（ZIP 导入 ≤20MiB，高风险接口）：解压侧硬限另见 scripts.rs import
+    let protected_import: Router<()> = Router::new()
+        .route("/api/scripts/import", post(api_import_script))
+        .with_state(state.clone())
+        .route_layer(axmw::from_fn_with_state(
+            state.auth.clone(),
+            auth::auth_guard,
+        ))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_ZIP_IMPORT));
+
+    // 最外层注入来源 IP 键（登录限流用）；CORS 层已移除——vite dev proxy 同源转发不受影响
+    Router::new()
+        .merge(public)
+        .merge(protected_json)
+        .merge(protected_upload)
+        .merge(protected_import)
+        .layer(axmw::from_fn(auth::inject_ip_key))
 }
 
 /// 视频静默看门狗：设备在线但视频流超过阈值无新帧时的处置。
@@ -267,32 +338,78 @@ fn spawn_watchdog(st: AppState) {
     });
 }
 
-// ---------- 认证 ----------
+// ---------- 认证（契约钉死，见 web/src/auth.js 同款口径） ----------
+//
+// POST /api/login {username,password} → 200 Set-Cookie gb_session(Path=/; HttpOnly; SameSite=Strict)
+//                                        body {ok:true,username}
+//   401 {"error":"invalid_credentials"}；429 {"error":"too_many_attempts","retry_after":秒}
+// GET  /api/session → 200 {authenticated:true,username} / 401 {"error":"unauthorized"}
+// POST /api/logout → 204 销毁会话 + 过期 Set-Cookie（幂等）
+// Secure 标志仅 GAMER_PROFILE=prod 追加；dev 纯 HTTP LAN 保持无 Secure。
+// 旧响应壳 {token:"demo-token"} 已废除。
 
 #[derive(Deserialize)]
 struct LoginReq {
-    user: String,
+    username: String,
     password: String,
 }
 
-#[derive(Serialize)]
-struct LoginResp {
-    token: String,
+async fn api_login(
+    State(st): State<AppState>,
+    Extension(ip): Extension<auth::IpKey>,
+    Json(req): Json<LoginReq>,
+) -> Response {
+    // 形状粗校验：缺字段/超长直接 400，不进限流与凭据比对
+    if req.username.is_empty()
+        || req.password.is_empty()
+        || req.username.len() > 64
+        || req.password.len() > 1024
+    {
+        return err_response(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    match st.auth.attempt_login(&req.username, &req.password, &ip.0) {
+        Ok((sid, username)) => (
+            StatusCode::OK,
+            [(header::SET_COOKIE, st.auth.session_cookie_for(&sid))],
+            Json(serde_json::json!({"ok": true, "username": username})),
+        )
+            .into_response(),
+        Err(auth::LoginError::Invalid) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_credentials"})),
+        )
+            .into_response(),
+        Err(auth::LoginError::RateLimited { retry_after_secs }) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, retry_after_secs.to_string())],
+            Json(
+                serde_json::json!({"error": "too_many_attempts", "retry_after": retry_after_secs}),
+            ),
+        )
+            .into_response(),
+    }
 }
 
-async fn api_login(State(st): State<AppState>, Json(req): Json<LoginReq>) -> Response {
-    if req.user == "admin" && req.password == st.cfg.password {
-        Json(LoginResp {
-            token: "demo-token".into(),
-        })
-        .into_response()
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "用户名或密码错误"})),
-        )
-            .into_response()
+/// 会话探测（豁免组但语义与受保护端点一致：有效会话续期并回身份）
+async fn api_session(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    match auth::AuthState::extract_sid(&headers).and_then(|sid| st.auth.validate(&sid)) {
+        Some(username) => {
+            Json(serde_json::json!({"authenticated": true, "username": username})).into_response()
+        }
+        None => auth::unauthorized_response(),
     }
+}
+
+/// 登出：销毁当前会话 + 下发过期 Cookie；无会话时同样 204（幂等）
+async fn api_logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(sid) = auth::AuthState::extract_sid(&headers) {
+        st.auth.destroy(&sid);
+    }
+    (
+        StatusCode::NO_CONTENT,
+        [(header::SET_COOKIE, st.auth.expired_cookie())],
+    )
+        .into_response()
 }
 
 // ---------- 设备 ----------
@@ -1341,3 +1458,558 @@ fn sanitize_filename(name: &str) -> String {
 
 #[allow(dead_code)]
 fn _unused(_: LogEntry, _: Duration) {}
+
+// ---------- 集成测试（阶段 2 SEC 验收矩阵自动化子集） ----------
+//
+// 走真实 build_router 全栈（DeviceManager 只构造不 start——无 adb 扫描副作用；
+// Store 用临时目录 sqlite），请求经 tower oneshot 直驱，ConnectInfo 以扩展注入
+// 模拟来源地址。WS 场景以"升级前被 guard 拒绝"断言（真握手过繁，见 auth.rs 决策内核注释）。
+
+#[cfg(test)]
+mod sec_tests {
+    use super::*;
+    use axum::extract::ConnectInfo;
+    use axum::http::{Request as HttpRequest, Response as HttpResponse};
+    use std::net::SocketAddr;
+    use tower::ServiceExt;
+
+    struct TestApp {
+        app: Router,
+        /// 保活 shutdown 接收端，模拟 main 的优雅退出监听
+        _shutdown_rx: tokio::sync::watch::Receiver<bool>,
+        #[allow(dead_code)]
+        dir: std::path::PathBuf,
+    }
+
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-apitest-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn build_app(
+        tag: &str,
+        credential: auth::Credential,
+        mut auth_cfg: crate::config::AuthConfig,
+    ) -> TestApp {
+        // 测试专用会话 TTL 缺省（生产默认 12h/2h 太长，无法实测过期）
+        if auth_cfg.session_abs_secs == 12 * 3600 {
+            auth_cfg.session_abs_secs = 3600;
+        }
+        if auth_cfg.session_idle_secs == 2 * 3600 {
+            auth_cfg.session_idle_secs = 1800;
+        }
+        let dir = tmp_dir(tag);
+        let cfg = Config {
+            data_dir: dir.clone(),
+            ..Default::default()
+        };
+        let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
+        let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let viewers: crate::webrtc::ViewerMap =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone(), viewers.clone()));
+        let scheduler = Arc::new(Scheduler::new(
+            db.clone(),
+            devices.clone(),
+            viewers.clone(),
+            scripts.clone(),
+        ));
+        let auth = Arc::new(auth::AuthState::new(
+            credential,
+            auth_cfg,
+            false,
+            Some("test-token".into()),
+        ));
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let app = build_router(
+            db,
+            devices,
+            scheduler,
+            cfg,
+            viewers,
+            scripts,
+            shutdown_tx,
+            auth.clone(),
+        );
+        TestApp {
+            app,
+            _shutdown_rx: shutdown_rx,
+            dir,
+        }
+    }
+
+    fn req(
+        method: &str,
+        uri: &str,
+        remote: Option<&str>,
+        headers: &[(String, String)],
+        body: Option<String>,
+    ) -> HttpRequest<Body> {
+        let mut b = HttpRequest::builder().method(method).uri(uri);
+        if let Some(r) = remote {
+            b = b.extension(ConnectInfo::<SocketAddr>(r.parse().unwrap()));
+        }
+        for (k, v) in headers {
+            b = b.header(k.as_str(), v);
+        }
+        match body {
+            Some(s) => b.body(Body::from(s)).unwrap(),
+            None => b.body(Body::empty()).unwrap(),
+        }
+    }
+
+    async fn send(app: &Router, r: HttpRequest<Body>) -> HttpResponse<Body> {
+        app.clone().oneshot(r).await.unwrap()
+    }
+
+    fn cookie_of(resp: &HttpResponse<Body>) -> String {
+        resp.headers()
+            .get(header::SET_COOKIE)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default()
+    }
+
+    fn first_cookie_pair(set_cookie: &str) -> String {
+        set_cookie
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    }
+
+    async fn json_body(resp: HttpResponse<Body>) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    const JSON_CT: &str = "application/json";
+    const ADMIN_JSON: &str = r#"{"username":"admin","password":"admin123"}"#;
+
+    async fn send_json_login(app: &Router, remote: Option<&str>, body: &str) -> HttpResponse<Body> {
+        send(
+            app,
+            req(
+                "POST",
+                "/api/login",
+                remote,
+                &[(header::CONTENT_TYPE.to_string(), JSON_CT.into())],
+                Some(body.to_string()),
+            ),
+        )
+        .await
+    }
+
+    async fn login(app: &Router) -> HttpResponse<Body> {
+        send_json_login(app, None, ADMIN_JSON).await
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_devices_list_is_401() {
+        let t = build_app(
+            "401devs",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let resp = send(&t.app, req("GET", "/api/devices", None, &[], None)).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let j = json_body(resp).await;
+        assert_eq!(j["error"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_shutdown_is_401_and_service_stays_alive() {
+        let t = build_app(
+            "401sd",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let resp = send(&t.app, req("POST", "/api/shutdown", None, &[], None)).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // 进程仍存活：后续请求正常应答
+        let alive = send(&t.app, req("GET", "/health/live", None, &[], None)).await;
+        assert_eq!(alive.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_sets_cookie_with_contract_attributes() {
+        let t = build_app(
+            "cookie",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let resp = login(&t.app).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ck = cookie_of(&resp);
+        assert!(ck.starts_with("gb_session="), "{ck}");
+        assert!(
+            !first_cookie_pair(&ck)[11..].trim().is_empty(),
+            "session id 非空: {ck}"
+        );
+        assert!(ck.contains("Path=/"), "{ck}");
+        assert!(ck.contains("HttpOnly"), "{ck}");
+        assert!(ck.contains("SameSite=Strict"), "{ck}");
+        assert!(
+            !ck.contains("Secure"),
+            "dev profile 不加 Secure 保证纯 HTTP LAN 可用: {ck}"
+        );
+        let j = json_body(resp).await;
+        assert_eq!(j["ok"], true);
+        assert_eq!(j["username"], "admin");
+    }
+
+    #[tokio::test]
+    async fn wrong_password_gives_invalid_credentials() {
+        let t = build_app(
+            "badpw",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let resp = send_json_login(&t.app, None, r#"{"username":"admin","password":"nope"}"#).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let j = json_body(resp).await;
+        assert_eq!(j["error"], "invalid_credentials");
+    }
+
+    #[tokio::test]
+    async fn consecutive_failures_trigger_429_too_many_attempts() {
+        let cfg = crate::config::AuthConfig {
+            login_max_fails: 3,
+            login_window_secs: 300,
+            ..Default::default()
+        };
+        let t = build_app("rl429", auth::Credential::Plain("admin123".into()), cfg);
+        for i in 0..3 {
+            let resp = send_json_login(
+                &t.app,
+                Some("203.0.113.7:5555"),
+                r#"{"username":"admin","password":"wrong"}"#,
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "第{i}次失败应为401"
+            );
+        }
+        // 正确口令在锁定期同样拒绝
+        let resp = send_json_login(&t.app, Some("203.0.113.7:5555"), ADMIN_JSON).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().contains_key(header::RETRY_AFTER));
+        let j = json_body(resp).await;
+        assert_eq!(j["error"], "too_many_attempts");
+        assert!(j["retry_after"].as_u64().unwrap_or(0) >= 1);
+    }
+
+    #[tokio::test]
+    async fn session_probe_and_logout_semantics() {
+        let t = build_app(
+            "sess",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+
+        // 未认证探测 → 401 unauthorized
+        let resp = send(&t.app, req("GET", "/api/session", None, &[], None)).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 登录拿 cookie → 探测通过且回身份
+        let ck = cookie_of(&login(&t.app).await);
+        let sid = first_cookie_pair(&ck);
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/session",
+                None,
+                &[(header::COOKIE.to_string(), sid.clone())],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let j = json_body(resp).await;
+        assert_eq!(j["authenticated"], true);
+        assert_eq!(j["username"], "admin");
+
+        // 登出 → 204 + 过期 Cookie；旧 cookie 立即失效
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/logout",
+                None,
+                &[(header::COOKIE.to_string(), sid.clone())],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let clear_ck = cookie_of(&resp);
+        assert!(
+            clear_ck.contains("Max-Age=0") && clear_ck.starts_with("gb_session="),
+            "{clear_ck}"
+        );
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/devices",
+                None,
+                &[(header::COOKIE.to_string(), sid)],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 登出幂等：无/坏 cookie 再登出仍 204
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/logout",
+                None,
+                &[(header::COOKIE.to_string(), "gb_session=deadbeef".into())],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = send(&t.app, req("POST", "/api/logout", None, &[], None)).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn cross_origin_state_change_is_403_but_matching_origin_passes() {
+        let t = build_app(
+            "origin",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let ck = cookie_of(&login(&t.app).await);
+        let sid = first_cookie_pair(&ck);
+
+        // 外站 Origin 打状态变更接口（已带合法会话）→ 403 forbidden_origin
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/devices/scan",
+                None,
+                &[
+                    (header::COOKIE.to_string(), sid.clone()),
+                    (header::ORIGIN.to_string(), "http://evil.example".into()),
+                    (header::HOST.to_string(), "localhost:8443".into()),
+                ],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let j = json_body(resp).await;
+        assert_eq!(j["error"], "forbidden_origin");
+
+        // 同源 Origin + 会话 → 通过 guard 进入处理器（设备不存在 → 非 4xx 卫兵错）
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/devices/nope/control",
+                None,
+                &[
+                    (header::COOKIE.to_string(), sid),
+                    (header::ORIGIN.to_string(), "http://localhost:8443".into()),
+                    (header::HOST.to_string(), "localhost:8443".into()),
+                    (header::CONTENT_TYPE.to_string(), "application/json".into()),
+                ],
+                Some(r#"{"type":"home"}"#.into()),
+            ),
+        )
+        .await;
+        assert_ne!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_without_cookie_rejected_before_handshake() {
+        let t = build_app(
+            "wsauth",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        // 无 cookie 的 WS 升级：guard 在握手前 401（无需真实建连）
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/ws/device/d1",
+                None,
+                &[
+                    (header::UPGRADE.to_string(), "websocket".into()),
+                    (header::CONNECTION.to_string(), "Upgrade".into()),
+                ],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // 带合法 cookie 则放行进入 upgrade 处理器（此处无 Upgrade 头，
+        // axum 会以非 101 拒绝，但绝不再是我们 guard 的 401）
+        let ck = cookie_of(&login(&t.app).await);
+        let sid = first_cookie_pair(&ck);
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/ws/device/d1",
+                None,
+                &[(header::COOKIE.to_string(), sid)],
+                None,
+            ),
+        )
+        .await;
+        assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn loopback_admin_token_channel_open_close() {
+        let t = build_app(
+            "admintok",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+
+        // 回环 + 正确 token → 放行执行 shutdown（测试栈里 viewers/devices 为空，安全）
+        let ok = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/shutdown",
+                Some("127.0.0.1:33333"),
+                &[(
+                    super::auth::ADMIN_TOKEN_HEADER.to_string(),
+                    "test-token".into(),
+                )],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let j = json_body(ok).await;
+        assert_eq!(j["ok"], true);
+        // 回环通道放行后 shutdown 已触发 watch 信号——router 本身仍活着
+        let alive = send(&t.app, req("GET", "/health/live", None, &[], None)).await;
+        assert_eq!(alive.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn non_loopback_same_token_is_401() {
+        let t = build_app(
+            "lanrej",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        for addr in ["192.168.1.50:40000", "10.1.2.3:8443"] {
+            let resp = send(
+                &t.app,
+                req(
+                    "POST",
+                    "/api/shutdown",
+                    Some(addr),
+                    &[(
+                        super::auth::ADMIN_TOKEN_HEADER.to_string(),
+                        "test-token".into(),
+                    )],
+                    None,
+                ),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "{addr} 同 token 必须拒绝"
+            );
+        }
+        // 无 token 头也拒
+        let resp = send(
+            &t.app,
+            req("POST", "/api/shutdown", Some("127.0.0.1:1"), &[], None),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn wrong_token_even_loopback_is_401() {
+        let t = build_app(
+            "badtok",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/shutdown",
+                Some("127.0.0.1:22222"),
+                &[(super::auth::ADMIN_TOKEN_HEADER.to_string(), "nope".into())],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // 环境变量密码链路优先级：GAMER_ADMIN_PASSWORD 设置时覆盖 config 明文
+    #[test]
+    fn resolve_credential_prefers_env_then_hash_then_plain() {
+        use crate::config::Config;
+
+        // 仅明文
+        let cfg = Config::default(); // password=admin123
+        let c = auth::resolve_credential(&cfg);
+        assert!(matches!(c, auth::Credential::Plain(_)));
+        let st = auth::AuthState::new(c, Default::default(), false, None);
+        assert!(st.verify_credentials("admin123"));
+
+        // hash 覆盖明文
+        let salt = [0x11u8; 8];
+        let digest: [u8; 32] = {
+            use sha2::{Digest, Sha256};
+            let mut m = Sha256::new();
+            m.update(salt);
+            m.update(b"hashed-pw");
+            m.finalize().into()
+        };
+        let boxed = format!(
+            "sha256${}${}",
+            salt.iter().map(|b| format!("{b:02x}")).collect::<String>(),
+            digest
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        let mut cfg2 = Config::default();
+        cfg2.auth.password_hash = boxed;
+        let st2 = auth::AuthState::new(
+            auth::resolve_credential(&cfg2),
+            Default::default(),
+            false,
+            None,
+        );
+        assert_eq!(st2.credential_source(), "config:password_hash");
+        assert!(st2.verify_credentials("hashed-pw"));
+        assert!(!st2.verify_credentials("admin123"));
+    }
+}

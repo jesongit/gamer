@@ -18,6 +18,40 @@ use std::path::{Path, PathBuf};
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
+/// 鉴权配置（config.toml [auth] 段，阶段 2 SEC-002）
+///
+/// 凭据来源优先级（在 api/auth.rs 解析，非本文件）：环境变量 GAMER_ADMIN_PASSWORD
+/// > 本段 password_hash（`sha256$salt$hex`，salt 与 digest 均为 hex）> 兼容旧明文
+/// `password` 字段（默认 admin/admin123）。启动日志只打印启用的是哪一级来源，
+/// 绝不输出凭据内容。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    /// 会话绝对有效期秒数：自登录起算，到期强制重登（滑动续期无法延长）
+    pub session_abs_secs: u64,
+    /// 会话空闲有效期秒数：每次认证请求刷新；连续不活动超时即失效
+    pub session_idle_secs: u64,
+    /// 登录限流：同一来源 IP 在窗口内的最大失败次数，达到后全部拒绝直至窗口滑出
+    pub login_max_fails: u32,
+    /// 登录限流滑动窗口宽度秒数
+    pub login_window_secs: u64,
+    /// 管理口令哈希（格式 `sha256$salt$hex`：随机盐 + sha256(salt||password) 的 hex，
+    /// 长度校验在 validate）。留空 = 不启用，回落环境变量或明文 password。
+    pub password_hash: String,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            session_abs_secs: 12 * 3600,
+            session_idle_secs: 2 * 3600,
+            login_max_fails: 10,
+            login_window_secs: 300,
+            password_hash: String::new(),
+        }
+    }
+}
+
 /// 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式
 ///
 /// 占位符：{name} 模板名 · {x}/{y} 点击相对坐标（color 的采样点同用）·
@@ -146,6 +180,9 @@ pub struct Config {
     /// 仅 GB_LOG 指向文件时生效；0 = 永不清理
     #[serde(default = "default_log_retain_days")]
     pub log_retain_days: u32,
+    /// 鉴权与会话治理（[auth] 段整体可缺省取默认值）
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 fn default_idle_power_secs() -> u64 {
@@ -191,6 +228,7 @@ impl Default for Config {
             op_templates: OpTemplates::default(),
             idle_power_secs: default_idle_power_secs(),
             log_retain_days: default_log_retain_days(),
+            auth: AuthConfig::default(),
         }
     }
 }
@@ -291,12 +329,13 @@ impl Config {
         format!("0.0.0.0:{}", self.port)
     }
 
-    /// 非敏感生效值摘要（供启动日志展示来源与关键参数；密码等敏感项绝不输出）
+    /// 非敏感生效值摘要（供启动日志展示来源与关键参数；密码/哈希等敏感项绝不输出）
     pub fn non_sensitive_summary(&self) -> String {
         format!(
             "port={} data_dir={} interval=\"{}\" threshold={:.2} log_level={} \
              decode_frames={} max_size={} bitrate_mbps={} fps={} idle_power_secs={}s \
-             log_retain_days={}d",
+             log_retain_days={}d session_abs_secs={} session_idle_secs={} \
+             login_max_fails={}/{}s password_hash={}",
             self.port,
             self.data_dir.display(),
             self.interval,
@@ -308,6 +347,15 @@ impl Config {
             self.fps,
             self.idle_power_secs,
             self.log_retain_days,
+            self.auth.session_abs_secs,
+            self.auth.session_idle_secs,
+            self.auth.login_max_fails,
+            self.auth.login_window_secs,
+            if self.auth.password_hash.is_empty() {
+                "unset"
+            } else {
+                "set"
+            },
         )
     }
 
@@ -404,6 +452,40 @@ impl Config {
                 "log_level = \"{}\" 非法：只接受 debug / info / warn / error",
                 self.log_level
             ));
+        }
+
+        // [auth] 段（阶段 2）：TTL/限流下限收紧防止自摆乌龙（空闲 ≥60s、窗口 ≥1s）
+        if self.auth.session_abs_secs < 60 || self.auth.session_abs_secs > 30 * 86400 {
+            errs.push(format!(
+                "auth.session_abs_secs = {} 超出合理区间 [60, 2592000]（会话绝对有效期秒）",
+                self.auth.session_abs_secs
+            ));
+        }
+        if self.auth.session_idle_secs < 60 || self.auth.session_idle_secs > 7 * 86400 {
+            errs.push(format!(
+                "auth.session_idle_secs = {} 超出合理区间 [60, 604800]（会话空闲有效期秒）",
+                self.auth.session_idle_secs
+            ));
+        }
+        if !(1..=1000).contains(&self.auth.login_max_fails) {
+            errs.push(format!(
+                "auth.login_max_fails = {} 超出合理区间 [1, 1000]",
+                self.auth.login_max_fails
+            ));
+        }
+        if !(1..=86400).contains(&self.auth.login_window_secs) {
+            errs.push(format!(
+                "auth.login_window_secs = {} 超出合理区间 [1, 86400]",
+                self.auth.login_window_secs
+            ));
+        }
+        if !self.auth.password_hash.is_empty() {
+            if let Err(e) = crate::api::auth::parse_password_hash(&self.auth.password_hash) {
+                errs.push(format!(
+                    "auth.password_hash 格式非法：{e}（期望 sha256$salt$hex，salt 与 \
+                     sha256(salt||password) 均为 hex 编码）"
+                ));
+            }
         }
 
         errs
@@ -655,5 +737,51 @@ fps = 15
         assert_eq!(duration_str_to_ms("500xyz"), None); // 未知单位
         assert_eq!(duration_str_to_ms(""), None);
         assert_eq!(duration_str_to_ms("-1s"), None);
+    }
+
+    #[test]
+    fn auth_defaults_valid_and_bad_password_hash_rejected() {
+        // 缺省 [auth] 段必须通过启动校验
+        let cfg = Config::default();
+        assert!(cfg.validate().is_empty());
+        assert_eq!(cfg.auth.session_abs_secs, 12 * 3600);
+        assert_eq!(cfg.auth.session_idle_secs, 2 * 3600);
+        // 非法哈希格式逐类拒绝
+        for bad in [
+            "plaintext",
+            "sha256$onlysalt",
+            "sha256$$0123",      // 盐缺失
+            "md5$aabbccdd$0123", // 算法不符
+            "sha256$zzzz$$deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", // 盐非 hex
+            "sha256$aabbccdd$nothex", // 摘要非 hex
+            "sha256$aabbccdd$abcd",   // 摘要长度 ≠32 字节
+        ] {
+            let cfg = Config {
+                auth: AuthConfig {
+                    password_hash: bad.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let errs = cfg.validate();
+            assert!(
+                errs.iter().any(|e| e.contains("password_hash")),
+                "{bad}: {errs:?}"
+            );
+        }
+        // 合法样例：salt=aabbccdd11223344（8 字节），digest=32 字节 hex
+        let good = format!("sha256$aabbccdd11223344${}", "ab".repeat(32));
+        let cfg = Config {
+            auth: AuthConfig {
+                password_hash: good,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            !cfg.validate().iter().any(|e| e.contains("password_hash")),
+            "{:?}",
+            cfg.validate()
+        );
     }
 }

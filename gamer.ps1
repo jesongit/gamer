@@ -7,6 +7,9 @@
   - 后端：Rust gamer-server（端口从 server/config.toml 读取，默认 8443）
   - 前端：Vite dev server（端口 5173，代理 /api、/ws 到后端）
   停止时均通过「端口 + 进程名」定位进程，避免误杀其他程序。
+  阶段 2 起后端 REST/WS 需浏览器会话；本脚本走「回环 + X-Admin-Token」本机管理通道
+  （令牌优先取环境变量 GAMER_ADMIN_TOKEN，否则自动持久化到
+  %LOCALAPPDATA%\gamer\admin-token，启动后端时注入其进程环境）完成优雅停机。
   rebuild：停止前后端 → 重新编译（后端 cargo build，前端 vite build 产物输出到
   server/web-dist 由后端静态托管）→ 再启动（-Release 可指定 release 构建）。
 
@@ -57,6 +60,26 @@ $Root         = $PSScriptRoot
 $ServerDir    = Join-Path $Root 'server'
 $WebDir       = Join-Path $Root 'web'
 $ConfigFile   = Join-Path $ServerDir 'config.toml'
+
+# ---------- 回环管理通道令牌（阶段 2 鉴权配套） ----------
+# 服务端鉴权后，POST /api/shutdown 需要「回环来源 + X-Admin-Token」才能优雅停机。
+# 令牌解析：环境变量 GAMER_ADMIN_TOKEN 优先；否则使用/生成 %LOCALAPPDATA%\gamer\admin-token
+# （用户目录 ACL 下仅当前用户可读，与 config.toml 存明文口令同一信任级别）。
+# 该令牌会在启动后端时经进程环境注入 server，stop 时读取同一值放行——重启换新值也自洽。
+function Get-PersistedAdminToken {
+    if ($env:GAMER_ADMIN_TOKEN -and $env:GAMER_ADMIN_TOKEN.Trim()) { return $env:GAMER_ADMIN_TOKEN.Trim() }
+    $dir  = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'gamer'
+    $file = Join-Path $dir 'admin-token'
+    if (Test-Path $file) {
+        $tok = (Get-Content $file -Raw -ErrorAction SilentlyContinue)
+        if ($tok) { return $tok.Trim() }
+    }
+    $new = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N').Substring(0, 8)
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    Set-Content -Path $file -Value $new -NoNewline
+    return $new
+}
+$script:AdminToken = Get-PersistedAdminToken
 
 # 后端
 $BackendName   = 'gamer-server'                             # 进程名匹配模式
@@ -295,13 +318,17 @@ function Stop-Backend {
     }
     # 优雅停机：先调 /api/shutdown 让服务端拆 scrcpy 会话/清 adb reverse 隧道再退出
     # （硬杀会留孤儿 adb 子进程，曾致 adb 短暂楔死后续连接，见 AGENTS.md 已知坑）。
-    # curl 失败/超时无所谓——下面照旧兜底硬杀
+    # 阶段 2 起该接口要求回环 + X-Admin-Token 头——令牌由 Start-Backend 注入 server
+    # 进程环境（同值），此处带上即可优雅停机；服务端令牌不一致时退化为下方兜底硬杀。
     if (Test-PortListening $Port) {
-        Write-Host "后端: 请求优雅停机（POST /api/shutdown）..."
+        Write-Host "后端: 请求优雅停机（POST /api/shutdown + X-Admin-Token）..."
         $prev = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        try { & curl.exe -s -m 20 -X POST "http://127.0.0.1:$Port/api/shutdown" 2>$null | Out-Null } catch {}
-        finally { $ErrorActionPreference = $prev }
+        try {
+            & curl.exe -s -m 20 -X POST `
+                -H ("{0}: {1}" -f 'X-Admin-Token', $script:AdminToken) `
+                "http://127.0.0.1:$Port/api/shutdown" 2>$null | Out-Null
+        } catch {} finally { $ErrorActionPreference = $prev }
         # 响应返回时会话已拆完，通常随即自然退出；稍等未退再走硬杀
         $deadline = (Get-Date).AddSeconds(5)
         while (@(Get-BackendProcs).Count -gt 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
@@ -429,14 +456,15 @@ function Start-Backend {
     Write-Host ("后端日志: {0}（追加），stdout: {1}，stderr: {2}" -f $BackendLog, $BackendOutLog, $BackendErrLog)
 
     # 服务端支持 GB_LOG=<文件> 自带文件日志（追加模式），不依赖 stdout 重定向；
-    # GB_LOG 在 WMI 包装进程内设置（包装进程与当前控制台无句柄关联）
+    # GB_LOG 与 GAMER_ADMIN_TOKEN 在 WMI 包装进程内设置（包装进程与当前控制台
+    # 无句柄关联）。token 注入后 server 的回环管理通道即认可本脚本 stop。
     $launchTime = Get-Date
     $null = Start-BackgroundProcess -FilePath $exe `
         -WorkingDirectory $ServerDir `
         -OutputFile $BackendOutLog `
         -ErrorFile $BackendErrLog `
         -InputFile $NullInputFile `
-        -EnvBlock ("`$env:GB_LOG='{0}'" -f $BackendLog)
+        -EnvBlock ("`$env:GB_LOG='{0}'; `$env:GAMER_ADMIN_TOKEN='{1}'" -f $BackendLog, $script:AdminToken)
 
     # 等待端口监听（最多 60 秒）
     $deadline = (Get-Date).AddSeconds(60)
