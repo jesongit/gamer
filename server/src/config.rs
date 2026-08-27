@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// 鉴权配置（config.toml [auth] 段，阶段 2 SEC-002）
 ///
 /// 凭据来源优先级（在 api/auth.rs 解析，非本文件）：环境变量 GAMER_ADMIN_PASSWORD
-/// > 本段 password_hash（`sha256$salt$hex`，salt 与 digest 均为 hex）> 兼容旧明文
+/// > 本段 password_hash（推荐 Argon2id PHC；兼容旧 `sha256$salt$hex`）> 兼容旧明文
 /// `password` 字段（默认 admin/admin123）。启动日志只打印启用的是哪一级来源，
 /// 绝不输出凭据内容。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,8 +35,8 @@ pub struct AuthConfig {
     pub login_max_fails: u32,
     /// 登录限流滑动窗口宽度秒数
     pub login_window_secs: u64,
-    /// 管理口令哈希（格式 `sha256$salt$hex`：随机盐 + sha256(salt||password) 的 hex，
-    /// 长度校验在 validate）。留空 = 不启用，回落环境变量或明文 password。
+    /// 管理口令哈希（推荐 Argon2id PHC；兼容旧 `sha256$salt$hex`，长度/格式校验在
+    /// validate）。留空 = 不启用，回落环境变量或旧明文 password。
     pub password_hash: String,
 }
 
@@ -482,8 +482,8 @@ impl Config {
         if !self.auth.password_hash.is_empty() {
             if let Err(e) = crate::api::auth::parse_password_hash(&self.auth.password_hash) {
                 errs.push(format!(
-                    "auth.password_hash 格式非法：{e}（期望 sha256$salt$hex，salt 与 \
-                     sha256(salt||password) 均为 hex 编码）"
+                    "auth.password_hash 格式非法：{e}（期望 Argon2id PHC；兼容旧 \
+                     sha256$salt$hex）"
                 ));
             }
         }
