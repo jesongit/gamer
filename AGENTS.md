@@ -56,6 +56,15 @@ cd web && npm run dev                   # 单起前端
 - 开发/运行中踩到的坑（环境、构建、部署、已知限制）必须记入下方「已知坑」；
   每条保持**精简准确**：一句话现象 + 原因 + 解决/规避，不写流水账、不夸大
 - 修改yaml引擎，必须同步检查，前端校验代码，模板代码，yaml 文档
+- git 提交遵守下方「Git 提交规范」
+
+## Git 提交规范（Conventional Commits）
+
+- 提交格式：`<type>(<scope>): <描述>`；type 限定：feat / fix / docs / style / refactor / perf / test / build / ci / chore / revert
+- scope 用主要改动面（engine / web / api / device / data / scheduler / agents 等），建议写但不强制
+- 描述用中文一句话直陈结果；复杂改动按本仓库惯例把要点铺在同一行内展开，需要更多细节时空一行写正文分条
+- 主题不同的改动拆成多个提交（引擎 / 前端 / 数据 / 文档分开），单个提交自洽、可独立回滚
+- 破坏性变更：type 后紧跟 `!`（如 `feat(engine)!:`），正文末尾另起 `BREAKING CHANGE: <影响与迁移>` 脚注
 
 ## 已知坑
 
