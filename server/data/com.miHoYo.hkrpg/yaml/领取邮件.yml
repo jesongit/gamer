@@ -1,6 +1,6 @@
 steps:
-  - find: mail.png
+  - find: 邮件按钮.png
     then:
-      - find: mail_rev.png
-      - find: itm_cls.png
-      - find: close.png
+      - find: 领取邮件.png
+      - find: 点击空白关闭1.png
+      - find: 关闭界面.png
