@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -50,6 +51,34 @@ type SharedResult<T, E> = Shared<BoxFuture<'static, Result<Arc<T>, Arc<E>>>>;
 
 struct InFlightEntry<T, E> {
     result: SharedResult<T, E>,
+    waiters: AtomicUsize,
+}
+
+struct InFlightWaiter<'a, K, T, E>
+where
+    K: Eq + Hash + Clone + Send + 'static,
+    T: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+{
+    owner: &'a InFlight<K, T, E>,
+    key: K,
+    entry: Arc<InFlightEntry<T, E>>,
+}
+
+impl<K, T, E> Drop for InFlightWaiter<'_, K, T, E>
+where
+    K: Eq + Hash + Clone + Send + 'static,
+    T: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        if self.entry.waiters.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // If this was the last waiter, removing the identity-checked entry also drops
+            // the last Shared future. A cancelled ffmpeg operation therefore observes
+            // kill_on_drop instead of leaving a permanently occupied key behind.
+            self.owner.remove_if_same(&self.key, &self.entry);
+        }
+    }
 }
 
 /// 合并同一个 key 的并发异步请求。
@@ -174,14 +203,23 @@ where
                 let result = async move { operation().await.map(Arc::new).map_err(Arc::new) }
                     .boxed()
                     .shared();
-                let entry = Arc::new(InFlightEntry { result });
+                let entry = Arc::new(InFlightEntry {
+                    result,
+                    waiters: AtomicUsize::new(0),
+                });
                 entries.insert(key.clone(), Arc::clone(&entry));
                 entry
             }
         };
 
-        let result = entry.result.clone().await;
-        self.remove_if_same(&key, &entry);
+        entry.waiters.fetch_add(1, Ordering::AcqRel);
+        let waiter = InFlightWaiter {
+            owner: self,
+            key,
+            entry,
+        };
+        let result = waiter.entry.result.clone().await;
+        drop(waiter);
         result
     }
 
@@ -253,8 +291,11 @@ impl FrameCache {
             let total: usize = state.gop.iter().map(|f| f.data.len()).sum();
             if state.gop.len() > GOP_MAX_FRAMES || total > GOP_MAX_BYTES {
                 state.gop.clear();
+                // A discarded GOP is no longer a decodable snapshot, so invalidate any
+                // in-flight decode that captured it. Ordinary P frames keep the same GOP
+                // generation: they must not make a live decode stale on every video tick.
+                state.snapshot_changed(sequence);
             }
-            state.snapshot_changed(sequence);
         }
     }
 
@@ -552,7 +593,10 @@ mod tests {
         let second = cache.snapshot().expect("P frame extends the snapshot");
 
         assert_eq!(cache.latest_frame_info().0, 4);
-        assert!(second.key.snapshot_generation > first.key.snapshot_generation);
+        assert_eq!(
+            second.key.snapshot_generation,
+            first.key.snapshot_generation
+        );
         assert_eq!(second.key.config_generation, first.key.config_generation);
         assert!(second.frame_sequence > first.frame_sequence);
         assert!(second.latest_frame_at >= first.latest_frame_at);
@@ -587,6 +631,54 @@ mod tests {
 
         assert!(cache.clear_gop_if_same(current.key));
         assert!(cache.snapshot().is_none());
+    }
+
+    struct DropProbe(std::sync::Arc<AtomicUsize>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn in_flight_cancellation_cleans_last_waiter_and_drops_future() {
+        let requests = std::sync::Arc::new(InFlight::<u64, usize, TestError>::new());
+        let executions = std::sync::Arc::new(AtomicUsize::new(0));
+        let future_drops = std::sync::Arc::new(AtomicUsize::new(0));
+        let started = std::sync::Arc::new(Notify::new());
+
+        let first_requests = std::sync::Arc::clone(&requests);
+        let first_executions = std::sync::Arc::clone(&executions);
+        let first_future_drops = std::sync::Arc::clone(&future_drops);
+        let first_started = std::sync::Arc::clone(&started);
+        let first = tokio::spawn(async move {
+            first_requests
+                .run(42, move || async move {
+                    first_executions.fetch_add(1, Ordering::SeqCst);
+                    let _probe = DropProbe(first_future_drops);
+                    first_started.notify_one();
+                    std::future::pending::<Result<usize, TestError>>().await
+                })
+                .await
+        });
+
+        started.notified().await;
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+        tokio::task::yield_now().await;
+        assert_eq!(future_drops.load(Ordering::SeqCst), 1);
+
+        let retry_executions = std::sync::Arc::clone(&executions);
+        let retry = requests
+            .run(42, move || async move {
+                retry_executions.fetch_add(1, Ordering::SeqCst);
+                Ok(9)
+            })
+            .await
+            .unwrap();
+        assert_eq!(*retry, 9);
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
