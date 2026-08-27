@@ -46,6 +46,9 @@ pub const SESSION_COOKIE: &str = "gb_session";
 pub const ADMIN_TOKEN_HEADER: &str = "X-Admin-Token";
 /// 过期会话后台清扫周期（每小时一次）
 const SWEEP_PERIOD: Duration = Duration::from_secs(3600);
+/// 开发模式自动生成回环管理凭据时的非敏感提示；不得附带凭据名或凭据值。
+const DEV_ADMIN_TOKEN_NOTICE: &str =
+    "dev 模式已自动生成本机管理凭据（仅回环可用）；如需脚本复用请设置环境变量";
 /// 登录限流表容量上限：达到后整表收缩（防伪造源 IP 灌爆内存的最后兜底；
 /// 实际来源 IP 无法伪造 socket 地址，正常单机场景远远用不到这个量级）
 const MAX_TRACKED_IPS: usize = 10_000;
@@ -610,9 +613,9 @@ pub fn resolve_credential(cfg: &crate::config::Config) -> Credential {
     Credential::Plain(cfg.password.clone())
 }
 
-/// 回环管理通道令牌：GAMER_ADMIN_TOKEN 优先；dev 缺省自动生成并以 WARN 打印
-/// （敏感日志规范的显式例外：该令牌仅对回环请求生效、无法被远程利用，
-/// 打进本机日志换取"开箱即用的优雅停机"；prod 未设置则通道直接禁用）。
+/// 回环管理通道令牌：GAMER_ADMIN_TOKEN 优先；dev 缺省自动生成并以 WARN 提示
+/// 通道已启用，但**绝不把令牌值写入日志**（日志可能被导出或集中收集）；
+/// prod 未设置则通道直接禁用。
 pub fn resolve_admin_token(profile: crate::config::Profile) -> Option<String> {
     if let Ok(t) = std::env::var("GAMER_ADMIN_TOKEN") {
         let t = t.trim().to_string();
@@ -623,9 +626,7 @@ pub fn resolve_admin_token(profile: crate::config::Profile) -> Option<String> {
     match profile {
         crate::config::Profile::Dev => {
             let t = random_hex_id(16); // 128bit
-            warn!(
-                "dev 模式自动生成本机管理令牌（仅回环可用）：{ADMIN_TOKEN_HEADER}: {t} —— 可用 GAMER_ADMIN_TOKEN 固定"
-            );
+            warn!("{DEV_ADMIN_TOKEN_NOTICE}");
             Some(t)
         }
         crate::config::Profile::Prod => {
@@ -947,6 +948,44 @@ mod tests {
             Some("http://localhost:8443.evil"),
             Some("localhost:8443")
         ));
+        // Origin 必须是浏览器的 http(s) origin；畸形 scheme、空 authority、
+        // 用户信息和多值头均不能借字符串前缀比较绕过同源校验。
+        assert!(!origin_allows(
+            Some("ftp://localhost:8443"),
+            Some("localhost:8443")
+        ));
+        assert!(!origin_allows(
+            Some("http:///localhost:8443"),
+            Some("localhost:8443")
+        ));
+        assert!(!origin_allows(
+            Some("http://user@localhost:8443"),
+            Some("localhost:8443")
+        ));
+        assert!(!origin_allows(
+            Some("http://localhost:8443, http://evil.example"),
+            Some("localhost:8443")
+        ));
+        assert!(!origin_allows(Some("http://localhost:8443"), None));
+    }
+
+    #[test]
+    fn generated_admin_token_is_not_exposed_by_log_message_contract() {
+        // 令牌仍需返回给进程内的管理通道，但其值只能存在于内存，不能拼入
+        // 日志消息。这个断言与生产日志格式保持同一白名单：只允许头名称和提示，
+        // 禁止把随机值回显到日志文本。
+        let token = random_hex_id(16);
+        assert_eq!(token.len(), 32);
+        let safe_message = DEV_ADMIN_TOKEN_NOTICE;
+        assert!(!safe_message.contains(&token));
+        for sensitive in ["Cookie", "Authorization", "password", "token", "zip"] {
+            assert!(
+                !safe_message
+                    .to_ascii_lowercase()
+                    .contains(&sensitive.to_ascii_lowercase()),
+                "日志提示不得出现敏感字段名 {sensitive:?}"
+            );
+        }
     }
 
     /// 测试专用决策入口：按参数拼装请求头后走与中间件相同的 admit 内核

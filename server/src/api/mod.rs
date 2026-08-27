@@ -2213,12 +2213,51 @@ mod sec_tests {
                 "GET",
                 "/ws/device/d1",
                 None,
-                &[(header::COOKIE.to_string(), sid)],
+                &[(header::COOKIE.to_string(), sid.clone())],
                 None,
             ),
         )
         .await;
         assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 合法会话不能让跨站页面借 WS Upgrade 绕过 Origin 校验。
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/ws/device/d1",
+                None,
+                &[
+                    (header::COOKIE.to_string(), sid.clone()),
+                    (header::UPGRADE.to_string(), "websocket".into()),
+                    (header::CONNECTION.to_string(), "Upgrade".into()),
+                    (header::ORIGIN.to_string(), "https://evil.example".into()),
+                    (header::HOST.to_string(), "localhost:8443".into()),
+                ],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Origin 存在但 Host 缺失也必须拒绝，避免把畸形握手当作同源。
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/ws/device/d1",
+                None,
+                &[
+                    (header::COOKIE.to_string(), sid),
+                    (header::UPGRADE.to_string(), "websocket".into()),
+                    (header::CONNECTION.to_string(), "Upgrade".into()),
+                    (header::ORIGIN.to_string(), "https://localhost:8443".into()),
+                ],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

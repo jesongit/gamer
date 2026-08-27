@@ -183,7 +183,10 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                             }
                         } else {
                             // 后续消息：控制走 DataChannel，这里仅处理心跳
-                            debug!("ws msg: {}", text);
+                            // 信令 WS 上的后续内容由客户端控制，不能把原文写入日志：
+                            // 即使当前协议只约定心跳，也不应让 Cookie/token/password
+                            // 等误发内容进入日志文件。
+                            debug!(bytes = text.len(), "ws signaling message received");
                         }
                     }
                     Message::Close(_) => break,
