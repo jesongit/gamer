@@ -81,7 +81,7 @@ use std::time::Duration;
 
 use async_recursion::async_recursion;
 use image::GenericImageView;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_yaml::Value;
 use tracing::warn;
 
@@ -90,41 +90,18 @@ use crate::matcher;
 use crate::scripts::ScriptStore;
 use crate::webrtc::ViewerMap;
 
+#[path = "engine_events.rs"]
+mod events;
+#[path = "engine_syntax.rs"]
+mod syntax;
+
+pub use events::ScriptEvent;
+
 /// find 未显式指定 timeout 时的默认超时毫秒数（30 分钟）
 const FIND_DEFAULT_TIMEOUT_MS: u64 = 1_800_000;
 
 /// 自定义函数嵌套调用上限（防无限递归）
 const MAX_FUNC_DEPTH: usize = 32;
-
-/// 脚本运行可视化事件（服务端 → 浏览器，经 control DataChannel，JSON 格式 {"type":"se","ev":...}）
-/// 注意 rename_all="snake_case"：内部标签默认用变体名原样（"Tap"），
-/// 前端按小写 "tap"/"swipe"/"hit"/"miss" 匹配（曾因大小写不匹配事件全部被忽略）
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "ev", rename_all = "snake_case")]
-pub enum ScriptEvent {
-    /// 引擎点击（设备像素坐标）
-    Tap { x: u32, y: u32 },
-    /// 引擎滑动（设备像素坐标）
-    Swipe { x1: u32, y1: u32, x2: u32, y2: u32 },
-    /// 模板匹配命中（设备像素坐标 + 置信度）
-    Hit {
-        tpl: String,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-        score: f32,
-    },
-    /// 模板匹配未命中（可视化本次搜索区域，设备像素坐标；
-    /// 调试定位"在哪找、没找到"——轮询期内每轮刷新，命中前持续可见）
-    Miss {
-        tpl: String,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-    },
-}
 
 /// 运行器
 pub struct Runner {
@@ -1636,31 +1613,7 @@ impl Runner {
     /// 空格分隔 + 括号感知的实参切分：`[x, y]` 内部的空格不算分隔符。
     /// call 与自定义函数调用共用
     fn split_args(line: &str) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut cur = String::new();
-        let mut depth = 0usize;
-        for ch in line.chars() {
-            match ch {
-                '[' => {
-                    depth += 1;
-                    cur.push(ch);
-                }
-                ']' => {
-                    depth = depth.saturating_sub(1);
-                    cur.push(ch);
-                }
-                c if c.is_whitespace() && depth == 0 => {
-                    if !cur.is_empty() {
-                        out.push(std::mem::take(&mut cur));
-                    }
-                }
-                c => cur.push(c),
-            }
-        }
-        if !cur.is_empty() {
-            out.push(cur);
-        }
-        out
+        syntax::split_args(line)
     }
 
     /// call/函数实参替换：把 `$N`（N≥1）替换为实参。递归作用于所有字符串
@@ -1669,53 +1622,7 @@ impl Runner {
     /// 引用 `$N` 超出实参数量 → 报错（含 $N 占位的脚本被直接运行、或实参
     /// 传少，都在此拦截）
     fn substitute_args(v: &mut Value, args: &[String]) -> anyhow::Result<()> {
-        match v {
-            Value::String(s) => *s = Self::substitute_str(s, args)?,
-            Value::Sequence(seq) => {
-                for item in seq.iter_mut() {
-                    Self::substitute_args(item, args)?;
-                }
-            }
-            Value::Mapping(m) => {
-                // 键也要替换（如 color 的色值键），iter_mut 的键不可变 → 重建
-                let old = std::mem::take(m);
-                for (mut k, mut val) in old {
-                    Self::substitute_args(&mut k, args)?;
-                    Self::substitute_args(&mut val, args)?;
-                    m.insert(k, val);
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// 单字符串的 $N 替换：`$` 后跟数字（取最长数字串）= 实参引用，越界报错；
-    /// `$` 后非数字 = 字面 $ 原样保留。替换结果不再扫描（实参含 $N 不会二次展开）
-    fn substitute_str(s: &str, args: &[String]) -> anyhow::Result<String> {
-        let mut out = String::with_capacity(s.len());
-        let mut rest = s;
-        while let Some(pos) = rest.find('$') {
-            out.push_str(&rest[..pos]);
-            let after = &rest[pos + 1..];
-            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if digits.is_empty() {
-                out.push('$');
-                rest = after;
-                continue;
-            }
-            let n: usize = digits.parse().unwrap();
-            let Some(arg) = args.get(n.checked_sub(1).unwrap_or(usize::MAX)) else {
-                anyhow::bail!(
-                    "参数引用 ${} 超出实参数量（{} 个）：含 $N 占位的脚本需经 call/函数调用传参运行（参数从 $1 开始）",
-                    digits, args.len()
-                );
-            };
-            out.push_str(arg);
-            rest = &after[digits.len()..];
-        }
-        out.push_str(rest);
-        Ok(out)
+        syntax::substitute_args(v, args)
     }
 
     /// ^N 上下文替换（find/color 分支子树）：递归替换字符串（含映射键），但
@@ -1723,78 +1630,14 @@ impl Runner {
     /// 嵌套 find/color 的内层绑定自然覆盖外层；序列里的字符串项（block 模板
     /// 名 / wait 区间等）照常替换。^N 越界报错
     fn substitute_refs(v: &Value, refs: &[String]) -> anyhow::Result<Value> {
-        match v {
-            Value::String(s) => Ok(Value::String(Self::substitute_ref_str(s, refs)?)),
-            Value::Sequence(seq) => {
-                let mut out = Vec::with_capacity(seq.len());
-                for item in seq {
-                    out.push(match item {
-                        Value::String(s) => Value::String(Self::substitute_ref_str(s, refs)?),
-                        other => other.clone(),
-                    });
-                }
-                Ok(Value::Sequence(out))
-            }
-            Value::Mapping(m) => {
-                let mut out = serde_yaml::Mapping::new();
-                for (k, val) in m {
-                    let nk = match k {
-                        Value::String(s) => Value::String(Self::substitute_ref_str(s, refs)?),
-                        other => other.clone(),
-                    };
-                    let nv = match val {
-                        Value::String(s) => Value::String(Self::substitute_ref_str(s, refs)?),
-                        Value::Sequence(seq) => {
-                            let mut ns = Vec::with_capacity(seq.len());
-                            for item in seq {
-                                ns.push(match item {
-                                    Value::String(s) => {
-                                        Value::String(Self::substitute_ref_str(s, refs)?)
-                                    }
-                                    other => other.clone(),
-                                });
-                            }
-                            Value::Sequence(ns)
-                        }
-                        Value::Mapping(_) => Self::substitute_refs(val, refs)?,
-                        other => other.clone(),
-                    };
-                    out.insert(nk, nv);
-                }
-                Ok(Value::Mapping(out))
-            }
-            other => Ok(other.clone()),
-        }
+        syntax::substitute_refs(v, refs)
     }
 
     /// 单字符串的 ^N 替换：`^` 后跟数字（取最长数字串）= 上下文引用，越界
     /// 报错；`^` 后非数字 = 字面 ^ 原样保留。^ 不是 YAML 保留字符（& 是——
     /// 锚点，故弃用 &N 选 ^N）
     fn substitute_ref_str(s: &str, refs: &[String]) -> anyhow::Result<String> {
-        let mut out = String::with_capacity(s.len());
-        let mut rest = s;
-        while let Some(pos) = rest.find('^') {
-            out.push_str(&rest[..pos]);
-            let after = &rest[pos + 1..];
-            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if digits.is_empty() {
-                out.push('^');
-                rest = after;
-                continue;
-            }
-            let n: usize = digits.parse().unwrap();
-            let Some(r) = refs.get(n.checked_sub(1).unwrap_or(usize::MAX)) else {
-                anyhow::bail!(
-                    "上下文引用 ^{} 超出数量（{} 个：^1 主模板/坐标，^2.. 障碍模板/颜色）",
-                    digits,
-                    refs.len()
-                );
-            };
-            out.push_str(r);
-            rest = &after[digits.len()..];
-        }
-        out.push_str(rest);
-        Ok(out)
+        syntax::substitute_ref_str(s, refs)
     }
 
     /// 解析时长参数（timeout / interval / wait / swipe time 共用）：
@@ -1802,105 +1645,24 @@ impl Runner {
     /// （m ≡ min，大小写不敏感、可带小数如 "1.5s"）；裸数字（YAML 数字或
     /// 纯数字串）不再接受，直接报错（2026-08-26 语法精简）
     fn parse_duration(v: &Value, opt: &str) -> anyhow::Result<u64> {
-        let Some(s) = v.as_str() else {
-            anyhow::bail!(
-                "{} 需要带单位时长（如 500ms / 2s / 1m / 30min / 1h / 1d）；裸数字不再接受，收到: {:?}",
-                opt, v
-            );
-        };
-        let t = s.trim().to_ascii_lowercase();
-        // 后缀匹配顺序：ms 必须在 m 前判（"1ms" 剥掉 "s" 会剩 "1m"）；min 在 m 前
-        for (suffix, mult) in [
-            ("ms", 1.0f64),
-            ("min", 60_000.0),
-            ("m", 60_000.0),
-            ("s", 1_000.0),
-            ("h", 3_600_000.0),
-            ("d", 86_400_000.0),
-        ] {
-            if let Some(num) = t.strip_suffix(suffix) {
-                if let Ok(val) = num.trim().parse::<f64>() {
-                    if val >= 0.0 {
-                        return Ok((val * mult).round() as u64);
-                    }
-                }
-            }
-        }
-        anyhow::bail!(
-            "{} 需要带单位时长（如 500ms / 2s / 1m / 30min / 1h / 1d），收到: {}",
-            opt,
-            s
-        )
+        syntax::parse_duration(v, opt)
     }
 
     /// 取步骤时长参数（timeout），缺失返回 None；解析失败（格式非法）向上传播
     fn opt_duration(step: &Value, opt: &str) -> anyhow::Result<Option<u64>> {
-        match step.get(opt) {
-            Some(v) => Self::parse_duration(v, opt).map(Some),
-            None => Ok(None),
-        }
+        syntax::opt_duration(step, opt)
     }
 
     /// 步骤列表值：列表，或留空（null）= 无步骤
     fn steps_value(v: &Value) -> anyhow::Result<Vec<Value>> {
-        match v {
-            Value::Null => Ok(Vec::new()),
-            Value::Sequence(seq) => Ok(seq.clone()),
-            _ => anyhow::bail!("需要步骤列表（- 键: 换行缩进步骤）或留空"),
-        }
+        syntax::steps_value(v)
     }
 
     /// 解析 color 的色值键：6 位十六进制 RRGGBB（可带 # / 0x 前缀、大小写
     /// 不限）或 [r, g, b] 数字数组（0~255）；整数（YAML 解析器把 0xff8800
     /// 直接解析成数字时）按 0xRRGGBB 解码
     fn parse_color(v: &Value) -> anyhow::Result<(u8, u8, u8)> {
-        if let Some(s) = v.as_str() {
-            let t = s
-                .trim()
-                .trim_start_matches('#')
-                .trim_start_matches("0x")
-                .to_ascii_lowercase();
-            if t.len() == 6 && t.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Ok((
-                    u8::from_str_radix(&t[0..2], 16).unwrap(),
-                    u8::from_str_radix(&t[2..4], 16).unwrap(),
-                    u8::from_str_radix(&t[4..6], 16).unwrap(),
-                ));
-            }
-            anyhow::bail!(
-                "色值需要 6 位十六进制（如 ff8800 或 \"#ff8800\"）或 [r, g, b]，收到: {}",
-                s
-            );
-        }
-        if let Some(n) = v.as_u64() {
-            if n <= 0xFF_FFFF {
-                return Ok(((n >> 16) as u8, (n >> 8) as u8, n as u8));
-            }
-        }
-        if let Some(seq) = v.as_sequence() {
-            if seq.len() == 3 {
-                let c = seq
-                    .iter()
-                    .map(|x| {
-                        let n = x
-                            .as_u64()
-                            .or_else(|| x.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("色值数组需要 [r, g, b] 数字（0~255）")
-                            })?;
-                        if n > 255 {
-                            anyhow::bail!("色值分量必须在 0~255，收到: {}", n);
-                        }
-                        Ok(n as u8)
-                    })
-                    .collect::<anyhow::Result<Vec<u8>>>()?;
-                return Ok((c[0], c[1], c[2]));
-            }
-        }
-        anyhow::bail!(
-            "色值只支持 6 位十六进制（ff8800）或 [r, g, b] 数组，收到: {:?}",
-            v
-        )
+        syntax::parse_color(v)
     }
 
     /// 匹配单个模板一次（独立取最新截图，不重试）：按模板名 #后缀解析区域后匹配。
@@ -2193,22 +1955,7 @@ impl Runner {
 
     /// 解析相对坐标点 [x, y]（0~1）：tap / color 坐标 / region fm-to 共用
     fn parse_rel_coord(v: &Value) -> anyhow::Result<(f64, f64)> {
-        let seq = v
-            .as_sequence()
-            .ok_or_else(|| anyhow::anyhow!("需要 [x, y] 数组（相对坐标 0~1）"))?;
-        if seq.len() != 2 {
-            anyhow::bail!("需要 [x, y] 2 个相对坐标");
-        }
-        let x = seq[0]
-            .as_f64()
-            .ok_or_else(|| anyhow::anyhow!("坐标必须是数字"))?;
-        let y = seq[1]
-            .as_f64()
-            .ok_or_else(|| anyhow::anyhow!("坐标必须是数字"))?;
-        if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
-            anyhow::bail!("相对坐标必须在 0~1 之间");
-        }
-        Ok((x, y))
+        syntax::parse_rel_coord(v)
     }
 
     /// 获取屏幕尺寸：优先 scrcpy 会话元信息，兜底解析截图 PNG
@@ -2226,17 +1973,7 @@ impl Runner {
 
     /// 解析相对坐标（百分比 0~1）：支持数组 [x, y] 或对象 {x, y}
     fn relative_pair(&self, v: &Value) -> anyhow::Result<(f32, f32)> {
-        if let Some(seq) = v.as_sequence() {
-            let x = seq.first().and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-            let y = seq.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-            return Ok((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
-        }
-        if v.is_mapping() {
-            let x = v.get("x").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-            let y = v.get("y").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-            return Ok((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
-        }
-        anyhow::bail!("相对坐标需要 [x, y] 或 {{x, y}}")
+        syntax::relative_pair(v)
     }
 }
 
