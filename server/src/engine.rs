@@ -3616,3 +3616,7 @@ mod tests {
         );
     }
 }
+
+/// 前端共享 YAML fixture 双侧一致校验（OPTIMIZATION_PLAN QG-003）
+#[cfg(test)]
+mod fixtures_tests;
