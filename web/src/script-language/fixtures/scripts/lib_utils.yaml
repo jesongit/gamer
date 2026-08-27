@@ -1,0 +1,50 @@
+# 函数库（稳定副本，改编自 server/data/com.miHoYo.hkrpg/yaml/utils.yml，模板名虚拟化）
+func:
+  # 领取邮件
+  - mail_recv:
+    cond: tpl_phone.png
+    steps:
+      - find: tpl_phone.png
+      - find: tpl_mail_icon.png
+        timeout: 500ms
+        then:
+          - find: tpl_mail_claim.png
+          - find: tpl_blank_close_1.png
+          - find: tpl_close_panel.png
+  # 领取委托
+  - itm_recv:
+    - find: tpl_task_goto.png
+    - find: tpl_delegate_claim.png
+      timeout: 500ms
+      then: # 正确进入委托
+        - find: tpl_blank_close_1.png
+        - find: tpl_close_panel.png
+        - find: tpl_task_reward.png
+      else: # 如果没进委托一般是进了生存索引，切回任务界面
+        - find: tpl_task_list.png
+          timeout: 1s
+          else:
+            - throw: 未知界面
+
+  # 清体力
+  - ap_burn:
+    - find: tpl_train_target.png
+    - find: tpl_train_battle.png
+    - find: tpl_stamina_btn.png
+      timeout: 500ms
+    - find: tpl_add_count.png
+    - find: tpl_add_count.png
+    - find: tpl_add_count.png
+    - find: tpl_add_count.png
+    - find: tpl_add_count.png
+    - find: tpl_challenge_stage.png
+    - find: tpl_start_stage.png
+    - find: tpl_exit_battle.png
+    - find: tpl_close_panel.png
+      verify: true
+  # 领取大月卡
+  - bp_recv:
+    - find: tpl_monthly_btn.png
+      block:
+        - tpl_monthly_open.png
+        - tpl_blank_close_2.png

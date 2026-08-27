@@ -1,0 +1,4 @@
+# 小函数库（缺扩展名自动补全用例的调用目标：misc:ping → misc.yml）
+func:
+  - ping:
+    - log: pong
