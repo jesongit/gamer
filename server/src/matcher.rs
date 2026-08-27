@@ -3,11 +3,16 @@
 //! 性能策略：截图先等比缩放到 ≤540px 宽（模板同比例），步长采样 + rayon 并行，
 //! 1080p 全图 + 小模板典型耗时 100~400ms；支持搜索区域裁剪进一步加速。
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
+#[cfg(test)]
+use std::time::Instant;
 
-use image::{DynamicImage, GrayImage};
+use image::{DynamicImage, GenericImageView, GrayImage};
+use parking_lot::Mutex;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// 匹配结果（坐标基于原始截图坐标系）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,16 +37,130 @@ pub struct MatchRequest {
     pub region: Option<[u32; 4]>,
 }
 
+/// 模板预处理结果：缓存 PNG 解码后的灰度矩阵、f32 数据和 NCC 统计量。
+///
+/// 缓存键是完整模板字节的 SHA-256，因此覆盖上传或同名文件内容变化会自然
+/// 使用新键，不会把旧模板结果带到新内容上。缩放后的模板按目标尺寸另存，
+/// 因为全屏匹配和区域匹配的缩放比例可能不同。
+#[derive(Clone)]
+struct PreparedTemplate {
+    image: Arc<GrayImage>,
+    data: Arc<Vec<f32>>,
+    mean: f32,
+    var: f32,
+}
+
+struct TemplateCacheEntry {
+    source: Arc<DynamicImage>,
+    prepared: HashMap<(u32, u32), Arc<PreparedTemplate>>,
+}
+
+#[derive(Default)]
+struct TemplateCache {
+    entries: HashMap<[u8; 32], TemplateCacheEntry>,
+}
+
+const TEMPLATE_CACHE_CAPACITY: usize = 128;
+static TEMPLATE_CACHE: OnceLock<Mutex<TemplateCache>> = OnceLock::new();
+
+fn template_cache() -> &'static Mutex<TemplateCache> {
+    TEMPLATE_CACHE.get_or_init(|| Mutex::new(TemplateCache::default()))
+}
+
+fn template_key(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+/// 获取 PNG 解码后的源灰度图。锁只覆盖一次性的模板解码，命中时仅复制 Arc。
+fn cached_template_source(bytes: &[u8]) -> anyhow::Result<([u8; 32], Arc<DynamicImage>)> {
+    let key = template_key(bytes);
+    let mut cache = template_cache().lock();
+    if !cache.entries.contains_key(&key) {
+        let source = image::load_from_memory(bytes)
+            .map_err(|e| anyhow::anyhow!("解析模板失败 ({} bytes): {}", bytes.len(), e))?;
+        if cache.entries.len() >= TEMPLATE_CACHE_CAPACITY {
+            if let Some(evicted) = cache.entries.keys().next().copied() {
+                cache.entries.remove(&evicted);
+            }
+        }
+        cache.entries.insert(
+            key,
+            TemplateCacheEntry {
+                source: Arc::new(source),
+                prepared: HashMap::new(),
+            },
+        );
+    }
+    let source = cache
+        .entries
+        .get(&key)
+        .expect("template cache entry inserted")
+        .source
+        .clone();
+    Ok((key, source))
+}
+
+fn build_prepared_template(image: GrayImage) -> anyhow::Result<PreparedTemplate> {
+    let data: Vec<f32> = image.as_raw().iter().map(|&v| v as f32 / 255.0).collect();
+    if data.is_empty() {
+        anyhow::bail!("template is empty");
+    }
+    let mean = data.iter().sum::<f32>() / data.len() as f32;
+    let var = data.iter().map(|&v| (v - mean) * (v - mean)).sum();
+    if var < 1e-6 {
+        anyhow::bail!("template is uniform color");
+    }
+    Ok(PreparedTemplate {
+        image: Arc::new(image),
+        data: Arc::new(data),
+        mean,
+        var,
+    })
+}
+
+/// 获取指定尺寸的模板统计量。尺寸是缩放后的实际模板尺寸，避免重复灰度化、
+/// f32 转换和均值/方差计算；首次 miss 才做一次这些工作。
+fn cached_prepared_template(
+    key: [u8; 32],
+    source: &Arc<DynamicImage>,
+    dimensions: (u32, u32),
+) -> anyhow::Result<Arc<PreparedTemplate>> {
+    let mut cache = template_cache().lock();
+    let entry = cache
+        .entries
+        .entry(key)
+        .or_insert_with(|| TemplateCacheEntry {
+            source: source.clone(),
+            prepared: HashMap::new(),
+        });
+    if let Some(prepared) = entry.prepared.get(&dimensions) {
+        return Ok(prepared.clone());
+    }
+    let image = if entry.source.dimensions() == dimensions {
+        to_gray(entry.source.as_ref())
+    } else {
+        entry
+            .source
+            .resize(
+                dimensions.0,
+                dimensions.1,
+                image::imageops::FilterType::Triangle,
+            )
+            .to_luma8()
+    };
+    let prepared = Arc::new(build_prepared_template(image)?);
+    entry.prepared.insert(dimensions, prepared.clone());
+    Ok(prepared)
+}
+
 pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>> {
     let screen = image::load_from_memory(&req.screen_png)
         .map_err(|e| anyhow::anyhow!("解析截图失败 ({} bytes): {}", req.screen_png.len(), e))?
         .to_rgb8();
-    let template = image::load_from_memory(&req.template_png)
-        .map_err(|e| anyhow::anyhow!("解析模板失败 ({} bytes): {}", req.template_png.len(), e))?
-        .to_rgb8();
+    let (template_key, template_source) = cached_template_source(&req.template_png)?;
 
     let (sw, sh) = (screen.width(), screen.height());
-    let (tw, th) = (template.width(), template.height());
+    let (tw, th) = template_source.dimensions();
     if tw >= sw || th >= sh {
         anyhow::bail!("template larger than screen");
     }
@@ -71,36 +190,27 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
         DynamicImage::ImageRgb8(screen)
     };
     let screen_gray = to_gray(&screen_small);
-    let template_gray = if scale < 1.0 {
+    let template_dimensions = if scale < 1.0 {
         let (tw2, th2) = (
             (tw as f32 * scale).max(1.0) as u32,
             (th as f32 * scale).max(1.0) as u32,
         );
-        DynamicImage::ImageRgb8(template)
-            .resize(tw2, th2, image::imageops::FilterType::Triangle)
-            .to_luma8()
+        (tw2, th2)
     } else {
-        to_gray(&DynamicImage::ImageRgb8(template))
+        (tw, th)
     };
+    let prepared = cached_prepared_template(template_key, &template_source, template_dimensions)?;
 
     let (sw2, sh2) = screen_gray.dimensions();
-    let (tw2, th2) = template_gray.dimensions();
+    let (tw2, th2) = prepared.image.dimensions();
     if tw2 >= sw2 || th2 >= sh2 {
         // 缩放后模板仍过大，直接失败
         anyhow::bail!("template too large after scaling");
     }
 
-    // 模板统计
-    let t_data: Vec<f32> = template_gray
-        .as_raw()
-        .iter()
-        .map(|&v| v as f32 / 255.0)
-        .collect();
-    let t_mean = t_data.iter().sum::<f32>() / t_data.len() as f32;
-    let t_var: f32 = t_data.iter().map(|&v| (v - t_mean) * (v - t_mean)).sum();
-    if t_var < 1e-6 {
-        anyhow::bail!("template is uniform color");
-    }
+    let t_data = prepared.data.as_slice();
+    let t_mean = prepared.mean;
+    let t_var = prepared.var;
 
     // 区域映射到缩放坐标系（上界截断到缩放后图像尺寸，防止浮点误差越界）
     let (rx0s, ry0s) = ((rx0 as f32 * scale) as u32, (ry0 as f32 * scale) as u32);
@@ -131,7 +241,7 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
             let mut local_best: Option<(f32, usize, usize)> = None;
             for &y0 in &ys {
                 let y0 = y0 as usize;
-                let score = ncc_at(s_raw, s_w, &t_data, t_w, t_h, x0, y0, t_mean, t_var);
+                let score = ncc_at(s_raw, s_w, t_data, t_w, t_h, x0, y0, t_mean, t_var);
                 if local_best.is_none_or(|(b, _, _)| score > b) {
                     local_best = Some((score, x0, y0));
                 }
@@ -168,7 +278,7 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
             if nx + t_w > rx1s as usize || ny + t_h > ry1s as usize {
                 continue;
             }
-            let s = ncc_at(s_raw, s_w, &t_data, t_w, t_h, nx, ny, t_mean, t_var);
+            let s = ncc_at(s_raw, s_w, t_data, t_w, t_h, nx, ny, t_mean, t_var);
             if s > best_score {
                 best_score = s;
                 best_pos = (nx, ny);
@@ -337,6 +447,26 @@ mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
 
+    fn percentile(samples: &mut [u128], p: f64) -> u128 {
+        samples.sort_unstable();
+        let rank = ((samples.len() as f64) * p).ceil() as usize;
+        samples[rank.saturating_sub(1).min(samples.len() - 1)]
+    }
+
+    fn perf_report(metric: &str, samples: &mut [u128]) {
+        let p50 = percentile(samples, 0.50);
+        let p95 = percentile(samples, 0.95);
+        let max = samples.last().copied().unwrap_or_default();
+        println!(
+            "PERF metric={} samples={} p50_us={} p95_us={} max_us={}",
+            metric,
+            samples.len(),
+            p50,
+            p95,
+            max
+        );
+    }
+
     /// 手工构造最小 PNG（签名 + IHDR + IEND），IHDR 声明指定分辨率——
     /// 合法头但超大声明：解码器在分配任何像素缓冲前即被限额拦截
     fn pixel_bomb_png(width: u32, height: u32) -> Vec<u8> {
@@ -503,5 +633,122 @@ mod tests {
             region: None,
         };
         assert!(match_template(&req).unwrap().is_none());
+    }
+
+    #[test]
+    fn template_cache_reuses_decoded_source_and_statistics() {
+        let mut tpl = GrayImage::new(17, 13);
+        for (x, y, pixel) in tpl.enumerate_pixels_mut() {
+            pixel.0[0] = ((x * 17 + y * 31) % 251) as u8;
+        }
+        let mut bytes = Vec::new();
+        DynamicImage::ImageLuma8(tpl)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        let key = template_key(&bytes);
+        template_cache().lock().entries.remove(&key);
+
+        let (key1, source1) = cached_template_source(&bytes).unwrap();
+        let (key2, source2) = cached_template_source(&bytes).unwrap();
+        assert_eq!(key1, key2);
+        assert!(Arc::ptr_eq(&source1, &source2));
+
+        let prepared1 = cached_prepared_template(key1, &source1, (17, 13)).unwrap();
+        let prepared2 = cached_prepared_template(key2, &source2, (17, 13)).unwrap();
+        assert!(Arc::ptr_eq(&prepared1, &prepared2));
+        assert_eq!(prepared1.image.dimensions(), (17, 13));
+        assert_eq!(prepared1.data.len(), 17 * 13);
+        assert!(prepared1.var > 1e-6);
+    }
+
+    /// 固定 PNG 夹具的真实匹配基准。默认只测带区域元数据的区域搜索，避免普通
+    /// 单元测试意外运行数十秒；设置 GAMER_PERF_FULL_SCREEN=1 才额外测全屏路径。
+    /// 输出为机器可读的 p50/p95/max 微秒值，不包含任何预设或伪造的性能数据。
+    #[test]
+    #[ignore = "运行 tools/run-perf-benchmark.ps1 或设置 GAMER_PERF_ITERS 后执行"]
+    fn fixed_fixture_benchmark_p50_p95() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/perf");
+        let screen = std::fs::read(dir.join("keyframe_001.png"))
+            .expect("读取固定夹具 keyframe_001.png 失败");
+        let cases = [
+            (
+                "region_big",
+                "tmpl/perf_btn_primary#361_365_639_479.png",
+                [390, 700, 300, 220],
+            ),
+            (
+                "region_small",
+                "tmpl/perf_txt_status#130_219_185_240.png",
+                [140, 420, 60, 40],
+            ),
+            (
+                "region_corner",
+                "tmpl/perf_corner_menu#dr.png",
+                [540, 960, 540, 960],
+            ),
+        ];
+        let iterations = std::env::var("GAMER_PERF_ITERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(20);
+        let warmup = std::env::var("GAMER_PERF_WARMUP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(3);
+
+        for (metric, template_rel, region) in cases {
+            let template = std::fs::read(dir.join(template_rel))
+                .unwrap_or_else(|_| panic!("读取固定夹具 {} 失败", template_rel));
+            let mut request = MatchRequest {
+                screen_png: screen.clone(),
+                template_png: template,
+                threshold: Some(0.8),
+                region: Some(region),
+            };
+            for _ in 0..warmup {
+                assert!(
+                    match_template(&request).unwrap().is_some(),
+                    "{} 未命中",
+                    metric
+                );
+            }
+            let mut samples = Vec::with_capacity(iterations);
+            for _ in 0..iterations {
+                let started = Instant::now();
+                assert!(
+                    match_template(&request).unwrap().is_some(),
+                    "{} 未命中",
+                    metric
+                );
+                samples.push(started.elapsed().as_micros());
+            }
+            perf_report(metric, &mut samples);
+
+            if std::env::var_os("GAMER_PERF_FULL_SCREEN").is_some() {
+                request.region = None;
+                for _ in 0..warmup {
+                    assert!(
+                        match_template(&request).unwrap().is_some(),
+                        "{} 未命中全屏路径",
+                        metric
+                    );
+                }
+                let mut full_samples = Vec::with_capacity(iterations);
+                for _ in 0..iterations {
+                    let started = Instant::now();
+                    assert!(
+                        match_template(&request).unwrap().is_some(),
+                        "{} 未命中全屏路径",
+                        metric
+                    );
+                    full_samples.push(started.elapsed().as_micros());
+                }
+                perf_report(&format!("{}_full_screen", metric), &mut full_samples);
+            }
+        }
     }
 }

@@ -1,0 +1,3 @@
+perf_btn_primary#361_365_639_479.png
+perf_corner_menu#dr.png
+perf_txt_status#130_219_185_240.png
