@@ -8,9 +8,13 @@
 //!      一堆补丁兜底——按需解码把这些判断全部消除）。
 //!   2. WebRTC 新 viewer 初始重放（SPS/PPS + 最近 GOP，见 initial_frames）。
 
+use std::collections::HashMap;
+use std::future::Future;
+use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::{Mutex, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, warn};
@@ -41,6 +45,77 @@ const GOP_MAX_BYTES: usize = 64 * 1024 * 1024;
 const DECODE_TIMEOUT: Duration = Duration::from_secs(3);
 /// 等待首个可解码帧（GOP 非空）的最长时间：会话刚建立时首个 IDR 通常 ≤1s 到达
 const WAIT_FIRST_GOP: Duration = Duration::from_millis(1500);
+
+type SharedResult<T, E> = Shared<BoxFuture<'static, Result<Arc<T>, Arc<E>>>>;
+
+struct InFlightEntry<T, E> {
+    result: SharedResult<T, E>,
+}
+
+/// 合并同一个 key 的并发异步请求。
+///
+/// 首个调用创建并驱动 future，后续调用共享同一个 future 及其结果。结果（包括
+/// 错误）会广播给所有等待者；任一等待者拿到结果后都会尝试按条目身份清理，避免
+/// 旧请求的收尾误删已经开始的新请求。
+pub struct InFlight<K, T, E> {
+    entries: Arc<Mutex<HashMap<K, Arc<InFlightEntry<T, E>>>>>,
+}
+
+impl<K, T, E> Default for InFlight<K, T, E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K, T, E> InFlight<K, T, E> {
+    pub fn new() -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<K, T, E> InFlight<K, T, E>
+where
+    K: Eq + Hash + Clone + Send + 'static,
+    T: Send + Sync + 'static,
+    E: Send + Sync + 'static,
+{
+    /// 执行或加入 key 对应的请求；同一 key 的并发调用只执行一次。
+    pub async fn run<F, Fut>(&self, key: K, operation: F) -> Result<Arc<T>, Arc<E>>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T, E>> + Send + 'static,
+    {
+        let entry = {
+            let mut entries = self.entries.lock();
+            if let Some(entry) = entries.get(&key) {
+                Arc::clone(entry)
+            } else {
+                let result = async move { operation().await.map(Arc::new).map_err(Arc::new) }
+                    .boxed()
+                    .shared();
+                let entry = Arc::new(InFlightEntry { result });
+                entries.insert(key.clone(), Arc::clone(&entry));
+                entry
+            }
+        };
+
+        let result = entry.result.clone().await;
+        self.remove_if_same(&key, &entry);
+        result
+    }
+
+    fn remove_if_same(&self, key: &K, expected: &Arc<InFlightEntry<T, E>>) {
+        let mut entries = self.entries.lock();
+        if entries
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
+            entries.remove(key);
+        }
+    }
+}
 
 pub struct FrameCache {
     ffmpeg_path: Mutex<String>,
@@ -283,5 +358,105 @@ impl FrameCache {
             gop.len()
         );
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::InFlight;
+    use tokio::sync::Notify;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestError(&'static str);
+
+    #[tokio::test]
+    async fn in_flight_shares_one_execution_for_concurrent_callers() {
+        let requests = std::sync::Arc::new(InFlight::<u64, usize, TestError>::new());
+        let executions = std::sync::Arc::new(AtomicUsize::new(0));
+        let started = std::sync::Arc::new(Notify::new());
+        let release = std::sync::Arc::new(Notify::new());
+
+        let first_requests = std::sync::Arc::clone(&requests);
+        let first_executions = std::sync::Arc::clone(&executions);
+        let first_started = std::sync::Arc::clone(&started);
+        let first_release = std::sync::Arc::clone(&release);
+        let first = tokio::spawn(async move {
+            first_requests
+                .run(42, move || async move {
+                    first_executions.fetch_add(1, Ordering::SeqCst);
+                    first_started.notify_one();
+                    first_release.notified().await;
+                    Ok(7)
+                })
+                .await
+        });
+
+        started.notified().await;
+
+        let second_requests = std::sync::Arc::clone(&requests);
+        let second = tokio::spawn(async move { second_requests.run(42, || async { Ok(7) }).await });
+        tokio::task::yield_now().await;
+        release.notify_one();
+
+        assert_eq!(*first.await.unwrap().unwrap(), 7);
+        assert_eq!(*second.await.unwrap().unwrap(), 7);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn in_flight_propagates_error_and_allows_retry() {
+        let requests = std::sync::Arc::new(InFlight::<u64, usize, TestError>::new());
+        let executions = std::sync::Arc::new(AtomicUsize::new(0));
+        let started = std::sync::Arc::new(Notify::new());
+        let release = std::sync::Arc::new(Notify::new());
+
+        let first_requests = std::sync::Arc::clone(&requests);
+        let first_executions = std::sync::Arc::clone(&executions);
+        let first_started = std::sync::Arc::clone(&started);
+        let first_release = std::sync::Arc::clone(&release);
+        let first = tokio::spawn(async move {
+            first_requests
+                .run(42, move || async move {
+                    first_executions.fetch_add(1, Ordering::SeqCst);
+                    first_started.notify_one();
+                    first_release.notified().await;
+                    Err(TestError("temporary failure"))
+                })
+                .await
+        });
+
+        started.notified().await;
+
+        let second_requests = std::sync::Arc::clone(&requests);
+        let second = tokio::spawn(async move {
+            second_requests
+                .run(42, || async { Err(TestError("should not execute")) })
+                .await
+        });
+        tokio::task::yield_now().await;
+        release.notify_one();
+
+        assert_eq!(
+            first.await.unwrap().unwrap_err().as_ref(),
+            &TestError("temporary failure")
+        );
+        assert_eq!(
+            second.await.unwrap().unwrap_err().as_ref(),
+            &TestError("temporary failure")
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+        let retry_executions = std::sync::Arc::clone(&executions);
+        let retry = requests
+            .run(42, move || async move {
+                retry_executions.fetch_add(1, Ordering::SeqCst);
+                Ok(9)
+            })
+            .await
+            .unwrap();
+        assert_eq!(*retry, 9);
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
     }
 }
