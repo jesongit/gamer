@@ -1,22 +1,49 @@
-# GameBot 服务端配置（复制为 config.toml 修改）
+# GameBot 服务端配置示例（复制为 server/config.toml 后按需修改）
+#
+# 注意：`server/config.toml` 是本机文件（含真实路径/密码），已加入 .gitignore 不再入库；
+# 团队分发/评审一律以本示例文件为准。
+# 缺失该文件时：GAMER_PROFILE=dev（缺省）放行内置默认值（stderr 有醒目警告）；
+# GAMER_PROFILE=prod 直接报错退出。配置存在但解析失败/校验不过时进程即刻终止，
+# 错误信息带 TOML 行列位置与逐项违规清单。
+
+# HTTP 监听端口（1-65535）
 port = 8443
+# 数据目录（SQLite、模板图片、脚本按应用分区存放于其下）
 data_dir = "./data"
+
+# 外部工具路径：填 PATH 内的命令名或绝对路径（正斜杠/反斜杠均可）。
+#   Windows: "adb"                                  或 "C:/platform-tools/adb.exe"
+#   Linux/macOS: "adb"                              或 "/usr/local/bin/adb"
+# adb_path = "<PATH 内命令名或绝对路径>"；可执行性启动时探测记录 warn，不阻断
 adb_path = "adb"
+#   Windows: "ffmpeg"                               或 "D:/Scoop/apps/ffmpeg/current/bin/ffmpeg.exe"
+#   Linux: "/usr/bin/ffmpeg"    macOS(brew): "/opt/homebrew/bin/ffmpeg"
+# ffmpeg_path = "<PATH 内命令名或绝对路径>"；帧缓存软解码用，失效会导致截图/匹配不可用
 ffmpeg_path = "ffmpeg"
+
+# scrcpy-server jar 路径——启动必检，文件缺失直接退出（相对路径相对服务端工作目录）
 scrcpy_server = "./assets/scrcpy-server.jar"
+# 管理登录密码——务必在本机文件里改成自己的强密码（勿提交）
 password = "admin123"
+
 # 脚本引擎默认配置（可被脚本内 config: 段按脚本覆盖）
-interval = "500ms"     # 轮询类间隔（find 每轮重试 / verify 复查）；带单位，裸数字非法
-threshold = 0.85       # 模板匹配阈值
+interval = "500ms"     # 轮询类间隔（find 每轮重试 / verify 复查）；带单位 ms/s/m/min/h/d，裸数字非法
+threshold = 0.85       # 模板匹配阈值，(0, 1]
 log_level = "info"     # debug / info / warn / error，低于等级的引擎日志丢弃
 decode_frames = true
-max_size = 0
-bitrate_mbps = 12
-fps = 15
+max_size = 0           # scrcpy 最大分辨率（0=原始；非 0 时须为 8 的倍数且 [16,4096]）
+bitrate_mbps = 12      # 码率上限区间 [1,50]：过高会挤占 WebRTC 发送帧预算导致投屏积压冻结
+fps = 15               # 帧率上限（0 = 设备默认；≤120）
+
 # 空闲低功耗秒数（无 viewer 且无脚本运行持续 N 秒后触发）：
 # 虚拟屏模式拆 scrcpy 会话（停编码/销毁虚拟屏，adb 保留，下次脚本/投屏自动重连）；
 # 镜像模式关物理屏（会话保留，viewer/脚本回来即自动唤醒）；0=关闭
 idle_power_secs = 300
+
+# 服务端文件日志保留天数（GB_LOG 指向文件时生效）：按天滚动产出
+# gamer-server.log.YYYY-MM-DD，超出窗口的旧日期文件在启动与每日零点各清理一次；
+# 0 = 永不清理
+log_retain_days = 14
 
 # 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式（可自定义）
 # 占位符：

@@ -1,5 +1,9 @@
 # ===== Rust (server) =====
 server/target/
+# 本机配置（真实路径/密码，不入库）；分发以 server/config.example.toml 为准
+server/config.toml
+# 按天轮转的日志产物（gamer-server.log.YYYY-MM-DD；裸 *.log 规则盖不住带日期后缀的名）
+server/gamer-server.log.*
 # 运行时产物不入库；模板/脚本分区目录 server/data/<pkg>/{tmpl,yaml} 需入库
 server/data/gamer.db
 server/data/pending_restore.json
