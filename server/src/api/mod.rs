@@ -1906,6 +1906,19 @@ mod sec_tests {
     }
 
     #[tokio::test]
+    async fn unauthenticated_tasks_list_is_401() {
+        let t = build_app(
+            "401tasks",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let resp = send(&t.app, req("GET", "/api/tasks", None, &[], None)).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let j = json_body(resp).await;
+        assert_eq!(j["error"], "unauthorized");
+    }
+
+    #[tokio::test]
     async fn unauthenticated_shutdown_is_401_and_service_stays_alive() {
         let t = build_app(
             "401sd",
