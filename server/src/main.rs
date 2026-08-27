@@ -18,7 +18,7 @@ mod webrtc;
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -38,9 +38,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 配置先于日志初始化加载：滚动文件的保留天数取自 config.toml（log_retain_days），
-    // 加载失败时进程非零退出（此时尚未有任何 logger，错误只走 stderr）。
-    let cfg = config::Config::load()?;
+    // 配置加载（OPS-004：文件存在但解析失败/校验不过 → 带位置与清单直接退出；
+    // 文件缺失时 dev 放行默认值、prod 报错；此时还没有 logger，失败原因走 stderr）。
+    // 滚动日志保留天数同源于此。加载失败经 main 返回 anyhow → 非零退出码。
+    let loaded = config::Config::load()?;
+    let cfg = loaded.cfg;
 
     // 日志（OPS-003）：GB_LOG 未设置/留空/="stdout" → 纯 stdout，容器部署天然处于
     // 此形态，轮转与保留交给容器日志驱动；其余值视作基准路径，按天滚动写出
@@ -52,8 +54,31 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("GameBot server v{} starting...", env!("CARGO_PKG_VERSION"));
-    info!("listen: {}", cfg.listen_addr());
-    info!("data dir: {}", cfg.data_dir.display());
+    // 最终生效配置来源 + 非敏感摘要（敏感项如 password 绝不进入日志）
+    info!(
+        source = %loaded.source,
+        profile = loaded.profile.as_str(),
+        "config loaded"
+    );
+    info!("effective config: {}", cfg.non_sensitive_summary());
+
+    // scrcpy-server jar 存在性必检：缺失即退出（没有它连不上任何设备）
+    if let Err(e) = cfg.check_scrcpy_jar() {
+        tracing::error!("{e:#}");
+        return Err(e);
+    }
+    // adb / ffmpeg 只探测记录不阻断启动（readiness 端点属阶段 4 OBS-001，探测函数已预留）
+    for tool in cfg.probe_external_tools() {
+        match tool.status {
+            Ok(()) => info!(tool = tool.name, path = %tool.path, "external tool ready"),
+            Err(reason) => warn!(
+                tool = tool.name,
+                path = %tool.path,
+                reason = %reason,
+                "external tool NOT ready (startup continues)"
+            ),
+        }
+    }
 
     let db = Arc::new(store::Store::open(&cfg)?);
 
