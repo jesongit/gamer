@@ -411,8 +411,8 @@
               <ScriptPicker v-model="selScript" :package="activePkg" />
             </div>
             <div class="run-actions">
-              <button v-if="!store.running" class="btn btn-primary" :disabled="!selScript || !store.deviceId" @click="runScript">▶ 运行</button>
-              <button v-else class="btn btn-danger" @click="stopScript">■ 停止</button>
+              <button v-if="!store.running" class="btn btn-primary" :disabled="!selScript || !store.deviceId || startPending" @click="runScript">{{ startPending ? '提交中…' : '▶ 运行' }}</button>
+              <button v-else class="btn btn-danger" :disabled="runStopping" @click="stopScript">{{ runStopping ? '■ 停止中…' : '■ 停止' }}</button>
               <button class="btn" :disabled="!selScript" @click="editCurrentScript">编辑</button>
               <div class="more-wrap">
                 <button class="btn" :class="{ active: moreOpen }" @click="moreOpen = !moreOpen">更多 ▾</button>
@@ -499,8 +499,13 @@ const APP_CACHE_TTL = 5 * 60 * 1000
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, inject } from 'vue'
 import { pinyin } from 'pinyin-pro'
 import { useRouter } from 'vue-router'
-import { store, devicesData, scriptsData, templatesData, useToast } from '../store'
+import { store, devicesData, scriptsData, templatesData, useToast, applyRunRecord, findRun, beginCancel, resetStoreRunState } from '../store'
 import { api } from '../api'
+import {
+  sourceLabel, terminalLabel, describeConflict,
+  normalizeActiveRunResponse, normalizeStartReply,
+  isMissingEndpointError, isDeviceBusyConflict, isTerminalRunState,
+} from '../runs'
 import ScriptPicker from '../components/ScriptPicker.vue'
 import { createScriptValidator } from '../script-language/validate'
 import { computeRunLineMap } from '../script-language/line-map'
@@ -2938,8 +2943,9 @@ async function saveEditScript() {
   }
 }
 
-// 运行状态轮询：服务端异步执行脚本（run 接口立即返回），
-// 轮询 status 直到脚本真正结束，才复位运行状态（按钮/顶栏芯片随之恢复）
+// 运行状态轮询：以当前 runId 单次查询 GET /api/runs/:run_id，
+// 按 record.state 驱动状态机（stopping→停止中、终态→复位空闲并归档）；
+// 旧后端（run 查询端点 404/无 run_id 的兼容会话）静默降级为脚本 status 轮询
 let runStatusTimer = null
 
 function startRunStatusPoll() {
@@ -2953,7 +2959,34 @@ function stopRunStatusPoll() {
 }
 
 async function checkRunStatus() {
-  if (!store.running || !store.runScriptId) { stopRunStatusPoll(); return }
+  if (!store.running) { stopRunStatusPoll(); return }
+  if (store.runId) {
+    const rid = store.runId
+    let rec = null
+    try {
+      rec = await api.getRun(rid)
+    } catch (e) {
+      if (!isMissingEndpointError(e)) return // 网络抖动等：下轮再试，不中断轮询
+      // 旧后端降级：单次查询端点不存在 → 按注册表里的 script_id（或兼容句柄）查旧 status，
+      // 合成等效记录驱动同一套状态机（终态用 cancelled——旧接口没有结果语义）
+      const sid = findRun(rid)?.script_id || store.runScriptId
+      if (!sid) { stopRunStatusPoll(); resetStoreRunState(); return }
+      try {
+        const st = await api.scriptStatus(sid)
+        rec = { run_id: rid, device_id: store.deviceId, script_id: sid, state: st.running ? 'running' : 'cancelled', degraded: true }
+      } catch (e2) { return }
+    }
+    if (!rec || !rec.run_id) return
+    const m = applyRunRecord(rec)
+    if (m && isTerminalRunState(m.state)) {
+      stopRunStatusPoll()
+      const detail = m.degraded ? '' : `：${terminalLabel(m.state)}${m.error ? `（${m.error}）` : ''}`
+      toast(`脚本已结束${detail}`, m.degraded || m.state === 'success' ? 'info' : 'warn')
+    }
+    return
+  }
+  // 兼容降级会话（无 run_id，或从其他页面发起的旧式运行）：沿用脚本 status 轮询
+  if (!store.runScriptId) { stopRunStatusPoll(); return }
   try {
     const st = await api.scriptStatus(store.runScriptId)
     if (!st.running) {
@@ -3034,35 +3067,90 @@ function onScriptLineClick(idx) {
 // 切换脚本时清除行选中
 watch(() => selScript.value, () => { selectedLine.value = null })
 
-function runScript() {
-  if (!selScript.value) return
+// 启动提交中（202 快速返回前的防重复点击位）；run_id 在启动成功那一刻即登记为主键
+const startPending = ref(false)
+// 当前展示实例是否处于 stopping（cancel 已发、终态未达）：停止按钮转为禁用「停止中…」，
+// 避免旧实现立即回空闲导致可再次点运行与停"两个实例"交叠
+const runStopping = computed(() => {
+  const rec = store.runId ? findRun(store.runId) : null
+  return !!rec && rec.state === 'stopping'
+})
+
+/** 设备占用冲突（409 device_busy）入口：临时 toast 提示对方脚本/来源/本地化开始时间；
+ *  终版换成弹窗时只需把这里改为入队 pushRunConflict */
+function openRunConflict(d) {
+  const msg = describeConflict(d)
+  console.warn('[run] device busy (409)', d)
+  toast(msg + '。可在投屏控制台选中该设备查看运行日志', 'warn')
+}
+
+async function runScript() {
+  if (!selScript.value || !store.deviceId || startPending.value || store.running) return
   const s = scripts.value.find(x => x.id === selScript.value)
   if (!s) return
-  // 选中行 → 运行目标：顶层 steps 序号，或函数体（func + 体内序号）
+  // 选中行 → 运行目标：顶层 steps 序号，或函数体（func + 体内序号）（「从某行运行」选中流不变）
   const target = selectedLine.value != null ? runLineMap.value[selectedLine.value] : null
   const startIndex = target ? target.index : 0
   const funcName = target?.func || null
+  const displayName = funcName ? `${s.name} · ${funcName}()` : s.name
   // 每次运行清空日志区域，只显示本次运行产生的日志
   runStartTime = Date.now()
   rawLogs = []
   liveLogs.value = []
-  store.running = true
-  store.runScript = funcName ? `${s.name} · ${funcName}()` : s.name
-  store.runScriptId = s.id
-  api.runScript(s.id, store.deviceId, startIndex, funcName).then(() => {
+  startPending.value = true
+  try {
+    const rep = await api.runScript(s.id, store.deviceId, startIndex, funcName)
+    const st = normalizeStartReply(rep)
+    if (st) {
+      // 新契约：202 {run_id} —— 启动即以 run_id 登记执行实例（主键），后续轮询按 record.state 驱动 UI
+      applyRunRecord({
+        run_id: st.run_id,
+        state: st.state,
+        device_id: store.deviceId,
+        script_id: s.id,
+        source: 'manual',
+        display: displayName,
+      })
+    } else {
+      // 兼容降级：旧后端响应无 run_id → 保持旧 script 句柄语义（status 轮询 / stop 停止）
+      store.running = true
+      store.runScript = displayName
+      store.runScriptId = s.id
+    }
     toast('脚本已开始运行', 'success')
-    // POST 成功（服务端已登记 run_stops 条目）后才开始轮询，
-    // 避免设备离线时 connect_device 耗时较长、status 先于 run 返回导致状态被提前复位
+    // POST 成功（服务端已登记条目）后才开始轮询，避免设备离线时 connect_device 耗时较长、
+    // 查询先于登记返回导致状态被提前复位
+    startLogPolling()
     startRunStatusPoll()
-  }).catch(e => {
-    store.running = false
-    store.runScriptId = null
-    pushLog('error', `执行失败：${e.message}`)
-    toast('脚本执行失败', 'error')
-  })
+  } catch (e) {
+    if (isDeviceBusyConflict(e)) {
+      openRunConflict({ ...(e.data || {}), device_id: store.deviceId })
+    } else {
+      pushLog('error', `执行失败：${e.message}`)
+      toast('脚本执行失败', 'error')
+    }
+  } finally {
+    startPending.value = false
+  }
 }
 
 function stopScript() {
+  // 「停止」只对当前 runId 发 cancel：本地先行迁 state=stopping（按钮转停止中…），
+  // 终态由轮询查询确认后统一复位；cancel 端点缺失（旧后端 404/网络错）静默回退旧停止接口
+  if (store.runId) {
+    const rid = store.runId
+    beginCancel(rid)
+    api.cancelRun(rid).catch(e => {
+      if (isMissingEndpointError(e)) {
+        const sid = findRun(rid)?.script_id || store.runScriptId
+        if (sid) api.stopScript(sid).catch(() => {})
+      }
+    })
+    pushLog('warn', '已发送停止指令，等待脚本退出…')
+    toast('已发送停止指令', 'warn')
+    return
+  }
+  // 兼容降级路径（旧后端会话）
   const id = store.runScriptId || selScript.value
   if (!id) return
   api.stopScript(id).catch(() => {})
@@ -3123,30 +3211,46 @@ onMounted(async () => {
   else { mode.value = 'edit'; store.deviceId = null }
   window.addEventListener('keydown', onGlobalKeydown)
 
-  // 刷新恢复运行态：刷新前页面发起的脚本在服务端继续执行——按设备查询运行中的
-  // 脚本，恢复运行状态/选中脚本/状态轮询与日志（不依赖投屏连接是否恢复成功）
-  if (store.deviceId) {
-    try {
-      const run = await api.deviceRun(store.deviceId)
-      if (run && run.running && run.script_id && !store.running) {
-        store.running = true
-        store.runScriptId = run.script_id
-        store.runScript = run.script_name || run.script_id
-        selScript.value = run.script_id
-        scriptMode.value = 'run'
-        runStartTime = 0   // 不按开始时间过滤，恢复最近日志
-        startLogPolling()
-        startRunStatusPoll()
-        toast(`检测到 ${store.runScript} 正在运行，已恢复状态`, 'info')
-      }
-    } catch (e) { /* 恢复失败不影响进入页面 */ }
-  }
+  // 刷新恢复运行态：刷新前发起的脚本在服务端继续执行——按设备查询当前活动 run
+  // （新契约 active:true + 完整 RunRecord，含来源标签；旧后端 {running,script_id} 走兼容分支），
+  // 恢复运行状态/选中脚本/状态轮询与日志（不依赖投屏连接是否恢复成功）
+  if (store.deviceId) await restoreRunState()
   // 画面恢复：SPA 内返回（store 存活）或刷新后脚本运行中/设备会话在线（此前正在
   // 投屏）→ 自动连接；设备空闲离线则保持首次进入行为；遇 conflict 不抢（connect 内处理）
   if (store.deviceId && (spaPreselected || store.running || current.value?.status === 'online')) connect(false)
   // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
-  if (store.running && store.runScriptId) startRunStatusPoll()
+  if (store.running && (store.runId || store.runScriptId)) startRunStatusPoll()
 })
+
+/** 页面刷新 / 设备列表就绪后恢复该设备的活动 run：
+ *  新契约 GET /api/devices/:id/run → {active:true,...RunRecord} 完整恢复（含来源标签）；
+ *  旧后端形状由 normalizeActiveRunResponse 归一化兼容；无活动/请求失败静默跳过 */
+async function restoreRunState() {
+  if (!store.deviceId || store.running) return
+  let rep = null
+  try {
+    rep = await api.deviceRun(store.deviceId)
+  } catch (e) { /* 恢复失败不影响进入页面 */ return }
+  const rec = normalizeActiveRunResponse(rep)
+  if (!rec) return // {active:false}：无活动 run，保持空闲展示
+  const s = scripts.value.find(x => x.id === rec.script_id)
+  const baseName = rec.script_name || s?.name || rec.script_id
+  const srcTag = sourceLabel(rec.source)
+  if (rec.run_id) {
+    applyRunRecord({ ...rec, device_id: store.deviceId, display: srcTag ? `${baseName}（${srcTag}）` : baseName })
+  } else {
+    // 兼容降级：旧后端恢复仅 script_id，无实例主键
+    store.running = true
+    store.runScriptId = rec.script_id
+    store.runScript = baseName
+  }
+  selScript.value = rec.script_id
+  scriptMode.value = 'run'
+  runStartTime = 0   // 不按开始时间过滤，恢复最近日志
+  startLogPolling()
+  startRunStatusPoll()
+  toast(`检测到 ${baseName}${srcTag ? `（${srcTag}）` : ''} 正在运行，已恢复状态`, 'info')
+}
 
 // 设备选择持久化：刷新后自动恢复选中设备（运行态/画面恢复的前提）
 watch(() => store.deviceId, id => {

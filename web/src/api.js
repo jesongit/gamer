@@ -10,10 +10,15 @@ function authExempt(url) {
   return url.startsWith('/api/login') || url.startsWith('/api/session') || url.startsWith('/api/logout')
 }
 
+// 错误响应 → 结构化 Error：保留 message（body.error 或 HTTP xxx，与旧文案一致），
+// 并附加 status / data 原始 JSON —— 调用方据此识别 409 设备冲突、404 端点缺失（旧后端降级）等
 async function errMsg(r) {
-  let msg = `HTTP ${r.status}`
-  try { const j = await r.json(); if (j.error) msg = j.error } catch (e) {}
-  return msg
+  let body = null
+  try { body = await r.json() } catch (e) {}
+  const err = new Error(body && body.error ? body.error : `HTTP ${r.status}`)
+  err.status = r.status
+  err.data = body
+  return err
 }
 
 async function readResult(r) {
@@ -32,9 +37,9 @@ async function req(method, path, body) {
   if (!r.ok) {
     if (r.status === 401 && !authExempt(path)) {
       handleUnauthorized()                    // 会话过期/未认证：清态 + 跳登录
-      throw new Error(await errMsg(r))        // 调用方 catch 里仍能拿到原因
+      throw await errMsg(r)                   // 调用方 catch 里仍能拿到原因（含 status/data）
     }
-    throw new Error(await errMsg(r))
+    throw await errMsg(r)
   }
   return readResult(r)
 }
@@ -83,17 +88,23 @@ export const api = {
   listScripts: () => req('GET', '/api/scripts'),
   saveScript: (s) => req('POST', '/api/scripts', s),
   deleteScript: (id) => req('DELETE', `/api/scripts/${encodeURIComponent(id)}`),
+  // 脚本运行（RUN-003 阶段3 契约）：成功 202 {run_id, state:"starting"}；设备占用 409
+  // {error:"device_busy", run_id, script_id, source, started_at}（err.status/err.data 可取）
   runScript: (id, deviceId, startIndex, func) => req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, { device_id: deviceId, start_index: startIndex || 0, ...(func ? { func } : {}) }),
   stopScript: (id) => req('POST', `/api/scripts/${encodeURIComponent(id)}/stop`),
   scriptStatus: (id) => req('GET', `/api/scripts/${encodeURIComponent(id)}/status`),
-  // 设备当前运行中的脚本（页面刷新后恢复运行态用）→ {running, script_id?, script_name?}
+  // 统一运行实例（run_id 主键）：单次查询 RunRecord / 按次取消（终态以查询为准）
+  getRun: (runId) => req('GET', `/api/runs/${encodeURIComponent(runId)}`),
+  cancelRun: (runId) => req('POST', `/api/runs/${encodeURIComponent(runId)}/cancel`),
+  // 设备当前运行中的脚本（页面刷新后恢复运行态用）
+  // 新契约 → {active:true,...RunRecord} | {active:false}；旧后端 → {running, script_id?, script_name?}
   deviceRun: (id) => req('GET', `/api/devices/${id}/run`),
   // 导出整分区快照 zip（yaml/ + tmpl/ 全量，?pkg= 指定分区）→ { blob, filename }
   exportPartition: async (pkg) => {
     const r = await fetch(`/api/scripts/export?pkg=${encodeURIComponent(pkg)}`)
     if (!r.ok) {
       if (r.status === 401) handleUnauthorized()
-      throw new Error(await errMsg(r))
+      throw await errMsg(r)
     }
     const cd = r.headers.get('content-disposition') || ''
     let filename = ''
@@ -110,7 +121,7 @@ export const api = {
     })
     if (!r.ok) {
       if (r.status === 401) handleUnauthorized()
-      throw new Error(await errMsg(r))
+      throw await errMsg(r)
     }
     return r.json()
   },
@@ -119,6 +130,7 @@ export const api = {
   listTasks: () => req('GET', '/api/tasks'),
   saveTask: (t) => req('POST', '/api/tasks', t),
   deleteTask: (id) => req('DELETE', `/api/tasks/${id}`),
+  // 任务立即执行：新契约 202 {run_id}（触发即返回，不等任务完成）；旧后端 200 {ok:true}
   runTaskNow: (id) => req('POST', `/api/tasks/${id}/run`),
 
   // 日志

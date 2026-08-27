@@ -63,9 +63,10 @@
 
 <script setup>
 import { computed, ref, provide, onMounted } from 'vue'
-import { store, devicesData, tasksData } from '../store'
+import { store, devicesData, tasksData, beginCancel, findRun } from '../store'
 import { session, doLogout } from '../auth'
 import { api } from '../api'
+import { isMissingEndpointError } from '../runs'
 const navs = [
   { path: '/console', name: '投屏控制', icon: '🖥️' },
   { path: '/templates', name: '模板管理', icon: '🖼️' },
@@ -103,8 +104,22 @@ async function onLogout() {
   await doLogout()
 }
 
-/** 顶栏芯片上的停止按钮：任何页面都能手动停止当前脚本 */
+/** 顶栏芯片上的停止按钮：任何页面都能手动停止当前脚本。
+ *  run_id 主链路：POST cancel 后记录迁 stopping（终态以查询为准，芯片显示"正在停止…"，
+ *  回控制台时由刷新恢复/轮询确认终态复位）；cancel 端点缺失（旧后端）回退旧停止接口。 */
 function stopRunning() {
+  if (store.runId) {
+    const rid = store.runId
+    beginCancel(rid)
+    api.cancelRun(rid).catch(e => {
+      if (isMissingEndpointError(e)) {
+        const sid = findRun(rid)?.script_id || store.runScriptId
+        if (sid) api.stopScript(sid).catch(() => {})
+        else { store.running = false; store.runId = null }
+      }
+    })
+    return
+  }
   if (!store.runScriptId) { store.running = false; return }
   api.stopScript(store.runScriptId).catch(() => {})
   store.running = false
