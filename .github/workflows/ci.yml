@@ -1,0 +1,117 @@
+# QG-005：前后端构建测试门禁（对应 docs/OPTIMIZATION_PLAN.md 阶段 0）。
+# 门禁链与 tools/ci-local.ps1 一一对应，本地可先跑脚本再推送。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# 并发组：同一 ref（push 的分支 / PR）新一轮触发时取消仍在跑的旧一轮，
+# 顶层并发组对 rust、web 两个 job 同时生效（二者同属一个 workflow run 共享该组）。
+#
+# fail-fast 语义说明：
+# - rust 与 web 无 needs: 依赖，并行执行，任一失败不会跳过另一个；
+# - 本工作流未使用 matrix 策略，故不存在矩阵意义的 strategy.fail-fast；
+# - 合并门禁由两个 job 的最终结论共同决定：建议在分支保护中将
+#   "rust (fmt / clippy / test / build-release)" 与 "web (install / test / build)"
+#   都设为必需检查，任一失败即阻止合并。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------- Rust 服务端门禁 ----------
+  # 单测已验证不依赖 adb/ffmpeg/Android 设备与真实 server/config.toml：
+  # #[cfg(test)] 区段对 adb|ffmpeg|scrcpy|config::load 的引用为 0，
+  # config::load() 仅由 main 启动路径调用，cargo test/build 均不会触达。
+  rust:
+    name: rust (fmt / clippy / test / build-release)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      # 兼容即将落地的 OPS-004「配置失败即退出」：CI 无 server/config.toml，
+      # dev 档允许缺省配置走默认值；策略未合入时设置此变量也无害。
+      GAMER_PROFILE: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain (rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry / git / target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            server/target
+          # 键含 runner-os 与 Cargo.lock 哈希：锁文件或平台变化即落新缓存；
+          # restore-keys 允许按前缀部分命中旧缓存加速增量构建。
+          key: ${{ runner.os }}-cargo-${{ hashFiles('server/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (-D warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+      - name: cargo build --release (release smoke)
+        run: cargo build --release
+
+  # ---------- Web 前端门禁 ----------
+  web:
+    name: web (install / test / build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    env:
+      # Corepack 首次拉取 packageManager 指定的 pnpm 时跳过交互确认（非 TTY 下同样稳妥）
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 24 LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Enable Corepack (pnpm pinned by web/packageManager field)
+        run: corepack enable
+
+      - name: Resolve pnpm store directory
+        id: pnpm-store
+        run: echo "dir=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.dir }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('web/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: pnpm install (--frozen-lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm test:run
+        run: pnpm test:run
+
+      - name: pnpm build
+        run: pnpm build
