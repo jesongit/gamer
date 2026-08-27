@@ -2019,6 +2019,37 @@ mod sec_tests {
     use std::io::Write as _;
     use std::net::SocketAddr;
     use tower::ServiceExt;
+    use tracing::instrument::WithSubscriber as _;
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct CapturedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedWriter(self.0.clone())
+        }
+    }
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
 
     struct TestApp {
         app: Router,
@@ -2459,6 +2490,51 @@ mod sec_tests {
     }
 
     #[tokio::test]
+    async fn login_rate_limit_is_scoped_to_ip_and_username_pair() {
+        let cfg = crate::config::AuthConfig {
+            login_max_fails: 2,
+            login_window_secs: 300,
+            ..Default::default()
+        };
+        let t = build_app("rlpair", auth::Credential::Plain("admin123".into()), cfg);
+
+        // 同 IP 的诱饵用户名锁定后，admin 仍能登录。
+        for _ in 0..2 {
+            let resp = send_json_login(
+                &t.app,
+                Some("203.0.113.30:4000"),
+                r#"{"username":"decoy","password":"wrong"}"#,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        let decoy = send_json_login(
+            &t.app,
+            Some("203.0.113.30:4000"),
+            r#"{"username":"decoy","password":"admin123"}"#,
+        )
+        .await;
+        assert_eq!(decoy.status(), StatusCode::TOO_MANY_REQUESTS);
+        let admin = send_json_login(&t.app, Some("203.0.113.30:4000"), ADMIN_JSON).await;
+        assert_eq!(admin.status(), StatusCode::OK);
+
+        // admin 在一个 IP 锁定后，另一 IP 仍可登录。
+        for _ in 0..2 {
+            let resp = send_json_login(
+                &t.app,
+                Some("203.0.113.31:4000"),
+                r#"{"username":"admin","password":"wrong"}"#,
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        let locked = send_json_login(&t.app, Some("203.0.113.31:4000"), ADMIN_JSON).await;
+        assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+        let other_ip = send_json_login(&t.app, Some("203.0.113.32:4000"), ADMIN_JSON).await;
+        assert_eq!(other_ip.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn session_probe_and_logout_semantics() {
         let t = build_app(
             "sess",
@@ -2535,6 +2611,103 @@ mod sec_tests {
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         let resp = send(&t.app, req("POST", "/api/logout", None, &[], None)).await;
         assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn expired_cookie_is_rejected_by_protected_route() {
+        let cfg = crate::config::AuthConfig {
+            session_abs_secs: 1,
+            session_idle_secs: 60,
+            ..Default::default()
+        };
+        let t = build_app(
+            "expired-route",
+            auth::Credential::Plain("admin123".into()),
+            cfg,
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+
+        let before = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/devices",
+                None,
+                &[(header::COOKIE.to_string(), sid.clone())],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(before.status(), StatusCode::OK);
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        let after = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/devices",
+                None,
+                &[(header::COOKIE.to_string(), sid)],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(after).await["error"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn authentication_logs_rejection_metadata_without_secrets() {
+        let t = build_app(
+            "safe-auth-log",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let password = "log-secret-password-7a8b";
+        let cookie = "gb_session=log-secret-cookie-9c0d";
+        let bearer = "Bearer log-secret-authorization-1e2f";
+        let capture = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(capture.clone())
+            .finish();
+
+        let (login_resp, protected_resp) = async {
+            let login_resp = send_json_login(
+                &t.app,
+                Some("203.0.113.40:4000"),
+                &format!(r#"{{"username":"admin","password":"{password}"}}"#),
+            )
+            .await;
+            let protected_resp = send(
+                &t.app,
+                req(
+                    "GET",
+                    "/api/devices",
+                    None,
+                    &[
+                        (header::COOKIE.to_string(), cookie.into()),
+                        (header::AUTHORIZATION.to_string(), bearer.into()),
+                    ],
+                    None,
+                ),
+            )
+            .await;
+            (login_resp, protected_resp)
+        }
+        .with_subscriber(subscriber)
+        .await;
+
+        assert_eq!(login_resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(protected_resp.status(), StatusCode::UNAUTHORIZED);
+        let logs = capture.text();
+        assert!(logs.contains("authentication rejected"), "{logs}");
+        assert!(logs.contains("outcome=\"unauthorized\""), "{logs}");
+        for secret in [password, cookie, bearer] {
+            assert!(!logs.contains(secret), "敏感值进入日志: {secret}: {logs}");
+        }
     }
 
     #[tokio::test]
@@ -2663,8 +2836,7 @@ mod sec_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-        // 带合法 cookie 则放行进入 upgrade 处理器（此处无 Upgrade 头，
-        // axum 会以非 101 拒绝，但绝不再是我们 guard 的 401）
+        // 完整同源握手头 + 合法 cookie 应通过 guard 进入 WS extractor/处理器。
         let ck = cookie_of(&login(&t.app).await);
         let sid = first_cookie_pair(&ck);
         let resp = send(
@@ -2673,12 +2845,24 @@ mod sec_tests {
                 "GET",
                 "/ws/device/d1",
                 None,
-                &[(header::COOKIE.to_string(), sid.clone())],
+                &[
+                    (header::COOKIE.to_string(), sid.clone()),
+                    (header::UPGRADE.to_string(), "websocket".into()),
+                    (header::CONNECTION.to_string(), "Upgrade".into()),
+                    ("sec-websocket-version".into(), "13".into()),
+                    (
+                        "sec-websocket-key".into(),
+                        "dGhlIHNhbXBsZSBub25jZQ==".into(),
+                    ),
+                    (header::ORIGIN.to_string(), "http://localhost:8443".into()),
+                    (header::HOST.to_string(), "localhost:8443".into()),
+                ],
                 None,
             ),
         )
         .await;
         assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(resp.status(), StatusCode::FORBIDDEN);
 
         // 合法会话不能让跨站页面借 WS Upgrade 绕过 Origin 校验。
         let resp = send(
@@ -2960,6 +3144,26 @@ mod sec_tests {
         );
         assert!(parse_ctl(&ctl_req(r#"{"type":"start_app","app":"?"}"#)).is_err());
         assert!(parse_ctl(&ctl_req(r#"{"type":"start_app","app":"com.miHoYo.hkrpg"}"#)).is_ok());
+        for injected in [
+            "com.safe.app;id",
+            "com.safe.app&&id",
+            "com.safe.app$(id)",
+            "com.safe.app`id`",
+            "com.safe.app\nid",
+            "com.safe.app --user 0",
+            "+com.safe.app;id",
+            "+--user",
+        ] {
+            let body = serde_json::json!({"type": "start_app", "app": injected}).to_string();
+            assert!(
+                parse_ctl(&ctl_req(&body)).is_err(),
+                "可能进入 adb shell 包名拼接边界的注入载荷必须拒绝: {injected:?}"
+            );
+        }
+        assert!(
+            parse_ctl(&ctl_req(r#"{"type":"start_app","app":"?游戏; id"}"#)).is_ok(),
+            "? 搜索名只经 scrcpy 二进制控制协议透传，不进入 adb shell 包名路径"
+        );
 
         // clipboard 上限与空值
         assert!(parse_ctl(&ctl_req(r#"{"type":"clipboard","text":""}"#)).is_err());
@@ -3071,6 +3275,9 @@ mod sec_tests {
         };
         let cases = [
             craft_zip(vec![("yaml/../escape.yaml", b"steps: []\n".to_vec())]),
+            craft_zip(vec![("../escape.yaml", b"steps: []\n".to_vec())]),
+            craft_zip(vec![("/absolute.yaml", b"steps: []\n".to_vec())]),
+            craft_zip(vec![("yaml\\..\\escape.yaml", b"steps: []\n".to_vec())]),
             craft_zip(vec![
                 ("yaml/one.yaml", b"steps: []\n".to_vec()),
                 ("yaml/ONE.yaml", b"steps: []\n".to_vec()),

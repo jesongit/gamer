@@ -8,9 +8,8 @@
 //!   （login / session / logout / health / 静态资源）。
 //! - 回环管理通道：带 `X-Admin-Token` 的请求仅在「来源 IP 为回环 && token 匹配」
 //!   时视为已认证——专供本机管理脚本（gamer.ps1 stop 优雅停机）。token 来源：
-//!   环境变量 GAMER_ADMIN_TOKEN；dev 缺省时启动自动生成并以 WARN 打印
-//!   （敏感日志规范的显式例外：该 token 只对回环生效，打印进日志不会扩大攻击面，
-//!   却让本机调试者能直接拿到可用令牌；prod 不设置则通道直接禁用）。
+//!   环境变量 GAMER_ADMIN_TOKEN；dev 缺省时启动自动生成，仅以 WARN 提示通道启用，
+//!   不打印令牌值；prod 不设置则通道直接禁用。
 //! - 同源防护：Cookie SameSite=Strict 是 CSRF 主防线；此处再拦一层 Origin/Host
 //!   不一致的状态变更请求（POST/PUT/DELETE/PATCH 与 WS 升级），Origin 缺失放行
 //!   （CLI/curl 场景）。
@@ -36,7 +35,7 @@ use axum::Json;
 use rand::RngCore;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::config::AuthConfig;
 
@@ -49,9 +48,9 @@ const SWEEP_PERIOD: Duration = Duration::from_secs(3600);
 /// 开发模式自动生成回环管理凭据时的非敏感提示；不得附带凭据名或凭据值。
 const DEV_ADMIN_TOKEN_NOTICE: &str =
     "dev 模式已自动生成本机管理凭据（仅回环可用）；如需脚本复用请设置环境变量";
-/// 登录限流表容量上限：达到后整表收缩（防伪造源 IP 灌爆内存的最后兜底；
+/// 登录限流表容量上限：达到后整表收缩（防大量用户名组合灌爆内存的最后兜底；
 /// 实际来源 IP 无法伪造 socket 地址，正常单机场景远远用不到这个量级）
-const MAX_TRACKED_IPS: usize = 10_000;
+const MAX_TRACKED_LOGIN_KEYS: usize = 10_000;
 
 /// 登录凭据快照（构造 AuthState 时解析定死，运行期不变）
 #[derive(Debug, Clone)]
@@ -197,8 +196,16 @@ struct Session {
 }
 
 #[derive(Default)]
-struct IpFails {
+struct LoginFails {
     attempts: VecDeque<Instant>,
+}
+
+/// 登录失败桶使用结构化 `(来源 IP, 用户名)` 键，避免字符串拼接歧义，也避免
+/// 同一来源对无关用户名的失败尝试误锁唯一管理员账号。
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct LoginKey {
+    ip: String,
+    username: String,
 }
 
 #[derive(Debug)]
@@ -220,7 +227,7 @@ pub struct AuthState {
 
 struct Inner {
     sessions: HashMap<String, Session>,
-    fails: HashMap<String, IpFails>,
+    fails: HashMap<LoginKey, LoginFails>,
 }
 
 impl AuthState {
@@ -284,8 +291,8 @@ impl AuthState {
     }
 
     /// 登录尝试：成功返回 (session_id, username)，失败给出契约错误分类。
-    /// ip_key 限流键为来源 IP 文本（取不到则为 "unknown"，所有匿名直连共享桶——
-    /// 无 ConnectInfo 属异常路径而非生产形态，保守收紧无害）。
+    /// 限流键为 `(来源 IP, 用户名)` 组合；IP 取不到时为 "unknown"，相同用户名的
+    /// 非标准直连共享桶。用户名不做折叠，因为当前唯一合法值精确为 `admin`。
     pub fn attempt_login(
         &self,
         username: &str,
@@ -297,8 +304,12 @@ impl AuthState {
         let now = Instant::now();
         let mut g = self.inner.lock().unwrap();
         self.prune_fails(&mut g.fails, now);
+        let fail_key = LoginKey {
+            ip: ip_key.to_string(),
+            username: username.to_string(),
+        };
 
-        if let Some(f) = g.fails.get(ip_key) {
+        if let Some(f) = g.fails.get(&fail_key) {
             if f.attempts.len() >= self.cfg.login_max_fails as usize {
                 let oldest = f.attempts.front().copied().unwrap_or(now);
                 let retry = self
@@ -319,14 +330,14 @@ impl AuthState {
             && password.len() <= 1024
             && self.verify_credentials(password);
         if !cred_ok {
-            let entry = g.fails.entry(ip_key.to_string()).or_default();
+            let entry = g.fails.entry(fail_key.clone()).or_default();
             entry.attempts.push_back(now);
             while entry.attempts.len() > self.cfg.login_max_fails as usize {
                 entry.attempts.pop_front();
             }
-            if g.fails.len() > MAX_TRACKED_IPS {
+            if g.fails.len() > MAX_TRACKED_LOGIN_KEYS {
                 warn!(
-                    ips = g.fails.len(),
+                    keys = g.fails.len(),
                     "login-fail table over capacity, pruning all entries"
                 );
                 g.fails.clear(); // 极端灌压场景整体失忆，优先保活进程
@@ -338,7 +349,7 @@ impl AuthState {
         // 不记录 password，也不把 password 带入错误信息。下次进程启动时仍
         // 可读取旧配置，直到管理员将新 PHC 哈希写入 password_hash。
         self.upgrade_legacy_credential(password);
-        g.fails.remove(ip_key); // 成功即清空该来源失败计数
+        g.fails.remove(&fail_key); // 成功即清空该 IP+用户名组合的失败计数
         let sid = random_hex_id(32); // 256bit 高熵 ID
         g.sessions.insert(
             sid.clone(),
@@ -413,7 +424,7 @@ impl AuthState {
         Duration::from_secs(self.cfg.login_window_secs.max(1))
     }
 
-    fn prune_fails(&self, fails: &mut HashMap<String, IpFails>, now: Instant) {
+    fn prune_fails(&self, fails: &mut HashMap<LoginKey, LoginFails>, now: Instant) {
         let window = self.window_duration();
         fails.retain(|_, f| {
             f.attempts.retain(|t| now.duration_since(*t) < window);
@@ -524,12 +535,18 @@ pub async fn auth_guard(
         .map(|c| c.0);
     match admit(&auth, req.method(), req.headers(), remote) {
         Decision::Admit => next.run(req).await,
-        Decision::Forbidden => (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "forbidden_origin"})),
-        )
-            .into_response(),
-        Decision::Unauthorized => unauthorized_response(),
+        Decision::Forbidden => {
+            debug!(method = %req.method(), outcome = "forbidden_origin", "authentication rejected");
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "forbidden_origin"})),
+            )
+                .into_response()
+        }
+        Decision::Unauthorized => {
+            debug!(method = %req.method(), outcome = "unauthorized", "authentication rejected");
+            unauthorized_response()
+        }
     }
 }
 
@@ -944,6 +961,43 @@ mod tests {
             tight.attempt_login("admin", "bad", "8.8.8.8"),
             Err(LoginError::Invalid) // 计数已被成功登录清空，未触发限流
         ));
+    }
+
+    #[test]
+    fn rate_limit_bucket_isolated_by_ip_and_username_pair() {
+        let st = state(Credential::Plain("right".into()), 100, 100, 2, 3600);
+
+        // 同一 IP 的无关用户名达到上限，不得误锁唯一合法管理员用户名。
+        for _ in 0..2 {
+            assert!(matches!(
+                st.attempt_login("decoy", "bad", "203.0.113.10"),
+                Err(LoginError::Invalid)
+            ));
+        }
+        assert!(matches!(
+            st.attempt_login("decoy", "right", "203.0.113.10"),
+            Err(LoginError::RateLimited { .. })
+        ));
+        assert!(
+            st.attempt_login("admin", "right", "203.0.113.10").is_ok(),
+            "相同 IP、不同用户名必须使用独立失败桶"
+        );
+
+        // 同一用户名在一个 IP 被锁后，另一 IP 仍可正常认证。
+        for _ in 0..2 {
+            assert!(matches!(
+                st.attempt_login("admin", "bad", "203.0.113.20"),
+                Err(LoginError::Invalid)
+            ));
+        }
+        assert!(matches!(
+            st.attempt_login("admin", "right", "203.0.113.20"),
+            Err(LoginError::RateLimited { .. })
+        ));
+        assert!(
+            st.attempt_login("admin", "right", "203.0.113.21").is_ok(),
+            "相同用户名、不同 IP 必须使用独立失败桶"
+        );
     }
 
     #[test]
