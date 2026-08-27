@@ -486,6 +486,9 @@
         </div>
       </div>
     </div>
+
+    <!-- 设备占用冲突 409 提示（对方脚本/来源/开始时间；仍要查看日志 → 跳控制台对应设备） -->
+    <RunConflictModal />
   </div>
 </template>
 
@@ -499,14 +502,15 @@ const APP_CACHE_TTL = 5 * 60 * 1000
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, inject } from 'vue'
 import { pinyin } from 'pinyin-pro'
 import { useRouter } from 'vue-router'
-import { store, devicesData, scriptsData, templatesData, useToast, applyRunRecord, findRun, beginCancel, resetStoreRunState } from '../store'
+import { store, devicesData, scriptsData, templatesData, useToast, applyRunRecord, findRun, beginCancel, resetStoreRunState, pushRunConflict } from '../store'
 import { api } from '../api'
 import {
-  sourceLabel, terminalLabel, describeConflict,
+  sourceLabel, terminalLabel,
   normalizeActiveRunResponse, normalizeStartReply,
   isMissingEndpointError, isDeviceBusyConflict, isTerminalRunState,
 } from '../runs'
 import ScriptPicker from '../components/ScriptPicker.vue'
+import RunConflictModal from '../components/RunConflictModal.vue'
 import { createScriptValidator } from '../script-language/validate'
 import { computeRunLineMap } from '../script-language/line-map'
 
@@ -3076,12 +3080,11 @@ const runStopping = computed(() => {
   return !!rec && rec.state === 'stopping'
 })
 
-/** 设备占用冲突（409 device_busy）入口：临时 toast 提示对方脚本/来源/本地化开始时间；
- *  终版换成弹窗时只需把这里改为入队 pushRunConflict */
+/** 设备占用冲突（409 device_busy）：入队弹窗展示对方脚本/来源/本地化开始时间，
+ *  提供「仍要查看日志」跳控制台对应设备；不打断本页其他功能 */
 function openRunConflict(d) {
-  const msg = describeConflict(d)
   console.warn('[run] device busy (409)', d)
-  toast(msg + '。可在投屏控制台选中该设备查看运行日志', 'warn')
+  pushRunConflict({ ...(d || {}), device_id: store.deviceId })
 }
 
 async function runScript() {

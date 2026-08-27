@@ -24,7 +24,10 @@
         </thead>
         <tbody>
           <tr v-for="t in tasks" :key="t.id" :class="{ disabled: !t.enabled }">
-            <td class="task-name">{{ t.name }}</td>
+            <td class="task-name">
+              {{ t.name }}
+              <span v-if="activeRuns[t.device_id]" class="tag run run-now" title="该设备当前有活动中的自动化运行（含本任务或手动触发）">运行中<template v-if="sourceLabel(activeRuns[t.device_id].source)"> · {{ sourceLabel(activeRuns[t.device_id].source) }}</template></span>
+            </td>
             <td><span class="cron mono">{{ t.cron }}</span></td>
             <td class="mono">{{ scriptName(t.script_id) }}</td>
             <td>{{ deviceName(t.device_id) }}</td>
@@ -38,7 +41,7 @@
             </td>
             <td>
               <div class="row-actions">
-                <button class="btn btn-sm btn-ghost" @click="runNow(t)">▶ 立即</button>
+                <button class="btn btn-sm btn-ghost" :disabled="triggeringId === t.id" @click="runNow(t)">{{ triggeringId === t.id ? '触发中…' : '▶ 立即' }}</button>
                 <button class="btn btn-sm btn-ghost" @click="editTask(t)">✎</button>
                 <button class="btn btn-sm btn-ghost danger" @click="removeTask(t)">🗑</button>
               </div>
@@ -94,14 +97,19 @@
         </div>
       </div>
     </div>
+
+    <!-- 设备占用冲突 409 提示（立即运行命中活动 run 时；仍要查看日志 → 跳控制台对应设备） -->
+    <RunConflictModal />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { tasksData, scriptsData, devicesData, useToast } from '../store'
+import { tasksData, scriptsData, devicesData, useToast, pushRunConflict } from '../store'
 import { api } from '../api'
 import ScriptPicker from '../components/ScriptPicker.vue'
+import RunConflictModal from '../components/RunConflictModal.vue'
+import { sourceLabel, shortRunId, normalizeActiveRunResponse, isDeviceBusyConflict } from '../runs'
 
 const toast = useToast()
 const tasks = tasksData
@@ -110,6 +118,10 @@ const devices = devicesData
 const showAdd = ref(false)
 const editing = ref(false)
 const form = reactive({ id: null, name: '', cron: '', script_id: '', device_id: '' })
+// 立即执行触发中（行级防重复点击）；202 一返回即复位——不等任务完成
+const triggeringId = ref('')
+// 各设备当前活动 run 摘要（deviceId → 归一化记录）：列表标注「运行中 · 来源」
+const activeRuns = ref({})
 
 const presets = [
   { name: '每分钟', cron: '* * * * *' },
@@ -155,14 +167,41 @@ async function toggle(t, e) {
   }
 }
 
+/** 立即运行：新契约 202 {run_id} —— 触发即返回并立刻恢复按钮可用（不等任务完成），
+ *  提示「已触发（run xxxxxxxx）」；409 设备占用入队冲突弹窗；
+ *  旧后端响应无 run_id → 静默降级为旧文案「已触发 <名>」 */
 async function runNow(t) {
+  if (triggeringId.value) return
+  triggeringId.value = t.id
   try {
-    await api.runTaskNow(t.id)
-    toast(`已触发 ${t.name}`, 'success')
-    setTimeout(loadTasks, 3000)
+    const rep = await api.runTaskNow(t.id)
+    toast(rep && rep.run_id ? `已触发（run ${shortRunId(rep.run_id)}）` : `已触发 ${t.name}`, 'success')
+    // 稍后刷新列表与活跃标注（服务端开始执行后设备侧才登记）
+    setTimeout(() => { loadTasks(); refreshActiveRuns() }, 3000)
   } catch (e) {
-    toast('触发失败：' + e.message, 'error')
+    if (isDeviceBusyConflict(e)) {
+      pushRunConflict({ ...(e.data || {}), device_id: t.device_id })
+    } else {
+      toast('触发失败：' + e.message, 'error')
+    }
+  } finally {
+    triggeringId.value = ''
   }
+}
+
+/** 拉取各任务设备的当前活动 run（有则标注「运行中 · 来源」）。
+ *  端点缺失（旧后端仅兼容形状也能归一化）或网络错 → 静默留空，不影响列表 */
+async function refreshActiveRuns() {
+  const ids = [...new Set(tasks.value.map(t => t.device_id).filter(Boolean))]
+  if (!ids.length) { activeRuns.value = {}; return }
+  const reps = await Promise.allSettled(ids.map(id => api.deviceRun(id)))
+  const map = {}
+  reps.forEach((r, i) => {
+    if (r.status !== 'fulfilled') return
+    const rec = normalizeActiveRunResponse(r.value)
+    if (rec && rec.run_id) map[ids[i]] = rec
+  })
+  activeRuns.value = map
 }
 
 async function removeTask(t) {
@@ -204,11 +243,18 @@ async function loadDevices() {
   try { devices.value = await api.listDevices() } catch (e) {}
 }
 
-onMounted(() => { loadTasks(); loadScripts(); loadDevices() })
+onMounted(async () => {
+  loadScripts()
+  loadDevices()
+  await loadTasks()
+  refreshActiveRuns()
+})
 </script>
 
 <style scoped>
 .task-name { font-weight: 600; }
+/* 设备当前活动 run 标注（normalizeActiveRunResponse 命中时展示；配色复用全局 tag.run） */
+.run-now { margin-left: 6px; font-weight: 400; vertical-align: 1px; }
 .cron { color: var(--accent-2); font-size: 12px; }
 tr.disabled { opacity: .45; }
 .row-actions { display: flex; gap: 2px; }
