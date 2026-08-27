@@ -79,21 +79,29 @@ steps:
     expect(v(y)).toEqual([])
   })
 
-  it('省略 func: 的纯函数库映射（单函数）本身校验通过', () => {
+  it('省略 func: 的纯函数库映射简写（含多个函数）本身校验通过', () => {
     expect(makeValidator()(loadFixture('fn_lib_short.yaml'))).toEqual([])
   })
 
-  // TODO(expected-current): 固化当前前端行为，实为**已知分歧**：
-  // 引擎 exec_cross_func 在解析被引用脚本前先 normalize_top（server/src/engine.rs，
-  // 注释"先做顶层归一化（省略 func: 的纯函数库简写同样可被跨文件调用）"），
-  // 故引擎允许跨文件调用省略 func: 的纯函数库；
-  // 前端校验直接读原文档的 sdoc.func、未做等价归一化 → 误报"未定义函数"。
-  // 修复前端后应改为 toEqual([])。
-  it('跨文件调用省略 func: 库当前误报未定义函数（见 TODO 注释）', () => {
-    const errs = makeValidator()(`steps:
+  it('跨文件调用省略 func: 库：命中通过（与引擎 exec_cross_func 先 normalize_top 再取 func 一致）', () => {
+    expect(makeValidator()(`steps:
   - fn_lib_short:noop_fn
+`)).toEqual([])
+  })
+
+  it('跨文件调用省略 func: 库：未命中给定向错误', () => {
+    const errs = makeValidator()(`steps:
+  - fn_lib_short:missing_fn
 `)
-    expect(errs.some(e => e.includes('未定义函数 noop_fn'))).toBe(true)
+    expect(errs.some(e => e.includes('未定义函数 missing_fn'))).toBe(true)
+  })
+
+  it('序列简写子脚本无 func 段：跨文件调用报未定义函数而非误判', () => {
+    const vv = validatorWithScripts([
+      { id: `${PKG}/seq_lib.yaml`, package: PKG, name: 'seq_lib.yaml', content: '- log: hi\n' },
+    ])
+    const errs = vv('steps:\n  - seq_lib:f1\n')
+    expect(errs.some(e => e.includes('未定义函数 f1'))).toBe(true)
   })
 
   it('config 不能省略：顶层 interval/threshold 定向报错', () => {
@@ -138,11 +146,7 @@ steps:
     expect(v(y)).toEqual([])
   })
 
-  // TODO(expected-current): 此用例固化当前前端行为，实为**已知分歧**：
-  // 引擎 parse_funcs（server/src/engine.rs，func 值为 Mapping 时逐键拆分为多个函数定义）
-  // 接受"映射形式含多个函数"，而前端校验把整个映射当作一个条目、要求恰好一个函数名键。
-  // fixtures/fn_lib_short.yaml 采用单函数写法规避该分歧；修复前端后应改为 toEqual([])。
-  it('映射形式多函数当前报错（引擎接受，见 TODO 注释）', () => {
+  it('映射形式多函数（引擎 parse_funcs 对 Mapping 逐键拆分接受）零错误', () => {
     const y = `func:
   f1:
     - log: a
@@ -152,8 +156,22 @@ steps:
   - f1
   - f2
 `
-    const errs = v(y)
-    expect(errs.some(e => e.includes('恰好一个 函数名: 键'))).toBe(true)
+    expect(v(y)).toEqual([])
+  })
+
+  it('映射形式多函数且含 cond 嵌套的函数仍各别识别', () => {
+    const y = `func:
+  f1:
+    cond: tpl_phone.png
+    steps:
+      - find: $1
+  f2:
+    - log: ok
+steps:
+  - f1: tpl_guide.png
+  - f2
+`
+    expect(v(y)).toEqual([])
   })
 
   it('函数重复定义报错', () => {

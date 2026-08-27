@@ -20,6 +20,39 @@ export function createScriptValidator({ templatesData, scriptsData, activePkg })
     }
   }
 
+  /** func 段值拆分为逐项映射列表（与引擎 parse_funcs 对 Mapping/Sequence 的展开
+   *  一致）：列表原样；映射逐键拆成单键条目（一个映射里可定义多个函数）；
+   *  标量等其他形态原样包装由调用方报错 */
+  function splitFuncItems(funcVal) {
+    if (Array.isArray(funcVal)) return funcVal
+    if (funcVal && typeof funcVal === 'object') {
+      return Object.entries(funcVal).map(([k, v]) => ({ [k]: v }))
+    }
+    return [funcVal]
+  }
+
+  /** 跨文件调用的函数名提取：与引擎 exec_cross_func 一致，先做 normalize_top
+   *  归一化再取 func 段——顶层映射且不含 config/func/steps 任何键 = 整体视为
+   *  func（省略 func: 的纯函数库简写同样可被跨文件调用）；顶层序列 = steps（无
+   *  func）。函数名逐项收集（排除 cond / steps 参数键），不校验函数体结构 */
+  function extractCrossFileFuncNames(subContent) {
+    const sdoc = yamlParse(subContent)
+    const hasSection = d => !!d && typeof d === 'object' && !Array.isArray(d)
+      && ('config' in d || 'func' in d || 'steps' in d)
+    const funcVal = !sdoc || typeof sdoc !== 'object' || Array.isArray(sdoc)
+      ? undefined
+      : hasSection(sdoc) ? sdoc.func : sdoc // 省略 func: 的纯函数库简写 → 整体即 func
+    const names = new Set()
+    if (!funcVal || typeof funcVal !== 'object') return names
+    for (const it of splitFuncItems(funcVal)) {
+      if (!it || typeof it !== 'object') continue
+      for (const k of Object.keys(it)) {
+        if (k !== 'cond' && k !== 'steps') names.add(k.trim())
+      }
+    }
+    return names
+  }
+
   /** 保存前校验 YAML：语法 / steps / 坐标范围 / 模板存在（模板按当前应用分区校验） */
   function validateScriptCode(content) {
     const errors = []
@@ -189,7 +222,9 @@ export function createScriptValidator({ templatesData, scriptsData, activePkg })
     // 函数体步骤递归校验在主 steps 之后，return 合法）
     const funcs = []
     if (doc.func !== undefined && doc.func !== null) {
-      const items = Array.isArray(doc.func) ? doc.func : [doc.func]
+      // 映射形式逐键拆分为多个单键函数定义（与引擎 parse_funcs 一致：一个映射
+      // 里可定义多个函数——含省略 func: 的纯函数库简写归一化后的形态）
+      const items = splitFuncItems(doc.func)
       items.forEach((it, i) => {
         const at = `func 第 ${i + 1} 项`
         if (!it || typeof it !== 'object' || Array.isArray(it)) {
@@ -458,19 +493,10 @@ export function createScriptValidator({ templatesData, scriptsData, activePkg })
             if (!sub) {
               errors.push(`${at} 子脚本不存在：${sName}`)
             } else {
-              // 函数存在性：解析子脚本 func 段（与引擎 parse_funcs 取函数名的规则一致）
+              // 函数存在性：与引擎 exec_cross_func 一致，先 normalize_top 归一化
+              // 再取 func 段收集函数名（省略 func: 的纯函数库简写同样可被调用）
               try {
-                const sdoc = yamlParse(sub.content)
-                const subFuncs = new Set()
-                if (sdoc && sdoc.func && typeof sdoc.func === 'object') {
-                  const sitems = Array.isArray(sdoc.func) ? sdoc.func : [sdoc.func]
-                  for (const it of sitems) {
-                    if (!it || typeof it !== 'object') continue
-                    for (const k of Object.keys(it)) {
-                      if (k !== 'cond' && k !== 'steps') subFuncs.add(k.trim())
-                    }
-                  }
-                }
+                const subFuncs = extractCrossFileFuncNames(sub.content)
                 if (!subFuncs.has(fName)) errors.push(`${at} 子脚本 ${sub.name} 未定义函数 ${fName}`)
               } catch (e) {
                 errors.push(`${at} 子脚本 ${sub.name || sName} 解析失败：${e.message}`)
