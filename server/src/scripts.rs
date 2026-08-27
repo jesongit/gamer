@@ -11,11 +11,103 @@
 //! 导入必须显式指定目标分区（?pkg=）；两目录均可缺省。
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use crate::config::Config;
+
+/// 将一个文件以“同目录临时文件 + flush/sync + replace”方式写入。
+///
+/// 临时文件和目标文件必须位于同一文件系统，这样最后的替换才是原子的；
+/// 写入或替换失败时只清理临时文件，不触碰已有目标文件。
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("目标路径没有父目录: {}", path.display()))?;
+    std::fs::create_dir_all(parent)?;
+
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("目标文件名无效: {}", path.display()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let mut temp = None;
+    let mut file = None;
+    for attempt in 0..16u32 {
+        let candidate = parent.join(format!(
+            ".{name}.tmp-{}-{nonce}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(f) => {
+                temp = Some(candidate);
+                file = Some(f);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let temp = temp.ok_or_else(|| anyhow::anyhow!("无法创建临时文件: {}", path.display()))?;
+    let mut file = file.expect("临时文件句柄必须与路径同时创建");
+    let result = (|| -> anyhow::Result<()> {
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&temp, path)?;
+        sync_parent(parent)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+#[cfg(not(windows))]
+fn replace_file(temp: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::rename(temp, path)
+}
+
+#[cfg(windows)]
+fn replace_file(temp: &Path, path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
+    }
+
+    let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
+    let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent(parent: &Path) -> std::io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_parent: &Path) -> std::io::Result<()> {
+    Ok(())
+}
 
 /// ZIP 导入资源硬限（阶段 2 SEC-004；传输层另有 20MiB body 闸门）
 pub const IMPORT_MAX_TOTAL_BYTES: usize = 100 * 1024 * 1024; // 总解压量 ≤100MiB
@@ -69,9 +161,27 @@ pub struct ScriptStore {
 
 impl ScriptStore {
     pub fn open(cfg: &Config) -> anyhow::Result<Self> {
-        Ok(Self {
+        let store = Self {
             root: cfg.data_dir.clone(),
-        })
+        };
+        store.cleanup_staging();
+        Ok(store)
+    }
+
+    /// 清理上次进程异常退出留下的导入 staging 目录。目录名带随机 UUID，
+    /// 只匹配本服务自己的前缀，不触碰用户数据目录中的其他内容。
+    fn cleanup_staging(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(".gamer-staging-") && entry.path().is_dir() {
+                if let Err(e) = std::fs::remove_dir_all(entry.path()) {
+                    tracing::warn!(staging = %name, error = %e, "清理残留导入 staging 失败");
+                }
+            }
+        }
     }
 
     /// 分区 yaml 脚本目录
@@ -175,7 +285,7 @@ impl ScriptStore {
         let dir = self.yaml_dir(&package);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(&name);
-        std::fs::write(&path, content)?;
+        atomic_write(&path, content.as_bytes())?;
         let new_id = format!("{}/{}", package, name);
         if let Some(old) = old_id {
             if old != new_id {
@@ -322,6 +432,7 @@ impl ScriptStore {
         }
         // 全部解析到内存（zip-slip 防护 + 布局校验 + 实际读取计数），无错才考虑落盘
         let mut actual_total: usize = 0;
+        let mut seen_paths = std::collections::HashSet::new();
         let mut files: Vec<(String, PathBuf, Vec<u8>)> = Vec::new();
         for i in 0..archive.len() {
             let mut f = archive.by_index(i)?;
@@ -361,6 +472,9 @@ impl ScriptStore {
                 }
                 _ => anyhow::bail!("包内路径需为 yaml/<脚本> 或 tmpl/<模板>: {}", f.name()),
             };
+            if !seen_paths.insert(zip_path.clone()) {
+                anyhow::bail!("包内存在重复文件: {zip_path}");
+            }
             // 双保险之实际读取计数：按 cap 截读，多读 1 字节即暴露超限/声明造假
             let cap_display_mib = cap / (1024 * 1024);
             let mut buf = Vec::new();
@@ -392,20 +506,90 @@ impl ScriptStore {
         if !confirm {
             return Ok(rep);
         }
-        for (zip_path, dest, buf) in files {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
+        // 先把全部内容写入同文件系统 staging，再逐文件提交；提交失败时利用备份
+        // 回滚已经替换的文件，避免留下半导入状态。staging 目录由 open() 清理残留。
+        let staging = self
+            .root
+            .join(format!(".gamer-staging-{}", uuid::Uuid::new_v4().simple()));
+        let stage_data = staging.join("data");
+        let stage_backup = staging.join("backup");
+        let mut staged = Vec::with_capacity(files.len());
+        let stage_result = (|| -> anyhow::Result<()> {
+            for (zip_path, dest, buf) in files {
+                let relative = dest
+                    .strip_prefix(&self.root)
+                    .map_err(|_| anyhow::anyhow!("导入目标路径不在数据目录内"))?;
+                let stage_path = stage_data.join(relative);
+                atomic_write(&stage_path, &buf)?;
+                staged.push((zip_path, dest, stage_path));
             }
-            std::fs::write(&dest, &buf)?;
-            if rep.conflicts.iter().any(|c| c == &zip_path) {
-                rep.replaced.push(zip_path.clone());
+            Ok(())
+        })();
+        if let Err(e) = stage_result {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+
+        let mut committed: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+        for (zip_path, dest, stage_path) in staged {
+            let backup = if dest.exists() {
+                let relative = dest
+                    .strip_prefix(&self.root)
+                    .map_err(|_| anyhow::anyhow!("导入目标路径不在数据目录内"))?;
+                let path = stage_backup.join(relative);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                if let Err(e) = std::fs::rename(&dest, &path) {
+                    rollback_import(&committed);
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(e.into());
+                }
+                Some(path)
             } else {
-                rep.imported.push(zip_path.clone());
+                None
+            };
+            let data = match std::fs::read(&stage_path) {
+                Ok(data) => data,
+                Err(e) => {
+                    restore_import_file(&dest, backup.as_deref());
+                    rollback_import(&committed);
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(e.into());
+                }
+            };
+            if let Err(e) = atomic_write(&dest, &data) {
+                restore_import_file(&dest, backup.as_deref());
+                rollback_import(&committed);
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(e);
             }
+            committed.push((dest, backup));
+            if rep.conflicts.iter().any(|c| c == &zip_path) {
+                rep.replaced.push(zip_path);
+            } else {
+                rep.imported.push(zip_path);
+            }
+        }
+        if let Err(e) = std::fs::remove_dir_all(&staging) {
+            tracing::warn!(error = %e, "导入 staging 清理失败，将在下次启动时清理");
         }
         Ok(rep)
     }
 } // impl ScriptStore
+
+fn restore_import_file(dest: &Path, backup: Option<&Path>) {
+    let _ = std::fs::remove_file(dest);
+    if let Some(backup) = backup {
+        let _ = std::fs::rename(backup, dest);
+    }
+}
+
+fn rollback_import(committed: &[(PathBuf, Option<PathBuf>)]) {
+    for (dest, backup) in committed.iter().rev() {
+        restore_import_file(dest, backup.as_deref());
+    }
+}
 /// 导入结果报告
 #[derive(Debug, Default, Serialize)]
 pub struct ImportReport {
@@ -545,6 +729,39 @@ mod tests {
         );
         // 无指令行原样（补尾部换行）
         assert_eq!(strip_directive_line("steps: []"), "steps: []\n");
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_file_without_leftover_temp_files() {
+        let (store, dir) = temp_store("atomic");
+        let path = dir.join("com.test.app").join("yaml").join("main.yaml");
+        atomic_write(&path, b"first\n").unwrap();
+        atomic_write(&path, b"second\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second\n");
+        let yaml_dir = store.yaml_dir("com.test.app");
+        let leftovers: Vec<_> = std::fs::read_dir(yaml_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "临时文件未清理: {leftovers:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn script_store_open_cleans_stale_import_staging() {
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-staging-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(dir.join(".gamer-staging-old/data")).unwrap();
+        let cfg = Config {
+            data_dir: dir.clone(),
+            ..Default::default()
+        };
+        let _store = ScriptStore::open(&cfg).unwrap();
+        assert!(!dir.join(".gamer-staging-old").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

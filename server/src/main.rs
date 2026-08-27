@@ -10,12 +10,14 @@ mod device;
 mod engine;
 mod logging;
 mod matcher;
+mod run_manager;
 mod scheduler;
 mod scripts;
 mod store;
 mod webrtc;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tracing::{info, warn};
@@ -81,6 +83,27 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let db = Arc::new(store::Store::open(&cfg)?);
+    // 运行日志保留策略：启动时已做一次清理，这个低频任务负责长期运行实例。
+    // SQLite 调用放入 blocking 池，不占用 Tokio 核心线程；每次只删除小批量。
+    if cfg.log_retain_days > 0 {
+        let db_for_retention = db.clone();
+        let retain_days = cfg.log_retain_days;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(15 * 60));
+            loop {
+                tick.tick().await;
+                let db = db_for_retention.clone();
+                match tokio::task::spawn_blocking(move || db.prune_logs(retain_days)).await {
+                    Ok(Ok(deleted)) if deleted > 0 => {
+                        info!(deleted, retain_days, "expired run logs removed");
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => warn!(error = %e, "periodic run log cleanup failed"),
+                    Err(e) => warn!(error = %e, "run log cleanup worker failed"),
+                }
+            }
+        });
+    }
 
     // 鉴权状态（阶段 2）：凭据链路解析 + 回环管理通道令牌 + 会话治理参数
     let credential = api::auth::resolve_credential(&cfg);
@@ -114,12 +137,25 @@ async fn main() -> anyhow::Result<()> {
     ));
     devices.start().await?;
 
-    // 调度器：cron 定时任务
-    let scheduler = Arc::new(scheduler::Scheduler::new(
-        db.clone(),
+    // 统一运行管理（阶段 3 RUN-001）：手动 / 定时 / 立即运行共用 run_id 注册表，
+    // 生产装配 EngineExecutor 直连 Runner + DeviceManager
+    let runner = Arc::new(engine::Runner::new(
         devices.clone(),
         viewers.clone(),
         scripts.clone(),
+    ));
+    let executor = Arc::new(run_manager::EngineExecutor::new(
+        runner,
+        devices.clone(),
+        db.clone(),
+    ));
+    let runs = Arc::new(run_manager::RunManager::new(executor));
+
+    // 调度器：cron 定时任务（执行经 RunManager 统一仲裁）
+    let scheduler = Arc::new(scheduler::Scheduler::new(
+        db.clone(),
+        scripts.clone(),
+        runs.clone(),
     ));
     scheduler.start().await;
 
@@ -128,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
     let app = api::build_router(
         db,
         devices,
+        runs,
         scheduler,
         cfg.clone(),
         viewers,

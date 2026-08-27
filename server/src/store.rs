@@ -3,6 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use chrono::{Local, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
@@ -60,14 +61,30 @@ pub struct LogEntry {
     pub msg: String,
 }
 
+/// 低基数数据库指标快照，供 `/metrics` 暴露；不包含用户输入或路径标签。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StoreMetrics {
+    pub devices: i64,
+    pub tasks: i64,
+    pub logs: i64,
+    pub scheduled_runs: i64,
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
 }
 
 impl Store {
     pub fn open(cfg: &Config) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(&cfg.data_dir)?;
         let path = cfg.data_dir.join("gamer.db");
         let conn = Connection::open(&path)?;
+        // 单连接 Mutex 仍保留以兼容现有调用方；这些连接级 PRAGMA 让未来
+        // 增加读连接时也具备一致的锁等待、崩溃恢复和外键约束语义。
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;\nPRAGMA synchronous = NORMAL;\nPRAGMA foreign_keys = ON;",
+        )?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS devices (
@@ -104,6 +121,30 @@ impl Store {
             CREATE INDEX IF NOT EXISTS idx_logs_time ON logs(time DESC);
             "#,
         )?;
+        // 定时触发记录用于跨 tick/重启幂等。先建表，再清理历史实现可能留下的
+        // 重复行，最后建立唯一索引；这样旧库没有 scheduled_runs 表时可直接升级，
+        // 已有重复数据时也不会因 CREATE UNIQUE INDEX 失败而无法启动。
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS scheduled_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                scheduled_at INTEGER NOT NULL,
+                state TEXT NOT NULL DEFAULT 'running',
+                run_id TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL
+            );
+            DELETE FROM scheduled_runs
+             WHERE id NOT IN (
+                 SELECT MIN(id) FROM scheduled_runs GROUP BY task_id, scheduled_at
+             );
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_scheduled_runs_task_time
+                ON scheduled_runs(task_id, scheduled_at);
+            CREATE INDEX IF NOT EXISTS idx_scheduled_runs_created_at
+                ON scheduled_runs(created_at DESC);
+            "#,
+        )?;
         // 旧库迁移：devices 表可能缺 fps 列
         let has_fps = conn
             .prepare("PRAGMA table_info(devices)")?
@@ -114,9 +155,15 @@ impl Store {
         if !has_fps {
             conn.execute("ALTER TABLE devices ADD COLUMN fps INTEGER", [])?;
         }
-        Ok(Self {
+        let store = Self {
             conn: Mutex::new(conn),
-        })
+        };
+        if cfg.log_retain_days > 0 {
+            if let Err(e) = store.prune_logs(cfg.log_retain_days) {
+                tracing::warn!(error = %e, "启动时清理过期运行日志失败");
+            }
+        }
+        Ok(store)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -151,7 +198,32 @@ impl Store {
     }
 
     pub fn get_device(&self, id: &str) -> anyhow::Result<Option<Device>> {
-        Ok(self.list_devices()?.into_iter().find(|d| d.id == id))
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at\
+             FROM devices WHERE id = ?1",
+        )?;
+        match stmt.query_row([id], |r| {
+            Ok(Device {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                kind: r.get(2)?,
+                addr: r.get(3)?,
+                screen_mode: match r.get::<_, String>(4)?.as_str() {
+                    "virtual" => ScreenMode::Virtual,
+                    _ => ScreenMode::Mirror,
+                },
+                vd_res: r.get(5)?,
+                vd_dpi: r.get(6)?,
+                pkg: r.get(7)?,
+                fps: r.get(8)?,
+                created_at: r.get(9)?,
+            })
+        }) {
+            Ok(device) => Ok(Some(device)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn upsert_device(&self, d: &Device) -> anyhow::Result<()> {
@@ -230,6 +302,63 @@ impl Store {
         Ok(())
     }
 
+    // ---------- 定时触发幂等记录 ----------
+
+    /// 原子领取一个计划触发点。返回 true 表示本次调用取得执行权；false 表示
+    /// 该 `(task_id, scheduled_at)` 已由本进程或此前的进程领取。
+    pub fn claim_scheduled_run(&self, task_id: &str, scheduled_at: i64) -> anyhow::Result<bool> {
+        let created_at = Utc::now().to_rfc3339();
+        let changed = self.lock().execute(
+            r#"INSERT INTO scheduled_runs
+                   (task_id, scheduled_at, state, created_at)
+               VALUES (?1, ?2, 'running', ?3)
+               ON CONFLICT(task_id, scheduled_at) DO NOTHING"#,
+            rusqlite::params![task_id, scheduled_at, created_at],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// 更新计划触发点的终态或提交结果。未知记录按 no-op 处理，便于服务异常恢复
+    /// 时完成钩子与调度错误路径保持幂等。
+    pub fn finish_scheduled_run(
+        &self,
+        task_id: &str,
+        scheduled_at: i64,
+        state: &str,
+        run_id: Option<&str>,
+        error: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let changed = self.lock().execute(
+            r#"UPDATE scheduled_runs
+                  SET state = ?3, run_id = COALESCE(?4, run_id), error = ?5
+                WHERE task_id = ?1 AND scheduled_at = ?2 AND state = 'running'"#,
+            rusqlite::params![task_id, scheduled_at, state, run_id, error],
+        )?;
+        Ok(changed == 1)
+    }
+
+    #[cfg(test)]
+    fn scheduled_run_count(&self, task_id: &str, scheduled_at: i64) -> i64 {
+        self.lock()
+            .query_row(
+                "SELECT COUNT(*) FROM scheduled_runs WHERE task_id = ?1 AND scheduled_at = ?2",
+                rusqlite::params![task_id, scheduled_at],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[cfg(test)]
+    fn scheduled_run_state(&self, task_id: &str, scheduled_at: i64) -> String {
+        self.lock()
+            .query_row(
+                "SELECT state FROM scheduled_runs WHERE task_id = ?1 AND scheduled_at = ?2",
+                rusqlite::params![task_id, scheduled_at],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     // ---------- 日志 ----------
 
     pub fn add_log(
@@ -294,6 +423,167 @@ impl Store {
         self.lock().execute("DELETE FROM logs", [])?;
         Ok(())
     }
+
+    /// 运行健康探测：只做一个极轻量的数据库 round-trip，不暴露底层错误给 HTTP 客户端。
+    pub fn health_check(&self) -> anyhow::Result<()> {
+        let conn = self.lock();
+        conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?;
+        Ok(())
+    }
+
+    /// 获取低基数行数指标。表名是代码内固定值，查询不接受外部输入。
+    pub fn metrics_snapshot(&self) -> anyhow::Result<StoreMetrics> {
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT\
+                (SELECT COUNT(*) FROM devices),\
+                (SELECT COUNT(*) FROM tasks),\
+                (SELECT COUNT(*) FROM logs),\
+                (SELECT COUNT(*) FROM scheduled_runs)",
+            [],
+            |r| {
+                Ok(StoreMetrics {
+                    devices: r.get(0)?,
+                    tasks: r.get(1)?,
+                    logs: r.get(2)?,
+                    scheduled_runs: r.get(3)?,
+                })
+            },
+        )?)
+    }
+
+    /// 分批删除过期日志，避免一次大事务长时间占用数据库锁。
+    /// 返回本次删除的行数；retain_days=0 表示关闭保留清理。
+    pub fn prune_logs(&self, retain_days: u32) -> anyhow::Result<u64> {
+        if retain_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = (Local::now() - chrono::Duration::days(retain_days as i64))
+            .format("%Y-%m-%d %H:%M:%S%.3f")
+            .to_string();
+        let conn = self.lock();
+        let mut total = 0u64;
+        loop {
+            let deleted = conn.execute(
+                "DELETE FROM logs WHERE id IN (\
+                    SELECT id FROM logs WHERE time < ?1 ORDER BY id LIMIT 500)",
+                [cutoff.as_str()],
+            )?;
+            total += deleted as u64;
+            if deleted < 500 {
+                break;
+            }
+        }
+        Ok(total)
+    }
 }
 
 pub type Db = Arc<Store>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_config(name: &str) -> (Config, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("gamer-store-{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut cfg = Config::default();
+        cfg.data_dir = dir.clone();
+        (cfg, dir)
+    }
+
+    #[test]
+    fn scheduled_claim_is_idempotent() {
+        let (cfg, dir) = temp_config("claim");
+        let store = Store::open(&cfg).unwrap();
+        assert!(store.claim_scheduled_run("task", 1_700_000_000).unwrap());
+        assert!(!store.claim_scheduled_run("task", 1_700_000_000).unwrap());
+        assert!(store.claim_scheduled_run("task", 1_700_000_001).unwrap());
+        assert_eq!(store.scheduled_run_count("task", 1_700_000_000), 1);
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scheduled_unique_index_migrates_duplicate_legacy_rows() {
+        let (cfg, dir) = temp_config("migration");
+        let db_path = dir.join("gamer.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE scheduled_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                scheduled_at INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                run_id TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO scheduled_runs(task_id, scheduled_at, state, created_at)
+                VALUES ('task', 42, 'running', '2026-01-01T00:00:00Z');
+            INSERT INTO scheduled_runs(task_id, scheduled_at, state, created_at)
+                VALUES ('task', 42, 'running', '2026-01-01T00:00:01Z');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(&cfg).unwrap();
+        assert_eq!(store.scheduled_run_count("task", 42), 1);
+        assert!(!store.claim_scheduled_run("task", 42).unwrap());
+        assert!(store
+            .finish_scheduled_run("task", 42, "success", Some("run-1"), None)
+            .unwrap());
+        assert!(!store
+            .finish_scheduled_run("task", 42, "failed", Some("run-2"), Some("late"))
+            .unwrap());
+        assert_eq!(store.scheduled_run_state("task", 42), "success");
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sqlite_connection_uses_reliable_pragmas() {
+        let (cfg, dir) = temp_config("pragmas");
+        let store = Store::open(&cfg).unwrap();
+        let conn = store.lock();
+        let journal: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        let busy_timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
+        assert_eq!(busy_timeout, 5_000);
+        assert_eq!(foreign_keys, 1);
+        drop(conn);
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn metrics_snapshot_and_log_retention_are_bounded() {
+        let (cfg, dir) = temp_config("metrics-retention");
+        let store = Store::open(&cfg).unwrap();
+        store
+            .lock()
+            .execute(
+                "INSERT INTO logs(time, device_id, script_id, level, msg)\
+                 VALUES ('2000-01-01 00:00:00.000', 'd', 's', 'debug', 'old')",
+                [],
+            )
+            .unwrap();
+        store.add_log("d", "s", "info", "new").unwrap();
+        let deleted = store.prune_logs(1).unwrap();
+        assert_eq!(deleted, 1);
+        let metrics = store.metrics_snapshot().unwrap();
+        assert_eq!(metrics.logs, 1);
+        assert_eq!(store.list_logs(None, None, 10).unwrap()[0].msg, "new");
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

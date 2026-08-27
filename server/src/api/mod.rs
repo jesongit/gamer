@@ -5,7 +5,7 @@
 //!
 //! 鉴权（阶段 2 SEC，见 auth.rs）：
 //! - 公开豁免组（public）：POST /api/login、GET /api/session、POST /api/logout
-//!   （三者自身实现契约语义）、GET /health/live、静态资源 fallback；
+//!   （三者自身实现契约语义）、GET /health/live、GET /health/ready、GET /metrics、静态资源 fallback；
 //! - 受保护组（protected）：其余全部 /api/** 与 /ws/device/:id——统一经 auth_guard：
 //!   未认证 401 {"error":"unauthorized"}；状态变更/WS 升级 Origin≠Host 403；
 //!   回环 + X-Admin-Token 快捷通道放行本机管理脚本；
@@ -34,7 +34,6 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::device::DeviceManager;
-use crate::engine::Runner;
 use crate::matcher;
 use crate::scheduler::{next_run, Scheduler};
 use crate::scripts::ScriptStore;
@@ -50,25 +49,16 @@ const BODY_LIMIT_ZIP_IMPORT: usize = 20 * 1024 * 1024;
 /// 公开豁免组请求体上限（登录等极小 JSON）
 const BODY_LIMIT_PUBLIC: usize = 64 * 1024;
 
-/// 脚本运行句柄：停止标志 + 运行设备（run_stops 的表项）
-#[derive(Clone)]
-pub struct RunHandle {
-    pub stop: Arc<std::sync::atomic::AtomicBool>,
-    pub device_id: String,
-}
-
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
     pub devices: Arc<DeviceManager>,
     pub scheduler: Arc<Scheduler>,
-    pub runner: Arc<Runner>,
+    /// 统一运行管理（阶段 3 RUN-001）：手动/调度共用 run_id 注册表与设备级互斥
+    pub runs: Arc<crate::run_manager::RunManager>,
     pub cfg: Config,
     /// 脚本文件存储（data/scripts/<package>/）
     pub scripts: Arc<ScriptStore>,
-    /// 脚本运行注册表：script_id → 运行句柄（条目存在 = 正在运行）。
-    /// device_id 供页面刷新后按设备查询运行中的脚本（恢复运行态）
-    pub run_stops: Arc<std::sync::Mutex<std::collections::HashMap<String, RunHandle>>>,
     /// 每设备的活跃 viewer（WebRTC 会话）注册表（main.rs 创建，与 Scheduler 共享）：
     /// 同一设备只允许一个活跃 viewer——新连接踢掉旧连接（旧 pusher 停止 + 旧 peer 关闭），
     /// 避免多连接多推流导致浏览器端 srcObject 串流/资源浪费。
@@ -83,6 +73,7 @@ pub struct AppState {
 pub fn build_router(
     db: Db,
     devices: Arc<DeviceManager>,
+    runs: Arc<crate::run_manager::RunManager>,
     scheduler: Arc<Scheduler>,
     cfg: Config,
     viewers: crate::webrtc::ViewerMap,
@@ -90,19 +81,13 @@ pub fn build_router(
     shutdown: tokio::sync::watch::Sender<bool>,
     auth: Arc<auth::AuthState>,
 ) -> Router {
-    let runner = Arc::new(Runner::new(
-        devices.clone(),
-        viewers.clone(),
-        scripts.clone(),
-    ));
     let state = AppState {
         db,
         devices,
         scheduler,
-        runner,
+        runs,
         cfg: cfg.clone(),
         scripts,
-        run_stops: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         viewers,
         shutdown,
         auth,
@@ -112,13 +97,15 @@ pub fn build_router(
     spawn_watchdog(state.clone());
     auth::spawn_sweeper(state.auth.clone());
 
-    // ---- 公开豁免组：登录三端点自身实现契约语义；health 存活探针匿名；
+    // ---- 公开豁免组：登录三端点自身实现契约语义；health/metrics 探针匿名；
     //      静态资源兜底（前端 SPA）。这些路径不经过 auth_guard。
     let public: Router<()> = Router::new()
         .route("/api/login", post(api_login))
         .route("/api/session", get(api_session))
         .route("/api/logout", post(api_logout))
         .route("/health/live", get(|| async { (StatusCode::OK, "ok") }))
+        .route("/health/ready", get(api_health_ready))
+        .route("/metrics", get(api_metrics))
         .fallback_service(
             ServeDir::new("./web-dist").fallback(ServeDir::new("./web-dist/index.html")),
         )
@@ -156,6 +143,8 @@ pub fn build_router(
         .route("/api/scripts/:id/stop", post(api_stop_script))
         .route("/api/scripts/:id/status", get(api_script_status))
         .route("/api/devices/:id/run", get(api_device_run))
+        .route("/api/runs/:run_id", get(api_get_run))
+        .route("/api/runs/:run_id/cancel", post(api_cancel_run))
         .route("/api/scripts/export", get(api_export_partition))
         .route("/api/tasks", get(api_list_tasks).post(api_save_task))
         .route("/api/tasks/:id", delete(api_delete_task))
@@ -204,6 +193,111 @@ pub fn build_router(
         .merge(protected_upload)
         .merge(protected_import)
         .layer(axmw::from_fn(auth::inject_ip_key))
+}
+
+/// 结构化 readiness 探针：检查服务本地运行所需的持久化目录、SQLite、
+/// scrcpy-server 资源和外部工具。探针本身匿名可访问，响应只返回布尔状态，
+/// 不把本机路径、命令行或底层错误泄露给客户端。
+async fn api_health_ready(State(st): State<AppState>) -> Response {
+    let data_dir = st.cfg.data_dir.clone();
+    let scrcpy_server = st.cfg.scrcpy_server.clone();
+    let db = st.db.clone();
+    let cfg = st.cfg.clone();
+    let (data_dir_ok, scrcpy_ok, db_ok, tools) = tokio::join!(
+        tokio::task::spawn_blocking(move || data_dir.is_dir()),
+        tokio::task::spawn_blocking(move || scrcpy_server.is_file()),
+        tokio::task::spawn_blocking(move || db.health_check().is_ok()),
+        tokio::task::spawn_blocking(move || cfg.probe_external_tools()),
+    );
+    let data_dir_ok = data_dir_ok.unwrap_or(false);
+    let scrcpy_ok = scrcpy_ok.unwrap_or(false);
+    let db_ok = db_ok.unwrap_or(false);
+    let tool_probes = tools.ok().unwrap_or_default();
+    let adb_ok = tool_probes
+        .iter()
+        .find(|p| p.name == "adb")
+        .map(|p| p.status.is_ok())
+        .unwrap_or(false);
+    let ffmpeg_ok = tool_probes
+        .iter()
+        .find(|p| p.name == "ffmpeg")
+        .map(|p| p.status.is_ok())
+        .unwrap_or(false);
+    let ready = data_dir_ok && scrcpy_ok && db_ok && adb_ok && ffmpeg_ok;
+    let body = serde_json::json!({
+        "ready": ready,
+        "checks": {
+            "data_dir": { "ok": data_dir_ok },
+            "sqlite": { "ok": db_ok },
+            "scrcpy_server": { "ok": scrcpy_ok },
+            "adb": { "ok": adb_ok },
+            "ffmpeg": { "ok": ffmpeg_ok },
+        }
+    });
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(body)).into_response()
+}
+
+/// 暴露低基数 Prometheus 文本指标。读数据库和外部探测均移到 blocking 池，
+/// 避免指标抓取把 rusqlite/命令执行带到 Tokio 核心线程；业务指标采集失败时
+/// 仍返回合法响应，并用 `gamer_db_ready` 标记异常。
+async fn api_metrics(State(st): State<AppState>) -> Response {
+    let db = st.db.clone();
+    let db_snapshot = tokio::task::spawn_blocking(move || db.metrics_snapshot()).await;
+    let db_ready = db_snapshot.as_ref().is_ok_and(|r| r.is_ok());
+    let db_metrics = db_snapshot.ok().and_then(Result::ok).unwrap_or_default();
+    let configured_devices = st.devices.list_snapshot().len();
+    let active_sessions = st.devices.online_sessions().len();
+    let active_viewers = st.viewers.lock().map(|v| v.len()).unwrap_or_default();
+    let active_runs = st.runs.active_count();
+
+    let mut body = String::new();
+    body.push_str("# HELP gamer_configured_devices Number of configured devices.\n");
+    body.push_str("# TYPE gamer_configured_devices gauge\n");
+    body.push_str(&format!(
+        "gamer_configured_devices {}\n",
+        configured_devices
+    ));
+    body.push_str("# HELP gamer_sessions_active Current online scrcpy sessions.\n");
+    body.push_str("# TYPE gamer_sessions_active gauge\n");
+    body.push_str(&format!("gamer_sessions_active {}\n", active_sessions));
+    body.push_str("# HELP gamer_viewers_active Current registered WebRTC viewers.\n");
+    body.push_str("# TYPE gamer_viewers_active gauge\n");
+    body.push_str(&format!("gamer_viewers_active {}\n", active_viewers));
+    body.push_str("# HELP gamer_runs_active Current non-terminal runs.\n");
+    body.push_str("# TYPE gamer_runs_active gauge\n");
+    body.push_str(&format!("gamer_runs_active {}\n", active_runs));
+    body.push_str("# HELP gamer_db_ready Whether the database metrics query succeeded.\n");
+    body.push_str("# TYPE gamer_db_ready gauge\n");
+    body.push_str(&format!("gamer_db_ready {}\n", u8::from(db_ready)));
+    body.push_str("# HELP gamer_db_devices_total Rows in the devices table.\n");
+    body.push_str("# TYPE gamer_db_devices_total gauge\n");
+    body.push_str(&format!("gamer_db_devices_total {}\n", db_metrics.devices));
+    body.push_str("# HELP gamer_db_tasks_total Rows in the tasks table.\n");
+    body.push_str("# TYPE gamer_db_tasks_total gauge\n");
+    body.push_str(&format!("gamer_db_tasks_total {}\n", db_metrics.tasks));
+    body.push_str("# HELP gamer_db_logs_total Rows in the logs table.\n");
+    body.push_str("# TYPE gamer_db_logs_total gauge\n");
+    body.push_str(&format!("gamer_db_logs_total {}\n", db_metrics.logs));
+    body.push_str("# HELP gamer_scheduled_runs_total Rows in the scheduled_runs table.\n");
+    body.push_str("# TYPE gamer_scheduled_runs_total gauge\n");
+    body.push_str(&format!(
+        "gamer_scheduled_runs_total {}\n",
+        db_metrics.scheduled_runs
+    ));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )
+        .body(Body::from(body))
+        .expect("metrics response builder with static headers")
+        .into_response()
 }
 
 /// 视频静默看门狗：设备在线但视频流超过阈值无新帧时的处置。
@@ -1003,7 +1097,7 @@ async fn api_upload_template(
     }
     let name = sanitize_filename(&req.name);
     let path = dir.join(&name);
-    if let Err(e) = std::fs::write(&path, &bytes) {
+    if let Err(e) = crate::scripts::atomic_write(&path, &bytes) {
         return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
     Json(
@@ -1059,7 +1153,7 @@ async fn api_rename_template(
         Ok(b) => b,
         Err(_) => return err_response(StatusCode::NOT_FOUND, "模板不存在"),
     };
-    if let Err(e) = std::fs::write(&new_path, &bytes) {
+    if let Err(e) = crate::scripts::atomic_write(&new_path, &bytes) {
         return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
     }
     if std::fs::remove_file(&old_path).is_err() {
@@ -1259,140 +1353,135 @@ struct RunScriptReq {
     func: Option<String>,
 }
 
+/// 手动运行的完成钩子：终态摘要行落库（realtime 模式引擎日志已实时入库，
+/// 这里只补一条终局提示，与旧实现的"脚本执行完成/失败"行语义对齐）
+fn manual_finish_hook(db: Db) -> crate::run_manager::FinishHook {
+    use crate::run_manager::RunOutcome;
+    Arc::new(move |rec, outcome| match outcome {
+        RunOutcome::Success(_) => {
+            let _ = db.add_log(&rec.device_id, &rec.script_id, "success", "脚本执行完成");
+        }
+        RunOutcome::Failed(msg, _) => {
+            let _ = db.add_log(
+                &rec.device_id,
+                &rec.script_id,
+                "error",
+                &format!("脚本执行失败: {}", msg),
+            );
+        }
+        RunOutcome::Cancelled(_) => {
+            let _ = db.add_log(&rec.device_id, &rec.script_id, "info", "脚本已停止");
+        }
+    })
+}
+
 async fn api_run_script(
     State(st): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<RunScriptReq>,
 ) -> Response {
+    // 脚本存在性先校验（404 优先于设备冲突）
     let Some(script) = (match st.scripts.get(&id) {
         Ok(s) => s,
         Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }) else {
         return err_response(StatusCode::NOT_FOUND, "脚本不存在");
     };
-    // 同一脚本同时只允许一个运行实例（run_stops 条目存在 = 正在运行）
-    {
-        let stops = st.run_stops.lock().unwrap();
-        if stops.contains_key(&id) {
-            return err_response(StatusCode::CONFLICT, "脚本正在运行中");
-        }
+    if req.device_id.trim().is_empty() {
+        return err_response(StatusCode::BAD_REQUEST, "缺少 device_id");
     }
-    // 连接设备（若离线）
-    if let Err(e) = st.devices.connect_device(&req.device_id).await {
-        return err_response(StatusCode::BAD_GATEWAY, &format!("设备连接失败: {}", e));
-    }
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    st.run_stops.lock().unwrap().insert(
-        id.clone(),
-        RunHandle {
-            stop: stop.clone(),
-            device_id: req.device_id.clone(),
-        },
-    );
-    // 设备运行计数 +1（空闲断开守卫；spawn 结束时 run_end 归零）
-    st.devices.run_begin(&req.device_id);
-    let runner = st.runner.clone();
-    let devices = st.devices.clone();
-    let db = st.db.clone();
-    let run_stops = st.run_stops.clone();
-    let device_id = req.device_id.clone();
-    let script_id = id.clone();
-    let start_index = req.start_index.unwrap_or(0);
-    let run_func = req.func.filter(|s| !s.trim().is_empty());
-    let content = script.content.clone();
-    // 实时日志：脚本每产生一条日志就立刻写入 DB，前端轮询即可实时显示
-    let db_stream = st.db.clone();
-    let log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>> = {
-        let device_id = device_id.clone();
-        let script_id = script_id.clone();
-        Some(Arc::new(move |level, msg| {
-            let _ = db_stream.add_log(&device_id, &script_id, &level, &msg);
-        }))
+    // RUN-002 契约：启动即返回 202 {run_id, state:"starting"}，不等脚本结束；
+    // 设备级互斥冲突 → 409 {error:"device_busy", run_id, script_id, source, started_at}
+    let rreq = crate::run_manager::StartRequest {
+        run_id: String::new(),
+        device_id: req.device_id.clone(),
+        script_id: id.clone(),
+        content: script.content.clone(),
+        source: crate::run_manager::RunSource::Manual,
+        task_id: None,
+        scheduled_at: None,
+        start_index: req.start_index.unwrap_or(0),
+        run_func: req.func.filter(|s| !s.trim().is_empty()),
+        realtime_logs: true,
     };
-    tokio::spawn(async move {
-        let logs = runner
-            .run(
-                &device_id,
-                &script_id,
-                &content,
-                stop.clone(),
-                log_cb,
-                start_index,
-                run_func.as_deref(),
-                None,
-                vec![],
-            )
-            .await;
-        devices.run_end(&device_id);
-        // 空闲低功耗（拆会话/关屏）由 DeviceManager::idle_power_loop 周期统一管理
-        match logs {
-            Ok(_entries) => {
-                let _ = db.add_log(&device_id, &script_id, "success", "脚本执行完成");
-            }
-            Err(e) => {
-                let _ = db.add_log(
-                    &device_id,
-                    &script_id,
-                    "error",
-                    &format!("脚本执行失败: {}", e),
-                );
-            }
+    match st
+        .runs
+        .submit(rreq, Some(manual_finish_hook(st.db.clone())))
+    {
+        Ok(rec) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "run_id": rec.run_id,
+                "state": serde_json::to_value(rec.state).unwrap_or_default(),
+            })),
+        )
+            .into_response(),
+        Err(crate::run_manager::StartError::Conflict(busy)) => {
+            (StatusCode::CONFLICT, Json(busy.busy_payload())).into_response()
         }
-        // 运行结束：移除停止标志（条目存在与否同时作为"脚本是否在运行"的状态依据）
-        let mut stops = run_stops.lock().unwrap();
-        if let Some(cur) = stops.get(&script_id) {
-            if Arc::ptr_eq(&cur.stop, &stop) {
-                stops.remove(&script_id);
-            }
+        Err(crate::run_manager::StartError::ShuttingDown) => {
+            err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
         }
-    });
-    Json(serde_json::json!({"ok": true})).into_response()
+    }
 }
 
+/// 旧停止端点（兼容窗口）：按 script_id 定位活动 run 并取消。
+/// 同一脚本可能在不同设备各有一个实例——逐个取消。响应保持旧形状 {ok:true}。
 async fn api_stop_script(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    if let Some(h) = st.run_stops.lock().unwrap().get(&id) {
-        h.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    for run in st.runs.active_for_script(&id) {
+        st.runs.cancel(&run.run_id);
     }
     Json(serde_json::json!({"ok": true})).into_response()
 }
 
-/// 查询脚本是否正在运行（run_stops 条目存在 = 运行中，运行结束由 spawn 任务移除）
+/// 旧脚本运行查询（兼容窗口）：内部经 RunManager 反查该脚本的任意活动实例
 async fn api_script_status(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    let running = st.run_stops.lock().unwrap().contains_key(&id);
+    let running = !st.runs.active_for_script(&id).is_empty();
     Json(serde_json::json!({"running": running})).into_response()
 }
 
-/// 查询设备当前运行中的脚本（页面刷新后恢复运行态用）：
-/// 运行注册表按 device_id 反查首个运行中的脚本（同设备并发多脚本时取任一）
+/// 设备当前运行查询（前端刷新恢复运行态）：
+/// 新契约 active:true + 完整 RunRecord / active:false；
+/// （旧 {running,script_id,script_name} 形状已随阶段 3 废弃）
 async fn api_device_run(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    let found = st
-        .run_stops
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|(_, h)| h.device_id == id)
-        .map(|(sid, _)| sid.clone());
-    match found {
-        Some(script_id) => {
-            let name = st
-                .scripts
-                .get(&script_id)
-                .ok()
-                .flatten()
-                .map(|s| s.name)
-                .unwrap_or_else(|| {
-                    script_id
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&script_id)
-                        .trim_end_matches(".yml")
-                        .trim_end_matches(".yaml")
-                        .to_string()
-                });
-            Json(serde_json::json!({"running": true, "script_id": script_id, "script_name": name}))
-                .into_response()
+    match st.runs.active_for_device(&id) {
+        Some(rec) => {
+            let mut v = serde_json::to_value(&rec).unwrap_or_else(|_| serde_json::json!({}));
+            v["active"] = serde_json::json!(true);
+            Json(v).into_response()
         }
-        None => Json(serde_json::json!({"running": false})).into_response(),
+        None => Json(serde_json::json!({"active": false})).into_response(),
+    }
+}
+
+/// GET /api/runs/:run_id → 完整 RunRecord（活动在册 + 终态档案均可查；未知 404）
+async fn api_get_run(State(st): State<AppState>, Path(run_id): Path<String>) -> Response {
+    match st.runs.get_run(&run_id) {
+        Some(rec) => Json(serde_json::to_value(&rec).unwrap_or_else(|_| serde_json::json!({})))
+            .into_response(),
+        None => err_response(StatusCode::NOT_FOUND, "run_not_found"),
+    }
+}
+
+/// POST /api/runs/:run_id/cancel → 202 {"cancelling":true}；
+/// 终态由客户端随后 GET /api/runs/:id 确认（cancelled/success/failed）
+async fn api_cancel_run(State(st): State<AppState>, Path(run_id): Path<String>) -> Response {
+    use crate::run_manager::CancelOutcome;
+    match st.runs.cancel(&run_id) {
+        CancelOutcome::Accepted => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"cancelling": true})),
+        )
+            .into_response(),
+        CancelOutcome::NotFound => err_response(StatusCode::NOT_FOUND, "run_not_found"),
+        CancelOutcome::AlreadyFinished(state) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "already_finished",
+                "state": serde_json::to_value(state).unwrap_or_default(),
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -1470,7 +1559,10 @@ async fn api_delete_task(State(st): State<AppState>, Path(id): Path<String>) -> 
     }
 }
 
+/// 立即运行定时任务（RUN-002 契约）：202 {run_id} 提交即返回，不占用 HTTP
+/// 连接等任务完成；设备冲突 409 device_busy；停机 drain 中 503。
 async fn api_run_task_now(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    use crate::scheduler::RunNowError;
     let Some(task) = (match st.db.list_tasks() {
         Ok(t) => t,
         Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -1479,8 +1571,22 @@ async fn api_run_task_now(State(st): State<AppState>, Path(id): Path<String>) ->
     .find(|t| t.id == id) else {
         return err_response(StatusCode::NOT_FOUND, "任务不存在");
     };
-    st.scheduler.run_now(&task).await;
-    Json(serde_json::json!({"ok": true})).into_response()
+    match st.scheduler.run_now(&task).await {
+        Ok(run_id) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "run_id": run_id })),
+        )
+            .into_response(),
+        Err(RunNowError::Start(crate::run_manager::StartError::Conflict(busy))) => {
+            (StatusCode::CONFLICT, Json(busy.busy_payload())).into_response()
+        }
+        Err(RunNowError::Start(crate::run_manager::StartError::ShuttingDown)) => {
+            err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
+        }
+        Err(RunNowError::ScriptMissing | RunNowError::Io(_)) => {
+            err_response(StatusCode::BAD_REQUEST, "脚本不存在或读取失败")
+        }
+    }
 }
 
 // ---------- 日志 ----------
@@ -1526,11 +1632,15 @@ async fn api_op_templates(State(st): State<AppState>) -> Response {
 }
 
 /// 优雅停机（gamer.ps1 stop/rebuild 先调此端点，超时才兜底硬杀）：
-/// 踢所有 viewer（只关 peer 不发 taken_over——那是"被顶替"信号会让页面放弃自动
-/// 重连；普通断开页面会在服务重启后自动重连）→ 拆所有 scrcpy 会话/清 reverse
-/// 隧道（防孤儿 adb 楔死后续连接，见 DeviceManager::shutdown_all）→ 触发进程退出
+/// ① RunManager drain——先拒绝新 run（503），等待活动任务结束，超时强停
+/// （RUN-001：服务关闭先停止接收新任务再取消/等待活动任务）；
+/// ② 踢所有 viewer（只关 peer 不发 taken_over——那是"被顶替"信号会让页面放弃自动
+/// 重连；普通断开页面会在服务重启后自动重连）；③ 拆所有 scrcpy 会话/清 reverse
+/// 隧道（防孤儿 adb 楔死后续连接，见 DeviceManager::shutdown_all）；④ 触发进程退出
 async fn api_shutdown(State(st): State<AppState>) -> Response {
     info!("graceful shutdown requested (POST /api/shutdown)");
+    // RunManager drain（宽限 10s；活动脚本短则提前返回）
+    st.runs.begin_shutdown(Duration::from_secs(10)).await;
     // 踢 viewer：关 WebRTC peer（ws 循环随 peer_closed 退出），否则常驻 WS 连接
     // 会让 axum 的 graceful drain 一直等不到收尾
     let viewers = st.viewers.lock().unwrap().clone();
@@ -1631,12 +1741,63 @@ mod sec_tests {
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone(), viewers.clone()));
-        let scheduler = Arc::new(Scheduler::new(
-            db.clone(),
+        // 生产执行器装配（设备离线时 prepare 即失败，正好覆盖"连接失败锁释放"路径）
+        let executor = Arc::new(crate::run_manager::EngineExecutor::new(
+            Arc::new(crate::engine::Runner::new(
+                devices.clone(),
+                viewers.clone(),
+                scripts.clone(),
+            )),
             devices.clone(),
-            viewers.clone(),
-            scripts.clone(),
+            db.clone(),
         ));
+        assemble_app(
+            db, devices, cfg, scripts, viewers, credential, auth_cfg, executor,
+        )
+    }
+
+    /// 注入自定义执行器的装配（仲裁层 HTTP 集成测试用假执行器；其余与 build_app 相同）
+    fn build_app_with_executor(
+        tag: &str,
+        credential: auth::Credential,
+        mut auth_cfg: crate::config::AuthConfig,
+        executor: Arc<dyn crate::run_manager::RunExecutor>,
+    ) -> TestApp {
+        if auth_cfg.session_abs_secs == 12 * 3600 {
+            auth_cfg.session_abs_secs = 3600;
+        }
+        if auth_cfg.session_idle_secs == 2 * 3600 {
+            auth_cfg.session_idle_secs = 1800;
+        }
+        let dir = tmp_dir(tag);
+        let cfg = Config {
+            data_dir: dir.clone(),
+            ..Default::default()
+        };
+        let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
+        let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let viewers: crate::webrtc::ViewerMap =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone(), viewers.clone()));
+        assemble_app(
+            db, devices, cfg, scripts, viewers, credential, auth_cfg, executor,
+        )
+    }
+
+    /// 公共装配体：RunManager + Scheduler + Router（TestApp 持有临时目录负责清理边界注释）
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_app(
+        db: Db,
+        devices: Arc<DeviceManager>,
+        cfg: Config,
+        scripts: Arc<ScriptStore>,
+        viewers: crate::webrtc::ViewerMap,
+        credential: auth::Credential,
+        auth_cfg: crate::config::AuthConfig,
+        executor: Arc<dyn crate::run_manager::RunExecutor>,
+    ) -> TestApp {
+        let runs = Arc::new(crate::run_manager::RunManager::new(executor));
+        let scheduler = Arc::new(Scheduler::new(db.clone(), scripts.clone(), runs.clone()));
         let auth = Arc::new(auth::AuthState::new(
             credential,
             auth_cfg,
@@ -1644,9 +1805,11 @@ mod sec_tests {
             Some("test-token".into()),
         ));
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let dir = cfg.data_dir.clone();
         let app = build_router(
             db,
             devices,
+            runs,
             scheduler,
             cfg,
             viewers,
@@ -1754,6 +1917,55 @@ mod sec_tests {
         // 进程仍存活：后续请求正常应答
         let alive = send(&t.app, req("GET", "/health/live", None, &[], None)).await;
         assert_eq!(alive.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn readiness_is_public_structured_and_does_not_leak_paths() {
+        let t = build_app(
+            "ready",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let resp = send(&t.app, req("GET", "/health/ready", None, &[], None)).await;
+        assert!(matches!(
+            resp.status(),
+            StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE
+        ));
+        let status = resp.status();
+        let body = json_body(resp).await;
+        assert_eq!(body["ready"].is_boolean(), true);
+        for name in ["data_dir", "sqlite", "scrcpy_server", "adb", "ffmpeg"] {
+            assert_eq!(body["checks"][name]["ok"].is_boolean(), true, "{name}");
+        }
+        assert_eq!(body["ready"], status == StatusCode::OK);
+        assert!(!body
+            .to_string()
+            .contains(&t.dir.to_string_lossy().to_string()));
+    }
+
+    #[tokio::test]
+    async fn metrics_is_public_prometheus_text_with_low_cardinality() {
+        let t = build_app(
+            "metrics",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let resp = send(&t.app, req("GET", "/metrics", None, &[], None)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("gamer_sessions_active "));
+        assert!(body.contains("gamer_runs_active "));
+        assert!(body.contains("gamer_db_ready 1"));
+        assert!(!body.contains(&t.dir.to_string_lossy().to_string()));
     }
 
     #[tokio::test]
