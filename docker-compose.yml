@@ -14,10 +14,8 @@ services:
     environment:
       - GB_CONFIG=/app/config.toml
     restart: unless-stopped
-    # USB 设备直通（物理手机场景，按需开启）
-    # devices:
-    #   - "/dev/bus/usb:/dev/bus/usb"
-    privileged: true
+    # USB 设备直通（物理手机场景）不放主文件：
+    # 用 docker-compose.usb.yml override 承载 device 映射，网络类部署保持零特权
 
   # redroid 云手机（按需启用）
   redroid:

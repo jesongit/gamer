@@ -87,12 +87,18 @@ rustup default stable                            # MSVC 工具链需先装 VS Bu
 # 1. 构建服务端镜像
 cd server && docker build -t gamer-server .
 
-# 2. 拉起服务端 + redroid 云手机
-cd .. && docker compose up -d          # 含 redroid 云手机
-docker compose --profile redroid up -d # 仅服务端
+# 2. 启动服务端。redroid 声明了 profile：默认 up 只启动 gamer 服务端，
+#    需要 redroid 云手机时必须带 --profile redroid（会连同 gamer 一起拉起）
+docker compose up -d                    # 仅 gamer 服务端
+docker compose --profile redroid up -d  # gamer + redroid 云手机
+
+# USB 直连物理设备（Linux 宿主机）时叠加直通 override：
+docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d
 ```
 
 - 访问 `http://<服务器IP>:8443`，默认账号 `admin / admin123`
+- `gamer` 容器默认**不带特权**运行；网络类设备（redroid / WiFi adb / 模拟器）
+  无需宿主机特权，USB 直通所需的 device 映射由 `docker-compose.usb.yml` 承载
 - redroid 容器启动后，在「设备列表」添加设备：类型 redroid、地址 `redroid:5555`、
   屏幕模式虚拟屏 `1920x1080`、游戏包名填你的游戏
 
@@ -116,7 +122,7 @@ VITE_PROXY_TARGET=http://localhost:8443 pnpm dev
 | 方式 | 设备配置 | 说明 |
 |---|---|---|
 | redroid 容器 | 类型 `redroid`，地址 `redroid:5555` | Docker 内 Android，与服务端同网 |
-| USB 直连 | 类型 `usb`，地址留空 | 需容器 `--device /dev/bus/usb` 直通 |
+| USB 直连 | 类型 `usb`，地址留空 | 容器场景需叠加 `docker-compose.usb.yml` 直通 `/dev/bus/usb` |
 | 无线 adb | 类型 `wifi`，地址 `192.168.x.x:5555` | 手机开启无线调试 |
 | 模拟器 | 类型 `emu`，地址 `127.0.0.1:7555` | MuMu/雷电等 adb 端口 |
 
