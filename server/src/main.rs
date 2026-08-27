@@ -10,6 +10,7 @@ mod device;
 mod engine;
 mod logging;
 mod matcher;
+mod metrics;
 mod run_manager;
 mod scheduler;
 mod scripts;

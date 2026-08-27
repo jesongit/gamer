@@ -16,8 +16,9 @@ mod ws;
 
 pub mod auth;
 
+use std::fmt::Display;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
@@ -52,6 +53,8 @@ const BODY_LIMIT_PUBLIC: usize = 64 * 1024;
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
+    /// 进程内低基数运行指标；标签不接受请求中的任意字符串。
+    pub metrics: Arc<crate::metrics::Metrics>,
     pub devices: Arc<DeviceManager>,
     pub scheduler: Arc<Scheduler>,
     /// 统一运行管理（阶段 3 RUN-001）：手动/调度共用 run_id 注册表与设备级互斥
@@ -81,8 +84,10 @@ pub fn build_router(
     shutdown: tokio::sync::watch::Sender<bool>,
     auth: Arc<auth::AuthState>,
 ) -> Router {
+    let metrics = db.metrics();
     let state = AppState {
         db,
+        metrics,
         devices,
         scheduler,
         runs,
@@ -195,6 +200,23 @@ pub fn build_router(
         .layer(axmw::from_fn(auth::inject_ip_key))
 }
 
+fn append_metric(body: &mut String, help: &str, kind: &str, metric: &str, value: impl Display) {
+    body.push_str("# HELP ");
+    body.push_str(metric.split('{').next().unwrap_or(metric));
+    body.push(' ');
+    body.push_str(help);
+    body.push('\n');
+    body.push_str("# TYPE ");
+    body.push_str(metric.split('{').next().unwrap_or(metric));
+    body.push(' ');
+    body.push_str(kind);
+    body.push('\n');
+    body.push_str(metric);
+    body.push(' ');
+    body.push_str(&value.to_string());
+    body.push('\n');
+}
+
 /// 结构化 readiness 探针：检查服务本地运行所需的持久化目录、SQLite、
 /// scrcpy-server 资源和外部工具。探针本身匿名可访问，响应只返回布尔状态，
 /// 不把本机路径、命令行或底层错误泄露给客户端。
@@ -254,41 +276,307 @@ async fn api_metrics(State(st): State<AppState>) -> Response {
     let active_sessions = st.devices.online_sessions().len();
     let active_viewers = st.viewers.lock().map(|v| v.len()).unwrap_or_default();
     let active_runs = st.runs.active_count();
+    let runtime_metrics = st.metrics.snapshot();
 
     let mut body = String::new();
-    body.push_str("# HELP gamer_configured_devices Number of configured devices.\n");
-    body.push_str("# TYPE gamer_configured_devices gauge\n");
-    body.push_str(&format!(
-        "gamer_configured_devices {}\n",
-        configured_devices
-    ));
-    body.push_str("# HELP gamer_sessions_active Current online scrcpy sessions.\n");
-    body.push_str("# TYPE gamer_sessions_active gauge\n");
-    body.push_str(&format!("gamer_sessions_active {}\n", active_sessions));
-    body.push_str("# HELP gamer_viewers_active Current registered WebRTC viewers.\n");
-    body.push_str("# TYPE gamer_viewers_active gauge\n");
-    body.push_str(&format!("gamer_viewers_active {}\n", active_viewers));
-    body.push_str("# HELP gamer_runs_active Current non-terminal runs.\n");
-    body.push_str("# TYPE gamer_runs_active gauge\n");
-    body.push_str(&format!("gamer_runs_active {}\n", active_runs));
-    body.push_str("# HELP gamer_db_ready Whether the database metrics query succeeded.\n");
-    body.push_str("# TYPE gamer_db_ready gauge\n");
-    body.push_str(&format!("gamer_db_ready {}\n", u8::from(db_ready)));
-    body.push_str("# HELP gamer_db_devices_total Rows in the devices table.\n");
-    body.push_str("# TYPE gamer_db_devices_total gauge\n");
-    body.push_str(&format!("gamer_db_devices_total {}\n", db_metrics.devices));
-    body.push_str("# HELP gamer_db_tasks_total Rows in the tasks table.\n");
-    body.push_str("# TYPE gamer_db_tasks_total gauge\n");
-    body.push_str(&format!("gamer_db_tasks_total {}\n", db_metrics.tasks));
-    body.push_str("# HELP gamer_db_logs_total Rows in the logs table.\n");
-    body.push_str("# TYPE gamer_db_logs_total gauge\n");
-    body.push_str(&format!("gamer_db_logs_total {}\n", db_metrics.logs));
-    body.push_str("# HELP gamer_scheduled_runs_total Rows in the scheduled_runs table.\n");
-    body.push_str("# TYPE gamer_scheduled_runs_total gauge\n");
-    body.push_str(&format!(
-        "gamer_scheduled_runs_total {}\n",
-        db_metrics.scheduled_runs
-    ));
+    append_metric(
+        &mut body,
+        "Number of configured devices.",
+        "gauge",
+        "gamer_configured_devices",
+        configured_devices,
+    );
+    append_metric(
+        &mut body,
+        "Current online scrcpy sessions.",
+        "gauge",
+        "gamer_sessions_active",
+        active_sessions,
+    );
+    append_metric(
+        &mut body,
+        "Current registered WebRTC viewers.",
+        "gauge",
+        "gamer_viewers_active",
+        active_viewers,
+    );
+    append_metric(
+        &mut body,
+        "Current non-terminal runs.",
+        "gauge",
+        "gamer_runs_active",
+        active_runs,
+    );
+    append_metric(
+        &mut body,
+        "Whether the database metrics query succeeded.",
+        "gauge",
+        "gamer_db_ready",
+        u8::from(db_ready),
+    );
+    append_metric(
+        &mut body,
+        "Rows in the devices table.",
+        "gauge",
+        "gamer_db_devices_total",
+        db_metrics.devices,
+    );
+    append_metric(
+        &mut body,
+        "Rows in the tasks table.",
+        "gauge",
+        "gamer_db_tasks_total",
+        db_metrics.tasks,
+    );
+    append_metric(
+        &mut body,
+        "Rows in the logs table.",
+        "gauge",
+        "gamer_db_logs_total",
+        db_metrics.logs,
+    );
+    append_metric(
+        &mut body,
+        "Rows in the scheduled_runs table.",
+        "gauge",
+        "gamer_scheduled_runs_total",
+        db_metrics.scheduled_runs,
+    );
+    append_metric(
+        &mut body,
+        "Database worker queue depth.",
+        "gauge",
+        "gamer_db_queue_depth",
+        runtime_metrics.db_queue_depth,
+    );
+    append_metric(
+        &mut body,
+        "Completed database log batches.",
+        "counter",
+        "gamer_db_log_batches_total",
+        runtime_metrics.db_batches_total,
+    );
+    append_metric(
+        &mut body,
+        "Rows committed in database log batches.",
+        "counter",
+        "gamer_db_log_batch_rows_total",
+        runtime_metrics.db_batch_rows_total,
+    );
+    append_metric(
+        &mut body,
+        "Total database log batch duration in milliseconds.",
+        "counter",
+        "gamer_db_log_batch_duration_ms_total",
+        runtime_metrics.db_batch_duration_ms_total,
+    );
+    append_metric(
+        &mut body,
+        "Database log batch failures.",
+        "counter",
+        "gamer_db_log_flush_errors_total",
+        runtime_metrics.db_flush_errors_total,
+    );
+    append_metric(
+        &mut body,
+        "Debug logs dropped because the database queue was full.",
+        "counter",
+        "gamer_db_debug_logs_dropped_total",
+        runtime_metrics.db_logs_dropped_debug_total,
+    );
+    append_metric(
+        &mut body,
+        "Successful scrcpy connection attempts.",
+        "counter",
+        "gamer_scrcpy_connect_success_total",
+        runtime_metrics.scrcpy_connect_success_total,
+    );
+    append_metric(
+        &mut body,
+        "Failed scrcpy connection attempts.",
+        "counter",
+        "gamer_scrcpy_connect_failure_total",
+        runtime_metrics.scrcpy_connect_failure_total,
+    );
+    for (reason, value) in [
+        ("manual", runtime_metrics.scrcpy_reconnect_manual_total),
+        (
+            "watchdog_dead",
+            runtime_metrics.scrcpy_reconnect_watchdog_dead_total,
+        ),
+        (
+            "watchdog_silent",
+            runtime_metrics.scrcpy_reconnect_watchdog_silent_total,
+        ),
+    ] {
+        append_metric(
+            &mut body,
+            "Scrcpy reconnect attempts by bounded reason.",
+            "counter",
+            &format!("gamer_scrcpy_reconnect_total{{reason=\"{reason}\"}}"),
+            value,
+        );
+    }
+    append_metric(
+        &mut body,
+        "Video frames received from devices.",
+        "counter",
+        "gamer_video_input_frames_total",
+        runtime_metrics.video_input_frames_total,
+    );
+    append_metric(
+        &mut body,
+        "Approximate input video frames per second.",
+        "gauge",
+        "gamer_video_input_fps",
+        runtime_metrics.video_input_fps_milli as f64 / 1000.0,
+    );
+    append_metric(
+        &mut body,
+        "Video frames sent through RTP.",
+        "counter",
+        "gamer_rtp_sent_frames_total",
+        runtime_metrics.rtp_sent_frames_total,
+    );
+    append_metric(
+        &mut body,
+        "Approximate RTP video frames per second.",
+        "gauge",
+        "gamer_rtp_sent_fps",
+        runtime_metrics.rtp_sent_fps_milli as f64 / 1000.0,
+    );
+    append_metric(
+        &mut body,
+        "Current RTP queue depth.",
+        "gauge",
+        "gamer_rtp_queue_depth",
+        runtime_metrics.rtp_queue_depth,
+    );
+    append_metric(
+        &mut body,
+        "Video frames dropped before RTP send.",
+        "counter",
+        "gamer_rtp_dropped_frames_total",
+        runtime_metrics.rtp_dropped_frames_total,
+    );
+    append_metric(
+        &mut body,
+        "Frames currently retained in the latest GOP.",
+        "gauge",
+        "gamer_gop_frames",
+        runtime_metrics.gop_frames,
+    );
+    append_metric(
+        &mut body,
+        "Bytes currently retained in the latest GOP.",
+        "gauge",
+        "gamer_gop_bytes",
+        runtime_metrics.gop_bytes,
+    );
+    append_metric(
+        &mut body,
+        "On-demand ffmpeg frame decodes.",
+        "counter",
+        "gamer_ffmpeg_decode_total",
+        runtime_metrics.ffmpeg_decode_total,
+    );
+    for (result, value) in [
+        ("success", runtime_metrics.ffmpeg_decode_success_total),
+        ("timeout", runtime_metrics.ffmpeg_decode_timeout_total),
+        ("failure", runtime_metrics.ffmpeg_decode_failure_total),
+    ] {
+        append_metric(
+            &mut body,
+            "On-demand ffmpeg decodes by bounded result.",
+            "counter",
+            &format!("gamer_ffmpeg_decode_result_total{{result=\"{result}\"}}"),
+            value,
+        );
+    }
+    append_metric(
+        &mut body,
+        "Total on-demand ffmpeg decode duration in milliseconds.",
+        "counter",
+        "gamer_ffmpeg_decode_duration_ms_total",
+        runtime_metrics.ffmpeg_decode_duration_ms_total,
+    );
+    append_metric(
+        &mut body,
+        "NCC template match operations.",
+        "counter",
+        "gamer_ncc_matches_total",
+        runtime_metrics.ncc_matches_total,
+    );
+    for (result, value) in [
+        ("hit", runtime_metrics.ncc_hits_total),
+        ("miss", runtime_metrics.ncc_misses_total),
+    ] {
+        append_metric(
+            &mut body,
+            "NCC matches by bounded result.",
+            "counter",
+            &format!("gamer_ncc_result_total{{result=\"{result}\"}}"),
+            value,
+        );
+    }
+    for (scope, value) in [
+        ("region", runtime_metrics.ncc_region_total),
+        ("fullscreen", runtime_metrics.ncc_fullscreen_total),
+    ] {
+        append_metric(
+            &mut body,
+            "NCC matches by bounded search scope.",
+            "counter",
+            &format!("gamer_ncc_scope_total{{scope=\"{scope}\"}}"),
+            value,
+        );
+    }
+    let ncc_hit_ratio = if runtime_metrics.ncc_matches_total == 0 {
+        0.0
+    } else {
+        runtime_metrics.ncc_hits_total as f64 / runtime_metrics.ncc_matches_total as f64
+    };
+    append_metric(
+        &mut body,
+        "NCC hit ratio.",
+        "gauge",
+        "gamer_ncc_hit_ratio",
+        ncc_hit_ratio,
+    );
+    append_metric(
+        &mut body,
+        "Total NCC match duration in milliseconds.",
+        "counter",
+        "gamer_ncc_duration_ms_total",
+        runtime_metrics.ncc_duration_ms_total,
+    );
+    append_metric(
+        &mut body,
+        "Scheduler trigger submissions.",
+        "counter",
+        "gamer_scheduler_triggers_total",
+        runtime_metrics.scheduler_triggers_total,
+    );
+    append_metric(
+        &mut body,
+        "Total scheduler trigger submission latency in milliseconds.",
+        "counter",
+        "gamer_scheduler_trigger_latency_ms_total",
+        runtime_metrics.scheduler_trigger_latency_ms_total,
+    );
+    for (event, value) in [
+        ("conflict", runtime_metrics.scheduler_conflicts_total),
+        ("skipped", runtime_metrics.scheduler_skipped_total),
+        ("failed", runtime_metrics.scheduler_failures_total),
+    ] {
+        append_metric(
+            &mut body,
+            "Scheduler outcomes by bounded result.",
+            "counter",
+            &format!("gamer_scheduler_events_total{{event=\"{event}\"}}"),
+            value,
+        );
+    }
     Response::builder()
         .status(StatusCode::OK)
         .header(
@@ -339,6 +627,8 @@ fn spawn_watchdog(st: AppState) {
                 // 会话确死（video socket 已关）：唯一允许脚本运行中强拆重连的
                 // 路径——控制 socket 同链路已死，不重连脚本会永远卡死
                 if !session.connected.load(std::sync::atomic::Ordering::SeqCst) {
+                    st.metrics
+                        .scrcpy_reconnect(crate::metrics::ReconnectReason::WatchdogDead);
                     warn!(device = %id, idle_ms = idle, "session dead (video socket closed), tearing down");
                     nudged.remove(&id);
                     // 踢 viewer：旧 pusher 挂在旧帧通道上，重连建新通道后不会
@@ -412,6 +702,8 @@ fn spawn_watchdog(st: AppState) {
                     }
                 }
                 warn!(device = %id, idle_ms = idle, "video stream silent after keyframe nudge, auto-reconnecting scrcpy session");
+                st.metrics
+                    .scrcpy_reconnect(crate::metrics::ReconnectReason::WatchdogSilent);
                 // 踢旧 viewer：pusher 停止 + peer 关闭 → ws.rs 退出清理
                 let kicked = {
                     let mut map = st.viewers.lock().unwrap();
@@ -830,8 +1122,14 @@ fn pretty_app_label(pkg: &str) -> String {
 
 async fn api_connect_device(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     match st.devices.connect_device(&id).await {
-        Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => err_response(StatusCode::BAD_GATEWAY, &format!("连接失败: {}", e)),
+        Ok(_) => {
+            st.metrics.scrcpy_connect(true);
+            Json(serde_json::json!({"ok": true})).into_response()
+        }
+        Err(e) => {
+            st.metrics.scrcpy_connect(false);
+            err_response(StatusCode::BAD_GATEWAY, &format!("连接失败: {}", e))
+        }
     }
 }
 
@@ -1570,6 +1868,7 @@ async fn api_delete_task(State(st): State<AppState>, Path(id): Path<String>) -> 
 /// 连接等任务完成；设备冲突 409 device_busy；停机 drain 中 503。
 async fn api_run_task_now(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     use crate::scheduler::RunNowError;
+    let trigger_started = Instant::now();
     let Some(task) = (match st.db.list_tasks() {
         Ok(t) => t,
         Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -1579,18 +1878,34 @@ async fn api_run_task_now(State(st): State<AppState>, Path(id): Path<String>) ->
         return err_response(StatusCode::NOT_FOUND, "任务不存在");
     };
     match st.scheduler.run_now(&task).await {
-        Ok(run_id) => (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({ "run_id": run_id })),
-        )
-            .into_response(),
+        Ok(run_id) => {
+            st.metrics
+                .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({ "run_id": run_id })),
+            )
+                .into_response()
+        }
         Err(RunNowError::Start(crate::run_manager::StartError::Conflict(busy))) => {
+            st.metrics
+                .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
+            st.metrics
+                .record_scheduler_event(crate::metrics::SchedulerEvent::Conflict);
             (StatusCode::CONFLICT, Json(busy.busy_payload())).into_response()
         }
         Err(RunNowError::Start(crate::run_manager::StartError::ShuttingDown)) => {
+            st.metrics
+                .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
+            st.metrics
+                .record_scheduler_event(crate::metrics::SchedulerEvent::Skipped);
             err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
         }
         Err(RunNowError::ScriptMissing | RunNowError::Io(_)) => {
+            st.metrics
+                .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
+            st.metrics
+                .record_scheduler_event(crate::metrics::SchedulerEvent::Failed);
             err_response(StatusCode::BAD_REQUEST, "脚本不存在或读取失败")
         }
     }

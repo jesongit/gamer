@@ -23,9 +23,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use chrono::Days;
-use chrono::Local;
 use chrono::NaiveDate;
 use chrono::Timelike;
+use chrono::Utc;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::RollingFileAppender;
 use tracing_appender::rolling::Rotation;
@@ -99,7 +99,7 @@ pub fn init(retain_days: u32) -> anyhow::Result<(LogTarget, Option<WorkerGuard>)
                 &dir,
                 &prefix,
                 retain_days,
-                Local::now().date_naive(),
+                Utc::now().date_naive(),
             ));
             spawn_retention_loop(dir, prefix, retain_days);
             Ok((target, Some(guard)))
@@ -201,23 +201,23 @@ fn rotated_file_date(name: &str, prefix: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(rest, "%Y-%m-%d").ok()
 }
 
-/// 后台循环：每过一个本地零点顺带清理一次；与启动清理同套规则。
+/// 后台循环：每过一个 UTC 零点顺带清理一次；与 tracing-appender 的日期后缀口径一致。
 fn spawn_retention_loop(dir: PathBuf, prefix: String, retain_days: u32) {
     if retain_days == 0 {
         return; // 与启动清理口径一致：0 视为关闭保留策略
     }
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(duration_until_next_local_midnight()).await;
-            let today = Local::now().date_naive();
+            tokio::time::sleep(duration_until_next_utc_midnight()).await;
+            let today = Utc::now().date_naive();
             report_prune(prune_rotated_logs(&dir, &prefix, retain_days, today));
         }
     });
 }
 
-/// 距下一个本地零点的秒数（多加 5s 保证醒来时已明确越过零点边界）
-fn duration_until_next_local_midnight() -> Duration {
-    let secs = u64::from(Local::now().time().num_seconds_from_midnight());
+/// 距下一个 UTC 零点的秒数（多加 5s 保证醒来时已明确越过零点边界）
+fn duration_until_next_utc_midnight() -> Duration {
+    let secs = u64::from(Utc::now().time().num_seconds_from_midnight());
     Duration::from_secs(86_400 - secs + 5)
 }
 
@@ -328,7 +328,7 @@ mod tests {
     #[test]
     fn rolling_appender_produces_daily_named_file() {
         let dir = temp_dir("roll");
-        let today = Local::now().date_naive();
+        let today = Utc::now().date_naive();
         let appender = RollingFileAppender::builder()
             .rotation(Rotation::DAILY)
             .filename_prefix(PREFIX)
