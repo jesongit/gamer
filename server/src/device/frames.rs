@@ -95,10 +95,13 @@ pub struct InFlight<K, T, E> {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct FrameKey {
-    /// Identifies the stable config + GOP generation used to merge an in-flight decode.
+    /// Identifies the config + GOP lifetime that produced this frame.
     snapshot_generation: u64,
     /// Explicitly separates a parameter-set replacement from an ordinary GOP update.
     config_generation: u64,
+    /// Separates ordinary P-frame arrivals within the same GOP. Only requests that captured
+    /// the exact same latest frame may share a decode.
+    frame_sequence: u64,
 }
 
 #[derive(Clone)]
@@ -111,6 +114,7 @@ struct FrameSnapshot {
     latest_frame_at: Instant,
 }
 
+#[derive(Debug)]
 struct DecodedFrame {
     png: Vec<u8>,
     frame_sequence: u64,
@@ -160,6 +164,7 @@ impl FrameState {
         FrameKey {
             snapshot_generation: self.snapshot_generation,
             config_generation: self.config_generation,
+            frame_sequence: self.frame_sequence,
         }
     }
 
@@ -248,7 +253,7 @@ pub struct FrameCache {
     ffmpeg_path: Mutex<String>,
     /// 配置帧、GOP、序号和到达时间必须在同一把锁下观察，避免撕裂快照。
     state: Mutex<FrameState>,
-    /// 同一个稳定快照只允许一个真实 ffmpeg 解码，结果/错误由所有 waiter 共享。
+    /// 同一个精确帧快照只允许一个真实 ffmpeg 解码，结果/错误由所有 waiter 共享。
     decode_in_flight: InFlight<FrameKey, DecodedFrame, String>,
     /// 帧尺寸（最近一次成功解码的 PNG 尺寸，供设备信息展示）
     width: RwLock<u32>,
@@ -353,11 +358,6 @@ impl FrameCache {
         !state.gop.is_empty() && state.key() == key && state.frame_sequence == frame_sequence
     }
 
-    fn current_key(&self) -> Option<FrameKey> {
-        let state = self.state.lock();
-        (!state.gop.is_empty()).then(|| state.key())
-    }
-
     /// 仅在失败仍对应当前快照时清空 GOP。旧快照的异步 decode 收尾绝不能清掉新 GOP。
     fn clear_gop_if_same(&self, key: FrameKey) -> bool {
         let mut state = self.state.lock();
@@ -371,7 +371,7 @@ impl FrameCache {
     }
 
     /// 按需解码最新帧为 PNG（供截图/模板匹配）：
-    /// 每次调用都从当前稳定 GOP 快照全新解码。相同快照的并发请求共享同一个真实
+    /// 每次调用都从当前精确帧快照全新解码。相同帧序号的并发请求共享同一个真实
     /// ffmpeg future；解码完成后重新核对 key，避免把 config/GOP 已替换的旧 PNG 当成当前帧。
     /// 无帧（会话刚建立/刚清空）时等首个 IDR ≤1.5s；解码失败时仅当失败仍对应当前
     /// 快照才清空 GOP，随后等待新 IDR 重试一次。
@@ -392,21 +392,11 @@ impl FrameCache {
                 };
             };
             let key = snapshot.key;
-            let snapshot_frame_sequence = snapshot.frame_sequence;
             let snapshot_latest_frame_at = snapshot.latest_frame_at;
-            let config = snapshot.config;
-            let gop = snapshot.gop;
             let ffmpeg_for_decode = ffmpeg.clone();
             let decoded = self
-                .decode_in_flight
-                .run(key, move || async move {
-                    Self::decode_once(&ffmpeg_for_decode, &config, &gop)
-                        .await
-                        .map(|png| DecodedFrame {
-                            png,
-                            frame_sequence: snapshot_frame_sequence,
-                        })
-                        .map_err(|error| error.to_string())
+                .request_snapshot(snapshot, move |snapshot| async move {
+                    Self::decode_once(&ffmpeg_for_decode, &snapshot.config, &snapshot.gop).await
                 })
                 .await;
 
@@ -444,6 +434,32 @@ impl FrameCache {
                 }
             }
         }
+    }
+
+    /// 执行或加入精确帧快照的解码请求。该边界由生产截图路径直接调用，并允许测试
+    /// 注入解码器，验证并发合并、错误广播和不同 key 的独立进度。
+    async fn request_snapshot<F, Fut>(
+        &self,
+        snapshot: FrameSnapshot,
+        decode: F,
+    ) -> Result<Arc<DecodedFrame>, Arc<String>>
+    where
+        F: FnOnce(FrameSnapshot) -> Fut + Send + 'static,
+        Fut: Future<Output = anyhow::Result<Vec<u8>>> + Send + 'static,
+    {
+        let key = snapshot.key;
+        let frame_sequence = snapshot.frame_sequence;
+        self.decode_in_flight
+            .run(key, move || async move {
+                decode(snapshot)
+                    .await
+                    .map(|png| DecodedFrame {
+                        png,
+                        frame_sequence,
+                    })
+                    .map_err(|error| error.to_string())
+            })
+            .await
     }
 
     /// 等待 GOP 非空（首个 IDR 未到或解码失败后刚清空重建），超时返回 None
@@ -570,8 +586,10 @@ impl FrameCache {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    use super::{FrameCache, InFlight};
+    use super::{FrameCache, FrameKey, InFlight};
     use crate::device::scrcpy::VideoFrame;
     use tokio::sync::Notify;
 
@@ -614,6 +632,7 @@ mod tests {
             first.key.snapshot_generation
         );
         assert_eq!(second.key.config_generation, first.key.config_generation);
+        assert_ne!(second.key, first.key);
         assert!(second.frame_sequence > first.frame_sequence);
         assert!(second.latest_frame_at >= first.latest_frame_at);
         assert!(!cache.is_snapshot_current(first.key, first.frame_sequence));
@@ -657,6 +676,220 @@ mod tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    async fn wait_for_waiters(cache: &FrameCache, key: FrameKey, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let waiters = cache
+                    .decode_in_flight
+                    .entries
+                    .lock()
+                    .get(&key)
+                    .map(|entry| entry.waiters.load(Ordering::Acquire))
+                    .unwrap_or(0);
+                if waiters >= expected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("waiters should join the in-flight request");
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_coalesces_concurrent_same_frame() {
+        let cache = FrameCache::start("ffmpeg");
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+        let snapshot = cache.snapshot().expect("snapshot");
+        let key = snapshot.key;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        let first_cache = Arc::clone(&cache);
+        let first_snapshot = snapshot.clone();
+        let first_executions = Arc::clone(&executions);
+        let first_started = Arc::clone(&started);
+        let first_release = Arc::clone(&release);
+        let first = tokio::spawn(async move {
+            first_cache
+                .request_snapshot(first_snapshot, move |_| async move {
+                    first_executions.fetch_add(1, Ordering::SeqCst);
+                    first_started.notify_one();
+                    first_release.notified().await;
+                    Ok(vec![7])
+                })
+                .await
+        });
+
+        started.notified().await;
+
+        let second_cache = Arc::clone(&cache);
+        let second_executions = Arc::clone(&executions);
+        let second = tokio::spawn(async move {
+            second_cache
+                .request_snapshot(snapshot, move |_| async move {
+                    second_executions.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![99])
+                })
+                .await
+        });
+
+        wait_for_waiters(&cache, key, 2).await;
+        release.notify_one();
+
+        assert_eq!(first.await.unwrap().unwrap().png, vec![7]);
+        assert_eq!(second.await.unwrap().unwrap().png, vec![7]);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_propagates_failure_and_recovers() {
+        let cache = FrameCache::start("ffmpeg");
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+        let snapshot = cache.snapshot().expect("snapshot");
+        let key = snapshot.key;
+        let executions = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        let first_cache = Arc::clone(&cache);
+        let first_snapshot = snapshot.clone();
+        let first_executions = Arc::clone(&executions);
+        let first_started = Arc::clone(&started);
+        let first_release = Arc::clone(&release);
+        let first = tokio::spawn(async move {
+            first_cache
+                .request_snapshot(first_snapshot, move |_| async move {
+                    first_executions.fetch_add(1, Ordering::SeqCst);
+                    first_started.notify_one();
+                    first_release.notified().await;
+                    Err(anyhow::anyhow!("temporary failure"))
+                })
+                .await
+        });
+
+        started.notified().await;
+
+        let second_cache = Arc::clone(&cache);
+        let second_snapshot = snapshot.clone();
+        let second = tokio::spawn(async move {
+            second_cache
+                .request_snapshot(second_snapshot, |_| async move {
+                    Err(anyhow::anyhow!("should not execute"))
+                })
+                .await
+        });
+
+        wait_for_waiters(&cache, key, 2).await;
+        release.notify_one();
+
+        assert_eq!(
+            first.await.unwrap().unwrap_err().as_str(),
+            "temporary failure"
+        );
+        assert_eq!(
+            second.await.unwrap().unwrap_err().as_str(),
+            "temporary failure"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+        let retry_executions = Arc::clone(&executions);
+        let retry = cache
+            .request_snapshot(snapshot, move |_| async move {
+                retry_executions.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![9])
+            })
+            .await
+            .unwrap();
+        assert_eq!(retry.png, vec![9]);
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_different_keys_do_not_block_each_other() {
+        let cache = FrameCache::start("ffmpeg");
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+        let first_snapshot = cache.snapshot().expect("first snapshot");
+        let first_key = first_snapshot.key;
+        let first_started = Arc::new(Notify::new());
+        let first_release = Arc::new(Notify::new());
+
+        let first_cache = Arc::clone(&cache);
+        let started = Arc::clone(&first_started);
+        let release = Arc::clone(&first_release);
+        let first = tokio::spawn(async move {
+            first_cache
+                .request_snapshot(first_snapshot, move |_| async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(vec![1])
+                })
+                .await
+        });
+
+        first_started.notified().await;
+        cache.feed(&video_frame(3, false, false));
+        let second_snapshot = cache.snapshot().expect("second snapshot");
+        assert_ne!(first_key, second_snapshot.key);
+
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            cache.request_snapshot(second_snapshot, |_| async move { Ok(vec![2]) }),
+        )
+        .await
+        .expect("a different frame key must not wait for the first decode")
+        .unwrap();
+        assert_eq!(second.png, vec![2]);
+
+        first_release.notify_one();
+        assert_eq!(first.await.unwrap().unwrap().png, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_is_scoped_to_each_frame_cache() {
+        let first_cache = FrameCache::start("ffmpeg");
+        let second_cache = FrameCache::start("ffmpeg");
+        for cache in [&first_cache, &second_cache] {
+            cache.feed(&video_frame(1, true, false));
+            cache.feed(&video_frame(2, false, true));
+        }
+        let first_snapshot = first_cache.snapshot().expect("first snapshot");
+        let second_snapshot = second_cache.snapshot().expect("second snapshot");
+        assert_eq!(first_snapshot.key, second_snapshot.key);
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let task_cache = Arc::clone(&first_cache);
+        let task_started = Arc::clone(&started);
+        let task_release = Arc::clone(&release);
+        let first = tokio::spawn(async move {
+            task_cache
+                .request_snapshot(first_snapshot, move |_| async move {
+                    task_started.notify_one();
+                    task_release.notified().await;
+                    Ok(vec![1])
+                })
+                .await
+        });
+
+        started.notified().await;
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            second_cache.request_snapshot(second_snapshot, |_| async move { Ok(vec![2]) }),
+        )
+        .await
+        .expect("another device cache must have an independent in-flight map")
+        .unwrap();
+        assert_eq!(second.png, vec![2]);
+
+        release.notify_one();
+        assert_eq!(first.await.unwrap().unwrap().png, vec![1]);
     }
 
     #[tokio::test]
