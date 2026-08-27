@@ -53,6 +53,7 @@ FROM debian:trixie-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         adb \
         ffmpeg \
+        curl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app

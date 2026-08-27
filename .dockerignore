@@ -12,6 +12,7 @@ tools/
 
 # Rust：构建缓存（本机 target 约 5.8 GiB，必须排除）
 server/target/
+server/web-dist/
 
 # 运行期数据与日志
 /data/
