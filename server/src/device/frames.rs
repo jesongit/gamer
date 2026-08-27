@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::{Mutex, RwLock};
@@ -59,6 +59,85 @@ struct InFlightEntry<T, E> {
 /// 旧请求的收尾误删已经开始的新请求。
 pub struct InFlight<K, T, E> {
     entries: Arc<Mutex<HashMap<K, Arc<InFlightEntry<T, E>>>>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct FrameKey {
+    /// Identifies the exact config + GOP snapshot used as decode input.
+    snapshot_generation: u64,
+    /// Explicitly separates a parameter-set replacement from an ordinary GOP update.
+    config_generation: u64,
+}
+
+#[derive(Clone)]
+struct FrameSnapshot {
+    key: FrameKey,
+    config: Vec<u8>,
+    gop: Vec<VideoFrame>,
+    /// Sequence of the most recently received frame when this snapshot was taken.
+    frame_sequence: u64,
+    latest_frame_at: Instant,
+}
+
+struct FrameState {
+    config_buf: Vec<u8>,
+    gop: Vec<VideoFrame>,
+    /// Counts every received video frame, including repeated config frames.
+    frame_sequence: u64,
+    /// Advances only when the bytes that form a decodable snapshot change.
+    snapshot_generation: u64,
+    config_generation: u64,
+    latest_frame_at: Option<Instant>,
+}
+
+impl FrameState {
+    fn new() -> Self {
+        Self {
+            config_buf: Vec::new(),
+            gop: Vec::new(),
+            frame_sequence: 0,
+            snapshot_generation: 0,
+            config_generation: 0,
+            latest_frame_at: None,
+        }
+    }
+
+    fn next_counter(counter: &mut u64) {
+        *counter = counter
+            .checked_add(1)
+            .expect("frame sequence/generation exhausted");
+    }
+
+    fn observe_frame(&mut self) -> u64 {
+        Self::next_counter(&mut self.frame_sequence);
+        self.latest_frame_at = Some(Instant::now());
+        self.frame_sequence
+    }
+
+    fn snapshot_changed(&mut self, sequence: u64) {
+        Self::next_counter(&mut self.snapshot_generation);
+        debug_assert!(sequence <= self.frame_sequence);
+    }
+
+    fn key(&self) -> FrameKey {
+        FrameKey {
+            snapshot_generation: self.snapshot_generation,
+            config_generation: self.config_generation,
+        }
+    }
+
+    fn snapshot(&self) -> Option<FrameSnapshot> {
+        if self.gop.is_empty() {
+            return None;
+        }
+        Some(FrameSnapshot {
+            key: self.key(),
+            config: self.config_buf.clone(),
+            gop: self.gop.clone(),
+            frame_sequence: self.frame_sequence,
+            latest_frame_at: self.latest_frame_at?,
+        })
+    }
 }
 
 impl<K, T, E> Default for InFlight<K, T, E> {
@@ -119,10 +198,10 @@ where
 
 pub struct FrameCache {
     ffmpeg_path: Mutex<String>,
-    /// 最近 SPS/PPS 配置帧（解码任何 GOP 前必须先喂它）
-    config_buf: Mutex<Vec<u8>>,
-    /// 最近完整 GOP（自最近 IDR 起，含 IDR 与后续 P 帧；新 IDR 清空重建）
-    gop: Mutex<Vec<VideoFrame>>,
+    /// 配置帧、GOP、序号和到达时间必须在同一把锁下观察，避免撕裂快照。
+    state: Mutex<FrameState>,
+    /// 同一个稳定快照只允许一个真实 ffmpeg 解码，结果/错误由所有 waiter 共享。
+    decode_in_flight: InFlight<FrameKey, Vec<u8>, String>,
     /// 帧尺寸（最近一次成功解码的 PNG 尺寸，供设备信息展示）
     width: RwLock<u32>,
     height: RwLock<u32>,
@@ -132,8 +211,8 @@ impl FrameCache {
     pub fn start(ffmpeg_path: &str) -> Arc<Self> {
         Arc::new(Self {
             ffmpeg_path: Mutex::new(ffmpeg_path.to_string()),
-            config_buf: Mutex::new(Vec::new()),
-            gop: Mutex::new(Vec::new()),
+            state: Mutex::new(FrameState::new()),
+            decode_in_flight: InFlight::new(),
             width: RwLock::new(0),
             height: RwLock::new(0),
         })
@@ -142,36 +221,40 @@ impl FrameCache {
     /// 喂入一帧：仅更新 SPS/PPS 配置帧与 GOP 环（无任何解码工作）。
     /// 注意：本方法由视频消费任务调用，必须保持轻量（只做内存拷贝）。
     pub fn feed(&self, frame: &VideoFrame) {
+        let mut state = self.state.lock();
+        let sequence = state.observe_frame();
         if frame.is_config {
-            let mut cb = self.config_buf.lock();
-            if cb.is_empty() || *cb != frame.data {
+            if state.config_buf.is_empty() || state.config_buf != frame.data {
                 // 参数集变化（分辨率/编码参数切换，如游戏切横竖屏、编码器重启）：
                 // 旧 GOP 与新参数不匹配，清空等新 IDR 重建——否则 WebRTC 初始重放
                 // 与按需解码会把"新 SPS/PPS + 旧 GOP"喂给解码器 → 花屏/解码失败
                 // （repeat-previous-headers 会周期性重发相同参数集，字节相同则不清）
-                if !cb.is_empty() {
-                    self.gop.lock().clear();
+                if !state.config_buf.is_empty() {
+                    state.gop.clear();
                     debug!(
                         "SPS/PPS changed ({}B → {}B), GOP cleared",
-                        cb.len(),
+                        state.config_buf.len(),
                         frame.data.len()
                     );
                 }
-                *cb = frame.data.clone();
+                FrameState::next_counter(&mut state.config_generation);
+                state.config_buf = frame.data.clone();
+                state.snapshot_changed(sequence);
             }
             return;
         }
         // GOP 缓存维护：IDR 清空重建；P 帧追加；超限丢弃整个 GOP（等待下一个 IDR）
-        let mut gop = self.gop.lock();
         if frame.is_keyframe {
-            gop.clear();
-            gop.push(frame.clone());
-        } else if !gop.is_empty() {
-            gop.push(frame.clone());
-            let total: usize = gop.iter().map(|f| f.data.len()).sum();
-            if gop.len() > GOP_MAX_FRAMES || total > GOP_MAX_BYTES {
-                gop.clear();
+            state.gop.clear();
+            state.gop.push(frame.clone());
+            state.snapshot_changed(sequence);
+        } else if !state.gop.is_empty() {
+            state.gop.push(frame.clone());
+            let total: usize = state.gop.iter().map(|f| f.data.len()).sum();
+            if state.gop.len() > GOP_MAX_FRAMES || total > GOP_MAX_BYTES {
+                state.gop.clear();
             }
+            state.snapshot_changed(sequence);
         }
     }
 
@@ -180,23 +263,18 @@ impl FrameCache {
     /// 返回 None 表示缓存里还没有可用帧（会话刚建立时）。
     pub fn initial_frames(&self) -> Option<Vec<VideoFrame>> {
         let mut frames = Vec::new();
-        {
-            let c = self.config_buf.lock();
-            if !c.is_empty() {
-                frames.push(VideoFrame {
-                    data: c.clone(),
-                    pts_us: 0,
-                    is_config: true,
-                    is_keyframe: false,
-                    annex_b: true,
-                });
-            }
+        let state = self.state.lock();
+        if !state.config_buf.is_empty() {
+            frames.push(VideoFrame {
+                data: state.config_buf.clone(),
+                pts_us: 0,
+                is_config: true,
+                is_keyframe: false,
+                annex_b: true,
+            });
         }
-        {
-            let gop = self.gop.lock();
-            if !gop.is_empty() {
-                frames.extend(gop.iter().cloned());
-            }
+        if !state.gop.is_empty() {
+            frames.extend(state.gop.iter().cloned());
         }
         if frames.is_empty() {
             None
@@ -209,44 +287,115 @@ impl FrameCache {
         (*self.width.read(), *self.height.read())
     }
 
-    fn snapshot(&self) -> (Vec<u8>, Vec<VideoFrame>) {
-        (self.config_buf.lock().clone(), self.gop.lock().clone())
+    /// 返回收到的最新帧序号和到达时间；二者来自同一快照，调用方不会观察到撕裂状态。
+    pub fn latest_frame_info(&self) -> (u64, Option<Instant>) {
+        let state = self.state.lock();
+        (state.frame_sequence, state.latest_frame_at)
+    }
+
+    fn snapshot(&self) -> Option<FrameSnapshot> {
+        self.state.lock().snapshot()
+    }
+
+    fn is_snapshot_current(&self, key: FrameKey) -> bool {
+        self.current_key() == Some(key)
+    }
+
+    fn current_key(&self) -> Option<FrameKey> {
+        let state = self.state.lock();
+        (!state.gop.is_empty()).then(|| state.key())
+    }
+
+    /// 仅在失败仍对应当前快照时清空 GOP。旧快照的异步 decode 收尾绝不能清掉新 GOP。
+    fn clear_gop_if_same(&self, key: FrameKey) -> bool {
+        let mut state = self.state.lock();
+        if !state.gop.is_empty() && state.key() == key {
+            state.gop.clear();
+            FrameState::next_counter(&mut state.snapshot_generation);
+            true
+        } else {
+            false
+        }
     }
 
     /// 按需解码最新帧为 PNG（供截图/模板匹配）：
-    /// 每次调用都从"当前缓存的最近 GOP"全新解码，返回的就是服务器此刻收到的最新画面，
-    /// 天然实时、无陈旧。无帧（会话刚建立/刚清空）时等首个 IDR ≤1.5s；
-    /// 解码失败（如分辨率切换窗口 config 与 GOP 不匹配）→ 清空 GOP 等新 IDR 重试一次。
+    /// 每次调用都从当前稳定 GOP 快照全新解码。相同快照的并发请求共享同一个真实
+    /// ffmpeg future；解码完成后重新核对 key，避免把 config/GOP 已替换的旧 PNG 当成当前帧。
+    /// 无帧（会话刚建立/刚清空）时等首个 IDR ≤1.5s；解码失败时仅当失败仍对应当前
+    /// 快照才清空 GOP，随后等待新 IDR 重试一次。
     /// Ok(None) = 等待超时仍无关键帧（会话刚建立，稍后再试）。
     pub async fn decode_latest_png(&self) -> anyhow::Result<Option<Vec<u8>>> {
         let ffmpeg = self.ffmpeg_path.lock().clone();
-        let Some((config, gop)) = self.await_gop().await else {
-            return Ok(None);
-        };
-        match self.decode_once(&ffmpeg, &config, &gop).await {
-            Ok(png) => Ok(Some(png)),
-            Err(e) => {
-                warn!("按需解码失败: {}；清空 GOP 等下一个关键帧重试", e);
-                self.gop.lock().clear();
-                match self.await_gop().await {
-                    Some((config2, gop2)) => self
-                        .decode_once(&ffmpeg, &config2, &gop2)
+        let mut decode_error = None;
+        let mut retried_after_error = false;
+        let mut refreshed_after_stale = false;
+
+        loop {
+            let Some(snapshot) = self.await_gop().await else {
+                return match decode_error {
+                    Some(error) => {
+                        Err(anyhow::anyhow!("按需解码失败且等待新关键帧超时: {}", error))
+                    }
+                    None => Ok(None),
+                };
+            };
+            let key = snapshot.key;
+            let snapshot_frame_sequence = snapshot.frame_sequence;
+            let snapshot_latest_frame_at = snapshot.latest_frame_at;
+            let config = snapshot.config;
+            let gop = snapshot.gop;
+            let ffmpeg_for_decode = ffmpeg.clone();
+            let decoded = self
+                .decode_in_flight
+                .run(key, move || async move {
+                    Self::decode_once(&ffmpeg_for_decode, &config, &gop)
                         .await
-                        .map(Some)
-                        .map_err(|e2| anyhow::anyhow!("按需解码失败（重试后仍失败）: {}", e2)),
-                    None => Err(anyhow::anyhow!("按需解码失败且等待新关键帧超时: {}", e)),
+                        .map_err(|error| error.to_string())
+                })
+                .await;
+
+            match decoded {
+                Ok(png) => {
+                    if self.is_snapshot_current(key) {
+                        self.record_png_dims(&png);
+                        return Ok(Some((*png).clone()));
+                    }
+
+                    // 不能返回被替换的 config/GOP。只刷新一次，避免视频持续到达时无限追帧；
+                    // 第二次仍被更新则丢弃本次结果，让上层按“无可用帧”路径稍后重试。
+                    if !refreshed_after_stale {
+                        refreshed_after_stale = true;
+                        debug!(
+                            "frame snapshot superseded during decode: seq={}, age={:?}",
+                            snapshot_frame_sequence,
+                            snapshot_latest_frame_at.elapsed()
+                        );
+                        continue;
+                    }
+                    warn!("按需解码完成时帧快照已更新，丢弃过期 PNG");
+                    return Ok(None);
+                }
+                Err(error) => {
+                    let error = error.as_ref().clone();
+                    warn!("按需解码失败: {}；清空当前 GOP 等新关键帧重试", error);
+                    let _cleared_current = self.clear_gop_if_same(key);
+                    if !retried_after_error {
+                        retried_after_error = true;
+                        decode_error = Some(error);
+                        continue;
+                    }
+                    return Err(anyhow::anyhow!("按需解码失败（重试后仍失败）: {}", error));
                 }
             }
         }
     }
 
     /// 等待 GOP 非空（首个 IDR 未到或解码失败后刚清空重建），超时返回 None
-    async fn await_gop(&self) -> Option<(Vec<u8>, Vec<VideoFrame>)> {
+    async fn await_gop(&self) -> Option<FrameSnapshot> {
         let deadline = tokio::time::Instant::now() + WAIT_FIRST_GOP;
         loop {
-            let (c, g) = self.snapshot();
-            if !g.is_empty() {
-                return Some((c, g));
+            if let Some(snapshot) = self.snapshot() {
+                return Some(snapshot);
             }
             if tokio::time::Instant::now() >= deadline {
                 return None;
@@ -259,18 +408,16 @@ impl FrameCache {
     /// select=gte(n\,N)（N = GOP 帧数-1）：demuxer 会把配置帧也算进帧索引，
     /// gte 容忍 ±1~2 帧偏移，最多取到倒数第 3 帧（~100ms 旧），仍是实时画面。
     async fn decode_once(
-        &self,
         ffmpeg: &str,
         config: &[u8],
         gop: &[VideoFrame],
     ) -> anyhow::Result<Vec<u8>> {
-        tokio::time::timeout(DECODE_TIMEOUT, self.decode_inner(ffmpeg, config, gop))
+        tokio::time::timeout(DECODE_TIMEOUT, Self::decode_inner(ffmpeg, config, gop))
             .await
             .map_err(|_| anyhow::anyhow!("ffmpeg 解码超时（3s 未产出 PNG）"))?
     }
 
     async fn decode_inner(
-        &self,
         ffmpeg: &str,
         config: &[u8],
         gop: &[VideoFrame],
@@ -348,10 +495,6 @@ impl FrameCache {
                 }
             );
         }
-        if let Some((w, h)) = png_dims(&out) {
-            *self.width.write() = w;
-            *self.height.write() = h;
-        }
         debug!(
             "frame decoded on demand: {} bytes ({} frames)",
             out.len(),
@@ -359,17 +502,92 @@ impl FrameCache {
         );
         Ok(out)
     }
+
+    fn record_png_dims(&self, png: &[u8]) {
+        if let Some((w, h)) = png_dims(png) {
+            *self.width.write() = w;
+            *self.height.write() = h;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::InFlight;
+    use super::{FrameCache, InFlight};
+    use crate::device::scrcpy::VideoFrame;
     use tokio::sync::Notify;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct TestError(&'static str);
+
+    fn video_frame(data: u8, is_config: bool, is_keyframe: bool) -> VideoFrame {
+        VideoFrame {
+            data: vec![data],
+            pts_us: 0,
+            is_config,
+            is_keyframe,
+            annex_b: true,
+        }
+    }
+
+    #[test]
+    fn frame_sequence_and_snapshot_generation_are_monotonic() {
+        let cache = FrameCache::start("ffmpeg");
+        assert_eq!(cache.latest_frame_info().0, 0);
+
+        cache.feed(&video_frame(1, true, false));
+        let (sequence_after_config, latest_at) = cache.latest_frame_info();
+        assert_eq!(sequence_after_config, 1);
+        assert!(latest_at.is_some());
+
+        // Repeated SPS/PPS is a new arrival but not a new decode snapshot.
+        cache.feed(&video_frame(1, true, false));
+        assert_eq!(cache.latest_frame_info().0, 2);
+
+        cache.feed(&video_frame(2, false, true));
+        let first = cache.snapshot().expect("keyframe creates a snapshot");
+        cache.feed(&video_frame(3, false, false));
+        let second = cache.snapshot().expect("P frame extends the snapshot");
+
+        assert_eq!(cache.latest_frame_info().0, 4);
+        assert!(second.key.snapshot_generation > first.key.snapshot_generation);
+        assert_eq!(second.key.config_generation, first.key.config_generation);
+        assert!(second.frame_sequence > first.frame_sequence);
+        assert!(second.latest_frame_at >= first.latest_frame_at);
+    }
+
+    #[test]
+    fn old_snapshot_failure_cannot_clear_replaced_gop() {
+        let cache = FrameCache::start("ffmpeg");
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+        let old = cache.snapshot().expect("old snapshot");
+
+        cache.feed(&video_frame(9, true, false));
+        cache.feed(&video_frame(10, false, true));
+        let current = cache.snapshot().expect("replacement snapshot");
+
+        assert_ne!(old.key, current.key);
+        assert!(!cache.is_snapshot_current(old.key));
+        assert!(!cache.clear_gop_if_same(old.key));
+
+        let preserved = cache.snapshot().expect("new GOP remains available");
+        assert_eq!(preserved.key, current.key);
+        assert_eq!(preserved.gop[0].data, vec![10]);
+    }
+
+    #[test]
+    fn clearing_current_snapshot_invalidates_its_key() {
+        let cache = FrameCache::start("ffmpeg");
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+        let current = cache.snapshot().expect("current snapshot");
+
+        assert!(cache.clear_gop_if_same(current.key));
+        assert!(cache.snapshot().is_none());
+    }
 
     #[tokio::test]
     async fn in_flight_shares_one_execution_for_concurrent_callers() {
