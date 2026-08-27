@@ -1,0 +1,31 @@
+# ===== 构建上下文收窄：运行期产物 / 本机状态 / 版本库元数据一律不入 context =====
+# 根上下文多阶段构建只需要：server/{src,Cargo.*,assets} 与 web/{src,index.html,
+# vite.config.js,package.json,pnpm-lock.yaml,pnpm-workspace.yaml}，其余全部挡掉。
+# 注意：不要加入会命中上述必需路径的模式。
+
+# 版本库与本机调试状态
+.git/
+.zcode/
+.chrome-test-profile/
+docs/
+tools/
+
+# Rust：构建缓存（本机 target 约 5.8 GiB，必须排除）
+server/target/
+
+# 运行期数据与日志
+/data/
+server/data/
+**/*.log
+**/gamer.db
+**/pending_restore.json
+
+# 本机构建的前端产物（镜像内由 stage1 现编现产，不依赖宿主 dist）
+web/node_modules/
+web/dist/
+web/vitest.config.js
+web/test-validate.mjs
+
+# 杂项本机文件
+prompt.md
+run-body.json

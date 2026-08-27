@@ -51,8 +51,9 @@ gamer/
 │   │   ├── scheduler.rs    # cron 定时任务
 │   │   └── store.rs        # SQLite 持久化
 │   ├── assets/scrcpy-server.jar   # 官方 v3.3.3（仓库自带）
-│   └── Dockerfile          # 多阶段构建，内置 adb + ffmpeg
+│   └── Dockerfile          # 兼容保留：仅后端镜像（无前端页）
 ├── web/                    # Vue3 + Vite 前端（精简版）
+├── Dockerfile              # 推荐：一体化多阶段镜像（pnpm 前端 + Rust 服务端）
 ├── docker-compose.yml      # server + redroid 一键拉起
 └── docs/YAML.md            # YAML 自动化脚本语法（README 引用）
 ```
@@ -84,8 +85,9 @@ rustup default stable                            # MSVC 工具链需先装 VS Bu
 ### 方式一：Docker 一键部署（推荐）
 
 ```bash
-# 1. 构建服务端镜像
-cd server && docker build -t gamer-server .
+# 1. 构建一体化镜像（必须在仓库根执行：stage1 pnpm 构建前端 → stage2 cargo 编译服务端 →
+#    运行时层内置 adb / ffmpeg / scrcpy jar / 前端静态页，无需宿主机先装 Node）
+docker build -t gamer .
 
 # 2. 启动服务端。redroid 声明了 profile：默认 up 只启动 gamer 服务端，
 #    需要 redroid 云手机时必须带 --profile redroid（会连同 gamer 一起拉起）
@@ -99,6 +101,18 @@ docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d
 - 访问 `http://<服务器IP>:8443`，默认账号 `admin / admin123`
 - `gamer` 容器默认**不带特权**运行；网络类设备（redroid / WiFi adb / 模拟器）
   无需宿主机特权，USB 直通所需的 device 映射由 `docker-compose.usb.yml` 承载
+- **运行数据目录**（唯一口径 = 仓库的 `server/data/`，容器内 `/app/data`）：
+
+  | 内容 | 性质 | 来源 |
+  |---|---|---|
+  | `<应用包名>/tmpl/` `<应用包名>/yaml/` | 种子数据 | 随仓库分发（git 跟踪），**不在镜像内** |
+  | `gamer.db` | 运行期持久化 | 首次启动自动生成（gitignore） |
+  | 其他临时文件 | 运行期产物 | 自动创建（gitignore） |
+
+  镜像不含业务数据、不声明 VOLUME 匿名卷，compose 的绑定挂载不会遮蔽种子分区；
+  自定义服务端配置时把本地 `config.toml` 挂到容器 `/app/config.toml`
+  （镜像未内置配置文件，缺省走程序默认值）。本机 `cargo run` 与容器不要同时
+  使用同一数据目录——同一 SQLite 库被两套进程并行打开有损坏风险。
 - redroid 容器启动后，在「设备列表」添加设备：类型 redroid、地址 `redroid:5555`、
   屏幕模式虚拟屏 `1920x1080`、游戏包名填你的游戏
 

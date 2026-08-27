@@ -1,0 +1,7 @@
+# 旧后端单独构建（context=./server）配套的上下文收窄；
+# 根上下文一体化构建由仓库根 .dockerignore 负责
+target/
+data/
+web-dist/
+*.log
+pending_restore.json

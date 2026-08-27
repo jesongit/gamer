@@ -2,15 +2,18 @@
 
 services:
   gamer:
-    build: ./server
+    # 根上下文一体化构建：前端 + 服务端打进一个镜像（见仓库根 Dockerfile）
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: gamer-server
     ports:
       - "8443:8443"
     volumes:
-      - ./data:/app/data
-      - ./server/assets/scrcpy-server.jar:/app/assets/scrcpy-server.jar
-      # 前端构建产物挂载（web-dist）
-      - ./web/dist:/app/web-dist
+      # 运行数据唯一口径 = 仓库 server/data/：
+      #   <包名>/tmpl|yaml 分区 = 随仓库分发的种子数据（克隆即得）；
+      #   gamer.db 等运行期产物首次启动自动生成
+      - ./server/data:/app/data
     environment:
       - GB_CONFIG=/app/config.toml
     restart: unless-stopped

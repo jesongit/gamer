@@ -1,5 +1,5 @@
-# GameBot 服务端 Docker 镜像
-# 多阶段构建：rust builder → slim 运行时（内置 adb + ffmpeg）
+# 兼容保留：仅后端镜像（不含前端静态页）。生产/推荐路径请用仓库根的
+# 一体化多阶段 Dockerfile：在仓库根执行 docker build -t gamer .
 
 FROM rust:1.97-slim AS builder
 WORKDIR /build
