@@ -1192,19 +1192,23 @@ impl Runner {
                 }
             }
         };
-        let (w, h) = self.screen_size(ctx, &screen);
+        let (w, h) = self.screen_size(ctx, &screen).await;
         if w == 0 || h == 0 {
             anyhow::bail!("无法获取屏幕尺寸");
         }
-        let img = image::load_from_memory(&screen)
-            .map_err(|e| anyhow::anyhow!("解析截图失败: {}", e))?
-            .to_rgb8();
         // 每通道容差固定 30（H.264 有损压缩帧间像素抖动，精确匹配实际不可用）
         const TOL: i32 = 30;
         let px = ((rx * w as f64).round() as i64).clamp(0, w as i64 - 1) as u32;
         let py = ((ry * h as f64).round() as i64).clamp(0, h as i64 - 1) as u32;
-        let p = img.get_pixel(px, py).0;
-        let (ar, ag, ab) = (p[0] as i32, p[1] as i32, p[2] as i32);
+        // 截图整图解码 + 采样点读值提交计算池（PERF-003）；颜色判定语义不变
+        let (ar, ag, ab) = matcher::compute::run(move || {
+            let img = image::load_from_memory(&screen)
+                .map_err(|e| anyhow::anyhow!("解析截图失败: {}", e))?;
+            let p = img.to_rgb8().get_pixel(px, py).0;
+            Ok((p[0] as i32, p[1] as i32, p[2] as i32))
+        })
+        .await
+        .and_then(|inner| inner)?;
         for ((er, eg, eb), hex, steps) in &cases {
             if (ar - *er as i32).abs() <= TOL
                 && (ag - *eg as i32).abs() <= TOL
@@ -1620,7 +1624,7 @@ impl Runner {
         template: &str,
         screen: Vec<u8>,
     ) -> anyhow::Result<Option<matcher::MatchResult>> {
-        let (w, h) = self.screen_size(ctx, &screen);
+        let (w, h) = self.screen_size(ctx, &screen).await;
         if w == 0 || h == 0 {
             anyhow::bail!("无法获取屏幕尺寸");
         }
@@ -1679,7 +1683,9 @@ impl Runner {
         Ok(r)
     }
 
-    /// 在给定截图上匹配模板（region 为搜索区域，None=全屏）
+    /// 在给定截图上匹配模板（region 为搜索区域，None=全屏）。
+    /// 模板读取 + PNG 解码 + NCC 全部提交到专用计算池执行（PERF-003），
+    /// 不占 Tokio 核心工作线程；只移动执行位置，匹配语义零变化。
     async fn match_on_screen(
         &self,
         ctx: &Ctx,
@@ -1693,21 +1699,20 @@ impl Runner {
         // 目录不存在时先创建，避免 std::fs::read 报“系统找不到指定的路径”
         let _ = std::fs::create_dir_all(&tpl_dir);
         let tpl_path = Self::resolve_template_file(&tpl_dir, template)?;
-        let tpl_bytes = std::fs::read(&tpl_path).map_err(|e| {
-            anyhow::anyhow!(
-                "读取模板 {} 失败: {} (path={})",
-                template,
-                e,
-                tpl_path.display()
-            )
-        })?;
-        let req = matcher::MatchRequest {
-            screen_png: screen,
-            template_png: tpl_bytes,
-            threshold: Some(threshold),
-            region,
-        };
-        matcher::match_template(&req).map_err(|e| anyhow::anyhow!("模板匹配失败: {}", e))
+        let tpl_label = format!("{} (path={})", template, tpl_path.display());
+        matcher::compute::run(move || {
+            let tpl_bytes = std::fs::read(&tpl_path)
+                .map_err(|e| anyhow::anyhow!("读取模板 {} 失败: {}", tpl_label, e))?;
+            let req = matcher::MatchRequest {
+                screen_png: screen,
+                template_png: tpl_bytes,
+                threshold: Some(threshold),
+                region,
+            };
+            matcher::match_template(&req).map_err(|e| anyhow::anyhow!("模板匹配失败: {}", e))
+        })
+        .await
+        .and_then(|inner| inner)
     }
 
     /// 模板文件解析：精确名优先（写全名永远可用）；文件不存在时按**短名**解析——
@@ -1901,16 +1906,26 @@ impl Runner {
     }
 
     /// 获取屏幕尺寸：优先 scrcpy 会话元信息，兜底解析截图 PNG
-    fn screen_size(&self, ctx: &Ctx, screen: &[u8]) -> (u32, u32) {
+    /// 屏幕尺寸：会话视频参数优先；无会话时兜底解码截图读尺寸。
+    /// 兜底的整图 PNG 解码提交计算池（PERF-003），避免占住核心工作线程。
+    async fn screen_size(&self, ctx: &Ctx, screen: &[u8]) -> (u32, u32) {
         if let Some(s) = self.devices.session(&ctx.device_id) {
             let (w, h) = s.video_size();
             if w > 0 && h > 0 {
                 return (w, h);
             }
         }
-        image::load_from_memory(screen)
-            .map(|img| img.dimensions())
-            .unwrap_or((0, 0))
+        let png = screen.to_vec();
+        match matcher::compute::run(move || {
+            image::load_from_memory(&png)
+                .map(|img| img.dimensions())
+                .unwrap_or((0, 0))
+        })
+        .await
+        {
+            Ok((w, h)) => (w, h),
+            Err(_) => (0, 0),
+        }
     }
 
     /// 解析相对坐标（百分比 0~1）：支持数组 [x, y] 或对象 {x, y}

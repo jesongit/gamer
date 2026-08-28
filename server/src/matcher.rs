@@ -15,6 +15,11 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+// CPU 密集任务专用计算池（PERF-003）：NCC 匹配 / PNG 解码统一经
+// `compute::run` 提交，避免占住 Tokio 核心工作线程（文件在 src/compute.rs）
+#[path = "compute.rs"]
+pub mod compute;
+
 /// 匹配结果（坐标基于原始截图坐标系）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchResult {
@@ -540,7 +545,6 @@ fn cached_prepared_template_from_path_key(
 ///
 /// 覆盖、重命名和删除后都可以调用此方法；文件不存在时仍会清理旧路径键。
 /// mtime/size/内容哈希和目录代数仍保留，作为调用方漏发通知时的兜底。
-#[allow(dead_code)]
 pub fn invalidate_template_cache_path(path: &Path) {
     let normalized = normalize_path(path);
     let current_hash = std::fs::read(path).ok().map(|bytes| template_key(&bytes));
@@ -566,7 +570,6 @@ pub fn invalidate_template_cache_path(path: &Path) {
 ///
 /// 上传、覆盖、重命名、删除等目录操作完成后调用即可；下次路径匹配会重新
 /// 读取并预处理，短名解析也会重新枚举目录。
-#[allow(dead_code)]
 pub fn invalidate_template_cache_dir(dir: &Path) {
     let normalized = normalize_path(dir);
     let mut cache = template_cache().lock();
@@ -1732,6 +1735,98 @@ mod tests {
             .path_resolve_entries
             .keys()
             .all(|key| key.dir != normalize_path(&dir)));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// PERF-002 回归：同名覆盖上传 + 主动失效后，路径匹配必须使用新内容。
+    /// 截图左右各放一块互为反相的棋盘纹理，v1/v2 模板分别只在各自位置命中；
+    /// 覆盖后旧路径键与旧内容缓存被清空，再次匹配命中点移到 v2 位置。
+    #[test]
+    fn overwrite_same_name_template_and_invalidate_matches_new_content() {
+        let _lock = TEST_GUARD.lock().unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-matcher-overwrite-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+
+        // 400x200 截图：左块 (40..100, 70..130) 棋盘 A，右块 (300..360, 70..130) 反相棋盘
+        let mut screen = RgbImage::new(400, 200);
+        for (_, _, p) in screen.enumerate_pixels_mut() {
+            *p = Rgb([128, 128, 128]);
+        }
+        for y in 70..130 {
+            for x in 40..100 {
+                let v = if (x + y) % 2 == 0 { 255 } else { 60 };
+                screen.put_pixel(x, y, Rgb([v, v, v]));
+            }
+        }
+        for y in 70..130 {
+            for x in 300..360 {
+                let v = if (x + y) % 2 == 0 { 60 } else { 255 };
+                screen.put_pixel(x, y, Rgb([v, v, v]));
+            }
+        }
+        let crop = |x0: u32, y0: u32| {
+            let mut tpl = RgbImage::new(60, 60);
+            for y in 0..60 {
+                for x in 0..60 {
+                    tpl.put_pixel(x, y, *screen.get_pixel(x0 + x, y0 + y));
+                }
+            }
+            encode_png(&tpl)
+        };
+        let v1 = crop(40, 70);
+        let v2 = crop(300, 70);
+        let screen_png = encode_png(&screen);
+        let path = dir.join("cover.png");
+
+        // ① 首次“上传”v1 并匹配：命中左块，路径缓存已建立
+        std::fs::write(&path, &v1).unwrap();
+        let m1 = match_template_from_path(&screen_png, &path, Some(0.9), None)
+            .unwrap()
+            .expect("v1 应命中");
+        assert!(
+            (m1.x as i64 - 40).abs() <= 2 && (m1.y as i64 - 70).abs() <= 2,
+            "v1 命中点应在左块: {:?}",
+            (m1.x, m1.y)
+        );
+        assert!(template_cache()
+            .lock()
+            .path_entries
+            .keys()
+            .any(|key| key.path == normalize_path(&path)));
+
+        // ② 同名覆盖为 v2（模拟上传覆盖）+ 主动失效：路径键与旧内容缓存清空
+        std::fs::write(&path, &v2).unwrap();
+        invalidate_template_cache_path(&path);
+        assert!(template_cache()
+            .lock()
+            .path_entries
+            .keys()
+            .all(|key| key.path != normalize_path(&path)));
+
+        // ③ 立刻再匹配必须用新内容：命中点移到右块
+        let m2 = match_template_from_path(&screen_png, &path, Some(0.9), None)
+            .unwrap()
+            .expect("v2 应命中");
+        assert!(
+            (m2.x as i64 - 300).abs() <= 2 && (m2.y as i64 - 70).abs() <= 2,
+            "覆盖后应命中右块: {:?}",
+            (m2.x, m2.y)
+        );
+        assert!(
+            (m2.x as i64 - m1.x as i64).abs() > 100,
+            "新旧命中点应明显不同: {:?} vs {:?}",
+            (m1.x, m1.y),
+            (m2.x, m2.y)
+        );
+
+        std::fs::remove_file(&path).unwrap();
         let _ = std::fs::remove_dir(&dir);
     }
 

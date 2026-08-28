@@ -178,6 +178,12 @@ pub struct Config {
     /// 仅 GB_LOG 指向文件时生效；0 = 永不清理
     #[serde(default = "default_log_retain_days")]
     pub log_retain_days: u32,
+    /// 专用计算池并发上限（NCC 匹配 / PNG 解码等 CPU 密集工作，阶段 5
+    /// PERF-003）：这些工作提交到独立 rayon 线程池执行，不占 Tokio 核心线程；
+    /// 该值同时限制池线程数与在途任务数（池满排队等待，不丢弃）。
+    /// 0 或缺省 = 按 CPU 核数自动；启动加载后注入 matcher::compute，运行期不生效
+    #[serde(default)]
+    pub compute_max_concurrency: u32,
     /// 鉴权与会话治理（[auth] 段整体可缺省取默认值）
     #[serde(default)]
     pub auth: AuthConfig,
@@ -225,6 +231,7 @@ impl Default for Config {
             op_templates: OpTemplates::default(),
             idle_power_secs: default_idle_power_secs(),
             log_retain_days: default_log_retain_days(),
+            compute_max_concurrency: 0,
             auth: AuthConfig::default(),
         }
     }
@@ -292,6 +299,7 @@ impl Config {
                         let mut cfg = Config::default();
                         normalize_paths(&mut cfg);
                         ensure_valid(&cfg)?;
+                        crate::matcher::compute::configure(cfg.compute_max_concurrency as usize);
                         Ok(LoadedConfig {
                             cfg,
                             source: format!(
@@ -315,6 +323,8 @@ impl Config {
         })?;
         normalize_paths(&mut cfg);
         ensure_valid(&cfg)?;
+        // 计算池并发上限在启动期一次性注入（池首次使用时创建，之后配置不再生效）
+        crate::matcher::compute::configure(cfg.compute_max_concurrency as usize);
         Ok(LoadedConfig {
             cfg,
             source: format!("file {}", path.display()),
@@ -331,7 +341,8 @@ impl Config {
         format!(
             "port={} data_dir={} interval=\"{}\" threshold={:.2} log_level={} \
              decode_frames={} max_size={} bitrate_mbps={} fps={} idle_power_secs={}s \
-             log_retain_days={}d session_abs_secs={} session_idle_secs={} \
+             log_retain_days={}d compute_max_concurrency={} \
+             session_abs_secs={} session_idle_secs={} \
              login_max_fails={}/{}s password_hash={}",
             self.port,
             self.data_dir.display(),
@@ -344,6 +355,7 @@ impl Config {
             self.fps,
             self.idle_power_secs,
             self.log_retain_days,
+            self.compute_max_concurrency,
             self.auth.session_abs_secs,
             self.auth.session_idle_secs,
             self.auth.login_max_fails,
@@ -462,6 +474,15 @@ impl Config {
             errs.push(format!(
                 "log_level = \"{}\" 非法：只接受 debug / info / warn / error",
                 self.log_level
+            ));
+        }
+
+        // 计算池并发上限：0 = 按 CPU 核数自动；显式给值时给个 sanity 上限，
+        // 防止一笔误填把 NCC 并行度抬到远超物理核的量级
+        if self.compute_max_concurrency > 256 {
+            errs.push(format!(
+                "compute_max_concurrency = {} 超出合理区间 [0, 256]（0 = 按 CPU 核数自动）",
+                self.compute_max_concurrency
             ));
         }
 
