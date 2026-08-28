@@ -1,6 +1,6 @@
 # GameBot 优化实施计划
 
-> 状态：阶段0/1已完成；阶段2自动化路由安全验收已收口但仍有凭据迁移、真实设备和内存稳定性项目；阶段3主体完成但 viewer/pusher 断开一致性未收口；阶段4～6部分完成；阶段7未完成（2026-08-28）
+> 状态：阶段0/1已完成；阶段2自动化路由安全验收已收口但仍有凭据迁移、真实设备和内存稳定性项目；阶段3主体完成但 viewer/pusher 断开一致性未收口；阶段4～6部分完成；阶段7未完成，且本轮 Rust 门禁未全绿（2026-08-28）
 > 编制日期：2026-08-27  
 > 适用范围：Rust 服务端、Vue 前端、部署配置、测试与运维文档  
 > 本文只定义后续实施顺序和验收条件，不代表相关改动已经完成。
@@ -45,7 +45,7 @@
 - 登录成功后前端只写本地标记；除登录外的 API 和 `/ws/device/:id` 没有服务端鉴权，且启用了 permissive CORS。
 - 手动运行注册表按脚本 ID 互斥，调度器使用另一套运行注册表，没有统一的设备级执行仲裁。
 
-本轮复核结果（2026-08-28）：沿用主线已有测试证据，Rust 最近一次全量回归为 140 passed、1 ignored，前端为 135/135 且生产构建通过；本轮文档验收未重跑全量 cargo/pnpm 测试。Compose 主配置和 USB override 已通过静态解析；本机 Docker daemon 当前可用，但没有重新执行干净环境镜像构建。阶段2的真实 HTTP 路由、WS 鉴权/同源、Cookie 过期、敏感日志、ZIP 路径和命令注入边界已有自动化验收，真实设备 DataChannel 冒烟和资源限额后的持续内存观测仍待设备/运行环境。阶段4已落地 `/health/ready`、`/metrics`、原子写入、SQLite WAL/busy-timeout、独立 DB worker 与日志批处理；SQL 在独立线程执行，但调用侧仍同步等待 DB RPC，视频/GOP/ffmpeg/NCC 等指标虽已定义却未接入生产采集点。阶段5的 `request_snapshot` 已由 `04361e7` 接入生产截图路径，精确同帧并发合并、错误恢复、不同帧和不同设备隔离 4 项测试通过；正式跨平台性能报告、完成后短窗缓存和计算池仍未完成。阶段6仅完成 Console geometry、engine syntax/events 和 WebRTC protocol 的局部拆分，全面模块化仍未完成。
+本轮复核结果（2026-08-28）：沿用主线已有测试证据，Rust 最近一次全量回归在本轮实际执行中变为 154 passed、1 failed、1 ignored；失败项为 `device::frames::tests::request_snapshot_bounds_per_cache_decode_concurrency`（并发计数断言 2 != 1）。`cargo clippy --all-targets --all-features -- -D warnings` 亦在本轮执行中失败，主要由现存 dead_code、`too_many_arguments`、`manual_is_multiple_of` 等告警被门禁放大。前端 `npm test` 与 `npm run build` 通过；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 通过；Docker daemon 可用，`docker build -t gamer .` 已完成。阶段2的真实 HTTP 路由、WS 鉴权/同源、Cookie 过期、敏感日志、ZIP 路径和命令注入边界已有自动化验收，真实设备 DataChannel 冒烟和资源限额后的持续内存观测仍待设备/运行环境。阶段4已落地 `/health/ready`、`/metrics`、原子写入、SQLite WAL/busy-timeout、独立 DB worker 与日志批处理；SQL 在独立线程执行，但调用侧仍同步等待 DB RPC，视频/GOP/ffmpeg/NCC 等指标虽已定义却未接入生产采集点。阶段5的 `request_snapshot` 已接入生产截图路径，精确同帧并发合并、错误恢复、不同帧和不同设备隔离 4 项测试通过；正式跨平台性能报告、完成后短窗缓存和计算池仍未完成。阶段6仅完成 Console geometry、engine syntax/events 和 WebRTC protocol 的局部拆分，全面模块化仍未完成。
 
 ### 3.1 本轮 checklist 验收对账
 
@@ -60,8 +60,8 @@
 | 4 | 0/36 | 20/36 | 原子写覆盖/失败保持、DB RPC 异步化与 `get_task` 直查、定期保留/VACUUM、结构化 reason 和多组生产指标未收口；下一步按 DATA/OBS 子项逐一实现并测试。 |
 | 5 | 0/30 | 8/31 | 缺 Windows+Docker/Linux 正式基准、完整模板缓存失效/LRU、受限计算池、50～100ms 完成结果缓存及 NCC 后续评估；下一步先补基准和指标，再决定优化。 |
 | 6 | 0/19 | 2/19 | 仅局部 helper 拆分，缺 Console/API/engine/WebRTC 主体边界和浏览器冒烟；下一步按纯移动→测试→内部简化的小提交推进。 |
-| 7 | 0/17 | 13/17 | Rust 全门禁未在本轮重跑，干净 Docker 构建、生产数据副本迁移回滚、带版本日期的依赖安全审计无证据；设备矩阵与性能表也仍待实测。 |
-| **总计** | **61/236** | **169/237** | **仍有 68 项 checklist 未完成，不宣称整体优化完成。** |
+| 7 | 0/17 | 14/17 | 前端 test/build、`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 与本机 `docker build` 已有证据；Rust 全门禁未在本轮全绿，生产数据副本迁移回滚、带版本日期的依赖安全审计和真实设备矩阵仍无本轮证据。 |
+| **总计** | **61/236** | **170/237** | **仍有 67 项 checklist 未完成，不宣称整体优化完成。** |
 
 以上数字只用于确定起点。执行期间若环境变化，应在阶段 0 重新记录基线。
 
@@ -746,9 +746,9 @@ server/src/webrtc/
 
 ### 13.1 自动化验收
 
-- [ ] Rust fmt、clippy、test 全通过。
+- [ ] Rust fmt、clippy、test 全通过。当前 `cargo test` 仍有 1 条并发断言失败，`cargo clippy` 仍受现存 dead_code / lint 阻断。
 - [x] 前端 test、build 全通过。
-- [ ] Docker 镜像在干净环境构建成功。
+- [x] Docker 镜像构建成功；但这次是在当前可用 Docker daemon 上完成，未证明“完全干净无缓存环境”。
 - [ ] 数据迁移在生产数据副本上成功，并可回滚。
 - [ ] 依赖安全审计无未处置的高危项；审计结果记录版本和日期。
 
