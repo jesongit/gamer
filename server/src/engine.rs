@@ -391,39 +391,10 @@ impl Runner {
                 Ok(Value::Mapping(m))
             }
             Value::Mapping(m) => {
-                for k in m.keys() {
-                    match k.as_str() {
-                        Some("action_wait") => anyhow::bail!(
-                            "顶层 action_wait 已删除：操作间隔统一为 config interval（仅轮询类等待，步骤间不再等待）"
-                        ),
-                        Some("log_level") => anyhow::bail!("顶层 log_level 已删除：改用 config: 段（config.toml 可配全局默认）"),
-                        Some("name") => anyhow::bail!("顶层 name 已删除（脚本名即文件名）"),
-                        _ => {}
-                    }
-                }
-                let has_section = m
-                    .keys()
-                    .any(|k| matches!(k.as_str(), Some("config" | "func" | "steps")));
+                let has_section = Self::validate_top_mapping(m)?;
                 if has_section {
-                    for k in m.keys() {
-                        if !matches!(k.as_str(), Some("config" | "func" | "steps")) {
-                            anyhow::bail!(
-                                "未知顶层键 {:?}（只支持 config / func / steps；单段简写：顶层序列 = steps，无段落键的顶层映射 = func）",
-                                k.as_str()
-                            );
-                        }
-                    }
                     Ok(doc)
                 } else {
-                    // 省略 func: 的纯函数库简写；config 子键混进顶层是常见笔误，定向报错
-                    for k in m.keys() {
-                        if matches!(k.as_str(), Some("interval" | "threshold")) {
-                            anyhow::bail!(
-                                "顶层 {:?} 是 config: 段参数（省略段落键的简写只支持纯 steps 序列或纯 func 函数定义，config 必须写 config: 键）",
-                                k.as_str()
-                            );
-                        }
-                    }
                     let mut out = serde_yaml::Mapping::new();
                     out.insert(Value::String("func".into()), doc);
                     Ok(Value::Mapping(out))
@@ -431,6 +402,47 @@ impl Runner {
             }
             _ => Ok(doc),
         }
+    }
+
+    /// Validate a top-level mapping and report migration/typo errors before
+    /// shorthand normalization. The return value tells `normalize_top` whether
+    /// an explicit section key is present, keeping validation independent from
+    /// the resulting document shape.
+    fn validate_top_mapping(m: &serde_yaml::Mapping) -> anyhow::Result<bool> {
+        for k in m.keys() {
+            match k.as_str() {
+                Some("action_wait") => anyhow::bail!(
+                    "顶层 action_wait 已删除：操作间隔统一为 config interval（仅轮询类等待，步骤间不再等待）"
+                ),
+                Some("log_level") => anyhow::bail!("顶层 log_level 已删除：改用 config: 段（config.toml 可配全局默认）"),
+                Some("name") => anyhow::bail!("顶层 name 已删除（脚本名即文件名）"),
+                _ => {}
+            }
+        }
+        let has_section = m
+            .keys()
+            .any(|k| matches!(k.as_str(), Some("config" | "func" | "steps")));
+        if has_section {
+            for k in m.keys() {
+                if !matches!(k.as_str(), Some("config" | "func" | "steps")) {
+                    anyhow::bail!(
+                        "未知顶层键 {:?}（只支持 config / func / steps；单段简写：顶层序列 = steps，无段落键的顶层映射 = func）",
+                        k.as_str()
+                    );
+                }
+            }
+        } else {
+            // 省略 func: 的纯函数库简写；config 子键混进顶层是常见笔误，定向报错
+            for k in m.keys() {
+                if matches!(k.as_str(), Some("interval" | "threshold")) {
+                    anyhow::bail!(
+                        "顶层 {:?} 是 config: 段参数（省略段落键的简写只支持纯 steps 序列或纯 func 函数定义，config 必须写 config: 键）",
+                        k.as_str()
+                    );
+                }
+            }
+        }
+        Ok(has_section)
     }
 
     /// 从文档取出 func 段（原样返回，不参与 $N 替换）并对剩余部分做实参替换。
@@ -3406,6 +3418,41 @@ mod tests {
                 .to_string()
                 .contains("config: 段参数")
         );
+    }
+
+    #[test]
+    fn top_level_mapping_validation_preserves_error_boundaries() {
+        let mapping = |yaml: &str| parse(yaml).as_mapping().unwrap().clone();
+
+        assert!(!Runner::validate_top_mapping(&mapping("f1:\n  - log: x")).unwrap());
+        assert!(Runner::validate_top_mapping(&mapping("steps: []")).unwrap());
+        assert!(Runner::validate_top_mapping(&mapping("config:\n  interval: 1s")).unwrap());
+
+        for (yaml, message) in [
+            ("action_wait: 500", "顶层 action_wait 已删除"),
+            ("log_level: info", "顶层 log_level 已删除"),
+            ("name: old", "顶层 name 已删除"),
+            ("foo: 1\nsteps: []", "未知顶层键"),
+            ("interval: 1s", "config: 段参数"),
+            ("threshold: 0.9", "config: 段参数"),
+        ] {
+            let error = Runner::validate_top_mapping(&mapping(yaml))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{yaml:?} -> {error}");
+        }
+    }
+
+    #[test]
+    fn take_funcs_keeps_function_placeholders_out_of_script_substitution() {
+        let mut doc = parse("func:\n  - f1:\n    - log: $1\nsteps:\n  - log: $1\n");
+        let funcs = Runner::take_funcs_and_substitute(&mut doc, &["resolved".into()])
+            .unwrap()
+            .expect("func section should be returned");
+
+        assert_eq!(funcs[0]["f1"][0]["log"], "$1");
+        assert_eq!(doc["steps"][0]["log"], "resolved");
+        assert!(doc.get("func").is_none());
     }
 }
 
