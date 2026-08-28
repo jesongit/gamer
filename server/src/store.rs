@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use chrono::{Local, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
 
 use crate::config::Config;
 use crate::metrics::Metrics;
@@ -86,7 +85,8 @@ const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_LOG_MESSAGE_CHARS: usize = 1024;
 
 #[cfg(test)]
-static DB_BLOCKING_GATE: Semaphore = Semaphore::const_new(DB_BLOCKING_PERMITS);
+static DB_BLOCKING_GATE: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(DB_BLOCKING_PERMITS);
 
 type ErasedDbResult = anyhow::Result<Box<dyn Any + Send>>;
 type DbTask = Box<dyn FnOnce(&mut Connection) -> ErasedDbResult + Send + 'static>;

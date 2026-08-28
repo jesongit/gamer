@@ -27,6 +27,7 @@ pub(crate) fn payload_type_for(sdp: &str, encoding: &str) -> Option<u8> {
 ///
 /// The caller owns `seq` so the packet sequence advances exactly as the real
 /// sender would.
+#[allow(dead_code)]
 pub(crate) fn build_config_packets(
     cfg: &[u8],
     payload_type: u8,
@@ -62,6 +63,7 @@ pub(crate) fn build_config_packets(
 ///
 /// The output keeps the payload NAL type so tests can assert on SPS/PPS, IDR
 /// and FU-A reconstruction without a full decoder.
+#[allow(dead_code)]
 pub(crate) fn rebuild_h264_nalus(payloads: &[Bytes]) -> Vec<(u8, Bytes)> {
     let mut nals: Vec<(u8, Bytes)> = Vec::new();
     for p in payloads {
@@ -167,6 +169,7 @@ pub(crate) fn annexb_nalus(data: &[u8]) -> Vec<&[u8]> {
 }
 
 /// Return NAL units together with their types, skipping AUD/FILLER.
+#[allow(dead_code)]
 pub(crate) fn annexb_nalus_with_types(data: &[u8]) -> Vec<(u8, Vec<u8>)> {
     annexb_nalus(data)
         .into_iter()
@@ -252,8 +255,8 @@ mod tests {
     fn rebuild_h264_nalus_reconstructs_fu_a_and_stap_a_payloads() {
         let payloads = vec![
             Bytes::from_static(&[24, 0, 2, 0x67, 0x64, 0, 3, 0x68, 0xAA, 0xBB]),
-            Bytes::from_static(&[28, 0x85, 0x11, 0x22, 0x23]),
-            Bytes::from_static(&[28, 0x05, 0x33, 0x44]),
+            Bytes::from_static(&[0x7C, 0x85, 0x11, 0x22, 0x23]),
+            Bytes::from_static(&[0x7C, 0x05, 0x33, 0x44]),
         ];
 
         let rebuilt = rebuild_h264_nalus(&payloads);
