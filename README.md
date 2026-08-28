@@ -14,7 +14,7 @@
 - ⏰ **定时任务**：cron 表达式，服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
-> 优化计划尚未整体验收完成：阶段 0/1 已完成，阶段 2/3 主体能力已有自动化证据；真实设备 DataChannel 与设备回归矩阵、干净 Docker 构建、正式跨平台性能报告及全面模块化仍待验证。2026-08-28 复核时，前端 `npm test` / `npm run build` 通过，`docker build -t gamer .` 可完成；Rust `cargo test` 仍有 1 条并发断言失败，`cargo clippy --all-targets --all-features -- -D warnings` 仍受现存 dead_code / lint 告警阻断，详见 [docs/OPTIMIZATION_PLAN.md](docs/OPTIMIZATION_PLAN.md)。
+> 优化计划尚未整体验收完成：阶段 0/1 已完成，阶段 2/3 主体能力已有自动化证据；真实设备 DataChannel / WebRTC E2E、生产数据迁移回滚、正式跨平台 p50/p95、多平台基准和全面模块化仍待验证。2026-08-28 复核时，前端 `npm test` / `npm run build` 通过，`cargo test` 为 155 passed / 0 failed / 1 ignored，`cargo fmt --all -- --check` 与 `cargo clippy --all-targets --all-features -- -D warnings` 通过；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 通过，`docker build -t gamer .` 也可完成，但这只是普通构建通过，尚未证明完全无缓存构建。详见 [docs/OPTIMIZATION_PLAN.md](docs/OPTIMIZATION_PLAN.md)。
 
 ## 架构
 

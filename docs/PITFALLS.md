@@ -53,4 +53,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **`cargo test --lib` 在本仓库直接失败**：`gamer-server` 只有 binary target、没有 library target；最小回归应改用 `cargo test <过滤器>` 拆分针对性测试，稳定后再跑全量 `cargo test`。
 - **Windows 测试清理 SQLite 临时目录可能报文件占用**：`Store` 的 DB worker 持有 `gamer.db`/WAL 句柄，丢弃发送端后 worker 退出与 `remove_dir_all` 存在时间窗；测试应显式关闭并 join worker（未提供关闭接口时需有界重试清理），不能把占用误判为数据逻辑失败。
 - **`cargo test` 本轮实际失败在 `device::frames::tests::request_snapshot_bounds_per_cache_decode_concurrency`**：并发计数断言从 1 变成 2，说明同帧截图合并边界仍有回归；先保留失败证据再决定是否调试测试假设。
-- **`cargo clippy --all-targets --all-features -- -D warnings` 仍会失败**：现存 dead_code、`too_many_arguments`、`manual_is_multiple_of` 等告警在门禁下被提升为错误，短期只能记录结果，不能假装已通过。
+- **`cargo clippy --all-targets --all-features -- -D warnings` 曾被 dead_code、`too_many_arguments`、`manual_is_multiple_of` 卡住**：该类告警已由 `5b26eef` 收口为通过，若再次出现通常是新增未用代码或新 lint 回归，而不是旧基线问题。
+- **`C:` 盘构建缓存耗尽后最稳妥的恢复方式是只清本仓库 `server/target`**：一次性清全局缓存会把别的项目也拖慢；只删本仓库目标目录并重新跑构建即可把空间和恢复时间控制在当前项目内。
+- **Windows 下 SQLite / 文件句柄占用会让清理和覆盖操作短暂失败**：`gamer.db`、WAL 和测试 worker 持有的句柄会和 `remove_dir_all`、原子替换产生时间窗，必要时要显式等待 worker 退出后再清理或重试。
+- **`cargo audit` / `cargo-audit` 不在当前工具链里**：`tools/verify-release.ps1` 会把缺失报成“未安装”而不是伪造通过，依赖安全审计要先补装工具再跑正式结果。
