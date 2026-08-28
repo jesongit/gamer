@@ -75,9 +75,9 @@
 | 3 | `67052e3`、`00a296a`、`ab03209` | RunManager、设备互斥、调度幂等、取消/停机和 viewer/pusher 断开原因/推流边界测试。 | 34/34，阶段 3 收口。 |
 | 4 | `c0b264f`、`9c3f028`、`999f65c`、`8283edd`、`314cfbe`、`a3ecc6d` | atomic write、导入事务、SQLite worker、分批保留、API blocking/request validation、截图错误传播和部分指标测试。 | 24/29；仍缺统一配置写入、VACUUM/手动维护、完整关联字段和视频/GOP/ffmpeg 指标。 |
 | 5 | `bd180eb`、`4b08034`、`c15eccb`、`b517394`、`9399b0f`、`570ba85`、`04361e7`、`23d9acf`、`505bc5d`、`caa736b` | 固定 GOP/模板 fixture、JSONL/CSV 离线统计入口（含 CPU/峰值内存字段）、内容缓存预处理、64 MiB/128 项 LRU 与 FrameCache 合并回归；离线样本不替代真实跨平台 p50/p95。 | 9/25；真实性能、计算池和短窗结果缓存仍未验收。 |
-| 6 | `e4538b2`、`9f45786`、`a048a49`、`b2fa0c5`/`4114dd8`、`df003c8`、`d24306d`、`9e37bbc`、`314cfbe`、`4f4fe52`、`ab03209`、`3961478`、`ff04ebd` | Console helper/composable/lifecycle/操作模板模块、engine helper/边界测试、ApiError/请求校验/blocking 边界、RTP fixture 与 probe gate 回归；`ff04ebd` 补齐视觉组件静态回归。 | 13/19；全面拆分和浏览器/真实链路冒烟仍未完成。 |
+| 6 | `e4538b2`、`9f45786`、`a048a49`、`b2fa0c5`/`4114dd8`、`df003c8`、`d24306d`、`9e37bbc`、`314cfbe`、`4f4fe52`、`ab03209`、`3961478`、`eddcea8` | Console helper/composable/lifecycle/操作模板模块、engine helper/边界测试、ApiError/请求校验/blocking 边界、RTP fixture 与 probe gate 回归；`eddcea8` 补齐视觉组件静态回归。 | 13/19；全面拆分和浏览器/真实链路冒烟仍未完成。 |
 | 7 | `05f19b1`、`6e4f6f8` | Rust `170/0/1`、fmt/clippy/diff check、web `144 passed/build`、Compose config、server cargo audit、verify-release 及已知审计例外。 | 16/17；生产迁移回滚和真实设备矩阵仍阻塞。 |
-| **总计** | `6e4f6f8` → `ff04ebd` | 本轮新增 Console 视觉组件静态回归与 pnpm 构建证据；真实设备/浏览器链路仍不虚报完成。 | 175/203，28 项未完成；不宣称整体完成。 |
+| **总计** | `6e4f6f8` → `eddcea8` | 本轮新增 Console 视觉组件静态回归与 pnpm 构建证据；真实设备/浏览器链路仍不虚报完成。 | 175/203，28 项未完成；不宣称整体完成。 |
 
 ## 4. 实施原则
 
@@ -918,7 +918,7 @@ server/src/webrtc/
 - 完成日期：2026-08-28
 - 执行分支：`main`（当前委派 worktree 未创建额外分支）
 - 基线提交：`568160e`
-- 完成提交：`ff04ebd`
+- 完成提交：`eddcea8`
 - 已完成任务：将设备面板、模板捕获、脚本运行、运行日志和虚拟屏配置视觉模板移至 `web/src/components/console/`；Console 保留页面编排、状态、事件和唯一 cleanup 入口。
 - 未完成任务及原因：真实浏览器 WebRTC 连接冒烟需要 Android/scrcpy/浏览器链路，本环境无真机；未伪造成功证据，使用 Vitest 静态组件契约回归和生产构建作为可复现替代。
 - 测试结果：`pnpm test:run` 通过（10 个测试文件、147 项）；`pnpm build` 通过（Vite 102 modules transformed）。
