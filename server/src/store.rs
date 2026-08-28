@@ -293,7 +293,7 @@ fn sanitize_log_message(msg: &str) -> String {
         .take(MAX_LOG_MESSAGE_CHARS)
         .collect::<String>();
     if safe.chars().count() > MAX_LOG_MESSAGE_CHARS {
-        normalized.push_str("…");
+        normalized.push('…');
     }
     normalized
 }
@@ -509,6 +509,7 @@ impl Store {
         })
     }
 
+    #[cfg(test)]
     pub fn get_task(&self, id: &str) -> anyhow::Result<Option<Task>> {
         let id = id.to_string();
         self.request(move |conn| {
@@ -793,8 +794,7 @@ impl Store {
                 }
                 let first_id = ids[0];
                 let last_id = *ids.last().unwrap();
-                let placeholders = std::iter::repeat("?")
-                    .take(ids.len())
+                let placeholders = std::iter::repeat_n("?", ids.len())
                     .collect::<Vec<_>>()
                     .join(", ");
                 let sql = format!("DELETE FROM logs WHERE id IN ({placeholders})");
@@ -863,8 +863,10 @@ mod tests {
     fn temp_config(name: &str) -> (Config, PathBuf) {
         let dir = std::env::temp_dir().join(format!("gamer-store-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
-        let mut cfg = Config::default();
-        cfg.data_dir = dir.clone();
+        let cfg = Config {
+            data_dir: dir.clone(),
+            ..Default::default()
+        };
         (cfg, dir)
     }
 

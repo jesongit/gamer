@@ -154,12 +154,15 @@ pub fn hash_password(password: &str) -> Result<String, String> {
 }
 
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err("奇数长度 hex".into());
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+    s.as_bytes()
+        .chunks_exact(2)
+        .map(|chunk| {
+            let s = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
+            u8::from_str_radix(s, 16).map_err(|e| e.to_string())
+        })
         .collect()
 }
 
@@ -167,11 +170,11 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
 /// （两侧均为定长摘要或本机已知串，长度不构成可利用的时序侧信道，防御性抹平）
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     let mut acc = 0u8;
-    for i in 0..b.len() {
-        acc |= a.get(i).copied().unwrap_or(0) ^ b[i];
+    for (lhs, rhs) in a.iter().copied().zip(b.iter().copied()) {
+        acc |= lhs ^ rhs;
     }
-    for i in b.len()..a.len() {
-        acc |= a[i] ^ a[i];
+    if a.len() != b.len() {
+        acc |= 1;
     }
     let _ = std::hint::black_box(acc);
     // 长度不等时 acc 必然非零吗？不一定——用长度谓词兜底收尾
@@ -576,10 +579,8 @@ fn admit(
         return Decision::Admit;
     }
     // 2. 同源防护（WS 升级即使是 GET 也必须校验——建连同样是状态敏感动作）
-    if is_state_changing(method) || is_ws_upgrade(headers) {
-        if !origin_allows_headers(headers) {
-            return Decision::Forbidden;
-        }
+    if (is_state_changing(method) || is_ws_upgrade(headers)) && !origin_allows_headers(headers) {
+        return Decision::Forbidden;
     }
     // 3. Cookie 会话
     match AuthState::extract_sid(headers).and_then(|sid| auth.validate(&sid)) {
@@ -588,7 +589,7 @@ fn admit(
     }
 }
 
-fn header_str<'a>(headers: &'a HeaderMap, name: impl header::AsHeaderName) -> Option<&'a str> {
+fn header_str(headers: &HeaderMap, name: impl header::AsHeaderName) -> Option<&str> {
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
@@ -1262,43 +1263,43 @@ mod tests {
     }
 
     /// 测试专用决策入口：按参数拼装请求头后走与中间件相同的 admit 内核
-    fn admit_parts(
-        st: &AuthState,
-        method: Method,
-        origin: Option<&str>,
-        host: Option<&str>,
-        cookie: Option<&str>,
+    struct AdmitParts<'a> {
+        origin: Option<&'a str>,
+        host: Option<&'a str>,
+        cookie: Option<&'a str>,
         ws_upgrade: bool,
-        admin_token: Option<&str>,
+        admin_token: Option<&'a str>,
         remote: Option<SocketAddr>,
-    ) -> Decision {
+    }
+
+    fn admit_parts(st: &AuthState, method: Method, parts: AdmitParts<'_>) -> Decision {
         let mut hm = HeaderMap::new();
-        if let Some(o) = origin {
+        if let Some(o) = parts.origin {
             hm.insert(
                 header::ORIGIN,
                 axum::http::HeaderValue::from_str(o).unwrap(),
             );
         }
-        if let Some(h) = host {
+        if let Some(h) = parts.host {
             hm.insert(header::HOST, axum::http::HeaderValue::from_str(h).unwrap());
         }
-        if let Some(c) = cookie {
+        if let Some(c) = parts.cookie {
             hm.insert(
                 header::COOKIE,
                 axum::http::HeaderValue::from_str(c).unwrap(),
             );
         }
-        if ws_upgrade {
+        if parts.ws_upgrade {
             hm.insert(
                 header::UPGRADE,
                 axum::http::HeaderValue::from_static("websocket"),
             );
         }
-        if let Some(t) = admin_token {
+        if let Some(t) = parts.admin_token {
             let name = axum::http::HeaderName::from_static("x-admin-token");
             hm.insert(name, axum::http::HeaderValue::from_str(t).unwrap());
         }
-        admit(st, &method, &hm, remote)
+        admit(st, &method, &hm, parts.remote)
     }
 
     #[test]
@@ -1311,7 +1312,18 @@ mod tests {
 
         // 普通 API：无 cookie → 401
         assert_eq!(
-            admit_parts(&st, Method::GET, None, Some("h"), None, false, None, None),
+            admit_parts(
+                &st,
+                Method::GET,
+                AdmitParts {
+                    origin: None,
+                    host: Some("h"),
+                    cookie: None,
+                    ws_upgrade: false,
+                    admin_token: None,
+                    remote: None,
+                },
+            ),
             Decision::Unauthorized
         );
         // 有效 cookie 放行
@@ -1319,12 +1331,14 @@ mod tests {
             admit_parts(
                 &st,
                 Method::GET,
-                None,
-                Some("h"),
-                Some(&cookie),
-                false,
-                None,
-                None
+                AdmitParts {
+                    origin: None,
+                    host: Some("h"),
+                    cookie: Some(&cookie),
+                    ws_upgrade: false,
+                    admin_token: None,
+                    remote: None,
+                },
             ),
             Decision::Admit
         );
@@ -1333,12 +1347,14 @@ mod tests {
             admit_parts(
                 &st,
                 Method::POST,
-                Some("http://evil"),
-                Some("h"),
-                Some(&cookie),
-                false,
-                None,
-                None
+                AdmitParts {
+                    origin: Some("http://evil"),
+                    host: Some("h"),
+                    cookie: Some(&cookie),
+                    ws_upgrade: false,
+                    admin_token: None,
+                    remote: None,
+                },
             ),
             Decision::Forbidden
         );
@@ -1347,12 +1363,14 @@ mod tests {
             admit_parts(
                 &st,
                 Method::GET,
-                Some("http://evil"),
-                Some("h"),
-                Some(&cookie),
-                false,
-                None,
-                None
+                AdmitParts {
+                    origin: Some("http://evil"),
+                    host: Some("h"),
+                    cookie: Some(&cookie),
+                    ws_upgrade: false,
+                    admin_token: None,
+                    remote: None,
+                },
             ),
             Decision::Admit
         );
@@ -1361,18 +1379,31 @@ mod tests {
             admit_parts(
                 &st,
                 Method::GET,
-                Some("http://evil"),
-                Some("h"),
-                Some(&cookie),
-                true,
-                None,
-                None
+                AdmitParts {
+                    origin: Some("http://evil"),
+                    host: Some("h"),
+                    cookie: Some(&cookie),
+                    ws_upgrade: true,
+                    admin_token: None,
+                    remote: None,
+                },
             ),
             Decision::Forbidden
         );
         // WS 缺 Origin（CLI 场景）但 guard 层仍要求会话
         assert_eq!(
-            admit_parts(&st, Method::GET, None, Some("h"), None, true, None, None),
+            admit_parts(
+                &st,
+                Method::GET,
+                AdmitParts {
+                    origin: None,
+                    host: Some("h"),
+                    cookie: None,
+                    ws_upgrade: true,
+                    admin_token: None,
+                    remote: None,
+                },
+            ),
             Decision::Unauthorized
         );
         // 回环 + 正确 token：无 cookie/origin 直达放行
@@ -1380,12 +1411,14 @@ mod tests {
             admit_parts(
                 &st,
                 Method::POST,
-                None,
-                None,
-                None,
-                false,
-                Some("tok"),
-                Some(lb)
+                AdmitParts {
+                    origin: None,
+                    host: None,
+                    cookie: None,
+                    ws_upgrade: false,
+                    admin_token: Some("tok"),
+                    remote: Some(lb),
+                },
             ),
             Decision::Admit
         );
@@ -1395,12 +1428,14 @@ mod tests {
             admit_parts(
                 &st,
                 Method::POST,
-                None,
-                None,
-                None,
-                false,
-                Some("tok"),
-                Some(lan)
+                AdmitParts {
+                    origin: None,
+                    host: None,
+                    cookie: None,
+                    ws_upgrade: false,
+                    admin_token: Some("tok"),
+                    remote: Some(lan),
+                },
             ),
             Decision::Unauthorized
         );

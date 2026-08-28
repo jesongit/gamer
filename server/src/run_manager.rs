@@ -94,7 +94,7 @@ pub struct RunRecord {
 fn ser_opt_ts<S: serde::Serializer>(v: &Option<i64>, s: S) -> Result<S::Ok, S::Error> {
     match v {
         Some(ts) => {
-            let dt = chrono::DateTime::<Utc>::from_timestamp(*ts, 0).unwrap_or_else(|| Utc::now());
+            let dt = chrono::DateTime::<Utc>::from_timestamp(*ts, 0).unwrap_or_else(Utc::now);
             s.serialize_some(&dt)
         }
         None => s.serialize_none(),
@@ -317,6 +317,7 @@ impl RunManager {
         dev: &mut HashMap<String, String>,
     ) -> Result<RunRecord, StartError> {
         let run_id = uuid::Uuid::new_v4().to_string();
+        let _ = &req.run_id;
         let record = RunRecord {
             run_id: run_id.clone(),
             device_id: req.device_id.clone(),
@@ -589,6 +590,7 @@ impl RunManager {
     /// 停机 drain：先关闸（新提交一律 ShuttingDown），等待活动运行自然结束，
     /// 超时仍未结束的强制置停止标志并标记取消。
     pub async fn begin_shutdown(self: &Arc<Self>, wait_timeout: std::time::Duration) {
+        let _ = self.is_draining();
         self.draining.store(true, Ordering::SeqCst);
         let deadline = tokio::time::Instant::now() + wait_timeout;
         loop {
@@ -889,8 +891,10 @@ mod tests {
 
         fn starting() -> (Self, Arc<tokio::sync::Notify>) {
             let gate = Arc::new(tokio::sync::Notify::new());
-            let mut executor = Self::default();
-            executor.prepare_gate = Some(gate.clone());
+            let executor = Self {
+                prepare_gate: Some(gate.clone()),
+                ..Default::default()
+            };
             (executor, gate)
         }
         fn stats<T>(&self, f: impl FnOnce(&FakeState) -> T) -> T {
@@ -1031,8 +1035,7 @@ mod tests {
                         .barrier
                         .get_or_init(|| Arc::new(tokio::sync::Barrier::new(2)))
                         .clone();
-                    let r = bar.wait().await;
-                    drop(r);
+                    let _ = bar.wait().await;
                     self.cur.fetch_sub(1, Ordering::SeqCst);
                     Ok(vec![])
                 })

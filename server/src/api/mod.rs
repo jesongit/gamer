@@ -75,6 +75,10 @@ pub struct AppState {
     pub auth: Arc<auth::AuthState>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "router assembly keeps existing call shape"
+)]
 pub fn build_router(
     db: Db,
     devices: Arc<DeviceManager>,
@@ -2386,9 +2390,9 @@ mod sec_tests {
         ));
         let status = resp.status();
         let body = json_body(resp).await;
-        assert_eq!(body["ready"].is_boolean(), true);
+        assert!(body["ready"].is_boolean());
         for name in ["data_dir", "sqlite", "scrcpy_server", "adb", "ffmpeg"] {
-            assert_eq!(body["checks"][name]["ok"].is_boolean(), true, "{name}");
+            assert!(body["checks"][name]["ok"].is_boolean(), "{name}");
         }
         assert_eq!(body["ready"], status == StatusCode::OK);
         assert!(!body

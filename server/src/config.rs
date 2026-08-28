@@ -22,8 +22,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// 凭据来源优先级（在 api/auth.rs 解析，非本文件）：环境变量 GAMER_ADMIN_PASSWORD
 /// > 环境变量 GAMER_ADMIN_PASSWORD_FILE 指向的密钥文件 > 本段 password_hash
-/// （推荐 Argon2id PHC；兼容旧 `sha256$salt$hex`）> 开发模式内置默认值。启动日志
-/// 只打印启用的是哪一级来源，绝不输出凭据内容。
+/// > （推荐 Argon2id PHC；兼容旧 `sha256$salt$hex`）
+/// > 开发模式内置默认值。启动日志只打印启用的是哪一级来源，绝不输出凭据内容。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {

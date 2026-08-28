@@ -23,7 +23,7 @@ use crate::config::Config;
 /// 临时文件和目标文件必须位于同一文件系统，这样最后的替换才是原子的；
 /// 写入或替换失败时只清理临时文件，不触碰已有目标文件。
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    atomic_write_with(path, bytes, |temp, path| replace_file(temp, path))
+    atomic_write_with(path, bytes, replace_file)
 }
 
 #[cfg(test)]
