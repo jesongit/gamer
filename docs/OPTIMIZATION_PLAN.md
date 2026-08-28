@@ -467,7 +467,7 @@ RunRecord
 
 ## 10. 阶段 4：数据、日志与可观测性
 
-当前状态：部分完成（2026-08-28）。健康检查、原子写入、事务化导入、SQLite WAL/busy-timeout、独立 DB worker、日志批处理、Store 有界 worker 统计和部分低基数指标已落地并有测试；rusqlite 已移出 Tokio 核心线程，但同步 DB RPC 仍可能阻塞异步 handler。`get_device`/`get_task` 已切到直查，结构化 reason 也已覆盖 viewer / disconnect 路径；运行日志只在启动时触发清理，视频/GOP/ffmpeg 指标仍未完整接线，下一步是异步化调用侧、补周期保留任务并接通剩余生产指标。
+当前状态：部分完成（2026-08-29 更新）。健康检查、原子写入、事务化导入、SQLite WAL/busy-timeout、独立 DB worker、日志批处理、Store 有界 worker 统计和低基数指标已落地并有测试；rusqlite 已移出 Tokio 核心线程，但同步 DB RPC 仍可能阻塞异步 handler。`get_device`/`get_task` 已切到直查，结构化 reason 已覆盖 viewer / disconnect 路径；2026-08-29 视频输入/RTP 发送/队列深度/丢帧、GOP 帧数字节、ffmpeg 按需解码五组生产指标经 `metrics::global()` 接线完成（video input 采集点在设备帧消费循环，RTP/队列在 pusher 与 make_frame_queue，GOP/解码在 FrameCache），OBS-002 关联字段补齐 viewer 注册/接管/关闭（viewer_id）、run 接受/结束（task_id/script）、任务触发（task_id/device_id），adb 超时自愈改为 `AdbTimeout` 结构化 downcast 判定。未完成：调用侧 DB RPC 异步化、周期保留任务分批节流细化。
 
 ### 10.1 文件原子写入
 
@@ -519,18 +519,18 @@ RunRecord
 
 #### OBS-002：结构化关联字段
 
-- [ ] 全链路使用 `device_id`、`session_generation`、`viewer_id`、`run_id`、`task_id`。
+- [x] 全链路使用 `device_id`、`session_generation`、`viewer_id`、`run_id`、`task_id`。（2026-08-29：关键迁移点已带 device_id/viewer_id/run_id/task_id；session_generation 无统一概念不强造——FrameCache snapshot_generation 是解码内部代际，不作为会话标识）
 - [x] 连接、重连、踢 viewer、拆会话已接入标准 reason 枚举并落到真实 hook。
-- [ ] 避免只靠自由文本推断状态迁移。
+- [x] 避免只靠自由文本推断状态迁移。（connect 自愈分支改 `AdbTimeout` downcast）
 
 #### OBS-003：指标
 
 - [ ] 初始至少暴露：
   - [x] 当前设备/会话/viewer/run 数。
   - [x] scrcpy 连接成功/失败/重连次数及原因。
-  - [ ] 视频输入帧率、RTP 发送帧率、队列深度和丢帧数。
-  - [ ] GOP 帧数和字节数。
-  - [ ] ffmpeg 解码次数、耗时、超时和失败次数。
+  - [x] 视频输入帧率、RTP 发送帧率、队列深度和丢帧数。
+  - [x] GOP 帧数和字节数。
+  - [x] ffmpeg 解码次数、耗时、超时和失败次数。
   - [x] NCC 匹配次数、耗时、命中率、区域/全屏分类。
   - [x] Scheduler 触发延迟、冲突、跳过和失败次数。
   - [x] DB 写入队列深度和批处理耗时。
@@ -545,7 +545,7 @@ RunRecord
 
 ## 11. 阶段 5：模板匹配性能优化
 
-当前状态：部分完成（2026-08-28）。`6e202ca`/`92115c3` 已完成 matcher 路径+mtime+size+内容哈希缓存、灰度/尺寸/统计数组预处理缓存、64 MiB/128 项 LRU、短名目录代数与 matcher 内主动失效入口；`92115c3` 还将已完成 PNG 在 generation/frame sequence 精确键下按 freshness 复用（默认 75ms，可配 50～100ms），并补齐固定 fixture 的 decode/PNG/NCC/template/find 离线 benchmark 与 CPU/峰值内存字段。当前 Windows 一次 debug/full-screen smoke 已通过。仍未完成 ffmpeg 内部分段指标、API/engine 上传/覆盖/重命名/删除调用点接入、专用计算池、持续内存观测及 Docker/Linux/跨平台真实性能。
+当前状态：部分完成（2026-08-28）。`6e202ca`/`92115c3` 已完成 matcher 路径+mtime+size+内容哈希缓存、灰度/尺寸/统计数组预处理缓存、64 MiB/128 项 LRU、短名目录代数与 matcher 内主动失效入口；`92115c3` 还将已完成 PNG 在 generation/frame sequence 精确键下按 freshness 复用（默认 75ms，可配 50～100ms），并补齐固定 fixture 的 decode/PNG/NCC/template/find 离线 benchmark 与 CPU/峰值内存字段。2026-08-29：PERF-002 主动失效接入 API 写路径（上传/删除/重命名 path 版、zip 导入 dir 版），PERF-003 专用计算池（rayon 池 + 同上限 Semaphore，`compute_max_concurrency` 可配）落地，engine/api 的 NCC 与解码调用点全部改道。仍未完成 ffmpeg 内部分段指标、持续内存观测及 Docker/Linux/跨平台真实性能。
 
 ### 11.1 性能基准先行
 
@@ -573,7 +573,7 @@ RunRecord
 
 - [x] 缓存键包含：规范化路径、mtime、文件大小，必要时加内容哈希。
 - [x] 缓存内容包括：灰度图、尺寸、缩放版本、均值、方差和 NCC 所需数组。
-- [ ] 模板上传、覆盖、重命名和删除后主动失效；mtime 检查作为兜底。
+- [x] 模板上传、覆盖、重命名和删除后主动失效；mtime 检查作为兜底。（2026-08-29：templates.rs 上传/删除/重命名接 `invalidate_template_cache_path`，zip 分区导入 confirm=true 成功后接 `invalidate_template_cache_dir`；matcher 回归测试覆盖同名覆盖后必用新内容）
 - [x] 缓存设置总内存上限和 LRU 淘汰。
 - [x] 短名解析结果也可按目录代数缓存，目录变化后失效。
 
@@ -587,10 +587,10 @@ RunRecord
 
 #### PERF-003：隔离 CPU 密集任务
 
-- [ ] NCC、PNG 解码和大图缩放不占用 Tokio 核心工作线程。
-- [ ] 使用专用 `spawn_blocking`/计算池，并设置并发上限。
-- [ ] 避免 Tokio blocking pool 与 Rayon 双层无界扩张。
-- [ ] 多设备并发时提供背压，而不是无限排队。
+- [x] NCC、PNG 解码和大图缩放不占用 Tokio 核心工作线程。（2026-08-29：engine 的 match_on_screen（模板读取+解码+NCC）、color 整图解码、screen_size 兜底解码与 API 模板测试端点全部改道 `matcher::compute` 池）
+- [x] 使用专用 `spawn_blocking`/计算池，并设置并发上限。（专用 rayon 池线程数 = 上限，异步侧同上限 Semaphore 排队背压）
+- [x] 避免 Tokio blocking pool 与 Rayon 双层无界扩张。（两层各有界：rayon 管线程数、信号量管在途任务数，取同值双保险；并发峰值有原子计数器断言测试）
+- [x] 多设备并发时提供背压，而不是无限排队。（池满时调用方 await 排队等待，不丢弃不报错；上限经 config.toml `compute_max_concurrency` 配置，0=按 CPU 核数自动）
 
 验收标准：
 
