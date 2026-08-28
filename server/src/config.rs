@@ -394,7 +394,13 @@ impl Config {
     fn validate_for_load(&self) -> Vec<String> {
         let has_env_password = non_empty_env("GAMER_ADMIN_PASSWORD");
         let has_secret_file = non_empty_env("GAMER_ADMIN_PASSWORD_FILE");
-        self.validate_with_password_hash(!(has_env_password || has_secret_file))
+        if has_env_password || has_secret_file {
+            self.validate_with_password_hash(false)
+        } else {
+            // 普通配置加载复用完整公开校验；仅在凭据被高优先级来源覆盖时，
+            // 跳过不会生效的 password_hash 格式检查。
+            self.validate()
+        }
     }
 
     fn validate_with_password_hash(&self, validate_password_hash: bool) -> Vec<String> {
@@ -804,11 +810,36 @@ fps = 15
                 .any(|err| err.contains("password_hash")),
             "直接校验仍应拒绝坏哈希"
         );
+
+        let _password = EnvVarGuard::set("GAMER_ADMIN_PASSWORD", "test-password");
         assert!(
-            !cfg.validate_with_password_hash(false)
+            !cfg.validate_for_load()
                 .iter()
                 .any(|err| err.contains("password_hash")),
             "高优先级 env/secret 覆盖时，启动不应校验被遮蔽的坏哈希"
         );
+    }
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
     }
 }
