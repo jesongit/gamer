@@ -20,14 +20,17 @@ pub(crate) fn payload_type_for(sdp: &str, encoding: &str) -> Option<u8> {
 }
 
 /// Return the H.264 NAL unit type encoded in the first byte.
+#[allow(dead_code)]
 pub(crate) fn nal_unit_type(nal: &[u8]) -> Option<u8> {
     nal.first().map(|b| b & 0x1F)
 }
 
+#[allow(dead_code)]
 pub(crate) fn is_h264_config_nal(nal: &[u8]) -> bool {
     matches!(nal_unit_type(nal), Some(7 | 8))
 }
 
+#[allow(dead_code)]
 pub(crate) fn is_h264_idr_nal(nal: &[u8]) -> bool {
     matches!(nal_unit_type(nal), Some(5))
 }

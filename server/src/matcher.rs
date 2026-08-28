@@ -59,6 +59,7 @@ struct TemplateCacheEntry {
 }
 
 #[derive(Default)]
+#[allow(dead_code)]
 struct TemplateCache {
     entries: HashMap<[u8; 32], TemplateCacheEntry>,
     total_bytes: usize,
@@ -89,6 +90,7 @@ fn matcher_stats() -> &'static MatcherStats {
     }
 }
 
+#[cfg(test)]
 fn install_matcher_stats(stats: MatcherStats) -> MatcherStatsGuard {
     let boxed = Box::new(stats);
     let raw = Box::into_raw(boxed);
@@ -114,11 +116,13 @@ impl MatcherStats {
     }
 }
 
+#[cfg(test)]
 struct MatcherStatsGuard {
     prev: *mut MatcherStats,
     current: *mut MatcherStats,
 }
 
+#[cfg(test)]
 impl Drop for MatcherStatsGuard {
     fn drop(&mut self) {
         MATCHER_STATS.store(self.prev, Ordering::Release);
@@ -141,6 +145,7 @@ struct TemplatePathKey {
     content_hash: [u8; 32],
 }
 
+#[allow(dead_code)]
 struct TemplatePathEntry {
     source: Arc<DynamicImage>,
     bytes_len: usize,
@@ -156,6 +161,7 @@ struct TemplateResolveKey {
     template: String,
 }
 
+#[allow(dead_code)]
 struct TemplateResolveEntry {
     resolved: Arc<PathBuf>,
     last_used: u64,
@@ -174,6 +180,7 @@ fn template_key(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+#[allow(dead_code)]
 fn metadata_key(path: &Path, meta: &std::fs::Metadata, content_hash: [u8; 32]) -> TemplatePathKey {
     TemplatePathKey {
         path: normalize_path(path),
@@ -183,10 +190,12 @@ fn metadata_key(path: &Path, meta: &std::fs::Metadata, content_hash: [u8; 32]) -
     }
 }
 
+#[allow(dead_code)]
 fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+#[allow(dead_code)]
 fn file_mtime_ns(meta: &std::fs::Metadata) -> u128 {
     meta.modified()
         .ok()
@@ -195,6 +204,7 @@ fn file_mtime_ns(meta: &std::fs::Metadata) -> u128 {
         .unwrap_or(0)
 }
 
+#[allow(dead_code)]
 fn dir_signature(dir: &Path) -> anyhow::Result<(PathBuf, u128, u64)> {
     let meta = std::fs::metadata(dir)?;
     Ok((normalize_path(dir), file_mtime_ns(&meta), meta.len()))
@@ -331,6 +341,7 @@ fn evict_template_cache(cache: &mut TemplateCache) {
     }
 }
 
+#[allow(dead_code)]
 fn cached_template_source_from_path_key(
     path: &Path,
 ) -> anyhow::Result<([u8; 32], Arc<DynamicImage>, TemplatePathKey)> {
@@ -372,9 +383,9 @@ fn cached_template_source_from_path_key(
     Ok((key.content_hash, source, key))
 }
 
+#[allow(dead_code)]
 fn cached_resolved_template_file(dir: &Path, template: &str) -> anyhow::Result<PathBuf> {
     let (dir, dir_mtime_ns, dir_size) = dir_signature(dir)?;
-    let dir = dir;
     let key = TemplateResolveKey {
         dir: dir.clone(),
         dir_mtime_ns,
@@ -405,6 +416,7 @@ fn cached_resolved_template_file(dir: &Path, template: &str) -> anyhow::Result<P
     Ok(resolved)
 }
 
+#[allow(dead_code)]
 fn resolve_template_file_impl(tpl_dir: &Path, template: &str) -> anyhow::Result<PathBuf> {
     let exact = tpl_dir.join(template);
     if exact.is_file() {

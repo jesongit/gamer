@@ -11,6 +11,7 @@ use std::time::Instant;
 const RELAXED: Ordering = Ordering::Relaxed;
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum ReconnectReason {
     ManualRetry,
     WatchdogDead,
@@ -18,6 +19,7 @@ pub enum ReconnectReason {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum FfmpegResult {
     Success,
     Timeout,
@@ -25,12 +27,14 @@ pub enum FfmpegResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum NccResult {
     Hit,
     Miss,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum NccScope {
     Region,
     Fullscreen,
@@ -44,6 +48,7 @@ pub enum SchedulerEvent {
 }
 
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 struct RateState {
     input_started: Option<Instant>,
     input_frames: u64,
@@ -97,6 +102,7 @@ pub struct Metrics {
     scheduler_skipped_total: AtomicU64,
     scheduler_failures_total: AtomicU64,
 
+    #[allow(dead_code)]
     rate_state: Mutex<RateState>,
 }
 
@@ -139,6 +145,7 @@ pub struct MetricsSnapshot {
     pub scheduler_failures_total: u64,
 }
 
+#[allow(dead_code)]
 impl Metrics {
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -316,6 +323,7 @@ impl Metrics {
     }
 }
 
+#[allow(dead_code)]
 fn record_rate(rate: &mut RateState, input: bool) {
     let now = Instant::now();
     let (started, frames, fps_milli) = if input {

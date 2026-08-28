@@ -28,6 +28,7 @@ pub enum ViewerDisconnectReason {
 }
 
 impl ViewerDisconnectReason {
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TakenOver => "taken_over",
@@ -1645,6 +1646,7 @@ pub fn make_audio_queue(
 
 /// 从 answer SDP 解析 H264 的 payload type（a=rtpmap:102 H264/90000）
 /// 返回第一个 H264 条目（实测 42e01f 协商为 102，浏览器可稳定解码）
+#[allow(dead_code)]
 fn parse_h264_payload_type(sdp: &str) -> Option<u8> {
     for line in sdp.lines() {
         let line = line.trim();
@@ -1661,6 +1663,7 @@ fn parse_h264_payload_type(sdp: &str) -> Option<u8> {
 }
 
 /// 从 answer SDP 解析 OPUS 的 payload type（a=rtpmap:111 opus/48000/2）
+#[allow(dead_code)]
 fn parse_opus_payload_type(sdp: &str) -> Option<u8> {
     for line in sdp.lines() {
         let line = line.trim();

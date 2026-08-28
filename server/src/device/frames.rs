@@ -51,6 +51,7 @@ const WAIT_FIRST_GOP: Duration = Duration::from_millis(1500);
 const MAX_CONCURRENT_DECODES_PER_CACHE: usize = 1;
 
 type SharedResult<T, E> = Shared<BoxFuture<'static, Result<Arc<T>, Arc<E>>>>;
+type InFlightEntries<K, T, E> = HashMap<K, Arc<InFlightEntry<T, E>>>;
 
 struct InFlightEntry<T, E> {
     result: SharedResult<T, E>,
@@ -93,7 +94,7 @@ where
 /// 错误）会广播给所有等待者；任一等待者拿到结果后都会尝试按条目身份清理，避免
 /// 旧请求的收尾误删已经开始的新请求。
 pub struct InFlight<K, T, E> {
-    entries: Arc<Mutex<HashMap<K, Arc<InFlightEntry<T, E>>>>>,
+    entries: Arc<Mutex<InFlightEntries<K, T, E>>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -350,6 +351,7 @@ impl FrameCache {
     }
 
     /// 返回收到的最新帧序号和到达时间；二者来自同一快照，调用方不会观察到撕裂状态。
+    #[cfg(test)]
     pub fn latest_frame_info(&self) -> (u64, Option<Instant>) {
         let state = self.state.lock();
         (state.frame_sequence, state.latest_frame_at)
