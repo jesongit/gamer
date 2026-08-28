@@ -45,7 +45,7 @@
 - 登录成功后前端只写本地标记；除登录外的 API 和 `/ws/device/:id` 没有服务端鉴权，且启用了 permissive CORS。
 - 手动运行注册表按脚本 ID 互斥，调度器使用另一套运行注册表，没有统一的设备级执行仲裁。
 
-本轮复核结果（2026-08-28）：沿用主线已有测试证据，Rust 最近一次全量回归已收口为 159 passed、0 failed、1 ignored；`cargo clippy --all-targets --all-features -- -D warnings` 与 `cargo fmt --all -- --check` 也在主线上通过，`2ffafc4` 只是在截图并发测试里修正了测点口径，`5b26eef` 则把 clippy 门禁和 Windows 原子写竞争一起收口。前端 `npm test` 与 `npm run build` 通过；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 通过；Docker daemon 可用，`docker build -t gamer .` 已完成，但仍只是普通构建通过，未证明完全无缓存构建。阶段2的真实 HTTP 路由、WS 鉴权/同源、Cookie 过期、敏感日志、ZIP 路径和命令注入边界已有自动化验收，真实设备 DataChannel 冒烟和资源限额后的持续内存观测仍待设备/运行环境。阶段4已落地 `/health/ready`、`/metrics`、原子写入、SQLite WAL/busy-timeout、独立 DB worker 与日志批处理；Store 有界 worker、清理统计和 scheduler/metrics 的真实 hook 也已补齐，但 SQL 调用侧仍同步等待 DB RPC，视频/GOP/ffmpeg/NCC 等指标虽已定义却未接入全部生产采集点。阶段5的 `request_snapshot` 已接入生产截图路径，WebRTC RTP fixture、精确同帧并发合并、错误恢复、不同帧和不同设备隔离测试已通过；正式跨平台性能报告、完成后短窗缓存和计算池仍未完成。阶段6的 Console WebRTC lifecycle、engine syntax/events 和 WebRTC protocol helper 已局部拆分并回归通过，全面模块化仍未完成。
+本轮复核结果（2026-08-28）：沿用主线已有测试证据，Rust 最近一次全量回归已收口为 159 passed、0 failed、1 ignored；`cargo clippy --all-targets --all-features -- -D warnings` 与 `cargo fmt --all -- --check` 也在主线上通过，`2ffafc4` 只是在截图并发测试里修正了测点口径，`5b26eef` 则把 clippy 门禁和 Windows 原子写竞争一起收口。前端 `npm test` 与 `npm run build` 通过；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 通过；Docker daemon 可用，`docker build -t gamer .` 与 `docker build --no-cache -t gamer .` 都已完成。`cargo-audit` 本轮结果为 0 vulnerabilities，但仍提示 `bincode` unmaintained，已按审计口径记录版本与日期。阶段2的真实 HTTP 路由、WS 鉴权/同源、Cookie 过期、敏感日志、ZIP 路径和命令注入边界已有自动化验收，真实设备 DataChannel 冒烟和资源限额后的持续内存观测仍待设备/运行环境。阶段4已落地 `/health/ready`、`/metrics`、原子写入、SQLite WAL/busy-timeout、独立 DB worker 与日志批处理；Store 有界 worker、清理统计和 scheduler/metrics 的真实 hook 也已补齐，但 SQL 调用侧仍同步等待 DB RPC，视频/GOP/ffmpeg/NCC 等指标虽已定义却未接入全部生产采集点。阶段5的 `request_snapshot` 已接入生产截图路径，WebRTC RTP fixture、精确同帧并发合并、错误恢复、不同帧和不同设备隔离测试已通过；正式跨平台性能报告、完成后短窗缓存和计算池仍未完成。阶段6的 Console WebRTC lifecycle、engine syntax/events 和 WebRTC protocol helper 已局部拆分并回归通过，全面模块化仍未完成。
 
 ### 3.1 本轮 checklist 验收对账
 
@@ -60,7 +60,7 @@
 | 4 | 0/36 | 28/37 | 原子写覆盖/失败保持、Store 有界 worker 与清理统计、`get_task` 直查、scheduler/metrics/NCC 真实 hook、定期保留/VACUUM、结构化 reason 和多组生产指标未完全收口；下一步按 DATA/OBS 子项逐一实现并测试。 |
 | 5 | 0/30 | 8/31 | 缺 Windows+Docker/Linux 正式基准、完整模板缓存失效/LRU、受限计算池、50～100ms 完成结果缓存及 NCC 后续评估；下一步先补基准和指标，再决定优化。 |
 | 6 | 0/19 | 8/19 | Console WebRTC lifecycle、无 UI 的运行时 composable、WebRTC RTP fixture 与若干 protocol helper 已局部拆分并有回归测试，但缺 Console/API/engine/WebRTC 主体边界和浏览器冒烟；下一步按纯移动→测试→内部简化的小提交推进。 |
-| 7 | 0/17 | 15/17 | `cargo fmt`、`cargo clippy -D warnings`、`cargo test`、前端 test/build、`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 与本机 `docker build` 已有证据；生产数据副本迁移回滚、带版本日期的依赖安全审计和真实设备矩阵仍无本轮证据。 |
+| 7 | 0/17 | 16/17 | `cargo fmt`、`cargo clippy -D warnings`、`cargo test`、前端 test/build、`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps`、本机 `docker build --no-cache` 与 `cargo-audit` 0 漏洞结果已有证据；生产数据副本迁移回滚和真实设备矩阵仍无本轮证据。 |
 | **总计** | **61/236** | **191/238** | **仍有 47 项 checklist 未完成，不宣称整体优化完成。** |
 
 以上数字只用于确定起点。执行期间若环境变化，应在阶段 0 重新记录基线。
@@ -531,7 +531,7 @@ RunRecord
 
 ## 11. 阶段 5：模板匹配性能优化
 
-当前状态：部分完成（2026-08-28）。matcher 内容哈希模板缓存已完成；截图请求合并器已接入生产 `decode_latest_png`，以 config/GOP generation + frame sequence 精确区分帧，并通过同帧合并、失败恢复、不同帧并行和设备隔离测试，WebRTC RTP fixture 也已补齐。正式跨平台性能报告、完成后 50～100ms 短窗缓存、可观测 decode 指标和受限计算池仍未完成。
+当前状态：部分完成（2026-08-28）。matcher 内容哈希模板缓存已完成；截图请求合并器已接入生产 `decode_latest_png`，以 config/GOP generation + frame sequence 精确区分帧，并通过同帧合并、失败恢复、不同帧并行和设备隔离测试，WebRTC RTP fixture 也已补齐。`c8037c2` 对应 matcher 收口，`4f4fe52` 对应 WebRTC fixture / packetization 回归。正式跨平台性能报告、完成后 50～100ms 短窗缓存、可观测 decode 指标和受限计算池仍未完成。
 
 ### 11.1 性能基准先行
 
@@ -743,15 +743,15 @@ server/src/webrtc/
 
 ## 13. 阶段 7：发布验收与文档收口
 
-当前状态：未完成（2026-08-28）。安全自动化矩阵和本轮三份文档已对账；Rust 全门禁沿用既有结果而未重跑，真实设备矩阵、正式性能表、干净 Docker 构建、生产数据副本迁移回滚及依赖安全审计仍无本轮证据。下一步按 §13.1～13.4 在相应环境逐项执行并回填日期、版本和实测值。
+当前状态：未完成（2026-08-28）。安全自动化矩阵和本轮三份文档已对账；Rust 全门禁沿用既有结果而未重跑，真实设备矩阵、正式性能表、生产数据副本迁移回滚及部分发布证据仍待补齐。下一步按 §13.1～13.4 在相应环境逐项执行并回填日期、版本和实测值。
 
 ### 13.1 自动化验收
 
 - [x] Rust fmt、clippy、test 全通过。
 - [x] 前端 test、build 全通过。
-- [x] Docker 镜像构建成功；但这次是在当前可用 Docker daemon 上完成，未证明“完全干净无缓存环境”。
+- [x] Docker 镜像构建成功；`docker build --no-cache -t gamer .` 也已成功，证明至少在当前环境可完整重建。
 - [ ] 数据迁移在生产数据副本上成功，并可回滚。
-- [ ] 依赖安全审计无未处置的高危项；审计结果记录版本和日期。
+- [x] 依赖安全审计无未处置的高危项；`cargo-audit` 结果为 0 vulnerabilities，但 `bincode` 仍标记 unmaintained，已记录版本和日期。
 
 ### 13.2 设备回归矩阵
 
