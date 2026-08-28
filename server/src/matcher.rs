@@ -857,6 +857,7 @@ mod tests {
 
     #[test]
     fn match_template_applies_decode_limits_to_screen_and_template() {
+        let _lock = TEST_GUARD.lock().unwrap();
         let mut screen = RgbImage::new(10, 10);
         for (_, _, p) in screen.enumerate_pixels_mut() {
             *p = Rgb([10, 20, 30]);
@@ -908,6 +909,7 @@ mod tests {
 
     #[test]
     fn test_template_match_hit() {
+        let _lock = TEST_GUARD.lock().unwrap();
         // 400x600 截图：紫底 + 绿色方块
         let mut screen = RgbImage::new(400, 600);
         for (_, _, p) in screen.enumerate_pixels_mut() {
@@ -961,6 +963,7 @@ mod tests {
 
     #[test]
     fn test_template_match_miss() {
+        let _lock = TEST_GUARD.lock().unwrap();
         let mut screen = RgbImage::new(200, 200);
         for (_, _, p) in screen.enumerate_pixels_mut() {
             *p = Rgb([10, 10, 10]);
@@ -1100,6 +1103,7 @@ mod tests {
     #[test]
     #[ignore = "运行 tools/run-perf-benchmark.ps1 或设置 GAMER_PERF_ITERS 后执行"]
     fn fixed_fixture_benchmark_p50_p95() {
+        let _lock = TEST_GUARD.lock().unwrap();
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/perf");
         let screen = std::fs::read(dir.join("keyframe_001.png"))
             .expect("读取固定夹具 keyframe_001.png 失败");
