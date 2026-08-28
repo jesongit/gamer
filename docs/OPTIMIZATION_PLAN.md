@@ -45,7 +45,7 @@
 - 登录成功后前端只写本地标记；除登录外的 API 和 `/ws/device/:id` 没有服务端鉴权，且启用了 permissive CORS。
 - 手动运行注册表按脚本 ID 互斥，调度器使用另一套运行注册表，没有统一的设备级执行仲裁。
 
-本轮复核结果（2026-08-28，未在本轮重跑测试）：当前 HEAD `9399b0f` 的主线验收记录为 Rust `170 passed/0 failed/1 ignored`；`cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings` 与 `git diff --check` 通过。`web` 的 `npm test` 为 `144 passed`，`npm run build` 通过；`docker compose config` 通过。`server` 的 `cargo audit` 通过，但有 `bincode 1.3.3` unmaintained warning；根目录 audit 因无 `Cargo.lock` 失败。`tools/verify-release.ps1` 最终通过，但 crates.io yanked 检查收到 403。对账依据包括 `6e4f6f8` 及其前序计划证据、`de13827`（凭据覆盖与脚本/导入路径边界）、`ab03209`（WebRTC 状态/推流边界）、`c15eccb`（阶段 5 离线统计与 PowerShell 兼容）、`d24306d`（前端操作模板模块）、`a9a9a0c`（实际 Config.validate 加载校验）、`314cfbe`（API blocking 边界与请求校验）、`3961478`（engine 顶层解析边界）、`a3ecc6d`（截图解码错误传播）和 `9399b0f`（matcher 缓存内存淘汰与目录失效）。这些证据仍未提供真实 Android/scrcpy/WebRTC E2E、跨平台 p50/p95、持续内存观测、生产数据库/文件迁移回滚或设备矩阵，因此相应项目继续保持未完成。
+本轮复核结果（2026-08-28，未在本轮重跑测试）：当前 HEAD `d6f0684` 的主线验收记录为 Rust `170 passed/0 failed/1 ignored`；`cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings` 与 `git diff --check` 通过。`web` 的 `npm test` 为 `144 passed`，`npm run build` 通过；`docker compose config` 通过。`server` 的 `cargo audit` 通过，但有 `bincode 1.3.3` unmaintained warning；根目录 audit 因无 `Cargo.lock` 失败。`tools/verify-release.ps1` 最终通过，但 crates.io yanked 检查收到 403。对账依据包括 `6e4f6f8` 及其前序计划证据、`de13827`（凭据覆盖与脚本/导入路径边界）、`ab03209`（WebRTC 状态/推流边界）、`c15eccb`（阶段 5 离线统计与 PowerShell 兼容）、`d24306d`（前端操作模板模块）、`a9a9a0c`（实际 Config.validate 加载校验）、`314cfbe`（API blocking 边界与请求校验）、`3961478`（engine 顶层解析边界）、`a3ecc6d`（截图解码错误传播）和 `9399b0f`（matcher 缓存内存淘汰与目录失效）。这些证据仍未提供真实 Android/scrcpy/WebRTC E2E、跨平台 p50/p95、持续内存观测、生产数据库/文件迁移回滚或设备矩阵，因此相应项目继续保持未完成。
 
 ### 3.1 本轮 checklist 验收对账
 
@@ -77,7 +77,7 @@
 | 5 | `bd180eb`、`4b08034`、`c15eccb`、`b517394`、`9399b0f`、`570ba85`、`04361e7`、`23d9acf`、`505bc5d`、`caa736b` | 固定 GOP/模板 fixture、JSONL/CSV 离线统计入口（含 CPU/峰值内存字段）、内容缓存预处理、64 MiB/128 项 LRU 与 FrameCache 合并回归；离线样本不替代真实跨平台 p50/p95。 | 9/25；真实性能、计算池和短窗结果缓存仍未验收。 |
 | 6 | `e4538b2`、`9f45786`、`a048a49`、`b2fa0c5`/`4114dd8`、`df003c8`、`d24306d`、`9e37bbc`、`314cfbe`、`4f4fe52`、`ab03209`、`3961478` | Console helper/composable/lifecycle/操作模板模块、engine helper/边界测试、ApiError/请求校验/blocking 边界、RTP fixture 与 probe gate 回归。 | 12/19；全面拆分和浏览器/真实链路冒烟仍未完成。 |
 | 7 | `05f19b1`、`6e4f6f8` | Rust `170/0/1`、fmt/clippy/diff check、web `144 passed/build`、Compose config、server cargo audit、verify-release 及已知审计例外。 | 16/17；生产迁移回滚和真实设备矩阵仍阻塞。 |
-| **总计** | `6e4f6f8` → `9399b0f` | 本轮仅按 HEAD 代码/提交与已有验收记录对账，未新增测试；外部环境项目不虚报完成。 | 174/203，29 项未完成；不宣称整体完成。 |
+| **总计** | `6e4f6f8` → `d6f0684` | 本轮仅按 HEAD 代码/提交与已有验收记录对账，未新增测试；外部环境项目不虚报完成。 | 174/203，29 项未完成；不宣称整体完成。 |
 
 ## 4. 实施原则
 
