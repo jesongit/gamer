@@ -51,8 +51,15 @@ export function useWebRtcLifecycle({
       return false
     }
     const delay = [3000, 6000, 12000][Math.min(reconnectAttempts.value, 2)]
-    reconnectAttempts.value++
-    toast(`连接已断开，${delay / 1000} 秒后自动重连…`, 'warn')
+    const attemptNo = reconnectAttempts.value + 1
+    reconnectAttempts.value = attemptNo
+    // 长时间停机（服务端重建等）会连续重试：仅前两次弹 toast，之后静默重试
+    // 并把状态写进错误栏，避免每 12s 一条提示刷屏
+    if (attemptNo <= 2) {
+      toast(`连接已断开，${delay / 1000} 秒后自动重连…`, 'warn')
+    } else if (errorMsgRef) {
+      errorMsgRef.value = `连接已断开，自动重连中…（第 ${attemptNo} 次）`
+    }
     reconnectTimer.value = setTimeout(() => {
       reconnectTimer.value = null
       if (superseded?.value) {
@@ -123,7 +130,7 @@ export function useWebRtcLifecycle({
       connectingRef.value = false
       errorMsgRef.value = '设备连接失败：' + e.message
       onConnectFinish({ ok: false, error: e })
-      return
+      return false
     }
 
     try {
@@ -185,6 +192,7 @@ export function useWebRtcLifecycle({
       connectedRef.value = true
       connectingRef.value = false
       closedByCleanup = false
+      reconnectAttempts.value = 0 // 连接成功即重置退避计数（不依赖调用方回调）
       onConnectSuccess({ pc, ws })
       onConnectFinish({ ok: true })
       return true
@@ -210,7 +218,11 @@ export function useWebRtcLifecycle({
     connectLock = true
     forceTakeover = false
     try {
-      await doConnect()
+      const ok = await doConnect()
+      // 自动重连链路必须续链：服务端停机/重启窗口内 connectDevice、信令 ws
+      // 都会失败，doConnect 走失败分支 return false——这里不补排下一次重试，
+      // 重连就永久停摆，页面定格成死图只能手动刷新（实测构建停机 4 分钟即复现）
+      if (ok === false && !manual) scheduleReconnect({ superseded: supersededRef })
     } catch (e) {
       if (e && e.conflict) {
         if (manual) {
