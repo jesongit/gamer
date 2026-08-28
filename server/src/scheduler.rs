@@ -114,7 +114,8 @@ impl Scheduler {
                         let triggers2 = triggers.clone();
                         let task2 = task.clone();
                         tokio::spawn(async move {
-                            info!(task = %task2.name, "scheduled run triggered");
+                            // OBS-002 关联字段：task_id + device_id 随触发日志落盘
+                            info!(task = %task2.name, task_id = %task2.id, device = %task2.device_id, "scheduled run triggered");
                             dispatch(&db2, &runs2, &scripts2, &task2, Some(trigger_time)).await;
                             // 复位占位；同一触发点的跨 tick/重启判重由 scheduled_runs
                             // 唯一索引负责。
@@ -131,7 +132,7 @@ impl Scheduler {
 
     /// 立即运行任务（手动触发）：202 契约 —— 提交即返回 run_id，不等完成
     pub async fn run_now(&self, task: &Task) -> Result<String, RunNowError> {
-        info!(task = %task.name, "manual trigger (task now)");
+        info!(task = %task.name, task_id = %task.id, device = %task.device_id, "manual trigger (task now)");
         let content = match self.scripts.get(&task.script_id) {
             Ok(Some(s)) => s.content,
             Ok(None) => {
@@ -233,7 +234,7 @@ async fn dispatch(
     };
     match submit_run(runs, db, task, trigger, content).await {
         Ok(run_id) => {
-            debug!(task = %task.name, %run_id, "scheduled run submitted");
+            debug!(task = %task.name, task_id = %task.id, device = %task.device_id, %run_id, "scheduled run submitted");
         }
         Err(StartError::Conflict(busy)) => {
             // 设备正忙（大概率手动运行中）：第一版策略不排队——记 skipped、更新任务

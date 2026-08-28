@@ -147,6 +147,7 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                         running: vs.running.clone(),
                                         peer: std::sync::Arc::downgrade(&vs.peer),
                                         control_dc: vs.control_dc.clone(),
+                                        viewer_id: vs.viewer_id.clone(),
                                         last_serve: vs.last_serve.clone(),
                                         notify: std::sync::Arc::new(parking_lot::Mutex::new(Some(notify_tx.clone()))),
                                     };
@@ -161,13 +162,15 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                         // 自动重连），再关 peer；旧 ws 循环在 peer 关闭后有
                                         // 冲刷窗口保证通知先于 close 到达。仅断浏览器↔服务端
                                         // 链路，设备 scrcpy 会话保持不动（新 viewer 无缝接管）
+                                        let old_viewer_id = old.viewer_id.clone();
                                         crate::webrtc::teardown_viewer(
                                             old,
                                             ViewerDisconnectReason::TakenOver,
                                         )
                                         .await;
-                                        info!(device = %device_id, "kicked previous viewer (takeover)");
+                                        info!(device = %device_id, old_viewer_id = %old_viewer_id, new_viewer_id = %vs.viewer_id, "kicked previous viewer (takeover)");
                                     }
+                                    info!(device = %device_id, viewer_id = %vs.viewer_id, "viewer registered");
                                     // 消费者出现：打断空闲低功耗计时（镜像模式若已关屏则唤醒）
                                     st.devices.notify_activity(&device_id);
                                     let answer = vs.local_description();
@@ -248,6 +251,6 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
             )
             .await;
         }
-        info!(device = %device_id, "viewer closed");
+        info!(device = %device_id, viewer_id = %v.viewer_id, "viewer closed");
     }
 }

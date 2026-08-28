@@ -335,6 +335,7 @@ impl RunManager {
             device = %record.device_id,
             script = %record.script_id,
             source = ?record.source,
+            task_id = record.task_id.as_deref().unwrap_or("-"),
             "run accepted"
         );
         self.runs.lock().unwrap().insert(
@@ -575,6 +576,8 @@ impl RunManager {
         info!(
             run_id = %rec.run_id,
             device = %rec.device_id,
+            script = %rec.script_id,
+            task_id = rec.task_id.as_deref().unwrap_or("-"),
             state = ?rec.state,
             elapsed_ms = (Utc::now() - rec.started_at).num_milliseconds(),
             "run finished"
