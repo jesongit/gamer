@@ -865,11 +865,16 @@ impl DeviceManager {
         }
     }
 
-    /// 对 wifi/emu 设备执行 adb connect（幂等，已连接无副作用）。
-    /// 低功耗空闲的连接保障：adb 链路断了设备无法被脚本触达，这里周期补连
+    /// 对 wifi 设备执行 adb connect（幂等，已连接无副作用）。
+    /// 低功耗空闲的连接保障：adb 链路断了设备无法被脚本触达，这里周期补连。
+    /// 只补**可寻址**的经典网络 adb（host:port / 裸 IP 默认 :5555）：
+    /// mDNS 无线调试是裸设备名，重连由手机侧广播驱动（熄屏不广播，connect
+    /// 无从下手，反复尝试只是每 60s 一次注定失败的 15s 阻塞）；emulator
+    /// 常驻本地 server 无需补连
     pub async fn connect_wireless_adb(&self) {
         for (d, _, _) in self.list_snapshot() {
-            if (d.kind == "wifi" || d.kind == "emu") && !d.addr.is_empty() {
+            let addressable = d.addr.contains(':') || d.addr.contains('.');
+            if d.kind == "wifi" && addressable {
                 if let Err(e) = self.adb.connect(&d.addr).await {
                     debug!(device = %d.name, addr = %d.addr, "adb connect failed: {}", e);
                 }
@@ -900,7 +905,10 @@ impl DeviceManager {
                 .iter()
                 .find_map(|p| p.strip_prefix("model:"))
                 .map(|m| m.replace('_', " "));
-            let kind = infer_device_kind(&serial);
+            // kind 按整行判定：`usb:` 标记是 USB 的铁证；带冒号 / adb- 前缀是
+            // 网络接入；其余（实测小米 HyperOS USB 不带 usb: 标记）保守按 usb。
+            // 无线与 USB 共用串号时 -l 无法区分传输，kind 只影响无线保活门控
+            let kind = infer_device_kind(&serial, &parts);
             // 去重 + 地址同步：精确/子串/model 匹配（USB↔无线切换、无线 IP 变化后
             // serial 会变，见 adb.rs resolve_serial）；匹配到的旧设备更新 addr/kind，
             // 避免同一台设备重复入库
@@ -1108,10 +1116,16 @@ fn extract_rect(line: &str) -> Option<(i64, i64)> {
     Some((x2, y2))
 }
 
-/// 从 adb serial 推断接入方式：emulator-* → 模拟器；ip:port / adb-*（mDNS）→ 无线；其余 → USB
-fn infer_device_kind(serial: &str) -> &'static str {
+/// 从 `adb devices -l` 行推断接入方式：emulator-* → 模拟器；行带 `usb:` 标记 → USB；
+/// ip:port / adb-* mDNS → 无线；其余 → USB。
+/// 注意部分设备（实测小米 HyperOS）USB 传输也不带 `usb:` 标记，且无线调试与
+/// USB 共用同一串号——无法从 -l 输出区分，保守按 usb（kind 只影响无线保活
+/// 门控与展示，误判无功能副作用：保活另按「地址可寻址」把关）
+fn infer_device_kind(serial: &str, parts: &[&str]) -> &'static str {
     if serial.starts_with("emulator-") {
         "emu"
+    } else if parts.iter().any(|p| p.starts_with("usb:")) {
+        "usb"
     } else if serial.contains(':') || serial.starts_with("adb-") {
         "wifi"
     } else {
