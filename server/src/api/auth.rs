@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::{header, header::HeaderMap, Method, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -37,7 +37,90 @@ use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use tracing::{debug, warn};
 
+use super::common::err_response;
+use super::AppState;
 use crate::config::AuthConfig;
+
+// ---------- 认证（契约钉死，见 web/src/auth.js 同款口径） ----------
+//
+// POST /api/login {username,password} → 200 Set-Cookie gb_session(Path=/; HttpOnly; SameSite=Strict)
+//                                        body {ok:true,username}
+//   401 {"error":"invalid_credentials"}；429 {"error":"too_many_attempts","retry_after":秒}
+// GET  /api/session → 200 {authenticated:true,username} / 401 {"error":"unauthorized"}
+// POST /api/logout → 204 销毁会话 + 过期 Set-Cookie（幂等）
+// Secure 标志仅 GAMER_PROFILE=prod 追加；dev 纯 HTTP LAN 保持无 Secure。
+// 旧响应壳 {token:"demo-token"} 已废除。
+
+#[derive(serde::Deserialize)]
+pub(super) struct LoginReq {
+    username: String,
+    password: String,
+}
+
+pub(super) async fn api_login(
+    State(st): State<AppState>,
+    Extension(ip): Extension<IpKey>,
+    headers: HeaderMap,
+    Json(req): Json<LoginReq>,
+) -> Response {
+    if !origin_allows_headers(&headers) {
+        return err_response(StatusCode::FORBIDDEN, "forbidden_origin");
+    }
+    // 形状粗校验：缺字段/超长直接 400，不进限流与凭据比对
+    if req.username.is_empty()
+        || req.password.is_empty()
+        || req.username.len() > 64
+        || req.password.len() > 1024
+    {
+        return err_response(StatusCode::BAD_REQUEST, "bad_request");
+    }
+    match st.auth.attempt_login(&req.username, &req.password, &ip.0) {
+        Ok((sid, username)) => (
+            StatusCode::OK,
+            [(header::SET_COOKIE, st.auth.session_cookie_for(&sid))],
+            Json(serde_json::json!({"ok": true, "username": username})),
+        )
+            .into_response(),
+        Err(LoginError::Invalid) => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_credentials"})),
+        )
+            .into_response(),
+        Err(LoginError::RateLimited { retry_after_secs }) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, retry_after_secs.to_string())],
+            Json(
+                serde_json::json!({"error": "too_many_attempts", "retry_after": retry_after_secs}),
+            ),
+        )
+            .into_response(),
+    }
+}
+
+/// 会话探测（豁免组但语义与受保护端点一致：有效会话续期并回身份）
+pub(super) async fn api_session(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    match AuthState::extract_sid(&headers).and_then(|sid| st.auth.validate(&sid)) {
+        Some(username) => {
+            Json(serde_json::json!({"authenticated": true, "username": username})).into_response()
+        }
+        None => unauthorized_response(),
+    }
+}
+
+/// 登出：销毁当前会话 + 下发过期 Cookie；无会话时同样 204（幂等）
+pub(super) async fn api_logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if !origin_allows_headers(&headers) {
+        return err_response(StatusCode::FORBIDDEN, "forbidden_origin");
+    }
+    if let Some(sid) = AuthState::extract_sid(&headers) {
+        st.auth.destroy(&sid);
+    }
+    (
+        StatusCode::NO_CONTENT,
+        [(header::SET_COOKIE, st.auth.expired_cookie())],
+    )
+        .into_response()
+}
 
 /// 会话 Cookie 名（前端契约钉死值）
 pub const SESSION_COOKIE: &str = "gb_session";
