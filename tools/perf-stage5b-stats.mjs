@@ -36,11 +36,23 @@ const METRIC_ALIASES = new Map([
   ['find轮次', 'find_round'],
 ]);
 
+const RESOURCE_ALIASES = new Map([
+  ['cpu_ms', 'cpu_ms'],
+  ['cpu_time_ms', 'cpu_ms'],
+  ['cpu_ms_total', 'cpu_ms'],
+  ['cpu_seconds', 'cpu_ms'],
+  ['peak_mem_bytes', 'peak_mem_bytes'],
+  ['peak_memory_bytes', 'peak_mem_bytes'],
+  ['rss_bytes', 'peak_mem_bytes'],
+  ['memory_bytes', 'peak_mem_bytes'],
+]);
+
 function usage(exitCode = 0) {
   const msg = [
     'usage: node tools/perf-stage5b-stats.mjs --input <file|dir> [--input ...] [--json] [--include-resource] [--self-test] [--dry-run]',
     '',
     'Reads JSONL/CSV benchmark samples and prints p50/p95/max for the stage5 B metrics.',
+    'Use --include-resource to include CPU and peak-memory fields when present.',
   ].join('\n');
   console[exitCode === 0 ? 'log' : 'error'](msg);
   process.exit(exitCode);
@@ -66,7 +78,7 @@ function normalizeMetric(raw) {
 
 function parseJsonl(text, source) {
   const rows = [];
-  for (const [lineNo, line] of text.split(/\r?\n/).entries()) {
+  for (const [lineNo, line] of text.replace(/^\uFEFF/, '').split(/\r?\n/).entries()) {
     if (!line.trim()) continue;
     try {
       rows.push({ ...JSON.parse(line), __source: source, __line: lineNo + 1 });
@@ -80,7 +92,7 @@ function parseJsonl(text, source) {
 function parseCsv(text, source) {
   const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
   if (lines.length === 0) return [];
-  const headers = splitCsvLine(lines[0]).map((h) => h.trim());
+  const headers = splitCsvLine(lines[0]).map((h, idx) => (idx === 0 ? h.replace(/^\uFEFF/, '') : h).trim());
   return lines.slice(1).map((line, idx) => {
     const values = splitCsvLine(line);
     const row = {};
@@ -140,17 +152,22 @@ function collectFiles(inputs) {
     if (stat.isDirectory()) {
       walkDir(input, files);
     } else if (stat.isFile()) {
+      if (!inferFormat(input)) {
+        throw new Error(`${input}: unsupported input format; use .jsonl, .json, or .csv`);
+      }
       files.push(input);
     }
   }
+  files.sort();
   return files;
 }
 
 function walkDir(dir, out) {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) walkDir(full, out);
-    else if (entry.isFile()) out.push(full);
+    else if (entry.isFile() && inferFormat(full)) out.push(full);
   }
 }
 
@@ -179,36 +196,105 @@ function field(row, names) {
   return undefined;
 }
 
+function firstNumber(row, names) {
+  for (const name of names) {
+    const value = toNumber(row[name]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function normalizeResource(raw) {
+  if (!raw) return null;
+  return RESOURCE_ALIASES.get(String(raw).trim().toLowerCase()) || null;
+}
+
+function timingValueUs(row) {
+  const valueUs = firstNumber(row, ['value_us', 'us', 'duration_us', 'elapsed_us', 'time_us', 'latency_us']);
+  if (valueUs !== null) return valueUs;
+  const valueMs = firstNumber(row, ['value_ms', 'ms', 'duration_ms', 'elapsed_ms', 'time_ms', 'latency_ms']);
+  if (valueMs !== null) return valueMs * 1000;
+  const valueNs = firstNumber(row, ['value_ns', 'ns', 'duration_ns', 'elapsed_ns', 'time_ns', 'latency_ns']);
+  if (valueNs !== null) return valueNs / 1000;
+  return null;
+}
+
+function resourceValue(row, resource, rawName) {
+  if (resource === 'cpu_ms') {
+    const direct = firstNumber(row, ['cpu_ms', 'cpu_time_ms', 'cpu_ms_total']);
+    if (direct !== null) return direct;
+    const valueMs = firstNumber(row, ['value_ms', 'duration_ms', 'elapsed_ms', 'time_ms', 'latency_ms']);
+    if (valueMs !== null) return valueMs;
+    const valueSeconds = firstNumber(row, ['value_s', 'value_seconds', 'duration_s', 'duration_seconds', 'cpu_seconds']);
+    if (valueSeconds !== null) return valueSeconds * 1000;
+    const valueUs = firstNumber(row, ['value_us', 'duration_us', 'elapsed_us', 'time_us', 'latency_us']);
+    if (valueUs !== null) return valueUs / 1000;
+    const valueNs = firstNumber(row, ['value_ns', 'duration_ns', 'elapsed_ns', 'time_ns', 'latency_ns']);
+    if (valueNs !== null) return valueNs / 1000000;
+    const generic = firstNumber(row, ['value', 'amount']);
+    if (generic !== null) return rawName === 'cpu_seconds' ? generic * 1000 : generic;
+  } else {
+    const direct = firstNumber(row, ['peak_mem_bytes', 'peak_memory_bytes', 'rss_bytes', 'memory_bytes']);
+    if (direct !== null) return direct;
+    const valueBytes = firstNumber(row, ['value_bytes', 'bytes', 'memory']);
+    if (valueBytes !== null) return valueBytes;
+    const valueKb = firstNumber(row, ['value_kb', 'memory_kb']);
+    if (valueKb !== null) return valueKb * 1024;
+    const valueMb = firstNumber(row, ['value_mb', 'memory_mb']);
+    if (valueMb !== null) return valueMb * 1024 * 1024;
+    const generic = firstNumber(row, ['value', 'amount']);
+    if (generic !== null) return generic;
+  }
+  return null;
+}
+
+function extractResourceSample(row) {
+  const rawName = field(row, ['resource', 'resource_metric', 'metric', 'name']);
+  const resource = normalizeResource(rawName);
+  if (!resource) return null;
+  const value = resourceValue(row, resource, String(rawName).trim().toLowerCase());
+  if (value === null) {
+    throw new Error(`${row.__source}:${row.__line} missing resource value for ${resource}`);
+  }
+  return { resource, value };
+}
+
+function extractMetadataResources(row) {
+  const values = [];
+  const cpuMs = firstNumber(row, ['cpu_ms', 'cpu_time_ms', 'cpu_ms_total']);
+  if (cpuMs !== null) values.push({ resource: 'cpu_ms', value: cpuMs });
+  const cpuSeconds = firstNumber(row, ['cpu_seconds']);
+  if (cpuSeconds !== null && cpuMs === null) values.push({ resource: 'cpu_ms', value: cpuSeconds * 1000 });
+  const memory = firstNumber(row, ['peak_mem_bytes', 'peak_memory_bytes', 'rss_bytes', 'memory_bytes']);
+  if (memory !== null) values.push({ resource: 'peak_mem_bytes', value: memory });
+  return values;
+}
+
 function extractSample(row) {
   const metric = normalizeMetric(field(row, ['metric', 'name', 'stage', 'op', 'step']));
   if (!metric) return null;
-  const value = toNumber(field(row, ['value_us', 'us', 'duration_us', 'elapsed_us', 'time_us', 'latency_us']))
-    ?? (toNumber(field(row, ['value_ms', 'duration_ms', 'elapsed_ms', 'time_ms', 'latency_ms'])) * 1000)
-    ?? (toNumber(field(row, ['value_ns', 'duration_ns', 'elapsed_ns', 'time_ns', 'latency_ns'])) / 1000);
-  if (!Number.isFinite(value)) {
+  const value = timingValueUs(row);
+  if (value === null) {
     throw new Error(`${row.__source}:${row.__line} missing timing value for ${metric}`);
   }
-  return {
-    metric,
-    value,
-    cpu: toNumber(field(row, ['cpu_ms', 'cpu_time_ms', 'cpu_ms_total', 'cpu_seconds'])) ?? null,
-    memory: toNumber(field(row, ['peak_mem_bytes', 'peak_memory_bytes', 'rss_bytes', 'memory_bytes'])) ?? null,
-  };
+  return { metric, value };
 }
 
 function summarize(rows) {
   const buckets = new Map();
-  let cpu = null;
-  let memory = null;
+  const resources = { cpu_ms: null, peak_mem_bytes: null };
   for (const row of rows) {
+    const resourceSample = extractResourceSample(row);
+    if (resourceSample) resources[resourceSample.resource] = resourceSample.value;
+    else {
+      for (const resource of extractMetadataResources(row)) resources[resource.resource] = resource.value;
+    }
     const sample = extractSample(row);
     if (!sample) continue;
     if (!buckets.has(sample.metric)) buckets.set(sample.metric, []);
     buckets.get(sample.metric).push(sample.value);
-    if (sample.cpu !== null) cpu = sample.cpu;
-    if (sample.memory !== null) memory = sample.memory;
   }
-  return { buckets, cpu, memory };
+  return { buckets, resources };
 }
 
 function formatNumber(n) {
@@ -216,7 +302,7 @@ function formatNumber(n) {
   return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(2)));
 }
 
-function renderSummary(summary) {
+function renderSummary(summary, includeResource = false) {
   const lines = [];
   for (const metric of METRIC_ORDER) {
     const samples = summary.buckets.get(metric);
@@ -227,9 +313,24 @@ function renderSummary(summary) {
     const s = percentiles(samples);
     lines.push(`${metric}: count=${samples.length} p50_us=${formatNumber(s.p50)} p95_us=${formatNumber(s.p95)} max_us=${formatNumber(s.max)}`);
   }
-  if (summary.cpu !== null) lines.push(`cpu_ms=${formatNumber(summary.cpu)}`);
-  if (summary.memory !== null) lines.push(`peak_mem_bytes=${formatNumber(summary.memory)}`);
+  if (includeResource) {
+    if (summary.resources.cpu_ms !== null) lines.push(`cpu_ms=${formatNumber(summary.resources.cpu_ms)}`);
+    if (summary.resources.peak_mem_bytes !== null) lines.push(`peak_mem_bytes=${formatNumber(summary.resources.peak_mem_bytes)}`);
+  }
   return lines;
+}
+
+function jsonSummary(summary, includeResource) {
+  const payload = { metrics: {} };
+  if (includeResource) {
+    payload.cpu_ms = summary.resources.cpu_ms;
+    payload.peak_mem_bytes = summary.resources.peak_mem_bytes;
+  }
+  for (const metric of METRIC_ORDER) {
+    const samples = summary.buckets.get(metric);
+    payload.metrics[metric] = samples?.length ? { count: samples.length, ...percentiles(samples) } : { skipped: true };
+  }
+  return payload;
 }
 
 function selfTestDir() {
@@ -243,23 +344,38 @@ function selfTest() {
     const summary = summarize(readRows([file]));
     const decode = summary.buckets.get('decode_latest_png') || [];
     if (decode.length !== 3) throw new Error(`self-test expected 3 decode_latest_png samples in ${name}`);
-    const out = renderSummary(summary).join('\n');
+    if (summary.resources.cpu_ms !== 12) throw new Error(`self-test expected cpu_ms=12 in ${name}`);
+    if (summary.resources.peak_mem_bytes !== 3456789) throw new Error(`self-test expected peak memory in ${name}`);
+    const out = renderSummary(summary, true).join('\n');
     if (!out.includes('ffmpeg_start: count=3')) throw new Error(`self-test missing ffmpeg_start summary in ${name}`);
+    if (!out.includes('cpu_ms=12') || !out.includes('peak_mem_bytes=3456789')) {
+      throw new Error(`self-test missing resource summary in ${name}`);
+    }
     console.log(`[${name}]`);
     console.log(out);
   }
+  const converted = summarize([
+    { metric: 'ncc_region', value_ms: 1.5, __source: 'self-test', __line: 1 },
+    { metric: 'ncc_fullscreen', value_ns: 2500, __source: 'self-test', __line: 2 },
+    { metric: 'find_round', value_us: 3, cpu_seconds: 0.25, __source: 'self-test', __line: 3 },
+  ]);
+  if (converted.buckets.get('ncc_region')[0] !== 1500) throw new Error('self-test ms to us conversion failed');
+  if (converted.buckets.get('ncc_fullscreen')[0] !== 2.5) throw new Error('self-test ns to us conversion failed');
+  if (converted.resources.cpu_ms !== 250) throw new Error('self-test seconds to ms conversion failed');
   console.log('self-test: ok');
 }
 
 function main(argv) {
   const inputs = [];
   let json = false;
+  let includeResource = false;
   let dryRun = false;
   let self = false;
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') usage(0);
     if (arg === '--json') { json = true; continue; }
+    if (arg === '--include-resource') { includeResource = true; continue; }
     if (arg === '--dry-run') { dryRun = true; continue; }
     if (arg === '--self-test') { self = true; continue; }
     if (arg === '--input') {
@@ -296,15 +412,10 @@ function main(argv) {
     return;
   }
   if (json) {
-    const payload = { metrics: {}, cpu_ms: summary.cpu, peak_mem_bytes: summary.memory };
-    for (const metric of METRIC_ORDER) {
-      const samples = summary.buckets.get(metric);
-      payload.metrics[metric] = samples?.length ? { count: samples.length, ...percentiles(samples) } : { skipped: true };
-    }
-    console.log(JSON.stringify(payload, null, 2));
+    console.log(JSON.stringify(jsonSummary(summary, includeResource), null, 2));
     return;
   }
-  console.log(renderSummary(summary).join('\n'));
+  console.log(renderSummary(summary, includeResource).join('\n'));
 }
 
 try {

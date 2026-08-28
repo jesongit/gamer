@@ -31,5 +31,5 @@
 {"metric":"find_round","value_us":1500}
 {"metric":"find_round","value_us":1700}
 {"metric":"find_round","value_us":1900}
-{"metric":"cpu_ms","value_us":12}
-{"metric":"peak_mem_bytes","value_us":3456789}
+{"metric":"cpu_ms","value_ms":12}
+{"metric":"peak_mem_bytes","value_bytes":3456789}

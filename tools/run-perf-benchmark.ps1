@@ -1,4 +1,5 @@
 ﻿# run-perf-benchmark.ps1 —— PERF-002/003 固定夹具匹配基准
+#requires -Version 5.1
 #
 # 只执行被 #[ignore] 标记的 Rust 基准测试；输入来自 server/testdata/perf，
 # 输出为实际测得的 p50/p95/max 微秒值，不写回仓库、不伪造目标或对比数据。
@@ -7,13 +8,15 @@
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-perf-benchmark.ps1
 #   powershell ... tools\run-perf-benchmark.ps1 -Iterations 50 -FullScreen
 
+[CmdletBinding()]
 param(
     [ValidateRange(1, 10000)]
     [int]$Iterations = 20,
     [ValidateRange(0, 1000)]
     [int]$Warmup = 3,
     [switch]$FullScreen,
-    [switch]$Release
+    [switch]$Release,
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,6 +38,11 @@ if ($FullScreen) {
 }
 
 Write-Host ('{0} fixture={1} iterations={2} warmup={3} release={4} full_screen={5}' -f '[perf]', $fixture, $Iterations, $Warmup, $Release, $FullScreen)
+if ($DryRun) {
+    Write-Host '[perf] dry-run: cargo test skipped'
+    return
+}
+
 Push-Location $server
 try {
     if ($Release) {

@@ -3,7 +3,7 @@
 //! 性能策略：截图先等比缩放到 ≤540px 宽（模板同比例），步长采样 + rayon 并行，
 //! 1080p 全图 + 小模板典型耗时 100~400ms；支持搜索区域裁剪进一步加速。
 
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -54,7 +54,7 @@ struct PreparedTemplate {
 struct TemplateCacheEntry {
     source: Arc<DynamicImage>,
     prepared: HashMap<(u32, u32), Arc<PreparedTemplate>>,
-    bytes_len: usize,
+    memory_bytes: usize,
     last_used: u64,
 }
 
@@ -90,6 +90,7 @@ fn matcher_stats() -> &'static MatcherStats {
     }
 }
 
+#[cfg(test)]
 fn install_matcher_stats(stats: MatcherStats) -> MatcherStatsGuard {
     let boxed = Box::new(stats);
     let raw = Box::into_raw(boxed);
@@ -115,11 +116,13 @@ impl MatcherStats {
     }
 }
 
+#[cfg(test)]
 struct MatcherStatsGuard {
     prev: *mut MatcherStats,
     current: *mut MatcherStats,
 }
 
+#[cfg(test)]
 impl Drop for MatcherStatsGuard {
     fn drop(&mut self) {
         MATCHER_STATS.store(self.prev, Ordering::Release);
@@ -145,7 +148,7 @@ struct TemplatePathKey {
 #[allow(dead_code)]
 struct TemplatePathEntry {
     source: Arc<DynamicImage>,
-    bytes_len: usize,
+    memory_bytes: usize,
     prepared: HashMap<(u32, u32), Arc<PreparedTemplate>>,
     last_used: u64,
 }
@@ -153,14 +156,14 @@ struct TemplatePathEntry {
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct TemplateResolveKey {
     dir: PathBuf,
-    dir_mtime_ns: u128,
-    dir_size: u64,
+    dir_generation: [u8; 32],
     template: String,
 }
 
 #[allow(dead_code)]
 struct TemplateResolveEntry {
     resolved: Arc<PathBuf>,
+    memory_bytes: usize,
     last_used: u64,
 }
 
@@ -202,48 +205,79 @@ fn file_mtime_ns(meta: &std::fs::Metadata) -> u128 {
 }
 
 #[allow(dead_code)]
-fn dir_signature(dir: &Path) -> anyhow::Result<(PathBuf, u128, u64)> {
-    let meta = std::fs::metadata(dir)?;
-    Ok((normalize_path(dir), file_mtime_ns(&meta), meta.len()))
+fn dir_signature(dir: &Path) -> anyhow::Result<(PathBuf, [u8; 32])> {
+    let dir = normalize_path(dir);
+    let mut entries = std::fs::read_dir(&dir)?
+        .map(|entry| {
+            let entry = entry?;
+            let path = normalize_path(&entry.path());
+            let is_file = entry.file_type()?.is_file();
+            Ok((path, is_file))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    entries.sort_unstable_by(|(path_a, file_a), (path_b, file_b)| {
+        path_a.cmp(path_b).then(file_a.cmp(file_b))
+    });
+    let mut hasher = Sha256::new();
+    for (path, is_file) in entries {
+        hasher.update(path.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update([is_file as u8]);
+    }
+    Ok((dir, hasher.finalize().into()))
+}
+
+fn image_memory_bytes(width: u32, height: u32, bytes_per_pixel: usize) -> usize {
+    (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(bytes_per_pixel)
+}
+
+fn source_memory_bytes(source: &DynamicImage) -> usize {
+    // PNG/JPEG 输入可解码为多种 DynamicImage 像素格式；8 字节/像素是对
+    // 当前支持格式的保守预算，避免只按压缩后的 PNG 字节数放行大图。
+    let (width, height) = source.dimensions();
+    image_memory_bytes(width, height, 8)
+}
+
+fn prepared_memory_bytes(prepared: &PreparedTemplate) -> usize {
+    let (width, height) = prepared.image.dimensions();
+    image_memory_bytes(width, height, 5)
+}
+
+fn cache_entry_count(cache: &TemplateCache) -> usize {
+    cache.entries.len() + cache.path_entries.len() + cache.path_resolve_entries.len()
 }
 
 /// 获取 PNG 解码后的源灰度图。锁只覆盖一次性的模板解码，命中时仅复制 Arc。
 fn cached_template_source(bytes: &[u8]) -> anyhow::Result<([u8; 32], Arc<DynamicImage>)> {
     let key = template_key(bytes);
     let mut cache = template_cache().lock();
-    if !cache.entries.contains_key(&key) {
-        let source = decode_image_limited(bytes, TEMPLATE_MAX_INPUT_BYTES, "模板")?;
-        let bytes_len = bytes.len();
-        if cache.entries.len() >= TEMPLATE_CACHE_CAPACITY {
-            if let Some(evicted) = cache.entries.keys().next().copied() {
-                if let Some(old) = cache.entries.remove(&evicted) {
-                    cache.total_bytes = cache.total_bytes.saturating_sub(old.bytes_len);
-                }
-            }
-        }
+    if let Some(source) = cache.entries.get(&key).map(|entry| entry.source.clone()) {
         let used = cache_tick(&mut cache);
-        cache.entries.insert(
-            key,
-            TemplateCacheEntry {
-                source: Arc::new(source),
-                prepared: HashMap::new(),
-                bytes_len,
-                last_used: used,
-            },
-        );
-        cache.total_bytes = cache.total_bytes.saturating_add(bytes_len);
-        evict_template_cache(&mut cache);
+        if let Some(entry) = cache.entries.get_mut(&key) {
+            entry.last_used = used;
+        }
+        return Ok((key, source));
     }
-    let source = cache
-        .entries
-        .get(&key)
-        .expect("template cache entry inserted")
-        .source
-        .clone();
+    let source = Arc::new(decode_image_limited(
+        bytes,
+        TEMPLATE_MAX_INPUT_BYTES,
+        "模板",
+    )?);
+    let memory_bytes = source_memory_bytes(&source);
     let used = cache_tick(&mut cache);
-    if let Some(entry) = cache.entries.get_mut(&key) {
-        entry.last_used = used;
-    }
+    cache.entries.insert(
+        key,
+        TemplateCacheEntry {
+            source: source.clone(),
+            prepared: HashMap::new(),
+            memory_bytes,
+            last_used: used,
+        },
+    );
+    cache.total_bytes = cache.total_bytes.saturating_add(memory_bytes);
+    evict_template_cache(&mut cache);
     Ok((key, source))
 }
 
@@ -287,16 +321,21 @@ fn cached_prepared_template(
         }
         return Ok(prepared);
     }
-    let prepared = {
+    if let Entry::Vacant(entry) = cache.entries.entry(key) {
+        let source_memory = source_memory_bytes(source);
+        entry.insert(TemplateCacheEntry {
+            source: source.clone(),
+            prepared: HashMap::new(),
+            memory_bytes: source_memory,
+            last_used: 0,
+        });
+        cache.total_bytes = cache.total_bytes.saturating_add(source_memory);
+    }
+    let (prepared, prepared_bytes) = {
         let entry = cache
             .entries
-            .entry(key)
-            .or_insert_with(|| TemplateCacheEntry {
-                source: source.clone(),
-                prepared: HashMap::new(),
-                bytes_len: 0,
-                last_used: 0,
-            });
+            .get_mut(&key)
+            .expect("template cache entry inserted");
         let image = if entry.source.dimensions() == dimensions {
             to_gray(entry.source.as_ref())
         } else {
@@ -310,31 +349,65 @@ fn cached_prepared_template(
                 .to_luma8()
         };
         let prepared = Arc::new(build_prepared_template(image)?);
+        let prepared_bytes = prepared_memory_bytes(&prepared);
         entry.prepared.insert(dimensions, prepared.clone());
-        prepared
+        (prepared, prepared_bytes)
     };
+    cache.total_bytes = cache.total_bytes.saturating_add(prepared_bytes);
     let used = cache_tick(&mut cache);
     if let Some(entry) = cache.entries.get_mut(&key) {
         entry.last_used = used;
     }
+    evict_template_cache(&mut cache);
     Ok(prepared)
 }
 
 fn evict_template_cache(cache: &mut TemplateCache) {
-    while cache.total_bytes > TEMPLATE_CACHE_MAX_BYTES {
-        let Some((old_key, _)) = cache
+    while cache.total_bytes > TEMPLATE_CACHE_MAX_BYTES
+        || cache_entry_count(cache) > TEMPLATE_CACHE_CAPACITY
+    {
+        enum Oldest {
+            Content([u8; 32]),
+            Path(TemplatePathKey),
+            Resolve(TemplateResolveKey),
+        }
+
+        let oldest = cache
             .entries
             .iter()
-            .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(k, v)| (*k, v.last_used))
-        else {
+            .map(|(key, entry)| (entry.last_used, Oldest::Content(*key)))
+            .chain(
+                cache
+                    .path_entries
+                    .iter()
+                    .map(|(key, entry)| (entry.last_used, Oldest::Path(key.clone()))),
+            )
+            .chain(
+                cache
+                    .path_resolve_entries
+                    .iter()
+                    .map(|(key, entry)| (entry.last_used, Oldest::Resolve(key.clone()))),
+            )
+            .min_by_key(|(last_used, _)| *last_used)
+            .map(|(_, oldest)| oldest);
+        let Some(oldest) = oldest else {
             break;
         };
-        if let Some(removed) = cache.entries.remove(&old_key) {
-            cache.total_bytes = cache.total_bytes.saturating_sub(removed.bytes_len);
-        } else {
+        let removed_bytes = match oldest {
+            Oldest::Content(key) => cache.entries.remove(&key).map(|entry| entry.memory_bytes),
+            Oldest::Path(key) => cache
+                .path_entries
+                .remove(&key)
+                .map(|entry| entry.memory_bytes),
+            Oldest::Resolve(key) => cache
+                .path_resolve_entries
+                .remove(&key)
+                .map(|entry| entry.memory_bytes),
+        };
+        let Some(removed_bytes) = removed_bytes else {
             break;
-        }
+        };
+        cache.total_bytes = cache.total_bytes.saturating_sub(removed_bytes);
     }
 }
 
@@ -357,36 +430,33 @@ fn cached_template_source_from_path_key(
         }
         return Ok((key.content_hash, source, key));
     }
-    let source = decode_image_limited(&bytes, TEMPLATE_MAX_INPUT_BYTES, "模板")?;
-    let bytes_len = bytes.len();
+    let source = Arc::new(decode_image_limited(
+        &bytes,
+        TEMPLATE_MAX_INPUT_BYTES,
+        "模板",
+    )?);
+    let memory_bytes = source_memory_bytes(&source);
     let used = cache_tick(&mut cache);
     cache.path_entries.insert(
         key.clone(),
         TemplatePathEntry {
-            source: Arc::new(source),
-            bytes_len,
+            source: source.clone(),
+            memory_bytes,
             prepared: HashMap::new(),
             last_used: used,
         },
     );
-    cache.total_bytes = cache.total_bytes.saturating_add(bytes_len);
+    cache.total_bytes = cache.total_bytes.saturating_add(memory_bytes);
     evict_template_cache(&mut cache);
-    let source = cache
-        .path_entries
-        .get(&key)
-        .expect("path cache inserted")
-        .source
-        .clone();
     Ok((key.content_hash, source, key))
 }
 
 #[allow(dead_code)]
 fn cached_resolved_template_file(dir: &Path, template: &str) -> anyhow::Result<PathBuf> {
-    let (dir, dir_mtime_ns, dir_size) = dir_signature(dir)?;
+    let (dir, dir_generation) = dir_signature(dir)?;
     let key = TemplateResolveKey {
         dir: dir.clone(),
-        dir_mtime_ns,
-        dir_size,
+        dir_generation,
         template: template.to_string(),
     };
     let mut cache = template_cache().lock();
@@ -402,14 +472,18 @@ fn cached_resolved_template_file(dir: &Path, template: &str) -> anyhow::Result<P
         return Ok(resolved);
     }
     let resolved = resolve_template_file_impl(dir.as_path(), template)?;
+    let memory_bytes = resolved.as_os_str().len().saturating_add(template.len());
     let used = cache_tick(&mut cache);
     cache.path_resolve_entries.insert(
         key,
         TemplateResolveEntry {
             resolved: Arc::new(resolved.clone()),
+            memory_bytes,
             last_used: used,
         },
     );
+    cache.total_bytes = cache.total_bytes.saturating_add(memory_bytes);
+    evict_template_cache(&mut cache);
     Ok(resolved)
 }
 
@@ -435,7 +509,11 @@ fn resolve_template_file_impl(tpl_dir: &Path, template: &str) -> anyhow::Result<
         let Some((stem, e)) = name.rsplit_once('.') else {
             continue;
         };
-        if e.eq_ignore_ascii_case(ext) && stem.starts_with(base) {
+        if e.eq_ignore_ascii_case(ext)
+            && stem
+                .strip_prefix(base)
+                .is_some_and(|suffix| suffix.starts_with('#'))
+        {
             cands.push(p);
         }
     }

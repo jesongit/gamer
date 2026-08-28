@@ -135,6 +135,7 @@ fn sync_parent(_parent: &Path) -> std::io::Result<()> {
 }
 
 /// ZIP 导入资源硬限（阶段 2 SEC-004；传输层另有 20MiB body 闸门）
+pub const IMPORT_MAX_ARCHIVE_BYTES: usize = 20 * 1024 * 1024; // 压缩包 ≤20MiB
 pub const IMPORT_MAX_TOTAL_BYTES: usize = 100 * 1024 * 1024; // 总解压量 ≤100MiB
 pub const IMPORT_MAX_ENTRIES: usize = 500; // 条目数 ≤500
 pub const IMPORT_MAX_YAML_BYTES: usize = 1024 * 1024; // 单 YAML ≤1MiB
@@ -154,7 +155,13 @@ pub struct ScriptFile {
 /// 允许 unicode 字母数字与 `. - _`；禁止空、路径分隔符、`..`、前导点
 pub fn sanitize_part(s: &str) -> Option<String> {
     let t = s.trim();
-    if t.is_empty() || t == "." || t == ".." || t.starts_with('.') {
+    if t.is_empty()
+        || t == "."
+        || t == ".."
+        || t.starts_with('.')
+        || t.ends_with('.')
+        || is_windows_reserved_name(t)
+    {
         return None;
     }
     if t.chars()
@@ -168,7 +175,13 @@ pub fn sanitize_part(s: &str) -> Option<String> {
 /// 校验模板文件名：允许 unicode 字母数字与 `. - _ #`（模板名可带 #x1_y1_x2_y2 区域后缀）、空格
 fn sanitize_template_name(s: &str) -> Option<String> {
     let t = s.trim();
-    if t.is_empty() || t == "." || t == ".." || t.starts_with('.') {
+    if t.is_empty()
+        || t == "."
+        || t == ".."
+        || t.starts_with('.')
+        || t.ends_with('.')
+        || is_windows_reserved_name(t)
+    {
         return None;
     }
     if t.chars()
@@ -177,6 +190,42 @@ fn sanitize_template_name(s: &str) -> Option<String> {
         return None;
     }
     Some(t.to_string())
+}
+
+/// Windows 会把这些名字（包括带扩展名的形式）解析为设备文件；统一拒绝
+/// 可移植存储中对应的 basename，避免 Linux 上创建后在 Windows 产生歧义。
+fn is_windows_reserved_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+fn parse_script_id(id: &str) -> Option<(String, String)> {
+    let (pkg, name) = id.split_once('/')?;
+    Some((sanitize_part(pkg)?, sanitize_part(name)?))
 }
 
 pub struct ScriptStore {
@@ -211,12 +260,20 @@ impl ScriptStore {
 
     /// 分区 yaml 脚本目录
     pub fn yaml_dir(&self, pkg: &str) -> PathBuf {
-        self.root.join(pkg).join("yaml")
+        self.partition_dir(pkg).join("yaml")
     }
 
     /// 分区模板目录
     pub fn tmpl_dir(&self, pkg: &str) -> PathBuf {
-        self.root.join(pkg).join("tmpl")
+        self.partition_dir(pkg).join("tmpl")
+    }
+
+    /// 返回位于数据根内的分区目录。公共路径构造器没有 Result 返回值，故对
+    /// 非法分区名映射到不可枚举的哨兵目录，避免任何调用方意外逃出 root。
+    fn partition_dir(&self, pkg: &str) -> PathBuf {
+        sanitize_part(pkg)
+            .map(|pkg| self.root.join(pkg))
+            .unwrap_or_else(|| self.root.join(".gamer-invalid-partition"))
     }
 
     /// 磁盘上全部分区名（存在 yaml/ 或 tmpl/ 子目录的一级目录，字典序）
@@ -227,8 +284,11 @@ impl ScriptStore {
         };
         for d in rd.flatten() {
             let p = d.path();
+            let Some(name) = sanitize_part(&d.file_name().to_string_lossy()) else {
+                continue;
+            };
             if p.is_dir() && (p.join("yaml").is_dir() || p.join("tmpl").is_dir()) {
-                out.push(d.file_name().to_string_lossy().to_string());
+                out.push(name);
             }
         }
         out.sort();
@@ -246,15 +306,17 @@ impl ScriptStore {
     }
 
     fn load_file(&self, pkg: &str, name: &str) -> Option<ScriptFile> {
-        let p = self.yaml_dir(pkg).join(name);
+        let package = sanitize_part(pkg)?;
+        let name = sanitize_part(name)?;
+        let p = self.yaml_dir(&package).join(&name);
         if !p.is_file() {
             return None;
         }
         let content = std::fs::read_to_string(&p).ok()?;
         Some(ScriptFile {
-            id: format!("{}/{}", pkg, name),
-            package: pkg.to_string(),
-            name: name.to_string(),
+            id: format!("{}/{}", package, name),
+            package,
+            name,
             content,
             updated_at: Self::fmt_mtime(&p),
         })
@@ -283,10 +345,10 @@ impl ScriptStore {
     }
 
     pub fn get(&self, id: &str) -> anyhow::Result<Option<ScriptFile>> {
-        let Some((pkg, name)) = id.split_once('/') else {
+        let Some((pkg, name)) = parse_script_id(id) else {
             return Ok(None);
         };
-        Ok(self.load_file(pkg, name))
+        Ok(self.load_file(&pkg, &name))
     }
 
     /// 保存脚本到指定应用分区，name 缺扩展名时补 .yaml；
@@ -307,19 +369,24 @@ impl ScriptStore {
         if !(low.ends_with(".yaml") || low.ends_with(".yml")) {
             name.push_str(".yaml");
         }
+        let old = match old_id {
+            Some(id) => {
+                Some(parse_script_id(id).ok_or_else(|| anyhow::anyhow!("非法脚本 id: {}", id))?)
+            }
+            None => None,
+        };
         let dir = self.yaml_dir(&package);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(&name);
         atomic_write(&path, content.as_bytes())?;
         let new_id = format!("{}/{}", package, name);
-        if let Some(old) = old_id {
-            if old != new_id {
-                if let Some((opkg, oname)) = old.split_once('/') {
-                    let old_path = self.yaml_dir(opkg).join(oname);
-                    if old_path != path && old_path.is_file() {
-                        std::fs::remove_file(&old_path)?;
-                        self.cleanup_partition(opkg);
-                    }
+        if let Some((opkg, oname)) = old {
+            let old_id = format!("{}/{}", opkg, oname);
+            if old_id != new_id {
+                let old_path = self.yaml_dir(&opkg).join(&oname);
+                if old_path != path && old_path.is_file() {
+                    std::fs::remove_file(&old_path)?;
+                    self.cleanup_partition(&opkg);
                 }
             }
         }
@@ -333,13 +400,13 @@ impl ScriptStore {
     }
 
     pub fn delete(&self, id: &str) -> anyhow::Result<()> {
-        let Some((pkg, name)) = id.split_once('/') else {
+        let Some((pkg, name)) = parse_script_id(id) else {
             anyhow::bail!("非法脚本 id: {}", id);
         };
-        let path = self.yaml_dir(pkg).join(name);
+        let path = self.yaml_dir(&pkg).join(&name);
         std::fs::remove_file(&path)
             .map_err(|e| anyhow::anyhow!("删除失败: {} ({})", e, path.display()))?;
-        self.cleanup_partition(pkg);
+        self.cleanup_partition(&pkg);
         Ok(())
     }
 
@@ -389,7 +456,10 @@ impl ScriptStore {
             for f in rd.flatten() {
                 let name = f.file_name().to_string_lossy().to_string();
                 let low = name.to_lowercase();
-                if f.path().is_file() && (low.ends_with(".yaml") || low.ends_with(".yml")) {
+                if f.path().is_file()
+                    && sanitize_part(&name).is_some()
+                    && (low.ends_with(".yaml") || low.ends_with(".yml"))
+                {
                     yaml_files.push(name);
                 }
             }
@@ -398,7 +468,10 @@ impl ScriptStore {
         if let Ok(rd) = std::fs::read_dir(self.tmpl_dir(&package)) {
             for f in rd.flatten() {
                 let name = f.file_name().to_string_lossy().to_string();
-                if f.path().is_file() && !name.starts_with('.') {
+                if f.path().is_file()
+                    && !name.starts_with('.')
+                    && sanitize_template_name(&name).is_some()
+                {
                     tmpl_files.push(name);
                 }
             }
@@ -438,6 +511,13 @@ impl ScriptStore {
     pub fn import(&self, bytes: &[u8], pkg: &str, confirm: bool) -> anyhow::Result<ImportReport> {
         let package = sanitize_part(pkg)
             .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {}", pkg))?;
+        if bytes.len() > IMPORT_MAX_ARCHIVE_BYTES {
+            anyhow::bail!(
+                "压缩包 {} 字节超过上限 {} MiB",
+                bytes.len(),
+                IMPORT_MAX_ARCHIVE_BYTES / (1024 * 1024)
+            );
+        }
         let mut rep = ImportReport::default();
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
         // 预检 ① 条目数（含目录条目——给攻击者的预算更紧，合法包不受影响）
@@ -498,6 +578,13 @@ impl ScriptStore {
                 }
                 _ => anyhow::bail!("包内路径需为 yaml/<脚本> 或 tmpl/<模板>: {}", f.name()),
             };
+            if f.size() > cap as u64 {
+                anyhow::bail!(
+                    "{zip_path} 声明解压后 {} 字节超限（该类文件上限 {} MiB）",
+                    f.size(),
+                    cap / (1024 * 1024)
+                );
+            }
             if !seen_paths.insert(zip_path.to_ascii_lowercase()) {
                 anyhow::bail!("包内存在重复文件: {zip_path}");
             }
@@ -511,7 +598,7 @@ impl ScriptStore {
                     bytes = buf.len()
                 );
             }
-            actual_total += buf.len();
+            actual_total = actual_total.saturating_add(buf.len());
             if actual_total > IMPORT_MAX_TOTAL_BYTES {
                 anyhow::bail!(
                     "总解压量超过上限（>{} MiB），中止导入",

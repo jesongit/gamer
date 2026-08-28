@@ -38,8 +38,12 @@ impl ViewerDisconnectReason {
         }
     }
 
-    fn notify_taken_over(self) -> bool {
-        matches!(self, Self::TakenOver)
+    /// 返回需要经信令 WS 发送的控制通知；其它断开原因不应伪装成接管。
+    fn notification_type(self) -> Option<&'static str> {
+        match self {
+            Self::TakenOver => Some("taken_over"),
+            Self::DeviceDisconnected | Self::Shutdown | Self::PeerClosed => None,
+        }
     }
 }
 
@@ -75,9 +79,9 @@ pub async fn teardown_viewer(handle: ViewerHandle, reason: ViewerDisconnectReaso
     handle
         .running
         .store(false, std::sync::atomic::Ordering::SeqCst);
-    if reason.notify_taken_over() {
+    if let Some(notification_type) = reason.notification_type() {
         if let Some(tx) = handle.notify.lock().take() {
-            let _ = tx.send(serde_json::json!({"type": "taken_over"}).to_string());
+            let _ = tx.send(serde_json::json!({"type": notification_type}).to_string());
         }
     }
     if let Some(peer) = handle.peer.upgrade() {
@@ -159,6 +163,34 @@ use webrtc::rtp::packetizer::Payloader;
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::rtp_transceiver::rtp_sender::RTCRtpSender;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerConnectionEffect {
+    Connected,
+    TemporarilyDisconnected,
+    Terminal,
+    Ignore,
+}
+
+/// 将 webrtc-rs 的连接状态压缩成 pusher/ws 真正关心的生命周期事件。
+/// Disconnected 是可恢复的 ICE 抖动，Failed/Closed 才是终态；New/Connecting
+/// 不覆盖当前状态，避免异步回调的迟到状态把已建立连接误标为未连接。
+fn peer_connection_effect(state: RTCPeerConnectionState) -> PeerConnectionEffect {
+    match state {
+        RTCPeerConnectionState::Connected => PeerConnectionEffect::Connected,
+        RTCPeerConnectionState::Disconnected => PeerConnectionEffect::TemporarilyDisconnected,
+        RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
+            PeerConnectionEffect::Terminal
+        }
+        _ => PeerConnectionEffect::Ignore,
+    }
+}
+
+/// 诊断探针的唯一开关：关闭时不应为生产推流创建任何 ffmpeg 任务。
+/// frame_no=0 不是推流循环的有效帧号，不能误把普通 P 帧当成采样帧。
+fn should_probe_encoder(enabled: bool, frame_no: u64, is_keyframe: bool) -> bool {
+    enabled && (is_keyframe || (frame_no != 0 && frame_no.is_multiple_of(30)))
+}
 
 /// 一个浏览器的 WebRTC 会话
 pub struct ViewerSession {
@@ -338,23 +370,23 @@ impl ViewerSession {
         let (peer_closed_tx, peer_closed_rx) = tokio::sync::watch::channel(false);
         peer.on_peer_connection_state_change(Box::new(move |s| {
             debug!("peer state: {:?}", s);
-            match s {
-                RTCPeerConnectionState::Connected => {
+            match peer_connection_effect(s) {
+                PeerConnectionEffect::Connected => {
                     peer_connected2.store(true, std::sync::atomic::Ordering::SeqCst);
                     let _ = conn_tx2.try_send(());
                 }
-                RTCPeerConnectionState::Disconnected => {
+                PeerConnectionEffect::TemporarilyDisconnected => {
                     // ICE 短暂抖动（无线 adb / 浏览器标签页后台常见）：
                     // 仅标记未连接，pusher 跳过发送等待恢复，不杀 pusher
                     peer_connected2.store(false, std::sync::atomic::Ordering::SeqCst);
                 }
-                RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
+                PeerConnectionEffect::Terminal => {
                     peer_connected2.store(false, std::sync::atomic::Ordering::SeqCst);
                     running2.store(false, std::sync::atomic::Ordering::SeqCst);
                     let _ = peer_closed_tx.send(true);
                     info!("peer failed/closed, notified ws loop");
                 }
-                _ => {}
+                PeerConnectionEffect::Ignore => {}
             }
             Box::pin(async {})
         }));
@@ -994,7 +1026,7 @@ impl ViewerSession {
                     // 默认关闭（config probe_encoder）：60fps 下 ~2.5 进程/秒的阻塞
                     // ffmpeg 抢 tokio worker，实测把单帧 RTP 发送耗时推高 3~4 倍
                     // （send_avg 6→20ms），发送饱和 → 积压断链 → 周期性冻结
-                    if probe_encoder && (frame.is_keyframe || frame_no.is_multiple_of(30)) {
+                    if should_probe_encoder(probe_encoder, frame_no, frame.is_keyframe) {
                         let cfg = config_nalu.lock().clone();
                         let fdata = frame.data.clone();
                         let ff = ffmpeg_path.clone();
@@ -1797,6 +1829,105 @@ fn probe_encoder_blockiness(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disconnect_reasons_have_stable_names_and_notification_policy() {
+        let cases = [
+            (
+                ViewerDisconnectReason::TakenOver,
+                "taken_over",
+                Some("taken_over"),
+            ),
+            (
+                ViewerDisconnectReason::DeviceDisconnected,
+                "device_disconnected",
+                None,
+            ),
+            (ViewerDisconnectReason::Shutdown, "shutdown", None),
+            (ViewerDisconnectReason::PeerClosed, "peer_closed", None),
+        ];
+
+        for (reason, name, notification_type) in cases {
+            assert_eq!(reason.as_str(), name);
+            assert_eq!(reason.notification_type(), notification_type);
+        }
+    }
+
+    #[test]
+    fn peer_connection_effect_keeps_ice_jitter_non_terminal() {
+        assert_eq!(
+            peer_connection_effect(RTCPeerConnectionState::Connected),
+            PeerConnectionEffect::Connected
+        );
+        assert_eq!(
+            peer_connection_effect(RTCPeerConnectionState::Disconnected),
+            PeerConnectionEffect::TemporarilyDisconnected
+        );
+        assert_eq!(
+            peer_connection_effect(RTCPeerConnectionState::Failed),
+            PeerConnectionEffect::Terminal
+        );
+        assert_eq!(
+            peer_connection_effect(RTCPeerConnectionState::Closed),
+            PeerConnectionEffect::Terminal
+        );
+        assert_eq!(
+            peer_connection_effect(RTCPeerConnectionState::New),
+            PeerConnectionEffect::Ignore
+        );
+        assert_eq!(
+            peer_connection_effect(RTCPeerConnectionState::Connecting),
+            PeerConnectionEffect::Ignore
+        );
+    }
+
+    #[test]
+    fn pusher_drain_decision_preserves_reference_chain_boundaries() {
+        assert_eq!(
+            decide_pusher_drain(60, 60, false, false, None),
+            PusherDrainDecision::Keep
+        );
+        assert_eq!(
+            decide_pusher_drain(61, 60, false, false, Some(0)),
+            PusherDrainDecision::Keep
+        );
+        assert_eq!(
+            decide_pusher_drain(61, 60, false, false, Some(7)),
+            PusherDrainDecision::DrainToKeyframe {
+                drop_prefix: 7,
+                request_idr: false,
+            }
+        );
+        assert_eq!(
+            decide_pusher_drain(61, 60, false, false, None),
+            PusherDrainDecision::DrainAll
+        );
+        assert_eq!(
+            decide_pusher_drain(3, 60, false, true, Some(2)),
+            PusherDrainDecision::DrainToKeyframe {
+                drop_prefix: 2,
+                request_idr: false,
+            }
+        );
+        assert_eq!(
+            decide_pusher_drain(3, 60, false, true, None),
+            PusherDrainDecision::DrainAll
+        );
+        assert_eq!(
+            decide_pusher_drain(61, 60, true, false, Some(4)),
+            PusherDrainDecision::DrainAll
+        );
+    }
+
+    #[test]
+    fn encoder_probe_gate_is_closed_for_disabled_or_unsampled_frames() {
+        assert!(!should_probe_encoder(false, 30, true));
+        assert!(should_probe_encoder(true, 0, true));
+        assert!(!should_probe_encoder(true, 0, false));
+        assert!(should_probe_encoder(true, 30, false));
+        assert!(!should_probe_encoder(true, 29, false));
+        assert!(!should_probe_encoder(true, 31, false));
+    }
 
     #[tokio::test]
     async fn remove_and_teardown_viewer_clears_map_and_stops_running() {

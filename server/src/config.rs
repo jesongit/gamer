@@ -386,6 +386,24 @@ impl Config {
     /// 启动期校验：返回全部违规项描述（空 = 通过）。逐项给出明确错误信息，
     /// 调用方在打完清单后以非零码退出
     pub fn validate(&self) -> Vec<String> {
+        self.validate_with_password_hash(true)
+    }
+
+    /// 启动时按凭据优先级校验配置：高优先级环境凭据存在时，低优先级的
+    /// `password_hash` 不参与校验；否则一个已被覆盖的坏哈希仍会阻止启动。
+    fn validate_for_load(&self) -> Vec<String> {
+        let has_env_password = non_empty_env("GAMER_ADMIN_PASSWORD");
+        let has_secret_file = non_empty_env("GAMER_ADMIN_PASSWORD_FILE");
+        if has_env_password || has_secret_file {
+            self.validate_with_password_hash(false)
+        } else {
+            // 普通配置加载复用完整公开校验；仅在凭据被高优先级来源覆盖时，
+            // 跳过不会生效的 password_hash 格式检查。
+            self.validate()
+        }
+    }
+
+    fn validate_with_password_hash(&self, validate_password_hash: bool) -> Vec<String> {
         let mut errs = Vec::new();
 
         if self.port == 0 {
@@ -472,7 +490,7 @@ impl Config {
                 self.auth.login_window_secs
             ));
         }
-        if !self.auth.password_hash.is_empty() {
+        if validate_password_hash && !self.auth.password_hash.is_empty() {
             if let Err(e) = crate::api::auth::parse_password_hash(&self.auth.password_hash) {
                 errs.push(format!(
                     "auth.password_hash 格式非法：{e}（期望 Argon2id PHC；兼容旧 \
@@ -501,7 +519,7 @@ fn normalize_paths(cfg: &mut Config) {
 }
 
 fn ensure_valid(cfg: &Config) -> anyhow::Result<()> {
-    let errs = cfg.validate();
+    let errs = cfg.validate_for_load();
     if errs.is_empty() {
         return Ok(());
     }
@@ -513,6 +531,12 @@ fn ensure_valid(cfg: &Config) -> anyhow::Result<()> {
             .collect::<Vec<_>>()
             .join("\n")
     )
+}
+
+fn non_empty_env(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
 }
 
 fn probe_tool(name: &'static str, path: &str, args: &[&str]) -> ToolProbe {
@@ -768,5 +792,54 @@ fps = 15
             "{:?}",
             cfg.validate()
         );
+    }
+
+    #[test]
+    fn overridden_password_hash_is_not_validated_during_load() {
+        let cfg = Config {
+            auth: AuthConfig {
+                password_hash: "not-a-password-hash".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(
+            cfg.validate()
+                .iter()
+                .any(|err| err.contains("password_hash")),
+            "直接校验仍应拒绝坏哈希"
+        );
+
+        let _password = EnvVarGuard::set("GAMER_ADMIN_PASSWORD", "test-password");
+        assert!(
+            !cfg.validate_for_load()
+                .iter()
+                .any(|err| err.contains("password_hash")),
+            "高优先级 env/secret 覆盖时，启动不应校验被遮蔽的坏哈希"
+        );
+    }
+
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
+            }
+        }
     }
 }
