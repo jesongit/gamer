@@ -740,8 +740,8 @@ server/src/webrtc/
 
 - [x] RTP H.264 packetization 使用录制 fixture 测试 SPS/PPS、IDR、FU-A、marker 和时间戳。
 - [x] pusher 队列、waiting_key、初始 GOP 重放建模为可测试状态机。
-- [ ] viewer 接管/conflict/taken_over 与 RTP 推送解耦。
-- [ ] 诊断 probe 与生产推流隔离，确保关闭时零开销。
+- [x] viewer 接管/conflict/taken_over 与 RTP 推送解耦。
+- [x] 诊断 probe 与生产推流隔离，确保关闭时零开销。
 
 ### 12.5 设备 actor 候选
 
