@@ -24,6 +24,18 @@ pub enum FfmpegResult {
     Failure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NccResult {
+    Hit,
+    Miss,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NccScope {
+    Region,
+    Fullscreen,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum SchedulerEvent {
     Conflict,
@@ -264,13 +276,23 @@ impl Metrics {
     }
 
     pub fn record_ncc(&self, duration_ms: u64, hit: bool, region: bool) {
+        let result = if hit { NccResult::Hit } else { NccResult::Miss };
+        let scope = if region {
+            NccScope::Region
+        } else {
+            NccScope::Fullscreen
+        };
+        self.record_ncc_observation(duration_ms, result, scope);
+    }
+
+    pub fn record_ncc_observation(&self, duration_ms: u64, result: NccResult, scope: NccScope) {
         self.ncc_matches_total.fetch_add(1, RELAXED);
-        if hit {
+        if matches!(result, NccResult::Hit) {
             self.ncc_hits_total.fetch_add(1, RELAXED);
         } else {
             self.ncc_misses_total.fetch_add(1, RELAXED);
         }
-        if region {
+        if matches!(scope, NccScope::Region) {
             self.ncc_region_total.fetch_add(1, RELAXED);
         } else {
             self.ncc_fullscreen_total.fetch_add(1, RELAXED);
@@ -326,22 +348,50 @@ mod tests {
     #[test]
     fn counters_are_low_cardinality_and_snapshot_consistent() {
         let metrics = Metrics::default();
+        metrics.scrcpy_connect(true);
+        metrics.scrcpy_connect(false);
+        metrics.scrcpy_reconnect(ReconnectReason::ManualRetry);
+        metrics.scrcpy_reconnect(ReconnectReason::WatchdogDead);
+        metrics.scrcpy_reconnect(ReconnectReason::WatchdogSilent);
         metrics.record_video_input_frame();
         metrics.record_rtp_sent_frame();
         metrics.record_rtp_drop();
-        metrics.record_ffmpeg_decode(12, FfmpegResult::Timeout);
-        metrics.record_ncc(4, true, false);
+        metrics.set_rtp_queue_depth(-3);
+        metrics.set_gop_size(-1, 42);
+        metrics.record_ffmpeg_decode(12, FfmpegResult::Success);
+        metrics.record_ffmpeg_decode(13, FfmpegResult::Timeout);
+        metrics.record_ffmpeg_decode(14, FfmpegResult::Failure);
+        metrics.record_ncc_observation(4, NccResult::Hit, NccScope::Fullscreen);
+        metrics.record_ncc_observation(5, NccResult::Miss, NccScope::Region);
         metrics.record_scheduler_trigger(7);
         metrics.record_scheduler_event(SchedulerEvent::Conflict);
+        metrics.record_scheduler_event(SchedulerEvent::Skipped);
+        metrics.record_scheduler_event(SchedulerEvent::Failed);
 
         let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.scrcpy_connect_success_total, 1);
+        assert_eq!(snapshot.scrcpy_connect_failure_total, 1);
+        assert_eq!(snapshot.scrcpy_reconnect_manual_total, 1);
+        assert_eq!(snapshot.scrcpy_reconnect_watchdog_dead_total, 1);
+        assert_eq!(snapshot.scrcpy_reconnect_watchdog_silent_total, 1);
         assert_eq!(snapshot.video_input_frames_total, 1);
         assert_eq!(snapshot.rtp_sent_frames_total, 1);
         assert_eq!(snapshot.rtp_dropped_frames_total, 1);
+        assert_eq!(snapshot.rtp_queue_depth, 0);
+        assert_eq!(snapshot.gop_frames, 0);
+        assert_eq!(snapshot.gop_bytes, 42);
+        assert_eq!(snapshot.ffmpeg_decode_success_total, 1);
         assert_eq!(snapshot.ffmpeg_decode_timeout_total, 1);
+        assert_eq!(snapshot.ffmpeg_decode_failure_total, 1);
+        assert_eq!(snapshot.ffmpeg_decode_total, 3);
         assert_eq!(snapshot.ncc_hits_total, 1);
+        assert_eq!(snapshot.ncc_misses_total, 1);
+        assert_eq!(snapshot.ncc_region_total, 1);
         assert_eq!(snapshot.ncc_fullscreen_total, 1);
+        assert_eq!(snapshot.ncc_matches_total, 2);
         assert_eq!(snapshot.scheduler_conflicts_total, 1);
+        assert_eq!(snapshot.scheduler_skipped_total, 1);
+        assert_eq!(snapshot.scheduler_failures_total, 1);
     }
 
     #[test]
