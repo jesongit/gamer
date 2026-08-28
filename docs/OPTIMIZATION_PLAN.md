@@ -1,6 +1,6 @@
 # GameBot 优化实施计划
 
-> 状态：阶段0/1已完成；阶段2自动化路由安全验收已收口但仍有凭据迁移、真实设备和内存稳定性项目；阶段3主体完成但 viewer/pusher 断开一致性未收口；阶段4～6部分完成；阶段7未完成，且本轮 Rust 门禁未全绿（2026-08-28）
+> 状态：阶段0/1已完成；阶段2自动化路由安全验收已收口但仍有凭据迁移、真实设备和内存稳定性项目；阶段3主体完成但 viewer/pusher 断开一致性未收口；阶段4～6部分完成；阶段7未完成，且本轮 Rust 门禁已全绿但仍缺生产迁移/依赖审计/真实设备证据（2026-08-28）
 > 编制日期：2026-08-27  
 > 适用范围：Rust 服务端、Vue 前端、部署配置、测试与运维文档  
 > 本文只定义后续实施顺序和验收条件，不代表相关改动已经完成。
@@ -45,11 +45,11 @@
 - 登录成功后前端只写本地标记；除登录外的 API 和 `/ws/device/:id` 没有服务端鉴权，且启用了 permissive CORS。
 - 手动运行注册表按脚本 ID 互斥，调度器使用另一套运行注册表，没有统一的设备级执行仲裁。
 
-本轮复核结果（2026-08-28）：沿用主线已有测试证据，Rust 最近一次全量回归已收口为 155 passed、0 failed、1 ignored；`cargo clippy --all-targets --all-features -- -D warnings` 与 `cargo fmt --all -- --check` 也在主线上通过，`2ffafc4` 只是在截图并发测试里修正了测点口径，`5b26eef` 则把 clippy 门禁和 Windows 原子写竞争一起收口。前端 `npm test` 与 `npm run build` 通过；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 通过；Docker daemon 可用，`docker build -t gamer .` 已完成，但仍只是普通构建通过，未证明完全无缓存构建。阶段2的真实 HTTP 路由、WS 鉴权/同源、Cookie 过期、敏感日志、ZIP 路径和命令注入边界已有自动化验收，真实设备 DataChannel 冒烟和资源限额后的持续内存观测仍待设备/运行环境。阶段4已落地 `/health/ready`、`/metrics`、原子写入、SQLite WAL/busy-timeout、独立 DB worker 与日志批处理；SQL 在独立线程执行，但调用侧仍同步等待 DB RPC，视频/GOP/ffmpeg/NCC 等指标虽已定义却未接入生产采集点。阶段5的 `request_snapshot` 已接入生产截图路径，精确同帧并发合并、错误恢复、不同帧和不同设备隔离 4 项测试通过；正式跨平台性能报告、完成后短窗缓存和计算池仍未完成。阶段6仅完成 Console geometry、engine syntax/events 和 WebRTC protocol 的局部拆分，全面模块化仍未完成。
+本轮复核结果（2026-08-28）：沿用主线已有测试证据，Rust 最近一次全量回归已收口为 159 passed、0 failed、1 ignored；`cargo clippy --all-targets --all-features -- -D warnings` 与 `cargo fmt --all -- --check` 也在主线上通过，`2ffafc4` 只是在截图并发测试里修正了测点口径，`5b26eef` 则把 clippy 门禁和 Windows 原子写竞争一起收口。前端 `npm test` 与 `npm run build` 通过；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 通过；Docker daemon 可用，`docker build -t gamer .` 已完成，但仍只是普通构建通过，未证明完全无缓存构建。阶段2的真实 HTTP 路由、WS 鉴权/同源、Cookie 过期、敏感日志、ZIP 路径和命令注入边界已有自动化验收，真实设备 DataChannel 冒烟和资源限额后的持续内存观测仍待设备/运行环境。阶段4已落地 `/health/ready`、`/metrics`、原子写入、SQLite WAL/busy-timeout、独立 DB worker 与日志批处理；Store 有界 worker、清理统计和 scheduler/metrics 的真实 hook 也已补齐，但 SQL 调用侧仍同步等待 DB RPC，视频/GOP/ffmpeg/NCC 等指标虽已定义却未接入全部生产采集点。阶段5的 `request_snapshot` 已接入生产截图路径，WebRTC RTP fixture、精确同帧并发合并、错误恢复、不同帧和不同设备隔离测试已通过；正式跨平台性能报告、完成后短窗缓存和计算池仍未完成。阶段6的 Console WebRTC lifecycle、engine syntax/events 和 WebRTC protocol helper 已局部拆分并回归通过，全面模块化仍未完成。
 
 ### 3.1 本轮 checklist 验收对账
 
-统计包含阶段 0～7 内所有 `- [ ]` / `- [x]`（含嵌套子项）；阶段 5 新增一条独立的 `InFlight` 合并器检查项，因此总项数由 236 增至 237。
+统计包含阶段 0～7 内所有 `- [ ]` / `- [x]`（含嵌套子项）；阶段 5 新增一条独立的 `InFlight` 合并器检查项，且阶段 4/5/6 补齐了若干真实 hook 与 fixture，因此总项数由 236 增至 238。
 
 | 阶段 | 审计前（HEAD） | 本轮审计后 | 未完成项—原因—下一步动作 |
 |---|---:|---:|---|
@@ -57,11 +57,11 @@
 | 1 | 25/28 | 28/28 | 原漏勾的 `server/web-dist` 排除、敏感日志约束和 adb/ffmpeg readiness 均已由主线代码/测试证明。 |
 | 2 | 0/36 | 33/36 | 开发模式仍兼容明文密码、缺真实设备 DataChannel 冒烟、资源限额测试未观测进程内存稳定性；下一步移除明文迁移口、跑设备链路与受限资源压力测试。 |
 | 3 | 0/34 | 29/34 | RUN-005 的强制断开、原因建模及旧 pusher 回归未实现；下一步统一 disconnect reason/cleanup 并补 viewer/pusher 生命周期测试。 |
-| 4 | 0/36 | 21/36 | 原子写覆盖/失败保持、DB RPC 异步化与 `get_task` 直查、定期保留/VACUUM、结构化 reason 和多组生产指标未收口；下一步按 DATA/OBS 子项逐一实现并测试。 |
+| 4 | 0/36 | 26/37 | 原子写覆盖/失败保持、Store 有界 worker 与清理统计、DB RPC 异步化与 `get_task` 直查、scheduler/metrics 真实 hook、定期保留/VACUUM、结构化 reason 和多组生产指标未完全收口；下一步按 DATA/OBS 子项逐一实现并测试。 |
 | 5 | 0/30 | 8/31 | 缺 Windows+Docker/Linux 正式基准、完整模板缓存失效/LRU、受限计算池、50～100ms 完成结果缓存及 NCC 后续评估；下一步先补基准和指标，再决定优化。 |
-| 6 | 0/19 | 2/19 | 仅局部 helper 拆分，缺 Console/API/engine/WebRTC 主体边界和浏览器冒烟；下一步按纯移动→测试→内部简化的小提交推进。 |
+| 6 | 0/19 | 5/19 | Console WebRTC lifecycle、WebRTC RTP fixture 与若干 protocol helper 已局部拆分，但缺 Console/API/engine/WebRTC 主体边界和浏览器冒烟；下一步按纯移动→测试→内部简化的小提交推进。 |
 | 7 | 0/17 | 15/17 | `cargo fmt`、`cargo clippy -D warnings`、`cargo test`、前端 test/build、`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 与本机 `docker build` 已有证据；生产数据副本迁移回滚、带版本日期的依赖安全审计和真实设备矩阵仍无本轮证据。 |
-| **总计** | **61/236** | **172/237** | **仍有 65 项 checklist 未完成，不宣称整体优化完成。** |
+| **总计** | **61/236** | **180/238** | **仍有 58 项 checklist 未完成，不宣称整体优化完成。** |
 
 以上数字只用于确定起点。执行期间若环境变化，应在阶段 0 重新记录基线。
 
@@ -453,7 +453,7 @@ RunRecord
 
 ## 10. 阶段 4：数据、日志与可观测性
 
-当前状态：部分完成（2026-08-28）。健康检查、原子写入、事务化导入、SQLite WAL/busy-timeout、独立 DB worker、日志批处理和部分低基数指标已落地并有测试；rusqlite 已移出 Tokio 核心线程，但同步 DB RPC 仍可能阻塞异步 handler。运行日志只在启动时触发清理，结构化 reason 和视频/GOP/ffmpeg/NCC 指标生产端尚未完整接线；下一步是异步化调用侧、补周期保留任务并接通生产指标。
+当前状态：部分完成（2026-08-28）。健康检查、原子写入、事务化导入、SQLite WAL/busy-timeout、独立 DB worker、日志批处理、Store 有界 worker 统计和部分低基数指标已落地并有测试；rusqlite 已移出 Tokio 核心线程，但同步 DB RPC 仍可能阻塞异步 handler。运行日志只在启动时触发清理，结构化 reason 和视频/GOP/ffmpeg/NCC 指标生产端尚未完整接线；下一步是异步化调用侧、补周期保留任务并接通生产指标。
 
 ### 10.1 文件原子写入
 
@@ -484,6 +484,7 @@ RunRecord
   2. 低频查询使用 `spawn_blocking`。
   3. 不建议只把当前 Mutex 换成异步 Mutex，因为同步 SQLite 调用仍会阻塞 executor。
 - [x] 日志写入按小批量事务提交，例如 100 条或 250ms 一批；异常退出允许损失极少量 debug 日志，但 success/error 终态必须可靠落盘。
+- [x] Store 有界 worker 的排队与清理统计已接入结构化指标，能区分提交、刷盘和清理耗时。
 - [ ] `get_device`/`get_task` 使用直接 SQL，不再先 list 全表再内存查找。
 
 #### DATA-004：数据保留
@@ -491,7 +492,7 @@ RunRecord
 - [x] 为运行日志增加最大保留天数或最大条数。
 - [ ] 定期分批删除，避免一次大事务。
 - [ ] 暂不每次清理后自动 VACUUM；根据数据库大小提供手动维护动作。
-- [ ] 清理动作记录删除范围和数量。
+- [x] 清理动作记录删除范围和数量。
 
 ### 10.3 可观测性
 
@@ -505,19 +506,19 @@ RunRecord
 #### OBS-002：结构化关联字段
 
 - [ ] 全链路使用 `device_id`、`session_generation`、`viewer_id`、`run_id`、`task_id`。
-- [ ] 连接、重连、踢 viewer、拆会话必须记录标准 reason 枚举。
+- [x] 连接、重连、踢 viewer、拆会话已接入标准 reason 枚举并落到真实 hook。
 - [ ] 避免只靠自由文本推断状态迁移。
 
 #### OBS-003：指标
 
 - [ ] 初始至少暴露：
   - [x] 当前设备/会话/viewer/run 数。
-  - [ ] scrcpy 连接成功/失败/重连次数及原因。
+  - [x] scrcpy 连接成功/失败/重连次数及原因。
   - [ ] 视频输入帧率、RTP 发送帧率、队列深度和丢帧数。
   - [ ] GOP 帧数和字节数。
   - [ ] ffmpeg 解码次数、耗时、超时和失败次数。
   - [ ] NCC 匹配次数、耗时、命中率、区域/全屏分类。
-  - [ ] Scheduler 触发延迟、冲突、跳过和失败次数。
+  - [x] Scheduler 触发延迟、冲突、跳过和失败次数。
   - [x] DB 写入队列深度和批处理耗时。
 - [x] 指标标签不得包含模板完整路径、日志消息等高基数字段。
 
@@ -530,7 +531,7 @@ RunRecord
 
 ## 11. 阶段 5：模板匹配性能优化
 
-当前状态：部分完成（2026-08-28）。matcher 内容哈希模板缓存已完成；截图请求合并器已接入生产 `decode_latest_png`，以 config/GOP generation + frame sequence 精确区分帧，并通过同帧合并、失败恢复、不同帧并行和设备隔离测试。正式跨平台性能报告、完成后 50～100ms 短窗缓存、可观测 decode 指标和受限计算池仍未完成。
+当前状态：部分完成（2026-08-28）。matcher 内容哈希模板缓存已完成；截图请求合并器已接入生产 `decode_latest_png`，以 config/GOP generation + frame sequence 精确区分帧，并通过同帧合并、失败恢复、不同帧并行和设备隔离测试，WebRTC RTP fixture 也已补齐。正式跨平台性能报告、完成后 50～100ms 短窗缓存、可观测 decode 指标和受限计算池仍未完成。
 
 ### 11.1 性能基准先行
 
@@ -653,9 +654,9 @@ web/src/
 
 拆分顺序：
 
-- [ ] 先抽纯函数：坐标换算、指纹、YAML 校验、行映射、模板名解析。
+- [x] 先抽纯函数：坐标换算、指纹、YAML 校验、行映射、模板名解析。
 - [ ] 再抽无 UI 的状态 composable：运行状态、日志轮询、设备加载。
-- [ ] 再抽 WebRTC 生命周期，保持唯一 cleanup 入口。
+- [x] 再抽 WebRTC 生命周期，保持唯一 cleanup 入口。
 - [ ] 最后拆视觉组件和模板。
 - [ ] 每一步执行前端单测和浏览器连接冒烟测试。
 
@@ -723,7 +724,7 @@ server/src/webrtc/
 └─ probe.rs
 ```
 
-- [ ] RTP H.264 packetization 使用录制 fixture 测试 SPS/PPS、IDR、FU-A、marker 和时间戳。
+- [x] RTP H.264 packetization 使用录制 fixture 测试 SPS/PPS、IDR、FU-A、marker 和时间戳。
 - [ ] pusher 队列、waiting_key、初始 GOP 重放建模为可测试状态机。
 - [ ] viewer 接管/conflict/taken_over 与 RTP 推送解耦。
 - [ ] 诊断 probe 与生产推流隔离，确保关闭时零开销。
