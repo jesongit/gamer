@@ -3,7 +3,7 @@
 //! 性能策略：截图先等比缩放到 ≤540px 宽（模板同比例），步长采样 + rayon 并行，
 //! 1080p 全图 + 小模板典型耗时 100~400ms；支持搜索区域裁剪进一步加速。
 
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -145,7 +145,6 @@ struct TemplatePathKey {
     content_hash: [u8; 32],
 }
 
-#[allow(dead_code)]
 struct TemplatePathEntry {
     source: Arc<DynamicImage>,
     memory_bytes: usize,
@@ -160,7 +159,6 @@ struct TemplateResolveKey {
     template: String,
 }
 
-#[allow(dead_code)]
 struct TemplateResolveEntry {
     resolved: Arc<PathBuf>,
     memory_bytes: usize,
@@ -190,7 +188,6 @@ fn metadata_key(path: &Path, meta: &std::fs::Metadata, content_hash: [u8; 32]) -
     }
 }
 
-#[allow(dead_code)]
 fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -204,7 +201,6 @@ fn file_mtime_ns(meta: &std::fs::Metadata) -> u128 {
         .unwrap_or(0)
 }
 
-#[allow(dead_code)]
 fn dir_signature(dir: &Path) -> anyhow::Result<(PathBuf, [u8; 32])> {
     let dir = normalize_path(dir);
     let mut entries = std::fs::read_dir(&dir)?
@@ -351,6 +347,7 @@ fn cached_prepared_template(
         let prepared = Arc::new(build_prepared_template(image)?);
         let prepared_bytes = prepared_memory_bytes(&prepared);
         entry.prepared.insert(dimensions, prepared.clone());
+        entry.memory_bytes = entry.memory_bytes.saturating_add(prepared_bytes);
         (prepared, prepared_bytes)
     };
     cache.total_bytes = cache.total_bytes.saturating_add(prepared_bytes);
@@ -411,12 +408,28 @@ fn evict_template_cache(cache: &mut TemplateCache) {
     }
 }
 
+/// 读取模板时同时取前后元数据，避免原子替换边界把旧字节和新 mtime/size
+/// 拼成一个缓存键。内容哈希仍保留，用于覆盖但 mtime/size 未变的情况。
+#[allow(dead_code)]
+fn read_template_consistently(path: &Path) -> anyhow::Result<(Vec<u8>, std::fs::Metadata)> {
+    for _ in 0..2 {
+        let before = std::fs::metadata(path)?;
+        let bytes = std::fs::read(path)?;
+        let after = std::fs::metadata(path)?;
+        if file_mtime_ns(&before) == file_mtime_ns(&after) && before.len() == after.len() {
+            return Ok((bytes, after));
+        }
+    }
+    let bytes = std::fs::read(path)?;
+    let meta = std::fs::metadata(path)?;
+    Ok((bytes, meta))
+}
+
 #[allow(dead_code)]
 fn cached_template_source_from_path_key(
     path: &Path,
 ) -> anyhow::Result<([u8; 32], Arc<DynamicImage>, TemplatePathKey)> {
-    let bytes = std::fs::read(path)?;
-    let meta = std::fs::metadata(path)?;
+    let (bytes, meta) = read_template_consistently(path)?;
     let key = metadata_key(path, &meta, template_key(&bytes));
     let mut cache = template_cache().lock();
     if let Some(source) = cache
@@ -449,6 +462,146 @@ fn cached_template_source_from_path_key(
     cache.total_bytes = cache.total_bytes.saturating_add(memory_bytes);
     evict_template_cache(&mut cache);
     Ok((key.content_hash, source, key))
+}
+
+/// 获取路径入口指定尺寸的模板预处理结果。路径键和字节键分开保存，避免
+/// 一个文件覆盖后仅因与另一个文件同内容而跳过路径级失效边界。
+#[allow(dead_code)]
+fn cached_prepared_template_from_path_key(
+    key: &TemplatePathKey,
+    source: &Arc<DynamicImage>,
+    dimensions: (u32, u32),
+) -> anyhow::Result<Arc<PreparedTemplate>> {
+    let mut cache = template_cache().lock();
+    if let Some(prepared) = cache
+        .path_entries
+        .get(key)
+        .and_then(|entry| entry.prepared.get(&dimensions).cloned())
+    {
+        let used = cache_tick(&mut cache);
+        if let Some(entry) = cache.path_entries.get_mut(key) {
+            entry.last_used = used;
+        }
+        return Ok(prepared);
+    }
+    if let Entry::Vacant(entry) = cache.path_entries.entry(key.clone()) {
+        let source_memory = source_memory_bytes(source);
+        entry.insert(TemplatePathEntry {
+            source: source.clone(),
+            memory_bytes: source_memory,
+            prepared: HashMap::new(),
+            last_used: 0,
+        });
+        cache.total_bytes = cache.total_bytes.saturating_add(source_memory);
+    }
+    let (prepared, prepared_bytes) = {
+        let entry = cache
+            .path_entries
+            .get_mut(key)
+            .expect("path template cache entry inserted");
+        let image = if entry.source.dimensions() == dimensions {
+            to_gray(entry.source.as_ref())
+        } else {
+            entry
+                .source
+                .resize(
+                    dimensions.0,
+                    dimensions.1,
+                    image::imageops::FilterType::Triangle,
+                )
+                .to_luma8()
+        };
+        let prepared = Arc::new(build_prepared_template(image)?);
+        let prepared_bytes = prepared_memory_bytes(&prepared);
+        entry.prepared.insert(dimensions, prepared.clone());
+        entry.memory_bytes = entry.memory_bytes.saturating_add(prepared_bytes);
+        (prepared, prepared_bytes)
+    };
+    cache.total_bytes = cache.total_bytes.saturating_add(prepared_bytes);
+    let used = cache_tick(&mut cache);
+    if let Some(entry) = cache.path_entries.get_mut(key) {
+        entry.last_used = used;
+    }
+    evict_template_cache(&mut cache);
+    Ok(prepared)
+}
+
+/// 主动使单个模板文件及其父目录的短名解析缓存失效。
+///
+/// 覆盖、重命名和删除后都可以调用此方法；文件不存在时仍会清理旧路径键。
+/// mtime/size/内容哈希和目录代数仍保留，作为调用方漏发通知时的兜底。
+#[allow(dead_code)]
+pub fn invalidate_template_cache_path(path: &Path) {
+    let normalized = normalize_path(path);
+    let current_hash = std::fs::read(path).ok().map(|bytes| template_key(&bytes));
+    let mut cache = template_cache().lock();
+    let mut hashes = current_hash.into_iter().collect::<HashSet<_>>();
+    let path_keys: Vec<_> = cache
+        .path_entries
+        .keys()
+        .filter(|key| key.path == normalized)
+        .cloned()
+        .collect();
+    for key in path_keys {
+        hashes.insert(key.content_hash);
+        if let Some(entry) = cache.path_entries.remove(&key) {
+            cache.total_bytes = cache.total_bytes.saturating_sub(entry.memory_bytes);
+        }
+    }
+    remove_content_cache_hashes(&mut cache, hashes);
+    invalidate_resolve_cache_dir_locked(&mut cache, normalized.parent());
+}
+
+/// 主动使模板目录中的文件缓存和短名解析代数缓存失效。
+///
+/// 上传、覆盖、重命名、删除等目录操作完成后调用即可；下次路径匹配会重新
+/// 读取并预处理，短名解析也会重新枚举目录。
+#[allow(dead_code)]
+pub fn invalidate_template_cache_dir(dir: &Path) {
+    let normalized = normalize_path(dir);
+    let mut cache = template_cache().lock();
+    let mut hashes = HashSet::new();
+    let path_keys: Vec<_> = cache
+        .path_entries
+        .keys()
+        .filter(|key| key.path.parent() == Some(normalized.as_path()))
+        .cloned()
+        .collect();
+    for key in path_keys {
+        hashes.insert(key.content_hash);
+        if let Some(entry) = cache.path_entries.remove(&key) {
+            cache.total_bytes = cache.total_bytes.saturating_sub(entry.memory_bytes);
+        }
+    }
+    invalidate_resolve_cache_dir_locked(&mut cache, Some(normalized.as_path()));
+    remove_content_cache_hashes(&mut cache, hashes);
+}
+
+#[allow(dead_code)]
+fn remove_content_cache_hashes(cache: &mut TemplateCache, hashes: HashSet<[u8; 32]>) {
+    for hash in hashes {
+        if let Some(entry) = cache.entries.remove(&hash) {
+            cache.total_bytes = cache.total_bytes.saturating_sub(entry.memory_bytes);
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn invalidate_resolve_cache_dir_locked(cache: &mut TemplateCache, dir: Option<&Path>) {
+    let Some(dir) = dir else {
+        return;
+    };
+    let resolve_keys: Vec<_> = cache
+        .path_resolve_entries
+        .keys()
+        .filter(|key| key.dir == dir)
+        .cloned()
+        .collect();
+    for key in resolve_keys {
+        if let Some(entry) = cache.path_resolve_entries.remove(&key) {
+            cache.total_bytes = cache.total_bytes.saturating_sub(entry.memory_bytes);
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -529,6 +682,51 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
     let screen = decode_image_limited(&req.screen_png, SCREEN_MAX_INPUT_BYTES, "截图")?.to_rgb8();
     let (template_key, template_source) = cached_template_source(&req.template_png)?;
 
+    match_template_with_source(
+        &screen,
+        req.threshold,
+        req.region,
+        template_key,
+        template_source,
+        None,
+        started,
+    )
+}
+
+/// 通过规范化路径读取并匹配模板。路径入口的缓存键包含路径、mtime、文件大小
+/// 和内容哈希；现有字节入口保持兼容，不改变 MatchRequest 或调用方语义。
+#[allow(dead_code)]
+pub fn match_template_from_path(
+    screen_png: &[u8],
+    template_path: &Path,
+    threshold: Option<f32>,
+    region: Option<[u32; 4]>,
+) -> anyhow::Result<Option<MatchResult>> {
+    let started = (matcher_stats().now)();
+    let screen = decode_image_limited(screen_png, SCREEN_MAX_INPUT_BYTES, "截图")?.to_rgb8();
+    let (template_key, template_source, path_key) =
+        cached_template_source_from_path_key(template_path)?;
+
+    match_template_with_source(
+        &screen,
+        threshold,
+        region,
+        template_key,
+        template_source,
+        Some(&path_key),
+        started,
+    )
+}
+
+fn match_template_with_source(
+    screen: &image::RgbImage,
+    threshold: Option<f32>,
+    region: Option<[u32; 4]>,
+    template_key: [u8; 32],
+    template_source: Arc<DynamicImage>,
+    path_key: Option<&TemplatePathKey>,
+    started: Instant,
+) -> anyhow::Result<Option<MatchResult>> {
     let (sw, sh) = (screen.width(), screen.height());
     let (tw, th) = template_source.dimensions();
     if tw >= sw || th >= sh {
@@ -536,7 +734,7 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
     }
 
     // 搜索区域
-    let (rx0, ry0, rx1, ry1) = match req.region {
+    let (rx0, ry0, rx1, ry1) = match region {
         Some([x, y, w, h]) => (x, y, (x + w).min(sw), (y + h).min(sh)),
         None => (0, 0, sw, sh),
     };
@@ -545,7 +743,7 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
     }
 
     // 有搜索区域时用原始分辨率精匹配（区域小、小模板更准）；无区域全图搜索时缩到 ≤540 保证性能
-    let scale = if req.region.is_some() {
+    let scale = if region.is_some() {
         1.0
     } else {
         (540.0 / sw.max(sh) as f32).min(1.0)
@@ -555,9 +753,13 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
         (sh as f32 * scale).max(1.0) as u32,
     );
     let screen_small = if scale < 1.0 {
-        DynamicImage::ImageRgb8(screen).resize(sw2, sh2, image::imageops::FilterType::Triangle)
+        DynamicImage::ImageRgb8(screen.clone()).resize(
+            sw2,
+            sh2,
+            image::imageops::FilterType::Triangle,
+        )
     } else {
-        DynamicImage::ImageRgb8(screen)
+        DynamicImage::ImageRgb8(screen.clone())
     };
     let screen_gray = to_gray(&screen_small);
     let template_dimensions = if scale < 1.0 {
@@ -569,7 +771,12 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
     } else {
         (tw, th)
     };
-    let prepared = cached_prepared_template(template_key, &template_source, template_dimensions)?;
+    let prepared = match path_key {
+        Some(key) => {
+            cached_prepared_template_from_path_key(key, &template_source, template_dimensions)?
+        }
+        None => cached_prepared_template(template_key, &template_source, template_dimensions)?,
+    };
 
     let (sw2, sh2) = screen_gray.dimensions();
     let (tw2, th2) = prepared.image.dimensions();
@@ -656,7 +863,7 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
         }
     }
 
-    let threshold = req.threshold.unwrap_or(0.8);
+    let threshold = threshold.unwrap_or(0.8);
     let result = if best_score < threshold {
         None
     } else {
@@ -675,7 +882,7 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
         })
     };
     let duration_ms = started.elapsed().as_millis() as u64;
-    matcher_stats().record_ncc(duration_ms, result.is_some(), req.region.is_some());
+    matcher_stats().record_ncc(duration_ms, result.is_some(), region.is_some());
     Ok(result)
 }
 
