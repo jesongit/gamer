@@ -6,6 +6,8 @@ server/config.toml
 server/gamer-server.log.*
 # 运行时产物不入库；模板/脚本分区目录 server/data/<pkg>/{tmpl,yaml} 需入库
 server/data/gamer.db
+server/data/*.db-shm
+server/data/*.db-wal
 server/data/pending_restore.json
 
 # ===== Node (web) =====
