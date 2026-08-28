@@ -30,6 +30,7 @@ use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 use tower_http::services::ServeDir;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -51,15 +52,34 @@ const BODY_LIMIT_UPLOAD: usize = 16 * 1024 * 1024;
 const BODY_LIMIT_ZIP_IMPORT: usize = 20 * 1024 * 1024;
 /// 公开豁免组请求体上限（登录等极小 JSON）
 const BODY_LIMIT_PUBLIC: usize = 64 * 1024;
+/// API 侧同步文件/SQLite/外部探测任务的并发上限。
+///
+/// `spawn_blocking` 自身允许任务排队到 Tokio 的 blocking 池；如果每个请求都
+/// 无界提交，恶意的列表/导入请求仍可能把排队内存和线程预算耗尽。API 统一经此
+/// 门进入 blocking 池，保持异步 handler 不执行同步工作，并给入口加背压。
+const API_BLOCKING_CONCURRENCY: usize = 16;
+
+fn api_blocking_limiter() -> &'static Arc<Semaphore> {
+    static LIMITER: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    LIMITER.get_or_init(|| Arc::new(Semaphore::new(API_BLOCKING_CONCURRENCY)))
+}
 
 async fn run_blocking_api<T, F>(task: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, ApiError> + Send + 'static,
 {
-    tokio::task::spawn_blocking(task)
+    let permit = api_blocking_limiter()
+        .clone()
+        .acquire_owned()
         .await
-        .map_err(|e| ApiError::internal(format!("blocking worker failed: {e}")))?
+        .map_err(|_| ApiError::internal("blocking worker limiter closed"))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        task()
+    })
+    .await
+    .map_err(|e| ApiError::internal(format!("blocking worker failed: {e}")))?
 }
 
 #[derive(Clone)]
@@ -242,15 +262,15 @@ async fn api_health_ready(State(st): State<AppState>) -> Response {
     let db = st.db.clone();
     let cfg = st.cfg.clone();
     let (data_dir_ok, scrcpy_ok, db_ok, tools) = tokio::join!(
-        tokio::task::spawn_blocking(move || data_dir.is_dir()),
-        tokio::task::spawn_blocking(move || scrcpy_server.is_file()),
-        tokio::task::spawn_blocking(move || db.health_check().is_ok()),
-        tokio::task::spawn_blocking(move || cfg.probe_external_tools()),
+        run_blocking_api(move || Ok(data_dir.is_dir())),
+        run_blocking_api(move || Ok(scrcpy_server.is_file())),
+        run_blocking_api(move || Ok(db.health_check().is_ok())),
+        run_blocking_api(move || Ok(cfg.probe_external_tools())),
     );
     let data_dir_ok = data_dir_ok.unwrap_or(false);
     let scrcpy_ok = scrcpy_ok.unwrap_or(false);
     let db_ok = db_ok.unwrap_or(false);
-    let tool_probes = tools.ok().unwrap_or_default();
+    let tool_probes = tools.unwrap_or_default();
     let adb_ok = tool_probes
         .iter()
         .find(|p| p.name == "adb")
@@ -285,9 +305,13 @@ async fn api_health_ready(State(st): State<AppState>) -> Response {
 /// 仍返回合法响应，并用 `gamer_db_ready` 标记异常。
 async fn api_metrics(State(st): State<AppState>) -> Response {
     let db = st.db.clone();
-    let db_snapshot = tokio::task::spawn_blocking(move || db.metrics_snapshot()).await;
-    let db_ready = db_snapshot.as_ref().is_ok_and(|r| r.is_ok());
-    let db_metrics = db_snapshot.ok().and_then(Result::ok).unwrap_or_default();
+    let db_snapshot = run_blocking_api(move || {
+        db.metrics_snapshot()
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await;
+    let db_ready = db_snapshot.is_ok();
+    let db_metrics = db_snapshot.unwrap_or_default();
     let configured_devices = st.devices.list_snapshot().len();
     let active_sessions = st.devices.online_sessions().len();
     let active_viewers = st.viewers.lock().map(|v| v.len()).unwrap_or_default();
@@ -840,25 +864,131 @@ struct DeviceView {
     height: Option<u32>,
 }
 
-async fn api_list_devices(State(st): State<AppState>) -> Response {
-    Json(device_views(&st)).into_response()
+fn validate_text_field(value: &str, field: &str, max_bytes: usize) -> Result<(), ApiError> {
+    if value.trim().is_empty() {
+        return Err(ApiError::bad_request(format!("{field} 不能为空")));
+    }
+    if value.len() > max_bytes {
+        return Err(ApiError::bad_request(format!(
+            "{field} 超过 {max_bytes} 字节"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(format!("{field} 包含非法控制字符")));
+    }
+    Ok(())
 }
 
-/// 渲染设备列表视图（带运行时状态/分辨率）
-fn device_views(st: &AppState) -> Vec<DeviceView> {
-    let devices = match st.db.list_devices() {
-        Ok(d) => d,
-        Err(_) => return Vec::new(),
-    };
+/// 设备请求的纯输入校验：不改变设备管理层的默认值，只拒绝会被静默
+/// 转换为错误配置或可能污染日志/路径的输入。
+fn validate_device_req(req: &CreateDeviceReq) -> Result<(), ApiError> {
+    validate_text_field(&req.name, "设备名称", 255)?;
+    validate_text_field(&req.kind, "设备类型", 64)?;
+    if let Some(addr) = req.addr.as_deref().filter(|v| !v.is_empty()) {
+        validate_text_field(addr, "设备地址", 255)?;
+    }
+    if let Some(mode) = req.screen_mode.as_deref() {
+        if !matches!(mode, "mirror" | "virtual") {
+            return Err(ApiError::bad_request(
+                "screen_mode 只允许 mirror 或 virtual",
+            ));
+        }
+    }
+    if let Some(res) = req.vd_res.as_deref().filter(|v| !v.trim().is_empty()) {
+        validate_text_field(res, "虚拟屏分辨率", 32)?;
+        let Some((width, height)) = res.trim().split_once('x') else {
+            return Err(ApiError::bad_request("vd_res 必须是 WIDTHxHEIGHT"));
+        };
+        let valid_dimension = |v: &str| {
+            v.parse::<u32>()
+                .ok()
+                .is_some_and(|n| (16..=16_384).contains(&n))
+        };
+        if !valid_dimension(width) || !valid_dimension(height) {
+            return Err(ApiError::bad_request(
+                "vd_res 的宽高必须在 16..16384 范围内",
+            ));
+        }
+    }
+    if req.vd_dpi.is_some_and(|dpi| dpi > 1_000) {
+        return Err(ApiError::bad_request("vd_dpi 必须在 0..1000 范围内"));
+    }
+    if req.fps.is_some_and(|fps| fps > 120) {
+        return Err(ApiError::bad_request("fps 必须在 0..120 范围内"));
+    }
+    if let Some(pkg) = req.pkg.as_deref().filter(|v| !v.trim().is_empty()) {
+        require_pkg(Some(pkg))?;
+    }
+    Ok(())
+}
+
+/// 模板名必须是单个分区目录内的普通文件名。之前的 sanitize 逻辑会把
+/// `/`、反斜杠和控制字符静默改成 `_`，容易让调用方误以为写入了原名；
+/// 路由层现在明确拒绝这类输入，保留 `#` 区域后缀语法。
+fn validate_template_name(name: &str) -> Result<String, ApiError> {
+    let name = name.trim();
+    if name.is_empty() || name == "." || name == ".." || name.starts_with('.') {
+        return Err(ApiError::bad_request("模板名不能为空或以 . 开头"));
+    }
+    if name.len() > 255 {
+        return Err(ApiError::bad_request("模板名超过 255 字节"));
+    }
+    if name
+        .chars()
+        .any(|c| !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '#' | ' ')))
+    {
+        return Err(ApiError::bad_request(
+            "模板名包含非法字符（只允许字母数字 . - _ # 和空格）",
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn validate_task_req(req: &SaveTaskReq) -> Result<(), ApiError> {
+    validate_text_field(&req.name, "任务名称", 255)?;
+    validate_text_field(&req.cron, "cron", 256)?;
+    validate_text_field(&req.script_id, "script_id", 512)?;
+    validate_text_field(&req.device_id, "device_id", 255)?;
+    Ok(())
+}
+
+fn validate_run_script_req(req: &RunScriptReq) -> Result<(), ApiError> {
+    validate_text_field(&req.device_id, "device_id", 255)?;
+    if req.start_index.is_some_and(|index| index > 100_000) {
+        return Err(ApiError::bad_request("start_index 超过脚本步数上限"));
+    }
+    if let Some(func) = req.func.as_deref().filter(|v| !v.trim().is_empty()) {
+        validate_text_field(func, "func", 255)?;
+    }
+    Ok(())
+}
+
+async fn api_list_devices(State(st): State<AppState>) -> Response {
+    match device_views(&st).await {
+        Ok(devices) => Json(devices).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+/// 渲染设备列表视图（带运行时状态/分辨率）。SQLite 查询和同步快照均在
+/// API blocking 边界内完成；数据库失败必须向调用方返回 500，而不是伪装成空列表。
+async fn device_views(st: &AppState) -> Result<Vec<DeviceView>, ApiError> {
+    let db = st.db.clone();
+    let devices = st.devices.clone();
+    run_blocking_api(move || render_device_views(&db, &devices)).await
+}
+
+fn render_device_views(db: &Db, devices: &Arc<DeviceManager>) -> Result<Vec<DeviceView>, ApiError> {
+    let devices_snapshot = db
+        .list_devices()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     let mut out = Vec::new();
-    for d in devices {
-        let (_, status, error) = st
-            .devices
+    for d in devices_snapshot {
+        let (_, status, error) = devices
             .snapshot(&d.id)
             .map(|(_, s, e)| ((), s, e))
             .unwrap_or(((), crate::device::DeviceStatus::Offline, None));
-        let (width, height) = st
-            .devices
+        let (width, height) = devices
             .frame_cache(&d.id)
             .map(|fc| fc.dims())
             .unwrap_or((0, 0));
@@ -885,7 +1015,7 @@ fn device_views(st: &AppState) -> Vec<DeviceView> {
             height: if height > 0 { Some(height) } else { None },
         });
     }
-    out
+    Ok(out)
 }
 
 /// 扫描 `adb devices -l`，自动注册新发现的设备（USB / 无线 adb / 模拟器），
@@ -898,8 +1028,11 @@ async fn api_scan_devices(State(st): State<AppState>) -> Response {
             return err_response(StatusCode::BAD_GATEWAY, &format!("adb devices 失败: {}", e))
         }
     };
-    Json(serde_json::json!({"ok": true, "added": added, "devices": device_views(&st)}))
-        .into_response()
+    let devices = match device_views(&st).await {
+        Ok(devices) => devices,
+        Err(err) => return err.into_response(),
+    };
+    Json(serde_json::json!({"ok": true, "added": added, "devices": devices})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -918,6 +1051,9 @@ async fn api_create_device(
     State(st): State<AppState>,
     Json(req): Json<CreateDeviceReq>,
 ) -> Response {
+    if let Err(err) = validate_device_req(&req) {
+        return err.into_response();
+    }
     let id = Uuid::new_v4().simple().to_string();
     let device = Device {
         id,
@@ -947,11 +1083,22 @@ async fn api_update_device(
     Path(id): Path<String>,
     Json(req): Json<CreateDeviceReq>,
 ) -> Response {
-    let Some(existing) = (match st.db.get_device(&id) {
-        Ok(d) => d,
-        Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }) else {
-        return err_response(StatusCode::NOT_FOUND, "设备不存在");
+    if let Err(err) = validate_device_req(&req) {
+        return err.into_response();
+    }
+    let db = st.db.clone();
+    let lookup_id = id.clone();
+    let existing = match run_blocking_api(move || {
+        db.get_device(&lookup_id)
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
+        Ok(existing) => existing,
+        Err(err) => return err.into_response(),
+    };
+    let Some(existing) = existing else {
+        return ApiError::not_found("设备不存在").into_response();
     };
     let device = Device {
         id: id.clone(),
@@ -1008,10 +1155,16 @@ async fn api_delete_device(State(st): State<AppState>, Path(id): Path<String>) -
 /// 设备端 shell 无法解析应用显示名（label 在 APK 资源里），
 /// 用包名最后两段生成友好名，完整包名始终一并展示，可搜索选择。
 async fn api_device_apps(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    let device = match st.db.get_device(&id) {
-        Ok(Some(d)) => d,
-        Ok(None) => return err_response(StatusCode::NOT_FOUND, "设备不存在"),
-        Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    let db = st.db.clone();
+    let device = match run_blocking_api(move || {
+        db.get_device(&id)
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
+        Ok(Some(device)) => device,
+        Ok(None) => return ApiError::not_found("设备不存在").into_response(),
+        Err(err) => return err.into_response(),
     };
     let serial = if device.addr.is_empty() {
         "usb".to_string()
@@ -1403,6 +1556,10 @@ async fn api_upload_template(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
+    let name = match validate_template_name(&req.name) {
+        Ok(name) => name,
+        Err(err) => return err.into_response(),
+    };
     // base64 合法性与体积先于解码校验（4/3 膨胀后 16MiB ≈ 原始 12MiB 内的护栏）
     const MAX_B64_LEN: usize = (matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 1) * 4;
     if req.data_b64.len() > MAX_B64_LEN {
@@ -1421,7 +1578,6 @@ async fn api_upload_template(
         Ok(b) => b,
         Err(e) => return ApiError::bad_request(e.to_string()).into_response(),
     };
-    let name = sanitize_filename(&req.name);
     match run_blocking_api(move || {
         let dir = st.scripts.tmpl_dir(&pkg);
         std::fs::create_dir_all(&dir).map_err(|e| ApiError::internal(e.to_string()))?;
@@ -1448,8 +1604,12 @@ async fn api_delete_template(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
+    let name = match validate_template_name(&name) {
+        Ok(name) => name,
+        Err(err) => return err.into_response(),
+    };
     match run_blocking_api(move || {
-        let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
+        let path = st.scripts.tmpl_dir(&pkg).join(&name);
         std::fs::remove_file(&path).map_err(|e| ApiError::internal(e.to_string()))?;
         st.scripts.cleanup_partition(&pkg); // 分区 yaml/tmpl 都空了则清理目录
         Ok(Json(serde_json::json!({"ok": true})))
@@ -1477,13 +1637,20 @@ async fn api_rename_template(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    let new_name = sanitize_filename(&req.name);
-    if new_name == sanitize_filename(&old_name) {
+    let old_name = match validate_template_name(&old_name) {
+        Ok(name) => name,
+        Err(err) => return err.into_response(),
+    };
+    let new_name = match validate_template_name(&req.name) {
+        Ok(name) => name,
+        Err(err) => return err.into_response(),
+    };
+    if new_name == old_name {
         return ApiError::bad_request("名称未变化").into_response();
     }
     match run_blocking_api(move || {
         let dir = st.scripts.tmpl_dir(&pkg);
-        let old_path = dir.join(sanitize_filename(&old_name));
+        let old_path = dir.join(&old_name);
         let new_path = dir.join(&new_name);
         if new_path.exists() {
             return Err(ApiError::bad_request("已存在同名模板"));
@@ -1515,8 +1682,12 @@ async fn api_get_template_image(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
+    let name = match validate_template_name(&name) {
+        Ok(name) => name,
+        Err(err) => return err.into_response(),
+    };
     match run_blocking_api(move || {
-        let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
+        let path = st.scripts.tmpl_dir(&pkg).join(&name);
         let bytes = std::fs::read(&path).map_err(|_| ApiError::not_found("模板不存在"))?;
         let mime = match path
             .extension()
@@ -1561,8 +1732,12 @@ async fn api_test_template(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
+    let name = match validate_template_name(&name) {
+        Ok(name) => name,
+        Err(err) => return err.into_response(),
+    };
     let tpl_bytes = match run_blocking_api(move || {
-        let tpl_path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
+        let tpl_path = st.scripts.tmpl_dir(&pkg).join(&name);
         std::fs::read(&tpl_path).map_err(|_| ApiError::not_found("模板不存在"))
     })
     .await
@@ -1612,8 +1787,14 @@ struct SaveScriptReq {
 }
 
 async fn api_save_script(State(st): State<AppState>, Json(req): Json<SaveScriptReq>) -> Response {
-    if req.name.trim().is_empty() {
-        return ApiError::bad_request("脚本名不能为空").into_response();
+    if let Err(err) = validate_text_field(&req.name, "脚本名", 255) {
+        return err.into_response();
+    }
+    if req.content.trim().is_empty() {
+        return ApiError::bad_request("脚本内容不能为空").into_response();
+    }
+    if req.content.len() > crate::scripts::IMPORT_MAX_YAML_BYTES {
+        return ApiError::bad_request("脚本内容超过 1 MiB").into_response();
     }
     if crate::scripts::sanitize_part(&req.pkg).is_none() {
         return ApiError::bad_request("应用包名非法（只允许字母数字 . _ -）").into_response();
@@ -1765,10 +1946,10 @@ async fn api_run_script(
         Ok(s) => s,
         Err(e) => return e.into_response(),
     }) else {
-        return err_response(StatusCode::NOT_FOUND, "脚本不存在");
+        return ApiError::not_found("脚本不存在").into_response();
     };
-    if req.device_id.trim().is_empty() {
-        return err_response(StatusCode::BAD_REQUEST, "缺少 device_id");
+    if let Err(err) = validate_run_script_req(&req) {
+        return err.into_response();
     }
     // RUN-002 契约：启动即返回 202 {run_id, state:"starting"}，不等脚本结束；
     // 设备级互斥冲突 → 409 {error:"device_busy", run_id, script_id, source, started_at}
@@ -1868,23 +2049,34 @@ async fn api_cancel_run(State(st): State<AppState>, Path(run_id): Path<String>) 
 // ---------- 定时任务 ----------
 
 async fn api_list_tasks(State(st): State<AppState>) -> Response {
-    match st.db.list_tasks() {
-        Ok(tasks) => {
-            let out: Vec<serde_json::Value> = tasks
-                .into_iter()
-                .map(|t| {
-                    let next = if t.enabled { next_run(&t.cron).map(|x| x.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_else(|| "-".into()) } else { "-".into() };
-                    serde_json::json!({
-                        "id": t.id, "name": t.name, "cron": t.cron, "script_id": t.script_id,
-                        "device_id": t.device_id, "enabled": t.enabled, "last_result": t.last_result,
-                        "last_run_at": t.last_run_at, "next_run": next
-                    })
-                })
-                .collect();
-            Json(out).into_response()
-        }
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    let db = st.db.clone();
+    let tasks = match run_blocking_api(move || {
+        db.list_tasks()
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
+        Ok(tasks) => tasks,
+        Err(err) => return err.into_response(),
+    };
+    let out: Vec<serde_json::Value> = tasks
+        .into_iter()
+        .map(|t| {
+            let next = if t.enabled {
+                next_run(&t.cron)
+                    .map(|x| x.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| "-".into())
+            } else {
+                "-".into()
+            };
+            serde_json::json!({
+                "id": t.id, "name": t.name, "cron": t.cron, "script_id": t.script_id,
+                "device_id": t.device_id, "enabled": t.enabled, "last_result": t.last_result,
+                "last_run_at": t.last_run_at, "next_run": next
+            })
+        })
+        .collect();
+    Json(out).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1902,40 +2094,57 @@ async fn api_save_task(State(st): State<AppState>, Json(req): Json<SaveTaskReq>)
     if !crate::scheduler::validate_cron(&req.cron) {
         return err_response(StatusCode::BAD_REQUEST, "cron 表达式无效");
     }
+    if let Err(err) = validate_task_req(&req) {
+        return err.into_response();
+    }
     let id = req
         .id
         .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
-    let existing = st
-        .db
-        .list_tasks()
-        .ok()
-        .and_then(|ts| ts.into_iter().find(|t| t.id == id));
-    let task = Task {
-        id,
-        name: req.name,
-        cron: req.cron,
-        script_id: req.script_id,
-        device_id: req.device_id,
-        enabled: req
-            .enabled
-            .unwrap_or(existing.as_ref().map(|t| t.enabled).unwrap_or(true)),
-        last_result: existing.as_ref().and_then(|t| t.last_result.clone()),
-        last_run_at: existing.as_ref().and_then(|t| t.last_run_at.clone()),
-        created_at: existing
-            .as_ref()
-            .map(|t| t.created_at.clone())
-            .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+    let db = st.db.clone();
+    let task = match run_blocking_api(move || {
+        let existing = db
+            .list_tasks()
+            .map_err(|e| ApiError::internal(e.to_string()))?
+            .into_iter()
+            .find(|t| t.id == id);
+        let task = Task {
+            id,
+            name: req.name,
+            cron: req.cron,
+            script_id: req.script_id,
+            device_id: req.device_id,
+            enabled: req
+                .enabled
+                .unwrap_or(existing.as_ref().map(|t| t.enabled).unwrap_or(true)),
+            last_result: existing.as_ref().and_then(|t| t.last_result.clone()),
+            last_run_at: existing.as_ref().and_then(|t| t.last_run_at.clone()),
+            created_at: existing
+                .as_ref()
+                .map(|t| t.created_at.clone())
+                .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
+        };
+        db.upsert_task(&task)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        Ok(task)
+    })
+    .await
+    {
+        Ok(task) => task,
+        Err(err) => return err.into_response(),
     };
-    match st.db.upsert_task(&task) {
-        Ok(_) => Json(serde_json::json!({"ok": true, "id": task.id})).into_response(),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-    }
+    Json(serde_json::json!({"ok": true, "id": task.id})).into_response()
 }
 
 async fn api_delete_task(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    match st.db.delete_task(&id) {
+    let db = st.db.clone();
+    match run_blocking_api(move || {
+        db.delete_task(&id)
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -1944,13 +2153,18 @@ async fn api_delete_task(State(st): State<AppState>, Path(id): Path<String>) -> 
 async fn api_run_task_now(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     use crate::scheduler::RunNowError;
     let trigger_started = Instant::now();
-    let Some(task) = (match st.db.list_tasks() {
-        Ok(t) => t,
-        Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    let db = st.db.clone();
+    let tasks = match run_blocking_api(move || {
+        db.list_tasks()
+            .map_err(|e| ApiError::internal(e.to_string()))
     })
-    .into_iter()
-    .find(|t| t.id == id) else {
-        return err_response(StatusCode::NOT_FOUND, "任务不存在");
+    .await
+    {
+        Ok(tasks) => tasks,
+        Err(err) => return err.into_response(),
+    };
+    let Some(task) = tasks.into_iter().find(|t| t.id == id) else {
+        return ApiError::not_found("任务不存在").into_response();
     };
     match st.scheduler.run_now(&task).await {
         Ok(run_id) => {
@@ -2006,20 +2220,31 @@ fn clamp_log_limit(limit: Option<i64>) -> i64 {
 }
 
 async fn api_list_logs(State(st): State<AppState>, Query(q): Query<LogQuery>) -> Response {
-    match st.db.list_logs(
-        q.device_id.as_deref(),
-        q.level.as_deref(),
-        clamp_log_limit(q.limit),
-    ) {
+    let db = st.db.clone();
+    let device_id = q.device_id;
+    let level = q.level;
+    let limit = clamp_log_limit(q.limit);
+    match run_blocking_api(move || {
+        db.list_logs(device_id.as_deref(), level.as_deref(), limit)
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
         Ok(logs) => Json(logs).into_response(),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(err) => err.into_response(),
     }
 }
 
 async fn api_clear_logs(State(st): State<AppState>) -> Response {
-    match st.db.clear_logs() {
+    let db = st.db.clone();
+    match run_blocking_api(move || {
+        db.clear_logs()
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -2056,25 +2281,7 @@ async fn api_shutdown(State(st): State<AppState>) -> Response {
 // ---------- 工具 ----------
 
 fn err_response(status: StatusCode, msg: &str) -> Response {
-    (status, Json(serde_json::json!({"error": msg}))).into_response()
-}
-
-fn sanitize_filename(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' || c == ' ' || c == '#' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "unnamed.png".into()
-    } else {
-        cleaned
-    }
+    ApiError::new(status, msg.to_owned()).into_response()
 }
 
 #[allow(dead_code)]
@@ -3442,5 +3649,85 @@ mod sec_tests {
         assert_eq!(clamp_log_limit(Some(-100)), 1);
         assert_eq!(clamp_log_limit(Some(1001)), 1000);
         assert_eq!(clamp_log_limit(Some(1_000_000)), 1000);
+    }
+
+    #[test]
+    fn route_validation_rejects_ambiguous_device_configuration() {
+        let valid = CreateDeviceReq {
+            name: "demo".into(),
+            kind: "redroid".into(),
+            addr: Some("127.0.0.1:5555".into()),
+            screen_mode: Some("virtual".into()),
+            vd_res: Some("1920x1080".into()),
+            vd_dpi: Some(420),
+            pkg: Some("com.example.game".into()),
+            fps: Some(60),
+        };
+        assert!(validate_device_req(&valid).is_ok());
+
+        let mut invalid = valid;
+        invalid.screen_mode = Some("unexpected".into());
+        assert!(validate_device_req(&invalid).is_err());
+        invalid.screen_mode = Some("virtual".into());
+        invalid.vd_res = Some("1920".into());
+        assert!(validate_device_req(&invalid).is_err());
+        invalid.vd_res = Some("1x1080".into());
+        assert!(validate_device_req(&invalid).is_err());
+        invalid.vd_res = Some("1920x1080".into());
+        invalid.fps = Some(121);
+        assert!(validate_device_req(&invalid).is_err());
+        invalid.fps = Some(60);
+        invalid.name = "line\nfeed".into();
+        assert!(validate_device_req(&invalid).is_err());
+    }
+
+    #[test]
+    fn route_validation_rejects_path_like_template_names() {
+        for name in [
+            "",
+            ".hidden.png",
+            "..",
+            "../escape.png",
+            "a\\b.png",
+            "a:b.png",
+        ] {
+            assert!(
+                validate_template_name(name).is_err(),
+                "{name:?} must be rejected"
+            );
+        }
+        assert_eq!(
+            validate_template_name("login#0.1_0.2_0.3_0.4.png").unwrap(),
+            "login#0.1_0.2_0.3_0.4.png"
+        );
+        assert!(validate_template_name("截图 1.png").is_ok());
+    }
+
+    #[test]
+    fn route_validation_bounds_run_and_task_requests() {
+        let task = SaveTaskReq {
+            id: None,
+            name: "daily".into(),
+            cron: "*/5 * * * *".into(),
+            script_id: "com.example.game/daily.yaml".into(),
+            device_id: "device-1".into(),
+            enabled: Some(true),
+        };
+        assert!(validate_task_req(&task).is_ok());
+        let mut bad_task = task;
+        bad_task.device_id.clear();
+        assert!(validate_task_req(&bad_task).is_err());
+
+        let run = RunScriptReq {
+            device_id: "device-1".into(),
+            start_index: Some(100_000),
+            func: Some("main".into()),
+        };
+        assert!(validate_run_script_req(&run).is_ok());
+        let bad_run = RunScriptReq {
+            start_index: Some(100_001),
+            ..run
+        };
+        assert!(validate_run_script_req(&bad_run).is_err());
     }
 }
