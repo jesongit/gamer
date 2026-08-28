@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, OnceLock};
-#[cfg(test)]
 use std::time::Instant;
 
 use image::{DynamicImage, GenericImageView, GrayImage};
@@ -70,6 +70,68 @@ struct TemplateCache {
 const TEMPLATE_CACHE_CAPACITY: usize = 128;
 const TEMPLATE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 static TEMPLATE_CACHE: OnceLock<Mutex<TemplateCache>> = OnceLock::new();
+static MATCHER_STATS: AtomicPtr<MatcherStats> = AtomicPtr::new(std::ptr::null_mut());
+
+fn default_matcher_stats() -> &'static MatcherStats {
+    static DEFAULT: MatcherStats = MatcherStats {
+        now: MatcherStats::now_instant,
+        record_ncc: MatcherStats::record_ncc_noop,
+    };
+    &DEFAULT
+}
+
+fn matcher_stats() -> &'static MatcherStats {
+    let ptr = MATCHER_STATS.load(Ordering::Relaxed);
+    if ptr.is_null() {
+        default_matcher_stats()
+    } else {
+        unsafe { &*ptr }
+    }
+}
+
+fn install_matcher_stats(stats: MatcherStats) -> MatcherStatsGuard {
+    let boxed = Box::new(stats);
+    let raw = Box::into_raw(boxed);
+    let prev = MATCHER_STATS.swap(raw, Ordering::AcqRel);
+    MatcherStatsGuard { prev, current: raw }
+}
+
+#[derive(Clone, Copy)]
+pub struct MatcherStats {
+    now: fn() -> Instant,
+    record_ncc: fn(u64, bool, bool),
+}
+
+impl MatcherStats {
+    fn now_instant() -> Instant {
+        Instant::now()
+    }
+
+    fn record_ncc_noop(_: u64, _: bool, _: bool) {}
+
+    fn record_ncc(&self, duration_ms: u64, hit: bool, region: bool) {
+        (self.record_ncc)(duration_ms, hit, region);
+    }
+}
+
+struct MatcherStatsGuard {
+    prev: *mut MatcherStats,
+    current: *mut MatcherStats,
+}
+
+impl Drop for MatcherStatsGuard {
+    fn drop(&mut self) {
+        MATCHER_STATS.store(self.prev, Ordering::Release);
+        unsafe {
+            drop(Box::from_raw(self.current));
+        }
+    }
+}
+
+#[cfg(test)]
+fn test_matcher_stats(now: fn() -> Instant, record_ncc: fn(u64, bool, bool)) -> MatcherStats {
+    MatcherStats { now, record_ncc }
+}
 
 #[derive(Hash, Eq, PartialEq, Clone)]
 struct TemplatePathKey {
@@ -376,6 +438,7 @@ fn resolve_template_file_impl(tpl_dir: &Path, template: &str) -> anyhow::Result<
 }
 
 pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>> {
+    let started = (matcher_stats().now)();
     let screen = decode_image_limited(&req.screen_png, SCREEN_MAX_INPUT_BYTES, "截图")?.to_rgb8();
     let (template_key, template_source) = cached_template_source(&req.template_png)?;
 
@@ -507,23 +570,26 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
     }
 
     let threshold = req.threshold.unwrap_or(0.8);
-    if best_score < threshold {
-        return Ok(None);
-    }
-
-    // 映射回原始坐标系
-    let inv = 1.0 / scale;
-    let (ox, oy) = (
-        (best_pos.0 as f32 * inv) as u32,
-        (best_pos.1 as f32 * inv) as u32,
-    );
-    Ok(Some(MatchResult {
-        x: ox,
-        y: oy,
-        width: (tw2 as f32 * inv) as u32,
-        height: (th2 as f32 * inv) as u32,
-        score: best_score,
-    }))
+    let result = if best_score < threshold {
+        None
+    } else {
+        // 映射回原始坐标系
+        let inv = 1.0 / scale;
+        let (ox, oy) = (
+            (best_pos.0 as f32 * inv) as u32,
+            (best_pos.1 as f32 * inv) as u32,
+        );
+        Some(MatchResult {
+            x: ox,
+            y: oy,
+            width: (tw2 as f32 * inv) as u32,
+            height: (th2 as f32 * inv) as u32,
+            score: best_score,
+        })
+    };
+    let duration_ms = started.elapsed().as_millis() as u64;
+    matcher_stats().record_ncc(duration_ms, result.is_some(), req.region.is_some());
+    Ok(result)
 }
 
 /// 计算 (x0, y0) 处的 NCC
@@ -690,6 +756,15 @@ impl Matcher {
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    static TEST_GUARD: Mutex<()> = Mutex::new(());
+    static TEST_HITS: AtomicU64 = AtomicU64::new(0);
+    static TEST_MISSES: AtomicU64 = AtomicU64::new(0);
+    static TEST_REGIONS: AtomicU64 = AtomicU64::new(0);
+    static TEST_FULLSCREEN: AtomicU64 = AtomicU64::new(0);
+    static TEST_DURATION_MS: AtomicU64 = AtomicU64::new(0);
 
     fn percentile(samples: &mut [u128], p: f64) -> u128 {
         samples.sort_unstable();
@@ -709,6 +784,22 @@ mod tests {
             p95,
             max
         );
+    }
+
+    fn encode_png(image: &RgbImage) -> Vec<u8> {
+        let mut out = Vec::new();
+        image
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    fn encode_luma_png(image: &GrayImage) -> Vec<u8> {
+        let mut out = Vec::new();
+        DynamicImage::ImageLuma8(image.clone())
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
     }
 
     /// 手工构造最小 PNG（签名 + IHDR + IEND），IHDR 声明指定分辨率——
@@ -834,19 +925,8 @@ mod tests {
                 tpl.put_pixel(x, y, *screen.get_pixel(140 + x, 190 + y));
             }
         }
-        let mut screen_bytes = Vec::new();
-        let mut tpl_bytes = Vec::new();
-        screen
-            .write_to(
-                &mut std::io::Cursor::new(&mut screen_bytes),
-                image::ImageFormat::Png,
-            )
-            .unwrap();
-        tpl.write_to(
-            &mut std::io::Cursor::new(&mut tpl_bytes),
-            image::ImageFormat::Png,
-        )
-        .unwrap();
+        let screen_bytes = encode_png(&screen);
+        let tpl_bytes = encode_png(&tpl);
 
         let req = MatchRequest {
             screen_png: screen_bytes,
@@ -891,19 +971,8 @@ mod tests {
             let v = if (x + y) % 2 == 0 { 200u8 } else { 100u8 };
             *p = Rgb([v, v, v]);
         }
-        let mut screen_bytes = Vec::new();
-        let mut tpl_bytes = Vec::new();
-        screen
-            .write_to(
-                &mut std::io::Cursor::new(&mut screen_bytes),
-                image::ImageFormat::Png,
-            )
-            .unwrap();
-        tpl.write_to(
-            &mut std::io::Cursor::new(&mut tpl_bytes),
-            image::ImageFormat::Png,
-        )
-        .unwrap();
+        let screen_bytes = encode_png(&screen);
+        let tpl_bytes = encode_png(&tpl);
         let req = MatchRequest {
             screen_png: screen_bytes,
             template_png: tpl_bytes,
@@ -911,6 +980,89 @@ mod tests {
             region: None,
         };
         assert!(match_template(&req).unwrap().is_none());
+    }
+
+    #[test]
+    fn matcher_stats_hook_records_success_miss_and_region() {
+        let _lock = TEST_GUARD.lock().unwrap();
+        TEST_HITS.store(0, Ordering::Relaxed);
+        TEST_MISSES.store(0, Ordering::Relaxed);
+        TEST_REGIONS.store(0, Ordering::Relaxed);
+        TEST_FULLSCREEN.store(0, Ordering::Relaxed);
+        TEST_DURATION_MS.store(0, Ordering::Relaxed);
+
+        fn record(duration_ms: u64, hit: bool, region: bool) {
+            TEST_DURATION_MS.fetch_add(duration_ms, Ordering::Relaxed);
+            if hit {
+                TEST_HITS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                TEST_MISSES.fetch_add(1, Ordering::Relaxed);
+            }
+            if region {
+                TEST_REGIONS.fetch_add(1, Ordering::Relaxed);
+            } else {
+                TEST_FULLSCREEN.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let stats = test_matcher_stats(Instant::now, record);
+        let _guard = install_matcher_stats(stats);
+
+        let mut screen = GrayImage::new(160, 120);
+        for (_, _, p) in screen.enumerate_pixels_mut() {
+            *p = image::Luma([20]);
+        }
+        for y in 40..70 {
+            for x in 50..90 {
+                let v = ((x - 50) * 7 + (y - 40) * 11) as u8;
+                let gray = if (x + y) % 2 == 0 {
+                    40u8.saturating_add(v / 2)
+                } else {
+                    180u8.saturating_add(v / 3)
+                };
+                screen.put_pixel(x, y, image::Luma([gray]));
+            }
+        }
+        let mut tpl = GrayImage::new(18, 18);
+        for y in 0..18 {
+            for x in 0..18 {
+                tpl.put_pixel(x, y, *screen.get_pixel(54 + x, 44 + y));
+            }
+        }
+        let hit_req = MatchRequest {
+            screen_png: encode_luma_png(&screen),
+            template_png: encode_luma_png(&tpl),
+            threshold: Some(0.9),
+            region: None,
+        };
+        assert!(match_template(&hit_req).unwrap().is_some());
+
+        let mut miss_tpl = GrayImage::new(18, 18);
+        for (x, y, p) in miss_tpl.enumerate_pixels_mut() {
+            let gray = if (x + y) % 2 == 0 { 235 } else { 245 };
+            *p = image::Luma([gray]);
+        }
+        let miss_req = MatchRequest {
+            screen_png: hit_req.screen_png.clone(),
+            template_png: encode_luma_png(&miss_tpl),
+            threshold: Some(0.99),
+            region: None,
+        };
+        assert!(match_template(&miss_req).unwrap().is_none());
+
+        let region_req = MatchRequest {
+            screen_png: hit_req.screen_png,
+            template_png: encode_luma_png(&tpl),
+            threshold: Some(0.9),
+            region: Some([42, 38, 44, 44]),
+        };
+        assert!(match_template(&region_req).unwrap().is_some());
+
+        assert_eq!(TEST_HITS.load(Ordering::Relaxed), 2);
+        assert_eq!(TEST_MISSES.load(Ordering::Relaxed), 1);
+        assert_eq!(TEST_REGIONS.load(Ordering::Relaxed), 1);
+        assert_eq!(TEST_FULLSCREEN.load(Ordering::Relaxed), 2);
+        assert!(TEST_DURATION_MS.load(Ordering::Relaxed) > 0);
     }
 
     #[test]
