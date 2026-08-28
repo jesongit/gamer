@@ -59,9 +59,9 @@
 | 3 | 34/34 | 34/34 | RunManager、调度幂等、强制断开和 viewer/pusher 收尾均有主线回归证据。 |
 | 4 | 23/29 | 24/29 | `999f65c` 已补分批日志删除，`314cfbe` 已收口 API blocking；仍缺脚本/模板/配置统一写入、VACUUM/手动维护、全链路关联字段、自由文本状态迁移和视频/GOP/ffmpeg 指标。 |
 | 5 | 8/25 | 9/25 | `9399b0f` 已落地生产内容缓存的内存预算/LRU；仍缺真实跨平台 p50/p95、CPU/内存实测、主动失效/目录缓存接入、受限计算池、50～100ms 完成结果缓存和 NCC 后续评估。 |
-| 6 | 9/19 | 12/19 | `9e37bbc`/`314cfbe` 补齐统一错误映射、请求校验和 handler blocking 边界，`ab03209` 补齐 probe gate；仍缺 Console/API/engine/viewer 全面拆分和浏览器/真实链路冒烟。 |
+| 6 | 9/19 | 13/19 | `9e37bbc`/`314cfbe` 补齐统一错误映射、请求校验和 handler blocking 边界，`ab03209` 补齐 probe gate；Console 视觉组件已拆分，仍缺 Console/API/engine/viewer 全面拆分和浏览器/真实链路冒烟。 |
 | 7 | 16/17 | 16/17 | 自动化门禁、Compose、release 和 server audit 有证据；生产数据库/文件迁移回滚与真实设备矩阵仍无证据。 |
-| **总计** | **167/203** | **174/203** | **仍有 29 项 checklist 未完成，不宣称整体优化完成。** |
+| **总计** | **167/203** | **175/203** | **仍有 28 项 checklist 未完成，不宣称整体优化完成。** |
 
 以上数字只用于确定起点。执行期间若环境变化，应在阶段 0 重新记录基线。
 
@@ -75,9 +75,9 @@
 | 3 | `67052e3`、`00a296a`、`ab03209` | RunManager、设备互斥、调度幂等、取消/停机和 viewer/pusher 断开原因/推流边界测试。 | 34/34，阶段 3 收口。 |
 | 4 | `c0b264f`、`9c3f028`、`999f65c`、`8283edd`、`314cfbe`、`a3ecc6d` | atomic write、导入事务、SQLite worker、分批保留、API blocking/request validation、截图错误传播和部分指标测试。 | 24/29；仍缺统一配置写入、VACUUM/手动维护、完整关联字段和视频/GOP/ffmpeg 指标。 |
 | 5 | `bd180eb`、`4b08034`、`c15eccb`、`b517394`、`9399b0f`、`570ba85`、`04361e7`、`23d9acf`、`505bc5d`、`caa736b` | 固定 GOP/模板 fixture、JSONL/CSV 离线统计入口（含 CPU/峰值内存字段）、内容缓存预处理、64 MiB/128 项 LRU 与 FrameCache 合并回归；离线样本不替代真实跨平台 p50/p95。 | 9/25；真实性能、计算池和短窗结果缓存仍未验收。 |
-| 6 | `e4538b2`、`9f45786`、`a048a49`、`b2fa0c5`/`4114dd8`、`df003c8`、`d24306d`、`9e37bbc`、`314cfbe`、`4f4fe52`、`ab03209`、`3961478` | Console helper/composable/lifecycle/操作模板模块、engine helper/边界测试、ApiError/请求校验/blocking 边界、RTP fixture 与 probe gate 回归。 | 12/19；全面拆分和浏览器/真实链路冒烟仍未完成。 |
+| 6 | `e4538b2`、`9f45786`、`a048a49`、`b2fa0c5`/`4114dd8`、`df003c8`、`d24306d`、`9e37bbc`、`314cfbe`、`4f4fe52`、`ab03209`、`3961478`、`ff04ebd` | Console helper/composable/lifecycle/操作模板模块、engine helper/边界测试、ApiError/请求校验/blocking 边界、RTP fixture 与 probe gate 回归；`ff04ebd` 补齐视觉组件静态回归。 | 13/19；全面拆分和浏览器/真实链路冒烟仍未完成。 |
 | 7 | `05f19b1`、`6e4f6f8` | Rust `170/0/1`、fmt/clippy/diff check、web `144 passed/build`、Compose config、server cargo audit、verify-release 及已知审计例外。 | 16/17；生产迁移回滚和真实设备矩阵仍阻塞。 |
-| **总计** | `6e4f6f8` → `d6f0684` | 本轮仅按 HEAD 代码/提交与已有验收记录对账，未新增测试；外部环境项目不虚报完成。 | 174/203，29 项未完成；不宣称整体完成。 |
+| **总计** | `6e4f6f8` → `ff04ebd` | 本轮新增 Console 视觉组件静态回归与 pnpm 构建证据；真实设备/浏览器链路仍不虚报完成。 | 175/203，28 项未完成；不宣称整体完成。 |
 
 ## 4. 实施原则
 
@@ -638,7 +638,7 @@ RunRecord
 
 ## 12. 阶段 6：模块化重构
 
-当前状态：部分完成（2026-08-28）。Console geometry、无 UI 的运行时 composable、engine syntax/events 和 WebRTC Annex-B/SDP protocol helper 已局部拆分并通过回归；Console 状态/UI、API 资源、engine 执行层和 WebRTC pusher/viewer 的全面拆分仍未完成。
+当前状态：部分完成（2026-08-28）。Console geometry、无 UI 的运行时 composable、engine syntax/events 和 WebRTC Annex-B/SDP protocol helper 已局部拆分并通过回归；Console 视觉组件已原样移动并通过静态组件回归，Console 状态/UI 其余细化、API 资源、engine 执行层和 WebRTC pusher/viewer 的全面拆分仍未完成。
 
 此阶段只在前述测试和运行管理稳定后执行。每次先“原样移动”，后“内部简化”，禁止边拆文件边改变协议。
 
@@ -671,7 +671,7 @@ web/src/
 - [x] 先抽纯函数：坐标换算、指纹、YAML 校验、行映射、模板名解析。
 - [x] 再抽无 UI 的状态 composable：运行状态、日志轮询、设备加载。
 - [x] 再抽 WebRTC 生命周期，保持唯一 cleanup 入口。
-- [ ] 最后拆视觉组件和模板。
+- [x] 最后拆视觉组件和模板。（本次提交将设备、模板、脚本运行和日志视觉块移至 `web/src/components/console/`）
 - [ ] 每一步执行前端单测和浏览器连接冒烟测试。
 
 目标不是追求任意行数，但 `Console.vue` 最终应主要负责页面编排，不再同时实现信令、视频看门狗、设备表单、模板裁切和 YAML 解释。
@@ -911,6 +911,20 @@ server/src/webrtc/
 - 性能前后对比：Docker 构建上下文由约 5.8GiB 降至 1.07MB；服务日志由单文件无限追加改为按天轮转默认保留 14 天；裸容器启动即退出问题随 /app/data 预建消除
 - 新增 PITFALLS：「Docker 镜像启动即 GLIBC_2.39 not found」「BuildKit cache mount + dummy-main 依赖预热会产出空壳二进制」「Docker Desktop 构建 load metadata auth.docker.io 连接超时而 CLI pull 正常」「PowerShell 管道改写含中文的 UTF-8 源码会静默毁坏文件结构」（016e9fc）「配置加载不再自建 data 目录后裸容器启动即退出」
 - 发布/回滚说明：config.toml 自此为本机文件（本机副本保留，不随仓库分发）；自定义配置挂载到容器 GB_CONFIG 路径；原 privileged 部署迁移需叠加 docker-compose.usb.yml
+
+### 阶段 6.1：前端 Console 视觉拆分
+
+- 开始日期：2026-08-28
+- 完成日期：2026-08-28
+- 执行分支：`main`（当前委派 worktree 未创建额外分支）
+- 基线提交：`568160e`
+- 完成提交：`ff04ebd`
+- 已完成任务：将设备面板、模板捕获、脚本运行、运行日志和虚拟屏配置视觉模板移至 `web/src/components/console/`；Console 保留页面编排、状态、事件和唯一 cleanup 入口。
+- 未完成任务及原因：真实浏览器 WebRTC 连接冒烟需要 Android/scrcpy/浏览器链路，本环境无真机；未伪造成功证据，使用 Vitest 静态组件契约回归和生产构建作为可复现替代。
+- 测试结果：`pnpm test:run` 通过（10 个测试文件、147 项）；`pnpm build` 通过（Vite 102 modules transformed）。
+- 性能前后对比：不适用（原样移动视觉模板，未改变协议或脚本执行路径）。
+- 新增 PITFALLS：无。
+- 发布/回滚说明：视觉拆分为独立 Conventional Commit；如需回滚可单独回退该提交，保留此前 composable/helper 拆分。
 
 ## 17. 推荐的第一次执行范围
 

@@ -64,372 +64,14 @@
       </div>
 
       <div class="tab-body">
-        <!-- 设备（设备管理 + 配置，融合原设备列表功能） -->
-        <div v-show="activeTab === 'info'" class="panel-sec">
-          <!-- 设备选择：下拉框 + 刷新扫描 + 手动新增 -->
-          <div class="dev-pick">
-            <select v-model="store.deviceId" class="select mono dev-select" @change="onDeviceSelect">
-              <option value="">选择设备…</option>
-              <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
-            </select>
-            <button class="btn btn-sm" :disabled="scanning" @click="refreshDevices" title="扫描 adb 设备（新设备自动入库）">🔄 刷新</button>
-            <button class="btn btn-sm" @click="startAdd" title="手动新增设备">＋ 新增</button>
-          </div>
+        <DevicePanel v-show="activeTab === 'info'" :context="devicePanelContext" />
 
-          <!-- 新增模式：完整创建表单（接入方式 / ADB 地址仅新增时可改） -->
-          <div v-if="mode === 'add'" class="cfg-form">
-            <div class="cfg-form-head">
-              <span>新增设备</span>
-              <span class="cfg-form-sub">填写信息后确认添加</span>
-            </div>
-            <div class="form-item">
-              <label>设备名称</label>
-              <input v-model="form.name" class="input" placeholder="例如：红米 Note12 挂机号" />
-            </div>
-            <div class="form-item">
-              <label>接入方式</label>
-              <div class="type-picker">
-                <div v-for="t in types" :key="t.key" class="type-opt" :class="{ sel: form.kind === t.key }" @click="form.kind = t.key">
-                  <span class="type-icon">{{ t.icon }}</span>
-                  <span>{{ t.label }}</span>
-                </div>
-              </div>
-            </div>
-            <div class="form-item">
-              <label>ADB 地址 <span class="muted">（redroid / 无线 adb / 模拟器需要填写）</span></label>
-              <input v-model="form.addr" class="input mono" placeholder="redroid:5555 或 192.168.1.88:5555" />
-            </div>
-            <div class="form-item">
-              <label>屏幕模式</label>
-              <div class="mode-picker">
-                <div class="mode-opt" :class="{ sel: form.screen_mode === 'mirror' }" @click="form.screen_mode = 'mirror'">
-                  <div class="mode-title">🖥️ 镜像主屏</div>
-                  <div class="mode-desc">投屏设备物理屏幕，各设备分辨率不同</div>
-                </div>
-                <div class="mode-opt" :class="{ sel: form.screen_mode === 'virtual' }" @click="form.screen_mode = 'virtual'">
-                  <div class="mode-title">🖥️ 虚拟屏</div>
-                  <div class="mode-desc">统一分辨率虚拟屏幕，模板跨设备通用</div>
-                </div>
-              </div>
-            </div>
-            <template v-if="form.screen_mode === 'virtual'">
-              <div class="form-item">
-                <label>虚拟屏分辨率</label>
-                <div class="vd-presets">
-                  <div v-for="p in vdPresets" :key="p.res" class="vd-opt" :class="{ sel: form.vd_res === p.res && String(form.vd_dpi) === String(p.dpi) }" @click="form.vd_res = p.res; form.vd_dpi = p.dpi">
-                    <span class="vd-res mono">{{ p.res }}</span>
-                    <span class="vd-dpi">@{{ p.dpi }}dpi</span>
-                  </div>
-                </div>
-              </div>
-              <div class="form-row">
-                <div class="form-item">
-                  <label>宽 × 高</label>
-                  <input v-model="form.vd_res" class="input mono" placeholder="1920x1080" />
-                </div>
-                <div class="form-item">
-                  <label>DPI <span class="muted">（0=自动）</span></label>
-                  <div class="dpi-box">
-                    <input v-model.number="form.vd_dpi" class="input mono" type="number" placeholder="0" />
-                    <button class="btn btn-sm" :class="{ active: !form.vd_dpi }" @click="form.vd_dpi = 0" title="DPI 自动（跟随屏幕）">自动</button>
-                  </div>
-                </div>
-              </div>
-              <div class="form-item">
-                <label>应用 <span class="muted">（可选，连接成功后自动启动到虚拟屏）</span></label>
-                <div class="app-box">
-                  <input v-model="pkgDraft" class="input mono" placeholder="搜索应用或输入包名…（点击下拉选择，回车确认）" @focus="appOpen = true" @input="appOpen = true" @keydown.enter="commitPkg" @blur="appOpen = false" />
-                  <button class="btn btn-sm" :disabled="appLoading" @click="loadApps" :title="'从设备读取应用列表'">{{ appLoading ? '加载中…' : '🔄 读取应用' }}</button>
-                  <div class="app-menu" v-if="appOpen && appFiltered.length">
-                    <div v-for="a in appFiltered" :key="a.pkg" class="app-opt" @mousedown.prevent="pickApp(a)">
-                      <span class="app-label">{{ a.label }}</span>
-                      <span class="app-pkg mono">{{ a.pkg }}</span>
-                    </div>
-                    <div class="app-empty mono" v-if="!appFiltered.length">无匹配应用</div>
-                  </div>
-                </div>
-                <div class="muted small" v-if="appHint">{{ appHint }}</div>
-              </div>
-              <div class="form-item">
-                <label>视频帧率 <span class="muted">（scrcpy 帧率上限：越高越流畅、越耗性能）</span></label>
-                <div class="fps-presets">
-                  <div v-for="f in fpsPresets" :key="f" class="fps-opt mono" :class="{ sel: form.fps === f }" @click="form.fps = f">{{ f }}</div>
-                </div>
-              </div>
-            </template>
-            <div class="cfg-actions">
-              <button class="btn btn-primary" :disabled="configApplying" @click="addDevice">
-                {{ configApplying ? '添加中…' : '确认添加' }}
-              </button>
-              <button class="btn btn-sm" @click="cancelAdd">取消</button>
-            </div>
-          </div>
-
-          <!-- 编辑模式：连接概览 + 可折叠配置 -->
-          <template v-else>
-            <div v-if="current" class="dev-summary">
-              <ConsoleDeviceSummary
-                :device="current"
-                :connected="connected"
-                :kind-icon="kindInfo(current.kind).icon"
-                :kind-label="kindInfo(current.kind).label"
-                :screen-summary="screenSummary"
-              />
-              <div class="sum-actions">
-                <button v-if="!connected" class="btn btn-primary" :disabled="!store.deviceId || connecting" @click="flushAndConnect">
-                  {{ connecting ? '连接中…' : '🔌 连接' }}
-                </button>
-                <button v-else class="btn" @click="disconnect">断开连接</button>
-                <button class="btn btn-danger" @click="removeDevice" title="删除设备">删除</button>
-              </div>
-
-              <!-- 设备配置（接入方式 / ADB 地址只读展示，不在表单内） -->
-              <div class="cfg-form">
-                <div class="cfg-form-head">
-                  <span>设备配置</span>
-                  <span class="cfg-form-sub">{{ configApplying ? '保存中…' : (formDirty ? '有未保存的修改（自动保存）' : (savedVisible ? '已自动保存' : '')) }}</span>
-                </div>
-                <div class="form-item">
-                  <label>设备名称</label>
-                  <input v-model="form.name" class="input" placeholder="例如：红米 Note12 挂机号" />
-                </div>
-                <div class="form-item">
-                  <label>屏幕模式</label>
-                  <div class="mode-picker">
-                    <div class="mode-opt" :class="{ sel: form.screen_mode === 'mirror' }" @click="form.screen_mode = 'mirror'">
-                      <div class="mode-title">🖥️ 镜像主屏</div>
-                      <div class="mode-desc">投屏设备物理屏幕，各设备分辨率不同</div>
-                    </div>
-                    <div class="mode-opt" :class="{ sel: form.screen_mode === 'virtual' }" @click="form.screen_mode = 'virtual'">
-                      <div class="mode-title">🖥️ 虚拟屏</div>
-                      <div class="mode-desc">统一分辨率虚拟屏幕，模板跨设备通用</div>
-                    </div>
-                  </div>
-                </div>
-                <template v-if="form.screen_mode === 'virtual'">
-                  <div class="form-item">
-                    <label>虚拟屏分辨率</label>
-                    <div class="vd-presets">
-                      <div v-for="p in vdPresets" :key="p.res" class="vd-opt" :class="{ sel: form.vd_res === p.res && String(form.vd_dpi) === String(p.dpi) }" @click="form.vd_res = p.res; form.vd_dpi = p.dpi">
-                        <span class="vd-res mono">{{ p.res }}</span>
-                        <span class="vd-dpi">@{{ p.dpi }}dpi</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="form-row">
-                    <div class="form-item">
-                      <label>宽 × 高</label>
-                      <input v-model="form.vd_res" class="input mono" placeholder="1920x1080" />
-                    </div>
-                    <div class="form-item">
-                      <label>DPI <span class="muted">（0=自动）</span></label>
-                      <div class="dpi-box">
-                        <input v-model.number="form.vd_dpi" class="input mono" type="number" placeholder="0" />
-                        <button class="btn btn-sm" :class="{ active: !form.vd_dpi }" @click="form.vd_dpi = 0" title="DPI 自动（跟随屏幕）">自动</button>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="form-item">
-                    <label>应用 <span class="muted">（可选，连接成功后自动启动到虚拟屏）</span></label>
-                    <div class="app-box">
-                      <input v-model="pkgDraft" class="input mono" placeholder="搜索应用或输入包名…（点击下拉选择，回车确认）" @focus="appOpen = true" @input="appOpen = true" @keydown.enter="commitPkg" @blur="appOpen = false" />
-                      <button class="btn btn-sm" :disabled="appLoading" @click="loadApps" :title="'从设备读取应用列表'">{{ appLoading ? '加载中…' : '🔄 读取应用' }}</button>
-                      <div class="app-menu" v-if="appOpen && appFiltered.length">
-                        <div v-for="a in appFiltered" :key="a.pkg" class="app-opt" @mousedown.prevent="pickApp(a)">
-                          <span class="app-label">{{ a.label }}</span>
-                          <span class="app-pkg mono">{{ a.pkg }}</span>
-                        </div>
-                        <div class="app-empty mono" v-if="!appFiltered.length">无匹配应用</div>
-                      </div>
-                    </div>
-                    <div class="muted small" v-if="appHint">{{ appHint }}</div>
-                  </div>
-                  <div class="form-item">
-                    <label>视频帧率 <span class="muted">（scrcpy 帧率上限：越高越流畅、越耗性能）</span></label>
-                    <div class="fps-presets">
-                      <div v-for="f in fpsPresets" :key="f" class="fps-opt mono" :class="{ sel: form.fps === f }" @click="form.fps = f">{{ f }}</div>
-                    </div>
-                  </div>
-                </template>
-              </div>
-              <div class="cfg-hint">{{ connected ? '已连接：修改自动保存并实时生效（自动重连）' : '未连接：修改自动保存，连接后按新配置生效' }}</div>
-            </div>
-
-            <!-- 无设备 -->
-            <div v-else class="dev-empty">
-              <div class="dev-empty-icon">📴</div>
-              <div class="dev-empty-text">未选择设备</div>
-              <button class="btn btn-sm" @click="startAdd">＋ 新增设备</button>
-            </div>
-          </template>
-        </div>
-
-        <!-- 脚本（模板功能 + 脚本运行/编辑），按应用分区存储（data/<pkg>/tmpl|yaml） -->
         <div v-show="activeTab === 'script'" class="panel-sec script-tab">
-          <!-- 应用分区切换：模板与脚本数据随分区切换（默认跟随设备页签的应用包名） -->
-          <div class="pkg-bar">
-            <span class="pkg-label">应用</span>
-            <select v-model="activePkg" class="select mono pkg-select" title="应用分区（data/<应用包名>/tmpl|yaml），默认跟随设备页签配置的应用包名">
-              <option v-if="!pkgOptions.length" value="">（未配置应用包名）</option>
-              <option v-for="p in pkgOptions" :key="p" :value="p">{{ p }}</option>
-            </select>
-            <button class="btn btn-sm" :disabled="!activePkg" @click="exportPartition" title="导出当前应用分区的全部脚本与模板（zip 分区快照，导入导出同构）">⬆ 导出</button>
-            <button class="btn btn-sm" :disabled="!activePkg" @click="$refs.impFile.click()" title="导入分区快照 zip 到当前应用分区（同名文件替换前二次确认）">⬇ 导入</button>
-            <input ref="impFile" type="file" accept=".zip" hidden @change="onImportFile" />
-          </div>
-          <div v-if="!activePkg" class="pkg-empty">暂无应用分区：请先在「设备」页签配置应用包名（模板与脚本按应用分区存储）</div>
-          <template v-else>
-          <!-- 模板功能（放上面） -->
-          <div class="script-tpl">
-            <!-- 模板文件列表（非裁切时） -->
-            <template v-if="!crop.active">
-              <div class="tpl-top">
-                <input v-model.number="testThreshold" class="input input-sm mono" type="number" min="0" max="1" step="0.01" placeholder="测试阈值 0~1" title="模板测试阈值，默认 0.8" />
-                <select v-model="testRegion" class="select mono tpl-region" title="模板匹配区域：默认=按模板名自动识别（名字带 #x1_y1_x2_y2 用对应矩形，带 #a/#u/#d/#l/#r/#ul/#ur/#dl/#dr 用对应半区，否则等价 a 全屏）；手动选择后，测试匹配与生成记录都使用该区域">
-                  <option value="">默认</option>
-                  <option value="a">a · 全屏</option>
-                  <option value="u">u · 上半屏</option>
-                  <option value="d">d · 下半屏</option>
-                  <option value="l">l · 左半屏</option>
-                  <option value="r">r · 右半屏</option>
-                  <option value="ul">ul · 左上</option>
-                  <option value="ur">ur · 右上</option>
-                  <option value="dl">dl · 左下</option>
-                  <option value="dr">dr · 右下</option>
-                </select>
-                <input v-model="tplSearch" class="input input-sm mono tpl-search" placeholder="🔍 模糊/拼音首字母搜索…" title="模糊搜索模板名（短名/带 #后缀 全名均可，按匹配位置排序）；中文名支持拼音首字母，如 rcyq 命中 日常遗器.png；三类命中并列展示，文字命中排前" />
-                <button class="btn btn-sm" :class="{ active: picking }" @click="togglePick" :disabled="!connected" title="在画面上框选区域保存为模板">✂️ 框选</button>
-                <button class="btn btn-sm" @click="$refs.tplUpload.click()" title="上传图片模板">⬆️ 上传</button>
-                <input ref="tplUpload" type="file" accept="image/png,image/jpeg" hidden @change="onTplUpload" />
-              </div>
-              <div class="tpl-list-wrap">
-                <div class="tpl-list-head">
-                  <span class="tpl-cell thumb">缩略图</span>
-                  <span class="tpl-cell name">文件名</span>
-                  <span class="tpl-cell ops">操作</span>
-                </div>
-                <div class="tpl-list">
-                    <div v-for="t in templates" :key="t.name" class="tpl-row" :class="{ 'del-confirm': confirmDelTpl === t.name, renaming: renaming === t.name }" @click="onTplRowClick($event, t)">
-                    <span class="tpl-cell thumb" @click.stop="onTplThumbClick($event, t)" title="点击查看大图；Alt/alt 模式点击复制模板名">
-                      <span class="tpl-thumb"><img :src="tplThumbUrl(t.name)" alt="" loading="lazy" @error="e => e.target.style.visibility = 'hidden'" /></span>
-                    </span>
-                    <span class="tpl-cell name mono" :title="`${t.name}（点击查看大图；Alt/alt 模式点击生成 find 记录）`" @click.stop="onTplNameClick($event, t)">
-                      <input v-if="renaming === t.name" :ref="el => renameInputEl = el" v-model="renameVal" class="input rename-input mono" @keydown.enter="confirmRename(t)" @keydown.esc="cancelRename" @blur="cancelRename" @click.stop />
-                      <template v-else>{{ tplShortName(t.name) }}<span v-if="tplRegionBadge(t.name)" class="tpl-region-badge" :title="`${t.name}（区域后缀，脚本可写短名 ${tplShortName(t.name)}）`">{{ tplRegionBadge(t.name) }}</span></template>
-                    </span>
-                    <span class="tpl-cell ops">
-                      <button v-if="renaming === t.name" class="btn btn-sm btn-primary" @mousedown.prevent @click.stop="confirmRename(t)">确认</button>
-                      <button v-else class="btn btn-sm" @click.stop="startRename(t)">重命名</button>
-                      <button class="btn btn-sm" :class="{ 'tpl-del-confirm': confirmDelTpl === t.name }" @click.stop="onTplDeleteClick(t)">{{ confirmDelTpl === t.name ? '确认' : '删除' }}</button>
-                      <button class="btn btn-sm" @click.stop="onTplMatchClick(t)">匹配</button>
-                    </span>
-                  </div>
-                  <div v-if="!templates.length" class="tpl-empty">{{ tplSearch.trim() ? '没有匹配的模板' : '暂无模板，点击「框选」或「上传」创建' }}</div>
-                </div>
-              </div>
-              <div class="tpl-tools">
-                <span class="ps-sub">缩略图 → 查看大图（Alt / alt 模式 → 复制模板名）· alt 模式点文件名 → 生成 find 记录 · 匹配 → 测试匹配 · 重命名 → 修改模板名</span>
-              </div>
-            </template>
-
-            <!-- 二次裁切（框选后占满整个模板区域） -->
-            <div v-else class="crop-panel crop-panel-full" ref="cropSec">
-              <div class="ps-head">
-                <span class="ps-title">✂️ 二次裁切</span>
-                <span class="ps-sub mono">{{ cropSize }} · {{ cropZoomPct }}</span>
-              </div>
-              <div class="crop-stage">
-                <canvas ref="cropCanvas" class="crop-canvas" @mousedown="cropMouseDown" @mousemove="cropMouseMove" @mouseup="cropMouseUp" @mouseleave="cropMouseLeave" @wheel="cropWheel"></canvas>
-              </div>
-              <div class="crop-hint">滚轮缩放（50%~800%）· 拖动边框/角调整选框（只动遮罩框）· 拖框内移动位置 · Alt/alt 模式点击任意处 → 取色生成 color 记录</div>
-              <input v-model="crop.name" class="input mono" placeholder="模板名称（默认自动生成）" @keydown.enter="saveTemplate" />
-              <div class="crop-actions">
-                <button class="btn btn-sm" @click="cancelCrop">取消</button>
-                <button class="btn btn-sm btn-ghost" @click="repick">重新框选</button>
-                <button class="btn btn-sm btn-primary" :disabled="saving" @click="saveTemplate">{{ saving ? '保存中…' : '💾 保存模板' }}</button>
-              </div>
-            </div>
-
-            <!-- 模板查看大图 -->
-            <div v-if="viewTpl" class="tpl-view-mask" @click.self="closeTplView">
-              <div class="tpl-view-modal">
-                <button class="tpl-view-close" @click="closeTplView" title="关闭">✕</button>
-                <div class="tpl-view-img">
-                  <img :src="tplThumbUrl(viewTpl)" alt="模板预览" />
-                </div>
-                <div class="tpl-view-name mono">{{ viewTpl }}</div>
-              </div>
-            </div>
-          </div>
-          <!-- 脚本功能：运行模式 -->
-          <div v-if="scriptMode === 'run'" class="script-run">
-            <div class="auto-run">
-              <ScriptPicker v-model="selScript" :package="activePkg" />
-            </div>
-            <div class="run-actions">
-              <button v-if="!store.running" class="btn btn-primary" :disabled="!selScript || !store.deviceId || startPending" @click="runScript">{{ startPending ? '提交中…' : '▶ 运行' }}</button>
-              <button v-else class="btn btn-danger" :disabled="runStopping" @click="stopScript">{{ runStopping ? '■ 停止中…' : '■ 停止' }}</button>
-              <button class="btn" :disabled="!selScript" @click="editCurrentScript">编辑</button>
-              <div class="more-wrap">
-                <button class="btn" :class="{ active: moreOpen }" @click="moreOpen = !moreOpen">更多 ▾</button>
-                <div v-if="moreOpen" class="more-mask" @click="moreOpen = false"></div>
-                <div v-if="moreOpen" class="more-dropdown">
-                  <button class="more-item" @click="moreOpen = false; startNewScript()">＋ 新建</button>
-                  <button class="more-item danger" :disabled="!selScript" @click="moreOpen = false; deleteCurrentScript()">🗑 删除</button>
-                </div>
-              </div>
-            </div>
-
-            <!-- 运行中：实时日志；其他情况：脚本内容（只读） -->
-            <div v-if="store.running" ref="logBox" class="live-logs script-logs mono">
-              <div v-for="(l, i) in liveLogs" :key="i" class="ll" :class="l.level">
-                <span class="ll-time">{{ l.time }}</span>
-                <span class="ll-msg">{{ l.msg }}</span>
-              </div>
-            </div>
-            <template v-else>
-              <div v-if="!selScript" class="script-view-empty">请选择脚本</div>
-              <div v-else class="script-view-wrap">
-                <div class="run-hint">点击「- 」开头的逻辑行（含函数体内步骤）→ 从该步骤开始运行；点击函数名行 → 从头运行整个函数（先判 cond 再跑函数体）；再次点击选中行取消（从头运行）</div>
-                <div class="script-view mono">
-                  <div
-                    v-for="(line, idx) in scriptLines"
-                    :key="idx"
-                    class="sv-line"
-                    :class="{ sel: selectedLine === idx, selectable: !!runLineMap[idx] }"
-                    @click="onScriptLineClick(idx)"
-                  ><!-- sv-line 为 white-space:pre，插值必须紧贴标签，避免格式化空白泄入渲染 -->
-                    <template v-if="callLinks[idx]">{{ callLinks[idx].prefix }}<span class="call-link" title="点击预览脚本内容" @click.stop="openCallPreview(callLinks[idx].name)">{{ callLinks[idx].label || callLinks[idx].name }}</span>{{ callLinks[idx].suffix }}</template>
-                    <template v-else>{{ line || ' ' }}</template>
-                  </div>
-                </div>
-              </div>
-            </template>
-          </div>
-
-          <!-- 脚本功能：编辑模式（新建脚本） -->
-          <div v-else class="script-edit">
-            <div class="edit-name-row">
-              <input v-model="editScriptName" class="input mono" placeholder="脚本名称（可省略 .yml 后缀）" @keydown.enter="saveEditScript" />
-            </div>
-            <div class="edit-actions">
-              <button class="btn btn-primary" :disabled="scriptSaving" @click="saveEditScript">{{ scriptSaving ? '保存中…' : '💾 保存' }}</button>
-              <button class="btn" @click="cancelEditScript">取消</button>
-              <button class="btn" :class="{ active: altMode }" @click="toggleAltMode" title="开启后投屏点击/滑动只生成操作记录，不发送控制指令">⌥ alt 模式</button>
-            </div>
-            <div class="op-record">
-              <div v-if="!opRecords.length" class="op-record-empty">请在alt模式下进行操作生成记录</div>
-              <div v-for="r in opRecords" :key="r.id" class="op-record-line mono" @click="applyOpRecord(r)">
-                {{ r.text }}
-              </div>
-            </div>
-            <textarea ref="scriptEditor" v-model="editScriptCode" class="script-editor mono" spellcheck="false" placeholder="# YAML 脚本&#10;config:&#10;  interval: 500ms&#10;&#10;steps:&#10;  - find: 模板名.png&#10;    block: 障碍模板.png" @keydown.tab.prevent="onEditorTab"></textarea>
-          </div>
-          </template>
+          <TemplateCapture :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
+          <ScriptRunner :context="scriptRunnerContext" :on-editor-mounted="onScriptEditorMounted" />
         </div>
       </div>
     </aside>
-
     <!-- call 子脚本预览弹窗（ESC / ✕ / 点遮罩关闭） -->
     <div v-if="previewScript" class="modal-mask" @click.self="closeCallPreview">
       <div class="modal preview-modal">
@@ -465,9 +107,10 @@ import {
   normalizeActiveRunResponse, normalizeStartReply,
   isMissingEndpointError, isDeviceBusyConflict, isTerminalRunState,
 } from '../runs'
-import ScriptPicker from '../components/ScriptPicker.vue'
-import ConsoleDeviceSummary from '../components/ConsoleDeviceSummary.vue'
 import ConsoleVideoStage from '../components/console/ConsoleVideoStage.vue'
+import DevicePanel from '../components/console/DevicePanel.vue'
+import TemplateCapture from '../components/console/TemplateCapture.vue'
+import ScriptRunner from '../components/console/ScriptRunner.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import { createScriptValidator } from '../script-language/validate'
 import { computeRunLineMap } from '../script-language/line-map'
@@ -2939,6 +2582,41 @@ async function testMatch(name) {
 
 function fullscreen() {
   if (videoWrap.value?.requestFullscreen) videoWrap.value.requestFullscreen()
+}
+
+// 视觉组件只接收这两个上下文对象；所有状态、动作和清理仍由 Console 统一持有。
+function onCropMounted({ canvas, section }) {
+  cropCanvas.value = canvas
+  cropSec.value = section
+  if (crop.active) {
+    renderCropFrame()
+    refreshCropPreview()
+  }
+}
+function onLogBoxMounted(el) { logBox.value = el }
+function onScriptEditorMounted(el) { scriptEditor.value = el }
+function setRenameInputEl(el) { renameInputEl = el }
+
+const devicePanelContext = {
+  store, devices, scanning, refreshDevices, startAdd, mode, form, types, vdPresets, fpsPresets,
+  pkgDraft, appOpen, appFiltered, appLoading, loadApps, commitPkg, pickApp, appHint,
+  configApplying, addDevice, cancelAdd, current, connected, kindInfo, screenSummary,
+  connecting, flushAndConnect, disconnect, removeDevice, formDirty, savedVisible,
+}
+const templateCaptureContext = {
+  activePkg, pkgOptions, exportPartition, onImportFile, crop, testThreshold, testRegion, tplSearch,
+  picking, connected, togglePick, templates, confirmDelTpl, renaming, onTplRowClick, onTplThumbClick,
+  tplThumbUrl, onTplNameClick, setRenameInputEl, renameVal, confirmRename, cancelRename, startRename,
+  onTplDeleteClick, onTplMatchClick, tplShortName, tplRegionBadge, cropSize, cropZoomPct,
+  cropMouseDown, cropMouseMove, cropMouseUp, cropMouseLeave, cropWheel, saveTemplate, cancelCrop,
+  repick, saving, viewTpl, closeTplView,
+}
+const scriptRunnerContext = {
+  scriptMode, selScript, activePkg, store, startPending, runScript, runStopping, stopScript,
+  editCurrentScript, moreOpen, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
+  scriptLines, selectedLine, runLineMap, onScriptLineClick, callLinks, openCallPreview,
+  editScriptName, scriptSaving, saveEditScript, cancelEditScript, altMode, toggleAltMode,
+  opRecords, applyOpRecord, editScriptCode, onEditorTab,
 }
 
 onMounted(async () => {
