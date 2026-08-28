@@ -78,6 +78,7 @@ pub struct StoreMetrics {
 
 const DB_QUEUE_CAPACITY: usize = 1024;
 const LOG_BATCH_SIZE: usize = 100;
+const LOG_PRUNE_BATCH_SIZE: i64 = 500;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_LOG_MESSAGE_CHARS: usize = 1024;
 
@@ -303,6 +304,15 @@ pub struct Store {
     metrics: Arc<Metrics>,
 }
 
+impl Drop for Store {
+    fn drop(&mut self) {
+        let _ = self.tx.send(DbCommand::Shutdown);
+        if let Some(worker) = self.worker.lock().ok().and_then(|mut slot| slot.take()) {
+            let _ = worker.join();
+        }
+    }
+}
+
 impl Store {
     pub fn open(cfg: &Config) -> anyhow::Result<Self> {
         std::fs::create_dir_all(&cfg.data_dir)?;
@@ -496,6 +506,32 @@ impl Store {
                 })
             })?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn get_task(&self, id: &str) -> anyhow::Result<Option<Task>> {
+        let id = id.to_string();
+        self.request(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, cron, script_id, device_id, enabled, last_result, last_run_at, created_at FROM tasks WHERE id = ?1",
+            )?;
+            match stmt.query_row([id], |r| {
+                Ok(Task {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    cron: r.get(2)?,
+                    script_id: r.get(3)?,
+                    device_id: r.get(4)?,
+                    enabled: r.get::<_, i64>(5)? != 0,
+                    last_result: r.get(6)?,
+                    last_run_at: r.get(7)?,
+                    created_at: r.get(8)?,
+                })
+            }) {
+                Ok(task) => Ok(Some(task)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
         })
     }
 
@@ -741,16 +777,51 @@ impl Store {
             .to_string();
         self.request(move |conn| {
             let mut total = 0u64;
+            let mut batches = 0u64;
             loop {
-                let deleted = conn.execute(
-                    "DELETE FROM logs WHERE id IN (\
-                        SELECT id FROM logs WHERE time < ?1 ORDER BY id LIMIT 500)",
-                    [cutoff.as_str()],
-                )?;
-                total += deleted as u64;
-                if deleted < 500 {
+                let ids = {
+                    let mut stmt =
+                        conn.prepare("SELECT id FROM logs WHERE time < ?1 ORDER BY id LIMIT ?2")?;
+                    let rows = stmt.query_map(
+                        rusqlite::params![cutoff.as_str(), LOG_PRUNE_BATCH_SIZE],
+                        |r| r.get::<_, i64>(0),
+                    )?;
+                    rows.collect::<Result<Vec<_>, _>>()?
+                };
+                if ids.is_empty() {
                     break;
                 }
+                let first_id = ids[0];
+                let last_id = *ids.last().unwrap();
+                let placeholders = std::iter::repeat("?")
+                    .take(ids.len())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!("DELETE FROM logs WHERE id IN ({placeholders})");
+                let deleted = conn.execute(&sql, rusqlite::params_from_iter(ids.iter()))?;
+                total += deleted as u64;
+                batches += 1;
+                tracing::info!(
+                    retain_days,
+                    cutoff = %cutoff,
+                    batch = batches,
+                    deleted,
+                    id_start = first_id,
+                    id_end = last_id,
+                    "expired run logs removed"
+                );
+                if deleted < LOG_PRUNE_BATCH_SIZE as usize {
+                    break;
+                }
+            }
+            if total > 0 {
+                tracing::info!(
+                    retain_days,
+                    cutoff = %cutoff,
+                    batches,
+                    deleted = total,
+                    "expired run logs cleanup finished"
+                );
             }
             Ok(total)
         })
@@ -871,6 +942,58 @@ mod tests {
         let metrics = store.metrics_snapshot().unwrap();
         assert_eq!(metrics.logs, 1);
         assert_eq!(store.list_logs(None, None, 10).unwrap()[0].msg, "new");
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn get_task_returns_single_row_or_none() {
+        let (cfg, dir) = temp_config("task-lookup");
+        let store = Store::open(&cfg).unwrap();
+        let task = Task {
+            id: "task-1".into(),
+            name: "Task 1".into(),
+            cron: "*/5 * * * * * *".into(),
+            script_id: "pkg/script.yaml".into(),
+            device_id: "device-1".into(),
+            enabled: true,
+            last_result: Some("ok".into()),
+            last_run_at: Some("2026-08-28T00:00:00Z".into()),
+            created_at: "2026-08-28T00:00:00Z".into(),
+        };
+        store.upsert_task(&task).unwrap();
+
+        let fetched = store.get_task("task-1").unwrap().unwrap();
+        assert_eq!(fetched.id, task.id);
+        assert_eq!(fetched.name, task.name);
+        assert_eq!(fetched.script_id, task.script_id);
+        assert_eq!(fetched.last_result, task.last_result);
+        assert!(store.get_task("missing").unwrap().is_none());
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn prune_logs_deletes_all_eligible_rows_in_batches() {
+        let (cfg, dir) = temp_config("prune-batch");
+        let store = Store::open(&cfg).unwrap();
+        for idx in 0..(LOG_PRUNE_BATCH_SIZE as usize + 3) {
+            let second = idx % 60;
+            store
+                .insert_raw_log_for_test(&format!("2000-01-01 00:00:{second:02}.000"), "old")
+                .unwrap();
+        }
+        store
+            .insert_raw_log_for_test("2026-08-28 00:00:00.000", "new")
+            .unwrap();
+
+        let deleted = store.prune_logs(1).unwrap();
+        assert_eq!(deleted, (LOG_PRUNE_BATCH_SIZE as u64) + 3);
+        let logs = store.list_logs(None, None, 10).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].msg, "new");
+
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
