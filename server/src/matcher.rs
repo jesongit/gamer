@@ -81,7 +81,7 @@ static MATCHER_STATS: AtomicPtr<MatcherStats> = AtomicPtr::new(std::ptr::null_mu
 fn default_matcher_stats() -> &'static MatcherStats {
     static DEFAULT: MatcherStats = MatcherStats {
         now: MatcherStats::now_instant,
-        record_ncc: MatcherStats::record_ncc_noop,
+        record_ncc: MatcherStats::record_ncc_to_metrics,
     };
     &DEFAULT
 }
@@ -114,7 +114,13 @@ impl MatcherStats {
         Instant::now()
     }
 
-    fn record_ncc_noop(_: u64, _: bool, _: bool) {}
+    /// 生产默认埋点：转发进程级共享 metrics（/metrics 的数据源）。main 启动时
+    /// 已安装 Store 的实例；未安装（如未装 global 的测试进程）时
+    /// `metrics::global()` 惰性兜底创建默认实例——观测为旁路，绝不 panic、
+    /// 不影响匹配结果。测试经 `install_matcher_stats` 覆盖此函数实现计数隔离。
+    fn record_ncc_to_metrics(duration_ms: u64, hit: bool, region: bool) {
+        crate::metrics::global().record_ncc(duration_ms, hit, region);
+    }
 
     fn record_ncc(&self, duration_ms: u64, hit: bool, region: bool) {
         (self.record_ncc)(duration_ms, hit, region);
@@ -895,6 +901,12 @@ fn match_template_with_source(
         })
     };
     let duration_ms = started.elapsed().as_millis() as u64;
+    // NCC 观测唯一计数点：字节入口 match_template / 路径入口
+    // match_template_from_path / 计算池（matcher::compute::run 只移动执行位置，
+    // 提交的闭包仍执行本函数）全部汇聚于此——一次匹配请求只记一次，不存在
+    // 调用点与池内工作函数双层重复计数。命中/未命中 = 阈值判定结果
+    // （result.is_some()），区域/全屏 = 是否传了搜索区域（region.is_some()），
+    // 口径与 metrics.rs 的 ncc_* 字段定义一致。
     matcher_stats().record_ncc(duration_ms, result.is_some(), region.is_some());
     Ok(result)
 }
@@ -1660,6 +1672,99 @@ mod tests {
         assert_eq!(TEST_REGIONS.load(Ordering::Relaxed), 1);
         assert_eq!(TEST_FULLSCREEN.load(Ordering::Relaxed), 2);
         assert!(TEST_DURATION_MS.load(Ordering::Relaxed) > 0);
+    }
+
+    /// 生产接线（OBS）：不安装测试钩子时，默认统计必须把 NCC 观测写入进程级
+    /// 共享 metrics（GET /metrics 的数据源），且命中/未命中与区域/全屏分类
+    /// 口径正确。持 TEST_GUARD 排除本模块其余真实匹配测试；唯一无锁的并发
+    /// 写入者是计算池测试（只产生全屏命中），故未命中与区域分类的增量可
+    /// 精确断言，命中/全屏只断言下界。
+    #[test]
+    fn production_matches_record_into_global_metrics() {
+        let _lock = TEST_GUARD.lock().unwrap();
+        let metrics = crate::metrics::global();
+        let before = metrics.snapshot();
+
+        // 480x360 截图（全屏路径 scale=1.0，无缩放）+ 自截图裁切的 60x60 模板
+        let mut screen = RgbImage::new(480, 360);
+        for (_, _, p) in screen.enumerate_pixels_mut() {
+            *p = Rgb([40, 20, 80]);
+        }
+        for y in 120..180 {
+            for x in 150..230 {
+                let v = ((x - 150) * 5 + (y - 120) * 9) as u8;
+                let gray = if (x + y) % 2 == 0 {
+                    40u8.saturating_add(v / 2)
+                } else {
+                    180u8.saturating_add(v / 3)
+                };
+                screen.put_pixel(x, y, Rgb([gray, gray, gray]));
+            }
+        }
+        let mut tpl = RgbImage::new(60, 60);
+        for y in 0..60 {
+            for x in 0..60 {
+                tpl.put_pixel(x, y, *screen.get_pixel(140 + x, 115 + y));
+            }
+        }
+        let hit_req = MatchRequest {
+            screen_png: encode_png(&screen),
+            template_png: encode_png(&tpl),
+            threshold: Some(0.9),
+            region: None,
+        };
+        assert!(match_template(&hit_req).unwrap().is_some(), "全屏应命中");
+
+        let mut miss_tpl = RgbImage::new(24, 24);
+        for (x, y, p) in miss_tpl.enumerate_pixels_mut() {
+            let v = if (x + y) % 2 == 0 { 235 } else { 245 };
+            *p = Rgb([v, v, v]);
+        }
+        let miss_req = MatchRequest {
+            screen_png: hit_req.screen_png.clone(),
+            template_png: encode_png(&miss_tpl),
+            threshold: Some(0.99),
+            region: None,
+        };
+        assert!(match_template(&miss_req).unwrap().is_none(), "应未命中");
+
+        // 搜索区域覆盖模板真实位置 (140, 115)：区域路径命中 → 计入 ncc_region
+        let region_req = MatchRequest {
+            screen_png: hit_req.screen_png.clone(),
+            template_png: encode_png(&tpl),
+            threshold: Some(0.9),
+            region: Some([100, 90, 220, 180]),
+        };
+        assert!(match_template(&region_req).unwrap().is_some(), "区域应命中");
+
+        let after = metrics.snapshot();
+        let delta = |later: u64, earlier: u64| later.saturating_sub(earlier);
+        assert!(
+            delta(after.ncc_matches_total, before.ncc_matches_total) >= 3,
+            "本测试 3 次匹配至少应计入 ncc_matches_total"
+        );
+        assert!(
+            delta(after.ncc_hits_total, before.ncc_hits_total) >= 2,
+            "两次命中应计入 ncc_hits_total"
+        );
+        assert_eq!(
+            delta(after.ncc_misses_total, before.ncc_misses_total),
+            1,
+            "未命中增量应恰为 1（真实匹配测试均持 TEST_GUARD，无锁并发只可能产生命中）"
+        );
+        assert_eq!(
+            delta(after.ncc_region_total, before.ncc_region_total),
+            1,
+            "区域分类增量应恰为 1（其余真实匹配均为全屏）"
+        );
+        assert!(
+            delta(after.ncc_fullscreen_total, before.ncc_fullscreen_total) >= 2,
+            "两次全屏匹配应计入 ncc_fullscreen_total"
+        );
+        assert!(
+            delta(after.ncc_duration_ms_total, before.ncc_duration_ms_total) >= 1,
+            "耗时累计应增长"
+        );
     }
 
     #[test]
