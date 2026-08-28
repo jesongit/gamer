@@ -10,6 +10,7 @@ use serde::Deserialize;
 use super::common::{require_pkg, run_blocking_api, validate_text_field};
 use super::templates::PkgQuery;
 use super::{ApiError, AppState};
+use crate::matcher;
 
 // ---------- 脚本 ----------
 
@@ -142,9 +143,17 @@ pub(super) async fn api_import_script(
         Err(err) => return err.into_response(),
     };
     match run_blocking_api(move || {
-        st.scripts
+        let rep = st
+            .scripts
             .import(&body, &pkg, confirm)
-            .map_err(|e| ApiError::bad_request(e.to_string()))
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        // confirm=true 落盘成功后对 tmpl 目录做一次目录级主动失效（PERF-002）：
+        // 导入可能批量替换模板，逐文件失效不如整目录干净；confirm=false 只解析
+        // 未落盘、失败路径未写入，均不动缓存（mtime/size/hash 兜底仍在）
+        if confirm {
+            matcher::invalidate_template_cache_dir(&st.scripts.tmpl_dir(&pkg));
+        }
+        Ok(rep)
     })
     .await
     {

@@ -144,6 +144,9 @@ pub(super) async fn api_upload_template(
         let path = dir.join(&name);
         crate::scripts::atomic_write(&path, &bytes)
             .map_err(|e| ApiError::internal(e.to_string()))?;
+        // 覆盖上传成功后主动失效该路径的模板预处理缓存（PERF-002；
+        // mtime/size/hash 兜底仍在）。失败路径不失效。
+        matcher::invalidate_template_cache_path(&path);
         Ok(Json(
             serde_json::json!({"ok": true, "name": name, "size": bytes.len(), "orig_size": orig_size}),
         ))
@@ -171,6 +174,8 @@ pub(super) async fn api_delete_template(
     match run_blocking_api(move || {
         let path = st.scripts.tmpl_dir(&pkg).join(&name);
         std::fs::remove_file(&path).map_err(|e| ApiError::internal(e.to_string()))?;
+        // 删除成功后主动失效该路径缓存（PERF-002）；失败路径不失效
+        matcher::invalidate_template_cache_path(&path);
         st.scripts.cleanup_partition(&pkg); // 分区 yaml/tmpl 都空了则清理目录
         Ok(Json(serde_json::json!({"ok": true})))
     })
@@ -222,6 +227,10 @@ pub(super) async fn api_rename_template(
             let _ = std::fs::remove_file(&new_path);
             return Err(ApiError::internal("旧模板删除失败"));
         }
+        // 重命名 = 写新删旧：新旧两条路径的模板缓存与短名解析缓存一起失效
+        // （PERF-002）；上方任一步失败时旧文件未动，不做失效
+        matcher::invalidate_template_cache_path(&new_path);
+        matcher::invalidate_template_cache_path(&old_path);
         Ok(Json(serde_json::json!({"ok": true, "name": new_name})))
     })
     .await
@@ -315,11 +324,14 @@ pub(super) async fn api_test_template(
         threshold: req.threshold,
         region: req.region,
     };
-    match run_blocking_api(move || {
-        matcher::match_template(&mr)
-            .map_err(|e| ApiError::internal(e.to_string()))
+    // NCC 匹配（含截图/模板 PNG 解码）走专用计算池（PERF-003），与引擎同一条
+    // CPU 预算通道，不再占用 API blocking 池名额
+    match matcher::compute::run(move || {
+        matcher::match_template(&mr).map_err(|e| ApiError::internal(e.to_string()))
     })
     .await
+    .map_err(|e| ApiError::internal(e.to_string()))
+    .and_then(|inner| inner)
     {
         Ok(Some(m)) => Json(serde_json::json!({"hit": true, "x": m.x, "y": m.y, "width": m.width, "height": m.height, "score": m.score})).into_response(),
         Ok(None) => Json(serde_json::json!({"hit": false})).into_response(),
