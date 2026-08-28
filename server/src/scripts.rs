@@ -23,6 +23,21 @@ use crate::config::Config;
 /// 临时文件和目标文件必须位于同一文件系统，这样最后的替换才是原子的；
 /// 写入或替换失败时只清理临时文件，不触碰已有目标文件。
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    atomic_write_with(path, bytes, |temp, path| replace_file(temp, path))
+}
+
+#[cfg(test)]
+fn atomic_write_with_replace_err(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    atomic_write_with(path, bytes, |_temp, _path| {
+        Err(std::io::Error::other("injected replace failure"))
+    })
+}
+
+fn atomic_write_with(
+    path: &Path,
+    bytes: &[u8],
+    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("目标路径没有父目录: {}", path.display()))?;
@@ -64,7 +79,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         file.flush()?;
         file.sync_all()?;
         drop(file);
-        replace_file(&temp, path)?;
+        replace(&temp, path)?;
         sync_parent(parent)?;
         Ok(())
     })();
@@ -709,7 +724,7 @@ pub fn migrate_fs_layout(db: &crate::store::Store, store: &ScriptStore) -> anyho
                     continue;
                 }
                 let content = std::fs::read_to_string(f.path())?;
-                std::fs::write(&dest, strip_directive_line(&content))?;
+                atomic_write(&dest, strip_directive_line(&content).as_bytes())?;
                 let _ = std::fs::remove_file(f.path());
                 tracing::info!(from = %f.path().display(), to = %dest.display(), "脚本迁移至应用分区");
             }
@@ -728,7 +743,9 @@ pub fn migrate_fs_layout(db: &crate::store::Store, store: &ScriptStore) -> anyho
                 tracing::warn!(name = %name, "目标已存在同名模板，跳过（旧文件保留）");
                 continue;
             }
-            std::fs::rename(f.path(), &dest)?;
+            let content = std::fs::read(f.path())?;
+            atomic_write(&dest, &content)?;
+            let _ = std::fs::remove_file(f.path());
             tracing::info!(from = %f.path().display(), to = %dest.display(), "模板迁移至应用分区");
         }
         let _ = std::fs::remove_dir(&old_templates);
@@ -739,6 +756,8 @@ pub fn migrate_fs_layout(db: &crate::store::Store, store: &ScriptStore) -> anyho
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     #[test]
     fn strip_legacy_directive() {
@@ -768,6 +787,73 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "临时文件未清理: {leftovers:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_failure_keeps_old_content_and_cleans_temp_file() {
+        let (store, dir) = temp_store("atomic-fail");
+        let path = dir.join("com.test.app").join("yaml").join("main.yaml");
+        atomic_write(&path, b"old\n").unwrap();
+
+        let err = atomic_write_with_replace_err(&path, b"new\n").unwrap_err();
+        assert!(err.to_string().contains("replace failure"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
+
+        let yaml_dir = store.yaml_dir("com.test.app");
+        let leftovers: Vec<_> = std::fs::read_dir(yaml_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "失败后临时文件未清理: {leftovers:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_concurrent_writers_replace_with_whole_files_only() {
+        let (store, dir) = temp_store("atomic-race");
+        let path = dir.join("com.test.app").join("yaml").join("main.yaml");
+        atomic_write(&path, b"seed\n").unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let payload_a = b"alpha\nalpha\n".to_vec();
+        let payload_b = b"beta\nbeta\nbeta\n".to_vec();
+
+        let mut handles = Vec::new();
+        for payload in [payload_a.clone(), payload_b.clone()] {
+            let barrier = barrier.clone();
+            let path = path.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                atomic_write(&path, &payload).unwrap();
+                payload
+            }));
+        }
+
+        let mut seen = Vec::new();
+        for handle in handles {
+            seen.push(handle.join().unwrap());
+        }
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            seen.iter().any(|payload| *payload == content.as_bytes()),
+            "并发写入后内容应完整来自某个写者，实际 {content:?}"
+        );
+        assert!(!content.contains("seed"));
+        assert!(!content.contains("alpha\nbeta"));
+
+        let yaml_dir = store.yaml_dir("com.test.app");
+        let leftovers: Vec<_> = std::fs::read_dir(yaml_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "并发写入后临时文件未清理: {leftovers:?}"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
