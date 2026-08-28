@@ -18,75 +18,41 @@
         <span class="tb-tip">鼠标左键=触控 · 滚轮=滑动 · 支持多点触控</span>
       </div>
 
-      <div class="video-wrap" ref="videoWrap">
-        <video
-          ref="videoElement"
-          autoplay
-          playsinline
-          :muted="audioMuted"
-          class="video-stream"
-          @mousedown="onMouseDown"
-          @mousemove="onMouseMove"
-          @mouseup="onMouseUp"
-          @wheel.prevent="onWheel"
-          @contextmenu.prevent
-          @mouseleave="onVideoMouseLeave"
-        ></video>
-
-        <!-- 找图命中框演示（模板测试） -->
-        <div v-if="showHit" class="hit-box" :class="{ 'hit-miss': hitMiss }" :style="hitStyle">
-          <span class="hit-label">{{ hitLabel }}</span>
-        </div>
-
-        <!-- 框选模板 -->
-        <div v-if="selecting" class="select-box" :style="selStyle"></div>
-
-        <!-- alt 模式点击/滑动反馈 -->
-        <div v-if="altFeedback.show && altFeedback.kind === 'tap'" class="alt-tap" :style="altTapStyle">
-          <span class="alt-label">tap</span>
-        </div>
-        <div v-if="altFeedback.show && altFeedback.kind === 'region'" class="alt-region" :style="altFeedbackStyle">
-          <span class="alt-label">region</span>
-        </div>
-
-        <!-- 脚本运行可视化：引擎 tap/swipe/匹配命中（服务端经 control DataChannel 推送，样式复用 alt/hit） -->
-        <div v-if="scriptFx.tap.show" class="alt-tap" :style="fxTapStyle">
-          <span class="alt-label">tap</span>
-        </div>
-        <div v-if="scriptFx.swipe.show" class="alt-region" :style="fxSwipeStyle">
-          <span class="alt-label">swipe</span>
-        </div>
-        <div v-if="scriptFx.hit.show" class="hit-box" :class="{ 'hit-miss': scriptFx.hit.miss }" :style="fxHitStyle">
-          <span class="hit-label">{{ scriptFx.hit.label }}</span>
-        </div>
-
-        <!-- 放大预览镜 -->
-        <div class="loupe" v-show="loupe.show" :style="{ left: loupe.x + 'px', top: loupe.y + 'px' }">
-          <canvas ref="loupeCanvas" width="300" height="300"></canvas>
-          <span class="loupe-tag mono">{{ loupe.zoom }}×</span>
-        </div>
-
-        <div class="v-overlay" v-if="!connected">
-          <div class="v-connecting" v-if="connecting">
-            <span class="dot run"></span> 正在建立 WebRTC 连接…
-          </div>
-          <div v-else>
-            <div class="v-empty-icon">📴</div>
-            <div class="v-empty-text">{{ errorMsg || '未连接设备' }}</div>
-            <button class="btn btn-primary" @click="flushAndConnect">连接 {{ currentName }}</button>
-          </div>
-        </div>
-
-        <div class="v-stats" v-if="connected">
-          <span class="st">{{ fps }} fps</span>
-          <span class="st">延迟 {{ delay }}ms</span>
-          <span class="st">{{ res }}</span>
-          <span class="st">码率 {{ bitrate }}</span>
-          <span class="st">H.264 · WebRTC</span>
-        </div>
-
-        <button class="v-fs" @click="fullscreen" title="全屏">⛶</button>
-      </div>
+      <ConsoleVideoStage
+        :connected="connected"
+        :connecting="connecting"
+        :error-msg="errorMsg"
+        :current-name="currentName"
+        :audio-muted="audioMuted"
+        :fps="fps"
+        :delay="delay"
+        :res="res"
+        :bitrate="bitrate"
+        :show-hit="showHit"
+        :hit-miss="hitMiss"
+        :hit-style="hitStyle"
+        :hit-label="hitLabel"
+        :selecting="selecting"
+        :sel-style="selStyle"
+        :alt-feedback="altFeedback"
+        :alt-tap-style="altTapStyle"
+        :alt-feedback-style="altFeedbackStyle"
+        :script-fx="scriptFx"
+        :fx-tap-style="fxTapStyle"
+        :fx-swipe-style="fxSwipeStyle"
+        :fx-hit-style="fxHitStyle"
+        :loupe="loupe"
+        :on-mouse-down="onMouseDown"
+        :on-mouse-move="onMouseMove"
+        :on-mouse-up="onMouseUp"
+        :on-wheel="onWheel"
+        :on-video-mouse-leave="onVideoMouseLeave"
+        :flush-and-connect="flushAndConnect"
+        :fullscreen="fullscreen"
+        @video-mounted="onVideoMounted"
+        @wrap-mounted="onVideoWrapMounted"
+        @loupe-mounted="onLoupeMounted"
+      />
     </div>
 
     <!-- 右：控制面板（页签切换） -->
@@ -501,6 +467,7 @@ import {
 } from '../runs'
 import ScriptPicker from '../components/ScriptPicker.vue'
 import ConsoleDeviceSummary from '../components/ConsoleDeviceSummary.vue'
+import ConsoleVideoStage from '../components/console/ConsoleVideoStage.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import { createScriptValidator } from '../script-language/validate'
 import { computeRunLineMap } from '../script-language/line-map'
@@ -532,6 +499,11 @@ const bitrate = ref('—')
 const audioMuted = ref(true)
 const videoWrap = ref(null)
 const videoElement = ref(null)
+
+function onVideoMounted(el) { videoElement.value = el }
+function onVideoWrapMounted(el) { videoWrap.value = el }
+function onLoupeMounted(el) { loupeCanvas.value = el }
+
 const consoleRuntime = useConsoleRuntime({
   api,
   devicesData,
@@ -3069,65 +3041,6 @@ onUnmounted(() => {
 /* ===== 画面区 ===== */
 .stage { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 
-.video-wrap {
-  flex: 1; position: relative; background: #000;
-  border: 1px solid var(--border); border-radius: var(--radius);
-  overflow: hidden; min-height: 300px;
-}
-
-.video-stream { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; user-select: none; }
-
-.hit-box {
-  position: absolute; border: 2px solid var(--accent);
-  box-shadow: 0 0 12px rgba(34,211,165,.5); border-radius: 4px;
-  pointer-events: none; z-index: 5;
-}
-.hit-label {
-  position: absolute; top: -22px; left: 0; background: var(--accent); color: #06251c;
-  font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; white-space: nowrap;
-}
-/* 未命中的搜索区域框：虚线红、无光晕（区别于命中实线绿），大区域时半透明填充提示范围 */
-.hit-miss { border-style: dashed; border-color: var(--danger); box-shadow: none; background: rgba(239,68,68,.06); }
-.hit-miss .hit-label { background: var(--danger); color: #fff; }
-
-.select-box {
-  position: absolute; border: 2px dashed var(--accent-2);
-  background: rgba(56,189,248,.12); pointer-events: none; z-index: 5;
-}
-
-/* alt 模式点击/滑动反馈 */
-.alt-tap {
-  position: absolute; z-index: 6; width: 14px; height: 14px;
-  border-radius: 50%; border: 2px solid var(--accent-2);
-  background: rgba(56,189,248,.28);
-  transform: translate(-50%, -50%); pointer-events: none;
-  box-shadow: 0 0 8px rgba(56,189,248,.6);
-}
-.alt-region {
-  position: absolute; z-index: 6; border: 2px dashed var(--accent-2);
-  background: rgba(56,189,248,.12); pointer-events: none;
-  box-shadow: 0 0 10px rgba(56,189,248,.25);
-}
-.alt-label {
-  position: absolute; top: -20px; left: 0; font-size: 10px;
-  color: var(--accent-2); background: rgba(8,10,16,.7);
-  padding: 1px 5px; border-radius: 4px; white-space: nowrap;
-  font-family: var(--mono);
-}
-
-/* 放大预览镜 */
-.loupe {
-  position: fixed; z-index: 200; width: 150px; height: 150px;
-  border: 1px solid rgba(34,211,165,.5); border-radius: 10px; overflow: hidden;
-  background: #000; box-shadow: 0 8px 30px rgba(0,0,0,.6);
-  pointer-events: none;
-}
-.loupe canvas { width: 100%; height: 100%; display: block; }
-.loupe-tag {
-  position: absolute; right: 6px; bottom: 4px; font-size: 10px;
-  color: #fff; background: rgba(0,0,0,.55); padding: 1px 5px; border-radius: 6px;
-}
-
 /* 二次裁切区 */
 .crop-stage {
   display: flex; overflow: auto;
@@ -3146,29 +3059,6 @@ onUnmounted(() => {
 }
 .crop-actions { display: flex; gap: 8px; }
 .crop-actions .btn-primary { margin-left: auto; }
-
-.v-overlay {
-  position: absolute; inset: 0; z-index: 10; display: flex;
-  align-items: center; justify-content: center;
-  background: rgba(8,10,16,.72); backdrop-filter: blur(2px);
-}
-.v-connecting { display: flex; align-items: center; gap: 10px; color: var(--accent); font-size: 14px; }
-.v-empty-icon { font-size: 44px; text-align: center; opacity: .6; }
-.v-empty-text { color: var(--text-1); margin: 10px 0 16px; max-width: 320px; text-align: center; }
-
-.v-stats {
-  position: absolute; left: 12px; top: 12px; z-index: 6;
-  display: flex; gap: 8px; background: rgba(8,10,16,.6);
-  border: 1px solid rgba(255,255,255,.08); border-radius: 20px; padding: 4px 10px;
-}
-.st { font-size: 11px; color: var(--text-1); font-family: var(--mono); }
-
-.v-fs {
-  position: absolute; right: 12px; top: 12px; z-index: 6;
-  background: rgba(8,10,16,.6); border: 1px solid rgba(255,255,255,.08);
-  color: var(--text-1); border-radius: 8px; width: 30px; height: 30px; cursor: pointer;
-}
-.v-fs:hover { color: var(--accent); border-color: var(--accent); }
 
 /* 工具条 */
 .toolbar {
