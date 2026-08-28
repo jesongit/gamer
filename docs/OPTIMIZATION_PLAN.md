@@ -1,6 +1,6 @@
 # GameBot 优化实施计划
 
-> 状态：阶段0/1/3已完成；阶段2自动化路由安全验收已收口但仍有真实 Android/scrcpy/WebRTC E2E 与持续内存观测；阶段4～6部分完成；阶段7未完成，且最终门禁已收口但仍缺跨平台真实性能、生产数据库/文件迁移回滚和设备矩阵证据（2026-08-28）
+> 状态：阶段0/1/3已完成；阶段2自动化路由安全验收已收口但仍有真实 Android/scrcpy/WebRTC/DataChannel E2E 与持续内存观测；阶段4～6部分完成；阶段7未完成。当前 main 已完成本轮无真机验收：fmt/test/前端测试与构建、Windows 离线性能 smoke 通过，但 clippy 仍失败；Docker/Linux、真实设备链路、持续内存观测和生产数据副本回滚不作通过声明（2026-08-28）
 > 编制日期：2026-08-27  
 > 适用范围：Rust 服务端、Vue 前端、部署配置、测试与运维文档  
 > 本文只定义后续实施顺序和验收条件，不代表相关改动已经完成。
@@ -45,23 +45,23 @@
 - 登录成功后前端只写本地标记；除登录外的 API 和 `/ws/device/:id` 没有服务端鉴权，且启用了 permissive CORS。
 - 手动运行注册表按脚本 ID 互斥，调度器使用另一套运行注册表，没有统一的设备级执行仲裁。
 
-本轮复核结果（2026-08-28，未在本轮重跑测试）：当前 HEAD `d6f0684` 的主线验收记录为 Rust `170 passed/0 failed/1 ignored`；`cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings` 与 `git diff --check` 通过。`web` 的 `npm test` 为 `144 passed`，`npm run build` 通过；`docker compose config` 通过。`server` 的 `cargo audit` 通过，但有 `bincode 1.3.3` unmaintained warning；根目录 audit 因无 `Cargo.lock` 失败。`tools/verify-release.ps1` 最终通过，但 crates.io yanked 检查收到 403。对账依据包括 `6e4f6f8` 及其前序计划证据、`de13827`（凭据覆盖与脚本/导入路径边界）、`ab03209`（WebRTC 状态/推流边界）、`c15eccb`（阶段 5 离线统计与 PowerShell 兼容）、`d24306d`（前端操作模板模块）、`a9a9a0c`（实际 Config.validate 加载校验）、`314cfbe`（API blocking 边界与请求校验）、`3961478`（engine 顶层解析边界）、`a3ecc6d`（截图解码错误传播）和 `9399b0f`（matcher 缓存内存淘汰与目录失效）。这些证据仍未提供真实 Android/scrcpy/WebRTC E2E、跨平台 p50/p95、持续内存观测、生产数据库/文件迁移回滚或设备矩阵，因此相应项目继续保持未完成。
+本轮复核结果（2026-08-28，当前 HEAD `92115c3`）：`cargo fmt --all -- --check` 通过；`cargo clippy --all-targets --all-features -- -D warnings` 失败，原因为 `engine.rs` 的 `validate_top_mapping` dead-code、`engine/model.rs` 的 too-many-arguments，以及本轮 matcher ignored benchmark 测试持同步 `MutexGuard` 跨 await。`cargo test` 为 `177 passed/0 failed/1 ignored`；`web` 的 `pnpm test:run` 为 `147 passed`，`pnpm build` 通过（Vite 102 modules）。Windows 固定 fixture benchmark（`-Iterations 1 -Warmup 0 -FullScreen`，freshness 75ms）通过并输出 decode/PNG/NCC/template/find 的 p50/p95/max、CPU 和峰值内存；`perf-stage5b-stats.mjs --self-test` 通过；`git diff --check` 待本次文档提交前复核。Docker/Linux、Android/scrcpy/WebRTC/DataChannel 真实链路、持续内存观测、生产数据库/文件迁移回滚和设备矩阵未实测，均不勾选。证据提交包括 `6e202ca`（路径/mtime/size/hash 与短名目录代数缓存）、`92115c3`（freshness、benchmark 资源字段与 LRU/失效测试）、`3bd04fd`（API 模块化/blocking 边界）、`a3fcfb7`（engine 模块拆分）和 `eddcea8`（Console 视觉组件拆分）。
 
 ### 3.1 本轮 checklist 验收对账
 
-统计包含阶段 0～7 内所有 `- [ ]` / `- [x]`（含嵌套子项）；按当前文档实际复选项重新计数，共 203 项，本轮只将有 HEAD 代码/测试证据的条目收口为 `[x]`。
+统计包含阶段 0～7 内所有 `- [ ]` / `- [x]`（含嵌套子项）；本次按文档实际复选项校正为 238 项，并只将有当前 HEAD 代码/测试证据的条目收口为 `[x]`。真实设备、Docker/Linux、持续内存和生产回滚仍保持未勾选。
 
-| 阶段 | 审计前（HEAD） | 本轮审计后 | 未完成项—原因—下一步动作 |
+| 阶段 | 校正前记录 | 本轮审计后 | 未完成项—原因—下一步动作 |
 |---|---:|---:|---|
-| 0 | 28/28 | 28/28 | 无。 |
-| 1 | 20/20 | 20/20 | 无。 |
-| 2 | 29/31 | 29/31 | 登录后的真实 Android/scrcpy/WebRTC DataChannel E2E、超限输入后的持续内存观测仍缺设备/压力环境。 |
+| 0 | 36/36 | 36/36 | 质量门禁实现项已完成；当前 HEAD 的 clippy 门禁因既有 engine lint 与 benchmark 测试 lint 失败，需后续单独修复。 |
+| 1 | 28/28 | 28/28 | 无新增未完成实现项；USB/设备回归仍归阶段 7。 |
+| 2 | 34/36 | 34/36 | 登录后的真实 Android/scrcpy/WebRTC/DataChannel E2E、超限输入后的持续内存观测仍缺设备/压力环境。 |
 | 3 | 34/34 | 34/34 | RunManager、调度幂等、强制断开和 viewer/pusher 收尾均有主线回归证据。 |
-| 4 | 23/29 | 24/29 | `999f65c` 已补分批日志删除，`314cfbe` 已收口 API blocking；仍缺脚本/模板/配置统一写入、VACUUM/手动维护、全链路关联字段、自由文本状态迁移和视频/GOP/ffmpeg 指标。 |
-| 5 | 8/25 | 9/25 | `9399b0f` 已落地生产内容缓存的内存预算/LRU；仍缺真实跨平台 p50/p95、CPU/内存实测、主动失效/目录缓存接入、受限计算池、50～100ms 完成结果缓存和 NCC 后续评估。 |
-| 6 | 9/19 | 13/19 | `9e37bbc`/`314cfbe` 补齐统一错误映射、请求校验和 handler blocking 边界，`ab03209` 补齐 probe gate；Console 视觉组件已拆分，仍缺 Console/API/engine/viewer 全面拆分和浏览器/真实链路冒烟。 |
-| 7 | 16/17 | 16/17 | 自动化门禁、Compose、release 和 server audit 有证据；生产数据库/文件迁移回滚与真实设备矩阵仍无证据。 |
-| **总计** | **167/203** | **175/203** | **仍有 28 项 checklist 未完成，不宣称整体优化完成。** |
+| 4 | 28/37 | 28/37 | 仍缺脚本/模板/配置统一写入、VACUUM/手动维护、全链路关联字段、自由文本状态迁移和视频/GOP/ffmpeg 指标。 |
+| 5 | 8/31 | 18/31 | `6e202ca`/`92115c3` 已证实路径键、灰度/统计缓存、64 MiB/128 项 LRU、短名目录代数、50～100ms freshness 和 Windows 离线指标；仍缺 ffmpeg 内部分段、API/engine 调用点主动失效接入、计算池和 Docker/Linux/跨平台实测。 |
+| 6 | 10/19 | 15/19 | `3bd04fd`、`a3fcfb7`、`eddcea8` 已证实 API/engine/Console 的局部拆分与回归；仍缺浏览器连接冒烟、窄 trait/fake、viewer/RTP 解耦和 probe 零开销隔离。 |
+| 7 | 16/17 | 15/17 | fmt/test/前端 test/build 和离线 benchmark 有当前证据；clippy 当前失败，生产数据库/文件迁移回滚与真实设备矩阵仍无证据。 |
+| **总计** | **194/238** | **208/238** | **仍有 30 项 checklist 未完成，不宣称整体优化完成。** |
 
 以上数字只用于确定起点。执行期间若环境变化，应在阶段 0 重新记录基线。
 
@@ -74,10 +74,10 @@
 | 2 | `2e3934e`、`a96935a`、`b7ab9dd`、`f6931fd`、`de13827`、`774c3dd` | HTTP/WS 鉴权、Cookie、同源、敏感日志、ZIP/命令/脚本路径边界和环境凭据覆盖测试。 | 29/31；真实 Android/scrcpy/WebRTC DataChannel E2E 与持续内存观测仍阻塞。 |
 | 3 | `67052e3`、`00a296a`、`ab03209` | RunManager、设备互斥、调度幂等、取消/停机和 viewer/pusher 断开原因/推流边界测试。 | 34/34，阶段 3 收口。 |
 | 4 | `c0b264f`、`9c3f028`、`999f65c`、`8283edd`、`314cfbe`、`a3ecc6d` | atomic write、导入事务、SQLite worker、分批保留、API blocking/request validation、截图错误传播和部分指标测试。 | 24/29；仍缺统一配置写入、VACUUM/手动维护、完整关联字段和视频/GOP/ffmpeg 指标。 |
-| 5 | `bd180eb`、`4b08034`、`c15eccb`、`b517394`、`9399b0f`、`570ba85`、`04361e7`、`23d9acf`、`505bc5d`、`caa736b` | 固定 GOP/模板 fixture、JSONL/CSV 离线统计入口（含 CPU/峰值内存字段）、内容缓存预处理、64 MiB/128 项 LRU 与 FrameCache 合并回归；离线样本不替代真实跨平台 p50/p95。 | 9/25；真实性能、计算池和短窗结果缓存仍未验收。 |
-| 6 | `e4538b2`、`9f45786`、`a048a49`、`b2fa0c5`/`4114dd8`、`df003c8`、`d24306d`、`9e37bbc`、`314cfbe`、`4f4fe52`、`ab03209`、`3961478`、`eddcea8` | Console helper/composable/lifecycle/操作模板模块、engine helper/边界测试、ApiError/请求校验/blocking 边界、RTP fixture 与 probe gate 回归；`eddcea8` 补齐视觉组件静态回归。 | 13/19；全面拆分和浏览器/真实链路冒烟仍未完成。 |
-| 7 | `05f19b1`、`6e4f6f8` | Rust `170/0/1`、fmt/clippy/diff check、web `144 passed/build`、Compose config、server cargo audit、verify-release 及已知审计例外。 | 16/17；生产迁移回滚和真实设备矩阵仍阻塞。 |
-| **总计** | `6e4f6f8` → `eddcea8` | 本轮新增 Console 视觉组件静态回归与 pnpm 构建证据；真实设备/浏览器链路仍不虚报完成。 | 175/203，28 项未完成；不宣称整体完成。 |
+| 5 | `bd180eb`、`4b08034`、`c15eccb`、`b517394`、`9399b0f`、`570ba85`、`04361e7`、`23d9acf`、`505bc5d`、`caa736b`、`6e202ca`、`92115c3` | `6e202ca`/`92115c3` 补齐规范化路径+mtime+size+hash、灰度/尺寸/统计数组缓存、64 MiB/128 项 LRU、短名目录代数与主动失效入口、generation/frame sequence 严格 freshness（默认 75ms，可配 50～100ms）；固定 fixture benchmark 输出 decode/PNG/NCC/template/find 的 p50/p95/max、CPU、峰值内存，Windows smoke 已实测。 | 18/31；仍缺 ffmpeg 内部分段、API/engine 调用点主动失效接入、专用计算池，以及 Docker/Linux/跨平台真实性能。 |
+| 6 | `e4538b2`、`9f45786`、`a048a49`、`b2fa0c5`/`4114dd8`、`df003c8`、`d24306d`、`9e37bbc`、`314cfbe`、`4f4fe52`、`ab03209`、`3961478`、`eddcea8`、`3bd04fd`、`a3fcfb7` | `3bd04fd` 完成 API 资源模块、统一错误/校验与 blocking 边界；`a3fcfb7` 完成 engine model/normalize/validate 局部拆分；`eddcea8` 补齐 Console 视觉组件静态回归。 | 15/20；全面拆分、浏览器/真实链路冒烟、窄 trait/fake、viewer/RTP 解耦和 probe 零开销隔离仍未完成。 |
+| 7 | `05f19b1`、`6e4f6f8`、`3bd04fd`、`a3fcfb7`、`eddcea8`、`92115c3` | 当前复核：Rust `177/0/1`、fmt 通过、clippy 失败；web `147 passed/build`；Windows 离线 benchmark/stats self-test 通过。真实设备、Docker/Linux、生产迁移回滚仍无证据。 | 15/17；clippy 修复、生产迁移回滚和真实设备矩阵仍阻塞。 |
+| **总计** | `6e202ca` → `92115c3`（含 `3bd04fd`、`a3fcfb7`、`eddcea8`） | 本轮完成无真机验收记录与阶段 5/6 证据回填；真实 Android/scrcpy/WebRTC/DataChannel、Docker/Linux、持续内存观测和生产回滚不虚报完成。 | 208/238，30 项未完成；不宣称整体完成。 |
 
 ## 4. 实施原则
 
@@ -545,7 +545,7 @@ RunRecord
 
 ## 11. 阶段 5：模板匹配性能优化
 
-当前状态：部分完成（2026-08-28）。matcher 内容哈希模板缓存已完成；截图请求合并器已接入生产 `decode_latest_png`，以 config/GOP generation + frame sequence 精确区分帧，并通过同帧合并、失败恢复、不同帧并行和设备隔离测试，WebRTC RTP fixture 也已补齐。`c8037c2` 对应 matcher 收口，`4f4fe52` 对应 WebRTC fixture / packetization 回归。正式跨平台性能报告、完成后 50～100ms 短窗缓存、可观测 decode 指标和受限计算池仍未完成。
+当前状态：部分完成（2026-08-28）。`6e202ca`/`92115c3` 已完成 matcher 路径+mtime+size+内容哈希缓存、灰度/尺寸/统计数组预处理缓存、64 MiB/128 项 LRU、短名目录代数与 matcher 内主动失效入口；`92115c3` 还将已完成 PNG 在 generation/frame sequence 精确键下按 freshness 复用（默认 75ms，可配 50～100ms），并补齐固定 fixture 的 decode/PNG/NCC/template/find 离线 benchmark 与 CPU/峰值内存字段。当前 Windows 一次 debug/full-screen smoke 已通过。仍未完成 ffmpeg 内部分段指标、API/engine 上传/覆盖/重命名/删除调用点接入、专用计算池、持续内存观测及 Docker/Linux/跨平台真实性能。
 
 ### 11.1 性能基准先行
 
@@ -553,13 +553,13 @@ RunRecord
 
 - [x] 准备固定 H.264 GOP、截图和模板 fixture，不使用实时设备作为唯一基准。
 - [ ] 分别记录：
-  - [ ] `decode_latest_png` 总耗时。
-  - [ ] ffmpeg 启动、输入写入、解码和 PNG 输出耗时。
-  - [ ] PNG 解码与灰度化耗时。
-  - [ ] 全屏和区域 NCC 耗时。
-  - [ ] 模板文件读取和预处理耗时。
-  - [ ] 单次 `find` 主模板 + N 个 block 的整轮耗时。
-- [ ] 记录 p50、p95、最大值、CPU 和峰值内存。
+  - [x] `decode_latest_png` 总耗时。
+  - [ ] ffmpeg 启动、输入写入、解码和 PNG 输出耗时（当前只输出整体 decode，未拆内部阶段）。
+  - [x] PNG 解码与灰度化耗时。
+  - [x] 全屏和区域 NCC 耗时。
+  - [x] 模板文件读取和预处理耗时。
+  - [x] 单次 `find` 主模板 + N 个 block 的整轮耗时。
+- [x] 记录 p50、p95、最大值、CPU 和峰值内存。
 - [ ] Windows 和 Docker/Linux 至少各跑一轮。
 
 验收标准：
@@ -571,11 +571,11 @@ RunRecord
 
 #### PERF-002：缓存模板预处理结果
 
-- [ ] 缓存键包含：规范化路径、mtime、文件大小，必要时加内容哈希。
+- [x] 缓存键包含：规范化路径、mtime、文件大小，必要时加内容哈希。
 - [x] 缓存内容包括：灰度图、尺寸、缩放版本、均值、方差和 NCC 所需数组。
 - [ ] 模板上传、覆盖、重命名和删除后主动失效；mtime 检查作为兜底。
-- [ ] 缓存设置总内存上限和 LRU 淘汰。
-- [ ] 短名解析结果也可按目录代数缓存，目录变化后失效。
+- [x] 缓存设置总内存上限和 LRU 淘汰。
+- [x] 短名解析结果也可按目录代数缓存，目录变化后失效。
 
 验收标准：
 
@@ -604,7 +604,7 @@ RunRecord
 - [x] 提供独立可复用的 `InFlight<K, T, E>` 请求合并器，并通过并发共享、错误广播、取消清理和重试测试（`570ba85`、`505bc5d`）。
 - [x] `FrameCache` 暴露单调递增的帧序号和最近帧到达时间。
 - [x] 同一设备、同一帧序号上的并发截图请求共享一个 in-flight decode future（生产路径接入提交 `04361e7`）。
-- [ ] 已解码结果只允许在很短新鲜度窗口内复用，初始建议 50～100ms，并以指标调整。
+- [x] 已解码结果只允许在很短新鲜度窗口内复用，默认 75ms，可配置范围 50～100ms，并以指标调整。
 - [x] 新帧到达后不得长期返回旧 PNG。
 - [x] 分辨率/config 代数变化立即失效缓存。
 - [x] `find` 主模板和 block 是否共享同一截图必须保持现有语义；第一版只合并真正并发或同帧请求，不主动改变“每模板独立取新截图”。
@@ -638,7 +638,7 @@ RunRecord
 
 ## 12. 阶段 6：模块化重构
 
-当前状态：部分完成（2026-08-28）。Console geometry、无 UI 的运行时 composable、engine syntax/events 和 WebRTC Annex-B/SDP protocol helper 已局部拆分并通过回归；Console 视觉组件已原样移动并通过静态组件回归，Console 状态/UI 其余细化、API 资源、engine 执行层和 WebRTC pusher/viewer 的全面拆分仍未完成。
+当前状态：部分完成（2026-08-28）。Console geometry、无 UI 的运行时 composable、engine syntax/events 和 WebRTC Annex-B/SDP protocol helper 已局部拆分并通过回归；`3bd04fd` 完成 API 资源模块、统一错误/校验与 blocking 边界，`a3fcfb7` 完成 engine model/normalize/validate 局部拆分，`eddcea8` 将 Console 视觉组件原样移动并补静态回归。Console/API/engine/viewer 的全面拆分、浏览器真实链路冒烟、窄 trait/fake 和 probe 零开销隔离仍未完成。
 
 此阶段只在前述测试和运行管理稳定后执行。每次先“原样移动”，后“内部简化”，禁止边拆文件边改变协议。
 
@@ -693,10 +693,10 @@ server/src/api/
 └─ ws.rs
 ```
 
-- [ ] `mod.rs` 只负责状态组装、Router 和共享错误类型。
+- [x] `mod.rs` 只负责状态组装、Router 和共享错误类型。
 - [x] 建立统一 `ApiError`，避免每个 handler 手工拼 Response。
-- [ ] 统一输入校验和 4xx/5xx 映射。
-- [ ] 阻塞文件/DB 工作不得散落在 handler 内。
+- [x] 统一输入校验和 4xx/5xx 映射。
+- [x] 阻塞文件/DB 工作不得散落在 handler 内。
 
 ### 12.3 Engine 拆分
 
@@ -715,9 +715,9 @@ server/src/engine/
 └─ tests/
 ```
 
-- [ ] `normalize/parse/validate` 尽量保持纯函数。
+- [x] `normalize/parse/validate` 尽量保持纯函数。
 - [x] `$N`、`^N` 替换独立测试。
-- [ ] 执行上下文和函数栈集中管理。
+- [x] 执行上下文和函数栈集中管理。
 - [ ] 模板匹配、设备控制通过窄 trait 注入，单元测试使用 fake。
 - [x] 跨文件函数解析与文件系统寻址分离。
 - [x] 重构不改变 YAML 语义；如必须改变，另起破坏性提交并同步文档。
@@ -757,11 +757,11 @@ server/src/webrtc/
 
 ## 13. 阶段 7：发布验收与文档收口
 
-当前状态：未完成（2026-08-28）。安全自动化矩阵和本轮三份文档已对账；Rust 全门禁沿用既有结果而未重跑，真实设备矩阵、正式性能表、生产数据副本迁移回滚及部分发布证据仍待补齐。下一步按 §13.1～13.4 在相应环境逐项执行并回填日期、版本和实测值。
+当前状态：未完成（2026-08-28）。本轮已实际重跑自动化门禁：fmt、test、pnpm test:run、pnpm build 和 Windows 离线 benchmark/stats 通过；clippy 因 engine 既有 lint 与 matcher benchmark 测试的 `await_holding_lock` 失败。真实 Android/scrcpy/WebRTC/DataChannel 设备矩阵、Docker/Linux、持续内存观测和生产数据副本迁移回滚仍无证据，下一步只在对应环境补测。
 
 ### 13.1 自动化验收
 
-- [x] Rust fmt、clippy、test 全通过。
+- [ ] Rust fmt、clippy、test 全通过（fmt/test 通过；clippy 当前失败，详见 §3）。
 - [x] 前端 test、build 全通过。
 - [x] Docker 镜像构建成功；`docker build --no-cache -t gamer .` 也已成功，证明至少在当前环境可完整重建。
 - [ ] 数据迁移在生产数据副本上成功，并可回滚。
@@ -792,17 +792,34 @@ server/src/webrtc/
 
 ### 13.4 性能验收
 
-目标值应以阶段 5 的基线为基础填写，不预先承诺脱离环境的绝对延迟：
+目标值应以阶段 5 的基线为基础填写，不预先承诺脱离环境的绝对延迟。本轮执行：
+`powershell -NoProfile -ExecutionPolicy Bypass -File tools/run-perf-benchmark.ps1 -Iterations 1 -Warmup 0 -FullScreen`。
+环境为 Windows、debug、固定 `server/testdata/perf` fixture、`freshness_ms=75`、90 个 GOP 帧；这是离线 smoke，不代表生产 SLA。
+
+| 指标 | wall p50/p95/max (µs) | CPU p50/p95/max (µs) | 峰值内存 (bytes) | 结果 |
+|---|---:|---:|---:|---|
+| `decode_latest_png` | 461642/461642/461642 | 31250/31250/31250 | 38019072 | Windows 实测 |
+| `png_decode` | 243872/243872/243872 | 234375/234375/234375 | 38019072 | Windows 实测 |
+| `png_grayscale` | 273034/273034/273034 | 281250/281250/281250 | 38019072 | Windows 实测 |
+| `ncc_region`（3 个模板） | 531485/940144/940144 | 515625/2750000/2750000 | 56127488 | Windows 实测 |
+| `ncc_fullscreen`（3 个模板） | 927422/962020/962020 | 953125/2328125/2328125 | 56422400 | Windows 实测 |
+| `template_read`（3 个模板） | 319/398/398 | 0/0/0 | 56127488 | Windows 实测 |
+| `template_preprocess`（3 个模板） | 475/3801/3801 | 0/0/0 | 56127488 | Windows 实测 |
+| `find_round`（主模板+2 block） | 2409649/2409649/2409649 | 4562500/4562500/4562500 | 56422400 | Windows 实测 |
+
+以下仍不宣称完成：ffmpeg 启动/输入/解码/PNG 内部分段尚未单独输出；每分钟生产 ffmpeg 启动次数、高负载 health、日志日增长量和 Docker 构建上下文未在本轮测量；Docker/Linux、跨平台 p50/p95、真实设备链路、持续内存观测和生产数据副本回滚未实测。
+
+原验收指标对账：
 
 | 指标 | 基线 | 目标 | 实测 |
 |---|---:|---:|---:|
-| 单次按需解码 p50/p95 | 待测 | 不劣化实时性 | 待填 |
-| 区域 NCC p50/p95 | 待测 | 较基线下降 | 待填 |
-| 全屏 NCC p50/p95 | 待测 | 较基线下降 | 待填 |
-| 每分钟 ffmpeg 启动次数 | 待测 | 同帧请求显著合并 | 待填 |
-| 高负载 health p95 | 待测 | 保持可响应 | 待填 |
-| 服务日志日增长量 | 待测 | 受保留策略约束 | 待填 |
-| Docker 构建上下文 | 当前含约 5.8 GiB target | 不含本地产物 | 待填 |
+| 单次按需解码 p50/p95 | 待建立跨平台基线 | 不劣化实时性 | Windows smoke：461642/461642 µs；不作跨平台结论 |
+| 区域 NCC p50/p95 | 待建立跨平台基线 | 较基线下降 | Windows smoke：531485/940144 µs；不作目标达成结论 |
+| 全屏 NCC p50/p95 | 待建立跨平台基线 | 较基线下降 | Windows smoke：927422/962020 µs；不作目标达成结论 |
+| 每分钟 ffmpeg 启动次数 | 待测 | 同帧请求显著合并 | 未实测 |
+| 高负载 health p95 | 待测 | 保持可响应 | 未实测 |
+| 服务日志日增长量 | 待测 | 受保留策略约束 | 未实测 |
+| Docker 构建上下文 | 当前含约 5.8 GiB target | 不含本地产物 | 未在本轮实测 |
 
 ### 13.5 文档更新
 
@@ -925,6 +942,34 @@ server/src/webrtc/
 - 性能前后对比：不适用（原样移动视觉模板，未改变协议或脚本执行路径）。
 - 新增 PITFALLS：无。
 - 发布/回滚说明：视觉拆分为独立 Conventional Commit；如需回滚可单独回退该提交，保留此前 composable/helper 拆分。
+
+### 阶段 5：模板匹配性能优化收口
+
+- 开始日期：2026-08-28
+- 完成日期：2026-08-28（本轮无真机验收）
+- 执行分支：`main`
+- 基线提交：`3bd04fd`
+- 完成提交：`6e202ca` / `92115c3`
+- 已完成任务：模板路径键（规范化路径、mtime、size、内容 hash）、灰度/尺寸/均值/方差/NCC 数组预处理缓存、64 MiB/128 项 LRU、短名目录 generation 与 matcher 内主动失效入口、generation/frame sequence 严格 freshness PNG 复用，以及离线 decode/PNG/NCC/template/find benchmark 与 JSONL/CSV stats 自检。
+- 未完成任务及原因：ffmpeg 内部分段指标、API/engine 上传/覆盖/重命名/删除调用点接入、专用计算池、Docker/Linux/跨平台性能、持续内存观测和真实设备链路均未在本轮完成；调用点受本轮禁止修改 API/engine 的范围约束。
+- 测试结果：`cargo test` 177 passed/0 failed/1 ignored；frames 相关 14 passed；`cargo fmt --all -- --check` 通过；clippy 因既有 engine lint 与 matcher benchmark 测试 `await_holding_lock` 失败；`pnpm test:run` 147 passed；`pnpm build` 通过；Windows benchmark smoke 与 `tools/perf-stage5b-stats.mjs --self-test` 通过。
+- 性能前后对比：Windows debug、固定 fixture、freshness 75ms、1 iteration/0 warmup/full-screen 已记录于 §13.4；结果只作离线 smoke，不替代跨平台/生产基线。
+- 新增 PITFALLS：无。
+- 发布/回滚说明：`6e202ca` 与 `92115c3` 可独立回滚；本轮未改 API/engine/webrtc/frontend。
+
+### 最终无真机验收：阶段 5～7
+
+- 开始日期：2026-08-28
+- 完成日期：2026-08-28
+- 执行分支：`main`
+- 基线提交：`92115c3`
+- 完成提交：本次 `docs(plan): 更新优化进度与验收证据`
+- 已完成任务：基于 `3bd04fd`、`a3fcfb7`、`eddcea8`、`6e202ca`、`92115c3` 对账 checklist、阶段状态、提交证据、自动化门禁和 Windows 离线性能实测。
+- 未完成任务及原因：`cargo clippy --all-targets --all-features -- -D warnings` 当前失败；Android/scrcpy/WebRTC/DataChannel 真实链路、Docker/Linux、持续内存观测、生产数据副本迁移回滚和设备矩阵没有环境证据，保持未勾选。
+- 测试结果：fmt 通过；cargo test 177/0/1；pnpm test:run 147 passed；pnpm build 通过；benchmark/stats self-test 通过；git diff --check 在提交前执行。
+- 性能前后对比：不宣称优化目标达成；仅记录 §13.4 的 Windows 固定 fixture smoke 数据。
+- 新增 PITFALLS：无。
+- 发布/回滚说明：文档提交只更新计划与证据，不改变运行功能；功能提交仍按阶段独立回滚。
 
 ## 17. 推荐的第一次执行范围
 
