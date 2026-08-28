@@ -202,23 +202,13 @@
           <!-- 编辑模式：连接概览 + 可折叠配置 -->
           <template v-else>
             <div v-if="current" class="dev-summary">
-              <div class="ps-head">
-                <span class="dot" :class="connected ? 'ok' : 'off'"></span>
-                <span class="ps-title">{{ current.name }}</span>
-                <span class="tag" :class="connected ? 'info' : ''">{{ connected ? '已连接' : (current.status === 'online' ? '在线' : '离线') }}</span>
-              </div>
-              <div class="sum-row">
-                <span class="sum-label">接入</span>
-                <span class="sum-value"><span class="kind-badge">{{ kindInfo(current.kind).icon }} {{ kindInfo(current.kind).label }}</span></span>
-              </div>
-              <div class="sum-row">
-                <span class="sum-label">地址</span>
-                <span class="sum-value mono">{{ current.addr || '—' }}</span>
-              </div>
-              <div class="sum-row">
-                <span class="sum-label">屏幕</span>
-                <span class="sum-value">{{ screenSummary }}</span>
-              </div>
+              <ConsoleDeviceSummary
+                :device="current"
+                :connected="connected"
+                :kind-icon="kindInfo(current.kind).icon"
+                :kind-label="kindInfo(current.kind).label"
+                :screen-summary="screenSummary"
+              />
               <div class="sum-actions">
                 <button v-if="!connected" class="btn btn-primary" :disabled="!store.deviceId || connecting" @click="flushAndConnect">
                   {{ connecting ? '连接中…' : '🔌 连接' }}
@@ -510,6 +500,7 @@ import {
   isMissingEndpointError, isDeviceBusyConflict, isTerminalRunState,
 } from '../runs'
 import ScriptPicker from '../components/ScriptPicker.vue'
+import ConsoleDeviceSummary from '../components/ConsoleDeviceSummary.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import { createScriptValidator } from '../script-language/validate'
 import { computeRunLineMap } from '../script-language/line-map'
@@ -521,6 +512,7 @@ import {
   selectionToDeviceRect,
   toDeviceCoord as mapToDeviceCoord,
 } from '../console/geometry'
+import { formatScreenSummary } from '../console/device-summary'
 
 const router = useRouter()
 const toast = useToast()
@@ -887,14 +879,7 @@ function kindInfo(k) {
 
 /** 编辑模式概览里的屏幕摘要（与配置表单区分开，避免重复） */
 const screenSummary = computed(() => {
-  const d = current.value
-  if (!d) return '—'
-  if (d.screen_mode === 'virtual') {
-    const res = d.vd_res || '1920x1080'
-    const dpi = d.vd_dpi ? ` @${d.vd_dpi}dpi` : ' · DPI 自动'
-    return `🖥️ 虚拟屏 · ${res}${dpi}`
-  }
-  return '🖥️ 镜像主屏'
+  return formatScreenSummary(current.value)
 })
 
 const appFiltered = computed(() => {
