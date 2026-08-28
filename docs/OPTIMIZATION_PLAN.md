@@ -1,6 +1,6 @@
 # GameBot 优化实施计划
 
-> 状态：阶段0/1已完成；阶段2自动化路由安全验收已收口但仍有凭据迁移、真实设备和内存稳定性项目；阶段3主体完成但 viewer/pusher 断开一致性未收口；阶段4～6部分完成；阶段7未完成，且本轮 Rust 门禁已全绿但仍缺生产迁移/依赖审计/真实设备证据（2026-08-28）
+> 状态：阶段0/1/3已完成；阶段2自动化路由安全验收已收口但仍有真实设备和内存稳定性项目；阶段4～6部分完成；阶段7未完成，且本轮 Rust 门禁已有主线证据但仍缺生产迁移、正式跨平台性能和真实设备证据（2026-08-28）
 > 编制日期：2026-08-27  
 > 适用范围：Rust 服务端、Vue 前端、部署配置、测试与运维文档  
 > 本文只定义后续实施顺序和验收条件，不代表相关改动已经完成。
@@ -45,7 +45,7 @@
 - 登录成功后前端只写本地标记；除登录外的 API 和 `/ws/device/:id` 没有服务端鉴权，且启用了 permissive CORS。
 - 手动运行注册表按脚本 ID 互斥，调度器使用另一套运行注册表，没有统一的设备级执行仲裁。
 
-本轮复核结果（2026-08-28）：沿用主线已有测试证据，Rust 最近一次全量回归已收口为 159 passed、0 failed、1 ignored；`cargo clippy --all-targets --all-features -- -D warnings` 与 `cargo fmt --all -- --check` 也在主线上通过，`2ffafc4` 只是在截图并发测试里修正了测点口径，`5b26eef` 则把 clippy 门禁和 Windows 原子写竞争一起收口。前端 `npm test` 与 `npm run build` 通过；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 通过；Docker daemon 可用，`docker build -t gamer .` 与 `docker build --no-cache -t gamer .` 都已完成。`cargo-audit` 本轮结果为 0 vulnerabilities，但仍提示 `bincode` unmaintained，已按审计口径记录版本与日期。阶段2的真实 HTTP 路由、WS 鉴权/同源、Cookie 过期、敏感日志、ZIP 路径和命令注入边界已有自动化验收，真实设备 DataChannel 冒烟和资源限额后的持续内存观测仍待设备/运行环境。阶段4已落地 `/health/ready`、`/metrics`、原子写入、SQLite WAL/busy-timeout、独立 DB worker 与日志批处理；Store 有界 worker、清理统计和 scheduler/metrics 的真实 hook 也已补齐，但 SQL 调用侧仍同步等待 DB RPC，视频/GOP/ffmpeg/NCC 等指标虽已定义却未接入全部生产采集点。阶段5的 `request_snapshot` 已接入生产截图路径，WebRTC RTP fixture、精确同帧并发合并、错误恢复、不同帧和不同设备隔离测试已通过；正式跨平台性能报告、完成后短窗缓存和计算池仍未完成。阶段6的 Console WebRTC lifecycle、engine syntax/events 和 WebRTC protocol helper 已局部拆分并回归通过，全面模块化仍未完成。
+本轮复核结果（2026-08-28）：沿用主线已有测试证据，Rust 最近一次全量回归已收口为 159 passed、0 failed、1 ignored；`cargo clippy --all-targets --all-features -- -D warnings` 与 `cargo fmt --all -- --check` 也在主线上通过。前端已有 `npm test` / `npm run build` 通过证据；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps`、普通及 `--no-cache` Docker 构建和 `cargo-audit` 结果也已有记录。新增对账依据为 `09c33ec`（engine 顶层解析边界测试）、`774c3dd`（API 阻塞边界与请求校验）、`45f3dcd`（截图解码错误传播）、`4114dd8`/`b2fa0c5`（Console 投屏视觉阶段拆分）、`df003c8`（设备摘要拆分）和 `4b08034`（阶段 5 B 类统计入口及离线样本）。这些提交补强了自动化证据，但未提供真实 Android/scrcpy/WebRTC E2E、跨平台 p50/p95、生产迁移回滚或持续内存观测，因此相应项目继续保持未完成。
 
 ### 3.1 本轮 checklist 验收对账
 
@@ -57,13 +57,27 @@
 | 1 | 25/28 | 28/28 | 原漏勾的 `server/web-dist` 排除、敏感日志约束和 adb/ffmpeg readiness 均已由主线代码/测试证明。 |
 | 2 | 0/36 | 34/36 | 开发模式仍兼容明文密码、缺真实设备 DataChannel 冒烟、资源限额测试未观测进程内存稳定性；下一步移除明文迁移口、跑设备链路与受限资源压力测试。 |
 | 3 | 0/34 | 34/34 | RUN-005 的强制断开、原因建模、旧 viewer/pusher 回归都已落到代码与测试；阶段 3 checklist 已收口。 |
-| 4 | 0/36 | 28/37 | 原子写覆盖/失败保持、Store 有界 worker 与清理统计、`get_task` 直查、scheduler/metrics/NCC 真实 hook、定期保留/VACUUM、结构化 reason 和多组生产指标未完全收口；下一步按 DATA/OBS 子项逐一实现并测试。 |
-| 5 | 0/30 | 8/31 | 缺 Windows+Docker/Linux 正式基准、完整模板缓存失效/LRU、受限计算池、50～100ms 完成结果缓存及 NCC 后续评估；下一步先补基准和指标，再决定优化。 |
-| 6 | 0/19 | 8/19 | Console WebRTC lifecycle、无 UI 的运行时 composable、WebRTC RTP fixture 与若干 protocol helper 已局部拆分并有回归测试，但缺 Console/API/engine/WebRTC 主体边界和浏览器冒烟；下一步按纯移动→测试→内部简化的小提交推进。 |
+| 4 | 0/36 | 28/37 | 健康检查、原子写、导入事务、SQLite worker、日志批处理、Store 统计、直查与部分指标已有证据；仍缺统一调用收口、周期保留/VACUUM、全链路关联字段和视频/GOP/ffmpeg 指标。 |
+| 5 | 0/30 | 8/31 | `4b08034` 只提供 B 类统计入口和离线样本，不构成真实测量；仍缺 Windows+Docker/Linux 正式基准、完整模板缓存失效/LRU、受限计算池、50～100ms 完成结果缓存及 NCC 后续评估。 |
+| 6 | 0/19 | 9/19 | `b2fa0c5`/`4114dd8`、`df003c8` 与既有 lifecycle/composable/helper 形成局部拆分并有回归证据，但缺 Console/API/engine/WebRTC 主体边界和浏览器冒烟。 |
 | 7 | 0/17 | 16/17 | `cargo fmt`、`cargo clippy -D warnings`、`cargo test`、前端 test/build、`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps`、本机 `docker build --no-cache` 与 `cargo-audit` 0 漏洞结果已有证据；生产数据副本迁移回滚和真实设备矩阵仍无本轮证据。 |
-| **总计** | **61/236** | **191/238** | **仍有 47 项 checklist 未完成，不宣称整体优化完成。** |
+| **总计** | **61/236** | **193/238** | **仍有 45 项 checklist 未完成，不宣称整体优化完成。** |
 
 以上数字只用于确定起点。执行期间若环境变化，应在阶段 0 重新记录基线。
+
+### 3.2 本轮提交、证据与变更记录
+
+| 阶段 | 本轮/最近相关提交 | 仓库内已有证据 | 本轮结论与下一步 |
+|---|---|---|---|
+| 0 | `d901121`、`6354b85` | Rust/前端质量门禁、共享 fixture 和 CI 记录。 | 36/36，暂无遗留。 |
+| 1 | `23ea36b`、`db6e423`、`3e16e96`、`ff81627` | Docker/Compose、日志轮转和配置校验记录。 | 28/28；USB 真机回归留至阶段 7。 |
+| 2 | `b7ab9dd`、`f6931fd`、`774c3dd` | HTTP/WS 鉴权、Cookie、同源、敏感日志、ZIP/命令边界测试。 | 34/36；真实 DataChannel 与持续内存观测需设备/压力环境。 |
+| 3 | `67052e3` 及 RUN-005 收口提交 | RunManager、设备互斥、调度幂等、取消/停机和 viewer/pusher 回归测试。 | 34/34，阶段 3 收口。 |
+| 4 | `9c3f028`、`8283edd`、`774c3dd` | health/readiness、atomic write、DB worker/批处理、scheduler/NCC hook 和部分指标测试。 | 28/37；补齐调用侧、保留策略、关联字段与剩余生产指标。 |
+| 5 | `4b08034`、`45f3dcd`、`caa736b`、`04361e7`、`4f4fe52` | 固定 GOP/模板 fixture、FrameCache 合并/错误传播、matcher/RTP 回归；B 类统计入口可消费 JSONL/CSV。 | 8/31；离线样本不替代真实跨平台 p50/p95、CPU/内存和计算池验收。 |
+| 6 | `b2fa0c5`/`4114dd8`、`df003c8`、`a048a49`、`e4538b2`、`09c33ec` | Console 组件/lifecycle、engine helper、RTP protocol 的纯测试与边界测试。 | 9/19；继续拆 API/engine/viewer，补浏览器连接冒烟。 |
+| 7 | `05f19b1`（前次对账） | Rust/前端/Compose/release/metadata/Docker/audit 的既有记录。 | 16/17；生产数据副本迁移回滚和真实设备矩阵仍阻塞。 |
+| **总计** | `df003c8` → `4b08034` | 本轮只核对提交与既有测试证据，未新增耗时测试。 | 193/238，45 项未完成；不宣称整体完成。 |
 
 ## 4. 实施原则
 
