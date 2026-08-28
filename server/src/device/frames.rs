@@ -128,7 +128,6 @@ struct DecodedFrame {
 
 struct DecodedResultCacheEntry {
     key: FrameKey,
-    frame_sequence: u64,
     png: Arc<Vec<u8>>,
     completed_at: Instant,
 }
@@ -380,9 +379,16 @@ impl FrameCache {
         self.state.lock().snapshot()
     }
 
-    fn is_snapshot_current(&self, key: FrameKey, frame_sequence: u64) -> bool {
+    /// 结构性货币性检查：key 所依据的 GOP/config 代际仍是当前代际。
+    /// **不含** frame_sequence——动态画面下 P 帧逐帧推进序号，若按帧序判新，
+    /// 任何耗时超过一帧间隔（30fps 下 33ms）的解码都永远追不上（实测冷启动
+    /// 动画期间截图 100% 失败）；解码落后若干个 P 帧由 decoded_result 的
+    /// freshness 窗口统一界定陈旧度。
+    fn is_snapshot_current(&self, key: FrameKey) -> bool {
         let state = self.state.lock();
-        !state.gop.is_empty() && state.key() == key && state.frame_sequence == frame_sequence
+        !state.gop.is_empty()
+            && state.snapshot_generation == key.snapshot_generation
+            && state.config_generation == key.config_generation
     }
 
     /// 仅在失败仍对应当前快照时清空 GOP。旧快照的异步 decode 收尾绝不能清掉新 GOP。
@@ -442,14 +448,16 @@ impl FrameCache {
 
             match decoded {
                 Ok(decoded) => {
-                    if self.is_snapshot_current(key, decoded.frame_sequence) {
+                    if self.is_snapshot_current(key) {
                         self.record_png_dims(&decoded.png);
-                        self.store_decoded_png(key, decoded.frame_sequence, &decoded.png);
+                        self.store_decoded_png(key, &decoded.png);
                         return Ok(Some(decoded.png.clone()));
                     }
 
-                    // 不能返回被替换的 config/GOP。只刷新一次，避免视频持续到达时无限追帧；
-                    // 第二次仍被更新则丢弃本次结果，让上层按“无可用帧”路径稍后重试。
+                    // 不能返回被替换的 config/GOP（代际已推进 = 编码器重启/新 IDR）。
+                    // 只刷新一次：IDR 间隔（i-frame-interval=2s）通常大于解码耗时，
+                    // 刷新一次即收敛；连续被顶说明解码长期追不上 GOP 更新，
+                    // 放弃本轮交由调用方按"无可用帧"稍后重试。
                     if !refreshed_after_stale {
                         refreshed_after_stale = true;
                         debug!(
@@ -502,12 +510,15 @@ impl FrameCache {
     }
 
     fn cached_decoded_png(&self, key: FrameKey, frame_sequence: u64) -> Option<Vec<u8>> {
-        if !self.is_snapshot_current(key, frame_sequence) {
+        let _ = frame_sequence; // 复用按代际判定；序号仅用于日志/追踪
+        if !self.is_snapshot_current(key) {
             return None;
         }
         let mut cached = self.decoded_result.lock();
         let entry = cached.as_ref()?;
-        if entry.key != key || entry.frame_sequence != frame_sequence {
+        if entry.key.snapshot_generation != key.snapshot_generation
+            || entry.key.config_generation != key.config_generation
+        {
             return None;
         }
         if entry.completed_at.elapsed() <= self.decode_freshness {
@@ -517,13 +528,12 @@ impl FrameCache {
         None
     }
 
-    fn store_decoded_png(&self, key: FrameKey, frame_sequence: u64, png: &[u8]) {
-        if !self.is_snapshot_current(key, frame_sequence) {
+    fn store_decoded_png(&self, key: FrameKey, png: &[u8]) {
+        if !self.is_snapshot_current(key) {
             return;
         }
         *self.decoded_result.lock() = Some(DecodedResultCacheEntry {
             key,
-            frame_sequence,
             png: Arc::new(png.to_vec()),
             completed_at: Instant::now(),
         });
@@ -811,7 +821,7 @@ mod tests {
 
         cache.feed(&video_frame(2, false, true));
         let first = cache.snapshot().expect("keyframe creates a snapshot");
-        assert!(cache.is_snapshot_current(first.key, first.frame_sequence));
+        assert!(cache.is_snapshot_current(first.key));
         cache.feed(&video_frame(3, false, false));
         let second = cache.snapshot().expect("P frame extends the snapshot");
 
@@ -824,8 +834,43 @@ mod tests {
         assert_ne!(second.key, first.key);
         assert!(second.frame_sequence > first.frame_sequence);
         assert!(second.latest_frame_at >= first.latest_frame_at);
-        assert!(!cache.is_snapshot_current(first.key, first.frame_sequence));
-        assert!(cache.is_snapshot_current(second.key, second.frame_sequence));
+        // P 帧推进 frame_sequence 但不动代际：旧快照结构上仍是"当前"，
+        // 解码结果允许落后若干 P 帧（陈旧度由 freshness 窗口界定）
+        assert!(cache.is_snapshot_current(first.key));
+        assert!(cache.is_snapshot_current(second.key));
+    }
+
+    /// 动态画面回归：解码耗时内 P 帧持续到达不能让截图失效（否则 30fps 下
+    /// 任何解码都追不上帧序，冷启动动画期间截图 100% 失败）。
+    /// 代际内已解码 PNG 在 freshness 窗口内跨 frame_sequence 复用。
+    #[test]
+    fn decoded_png_survives_p_frame_arrivals_within_same_generation() {
+        let cache = FrameCache::start_with_freshness("ffmpeg", std::time::Duration::from_secs(1));
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+        let first = cache.snapshot().expect("snapshot before motion");
+        cache.store_decoded_png(first.key, b"png-v1");
+
+        // 模拟解码期间/之后画面持续运动：P 帧推进序号，代际不变
+        cache.feed(&video_frame(3, false, false));
+        cache.feed(&video_frame(4, false, false));
+        let second = cache.snapshot().expect("snapshot after motion");
+        assert_ne!(second.key, first.key);
+        assert!(cache.is_snapshot_current(first.key));
+        assert_eq!(
+            cache
+                .cached_decoded_png(second.key, second.frame_sequence)
+                .as_deref(),
+            Some(&b"png-v1"[..])
+        );
+
+        // 新 IDR 推进代际：旧解码结果彻底失效
+        cache.feed(&video_frame(9, false, true));
+        let third = cache.snapshot().expect("snapshot after new IDR");
+        assert!(!cache.is_snapshot_current(first.key));
+        assert!(cache
+            .cached_decoded_png(third.key, third.frame_sequence)
+            .is_none());
     }
 
     #[test]
@@ -840,7 +885,7 @@ mod tests {
         let current = cache.snapshot().expect("replacement snapshot");
 
         assert_ne!(old.key, current.key);
-        assert!(!cache.is_snapshot_current(old.key, old.frame_sequence));
+        assert!(!cache.is_snapshot_current(old.key));
         assert!(!cache.clear_gop_if_same(old.key));
 
         let preserved = cache.snapshot().expect("new GOP remains available");
@@ -1306,31 +1351,44 @@ mod tests {
     }
 
     #[test]
-    fn decoded_result_cache_requires_exact_frame_and_expires() {
+    fn decoded_result_cache_reuses_within_generation_and_expires() {
         let cache = FrameCache::start_with_freshness("ffmpeg", Duration::from_millis(50));
         cache.feed(&video_frame(1, true, false));
         cache.feed(&video_frame(2, false, true));
         let first = cache.snapshot().expect("first snapshot");
 
-        cache.store_decoded_png(first.key, first.frame_sequence, b"first");
+        cache.store_decoded_png(first.key, b"first");
         assert_eq!(
             cache.cached_decoded_png(first.key, first.frame_sequence),
             Some(b"first".to_vec())
         );
 
+        // 同代际内 P 帧推进序号：freshness 窗口内复用（陈旧度由窗口承诺）
         cache.feed(&video_frame(3, false, false));
         let second = cache.snapshot().expect("second snapshot");
         assert_ne!(first.key, second.key);
         assert_eq!(
-            cache.cached_decoded_png(first.key, first.frame_sequence),
-            None,
-            "new frame sequence must not reuse the old PNG"
+            cache.cached_decoded_png(second.key, second.frame_sequence),
+            Some(b"first".to_vec()),
+            "same generation + fresh window must reuse the decoded PNG"
         );
 
-        cache.store_decoded_png(second.key, second.frame_sequence, b"second");
+        // 新代际（config 变更清 GOP）后不得复用
+        cache.feed(&video_frame(9, true, false));
+        cache.feed(&video_frame(10, false, true));
+        let third = cache
+            .snapshot()
+            .expect("third snapshot after config change");
+        assert_eq!(
+            cache.cached_decoded_png(third.key, third.frame_sequence),
+            None,
+            "replaced generation must not reuse the old PNG"
+        );
+
+        cache.store_decoded_png(third.key, b"third");
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(
-            cache.cached_decoded_png(second.key, second.frame_sequence),
+            cache.cached_decoded_png(third.key, third.frame_sequence),
             None,
             "completed PNG must expire after the configured freshness window"
         );
