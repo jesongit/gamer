@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::store::{Db, Device, ScreenMode};
-use crate::webrtc::ViewerMap;
+use crate::webrtc::{remove_and_teardown_viewer, ViewerDisconnectReason, ViewerMap};
 
 use self::adb::Adb;
 use self::frames::FrameCache;
@@ -616,7 +616,16 @@ impl DeviceManager {
     /// 运行守卫：脚本运行中拒绝拆除（虚拟屏销毁会杀掉屏上游戏 activity、脚本
     /// 上下文全丢），仅 force=true（删除设备/看门狗确认死链路/显式管理动作）可绕过
     pub async fn disconnect_device(&self, id: &str, force: bool) {
-        if !force && self.has_running_scripts(id) {
+        let reason = if force {
+            DeviceDisconnectReason::Forced
+        } else {
+            DeviceDisconnectReason::Managed
+        };
+        self.disconnect_device_with_reason(id, reason).await;
+    }
+
+    pub async fn disconnect_device_with_reason(&self, id: &str, reason: DeviceDisconnectReason) {
+        if matches!(reason, DeviceDisconnectReason::Managed) && self.has_running_scripts(id) {
             warn!(device = %id, "script running, skip disconnect (use force to override)");
             return;
         }
@@ -629,6 +638,8 @@ impl DeviceManager {
                 rt.device.pkg.clone(),
             )
         };
+        let viewer_reason = reason.viewer_disconnect_reason();
+        let _ = remove_and_teardown_viewer(&self.viewers, id, viewer_reason).await;
         {
             let mut map = self.devices.write();
             let Some(rt) = map.get_mut(id) else { return };
@@ -686,7 +697,8 @@ impl DeviceManager {
                 continue;
             }
             info!(device = %d.name, "shutdown: disconnecting scrcpy session");
-            self.disconnect_device(id, true).await;
+            self.disconnect_device_with_reason(id, DeviceDisconnectReason::Shutdown)
+                .await;
         }
         // 留退场时间：control socket 关闭 → 设备端 server cleanup 需要一点传播时间
         tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -846,7 +858,8 @@ impl DeviceManager {
                     });
                 } else {
                     info!(device = %device.name, idle_secs = self.cfg.idle_power_secs, "idle: disconnect scrcpy session (low-power, adb kept)");
-                    self.disconnect_device(&id, false).await;
+                    self.disconnect_device_with_reason(&id, DeviceDisconnectReason::IdleTimeout)
+                        .await;
                 }
             }
         }
@@ -1050,6 +1063,27 @@ impl DeviceManager {
             }
         }
         None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceDisconnectReason {
+    Managed,
+    Forced,
+    IdleTimeout,
+    WatchdogDead,
+    WatchdogSilent,
+    Shutdown,
+}
+
+impl DeviceDisconnectReason {
+    fn viewer_disconnect_reason(self) -> ViewerDisconnectReason {
+        match self {
+            Self::Managed | Self::IdleTimeout | Self::WatchdogSilent => {
+                ViewerDisconnectReason::DeviceDisconnected
+            }
+            Self::Forced | Self::WatchdogDead | Self::Shutdown => ViewerDisconnectReason::Shutdown,
+        }
     }
 }
 

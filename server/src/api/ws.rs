@@ -13,7 +13,10 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use super::AppState;
 use crate::device::scrcpy::VideoFrame;
-use crate::webrtc::{make_audio_queue, make_frame_queue, ViewerHandle, ViewerSession};
+use crate::webrtc::{
+    make_audio_queue, make_frame_queue, remove_and_teardown_viewer, ViewerDisconnectReason,
+    ViewerHandle, ViewerSession,
+};
 
 pub async fn ws_device(
     ws: WebSocketUpgrade,
@@ -158,13 +161,11 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                         // 自动重连），再关 peer；旧 ws 循环在 peer 关闭后有
                                         // 冲刷窗口保证通知先于 close 到达。仅断浏览器↔服务端
                                         // 链路，设备 scrcpy 会话保持不动（新 viewer 无缝接管）
-                                        if let Some(tx) = old.notify.lock().take() {
-                                            let _ = tx.send(json!({"type": "taken_over"}).to_string());
-                                        }
-                                        old.running.store(false, std::sync::atomic::Ordering::SeqCst);
-                                        if let Some(p) = old.peer.upgrade() {
-                                            let _ = p.close().await;
-                                        }
+                                        crate::webrtc::teardown_viewer(
+                                            old,
+                                            ViewerDisconnectReason::TakenOver,
+                                        )
+                                        .await;
                                         info!(device = %device_id, "kicked previous viewer (takeover)");
                                     }
                                     // 消费者出现：打断空闲低功耗计时（镜像模式若已关屏则唤醒）
@@ -229,7 +230,6 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
     }
 
     if let Some(v) = viewer {
-        v.running.store(false, std::sync::atomic::Ordering::SeqCst);
         // 只注销自己（若期间已被新连接替换，则注册表里已不是自己）
         // 注意：std::sync::Mutex 不可重入！不能在持锁状态下再次 lock()
         // （旧实现 if-let 匹配的临时 guard 存活到块结束，块内再 lock 自死锁，
@@ -241,9 +241,13 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                 .unwrap_or(false)
         };
         if is_mine {
-            st.viewers.lock().unwrap().remove(&device_id);
+            let _ = remove_and_teardown_viewer(
+                &st.viewers,
+                &device_id,
+                ViewerDisconnectReason::PeerClosed,
+            )
+            .await;
         }
-        let _ = v.peer.close().await;
         info!(device = %device_id, "viewer closed");
     }
 }
