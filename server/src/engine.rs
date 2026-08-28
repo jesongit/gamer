@@ -106,6 +106,12 @@ pub use model::{Ctx, FuncDef, Runner};
 
 /// find 未显式指定 timeout 时的默认超时毫秒数（30 分钟）
 const FIND_DEFAULT_TIMEOUT_MS: u64 = 1_800_000;
+/// wait 分片睡眠的单片时长：停止请求最多延迟这么久生效
+const WAIT_STOP_SLICE_MS: u64 = 200;
+/// find 截图持续失败的宽限期：超过则判定链路/会话异常，带因中止
+const FIND_SHOT_FAIL_GRACE_MS: u64 = 20_000;
+/// color 截图重试次数（单次判定步骤，无轮询语义，小步重试即可）
+const COLOR_SHOT_RETRIES: u32 = 3;
 
 /// 自定义函数嵌套调用上限（防无限递归）
 const MAX_FUNC_DEPTH: usize = 32;
@@ -778,7 +784,17 @@ impl Runner {
                     other => Self::parse_duration(other, "wait")?,
                 };
                 ctx.log("debug", format!("等待 {}ms", ms));
-                tokio::time::sleep(Duration::from_millis(ms)).await;
+                // 分片睡眠 + 逐片检查 stop：停止标志只在步骤间检查，长 wait
+                // （如 1h）一口睡满会让「停止中」永远等不到步骤边界
+                let mut left = ms;
+                while left > 0 {
+                    if ctx.stop.load(Ordering::SeqCst) {
+                        return Ok(());
+                    }
+                    let slice = left.min(WAIT_STOP_SLICE_MS);
+                    tokio::time::sleep(Duration::from_millis(slice)).await;
+                    left -= slice;
+                }
             }
             "find" => self.exec_find(ctx, step).await?,
             "color" => self.exec_color(ctx, step).await?,
@@ -979,6 +995,10 @@ impl Runner {
             );
         }
         let start = std::time::Instant::now();
+        // 截图瞬态失败（会话刚建立首帧未到 / 无线链路抖动）不整脚本夭折：
+        // 轮询语义下跳过本轮重试，持续失败超过宽限期才判死带因退出
+        let mut shot_fail_since: Option<std::time::Instant> = None;
+        let mut shot_fail_warned_at: Option<std::time::Instant> = None;
         loop {
             if ctx.stop.load(Ordering::SeqCst)
                 || ctx.exit.load(Ordering::SeqCst)
@@ -994,7 +1014,31 @@ impl Runner {
                 self.run_branch(ctx, &else_steps, &refs).await?;
                 break;
             }
-            if let Some(mm) = self.match_one(ctx, &template).await? {
+            let screen = match self.shot(ctx).await {
+                Ok(s) => {
+                    shot_fail_since = None;
+                    s
+                }
+                Err(e) => {
+                    let since = shot_fail_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed().as_millis() as u64 > FIND_SHOT_FAIL_GRACE_MS {
+                        anyhow::bail!(
+                            "截图持续失败（已重试 {}s，疑似链路/会话异常）：{e:#}",
+                            FIND_SHOT_FAIL_GRACE_MS / 1000
+                        );
+                    }
+                    if shot_fail_warned_at.map_or(true, |t| t.elapsed().as_secs() >= 10) {
+                        shot_fail_warned_at = Some(std::time::Instant::now());
+                        ctx.log(
+                            "warn",
+                            format!("截图失败，{}ms 后重试：{e:#}", ctx.interval_ms),
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(ctx.interval_ms)).await;
+                    continue;
+                }
+            };
+            if let Some(mm) = self.match_screen_one(ctx, &template, screen).await? {
                 self.emit(
                     &ctx.device_id,
                     ScriptEvent::Hit {
@@ -1014,7 +1058,14 @@ impl Runner {
                 self.click_center(ctx, &mm).await?;
                 if verify {
                     tokio::time::sleep(Duration::from_millis(ctx.interval_ms)).await;
-                    if let Some(m2) = self.match_one(ctx, &template).await? {
+                    let recheck = match self.shot(ctx).await {
+                        Ok(scr) => self.match_screen_one(ctx, &template, scr).await,
+                        Err(e) => {
+                            ctx.log("debug", format!("verify 截图失败，跳过复查：{e:#}"));
+                            Ok(None)
+                        }
+                    };
+                    if let Some(m2) = recheck? {
                         self.emit(
                             &ctx.device_id,
                             ScriptEvent::Hit {
@@ -1050,7 +1101,11 @@ impl Runner {
                 if ctx.stop.load(Ordering::SeqCst) {
                     break;
                 }
-                if let Some(mm) = self.match_one(ctx, b).await? {
+                let found = match self.shot(ctx).await {
+                    Ok(scr) => self.match_screen_one(ctx, b, scr).await.unwrap_or(None),
+                    Err(_) => None, // 截图瞬态失败按本轮 block 未出现处理
+                };
+                if let Some(mm) = found {
                     self.emit(
                         &ctx.device_id,
                         ScriptEvent::Hit {
@@ -1122,11 +1177,29 @@ impl Runner {
         let refs: Vec<String> = std::iter::once(format!("[{}, {}]", rx, ry))
             .chain(cases.iter().map(|(_, hex, _)| hex.clone()))
             .collect();
-        let screen = self
-            .devices
-            .screenshot(&ctx.device_id)
-            .await
-            .map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
+        // 无轮询语义，截图瞬态失败小步重试几次，仍失败才带因中止
+        let screen = {
+            let mut last_err = None;
+            let mut screen = None;
+            for _ in 0..COLOR_SHOT_RETRIES {
+                match self.shot(ctx).await {
+                    Ok(s) => {
+                        screen = Some(s);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                        tokio::time::sleep(Duration::from_millis(ctx.interval_ms)).await;
+                    }
+                }
+            }
+            match screen {
+                Some(s) => s,
+                None => {
+                    return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("截图失败")));
+                }
+            }
+        };
         let (w, h) = self.screen_size(ctx, &screen);
         if w == 0 || h == 0 {
             anyhow::bail!("无法获取屏幕尺寸");
@@ -1537,11 +1610,24 @@ impl Runner {
         ctx: &mut Ctx,
         template: &str,
     ) -> anyhow::Result<Option<matcher::MatchResult>> {
-        let screen = self
-            .devices
+        let screen = self.shot(ctx).await?;
+        self.match_screen_one(ctx, template, screen).await
+    }
+
+    /// 截图（find 的软重试语义由调用方实现，这里只做错误包装）
+    async fn shot(&self, ctx: &Ctx) -> anyhow::Result<Vec<u8>> {
+        self.devices
             .screenshot(&ctx.device_id)
             .await
-            .map_err(|e| anyhow::anyhow!("截图失败: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("截图失败: {e:#}"))
+    }
+
+    async fn match_screen_one(
+        &self,
+        ctx: &mut Ctx,
+        template: &str,
+        screen: Vec<u8>,
+    ) -> anyhow::Result<Option<matcher::MatchResult>> {
         let (w, h) = self.screen_size(ctx, &screen);
         if w == 0 || h == 0 {
             anyhow::bail!("无法获取屏幕尺寸");
@@ -2679,6 +2765,43 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("cond"));
+    }
+
+    /// 长 wait 可被停止打断：stop 置位后分片睡眠立即退出，不再等满整个 wait
+    /// （回归：`wait: 1h` 一步睡满，run_manager 停在 stopping，前端卡「停止中」）
+    #[tokio::test]
+    async fn wait_interruptible_by_stop() {
+        let (runner, _ctx) = test_runner_ctx();
+        let stop = Arc::new(AtomicBool::new(false));
+        let code = "steps:\n  - log: begin\n  - wait: 1h\n  - log: after";
+        let stop2 = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            stop2.store(true, Ordering::SeqCst);
+        });
+        let t = std::time::Instant::now();
+        let logs = runner
+            .run(
+                "dev",
+                "com.test/t.yml",
+                code,
+                stop,
+                None,
+                0,
+                None,
+                None,
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert!(
+            t.elapsed() < Duration::from_secs(5),
+            "wait 未被停止打断，耗时 {:?}",
+            t.elapsed()
+        );
+        assert!(logs.iter().any(|(_, m)| m == "begin"));
+        assert!(!logs.iter().any(|(_, m)| m == "after"));
+        assert!(logs.iter().any(|(_, m)| m == "脚本被停止"));
     }
 
     /// 跨文件函数调用（exec_cross_func）：子脚本按名解析（同分区优先、缺扩展名
