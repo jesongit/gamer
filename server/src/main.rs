@@ -84,26 +84,19 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let db = Arc::new(store::Store::open(&cfg)?);
-    // 运行日志保留策略：启动时已做一次清理，这个低频任务负责长期运行实例。
-    // SQLite 调用放入 blocking 池，不占用 Tokio 核心线程；每次只删除小批量。
+    // 优雅停机信号（POST /api/shutdown 拆完会话后触发）；先于周期任务创建，
+    // 运行日志保留任务同挂此信号——服务关闭时随之结束
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    // 运行日志保留策略（DATA-004）：启动时已做一次清理，这个低频任务负责长期
+    // 运行实例。SQLite 调用放入 blocking 池，不占用 Tokio 核心线程；每次只删除小批量。
     if cfg.log_retain_days > 0 {
-        let db_for_retention = db.clone();
+        let retention_db = db.clone();
         let retain_days = cfg.log_retain_days;
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(15 * 60));
-            loop {
-                tick.tick().await;
-                let db = db_for_retention.clone();
-                match tokio::task::spawn_blocking(move || db.prune_logs(retain_days)).await {
-                    Ok(Ok(deleted)) if deleted > 0 => {
-                        info!(deleted, retain_days, "expired run logs removed");
-                    }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => warn!(error = %e, "periodic run log cleanup failed"),
-                    Err(e) => warn!(error = %e, "run log cleanup worker failed"),
-                }
-            }
-        });
+        tokio::spawn(run_log_retention(
+            retention_db,
+            retain_days,
+            shutdown_rx.clone(),
+        ));
     }
 
     // 鉴权状态（阶段 2）：凭据链路解析 + 回环管理通道令牌 + 会话治理参数
@@ -160,8 +153,7 @@ async fn main() -> anyhow::Result<()> {
     ));
     scheduler.start().await;
 
-    // HTTP + WebSocket API；优雅停机信号（POST /api/shutdown 拆完会话后触发）
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    // HTTP + WebSocket API（停机信号已在上方创建，由 /api/shutdown 触发）
     let app = api::build_router(
         db,
         devices,
@@ -187,4 +179,69 @@ async fn main() -> anyhow::Result<()> {
     info!("server exited");
 
     Ok(())
+}
+
+/// 运行日志保留周期（DATA-004）：低频兜底清理即可，无需可配置——保留天数
+/// 复用 config.toml 的 `log_retain_days`，这里只固定触发频率。
+const LOG_RETENTION_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// 运行日志周期保留任务（DATA-004）：每 [`LOG_RETENTION_INTERVAL`] 调用一次
+/// [`store::Store::prune_logs`]（分批删除，避免一次大事务长期占用数据库锁）。
+/// 挂在 main 的 watch 停机信号上——服务关闭时任务随之结束，不阻塞优雅退出。
+async fn run_log_retention(
+    db: Arc<store::Store>,
+    retain_days: u32,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut tick = tokio::time::interval(LOG_RETENTION_INTERVAL);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let db = db.clone();
+                match tokio::task::spawn_blocking(move || db.prune_logs(retain_days)).await {
+                    Ok(Ok(deleted)) if deleted > 0 => {
+                        info!(deleted, retain_days, "periodic run log cleanup removed expired rows");
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => warn!(error = %e, "periodic run log cleanup failed"),
+                    Err(e) => warn!(error = %e, "run log cleanup worker failed"),
+                }
+            }
+            _ = shutdown.changed() => {
+                info!("run log retention task stopped (shutdown)");
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 周期保留任务随停机信号结束（DATA-004）：首轮 tick 即触发一次
+    /// prune_logs（分批删除逻辑本体已在 store.rs 测试覆盖），收到停机
+    /// 信号后任务必须在有限时间内退出，不悬挂阻塞优雅关机。
+    #[tokio::test]
+    async fn log_retention_task_exits_on_shutdown_signal() {
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-retention-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = config::Config {
+            data_dir: dir.clone(),
+            ..Default::default()
+        };
+        let db = Arc::new(store::Store::open(&cfg).unwrap());
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(run_log_retention(db, 14, rx));
+
+        tx.send(true).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), task).await;
+        assert!(result.is_ok(), "保留任务未随停机信号退出");
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
