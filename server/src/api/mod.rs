@@ -52,6 +52,16 @@ const BODY_LIMIT_ZIP_IMPORT: usize = 20 * 1024 * 1024;
 /// 公开豁免组请求体上限（登录等极小 JSON）
 const BODY_LIMIT_PUBLIC: usize = 64 * 1024;
 
+async fn run_blocking_api<T, F>(task: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|e| ApiError::internal(format!("blocking worker failed: {e}")))?
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
@@ -1344,29 +1354,38 @@ async fn api_list_templates(State(st): State<AppState>, Query(q): Query<PkgQuery
         },
         None => st.scripts.partitions(),
     };
-    let mut out = Vec::new();
-    for pkg in pkgs {
-        let dir = st.scripts.tmpl_dir(&pkg);
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                // 模板目录专用：列出所有非隐藏文件（模板名可能带 .png/.jpg，也可能是 随机名字#x1_y1_x2_y2 这种带小数点无后缀名）
-                let fname = e.file_name().to_string_lossy().to_string();
-                if e.path().is_file() && !fname.starts_with('.') {
-                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                    // mtime（unix 秒）：前端按修改时间倒序排模板列表
-                    let mtime = e
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    out.push(serde_json::json!({"name": fname, "size": size, "mtime": mtime, "pkg": pkg}));
+    match run_blocking_api(move || {
+        let mut out = Vec::new();
+        for pkg in pkgs {
+            let dir = st.scripts.tmpl_dir(&pkg);
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for e in entries.flatten() {
+                    // 模板目录专用：列出所有非隐藏文件（模板名可能带 .png/.jpg，也可能是 随机名字#x1_y1_x2_y2 这种带小数点无后缀名）
+                    let fname = e.file_name().to_string_lossy().to_string();
+                    if e.path().is_file() && !fname.starts_with('.') {
+                        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                        // mtime（unix 秒）：前端按修改时间倒序排模板列表
+                        let mtime = e
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        out.push(
+                            serde_json::json!({"name": fname, "size": size, "mtime": mtime, "pkg": pkg}),
+                        );
+                    }
                 }
             }
         }
+        Ok(out)
+    })
+    .await
+    {
+        Ok(out) => Json(out).into_response(),
+        Err(err) => err.into_response(),
     }
-    Json(out).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1402,19 +1421,22 @@ async fn api_upload_template(
         Ok(b) => b,
         Err(e) => return ApiError::bad_request(e.to_string()).into_response(),
     };
-    let dir = st.scripts.tmpl_dir(&pkg);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return ApiError::internal(e.to_string()).into_response();
-    }
     let name = sanitize_filename(&req.name);
-    let path = dir.join(&name);
-    if let Err(e) = crate::scripts::atomic_write(&path, &bytes) {
-        return ApiError::internal(e.to_string()).into_response();
+    match run_blocking_api(move || {
+        let dir = st.scripts.tmpl_dir(&pkg);
+        std::fs::create_dir_all(&dir).map_err(|e| ApiError::internal(e.to_string()))?;
+        let path = dir.join(&name);
+        crate::scripts::atomic_write(&path, &bytes)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        Ok(Json(
+            serde_json::json!({"ok": true, "name": name, "size": bytes.len(), "orig_size": orig.len()}),
+        ))
+    })
+    .await
+    {
+        Ok(resp) => resp.into_response(),
+        Err(err) => err.into_response(),
     }
-    Json(
-        serde_json::json!({"ok": true, "name": name, "size": bytes.len(), "orig_size": orig.len()}),
-    )
-    .into_response()
 }
 
 async fn api_delete_template(
@@ -1426,13 +1448,16 @@ async fn api_delete_template(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
-    match std::fs::remove_file(&path) {
-        Ok(_) => {
-            st.scripts.cleanup_partition(&pkg); // 分区 yaml/tmpl 都空了则清理目录
-            Json(serde_json::json!({"ok": true})).into_response()
-        }
-        Err(e) => ApiError::internal(e.to_string()).into_response(),
+    match run_blocking_api(move || {
+        let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
+        std::fs::remove_file(&path).map_err(|e| ApiError::internal(e.to_string()))?;
+        st.scripts.cleanup_partition(&pkg); // 分区 yaml/tmpl 都空了则清理目录
+        Ok(Json(serde_json::json!({"ok": true})))
+    })
+    .await
+    {
+        Ok(resp) => resp.into_response(),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -1452,28 +1477,31 @@ async fn api_rename_template(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    let dir = st.scripts.tmpl_dir(&pkg);
-    let old_path = dir.join(sanitize_filename(&old_name));
     let new_name = sanitize_filename(&req.name);
     if new_name == sanitize_filename(&old_name) {
         return ApiError::bad_request("名称未变化").into_response();
     }
-    let new_path = dir.join(&new_name);
-    if new_path.exists() {
-        return ApiError::bad_request("已存在同名模板").into_response();
+    match run_blocking_api(move || {
+        let dir = st.scripts.tmpl_dir(&pkg);
+        let old_path = dir.join(sanitize_filename(&old_name));
+        let new_path = dir.join(&new_name);
+        if new_path.exists() {
+            return Err(ApiError::bad_request("已存在同名模板"));
+        }
+        let bytes = std::fs::read(&old_path).map_err(|_| ApiError::not_found("模板不存在"))?;
+        crate::scripts::atomic_write(&new_path, &bytes)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        if std::fs::remove_file(&old_path).is_err() {
+            let _ = std::fs::remove_file(&new_path);
+            return Err(ApiError::internal("旧模板删除失败"));
+        }
+        Ok(Json(serde_json::json!({"ok": true, "name": new_name})))
+    })
+    .await
+    {
+        Ok(resp) => resp.into_response(),
+        Err(err) => err.into_response(),
     }
-    let bytes = match std::fs::read(&old_path) {
-        Ok(b) => b,
-        Err(_) => return ApiError::not_found("模板不存在").into_response(),
-    };
-    if let Err(e) = crate::scripts::atomic_write(&new_path, &bytes) {
-        return ApiError::internal(e.to_string()).into_response();
-    }
-    if std::fs::remove_file(&old_path).is_err() {
-        let _ = std::fs::remove_file(&new_path);
-        return ApiError::internal("旧模板删除失败").into_response();
-    }
-    Json(serde_json::json!({"ok": true, "name": new_name})).into_response()
 }
 
 /// 返回模板图片原始字节（PNG/JPEG），供前端缩略图与预览使用。
@@ -1487,30 +1515,33 @@ async fn api_get_template_image(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(_) => return ApiError::not_found("模板不存在").into_response(),
-    };
-    let mime = match path
-        .extension()
-        .and_then(|x| x.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
+    match run_blocking_api(move || {
+        let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
+        let bytes = std::fs::read(&path).map_err(|_| ApiError::not_found("模板不存在"))?;
+        let mime = match path
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "jpg" | "jpeg" => "image/jpeg",
+            _ => "image/png",
+        };
+        Ok((
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            bytes,
+        ))
+    })
+    .await
     {
-        "jpg" | "jpeg" => "image/jpeg",
-        _ => "image/png",
-    };
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, mime),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        bytes,
-    )
-        .into_response()
+        Ok(resp) => resp.into_response(),
+        Err(err) => err.into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1530,10 +1561,14 @@ async fn api_test_template(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    let tpl_path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
-    let tpl_bytes = match std::fs::read(&tpl_path) {
-        Ok(b) => b,
-        Err(_) => return ApiError::not_found("模板不存在").into_response(),
+    let tpl_bytes = match run_blocking_api(move || {
+        let tpl_path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
+        std::fs::read(&tpl_path).map_err(|_| ApiError::not_found("模板不存在"))
+    })
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(err) => return err.into_response(),
     };
     let screen = match st.devices.screenshot(&req.device_id).await {
         Ok(s) => s,
@@ -1555,9 +1590,15 @@ async fn api_test_template(
 // ---------- 脚本 ----------
 
 async fn api_list_scripts(State(st): State<AppState>) -> Response {
-    match st.scripts.list() {
+    match run_blocking_api(move || {
+        st.scripts
+            .list()
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
         Ok(s) => Json(s).into_response(),
-        Err(e) => ApiError::internal(e.to_string()).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -1577,22 +1618,31 @@ async fn api_save_script(State(st): State<AppState>, Json(req): Json<SaveScriptR
     if crate::scripts::sanitize_part(&req.pkg).is_none() {
         return ApiError::bad_request("应用包名非法（只允许字母数字 . _ -）").into_response();
     }
-    match st
-        .scripts
-        .save(req.id.as_deref(), &req.pkg, &req.name, &req.content)
+    match run_blocking_api(move || {
+        st.scripts
+            .save(req.id.as_deref(), &req.pkg, &req.name, &req.content)
+            .map_err(|e| ApiError::bad_request(e.to_string()))
+    })
+    .await
     {
         Ok(s) => {
             Json(serde_json::json!({"ok": true, "id": s.id, "package": s.package, "name": s.name}))
                 .into_response()
         }
-        Err(e) => ApiError::bad_request(e.to_string()).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
 async fn api_delete_script(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    match st.scripts.delete(&id) {
+    match run_blocking_api(move || {
+        st.scripts
+            .delete(&id)
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -1602,9 +1652,15 @@ async fn api_export_partition(State(st): State<AppState>, Query(q): Query<PkgQue
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    match st.scripts.export_partition(&pkg) {
+    match run_blocking_api(move || {
+        st.scripts
+            .export_partition(&pkg)
+            .map_err(|e| ApiError::not_found(e.to_string()))
+    })
+    .await
+    {
         Ok((filename, bytes)) => zip_response(&filename, bytes),
-        Err(e) => ApiError::not_found(e.to_string()).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -1645,9 +1701,15 @@ async fn api_import_script(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    match st.scripts.import(&body, &pkg, confirm) {
+    match run_blocking_api(move || {
+        st.scripts
+            .import(&body, &pkg, confirm)
+            .map_err(|e| ApiError::bad_request(e.to_string()))
+    })
+    .await
+    {
         Ok(rep) => Json(rep).into_response(),
-        Err(e) => ApiError::bad_request(e.to_string()).into_response(),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -1691,10 +1753,17 @@ async fn api_run_script(
     Path(id): Path<String>,
     Json(req): Json<RunScriptReq>,
 ) -> Response {
+    let script_id = id.clone();
     // 脚本存在性先校验（404 优先于设备冲突）
-    let Some(script) = (match st.scripts.get(&id) {
+    let Some(script) = (match run_blocking_api(move || {
+        st.scripts
+            .get(&id)
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
         Ok(s) => s,
-        Err(e) => return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => return e.into_response(),
     }) else {
         return err_response(StatusCode::NOT_FOUND, "脚本不存在");
     };
@@ -1706,7 +1775,7 @@ async fn api_run_script(
     let rreq = crate::run_manager::StartRequest {
         run_id: String::new(),
         device_id: req.device_id.clone(),
-        script_id: id.clone(),
+        script_id,
         content: script.content.clone(),
         source: crate::run_manager::RunSource::Manual,
         task_id: None,
