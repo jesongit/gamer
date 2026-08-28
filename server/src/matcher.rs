@@ -189,7 +189,17 @@ fn metadata_key(path: &Path, meta: &std::fs::Metadata, content_hash: [u8; 32]) -
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    if let Ok(normalized) = path.canonicalize() {
+        return normalized;
+    }
+    // 删除/重命名后的路径本身不存在，canonicalize 失败；父目录通常仍在，
+    // 先规范化父目录再拼回文件名，保证主动失效仍命中既有绝对路径键。
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name()) {
+        if let Ok(normalized_parent) = parent.canonicalize() {
+            return normalized_parent.join(name);
+        }
+    }
+    path.to_path_buf()
 }
 
 #[allow(dead_code)]
@@ -1050,6 +1060,7 @@ impl Matcher {
 mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
+    use std::hint::black_box;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
@@ -1060,24 +1071,310 @@ mod tests {
     static TEST_FULLSCREEN: AtomicU64 = AtomicU64::new(0);
     static TEST_DURATION_MS: AtomicU64 = AtomicU64::new(0);
 
-    fn percentile(samples: &mut [u128], p: f64) -> u128 {
-        samples.sort_unstable();
-        let rank = ((samples.len() as f64) * p).ceil() as usize;
-        samples[rank.saturating_sub(1).min(samples.len() - 1)]
+    fn percentile(samples: &[u128], p: f64) -> u128 {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let rank = ((sorted.len() as f64) * p).ceil() as usize;
+        sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
     }
 
-    fn perf_report(metric: &str, samples: &mut [u128]) {
-        let p50 = percentile(samples, 0.50);
-        let p95 = percentile(samples, 0.95);
-        let max = samples.last().copied().unwrap_or_default();
+    #[derive(Clone, Copy)]
+    struct PerfSample {
+        wall_us: u128,
+        cpu_us: Option<u128>,
+        peak_mem_bytes: Option<u64>,
+    }
+
+    fn format_optional<T: std::fmt::Display>(value: Option<T>) -> String {
+        value
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "未实测".to_string())
+    }
+
+    fn perf_report(metric: &str, samples: &[PerfSample]) {
+        assert!(!samples.is_empty(), "{metric} 没有样本");
+        let wall: Vec<_> = samples.iter().map(|sample| sample.wall_us).collect();
+        let cpu: Vec<_> = samples.iter().filter_map(|sample| sample.cpu_us).collect();
+        let peak_mem = samples
+            .iter()
+            .filter_map(|sample| sample.peak_mem_bytes)
+            .max();
+        let cpu_ms = if cpu.is_empty() {
+            "未实测".to_string()
+        } else {
+            format!("{:.3}", cpu.iter().sum::<u128>() as f64 / 1000.0)
+        };
         println!(
-            "PERF metric={} samples={} p50_us={} p95_us={} max_us={}",
+            "PERF metric={} samples={} p50_us={} p95_us={} max_us={} cpu_ms={} cpu_p50_us={} cpu_p95_us={} cpu_max_us={} peak_mem_bytes={} platform={}",
             metric,
             samples.len(),
-            p50,
-            p95,
-            max
+            percentile(&wall, 0.50),
+            percentile(&wall, 0.95),
+            wall.iter().copied().max().unwrap_or_default(),
+            cpu_ms,
+            format_optional(cpu.first().map(|_| percentile(&cpu, 0.50))),
+            format_optional(cpu.first().map(|_| percentile(&cpu, 0.95))),
+            format_optional(cpu.iter().copied().max()),
+            format_optional(peak_mem),
+            std::env::consts::OS,
         );
+    }
+
+    #[cfg(unix)]
+    #[repr(C)]
+    struct TimeVal {
+        tv_sec: std::os::raw::c_long,
+        tv_usec: std::os::raw::c_long,
+    }
+
+    #[cfg(unix)]
+    #[repr(C)]
+    struct ResourceUsage {
+        ru_utime: TimeVal,
+        ru_stime: TimeVal,
+        ru_maxrss: std::os::raw::c_long,
+        ru_ixrss: std::os::raw::c_long,
+        ru_idrss: std::os::raw::c_long,
+        ru_isrss: std::os::raw::c_long,
+        ru_minflt: std::os::raw::c_long,
+        ru_majflt: std::os::raw::c_long,
+        ru_nswap: std::os::raw::c_long,
+        ru_inblock: std::os::raw::c_long,
+        ru_oublock: std::os::raw::c_long,
+        ru_msgsnd: std::os::raw::c_long,
+        ru_msgrcv: std::os::raw::c_long,
+        ru_nsignals: std::os::raw::c_long,
+        ru_nvcsw: std::os::raw::c_long,
+        ru_nivcsw: std::os::raw::c_long,
+    }
+
+    #[cfg(unix)]
+    fn resource_usage() -> Option<ResourceUsage> {
+        unsafe extern "C" {
+            fn getrusage(
+                who: std::os::raw::c_int,
+                usage: *mut ResourceUsage,
+            ) -> std::os::raw::c_int;
+        }
+        let mut usage = std::mem::MaybeUninit::<ResourceUsage>::uninit();
+        let status = unsafe { getrusage(0, usage.as_mut_ptr()) };
+        (status == 0).then(|| unsafe { usage.assume_init() })
+    }
+
+    #[cfg(unix)]
+    fn process_cpu_time_ns() -> Option<u128> {
+        let usage = resource_usage()?;
+        let to_ns = |time: TimeVal| {
+            (time.tv_sec.max(0) as u128) * 1_000_000_000 + (time.tv_usec.max(0) as u128) * 1_000
+        };
+        Some(to_ns(usage.ru_utime) + to_ns(usage.ru_stime))
+    }
+
+    #[cfg(unix)]
+    fn process_peak_memory_bytes() -> Option<u64> {
+        let usage = resource_usage()?;
+        let maxrss = usage.ru_maxrss.max(0) as u64;
+        #[cfg(target_os = "macos")]
+        {
+            Some(maxrss)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Some(maxrss.saturating_mul(1024))
+        }
+    }
+
+    #[cfg(windows)]
+    fn process_cpu_time_ns() -> Option<u128> {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct FileTime {
+            low: u32,
+            high: u32,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+            fn GetProcessTimes(
+                process: *mut std::ffi::c_void,
+                creation: *mut FileTime,
+                exit: *mut FileTime,
+                kernel: *mut FileTime,
+                user: *mut FileTime,
+            ) -> i32;
+        }
+        let mut creation = FileTime { low: 0, high: 0 };
+        let mut exit = FileTime { low: 0, high: 0 };
+        let mut kernel = FileTime { low: 0, high: 0 };
+        let mut user = FileTime { low: 0, high: 0 };
+        let ok = unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let to_ns = |time: FileTime| (((time.high as u64) << 32 | time.low as u64) as u128) * 100;
+        Some(to_ns(kernel) + to_ns(user))
+    }
+
+    #[cfg(windows)]
+    fn process_peak_memory_bytes() -> Option<u64> {
+        #[repr(C)]
+        struct ProcessMemoryCounters {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        }
+        #[link(name = "psapi")]
+        unsafe extern "system" {
+            fn GetProcessMemoryInfo(
+                process: *mut std::ffi::c_void,
+                counters: *mut ProcessMemoryCounters,
+                size: u32,
+            ) -> i32;
+        }
+        let mut counters = ProcessMemoryCounters {
+            cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+            page_fault_count: 0,
+            peak_working_set_size: 0,
+            working_set_size: 0,
+            quota_peak_paged_pool_usage: 0,
+            quota_paged_pool_usage: 0,
+            quota_peak_non_paged_pool_usage: 0,
+            quota_non_paged_pool_usage: 0,
+            pagefile_usage: 0,
+            peak_pagefile_usage: 0,
+        };
+        let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+        (ok != 0).then_some(counters.peak_working_set_size as u64)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn process_cpu_time_ns() -> Option<u128> {
+        None
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn process_peak_memory_bytes() -> Option<u64> {
+        None
+    }
+
+    fn sample_sync<T>(operation: impl FnOnce() -> T) -> (T, PerfSample) {
+        let cpu_before = process_cpu_time_ns();
+        let started = Instant::now();
+        let value = operation();
+        let wall_us = started.elapsed().as_micros();
+        let cpu_us = cpu_before.and_then(|before| {
+            process_cpu_time_ns().map(|after| after.saturating_sub(before) / 1000)
+        });
+        (
+            value,
+            PerfSample {
+                wall_us,
+                cpu_us,
+                peak_mem_bytes: process_peak_memory_bytes(),
+            },
+        )
+    }
+
+    async fn sample_async<T>(operation: impl std::future::Future<Output = T>) -> (T, PerfSample) {
+        let cpu_before = process_cpu_time_ns();
+        let started = Instant::now();
+        let value = operation.await;
+        let wall_us = started.elapsed().as_micros();
+        let cpu_us = cpu_before.and_then(|before| {
+            process_cpu_time_ns().map(|after| after.saturating_sub(before) / 1000)
+        });
+        (
+            value,
+            PerfSample {
+                wall_us,
+                cpu_us,
+                peak_mem_bytes: process_peak_memory_bytes(),
+            },
+        )
+    }
+
+    fn split_perf_gop(stream: &[u8]) -> (Vec<u8>, Vec<crate::device::scrcpy::VideoFrame>) {
+        use crate::device::scrcpy::VideoFrame;
+
+        let mut starts = Vec::new();
+        let mut index = 0;
+        while index + 3 <= stream.len() {
+            let prefix = if stream[index..].starts_with(&[0, 0, 0, 1]) {
+                4
+            } else if stream[index..].starts_with(&[0, 0, 1]) {
+                3
+            } else {
+                index += 1;
+                continue;
+            };
+            starts.push((index, prefix));
+            index += prefix;
+        }
+
+        let mut config = Vec::new();
+        let mut frames = Vec::new();
+        let mut current = Vec::new();
+        let mut current_has_slice = false;
+        let mut current_is_keyframe = false;
+        for (position, (start, prefix)) in starts.iter().enumerate() {
+            let end = starts
+                .get(position + 1)
+                .map(|(next, _)| *next)
+                .unwrap_or(stream.len());
+            let nal = &stream[start + prefix..end];
+            let nal_type = nal.first().copied().unwrap_or_default() & 0x1f;
+            let first_slice =
+                matches!(nal_type, 1 | 5) && nal.get(1).is_some_and(|byte| byte & 0x80 != 0);
+            if matches!(nal_type, 7 | 8) && frames.is_empty() && current.is_empty() {
+                config.extend_from_slice(&stream[*start..end]);
+                continue;
+            }
+            if first_slice && current_has_slice {
+                frames.push(VideoFrame {
+                    data: std::mem::take(&mut current),
+                    pts_us: frames.len() as u64 * 33_333,
+                    is_config: false,
+                    is_keyframe: current_is_keyframe,
+                    annex_b: true,
+                });
+                current_has_slice = false;
+                current_is_keyframe = false;
+            }
+            if first_slice {
+                current_has_slice = true;
+                current_is_keyframe = nal_type == 5;
+            }
+            current.extend_from_slice(&stream[*start..end]);
+        }
+        if !current.is_empty() {
+            frames.push(VideoFrame {
+                data: current,
+                pts_us: frames.len() as u64 * 33_333,
+                is_config: false,
+                is_keyframe: current_is_keyframe,
+                annex_b: true,
+            });
+        }
+        (config, frames)
     }
 
     fn encode_png(image: &RgbImage) -> Vec<u8> {
@@ -1391,33 +1688,86 @@ mod tests {
         assert!(prepared1.var > 1e-6);
     }
 
-    /// 固定 PNG 夹具的真实匹配基准。默认只测带区域元数据的区域搜索，避免普通
-    /// 单元测试意外运行数十秒；设置 GAMER_PERF_FULL_SCREEN=1 才额外测全屏路径。
-    /// 输出为机器可读的 p50/p95/max 微秒值，不包含任何预设或伪造的性能数据。
     #[test]
+    fn short_name_generation_and_delete_invalidation_clear_resolver_cache() {
+        let _lock = TEST_GUARD.lock().unwrap();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-matcher-short-name-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let first = dir.join("login#u.png");
+        let second = dir.join("login#d.png");
+        std::fs::write(&first, b"placeholder").unwrap();
+
+        let resolved = cached_resolved_template_file(&dir, "login.png").unwrap();
+        assert_eq!(resolved, normalize_path(&first));
+
+        // Directory generation changes after a short-name candidate is added, so the
+        // stale unique resolution cannot be reused and the duplicate is rejected.
+        std::fs::write(&second, b"placeholder").unwrap();
+        assert!(cached_resolved_template_file(&dir, "login.png").is_err());
+
+        invalidate_template_cache_dir(&dir);
+        assert!(template_cache()
+            .lock()
+            .path_resolve_entries
+            .keys()
+            .all(|key| key.dir != normalize_path(&dir)));
+
+        std::fs::remove_file(&second).unwrap();
+        assert_eq!(
+            cached_resolved_template_file(&dir, "login.png").unwrap(),
+            normalize_path(&first)
+        );
+
+        std::fs::remove_file(&first).unwrap();
+        invalidate_template_cache_path(&first);
+        assert!(template_cache()
+            .lock()
+            .path_resolve_entries
+            .keys()
+            .all(|key| key.dir != normalize_path(&dir)));
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// 固定 fixture 的离线基准。每个指标输出墙钟 p50/p95/max、CPU 时间分位数、
+    /// CPU 总耗时和峰值内存；当前平台无法读取资源时输出“未实测”。
+    /// 默认测区域路径；设置 GAMER_PERF_FULL_SCREEN=1 追加全屏 NCC。
+    #[tokio::test]
     #[ignore = "运行 tools/run-perf-benchmark.ps1 或设置 GAMER_PERF_ITERS 后执行"]
-    fn fixed_fixture_benchmark_p50_p95() {
+    async fn fixed_fixture_benchmark_p50_p95() {
         let _lock = TEST_GUARD.lock().unwrap();
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/perf");
         let screen = std::fs::read(dir.join("keyframe_001.png"))
             .expect("读取固定夹具 keyframe_001.png 失败");
+        let stream = std::fs::read(dir.join("stream.h264")).expect("读取固定夹具 stream.h264 失败");
+        let (config, gop) = split_perf_gop(&stream);
+        assert!(!config.is_empty(), "固定 H.264 fixture 缺少 SPS/PPS");
+        assert!(!gop.is_empty(), "固定 H.264 fixture 未解析出视频帧");
+        let ffmpeg = std::env::var("GAMER_PERF_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
         let cases = [
             (
-                "region_big",
                 "tmpl/perf_btn_primary#361_365_639_479.png",
                 [390, 700, 300, 220],
             ),
             (
-                "region_small",
                 "tmpl/perf_txt_status#130_219_185_240.png",
                 [140, 420, 60, 40],
             ),
-            (
-                "region_corner",
-                "tmpl/perf_corner_menu#dr.png",
-                [540, 960, 540, 960],
-            ),
+            ("tmpl/perf_corner_menu#dr.png", [540, 960, 540, 960]),
         ];
+        let templates: Vec<_> = cases
+            .iter()
+            .map(|(relative, _)| {
+                std::fs::read(dir.join(relative))
+                    .unwrap_or_else(|_| panic!("读取固定夹具 {} 失败", relative))
+            })
+            .collect();
         let iterations = std::env::var("GAMER_PERF_ITERS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -1428,55 +1778,123 @@ mod tests {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(3);
 
-        for (metric, template_rel, region) in cases {
-            let template = std::fs::read(dir.join(template_rel))
-                .unwrap_or_else(|_| panic!("读取固定夹具 {} 失败", template_rel));
-            let mut request = MatchRequest {
-                screen_png: screen.clone(),
-                template_png: template,
+        let full_screen = std::env::var_os("GAMER_PERF_FULL_SCREEN").is_some();
+        let mut reports: HashMap<&'static str, Vec<PerfSample>> = HashMap::new();
+        let mut push = |metric: &'static str, sample: PerfSample| {
+            reports.entry(metric).or_default().push(sample);
+        };
+        let run_match = |screen: &[u8], template: &[u8], region: Option<[u32; 4]>| {
+            match_template(&MatchRequest {
+                screen_png: screen.to_vec(),
+                template_png: template.to_vec(),
                 threshold: Some(0.8),
-                region: Some(region),
-            };
-            for _ in 0..warmup {
-                assert!(
-                    match_template(&request).unwrap().is_some(),
-                    "{} 未命中",
-                    metric
-                );
-            }
-            let mut samples = Vec::with_capacity(iterations);
-            for _ in 0..iterations {
-                let started = Instant::now();
-                assert!(
-                    match_template(&request).unwrap().is_some(),
-                    "{} 未命中",
-                    metric
-                );
-                samples.push(started.elapsed().as_micros());
-            }
-            perf_report(metric, &mut samples);
+                region,
+            })
+        };
 
-            if std::env::var_os("GAMER_PERF_FULL_SCREEN").is_some() {
-                request.region = None;
-                for _ in 0..warmup {
-                    assert!(
-                        match_template(&request).unwrap().is_some(),
-                        "{} 未命中全屏路径",
-                        metric
-                    );
+        for _ in 0..warmup {
+            crate::device::frames::FrameCache::benchmark_decode_latest_png(&ffmpeg, &config, &gop)
+                .await
+                .expect("固定 GOP 解码失败");
+            let decoded = image::load_from_memory(&screen).expect("PNG fixture 解码失败");
+            black_box(decoded.to_luma8());
+            for ((_, region), template) in cases.iter().zip(templates.iter()) {
+                run_match(&screen, template, Some(*region))
+                    .expect("区域 NCC 失败")
+                    .expect("区域 NCC 未命中");
+                if full_screen {
+                    run_match(&screen, template, None)
+                        .expect("全屏 NCC 失败")
+                        .expect("全屏 NCC 未命中");
                 }
-                let mut full_samples = Vec::with_capacity(iterations);
-                for _ in 0..iterations {
-                    let started = Instant::now();
-                    assert!(
-                        match_template(&request).unwrap().is_some(),
-                        "{} 未命中全屏路径",
-                        metric
-                    );
-                    full_samples.push(started.elapsed().as_micros());
-                }
-                perf_report(&format!("{}_full_screen", metric), &mut full_samples);
             }
         }
+
+        for _ in 0..iterations {
+            let (decoded, decode_sample) = sample_async(
+                crate::device::frames::FrameCache::benchmark_decode_latest_png(
+                    &ffmpeg, &config, &gop,
+                ),
+            )
+            .await;
+            black_box(decoded.expect("固定 GOP 解码失败"));
+            push("decode_latest_png", decode_sample);
+
+            let (decoded, png_decode_sample) = sample_sync(|| {
+                black_box(image::load_from_memory(&screen).expect("PNG fixture 解码失败"))
+            });
+            push("png_decode", png_decode_sample);
+            let (_, grayscale_sample) = sample_sync(|| black_box(decoded.to_luma8()));
+            push("png_grayscale", grayscale_sample);
+
+            for ((relative, region), template) in cases.iter().zip(templates.iter()) {
+                let (_, read_sample) = sample_sync(|| {
+                    black_box(std::fs::read(dir.join(relative)).expect("模板 fixture 读取失败"))
+                });
+                push("template_read", read_sample);
+
+                let (_, preprocess_sample) = sample_sync(|| {
+                    let source = decode_image_limited(template, TEMPLATE_MAX_INPUT_BYTES, "模板")
+                        .expect("模板 PNG 解码失败");
+                    black_box(build_prepared_template(to_gray(&source)).expect("模板预处理失败"))
+                });
+                push("template_preprocess", preprocess_sample);
+
+                let (_, region_sample) = sample_sync(|| {
+                    black_box(
+                        run_match(&screen, template, Some(*region))
+                            .expect("区域 NCC 失败")
+                            .expect("区域 NCC 未命中"),
+                    )
+                });
+                push("ncc_region", region_sample);
+
+                if full_screen {
+                    let (_, full_sample) = sample_sync(|| {
+                        black_box(
+                            run_match(&screen, template, None)
+                                .expect("全屏 NCC 失败")
+                                .expect("全屏 NCC 未命中"),
+                        )
+                    });
+                    push("ncc_fullscreen", full_sample);
+                }
+            }
+
+            let (_, find_sample) = sample_sync(|| {
+                let main = run_match(&screen, &templates[0], Some(cases[0].1))
+                    .expect("find 主模板 NCC 失败");
+                black_box(main);
+                for ((_, region), template) in cases.iter().skip(1).zip(templates.iter().skip(1)) {
+                    black_box(
+                        run_match(&screen, template, Some(*region)).expect("find block NCC 失败"),
+                    );
+                }
+            });
+            push("find_round", find_sample);
+        }
+
+        for metric in [
+            "decode_latest_png",
+            "png_decode",
+            "png_grayscale",
+            "ncc_region",
+            "ncc_fullscreen",
+            "template_read",
+            "template_preprocess",
+            "find_round",
+        ] {
+            if let Some(samples) = reports.get(metric) {
+                perf_report(metric, samples);
+            }
+        }
+        println!(
+            "PERF fixture=server/testdata/perf iterations={} warmup={} platform={} full_screen={} gop_frames={}",
+            iterations,
+            warmup,
+            std::env::consts::OS,
+            full_screen,
+            gop.len(),
+        );
     }
 }

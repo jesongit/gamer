@@ -1,11 +1,9 @@
 //! 帧缓存（帧环 + 按需解码）：
 //! 缓存 scrcpy 的 H.264 原始帧（SPS/PPS 配置帧 + 自最近关键帧起的完整 GOP），
 //! 用途：
-//!   1. 截图/模板匹配 —— 每次请求用**临时 ffmpeg** 把最新一帧解码成 PNG 返回。
-//!      每次都是全新解码，天然实时：返回的图就是服务器当前收到的最新画面，
-//!      不存在常驻解码管线的停滞/陈旧问题（旧设计：常驻 ffmpeg 软解 PNG 流，
-//!      一旦管线静默冻结，截图/匹配会永远拿到旧画面，需要代数/新鲜度/健康检查
-//!      一堆补丁兜底——按需解码把这些判断全部消除）。
+//!   1. 截图/模板匹配 —— 用**临时 ffmpeg** 把最新一帧解码成 PNG 返回；同一
+//!      generation/frame sequence 在短 freshness 窗口内复用已完成 PNG，帧一变就失效。
+//!      cache miss 仍按需解码，避免常驻解码管线停滞后持续返回旧画面。
 //!   2. WebRTC 新 viewer 初始重放（SPS/PPS + 最近 GOP，见 initial_frames）。
 
 use std::collections::HashMap;
@@ -49,6 +47,10 @@ const DECODE_TIMEOUT: Duration = Duration::from_secs(3);
 const WAIT_FIRST_GOP: Duration = Duration::from_millis(1500);
 /// 单设备截图解码并发上限：保留同帧合并，但不同帧请求在设备内串行化。
 const MAX_CONCURRENT_DECODES_PER_CACHE: usize = 1;
+/// 已完成 PNG 的短 freshness 窗口。默认 75ms，可通过环境变量覆盖到 50~100ms。
+const DEFAULT_DECODE_FRESHNESS_MS: u64 = 75;
+const MIN_DECODE_FRESHNESS_MS: u64 = 50;
+const MAX_DECODE_FRESHNESS_MS: u64 = 100;
 
 type SharedResult<T, E> = Shared<BoxFuture<'static, Result<Arc<T>, Arc<E>>>>;
 type InFlightEntries<K, T, E> = HashMap<K, Arc<InFlightEntry<T, E>>>;
@@ -122,6 +124,13 @@ struct FrameSnapshot {
 struct DecodedFrame {
     png: Vec<u8>,
     frame_sequence: u64,
+}
+
+struct DecodedResultCacheEntry {
+    key: FrameKey,
+    frame_sequence: u64,
+    png: Arc<Vec<u8>>,
+    completed_at: Instant,
 }
 
 struct FrameState {
@@ -259,6 +268,9 @@ pub struct FrameCache {
     state: Mutex<FrameState>,
     /// 同一个精确帧快照只允许一个真实 ffmpeg 解码，结果/错误由所有 waiter 共享。
     decode_in_flight: InFlight<FrameKey, DecodedFrame, String>,
+    /// 已完成 PNG 的短缓存。键必须精确匹配 generation + frame sequence，不能跨帧复用。
+    decoded_result: Mutex<Option<DecodedResultCacheEntry>>,
+    decode_freshness: Duration,
     /// 单设备有界闸门：避免同一设备上出现多个 ffmpeg / PNG 解码同时占用 Tokio 资源。
     decode_budget: Arc<Semaphore>,
     /// 帧尺寸（最近一次成功解码的 PNG 尺寸，供设备信息展示）
@@ -268,10 +280,17 @@ pub struct FrameCache {
 
 impl FrameCache {
     pub fn start(ffmpeg_path: &str) -> Arc<Self> {
+        Self::start_with_freshness(ffmpeg_path, configured_decode_freshness())
+    }
+
+    #[allow(dead_code)]
+    fn start_with_freshness(ffmpeg_path: &str, decode_freshness: Duration) -> Arc<Self> {
         Arc::new(Self {
             ffmpeg_path: Mutex::new(ffmpeg_path.to_string()),
             state: Mutex::new(FrameState::new()),
             decode_in_flight: InFlight::new(),
+            decoded_result: Mutex::new(None),
+            decode_freshness,
             decode_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_DECODES_PER_CACHE)),
             width: RwLock::new(0),
             height: RwLock::new(0),
@@ -372,15 +391,16 @@ impl FrameCache {
         if !state.gop.is_empty() && state.key() == key {
             state.gop.clear();
             FrameState::next_counter(&mut state.snapshot_generation);
+            *self.decoded_result.lock() = None;
             true
         } else {
             false
         }
     }
 
-    /// 按需解码最新帧为 PNG（供截图/模板匹配）：
-    /// 每次调用都从当前精确帧快照全新解码。相同帧序号的并发请求共享同一个真实
-    /// ffmpeg future；解码完成后重新核对 key，避免把 config/GOP 已替换的旧 PNG 当成当前帧。
+    /// 按需解码最新帧为 PNG（供截图/模板匹配）。当前帧的已完成 PNG 可在短
+    /// freshness 窗口内复用；相同帧序号的并发请求共享同一个真实 ffmpeg future。
+    /// 解码完成后重新核对 key，避免把 config/GOP 已替换的旧 PNG 当成当前帧。
     /// 无帧（会话刚建立/刚清空）时等首个 IDR ≤1.5s；解码失败时仅当失败仍对应当前
     /// 快照才清空 GOP，随后等待新 IDR 重试一次。
     /// Ok(None) = 等待超时仍无关键帧（会话刚建立，稍后再试）。
@@ -402,6 +422,10 @@ impl FrameCache {
             };
             let key = snapshot.key;
             let snapshot_latest_frame_at = snapshot.latest_frame_at;
+            if let Some(png) = self.cached_decoded_png(key, snapshot.frame_sequence) {
+                self.record_png_dims(&png);
+                return Ok(Some(png));
+            }
             let ffmpeg_for_decode = ffmpeg.clone();
             let decode_budget = Arc::clone(&decode_budget);
             let decoded = self
@@ -420,6 +444,7 @@ impl FrameCache {
                 Ok(decoded) => {
                     if self.is_snapshot_current(key, decoded.frame_sequence) {
                         self.record_png_dims(&decoded.png);
+                        self.store_decoded_png(key, decoded.frame_sequence, &decoded.png);
                         return Ok(Some(decoded.png.clone()));
                     }
 
@@ -450,6 +475,58 @@ impl FrameCache {
                 }
             }
         }
+    }
+
+    /// Test-only entry point for the fixed offline benchmark. It exercises the
+    /// production `decode_latest_png` path with a deterministic packetized GOP.
+    #[cfg(test)]
+    pub(crate) async fn benchmark_decode_latest_png(
+        ffmpeg: &str,
+        config: &[u8],
+        gop: &[VideoFrame],
+    ) -> anyhow::Result<Vec<u8>> {
+        let cache = FrameCache::start(ffmpeg);
+        {
+            let mut state = cache.state.lock();
+            state.config_buf = config.to_vec();
+            state.config_generation = 1;
+            state.gop = gop.to_vec();
+            state.snapshot_generation = 1;
+            state.frame_sequence = gop.len() as u64;
+            state.latest_frame_at = Some(Instant::now());
+        }
+        cache
+            .decode_latest_png()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("固定 GOP 未产生 PNG"))
+    }
+
+    fn cached_decoded_png(&self, key: FrameKey, frame_sequence: u64) -> Option<Vec<u8>> {
+        if !self.is_snapshot_current(key, frame_sequence) {
+            return None;
+        }
+        let mut cached = self.decoded_result.lock();
+        let entry = cached.as_ref()?;
+        if entry.key != key || entry.frame_sequence != frame_sequence {
+            return None;
+        }
+        if entry.completed_at.elapsed() <= self.decode_freshness {
+            return Some(entry.png.as_ref().clone());
+        }
+        *cached = None;
+        None
+    }
+
+    fn store_decoded_png(&self, key: FrameKey, frame_sequence: u64, png: &[u8]) {
+        if !self.is_snapshot_current(key, frame_sequence) {
+            return;
+        }
+        *self.decoded_result.lock() = Some(DecodedResultCacheEntry {
+            key,
+            frame_sequence,
+            png: Arc::new(png.to_vec()),
+            completed_at: Instant::now(),
+        });
     }
 
     /// 执行或加入精确帧快照的解码请求。该边界由生产截图路径直接调用，并允许测试
@@ -640,6 +717,15 @@ impl FrameCache {
             *self.height.write() = h;
         }
     }
+}
+
+fn configured_decode_freshness() -> Duration {
+    let milliseconds = std::env::var("GAMER_DECODE_FRESHNESS_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DECODE_FRESHNESS_MS)
+        .clamp(MIN_DECODE_FRESHNESS_MS, MAX_DECODE_FRESHNESS_MS);
+    Duration::from_millis(milliseconds)
 }
 
 async fn read_child_output<Stdout, Stderr>(
@@ -1217,5 +1303,36 @@ mod tests {
             .unwrap();
         assert_eq!(*retry, 9);
         assert_eq!(executions.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn decoded_result_cache_requires_exact_frame_and_expires() {
+        let cache = FrameCache::start_with_freshness("ffmpeg", Duration::from_millis(50));
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+        let first = cache.snapshot().expect("first snapshot");
+
+        cache.store_decoded_png(first.key, first.frame_sequence, b"first");
+        assert_eq!(
+            cache.cached_decoded_png(first.key, first.frame_sequence),
+            Some(b"first".to_vec())
+        );
+
+        cache.feed(&video_frame(3, false, false));
+        let second = cache.snapshot().expect("second snapshot");
+        assert_ne!(first.key, second.key);
+        assert_eq!(
+            cache.cached_decoded_png(first.key, first.frame_sequence),
+            None,
+            "new frame sequence must not reuse the old PNG"
+        );
+
+        cache.store_decoded_png(second.key, second.frame_sequence, b"second");
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(
+            cache.cached_decoded_png(second.key, second.frame_sequence),
+            None,
+            "completed PNG must expire after the configured freshness window"
+        );
     }
 }

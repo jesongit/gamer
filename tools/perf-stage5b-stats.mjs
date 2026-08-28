@@ -10,6 +10,7 @@ const METRIC_ORDER = [
   'ffmpeg_input',
   'ffmpeg_decode',
   'ffmpeg_png',
+  'png_decode',
   'png_grayscale',
   'ncc_fullscreen',
   'ncc_region',
@@ -282,24 +283,40 @@ function extractSample(row) {
 
 function summarize(rows) {
   const buckets = new Map();
+  const resourceBuckets = new Map();
   const resources = { cpu_ms: null, peak_mem_bytes: null };
   for (const row of rows) {
-    const resourceSample = extractResourceSample(row);
-    if (resourceSample) resources[resourceSample.resource] = resourceSample.value;
-    else {
-      for (const resource of extractMetadataResources(row)) resources[resource.resource] = resource.value;
-    }
     const sample = extractSample(row);
+    const resourceSample = extractResourceSample(row);
+    const rowResources = resourceSample ? [resourceSample] : extractMetadataResources(row);
+    for (const resource of rowResources) {
+      resources[resource.resource] = resource.value;
+      if (sample) {
+        if (!resourceBuckets.has(sample.metric)) {
+          resourceBuckets.set(sample.metric, { cpu_ms: [], peak_mem_bytes: [] });
+        }
+        const metricResources = resourceBuckets.get(sample.metric);
+        metricResources[resource.resource].push(resource.value);
+      }
+    }
     if (!sample) continue;
     if (!buckets.has(sample.metric)) buckets.set(sample.metric, []);
     buckets.get(sample.metric).push(sample.value);
   }
-  return { buckets, resources };
+  return { buckets, resourceBuckets, resources };
 }
 
 function formatNumber(n) {
-  if (n === null || n === undefined || Number.isNaN(n)) return 'n/a';
+  if (n === null || n === undefined || Number.isNaN(n)) return '未实测';
   return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(2)));
+}
+
+function resourcePercentiles(summary, metric) {
+  const values = summary.resourceBuckets.get(metric) || { cpu_ms: [], peak_mem_bytes: [] };
+  return {
+    cpu: values.cpu_ms.length ? percentiles(values.cpu_ms) : null,
+    peakMem: values.peak_mem_bytes.length ? percentiles(values.peak_mem_bytes) : null,
+  };
 }
 
 function renderSummary(summary, includeResource = false) {
@@ -311,11 +328,17 @@ function renderSummary(summary, includeResource = false) {
       continue;
     }
     const s = percentiles(samples);
-    lines.push(`${metric}: count=${samples.length} p50_us=${formatNumber(s.p50)} p95_us=${formatNumber(s.p95)} max_us=${formatNumber(s.max)}`);
+    let line = `${metric}: count=${samples.length} p50_us=${formatNumber(s.p50)} p95_us=${formatNumber(s.p95)} max_us=${formatNumber(s.max)}`;
+    if (includeResource) {
+      const resource = resourcePercentiles(summary, metric);
+      line += ` cpu_ms_p50=${formatNumber(resource.cpu?.p50 ?? null)} cpu_ms_p95=${formatNumber(resource.cpu?.p95 ?? null)} cpu_ms_max=${formatNumber(resource.cpu?.max ?? null)}`;
+      line += ` peak_mem_bytes_p50=${formatNumber(resource.peakMem?.p50 ?? null)} peak_mem_bytes_p95=${formatNumber(resource.peakMem?.p95 ?? null)} peak_mem_bytes_max=${formatNumber(resource.peakMem?.max ?? null)}`;
+    }
+    lines.push(line);
   }
   if (includeResource) {
-    if (summary.resources.cpu_ms !== null) lines.push(`cpu_ms=${formatNumber(summary.resources.cpu_ms)}`);
-    if (summary.resources.peak_mem_bytes !== null) lines.push(`peak_mem_bytes=${formatNumber(summary.resources.peak_mem_bytes)}`);
+    lines.push(`cpu_ms=${formatNumber(summary.resources.cpu_ms)}`);
+    lines.push(`peak_mem_bytes=${formatNumber(summary.resources.peak_mem_bytes)}`);
   }
   return lines;
 }
@@ -328,7 +351,21 @@ function jsonSummary(summary, includeResource) {
   }
   for (const metric of METRIC_ORDER) {
     const samples = summary.buckets.get(metric);
-    payload.metrics[metric] = samples?.length ? { count: samples.length, ...percentiles(samples) } : { skipped: true };
+    if (!samples?.length) {
+      payload.metrics[metric] = { skipped: true };
+      continue;
+    }
+    const resource = resourcePercentiles(summary, metric);
+    payload.metrics[metric] = {
+      count: samples.length,
+      ...percentiles(samples),
+      cpu_ms_p50: resource.cpu?.p50 ?? null,
+      cpu_ms_p95: resource.cpu?.p95 ?? null,
+      cpu_ms_max: resource.cpu?.max ?? null,
+      peak_mem_bytes_p50: resource.peakMem?.p50 ?? null,
+      peak_mem_bytes_p95: resource.peakMem?.p95 ?? null,
+      peak_mem_bytes_max: resource.peakMem?.max ?? null,
+    };
   }
   return payload;
 }

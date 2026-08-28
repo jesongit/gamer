@@ -14,6 +14,8 @@ param(
     [int]$Iterations = 20,
     [ValidateRange(0, 1000)]
     [int]$Warmup = 3,
+    [ValidateRange(50, 100)]
+    [int]$DecodeFreshnessMs = 75,
     [switch]$FullScreen,
     [switch]$Release,
     [switch]$DryRun
@@ -31,13 +33,14 @@ if (-not (Test-Path -LiteralPath $fixture -PathType Leaf)) {
 
 $env:GAMER_PERF_ITERS = [string]$Iterations
 $env:GAMER_PERF_WARMUP = [string]$Warmup
+$env:GAMER_DECODE_FRESHNESS_MS = [string]$DecodeFreshnessMs
 if ($FullScreen) {
     $env:GAMER_PERF_FULL_SCREEN = '1'
 } else {
     Remove-Item Env:GAMER_PERF_FULL_SCREEN -ErrorAction SilentlyContinue
 }
 
-Write-Host ('{0} fixture={1} iterations={2} warmup={3} release={4} full_screen={5}' -f '[perf]', $fixture, $Iterations, $Warmup, $Release, $FullScreen)
+Write-Host ('{0} fixture={1} iterations={2} warmup={3} freshness_ms={4} release={5} full_screen={6}' -f '[perf]', $fixture, $Iterations, $Warmup, $DecodeFreshnessMs, $Release, $FullScreen)
 if ($DryRun) {
     Write-Host '[perf] dry-run: cargo test skipped'
     return
