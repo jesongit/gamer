@@ -12,6 +12,7 @@
 //! - 分路由 body 限额：普通 JSON ≤256KiB；模板上传/脚本保存 JSON ≤16MiB
 //!   （data_b64/base64 膨胀需要余量，真实图片字节上限在 matcher 收口）；
 //!   ZIP 导入 ≤20MiB。CORS 层已整体移除（vite 代理同源不受影响）。
+mod error;
 mod ws;
 
 pub mod auth;
@@ -33,6 +34,7 @@ use tower_http::services::ServeDir;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use self::error::ApiError;
 use crate::config::Config;
 use crate::device::DeviceManager;
 use crate::matcher;
@@ -1194,21 +1196,21 @@ enum Ctl<'a> {
 
 /// 控制命令解析与校验（纯函数，可单测）：
 /// 坐标/时长/文本长度/包名不合格一律显式拒绝，替代旧 unwrap_or 静默缺省
-fn parse_ctl(req: &ControlReq) -> Result<Ctl<'_>, String> {
+fn parse_ctl(req: &ControlReq) -> Result<Ctl<'_>, ApiError> {
     match req.cmd.as_str() {
         "tap" => match (req.x, req.y) {
             (Some(x), Some(y)) if valid_coord(x) && valid_coord(y) => Ok(Ctl::Tap(x, y)),
-            _ => Err("缺少或非法的 tap 坐标 x/y".into()),
+            _ => Err(ApiError::bad_request("缺少或非法的 tap 坐标 x/y")),
         },
         "swipe" => {
             let (Some(x1), Some(y1), Some(x2), Some(y2)) = (req.x1, req.y1, req.x2, req.y2) else {
-                return Err("缺少或非法的 swipe 坐标 x1/y1/x2/y2".into());
+                return Err(ApiError::bad_request("缺少或非法的 swipe 坐标 x1/y1/x2/y2"));
             };
             if ![x1, y1, x2, y2].iter().all(|v| valid_coord(*v)) {
-                return Err("swipe 坐标超出合法范围".into());
+                return Err(ApiError::bad_request("swipe 坐标超出合法范围"));
             }
             if req.duration.is_some_and(|d| !(1..=600_000).contains(&d)) {
-                return Err("duration 必须在 1..600000 ms 内".into());
+                return Err(ApiError::bad_request("duration 必须在 1..600000 ms 内"));
             }
             Ok(Ctl::Swipe(x1, y1, x2, y2, req.duration.unwrap_or(300)))
         }
@@ -1218,10 +1220,10 @@ fn parse_ctl(req: &ControlReq) -> Result<Ctl<'_>, String> {
                 .as_deref()
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
-                .ok_or("text 不能为空")?;
+                .ok_or_else(|| ApiError::bad_request("text 不能为空"))?;
             // scrcpy 控制协议单条文本上限 300 字节，超长下游静默截断——显式拒绝
             if text.len() > 300 {
-                return Err("text 超过 300 字节（协议上限）".into());
+                return Err(ApiError::bad_request("text 超过 300 字节（协议上限）"));
             }
             Ok(Ctl::Text(text))
         }
@@ -1229,7 +1231,7 @@ fn parse_ctl(req: &ControlReq) -> Result<Ctl<'_>, String> {
             let kc = req
                 .keycode
                 .filter(|k| valid_keycode(*k))
-                .ok_or("keycode 缺失或不在 1..1000")?;
+                .ok_or_else(|| ApiError::bad_request("keycode 缺失或不在 1..1000"))?;
             Ok(Ctl::Press(kc))
         }
         "home" => Ok(Ctl::Home),
@@ -1241,21 +1243,21 @@ fn parse_ctl(req: &ControlReq) -> Result<Ctl<'_>, String> {
                 .as_deref()
                 .map(str::trim)
                 .filter(|a| !a.is_empty())
-                .ok_or("app 包名不能为空")?;
+                .ok_or_else(|| ApiError::bad_request("app 包名不能为空"))?;
             if app.len() > 255 {
-                return Err("app 包名超过 255 字节".into());
+                return Err(ApiError::bad_request("app 包名超过 255 字节"));
             }
             // "+" 强启 / "?" 按名搜索允许透传；裸包名必须是安全包名字符集
             if let Some(pkg) = app.strip_prefix('+') {
                 if pkg.is_empty() || !crate::device::adb::is_safe_pkg(pkg) {
-                    return Err("+ 前缀后须为合法包名".into());
+                    return Err(ApiError::bad_request("+ 前缀后须为合法包名"));
                 }
             } else if let Some(name) = app.strip_prefix('?') {
                 if name.trim().len() < 2 {
-                    return Err("? 搜索名过短".into());
+                    return Err(ApiError::bad_request("? 搜索名过短"));
                 }
             } else if !crate::device::adb::is_safe_pkg(app) {
-                return Err("包名非法（只允许字母数字 . _）".into());
+                return Err(ApiError::bad_request("包名非法（只允许字母数字 . _）"));
             }
             Ok(Ctl::StartApp(app))
         }
@@ -1265,14 +1267,16 @@ fn parse_ctl(req: &ControlReq) -> Result<Ctl<'_>, String> {
                 .text
                 .as_deref()
                 .filter(|t| !t.is_empty())
-                .ok_or("clipboard 文本不能为空")?;
+                .ok_or_else(|| ApiError::bad_request("clipboard 文本不能为空"))?;
             // scrcpy 剪贴板协议上限 128KiB，超长下游静默截断——显式拒绝
             if text.len() > 131_072 {
-                return Err("clipboard 文本超过 131072 字节（协议上限）".into());
+                return Err(ApiError::bad_request(
+                    "clipboard 文本超过 131072 字节（协议上限）",
+                ));
             }
             Ok(Ctl::Clipboard(text))
         }
-        _ => Err("unknown command".into()),
+        _ => Err(ApiError::bad_request("unknown command")),
     }
 }
 
@@ -1284,7 +1288,7 @@ async fn api_control(
     // 先纯校验（与设备无关，离线设备也能拿到明确 400），再取会话执行
     let ctl = match parse_ctl(&req) {
         Ok(c) => c,
-        Err(msg) => return err_response(StatusCode::BAD_REQUEST, &msg),
+        Err(err) => return err.into_response(),
     };
     let Some(session) = st.devices.session(&id) else {
         return err_response(StatusCode::CONFLICT, "设备未连接");
@@ -1303,7 +1307,7 @@ async fn api_control(
     };
     match result {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(e) => err_response(StatusCode::BAD_GATEWAY, &e.to_string()),
+        Err(e) => ApiError::bad_gateway(e.to_string()).into_response(),
     }
 }
 
@@ -1314,12 +1318,12 @@ struct PkgQuery {
     pkg: Option<String>,
 }
 
-/// 校验必需的 pkg 参数（应用包名 = 分区名）：缺失/空串/非法包名均返回 None
-/// （调用方各自回 400，不直接透出内部 Response，避免大 Err 载荷）
-fn require_pkg(raw: Option<&str>) -> Option<String> {
+/// 校验必需的 pkg 参数（应用包名 = 分区名）：缺失/空串/非法包名统一为 400。
+fn require_pkg(raw: Option<&str>) -> Result<String, ApiError> {
     raw.map(str::trim)
         .filter(|s| !s.is_empty())
         .and_then(crate::scripts::sanitize_part)
+        .ok_or_else(|| ApiError::bad_request("应用包名非法（只允许字母数字 . _ -）"))
 }
 
 /// 列出模板：?pkg= 指定分区时只列该分区，否则跨分区全列（条目带 pkg 字段）
@@ -1372,11 +1376,9 @@ async fn api_upload_template(
     State(st): State<AppState>,
     Json(req): Json<UploadTemplateReq>,
 ) -> Response {
-    let Some(pkg) = require_pkg(Some(&req.pkg)) else {
-        return err_response(
-            StatusCode::BAD_REQUEST,
-            "应用包名非法（只允许字母数字 . _ -）",
-        );
+    let pkg = match require_pkg(Some(&req.pkg)) {
+        Ok(pkg) => pkg,
+        Err(err) => return err.into_response(),
     };
     // base64 合法性与体积先于解码校验（4/3 膨胀后 16MiB ≈ 原始 12MiB 内的护栏）
     const MAX_B64_LEN: usize = (matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 1) * 4;
@@ -1388,22 +1390,22 @@ async fn api_upload_template(
     }
     let orig = match base64::engine::general_purpose::STANDARD.decode(&req.data_b64) {
         Ok(b) => b,
-        Err(e) => return err_response(StatusCode::BAD_REQUEST, &format!("base64 解码失败: {}", e)),
+        Err(e) => return ApiError::bad_request(format!("base64 解码失败: {}", e)).into_response(),
     };
     // 统一重编码为灰度 PNG（匹配零损失 + 大幅减小体积；字节数/像素炸弹
     // 双层硬限在 reencode_template_gray_png 内收口）
     let bytes = match matcher::reencode_template_gray_png(&orig) {
         Ok(b) => b,
-        Err(e) => return err_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => return ApiError::bad_request(e.to_string()).into_response(),
     };
     let dir = st.scripts.tmpl_dir(&pkg);
     if let Err(e) = std::fs::create_dir_all(&dir) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+        return ApiError::internal(e.to_string()).into_response();
     }
     let name = sanitize_filename(&req.name);
     let path = dir.join(&name);
     if let Err(e) = crate::scripts::atomic_write(&path, &bytes) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+        return ApiError::internal(e.to_string()).into_response();
     }
     Json(
         serde_json::json!({"ok": true, "name": name, "size": bytes.len(), "orig_size": orig.len()}),
@@ -1416,8 +1418,9 @@ async fn api_delete_template(
     Path(name): Path<String>,
     Query(q): Query<PkgQuery>,
 ) -> Response {
-    let Some(pkg) = require_pkg(q.pkg.as_deref()) else {
-        return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
+    let pkg = match require_pkg(q.pkg.as_deref()) {
+        Ok(pkg) => pkg,
+        Err(err) => return err.into_response(),
     };
     let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
     match std::fs::remove_file(&path) {
@@ -1425,7 +1428,7 @@ async fn api_delete_template(
             st.scripts.cleanup_partition(&pkg); // 分区 yaml/tmpl 都空了则清理目录
             Json(serde_json::json!({"ok": true})).into_response()
         }
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => ApiError::internal(e.to_string()).into_response(),
     }
 }
 
@@ -1441,29 +1444,30 @@ async fn api_rename_template(
     Query(q): Query<PkgQuery>,
     Json(req): Json<RenameTemplateReq>,
 ) -> Response {
-    let Some(pkg) = require_pkg(q.pkg.as_deref()) else {
-        return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
+    let pkg = match require_pkg(q.pkg.as_deref()) {
+        Ok(pkg) => pkg,
+        Err(err) => return err.into_response(),
     };
     let dir = st.scripts.tmpl_dir(&pkg);
     let old_path = dir.join(sanitize_filename(&old_name));
     let new_name = sanitize_filename(&req.name);
     if new_name == sanitize_filename(&old_name) {
-        return err_response(StatusCode::BAD_REQUEST, "名称未变化");
+        return ApiError::bad_request("名称未变化").into_response();
     }
     let new_path = dir.join(&new_name);
     if new_path.exists() {
-        return err_response(StatusCode::BAD_REQUEST, "已存在同名模板");
+        return ApiError::bad_request("已存在同名模板").into_response();
     }
     let bytes = match std::fs::read(&old_path) {
         Ok(b) => b,
-        Err(_) => return err_response(StatusCode::NOT_FOUND, "模板不存在"),
+        Err(_) => return ApiError::not_found("模板不存在").into_response(),
     };
     if let Err(e) = crate::scripts::atomic_write(&new_path, &bytes) {
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string());
+        return ApiError::internal(e.to_string()).into_response();
     }
     if std::fs::remove_file(&old_path).is_err() {
         let _ = std::fs::remove_file(&new_path);
-        return err_response(StatusCode::INTERNAL_SERVER_ERROR, "旧模板删除失败");
+        return ApiError::internal("旧模板删除失败").into_response();
     }
     Json(serde_json::json!({"ok": true, "name": new_name})).into_response()
 }
@@ -1475,13 +1479,14 @@ async fn api_get_template_image(
     Path(name): Path<String>,
     Query(q): Query<PkgQuery>,
 ) -> Response {
-    let Some(pkg) = require_pkg(q.pkg.as_deref()) else {
-        return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
+    let pkg = match require_pkg(q.pkg.as_deref()) {
+        Ok(pkg) => pkg,
+        Err(err) => return err.into_response(),
     };
     let path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
-        Err(_) => return err_response(StatusCode::NOT_FOUND, "模板不存在"),
+        Err(_) => return ApiError::not_found("模板不存在").into_response(),
     };
     let mime = match path
         .extension()
@@ -1517,20 +1522,18 @@ async fn api_test_template(
     Path(name): Path<String>,
     Json(req): Json<TestTemplateReq>,
 ) -> Response {
-    let Some(pkg) = require_pkg(Some(&req.pkg)) else {
-        return err_response(
-            StatusCode::BAD_REQUEST,
-            "应用包名非法（只允许字母数字 . _ -）",
-        );
+    let pkg = match require_pkg(Some(&req.pkg)) {
+        Ok(pkg) => pkg,
+        Err(err) => return err.into_response(),
     };
     let tpl_path = st.scripts.tmpl_dir(&pkg).join(sanitize_filename(&name));
     let tpl_bytes = match std::fs::read(&tpl_path) {
         Ok(b) => b,
-        Err(_) => return err_response(StatusCode::NOT_FOUND, "模板不存在"),
+        Err(_) => return ApiError::not_found("模板不存在").into_response(),
     };
     let screen = match st.devices.screenshot(&req.device_id).await {
         Ok(s) => s,
-        Err(e) => return err_response(StatusCode::BAD_GATEWAY, &format!("截图失败: {}", e)),
+        Err(e) => return ApiError::bad_gateway(format!("截图失败: {}", e)).into_response(),
     };
     let mr = matcher::MatchRequest {
         screen_png: screen,
@@ -1541,7 +1544,7 @@ async fn api_test_template(
     match matcher::match_template(&mr) {
         Ok(Some(m)) => Json(serde_json::json!({"hit": true, "x": m.x, "y": m.y, "width": m.width, "height": m.height, "score": m.score})).into_response(),
         Ok(None) => Json(serde_json::json!({"hit": false})).into_response(),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => ApiError::internal(e.to_string()).into_response(),
     }
 }
 
@@ -1550,7 +1553,7 @@ async fn api_test_template(
 async fn api_list_scripts(State(st): State<AppState>) -> Response {
     match st.scripts.list() {
         Ok(s) => Json(s).into_response(),
-        Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        Err(e) => ApiError::internal(e.to_string()).into_response(),
     }
 }
 
@@ -1565,13 +1568,10 @@ struct SaveScriptReq {
 
 async fn api_save_script(State(st): State<AppState>, Json(req): Json<SaveScriptReq>) -> Response {
     if req.name.trim().is_empty() {
-        return err_response(StatusCode::BAD_REQUEST, "脚本名不能为空");
+        return ApiError::bad_request("脚本名不能为空").into_response();
     }
     if crate::scripts::sanitize_part(&req.pkg).is_none() {
-        return err_response(
-            StatusCode::BAD_REQUEST,
-            "应用包名非法（只允许字母数字 . _ -）",
-        );
+        return ApiError::bad_request("应用包名非法（只允许字母数字 . _ -）").into_response();
     }
     match st
         .scripts
@@ -1581,7 +1581,7 @@ async fn api_save_script(State(st): State<AppState>, Json(req): Json<SaveScriptR
             Json(serde_json::json!({"ok": true, "id": s.id, "package": s.package, "name": s.name}))
                 .into_response()
         }
-        Err(e) => err_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => ApiError::bad_request(e.to_string()).into_response(),
     }
 }
 
@@ -1594,12 +1594,13 @@ async fn api_delete_script(State(st): State<AppState>, Path(id): Path<String>) -
 
 /// 导出整分区快照 zip（?pkg= 指定应用分区）：yaml/ 全部脚本 + tmpl/ 全部模板
 async fn api_export_partition(State(st): State<AppState>, Query(q): Query<PkgQuery>) -> Response {
-    let Some(pkg) = require_pkg(q.pkg.as_deref()) else {
-        return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
+    let pkg = match require_pkg(q.pkg.as_deref()) {
+        Ok(pkg) => pkg,
+        Err(err) => return err.into_response(),
     };
     match st.scripts.export_partition(&pkg) {
         Ok((filename, bytes)) => zip_response(&filename, bytes),
-        Err(e) => err_response(StatusCode::NOT_FOUND, &e.to_string()),
+        Err(e) => ApiError::not_found(e.to_string()).into_response(),
     }
 }
 
@@ -1636,12 +1637,13 @@ async fn api_import_script(
     body: axum::body::Bytes,
 ) -> Response {
     let confirm = matches!(q.confirm.as_deref(), Some("1") | Some("true"));
-    let Some(pkg) = require_pkg(q.pkg.as_deref()) else {
-        return err_response(StatusCode::BAD_REQUEST, "缺少 pkg 参数（应用包名）");
+    let pkg = match require_pkg(q.pkg.as_deref()) {
+        Ok(pkg) => pkg,
+        Err(err) => return err.into_response(),
     };
     match st.scripts.import(&body, &pkg, confirm) {
         Ok(rep) => Json(rep).into_response(),
-        Err(e) => err_response(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(e) => ApiError::bad_request(e.to_string()).into_response(),
     }
 }
 
@@ -3174,7 +3176,10 @@ mod sec_tests {
 
         // 未知命令仍 400 文案
         match parse_ctl(&ctl_req(r#"{"type":"touch","action":"down"}"#)) {
-            Err(e) => assert_eq!(e, "unknown command"),
+            Err(e) => {
+                assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+                assert_eq!(e.message(), "unknown command");
+            }
             Ok(_) => panic!("touch 不属于 REST 控制命令"),
         }
     }
@@ -3257,6 +3262,17 @@ mod sec_tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn api_error_maps_status_and_json_body() {
+        let resp = ApiError::conflict("device_busy").into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json, serde_json::json!({"error": "device_busy"}));
     }
 
     #[tokio::test]
