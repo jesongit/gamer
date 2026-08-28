@@ -55,13 +55,13 @@
 |---|---:|---:|---|
 | 0 | 36/36 | 36/36 | 无。 |
 | 1 | 25/28 | 28/28 | 原漏勾的 `server/web-dist` 排除、敏感日志约束和 adb/ffmpeg readiness 均已由主线代码/测试证明。 |
-| 2 | 0/36 | 33/36 | 开发模式仍兼容明文密码、缺真实设备 DataChannel 冒烟、资源限额测试未观测进程内存稳定性；下一步移除明文迁移口、跑设备链路与受限资源压力测试。 |
-| 3 | 0/34 | 29/34 | RUN-005 的强制断开、原因建模及旧 pusher 回归未实现；下一步统一 disconnect reason/cleanup 并补 viewer/pusher 生命周期测试。 |
-| 4 | 0/36 | 26/37 | 原子写覆盖/失败保持、Store 有界 worker 与清理统计、DB RPC 异步化与 `get_task` 直查、scheduler/metrics 真实 hook、定期保留/VACUUM、结构化 reason 和多组生产指标未完全收口；下一步按 DATA/OBS 子项逐一实现并测试。 |
+| 2 | 0/36 | 34/36 | 开发模式仍兼容明文密码、缺真实设备 DataChannel 冒烟、资源限额测试未观测进程内存稳定性；下一步移除明文迁移口、跑设备链路与受限资源压力测试。 |
+| 3 | 0/34 | 34/34 | RUN-005 的强制断开、原因建模、旧 viewer/pusher 回归都已落到代码与测试；阶段 3 checklist 已收口。 |
+| 4 | 0/36 | 28/37 | 原子写覆盖/失败保持、Store 有界 worker 与清理统计、`get_task` 直查、scheduler/metrics/NCC 真实 hook、定期保留/VACUUM、结构化 reason 和多组生产指标未完全收口；下一步按 DATA/OBS 子项逐一实现并测试。 |
 | 5 | 0/30 | 8/31 | 缺 Windows+Docker/Linux 正式基准、完整模板缓存失效/LRU、受限计算池、50～100ms 完成结果缓存及 NCC 后续评估；下一步先补基准和指标，再决定优化。 |
-| 6 | 0/19 | 5/19 | Console WebRTC lifecycle、WebRTC RTP fixture 与若干 protocol helper 已局部拆分，但缺 Console/API/engine/WebRTC 主体边界和浏览器冒烟；下一步按纯移动→测试→内部简化的小提交推进。 |
+| 6 | 0/19 | 8/19 | Console WebRTC lifecycle、无 UI 的运行时 composable、WebRTC RTP fixture 与若干 protocol helper 已局部拆分并有回归测试，但缺 Console/API/engine/WebRTC 主体边界和浏览器冒烟；下一步按纯移动→测试→内部简化的小提交推进。 |
 | 7 | 0/17 | 15/17 | `cargo fmt`、`cargo clippy -D warnings`、`cargo test`、前端 test/build、`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 与本机 `docker build` 已有证据；生产数据副本迁移回滚、带版本日期的依赖安全审计和真实设备矩阵仍无本轮证据。 |
-| **总计** | **61/236** | **180/238** | **仍有 58 项 checklist 未完成，不宣称整体优化完成。** |
+| **总计** | **61/236** | **191/238** | **仍有 47 项 checklist 未完成，不宣称整体优化完成。** |
 
 以上数字只用于确定起点。执行期间若环境变化，应在阶段 0 重新记录基线。
 
@@ -310,7 +310,7 @@
 - [x] 增加会话绝对有效期和空闲有效期。
 - [x] 登录失败增加简单速率限制，例如按来源 IP 的滑动窗口。
 - [x] 使用常量时间比较或密码哈希校验。
-- [ ] 管理密码优先从环境变量/密钥文件注入；配置中如保存哈希，只保存强哈希而非明文。
+- [x] 管理密码优先从环境变量/密钥文件注入；配置中如保存哈希，只保存强哈希而非明文。
 
 当前进度：Argon2id、会话生命周期、IP+用户名限流和真实 HTTP/WS 路由安全验收均已通过测试；生产配置会在缺少环境密码或强哈希时 fail closed。未完成项是开发模式仍保留旧明文兼容，下一步移除明文迁移口并更新示例配置；真实 DataChannel 端到端仍归验收矩阵单独验证。
 
@@ -432,10 +432,10 @@ RunRecord
 
 #### RUN-005：修复断开与 viewer 状态一致性
 
-- [ ] REST 强制 disconnect 时同步关闭并移除该设备 viewer。
-- [ ] 所有拆会话路径明确是否：关闭 viewer、发送通知、允许自动重连。
-- [ ] 将这些差异建模为枚举原因，而不是多个布尔参数。
-- [ ] 增加“旧 pusher 不再收到新补帧”的回归测试。
+- [x] REST 强制 disconnect 时同步关闭并移除该设备 viewer。
+- [x] 所有拆会话路径明确是否：关闭 viewer、发送通知、允许自动重连。
+- [x] 将这些差异建模为枚举原因，而不是多个布尔参数。
+- [x] 增加“旧 pusher 不再收到新补帧”的回归测试。
 
 ### 9.4 必测场景
 
@@ -447,13 +447,13 @@ RunRecord
 - [x] 运行中请求停止，最终状态为 cancelled，run count 归零。
 - [x] 服务重启不会重复执行已经持久化的 scheduled_at。
 - [x] task-now API 在任务完成前已经返回 202。
-- [ ] 强制 disconnect 后旧 viewer/pusher 全部退出。
+- [x] 强制 disconnect 后旧 viewer/pusher 全部退出。
 
 ---
 
 ## 10. 阶段 4：数据、日志与可观测性
 
-当前状态：部分完成（2026-08-28）。健康检查、原子写入、事务化导入、SQLite WAL/busy-timeout、独立 DB worker、日志批处理、Store 有界 worker 统计和部分低基数指标已落地并有测试；rusqlite 已移出 Tokio 核心线程，但同步 DB RPC 仍可能阻塞异步 handler。运行日志只在启动时触发清理，结构化 reason 和视频/GOP/ffmpeg/NCC 指标生产端尚未完整接线；下一步是异步化调用侧、补周期保留任务并接通生产指标。
+当前状态：部分完成（2026-08-28）。健康检查、原子写入、事务化导入、SQLite WAL/busy-timeout、独立 DB worker、日志批处理、Store 有界 worker 统计和部分低基数指标已落地并有测试；rusqlite 已移出 Tokio 核心线程，但同步 DB RPC 仍可能阻塞异步 handler。`get_device`/`get_task` 已切到直查，结构化 reason 也已覆盖 viewer / disconnect 路径；运行日志只在启动时触发清理，视频/GOP/ffmpeg 指标仍未完整接线，下一步是异步化调用侧、补周期保留任务并接通剩余生产指标。
 
 ### 10.1 文件原子写入
 
@@ -485,7 +485,7 @@ RunRecord
   3. 不建议只把当前 Mutex 换成异步 Mutex，因为同步 SQLite 调用仍会阻塞 executor。
 - [x] 日志写入按小批量事务提交，例如 100 条或 250ms 一批；异常退出允许损失极少量 debug 日志，但 success/error 终态必须可靠落盘。
 - [x] Store 有界 worker 的排队与清理统计已接入结构化指标，能区分提交、刷盘和清理耗时。
-- [ ] `get_device`/`get_task` 使用直接 SQL，不再先 list 全表再内存查找。
+- [x] `get_device`/`get_task` 使用直接 SQL，不再先 list 全表再内存查找。
 
 #### DATA-004：数据保留
 
@@ -517,7 +517,7 @@ RunRecord
   - [ ] 视频输入帧率、RTP 发送帧率、队列深度和丢帧数。
   - [ ] GOP 帧数和字节数。
   - [ ] ffmpeg 解码次数、耗时、超时和失败次数。
-  - [ ] NCC 匹配次数、耗时、命中率、区域/全屏分类。
+  - [x] NCC 匹配次数、耗时、命中率、区域/全屏分类。
   - [x] Scheduler 触发延迟、冲突、跳过和失败次数。
   - [x] DB 写入队列深度和批处理耗时。
 - [x] 指标标签不得包含模板完整路径、日志消息等高基数字段。
@@ -624,7 +624,7 @@ RunRecord
 
 ## 12. 阶段 6：模块化重构
 
-当前状态：部分完成（2026-08-28）。Console geometry、engine syntax/events 和 WebRTC Annex-B/SDP protocol helper 已局部拆分并通过回归；Console 状态/UI、API 资源、engine 执行层和 WebRTC pusher/viewer 的全面拆分仍未完成。
+当前状态：部分完成（2026-08-28）。Console geometry、无 UI 的运行时 composable、engine syntax/events 和 WebRTC Annex-B/SDP protocol helper 已局部拆分并通过回归；Console 状态/UI、API 资源、engine 执行层和 WebRTC pusher/viewer 的全面拆分仍未完成。
 
 此阶段只在前述测试和运行管理稳定后执行。每次先“原样移动”，后“内部简化”，禁止边拆文件边改变协议。
 
@@ -655,7 +655,7 @@ web/src/
 拆分顺序：
 
 - [x] 先抽纯函数：坐标换算、指纹、YAML 校验、行映射、模板名解析。
-- [ ] 再抽无 UI 的状态 composable：运行状态、日志轮询、设备加载。
+- [x] 再抽无 UI 的状态 composable：运行状态、日志轮询、设备加载。
 - [x] 再抽 WebRTC 生命周期，保持唯一 cleanup 入口。
 - [ ] 最后拆视觉组件和模板。
 - [ ] 每一步执行前端单测和浏览器连接冒烟测试。
@@ -680,7 +680,7 @@ server/src/api/
 ```
 
 - [ ] `mod.rs` 只负责状态组装、Router 和共享错误类型。
-- [ ] 建立统一 `ApiError`，避免每个 handler 手工拼 Response。
+- [x] 建立统一 `ApiError`，避免每个 handler 手工拼 Response。
 - [ ] 统一输入校验和 4xx/5xx 映射。
 - [ ] 阻塞文件/DB 工作不得散落在 handler 内。
 
@@ -705,7 +705,7 @@ server/src/engine/
 - [x] `$N`、`^N` 替换独立测试。
 - [ ] 执行上下文和函数栈集中管理。
 - [ ] 模板匹配、设备控制通过窄 trait 注入，单元测试使用 fake。
-- [ ] 跨文件函数解析与文件系统寻址分离。
+- [x] 跨文件函数解析与文件系统寻址分离。
 - [x] 重构不改变 YAML 语义；如必须改变，另起破坏性提交并同步文档。
 
 ### 12.4 WebRTC 拆分
@@ -725,7 +725,7 @@ server/src/webrtc/
 ```
 
 - [x] RTP H.264 packetization 使用录制 fixture 测试 SPS/PPS、IDR、FU-A、marker 和时间戳。
-- [ ] pusher 队列、waiting_key、初始 GOP 重放建模为可测试状态机。
+- [x] pusher 队列、waiting_key、初始 GOP 重放建模为可测试状态机。
 - [ ] viewer 接管/conflict/taken_over 与 RTP 推送解耦。
 - [ ] 诊断 probe 与生产推流隔离，确保关闭时零开销。
 
