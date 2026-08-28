@@ -115,7 +115,7 @@ pub fn build_router(
         .layer(DefaultBodyLimit::max(BODY_LIMIT_PUBLIC));
 
     // ---- 受保护组（普通 JSON API，≤256KiB）：设备 / 截图 / 控制 / 模板查询删除 /
-    //      脚本运行停止状态导出 / 任务 / 日志 / op-templates / shutdown。
+    //      脚本运行停止状态导出 / 任务 / 日志 / op-templates / shutdown / 维护 vacuum。
     //      高风险接口标注（专项测试见文件尾 tests）：shutdown、设备控制
     //      （devices::api_control）、脚本运行·停止、模板删除（templates::api_delete_template）。
     let protected_json: Router<()> = Router::new()
@@ -172,6 +172,10 @@ pub fn build_router(
         )
         .route("/api/op-templates", get(system::api_op_templates))
         .route("/api/shutdown", post(system::api_shutdown))
+        .route(
+            "/api/maintenance/vacuum",
+            post(system::api_maintenance_vacuum),
+        )
         // WS 信令与 REST 同守卫：升级握手完成前由 auth_guard 判定
         .route("/ws/device/:id", get(ws::ws_device))
         .with_state(state.clone())

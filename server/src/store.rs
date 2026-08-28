@@ -2,7 +2,7 @@
 //! （脚本已改为文件系统存储 data/scripts/<package>/，见 scripts.rs；scripts 表仅留迁移读取）
 
 use std::any::Any;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -327,7 +327,16 @@ fn sanitize_log_message(msg: &str) -> String {
     normalized
 }
 
+/// VACUUM 前后的数据库文件大小（字节；主库 + WAL 合计，WAL 模式下二者合看才真实）
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct VacuumReport {
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+}
+
 pub struct Store {
+    /// 数据库主文件路径（vacuum 前后取文件大小用）
+    path: PathBuf,
     tx: SyncSender<DbCommand>,
     worker: Mutex<Option<JoinHandle<()>>>,
     metrics: Arc<Metrics>,
@@ -373,6 +382,7 @@ impl Store {
             }
         }
         let store = Self {
+            path: cfg.data_dir.join("gamer.db"),
             tx,
             worker: Mutex::new(Some(worker)),
             metrics,
@@ -876,6 +886,37 @@ impl Store {
         })
     }
 
+    /// 手动维护动作（DATA-004）：VACUUM 重建数据库文件、回收已删除行占用的页。
+    /// VACUUM 需要独占锁且耗时，故放入 DB worker 线程串行执行——与 worker 内
+    /// 其它操作天然互斥，也不阻塞异步调用侧。返回 vacuum 前后的文件字节数
+    /// （主库 + WAL 合计；结尾强制 checkpoint 截断 WAL，让主库文件立即反映
+    /// 重建后的真实大小）。
+    pub fn vacuum(&self) -> anyhow::Result<VacuumReport> {
+        let path = self.path.clone();
+        self.request(move |conn| {
+            let file_bytes = |p: &Path| -> u64 {
+                let wal = PathBuf::from(format!("{}-wal", p.display()));
+                std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+                    + std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0)
+            };
+            let before = file_bytes(&path);
+            conn.execute_batch("VACUUM")?;
+            if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+                tracing::warn!(error = %e, "vacuum 后 WAL checkpoint 失败（不影响 VACUUM 结果）");
+            }
+            let after = file_bytes(&path);
+            tracing::info!(
+                before_bytes = before,
+                after_bytes = after,
+                "database vacuum finished"
+            );
+            Ok(VacuumReport {
+                before_bytes: before,
+                after_bytes: after,
+            })
+        })
+    }
+
     #[cfg(test)]
     fn pragma_snapshot(&self) -> anyhow::Result<(String, i64, i64)> {
         self.request(|conn| {
@@ -1048,6 +1089,29 @@ mod tests {
         let logs = store.list_logs(None, None, 10).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].msg, "new");
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn vacuum_reports_sizes_and_store_stays_usable() {
+        let (cfg, dir) = temp_config("vacuum");
+        let store = Store::open(&cfg).unwrap();
+        for i in 0..300 {
+            store
+                .add_log("d", "s", "info", &format!("log-{i}"))
+                .unwrap();
+        }
+        let report = store.vacuum().unwrap();
+        assert!(report.before_bytes > 0, "vacuum 前应有非零文件大小");
+        assert!(report.after_bytes > 0, "vacuum 后应有非零文件大小");
+        // vacuum 后数据库仍可正常读写
+        assert!(store.health_check().is_ok());
+        assert!(store.metrics_snapshot().unwrap().logs >= 300);
+        // 幂等：连续 VACUUM 不报错
+        let again = store.vacuum().unwrap();
+        assert!(again.after_bytes > 0);
 
         drop(store);
         fs::remove_dir_all(dir).unwrap();

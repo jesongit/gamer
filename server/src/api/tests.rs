@@ -393,6 +393,43 @@ mod sec_tests {
     }
 
     #[tokio::test]
+    async fn maintenance_vacuum_requires_auth_and_reports_file_sizes() {
+        let t = build_app(
+            "vacuum",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        // 未登录 → 401（受保护维护动作，与 /api/shutdown 同守卫）
+        let resp = send(
+            &t.app,
+            req("POST", "/api/maintenance/vacuum", None, &[], None),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(json_body(resp).await["error"], "unauthorized");
+
+        // 登录后 → 200，返回 vacuum 前后数据库文件字节数（均 > 0）
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/maintenance/vacuum",
+                None,
+                &[(header::COOKIE.to_string(), sid)],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let j = json_body(resp).await;
+        assert!(j["before_bytes"].is_u64(), "{j}");
+        assert!(j["after_bytes"].is_u64(), "{j}");
+        assert!(j["before_bytes"].as_u64().unwrap() > 0);
+        assert!(j["after_bytes"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
     async fn readiness_is_public_structured_and_does_not_leak_paths() {
         let t = build_app(
             "ready",

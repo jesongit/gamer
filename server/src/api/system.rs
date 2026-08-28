@@ -570,3 +570,23 @@ pub(super) async fn api_shutdown(State(st): State<AppState>) -> Response {
     let _ = st.shutdown.send(true);
     Json(serde_json::json!({"ok": true})).into_response()
 }
+
+/// 手动维护动作（DATA-004）：SQLite VACUUM，返回 vacuum 前后的数据库文件
+/// 字节数。VACUUM 耗时且需独占锁——在 store 的 DB worker 线程串行执行，
+/// handler 经 blocking 池等待结果，不占用 Tokio 核心线程。
+pub(super) async fn api_maintenance_vacuum(State(st): State<AppState>) -> Response {
+    let db = st.db.clone();
+    info!("manual maintenance: sqlite vacuum requested");
+    match run_blocking_api(move || db.vacuum().map_err(|e| ApiError::internal(e.to_string()))).await
+    {
+        Ok(report) => {
+            info!(
+                before_bytes = report.before_bytes,
+                after_bytes = report.after_bytes,
+                "manual maintenance: sqlite vacuum done"
+            );
+            Json(report).into_response()
+        }
+        Err(err) => err.into_response(),
+    }
+}
