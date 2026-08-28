@@ -83,7 +83,9 @@ fn save_pending(data_dir: &std::path::Path, map: &HashMap<String, PendingRestore
     }
     match serde_json::to_string_pretty(map) {
         Ok(s) => {
-            if let Err(e) = std::fs::write(&p, s) {
+            // 统一原子写（DATA-001）：崩溃自愈标记不允许半写状态——进程被硬杀时
+            // 读到残缺 JSON 会让兜底恢复漏掉设备侧改写（freezer/静音回不来）
+            if let Err(e) = crate::scripts::atomic_write(&p, s.as_bytes()) {
                 warn!("pending_restore.json 写入失败: {}", e);
             }
         }
@@ -1140,5 +1142,57 @@ fn short_serial(serial: &str) -> String {
         format!("{}…", head)
     } else {
         serial.to_string()
+    }
+}
+
+#[cfg(test)]
+mod pending_restore_tests {
+    use super::*;
+
+    /// 崩溃自愈标记走统一原子写（DATA-001）：重复覆盖不残留 .tmp- 临时文件，
+    /// 清空映射时删除标记文件
+    #[test]
+    fn save_pending_roundtrips_and_replaces_without_temp_leftovers() {
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-pending-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut map = HashMap::new();
+        map.insert(
+            "127.0.0.1:5555".to_string(),
+            PendingRestore {
+                freezer: Some("0".into()),
+                media_volume: Some(7),
+            },
+        );
+        save_pending(&dir, &map);
+        let path = pending_restore_path(&dir);
+        assert!(path.is_file());
+
+        let loaded = load_pending(&dir);
+        assert_eq!(loaded["127.0.0.1:5555"].freezer.as_deref(), Some("0"));
+        assert_eq!(loaded["127.0.0.1:5555"].media_volume, Some(7));
+
+        // 二次覆盖（原子替换已存在文件）：新内容生效且无临时文件残留
+        map.insert("serial2".to_string(), PendingRestore::default());
+        save_pending(&dir, &map);
+        let loaded = load_pending(&dir);
+        assert_eq!(loaded.len(), 2);
+        assert!(loaded.contains_key("serial2"));
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "临时文件未清理: {leftovers:?}");
+
+        // 清空映射 → 删除标记文件（兜底恢复无需执行）
+        save_pending(&dir, &HashMap::new());
+        assert!(!path.exists());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
