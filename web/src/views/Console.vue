@@ -513,6 +513,7 @@ import ScriptPicker from '../components/ScriptPicker.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import { createScriptValidator } from '../script-language/validate'
 import { computeRunLineMap } from '../script-language/line-map'
+import { useConsoleRuntime } from '../composables/useConsoleRuntime'
 import {
   defaultTemplateName,
   deviceRectStyle as mapDeviceRectStyle,
@@ -525,6 +526,17 @@ const toast = useToast()
 
 // 侧边栏收起状态（MainLayout provide）：收起时释放的宽度让给右侧操作区，投屏区保持不变
 const sidebarCollapsed = inject('sidebarCollapsed', ref(false))
+const superseded = ref(false)
+const manualClose = ref(false)
+const consoleRuntime = useConsoleRuntime({
+  api,
+  devicesData,
+  scriptsData,
+  templatesData,
+  toast,
+  connect,
+  deviceIdRef: computed(() => store.deviceId),
+})
 
 const videoWrap = ref(null)
 const videoElement = ref(null)
@@ -670,51 +682,29 @@ let connectLock = false
 //    会话保持不断，新 viewer 无缝接管
 //  - 被顶替页面经信令 ws 收到 taken_over → 直接断开且不再自动重连（防互顶）
 //  - 自动重连（非手动）遇 conflict → 直接放弃并提示（不弹窗、不抢连接）
-let reconnectTimer = null
-let reconnectAttempts = 0
-let manualClose = false
-// 被其他页面 force 顶替（已收 taken_over）：断开后不再自动重连
-let superseded = false
 // 本次 offer 是否带 force（conflict 确认后顶替重连用）
 let forceTakeover = false
 
-/** 被动断开后的自动重连调度：被顶替不重连，否则按退避时间重连 */
 function scheduleReconnect() {
-  if (reconnectTimer || !store.deviceId) return
-  if (superseded) {
-    errorMsg.value = '连接已被其他页面接管'
-    return
-  }
-  const delay = [3000, 6000, 12000][Math.min(reconnectAttempts, 2)]
-  reconnectAttempts++
-  toast(`连接已断开，${delay / 1000} 秒后自动重连…`, 'warn')
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null
-    if (superseded) {
-      errorMsg.value = '连接已被其他页面接管'
-      return
-    }
-    connect(false) // 自动重连非 force：他页已连接时服务端回 conflict → 放弃
-  }, delay)
+  consoleRuntime.scheduleReconnect({ superseded, errorMsg })
 }
 
 function onChannelOpen() {
-  connected.value = true
-  connecting.value = false
-  reconnectAttempts = 0
-  videoConnectTs = Date.now()
-  // 音频按需发送：告知服务端本页是否要音频（默认静音 → 服务端零音频包）。
-  // 仅靠 track.enabled=false 不够：部分浏览器内核仍把音频流选为 A/V 同步
-  // 主时钟，虚拟屏音频时钟慢漂会把视频延迟单调拉高（见 toggleAudio 注释）
-  sendControl({ type: 'audio', on: !audioMuted.value })
-  toast('WebRTC 连接建立', 'success')
+  consoleRuntime.onChannelOpen({
+    connectedRef: connected,
+    connectingRef: connecting,
+    videoConnectTsRef: { get value() { return videoConnectTs }, set value(v) { videoConnectTs = v } },
+    audioMutedRef: audioMuted,
+    sendControl,
+  })
 }
 
 function onChannelClose() {
-  connected.value = false
-  // 被顶替（taken_over）不自动重连，防互顶死循环
-  if (!manualClose && !superseded) scheduleReconnect()
-  manualClose = false
+  consoleRuntime.onChannelClose({
+    connectedRef: connected,
+    manualCloseRef: manualClose,
+    supersededRef: superseded,
+  })
 }
 
 // 右侧面板页签
@@ -746,7 +736,7 @@ const mode = ref('edit')
 const savedVisible = ref(false)
 let savedTimer = null
 const form = reactive({ name: '', kind: 'redroid', addr: '', screen_mode: 'virtual', vd_res: '1920x1080', vd_dpi: 0, pkg: '', fps: 30 })
-const scanning = ref(false)
+const scanning = consoleRuntime.scanning
 // 配置保存串行化标志：防止连续保存叠加触发多次重连
 const configApplying = ref(false)
 
@@ -943,8 +933,8 @@ function cancelAdd() {
 
 /** 下拉框切换设备：手动断开旧连接（不自动重连），等待用户点连接 */
 function onDeviceSelect() {
-  if (connected.value || reconnectTimer) {
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  if (connected.value || consoleRuntime.reconnectTimer.value) {
+    consoleRuntime.cancelReconnect()
     cleanup(true)
   }
   reconnectAttempts = 0
@@ -1056,8 +1046,8 @@ async function addDevice() {
     const r = await api.createDevice(payload)
     await loadData()
     // 新增成功后切换到新设备：先断开旧设备连接，避免画面/控制仍指向旧设备
-    if (connected.value || reconnectTimer) {
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+    if (connected.value || consoleRuntime.reconnectTimer.value) {
+      consoleRuntime.cancelReconnect()
       cleanup(true)
     }
     store.deviceId = r.id
@@ -1075,8 +1065,8 @@ async function removeDevice() {
   if (!confirm(`确定删除设备 ${d.name}？`)) return
   try {
     await api.deleteDevice(d.id)
-    if (connected.value || reconnectTimer) {
-      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+    if (connected.value || consoleRuntime.reconnectTimer.value) {
+      consoleRuntime.cancelReconnect()
       cleanup(true)
     }
     devicesData.value = devices.value.filter(x => x.id !== d.id)
@@ -1098,7 +1088,7 @@ async function removeDevice() {
  *  虚拟屏拆会话/镜像关屏） */
 function disconnect() {
   if (!store.deviceId) return
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  consoleRuntime.cancelReconnect()
   cleanup(true)
   toast('已断开投屏（设备会话保留）', 'info')
 }
@@ -1215,15 +1205,7 @@ const fxHitStyle = computed(() => (scriptFx.hit.show
   : {}))
 
 async function loadData() {
-  try {
-    devicesData.value = await api.listDevices()
-  } catch (e) { console.warn('load devices:', e.message) }
-  try {
-    scriptsData.value = await api.listScripts()
-  } catch (e) { console.warn('load scripts:', e.message) }
-  try {
-    templatesData.value = await api.listTemplates()
-  } catch (e) { console.warn('load templates:', e.message) }
+  await consoleRuntime.loadData()
 }
 
 // ---------- WebRTC 连接 ----------
@@ -1292,7 +1274,7 @@ async function doConnect() {
   if (!store.deviceId) return toast('请先选择设备（设备页签下拉框）', 'error')
   // 重连场景：若有残留 pc（连接失败但未清理干净），先释放（主动关闭，不触发自动重连）
   if (pc) cleanup(true)
-  superseded = false
+  superseded.value = false
   errorMsg.value = ''
   connecting.value = true
 
@@ -1384,7 +1366,7 @@ async function doConnect() {
       try {
         const msg = JSON.parse(evt.data)
         if (msg.type === 'taken_over') {
-          superseded = true
+          superseded.value = true
           console.warn('[webrtc] taken over by another page')
           toast('连接已被其他页面接管', 'warn')
         }
@@ -1409,9 +1391,8 @@ async function doConnect() {
 /** 释放 WebRTC 资源；manual=true 表示主动关闭（不触发自动重连） */
 function cleanup(manual = false) {
   if (statsTimer) { clearInterval(statsTimer); statsTimer = null }
-  if (logTimer) { clearInterval(logTimer); logTimer = null }
   if (pc) {
-    manualClose = manual // 主动关闭时标记：pc.close() 触发的 onclose 不触发自动重连
+    manualClose.value = manual // 主动关闭时标记：pc.close() 触发的 onclose 不触发自动重连
     try { pc.close() } catch (e) {}
     pc = null
   }
@@ -1430,6 +1411,7 @@ function cleanup(manual = false) {
   // 清空画面：断开后避免旧帧定格残留（overlay 会显示连接提示）
   if (videoElement.value) videoElement.value.srcObject = null
   hideLoupe()
+  consoleRuntime.cleanup()
 }
 
 // ---------- 视频静默检测 ----------
@@ -1479,7 +1461,7 @@ let fpCanvas = null
 let fpCtx = null
 
 function handleVideoSilence() {
-  if (manualClose || !connected.value || !store.deviceId) return
+  if (manualClose.value || !connected.value || !store.deviceId) return
   console.warn('[webrtc] video stream silent, treating as disconnected')
   connected.value = false
   scheduleReconnect()
@@ -1669,18 +1651,15 @@ function applyLogFilter() {
 }
 
 async function refreshLogs() {
-  if (!store.deviceId) return
   try {
-    const logs = await api.listLogs(store.deviceId, null, 50)
+    const logs = await consoleRuntime.refreshLogs()
     rawLogs = logs || []
     applyLogFilter()
   } catch (e) {}
 }
 
 function startLogPolling() {
-  if (logTimer) clearInterval(logTimer)
-  refreshLogs()
-  logTimer = setInterval(refreshLogs, 1000)
+  consoleRuntime.startLogPolling(refreshLogs)
 }
 
 // ---------- 控制（走 DataChannel） ----------
@@ -3230,7 +3209,7 @@ watch(() => store.deviceId, id => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  consoleRuntime.cancelReconnect()
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
   if (savedTimer) { clearTimeout(savedTimer); savedTimer = null }
   if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
