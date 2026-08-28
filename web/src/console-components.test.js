@@ -8,27 +8,41 @@ describe('Console 视觉组件拆分静态回归', () => {
   const consoleSource = read('./views/Console.vue')
   const template = consoleSource.slice(0, consoleSource.indexOf('</template>'))
 
-  it('Console 只编排视觉子组件，原设备/模板/脚本大块模板已移出', () => {
-    expect(consoleSource).toContain("import DevicePanel from '../components/console/DevicePanel.vue'")
+  it('Console 只编排视觉子组件，设备管理收进工具条 + 设置弹窗', () => {
+    expect(consoleSource).toContain("import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'")
     expect(consoleSource).toContain("import TemplateCapture from '../components/console/TemplateCapture.vue'")
     expect(consoleSource).toContain("import ScriptRunner from '../components/console/ScriptRunner.vue'")
-    expect(template).toContain('<DevicePanel ')
+    expect(template).toContain('<DeviceSettingsModal ')
     expect(template).toContain('<TemplateCapture ')
     expect(template).toContain('<ScriptRunner ')
+    expect(template).not.toContain('<DevicePanel ')
+    expect(template).not.toContain('panel-tabs')
     expect(template).not.toContain('class="dev-pick"')
     expect(template).not.toContain('class="script-tpl"')
     expect(template).not.toContain('class="script-run"')
   })
 
+  it('设备选择/连接/设置/删除等设备控件位于投屏上方工具条', () => {
+    const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('ConsoleVideoStage'))
+    expect(toolbar).toContain('v-model="store.deviceId"')
+    expect(toolbar).toContain('flushAndConnect')
+    expect(toolbar).toContain('refreshDevices')
+    expect(toolbar).toContain('startAdd')
+    expect(toolbar).toContain('openSettings')
+    expect(toolbar).toContain('removeDevice')
+    expect(toolbar).toContain('⚙️ 设置')
+  })
+
   it('子组件保留关键交互入口和挂载回调契约', () => {
-    const device = read('./components/console/DevicePanel.vue')
+    const settings = read('./components/console/DeviceSettingsModal.vue')
     const capture = read('./components/console/TemplateCapture.vue')
     const runner = read('./components/console/ScriptRunner.vue')
     const logs = read('./components/console/RunLogPanel.vue')
 
-    expect(device).toContain('DeviceVirtualFields')
-    expect(device).toContain('ctx.flushAndConnect')
-    expect(device).toContain('ctx.removeDevice')
+    expect(settings).toContain('DeviceVirtualFields')
+    expect(settings).toContain('ctx.saveSettings')
+    expect(settings).toContain('ctx.cancelSettings')
+    expect(settings).toContain('ConsoleDeviceSummary')
     expect(capture).toContain('props.onCropMounted({ canvas: cropCanvas.value, section: cropSec.value })')
     expect(capture).toContain('ctx.cropMouseDown')
     expect(capture).toContain('ctx.onTplUpload')

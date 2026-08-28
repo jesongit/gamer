@@ -33,3 +33,18 @@ const props = defineProps({
 
 const deviceStatus = computed(() => (props.device?.status === 'online' ? '在线' : '离线'))
 </script>
+
+<style scoped>
+.dev-summary { display: flex; flex-direction: column; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.ps-head { display: flex; align-items: center; gap: 8px; }
+.ps-title { font-size: 13px; font-weight: 600; }
+.sum-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.sum-label { width: 34px; flex-shrink: 0; font-size: 11px; color: var(--text-2); }
+.sum-value { min-width: 0; word-break: break-all; color: var(--text-1); }
+.kind-badge {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
+  background: var(--bg-3); border: 1px solid var(--border);
+  border-radius: 12px; font-size: 11px; white-space: nowrap;
+}
+.mono { font-family: var(--mono); font-size: 11px; color: var(--text-1); }
+</style>

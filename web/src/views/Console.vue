@@ -2,8 +2,18 @@
   <div class="console" :class="{ 'sb-collapsed': sidebarCollapsed }">
     <!-- 左：画面区 -->
     <div class="stage">
-      <!-- 顶部工具条 -->
+      <!-- 顶部工具条：设备管理 + 投屏控制 -->
       <div class="toolbar">
+        <select v-model="store.deviceId" class="select mono tb-dev-select" @change="onDeviceSelect">
+          <option value="">选择设备…</option>
+          <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
+        </select>
+        <button v-if="!connected" class="btn btn-sm btn-primary" :disabled="!store.deviceId || connecting" @click="flushAndConnect">{{ connecting ? '连接中…' : '🔌 连接' }}</button>
+        <button v-else class="btn btn-sm" @click="disconnect">⏹ 断开</button>
+        <button class="btn btn-sm" :disabled="scanning" @click="refreshDevices">🔄 刷新</button>
+        <button class="btn btn-sm" @click="startAdd">＋ 新增</button>
+        <button class="btn btn-sm" :disabled="!current" @click="openSettings">⚙️ 设置</button>
+        <div class="tb-sep"></div>
         <button class="btn btn-sm" @click="shot">📷 截图</button>
         <button class="btn btn-sm" @click="rotate">🔄 旋转</button>
         <button class="btn btn-sm" @click="key('HOME')">🏠 Home</button>
@@ -15,7 +25,7 @@
         <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (currentPkg || '未配置应用')">🚀 启动应用</button>
         <div class="tb-sep"></div>
         <button class="btn btn-sm" @click="clipboard">📋 剪贴板</button>
-        <span class="tb-tip">鼠标左键=触控 · 滚轮=滑动 · 支持多点触控</span>
+        <button class="btn btn-sm btn-danger" :disabled="!current" @click="removeDevice">🗑 删除</button>
       </div>
 
       <ConsoleVideoStage
@@ -55,23 +65,15 @@
       />
     </div>
 
-    <!-- 右：控制面板（页签切换） -->
+    <!-- 右：功能区（模板 + 脚本独占；设备管理收进顶部工具条与设置弹窗） -->
     <aside class="panel">
-      <div class="panel-tabs">
-        <button v-for="t in tabs" :key="t.key" class="tab-btn" :class="{ active: activeTab === t.key }" @click="activeTab = t.key">
-          {{ t.icon }}<span class="tab-label">{{ t.label }}</span>
-        </button>
-      </div>
-
-      <div class="tab-body">
-        <DevicePanel v-show="activeTab === 'info'" :context="devicePanelContext" />
-
-        <div v-show="activeTab === 'script'" class="panel-sec script-tab">
-          <TemplateCapture :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
-          <ScriptRunner :context="scriptRunnerContext" :on-editor-mounted="onScriptEditorMounted" />
-        </div>
+      <div class="panel-sec script-tab">
+        <TemplateCapture :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
+        <ScriptRunner :context="scriptRunnerContext" :on-editor-mounted="onScriptEditorMounted" />
       </div>
     </aside>
+    <!-- 设备设置 / 新增设备弹窗 -->
+    <DeviceSettingsModal :context="deviceSettingsContext" />
     <!-- call 子脚本预览弹窗（ESC / ✕ / 点遮罩关闭） -->
     <div v-if="previewScript" class="modal-mask" @click.self="closeCallPreview">
       <div class="modal preview-modal">
@@ -108,7 +110,7 @@ import {
   isMissingEndpointError, isDeviceBusyConflict, isTerminalRunState,
 } from '../runs'
 import ConsoleVideoStage from '../components/console/ConsoleVideoStage.vue'
-import DevicePanel from '../components/console/DevicePanel.vue'
+import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
 import ScriptRunner from '../components/console/ScriptRunner.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
@@ -364,14 +366,10 @@ function scheduleReconnect() {
 function onChannelOpen() {}
 function onChannelClose() {}
 
-// 右侧面板页签
-const activeTab = ref('info')
-const tabs = [
-  { key: 'info', icon: 'ℹ️', label: '设备' },
-  { key: 'script', icon: '📜', label: '脚本' }
-]
+// 设备设置弹窗开关（新增/编辑共用一个弹窗，由 mode 区分）
+const settingsOpen = ref(false)
 
-// ---------- 设备管理（融合原设备列表：下拉选择 / 连接 / 手动新增 / 配置编辑） ----------
+// ---------- 设备管理（工具条设备控件 + 设置弹窗；原右侧设备页签已收编） ----------
 const vdPresets = [
   { res: '1920x1080', dpi: 420 },
   { res: '1080x1920', dpi: 420 },
@@ -386,15 +384,12 @@ const types = [
   { key: 'wifi', label: '无线 adb', icon: '📶' },
   { key: 'emu', label: '模拟器', icon: '🖥️' }
 ]
-// 表单状态：'edit' 编辑现有设备 / 'add' 手动新增
+// 表单状态：'edit' 编辑现有设备 / 'add' 手动新增（均在设置弹窗内完成）
 // 默认配置：分辨率 1920x1080 · 帧率 30 · DPI 自动（0）
 const mode = ref('edit')
-// “已自动保存”提示：保存成功后只短暂显示几秒
-const savedVisible = ref(false)
-let savedTimer = null
 const form = reactive({ name: '', kind: 'redroid', addr: '', screen_mode: 'virtual', vd_res: '1920x1080', vd_dpi: 0, pkg: '', fps: 30 })
 const scanning = consoleRuntime.scanning
-// 配置保存串行化标志：防止连续保存叠加触发多次重连
+// 配置保存进行中标志：防止重复提交
 const configApplying = ref(false)
 
 // 应用下拉（应用选择）
@@ -502,23 +497,9 @@ function restoreAppCache(id) {
   appHint.value = cached ? `已缓存 ${cached.list.length} 个应用` : ''
 }
 
-/** 隐藏“已自动保存”提示（切换设备/取消新增时清除残留） */
-function hideSavedHint() {
-  savedVisible.value = false
-  if (savedTimer) { clearTimeout(savedTimer); savedTimer = null }
-}
-
-/** 显示“已自动保存”提示，3 秒后自动消失 */
-function showSavedHint() {
-  savedVisible.value = true
-  if (savedTimer) { clearTimeout(savedTimer); savedTimer = null }
-  savedTimer = setTimeout(() => { savedVisible.value = false }, 3000)
-}
-
 /** 把设备记录载入表单（编辑模式） */
 function loadForm(d) {
   mode.value = 'edit'
-  hideSavedHint()
   form.name = d.name || ''
   form.kind = d.kind || 'redroid'
   form.addr = d.addr || ''
@@ -547,10 +528,9 @@ const formDirty = computed(() => {
   )
 })
 
-/** 手动新增：重置为默认配置（1920x1080 / 30fps / DPI 自动） */
+/** 手动新增：重置为默认配置（1920x1080 / 30fps / DPI 自动）并打开设置弹窗 */
 function startAdd() {
   mode.value = 'add'
-  hideSavedHint()
   form.name = ''
   form.kind = 'redroid'
   form.addr = ''
@@ -564,15 +544,24 @@ function startAdd() {
   appOpen.value = false
   appHint.value = ''
   errorMsg.value = ''
+  settingsOpen.value = true
 }
 
-/** 取消新增：回到当前已选设备（或空状态） */
-function cancelAdd() {
+/** 打开设备设置弹窗（编辑当前选中设备） */
+function openSettings() {
+  const d = current.value
+  if (!d) return
+  loadForm(d)
+  settingsOpen.value = true
+}
+
+/** 关闭设置弹窗：丢弃未保存修改，恢复当前设备的已保存配置 */
+function cancelSettings() {
+  settingsOpen.value = false
   const d = current.value
   if (d) loadForm(d)
   else {
     mode.value = 'edit'
-    hideSavedHint()
     store.deviceId = null
     pkgDraft.value = ''
     appList.value = []
@@ -632,43 +621,39 @@ function buildPayload() {
   }
 }
 
-/** 自动保存：编辑表单（防抖 800ms）→ PUT 更新配置。
- *  未连接时仅保存修改（连接后按新配置生效）；已连接时保存即实时生效
- *  （服务端踢旧 viewer → onclose → 自动重连，画面自动恢复）。
- *  防抖 + 串行化：保存期间/连接期间的新修改延后重试，避免叠加触发多次重连。 */
-let saveTimer = null
+/** 判断本次保存的 payload 相对旧配置是否触碰投屏会话参数（与服务端
+ *  session_affecting_change 同口径：kind/addr/screen_mode/vd_res/vd_dpi/fps）。
+ *  仅名称/应用变更时服务端保持会话，前端据此前提示「不断开投屏」。 */
+function castingParamsChanged(d, p) {
+  const normRes = s => String(s || '').trim().toLowerCase() || '1920x1080'
+  return d.kind !== p.kind
+    || (d.addr || '').trim() !== p.addr
+    || (d.screen_mode || 'virtual') !== p.screen_mode
+    || normRes(d.vd_res) !== normRes(p.vd_res)
+    || Number(d.vd_dpi || 0) !== Number(p.vd_dpi || 0)
+    || Number(d.fps || 30) !== Number(p.fps || 30)
+}
 
-watch(form, () => {
-  if (mode.value !== 'edit' || !current.value) return
-  if (saveTimer) clearTimeout(saveTimer)
-  saveTimer = setTimeout(autoSaveConfig, 800)
-}, { deep: true })
-
-async function autoSaveConfig() {
-  saveTimer = null
-  if (mode.value !== 'edit') return
+/** 设置弹窗保存：编辑模式 PUT 更新配置，成功后关闭弹窗。
+ *  投屏相关参数变更且已连接时，服务端踢 viewer → onclose → 自动重连生效，
+ *  前端无需手动重连（避免与自动重连并发导致双连接）；仅改名称/应用时
+ *  服务端保持会话，投屏不中断。 */
+async function saveSettings() {
+  if (mode.value === 'add') return addDevice()
   const d = current.value
-  if (!d) return
-  // 保存/连接进行中：稍后重试（表单修改仍在，formDirty 保持）
-  if (configApplying.value || connecting.value) {
-    saveTimer = setTimeout(autoSaveConfig, 600)
-    return
-  }
-  if (!formDirty.value) return
+  if (!d || configApplying.value) return
   const payload = buildPayload()
   if (!payload.name) return toast('请填写设备名称', 'error')
   const wasConnected = connected.value
+  const castingChanged = castingParamsChanged(d, payload)
   configApplying.value = true
   try {
     await api.updateDevice(d.id, payload)
     await loadData()
     const nd = devices.value.find(x => x.id === d.id)
     if (nd) loadForm(nd)
-    // 服务端已踢掉本页 viewer（config changed, kicked viewer）→ 触发 onclose →
-    // 自动重连逻辑（scheduleReconnect）重新建立会话与 WebRTC，无需在此手动重连，
-    // 避免与自动重连并发导致双连接
-    toast(wasConnected ? '配置已保存，正在自动重连生效…' : '配置已保存', 'success')
-    showSavedHint()
+    settingsOpen.value = false
+    toast(wasConnected && castingChanged ? '配置已保存，投屏参数变更，自动重连中…' : '配置已保存', 'success')
   } catch (e) {
     toast('保存失败：' + e.message, 'error')
   } finally {
@@ -676,15 +661,10 @@ async function autoSaveConfig() {
   }
 }
 
-/** 点连接前先落盘未保存的配置（防抖未到期时），再建立连接 */
+/** 建立连接（配置统一在设置弹窗内显式保存，连接时无待保存修改） */
 async function flushAndConnect() {
-  if (mode.value === 'add') return toast('请先取消新增或选择已有设备', 'warn')
-  if (mode.value !== 'edit' || !current.value) return connect(true)
-  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
-  if (configApplying.value) return toast('配置保存中，请稍候再连接', 'warn')
-  if (!formDirty.value) return connect(true)
-  await autoSaveConfig()
-  if (formDirty.value) return toast('配置尚未保存成功，请稍后重试', 'error')
+  if (mode.value === 'add') return toast('请先完成或取消「新增设备」', 'warn')
+  if (!store.deviceId) return
   connect(true)
 }
 
@@ -703,6 +683,7 @@ async function addDevice() {
     store.deviceId = r.id
     const nd = devices.value.find(x => x.id === r.id)
     if (nd) loadForm(nd)
+    settingsOpen.value = false
     toast('设备已添加，点击连接开始投屏', 'success')
   } catch (e) {
     toast('添加失败：' + e.message, 'error')
@@ -725,7 +706,10 @@ async function removeDevice() {
       loadForm(devices.value[0])
     } else {
       store.deviceId = null
-      startAdd()
+      mode.value = 'edit'
+      pkgDraft.value = ''
+      appList.value = []
+      appHint.value = ''
     }
     toast('设备已删除', 'success')
   } catch (e) {
@@ -1350,7 +1334,6 @@ function openCrop(rect) {
   crop.rect = { x: 0, y: 0, w: crop.baseW, h: crop.baseH }
   crop.name = defaultTplName(rect)
   crop.active = true
-  activeTab.value = 'script'
   nextTick(() => {
     renderCropFrame()
     refreshCropPreview()
@@ -1867,10 +1850,12 @@ function fileToBase64(file) {
   })
 }
 
-/** 全局按键：Esc 关闭 call 子脚本预览 / 模板大图 / 取消删除确认 */
+/** 全局按键：Esc 关闭设备设置弹窗 / call 子脚本预览 / 模板大图 / 取消删除确认 */
 function onGlobalKeydown(e) {
   if (e.key !== 'Escape') return
-  if (previewScript.value) {
+  if (settingsOpen.value) {
+    cancelSettings()
+  } else if (previewScript.value) {
     closeCallPreview()
   } else if (viewTpl.value) {
     closeTplView()
@@ -2597,11 +2582,10 @@ function onLogBoxMounted(el) { logBox.value = el }
 function onScriptEditorMounted(el) { scriptEditor.value = el }
 function setRenameInputEl(el) { renameInputEl = el }
 
-const devicePanelContext = {
-  store, devices, scanning, refreshDevices, startAdd, mode, form, types, vdPresets, fpsPresets,
+const deviceSettingsContext = {
+  settingsOpen, mode, form, types, vdPresets, fpsPresets, formDirty,
   pkgDraft, appOpen, appFiltered, appLoading, loadApps, commitPkg, pickApp, appHint,
-  configApplying, addDevice, cancelAdd, current, connected, kindInfo, screenSummary,
-  connecting, flushAndConnect, disconnect, removeDevice, formDirty, savedVisible,
+  configApplying, saveSettings, cancelSettings, current, connected, kindInfo, screenSummary,
 }
 const templateCaptureContext = {
   activePkg, pkgOptions, exportPartition, onImportFile, crop, testThreshold, testRegion, tplSearch,
@@ -2682,8 +2666,6 @@ watch(() => store.deviceId, id => {
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   consoleRuntime.cancelReconnect()
-  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
-  if (savedTimer) { clearTimeout(savedTimer); savedTimer = null }
   if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
   if (altFeedbackTimer) { clearTimeout(altFeedbackTimer); altFeedbackTimer = null }
   if (fxTapTimer) { clearTimeout(fxTapTimer); fxTapTimer = null }
@@ -2731,7 +2713,6 @@ onUnmounted(() => {
   min-height: 45px; box-sizing: border-box;
 }
 .tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
-.tb-tip { margin-left: auto; font-size: 11px; color: var(--text-2); }
 .btn.active { border-color: var(--accent-2); color: var(--accent-2); }
 
 /* ===== 右侧面板 ===== */
@@ -2741,135 +2722,15 @@ onUnmounted(() => {
 }
 /* 侧边栏收起：释放宽度全部给右侧操作区（340 + 148），中间投屏区宽度保持不变 */
 .console.sb-collapsed .panel { width: calc(340px + var(--sb-free-w)); }
-.panel-tabs {
-  display: flex; gap: 4px; flex-shrink: 0;
-  background: var(--bg-1); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 4px 6px;
-  height: 45px; box-sizing: border-box;
-}
-.tab-btn {
-  flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px;
-  padding: 7px 2px; border: none; border-radius: var(--radius-sm);
-  background: transparent; color: var(--text-2); font-size: 12px; cursor: pointer;
-  transition: all .15s; white-space: nowrap;
-}
-.tab-btn:hover { color: var(--text-0); background: var(--bg-3); }
-.tab-btn.active { background: rgba(34,211,165,.1); color: var(--accent); font-weight: 600; }
-.tab-btn.hidden { display: none; }
-.tab-body { flex: 1; display: flex; flex-direction: column; gap: 12px; overflow: auto; min-height: 0; }
-.ps-stats { display: flex; gap: 8px; flex-wrap: wrap; }
 
-/* ===== 设备页签（设备管理 + 配置表单） ===== */
-.dev-pick { display: flex; gap: 6px; align-items: center; }
-.dev-pick .dev-select { flex: 1; min-width: 0; padding: 5px 8px; font-size: 12px; }
-.btn-block { width: 100%; }
-
-.cfg-form { display: flex; flex-direction: column; gap: 10px; }
-.cfg-form-head {
-  display: flex; align-items: baseline; justify-content: space-between;
-  font-size: 12px; font-weight: 600; padding-bottom: 2px;
-  border-bottom: 1px solid var(--border);
-}
-.cfg-form-sub { font-size: 10px; font-weight: 400; color: var(--text-2); }
-.cfg-actions { display: flex; gap: 8px; }
-.cfg-actions .btn-primary { flex: 1; }
-.cfg-hint { font-size: 10px; color: var(--text-2); }
-
-/* 编辑模式：连接概览 */
-.dev-summary { display: flex; flex-direction: column; gap: 8px; }
-.sum-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-.sum-label { width: 34px; flex-shrink: 0; font-size: 11px; color: var(--text-2); }
-.sum-value { min-width: 0; word-break: break-all; color: var(--text-1); }
-.sum-actions { display: flex; align-items: center; gap: 8px; }
-.sum-actions .btn { flex: 1; }
-.sum-actions .btn-danger { flex: 0 0 auto; }
-.kind-badge {
-  display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
-  background: var(--bg-3); border: 1px solid var(--border);
-  border-radius: 12px; font-size: 11px; white-space: nowrap;
-}
-.dev-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 24px 0; text-align: center; }
-.dev-empty-icon { font-size: 34px; opacity: .5; }
-.dev-empty-text { color: var(--text-2); font-size: 12px; }
-
-.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.form-row .form-item { min-width: 0; }
-.dpi-box { display: flex; gap: 6px; }
-.dpi-box .input { flex: 1; min-width: 0; }
-.dpi-box .btn { flex-shrink: 0; }
-.dpi-box .btn.active { border-color: var(--accent-2); color: var(--accent-2); }
-
-.muted { color: var(--text-2); font-weight: 400; }
-.small { font-size: 11px; margin-top: 4px; }
-
-.type-picker { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-.type-opt {
-  display: flex; flex-direction: column; align-items: center; gap: 5px;
-  padding: 10px 4px; border-radius: var(--radius-sm); border: 1px solid var(--border);
-  cursor: pointer; font-size: 11px; color: var(--text-1); transition: all .15s;
-  text-align: center;
-}
-.type-opt:hover { border-color: #33405e; }
-.type-opt.sel { border-color: var(--accent); color: var(--accent); background: rgba(34,211,165,.06); }
-.type-icon { font-size: 18px; }
-
-.mode-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-.mode-opt {
-  padding: 10px; border-radius: var(--radius-sm); border: 1px solid var(--border);
-  cursor: pointer; transition: all .15s; display: flex; flex-direction: column; gap: 3px;
-}
-.mode-opt:hover { border-color: #33405e; }
-.mode-opt.sel { border-color: var(--accent); background: rgba(34,211,165,.06); }
-.mode-title { font-size: 12px; font-weight: 600; }
-.mode-desc { font-size: 10px; color: var(--text-2); }
-
-.vd-presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-.vd-opt {
-  display: flex; flex-direction: column; align-items: center; gap: 2px;
-  padding: 8px 2px; border-radius: var(--radius-sm); border: 1px solid var(--border);
-  cursor: pointer; transition: all .15s;
-}
-.vd-opt:hover { border-color: #33405e; }
-.vd-opt.sel { border-color: var(--accent-2); background: rgba(56,189,248,.06); }
-.vd-res { font-size: 11px; color: var(--text-0); }
-.vd-dpi { font-size: 10px; color: var(--text-2); }
-
-/* 应用下拉 */
-.app-box { position: relative; display: flex; gap: 6px; }
-.app-box .btn { flex-shrink: 0; }
-.app-box .input { flex: 1; min-width: 0; }
-.app-menu {
-  position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 30;
-  background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  max-height: 200px; overflow: auto; box-shadow: 0 8px 24px rgba(0,0,0,.45);
-}
-.app-opt {
-  display: flex; flex-direction: column; gap: 2px; padding: 7px 10px;
-  cursor: pointer; border-bottom: 1px solid rgba(255,255,255,.04);
-}
-.app-opt:hover { background: var(--bg-3); }
-.app-label { font-size: 12px; color: var(--text-0); }
-.app-pkg { font-size: 10px; color: var(--text-2); }
-.app-empty { padding: 10px; font-size: 11px; color: var(--text-2); text-align: center; }
-
-/* 帧率选择（无"自动"选项） */
-.fps-presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-.fps-opt {
-  text-align: center; padding: 8px 4px; border-radius: var(--radius-sm);
-  border: 1px solid var(--border); cursor: pointer; font-size: 12px;
-  color: var(--text-1); transition: all .15s;
-}
-.fps-opt:hover { border-color: #33405e; }
-.fps-opt.sel { border-color: var(--accent-2); background: rgba(56,189,248,.06); color: var(--accent-2); }
+/* 工具条设备下拉（设备管理收进工具条后的宽度约束） */
+.tb-dev-select { flex: 0 1 auto; min-width: 130px; max-width: 200px; padding: 4px 6px; font-size: 12px; }
 
 .panel-sec {
   background: var(--bg-1); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 10px;
   flex-shrink: 0;
 }
-.ps-head { display: flex; align-items: center; gap: 8px; }
-.ps-title { font-size: 13px; font-weight: 600; }
-.ps-sub { font-size: 11px; color: var(--text-2); }
 .mono { font-family: var(--mono); font-size: 11px; color: var(--text-1); }
 
 .auto-run { display: flex; flex-wrap: wrap; gap: 8px; }
