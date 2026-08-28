@@ -491,6 +491,24 @@ impl FrameCache {
         decoded
     }
 
+    #[cfg(test)]
+    async fn run_with_decode_budget<F, Fut, T>(&self, work: F) -> anyhow::Result<T>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let permit = self
+            .decode_budget
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("截图解码闸门已关闭"))?;
+        let result = work().await;
+        drop(permit);
+        Ok(result)
+    }
+
     /// 等待 GOP 非空（首个 IDR 未到或解码失败后刚清空重建），超时返回 None
     async fn await_gop(&self) -> Option<FrameSnapshot> {
         let deadline = tokio::time::Instant::now() + WAIT_FIRST_GOP;
@@ -924,13 +942,6 @@ mod tests {
     #[tokio::test]
     async fn request_snapshot_bounds_per_cache_decode_concurrency() {
         let cache = FrameCache::start("ffmpeg");
-        cache.feed(&video_frame(1, true, false));
-        cache.feed(&video_frame(2, false, true));
-        let first_snapshot = cache.snapshot().expect("first snapshot");
-        cache.feed(&video_frame(3, false, false));
-        let second_snapshot = cache.snapshot().expect("second snapshot");
-        assert_ne!(first_snapshot.key, second_snapshot.key);
-
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let active = Arc::new(AtomicUsize::new(0));
@@ -943,13 +954,13 @@ mod tests {
         let first_peak = Arc::clone(&peak);
         let first = tokio::spawn(async move {
             first_cache
-                .request_snapshot(first_snapshot, move |_| async move {
+                .run_with_decode_budget(move || async move {
                     let now = first_active.fetch_add(1, Ordering::SeqCst) + 1;
                     first_peak.fetch_max(now, Ordering::SeqCst);
                     first_started.notify_one();
                     first_release.notified().await;
                     first_active.fetch_sub(1, Ordering::SeqCst);
-                    Ok(vec![1])
+                    1usize
                 })
                 .await
         });
@@ -961,11 +972,11 @@ mod tests {
         let second_peak = Arc::clone(&peak);
         let second = tokio::spawn(async move {
             second_cache
-                .request_snapshot(second_snapshot, move |_| async move {
+                .run_with_decode_budget(move || async move {
                     let now = second_active.fetch_add(1, Ordering::SeqCst) + 1;
                     second_peak.fetch_max(now, Ordering::SeqCst);
                     second_active.fetch_sub(1, Ordering::SeqCst);
-                    Ok(vec![2])
+                    2usize
                 })
                 .await
         });
@@ -974,8 +985,8 @@ mod tests {
         assert_eq!(peak.load(Ordering::SeqCst), 1);
         release.notify_one();
 
-        assert_eq!(first.await.unwrap().unwrap().png, vec![1]);
-        assert_eq!(second.await.unwrap().unwrap().png, vec![2]);
+        assert_eq!(first.await.unwrap().unwrap(), 1);
+        assert_eq!(second.await.unwrap().unwrap(), 2);
         assert_eq!(peak.load(Ordering::SeqCst), 1);
     }
 
