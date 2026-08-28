@@ -12,6 +12,8 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -79,6 +81,8 @@ fn atomic_write_with(
         file.flush()?;
         file.sync_all()?;
         drop(file);
+        #[cfg(windows)]
+        let _guard = replace_lock().lock().unwrap();
         replace(&temp, path)?;
         sync_parent(parent)?;
         Ok(())
@@ -117,6 +121,12 @@ fn replace_file(temp: &Path, path: &Path) -> std::io::Result<()> {
 #[cfg(unix)]
 fn sync_parent(parent: &Path) -> std::io::Result<()> {
     std::fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(windows)]
+fn replace_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[cfg(not(unix))]

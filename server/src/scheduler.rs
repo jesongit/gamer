@@ -142,7 +142,7 @@ impl Scheduler {
             Err(e) => {
                 warn!(task = %task.name, err = %e, "task now rejected: read script failed");
                 record_scheduler_failure(&self.db.metrics());
-                return Err(RunNowError::Io(e.to_string()));
+                return Err(RunNowError::Io);
             }
         };
         let result = submit_run(&self.runs, &self.db, task, None, content)
@@ -156,7 +156,7 @@ impl Scheduler {
             Err(RunNowError::Start(StartError::ShuttingDown)) => {
                 record_scheduler_event(&self.db.metrics(), SchedulerEvent::Skipped);
             }
-            Err(RunNowError::ScriptMissing | RunNowError::Io(_)) => {
+            Err(RunNowError::ScriptMissing | RunNowError::Io) => {
                 record_scheduler_failure(&self.db.metrics());
             }
         }
@@ -168,7 +168,7 @@ impl Scheduler {
 #[derive(Debug)]
 pub enum RunNowError {
     ScriptMissing,
-    Io(String),
+    Io,
     Start(StartError),
 }
 
@@ -473,10 +473,6 @@ async fn watch_scheduled_completion(
     }
 }
 
-fn record_scheduler_trigger(metrics: &Metrics, trigger_started: std::time::Instant) {
-    metrics.record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
-}
-
 fn record_scheduler_trigger_latency(metrics: &Metrics, scheduled_at: i64) {
     let now = Utc::now().timestamp();
     metrics.record_scheduler_trigger(now.saturating_sub(scheduled_at) as u64);
@@ -523,7 +519,7 @@ mod tests {
     #[test]
     fn scheduler_metrics_helpers_update_low_cardinality_counters() {
         let trigger_metrics = Metrics::default();
-        record_scheduler_trigger(&trigger_metrics, std::time::Instant::now());
+        record_scheduler_trigger_latency(&trigger_metrics, Utc::now().timestamp());
         let trigger_snapshot = trigger_metrics.snapshot();
         assert_eq!(trigger_snapshot.scheduler_triggers_total, 1);
 

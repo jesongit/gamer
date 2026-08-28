@@ -1659,13 +1659,6 @@ impl Runner {
         syntax::substitute_refs(v, refs)
     }
 
-    /// 单字符串的 ^N 替换：`^` 后跟数字（取最长数字串）= 上下文引用，越界
-    /// 报错；`^` 后非数字 = 字面 ^ 原样保留。^ 不是 YAML 保留字符（& 是——
-    /// 锚点，故弃用 &N 选 ^N）
-    fn substitute_ref_str(s: &str, refs: &[String]) -> anyhow::Result<String> {
-        syntax::substitute_ref_str(s, refs)
-    }
-
     /// 解析时长参数（timeout / interval / wait / swipe time 共用）：
     /// **强制带单位**——字符串支持 1ms / 1s / 1m / 30min / 1h / 1d
     /// （m ≡ min，大小写不敏感、可带小数如 "1.5s"）；裸数字（YAML 数字或
@@ -2323,10 +2316,10 @@ mod tests {
         );
         // ^ 后非数字原样保留；越界报错
         assert_eq!(
-            Runner::substitute_ref_str("a^b 100^", &refs).unwrap(),
+            syntax::substitute_ref_str("a^b 100^", &refs).unwrap(),
             "a^b 100^"
         );
-        assert!(Runner::substitute_ref_str("^3", &refs).is_err());
+        assert!(syntax::substitute_ref_str("^3", &refs).is_err());
         // ^ 裸标量合法（& 会变锚点导致值丢失——弃用 &N 的原因）
         assert_eq!(
             parse("steps:\n  - func1: ^1")

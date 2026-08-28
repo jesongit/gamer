@@ -541,9 +541,7 @@ impl RunManager {
     fn finalize(&self, run_id: &str) -> Option<RunRecord> {
         let rec = {
             let mut runs = self.runs.lock().unwrap();
-            let Some(entry) = runs.get_mut(run_id) else {
-                return None;
-            };
+            let entry = runs.get_mut(run_id)?;
             if !entry.record.state.is_terminal() {
                 let cancelled = entry.cancel_requested;
                 entry.record.state = if cancelled {

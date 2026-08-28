@@ -1907,7 +1907,7 @@ async fn api_run_task_now(State(st): State<AppState>, Path(id): Path<String>) ->
                 .record_scheduler_event(crate::metrics::SchedulerEvent::Skipped);
             err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
         }
-        Err(RunNowError::ScriptMissing | RunNowError::Io(_)) => {
+        Err(RunNowError::ScriptMissing | RunNowError::Io) => {
             st.metrics
                 .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
             st.metrics
@@ -2117,6 +2117,8 @@ mod sec_tests {
     }
 
     /// 注入自定义执行器的装配（仲裁层 HTTP 集成测试用假执行器；其余与 build_app 相同）
+    #[cfg(test)]
+    #[allow(dead_code)]
     fn build_app_with_executor(
         tag: &str,
         credential: auth::Credential,
