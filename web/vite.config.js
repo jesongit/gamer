@@ -12,10 +12,12 @@ export default defineConfig({
     port: 5173,
     host: true,
     proxy: {
-      // Rust 服务端 API 代理
+      // Rust 服务端 API 代理。
+      // changeOrigin 必须保持 false：后端对 POST/PUT/DELETE 做 Origin↔Host 同源校验，
+      // 改写 Host 后与浏览器 Origin(5173) 不一致会被 403 forbidden_origin 拒掉。
       '/api': {
         target: process.env.VITE_PROXY_TARGET || 'http://localhost:8443',
-        changeOrigin: true
+        changeOrigin: false
       },
       '/ws': {
         target: process.env.VITE_PROXY_TARGET || 'ws://localhost:8443',

@@ -58,6 +58,10 @@ function stopCountdown() {
 
 async function onLogin() {
   if (busy.value || countdown.value > 0) return
+  if (!user.value.trim() || !pass.value) {
+    errMsg.value = '请输入用户名和密码'
+    return
+  }
   busy.value = true
   errMsg.value = ''
   const res = await login(user.value.trim(), pass.value)   // 必须 await：凭 Set-Cookie 回包后才能放行路由
@@ -79,6 +83,9 @@ async function onLogin() {
       break
     case 'network_error':
       errMsg.value = '无法连接服务端，请确认后端已启动'
+      break
+    case 'forbidden_origin':
+      errMsg.value = '请求被服务端同源校验拒绝，请检查代理/访问地址配置'
       break
     default:
       errMsg.value = '登录失败，请稍后再试'

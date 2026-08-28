@@ -165,6 +165,13 @@ describe('login（POST /api/login）', () => {
     expect(r).toEqual({ ok: false, code: 'network_error' })
   })
 
+  it('403 forbidden_origin → 结构化失败码（代理改写 Host 触发同源校验拒绝）', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonRes(403, { error: 'forbidden_origin' }))
+    const r = await auth.login('a', 'b')
+    expect(r).toEqual({ ok: false, code: 'forbidden_origin' })
+    expect(auth.session.username).toBeNull()
+  })
+
   it('非契约状态（如 500）→ 归类 http_NNN', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonRes(500, { error: 'boom' }))
     const r = await auth.login('a', 'b')

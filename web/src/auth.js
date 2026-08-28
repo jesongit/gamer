@@ -1,5 +1,5 @@
 // 鉴权会话层（阶段 2 SEC 契约，钉死不复述第二套口径）：
-// - 登录   POST /api/login  {username,password} → 200 Set-Cookie gb_session / 401 invalid_credentials / 429 too_many_attempts{retry_after}
+// - 登录   POST /api/login  {username,password} → 200 Set-Cookie gb_session / 401 invalid_credentials / 429 too_many_attempts{retry_after} / 403 forbidden_origin
 // - 探测   GET  /api/session → 200 {authenticated:true,username} / 401
 // - 退出   POST /api/logout  → 204 幂等（成败均清本地态）
 // 同源部署 SameSite=Strict：fetch 不设 credentials（默认同源自动携带/写回 Cookie），不引 CSRF token。
@@ -62,7 +62,7 @@ function isOnLoginPage() {
 // ---- 登录 / 退出 / 探测 ----
 
 // 登录：返回结构化结果而非抛错，调用方据 code 定制文案
-//   {ok:true,username} | {ok:false,code:'invalid_credentials'|'too_many_attempts'|'network_error'|http_NNN, retryAfter?}
+//   {ok:true,username} | {ok:false,code:'invalid_credentials'|'too_many_attempts'|'forbidden_origin'|'network_error'|http_NNN, retryAfter?}
 export async function login(username, password) {
   let r
   try {
@@ -83,6 +83,7 @@ export async function login(username, password) {
     return { ok: false, code: 'too_many_attempts', retryAfter: Math.max(1, Math.floor(Number(body.retry_after) || 1)) }
   }
   if (r.status === 401) return { ok: false, code: 'invalid_credentials' }
+  if (r.status === 403) return { ok: false, code: 'forbidden_origin' } // 服务端 Origin↔Host 同源校验拒绝（反代/代理改写 Host 时会触发）
   return { ok: false, code: `http_${r.status}` }
 }
 
