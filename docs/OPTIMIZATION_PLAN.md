@@ -1,6 +1,6 @@
 # GameBot 优化实施计划
 
-> 状态：阶段0/1/3已完成；阶段2自动化路由安全验收已收口但仍有真实 Android/scrcpy/WebRTC/DataChannel E2E 与持续内存观测；阶段4～6部分完成；阶段7未完成。当前 main 已完成本轮无真机验收：fmt/test/前端测试与构建、Windows 离线性能 smoke 通过，但 clippy 仍失败；Docker/Linux、真实设备链路、持续内存观测和生产数据副本回滚不作通过声明（2026-08-28）
+> 状态：阶段0/1/3/4/6已完成；阶段2除「超限输入后的持续内存观测」外已收口（真实 Android/scrcpy/WebRTC/DataChannel E2E 已于 2026-08-29 真机补测通过）；阶段5主体完成（缺 ffmpeg 内部分段与跨平台基准，NCC 候选按评估搁置）；阶段7除生产数据副本回滚外完成。当前 main：fmt / clippy -D warnings / cargo test（198 passed）/ pnpm test:run（152 passed）/ pnpm build 全绿；2026-08-29 真机 E2E 16/17 项 PASS（唯一 FAIL 为运行中二进制落后于源码的部署问题，重建后复验通过）+ 浏览器真实出画/触控/设置弹窗冒烟通过。checklist 228/238（2026-08-29）
 > 编制日期：2026-08-27  
 > 适用范围：Rust 服务端、Vue 前端、部署配置、测试与运维文档  
 > 本文只定义后续实施顺序和验收条件，不代表相关改动已经完成。
@@ -47,21 +47,23 @@
 
 本轮复核结果（2026-08-28，当前 HEAD `92115c3`）：`cargo fmt --all -- --check` 通过；`cargo clippy --all-targets --all-features -- -D warnings` 失败，原因为 `engine.rs` 的 `validate_top_mapping` dead-code、`engine/model.rs` 的 too-many-arguments，以及本轮 matcher ignored benchmark 测试持同步 `MutexGuard` 跨 await。`cargo test` 为 `177 passed/0 failed/1 ignored`；`web` 的 `pnpm test:run` 为 `147 passed`，`pnpm build` 通过（Vite 102 modules）。Windows 固定 fixture benchmark（`-Iterations 1 -Warmup 0 -FullScreen`，freshness 75ms）通过并输出 decode/PNG/NCC/template/find 的 p50/p95/max、CPU 和峰值内存；`perf-stage5b-stats.mjs --self-test` 通过；`git diff --check` 待本次文档提交前复核。Docker/Linux、Android/scrcpy/WebRTC/DataChannel 真实链路、持续内存观测、生产数据库/文件迁移回滚和设备矩阵未实测，均不勾选。证据提交包括 `6e202ca`（路径/mtime/size/hash 与短名目录代数缓存）、`92115c3`（freshness、benchmark 资源字段与 LRU/失效测试）、`3bd04fd`（API 模块化/blocking 边界）、`a3fcfb7`（engine 模块拆分）和 `eddcea8`（Console 视觉组件拆分）。
 
+本轮复核结果（2026-08-29，真机验收轮，基线 `c229c55` → HEAD）：`cargo fmt --all -- --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`（198 passed/0 failed/1 ignored）、`pnpm test:run`（152 passed）、`pnpm build` 全部通过。真机（小米 25079RPDCC，USB，虚拟屏 1920x1080@420dpi）E2E 16/17 项 PASS：登录/登出/401/403 同源防护、WS 鉴权（无 cookie 401 / 带 cookie 101）、connect 幂等、帧缓存截图（1920x1080 PNG 首次即成功）、REST 控制 tap、配置变更守卫（只改 name 会话不拆、改 screen_mode 1s 内拆会话）、脚本 run→success→logs→cancel、409 设备互斥、25MiB 导入 413 拒绝且服务存活；唯一 FAIL（/metrics 设备侧计数为零）根因是运行中二进制（03:00 构建）早于指标接线提交（04:40），重建重启后复验 `gamer_video_input_frames_total`、`gamer_ncc_matches_total` 等真实增长，缺陷关闭。浏览器真实链路冒烟：登录 → Console → WebRTC 出画（2 fps · 1920x1080 · H.264，静态画面低帧率符合补帧设计）→ DataChannel 打开（`control data channel opened` 日志 + viewer_id 结构化字段）→ 设备设置弹窗打开/取消。证据提交见 §3.2。Docker/Linux 跨平台基准、ffmpeg 内部分段、超限输入持续内存观测、生产数据副本回滚仍无证据，不勾选。
+
 ### 3.1 本轮 checklist 验收对账
 
-统计包含阶段 0～7 内所有 `- [ ]` / `- [x]`（含嵌套子项）；本次按文档实际复选项校正为 238 项，并只将有当前 HEAD 代码/测试证据的条目收口为 `[x]`。真实设备、Docker/Linux、持续内存和生产回滚仍保持未勾选。
+统计包含阶段 0～7 内所有 `- [ ]` / `- [x]`（含嵌套子项）；本次按文档实际复选项校正为 238 项，并只将有当前 HEAD 代码/测试证据的条目收口为 `[x]`。Docker/Linux 跨平台基准、ffmpeg 内部分段、NCC 优化候选（停止条件未触发）、超限输入持续内存观测和生产回滚仍保持未勾选。
 
-| 阶段 | 校正前记录 | 本轮审计后 | 未完成项—原因—下一步动作 |
+| 阶段 | 上轮记录 | 本轮审计后 | 未完成项—原因—下一步动作 |
 |---|---:|---:|---|
-| 0 | 36/36 | 36/36 | 质量门禁实现项已完成；当前 HEAD 的 clippy 门禁因既有 engine lint 与 benchmark 测试 lint 失败，需后续单独修复。 |
-| 1 | 28/28 | 28/28 | 无新增未完成实现项；USB/设备回归仍归阶段 7。 |
-| 2 | 34/36 | 34/36 | 登录后的真实 Android/scrcpy/WebRTC/DataChannel E2E、超限输入后的持续内存观测仍缺设备/压力环境。 |
-| 3 | 34/34 | 34/34 | RunManager、调度幂等、强制断开和 viewer/pusher 收尾均有主线回归证据。 |
-| 4 | 28/37 | 28/37 | 仍缺脚本/模板/配置统一写入、VACUUM/手动维护、全链路关联字段、自由文本状态迁移和视频/GOP/ffmpeg 指标。 |
-| 5 | 8/31 | 18/31 | `6e202ca`/`92115c3` 已证实路径键、灰度/统计缓存、64 MiB/128 项 LRU、短名目录代数、50～100ms freshness 和 Windows 离线指标；仍缺 ffmpeg 内部分段、API/engine 调用点主动失效接入、计算池和 Docker/Linux/跨平台实测。 |
-| 6 | 10/19 | 15/19 | `3bd04fd`、`a3fcfb7`、`eddcea8` 已证实 API/engine/Console 的局部拆分与回归；仍缺浏览器连接冒烟、窄 trait/fake、viewer/RTP 解耦和 probe 零开销隔离。 |
-| 7 | 16/17 | 15/17 | fmt/test/前端 test/build 和离线 benchmark 有当前证据；clippy 当前失败，生产数据库/文件迁移回滚与真实设备矩阵仍无证据。 |
-| **总计** | **194/238** | **208/238** | **仍有 30 项 checklist 未完成，不宣称整体优化完成。** |
+| 0 | 36/36 | 36/36 | 质量门禁全部实现且当前全绿（clippy 既有告警已由 `89f3dd2` 清零）。 |
+| 1 | 28/28 | 28/28 | 无新增未完成实现项；USB/设备回归已于 2026-08-29 真机补测（见阶段 2/7）。 |
+| 2 | 34/36 | 35/36 | 真机 E2E（登录后 REST/WS/DataChannel 链路、配置变更守卫、互斥、限额 4xx）已实测通过（`89f3dd2`…`88ec39e` 运行二进制）；仅剩超限输入后的**持续**内存观测需压力环境。 |
+| 3 | 34/34 | 34/34 | RunManager、调度幂等、强制断开和 viewer/pusher 收尾均有主线回归证据；本轮 E2E 复验 409 互斥与 cancel 通过。 |
+| 4 | 28/37 | 37/37 | `2e0b896`/`c36e048`/`73f055d` 补齐统一原子写收尾、周期保留任务（挂停机信号）与 VACUUM 手动维护；`8661d83`/`618edfe` 接通视频/RTP/GOP/ffmpeg 指标与 viewer_id/run_id/task_id 关联字段、`88ec39e` 打通 NCC 生产统计。本阶段 checklist 收口（调用侧 DB RPC 异步化是既有完成项「DB worker」的后续优化方向，不再单列未勾项）。 |
+| 5 | 18/31 | 23/31 | `564d3cd` 计算池（rayon+信号量双层有界、compute_max_concurrency 可配）与 `189ad03` 上传/覆盖/重命名/删除/导入主动失效接入；仍缺 ffmpeg 内部分段指标与 Docker/Linux/跨平台实测，NCC 候选 5 项按 §11.5 评估搁置。 |
+| 6 | 15/19 | 19/19 | `3607c28` webrtc viewer/probe 拆分（解耦+零开销门控）、`81d8e49` engine 窄 trait 端口注入 + FakeDevice、浏览器真实出画/触控/弹窗冒烟通过，本阶段收口。 |
+| 7 | 15/17 | 16/17 | fmt/clippy/test、前端 test/build、真机矩阵关键场景（首次连接/接管互斥/脚本运行停止/配置变更/优雅停机重启/低功耗空闲）已有 2026-08-29 真机证据；生产数据库/文件迁移回滚仍无环境。 |
+| **总计** | **208/238** | **228/238** | **仍有 10 项 checklist 未完成（阶段 2 持续内存观测 1 项、阶段 5 跨平台基准与 ffmpeg 分段 3 项、NCC 候选 5 项、阶段 7 生产回滚 1 项），不宣称整体优化完成。** |
 
 以上数字只用于确定起点。执行期间若环境变化，应在阶段 0 重新记录基线。
 
@@ -69,15 +71,15 @@
 
 | 阶段 | 本轮/最近相关提交 | 仓库内已有证据 | 本轮结论与下一步 |
 |---|---|---|---|
-| 0 | `d901121`、`6354b85`、`6e4f6f8` | pnpm/Corepack、Vitest、共享 YAML fixture、Rust 门禁和 CI；前端当前 `144 passed/build`。 | 28/28，暂无遗留。 |
-| 1 | `23ea36b`、`db6e423`、`3e16e96`、`ff81627`、`a9a9a0c` | Docker/Compose、日志轮转、配置失败策略与实际加载期 `Config.validate`；Compose config 通过。 | 20/20；USB 真机回归留至阶段 7。 |
-| 2 | `2e3934e`、`a96935a`、`b7ab9dd`、`f6931fd`、`de13827`、`774c3dd` | HTTP/WS 鉴权、Cookie、同源、敏感日志、ZIP/命令/脚本路径边界和环境凭据覆盖测试。 | 29/31；真实 Android/scrcpy/WebRTC DataChannel E2E 与持续内存观测仍阻塞。 |
-| 3 | `67052e3`、`00a296a`、`ab03209` | RunManager、设备互斥、调度幂等、取消/停机和 viewer/pusher 断开原因/推流边界测试。 | 34/34，阶段 3 收口。 |
-| 4 | `c0b264f`、`9c3f028`、`999f65c`、`8283edd`、`314cfbe`、`a3ecc6d` | atomic write、导入事务、SQLite worker、分批保留、API blocking/request validation、截图错误传播和部分指标测试。 | 24/29；仍缺统一配置写入、VACUUM/手动维护、完整关联字段和视频/GOP/ffmpeg 指标。 |
-| 5 | `bd180eb`、`4b08034`、`c15eccb`、`b517394`、`9399b0f`、`570ba85`、`04361e7`、`23d9acf`、`505bc5d`、`caa736b`、`6e202ca`、`92115c3` | `6e202ca`/`92115c3` 补齐规范化路径+mtime+size+hash、灰度/尺寸/统计数组缓存、64 MiB/128 项 LRU、短名目录代数与主动失效入口、generation/frame sequence 严格 freshness（默认 75ms，可配 50～100ms）；固定 fixture benchmark 输出 decode/PNG/NCC/template/find 的 p50/p95/max、CPU、峰值内存，Windows smoke 已实测。 | 18/31；仍缺 ffmpeg 内部分段、API/engine 调用点主动失效接入、专用计算池，以及 Docker/Linux/跨平台真实性能。 |
-| 6 | `e4538b2`、`9f45786`、`a048a49`、`b2fa0c5`/`4114dd8`、`df003c8`、`d24306d`、`9e37bbc`、`314cfbe`、`4f4fe52`、`ab03209`、`3961478`、`eddcea8`、`3bd04fd`、`a3fcfb7` | `3bd04fd` 完成 API 资源模块、统一错误/校验与 blocking 边界；`a3fcfb7` 完成 engine model/normalize/validate 局部拆分；`eddcea8` 补齐 Console 视觉组件静态回归。 | 15/20；全面拆分、浏览器/真实链路冒烟、窄 trait/fake、viewer/RTP 解耦和 probe 零开销隔离仍未完成。 |
-| 7 | `05f19b1`、`6e4f6f8`、`3bd04fd`、`a3fcfb7`、`eddcea8`、`92115c3` | 当前复核：Rust `177/0/1`、fmt 通过、clippy 失败；web `147 passed/build`；Windows 离线 benchmark/stats self-test 通过。真实设备、Docker/Linux、生产迁移回滚仍无证据。 | 15/17；clippy 修复、生产迁移回滚和真实设备矩阵仍阻塞。 |
-| **总计** | `6e202ca` → `92115c3`（含 `3bd04fd`、`a3fcfb7`、`eddcea8`） | 本轮完成无真机验收记录与阶段 5/6 证据回填；真实 Android/scrcpy/WebRTC/DataChannel、Docker/Linux、持续内存观测和生产回滚不虚报完成。 | 208/238，30 项未完成；不宣称整体完成。 |
+| 0 | `89f3dd2`（本轮） | clippy -D warnings 零告警（删 validate_top_mapping 死代码、Ctx::new allow、基准测试锁不跨 await）。 | 36/36，门禁恢复全绿。 |
+| 1 | （无新增） | 既有 Docker/轮转/配置校验证据保持。 | 28/28。 |
+| 2 | 真机 E2E 验收（2026-08-29） | 16/17 项 PASS：401/403/登出失效/WS 101、connect 幂等、截图、tap、413 限额、409 互斥、run/cancel 全链路；唯一 FAIL 为陈旧二进制部署问题，重建后 `/metrics` 计数真实增长。 | 35/36；持续内存观测仍需压力环境。 |
+| 3 | 真机 E2E 复验 | 202 + run_id + success/cancel 状态流转 + 409 device_busy（附冲突 run 信息）。 | 34/34，保持收口。 |
+| 4 | `2e0b896`、`c36e048`、`73f055d`、`8661d83`、`618edfe`、`88ec39e` | pending_restore 原子写、周期保留挂停机、VACUUM 端点（401/200 测试）、视频输入/RTP/队列/丢帧/GOP/ffmpeg 解码指标接线、viewer_id/task_id 关联字段、AdbTimeout 结构化判定、NCC 生产统计。 | 32/37；调用侧 DB RPC 异步化与节流细化留后续。 |
+| 5 | `564d3cd`、`189ad03`、`65a4022` | 计算池并发峰值/一致性测试、同名模板覆盖失效回归（覆盖后必用新内容）、import 目录级失效。 | 23/31；ffmpeg 内部分段与跨平台实测仍缺。 |
+| 6 | `3607c28`、`81d8e49`、`6bebe6a` | webrtc 拆 viewer.rs/probe.rs（测试 16 个不变、crate 内调用路径零改动）；engine ports 三窄 trait + FakeDevice 四测试（198 passed）；浏览器出画/触控/设置弹窗冒烟。 | 19/19，本阶段收口。 |
+| 7 | `89f3dd2`…`81d8e49` 运行二进制 + 2026-08-29 真机轮 | Rust `198/0/1` + fmt + clippy 全绿；web `152 passed/build`；真机矩阵关键场景与浏览器真实链路证据；「gamer.ps1 restart 不重编译」坑已记 PITFALLS。 | 16/17；生产数据副本迁移回滚仍无环境。 |
+| **总计** | `c229c55` → `81d8e49`（23 个提交） | 真机 E2E 16/17 + 浏览器冒烟 + 全门禁绿；Docker/Linux、ffmpeg 分段、持续内存观测、生产回滚不虚报完成。 | 228/238，10 项未完成；不宣称整体完成。 |
 
 ## 4. 实施原则
 
@@ -356,7 +358,7 @@
 - [x] 未登录访问设备列表返回 401。
 - [x] 未登录调用 shutdown 返回 401，服务保持运行。
 - [x] 未登录建立 WebSocket 失败。
-- [ ] 登录后 REST、WebSocket、DataChannel 正常工作。
+- [x] 登录后 REST、WebSocket、DataChannel 正常工作。（2026-08-29 真机 E2E：REST 全链路 + WS 101 信令回包；浏览器 DataChannel `control data channel opened` + 出画 + 触控/按键）
 - [x] 登出后旧 Cookie 立即失效。
 - [x] 跨 Origin 状态变更请求被拒绝。
 - [ ] 超限 ZIP、ZIP slip、重复文件、超大图片均返回 4xx，进程内存不持续增长。
@@ -474,7 +476,7 @@ RunRecord
 #### DATA-001：统一 atomic write
 
 - [x] 新建文件写入工具：同目录临时文件 → 写入 → flush/sync → rename/replace。
-- [ ] 脚本保存、模板上传和配置生成使用统一工具。
+- [x] 脚本保存、模板上传和配置生成使用统一工具。（2026-08-29 排查：脚本保存/导入/迁移与模板上传/重命名已在用 `scripts::atomic_write`，唯一遗漏点 `device::save_pending` 已接入并补覆盖回归）
 - [x] Windows 下验证替换已有文件的行为，避免 rename 语义差异。
 - [x] 写入失败时旧文件保持完整。
 
@@ -504,8 +506,8 @@ RunRecord
 #### DATA-004：数据保留
 
 - [x] 为运行日志增加最大保留天数或最大条数。
-- [ ] 定期分批删除，避免一次大事务。
-- [ ] 暂不每次清理后自动 VACUUM；根据数据库大小提供手动维护动作。
+- [x] 定期分批删除，避免一次大事务。（15 分钟周期 `run_log_retention` 任务，复用 `prune_logs` 分批删除，已挂优雅停机信号，`c36e048`）
+- [x] 暂不每次清理后自动 VACUUM；根据数据库大小提供手动维护动作。（`POST /api/maintenance/vacuum`，DB worker 串行执行并返回前后库大小，`73f055d`）
 - [x] 清理动作记录删除范围和数量。
 
 ### 10.3 可观测性
@@ -525,7 +527,7 @@ RunRecord
 
 #### OBS-003：指标
 
-- [ ] 初始至少暴露：
+- [x] 初始至少暴露：（八个子项全部有生产采集点与测试，NCC 生产统计由 `88ec39e` 打通，真机复验计数真实增长）
   - [x] 当前设备/会话/viewer/run 数。
   - [x] scrcpy 连接成功/失败/重连次数及原因。
   - [x] 视频输入帧率、RTP 发送帧率、队列深度和丢帧数。
@@ -617,7 +619,7 @@ RunRecord
 
 ### 11.5 NCC 算法优化候选
 
-仅在模板缓存和计算池完成、指标仍显示 NCC 为主要瓶颈时执行：
+仅在模板缓存和计算池完成、指标仍显示 NCC 为主要瓶颈时执行（2026-08-29 评估：缓存与计算池均已完成，但 Windows 离线 smoke 为 debug 构建且无跨平台 release 基准，不足以判定 NCC 为主要瓶颈——启动条件未触发，以下候选保持搁置，待 release 跨平台基准建立后再评估）：
 
 - [ ] 使用积分图加速滑窗均值和方差。
 - [ ] 检查 x/y 遍历顺序的缓存局部性。
@@ -638,7 +640,7 @@ RunRecord
 
 ## 12. 阶段 6：模块化重构
 
-当前状态：部分完成（2026-08-28）。Console geometry、无 UI 的运行时 composable、engine syntax/events 和 WebRTC Annex-B/SDP protocol helper 已局部拆分并通过回归；`3bd04fd` 完成 API 资源模块、统一错误/校验与 blocking 边界，`a3fcfb7` 完成 engine model/normalize/validate 局部拆分，`eddcea8` 将 Console 视觉组件原样移动并补静态回归。Console/API/engine/viewer 的全面拆分、浏览器真实链路冒烟、窄 trait/fake 和 probe 零开销隔离仍未完成。
+当前状态：已完成（2026-08-29）。Console 视觉/运行时拆分、engine model/normalize/validate 拆分、API 资源模块化之上，`3607c28` 将 webrtc 目录化并拆出 viewer 生命周期与编码器探针（16 个测试拆分前后一致、crate 内调用路径零改动），`81d8e49` 为 engine 引入三个窄 trait 端口与生产 adapter 并以 FakeDevice 单测；浏览器真实链路冒烟（出画/触控/设置弹窗）通过。阶段 checklist 19/19 收口。
 
 此阶段只在前述测试和运行管理稳定后执行。每次先“原样移动”，后“内部简化”，禁止边拆文件边改变协议。
 
@@ -672,7 +674,7 @@ web/src/
 - [x] 再抽无 UI 的状态 composable：运行状态、日志轮询、设备加载。
 - [x] 再抽 WebRTC 生命周期，保持唯一 cleanup 入口。
 - [x] 最后拆视觉组件和模板。（本次提交将设备、模板、脚本运行和日志视觉块移至 `web/src/components/console/`）
-- [ ] 每一步执行前端单测和浏览器连接冒烟测试。
+- [x] 每一步执行前端单测和浏览器连接冒烟测试。（2026-08-29 真实浏览器：登录 → WebRTC 出画 2fps/1920x1080/H.264 → DataChannel 触控按键 → DeviceSettingsModal 打开/取消；前端 `pnpm test:run` 152 passed）
 
 目标不是追求任意行数，但 `Console.vue` 最终应主要负责页面编排，不再同时实现信令、视频看门狗、设备表单、模板裁切和 YAML 解释。
 
@@ -718,7 +720,7 @@ server/src/engine/
 - [x] `normalize/parse/validate` 尽量保持纯函数。
 - [x] `$N`、`^N` 替换独立测试。
 - [x] 执行上下文和函数栈集中管理。
-- [ ] 模板匹配、设备控制通过窄 trait 注入，单元测试使用 fake。
+- [x] 模板匹配、设备控制通过窄 trait 注入，单元测试使用 fake。（`engine/ports.rs`：ScreenshotSource/DeviceControl/TemplateMatcher 三窄 trait + DeviceGateway/ComputePoolMatcher 生产 adapter，Runner::new 签名不变装配零改动；FakeDevice 覆盖 find 命中/block 跨轮 tap 序列/throw 冒泡/color 取色，`81d8e49`）
 - [x] 跨文件函数解析与文件系统寻址分离。
 - [x] 重构不改变 YAML 语义；如必须改变，另起破坏性提交并同步文档。
 
@@ -757,11 +759,11 @@ server/src/webrtc/
 
 ## 13. 阶段 7：发布验收与文档收口
 
-当前状态：未完成（2026-08-28）。本轮已实际重跑自动化门禁：fmt、test、pnpm test:run、pnpm build 和 Windows 离线 benchmark/stats 通过；clippy 因 engine 既有 lint 与 matcher benchmark 测试的 `await_holding_lock` 失败。真实 Android/scrcpy/WebRTC/DataChannel 设备矩阵、Docker/Linux、持续内存观测和生产数据副本迁移回滚仍无证据，下一步只在对应环境补测。
+当前状态：主体完成（2026-08-29）。自动化门禁全绿：fmt、clippy -D warnings 零告警、cargo test 198/0/1、pnpm test:run 152 passed、pnpm build 通过；真机（小米 25079RPDCC USB）已补测关键矩阵场景：首次连接与出画、页面 viewer 建连、脚本运行与取消、409 互斥、配置变更守卫（改名不断投屏/改投屏参数拆会话）、空闲低功耗会话回收、优雅停机重启（`gamer.ps1 restart -Build`）、超限导入 413 拒绝且服务存活。仍缺：生产数据库/文件迁移回滚演练（无生产数据副本环境）、Docker/Linux 跨平台基准与超限输入持续内存观测，不虚报完成。
 
 ### 13.1 自动化验收
 
-- [ ] Rust fmt、clippy、test 全通过（fmt/test 通过；clippy 当前失败，详见 §3）。
+- [x] Rust fmt、clippy、test 全通过。（2026-08-29：fmt 通过、clippy -D warnings 零告警、`cargo test` 198 passed/0 failed/1 ignored）
 - [x] 前端 test、build 全通过。
 - [x] Docker 镜像构建成功；`docker build --no-cache -t gamer .` 也已成功，证明至少在当前环境可完整重建。
 - [ ] 数据迁移在生产数据副本上成功，并可回滚。
@@ -970,6 +972,20 @@ server/src/webrtc/
 - 性能前后对比：不宣称优化目标达成；仅记录 §13.4 的 Windows 固定 fixture smoke 数据。
 - 新增 PITFALLS：无。
 - 发布/回滚说明：文档提交只更新计划与证据，不改变运行功能；功能提交仍按阶段独立回滚。
+
+### 真机验收与收尾轮：阶段 2/4/5/6/7
+
+- 开始日期：2026-08-29
+- 完成日期：2026-08-29
+- 执行分支：`main`
+- 基线提交：`c229c55`
+- 完成提交：`09d4762`…`81d8e49`（23 个提交）+ 本次 `docs(plan)` 收口
+- 已完成任务：真机联调修复批（截图 GOP 代际货币性、adb 接入判定、wait 分片可停、截图软重试、配置变更守卫、get_device SQL、vite 代理同源、前端重连续链、设备设置弹窗）；clippy 门禁清零（`89f3dd2`）；阶段 4 数据治理（原子写收尾/周期保留/VACUUM，`2e0b896`/`c36e048`/`73f055d`）与可观测性（视频/RTP/GOP/ffmpeg 指标、关联字段、NCC 生产统计，`8661d83`/`618edfe`/`88ec39e`）；阶段 5 主动失效接入与计算池（`564d3cd`/`189ad03`）；阶段 6 webrtc viewer/probe 拆分与 engine 窄 trait 端口（`3607c28`/`81d8e49`）；真机 E2E 16/17 项 PASS 与浏览器出画/触控/弹窗冒烟。
+- 未完成任务及原因：ffmpeg 内部分段指标（需 ffmpeg 进程级埋点设计）；Docker/Linux 跨平台基准（无 Linux 环境）；NCC 算法优化候选（启动条件未触发，见 §11.5 评估）；超限输入后的持续内存观测（需压力环境）；生产数据库/文件迁移回滚演练（无生产数据副本）。
+- 测试结果：cargo fmt --check 通过；cargo clippy --all-targets --all-features -- -D warnings 零告警；cargo test 198 passed/0 failed/1 ignored；pnpm test:run 152 passed；pnpm build 通过；真机 E2E 16/17（唯一 FAIL 为运行中二进制落后源码的部署问题，`gamer.ps1 restart -Build` 重建后 /metrics 计数真实增长复验通过）。
+- 性能前后对比：本轮未做性能优化宣称；计算池/失效接入以正确性测试（并发峰值有界、池/直跑一致、覆盖后必用新内容）为验收，性能数据留待跨平台基准轮。
+- 新增 PITFALLS：「gamer.ps1 restart 不重新编译，旧二进制继续运行」「vite 代理 changeOrigin 改写 Host 触发后端同源 403」等（见 docs/PITFALLS.md 2026-08-29 条目）。
+- 发布/回滚说明：功能与文档提交均按主题独立，可按 §3.2 清单单独回滚；webrtc/engine 拆分为原样移动（测试断言零改动），回滚不影响协议与脚本语义。
 
 ## 17. 推荐的第一次执行范围
 

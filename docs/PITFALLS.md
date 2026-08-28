@@ -66,3 +66,5 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **adb server 重启（含 `gamer.ps1 restart` 内部 kill-server）会掉无线调试连接，且服务端无法主动救回**：Android 11+ 无线调试的重连由手机侧 mDNS 广播驱动，熄屏/深睡时不广播，`adb connect <串号>` 对裸设备名也无效（非 host:port）；只能等手机亮屏重新广播或插线。服务端无线保活因此只对可寻址的经典网络 adb（含 `:` 或 `.`）补连。
 - **冷启动瞬间截图可能双路齐挂**：应用冷启动/画面剧变时帧缓存按需解码撞上 GOP 刷新会被判过期丢弃（两拍后返回"无帧"），同时 `screencap -d` 对切换中的虚拟屏可能返回非图片错误文本——两条截图路径同时失败。find 的轮询语义已改为软失败重试（20s 宽限），无需在设备层再加补丁。
 - **小米 HyperOS 上游戏前台时 `screencap -d <虚拟屏>` 恒返回 ~80 字节错误文本**（疑似安全标志 surface），截图只能依赖帧缓存按需解码；帧缓存解码的货币性检查必须按 GOP 代际（snapshot/config generation）判定，不能按 frame_sequence——动态画面下 P 帧逐帧推进序号，按帧序判新会让任何解码（约 1s）永远追不上，动画期间截图 100% 失败。
+- **`gamer.ps1 restart` 不重新编译，改完 Rust 代码必须 `-Build` 否则旧二进制继续运行**：restart 只 stop/start，直接启动 `target/debug/gamer-server.exe`（旧产物）；且服务运行中 `cargo build` 链接该 exe 会 os error 5 失败，错以为构建过。E2E 验收曾因此踩坑（/metrics 新指标全 0，实为运行中的 03:00 旧二进制）。解决：`.\gamer.ps1 restart -BackendOnly -Build`（先停服务再构建）。
+- **并行开发/验收时多个任务共享同一 cargo target 锁会互相阻塞**：多个 Agent 同时跑 `cargo clippy/test` 会串行排队（正常），但一方写到一半的源码会让另一方编译失败——并行任务的验收命令要在对方收口后复跑一遍才算数。
