@@ -463,7 +463,9 @@ impl Store {
         let id = id.to_string();
         self.request(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at\
+                // 注意：`\` 续行会吞掉行首缩进，"created_at" 后必须显式留空格，
+                // 否则拼出 created_atFROM 导致 PUT /api/devices/:id 全挂
+                "SELECT id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at \
                  FROM devices WHERE id = ?1",
             )?;
             match stmt.query_row([id], |r| {
@@ -1046,6 +1048,55 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].msg, "new");
 
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn device_upsert_get_roundtrip() {
+        // 回归：get_device 的 SQL 曾因字符串 `\` 续行吞掉行首缩进拼出
+        // created_atFROM，设备回读全挂且无测试覆盖（PUT /api/devices/:id 500）
+        let (cfg, dir) = temp_config("device-roundtrip");
+        let store = Store::open(&cfg).unwrap();
+        let device = Device {
+            id: "dev-1".into(),
+            name: "投屏机".into(),
+            kind: "usb".into(),
+            addr: "SERIAL123".into(),
+            screen_mode: ScreenMode::Virtual,
+            vd_res: Some("1920x1080".into()),
+            vd_dpi: Some(420),
+            pkg: Some("com.example.game".into()),
+            fps: Some(30),
+            created_at: "2026-08-29 00:00:00".into(),
+        };
+        store.upsert_device(&device).unwrap();
+        let got = store
+            .get_device("dev-1")
+            .unwrap()
+            .expect("device should exist");
+        assert_eq!(got.name, "投屏机");
+        assert_eq!(got.addr, "SERIAL123");
+        assert!(matches!(got.screen_mode, ScreenMode::Virtual));
+        assert_eq!(got.vd_res.as_deref(), Some("1920x1080"));
+        assert_eq!(got.vd_dpi, Some(420));
+        assert_eq!(got.pkg.as_deref(), Some("com.example.game"));
+        assert_eq!(got.fps, Some(30));
+
+        // 更新走同一 UPSERT：字段回读一致
+        let mut updated = device.clone();
+        updated.name = "改名".into();
+        updated.fps = Some(60);
+        store.upsert_device(&updated).unwrap();
+        let got2 = store.get_device("dev-1").unwrap().unwrap();
+        assert_eq!(got2.name, "改名");
+        assert_eq!(got2.fps, Some(60));
+        assert_eq!(
+            got2.created_at, "2026-08-29 00:00:00",
+            "created_at 不应被覆盖"
+        );
+
+        assert!(store.get_device("missing").unwrap().is_none());
         drop(store);
         fs::remove_dir_all(dir).unwrap();
     }
