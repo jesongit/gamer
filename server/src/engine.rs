@@ -74,7 +74,7 @@
 //! 可视化事件：tap/swipe/匹配命中时经 control DataChannel 推送给浏览器投屏页面
 //!   （emit → ViewerMap 查当前 viewer；无 viewer 时静默丢弃）
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -85,43 +85,30 @@ use serde::Deserialize;
 use serde_yaml::Value;
 use tracing::warn;
 
-use crate::device::DeviceManager;
 use crate::matcher;
 use crate::scripts::ScriptFile;
 use crate::scripts::ScriptStore;
-use crate::webrtc::ViewerMap;
 
 #[path = "engine_events.rs"]
 mod events;
+#[path = "engine/model.rs"]
+mod model;
+#[path = "engine/normalize.rs"]
+mod normalize;
 #[path = "engine_syntax.rs"]
 mod syntax;
+#[path = "engine/validate.rs"]
+mod validate;
 
 pub use events::ScriptEvent;
+use model::FunctionEnvironment;
+pub use model::{Ctx, FuncDef, Runner};
 
 /// find 未显式指定 timeout 时的默认超时毫秒数（30 分钟）
 const FIND_DEFAULT_TIMEOUT_MS: u64 = 1_800_000;
 
 /// 自定义函数嵌套调用上限（防无限递归）
 const MAX_FUNC_DEPTH: usize = 32;
-
-/// 运行器
-pub struct Runner {
-    pub devices: Arc<DeviceManager>,
-    /// 每设备活跃 viewer 注册表：脚本 tap/swipe/命中可视化事件推送用
-    pub viewers: ViewerMap,
-    /// 脚本文件存储（data/<pkg>/yaml/，按应用分区）：call 子脚本解析用
-    pub scripts: Arc<ScriptStore>,
-}
-
-/// 自定义函数定义：可选 cond 模板条件 + 函数体
-#[derive(Clone, Debug)]
-pub struct FuncDef {
-    /// 函数执行条件模板（cond: 单模板字符串 / 逗号分隔 / 列表）；每个模板各取
-    /// 一张新截图匹配一次（不点击），全部命中才执行函数体；任一未命中 → 返回 false
-    pub cond: Vec<String>,
-    /// 函数体步骤（未经 $N 替换，调用时按实参替换）
-    pub body: Vec<Value>,
-}
 
 /// 脚本寻址窄接口：只负责按调用名找脚本文件，不涉及 func 解析。
 trait ScriptResolver {
@@ -134,78 +121,7 @@ impl ScriptResolver for ScriptStore {
     }
 }
 
-/// 脚本运行上下文
-pub struct Ctx {
-    pub device_id: String,
-    pub script_id: String,
-    pub log: Vec<(String, String)>, // (level, msg)
-    pub stop: Arc<AtomicBool>,
-    /// throw 动作已触发（跨 call 子脚本共享）：run 主循环据此提前结束整个脚本运行
-    pub exit: Arc<AtomicBool>,
-    /// 轮询类间隔（find 每轮重试 / verify 复查），config: 段 > config.toml
-    pub interval_ms: u64,
-    /// 模板匹配阈值，config: 段 > config.toml
-    pub threshold: f32,
-    /// 日志等级（0=debug 1=info 2=warn 3=error），低于该等级的日志丢弃
-    pub log_level_rank: u8,
-    /// 本脚本文件内定义的自定义函数（函数体/条件未经 $N 替换，调用时按实参替换）
-    pub funcs: HashMap<String, FuncDef>,
-    /// 当前函数嵌套深度（防无限递归）
-    pub func_depth: usize,
-    /// return 动作的返回值（Some = 正在向上冒泡结束函数）
-    pub return_value: Option<bool>,
-    /// ^N 上下文绑定栈：find/color 的 then/else 子树执行期间压栈，
-    /// 栈顶（最内层）绑定生效
-    pub ref_stack: Vec<Vec<String>>,
-    /// 已提醒过"无 #区域后缀回退全屏"的模板（每次运行每模板一条）
-    pub region_warned: HashSet<String>,
-    pub log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
-}
-
-impl Ctx {
-    /// 日志等级 → 排序值（success 视同 info：info 级即可见）
-    fn level_rank(level: &str) -> u8 {
-        match level {
-            "debug" => 0,
-            "info" | "success" => 1,
-            "warn" => 2,
-            _ => 3,
-        }
-    }
-
-    /// 配置字符串 → 等级排序值
-    fn parse_level(s: &str) -> Option<u8> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "debug" => Some(0),
-            "info" => Some(1),
-            "warn" | "warning" => Some(2),
-            "error" => Some(3),
-            _ => None,
-        }
-    }
-
-    /// 记录日志：实时回调（如有）并同时收集到 ctx.log；
-    /// 低于配置等级（log_level）的日志丢弃（不回调、不收集）
-    fn log(&mut self, level: &str, msg: String) {
-        if Self::level_rank(level) < self.log_level_rank {
-            return;
-        }
-        if let Some(cb) = &self.log_cb {
-            cb(level.to_string(), msg.clone());
-        }
-        self.log.push((level.to_string(), msg));
-    }
-}
-
 impl Runner {
-    pub fn new(devices: Arc<DeviceManager>, viewers: ViewerMap, scripts: Arc<ScriptStore>) -> Self {
-        Self {
-            devices,
-            viewers,
-            scripts,
-        }
-    }
-
     /// 从脚本内容提取并解析 func 段。这里不触碰文件系统，
     /// 只负责 YAML 语义：normalize_top → parse_funcs。
     fn parse_script_funcs(content: &str) -> anyhow::Result<HashMap<String, FuncDef>> {
@@ -291,22 +207,17 @@ impl Runner {
         // steps 可缺省：纯函数库脚本（只有 func）供其他脚本通过 脚本名:函数名 调用
         let steps_raw = doc.get("steps").and_then(|v| v.as_sequence()).cloned();
 
-        let mut ctx = Ctx {
-            device_id: device_id.to_string(),
-            script_id: script_id.to_string(),
-            log: Vec::new(),
+        let mut ctx = Ctx::new(
+            device_id.to_string(),
+            script_id.to_string(),
             stop,
-            exit: exit.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+            exit.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             interval_ms,
             threshold,
             log_level_rank,
             funcs,
-            func_depth: 0,
-            return_value: None,
-            ref_stack: Vec::new(),
-            region_warned: HashSet::new(),
             log_cb,
-        };
+        );
 
         // 直接运行函数体模式：steps 换成函数体（无实参，$N 保持字面量不替换）。
         // 从头运行（start_step=0，Console 点击函数名行）先检查 cond 条件——
@@ -384,24 +295,7 @@ impl Runner {
     /// 返回带段落键的归一化文档；旧顶层键（action_wait/log_level/name）无论
     /// 何种形态都先定向报错
     fn normalize_top(doc: Value) -> anyhow::Result<Value> {
-        match &doc {
-            Value::Sequence(_) => {
-                let mut m = serde_yaml::Mapping::new();
-                m.insert(Value::String("steps".into()), doc);
-                Ok(Value::Mapping(m))
-            }
-            Value::Mapping(m) => {
-                let has_section = Self::validate_top_mapping(m)?;
-                if has_section {
-                    Ok(doc)
-                } else {
-                    let mut out = serde_yaml::Mapping::new();
-                    out.insert(Value::String("func".into()), doc);
-                    Ok(Value::Mapping(out))
-                }
-            }
-            _ => Ok(doc),
-        }
+        normalize::normalize_top(doc)
     }
 
     /// Validate a top-level mapping and report migration/typo errors before
@@ -409,40 +303,7 @@ impl Runner {
     /// an explicit section key is present, keeping validation independent from
     /// the resulting document shape.
     fn validate_top_mapping(m: &serde_yaml::Mapping) -> anyhow::Result<bool> {
-        for k in m.keys() {
-            match k.as_str() {
-                Some("action_wait") => anyhow::bail!(
-                    "顶层 action_wait 已删除：操作间隔统一为 config interval（仅轮询类等待，步骤间不再等待）"
-                ),
-                Some("log_level") => anyhow::bail!("顶层 log_level 已删除：改用 config: 段（config.toml 可配全局默认）"),
-                Some("name") => anyhow::bail!("顶层 name 已删除（脚本名即文件名）"),
-                _ => {}
-            }
-        }
-        let has_section = m
-            .keys()
-            .any(|k| matches!(k.as_str(), Some("config" | "func" | "steps")));
-        if has_section {
-            for k in m.keys() {
-                if !matches!(k.as_str(), Some("config" | "func" | "steps")) {
-                    anyhow::bail!(
-                        "未知顶层键 {:?}（只支持 config / func / steps；单段简写：顶层序列 = steps，无段落键的顶层映射 = func）",
-                        k.as_str()
-                    );
-                }
-            }
-        } else {
-            // 省略 func: 的纯函数库简写；config 子键混进顶层是常见笔误，定向报错
-            for k in m.keys() {
-                if matches!(k.as_str(), Some("interval" | "threshold")) {
-                    anyhow::bail!(
-                        "顶层 {:?} 是 config: 段参数（省略段落键的简写只支持纯 steps 序列或纯 func 函数定义，config 必须写 config: 键）",
-                        k.as_str()
-                    );
-                }
-            }
-        }
-        Ok(has_section)
+        validate::validate_top_mapping(m)
     }
 
     /// 从文档取出 func 段（原样返回，不参与 $N 替换）并对剩余部分做实参替换。
@@ -682,7 +543,7 @@ impl Runner {
     #[async_recursion]
     async fn exec_step(&self, ctx: &mut Ctx, step: &Value) -> anyhow::Result<()> {
         // return 冒泡中：嵌套步骤全部跳过（函数体逐层收口）
-        if ctx.return_value.is_some() {
+        if ctx.function_return().is_some() {
             return Ok(());
         }
         // 无参动作简写：`- str_app` / `- throw` 等纯标量步骤等价 `- str_app:`
@@ -722,7 +583,7 @@ impl Runner {
             anyhow::bail!("check 已改名 block（find 的障碍模板）");
         }
         if step.get("cond").is_some() {
-            if ctx.func_depth > 0 {
+            if ctx.function_depth() > 0 {
                 anyhow::bail!("cond 是函数级条件（写在 \"- 函数名:\" 行下、与 steps 键同级），函数体步骤不支持 cond；旧颜色判断请用 color");
             }
             anyhow::bail!("cond 已改名 color：颜色判断写 `- color: [x, y]` + 色值键步骤；模板分支用 find + then/else");
@@ -1020,11 +881,11 @@ impl Runner {
                     .get("return")
                     .and_then(|v| v.as_bool())
                     .ok_or_else(|| anyhow::anyhow!("return 需要 true / false"))?;
-                if ctx.func_depth == 0 {
+                if ctx.function_depth() == 0 {
                     anyhow::bail!("return 仅可在自定义函数内使用");
                 }
                 ctx.log("debug", format!("函数 return {}", b));
-                ctx.return_value = Some(b);
+                ctx.set_function_return(b);
             }
             name => {
                 if let Some(qual) = cross_qual {
@@ -1121,7 +982,7 @@ impl Runner {
         loop {
             if ctx.stop.load(Ordering::SeqCst)
                 || ctx.exit.load(Ordering::SeqCst)
-                || ctx.return_value.is_some()
+                || ctx.function_return().is_some()
             {
                 break;
             }
@@ -1212,7 +1073,7 @@ impl Runner {
             }
             if ctx.stop.load(Ordering::SeqCst)
                 || ctx.exit.load(Ordering::SeqCst)
-                || ctx.return_value.is_some()
+                || ctx.function_return().is_some()
             {
                 break;
             }
@@ -1340,13 +1201,13 @@ impl Runner {
             }
             if ctx.stop.load(Ordering::SeqCst)
                 || ctx.exit.load(Ordering::SeqCst)
-                || ctx.return_value.is_some()
+                || ctx.function_return().is_some()
             {
                 break;
             }
             ctx.log("debug", format!("循环第 {} 次", n + 1));
             for sub in &sub_steps {
-                if ctx.exit.load(Ordering::SeqCst) || ctx.return_value.is_some() {
+                if ctx.exit.load(Ordering::SeqCst) || ctx.function_return().is_some() {
                     break;
                 }
                 self.exec_step(ctx, sub).await?;
@@ -1370,7 +1231,7 @@ impl Runner {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("函数 {} 未定义（func: 段里没有该函数名）", name))?;
         let args = Self::func_args(step, name)?;
-        let ret = self.run_func_core(ctx, def, &args, name).await?;
+        let ret = self.run_func_core(ctx, def, &args, name, None).await?;
         self.run_func_branch(ctx, step, ret).await
     }
 
@@ -1394,20 +1255,23 @@ impl Runner {
                 .map_err(|e| anyhow::anyhow!("子脚本 {}: {}", script_name, e))?;
         let args = Self::func_args(step, qual)?;
         // 函数体执行期间被引用脚本的函数可见（体内裸函数名按该脚本解析），
-        // 调用者函数兜底；执行结束恢复（避免子脚本函数泄漏到后续步骤）
+        // 调用者函数兜底；函数栈统一负责环境恢复（避免错误路径泄漏子脚本状态）
         let mut merged = sub_funcs;
         for (k, v) in ctx.funcs.iter() {
             merged.entry(k.clone()).or_insert_with(|| v.clone());
         }
-        let saved = std::mem::replace(&mut ctx.funcs, merged);
-        // 模板按被引用脚本所在分区解析（与 call 一致；通常与调用者同分区）
-        let saved_id = std::mem::replace(&mut ctx.script_id, s.id.clone());
         let ret = self
-            .run_func_core(ctx, def, &args, &format!("{}:{}", s.name, func_name))
-            .await;
-        ctx.script_id = saved_id;
-        ctx.funcs = saved;
-        let ret = ret?;
+            .run_func_core(
+                ctx,
+                def,
+                &args,
+                &format!("{}:{}", s.name, func_name),
+                Some(FunctionEnvironment {
+                    script_id: s.id,
+                    funcs: merged,
+                }),
+            )
+            .await?;
         self.run_func_branch(ctx, step, ret).await
     }
 
@@ -1420,13 +1284,10 @@ impl Runner {
         def: FuncDef,
         args: &[String],
         label: &str,
+        environment: Option<FunctionEnvironment>,
     ) -> anyhow::Result<bool> {
-        if ctx.func_depth >= MAX_FUNC_DEPTH {
-            anyhow::bail!(
-                "自定义函数嵌套过深（上限 {}）：疑似无限递归",
-                MAX_FUNC_DEPTH
-            );
-        }
+        // 保持原错误顺序：深度上限先于日志与 `$N` 替换检查。
+        ctx.ensure_function_depth(MAX_FUNC_DEPTH)?;
         if args.is_empty() {
             ctx.log("debug", format!("调用函数 {}", label));
         } else {
@@ -1438,24 +1299,33 @@ impl Runner {
         let mut body_val = Value::Sequence(def.body);
         Self::substitute_args(&mut body_val, args)?;
         let body = body_val.as_sequence().cloned().unwrap_or_default();
-        ctx.func_depth += 1;
-        ctx.return_value = None;
-        if !self.check_func_cond(ctx, &def.cond).await? {
-            // 条件未命中：函数返回 false（不执行函数体）
-            ctx.return_value = Some(false);
-        } else {
-            for sub in &body {
-                if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) {
-                    break;
-                }
-                self.exec_step(ctx, sub).await?;
-                if ctx.return_value.is_some() {
-                    break;
-                }
+        ctx.enter_function(environment, MAX_FUNC_DEPTH)?;
+        let result = match self.check_func_cond(ctx, &def.cond).await {
+            Err(error) => Err(error),
+            Ok(false) => {
+                ctx.set_function_return(false);
+                Ok(())
             }
-        }
-        ctx.func_depth -= 1;
-        Ok(ctx.return_value.take().unwrap_or(true))
+            Ok(true) => {
+                let mut result = Ok(());
+                for sub in &body {
+                    if ctx.stop.load(Ordering::SeqCst) || ctx.exit.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if let Err(error) = self.exec_step(ctx, sub).await {
+                        result = Err(error);
+                        break;
+                    }
+                    if ctx.function_return().is_some() {
+                        break;
+                    }
+                }
+                result
+            }
+        };
+        let return_value = ctx.leave_function();
+        result?;
+        Ok(return_value)
     }
 
     /// 函数 cond 条件检查：每个条件模板各取一张新截图匹配一次（不点击）；
@@ -1504,7 +1374,7 @@ impl Runner {
             for sub in steps {
                 if ctx.stop.load(Ordering::SeqCst)
                     || ctx.exit.load(Ordering::SeqCst)
-                    || ctx.return_value.is_some()
+                    || ctx.function_return().is_some()
                 {
                     break;
                 }
@@ -1537,23 +1407,7 @@ impl Runner {
     /// （键 = "throw 未知界面"），用户本意是 `- throw: 未知界面`。返回提示（无匹配
     /// 返回 None）。动作名后必须跟空白才算带值（函数名 "finder" 不会误伤 find）
     fn missing_colon_hint(names: &[String]) -> Option<String> {
-        const ACTIONS: [&str; 14] = [
-            "log", "key", "text", "tap", "swipe", "find", "color", "loop", "call", "throw",
-            "str_app", "cls_app", "wait", "return",
-        ];
-        for n in names {
-            for act in ACTIONS {
-                if let Some(rest) = n.strip_prefix(act) {
-                    if rest.starts_with(char::is_whitespace) {
-                        return Some(format!(
-                            "\"{}\" 是标量步骤（YAML 把 \"- {}\" 解析成字符串）——带值/带原因的动作需写冒号：应为 \"- {}: {}\"（裸写仅限无参动作，如 - str_app / - throw）",
-                            n, n, act, rest.trim_start()
-                        ));
-                    }
-                }
-            }
-        }
-        None
+        validate::missing_colon_hint(names)
     }
 
     /// 在 ^N 绑定下执行分支步骤（find 的 then/else、color 的命中步骤/else）：
@@ -1572,7 +1426,7 @@ impl Runner {
         for sub in steps {
             if ctx.stop.load(Ordering::SeqCst)
                 || ctx.exit.load(Ordering::SeqCst)
-                || ctx.return_value.is_some()
+                || ctx.function_return().is_some()
             {
                 break;
             }
@@ -1599,33 +1453,12 @@ impl Runner {
     /// 步骤的兄弟键白名单校验：出现白名单外的键（含拼写错误/已删除参数残留）
     /// 显式报错，防静默失效
     fn ensure_only_keys(step: &Value, action: &str, allowed: &[&str]) -> anyhow::Result<()> {
-        let m = step.as_mapping().unwrap();
-        for k in m.keys() {
-            let Some(name) = k.as_str() else {
-                anyhow::bail!("{} 不支持非字符串参数键（旧数组键写法已删除）", action);
-            };
-            if !allowed.contains(&name) {
-                anyhow::bail!(
-                    "{} 不支持参数 {}（可用：{}）",
-                    action,
-                    name,
-                    allowed.join(" / ")
-                );
-            }
-        }
-        Ok(())
+        validate::ensure_only_keys(step, action, allowed)
     }
 
     /// str_app / cls_app 只接受裸写（值必须为 null 或空串），带值报错
     fn ensure_bare_value(step: &Value, action: &str) -> anyhow::Result<()> {
-        match step.get(action) {
-            None | Some(Value::Null) => Ok(()),
-            Some(Value::String(s)) if s.trim().is_empty() => Ok(()),
-            Some(_) => anyhow::bail!(
-                "{} 不支持参数：应用包名固定为设备分区（设备配置 pkg）",
-                action
-            ),
-        }
+        validate::ensure_bare_value(step, action)
     }
 
     /// str_app/cls_app 的应用包名：固定取设备配置 pkg；
@@ -2418,22 +2251,17 @@ mod tests {
         ));
         let scripts = std::sync::Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
         let runner = Runner::new(devices, viewers, scripts);
-        let ctx = Ctx {
-            device_id: "test-dev".into(),
-            script_id: "com.test/t.yaml".into(),
-            log: Vec::new(),
-            stop: Arc::new(AtomicBool::new(false)),
-            exit: Arc::new(AtomicBool::new(false)),
-            interval_ms: 5,
-            threshold: 0.85,
-            log_level_rank: 0,
-            funcs: HashMap::new(),
-            func_depth: 0,
-            return_value: None,
-            ref_stack: Vec::new(),
-            region_warned: HashSet::new(),
-            log_cb: None,
-        };
+        let ctx = Ctx::new(
+            "test-dev".into(),
+            "com.test/t.yaml".into(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            5,
+            0.85,
+            0,
+            HashMap::new(),
+            None,
+        );
         (runner, ctx)
     }
 
