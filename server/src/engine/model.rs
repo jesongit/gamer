@@ -97,6 +97,9 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    // 参数对象与 Runner::run 一并留给 OPTIMIZATION_PLAN 阶段 3/6（RunManager）收敛，
+    // 现在引入仅服务于本构造器的中间结构体是纯仪式
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         device_id: String,
         script_id: String,

@@ -1791,6 +1791,10 @@ mod tests {
                 region,
             })
         };
+        // 后续循环含 await，std MutexGuard 不能跨 await（clippy await_holding_lock）；
+        // 本基准默认 #[ignore] 经 perf 脚本独占运行，统计隔离另有 MatcherStatsGuard
+        // RAII 兜底，此处提前放锁不影响其余测试
+        drop(_lock);
 
         for _ in 0..warmup {
             crate::device::frames::FrameCache::benchmark_decode_latest_png(&ffmpeg, &config, &gop)

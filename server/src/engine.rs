@@ -304,14 +304,6 @@ impl Runner {
         normalize::normalize_top(doc)
     }
 
-    /// Validate a top-level mapping and report migration/typo errors before
-    /// shorthand normalization. The return value tells `normalize_top` whether
-    /// an explicit section key is present, keeping validation independent from
-    /// the resulting document shape.
-    fn validate_top_mapping(m: &serde_yaml::Mapping) -> anyhow::Result<bool> {
-        validate::validate_top_mapping(m)
-    }
-
     /// 从文档取出 func 段（原样返回，不参与 $N 替换）并对剩余部分做实参替换。
     /// 返回 func 段的值（None = 未定义）
     fn take_funcs_and_substitute(
@@ -1027,7 +1019,7 @@ impl Runner {
                             FIND_SHOT_FAIL_GRACE_MS / 1000
                         );
                     }
-                    if shot_fail_warned_at.map_or(true, |t| t.elapsed().as_secs() >= 10) {
+                    if shot_fail_warned_at.is_none_or(|t| t.elapsed().as_secs() >= 10) {
                         shot_fail_warned_at = Some(std::time::Instant::now());
                         ctx.log(
                             "warn",
@@ -3375,9 +3367,9 @@ mod tests {
     fn top_level_mapping_validation_preserves_error_boundaries() {
         let mapping = |yaml: &str| parse(yaml).as_mapping().unwrap().clone();
 
-        assert!(!Runner::validate_top_mapping(&mapping("f1:\n  - log: x")).unwrap());
-        assert!(Runner::validate_top_mapping(&mapping("steps: []")).unwrap());
-        assert!(Runner::validate_top_mapping(&mapping("config:\n  interval: 1s")).unwrap());
+        assert!(!validate::validate_top_mapping(&mapping("f1:\n  - log: x")).unwrap());
+        assert!(validate::validate_top_mapping(&mapping("steps: []")).unwrap());
+        assert!(validate::validate_top_mapping(&mapping("config:\n  interval: 1s")).unwrap());
 
         for (yaml, message) in [
             ("action_wait: 500", "顶层 action_wait 已删除"),
@@ -3387,7 +3379,7 @@ mod tests {
             ("interval: 1s", "config: 段参数"),
             ("threshold: 0.9", "config: 段参数"),
         ] {
-            let error = Runner::validate_top_mapping(&mapping(yaml))
+            let error = validate::validate_top_mapping(&mapping(yaml))
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(message), "{yaml:?} -> {error}");
