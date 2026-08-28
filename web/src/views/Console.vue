@@ -513,6 +513,7 @@ import {
   toDeviceCoord as mapToDeviceCoord,
 } from '../console/geometry'
 import { formatScreenSummary } from '../console/device-summary'
+import { renderOpTpl } from '../console/op-template'
 
 const router = useRouter()
 const toast = useToast()
@@ -608,22 +609,6 @@ api.getOpTemplates().then(t => {
 }).catch(e => {
   console.warn('op-templates 拉取失败，使用内置默认模板（服务端未重启或接口缺失）', e)
 })
-/** 用变量渲染操作记录模板；未提供的占位符保留原样。
- *  值为空的占位符若独占一行（如省略 region）则整行删除；
- *  多行值（如 {region} 的 fm/to 续行）缩进跟随占位符所在行 +2（吞掉值自带的续行缩进），保证嵌套层级正确 */
-function renderOpTpl(tpl, vars) {
-  let out = tpl || ''
-  for (const [k, v] of Object.entries(vars)) {
-    const val = v ?? ''
-    out = out.split('\n').map(line => {
-      if (!line.includes('{' + k + '}')) return line
-      if (String(val).trim() === '' && line.replace('{' + k + '}', '').trim() === '') return null
-      const indent = (line.match(/^(\s*)/) || ['', ''])[1]
-      return line.split('{' + k + '}').join(val.replace(/\n\s*/g, '\n' + indent + '  '))
-    }).filter(l => l !== null).join('\n')
-  }
-  return out.replace(/\n{3,}/g, '\n\n').trim()
-}
 // alt 模式：仅在脚本编辑模式生效；开启后模板/投屏点击只生成操作记录
 const altMode = ref(false)
 // 操作记录区：最多展示 3 行，每行可点击追加到编辑区
