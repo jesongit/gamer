@@ -12,6 +12,7 @@
 param(
     [string[]]$InputPath = @(),
     [switch]$Json,
+    [switch]$IncludeResource,
     [switch]$DryRun,
     [switch]$SelfTest
 )
@@ -30,18 +31,19 @@ if ($null -eq $node) {
     throw 'node not found on PATH'
 }
 
-$args = @($script)
+$nodeArgs = @($script)
 foreach ($p in $InputPath) {
     foreach ($item in ($p -split ',')) {
         $trimmed = $item.Trim()
         if ($trimmed.Length -eq 0) { continue }
-        $args += '--input'
-        $args += $trimmed
+        $nodeArgs += '--input'
+        $nodeArgs += $trimmed
     }
 }
-if ($Json) { $args += '--json' }
-if ($DryRun) { $args += '--dry-run' }
-if ($SelfTest) { $args += '--self-test' }
+if ($Json) { $nodeArgs += '--json' }
+if ($IncludeResource) { $nodeArgs += '--include-resource' }
+if ($DryRun) { $nodeArgs += '--dry-run' }
+if ($SelfTest) { $nodeArgs += '--self-test' }
 
-& node @args
+& node @nodeArgs
 exit $LASTEXITCODE
