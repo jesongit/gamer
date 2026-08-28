@@ -514,6 +514,7 @@ import RunConflictModal from '../components/RunConflictModal.vue'
 import { createScriptValidator } from '../script-language/validate'
 import { computeRunLineMap } from '../script-language/line-map'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
+import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
 import {
   defaultTemplateName,
   deviceRectStyle as mapDeviceRectStyle,
@@ -528,28 +529,52 @@ const toast = useToast()
 const sidebarCollapsed = inject('sidebarCollapsed', ref(false))
 const superseded = ref(false)
 const manualClose = ref(false)
+const connected = ref(false)
+const connecting = ref(false)
+const errorMsg = ref('')
+const fps = ref(0)
+const delay = ref(0)
+let delaySpikes = 0
+const res = ref('—')
+const bitrate = ref('—')
+const audioMuted = ref(true)
+const videoWrap = ref(null)
+const videoElement = ref(null)
 const consoleRuntime = useConsoleRuntime({
   api,
   devicesData,
   scriptsData,
   templatesData,
   toast,
-  connect,
   deviceIdRef: computed(() => store.deviceId),
 })
 
-const videoWrap = ref(null)
-const videoElement = ref(null)
-
-const connected = ref(false)
-const connecting = ref(false)
-const errorMsg = ref('')
-const fps = ref(0)
-const delay = ref(0)
-// 延迟看门狗计数：连续两次采样（~4s）延迟超阈值才重连，防瞬时抖动误触发
-let delaySpikes = 0
-const res = ref('—')
-const bitrate = ref('—')
+let statsTimer = null
+let logTimer = null
+let connectLock = false
+let forceTakeover = false
+let ws = null
+let pc = null
+let controlChannel = null
+let mediaStream = null
+let hadVideo = false
+let videoBytesAdvanced = false
+let lastVideoTime = 0
+let stillFrames = 0
+let lastBytesReceived = 0
+let lastBitrateTs = 0
+let lastJbd = 0
+let lastJbe = 0
+let videoConnectTs = 0
+let lastPliCount = 0
+let lastPliResetAt = 0
+let pliResetStreak = 0
+let renderFpLast = ''
+let renderFpFrozen = 0
+let lastDragInputAt = 0
+let stallResetSent = false
+let fpCanvas = null
+let fpCtx = null
 const selScript = ref('')
 // 脚本页签：运行/编辑模式 + 日志级别
 const DEFAULT_SCRIPT_CODE = `config:
@@ -664,48 +689,88 @@ const saving = ref(false)
 const loupe = reactive({ show: false, x: 0, y: 0, zoom: 2.5 })
 const loupeCanvas = ref(null)
 
-// WebRTC 状态
-let ws = null
-let pc = null
-let controlChannel = null
-let mediaStream = null
-let statsTimer = null
-let logTimer = null
-// 连接同步锁：防止并发 connect() 创建多个 PeerConnection（双连接 → 串流 → 画面定格）
-let connectLock = false
-
-// ---------- 多页面互斥 + 自动重连 ----------
-// 同一设备同一时刻只有一个活跃 viewer，由服务端 viewers 注册表仲裁
-// （取代旧 localStorage 锁——它只能管同一浏览器，跨浏览器/跨 PC 管不到）：
-//  - 新页面连接时若已有活跃 viewer：服务端回 conflict → 手动连接（点连接按钮）
-//    弹窗确认后带 force 重发 offer 顶替；仅换浏览器↔服务端链路，设备 scrcpy
-//    会话保持不断，新 viewer 无缝接管
-//  - 被顶替页面经信令 ws 收到 taken_over → 直接断开且不再自动重连（防互顶）
-//  - 自动重连（非手动）遇 conflict → 直接放弃并提示（不弹窗、不抢连接）
-// 本次 offer 是否带 force（conflict 确认后顶替重连用）
-let forceTakeover = false
+const webrtcLifecycle = useWebRtcLifecycle({
+  api,
+  deviceIdRef: computed(() => store.deviceId),
+  connectedRef: connected,
+  connectingRef: connecting,
+  errorMsgRef: errorMsg,
+  supersededRef: superseded,
+  manualCloseRef: manualClose,
+  toast,
+  onConnectStart() {
+    errorMsg.value = ''
+    connecting.value = true
+  },
+  onConnectSuccess() {
+    startStats()
+    startLogPolling()
+  },
+  onDisconnect() {
+    stopStats()
+    stopLogPolling()
+    connected.value = false
+    hadVideo = false
+    stillFrames = 0
+    renderFpLast = ''
+    renderFpFrozen = 0
+    stallResetSent = false
+    lastBytesReceived = 0
+    lastBitrateTs = 0
+    bitrate.value = '—'
+    if (videoElement.value) videoElement.value.srcObject = null
+    hideLoupe()
+  },
+  onChannelOpen() {
+    connected.value = true
+    connecting.value = false
+    controlChannel = webrtcLifecycle.getControlChannel()
+    videoConnectTs = Date.now()
+    sendControl({ type: 'audio', on: !audioMuted.value })
+    toast('WebRTC 连接建立', 'success')
+  },
+  onChannelClose() {
+    connected.value = false
+    controlChannel = null
+  },
+  onRemoteTrack({ event, pc: currentPc }) {
+    if (event.target !== currentPc) return
+    mediaStream = event.streams[0] || new MediaStream([event.track])
+    if (event.track.kind === 'audio') event.track.enabled = !audioMuted.value
+    if (videoElement.value) {
+      videoElement.value.srcObject = mediaStream
+      videoElement.value.play().catch(() => {})
+    }
+    const v = event.track
+    v.addEventListener('unmute', () => {
+      setTimeout(() => {
+        const w = videoElement.value?.videoWidth || 0
+        const h = videoElement.value?.videoHeight || 0
+        if (w) res.value = `${w}x${h}`
+      }, 200)
+    })
+  },
+  onControlMessage(e) {
+    onControlMessage(e)
+  },
+  onSignalMessage({ type, message, channel }) {
+    if (type === 'signal' && message?.type === 'taken_over') {
+      superseded.value = true
+      toast('连接已被其他页面接管', 'warn')
+    }
+  },
+  onPeerDisposed() {
+    controlChannel = null
+    mediaStream = null
+  },
+})
 
 function scheduleReconnect() {
-  consoleRuntime.scheduleReconnect({ superseded, errorMsg })
+  webrtcLifecycle.scheduleReconnect({ superseded })
 }
 
-function onChannelOpen() {
-  consoleRuntime.onChannelOpen({
-    connectedRef: connected,
-    connectingRef: connecting,
-    videoConnectTsRef: { get value() { return videoConnectTs }, set value(v) { videoConnectTs = v } },
-    audioMutedRef: audioMuted,
-    sendControl,
-  })
-}
-
-function onChannelClose() {
-  consoleRuntime.onChannelClose({
-    connectedRef: connected,
-    manualCloseRef: manualClose,
-    supersededRef: superseded,
-  })
-}
+function onChannelOpen() {}
+function onChannelClose() {}
 
 // 右侧面板页签
 const activeTab = ref('info')
@@ -1210,8 +1275,6 @@ async function loadData() {
 
 // ---------- WebRTC 连接 ----------
 
-// 声音默认静音（虚拟屏音频已接入 WebRTC，用户可点工具栏 🔊 按钮开启）
-const audioMuted = ref(true)
 function toggleAudio() {
   audioMuted.value = !audioMuted.value
   const v = videoElement.value
@@ -1232,233 +1295,14 @@ function toggleAudio() {
 }
 
 async function connect(manual = false) {
-  // 幂等：同步锁 + 状态检查，杜绝并发/重复调用创建多个 PC
-  // （服务端会因多连接出现多推流，video.srcObject 被串流覆盖 → 画面定格）
-  if (connectLock || connecting.value || connected.value) {
-    console.warn('[webrtc] connect ignored (lock/connecting/connected)')
-    return
-  }
-  connectLock = true
-  console.log('[webrtc] connect called (pc exists:', !!pc, ')')
-  try {
-    await doConnect()
-  } catch (e) {
-    if (e && e.conflict) {
-      // 已有其他页面在投屏：手动连接（点连接按钮）→ 弹窗确认后 force 顶替；
-      // 自动重连 → 直接放弃（不弹窗、不抢连接，防互顶死循环）
-      if (manual) {
-        if (confirm(`设备 ${currentName.value} 正在其他页面投屏。\n\n确认接管连接？对方页面将断开且不会自动重连。`)) {
-          forceTakeover = true
-          try {
-            await doConnect()
-          } finally {
-            forceTakeover = false
-          }
-        } else {
-          connecting.value = false
-          errorMsg.value = '设备正在其他页面使用'
-        }
-      } else {
-        connecting.value = false
-        errorMsg.value = '设备已在其他页面连接，本页已停止重连'
-        toast(errorMsg.value, 'warn')
-      }
-    }
-    // 常规错误：doConnect 内部已置 errorMsg 并 cleanup
-  } finally {
-    connectLock = false
-  }
-}
-
-async function doConnect() {
-  if (!store.deviceId) return toast('请先选择设备（设备页签下拉框）', 'error')
-  // 重连场景：若有残留 pc（连接失败但未清理干净），先释放（主动关闭，不触发自动重连）
-  if (pc) cleanup(true)
-  superseded.value = false
-  errorMsg.value = ''
-  connecting.value = true
-
-  try {
-    // 1. 服务端建立 scrcpy 会话
-    await api.connectDevice(store.deviceId)
-  } catch (e) {
-    connecting.value = false
-    errorMsg.value = '设备连接失败：' + e.message
-    return
-  }
-
-  try {
-    // 2. 信令 WebSocket
-    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    ws = new WebSocket(`${wsProto}//${location.host}/ws/device/${store.deviceId}`)
-
-    await new Promise((resolve, reject) => {
-      ws.onopen = resolve
-      ws.onerror = () => reject(new Error('信令连接失败'))
-    })
-
-    // 3. 创建 PeerConnection（接收视频轨 + 控制 DataChannel）
-    pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
-    // 调试：统计本页创建的 PC 数量（验证无双连接）
-    window.__pcCount = (window.__pcCount || 0) + 1
-    console.log('[webrtc] PC #' + window.__pcCount)
-    pc.addTransceiver('video', { direction: 'recvonly' })
-    pc.addTransceiver('audio', { direction: 'recvonly' })
-
-    // 控制 DataChannel 必须由 offerer 创建：否则 offer 里没有 m=application，
-    // answer 也不会有（webrtc-rs 只镜像 offer 的 media section），SCTP 永不建立
-    controlChannel = pc.createDataChannel('control')
-    controlChannel.onopen = onChannelOpen
-    controlChannel.onclose = onChannelClose
-    controlChannel.onmessage = onControlMessage
-
-    pc.ontrack = (e) => {
-      // 只接受当前 pc 的轨道：残留/旧连接的 ontrack 不得覆盖 srcObject（串流 → 定格）
-      if (e.target !== pc) return
-      // 兜底：对端 SDP 无 a=msid 时 e.streams 可能为空，用 track 自建 MediaStream
-      mediaStream = e.streams[0] || new MediaStream([e.track])
-      // 默认静音场景直接禁用音频轨（A/V 同步拖延迟问题，见 toggleAudio 注释）
-      if (e.track.kind === 'audio') e.track.enabled = !audioMuted.value
-      if (videoElement.value) {
-        videoElement.value.srcObject = mediaStream
-        videoElement.value.play().catch(() => {})
-      }
-      console.log('[webrtc] ontrack', e.track.kind, 'streams=', e.streams.length, 'codec=', e.track.getSettings?.())
-      // 视频元信息
-      const v = e.track
-      v.addEventListener('unmute', () => {
-        setTimeout(() => {
-          const w = videoElement.value?.videoWidth || 0
-          const h = videoElement.value?.videoHeight || 0
-          if (w) res.value = `${w}x${h}`
-        }, 200)
-      })
-    }
-
-    pc.ondatachannel = (e) => {
-      controlChannel = e.channel
-      controlChannel.onopen = onChannelOpen
-      controlChannel.onclose = onChannelClose
-      controlChannel.onmessage = onControlMessage
-    }
-
-    // 4. offer 交换（force: conflict 确认后的顶替重连；首轮 false——
-    //    他页已连接时服务端回 conflict，由 connect() 弹窗协商）
-    const offer = await pc.createOffer()
-    await pc.setLocalDescription(offer)
-    const answer = await new Promise((resolve, reject) => {
-      ws.onmessage = (evt) => {
-        try {
-          const msg = JSON.parse(evt.data)
-          if (msg.type === 'answer') resolve(msg.sdp)
-          else if (msg.type === 'conflict') reject({ conflict: true })
-          else if (msg.type === 'error') reject(new Error(msg.error || '信令错误'))
-        } catch (e) { reject(e) }
-      }
-      ws.send(JSON.stringify({ type: 'offer', sdp: offer, force: forceTakeover }))
-      setTimeout(() => reject(new Error('信令超时')), 10000)
-    })
-    await pc.setRemoteDescription(new RTCSessionDescription(answer))
-
-    // 信令 ws 后续消息：被其他页面 force 顶替的通知（收到后本页断开且不再
-    // 自动重连，防互顶；随后 peer close 由 onChannelClose 兜底清理）
-    ws.onmessage = (evt) => {
-      try {
-        const msg = JSON.parse(evt.data)
-        if (msg.type === 'taken_over') {
-          superseded.value = true
-          console.warn('[webrtc] taken over by another page')
-          toast('连接已被其他页面接管', 'warn')
-        }
-      } catch (e) {}
-    }
-
-    // 5. 统计定时器
-    startStats()
-    startLogPolling()
-  } catch (e) {
-    console.error('webrtc connect:', e)
-    connecting.value = false
-    if (e && e.conflict) {
-      cleanup(true)
-      throw e // conflict 上抛给 connect()：手动连接弹窗确认接管 / 自动重连放弃
-    }
-    errorMsg.value = e.message
-    cleanup(true)
-  }
+  await webrtcLifecycle.connect(manual)
 }
 
 /** 释放 WebRTC 资源；manual=true 表示主动关闭（不触发自动重连） */
 function cleanup(manual = false) {
-  if (statsTimer) { clearInterval(statsTimer); statsTimer = null }
-  if (pc) {
-    manualClose.value = manual // 主动关闭时标记：pc.close() 触发的 onclose 不触发自动重连
-    try { pc.close() } catch (e) {}
-    pc = null
-  }
-  if (ws) { try { ws.close() } catch (e) {} ws = null }
-  controlChannel = null
-  mediaStream = null
-  connected.value = false
-  hadVideo = false
-  stillFrames = 0
-  renderFpLast = ''
-  renderFpFrozen = 0
-  stallResetSent = false
-  lastBytesReceived = 0
-  lastBitrateTs = 0
-  bitrate.value = '—'
-  // 清空画面：断开后避免旧帧定格残留（overlay 会显示连接提示）
-  if (videoElement.value) videoElement.value.srcObject = null
-  hideLoupe()
+  webrtcLifecycle.cleanup(manual)
   consoleRuntime.cleanup()
 }
-
-// ---------- 视频静默检测 ----------
-// 被踢/断流时服务端不再向本页推帧（或已推给其他页面）→ 判定断流，走与
-// onclose 相同的自动重连逻辑（带页面锁检查）。
-// 双条件（currentTime 冻结 && 统计窗口零新增字节）：静止屏下服务端补帧重发
-// 的是重复 P 帧——H.264 相同 frame_num 的重复 slice 会被 Chrome 静默丢弃
-// （不解码、currentTime 不推进），画面定格本就是静态屏的正确渲染，字节仍在
-// 到达 = 链路活着，不算断流；真断流（被踢/断链/scrcpy 死）两者同时冻结
-let lastVideoTime = 0
-let stillFrames = 0
-let hadVideo = false
-// 上一统计窗口视频轨是否有新增字节（链路活性，见上方注释）
-let videoBytesAdvanced = false
-// 传输码率统计（按两次 getStats 的 bytesReceived 差值计算）
-let lastBytesReceived = 0
-let lastBitrateTs = 0
-// 画面延迟统计：jitterBufferDelay 增量 / 新播出帧数 = 每帧在 jitter buffer 的平均停留
-// 时间（≈ 画面滞后于设备的时间下限；服务端推流节奏正常时 ~100-300ms）
-let lastJbd = 0
-let lastJbe = 0
-// 连接建立时间：用于"连接后长时间无视频帧（黑屏）"看门狗
-let videoConnectTs = 0
-// PLI 自愈：浏览器解码器失步（花屏/卡顿）时自动发 RTCP PLI 请求关键帧，
-// 但服务端（webrtc-rs）不响应 PLI，只能等设备固定 IDR（i-frame-interval=2s）——
-// 花屏最长要 2s 才恢复。检测 inbound-rtp.pliCount 增量 → 经 control DataChannel
-// 通知服务端 reset_video（scrcpy 控制消息 17）→ 设备立即输出新 config+IDR → ~200ms 恢复
-let lastPliCount = 0
-let lastPliResetAt = 0
-// PLI reset 退避：reset 后 pliCount 仍在涨 = reset 无效（黑屏/静态屏编码器
-// 不吐 IDR），连续无效就指数退避（2s → 15s → 60s），避免每 3s 重启一次编码器
-let pliResetStreak = 0
-
-// 画面停滞看门狗（2026-08-23）：长时间静止补帧 + 运动突发后，Chrome jitter
-// buffer 的目标延迟可膨胀到秒级（实测静止 23min 后 676ms，滚动突发后飙到 4.9s），
-// 表现为"包在到、framesDecoded 在涨、画面却逐位冻结或残缺（花屏）"——此时
-// currentTime 照常 1.0x 推进、bytesReceived 照常增长、pliCount 不动（静默参考
-// 链损坏不触发 PLI），静默/延迟/PLI 三个现有看门狗全部失明，用户只能手动刷新。
-// 唯一彻底解药是重连（重建 jitter buffer，实测重连后同场景恢复正常渲染）。
-// 检测：用户刚做过拖动/滚轮（预期画面变化）但渲染像素指纹连续 ~5s 逐位未变
-// → 先 reset_video 请求 IDR；仍冻结则重连。指纹取 24x14 亮度哈希，开销可忽略。
-let renderFpLast = ''
-let renderFpFrozen = 0
-let lastDragInputAt = 0
-let stallResetSent = false
-let fpCanvas = null
-let fpCtx = null
 
 function handleVideoSilence() {
   if (manualClose.value || !connected.value || !store.deviceId) return
@@ -1478,7 +1322,7 @@ function formatBitrate(bps) {
 function startStats() {
   if (statsTimer) clearInterval(statsTimer)
   statsTimer = setInterval(async () => {
-    if (!pc) return
+    if (!webrtcLifecycle.getPeerConnection()) return
     const v = videoElement.value
     // 黑屏看门狗：连接建立后 8s 内一直没有可解码视频帧（videoWidth 仍为 0，
     // 如服务端未重放出 SPS/PPS+IDR）→ 判定异常，自动重连（重连时服务端会
@@ -1539,7 +1383,7 @@ function startStats() {
       }
     }
     try {
-      const stats = await pc.getStats()
+      const stats = await webrtcLifecycle.getPeerConnection().getStats()
       let fpsCount = 0
       stats.forEach(s => {
         if (s.type === 'inbound-rtp' && s.kind === 'video') {
@@ -1627,6 +1471,13 @@ function startStats() {
   }, 1000)
 }
 
+function stopStats() {
+  if (statsTimer) {
+    clearInterval(statsTimer)
+    statsTimer = null
+  }
+}
+
 function parseLogTime(s) {
   if (!s) return 0
   const d = new Date(s.replace(' ', 'T'))
@@ -1670,8 +1521,9 @@ function sendControl(obj) {
   if ((obj.type === 'touch' && obj.action === 'move') || obj.type === 'scroll' || obj.type === 'swipe') {
     lastDragInputAt = Date.now()
   }
-  if (controlChannel && controlChannel.readyState === 'open') {
-    controlChannel.send(JSON.stringify(obj))
+  const channel = webrtcLifecycle.getControlChannel() || controlChannel
+  if (channel && channel.readyState === 'open') {
+    channel.send(JSON.stringify(obj))
     return true
   }
   console.warn('[control] channel not open, fallback REST', JSON.stringify(obj))
