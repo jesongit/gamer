@@ -11,6 +11,28 @@ use tokio::process::Command;
 
 use crate::config::Config;
 
+/// adb 命令超时（结构化错误类型）：connect 失败自愈分支需要区分"adb server
+/// 楔死"与"设备侧失败"，旧实现靠错误文本 `contains("adb timeout")` 推断
+/// （OBS-002：改为 `is_adb_timeout` 沿错误链 downcast，不再依赖自由文本）。
+#[derive(Debug)]
+pub struct AdbTimeout {
+    pub args: String,
+}
+
+impl std::fmt::Display for AdbTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "adb timeout: {}", self.args)
+    }
+}
+
+impl std::error::Error for AdbTimeout {}
+
+/// 判断错误链中是否含 adb 命令超时（anyhow context 包装不影响判定）
+pub fn is_adb_timeout(err: &anyhow::Error) -> bool {
+    err.chain()
+        .any(|cause| cause.downcast_ref::<AdbTimeout>().is_some())
+}
+
 #[derive(Debug, Clone)]
 pub struct Adb {
     bin: String,
@@ -45,7 +67,9 @@ impl Adb {
             }
             Err(_) => {
                 let _ = child.kill().await;
-                anyhow::bail!("adb timeout: {:?}", args);
+                return Err(anyhow::Error::new(AdbTimeout {
+                    args: format!("{:?}", args),
+                }));
             }
         }
         let out = String::from_utf8_lossy(&out_buf).into_owned();
@@ -78,7 +102,9 @@ impl Adb {
             }
             Err(_) => {
                 let _ = child.kill().await;
-                anyhow::bail!("adb timeout: {:?}", args);
+                return Err(anyhow::Error::new(AdbTimeout {
+                    args: format!("{:?}", args),
+                }));
             }
         }
         let status = child.wait().await?;

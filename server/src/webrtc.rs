@@ -55,6 +55,9 @@ pub struct ViewerHandle {
     pub running: Arc<std::sync::atomic::AtomicBool>,
     pub peer: std::sync::Weak<webrtc::peer_connection::RTCPeerConnection>,
     pub control_dc: Arc<Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>>,
+    /// viewer 实例标识（OBS-002 关联字段）：注册/接管踢除/断开日志用它对齐
+    /// 同一个 viewer 会话的迁移轨迹（uuid，仅日志关联用）
+    pub viewer_id: String,
     /// pusher 最近一次向浏览器发送（实时帧或静止补帧）的 unix 毫秒：
     /// api 静默看门狗据此区分"设备 0 帧（静态屏常态，viewer 仍被补帧投喂）"
     /// 与"真断流（pusher 停止供帧）"，避免静态屏被 35s 周期兜底重连踢 viewer
@@ -194,6 +197,8 @@ fn should_probe_encoder(enabled: bool, frame_no: u64, is_keyframe: bool) -> bool
 
 /// 一个浏览器的 WebRTC 会话
 pub struct ViewerSession {
+    /// viewer 实例标识（OBS-002 关联字段，注册/接管/断开日志共用）
+    pub viewer_id: String,
     pub peer: Arc<webrtc::peer_connection::RTCPeerConnection>,
     pub track: Arc<TrackLocalStaticRTP>,
     pub running: Arc<std::sync::atomic::AtomicBool>,
@@ -442,6 +447,7 @@ impl ViewerSession {
         }
 
         let vs = Self {
+            viewer_id: uuid::Uuid::new_v4().simple().to_string(),
             peer,
             track,
             running,
@@ -794,6 +800,8 @@ impl ViewerSession {
                                         info!("pusher backlog without keyframe in queue, dropped {} frames (reference chain broken), drops={}", q.len(), drops_broken);
                                     }
                                 }
+                                // OBS-003：积压跳帧/断链清队的整批丢帧计数
+                                crate::metrics::global().record_rtp_drops(q.len() as u64);
                                 q.clear();
                                 waiting_key = true;
                                 need_idr = true;
@@ -807,6 +815,7 @@ impl ViewerSession {
                                     if drops_to_key % 20 == 1 {
                                         info!("pusher skipped {} stale frames to keyframe (queue {}), skips={}", drop_prefix, q.len(), drops_to_key);
                                     }
+                                    crate::metrics::global().record_rtp_drops(drop_prefix as u64);
                                     q.drain(..drop_prefix);
                                 }
                                 waiting_key = false;
@@ -1216,6 +1225,7 @@ async fn push_rtp(
         Ok(p) => p,
         Err(e) => {
             debug!("payload error: {}", e);
+            record_rtp_outcome(crate::metrics::global(), 0);
             return (true, 0);
         }
     };
@@ -1269,15 +1279,18 @@ async fn push_rtp(
             Ok(Ok(m)) => written += m,
             Ok(Err(e)) => {
                 debug!("write_rtp error: {}", e);
+                record_rtp_outcome(crate::metrics::global(), written);
                 return (false, written);
             }
             Err(_) => {
                 warn!("write_rtp timed out (3s), connection stalled, stopping pusher");
+                record_rtp_outcome(crate::metrics::global(), written);
                 return (false, written);
             }
         }
         *seq = seq.wrapping_add(1);
     }
+    record_rtp_outcome(crate::metrics::global(), written);
     if written == 0 && n > 0 {
         // SRTP 未就绪时 webrtc-rs 静默返回 Ok(0) 丢弃整包——连接初期窗口
         debug!(
@@ -1287,6 +1300,17 @@ async fn push_rtp(
         );
     }
     (true, written)
+}
+
+/// RTP 单帧发送结果采集（OBS-003，旁路）：实际写入 >0 字节记发送，
+/// 0 字节（SRTP 未就绪静默丢弃 / payload 失败）记整帧丢弃。
+/// 独立函数便于对采集语义做无网络单测。
+fn record_rtp_outcome(metrics: &crate::metrics::Metrics, written_bytes: usize) {
+    if written_bytes > 0 {
+        metrics.record_rtp_sent_frame();
+    } else {
+        metrics.record_rtp_drop();
+    }
 }
 
 /// 把 SPS/PPS 配置帧作为**独立单 NALU RTP 包**发送（RFC 6184 允许 type 7/8 单包）。
@@ -1631,11 +1655,17 @@ pub fn make_frame_queue(
                                 q.pop_front(); // 满队列：丢最旧保最新（参考链断裂，通知 pusher）
                                 overflowed2.store(true, std::sync::atomic::Ordering::SeqCst);
                                 dropped += 1;
+                                // OBS-003：环形缓冲溢出丢帧计数（旁路采集）
+                                crate::metrics::global().record_rtp_drop();
                                 if dropped % 1000 == 1 {
                                     debug!("frame queue ring full, dropped oldest, dropped={}", dropped);
                                 }
                             }
                             q.push_back(f);
+                            // OBS-003：生产侧队列深度 gauge。多个 viewer 各有独立
+                            // 环形缓冲，gauge 记最近一次更新者的深度（简化取舍：
+                            // 单设备单 viewer 是常态，多 viewer 时该值为最后活跃队列）
+                            crate::metrics::global().set_rtp_queue_depth(q.len() as i64);
                             drop(q);
                             notify2.notify_one();
                         }
@@ -1830,6 +1860,19 @@ fn probe_encoder_blockiness(
 mod tests {
     use super::*;
 
+    /// OBS-003：RTP 帧发送结果采集——写入 >0 字节记发送，0 字节记丢弃
+    #[test]
+    fn rtp_outcome_counts_sent_and_dropped_frames() {
+        let metrics = crate::metrics::Metrics::default();
+        record_rtp_outcome(&metrics, 1280);
+        record_rtp_outcome(&metrics, 64);
+        // SRTP 未就绪 0 字节静默丢弃 / payload 失败 → 丢帧
+        record_rtp_outcome(&metrics, 0);
+        let snap = metrics.snapshot();
+        assert_eq!(snap.rtp_sent_frames_total, 2);
+        assert_eq!(snap.rtp_dropped_frames_total, 1);
+    }
+
     #[test]
     fn disconnect_reasons_have_stable_names_and_notification_policy() {
         let cases = [
@@ -1937,6 +1980,7 @@ mod tests {
             running: running.clone(),
             peer: std::sync::Weak::new(),
             control_dc: Arc::new(Mutex::new(None)),
+            viewer_id: "viewer-a".to_string(),
             last_serve: Arc::new(std::sync::atomic::AtomicI64::new(123)),
             notify: Arc::new(Mutex::new(Some(tx))),
         };
@@ -1964,6 +2008,7 @@ mod tests {
             running: running.clone(),
             peer: std::sync::Weak::new(),
             control_dc: Arc::new(Mutex::new(None)),
+            viewer_id: "viewer-b".to_string(),
             last_serve: Arc::new(std::sync::atomic::AtomicI64::new(123)),
             notify: Arc::new(Mutex::new(Some(tx))),
         };

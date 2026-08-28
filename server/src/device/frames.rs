@@ -263,6 +263,9 @@ where
 
 pub struct FrameCache {
     ffmpeg_path: Mutex<String>,
+    /// 低基数运行指标（OBS-003）：GOP 帧数/字节 gauge 与按需解码计数。
+    /// 生产为进程级共享实例（metrics::global_arc），测试注入独立实例隔离计数。
+    metrics: Arc<crate::metrics::Metrics>,
     /// 配置帧、GOP、序号和到达时间必须在同一把锁下观察，避免撕裂快照。
     state: Mutex<FrameState>,
     /// 同一个精确帧快照只允许一个真实 ffmpeg 解码，结果/错误由所有 waiter 共享。
@@ -284,8 +287,23 @@ impl FrameCache {
 
     #[allow(dead_code)]
     fn start_with_freshness(ffmpeg_path: &str, decode_freshness: Duration) -> Arc<Self> {
+        Self::start_with(ffmpeg_path, decode_freshness, crate::metrics::global_arc())
+    }
+
+    /// 测试专用：注入独立 Metrics 实例，采集计数与进程级全局互不干扰
+    #[cfg(test)]
+    fn start_with_metrics(ffmpeg_path: &str, metrics: Arc<crate::metrics::Metrics>) -> Arc<Self> {
+        Self::start_with(ffmpeg_path, configured_decode_freshness(), metrics)
+    }
+
+    fn start_with(
+        ffmpeg_path: &str,
+        decode_freshness: Duration,
+        metrics: Arc<crate::metrics::Metrics>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             ffmpeg_path: Mutex::new(ffmpeg_path.to_string()),
+            metrics,
             state: Mutex::new(FrameState::new()),
             decode_in_flight: InFlight::new(),
             decoded_result: Mutex::new(None),
@@ -309,6 +327,9 @@ impl FrameCache {
                 // （repeat-previous-headers 会周期性重发相同参数集，字节相同则不清）
                 if !state.config_buf.is_empty() {
                     state.gop.clear();
+                    // OBS-003：参数集切换清空 GOP → gauge 归零（多设备时为最后
+                    // 更新者的快照，进程级单 gauge 的简化取舍）
+                    self.metrics.set_gop_size(0, 0);
                     debug!(
                         "SPS/PPS changed ({}B → {}B), GOP cleared",
                         state.config_buf.len(),
@@ -325,16 +346,24 @@ impl FrameCache {
         if frame.is_keyframe {
             state.gop.clear();
             state.gop.push(frame.clone());
+            // OBS-003：GOP 起点 gauge（1 帧 = IDR 自身）
+            self.metrics.set_gop_size(1, frame.data.len() as i64);
             state.snapshot_changed(sequence);
         } else if !state.gop.is_empty() {
             state.gop.push(frame.clone());
             let total: usize = state.gop.iter().map(|f| f.data.len()).sum();
             if state.gop.len() > GOP_MAX_FRAMES || total > GOP_MAX_BYTES {
                 state.gop.clear();
+                // OBS-003：超限整 GOP 丢弃 → gauge 归零
+                self.metrics.set_gop_size(0, 0);
                 // A discarded GOP is no longer a decodable snapshot, so invalidate any
                 // in-flight decode that captured it. Ordinary P frames keep the same GOP
                 // generation: they must not make a live decode stale on every video tick.
                 state.snapshot_changed(sequence);
+            } else {
+                // OBS-003：GOP 帧数/字节 gauge（跟随现有 O(GOP) 求和，不额外加重）
+                self.metrics
+                    .set_gop_size(state.gop.len() as i64, total as i64);
             }
         }
     }
@@ -396,6 +425,8 @@ impl FrameCache {
         let mut state = self.state.lock();
         if !state.gop.is_empty() && state.key() == key {
             state.gop.clear();
+            // OBS-003：解码失败清空当前 GOP → gauge 归零
+            self.metrics.set_gop_size(0, 0);
             FrameState::next_counter(&mut state.snapshot_generation);
             *self.decoded_result.lock() = None;
             true
@@ -434,11 +465,13 @@ impl FrameCache {
             }
             let ffmpeg_for_decode = ffmpeg.clone();
             let decode_budget = Arc::clone(&decode_budget);
+            let decode_metrics = Arc::clone(&self.metrics);
             let decoded = self
                 .request_snapshot(snapshot, move |snapshot| async move {
                     Self::decode_once_with_budget(
                         Arc::clone(&decode_budget),
                         &ffmpeg_for_decode,
+                        decode_metrics,
                         &snapshot.config,
                         &snapshot.gop,
                     )
@@ -568,6 +601,7 @@ impl FrameCache {
     async fn decode_once_with_budget(
         budget: Arc<Semaphore>,
         ffmpeg: &str,
+        metrics: Arc<crate::metrics::Metrics>,
         config: &[u8],
         gop: &[VideoFrame],
     ) -> anyhow::Result<Vec<u8>> {
@@ -575,7 +609,27 @@ impl FrameCache {
             .acquire_owned()
             .await
             .map_err(|_| anyhow::anyhow!("截图解码闸门已关闭"))?;
-        let decoded = Self::decode_once(ffmpeg, config, gop).await;
+        // OBS-003：按需解码采集点——每个真实 ffmpeg 执行记一次（同帧合并的
+        // 并发等待方共享执行、不重复计数），按 结果/超时 分类并累计耗时
+        let started = Instant::now();
+        let result =
+            tokio::time::timeout(DECODE_TIMEOUT, Self::decode_inner(ffmpeg, config, gop)).await;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        let decoded = match result {
+            Ok(inner) => {
+                let outcome = if inner.is_ok() {
+                    crate::metrics::FfmpegResult::Success
+                } else {
+                    crate::metrics::FfmpegResult::Failure
+                };
+                metrics.record_ffmpeg_decode(elapsed_ms, outcome);
+                inner
+            }
+            Err(_) => {
+                metrics.record_ffmpeg_decode(elapsed_ms, crate::metrics::FfmpegResult::Timeout);
+                Err(anyhow::anyhow!("ffmpeg 解码超时（3s 未产出 PNG）"))
+            }
+        };
         drop(permit);
         decoded
     }
@@ -615,16 +669,6 @@ impl FrameCache {
     /// 用临时 ffmpeg 解码 config+GOP，输出 GOP 最后一帧的 PNG。
     /// select=gte(n\,N)（N = GOP 帧数-1）：demuxer 会把配置帧也算进帧索引，
     /// gte 容忍 ±1~2 帧偏移，最多取到倒数第 3 帧（~100ms 旧），仍是实时画面。
-    async fn decode_once(
-        ffmpeg: &str,
-        config: &[u8],
-        gop: &[VideoFrame],
-    ) -> anyhow::Result<Vec<u8>> {
-        tokio::time::timeout(DECODE_TIMEOUT, Self::decode_inner(ffmpeg, config, gop))
-            .await
-            .map_err(|_| anyhow::anyhow!("ffmpeg 解码超时（3s 未产出 PNG）"))?
-    }
-
     async fn decode_inner(
         ffmpeg: &str,
         config: &[u8],
@@ -768,6 +812,61 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::io::{AsyncRead, ReadBuf};
     use tokio::sync::Notify;
+
+    /// OBS-003：GOP 帧数/字节 gauge 跟随喂帧/参数集切换/超限丢弃变化。
+    /// 注入独立 Metrics 实例，与进程级全局计数隔离。
+    #[test]
+    fn gop_metrics_track_feed_changes_and_discards() {
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let cache = FrameCache::start_with_metrics("ffmpeg", Arc::clone(&metrics));
+
+        // 参数集帧不产生 GOP
+        cache.feed(&video_frame(1, true, false));
+        let snap = metrics.snapshot();
+        assert_eq!((snap.gop_frames, snap.gop_bytes), (0, 0));
+
+        // IDR 建立 GOP：1 帧
+        cache.feed(&video_frame(2, false, true));
+        let snap = metrics.snapshot();
+        assert_eq!((snap.gop_frames, snap.gop_bytes), (1, 1));
+
+        // P 帧追加：帧数与字节累加
+        cache.feed(&video_frame(3, false, false));
+        cache.feed(&video_frame(4, false, false));
+        let snap = metrics.snapshot();
+        assert_eq!((snap.gop_frames, snap.gop_bytes), (3, 3));
+
+        // 参数集变化 → GOP 清空归零
+        cache.feed(&video_frame(9, true, false));
+        cache.feed(&video_frame(10, false, true));
+        let snap = metrics.snapshot();
+        assert_eq!((snap.gop_frames, snap.gop_bytes), (1, 1));
+
+        // 超过 GOP_MAX_FRAMES 上限 → 整 GOP 丢弃归零
+        for i in 0..=super::GOP_MAX_FRAMES {
+            cache.feed(&video_frame((i % 251) as u8, false, false));
+        }
+        let snap = metrics.snapshot();
+        assert_eq!((snap.gop_frames, snap.gop_bytes), (0, 0));
+    }
+
+    /// OBS-003：解码失败计入 ffmpeg_decode 失败分类（不起真实 ffmpeg：
+    /// 不存在的可执行文件在 spawn 阶段失败，走同一采集函数）
+    #[tokio::test]
+    async fn decode_failure_is_counted_per_execution() {
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let cache = FrameCache::start_with_metrics("gamer-no-such-ffmpeg", Arc::clone(&metrics));
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+
+        assert!(cache.decode_latest_png().await.is_err());
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.ffmpeg_decode_total, 1);
+        assert_eq!(snap.ffmpeg_decode_failure_total, 1);
+        assert_eq!(snap.ffmpeg_decode_success_total, 0);
+        assert_eq!(snap.ffmpeg_decode_timeout_total, 0);
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct TestError(&'static str);

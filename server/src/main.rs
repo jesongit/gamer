@@ -84,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let db = Arc::new(store::Store::open(&cfg)?);
+    // 进程级共享指标（OBS-003）：webrtc pusher / 帧缓存 / 设备帧消费等采集点
+    // 远离 AppState，经 metrics::global() 取同一实例；未安装时惰性兜底，
+    // 采集失败/缺失不影响业务行为（观测为旁路）
+    metrics::install_global(db.metrics());
     // 优雅停机信号（POST /api/shutdown 拆完会话后触发）；先于周期任务创建，
     // 运行日志保留任务同挂此信号——服务关闭时随之结束
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);

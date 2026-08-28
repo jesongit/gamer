@@ -421,7 +421,7 @@ impl DeviceManager {
             }
         }
 
-        info!(device = %device.name, "connecting...");
+        info!(device = %device.name, device_id = %id, "connecting...");
         let result = ScrcpySession::connect(&self.adb, &self.cfg, &device).await;
         let handle: SessionHandle = match result {
             Ok(h) => h,
@@ -429,8 +429,9 @@ impl DeviceManager {
                 let msg = format!("{:#}", e);
                 // adb 楔死自愈：连接失败根因是 adb 超时（push/reverse/shell）→ 重置
                 // server 后重试一次（楔死期重试必失败；重置后全新 server 通常秒连，
-                // 设备侧也坏了则明确报"设备不在线"，不再无限 70s 挂起）
-                if msg.contains("adb timeout") {
+                // 设备侧也坏了则明确报"设备不在线"，不再无限 70s 挂起）。
+                // 结构化判定（OBS-002）：沿错误链 downcast AdbTimeout，不匹配错误文本
+                if adb::is_adb_timeout(&e) {
                     warn!(device = %device.name, "connect adb timeout（{}），重置 adb server 后重试一次", msg);
                     self.adb.reset_server().await;
                     tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -473,6 +474,9 @@ impl DeviceManager {
             let cache = frame_cache2;
             let mut bc_no_viewer = 0u64;
             while let Some(frame) = rx.recv().await {
+                // OBS-003：视频输入帧计数 + 输入帧率（scrcpy → 服务端入口；
+                // 旁路原子采集，多设备时 fps 为全进程合计口径）
+                crate::metrics::global().record_video_input_frame();
                 if let Some(fc) = &cache {
                     fc.feed(&frame);
                 }
@@ -538,7 +542,7 @@ impl DeviceManager {
                 // 又会把游戏拉起来，与低功耗模式冲突
             }
         }
-        info!(device = %device.name, "online");
+        info!(device = %device.name, device_id = %id, "online");
 
         // 主屏保活仅限**镜像会话**：镜像内容来自物理屏管线，屏幕休眠后显示管线
         // 停止出帧，流静默定格（"连接后画面卡住"）。
@@ -1148,6 +1152,18 @@ fn short_serial(serial: &str) -> String {
 #[cfg(test)]
 mod pending_restore_tests {
     use super::*;
+
+    /// OBS-002：connect 失败自愈分支用结构化 AdbTimeout 判定取代错误文本
+    /// contains("adb timeout") 匹配；anyhow context 包装不影响判定
+    #[test]
+    fn adb_timeout_is_detected_structurally_through_error_chain() {
+        let wrapped = anyhow::Error::new(adb::AdbTimeout {
+            args: r#"["-s","dev","push"]"#.to_string(),
+        })
+        .context("scrcpy connect failed");
+        assert!(adb::is_adb_timeout(&wrapped));
+        assert!(!adb::is_adb_timeout(&anyhow::anyhow!("device not online")));
+    }
 
     /// 崩溃自愈标记走统一原子写（DATA-001）：重复覆盖不残留 .tmp- 临时文件，
     /// 清空映射时删除标记文件

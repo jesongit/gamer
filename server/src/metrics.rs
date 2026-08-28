@@ -5,10 +5,32 @@
 //! 请求内容或用户数据带入监控系统。
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 const RELAXED: Ordering = Ordering::Relaxed;
+
+/// 进程级共享指标实例（OBS-003）：main 启动时用 Store 的 Metrics 调用
+/// [`install_global`] 安装一次；采集点散布在 webrtc pusher / 帧缓存 / 设备消费
+/// 任务等远离 AppState 的位置，经 [`global`] 取用，避免逐层传参改造签名。
+static GLOBAL: OnceLock<Arc<Metrics>> = OnceLock::new();
+
+/// 安装进程级共享指标实例。返回 false = 已被安装（或已被惰性兜底创建），
+/// 本次忽略——观测为旁路，不因重复安装改变行为。
+pub fn install_global(metrics: Arc<Metrics>) -> bool {
+    GLOBAL.set(metrics).is_ok()
+}
+
+/// 进程级共享指标：未安装时惰性创建默认实例，采集函数在任意时机都可安全调用。
+pub fn global() -> &'static Metrics {
+    GLOBAL.get_or_init(|| Arc::new(Metrics::default()))
+}
+
+/// [`global`] 的 Arc 形态：需要持有句柄的结构（如 FrameCache）用它，
+/// 测试可注入独立实例实现计数隔离。
+pub(crate) fn global_arc() -> Arc<Metrics> {
+    GLOBAL.get_or_init(|| Arc::new(Metrics::default())).clone()
+}
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -266,6 +288,13 @@ impl Metrics {
         self.rtp_dropped_frames_total.fetch_add(1, RELAXED);
     }
 
+    /// 批量丢帧（pusher 积压跳帧/断链清队一次丢多帧时避免逐帧自增）
+    pub fn record_rtp_drops(&self, n: u64) {
+        if n > 0 {
+            self.rtp_dropped_frames_total.fetch_add(n, RELAXED);
+        }
+    }
+
     pub fn set_gop_size(&self, frames: i64, bytes: i64) {
         self.gop_frames.store(frames.max(0), RELAXED);
         self.gop_bytes.store(bytes.max(0), RELAXED);
@@ -385,6 +414,9 @@ mod tests {
         assert_eq!(snapshot.video_input_frames_total, 1);
         assert_eq!(snapshot.rtp_sent_frames_total, 1);
         assert_eq!(snapshot.rtp_dropped_frames_total, 1);
+        metrics.record_rtp_drops(7);
+        metrics.record_rtp_drops(0);
+        assert_eq!(metrics.snapshot().rtp_dropped_frames_total, 8);
         assert_eq!(snapshot.rtp_queue_depth, 0);
         assert_eq!(snapshot.gop_frames, 0);
         assert_eq!(snapshot.gop_bytes, 42);
@@ -400,6 +432,19 @@ mod tests {
         assert_eq!(snapshot.scheduler_conflicts_total, 1);
         assert_eq!(snapshot.scheduler_skipped_total, 1);
         assert_eq!(snapshot.scheduler_failures_total, 1);
+    }
+
+    /// 全局访问器必须返回稳定实例：采集点分散在多个模块，同一进程内
+    /// 观测的必须是同一个计数器集合（未安装时惰性兜底创建同样稳定）。
+    #[test]
+    fn global_accessor_returns_stable_instance() {
+        let first = global();
+        let second = global();
+        assert!(
+            std::ptr::eq(first, second),
+            "global() must return the same instance within a process"
+        );
+        assert!(std::ptr::eq(first, global_arc().as_ref()));
     }
 
     #[test]
