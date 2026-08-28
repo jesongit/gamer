@@ -19,6 +19,19 @@ pub(crate) fn payload_type_for(sdp: &str, encoding: &str) -> Option<u8> {
     None
 }
 
+/// Return the H.264 NAL unit type encoded in the first byte.
+pub(crate) fn nal_unit_type(nal: &[u8]) -> Option<u8> {
+    nal.first().map(|b| b & 0x1F)
+}
+
+pub(crate) fn is_h264_config_nal(nal: &[u8]) -> bool {
+    matches!(nal_unit_type(nal), Some(7 | 8))
+}
+
+pub(crate) fn is_h264_idr_nal(nal: &[u8]) -> bool {
+    matches!(nal_unit_type(nal), Some(5))
+}
+
 /// Split an Annex-B byte stream into NAL units.
 ///
 /// Bytes before a start code are ignored, matching the existing WebRTC
@@ -63,7 +76,9 @@ pub(crate) fn annexb_nalus(data: &[u8]) -> Vec<&[u8]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{annexb_nalus, payload_type_for};
+    use super::{
+        annexb_nalus, is_h264_config_nal, is_h264_idr_nal, nal_unit_type, payload_type_for,
+    };
 
     #[test]
     fn payload_type_for_returns_first_matching_rtpmap() {
@@ -100,5 +115,14 @@ mod tests {
     #[test]
     fn annexb_nalus_returns_empty_for_non_annex_b_data() {
         assert!(annexb_nalus(&[0x67, 0x42, 0x00]).is_empty());
+    }
+
+    #[test]
+    fn nal_helpers_classify_config_and_idr_units() {
+        assert_eq!(nal_unit_type(&[0x67, 0x00]), Some(7));
+        assert!(is_h264_config_nal(&[0x67, 0x00]));
+        assert!(is_h264_config_nal(&[0x68]));
+        assert!(is_h264_idr_nal(&[0x65, 0x00]));
+        assert!(!is_h264_idr_nal(&[0x61, 0x00]));
     }
 }

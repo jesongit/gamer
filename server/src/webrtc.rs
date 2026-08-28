@@ -99,6 +99,45 @@ pub async fn remove_and_teardown_viewer(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PusherDrainDecision {
+    DrainAll,
+    DrainToKeyframe { drop_prefix: usize, request_idr: bool },
+    Keep,
+}
+
+fn decide_pusher_drain(
+    queue_len: usize,
+    backlog_limit: usize,
+    overflowed: bool,
+    waiting_key: bool,
+    keyframe_index: Option<usize>,
+) -> PusherDrainDecision {
+    if overflowed {
+        return PusherDrainDecision::DrainAll;
+    }
+    if waiting_key {
+        return match keyframe_index {
+            Some(ki) => PusherDrainDecision::DrainToKeyframe {
+                drop_prefix: ki,
+                request_idr: false,
+            },
+            None => PusherDrainDecision::DrainAll,
+        };
+    }
+    if queue_len > backlog_limit {
+        return match keyframe_index {
+            Some(0) => PusherDrainDecision::Keep,
+            Some(ki) => PusherDrainDecision::DrainToKeyframe {
+                drop_prefix: ki,
+                request_idr: false,
+            },
+            None => PusherDrainDecision::DrainAll,
+        };
+    }
+    PusherDrainDecision::Keep
+}
+
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
@@ -685,55 +724,58 @@ impl ViewerSession {
                                 i += 1;
                             }
                         }
-                        // 环形缓冲溢出 → 参考链断裂：清空队列，等下一个 IDR 重建
-                        if overflowed.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                            drops_broken += 1;
-                            if drops_broken % 20 == 1 {
-                                info!("pusher chain broken (ring overflow), dropped {} frames, drops={}", q.len(), drops_broken);
-                            }
-                            q.clear();
-                            waiting_key = true;
-                            need_idr = true;
-                        }
-                        if waiting_key {
-                            // 断链恢复中：丢弃 P 帧直到新的关键帧出现
-                            if let Some(ki) = q.iter().position(|f| f.is_keyframe) {
-                                waiting_key = false;
-                                q.drain(..ki); // 关键帧之前的 P 帧来自断链段，丢弃
-                                to_send = q.drain(..).collect();
-                            } else {
-                                q.clear();
-                            }
+                        let keyframe_index = q.iter().position(|f| f.is_keyframe);
+                        let mut decision = if overflowed.swap(false, std::sync::atomic::Ordering::SeqCst)
+                        {
+                            PusherDrainDecision::DrainAll
                         } else {
-                            // 积压跳帧：队列深度超过 ~1s 的帧数 → 跳到最近关键帧
-                            // （其前帧依赖更早参考链，丢弃）。正常运转时队列 1~5 帧，不触发。
-                            if q.len() > backlog_limit {
-                                let ki = q.iter().rposition(|f| f.is_keyframe).unwrap_or(0);
-                                if ki > 0 {
-                                    drops_to_key += 1;
-                                    if drops_to_key % 20 == 1 {
-                                        info!("pusher skipped {} stale frames to keyframe (queue {}), skips={}", ki, q.len(), drops_to_key);
-                                    }
-                                    q.drain(..ki);
-                                } else {
-                                    // **断链跳帧（静默花屏根源）**：队内无未发送关键帧
-                                    // （IDR 每 ~4s 一个，若积压恰好发生在 IDR 刚发完的
-                                    // 窗口，队内全是 P 帧）→ rposition 返回 None → 旧代码
-                                    // 直接全量发送——这些 P 帧引用的是浏览器**没收到**的
-                                    // 更早帧，解码器用断裂参考链解码 → **黑白马赛克/彩色块
-                                    // 点直到下个 IDR**（~4s，偶发、瞬态、截图抓不到，
-                                    // "点击后花屏"的又一真凶；触发：点击引发大帧积压）。
-                                    // 修复：与环形缓冲溢出同路径——清空队列 + waiting_key，
-                                    // 丢 P 帧等下一个 IDR（浏览器保持最后干净帧，不花屏）。
+                            decide_pusher_drain(
+                                q.len(),
+                                backlog_limit,
+                                false,
+                                waiting_key,
+                                keyframe_index,
+                            )
+                        };
+                        if matches!(decision, PusherDrainDecision::DrainAll) && keyframe_index.is_some()
+                            && !waiting_key && q.len() > backlog_limit
+                        {
+                            decision = PusherDrainDecision::DrainToKeyframe {
+                                drop_prefix: keyframe_index.unwrap_or(0),
+                                request_idr: false,
+                            };
+                        }
+                        match decision {
+                            PusherDrainDecision::DrainAll => {
+                                if waiting_key || keyframe_index.is_none() || q.len() > backlog_limit {
                                     drops_broken += 1;
                                     if drops_broken % 20 == 1 {
                                         info!("pusher backlog without keyframe in queue, dropped {} frames (reference chain broken), drops={}", q.len(), drops_broken);
                                     }
-                                    q.clear();
-                                    waiting_key = true;
+                                }
+                                q.clear();
+                                waiting_key = true;
+                                need_idr = true;
+                            }
+                            PusherDrainDecision::DrainToKeyframe {
+                                drop_prefix,
+                                request_idr,
+                            } => {
+                                if drop_prefix > 0 {
+                                    drops_to_key += 1;
+                                    if drops_to_key % 20 == 1 {
+                                        info!("pusher skipped {} stale frames to keyframe (queue {}), skips={}", drop_prefix, q.len(), drops_to_key);
+                                    }
+                                    q.drain(..drop_prefix);
+                                }
+                                waiting_key = false;
+                                if request_idr {
                                     need_idr = true;
                                 }
                             }
+                            PusherDrainDecision::Keep => {}
+                        }
+                        if !waiting_key || !q.is_empty() {
                             to_send = q.drain(..).collect();
                             last_q_len = to_send.len(); // 本轮取出的帧数（≈ 队列积压深度）
                         }
