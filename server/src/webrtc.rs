@@ -102,7 +102,10 @@ pub async fn remove_and_teardown_viewer(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PusherDrainDecision {
     DrainAll,
-    DrainToKeyframe { drop_prefix: usize, request_idr: bool },
+    DrainToKeyframe {
+        drop_prefix: usize,
+        request_idr: bool,
+    },
     Keep,
 }
 
@@ -725,20 +728,22 @@ impl ViewerSession {
                             }
                         }
                         let keyframe_index = q.iter().position(|f| f.is_keyframe);
-                        let mut decision = if overflowed.swap(false, std::sync::atomic::Ordering::SeqCst)
-                        {
-                            PusherDrainDecision::DrainAll
-                        } else {
-                            decide_pusher_drain(
-                                q.len(),
-                                backlog_limit,
-                                false,
-                                waiting_key,
-                                keyframe_index,
-                            )
-                        };
-                        if matches!(decision, PusherDrainDecision::DrainAll) && keyframe_index.is_some()
-                            && !waiting_key && q.len() > backlog_limit
+                        let mut decision =
+                            if overflowed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                                PusherDrainDecision::DrainAll
+                            } else {
+                                decide_pusher_drain(
+                                    q.len(),
+                                    backlog_limit,
+                                    false,
+                                    waiting_key,
+                                    keyframe_index,
+                                )
+                            };
+                        if matches!(decision, PusherDrainDecision::DrainAll)
+                            && keyframe_index.is_some()
+                            && !waiting_key
+                            && q.len() > backlog_limit
                         {
                             decision = PusherDrainDecision::DrainToKeyframe {
                                 drop_prefix: keyframe_index.unwrap_or(0),
@@ -747,7 +752,10 @@ impl ViewerSession {
                         }
                         match decision {
                             PusherDrainDecision::DrainAll => {
-                                if waiting_key || keyframe_index.is_none() || q.len() > backlog_limit {
+                                if waiting_key
+                                    || keyframe_index.is_none()
+                                    || q.len() > backlog_limit
+                                {
                                     drops_broken += 1;
                                     if drops_broken % 20 == 1 {
                                         info!("pusher backlog without keyframe in queue, dropped {} frames (reference chain broken), drops={}", q.len(), drops_broken);
