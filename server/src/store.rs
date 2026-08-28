@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use chrono::{Local, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 
 use crate::config::Config;
 use crate::metrics::Metrics;
@@ -77,10 +78,15 @@ pub struct StoreMetrics {
 }
 
 const DB_QUEUE_CAPACITY: usize = 1024;
+#[cfg(test)]
+const DB_BLOCKING_PERMITS: usize = 2;
 const LOG_BATCH_SIZE: usize = 100;
 const LOG_PRUNE_BATCH_SIZE: i64 = 500;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_LOG_MESSAGE_CHARS: usize = 1024;
+
+#[cfg(test)]
+static DB_BLOCKING_GATE: Semaphore = Semaphore::const_new(DB_BLOCKING_PERMITS);
 
 type ErasedDbResult = anyhow::Result<Box<dyn Any + Send>>;
 type DbTask = Box<dyn FnOnce(&mut Connection) -> ErasedDbResult + Send + 'static>;
@@ -198,32 +204,43 @@ fn run_worker(mut conn: Connection, rx: Receiver<DbCommand>, metrics: Arc<Metric
                         .last()
                         .is_some_and(|log| log.completion.is_some())
                 {
-                    flush_logs(&mut conn, &mut pending_logs, &metrics);
+                    let _ = flush_logs(&mut conn, &mut pending_logs, &metrics);
                 }
             }
             Ok(DbCommand::Call { task, reply }) => {
                 metrics.db_dequeue();
-                flush_logs(&mut conn, &mut pending_logs, &metrics);
+                if let Err(err) = flush_logs(&mut conn, &mut pending_logs, &metrics) {
+                    let _ = reply.send(Err(err));
+                    continue;
+                }
                 let _ = reply.send(task(&mut conn));
             }
             Ok(DbCommand::Shutdown) => {
-                flush_logs(&mut conn, &mut pending_logs, &metrics);
+                if let Err(err) = flush_logs(&mut conn, &mut pending_logs, &metrics) {
+                    tracing::error!(error = %err, "database worker flush failed during shutdown");
+                }
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
-                flush_logs(&mut conn, &mut pending_logs, &metrics);
+                let _ = flush_logs(&mut conn, &mut pending_logs, &metrics);
             }
             Err(RecvTimeoutError::Disconnected) => {
-                flush_logs(&mut conn, &mut pending_logs, &metrics);
+                if let Err(err) = flush_logs(&mut conn, &mut pending_logs, &metrics) {
+                    tracing::error!(error = %err, "database worker flush failed after disconnect");
+                }
                 break;
             }
         }
     }
 }
 
-fn flush_logs(conn: &mut Connection, pending_logs: &mut Vec<PendingLog>, metrics: &Metrics) {
+fn flush_logs(
+    conn: &mut Connection,
+    pending_logs: &mut Vec<PendingLog>,
+    metrics: &Metrics,
+) -> anyhow::Result<()> {
     if pending_logs.is_empty() {
-        return;
+        return Ok(());
     }
     let batch = std::mem::take(pending_logs);
     let rows = batch.len();
@@ -246,17 +263,29 @@ fn flush_logs(conn: &mut Connection, pending_logs: &mut Vec<PendingLog>, metrics
         Ok(())
     })();
     metrics.db_batch(rows, started.elapsed().as_millis() as u64, result.is_err());
-    let error = result.err().map(|error| format!("{error:#}"));
-    if let Some(error) = &error {
-        tracing::error!(rows, error = %error, "database log batch failed");
-    }
-    for log in batch {
-        if let Some(completion) = log.completion {
-            let response = match &error {
-                Some(error) => Err(anyhow::anyhow!(error.clone())),
-                None => Ok(()),
-            };
-            let _ = completion.send(response);
+    match result {
+        Ok(()) => {
+            tracing::info!(rows, "database log batch committed");
+            for log in batch {
+                if let Some(completion) = log.completion {
+                    let _ = completion.send(Ok(()));
+                }
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let error_msg = format!("{error:#}");
+            tracing::error!(
+                rows,
+                error = %error_msg,
+                "database log batch failed"
+            );
+            for log in batch {
+                if let Some(completion) = log.completion {
+                    let _ = completion.send(Err(anyhow::anyhow!(error_msg.clone())));
+                }
+            }
+            Err(anyhow::anyhow!(error_msg))
         }
     }
 }
@@ -379,6 +408,18 @@ impl Store {
             .downcast::<T>()
             .map(|value| *value)
             .map_err(|_| anyhow::anyhow!("database worker returned an unexpected result type"))
+    }
+
+    #[cfg(test)]
+    pub async fn with_bounded_blocking<T, F>(task: F) -> anyhow::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    {
+        let _permit = DB_BLOCKING_GATE.acquire().await?;
+        tokio::task::spawn_blocking(task)
+            .await
+            .map_err(|error| anyhow::anyhow!("database blocking worker failed: {error}"))?
     }
 
     fn enqueue(&self, command: DbCommand) -> anyhow::Result<()> {
@@ -779,6 +820,8 @@ impl Store {
         self.request(move |conn| {
             let mut total = 0u64;
             let mut batches = 0u64;
+            let mut first_deleted_id = None;
+            let mut last_deleted_id = None;
             loop {
                 let ids = {
                     let mut stmt =
@@ -792,8 +835,10 @@ impl Store {
                 if ids.is_empty() {
                     break;
                 }
-                let first_id = ids[0];
-                let last_id = *ids.last().unwrap();
+                let batch_first_id = ids[0];
+                let batch_last_id = *ids.last().unwrap();
+                first_deleted_id.get_or_insert(batch_first_id);
+                last_deleted_id = Some(batch_last_id);
                 let placeholders = std::iter::repeat_n("?", ids.len())
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -805,9 +850,9 @@ impl Store {
                     retain_days,
                     cutoff = %cutoff,
                     batch = batches,
-                    deleted,
-                    id_start = first_id,
-                    id_end = last_id,
+                    deleted_rows = deleted,
+                    id_start = batch_first_id,
+                    id_end = batch_last_id,
                     "expired run logs removed"
                 );
                 if deleted < LOG_PRUNE_BATCH_SIZE as usize {
@@ -819,7 +864,9 @@ impl Store {
                     retain_days,
                     cutoff = %cutoff,
                     batches,
-                    deleted = total,
+                    deleted_rows = total,
+                    id_start = first_deleted_id.unwrap_or_default(),
+                    id_end = last_deleted_id.unwrap_or_default(),
                     "expired run logs cleanup finished"
                 );
             }
@@ -859,6 +906,9 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration as StdDuration;
 
     fn temp_config(name: &str) -> (Config, PathBuf) {
         let dir = std::env::temp_dir().join(format!("gamer-store-{name}-{}", uuid::Uuid::new_v4()));
@@ -998,5 +1048,42 @@ mod tests {
 
         drop(store);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_blocking_helper_limits_parallelism() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..6 {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            handles.push(tokio::spawn(async move {
+                Store::with_bounded_blocking(move || {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    loop {
+                        let current = max_active.load(Ordering::SeqCst);
+                        if now <= current {
+                            break;
+                        }
+                        if max_active
+                            .compare_exchange(current, now, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(StdDuration::from_millis(50));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+                .unwrap()
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        assert!(max_active.load(Ordering::SeqCst) <= DB_BLOCKING_PERMITS);
     }
 }
