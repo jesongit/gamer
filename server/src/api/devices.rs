@@ -79,6 +79,27 @@ pub(super) fn validate_device_req(req: &CreateDeviceReq) -> Result<(), ApiError>
     Ok(())
 }
 
+/// 判断新旧配置里「投屏会话相关」字段是否变化。
+///
+/// scrcpy 会话组装实际消费的参数：kind / addr / screen_mode / vd_res / vd_dpi / fps
+/// （见 `device::scrcpy`）；name / pkg 不参与建会话，只改它们无需断线重连。
+/// 比较按生效值归一（与 scrcpy 侧 `unwrap_or` 默认一致），None 与等值默认之间的
+/// 写法差异不触发重连；fps 未设置时以全局配置为生效值。
+pub(super) fn session_affecting_change(prev: &Device, next: &Device, global_fps: u32) -> bool {
+    let norm_res = |s: Option<&String>| -> String {
+        s.map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+            .unwrap_or("1920x1080")
+            .to_ascii_lowercase()
+    };
+    prev.kind != next.kind
+        || prev.addr.trim() != next.addr.trim()
+        || prev.screen_mode != next.screen_mode
+        || norm_res(prev.vd_res.as_ref()) != norm_res(next.vd_res.as_ref())
+        || prev.vd_dpi.unwrap_or(0) != next.vd_dpi.unwrap_or(0)
+        || prev.fps.unwrap_or(global_fps) != next.fps.unwrap_or(global_fps)
+}
+
 pub(super) async fn api_list_devices(State(st): State<AppState>) -> Response {
     match device_views(&st).await {
         Ok(devices) => Json(devices).into_response(),
@@ -220,7 +241,7 @@ pub(super) async fn api_update_device(
         id: id.clone(),
         name: req.name,
         kind: req.kind,
-        addr: req.addr.unwrap_or(existing.addr),
+        addr: req.addr.unwrap_or_else(|| existing.addr.clone()),
         screen_mode: if req.screen_mode.as_deref() == Some("virtual") {
             ScreenMode::Virtual
         } else {
@@ -230,27 +251,31 @@ pub(super) async fn api_update_device(
         vd_dpi: req.vd_dpi,
         pkg: req.pkg,
         fps: req.fps,
-        created_at: existing.created_at,
+        created_at: existing.created_at.clone(),
     };
-    // 配置变更后断开重连以生效。脚本运行中：会话被运行守卫拦下（旧参数跑完
-    // 当前脚本，新配置下次连接生效），viewer 也无需踢、画面不闪断。
-    // 空闲时：踢掉活跃 viewer（pusher 停止 + peer 关闭）→ 断开 → 浏览器端
-    // onclose 自动重连恢复画面，否则旧 pusher 悬挂在已关闭的帧队列上画面定格
-    if st.devices.has_running_scripts(&id) {
-        info!(device = %id, "config changed while script running, session kept (applied on next connect)");
-    } else {
-        let kicked = {
-            let mut map = st.viewers.lock().unwrap();
-            map.remove(&id)
-        };
-        if let Some(h) = kicked {
-            h.running.store(false, std::sync::atomic::Ordering::SeqCst);
-            if let Some(p) = h.peer.upgrade() {
-                let _ = p.close().await;
+    // 投屏相关参数（接入类型/地址/屏幕模式/虚拟屏参数/帧率）变更才需要重建会话：
+    // 踢活跃 viewer + 拆会话，浏览器 onclose 自动重连恢复画面。仅改名称/应用包名
+    // 等非投屏字段时保持现有连接不中断。脚本运行中仍受运行守卫保护不拆会话
+    // （旧参数跑完当前脚本，新配置下次连接生效）。
+    if session_affecting_change(&existing, &device, st.cfg.fps) {
+        if st.devices.has_running_scripts(&id) {
+            info!(device = %id, "casting config changed while script running, session kept (applied on next connect)");
+        } else {
+            let kicked = {
+                let mut map = st.viewers.lock().unwrap();
+                map.remove(&id)
+            };
+            if let Some(h) = kicked {
+                h.running.store(false, std::sync::atomic::Ordering::SeqCst);
+                if let Some(p) = h.peer.upgrade() {
+                    let _ = p.close().await;
+                }
+                info!(device = %id, "casting config changed, kicked viewer");
             }
-            info!(device = %id, "config changed, kicked viewer");
+            st.devices.disconnect_device(&id, false).await;
         }
-        st.devices.disconnect_device(&id, false).await;
+    } else {
+        info!(device = %id, "config changed (non-casting fields only), session kept");
     }
     match st.devices.upsert_device(&device).await {
         Ok(_) => Json(serde_json::json!({"ok": true, "id": device.id})).into_response(),

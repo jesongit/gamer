@@ -8,7 +8,7 @@ use crate::device::DeviceManager;
 use crate::matcher;
 use crate::scheduler::Scheduler;
 use crate::scripts::ScriptStore;
-use crate::store::Db;
+use crate::store::{Db, Device, ScreenMode};
 use axum::body::Body;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
@@ -16,7 +16,9 @@ use axum::Router;
 use base64::Engine;
 
 use super::common::{BODY_LIMIT_JSON, BODY_LIMIT_ZIP_IMPORT};
-use super::devices::{parse_ctl, validate_device_req, ControlReq, CreateDeviceReq};
+use super::devices::{
+    parse_ctl, session_affecting_change, validate_device_req, ControlReq, CreateDeviceReq,
+};
 use super::logs::clamp_log_limit;
 use super::runs::{validate_run_script_req, RunScriptReq};
 use super::tasks::{validate_task_req, SaveTaskReq};
@@ -1415,6 +1417,107 @@ mod sec_tests {
         invalid.fps = Some(60);
         invalid.name = "line\nfeed".into();
         assert!(validate_device_req(&invalid).is_err());
+    }
+
+    #[test]
+    fn session_affecting_change_only_detects_casting_fields() {
+        let base = Device {
+            id: "d1".into(),
+            name: "挂机一号".into(),
+            kind: "redroid".into(),
+            addr: "127.0.0.1:5555".into(),
+            screen_mode: ScreenMode::Virtual,
+            vd_res: Some("1920x1080".into()),
+            vd_dpi: Some(420),
+            pkg: Some("com.example.game".into()),
+            fps: Some(30),
+            created_at: "2026-01-01 00:00:00".into(),
+        };
+        let mutate = |f: &dyn Fn(&mut Device)| {
+            let mut d = base.clone();
+            f(&mut d);
+            d
+        };
+
+        // 非投屏字段（名称/包名）任意变化 → 不重建会话
+        assert!(!session_affecting_change(
+            &base,
+            &mutate(&|d| d.name = "改名".into()),
+            30
+        ));
+        assert!(!session_affecting_change(
+            &base,
+            &mutate(&|d| d.pkg = None),
+            30
+        ));
+        assert!(!session_affecting_change(
+            &base,
+            &mutate(&|d| d.pkg = Some("com.other.app".into())),
+            30
+        ));
+
+        // 写法差异但生效值相同（空串/None/默认值归一）→ 不重建会话
+        assert!(!session_affecting_change(
+            &base,
+            &mutate(&|d| d.vd_res = Some(" 1920X1080 ".into())),
+            30
+        ));
+        assert!(!session_affecting_change(
+            &base,
+            &mutate(&|d| d.vd_res = None),
+            30
+        ));
+        // DPI None 与 0 同为"自动"
+        let no_dpi = mutate(&|d| d.vd_dpi = None);
+        assert!(!session_affecting_change(
+            &no_dpi,
+            &mutate(&|d| d.vd_dpi = Some(0)),
+            30
+        ));
+        assert!(!session_affecting_change(
+            &base,
+            &mutate(&|d| d.fps = None),
+            30
+        ));
+
+        // 投屏字段实质变化 → 重建会话
+        assert!(session_affecting_change(
+            &base,
+            &mutate(&|d| d.screen_mode = ScreenMode::Mirror),
+            30
+        ));
+        assert!(session_affecting_change(
+            &base,
+            &mutate(&|d| d.vd_res = Some("1280x720".into())),
+            30
+        ));
+        assert!(session_affecting_change(
+            &base,
+            &mutate(&|d| d.vd_dpi = Some(320)),
+            30
+        ));
+        assert!(session_affecting_change(
+            &base,
+            &mutate(&|d| d.fps = Some(60)),
+            30
+        ));
+        assert!(session_affecting_change(
+            &base,
+            &mutate(&|d| d.addr = "192.168.1.9:5555".into()),
+            30
+        ));
+        assert!(session_affecting_change(
+            &base,
+            &mutate(&|d| d.kind = "emu".into()),
+            30
+        ));
+
+        // fps None 跟随全局配置：全局值不同则生效值不同 → 重建
+        assert!(session_affecting_change(
+            &base,
+            &mutate(&|d| d.fps = None),
+            60
+        ));
     }
 
     #[test]
