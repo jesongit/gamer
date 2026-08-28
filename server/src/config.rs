@@ -21,9 +21,9 @@ use serde::{Deserialize, Serialize};
 /// 鉴权配置（config.toml [auth] 段，阶段 2 SEC-002）
 ///
 /// 凭据来源优先级（在 api/auth.rs 解析，非本文件）：环境变量 GAMER_ADMIN_PASSWORD
-/// > 本段 password_hash（推荐 Argon2id PHC；兼容旧 `sha256$salt$hex`）> 兼容旧明文
-/// `password` 字段（默认 admin/admin123）。启动日志只打印启用的是哪一级来源，
-/// 绝不输出凭据内容。
+/// > 环境变量 GAMER_ADMIN_PASSWORD_FILE 指向的密钥文件 > 本段 password_hash
+/// （推荐 Argon2id PHC；兼容旧 `sha256$salt$hex`）> 开发模式内置默认值。启动日志
+/// 只打印启用的是哪一级来源，绝不输出凭据内容。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
@@ -36,7 +36,7 @@ pub struct AuthConfig {
     /// 登录限流滑动窗口宽度秒数
     pub login_window_secs: u64,
     /// 管理口令哈希（推荐 Argon2id PHC；兼容旧 `sha256$salt$hex`，长度/格式校验在
-    /// validate）。留空 = 不启用，回落环境变量或旧明文 password。
+    /// validate）。留空 = 不启用，回落环境变量/密钥文件或开发默认值。
     pub password_hash: String,
 }
 
@@ -138,8 +138,6 @@ pub struct Config {
     pub ffmpeg_path: String,
     /// scrcpy-server jar 路径
     pub scrcpy_server: PathBuf,
-    /// 管理员密码
-    pub password: String,
     /// 脚本引擎默认 interval（轮询类间隔，带单位时长串如 "500ms"；
     /// 可被脚本内 config: 段覆盖；裸数字非法——引擎 parse_duration 强制单位）
     #[serde(default = "default_interval")]
@@ -213,7 +211,6 @@ impl Default for Config {
             adb_path: "adb".into(),
             ffmpeg_path: "ffmpeg".into(),
             scrcpy_server: PathBuf::from("./assets/scrcpy-server.jar"),
-            password: "admin123".into(),
             interval: default_interval(),
             threshold: default_threshold(),
             log_level: default_log_level(),
@@ -398,10 +395,6 @@ impl Config {
             ));
         }
 
-        if self.password.trim().is_empty() {
-            errs.push("password 不能为空（管理登录凭据）".into());
-        }
-
         match duration_str_to_ms(&self.interval) {
             None => errs.push(format!(
                 "interval = \"{}\" 非法：须为带单位的时长串，支持 ms/s/m/min/h/d \
@@ -550,8 +543,7 @@ data_dir = "./data"
 adb_path = "adb"
 ffmpeg_path = "ffmpeg"
 scrcpy_server = "./assets/scrcpy-server.jar"
-password = "admin123"
-decode_frames = true
+                    decode_frames = true
 max_size = 0
 bitrate_mbps = 12
 fps = 15
@@ -667,13 +659,6 @@ fps = 15
                     ..Default::default()
                 },
                 "threshold",
-            ),
-            (
-                Config {
-                    password: "  ".into(), // 空白密码
-                    ..Default::default()
-                },
-                "password",
             ),
         ];
         for (cfg, marker) in cases {

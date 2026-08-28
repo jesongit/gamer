@@ -57,11 +57,13 @@ const MAX_TRACKED_LOGIN_KEYS: usize = 10_000;
 pub enum Credential {
     /// 环境变量 GAMER_ADMIN_PASSWORD（优先级最高）
     EnvPassword(String),
+    /// 环境变量 GAMER_ADMIN_PASSWORD_FILE 指向的密钥文件
+    SecretFile(String),
     /// config [auth].password_hash = sha256$salt$hex（仅兼容旧配置，成功登录后升级）
     Hash { salt: Vec<u8>, digest: Vec<u8> },
     /// Argon2id PHC 哈希（推荐配置格式）
     Argon2(String),
-    /// 兼容旧明文 password 字段（默认 admin/admin123）；成功登录后仅在内存中升级
+    /// 开发模式内置默认值；成功登录后仅在内存中升级到 Argon2id
     Plain(String),
     /// 凭据配置非法或生产模式没有强凭据时的 fail-closed 状态。
     /// 不携带原始配置内容，避免误把口令/哈希带入调试输出。
@@ -232,7 +234,8 @@ struct Inner {
 
 impl AuthState {
     /// 组装鉴权状态。credential 由 main 在配置加载后按
-    /// GAMER_ADMIN_PASSWORD > [auth].password_hash > 明文 password 链路解析传入。
+    /// GAMER_ADMIN_PASSWORD > GAMER_ADMIN_PASSWORD_FILE > [auth].password_hash >
+    /// 开发默认值链路解析传入。
     pub fn new(
         credential: Credential,
         cfg: AuthConfig,
@@ -255,8 +258,9 @@ impl AuthState {
     pub fn credential_source(&self) -> &'static str {
         match &*self.credential.read().unwrap() {
             Credential::EnvPassword(_) => "env:GAMER_ADMIN_PASSWORD",
+            Credential::SecretFile(_) => "env:GAMER_ADMIN_PASSWORD_FILE",
             Credential::Hash { .. } | Credential::Argon2(_) => "config:password_hash",
-            Credential::Plain(_) => "config:password(legacy plain)",
+            Credential::Plain(_) => "dev:built-in-default",
             Credential::Unavailable => "unavailable:invalid-or-missing-credential",
         }
     }
@@ -276,7 +280,7 @@ impl AuthState {
                     .verify_password(input.as_bytes(), &parsed)
                     .is_ok()
             }
-            Credential::EnvPassword(p) | Credential::Plain(p) => {
+            Credential::EnvPassword(p) | Credential::SecretFile(p) | Credential::Plain(p) => {
                 // 迁移兼容：不再作为新配置格式；成功登录后会替换为 Argon2id。
                 ct_eq(&sha256(input.as_bytes()), &sha256(p.as_bytes()))
             }
@@ -634,7 +638,8 @@ pub(crate) fn spawn_sweeper(auth: std::sync::Arc<AuthState>) {
 // ---------- 来源 IP 注入 ----------
 
 /// 管理口令来源链路：环境变量 GAMER_ADMIN_PASSWORD（最高）>
-/// config [auth].password_hash > 兼容旧明文 password 字段。
+/// 环境变量 GAMER_ADMIN_PASSWORD_FILE 指向的密钥文件 > config [auth].password_hash >
+/// 开发模式内置默认值。
 pub fn resolve_credential(cfg: &crate::config::Config) -> Credential {
     resolve_credential_for_profile(cfg, crate::config::Profile::from_env())
 }
@@ -650,6 +655,7 @@ pub fn resolve_credential_for_profile(
         cfg,
         profile,
         std::env::var("GAMER_ADMIN_PASSWORD").ok().as_deref(),
+        std::env::var("GAMER_ADMIN_PASSWORD_FILE").ok().as_deref(),
     )
 }
 
@@ -657,9 +663,19 @@ fn resolve_credential_with_password(
     cfg: &crate::config::Config,
     profile: crate::config::Profile,
     env_password: Option<&str>,
+    env_password_file: Option<&str>,
 ) -> Credential {
     if let Some(p) = env_password.map(str::trim).filter(|p| !p.is_empty()) {
         return Credential::EnvPassword(p.to_string());
+    }
+    if let Some(path) = env_password_file.map(str::trim).filter(|p| !p.is_empty()) {
+        match read_secret_file(path) {
+            Ok(secret) => return Credential::SecretFile(secret),
+            Err(e) => {
+                warn!("管理密码密钥文件读取失败，认证已 fail closed：{}", e);
+                return Credential::Unavailable;
+            }
+        }
     }
     if !cfg.auth.password_hash.trim().is_empty() {
         match parse_password_hash(cfg.auth.password_hash.trim()) {
@@ -676,10 +692,21 @@ fn resolve_credential_with_password(
         }
     }
     if profile == crate::config::Profile::Prod {
-        warn!("生产模式未配置 GAMER_ADMIN_PASSWORD 或 Argon2id password_hash，认证已 fail closed");
+        warn!(
+            "生产模式未配置 GAMER_ADMIN_PASSWORD、GAMER_ADMIN_PASSWORD_FILE 或 Argon2id password_hash，认证已 fail closed"
+        );
         return Credential::Unavailable;
     }
-    Credential::Plain(cfg.password.clone())
+    Credential::Plain("admin123".to_string())
+}
+
+fn read_secret_file(path: &str) -> Result<String, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+    let secret = raw.trim().to_string();
+    if secret.is_empty() {
+        return Err(format!("{}: 密钥文件内容为空", path));
+    }
+    Ok(secret)
 }
 
 /// 回环管理通道令牌：GAMER_ADMIN_TOKEN 优先；dev 缺省自动生成并以 WARN 提示
@@ -760,6 +787,16 @@ mod tests {
         let st2 = state(Credential::EnvPassword("s3cret!".into()), 60, 60, 10, 300);
         assert!(st2.verify_credentials("s3cret!"));
         assert!(!st2.verify_credentials("admin123"));
+
+        let st3 = state(
+            Credential::SecretFile("file-secret".into()),
+            60,
+            60,
+            10,
+            300,
+        );
+        assert!(st3.verify_credentials("file-secret"));
+        assert!(!st3.verify_credentials("admin123"));
     }
 
     #[test]
@@ -1116,7 +1153,8 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.auth.password_hash = "sha256$aabbccdd11223344$".to_string() + &"ab".repeat(32);
 
-        let legacy = resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None);
+        let legacy =
+            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None, None);
         assert!(matches!(legacy, Credential::Unavailable));
         assert!(
             !AuthState::new(legacy, Default::default(), true, None).verify_credentials("admin123")
@@ -1124,30 +1162,103 @@ mod tests {
 
         cfg.auth.password_hash = "not-a-password-hash".into();
         assert!(matches!(
-            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None),
+            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None, None),
             Credential::Unavailable
         ));
 
         cfg.auth.password_hash.clear();
         assert!(matches!(
-            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None),
+            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None, None),
             Credential::Unavailable
         ));
     }
 
     #[test]
-    fn environment_password_has_priority_over_config_hash() {
+    fn environment_password_has_priority_over_secret_file_and_config_hash() {
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-auth-secret-{}-{}",
+            std::process::id(),
+            random_hex_id(8)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret_path = dir.join("admin.secret");
+        std::fs::write(&secret_path, "file-secret\n").unwrap();
+
         let mut cfg = crate::config::Config::default();
         cfg.auth.password_hash = hash_password("config-secret").unwrap();
         let credential = resolve_credential_with_password(
             &cfg,
             crate::config::Profile::Prod,
             Some("env-secret"),
+            Some(secret_path.to_str().unwrap()),
         );
         assert!(matches!(credential, Credential::EnvPassword(ref value) if value == "env-secret"));
         let st = AuthState::new(credential, Default::default(), true, None);
         assert!(st.verify_credentials("env-secret"));
         assert!(!st.verify_credentials("config-secret"));
+
+        let credential2 = resolve_credential_with_password(
+            &cfg,
+            crate::config::Profile::Prod,
+            None,
+            Some(secret_path.to_str().unwrap()),
+        );
+        assert!(matches!(credential2, Credential::SecretFile(ref value) if value == "file-secret"));
+        let st2 = AuthState::new(credential2, Default::default(), true, None);
+        assert!(st2.verify_credentials("file-secret"));
+        assert!(!st2.verify_credentials("config-secret"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secret_file_resolution_fails_fast_on_missing_or_empty_content() {
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-auth-secret-fail-{}-{}",
+            std::process::id(),
+            random_hex_id(8)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("missing.secret");
+        let empty = dir.join("empty.secret");
+        std::fs::write(&empty, "   \n").unwrap();
+
+        let cfg = crate::config::Config::default();
+        assert!(matches!(
+            resolve_credential_with_password(
+                &cfg,
+                crate::config::Profile::Prod,
+                None,
+                Some(missing.to_str().unwrap()),
+            ),
+            Credential::Unavailable
+        ));
+        assert!(matches!(
+            resolve_credential_with_password(
+                &cfg,
+                crate::config::Profile::Prod,
+                None,
+                Some(empty.to_str().unwrap()),
+            ),
+            Credential::Unavailable
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dev_default_does_not_leak_secret_values_to_logs_or_responses() {
+        let st = state(Credential::Plain("dev-secret".into()), 60, 60, 10, 300);
+        assert_eq!(st.credential_source(), "dev:built-in-default");
+
+        let resp = unauthorized_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("unauthorized response body should be readable");
+        let body_text = std::str::from_utf8(&body).unwrap();
+        assert_eq!(body_text, r#"{"error":"unauthorized"}"#);
+        assert!(!body_text.contains("dev-secret"));
+        assert!(!st.credential_source().contains("dev-secret"));
     }
 
     /// 测试专用决策入口：按参数拼装请求头后走与中间件相同的 admit 内核
