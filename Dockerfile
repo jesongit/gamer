@@ -69,4 +69,6 @@ EXPOSE 8443
 ENV GB_CONFIG=/app/config.toml
 # 数据目录不声明 VOLUME 匿名卷：种子分区随部署方式注入（compose 绑定挂载
 # ./server/data:/app/data），匿名卷会在镜像空目录之上遮蔽挂载内容
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl --fail --silent --show-error http://127.0.0.1:8443/health/ready || exit 1
 ENTRYPOINT ["gamer-server"]
