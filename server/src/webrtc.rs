@@ -17,6 +17,31 @@ use crate::device::scrcpy::{AudioFrame, ScrcpySession, VideoFrame};
 #[path = "webrtc_protocol.rs"]
 mod protocol;
 
+/// viewer 断开原因：用于统一 takeover / device disconnect / shutdown / peer closed
+/// 的 teardown 行为与日志口径。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewerDisconnectReason {
+    TakenOver,
+    DeviceDisconnected,
+    Shutdown,
+    PeerClosed,
+}
+
+impl ViewerDisconnectReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TakenOver => "taken_over",
+            Self::DeviceDisconnected => "device_disconnected",
+            Self::Shutdown => "shutdown",
+            Self::PeerClosed => "peer_closed",
+        }
+    }
+
+    fn notify_taken_over(self) -> bool {
+        matches!(self, Self::TakenOver)
+    }
+}
+
 /// 每设备活跃 viewer 注册表条目：
 /// - running/peer 用于"新连接踢旧连接"（停旧 pusher + 关旧 peer）
 /// - control_dc 供服务端反向给浏览器推消息（脚本 tap/swipe/匹配命中可视化事件）
@@ -37,6 +62,42 @@ pub struct ViewerHandle {
 
 /// device_id → 活跃 viewer（main.rs 创建，AppState / Scheduler / ws.rs 共享）
 pub type ViewerMap = Arc<std::sync::Mutex<std::collections::HashMap<String, ViewerHandle>>>;
+
+/// 从 viewer 注册表移除指定设备的活跃 viewer。
+pub fn take_viewer(viewers: &ViewerMap, device_id: &str) -> Option<ViewerHandle> {
+    viewers.lock().unwrap().remove(device_id)
+}
+
+/// 统一 viewer teardown：先标记 running=false，再按 reason 决定是否发送 taken_over，
+/// 最后关闭 peer，避免各条断开路径出现不同的收尾行为。
+pub async fn teardown_viewer(handle: ViewerHandle, reason: ViewerDisconnectReason) {
+    handle
+        .running
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    if reason.notify_taken_over() {
+        if let Some(tx) = handle.notify.lock().take() {
+            let _ = tx.send(serde_json::json!({"type": "taken_over"}).to_string());
+        }
+    }
+    if let Some(peer) = handle.peer.upgrade() {
+        let _ = peer.close().await;
+    }
+}
+
+/// 从注册表移除并 teardown viewer；返回是否确实清掉了一个活跃 viewer。
+pub async fn remove_and_teardown_viewer(
+    viewers: &ViewerMap,
+    device_id: &str,
+    reason: ViewerDisconnectReason,
+) -> bool {
+    match take_viewer(viewers, device_id) {
+        Some(handle) => {
+            teardown_viewer(handle, reason).await;
+            true
+        }
+        None => false,
+    }
+}
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -1677,5 +1738,55 @@ fn probe_encoder_blockiness(
             "ENCODER FRAME blockiness: frame_no={} key={} size={} ratio={:.2} {}x{}",
             frame_no, is_key, size, ratio, w, h
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn remove_and_teardown_viewer_clears_map_and_stops_running() {
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let handle = ViewerHandle {
+            running: running.clone(),
+            peer: std::sync::Weak::new(),
+            control_dc: Arc::new(Mutex::new(None)),
+            last_serve: Arc::new(std::sync::atomic::AtomicI64::new(123)),
+            notify: Arc::new(Mutex::new(Some(tx))),
+        };
+        let viewers: ViewerMap = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        viewers.lock().unwrap().insert("dev1".to_string(), handle);
+
+        assert!(
+            remove_and_teardown_viewer(
+                &viewers,
+                "dev1",
+                ViewerDisconnectReason::DeviceDisconnected
+            )
+            .await
+        );
+        assert!(viewers.lock().unwrap().is_empty());
+        assert!(!running.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn takeover_reason_emits_taken_over_notification() {
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let handle = ViewerHandle {
+            running: running.clone(),
+            peer: std::sync::Weak::new(),
+            control_dc: Arc::new(Mutex::new(None)),
+            last_serve: Arc::new(std::sync::atomic::AtomicI64::new(123)),
+            notify: Arc::new(Mutex::new(Some(tx))),
+        };
+
+        teardown_viewer(handle, ViewerDisconnectReason::TakenOver).await;
+        assert!(!running.load(std::sync::atomic::Ordering::SeqCst));
+        let msg = rx.try_recv().expect("taken_over notification");
+        assert!(msg.contains("\"taken_over\""));
     }
 }
