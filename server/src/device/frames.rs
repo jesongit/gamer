@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::{Mutex, RwLock};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
@@ -585,15 +585,25 @@ impl FrameCache {
         let mut err: Vec<u8> = Vec::new();
         // 写输入与读输出并发：若先写完再读，ffmpeg 输出管道满时会堵住解码（死锁）
         let write = async move {
-            let _ = stdin.write_all(&input).await;
+            stdin
+                .write_all(&input)
+                .await
+                .map_err(|e| anyhow::anyhow!("写入 ffmpeg stdin 失败: {}", e))?;
             drop(stdin); // 关闭 stdin → ffmpeg 读到 EOF
+            Ok::<_, anyhow::Error>(())
         };
         let read = async {
-            if let (Some(mut so), Some(mut se)) = (child.stdout.take(), child.stderr.take()) {
-                let _ = tokio::join!(so.read_to_end(&mut out), se.read_to_end(&mut err));
-            }
+            let (Some(so), Some(se)) = (child.stdout.take(), child.stderr.take()) else {
+                anyhow::bail!("ffmpeg 输出管道未创建");
+            };
+            let (child_out, child_err) = read_child_output(so, se).await?;
+            out = child_out;
+            err = child_err;
+            Ok::<_, anyhow::Error>(())
         };
-        tokio::join!(write, read);
+        let (write_result, read_result) = tokio::join!(write, read);
+        write_result?;
+        read_result?;
         let status = child
             .wait()
             .await
@@ -632,14 +642,35 @@ impl FrameCache {
     }
 }
 
+async fn read_child_output<Stdout, Stderr>(
+    mut stdout: Stdout,
+    mut stderr: Stderr,
+) -> anyhow::Result<(Vec<u8>, Vec<u8>)>
+where
+    Stdout: AsyncRead + Unpin,
+    Stderr: AsyncRead + Unpin,
+{
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let (stdout_result, stderr_result) =
+        tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
+    stdout_result.map_err(|e| anyhow::anyhow!("读取 ffmpeg stdout 失败: {}", e))?;
+    stderr_result.map_err(|e| anyhow::anyhow!("读取 ffmpeg stderr 失败: {}", e))?;
+    Ok((out, err))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{FrameCache, FrameKey, InFlight};
+    use super::{read_child_output, FrameCache, FrameKey, InFlight};
     use crate::device::scrcpy::VideoFrame;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
     use tokio::sync::Notify;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -653,6 +684,29 @@ mod tests {
             is_keyframe,
             annex_b: true,
         }
+    }
+
+    struct FailingReader;
+
+    impl AsyncRead for FailingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "test pipe failure",
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn child_output_read_errors_are_propagated() {
+        let error = read_child_output(FailingReader, tokio::io::empty())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("读取 ffmpeg stdout 失败"));
     }
 
     #[test]
