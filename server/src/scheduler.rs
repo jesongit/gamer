@@ -15,6 +15,7 @@ use std::str::FromStr;
 
 use tracing::{debug, error, info, warn};
 
+use crate::metrics::{Metrics, SchedulerEvent};
 use crate::run_manager::{
     FinishHook, RunManager, RunOutcome, RunSource, RunState, StartError, StartRequest,
 };
@@ -135,16 +136,31 @@ impl Scheduler {
             Ok(Some(s)) => s.content,
             Ok(None) => {
                 warn!(task = %task.name, "task now rejected: script not found");
+                record_scheduler_failure(&self.db.metrics());
                 return Err(RunNowError::ScriptMissing);
             }
             Err(e) => {
                 warn!(task = %task.name, err = %e, "task now rejected: read script failed");
+                record_scheduler_failure(&self.db.metrics());
                 return Err(RunNowError::Io(e.to_string()));
             }
         };
-        submit_run(&self.runs, &self.db, task, None, content)
+        let result = submit_run(&self.runs, &self.db, task, None, content)
             .await
-            .map_err(RunNowError::Start)
+            .map_err(RunNowError::Start);
+        match &result {
+            Ok(_) => {}
+            Err(RunNowError::Start(StartError::Conflict(_))) => {
+                record_scheduler_event(&self.db.metrics(), SchedulerEvent::Conflict);
+            }
+            Err(RunNowError::Start(StartError::ShuttingDown)) => {
+                record_scheduler_event(&self.db.metrics(), SchedulerEvent::Skipped);
+            }
+            Err(RunNowError::ScriptMissing | RunNowError::Io(_)) => {
+                record_scheduler_failure(&self.db.metrics());
+            }
+        }
+        result
     }
 }
 
@@ -166,6 +182,10 @@ async fn dispatch(
     trigger: Option<DateTime<Local>>,
 ) {
     let scheduled_at = trigger.map(|t| t.timestamp());
+    let metrics = db.metrics();
+    if let Some(scheduled_at) = scheduled_at {
+        record_scheduler_trigger_latency(&metrics, scheduled_at);
+    }
     if let Some(scheduled_at) = scheduled_at {
         match db.claim_scheduled_run(&task.id, scheduled_at) {
             Ok(true) => {}
@@ -175,6 +195,7 @@ async fn dispatch(
                     scheduled_at,
                     "scheduled trigger already claimed"
                 );
+                record_scheduler_event(&metrics, SchedulerEvent::Skipped);
                 return;
             }
             Err(e) => {
@@ -184,6 +205,7 @@ async fn dispatch(
                     err = %e,
                     "scheduled trigger claim failed"
                 );
+                record_scheduler_event(&metrics, SchedulerEvent::Failed);
                 return;
             }
         }
@@ -196,19 +218,23 @@ async fn dispatch(
                 script = %task.script_id,
                 "scheduled skip: script not found"
             );
+            record_scheduler_event(&metrics, SchedulerEvent::Failed);
             finish_scheduled_run(db, task, scheduled_at, "failed", None, Some("脚本不存在"));
             mark_task_result(db, task, "失败", Some("任务执行失败: 脚本不存在"));
             return;
         }
         Err(e) => {
             warn!(task = %task.name, err = %e, "scheduled skip: read script failed");
+            record_scheduler_event(&metrics, SchedulerEvent::Failed);
             finish_scheduled_run(db, task, scheduled_at, "failed", None, Some("读取脚本失败"));
             mark_task_result(db, task, "失败", Some("任务执行失败: 读脚本失败"));
             return;
         }
     };
     match submit_run(runs, db, task, trigger, content).await {
-        Ok(run_id) => debug!(task = %task.name, %run_id, "scheduled run submitted"),
+        Ok(run_id) => {
+            debug!(task = %task.name, %run_id, "scheduled run submitted");
+        }
         Err(StartError::Conflict(busy)) => {
             // 设备正忙（大概率手动运行中）：第一版策略不排队——记 skipped、更新任务
             // 结果，不向对方会话注入任何控制
@@ -219,6 +245,7 @@ async fn dispatch(
                 skipped = "conflict",
                 "scheduled trigger skipped: device busy"
             );
+            record_scheduler_event(&metrics, SchedulerEvent::Conflict);
             finish_scheduled_run(db, task, scheduled_at, "skipped", None, Some("设备忙"));
             mark_task_result(
                 db,
@@ -229,6 +256,7 @@ async fn dispatch(
         }
         Err(StartError::ShuttingDown) => {
             warn!(task = %task.name, "scheduled trigger dropped: server draining");
+            record_scheduler_event(&metrics, SchedulerEvent::Skipped);
             finish_scheduled_run(
                 db,
                 task,
@@ -445,6 +473,23 @@ async fn watch_scheduled_completion(
     }
 }
 
+fn record_scheduler_trigger(metrics: &Metrics, trigger_started: std::time::Instant) {
+    metrics.record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
+}
+
+fn record_scheduler_trigger_latency(metrics: &Metrics, scheduled_at: i64) {
+    let now = Utc::now().timestamp();
+    metrics.record_scheduler_trigger(now.saturating_sub(scheduled_at) as u64);
+}
+
+fn record_scheduler_event(metrics: &Metrics, event: SchedulerEvent) {
+    metrics.record_scheduler_event(event);
+}
+
+fn record_scheduler_failure(metrics: &Metrics) {
+    metrics.record_scheduler_event(SchedulerEvent::Failed);
+}
+
 fn persisted_scheduled_state(state: RunState) -> Option<&'static str> {
     match state {
         RunState::Success => Some("success"),
@@ -473,6 +518,30 @@ mod tests {
         let value = now_utc_string();
         assert!(value.ends_with('Z'));
         assert!(chrono::DateTime::parse_from_rfc3339(&value).is_ok());
+    }
+
+    #[test]
+    fn scheduler_metrics_helpers_update_low_cardinality_counters() {
+        let trigger_metrics = Metrics::default();
+        record_scheduler_trigger(&trigger_metrics, std::time::Instant::now());
+        let trigger_snapshot = trigger_metrics.snapshot();
+        assert_eq!(trigger_snapshot.scheduler_triggers_total, 1);
+
+        let latency_metrics = Metrics::default();
+        let scheduled_at = Utc::now().timestamp().saturating_sub(12);
+        record_scheduler_trigger_latency(&latency_metrics, scheduled_at);
+        let latency_snapshot = latency_metrics.snapshot();
+        assert!(latency_snapshot.scheduler_triggers_total >= 1);
+        assert!(latency_snapshot.scheduler_trigger_latency_ms_total >= 12);
+
+        let event_metrics = Metrics::default();
+        record_scheduler_event(&event_metrics, SchedulerEvent::Conflict);
+        record_scheduler_event(&event_metrics, SchedulerEvent::Skipped);
+        record_scheduler_failure(&event_metrics);
+        let event_snapshot = event_metrics.snapshot();
+        assert_eq!(event_snapshot.scheduler_conflicts_total, 1);
+        assert_eq!(event_snapshot.scheduler_skipped_total, 1);
+        assert_eq!(event_snapshot.scheduler_failures_total, 1);
     }
 
     #[test]
