@@ -4,6 +4,7 @@
 //! 1080p 全图 + 小模板典型耗时 100~400ms；支持搜索区域裁剪进一步加速。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 #[cfg(test)]
 use std::time::Instant;
@@ -53,22 +54,88 @@ struct PreparedTemplate {
 struct TemplateCacheEntry {
     source: Arc<DynamicImage>,
     prepared: HashMap<(u32, u32), Arc<PreparedTemplate>>,
+    bytes_len: usize,
+    last_used: u64,
 }
 
 #[derive(Default)]
 struct TemplateCache {
     entries: HashMap<[u8; 32], TemplateCacheEntry>,
+    total_bytes: usize,
+    clock: u64,
+    path_entries: HashMap<TemplatePathKey, TemplatePathEntry>,
+    path_resolve_entries: HashMap<TemplateResolveKey, TemplateResolveEntry>,
 }
 
 const TEMPLATE_CACHE_CAPACITY: usize = 128;
+const TEMPLATE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 static TEMPLATE_CACHE: OnceLock<Mutex<TemplateCache>> = OnceLock::new();
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct TemplatePathKey {
+    path: PathBuf,
+    mtime_ns: u128,
+    size: u64,
+    content_hash: [u8; 32],
+}
+
+struct TemplatePathEntry {
+    source: Arc<DynamicImage>,
+    bytes_len: usize,
+    prepared: HashMap<(u32, u32), Arc<PreparedTemplate>>,
+    last_used: u64,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct TemplateResolveKey {
+    dir: PathBuf,
+    dir_mtime_ns: u128,
+    dir_size: u64,
+    template: String,
+}
+
+struct TemplateResolveEntry {
+    resolved: Arc<PathBuf>,
+    last_used: u64,
+}
 
 fn template_cache() -> &'static Mutex<TemplateCache> {
     TEMPLATE_CACHE.get_or_init(|| Mutex::new(TemplateCache::default()))
 }
 
+fn cache_tick(cache: &mut TemplateCache) -> u64 {
+    cache.clock = cache.clock.wrapping_add(1).max(1);
+    cache.clock
+}
+
 fn template_key(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+fn metadata_key(path: &Path, meta: &std::fs::Metadata, content_hash: [u8; 32]) -> TemplatePathKey {
+    TemplatePathKey {
+        path: normalize_path(path),
+        mtime_ns: file_mtime_ns(meta),
+        size: meta.len(),
+        content_hash,
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn file_mtime_ns(meta: &std::fs::Metadata) -> u128 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
+fn dir_signature(dir: &Path) -> anyhow::Result<(PathBuf, u128, u64)> {
+    let meta = std::fs::metadata(dir)?;
+    Ok((normalize_path(dir), file_mtime_ns(&meta), meta.len()))
 }
 
 /// 获取 PNG 解码后的源灰度图。锁只覆盖一次性的模板解码，命中时仅复制 Arc。
@@ -77,18 +144,26 @@ fn cached_template_source(bytes: &[u8]) -> anyhow::Result<([u8; 32], Arc<Dynamic
     let mut cache = template_cache().lock();
     if !cache.entries.contains_key(&key) {
         let source = decode_image_limited(bytes, TEMPLATE_MAX_INPUT_BYTES, "模板")?;
+        let bytes_len = bytes.len();
         if cache.entries.len() >= TEMPLATE_CACHE_CAPACITY {
             if let Some(evicted) = cache.entries.keys().next().copied() {
-                cache.entries.remove(&evicted);
+                if let Some(old) = cache.entries.remove(&evicted) {
+                    cache.total_bytes = cache.total_bytes.saturating_sub(old.bytes_len);
+                }
             }
         }
+        let used = cache_tick(&mut cache);
         cache.entries.insert(
             key,
             TemplateCacheEntry {
                 source: Arc::new(source),
                 prepared: HashMap::new(),
+                bytes_len,
+                last_used: used,
             },
         );
+        cache.total_bytes = cache.total_bytes.saturating_add(bytes_len);
+        evict_template_cache(&mut cache);
     }
     let source = cache
         .entries
@@ -96,6 +171,10 @@ fn cached_template_source(bytes: &[u8]) -> anyhow::Result<([u8; 32], Arc<Dynamic
         .expect("template cache entry inserted")
         .source
         .clone();
+    let used = cache_tick(&mut cache);
+    if let Some(entry) = cache.entries.get_mut(&key) {
+        entry.last_used = used;
+    }
     Ok((key, source))
 }
 
@@ -125,31 +204,175 @@ fn cached_prepared_template(
     dimensions: (u32, u32),
 ) -> anyhow::Result<Arc<PreparedTemplate>> {
     let mut cache = template_cache().lock();
-    let entry = cache
-        .entries
-        .entry(key)
-        .or_insert_with(|| TemplateCacheEntry {
-            source: source.clone(),
-            prepared: HashMap::new(),
-        });
-    if let Some(prepared) = entry.prepared.get(&dimensions) {
-        return Ok(prepared.clone());
-    }
-    let image = if entry.source.dimensions() == dimensions {
-        to_gray(entry.source.as_ref())
-    } else {
+    let hit = cache.entries.get(&key).and_then(|entry| {
         entry
-            .source
-            .resize(
-                dimensions.0,
-                dimensions.1,
-                image::imageops::FilterType::Triangle,
-            )
-            .to_luma8()
+            .prepared
+            .get(&dimensions)
+            .cloned()
+            .map(|prepared| (prepared, entry.last_used))
+    });
+    if let Some((prepared, _)) = hit {
+        let used = cache_tick(&mut cache);
+        if let Some(entry) = cache.entries.get_mut(&key) {
+            entry.last_used = used;
+        }
+        return Ok(prepared);
+    }
+    let prepared = {
+        let entry = cache
+            .entries
+            .entry(key)
+            .or_insert_with(|| TemplateCacheEntry {
+                source: source.clone(),
+                prepared: HashMap::new(),
+                bytes_len: 0,
+                last_used: 0,
+            });
+        let image = if entry.source.dimensions() == dimensions {
+            to_gray(entry.source.as_ref())
+        } else {
+            entry
+                .source
+                .resize(
+                    dimensions.0,
+                    dimensions.1,
+                    image::imageops::FilterType::Triangle,
+                )
+                .to_luma8()
+        };
+        let prepared = Arc::new(build_prepared_template(image)?);
+        entry.prepared.insert(dimensions, prepared.clone());
+        prepared
     };
-    let prepared = Arc::new(build_prepared_template(image)?);
-    entry.prepared.insert(dimensions, prepared.clone());
+    let used = cache_tick(&mut cache);
+    if let Some(entry) = cache.entries.get_mut(&key) {
+        entry.last_used = used;
+    }
     Ok(prepared)
+}
+
+fn evict_template_cache(cache: &mut TemplateCache) {
+    while cache.total_bytes > TEMPLATE_CACHE_MAX_BYTES {
+        let Some((old_key, _)) = cache
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(k, v)| (*k, v.last_used))
+        else {
+            break;
+        };
+        if let Some(removed) = cache.entries.remove(&old_key) {
+            cache.total_bytes = cache.total_bytes.saturating_sub(removed.bytes_len);
+        } else {
+            break;
+        }
+    }
+}
+
+fn cached_template_source_from_path_key(
+    path: &Path,
+) -> anyhow::Result<([u8; 32], Arc<DynamicImage>, TemplatePathKey)> {
+    let bytes = std::fs::read(path)?;
+    let meta = std::fs::metadata(path)?;
+    let key = metadata_key(path, &meta, template_key(&bytes));
+    let mut cache = template_cache().lock();
+    if let Some(source) = cache
+        .path_entries
+        .get(&key)
+        .map(|entry| entry.source.clone())
+    {
+        let used = cache_tick(&mut cache);
+        if let Some(entry) = cache.path_entries.get_mut(&key) {
+            entry.last_used = used;
+        }
+        return Ok((key.content_hash, source, key));
+    }
+    let source = decode_image_limited(&bytes, TEMPLATE_MAX_INPUT_BYTES, "模板")?;
+    let bytes_len = bytes.len();
+    let used = cache_tick(&mut cache);
+    cache.path_entries.insert(
+        key.clone(),
+        TemplatePathEntry {
+            source: Arc::new(source),
+            bytes_len,
+            prepared: HashMap::new(),
+            last_used: used,
+        },
+    );
+    cache.total_bytes = cache.total_bytes.saturating_add(bytes_len);
+    evict_template_cache(&mut cache);
+    let source = cache
+        .path_entries
+        .get(&key)
+        .expect("path cache inserted")
+        .source
+        .clone();
+    Ok((key.content_hash, source, key))
+}
+
+fn cached_resolved_template_file(dir: &Path, template: &str) -> anyhow::Result<PathBuf> {
+    let (dir, dir_mtime_ns, dir_size) = dir_signature(dir)?;
+    let dir = dir;
+    let key = TemplateResolveKey {
+        dir: dir.clone(),
+        dir_mtime_ns,
+        dir_size,
+        template: template.to_string(),
+    };
+    let mut cache = template_cache().lock();
+    if let Some(resolved) = cache
+        .path_resolve_entries
+        .get(&key)
+        .map(|entry| (*entry.resolved).clone())
+    {
+        let used = cache_tick(&mut cache);
+        if let Some(entry) = cache.path_resolve_entries.get_mut(&key) {
+            entry.last_used = used;
+        }
+        return Ok(resolved);
+    }
+    let resolved = resolve_template_file_impl(dir.as_path(), template)?;
+    let used = cache_tick(&mut cache);
+    cache.path_resolve_entries.insert(
+        key,
+        TemplateResolveEntry {
+            resolved: Arc::new(resolved.clone()),
+            last_used: used,
+        },
+    );
+    Ok(resolved)
+}
+
+fn resolve_template_file_impl(tpl_dir: &Path, template: &str) -> anyhow::Result<PathBuf> {
+    let exact = tpl_dir.join(template);
+    if exact.is_file() {
+        return Ok(exact);
+    }
+    let Some((base, ext)) = template.rsplit_once('.') else {
+        anyhow::bail!("模板 {} 不存在 (path={})", template, exact.display());
+    };
+    let mut cands = Vec::new();
+    for entry in std::fs::read_dir(tpl_dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some((stem, e)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if e.eq_ignore_ascii_case(ext) && stem.starts_with(base) {
+            cands.push(p);
+        }
+    }
+    match cands.len() {
+        0 => anyhow::bail!("模板 {} 不存在 (path={})", template, exact.display()),
+        1 => Ok(cands.remove(0)),
+        _ => anyhow::bail!("模板 {} 短名匹配到多个候选：{}", template, exact.display()),
+    }
 }
 
 pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>> {
