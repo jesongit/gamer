@@ -973,18 +973,20 @@ mod tests {
 
     #[test]
     fn session_lifecycle_absolute_and_sliding() {
+        // abs 用 5s 窗口而非 1s：并行测试负载下 login→validate 间隔可能超 1s，
+        // 首次 validate 会误判绝对过期（偶发红）；5s 裕量足够吸收调度抖动
         let st = state(
             Credential::Plain("pw".into()),
             /*idle*/ 1_000_000,
-            /*abs*/ 1,
+            /*abs*/ 5,
             10,
             300,
         );
         let (sid, user) = st.attempt_login("admin", "pw", "ipA").unwrap();
         assert_eq!(user, "admin");
         assert_eq!(st.validate(&sid).as_deref(), Some("admin"));
-        // 绝对 TTL 到期：sleep 让 abs(1s) 过期
-        sleep_ms(1100);
+        // 绝对 TTL 到期：sleep 让 abs(5s) 过期
+        sleep_ms(5_200);
         assert_eq!(st.validate(&sid), None, "绝对有效期到期必须强制重登");
         assert_eq!(st.sessions_len(), 0);
     }

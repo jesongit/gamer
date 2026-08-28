@@ -1038,9 +1038,10 @@ mod tests {
                 .insert_raw_log_for_test(&format!("2000-01-01 00:00:{second:02}.000"), "old")
                 .unwrap();
         }
-        store
-            .insert_raw_log_for_test("2026-08-28 00:00:00.000", "new")
-            .unwrap();
+        // "新日志"时间戳必须动态取当前时间：硬编码日期会随真实时间推移老化出
+        // retain_days 窗口（2026-08-28 硬编码在 08-29 起必挂——被 prune 正确删除）
+        let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        store.insert_raw_log_for_test(&now, "new").unwrap();
 
         let deleted = store.prune_logs(1).unwrap();
         assert_eq!(deleted, (LOG_PRUNE_BATCH_SIZE as u64) + 3);
