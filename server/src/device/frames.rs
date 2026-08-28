@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::{Mutex, RwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
 use super::scrcpy::VideoFrame;
@@ -46,6 +47,8 @@ const GOP_MAX_BYTES: usize = 64 * 1024 * 1024;
 const DECODE_TIMEOUT: Duration = Duration::from_secs(3);
 /// 等待首个可解码帧（GOP 非空）的最长时间：会话刚建立时首个 IDR 通常 ≤1s 到达
 const WAIT_FIRST_GOP: Duration = Duration::from_millis(1500);
+/// 单设备截图解码并发上限：保留同帧合并，但不同帧请求在设备内串行化。
+const MAX_CONCURRENT_DECODES_PER_CACHE: usize = 1;
 
 type SharedResult<T, E> = Shared<BoxFuture<'static, Result<Arc<T>, Arc<E>>>>;
 
@@ -255,6 +258,8 @@ pub struct FrameCache {
     state: Mutex<FrameState>,
     /// 同一个精确帧快照只允许一个真实 ffmpeg 解码，结果/错误由所有 waiter 共享。
     decode_in_flight: InFlight<FrameKey, DecodedFrame, String>,
+    /// 单设备有界闸门：避免同一设备上出现多个 ffmpeg / PNG 解码同时占用 Tokio 资源。
+    decode_budget: Arc<Semaphore>,
     /// 帧尺寸（最近一次成功解码的 PNG 尺寸，供设备信息展示）
     width: RwLock<u32>,
     height: RwLock<u32>,
@@ -266,6 +271,7 @@ impl FrameCache {
             ffmpeg_path: Mutex::new(ffmpeg_path.to_string()),
             state: Mutex::new(FrameState::new()),
             decode_in_flight: InFlight::new(),
+            decode_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_DECODES_PER_CACHE)),
             width: RwLock::new(0),
             height: RwLock::new(0),
         })
@@ -378,6 +384,7 @@ impl FrameCache {
     /// Ok(None) = 等待超时仍无关键帧（会话刚建立，稍后再试）。
     pub async fn decode_latest_png(&self) -> anyhow::Result<Option<Vec<u8>>> {
         let ffmpeg = self.ffmpeg_path.lock().clone();
+        let decode_budget = Arc::clone(&self.decode_budget);
         let mut decode_error = None;
         let mut retried_after_error = false;
         let mut refreshed_after_stale = false;
@@ -394,9 +401,16 @@ impl FrameCache {
             let key = snapshot.key;
             let snapshot_latest_frame_at = snapshot.latest_frame_at;
             let ffmpeg_for_decode = ffmpeg.clone();
+            let decode_budget = Arc::clone(&decode_budget);
             let decoded = self
                 .request_snapshot(snapshot, move |snapshot| async move {
-                    Self::decode_once(&ffmpeg_for_decode, &snapshot.config, &snapshot.gop).await
+                    Self::decode_once_with_budget(
+                        Arc::clone(&decode_budget),
+                        &ffmpeg_for_decode,
+                        &snapshot.config,
+                        &snapshot.gop,
+                    )
+                    .await
                 })
                 .await;
 
@@ -460,6 +474,21 @@ impl FrameCache {
                     .map_err(|error| error.to_string())
             })
             .await
+    }
+
+    async fn decode_once_with_budget(
+        budget: Arc<Semaphore>,
+        ffmpeg: &str,
+        config: &[u8],
+        gop: &[VideoFrame],
+    ) -> anyhow::Result<Vec<u8>> {
+        let permit = budget
+            .acquire_owned()
+            .await
+            .map_err(|_| anyhow::anyhow!("截图解码闸门已关闭"))?;
+        let decoded = Self::decode_once(ffmpeg, config, gop).await;
+        drop(permit);
+        decoded
     }
 
     /// 等待 GOP 非空（首个 IDR 未到或解码失败后刚清空重建），超时返回 None
@@ -890,6 +919,108 @@ mod tests {
 
         release.notify_one();
         assert_eq!(first.await.unwrap().unwrap().png, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_bounds_per_cache_decode_concurrency() {
+        let cache = FrameCache::start("ffmpeg");
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+        let first_snapshot = cache.snapshot().expect("first snapshot");
+        cache.feed(&video_frame(3, false, false));
+        let second_snapshot = cache.snapshot().expect("second snapshot");
+        assert_ne!(first_snapshot.key, second_snapshot.key);
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        let first_cache = Arc::clone(&cache);
+        let first_started = Arc::clone(&started);
+        let first_release = Arc::clone(&release);
+        let first_active = Arc::clone(&active);
+        let first_peak = Arc::clone(&peak);
+        let first = tokio::spawn(async move {
+            first_cache
+                .request_snapshot(first_snapshot, move |_| async move {
+                    let now = first_active.fetch_add(1, Ordering::SeqCst) + 1;
+                    first_peak.fetch_max(now, Ordering::SeqCst);
+                    first_started.notify_one();
+                    first_release.notified().await;
+                    first_active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(vec![1])
+                })
+                .await
+        });
+
+        started.notified().await;
+
+        let second_cache = Arc::clone(&cache);
+        let second_active = Arc::clone(&active);
+        let second_peak = Arc::clone(&peak);
+        let second = tokio::spawn(async move {
+            second_cache
+                .request_snapshot(second_snapshot, move |_| async move {
+                    let now = second_active.fetch_add(1, Ordering::SeqCst) + 1;
+                    second_peak.fetch_max(now, Ordering::SeqCst);
+                    second_active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(vec![2])
+                })
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        release.notify_one();
+
+        assert_eq!(first.await.unwrap().unwrap().png, vec![1]);
+        assert_eq!(second.await.unwrap().unwrap().png, vec![2]);
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn request_snapshot_releases_budget_after_failure() {
+        let cache = FrameCache::start("ffmpeg");
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+        let snapshot = cache.snapshot().expect("snapshot");
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let executed = Arc::new(AtomicUsize::new(0));
+
+        let retry_snapshot = snapshot.clone();
+        let retry_executed = Arc::clone(&executed);
+        let first_cache = Arc::clone(&cache);
+        let first_started = Arc::clone(&started);
+        let first_release = Arc::clone(&release);
+        let first_executed = Arc::clone(&executed);
+        let first = tokio::spawn(async move {
+            first_cache
+                .request_snapshot(snapshot.clone(), move |_| async move {
+                    first_executed.fetch_add(1, Ordering::SeqCst);
+                    first_started.notify_one();
+                    first_release.notified().await;
+                    Err(anyhow::anyhow!("boom"))
+                })
+                .await
+        });
+
+        started.notified().await;
+        release.notify_one();
+        assert_eq!(first.await.unwrap().unwrap_err().as_str(), "boom");
+        tokio::task::yield_now().await;
+
+        let retry = cache
+            .request_snapshot(retry_snapshot, move |_| async move {
+                retry_executed.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![9])
+            })
+            .await
+            .expect("retry should recover");
+
+        assert_eq!(retry.png, vec![9]);
+        assert_eq!(executed.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
