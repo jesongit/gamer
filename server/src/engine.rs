@@ -87,6 +87,7 @@ use tracing::warn;
 
 use crate::device::DeviceManager;
 use crate::matcher;
+use crate::scripts::ScriptFile;
 use crate::scripts::ScriptStore;
 use crate::webrtc::ViewerMap;
 
@@ -120,6 +121,17 @@ pub struct FuncDef {
     pub cond: Vec<String>,
     /// 函数体步骤（未经 $N 替换，调用时按实参替换）
     pub body: Vec<Value>,
+}
+
+/// 脚本寻址窄接口：只负责按调用名找脚本文件，不涉及 func 解析。
+trait ScriptResolver {
+    fn resolve_call(&self, caller_pkg: &str, name: &str) -> anyhow::Result<Option<ScriptFile>>;
+}
+
+impl ScriptResolver for ScriptStore {
+    fn resolve_call(&self, caller_pkg: &str, name: &str) -> anyhow::Result<Option<ScriptFile>> {
+        ScriptStore::resolve_call(self, caller_pkg, name)
+    }
 }
 
 /// 脚本运行上下文
@@ -192,6 +204,32 @@ impl Runner {
             viewers,
             scripts,
         }
+    }
+
+    /// 从脚本内容提取并解析 func 段。这里不触碰文件系统，
+    /// 只负责 YAML 语义：normalize_top → parse_funcs。
+    fn parse_script_funcs(content: &str) -> anyhow::Result<HashMap<String, FuncDef>> {
+        let doc: Value = serde_yaml::from_str(content)?;
+        let doc = Self::normalize_top(doc)?;
+        Self::parse_funcs(doc.get("func").filter(|v| !v.is_null()).cloned())
+    }
+
+    /// 先按调用名找到脚本，再从内容里解析 func 段。
+    fn resolve_cross_func_def<R: ScriptResolver>(
+        resolver: &R,
+        caller_pkg: &str,
+        script_name: &str,
+        func_name: &str,
+    ) -> anyhow::Result<(ScriptFile, HashMap<String, FuncDef>, FuncDef)> {
+        let s = resolver
+            .resolve_call(caller_pkg, script_name)?
+            .ok_or_else(|| anyhow::anyhow!("子脚本不存在: {}", script_name))?;
+        let sub_funcs = Self::parse_script_funcs(&s.content)?;
+        let def = sub_funcs
+            .get(func_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("子脚本 {} 未定义函数 {}", s.name, func_name))?;
+        Ok((s, sub_funcs, def))
     }
 
     /// 推送脚本可视化事件给该设备当前的 viewer（无 viewer / 通道未开 / 发送失败均静默忽略）
@@ -1339,21 +1377,9 @@ impl Runner {
         }
         // 子脚本按名解析：优先调用者同分区，其次跨分区（缺扩展名自动补全）
         let caller_pkg = ctx.script_id.split('/').next().unwrap_or_default();
-        let s = self
-            .scripts
-            .resolve_call(caller_pkg, script_name)?
-            .ok_or_else(|| anyhow::anyhow!("子脚本不存在: {}", script_name))?;
-        // 解析被引用脚本的 func 段（函数体 $N 不参与子脚本级替换，由调用点实参替换）；
-        // 先做顶层归一化（省略 func: 的纯函数库简写同样可被跨文件调用）
-        let doc: Value = serde_yaml::from_str(&s.content)
-            .map_err(|e| anyhow::anyhow!("子脚本 {} 解析失败: {}", script_name, e))?;
-        let doc = Self::normalize_top(doc)
-            .map_err(|e| anyhow::anyhow!("子脚本 {}: {}", script_name, e))?;
-        let sub_funcs = Self::parse_funcs(doc.get("func").filter(|v| !v.is_null()).cloned())?;
-        let def = sub_funcs
-            .get(func_name)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("子脚本 {} 未定义函数 {}", s.name, func_name))?;
+        let (s, sub_funcs, def) =
+            Self::resolve_cross_func_def(self.scripts.as_ref(), caller_pkg, script_name, func_name)
+                .map_err(|e| anyhow::anyhow!("子脚本 {}: {}", script_name, e))?;
         let args = Self::func_args(step, qual)?;
         // 函数体执行期间被引用脚本的函数可见（体内裸函数名按该脚本解析），
         // 调用者函数兜底；执行结束恢复（避免子脚本函数泄漏到后续步骤）
@@ -3199,6 +3225,42 @@ mod tests {
         .unwrap_err()
         .to_string()
         .contains("重复定义"));
+    }
+
+    struct FakeResolver {
+        file: Option<ScriptFile>,
+    }
+
+    impl ScriptResolver for FakeResolver {
+        fn resolve_call(
+            &self,
+            _caller_pkg: &str,
+            _name: &str,
+        ) -> anyhow::Result<Option<ScriptFile>> {
+            Ok(self.file.clone())
+        }
+    }
+
+    /// resolver 只负责寻址，func 解析只看脚本内容；fake resolver 不依赖磁盘。
+    #[test]
+    fn cross_file_func_resolution_is_split_from_path_lookup() {
+        let fake = FakeResolver {
+            file: Some(ScriptFile {
+                id: "pkg/sub.yaml".into(),
+                package: "pkg".into(),
+                name: "sub.yaml".into(),
+                content: "func:\n  - ping:\n    - log: pong\n".into(),
+                updated_at: "now".into(),
+            }),
+        };
+        let (script, funcs, def) = Runner::resolve_cross_func_def(&fake, "pkg", "sub", "ping")
+            .expect("fake resolver should work");
+        assert_eq!(script.name, "sub.yaml");
+        assert!(funcs.contains_key("ping"));
+        assert_eq!(def.body[0].get("log").and_then(Value::as_str), Some("pong"));
+
+        let missing = FakeResolver { file: None };
+        assert!(Runner::resolve_cross_func_def(&missing, "pkg", "sub", "ping").is_err());
     }
 
     /// run_func 直接运行函数体：不跑顶层 steps、start_step 定位函数体内、
