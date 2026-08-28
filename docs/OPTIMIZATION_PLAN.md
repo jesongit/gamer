@@ -1,6 +1,6 @@
 # GameBot 优化实施计划
 
-> 状态：阶段0/1/3已完成；阶段2自动化路由安全验收已收口但仍有真实设备和内存稳定性项目；阶段4～6部分完成；阶段7未完成，且本轮 Rust 门禁已有主线证据但仍缺生产迁移、正式跨平台性能和真实设备证据（2026-08-28）
+> 状态：阶段0/1/3已完成；阶段2自动化路由安全验收已收口但仍有真实 Android/scrcpy/WebRTC E2E 与持续内存稳定性项目；阶段4～6部分完成；阶段7未完成，且本轮 Rust 门禁已有主线证据但仍缺生产迁移回滚、正式跨平台性能和真实设备证据（2026-08-28）
 > 编制日期：2026-08-27  
 > 适用范围：Rust 服务端、Vue 前端、部署配置、测试与运维文档  
 > 本文只定义后续实施顺序和验收条件，不代表相关改动已经完成。
@@ -45,7 +45,7 @@
 - 登录成功后前端只写本地标记；除登录外的 API 和 `/ws/device/:id` 没有服务端鉴权，且启用了 permissive CORS。
 - 手动运行注册表按脚本 ID 互斥，调度器使用另一套运行注册表，没有统一的设备级执行仲裁。
 
-本轮复核结果（2026-08-28）：沿用主线已有测试证据，Rust 最近一次全量回归已收口为 159 passed、0 failed、1 ignored；`cargo clippy --all-targets --all-features -- -D warnings` 与 `cargo fmt --all -- --check` 也在主线上通过。前端已有 `npm test` / `npm run build` 通过证据；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps`、普通及 `--no-cache` Docker 构建和 `cargo-audit` 结果也已有记录。新增对账依据为 `09c33ec`（engine 顶层解析边界测试）、`774c3dd`（API 阻塞边界与请求校验）、`45f3dcd`（截图解码错误传播）、`4114dd8`/`b2fa0c5`（Console 投屏视觉阶段拆分）、`df003c8`（设备摘要拆分）和 `4b08034`（阶段 5 B 类统计入口及离线样本）。这些提交补强了自动化证据，但未提供真实 Android/scrcpy/WebRTC E2E、跨平台 p50/p95、生产迁移回滚或持续内存观测，因此相应项目继续保持未完成。
+本轮复核结果（2026-08-28）：本轮不重跑测试，仅沿用主线已有测试证据；Rust 最近一次全量回归已收口为 159 passed、0 failed、1 ignored；`cargo clippy --all-targets --all-features -- -D warnings` 与 `cargo fmt --all -- --check` 也在主线上通过。前端已有 `npm test` / `npm run build` 通过证据；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps`、普通及 `--no-cache` Docker 构建和 `cargo-audit` 结果也已有记录。新增对账依据为 `09c33ec`（engine 顶层解析边界测试）、`774c3dd`（API 阻塞边界与请求校验）、`45f3dcd`（截图解码错误传播）、`4114dd8`/`b2fa0c5`（Console 投屏视觉阶段拆分）、`df003c8`（设备摘要拆分）和 `4b08034`（阶段 5 B 类统计入口及离线样本）。这些提交补强了自动化证据，但未提供真实 Android/scrcpy/WebRTC E2E、跨平台 p50/p95、生产迁移回滚或持续内存观测，因此相应项目继续保持未完成。
 
 ### 3.1 本轮 checklist 验收对账
 
@@ -71,13 +71,13 @@
 |---|---|---|---|
 | 0 | `d901121`、`6354b85` | Rust/前端质量门禁、共享 fixture 和 CI 记录。 | 36/36，暂无遗留。 |
 | 1 | `23ea36b`、`db6e423`、`3e16e96`、`ff81627` | Docker/Compose、日志轮转和配置校验记录。 | 28/28；USB 真机回归留至阶段 7。 |
-| 2 | `b7ab9dd`、`f6931fd`、`774c3dd` | HTTP/WS 鉴权、Cookie、同源、敏感日志、ZIP/命令边界测试。 | 34/36；真实 DataChannel 与持续内存观测需设备/压力环境。 |
+| 2 | `b7ab9dd`、`f6931fd`、`774c3dd` | HTTP/WS 鉴权、Cookie、同源、敏感日志、ZIP/命令边界测试。 | 34/36；真实 Android/scrcpy/WebRTC DataChannel E2E 与持续内存观测需设备/压力环境。 |
 | 3 | `67052e3` 及 RUN-005 收口提交 | RunManager、设备互斥、调度幂等、取消/停机和 viewer/pusher 回归测试。 | 34/34，阶段 3 收口。 |
 | 4 | `9c3f028`、`8283edd`、`774c3dd` | health/readiness、atomic write、DB worker/批处理、scheduler/NCC hook 和部分指标测试。 | 28/37；补齐调用侧、保留策略、关联字段与剩余生产指标。 |
 | 5 | `4b08034`、`45f3dcd`、`caa736b`、`04361e7`、`4f4fe52` | 固定 GOP/模板 fixture、FrameCache 合并/错误传播、matcher/RTP 回归；B 类统计入口可消费 JSONL/CSV。 | 8/31；离线样本不替代真实跨平台 p50/p95、CPU/内存和计算池验收。 |
 | 6 | `b2fa0c5`/`4114dd8`、`df003c8`、`a048a49`、`e4538b2`、`09c33ec` | Console 组件/lifecycle、engine helper、RTP protocol 的纯测试与边界测试。 | 9/19；继续拆 API/engine/viewer，补浏览器连接冒烟。 |
 | 7 | `05f19b1`（前次对账） | Rust/前端/Compose/release/metadata/Docker/audit 的既有记录。 | 16/17；生产数据副本迁移回滚和真实设备矩阵仍阻塞。 |
-| **总计** | `df003c8` → `4b08034` | 本轮只核对提交与既有测试证据，未新增耗时测试。 | 193/238，45 项未完成；不宣称整体完成。 |
+| **总计** | `09c33ec`、`774c3dd`、`45f3dcd`、`df003c8`、`4b08034`、`b2fa0c5`/`4114dd8` | 本轮只核对已确认提交/主线等价内容与既有测试证据，未新增耗时测试。 | 193/238，45 项未完成；不宣称整体完成。 |
 
 ## 4. 实施原则
 
