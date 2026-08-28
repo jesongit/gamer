@@ -95,6 +95,8 @@ mod events;
 mod model;
 #[path = "engine/normalize.rs"]
 mod normalize;
+#[path = "engine/ports.rs"]
+mod ports;
 #[path = "engine_syntax.rs"]
 mod syntax;
 #[path = "engine/validate.rs"]
@@ -327,19 +329,20 @@ impl Runner {
 
     /// config: 段解析（mapping 或 mapping 列表按序覆盖）：
     /// interval / threshold / log_level，默认取 config.toml 同名键
+    /// （settings = 装配时提取的 config.toml 静态快照）
     fn parse_script_config(&self, doc: &Value) -> anyhow::Result<(u64, f32, u8)> {
         let mut interval_ms = Self::parse_duration(
-            &Value::String(self.devices.cfg.interval.clone()),
+            &Value::String(self.settings.interval.clone()),
             "config.toml interval",
         )?;
         if interval_ms == 0 {
             anyhow::bail!("config.toml interval 必须 > 0");
         }
-        let mut threshold = self.devices.cfg.threshold;
-        let mut level = Ctx::parse_level(&self.devices.cfg.log_level).ok_or_else(|| {
+        let mut threshold = self.settings.threshold;
+        let mut level = Ctx::parse_level(&self.settings.log_level).ok_or_else(|| {
             anyhow::anyhow!(
                 "config.toml log_level 需要 debug/info/warn/error，收到: {}",
-                self.devices.cfg.log_level
+                self.settings.log_level
             )
         })?;
         match doc.get("config") {
@@ -677,30 +680,22 @@ impl Runner {
                 let key = step.get("key").and_then(|v| v.as_str()).unwrap_or("");
                 let code = key_code(key);
                 ctx.log("debug", format!("按键 {}", key));
-                if let Some(s) = self.devices.session(&ctx.device_id) {
-                    s.press_key(code).await?;
-                } else {
-                    anyhow::bail!("设备未连接");
-                }
+                // 无会话时端口实现报「设备未连接」（与旧 session 判空路径逐字一致）
+                self.ctl.key(&ctx.device_id, code).await?;
             }
             "text" => {
                 Self::ensure_only_keys(step, "text", &["text"])?;
                 let text = step.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 ctx.log("debug", format!("输入文本 {}", text));
-                if let Some(s) = self.devices.session(&ctx.device_id) {
-                    s.inject_text(text).await?;
-                } else {
-                    anyhow::bail!("设备未连接");
-                }
+                self.ctl.text(&ctx.device_id, text).await?;
             }
             "tap" => {
                 Self::ensure_only_keys(step, "tap", &["tap"])?;
                 let (rx, ry) = self.relative_pair(step.get("tap").unwrap_or(&Value::Null))?;
-                let s = self
-                    .devices
-                    .session(&ctx.device_id)
+                let (w, h) = self
+                    .ctl
+                    .video_size(&ctx.device_id)
                     .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-                let (w, h) = s.video_size();
                 let x = (rx * w as f32).round().clamp(0.0, w as f32) as u32;
                 let y = (ry * h as f32).round().clamp(0.0, h as f32) as u32;
                 ctx.log(
@@ -708,7 +703,7 @@ impl Runner {
                     format!("点击坐标 ({:.3}, {:.3}) → 像素 ({}, {})", rx, ry, x, y),
                 );
                 self.emit(&ctx.device_id, ScriptEvent::Tap { x, y }).await;
-                s.tap(x as f32, y as f32).await?;
+                self.ctl.tap(&ctx.device_id, x as f32, y as f32).await?;
             }
             "swipe" => {
                 Self::ensure_only_keys(step, "swipe", &["swipe"])?;
@@ -737,11 +732,10 @@ impl Runner {
                 };
                 let (rx1, ry1) = self.relative_pair(&from)?;
                 let (rx2, ry2) = self.relative_pair(&to)?;
-                let s = self
-                    .devices
-                    .session(&ctx.device_id)
+                let (w, h) = self
+                    .ctl
+                    .video_size(&ctx.device_id)
                     .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-                let (w, h) = s.video_size();
                 let x1 = (rx1 * w as f32).round().clamp(0.0, w as f32) as u32;
                 let y1 = (ry1 * h as f32).round().clamp(0.0, h as f32) as u32;
                 let x2 = (rx2 * w as f32).round().clamp(0.0, w as f32) as u32;
@@ -755,7 +749,15 @@ impl Runner {
                 );
                 self.emit(&ctx.device_id, ScriptEvent::Swipe { x1, y1, x2, y2 })
                     .await;
-                s.swipe(x1 as f32, y1 as f32, x2 as f32, y2 as f32, dur)
+                self.ctl
+                    .swipe(
+                        &ctx.device_id,
+                        x1 as f32,
+                        y1 as f32,
+                        x2 as f32,
+                        y2 as f32,
+                        dur,
+                    )
                     .await?;
             }
             "wait" => {
@@ -853,29 +855,28 @@ impl Runner {
                 Self::ensure_bare_value(step, "str_app")?;
                 let pkg = self.resolve_app_pkg(ctx)?;
                 // "+" 前缀：先 force-stop 再启动（scrcpy 定制控制消息，
-                // 虚拟屏模式下自动启动到虚拟屏，不要用 adb am start——会落到主屏）
-                let s = self
-                    .devices
-                    .session(&ctx.device_id)
-                    .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+                // 虚拟屏模式下自动启动到虚拟屏，不要用 adb am start——会落到主屏）。
+                // 会话判空在记日志之前（保序：未连接时不产生「冷启动」日志）
+                if !self.ctl.has_session(&ctx.device_id) {
+                    anyhow::bail!("设备未连接");
+                }
                 ctx.log("info", format!("冷启动应用 {}", pkg));
-                s.start_app(&format!("+{}", pkg)).await?;
+                self.ctl
+                    .start_app(&ctx.device_id, &format!("+{}", pkg))
+                    .await?;
             }
             "cls_app" => {
                 Self::ensure_only_keys(step, "cls_app", &["cls_app"])?;
                 Self::ensure_bare_value(step, "cls_app")?;
                 let pkg = self.resolve_app_pkg(ctx)?;
                 let serial = self
-                    .devices
-                    .snapshot(&ctx.device_id)
-                    .map(|(d, _, _)| d.addr)
-                    .filter(|a| !a.is_empty())
+                    .ctl
+                    .adb_serial(&ctx.device_id)
                     .ok_or_else(|| anyhow::anyhow!("设备不存在或未解析出 adb serial"))?;
                 ctx.log("info", format!("关闭应用 {}", pkg));
                 // adb force-stop：不碰 scrcpy 会话（屏幕/投屏不中断）；幂等，应用未运行也无害。
                 // 虚拟屏上应用被杀后画面变桌面或黑屏，流不断，属预期
-                self.devices
-                    .adb
+                self.ctl
                     .shell(
                         &serial,
                         &format!("am force-stop {}", pkg),
@@ -1505,17 +1506,17 @@ impl Runner {
         Ok(())
     }
 
-    /// 点击命中模板的中心（find 主模板与 block 障碍模板共用）
+    /// 点击命中模板的中心（find 主模板与 block 障碍模板共用）。
+    /// 会话判空在日志/事件之前（保序：未连接时不产生点击日志与 Tap 事件）
     async fn click_center(&self, ctx: &mut Ctx, m: &matcher::MatchResult) -> anyhow::Result<()> {
-        let s = self
-            .devices
-            .session(&ctx.device_id)
-            .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
+        if !self.ctl.has_session(&ctx.device_id) {
+            anyhow::bail!("设备未连接");
+        }
         let (cx, cy) = (m.x + m.width / 2, m.y + m.height / 2);
         ctx.log("debug", format!("点击模板中心 @ ({}, {})", cx, cy));
         self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy })
             .await;
-        s.tap(cx as f32, cy as f32).await?;
+        self.ctl.tap(&ctx.device_id, cx as f32, cy as f32).await?;
         Ok(())
     }
 
@@ -1530,14 +1531,10 @@ impl Runner {
         validate::ensure_bare_value(step, action)
     }
 
-    /// str_app/cls_app 的应用包名：固定取设备配置 pkg；
+    /// str_app/cls_app 的应用包名：固定取设备配置 pkg（设备控制端口元信息）；
     /// 校验仅允许 [A-Za-z0-9_.]（cls_app 要拼进 adb shell 命令，防注入）
     fn resolve_app_pkg(&self, ctx: &Ctx) -> anyhow::Result<String> {
-        let pkg = self
-            .devices
-            .snapshot(&ctx.device_id)
-            .and_then(|(d, _, _)| d.pkg)
-            .unwrap_or_default();
+        let pkg = self.ctl.app_pkg(&ctx.device_id).unwrap_or_default();
         if pkg.is_empty() {
             anyhow::bail!("缺少应用包名（设备未配置 pkg）");
         }
@@ -1612,7 +1609,7 @@ impl Runner {
 
     /// 截图（find 的软重试语义由调用方实现，这里只做错误包装）
     async fn shot(&self, ctx: &Ctx) -> anyhow::Result<Vec<u8>> {
-        self.devices
+        self.shots
             .screenshot(&ctx.device_id)
             .await
             .map_err(|e| anyhow::anyhow!("截图失败: {e:#}"))
@@ -1684,8 +1681,9 @@ impl Runner {
     }
 
     /// 在给定截图上匹配模板（region 为搜索区域，None=全屏）。
-    /// 模板读取 + PNG 解码 + NCC 全部提交到专用计算池执行（PERF-003），
-    /// 不占 Tokio 核心工作线程；只移动执行位置，匹配语义零变化。
+    /// 模板名 → 文件解析在本引擎（分区寻址 + 短名消歧）；模板读取 + PNG 解码 +
+    /// NCC 经 TemplateMatcher 端口（生产 = ComputePoolMatcher 提交专用计算池，
+    /// PERF-003），匹配语义零变化
     async fn match_on_screen(
         &self,
         ctx: &Ctx,
@@ -1699,20 +1697,9 @@ impl Runner {
         // 目录不存在时先创建，避免 std::fs::read 报“系统找不到指定的路径”
         let _ = std::fs::create_dir_all(&tpl_dir);
         let tpl_path = Self::resolve_template_file(&tpl_dir, template)?;
-        let tpl_label = format!("{} (path={})", template, tpl_path.display());
-        matcher::compute::run(move || {
-            let tpl_bytes = std::fs::read(&tpl_path)
-                .map_err(|e| anyhow::anyhow!("读取模板 {} 失败: {}", tpl_label, e))?;
-            let req = matcher::MatchRequest {
-                screen_png: screen,
-                template_png: tpl_bytes,
-                threshold: Some(threshold),
-                region,
-            };
-            matcher::match_template(&req).map_err(|e| anyhow::anyhow!("模板匹配失败: {}", e))
-        })
-        .await
-        .and_then(|inner| inner)
+        self.matcher
+            .match_template(screen, template, tpl_path, threshold, region)
+            .await
     }
 
     /// 模板文件解析：精确名优先（写全名永远可用）；文件不存在时按**短名**解析——
@@ -1757,7 +1744,7 @@ impl Runner {
     /// 脚本所在分区的模板目录：data/<pkg>/tmpl/（script_id 首段 = 分区）
     fn tpl_dir_of(&self, ctx: &Ctx) -> std::path::PathBuf {
         let pkg = ctx.script_id.split('/').next().unwrap_or_default();
-        self.devices.cfg.data_dir.join(pkg).join("tmpl")
+        self.settings.data_dir.join(pkg).join("tmpl")
     }
 
     /// 解析模板名列表（find 的 block）：字符串（可逗号分隔多模板）或 YAML 字符串列表
@@ -1909,8 +1896,7 @@ impl Runner {
     /// 屏幕尺寸：会话视频参数优先；无会话时兜底解码截图读尺寸。
     /// 兜底的整图 PNG 解码提交计算池（PERF-003），避免占住核心工作线程。
     async fn screen_size(&self, ctx: &Ctx, screen: &[u8]) -> (u32, u32) {
-        if let Some(s) = self.devices.session(&ctx.device_id) {
-            let (w, h) = s.video_size();
+        if let Some((w, h)) = self.ctl.video_size(&ctx.device_id) {
             if w > 0 && h > 0 {
                 return (w, h);
             }
@@ -3411,6 +3397,356 @@ mod tests {
         assert_eq!(funcs[0]["f1"][0]["log"], "$1");
         assert_eq!(doc["steps"][0]["log"], "resolved");
         assert!(doc.get("func").is_none());
+    }
+
+    // ===== 阶段 6.3：内存 fake 端口单测（模板匹配/设备控制经窄 trait 注入）=====
+    // 此前 find/控制序列场景必须依赖 DeviceManager（真实会话 + 帧缓存），现在
+    // 通过 FakeDevice 表达：预置截图字节与匹配结果、记录控制调用
+
+    use std::path::PathBuf;
+
+    use futures_util::future::BoxFuture;
+
+    use super::ports::{DeviceControl, EngineSettings, ScreenshotSource, TemplateMatcher};
+
+    /// swipe 记录：(x1, y1, x2, y2, 时长 ms)
+    type SwipeRec = (u32, u32, u32, u32, u64);
+
+    /// 内存 fake：实现全部三个引擎端口。截图/匹配结果按队列依序消费，耗尽后
+    /// 复用最后一项（find 轮询语义下"只预置一条未命中"= 永远未命中）；控制
+    /// 调用（tap/swipe/key/text/start_app/shell）只记录不生效
+    struct FakeDevice {
+        /// 依次消费的截图字节
+        screens: std::sync::Mutex<Vec<Vec<u8>>>,
+        /// 模板名 → 依次消费的匹配结果（None = 未命中）
+        matches: std::sync::Mutex<HashMap<String, Vec<Option<matcher::MatchResult>>>>,
+        /// 会话视频尺寸（None = 无会话）
+        video_size: Option<(u32, u32)>,
+        pkg: Option<String>,
+        serial: Option<String>,
+        taps: std::sync::Mutex<Vec<(u32, u32)>>,
+        swipes: std::sync::Mutex<Vec<SwipeRec>>,
+        keys: std::sync::Mutex<Vec<u32>>,
+        texts: std::sync::Mutex<Vec<String>>,
+        apps: std::sync::Mutex<Vec<String>>,
+        shells: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakeDevice {
+        fn new(video_size: (u32, u32)) -> Self {
+            Self {
+                screens: std::sync::Mutex::new(Vec::new()),
+                matches: std::sync::Mutex::new(HashMap::new()),
+                video_size: Some(video_size),
+                pkg: None,
+                serial: None,
+                taps: std::sync::Mutex::new(Vec::new()),
+                swipes: std::sync::Mutex::new(Vec::new()),
+                keys: std::sync::Mutex::new(Vec::new()),
+                texts: std::sync::Mutex::new(Vec::new()),
+                apps: std::sync::Mutex::new(Vec::new()),
+                shells: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// 预置一次截图
+        fn with_screen(mut self, png: Vec<u8>) -> Self {
+            self.screens.get_mut().unwrap().push(png);
+            self
+        }
+
+        /// 预置一次模板匹配结果（同一模板多次预置按轮次依序消费）
+        fn with_match(mut self, tpl: &str, hit: Option<(u32, u32, u32, u32)>) -> Self {
+            let m = hit.map(|(x, y, width, height)| matcher::MatchResult {
+                x,
+                y,
+                width,
+                height,
+                score: 0.99,
+            });
+            self.matches
+                .get_mut()
+                .unwrap()
+                .entry(tpl.to_string())
+                .or_default()
+                .push(m);
+            self
+        }
+
+        fn taps(&self) -> Vec<(u32, u32)> {
+            self.taps.lock().unwrap().clone()
+        }
+
+        fn pop_screen(&self) -> Vec<u8> {
+            let mut q = self.screens.lock().unwrap();
+            if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q.first().cloned().unwrap_or_default()
+            }
+        }
+
+        fn pop_match(&self, tpl: &str) -> Option<matcher::MatchResult> {
+            let mut map = self.matches.lock().unwrap();
+            let q = map.get_mut(tpl)?;
+            if q.len() > 1 {
+                q.remove(0)
+            } else {
+                q.first().cloned().flatten()
+            }
+        }
+    }
+
+    impl ScreenshotSource for FakeDevice {
+        fn screenshot(&self, _device_id: &str) -> BoxFuture<'_, anyhow::Result<Vec<u8>>> {
+            Box::pin(std::future::ready(Ok(self.pop_screen())))
+        }
+    }
+
+    impl DeviceControl for FakeDevice {
+        fn has_session(&self, _device_id: &str) -> bool {
+            self.video_size.is_some()
+        }
+
+        fn video_size(&self, _device_id: &str) -> Option<(u32, u32)> {
+            self.video_size
+        }
+
+        fn app_pkg(&self, _device_id: &str) -> Option<String> {
+            self.pkg.clone()
+        }
+
+        fn adb_serial(&self, _device_id: &str) -> Option<String> {
+            self.serial.clone()
+        }
+
+        fn tap(&self, _device_id: &str, x: f32, y: f32) -> BoxFuture<'_, anyhow::Result<()>> {
+            self.taps.lock().unwrap().push((x as u32, y as u32));
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn swipe(
+            &self,
+            _device_id: &str,
+            x1: f32,
+            y1: f32,
+            x2: f32,
+            y2: f32,
+            duration_ms: u64,
+        ) -> BoxFuture<'_, anyhow::Result<()>> {
+            self.swipes.lock().unwrap().push((
+                x1 as u32,
+                y1 as u32,
+                x2 as u32,
+                y2 as u32,
+                duration_ms,
+            ));
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn key(&self, _device_id: &str, keycode: u32) -> BoxFuture<'_, anyhow::Result<()>> {
+            self.keys.lock().unwrap().push(keycode);
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn text(&self, _device_id: &str, text: &str) -> BoxFuture<'_, anyhow::Result<()>> {
+            self.texts.lock().unwrap().push(text.to_string());
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn start_app(&self, _device_id: &str, name: &str) -> BoxFuture<'_, anyhow::Result<()>> {
+            self.apps.lock().unwrap().push(name.to_string());
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn shell(
+            &self,
+            _serial: &str,
+            command: &str,
+            _timeout: Duration,
+        ) -> BoxFuture<'_, anyhow::Result<()>> {
+            self.shells.lock().unwrap().push(command.to_string());
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
+    impl TemplateMatcher for FakeDevice {
+        fn match_template(
+            &self,
+            _screen_png: Vec<u8>,
+            template: &str,
+            _template_path: PathBuf,
+            _threshold: f32,
+            _region: Option<[u32; 4]>,
+        ) -> BoxFuture<'_, anyhow::Result<Option<matcher::MatchResult>>> {
+            Box::pin(std::future::ready(Ok(self.pop_match(template))))
+        }
+    }
+
+    /// fake 端口装配的测试环境：临时 data_dir + 预写模板占位文件（fake 匹配
+    /// 不读内容，只要求引擎侧的存在性/短名解析可达）
+    fn fake_env(
+        tag: &str,
+        fake: FakeDevice,
+        templates: &[&str],
+    ) -> (Runner, Arc<FakeDevice>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-fake-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let tpl_dir = dir.join("com.test").join("tmpl");
+        std::fs::create_dir_all(&tpl_dir).unwrap();
+        for name in templates {
+            std::fs::write(tpl_dir.join(name), b"tpl").unwrap();
+        }
+        let cfg = crate::config::Config {
+            data_dir: dir.clone(),
+            ..Default::default()
+        };
+        let fake = Arc::new(fake);
+        let viewers: crate::webrtc::ViewerMap =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let runner = Runner::with_ports(
+            EngineSettings {
+                interval: "5ms".into(),
+                threshold: 0.85,
+                log_level: "debug".into(),
+                data_dir: dir.clone(),
+            },
+            fake.clone(),
+            fake.clone(),
+            fake.clone(),
+            viewers,
+            Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap()),
+        );
+        (runner, fake, dir)
+    }
+
+    /// 走完整 run() 入口的 fake 运行（main 脚本、无实参、不停止）
+    async fn fake_run(runner: &Runner, yaml: &str) -> anyhow::Result<Vec<(String, String)>> {
+        runner
+            .run(
+                "dev",
+                "com.test/t.yaml",
+                yaml,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                0,
+                None,
+                None,
+                vec![],
+            )
+            .await
+    }
+
+    /// 纯色 PNG 字节（color fake 测试：真 PNG 才能走生产解码链路读像素）
+    fn solid_png(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
+        let mut img = image::RgbImage::new(w, h);
+        for p in img.pixels_mut() {
+            *p = image::Rgb(rgb);
+        }
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    /// fake 端口：find 主模板首轮命中 → 点击模板中心（tap 经控制端口记录），
+    /// then 分支执行；其余控制通道未被触碰
+    #[tokio::test]
+    async fn fake_find_hit_clicks_center() {
+        let (runner, fake, _dir) = fake_env(
+            "hit",
+            FakeDevice::new((100, 200)).with_match("a.png", Some((10, 20, 30, 40))),
+            &["a.png"],
+        );
+        let logs = fake_run(
+            &runner,
+            "steps:\n  - find: a.png\n    then:\n      - log: got-it",
+        )
+        .await
+        .unwrap();
+        // 命中即点击中心：(10 + 30/2, 20 + 40/2)
+        assert_eq!(fake.taps(), vec![(25, 40)]);
+        assert!(logs
+            .iter()
+            .any(|(_, m)| m.contains("模板 a.png 已找到 @ (10, 20)")));
+        assert!(logs.iter().any(|(_, m)| m == "got-it"));
+        assert!(fake.swipes.lock().unwrap().is_empty());
+        assert!(fake.keys.lock().unwrap().is_empty());
+        assert!(fake.texts.lock().unwrap().is_empty());
+    }
+
+    /// fake 端口：find 主模板第 1 轮未命中 → block 命中点其中心结束本轮 →
+    /// 第 2 轮主模板命中点中心 → then 分支 ^1 引用主模板名。
+    /// tap 调用序列 = block 中心 → 主模板中心（跨轮次顺序经端口断言）
+    #[tokio::test]
+    async fn fake_find_block_then_refs_call_sequence() {
+        let (runner, fake, _dir) = fake_env(
+            "block",
+            FakeDevice::new((100, 200))
+                .with_match("a.png", None) // 第 1 轮主模板未命中
+                .with_match("a.png", Some((100, 50, 20, 10))) // 第 2 轮命中
+                .with_match("b.png", Some((8, 6, 4, 2))), // 第 1 轮障碍命中
+            &["a.png", "b.png"],
+        );
+        let logs = fake_run(
+            &runner,
+            "steps:\n  - find: a.png\n    block: b.png\n    then:\n      - log: pick ^1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(fake.taps(), vec![(10, 7), (110, 55)]);
+        assert!(logs
+            .iter()
+            .any(|(_, m)| m.contains("障碍模板 b.png 出现，点击关闭 @ (8, 6)")));
+        // then 子树 ^1 = 主模板名
+        assert!(logs.iter().any(|(_, m)| m == "pick a.png"));
+    }
+
+    /// fake 端口：throw 在 find 的 then 子树里冒泡结束整个任务（exit 标志跨
+    /// 步骤生效），后续顶层步骤不再执行
+    #[tokio::test]
+    async fn fake_throw_in_find_then_ends_run() {
+        let (runner, fake, _dir) = fake_env(
+            "throw",
+            FakeDevice::new((100, 200)).with_match("a.png", Some((0, 0, 10, 10))),
+            &["a.png"],
+        );
+        let logs = fake_run(
+            &runner,
+            "steps:\n  - find: a.png\n    then:\n      - throw: done\n  - log: after",
+        )
+        .await
+        .unwrap();
+        assert_eq!(fake.taps(), vec![(5, 5)]);
+        assert!(logs.iter().any(|(_, m)| m == "因 done 结束运行脚本"));
+        assert!(!logs.iter().any(|(_, m)| m == "after"));
+    }
+
+    /// fake 端口：color 一次截图按像素判定（fake 截图 = 真 PNG，解码走生产
+    /// 计算池），命中执行色值键步骤、跳过 else；color 不点击
+    #[tokio::test]
+    async fn fake_color_hit_reads_pixel() {
+        let (runner, fake, _dir) = fake_env(
+            "color",
+            FakeDevice::new((10, 10)).with_screen(solid_png(10, 10, [0xff, 0x88, 0x00])),
+            &[],
+        );
+        let logs = fake_run(
+            &runner,
+            "steps:\n  - color: [0.5, 0.5]\n    ff8800:\n      - log: hit-color\n    else:\n      - log: miss-color",
+        )
+        .await
+        .unwrap();
+        assert!(logs.iter().any(|(_, m)| m == "hit-color"));
+        assert!(!logs.iter().any(|(_, m)| m == "miss-color"));
+        assert!(fake.taps().is_empty());
     }
 }
 

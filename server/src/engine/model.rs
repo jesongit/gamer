@@ -15,9 +15,25 @@ use crate::device::DeviceManager;
 use crate::scripts::ScriptStore;
 use crate::webrtc::ViewerMap;
 
+use super::ports::{
+    ComputePoolMatcher, DeviceControl, DeviceGateway, EngineSettings, ScreenshotSource,
+    TemplateMatcher,
+};
+
 /// YAML script runner.
+///
+/// 设备访问与模板匹配全部经窄 trait 端口注入（`super::ports`，阶段 6.3）：
+/// 生产由 [`Runner::new`] 装配 adapter 转发 DeviceManager / matcher 真实实现，
+/// 单元测试可注入内存 fake 而不依赖 DeviceManager。
 pub struct Runner {
-    pub devices: Arc<DeviceManager>,
+    /// config.toml 中引擎消费字段的静态快照（interval / threshold / log_level / data_dir）
+    pub settings: EngineSettings,
+    /// 截图源端口：生产 = DeviceGateway → DeviceManager::screenshot（帧缓存链路）
+    pub shots: Arc<dyn ScreenshotSource>,
+    /// 设备控制端口：生产 = DeviceGateway → scrcpy 会话控制 / adb
+    pub ctl: Arc<dyn DeviceControl>,
+    /// 模板匹配端口：生产 = ComputePoolMatcher → matcher::compute 计算池
+    pub matcher: Arc<dyn TemplateMatcher>,
     /// Active viewer registry used for script visualization events.
     pub viewers: ViewerMap,
     /// Script storage used by `call` and cross-file function resolution.
@@ -25,9 +41,35 @@ pub struct Runner {
 }
 
 impl Runner {
+    /// 生产装配：在构造点包一层端口 adapter，内部转发 DeviceManager / matcher
+    /// 真实实现；Runner 执行路径只依赖窄 trait，生产行为零变化
     pub fn new(devices: Arc<DeviceManager>, viewers: ViewerMap, scripts: Arc<ScriptStore>) -> Self {
+        let settings = EngineSettings::from_config(&devices.cfg);
+        let gateway = Arc::new(DeviceGateway::new(devices));
+        Self::with_ports(
+            settings,
+            gateway.clone(),
+            gateway,
+            Arc::new(ComputePoolMatcher),
+            viewers,
+            scripts,
+        )
+    }
+
+    /// 端口注入装配（测试用）：截图源 / 设备控制 / 模板匹配各自注入
+    pub(crate) fn with_ports(
+        settings: EngineSettings,
+        shots: Arc<dyn ScreenshotSource>,
+        ctl: Arc<dyn DeviceControl>,
+        matcher: Arc<dyn TemplateMatcher>,
+        viewers: ViewerMap,
+        scripts: Arc<ScriptStore>,
+    ) -> Self {
         Self {
-            devices,
+            settings,
+            shots,
+            ctl,
+            matcher,
             viewers,
             scripts,
         }
