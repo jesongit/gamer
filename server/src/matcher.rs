@@ -90,7 +90,6 @@ fn matcher_stats() -> &'static MatcherStats {
     }
 }
 
-#[cfg(test)]
 fn install_matcher_stats(stats: MatcherStats) -> MatcherStatsGuard {
     let boxed = Box::new(stats);
     let raw = Box::into_raw(boxed);
@@ -116,13 +115,11 @@ impl MatcherStats {
     }
 }
 
-#[cfg(test)]
 struct MatcherStatsGuard {
     prev: *mut MatcherStats,
     current: *mut MatcherStats,
 }
 
-#[cfg(test)]
 impl Drop for MatcherStatsGuard {
     fn drop(&mut self) {
         MATCHER_STATS.store(self.prev, Ordering::Release);
