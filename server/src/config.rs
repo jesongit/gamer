@@ -13,6 +13,7 @@
 //! `probe_external_tools` 即为它预留的探测函数）。
 
 use std::io;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
@@ -187,6 +188,22 @@ pub struct Config {
     /// 鉴权与会话治理（[auth] 段整体可缺省取默认值）
     #[serde(default)]
     pub auth: AuthConfig,
+    /// WebRTC ICE 候选宣告的外部 IP（容器 / 公网 NAT 1-to-1 部署，见
+    /// webrtc/rtc_net.rs）：非空时 host 候选一律宣告该 IP（不经 STUN/接口
+    /// 枚举，容器内网 IP 172.x 不再宣告）。空 = 既有行为（接口枚举 + STUN）。
+    /// 容器 bridge 部署黑屏（信令正常、媒体候选不通）的修复入口。
+    #[serde(default)]
+    pub rtc_external_ip: String,
+    /// WebRTC 媒体 UDP 固定绑定端口（0 = 既有行为：每会话临时端口）。
+    /// 容器端口映射场景必配（docker -p <宿主端口>:<本值>/udp）；单 socket
+    /// UDPMux 进程级共享，按 ICE ufrag 复用，启动后变更需重启生效。
+    #[serde(default)]
+    pub rtc_udp_port: u16,
+    /// ICE 候选宣告的对外 UDP 端口（docker -p 的宿主侧端口 B）。
+    /// 0 = 宣告 rtc_udp_port 本身（容器内外同端口号映射 -p A:A/udp）。
+    /// 仅 rtc_udp_port 非 0 时有意义（校验强制成对配置）。
+    #[serde(default)]
+    pub rtc_external_port: u16,
 }
 
 fn default_idle_power_secs() -> u64 {
@@ -233,6 +250,9 @@ impl Default for Config {
             log_retain_days: default_log_retain_days(),
             compute_max_concurrency: 0,
             auth: AuthConfig::default(),
+            rtc_external_ip: String::new(),
+            rtc_udp_port: 0,
+            rtc_external_port: 0,
         }
     }
 }
@@ -342,6 +362,7 @@ impl Config {
             "port={} data_dir={} interval=\"{}\" threshold={:.2} log_level={} \
              decode_frames={} max_size={} bitrate_mbps={} fps={} idle_power_secs={}s \
              log_retain_days={}d compute_max_concurrency={} \
+             rtc_external_ip={} rtc_udp_port={} rtc_external_port={} \
              session_abs_secs={} session_idle_secs={} \
              login_max_fails={}/{}s password_hash={}",
             self.port,
@@ -356,6 +377,13 @@ impl Config {
             self.idle_power_secs,
             self.log_retain_days,
             self.compute_max_concurrency,
+            if self.rtc_external_ip.is_empty() {
+                "unset"
+            } else {
+                &self.rtc_external_ip
+            },
+            self.rtc_udp_port,
+            self.rtc_external_port,
             self.auth.session_abs_secs,
             self.auth.session_idle_secs,
             self.auth.login_max_fails,
@@ -486,6 +514,22 @@ impl Config {
             ));
         }
 
+        // WebRTC 候选外部宣告（容器 / NAT 1-to-1，接线见 webrtc/rtc_net.rs）：
+        // IP 格式启动期校验（避免连不上时才在运行期报错）；宣告端口必须配对绑定端口
+        if !self.rtc_external_ip.is_empty() && self.rtc_external_ip.parse::<IpAddr>().is_err() {
+            errs.push(format!(
+                "rtc_external_ip = \"{}\" 非法：须为合法 IP 字面量（IPv4/IPv6）",
+                self.rtc_external_ip
+            ));
+        }
+        if self.rtc_external_port != 0 && self.rtc_udp_port == 0 {
+            errs.push(format!(
+                "rtc_external_port = {} 依赖 rtc_udp_port：宣告端口仅用于固定端口映射 \
+                 （docker -p），请同时配置 rtc_udp_port（0 = 每会话临时端口，无固定宣告）",
+                self.rtc_external_port
+            ));
+        }
+
         // [auth] 段（阶段 2）：TTL/限流下限收紧防止自摆乌龙（空闲 ≥60s、窗口 ≥1s）
         if self.auth.session_abs_secs < 60 || self.auth.session_abs_secs > 30 * 86400 {
             errs.push(format!(
@@ -529,6 +573,7 @@ fn normalize_paths(cfg: &mut Config) {
     cfg.adb_path = cfg.adb_path.trim().to_string();
     cfg.ffmpeg_path = cfg.ffmpeg_path.trim().to_string();
     cfg.encoder_name = cfg.encoder_name.trim().to_string();
+    cfg.rtc_external_ip = cfg.rtc_external_ip.trim().to_string();
     for p in [&mut cfg.data_dir, &mut cfg.scrcpy_server] {
         if let Some(s) = p.to_str() {
             let t = s.trim();
@@ -753,6 +798,99 @@ fps = 15
         };
         present.check_scrcpy_jar().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rtc_keys_default_to_noop_and_parse_from_toml() {
+        // 默认值：三键全零/空 = 未配置（行为零变化的前提）
+        let def = Config::default();
+        assert_eq!(def.rtc_external_ip, "");
+        assert_eq!(def.rtc_udp_port, 0);
+        assert_eq!(def.rtc_external_port, 0);
+        assert!(def.validate().is_empty());
+
+        // 缺省键的最小 TOML 同样解析为未配置
+        let dir = temp_dir("rtc-default");
+        let path = write_minimal_config(&dir, "config.toml");
+        let loaded = Config::load_from(&path, Profile::Prod).unwrap();
+        assert_eq!(loaded.cfg.rtc_external_ip, "");
+        assert_eq!(loaded.cfg.rtc_udp_port, 0);
+        assert_eq!(loaded.cfg.rtc_external_port, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // 显式配置：容器 -p 50000:3478/udp 场景，ip 值带空白也被 trim
+        let dir = temp_dir("rtc-set");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"port = 8443
+data_dir = "./data"
+adb_path = "adb"
+ffmpeg_path = "ffmpeg"
+scrcpy_server = "./assets/scrcpy-server.jar"
+decode_frames = true
+max_size = 0
+bitrate_mbps = 12
+fps = 15
+rtc_external_ip = " 192.168.1.10 "
+rtc_udp_port = 3478
+rtc_external_port = 50000
+"#,
+        )
+        .unwrap();
+        let loaded = Config::load_from(&path, Profile::Prod).unwrap();
+        assert_eq!(loaded.cfg.rtc_external_ip, "192.168.1.10");
+        assert_eq!(loaded.cfg.rtc_udp_port, 3478);
+        assert_eq!(loaded.cfg.rtc_external_port, 50000);
+        assert!(
+            loaded.cfg.validate().is_empty(),
+            "{:?}",
+            loaded.cfg.validate()
+        );
+        let summary = loaded.cfg.non_sensitive_summary();
+        assert!(
+            summary.contains("rtc_external_ip=192.168.1.10"),
+            "{summary}"
+        );
+        assert!(summary.contains("rtc_udp_port=3478"), "{summary}");
+        assert!(summary.contains("rtc_external_port=50000"), "{summary}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rtc_keys_validation_rejects_bad_ip_and_unpaired_port() {
+        // rtc_external_ip 非法（非 IP 字面量：域名/任意串拒绝）
+        let cfg = Config {
+            rtc_external_ip: "example.com".into(),
+            ..Default::default()
+        };
+        let errs = cfg.validate();
+        assert!(
+            errs.iter().any(|e| e.contains("rtc_external_ip")),
+            "{errs:?}"
+        );
+
+        // rtc_external_port 无 rtc_udp_port 成对：宣告端口无绑定端口可映射
+        let cfg = Config {
+            rtc_external_port: 50000,
+            ..Default::default()
+        };
+        let errs = cfg.validate();
+        assert!(
+            errs.iter().any(|e| e.contains("rtc_external_port")),
+            "{errs:?}"
+        );
+
+        // 仅配 rtc_udp_port（内外同端口号映射）合法
+        let cfg = Config {
+            rtc_udp_port: 3478,
+            ..Default::default()
+        };
+        assert!(
+            !cfg.validate().iter().any(|e| e.contains("rtc_")),
+            "{:?}",
+            cfg.validate()
+        );
     }
 
     #[test]

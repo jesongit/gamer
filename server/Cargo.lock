@@ -863,6 +863,7 @@ dependencies = [
  "anyhow",
  "argon2",
  "async-recursion",
+ "async-trait",
  "axum",
  "base64",
  "bytes",

@@ -52,6 +52,22 @@ log_retain_days = 14
 # 显式值上限 256。0 或缺省 = 按 CPU 核数自动
 compute_max_concurrency = 0
 
+# WebRTC ICE 候选外部宣告（容器 / 公网 NAT 1-to-1 部署）：三键全部缺省时
+# 行为不变（接口枚举 + STUN，每会话临时端口）。Docker bridge 下服务端
+# host candidate 是容器内网 IP（172.x），宿主浏览器不可路由 → 信令正常但
+# 媒体协商不出候选对、投屏黑屏——此时按下面三键宣告宿主可达地址。
+# 容器配法示例（docker run ... -p 50000:3478/udp，宿主 50000 → 容器 3478）：
+#   rtc_external_ip = "192.168.1.10"   # 浏览器可达的宿主 IP
+#   rtc_udp_port = 3478                # 容器内绑定端口（= 映射 -p 的容器侧 A）
+#   rtc_external_port = 50000          # 宿主对外端口（= 映射 -p 的宿主侧 B）
+# 内外同端口号映射（-p 3478:3478/udp）时 rtc_external_port 可配 0（缺省），
+# 候选端口即 rtc_udp_port 本身。仅 host 网络容器（network_mode: host）等
+# 端口本就可达、只差 IP 宣告的场景可只配 rtc_external_ip。
+# 单 socket UDPMux 进程级共享（多设备/多 viewer 复用），端口变更需重启生效
+rtc_external_ip = ""
+rtc_udp_port = 0
+rtc_external_port = 0
+
 # 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式（可自定义）
 # 占位符：
 #   {name}     模板名

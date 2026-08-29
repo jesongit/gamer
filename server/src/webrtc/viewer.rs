@@ -171,10 +171,16 @@ impl ViewerSession {
         m.register_default_codecs()?;
         let mut registry = Registry::new();
         registry = register_default_interceptors(registry, &mut m)?;
-        let api = APIBuilder::new()
+        // 容器 / NAT 1-to-1 部署（config.toml rtc_external_ip / rtc_udp_port /
+        // rtc_external_port，语义见 rtc_net）：三键全缺省返回 None，构建链与
+        // 既有逐字节一致（Windows 直跑 / 既有部署零变化）
+        let api_builder = APIBuilder::new()
             .with_media_engine(m)
-            .with_interceptor_registry(registry)
-            .build();
+            .with_interceptor_registry(registry);
+        let api = match super::rtc_net::build_rtc_setting_engine(cfg).await? {
+            Some(se) => api_builder.with_setting_engine(se).build(),
+            None => api_builder.build(),
+        };
 
         let ice = if let Ok(s) = std::env::var("ICE_SERVERS") {
             s.split(';')

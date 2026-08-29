@@ -3,7 +3,8 @@
 //! - DataChannel "control" 接收浏览器的触控/按键/文本等控制消息，转发给 scrcpy 控制 socket
 //!
 //! 模块布局（OPTIMIZATION_PLAN §12.4）：本文件承载 pusher/RTP 推送与帧队列；
-//! viewer 生命周期在 `viewer`，编码器诊断探针在 `probe`，RTP 线格式在 `protocol`。
+//! viewer 生命周期在 `viewer`，编码器诊断探针在 `probe`，RTP 线格式在 `protocol`，
+//! ICE 候选外部宣告（容器/NAT 部署）在 `rtc_net`。
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use crate::device::scrcpy::{AudioFrame, ScrcpySession, VideoFrame};
 mod protocol;
 
 mod probe;
+mod rtc_net;
 mod viewer;
 
 pub use viewer::{
