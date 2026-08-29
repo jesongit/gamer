@@ -1,15 +1,17 @@
 # 设备接入方案
 
 GameBot 实例（宿主二进制 / Docker 容器）如何看到并控制 Android 设备。截至 2026-08-29，
-Docker 实例（`docker-compose.local.yml`，宿主 8444）采用**共享宿主 adb server**方案；
-此前探索的「容器内无线调试 + WebRTC 出画」线已搁置（root cause 链见文末存档），待修复后可续。
+Docker 实例（`docker-compose.local.yml`，宿主 8444）采用**手机无线调试直连**方案
+（容器内独立 adb server + 密钥复用 + ICE 候选宣告，投屏出画已实测验证）；此前探索的
+「共享宿主 adb server」线因 reverse 隧道死结致容器内无实时会话，完整方案与切换方式
+保留在文中与 git 历史（`b2dedc7`），root cause 链见文末存档。
 
 ## 方案对比
 
 | 方案 | 设备可见性 | scrcpy 实时会话（投屏/帧缓存截图/控制） | 手机侧操作 | 结论 |
 |---|---|---|---|---|
 | **共享宿主 adb server**（当前采用） | USB / 无线通吃，零手机操作（容器 adb 客户端复用宿主 server） | **容器内不可用**（reverse 隧道死结，见下节）；adb 层操作（scan/shell/设备管理/screencap 类）全部正常 | 无 | **采用**。adb 可见性即插即用；实时会话暂由宿主实例承担，待源码改造解锁 |
-| 手机无线调试直连（容器内独立 server + 密钥挂载） | 需手机开「无线调试」，端口每次重开变化；熄屏深睡时 mDNS 停止广播（见 [PITFALLS](PITFALLS.md)） | 会话可建立（reverse 隧道在容器 server 与容器客户端间闭环）；**但浏览器投屏黑屏**（WebRTC ICE 出画未完成，root cause 链见文末存档） | 需开启无线调试 + 配对 | adb 侧已打通；被 WebRTC 出画问题阻塞，整体搁置 |
+| 手机无线调试直连（容器内独立 server + 密钥挂载） | 需手机开「无线调试」，端口每次重开变化；熄屏深睡时 mDNS 停止广播（见 [PITFALLS](PITFALLS.md)） | 会话可建立（reverse 隧道在容器 server 与容器客户端间闭环）；**投屏出画已验证**（ICE checking→connected ≈10ms，浏览器解出 1920x1080 零丢帧，2026-08-29） | 需开启无线调试 + 配对 | **当前采用模式**（docker-compose.local.yml 现状） |
 | usbipd-win USB 直通（容器内独立 server） | 容器独占 USB 设备，宿主 adb 失去设备（attach/detach 切换麻烦） | 可用（容器 server 与容器客户端闭环） | 无 | 不推荐：Windows Docker Desktop 需管理员 + 宿主失去设备，与「宿主实例同时在用手机」互斥 |
 
 ## 共享宿主 adb server：原理与操作
@@ -112,11 +114,12 @@ Docker 实例（`docker-compose.local.yml`，宿主 8444）采用**共享宿主 
 - **熄屏断连坑**：无线 adb 的重连由手机侧 mDNS 广播驱动，熄屏/深睡时不广播，`adb connect`
   对裸设备名无效——服务端保活只对可寻址的经典网络地址（含 `:`）补连。详见
   [PITFALLS](PITFALLS.md)「adb server 重启会掉无线调试连接」条目。
-- **WebRTC 出画 root cause 链**（投屏黑屏，修复进行中）：
+- **WebRTC 出画 root cause 链**（投屏黑屏，**已修复并实测出画**，2026-08-29）：
   1. 容器 bridge 网络的 ICE 候选是容器内网 172.x，宿主浏览器不可达 → 信令（WS）通但视频黑屏；
   2. 加 `rtc_external_ip` / `rtc_udp_port` / `rtc_external_port` 配置宣告宿主可达候选
-     （已实现，提交 `018f455`、`1c6827d`；对应 docker-config.toml 三键与 compose
-     `8444:8443/udp` 映射）；
-  3. 候选 local_addr 未指定 IP 的修复（`1c6827d`）；
-  4. 剩余「no candidate pairs」排查中——后续从该点继续。docker-config.toml 的 rtc_* 三键
-     当前由该修复工作持有（保持生效），修复落地后如无线直连线仍不启用可恢复注释。
+     （提交 `018f455`；对应 docker-config.toml 三键与 compose `8444:8443/udp` 映射）；
+  3. 候选 local_addr 未指定 IP 的修复（`1c6827d`）——0.0.0.0 致 muxed gather 零候选；
+  4. 前端 offer 不携带候选的真根因（`b245cfb`）：`createOffer()` 的 SDP 无 a=candidate，
+     需等 gathering 完成后发送 `localDescription`。
+  修复后实测：checking→connected ≈10ms，SRTP 推流正常，浏览器 getStats 零丢帧、
+  解出 1920x1080 真实画面（`docker-config.toml` 三键保持生效）。

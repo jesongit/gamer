@@ -1,22 +1,21 @@
 # GameBot 本机并存部署 overlay：Docker 实例（宿主 8444）与本地开发实例（8443 / 5173 dev）并存
 #
-# 用途：与 docker-compose.yml 叠加使用，为 Docker 实例提供独立数据目录 docker-data/
-#      与独立端口（host 网络 + 容器内配置监听 8444），绝不触碰开发实例的 server/data
-#      与 8443 服务（两实例共享数据目录会抢设备 scrcpy 会话、定时任务双跑）。
-#      ports / volumes / healthcheck / network_mode 用 !override 整体替换主文件对应项。
+# 【当前模式：无线调试直连】容器内运行自己的 adb server（挂载 Windows 已配对的
+# adbkey，手机信任该密钥无需配对码），adb reverse 隧道在容器内闭环——scrcpy
+# 实时会话（投屏/截图/控制）可用。WebRTC 出画三件套已就位：
+#   1. docker-config.toml 的 rtc_external_ip/rtc_udp_port/rtc_external_port
+#      （bridge 网络下宣告宿主可达的 ICE 候选，UDP 经 8444:8443/udp 映射）
+#   2. 前端 offer 等 ICE 候选收集完成再发送（b245cfb）
+#   3. ICE 候选 local_addr 具体化（1c6827d）
+# 实测：checking→connected 约 10ms，浏览器解出 1920x1080 真实画面（零丢帧）。
 #
-# 为什么必须 host 网络：WebRTC 媒体流（RTP/UDP）靠 ICE 候选直连，bridge 网络的
-# 候选是容器内网 172.x，宿主浏览器不可达 → 信令（WS）通但视频黑屏。host 网络下
-# 候选即宿主 IP，浏览器直达。代价是容器内服务必须换端口（docker-config.toml
-# port=8444）避开开发实例的 8443。
+# 注意：
+# - 手机「无线调试」端口每次重新开启都会变化，设备连接地址需随之更新
+# - 熄屏/深睡或 adb server 重启会掉无线连接，重新 connect 即可（密钥已互信）
+# - 备选模式「共享宿主 adb server」（adb 层共享但 reverse 隧道死结致容器内无
+#   实时会话）见 git 历史 b2dedc7 与 docs/DEVICE_ACCESS.md 的方案对比
 #
-# 设备接入（共享宿主 adb server 方案，详见 docs/DEVICE_ACCESS.md）：宿主以
-# -a 模式常驻 adb server（tools/adb-share-start.ps1，监听 0.0.0.0:5037），容器内
-# adb 客户端经 ADB_SERVER_SOCKET 复用它，USB/无线设备天然全可见；容器内不挂载
-# adbkey（配对密钥在宿主侧，挂进来无用且混淆）。
-#
-# 数据目录准备（种子 = server/data 下各应用分区 <pkg>/{tmpl,yaml}，不含 gamer.db* /
-# pending_restore.json，Docker 实例自建自己的数据库）：
+# 数据目录准备（种子 = server/data 下各应用分区 <pkg>/{tmpl,yaml}，不含 gamer.db*）：
 #   mkdir -p docker-data && cp -r server/data/<pkg>… docker-data/
 #
 # 启动（构建 + 起容器；redroid 带 profile，不会被拉起）：
@@ -30,29 +29,24 @@ services:
   gamer:
     image: gamer:deploy
     container_name: gamer-server-docker
-    # 注意：曾尝试 network_mode: host 修复 WebRTC 黑屏（bridge 候选 172.x 浏览器不可达），
-    # 但 Docker Desktop 的 host networking 未在设置启用时不生效（宿主访问不到容器端口）。
-    # 当前方案：bridge + TCP/UDP 双映射 + 服务端 rtc_external_ip/rtc_udp_port 配置
-    # （见 docker-config.toml）宣告宿主可达的 ICE 候选。
+    # bridge + TCP/UDP 双映射：WebRTC 媒体候选经 docker-config.toml 的 rtc_*
+    # 三键宣告宿主可达地址（127.0.0.1:8444），UDP 媒体流走 8444:8443/udp 映射
     ports: !override
       - "8444:8443"
       - "8444:8443/udp"
     volumes: !override
       # 独立数据目录：与开发实例 server/data 完全隔离
       - ./docker-data:/app/data
-      # 容器专用配置：port=8444 + 容器内工具路径；rtc_* 三键当前由并行 WebRTC
-      # 出画修复工作持有（保持生效），修复落地后按 docs/DEVICE_ACCESS.md 处置
+      # 容器专用配置：port=8443 + 容器内工具路径 + ICE 候选宣告（出画修复）
       - ./docker-config.toml:/app/config.toml:ro
-      # adb 密钥不再挂载：共享宿主 adb server 模式下配对在宿主侧完成
+      # 无线调试连接：复用 Windows 已配对的 adb 密钥（USB 授权即互信），
+      # 容器内 adb connect <ip:port> 免配对码；reverse 隧道在容器内闭环
+      - C:/Users/Jeson/.android/adbkey:/root/.android/adbkey:ro
+      - C:/Users/Jeson/.android/adbkey.pub:/root/.android/adbkey.pub:ro
     healthcheck: !override
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8443/health/ready"]
       interval: 30s
       timeout: 5s
       start_period: 15s
       retries: 3
-    environment: !override
-      - GB_CONFIG=/app/config.toml
-      # 共享宿主 adb server：容器内每次 spawn 的 adb 客户端进程全部打到宿主 server
-      # （宿主需先跑 tools/adb-share-start.ps1；server 被 kill 或重启机器后需重跑）
-      - ADB_SERVER_SOCKET=tcp:host.docker.internal:5037
-    # build / restart 策略复用主文件定义
+    # build / environment(GB_CONFIG) / restart 策略复用主文件定义
