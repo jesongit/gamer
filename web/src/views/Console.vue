@@ -72,23 +72,11 @@
     <aside class="panel">
       <div class="panel-sec script-tab">
         <TemplateCapture :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
-        <ScriptRunner :context="scriptRunnerContext" :on-editor-mounted="onScriptEditorMounted" />
+        <ScriptRunner :context="scriptRunnerContext" />
       </div>
     </aside>
     <!-- 设备设置 / 新增设备弹窗 -->
     <DeviceSettingsModal :context="deviceSettingsContext" />
-    <!-- call 子脚本预览弹窗（ESC / ✕ / 点遮罩关闭） -->
-    <div v-if="previewScript" class="modal-mask" @click.self="closeCallPreview">
-      <div class="modal preview-modal">
-        <div class="modal-head">
-          <span class="title mono">{{ previewScript.name }}</span>
-          <button class="btn btn-ghost btn-sm" @click="closeCallPreview">✕</button>
-        </div>
-        <div class="modal-body">
-          <pre class="preview-code mono">{{ previewScript.content }}</pre>
-        </div>
-      </div>
-    </div>
 
     <!-- 设备占用冲突 409 提示（对方脚本/来源/开始时间；仍要查看日志 → 跳控制台对应设备） -->
     <RunConflictModal />
@@ -117,10 +105,12 @@ import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
 import ScriptRunner from '../components/console/ScriptRunner.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
-import { createScriptValidator } from '../script-language/validate'
-import { computeRunLineMap } from '../script-language/line-map'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
 import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
+import { useScriptEditorShell } from '../composables/useScriptEditorShell'
+import { useFunctionLibrary } from '../composables/useFunctionLibrary'
+import { parseScript } from '../script-editor/codec'
+import { startIndexOf } from '../script-editor/selection'
 import {
   defaultTemplateName,
   deviceRectStyle as mapDeviceRectStyle,
@@ -128,7 +118,6 @@ import {
   toDeviceCoord as mapToDeviceCoord,
 } from '../console/geometry'
 import { formatScreenSummary } from '../console/device-summary'
-import { renderOpTpl } from '../console/op-template'
 
 const router = useRouter()
 const toast = useToast()
@@ -189,51 +178,37 @@ let stallResetSent = false
 let fpCanvas = null
 let fpCtx = null
 const selScript = ref('')
-// 脚本页签：运行/编辑模式 + 日志级别
-const DEFAULT_SCRIPT_CODE = `config:
-  interval: 500ms
-
-steps:
-  - wait: 1s
-  - log: "脚本开始运行"
-`
+// 脚本页签：运行/编辑模式
 // 脚本页签当前应用分区（= 应用包名）：默认/自动跟随设备页签配置的 pkg，可手动切换；
 // 模板列表、脚本选择、模板/脚本读写都按该分区进行（后端 data/<pkg>/tmpl|yaml）
 const activePkg = ref('')
 const scriptMode = ref('run')
-const editScriptName = ref('新脚本')
-const editScriptCode = ref(DEFAULT_SCRIPT_CODE)
-// 编辑区 textarea：追加操作记录时读取光标位置
-const scriptEditor = ref(null)
-// 编辑模式当前编辑的脚本 id（null=新建）
-const editScriptId = ref(null)
-const scriptSaving = ref(false)
-// 操作记录 YAML 模板：alt 模式把操作追加到编辑区时使用的格式。
-// 由服务端 config.toml 的 [op_templates] 配置，前端启动时拉取；失败时用内置默认。
-// 占位符：{name} 模板名 · {x}/{y} 点击坐标 · {fx}/{fy}/{tx}/{ty} 滑动起终点 ·
-//         {time} 滑动实际时长 ms · {color} 二次裁切区点击处采样的十六进制颜色
-//         搜索区域不再有占位符：由模板名 #后缀（hp#l / xx#0_0_500_500）决定，引擎自动解析
-// 生成的操作记录不写等待参数：步骤间不再统一等待，轮询间隔由 config interval 控制
-const DEFAULT_OP_TPL = {
-  find: '- find: {name}',
-  tap: '- tap: [{x}, {y}]',
-  color: '- color: [{x}, {y}]\n  {color}:',
-  swipe: '- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}ms'
-}
-const opTpls = reactive({ ...DEFAULT_OP_TPL })
-api.getOpTemplates().then(t => {
-  if (!t || typeof t !== 'object') return
-  for (const k of Object.keys(DEFAULT_OP_TPL)) {
-    if (typeof t[k] === 'string' && t[k].trim()) opTpls[k] = t[k]
-  }
-}).catch(e => {
-  console.warn('op-templates 拉取失败，使用内置默认模板（服务端未重启或接口缺失）', e)
+// ---------- 共享脚本编辑器外壳（阶段 4） ----------
+// 模型/命令栈/dirty/保存/409 冲突/校验/跳转全部收敛在 useScriptEditorShell，
+// Console 与独立脚本页共用同一编辑核心（script-editor/*）。
+// resolvers 提供模板存在性校验（call/func 资源与 args 绑定检查需要目标参数表，客户端暂缺、由服务端权威校验）
+const scriptShell = useScriptEditorShell({
+  api,
+  getContext: () => ({
+    resolveTemplate: (n) => {
+      const list = templatesData.value.filter(t => t.pkg === activePkg.value)
+      return list.some(t => t.name === n || tplShortName(t.name) === n)
+    },
+  }),
 })
-// alt 模式：仅在脚本编辑模式生效；开启后模板/投屏点击只生成操作记录
+// 函数库列表与 func 目标解析（func 步骤「打开函数定义」跳转用）
+const fnLib = useFunctionLibrary({ api })
+// 编辑态辅助 UI 开关
+const showYaml = ref(false)
+const showExtras = ref(false)
+// 模板短名候选（画布 tmpl 控件 datalist）
+const templateNames = computed(() =>
+  templatesData.value.filter(t => t.pkg === activePkg.value).map(t => tplShortName(t.name)))
+watch(activePkg, pkg => { fnLib.refresh(pkg) })
+
+// ---------- alt 模式（编辑态把投屏/模板/取色操作生成为类型化步骤插入当前锚点） ----------
+// alt 模式：仅在脚本编辑模式生效；开启后模板/投屏点击只生成类型化步骤，不发送控制指令
 const altMode = ref(false)
-// 操作记录区：最多展示 3 行，每行可点击追加到编辑区
-const opRecords = ref([])
-let opRecordSeq = 0
 // alt 手势（点击/滑动投屏时记录，不发送控制指令）
 const altGesture = reactive({ active: false, moved: false, start: { x: 0, y: 0 }, last: { x: 0, y: 0 }, startT: 0 })
 // alt 模式点击/滑动画面反馈（点击圆点 / 滑动 region 框）
@@ -1469,9 +1444,10 @@ function cropEventDev(e) {
   }
 }
 
-/** 二次裁切底图（冻结的框选画面）上 alt 点击 → 取色生成 color 颜色判断记录：
+/** 二次裁切底图（冻结的框选画面）上 alt 点击 → 取色生成 color 颜色判断步骤：
  *  颜色直接从 cropBaseCanvas 采样（所见即所得，同步生成无延迟）；
- *  点击点在底图上的设备坐标 = p + (originX, originY)，换算成相对坐标写进 color 坐标 */
+ *  点击点在底图上的设备坐标 = p + (originX, originY)，换算成相对坐标写入 color 步骤。
+ *  阶段 4：不再拼接 YAML 文本，直接生成类型化 ColorStep 插入当前编辑锚点 */
 function cropPickColor(e) {
   const p = cropEventDev(e)
   const base = cropBaseCanvas
@@ -1482,12 +1458,9 @@ function cropPickColor(e) {
   const hex = [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('')
   const vw = crop.imgW || 1920
   const vh = crop.imgH || 1080
-  const rx = ((crop.originX + px) / vw).toFixed(4)
-  const ry = ((crop.originY + py) / vh).toFixed(4)
-  opRecords.value = [
-    { id: ++opRecordSeq, text: `- color #${hex} @ (${rx}, ${ry})`, yaml: renderOpTpl(opTpls.color, { x: rx, y: ry, color: hex }) }
-  ]
-  toast(`已生成 ${hex} 的颜色判断记录，点击选择追加`, 'success')
+  const rx = (crop.originX + px) / vw
+  const ry = (crop.originY + py) / vh
+  insertAltStep(() => scriptShell.insertColorCheck([rx, ry], hex), `颜色判断 ${hex} @ (${rx.toFixed(4)}, ${ry.toFixed(4)})`)
 }
 
 function cropMouseDown(e) {
@@ -1720,17 +1693,14 @@ async function onTplThumbClick(e, t) {
   openTplView(t.name)
 }
 
-/** 模板列表文件名：alt → 生成 find 操作记录；普通 → 查看大图 */
+/** 模板列表文件名：alt → 生成 find 步骤插入当前编辑锚点；普通 → 查看大图 */
 function onTplNameClick(e, t) {
   if (renaming.value === t.name) return
   confirmDelTpl.value = null
   if (isAltAction(e)) {
-    // 生成的记录写短名（login.png）：引擎自动解析到带 #后缀 的文件，区域照常生效
+    // 生成的步骤写短名（login.png）：引擎自动解析到带 #后缀 的文件，区域照常生效
     const name = tplShortName(t.name)
-    opRecords.value = [
-      { id: ++opRecordSeq, text: `- find ${name}（等到出现+点击）`, yaml: renderOpTpl(opTpls.find, { name }) }
-    ]
-    toast(`已生成 ${name} 的 find 记录，点击选择追加`, 'success')
+    insertAltStep(() => scriptShell.insertFindTemplate(name), `等待并点击 ${name}`)
     return
   }
   openTplView(t.name)
@@ -1853,13 +1823,11 @@ function fileToBase64(file) {
   })
 }
 
-/** 全局按键：Esc 关闭设备设置弹窗 / call 子脚本预览 / 模板大图 / 取消删除确认 */
+/** 全局按键：Esc 关闭设备设置弹窗 / 模板大图 / 取消删除确认 */
 function onGlobalKeydown(e) {
   if (e.key !== 'Escape') return
   if (settingsOpen.value) {
     cancelSettings()
-  } else if (previewScript.value) {
-    closeCallPreview()
   } else if (viewTpl.value) {
     closeTplView()
   } else if (confirmDelTpl.value) {
@@ -1878,7 +1846,6 @@ function pushLog(level, msg) {
 /** 重置 alt 模式相关状态（进入/退出编辑模式时调用） */
 function resetAltState() {
   altMode.value = false
-  opRecords.value = []
   altGesture.active = false
   if (altFeedbackTimer) clearTimeout(altFeedbackTimer)
   altFeedback.show = false
@@ -1890,9 +1857,22 @@ function toggleAltMode() {
   altMode.value = !altMode.value
 }
 
-/** 当前是否应把模板/投屏操作转为操作记录（编辑模式 + 按住 Alt 或 alt 模式开启） */
+/** 当前是否应把模板/投屏操作转为类型化步骤（编辑模式 + 按住 Alt 或 alt 模式开启） */
 function isAltAction(e) {
   return scriptMode.value === 'edit' && (altMode.value || (e && e.altKey))
+}
+
+/** Alt 生成步骤统一入口：仅编辑态且有模型时插入当前锚点（与「添加步骤」面板同源）；
+ *  否则提示（plan §10：Alt 投屏记录 → 非录制状态保留，插入当前锚点可撤销） */
+function insertAltStep(make, label) {
+  if (scriptMode.value !== 'edit' || !scriptShell.hasModel) {
+    toast('进入脚本编辑态后，Alt 操作才会插入类型化步骤', 'warn')
+    return false
+  }
+  const ok = make()
+  if (ok) toast(`${label} 已插入当前锚点`, 'success')
+  else toast('插入失败：锚点不可用', 'error')
+  return ok
 }
 
 /** 从模板名解析 #x1_y1_x2_y2（相对坐标 ×1000 存 3 位整数，如 123→0.123），返回 [x1,y1,x2,y2] 或 null */
@@ -1971,199 +1951,6 @@ function templateRegionPixels(name) {
   return null
 }
 
-/** 把生成的 YAML 片段以对应缩进插入到脚本的光标下一行：
- *  - 光标在 steps 列表内 → 2 空格缩进插到光标所在行的下一行
- *  - 光标在 func 函数体内 → 以函数体缩进（默认 defIndent+2；cond+steps 写法取
- *    steps 列表项缩进）插到光标所在行的下一行；光标在「- 函数名:」行 / func: 行 →
- *    插到该函数体末尾（无函数定义时回到 steps 逻辑）
- *  - 省略段落键的简写脚本同样支持：顶层 steps 序列按序列项缩进追加；省略 func:
- *    的顶层函数定义按定义缩进 0 定位函数体（兜底追加到最后一个函数体末尾）
- *  - 其余（steps 之外或无光标）→ 追加到 steps 列表末尾；没有 steps 时补一个
- *    最小可运行脚本结构。插入后光标移到新记录之后，方便连续追加 */
-function appendYamlToScript(snippet) {
-  const lines = editScriptCode.value.split('\n')
-  const stepsIdx = lines.findIndex(l => /^steps\s*:/.test(l))
-  const funcIdx = lines.findIndex(l => /^func\s*:/.test(l))
-  // 省略段落键的简写（与引擎 normalize_top 判定一致）：无 steps:/func: 根键时
-  // 顶层序列 = steps、顶层映射 = func（函数定义在缩进 0；config 不能省略）
-  const firstContent = lines.find(l => l.trim() && !/^\s*#/.test(l)) || ''
-  const impliedSteps = stepsIdx === -1 && funcIdx === -1 && /^\s*-\s/.test(firstContent)
-  const impliedFunc = stepsIdx === -1 && funcIdx === -1 && !impliedSteps && !!firstContent
-  const ta = scriptEditor.value
-  let cursorLine = -1
-  if (ta && typeof ta.selectionStart === 'number') {
-    cursorLine = editScriptCode.value.slice(0, ta.selectionStart).split('\n').length - 1
-  }
-  const indOf = l => (l.match(/^(\s*)/) || ['', ''])[1].length
-
-  let insertIdx = -1
-  let indent = '  '
-  // —— 光标在 func 段内（显式 func: 或省略简写的顶层映射）：插入到光标所属函数体 ——
-  if ((funcIdx !== -1 || impliedFunc) && cursorLine >= funcIdx) {
-    const defIndent = impliedFunc ? 0 : 2 // 函数定义行缩进（简写 = 顶层）
-    // 函数定义行（「名称:」或「- 名称:」，值留空；cond/steps 挂在下一层）
-    const isDef = l => {
-      const t = l.trim()
-      return indOf(l) === defIndent && /^(- )?[\w.-]+\s*:\s*(#.*)?$/.test(t)
-    }
-    // 函数体末尾 = 下一个缩进 ≤defIndent 的非空行（函数定义 / 根级键）之前；
-    // 函数体缩进 = 第一个「- 」项行（cond+steps 写法里 steps 列表项的缩进），
-    // 无项行时若紧跟 steps: 键则取其 +2，默认 defIndent+2
-    const insertIntoFuncBody = defIdx => {
-      let bodyEnd = defIdx
-      for (let i = defIdx + 1; i < lines.length; i++) {
-        const l = lines[i]
-        if (l.trim() && indOf(l) <= defIndent) break
-        if (l.trim()) bodyEnd = i
-      }
-      let bi = defIndent + 2
-      for (let i = defIdx + 1; i <= bodyEnd; i++) {
-        const l = lines[i]
-        if (!l.trim()) continue
-        const ind = indOf(l)
-        if (ind <= defIndent) break
-        if (/^\s*-\s/.test(l)) { bi = ind; break }
-        if (/^steps\s*:\s*$/.test(l.trim())) bi = ind + 2
-      }
-      indent = ' '.repeat(bi)
-      // 光标在函数体内（含函数体行/嵌套行）→ 光标下一行；否则函数体末尾
-      insertIdx = cursorLine > defIdx && cursorLine <= bodyEnd ? cursorLine + 1 : bodyEnd + 1
-    }
-    let inFunc = false
-    for (let i = cursorLine; i >= 0; i--) {
-      if (lines[i].trim() && indOf(lines[i]) === 0) {
-        // 简写：顶层函数定义行即段起点；显式：func: 行
-        inFunc = impliedFunc ? isDef(lines[i]) : /^func\s*:/.test(lines[i])
-        break
-      }
-    }
-    if (inFunc) {
-      // 光标所属函数；光标在 func: 行 / 首个函数之前 → 第一个函数
-      let defIdx = -1
-      for (let i = cursorLine; i > funcIdx; i--) {
-        if (isDef(lines[i])) { defIdx = i; break }
-      }
-      if (defIdx === -1) {
-        for (let i = impliedFunc ? 0 : funcIdx + 1; i < lines.length; i++) {
-          if (!impliedFunc && lines[i].trim() && indOf(lines[i]) === 0) break
-          if (isDef(lines[i])) { defIdx = i; break }
-        }
-      }
-      if (defIdx !== -1) insertIntoFuncBody(defIdx)
-    } else if (impliedFunc) {
-      // 简写库兜底（光标在函数外/注释区）：追加到最后一个函数体末尾
-      let lastDef = -1
-      for (let i = 0; i < lines.length; i++) if (isDef(lines[i])) lastDef = i
-      if (lastDef !== -1) insertIntoFuncBody(lastDef)
-    }
-  }
-  // —— 省略 steps: 的顶层序列：按序列项缩进追加（光标行后优先，否则列表末尾）——
-  if (impliedSteps && insertIdx === -1) {
-    const firstDash = lines.findIndex(l => /^\s*-\s/.test(l))
-    indent = ' '.repeat(indOf(lines[firstDash]))
-    insertIdx = lines.length
-    if (cursorLine >= firstDash) {
-      const cur = lines[cursorLine] || ''
-      if (!cur.trim() || /^\s/.test(cur) || /^\s*#/.test(cur)) insertIdx = cursorLine + 1
-    }
-  }
-  // —— 没有 steps 时补一个最小可运行脚本结构 ——
-  if (stepsIdx === -1 && insertIdx === -1) {
-    const indented = snippet.split('\n').map(l => (l ? '  ' + l : l)).join('\n')
-    const base = editScriptCode.value.trim()
-    const block = `steps:\n${indented}`
-    editScriptCode.value = base ? base + '\n\n' + block : block
-    return
-  }
-  // —— steps 列表（或兜底）：光标在 steps 内部 → 光标下一行，否则 steps 末尾 ——
-  if (insertIdx === -1) {
-    insertIdx = lines.length
-    for (let i = stepsIdx + 1; i < lines.length; i++) {
-      const line = lines[i]
-      if (line.trim() && !/^\s/.test(line)) {
-        insertIdx = i
-        break
-      }
-    }
-    if (cursorLine > stepsIdx) {
-      const cur = lines[cursorLine] || ''
-      if (!cur.trim() || /^\s/.test(cur) || /^\s*#/.test(cur)) {
-        insertIdx = cursorLine + 1
-      }
-    }
-  }
-  const indented = snippet.split('\n').map(l => (l ? indent + l : l)).join('\n')
-  const before = lines.slice(0, insertIdx)
-  const after = lines.slice(insertIdx)
-  while (before.length && before[before.length - 1].trim() === '') before.pop()
-  while (after.length && after[0].trim() === '') after.shift()
-  const text = before.join('\n') + (before.length ? '\n' : '') + indented + (after.length ? '\n' + after.join('\n') : '')
-  editScriptCode.value = text
-  // 光标移到插入的记录之后，连续追加时依次往下排
-  nextTick(() => {
-    const ta2 = scriptEditor.value
-    if (!ta2) return
-    const pos = (before.join('\n').length + (before.length ? 1 : 0)) + indented.length
-    ta2.selectionStart = ta2.selectionEnd = pos
-  })
-}
-
-/** 点击操作记录行：把对应的 YAML 追加到编辑区 */
-function applyOpRecord(r) {
-  if (scriptMode.value !== 'edit') return
-  appendYamlToScript(r.yaml)
-  toast('已追加：' + r.text, 'success')
-}
-
-/** 编辑区 Tab 键：插入 2 个空格（代替切换焦点）；Shift+Tab 反向缩进（每行行首退 1~2 个空格） */
-function onEditorTab(e) {
-  const ta = e.target
-  const start = ta.selectionStart
-  const end = ta.selectionEnd
-  const v = editScriptCode.value
-  if (start === end) {
-    const lineStart = v.lastIndexOf('\n', start - 1) + 1
-    const before = v.slice(lineStart, start)
-    if (e.shiftKey) {
-      // Shift+Tab：当前行行首退 1~2 个空格（光标在行内任意位置均可）
-      const m = before.match(/^ {1,2}/)
-      if (m) {
-        editScriptCode.value = v.slice(0, lineStart) + v.slice(lineStart + m[0].length)
-        nextTick(() => { ta.selectionStart = ta.selectionEnd = start - m[0].length })
-      }
-      return
-    }
-    editScriptCode.value = v.slice(0, start) + '  ' + v.slice(end)
-    nextTick(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
-    return
-  }
-  const sel = v.slice(start, end)
-  if (sel.includes('\n')) {
-    const lineStart = v.lastIndexOf('\n', start - 1) + 1
-    if (e.shiftKey) {
-      // Shift+Tab 多行选中：各行行首退 1~2 个空格
-      const lines = v.slice(lineStart, end).split('\n')
-      const removed = lines.map(l => (l.match(/^ {1,2}/) || ['', ''])[0].length)
-      const dedented = lines.map((l, i) => l.slice(removed[i])).join('\n')
-      editScriptCode.value = v.slice(0, lineStart) + dedented + v.slice(end)
-      const shrink = removed.reduce((a, b) => a + b, 0)
-      const newEnd = Math.max(lineStart, end - shrink)
-      const newStart = Math.min(start - Math.min(removed[0], start - lineStart), newEnd)
-      nextTick(() => { ta.selectionStart = newStart; ta.selectionEnd = newEnd })
-      return
-    }
-    // 多行选中：每行前插 2 空格
-    const indented = v.slice(lineStart, end).split('\n').map(l => '  ' + l).join('\n')
-    editScriptCode.value = v.slice(0, lineStart) + indented + v.slice(end)
-    const newEnd = lineStart + indented.length
-    nextTick(() => { ta.selectionStart = lineStart; ta.selectionEnd = newEnd })
-  } else {
-    // 单点插入：光标处插 2 空格
-    editScriptCode.value = v.slice(0, start) + '  ' + v.slice(end)
-    nextTick(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
-  }
-}
-
 /** 显示 alt 模式画面反馈（2 秒后自动消失） */
 function showAltFeedback(kind, x, y, w = 0, h = 0) {
   altFeedback.show = true
@@ -2176,65 +1963,70 @@ function showAltFeedback(kind, x, y, w = 0, h = 0) {
   altFeedbackTimer = setTimeout(() => { altFeedback.show = false }, 2000)
 }
 
-/** 投屏点击（alt 模式）→ 生成 tap 记录（color 取色记录改在二次裁切区内生成，见 cropPickColor） */
+/** 投屏点击（alt 模式）→ 生成 tap 类型化步骤插入当前锚点（color 取色在二次裁切区，见 cropPickColor） */
 function setTapRecord(p) {
   const vw = videoElement.value?.videoWidth || 1920
   const vh = videoElement.value?.videoHeight || 1080
-  const rx = (p.x / vw).toFixed(4)
-  const ry = (p.y / vh).toFixed(4)
-  opRecords.value = [
-    { id: ++opRecordSeq, text: `- tap [${rx}, ${ry}]`, yaml: renderOpTpl(opTpls.tap, { x: rx, y: ry }) }
-  ]
   showAltFeedback('tap', p.x, p.y)
+  const x = p.x / vw
+  const y = p.y / vh
+  insertAltStep(() => scriptShell.insertTapAt(x, y), `点击 (${x.toFixed(4)}, ${y.toFixed(4)})`)
 }
 
-/** 投屏滑动 → 生成 swipe 记录（time 用实际滑动时长，模板自带 ms 单位） */
+/** 投屏滑动（alt 模式）→ 生成 swipe 类型化步骤（time 用实际滑动时长 ms） */
 function setSwipeRecords(from, to, durationMs) {
   const vw = videoElement.value?.videoWidth || 1920
   const vh = videoElement.value?.videoHeight || 1080
-  const fx = (from.x / vw).toFixed(4)
-  const fy = (from.y / vh).toFixed(4)
-  const tx = (to.x / vw).toFixed(4)
-  const ty = (to.y / vh).toFixed(4)
-  const dur = Math.max(1, Math.round(durationMs || 1000))
-  opRecords.value = [
-    {
-      id: ++opRecordSeq,
-      text: `- swipe [${fx}, ${fy}] -> [${tx}, ${ty}] ${dur}ms`,
-      yaml: renderOpTpl(opTpls.swipe, { fx, fy, tx, ty, time: String(dur) })
-    }
-  ]
   const rx = Math.min(from.x, to.x)
   const ry = Math.min(from.y, to.y)
   const rw = Math.abs(to.x - from.x)
   const rh = Math.abs(to.y - from.y)
   showAltFeedback('region', rx, ry, rw, rh)
+  const f = [from.x / vw, from.y / vh]
+  const t = [to.x / vw, to.y / vh]
+  insertAltStep(() => scriptShell.insertSwipeBetween(f, t, durationMs), `滑动 (${f[0].toFixed(4)}, ${f[1].toFixed(4)}) → (${t[0].toFixed(4)}, ${t[1].toFixed(4)})`)
 }
 
-function cancelEditScript() {
-  editScriptId.value = null
+/** 退出编辑（脏模型需确认丢弃）；若处于跳转栈中先返回上一资源。
+ *  注意 shell 是 reactive 包装：ref/computed 属性访问即解包，不能再取 .value */
+async function cancelEditScript() {
+  if (scriptShell.hasModel && scriptShell.dirty && !window.confirm('有未保存修改，确认放弃？')) return
+  if (scriptShell.canJumpBack) {
+    await jumpBack()
+    return
+  }
+  scriptShell.reset()
   scriptMode.value = 'run'
+  showYaml.value = false
+  showExtras.value = false
   resetAltState()
 }
 
+/** 新建脚本：空 ScriptModel（保存时落盘到当前应用分区） */
 function startNewScript() {
   if (!activePkg.value) return toast('请先选择应用分区（设备页签配置应用包名）', 'warn')
-  editScriptId.value = null
-  editScriptName.value = '新脚本'
-  editScriptCode.value = DEFAULT_SCRIPT_CODE
   scriptMode.value = 'edit'
+  showYaml.value = false
+  showExtras.value = false
   resetAltState()
+  scriptShell.newScript({ name: '新脚本.yml', pkg: activePkg.value })
 }
 
-/** 运行模式：编辑当前选中的脚本 */
-function editCurrentScript() {
+/** 运行模式：编辑当前选中的脚本（getScript 读取最新内容与版本短码） */
+async function editCurrentScript() {
   const s = scripts.value.find(x => x.id === selScript.value)
   if (!s) return toast('请先选择脚本', 'error')
-  editScriptId.value = s.id
-  editScriptName.value = s.name.replace(/\.(ya?ml)$/i, '')
-  editScriptCode.value = s.content
   scriptMode.value = 'edit'
+  showYaml.value = false
+  showExtras.value = false
   resetAltState()
+  try {
+    await scriptShell.loadScript(s.id)
+  } catch (e) {
+    scriptShell.reset()
+    scriptMode.value = 'run'
+    toast('脚本加载失败：' + e.message, 'error')
+  }
 }
 
 /** 运行模式：删除当前选中的脚本 */
@@ -2290,31 +2082,58 @@ async function onImportFile(e) {
   })
 }
 
-/** 脚本校验（实现已抽离至 src/script-language/validate.js）：绑定当前分区/模板/脚本数据源 */
-const validateScriptCode = createScriptValidator({ templatesData, scriptsData, activePkg })
+/** 脚本校验（结构化字段级）由 useScriptEditorShell.diagnostics 提供（validateScript + 解析期诊断） */
 
-/** 保存新建/编辑脚本：先校验再保存（落盘到当前应用分区），名称自动补 .yml */
+/** 保存编辑中的脚本：shell.save() 序列化模型并携带 expected_version；
+ *  校验失败 → 提示前 3 条诊断；409 version_conflict → shell.conflict 置位，SaveConflictModal 弹出 */
 async function saveEditScript() {
-  const rawName = editScriptName.value.trim()
-  if (!rawName) return toast('请填写脚本名称', 'error')
-  if (!activePkg.value) return toast('请先选择应用分区', 'warn')
-  const name = /\.(ya?ml)$/i.test(rawName) ? rawName : rawName + '.yml'
-  const errors = validateScriptCode(editScriptCode.value)
-  if (errors.length) return toast('校验未通过：' + errors.slice(0, 3).join('；'), 'error')
-  scriptSaving.value = true
-  try {
-    const r = await api.saveScript({ id: editScriptId.value, name, content: editScriptCode.value, pkg: activePkg.value })
-    await loadData()
-    editScriptId.value = null
-    scriptMode.value = 'run'
-    resetAltState()
-    selScript.value = r.id
-    toast('脚本已保存', 'success')
-  } catch (e) {
-    toast('保存失败：' + e.message, 'error')
-  } finally {
-    scriptSaving.value = false
+  if (!scriptShell.hasModel) return
+  if (!String(scriptShell.name || '').trim()) return toast('请填写脚本名称', 'error')
+  if (!scriptShell.pkg && !activePkg.value) return toast('请先选择应用分区', 'warn')
+  const r = await scriptShell.save()
+  if (r.ok) {
+    await afterScriptSaved(r.result)
+  } else if (r.reason === 'invalid') {
+    toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
+  } else if (r.reason === 'conflict') {
+    // shell.conflict 已置位，弹窗由 ScriptRunner 渲染（重载 / 覆盖）
+  } else {
+    toast('保存失败：' + (r.error?.message || r.error), 'error')
   }
+}
+
+/** 保存成功后置：刷新列表、选中保存后的脚本、退出编辑回到运行视图 */
+async function afterScriptSaved(rep) {
+  await loadData()
+  if (rep?.id) selScript.value = rep.id
+  scriptShell.reset()
+  scriptMode.value = 'run'
+  showYaml.value = false
+  showExtras.value = false
+  resetAltState()
+  toast('脚本已保存', 'success')
+}
+
+/** 409 冲突弹窗：重载磁盘版本（放弃本地修改） */
+async function onConflictReload() {
+  try {
+    const r = await scriptShell.reload()
+    if (r.ok) toast('已恢复磁盘版本', 'success')
+  } catch (e) {
+    toast('重载失败：' + e.message, 'error')
+  }
+}
+
+/** 409 冲突弹窗：强制覆盖（不带 expected_version 重存），成功后同保存收尾 */
+async function onConflictOverwrite() {
+  const r = await scriptShell.overwrite()
+  if (r.ok) await afterScriptSaved(r.result)
+  else if (r.reason === 'error') toast('覆盖失败：' + (r.error?.message || r.error), 'error')
+}
+
+/** 409 冲突弹窗：关闭（留在编辑态，可继续改后重试保存） */
+function onConflictDismiss() {
+  scriptShell.dismissConflict()
 }
 
 // 运行状态轮询：以当前 runId 单次查询 GET /api/runs/:run_id，
@@ -2372,74 +2191,89 @@ async function checkRunStatus() {
   } catch (e) {}
 }
 
-// ---------- 运行模式：只读脚本内容 + 逻辑行选中 ----------
-// 未运行/非编辑时展示脚本内容（不可编辑）。可点击选中的「逻辑行」：
-// steps: 段内与首项同缩进的 "- " 行（从该步骤起跑顶层）+ func: 段内每个
-// 函数名行（从头运行整函数：引擎先判 cond 再跑函数体）与函数体中与函数体
-// 首项同缩进的 "- " 行（直接运行该函数体，从该步骤起）。
-// then/else/loop 子步骤、config 段不可选；索引按所在段落各自计数，
-// 不再受 func/config 段条目数量的偏移影响。
-// 省略段落键的简写脚本（顶层序列/顶层映射直接写内容）同样支持行选中。
-const selectedLine = ref(null)
-
-const scriptContent = computed(() => {
+// ---------- 运行模式：只读步骤摘要 + 运行起点选择（plan §10「只读源码展示/从某行运行」行） ----------
+// 非编辑态不再展示源码文本：选中脚本解析为 ScriptModel，ScriptSummary 逐顶层卡片给出
+// 图标 + 中文动作名 + 自然语言摘要；卡片可选中为运行起点（uuid → startIndexOf 映射顶层序号）。
+// 解析失败（旧语法残留等）→ summaryError 提示，主视图不给摘要、不可选运行起点。
+const summaryModel = computed(() => {
   const s = scripts.value.find(x => x.id === selScript.value)
-  return s ? s.content : ''
-})
-const scriptLines = computed(() => scriptContent.value.split('\n'))
-
-/** call / 跨文件函数调用行解析（与 scriptLines 平行）：
- *  `- call: test.yaml` → { prefix, name, suffix }；`- test1:fun1: 实参…` →
- *  { prefix, name: 脚本名, label: 完整键, suffix }，其余行 → null */
-const callLinks = computed(() => scriptLines.value.map(line => {
-  // call 传参后行内还有实参（- call: 通用日常.yml act_136.png）：分隔空格划入
-  // suffix（m[3] 以 \s+ 开头），否则渲染时脚本名和实参贴在一起
-  const m = line.match(/^(\s*(?:-\s+)?call:\s*)(\S+)((?:\s+.*)?)$/)
-  if (m) {
-    const name = m[2].replace(/^["']|["']$/g, '')
-    return name ? { prefix: m[1], name, suffix: m[3] } : null
+  if (!s) return null
+  try {
+    return parseScript(s.content ?? '').model
+  } catch {
+    return null
   }
-  // 跨文件函数调用 - 脚本名:函数名: 实参…：链接预览子脚本内容
-  const x = line.match(/^(\s*(?:-\s+)?)(\S+:[^\s:]+)((?:\s+.*)?)$/)
-  if (x) {
-    const script = x[2].split(':')[0]
-    return script ? { prefix: x[1], name: script, label: x[2], suffix: x[3] } : null
+})
+const summaryError = computed(() => {
+  const s = scripts.value.find(x => x.id === selScript.value)
+  if (!s) return ''
+  if (!summaryModel.value) return '脚本解析失败（可能含旧语法），请进编辑态查看诊断'
+  return ''
+})
+
+// 运行起点（顶层卡片 uuid；null = 从头运行）。脚本切换或内容重解析后重置
+const runStartUuid = ref(null)
+watch([selScript, summaryModel], () => { runStartUuid.value = null })
+
+/** 点击摘要卡片：选中/取消运行起点（嵌套卡片不会出现在摘要里，无需过滤） */
+function toggleRunStart(uuid) {
+  runStartUuid.value = runStartUuid.value === uuid ? null : uuid
+}
+
+/** 摘要卡片「▶ 从此运行」：选中该卡片并立即启动 */
+function runFromStep(uuid) {
+  if (store.running || startPending.value) return
+  runStartUuid.value = uuid
+  runScript()
+}
+
+/** 运行起点 uuid → 引擎 start_index（仅主流程顶层；找不到回退 0 从头跑） */
+function resolveRunStartIndex() {
+  if (!runStartUuid.value || !summaryModel.value) return 0
+  return startIndexOf(summaryModel.value, runStartUuid.value) ?? 0
+}
+
+// ---------- 结构化跳转（plan §10「调用文本链接预览」行：正则扫描源码 → 结构化引用） ----------
+
+/** call 步骤目标（短名或含扩展名）→ 同分区脚本 id（缺扩展名自动补全，与引擎一致） */
+function resolveCallTargetId(target) {
+  const raw = String(target || '').trim()
+  if (!raw) return null
+  const names = [raw]
+  if (!/\.(ya?ml)$/i.test(raw)) names.push(`${raw}.yaml`, `${raw}.yml`)
+  for (const n of names) {
+    const hit = scripts.value.find(x => x.package === activePkg.value && x.name === n)
+    if (hit) return hit.id
   }
   return null
-}))
+}
 
-// call 子脚本预览弹窗（点脚本名打开；ESC / ✕ / 点遮罩关闭）
-const previewScript = ref(null)
-
-function openCallPreview(name) {
-  // 与引擎 resolve_call 一致：缺 .yaml/.yml 扩展名自动补全
-  const find = n => scripts.value.find(x => x.name === n)
-  let s = find(name)
-  if (!s && !/\.(ya?ml)$/i.test(name)) {
-    for (const ext of ['.yaml', '.yml']) {
-      s = find(name + ext)
-      if (s) break
-    }
+/** 摘要 call/func 卡片「↗ 打开子脚本/函数定义」：进入编辑态并把目标载入共享外壳 */
+async function openScriptTarget({ kind, target }) {
+  const id = kind === 'call' ? resolveCallTargetId(target) : fnLib.resolveTargetId(target)
+  if (!id) return toast(`跳转目标不存在：${target}`, 'warn')
+  scriptMode.value = 'edit'
+  showYaml.value = false
+  showExtras.value = false
+  resetAltState()
+  try {
+    if (kind === 'call') await scriptShell.jumpToScript(id)
+    else await scriptShell.jumpToFunctionFile(id)
+  } catch (e) {
+    scriptShell.reset()
+    scriptMode.value = 'run'
+    toast('目标加载失败：' + e.message, 'error')
   }
-  if (!s) return toast(`子脚本不存在：${name}`, 'warn')
-  previewScript.value = s
 }
 
-function closeCallPreview() {
-  previewScript.value = null
+/** 编辑态跳转返回（call/func 打开目标后）：载回上一资源；栈空时按钮不显示 */
+async function jumpBack() {
+  try {
+    await scriptShell.jumpBack()
+  } catch (e) {
+    toast('返回失败：' + e.message, 'error')
+  }
 }
-
-const runLineMap = computed(() => computeRunLineMap(scriptLines.value))
-
-/** 点击行：可选逻辑行选中；再次点击已选中行取消（从头运行）；
- *  点击 then/else 等非逻辑行不改变当前选中 */
-function onScriptLineClick(idx) {
-  if (!runLineMap.value[idx]) return
-  selectedLine.value = selectedLine.value === idx ? null : idx
-}
-
-// 切换脚本时清除行选中
-watch(() => selScript.value, () => { selectedLine.value = null })
 
 // 启动提交中（202 快速返回前的防重复点击位）；run_id 在启动成功那一刻即登记为主键
 const startPending = ref(false)
@@ -2461,10 +2295,9 @@ async function runScript() {
   if (!selScript.value || !store.deviceId || startPending.value || store.running) return
   const s = scripts.value.find(x => x.id === selScript.value)
   if (!s) return
-  // 选中行 → 运行目标：顶层 steps 序号，或函数体（func + 体内序号）（「从某行运行」选中流不变）
-  const target = selectedLine.value != null ? runLineMap.value[selectedLine.value] : null
-  const startIndex = target ? target.index : 0
-  const funcName = target?.func || null
+  // 运行起点（摘要卡片选中）→ 顶层 steps 序号；未选中 = 从头运行（首版仅主流程顶层，plan §10）
+  const startIndex = resolveRunStartIndex()
+  const funcName = null
   const displayName = funcName ? `${s.name} · ${funcName}()` : s.name
   // 每次运行清空日志区域，只显示本次运行产生的日志
   runStartTime = Date.now()
@@ -2580,7 +2413,6 @@ function onCropMounted({ canvas, section }) {
   }
 }
 function onLogBoxMounted(el) { logBox.value = el }
-function onScriptEditorMounted(el) { scriptEditor.value = el }
 function setRenameInputEl(el) { renameInputEl = el }
 
 const deviceSettingsContext = {
@@ -2599,9 +2431,12 @@ const templateCaptureContext = {
 const scriptRunnerContext = {
   scriptMode, selScript, activePkg, store, startPending, runScript, runStopping, stopScript,
   editCurrentScript, moreOpen, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
-  scriptLines, selectedLine, runLineMap, onScriptLineClick, callLinks, openCallPreview,
-  editScriptName, scriptSaving, saveEditScript, cancelEditScript, altMode, toggleAltMode,
-  opRecords, applyOpRecord, editScriptCode, onEditorTab,
+  // 运行视图：只读摘要 + 运行起点 + call/func 结构化跳转（替代旧源码行点击/文本预览）
+  summaryModel, summaryError, runStartUuid, toggleRunStart, runFromStep, openScriptTarget,
+  // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调 + Alt 录制开关
+  shell: scriptShell, saveEditScript, cancelEditScript, altMode, toggleAltMode,
+  showYaml, showExtras, templateNames, jumpBack,
+  onConflictReload, onConflictOverwrite, onConflictDismiss,
 }
 
 onMounted(async () => {

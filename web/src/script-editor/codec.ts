@@ -615,7 +615,9 @@ function parseParamDecls(node: YNode | null, basePath: string, diags: Diagnostic
     }
     const raw = item.value
     const parts = splitn(raw, ':', 4)
-    if (parts.length < 3 || parts[0] === '' || parts[1] === '' || parts[2] === '') {
+    // 备注段允许为空（ParamEditor 新建行 remark=''；序列化端 paramDeclToRawString 同样可产出）,
+    // 只要求 类型/变量名 非空：'text:tag:'（无默认值）与 'text:tag::x'（空备注+默认值）均可回解析
+    if (parts.length < 3 || parts[0] === '' || parts[1] === '') {
       diags.push(diag(CODES.paramDeclFormat, path, 'declaration', `参数声明应为 类型:变量名:备注[:默认值] 四段式，收到 ${JSON.stringify(raw)}`))
       return
     }

@@ -1,12 +1,12 @@
 <template>
   <div class="param-editor" data-testid="param-editor" @click.stop>
     <div class="pe-head">
-      <span class="pe-title">脚本参数</span>
+      <span class="pe-title">{{ functionPath ? '函数参数' : '脚本参数' }}</span>
       <span class="pe-sub">{{ rows.length }} 个参数 · {{ rows.filter((p) => p.default !== null).length }} 个有默认值</span>
       <button type="button" class="mini-btn add" @click="addParam">+ 添加参数</button>
     </div>
 
-    <div v-if="isFunctionLibrary" class="pe-hint warn">函数库没有文件级 params——请在具体函数下编辑（命令栈扩展后开放）</div>
+    <div v-if="isFunctionLibrary && !functionPath" class="pe-hint warn">函数库没有文件级 params——请先在画布选择函数后按函数编辑参数</div>
 
     <template v-else>
       <div v-if="rows.length === 0" class="pe-hint">暂无参数。脚本可不声明参数；声明后可在步骤与运行表单中引用 $名称。</div>
@@ -61,11 +61,11 @@
  * 即时命名/重复/默认值校验提示；全部写操作经 CommandStack
  * （insert_param / update_param / remove_param / set_params）。
  *
- * 注意：命令栈的 params 命令只覆盖脚本文件级参数（函数库逐函数 params 待阶段 4 扩展），
- * 函数库模型挂载时显示提示。
+ * 阶段 4：传 functionPath（['functions', 函数名, 'params']）时编辑函数级 params，
+ * 命令携带 path 容器；缺省 = 脚本文件级（函数库模型未指明函数时仍显示提示）。
  */
 import { computed, type PropType } from 'vue'
-import type { EditorModel } from '../commands'
+import type { EditorModel, Path } from '../commands'
 import type { Diagnostic } from '../diagnostics'
 import { lit, PARAM_TYPES, type ParamDecl, type ParamType, type ScriptModel } from '../model'
 import { checkCellLiteral, PARAM_NAME_RE } from '../schema'
@@ -76,6 +76,8 @@ const props = defineProps({
   stack: { type: Object as PropType<{ apply: (c: unknown, n?: string) => boolean }>, required: true },
   /** 外部诊断（可传 validateScript 结果，step_path 形如 params[0]；此处仅标红整行）。 */
   diagnostics: { type: Array as PropType<Diagnostic[]>, default: () => [] },
+  /** 函数级 params 容器（['functions', 函数名, 'params']）；缺省 = 脚本文件级。 */
+  functionPath: { type: Array as PropType<Path | null>, default: null },
 })
 
 const TYPE_LABELS: Record<ParamType, string> = {
@@ -87,27 +89,40 @@ const DEFAULT_LITERALS: Record<ParamType, unknown> = {
 }
 
 const isFunctionLibrary = computed(() => 'functions' in props.model)
-const rows = computed<ParamDecl[]>(() => (isFunctionLibrary.value ? [] : (props.model as ScriptModel).params))
+const rows = computed<ParamDecl[]>(() => {
+  if (props.functionPath && props.functionPath.length === 3) {
+    const fnName = props.functionPath[1]
+    const fn = (props.model as { functions: { name: string; params: ParamDecl[] }[] }).functions
+      .find((f) => f.name === fnName)
+    return fn ? fn.params : []
+  }
+  return isFunctionLibrary.value ? [] : (props.model as ScriptModel).params
+})
+
+/** params 命令附加容器：函数级时携带 path（阶段 4 扩展），文件级缺省。 */
+function paramCmd<T extends object>(cmd: T): T & { path?: Path } {
+  return props.functionPath ? { ...cmd, path: props.functionPath } : cmd
+}
 
 function updateParam(index: number, decl: ParamDecl): boolean {
-  return props.stack.apply({ type: 'update_param', index, decl }, '编辑参数')
+  return props.stack.apply(paramCmd({ type: 'update_param', index, decl }), '编辑参数')
 }
 
 function addParam(): void {
   props.stack.apply(
-    { type: 'insert_param', index: rows.value.length, decl: { type: 'text', name: '', remark: '', default: null } },
+    paramCmd({ type: 'insert_param', index: rows.value.length, decl: { type: 'text', name: '', remark: '', default: null } }),
     '添加参数',
   )
 }
 function removeParam(index: number): void {
-  props.stack.apply({ type: 'remove_param', index }, '删除参数')
+  props.stack.apply(paramCmd({ type: 'remove_param', index }), '删除参数')
 }
 function moveRow(index: number, dir: -1 | 1): void {
   const next = [...rows.value]
   const tmp = next[index]!
   next[index] = next[index + dir]!
   next[index + dir] = tmp
-  props.stack.apply({ type: 'set_params', params: next as ParamDecl[] }, '参数排序')
+  props.stack.apply(paramCmd({ type: 'set_params', params: next as ParamDecl[] }), '参数排序')
 }
 function setName(i: number, raw: string): void {
   updateParam(i, { ...rows.value[i]!, name: raw.trim() })

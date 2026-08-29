@@ -278,6 +278,14 @@ const cellParams = computed<ParamDecl[]>(() => {
 })
 
 const rootEl = ref<HTMLElement | null>(null)
+
+/**
+ * 外壳（阶段 4）专用出口：
+ * - anchor：当前插入锚点（Alt 生成 tap/find/color 步骤按此插入，与面板添加同源）；
+ * - locate：错误面板独立挂载在画布外（全屏外壳右侧常驻）时由宿主转发定位；
+ * - activeFnName：函数库当前编辑的函数名（全屏外壳按它把 ParamEditor 指到函数级 params）。
+ */
+defineExpose({ anchor, locate, activeFnName })
 </script>
 
 <style scoped>

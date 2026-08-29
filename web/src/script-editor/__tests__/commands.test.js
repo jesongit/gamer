@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { CommandStack, resolveStep, resolveStepList } from '../commands'
+import { CommandStack, paths, resolveStep, resolveStepList } from '../commands'
 import { parseScript, parseFunctionLibrary, serialize } from '../codec'
 import { makeStep } from '../factories'
+import { setupFunctions } from './component_helpers'
 import { stripUuids } from './helpers'
 
 /**
@@ -232,5 +233,63 @@ describe('commands：路径解析', () => {
     const { model: m2 } = parseScript('steps:\n  - match:\n    - a.png:\n      - log: 命中\n')
     const candSteps = resolveStepList(m2, ['steps', 0, 'candidates', 0])
     expect(candSteps[0].kind).toBe('log')
+  })
+})
+
+describe('commands：函数级 params（阶段 4 path 容器）', () => {
+  const FN_YAML = `login:
+  params:
+    - 'tmpl:account:账号模板:account.png'
+  steps:
+    - return: true
+`
+
+  function setup() {
+    const { model, stack } = setupFunctions(FN_YAML, 'common')
+    const path = paths.functionParams('login')
+    return { model, stack, path }
+  }
+
+  it('paths.functionParams 生成 [functions, 名, params] 容器路径', () => {
+    expect(paths.functionParams('login')).toEqual(['functions', 'login', 'params'])
+  })
+
+  it('insert/update/remove/set 携带 path 后命中目标函数，undo 还原', () => {
+    const { model, stack, path } = setup()
+    expect(stack.apply({ type: 'insert_param', path, index: 1, decl: { type: 'text', name: 'tag', remark: '', default: null } }, '添加函数参数')).toBe(true)
+    expect(model.functions[0].params).toHaveLength(2)
+    expect(model.functions[0].params[1].name).toBe('tag')
+
+    expect(stack.apply({ type: 'update_param', path, index: 1, decl: { type: 'num', name: 'count', remark: '', default: 3 } }, '编辑函数参数')).toBe(true)
+    expect(model.functions[0].params[1]).toMatchObject({ type: 'num', name: 'count', default: 3 })
+
+    expect(stack.apply({ type: 'remove_param', path, index: 1 }, '删除函数参数')).toBe(true)
+    expect(model.functions[0].params).toHaveLength(1)
+
+    const reordered = [...model.functions[0].params]
+    expect(stack.apply({ type: 'set_params', path, params: reordered }, '参数排序')).toBe(true)
+    // 序列化后 params 只落回 login 函数，另一函数不受影响
+    expect(serialize(model)).toContain('tmpl:account:账号模板:account.png')
+
+    // undo×4 逐条还原：set → remove → update → insert，回到初始 [account]
+    stack.undo()
+    stack.undo()
+    stack.undo()
+    stack.undo()
+    expect(model.functions[0].params).toHaveLength(1)
+    expect(model.functions[0].params[0].name).toBe('account')
+  })
+
+  it('路径指向不存在的函数在执行期抛错且不进历史', () => {
+    const { stack } = setup()
+    const bad = ['functions', 'nope', 'params']
+    expect(() => stack.apply({ type: 'insert_param', path: bad, index: 0, decl: { type: 'text', name: 'x', remark: '', default: null } }, '添加函数参数'))
+      .toThrow('函数不存在')
+    expect(stack.canUndo).toBe(false)
+  })
+
+  it('函数库模型缺省路径（文件级 params）被拒绝', () => {
+    const { stack } = setup()
+    expect(() => stack.apply({ type: 'set_params', params: [] }, '编辑参数')).toThrow()
   })
 })

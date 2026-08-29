@@ -49,9 +49,41 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(capture).toContain('props.onCropMounted({ canvas: cropCanvas.value, section: cropSec.value })')
     expect(capture).toContain('ctx.cropMouseDown')
     expect(capture).toContain('ctx.onTplUpload')
-    expect(runner).toContain('props.onEditorMounted(scriptEditor.value)')
+    // 阶段 4：编辑区换壳——画布锚点提供者注入 shell（Alt 插入与「添加步骤」面板同源），
+    // textarea 与 onEditorMounted 挂载回调随旧文本编辑区一并删除
+    expect(runner).toContain('ctx.shell.setAnchorProvider')
+    expect(runner).not.toContain('onEditorMounted')
+    expect(runner).not.toContain('<textarea')
+    expect(runner).toContain('<StepCanvas')
+    expect(runner).toContain('<ScriptSummary')
+    expect(runner).toContain('<SaveConflictModal')
     expect(runner).toContain('<RunLogPanel ')
     expect(logs).toContain('props.onMounted(logBox.value)')
+  })
+
+  it('阶段 4：Console 接入共享编辑器外壳，运行视图为只读摘要 + 结构化跳转', () => {
+    // 编辑核心收敛在 useScriptEditorShell；旧文本校验器/行扫描导入停用（模块本体阶段 7 删）
+    expect(consoleSource).toContain("import { useScriptEditorShell } from '../composables/useScriptEditorShell'")
+    expect(consoleSource).not.toContain('script-language/validate')
+    expect(consoleSource).not.toContain('script-language/line-map')
+    // 运行视图：ScriptSummary 摘要模型 + 运行起点 uuid → startIndexOf；call/func 结构化跳转
+    expect(consoleSource).toContain('const summaryModel = computed(')
+    expect(consoleSource).toContain('startIndexOf(summaryModel.value')
+    expect(consoleSource).toContain('function openScriptTarget(')
+    expect(consoleSource).toContain('function toggleRunStart(')
+    expect(consoleSource).toContain('function runFromStep(')
+    // 保存走 shell（expected_version + 409 冲突回调），Alt 操作经 shell 生成类型化步骤
+    expect(consoleSource).toContain('scriptShell.save()')
+    expect(consoleSource).toContain('function onConflictReload(')
+    expect(consoleSource).toContain('function onConflictOverwrite(')
+    expect(consoleSource).toContain('scriptShell.insertTapAt(')
+    expect(consoleSource).toContain('scriptShell.insertSwipeBetween(')
+    expect(consoleSource).toContain('scriptShell.insertFindTemplate(')
+    expect(consoleSource).toContain('scriptShell.insertColorCheck(')
+    // opRecords 文本拼接路径停用：无 opRecords / renderOpTpl / DEFAULT_OP_TPL 残留
+    expect(consoleSource).not.toContain('opRecords')
+    expect(consoleSource).not.toContain('renderOpTpl')
+    expect(consoleSource).not.toContain('DEFAULT_OP_TPL')
   })
 
   it('Console 仍保留唯一页面级清理入口，未伪造真机 WebRTC 冒烟', () => {

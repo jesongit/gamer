@@ -86,8 +86,22 @@ export const api = {
 
   // 脚本（id 形如 "<pkg>/<name>.yaml"，含 '/'，拼 URL 必须整体 encodeURIComponent；保存需 pkg=应用分区）
   listScripts: () => req('GET', '/api/scripts'),
+  // 单脚本读取（含内容版本短码 version：编辑器 expected_version 冲突检测依据）
+  getScript: (id) => req('GET', `/api/scripts/${encodeURIComponent(id)}`),
+  // 保存（upsert；id 缺省=新建，id+新名=重命名并删旧文件）。expected_version 与磁盘不符
+  // → 409 {code:"version_conflict", message, resource}（err.status/err.data 可取）
   saveScript: (s) => req('POST', '/api/scripts', s),
   deleteScript: (id) => req('DELETE', `/api/scripts/${encodeURIComponent(id)}`),
+  // 函数库（data/<pkg>/func/；id 形如 "<pkg>/<文件短路径>.yaml"，整体 encodeURIComponent。
+  // 不进脚本列表/运行接口/任务选择器；GET 单文件含 content/version/functions（顶层函数名清单））
+  listFunctions: (pkg) => req('GET', `/api/functions?pkg=${encodeURIComponent(pkg)}`),
+  getFunction: (id) => req('GET', `/api/functions/${encodeURIComponent(id)}`),
+  // 创建/覆盖（upsert）：{pkg, name(短路径,缺扩展名自动补), content, expected_version?}
+  saveFunction: (f) => req('POST', '/api/functions', f),
+  // 覆盖更新（不重命名）：{content, expected_version?}；404（不存在）优先于 409
+  updateFunction: (id, f) => req('PUT', `/api/functions/${encodeURIComponent(id)}`, f),
+  deleteFunction: (id) => req('DELETE', `/api/functions/${encodeURIComponent(id)}`),
+
   // 脚本运行（RUN-003 阶段3 契约）：成功 202 {run_id, state:"starting"}；设备占用 409
   // {error:"device_busy", run_id, script_id, source, started_at}（err.status/err.data 可取）
   runScript: (id, deviceId, startIndex, func) => req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, { device_id: deviceId, start_index: startIndex || 0, ...(func ? { func } : {}) }),

@@ -114,6 +114,26 @@ function resolveFunction(model: FunctionLibraryModel, seg: PathSeg): FunctionMod
   return fn
 }
 
+/**
+ * 解析 params 命令目标宿主（持有 params 数组的对象）：
+ * - path 缺省/空 = 文件级：脚本模型自身（函数库模型没有文件级 params → 报错）；
+ * - ['functions', <函数名|序号>, 'params'] = 函数级：返回该函数记录（阶段 4）。
+ * 返回宿主对象引用而非数组快照：redo/undo 经同一引用整体替换或就地增删，
+ * Vue reactive 场景下宿主是代理，写入天然触发更新。
+ */
+function resolveParamsHost(model: EditorModel, path?: Path): { params: ParamDecl[] } {
+  if (!path || path.length === 0) {
+    if (!('params' in model)) {
+      throw new Error('函数库模型没有文件级 params；请用 [\'functions\', 函数名, \'params\'] 路径编辑具体函数')
+    }
+    return model as ScriptModel
+  }
+  if ('functions' in model && path.length === 3 && path[0] === 'functions' && path[2] === 'params') {
+    return resolveFunction(model, path[1])
+  }
+  throw new Error(`非法 params 路径：${path.map(String).join('.')}（缺省=文件级，或 ['functions', 函数名, 'params']）`)
+}
+
 // ---------- 命令 ----------
 
 /**
@@ -140,10 +160,11 @@ export type Command =
   | { type: 'move_step'; from: { path: Path; index: number }; to: { path: Path; index: number } }
   | { type: 'duplicate_step'; path: Path; index: number }
   | { type: 'update_step'; path: Path; fields: Record<string, unknown> }
-  | { type: 'set_params'; params: ParamDecl[] }
-  | { type: 'insert_param'; index: number; decl: ParamDecl }
-  | { type: 'remove_param'; index: number }
-  | { type: 'update_param'; index: number; decl: ParamDecl }
+  /** params 命令：path 缺省 = 文件级（脚本）；['functions', <函数名|序号>, 'params'] = 函数级（阶段 4）。 */
+  | { type: 'set_params'; path?: Path; params: ParamDecl[] }
+  | { type: 'insert_param'; path?: Path; index: number; decl: ParamDecl }
+  | { type: 'remove_param'; path?: Path; index: number }
+  | { type: 'update_param'; path?: Path; index: number; decl: ParamDecl }
   | { type: 'set_config'; config: ScriptConfig | null }
 
 interface HistoryEntry {
@@ -392,54 +413,50 @@ export class CommandStack {
         }
       }
       case 'set_params': {
-        if (!('params' in this.model)) throw new Error('函数库模型没有文件级 params')
-        const m = this.model as ScriptModel
-        const oldParams = m.params
+        const host = resolveParamsHost(this.model, command.path)
+        const oldParams = host.params
         const newParams = structuredClone(unwrap(command.params))
         return {
           name,
           redo: () => {
-            m.params = newParams
+            host.params = newParams
           },
           undo: () => {
-            m.params = oldParams
+            host.params = oldParams
           },
         }
       }
       case 'insert_param': {
-        if (!('params' in this.model)) throw new Error('函数库模型没有文件级 params；请编辑具体函数的 params')
-        const m = this.model as ScriptModel
-        const at = Math.max(0, Math.min(command.index, m.params.length + 1))
+        const host = resolveParamsHost(this.model, command.path)
+        const at = Math.max(0, Math.min(command.index, host.params.length + 1))
         return {
           name,
-          redo: () => m.params.splice(at, 0, command.decl),
-          undo: () => m.params.splice(at, 1),
+          redo: () => host.params.splice(at, 0, command.decl),
+          undo: () => host.params.splice(at, 1),
         }
       }
       case 'remove_param': {
-        if (!('params' in this.model)) throw new Error('函数库模型没有文件级 params')
-        const m = this.model as ScriptModel
-        const removed = m.params[command.index]
+        const host = resolveParamsHost(this.model, command.path)
+        const removed = host.params[command.index]
         if (!removed) return null
         return {
           name,
-          redo: () => m.params.splice(command.index, 1),
-          undo: () => m.params.splice(command.index, 0, removed),
+          redo: () => host.params.splice(command.index, 1),
+          undo: () => host.params.splice(command.index, 0, removed),
         }
       }
       case 'update_param': {
-        if (!('params' in this.model)) throw new Error('函数库模型没有文件级 params')
-        const m = this.model as ScriptModel
-        const old = m.params[command.index]
+        const host = resolveParamsHost(this.model, command.path)
+        const old = host.params[command.index]
         if (!old) return null
         const updated = structuredClone(unwrap(command.decl))
         return {
           name,
           redo: () => {
-            m.params[command.index] = updated
+            host.params[command.index] = updated
           },
           undo: () => {
-            m.params[command.index] = old
+            host.params[command.index] = old
           },
         }
       }
@@ -467,6 +484,8 @@ export class CommandStack {
 export const paths = {
   steps: (): Path => ['steps'],
   functionSteps: (name: string): Path => ['functions', name, 'steps'],
+  /** 函数级 params 容器（阶段 4：params 命令带 path 时使用）。 */
+  functionParams: (name: string): Path => ['functions', name, 'params'],
   child: (path: Path, key: string, index: number): Path => [...path, key, index],
   /** 校验路径（validation 字符串形态）与命令路径互转所需：['steps', 0, 'then', 1]。 */
   join: (...segs: PathSeg[]): Path => segs,
