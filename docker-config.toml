@@ -1,0 +1,29 @@
+# GameBot Docker 并存部署专用配置（bridge 网络 + 端口映射，见 docker-compose.local.yml）
+# 与开发实例（本机 8443 / server/config.toml）完全独立：
+#   - 容器内服务监听 8443，宿主经端口映射 8444→8443 访问，避开开发实例
+#   - rtc_external_ip/rtc_udp_port：WebRTC ICE 候选修复——bridge 网络的 172.x
+#     候选浏览器不可达（信令通但黑屏），宣告宿主可达的 IP/端口由映射承载 UDP 媒体流
+data_dir = "/app/data"
+port = 8443
+adb_path = "/usr/bin/adb"
+ffmpeg_path = "/usr/bin/ffmpeg"
+scrcpy_server = "/app/assets/scrcpy-server.jar"
+password = "admin123"
+interval = "500ms"
+threshold = 0.85
+log_level = "info"
+decode_frames = true
+max_size = 0
+bitrate_mbps = 12
+fps = 15
+idle_power_secs = 300
+log_retain_days = 14
+
+# WebRTC ICE 候选修复（bridge 网络）：容器内 172.x 候选浏览器不可达，
+# 宣告宿主可达的 127.0.0.1:8444（本机浏览器场景；局域网其他设备访问改填宿主局域网 IP）。
+# UDP 媒体流：容器内绑 8443/udp，宿主 8444/udp 经 compose "8444:8443/udp" 映射承载
+# ——待 WebRTC ICE 出画修复完成后启用（当前「no candidate pairs」排查中，
+#    详见 docs/DEVICE_ACCESS.md 无线调试直连方案存档；注释期间 8444 Console 投屏黑屏属预期）
+rtc_external_ip = "127.0.0.1"
+rtc_udp_port = 8443
+rtc_external_port = 8444
