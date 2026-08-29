@@ -116,6 +116,24 @@ function resolveFunction(model: FunctionLibraryModel, seg: PathSeg): FunctionMod
 
 // ---------- 命令 ----------
 
+/**
+ * 深度解包 Vue reactive 代理（duck-typed __v_raw，与 vue 的 toRaw 同一内部标记）。
+ * UI 层会传 reactive(model) 进来，且组件常从代理对象展开构造新对象（{...proxy} 的字段值
+ * 仍是嵌套代理）——structuredClone 无法克隆任何 Proxy（DataCloneError），快照/复制前
+ * 必须递归解包。返回全新纯对象（快照语义，与 structuredClone 一致）。
+ */
+function unwrap<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value
+  const raw = (value as { __v_raw?: unknown }).__v_raw
+  if (raw !== undefined && raw !== null) return unwrap(raw as T)
+  if (Array.isArray(value)) {
+    return (value as unknown[]).map((v) => unwrap(v)) as unknown as T
+  }
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = unwrap(v)
+  return out as T
+}
+
 export type Command =
   | { type: 'insert_step'; path: Path; index: number; step: Step }
   | { type: 'remove_step'; path: Path; index: number }
@@ -340,7 +358,7 @@ export class CommandStack {
         const list = resolveStepList(this.model, command.path)
         const source = list[command.index]
         if (!source) return null
-        const copy = cloneStepWithNewUuids(source)
+        const copy = cloneStepWithNewUuids(unwrap(source))
         const at = command.index + 1
         const position = { path: clonePath(command.path), index: at }
         return {
@@ -363,9 +381,9 @@ export class CommandStack {
           if (!(key in (step as unknown as Record<string, unknown>))) {
             throw new Error(`步骤 ${step.kind} 没有字段 ${key}（路径 ${pathStr}）`)
           }
-          oldValues[key] = structuredClone((step as unknown as Record<string, unknown>)[key])
+          oldValues[key] = structuredClone(unwrap((step as unknown as Record<string, unknown>)[key]))
         }
-        const newValues = structuredClone(command.fields)
+        const newValues = structuredClone(unwrap(command.fields))
         const target = step as unknown as Record<string, unknown>
         return {
           name,
@@ -377,7 +395,7 @@ export class CommandStack {
         if (!('params' in this.model)) throw new Error('函数库模型没有文件级 params')
         const m = this.model as ScriptModel
         const oldParams = m.params
-        const newParams = structuredClone(command.params)
+        const newParams = structuredClone(unwrap(command.params))
         return {
           name,
           redo: () => {
@@ -414,7 +432,7 @@ export class CommandStack {
         const m = this.model as ScriptModel
         const old = m.params[command.index]
         if (!old) return null
-        const updated = structuredClone(command.decl)
+        const updated = structuredClone(unwrap(command.decl))
         return {
           name,
           redo: () => {
@@ -429,7 +447,7 @@ export class CommandStack {
         if (!('config' in this.model)) throw new Error('函数库模型没有文件级 config')
         const m = this.model as ScriptModel
         const oldConfig = m.config
-        const newConfig = command.config === null ? null : structuredClone(command.config)
+        const newConfig = command.config === null ? null : structuredClone(unwrap(command.config))
         return {
           name,
           redo: () => {
