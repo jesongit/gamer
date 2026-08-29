@@ -39,3 +39,6 @@ server/web-dist/
 
 # ===== 本地任务笔记 =====
 prompt.md
+
+# ===== 阶段备份（重构发布前的只读数据快照，如 backups/stage0-data）=====
+backups/
