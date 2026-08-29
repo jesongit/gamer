@@ -62,7 +62,7 @@ describe('Console 视觉组件拆分静态回归', () => {
   })
 
   it('阶段 4：Console 接入共享编辑器外壳，运行视图为只读摘要 + 结构化跳转', () => {
-    // 编辑核心收敛在 useScriptEditorShell；旧文本校验器/行扫描导入停用（模块本体阶段 7 删）
+    // 编辑核心收敛在 useScriptEditorShell；旧文本校验器/行扫描模块已删除
     expect(consoleSource).toContain("import { useScriptEditorShell } from '../composables/useScriptEditorShell'")
     expect(consoleSource).not.toContain('script-language/validate')
     expect(consoleSource).not.toContain('script-language/line-map')

@@ -68,7 +68,7 @@
 
 <script setup>
 /**
- * Console 紧凑脚本外壳（阶段 4，plan §10.1）：替换旧「textarea + opRecords 文本拼接」编辑区。
+ * Console 紧凑脚本外壳（阶段 4，plan §10.1）：替换旧 textarea 文本编辑区。
  * - 运行态：ScriptPicker（锁分区）+ 运行/停止/更多 + 实时日志 + 只读步骤摘要列表
  *   （ScriptSummary：顶层卡片选运行起点、call/func 结构化跳转）；
  * - 编辑态：StepCanvas 共享画布（面包屑/专注视图/诊断定位/添加面板均为组件现成能力）+

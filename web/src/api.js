@@ -87,9 +87,6 @@ export const api = {
   // 模板缩略图/预览 URL（<img :src> 用；pkg 必填）
   tplImageUrl: (name, pkg) => `/api/templates/${encodeURIComponent(name)}/image?pkg=${encodeURIComponent(pkg)}`,
 
-  // 配置：操作记录 YAML 模板（config.toml [op_templates]）
-  getOpTemplates: () => req('GET', '/api/op-templates'),
-
   // 脚本（id 形如 "<pkg>/<name>.yaml"，含 '/'，拼 URL 必须整体 encodeURIComponent；保存需 pkg=应用分区）
   listScripts: () => req('GET', '/api/scripts'),
   // 单脚本读取（含内容版本短码 version：编辑器 expected_version 冲突检测依据）

@@ -1,6 +1,0 @@
-# 三账号循环（稳定副本，改编自 server/data/com.miHoYo.hkrpg/yaml/三账号日常.yml；
-# 账号模板为带 # 后缀的短名引用 acct_155.png → acct_155#383_514_539_931.png）
-steps:
-  - call: common_account.yaml acct_155.png
-  - call: common_account.yaml acct_136.png
-  - call: common_account.yaml acct_188.png

@@ -1,7 +1,0 @@
-# 纯函数库简写：省略 func: 段落键，顶层映射 = 函数定义（映射形式）。
-# 引擎 parse_funcs 对 Mapping 值逐键拆分，一个映射里可定义多个函数；
-# 前端校验已对齐该语义（跨文件调用同样按 normalize_top 归一化后取 func）。
-noop_fn:
-  - log: $1
-ping_fn:
-  - log: pong

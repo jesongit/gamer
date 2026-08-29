@@ -1,8 +1,0 @@
-# 领取邮件（稳定副本，改编自 server/data/com.miHoYo.hkrpg/yaml/领取邮件.yml；
-# 原版引用的 邮件按钮.png 在真实数据中已不存在，改编为存在的短名引用）
-steps:
-  - find: tpl_mail_icon.png
-    then:
-      - find: tpl_mail_claim.png
-      - find: tpl_blank_close_1.png
-      - find: tpl_close_panel.png
