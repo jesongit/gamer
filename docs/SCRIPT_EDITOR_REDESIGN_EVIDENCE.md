@@ -202,3 +202,27 @@
 
 ### 结论
 通过
+
+
+## 阶段 5：参数、函数和任务全链路
+
+### 交付
+- aa696bb feat(scheduler)!: 任务持久化参数快照与签名过期门禁（store 加 args_json/param_signature 两列，旧库 ALTER 兜底；task_params 四态门禁+rebind；调度/立即运行全量快照传参；409 param_signature_conflict+reconfirm；GET /api/tasks/:id 详情；日志不记参数值）
+- 10b7b14 feat(web): 运行与函数测试参数表单接线（ParamsForm 七类三态、RunParamsModal、useRunArgsFlow、400 诊断字段级回填、resolved_args 来源标注、建议缓存不遮蔽默认值、测试函数激活+「▶测试」start_index）
+- 515b698 feat(web): 定时任务参数快照表单与过期重新确认（三列对比表+reconfirm、param_stale 徽标与禁用、启停携带原快照）
+
+### 自动化命令与结果
+- cargo test：287 passed / 0 failed / 2 ignored（+16，含 text 值日志防泄露断言；主线复验）
+- pnpm test:run：433 passed / 0 failed（+37）；pnpm build 成功（主线复验）
+
+### 契约缺口（实现期冻结）
+- param_signature_conflict 采用 snake_case（CONTRACT §5.2 dot 命名空间未列此码）；psig1 实际在 CONTRACT §4.5；409 体 reason/expected/actual/task_id 与 GET /api/tasks/:id 为服务端扩展；reconfirm:true 不带 args 语义=存活参数保留原值+新参数取当前默认值
+
+### 已知限制
+- 降级路径：旧程序读新库可运行，但旧程序 upsert 会把两新列写回 NULL（需新版重新保存任务）；回滚说明已写入提交信息与代码注释
+
+### 审查人
+主线编排复核：复跑双端门禁全绿
+
+### 结论
+通过

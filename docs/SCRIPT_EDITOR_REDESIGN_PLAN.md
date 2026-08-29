@@ -750,10 +750,10 @@ parse_function_file() # 只接受 FunctionLibraryModel
 
 ### 阶段 5：参数、函数和任务全链路
 
-- [ ] 运行/函数测试表单生成 params 控件，区分继承默认值和显式覆盖并发送稀疏 args。
-- [ ] 函数选择、定义跳转、运行期缓存及递归错误链路。
-- [ ] SQLite 任务结构增加 args，调度前检测参数过期。
-- [ ] 更新 `ScriptPicker` 和 `TaskScheduler`，只让 yaml 脚本进入调度。
+- [x] 运行/函数测试表单生成 params 控件，区分继承默认值和显式覆盖并发送稀疏 args。
+- [x] 函数选择、定义跳转、运行期缓存及递归错误链路。
+- [x] SQLite 任务结构增加 args，调度前检测参数过期。
+- [x] 更新 `ScriptPicker` 和 `TaskScheduler`，只让 yaml 脚本进入调度。
 
 ### 阶段 6：录制模式
 
