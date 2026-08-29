@@ -133,8 +133,10 @@ impl Scheduler {
     /// 立即运行任务（手动触发）：202 契约 —— 提交即返回 run_id，不等完成
     pub async fn run_now(&self, task: &Task) -> Result<String, RunNowError> {
         info!(task = %task.name, task_id = %task.id, device = %task.device_id, "manual trigger (task now)");
-        let content = match self.scripts.get(&task.script_id) {
-            Ok(Some(s)) => s.content,
+        // 脚本存在性预检（404 语义在提交前给出）；内容不预读——运行源码由
+        // 引擎开始时整体快照（阶段 2 交付 3）
+        match self.scripts.get(&task.script_id) {
+            Ok(Some(_)) => {}
             Ok(None) => {
                 warn!(task = %task.name, "task now rejected: script not found");
                 record_scheduler_failure(&self.db.metrics());
@@ -145,8 +147,8 @@ impl Scheduler {
                 record_scheduler_failure(&self.db.metrics());
                 return Err(RunNowError::Io);
             }
-        };
-        let result = submit_run(&self.runs, &self.db, task, None, content)
+        }
+        let result = submit_run(&self.runs, &self.db, task, None)
             .await
             .map_err(RunNowError::Start);
         match &result {
@@ -211,8 +213,10 @@ async fn dispatch(
             }
         }
     }
-    let content = match scripts.get(&task.script_id) {
-        Ok(Some(s)) => s.content,
+    // 脚本存在性预检（失败语义保持：记 failed/skip + 任务结果更新）；
+    // 内容不预读——运行源码由引擎开始时整体快照（阶段 2 交付 3）
+    match scripts.get(&task.script_id) {
+        Ok(Some(_)) => {}
         Ok(None) => {
             warn!(
                 task = %task.name,
@@ -231,8 +235,8 @@ async fn dispatch(
             mark_task_result(db, task, "失败", Some("任务执行失败: 读脚本失败"));
             return;
         }
-    };
-    match submit_run(runs, db, task, trigger, content).await {
+    }
+    match submit_run(runs, db, task, trigger).await {
         Ok(run_id) => {
             debug!(task = %task.name, task_id = %task.id, device = %task.device_id, %run_id, "scheduled run submitted");
         }
@@ -270,21 +274,22 @@ async fn dispatch(
     }
 }
 
-/// 组装 StartRequest 并提交（trigger 有值=Scheduled，无=TaskNow）
+/// 组装 StartRequest 并提交（trigger 有值=Scheduled，无=TaskNow）。
+/// 任务 args 快照（plan §12.3）归阶段 5；当前调度运行传空覆盖。
 async fn submit_run(
     runs: &Arc<RunManager>,
     db: &Db,
     task: &Task,
     trigger: Option<DateTime<Local>>,
-    content: String,
 ) -> Result<String, StartError> {
     let scheduled_at = trigger.map(|t| t.timestamp());
     let hook = task_finish_hook(db.clone(), task.id.clone(), task.name.clone(), scheduled_at);
     let req = StartRequest {
-        run_id: String::new(),
         device_id: task.device_id.clone(),
-        script_id: task.script_id.clone(),
-        content,
+        target: crate::engine::RunTarget::Script {
+            script_id: task.script_id.clone(),
+            start_index: 0,
+        },
         source: if trigger.is_some() {
             RunSource::Scheduled
         } else {
@@ -292,8 +297,7 @@ async fn submit_run(
         },
         task_id: Some(task.id.clone()),
         scheduled_at,
-        start_index: 0,
-        run_func: None,
+        args: vec![],
         realtime_logs: false,
     };
     let rec = runs.submit(req, Some(hook))?;

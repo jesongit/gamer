@@ -1,4 +1,14 @@
-//! Manual script runs and run lifecycle compatibility endpoints.
+//! 手动运行（脚本 / 函数测试）与运行生命周期端点。
+//!
+//! - `POST /api/scripts/:id/run` body `{device_id, start_index?, args?}`：
+//!   统一 RunTarget::Script（CONTRACT §4.4）；`args` 为稀疏映射（§4.3），
+//!   提交前按声明七类解析并合并默认值，诊断失败 → 400 {error:"invalid_args",
+//!   diagnostics:[...]};；
+//! - `POST /api/functions/:id/run` body `{device_id, function?, start_index?,
+//!   args?}`：函数测试（RunTarget::Function），RunRecord.script_id 记
+//!   `<pkg>/<file>.yaml[#函数]` 展示标签；函数库不进脚本运行接口。
+//! - 旧 v1 `func`（run_func 位置实参路径）已删除：函数运行统一走本文件
+//!   函数测试端点，函数体内步骤定位 = function + start_index。
 
 use std::sync::Arc;
 
@@ -7,33 +17,50 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::common::{err_response, run_blocking_api, validate_text_field};
 use super::{ApiError, AppState};
+use crate::engine::RunTarget;
 use crate::store::Db;
 
-pub(super) fn validate_run_script_req(req: &RunScriptReq) -> Result<(), ApiError> {
+/// 稀疏 args 请求形态（手动运行 / 函数测试共用）。
+#[derive(Deserialize)]
+pub(super) struct RunReqArgs {
+    pub(super) device_id: String,
+    /// 从第几个顶层步骤开始运行（0=从头；「从某行运行」选中逻辑行时传入）
+    #[serde(default)]
+    pub(super) start_index: Option<usize>,
+    /// 函数测试：目标函数名；缺省 = 文件第一个函数
+    #[serde(default)]
+    pub(super) function: Option<String>,
+    /// 稀疏参数覆盖：键 = 参数名，值按七类解析（bool=布尔、coord=[x,y]、
+    /// 其余五类=字符串）
+    #[serde(default)]
+    pub(super) args: Option<serde_json::Map<String, Value>>,
+}
+
+pub(super) fn validate_run_req(req: &RunReqArgs) -> Result<(), ApiError> {
     validate_text_field(&req.device_id, "device_id", 255)?;
     if req.start_index.is_some_and(|index| index > 100_000) {
         return Err(ApiError::bad_request("start_index 超过脚本步数上限"));
     }
-    if let Some(func) = req.func.as_deref().filter(|v| !v.trim().is_empty()) {
-        validate_text_field(func, "func", 255)?;
+    if let Some(func) = req.function.as_deref().filter(|v| !v.trim().is_empty()) {
+        validate_text_field(func, "function", 255)?;
     }
     Ok(())
 }
 
-#[derive(Deserialize)]
-pub(super) struct RunScriptReq {
-    pub(super) device_id: String,
-    /// 从第几个 step 开始运行（0=从头；前端选中某个 "- " 逻辑行时传入）
-    #[serde(default)]
-    pub(super) start_index: Option<usize>,
-    /// 直接运行指定函数体（Console 选中函数名行 / 函数体内的行时传入）；
-    /// start_index 此时是函数体内的步骤序号——0（函数名行）先检查函数 cond，
-    /// >0（体内行）跳过 cond 从该步执行
-    #[serde(default)]
-    pub(super) func: Option<String>,
+/// 结构化诊断 400 响应（CONTRACT §5.1 五元组列表，前端按 code/step_path 定位）。
+fn diagnostics_response(diagnostics: &[crate::script_v2::ScriptError]) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": "invalid_args",
+            "diagnostics": diagnostics,
+        })),
+    )
+        .into_response()
 }
 
 /// 手动运行的完成钩子：终态摘要行落库（realtime 模式引擎日志已实时入库，
@@ -58,40 +85,43 @@ fn manual_finish_hook(db: Db) -> crate::run_manager::FinishHook {
     })
 }
 
-pub(super) async fn api_run_script(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<RunScriptReq>,
+/// 统一提交入口：解析 args（blocking 池内做磁盘快照 + 严格解析）→
+/// RunManager.submit → 202 {run_id, state, resolved_args}。
+async fn submit_run(
+    st: &AppState,
+    device_id: String,
+    target: RunTarget,
+    args_json: Option<serde_json::Map<String, Value>>,
 ) -> Response {
-    let script_id = id.clone();
-    // 脚本存在性先校验（404 优先于设备冲突）
-    let Some(script) = (match run_blocking_api(move || {
-        st.scripts
-            .get(&id)
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => return e.into_response(),
-    }) else {
-        return ApiError::not_found("脚本不存在").into_response();
+    // args 解析需要分区快照（磁盘 IO + 严格解析），放 blocking 池。
+    // 闭包返回 Result<绑定结果, ApiError> 以适配 run_blocking_api；诊断在
+    // 内层 Result 里透传给 400 响应。
+    let scripts = st.scripts.clone();
+    let bound = {
+        let target = target.clone();
+        match run_blocking_api(move || {
+            let r: Result<crate::engine::BoundEntryArgs, Vec<crate::script_v2::ScriptError>> =
+                crate::engine::resolve_entry_args(
+                    &scripts,
+                    &target,
+                    &args_json.unwrap_or_default(),
+                );
+            Ok(r)
+        })
+        .await
+        {
+            Ok(Ok(bound)) => bound,
+            Ok(Err(diagnostics)) => return diagnostics_response(&diagnostics),
+            Err(e) => return e.into_response(),
+        }
     };
-    if let Err(err) = validate_run_script_req(&req) {
-        return err.into_response();
-    }
-    // RUN-002 契约：启动即返回 202 {run_id, state:"starting"}，不等脚本结束；
-    // 设备级互斥冲突 → 409 {error:"device_busy", run_id, script_id, source, started_at}
     let rreq = crate::run_manager::StartRequest {
-        run_id: String::new(),
-        device_id: req.device_id.clone(),
-        script_id,
-        content: script.content.clone(),
+        device_id,
+        target,
         source: crate::run_manager::RunSource::Manual,
         task_id: None,
         scheduled_at: None,
-        start_index: req.start_index.unwrap_or(0),
-        run_func: req.func.filter(|s| !s.trim().is_empty()),
+        args: bound.overrides,
         realtime_logs: true,
     };
     match st
@@ -103,6 +133,7 @@ pub(super) async fn api_run_script(
             Json(serde_json::json!({
                 "run_id": rec.run_id,
                 "state": serde_json::to_value(rec.state).unwrap_or_default(),
+                "resolved_args": bound.resolved,
             })),
         )
             .into_response(),
@@ -113,6 +144,85 @@ pub(super) async fn api_run_script(
             err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
         }
     }
+}
+
+/// POST /api/scripts/:id/run（id = `<pkg>/<name>.yaml`，整体 encodeURIComponent）
+pub(super) async fn api_run_script(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RunReqArgs>,
+) -> Response {
+    // 脚本存在性先校验（404 优先于设备冲突）
+    let scripts = st.scripts.clone();
+    let probe = id.clone();
+    let exists = match run_blocking_api(move || {
+        scripts
+            .get(&probe)
+            .map(|s| s.is_some())
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
+        Ok(ok) => ok,
+        Err(e) => return e.into_response(),
+    };
+    if !exists {
+        return ApiError::not_found("脚本不存在").into_response();
+    }
+    if let Err(err) = validate_run_req(&req) {
+        return err.into_response();
+    }
+    // RUN-002 契约：启动即返回 202 {run_id, state:"starting"}，不等脚本结束；
+    // 设备级互斥冲突 → 409 {error:"device_busy", run_id, script_id, source, started_at}
+    let target = RunTarget::Script {
+        script_id: id,
+        start_index: req.start_index.unwrap_or(0),
+    };
+    submit_run(&st, req.device_id, target, req.args).await
+}
+
+/// POST /api/functions/:id/run（id = `<pkg>/<文件短路径>.yaml`）：
+/// 函数测试运行（RunTarget::Function）。函数文件不存在 → 404；
+/// 指定 function 不存在 → 400 诊断（resource.func.not_found）。
+pub(super) async fn api_run_function(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RunReqArgs>,
+) -> Response {
+    // 函数文件存在性先校验（404 优先于设备冲突）；文件短路径去扩展名
+    let scripts = st.scripts.clone();
+    let probe = id.clone();
+    let file_short = match run_blocking_api(move || {
+        scripts
+            .get_function(&probe)
+            .map(|f| f.map(|f| f.file))
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
+        Ok(Some(file)) => file,
+        Ok(None) => return ApiError::not_found("函数文件不存在").into_response(),
+        Err(e) => return e.into_response(),
+    };
+    if let Err(err) = validate_run_req(&req) {
+        return err.into_response();
+    }
+    let Some((pkg, _)) = id.split_once('/') else {
+        return ApiError::not_found("函数文件不存在").into_response();
+    };
+    let function = req
+        .function
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let target = RunTarget::Function {
+        pkg: pkg.to_string(),
+        file: file_short,
+        function,
+        start_index: req.start_index.unwrap_or(0),
+    };
+    submit_run(&st, req.device_id, target, req.args).await
 }
 
 /// 旧停止端点（兼容窗口）：按 script_id 定位活动 run 并取消。

@@ -356,3 +356,79 @@ pub fn merge_args(
         Err(errors)
     }
 }
+
+// ---------------------------------------------------------------------------
+// API JSON args（手动运行 / 函数测试 / 阶段 5 任务快照）
+// ---------------------------------------------------------------------------
+
+/// 七类参数值从 API JSON 解析为类型化字面量：bool=布尔、coord=[x,y] 数组
+/// （0~1）、其余五类=字符串（time 须带单位且 >0，color 须 6 位十六进制，
+/// tmpl/key 非空）。形态不符返回 `None`（调用方报 param.args.type_mismatch）。
+pub fn parse_json_arg(ty: ParamType, value: &serde_json::Value) -> Option<TypedValue> {
+    match (ty, value) {
+        (ParamType::Tmpl, serde_json::Value::String(s)) => {
+            (!s.is_empty()).then(|| TypedValue::Tmpl(s.clone()))
+        }
+        (ParamType::Coord, serde_json::Value::Array(items)) if items.len() == 2 => {
+            let x = items[0].as_f64()?;
+            let y = items[1].as_f64()?;
+            (coord_in_range(x) && coord_in_range(y)).then_some(TypedValue::Coord([x, y]))
+        }
+        (ParamType::Color, serde_json::Value::String(s)) => {
+            is_valid_color(s).then(|| TypedValue::Color(s.clone()))
+        }
+        (ParamType::Time, serde_json::Value::String(s)) => {
+            parse_time_ms(s).map(|_| TypedValue::Time(s.clone()))
+        }
+        (ParamType::Key, serde_json::Value::String(s)) => {
+            (!s.is_empty()).then(|| TypedValue::Key(s.clone()))
+        }
+        (ParamType::Text, serde_json::Value::String(s)) => Some(TypedValue::Text(s.clone())),
+        (ParamType::Bool, serde_json::Value::Bool(b)) => Some(TypedValue::Bool(*b)),
+        _ => None,
+    }
+}
+
+/// 稀疏 JSON args（键 → 任意 JSON 值）按声明解析为类型化稀疏覆盖：
+/// 未知键 → `param.args.unknown`；形态与声明类型不符 → `param.args.type_mismatch`。
+pub fn parse_json_args(
+    decls: &[ParamDecl],
+    args: &serde_json::Map<String, serde_json::Value>,
+    resource: &str,
+) -> Result<Vec<(String, TypedValue)>, Vec<super::error::ScriptError>> {
+    use super::error::ScriptError;
+    let mut errors = Vec::new();
+    let mut out = Vec::new();
+    for (name, value) in args {
+        let Some(decl) = decls.iter().find(|d| &d.name == name) else {
+            errors.push(
+                ScriptError::new(
+                    codes::PARAM_ARGS_UNKNOWN,
+                    format!("args 键 {name:?} 不是目标参数"),
+                    resource,
+                )
+                .at(format!("args.{name}"), "args"),
+            );
+            continue;
+        };
+        match parse_json_arg(decl.ty, value) {
+            Some(v) => out.push((name.clone(), v)),
+            None => errors.push(
+                ScriptError::new(
+                    codes::PARAM_ARGS_TYPE_MISMATCH,
+                    format!(
+                        "参数 {name} 的实参 {value} 与声明类型 {} 不符",
+                        decl.ty.as_str()
+                    ),
+                    resource,
+                )
+                .at(format!("args.{name}"), "args"),
+            ),
+        }
+    }
+    if errors.is_empty() {
+        Ok(out)
+    } else {
+        Err(errors)
+    }
+}

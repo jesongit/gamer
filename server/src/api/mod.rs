@@ -160,6 +160,7 @@ pub fn build_router(
         .route("/api/scripts/:id/run", post(runs::api_run_script))
         .route("/api/scripts/:id/stop", post(runs::api_stop_script))
         .route("/api/scripts/:id/status", get(runs::api_script_status))
+        .route("/api/functions/:id/run", post(runs::api_run_function))
         .route("/api/devices/:id/run", get(runs::api_device_run))
         .route("/api/runs/:run_id", get(runs::api_get_run))
         .route("/api/runs/:run_id/cancel", post(runs::api_cancel_run))

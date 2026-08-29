@@ -117,20 +117,16 @@ impl RunRecord {
 /// 提交给执行器的一次运行请求
 #[derive(Debug, Clone)]
 pub struct StartRequest {
-    /// 由 RunManager 分配并回填
-    pub run_id: String,
     pub device_id: String,
-    pub script_id: String,
-    /// 脚本 YAML 文本（调用方先经 ScriptStore 取好）
-    pub content: String,
+    /// 统一运行目标：脚本（yaml/，含从步骤运行）/ 函数测试（func/）
+    pub target: crate::engine::RunTarget,
     pub source: RunSource,
+    /// 关联定时任务 id（manual 为 null）
     pub task_id: Option<String>,
     /// 计划触发点 unix 秒 UTC（scheduled 来源携带）
     pub scheduled_at: Option<i64>,
-    /// 从第几个 step 开始（Console「从某行运行」）
-    pub start_index: usize,
-    /// 直接运行指定函数体（Console 函数名行）
-    pub run_func: Option<String>,
+    /// 稀疏类型化参数覆盖（API/任务快照按七类解析；引擎按快照声明绑定默认值）
+    pub args: Vec<(String, crate::script_v2::TypedValue)>,
     /// 实时逐条落库日志（Console 是；调度批量为 false，由完成钩子批量写）
     pub realtime_logs: bool,
 }
@@ -317,11 +313,10 @@ impl RunManager {
         dev: &mut HashMap<String, String>,
     ) -> Result<RunRecord, StartError> {
         let run_id = uuid::Uuid::new_v4().to_string();
-        let _ = &req.run_id;
         let record = RunRecord {
             run_id: run_id.clone(),
             device_id: req.device_id.clone(),
-            script_id: req.script_id.clone(),
+            script_id: req.target.label(),
             source: req.source,
             task_id: req.task_id.clone(),
             scheduled_at: req.scheduled_at,
@@ -792,26 +787,19 @@ impl RunExecutor for EngineExecutor {
             let log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>> = if req.realtime_logs {
                 let db = self.db.clone();
                 let device_id = req.device_id.clone();
-                let script_id = req.script_id.clone();
+                let script_id = req.target.label();
                 Some(Arc::new(move |level, msg| {
                     let _ = db.add_log(&device_id, &script_id, &level, &msg);
                 }))
             } else {
                 None
             };
-            self.runner
-                .run(
-                    &req.device_id,
-                    &req.script_id,
-                    &req.content,
-                    stop,
-                    log_cb,
-                    req.start_index,
-                    req.run_func.as_deref(),
-                    None,
-                    vec![],
-                )
-                .await
+            let spec = crate::engine::RunSpec {
+                device_id: req.device_id.clone(),
+                target: req.target.clone(),
+                args: req.args.clone(),
+            };
+            self.runner.run(&spec, stop, log_cb).await
         })
     }
 
@@ -965,15 +953,15 @@ mod tests {
 
     fn req(device_id: &str, script_id: &str, source: RunSource) -> StartRequest {
         StartRequest {
-            run_id: String::new(),
             device_id: device_id.into(),
-            script_id: script_id.into(),
-            content: "- log: x".into(),
+            target: crate::engine::RunTarget::Script {
+                script_id: script_id.into(),
+                start_index: 0,
+            },
             source,
             task_id: None,
             scheduled_at: None,
-            start_index: 0,
-            run_func: None,
+            args: vec![],
             realtime_logs: false,
         }
     }
@@ -1306,5 +1294,40 @@ mod tests {
             "occupy paired even on unwind"
         );
         assert_eq!(*seen.lock(), vec![RunState::Failed]);
+    }
+    // 统一 RunTarget：函数测试目标与脚本目标同样受设备互斥 + 可取消
+    #[tokio::test]
+    async fn function_run_target_conflicts_and_cancels() {
+        let fake = Arc::new(FakeExecutor::hanging());
+        let mgr = Arc::new(RunManager::new(fake.clone()));
+        let mut req = req("d1", "p/s.yaml", RunSource::Manual);
+        req.target = crate::engine::RunTarget::Function {
+            pkg: "com.test.app".into(),
+            file: "common".into(),
+            function: Some("login".into()),
+            start_index: 0,
+        };
+        let a = mgr.submit(req.clone(), None).unwrap();
+        assert_eq!(a.script_id, "com.test.app/common.yaml#login", "展示标签");
+        // 同设备第二个函数运行 → 409 携带在册记录（展示标签一致）
+        match mgr.submit(req, None) {
+            Err(StartError::Conflict(busy)) => {
+                assert_eq!(busy.script_id, "com.test.app/common.yaml#login");
+            }
+            other => panic!("expected conflict, got {:?}", other.map(|r| r.run_id)),
+        }
+        // 取消 → stopping → cancelled，设备槽释放（等进入 running 再取消，
+        // 避免踩 starting 短路路径——该路径本就不 occupy/release）
+        mgr.wait_for_state(
+            &a.run_id,
+            |rec| rec.state == RunState::Running,
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(mgr.cancel(&a.run_id), CancelOutcome::Accepted);
+        settled(&mgr).await;
+        assert_eq!(mgr.get_run(&a.run_id).unwrap().state, RunState::Cancelled);
+        assert_eq!(mgr.active_for_device("d1"), None);
+        assert_eq!(fake.stats(|s| s.releases), 1);
     }
 }

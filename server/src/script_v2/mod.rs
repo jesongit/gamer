@@ -1,14 +1,15 @@
 //! script_v2：脚本新语法（2026-08 冻结契约，docs/SCRIPT_EDITOR_CONTRACT.md）
 //! 的严格装载、AST 与语义校验。
 //!
-//! 阶段 2 前半（只装载与校验，不做执行引擎）。分层：
+//! 阶段 2 执行引擎（engine.rs）与运行 API 消费本模块：
 //! 1. [`loader`]：saphyr-parser 事件级装载（ScalarStyle + Span）→ 节点树 →
 //!    结构层 AST 构建（顶层键白名单、参数声明、步骤结构/字段互斥）；
 //! 2. [`validate`]：语义层（$name 引用、args 绑定一致性、模板存在性、
-//!    静态重复、call/func 引用图环与深度）。
+//!    静态重复、call/func 引用图环与深度）；
+//! 3. [`params`]：参数声明解析、类型化字面量、args 绑定（引擎与 API 共用）。
 //!
-//! 本模块当前仅被测试引用；阶段 2 执行引擎接入后由引擎/API 消费
-//! （届时移除下方 allow(dead_code)）。
+//! serialize / param_signature / loader span 等由测试与阶段 4/5（编辑器保存、
+//! 任务快照签名）消费，非测试构建暂不引用。
 
 #![allow(dead_code)]
 
@@ -24,7 +25,8 @@ mod fixtures_tests;
 #[cfg(test)]
 mod tests;
 
-// 供阶段 2 引擎 / API 消费的公共面；接入前允许暂时未被 crate 内使用。
+// 以下再导出为引擎 / API / 测试消费的公共面（bin crate 下部分条目仅测试
+// 或外部阶段使用，未在本 crate 非测试代码内引用）。
 #[allow(unused_imports)]
 pub use error::ScriptError;
 #[allow(unused_imports)]

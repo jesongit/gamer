@@ -24,14 +24,12 @@ use crate::matcher;
 /// 一次，测试可直接手工构造）
 #[derive(Clone, Debug)]
 pub struct EngineSettings {
-    /// find / verify 轮询间隔（带单位字符串，如 "500ms"，语义同 parse_duration）
+    /// find / verify / match 轮询间隔（带单位字符串，如 "500ms"）
     pub interval: String,
     /// 模板匹配阈值（0~1]
     pub threshold: f32,
     /// 运行日志等级 debug / info / warn / error
     pub log_level: String,
-    /// 数据目录（模板按分区寻址 data/<pkg>/tmpl/）
-    pub data_dir: PathBuf,
 }
 
 impl EngineSettings {
@@ -40,7 +38,6 @@ impl EngineSettings {
             interval: cfg.interval.clone(),
             threshold: cfg.threshold,
             log_level: cfg.log_level.clone(),
-            data_dir: cfg.data_dir.clone(),
         }
     }
 }
@@ -60,8 +57,6 @@ pub trait DeviceControl: Send + Sync {
     fn has_session(&self, device_id: &str) -> bool;
     /// 会话视频尺寸（相对坐标→像素映射、屏幕尺寸优先源）；无会话 → None
     fn video_size(&self, device_id: &str) -> Option<(u32, u32)>;
-    /// 设备配置的应用包名（str_app / cls_app）
-    fn app_pkg(&self, device_id: &str) -> Option<String>;
     /// adb serial（空串视同未解析；cls_app 拼 force-stop 命令用）
     fn adb_serial(&self, device_id: &str) -> Option<String>;
     /// 点击（像素坐标）
@@ -133,10 +128,6 @@ impl DeviceControl for DeviceGateway {
 
     fn video_size(&self, device_id: &str) -> Option<(u32, u32)> {
         self.devices.session(device_id).map(|s| s.video_size())
-    }
-
-    fn app_pkg(&self, device_id: &str) -> Option<String> {
-        self.devices.snapshot(device_id).and_then(|(d, _, _)| d.pkg)
     }
 
     fn adb_serial(&self, device_id: &str) -> Option<String> {

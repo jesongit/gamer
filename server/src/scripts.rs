@@ -246,6 +246,19 @@ fn sanitize_template_name(s: &str) -> Option<String> {
     Some(t.to_string())
 }
 
+/// 模板短名匹配结果（resolve_template_path / template_avail 共用内核）。
+enum TplMatch {
+    Found(PathBuf),
+    NotFound {
+        name: String,
+        path: PathBuf,
+    },
+    Ambiguous {
+        name: String,
+        candidates: Vec<String>,
+    },
+}
+
 /// Windows 会把这些名字（包括带扩展名的形式）解析为设备文件；统一拒绝
 /// 可移植存储中对应的 basename，避免 Linux 上创建后在 Windows 产生歧义。
 fn is_windows_reserved_name(name: &str) -> bool {
@@ -675,26 +688,59 @@ impl ScriptStore {
     }
 
     /// 模板短名/完整名 → 分区 `tmpl/` 内**现存**文件的路径。
-    /// 精确名优先；否则按「基名 + `#` 后缀 + 同扩展名」唯一匹配（与引擎
-    /// resolve_template_file 同语义）；零候选/多候选均报错，不猜测、不跨目录回退。
-    /// 阶段 1 由测试锁死语义；阶段 2 引擎/模板路由接入后摘除 allow（调用点
-    /// engine.rs / api/templates.rs 均在阶段 1 编辑边界之外）。
-    #[allow(dead_code)]
+    /// 精确名优先；否则按「基名 + `#` 后缀 + 同扩展名」唯一匹配（短名消歧语义
+    /// 与 script_v2 校验一致）；零候选/多候选均报错，不猜测、不跨目录回退。
     pub fn resolve_template_path(&self, pkg: &str, short: &str) -> anyhow::Result<PathBuf> {
-        let package = sanitize_part(pkg)
-            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {pkg}"))?;
-        if short.contains('\\') || short.contains('/') {
-            anyhow::bail!("模板名不允许路径分隔符: {short:?}");
+        match self.match_template_in_partition(pkg, short) {
+            TplMatch::Found(path) => Ok(path),
+            TplMatch::NotFound { name, path } => {
+                anyhow::bail!("模板 {name} 不存在 (path={})", path.display())
+            }
+            TplMatch::Ambiguous { name, candidates } => anyhow::bail!(
+                "模板 {name} 匹配到多个候选：{}，请用完整文件名指定",
+                candidates.join("、")
+            ),
         }
-        let name =
-            sanitize_template_name(short).ok_or_else(|| anyhow::anyhow!("模板名非法: {short}"))?;
+    }
+
+    /// 模板短名可用性（script_v2 校验 ResourceProvider 消费）：
+    /// 唯一存在 / 缺失 / 同短名多个 `#` 后缀候选（歧义）。
+    pub fn template_avail(&self, pkg: &str, short: &str) -> crate::script_v2::TemplateAvail {
+        match self.match_template_in_partition(pkg, short) {
+            TplMatch::Found(_) => crate::script_v2::TemplateAvail::Found,
+            TplMatch::NotFound { .. } => crate::script_v2::TemplateAvail::NotFound,
+            TplMatch::Ambiguous { .. } => crate::script_v2::TemplateAvail::Ambiguous,
+        }
+    }
+
+    /// 短名/完整名 → 磁盘文件的统一匹配内核（resolve_template_path 与
+    /// template_avail 共用）：精确名优先，短名在同扩展名文件中唯一匹配。
+    fn match_template_in_partition(&self, pkg: &str, short: &str) -> TplMatch {
+        let Some(package) = sanitize_part(pkg) else {
+            return TplMatch::NotFound {
+                name: short.to_string(),
+                path: self.tmpl_dir(pkg),
+            };
+        };
+        if short.contains('\\') || short.contains('/') {
+            return TplMatch::NotFound {
+                name: short.to_string(),
+                path: self.tmpl_dir(&package),
+            };
+        }
+        let Some(name) = sanitize_template_name(short) else {
+            return TplMatch::NotFound {
+                name: short.to_string(),
+                path: self.tmpl_dir(&package),
+            };
+        };
         let dir = self.tmpl_dir(&package);
         let exact = dir.join(&name);
         if exact.is_file() {
-            return Ok(exact);
+            return TplMatch::Found(exact);
         }
         let Some((base, ext)) = name.rsplit_once('.') else {
-            anyhow::bail!("模板 {name} 不存在 (path={})", exact.display());
+            return TplMatch::NotFound { name, path: exact };
         };
         let prefix = format!("{}#", base.to_ascii_lowercase());
         let dotted = format!(".{}", ext.to_ascii_lowercase());
@@ -710,12 +756,9 @@ impl ScriptStore {
             .collect();
         candidates.sort();
         match candidates.len() {
-            1 => Ok(dir.join(&candidates[0])),
-            0 => anyhow::bail!("模板 {name} 不存在 (path={})", exact.display()),
-            _ => anyhow::bail!(
-                "模板 {name} 匹配到多个候选：{}，请用完整文件名指定",
-                candidates.join("、")
-            ),
+            1 => TplMatch::Found(dir.join(&candidates[0])),
+            0 => TplMatch::NotFound { name, path: exact },
+            _ => TplMatch::Ambiguous { name, candidates },
         }
     }
 
@@ -862,34 +905,6 @@ impl ScriptStore {
         let _ = std::fs::remove_dir(self.func_dir(pkg));
         let _ = std::fs::remove_dir(self.tmpl_dir(pkg));
         let _ = std::fs::remove_dir(self.root.join(pkg));
-    }
-
-    /// call 子脚本按名解析：优先调用者同分区，其次跨分区；
-    /// 名字缺 .yaml/.yml 扩展名时自动补全再试（call 写 `子脚本` 或 `子脚本.yml` 均可）
-    pub fn resolve_call(&self, caller_pkg: &str, name: &str) -> anyhow::Result<Option<ScriptFile>> {
-        let all = self.list()?;
-        if let Some(i) = all
-            .iter()
-            .position(|s| s.package == caller_pkg && s.name == name)
-        {
-            let mut all = all;
-            return Ok(Some(all.swap_remove(i)));
-        }
-        if let Some(i) = all.iter().position(|s| s.name == name) {
-            let mut all = all;
-            return Ok(Some(all.swap_remove(i)));
-        }
-        let low = name.to_lowercase();
-        if !(low.ends_with(".yaml") || low.ends_with(".yml")) {
-            for ext in [".yaml", ".yml"] {
-                let with_ext = format!("{}{}", name, ext);
-                if let Some(i) = all.iter().position(|s| s.name == with_ext) {
-                    let mut all = all;
-                    return Ok(Some(all.swap_remove(i)));
-                }
-            }
-        }
-        Ok(None)
     }
 
     /// 导出整分区快照 zip：yaml/ 全部脚本 + func/ 全部函数库 + tmpl/ 全部模板 → zip 字节。
