@@ -13,6 +13,7 @@ mod matcher;
 mod metrics;
 mod run_manager;
 mod scheduler;
+mod script_v2;
 mod scripts;
 mod store;
 mod webrtc;
