@@ -306,8 +306,8 @@ fn normalize_script_name(name_raw: &str) -> anyhow::Result<String> {
     Ok(name)
 }
 
-/// 函数名合法保留字清单：动作键 + 结构键 + 已删除的旧动作名（与 engine.rs
-/// func 段的 RESERVED 对齐，并纳入新契约 v2 新增动作/结构键——函数调用写
+/// 函数名合法保留字清单：动作键 + 结构键 + 已删除的旧动作名（与 script_v2
+/// loader 的 ACTION_KEYS 对齐并额外保守纳入旧动作名与结构键——函数调用写
 /// `- 函数名:` 与步骤动作键同空间，撞名会让脚本无法解析）
 const RESERVED_FUNCTION_NAMES: [&str; 32] = [
     "log",
@@ -386,27 +386,22 @@ pub fn validate_function_file(content: &str) -> Result<Vec<String>, String> {
 }
 
 /// 脚本文件浅校验（分区导入 dry-run 用）：合法 YAML + 顶层结构。
-/// 新契约顶层键 = params/config/steps（CONTRACT §3.2）；过渡期兼容 v1 引擎的
-/// func 段与顶层序列简写（存量分区脚本仍在 v1 语法上运行，阶段 2 收紧）。
+/// 新契约顶层键 = params/config/steps（CONTRACT §3.2）；旧语法顶层键
+/// （func/name/action_wait 等）与顶层序列一律拒绝——拒绝口径与 script_v2
+/// 严格装载一致，导入 dry-run 不再放行引擎跑不了的文件。
 pub fn validate_script_file_shallow(content: &str) -> Result<(), String> {
     let v: serde_yaml::Value =
         serde_yaml::from_str(content).map_err(|e| format!("YAML 语法错误: {e}"))?;
-    match &v {
-        // v1 简写：顶层序列 = steps
-        serde_yaml::Value::Sequence(_) => Ok(()),
-        serde_yaml::Value::Mapping(map) => {
-            for (k, _) in map {
-                let key = k.as_str().unwrap_or_default();
-                if !matches!(key, "params" | "config" | "steps" | "func") {
-                    return Err(format!(
-                        "未知顶层键 {key:?}（只允许 params/config/steps；过渡期兼容 func）"
-                    ));
-                }
-            }
-            Ok(())
+    let serde_yaml::Value::Mapping(map) = v else {
+        return Err("脚本顶层必须是映射（params/config/steps）".to_string());
+    };
+    for (k, _) in map {
+        let key = k.as_str().unwrap_or_default();
+        if !matches!(key, "params" | "config" | "steps") {
+            return Err(format!("未知顶层键 {key:?}（只允许 params/config/steps）"));
         }
-        _ => Err("脚本顶层必须是映射或步骤序列".to_string()),
     }
+    Ok(())
 }
 
 /// 相对短路径分段校验（脚本/函数路径 resolver 共用）：
@@ -1155,9 +1150,10 @@ impl ScriptStore {
                     IMPORT_MAX_TOTAL_BYTES / (1024 * 1024)
                 );
             }
-            // 浅校验（阶段 1）：yaml/func 条目必须是合法 UTF-8 的 YAML 且顶层结构合规
-            // （脚本顶层键 ∈ params/config/steps ∪ 过渡期 func；函数文件顶层键全是
-            // 合法函数名）。不合规记入报告，confirm 时整体拒绝。完整校验归阶段 2。
+            // 浅校验（分区导入 dry-run 闸门）：yaml/func 条目必须是合法 UTF-8 的
+            // YAML 且顶层结构合规（脚本顶层键 ∈ params/config/steps；函数文件
+            // 顶层键全是合法函数名）。不合规记入报告，confirm 时整体拒绝；
+            // 拒绝口径与 script_v2 严格装载一致，完整语义校验在运行/保存时进行。
             if matches!(kind, ImportKind::Script | ImportKind::Func) {
                 let check = std::str::from_utf8(&buf)
                     .map_err(|_| "内容不是合法 UTF-8 文本".to_string())
@@ -1812,12 +1808,10 @@ mod tests {
     #[test]
     fn import_accepts_legacy_zip_without_func_dir() {
         let (store, dir) = temp_store("import-legacy");
-        // 旧布局 zip：只有 yaml/ + tmpl/，且脚本为 v1 过渡语法（func 段 + 顶层序列）
+        // 旧布局 zip：只有 yaml/ + tmpl/（无 func/ 目录）。脚本用新契约语法；
+        // 同包内 v1 过渡语法（func: 顶层键）按严格口径记 invalid，confirm 整体拒绝。
         let z = craft_zip(vec![
-            (
-                "yaml/old.yaml".into(),
-                b"func:\n  - f1:\n    - log: a\nsteps:\n  - log: x\n".to_vec(),
-            ),
+            ("yaml/old.yaml".into(), b"steps:\n  - log: x\n".to_vec()),
             ("tmpl/b.png".into(), valid_template_png()),
         ]);
         let rep = store.import(&z, "com.test.app", true).unwrap();
@@ -1825,6 +1819,18 @@ mod tests {
         assert_eq!(rep.templates.add, vec!["tmpl/b.png"]);
         assert!(rep.functions.add.is_empty() && rep.functions.invalid.is_empty());
         assert!(dir.join("com.test.app/yaml/old.yaml").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // v1 过渡语法（func: 顶层键 / 顶层序列）不再被导入接受
+        let z = craft_zip(vec![
+            (
+                "yaml/v1func.yaml".into(),
+                b"func:\n  - f1:\n    - log: a\nsteps:\n  - log: x\n".to_vec(),
+            ),
+            ("yaml/v1seq.yaml".into(), b"- log: seq\n".to_vec()),
+        ]);
+        let rep = store.import(&z, "com.test.app", false).unwrap();
+        assert_eq!(rep.scripts.invalid.len(), 2, "{rep:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2185,16 +2191,16 @@ mod tests {
     }
 
     #[test]
-    fn script_shallow_validation_accepts_contract_and_legacy_v1() {
+    fn script_shallow_validation_rejects_legacy_v1() {
         // 新契约顶层键
         assert!(validate_script_file_shallow(
             "params: []\nconfig:\n  interval: 500ms\nsteps: []\n"
         )
         .is_ok());
         assert!(validate_script_file_shallow("steps:\n  - log: x\n").is_ok());
-        // 过渡期兼容 v1：func 段 / 顶层序列简写
-        assert!(validate_script_file_shallow("func:\n  - f1:\n    - log: a\nsteps: []\n").is_ok());
-        assert!(validate_script_file_shallow("- log: 顶层序列简写\n").is_ok());
+        // 旧语法拒绝（与 script_v2 严格装载口径一致）：func 顶层键 / 顶层序列
+        assert!(validate_script_file_shallow("func:\n  - f1:\n    - log: a\nsteps: []\n").is_err());
+        assert!(validate_script_file_shallow("- log: 顶层序列简写\n").is_err());
         // 未知顶层键 / 语法错误 / 标量顶层
         assert!(validate_script_file_shallow("steps: []\nname: x\n").is_err());
         assert!(validate_script_file_shallow("action_wait: 1s\nsteps: []\n").is_err());

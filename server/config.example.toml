@@ -71,25 +71,6 @@ rtc_external_ip = ""
 rtc_udp_port = 0
 rtc_external_port = 0
 
-# 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式（可自定义）
-# 占位符：
-#   {name}     模板名
-#   {x}/{y}    点击相对坐标（color 的采样点同用）
-#   {fx}/{fy}/{tx}/{ty} 滑动起终点相对坐标
-#   {time}     滑动实际时长（ms）
-#   {color}    二次裁切区点击处采样的十六进制颜色（color 色值键）
-# 搜索区域不再有占位符：由模板名 #后缀（hp#l / xx#0_0_500_500）决定，引擎自动解析
-# 生成的操作记录不写等待参数：步骤间不再统一等待，轮询间隔由 config interval 控制
-[op_templates]
-find = """- find: {name}"""
-tap = """- tap: [{x}, {y}]"""
-color = """- color: [{x}, {y}]
-  {color}:"""
-swipe = """- swipe:
-    fm: [{fx}, {fy}]
-    to: [{tx}, {ty}]
-    time: {time}ms"""
-
 # 鉴权与会话治理（阶段 2）。REST/WS 除登录三端点外全部要求浏览器会话 Cookie；
 # gamer.ps1 走「回环 + X-Admin-Token」本机管理通道优雅停机。
 # 管理口令来源优先级：环境变量 GAMER_ADMIN_PASSWORD > 本段 password_hash > 上面

@@ -53,42 +53,6 @@ impl Default for AuthConfig {
     }
 }
 
-/// 操作记录 YAML 模板：前端 alt 模式把操作追加到编辑区时使用的格式
-///
-/// 占位符：{name} 模板名 · {x}/{y} 点击相对坐标（color 的采样点同用）·
-/// {fx}/{fy}/{tx}/{ty} 滑动起终点 · {time} 滑动实际时长 ms ·
-/// {color} 二次裁切区点击处采样的十六进制颜色（color 色值键）
-///
-/// 生成的操作记录不写等待参数：步骤间不再统一等待，
-/// 轮询类间隔由 config interval 控制（config.toml 或脚本 config: 段）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpTemplates {
-    /// find：等模板出现并点击
-    #[serde(default)]
-    pub find: String,
-    /// 屏幕点击
-    #[serde(default)]
-    pub tap: String,
-    /// color 颜色判断记录（{color} 为二次裁切区 alt 点击采样的十六进制颜色）
-    #[serde(default)]
-    pub color: String,
-    /// 屏幕滑动
-    #[serde(default)]
-    pub swipe: String,
-}
-
-impl Default for OpTemplates {
-    fn default() -> Self {
-        Self {
-            find: "- find: {name}".into(),
-            tap: "- tap: [{x}, {y}]".into(),
-            color: "- color: [{x}, {y}]\n  {color}:".into(),
-            swipe: "- swipe:\n    fm: [{fx}, {fy}]\n    to: [{tx}, {ty}]\n    time: {time}ms"
-                .into(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     Dev,
@@ -165,9 +129,6 @@ pub struct Config {
     /// CPU/worker，推高单帧 RTP 发送耗时（饱和 → 积压 → 冻结跳帧），默认关闭
     #[serde(default)]
     pub probe_encoder: bool,
-    /// 操作记录 YAML 模板（config.toml [op_templates]，可自定义）
-    #[serde(default)]
-    pub op_templates: OpTemplates,
     /// 空闲低功耗秒数：周期检查（无 viewer 且无脚本运行持续 N 秒）后——
     /// 虚拟屏拆 scrcpy 会话（编码停止/虚拟屏销毁，adb 链路保留，下次脚本/
     /// 投屏自动重连）；镜像模式关物理屏（会话保留，消费者回来即唤醒）。
@@ -248,7 +209,6 @@ impl Default for Config {
             fps: 15,
             encoder_name: String::new(),
             probe_encoder: false,
-            op_templates: OpTemplates::default(),
             idle_power_secs: default_idle_power_secs(),
             log_retain_days: default_log_retain_days(),
             compute_max_concurrency: 0,

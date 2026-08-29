@@ -578,11 +578,6 @@ pub(super) fn spawn_watchdog(st: AppState) {
     });
 }
 
-/// 操作记录 YAML 模板（前端 alt 模式追加到编辑区用，来源 config.toml [op_templates]）
-pub(super) async fn api_op_templates(State(st): State<AppState>) -> Response {
-    Json(st.cfg.op_templates.clone()).into_response()
-}
-
 /// 优雅停机（gamer.ps1 stop/rebuild 先调此端点，超时才兜底硬杀）：
 /// ① RunManager drain——先拒绝新 run（503），等待活动任务结束，超时强停
 /// （RUN-001：服务关闭先停止接收新任务再取消/等待活动任务）；

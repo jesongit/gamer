@@ -6,9 +6,8 @@
 //!   diagnostics:[...]};；
 //! - `POST /api/functions/:id/run` body `{device_id, function?, start_index?,
 //!   args?}`：函数测试（RunTarget::Function），RunRecord.script_id 记
-//!   `<pkg>/<file>.yaml[#函数]` 展示标签；函数库不进脚本运行接口。
-//! - 旧 v1 `func`（run_func 位置实参路径）已删除：函数运行统一走本文件
-//!   函数测试端点，函数体内步骤定位 = function + start_index。
+//!   `<pkg>/<file>.yaml[#函数]` 展示标签；函数库不进脚本运行接口，
+//!   函数体内步骤定位 = function + start_index。
 
 use std::sync::Arc;
 
