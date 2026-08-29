@@ -72,8 +72,8 @@
 
 ### 审查人
 
-待主线验收填写
+主线编排复核（非实现者）：复核 CONTRACT.md 与 fixture 索引；复跑 cargo test（216+7 全过）、pnpm test:run（168 全过）、pnpm build 成功
 
 ### 结论
 
-待主线验收填写
+通过
