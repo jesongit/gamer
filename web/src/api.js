@@ -102,9 +102,26 @@ export const api = {
   updateFunction: (id, f) => req('PUT', `/api/functions/${encodeURIComponent(id)}`, f),
   deleteFunction: (id) => req('DELETE', `/api/functions/${encodeURIComponent(id)}`),
 
-  // 脚本运行（RUN-003 阶段3 契约）：成功 202 {run_id, state:"starting"}；设备占用 409
-  // {error:"device_busy", run_id, script_id, source, started_at}（err.status/err.data 可取）
-  runScript: (id, deviceId, startIndex, func) => req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, { device_id: deviceId, start_index: startIndex || 0, ...(func ? { func } : {}) }),
+  // 脚本运行（阶段 5 契约）：body {device_id, start_index?, args?}——args 为稀疏显式覆盖映射
+  //（bool/coord/time/color/tmpl/key/text 七类；「使用默认值」的参数省略，由服务端解析默认值）。
+  // 成功 202 {run_id, state, resolved_args}；参数诊断 400 {error:"invalid_args", diagnostics:[...]}
+  //（err.status/err.data 可取）；设备占用 409 {error:"device_busy", run_id, script_id, source, started_at}
+  runScript: (id, deviceId, startIndex, args) =>
+    req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, {
+      device_id: deviceId,
+      start_index: startIndex || 0,
+      ...(args && Object.keys(args).length ? { args } : {}),
+    }),
+  // 函数测试（阶段 5）：id = 函数库文件 id（"<pkg>/<文件短路径>.yaml"，整体 encodeURIComponent）。
+  // body {device_id, function?, start_index?, args?}（function 缺省 = 文件第一个函数）；
+  // 响应/错误语义与脚本 run 相同（RunManager 统一 run_id 管理）
+  runFunction: (id, deviceId, opts = {}) =>
+    req('POST', `/api/functions/${encodeURIComponent(id)}/run`, {
+      device_id: deviceId,
+      ...(opts.function ? { function: opts.function } : {}),
+      ...(opts.start_index ? { start_index: opts.start_index } : {}),
+      ...(opts.args && Object.keys(opts.args).length ? { args: opts.args } : {}),
+    }),
   stopScript: (id) => req('POST', `/api/scripts/${encodeURIComponent(id)}/stop`),
   scriptStatus: (id) => req('GET', `/api/scripts/${encodeURIComponent(id)}/status`),
   // 统一运行实例（run_id 主键）：单次查询 RunRecord / 按次取消（终态以查询为准）
@@ -140,11 +157,15 @@ export const api = {
     return r.json()
   },
 
-  // 定时任务
+  // 定时任务（阶段 5 参数化）：创建/更新接受 args（稀疏显式覆盖映射，服务端解析为完整
+  // 快照存储并计算 param_signature）；列表响应含 args 视图 / param_signature / param_stale。
+  // PUT/更新签名不匹配且无 reconfirm:true → 409 {code:"param_signature_conflict"}；
+  // 带 reconfirm 则按当前参数声明重算快照
   listTasks: () => req('GET', '/api/tasks'),
   saveTask: (t) => req('POST', '/api/tasks', t),
   deleteTask: (id) => req('DELETE', `/api/tasks/${id}`),
-  // 任务立即执行：新契约 202 {run_id}（触发即返回，不等任务完成）；旧后端 200 {ok:true}
+  // 任务立即执行（用任务已存参数快照；过期/无快照由服务端明确报错）：
+  // 新契约 202 {run_id}（触发即返回，不等任务完成）；旧后端 200 {ok:true}
   runTaskNow: (id) => req('POST', `/api/tasks/${id}/run`),
 
   // 日志

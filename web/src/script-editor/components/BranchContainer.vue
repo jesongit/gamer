@@ -35,10 +35,12 @@
           :context="context"
           :resolve-target="resolveTarget"
           :templates="templates"
+          :test-from="testFrom"
           @select="(u) => emit('select', u)"
           @toggle-expand="(u) => emit('toggle-expand', u)"
           @focus="(p) => emit('focus', p)"
           @add-here="(p) => emit('add-here', p)"
+          @test-from="(u) => emit('test-from', u)"
         />
       </div>
       <div v-else class="branch-empty">空流程——点「+ 添加」插入步骤</div>
@@ -85,9 +87,11 @@ const props = defineProps({
     default: undefined,
   },
   templates: { type: Array as PropType<string[]>, default: () => [] },
+  /** 透传「从此步骤测试函数」入口开关（宿主仅在函数体根容器开启）。 */
+  testFrom: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['select', 'toggle-expand', 'focus', 'add-here'])
+const emit = defineEmits(['select', 'toggle-expand', 'focus', 'add-here', 'test-from'])
 
 const list = computed<Step[]>(() => resolveStepList(props.model, props.containerPath))
 </script>

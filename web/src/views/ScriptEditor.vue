@@ -82,7 +82,9 @@
               :context="shell.editorContext"
               :templates="templateNames"
               :selected-uuid="shell.selectedUuid"
+              :test-from="tab === 'func'"
               @select="(u) => shell.select(u)"
+              @test-from="onTestFrom"
             />
             <div v-if="showExtras" class="extras">
               <!-- 脚本 = 文件级 params；函数库 = 当前函数 params（functionPath 指到 functions.<名>.params） -->
@@ -99,8 +101,16 @@
         <ErrorSummary :diagnostics="shell.diagnostics" @locate="locateDiag" />
         <div v-if="tab === 'func' && shell.hasModel" class="test-fn">
           <div class="tf-title">测试函数</div>
-          <p class="tf-desc">运行单个函数需要运行参数表单与函数测试接口（阶段 5 开放：按 params 生成控件、发送稀疏 args）。</p>
-          <button class="btn" disabled title="阶段 5 开放">▶ 测试函数（未开放）</button>
+          <select v-model="testFnName" class="select tf-fn" aria-label="选择要测试的函数">
+            <option value="">（画布当前函数）</option>
+            <option v-for="f in shell.model.functions" :key="f.name" :value="f.name">{{ f.name }}</option>
+          </select>
+          <button
+            class="btn btn-primary" :disabled="!store.deviceId || testFlow.modal.submitting"
+            title="按函数 params 生成参数表单，经函数测试接口运行单个函数"
+            @click="beginTestFn()"
+          >▶ 测试函数</button>
+          <p class="tf-desc">按函数 params 生成参数表单（有默认值可省略）；函数体顶层卡片可用「▶测试」从此步骤开始。</p>
         </div>
       </aside>
     </div>
@@ -120,6 +130,37 @@
       @overwrite="onConflictOverwrite"
       @close="shell.dismissConflict()"
     />
+    <!-- 运行参数弹窗（阶段 5）：脚本运行 / 函数测试共用 ParamsForm（稀疏 args、400 诊断回填标红） -->
+    <RunParamsModal
+      :open="runFlow.modal.open"
+      :title="runFlow.modal.title"
+      :desc="runFlow.modal.desc"
+      submit-label="▶ 运行"
+      :params="runFlow.modal.params"
+      :initial-args="runFlow.modal.initialArgs"
+      :suggestions="runFlow.modal.suggestions"
+      :templates="runFlow.modal.templates"
+      :field-errors="runFlow.modal.fieldErrors"
+      :general-errors="runFlow.modal.generalErrors"
+      :submitting="runFlow.modal.submitting"
+      @submit="onRunArgsSubmit"
+      @close="runFlow.close()"
+    />
+    <RunParamsModal
+      :open="testFlow.modal.open"
+      :title="testFlow.modal.title"
+      :desc="testFlow.modal.desc"
+      :submit-label="testFlow.modal.submitLabel"
+      :params="testFlow.modal.params"
+      :initial-args="testFlow.modal.initialArgs"
+      :suggestions="testFlow.modal.suggestions"
+      :templates="testFlow.modal.templates"
+      :field-errors="testFlow.modal.fieldErrors"
+      :general-errors="testFlow.modal.generalErrors"
+      :submitting="testFlow.modal.submitting"
+      @submit="onTestArgsSubmit"
+      @close="testFlow.close()"
+    />
     <RunConflictModal />
   </div>
 </template>
@@ -133,8 +174,10 @@
  * - 函数库：文件 → FunctionLibraryModel，函数级 params 经 ParamEditor functionPath 编辑；
  * - 保存带 expected_version，409 version_conflict → SaveConflictModal（重载/覆盖）；
  * - 「保存并运行」：存在未保存内容先落盘，再以持久化版本启动（不运行浏览器内临时模型）；
- * - 运行/停止/实例恢复沿用统一 RunManager 状态（store + runs.js），与旧页一致。
- * 「测试函数」为占位入口，等阶段 5 的参数表单与函数运行接口。
+ * - 运行/停止/实例恢复沿用统一 RunManager 状态（store + runs.js），与旧页一致；
+ * - 「测试函数」（阶段 5）：选函数 → ParamsForm → POST /api/functions/:id/run
+ *   （function/start_index/args）；函数体顶层卡片「▶测试」映射 start_index 从该步测试；
+ *   400 invalid_args 诊断回填表单字段标红，覆盖建议按函数库文件 id 存 localStorage。
  */
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
@@ -143,15 +186,19 @@ import {
   applyRunRecord, beginCancel, findRun, resetStoreRunState, pushRunConflict,
 } from '../store'
 import { api } from '../api'
+import { serialize } from '../script-editor/codec'
+import { startIndexOf } from '../script-editor/selection'
 import {
   normalizeActiveRunResponse, normalizeStartReply,
   isMissingEndpointError, isDeviceBusyConflict, isTerminalRunState, terminalLabel,
   describeConflict,
 } from '../runs'
 import RunConflictModal from '../components/RunConflictModal.vue'
+import RunParamsModal from '../components/RunParamsModal.vue'
 import SaveConflictModal from '../components/console/SaveConflictModal.vue'
 import { useScriptEditorShell } from '../composables/useScriptEditorShell'
 import { useFunctionLibrary } from '../composables/useFunctionLibrary'
+import { useRunArgsFlow } from '../composables/useRunArgsFlow'
 import { StepCanvas, ParamEditor, ConfigEditor, YamlPreview, ErrorSummary } from '../script-editor/components/index'
 
 const router = useRouter()
@@ -367,31 +414,16 @@ const runStopping = computed(() => {
   return rec?.state === 'stopping'
 })
 
-/** 运行目标：模板页签无运行对象；函数库不能独立运行（阶段 5 提供「测试函数」） */
+/** 运行目标：模板页签无运行对象；函数库不能独立运行（「测试函数」走函数测试接口） */
 const canRun = computed(() => {
   if (tab.value !== 'script') return false
   return !!pkg.value && (shell.kind === 'script' ? shell.hasModel : !!selScriptId.value)
 })
 
-async function run() {
-  if (!store.deviceId) return toast('请先选择设备（投屏控制台 → 设备工具条）', 'error')
-  if (shell.kind === 'function_library') return toast('函数库不能独立运行（在脚本 func 步骤中调用；测试函数阶段 5 开放）', 'warn')
-  // 未打开任何脚本时先打开树中选中项
-  if (!shell.hasModel) {
-    const s = scripts.value.find(x => x.id === selScriptId.value)
-    if (!s) return toast('请先选择脚本', 'error')
-    await openScript(s)
-  }
-  if (shell.kind !== 'script') return
-  if (shell.dirty || !shell.resourceId) {
-    const r = await save()
-    if (!r || !r.ok) return // 保存失败（含 409 冲突弹窗挂起）不启动运行
-  }
-  if (!shell.resourceId) return toast('请先保存脚本', 'error')
-  const id = shell.resourceId
-  const name = shell.name || id
-  try {
-    const rep = await api.runScript(id, store.deviceId)
+// ---- 运行参数流程（阶段 5，plan §12.1）：脚本声明 params 时先弹表单，稀疏 args 提交 ----
+const runFlow = useRunArgsFlow({
+  exec: async ({ id, name, startIndex, args }) => {
+    const rep = await api.runScript(id, store.deviceId, startIndex, args)
     const started = normalizeStartReply(rep)
     if (started) {
       applyRunRecord({
@@ -407,16 +439,155 @@ async function run() {
       store.runScript = name
       store.runScriptId = id
     }
+    return rep
+  },
+  notify: ({ summary }) => {
     toast('脚本已开始运行', 'success')
+    if (summary) toast(summary, 'info') // resolved_args 摘要（默认继承/显式覆盖标注）
     startRunStatusPoll()
-  } catch (e) {
-    if (isDeviceBusyConflict(e)) {
-      const info = { ...(e.data || {}), device_id: store.deviceId }
-      pushRunConflict(info)
-      toast(describeConflict(info), 'warn')
+  },
+})
+
+function handleRunStartError(e) {
+  if (isDeviceBusyConflict(e)) {
+    const info = { ...(e.data || {}), device_id: store.deviceId }
+    pushRunConflict(info)
+    toast(describeConflict(info), 'warn')
+  } else {
+    toast('运行失败：' + e.message, 'error')
+  }
+}
+
+function onRunArgsSubmit({ args }) {
+  runFlow.confirm(args).catch(handleRunStartError)
+}
+
+// ---- 函数测试（阶段 5，plan §12.2）：RunManager 统一 run_id，RunRecord.script_id 仅展示标签 ----
+
+const testFnName = ref('') // 右栏函数选择；'' = 跟随画布当前函数
+
+const testFlow = useRunArgsFlow({
+  exec: async ({ id, name, fnName, startIndex, args }) => {
+    const rep = await api.runFunction(id, store.deviceId, {
+      function: fnName,
+      start_index: startIndex || 0,
+      args,
+    })
+    const started = normalizeStartReply(rep)
+    const display = `${name || id} · ${fnName}()`
+    if (started) {
+      applyRunRecord({
+        run_id: started.run_id,
+        state: started.state,
+        device_id: store.deviceId,
+        script_id: id,
+        source: 'manual',
+        display,
+      })
     } else {
-      toast('运行失败：' + e.message, 'error')
+      store.running = true
+      store.runScript = display
+      store.runScriptId = id
     }
+    return rep
+  },
+  notify: ({ summary }) => {
+    toast('函数测试已开始', 'success')
+    if (summary) toast(summary, 'info') // resolved_args 摘要
+    startRunStatusPoll()
+  },
+})
+
+/** 待测函数名解析：右栏下拉 > 画布当前函数 > 第一个函数。 */
+function resolveTestFnName() {
+  const fns = shell.hasModel && Array.isArray(shell.model.functions) ? shell.model.functions : []
+  const name = testFnName.value || canvasEl.value?.activeFnName || fns[0]?.name || ''
+  return fns.some((f) => f.name === name) ? name : ''
+}
+
+/** 「▶ 测试函数」：从头（start_index 0）运行所选函数；未保存内容先落盘（服务端读磁盘）。 */
+async function beginTestFn() {
+  if (!store.deviceId) return toast('请先选择设备（投屏控制台 → 设备工具条）', 'error')
+  const fnName = resolveTestFnName()
+  if (!fnName) return toast('该函数库文件没有可测试的函数', 'warn')
+  await startFunctionTest(fnName, 0)
+}
+
+async function startFunctionTest(fnName, startIndex) {
+  if (shell.dirty || !shell.resourceId) {
+    const r = await save()
+    if (!r || !r.ok) return // 保存失败（校验/409 冲突）不发起测试
+  }
+  if (!shell.resourceId) return toast('请先保存函数库文件', 'error')
+  try {
+    await testFlow.begin({
+      id: shell.resourceId,
+      name: shell.name || shell.resourceId,
+      kind: 'function_library',
+      fnName,
+      startIndex,
+      yaml: serialize(shell.model),
+      templates: templateNames.value,
+      title: '测试函数',
+      submitLabel: '▶ 测试',
+      desc: `测试 ${shell.name || shell.resourceId} · ${fnName}()${startIndex ? `（从第 ${startIndex + 1} 步）` : ''}`,
+    })
+  } catch (e) {
+    handleTestStartError(e)
+  }
+}
+
+function handleTestStartError(e) {
+  if (isDeviceBusyConflict(e)) {
+    const info = { ...(e.data || {}), device_id: store.deviceId }
+    pushRunConflict(info)
+    toast(describeConflict(info), 'warn')
+  } else {
+    toast('测试失败：' + e.message, 'error')
+  }
+}
+
+function onTestArgsSubmit({ args }) {
+  testFlow.confirm(args).catch(handleTestStartError)
+}
+
+/** 画布函数体顶层卡片「▶测试」：uuid → start_index 从该步测试（嵌套步骤不支持）。 */
+function onTestFrom(uuid) {
+  if (!shell.hasModel) return
+  const idx = startIndexOf(shell.model, uuid)
+  if (idx === null) return toast('仅函数体顶层步骤支持「从此步骤测试」', 'warn')
+  const fnName = resolveTestFnName()
+  if (!fnName) return toast('该函数库文件没有可测试的函数', 'warn')
+  startFunctionTest(fnName, idx)
+}
+
+async function run() {
+  if (!store.deviceId) return toast('请先选择设备（投屏控制台 → 设备工具条）', 'error')
+  if (shell.kind === 'function_library') return toast('函数库不能独立运行（在脚本 func 步骤中调用；可用「测试函数」运行单个函数）', 'warn')
+  // 未打开任何脚本时先打开树中选中项
+  if (!shell.hasModel) {
+    const s = scripts.value.find(x => x.id === selScriptId.value)
+    if (!s) return toast('请先选择脚本', 'error')
+    await openScript(s)
+  }
+  if (shell.kind !== 'script') return
+  if (shell.dirty || !shell.resourceId) {
+    const r = await save()
+    if (!r || !r.ok) return // 保存失败（含 409 冲突弹窗挂起）不启动运行
+  }
+  if (!shell.resourceId) return toast('请先保存脚本', 'error')
+  const id = shell.resourceId
+  const name = shell.name || id
+  try {
+    await runFlow.begin({
+      id,
+      name,
+      yaml: serialize(shell.model),
+      templates: templateNames.value,
+      desc: `运行脚本 ${name}`,
+    })
+  } catch (e) {
+    handleRunStartError(e)
   }
 }
 
@@ -607,6 +778,7 @@ onUnmounted(() => stopRunStatusPoll())
 .side-panel :deep(.error-summary) { margin-top: 0; }
 .test-fn { border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 10px; display: flex; flex-direction: column; gap: 6px; }
 .tf-title { font-size: 12px; font-weight: 600; color: var(--text-1); }
+.tf-fn { width: 100%; font-size: 12px; }
 .tf-desc { margin: 0; font-size: 11px; color: var(--text-2); line-height: 1.6; }
 
 @media (max-width: 1100px) {

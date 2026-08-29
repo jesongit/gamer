@@ -78,6 +78,23 @@
     <!-- 设备设置 / 新增设备弹窗 -->
     <DeviceSettingsModal :context="deviceSettingsContext" />
 
+    <!-- 运行参数弹窗（脚本声明 params 时点运行/从此运行弹出；稀疏 args 提交、400 诊断回填标红） -->
+    <RunParamsModal
+      :open="runArgsFlow.modal.open"
+      :title="runArgsFlow.modal.title"
+      :desc="runArgsFlow.modal.desc"
+      submit-label="▶ 运行"
+      :params="runArgsFlow.modal.params"
+      :initial-args="runArgsFlow.modal.initialArgs"
+      :suggestions="runArgsFlow.modal.suggestions"
+      :templates="runArgsFlow.modal.templates"
+      :field-errors="runArgsFlow.modal.fieldErrors"
+      :general-errors="runArgsFlow.modal.generalErrors"
+      :submitting="runArgsFlow.modal.submitting"
+      @submit="onRunArgsSubmit"
+      @close="runArgsFlow.close()"
+    />
+
     <!-- 设备占用冲突 409 提示（对方脚本/来源/开始时间；仍要查看日志 → 跳控制台对应设备） -->
     <RunConflictModal />
   </div>
@@ -105,10 +122,12 @@ import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
 import ScriptRunner from '../components/console/ScriptRunner.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
+import RunParamsModal from '../components/RunParamsModal.vue'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
 import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
 import { useScriptEditorShell } from '../composables/useScriptEditorShell'
 import { useFunctionLibrary } from '../composables/useFunctionLibrary'
+import { useRunArgsFlow } from '../composables/useRunArgsFlow'
 import { parseScript } from '../script-editor/codec'
 import { startIndexOf } from '../script-editor/selection'
 import {
@@ -2291,53 +2310,84 @@ function openRunConflict(d) {
   pushRunConflict({ ...(d || {}), device_id: store.deviceId })
 }
 
+// ---------- 运行参数流程（阶段 5）：脚本声明 params 时先弹参数表单，稀疏 args 提交 ----------
+// exec 完成 API 调用与 run_id 登记；flow 负责表单开关/400 诊断回填字段/覆盖建议缓存/摘要
+const runArgsFlow = useRunArgsFlow({
+  exec: async ({ id, name, startIndex, args }) => {
+    startPending.value = true
+    // 每次运行清空日志区域，只显示本次运行产生的日志
+    runStartTime = Date.now()
+    rawLogs = []
+    liveLogs.value = []
+    try {
+      const rep = await api.runScript(id, store.deviceId, startIndex, args)
+      const st = normalizeStartReply(rep)
+      if (st) {
+        // 新契约：202 {run_id} —— 启动即以 run_id 登记执行实例（主键），后续轮询按 record.state 驱动 UI
+        applyRunRecord({
+          run_id: st.run_id,
+          state: st.state,
+          device_id: store.deviceId,
+          script_id: id,
+          source: 'manual',
+          display: name,
+        })
+      } else {
+        // 兼容降级：旧后端响应无 run_id → 保持旧 script 句柄语义（status 轮询 / stop 停止）
+        store.running = true
+        store.runScript = name
+        store.runScriptId = id
+      }
+      return rep
+    } finally {
+      startPending.value = false
+    }
+  },
+  notify: ({ summary }) => {
+    toast('脚本已开始运行', 'success')
+    // resolved_args 摘要（默认继承/显式覆盖来源标注）进运行日志区，说明本次实际使用的参数
+    if (summary) pushLog('info', summary)
+    // POST 成功（服务端已登记条目）后才开始轮询，避免设备离线时 connect_device 耗时较长、
+    // 查询先于登记返回导致状态被提前复位
+    startLogPolling()
+    startRunStatusPoll()
+  },
+})
+
+/** 运行启动失败统一处理：409 设备占用 → 冲突弹窗；其余写日志 + toast（400 诊断由 flow 消化不经过此） */
+function handleRunStartError(e) {
+  if (isDeviceBusyConflict(e)) {
+    openRunConflict({ ...(e.data || {}), device_id: store.deviceId })
+  } else {
+    pushLog('error', `执行失败：${e.message}`)
+    toast('脚本执行失败', 'error')
+  }
+}
+
+/** 运行/从此步骤运行入口：解析当前脚本 params → 无参数直接运行，有参数弹参数表单 */
 async function runScript() {
   if (!selScript.value || !store.deviceId || startPending.value || store.running) return
   const s = scripts.value.find(x => x.id === selScript.value)
   if (!s) return
   // 运行起点（摘要卡片选中）→ 顶层 steps 序号；未选中 = 从头运行（首版仅主流程顶层，plan §10）
   const startIndex = resolveRunStartIndex()
-  const funcName = null
-  const displayName = funcName ? `${s.name} · ${funcName}()` : s.name
-  // 每次运行清空日志区域，只显示本次运行产生的日志
-  runStartTime = Date.now()
-  rawLogs = []
-  liveLogs.value = []
-  startPending.value = true
   try {
-    const rep = await api.runScript(s.id, store.deviceId, startIndex, funcName)
-    const st = normalizeStartReply(rep)
-    if (st) {
-      // 新契约：202 {run_id} —— 启动即以 run_id 登记执行实例（主键），后续轮询按 record.state 驱动 UI
-      applyRunRecord({
-        run_id: st.run_id,
-        state: st.state,
-        device_id: store.deviceId,
-        script_id: s.id,
-        source: 'manual',
-        display: displayName,
-      })
-    } else {
-      // 兼容降级：旧后端响应无 run_id → 保持旧 script 句柄语义（status 轮询 / stop 停止）
-      store.running = true
-      store.runScript = displayName
-      store.runScriptId = s.id
-    }
-    toast('脚本已开始运行', 'success')
-    // POST 成功（服务端已登记条目）后才开始轮询，避免设备离线时 connect_device 耗时较长、
-    // 查询先于登记返回导致状态被提前复位
-    startLogPolling()
-    startRunStatusPoll()
+    await runArgsFlow.begin({
+      id: s.id,
+      name: s.name,
+      yaml: s.content ?? '',
+      startIndex,
+      templates: templateNames.value,
+      desc: `运行脚本 ${s.name}${startIndex ? `（从第 ${startIndex + 1} 步）` : ''}`,
+    })
   } catch (e) {
-    if (isDeviceBusyConflict(e)) {
-      openRunConflict({ ...(e.data || {}), device_id: store.deviceId })
-    } else {
-      pushLog('error', `执行失败：${e.message}`)
-      toast('脚本执行失败', 'error')
-    }
-  } finally {
-    startPending.value = false
+    handleRunStartError(e)
   }
+}
+
+/** RunParamsModal 提交（客户端校验已过）：稀疏 args 提交；400 invalid_args 由 flow 回填表单标红 */
+function onRunArgsSubmit({ args }) {
+  runArgsFlow.confirm(args).catch(handleRunStartError)
 }
 
 function stopScript() {
@@ -2433,6 +2483,8 @@ const scriptRunnerContext = {
   editCurrentScript, moreOpen, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
   // 运行视图：只读摘要 + 运行起点 + call/func 结构化跳转（替代旧源码行点击/文本预览）
   summaryModel, summaryError, runStartUuid, toggleRunStart, runFromStep, openScriptTarget,
+  // 运行参数表单（阶段 5）：脚本声明 params 时点运行/从此运行弹出
+  runArgsFlow, onRunArgsSubmit,
   // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调 + Alt 录制开关
   shell: scriptShell, saveEditScript, cancelEditScript, altMode, toggleAltMode,
   showYaml, showExtras, templateNames, jumpBack,

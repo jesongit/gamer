@@ -53,10 +53,12 @@
       :context="context"
       :resolve-target="resolveTarget"
       :templates="templates"
+      :test-from="testFromActive"
       @select="onSelect"
       @toggle-expand="toggleExpand"
       @focus="enterFocus"
       @add-here="onAddHere"
+      @test-from="(u: string) => emit('test-from', u)"
     />
 
     <ErrorSummary v-if="showErrorPanel" :diagnostics="diagnostics" @locate="locate" />
@@ -103,9 +105,11 @@ const props = defineProps({
   showErrorPanel: { type: Boolean, default: false },
   /** CellEditor 的参数引用列表；缺省时按模型自动取（脚本 = 文件级，函数库 = 当前函数）。 */
   params: { type: Array as PropType<ParamDecl[]>, default: null as unknown as ParamDecl[] },
+  /** 开启「从此步骤测试函数」入口（阶段 5）：仅函数库页签 + 当前容器为函数体根时生效。 */
+  testFrom: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['select'])
+const emit = defineEmits(['select', 'test-from'])
 
 // ---------- 选中 / 展开 / 高亮 ----------
 
@@ -158,6 +162,10 @@ function sanitize(path: Path | null | undefined): Path {
 
 const activeContainer = computed<Path>(() => sanitize(focusPath.value ?? currentContainer.value))
 const activeFnName = computed(() => (isFunction.value ? String(activeContainer.value[1] ?? '') : ''))
+// 测试入口仅出现在函数体根容器（专注视图进入深层分支后隐藏——start_index 只映射函数体顶层）
+const testFromActive = computed(() =>
+  props.testFrom && isFunction.value
+  && activeContainer.value.length === 3 && activeContainer.value[2] === 'steps')
 const activeLabel = computed(() => {
   const nodes = breadcrumbForContainer(props.model, activeContainer.value)
   return nodes.length ? nodes[nodes.length - 1]!.label : '主流程'

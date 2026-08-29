@@ -17,6 +17,12 @@
         {{ ownErrors.length }}
       </span>
       <span class="head-actions">
+        <!-- 函数测试入口（阶段 5）：仅宿主开启 testFrom 时显示（函数库页签的函数体顶层卡片） -->
+        <button
+          v-if="testFrom" type="button" class="mini-btn test-from"
+          title="从此步骤测试函数"
+          @click.stop="emit('test-from', step.uuid)"
+        >▶测试</button>
         <button
           type="button" class="mini-btn expand-btn"
           :title="expanded ? '收起' : '展开编辑'"
@@ -403,9 +409,11 @@ const props = defineProps({
     default: undefined,
   },
   templates: { type: Array as PropType<string[]>, default: () => [] },
+  /** 显示「从此步骤测试函数」入口（函数库测试；仅函数体顶层容器由宿主开启）。 */
+  testFrom: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['select', 'toggle-expand', 'focus', 'add-here'])
+const emit = defineEmits(['select', 'toggle-expand', 'focus', 'add-here', 'test-from'])
 
 const meta = computed(() => KIND_META[props.step.kind as StepKind])
 const summary = computed(() => stepSummary(props.step))
@@ -613,6 +621,8 @@ function addArg(): void {
 .mini-btn:disabled { opacity: .35; cursor: not-allowed; }
 .mini-btn.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
 .mini-btn.add { color: var(--accent-2); }
+.mini-btn.test-from { color: var(--accent); }
+.mini-btn.test-from:hover { background: var(--accent); color: #06251c; }
 
 .card-body { padding: 4px 10px 10px 32px; display: flex; flex-direction: column; gap: 4px; }
 .field-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
