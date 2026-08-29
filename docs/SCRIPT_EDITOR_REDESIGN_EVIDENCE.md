@@ -77,3 +77,46 @@
 ### 结论
 
 通过
+
+
+## 阶段 1：目录和资源 API
+
+### 交付
+- ca15360 feat(data): 三套路径解析（yaml/func/tmpl，拒绝穿越/反斜杠/空段/..）、func/ 函数库存储、浅校验（顶层键合法函数名）、version（SHA-256 前 12 hex）、原子写入（临时文件+rename）
+- fb92305 feat(api): /api/functions CRUD（GET?pkg=/POST/GET/:id/PUT/:id/DELETE/:id，id 整体 %2F 编码）、脚本 GET/:id 与 expected_version 409 冲突、导入 dry-run（无 confirm=1 返回 {scripts,functions,templates} 分类报告，invalid 整体拒绝）与导出 zip 三目录布局（兼容旧布局）
+
+### 自动化命令与结果
+- cargo test：238 passed / 0 failed / 2 ignored（主线在 HEAD 复验 237+script_v2 中间态亦全绿）；cargo check 0 warning
+- 并行验证：S1 在独立 worktree（HEAD+自身 diff）连续两轮全绿
+
+### 人工用例与结果
+- API 列表只返回 yaml/ 脚本、函数不进运行/任务选择器：router 集成测试锁死，通过
+
+### 已知限制
+- func/ 嵌套子目录：resolver 支持、save/list/导入暂扁平；.yml 兼容仅脚本侧；dry-run 对攻击形态（zip-slip/像素炸弹）整体 400 不进报告（安全优先）；resolve_template_path 生产调用点待阶段 2 接入（#[allow(dead_code)]）
+- 回归：Console.vue 导入确认弹窗读旧报告字段（dry.conflicts），已列修复任务
+
+### 审查人
+主线编排复核：HEAD 复跑 cargo test 全绿、抽查路由与 resolver 测试
+
+### 结论
+通过
+
+## 阶段 3（前半）：编辑器核心模型层
+
+### 交付
+- 2c6382d feat(web): model/codec/schema/diagnostics（TS）+ fixture 逐字节往返（14 合法 fixture serialize(parse(x)) 与原文一致，未改 fixture）
+- 3d81ef4 feat(web): commands（事务栈）/validation/factories/selection + 116 新测试
+
+### 自动化命令与结果
+- pnpm test:run：284 passed / 0 failed（既有 168 零回归）；pnpm build 成功；tsc --noEmit 干净
+
+### 已知限制
+- $ 前缀 text 字面量与 ref 语法同形，YAML 层不可区分（一律解析为 ref）；config 未知键暂借 step.field.* 错误码；time 单位大小写不敏感、存储原样
+- color else 位置、字母/纯数字色值引号、args 实参引号等隐性规范由 fixture 冻结（已回写 CONTRACT 澄清节）
+
+### 审查人
+主线编排复核：复跑 pnpm test:run / build 全绿
+
+### 结论
+通过（模型层部分；组件层归阶段 3 后半）

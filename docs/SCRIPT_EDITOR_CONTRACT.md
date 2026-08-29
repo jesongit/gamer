@@ -356,3 +356,12 @@ canonical_default（required=1 时为空串）：
 - 前端副本映射：`server/tests/fixtures/script_v2/<file>` ↔ `web/src/script-editor/__fixtures__/yaml|json/<file>`，逐字节一致由 `fixtures.test.js` 的漂移测试强制。
 - 服务端断言：`server/tests/script_v2_contract/`（事件树 → Model JSON 与 golden 相等；非法样例被最小预校验拒绝）。前端断言：`web/src/script-editor/__fixtures__/fixtures.test.js`（js-yaml 加载同一 YAML 校验同一模型形态 + psig1 双实现）。
 - 本阶段（阶段 0）只冻结**语法与结构形态**；语义校验（资源存在性、类型化绑定、args 绑定、运行行为）归阶段 2；目录/资源 API 归阶段 1。修改任何契约必须同步：本文档、双方 fixture、双方测试、（阶段 2 起）`docs/YAML.md`。
+
+
+## 附：实现期澄清（阶段 1~3 期间冻结，与 fixture 同步）
+
+- **color 的 `else` 写在步骤级**（与 `color:` 键同列），`at`/`expect` 位于 color 值映射内；parse 对写在映射内的旧位置 `else` 容错接受（fixture v05/v08/v10 冻结）。
+- **色值序列化引号**：纯数字色值由 YAML 层自动加引号防前导零丢失；字母色值裸写（§4.2「统一加引号」按此修订）。
+- **args 字符串实参引号**：呈 time/key/color 形态的串 plain 输出，其余双引号——模型不带目标类型信息，这是唯一可判定规则（v09/v10 双向锁死）。
+- **time 单位大小写**：接受不敏感输入，存储原样；psig1 归一化仅在签名侧。
+- **config 未知键**：暂借用 `step.field.unknown` / `step.field.type_mismatch` 错误码（独立 config.* 码待阶段 2 定夺）。

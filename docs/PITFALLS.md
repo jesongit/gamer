@@ -74,3 +74,8 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **共享宿主 adb server 下，容器内 GameBot 的 scrcpy 会话必死（`accept video socket timeout`），纯配置无解**（2026-08-29 实证）：GameBot 在容器内 bind 127.0.0.1 随机端口 accept，而 `adb reverse` 的回连方是 **adb server**（共享后位于宿主）——它收到设备侧 localabstract 连接后硬编码连宿主自己的 127.0.0.1:<随机端口>（adb `network_loopback_client`，reverse 的 local 端不支持指定 host），宿主上无人监听 → 设备侧 scrcpy server 已正常启动（容器日志可见 `New display: …`）但 socket 连不上自退。解锁需改 `scrcpy.rs`（bind 地址可配 + 隧道方向反转为 `adb forward`），当前容器实例只承担 adb 层操作（scan/shell/设备管理），实时会话由宿主实例承担，详见 docs/DEVICE_ACCESS.md。
 - **Git Bash 里 `docker exec <容器> grep … /app/config.toml` 报 `D:/Scoop/.../app/config.toml: No such file`**：MSYS 自动把容器内绝对路径转换成 Windows 路径；容器内路径参数写成双斜杠开头（`//app/config.toml`）或加 `MSYS_NO_PATHCONV=1` 绕过。
 - **js-yaml `load()` 解析 color 候选映射时纯数字色键会丢顺序**（2026-08-29，脚本编辑器重构阶段 0 实测）：`'123456'` 被解析成整数 123456，plain object 的整数形键按数值排在字符串键之前，`Object.keys` 顺序 ≠ YAML 书写顺序，颜色候选按序匹配语义被静默破坏。解决：脚本 v2 契约把 color `expect` 冻结为有序列表（每项单键映射，与 match 候选同构），前端 codec 解析有序映射一律走事件/Map 形态，不能用 `load()` 出来的 plain object 直接取键序。
+
+## 2026-08-29
+
+- 多 Agent 并行改同一仓库时共享 git index：A 任务 `git add` 与 `git commit` 之间 B 任务 stage 的文件会被 A 的裸 `git commit` 误扫提交。解决：`git add <路径>` 后立即 `git commit -- <同一组路径>`（pathspec 提交只含指定路径），永远不用裸 commit；遇 index.lock 等 3 秒重试。
+- js-yaml 5（^5.3.0）API 重写：`dump` 无法按节点控制引号样式与缩进，`load` 丢失标量样式；需要规范序列化（params 整条单引号、match 紧凑缩进）须手写输出器（逐标量可借 `dump(lineWidth:-1)` 判 plain 安全性），校验引号样式走 `parseEvents` 事件级 AST（带 `style.singleQuoted`）。
