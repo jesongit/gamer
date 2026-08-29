@@ -12,8 +12,8 @@
         </select>
         <button v-if="!store.running" class="btn btn-primary" :disabled="!canRun" @click="run">▶ 运行</button>
         <button v-else class="btn btn-danger" :disabled="runStopping" @click="stop">{{ runStopping ? '■ 停止中…' : '■ 停止' }}</button>
-        <button class="btn" :disabled="!shell.hasModel || shell.saving" @click="save">{{ shell.saving ? '保存中…' : '💾 保存' }}</button>
-        <span v-if="shell.hasModel && shell.dirty" class="tag dirty-tag">未保存</span>
+        <button class="btn" :disabled="!modelOnTab || shell.saving" @click="save">{{ shell.saving ? '保存中…' : '💾 保存' }}</button>
+        <span v-if="modelOnTab && shell.dirty" class="tag dirty-tag">未保存</span>
       </div>
     </div>
 
@@ -48,8 +48,8 @@
             <div v-if="!fnLib.list.length" class="res-empty">该分区暂无函数库文件</div>
           </template>
           <template v-else>
-            <div v-for="t in templates" :key="t.name" class="res-item readonly">
-              <div class="ri-name">{{ t.name }}</div>
+            <div v-for="t in templates" :key="t.name" class="res-item" :title="t.name" @click="goConsole">
+              <div class="ri-name">{{ shortName(t.name) }}</div>
               <div class="ri-meta mono">模板图片 · 框选/上传/匹配测试在投屏控制台</div>
             </div>
             <div v-if="!templates.length" class="res-empty">该分区暂无模板</div>
@@ -64,7 +64,7 @@
           <p>模板的框选截取、上传、二次裁切与匹配测试在投屏控制台完成（依赖设备画面）。</p>
           <button class="btn btn-primary" @click="goConsole">前往投屏控制台</button>
         </div>
-        <template v-else-if="shell.hasModel">
+        <template v-else-if="modelOnTab">
           <div class="ed-toolbar">
             <input v-model="shell.name" class="input mono ed-name" :placeholder="tab === 'func' ? '函数库文件短名（缺省 .yaml 自动补）' : '脚本名称（可省略 .yml 后缀）'" />
             <button class="btn btn-sm" :disabled="!shell.canUndo" title="撤销" @click="shell.undo()">↶</button>
@@ -99,7 +99,7 @@
       <!-- 右：校验错误列表 + 函数测试占位（阶段 5） -->
       <aside class="side-panel card">
         <ErrorSummary :diagnostics="shell.diagnostics" @locate="locateDiag" />
-        <div v-if="tab === 'func' && shell.hasModel" class="test-fn">
+        <div v-if="tab === 'func' && modelOnTab" class="test-fn">
           <div class="tf-title">测试函数</div>
           <select v-model="testFnName" class="select tf-fn" aria-label="选择要测试的函数">
             <option value="">（画布当前函数）</option>
@@ -116,7 +116,7 @@
     </div>
 
     <YamlPreview
-      v-if="showYaml && shell.hasModel"
+      v-if="showYaml && modelOnTab"
       :model="shell.model"
       :filename="shell.name || (tab === 'func' ? 'functions.yaml' : 'script.yaml')"
       @close="showYaml = false"
@@ -168,7 +168,9 @@
 <script setup>
 /**
  * 独立脚本页 = 全屏可视化外壳（阶段 4，plan §10.2）：
- * - 左侧资源树三页签：脚本 / 函数库 / 模板（模板只读列表 + 跳转投屏控制台占位）；
+ * - 左侧资源树三页签：脚本 / 函数库 / 模板（模板短名列表 + 点击跳转投屏控制台占位）；
+ * - 页签切换只换左栏数据源，中央画布/保存/测试面板仅对与页签同类的模型开放
+ *   （脚本页签↔script、函数库页签↔function_library），跨页签残留模型隐藏不丢失；
  * - 中央共享画布（StepCanvas，与 Console 紧凑外壳同一编辑核心 useScriptEditorShell）；
  * - 右侧常驻错误列表（ErrorSummary，点击经画布 locate 定位展开）；
  * - 函数库：文件 → FunctionLibraryModel，函数级 params 经 ParamEditor functionPath 编辑；
@@ -231,6 +233,19 @@ function shortName(name) {
 const templateNames = computed(() => templates.value.map(t => shortName(t.name)))
 
 const pkgScripts = computed(() => scripts.value.filter(s => !pkg.value || s.package === pkg.value))
+
+/**
+ * 画布模型与页签同类：页签切换只换左栏列表数据源与新建入口，已加载资源保留
+ * （切回对应页签仍在、不丢未保存内容）；但中央画布/保存/测试函数面板仅在模型与
+ * 页签同类时显示——脚本页签↔script、函数库页签↔function_library，防止跨页签把
+ * 残留的脚本模型当函数库测试/保存（反之亦然）。模板页签不显示画布（跳控制台占位）。
+ */
+const modelOnTab = computed(() => {
+  if (!shell.hasModel) return false
+  if (tab.value === 'script') return shell.kind === 'script'
+  if (tab.value === 'func') return shell.kind === 'function_library'
+  return false
+})
 
 /** 分区下拉选项：当前设备配置的应用包名 ∪ 已有脚本分区 */
 const pkgOptions = computed(() => {
@@ -367,7 +382,7 @@ function goConsole() {
 
 /** 保存当前模型（脚本或函数库）；冲突时弹 SaveConflictModal，校验失败提示前几条诊断 */
 async function save() {
-  if (!shell.hasModel) return { ok: false }
+  if (!modelOnTab.value) return { ok: false } // 无模型或跨页签隐藏的模型一律不保存
   if (!String(shell.name || '').trim()) { toast('请填写资源名称', 'error'); return { ok: false } }
   if (!pkg.value && !shell.pkg) { toast('请先选择应用分区', 'warn'); return { ok: false } }
   const r = await shell.save()
@@ -564,8 +579,8 @@ function onTestFrom(uuid) {
 async function run() {
   if (!store.deviceId) return toast('请先选择设备（投屏控制台 → 设备工具条）', 'error')
   if (shell.kind === 'function_library') return toast('函数库不能独立运行（在脚本 func 步骤中调用；可用「测试函数」运行单个函数）', 'warn')
-  // 未打开任何脚本时先打开树中选中项
-  if (!shell.hasModel) {
+  // 未打开脚本、或画布停留的是函数库等跨页签模型时，先打开树中选中项
+  if (!shell.hasModel || shell.kind !== 'script') {
     const s = scripts.value.find(x => x.id === selScriptId.value)
     if (!s) return toast('请先选择脚本', 'error')
     await openScript(s)
@@ -748,7 +763,6 @@ onUnmounted(() => stopRunStatusPoll())
 }
 .res-item:hover { background: var(--bg-3); }
 .res-item.sel { background: rgba(34, 211, 165, .08); border-color: rgba(34, 211, 165, .35); }
-.res-item.readonly { cursor: default; }
 .ri-name { font-size: 12px; font-weight: 600; padding-right: 26px; word-break: break-all; }
 .ri-meta { font-size: 11px; color: var(--text-2); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ri-del {
