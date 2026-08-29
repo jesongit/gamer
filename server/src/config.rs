@@ -195,8 +195,11 @@ pub struct Config {
     #[serde(default)]
     pub rtc_external_ip: String,
     /// WebRTC 媒体 UDP 固定绑定端口（0 = 既有行为：每会话临时端口）。
-    /// 容器端口映射场景必配（docker -p <宿主端口>:<本值>/udp）；单 socket
-    /// UDPMux 进程级共享，按 ICE ufrag 复用，启动后变更需重启生效。
+    /// 容器端口映射场景必配（docker -p <宿主端口>:<本值>/udp）；**必须与
+    /// rtc_external_ip 成对配置**（校验强制）：固定端口下候选地址/端口取自
+    /// mux conn 的 local_addr()，无具体 IP 宣告则 muxed gather 产出零候选
+    /// （2026-08-29 容器实测回归）。单 socket UDPMux 进程级共享，按 ICE
+    /// ufrag 复用，启动后变更需重启生效。
     #[serde(default)]
     pub rtc_udp_port: u16,
     /// ICE 候选宣告的对外 UDP 端口（docker -p 的宿主侧端口 B）。
@@ -515,11 +518,20 @@ impl Config {
         }
 
         // WebRTC 候选外部宣告（容器 / NAT 1-to-1，接线见 webrtc/rtc_net.rs）：
-        // IP 格式启动期校验（避免连不上时才在运行期报错）；宣告端口必须配对绑定端口
+        // IP 格式启动期校验（避免连不上时才在运行期报错）；固定端口必须配对外部
+        // IP、宣告端口必须配对绑定端口
         if !self.rtc_external_ip.is_empty() && self.rtc_external_ip.parse::<IpAddr>().is_err() {
             errs.push(format!(
                 "rtc_external_ip = \"{}\" 非法：须为合法 IP 字面量（IPv4/IPv6）",
                 self.rtc_external_ip
+            ));
+        }
+        if self.rtc_udp_port != 0 && self.rtc_external_ip.trim().is_empty() {
+            errs.push(format!(
+                "rtc_udp_port = {} 缺少 rtc_external_ip：固定端口下候选地址取自 \
+                 mux conn 的 local_addr()，无具体外部 IP 宣告会得到 0 个本地候选 \
+                 （ICE 停在 no candidate pairs，投屏黑屏）",
+                self.rtc_udp_port
             ));
         }
         if self.rtc_external_port != 0 && self.rtc_udp_port == 0 {
@@ -881,9 +893,20 @@ rtc_external_port = 50000
             "{errs:?}"
         );
 
-        // 仅配 rtc_udp_port（内外同端口号映射）合法
+        // rtc_udp_port 无 rtc_external_ip 成对：无具体 IP 宣告 → muxed gather
+        // 零候选（2026-08-29 容器实测回归），启动期直接拒绝
         let cfg = Config {
             rtc_udp_port: 3478,
+            ..Default::default()
+        };
+        let errs = cfg.validate();
+        assert!(errs.iter().any(|e| e.contains("rtc_udp_port")), "{errs:?}");
+
+        // 完整成对配置合法
+        let cfg = Config {
+            rtc_external_ip: "192.168.1.10".into(),
+            rtc_udp_port: 3478,
+            rtc_external_port: 50000,
             ..Default::default()
         };
         assert!(

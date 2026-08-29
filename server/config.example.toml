@@ -63,6 +63,9 @@ compute_max_concurrency = 0
 # 内外同端口号映射（-p 3478:3478/udp）时 rtc_external_port 可配 0（缺省），
 # 候选端口即 rtc_udp_port 本身。仅 host 网络容器（network_mode: host）等
 # 端口本就可达、只差 IP 宣告的场景可只配 rtc_external_ip。
+# 注意：rtc_udp_port 必须与 rtc_external_ip 成对配置（启动校验强制）——
+# 固定端口下候选地址取自 mux conn 的 local_addr()，缺具体 IP 宣告会得到
+# 0 个本地候选（ICE 停在 no candidate pairs，投屏黑屏）。
 # 单 socket UDPMux 进程级共享（多设备/多 viewer 复用），端口变更需重启生效
 rtc_external_ip = ""
 rtc_udp_port = 0
