@@ -163,3 +163,42 @@
 ## 附：回归修复
 
 - 5e01bd5 fix(web): 适配分区快照 dry-run 导入报告并恢复覆盖二次确认（阶段 1 报告形态变更的连带回归；7 新用例；含于 381）
+
+
+## 阶段 2（后半）：执行引擎与统一 RunTarget
+
+### 交付
+- 549ccd5 feat(engine)!: 严格 AST 执行引擎替换 v1 + 统一 RunTarget 运行接口与函数测试端点（单笔合并：engine/api/run_manager/scheduler 编译强耦合无法拆分自洽提交）——exec.rs 17 类步骤逐类执行（find 恒点中心/verify 两击/block 有序、match 每轮单帧有序候选不点击+绑定后重复截图前拒、color 有序判色容差 30、if 布尔严格、loop+10 万步 guard、call 压栈恢复、func 继承 config 走完默认 true、throw 跨链、return 退函数、$name 作用域栈、call+func 合计 32 层）；snapshot.rs 运行源码快照+懒解析缓存；RunManager Script/Function 双目标统一互斥/取消/恢复；API：run 改 {device_id,start_index?,args?}→202 {run_id,state,resolved_args}、新增 POST /api/functions/:id/run、删 v1 func 位置实参
+
+### 自动化命令与结果
+- cargo test：271 passed / 0 failed / 2 ignored（新增 39 例：exec 25 语义+12 golden 端到端+函数目标互斥取消+router 用例）；cargo fmt --check 干净、0 warning（主线复验）
+
+### 语义偏差（合理取舍，知悉）
+- match 绑定后重复：静态查字面量+运行期查 Ref 解析后，两层互补；resolved_args 提前于阶段 5 进入 202 响应（前端展示用）；loop times:0 沿 v1 语义=无限
+
+### 审查人
+主线编排复核：HEAD 复跑 cargo test 全绿
+
+### 结论
+通过（阶段 2 整体完成）
+
+## 阶段 4：替换两套编辑入口
+
+### 交付
+- 488a35f feat(web)!: 控制台脚本区换壳为共享可视化编辑器紧凑外壳（useScriptEditorShell/useFunctionLibrary composable、SaveConflictModal/ScriptSummary、Alt 类型化工厂、旧文本机制全删）
+- c4a80ba feat(web)!: 独立脚本页重构为全屏三页签可视化外壳并纳入函数库（函数级 params 命令、codec 空备注对称修复）
+
+### 自动化命令与结果
+- pnpm test:run：396 passed / 0 failed（+15）；pnpm build 成功；webrtc-lifecycle/api-intercept/auth 零改动通过（主线复验）
+
+### 修复的真 bug
+- Console cancelEditScript 对 reactive 包装取 .value 静默失效；ScriptRunner 覆盖运行起点选择；codec 序列化端可产出空备注参数串但解析端拒绝（往返必挂）
+
+### 迁移矩阵
+- §10 对账见汇报与代码；占位两项：模板页签只读列表+跳转（模板完整能力保留在 Console）、测试函数按钮（阶段 5 对齐 RunTarget+args）
+
+### 审查人
+主线编排复核：复跑双端门禁全绿、抽查提交 diff
+
+### 结论
+通过

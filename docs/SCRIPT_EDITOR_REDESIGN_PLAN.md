@@ -728,11 +728,11 @@ parse_function_file() # 只接受 FunctionLibraryModel
 
 ### 阶段 2：严格语法和引擎
 
-- [ ] 实现 ScriptModel、FunctionLibraryModel、ParamDecl 和 Step AST。
-- [ ] 实现具名强类型参数、类型化默认值、`if`、只检测的 `match`、函数/脚本 `args`。
-- [ ] 删除旧 `$N`、顶层推断、本地函数、函数级 `cond` 和跨 YAML 函数调用。
-- [ ] 同步运行、函数测试、从步骤运行和错误路径。
-- [ ] 更新服务端单元/集成测试，确保所有旧 fixture 明确失败。
+- [x] 实现 ScriptModel、FunctionLibraryModel、ParamDecl 和 Step AST。
+- [x] 实现具名强类型参数、类型化默认值、`if`、只检测的 `match`、函数/脚本 `args`。
+- [x] 删除旧 `$N`、顶层推断、本地函数、函数级 `cond` 和跨 YAML 函数调用。
+- [x] 同步运行、函数测试、从步骤运行和错误路径。
+- [x] 更新服务端单元/集成测试，确保所有旧 fixture 明确失败。
 
 ### 阶段 3：共享可视化编辑核心
 
@@ -743,10 +743,10 @@ parse_function_file() # 只接受 FunctionLibraryModel
 
 ### 阶段 4：替换两套编辑入口
 
-- [ ] Console 接入紧凑外壳，保留运行、停止、日志、冲突、实例恢复和从步骤运行。
-- [ ] 独立脚本页接入全屏外壳，增加脚本/函数库资源页签。
-- [ ] 将文本调用预览改为结构化跳转。
-- [ ] 删除 textarea、行号、Tab 缩进、旧语法帮助和基于文本的行扫描。
+- [x] Console 接入紧凑外壳，保留运行、停止、日志、冲突、实例恢复和从步骤运行。
+- [x] 独立脚本页接入全屏外壳，增加脚本/函数库资源页签。
+- [x] 将文本调用预览改为结构化跳转。
+- [x] 删除 textarea、行号、Tab 缩进、旧语法帮助和基于文本的行扫描。
 
 ### 阶段 5：参数、函数和任务全链路
 
