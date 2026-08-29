@@ -120,3 +120,46 @@
 
 ### 结论
 通过（模型层部分；组件层归阶段 3 后半）
+
+
+## 阶段 2（前半）：script_v2 严格装载校验与规范序列化
+
+### 交付
+- 57c1964 feat(engine): script_v2 模块（model/loader/params/validate/serialize/error，4747 行）——saphyr 事件级样式保留、params 整条单引号强制、分层校验、静态调用环与 32 层深度、规范序列化、ResourceProvider trait + 内存实现
+
+### 自动化命令与结果
+- cargo test：269 passed / 0 failed / 2 ignored（主线 HEAD 复验）
+
+### 审计发现
+- 前任 Agent 被取消时 mod.rs 漏挂 serialize/tests 两模块（从未参与编译，'235 全绿'不含其 33 个单测）；审计 Agent 修复挂载并补 12 组 fixture 字节级往返与 resource.tmpl.ambiguous 测试
+
+### 已知限制
+- ref.func.missing_args 并入 param.args.*（call/func 单一绑定路径）；ref.template.ambiguous 用 resource.tmpl.ambiguous；config.* 独立错误码待执行引擎期定夺
+
+### 审查人
+主线编排复核：HEAD 复跑 cargo test 全绿、审计清单逐项核对
+
+### 结论
+通过（前半；执行引擎与 RunManager 归后半）
+
+## 阶段 3（后半）：编辑器组件层
+
+### 交付
+- d3196af feat(web): StepCard（17 类）/CellEditor（七类类型化控件+值参切换）/ParamEditor/ConfigEditor + commands.ts unwrap 补丁（Vue reactive 不可 structuredClone）
+- 4bfc495 feat(web): StepCanvas（锚点/选中/面包屑/诊断定位联动）/BranchContainer（一层内嵌+深层专注视图）/AddStepPanel/ErrorSummary/YamlPreview
+
+### 自动化命令与结果
+- pnpm test:run：381 passed / 0 failed（+97）；pnpm build 成功；tsc --noEmit 干净（主线复验）
+
+### 已知限制
+- 函数库逐函数 params 编辑待阶段 4/5 扩展命令栈；拖动排序占位（上移/下移按钮已可用）
+
+### 审查人
+主线编排复核：复跑双端门禁全绿
+
+### 结论
+通过（阶段 3 整体完成）
+
+## 附：回归修复
+
+- 5e01bd5 fix(web): 适配分区快照 dry-run 导入报告并恢复覆盖二次确认（阶段 1 报告形态变更的连带回归；7 新用例；含于 381）
