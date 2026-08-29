@@ -328,6 +328,13 @@ impl ViewerSession {
         }));
 
         // SDP 协商
+        // 运维观测：offer 携带的远端候选数（0 = 浏览器发了无候选 offer——前端
+        // 未等收集完成就发送，连接只能靠浏览器对 answer 候选的 prflx 回路）
+        let remote_candidates = offer
+            .sdp
+            .lines()
+            .filter(|l| l.starts_with("a=candidate:"))
+            .count();
         peer.set_remote_description(offer).await?;
         let answer = peer.create_answer(None).await?;
         let mut gather_complete = peer.gathering_complete_promise().await;
@@ -339,6 +346,22 @@ impl ViewerSession {
             .local_description()
             .await
             .ok_or_else(|| anyhow::anyhow!("no local description"))?;
+        // 运维观测：ICE 候选宣告（容器 / 端口映射部署排障第一现场）——
+        // local=[] = muxed gather 失败（rtc_external_ip/rtc_udp_port 配置或网络问题）；
+        // offer_remote=0 = 浏览器发了无候选 offer（前端未等收集完成），此时
+        // 连接全靠浏览器对 answer 候选的 prflx 回路，健壮性差（见 PITFALLS）
+        let local_candidates: Vec<&str> = answer_sdp
+            .sdp
+            .lines()
+            .filter(|l| l.starts_with("a=candidate:"))
+            .map(|l| l.trim_start_matches("a=candidate:"))
+            .collect();
+        info!(
+            device = %session.device.name,
+            "ICE candidates: local=[{}] offer_remote={} (offer_remote=0 relies on browser prflx)",
+            local_candidates.join(" | "),
+            remote_candidates,
+        );
         let payload_type = protocol::payload_type_for(&answer_sdp.sdp, "H264/90000").unwrap_or(96);
         let ssrc = rtp_sender
             .get_parameters()

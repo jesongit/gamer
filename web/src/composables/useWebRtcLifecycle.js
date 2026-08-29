@@ -160,6 +160,33 @@ export function useWebRtcLifecycle({
 
       const offer = await pc.createOffer()
       await pc.setLocalDescription(offer)
+      // createOffer 返回的 SDP 不含任何 a=candidate（候选由 setLocalDescription
+      // 后的 localDescription 携带）。直接把 createOffer 的结果发给服务端
+      // （webrtc-rs 非 trickle，不收后续 candidate 消息）= 服务端零远端候选 →
+      // ICE 零 pair，容器部署下只剩「浏览器对 answer 候选的 prflx 回路」一条
+      // 通路可走。等收集完成再发 localDescription；受限网络收集可能不结束，
+      // 2000ms 兜底按现状发送（Chrome 官方 demo waitIceGatheringComplete 同口径）
+      await new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') return resolve()
+        // 最小实现（单测 FakePeer 等）无候选收集 API：直接放行不等待
+        if (typeof pc.addEventListener !== 'function' || typeof pc.removeEventListener !== 'function') {
+          return resolve()
+        }
+        let settle = false
+        const done = () => {
+          if (settle) return
+          settle = true
+          clearTimeout(timer)
+          pc.removeEventListener('icegatheringstatechange', onGather)
+          resolve()
+        }
+        const timer = setTimeout(done, 2000)
+        const onGather = () => {
+          if (pc.iceGatheringState === 'complete') done()
+        }
+        pc.addEventListener('icegatheringstatechange', onGather)
+      })
+      const offerToSend = pc.localDescription ?? offer
       const answer = await new Promise((resolve, reject) => {
         ws.onmessage = evt => {
           try {
@@ -172,7 +199,7 @@ export function useWebRtcLifecycle({
             reject(err)
           }
         }
-        ws.send(JSON.stringify({ type: 'offer', sdp: offer, force: forceTakeover }))
+        ws.send(JSON.stringify({ type: 'offer', sdp: offerToSend, force: forceTakeover }))
         setTimeout(() => reject(new Error('信令超时')), 10000)
       })
       onOfferAnswer({ offer, answer })
