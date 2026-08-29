@@ -29,4 +29,7 @@ pub mod snapshot;
 #[allow(unused_imports)]
 pub use events::ScriptEvent;
 #[allow(unused_imports)]
-pub use exec::{key_code, resolve_entry_args, BoundEntryArgs, RunSpec, RunTarget, Runner};
+pub use exec::{
+    key_code, load_entry_param_decls, resolve_entry_args, BoundEntryArgs, RunSpec, RunTarget,
+    Runner,
+};

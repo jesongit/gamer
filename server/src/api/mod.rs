@@ -169,7 +169,10 @@ pub fn build_router(
             "/api/tasks",
             get(tasks::api_list_tasks).post(tasks::api_save_task),
         )
-        .route("/api/tasks/:id", delete(tasks::api_delete_task))
+        .route(
+            "/api/tasks/:id",
+            get(tasks::api_get_task).delete(tasks::api_delete_task),
+        )
         .route("/api/tasks/:id/run", post(tasks::api_run_task_now))
         .route(
             "/api/logs",

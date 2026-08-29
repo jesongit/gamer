@@ -55,6 +55,13 @@ pub struct Task {
     pub last_result: Option<String>,
     pub last_run_at: Option<String>,
     pub created_at: String,
+    /// 完整类型化参数快照 JSON（plan §12.3：参数名 → 七类 TypedValue 的 JSON
+    /// 形态，与 run API args 同构；每个参数都有值）。`None` = 旧版本任务无快照，
+    /// 调度/立即运行前必须经 task_params 门禁重新确认。
+    pub args_json: Option<String>,
+    /// 保存快照时脚本的 psig1 参数签名（CONTRACT §4.5）；与脚本当前声明复算
+    /// 值不一致 = 参数过期。`None` = 无快照（旧任务）。
+    pub param_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,7 +152,9 @@ fn open_connection(path: &Path) -> anyhow::Result<Connection> {
             enabled INTEGER NOT NULL DEFAULT 1,
             last_result TEXT,
             last_run_at TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            args_json TEXT,
+            param_signature TEXT
         );
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,6 +192,17 @@ fn open_connection(path: &Path) -> anyhow::Result<Connection> {
         .any(|column| column == "fps");
     if !has_fps {
         conn.execute("ALTER TABLE devices ADD COLUMN fps INTEGER", [])?;
+    }
+    // 旧库补列（2026-08-29 阶段 5：任务参数快照与签名）。SQLite 无便捷
+    // DROP COLUMN，回滚 = 旧版程序读新库（SELECT 显式列名，新列被忽略）。
+    let task_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(tasks)")?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for column in ["args_json", "param_signature"] {
+        if !task_columns.iter().any(|name| name == column) {
+            conn.execute(&format!("ALTER TABLE tasks ADD COLUMN {column} TEXT"), [])?;
+        }
     }
     Ok(conn)
 }
@@ -543,7 +563,7 @@ impl Store {
     pub fn list_tasks(&self) -> anyhow::Result<Vec<Task>> {
         self.request(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, cron, script_id, device_id, enabled, last_result, last_run_at, created_at FROM tasks ORDER BY created_at",
+                "SELECT id, name, cron, script_id, device_id, enabled, last_result, last_run_at, created_at, args_json, param_signature FROM tasks ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok(Task {
@@ -556,6 +576,8 @@ impl Store {
                     last_result: r.get(6)?,
                     last_run_at: r.get(7)?,
                     created_at: r.get(8)?,
+                    args_json: r.get(9)?,
+                    param_signature: r.get(10)?,
                 })
             })?;
             Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -567,7 +589,7 @@ impl Store {
         let id = id.to_string();
         self.request(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, name, cron, script_id, device_id, enabled, last_result, last_run_at, created_at FROM tasks WHERE id = ?1",
+                "SELECT id, name, cron, script_id, device_id, enabled, last_result, last_run_at, created_at, args_json, param_signature FROM tasks WHERE id = ?1",
             )?;
             match stmt.query_row([id], |r| {
                 Ok(Task {
@@ -580,6 +602,8 @@ impl Store {
                     last_result: r.get(6)?,
                     last_run_at: r.get(7)?,
                     created_at: r.get(8)?,
+                    args_json: r.get(9)?,
+                    param_signature: r.get(10)?,
                 })
             }) {
                 Ok(task) => Ok(Some(task)),
@@ -593,14 +617,15 @@ impl Store {
         let t = t.clone();
         self.request(move |conn| {
             conn.execute(
-                r#"INSERT INTO tasks (id, name, cron, script_id, device_id, enabled, last_result, last_run_at, created_at)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                r#"INSERT INTO tasks (id, name, cron, script_id, device_id, enabled, last_result, last_run_at, created_at, args_json, param_signature)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                    ON CONFLICT(id) DO UPDATE SET
-                     name=?2, cron=?3, script_id=?4, device_id=?5, enabled=?6, last_result=?7, last_run_at=?8"#,
+                     name=?2, cron=?3, script_id=?4, device_id=?5, enabled=?6, last_result=?7, last_run_at=?8, args_json=?10, param_signature=?11"#,
                 rusqlite::params![
                     t.id, t.name, t.cron, t.script_id, t.device_id,
                     if t.enabled { 1 } else { 0 },
                     t.last_result, t.last_run_at, t.created_at,
+                    t.args_json, t.param_signature,
                 ],
             )?;
             Ok(())
@@ -1055,6 +1080,8 @@ mod tests {
             last_result: Some("ok".into()),
             last_run_at: Some("2026-08-28T00:00:00Z".into()),
             created_at: "2026-08-28T00:00:00Z".into(),
+            args_json: None,
+            param_signature: None,
         };
         store.upsert_task(&task).unwrap();
 
@@ -1064,6 +1091,101 @@ mod tests {
         assert_eq!(fetched.script_id, task.script_id);
         assert_eq!(fetched.last_result, task.last_result);
         assert!(store.get_task("missing").unwrap().is_none());
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 旧库（无 args_json/param_signature 列）打开后自动 ALTER 补列：
+    /// 存量行读出为 NULL 快照（= 无快照语义），新列可正常写入回读。
+    #[test]
+    fn tasks_table_migration_adds_param_columns_to_legacy_db() {
+        let (cfg, dir) = temp_config("task-migration");
+        let db_path = dir.join("gamer.db");
+        // 按旧版形状直建 tasks 表并塞一行存量任务
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                cron TEXT NOT NULL,
+                script_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_result TEXT,
+                last_run_at TEXT,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO tasks(id, name, cron, script_id, device_id, enabled, created_at)
+                VALUES ('legacy-1', 'Legacy', '0 * * * * *', 'pkg/old.yaml', 'dev-1', 1, '2026-01-01');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(&cfg).unwrap();
+        let tasks = store.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "legacy-1");
+        assert_eq!(tasks[0].args_json, None, "存量任务读出必须是无快照（NULL）");
+        assert_eq!(tasks[0].param_signature, None);
+
+        // 补列后可正常写入快照并回读
+        let mut updated = tasks[0].clone();
+        updated.args_json = Some(r#"{"enable":true}"#.into());
+        updated.param_signature = Some("psig1|bool,enable,0,true".into());
+        store.upsert_task(&updated).unwrap();
+        let fetched = store.get_task("legacy-1").unwrap().unwrap();
+        assert_eq!(fetched.args_json.as_deref(), Some(r#"{"enable":true}"#));
+        assert_eq!(
+            fetched.param_signature.as_deref(),
+            Some("psig1|bool,enable,0,true")
+        );
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 任务参数快照往返：args_json / param_signature 经 upsert 落库、list/get
+    /// 读回一致；置回 None 也走同一通道（重新确认前的清空路径）。
+    #[test]
+    fn task_args_snapshot_roundtrip() {
+        let (cfg, dir) = temp_config("task-snapshot");
+        let store = Store::open(&cfg).unwrap();
+        let task = Task {
+            id: "task-snap".into(),
+            name: "Snapshot".into(),
+            cron: "0 30 8 * * *".into(),
+            script_id: "com.test.app/daily.yaml".into(),
+            device_id: "dev-1".into(),
+            enabled: true,
+            last_result: None,
+            last_run_at: None,
+            created_at: "2026-08-29T00:00:00Z".into(),
+            args_json: Some(
+                r#"{"enable":true,"timeout":"30s","message":"开始任务","pos":[0.5,0.5]}"#.into(),
+            ),
+            param_signature: Some(
+                "psig1|bool,enable,0,true|time,timeout,0,30s|text,message,0,开始任务|coord,pos,0,[0.5,0.5]"
+                    .into(),
+            ),
+        };
+        store.upsert_task(&task).unwrap();
+
+        let fetched = store.get_task("task-snap").unwrap().unwrap();
+        assert_eq!(fetched.args_json, task.args_json);
+        assert_eq!(fetched.param_signature, task.param_signature);
+        let listed = store.list_tasks().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].args_json, task.args_json);
+        assert_eq!(listed[0].param_signature, task.param_signature);
+
+        // 结果更新路径（upsert_task_result 复用全量 upsert）不得丢快照
+        let mut touched = fetched.clone();
+        touched.last_result = Some("成功".into());
+        store.upsert_task(&touched).unwrap();
+        let again = store.get_task("task-snap").unwrap().unwrap();
+        assert_eq!(again.args_json, task.args_json, "结果写回不得丢快照");
+        assert_eq!(again.param_signature, task.param_signature);
 
         drop(store);
         fs::remove_dir_all(dir).unwrap();

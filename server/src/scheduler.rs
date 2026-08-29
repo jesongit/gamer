@@ -21,6 +21,7 @@ use crate::run_manager::{
 };
 use crate::scripts::ScriptStore;
 use crate::store::{Db, Task};
+use crate::task_params::{self, GateError, TaskArgs};
 
 /// misfire 窗口沿用原调度器的一小时回看范围：恢复时只补最近一次，窗口外不补跑。
 const MISFIRE_WINDOW_SECS: i64 = 60 * 60;
@@ -130,25 +131,31 @@ impl Scheduler {
         });
     }
 
-    /// 立即运行任务（手动触发）：202 契约 —— 提交即返回 run_id，不等完成
+    /// 立即运行任务（手动触发）：202 契约 —— 提交即返回 run_id，不等完成。
+    /// 参数门禁与计划触发同口径：脚本缺失/解析失败 → 4xx；无快照/签名过期 →
+    /// ParamStale（API 映射 409 param_signature_conflict，要求重新确认）。
     pub async fn run_now(&self, task: &Task) -> Result<String, RunNowError> {
         info!(task = %task.name, task_id = %task.id, device = %task.device_id, "manual trigger (task now)");
-        // 脚本存在性预检（404 语义在提交前给出）；内容不预读——运行源码由
-        // 引擎开始时整体快照（阶段 2 交付 3）
-        match self.scripts.get(&task.script_id) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                warn!(task = %task.name, "task now rejected: script not found");
+        let task_args = match task_params::gate_task(&self.scripts, task) {
+            Ok(ok) => ok,
+            Err(err) => {
+                warn!(
+                    task = %task.name,
+                    script = %task.script_id,
+                    reason = %err.reason(),
+                    detail = %err.message(),
+                    "task now rejected: param gate failed"
+                );
                 record_scheduler_failure(&self.db.metrics());
-                return Err(RunNowError::ScriptMissing);
+                return Err(match err {
+                    GateError::ScriptMissing => RunNowError::ScriptMissing,
+                    GateError::ScriptInvalid(_) => RunNowError::ScriptInvalid(err.message()),
+                    stale => RunNowError::ParamStale(stale),
+                });
             }
-            Err(e) => {
-                warn!(task = %task.name, err = %e, "task now rejected: read script failed");
-                record_scheduler_failure(&self.db.metrics());
-                return Err(RunNowError::Io);
-            }
-        }
-        let result = submit_run(&self.runs, &self.db, task, None)
+        };
+        log_task_params("task now", task, &task_args);
+        let result = submit_run(&self.runs, &self.db, task, None, task_args)
             .await
             .map_err(RunNowError::Start);
         match &result {
@@ -159,7 +166,10 @@ impl Scheduler {
             Err(RunNowError::Start(StartError::ShuttingDown)) => {
                 record_scheduler_event(&self.db.metrics(), SchedulerEvent::Skipped);
             }
-            Err(RunNowError::ScriptMissing | RunNowError::Io) => {
+            Err(RunNowError::ScriptMissing | RunNowError::ScriptInvalid(_)) => {
+                record_scheduler_failure(&self.db.metrics());
+            }
+            Err(RunNowError::ParamStale(_)) => {
                 record_scheduler_failure(&self.db.metrics());
             }
         }
@@ -167,11 +177,30 @@ impl Scheduler {
     }
 }
 
-/// 立即运行的错误面（API 映射：ScriptMissing/Io→4xx、Start→409/503）
+/// 参数确认日志：只记参数名列表与签名（短码 + 全串），**不记参数值**
+/// （text 参数防泄露）。
+fn log_task_params(scene: &str, task: &Task, args: &TaskArgs) {
+    info!(
+        scene,
+        task = %task.name,
+        task_id = %task.id,
+        script = %task.script_id,
+        params = args.names.join(","),
+        signature = %args.signature,
+        signature_short = %task_params::signature_short_code(&args.signature),
+        "task params confirmed"
+    );
+}
+
+/// 立即运行的错误面（API 映射：ScriptMissing/ScriptInvalid→400、
+/// ParamStale→409 param_signature_conflict、Start→409 device_busy/503）
 #[derive(Debug)]
 pub enum RunNowError {
     ScriptMissing,
-    Io,
+    /// 脚本读取/严格解析失败（携带人类可读摘要）
+    ScriptInvalid(String),
+    /// 参数门禁未过：旧任务无快照 / 签名过期，需重新确认
+    ParamStale(GateError),
     Start(StartError),
 }
 
@@ -213,11 +242,11 @@ async fn dispatch(
             }
         }
     }
-    // 脚本存在性预检（失败语义保持：记 failed/skip + 任务结果更新）；
-    // 内容不预读——运行源码由引擎开始时整体快照（阶段 2 交付 3）
-    match scripts.get(&task.script_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+    // 参数门禁（plan §12.3 阶段 5）：脚本存在性 / 严格解析 / 快照签名统一
+    // 口径——任何失败都明确落失败结果，绝不空跑、绝不静默继承新默认值。
+    let task_args = match task_params::gate_task(scripts, task) {
+        Ok(ok) => ok,
+        Err(GateError::ScriptMissing) => {
             warn!(
                 task = %task.name,
                 script = %task.script_id,
@@ -228,15 +257,49 @@ async fn dispatch(
             mark_task_result(db, task, "失败", Some("任务执行失败: 脚本不存在"));
             return;
         }
-        Err(e) => {
-            warn!(task = %task.name, err = %e, "scheduled skip: read script failed");
+        Err(err @ GateError::ScriptInvalid(_)) => {
+            warn!(
+                task = %task.name,
+                script = %task.script_id,
+                detail = %err.message(),
+                "scheduled skip: script invalid"
+            );
             record_scheduler_event(&metrics, SchedulerEvent::Failed);
-            finish_scheduled_run(db, task, scheduled_at, "failed", None, Some("读取脚本失败"));
-            mark_task_result(db, task, "失败", Some("任务执行失败: 读脚本失败"));
+            finish_scheduled_run(db, task, scheduled_at, "failed", None, Some("脚本解析失败"));
+            mark_task_result(db, task, "失败", Some("任务执行失败: 脚本解析失败"));
             return;
         }
-    }
-    match submit_run(runs, db, task, trigger).await {
+        Err(err @ (GateError::NoSnapshot | GateError::SignatureMismatch { .. })) => {
+            // 签名过期 / 旧任务无快照：日志带期望 vs 实际签名短码（不含参数值）
+            let (actual, reason) = match &err {
+                GateError::NoSnapshot => (None, err.reason()),
+                GateError::SignatureMismatch { stored, .. } => (
+                    Some(task_params::signature_short_code(stored)),
+                    err.reason(),
+                ),
+                _ => unreachable!(),
+            };
+            warn!(
+                task = %task.name,
+                task_id = %task.id,
+                script = %task.script_id,
+                reason,
+                actual_signature = ?actual,
+                "scheduled skip: task params stale, reconfirm required"
+            );
+            record_scheduler_event(&metrics, SchedulerEvent::Failed);
+            finish_scheduled_run(db, task, scheduled_at, "failed", None, Some(&err.message()));
+            mark_task_result(
+                db,
+                task,
+                "失败",
+                Some(&format!("任务执行失败: {}", err.message())),
+            );
+            return;
+        }
+    };
+    log_task_params("scheduled", task, &task_args);
+    match submit_run(runs, db, task, trigger, task_args).await {
         Ok(run_id) => {
             debug!(task = %task.name, task_id = %task.id, device = %task.device_id, %run_id, "scheduled run submitted");
         }
@@ -275,12 +338,14 @@ async fn dispatch(
 }
 
 /// 组装 StartRequest 并提交（trigger 有值=Scheduled，无=TaskNow）。
-/// 任务 args 快照（plan §12.3）归阶段 5；当前调度运行传空覆盖。
+/// `task_args` = 已过签名门禁的完整参数快照（签名 + 参数名 + 全量类型化
+/// 覆盖）；快照是全量，天然不静默继承脚本新默认值（plan §12.3）。
 async fn submit_run(
     runs: &Arc<RunManager>,
     db: &Db,
     task: &Task,
     trigger: Option<DateTime<Local>>,
+    task_args: TaskArgs,
 ) -> Result<String, StartError> {
     let scheduled_at = trigger.map(|t| t.timestamp());
     let hook = task_finish_hook(db.clone(), task.id.clone(), task.name.clone(), scheduled_at);
@@ -297,7 +362,7 @@ async fn submit_run(
         },
         task_id: Some(task.id.clone()),
         scheduled_at,
-        args: vec![],
+        args: task_args.overrides,
         realtime_logs: false,
     };
     let rec = runs.submit(req, Some(hook))?;
@@ -399,6 +464,8 @@ fn fallback_task(task_id: &str, task_name: &str, rec: &crate::run_manager::RunRe
         last_result: None,
         last_run_at: None,
         created_at: String::new(),
+        args_json: None,
+        param_signature: None,
     }
 }
 
@@ -568,5 +635,386 @@ mod tests {
             Some("skipped")
         );
         assert_eq!(persisted_scheduled_state(RunState::Running), None);
+    }
+}
+
+/// 阶段 5：调度/立即运行的参数快照与签名门禁测试。
+/// 真脚本走 ScriptStore（临时目录直写 yaml 文件），RunManager 挂捕获假执行器。
+#[cfg(test)]
+mod task_param_tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::run_manager::RunExecutor;
+    use futures_util::future::BoxFuture;
+    use std::sync::atomic::AtomicBool;
+
+    /// 带默认值的参数脚本（v12 形态子集；不引模板，免去模板存在性校验）。
+    const SCRIPT: &str = "\
+params:
+  - 'bool:enable:是否启用:true'
+  - 'text:message:提示文本:\"hello\"'
+steps:
+  - log: 'ok'
+";
+
+    /// text 参数的敏感标记值：任何日志/落库出现即失败。
+    const SECRET_TEXT: &str = "TOPSECRET-TEXT-9a3f";
+
+    struct CaptureExec {
+        requests: parking_lot::Mutex<Vec<StartRequest>>,
+    }
+
+    impl CaptureExec {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                requests: parking_lot::Mutex::new(Vec::new()),
+            })
+        }
+        fn captured(&self) -> Vec<StartRequest> {
+            self.requests.lock().clone()
+        }
+    }
+
+    impl RunExecutor for CaptureExec {
+        fn prepare<'a>(&'a self, _req: &'a StartRequest) -> BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn execute<'a>(
+            &'a self,
+            req: &'a StartRequest,
+            _stop: Arc<AtomicBool>,
+        ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
+            Box::pin(async move {
+                self.requests.lock().push(req.clone());
+                Ok(vec![("info".into(), "fake done".into())])
+            })
+        }
+        fn occupy(&self, _device_id: &str) {}
+        fn release(&self, _device_id: &str) {}
+    }
+
+    struct Rig {
+        db: Db,
+        scripts: Arc<ScriptStore>,
+        runs: Arc<RunManager>,
+        exec: Arc<CaptureExec>,
+        scheduler: Scheduler,
+        dir: std::path::PathBuf,
+    }
+
+    fn rig(tag: &str) -> Rig {
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-sched-{tag}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = Config {
+            data_dir: dir.clone(),
+            ..Default::default()
+        };
+        let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
+        let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let exec = CaptureExec::new();
+        let runs = Arc::new(RunManager::new(exec.clone()));
+        let scheduler = Scheduler::new(db.clone(), scripts.clone(), runs.clone());
+        Rig {
+            db,
+            scripts,
+            runs,
+            exec,
+            scheduler,
+            dir,
+        }
+    }
+
+    impl Drop for Rig {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn write_script(rig: &Rig, name: &str, content: &str) {
+        let dir = rig.dir.join("com.test.app").join("yaml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), content).unwrap();
+    }
+
+    fn mk_task(script_id: &str, args_json: Option<&str>, sig: Option<&str>) -> Task {
+        Task {
+            id: "task-1".into(),
+            name: "Daily".into(),
+            cron: "0 * * * * *".into(),
+            script_id: script_id.into(),
+            device_id: "dev-1".into(),
+            enabled: true,
+            last_result: None,
+            last_run_at: None,
+            created_at: "2026-08-29T00:00:00Z".into(),
+            args_json: args_json.map(str::to_string),
+            param_signature: sig.map(str::to_string),
+        }
+    }
+
+    /// 等待所有 run 收敛（RunManager wait_settled 是模块私有，这里轮询公开计数）
+    async fn settle(runs: &Arc<RunManager>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while runs.active_count() > 0 {
+            assert!(std::time::Instant::now() < deadline, "runs did not settle");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // 完成钩子是同步回调，收敛即已写回
+    }
+
+    #[tokio::test]
+    async fn scheduled_dispatch_passes_full_snapshot_args() {
+        let rig = rig("dispatch-ok");
+        write_script(&rig, "daily.yaml", SCRIPT);
+        let (_, signature) =
+            task_params::probe_script_signature(&rig.scripts, "com.test.app/daily.yaml").unwrap();
+        let snapshot = serde_json::json!({
+            "enable": false,
+            "message": SECRET_TEXT,
+        });
+        let task = mk_task(
+            "com.test.app/daily.yaml",
+            Some(&snapshot.to_string()),
+            Some(&signature),
+        );
+        rig.db.upsert_task(&task).unwrap();
+
+        dispatch(&rig.db, &rig.runs, &rig.scripts, &task, None).await;
+        settle(&rig.runs).await;
+
+        let captured = rig.exec.captured();
+        assert_eq!(captured.len(), 1, "门禁通过必须恰好提交一次");
+        let req = &captured[0];
+        assert_eq!(
+            req.args,
+            vec![
+                (
+                    "enable".to_string(),
+                    crate::script_v2::TypedValue::Bool(false)
+                ),
+                (
+                    "message".to_string(),
+                    crate::script_v2::TypedValue::Text(SECRET_TEXT.into())
+                ),
+            ],
+            "调度必须把完整快照作为 args 传入 StartRequest"
+        );
+        assert!(matches!(req.source, RunSource::TaskNow));
+    }
+
+    #[tokio::test]
+    async fn stale_signature_task_is_not_dispatched_and_marks_failure() {
+        let rig = rig("dispatch-stale");
+        write_script(&rig, "daily.yaml", SCRIPT);
+        let trigger = Local::now();
+        let task = mk_task(
+            "com.test.app/daily.yaml",
+            Some(r#"{"enable":false,"message":"x"}"#),
+            Some("psig1|stale"),
+        );
+        rig.db.upsert_task(&task).unwrap();
+
+        dispatch(&rig.db, &rig.runs, &rig.scripts, &task, Some(trigger)).await;
+        settle(&rig.runs).await;
+
+        assert!(rig.exec.captured().is_empty(), "签名过期绝不调度");
+        let stored = rig
+            .db
+            .list_tasks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "task-1")
+            .unwrap();
+        assert_eq!(
+            stored.last_result.as_deref(),
+            Some("失败"),
+            "明确失败而非空跑"
+        );
+        assert!(
+            stored.last_run_at.is_some(),
+            "失败也要更新 last_run_at（UI 可见）"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_task_without_snapshot_is_not_dispatched() {
+        let rig = rig("dispatch-legacy");
+        write_script(&rig, "daily.yaml", SCRIPT);
+        let trigger = Local::now();
+        // 旧任务：args_json / param_signature 均为 NULL
+        let task = mk_task("com.test.app/daily.yaml", None, None);
+        rig.db.upsert_task(&task).unwrap();
+
+        dispatch(&rig.db, &rig.runs, &rig.scripts, &task, Some(trigger)).await;
+        settle(&rig.runs).await;
+
+        assert!(rig.exec.captured().is_empty(), "无快照绝不调度");
+        let stored = rig
+            .db
+            .list_tasks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "task-1")
+            .unwrap();
+        assert_eq!(stored.last_result.as_deref(), Some("失败"));
+    }
+
+    #[tokio::test]
+    async fn missing_script_task_is_not_dispatched() {
+        let rig = rig("dispatch-missing");
+        // 探测不存在的脚本应报 ScriptMissing（保证门禁与既有 404 口径一致）
+        match task_params::probe_script_signature(&rig.scripts, "com.test.app/missing.yaml") {
+            Err(GateError::ScriptMissing) => {}
+            other => panic!("expected ScriptMissing, got ok={}", other.is_ok()),
+        }
+        let task = mk_task("com.test.app/missing.yaml", Some("{}"), Some("psig1|"));
+        rig.db.upsert_task(&task).unwrap();
+
+        dispatch(&rig.db, &rig.runs, &rig.scripts, &task, Some(Local::now())).await;
+        settle(&rig.runs).await;
+
+        assert!(rig.exec.captured().is_empty());
+        let stored = rig
+            .db
+            .list_tasks()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "task-1")
+            .unwrap();
+        assert_eq!(stored.last_result.as_deref(), Some("失败"));
+    }
+
+    #[tokio::test]
+    async fn run_now_rejects_stale_task_and_passes_snapshot_when_fresh() {
+        let rig = rig("run-now");
+        write_script(&rig, "daily.yaml", SCRIPT);
+        let (_, signature) =
+            task_params::probe_script_signature(&rig.scripts, "com.test.app/daily.yaml").unwrap();
+        let snapshot = serde_json::json!({ "enable": false, "message": SECRET_TEXT });
+
+        // 过期：409 语义（ParamStale），不提交
+        let stale = mk_task("com.test.app/daily.yaml", Some("{}"), Some("psig1|old"));
+        match rig.scheduler.run_now(&stale).await {
+            Err(RunNowError::ParamStale(GateError::SignatureMismatch { stored, current })) => {
+                assert_eq!(stored, "psig1|old");
+                assert!(current.starts_with("psig1|"));
+            }
+            other => panic!("expected ParamStale, got ok={}", other.is_ok()),
+        }
+        assert!(rig.exec.captured().is_empty());
+
+        // 无快照：同样拒绝
+        let legacy = mk_task("com.test.app/daily.yaml", None, None);
+        assert!(matches!(
+            rig.scheduler.run_now(&legacy).await,
+            Err(RunNowError::ParamStale(GateError::NoSnapshot))
+        ));
+        assert!(rig.exec.captured().is_empty());
+
+        // 新鲜快照：run_now 通过并携带完整 args
+        let fresh = mk_task(
+            "com.test.app/daily.yaml",
+            Some(&snapshot.to_string()),
+            Some(&signature),
+        );
+        let run_id = rig.scheduler.run_now(&fresh).await.unwrap();
+        settle(&rig.runs).await;
+        let rec = rig.runs.get_run(&run_id).unwrap();
+        assert_eq!(rec.state, RunState::Success);
+        let captured = rig.exec.captured();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].args.len(), 2, "全量快照覆盖");
+        assert_eq!(
+            captured[0].args[1],
+            (
+                "message".to_string(),
+                crate::script_v2::TypedValue::Text(SECRET_TEXT.into())
+            )
+        );
+    }
+
+    /// 日志防泄露：text 参数值绝不进入运行链路日志；参数名与签名短码必须在。
+    #[tokio::test]
+    async fn run_logs_contain_signature_and_names_never_values() {
+        use tracing::instrument::WithSubscriber as _;
+
+        struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl CapturedLogs {
+            fn new() -> Self {
+                Self(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+            }
+            fn text(&self) -> String {
+                String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+            }
+        }
+        impl Clone for CapturedLogs {
+            fn clone(&self) -> Self {
+                Self(self.0.clone())
+            }
+        }
+        struct CapturedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for CapturedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+            type Writer = CapturedWriter;
+            fn make_writer(&'a self) -> Self::Writer {
+                CapturedWriter(self.0.clone())
+            }
+        }
+
+        let rig = rig("log-leak");
+        write_script(&rig, "daily.yaml", SCRIPT);
+        let (_, signature) =
+            task_params::probe_script_signature(&rig.scripts, "com.test.app/daily.yaml").unwrap();
+        let snapshot = serde_json::json!({ "enable": false, "message": SECRET_TEXT });
+        let task = mk_task(
+            "com.test.app/daily.yaml",
+            Some(&snapshot.to_string()),
+            Some(&signature),
+        );
+        rig.db.upsert_task(&task).unwrap();
+
+        let capture = CapturedLogs::new();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(capture.clone())
+            .finish();
+        dispatch(&rig.db, &rig.runs, &rig.scripts, &task, None)
+            .with_subscriber(subscriber)
+            .await;
+        settle(&rig.runs).await;
+
+        let logs = capture.text();
+        assert!(logs.contains("task params confirmed"), "{logs}");
+        assert!(
+            logs.contains("enable,message"),
+            "参数名列表必须出现在确认日志: {logs}"
+        );
+        assert!(
+            logs.contains("signature_short"),
+            "签名短码必须出现在确认日志: {logs}"
+        );
+        assert!(!logs.contains(SECRET_TEXT), "text 参数值泄露进日志: {logs}");
+        // 落库日志同样不得含参数值（调度批量日志经完成钩子入库）
+        let db_logs = rig.db.list_logs(None, None, 100).unwrap();
+        for log in db_logs {
+            assert!(
+                !log.msg.contains(SECRET_TEXT),
+                "text 参数值泄露进运行日志表: {}",
+                log.msg
+            );
+        }
     }
 }

@@ -52,7 +52,8 @@ pub(super) fn validate_run_req(req: &RunReqArgs) -> Result<(), ApiError> {
 }
 
 /// 结构化诊断 400 响应（CONTRACT §5.1 五元组列表，前端按 code/step_path 定位）。
-fn diagnostics_response(diagnostics: &[crate::script_v2::ScriptError]) -> Response {
+/// 任务保存的 args 解析与脚本解析诊断共用同一形态。
+pub(super) fn diagnostics_response(diagnostics: &[crate::script_v2::ScriptError]) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({

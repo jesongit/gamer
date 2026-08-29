@@ -16,6 +16,7 @@ mod scheduler;
 mod script_v2;
 mod scripts;
 mod store;
+mod task_params;
 mod webrtc;
 
 use std::sync::Arc;

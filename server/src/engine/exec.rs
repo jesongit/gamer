@@ -382,10 +382,13 @@ fn fail_diagnostics(errors: &[crate::script_v2::ScriptError]) -> anyhow::Error {
 pub struct BoundEntryArgs {
     pub overrides: Vec<(String, TypedValue)>,
     pub resolved: serde_json::Value,
+    /// 目标当前声明的 psig1 参数签名（CONTRACT §4.5）：定时任务保存时与快照
+    /// 一起持久化，调度/立即运行前与脚本当前声明复算值比对做过期门禁。
+    pub param_signature: String,
 }
 
-/// API 手动运行 / 函数测试的入口参数解析：按分区当前磁盘状态捕获快照、严格
-/// 解析入口文件，把稀疏 JSON args 按声明七类解析并合并默认值。
+/// API 入口参数解析：按分区当前磁盘状态捕获快照、严格解析入口文件，
+/// 把稀疏 JSON args 按声明七类解析并合并默认值。
 /// 解析/校验失败返回全部结构化诊断（API 映射 400 + 诊断列表）。
 /// 注意：这只是提交前的即时解析；运行开始时引擎会以当时的快照重新绑定。
 pub fn resolve_entry_args(
@@ -393,6 +396,30 @@ pub fn resolve_entry_args(
     target: &RunTarget,
     args: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<BoundEntryArgs, Vec<crate::script_v2::ScriptError>> {
+    let (decls, label) = load_entry_param_decls(scripts, target)?;
+    let overrides = params::parse_json_args(&decls, args, &label)?;
+    let resolved = params::merge_args(&decls, overrides.iter().cloned(), &label)?;
+    let mut map = serde_json::Map::new();
+    for (name, value) in resolved {
+        map.insert(name, serde_json::to_value(&value).unwrap_or_default());
+    }
+    Ok(BoundEntryArgs {
+        overrides,
+        resolved: serde_json::Value::Object(map),
+        param_signature: crate::script_v2::param_signature(&decls),
+    })
+}
+
+/// 载入运行目标的参数声明（分区磁盘快照 + 严格解析）：
+/// - Script：yaml/ 脚本顶层 params；
+/// - Function：func/ 文件中目标函数（缺省 = 第一个函数）的 params。
+///
+/// 同时返回诊断定位用的资源标签（脚本相对 id / `file/function`）；
+/// 脚本/函数不存在或解析失败 → 全部结构化诊断（RESOURCE_*.not_found 等）。
+pub fn load_entry_param_decls(
+    scripts: &ScriptStore,
+    target: &RunTarget,
+) -> Result<(Vec<ParamDecl>, String), Vec<crate::script_v2::ScriptError>> {
     use crate::script_v2::error::codes;
     use crate::script_v2::ScriptError;
 
@@ -406,11 +433,12 @@ pub fn resolve_entry_args(
     })?;
     let resources = RunResources::new(&snapshot, scripts, pkg.clone());
     let mut cache = ResourceCache::default();
-    let (decls, label) = match target {
+    match target {
         RunTarget::Script { script_id, .. } => {
             let rel = relative_script_id(script_id, &pkg);
             let script = cache.script(&resources, &rel)?;
-            (script.params.clone(), rel)
+            let decls = script.params.clone();
+            Ok((decls, rel))
         }
         RunTarget::Function { file, function, .. } => {
             let ff = cache.function_file(&resources, file)?;
@@ -435,19 +463,9 @@ pub fn resolve_entry_args(
                     file.clone(),
                 )]
             })?;
-            (decl.params.clone(), format!("{file}/{name}"))
+            Ok((decl.params.clone(), format!("{file}/{name}")))
         }
-    };
-    let overrides = params::parse_json_args(&decls, args, &label)?;
-    let resolved = params::merge_args(&decls, overrides.iter().cloned(), &label)?;
-    let mut map = serde_json::Map::new();
-    for (name, value) in resolved {
-        map.insert(name, serde_json::to_value(&value).unwrap_or_default());
     }
-    Ok(BoundEntryArgs {
-        overrides,
-        resolved: serde_json::Value::Object(map),
-    })
 }
 
 // ---------------------------------------------------------------------------
