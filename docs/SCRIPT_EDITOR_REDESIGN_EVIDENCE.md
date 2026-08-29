@@ -251,3 +251,32 @@
 
 ### 结论
 自动化通过；真机录制回放待用户确认（L5 待验）
+
+
+## 阶段 7：删除旧路径并收口文档
+
+### 交付
+- 45d17ff feat(api)!: 模板上传改收 short_name+region（[x1,y1,x2,y2] 相对坐标），服务端组合完整名（×1000 编码同现有），短名冲突 409 改名不覆盖；旧 {name} 形态兼容
+- fca868b feat(web): 录制上传直传 short_name+region，删前端 composeRegionName（§11.7 收口）
+- e60addf refactor(api)!: 删除 /api/op-templates 端点与 [op_templates] 配置结构；导入浅校验收紧为只认 params/config/steps（v1 语法记 invalid，与严格装载对齐）
+- 3107018 refactor(web)!: 删除 script-language/（validate/line-map/fixtures）、op-template.js、op-template.test.js，-1590 行
+- d1919e5 docs(yaml)!: 重写 docs/YAML.md（617 行：目录/params/17 步/绑定/运行入口/录制形态/诊断/v1 差异对照）+ AGENTS.md 同步；14 个 YAML 示例全部通过 script_v2 严格装载验证（临时 doccheck 测试验证后移除）
+- 主线补：vitest include 移除 script-language 死条目、移除 recording 补收集
+
+### rg 残留扫描（最终态）
+- op_template/normalize_top/run_func/start_step 生产代码 0 命中；`$N`/until/cond 仅剩新语法合法使用、显式拒绝测试与非语法命中；全清单见 F1 汇报归档于提交信息
+
+### 最终门禁（主线 HEAD 复验）
+- cargo fmt --all --check：干净；cargo test：289 passed / 0 failed / 2 ignored
+- pnpm test:run：458 passed / 0 failed（32 文件）；pnpm build：成功；git diff --check：干净
+- cargo clippy --all-targets --all-features：9 条 warning（全部为存量，本重构未新增；RC 前如需清零另行立项）
+
+### 已知取舍
+- 旧 {name} 上传形态仍可覆盖写（兼容 Console 框选替换），理论上可绕过短名唯一制造歧义候选；如需收口后续把 name 形态也按基名判冲突
+- 契约与实现的差异清单见 d1919e5 汇报（run 端点形态/色值引号澄清/完整值引用等，文档均以实现为准）
+
+### 审查人
+主线编排复核：HEAD 复跑全部门禁；抽查三路提交 diff 与 rg 清单
+
+### 结论
+通过（阶段 7 完成；「真机录制/回滚演练后再宣布发布完成」一项归阶段 8 待人工）

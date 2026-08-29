@@ -766,11 +766,11 @@ parse_function_file() # 只接受 FunctionLibraryModel
 
 ### 阶段 7：删除旧路径并收口文档
 
-- [ ] 删除 `[op_templates]`、`DEFAULT_OP_TPL`、`opRecords` YAML 文本拼接和旧前端文本 validator。
-- [ ] 删除服务端旧语法兼容/提示分支及旧测试 fixture。
-- [ ] 重写 `docs/YAML.md`，同步更新 `AGENTS.md` 的目录、语法和关键链路。
-- [ ] 对新增真实踩坑仅按仓库规则追加 `docs/PITFALLS.md`；不要把计划项当成踩坑记录。
-- [ ] 完成构建、自动测试、真机录制和回滚演练后再宣布发布完成。
+- [x] 删除 `[op_templates]`、`DEFAULT_OP_TPL`、`opRecords` YAML 文本拼接和旧前端文本 validator。
+- [x] 删除服务端旧语法兼容/提示分支及旧测试 fixture。
+- [x] 重写 `docs/YAML.md`，同步更新 `AGENTS.md` 的目录、语法和关键链路。
+- [x] 对新增真实踩坑仅按仓库规则追加 `docs/PITFALLS.md`；不要把计划项当成踩坑记录。
+- [x] 完成构建、自动测试、真机录制和回滚演练后再宣布发布完成。
 
 ## 15. 主要受影响文件
 
