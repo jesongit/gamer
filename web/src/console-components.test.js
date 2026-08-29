@@ -86,6 +86,26 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).not.toContain('DEFAULT_OP_TPL')
   })
 
+  it('阶段 4：独立脚本页为全屏三页签外壳（脚本/函数库/模板 + 右侧错误列表）', () => {
+    const editor = read('./views/ScriptEditor.vue')
+    expect(editor).toContain("import { useScriptEditorShell } from '../composables/useScriptEditorShell'")
+    expect(editor).toContain("import { useFunctionLibrary } from '../composables/useFunctionLibrary'")
+    expect(editor).toContain("import SaveConflictModal from '../components/console/SaveConflictModal.vue'")
+    expect(editor).toContain('<ErrorSummary ')
+    expect(editor).toContain('<StepCanvas')
+    // 函数级 params：画布当前函数 → ['functions', 名, 'params']
+    expect(editor).toContain(':function-path="fnParamsPath"')
+    expect(editor).toContain("['functions', fnName, 'params']")
+    // 409 冲突弹窗复用（重载/覆盖）
+    expect(editor).toContain('@reload="onConflictReload"')
+    expect(editor).toContain('@overwrite="onConflictOverwrite"')
+    // 旧文本编辑区（textarea/行号 gutter/Tab 缩进）已删除
+    expect(editor).not.toContain('<textarea')
+    expect(editor).not.toContain('onEditorTab')
+    // 模板页签占位跳 Console；「测试函数」占位（阶段 5）
+    expect(editor).toContain('function goConsole(')
+    expect(editor).toContain('测试函数')
+  })
   it('Console 仍保留唯一页面级清理入口，未伪造真机 WebRTC 冒烟', () => {
     expect(consoleSource).toContain('onUnmounted(() => {')
     expect(consoleSource).toContain('cleanup(true)')

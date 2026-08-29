@@ -3,160 +3,141 @@
     <div class="page-head">
       <div>
         <div class="page-title">脚本编辑</div>
-        <div class="page-sub">YAML 自动化脚本 · 支持 find（找图等待 + block 障碍）/ color 颜色分支 / loop / func 自定义函数（$N 传参 + return + cond 条件）/ 跨文件函数调用（脚本名:函数名）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait；时间参数一律带单位（1ms / 2s / 1m / 30min / 1h / 1d），间隔与阈值用 config: 段配置</div>
+        <div class="page-sub">可视化步骤画布：卡片编辑 · 撤销重做 · 字段级校验 · 保存版本冲突检测；脚本与函数库按应用分区存放（只读 YAML 在「诊断」中预览）</div>
       </div>
       <div class="head-actions">
-        <button class="btn" @click="validate">✔ 校验</button>
-        <button v-if="!store.running" class="btn btn-primary" @click="run">▶ 运行</button>
+        <select v-model="pkg" class="select mono ed-pkg" title="应用分区（脚本/函数库/模板都存放在 data/<应用包名>/ 下）">
+          <option v-if="!pkgOptions.length" value="">（无分区）</option>
+          <option v-for="p in pkgOptions" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <button v-if="!store.running" class="btn btn-primary" :disabled="!canRun" @click="run">▶ 运行</button>
         <button v-else class="btn btn-danger" :disabled="runStopping" @click="stop">{{ runStopping ? '■ 停止中…' : '■ 停止' }}</button>
-        <button class="btn" @click="save">💾 保存</button>
+        <button class="btn" :disabled="!shell.hasModel || shell.saving" @click="save">{{ shell.saving ? '保存中…' : '💾 保存' }}</button>
+        <span v-if="shell.hasModel && shell.dirty" class="tag dirty-tag">未保存</span>
       </div>
     </div>
 
-    <div class="script-layout">
-      <!-- 左：脚本列表 -->
-      <div class="script-list card">
-        <button class="btn btn-sm btn-primary new-btn" @click="newScript">＋ 新建脚本</button>
-        <div class="sl-items">
-          <div v-for="s in scripts" :key="s.id" class="sl-item" :class="{ sel: s.id === sel?.id }" @click="select(s)">
-            <div class="sl-name">{{ s.name }}</div>
-            <div class="sl-meta mono"><span class="sl-pkg">{{ s.package }}</span> · {{ fmtTime(s.updated_at) }}</div>
-            <button class="sl-del" @click.stop="removeScript(s)" title="删除">🗑</button>
-          </div>
+    <div class="shell-layout">
+      <!-- 左：资源树（脚本 / 函数库 / 模板 三页签，plan §10.2） -->
+      <aside class="res-panel card">
+        <div class="res-tabs">
+          <button type="button" class="res-tab" :class="{ active: tab === 'script' }" @click="tab = 'script'">脚本</button>
+          <button type="button" class="res-tab" :class="{ active: tab === 'func' }" @click="tab = 'func'">函数库</button>
+          <button type="button" class="res-tab" :class="{ active: tab === 'tmpl' }" @click="tab = 'tmpl'">模板</button>
         </div>
-        <div class="sl-foot">
-          <span>YAML 语法说明</span>
-          <button class="btn btn-sm btn-ghost" @click="showHelp = true">?</button>
+        <div class="res-actions">
+          <button v-if="tab === 'script'" class="btn btn-sm" @click="newScript">＋ 新建脚本</button>
+          <button v-if="tab === 'func'" class="btn btn-sm" @click="newFunctionFile">＋ 新建函数库</button>
+          <button v-if="tab === 'tmpl'" class="btn btn-sm" @click="goConsole">投屏控制台管理 →</button>
         </div>
-      </div>
+        <div class="res-items">
+          <template v-if="tab === 'script'">
+            <div v-for="s in pkgScripts" :key="s.id" class="res-item" :class="{ sel: s.id === selScriptId }" @click="openScript(s)">
+              <div class="ri-name">{{ s.name }}</div>
+              <div class="ri-meta mono">{{ fmtTime(s.updated_at) }}</div>
+              <button class="ri-del" @click.stop="removeScript(s)" title="删除">🗑</button>
+            </div>
+            <div v-if="!pkgScripts.length" class="res-empty">该分区暂无脚本</div>
+          </template>
+          <template v-else-if="tab === 'func'">
+            <div v-for="f in fnLib.list" :key="f.id" class="res-item" :class="{ sel: f.id === selFnId }" @click="openFunctionFile(f)">
+              <div class="ri-name">{{ f.file }}</div>
+              <div class="ri-meta mono">{{ (f.functions || []).join('、') || '（无函数）' }}</div>
+              <button class="ri-del" @click.stop="removeFunctionFile(f)" title="删除">🗑</button>
+            </div>
+            <div v-if="!fnLib.list.length" class="res-empty">该分区暂无函数库文件</div>
+          </template>
+          <template v-else>
+            <div v-for="t in templates" :key="t.name" class="res-item readonly">
+              <div class="ri-name">{{ t.name }}</div>
+              <div class="ri-meta mono">模板图片 · 框选/上传/匹配测试在投屏控制台</div>
+            </div>
+            <div v-if="!templates.length" class="res-empty">该分区暂无模板</div>
+          </template>
+        </div>
+        <div class="res-foot mono">运行设备：{{ store.deviceId || '未选择（投屏控制台选择）' }}</div>
+      </aside>
 
-      <!-- 右：编辑器 -->
-      <div class="editor-wrap card">
-        <div class="ed-head">
-          <div class="ed-file mono">
-            <select v-model="edPkg" class="select mono ed-pkg" title="应用分区（保存到 data/<应用包名>/yaml；编辑已有脚本时切换分区，保存后即移动）">
-              <option v-if="!pkgOptions.length" value="">（无分区）</option>
-              <option v-for="p in pkgOptions" :key="p" :value="p">{{ p }}</option>
-            </select>
-            <span>{{ sel?.name || '未命名.yml' }}</span>
-          </div>
-          <div class="ed-status">
-            <span class="tag" :class="valid ? 'ok' : 'err'">{{ valid ? '✓ 语法正确' : '✗ 语法错误' }}</span>
-          </div>
+      <!-- 中：共享编辑画布 -->
+      <section class="editor-main card">
+        <div v-if="tab === 'tmpl'" class="ed-empty">
+          <p>模板的框选截取、上传、二次裁切与匹配测试在投屏控制台完成（依赖设备画面）。</p>
+          <button class="btn btn-primary" @click="goConsole">前往投屏控制台</button>
         </div>
+        <template v-else-if="shell.hasModel">
+          <div class="ed-toolbar">
+            <input v-model="shell.name" class="input mono ed-name" :placeholder="tab === 'func' ? '函数库文件短名（缺省 .yaml 自动补）' : '脚本名称（可省略 .yml 后缀）'" />
+            <button class="btn btn-sm" :disabled="!shell.canUndo" title="撤销" @click="shell.undo()">↶</button>
+            <button class="btn btn-sm" :disabled="!shell.canRedo" title="重做" @click="shell.redo()">↷</button>
+            <button class="btn btn-sm" :class="{ active: showExtras }" @click="showExtras = !showExtras">参数/配置</button>
+            <button class="btn btn-sm" :class="{ active: showYaml }" title="只读生成 YAML（诊断预览，不可编辑）" @click="showYaml = !showYaml">诊断</button>
+            <button v-if="shell.canJumpBack" class="btn btn-sm" @click="shell.jumpBack()">← 返回 {{ shell.jumpBackLabel }}</button>
+          </div>
+          <div class="ed-body">
+            <StepCanvas
+              ref="canvasEl"
+              :model="shell.model"
+              :stack="shell.stack"
+              :diagnostics="shell.diagnostics"
+              :context="shell.editorContext"
+              :templates="templateNames"
+              :selected-uuid="shell.selectedUuid"
+              @select="(u) => shell.select(u)"
+            />
+            <div v-if="showExtras" class="extras">
+              <!-- 脚本 = 文件级 params；函数库 = 当前函数 params（functionPath 指到 functions.<名>.params） -->
+              <ParamEditor :model="shell.model" :stack="shell.stack" :diagnostics="shell.diagnostics" :function-path="fnParamsPath" />
+              <ConfigEditor v-if="tab === 'script'" :model="shell.model" :stack="shell.stack" />
+            </div>
+          </div>
+        </template>
+        <div v-else class="ed-empty">从左侧选择{{ tab === 'func' ? '函数库文件' : '脚本' }}，或新建一个。</div>
+      </section>
 
-        <div class="editor">
-          <div class="gutter mono"><div v-for="(_, i) in codeLines" :key="i">{{ i + 1 }}</div></div>
-          <textarea v-model="code" class="code-area mono" spellcheck="false" @input="valid = null" @keydown.tab.prevent="onEditorTab"></textarea>
+      <!-- 右：校验错误列表 + 函数测试占位（阶段 5） -->
+      <aside class="side-panel card">
+        <ErrorSummary :diagnostics="shell.diagnostics" @locate="locateDiag" />
+        <div v-if="tab === 'func' && shell.hasModel" class="test-fn">
+          <div class="tf-title">测试函数</div>
+          <p class="tf-desc">运行单个函数需要运行参数表单与函数测试接口（阶段 5 开放：按 params 生成控件、发送稀疏 args）。</p>
+          <button class="btn" disabled title="阶段 5 开放">▶ 测试函数（未开放）</button>
         </div>
-      </div>
+      </aside>
     </div>
 
-    <!-- 语法帮助弹窗 -->
-    <div v-if="showHelp" class="modal-mask" @click.self="showHelp = false">
-      <div class="modal help-modal">
-        <div class="modal-head">
-          <span class="title">YAML 脚本语法</span>
-          <button class="btn btn-ghost btn-sm" @click="showHelp = false">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="help-block">
-            <div class="hb-title">⚙ 顶层结构（只允许 config / func / steps）</div>
-            <pre class="hb-code mono"># 脚本按应用分区存放（data/&lt;应用包名&gt;/yaml，分区由编辑器顶部分区下拉决定）
-config:                 # 可选：覆盖 config.toml 默认（也可写成映射列表按序覆盖）
-  interval: 500ms       # 轮询类间隔（find 每轮重试 / verify 复查）；步骤间不等待
-  threshold: 0.85       # 模板匹配阈值
-  log_level: info       # debug / info（默认）/ warn / error，低于等级的日志丢弃
-func:                   # 可选：自定义函数（见下）
-steps:                  # 必需：步骤列表
-  - log: "开始"
-
-# —— 另一种独立写法：单段脚本省略段落键（config 不能省）——
-# ① 顶层序列 = steps：
-- log: "直接写步骤"
-# ② 顶层映射（不含 config/func/steps 任何键）= func 纯函数库简写（另一个脚本）：
-wait_tpl:
-  - find: $1</pre>
-          </div>
-          <div class="help-block">
-            <div class="hb-title">🎬 基础动作</div>
-            <pre class="hb-code mono">- wait: 2s               # 等待（也可 [1s, 3s] 随机区间）；时间一律带单位
-- tap: [0.500, 0.500]    # 相对坐标点击
-- swipe:
-    fm: [0.500, 0.800]   # 滑动起点
-    to: [0.500, 0.200]   # 滑动终点
-    time: 800ms          # 滑动时长（省略默认 500ms）
-- text: "hello world"    # 输入文本
-- key: HOME              # HOME/BACK/APP_SWITCH/VOL_UP…
-- log: "输出到运行日志"
-- str_app                # 冷启动应用（只写裸名，包名 = 设备分区）
-- cls_app                # 关闭应用（adb force-stop，不碰投屏）
-- throw                  # 结束整个任务（跨 call）；- throw: 体力不足 带原因</pre>
-          </div>
-          <div class="help-block">
-            <div class="hb-title">🔍 找图 find（超时内轮询等模板出现并点击，恒点模板中心）</div>
-            <pre class="hb-code mono">- find: sign_btn.png   # 单个主模板（多目标拆成多步；挡路的写 block）
-  timeout: 30min        # 超时执行 else（默认 30min，必须 > 0）
-  block:                # 障碍模板：主模板未命中后依序匹配，命中即点击其中心
-    - pop.png           # 并结束本轮；单个可写 block: pop.png
-    - ad.png
-  verify: true          # 生效验证（默认 false）：命中点击后等 interval 重匹配主模板，
-                         # 仍命中再补一击（共两击，不循环）
-  then:                 # 命中执行（^1 = 主模板名、^2.. = block 名，可传参引用）
-    - log: "找到 ^1"
-  else:                 # 超时执行
-    - log: "等待 ^1 超时"
-# 每轮：主模板（新截图）→ 命中点击 + verify + then；未命中 → block 依序 →
-# 全未命中等 interval 重开一轮。threshold 用 config 配置；
-# 搜索区域由模板名 #后缀 决定：hp#l.png（左半）/ xx#0_0_500_500.png（左上 1/4），
-# 无后缀回退全屏（运行日志有提醒）；可写短名 login.png（引擎解析唯一 login#*.png）</pre>
-          </div>
-          <div class="help-block">
-            <div class="hb-title">🎨 找色 color（一次截图按序判定，命中即执行其步骤并结束）</div>
-            <pre class="hb-code mono">- color: [0.5123, 0.8456]   # 采样相对坐标
-  ff8800:                   # 色值键 = 6 位十六进制（容差固定 30），挂命中步骤（可留空）
-    - log: "命中颜色"
-  ff8811:
-  else:                     # 全部未命中执行
-    - log: "都没命中"
-# 不轮询无超时（重试套 loop）。^1 = "[x, y]" 坐标串、^2.. = 色值键（书写顺序）
-# 二次裁切区 Alt/alt 模式点击任意处 → 自动生成 color 记录（所见即所得取色）</pre>
-          </div>
-          <div class="help-block">
-            <div class="hb-title">🔁 loop / call / func 自定义函数</div>
-            <pre class="hb-code mono">- loop:                # times 省略或 0 = 无限循环
-  times: 3
-  steps:
-    - log: "每一轮"
-- call: 子脚本.yml a.png [0.5, 0.6]   # 空格分隔实参（[x, y] 括号内不切分），
-                                       # 子脚本内 $1/$2… 引用（替换全部字符串，
-                                       # 嵌套 call 转发 $N 同样生效）
-
-func:                   # 自定义函数定义（本脚本内调用；cond 可选执行条件）
-  - wait_tpl:           # 函数名不能是保留字；体内 $N 指函数实参
-    cond: gate.png      # 可选：必须匹配条件模板才执行函数体，否则函数返回 false
-    steps:              # 函数体（与 cond 同级；多模板写 cond: [a.png, b.png]）
-      - find: $1
-        timeout: 6s
-      - return: true    # return 仅函数内合法：立即返回；函数体执行完未 return = true
-steps:
-  - wait_tpl: sign_btn.png   # 调用：空格分隔实参 + then（返回 true）/ else（false）
-    then:
-      - log: "出现了"
-    else:
-      - log: "没等到"
-  - 通用日常:fun1: a.png     # 跨文件调用：脚本名:函数名 + 实参（解析同 call）
-# 嵌套函数调用上限 32 层；throw 在函数内同样结束整个任务</pre>
-          </div>
-        </div>
-      </div>
-    </div>
+    <YamlPreview
+      v-if="showYaml && shell.hasModel"
+      :model="shell.model"
+      :filename="shell.name || (tab === 'func' ? 'functions.yaml' : 'script.yaml')"
+      @close="showYaml = false"
+    />
+    <!-- 保存 409 冲突：与 Console 紧凑外壳共用同一弹窗与 shell 冲突状态 -->
+    <SaveConflictModal
+      :open="!!shell.conflict"
+      :resource="shell.conflict?.resource || ''"
+      :message="shell.conflict?.message || ''"
+      @reload="onConflictReload"
+      @overwrite="onConflictOverwrite"
+      @close="shell.dismissConflict()"
+    />
     <RunConflictModal />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch, onMounted, onUnmounted } from 'vue'
+/**
+ * 独立脚本页 = 全屏可视化外壳（阶段 4，plan §10.2）：
+ * - 左侧资源树三页签：脚本 / 函数库 / 模板（模板只读列表 + 跳转投屏控制台占位）；
+ * - 中央共享画布（StepCanvas，与 Console 紧凑外壳同一编辑核心 useScriptEditorShell）；
+ * - 右侧常驻错误列表（ErrorSummary，点击经画布 locate 定位展开）；
+ * - 函数库：文件 → FunctionLibraryModel，函数级 params 经 ParamEditor functionPath 编辑；
+ * - 保存带 expected_version，409 version_conflict → SaveConflictModal（重载/覆盖）；
+ * - 「保存并运行」：存在未保存内容先落盘，再以持久化版本启动（不运行浏览器内临时模型）；
+ * - 运行/停止/实例恢复沿用统一 RunManager 状态（store + runs.js），与旧页一致。
+ * 「测试函数」为占位入口，等阶段 5 的参数表单与函数运行接口。
+ */
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   scriptsData, devicesData, store, useToast,
   applyRunRecord, beginCancel, findRun, resetStoreRunState, pushRunConflict,
@@ -168,51 +149,41 @@ import {
   describeConflict,
 } from '../runs'
 import RunConflictModal from '../components/RunConflictModal.vue'
+import SaveConflictModal from '../components/console/SaveConflictModal.vue'
+import { useScriptEditorShell } from '../composables/useScriptEditorShell'
+import { useFunctionLibrary } from '../composables/useFunctionLibrary'
+import { StepCanvas, ParamEditor, ConfigEditor, YamlPreview, ErrorSummary } from '../script-editor/components/index'
 
+const router = useRouter()
 const toast = useToast()
 const scripts = scriptsData
 const devices = devicesData
-const sel = ref(null)
-const code = ref('')
-const valid = ref(null)
-const showHelp = ref(false)
-// 保存目标应用分区（= 应用包名）：编辑已有脚本=其所在分区，新建=当前设备 pkg
-const edPkg = ref('')
-const runStopping = computed(() => {
-  const rec = store.runId ? findRun(store.runId) : null
-  return rec?.state === 'stopping'
+
+// ---------- 外壳与资源 ----------
+const shell = useScriptEditorShell({
+  api,
+  getContext: () => ({
+    resolveTemplate: (n) => templates.value.some(t => t.name === n || shortName(t.name) === n),
+  }),
 })
+const fnLib = useFunctionLibrary({ api })
 
-const DEFAULT_CODE = `config:
-  interval: 500ms
+const pkg = ref('')
+const tab = ref('script') // 'script' | 'func' | 'tmpl'
+const templates = ref([]) // 当前分区模板（只读列表）
+const selScriptId = ref(null)
+const selFnId = ref(null)
+const showExtras = ref(false)
+const showYaml = ref(false)
+const canvasEl = ref(null)
 
-func:
-  - wait_tpl:
-    - find: $1
-      timeout: 6s
-    - return: true
+/** 模板短名（login.png ← login#l.png）：画布 tmpl 控件与存在性校验共用口径。 */
+function shortName(name) {
+  return String(name || '').replace(/#.*?(\.(png|jpe?g|bmp|webp))?$/i, '$1')
+}
+const templateNames = computed(() => templates.value.map(t => shortName(t.name)))
 
-steps:
-  - wait: [300ms, 800ms]
-  - wait_tpl: sign_btn.png
-    then:
-      - log: "点击签到按钮"
-    else:
-      - log: "未找到签到按钮，滑动后重试"
-  - loop:
-    times: 3
-    steps:
-      - swipe:
-          fm: [0.500, 0.800]
-          to: [0.500, 0.200]
-          time: 800ms
-      - wait: [300ms, 900ms]
-  - key: HOME
-  - log: "签到完成"
-`
-
-const codeLines = computed(() => code.value.split('\n'))
-const fmtTime = s => (s || '').slice(0, 16)
+const pkgScripts = computed(() => scripts.value.filter(s => !pkg.value || s.package === pkg.value))
 
 /** 分区下拉选项：当前设备配置的应用包名 ∪ 已有脚本分区 */
 const pkgOptions = computed(() => {
@@ -222,165 +193,219 @@ const pkgOptions = computed(() => {
   for (const s of scripts.value) if (s.package) set.add(s.package)
   return [...set].sort()
 })
-watch(pkgOptions, list => { if (!edPkg.value) edPkg.value = list[0] || '' }, { immediate: true })
 
-function select(s) {
-  sel.value = s
-  code.value = s.content
-  edPkg.value = s.package || ''
-  valid.value = null
+/** 函数级 params 容器：画布当前编辑函数名（expose 代理透出，随函数下拉联动）→ ['functions', 名, 'params'] */
+const fnParamsPath = computed(() => {
+  if (tab.value !== 'func' || !canvasEl.value) return null
+  const fnName = canvasEl.value.activeFnName
+  return fnName ? ['functions', fnName, 'params'] : null
+})
+
+function fmtTime(s) {
+  return (s || '').slice(0, 16)
+}
+
+// ---------- 资源加载 ----------
+
+async function loadScripts() {
+  try { scripts.value = await api.listScripts() } catch (e) { /* 保持旧列表 */ }
+}
+async function loadDevices() {
+  try { devices.value = await api.listDevices() } catch (e) {}
+}
+async function loadTemplates() {
+  if (!pkg.value) { templates.value = []; return }
+  try { templates.value = (await api.listTemplates(pkg.value)) || [] } catch (e) { templates.value = [] }
+}
+
+/** 切分区：函数库/模板随分区刷新 */
+function applyPkg() {
+  fnLib.refresh(pkg.value)
+  loadTemplates()
+}
+
+watch(pkg, () => { applyPkg() })
+
+// ---------- 打开 / 新建 / 删除 ----------
+
+async function confirmDiscardDirty() {
+  if (shell.hasModel && shell.dirty && !window.confirm('当前资源有未保存修改，确认放弃？')) return false
+  return true
+}
+
+async function openScript(s) {
+  if (shell.kind === 'script' && shell.resourceId === s.id) return
+  if (!(await confirmDiscardDirty())) return
+  tab.value = 'script'
+  showExtras.value = false
+  showYaml.value = false
+  try {
+    await shell.loadScript(s.id)
+    selScriptId.value = s.id
+  } catch (e) {
+    shell.reset()
+    toast('脚本加载失败：' + e.message, 'error')
+  }
+}
+
+async function openFunctionFile(f) {
+  if (shell.kind === 'function_library' && shell.resourceId === f.id) return
+  if (!(await confirmDiscardDirty())) return
+  tab.value = 'func'
+  showExtras.value = false
+  showYaml.value = false
+  try {
+    await shell.loadFunctionFile(f.id)
+    selFnId.value = f.id
+  } catch (e) {
+    shell.reset()
+    toast('函数库加载失败：' + e.message, 'error')
+  }
 }
 
 function newScript() {
-  sel.value = { id: null, name: '新脚本.yml', content: DEFAULT_CODE, updated_at: '' }
-  code.value = DEFAULT_CODE
-  const dp = (devices.value.find(d => d.id === store.deviceId)?.pkg || '').trim()
-  edPkg.value = dp || pkgOptions.value[0] || ''
-  valid.value = null
+  if (!pkg.value) return toast('请先选择应用分区', 'warn')
+  if (shell.hasModel && shell.dirty && !window.confirm('当前资源有未保存修改，确认放弃？')) return
+  tab.value = 'script'
+  showExtras.value = false
+  showYaml.value = false
+  shell.newScript({ name: '新脚本.yml', pkg: pkg.value })
+  selScriptId.value = null
 }
 
-/** 编辑区 Tab 键：插入 2 个空格（代替切换焦点）；多行选中时逐行缩进，Shift+Tab 行首退格 */
-function onEditorTab(e) {
-  const ta = e.target
-  const start = ta.selectionStart
-  const end = ta.selectionEnd
-  const v = code.value
-  if (start === end) {
-    const lineStart = v.lastIndexOf('\n', start - 1) + 1
-    const before = v.slice(lineStart, start)
-    if (e.shiftKey) {
-      // Shift+Tab：删除行首 1~2 个空格
-      const m = before.match(/^ {1,2}/)
-      if (m) {
-        code.value = v.slice(0, lineStart) + v.slice(lineStart + m[0].length)
-        nextTick(() => { ta.selectionStart = ta.selectionEnd = start - m[0].length })
-      }
-      return
-    }
-    code.value = v.slice(0, start) + '  ' + v.slice(end)
-    nextTick(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
-    return
-  }
-  const sel = v.slice(start, end)
-  if (sel.includes('\n')) {
-    // 多行选中：每行前插 2 空格
-    const lineStart = v.lastIndexOf('\n', start - 1) + 1
-    const indented = v.slice(lineStart, end).split('\n').map(l => '  ' + l).join('\n')
-    code.value = v.slice(0, lineStart) + indented + v.slice(end)
-    const newEnd = lineStart + indented.length
-    nextTick(() => { ta.selectionStart = lineStart; ta.selectionEnd = newEnd })
-  } else {
-    code.value = v.slice(0, start) + '  ' + v.slice(end)
-    nextTick(() => { ta.selectionStart = ta.selectionEnd = start + 2 })
-  }
+function newFunctionFile() {
+  if (!pkg.value) return toast('请先选择应用分区', 'warn')
+  if (shell.hasModel && shell.dirty && !window.confirm('当前资源有未保存修改，确认放弃？')) return
+  const raw = window.prompt('函数库文件短名（缺省 .yaml 自动补）', 'functions')
+  if (!raw || !raw.trim()) return
+  tab.value = 'func'
+  showExtras.value = false
+  showYaml.value = false
+  shell.newFunctionFile({ file: raw.trim(), pkg: pkg.value })
+  selFnId.value = null
 }
 
-function validate() {
-  const c = code.value
-  // 段落判定（与引擎 normalize_top 一致）：显式 config:/func:/steps: 根键，
-  // 或省略段落键的单段简写（顶层步骤序列 / 无段落键的顶层函数映射）
-  const hasSection = /^(config|func|steps):/m.test(c)
-  const first = (c.split('\n').find(l => l.trim() && !/^\s*#/.test(l)) || '').trim()
-  const implied = !hasSection && (first.startsWith('- ') || /^[\w\u4e00-\u9fa5.-]+\s*:(\s|$)/.test(first))
-  valid.value = hasSection || implied
-  toast(valid.value ? '语法校验通过' : '缺少脚本内容（steps/func 段落键，或顶层直接写步骤列表/函数定义）', valid.value ? 'success' : 'error')
-}
-
-async function save() {
-  if (!sel.value) return toast('请先选择或新建脚本', 'error')
-  if (!sel.value.name) return toast('请填写脚本名称', 'error')
-  if (!edPkg.value) return toast('请先选择应用分区', 'warn')
+async function removeScript(s) {
+  if (!s.id) return
+  if (!window.confirm(`删除脚本 ${s.name}？`)) return
   try {
-    const r = await api.saveScript({ id: sel.value.id, name: sel.value.name, content: code.value, pkg: edPkg.value })
+    await api.deleteScript(s.id)
     await loadScripts()
-    // 分区/名称可能变化（id 变化），按返回 id 重新定位
-    sel.value = scripts.value.find(s => s.id === r.id) || sel.value
-    toast('已保存', 'success')
+    if (shell.kind === 'script' && shell.resourceId === s.id) shell.reset()
+    if (selScriptId.value === s.id) selScriptId.value = null
+    toast('脚本已删除', 'success')
   } catch (e) {
-    toast('保存失败：' + e.message, 'error')
+    toast('删除失败：' + e.message, 'error')
   }
 }
 
-// 运行状态轮询：服务端异步执行脚本（run 接口立即返回）。
-// 新后端以 run_id 查询并驱动状态机；旧后端只有在新端点明确缺失（404/网络错）时
-// 才退回 script_id status，避免同一脚本的多个执行实例互相覆盖状态。
-let runStatusTimer = null
-
-function startRunStatusPoll() {
-  if (runStatusTimer) clearInterval(runStatusTimer)
-  checkRunStatus()
-  runStatusTimer = setInterval(checkRunStatus, 1000)
-}
-
-function stopRunStatusPoll() {
-  if (runStatusTimer) { clearInterval(runStatusTimer); runStatusTimer = null }
-}
-
-async function checkRunStatus() {
-  if (!store.running) { stopRunStatusPoll(); return }
-  if (store.runId) {
-    const rid = store.runId
-    let rec = null
-    try {
-      rec = await api.getRun(rid)
-    } catch (e) {
-      if (!isMissingEndpointError(e)) return
-      const sid = findRun(rid)?.script_id || store.runScriptId
-      if (!sid) { stopRunStatusPoll(); resetStoreRunState(); return }
-      try {
-        const st = await api.scriptStatus(sid)
-        rec = {
-          run_id: rid,
-          device_id: store.deviceId,
-          script_id: sid,
-          state: st.running ? 'running' : 'cancelled',
-          degraded: true,
-        }
-      } catch (e2) { return }
-    }
-    if (!rec || !rec.run_id) return
-    const merged = applyRunRecord(rec)
-    if (merged && isTerminalRunState(merged.state)) {
-      stopRunStatusPoll()
-      const detail = merged.degraded ? '' : `：${terminalLabel(merged.state)}${merged.error ? `（${merged.error}）` : ''}`
-      toast(`脚本已结束${detail}`, merged.degraded || merged.state === 'success' ? 'info' : 'warn')
-    }
-    return
-  }
-
-  // 兼容旧后端或旧页面会话：此分支没有执行实例 ID，只能使用旧 script_id 接口。
-  if (!store.runScriptId) { stopRunStatusPoll(); return }
+async function removeFunctionFile(f) {
+  if (!window.confirm(`删除函数库文件 ${f.file}？（其中函数将被其他脚本的 func 引用失效）`)) return
   try {
-    const st = await api.scriptStatus(store.runScriptId)
-    if (!st.running) {
-      resetStoreRunState()
-      stopRunStatusPoll()
-      toast('脚本已结束', 'info')
-    }
-  } catch (e) {}
+    await api.deleteFunction(f.id)
+    fnLib.refresh(pkg.value)
+    if (shell.kind === 'function_library' && shell.resourceId === f.id) shell.reset()
+    if (selFnId.value === f.id) selFnId.value = null
+    toast('函数库文件已删除', 'success')
+  } catch (e) {
+    toast('删除失败：' + e.message, 'error')
+  }
 }
+
+function goConsole() {
+  router.push({ name: 'Console' })
+}
+
+// ---------- 保存 / 冲突 ----------
+
+/** 保存当前模型（脚本或函数库）；冲突时弹 SaveConflictModal，校验失败提示前几条诊断 */
+async function save() {
+  if (!shell.hasModel) return { ok: false }
+  if (!String(shell.name || '').trim()) { toast('请填写资源名称', 'error'); return { ok: false } }
+  if (!pkg.value && !shell.pkg) { toast('请先选择应用分区', 'warn'); return { ok: false } }
+  const r = await shell.save()
+  if (r.ok) {
+    await loadScripts()
+    fnLib.refresh(pkg.value)
+    if (shell.kind === 'script') selScriptId.value = shell.resourceId
+    else selFnId.value = shell.resourceId
+    toast('已保存', 'success')
+  } else if (r.reason === 'invalid') {
+    toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
+  } else if (r.reason === 'conflict') {
+    // shell.conflict 已置位 → SaveConflictModal
+  } else {
+    toast('保存失败：' + (r.error?.message || r.error), 'error')
+  }
+  return r
+}
+
+async function onConflictReload() {
+  try {
+    const r = await shell.reload()
+    if (r.ok) toast('已恢复磁盘版本', 'success')
+  } catch (e) {
+    toast('重载失败：' + e.message, 'error')
+  }
+}
+
+async function onConflictOverwrite() {
+  const r = await shell.overwrite()
+  if (r.ok) {
+    await loadScripts()
+    fnLib.refresh(pkg.value)
+    toast('已强制覆盖', 'success')
+  } else if (r.reason === 'error') {
+    toast('覆盖失败：' + (r.error?.message || r.error), 'error')
+  }
+}
+
+// ---------- 运行（统一 RunManager 状态，沿用旧页状态机） ----------
+
+const runStopping = computed(() => {
+  const rec = store.runId ? findRun(store.runId) : null
+  return rec?.state === 'stopping'
+})
+
+/** 运行目标：模板页签无运行对象；函数库不能独立运行（阶段 5 提供「测试函数」） */
+const canRun = computed(() => {
+  if (tab.value !== 'script') return false
+  return !!pkg.value && (shell.kind === 'script' ? shell.hasModel : !!selScriptId.value)
+})
 
 async function run() {
-  if (!sel.value?.id) return toast('请先保存脚本', 'error')
-  if (!store.deviceId) return toast('请先选择设备（投屏控制 → 设备页签）', 'error')
+  if (!store.deviceId) return toast('请先选择设备（投屏控制台 → 设备工具条）', 'error')
+  if (shell.kind === 'function_library') return toast('函数库不能独立运行（在脚本 func 步骤中调用；测试函数阶段 5 开放）', 'warn')
+  // 未打开任何脚本时先打开树中选中项
+  if (!shell.hasModel) {
+    const s = scripts.value.find(x => x.id === selScriptId.value)
+    if (!s) return toast('请先选择脚本', 'error')
+    await openScript(s)
+  }
+  if (shell.kind !== 'script') return
+  if (shell.dirty || !shell.resourceId) {
+    const r = await save()
+    if (!r || !r.ok) return // 保存失败（含 409 冲突弹窗挂起）不启动运行
+  }
+  if (!shell.resourceId) return toast('请先保存脚本', 'error')
+  const id = shell.resourceId
+  const name = shell.name || id
   try {
-    const rep = await api.runScript(sel.value.id, store.deviceId)
+    const rep = await api.runScript(id, store.deviceId)
     const started = normalizeStartReply(rep)
     if (started) {
-      // 202 {run_id}：登记实例后再开始轮询，运行状态不再以 script_id 表示。
       applyRunRecord({
         run_id: started.run_id,
         state: started.state,
         device_id: store.deviceId,
-        script_id: sel.value.id,
+        script_id: id,
         source: 'manual',
-        display: sel.value.name,
+        display: name,
       })
     } else {
-      // 旧后端 200 {ok:true}：保留原有 script_id 兼容句柄。
       store.running = true
-      store.runScript = sel.value.name
-      store.runScriptId = sel.value.id
+      store.runScript = name
+      store.runScriptId = id
     }
     toast('脚本已开始运行', 'success')
     startRunStatusPoll()
@@ -410,7 +435,6 @@ function stop() {
     toast('已发送停止指令，等待脚本退出…', 'warn')
     return
   }
-
   // 兼容旧后端会话：没有 run_id 时才使用 script_id 停止并立即恢复旧 UI。
   if (!store.runScriptId) return
   api.stopScript(store.runScriptId).catch(() => {})
@@ -419,40 +443,55 @@ function stop() {
   toast('已发送停止指令，脚本将在当前步骤结束后停止', 'warn')
 }
 
-async function removeScript(s) {
-  if (!s.id) return
-  if (!confirm(`删除脚本 ${s.name}？`)) return
+// 运行状态轮询：以当前 runId 单次查询，按 record.state 驱动状态机；旧后端降级 script status
+let runStatusTimer = null
+
+function startRunStatusPoll() {
+  if (runStatusTimer) clearInterval(runStatusTimer)
+  checkRunStatus()
+  runStatusTimer = setInterval(checkRunStatus, 1000)
+}
+
+function stopRunStatusPoll() {
+  if (runStatusTimer) { clearInterval(runStatusTimer); runStatusTimer = null }
+}
+
+async function checkRunStatus() {
+  if (!store.running) { stopRunStatusPoll(); return }
+  if (store.runId) {
+    const rid = store.runId
+    let rec = null
+    try {
+      rec = await api.getRun(rid)
+    } catch (e) {
+      if (!isMissingEndpointError(e)) return
+      const sid = findRun(rid)?.script_id || store.runScriptId
+      if (!sid) { stopRunStatusPoll(); resetStoreRunState(); return }
+      try {
+        const st = await api.scriptStatus(sid)
+        rec = { run_id: rid, device_id: store.deviceId, script_id: sid, state: st.running ? 'running' : 'cancelled', degraded: true }
+      } catch (e2) { return }
+    }
+    if (!rec || !rec.run_id) return
+    const merged = applyRunRecord(rec)
+    if (merged && isTerminalRunState(merged.state)) {
+      stopRunStatusPoll()
+      const detail = merged.degraded ? '' : `：${terminalLabel(merged.state)}${merged.error ? `（${merged.error}）` : ''}`
+      toast(`脚本已结束${detail}`, merged.degraded || merged.state === 'success' ? 'info' : 'warn')
+    }
+    return
+  }
+  // 兼容旧后端或旧页面会话：此分支没有执行实例 ID，只能使用旧 script_id 接口。
+  if (!store.runScriptId) { stopRunStatusPoll(); return }
   try {
-    await api.deleteScript(s.id)
-    scripts.value = scripts.value.filter(x => x.id !== s.id)
-    if (sel.value?.id === s.id) sel.value = null
-    toast('脚本已删除', 'success')
-  } catch (e) {
-    toast('删除失败：' + e.message, 'error')
-  }
+    const st = await api.scriptStatus(store.runScriptId)
+    if (!st.running) {
+      resetStoreRunState()
+      stopRunStatusPoll()
+      toast('脚本已结束', 'info')
+    }
+  } catch (e) {}
 }
-
-async function loadScripts() {
-  try { scripts.value = await api.listScripts() } catch (e) {}
-}
-async function loadDevices() {
-  try { devices.value = await api.listDevices() } catch (e) {}
-}
-
-onMounted(async () => {
-  await Promise.all([loadScripts(), loadDevices()])
-  // 直接刷新在脚本页时 store 尚未经过 Console 初始化：复用 Console 保存的设备选择，
-  // 这样后续 deviceRun 查询仍能恢复该设备上正在执行的 run_id。
-  if (!store.deviceId) {
-    const saved = localStorage.getItem('gb_device_id')
-    if (saved && devices.value.some(d => d.id === saved)) store.deviceId = saved
-  }
-  // 刷新后 store 是空内存态：按当前设备恢复服务端活动 run；SPA 切页时则复用已有 run。
-  if (!store.running) await restoreRunState()
-  // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）。
-  if (store.running && (store.runId || store.runScriptId)) startRunStatusPoll()
-})
-onUnmounted(() => stopRunStatusPoll())
 
 /** 页面刷新后按设备恢复活动运行实例；旧后端响应保留 script_id 降级路径。 */
 async function restoreRunState() {
@@ -475,58 +514,102 @@ async function restoreRunState() {
     store.runScript = display
     store.runScriptId = rec.script_id
   }
-  sel.value = script || { id: rec.script_id, name: display, content: '' }
+  if (script) selScriptId.value = script.id
   startRunStatusPoll()
   toast(`检测到 ${display} 正在运行，已恢复状态`, 'info')
 }
+
+// ---------- 诊断定位 ----------
+
+/** 右侧错误列表点击 → 画布定位（展开祖先链 + 选中 + 瞬态高亮），面板独立挂载由宿主转发 */
+function locateDiag(d) {
+  canvasEl.value?.locate(d)
+}
+
+// ---------- 生命周期 ----------
+
+onMounted(async () => {
+  await Promise.all([loadScripts(), loadDevices()])
+  // 直接刷新在脚本页时 store 尚未经过 Console 初始化：复用 Console 保存的设备选择
+  if (!store.deviceId) {
+    const saved = localStorage.getItem('gb_device_id')
+    if (saved && devices.value.some(d => d.id === saved)) store.deviceId = saved
+  }
+  // 初始分区：设备配置的应用包名优先，否则第一个脚本分区
+  if (!pkg.value) {
+    const dp = (devices.value.find(d => d.id === store.deviceId)?.pkg || '').trim()
+    pkg.value = dp || pkgOptions.value[0] || ''
+  }
+  applyPkg()
+  // 刷新后 store 是空内存态：按当前设备恢复服务端活动 run；SPA 切页时则复用已有 run。
+  if (!store.running) await restoreRunState()
+  // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）。
+  if (store.running && (store.runId || store.runScriptId)) startRunStatusPoll()
+})
+onUnmounted(() => stopRunStatusPoll())
 </script>
 
 <style scoped>
-.head-actions { display: flex; gap: 10px; }
+.head-actions { display: flex; gap: 10px; align-items: center; }
+.ed-pkg { max-width: 240px; font-size: 12px; }
+.dirty-tag { color: var(--warn); border-color: var(--warn); }
 
-.script-layout { display: grid; grid-template-columns: 260px 1fr; gap: 14px; flex: 1; min-height: 0; }
-
-.script-list { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow: hidden; }
-.new-btn { justify-content: center; }
-.sl-items { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 6px; }
-.sl-item {
-  padding: 10px 12px; border-radius: var(--radius-sm); cursor: pointer;
-  border: 1px solid transparent; position: relative; transition: all .15s;
+.shell-layout {
+  display: grid; grid-template-columns: 250px 1fr 250px;
+  gap: 12px; flex: 1; min-height: 0;
 }
-.sl-item:hover { background: var(--bg-3); }
-.sl-item.sel { background: rgba(34,211,165,.08); border-color: rgba(34,211,165,.35); }
-.sl-name { font-size: 13px; font-weight: 600; padding-right: 32px; }
-.sl-meta { font-size: 11px; color: var(--text-2); margin-top: 4px; }
-.sl-pkg { color: var(--accent-2); }
-.sl-del {
-  position: absolute; right: 8px; top: 10px; background: none; border: none;
+
+/* 左：资源树 */
+.res-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px; overflow: hidden; }
+.res-tabs { display: flex; gap: 4px; }
+.res-tab {
+  flex: 1; padding: 5px 0; font-size: 12px; text-align: center; cursor: pointer;
+  border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
+  border-radius: var(--radius-sm);
+}
+.res-tab.active { color: var(--accent); border-color: rgba(34, 211, 165, .45); background: rgba(34, 211, 165, .08); }
+.res-actions { display: flex; gap: 6px; }
+.res-actions .btn { flex: 1; justify-content: center; }
+.res-items { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 5px; min-height: 0; }
+.res-item {
+  position: relative; padding: 7px 10px; border-radius: var(--radius-sm); cursor: pointer;
+  border: 1px solid transparent; transition: all .15s;
+}
+.res-item:hover { background: var(--bg-3); }
+.res-item.sel { background: rgba(34, 211, 165, .08); border-color: rgba(34, 211, 165, .35); }
+.res-item.readonly { cursor: default; }
+.ri-name { font-size: 12px; font-weight: 600; padding-right: 26px; word-break: break-all; }
+.ri-meta { font-size: 11px; color: var(--text-2); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ri-del {
+  position: absolute; right: 6px; top: 8px; background: none; border: none;
   color: var(--text-2); cursor: pointer; font-size: 12px;
 }
-.sl-del:hover { color: var(--danger); }
-.sl-foot { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--text-2); border-top: 1px solid var(--border); padding-top: 10px; }
+.ri-del:hover { color: var(--danger); }
+.res-empty { padding: 14px 6px; text-align: center; font-size: 12px; color: var(--text-2); }
+.res-foot { flex-shrink: 0; font-size: 11px; color: var(--text-2); border-top: 1px solid var(--border); padding-top: 8px; }
 
-.editor-wrap { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 12px; }
-.ed-head { display: flex; justify-content: space-between; align-items: center; }
-.ed-file { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.ed-file > span { font-size: 13px; color: var(--text-0); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ed-pkg { max-width: 220px; font-size: 12px; }
-
-.editor { flex: 1; position: relative; display: flex; background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: auto; min-height: 200px; }
-.gutter {
-  padding: 12px 10px; text-align: right; color: var(--text-2);
-  font-size: 12px; line-height: 1.65; user-select: none;
-  border-right: 1px solid var(--border); flex-shrink: 0;
+/* 中：画布 */
+.editor-main { display: flex; flex-direction: column; gap: 8px; padding: 10px; overflow: hidden; }
+.ed-toolbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.ed-toolbar .btn.active { border-color: var(--accent-2); color: var(--accent-2); background: rgba(56, 189, 248, .08); }
+.ed-name { flex: 1; min-width: 140px; max-width: 320px; }
+.ed-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.ed-body :deep(.se-canvas) { flex: none; }
+.extras { display: flex; flex-direction: column; }
+.ed-empty {
+  flex: 1; display: flex; flex-direction: column; gap: 10px; align-items: center; justify-content: center;
+  color: var(--text-2); font-size: 13px; text-align: center; padding: 20px;
 }
-.code-area {
-  flex: 1; padding: 12px; border: none; outline: none; background: transparent;
-  color: #c9d4e8; font-size: 12px; line-height: 1.65; resize: none; min-width: 0;
-}
+.ed-empty p { margin: 0; }
 
-.help-modal { min-width: 560px; }
-.help-block { display: flex; flex-direction: column; gap: 6px; }
-.hb-title { font-size: 13px; font-weight: 600; color: var(--accent); }
-.hb-code {
-  background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 10px 12px; font-size: 12px; line-height: 1.6; color: #c9d4e8; overflow: auto;
+/* 右：错误列表 + 函数测试 */
+.side-panel { display: flex; flex-direction: column; gap: 10px; padding: 10px; overflow: auto; min-height: 0; }
+.side-panel :deep(.error-summary) { margin-top: 0; }
+.test-fn { border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.tf-title { font-size: 12px; font-weight: 600; color: var(--text-1); }
+.tf-desc { margin: 0; font-size: 11px; color: var(--text-2); line-height: 1.6; }
+
+@media (max-width: 1100px) {
+  .shell-layout { grid-template-columns: 200px 1fr 200px; }
 }
 </style>
