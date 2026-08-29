@@ -16,7 +16,7 @@ import { CommandStack } from '../script-editor/commands'
 import { parseFunctionLibrary, parseScript, serialize } from '../script-editor/codec'
 import { createStep } from '../script-editor/factories'
 import { lit } from '../script-editor/model'
-import { defaultAnchor, startIndexOf } from '../script-editor/selection'
+import { defaultAnchor, findStepLocation, startIndexOf } from '../script-editor/selection'
 import { validateFunctionLibrary, validateScript } from '../script-editor/validation'
 
 const YAML_EXT_RE = /\.(ya?ml)$/i
@@ -303,6 +303,43 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     return stack.value.apply({ type: 'insert_step', path: anchor.containerPath, index: anchor.index, step }, label)
   }
 
+  /** 录制接线（阶段 6）：在显式锚点插入步骤（不经 anchorProvider/选中态）——
+   *  录制开始时锁定的插入目标在多次插入间保持稳定。返回是否成功。 */
+  function insertStepWithAnchor(step, label = '插入步骤', anchor = null) {
+    if (!hasModel.value || !anchor) return false
+    return stack.value.apply({ type: 'insert_step', path: anchor.containerPath, index: anchor.index, step }, label)
+  }
+
+  /**
+   * 录制接线（阶段 6）：按 uuid 把占位步骤替换为最终步骤（一次事务 = 一次撤销）。
+   * 同 kind → update_step 就地改字段（uuid 稳定）；跨 kind（坐标降级 find→tap）→
+   * 同事务 remove+insert 整体替换。成功返回 { path, step }，失败（无模型/找不到）返回 null。
+   */
+  function replaceStepFields(uuid, fields, label = '替换录制占位') {
+    if (!hasModel.value) return null
+    const loc = findStepLocation(model.value, uuid)
+    if (!loc) return null
+    const sameKind = fields && fields.kind ? fields.kind === loc.step.kind : true
+    let ok = false
+    if (sameKind) {
+      const patch = { ...fields }
+      delete patch.uuid
+      delete patch.kind
+      stack.value.transaction(() => {
+        ok = stack.value.apply({ type: 'update_step', path: loc.path, fields: patch }, label)
+      }, label)
+    } else {
+      const next = { ...fields }
+      delete next.uuid
+      stack.value.transaction(() => {
+        const removed = stack.value.apply({ type: 'remove_step', path: loc.containerPath, index: loc.index }, label)
+        const inserted = stack.value.apply({ type: 'insert_step', path: loc.containerPath, index: loc.index, step: createStep(next.kind, next) }, label)
+        ok = removed && inserted
+      }, label)
+    }
+    return ok ? { path: loc.path, step: loc.step } : null
+  }
+
   // ---- Alt 便捷工厂（plan §10 迁移矩阵：Alt 投屏/模板/取色 → 类型化步骤） ----
 
   function insertTapAt(x, y) {
@@ -385,7 +422,7 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     canJumpBack, jumpBackLabel,
     loadScript, loadFunctionFile, newScript, newFunctionFile,
     save, reload, overwrite, dismissConflict, reset, undo, redo,
-    select, setAnchorProvider, insertStep,
+    select, setAnchorProvider, insertStep, insertStepWithAnchor, replaceStepFields,
     insertTapAt, insertSwipeBetween, insertFindTemplate, insertColorCheck,
     runStartIndexOf, jumpToScript, jumpToFunctionFile, jumpBack,
   })

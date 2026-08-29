@@ -72,6 +72,12 @@ export const api = {
   // 模板（按应用分区 data/<pkg>/tmpl；pkg 缺省=跨分区全列）
   listTemplates: (pkg) => req('GET', `/api/templates${pkg ? `?pkg=${encodeURIComponent(pkg)}` : ''}`),
   uploadTemplate: (name, dataB64, pkg) => req('POST', '/api/templates', { name, data_b64: dataB64, pkg }),
+  // 录制上传（阶段 6）：短名 + 搜索区域（相对坐标 [x1,y1,x2,y2]，0~1）→
+  // 完整文件名 `短名#x1_y1_x2_y2.png`（×1000 三位整数，与 defaultTemplateName 同编码）。
+  // 现服务端 POST /api/templates 只收完整 name（validate_template_name 保留 # 后缀），
+  // 尚无「短名+region」参数形态，#元数据暂由前端拼接；服务端补齐参数后此处整体切换（见汇报）。
+  uploadTemplateRegion: (shortName, dataB64, pkg, region) =>
+    req('POST', '/api/templates', { name: composeRegionName(shortName, region), data_b64: dataB64, pkg }),
   renameTemplate: (oldName, newName, pkg) =>
     req('PUT', `/api/templates/${encodeURIComponent(oldName)}?pkg=${encodeURIComponent(pkg)}`, { name: newName }),
   deleteTemplate: (name, pkg) =>
@@ -179,6 +185,19 @@ export const api = {
     return req('GET', `/api/logs?${p.toString()}`)
   },
   clearLogs: () => req('DELETE', '/api/logs')
+}
+
+// ---- 模板搜索区域命名（录制上传用）----
+// 与 console/geometry.js defaultTemplateName 同一编码：相对坐标 ×1000 存 3 位整数
+//（0.123→'123'，1.0 夹取 999），无后缀文件名回退全屏（=#a 语义）。
+export function composeRegionName(shortName, region) {
+  const base = String(shortName || '').replace(/\.(png|jpe?g)$/i, '')
+  if (!Array.isArray(region) || region.length !== 4 || region.some(v => !Number.isFinite(v))) {
+    return `${base}.png`
+  }
+  const toInt3 = v => String(Math.min(999, Math.max(0, Math.round(v * 1000)))).padStart(3, '0')
+  const suffix = `${toInt3(region[0])}_${toInt3(region[1])}_${toInt3(region[2])}_${toInt3(region[3])}`
+  return `${base}#${suffix}.png`
 }
 
 // ---- 分区快照导入（服务端 ImportReport 契约，scripts.rs ImportReport 同构）----
