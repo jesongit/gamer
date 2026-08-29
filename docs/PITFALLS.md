@@ -79,3 +79,5 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 
 - 多 Agent 并行改同一仓库时共享 git index：A 任务 `git add` 与 `git commit` 之间 B 任务 stage 的文件会被 A 的裸 `git commit` 误扫提交。解决：`git add <路径>` 后立即 `git commit -- <同一组路径>`（pathspec 提交只含指定路径），永远不用裸 commit；遇 index.lock 等 3 秒重试。
 - js-yaml 5（^5.3.0）API 重写：`dump` 无法按节点控制引号样式与缩进，`load` 丢失标量样式；需要规范序列化（params 整条单引号、match 紧凑缩进）须手写输出器（逐标量可借 `dump(lineWidth:-1)` 判 plain 安全性），校验引号样式走 `parseEvents` 事件级 AST（带 `style.singleQuoted`）。
+- **Vue `reactive(model)` + `structuredClone` 会 DataCloneError**（2026-08-29，脚本编辑器组件层实测）：命令栈/模型层的 `structuredClone` 快照与 `cloneStepWithNewUuids` 无法克隆 Proxy（Vue reactive 代理及组件里 `{...proxy}` 展开出的嵌套代理字段都算）。解决：`commands.ts::unwrap` 递归按 `__v_raw` 深解包后再 clone（duck-typed，模型层不引 vue）；页面接线固定 `reactive(model)` + `new CommandStack(同一 reactive 实例)`，两处引用必须同源，否则命令改的是代理、组件读不到/反之。
+- **@vue/test-utils 的 `setValue()` 对 input/select 都会触发 change**（2026-08-29）：测试里 `setValue` 后再补 `trigger('change')` 会让 `@change` 处理器执行两次（两条 undo 历史）；setValue 自带事件派发，不要叠加手动 trigger。
