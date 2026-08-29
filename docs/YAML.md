@@ -1,323 +1,476 @@
-# YAML 自动化脚本语法
+# YAML 脚本语法（v2）
 
-GameBot 脚本为 YAML 步骤列表，语法以服务端引擎（`server/src/engine.rs`）为准（2026-08-26 语法精简重写，不兼容旧语法——旧写法引擎与前端校验均显式报错引导迁移）。
-模板按应用分区存放于 `data/<应用包名>/tmpl/`，脚本中写文件名即可（如 `shop.png`）。
+GameBot 自动化脚本的权威语法文档（2026-08 重写）。本文描述**全新 v2 语法**，与旧版
+v1 语法完全不兼容（差异清单见文末「与旧语法（v1）的差异」）。规则来源：
 
-## 脚本结构
+- 契约：`docs/SCRIPT_EDITOR_CONTRACT.md`（阶段 0 冻结 + 实现期澄清）；
+- 可执行样例：`server/tests/fixtures/script_v2/`（本文所有示例与其同形态，装载由
+  `server/src/script_v2/`（装载/校验/序列化）+ `server/src/engine/`（执行）保证）；
+- 前端：可视化编辑器（`web/src/script-editor/`）以此为唯一编辑模型，保存时由服务端
+  统一序列化为本文的「规范 YAML」。
 
-顶层键只允许 `config` / `func` / `steps`（未知顶层键报错）；`steps` 可缺省——**纯函数库脚本**（只有 `func`）供其他脚本通过「脚本名:函数名」跨文件调用：
+## 1. 目录与资源边界
+
+脚本、函数库、模板按**应用分区**（设备配置的 pkg，即应用包名）存放，目录即类型：
+
+```
+data/<pkg>/
+├── yaml/    # 可运行脚本（.yaml/.yml，顶层必须有 steps）
+├── func/    # 函数库（严格 .yaml，顶层键全是函数名）
+└── tmpl/    # 模板图片（8-bit 灰度 PNG，文件名可带 # 搜索区后缀）
+```
+
+- **脚本资源 ID** = `<pkg>/<文件名>.yaml`（如 `daily/login.yaml`，可含子目录）。
+  含 `/`，前端拼 URL 必须整体 `encodeURIComponent`。
+- **函数路径** = `<文件短路径>/<函数名>`（如 `common/login` = `func/common.yaml`
+  里的 `login`；一个函数库文件可定义多个函数）。
+- **运行边界**：只有 `yaml/` 下的脚本可手动运行 / 立即运行 / 进入定时任务；
+  `func/` 只能被 `func` 步骤调用或走函数测试 API，不进脚本列表与任务选择器。
+- **不做内容推断**：`yaml/` 里必须有顶层 `steps`；`func/` 顶层键全是函数名。
+  放错目录按该目录的类型校验，报错即拒。
+- **跨分区一律不解析、不回退**：模板 / 函数 / 子脚本只在当前应用分区查找，
+  没有 default 兜底。旧目录布局（`data/scripts/<package>/` + 全局
+  `data/templates/`）由服务端启动时一次性迁移（`scripts::migrate_fs_layout`），
+  不再被读取。
+- **模板引用写短名**（如 `account.png`）。磁盘文件名可带 `#` **搜索区后缀**
+  （后缀在扩展名前，如 `xx#l.png`）：
+  - 半区码：`a`=全屏、`u`/`d`/`l`/`r`=上/下/左/右半、`ul`/`ur`/`dl`/`dr`=四角；
+  - 数字坐标：`xx#x1_y1_x2_y2`，四段各为相对坐标 ×1000 的整数（如
+    `xx#0_0_500_500` = 左上 1/4 区域），需 x2>x1、y2>y1。
+  脚本写 `xx.png` 而磁盘存在 `xx#l.png` 时按「基名 + `#` 后缀 + 同扩展名」唯一
+  匹配；零候选报不存在、多候选报歧义（`resource.tmpl.ambiguous`），不猜测。
+
+## 2. 顶层结构
+
+### 2.1 脚本（yaml/）
+
+顶层只允许 **params / config / steps** 三个键（顺序不限）：
 
 ```yaml
-config:                 # 可选：覆盖 config.toml 默认值（也可写成映射列表按序覆盖）
-  interval: 500ms       # 轮询类间隔（find 每轮重试 / verify 复查）
-  threshold: 0.85       # 模板匹配阈值
-  log_level: info       # debug / info（默认）/ warn / error，低于等级的日志丢弃
-func:                   # 可选：自定义函数定义（见「自定义函数」）
-  - wait_tpl:
-    - find: $1
-    - return: false
-steps:                  # 可选（纯函数库可省略）：按顺序执行的动作列表
-  - wait: 1s
-  - log: "开始"
+params:                     # 可选：参数声明（见 §3）
+  - 'bool:enable:是否启用:true'
+config:                     # 可选：运行配置（见 §4）；整体省略 = 用 config.toml 同名键
+  interval: 500ms
+  threshold: 0.85
+  log_level: info
+steps:                      # 必需：可为空列表 steps: []，但不可省略
+  - log: 最小脚本
+  - tap: [0.5, 0.5]
 ```
 
-**单段脚本可省略段落键直接写内容**（按内容形态判定，`config` 不能省略——其子键不是函数名，无法判定归属）：
+- 出现旧语法顶层键（`func` / `name` / `action_wait` / `default_threshold` /
+  `package` / `until` / `cond`）报 `script.top_level.legacy_format`（前端展示
+  迁移引导）；其余未知键报 `script.top_level.unknown_key`。
+- 根节点必须是映射；`steps` 缺失报 `step.field.missing`（field=steps）。
+
+### 2.2 函数库（func/）
+
+顶层键 = 函数名（保持书写顺序），每个函数记录只允许 **params / steps** 两个键；
+**没有文件级 config**。函数内的 `steps` 同样必需（可空列表不可省略）：
 
 ```yaml
-# 顶层序列 = 省略 steps:（等价 steps: 包住整个列表）
-- find: sign_btn.png
-- log: "签到完成"
-
-# 顶层映射（不含 config/func/steps 任何键）= 省略 func: 的纯函数库简写
-wait_tpl:
-  - find: $1
-  - return: false
-```
-
-- 动作参数与动作键同级缩进；无参动作可省略冒号：`- str_app` ≡ `- str_app:`
-- 一个步骤只能有一个动作键
-- 所有坐标均为相对坐标 0~1，与设备分辨率解耦
-- **时间参数一律强制带单位**：`1ms / 2s / 1m / 30min / 1h / 1d`（m ≡ min，可小数如 `1.5s`），裸数字报错
-- `interval` 只作用于轮询类等待（find 每轮重试、verify 复查）；**步骤之间不再统一等待**（旧 `action_wait` / 步骤级 `wait` 参数已删除）
-
-## find —— 等模板出现并点击
-
-```yaml
-- find: sign_btn.png    # 主模板（单个字符串；多目标拆成多步，挡路的写 block）
-  timeout: 30min        # 超时执行 else（默认 30min，必须 > 0）
-  block:                # 障碍模板（旧名 check）：主模板未命中后依序匹配，
-    - pop.png           # 命中即点击其中心并结束本轮；单个可写 block: pop.png
-    - ad.png            # （逗号分隔或列表均可）
-  verify: false         # 默认 false；true = 命中点击后等 interval 重匹配主模板，
-                        # 仍命中再补一击（共两击，不循环、不判超时）
-  then:                 # 命中执行
-    - log: "找到并点击"
-  else:                 # 超时执行
-    - log: "等待超时"
-```
-
-每轮流程：
-
-```
-主模板（新截图）命中 → 点击中心 → verify（若 true）→ then → 结束
-主模板未命中 → block 依序匹配 → 命中：点击其中心、结束本轮
-                              → 全未命中：等 interval 重开一轮
-超时（timeout）→ else
-```
-
-- 所有模板（主模板与 block）命中都**点击模板中心**，无"只匹配不点击"
-- 截图瞬态失败（会话刚建立首帧未到、无线链路抖动）**不整脚本夭折**：warn 后跳过本轮等 interval 重试，持续失败超过 20s 宽限才带因中止
-- `^1` = 主模板名、`^2..` = block 名（书写顺序），在 then/else 子树内可引用（见「^N 上下文引用」）
-- 匹配阈值全局配置（`config:` 段或 config.toml `threshold`），无步骤级参数
-- 搜索区域由**模板名 `#` 后缀**决定（见下节）；模板无 `#` 后缀时回退全屏搜索（即 `#a` 语义），运行日志会记一条提醒（每次运行每模板一条）
-
-### 搜索区域：模板名 # 后缀
-
-- `hp#l.png` / `xx#dr.png` —— 半区码：`a`=全屏（默认回退值）、`u/d/l/r`=上下左右半、`ul/ur/dl/dr`=四分之一
-- `xx#0_0_500_500.png` —— 相对坐标 ×1000（`0.0,0.0 ~ 0.5,0.5` 即左上四分之一），框选生成区域模板的自动命名格式
-- **短名引用**：脚本写 `login.png`，精确文件不存在时引擎在同扩展名文件中唯一匹配 `login#*.png`（区域后缀照常生效）；多个候选报错要求写全名
-
-## color —— 找色分支
-
-```yaml
-- color: [0.5123, 0.8456]   # 采样相对坐标
-  ff8800:                   # 色值键（6 位十六进制，宽容 # / 0x 前缀；容差固定 30/通道）
-    - log: "命中颜色"       # 命中执行的步骤（写在色值键正下方，可留空）
-  ff8811:
-  else:                     # 全部未命中执行
-    - log: "都没命中"
-```
-
-- 一次截图按序判定，命中一个执行其步骤并结束本步；全部未命中走 `else`（截图瞬态失败自动重试最多 3 次，仍失败才中止）
-- 不轮询、无超时（要重试套 `loop`）
-- `^1` = `"[x, y]"` 坐标串、`^2..` = 色值键（书写顺序）
-- 前端二次裁切区 Alt/alt 模式点击任意处 → 自动生成 color 记录（所见即所得取色）
-
-## ^N 上下文引用
-
-find 的 then/else、color 的命中步骤/else 子树内，`^N` 引用当前步骤的上下文（find：`^1` 主模板、`^2..` block；color：`^1` 坐标串、`^2..` 色值）：
-
-```yaml
-- find: menu.png
-  block: ad.png
-  then:
-    - wait_tpl: ^1          # 把主模板名传给函数
-    - call: 处理.yml ^2     # 把障碍模板名传给子脚本
-  else:
-    - log: "没等到 ^1"
-```
-
-- 嵌套 find/color 的内层绑定自然覆盖外层（每步执行时按最内层绑定替换）
-- `^` 不是 YAML 保留字符，裸写合法（`&` 是锚点保留字符——值会变 null，故弃用）
-
-## 自定义函数 func
-
-```yaml
-func:
-  - wait_tpl:               # 函数名不能是保留字（动作键 / then / else / steps…）
-    - find: $1
-      timeout: 6s
-    - return: true          # return 仅函数内合法：true / false，立即返回；
-                            # 函数体执行完未 return 视为返回 true
-  - need_gate:              # 带执行条件（cond）的函数
-    cond: gate.png          # 可选：必须匹配该模板才执行函数体，否则函数返回 false
-    steps:                  # 函数体（与 cond 同为函数定义兄弟键，用 steps 键包住）
-      - find: $1
-        timeout: 6s
-
-steps:
-  - wait_tpl: sign_btn.png [0.5, 0.6] ff8800   # 调用：空格分隔实参 + then / else
-    then:
-      - log: "出现了"
-    else:
-      - log: "没等到"
-  - need_gate: act.png
-```
-
-- 实参空格分隔、**括号感知切分**：`[x, y]` 内部的空格不算分隔符；无参写 `- wait_tpl:` 或 `- wait_tpl`
-- 函数体内 `$1`/`$2`… 指函数实参（`func:` 段不参与脚本级 `$N` 替换）
-- 函数体可用全部动作（含 call/throw/嵌套函数调用，嵌套上限 32 层）
-- `return: true` → 执行 then；`false` → 执行 else；**函数体正常走完未写 return → 默认返回 true**（2026-08-27 改，旧语义为 false）
-- `cond`（可选）：执行条件模板，支持单个（`cond: test.png`）、逗号分隔（`cond: a.png, b.png`）或列表：
-
-```yaml
-func:
-  - fun1:
-    cond:                 # 多模板：每个模板各取一张新截图匹配一次
-      - test1.png         # （不点击），全部命中才执行函数体；
-      - test2.png         # 任一未命中 → 函数返回 false（不执行函数体）
-    steps:
-      - find: $1
-```
-
-  - 兼容两种写法：`cond:` + `steps:` 兄弟键（如上，推荐），或 cond 写在函数体之后（`- fun1:` 下先步骤列表、最后 `cond: test.png`）
-  - 注意 YAML 规则：**cond 后不能直接跟同列 `- ` 步骤行**（bad indentation），必须用 `steps:` 键包住函数体
-
-### 跨文件函数调用
-
-子脚本里的函数可直接调用（脚本名与 call 同规则解析：优先同分区、跨分区兜底、缺扩展名自动补全）；**纯函数库脚本**（只定义 func、没有 steps）同样作为调用对象，函数定义也可用省略 `func:` 的顶层映射简写：
-
-```yaml
-# test1.yaml
-func:
-  - fun1:
-    - find: $1
-    - find: $2
-  - fun2:
-    - log xxx
-
-# test2.yaml
-steps:
-  - test1:fun1: test.png test2.png   # 调用 test1.yaml 的 fun1，实参同本地函数
-  - test1:fun2                       # 无参调用
-```
-
-- 函数体/cond 取自被引用脚本的 func 段；体内 `$N` 由调用点实参替换
-- 函数体执行期间被引用脚本的函数可见（体内裸函数名按被引用脚本解析），调用者函数兜底
-- 返回语义与本地函数一致（return / fall-through 默认 true）；then/else、嵌套、上限 32 层同样适用
-- 带 then/else 的无参调用记得写冒号：`- test1:fun2:`（否则被解析成标量字符串步骤）
-
-## loop —— 循环
-
-```yaml
-- loop:
-  times: 3              # 省略或 0 = 无限循环
+login:
+  params:
+    - 'tmpl:account:账号模板:account.png'
+    - 'time:timeout:等待时间:30s'
   steps:
-    - log: "每一轮"
+    - find: $account
+      timeout: $timeout
+    - return: true
+
+is_enabled:
+  params:
+    - 'bool:enable:开关'
+  steps:
+    - return: $enable
 ```
 
-`times`/`steps` 两种缩进均可：与 `loop` 同级（如上，YAML 会解析成步骤兄弟键）或缩进到 `loop` 值内（`- loop:\n    times: 3`）。
+- `return` 只允许出现在函数库（脚本里出现报 `step.return.in_script`）；
+- 函数体正常走完未 `return` 视为返回 `true`；
+- 函数库不能直接运行 / 调度，只能经 `func` 步骤调用或函数测试 API（§7）。
 
-## call —— 调用子脚本（可传参）
+## 3. 参数声明 params
+
+### 3.1 声明格式
+
+每条声明是一个**整条单引号**的 YAML 标量（无引号非法 → `param.decl.quote_style`）：
 
 ```yaml
-- call: 子脚本.yml
-- call: 通用日常.yml act_136.png          # 空格分隔实参（括号感知，[x, y] 不切分）
-- call: 处理.yml a.png [0.5, 0.6] ff8800
+params:
+  - 'tmpl:account:账号模板:account.png'
+  - 'coord:click_pos:点击位置:[0.5, 0.8]'
+  - 'color:target_color:目标颜色:ff8800'
+  - 'time:timeout:最长等待:30s'
+  - 'key:cancel_key:取消按键:ESC'
+  - 'text:message:提示文本:"示例文本"'
+  - 'bool:enable:是否启用:true'
+  - 'text:api_url:服务地址:https://example.com:8443'   # 第 4 段整体是默认值，可含冒号
 ```
 
-- 子脚本按名解析：优先同分区，其次跨分区（缺扩展名自动补全）
-- 子脚本内 `$1`/`$2`… 引用实参（替换作用于子脚本 config/steps 全部字符串，嵌套 call 转发 `$N` 同样生效；`func:` 段除外）
-- 含 `$N` 的脚本被直接运行（未传参）→ 启动即报错
-- YAML 裸标量 `@` 开头是保留字符非法，参数引用必须用 `$`（不能用 `@1`）
+固定四规则：
 
-## throw —— 结束任务
+1. 格式 `类型:变量名:备注[:默认值]`，按第 3 个冒号切分（`splitn(4)`）：前三段必需
+   且非空，第 4 段整体为默认值尾串——因此 text 默认值可含半角冒号。类型/变量名/
+   备注本身不得含半角冒号（备注需要冒号用全角 `：`）→ 违反报 `param.decl.format`。
+2. **整条单引号**：无引号 plain 标量在尾串为空时会变成映射、样式信息也会丢失，
+   故强制单引号。
+3. 变量名 `[A-Za-z_][A-Za-z0-9_]*`（`param.decl.name_invalid`），同一参数表内唯一
+   （`param.decl.name_duplicate`）；保留名 `true` / `false` / `null` 与 `gb_` 前缀
+   不可用。
+4. **空默认值非法**：第 4 段存在但为空（如 `'text:x:名:'`）不等价于没有默认值 →
+   `param.default.empty`。省略第 4 段 = **必填**；带默认值可在调用 / 运行 args 中省略。
+
+### 3.2 七类类型与默认值
+
+| 类型 | 默认值写法示例 | 约束 |
+|---|---|---|
+| tmpl | `account.png` | 当前分区存在的模板短名 |
+| coord | `[0.5, 0.8]` | 两个 0~1 的数字（相对坐标） |
+| color | `ff8800` | 6 位十六进制，无 `#`；**前导零靠引号保住**（见下） |
+| time | `30s` | 单位 ms/s/m/min/h/d（m≡min，可小数），必须 >0 |
+| key | `ESC` | 按键名（§5.1 key 表） |
+| text | `"示例文本"` | 可含冒号/空格；空串必须写 `""`；外层双引号会被剥离 |
+| bool | `true` | 仅字面 `true`/`false`（字符串 `"true"` 非法） |
+
+- 默认值按声明类型解析，非法报 `param.default.invalid`；
+- **color 是字符串不是数字**：所有位置（声明默认值、expect 候选、args、任务快照、
+  运行记录）统一为 6 位十六进制无 `#`。纯数字色值在 YAML 里**必须加引号**
+  （`'123456'`）防止被解析成数字丢前导零；含字母色值（`ff8800`）可裸写，编辑器
+  保存时对纯数字色值统一加引号输出。
+
+### 3.3 `$name` 引用
+
+步骤字段处写 `$参数名` 即**完整值引用**（绑定声明类型的值，不做全文替换）：
 
 ```yaml
-- throw                  # 打印"结束运行脚本"，立即结束整个任务
-- throw: 体力不足        # 打印"因 体力不足 结束运行脚本"
+steps:
+  - tap: $click_pos        # 引用 coord 参数
+  - find: $account         # 模板字段也可引用
+    timeout: $timeout
 ```
 
-跨 call 子脚本同样结束整个任务（原 `exit` 改名）。
+- 引用必须占据整个标量（不支持把 `$name` 嵌在文本中间插值）；
+- 字段类型与参数类型不符报 `param.ref.type_mismatch`，未声明的名字报
+  `param.ref.unknown`；
+- match 候选模板键与 color 候选色键同样接受 `$name`（见 §5.3/§5.4）；
+- `$name` 只在引用处生效：call/func 的 `args`、入口运行参数按名字绑定（§6）。
 
-## 动作清单
-
-### wait
-
-```yaml
-- wait: 2s               # 固定等待
-- wait: [1s, 3s]         # 随机区间
-```
-
-等待分片进行（200ms 一片），运行中点停止最多 ~200ms 内生效，长 wait 不会卡住「停止中」。
-
-### log
-
-```yaml
-- log: 输出文本
-```
-
-### key
-
-```yaml
-- key: HOME              # HOME/BACK/APP_SWITCH(RECENTS)/MENU/VOL_*/POWER/ENTER/DEL/TAB/SPACE/ESC/…/数字，或原始 keycode
-```
-
-### text
-
-```yaml
-- text: "hello world"
-```
-
-### tap
-
-```yaml
-- tap: [0.500, 0.500]
-```
-
-### swipe
-
-```yaml
-- swipe:
-    fm: [0.500, 0.800]   # 起点
-    to: [0.500, 0.200]   # 终点
-    time: 800ms          # 时长（省略默认 500ms；书写必须带单位）
-```
-
-### str_app / cls_app
-
-```yaml
-- str_app                # 冷启动应用（scrcpy 控制消息，虚拟屏模式自动进虚拟屏）；
-                         # 只支持裸写，包名 = 设备分区（设备配置 pkg）
-- cls_app                # 关闭应用（adb am force-stop，不碰会话/投屏；幂等）
-```
-
-## 已删除的旧写法（显式报错引导迁移）
-
-| 旧写法 | 迁移目标 |
-|---|---|
-| `until` | `find`（障碍模板 `check` → `block`） |
-| `cond` | 颜色条件 → `color`；模板条件 → `find`（短 timeout）+ then/else 或 func 封装（func 新增 `cond` 函数级执行条件，2026-08-27） |
-| `exit` | `throw` |
-| `goto` / `label` | `loop` |
-| `count` / `cnt_ivl` / `cnt_chk` / `img_ivl` / `and_or` / `click` / `before` / `after` | 已删除（find 语义内置：命中恒点中心、每轮统一 interval） |
-| 步骤级 `threshold` / `region` 参数 | `config:` 段配置阈值；区域用模板名 `#` 后缀 |
-| 步骤级 `wait` 参数 / 顶层 `action_wait` | 已删除：步骤间不等待，轮询间隔用 `config: interval` |
-| 顶层 `log_level` / `name` | `config: log_level`；name 删除（脚本名即文件名） |
-| 顶层 `package <名字>` 指令 | 已删除（分区 = 设备配置的 pkg） |
-
-## 完整示例
+## 4. config
 
 ```yaml
 config:
-  interval: 500ms
-  log_level: info
-
-func:
-  - login_ok:            # 等登录页出现并点掉（障碍弹窗自动关闭）
-    - find: login.png
-      block: act_cls.png
-      timeout: 60s
-    - return: true
-
-steps:
-  - str_app
-  - login_ok:
-    then:
-      - log: "已进登录页"
-    else:
-      - throw: 启动超时
-  - find: act_swt.png
-    block: swt_etr.png
-  - find: tili_use.png
-    timeout: 2s
-  - find: close.png
-    verify: true         # 点完等 interval 复查，仍命中补一击
-  - loop:
-    times: 3
-    steps:
-      - find: cnt_add.png
-        timeout: 5s
-  - color: [0.7625, 0.9130]
-    c74f36:
-      - log: "体力确认按钮亮起"
-    else:
-      - log: "未亮起"
-  - call: 日常遗器.yml
-  - cls_app
-  - log: "日常完成"
+  interval: 500ms     # 轮询间隔（find 每轮重试 / verify 复查 / match 轮询），带单位 >0
+  threshold: 0.85     # 模板匹配阈值，0~1
+  log_level: info     # debug / info / warn / error，低于等级的日志丢弃
 ```
 
----
+整体省略 = 使用 `config.toml` 同名键（`interval` / `threshold` / `log_level`）。
+不允许未知 config 键；只能是映射（v1 的「映射列表按序覆盖」写法已删除）。
 
-附：空闲自动断开 `idle_power_secs`（config.toml，默认 300s，0=关）——无 viewer 且无脚本运行持续 N 秒后拆会话进低功耗，下次运行自动重连。
+## 5. 步骤（17 种）
+
+一个步骤只允许一个动作键（多动作键 → `step.multi_action`）；动作键之外的同级键是
+该步骤的字段。步骤按书写顺序执行；空分支 / 默认字段在 YAML 里省略（编辑器保存
+的规范 YAML 同样省略）。分支子列表（`then` / `else` / 候选分支 / `loop.steps` /
+函数体）递归为步骤列表。
+
+### 5.1 基础动作
+
+```yaml
+steps:
+  - str_app                     # 冷启动当前分区应用（先 force-stop 再启动）；裸写，带值非法
+  - tap: [0.5, 0.5]             # 点击（相对坐标或 $name）
+  - swipe:                      # 滑动：YAML 键为 fm/to/time
+      fm: [0.1, 0.9]
+      to: [0.9, 0.1]
+      time: 800ms
+  - key: ESC                    # 按键
+  - text: "hello world"         # 输入文本
+  - log: 全动作脚本              # 写一条 info 运行日志
+  - wait: 1s                    # 固定等待
+  - wait: [1s, 3s]              # 随机区间等待（含两端；起点>终点报 step.wait.range_invalid）
+  - cls_app                     # 关闭当前分区应用（adb force-stop，投屏不中断）
+```
+
+- `str_app` / `cls_app` 不带参数，包名 = 运行分区（设备配置的应用包名）。
+- `key` 支持的按键名：`HOME` `BACK` `MENU` `APP_SWITCH`（=`RECENTS`）`VOL_UP`
+  （=`VOLUME_UP`）`VOL_DOWN`（=`VOLUME_DOWN`）`POWER` `ENTER` `DEL`（=`BACKSPACE`）
+  `TAB` `SPACE` `ESC` `SEARCH` `CAMERA` `FOCUS` `NOTIFICATION` `SETTINGS` `MUTE`
+  `HEADSETHOOK` `WAKEUP` `SLEEP` `0`~`9`；纯数字按 Android keycode 透传。
+- `time` 一律带单位（ms/s/m/min/h/d），缺单位报 `step.time.format`。
+
+### 5.2 find —— 等待模板出现并点击
+
+```yaml
+- find: $account                # 主模板（短名或 $name）
+  block:                        # 可选：障碍模板列表，依序处理
+    - popup.png
+    - dialog.png
+  verify: true                  # 可选：默认 false
+  timeout: $timeout             # 可选：默认 30min，必须 >0
+  then:                         # 可选：命中后执行（默认无）
+    - log: 已进入主界面
+  else:                         # 可选：超时后执行（默认无）
+    - throw: 等待超时
+```
+
+每轮：主模板（**新截图**）命中 → 恒点**模板中心** → `verify: true` 时等
+`config.interval` 重匹配一次、仍命中补一击（共两击，适合点击后弹窗关闭类按钮）→
+执行 `then` 结束本步；未命中 → `block` 依序匹配（命中即点其中心并结束本轮）→
+全未命中等 `config.interval` 重开一轮。超过 `timeout` 执行 `else`。截图瞬态失败
+跳过本轮重试（持续失败约 20s 判链路异常带因中止）。
+
+### 5.3 match —— 多模板策略选择（不点击）
+
+`match` 的候选列表是**紧凑缩进**（无缩进序列，唯一序列化格式）；`else` /
+`timeout` 是 `match` 步骤的**兄弟键**，与 `match` 同列：
+
+```yaml
+- match:
+  - test1.png:
+    - log: 命中 test1
+  - test2.png:
+    - log: 命中 test2
+  else:
+    - log: 都未命中
+  timeout: 30s
+```
+
+- 每轮只截**一帧**，候选按书写顺序匹配、首个命中获胜、执行其分支步骤并结束本步；
+  **不点击**（需要点用 find）。
+- 未配 `timeout` 只执行一轮（全未命中立即进 `else`）；配了按 `config.interval`
+  轮询到超时才进 `else`。
+- 候选模板短名不可重复（装载期与参数绑定后都查重 →
+  `step.match.candidate_duplicate`）；不接受布尔条件（布尔走 `if`）。
+- `- else:` / `- timeout:` 写进候选列表是错误（`step.match.else_in_candidates`）。
+
+### 5.4 color —— 单点颜色分支
+
+`at` 与 `expect` 写在 `color` 值映射内；`expect` 是**有序列表**（不用颜色做映射键，
+防解析器重排），每项是单键映射 `颜色: [分支步骤]`；`else` 与 `color` 键同列：
+
+```yaml
+- color:
+    at: [0.5, 0.5]
+    expect:
+      - ff8800:
+        - tap: [0.5, 0.5]
+      - '123456':
+        - log: 深蓝分支
+  else:
+    - throw: 颜色未命中
+```
+
+- 一次截图、按序判色：实际像素与期望色每通道差 ≤30 视为命中（容差固定 30，吸收
+  H.264 有损压缩抖动），命中即执行该色分支并结束本步；全未命中走 `else`。
+- **不轮询、不点击**（重试套 `loop`）。
+- 同色候选重复 → `step.color.duplicate`；颜色格式非法 → `step.color.format`；
+  纯数字色值必须加引号（§3.2）。
+
+### 5.5 if / loop
+
+```yaml
+- if: $enable                   # 条件严格布尔（bool 参数或 true/false），无隐式转换
+  then:
+    - tap: [0.5, 0.5]
+  else:
+    - log: 未启用
+
+- loop:                         # times 省略或 0 = 无限（10 万步 guard 兜底，见 §5.7）
+    times: 3
+    steps:
+      - wait: 1s
+```
+
+- `if` 条件非布尔报 `step.if.non_bool_cond`；
+- `loop` 值是映射：`times` 为非负整数字面量、`steps` 必需且非空
+  （缺失 → `step.field.missing`，空 → `step.loop.empty_steps`）。
+
+### 5.6 call / func —— 子脚本与函数
+
+```yaml
+- call: sub/inner.yaml          # 调用同分区 yaml/ 脚本（缺 .yaml 自动补全）
+  args:                         # 具名实参（稀疏：未给的参数走声明默认值）
+    enable: $enable
+    message: "字面量消息"
+
+- func: common/login            # 调用 func/<文件短路径>.yaml 里的函数 login
+  args:
+    account: $account
+    timeout: 30s
+  then:                         # 返回 true → then
+    - log: 登录成功
+  else:                         # 返回 false → else
+    - throw: 登录失败
+```
+
+- **call**：压入被调脚本的 `config` 三键覆盖与新的参数作用域，返回后恢复调用者的
+  config 与作用域；没有布尔分支。
+- **func**：`<文件短路径>/<函数名>`；**继承调用点 config**（不覆盖）；函数体内
+  `return: true/false` 立即返回，走完未 return 默认返回 `true`；返回布尔驱动
+  调用点 `then` / `else`。
+- 两者共用约束：目标必须同分区（跨分区不解析）；路径穿越 / 绝对路径 / 反斜杠报
+  `ref.call.path_traversal` / `ref.func.path_traversal`；call 自身 / 跨文件环报
+  `ref.call.self_cycle` / `ref.call.cross_cycle`；args 未知键报
+  `param.args.unknown`、类型不符报 `param.args.type_mismatch`、必填缺失报
+  `param.args.missing_required`。
+
+### 5.7 throw / return 与运行护栏
+
+```yaml
+- throw                         # 无原因
+- throw: 余额不足                # 带原因
+- return: true                  # 仅函数库合法（脚本里报 step.return.in_script）
+- return: $enable
+```
+
+- `throw` 立即结束整个运行（跨 call/func 调用链），运行以失败终态收场
+  （`runtime.engine.throw`，携带原因）。
+- `return` 只退出当前函数，值必须是布尔。
+- **护栏**：call+func 合计嵌套上限 **32 层**（超限 `runtime.nesting.limit`）；
+  单次运行累计执行 **10 万步**（含循环体与嵌套子步骤，超限
+  `runtime.step.limit` 强制终止）；「停止」在长 wait 中分片（200ms）生效。
+
+## 6. 调用参数绑定
+
+绑定顺序冻结为：**声明默认值 → 显式 args / 入参覆盖**，绑定完成后再做类型校验。
+
+- call/func 的 `args` 是稀疏映射：没给的参数用声明默认值；必填参数没给 →
+  `param.args.missing_required`；
+- 实参可以是 `$name` 引用（类型须与目标参数一致）或字面量（按目标参数类型解析，
+  如 `timeout: 30s` 定型为 time）；
+- 手动运行 / 函数测试的入口 `args` 同为稀疏映射（§7）；显式传 `null` 不触发
+  默认值，仅 text 接受空串；
+- `$name` 引用的查找：call/func 进入压入新作用域，**最内层优先**——被调脚本的
+  参数遮蔽调用者同名参数。
+
+## 7. 运行入口与参数
+
+### 7.1 手动运行 / 从步骤运行（Console）
+
+```
+POST /api/scripts/:id/run     body { device_id, start_index?, args? }
+→ 202 { run_id, state, resolved_args }
+```
+
+- `id` = `<pkg>/<文件名>.yaml`；`args` 为稀疏映射：bool=布尔、coord=`[x, y]`
+  数组、其余五类=字符串（time 带单位、color 6 位十六进制、tmpl/key 非空）；
+- `resolved_args` 是「默认值 → 覆盖」合并后的**全量绑定视图**，前端在运行日志区
+  展示本次实际生效的参数；
+- `start_index` = 主流程顶层步骤序号（0=从头；Console 摘要卡片「从此步骤运行」
+  传入；越界回退从头）；
+- args 解析 / 脚本校验失败 → `400 {error:"invalid_args", diagnostics:[五元组]}`；
+- 运行实例查询 / 取消：`GET /api/runs/:run_id`、`POST /api/runs/:run_id/cancel`。
+
+### 7.2 函数测试（编辑器 / Console）
+
+```
+POST /api/functions/:id/run   body { device_id, function?, start_index?, args? }
+```
+
+- `id` = `<pkg>/<文件短路径>.yaml`；`function` 缺省 = 文件第一个函数；
+  `start_index` = 函数体内顶层步骤序号；函数入口用 `config.toml` 默认 config
+  （函数库无文件级 config）。函数运行不占用脚本运行接口，RunRecord 以
+  `<pkg>/<file>.yaml[#函数]` 标识展示。
+
+### 7.3 定时任务：参数快照与签名门禁
+
+任务保存的是**完整类型化 args 快照**（每个声明参数都有值，与运行 API 的 args
+同构）+ 保存时的参数签名，两列随任务持久化：
+
+- 保存 `POST /api/tasks`（body 含 `script_id`、`cron`、`args` 稀疏覆盖）时，服务端
+  按脚本当前声明解析成全量快照并计算签名 `param_signature`；
+- **调度运行使用快照**，不回读声明默认值、不依赖浏览器在线；脚本默认值后续变化
+  不影响已保存任务；
+- 脚本参数声明（类型/名称/必填性/默认值）变化 → 重算签名与存储值不一致 → 任务标
+  「参数已过期」，保存 / 启用 / 立即运行被 **409
+  `param_signature_conflict`** 拦截（body 带 `reason`：
+  `signature_mismatch`=声明已变 / `no_snapshot`=旧任务无快照）；
+- 编辑任务里「重新确认」带 `reconfirm:true` 重存 → 按当前声明重算快照与签名。
+
+签名算法 `psig1`（按声明顺序，覆盖类型/名称/必填性/默认值，前端服务端各有一份
+实现、双向测试锁定）：
+
+```
+param_signature := "psig1" + "|" + join(entries, "|")
+entry           := type "," name "," required "," canonical_default
+required        := "1"(必填) | "0"(有默认值)
+canonical_default: bool→true/false；coord→[x,y]（逗号后无空格）；color→小写 hex；
+                   key→大写；time→小写且 min 归一为 m；text→转义 \ , |；tmpl→原样
+```
+
+示例（fixture v12）：
+`psig1|bool,enable,0,true|time,timeout,0,30s|text,message,0,开始任务|coord,pos,0,[0.5,0.5]|color,target,0,123456|key,quit_key,0,ESC|tmpl,icon,0,icon.png`
+
+## 8. 录制输出形态
+
+投屏控制台（Console）录制手势，停止后按以下形态生成步骤（fixture v11）：
+
+- **点击** → 单条 `find`（模板短名，无 block/verify/timeout）：
+
+```yaml
+steps:
+  - find: record_click_20260829_001.png
+```
+
+- **滑动** → `match → swipe`（起点模板命中才滑，避免 find 的命中点击破坏手势），
+  默认 `else` 为 throw、`timeout: 30s`：
+
+```yaml
+  - match:
+    - record_swipe_20260829_002.png:
+      - swipe:
+          fm: [0.5, 0.8]
+          to: [0.5, 0.2]
+          time: 800ms
+    else:
+      - throw: 未找到滑动起点
+    timeout: 30s
+```
+
+- **模板命名**：默认 `record_<click|swipe>_YYYYMMDD_NNN.png`（NNN 三位序号，
+  分区内冲突自动顺延）；录制时框选的搜索区域写入完整文件名的 `#` 后缀
+  （半区码或 `#x1_y1_x2_y2` 相对 ×1000，见 §1），脚本里仍写短名引用。
+- **Alt 组合键**（编辑态，不经录制上传队列）：模板 → `find`；取色 → `color`；
+  Alt 拖动 → 裸 `swipe`。
+- 录制产出以「占位步骤 + 逐条定稿」写入编辑器命令栈，可撤销；上传失败保留草稿
+  可重试 / 降级为坐标 tap / 丢弃。
+
+## 9. 诊断错误
+
+装载 / 校验 / 运行错误统一为结构化五元组
+`{ code, message, resource, step_path, field }`：
+
+- `code` 命名空间五域：`resource.*`（模板/脚本/函数/分区）、`param.*`（声明/引用/
+  args）、`step.*`（字段与候选）、`ref.*`（call/func 引用图）、`runtime.*`
+  （运行期）；完整清单见 `docs/SCRIPT_EDITOR_CONTRACT.md` §5.3；
+- `step_path` 定位到步骤（如 `steps[1].then[0]`、`params[0]`、`login.steps[2]`），
+  前端按 `code + step_path + field` 定位卡片与控件，`message` 仅展示；
+- 保存接口（脚本 / 函数库）带 `expected_version` 版本短码做双页面冲突检测，
+  不符返回 `409 {code:"version_conflict"}`。
+
+## 10. 与旧语法（v1）的差异（破坏性）
+
+v2 与 2026-08-26 的 v1 精简语法**不兼容**，装载器对旧写法显式报错引导迁移：
+
+| v1 | v2 |
+|---|---|
+| 顶层 `func:` 段定义自定义函数 | 删除；函数库独立放 `data/<pkg>/func/`，顶层键=函数名，经 `func: 文件/函数` 调用 |
+| `$N` 位置实参 / `^N` 上下文引用 | 删除；改为具名参数 `$name`（params 声明 + args 绑定） |
+| `call` 传 $N、`- 脚本名:函数名:` 跨文件函数调用 | 删除；`- call: <脚本>.yaml` + 具名 `args`，函数调用统一走 `- func: 文件/函数` |
+| 函数 `cond:` 条件（模板匹配决定是否执行） | 删除；布尔分支用 `if`，模板条件用 `find` 短 timeout + then/else |
+| `until:` 步骤 | 删除；由 `find` 取代 |
+| 脚本顶层 `name` / `action_wait` / `default_threshold` 键 | 删除；`config` 三键为 interval/threshold/log_level |
+| `package <名字>` 指令 | 删除；分区 = 目录名 `data/<pkg>/`，残留=解析报错 |
+| `config` 可写映射列表按序覆盖 | 删除；只能写单个映射 |
+| `steps:` / `func:` 段落键可省略（单段脚本简写） | 删除；`yaml/` 脚本必须显式 `steps:`（可空列表不可省略） |
+| `- color: [x, y]` + 兄弟键色值 | 删除；改为 `- color:` + `at` + `expect` 有序列表（§5.4） |
+| `loop` 的 times/steps 两种缩进均认 | 删除；只认 `- loop:` 映射形态（§5.5） |
+| `success` 日志级别 | 删除；四级 debug/info/warn/error，success 视同 info 的特例不再存在 |
+| 匹配只随 find 隐式发生 | `match`（不点击策略选择）成为正式步骤，录制滑动输出 match→swipe |
+| 脚本/函数混存 `data/<pkg>/yaml/`（v1 末期） | 目录即类型三分：`yaml/` + `func/` + `tmpl/`，函数库不可运行/调度 |
+
+保留不变（自 v1 沿用）：`str_app` / `cls_app` / `tap` / `swipe` / `key` / `text` /
+`log` / `wait`（含随机区间）；`find` 的 `block` / `verify` / `timeout` / `then` /
+`else` 骨架；`throw`；模板 `#` 搜索区后缀与短名引用；脚本 id
+`<pkg>/<名>.yaml`；10 万步 guard 与 tap/swipe/hit/miss 可视化事件。
