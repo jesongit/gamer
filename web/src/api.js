@@ -162,6 +162,8 @@ export const api = {
   // PUT/更新签名不匹配且无 reconfirm:true → 409 {code:"param_signature_conflict"}；
   // 带 reconfirm 则按当前参数声明重算快照
   listTasks: () => req('GET', '/api/tasks'),
+  // 任务详情（args 解析视图所在端点；列表仅带 param_stale/has_args/param_signature）
+  getTask: (id) => req('GET', `/api/tasks/${id}`),
   saveTask: (t) => req('POST', '/api/tasks', t),
   deleteTask: (id) => req('DELETE', `/api/tasks/${id}`),
   // 任务立即执行（用任务已存参数快照；过期/无快照由服务端明确报错）：

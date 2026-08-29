@@ -26,6 +26,7 @@
           <tr v-for="t in tasks" :key="t.id" :class="{ disabled: !t.enabled }">
             <td class="task-name">
               {{ t.name }}
+              <span v-if="t.param_stale" class="tag stale-tag" title="任务参数快照与脚本当前参数声明不一致，调度前请编辑任务重新确认">参数已过期</span>
               <span v-if="activeRuns[t.device_id]" class="tag run run-now" title="该设备当前有活动中的自动化运行（含本任务或手动触发）">运行中<template v-if="sourceLabel(activeRuns[t.device_id].source)"> · {{ sourceLabel(activeRuns[t.device_id].source) }}</template></span>
             </td>
             <td><span class="cron mono">{{ t.cron }}</span></td>
@@ -41,7 +42,7 @@
             </td>
             <td>
               <div class="row-actions">
-                <button class="btn btn-sm btn-ghost" :disabled="triggeringId === t.id" @click="runNow(t)">{{ triggeringId === t.id ? '触发中…' : '▶ 立即' }}</button>
+                <button class="btn btn-sm btn-ghost" :disabled="triggeringId === t.id || t.param_stale" :title="t.param_stale ? staleReason(t) : '立即运行（使用任务保存的参数快照）'" @click="runNow(t)">{{ triggeringId === t.id ? '触发中…' : '▶ 立即' }}</button>
                 <button class="btn btn-sm btn-ghost" @click="editTask(t)">✎</button>
                 <button class="btn btn-sm btn-ghost danger" @click="removeTask(t)">🗑</button>
               </div>
@@ -81,7 +82,7 @@
           <div class="form-row">
             <div class="form-item">
               <label>脚本</label>
-              <ScriptPicker v-model="form.script_id" />
+              <ScriptPicker v-model="form.script_id" @update:model-value="onScriptPicked" />
             </div>
             <div class="form-item">
               <label>设备</label>
@@ -90,10 +91,38 @@
               </select>
             </div>
           </div>
+          <!-- 运行参数（阶段 5）：选脚本后按其 params 渲染表单；保存提交稀疏 args（显式覆盖），
+               服务端解析为完整快照存储。默认值字段不动 = 省略（服务端取声明默认值）。 -->
+          <div v-if="taskParams.length" class="form-item">
+            <label>运行参数</label>
+            <div v-if="staleNotice" class="stale-banner">
+              <span>⚠️ 参数已过期：脚本参数声明已变化，任务原快照可能与当前脚本不一致。</span>
+              <button class="btn btn-sm" :disabled="savingTask" title="按当前参数声明重算快照并保存（reconfirm）" @click="saveTask(true)">重新确认</button>
+            </div>
+            <table v-if="staleNotice" class="cmp-table">
+              <thead>
+                <tr><th>参数</th><th>任务原快照</th><th>当前默认值</th><th>本次采用</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in staleRows" :key="r.name">
+                  <td class="mono">{{ r.name }}</td>
+                  <td class="mono">{{ fmtLiteral(r.snapshot) }}</td>
+                  <td class="mono">{{ fmtLiteral(r.currentDefault) }}</td>
+                  <td class="mono adopted">{{ fmtLiteral(r.adopted) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <ParamsForm
+              ref="taskFormEl"
+              :params="taskParams"
+              :initial-args="taskInitialArgs"
+              @change="onFormChange"
+            />
+          </div>
         </div>
         <div class="modal-foot">
           <button class="btn" @click="showAdd = false">取消</button>
-          <button class="btn btn-primary" @click="saveTask">保存</button>
+          <button class="btn btn-primary" :disabled="savingTask" @click="saveTask()">{{ savingTask ? '保存中…' : '保存' }}</button>
         </div>
       </div>
     </div>
@@ -104,10 +133,13 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { tasksData, scriptsData, devicesData, useToast, pushRunConflict } from '../store'
 import { api } from '../api'
 import ScriptPicker from '../components/ScriptPicker.vue'
+import ParamsForm from '../script-editor/components/ParamsForm.vue'
+import { extractParams, fmtLiteral } from '../script-editor/params'
+import { buildTaskSavePayload, isParamSignatureConflict, staleCompareRows, staleReason } from '../task-args'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import { sourceLabel, shortRunId, normalizeActiveRunResponse, isDeviceBusyConflict } from '../runs'
 
@@ -122,6 +154,37 @@ const form = reactive({ id: null, name: '', cron: '', script_id: '', device_id: 
 const triggeringId = ref('')
 // 各设备当前活动 run 摘要（deviceId → 归一化记录）：列表标注「运行中 · 来源」
 const activeRuns = ref({})
+
+// ---- 运行参数（阶段 5，plan §12.3）：表单态 + 过期横幅 + 快照对比 ----
+const taskFormEl = ref(null)
+// 任务存储 args 快照（编辑时整体带入 → 全部为覆盖态，本次采用=快照值，除非用户改）
+const taskInitialArgs = ref({})
+// 打开弹窗时的脚本 id：切换脚本后任务原快照不再适用，清空带入并隐藏横幅
+const openedScriptId = ref('')
+// param_stale 编辑带入 或 保存 409 param_signature_conflict → 横幅 + 三列对比表
+const staleNotice = ref(false)
+const savingTask = ref(false)
+// ParamsForm 变化回传（args=稀疏覆盖；effective=完整采用值视图，对比表「本次采用」列）
+const formChange = ref({ args: {}, effective: {} })
+
+const taskParams = computed(() => {
+  const s = scripts.value.find(x => x.id === form.script_id)
+  if (!s) return []
+  return extractParams(s.content ?? '')
+})
+const staleRows = computed(() =>
+  staleCompareRows(taskParams.value, taskInitialArgs.value, formChange.value.effective))
+
+function onFormChange(payload) {
+  formChange.value = payload
+}
+
+function onScriptPicked(v) {
+  if (v !== openedScriptId.value) {
+    taskInitialArgs.value = {}
+    staleNotice.value = false
+  }
+}
 
 const presets = [
   { name: '每分钟', cron: '* * * * *' },
@@ -148,22 +211,42 @@ function lastTag(last) {
 function openAdd() {
   editing.value = false
   Object.assign(form, { id: null, name: '', cron: '0 8 * * *', script_id: scripts.value[0]?.id || '', device_id: devices.value[0]?.id || '' })
+  taskInitialArgs.value = {}
+  openedScriptId.value = form.script_id
+  staleNotice.value = false
   showAdd.value = true
 }
 
 function editTask(t) {
   editing.value = true
   Object.assign(form, { id: t.id, name: t.name, cron: t.cron, script_id: t.script_id, device_id: t.device_id })
+  openedScriptId.value = t.script_id
+  staleNotice.value = !!t.param_stale
+  // 先按列表兜底（旧快照字段若有），再拉任务详情的 args 解析视图整体带入覆盖态
+  //（resolve_entry_args 语义：本次采用=快照值，除非用户改/关覆盖）
+  taskInitialArgs.value = t.args && typeof t.args === 'object' ? JSON.parse(JSON.stringify(t.args)) : {}
   showAdd.value = true
+  api.getTask(t.id).then((detail) => {
+    if (form.id !== t.id || !showAdd.value) return // 弹窗已切换/关闭：丢弃迟到响应
+    if (detail && detail.args && typeof detail.args === 'object') {
+      taskInitialArgs.value = JSON.parse(JSON.stringify(detail.args))
+    }
+  }).catch(() => { /* 详情拉取失败：按现有兜底渲染（默认值字段省略） */ })
 }
 
 async function toggle(t, e) {
   try {
-    await api.saveTask({ id: t.id, name: t.name, cron: t.cron, script_id: t.script_id, device_id: t.device_id, enabled: e.target.checked })
+    // 启停带原快照：避免服务端把缺省 args 当作「清空快照」（保持任务参数不变）
+    await api.saveTask(buildTaskSavePayload({
+      id: t.id, name: t.name, cron: t.cron, script_id: t.script_id,
+      device_id: t.device_id, enabled: e.target.checked, args: t.args,
+    }))
     toast(`${t.name} 已${e.target.checked ? '启用' : '停用'}`, 'info')
     loadTasks()
   } catch (err) {
-    toast('操作失败：' + err.message, 'error')
+    if (isParamSignatureConflict(err)) toast('参数快照已过期：请先编辑任务确认参数，再启用调度', 'error')
+    else toast('操作失败：' + err.message, 'error')
+    loadTasks()
   }
 }
 
@@ -181,6 +264,8 @@ async function runNow(t) {
   } catch (e) {
     if (isDeviceBusyConflict(e)) {
       pushRunConflict({ ...(e.data || {}), device_id: t.device_id })
+    } else if (isParamSignatureConflict(e)) {
+      toast('任务参数快照已过期：请编辑任务重新确认参数后再运行', 'error')
     } else {
       toast('触发失败：' + e.message, 'error')
     }
@@ -217,19 +302,41 @@ async function removeTask(t) {
 
 function applyPreset(p) { form.cron = p.cron }
 
-async function saveTask() {
+/**
+ * 保存任务（阶段 5 参数化）：表单客户端校验（必填缺失/类型不合规阻断）→ 稀疏 args 提交，
+ * 服务端解析为完整快照存储并计算 param_signature。签名不匹配 409 → 横幅 + 对比表，
+ * 用户「重新确认」带 reconfirm:true 按当前声明重算。
+ */
+async function saveTask(reconfirm = false) {
   if (!form.name || !form.cron) return toast('请填写名称和 cron 表达式', 'error')
   if (!form.script_id) return toast('请选择脚本', 'error')
+  let args = {}
+  if (taskParams.value.length && taskFormEl.value) {
+    const errs = taskFormEl.value.validate()
+    if (errs.length) {
+      return toast('参数校验未通过：' + errs.map(e => `$${e.name} ${e.message}`).join('；'), 'error')
+    }
+    args = taskFormEl.value.getArgs()
+  }
+  savingTask.value = true
   try {
-    await api.saveTask({
+    await api.saveTask(buildTaskSavePayload({
       id: form.id, name: form.name, cron: form.cron,
-      script_id: form.script_id, device_id: form.device_id
-    })
+      script_id: form.script_id, device_id: form.device_id, args,
+    }, { reconfirm }))
     showAdd.value = false
-    toast('任务已保存', 'success')
+    toast(reconfirm ? '参数已重新确认，任务已保存' : '任务已保存', 'success')
     loadTasks()
   } catch (e) {
-    toast('保存失败：' + e.message, 'error')
+    if (isParamSignatureConflict(e)) {
+      // 脚本参数声明已变化：展示原快照/当前默认值/本次采用对比，由用户显式重新确认
+      staleNotice.value = true
+      toast('任务参数快照已过期（脚本参数声明已变化），请核对对比表后点「重新确认」', 'error')
+    } else {
+      toast('保存失败：' + e.message, 'error')
+    }
+  } finally {
+    savingTask.value = false
   }
 }
 
@@ -257,6 +364,19 @@ onMounted(async () => {
 .run-now { margin-left: 6px; font-weight: 400; vertical-align: 1px; }
 .cron { color: var(--accent-2); font-size: 12px; }
 tr.disabled { opacity: .45; }
+/* 参数已过期标注（param_stale）与弹窗内横幅/对比表 */
+.stale-tag { margin-left: 6px; color: var(--warn); border-color: var(--warn); font-weight: 400; }
+.stale-banner {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  border: 1px solid var(--warn); border-radius: var(--radius-sm);
+  background: rgba(250, 179, 135, .08); color: var(--warn);
+  font-size: 12px; padding: 6px 10px; margin-bottom: 8px;
+}
+.cmp-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 8px; }
+.cmp-table th, .cmp-table td { border: 1px solid var(--border); padding: 3px 6px; text-align: left; word-break: break-all; }
+.cmp-table th { color: var(--text-2); font-weight: 500; background: var(--bg-3); }
+.cmp-table td.adopted { color: var(--accent); }
+.mono { font-family: var(--mono); }
 .row-actions { display: flex; gap: 2px; }
 .row-actions .danger:hover { color: var(--danger); border-color: var(--danger); }
 
