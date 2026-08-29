@@ -1,0 +1,4 @@
+steps:
+  - find: 挑战.png
+  - find: 难度1.png
+  - find: 开始挑战.png
