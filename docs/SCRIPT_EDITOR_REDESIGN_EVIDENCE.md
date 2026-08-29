@@ -280,3 +280,20 @@
 
 ### 结论
 通过（阶段 7 完成；「真机录制/回滚演练后再宣布发布完成」一项归阶段 8 待人工）
+
+
+## 阶段 8（自动化部分）：RC 构建
+
+### 产物与环境
+- target/release/gamer-server.exe（42.9MB，HEAD 3366241）；web 产物 server/web-dist/（pnpm build ✓）
+- rustc/cargo、node v24.14.0、pnpm 11.x、Windows 10.0.26200 x64
+
+### 门禁（HEAD 复验全绿）
+- cargo fmt --check ✓；cargo test 289/0/2；pnpm test:run 458/0（32 文件）；pnpm build ✓；git diff --check ✓
+- clippy：9 条存量 warning（未新增）
+
+### 待人工（需用户确认后执行）
+- §19.1 发布前检查：调度暂停/备份核对/新格式分区快照 dry-run 人工确认
+- §17.3 A~E 端到端剧本 + §16.6 真机矩阵（设备已可用）
+- §19.3/19.4 回滚演练
+- 按仓库规范打破坏性版本标签
