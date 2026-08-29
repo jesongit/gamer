@@ -1,0 +1,10 @@
+{
+  "id": "i05_func_path_traversal",
+  "kind": "invalid",
+  "description": "函数路径穿越：.. 相对路径、绝对路径、反斜杠分隔符三种形态全部拒绝",
+  "errors": [
+    { "code": "ref.func.path_traversal", "step_path": "steps[0]", "field": "target" },
+    { "code": "ref.func.path_traversal", "step_path": "steps[1]", "field": "target" },
+    { "code": "ref.func.path_traversal", "step_path": "steps[2]", "field": "target" }
+  ]
+}

@@ -1,0 +1,11 @@
+params:
+  - 'tmpl:account:账号模板:account.png'
+steps:
+  - func: common/login
+    args:
+      account: $account
+      timeout: 30s
+    then:
+      - log: 登录成功
+    else:
+      - throw: 登录失败

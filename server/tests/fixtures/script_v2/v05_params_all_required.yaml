@@ -1,0 +1,20 @@
+params:
+  - 'tmpl:account:账号模板'
+  - 'coord:click_pos:点击位置'
+  - 'color:target_color:目标颜色'
+  - 'time:timeout:最长等待'
+  - 'key:cancel_key:取消按键'
+  - 'text:message:提示文本'
+  - 'bool:enable:是否启用'
+steps:
+  - if: $enable
+    then:
+      - tap: $click_pos
+  - find: $account
+    timeout: $timeout
+  - color:
+      at: [0.1, 0.1]
+      expect:
+        - $target_color:
+          - key: $cancel_key
+  - text: $message

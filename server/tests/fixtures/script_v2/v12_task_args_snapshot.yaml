@@ -1,0 +1,15 @@
+params:
+  - 'bool:enable:是否启用:true'
+  - 'time:timeout:最长等待:30s'
+  - 'text:message:提示文本:"开始任务"'
+  - 'coord:pos:执行位置:[0.5, 0.5]'
+  - 'color:target:目标颜色:123456'
+  - 'key:quit_key:退出按键:ESC'
+  - 'tmpl:icon:图标模板:icon.png'
+steps:
+  - if: $enable
+    then:
+      - log: $message
+      - tap: $pos
+  - find: $icon
+    timeout: $timeout

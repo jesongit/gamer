@@ -1,0 +1,8 @@
+{
+  "id": "i04_match_candidate_duplicate",
+  "kind": "invalid",
+  "description": "match 候选模板短名重复",
+  "errors": [
+    { "code": "step.match.candidate_duplicate", "step_path": "steps[0]", "field": "candidates" }
+  ]
+}

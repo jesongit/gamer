@@ -1,0 +1,8 @@
+{
+  "id": "i07_unknown_top_key",
+  "kind": "invalid",
+  "description": "未知顶层键：新语法只允许 params/config/steps",
+  "errors": [
+    { "code": "script.top_level.unknown_key", "step_path": "", "field": "metadata" }
+  ]
+}

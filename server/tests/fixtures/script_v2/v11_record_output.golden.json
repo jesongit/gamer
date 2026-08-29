@@ -1,0 +1,45 @@
+{
+  "id": "v11_record_output",
+  "kind": "valid",
+  "description": "录制输出形态：点击录制生成单条 find；滑动录制生成 match→swipe（不点击候选），默认 throw + 30s timeout",
+  "files": [
+    {
+      "file": "v11_record_output.yaml",
+      "role": "main",
+      "model_kind": "script",
+      "model": {
+        "params": [],
+        "config": null,
+        "steps": [
+          {
+            "kind": "find",
+            "template": { "lit": "record_click_20260829_001.png" },
+            "block": [],
+            "verify": false,
+            "timeout": null,
+            "then": [],
+            "else": []
+          },
+          {
+            "kind": "match",
+            "candidates": [
+              {
+                "template": { "lit": "record_swipe_20260829_002.png" },
+                "steps": [
+                  {
+                    "kind": "swipe",
+                    "from": { "lit": [0.5, 0.8] },
+                    "to": { "lit": [0.5, 0.2] },
+                    "time": { "lit": "800ms" }
+                  }
+                ]
+              }
+            ],
+            "else": [{ "kind": "throw", "message": "未找到滑动起点" }],
+            "timeout": { "lit": "30s" }
+          }
+        ]
+      }
+    }
+  ]
+}

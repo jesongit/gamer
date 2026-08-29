@@ -1,0 +1,20 @@
+{
+  "id": "v01_minimal_script",
+  "kind": "valid",
+  "description": "最小脚本：steps 必需，无 params/config",
+  "files": [
+    {
+      "file": "v01_minimal_script.yaml",
+      "role": "main",
+      "model_kind": "script",
+      "model": {
+        "params": [],
+        "config": null,
+        "steps": [
+          { "kind": "log", "message": { "lit": "最小脚本" } },
+          { "kind": "tap", "at": { "lit": [0.5, 0.5] } }
+        ]
+      }
+    }
+  ]
+}

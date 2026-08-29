@@ -1,0 +1,33 @@
+{
+  "id": "v08_color_branch",
+  "kind": "valid",
+  "description": "color 分支：at 坐标 + 有序颜色候选列表（每项单键映射，纯数字色值 '123456' 必须加引号保持字符串；候选不用映射键形态——JS 端整数形键会丢顺序）+ else",
+  "files": [
+    {
+      "file": "v08_color_branch.yaml",
+      "role": "main",
+      "model_kind": "script",
+      "model": {
+        "params": [],
+        "config": null,
+        "steps": [
+          {
+            "kind": "color",
+            "at": { "lit": [0.5, 0.5] },
+            "expect": [
+              {
+                "color": { "lit": "ff8800" },
+                "steps": [{ "kind": "tap", "at": { "lit": [0.5, 0.5] } }]
+              },
+              {
+                "color": { "lit": "123456" },
+                "steps": [{ "kind": "log", "message": { "lit": "深蓝分支" } }]
+              }
+            ],
+            "else": [{ "kind": "throw", "message": "颜色未命中" }]
+          }
+        ]
+      }
+    }
+  ]
+}

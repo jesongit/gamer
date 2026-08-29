@@ -1,0 +1,60 @@
+{
+  "id": "v06_nested_if_loop",
+  "kind": "valid",
+  "description": "嵌套 if/loop：loop(3) > if > find(block+verify+then)，外加无限 loop（times 省略=null）",
+  "files": [
+    {
+      "file": "v06_nested_if_loop.yaml",
+      "role": "main",
+      "model_kind": "script",
+      "model": {
+        "params": [
+          { "type": "bool", "name": "enable", "remark": "是否启用", "default": true },
+          { "type": "bool", "name": "retry", "remark": "允许重试", "default": false }
+        ],
+        "config": null,
+        "steps": [
+          {
+            "kind": "loop",
+            "times": 3,
+            "steps": [
+              {
+                "kind": "if",
+                "cond": { "ref": "retry" },
+                "then": [
+                  {
+                    "kind": "find",
+                    "template": { "lit": "retry.png" },
+                    "block": [{ "lit": "popup.png" }, { "lit": "dialog.png" }],
+                    "verify": true,
+                    "timeout": null,
+                    "then": [
+                      { "kind": "log", "message": { "lit": "清理障碍" } },
+                      { "kind": "tap", "at": { "lit": [0.5, 0.5] } }
+                    ],
+                    "else": []
+                  }
+                ],
+                "else": [{ "kind": "log", "message": { "lit": "无障碍物" } }]
+              }
+            ]
+          },
+          {
+            "kind": "if",
+            "cond": { "ref": "enable" },
+            "then": [
+              {
+                "kind": "loop",
+                "times": null,
+                "steps": [
+                  { "kind": "wait", "duration": { "lit": "1s" }, "duration_max": null }
+                ]
+              }
+            ],
+            "else": [{ "kind": "log", "message": { "lit": "已禁用" } }]
+          }
+        ]
+      }
+    }
+  ]
+}

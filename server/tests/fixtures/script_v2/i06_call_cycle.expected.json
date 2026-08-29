@@ -1,0 +1,8 @@
+{
+  "id": "i06_call_cycle",
+  "kind": "invalid",
+  "description": "call 调用环：脚本 call 自身（自引用成环；跨文件调用环检测归阶段 2 的资源引用图）",
+  "errors": [
+    { "code": "ref.call.self_cycle", "step_path": "steps[0]", "field": "target" }
+  ]
+}

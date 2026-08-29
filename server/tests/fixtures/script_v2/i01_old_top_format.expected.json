@@ -1,0 +1,8 @@
+{
+  "id": "i01_old_top_format",
+  "kind": "invalid",
+  "description": "旧顶层格式：func: 段（旧函数定义）在新语法中是非法顶层键",
+  "errors": [
+    { "code": "script.top_level.legacy_format", "step_path": "", "field": "func" }
+  ]
+}

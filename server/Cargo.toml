@@ -51,5 +51,6 @@ async-recursion = "1"
 zip = "2"
 
 [dev-dependencies]
+saphyr-parser = "0.0.12"
 # router 集成测试用 oneshot 驱动（tower ServiceExt）
 tower = { version = "0.4", features = ["util"] }
