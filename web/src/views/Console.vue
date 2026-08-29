@@ -106,7 +106,7 @@ import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, injec
 import { pinyin } from 'pinyin-pro'
 import { useRouter } from 'vue-router'
 import { store, devicesData, scriptsData, templatesData, useToast, applyRunRecord, findRun, beginCancel, resetStoreRunState, pushRunConflict } from '../store'
-import { api } from '../api'
+import { api, runPartitionImport } from '../api'
 import {
   sourceLabel, terminalLabel,
   normalizeActiveRunResponse, normalizeStartReply,
@@ -2272,24 +2272,22 @@ async function exportPartition() {
   }
 }
 
-/** 导入分区快照 zip（模板+脚本）到当前应用分区：先探测冲突，同名文件替换前二次确认 */
+/** 导入分区快照 zip（模板+脚本）到当前应用分区：先 dry-run 解析报告；invalid 条目直接阻止
+ *  （服务端 confirm 模式遇任一非法文件整体拒绝），同名覆盖弹二次确认后 confirm 落盘。
+ *  流程实现抽离至 api.js runPartitionImport（依赖注入，node 单测覆盖）。 */
 async function onImportFile(e) {
   const file = e.target.files?.[0]
   e.target.value = ''
   if (!file) return
   if (!activePkg.value) return toast('请先选择应用分区', 'warn')
-  try {
-    const dry = await api.importScripts(file, false, activePkg.value)
-    if (dry.conflicts?.length) {
-      const list = dry.conflicts.join('\n')
-      if (!confirm(`导入到 ${activePkg.value} 会替换以下 ${dry.conflicts.length} 个同名文件：\n\n${list}\n\n确认替换导入？`)) return
-    }
-    const rep = await api.importScripts(file, true, activePkg.value)
-    await loadData()
-    toast(`导入完成：新增 ${rep.imported.length} 个，替换 ${rep.replaced.length} 个`, 'success')
-  } catch (err) {
-    toast('导入失败：' + err.message, 'error')
-  }
+  await runPartitionImport({
+    file,
+    pkg: activePkg.value,
+    importScripts: api.importScripts,
+    confirmDialog: msg => window.confirm(msg),
+    notify: toast,
+    refresh: loadData,
+  })
 }
 
 /** 脚本校验（实现已抽离至 src/script-language/validate.js）：绑定当前分区/模板/脚本数据源 */
