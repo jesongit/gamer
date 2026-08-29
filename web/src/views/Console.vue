@@ -26,9 +26,28 @@
           <button class="btn btn-sm" @click="key('VOL_DOWN')">🔊－</button>
           <button class="btn btn-sm" @click="toggleAudio" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'">{{ audioMuted ? '🔇' : '🔊' }}</button>
           <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (currentPkg || '未配置应用')">🚀 启动应用</button>
+          <button
+            class="btn btn-sm"
+            :class="{ active: recording.phase !== 'idle', 'rec-btn': recording.phase !== 'idle' }"
+            :disabled="recording.phase === 'stopping' || (recording.phase === 'idle' && !recording.available)"
+            :title="recording.buttonTitle"
+            data-test="recording-toggle"
+            @click="recording.toggle()"
+          >{{ recording.phase === 'idle' ? '⏺ 录制' : '■ 停止录制' }}</button>
           <div class="tb-sep"></div>
           <button class="btn btn-sm" @click="clipboard">📋 剪贴板</button>
         </div>
+      </div>
+
+      <!-- 录制状态栏（plan §10.1/§11.8）：状态 · 录制目标 · 待处理数量 · 停止按钮 -->
+      <div v-if="recording.phase !== 'idle'" class="rec-bar" data-test="recording-bar">
+        <span class="rec-dot" :class="{ stopping: recording.phase === 'stopping' }"></span>
+        <strong>{{ recording.phase === 'recording' ? '录制中' : '停止中…' }}</strong>
+        <span class="mono">录制到：{{ recording.targetLabel }}</span>
+        <span class="mono">待处理 {{ recording.pendingCount }}</span>
+        <span v-if="recording.failedCount" class="rec-bar-err">失败 {{ recording.failedCount }}</span>
+        <span v-if="altMode" class="mono rec-alt-hint" :title="PROJECTION_ALT_HINT">{{ PROJECTION_ALT_HINT }}</span>
+        <button class="btn btn-sm" :disabled="recording.phase === 'stopping'" data-test="recording-stop" @click="recording.stop()">■ 停止</button>
       </div>
 
       <ConsoleVideoStage
@@ -71,6 +90,7 @@
     <!-- 右：功能区（模板 + 脚本独占；设备管理收进顶部工具条与设置弹窗） -->
     <aside class="panel">
       <div class="panel-sec script-tab">
+        <RecordingCropPanel v-if="recording.panelDraft" :context="recordingCropContext" />
         <TemplateCapture :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
         <ScriptRunner :context="scriptRunnerContext" />
       </div>
@@ -121,6 +141,7 @@ import ConsoleVideoStage from '../components/console/ConsoleVideoStage.vue'
 import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
 import ScriptRunner from '../components/console/ScriptRunner.vue'
+import RecordingCropPanel from '../components/console/RecordingCropPanel.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import RunParamsModal from '../components/RunParamsModal.vue'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
@@ -128,6 +149,7 @@ import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
 import { useScriptEditorShell } from '../composables/useScriptEditorShell'
 import { useFunctionLibrary } from '../composables/useFunctionLibrary'
 import { useRunArgsFlow } from '../composables/useRunArgsFlow'
+import { useRecording, altScopeFlags, PROJECTION_ALT_HINT } from '../composables/useRecording'
 import { parseScript } from '../script-editor/codec'
 import { startIndexOf } from '../script-editor/selection'
 import {
@@ -225,9 +247,66 @@ const templateNames = computed(() =>
   templatesData.value.filter(t => t.pkg === activePkg.value).map(t => tplShortName(t.name)))
 watch(activePkg, pkg => { fnLib.refresh(pkg) })
 
+// ---------- 录制接线（阶段 6，plan §11）：核心服务在 web/src/recording/，本层只做接入 ----------
+// 指针坐标换算（帧原始尺寸基准）、触控发送（move 走 rAF 合并）、冻结帧注入 useRecording；
+// 占位插入/最终替换经 shell 命令栈事务，草稿队列/裁切/上传/命名收敛在 composable。
+function recordingClientToDevice(clientX, clientY) {
+  const video = videoElement.value
+  const wrap = videoWrap.value
+  if (!video?.videoWidth || !wrap) return null
+  const rect = wrap.getBoundingClientRect()
+  const vw = video.videoWidth
+  const vh = video.videoHeight
+  const ratio = Math.min(rect.width / vw, rect.height / vh)
+  const offX = (rect.width - vw * ratio) / 2
+  const offY = (rect.height - vh * ratio) / 2
+  // 画面 letterbox 区域之外不透传（多指第二指在面板上滑动不应触达设备）
+  if (clientX < rect.left + offX || clientX > rect.right - offX) return null
+  if (clientY < rect.top + offY || clientY > rect.bottom - offY) return null
+  return toDeviceCoord(clientX, clientY)
+}
+
+const recording = useRecording({
+  shell: scriptShell,
+  activePkg,
+  connected,
+  videoElement,
+  templatesData,
+  api,
+  notify: toast,
+  sendControl,
+  sendTouchMove: (x, y) => scheduleMove(x, y),
+  clientToDevice: recordingClientToDevice,
+})
+// 录制中分区锁定：busy（录制/停止中/有未完成草稿）时禁止切换应用分区
+watch(activePkg, (v, old) => {
+  if (recording.busy && old && v !== recording.lockPkg) {
+    activePkg.value = old
+    toast('录制中不能切换应用分区', 'warn')
+  }
+})
+// 二次裁切录制草稿面板上下文（getter 保响应式）
+const recordingCropContext = {
+  get draft() { return recording.panelDraft },
+  confirm: (item, payload) => recording.confirmCrop(item, payload),
+  downgrade: item => recording.downgrade(item),
+  discard: item => recording.discard(item),
+  retry: item => recording.retry(item),
+  shortNameTaken: name => recording.shortNameTaken(name),
+  defaultNameFor: (kind, suggested) => recording.nextShortName(kind, suggested),
+  computeSearchRect: (item, rect, adjusted) => recording.computeSearchRect(item, rect, adjusted),
+}
+
 // ---------- alt 模式（编辑态把投屏/模板/取色操作生成为类型化步骤插入当前锚点） ----------
 // alt 模式：仅在脚本编辑模式生效；开启后模板/投屏点击只生成类型化步骤，不发送控制指令
 const altMode = ref(false)
+// Alt 作用域拆分（plan §11.2）：录制中投屏 Alt 特殊语义忽略（按录制透传处理），
+// 模板 Alt 与二次裁切取色 Alt 保持可用；文案见 PROJECTION_ALT_HINT
+const projectionAltEnabled = computed(() => altScopeFlags(altMode.value, recording.active).projection)
+const templateAltEnabled = computed(() => altScopeFlags(altMode.value, recording.active).template)
+const cropAltEnabled = computed(() => altScopeFlags(altMode.value, recording.active).crop)
+// 录制中投屏 Alt 暂停的提示文案（alt 按钮 title 与录制状态栏共用）
+const altHint = computed(() => (recording.active && altMode.value) ? PROJECTION_ALT_HINT : '')
 // alt 手势（点击/滑动投屏时记录，不发送控制指令）
 const altGesture = reactive({ active: false, moved: false, start: { x: 0, y: 0 }, last: { x: 0, y: 0 }, startT: 0 })
 // alt 模式点击/滑动画面反馈（点击圆点 / 滑动 region 框）
@@ -311,6 +390,8 @@ const webrtcLifecycle = useWebRtcLifecycle({
     bitrate.value = '—'
     if (videoElement.value) videoElement.value.srcObject = null
     hideLoupe()
+    // viewer 断开/被接管：取消录制手势并停止录制（草稿队列继续处理，plan §16.4）
+    recording.onLinkLost()
   },
   onChannelOpen() {
     connected.value = true
@@ -1176,9 +1257,28 @@ function cancelPendingMove() {
   pendingMove = null
 }
 
+/** 录制指针换算：设备像素 → 相对坐标（帧原始尺寸基准，plan §11.6）；画面未就绪返回 null */
+function recordingPointerMeta(e) {
+  const v = videoElement.value
+  if (!v || !v.videoWidth || !v.videoHeight) return null
+  const pt = toDeviceCoord(e.clientX, e.clientY)
+  return { relX: pt.x / v.videoWidth, relY: pt.y / v.videoHeight, frameW: v.videoWidth, frameH: v.videoHeight }
+}
+
 function onMouseDown(e) {
+  // 录制透传（plan §11）：DOWN 冻结帧→立即发送触控（不等待编码/上传）；右键/中键忽略
+  if (recording.active) {
+    if (e.button !== 0) return
+    if (!connected.value) return
+    const m = recordingPointerMeta(e)
+    if (!m) return toast('设备画面不可用，无法录制', 'warn')
+    recording.onPointerDown(m)
+    return
+  }
   // alt 模式/按住 Alt：点击/滑动只生成操作记录，不发送控制指令
-  if (isAltAction(e) && connected.value) {
+  // （Alt 作用域拆分 §11.2：投屏 Alt 生效条件 = isAltAction && !recording —— 录制中上方
+  // 分支已按录制透传处理并返回；模板 Alt 与取色 Alt 不受影响，仍按 altMode 生效）
+  if (isAltAction(e) && !recording.active && connected.value) {
     const { x, y } = toDeviceCoord(e.clientX, e.clientY)
     altGesture.active = true
     altGesture.moved = false
@@ -1213,6 +1313,12 @@ function onMouseDown(e) {
 }
 
 function onMouseMove(e) {
+  // 录制透传：MOVE 实时发送（useRecording 侧经 rAF 合并，不等待编码/上传）
+  if (recording.active) {
+    const m = recordingPointerMeta(e)
+    if (m) recording.onPointerMove(m)
+    return
+  }
   if (altGesture.active) {
     const { x, y } = toDeviceCoord(e.clientX, e.clientY)
     if (Math.abs(x - altGesture.last.x) + Math.abs(y - altGesture.last.y) > 6) {
@@ -1257,6 +1363,12 @@ function togglePick() {
 }
 
 function onMouseUp(e) {
+  // 录制透传：UP 记录终点/时长 → 手势分类 → 占位插入（控制早已在 DOWN/MOVE 发出）
+  if (recording.active) {
+    const m = recordingPointerMeta(e)
+    if (m) recording.onPointerUp(m)
+    return
+  }
   if (altGesture.active) {
     const { x, y } = toDeviceCoord(e.clientX, e.clientY)
     const start = altGesture.start
@@ -1283,12 +1395,13 @@ function onMouseUp(e) {
   sendControl({ type: 'touch', action: 'up', x, y })
 }
 
-/** 鼠标离开投屏区域时终止未完成的 alt 手势，避免卡在记录模式 */
+/** 鼠标离开投屏区域时终止未完成的 alt 手势/录制手势，避免卡在记录模式 */
 function onVideoMouseLeave() {
   hideLoupe()
   if (altGesture.active) altGesture.active = false
   if (altFeedbackTimer) clearTimeout(altFeedbackTimer)
   altFeedback.show = false
+  if (recording.active) recording.cancelGesture('leave') // pointercancel/失焦同路径：UP 兜底 + 清理
 }
 
 // ---------- 框选保存模板 ----------
@@ -1479,7 +1592,7 @@ function cropPickColor(e) {
   const vh = crop.imgH || 1080
   const rx = (crop.originX + px) / vw
   const ry = (crop.originY + py) / vh
-  insertAltStep(() => scriptShell.insertColorCheck([rx, ry], hex), `颜色判断 ${hex} @ (${rx.toFixed(4)}, ${ry.toFixed(4)})`)
+  insertAltStep(() => scriptShell.insertColorCheck([rx, ry], hex), `颜色判断 ${hex} @ (${rx.toFixed(4)}, ${ry.toFixed(4)})`, () => recording.buildColorStep([rx, ry], hex))
 }
 
 function cropMouseDown(e) {
@@ -1719,7 +1832,7 @@ function onTplNameClick(e, t) {
   if (isAltAction(e)) {
     // 生成的步骤写短名（login.png）：引擎自动解析到带 #后缀 的文件，区域照常生效
     const name = tplShortName(t.name)
-    insertAltStep(() => scriptShell.insertFindTemplate(name), `等待并点击 ${name}`)
+    insertAltStep(() => scriptShell.insertFindTemplate(name), `等待并点击 ${name}`, () => recording.buildFindStep(name))
     return
   }
   openTplView(t.name)
@@ -1882,12 +1995,15 @@ function isAltAction(e) {
 }
 
 /** Alt 生成步骤统一入口：仅编辑态且有模型时插入当前锚点（与「添加步骤」面板同源）；
- *  否则提示（plan §10：Alt 投屏记录 → 非录制状态保留，插入当前锚点可撤销） */
-function insertAltStep(make, label) {
+ *  录制中改走 recording.altAdd（锁定锚点保序占位，不进上传队列，plan §11.8）——
+ *  此时传 buildOnly 构建纯步骤（不落模型），由录制链路统一插入。
+ *  plan §10：非录制状态 Alt 投屏记录保留，插入当前锚点可撤销 */
+function insertAltStep(make, label, buildOnly) {
   if (scriptMode.value !== 'edit' || !scriptShell.hasModel) {
     toast('进入脚本编辑态后，Alt 操作才会插入类型化步骤', 'warn')
     return false
   }
+  if (recording.active) return recording.altAdd(buildOnly ? buildOnly() : null, label)
   const ok = make()
   if (ok) toast(`${label} 已插入当前锚点`, 'success')
   else toast('插入失败：锚点不可用', 'error')
@@ -1989,7 +2105,7 @@ function setTapRecord(p) {
   showAltFeedback('tap', p.x, p.y)
   const x = p.x / vw
   const y = p.y / vh
-  insertAltStep(() => scriptShell.insertTapAt(x, y), `点击 (${x.toFixed(4)}, ${y.toFixed(4)})`)
+  insertAltStep(() => scriptShell.insertTapAt(x, y), `点击 (${x.toFixed(4)}, ${y.toFixed(4)})`, () => recording.buildTapStep(x, y))
 }
 
 /** 投屏滑动（alt 模式）→ 生成 swipe 类型化步骤（time 用实际滑动时长 ms） */
@@ -2003,12 +2119,14 @@ function setSwipeRecords(from, to, durationMs) {
   showAltFeedback('region', rx, ry, rw, rh)
   const f = [from.x / vw, from.y / vh]
   const t = [to.x / vw, to.y / vh]
-  insertAltStep(() => scriptShell.insertSwipeBetween(f, t, durationMs), `滑动 (${f[0].toFixed(4)}, ${f[1].toFixed(4)}) → (${t[0].toFixed(4)}, ${t[1].toFixed(4)})`)
+  insertAltStep(() => scriptShell.insertSwipeBetween(f, t, durationMs), `滑动 (${f[0].toFixed(4)}, ${f[1].toFixed(4)}) → (${t[0].toFixed(4)}, ${t[1].toFixed(4)})`, () => recording.buildAltSwipeStep(f, t, durationMs))
 }
 
 /** 退出编辑（脏模型需确认丢弃）；若处于跳转栈中先返回上一资源。
+ *  录制忙（录制中/停止中/有未完成草稿）时阻止退出——占位与草稿锚定当前模型（plan §11.3）。
  *  注意 shell 是 reactive 包装：ref/computed 属性访问即解包，不能再取 .value */
 async function cancelEditScript() {
+  if (recording.busy) return toast('录制未完成：请先停止录制，并重试或丢弃未完成草稿', 'warn')
   if (scriptShell.hasModel && scriptShell.dirty && !window.confirm('有未保存修改，确认放弃？')) return
   if (scriptShell.canJumpBack) {
     await jumpBack()
@@ -2104,9 +2222,11 @@ async function onImportFile(e) {
 /** 脚本校验（结构化字段级）由 useScriptEditorShell.diagnostics 提供（validateScript + 解析期诊断） */
 
 /** 保存编辑中的脚本：shell.save() 序列化模型并携带 expected_version；
- *  校验失败 → 提示前 3 条诊断；409 version_conflict → shell.conflict 置位，SaveConflictModal 弹出 */
+ *  校验失败 → 提示前 3 条诊断；409 version_conflict → shell.conflict 置位，SaveConflictModal 弹出。
+ *  录制忙时阻断保存直至队列排空（stopping 中同样拦截，plan §11.3） */
 async function saveEditScript() {
   if (!scriptShell.hasModel) return
+  if (recording.busy) return toast(recording.phase === 'stopping' ? '停止中：等待录制队列排空后再保存' : '录制尚未结束：请先停止录制', 'warn')
   if (!String(scriptShell.name || '').trim()) return toast('请填写脚本名称', 'error')
   if (!scriptShell.pkg && !activePkg.value) return toast('请先选择应用分区', 'warn')
   const r = await scriptShell.save()
@@ -2267,8 +2387,10 @@ function resolveCallTargetId(target) {
   return null
 }
 
-/** 摘要 call/func 卡片「↗ 打开子脚本/函数定义」：进入编辑态并把目标载入共享外壳 */
+/** 摘要 call/func 卡片「↗ 打开子脚本/函数定义」：进入编辑态并把目标载入共享外壳。
+ *  录制忙时阻止（同 jumpBack：跳转会整体替换模型） */
 async function openScriptTarget({ kind, target }) {
+  if (recording.busy) return toast('录制中不能跳转资源', 'warn')
   const id = kind === 'call' ? resolveCallTargetId(target) : fnLib.resolveTargetId(target)
   if (!id) return toast(`跳转目标不存在：${target}`, 'warn')
   scriptMode.value = 'edit'
@@ -2285,8 +2407,10 @@ async function openScriptTarget({ kind, target }) {
   }
 }
 
-/** 编辑态跳转返回（call/func 打开目标后）：载回上一资源；栈空时按钮不显示 */
+/** 编辑态跳转返回（call/func 打开目标后）：载回上一资源；栈空时按钮不显示。
+ *  录制忙时阻止（跳转会整体替换模型，录制占位会丢失） */
 async function jumpBack() {
+  if (recording.busy) return toast('录制中不能切换资源', 'warn')
   try {
     await scriptShell.jumpBack()
   } catch (e) {
@@ -2489,6 +2613,16 @@ const scriptRunnerContext = {
   shell: scriptShell, saveEditScript, cancelEditScript, altMode, toggleAltMode,
   showYaml, showExtras, templateNames, jumpBack,
   onConflictReload, onConflictOverwrite, onConflictDismiss,
+  // 录制（阶段 6）：上传进行中锁画布（占位不可跨分支拖动）+ 投屏 Alt 暂停提示
+  recording, altHint,
+}
+
+/** 关页保护：录制忙（录制/停止中/未完成草稿）或有未保存修改时浏览器弹出确认 */
+function onBeforeUnload(e) {
+  if (recording.busy || (scriptMode.value === 'edit' && scriptShell.hasModel && scriptShell.dirty)) {
+    e.preventDefault()
+    e.returnValue = ''
+  }
 }
 
 onMounted(async () => {
@@ -2504,6 +2638,7 @@ onMounted(async () => {
   if (d) loadForm(d)
   else { mode.value = 'edit'; store.deviceId = null }
   window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('beforeunload', onBeforeUnload)
 
   // 刷新恢复运行态：刷新前发起的脚本在服务端继续执行——按设备查询当前活动 run
   // （新契约 active:true + 完整 RunRecord，含来源标签；旧后端 {running,script_id} 走兼容分支），
@@ -2553,6 +2688,7 @@ watch(() => store.deviceId, id => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('beforeunload', onBeforeUnload)
   consoleRuntime.cancelReconnect()
   if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
   if (altFeedbackTimer) { clearTimeout(altFeedbackTimer); altFeedbackTimer = null }
@@ -2606,6 +2742,25 @@ onUnmounted(() => {
 }
 .tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
 .btn.active { border-color: var(--accent-2); color: var(--accent-2); }
+.btn.rec-btn { border-color: var(--danger); color: var(--danger); }
+
+/* ===== 录制状态栏（plan §10.1：录制状态/插入位置/待处理数量/停止按钮） ===== */
+.rec-bar {
+  flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.4);
+  border-radius: var(--radius); padding: 6px 10px;
+}
+.rec-bar strong { font-size: 12px; color: var(--danger); }
+.rec-bar .mono { font-size: 11px; color: var(--text-1); }
+.rec-bar-err { font-size: 11px; color: var(--danger); font-weight: 600; }
+.rec-alt-hint { color: var(--text-2); }
+.rec-dot {
+  width: 10px; height: 10px; border-radius: 50%; background: var(--danger);
+  animation: rec-blink 1.2s ease-in-out infinite; flex-shrink: 0;
+}
+.rec-dot.stopping { background: var(--warn); animation: none; }
+@keyframes rec-blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.rec-bar .btn { margin-left: auto; }
 
 /* ===== 右侧面板 ===== */
 .panel {
