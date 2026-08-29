@@ -1,6 +1,6 @@
 # GameBot 优化实施计划
 
-> 状态：阶段0/1/3/4/6已完成；阶段2除「超限输入后的持续内存观测」外已收口（真实 Android/scrcpy/WebRTC/DataChannel E2E 已于 2026-08-29 真机补测通过）；阶段5主体完成（缺 ffmpeg 内部分段与跨平台基准，NCC 候选按评估搁置）；阶段7除生产数据副本回滚外完成。当前 main：fmt / clippy -D warnings / cargo test（198 passed）/ pnpm test:run（152 passed）/ pnpm build 全绿；2026-08-29 真机 E2E 16/17 项 PASS（唯一 FAIL 为运行中二进制落后于源码的部署问题，重建后复验通过）+ 浏览器真实出画/触控/设置弹窗冒烟通过。checklist 228/238（2026-08-29）
+> 状态：**阶段 0/1/2/3/4/6/7 全部收口；阶段 5 仅剩 5 项 NCC 条件性候选（2026-08-29 release 基准评估停止条件触发，正式搁置关闭，不计为未完成债务）**。全部门禁绿色：fmt / clippy -D warnings / cargo test（200 passed）/ pnpm test:run（152 passed）/ pnpm build，Windows 与 Linux 容器双侧验证。真机 E2E、超限输入压力内存观测、生产副本迁移回滚演练、Docker 镜像重建、跨平台基准与 NCC 停止条件评估均于 2026-08-29 完成。checklist 233/238（2026-08-29）
 > 编制日期：2026-08-27  
 > 适用范围：Rust 服务端、Vue 前端、部署配置、测试与运维文档  
 > 本文只定义后续实施顺序和验收条件，不代表相关改动已经完成。
@@ -57,13 +57,13 @@
 |---|---:|---:|---|
 | 0 | 36/36 | 36/36 | 质量门禁全部实现且当前全绿（clippy 既有告警已由 `89f3dd2` 清零）。 |
 | 1 | 28/28 | 28/28 | 无新增未完成实现项；USB/设备回归已于 2026-08-29 真机补测（见阶段 2/7）。 |
-| 2 | 34/36 | 35/36 | 真机 E2E（登录后 REST/WS/DataChannel 链路、配置变更守卫、互斥、限额 4xx）已实测通过（`89f3dd2`…`88ec39e` 运行二进制）；仅剩超限输入后的**持续**内存观测需压力环境。 |
+| 2 | 34/36 | 36/36 | 真机 E2E（登录后 REST/WS/DataChannel 链路、配置变更守卫、互斥）已实测通过；超限输入压力观测补齐（5 类×5 轮全 4xx、内存走平回落、health 全绿）。**本阶段收口**。 |
 | 3 | 34/34 | 34/34 | RunManager、调度幂等、强制断开和 viewer/pusher 收尾均有主线回归证据；本轮 E2E 复验 409 互斥与 cancel 通过。 |
-| 4 | 28/37 | 37/37 | `2e0b896`/`c36e048`/`73f055d` 补齐统一原子写收尾、周期保留任务（挂停机信号）与 VACUUM 手动维护；`8661d83`/`618edfe` 接通视频/RTP/GOP/ffmpeg 指标与 viewer_id/run_id/task_id 关联字段、`88ec39e` 打通 NCC 生产统计。本阶段 checklist 收口（调用侧 DB RPC 异步化是既有完成项「DB worker」的后续优化方向，不再单列未勾项）。 |
-| 5 | 18/31 | 23/31 | `564d3cd` 计算池（rayon+信号量双层有界、compute_max_concurrency 可配）与 `189ad03` 上传/覆盖/重命名/删除/导入主动失效接入；仍缺 ffmpeg 内部分段指标与 Docker/Linux/跨平台实测，NCC 候选 5 项按 §11.5 评估搁置。 |
-| 6 | 15/19 | 19/19 | `3607c28` webrtc viewer/probe 拆分（解耦+零开销门控）、`81d8e49` engine 窄 trait 端口注入 + FakeDevice、浏览器真实出画/触控/弹窗冒烟通过，本阶段收口。 |
-| 7 | 15/17 | 16/17 | fmt/clippy/test、前端 test/build、真机矩阵关键场景（首次连接/接管互斥/脚本运行停止/配置变更/优雅停机重启/低功耗空闲）已有 2026-08-29 真机证据；生产数据库/文件迁移回滚仍无环境。 |
-| **总计** | **208/238** | **228/238** | **仍有 10 项 checklist 未完成（阶段 2 持续内存观测 1 项、阶段 5 跨平台基准与 ffmpeg 分段 3 项、NCC 候选 5 项、阶段 7 生产回滚 1 项），不宣称整体优化完成。** |
+| 4 | 28/37 | 37/37 | `2e0b896`/`c36e048`/`73f055d` 补齐统一原子写收尾、周期保留任务（挂停机信号）与 VACUUM 手动维护；`8661d83`/`618edfe` 接通视频/RTP/GOP/ffmpeg 指标与 viewer_id/run_id/task_id 关联字段、`88ec39e` 打通 NCC 生产统计。**本阶段收口**。 |
+| 5 | 18/31 | 26/31 | `564d3cd` 计算池、`189ad03` 主动失效接入、`1714c85` ffmpeg 四段分段指标与分段基准；Windows release 10 轮 + Linux 容器 10 轮基准实测（§13.4）。剩余 5 项 NCC 候选经 release 基准评估**停止条件触发、正式搁置关闭**（NCC 仅占 ≈3%，ffmpeg 占 ≈77%），属条件性候选未实施，不计为未完成债务。 |
+| 6 | 15/19 | 19/19 | `3607c28` webrtc viewer/probe 拆分（解耦+零开销门控）、`81d8e49` engine 窄 trait 端口注入 + FakeDevice、浏览器真实出画/触控/弹窗冒烟通过。**本阶段收口**。 |
+| 7 | 15/17 | 17/17 | 门禁全绿（Rust 200/0/2 + fmt + clippy + 前端 152/build）；真机矩阵关键场景与浏览器真实链路已有 2026-08-29 证据；生产数据副本演练 PASS（旧版↔新版双向可读，回滚闭环成立）；Docker 镜像重建冒烟通过（上下文 1.66MB）。**本阶段收口**。 |
+| **总计** | **208/238** | **233/238** | **除 5 项 NCC 条件性候选（已评估搁置关闭，见 §11.5/§13.4）外全部收口。阶段 0～4、6、7 完成；阶段 5 仅剩已搁置候选。** |
 
 以上数字只用于确定起点。执行期间若环境变化，应在阶段 0 重新记录基线。
 
@@ -73,13 +73,13 @@
 |---|---|---|---|
 | 0 | `89f3dd2`（本轮） | clippy -D warnings 零告警（删 validate_top_mapping 死代码、Ctx::new allow、基准测试锁不跨 await）。 | 36/36，门禁恢复全绿。 |
 | 1 | （无新增） | 既有 Docker/轮转/配置校验证据保持。 | 28/28。 |
-| 2 | 真机 E2E 验收（2026-08-29） | 16/17 项 PASS：401/403/登出失效/WS 101、connect 幂等、截图、tap、413 限额、409 互斥、run/cancel 全链路；唯一 FAIL 为陈旧二进制部署问题，重建后 `/metrics` 计数真实增长。 | 35/36；持续内存观测仍需压力环境。 |
+| 2 | 真机 E2E 验收（2026-08-29） | 16/17 项 PASS：401/403/登出失效/WS 101、connect 幂等、截图、tap、413 限额、409 互斥、run/cancel 全链路；唯一 FAIL 为陈旧二进制部署问题，重建后 `/metrics` 计数真实增长。**补充轮**：超限输入 5 类×5 轮压力全 4xx、内存走平回落、health 全绿——36/36 收口。 |
 | 3 | 真机 E2E 复验 | 202 + run_id + success/cancel 状态流转 + 409 device_busy（附冲突 run 信息）。 | 34/34，保持收口。 |
-| 4 | `2e0b896`、`c36e048`、`73f055d`、`8661d83`、`618edfe`、`88ec39e` | pending_restore 原子写、周期保留挂停机、VACUUM 端点（401/200 测试）、视频输入/RTP/队列/丢帧/GOP/ffmpeg 解码指标接线、viewer_id/task_id 关联字段、AdbTimeout 结构化判定、NCC 生产统计。 | 32/37；调用侧 DB RPC 异步化与节流细化留后续。 |
-| 5 | `564d3cd`、`189ad03`、`65a4022` | 计算池并发峰值/一致性测试、同名模板覆盖失效回归（覆盖后必用新内容）、import 目录级失效。 | 23/31；ffmpeg 内部分段与跨平台实测仍缺。 |
-| 6 | `3607c28`、`81d8e49`、`6bebe6a` | webrtc 拆 viewer.rs/probe.rs（测试 16 个不变、crate 内调用路径零改动）；engine ports 三窄 trait + FakeDevice 四测试（198 passed）；浏览器出画/触控/设置弹窗冒烟。 | 19/19，本阶段收口。 |
-| 7 | `89f3dd2`…`81d8e49` 运行二进制 + 2026-08-29 真机轮 | Rust `198/0/1` + fmt + clippy 全绿；web `152 passed/build`；真机矩阵关键场景与浏览器真实链路证据；「gamer.ps1 restart 不重编译」坑已记 PITFALLS。 | 16/17；生产数据副本迁移回滚仍无环境。 |
-| **总计** | `c229c55` → `81d8e49`（23 个提交） | 真机 E2E 16/17 + 浏览器冒烟 + 全门禁绿；Docker/Linux、ffmpeg 分段、持续内存观测、生产回滚不虚报完成。 | 228/238，10 项未完成；不宣称整体完成。 |
+| 4 | `2e0b896`、`c36e048`、`73f055d`、`8661d83`、`618edfe`、`88ec39e` | pending_restore 原子写、周期保留挂停机、VACUUM 端点（401/200 测试）、视频输入/RTP/队列/丢帧/GOP/ffmpeg 解码指标接线、viewer_id/task_id 关联字段、AdbTimeout 结构化判定、NCC 生产统计。 | 37/37，收口。 |
+| 5 | `564d3cd`、`189ad03`、`65a4022`、`1714c85` | 计算池并发峰值/一致性测试、同名模板覆盖失效回归（覆盖后必用新内容）、import 目录级失效；**补充轮**：ffmpeg 四段分段指标+分段基准（`1714c85`）、Windows release 10 轮与 Linux 容器 10 轮基准（§13.4）、NCC 停止条件评估触发。 | 26/31；剩余 5 项 NCC 候选搁置关闭（条件性候选，非未完成债务）。 |
+| 6 | `3607c28`、`81d8e49`、`6bebe6a` | webrtc 拆 viewer.rs/probe.rs（测试 16 个不变、crate 内调用路径零改动）；engine ports 三窄 trait + FakeDevice 四测试（200 passed）；浏览器出画/触控/设置弹窗冒烟。 | 19/19，收口。 |
+| 7 | `89f3dd2`…`cccdb5c` 运行二进制 + 2026-08-29 真机轮与补充轮 | Rust `200/0/2` + fmt + clippy 全绿（Windows 与 Linux 容器双侧）；web `152 passed/build`；真机矩阵与浏览器真实链路证据；生产副本演练 PASS（回滚闭环成立）；Docker 镜像重建冒烟通过（上下文 1.66MB）；「gamer.ps1 restart 不重编译」等坑已记 PITFALLS。 | 17/17，收口。 |
+| **总计** | `c229c55` → `cccdb5c`（28 个提交） | 真机 E2E + 压力观测 + 回滚演练 + 跨平台基准 + NCC 停止条件评估全部完成；Docker/Linux 实测补齐；高负载 health p95 与生产日志日增长量留生产观测（不影响 checklist）。 | 233/238，仅剩 5 项已搁置的 NCC 条件性候选。 |
 
 ## 4. 实施原则
 
@@ -361,7 +361,7 @@
 - [x] 登录后 REST、WebSocket、DataChannel 正常工作。（2026-08-29 真机 E2E：REST 全链路 + WS 101 信令回包；浏览器 DataChannel `control data channel opened` + 出画 + 触控/按键）
 - [x] 登出后旧 Cookie 立即失效。
 - [x] 跨 Origin 状态变更请求被拒绝。
-- [ ] 超限 ZIP、ZIP slip、重复文件、超大图片均返回 4xx，进程内存不持续增长。
+- [x] 超限 ZIP、ZIP slip、重复文件、超大图片均返回 4xx，进程内存不持续增长。（2026-08-29 真机压力观测：5 类超限输入×5 轮循环全部 4xx/413 无 5xx，WorkingSet/PrivateBytes 五轮走平 +0.1%/+0.45% 且 30s 后回落近基线，health/ready 全绿）
 - [x] 浏览器刷新后会话行为符合设计，不依赖 localStorage 伪 token。
 
 ### 8.4 兼容与部署
@@ -554,15 +554,15 @@ RunRecord
 #### PERF-001：建立可重复基准
 
 - [x] 准备固定 H.264 GOP、截图和模板 fixture，不使用实时设备作为唯一基准。
-- [ ] 分别记录：
+- [x] 分别记录：（2026-08-29 release 10 轮基准含 ffmpeg 四段分段，见 §13.4）
   - [x] `decode_latest_png` 总耗时。
-  - [ ] ffmpeg 启动、输入写入、解码和 PNG 输出耗时（当前只输出整体 decode，未拆内部阶段）。
+  - [x] ffmpeg 启动、输入写入、解码和 PNG 输出耗时。（decode_inner 四段 Instant 计时进 `gamer_ffmpeg_stage_*` 指标与分段基准；release 实测 spawn 9ms / input 154ms / decode 229ms / png ~0ms，四段和≈整体 97%，证实每次截图恰一次 spawn）
   - [x] PNG 解码与灰度化耗时。
   - [x] 全屏和区域 NCC 耗时。
   - [x] 模板文件读取和预处理耗时。
   - [x] 单次 `find` 主模板 + N 个 block 的整轮耗时。
 - [x] 记录 p50、p95、最大值、CPU 和峰值内存。
-- [ ] Windows 和 Docker/Linux 至少各跑一轮。
+- [x] Windows 和 Docker/Linux 至少各跑一轮。（2026-08-29：Windows release 10 轮 + Linux 容器（rust:1.97-slim，Docker Desktop VM 口径）debug 10 轮，容器内 cargo test 200/0/2 与 fmt/clippy 全绿；数据见 §13.4）
 
 验收标准：
 
@@ -619,7 +619,7 @@ RunRecord
 
 ### 11.5 NCC 算法优化候选
 
-仅在模板缓存和计算池完成、指标仍显示 NCC 为主要瓶颈时执行（2026-08-29 评估：缓存与计算池均已完成，但 Windows 离线 smoke 为 debug 构建且无跨平台 release 基准，不足以判定 NCC 为主要瓶颈——启动条件未触发，以下候选保持搁置，待 release 跨平台基准建立后再评估）：
+仅在模板缓存和计算池完成、指标仍显示 NCC 为主要瓶颈时执行（**2026-08-29 release 基准确认停止条件触发，以下 5 项搁置关闭**：真实 find 一轮 p95 ≈ 556ms、加默认 interval 500ms 轮询周期 ≈ 1.06s 满足秒级轮询需求；耗时构成 ffmpeg 按需解码 ≈77%、匹配侧 ≈23% 且其中纯 NCC 计算仅 ≈3%——NCC 不是瓶颈，优化优先级应指向截图解码链路（ffmpeg input/decode 段）与匹配 API 的截图重复解码；数据见 §13.4。这 5 项为条件性候选，未实施且不再是未完成债务）：
 
 - [ ] 使用积分图加速滑窗均值和方差。
 - [ ] 检查 x/y 遍历顺序的缓存局部性。
@@ -766,7 +766,7 @@ server/src/webrtc/
 - [x] Rust fmt、clippy、test 全通过。（2026-08-29：fmt 通过、clippy -D warnings 零告警、`cargo test` 198 passed/0 failed/1 ignored）
 - [x] 前端 test、build 全通过。
 - [x] Docker 镜像构建成功；`docker build --no-cache -t gamer .` 也已成功，证明至少在当前环境可完整重建。
-- [ ] 数据迁移在生产数据副本上成功，并可回滚。
+- [x] 数据迁移在生产数据副本上成功，并可回滚。（2026-08-29 副本演练：数据副本 → 旧版二进制（c229c55 worktree 构建）起 18443 可读 → HEAD 新版升级后读写正常 → 旧版再起升级后副本仍完整读回（回滚闭环成立）；c229c55→HEAD 无 schema 变更，演练证明双向可读性，流程可复用于未来真实 schema 迁移）
 - [x] 依赖安全审计无未处置的高危项；`cargo-audit` 结果为 0 vulnerabilities，但 `bincode` 仍标记 unmaintained，已记录版本和日期。
 
 ### 13.2 设备回归矩阵
@@ -809,19 +809,44 @@ server/src/webrtc/
 | `template_preprocess`（3 个模板） | 475/3801/3801 | 0/0/0 | 56127488 | Windows 实测 |
 | `find_round`（主模板+2 block） | 2409649/2409649/2409649 | 4562500/4562500/4562500 | 56422400 | Windows 实测 |
 
-以下仍不宣称完成：ffmpeg 启动/输入/解码/PNG 内部分段尚未单独输出；每分钟生产 ffmpeg 启动次数、高负载 health、日志日增长量和 Docker 构建上下文未在本轮测量；Docker/Linux、跨平台 p50/p95、真实设备链路、持续内存观测和生产数据副本回滚未实测。
+以下仍不宣称完成：~~ffmpeg 启动/输入/解码/PNG 内部分段尚未单独输出~~（2026-08-29 已补，见下表）；~~每分钟生产 ffmpeg 启动次数~~（2026-08-29 已按 release 数据估算）；~~Docker 构建上下文未实测~~（2026-08-29 镜像重建实测 1.66MB）。仍未实测：高负载 health p95、服务日志日增长量；真实设备链路（已于 2026-08-29 真机 E2E 补测功能链路，性能 SLA 不在此宣称）、持续内存观测（已于 2026-08-29 超限输入压力观测补齐）。
+
+**2026-08-29 补充实测（三口径并列，wall p50/p95/max，µs）**：
+
+| 指标 | Windows debug smoke（1 轮） | Linux 容器 debug（10 轮 p50） | **Windows release（10 轮，机器独占）** |
+|---|---:|---:|---:|
+| `decode_latest_png` | 461642/461642/461642 | — | 403125/432197/432197 |
+| `png_decode` | 243872/… | — | 20621/22296/22296 |
+| `png_grayscale` | 273034/… | — | 5470/7135/7135 |
+| `ncc_region`（3 模板） | 531485/940144/940144 | — | 31096/59886/62084 |
+| `ncc_fullscreen`（3 模板） | 927422/962020/962020 | 752587 | 39645/59120/59485 |
+| `template_read` | 319/398/398 | 2481 | 370/504/508 |
+| `template_preprocess` | 475/3801/3801 | 321 | 65/341/343 |
+| `find_round`（主+2 block） | 2409649/… | 2092060 | **119688/123856/123856** |
+| `ffmpeg_start` | 未拆分 | 2000 | 9000/15000/15000 |
+| `ffmpeg_input` | 未拆分 | 334000 | 154000/217000/217000 |
+| `ffmpeg_decode` | 未拆分 | 122000 | 229000/274000/274000 |
+| `ffmpeg_png` | 未拆分 | ~0 | 0/1000/1000 |
+
+release 口径：Ryzen 7 5800X / 16 线程、`-Iterations 10 -Warmup 2 -FullScreen -Release`、机器独占；Linux 口径：Docker Desktop VM（rust:1.97-slim，容器共享宿主资源，非裸机）。release 较 debug：`find_round` 20.1×、`ncc_fullscreen` 23.4×；`decode_latest_png` 仅 −13%（ffmpeg 进程外部成本主导）。ffmpeg 四段和 ≈ `decode_latest_png` 的 97%，证实每次截图恰一次 spawn。真实 find 一轮（解码+匹配）release p95 ≈ 556ms，加 interval 500ms 轮询周期 ≈ 1.06s。
+
+**NCC 优化候选判定（§11.5 停止条件）**：真实一轮中 ffmpeg 解码 ≈77%、匹配侧 ≈23% 且纯 NCC 计算仅 ≈3%——NCC 不是主要瓶颈，轮询需求已满足，停止条件触发，5 项候选搁置关闭；若未来需再优化，优先级指向截图解码链路（ffmpeg input/decode 段）与匹配 API 的截图重复解码，而非 NCC 算法。
+
+**每分钟 ffmpeg 启动次数（release 数据估算）**：find 轮询周期 ≈1023ms → ≈59 轮/分钟；轮内主模板命中即结束（1 次），block 顺序检查通常落在同帧 in-flight 合并 + 75ms freshness 窗口内 → 典型 ≈1 spawn/轮 ≈ **59 次/分钟**（无复用上界 3 spawn/轮 ≈176 次/分钟）。
+
+**Docker 构建上下文实测（2026-08-29）**：`docker build` 冷构建成功（376s，镜像 813MB），构建上下文传输 **1.66MB**——约 5.8GiB 的 `server/target` 确认被 `.dockerignore` 挡住；容器运行 `/health/ready` 五项全 ok、前端静态托管正常。
 
 原验收指标对账：
 
 | 指标 | 基线 | 目标 | 实测 |
 |---|---:|---:|---:|
-| 单次按需解码 p50/p95 | 待建立跨平台基线 | 不劣化实时性 | Windows smoke：461642/461642 µs；不作跨平台结论 |
-| 区域 NCC p50/p95 | 待建立跨平台基线 | 较基线下降 | Windows smoke：531485/940144 µs；不作目标达成结论 |
-| 全屏 NCC p50/p95 | 待建立跨平台基线 | 较基线下降 | Windows smoke：927422/962020 µs；不作目标达成结论 |
-| 每分钟 ffmpeg 启动次数 | 待测 | 同帧请求显著合并 | 未实测 |
-| 高负载 health p95 | 待测 | 保持可响应 | 未实测 |
-| 服务日志日增长量 | 待测 | 受保留策略约束 | 未实测 |
-| Docker 构建上下文 | 当前含约 5.8 GiB target | 不含本地产物 | 未在本轮实测 |
+| 单次按需解码 p50/p95 | 待建立跨平台基线 | 不劣化实时性 | Windows release：403125/432197 µs（Linux 容器 debug 10 轮 p50 468614µs 同量级）；ffmpeg 主导，与跨平台结论一致 |
+| 区域 NCC p50/p95 | 待建立跨平台基线 | 较基线下降 | Windows release：31096/59886 µs（较 debug 17×） |
+| 全屏 NCC p50/p95 | 待建立跨平台基线 | 较基线下降 | Windows release：39645/59120 µs（较 debug 23.4×） |
+| 每分钟 ffmpeg 启动次数 | 待测 | 同帧请求显著合并 | release 估算：典型 find 轮询 ≈59 次/分钟（每轮 1 spawn，in-flight+freshness 合并生效） |
+| 高负载 health p95 | 待测 | 保持可响应 | 未实测（超限压力期间 health/live 稳定 200 可作部分佐证） |
+| 服务日志日增长量 | 待测 | 受保留策略约束 | 未实测（保留策略已有，增长量留生产观测） |
+| Docker 构建上下文 | 当前含约 5.8 GiB target | 不含本地产物 | 2026-08-29 实测传输 1.66MB，`server/target` 已被挡住 |
 
 ### 13.5 文档更新
 
@@ -986,6 +1011,20 @@ server/src/webrtc/
 - 性能前后对比：本轮未做性能优化宣称；计算池/失效接入以正确性测试（并发峰值有界、池/直跑一致、覆盖后必用新内容）为验收，性能数据留待跨平台基准轮。
 - 新增 PITFALLS：「gamer.ps1 restart 不重新编译，旧二进制继续运行」「vite 代理 changeOrigin 改写 Host 触发后端同源 403」等（见 docs/PITFALLS.md 2026-08-29 条目）。
 - 发布/回滚说明：功能与文档提交均按主题独立，可按 §3.2 清单单独回滚；webrtc/engine 拆分为原样移动（测试断言零改动），回滚不影响协议与脚本语义。
+
+### 补充收口轮：阶段 2/5/7 末项与 NCC 评估
+
+- 开始日期：2026-08-29
+- 完成日期：2026-08-29
+- 执行分支：`main`
+- 基线提交：`cd4c573`
+- 完成提交：`1714c85`（ffmpeg 分段指标）/ `cccdb5c`（expired_cookie 用例窗口放宽）+ 本次 `docs(plan)` 收口
+- 已完成任务：ffmpeg 四段分段耗时指标（`gamer_ffmpeg_stage_*` + 分段基准，debug 实测 input 写入为主段）；超限输入压力观测（5 类×5 轮全 4xx、WorkingSet/PrivateBytes 走平 +0.1%/+0.45% 且 30s 回落、health 全绿）；生产数据副本迁移回滚演练（旧版 c229c55 worktree 二进制 ↔ HEAD 新版在副本数据上双向可读可写，回滚闭环成立；c229c55→HEAD 无 schema 变更，演练证明双向可读性）；Docker/Linux 容器实测（rust:1.97-slim，cargo test 200/0/2 + fmt + clippy 全绿、debug 10 轮基准、镜像冷构建 376s/813MB/上下文 1.66MB、运行 health 冒烟）；Windows release 10 轮基准（find_round 119688/123856µs，较 debug 20.1×）与 NCC 停止条件评估（NCC 占 ≈3%、ffmpeg 占 ≈77%，轮询周期 ≈1.06s 满足需求——5 项候选搁置关闭）。
+- 未完成任务及原因：NCC 5 项候选按 §11.5 停止条件正式搁置（条件性候选，非未完成债务）；高负载 health p95 与生产日志日增长量留生产环境观测。
+- 测试结果：Windows `cargo test` 200/0/2 + fmt + clippy 全绿；Linux 容器同口径全绿；`perf-stage5b-stats.mjs --self-test` 通过；release 基准两测试首跑即过。
+- 性能前后对比：见 §13.4 三口径表——release 较 debug `find_round` 20.1×/`ncc_fullscreen` 23.4×，`decode_latest_png` 仅 −13%（ffmpeg 主导）；每分钟 ffmpeg spawn 估算 ≈59 次（典型 find 轮询）。
+- 新增 PITFALLS：「expired_cookie 用例 1s 绝对过期窗口在容器高并行下 flaky」（已放宽至 5s，`cccdb5c`）。
+- 发布/回滚说明：`1714c85`/`cccdb5c` 可独立回滚；本轮观测与演练不改变任何运行行为。
 
 ## 17. 推荐的第一次执行范围
 
