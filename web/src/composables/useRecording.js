@@ -338,7 +338,7 @@ export function useRecording({
 
   const cropPng = cropPngOverride || defaultCropPng
 
-  /** 像素矩形 → 相对 [x1,y1,x2,y2]（模板名 #后缀 / 搜索区域参数用）。 */
+  /** 像素矩形 → 相对 [x1,y1,x2,y2]（上传 region 参数；完整模板名由服务端组合）。 */
   function regionOf(rect, frameW, frameH) {
     const [x1, y1] = toRelative(rect.x, rect.y, frameW, frameH)
     const [x2, y2] = toRelative(rect.x + rect.w, rect.y + rect.h, frameW, frameH)

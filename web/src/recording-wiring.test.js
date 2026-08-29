@@ -6,7 +6,7 @@ import { ref } from 'vue'
 import { altScopeFlags, PROJECTION_ALT_HINT, useRecording } from './composables/useRecording'
 import { useScriptEditorShell } from './composables/useScriptEditorShell'
 import { serialize } from './script-editor/codec'
-import { composeRegionName } from './api'
+import { api } from './api'
 
 /**
  * 阶段 6 后半接线回归（plan §11 / §16.3）：
@@ -140,19 +140,38 @@ describe('录制入口与状态栏 / 离开保护（静态接线）', () => {
   })
 })
 
-describe('composeRegionName（api.js 模板上传封装）', () => {
-  it('短名 + 相对区域 → #×1000 三位整数后缀；越界钳取；无区域回退普通名', () => {
-    expect(composeRegionName('record_click_20260829_001', [0.1, 0.2, 0.3, 0.4]))
-      .toBe('record_click_20260829_001#100_200_300_400.png')
-    expect(composeRegionName('a.png', [0, 0, 1, 1])).toBe('a#000_000_999_999.png')
-    expect(composeRegionName('b.png')).toBe('b.png')
-    expect(composeRegionName('c.png', null)).toBe('c.png')
+describe('api.uploadTemplateRegion 契约化（§11.7：短名+region 直传，完整名由服务端组合）', () => {
+  it('POST /api/templates body 只带 short_name+region+data_b64+pkg，前端不拼 # 元数据', async () => {
+    const calls = []
+    const orig = globalThis.fetch
+    globalThis.fetch = async (url, opt) => {
+      calls.push({ url, opt })
+      return new Response(JSON.stringify({ ok: true, name: 'x#100_200_300_400.png' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    try {
+      await api.uploadTemplateRegion('x.png', 'QUJD', 'com.demo', [0.1, 0.2, 0.3, 0.4])
+    } finally {
+      globalThis.fetch = orig
+    }
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url).toBe('/api/templates')
+    expect(calls[0].opt.method).toBe('POST')
+    expect(JSON.parse(calls[0].opt.body)).toEqual({
+      short_name: 'x.png',
+      region: [0.1, 0.2, 0.3, 0.4],
+      data_b64: 'QUJD',
+      pkg: 'com.demo',
+    })
   })
 
-  it('api.uploadTemplateRegion 走 POST /api/templates（完整名服务端灰度重编码）', () => {
+  it('api.js 静态断言：录制上传走 short_name 参数，composeRegionName 前端拼接已删除', () => {
     const src = read('./api.js')
     expect(src).toContain('uploadTemplateRegion:')
-    expect(src).toContain('composeRegionName(shortName, region)')
+    expect(src).toContain('short_name: shortName')
+    expect(src).not.toContain('composeRegionName')
   })
 })
 
