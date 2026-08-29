@@ -3,6 +3,11 @@
 #
 # 只执行被 #[ignore] 标记的 Rust 基准测试；输入来自 server/testdata/perf，
 # 输出为实际测得的 p50/p95/max 微秒值，不写回仓库、不伪造目标或对比数据。
+# 依次运行两个基准（独立 cargo 进程，互不竞争资源）：
+#   1. matcher::tests::fixed_fixture_benchmark_p50_p95     —— decode/PNG/NCC/template/find 整体耗时
+#   2. frames::tests::fixed_fixture_decode_stage_benchmark_p50_p95 —— ffmpeg 按需解码内部分段
+#      （spawn/write/decode/png 四段，PERF metric=ffmpeg_start/ffmpeg_input/ffmpeg_decode/ffmpeg_png，
+#      可直接被 tools/perf-stage5b-stats.mjs 的指标别名消费）
 #
 # 示例（仓库根目录）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-perf-benchmark.ps1
@@ -48,14 +53,20 @@ if ($DryRun) {
 
 Push-Location $server
 try {
-    if ($Release) {
-        & cargo test --release matcher::tests::fixed_fixture_benchmark_p50_p95 -- --ignored --nocapture
-    } else {
-        & cargo test matcher::tests::fixed_fixture_benchmark_p50_p95 -- --ignored --nocapture
-    }
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) {
-        throw ('Rust 固定夹具基准失败（exit={0}）' -f $exitCode)
+    $benchTests = @(
+        'matcher::tests::fixed_fixture_benchmark_p50_p95',
+        'frames::tests::fixed_fixture_decode_stage_benchmark_p50_p95'
+    )
+    foreach ($test in $benchTests) {
+        if ($Release) {
+            & cargo test --release $test -- --ignored --nocapture
+        } else {
+            & cargo test $test -- --ignored --nocapture
+        }
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            throw ('Rust 固定夹具基准失败（exit={0}）：{1}' -f $exitCode, $test)
+        }
     }
 } finally {
     Pop-Location

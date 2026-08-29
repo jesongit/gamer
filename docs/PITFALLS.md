@@ -68,3 +68,4 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **小米 HyperOS 上游戏前台时 `screencap -d <虚拟屏>` 恒返回 ~80 字节错误文本**（疑似安全标志 surface），截图只能依赖帧缓存按需解码；帧缓存解码的货币性检查必须按 GOP 代际（snapshot/config generation）判定，不能按 frame_sequence——动态画面下 P 帧逐帧推进序号，按帧序判新会让任何解码（约 1s）永远追不上，动画期间截图 100% 失败。
 - **`gamer.ps1 restart` 不重新编译，改完 Rust 代码必须 `-Build` 否则旧二进制继续运行**：restart 只 stop/start，直接启动 `target/debug/gamer-server.exe`（旧产物）；且服务运行中 `cargo build` 链接该 exe 会 os error 5 失败，错以为构建过。E2E 验收曾因此踩坑（/metrics 新指标全 0，实为运行中的 03:00 旧二进制）。解决：`.\gamer.ps1 restart -BackendOnly -Build`（先停服务再构建）。
 - **并行开发/验收时多个任务共享同一 cargo target 锁会互相阻塞**：多个 Agent 同时跑 `cargo clippy/test` 会串行排队（正常），但一方写到一半的源码会让另一方编译失败——并行任务的验收命令要在对方收口后复跑一遍才算数。
+- **`api::tests::sec_tests::expired_cookie_is_rejected_by_protected_route` 也属计时敏感偶发红**（2026-08-29）：登录后立即请求预期 200，但 `session_abs_secs: 1` 的绝对 TTL 下，并行测试负载只要把 login→before 间隔拖过 1s 就先收到 401（断言在 before 处失败，与测试名暗示的"过期后拒绝"不是同一处）；单独重跑即过，勿当成回归（与既有 `session_lifecycle_absolute_and_sliding` 偶发红同类）。

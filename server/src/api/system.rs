@@ -317,6 +317,43 @@ pub(super) async fn api_metrics(State(st): State<AppState>) -> Response {
         "gamer_ffmpeg_decode_duration_ms_total",
         runtime_metrics.ffmpeg_decode_duration_ms_total,
     );
+    for (stage, count, duration) in [
+        (
+            "spawn",
+            runtime_metrics.ffmpeg_stage_spawn_total,
+            runtime_metrics.ffmpeg_stage_spawn_ms_total,
+        ),
+        (
+            "write",
+            runtime_metrics.ffmpeg_stage_write_total,
+            runtime_metrics.ffmpeg_stage_write_ms_total,
+        ),
+        (
+            "decode",
+            runtime_metrics.ffmpeg_stage_decode_total,
+            runtime_metrics.ffmpeg_stage_decode_ms_total,
+        ),
+        (
+            "png",
+            runtime_metrics.ffmpeg_stage_png_total,
+            runtime_metrics.ffmpeg_stage_png_ms_total,
+        ),
+    ] {
+        append_metric(
+            &mut body,
+            "On-demand ffmpeg decode pipeline stage executions.",
+            "counter",
+            &format!("gamer_ffmpeg_stage_total{{stage=\"{stage}\"}}"),
+            count,
+        );
+        append_metric(
+            &mut body,
+            "Total on-demand ffmpeg decode pipeline stage duration in milliseconds.",
+            "counter",
+            &format!("gamer_ffmpeg_stage_ms_total{{stage=\"{stage}\"}}"),
+            duration,
+        );
+    }
     append_metric(
         &mut body,
         "NCC template match operations.",

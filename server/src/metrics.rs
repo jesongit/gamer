@@ -48,6 +48,23 @@ pub enum FfmpegResult {
     Failure,
 }
 
+/// PERF-001：ffmpeg 按需解码的内部分段。段边界定义见
+/// `device::frames::decode_inner` 的分段注释（spawn / write / decode / png
+/// 四段互斥，并集≈单次解码总耗时）。
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub enum FfmpegStage {
+    /// 进程 spawn（含输入缓冲拼接与命令构造）
+    Spawn,
+    /// stdin 写入 GOP 数据（与读输出并发，重叠部分归本段）
+    Write,
+    /// 解码等待（stdin EOF → stdout/stderr EOF，含 ffmpeg 进程内的
+    /// H.264 解码与 PNG 编码）
+    Decode,
+    /// PNG 输出后处理（进程收割 + 退出码/输出校验，µs 级）
+    Png,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum NccResult {
@@ -111,6 +128,17 @@ pub struct Metrics {
     ffmpeg_decode_failure_total: AtomicU64,
     ffmpeg_decode_duration_ms_total: AtomicU64,
 
+    // PERF-001 ffmpeg 按需解码内部分段：每段执行次数与累计毫秒（低基数，
+    // 段名为代码枚举；/metrics 以 gamer_ffmpeg_stage_*{stage="spawn|write|decode|png"} 风格暴露）
+    ffmpeg_stage_spawn_total: AtomicU64,
+    ffmpeg_stage_write_total: AtomicU64,
+    ffmpeg_stage_decode_total: AtomicU64,
+    ffmpeg_stage_png_total: AtomicU64,
+    ffmpeg_stage_spawn_ms_total: AtomicU64,
+    ffmpeg_stage_write_ms_total: AtomicU64,
+    ffmpeg_stage_decode_ms_total: AtomicU64,
+    ffmpeg_stage_png_ms_total: AtomicU64,
+
     ncc_matches_total: AtomicU64,
     ncc_hits_total: AtomicU64,
     ncc_misses_total: AtomicU64,
@@ -154,6 +182,16 @@ pub struct MetricsSnapshot {
     pub ffmpeg_decode_timeout_total: u64,
     pub ffmpeg_decode_failure_total: u64,
     pub ffmpeg_decode_duration_ms_total: u64,
+    // PERF-001 ffmpeg 内部分段：spawn/write/decode/png 四段，/metrics 以
+    // gamer_ffmpeg_stage_*{stage=...} 渲染（api/system.rs）
+    pub ffmpeg_stage_spawn_total: u64,
+    pub ffmpeg_stage_write_total: u64,
+    pub ffmpeg_stage_decode_total: u64,
+    pub ffmpeg_stage_png_total: u64,
+    pub ffmpeg_stage_spawn_ms_total: u64,
+    pub ffmpeg_stage_write_ms_total: u64,
+    pub ffmpeg_stage_decode_ms_total: u64,
+    pub ffmpeg_stage_png_ms_total: u64,
     pub ncc_matches_total: u64,
     pub ncc_hits_total: u64,
     pub ncc_misses_total: u64,
@@ -199,6 +237,14 @@ impl Metrics {
             ffmpeg_decode_timeout_total: self.ffmpeg_decode_timeout_total.load(RELAXED),
             ffmpeg_decode_failure_total: self.ffmpeg_decode_failure_total.load(RELAXED),
             ffmpeg_decode_duration_ms_total: self.ffmpeg_decode_duration_ms_total.load(RELAXED),
+            ffmpeg_stage_spawn_total: self.ffmpeg_stage_spawn_total.load(RELAXED),
+            ffmpeg_stage_write_total: self.ffmpeg_stage_write_total.load(RELAXED),
+            ffmpeg_stage_decode_total: self.ffmpeg_stage_decode_total.load(RELAXED),
+            ffmpeg_stage_png_total: self.ffmpeg_stage_png_total.load(RELAXED),
+            ffmpeg_stage_spawn_ms_total: self.ffmpeg_stage_spawn_ms_total.load(RELAXED),
+            ffmpeg_stage_write_ms_total: self.ffmpeg_stage_write_ms_total.load(RELAXED),
+            ffmpeg_stage_decode_ms_total: self.ffmpeg_stage_decode_ms_total.load(RELAXED),
+            ffmpeg_stage_png_ms_total: self.ffmpeg_stage_png_ms_total.load(RELAXED),
             ncc_matches_total: self.ncc_matches_total.load(RELAXED),
             ncc_hits_total: self.ncc_hits_total.load(RELAXED),
             ncc_misses_total: self.ncc_misses_total.load(RELAXED),
@@ -309,6 +355,32 @@ impl Metrics {
             FfmpegResult::Timeout => self.ffmpeg_decode_timeout_total.fetch_add(1, RELAXED),
             FfmpegResult::Failure => self.ffmpeg_decode_failure_total.fetch_add(1, RELAXED),
         };
+    }
+
+    /// PERF-001：记录一次 ffmpeg 按需解码的单段耗时（观测旁路：只加计数，
+    /// 不参与任何解码控制流）。失败路径按已完成的段如实记录；超时取消时
+    /// 保留已记录段、后续段不再计入。
+    pub fn record_ffmpeg_stage(&self, stage: FfmpegStage, duration_ms: u64) {
+        let (count, duration) = match stage {
+            FfmpegStage::Spawn => (
+                &self.ffmpeg_stage_spawn_total,
+                &self.ffmpeg_stage_spawn_ms_total,
+            ),
+            FfmpegStage::Write => (
+                &self.ffmpeg_stage_write_total,
+                &self.ffmpeg_stage_write_ms_total,
+            ),
+            FfmpegStage::Decode => (
+                &self.ffmpeg_stage_decode_total,
+                &self.ffmpeg_stage_decode_ms_total,
+            ),
+            FfmpegStage::Png => (
+                &self.ffmpeg_stage_png_total,
+                &self.ffmpeg_stage_png_ms_total,
+            ),
+        };
+        count.fetch_add(1, RELAXED);
+        duration.fetch_add(duration_ms, RELAXED);
     }
 
     pub fn record_ncc(&self, duration_ms: u64, hit: bool, region: bool) {
@@ -432,6 +504,29 @@ mod tests {
         assert_eq!(snapshot.scheduler_conflicts_total, 1);
         assert_eq!(snapshot.scheduler_skipped_total, 1);
         assert_eq!(snapshot.scheduler_failures_total, 1);
+    }
+
+    /// PERF-001：ffmpeg 内部分段计数按段独立累计（次数 + 毫秒）
+    #[test]
+    fn ffmpeg_stage_counters_split_by_stage() {
+        let metrics = Metrics::default();
+        metrics.record_ffmpeg_stage(FfmpegStage::Spawn, 12);
+        metrics.record_ffmpeg_stage(FfmpegStage::Write, 3);
+        metrics.record_ffmpeg_stage(FfmpegStage::Decode, 40);
+        metrics.record_ffmpeg_stage(FfmpegStage::Png, 0);
+        metrics.record_ffmpeg_stage(FfmpegStage::Spawn, 8);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.ffmpeg_stage_spawn_total, 2);
+        assert_eq!(snapshot.ffmpeg_stage_spawn_ms_total, 20);
+        assert_eq!(snapshot.ffmpeg_stage_write_total, 1);
+        assert_eq!(snapshot.ffmpeg_stage_write_ms_total, 3);
+        assert_eq!(snapshot.ffmpeg_stage_decode_total, 1);
+        assert_eq!(snapshot.ffmpeg_stage_decode_ms_total, 40);
+        assert_eq!(snapshot.ffmpeg_stage_png_total, 1);
+        assert_eq!(snapshot.ffmpeg_stage_png_ms_total, 0);
+        // 分段与既有整次解码计数互不干扰
+        assert_eq!(snapshot.ffmpeg_decode_total, 0);
     }
 
     /// 全局访问器必须返回稳定实例：采集点分散在多个模块，同一进程内

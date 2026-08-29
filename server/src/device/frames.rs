@@ -20,6 +20,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
 use super::scrcpy::VideoFrame;
+use crate::metrics::FfmpegStage;
 
 const PNG_SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
@@ -526,7 +527,20 @@ impl FrameCache {
         config: &[u8],
         gop: &[VideoFrame],
     ) -> anyhow::Result<Vec<u8>> {
-        let cache = FrameCache::start(ffmpeg);
+        Self::benchmark_decode_with_metrics(ffmpeg, crate::metrics::global_arc(), config, gop).await
+    }
+
+    /// 固定夹具基准的解码执行体（PERF-001）：全新 cache 注入指定 Metrics
+    /// 实例（计数隔离，不受其他测试/进程级全局计数污染），预置确定性 GOP 后
+    /// 走生产 decode_latest_png 路径恰好一次真实解码。
+    #[cfg(test)]
+    async fn benchmark_decode_with_metrics(
+        ffmpeg: &str,
+        metrics: Arc<crate::metrics::Metrics>,
+        config: &[u8],
+        gop: &[VideoFrame],
+    ) -> anyhow::Result<Vec<u8>> {
+        let cache = FrameCache::start_with(ffmpeg, configured_decode_freshness(), metrics);
         {
             let mut state = cache.state.lock();
             state.config_buf = config.to_vec();
@@ -610,10 +624,15 @@ impl FrameCache {
             .await
             .map_err(|_| anyhow::anyhow!("截图解码闸门已关闭"))?;
         // OBS-003：按需解码采集点——每个真实 ffmpeg 执行记一次（同帧合并的
-        // 并发等待方共享执行、不重复计数），按 结果/超时 分类并累计耗时
+        // 并发等待方共享执行、不重复计数），按 结果/超时 分类并累计耗时。
+        // PERF-001：spawn/write/decode/png 内部分段在 decode_inner 内单独计时记录
+        // （并发闸门排队发生在本函数 acquire_owned 处，不计入四段）
         let started = Instant::now();
-        let result =
-            tokio::time::timeout(DECODE_TIMEOUT, Self::decode_inner(ffmpeg, config, gop)).await;
+        let result = tokio::time::timeout(
+            DECODE_TIMEOUT,
+            Self::decode_inner(ffmpeg, config, gop, &metrics),
+        )
+        .await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let decoded = match result {
             Ok(inner) => {
@@ -669,11 +688,27 @@ impl FrameCache {
     /// 用临时 ffmpeg 解码 config+GOP，输出 GOP 最后一帧的 PNG。
     /// select=gte(n\,N)（N = GOP 帧数-1）：demuxer 会把配置帧也算进帧索引，
     /// gte 容忍 ±1~2 帧偏移，最多取到倒数第 3 帧（~100ms 旧），仍是实时画面。
+    ///
+    /// PERF-001 内部分段（观测旁路：经 `metrics` 记录 spawn/write/decode/png
+    /// 四段，互斥且并集≈本函数总耗时；只加计数，不改变解码行为与错误语义）：
+    ///   spawn  = 函数入口 → 子进程创建完成、stdin/stdout 句柄就绪（含
+    ///            config+GOP 输入缓冲拼接与命令构造，均为纯内存准备）
+    ///   write  = spawn 段终点 → stdin 写入完成并关闭（EOF）。写入与读输出
+    ///            在 tokio::join! 下并发执行，重叠窗口归 write 段
+    ///   decode = write 段终点 → stdout/stderr 读到 EOF（进程此时已退出）。
+    ///            ffmpeg 进程内的 H.264 解码与 PNG 编码都发生在该等待窗口内，
+    ///            Rust 侧无法再细分，故 PNG 编码归 decode 段
+    ///   png    = stdout EOF → 函数返回：child.wait() 收割 + 退出码/输出校验
+    ///            + stderr 尾部截取（µs 级后处理，用于校验四段并集完整性）
+    /// 失败路径按已完成的段如实记录：spawn 失败只记 spawn 段；写入失败记
+    /// write+decode（decode≈0）后返回；超时取消保留已记录段、后续段不计。
     async fn decode_inner(
         ffmpeg: &str,
         config: &[u8],
         gop: &[VideoFrame],
+        metrics: &crate::metrics::Metrics,
     ) -> anyhow::Result<Vec<u8>> {
+        let spawn_started = Instant::now();
         let n = gop.len().saturating_sub(1);
         let mut input =
             Vec::with_capacity(config.len() + gop.iter().map(|f| f.data.len()).sum::<usize>());
@@ -682,7 +717,7 @@ impl FrameCache {
             input.extend_from_slice(&f.data);
         }
         let filter = format!("select=gte(n\\,{})", n);
-        let mut child = tokio::process::Command::new(ffmpeg)
+        let spawned = tokio::process::Command::new(ffmpeg)
             .args([
                 "-loglevel",
                 "error",
@@ -706,14 +741,21 @@ impl FrameCache {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("启动 ffmpeg 失败: {}", e))?;
+            .spawn();
+        // spawn 段在失败路径也记录：到失败点的启动耗时同样有观测价值
+        metrics.record_ffmpeg_stage(
+            FfmpegStage::Spawn,
+            spawn_started.elapsed().as_millis() as u64,
+        );
+        let mut child = spawned.map_err(|e| anyhow::anyhow!("启动 ffmpeg 失败: {}", e))?;
         let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| anyhow::anyhow!("ffmpeg 无 stdin"))?;
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
+        // 写入/读取段共享起点：join! 首次调度前
+        let pipeline_started = Instant::now();
         // 写输入与读输出并发：若先写完再读，ffmpeg 输出管道满时会堵住解码（死锁）
         let write = async move {
             stdin
@@ -721,7 +763,7 @@ impl FrameCache {
                 .await
                 .map_err(|e| anyhow::anyhow!("写入 ffmpeg stdin 失败: {}", e))?;
             drop(stdin); // 关闭 stdin → ffmpeg 读到 EOF
-            Ok::<_, anyhow::Error>(())
+            Ok::<_, anyhow::Error>(Instant::now())
         };
         let read = async {
             let (Some(so), Some(se)) = (child.stdout.take(), child.stderr.take()) else {
@@ -733,13 +775,36 @@ impl FrameCache {
             Ok::<_, anyhow::Error>(())
         };
         let (write_result, read_result) = tokio::join!(write, read);
-        write_result?;
+        let io_done = Instant::now();
+        let write_done_at = match write_result {
+            Ok(at) => at,
+            Err(error) => {
+                // 写入失败（如 ffmpeg 提前退出断开管道）：write 段记到失败点，decode 段≈0
+                metrics.record_ffmpeg_stage(
+                    FfmpegStage::Write,
+                    pipeline_started.elapsed().as_millis() as u64,
+                );
+                metrics.record_ffmpeg_stage(FfmpegStage::Decode, 0);
+                return Err(error);
+            }
+        };
+        metrics.record_ffmpeg_stage(
+            FfmpegStage::Write,
+            write_done_at
+                .saturating_duration_since(pipeline_started)
+                .as_millis() as u64,
+        );
+        metrics.record_ffmpeg_stage(
+            FfmpegStage::Decode,
+            io_done.saturating_duration_since(write_done_at).as_millis() as u64,
+        );
         read_result?;
         let status = child
             .wait()
             .await
             .map_err(|e| anyhow::anyhow!("等待 ffmpeg 失败: {}", e))?;
         if !status.success() || out.is_empty() {
+            metrics.record_ffmpeg_stage(FfmpegStage::Png, io_done.elapsed().as_millis() as u64);
             let tail = String::from_utf8_lossy(&err).trim().to_string();
             let tail = if tail.len() > 300 {
                 format!("...{}", &tail[tail.len() - 300..])
@@ -757,6 +822,7 @@ impl FrameCache {
                 }
             );
         }
+        metrics.record_ffmpeg_stage(FfmpegStage::Png, io_done.elapsed().as_millis() as u64);
         debug!(
             "frame decoded on demand: {} bytes ({} frames)",
             out.len(),
@@ -866,6 +932,24 @@ mod tests {
         assert_eq!(snap.ffmpeg_decode_failure_total, 1);
         assert_eq!(snap.ffmpeg_decode_success_total, 0);
         assert_eq!(snap.ffmpeg_decode_timeout_total, 0);
+    }
+
+    /// PERF-001：spawn 失败只记 spawn 段（其余段未执行不计数），分段观测
+    /// 不改变失败语义。不起真实 ffmpeg：不存在的可执行文件在 spawn 阶段失败。
+    #[tokio::test]
+    async fn decode_stage_metrics_record_spawn_failure_only() {
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let cache = FrameCache::start_with_metrics("gamer-no-such-ffmpeg", Arc::clone(&metrics));
+        cache.feed(&video_frame(1, true, false));
+        cache.feed(&video_frame(2, false, true));
+
+        assert!(cache.decode_latest_png().await.is_err());
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.ffmpeg_stage_spawn_total, 1);
+        assert_eq!(snap.ffmpeg_stage_write_total, 0);
+        assert_eq!(snap.ffmpeg_stage_decode_total, 0);
+        assert_eq!(snap.ffmpeg_stage_png_total, 0);
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1490,6 +1574,213 @@ mod tests {
             cache.cached_decoded_png(third.key, third.frame_sequence),
             None,
             "completed PNG must expire after the configured freshness window"
+        );
+    }
+
+    /// PERF-001：解析固定夹具 Annex-B 流为（SPS/PPS 配置帧, GOP 帧序列）。
+    /// 与 matcher::tests::split_perf_gop 同源；若流解析规则变化需两边同步。
+    fn split_benchmark_gop(stream: &[u8]) -> (Vec<u8>, Vec<VideoFrame>) {
+        let mut starts = Vec::new();
+        let mut index = 0;
+        while index + 3 <= stream.len() {
+            let prefix = if stream[index..].starts_with(&[0, 0, 0, 1]) {
+                4
+            } else if stream[index..].starts_with(&[0, 0, 1]) {
+                3
+            } else {
+                index += 1;
+                continue;
+            };
+            starts.push((index, prefix));
+            index += prefix;
+        }
+
+        let mut config = Vec::new();
+        let mut frames = Vec::new();
+        let mut current = Vec::new();
+        let mut current_has_slice = false;
+        let mut current_is_keyframe = false;
+        for (position, (start, prefix)) in starts.iter().enumerate() {
+            let end = starts
+                .get(position + 1)
+                .map(|(next, _)| *next)
+                .unwrap_or(stream.len());
+            let nal = &stream[start + prefix..end];
+            let nal_type = nal.first().copied().unwrap_or_default() & 0x1f;
+            let first_slice =
+                matches!(nal_type, 1 | 5) && nal.get(1).is_some_and(|byte| byte & 0x80 != 0);
+            if matches!(nal_type, 7 | 8) && frames.is_empty() && current.is_empty() {
+                config.extend_from_slice(&stream[*start..end]);
+                continue;
+            }
+            if first_slice && current_has_slice {
+                frames.push(VideoFrame {
+                    data: std::mem::take(&mut current),
+                    pts_us: frames.len() as u64 * 33_333,
+                    is_config: false,
+                    is_keyframe: current_is_keyframe,
+                    annex_b: true,
+                });
+                current_has_slice = false;
+                current_is_keyframe = false;
+            }
+            if first_slice {
+                current_has_slice = true;
+                current_is_keyframe = nal_type == 5;
+            }
+            current.extend_from_slice(&stream[*start..end]);
+        }
+        if !current.is_empty() {
+            frames.push(VideoFrame {
+                data: current,
+                pts_us: frames.len() as u64 * 33_333,
+                is_config: false,
+                is_keyframe: current_is_keyframe,
+                annex_b: true,
+            });
+        }
+        (config, frames)
+    }
+
+    /// 段样本百分位（ceil 秩），与 matcher::tests 的 percentile 取法一致
+    fn stage_percentile(samples: &[u64], p: f64) -> u64 {
+        let mut sorted = samples.to_vec();
+        sorted.sort_unstable();
+        let rank = ((sorted.len() as f64) * p).ceil() as usize;
+        sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+    }
+
+    /// 输出与 matcher 基准 perf_report 同构的 PERF 行（cpu/peak 不适用于
+    /// 计数器差分样本，固定“未实测”占位），metric 名对齐
+    /// tools/perf-stage5b-stats.mjs 的 ffmpeg_* 别名
+    fn report_stage_samples(metric: &str, samples: &[u64]) {
+        assert!(!samples.is_empty(), "{metric} 没有样本");
+        println!(
+            "PERF metric={} samples={} p50_us={} p95_us={} max_us={} cpu_ms=未实测 cpu_p50_us=未实测 cpu_p95_us=未实测 cpu_max_us=未实测 peak_mem_bytes=未实测 platform={}",
+            metric,
+            samples.len(),
+            stage_percentile(samples, 0.50),
+            stage_percentile(samples, 0.95),
+            samples.iter().copied().max().unwrap_or_default(),
+            std::env::consts::OS,
+        );
+    }
+
+    /// PERF-001：ffmpeg 按需解码内部分段（spawn/write/decode/png）的固定夹具
+    /// 离线基准。与 matcher::tests::fixed_fixture_benchmark_p50_p95 同一
+    /// fixture（testdata/perf/stream.h264 固定 GOP），单独驱动生产
+    /// decode_latest_png 路径，按迭代差分注入 Metrics 实例的分段累计器，
+    /// 输出 PERF metric=ffmpeg_start/ffmpeg_input/ffmpeg_decode/ffmpeg_png 的
+    /// p50/p95/max（µs；样本值来自毫秒分辨率的分段计数器 ×1000——spawn/decode
+    /// 段为数十~数百 ms、write 段数十 ms，量化影响可忽略；png 段为 Rust 侧
+    /// 亚毫秒后处理，常记 0 属预期）。运行 tools/run-perf-benchmark.ps1 或
+    /// 设置 GAMER_PERF_ITERS 后执行。
+    #[tokio::test]
+    #[ignore = "运行 tools/run-perf-benchmark.ps1 或设置 GAMER_PERF_ITERS 后执行"]
+    async fn fixed_fixture_decode_stage_benchmark_p50_p95() {
+        use std::hint::black_box;
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/perf");
+        let stream = std::fs::read(dir.join("stream.h264")).expect("读取固定夹具 stream.h264 失败");
+        let (config, gop) = split_benchmark_gop(&stream);
+        assert!(!config.is_empty(), "固定 H.264 fixture 缺少 SPS/PPS");
+        assert!(!gop.is_empty(), "固定 H.264 fixture 未解析出视频帧");
+        let ffmpeg = std::env::var("GAMER_PERF_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
+        let iterations = std::env::var("GAMER_PERF_ITERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(20);
+        let warmup = std::env::var("GAMER_PERF_WARMUP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(3);
+
+        // 注入独立 Metrics：本测试独占该实例，分段累计器的迭代差分即为
+        // 该次解码的各段耗时（每段每次解码恰记录一次）
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let decode = |metrics: Arc<crate::metrics::Metrics>| {
+            FrameCache::benchmark_decode_with_metrics(&ffmpeg, metrics, &config, &gop)
+        };
+
+        for _ in 0..warmup {
+            decode(Arc::clone(&metrics))
+                .await
+                .expect("固定 GOP 解码失败");
+        }
+
+        let mut spawn_samples = Vec::with_capacity(iterations);
+        let mut write_samples = Vec::with_capacity(iterations);
+        let mut decode_samples = Vec::with_capacity(iterations);
+        let mut png_samples = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let before = metrics.snapshot();
+            let png = decode(Arc::clone(&metrics))
+                .await
+                .expect("固定 GOP 解码失败");
+            let after = metrics.snapshot();
+            black_box(png);
+
+            let delta_us = |later_ms: u64, earlier_ms: u64| {
+                later_ms.saturating_sub(earlier_ms).saturating_mul(1000)
+            };
+            spawn_samples.push(delta_us(
+                after.ffmpeg_stage_spawn_ms_total,
+                before.ffmpeg_stage_spawn_ms_total,
+            ));
+            write_samples.push(delta_us(
+                after.ffmpeg_stage_write_ms_total,
+                before.ffmpeg_stage_write_ms_total,
+            ));
+            decode_samples.push(delta_us(
+                after.ffmpeg_stage_decode_ms_total,
+                before.ffmpeg_stage_decode_ms_total,
+            ));
+            png_samples.push(delta_us(
+                after.ffmpeg_stage_png_ms_total,
+                before.ffmpeg_stage_png_ms_total,
+            ));
+            // 计数差分≠1 说明分段计数被并发污染，样本不可信
+            assert_eq!(
+                after
+                    .ffmpeg_stage_spawn_total
+                    .saturating_sub(before.ffmpeg_stage_spawn_total),
+                1,
+                "spawn 段每次解码应恰记录一次"
+            );
+            assert_eq!(
+                after
+                    .ffmpeg_stage_write_total
+                    .saturating_sub(before.ffmpeg_stage_write_total),
+                1,
+                "write 段每次解码应恰记录一次"
+            );
+            assert_eq!(
+                after
+                    .ffmpeg_stage_decode_total
+                    .saturating_sub(before.ffmpeg_stage_decode_total),
+                1,
+                "decode 段每次解码应恰记录一次"
+            );
+            assert_eq!(
+                after
+                    .ffmpeg_stage_png_total
+                    .saturating_sub(before.ffmpeg_stage_png_total),
+                1,
+                "png 段每次解码应恰记录一次"
+            );
+        }
+
+        report_stage_samples("ffmpeg_start", &spawn_samples);
+        report_stage_samples("ffmpeg_input", &write_samples);
+        report_stage_samples("ffmpeg_decode", &decode_samples);
+        report_stage_samples("ffmpeg_png", &png_samples);
+        println!(
+            "PERF stages fixture=server/testdata/perf iterations={} warmup={} platform={} gop_frames={} resolution=ms_quantized",
+            iterations,
+            warmup,
+            std::env::consts::OS,
+            gop.len(),
         );
     }
 }
