@@ -674,8 +674,10 @@ mod sec_tests {
 
     #[tokio::test]
     async fn expired_cookie_is_rejected_by_protected_route() {
+        // abs 用 5s 窗口而非 1s：与 session_lifecycle 同因——并行负载下
+        // login→首请求→sleep 的调度抖动可能超 1s，窗口太紧会误判未过期/过期翻转
         let cfg = crate::config::AuthConfig {
-            session_abs_secs: 1,
+            session_abs_secs: 5,
             session_idle_secs: 60,
             ..Default::default()
         };
@@ -699,7 +701,7 @@ mod sec_tests {
         .await;
         assert_eq!(before.status(), StatusCode::OK);
 
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        tokio::time::sleep(Duration::from_millis(5_200)).await;
         let after = send(
             &t.app,
             req(
