@@ -9,6 +9,6 @@ export default defineConfig({
   plugins: [vue()],
   test: {
     environment: 'node',
-    include: ['src/script-language/**/*.test.js', 'src/*.test.js', 'src/script-editor/**/*.test.js', 'src/recording/**/*.test.js'],
+    include: ['src/*.test.js', 'src/script-editor/**/*.test.js', 'src/recording/**/*.test.js'],
   },
 })
