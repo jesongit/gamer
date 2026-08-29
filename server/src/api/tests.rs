@@ -22,7 +22,7 @@ use super::devices::{
 use super::logs::clamp_log_limit;
 use super::runs::{validate_run_req, RunReqArgs};
 use super::tasks::{validate_task_req, SaveTaskReq};
-use super::templates::validate_template_name;
+use super::templates::{compose_region_suffix, validate_short_name, validate_template_name};
 use super::{auth, build_router, ApiError};
 
 // ---------- 集成测试（阶段 2 SEC 验收矩阵自动化子集） ----------
@@ -2370,6 +2370,137 @@ mod sec_tests {
         let j = json_body(resp).await;
         assert_eq!(j.as_array().unwrap().len(), 1);
         assert_eq!(j[0]["name"], "icon.png");
+    }
+
+    // ---------- 模板上传命名契约（plan §11.7：短名 + 搜索区域由服务端组合完整名）----------
+
+    #[test]
+    fn short_name_and_region_composition_units() {
+        // 短名合法口径：[A-Za-z0-9_-]+\.png
+        assert!(validate_short_name("record_click_20260829_001.png").is_ok());
+        assert!(validate_short_name("  a-b_C9.png  ").is_ok());
+        assert!(validate_short_name("x.jpg").is_err());
+        assert!(validate_short_name("bad name!.png").is_err());
+        assert!(validate_short_name(".png").is_err());
+        assert!(validate_short_name("中文.png").is_err());
+        // 区域 ×1000 三位整数；1.0 钳到 999；越界夹取；退化（x2<=x1 / y2<=y1）拒绝
+        assert_eq!(
+            compose_region_suffix([0.1, 0.2, 0.3, 0.4]).unwrap(),
+            "100_200_300_400"
+        );
+        assert_eq!(
+            compose_region_suffix([0.0, 0.0, 1.0, 1.0]).unwrap(),
+            "000_000_999_999"
+        );
+        assert_eq!(
+            compose_region_suffix([-1.0, -1.0, 2.0, 2.0]).unwrap(),
+            "000_000_999_999"
+        );
+        assert!(compose_region_suffix([0.5, 0.5, 0.5, 0.9]).is_err());
+        assert!(compose_region_suffix([0.1, 0.9, 0.3, 0.2]).is_err());
+    }
+
+    #[tokio::test]
+    async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
+        let t = build_app(
+            "tmplshort",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+        let png = base64::engine::general_purpose::STANDARD.encode(valid_template_png());
+
+        // 短名 + region → 服务端组合 `<短名去.png>#x1_y1_x2_y2.png`
+        let resp = post_json(
+            &t,
+            &sid,
+            "/api/templates",
+            serde_json::json!({
+                "pkg": "com.test.app",
+                "short_name": "login_btn.png",
+                "region": [0.1, 0.2, 0.3, 0.4],
+                "data_b64": png,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let j = json_body(resp).await;
+        assert_eq!(j["ok"], true);
+        assert_eq!(j["name"], "login_btn#100_200_300_400.png");
+
+        // 磁盘文件与列表都呈现完整名（引擎 #后缀即搜索区域元数据）
+        assert!(t
+            .dir
+            .join("com.test.app/tmpl/login_btn#100_200_300_400.png")
+            .is_file());
+        let resp = get_json(&t, &sid, "/api/templates?pkg=com.test.app").await;
+        let j = json_body(resp).await;
+        assert_eq!(j.as_array().unwrap().len(), 1);
+        assert_eq!(j[0]["name"], "login_btn#100_200_300_400.png");
+
+        // 同短名再传（不同区域）→ 409 冲突不覆盖（§11.7 冲突要求改名）；
+        // 磁盘上仍是第一次的完整名
+        let resp = post_json(
+            &t,
+            &sid,
+            "/api/templates",
+            serde_json::json!({
+                "pkg": "com.test.app",
+                "short_name": "login_btn.png",
+                "region": [0.0, 0.0, 0.5, 0.5],
+                "data_b64": png,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(t
+            .dir
+            .join("com.test.app/tmpl/login_btn#100_200_300_400.png")
+            .is_file());
+        assert!(!t
+            .dir
+            .join("com.test.app/tmpl/login_btn#000_000_500_500.png")
+            .is_file());
+
+        // 非法短名 / 非法 region / 参数互斥与缺参 → 400
+        for body in [
+            serde_json::json!({"pkg": "com.test.app", "short_name": "bad name!.png", "data_b64": png}),
+            serde_json::json!({"pkg": "com.test.app", "short_name": "x.jpg", "data_b64": png}),
+            serde_json::json!({"pkg": "com.test.app", "short_name": "ok.png", "region": [0.5, 0.5, 0.5, 0.5], "data_b64": png}),
+            serde_json::json!({"pkg": "com.test.app", "short_name": "ok.png", "name": "y.png", "data_b64": png}),
+            serde_json::json!({"pkg": "com.test.app", "data_b64": png}),
+        ] {
+            let resp = post_json(&t, &sid, "/api/templates", body).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        // 短名无 region → 无 # 后缀普通名落盘；旧形态 name 覆盖写保持不变
+        // （Console 框选替换/文件上传靠同名覆盖，兼容不动）
+        let resp = post_json(
+            &t,
+            &sid,
+            "/api/templates",
+            serde_json::json!({
+                "pkg": "com.test.app",
+                "short_name": "plain.png",
+                "data_b64": png,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json_body(resp).await["name"], "plain.png");
+        let resp = post_json(
+            &t,
+            &sid,
+            "/api/templates",
+            serde_json::json!({
+                "pkg": "com.test.app",
+                "name": "plain.png",
+                "data_b64": png,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // ---------- 统一 RunTarget：函数测试运行端点（POST /api/functions/:id/run）----------

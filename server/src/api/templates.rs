@@ -40,6 +40,45 @@ pub(super) fn validate_template_name(name: &str) -> Result<String, ApiError> {
     Ok(name.to_string())
 }
 
+/// 录制上传短名校验（plan §11.7）：`[A-Za-z0-9_-]+\.png`。
+/// 完整文件名由服务端组合（短名 + 搜索区域 #×1000 后缀），前端不拼接 # 元数据。
+pub(super) fn validate_short_name(name: &str) -> Result<String, ApiError> {
+    let name = name.trim();
+    let Some(base) = name.strip_suffix(".png") else {
+        return Err(ApiError::bad_request("短名非法（必须以 .png 结尾）"));
+    };
+    if base.is_empty()
+        || base.len() > 251
+        || !base
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(ApiError::bad_request(
+            "短名非法（只允许字母数字 - _，以 .png 结尾）",
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// 相对搜索区域 `[x1,y1,x2,y2]`（0~1）→ `x1_y1_x2_y2` ×1000 三位整数后缀。
+/// 与前端 defaultTemplateName 同编码，是引擎 `tpl_region_from_name` 数字分支
+/// 的逆变换（后者要求 x2>x1、y2>y1，此处组合前同口径校验）。
+pub(super) fn compose_region_suffix(region: [f64; 4]) -> Result<String, ApiError> {
+    if region.iter().any(|v| !v.is_finite()) {
+        return Err(ApiError::bad_request("region 含非数字值"));
+    }
+    // 越界夹取到 0~1、×1000 取整并钳到 999（与前端 toInt3 一致）
+    let to_int3 = |v: f64| ((v.clamp(0.0, 1.0) * 1000.0).round() as u32).min(999);
+    let [x1, y1, x2, y2] = region;
+    let (a, b, c, d) = (to_int3(x1), to_int3(y1), to_int3(x2), to_int3(y2));
+    if c <= a || d <= b {
+        return Err(ApiError::bad_request(
+            "region 非法（需 x2>x1、y2>y1，为 0~1 相对坐标 [x1,y1,x2,y2]）",
+        ));
+    }
+    Ok(format!("{a:03}_{b:03}_{c:03}_{d:03}"))
+}
+
 pub(super) async fn api_list_templates(
     State(st): State<AppState>,
     Query(q): Query<PkgQuery>,
@@ -94,11 +133,39 @@ pub(super) async fn api_list_templates(
     }
 }
 
+/// 模板上传请求（plan §11.7 命名契约化后两种形态二选一）：
+/// - **新形态（录制上传）**：`short_name`（短名，可选配 `region` 搜索区域
+///   `[x1,y1,x2,y2]` 相对坐标 0~1）——完整文件名由服务端组合
+///   `<短名去.png>#x1_y1_x2_y2.png`（×1000 三位整数），短名冲突 409 不覆盖；
+/// - **旧形态（兼容）**：`name` 完整文件名（可带 `#` 后缀），同名覆盖写
+///   （行为不变，region 字段忽略）。
 #[derive(Deserialize)]
 pub(super) struct UploadTemplateReq {
-    name: String,
+    name: Option<String>,
+    short_name: Option<String>,
+    region: Option<[f64; 4]>,
     data_b64: String,
     pkg: String,
+}
+
+/// 短名冲突检查（新形态专用，plan §11.7：冲突要求改名不覆盖）：分区内存在
+/// 同基名文件（任意扩展名，含 `#` 后缀变体，大小写不敏感对齐 Windows FS）即冲突。
+/// 短名引用靠「基名 + # 后缀唯一候选」消歧，放行第二个同基名文件会制造歧义。
+fn short_name_conflict(dir: &std::path::Path, base: &str) -> bool {
+    let base = base.to_ascii_lowercase();
+    let prefix = format!("{base}#");
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .any(|n| match n.rsplit_once('.') {
+            Some((stem, _)) => {
+                let stem = stem.to_ascii_lowercase();
+                stem == base || stem.starts_with(&prefix)
+            }
+            None => false,
+        })
 }
 
 pub(super) async fn api_upload_template(
@@ -109,9 +176,31 @@ pub(super) async fn api_upload_template(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    let name = match validate_template_name(&req.name) {
-        Ok(name) => name,
-        Err(err) => return err.into_response(),
+    // 新旧形态分流：short_name（服务端组合完整名 + 短名冲突拒绝）/ name（覆盖写）
+    let (name, short_base) = match (req.short_name.as_deref(), req.name.as_deref()) {
+        (Some(_), Some(_)) => {
+            return err_response(StatusCode::BAD_REQUEST, "name 与 short_name 只能二选一")
+        }
+        (None, None) => return err_response(StatusCode::BAD_REQUEST, "缺少 name 或 short_name"),
+        (Some(short), None) => {
+            let short = match validate_short_name(short) {
+                Ok(v) => v,
+                Err(err) => return err.into_response(),
+            };
+            let base = &short[..short.len() - 4]; // 去 ".png"
+            let name = match req.region {
+                Some(region) => match compose_region_suffix(region) {
+                    Ok(suffix) => format!("{base}#{suffix}.png"),
+                    Err(err) => return err.into_response(),
+                },
+                None => short.clone(),
+            };
+            (name, Some(base.to_string()))
+        }
+        (None, Some(name)) => match validate_template_name(name) {
+            Ok(v) => (v, None),
+            Err(err) => return err.into_response(),
+        },
     };
     // base64 合法性与体积先于解码校验（4/3 膨胀后 16MiB ≈ 原始 12MiB 内的护栏）
     const MAX_B64_LEN: usize = (matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 1) * 4;
@@ -140,6 +229,14 @@ pub(super) async fn api_upload_template(
     };
     match run_blocking_api(move || {
         let dir = st.scripts.tmpl_dir(&pkg);
+        // 新形态：短名冲突即 409（§11.7 冲突要求改名不自动覆盖）；旧形态保持覆盖写
+        if let Some(base) = &short_base {
+            if short_name_conflict(&dir, base) {
+                return Err(ApiError::conflict(format!(
+                    "短名 {base}.png 已存在，请改名（不会覆盖）"
+                )));
+            }
+        }
         std::fs::create_dir_all(&dir).map_err(|e| ApiError::internal(e.to_string()))?;
         let path = dir.join(&name);
         crate::scripts::atomic_write(&path, &bytes)
