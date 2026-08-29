@@ -226,3 +226,28 @@
 
 ### 结论
 通过
+
+
+## 阶段 6：录制模式
+
+### 交付
+- 9566840 feat(web): 录制核心服务（web/src/recording/：gesture 分类阈值 max(8,min×0.005)/600ms、crop 自动 50×50 与 100×100/union+25px 边界数学、queue 单调 seq 占位保序+失败重试/丢弃/坐标降级、service 状态机 idle→recording→stopping 且按下先冻结后透传）
+- b4e7235 + ce4f9af feat(web): Console 录制接线（useRecording 接线层、⏺ 录制按钮+状态栏、投屏录制分支优先于 Alt、RecordingCropPanel 全幅底图二次裁切、失败草稿不漏步、离开保护、ScriptRunner 上传中锁画布）
+- 主线补: vitest include 纳入 src/recording（E1 按边界约束不能改共享配置）
+
+### 自动化命令与结果
+- pnpm test:run：534 passed / 0 failed（454 接线+80 核心全量收集）；pnpm build 成功（主线复验）
+
+### 与 §11 的偏差（实现期冻结）
+- `#` 搜索区后缀暂由前端拼接（现 POST /api/templates 仅收完整 name；§11.7 要求服务端组合——归阶段 7 服务端补 short_name+region 参数后切换）
+- setCropping 迁移态未用（语义等价 pending→uploading→ready）；暂停换锚点=停止后可换、上传中锁画布等价实现
+- 冻结失败（黑屏）→ 失败草稿「画面不可用」，触控仍透传，不假报成功
+
+### 真机验收注意（阶段 8 待用户确认）
+- 多指第二指 window 捕获透传的浏览器兼容；同步 toDataURL 冻结 1080p 约 30-60ms 的手感；高分屏/旋转以按下帧尺寸为基准；长按>600ms 生成失败草稿属设计
+
+### 审查人
+主线编排复核：复跑门禁全绿（含录制核心测试收集修复）
+
+### 结论
+自动化通过；真机录制回放待用户确认（L5 待验）
