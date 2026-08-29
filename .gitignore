@@ -10,6 +10,11 @@ server/data/*.db-shm
 server/data/*.db-wal
 server/data/pending_restore.json
 
+# ===== Docker 并存部署（docker-compose.local.yml，宿主 8444）=====
+# 独立数据目录（volume 挂载，本机运行数据不随仓库分发）：需要种子分区时
+# 从 server/data/<pkg> 自行复制
+docker-data/
+
 # ===== Node (web) =====
 web/node_modules/
 web/dist/

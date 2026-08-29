@@ -1,0 +1,29 @@
+# GameBot 本机并存部署 overlay：Docker 实例（宿主 8444）与本地开发实例（8443 / 5173 dev）并存
+#
+# 用途：与 docker-compose.yml 叠加使用，为 Docker 实例提供独立数据目录 docker-data/
+#      与独立端口（宿主 8444 → 容器 8443），绝不触碰开发实例的 server/data 与 8443 服务
+#      （两实例共享数据目录会抢设备 scrcpy 会话、定时任务双跑）。
+#      ports / volumes 用 !override 整体替换主文件对应项（避免合并出 8443:8443 双映射）。
+#
+# 数据目录准备（种子 = server/data 下各应用分区 <pkg>/{tmpl,yaml}，不含 gamer.db* /
+# pending_restore.json，Docker 实例自建自己的数据库）：
+#   mkdir -p docker-data && cp -r server/data/<pkg>… docker-data/
+#
+# 启动（构建 + 起容器；redroid 带 profile，不会被拉起）：
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+# 停止：
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml down
+#
+# 登录：容器内无 config.toml（本机文件不入镜像）→ GAMER_PROFILE 缺省 dev →
+#      内置默认凭据 admin/admin123、端口 8443、数据目录 /app/data
+
+services:
+  gamer:
+    image: gamer:deploy
+    container_name: gamer-server-docker
+    ports: !override
+      - "8444:8443"
+    volumes: !override
+      # 独立数据目录：与开发实例 server/data 完全隔离
+      - ./docker-data:/app/data
+    # build / environment(GB_CONFIG) / healthcheck / restart 策略复用主文件定义
