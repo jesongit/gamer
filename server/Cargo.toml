@@ -50,7 +50,10 @@ async-recursion = "1"
 # 脚本包导出/导入（zip）
 zip = "2"
 
-[dev-dependencies]
+# script_v2 严格装载：事件级解析携带标量样式与 Span（契约见 docs/SCRIPT_EDITOR_CONTRACT.md）
 saphyr-parser = "0.0.12"
+
+[dev-dependencies]
+tempfile = "3"
 # router 集成测试用 oneshot 驱动（tower ServiceExt）
 tower = { version = "0.4", features = ["util"] }
