@@ -1608,4 +1608,764 @@ mod sec_tests {
         };
         assert!(validate_run_script_req(&bad_run).is_err());
     }
+
+    // ---------- 阶段 1 资源 API：/api/functions CRUD、版本冲突、dry-run 导入 ----------
+    //
+    // 资源 id 含 `/`，URL 里整体 encodeURIComponent（%2F），与 scripts 路由同规则。
+
+    const FUNC_YAML: &str = "login:\n  steps:\n    - return: true\n";
+    const FUNC_YAML_V2: &str = "login:\n  steps:\n    - return: false\n";
+
+    fn json_headers(cookie: String) -> Vec<(String, String)> {
+        vec![
+            (header::COOKIE.to_string(), cookie),
+            (header::CONTENT_TYPE.to_string(), JSON_CT.into()),
+        ]
+    }
+
+    fn zip_headers(cookie: String) -> Vec<(String, String)> {
+        vec![
+            (header::COOKIE.to_string(), cookie),
+            (header::CONTENT_TYPE.to_string(), "application/zip".into()),
+        ]
+    }
+
+    fn valid_template_png() -> Vec<u8> {
+        let mut img = image::GrayImage::new(8, 8);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            p.0[0] = if (x + y) % 2 == 0 { 32 } else { 224 };
+        }
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    async fn post_json(
+        t: &TestApp,
+        sid: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> HttpResponse<Body> {
+        send(
+            &t.app,
+            req(
+                "POST",
+                uri,
+                None,
+                &json_headers(sid.to_string()),
+                Some(body.to_string()),
+            ),
+        )
+        .await
+    }
+
+    async fn get_json(t: &TestApp, sid: &str, uri: &str) -> HttpResponse<Body> {
+        send(
+            &t.app,
+            req("GET", uri, None, &json_headers(sid.to_string()), None),
+        )
+        .await
+    }
+
+    async fn func_first(t: &TestApp, sid: &str, pkg: &str) -> (String, String, serde_json::Value) {
+        let resp = get_json(t, sid, &format!("/api/functions?pkg={pkg}")).await;
+        let j = json_body(resp).await;
+        (
+            j[0]["file"].as_str().unwrap().to_string(),
+            j[0]["content"].as_str().unwrap().to_string(),
+            j[0]["functions"].clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn functions_routes_require_auth() {
+        let t = build_app(
+            "fnauth",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let cases = [
+            ("GET", "/api/functions?pkg=com.test.app", None),
+            (
+                "POST",
+                "/api/functions",
+                Some(r#"{"pkg":"p","name":"a","content":"x: {}\n"}"#),
+            ),
+            ("GET", "/api/functions/com.test.app%2Fa.yaml", None),
+            (
+                "PUT",
+                "/api/functions/com.test.app%2Fa.yaml",
+                Some(r#"{"content":"x: {}\n"}"#),
+            ),
+            ("DELETE", "/api/functions/com.test.app%2Fa.yaml", None),
+        ];
+        for (method, uri, body) in cases {
+            let resp = send(
+                &t.app,
+                req(method, uri, None, &[], body.map(str::to_string)),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn functions_crud_cycle_with_version_conflict() {
+        let t = build_app(
+            "fncrud",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+
+        // create：缺扩展名自动补 .yaml，返回 id/file/version/函数名清单
+        let body =
+            serde_json::json!({"pkg": "com.test.app", "name": "common", "content": FUNC_YAML});
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/functions",
+                None,
+                &json_headers(sid.clone()),
+                Some(body.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let j = json_body(resp).await;
+        assert_eq!(j["ok"], true);
+        assert_eq!(j["id"], "com.test.app/common.yaml");
+        assert_eq!(j["file"], "common");
+        assert_eq!(j["functions"], serde_json::json!(["login"]));
+        let v1 = j["version"].as_str().unwrap().to_string();
+        assert_eq!(v1.len(), 12);
+
+        // list：pkg 必填、返回文件短路径 + 函数名清单
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/functions?pkg=com.test.app",
+                None,
+                &json_headers(sid.clone()),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let j = json_body(resp).await;
+        assert_eq!(j[0]["id"], "com.test.app/common.yaml");
+        assert_eq!(j[0]["file"], "common");
+        assert_eq!(j[0]["version"], v1.as_str());
+        assert_eq!(j[0]["functions"], serde_json::json!(["login"]));
+
+        // get（%2F 编码 id）：内容往返一致
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/functions/com.test.app%2Fcommon.yaml",
+                None,
+                &json_headers(sid.clone()),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let j = json_body(resp).await;
+        assert_eq!(j["content"], FUNC_YAML);
+        assert_eq!(j["pkg"], "com.test.app");
+
+        // update 带 expected_version：成功并换新版本
+        let body = serde_json::json!({"content": FUNC_YAML_V2, "expected_version": v1});
+        let resp = send(
+            &t.app,
+            req(
+                "PUT",
+                "/api/functions/com.test.app%2Fcommon.yaml",
+                None,
+                &json_headers(sid.clone()),
+                Some(body.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v2 = json_body(resp).await["version"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(v2, v1);
+
+        // update 带过期版本 → 409 {code:"version_conflict", message, resource}
+        let body = serde_json::json!({"content": FUNC_YAML, "expected_version": v1});
+        let resp = send(
+            &t.app,
+            req(
+                "PUT",
+                "/api/functions/com.test.app%2Fcommon.yaml",
+                None,
+                &json_headers(sid.clone()),
+                Some(body.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let j = json_body(resp).await;
+        assert_eq!(j["code"], "version_conflict");
+        assert_eq!(j["resource"], "com.test.app/common.yaml");
+        assert!(j["message"].is_string());
+
+        // 不带 expected_version 直接接受（旧前端兼容）
+        let body = serde_json::json!({"content": FUNC_YAML});
+        let resp = send(
+            &t.app,
+            req(
+                "PUT",
+                "/api/functions/com.test.app%2Fcommon.yaml",
+                None,
+                &json_headers(sid.clone()),
+                Some(body.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // delete → get 404 → delete 幂等失败 404
+        let resp = send(
+            &t.app,
+            req(
+                "DELETE",
+                "/api/functions/com.test.app%2Fcommon.yaml",
+                None,
+                &json_headers(sid.clone()),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/functions/com.test.app%2Fcommon.yaml",
+                None,
+                &json_headers(sid.clone()),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = send(
+            &t.app,
+            req(
+                "DELETE",
+                "/api/functions/com.test.app%2Fcommon.yaml",
+                None,
+                &json_headers(sid),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn functions_input_validation_and_missing_pkg() {
+        let t = build_app(
+            "fnvalid",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+
+        // pkg 缺失/空 → 400（GET 与 POST）
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/functions",
+                None,
+                &json_headers(sid.clone()),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = serde_json::json!({"pkg": "", "name": "a", "content": "x:\n  steps: []\n"});
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/functions",
+                None,
+                &json_headers(sid.clone()),
+                Some(body.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // 浅校验：顶层键保留字 / 非法函数名 / YAML 语法错 / 子目录短路径
+        let cases = [
+            ("match:\n  steps: []\n", "保留字"),
+            ("1abc:\n  steps: []\n", "不符合"),
+            ("login: [unclosed", "YAML"),
+            (
+                "123:
+  steps: []
+",
+                "不是字符串标量",
+            ),
+        ];
+        for (content, marker) in cases {
+            let body =
+                serde_json::json!({"pkg": "com.test.app", "name": "bad", "content": content});
+            let resp = send(
+                &t.app,
+                req(
+                    "POST",
+                    "/api/functions",
+                    None,
+                    &json_headers(sid.clone()),
+                    Some(body.to_string()),
+                ),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{content}");
+            assert!(
+                json_body(resp).await["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains(marker),
+                "{content}"
+            );
+        }
+        let body =
+            serde_json::json!({"pkg": "com.test.app", "name": "sub/common", "content": FUNC_YAML});
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/functions",
+                None,
+                &json_headers(sid.clone()),
+                Some(body.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // PUT / GET 不存在的函数文件 → 404
+        for (method, uri, body) in [
+            ("GET", "/api/functions/com.test.app%2Fnope.yaml", None),
+            (
+                "PUT",
+                "/api/functions/com.test.app%2Fnope.yaml",
+                Some(r#"{"content":"a:\n  steps: []\n"}"#),
+            ),
+        ] {
+            let resp = send(
+                &t.app,
+                req(
+                    method,
+                    uri,
+                    None,
+                    &json_headers(sid.clone()),
+                    body.map(str::to_string),
+                ),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn functions_never_leak_into_script_sources() {
+        let t = build_app(
+            "fnisolation",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+        // 同分区各建一个脚本与一个函数库文件
+        let script = serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps: []\n"});
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/scripts",
+                None,
+                &json_headers(sid.clone()),
+                Some(script.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let func =
+            serde_json::json!({"pkg": "com.test.app", "name": "common.yaml", "content": FUNC_YAML});
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/functions",
+                None,
+                &json_headers(sid.clone()),
+                Some(func.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 脚本列表只含 yaml/ 脚本，func 文件绝不混入
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/scripts",
+                None,
+                &json_headers(sid.clone()),
+                None,
+            ),
+        )
+        .await;
+        let j = json_body(resp).await;
+        assert_eq!(j.as_array().unwrap().len(), 1);
+        assert_eq!(j[0]["name"], "main.yaml");
+
+        // 函数 id 在脚本读取/运行接口一律 404（目录即类型，不做内容推断）
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/scripts/com.test.app%2Fcommon.yaml",
+                None,
+                &json_headers(sid.clone()),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/scripts/com.test.app%2Fcommon.yaml/run",
+                None,
+                &json_headers(sid.clone()),
+                Some(r#"{"device_id":"d1"}"#.into()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(resp).await["error"], "脚本不存在");
+
+        // 函数列表也只含 func/ 文件
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/functions?pkg=com.test.app",
+                None,
+                &json_headers(sid),
+                None,
+            ),
+        )
+        .await;
+        let j = json_body(resp).await;
+        assert_eq!(j.as_array().unwrap().len(), 1);
+        assert_eq!(j[0]["file"], "common");
+    }
+
+    #[tokio::test]
+    async fn scripts_get_version_and_save_expected_version_conflict() {
+        let t = build_app(
+            "scriptvers",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+
+        let resp = post_json(
+            &t,
+            &sid,
+            "/api/scripts",
+            serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps:\n  - log v1\n"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v1 = json_body(resp).await["version"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // GET 单脚本返回内容与版本
+        let resp = get_json(&t, &sid, "/api/scripts/com.test.app%2Fmain.yaml").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let j = json_body(resp).await;
+        assert_eq!(j["version"], v1.as_str());
+        assert!(j["content"].as_str().unwrap().contains("log v1"));
+
+        // 过期 expected_version → 409 version_conflict
+        let resp = post_json(
+            &t,
+            &sid,
+            "/api/scripts",
+            serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps: []\n", "expected_version": "deadbeefdead"}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let j = json_body(resp).await;
+        assert_eq!(j["code"], "version_conflict");
+        assert_eq!(j["resource"], "com.test.app/main.yaml");
+
+        // 正确 expected_version → 更新成功并返回新版本
+        let resp = post_json(
+            &t,
+            &sid,
+            "/api/scripts",
+            serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps:\n  - log v2\n", "expected_version": v1}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v2 = json_body(resp).await["version"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(v2, v1);
+
+        // 新建文件却带 expected_version（不可能持有的版本）→ 409
+        let resp = post_json(
+            &t,
+            &sid,
+            "/api/scripts",
+            serde_json::json!({"pkg": "com.test.app", "name": "other.yaml", "content": "steps: []\n", "expected_version": v1}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        // 重命名场景：expected_version 以 id 指向的旧文件为准
+        let resp = post_json(
+            &t,
+            &sid,
+            "/api/scripts",
+            serde_json::json!({"id": "com.test.app/main.yaml", "pkg": "com.test.app", "name": "quest", "content": "steps:\n  - log v2\n", "expected_version": v2}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = get_json(&t, &sid, "/api/scripts/com.test.app%2Fmain.yaml").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = get_json(&t, &sid, "/api/scripts/com.test.app%2Fquest.yaml").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn import_dry_run_reports_then_confirm_writes() {
+        let t = build_app(
+            "dryrun",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+        let z = craft_zip(vec![
+            ("yaml/ok.yaml", b"steps: []\n".to_vec()),
+            ("func/common.yaml", FUNC_YAML.as_bytes().to_vec()),
+            ("tmpl/a.png", valid_template_png()),
+        ]);
+
+        // dry-run：三类资源报告、不落盘
+        let resp = send(
+            &t.app,
+            req_bytes(
+                "POST",
+                "/api/scripts/import?pkg=com.test.app",
+                None,
+                &zip_headers(sid.clone()),
+                z.clone(),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let j = json_body(resp).await;
+        assert_eq!(j["scripts"]["add"], serde_json::json!(["yaml/ok.yaml"]));
+        assert_eq!(
+            j["functions"]["add"],
+            serde_json::json!(["func/common.yaml"])
+        );
+        assert_eq!(j["templates"]["add"].as_array().unwrap().len(), 1);
+        assert!(j["scripts"]["invalid"].as_array().unwrap().is_empty());
+        assert!(j["functions"]["invalid"].as_array().unwrap().is_empty());
+        assert!(!t.dir.join("com.test.app/yaml/ok.yaml").exists());
+
+        // confirm：落盘
+        let resp = send(
+            &t.app,
+            req_bytes(
+                "POST",
+                "/api/scripts/import?pkg=com.test.app&confirm=1",
+                None,
+                &zip_headers(sid.clone()),
+                z,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(t.dir.join("com.test.app/yaml/ok.yaml").is_file());
+        assert!(t.dir.join("com.test.app/func/common.yaml").is_file());
+
+        // dry-run 报告 invalid（函数名保留字）；confirm 整体拒绝、合法条目不写入
+        let bad = craft_zip(vec![
+            ("yaml/ok.yaml", b"steps: []\n".to_vec()),
+            ("func/bad.yaml", b"return:\n  steps: []\n".to_vec()),
+        ]);
+        let resp = send(
+            &t.app,
+            req_bytes(
+                "POST",
+                "/api/scripts/import?pkg=com.test.app",
+                None,
+                &zip_headers(sid.clone()),
+                bad.clone(),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let j = json_body(resp).await;
+        assert_eq!(j["functions"]["invalid"][0]["path"], "func/bad.yaml");
+        assert!(j["functions"]["invalid"][0]["reason"].is_string());
+        let resp = send(
+            &t.app,
+            req_bytes(
+                "POST",
+                "/api/scripts/import?pkg=com.test.app&confirm=1",
+                None,
+                &zip_headers(sid.clone()),
+                bad,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(!t.dir.join("com.test.app/func/bad.yaml").exists());
+        // ok.yaml 上一轮 confirm 已存在，本轮整体拒绝不覆盖（mtime 校验过重，查内容即可）
+        assert_eq!(
+            std::fs::read_to_string(t.dir.join("com.test.app/yaml/ok.yaml")).unwrap(),
+            "steps: []\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_import_roundtrip_via_api() {
+        let t = build_app(
+            "roundtrip",
+            auth::Credential::Plain("admin123".into()),
+            Default::default(),
+        );
+        let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+        // 造齐三类资源
+        let script = serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps:\n  - log x\n"});
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/scripts",
+                None,
+                &json_headers(sid.clone()),
+                Some(script.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let func =
+            serde_json::json!({"pkg": "com.test.app", "name": "common", "content": FUNC_YAML});
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/functions",
+                None,
+                &json_headers(sid.clone()),
+                Some(func.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let tmpl = serde_json::json!({
+            "pkg": "com.test.app",
+            "name": "icon.png",
+            "data_b64": base64::engine::general_purpose::STANDARD.encode(valid_template_png()),
+        });
+        let resp = send(
+            &t.app,
+            req(
+                "POST",
+                "/api/templates",
+                None,
+                &json_headers(sid.clone()),
+                Some(tmpl.to_string()),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // 导出（zip 字节）→ 导入到另一分区
+        let resp = send(
+            &t.app,
+            req(
+                "GET",
+                "/api/scripts/export?pkg=com.test.app",
+                None,
+                &json_headers(sid.clone()),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let zip_bytes = axum::body::to_bytes(resp.into_body(), 32 * 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec();
+        let resp = send(
+            &t.app,
+            req_bytes(
+                "POST",
+                "/api/scripts/import?pkg=com.other.app&confirm=1",
+                None,
+                &zip_headers(sid.clone()),
+                zip_bytes,
+            ),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "导入失败: {:?}",
+            json_body(resp).await
+        );
+
+        // 零差异：脚本/函数/模板三类资源逐项一致
+        let resp = get_json(&t, &sid, "/api/scripts").await;
+        let j = json_body(resp).await;
+        let content_of = |pkg: &str| {
+            j.as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["package"] == pkg)
+                .map(|s| s["content"].as_str().unwrap().to_string())
+                .unwrap_or_default()
+        };
+        assert_eq!(content_of("com.test.app"), content_of("com.other.app"));
+        assert_eq!(
+            func_first(&t, &sid, "com.test.app").await,
+            func_first(&t, &sid, "com.other.app").await
+        );
+        let resp = get_json(&t, &sid, "/api/templates?pkg=com.other.app").await;
+        let j = json_body(resp).await;
+        assert_eq!(j.as_array().unwrap().len(), 1);
+        assert_eq!(j[0]["name"], "icon.png");
+    }
 }

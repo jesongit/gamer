@@ -557,6 +557,27 @@ impl ScriptStore {
         Ok(self.load_file(pkg, &name))
     }
 
+    /// 保存前的版本冲突检测：将被覆盖脚本的当前内容版本（文件不存在 → None）。
+    /// 编辑器按 old_id 加载（重命名场景以 old_id 文件为准），否则按目标 pkg+name。
+    pub fn script_version_for_save(
+        &self,
+        old_id: Option<&str>,
+        pkg: &str,
+        name: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let id = match old_id {
+            Some(id) => id.to_string(),
+            None => {
+                let package = sanitize_part(pkg).ok_or_else(|| {
+                    anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {pkg}")
+                })?;
+                let name = normalize_script_name(name)?;
+                format!("{package}/{name}")
+            }
+        };
+        Ok(self.get(&id)?.map(|s| s.version()))
+    }
+
     /// 保存脚本到指定应用分区，name 缺扩展名时补 .yaml；
     /// old_id 存在且归档位置变化时移动（删旧文件）。返回落盘后的脚本。
     pub fn save(
@@ -656,6 +677,9 @@ impl ScriptStore {
     /// 模板短名/完整名 → 分区 `tmpl/` 内**现存**文件的路径。
     /// 精确名优先；否则按「基名 + `#` 后缀 + 同扩展名」唯一匹配（与引擎
     /// resolve_template_file 同语义）；零候选/多候选均报错，不猜测、不跨目录回退。
+    /// 阶段 1 由测试锁死语义；阶段 2 引擎/模板路由接入后摘除 allow（调用点
+    /// engine.rs / api/templates.rs 均在阶段 1 编辑边界之外）。
+    #[allow(dead_code)]
     pub fn resolve_template_path(&self, pkg: &str, short: &str) -> anyhow::Result<PathBuf> {
         let package = sanitize_part(pkg)
             .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {pkg}"))?;
@@ -868,12 +892,15 @@ impl ScriptStore {
         Ok(None)
     }
 
-    /// 导出整分区快照 zip：yaml/ 全部脚本 + tmpl/ 全部模板 → zip 字节。
-    /// 分区没有任何可导出文件时报错。返回（建议文件名, zip 字节）。
+    /// 导出整分区快照 zip：yaml/ 全部脚本 + func/ 全部函数库 + tmpl/ 全部模板 → zip 字节。
+    /// 三个目录条目始终写入，允许目录为空（契约 §3.1 / plan §13.1）。
+    /// 返回（建议文件名, zip 字节）。
     pub fn export_partition(&self, pkg: &str) -> anyhow::Result<(String, Vec<u8>)> {
         let package = sanitize_part(pkg)
             .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {}", pkg))?;
-        // 收集规则与导入校验一致：yaml 只认 .yaml/.yml，tmpl 全部非隐藏文件
+        // 收集规则与导入校验一致：yaml/func 只认 .yaml/.yml（func 从严仅 .yaml 也
+        // 兼容收录存量 .yml，导入侧浅校验会把非 .yaml 函数文件记为 invalid），
+        // tmpl 全部非隐藏文件
         let mut yaml_files: Vec<String> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(self.yaml_dir(&package)) {
             for f in rd.flatten() {
@@ -884,6 +911,16 @@ impl ScriptStore {
                     && (low.ends_with(".yaml") || low.ends_with(".yml"))
                 {
                     yaml_files.push(name);
+                }
+            }
+        }
+        let mut func_files: Vec<String> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(self.func_dir(&package)) {
+            for f in rd.flatten() {
+                let name = f.file_name().to_string_lossy().to_string();
+                let low = name.to_lowercase();
+                if f.path().is_file() && sanitize_part(&name).is_some() && low.ends_with(".yaml") {
+                    func_files.push(name);
                 }
             }
         }
@@ -899,19 +936,25 @@ impl ScriptStore {
                 }
             }
         }
-        if yaml_files.is_empty() && tmpl_files.is_empty() {
-            anyhow::bail!("分区 {} 没有可导出的脚本/模板", package);
-        }
         yaml_files.sort();
+        func_files.sort();
         tmpl_files.sort();
         let mut buf = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
             let opts = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
+            // 目录条目始终存在：空目录也是合法快照形态
+            zw.add_directory("yaml", opts)?;
+            zw.add_directory("func", opts)?;
+            zw.add_directory("tmpl", opts)?;
             for name in &yaml_files {
                 zw.start_file(format!("yaml/{}", name), opts)?;
                 zw.write_all(&std::fs::read(self.yaml_dir(&package).join(name))?)?;
+            }
+            for name in &func_files {
+                zw.start_file(format!("func/{}", name), opts)?;
+                zw.write_all(&std::fs::read(self.func_dir(&package).join(name))?)?;
             }
             for name in &tmpl_files {
                 zw.start_file(format!("tmpl/{}", name), opts)?;
@@ -922,14 +965,16 @@ impl ScriptStore {
         Ok((format!("{}.zip", package), buf))
     }
 
-    /// 导入分区快照 zip 到指定应用分区。confirm=false 时只解析并报告同名冲突
-    /// （前端二次确认），confirm=true 时落盘（同名替换）。只认 yaml/ 与 tmpl/ 布局。
+    /// 导入分区快照 zip 到指定应用分区。confirm=false 为 dry-run：解析 + 浅校验，
+    /// 返回 {scripts, functions, templates} 三类资源各自的 add/overwrite/invalid
+    /// 报告、不落盘；confirm=true 时报告内有任何 invalid 则整体拒绝（不半写入），
+    /// 否则原子提交（同名替换，staging + 备份回滚）。只认 yaml/、func/、tmpl/ 布局。
     ///
     /// 资源硬限（阶段 2 SEC-004，传输层另有 20MiB body 闸门）：
     /// - 条目数 ≤ [`IMPORT_MAX_ENTRIES`]；
     /// - 总解压量 ≤ [`IMPORT_MAX_TOTAL_BYTES`]——条目声明尺寸预检 + 实际读取计数
     ///   双保险，防"声明造假"（压缩炸弹以小博大）；
-    /// - 单 YAML ≤ 1MiB、单模板 ≤ 10MiB（按实际读取字节判定，声明只做预检参考）；
+    /// - 单 YAML/函数库 ≤ 1MiB、单模板 ≤ 10MiB（按实际读取字节判定，声明只做预检参考）；
     /// - zip-slip 由 `enclosed_name` 拒绝绝对路径与 `..`；目录条目不计入限额。
     pub fn import(&self, bytes: &[u8], pkg: &str, confirm: bool) -> anyhow::Result<ImportReport> {
         let package = sanitize_part(pkg)
@@ -958,11 +1003,14 @@ impl ScriptStore {
                 );
             }
         }
-        // 全部解析到内存（zip-slip 防护 + 布局校验 + 实际读取计数），无错才考虑落盘
+        // 全部解析到内存（zip-slip 防护 + 布局校验 + 实际读取计数 + 浅校验），
+        // 无错才考虑落盘。zip-slip/布局外路径/重复条目/模板炸弹/体积超限 = 硬错误；
+        // 文件名非法/扩展名错配/YAML 语法错/顶层结构不合规 = 报告 invalid 条目
+        // （dry-run 只报告；confirm 见到任何 invalid 整体拒绝，不半写入）。
         let mut actual_total: usize = 0;
         let mut materialized_total: usize = 0;
         let mut seen_paths = std::collections::HashSet::new();
-        let mut files: Vec<(String, PathBuf, Vec<u8>)> = Vec::new();
+        let mut files: Vec<(ImportKind, String, PathBuf, Vec<u8>)> = Vec::new();
         for i in 0..archive.len() {
             let mut f = archive.by_index(i)?;
             if f.is_dir() {
@@ -976,31 +1024,73 @@ impl ScriptStore {
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().to_string())
                 .collect();
-            let (cap, zip_path, dest): (usize, String, PathBuf) = match comps.as_slice() {
-                [y, name] if y == "yaml" => {
-                    let name = sanitize_part(name)
-                        .ok_or_else(|| anyhow::anyhow!("脚本名非法: {}", name))?;
-                    let low = name.to_lowercase();
-                    if !(low.ends_with(".yaml") || low.ends_with(".yml")) {
-                        anyhow::bail!("yaml/ 下只支持 .yaml/.yml 文件: {}", name);
+            let (kind, cap, zip_path, dest): (ImportKind, usize, String, PathBuf) =
+                match comps.as_slice() {
+                    [y, name] if y == "yaml" => {
+                        let mut bad = |reason: String| {
+                            rep.scripts.invalid.push(ImportInvalidEntry {
+                                path: format!("yaml/{name}"),
+                                reason,
+                            })
+                        };
+                        let Some(name) = sanitize_part(name) else {
+                            bad(format!("脚本名非法: {name}"));
+                            continue;
+                        };
+                        let low = name.to_lowercase();
+                        if !(low.ends_with(".yaml") || low.ends_with(".yml")) {
+                            bad(format!("yaml/ 下只支持 .yaml/.yml 脚本: {name}"));
+                            continue;
+                        }
+                        (
+                            ImportKind::Script,
+                            IMPORT_MAX_YAML_BYTES,
+                            format!("yaml/{name}"),
+                            self.yaml_dir(&package).join(&name),
+                        )
                     }
-                    (
-                        IMPORT_MAX_YAML_BYTES,
-                        format!("yaml/{}", name),
-                        self.yaml_dir(&package).join(&name),
-                    )
-                }
-                [t, name] if t == "tmpl" => {
-                    let name = sanitize_template_name(name)
-                        .ok_or_else(|| anyhow::anyhow!("模板名非法: {}", name))?;
-                    (
-                        IMPORT_MAX_TMPL_BYTES,
-                        format!("tmpl/{}", name),
-                        self.tmpl_dir(&package).join(&name),
-                    )
-                }
-                _ => anyhow::bail!("包内路径需为 yaml/<脚本> 或 tmpl/<模板>: {}", f.name()),
-            };
+                    [d, name] if d == "func" => {
+                        let mut bad = |reason: String| {
+                            rep.functions.invalid.push(ImportInvalidEntry {
+                                path: format!("func/{name}"),
+                                reason,
+                            })
+                        };
+                        let Some(name) = sanitize_part(name) else {
+                            bad(format!("函数文件名非法: {name}"));
+                            continue;
+                        };
+                        if !name.to_lowercase().ends_with(".yaml") {
+                            bad(format!("func/ 下只支持 .yaml 函数库文件: {name}"));
+                            continue;
+                        }
+                        (
+                            ImportKind::Func,
+                            IMPORT_MAX_YAML_BYTES,
+                            format!("func/{name}"),
+                            self.func_dir(&package).join(&name),
+                        )
+                    }
+                    [t, name] if t == "tmpl" => {
+                        let Some(name) = sanitize_template_name(name) else {
+                            rep.templates.invalid.push(ImportInvalidEntry {
+                                path: format!("tmpl/{name}"),
+                                reason: format!("模板名非法: {name}"),
+                            });
+                            continue;
+                        };
+                        (
+                            ImportKind::Tmpl,
+                            IMPORT_MAX_TMPL_BYTES,
+                            format!("tmpl/{name}"),
+                            self.tmpl_dir(&package).join(&name),
+                        )
+                    }
+                    _ => anyhow::bail!(
+                        "包内路径需为 yaml/<脚本>、func/<函数库> 或 tmpl/<模板>: {}",
+                        f.name()
+                    ),
+                };
             if f.size() > cap as u64 {
                 anyhow::bail!(
                     "{zip_path} 声明解压后 {} 字节超限（该类文件上限 {} MiB）",
@@ -1050,19 +1140,50 @@ impl ScriptStore {
                     IMPORT_MAX_TOTAL_BYTES / (1024 * 1024)
                 );
             }
-            files.push((zip_path, dest, buf));
+            // 浅校验（阶段 1）：yaml/func 条目必须是合法 UTF-8 的 YAML 且顶层结构合规
+            // （脚本顶层键 ∈ params/config/steps ∪ 过渡期 func；函数文件顶层键全是
+            // 合法函数名）。不合规记入报告，confirm 时整体拒绝。完整校验归阶段 2。
+            if matches!(kind, ImportKind::Script | ImportKind::Func) {
+                let check = std::str::from_utf8(&buf)
+                    .map_err(|_| "内容不是合法 UTF-8 文本".to_string())
+                    .and_then(|text| match kind {
+                        ImportKind::Script => validate_script_file_shallow(text),
+                        ImportKind::Func => validate_function_file(text).map(|_| ()),
+                        ImportKind::Tmpl => Ok(()),
+                    });
+                if let Err(reason) = check {
+                    report_bucket(&mut rep, kind)
+                        .invalid
+                        .push(ImportInvalidEntry {
+                            path: zip_path.clone(),
+                            reason,
+                        });
+                    continue;
+                }
+            }
+            files.push((kind, zip_path, dest, buf));
         }
-        if files.is_empty() {
+        if files.is_empty() && !rep.any_invalid() {
             anyhow::bail!("包内没有可导入的文件");
         }
-        for (zip_path, dest, _) in &files {
-            rep.entries.push(zip_path.clone());
-            if dest.exists() {
-                rep.conflicts.push(zip_path.clone());
-            }
-        }
         if !confirm {
+            // dry-run：不落盘，报告三类资源各自的新增/覆盖/非法条目
+            for (kind, zip_path, dest, _) in &files {
+                let b = report_bucket(&mut rep, *kind);
+                if dest.exists() {
+                    b.overwrite.push(zip_path.clone());
+                } else {
+                    b.add.push(zip_path.clone());
+                }
+            }
             return Ok(rep);
+        }
+        if rep.any_invalid() {
+            anyhow::bail!(
+                "导入被拒绝：{} 个条目未通过浅校验（整体未写入）：{}",
+                rep.invalid_count(),
+                rep.invalid_summary()
+            );
         }
         // 先把全部内容写入同文件系统 staging，再逐文件提交；提交失败时利用备份
         // 回滚已经替换的文件，避免留下半导入状态。staging 目录由 open() 清理残留。
@@ -1073,13 +1194,13 @@ impl ScriptStore {
         let stage_backup = staging.join("backup");
         let mut staged = Vec::with_capacity(files.len());
         let stage_result = (|| -> anyhow::Result<()> {
-            for (zip_path, dest, buf) in files {
+            for (kind, zip_path, dest, buf) in files {
                 let relative = dest
                     .strip_prefix(&self.root)
                     .map_err(|_| anyhow::anyhow!("导入目标路径不在数据目录内"))?;
                 let stage_path = stage_data.join(relative);
                 atomic_write(&stage_path, &buf)?;
-                staged.push((zip_path, dest, stage_path));
+                staged.push((kind, zip_path, dest, stage_path));
             }
             Ok(())
         })();
@@ -1089,8 +1210,9 @@ impl ScriptStore {
         }
 
         let mut committed: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
-        for (zip_path, dest, stage_path) in staged {
-            let backup = if dest.exists() {
+        for (kind, zip_path, dest, stage_path) in staged {
+            let was_existing = dest.exists();
+            let backup = if was_existing {
                 let relative = dest
                     .strip_prefix(&self.root)
                     .map_err(|_| anyhow::anyhow!("导入目标路径不在数据目录内"))?;
@@ -1123,10 +1245,11 @@ impl ScriptStore {
                 return Err(e);
             }
             committed.push((dest, backup));
-            if rep.conflicts.iter().any(|c| c == &zip_path) {
-                rep.replaced.push(zip_path);
+            let b = report_bucket(&mut rep, kind);
+            if was_existing {
+                b.overwrite.push(zip_path);
             } else {
-                rep.imported.push(zip_path);
+                b.add.push(zip_path);
             }
         }
         if let Err(e) = std::fs::remove_dir_all(&staging) {
@@ -1135,6 +1258,22 @@ impl ScriptStore {
         Ok(rep)
     }
 } // impl ScriptStore
+
+/// 分区快照 zip 内的资源类别（目录即类型）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportKind {
+    Script,
+    Func,
+    Tmpl,
+}
+
+fn report_bucket(rep: &mut ImportReport, kind: ImportKind) -> &mut ImportResourceReport {
+    match kind {
+        ImportKind::Script => &mut rep.scripts,
+        ImportKind::Func => &mut rep.functions,
+        ImportKind::Tmpl => &mut rep.templates,
+    }
+}
 
 fn restore_import_file(dest: &Path, backup: Option<&Path>) {
     let _ = std::fs::remove_file(dest);
@@ -1148,17 +1287,59 @@ fn rollback_import(committed: &[(PathBuf, Option<PathBuf>)]) {
         restore_import_file(dest, backup.as_deref());
     }
 }
-/// 导入结果报告
+/// 单类资源的导入报告（add/overwrite 为 zip 相对路径）
+#[derive(Debug, Default, Serialize)]
+pub struct ImportResourceReport {
+    /// dry-run=将新增；confirm=实际新增
+    pub add: Vec<String>,
+    /// dry-run=将覆盖（分区已有同名文件）；confirm=实际覆盖
+    pub overwrite: Vec<String>,
+    /// 未通过浅校验的条目（YAML 语法错 / 路径非法 / 顶层结构不合规）
+    pub invalid: Vec<ImportInvalidEntry>,
+}
+
+/// 一个未通过浅校验的导入条目
+#[derive(Debug, Serialize)]
+pub struct ImportInvalidEntry {
+    /// zip 内相对路径
+    pub path: String,
+    /// 浅校验失败原因（人类可读；完整结构化诊断归阶段 2）
+    pub reason: String,
+}
+
+/// 导入结果报告（dry-run 与 confirm 同构；契约 plan §13.1）
 #[derive(Debug, Default, Serialize)]
 pub struct ImportReport {
-    /// 包内全部条目（zip 相对路径）
-    pub entries: Vec<String>,
-    /// 与现有文件同名、将被替换的条目（confirm=false 时的提示依据）
-    pub conflicts: Vec<String>,
-    /// 实际新增（confirm=true）
-    pub imported: Vec<String>,
-    /// 实际替换（confirm=true）
-    pub replaced: Vec<String>,
+    /// yaml/ 可执行脚本
+    pub scripts: ImportResourceReport,
+    /// func/ 函数库
+    pub functions: ImportResourceReport,
+    /// tmpl/ 模板
+    pub templates: ImportResourceReport,
+}
+
+impl ImportReport {
+    fn any_invalid(&self) -> bool {
+        !self.scripts.invalid.is_empty()
+            || !self.functions.invalid.is_empty()
+            || !self.templates.invalid.is_empty()
+    }
+
+    fn invalid_count(&self) -> usize {
+        self.scripts.invalid.len() + self.functions.invalid.len() + self.templates.invalid.len()
+    }
+
+    /// 前 3 条 invalid 的 "path: reason" 摘要（整体拒绝时的错误消息）
+    fn invalid_summary(&self) -> String {
+        let all = self
+            .scripts
+            .invalid
+            .iter()
+            .chain(&self.functions.invalid)
+            .chain(&self.templates.invalid)
+            .map(|e| format!("{}（{}）", e.path, e.reason));
+        all.take(3).collect::<Vec<_>>().join("；")
+    }
 }
 
 /// 剥离旧 `package <名字>` 指令行（仅 migrate_fs_layout 清理旧文件残留用，
@@ -1538,18 +1719,176 @@ mod tests {
         let (store, dir) = temp_store("happy");
         let z = craft_zip(vec![
             ("yaml/main.yaml".into(), b"steps:\n  - log ok\n".to_vec()),
+            (
+                "func/common.yaml".into(),
+                b"login:\n  steps:\n    - return: true\n".to_vec(),
+            ),
             ("tmpl/a#0_0_10_10.png".into(), valid_template_png()),
         ]);
+        // dry-run：报告三类资源、不落盘
+        let rep = store.import(&z, "com.test.app", false).unwrap();
+        assert_eq!(rep.scripts.add, vec!["yaml/main.yaml"]);
+        assert_eq!(rep.functions.add, vec!["func/common.yaml"]);
+        assert_eq!(rep.templates.add, vec!["tmpl/a#0_0_10_10.png"]);
+        assert!(!rep.any_invalid());
+        assert!(!dir.join("com.test.app/yaml/main.yaml").exists());
+        // confirm：落盘，报告 add
         let rep = store.import(&z, "com.test.app", true).unwrap();
-        assert_eq!(rep.imported.len(), 2);
-        assert_eq!(rep.conflicts.len(), 0);
+        assert_eq!(rep.scripts.add.len(), 1);
+        assert_eq!(rep.functions.add.len(), 1);
+        assert_eq!(rep.templates.add.len(), 1);
         let root: PathBuf = dir.clone();
         assert!(root.join("com.test.app/yaml/main.yaml").is_file());
+        assert!(root.join("com.test.app/func/common.yaml").is_file());
         assert!(root.join("com.test.app/tmpl/a#0_0_10_10.png").is_file());
-        // 再导入一次（confirm 覆盖同名）：全部进 replaced
+        // 再导入一次（confirm 覆盖同名）：全部进 overwrite
         let rep2 = store.import(&z, "com.test.app", true).unwrap();
-        assert_eq!(rep2.replaced.len(), 2);
+        assert_eq!(rep2.scripts.overwrite.len(), 1);
+        assert_eq!(rep2.functions.overwrite.len(), 1);
+        assert_eq!(rep2.templates.overwrite.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_dry_run_reports_invalid_and_confirm_rejects_atomically() {
+        let (store, dir) = temp_store("import-invalid");
+        let z = craft_zip(vec![
+            // 合法脚本 + 非法函数库（函数名保留字）+ 语法错脚本 + 未知顶层键脚本
+            ("yaml/ok.yaml".into(), b"steps: []\n".to_vec()),
+            (
+                "yaml/bad-syntax.yaml".into(),
+                b"steps: [unclosed\n".to_vec(),
+            ),
+            (
+                "yaml/bad-key.yaml".into(),
+                b"name: legacy\nsteps: []\n".to_vec(),
+            ),
+            (
+                "func/bad-name.yaml".into(),
+                b"match:\n  steps: []\n".to_vec(),
+            ),
+        ]);
+        let rep = store.import(&z, "com.test.app", false).unwrap();
+        assert_eq!(rep.scripts.add, vec!["yaml/ok.yaml"]);
+        assert_eq!(rep.scripts.invalid.len(), 2, "{rep:?}");
+        assert!(rep
+            .scripts
+            .invalid
+            .iter()
+            .any(|e| e.path == "yaml/bad-syntax.yaml"));
+        assert!(rep
+            .scripts
+            .invalid
+            .iter()
+            .any(|e| e.path == "yaml/bad-key.yaml"));
+        assert_eq!(rep.functions.invalid.len(), 1);
+        assert_eq!(rep.functions.invalid[0].path, "func/bad-name.yaml");
+        assert!(rep.functions.add.is_empty());
+        // dry-run 不落盘
+        assert!(!dir.join("com.test.app/yaml/ok.yaml").exists());
+        // confirm：任一 invalid → 整体拒绝，合法条目也不写入
+        let err = store.import(&z, "com.test.app", true).unwrap_err();
+        assert!(err.to_string().contains("整体未写入"), "{err}");
+        assert!(!dir.join("com.test.app/yaml/ok.yaml").exists());
+        assert!(!dir.join("com.test.app/func").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_accepts_legacy_zip_without_func_dir() {
+        let (store, dir) = temp_store("import-legacy");
+        // 旧布局 zip：只有 yaml/ + tmpl/，且脚本为 v1 过渡语法（func 段 + 顶层序列）
+        let z = craft_zip(vec![
+            (
+                "yaml/old.yaml".into(),
+                b"func:\n  - f1:\n    - log: a\nsteps:\n  - log: x\n".to_vec(),
+            ),
+            ("tmpl/b.png".into(), valid_template_png()),
+        ]);
+        let rep = store.import(&z, "com.test.app", true).unwrap();
+        assert_eq!(rep.scripts.add, vec!["yaml/old.yaml"]);
+        assert_eq!(rep.templates.add, vec!["tmpl/b.png"]);
+        assert!(rep.functions.add.is_empty() && rep.functions.invalid.is_empty());
+        assert!(dir.join("com.test.app/yaml/old.yaml").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_import_roundtrip_is_lossless() {
+        let (store, dir) = temp_store("roundtrip");
+        store
+            .save(None, "com.a", "main.yaml", "steps:\n  - log x\n")
+            .unwrap();
+        store
+            .save(None, "com.a", "legacy.yml", "steps: []\n")
+            .unwrap();
+        store.save_function("com.a", "common", FUNC_OK).unwrap();
+        let tmpl_dir = dir.join("com.a").join("tmpl");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+        // 磁盘模板与导入侧同为灰度归一化字节，保证往返逐字节可比
+        let png = crate::matcher::reencode_template_gray_png(&valid_template_png()).unwrap();
+        std::fs::write(tmpl_dir.join("icon#0_0_10_10.png"), &png).unwrap();
+
+        // 导出：含 yaml/ func/ tmpl/ 三个目录
+        let (filename, zip_bytes) = store.export_partition("com.a").unwrap();
+        assert_eq!(filename, "com.a.zip");
+        {
+            let mut ar = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes)).unwrap();
+            let names: Vec<String> = (0..ar.len())
+                .map(|i| ar.by_index(i).unwrap().name().to_string())
+                .collect();
+            for d in ["yaml/", "func/", "tmpl/"] {
+                assert!(names.iter().any(|n| n == d), "缺目录条目 {d}: {names:?}");
+            }
+            assert!(names.contains(&"yaml/main.yaml".to_string()));
+            assert!(names.contains(&"yaml/legacy.yml".to_string()));
+            assert!(names.contains(&"func/common.yaml".to_string()));
+            assert!(names.contains(&"tmpl/icon#0_0_10_10.png".to_string()));
+        }
+
+        // 导入到另一分区 → 列表零差异（内容逐字节一致）
+        store.import(&zip_bytes, "com.b", true).unwrap();
+        let a_scripts = store.list().unwrap();
+        let pair = |pkg: &str, name: &str| {
+            a_scripts
+                .iter()
+                .find(|s| s.package == pkg && s.name == name)
+                .map(|s| s.content.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(pair("com.a", "main.yaml"), pair("com.b", "main.yaml"));
+        assert_eq!(pair("com.a", "legacy.yml"), pair("com.b", "legacy.yml"));
+        let a_func = store.list_functions("com.a").unwrap();
+        let b_func = store.list_functions("com.b").unwrap();
+        assert_eq!(a_func.len(), b_func.len());
+        assert_eq!(a_func[0].file, b_func[0].file);
+        assert_eq!(a_func[0].content, b_func[0].content);
+        assert_eq!(a_func[0].functions, b_func[0].functions);
+        assert_eq!(
+            std::fs::read(tmpl_dir.join("icon#0_0_10_10.png")).unwrap(),
+            std::fs::read(dir.join("com.b/tmpl/icon#0_0_10_10.png")).unwrap()
+        );
+        // 导入分区隔离：com.a 不受影响（同名覆盖只发生在目标分区）
+        assert_eq!(store.list_functions("com.a").unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_allows_empty_directories() {
+        let (store, _dir) = temp_store("export-empty");
+        // 只有函数库的分区：yaml/ tmpl/ 为空目录也进快照
+        store.save_function("com.a", "common", FUNC_OK).unwrap();
+        let (_name, zip_bytes) = store.export_partition("com.a").unwrap();
+        let mut ar = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes)).unwrap();
+        let names: Vec<String> = (0..ar.len())
+            .map(|i| ar.by_index(i).unwrap().name().to_string())
+            .collect();
+        assert!(names.iter().all(|n| n != "yaml/main.yaml"));
+        assert!(names.iter().any(|n| n == "func/common.yaml"));
+        // 完全空分区也产出合法快照（三个空目录）
+        let (_name, empty_zip) = store.export_partition("com.empty").unwrap();
+        let ar = zip::ZipArchive::new(std::io::Cursor::new(&empty_zip)).unwrap();
+        assert_eq!(ar.len(), 3, "仅三个目录条目");
     }
 
     #[test]

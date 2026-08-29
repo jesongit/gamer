@@ -17,6 +17,7 @@ pub mod auth;
 mod common;
 mod devices;
 mod error;
+mod functions;
 mod logs;
 mod runs;
 mod scripts;
@@ -152,7 +153,10 @@ pub fn build_router(
             "/api/templates/:name/test",
             post(templates::api_test_template),
         )
-        .route("/api/scripts/:id", delete(scripts::api_delete_script))
+        .route(
+            "/api/scripts/:id",
+            get(scripts::api_get_script).delete(scripts::api_delete_script),
+        )
         .route("/api/scripts/:id/run", post(runs::api_run_script))
         .route("/api/scripts/:id/stop", post(runs::api_stop_script))
         .route("/api/scripts/:id/status", get(runs::api_script_status))
@@ -185,7 +189,8 @@ pub fn build_router(
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_JSON));
 
-    // ---- 受保护组（大 JSON，≤16MiB）：模板上传（data_b64）/ 脚本保存+列表。
+    // ---- 受保护组（大 JSON，≤16MiB）：模板上传（data_b64）/ 脚本保存+列表 /
+    //      函数库 CRUD（func/ 函数库与脚本同限：内容 ≤1MiB，JSON 余量对齐）。
     //      GET 与 POST 同路径注册在一组以避免 merge 冲突，GET 本身无 body 不受限额影响。
     let protected_upload: Router<()> = Router::new()
         .route(
@@ -195,6 +200,16 @@ pub fn build_router(
         .route(
             "/api/scripts",
             get(scripts::api_list_scripts).post(scripts::api_save_script),
+        )
+        .route(
+            "/api/functions",
+            get(functions::api_list_functions).post(functions::api_create_function),
+        )
+        .route(
+            "/api/functions/:id",
+            get(functions::api_get_function)
+                .put(functions::api_update_function)
+                .delete(functions::api_delete_function),
         )
         .with_state(state.clone())
         .route_layer(axmw::from_fn_with_state(

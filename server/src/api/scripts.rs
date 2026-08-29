@@ -34,6 +34,10 @@ pub(super) struct SaveScriptReq {
     content: String,
     /// 目标应用分区（设备配置的应用包名）
     pkg: String,
+    /// 可选：客户端持有的当前内容版本短码；与磁盘不符 → 409 version_conflict
+    /// （重命名场景以 id 指向的文件为准，否则以 pkg+name 目标文件为准）
+    #[serde(default)]
+    expected_version: Option<String>,
 }
 
 pub(super) async fn api_save_script(
@@ -53,6 +57,32 @@ pub(super) async fn api_save_script(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
+    // 版本冲突检测（blocking 内读盘）：expected_version 与将被覆盖的现有文件不符 → 409
+    let check_id = req.id.clone();
+    let expected = req.expected_version.clone();
+    let name_for_check = req.name.clone();
+    let pkg_for_check = pkg.clone();
+    let st_check = st.clone();
+    let check = run_blocking_api(move || {
+        let current = st_check
+            .scripts
+            .script_version_for_save(check_id.as_deref(), &pkg_for_check, &name_for_check)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let resource = check_id.unwrap_or_else(|| format!("{pkg_for_check}/{name_for_check}"));
+        Ok(super::functions::check_expected_version(
+            current,
+            expected.as_deref(),
+            resource,
+        ))
+    })
+    .await;
+    match check {
+        Err(e) => return e.into_response(),
+        Ok(super::functions::VersionCheck::Conflict { resource }) => {
+            return super::functions::version_conflict(&resource)
+        }
+        Ok(super::functions::VersionCheck::Ok) => {}
+    }
     match run_blocking_api(move || {
         st.scripts
             .save(req.id.as_deref(), &pkg, &req.name, &req.content)
@@ -60,10 +90,29 @@ pub(super) async fn api_save_script(
     })
     .await
     {
-        Ok(s) => {
-            Json(serde_json::json!({"ok": true, "id": s.id, "package": s.package, "name": s.name}))
-                .into_response()
-        }
+        Ok(s) => Json(serde_json::json!({
+            "ok": true,
+            "id": s.id,
+            "package": s.package,
+            "name": s.name,
+            "version": s.version(),
+        }))
+        .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// GET /api/scripts/:id：读取单个脚本（含内容版本短码 version，编辑器冲突检测用）
+pub(super) async fn api_get_script(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    match run_blocking_api(move || {
+        st.scripts
+            .get(&id)
+            .map_err(|e| ApiError::internal(e.to_string()))
+    })
+    .await
+    {
+        Ok(Some(s)) => Json(s).into_response(),
+        Ok(None) => ApiError::not_found("脚本不存在").into_response(),
         Err(e) => e.into_response(),
     }
 }
