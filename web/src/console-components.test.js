@@ -31,6 +31,9 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar).toContain('openSettings')
     expect(toolbar).toContain('removeDevice')
     expect(toolbar).toContain('⚙️ 设置')
+    // 删除属设备管理：归入设备行（tb-row-dev），不落在投屏控制行
+    const devRow = toolbar.slice(toolbar.indexOf('tb-row-dev'), toolbar.indexOf('tb-row-ctrl'))
+    expect(devRow).toContain('removeDevice')
   })
 
   it('子组件保留关键交互入口和挂载回调契约', () => {

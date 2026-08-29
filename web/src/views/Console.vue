@@ -2,30 +2,33 @@
   <div class="console" :class="{ 'sb-collapsed': sidebarCollapsed }">
     <!-- 左：画面区 -->
     <div class="stage">
-      <!-- 顶部工具条：设备管理 + 投屏控制 -->
+      <!-- 顶部工具条：两行布局——上行设备管理（删除归设备组），下行投屏控制 -->
       <div class="toolbar">
-        <select v-model="store.deviceId" class="select mono tb-dev-select" @change="onDeviceSelect">
-          <option value="">选择设备…</option>
-          <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
-        </select>
-        <button v-if="!connected" class="btn btn-sm btn-primary" :disabled="!store.deviceId || connecting" @click="flushAndConnect">{{ connecting ? '连接中…' : '🔌 连接' }}</button>
-        <button v-else class="btn btn-sm" @click="disconnect">⏹ 断开</button>
-        <button class="btn btn-sm" :disabled="scanning" @click="refreshDevices">🔄 刷新</button>
-        <button class="btn btn-sm" @click="startAdd">＋ 新增</button>
-        <button class="btn btn-sm" :disabled="!current" @click="openSettings">⚙️ 设置</button>
-        <div class="tb-sep"></div>
-        <button class="btn btn-sm" @click="shot">📷 截图</button>
-        <button class="btn btn-sm" @click="rotate">🔄 旋转</button>
-        <button class="btn btn-sm" @click="key('HOME')">🏠 Home</button>
-        <button class="btn btn-sm" @click="key('BACK')">⬅ 返回</button>
-        <button class="btn btn-sm" @click="key('APP_SWITCH')">🪟 最近</button>
-        <button class="btn btn-sm" @click="key('VOL_UP')">🔊＋</button>
-        <button class="btn btn-sm" @click="key('VOL_DOWN')">🔊－</button>
-        <button class="btn btn-sm" @click="toggleAudio" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'">{{ audioMuted ? '🔇' : '🔊' }}</button>
-        <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (currentPkg || '未配置应用')">🚀 启动应用</button>
-        <div class="tb-sep"></div>
-        <button class="btn btn-sm" @click="clipboard">📋 剪贴板</button>
-        <button class="btn btn-sm btn-danger" :disabled="!current" @click="removeDevice">🗑 删除</button>
+        <div class="tb-row tb-row-dev">
+          <select v-model="store.deviceId" class="select mono tb-dev-select" @change="onDeviceSelect">
+            <option value="">选择设备…</option>
+            <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
+          </select>
+          <button v-if="!connected" class="btn btn-sm btn-primary" :disabled="!store.deviceId || connecting" @click="flushAndConnect">{{ connecting ? '连接中…' : '🔌 连接' }}</button>
+          <button v-else class="btn btn-sm" @click="disconnect">⏹ 断开</button>
+          <button class="btn btn-sm" :disabled="scanning" @click="refreshDevices">🔄 刷新</button>
+          <button class="btn btn-sm" @click="startAdd">＋ 新增</button>
+          <button class="btn btn-sm" :disabled="!current" @click="openSettings">⚙️ 设置</button>
+          <button class="btn btn-sm btn-danger" :disabled="!current" @click="removeDevice">🗑 删除</button>
+        </div>
+        <div class="tb-row tb-row-ctrl">
+          <button class="btn btn-sm" @click="shot">📷 截图</button>
+          <button class="btn btn-sm" @click="rotate">🔄 旋转</button>
+          <button class="btn btn-sm" @click="key('HOME')">🏠 Home</button>
+          <button class="btn btn-sm" @click="key('BACK')">⬅ 返回</button>
+          <button class="btn btn-sm" @click="key('APP_SWITCH')">🪟 最近</button>
+          <button class="btn btn-sm" @click="key('VOL_UP')">🔊＋</button>
+          <button class="btn btn-sm" @click="key('VOL_DOWN')">🔊－</button>
+          <button class="btn btn-sm" @click="toggleAudio" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'">{{ audioMuted ? '🔇' : '🔊' }}</button>
+          <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (currentPkg || '未配置应用')">🚀 启动应用</button>
+          <div class="tb-sep"></div>
+          <button class="btn btn-sm" @click="clipboard">📋 剪贴板</button>
+        </div>
       </div>
 
       <ConsoleVideoStage
@@ -2705,12 +2708,16 @@ onUnmounted(() => {
 .crop-actions { display: flex; gap: 8px; }
 .crop-actions .btn-primary { margin-left: auto; }
 
-/* 工具条 */
+/* 工具条：两行布局（上行设备管理 / 下行投屏控制），行内各自 wrap 不出横向滚动 */
 .toolbar {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  display: flex; flex-direction: column; gap: 6px;
   background: var(--bg-1); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 8px 10px;
-  min-height: 45px; box-sizing: border-box;
+  box-sizing: border-box;
+}
+.tb-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  min-height: 29px; /* 单行高度（按钮 29px），wrap 换行后自然撑开 */
 }
 .tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
 .btn.active { border-color: var(--accent-2); color: var(--accent-2); }
