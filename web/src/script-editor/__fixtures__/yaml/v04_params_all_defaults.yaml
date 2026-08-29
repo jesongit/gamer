@@ -1,0 +1,29 @@
+params:
+  - 'tmpl:account:账号模板:account.png'
+  - 'coord:click_pos:点击位置:[0.5, 0.8]'
+  - 'color:target_color:目标颜色:ff8800'
+  - 'time:timeout:最长等待:30s'
+  - 'key:cancel_key:取消按键:ESC'
+  - 'text:message:提示文本:"示例文本"'
+  - 'bool:enable:是否启用:true'
+config:
+  interval: 500ms
+  threshold: 0.85
+  log_level: info
+steps:
+  - if: $enable
+    then:
+      - tap: $click_pos
+  - find: $account
+    timeout: $timeout
+  - key: $cancel_key
+  - log: $message
+  - color:
+      at: [0.25, 0.75]
+      expect:
+        - $target_color:
+          - log: 参数色命中
+        - ff8800:
+          - log: 字面色命中
+    else:
+      - log: 都未命中

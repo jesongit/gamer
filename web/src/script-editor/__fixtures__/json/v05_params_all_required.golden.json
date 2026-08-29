@@ -1,0 +1,53 @@
+{
+  "id": "v05_params_all_required",
+  "kind": "valid",
+  "description": "七类参数全必填（声明只有前三段，default 全部为 null）",
+  "files": [
+    {
+      "file": "v05_params_all_required.yaml",
+      "role": "main",
+      "model_kind": "script",
+      "model": {
+        "params": [
+          { "type": "tmpl", "name": "account", "remark": "账号模板", "default": null },
+          { "type": "coord", "name": "click_pos", "remark": "点击位置", "default": null },
+          { "type": "color", "name": "target_color", "remark": "目标颜色", "default": null },
+          { "type": "time", "name": "timeout", "remark": "最长等待", "default": null },
+          { "type": "key", "name": "cancel_key", "remark": "取消按键", "default": null },
+          { "type": "text", "name": "message", "remark": "提示文本", "default": null },
+          { "type": "bool", "name": "enable", "remark": "是否启用", "default": null }
+        ],
+        "config": null,
+        "steps": [
+          {
+            "kind": "if",
+            "cond": { "ref": "enable" },
+            "then": [{ "kind": "tap", "at": { "ref": "click_pos" } }],
+            "else": []
+          },
+          {
+            "kind": "find",
+            "template": { "ref": "account" },
+            "block": [],
+            "verify": false,
+            "timeout": { "ref": "timeout" },
+            "then": [],
+            "else": []
+          },
+          {
+            "kind": "color",
+            "at": { "lit": [0.1, 0.1] },
+            "expect": [
+              {
+                "color": { "ref": "target_color" },
+                "steps": [{ "kind": "key", "key": { "ref": "cancel_key" } }]
+              }
+            ],
+            "else": []
+          },
+          { "kind": "text", "value": { "ref": "message" } }
+        ]
+      }
+    }
+  ]
+}

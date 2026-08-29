@@ -1,0 +1,59 @@
+{
+  "id": "v12_task_args_snapshot",
+  "kind": "valid",
+  "description": "定时任务参数快照形态：args 为一次性解析的完整类型化值（本例全部继承声明默认值），param_signature 按声明顺序覆盖类型/名称/必填性/默认值",
+  "files": [
+    {
+      "file": "v12_task_args_snapshot.yaml",
+      "role": "main",
+      "model_kind": "script",
+      "model": {
+        "params": [
+          { "type": "bool", "name": "enable", "remark": "是否启用", "default": true },
+          { "type": "time", "name": "timeout", "remark": "最长等待", "default": "30s" },
+          { "type": "text", "name": "message", "remark": "提示文本", "default": "开始任务" },
+          { "type": "coord", "name": "pos", "remark": "执行位置", "default": [0.5, 0.5] },
+          { "type": "color", "name": "target", "remark": "目标颜色", "default": "123456" },
+          { "type": "key", "name": "quit_key", "remark": "退出按键", "default": "ESC" },
+          { "type": "tmpl", "name": "icon", "remark": "图标模板", "default": "icon.png" }
+        ],
+        "config": null,
+        "steps": [
+          {
+            "kind": "if",
+            "cond": { "ref": "enable" },
+            "then": [
+              { "kind": "log", "message": { "ref": "message" } },
+              { "kind": "tap", "at": { "ref": "pos" } }
+            ],
+            "else": []
+          },
+          {
+            "kind": "find",
+            "template": { "ref": "icon" },
+            "block": [],
+            "verify": false,
+            "timeout": { "ref": "timeout" },
+            "then": [],
+            "else": []
+          }
+        ]
+      }
+    }
+  ],
+  "task_snapshot": {
+    "script_id": "demo/v12_task_args_snapshot.yaml",
+    "device_id": "device-1",
+    "cron": "0 30 8 * * *",
+    "args": {
+      "enable": true,
+      "timeout": "30s",
+      "message": "开始任务",
+      "pos": [0.5, 0.5],
+      "target": "123456",
+      "quit_key": "ESC",
+      "icon": "icon.png"
+    },
+    "param_signature": "psig1|bool,enable,0,true|time,timeout,0,30s|text,message,0,开始任务|coord,pos,0,[0.5,0.5]|color,target,0,123456|key,quit_key,0,ESC|tmpl,icon,0,icon.png"
+  }
+}

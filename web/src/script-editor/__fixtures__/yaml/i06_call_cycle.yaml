@@ -1,0 +1,2 @@
+steps:
+  - call: i06_call_cycle.yaml

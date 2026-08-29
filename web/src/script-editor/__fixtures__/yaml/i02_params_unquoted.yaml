@@ -1,0 +1,4 @@
+params:
+  - bool:enable:开关:true
+steps:
+  - log: params 项未加单引号

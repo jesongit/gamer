@@ -1,0 +1,6 @@
+steps:
+  - match:
+    - start.png:
+      - log: 命中起点
+    - else:
+      - log: 错误缩进的 else（写进了候选列表）

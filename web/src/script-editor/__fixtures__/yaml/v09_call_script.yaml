@@ -1,0 +1,12 @@
+params:
+  - 'bool:enable:是否启用:true'
+  - 'text:message:提示文本:"来自父脚本"'
+steps:
+  - call: v09_call_script.target.yaml
+    args:
+      enable: $enable
+      message: $message
+  - call: v09_call_script.target.yaml
+    args:
+      enable: false
+      message: "字面量消息"

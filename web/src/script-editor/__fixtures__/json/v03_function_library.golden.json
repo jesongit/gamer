@@ -1,0 +1,45 @@
+{
+  "id": "v03_function_library",
+  "kind": "valid",
+  "description": "函数库：顶层键=函数名，记录只允许 params/steps，return true/false",
+  "files": [
+    {
+      "file": "v03_function_library.yaml",
+      "role": "main",
+      "model_kind": "function_library",
+      "model": {
+        "file": "v03_function_library",
+        "functions": [
+          {
+            "name": "login",
+            "params": [
+              { "type": "tmpl", "name": "account", "remark": "账号模板", "default": "account.png" },
+              { "type": "time", "name": "timeout", "remark": "等待时间", "default": "30s" }
+            ],
+            "steps": [
+              {
+                "kind": "find",
+                "template": { "ref": "account" },
+                "block": [],
+                "verify": false,
+                "timeout": { "ref": "timeout" },
+                "then": [],
+                "else": []
+              },
+              { "kind": "return", "value": { "lit": true } }
+            ]
+          },
+          {
+            "name": "is_enabled",
+            "params": [
+              { "type": "bool", "name": "enable", "remark": "开关", "default": null }
+            ],
+            "steps": [
+              { "kind": "return", "value": { "ref": "enable" } }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+steps:
+  - find: record_click_20260829_001.png
+  - match:
+    - record_swipe_20260829_002.png:
+      - swipe:
+          fm: [0.5, 0.8]
+          to: [0.5, 0.2]
+          time: 800ms
+    else:
+      - throw: 未找到滑动起点
+    timeout: 30s

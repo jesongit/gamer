@@ -1,0 +1,10 @@
+steps:
+  - color:
+      at: [0.5, 0.5]
+      expect:
+        - ff8800:
+          - tap: [0.5, 0.5]
+        - '123456':
+          - log: 深蓝分支
+    else:
+      - throw: 颜色未命中

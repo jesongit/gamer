@@ -1,0 +1,14 @@
+login:
+  params:
+    - 'tmpl:account:账号模板:account.png'
+    - 'time:timeout:等待时间:30s'
+  steps:
+    - find: $account
+      timeout: $timeout
+    - return: true
+
+is_enabled:
+  params:
+    - 'bool:enable:开关'
+  steps:
+    - return: $enable
