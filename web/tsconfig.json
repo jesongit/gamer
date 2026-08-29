@@ -1,0 +1,18 @@
+{
+  // 仅约束 script-editor 模型层（阶段 3 前半）；组件层下一波渐进迁移时再扩大 include。
+  // vite/vitest 走 esbuild 转译，本文件不影响既有纯 JS 代码；tsc --noEmit 用于自检类型。
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true
+  },
+  "include": ["src/script-editor/**/*.ts"]
+}
