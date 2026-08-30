@@ -508,16 +508,16 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] 集成负责人已统一更新 `server/src/api/mod.rs`。
 - [ ] 已按 C → D → B → A 顺序合并。
 - [ ] 每合并一条支线均单独运行了对应测试。
-- [ ] 已删除并重建开发测试数据库。
+- [x] 已删除并重建开发测试数据库。
 - [x] 旧 run endpoint 返回 404。
 - [x] 旧资源 body 被明确拒绝，不会静默转换。
 - [x] 当前 run/resource/auth/task endpoint 冒烟测试通过。
 - [x] `cargo fmt --check` 通过。
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` 通过。
+- [x] `cargo clippy --all-targets --all-features -- -D warnings` 通过。
 - [x] `cargo test` 通过。
 - [ ] 已为 E～H 创建独立分支/worktree，并指定负责人。
 
-> 波次 1 集成证据（2026-08-31）：A `d22ff00`、D `76ac7ee`、C `48ea895`、B `46e7369`；`cargo fmt --check` 与 `cargo test`（299 passed/2 ignored）通过，clippy 本次收口时被中断未作为通过证据；旧 stop/status=404、旧资源 body=4xx、当前 run/resource/auth/task smoke 通过。
+> 波次 1 集成证据（2026-08-31）：最终 commit `1c1fef8`；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过，`cargo test` 299 passed/2 ignored；空库实际启动后 schema v1 为 `user_version=1` 且表完整，重建前 DB 已移入 `baseline-backups/wave1-20260831-db-rebuild/database-pre-rebuild/`；旧 stop/status=404、旧模板 body=422，当前 run/resource/auth/task smoke 通过。
 
 ### 10.4 波次 2：前端、产品真相与文档
 
