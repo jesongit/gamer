@@ -1,0 +1,16 @@
+params:
+  - 'text:who:称呼'
+  - 'bool:enable:是否启用:true'
+  - 'time:waittime:等待时长:1s'
+  - 'key:akey:按键:BACK'
+  - 'color:acolor:标记色:ff8800'
+  - 'coord:apos:坐标:[0.5, 0.5]'
+  - 'tmpl:atmpl:模板:挑战.png'
+steps:
+  - log: 验证开始
+  - if: $enable
+    then:
+      - log: $who
+      - tap: [0.5, 0.6]
+  - wait: $waittime
+  - key: $akey

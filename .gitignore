@@ -1,5 +1,7 @@
 # ===== Rust (server) =====
 server/target/
+# RC 独立构建目录（正式服务运行中锁定 target/release 时的替代产物位，同不入库）
+server/target-rc/
 # 本机配置（真实路径/密码，不入库）；分发以 server/config.example.toml 为准
 server/config.toml
 # 按天轮转的日志产物（gamer-server.log.YYYY-MM-DD；裸 *.log 规则盖不住带日期后缀的名）

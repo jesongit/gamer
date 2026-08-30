@@ -1,0 +1,12 @@
+check_flag:
+  params:
+    - 'bool:flag:标志'
+  steps:
+    - return: $flag
+
+greet:
+  params:
+    - 'text:name:名字:"默认名"'
+  steps:
+    - log: $name
+    - return: true
