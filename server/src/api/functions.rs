@@ -2,10 +2,9 @@
 //!
 //! - id = `<pkg>/<文件短路径>.yaml`（含 `/`，前端拼 URL 必须整体 encodeURIComponent，
 //!   axum 对 %2F 解码，与 scripts 路由同规则）；
-//! - 浅校验（合法 YAML + 顶层键为合法函数名）在存储层强制，完整结构校验归阶段 2；
-//! - GET 返回内容版本短码 version；POST/PUT 带可选 expected_version，不匹配返回
-//!   409 {code:"version_conflict", message, resource}（CONTRACT §5 错误结构，resource
-//!   级错误 step_path/field 留空）；不提供则直接接受（现阶段旧前端兼容）；
+//! - GET 返回内容版本短码 version；POST 只创建，PUT 更新/重命名。PUT 默认要求
+//!   expected_version，不提供时只有 force:true 才能跳过版本门禁；
+//! - 严格 loader 失败返回统一结构化五元组诊断；
 //! - func/ 函数库不进脚本列表/运行接口/任务选择器（数据源物理隔离，测试锁死）。
 
 use axum::extract::{Path, Query, State};
@@ -35,27 +34,29 @@ pub(super) fn version_conflict(resource: &str) -> Response {
         .into_response()
 }
 
-/// expected_version 冲突判定结果（在 blocking 闭包里完成磁盘读取，处理在闭包外）
-pub(super) enum VersionCheck {
-    Ok,
-    /// 磁盘版本与 expected_version 不符（含目标文件不存在）——携带冲突资源 ID
-    Conflict {
-        resource: String,
-    },
+pub(super) fn version_required(resource: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "code": "version_required",
+            "message": "更新资源必须提供 expected_version，或显式 force:true",
+            "resource": resource,
+            "step_path": "",
+            "field": "expected_version"
+        })),
+    )
+        .into_response()
 }
 
-pub(super) fn check_expected_version(
-    current: Option<String>,
-    expected: Option<&str>,
-    resource: String,
-) -> VersionCheck {
-    match expected {
-        None => VersionCheck::Ok,
-        Some(exp) => match current {
-            Some(v) if v == exp => VersionCheck::Ok,
-            _ => VersionCheck::Conflict { resource },
-        },
-    }
+fn invalid_yaml_response(diagnostics: Vec<crate::script_v2::ScriptError>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": "invalid_yaml",
+            "diagnostics": diagnostics,
+        })),
+    )
+        .into_response()
 }
 
 /// 校验函数文件内容：非空、≤1MiB（与脚本同限）
@@ -94,19 +95,16 @@ pub(super) async fn api_list_functions(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SaveFunctionReq {
     /// 目标应用分区（设备配置的应用包名）
     pkg: String,
-    /// 函数文件短路径（缺 .yaml 扩展名自动补全；upsert 语义对齐 POST /api/scripts）
+    /// 函数文件短路径（缺 .yaml 扩展名自动补全）
     name: String,
     content: String,
-    /// 可选：客户端持有的当前内容版本短码；与磁盘不符 → 409 version_conflict
-    #[serde(default)]
-    expected_version: Option<String>,
 }
 
-/// POST /api/functions：创建/覆盖函数库文件（upsert）。先做 expected_version
-/// 冲突检测，再浅校验 + 原子落盘。
+/// POST /api/functions：只创建，不覆盖已有函数库文件。
 pub(super) async fn api_create_function(
     State(st): State<AppState>,
     Json(req): Json<SaveFunctionReq>,
@@ -121,31 +119,49 @@ pub(super) async fn api_create_function(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    let name = req.name.clone();
-    let expected = req.expected_version.clone();
-    let st_check = st.clone();
-    let pkg_check = pkg.clone();
-    let check = run_blocking_api(move || {
-        let current = st_check
+    let parse_pkg = pkg.clone();
+    let parse_name = req.name.clone();
+    let parse_content = req.content.clone();
+    let st_parse = st.clone();
+    let parsed = run_blocking_api(move || {
+        Ok(st_parse
             .scripts
-            .function_version_for_save(&pkg_check, &name)
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        Ok(check_expected_version(
-            current,
-            expected.as_deref(),
-            format!("{pkg_check}/{name}"),
-        ))
+            .parse_function_content(&parse_pkg, &parse_name, &parse_content))
     })
     .await;
-    match check {
-        Err(e) => return e.into_response(),
-        Ok(VersionCheck::Conflict { resource }) => return version_conflict(&resource),
-        Ok(VersionCheck::Ok) => {}
+    match parsed {
+        Err(err) => return err.into_response(),
+        Ok(Err(diagnostics)) => return invalid_yaml_response(diagnostics),
+        Ok(Ok(_)) => {}
     }
+    let name = req.name.clone();
+    let resource = format!(
+        "{}/{}",
+        pkg,
+        if name.to_lowercase().ends_with(".yaml") {
+            name.clone()
+        } else {
+            format!("{name}.yaml")
+        }
+    );
     match run_blocking_api(move || {
+        if st
+            .scripts
+            .function_version_for_save(&pkg, &name)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?
+            .is_some()
+        {
+            return Err(ApiError::conflict(format!("资源已存在: {resource}")));
+        }
         st.scripts
             .save_function(&pkg, &req.name, &req.content)
-            .map_err(|e| ApiError::bad_request(e.to_string()))
+            .map_err(|e| {
+                if e.to_string().contains("已存在") {
+                    ApiError::conflict(e.to_string())
+                } else {
+                    ApiError::bad_request(e.to_string())
+                }
+            })
     })
     .await
     {
@@ -181,14 +197,19 @@ pub(super) async fn api_get_function(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct UpdateFunctionReq {
+    /// 可选：不提供时沿用原文件名；提供时执行同分区重命名。
+    #[serde(default)]
+    name: Option<String>,
     content: String,
-    /// 可选：客户端持有的当前内容版本短码；与磁盘不符 → 409 version_conflict
     #[serde(default)]
     expected_version: Option<String>,
+    #[serde(default)]
+    force: bool,
 }
 
-/// PUT /api/functions/:id：覆盖更新（不重命名）。404（文件不存在）优先于 409。
+/// PUT /api/functions/:id：更新已有函数库，可选重命名；重命名也检查源版本。
 pub(super) async fn api_update_function(
     State(st): State<AppState>,
     Path(id): Path<String>,
@@ -198,7 +219,6 @@ pub(super) async fn api_update_function(
         return err.into_response();
     }
     let check_id = id.clone();
-    let expected = req.expected_version.clone();
     let st_check = st.clone();
     let check = run_blocking_api(move || {
         let Some(f) = st_check
@@ -208,26 +228,53 @@ pub(super) async fn api_update_function(
         else {
             return Err(ApiError::not_found("函数文件不存在"));
         };
-        Ok(check_expected_version(
-            Some(f.version),
-            expected.as_deref(),
-            check_id,
-        ))
+        Ok(f)
     })
     .await;
     match check {
         Err(e) => return e.into_response(),
-        Ok(VersionCheck::Conflict { resource }) => return version_conflict(&resource),
-        Ok(VersionCheck::Ok) => {}
+        Ok(f) => {
+            if !req.force && req.expected_version.is_none() {
+                return version_required(&id);
+            }
+            if !req.force && req.expected_version.as_deref() != Some(f.version.as_str()) {
+                return version_conflict(&id);
+            }
+        }
+    }
+    let (pkg, rel) = match id.split_once('/') {
+        Some((pkg, rel)) => (pkg.to_string(), rel.to_string()),
+        None => return ApiError::bad_request("非法函数文件 id").into_response(),
+    };
+    let target_name = req.name.clone().unwrap_or(rel);
+    if let Err(err) = validate_text_field(&target_name, "函数文件名", 255) {
+        return err.into_response();
+    }
+    let parse_pkg = pkg.clone();
+    let parse_name = target_name.clone();
+    let parse_content = req.content.clone();
+    let st_parse = st.clone();
+    let parsed = run_blocking_api(move || {
+        Ok(st_parse
+            .scripts
+            .parse_function_content(&parse_pkg, &parse_name, &parse_content))
+    })
+    .await;
+    match parsed {
+        Err(err) => return err.into_response(),
+        Ok(Err(diagnostics)) => return invalid_yaml_response(diagnostics),
+        Ok(Ok(_)) => {}
     }
     match run_blocking_api(move || {
-        // id 合法性（pkg/短路径分段与扩展名）由存储层 resolver 把关
-        let (pkg, rel) = id.split_once('/').ok_or_else(|| {
-            ApiError::bad_request("非法函数文件 id（应为 <pkg>/<文件短路径>.yaml）")
-        })?;
         st.scripts
-            .save_function(pkg, rel, &req.content)
-            .map_err(|e| ApiError::bad_request(e.to_string()))
+            .update_function(&id, Some(&target_name), &req.content)
+            .map_err(|e| {
+                if e.to_string().contains("已存在") {
+                    ApiError::conflict(e.to_string())
+                } else {
+                    ApiError::bad_request(e.to_string())
+                }
+            })
     })
     .await
     {

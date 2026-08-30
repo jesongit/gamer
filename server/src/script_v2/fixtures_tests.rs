@@ -46,7 +46,6 @@ const VALID_IDS: &[&str] = &[
 
 /// 非法样例逻辑 ID。
 const INVALID_IDS: &[&str] = &[
-    "i01_old_top_format",
     "i02_params_unquoted",
     "i03_default_type_mismatch",
     "i04_match_candidate_duplicate",

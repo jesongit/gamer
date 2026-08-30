@@ -11,7 +11,6 @@ pub mod codes {
     // yaml / 根结构
     pub const YAML_SYNTAX_ERROR: &str = "yaml.syntax_error";
     pub const SCRIPT_ROOT_TYPE: &str = "script.root_type";
-    pub const SCRIPT_TOP_LEVEL_LEGACY: &str = "script.top_level.legacy_format";
     pub const SCRIPT_TOP_LEVEL_UNKNOWN_KEY: &str = "script.top_level.unknown_key";
     // 契约缺口：§5.3 未列 config 域码，分层校验需要（config 子键白名单与取值域）
     pub const SCRIPT_CONFIG_UNKNOWN_KEY: &str = "script.config.unknown_key";
@@ -57,6 +56,7 @@ pub mod codes {
     pub const RESOURCE_TMPL_AMBIGUOUS: &str = "resource.tmpl.ambiguous";
     pub const RESOURCE_SCRIPT_NOT_FOUND: &str = "resource.script.not_found";
     pub const RESOURCE_FUNC_NOT_FOUND: &str = "resource.func.not_found";
+    pub const RESOURCE_IMPORT_INVALID: &str = "resource.import.invalid";
     // 引用
     pub const REF_CALL_PATH_TRAVERSAL: &str = "ref.call.path_traversal";
     pub const REF_CALL_SELF_CYCLE: &str = "ref.call.self_cycle";

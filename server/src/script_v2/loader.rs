@@ -217,17 +217,6 @@ fn key_loc(span: &Span) -> String {
 // 结构层构建（错误累积，不早退）
 // ---------------------------------------------------------------------------
 
-/// 旧语法顶层键（CONTRACT §3.2：出现即报 legacy_format，给前端迁移引导提示位）。
-const LEGACY_TOP_KEYS: &[&str] = &[
-    "func",
-    "name",
-    "action_wait",
-    "default_threshold",
-    "package",
-    "until",
-    "cond",
-];
-
 /// 步骤动作键（十七类）。
 pub(crate) const ACTION_KEYS: &[&str] = &[
     "str_app", "cls_app", "tap", "swipe", "key", "text", "log", "wait", "find", "match", "color",
@@ -271,18 +260,7 @@ pub(crate) fn build_script_file(ctx: &mut BuildCtx, root: &Node) -> Option<Scrip
     let mut config_node = None;
     let mut steps_node = None;
     for e in entries {
-        if LEGACY_TOP_KEYS.contains(&e.key.as_str()) {
-            ctx.push(
-                codes::SCRIPT_TOP_LEVEL_LEGACY,
-                "",
-                &e.key,
-                format!(
-                    "顶层键 {:?} 属于旧语法（旧 func:/name:/action_wait 等不再支持），请迁移到新语法",
-                    e.key
-                ),
-            );
-            top_bad = true;
-        } else if !matches!(e.key.as_str(), "params" | "config" | "steps") {
+        if !matches!(e.key.as_str(), "params" | "config" | "steps") {
             ctx.push(
                 codes::SCRIPT_TOP_LEVEL_UNKNOWN_KEY,
                 "",

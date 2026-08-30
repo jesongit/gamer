@@ -28,19 +28,58 @@ pub(super) async fn api_list_scripts(State(st): State<AppState>) -> Response {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SaveScriptReq {
-    id: Option<String>,
     name: String,
     content: String,
     /// 目标应用分区（设备配置的应用包名）
     pkg: String,
-    /// 可选：客户端持有的当前内容版本短码；与磁盘不符 → 409 version_conflict
-    /// （重命名场景以 id 指向的文件为准，否则以 pkg+name 目标文件为准）
-    #[serde(default)]
-    expected_version: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UpdateScriptReq {
+    /// 可选：不提供时沿用原文件名；提供时执行同分区重命名。
+    #[serde(default)]
+    name: Option<String>,
+    content: String,
+    /// 更新默认必须带当前内容版本；force=true 才跳过版本门禁。
+    #[serde(default)]
+    expected_version: Option<String>,
+    #[serde(default)]
+    force: bool,
+}
+
+fn invalid_yaml_response(diagnostics: Vec<crate::script_v2::ScriptError>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({
+            "error": "invalid_yaml",
+            "diagnostics": diagnostics,
+        })),
+    )
+        .into_response()
+}
+
+fn script_resource_name(name: &str) -> String {
+    let name = name.trim();
+    if name.to_lowercase().ends_with(".yaml") || name.to_lowercase().ends_with(".yml") {
+        name.to_string()
+    } else {
+        format!("{name}.yaml")
+    }
+}
+
+/// 兼容现有 mod.rs 的 handler 名称；集成负责人可切换到 api_create_script。
 pub(super) async fn api_save_script(
+    State(st): State<AppState>,
+    Json(req): Json<SaveScriptReq>,
+) -> Response {
+    api_create_script(State(st), Json(req)).await
+}
+
+/// POST /api/scripts：只创建，不覆盖已有脚本。
+pub(super) async fn api_create_script(
     State(st): State<AppState>,
     Json(req): Json<SaveScriptReq>,
 ) -> Response {
@@ -57,36 +96,42 @@ pub(super) async fn api_save_script(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    // 版本冲突检测（blocking 内读盘）：expected_version 与将被覆盖的现有文件不符 → 409
-    let check_id = req.id.clone();
-    let expected = req.expected_version.clone();
-    let name_for_check = req.name.clone();
-    let pkg_for_check = pkg.clone();
-    let st_check = st.clone();
-    let check = run_blocking_api(move || {
-        let current = st_check
+    let parse_pkg = pkg.clone();
+    let parse_name = req.name.clone();
+    let parse_content = req.content.clone();
+    let st_parse = st.clone();
+    let parsed = run_blocking_api(move || {
+        Ok(st_parse
             .scripts
-            .script_version_for_save(check_id.as_deref(), &pkg_for_check, &name_for_check)
-            .map_err(|e| ApiError::bad_request(e.to_string()))?;
-        let resource = check_id.unwrap_or_else(|| format!("{pkg_for_check}/{name_for_check}"));
-        Ok(super::functions::check_expected_version(
-            current,
-            expected.as_deref(),
-            resource,
-        ))
+            .parse_script_content(&parse_pkg, &parse_name, &parse_content))
     })
     .await;
-    match check {
-        Err(e) => return e.into_response(),
-        Ok(super::functions::VersionCheck::Conflict { resource }) => {
-            return super::functions::version_conflict(&resource)
-        }
-        Ok(super::functions::VersionCheck::Ok) => {}
+    match parsed {
+        Err(err) => return err.into_response(),
+        Ok(Err(diagnostics)) => return invalid_yaml_response(diagnostics),
+        Ok(Ok(_)) => {}
     }
+    let name = req.name.clone();
+    let name_for_response = script_resource_name(&name);
     match run_blocking_api(move || {
+        let resource = format!("{pkg}/{name_for_response}");
+        if st
+            .scripts
+            .script_version_for_save(None, &pkg, &name)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?
+            .is_some()
+        {
+            return Err(ApiError::conflict(format!("资源已存在: {resource}")));
+        }
         st.scripts
-            .save(req.id.as_deref(), &pkg, &req.name, &req.content)
-            .map_err(|e| ApiError::bad_request(e.to_string()))
+            .save(None, &pkg, &name, &req.content)
+            .map_err(|e| {
+                if e.to_string().contains("已存在") {
+                    ApiError::conflict(e.to_string())
+                } else {
+                    ApiError::bad_request(e.to_string())
+                }
+            })
     })
     .await
     {
@@ -99,6 +144,93 @@ pub(super) async fn api_save_script(
         }))
         .into_response(),
         Err(e) => e.into_response(),
+    }
+}
+
+/// PUT /api/scripts/:id：只更新已有脚本；重命名仍以源文件版本做检查。
+pub(super) async fn api_update_script(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateScriptReq>,
+) -> Response {
+    if req.content.trim().is_empty() {
+        return ApiError::bad_request("脚本内容不能为空").into_response();
+    }
+    if req.content.len() > crate::scripts::IMPORT_MAX_YAML_BYTES {
+        return ApiError::bad_request("脚本内容超过 1 MiB").into_response();
+    }
+    let (pkg, source_name) = match id.split_once('/') {
+        Some((pkg, name)) => match require_pkg(Some(pkg)) {
+            Ok(pkg) => (pkg, name.to_string()),
+            Err(err) => return err.into_response(),
+        },
+        None => return ApiError::not_found("脚本不存在").into_response(),
+    };
+    let source = match run_blocking_api({
+        let st = st.clone();
+        let id = id.clone();
+        move || {
+            st.scripts
+                .get(&id)
+                .map_err(|e| ApiError::internal(e.to_string()))
+        }
+    })
+    .await
+    {
+        Ok(Some(script)) => script,
+        Ok(None) => return ApiError::not_found("脚本不存在").into_response(),
+        Err(err) => return err.into_response(),
+    };
+    if !req.force && req.expected_version.is_none() {
+        return super::functions::version_required(&id);
+    }
+    if !req.force {
+        let current = source.version();
+        if req.expected_version.as_deref() != Some(current.as_str()) {
+            return super::functions::version_conflict(&id);
+        }
+    }
+    let target_name = req.name.clone().unwrap_or(source_name);
+    if let Err(err) = validate_text_field(&target_name, "脚本名", 255) {
+        return err.into_response();
+    }
+    let parse_pkg = pkg.clone();
+    let parse_name = target_name.clone();
+    let parse_content = req.content.clone();
+    let st_parse = st.clone();
+    let parsed = run_blocking_api(move || {
+        Ok(st_parse
+            .scripts
+            .parse_script_content(&parse_pkg, &parse_name, &parse_content))
+    })
+    .await;
+    match parsed {
+        Err(err) => return err.into_response(),
+        Ok(Err(diagnostics)) => return invalid_yaml_response(diagnostics),
+        Ok(Ok(_)) => {}
+    }
+    match run_blocking_api(move || {
+        st.scripts
+            .save(Some(&id), &pkg, &target_name, &req.content)
+            .map_err(|e| {
+                if e.to_string().contains("已存在") {
+                    ApiError::conflict(e.to_string())
+                } else {
+                    ApiError::bad_request(e.to_string())
+                }
+            })
+    })
+    .await
+    {
+        Ok(s) => Json(serde_json::json!({
+            "ok": true,
+            "id": s.id,
+            "package": s.package,
+            "name": s.name,
+            "version": s.version(),
+        }))
+        .into_response(),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -191,6 +323,42 @@ pub(super) async fn api_import_script(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
+    if confirm {
+        let preview = run_blocking_api({
+            let st = st.clone();
+            let body = body.clone();
+            let pkg = pkg.clone();
+            move || {
+                st.scripts
+                    .import(&body, &pkg, false)
+                    .map_err(|e| ApiError::bad_request(e.to_string()))
+            }
+        })
+        .await;
+        match preview {
+            Err(err) => return err.into_response(),
+            Ok(rep) => {
+                let diagnostics: Vec<_> = rep
+                    .scripts
+                    .invalid
+                    .iter()
+                    .chain(&rep.functions.invalid)
+                    .chain(&rep.templates.invalid)
+                    .flat_map(|entry| entry.diagnostics.iter())
+                    .collect();
+                if !diagnostics.is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "invalid_yaml",
+                            "diagnostics": diagnostics,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
     match run_blocking_api(move || {
         let rep = st
             .scripts

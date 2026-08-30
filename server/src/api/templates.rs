@@ -133,16 +133,12 @@ pub(super) async fn api_list_templates(
     }
 }
 
-/// 模板上传请求（plan §11.7 命名契约化后两种形态二选一）：
-/// - **新形态（录制上传）**：`short_name`（短名，可选配 `region` 搜索区域
-///   `[x1,y1,x2,y2]` 相对坐标 0~1）——完整文件名由服务端组合
-///   `<短名去.png>#x1_y1_x2_y2.png`（×1000 三位整数），短名冲突 409 不覆盖；
-/// - **旧形态（兼容）**：`name` 完整文件名（可带 `#` 后缀），同名覆盖写
-///   （行为不变，region 字段忽略）。
+/// 模板创建请求固定为 {short_name, region?, pkg, data_b64}。短名冲突
+/// 409 且不覆盖；已有图片的替换走独立 image PUT。
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct UploadTemplateReq {
-    name: Option<String>,
-    short_name: Option<String>,
+    short_name: String,
     region: Option<[f64; 4]>,
     data_b64: String,
     pkg: String,
@@ -168,7 +164,16 @@ fn short_name_conflict(dir: &std::path::Path, base: &str) -> bool {
         })
 }
 
+/// 兼容现有 mod.rs 的 handler 名称；集成负责人可切换到 api_create_template。
 pub(super) async fn api_upload_template(
+    State(st): State<AppState>,
+    Json(req): Json<UploadTemplateReq>,
+) -> Response {
+    api_create_template(State(st), Json(req)).await
+}
+
+/// POST /api/templates：只创建模板，不覆盖已有图片。
+pub(super) async fn api_create_template(
     State(st): State<AppState>,
     Json(req): Json<UploadTemplateReq>,
 ) -> Response {
@@ -176,31 +181,17 @@ pub(super) async fn api_upload_template(
         Ok(pkg) => pkg,
         Err(err) => return err.into_response(),
     };
-    // 新旧形态分流：short_name（服务端组合完整名 + 短名冲突拒绝）/ name（覆盖写）
-    let (name, short_base) = match (req.short_name.as_deref(), req.name.as_deref()) {
-        (Some(_), Some(_)) => {
-            return err_response(StatusCode::BAD_REQUEST, "name 与 short_name 只能二选一")
-        }
-        (None, None) => return err_response(StatusCode::BAD_REQUEST, "缺少 name 或 short_name"),
-        (Some(short), None) => {
-            let short = match validate_short_name(short) {
-                Ok(v) => v,
-                Err(err) => return err.into_response(),
-            };
-            let base = &short[..short.len() - 4]; // 去 ".png"
-            let name = match req.region {
-                Some(region) => match compose_region_suffix(region) {
-                    Ok(suffix) => format!("{base}#{suffix}.png"),
-                    Err(err) => return err.into_response(),
-                },
-                None => short.clone(),
-            };
-            (name, Some(base.to_string()))
-        }
-        (None, Some(name)) => match validate_template_name(name) {
-            Ok(v) => (v, None),
+    let short = match validate_short_name(&req.short_name) {
+        Ok(v) => v,
+        Err(err) => return err.into_response(),
+    };
+    let base = short[..short.len() - 4].to_string(); // 去 ".png"
+    let name = match req.region {
+        Some(region) => match compose_region_suffix(region) {
+            Ok(suffix) => format!("{base}#{suffix}.png"),
             Err(err) => return err.into_response(),
         },
+        None => short.clone(),
     };
     // base64 合法性与体积先于解码校验（4/3 膨胀后 16MiB ≈ 原始 12MiB 内的护栏）
     const MAX_B64_LEN: usize = (matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 1) * 4;
@@ -229,13 +220,11 @@ pub(super) async fn api_upload_template(
     };
     match run_blocking_api(move || {
         let dir = st.scripts.tmpl_dir(&pkg);
-        // 新形态：短名冲突即 409（§11.7 冲突要求改名不自动覆盖）；旧形态保持覆盖写
-        if let Some(base) = &short_base {
-            if short_name_conflict(&dir, base) {
-                return Err(ApiError::conflict(format!(
-                    "短名 {base}.png 已存在，请改名（不会覆盖）"
-                )));
-            }
+        // 短名冲突即 409（§11.7 冲突要求改名不自动覆盖）。
+        if short_name_conflict(&dir, &base) {
+            return Err(ApiError::conflict(format!(
+                "短名 {base}.png 已存在，请改名（不会覆盖）"
+            )));
         }
         std::fs::create_dir_all(&dir).map_err(|e| ApiError::internal(e.to_string()))?;
         let path = dir.join(&name);
@@ -247,6 +236,72 @@ pub(super) async fn api_upload_template(
         Ok(Json(
             serde_json::json!({"ok": true, "name": name, "size": bytes.len(), "orig_size": orig_size}),
         ))
+    })
+    .await
+    {
+        Ok(resp) => resp.into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ReplaceTemplateImageReq {
+    data_b64: String,
+}
+
+/// PUT /api/templates/:name/image?pkg=...：只替换已有模板的图片字节。
+/// 请求体严格只有 data_b64，名称与分区均来自 URL/query。
+pub(super) async fn api_replace_template_image(
+    State(st): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<PkgQuery>,
+    Json(req): Json<ReplaceTemplateImageReq>,
+) -> Response {
+    let pkg = match require_pkg(q.pkg.as_deref()) {
+        Ok(pkg) => pkg,
+        Err(err) => return err.into_response(),
+    };
+    let name = match validate_template_name(&name) {
+        Ok(name) => name,
+        Err(err) => return err.into_response(),
+    };
+    const MAX_B64_LEN: usize = (matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 1) * 4;
+    if req.data_b64.len() > MAX_B64_LEN {
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            "图片超过上传上限（10 MiB），请裁剪后再试",
+        );
+    }
+    let data_b64 = req.data_b64;
+    let (bytes, orig_size) = match run_blocking_api(move || {
+        let orig = base64::engine::general_purpose::STANDARD
+            .decode(data_b64)
+            .map_err(|e| ApiError::bad_request(format!("base64 解码失败: {e}")))?;
+        let orig_size = orig.len();
+        let bytes = matcher::reencode_template_gray_png(&orig)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        Ok((bytes, orig_size))
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(err) => return err.into_response(),
+    };
+    match run_blocking_api(move || {
+        let path = st.scripts.tmpl_dir(&pkg).join(&name);
+        if !path.is_file() {
+            return Err(ApiError::not_found("模板不存在"));
+        }
+        crate::scripts::atomic_write(&path, &bytes)
+            .map_err(|e| ApiError::internal(e.to_string()))?;
+        matcher::invalidate_template_cache_path(&path);
+        Ok(Json(serde_json::json!({
+            "ok": true,
+            "name": name,
+            "size": bytes.len(),
+            "orig_size": orig_size,
+        })))
     })
     .await
     {

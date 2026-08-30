@@ -51,7 +51,7 @@ async fn template_upload_rejects_byte_and_pixel_bombs_with_4xx() {
 
     let bomb_b64 = base64::engine::general_purpose::STANDARD.encode(pixel_bomb_png(30_000, 30_000));
     let body = serde_json::json!({
-        "name": "bomb.png",
+        "short_name": "bomb.png",
         "pkg": "com.test.app",
         "data_b64": bomb_b64,
     })
@@ -73,7 +73,7 @@ async fn template_upload_rejects_byte_and_pixel_bombs_with_4xx() {
     // 断言 API 在解码前直接以 400 拒绝，不分配/解码图片。
     let too_large_b64 = "A".repeat((matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 2) * 4);
     let body = serde_json::json!({
-        "name": "large.png",
+        "short_name": "large.png",
         "pkg": "com.test.app",
         "data_b64": too_large_b64,
     })
@@ -233,6 +233,20 @@ async fn functions_crud_cycle_with_version_conflict() {
     let v1 = j["version"].as_str().unwrap().to_string();
     assert_eq!(v1.len(), 12);
 
+    // POST 只创建：同名函数库再次提交不得覆盖
+    let resp = send(
+        &t.app,
+        req(
+            "POST",
+            "/api/functions",
+            None,
+            &json_headers(sid.clone()),
+            Some(body.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
     // list：pkg 必填、返回文件短路径 + 函数名清单
     let resp = send(
         &t.app,
@@ -308,8 +322,41 @@ async fn functions_crud_cycle_with_version_conflict() {
     assert_eq!(j["resource"], "com.test.app/common.yaml");
     assert!(j["message"].is_string());
 
-    // 不带 expected_version 直接接受（旧前端兼容）
+    // 缺少 expected_version → 409；显式 force:true 才允许跳过版本门禁
     let body = serde_json::json!({"content": FUNC_YAML});
+    let resp = send(
+        &t.app,
+        req(
+            "PUT",
+            "/api/functions/com.test.app%2Fcommon.yaml",
+            None,
+            &json_headers(sid.clone()),
+            Some(body.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let body = serde_json::json!({"content": FUNC_YAML, "force": true});
+    let resp = send(
+        &t.app,
+        req(
+            "PUT",
+            "/api/functions/com.test.app%2Fcommon.yaml",
+            None,
+            &json_headers(sid.clone()),
+            Some(body.to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v3 = json_body(resp).await["version"].as_str().unwrap().to_string();
+
+    // 重命名也是更新：必须使用源文件当前版本
+    let body = serde_json::json!({
+        "name": "renamed",
+        "content": FUNC_YAML_V2,
+        "expected_version": v3
+    });
     let resp = send(
         &t.app,
         req(
@@ -328,7 +375,7 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "DELETE",
-            "/api/functions/com.test.app%2Fcommon.yaml",
+            "/api/functions/com.test.app%2Frenamed.yaml",
             None,
             &json_headers(sid.clone()),
             None,
@@ -340,7 +387,7 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "GET",
-            "/api/functions/com.test.app%2Fcommon.yaml",
+            "/api/functions/com.test.app%2Frenamed.yaml",
             None,
             &json_headers(sid.clone()),
             None,
@@ -398,7 +445,7 @@ async fn functions_input_validation_and_missing_pkg() {
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // 浅校验：顶层键保留字 / 非法函数名 / YAML 语法错 / 子目录短路径
+    // 严格 loader：顶层键保留字 / 非法函数名 / YAML 语法错 / 子目录短路径
     let cases = [
         ("match:\n  steps: []\n", "保留字"),
         ("1abc:\n  steps: []\n", "只允许 unicode 字母"),
@@ -425,12 +472,15 @@ async fn functions_input_validation_and_missing_pkg() {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{content}");
+        let j = json_body(resp).await;
+        assert_eq!(j["error"], "invalid_yaml", "{content}");
         assert!(
-            json_body(resp).await["error"]
-                .as_str()
+            j["diagnostics"]
+                .as_array()
                 .unwrap()
-                .contains(marker),
-            "{content}"
+                .iter()
+                .any(|e| e["message"].as_str().unwrap_or_default().contains(marker)),
+            "{content}: {j}"
         );
     }
     let body =
@@ -599,35 +649,19 @@ async fn scripts_get_version_and_save_expected_version_conflict() {
     assert_eq!(j["version"], v1.as_str());
     assert!(j["content"].as_str().unwrap().contains("log v1"));
 
-    // 过期 expected_version → 409 version_conflict
+    // POST 只创建：已有资源再次 POST → 409，且不接受更新字段
     let resp = post_json(
             &t,
             &sid,
             "/api/scripts",
-            serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps: []\n", "expected_version": "deadbeefdead"}),
+            serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps: []\n"}),
         )
         .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let j = json_body(resp).await;
-    assert_eq!(j["code"], "version_conflict");
-    assert_eq!(j["resource"], "com.test.app/main.yaml");
+    assert_eq!(j["error"], "资源已存在: com.test.app/main.yaml");
 
-    // 正确 expected_version → 更新成功并返回新版本
-    let resp = post_json(
-            &t,
-            &sid,
-            "/api/scripts",
-            serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps:\n  - log v2\n", "expected_version": v1}),
-        )
-        .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let v2 = json_body(resp).await["version"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_ne!(v2, v1);
-
-    // 新建文件却带 expected_version（不可能持有的版本）→ 409
+    // POST body 不再接受旧的 id/expected_version 更新形态
     let resp = post_json(
             &t,
             &sid,
@@ -635,21 +669,7 @@ async fn scripts_get_version_and_save_expected_version_conflict() {
             serde_json::json!({"pkg": "com.test.app", "name": "other.yaml", "content": "steps: []\n", "expected_version": v1}),
         )
         .await;
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-
-    // 重命名场景：expected_version 以 id 指向的旧文件为准
-    let resp = post_json(
-            &t,
-            &sid,
-            "/api/scripts",
-            serde_json::json!({"id": "com.test.app/main.yaml", "pkg": "com.test.app", "name": "quest", "content": "steps:\n  - log v2\n", "expected_version": v2}),
-        )
-        .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let resp = get_json(&t, &sid, "/api/scripts/com.test.app%2Fmain.yaml").await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let resp = get_json(&t, &sid, "/api/scripts/com.test.app%2Fquest.yaml").await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -725,7 +745,7 @@ async fn import_dry_run_reports_then_confirm_writes() {
     assert_eq!(resp.status(), StatusCode::OK);
     let j = json_body(resp).await;
     assert_eq!(j["functions"]["invalid"][0]["path"], "func/bad.yaml");
-    assert!(j["functions"]["invalid"][0]["reason"].is_string());
+    assert!(j["functions"]["invalid"][0]["diagnostics"].is_array());
     let resp = send(
         &t.app,
         req_bytes(
@@ -783,7 +803,7 @@ async fn export_import_roundtrip_via_api() {
     assert_eq!(resp.status(), StatusCode::OK);
     let tmpl = serde_json::json!({
         "pkg": "com.test.app",
-        "name": "icon.png",
+        "short_name": "icon.png",
         "data_b64": base64::engine::general_purpose::STANDARD.encode(valid_template_png()),
     });
     let resp = send(
@@ -958,8 +978,7 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
-    // 短名无 region → 无 # 后缀普通名落盘；旧形态 name 覆盖写保持不变
-    // （Console 框选替换/文件上传靠同名覆盖，兼容不动）
+    // 短名无 region → 无 # 后缀普通名落盘；旧的 name/data 上传形态拒绝
     let resp = post_json(
         &t,
         &sid,
@@ -984,5 +1003,5 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

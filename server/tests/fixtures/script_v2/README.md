@@ -67,7 +67,6 @@ ParamDecl 为 `{type, name, remark, default}`，`default: null` 表示必填。M
 
 | 逻辑 ID | 文件 | 期望错误 |
 |---|---|---|
-| i01_old_top_format | i01_old_top_format.yaml | script.top_level.legacy_format @ func（旧 func: 段） |
 | i02_params_unquoted | i02_params_unquoted.yaml | param.decl.quote_style @ params[0].style（未加单引号） |
 | i03_default_type_mismatch | i03_default_type_mismatch.yaml | param.default.invalid @ params[0]、params[1]（bool 传字符串 / time 缺单位） |
 | i04_match_candidate_duplicate | i04_match_candidate_duplicate.yaml | step.match.candidate_duplicate @ steps[0].candidates |

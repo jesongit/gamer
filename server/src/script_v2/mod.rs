@@ -85,6 +85,14 @@ pub fn parse_function_file(
     let Some(file) = file else {
         return Err(ctx.errors);
     };
+    if file.functions.is_empty() {
+        return Err(vec![ScriptError::new(
+            error::codes::FUNC_RECORD_TYPE,
+            "函数文件没有定义任何函数",
+            resource,
+        )
+        .at("", "functions")]);
+    }
     let errors = validate::validate_function_file(&file, resource, provider);
     if errors.is_empty() {
         Ok(file)
