@@ -173,7 +173,7 @@ pub(crate) fn load(source: &str) -> Result<Node, String> {
     root.ok_or_else(|| "空文档".to_string())
 }
 
-fn attach(stack: &mut Vec<Frame>, root: &mut Option<Node>, node: Node) -> Result<(), String> {
+fn attach(stack: &mut [Frame], root: &mut Option<Node>, node: Node) -> Result<(), String> {
     match stack.last_mut() {
         Some(Frame::Seq(items)) => {
             items.push(node);
@@ -1060,7 +1060,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
         }
         "throw" => {
             let message = match value.as_scalar() {
-                Some((raw, _)) if raw.is_empty() => None,
+                Some(("", _)) => None,
                 Some((raw, _)) => Some(raw.to_string()),
                 None => {
                     ctx.push(

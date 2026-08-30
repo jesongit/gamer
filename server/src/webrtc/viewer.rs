@@ -303,8 +303,7 @@ impl ViewerSession {
                 PeerConnectionEffect::Terminal => {
                     // was_connected 区分两类断开：true = 已连通后正常终结（关页/
                     // 踢下线）；false = ICE 从未连通（同机部署先查 mDNS 解析/防火墙）
-                    let was_connected =
-                        peer_connected2.load(std::sync::atomic::Ordering::SeqCst);
+                    let was_connected = peer_connected2.load(std::sync::atomic::Ordering::SeqCst);
                     peer_connected2.store(false, std::sync::atomic::Ordering::SeqCst);
                     running2.store(false, std::sync::atomic::Ordering::SeqCst);
                     let _ = peer_closed_tx.send(true);

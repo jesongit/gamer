@@ -758,8 +758,12 @@ impl DeviceManager {
         }
         let map = self.devices.read();
         let Some(rt) = map.get(id) else { return };
-        let Some(session) = rt.session.clone() else { return };
-        let Some(pkg) = rt.device.pkg.clone() else { return };
+        let Some(session) = rt.session.clone() else {
+            return;
+        };
+        let Some(pkg) = rt.device.pkg.clone() else {
+            return;
+        };
         if pkg.trim().is_empty() {
             return;
         }

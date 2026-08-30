@@ -147,7 +147,7 @@ impl ResourceProvider for RunResources<'_> {
         // 轻量构建（不进缓存）：仅判断函数名存在性，正式解析在 ResourceCache。
         self.snapshot
             .function_file(file_short)
-            .and_then(|content| try_build_function_file(content))
+            .and_then(try_build_function_file)
             .is_some_and(|ff| ff.find(function).is_some())
     }
 

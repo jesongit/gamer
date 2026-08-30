@@ -611,7 +611,7 @@ impl<'p, 'e> GraphWalker<'p, 'e> {
                         // 自引用已在逐步骤校验报 self_cycle，图上跳过。
                         continue;
                     }
-                    if stack.iter().any(|k| *k == to_key) {
+                    if stack.contains(&to_key) {
                         self.errors.push(
                             ScriptError::new(
                                 codes::REF_CALL_CROSS_CYCLE,
@@ -652,7 +652,7 @@ impl<'p, 'e> GraphWalker<'p, 'e> {
                         // 同文件函数递归不在静态图内（运行期由 32 层嵌套 guard 兜底）。
                         continue;
                     }
-                    if stack.iter().any(|k| *k == to_key) {
+                    if stack.contains(&to_key) {
                         self.errors.push(
                             ScriptError::new(
                                 codes::REF_FUNC_CYCLE,

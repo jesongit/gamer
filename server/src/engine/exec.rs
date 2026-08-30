@@ -1370,8 +1370,8 @@ impl Runner {
         Ok(())
     }
 
-    /// call/func 公共返回：恢复 config 与 return_value，弹出作用域。
-    /// （在 exec_call / exec_func 内联实现，见各自函数体。）
+    // call/func 公共返回：恢复 config 与 return_value，弹出作用域。
+    // （在 exec_call / exec_func 内联实现，见各自函数体。）
 
     // ---- args 解析 ---------------------------------------------------------------
 
@@ -1447,7 +1447,8 @@ impl Runner {
         let ms = self.settings.judge_delay_ms;
         if ms > 0 {
             ctx.log("debug", format!("判断命中，延迟 {ms}ms 再执行后续步骤"));
-            self.sleep_interruptible(ctx, Duration::from_millis(ms)).await;
+            self.sleep_interruptible(ctx, Duration::from_millis(ms))
+                .await;
         }
     }
 
@@ -1990,7 +1991,10 @@ mod tests {
         );
         let start = Instant::now();
         let logs = r.run(script_target("f.yaml"), vec![]).await.unwrap();
-        assert!(start.elapsed() >= Duration::from_millis(200), "命中后应插入 judge_delay");
+        assert!(
+            start.elapsed() >= Duration::from_millis(200),
+            "命中后应插入 judge_delay"
+        );
         assert!(logs_contain(&logs, "进入主界面"));
     }
 
@@ -2030,7 +2034,10 @@ mod tests {
         );
         let start = Instant::now();
         let logs = r.run(script_target("f.yaml"), vec![]).await.unwrap();
-        assert!(start.elapsed() >= Duration::from_millis(200), "命中分支前应插入 judge_delay");
+        assert!(
+            start.elapsed() >= Duration::from_millis(200),
+            "命中分支前应插入 judge_delay"
+        );
         assert!(logs_contain(&logs, "分支执行"));
     }
 

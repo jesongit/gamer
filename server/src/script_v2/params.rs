@@ -75,7 +75,7 @@ pub fn parse_param_decl(raw: &str) -> Result<ParamDecl, DeclError> {
     }
     let default = match parts.get(3) {
         None => None,
-        Some(tail) if tail.is_empty() => {
+        Some(&"") => {
             return Err(decl_err(
                 codes::PARAM_DEFAULT_EMPTY,
                 "default",
