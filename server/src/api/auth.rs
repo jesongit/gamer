@@ -21,11 +21,11 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::{Mutex, RwLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Extension, State};
 use axum::http::{header, header::HeaderMap, Method, Request, StatusCode};
@@ -34,7 +34,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rand::RngCore;
 use serde_json::json;
-use sha2::{Digest as _, Sha256};
 use tracing::{debug, warn};
 
 use super::common::err_response;
@@ -138,91 +137,83 @@ const MAX_TRACKED_LOGIN_KEYS: usize = 10_000;
 /// 登录凭据快照（构造 AuthState 时解析定死，运行期不变）
 #[derive(Debug, Clone)]
 pub enum Credential {
-    /// 环境变量 GAMER_ADMIN_PASSWORD（优先级最高）
-    EnvPassword(String),
-    /// 环境变量 GAMER_ADMIN_PASSWORD_FILE 指向的密钥文件
-    SecretFile(String),
-    /// config [auth].password_hash = sha256$salt$hex（仅兼容旧配置，成功登录后升级）
-    Hash { salt: Vec<u8>, digest: Vec<u8> },
-    /// Argon2id PHC 哈希（推荐配置格式）
-    Argon2(String),
-    /// 开发模式内置默认值；成功登录后仅在内存中升级到 Argon2id
-    Plain(String),
+    /// 固定参数的 Argon2id PHC 哈希；开发环境变量在启动时也立即转换为此格式。
+    Argon2 {
+        encoded: String,
+        source: CredentialSource,
+    },
     /// 凭据配置非法或生产模式没有强凭据时的 fail-closed 状态。
     /// 不携带原始配置内容，避免误把口令/哈希带入调试输出。
     Unavailable,
 }
 
-/// 解析 Argon2id PHC 或旧版 `sha256$salt$hex` 口令哈希格式。
-///
-/// 旧格式只为迁移期保留，不能作为新配置生成格式；Argon2 参数和摘要格式
-/// 交由 password-hash 解析器校验，避免自行重新实现 PHC 语法。
-pub fn parse_password_hash(s: &str) -> Result<Credential, String> {
-    let trimmed = s.trim();
-    if trimmed.starts_with("$argon2id$") {
-        validate_argon2_phc(trimmed)?;
-        return Ok(Credential::Argon2(trimmed.to_string()));
-    }
-
-    parse_legacy_sha256_hash(trimmed)
+#[derive(Debug, Clone, Copy)]
+enum CredentialSource {
+    Config,
+    DevEnv,
 }
 
-fn validate_argon2_phc(s: &str) -> Result<(), String> {
-    let parts: Vec<&str> = s.split('$').collect();
-    if parts.len() != 6 || !parts[0].is_empty() || parts[1] != "argon2id" {
-        return Err("argon2id PHC 哈希段数或算法非法".into());
-    }
-    if parts[2] != "v=19" {
-        return Err("argon2id 仅支持 v=19".into());
-    }
-    let mut memory_kib = None;
-    let mut iterations = None;
-    let mut lanes = None;
-    for parameter in parts[3].split(',') {
-        let (name, value) = parameter
-            .split_once('=')
-            .ok_or_else(|| "argon2id 参数格式非法".to_string())?;
-        let value = value
-            .parse::<u32>()
-            .map_err(|_| "argon2id 参数值非法".to_string())?;
-        match name {
-            "m" if memory_kib.is_none() => memory_kib = Some(value),
-            "t" if iterations.is_none() => iterations = Some(value),
-            "p" if lanes.is_none() => lanes = Some(value),
-            _ => return Err("argon2id 参数集合非法".into()),
+impl CredentialSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Config => "config:password_hash",
+            Self::DevEnv => "env:GAMER_ADMIN_PASSWORD",
         }
     }
-    let memory_kib = memory_kib.ok_or_else(|| "argon2id 缺少 m 参数".to_string())?;
-    let iterations = iterations.ok_or_else(|| "argon2id 缺少 t 参数".to_string())?;
-    let lanes = lanes.ok_or_else(|| "argon2id 缺少 p 参数".to_string())?;
-    if !(8 * 1024..=1024 * 1024).contains(&memory_kib)
-        || !(1..=10).contains(&iterations)
-        || !(1..=16).contains(&lanes)
-        || parts[4].is_empty()
-        || parts[5].is_empty()
-    {
-        return Err("argon2id 参数超出安全范围或摘要为空".into());
-    }
-    PasswordHash::new(s).map_err(|_| "argon2id PHC 哈希编码非法".to_string())?;
-    Ok(())
 }
 
-/// 解析仅用于兼容的 `sha256$salt$hex` 口令哈希格式。
-/// salt：hex 编码、≥8 字节（16 hex 字符）；digest：sha256 摘要 32 字节的 hex（64 字符）。
-fn parse_legacy_sha256_hash(s: &str) -> Result<Credential, String> {
-    let parts: Vec<&str> = s.trim().split('$').collect();
-    if parts.len() != 3 || parts[0] != "sha256" {
-        return Err(format!("段数 {} 不符或算法前缀不是 sha256", parts.len()));
+const ARGON2_MEMORY_KIB: u32 = 19_456;
+const ARGON2_ITERATIONS: u32 = 2;
+const ARGON2_LANES: u32 = 1;
+const ARGON2_OUTPUT_LEN: usize = 32;
+const ARGON2_PARAMS: &str = "m=19456,t=2,p=1";
+
+fn fixed_argon2_params() -> Params {
+    Params::new(
+        ARGON2_MEMORY_KIB,
+        ARGON2_ITERATIONS,
+        ARGON2_LANES,
+        Some(ARGON2_OUTPUT_LEN),
+    )
+    .expect("fixed Argon2id parameters must be valid")
+}
+
+fn fixed_argon2() -> Argon2<'static> {
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, fixed_argon2_params())
+}
+
+/// 解析并校验唯一支持的固定参数 Argon2id PHC 口令哈希格式。
+fn parse_fixed_argon2_phc(s: &str) -> Result<PasswordHash<'_>, String> {
+    let trimmed = s.trim();
+    let parsed = PasswordHash::new(trimmed).map_err(|_| "argon2id PHC 哈希编码非法".to_string())?;
+    if parsed.algorithm != Algorithm::Argon2id.ident() {
+        return Err("仅支持 argon2id PHC 哈希".into());
     }
-    let salt = decode_hex(parts[1]).map_err(|_| "salt 不是合法 hex".to_string())?;
-    if salt.len() < 8 {
-        return Err(format!("salt 仅 {} 字节，要求 ≥8", salt.len()));
+    if parsed.version != Some(u32::from(Version::V0x13)) {
+        return Err("argon2id 仅支持 v=19".into());
     }
-    let digest = decode_hex(parts[2]).map_err(|_| "digest 不是合法 hex".to_string())?;
-    if digest.len() != 32 {
-        return Err(format!("digest 长 {} 字节，sha256 应为 32", digest.len()));
+    if parsed.params.as_str() != ARGON2_PARAMS {
+        return Err("argon2id 参数必须为固定的 m=19456,t=2,p=1".into());
     }
-    Ok(Credential::Hash { salt, digest })
+    if parsed.salt.is_none() || parsed.hash.is_none() {
+        return Err("argon2id PHC 哈希缺少 salt 或 digest".into());
+    }
+    let parsed_params =
+        Params::try_from(&parsed).map_err(|_| "argon2id PHC 参数编码非法".to_string())?;
+    if parsed_params != fixed_argon2_params() {
+        return Err("argon2id PHC 参数不符合固定配置".into());
+    }
+    Ok(parsed)
+}
+
+/// 解析唯一支持的固定参数 Argon2id PHC 口令哈希格式。
+pub fn parse_password_hash(s: &str) -> Result<Credential, String> {
+    let trimmed = s.trim();
+    parse_fixed_argon2_phc(trimmed)?;
+    Ok(Credential::Argon2 {
+        encoded: trimmed.to_string(),
+        source: CredentialSource::Config,
+    })
 }
 
 /// 生成可直接放入 `[auth].password_hash` 的 Argon2id PHC 哈希。
@@ -230,24 +221,10 @@ fn parse_legacy_sha256_hash(s: &str) -> Result<Credential, String> {
 /// 调用方只能得到不可逆哈希；密码不会写日志，也不会由本模块落盘。
 pub fn hash_password(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
-    Argon2::default()
+    fixed_argon2()
         .hash_password(password.as_bytes(), &salt)
         .map(|hash| hash.to_string())
         .map_err(|_| "argon2id 口令哈希生成失败".to_string())
-}
-
-fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
-    if !s.len().is_multiple_of(2) {
-        return Err("奇数长度 hex".into());
-    }
-    let (pairs, _) = s.as_bytes().as_chunks::<2>();
-    pairs
-        .iter()
-        .map(|chunk| {
-            let s = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
-            u8::from_str_radix(s, 16).map_err(|e| e.to_string())
-        })
-        .collect()
 }
 
 /// 常量时间字节比较：先走完等长 xor 再下结论；长度不等也耗同等工作量
@@ -263,10 +240,6 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     let _ = std::hint::black_box(acc);
     // 长度不等时 acc 必然非零吗？不一定——用长度谓词兜底收尾
     a.len() == b.len() && acc == 0
-}
-
-fn sha256(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(bytes).into()
 }
 
 /// 系统 ≥128bit 随机十六进制 ID（会话与 dev 管理令牌共用；这里给 256bit）
@@ -307,7 +280,7 @@ pub enum LoginError {
 
 pub struct AuthState {
     inner: Mutex<Inner>,
-    credential: RwLock<Credential>,
+    credential: Credential,
     secure_cookies: bool,
     /// 回环管理令牌（None = 通道禁用）
     admin_token: Option<String>,
@@ -320,9 +293,8 @@ struct Inner {
 }
 
 impl AuthState {
-    /// 组装鉴权状态。credential 由 main 在配置加载后按
-    /// GAMER_ADMIN_PASSWORD > GAMER_ADMIN_PASSWORD_FILE > [auth].password_hash >
-    /// 开发默认值链路解析传入。
+    /// 组装鉴权状态。credential 由 main 在配置加载后按开发环境变量或
+    /// `[auth].password_hash` 解析传入，运行期只持有 Argon2id PHC 或不可用状态。
     pub fn new(
         credential: Credential,
         cfg: AuthConfig,
@@ -334,7 +306,7 @@ impl AuthState {
                 sessions: HashMap::new(),
                 fails: HashMap::new(),
             }),
-            credential: RwLock::new(credential),
+            credential,
             secure_cookies,
             admin_token,
             cfg,
@@ -343,11 +315,8 @@ impl AuthState {
 
     /// 当前生效的凭据来源描述（启动摘要日志用，绝不含凭据内容）
     pub fn credential_source(&self) -> &'static str {
-        match &*self.credential.read().unwrap() {
-            Credential::EnvPassword(_) => "env:GAMER_ADMIN_PASSWORD",
-            Credential::SecretFile(_) => "env:GAMER_ADMIN_PASSWORD_FILE",
-            Credential::Hash { .. } | Credential::Argon2(_) => "config:password_hash",
-            Credential::Plain(_) => "dev:built-in-default",
+        match &self.credential {
+            Credential::Argon2 { source, .. } => source.label(),
             Credential::Unavailable => "unavailable:invalid-or-missing-credential",
         }
     }
@@ -356,26 +325,16 @@ impl AuthState {
         self.secure_cookies
     }
 
-    /// 凭据核验：新配置使用 Argon2id；旧格式仅作为迁移兼容路径。
+    /// 凭据核验：只使用固定参数 Argon2id PHC。
     pub(crate) fn verify_credentials(&self, input: &str) -> bool {
-        match &*self.credential.read().unwrap() {
-            Credential::Argon2(encoded) => {
-                let Ok(parsed) = PasswordHash::new(encoded) else {
+        match &self.credential {
+            Credential::Argon2 { encoded, .. } => {
+                let Ok(parsed) = parse_fixed_argon2_phc(encoded) else {
                     return false;
                 };
-                Argon2::default()
+                fixed_argon2()
                     .verify_password(input.as_bytes(), &parsed)
                     .is_ok()
-            }
-            Credential::EnvPassword(p) | Credential::SecretFile(p) | Credential::Plain(p) => {
-                // 迁移兼容：不再作为新配置格式；成功登录后会替换为 Argon2id。
-                ct_eq(&sha256(input.as_bytes()), &sha256(p.as_bytes()))
-            }
-            Credential::Hash { salt, digest } => {
-                let mut m = Sha256::new();
-                m.update(salt);
-                m.update(input.as_bytes());
-                ct_eq(&m.finalize(), digest)
             }
             Credential::Unavailable => false,
         }
@@ -436,10 +395,6 @@ impl AuthState {
             return Err(LoginError::Invalid);
         }
 
-        // 旧明文/旧 SHA-256 只在成功认证后于内存中升级；不回写配置文件，
-        // 不记录 password，也不把 password 带入错误信息。下次进程启动时仍
-        // 可读取旧配置，直到管理员将新 PHC 哈希写入 password_hash。
-        self.upgrade_legacy_credential(password);
         g.fails.remove(&fail_key); // 成功即清空该 IP+用户名组合的失败计数
         let sid = random_hex_id(32); // 256bit 高熵 ID
         g.sessions.insert(
@@ -451,19 +406,6 @@ impl AuthState {
             },
         );
         Ok((sid, "admin".to_string()))
-    }
-
-    fn upgrade_legacy_credential(&self, password: &str) {
-        let Ok(encoded) = hash_password(password) else {
-            return;
-        };
-        let mut credential = self.credential.write().unwrap();
-        if matches!(
-            &*credential,
-            Credential::EnvPassword(_) | Credential::Hash { .. } | Credential::Plain(_)
-        ) {
-            *credential = Credential::Argon2(encoded);
-        }
     }
 
     /// 校验并滑动续期：命中返回用户名；绝对/空闲到期均即时销毁并拒绝
@@ -722,16 +664,15 @@ pub(crate) fn spawn_sweeper(auth: std::sync::Arc<AuthState>) {
 
 // ---------- 来源 IP 注入 ----------
 
-/// 管理口令来源链路：环境变量 GAMER_ADMIN_PASSWORD（最高）>
-/// 环境变量 GAMER_ADMIN_PASSWORD_FILE 指向的密钥文件 > config [auth].password_hash >
-/// 开发模式内置默认值。
+/// 管理口令来源链路：开发模式的 GAMER_ADMIN_PASSWORD（启动时转换为 PHC）>
+/// config [auth].password_hash。生产模式不接受明文环境变量。
 pub fn resolve_credential(cfg: &crate::config::Config) -> Credential {
     resolve_credential_for_profile(cfg, crate::config::Profile::from_env())
 }
 
-/// 按显式 profile 解析管理凭据。生产环境不接受配置文件中的明文或旧
-/// SHA-256，也不允许非法 password_hash 静默回落到明文；异常配置统一
-/// 进入 [`Credential::Unavailable`]，使认证 fail closed。
+/// 按显式 profile 解析管理凭据。生产环境只接受固定参数 Argon2id PHC，
+/// 开发环境变量明文只在启动时使用并立即转换为 PHC；异常配置统一进入
+/// [`Credential::Unavailable`]，使认证 fail closed。
 pub fn resolve_credential_for_profile(
     cfg: &crate::config::Config,
     profile: crate::config::Profile,
@@ -740,7 +681,6 @@ pub fn resolve_credential_for_profile(
         cfg,
         profile,
         std::env::var("GAMER_ADMIN_PASSWORD").ok().as_deref(),
-        std::env::var("GAMER_ADMIN_PASSWORD_FILE").ok().as_deref(),
     )
 }
 
@@ -748,50 +688,41 @@ fn resolve_credential_with_password(
     cfg: &crate::config::Config,
     profile: crate::config::Profile,
     env_password: Option<&str>,
-    env_password_file: Option<&str>,
 ) -> Credential {
-    if let Some(p) = env_password.map(str::trim).filter(|p| !p.is_empty()) {
-        return Credential::EnvPassword(p.to_string());
-    }
-    if let Some(path) = env_password_file.map(str::trim).filter(|p| !p.is_empty()) {
-        match read_secret_file(path) {
-            Ok(secret) => return Credential::SecretFile(secret),
-            Err(e) => {
-                warn!("管理密码密钥文件读取失败，认证已 fail closed：{}", e);
-                return Credential::Unavailable;
-            }
+    if profile == crate::config::Profile::Dev {
+        if let Some(password) = env_password.map(str::trim).filter(|p| !p.is_empty()) {
+            return match hash_password(password) {
+                Ok(encoded) => Credential::Argon2 {
+                    encoded,
+                    source: CredentialSource::DevEnv,
+                },
+                Err(_) => {
+                    warn!("GAMER_ADMIN_PASSWORD 哈希生成失败，认证已 fail closed");
+                    Credential::Unavailable
+                }
+            };
         }
     }
     if !cfg.auth.password_hash.trim().is_empty() {
         match parse_password_hash(cfg.auth.password_hash.trim()) {
-            Ok(Credential::Argon2(encoded)) => return Credential::Argon2(encoded),
-            Ok(Credential::Hash { .. }) if profile == crate::config::Profile::Prod => {
-                warn!("生产模式拒绝旧 SHA-256 管理凭据；请改用 Argon2id password_hash");
-                return Credential::Unavailable;
+            Ok(Credential::Argon2 { encoded, .. }) => {
+                return Credential::Argon2 {
+                    encoded,
+                    source: CredentialSource::Config,
+                }
             }
-            Ok(c) => return c,
+            Ok(Credential::Unavailable) => return Credential::Unavailable,
             Err(_) => {
                 warn!("管理 password_hash 配置非法，认证已 fail closed");
                 return Credential::Unavailable;
             }
         }
     }
-    if profile == crate::config::Profile::Prod {
-        warn!(
-            "生产模式未配置 GAMER_ADMIN_PASSWORD、GAMER_ADMIN_PASSWORD_FILE 或 Argon2id password_hash，认证已 fail closed"
-        );
-        return Credential::Unavailable;
-    }
-    Credential::Plain("admin123".to_string())
-}
-
-fn read_secret_file(path: &str) -> Result<String, String> {
-    let raw = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
-    let secret = raw.trim().to_string();
-    if secret.is_empty() {
-        return Err(format!("{}: 密钥文件内容为空", path));
-    }
-    Ok(secret)
+    warn!(
+        profile = profile.as_str(),
+        "未配置 Argon2id 管理凭据，认证已 fail closed"
+    );
+    Credential::Unavailable
 }
 
 /// 回环管理通道令牌：GAMER_ADMIN_TOKEN 优先；dev 缺省自动生成并以 WARN 提示
@@ -857,52 +788,30 @@ mod tests {
         )
     }
 
+    fn credential(password: &str) -> Credential {
+        parse_password_hash(&hash_password(password).unwrap()).unwrap()
+    }
+
     fn sleep_ms(ms: u64) {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 
     #[test]
-    fn credentials_chain_plain_env_hash() {
-        // 明文链路
-        let st = state(Credential::Plain("admin123".into()), 60, 60, 10, 300);
-        assert!(st.verify_credentials("admin123"));
+    fn credentials_accept_only_argon2id_phc() {
+        let st = state(credential("argon-secret"), 60, 60, 10, 300);
+        assert!(st.verify_credentials("argon-secret"));
         assert!(!st.verify_credentials("wrong"));
-
-        // 环境变量链路与 hash 链路的 digest 内容一致性
-        let st2 = state(Credential::EnvPassword("s3cret!".into()), 60, 60, 10, 300);
-        assert!(st2.verify_credentials("s3cret!"));
-        assert!(!st2.verify_credentials("admin123"));
-
-        let st3 = state(
-            Credential::SecretFile("file-secret".into()),
-            60,
-            60,
-            10,
-            300,
-        );
-        assert!(st3.verify_credentials("file-secret"));
-        assert!(!st3.verify_credentials("admin123"));
     }
 
     #[test]
-    fn hash_format_roundtrip_and_reject() {
-        // sha256(salt||pw) 的 hex 装回去要能验过
-        let salt_hex = "00112233445566778899aabb";
-        let salt = decode_hex(salt_hex).unwrap();
-        let digest = {
-            let mut m = Sha256::new();
-            m.update(&salt);
-            m.update(b"hunter2");
-            let out: [u8; 32] = m.finalize().into();
-            out.iter().map(|b| format!("{b:02x}")).collect::<String>()
-        };
-        let boxed = format!("sha256${salt_hex}${digest}");
-        let parsed = parse_password_hash(&boxed).unwrap();
-        let st = state(parsed, 60, 60, 10, 300);
-        assert!(st.verify_credentials("hunter2"));
-        assert!(!st.verify_credentials("hunter"));
-
-        for bad in ["plain", "sha256$aa$bb", "sha256$aa$", "", "md5$aabbccdd$ab"] {
+    fn old_hash_and_plaintext_are_rejected() {
+        for bad in [
+            "plain",
+            "sha256$00112233445566778899aabb$deadbeef",
+            "sha256$aa$bb",
+            "",
+            "md5$aabbccdd$ab",
+        ] {
             assert!(parse_password_hash(bad).is_err(), "{bad} 不应解析成功");
         }
     }
@@ -912,7 +821,7 @@ mod tests {
         let encoded = hash_password("argon-secret").unwrap();
         assert!(encoded.starts_with("$argon2id$"), "{encoded}");
         let credential = parse_password_hash(&encoded).unwrap();
-        assert!(matches!(credential, Credential::Argon2(_)));
+        assert!(matches!(credential, Credential::Argon2 { .. }));
         let st = state(credential, 60, 60, 10, 300);
         assert!(st.verify_credentials("argon-secret"));
         assert!(!st.verify_credentials("wrong-password"));
@@ -926,50 +835,18 @@ mod tests {
             "$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$",
             "$argon2id$v=18$m=19456,t=2,p=1$c2FsdA$YWJjZA",
             "$argon2id$v=19$m=0,t=2,p=1$c2FsdA$YWJjZA",
+            "$argon2id$v=19$m=19456,t=3,p=1$c2FsdA$YWJjZGZmZ2hpamtsbW5vcA",
+            "$argon2id$v=19$m=19456,t=2,p=2$c2FsdA$YWJjZGZmZ2hpamtsbW5vcA",
         ] {
             assert!(parse_password_hash(bad).is_err(), "{bad} 不应解析成功");
         }
     }
 
     #[test]
-    fn legacy_credentials_upgrade_in_memory_after_successful_login() {
-        let salt = vec![0x42; 16];
-        let mut digest_input = salt.clone();
-        digest_input.extend_from_slice(b"legacy-secret");
-        let digest = sha256(&digest_input).to_vec();
-        let st = state(Credential::Hash { salt, digest }, 60, 60, 10, 300);
-
-        assert!(st.verify_credentials("legacy-secret"));
-        let (sid, _) = st
-            .attempt_login("admin", "legacy-secret", "legacy-ip")
-            .unwrap();
-        assert!(st.validate(&sid).is_some());
-        assert!(matches!(
-            &*st.credential.read().unwrap(),
-            Credential::Argon2(encoded) if encoded.starts_with("$argon2id$")
-                && !encoded.contains("legacy-secret")
-        ));
-        assert!(st.verify_credentials("legacy-secret"));
-        assert!(!st.verify_credentials("wrong-password"));
-    }
-
-    #[test]
-    fn legacy_plain_password_is_not_retained_after_successful_login() {
-        let st = state(
-            Credential::Plain("legacy-plain-secret".into()),
-            60,
-            60,
-            10,
-            300,
-        );
-        let (sid, _) = st
-            .attempt_login("admin", "legacy-plain-secret", "plain-ip")
-            .unwrap();
-        assert!(st.validate(&sid).is_some());
-        assert!(matches!(
-            &*st.credential.read().unwrap(),
-            Credential::Argon2(encoded) if !encoded.contains("legacy-plain-secret")
-        ));
+    fn legacy_credentials_do_not_authenticate_or_upgrade() {
+        let legacy = state(Credential::Unavailable, 60, 60, 10, 300);
+        assert!(!legacy.verify_credentials("legacy-secret"));
+        assert!(matches!(legacy.credential, Credential::Unavailable));
     }
 
     #[test]
@@ -977,7 +854,7 @@ mod tests {
         // abs 用 5s 窗口而非 1s：并行测试负载下 login→validate 间隔可能超 1s，
         // 首次 validate 会误判绝对过期（偶发红）；5s 裕量足够吸收调度抖动
         let st = state(
-            Credential::Plain("pw".into()),
+            credential("pw"),
             /*idle*/ 1_000_000,
             /*abs*/ 5,
             10,
@@ -995,7 +872,7 @@ mod tests {
     #[test]
     fn session_sliding_idle_expires_and_renews() {
         let st = state(
-            Credential::Plain("pw".into()),
+            credential("pw"),
             /*idle*/ 1,
             /*abs*/ 10_000,
             10,
@@ -1006,7 +883,7 @@ mod tests {
         assert_eq!(st.validate(&sid), None, "空闲超期未活动应失效");
 
         // 活动即续期：idle=1s 下每 600ms 探一次，远小于 abs，永远活着
-        let st2 = state(Credential::Plain("pw".into()), 2, 10_000, 10, 300);
+        let st2 = state(credential("pw"), 2, 10_000, 10, 300);
         let (sid2, _) = st2.attempt_login("admin", "pw", "ipC").unwrap();
         for _ in 0..4 {
             sleep_ms(600);
@@ -1020,7 +897,7 @@ mod tests {
 
     #[test]
     fn logout_destroys_immediately() {
-        let st = state(Credential::Plain("pw".into()), 100, 100, 10, 300);
+        let st = state(credential("pw"), 100, 100, 10, 300);
         let (sid, _) = st.attempt_login("admin", "pw", "ipD").unwrap();
         st.destroy(&sid);
         assert_eq!(st.validate(&sid), None);
@@ -1031,7 +908,7 @@ mod tests {
     fn rate_limit_kicks_in_after_max_fails_and_resets_on_success() {
         // 锁定窗口内：连续失败达到上限后全部 429（正确口令也拒），他 IP 不受牵连
         let st = state(
-            Credential::Plain("right".into()),
+            credential("right"),
             100,
             100,
             /*max*/ 3,
@@ -1054,7 +931,7 @@ mod tests {
         assert!(st.attempt_login("admin", "right", "5.5.5.5").is_ok());
 
         // 滑动窗口滑出后解锁（1s 窗口可实测）
-        let small = state(Credential::Plain("right".into()), 100, 100, 2, 1);
+        let small = state(credential("right"), 100, 100, 2, 1);
         small.attempt_login("admin", "bad", "7.7.7.7").unwrap_err();
         small.attempt_login("admin", "bad", "7.7.7.7").unwrap_err();
         assert!(matches!(
@@ -1069,13 +946,7 @@ mod tests {
 
         // 成功登录清空该来源失败记录：解锁后失败一次，成功登录重置计数，
         // 再失败一次仍是 invalid（若未清空则已是 max=1 的第二个 → 429）
-        let tight = state(
-            Credential::Plain("right".into()),
-            100,
-            100,
-            /*max*/ 2,
-            3600,
-        );
+        let tight = state(credential("right"), 100, 100, /*max*/ 2, 3600);
         assert!(matches!(
             tight.attempt_login("admin", "bad", "8.8.8.8"),
             Err(LoginError::Invalid)
@@ -1089,7 +960,7 @@ mod tests {
 
     #[test]
     fn rate_limit_bucket_isolated_by_ip_and_username_pair() {
-        let st = state(Credential::Plain("right".into()), 100, 100, 2, 3600);
+        let st = state(credential("right"), 100, 100, 2, 3600);
 
         // 同一 IP 的无关用户名达到上限，不得误锁唯一合法管理员用户名。
         for _ in 0..2 {
@@ -1126,7 +997,7 @@ mod tests {
 
     #[test]
     fn admin_token_loopback_only() {
-        let mut st = state(Credential::Plain("pw".into()), 100, 100, 10, 300);
+        let mut st = state(credential("pw"), 100, 100, 10, 300);
         // 注入 token
         st.admin_token = Some("tok123".into());
         let loopback: SocketAddr = "127.0.0.1:40000".parse().unwrap();
@@ -1240,102 +1111,66 @@ mod tests {
         let mut cfg = crate::config::Config::default();
         cfg.auth.password_hash = "sha256$aabbccdd11223344$".to_string() + &"ab".repeat(32);
 
-        let legacy =
-            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None, None);
+        let legacy = resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None);
         assert!(matches!(legacy, Credential::Unavailable));
-        assert!(
-            !AuthState::new(legacy, Default::default(), true, None).verify_credentials("admin123")
-        );
+        assert!(!AuthState::new(legacy, Default::default(), true, None)
+            .verify_credentials("legacy-secret"));
 
         cfg.auth.password_hash = "not-a-password-hash".into();
         assert!(matches!(
-            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None, None),
+            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None),
             Credential::Unavailable
         ));
 
         cfg.auth.password_hash.clear();
         assert!(matches!(
-            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None, None),
+            resolve_credential_with_password(&cfg, crate::config::Profile::Prod, None),
             Credential::Unavailable
         ));
     }
 
     #[test]
-    fn environment_password_has_priority_over_secret_file_and_config_hash() {
-        let dir = std::env::temp_dir().join(format!(
-            "gamer-auth-secret-{}-{}",
-            std::process::id(),
-            random_hex_id(8)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let secret_path = dir.join("admin.secret");
-        std::fs::write(&secret_path, "file-secret\n").unwrap();
-
+    fn development_password_is_hashed_and_production_ignores_plaintext_env() {
         let mut cfg = crate::config::Config::default();
         cfg.auth.password_hash = hash_password("config-secret").unwrap();
-        let credential = resolve_credential_with_password(
+        let dev =
+            resolve_credential_with_password(&cfg, crate::config::Profile::Dev, Some("dev-secret"));
+        assert!(matches!(
+            &dev,
+            Credential::Argon2 {
+                source: CredentialSource::DevEnv,
+                encoded,
+            } if encoded.starts_with("$argon2id$") && !encoded.contains("dev-secret")
+        ));
+        let dev_state = AuthState::new(dev, Default::default(), true, None);
+        assert!(dev_state.verify_credentials("dev-secret"));
+        assert!(!dev_state.verify_credentials("config-secret"));
+        assert!(cfg.auth.password_hash.contains("$argon2id$"));
+
+        let prod = resolve_credential_with_password(
             &cfg,
             crate::config::Profile::Prod,
-            Some("env-secret"),
-            Some(secret_path.to_str().unwrap()),
+            Some("dev-secret"),
         );
-        assert!(matches!(credential, Credential::EnvPassword(ref value) if value == "env-secret"));
-        let st = AuthState::new(credential, Default::default(), true, None);
-        assert!(st.verify_credentials("env-secret"));
-        assert!(!st.verify_credentials("config-secret"));
-
-        let credential2 = resolve_credential_with_password(
-            &cfg,
-            crate::config::Profile::Prod,
-            None,
-            Some(secret_path.to_str().unwrap()),
-        );
-        assert!(matches!(credential2, Credential::SecretFile(ref value) if value == "file-secret"));
-        let st2 = AuthState::new(credential2, Default::default(), true, None);
-        assert!(st2.verify_credentials("file-secret"));
-        assert!(!st2.verify_credentials("config-secret"));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn secret_file_resolution_fails_fast_on_missing_or_empty_content() {
-        let dir = std::env::temp_dir().join(format!(
-            "gamer-auth-secret-fail-{}-{}",
-            std::process::id(),
-            random_hex_id(8)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let missing = dir.join("missing.secret");
-        let empty = dir.join("empty.secret");
-        std::fs::write(&empty, "   \n").unwrap();
-
-        let cfg = crate::config::Config::default();
         assert!(matches!(
-            resolve_credential_with_password(
-                &cfg,
-                crate::config::Profile::Prod,
-                None,
-                Some(missing.to_str().unwrap()),
-            ),
-            Credential::Unavailable
+            &prod,
+            Credential::Argon2 {
+                source: CredentialSource::Config,
+                ..
+            }
         ));
-        assert!(matches!(
-            resolve_credential_with_password(
-                &cfg,
-                crate::config::Profile::Prod,
-                None,
-                Some(empty.to_str().unwrap()),
-            ),
-            Credential::Unavailable
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
+        let prod_state = AuthState::new(prod, Default::default(), true, None);
+        assert!(prod_state.verify_credentials("config-secret"));
+        assert!(!prod_state.verify_credentials("dev-secret"));
     }
 
     #[tokio::test]
-    async fn dev_default_does_not_leak_secret_values_to_logs_or_responses() {
-        let st = state(Credential::Plain("dev-secret".into()), 60, 60, 10, 300);
-        assert_eq!(st.credential_source(), "dev:built-in-default");
+    async fn unavailable_credential_does_not_leak_secret_values_to_logs_or_responses() {
+        let st = state(Credential::Unavailable, 60, 60, 10, 300);
+        assert_eq!(
+            st.credential_source(),
+            "unavailable:invalid-or-missing-credential"
+        );
 
         let resp = unauthorized_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -1344,8 +1179,7 @@ mod tests {
             .expect("unauthorized response body should be readable");
         let body_text = std::str::from_utf8(&body).unwrap();
         assert_eq!(body_text, r#"{"error":"unauthorized"}"#);
-        assert!(!body_text.contains("dev-secret"));
-        assert!(!st.credential_source().contains("dev-secret"));
+        assert!(!body_text.contains("secret"));
     }
 
     /// 测试专用决策入口：按参数拼装请求头后走与中间件相同的 admit 内核
@@ -1390,7 +1224,7 @@ mod tests {
 
     #[test]
     fn decision_matrix_ws_origin_token_cookie() {
-        let mut st = state(Credential::Plain("pw".into()), 100, 100, 10, 300);
+        let mut st = state(credential("pw"), 100, 100, 10, 300);
         st.admin_token = Some("tok".into());
         let (sid, _) = st.attempt_login("admin", "pw", "ipZ").unwrap();
         let cookie = format!("{SESSION_COOKIE}={sid}");

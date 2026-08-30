@@ -1,8 +1,8 @@
 # GameBot 服务端配置示例（复制为 server/config.toml 后按需修改）
 #
-# 注意：`server/config.toml` 是本机文件（含真实路径/密码），已加入 .gitignore 不再入库；
+# 注意：`server/config.toml` 是本机文件（含真实路径/凭据），已加入 .gitignore 不再入库；
 # 团队分发/评审一律以本示例文件为准。
-# 缺失该文件时：GAMER_PROFILE=dev（缺省）放行内置默认值（stderr 有醒目警告）；
+# 缺失该文件时：GAMER_PROFILE=dev（缺省）放行内置非凭据默认值（stderr 有醒目警告）；
 # GAMER_PROFILE=prod 直接报错退出。配置存在但解析失败/校验不过时进程即刻终止，
 # 错误信息带 TOML 行列位置与逐项违规清单。
 
@@ -23,10 +23,6 @@ ffmpeg_path = "ffmpeg"
 
 # scrcpy-server jar 路径——启动必检，文件缺失直接退出（相对路径相对服务端工作目录）
 scrcpy_server = "./assets/scrcpy-server.jar"
-# 管理登录密码（兼容旧明文口令）——务必在本机文件里改成自己的强密码（勿提交）；
-# 更安全的凭据来源见下方 [auth] 段说明（环境变量 / password_hash 优先于本字段）
-password = "admin123"
-
 # 脚本引擎默认配置（可被脚本内 config: 段按脚本覆盖）
 interval = "500ms"     # 轮询类间隔（find 每轮重试 / verify 复查）；带单位 ms/s/m/min/h/d，裸数字非法
 threshold = 0.85       # 模板匹配阈值，(0, 1]
@@ -74,20 +70,15 @@ rtc_external_port = 0
 
 # 鉴权与会话治理（阶段 2）。REST/WS 除登录三端点外全部要求浏览器会话 Cookie；
 # gamer.ps1 走「回环 + X-Admin-Token」本机管理通道优雅停机。
-# 管理口令来源优先级：环境变量 GAMER_ADMIN_PASSWORD > 本段 password_hash > 上面
-# 的明文 password 字段。哈希格式 `sha256$salt$hex`（salt ≥8 字节与
-# sha256(salt||password) 均 hex 编码），生成示例（PowerShell，替换尖括号内容）：
-#   $saltHex = "aabbccdd11223344"   # 换成自己的随机 8+ 字节
-#   $bytes   = [byte[]]-split ($saltHex -replace '..', '0x$& ') +
-#              [Text.Encoding]::UTF8.GetBytes('<你的密码>')
-#   $digest  = ([System.Security.Cryptography.SHA256]::Create()).ComputeHash($bytes)
-#   "sha256`$$saltHex`$" + (($digest | ForEach-Object { $_.ToString('x2') }) -join '')
+# 配置文件只接受固定参数 Argon2id PHC password_hash；初次开发启动也可设置
+# GAMER_ADMIN_PASSWORD，服务端只在进程内将其转换为 PHC，不会写回任何文件。
+# 生产部署请预先生成并填入 password_hash，未配置凭据时认证 fail closed。
 [auth]
 session_abs_secs = 43200   # 会话绝对有效期（秒）：自登录起算强制重登；范围 [60, 2592000]
 session_idle_secs = 7200   # 会话空闲有效期（秒）：每次认证请求续期；范围 [60, 604800]
 login_max_fails = 10       # 同一来源 IP 登录失败次数上限（窗口内），触发后 429 直至滑出
 login_window_secs = 300    # 登录限流滑动窗口宽度（秒），[1, 86400]
-password_hash = ""         # 留空 = 不启用哈希链路；格式非法启动即退出
+password_hash = ""         # 固定参数 Argon2id PHC；留空且无开发环境变量时认证 fail closed
 
 # 回环管理通道（gamer.ps1 stop / 运维脚本用）：请求头 X-Admin-Token 且来源 IP 为回环。
 # 令牌来源环境变量 GAMER_ADMIN_TOKEN；dev profile 未设置时启动自动生成并打 WARN

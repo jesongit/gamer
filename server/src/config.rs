@@ -21,10 +21,9 @@ use serde::{Deserialize, Serialize};
 
 /// 鉴权配置（config.toml [auth] 段，阶段 2 SEC-002）
 ///
-/// 凭据来源优先级（在 api/auth.rs 解析，非本文件）：环境变量 GAMER_ADMIN_PASSWORD
-/// > 环境变量 GAMER_ADMIN_PASSWORD_FILE 指向的密钥文件 > 本段 password_hash
-/// > （推荐 Argon2id PHC；兼容旧 `sha256$salt$hex`）
-/// > 开发模式内置默认值。启动日志只打印启用的是哪一级来源，绝不输出凭据内容。
+/// 凭据来源（在 api/auth.rs 解析，非本文件）：开发模式的环境变量
+/// GAMER_ADMIN_PASSWORD（仅启动时使用）或本段固定参数 Argon2id PHC。
+/// 启动日志只打印启用的是哪一级来源，绝不输出凭据内容；缺少凭据时认证 fail closed。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
@@ -36,8 +35,8 @@ pub struct AuthConfig {
     pub login_max_fails: u32,
     /// 登录限流滑动窗口宽度秒数
     pub login_window_secs: u64,
-    /// 管理口令哈希（推荐 Argon2id PHC；兼容旧 `sha256$salt$hex`，长度/格式校验在
-    /// validate）。留空 = 不启用，回落环境变量/密钥文件或开发默认值。
+    /// 管理口令固定参数 Argon2id PHC 哈希（长度/格式校验在 validate）。
+    /// 留空且未设置开发环境变量时认证 fail closed。
     pub password_hash: String,
 }
 
@@ -401,24 +400,15 @@ impl Config {
     /// 启动期校验：返回全部违规项描述（空 = 通过）。逐项给出明确错误信息，
     /// 调用方在打完清单后以非零码退出
     pub fn validate(&self) -> Vec<String> {
-        self.validate_with_password_hash(true)
+        self.validate_with_password_hash()
     }
 
-    /// 启动时按凭据优先级校验配置：高优先级环境凭据存在时，低优先级的
-    /// `password_hash` 不参与校验；否则一个已被覆盖的坏哈希仍会阻止启动。
+    /// 启动时校验配置中的 Argon2id PHC；环境变量不会遮蔽坏配置。
     fn validate_for_load(&self) -> Vec<String> {
-        let has_env_password = non_empty_env("GAMER_ADMIN_PASSWORD");
-        let has_secret_file = non_empty_env("GAMER_ADMIN_PASSWORD_FILE");
-        if has_env_password || has_secret_file {
-            self.validate_with_password_hash(false)
-        } else {
-            // 普通配置加载复用完整公开校验；仅在凭据被高优先级来源覆盖时，
-            // 跳过不会生效的 password_hash 格式检查。
-            self.validate()
-        }
+        self.validate()
     }
 
-    fn validate_with_password_hash(&self, validate_password_hash: bool) -> Vec<String> {
+    fn validate_with_password_hash(&self) -> Vec<String> {
         let mut errs = Vec::new();
 
         if self.port == 0 {
@@ -547,11 +537,10 @@ impl Config {
                 self.auth.login_window_secs
             ));
         }
-        if validate_password_hash && !self.auth.password_hash.is_empty() {
+        if !self.auth.password_hash.is_empty() {
             if let Err(e) = crate::api::auth::parse_password_hash(&self.auth.password_hash) {
                 errs.push(format!(
-                    "auth.password_hash 格式非法：{e}（期望 Argon2id PHC；兼容旧 \
-                     sha256$salt$hex）"
+                    "auth.password_hash 格式非法：{e}（期望固定参数 Argon2id PHC）"
                 ));
             }
         }
@@ -589,12 +578,6 @@ fn ensure_valid(cfg: &Config) -> anyhow::Result<()> {
             .collect::<Vec<_>>()
             .join("\n")
     )
-}
-
-fn non_empty_env(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
 }
 
 fn probe_tool(name: &'static str, path: &str, args: &[&str]) -> ToolProbe {
@@ -658,7 +641,10 @@ fps = 15
         assert!(loaded.source.contains(path.to_str().unwrap()));
         let summary = loaded.cfg.non_sensitive_summary();
         assert!(summary.contains("port=8443"));
-        assert!(!summary.contains("admin123"), "摘要绝不能包含密码");
+        assert!(
+            !summary.contains("config-password"),
+            "摘要绝不能包含口令内容"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -923,9 +909,9 @@ rtc_external_port = 50000
             "sha256$onlysalt",
             "sha256$$0123",      // 盐缺失
             "md5$aabbccdd$0123", // 算法不符
-            "sha256$zzzz$$deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", // 盐非 hex
-            "sha256$aabbccdd$nothex", // 摘要非 hex
-            "sha256$aabbccdd$abcd",   // 摘要长度 ≠32 字节
+            "$argon2i$v=19$m=19456,t=2,p=1$c2FsdA$YWJjZGZmZ2hpamtsbW5vcA",
+            "$argon2id$v=19$m=19456,t=3,p=1$c2FsdA$YWJjZGZmZ2hpamtsbW5vcA",
+            "$argon2id$v=19$m=19456,t=2,p=2$c2FsdA$YWJjZGZmZ2hpamtsbW5vcA",
         ] {
             let cfg = Config {
                 auth: AuthConfig {
@@ -940,8 +926,7 @@ rtc_external_port = 50000
                 "{bad}: {errs:?}"
             );
         }
-        // 合法样例：salt=aabbccdd11223344（8 字节），digest=32 字节 hex
-        let good = format!("sha256$aabbccdd11223344${}", "ab".repeat(32));
+        let good = crate::api::auth::hash_password("config-password").unwrap();
         let cfg = Config {
             auth: AuthConfig {
                 password_hash: good,
@@ -957,7 +942,7 @@ rtc_external_port = 50000
     }
 
     #[test]
-    fn overridden_password_hash_is_not_validated_during_load() {
+    fn environment_password_does_not_bypass_bad_config_hash() {
         let cfg = Config {
             auth: AuthConfig {
                 password_hash: "not-a-password-hash".into(),
@@ -973,35 +958,11 @@ rtc_external_port = 50000
             "直接校验仍应拒绝坏哈希"
         );
 
-        let _password = EnvVarGuard::set("GAMER_ADMIN_PASSWORD", "test-password");
         assert!(
-            !cfg.validate_for_load()
+            cfg.validate_for_load()
                 .iter()
                 .any(|err| err.contains("password_hash")),
-            "高优先级 env/secret 覆盖时，启动不应校验被遮蔽的坏哈希"
+            "开发环境变量不能遮蔽配置中的坏哈希"
         );
-    }
-
-    struct EnvVarGuard {
-        name: &'static str,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(name: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(name);
-            std::env::set_var(name, value);
-            Self { name, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            if let Some(value) = &self.previous {
-                std::env::set_var(self.name, value);
-            } else {
-                std::env::remove_var(self.name);
-            }
-        }
     }
 }

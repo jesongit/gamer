@@ -1,10 +1,21 @@
 use super::*;
 
+const TEST_PASSWORD: &str = "test-password";
+const AUTH_ADMIN_JSON: &str = r#"{"username":"admin","password":"test-password"}"#;
+
+fn test_credential(password: &str) -> auth::Credential {
+    auth::parse_password_hash(&auth::hash_password(password).unwrap()).unwrap()
+}
+
+async fn login(app: &Router) -> HttpResponse<Body> {
+    send_json_login(app, None, AUTH_ADMIN_JSON).await
+}
+
 #[tokio::test]
 async fn unauthenticated_devices_list_is_401() {
     let t = build_app(
         "401devs",
-        auth::Credential::Plain("admin123".into()),
+        test_credential(TEST_PASSWORD),
         Default::default(),
     );
     let resp = send(&t.app, req("GET", "/api/devices", None, &[], None)).await;
@@ -17,7 +28,7 @@ async fn unauthenticated_devices_list_is_401() {
 async fn unauthenticated_tasks_list_is_401() {
     let t = build_app(
         "401tasks",
-        auth::Credential::Plain("admin123".into()),
+        test_credential(TEST_PASSWORD),
         Default::default(),
     );
     let resp = send(&t.app, req("GET", "/api/tasks", None, &[], None)).await;
@@ -28,11 +39,7 @@ async fn unauthenticated_tasks_list_is_401() {
 
 #[tokio::test]
 async fn unauthenticated_shutdown_is_401_and_service_stays_alive() {
-    let t = build_app(
-        "401sd",
-        auth::Credential::Plain("admin123".into()),
-        Default::default(),
-    );
+    let t = build_app("401sd", test_credential(TEST_PASSWORD), Default::default());
     let resp = send(&t.app, req("POST", "/api/shutdown", None, &[], None)).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     // 进程仍存活：后续请求正常应答
@@ -44,7 +51,7 @@ async fn unauthenticated_shutdown_is_401_and_service_stays_alive() {
 async fn unauthenticated_high_risk_endpoints_are_all_401() {
     let t = build_app(
         "401highrisk",
-        auth::Credential::Plain("admin123".into()),
+        test_credential(TEST_PASSWORD),
         Default::default(),
     );
     let cases = [
@@ -65,11 +72,7 @@ async fn unauthenticated_high_risk_endpoints_are_all_401() {
 
 #[tokio::test]
 async fn maintenance_vacuum_requires_auth_and_reports_file_sizes() {
-    let t = build_app(
-        "vacuum",
-        auth::Credential::Plain("admin123".into()),
-        Default::default(),
-    );
+    let t = build_app("vacuum", test_credential(TEST_PASSWORD), Default::default());
     // 未登录 → 401（受保护维护动作，与 /api/shutdown 同守卫）
     let resp = send(
         &t.app,
@@ -102,11 +105,7 @@ async fn maintenance_vacuum_requires_auth_and_reports_file_sizes() {
 
 #[tokio::test]
 async fn login_sets_cookie_with_contract_attributes() {
-    let t = build_app(
-        "cookie",
-        auth::Credential::Plain("admin123".into()),
-        Default::default(),
-    );
+    let t = build_app("cookie", test_credential(TEST_PASSWORD), Default::default());
     let resp = login(&t.app).await;
     assert_eq!(resp.status(), StatusCode::OK);
     let ck = cookie_of(&resp);
@@ -129,11 +128,7 @@ async fn login_sets_cookie_with_contract_attributes() {
 
 #[tokio::test]
 async fn wrong_password_gives_invalid_credentials() {
-    let t = build_app(
-        "badpw",
-        auth::Credential::Plain("admin123".into()),
-        Default::default(),
-    );
+    let t = build_app("badpw", test_credential(TEST_PASSWORD), Default::default());
     let resp = send_json_login(&t.app, None, r#"{"username":"admin","password":"nope"}"#).await;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let j = json_body(resp).await;
@@ -147,7 +142,7 @@ async fn consecutive_failures_trigger_429_too_many_attempts() {
         login_window_secs: 300,
         ..Default::default()
     };
-    let t = build_app("rl429", auth::Credential::Plain("admin123".into()), cfg);
+    let t = build_app("rl429", test_credential(TEST_PASSWORD), cfg);
     for i in 0..3 {
         let resp = send_json_login(
             &t.app,
@@ -162,7 +157,7 @@ async fn consecutive_failures_trigger_429_too_many_attempts() {
         );
     }
     // 正确口令在锁定期同样拒绝
-    let resp = send_json_login(&t.app, Some("203.0.113.7:5555"), ADMIN_JSON).await;
+    let resp = send_json_login(&t.app, Some("203.0.113.7:5555"), AUTH_ADMIN_JSON).await;
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     assert!(resp.headers().contains_key(header::RETRY_AFTER));
     let j = json_body(resp).await;
@@ -177,7 +172,7 @@ async fn login_rate_limit_is_scoped_to_ip_and_username_pair() {
         login_window_secs: 300,
         ..Default::default()
     };
-    let t = build_app("rlpair", auth::Credential::Plain("admin123".into()), cfg);
+    let t = build_app("rlpair", test_credential(TEST_PASSWORD), cfg);
 
     // 同 IP 的诱饵用户名锁定后，admin 仍能登录。
     for _ in 0..2 {
@@ -192,11 +187,11 @@ async fn login_rate_limit_is_scoped_to_ip_and_username_pair() {
     let decoy = send_json_login(
         &t.app,
         Some("203.0.113.30:4000"),
-        r#"{"username":"decoy","password":"admin123"}"#,
+        r#"{"username":"decoy","password":"test-password"}"#,
     )
     .await;
     assert_eq!(decoy.status(), StatusCode::TOO_MANY_REQUESTS);
-    let admin = send_json_login(&t.app, Some("203.0.113.30:4000"), ADMIN_JSON).await;
+    let admin = send_json_login(&t.app, Some("203.0.113.30:4000"), AUTH_ADMIN_JSON).await;
     assert_eq!(admin.status(), StatusCode::OK);
 
     // admin 在一个 IP 锁定后，另一 IP 仍可登录。
@@ -209,19 +204,15 @@ async fn login_rate_limit_is_scoped_to_ip_and_username_pair() {
         .await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
-    let locked = send_json_login(&t.app, Some("203.0.113.31:4000"), ADMIN_JSON).await;
+    let locked = send_json_login(&t.app, Some("203.0.113.31:4000"), AUTH_ADMIN_JSON).await;
     assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
-    let other_ip = send_json_login(&t.app, Some("203.0.113.32:4000"), ADMIN_JSON).await;
+    let other_ip = send_json_login(&t.app, Some("203.0.113.32:4000"), AUTH_ADMIN_JSON).await;
     assert_eq!(other_ip.status(), StatusCode::OK);
 }
 
 #[tokio::test]
 async fn session_probe_and_logout_semantics() {
-    let t = build_app(
-        "sess",
-        auth::Credential::Plain("admin123".into()),
-        Default::default(),
-    );
+    let t = build_app("sess", test_credential(TEST_PASSWORD), Default::default());
 
     // 未认证探测 → 401 unauthorized
     let resp = send(&t.app, req("GET", "/api/session", None, &[], None)).await;
@@ -303,11 +294,7 @@ async fn expired_cookie_is_rejected_by_protected_route() {
         session_idle_secs: 60,
         ..Default::default()
     };
-    let t = build_app(
-        "expired-route",
-        auth::Credential::Plain("admin123".into()),
-        cfg,
-    );
+    let t = build_app("expired-route", test_credential(TEST_PASSWORD), cfg);
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     let before = send(
@@ -343,7 +330,7 @@ async fn expired_cookie_is_rejected_by_protected_route() {
 async fn authentication_logs_rejection_metadata_without_secrets() {
     let t = build_app(
         "safe-auth-log",
-        auth::Credential::Plain("admin123".into()),
+        test_credential(TEST_PASSWORD),
         Default::default(),
     );
     let password = "log-secret-password-7a8b";
@@ -397,7 +384,7 @@ async fn authentication_logs_rejection_metadata_without_secrets() {
 async fn cross_origin_login_and_logout_are_rejected_without_state_change() {
     let t = build_app(
         "csrf-public",
-        auth::Credential::Plain("admin123".into()),
+        test_credential(TEST_PASSWORD),
         Default::default(),
     );
     let evil = [
@@ -407,7 +394,13 @@ async fn cross_origin_login_and_logout_are_rejected_without_state_change() {
     ];
     let resp = send(
         &t.app,
-        req("POST", "/api/login", None, &evil, Some(ADMIN_JSON.into())),
+        req(
+            "POST",
+            "/api/login",
+            None,
+            &evil,
+            Some(AUTH_ADMIN_JSON.into()),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -448,11 +441,7 @@ async fn cross_origin_login_and_logout_are_rejected_without_state_change() {
 
 #[tokio::test]
 async fn cross_origin_state_change_is_403_but_matching_origin_passes() {
-    let t = build_app(
-        "origin",
-        auth::Credential::Plain("admin123".into()),
-        Default::default(),
-    );
+    let t = build_app("origin", test_credential(TEST_PASSWORD), Default::default());
     let ck = cookie_of(&login(&t.app).await);
     let sid = first_cookie_pair(&ck);
 
@@ -498,11 +487,7 @@ async fn cross_origin_state_change_is_403_but_matching_origin_passes() {
 
 #[tokio::test]
 async fn ws_upgrade_without_cookie_rejected_before_handshake() {
-    let t = build_app(
-        "wsauth",
-        auth::Credential::Plain("admin123".into()),
-        Default::default(),
-    );
+    let t = build_app("wsauth", test_credential(TEST_PASSWORD), Default::default());
     // 无 cookie 的 WS 升级：guard 在握手前 401（无需真实建连）
     let resp = send(
         &t.app,
@@ -591,7 +576,7 @@ async fn ws_upgrade_without_cookie_rejected_before_handshake() {
 async fn cross_origin_high_risk_endpoints_are_all_403_after_authentication() {
     let t = build_app(
         "403highrisk",
-        auth::Credential::Plain("admin123".into()),
+        test_credential(TEST_PASSWORD),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
@@ -638,7 +623,7 @@ async fn cross_origin_high_risk_endpoints_are_all_403_after_authentication() {
 async fn loopback_admin_token_channel_open_close() {
     let t = build_app(
         "admintok",
-        auth::Credential::Plain("admin123".into()),
+        test_credential(TEST_PASSWORD),
         Default::default(),
     );
 
@@ -667,11 +652,7 @@ async fn loopback_admin_token_channel_open_close() {
 
 #[tokio::test]
 async fn non_loopback_same_token_is_401() {
-    let t = build_app(
-        "lanrej",
-        auth::Credential::Plain("admin123".into()),
-        Default::default(),
-    );
+    let t = build_app("lanrej", test_credential(TEST_PASSWORD), Default::default());
     for addr in ["192.168.1.50:40000", "10.1.2.3:8443"] {
         let resp = send(
             &t.app,
@@ -704,11 +685,7 @@ async fn non_loopback_same_token_is_401() {
 
 #[tokio::test]
 async fn wrong_token_even_loopback_is_401() {
-    let t = build_app(
-        "badtok",
-        auth::Credential::Plain("admin123".into()),
-        Default::default(),
-    );
+    let t = build_app("badtok", test_credential(TEST_PASSWORD), Default::default());
     let resp = send(
         &t.app,
         req(
@@ -723,46 +700,39 @@ async fn wrong_token_even_loopback_is_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
-// 环境变量密码链路优先级：GAMER_ADMIN_PASSWORD 设置时覆盖 config 明文
 #[test]
-fn resolve_credential_prefers_env_then_hash_then_plain() {
+fn config_hash_is_the_only_persisted_credential_format() {
     use crate::config::Config;
 
-    // 仅明文
-    let cfg = Config::default(); // password=admin123
-    let c = auth::resolve_credential(&cfg);
-    assert!(matches!(c, auth::Credential::Plain(_)));
-    let st = auth::AuthState::new(c, Default::default(), false, None);
-    assert!(st.verify_credentials("admin123"));
-
-    // hash 覆盖明文
-    let salt = [0x11u8; 8];
-    let digest: [u8; 32] = {
-        use sha2::{Digest, Sha256};
-        let mut m = Sha256::new();
-        m.update(salt);
-        m.update(b"hashed-pw");
-        m.finalize().into()
-    };
-    let boxed = format!(
-        "sha256${}${}",
-        salt.iter().map(|b| format!("{b:02x}")).collect::<String>(),
-        digest
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    );
-    let mut cfg2 = Config::default();
-    cfg2.auth.password_hash = boxed;
+    let mut cfg = Config::default();
+    cfg.auth.password_hash = auth::hash_password("hashed-pw").unwrap();
     let st2 = auth::AuthState::new(
-        auth::resolve_credential(&cfg2),
+        auth::resolve_credential_for_profile(&cfg, crate::config::Profile::Prod),
         Default::default(),
         false,
         None,
     );
     assert_eq!(st2.credential_source(), "config:password_hash");
     assert!(st2.verify_credentials("hashed-pw"));
-    assert!(!st2.verify_credentials("admin123"));
+    assert!(!st2.verify_credentials("test-password"));
+
+    cfg.auth.password_hash = "sha256$00112233445566778899aabb$deadbeef".into();
+    assert!(matches!(
+        auth::resolve_credential_for_profile(&cfg, crate::config::Profile::Prod),
+        auth::Credential::Unavailable
+    ));
+}
+
+#[tokio::test]
+async fn unconfigured_credentials_fail_closed() {
+    let t = build_app(
+        "no-credential",
+        auth::Credential::Unavailable,
+        Default::default(),
+    );
+    let resp = login(&t.app).await;
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(json_body(resp).await["error"], "invalid_credentials");
 }
 
 // ---------- Wave 2：输入与资源限额（SEC-004） ----------
