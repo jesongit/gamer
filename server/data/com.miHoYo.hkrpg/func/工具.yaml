@@ -1,0 +1,6 @@
+func1:
+  steps: []
+
+login:
+  steps:
+    - find: 点击进入.png

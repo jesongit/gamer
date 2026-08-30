@@ -1,4 +1,10 @@
 steps:
-  - call: 通用日常.yml 账号155.png
-  - call: 通用日常.yml 账号136.png
-  - call: 通用日常.yml 账号188.png
+  - call: 通用日常.yml
+    args:
+      account: 账号155.png
+  - call: 通用日常.yml
+    args:
+      account: 账号136.png
+  - call: 通用日常.yml
+    args:
+      account: 账号188.png
