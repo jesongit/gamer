@@ -140,7 +140,12 @@ pub fn parse_typed_default(ty: ParamType, tail: &str) -> Result<TypedValue, Stri
             })?;
             Ok(TypedValue::Time(tail.to_string()))
         }
-        ParamType::Key => Ok(TypedValue::Key(tail.to_string())),
+        ParamType::Key => {
+            if !is_valid_key(tail) {
+                return Err(invalid_key_reason(tail));
+            }
+            Ok(TypedValue::Key(tail.to_string()))
+        }
         ParamType::Text => {
             // 双引号包裹形式：剥离外层引号并反转义（与规范序列化对称）。
             if tail.starts_with('"') && tail.ends_with('"') && tail.len() >= 2 {
@@ -170,6 +175,53 @@ pub fn coord_in_range(x: f64) -> bool {
 /// 6 位十六进制颜色（无 #）。
 pub fn is_valid_color(s: &str) -> bool {
     s.len() == 6 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+// ---------------------------------------------------------------------------
+// 按键
+// ---------------------------------------------------------------------------
+
+/// key 类型具名按键枚举（大小写不敏感；含 `engine::exec::key_code` 认可的别名
+/// 拼写，与前端 schema.KEY_ENUM、docs/YAML.md §5.1 保持一致）。
+pub const KEY_NAMES: &[&str] = &[
+    "HOME",
+    "BACK",
+    "APP_SWITCH",
+    "RECENTS",
+    "MENU",
+    "VOL_UP",
+    "VOLUME_UP",
+    "VOL_DOWN",
+    "VOLUME_DOWN",
+    "POWER",
+    "ENTER",
+    "DEL",
+    "BACKSPACE",
+    "TAB",
+    "SPACE",
+    "ESC",
+    "SEARCH",
+    "CAMERA",
+    "FOCUS",
+    "NOTIFICATION",
+    "SETTINGS",
+    "MUTE",
+    "HEADSETHOOK",
+    "WAKEUP",
+    "SLEEP",
+];
+
+/// key 值合法：具名枚举（大小写不敏感）或纯数字 Android keycode（与
+/// `engine::exec::key_code` 的数字透传同规则，须能解析为 u32）。
+pub fn is_valid_key(s: &str) -> bool {
+    s.parse::<u32>().is_ok() || KEY_NAMES.contains(&s.to_ascii_uppercase().as_str())
+}
+
+/// 非法 key 值的统一报错原因（默认值 / 步骤字面量 / args 共用文案基调）。
+pub fn invalid_key_reason(s: &str) -> String {
+    format!(
+        "未知按键 {s:?}（受支持枚举见 docs/YAML.md §5.1：HOME/BACK/ESC 等具名键，或纯数字 Android keycode）"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +415,8 @@ pub fn merge_args(
 
 /// 七类参数值从 API JSON 解析为类型化字面量：bool=布尔、coord=[x,y] 数组
 /// （0~1）、其余五类=字符串（time 须带单位且 >0，color 须 6 位十六进制，
-/// tmpl/key 非空）。形态不符返回 `None`（调用方报 param.args.type_mismatch）。
+/// tmpl 非空、key 须在按键枚举内或为纯数字 keycode）。形态不符返回 `None`
+/// （调用方报 param.args.type_mismatch）。
 pub fn parse_json_arg(ty: ParamType, value: &serde_json::Value) -> Option<TypedValue> {
     match (ty, value) {
         (ParamType::Tmpl, serde_json::Value::String(s)) => {
@@ -381,7 +434,7 @@ pub fn parse_json_arg(ty: ParamType, value: &serde_json::Value) -> Option<TypedV
             parse_time_ms(s).map(|_| TypedValue::Time(s.clone()))
         }
         (ParamType::Key, serde_json::Value::String(s)) => {
-            (!s.is_empty()).then(|| TypedValue::Key(s.clone()))
+            is_valid_key(s).then(|| TypedValue::Key(s.clone()))
         }
         (ParamType::Text, serde_json::Value::String(s)) => Some(TypedValue::Text(s.clone())),
         (ParamType::Bool, serde_json::Value::Bool(b)) => Some(TypedValue::Bool(*b)),

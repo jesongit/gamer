@@ -621,8 +621,13 @@ fn build_cell(ctx: &mut BuildCtx, node: &Node, path: &str, field: &str, exp: Exp
                     }
                 },
                 Exp::Key => {
-                    if raw.is_empty() {
-                        bad_cell(ctx, path, field, exp, raw);
+                    if !params::is_valid_key(raw) {
+                        ctx.push(
+                            codes::STEP_FIELD_TYPE_MISMATCH,
+                            path,
+                            field,
+                            params::invalid_key_reason(raw),
+                        );
                         return None;
                     }
                     TypedValue::Key(raw.clone())

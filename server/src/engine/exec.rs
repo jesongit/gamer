@@ -25,7 +25,6 @@ use std::time::{Duration, Instant};
 use async_recursion::async_recursion;
 use image::GenericImageView;
 use serde::Serialize;
-use tracing::warn;
 
 use crate::device::DeviceManager;
 use crate::matcher;
@@ -711,7 +710,8 @@ impl Runner {
             }
             Step::Key { key } => {
                 let key = self.text_value(ctx, key, "key", ParamType::Key)?;
-                let code = key_code(&key);
+                let code = key_code(&key)
+                    .ok_or_else(|| anyhow::anyhow!("{}", params::invalid_key_reason(&key)))?;
                 ctx.log("debug", format!("按键 {key}"));
                 self.ctl.key(&ctx.device_id, code).await?;
             }
@@ -1599,9 +1599,11 @@ fn tpl_region_from_name(template: &str, w: u32, h: u32) -> Option<[u32; 4]> {
     Some(half)
 }
 
-/// 常用按键映射（Android keycode）；纯数字 keycode 透传。
-pub fn key_code(key: &str) -> u32 {
-    match key.to_uppercase().as_str() {
+/// 常用按键映射（Android keycode）；纯数字 keycode 透传。未知键返回 `None`，
+/// 由调用方让当前步骤失败——装载/参数层已用 `params::is_valid_key` 拦截，
+/// 运行期能到这里的多是 args 显式传入的非法值，同样不静默降级。
+pub fn key_code(key: &str) -> Option<u32> {
+    let code = match key.to_uppercase().as_str() {
         "HOME" => 3,
         "BACK" => 4,
         "APP_SWITCH" | "RECENTS" => 187,
@@ -1633,15 +1635,9 @@ pub fn key_code(key: &str) -> u32 {
         "7" => 14,
         "8" => 15,
         "9" => 16,
-        _ => {
-            if let Ok(n) = key.parse::<u32>() {
-                n
-            } else {
-                warn!("unknown key: {}", key);
-                0
-            }
-        }
-    }
+        _ => return key.parse::<u32>().ok(),
+    };
+    Some(code)
 }
 
 // ---------------------------------------------------------------------------
@@ -2166,6 +2162,65 @@ mod tests {
         );
         let err = r.run(script_target("f.yaml"), vec![]).await.unwrap_err();
         assert!(err.to_string().contains("已执行"), "{err:#}");
+    }
+
+    // ---- key 枚举校验（装载层拦截 + 运行期兜底） ------------------------------
+
+    /// key_code 与 params::KEY_NAMES 双向一致：枚举内每键（含别名/小写）都有
+    /// 非 0 映射；数字串透传；未知键返回 None。
+    #[test]
+    fn key_code_matches_key_enum() {
+        use crate::script_v2::params::KEY_NAMES;
+        for name in KEY_NAMES {
+            let code = key_code(name).unwrap_or_else(|| panic!("枚举键 {name} 无 keycode 映射"));
+            assert_ne!(code, 0, "枚举键 {name} 映射为 keycode 0");
+            assert_eq!(
+                key_code(&name.to_ascii_lowercase()),
+                Some(code),
+                "{name} 应大小写不敏感"
+            );
+        }
+        assert_eq!(key_code("122"), Some(122), "纯数字 keycode 透传");
+        assert_eq!(key_code("NOT_A_KEY"), None, "未知键不再降级为 keycode 0");
+    }
+
+    /// key 步骤字面量非法键：入口装载即拦截，表现为运行失败且报错含键名
+    /// （此前是 warn + keycode 0 静默发送）。
+    #[tokio::test]
+    async fn key_step_unknown_key_fails_run() {
+        let r = rig(HashMap::new(), solid_png(10, 10, [0, 0, 0]), "error");
+        r.save_script("f.yaml", "steps:\n  - key: NOT_A_KEY\n");
+        let err = r.run(script_target("f.yaml"), vec![]).await.unwrap_err();
+        assert!(err.to_string().contains("NOT_A_KEY"), "{err:#}");
+        assert!(
+            !r.ctl.calls().iter().any(|c| c.starts_with("key ")),
+            "不得发送任何 keycode: {:?}",
+            r.ctl.calls()
+        );
+    }
+
+    /// args 显式传入非法 key（TypedValue 绕过装载层字面量拦截的路径）：
+    /// 运行期 key_code 兜底让步骤失败，不再降级为 keycode 0。
+    #[tokio::test]
+    async fn key_args_unknown_key_fails_run() {
+        let r = rig(HashMap::new(), solid_png(10, 10, [0, 0, 0]), "error");
+        r.save_script(
+            "f.yaml",
+            "params:\n  - 'key:quit:退出按键:ESC'\nsteps:\n  - key: $quit\n",
+        );
+        let err = r
+            .run(
+                script_target("f.yaml"),
+                vec![("quit", TypedValue::Key("BOGUS".into()))],
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("BOGUS"), "{err:#}");
+        assert!(
+            !r.ctl.calls().iter().any(|c| c.starts_with("key ")),
+            "不得发送任何 keycode: {:?}",
+            r.ctl.calls()
+        );
     }
 
     // ---- call / func / throw / return ----------------------------------------

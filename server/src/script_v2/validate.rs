@@ -794,6 +794,7 @@ fn last_segment(path: &str) -> &str {
 ///
 /// 装载层把非布尔/坐标标量统一存为 Text，此处按目标类型重新解析：
 /// time 目标要求可解析为合法时长，color 目标要求 6 位十六进制，
+/// key 目标要求在按键枚举内（或纯数字 keycode），
 /// bool 目标只接受布尔字面量（字符串 "true" 非法，CONTRACT §3.3）。
 pub(crate) fn coerce_literal(v: &TypedValue, target: ParamType) -> Option<TypedValue> {
     match (target, v) {
@@ -807,7 +808,7 @@ pub(crate) fn coerce_literal(v: &TypedValue, target: ParamType) -> Option<TypedV
             params::is_valid_color(s).then(|| TypedValue::Color(s.clone()))
         }
         (ParamType::Key, TypedValue::Key(s) | TypedValue::Text(s)) => {
-            (!s.is_empty()).then(|| TypedValue::Key(s.clone()))
+            params::is_valid_key(s).then(|| TypedValue::Key(s.clone()))
         }
         (ParamType::Tmpl, TypedValue::Tmpl(s) | TypedValue::Text(s)) => {
             (!s.is_empty()).then(|| TypedValue::Tmpl(s.clone()))

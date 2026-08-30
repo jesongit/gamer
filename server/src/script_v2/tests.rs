@@ -145,6 +145,24 @@ mod params_tests {
         );
     }
 
+    /// key 默认值枚举校验：非法键报 param.default.invalid（消息含非法值），
+    /// 具名键（含别名/小写）与纯数字 keycode 合法。
+    #[test]
+    fn key_default_enum_validation() {
+        let e = bad("key:quit:退出按键:NOT_A_KEY");
+        assert_eq!(e.code, codes::PARAM_DEFAULT_INVALID);
+        assert_eq!(e.field, "default");
+        assert!(e.message.contains("NOT_A_KEY"), "{:?}", e.message);
+        assert!(e.message.contains("ESC"), "应含合法示例: {:?}", e.message);
+
+        let d = decl("key:quit:退出按键:esc");
+        assert_eq!(d.default, Some(TypedValue::Key("esc".into())));
+        let d = decl("key:quit:退出按键:VOLUME_UP");
+        assert_eq!(d.default, Some(TypedValue::Key("VOLUME_UP".into())));
+        let d = decl("key:quit:退出按键:122");
+        assert_eq!(d.default, Some(TypedValue::Key("122".into())));
+    }
+
     /// 声明结构非法：段数 / 空段 / 未知类型 / 默认值类型不允许冒号。
     #[test]
     fn decl_format_errors() {
@@ -312,6 +330,23 @@ mod loader_tests {
     fn swipe_missing_field() {
         let e = errs("steps:\n  - swipe:\n      fm: [0.1, 0.9]\n      time: 800ms\n");
         assert_code(&e, codes::STEP_FIELD_MISSING, "steps[0]", "to");
+    }
+
+    /// key 步骤字面量按键枚举校验：非法键报 step.field.type_mismatch（与前端
+    /// checkCellLiteral 同码），具名键与数字键合法。
+    #[test]
+    fn key_step_literal_enum() {
+        let e = errs("steps:\n  - key: NOT_A_KEY\n");
+        assert_code(&e, codes::STEP_FIELD_TYPE_MISMATCH, "steps[0]", "key");
+        assert!(
+            e.iter()
+                .find(|e| e.code == codes::STEP_FIELD_TYPE_MISMATCH)
+                .map(|e| e.message.contains("NOT_A_KEY"))
+                .unwrap_or(false),
+            "消息应含非法值: {e:?}"
+        );
+        ok("steps:\n  - key: ESC\n");
+        ok("steps:\n  - key: 122\n");
     }
 
     /// wait 随机区间起点大于终点。
