@@ -240,8 +240,9 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
     if !s.len().is_multiple_of(2) {
         return Err("奇数长度 hex".into());
     }
-    s.as_bytes()
-        .chunks_exact(2)
+    let (pairs, _) = s.as_bytes().as_chunks::<2>();
+    pairs
+        .iter()
         .map(|chunk| {
             let s = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
             u8::from_str_radix(s, 16).map_err(|e| e.to_string())
