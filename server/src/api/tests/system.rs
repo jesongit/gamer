@@ -4,7 +4,7 @@ use super::*;
 async fn readiness_is_public_structured_and_does_not_leak_paths() {
     let t = build_app(
         "ready",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let resp = send(&t.app, req("GET", "/health/ready", None, &[], None)).await;
@@ -28,7 +28,7 @@ async fn readiness_is_public_structured_and_does_not_leak_paths() {
 async fn metrics_is_public_prometheus_text_with_low_cardinality() {
     let t = build_app(
         "metrics",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let resp = send(&t.app, req("GET", "/metrics", None, &[], None)).await;

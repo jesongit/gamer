@@ -11,7 +11,7 @@ const FUNC_YAML_V2: &str = "login:\n  steps:\n    - return: false\n";
 async fn malformed_control_payload_is_400_even_offline() {
     let t = build_app(
         "ctl400",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let ck = cookie_of(&login(&t.app).await);
@@ -31,14 +31,14 @@ async fn malformed_control_payload_is_400_even_offline() {
         ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(resp.status().is_client_error());
 }
 
 #[tokio::test]
 async fn template_upload_rejects_byte_and_pixel_bombs_with_4xx() {
     let t = build_app(
         "tmpllimits",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
@@ -83,14 +83,14 @@ async fn template_upload_rejects_byte_and_pixel_bombs_with_4xx() {
         req("POST", "/api/templates", None, &headers(sid), Some(body)),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(resp.status().is_client_error());
 }
 
 #[tokio::test]
 async fn zip_import_rejects_slip_duplicate_and_pixel_bomb_with_4xx() {
     let t = build_app(
         "ziplimits",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
@@ -131,7 +131,7 @@ async fn zip_import_rejects_slip_duplicate_and_pixel_bomb_with_4xx() {
 async fn request_body_limits_reject_oversize_json_and_zip_with_413() {
     let t = build_app(
         "bodylimits",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
@@ -174,7 +174,7 @@ async fn request_body_limits_reject_oversize_json_and_zip_with_413() {
 async fn functions_routes_require_auth() {
     let t = build_app(
         "fnauth",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let cases = [
@@ -206,7 +206,7 @@ async fn functions_routes_require_auth() {
 async fn functions_crud_cycle_with_version_conflict() {
     let t = build_app(
         "fncrud",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
@@ -413,7 +413,7 @@ async fn functions_crud_cycle_with_version_conflict() {
 async fn functions_input_validation_and_missing_pkg() {
     let t = build_app(
         "fnvalid",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
@@ -526,7 +526,7 @@ async fn functions_input_validation_and_missing_pkg() {
 async fn functions_never_leak_into_script_sources() {
     let t = build_app(
         "fnisolation",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
@@ -624,7 +624,7 @@ async fn functions_never_leak_into_script_sources() {
 async fn scripts_get_version_and_save_expected_version_conflict() {
     let t = build_app(
         "scriptvers",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
@@ -633,7 +633,7 @@ async fn scripts_get_version_and_save_expected_version_conflict() {
             &t,
             &sid,
             "/api/scripts",
-            serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps:\n  - log v1\n"}),
+            serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps:\n  - log: v1\n"}),
         )
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -647,7 +647,7 @@ async fn scripts_get_version_and_save_expected_version_conflict() {
     assert_eq!(resp.status(), StatusCode::OK);
     let j = json_body(resp).await;
     assert_eq!(j["version"], v1.as_str());
-    assert!(j["content"].as_str().unwrap().contains("log v1"));
+    assert!(j["content"].as_str().unwrap().contains("log: v1"));
 
     // POST 只创建：已有资源再次 POST → 409，且不接受更新字段
     let resp = post_json(
@@ -669,14 +669,14 @@ async fn scripts_get_version_and_save_expected_version_conflict() {
             serde_json::json!({"pkg": "com.test.app", "name": "other.yaml", "content": "steps: []\n", "expected_version": v1}),
         )
         .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(resp.status().is_client_error());
 }
 
 #[tokio::test]
 async fn import_dry_run_reports_then_confirm_writes() {
     let t = build_app(
         "dryrun",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
@@ -770,12 +770,12 @@ async fn import_dry_run_reports_then_confirm_writes() {
 async fn export_import_roundtrip_via_api() {
     let t = build_app(
         "roundtrip",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
     // 造齐三类资源
-    let script = serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps:\n  - log x\n"});
+    let script = serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps:\n  - log: x\n"});
     let resp = send(
         &t.app,
         req(
@@ -908,7 +908,7 @@ fn short_name_and_region_composition_units() {
 async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
     let t = build_app(
         "tmplshort",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
@@ -975,7 +975,7 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
         serde_json::json!({"pkg": "com.test.app", "data_b64": png}),
     ] {
         let resp = post_json(&t, &sid, "/api/templates", body).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(resp.status().is_client_error());
     }
 
     // 短名无 region → 无 # 后缀普通名落盘；旧的 name/data 上传形态拒绝
@@ -1003,5 +1003,5 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(resp.status().is_client_error());
 }

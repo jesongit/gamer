@@ -1,5 +1,33 @@
 use super::*;
 
+#[tokio::test]
+async fn removed_script_stop_and_status_routes_return_not_found() {
+    let t = build_app(
+        "removed-run-routes",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+
+    for (method, uri) in [
+        ("POST", "/api/scripts/missing/stop"),
+        ("GET", "/api/scripts/missing/status"),
+    ] {
+        let resp = send(
+            &t.app,
+            req(
+                method,
+                uri,
+                None,
+                &[(header::COOKIE.to_string(), sid.clone())],
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+}
+
 // ---------- 统一 RunTarget：函数测试运行端点（POST /api/functions/:id/run）----------
 
 /// 挂起到取消的假执行器（真实 RunManager 语义下测 router 行为）。
@@ -49,7 +77,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     let executor = Arc::new(executor);
     let t = build_app_with_executor(
         "fnrun",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
         executor,
     );

@@ -58,7 +58,6 @@ async fn unauthenticated_high_risk_endpoints_are_all_401() {
         ("POST", "/api/shutdown"),
         ("POST", "/api/devices/missing/control"),
         ("POST", "/api/scripts/missing/run"),
-        ("POST", "/api/scripts/missing/stop"),
         ("DELETE", "/api/templates/missing?pkg=com.test.app"),
         ("POST", "/api/scripts/import?pkg=com.test.app"),
     ];
@@ -592,7 +591,6 @@ async fn cross_origin_high_risk_endpoints_are_all_403_after_authentication() {
             "/api/scripts/missing/run",
             Some(r#"{"device_id":"d1"}"#),
         ),
-        ("POST", "/api/scripts/missing/stop", None),
         ("DELETE", "/api/templates/missing?pkg=com.test.app", None),
         (
             "POST",

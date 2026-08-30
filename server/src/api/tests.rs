@@ -267,6 +267,10 @@ mod sec_tests {
     const JSON_CT: &str = "application/json";
     const ADMIN_JSON: &str = r#"{"username":"admin","password":"admin123"}"#;
 
+    fn test_credential(password: &str) -> auth::Credential {
+        auth::parse_password_hash(&auth::hash_password(password).unwrap()).unwrap()
+    }
+
     fn craft_zip(entries: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
         let mut buf = Vec::new();
         {
@@ -399,13 +403,40 @@ mod sec_tests {
         )
     }
 
-    async fn save_task_script(t: &TestApp, sid: &str, content: &str) {
+    async fn save_task_script(t: &TestApp, sid: &str, name: &str, content: &str) {
         let body = serde_json::json!({
             "pkg": "com.test.app",
-            "name": "daily.yaml",
+            "name": name,
             "content": content,
         });
         let resp = post_json(t, sid, "/api/scripts", body).await;
+        assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    }
+
+    async fn update_task_script(t: &TestApp, sid: &str, content: &str) {
+        let get = get_json(t, sid, "/api/scripts/com.test.app%2Fdaily.yaml").await;
+        assert_eq!(get.status(), StatusCode::OK);
+        let version = json_body(get).await["version"]
+            .as_str()
+            .expect("script version")
+            .to_string();
+        let resp = send(
+            &t.app,
+            req(
+                "PUT",
+                "/api/scripts/com.test.app%2Fdaily.yaml",
+                None,
+                &json_headers(sid.to_string()),
+                Some(
+                    serde_json::json!({
+                        "content": content,
+                        "expected_version": version,
+                    })
+                    .to_string(),
+                ),
+            ),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     }
 

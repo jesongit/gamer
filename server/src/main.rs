@@ -120,9 +120,8 @@ async fn main() -> anyhow::Result<()> {
         "auth enabled (session cookies; /api/** requires login)"
     );
 
-    // 脚本/模板按应用分区存储（data/<pkg>/yaml|tmpl）+ 旧目录布局一次性迁移
+    // 脚本/模板按应用分区存储（data/<pkg>/yaml|tmpl）；旧目录布局不再自动迁移
     let scripts = Arc::new(scripts::ScriptStore::open(&cfg)?);
-    scripts::migrate_fs_layout(&db, &scripts)?;
 
     // 每设备活跃 viewer 注册表：AppState / Scheduler / DeviceManager（空闲断开守卫）共享
     // （引擎经 control DataChannel 反向推送脚本可视化事件，定时任务运行时同样生效）

@@ -148,7 +148,7 @@ pub enum Credential {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum CredentialSource {
+pub(crate) enum CredentialSource {
     Config,
     DevEnv,
 }
@@ -930,15 +930,15 @@ mod tests {
         ));
         assert!(st.attempt_login("admin", "right", "5.5.5.5").is_ok());
 
-        // 滑动窗口滑出后解锁（1s 窗口可实测）
-        let small = state(credential("right"), 100, 100, 2, 1);
+        // 滑动窗口滑出后解锁；窗口留出 Argon2 校验在并行门禁下的调度裕量。
+        let small = state(credential("right"), 100, 100, 2, 5);
         small.attempt_login("admin", "bad", "7.7.7.7").unwrap_err();
         small.attempt_login("admin", "bad", "7.7.7.7").unwrap_err();
         assert!(matches!(
             small.attempt_login("admin", "right", "7.7.7.7"),
             Err(LoginError::RateLimited { .. }) // 锁定期正确口令同样拒
         ));
-        sleep_ms(1200);
+        sleep_ms(5_200);
         assert!(matches!(
             small.attempt_login("admin", "bad", "7.7.7.7"),
             Err(LoginError::Invalid) // 已解锁但口令仍错

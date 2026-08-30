@@ -26,11 +26,11 @@ const TASK_SCRIPT_NO_PARAMS: &str = "steps:
 async fn task_args_snapshot_save_conflict_reconfirm_and_stale_flag() {
     let t = build_app(
         "task-snapshot",
-        auth::Credential::Plain("admin123".into()),
+        test_credential("admin123"),
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-    save_task_script(&t, &sid, TASK_SCRIPT_V1).await;
+    save_task_script(&t, &sid, "daily.yaml", TASK_SCRIPT_V1).await;
 
     // 缺必填参数（无 args）→ 400 invalid_args + param.args.missing_required
     let resp = post_json(
@@ -106,7 +106,7 @@ async fn task_args_snapshot_save_conflict_reconfirm_and_stale_flag() {
     assert_eq!(j["args"]["message"], "custom-text", "详情含原快照视图");
 
     // 脚本默认值变化 → 签名过期：列表 param_stale=true，PUT 无 reconfirm → 409
-    save_task_script(&t, &sid, TASK_SCRIPT_V2).await;
+    update_task_script(&t, &sid, TASK_SCRIPT_V2).await;
     let resp = get_json(&t, &sid, "/api/tasks").await;
     let j = json_body(resp).await;
     assert_eq!(j[0]["param_stale"], true);
@@ -172,7 +172,7 @@ async fn task_args_snapshot_save_conflict_reconfirm_and_stale_flag() {
     assert_eq!(j[0]["param_signature"], sig_v2);
 
     // 无参数脚本也必须落完整、非空快照：{} + 有效 psig1 签名。
-    save_task_script(&t, &sid, TASK_SCRIPT_NO_PARAMS).await;
+    save_task_script(&t, &sid, "no-params.yaml", TASK_SCRIPT_NO_PARAMS).await;
     let resp = post_json(
         &t,
         &sid,

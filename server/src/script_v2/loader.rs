@@ -45,6 +45,7 @@ pub(crate) enum NodeKind {
 #[derive(Debug, Clone)]
 pub(crate) struct MapEntry {
     pub key: String,
+    pub key_style: ScalarStyle,
     pub key_span: Span,
     pub value: Node,
 }
@@ -81,7 +82,7 @@ enum Frame {
     Seq(Vec<Node>),
     Map {
         entries: Vec<MapEntry>,
-        pending_key: Option<(String, Span)>,
+        pending_key: Option<(String, ScalarStyle, Span)>,
     },
 }
 
@@ -110,7 +111,7 @@ pub(crate) fn load(source: &str) -> Result<Node, String> {
                 if is_key {
                     match stack.last_mut() {
                         Some(Frame::Map { pending_key, .. }) => {
-                            *pending_key = Some((raw, span));
+                            *pending_key = Some((raw, style, span));
                         }
                         _ => unreachable!(),
                     }
@@ -183,7 +184,7 @@ fn attach(stack: &mut [Frame], root: &mut Option<Node>, node: Node) -> Result<()
             entries,
             pending_key,
         }) => {
-            let (key, key_span) = pending_key
+            let (key, key_style, key_span) = pending_key
                 .take()
                 .ok_or_else(|| "映射值缺少键（复键或结构异常）".to_string())?;
             if entries.iter().any(|e| e.key == key) {
@@ -194,6 +195,7 @@ fn attach(stack: &mut [Frame], root: &mut Option<Node>, node: Node) -> Result<()
             }
             entries.push(MapEntry {
                 key,
+                key_style,
                 key_span,
                 value: node,
             });
@@ -222,6 +224,55 @@ pub(crate) const ACTION_KEYS: &[&str] = &[
     "str_app", "cls_app", "tap", "swipe", "key", "text", "log", "wait", "find", "match", "color",
     "if", "loop", "call", "func", "throw", "return",
 ];
+
+/// 函数名与步骤动作共用 YAML 键空间，撞名会让函数调用无法无歧义解析。
+const RESERVED_FUNCTION_NAMES: &[&str] = &[
+    "log",
+    "key",
+    "text",
+    "tap",
+    "swipe",
+    "find",
+    "match",
+    "color",
+    "loop",
+    "call",
+    "throw",
+    "str_app",
+    "cls_app",
+    "wait",
+    "return",
+    "then",
+    "else",
+    "steps",
+    "times",
+    "block",
+    "verify",
+    "timeout",
+    "config",
+    "func",
+    "params",
+    "args",
+    "expect",
+    "candidates",
+    "if",
+    "until",
+    "cond",
+    "exit",
+];
+
+fn is_yaml_non_string_key(key: &str, style: ScalarStyle) -> bool {
+    style == ScalarStyle::Plain
+        && (matches!(key, "true" | "false" | "null" | "~") || key.parse::<f64>().is_ok())
+}
+
+fn valid_function_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() || c == '_' => chars.all(|c| c.is_alphanumeric() || c == '_'),
+        _ => false,
+    }
+}
 
 pub(crate) struct BuildCtx {
     pub resource: String,
@@ -306,13 +357,47 @@ pub(crate) fn build_function_file(ctx: &mut BuildCtx, root: &Node) -> Option<Fun
     let entries = match &root.kind {
         NodeKind::Map(entries) => entries,
         _ => {
-            ctx.push(codes::SCRIPT_ROOT_TYPE, "", "yaml", "根节点必须是映射");
+            ctx.push(
+                codes::SCRIPT_ROOT_TYPE,
+                "",
+                "yaml",
+                "函数文件顶层必须是映射",
+            );
             return None;
         }
     };
     let mut functions = Vec::new();
     for e in entries {
         let name = &e.key;
+        if is_yaml_non_string_key(name, e.key_style) {
+            ctx.push(
+                codes::FUNC_RECORD_TYPE,
+                name,
+                "name",
+                format!("顶层键 {name:?} 不是字符串标量，不能作为函数名"),
+            );
+            continue;
+        }
+        if !valid_function_name(name) {
+            ctx.push(
+                codes::FUNC_RECORD_TYPE,
+                name,
+                "name",
+                format!(
+                    "函数名 {name} 只允许 unicode 字母/数字/下划线（支持中文），且不能以数字开头"
+                ),
+            );
+            continue;
+        }
+        if RESERVED_FUNCTION_NAMES.contains(&name.as_str()) {
+            ctx.push(
+                codes::FUNC_RECORD_TYPE,
+                name,
+                "name",
+                format!("函数名 {name} 是保留字（动作键 / 结构键）"),
+            );
+            continue;
+        }
         let Some(record) = e.value.as_map() else {
             ctx.push(
                 codes::FUNC_RECORD_TYPE,

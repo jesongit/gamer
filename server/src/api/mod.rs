@@ -35,7 +35,7 @@ use std::sync::Arc;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::middleware as axmw;
-use axum::routing::{delete, get, post};
+use axum::routing::{any, delete, get, post};
 use axum::Router;
 use tower_http::services::ServeDir;
 
@@ -116,9 +116,9 @@ pub fn build_router(
         .layer(DefaultBodyLimit::max(BODY_LIMIT_PUBLIC));
 
     // ---- 受保护组（普通 JSON API，≤256KiB）：设备 / 截图 / 控制 / 模板查询删除 /
-    //      脚本运行停止状态导出 / 任务 / 日志 / shutdown / 维护 vacuum。
+    //      脚本运行与状态查询 / 任务 / 日志 / shutdown / 维护 vacuum。
     //      高风险接口标注（专项测试见文件尾 tests）：shutdown、设备控制
-    //      （devices::api_control）、脚本运行·停止、模板删除（templates::api_delete_template）。
+    //      （devices::api_control）、脚本运行、模板删除（templates::api_delete_template）。
     let protected_json: Router<()> = Router::new()
         .route(
             "/api/devices",
@@ -147,7 +147,7 @@ pub fn build_router(
         )
         .route(
             "/api/templates/:name/image",
-            get(templates::api_get_template_image),
+            get(templates::api_get_template_image).put(templates::api_replace_template_image),
         )
         .route(
             "/api/templates/:name/test",
@@ -155,11 +155,11 @@ pub fn build_router(
         )
         .route(
             "/api/scripts/:id",
-            get(scripts::api_get_script).delete(scripts::api_delete_script),
+            get(scripts::api_get_script)
+                .put(scripts::api_update_script)
+                .delete(scripts::api_delete_script),
         )
         .route("/api/scripts/:id/run", post(runs::api_run_script))
-        .route("/api/scripts/:id/stop", post(runs::api_stop_script))
-        .route("/api/scripts/:id/status", get(runs::api_script_status))
         .route("/api/functions/:id/run", post(runs::api_run_function))
         .route("/api/devices/:id/run", get(runs::api_device_run))
         .route("/api/runs/:run_id", get(runs::api_get_run))
@@ -183,6 +183,9 @@ pub fn build_router(
             "/api/maintenance/vacuum",
             post(system::api_maintenance_vacuum),
         )
+        // 未知 API 路径不应落入 SPA 静态 fallback（其 POST 默认会返回 405）；
+        // 统一由受保护组明确返回 404，旧运行路径因此不再保留任何兼容处理器。
+        .route("/api/*path", any(|| async { StatusCode::NOT_FOUND }))
         // WS 信令与 REST 同守卫：升级握手完成前由 auth_guard 判定
         .route("/ws/device/:id", get(ws::ws_device))
         .with_state(state.clone())
@@ -202,7 +205,7 @@ pub fn build_router(
         )
         .route(
             "/api/scripts",
-            get(scripts::api_list_scripts).post(scripts::api_save_script),
+            get(scripts::api_list_scripts).post(scripts::api_create_script),
         )
         .route(
             "/api/functions",

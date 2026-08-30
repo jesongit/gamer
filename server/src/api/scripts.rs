@@ -70,14 +70,6 @@ fn script_resource_name(name: &str) -> String {
     }
 }
 
-/// 兼容现有 mod.rs 的 handler 名称；集成负责人可切换到 api_create_script。
-pub(super) async fn api_save_script(
-    State(st): State<AppState>,
-    Json(req): Json<SaveScriptReq>,
-) -> Response {
-    api_create_script(State(st), Json(req)).await
-}
-
 /// POST /api/scripts：只创建，不覆盖已有脚本。
 pub(super) async fn api_create_script(
     State(st): State<AppState>,

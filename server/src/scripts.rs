@@ -565,20 +565,17 @@ impl ScriptStore {
         };
         let dir = self.yaml_dir(&package);
         let path = dir.join(&name);
-        match &old {
-            Some((old_pkg, old_name)) => {
-                if old_pkg != &package {
-                    anyhow::bail!("脚本更新不得跨分区移动: {old_id:?} -> {package}/{name}");
-                }
-                let old_path = self.yaml_dir(old_pkg).join(old_name);
-                if !old_path.is_file() {
-                    anyhow::bail!("脚本不存在: {old_id:?}");
-                }
-                if old_path != path && path.exists() {
-                    anyhow::bail!("脚本已存在: {}/{}", package, name);
-                }
+        if let Some((old_pkg, old_name)) = &old {
+            if old_pkg != &package {
+                anyhow::bail!("脚本更新不得跨分区移动: {old_id:?} -> {package}/{name}");
             }
-            None => {}
+            let old_path = self.yaml_dir(old_pkg).join(old_name);
+            if !old_path.is_file() {
+                anyhow::bail!("脚本不存在: {old_id:?}");
+            }
+            if old_path != path && path.exists() {
+                anyhow::bail!("脚本已存在: {}/{}", package, name);
+            }
         }
         std::fs::create_dir_all(&dir)?;
         atomic_write(&path, content.as_bytes())?;
@@ -1218,9 +1215,7 @@ impl ScriptStore {
                 ImportKind::Script => match std::str::from_utf8(&buf) {
                     Ok(text) => {
                         let name = zip_path.strip_prefix("yaml/").unwrap_or(&zip_path);
-                        crate::script_v2::parse_script_file(text, name, &resources)
-                            .map(|_| ())
-                            .map_err(|e| e)
+                        crate::script_v2::parse_script_file(text, name, &resources).map(|_| ())
                     }
                     Err(err) => Err(vec![crate::script_v2::ScriptError::new(
                         crate::script_v2::error::codes::YAML_SYNTAX_ERROR,
@@ -1232,9 +1227,7 @@ impl ScriptStore {
                 ImportKind::Func => match std::str::from_utf8(&buf) {
                     Ok(text) => {
                         let name = zip_path.strip_prefix("func/").unwrap_or(&zip_path);
-                        crate::script_v2::parse_function_file(text, name, &resources)
-                            .map(|_| ())
-                            .map_err(|e| e)
+                        crate::script_v2::parse_function_file(text, name, &resources).map(|_| ())
                     }
                     Err(err) => Err(vec![crate::script_v2::ScriptError::new(
                         crate::script_v2::error::codes::YAML_SYNTAX_ERROR,
@@ -1850,7 +1843,7 @@ mod tests {
     fn import_happy_path_under_limits_and_report() {
         let (store, dir) = temp_store("happy");
         let z = craft_zip(vec![
-            ("yaml/main.yaml".into(), b"steps:\n  - log ok\n".to_vec()),
+            ("yaml/main.yaml".into(), b"steps:\n  - log: ok\n".to_vec()),
             (
                 "func/common.yaml".into(),
                 b"login:\n  steps:\n    - return: true\n".to_vec(),
@@ -1958,7 +1951,7 @@ mod tests {
     fn export_import_roundtrip_is_lossless() {
         let (store, dir) = temp_store("roundtrip");
         store
-            .save(None, "com.a", "main.yaml", "steps:\n  - log x\n")
+            .save(None, "com.a", "main.yaml", "steps:\n  - log: x\n")
             .unwrap();
         store
             .save(None, "com.a", "legacy.yml", "steps: []\n")
@@ -2245,7 +2238,7 @@ mod tests {
     fn function_save_uses_strict_loader_before_writing() {
         let (store, dir) = temp_store("func-invalid");
         let cases: Vec<(&str, &str)> = vec![
-            ("YAML 语法错误", "login: [unclosed"),
+            ("yaml.syntax_error", "login: [unclosed"),
             ("函数文件顶层必须是映射", "- login\n- logout\n"),
             ("没有定义任何函数", "{}\n"),
             ("只允许 unicode 字母", "1abc:\n  steps: []\n"),

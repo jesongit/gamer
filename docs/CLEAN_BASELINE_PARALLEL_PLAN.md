@@ -444,78 +444,80 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] `pnpm build` 基线通过。
 
 > 波次 0 证据：基线 commit `038a2ad56159b40b4d8d8cfc685676ea7980b36d`；备份 `baseline-backups/wave0-20260831-015238723/`；四项门禁均通过（`cargo test` 297 passed/2 ignored，`pnpm test:run` 486 passed）。
-- [ ] 已为 A～D 创建独立分支/worktree，并指定负责人。
+- [x] 已为 A～D 创建独立分支指针，并指定负责人（本次不切换工作区、不创建 worktree）。
 
 ### 10.2 波次 1：服务端四路并行
 
 #### A — 运行契约
 
-- [ ] 删除脚本级 stop/status handler。
-- [ ] 删除按 `script_id` 查询或取消运行的旧索引和方法。
-- [ ] start 固定返回 HTTP 202、`run_id`、`state` 和 `resolved_args`。
-- [ ] active 查询固定为 `{active:false}` 或 `{active:true,run:...}`。
-- [ ] cancel/status 只接受 `run_id`。
-- [ ] 设备运行冲突仍返回 409。
-- [ ] 取消幂等、脚本运行、函数测试和任务运行测试通过。
-- [ ] route 删除清单已交给集成负责人。
-- [ ] A 支线提交已完成并附 `BREAKING CHANGE`。
+- [x] 删除脚本级 stop/status handler。
+- [x] 删除按 `script_id` 查询或取消运行的旧索引和方法。
+- [x] start 固定返回 HTTP 202、`run_id`、`state` 和 `resolved_args`。
+- [x] active 查询固定为 `{active:false}` 或 `{active:true,run:...}`。
+- [x] cancel/status 只接受 `run_id`。
+- [x] 设备运行冲突仍返回 409。
+- [x] 取消幂等、脚本运行、函数测试和任务运行测试通过。
+- [x] route 删除清单已交给集成负责人。
+- [x] A 支线提交已完成并附 `BREAKING CHANGE`。
 
 #### B — 资源与 YAML
 
-- [ ] 脚本、函数的 POST 仅创建，目标存在返回 409。
-- [ ] 脚本、函数的 PUT 更新必须带 `expected_version` 或显式 `force:true`。
-- [ ] 重命名执行版本检查。
-- [ ] 模板创建只接受 `{short_name,region?,pkg,data_b64}`。
-- [ ] 模板图片替换使用独立端点，不再接受旧上传 body。
-- [ ] 保存、导入预检、运行准备和任务保存复用严格 v2 loader。
-- [ ] 删除 `LEGACY_TOP_KEYS` 和 `script.top_level.legacy_format`。
-- [ ] 删除旧嵌套 color `else` 容错及 fixture。
-- [ ] 删除 `scripts::migrate_fs_layout` 和启动调用。
-- [ ] 旧目录存在时 fail fast，程序不自动搬运。
-- [ ] 同一非法 YAML 的多入口诊断一致性测试通过。
+- [x] 脚本、函数的 POST 仅创建，目标存在返回 409。
+- [x] 脚本、函数的 PUT 更新必须带 `expected_version` 或显式 `force:true`。
+- [x] 重命名执行版本检查。
+- [x] 模板创建只接受 `{short_name,region?,pkg,data_b64}`。
+- [x] 模板图片替换使用独立端点，不再接受旧上传 body。
+- [x] 保存、导入预检、运行准备和任务保存复用严格 v2 loader。
+- [x] 删除 `LEGACY_TOP_KEYS` 和 `script.top_level.legacy_format`。
+- [x] 删除旧嵌套 color `else` 容错及 fixture。
+- [x] 删除 `scripts::migrate_fs_layout` 和启动调用。
+- [x] 旧目录存在时 fail fast，程序不自动搬运。
+- [x] 同一非法 YAML 的多入口诊断一致性测试通过。
 - [ ] 前端 API 变化清单已交给 E。
 - [ ] YAML/fixture 文档变化清单已交给 H。
-- [ ] B 支线提交已完成并附 `BREAKING CHANGE`。
+- [x] B 支线提交已完成并附 `BREAKING CHANGE`。
 
 #### C — schema 与任务
 
-- [ ] schema v1 可以从空目录创建完整数据库。
-- [ ] 删除 `PRAGMA table_info` 式旧库补列路径。
-- [ ] 删除旧重复任务修复路径。
-- [ ] `tasks.args_json` 和 `tasks.param_signature` 为非空。
-- [ ] 无参数任务保存 `{}` 和有效签名。
-- [ ] 删除 `NoSnapshot`、`reason=no_snapshot` 及相关测试/UI 契约。
-- [ ] unversioned 或错误 schema 版本数据库会拒绝启动并给出明确原因。
-- [ ] 未来 schema 迁移保留单一入口，但没有 migration 0。
-- [ ] 任务保存、立即运行、cron 和重新确认测试通过。
-- [ ] C 支线提交已完成并附 `BREAKING CHANGE`。
+- [x] schema v1 可以从空目录创建完整数据库。
+- [x] 删除 `PRAGMA table_info` 式旧库补列路径。
+- [x] 删除旧重复任务修复路径。
+- [x] `tasks.args_json` 和 `tasks.param_signature` 为非空。
+- [x] 无参数任务保存 `{}` 和有效签名。
+- [x] 删除 `NoSnapshot`、`reason=no_snapshot` 及相关测试/UI 契约。
+- [x] unversioned 或错误 schema 版本数据库会拒绝启动并给出明确原因。
+- [x] 未来 schema 迁移保留单一入口，但没有 migration 0。
+- [x] 任务保存、立即运行、cron 和重新确认测试通过。
+- [x] C 支线提交已完成并附 `BREAKING CHANGE`。
 
 #### D — 认证
 
-- [ ] 删除旧 SHA-256 parser 和测试。
-- [ ] 删除配置文件明文密码支持。
-- [ ] 删除凭据内存升级路径。
-- [ ] 配置文件只接受 Argon2id PHC hash。
-- [ ] `GAMER_ADMIN_PASSWORD` 只作为开发启动输入，不持久化明文。
-- [ ] 正确密码、错误密码、无效 hash、会话过期测试通过。
-- [ ] 示例配置不再包含默认管理员明文。
+- [x] 删除旧 SHA-256 parser 和测试。
+- [x] 删除配置文件明文密码支持。
+- [x] 删除凭据内存升级路径。
+- [x] 配置文件只接受 Argon2id PHC hash。
+- [x] `GAMER_ADMIN_PASSWORD` 只作为开发启动输入，不持久化明文。
+- [x] 正确密码、错误密码、无效 hash、会话过期测试通过。
+- [x] 示例配置不再包含默认管理员明文。
 - [ ] 前端认证删改清单已交给 E。
 - [ ] 部署说明变化已交给 G/H。
-- [ ] D 支线提交已完成并附 `BREAKING CHANGE`。
+- [x] D 支线提交已完成并附 `BREAKING CHANGE`。
 
 ### 10.3 波次 1：服务端集成门禁
 
-- [ ] 集成负责人已统一更新 `server/src/api/mod.rs`。
+- [x] 集成负责人已统一更新 `server/src/api/mod.rs`。
 - [ ] 已按 C → D → B → A 顺序合并。
 - [ ] 每合并一条支线均单独运行了对应测试。
 - [ ] 已删除并重建开发测试数据库。
-- [ ] 旧 run endpoint 返回 404。
-- [ ] 旧资源 body 被明确拒绝，不会静默转换。
-- [ ] 当前 run/resource/auth/task endpoint 冒烟测试通过。
-- [ ] `cargo fmt --check` 通过。
+- [x] 旧 run endpoint 返回 404。
+- [x] 旧资源 body 被明确拒绝，不会静默转换。
+- [x] 当前 run/resource/auth/task endpoint 冒烟测试通过。
+- [x] `cargo fmt --check` 通过。
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings` 通过。
-- [ ] `cargo test` 通过。
+- [x] `cargo test` 通过。
 - [ ] 已为 E～H 创建独立分支/worktree，并指定负责人。
+
+> 波次 1 集成证据（2026-08-31）：A `d22ff00`、D `76ac7ee`、C `48ea895`、B `46e7369`；`cargo fmt --check` 与 `cargo test`（299 passed/2 ignored）通过，clippy 本次收口时被中断未作为通过证据；旧 stop/status=404、旧资源 body=4xx、当前 run/resource/auth/task smoke 通过。
 
 ### 10.4 波次 2：前端、产品真相与文档
 
