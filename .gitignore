@@ -6,6 +6,8 @@ server/target-rc/
 server/config.toml
 # 按天轮转的日志产物（gamer-server.log.YYYY-MM-DD；裸 *.log 规则盖不住带日期后缀的名）
 server/gamer-server.log.*
+# GB_LOG 误设裸词（无目录成分）时轮转文件落在 server/ 根，名如 1.2026-08-30
+server/*.20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]
 # 运行时产物不入库；模板/脚本分区目录 server/data/<pkg>/{tmpl,yaml} 需入库
 server/data/gamer.db
 server/data/*.db-shm

@@ -53,7 +53,7 @@ cd web && npm run dev                   # 单起前端
 | `web/src/script-editor/` | 可视化编辑器核心（model=唯一编辑源、codec=YAML↔Model、校验/诊断、命令栈撤销重做、components 步骤画布/卡片/参数表单） |
 | `web/src/recording/` + `web/src/composables/useRecording.js` | 录制核心服务（手势分类/队列/裁切/命名）与编辑器接线（占位插入/定稿/重试/降级/丢弃） |
 | `web/src/components/ScriptPicker.vue` | 脚本选择器：`package` prop 传入则锁定分区单下拉（Console），否则分区+脚本双下拉（TaskScheduler） |
-| `web/src/views/Console.vue` | 投屏控制：WebRTC 前端（连接锁防双 PC / 坐标映射 / 框选模板）+ 设备列表管理（scan/连接/删除）+ 脚本运行模式：只读步骤摘要卡片（ScriptSummary），点选卡片/「▶ 从此运行」→ start_index 提交（顶层步骤序号），有 params 先弹参数表单（RunParamsModal，400 诊断回填、resolved_args 摘要进日志）；call/func 卡片可跳转目标资源 |
+| `web/src/views/Console.vue` | 投屏控制：WebRTC 前端（连接锁防双 PC / 坐标映射 / 框选模板）+ 设备列表管理（scan/连接/删除）+ 脚本运行模式：只读步骤摘要卡片（ScriptSummary），「▶ 从此运行」→ start_index 提交（顶层步骤序号；点击卡片选中已删，顶部「运行」恒从头跑），有 params 先弹参数表单（RunParamsModal，400 诊断回填、resolved_args 摘要进日志）；call/func 卡片可跳转目标资源 |
 | `web/src/views/ScriptEditor.vue` / `TaskScheduler.vue` | 脚本/函数库/模板可视化编辑页（保存版本冲突检测、函数测试入口）/ 定时任务页（运行参数表单、参数过期横幅+三列对比、「重新确认」reconfirm） |
 
 ## 规则
