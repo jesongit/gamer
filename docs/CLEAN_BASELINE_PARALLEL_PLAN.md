@@ -1,6 +1,6 @@
 # GameBot 无兼容基线并行开发计划
 
-> 状态：波次 2 集成完成（自动门禁通过；真实设备/发布运行验收待补）
+> 状态：波次 2 集成完成；收口审计未完成（合并顺序/逐支线测试未证实，状态页与部署配置仍有漂移，真实运行验收待补）
 >
 > 目标：项目仍处于开发阶段，删除旧协议、旧数据和旧容错路径，形成单一、严格、可测试的当前基线。
 >
@@ -473,9 +473,11 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] 删除 `scripts::migrate_fs_layout` 和启动调用。
 - [x] 旧目录存在时 fail fast，程序不自动搬运。
 - [x] 同一非法 YAML 的多入口诊断一致性测试通过。
-- [ ] 前端 API 变化清单已交给 E。
-- [ ] YAML/fixture 文档变化清单已交给 H。
+- [x] 前端 API 变化清单已交给 E。
+- [x] YAML/fixture 文档变化清单已交给 H。
 - [x] B 支线提交已完成并附 `BREAKING CHANGE`。
+
+> B→E/H 交接证据（2026-08-31）：E 提交 `fd896de` 正文逐项列出资源 create/update/replace、`expected_version`/`force`、`run_id` 与认证清理；H 提交 `d7075de` 的变更集覆盖 `docs/YAML.md`、契约文档、服务端/前端 fixture 及当前分区资源，当前 fixture 严格 loader 测试通过。
 
 #### C — schema 与任务
 
@@ -499,9 +501,11 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] `GAMER_ADMIN_PASSWORD` 只作为开发启动输入，不持久化明文。
 - [x] 正确密码、错误密码、无效 hash、会话过期测试通过。
 - [x] 示例配置不再包含默认管理员明文。
-- [ ] 前端认证删改清单已交给 E。
-- [ ] 部署说明变化已交给 G/H。
+- [x] 前端认证删改清单已交给 E。
+- [x] 部署说明变化已交给 G/H。
 - [x] D 支线提交已完成并附 `BREAKING CHANGE`。
+
+> D→E/G/H 交接证据（2026-08-31）：E 提交 `fd896de` 正文明确记录仅使用 `gb_session` Cookie、删除伪 token/旧响应；G 提交 `8e3c026` 覆盖 compose、Docker 配置与系统状态，H 提交 `d7075de` 覆盖 README、AGENTS、示例配置及相关文档。
 
 ### 10.3 波次 1：服务端集成门禁
 
@@ -516,6 +520,8 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] `cargo clippy --all-targets --all-features -- -D warnings` 通过。
 - [x] `cargo test` 通过。
 - [x] 已为 E～H 创建独立分支/worktree，并指定负责人。
+
+> 波次 1 顺序/逐支线测试审计（2026-08-31）：`df1e3e5` 报告实际父链为 A→D→C→B，未满足 C→D→B→A；提交报告只给出集成门禁，未提供每条支线单独测试记录，因此上述两项保持未勾选。
 
 > 波次 1 集成证据（2026-08-31）：最终 commit `1c1fef8`；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过，`cargo test` 299 passed/2 ignored；空库实际启动后 schema v1 为 `user_version=1` 且表完整，重建前 DB 已移入 `baseline-backups/wave1-20260831-db-rebuild/database-pre-rebuild/`；旧 stop/status=404、旧模板 body=422，当前 run/resource/auth/task smoke 通过。
 > E～H 分支证据（2026-08-31）：`codex/clean-web-contract`→`fd896de`、`codex/clean-web-views`→`6ee4b23`、`codex/clean-truth-ops`→`8e3c026`、`codex/clean-validation-docs`→`d7075de`；本次以不切换工作区的本地分支指针完成，不创建额外 worktree。
@@ -551,15 +557,17 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 #### G — 真实状态、部署与时区
 
 - [x] 原型 Settings 已改为真实只读系统状态，或已从导航隐藏。
-- [x] 版本来自服务端，不再硬编码 `v0.1.0`。
+- [ ] 版本来自服务端，不再硬编码 `v0.1.0`。
 - [x] readiness、ADB、ffmpeg、scrcpy、data、DB 状态可见。
-- [x] 固定日志徽标已删除。
+- [ ] 固定日志徽标已删除。
 - [x] 页面明确显示任务使用的服务端时区。
 - [x] Docker 显式配置 `TZ`。
 - [x] 部署入口明确说明 WebRTC UDP 端口。
 - [x] system info/schema version 与自动更新计划共用一套定义。
 - [ ] 本机与 Docker 状态页冒烟测试通过。
 - [x] G 支线提交已完成。
+
+> G 反证（2026-08-31）：`web/src/layouts/MainLayout.vue` 仍含固定 `v0.1.0`、固定“服务运行中”和日志徽标 `3`，登录页也仍显示固定版本/默认账号提示；因此版本与固定徽标两项不能验收。
 
 #### H — 数据、验证与文档
 
@@ -577,7 +585,7 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 
 ### 10.5 波次 2：集成与人工验收
 
-- [x] 已按 E → F → G → H 顺序合并。
+- [ ] 已按 E → F → G → H 顺序合并。
 - [x] 合并未覆盖波次开始前的用户改动或开发数据。
 - [x] 空数据目录启动成功并创建 schema v1。
 - [ ] 登录、设备扫描、连接和投屏成功。
@@ -592,7 +600,8 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [ ] viewer 接管、重连、watchdog 和 idle 生命周期未回归。
 - [ ] Docker readiness、时区和 WebRTC UDP 验证通过。
 
-> 波次 2 集成证据（2026-08-31）：公共 `GET /api/system/info` 已在 `protected_json` 接入，未放入 public；集成测试验证未认证 401、认证后结构化响应和无临时路径泄露。`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`（306 passed/2 ignored）、`pnpm test:run`（490 passed）、`pnpm build` 通过；`docker-compose.yml`、主+`docker-compose.local.yml`、主+`docker-compose.usb.yml` 的 `config --quiet` 通过。USB 文件单独 config 失败是 override 必须叠加主文件的预期限制。未执行真实设备、浏览器 WebRTC、Docker 容器 readiness/UDP 或发布运行验收，故上述对应项目保持未勾选；`baseline-backups/` 保持未跟踪且未改动。
+> 波次 2 集成证据（2026-08-31）：公共 `GET /api/system/info` 已在 `protected_json` 接入，未放入 public；集成测试验证未认证 401、认证后结构化响应和无临时路径泄露。`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`（306 passed/2 ignored）、`pnpm test:run`（490 passed）、`pnpm build` 通过；`docker-compose.yml`、主+`docker-compose.local.yml`、主+`docker-compose.usb.yml` 的 `config --quiet` 通过。USB 文件单独 config 失败是 override 必须叠加主文件的预期限制。未执行真实设备流程、浏览器 WebRTC、Docker 容器 readiness/UDP 或发布运行验收，故上述对应项目保持未勾选；`baseline-backups/` 保持未跟踪且未改动。
+> 波次 2 合并顺序审计（2026-08-31）：实际父链为 E→H→G→F→最终集成，不是计划要求的 E→F→G→H，故顺序项保持未勾选。
 
 ### 10.6 最终清理与发布门禁
 
@@ -610,10 +619,12 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] 生产代码不存在 `no_snapshot`。
 - [x] 生产代码不存在脚本级 `/stop` 或 `/status` route。
 - [x] 所有旧行为命中只存在于明确的 rejection 测试或历史文档中。
-- [ ] 所有破坏性提交均包含 `BREAKING CHANGE`。
+- [x] 所有破坏性提交均包含 `BREAKING CHANGE`。
 - [x] 每个提交主题单一、可独立理解和回滚。
 - [ ] 最终文档、配置、fixture 和实际行为一致。
 - [x] 已记录最终基线 commit 和开发数据重建说明。
 - [x] 性能实验未夹带进本轮兼容清理提交。
 
-> 自动门禁证据（2026-08-31）：生产代码扫描上述 8 个禁用标记均为 0 命中；脚本级 stop/status 仅命中 `server/src/api/tests/runs.rs` 的明确 404 rejection 测试，`web/src/console-components.test.js` 的 `no_snapshot` 为负向断言。G/H 原提交未带 `BREAKING CHANGE` 页脚，因此“所有破坏性提交均包含”保持未勾选；真实设备/WebRTC/Docker runtime 与发布验收同样未宣称完成。
+> 自动门禁与提交审计证据（2026-08-31）：生产代码扫描上述 8 个禁用标记及脚本级 stop/status route 均为 0 命中；旧行为命中仅在明确 rejection/负向测试中。`d22ff00`、`76ac7ee`、`48ea895`、`46e7369`、`1c1fef8`、`fd896de`、`6ee4b23`、`9b3e7be` 等实际契约破坏提交均含 `BREAKING CHANGE`；无 footer 的 `d7075de`（docs）与 `8e3c026`（fix）不按破坏性提交计入。
+> 最终本机复核（2026-08-31）：Docker/Compose CLI 可用但 Docker Linux daemon 不可用；主 compose、主+local、主+USB 的 `config --quiet` 均通过。`adb devices -l` 发现真实设备 `HIUWUCNJOBEEOZDY`，但本机 8443 未监听，readiness/system info、登录/扫描/连接/投屏和 Docker runtime 未执行；`baseline-backups/` 仍未跟踪，`server/data` 无工作树改动。
+> 最终一致性反证（2026-08-31）：`docker-config.toml` 仍有明文 `password = "admin123"`，local overlay 注释和 `web/src/views/Login.vue` 仍描述默认凭据，且 Login/MainLayout 仍含固定版本；因此“最终文档、配置、fixture 和实际行为一致”保持未勾选，不能宣称 CLEAN_BASELINE 全部完成。
