@@ -430,18 +430,20 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 
 ### 10.1 波次 0：准备与基线
 
-- [ ] 当前未提交改动已逐项确认归属，没有未知来源文件。
-- [ ] 当前编辑器、数据、测试和文档工作已整理为可识别提交。
-- [ ] 已记录无兼容清理开始前的基线 commit。
-- [ ] `server/data/gamer.db` 已备份；确认可以删除并重建开发库。
-- [ ] `server/data/**` 当前资源已备份或确认可以重新生成。
-- [ ] 已确认 `.yaml`/`.yml` 扩展名不在本轮统一。
-- [ ] `server/src/api/tests.rs` 已按领域机械拆分，且没有改变测试语义。
-- [ ] 运行 API、资源写入、YAML、schema、认证契约已冻结。
-- [ ] `cargo fmt --check` 基线通过。
-- [ ] `cargo test` 基线通过。
-- [ ] `pnpm test:run` 基线通过。
-- [ ] `pnpm build` 基线通过。
+- [x] 当前未提交改动已逐项确认归属，没有未知来源文件。
+- [x] 当前编辑器、数据、测试和文档工作已整理为可识别提交。
+- [x] 已记录无兼容清理开始前的基线 commit。
+- [x] `server/data/gamer.db` 已备份；确认可以删除并重建开发库。
+- [x] `server/data/**` 当前资源已备份或确认可以重新生成。
+- [x] 已确认 `.yaml`/`.yml` 扩展名不在本轮统一。
+- [x] `server/src/api/tests.rs` 已按领域机械拆分，且没有改变测试语义。
+- [x] 运行 API、资源写入、YAML、schema、认证契约已冻结。
+- [x] `cargo fmt --check` 基线通过。
+- [x] `cargo test` 基线通过。
+- [x] `pnpm test:run` 基线通过。
+- [x] `pnpm build` 基线通过。
+
+> 波次 0 证据：基线 commit `038a2ad56159b40b4d8d8cfc685676ea7980b36d`；备份 `baseline-backups/wave0-20260831-015238723/`；四项门禁均通过（`cargo test` 297 passed/2 ignored，`pnpm test:run` 486 passed）。
 - [ ] 已为 A～D 创建独立分支/worktree，并指定负责人。
 
 ### 10.2 波次 1：服务端四路并行
