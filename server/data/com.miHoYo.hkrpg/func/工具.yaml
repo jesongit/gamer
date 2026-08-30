@@ -1,6 +1,18 @@
-func1:
-  steps: []
-
 login:
+  params:
+    - 'tmpl:account:要点击的账号头像模板'
   steps:
+    - str_app
+    - find: 登录按钮.png
+      block:
+        - 关闭登录.png
+    - find: 切换账号.png
+      block:
+        - 确认登出.png
+    - find: $account
+    - find: 进入游戏.png
+    - find: 开始游戏.png
     - find: 点击进入.png
+
+test:
+  steps: []

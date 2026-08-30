@@ -1,0 +1,49 @@
+func:
+  # 领取邮件
+  - mail_recv:
+    cond: 手机图标.png
+    steps:
+      - find: 手机图标.png
+      - find: 邮件图标.png
+        timeout: 500ms
+        then:
+          - find: 领取邮件.png
+          - find: 点击空白关闭1.png
+          - find: 关闭界面.png
+  # 领取委托
+  - itm_recv:
+    - find: 每日任务前往.png
+    - find: 领取委托.png
+      timeout: 500ms
+      then: # 正确进入委托
+        - find: 点击空白关闭1.png
+        - find: 关闭界面.png
+        - find: 每日任务领取.png
+      else: # 如果没进委托一般是进了生存索引，切回任务界面
+        - find: 每日任务列表.png
+          timeout: 1s
+          else:
+            - throw: 未知界面
+
+  # 清体力
+  - ap_burn:
+    - find: 培养目标.png
+    - find: 培养目标进入战斗.png
+    - find: 快捷体力按钮.png
+      timeout: 500ms
+    - find: 增加次数.png
+    - find: 增加次数.png
+    - find: 增加次数.png
+    - find: 增加次数.png
+    - find: 增加次数.png
+    - find: 挑战副本.png
+    - find: 开始挑战.png
+    - find: 退出战斗.png
+    - find: 关闭界面.png
+      verify: true
+  # 领取大月卡
+  - bp_recv:
+    - find: 月卡按钮.png
+      block:
+        - 开启月卡.png
+        - 点击空白关闭2.png

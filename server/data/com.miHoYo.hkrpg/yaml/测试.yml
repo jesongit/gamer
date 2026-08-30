@@ -1,7 +1,0 @@
-steps:
-  - color: [0.7625, 0.9130]
-    c74f36:
-      - log: "1"
-    else:
-      - log: "2"
-  - wait: 1h
