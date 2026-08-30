@@ -1,6 +1,6 @@
 # GameBot 无兼容基线并行开发计划
 
-> 状态：波次 2 集成完成；收口审计未完成（合并顺序/逐支线测试未证实，状态页与部署配置仍有漂移，真实运行验收待补）
+> 状态：代码与本机 HTTP/设备冒烟完成；WebRTC/Docker/发布验收待环境
 >
 > 目标：项目仍处于开发阶段，删除旧协议、旧数据和旧容错路径，形成单一、严格、可测试的当前基线。
 >
@@ -428,6 +428,8 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 
 清单由集成负责人维护。支线 Agent 只报告结果，确认提交已合并且对应门禁通过后再勾选，不能以“代码已写完”代替集成完成。
 
+> 证据索引（2026-08-31）：收口记录为 `2c28531`，清理提交 `5ea58f2` 已移除 `docker-config.toml` 明文 `admin123`、Login 默认凭据/固定版本、MainLayout 固定版本与日志徽标，并有 493 项前端测试。生产代码静态扫描为 0 命中；`cargo fmt`/clippy/test、Web 测试/build 和 compose config 均通过（Rust 306 passed/2 ignored，Web 493 passed）。临时服务使用一次性 `GAMER_ADMIN_PASSWORD` 冒烟：`/health/ready` 200，错误登录 401，正确登录 200 并设置 `gb_session`，`/api/session`、`/api/system/info`（schema=1，ADB/FFmpeg/scrcpy 版本可见）、`/api/devices/scan` 均 200；真实设备 connect 200 且为 online mirror，shutdown 200，未留下 gamer-server/8443/adb forward/reverse/scrcpy 残留。应用内浏览器因 `ERR_BLOCKED_BY_CLIENT` 未验证 WebRTC/DataChannel；Docker daemon 不可用，未伪造 Docker readiness/UDP 结果；设备脚本、viewer 接管、watchdog/idle 生命周期也未实际验证。
+
 ### 10.1 波次 0：准备与基线
 
 - [x] 当前未提交改动已逐项确认归属，没有未知来源文件。
@@ -557,9 +559,9 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 #### G — 真实状态、部署与时区
 
 - [x] 原型 Settings 已改为真实只读系统状态，或已从导航隐藏。
-- [ ] 版本来自服务端，不再硬编码 `v0.1.0`。
+- [x] 版本来自服务端，不再硬编码 `v0.1.0`。
 - [x] readiness、ADB、ffmpeg、scrcpy、data、DB 状态可见。
-- [ ] 固定日志徽标已删除。
+- [x] 固定日志徽标已删除。
 - [x] 页面明确显示任务使用的服务端时区。
 - [x] Docker 显式配置 `TZ`。
 - [x] 部署入口明确说明 WebRTC UDP 端口。
@@ -567,7 +569,7 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [ ] 本机与 Docker 状态页冒烟测试通过。
 - [x] G 支线提交已完成。
 
-> G 反证（2026-08-31）：`web/src/layouts/MainLayout.vue` 仍含固定 `v0.1.0`、固定“服务运行中”和日志徽标 `3`，登录页也仍显示固定版本/默认账号提示；因此版本与固定徽标两项不能验收。
+> G 最终复核（2026-08-31）：`5ea58f2` 已移除 `docker-config.toml` 明文 `admin123`、Login 默认凭据/固定版本、MainLayout 固定版本与日志徽标；新增的基线真相测试随 Web 493 项测试通过。`/api/system/info` 认证后返回 schema=1 及 ADB/FFmpeg/scrcpy 版本，故版本与固定徽标项勾选；Docker runtime 与浏览器页面状态未实测，综合状态页项保持未勾选。
 
 #### H — 数据、验证与文档
 
@@ -588,7 +590,7 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [ ] 已按 E → F → G → H 顺序合并。
 - [x] 合并未覆盖波次开始前的用户改动或开发数据。
 - [x] 空数据目录启动成功并创建 schema v1。
-- [ ] 登录、设备扫描、连接和投屏成功。
+- [x] 登录、设备扫描、连接和投屏的 HTTP/session 冒烟成功（真实设备为 online mirror；浏览器视频轨道未验证）。
 - [x] 脚本/函数/模板的新建、更新、重命名成功。
 - [x] 版本冲突返回 409，显式强制覆盖成功。
 - [x] 手动运行、从指定步骤运行、函数测试和取消成功。
@@ -600,7 +602,7 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [ ] viewer 接管、重连、watchdog 和 idle 生命周期未回归。
 - [ ] Docker readiness、时区和 WebRTC UDP 验证通过。
 
-> 波次 2 集成证据（2026-08-31）：公共 `GET /api/system/info` 已在 `protected_json` 接入，未放入 public；集成测试验证未认证 401、认证后结构化响应和无临时路径泄露。`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`（306 passed/2 ignored）、`pnpm test:run`（490 passed）、`pnpm build` 通过；`docker-compose.yml`、主+`docker-compose.local.yml`、主+`docker-compose.usb.yml` 的 `config --quiet` 通过。USB 文件单独 config 失败是 override 必须叠加主文件的预期限制。未执行真实设备流程、浏览器 WebRTC、Docker 容器 readiness/UDP 或发布运行验收，故上述对应项目保持未勾选；`baseline-backups/` 保持未跟踪且未改动。
+> 波次 2 集成证据（2026-08-31）：公共 `GET /api/system/info` 已在 `protected_json` 接入，未放入 public；集成测试验证未认证 401、认证后结构化响应和无临时路径泄露。`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`（306 passed/2 ignored）、`pnpm test:run`（493 passed）、`pnpm build` 通过；`docker-compose.yml`、主+`docker-compose.local.yml`、主+`docker-compose.usb.yml` 的 `config --quiet` 通过。一次性 `GAMER_ADMIN_PASSWORD` 临时服务已完成 readiness、错误/正确登录、session、system info、设备扫描、真实设备 connect（online mirror）和 shutdown 冒烟，且无进程/端口/ADB/scrcpy 残留；该结果覆盖 HTTP/session，浏览器视频轨道仍未验证。应用内浏览器 `ERR_BLOCKED_BY_CLIENT` 阻断 WebRTC/DataChannel 验证；Docker daemon 不可用，不能伪造容器 readiness/UDP；设备脚本、viewer 接管、watchdog/idle 生命周期及发布运行验收未执行，故对应项目保持未勾选；`baseline-backups/` 保持未跟踪且未改动。
 > 波次 2 合并顺序审计（2026-08-31）：实际父链为 E→H→G→F→最终集成，不是计划要求的 E→F→G→H，故顺序项保持未勾选。
 
 ### 10.6 最终清理与发布门禁
@@ -626,5 +628,5 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] 性能实验未夹带进本轮兼容清理提交。
 
 > 自动门禁与提交审计证据（2026-08-31）：生产代码扫描上述 8 个禁用标记及脚本级 stop/status route 均为 0 命中；旧行为命中仅在明确 rejection/负向测试中。`d22ff00`、`76ac7ee`、`48ea895`、`46e7369`、`1c1fef8`、`fd896de`、`6ee4b23`、`9b3e7be` 等实际契约破坏提交均含 `BREAKING CHANGE`；无 footer 的 `d7075de`（docs）与 `8e3c026`（fix）不按破坏性提交计入。
-> 最终本机复核（2026-08-31）：Docker/Compose CLI 可用但 Docker Linux daemon 不可用；主 compose、主+local、主+USB 的 `config --quiet` 均通过。`adb devices -l` 发现真实设备 `HIUWUCNJOBEEOZDY`，但本机 8443 未监听，readiness/system info、登录/扫描/连接/投屏和 Docker runtime 未执行；`baseline-backups/` 仍未跟踪，`server/data` 无工作树改动。
-> 最终一致性反证（2026-08-31）：`docker-config.toml` 仍有明文 `password = "admin123"`，local overlay 注释和 `web/src/views/Login.vue` 仍描述默认凭据，且 Login/MainLayout 仍含固定版本；因此“最终文档、配置、fixture 和实际行为一致”保持未勾选，不能宣称 CLEAN_BASELINE 全部完成。
+> 最终本机复核（2026-08-31）：Docker/Compose CLI 可用但 Docker Linux daemon 不可用；主 compose、主+local、主+USB 的 `config --quiet` 均通过。一次性 `GAMER_ADMIN_PASSWORD` 临时服务已完成 `/health/ready`、登录/session、system info、设备扫描、真实设备 connect（online mirror）和 shutdown 冒烟，未留下 gamer-server/8443/ADB/scrcpy 残留；`baseline-backups/` 仍未跟踪，`server/data` 无工作树改动。
+> 最终验收边界（2026-08-31）：`5ea58f2` 已清理明文凭据、Login/MainLayout 固定版本与日志徽标，生产代码静态扫描为 0 命中，自动门禁与 compose config 通过；但应用内浏览器 `ERR_BLOCKED_BY_CLIENT` 阻断 WebRTC/DataChannel，Docker daemon 不可用，设备脚本、viewer 接管、watchdog/idle 生命周期和发布运行未执行。因此“最终文档、配置、fixture 和实际行为一致”仍保持未勾选，不能宣称 CLEAN_BASELINE 全部完成。
