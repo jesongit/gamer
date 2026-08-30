@@ -1667,10 +1667,13 @@ mod tests {
         };
         assert!(match_template(&region_req).unwrap().is_some());
 
-        assert_eq!(TEST_HITS.load(Ordering::Relaxed), 2);
+        // 命中/全屏只断言下界：无锁并发的计算池测试会额外产生全屏命中，
+        // 精确断言与本测试的窗口存在竞态（偶发 3≠2，2026-08-30 实证）；
+        // 未命中/区域无并发写入者，精确断言保证分类口径不串。
+        assert!(TEST_HITS.load(Ordering::Relaxed) >= 2);
         assert_eq!(TEST_MISSES.load(Ordering::Relaxed), 1);
         assert_eq!(TEST_REGIONS.load(Ordering::Relaxed), 1);
-        assert_eq!(TEST_FULLSCREEN.load(Ordering::Relaxed), 2);
+        assert!(TEST_FULLSCREEN.load(Ordering::Relaxed) >= 2);
         assert!(TEST_DURATION_MS.load(Ordering::Relaxed) > 0);
     }
 
