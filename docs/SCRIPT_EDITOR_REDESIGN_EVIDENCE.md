@@ -297,3 +297,67 @@
 - §17.3 A~E 端到端剧本 + §16.6 真机矩阵（设备已可用）
 - §19.3/19.4 回滚演练
 - 按仓库规范打破坏性版本标签
+
+
+## 阶段 8（收口）：§20 核对清单审计、边缘修复与最终复验（2026-08-30）
+
+### §17/§20 只读审计结论
+
+按计划 §20 七条核对清单与 §17 验收标准中可静态验证条目逐条审计（独立只读 Agent，file:line 级证据）：
+17 种步骤类型在服务端 AST/loader/白名单、前端 model/factories/kinds、exec 引擎、docs/YAML.md 四方完全一致；
+前端仅剩 script-editor/codec.ts 一处 YAML 解析/序列化（script-language 已删、守卫测试在位）；
+§10 迁移矩阵两页逐项落点（运行/停止/冲突/恢复/从步骤运行/结构化跳转/409 版本冲突）；
+录制 Alt 三分作用域与 §11.2 文案逐字一致；点击→find、滑动→match{swipe+else throw+timeout 30s}
+且有测试断言「绝不能生成 find→swipe」；match 紧凑缩进 v07/v11 双向逐字节往返；
+无 `$N`/`normalize_top` 残留、目录即类型无内容推断。审计结论：8 条通过、1 条基本通过（参数规则），
+另发现 4 处边缘宽严差异，全部当轮修复：
+
+| # | 问题（审计定位） | 修复 | 提交 |
+|---|---|---|---|
+| 1 | 参数备注空段：codec 解析宽容 → validation 无保存前拦截，可产出服务端必拒的 `- text:tag:` | validation.ts/ParamEditor.vue 补 param.decl.format 保存前诊断 + 行内提示（解析层保持宽容仅为编辑中间态） | 480eada |
+| 2 | text 默认值引号：schema.ts 强制双引号，服务端/文档为可选（更严方错位） | schema.ts 改与服务端同构：双引号可选、镜像 unescape_double_quoted 反转义；序列化恒带引号不变 | 480eada |
+| 3 | 录制入口未排除脚本运行中（计划 §11.1） | useRecording.js available 增加运行中守卫 + 「脚本运行中不可录制」提示 | 480eada |
+| 4 | key 枚举：服务端默认值/args 仅非空校验，运行期未知键 warn+keycode 0 静默降级（计划 §6.2「保存时能过→运行时能用」被破坏） | params.rs KEY_NAMES+is_valid_key 四层拦截（默认值/args/步骤字面量/coerce），exec.rs 未知键改步骤失败；与前端 KEY_ENUM、YAML.md §5.1 三方核对一致 | 25b6363 |
+
+容错取舍保留（知悉即可，非缺陷）：codec 对 color 映射内旧位 `else` 静默迁移（服务端拒载，
+仅影响手写旧 YAML 的往返体验，保存即规范形态）；服务端 keycode 按 u32 收紧（超 u32 数字串
+前端能过、服务端拒），方向为更安全一侧。
+
+### 最终门禁（修复后 HEAD 复验）
+
+- cargo fmt --all --check 干净；cargo test **294 passed / 0 failed / 2 ignored**（289 基线 + key 枚举 5 新增）
+- cargo clippy --all-targets --all-features：9 条 warning 全部存量（7 独立 + 2 汇总），零新增；cargo check 0/0
+- pnpm test:run **472 passed / 0 failed**（33 文件，463 基线 + 前端修复 9 新增）；pnpm build 成功
+- git diff --check 干净
+- 负载偶发说明：并行 release 重编的高负载窗口内 api::auth 计时敏感用例一次出现 7 红
+  （`session_sliding_idle_expires_and_renews` 等，1s sleep 断言），负载解除后全量复跑全绿——
+  与 PITFALLS 既有「session_lifecycle_absolute_and_sliding 负载误报」同族，已把第二条用例名补入该条
+
+### RC 产物（修复后重建）
+
+- `server/target-rc/release/gamer-server.exe`：42,864,415 B，SHA256
+  `a0bc04953bb9531b7f39ef81972cb54d66d2d0cbda200d7af3a28ddcaeead580`
+- 构建自含 25b6363+480eada 修复的工作树；`target/release/` 原位产物因正式服务运行中锁定无法重链
+  （os error 5），故用独立 CARGO_TARGET_DIR 构建——**部署时以 target-rc 产物为准**；
+  前端产物 server/web-dist/ 已随 pnpm build 更新（运行时磁盘托管，不嵌入 exe）
+- `server/target-rc/` 已入 .gitignore（6cf8cf7）
+
+### 真机证据（server/1.2026-08-29 运行日志）
+
+- 手动脚本运行 `com.tencent.nrc/verify_a.yml`（七类参数 + if 分支 + $name 引用）×3 次 state=Success
+- 函数测试 `com.tencent.nrc/verify_lib.yaml#check_flag` ×2 次 state=Success（RunTarget=Function 链路真机可用）
+- WebRTC 信令/viewer 注册正常；§16.4 真机矩阵的「运行脚本时 hit/miss/tap/swipe 可视化」在该时段会话内进行
+- 上述两脚本/函数库已入库（6cf8cf7）作为验收产物
+- 无记录项：录制上传（日志无 upload/record 事件，服务端不逐条记 API）、定时任务实际调度（scheduler started
+  但期间无 cron 触发）——**真机录制回放与任务调度实跑仍待人工确认**；§19.1 发布前检查、§19.3/19.4
+  回滚演练、破坏性版本标签同前待人工
+
+### 审查人
+
+主线编排复验：三路并行 Agent（Rust 门禁 / §20 审计 / Web 门禁+RC）交叉复核，修复由两个并行 Agent
+落地后主线审查 diff、复跑全部门禁
+
+### 结论
+
+通过——计划阶段 0～8 自动化与静态验收全部完成，§20 核对清单七条全勾；
+发布宣布仍以「真机录制回放 + 任务调度实跑 + 回滚演练 + 版本标签」四项人工签核为准（§17.10/§19）。

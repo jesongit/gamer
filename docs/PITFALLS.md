@@ -61,7 +61,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **Windows 句柄竞争导致原子写偶发失败**：同一路径的替换在文件句柄未完全释放时会短暂被占用，修复为进程内替换锁串行化写入，规避方式是不要并发写同一目标。
 - **C: 盘构建缓存耗尽时不应全量清理**：一次性清全局缓存会拖慢其它项目，恢复时只清本仓库 `server/target` 就能把空间和回收成本控制在当前工作区。
 - **dev 前端(5173)登录/所有 POST 报「登录失败，请稍后再试」实为 403 forbidden_origin**：vite 代理 `/api` 开 `changeOrigin: true` 会把 Host 改写成 `localhost:8443`，与浏览器 Origin(5173) 不一致，命中后端 Origin↔Host 同源防护拒掉全部 POST/PUT/DELETE（GET 不校验所以页面能正常加载，极具迷惑性）；解决：`changeOrigin` 必须保持 false（与 `/ws` 代理一致），前端 `login()` 已把 403 映射为独立文案便于下次识别。
-- **`cargo test` 两个存量计时敏感用例偶发红**：`store::prune_logs_deletes_all_eligible_rows_in_batches` 曾硬编码 "2026-08-28" 当"新日志"，跨天后被 retain_days=1 正确清理导致 504≠503 必挂（已改为动态 `Local::now()`）；`api::auth::session_lifecycle_absolute_and_sliding` 用 1.1s sleep 等 1s 过期，机器负载高时会误报——单独重跑即过，勿当成回归。
+- **`cargo test` 存量计时敏感用例偶发红**：`store::prune_logs_deletes_all_eligible_rows_in_batches` 曾硬编码 "2026-08-28" 当"新日志"，跨天后被 retain_days=1 正确清理导致 504≠503 必挂（已改为动态 `Local::now()`）；`api::auth` 的 `session_lifecycle_absolute_and_sliding` 与 `session_sliding_idle_expires_and_renews` 都用 1.1s sleep 等 1s 过期，机器负载高时会误报（2026-08-30 并行 release 重编的高负载窗口一次连带 7 红、负载解除后复跑全绿）——单独重跑即过，勿当成回归。
 - **小米 HyperOS 设备的传输方式不能靠 `adb devices -l` 判定**：实测 25079RPDCC 的 USB 串号是 16 位大写字母数字（与无线调试连接显示同一串号），且 USB 传输的行里**没有** `usb:` 标记——`usb:` 有是 USB 铁证、没有不能说明是无线；`infer_device_kind` 对无标记设备保守按 usb（kind 只影响保活门控，误判无功能副作用）。
 - **adb server 重启（含 `gamer.ps1 restart` 内部 kill-server）会掉无线调试连接，且服务端无法主动救回**：Android 11+ 无线调试的重连由手机侧 mDNS 广播驱动，熄屏/深睡时不广播，`adb connect <串号>` 对裸设备名也无效（非 host:port）；只能等手机亮屏重新广播或插线。服务端无线保活因此只对可寻址的经典网络 adb（含 `:` 或 `.`）补连。
 - **冷启动瞬间截图可能双路齐挂**：应用冷启动/画面剧变时帧缓存按需解码撞上 GOP 刷新会被判过期丢弃（两拍后返回"无帧"），同时 `screencap -d` 对切换中的虚拟屏可能返回非图片错误文本——两条截图路径同时失败。find 的轮询语义已改为软失败重试（20s 宽限），无需在设备层再加补丁。
