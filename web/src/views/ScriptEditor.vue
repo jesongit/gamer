@@ -78,11 +78,14 @@
             <input v-model="shell.name" class="input mono ed-name" :placeholder="tab === 'func' ? '函数库文件短名（缺省 .yaml 自动补）' : '脚本名称（可省略 .yml 后缀）'" />
             <button class="btn btn-sm" :disabled="!shell.canUndo" title="撤销" @click="shell.undo()">↶</button>
             <button class="btn btn-sm" :disabled="!shell.canRedo" title="重做" @click="shell.redo()">↷</button>
-            <button class="btn btn-sm" :class="{ active: showExtras }" @click="showExtras = !showExtras">参数/配置</button>
             <button class="btn btn-sm" :class="{ active: showYaml }" title="只读生成 YAML（诊断预览，不可编辑）" @click="showYaml = !showYaml">诊断</button>
             <button v-if="shell.canJumpBack" class="btn btn-sm" @click="shell.jumpBack()">← 返回 {{ shell.jumpBackLabel }}</button>
           </div>
           <div class="ed-body">
+            <!-- 参数/配置常驻在步骤列表上方：脚本 = 文件级 params + 运行配置；
+                 函数库 = 当前函数 params（functionPath 随画布顶部函数下拉联动），无文件级 config -->
+            <ParamEditor :model="shell.model" :stack="shell.stack" :diagnostics="shell.diagnostics" :function-path="fnParamsPath" />
+            <ConfigEditor v-if="shell.editorContext === 'script'" :model="shell.model" :stack="shell.stack" />
             <StepCanvas
               ref="canvasEl"
               :model="shell.model"
@@ -91,15 +94,11 @@
               :context="shell.editorContext"
               :templates="templateNames"
               :selected-uuid="shell.selectedUuid"
+              :resolve-target="resolveTargetSync"
               :test-from="tab === 'func'"
               @select="(u) => shell.select(u)"
               @test-from="onTestFrom"
             />
-            <div v-if="showExtras" class="extras">
-              <!-- 脚本 = 文件级 params；函数库 = 当前函数 params（functionPath 指到 functions.<名>.params） -->
-              <ParamEditor :model="shell.model" :stack="shell.stack" :diagnostics="shell.diagnostics" :function-path="fnParamsPath" />
-              <ConfigEditor v-if="tab === 'script'" :model="shell.model" :stack="shell.stack" />
-            </div>
           </div>
         </template>
         <div v-else class="ed-empty">从左侧选择{{ tab === 'func' ? '函数库文件' : '脚本' }}，或新建一个。</div>
@@ -212,14 +211,15 @@
  *   （function/start_index/args）；函数体顶层卡片「▶测试」映射 start_index 从该步测试；
  *   400 invalid_args 诊断回填表单字段标红，覆盖建议按函数库文件 id 存 localStorage。
  */
-import { ref, computed, watch, onMounted, onUnmounted, provide } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, provide, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   scriptsData, devicesData, templatesData, store, useToast,
   applyRunRecord, beginCancel, findRun, resetStoreRunState, pushRunConflict,
 } from '../store'
 import { api } from '../api'
-import { serialize } from '../script-editor/codec'
+import { serialize, parseScript, parseFunctionLibrary } from '../script-editor/codec'
+import { SE_TARGET_OPTIONS } from '../script-editor/targets'
 import { startIndexOf } from '../script-editor/selection'
 import {
   normalizeActiveRunResponse, normalizeStartReply,
@@ -253,7 +253,6 @@ const tab = ref('script') // 'script' | 'func' | 'tmpl'
 const templates = ref([]) // 当前分区模板（只读列表）
 const selScriptId = ref(null)
 const selFnId = ref(null)
-const showExtras = ref(false)
 const showYaml = ref(false)
 const canvasEl = ref(null)
 
@@ -270,6 +269,92 @@ provide('tplPreviewUrl', (short) => {
 })
 
 const pkgScripts = computed(() => scripts.value.filter(s => !pkg.value || s.package === pkg.value))
+
+// ---------- call/func 目标候选与参数解析（StepCard 经 provide 注入；下拉 + args 自动生成） ----------
+// func 参数直接从 fnLib.list 的文件内容解析（按内容版本 memo）；call 需拉取脚本内容，
+// 按 script id 缓存。编辑器保存后清 call 缓存防默认值过期；跨页签外部改动过期到下次刷新。
+
+const callScriptOptions = computed(() => {
+  if (!pkg.value) return []
+  return pkgScripts.value
+    .filter(s => !(s.id === shell.resourceId && shell.kind === 'script')) // 排除当前脚本（自引用成环）
+    .map(s => ({ target: s.name, label: String(s.name || '').replace(/\.(ya?ml)$/i, '') }))
+})
+
+/** func 候选文件：正在编辑的函数库文件以画布实时模型为准（未保存的新增/改名函数立即可选），
+ *  其余文件用磁盘顶层函数名清单（fnLib 列表快照）。 */
+const funcFileOptions = computed(() => {
+  const live = shell.kind === 'function_library' && shell.hasModel && Array.isArray(shell.model.functions)
+    ? shell.model.functions.map(f => f.name)
+    : null
+  return fnLib.list.map(f => ({
+    file: f.file,
+    functions: live && f.id === shell.resourceId ? live : (Array.isArray(f.functions) ? f.functions : []),
+  }))
+})
+
+const callParamsCache = new Map() // script id → ParamDecl[] | null
+const fnParamsMemo = new Map() // `<file>@<内容版本>` → Map(函数名 → ParamDecl[])
+
+function funcParamsFor(target) {
+  const s = String(target || '')
+  const i = s.indexOf('/')
+  if (i <= 0 || i === s.length - 1) return null
+  const file = s.slice(0, i)
+  const fn = s.slice(i + 1)
+  const entry = fnLib.list.find(f => f.file === file)
+  if (!entry || !entry.content) return null
+  const memoKey = `${file}@${entry.version || entry.content.length}`
+  let byName = fnParamsMemo.get(memoKey)
+  if (!byName) {
+    const parsed = parseFunctionLibrary(entry.content, { file })
+    byName = new Map((parsed.model?.functions || []).map(f => [f.name, f.params || []]))
+    fnParamsMemo.set(memoKey, byName)
+  }
+  return byName.has(fn) ? byName.get(fn) : null
+}
+
+/** 同步缓存命中形态（func 实时解析、call 仅缓存）：已有实参类型回显用，不触发加载。 */
+function resolveTargetParamsSync(kind, target) {
+  if (!target) return null
+  if (kind === 'func') return funcParamsFor(target)
+  return callParamsCache.get(target) ?? null
+}
+
+async function resolveTargetParams(kind, target) {
+  if (!target) return null
+  if (kind === 'func') return funcParamsFor(target)
+  if (callParamsCache.has(target)) return callParamsCache.get(target)
+  const script = pkgScripts.value.find(x => x.name === target)
+  if (!script) return null
+  try {
+    const full = await api.getScript(script.id)
+    const parsed = parseScript(full.content ?? '')
+    const params = parsed.model?.params || []
+    callParamsCache.set(script.id, params)
+    return params
+  } catch {
+    return null
+  }
+}
+
+/** 保存/删资源后清 call 缓存（func memo 按内容版本自失效，无需清）。 */
+function clearCallParamsCache() {
+  callParamsCache.clear()
+}
+
+provide(SE_TARGET_OPTIONS, reactive({
+  callScripts: callScriptOptions,
+  funcFiles: funcFileOptions,
+  resolveParams: resolveTargetParams,
+  resolveParamsSync: resolveTargetParamsSync,
+}))
+
+/** 已有 call/func 实参的类型回显（同步缓存优先），传给画布 → StepCard argType。 */
+function resolveTargetSync(kind, target) {
+  const params = resolveTargetParamsSync(kind, target)
+  return params ? { params } : null
+}
 
 /**
  * 画布模型与页签同类：页签切换只换左栏列表数据源与新建入口，已加载资源保留
@@ -317,10 +402,11 @@ async function loadTemplates() {
   try { templates.value = (await api.listTemplates(pkg.value)) || [] } catch (e) { templates.value = [] }
 }
 
-/** 切分区：函数库/模板随分区刷新 */
+/** 切分区：函数库/模板随分区刷新，call 目标参数缓存作废 */
 function applyPkg() {
   fnLib.refresh(pkg.value)
   loadTemplates()
+  clearCallParamsCache()
 }
 
 watch(pkg, () => { applyPkg() })
@@ -336,7 +422,6 @@ async function openScript(s) {
   if (shell.kind === 'script' && shell.resourceId === s.id) return
   if (!(await confirmDiscardDirty())) return
   tab.value = 'script'
-  showExtras.value = false
   showYaml.value = false
   try {
     await shell.loadScript(s.id)
@@ -351,7 +436,6 @@ async function openFunctionFile(f) {
   if (shell.kind === 'function_library' && shell.resourceId === f.id) return
   if (!(await confirmDiscardDirty())) return
   tab.value = 'func'
-  showExtras.value = false
   showYaml.value = false
   try {
     await shell.loadFunctionFile(f.id)
@@ -366,7 +450,6 @@ function newScript() {
   if (!pkg.value) return toast('请先选择应用分区', 'warn')
   if (shell.hasModel && shell.dirty && !window.confirm('当前资源有未保存修改，确认放弃？')) return
   tab.value = 'script'
-  showExtras.value = false
   showYaml.value = false
   shell.newScript({ name: '新脚本.yml', pkg: pkg.value })
   selScriptId.value = null
@@ -378,7 +461,6 @@ function newFunctionFile() {
   const raw = window.prompt('函数库文件短名（缺省 .yaml 自动补）', 'functions')
   if (!raw || !raw.trim()) return
   tab.value = 'func'
-  showExtras.value = false
   showYaml.value = false
   shell.newFunctionFile({ file: raw.trim(), pkg: pkg.value })
   selFnId.value = null
@@ -398,6 +480,8 @@ async function autoSave() {
   const wasNew = !shell.resourceId
   const r = await shell.save({ suppressConflict: true })
   if (r.ok) {
+    clearCallParamsCache()
+    if (shell.kind === 'function_library') await fnLib.refresh(pkg.value)
     if (wasNew) {
       await loadScripts()
       fnLib.refresh(pkg.value)
@@ -419,6 +503,7 @@ async function removeScript(s) {
   try {
     await api.deleteScript(s.id)
     await loadScripts()
+    clearCallParamsCache()
     if (shell.kind === 'script' && shell.resourceId === s.id) shell.reset()
     if (selScriptId.value === s.id) selScriptId.value = null
     toast('脚本已删除', 'success')
@@ -541,6 +626,7 @@ async function save() {
   if (!pkg.value && !shell.pkg) { toast('请先选择应用分区', 'warn'); return { ok: false } }
   const r = await shell.save()
   if (r.ok) {
+    clearCallParamsCache()
     await loadScripts()
     fnLib.refresh(pkg.value)
     if (shell.kind === 'script') selScriptId.value = shell.resourceId
@@ -937,7 +1023,6 @@ onUnmounted(() => {
 .ed-name { flex: 1; min-width: 140px; max-width: 320px; }
 .ed-body { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
 .ed-body :deep(.se-canvas) { flex: none; }
-.extras { display: flex; flex-direction: column; }
 .ed-empty {
   flex: 1; display: flex; flex-direction: column; gap: 10px; align-items: center; justify-content: center;
   color: var(--text-2); font-size: 13px; text-align: center; padding: 20px;

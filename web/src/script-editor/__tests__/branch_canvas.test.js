@@ -179,8 +179,8 @@ describe('StepCanvas：专注视图与面包屑', () => {
     // 点击面包屑根返回主流程视图
     await wrapper.findAll('.crumb')[0].trigger('click')
     expect(wrapper.text()).toContain('记录日志 top1')
-    const crumbsAfter = wrapper.findAll('.crumb').map((c) => c.text())
-    expect(crumbsAfter).toEqual(['主流程'])
+    // 根视图面包屑只剩「主流程」单节点（与视图重复）→ 不渲染
+    expect(wrapper.find('.breadcrumb').exists()).toBe(false)
   })
 
   it('面包屑中段导航', async () => {
@@ -253,27 +253,29 @@ describe('StepCanvas：诊断定位联动（showErrorPanel）', () => {
 })
 
 describe('StepCanvas：函数库上下文', () => {
-  it('函数名输入框（切换/改名）+ 函数内卡片 + 面包屑函数名', async () => {
+  it('函数下拉（列出全部函数切换编辑）+ ✏️ 改名 + 面包屑函数名', async () => {
     const created = setupFunctions('login:\n  steps:\n    - log: hi\n\nother:\n  steps:\n    - log: y\n')
     const wrapper = mount(StepCanvas, {
       props: { model: created.model, stack: created.stack, context: 'function' },
     })
-    const nameInput = wrapper.find('input.fn-input')
-    expect(nameInput.exists()).toBe(true)
-    expect(nameInput.element.value).toBe('login')
+    const nameSel = wrapper.find('select.fn-select')
+    expect(nameSel.exists()).toBe(true)
+    expect(nameSel.element.value).toBe('login')
+    // 列出文件内全部函数（原生 datalist 的按值过滤问题不存在）
+    expect(nameSel.findAll('option').map((o) => o.element.value)).toEqual(['login', 'other'])
     expect(wrapper.text()).toContain('记录日志 hi')
-    const crumbs = wrapper.findAll('.crumb').map((c) => c.text())
-    expect(crumbs).toEqual(['login'])
-    // 输入已有函数名回车 = 切换（不改名）
-    await nameInput.setValue('other')
-    await nameInput.trigger('keydown.enter')
+    // 函数根视图：面包屑只有函数名一个节点（与函数下拉重复）→ 不渲染
+    expect(wrapper.find('.breadcrumb').exists()).toBe(false)
+    // 下拉选择已有函数 = 切换（不改名）
+    await nameSel.setValue('other')
     expect(wrapper.text()).toContain('记录日志 y')
     expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'other'])
-    // 输入新名字回车 = 重命名当前函数（画布跟随）
-    await nameInput.setValue('other2')
-    await nameInput.trigger('keydown.enter')
+    // ✏️ 输入新名字 = 重命名当前函数（画布跟随）
+    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('other2')
+    await wrapper.find('button.fn-rename').trigger('click')
+    promptSpy.mockRestore()
     expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'other2'])
-    expect(wrapper.find('input.fn-input').element.value).toBe('other2')
+    expect(wrapper.find('select.fn-select').element.value).toBe('other2')
     // 添加步骤插入当前函数末尾
     await wrapper.find('button.add-btn').trigger('click')
     await wrapper.findAll('.entry-btn')[0].trigger('click')
@@ -288,14 +290,15 @@ describe('StepCanvas：函数库上下文', () => {
     const wrapper = mount(StepCanvas, {
       props: { model: created.model, stack: created.stack, context: 'function' },
     })
-    const fnBtns = () => wrapper.findAll('button.fn-btn')
-    expect(fnBtns()[1].attributes('disabled')).toBeDefined() // 仅一个函数：删除禁用
-    await fnBtns()[0].trigger('click') // ＋ 函数
+    const addFnBtn = wrapper.find('button.fn-add')
+    const delFnBtn = () => wrapper.find('button.fn-btn-danger')
+    expect(delFnBtn().attributes('disabled')).toBeDefined() // 仅一个函数：删除禁用
+    await addFnBtn.trigger('click') // ＋ 函数
     expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'func1'])
-    expect(wrapper.find('input.fn-input').element.value).toBe('func1')
+    expect(wrapper.find('select.fn-select').element.value).toBe('func1')
     expect(wrapper.text()).not.toContain('记录日志 hi') // 画布已切到空的 func1
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    await fnBtns()[1].trigger('click')
+    await delFnBtn().trigger('click')
     expect(created.model.functions.map((f) => f.name)).toEqual(['login'])
     created.stack.undo()
     expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'func1'])

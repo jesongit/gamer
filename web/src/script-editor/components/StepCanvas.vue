@@ -1,23 +1,28 @@
 <template>
   <div ref="rootEl" class="se-canvas" @click.self="deselect">
-    <!-- 顶部：函数名输入（函数库，回车改名/切换）+ 面包屑 + 添加入口与函数管理 -->
+    <!-- 顶部：函数切换下拉 + ✏️改名（函数库）+ 面包屑 + 添加入口与函数管理 -->
     <div class="canvas-toolbar">
       <template v-if="isFunction">
-        <input
-          class="fn-input"
+        <select
+          class="select fn-select"
           :value="activeFnName"
-          list="se-fn-name-options"
-          aria-label="函数名（输入后回车：同名切换，新名重命名当前函数）"
-          title="输入函数名回车：与现有函数同名 → 切换到它；新名字 → 重命名当前函数（可撤销）"
+          aria-label="选择要编辑的函数"
+          title="切换到所选函数（列出文件内全部函数）"
           @click.stop
-          @keydown.enter="onFnNameEnter"
-          @blur="onFnNameBlur"
-        />
-        <datalist id="se-fn-name-options">
-          <option v-for="name in fnNames" :key="name" :value="name" />
-        </datalist>
+          @change="onFnSelectChange(($event.target as HTMLSelectElement).value)"
+        >
+          <option v-for="name in fnNames" :key="name" :value="name">{{ name }}</option>
+        </select>
+        <button
+          type="button"
+          class="fn-btn fn-rename"
+          title="重命名当前函数（可撤销；输入已有函数名则切换到它）"
+          @click.stop="renameActiveFn"
+        >✏️</button>
       </template>
-      <nav class="breadcrumb" aria-label="当前编辑流程">
+      <!-- 面包屑：进入嵌套分支后显示「函数名 / 命中后 / …」逐层导航；根视图只有
+           函数名/主流程一个节点，与函数下拉重复 → 隐藏 -->
+      <nav v-if="breadcrumbNodes.length > 1" class="breadcrumb" aria-label="当前编辑流程">
         <template v-for="(node, i) in breadcrumbNodes" :key="i">
           <span v-if="i" class="crumb-sep">/</span>
           <button
@@ -32,8 +37,8 @@
       <template v-if="isFunction">
         <button
           type="button"
-          class="fn-btn"
-          title="在文件末尾新增一个空函数（func1/func2… 顺延命名，上方输入框改名），画布切到新函数"
+          class="fn-btn fn-add"
+          title="在文件末尾新增一个空函数（func1/func2… 顺延命名，✏️ 按钮改名），画布切到新函数"
           @click.stop="addFunction"
         >＋ 函数</button>
         <button
@@ -210,13 +215,19 @@ function navigateTo(node: BreadcrumbNode): void {
 function switchFn(name: string): void {
   focusPath.value = null
   currentContainer.value = ['functions', name, 'steps']
+  innerSelected.value = null
+  emit('select', null)
 }
 
-/**
- * 函数名输入提交（回车/失焦）：与现有函数同名 → 切换到它；
- * 新名字 → 重命名当前函数（rename_function 命令，可撤销）并保持画布跟随。
- */
-function commitFnName(raw: string): void {
+/** 下拉切换到所选函数（select 值即目标函数名，画布跟到该函数体）。 */
+function onFnSelectChange(name: string): void {
+  if (!name || name === activeFnName.value) return
+  switchFn(name)
+}
+
+/** ✏️ 改名：prompt 输入新名字重命名当前函数（已有函数名 = 切换到它），可撤销。 */
+function renameActiveFn(): void {
+  const raw = window.prompt('函数名（新名字重命名当前函数；已有函数名则切换到它）', activeFnName.value)
   const to = String(raw || '').trim()
   const current = activeFnName.value
   if (!to || to === current) return
@@ -227,17 +238,9 @@ function commitFnName(raw: string): void {
   if (props.stack.apply({ type: 'rename_function', from: current, to }, `重命名函数 ${current} → ${to}`)) {
     focusPath.value = null
     currentContainer.value = ['functions', to, 'steps']
+    innerSelected.value = null
+    emit('select', null)
   }
-}
-
-function onFnNameEnter(e: Event): void {
-  const el = e.target as HTMLInputElement
-  commitFnName(el.value)
-  el.blur()
-}
-
-function onFnNameBlur(e: Event): void {
-  commitFnName((e.target as HTMLInputElement).value)
 }
 
 /** 新增空函数并切到它（func1/func2… 顺延命名，改名走上方输入框）。 */
@@ -305,6 +308,7 @@ function onInserted(uuid: string): void {
   panelOpen.value = false
   innerSelected.value = uuid
   emit('select', uuid)
+  expandedUuids.add(uuid) // 新卡自动展开：省去每次手动点开再填/选
 }
 
 // ---------- 面包屑 ----------
@@ -384,13 +388,12 @@ defineExpose({ anchor, locate, activeFnName })
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding-bottom: 6px; border-bottom: 1px solid var(--border); margin-bottom: 4px;
 }
-.fn-input {
-  background: var(--bg-3); color: var(--text-0);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 3px 8px; font-size: 12px; width: 120px; min-width: 0;
+/* 全局 .select 是 width:100% 大表单形态；工具条内收窄为内联尺寸 */
+.fn-select {
+  width: auto; max-width: 180px;
+  padding: 4px 8px; font-size: 12px;
   font-family: var(--mono);
 }
-.fn-input:focus { outline: none; border-color: var(--accent-2); }
 .fn-btn {
   border: 1px solid var(--border); background: transparent; color: var(--text-1);
   border-radius: var(--radius-sm); font-size: 12px; padding: 4px 10px; cursor: pointer;

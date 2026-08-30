@@ -292,7 +292,38 @@
       <template v-else-if="step.kind === 'call' || step.kind === 'func'">
         <div class="field-row">
           <span class="field-label">{{ step.kind === 'call' ? '目标脚本' : '目标函数' }}</span>
+          <!-- func：文件 + 函数名两级下拉（候选由宿主注入；未注入回退自由输入） -->
+          <template v-if="step.kind === 'func' && targetOptions">
+            <select
+              class="cell-input target-select" :value="fnFileSel" aria-label="函数库文件"
+              @change="onFnFileChange(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">（选择文件）</option>
+              <option v-if="fnFileSel && !fnFiles.some((f) => f.file === fnFileSel)" :value="fnFileSel">{{ fnFileSel }}（已失效）</option>
+              <option v-for="f in fnFiles" :key="f.file" :value="f.file">{{ f.file }}</option>
+            </select>
+            <span class="field-sep">/</span>
+            <select
+              class="cell-input target-select" :value="fnNameSel" aria-label="函数名" :disabled="!fnFileSel"
+              @change="onFnNameChange(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">（选择函数）</option>
+              <option v-if="fnNameSel && !(curFnFile?.functions ?? []).includes(fnNameSel)" :value="fnNameSel">{{ fnNameSel }}（已失效）</option>
+              <option v-for="name in curFnFile?.functions ?? []" :key="name" :value="name">{{ name }}</option>
+            </select>
+          </template>
+          <!-- call：分区脚本下拉 -->
+          <select
+            v-else-if="step.kind === 'call' && targetOptions"
+            class="cell-input target-select" :value="step.target" aria-label="目标脚本"
+            @change="applyTarget(($event.target as HTMLSelectElement).value)"
+          >
+            <option value="">（选择脚本）</option>
+            <option v-if="step.target && !callScripts.some((o) => o.target === step.target)" :value="step.target">{{ step.target }}（已失效）</option>
+            <option v-for="o in callScripts" :key="o.target" :value="o.target">{{ o.label || o.target }}</option>
+          </select>
           <input
+            v-else
             class="cell-input" :value="step.target"
             :placeholder="step.kind === 'call' ? 'sub_task.yaml' : 'common/login'"
             :aria-label="step.kind === 'call' ? '目标脚本' : '目标函数'"
@@ -302,6 +333,7 @@
         </div>
         <div class="field-row col">
           <span class="field-label">参数 args</span>
+          <span v-if="targetOptions" class="field-hint">选定目标后按其声明自动生成（默认值已预填，必填项需补齐）；也可手动增删</span>
           <span v-if="fieldError('args')" class="cell-err-msg">{{ fieldError('args') }}</span>
           <div v-for="name in argNames" :key="name" class="arg-row">
             <input
@@ -371,13 +403,14 @@
  * - find/match/color/if/loop/func 的分支子流程内嵌 BranchContainer（一层内嵌、更深专注）。
  * 纯受控组件：所有写操作构造 Command 提交 stack，自身不改模型。
  */
-import { computed, ref, type PropType } from 'vue'
+import { computed, inject, ref, watch, type PropType } from 'vue'
 import type { Path } from '../commands'
 import { resolveStepList } from '../commands'
 import type { Diagnostic } from '../diagnostics'
 import { joinStepPath } from '../diagnostics'
 import { childContainerPath, containerLabel } from '../selection'
 import type { Cell, ParamDecl, Step, StepKind } from '../model'
+import { SE_TARGET_OPTIONS, type SeTargetOptions } from '../targets'
 import { KIND_META, stepSummary } from './kinds'
 import CellEditor from './CellEditor.vue'
 import BranchContainer from './BranchContainer.vue'
@@ -542,13 +575,99 @@ function setMessage(v: string): void {
   updateStep({ message: v === '' ? null : v })
 }
 
+// ---------- call/func 目标下拉（宿主经 provide(SE_TARGET_OPTIONS) 注入候选与解析） ----------
+
+const targetOptions = inject<SeTargetOptions | null>(SE_TARGET_OPTIONS, null)
+const callScripts = computed(() => targetOptions?.callScripts ?? [])
+const fnFiles = computed(() => targetOptions?.funcFiles ?? [])
+
+/** func 两级下拉的本地选择态：target 外部变化（撤销/加载/跳转）时从 target 回同步。 */
+const fnFileSel = ref('')
+const fnNameSel = ref('')
+const curFnFile = computed(() => fnFiles.value.find((f) => f.file === fnFileSel.value) ?? null)
+
+function splitFnTarget(t: string): [string, string] {
+  const s = String(t || '')
+  const i = s.indexOf('/')
+  return i >= 0 ? [s.slice(0, i), s.slice(i + 1)] : [s, '']
+}
+watch(
+  () => String(s.value.target ?? ''),
+  (t) => {
+    const [file, fn] = splitFnTarget(t)
+    fnFileSel.value = file
+    fnNameSel.value = fn
+  },
+  { immediate: true },
+)
+
+function onFnFileChange(file: string): void {
+  fnFileSel.value = file
+  fnNameSel.value = '' // 换文件后原函数名视为失效，选中函数名才统一下发 target
+}
+function onFnNameChange(fn: string): void {
+  fnNameSel.value = fn
+  if (fnFileSel.value && fn) void applyTarget(`${fnFileSel.value}/${fn}`)
+}
+
+/**
+ * 下发目标；宿主注入了解析器时一并按目标声明重生成 args（默认值预填、必填补类型空值），
+ * 单条 update_step = 一次撤销。await 期间目标若又被改动则放弃（由最新一次变更接管）。
+ */
+async function applyTarget(next: string): Promise<void> {
+  if (!next) {
+    updateStep({ target: '', args: {} })
+    return
+  }
+  if (!targetOptions) {
+    updateStep({ target: next })
+    return
+  }
+  const prev = String(s.value.target ?? '')
+  let decls: ParamDecl[] | null = null
+  try {
+    decls = await targetOptions.resolveParams(props.step.kind === 'call' ? 'call' : 'func', next)
+  } catch {
+    decls = null // 解析失败不阻塞改目标：args 保持原样（校验层兜底）
+  }
+  if (String(s.value.target ?? '') !== prev) return
+  try {
+    updateStep(decls ? { target: next, args: argsFromDecls(decls) } : { target: next })
+  } catch {
+    // await 期间步骤已被删除（resolveStep 抛错）——放弃本次下发
+  }
+}
+
+/** 按目标声明生成完整 args：有默认值填默认值；必填填类型空值待用户补。 */
+function argsFromDecls(decls: ParamDecl[]): Record<string, Cell> {
+  const out: Record<string, Cell> = {}
+  for (const d of decls) {
+    out[d.name] = { lit: d.default !== null && d.default !== undefined ? d.default : emptyLitFor(d.type) }
+  }
+  return out
+}
+function emptyLitFor(type: ParamDecl['type']): unknown {
+  switch (type) {
+    case 'bool':
+      return false
+    case 'coord':
+      return [0.5, 0.5]
+    default:
+      return ''
+  }
+}
+
 // ---------- args（call/func） ----------
 
 const argNames = computed<string[]>(() => Object.keys(s.value.args ?? {}))
 
 function argType(name: string): ParamDecl['type'] {
-  if (!props.resolveTarget) return 'text'
-  const decls = props.resolveTarget(props.step.kind === 'call' ? 'call' : 'func', s.value.target)?.params
+  const kind = props.step.kind === 'call' ? 'call' : 'func'
+  const target = String(s.value.target ?? '')
+  // 宿主注入的同步缓存优先（call 实参类型需异步拉取后才有）；prop 解析器兜底
+  const decls = targetOptions?.resolveParamsSync
+    ? targetOptions.resolveParamsSync(kind, target)
+    : props.resolveTarget?.(kind, target)?.params
   return decls?.find((d) => d.name === name)?.type ?? 'text'
 }
 function updateArgValue(name: string, cell: Cell): void {
@@ -642,4 +761,13 @@ function addArg(): void {
 .arg-row { display: flex; align-items: center; gap: 6px; }
 .cell-input.grow { flex: 1; }
 .cell-input.num { width: 74px; }
+/* .cell-input 基础样式在 CellEditor 的 scoped 块里，本组件的 select 拿不到——自包含补齐 */
+.target-select {
+  background: var(--bg-2); color: var(--text-0);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 3px 6px; font-size: 12px; min-width: 60px; max-width: 200px;
+}
+.target-select:focus { outline: none; border-color: var(--accent); }
+.target-select option { background: var(--bg-1); color: var(--text-0); }
+.field-sep { color: var(--text-2); font-family: var(--mono); }
 </style>

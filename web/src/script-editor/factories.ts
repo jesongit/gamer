@@ -101,8 +101,8 @@ export const PANEL_GROUPS: { id: PanelGroupId; label: string; entries: PanelEntr
     id: 'recognition',
     label: '识别',
     entries: [
-      { kind: 'find', label: '等待并点击模板', group: 'recognition' },
-      { kind: 'match', label: '匹配多个模板', group: 'recognition' },
+      { kind: 'find', label: '点击模板', group: 'recognition' },
+      { kind: 'match', label: '匹配模板', group: 'recognition' },
       { kind: 'color', label: '判断颜色', group: 'recognition' },
     ],
   },
@@ -121,7 +121,7 @@ export const PANEL_GROUPS: { id: PanelGroupId; label: string; entries: PanelEntr
     label: '复用',
     entries: [
       { kind: 'call', label: '调用脚本', group: 'reuse' },
-      { kind: 'func', label: '调用自定义函数', group: 'reuse' },
+      { kind: 'func', label: '调用函数', group: 'reuse' },
     ],
   },
   {

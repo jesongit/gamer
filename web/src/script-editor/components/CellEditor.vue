@@ -1,5 +1,5 @@
 <template>
-  <div class="cell-editor" :class="{ 'cell-error': !!error, 'is-ref': isRef }" :title="error || undefined">
+  <div class="cell-editor" :class="{ 'cell-error': !!(error || selfError), 'is-ref': isRef }" :title="error || selfError || undefined">
     <div v-if="allowRef" class="cell-mode" role="group" aria-label="取值方式">
       <button
         type="button"
@@ -28,7 +28,8 @@
     </template>
 
     <template v-else>
-      <!-- tmpl：模板短名（自定义下拉，悬停行内预览缩略图；候选由页面外壳注入） -->
+      <!-- tmpl：模板短名（自定义下拉，悬停行内预览缩略图；候选由页面外壳注入）
+           + 框选（宿主注入 seCellTools 时可用：跳转投屏框选生成新模板） -->
       <template v-if="type === 'tmpl'">
         <span class="tmpl-wrap">
           <input
@@ -61,9 +62,14 @@
             </div>
           </div>
         </span>
+        <button
+          v-if="tools" type="button" class="cell-tool live"
+          title="跳转投屏框选截取新模板，完成后回到这里在下拉中选择"
+          @click.stop="tools.captureTemplate()"
+        >框选</button>
       </template>
 
-      <!-- coord：X/Y 双数字 -->
+      <!-- coord：X/Y 双数字 + 投屏选点（宿主注入 seCellTools 时可用） -->
       <template v-else-if="type === 'coord'">
         <label class="cell-mini">X
           <input
@@ -79,9 +85,15 @@
             @input.stop="onCoord(1, $event)"
           />
         </label>
+        <button
+          v-if="tools" type="button" class="cell-tool live"
+          :class="{ active: picking }"
+          :title="`在投屏画面上点击选点，自动填入 ${label} 坐标`"
+          @click.stop="onPickCoord"
+        >{{ picking ? '点击画面选取…' : '选坐标' }}</button>
       </template>
 
-      <!-- color：色板 + hex 输入 + 取色占位 -->
+      <!-- color：色板 + hex 输入 + 投屏选色（带放大镜） -->
       <template v-else-if="type === 'color'">
         <input
           class="cell-color" type="color"
@@ -93,10 +105,15 @@
           placeholder="6 位十六进制" :aria-label="`${label}hex`"
           @input.stop="onText($event, (v) => emitLit(v.toLowerCase()))"
         />
-        <button type="button" class="cell-tool" disabled title="从投屏取色（页面接入后可用）">取色</button>
+        <button
+          v-if="tools" type="button" class="cell-tool live"
+          :class="{ active: picking }"
+          title="在投屏画面上点击取色（带放大镜），自动填入颜色"
+          @click.stop="onPickColor"
+        >{{ picking ? '点击画面取色…' : '屏幕选色' }}</button>
       </template>
 
-      <!-- time：数值 + 单位 -->
+      <!-- time：数值 + 单位（默认 ms） -->
       <template v-else-if="type === 'time'">
         <input
           class="cell-input num" type="number" min="0" step="any"
@@ -115,15 +132,15 @@
         </select>
       </template>
 
-      <!-- bool：开关 -->
+      <!-- bool：下拉 真/假 -->
       <template v-else-if="type === 'bool'">
-        <label class="cell-switch">
-          <input
-            type="checkbox" :checked="cell.lit === true" :aria-label="label"
-            @change.stop="emitLit(($event.target as HTMLInputElement).checked)"
-          />
-          <span>{{ cell.lit === true ? '真' : '假' }}</span>
-        </label>
+        <select
+          class="cell-select" :value="cell.lit === true ? 'true' : 'false'" :aria-label="label"
+          @change.stop="emitLit(($event.target as HTMLSelectElement).value === 'true')"
+        >
+          <option value="true">真</option>
+          <option value="false">假</option>
+        </select>
       </template>
 
       <!-- text：单行/多行 -->
@@ -142,7 +159,7 @@
         />
       </template>
     </template>
-    <span v-if="error" class="cell-err-msg">{{ error }}</span>
+    <span v-if="error || selfError" class="cell-err-msg">{{ error || selfError }}</span>
   </div>
 </template>
 
@@ -156,7 +173,7 @@
 import { computed, inject, ref } from 'vue'
 import type { PropType } from 'vue'
 import { isRefCell, type Cell, type ParamDecl, type ParamType } from '../model'
-import { KEY_ENUM } from '../schema'
+import { checkCellLiteral, KEY_ENUM } from '../schema'
 
 const props = defineProps({
   cell: { type: Object as PropType<Cell>, required: true },
@@ -178,6 +195,39 @@ const emit = defineEmits(['change'])
 
 const TIME_UNITS = ['ms', 's', 'm', 'min', 'h', 'd'] as const
 
+/**
+ * 投屏取值工具（Console 编辑态 provide('seCellTools')）：选点/选色/框选生成模板。
+ * 未注入（独立脚本页无投屏、单测）时按钮不渲染。
+ */
+interface CellTools {
+  pickCoord(): Promise<{ x: number; y: number } | null>
+  pickColor(): Promise<{ hex: string; x: number; y: number } | null>
+  captureTemplate(): Promise<string | null>
+}
+const tools = inject<CellTools | null>('seCellTools', null)
+const picking = ref(false)
+
+async function onPickCoord(): Promise<void> {
+  if (!tools || picking.value) return
+  picking.value = true
+  try {
+    const hit = await tools.pickCoord()
+    if (hit) emitLit([hit.x, hit.y])
+  } finally {
+    picking.value = false
+  }
+}
+async function onPickColor(): Promise<void> {
+  if (!tools || picking.value) return
+  picking.value = true
+  try {
+    const hit = await tools.pickColor()
+    if (hit?.hex) emitLit(hit.hex)
+  } finally {
+    picking.value = false
+  }
+}
+
 const TYPE_LABELS: Record<ParamType, string> = {
   tmpl: '模板', coord: '坐标', color: '颜色', time: '时间', key: '按键', text: '文本', bool: '布尔',
 }
@@ -185,6 +235,13 @@ const typeLabel = computed(() => TYPE_LABELS[props.type])
 
 const isRef = computed(() => props.allowRef && isRefCell(props.cell))
 const sameTypeParams = computed(() => props.params.filter((p) => p.type === props.type))
+
+/** 即时自校验：字面量按类型规则（coord 0~1 / time 带单位>0 / color hex / key 枚举 /
+ *  tmpl 非空…）当场校验，不等保存或父级诊断；参数引用态由父级校验覆盖 */
+const selfError = computed(() => {
+  if (isRef.value) return ''
+  return checkCellLiteral(props.type, props.cell.lit)?.message ?? ''
+})
 
 // ---- tmpl 自定义下拉（替代原生 datalist）：悬停行内预览缩略图，缩略图 URL 由
 // 页面外壳 provide('tplPreviewUrl') 注入（短名 → 当前分区图片 URL）。 ----
@@ -211,7 +268,8 @@ const coordLit = computed<[number, number]>(() => {
 })
 const timeParts = computed<[string, string]>(() => {
   const m = /^([0-9]+(?:\.[0-9]+)?)(ms|s|m|min|h|d)$/.exec(litString.value.trim())
-  return m ? [m[1], m[2]] : ['1', 's']
+  // 解析失败/空值回退 1ms（默认单位 ms）
+  return m ? [m[1], m[2]] : ['1', 'ms']
 })
 const hexLit = computed(() => (/^[0-9a-fA-F]{6}$/.test(litString.value) ? litString.value : '888888'))
 
@@ -220,7 +278,7 @@ function defaultLiteral(type: ParamType): unknown {
     case 'coord': return [0.5, 0.5]
     case 'bool': return true
     case 'color': return 'ff8800'
-    case 'time': return '1s'
+    case 'time': return '500ms'
     case 'key': return 'BACK'
     case 'tmpl': return ''
     case 'text': return ''
@@ -303,7 +361,10 @@ function onTimeUnit(e: Event): void {
 .cell-select.unit { width: 64px; }
 .cell-color { width: 32px; height: 24px; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-2); }
 .cell-tool { font-size: 11px; padding: 2px 8px; border-radius: var(--radius-sm); border: 1px dashed var(--border); background: transparent; color: var(--text-2); cursor: not-allowed; }
-.cell-switch { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-1); cursor: pointer; }
+.cell-tool.live { cursor: pointer; border-style: solid; }
+.cell-tool.live:hover:not(.active) { color: var(--accent); border-color: var(--accent); }
+/* 取点/取色进行中的激活态：按钮保持"被按下"样式，填入数据后自动恢复 */
+.cell-tool.live.active { background: var(--accent); color: #06251c; border-color: var(--accent); font-weight: 600; }
 .cell-mini { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--text-2); }
 .cell-hint { font-size: 11px; color: var(--text-2); }
 .cell-err-msg { font-size: 11px; color: var(--danger); }
