@@ -113,6 +113,11 @@ pub struct Config {
     /// 引擎日志等级 debug|info|warn|error（可被脚本内 config: 段覆盖）
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// 判断类步骤（find/match/color）命中后、执行后续分支前的固定间隔毫秒：
+    /// 给游戏 UI 留出响应时间（弹窗动画/转场落地后再跑点击序列）。0 = 关闭。
+    /// 仅 config.toml 全局生效，脚本内 config: 三键不覆盖
+    #[serde(default = "default_judge_delay_ms")]
+    pub judge_delay_ms: u64,
     /// 视频流软解码（供模板匹配取帧）
     pub decode_frames: bool,
     /// scrcpy 最大分辨率（0 = 原始）
@@ -190,6 +195,10 @@ fn default_log_level() -> String {
     "info".into()
 }
 
+fn default_judge_delay_ms() -> u64 {
+    200
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -201,6 +210,7 @@ impl Default for Config {
             interval: default_interval(),
             threshold: default_threshold(),
             log_level: default_log_level(),
+            judge_delay_ms: default_judge_delay_ms(),
             decode_frames: true,
             max_size: 0,
             bitrate_mbps: 20,
@@ -323,6 +333,7 @@ impl Config {
     pub fn non_sensitive_summary(&self) -> String {
         format!(
             "port={} data_dir={} interval=\"{}\" threshold={:.2} log_level={} \
+             judge_delay_ms={}ms \
              decode_frames={} max_size={} bitrate_mbps={} fps={} idle_power_secs={}s \
              log_retain_days={}d compute_max_concurrency={} \
              rtc_external_ip={} rtc_udp_port={} rtc_external_port={} \
@@ -333,6 +344,7 @@ impl Config {
             self.interval,
             self.threshold,
             self.log_level,
+            self.judge_delay_ms,
             self.decode_frames,
             self.max_size,
             self.bitrate_mbps,
@@ -465,6 +477,14 @@ impl Config {
             errs.push(format!(
                 "log_level = \"{}\" 非法：只接受 debug / info / warn / error",
                 self.log_level
+            ));
+        }
+
+        // 判断命中后延迟：0 = 关闭放行；显式给值时设 sanity 上限防误填把脚本拖成分钟级步进
+        if self.judge_delay_ms > 60_000 {
+            errs.push(format!(
+                "judge_delay_ms = {} 超出合理区间 [0, 60000]（0 = 关闭判断命中后延迟）",
+                self.judge_delay_ms
             ));
         }
 

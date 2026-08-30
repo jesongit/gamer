@@ -30,6 +30,9 @@ pub struct EngineSettings {
     pub threshold: f32,
     /// 运行日志等级 debug / info / warn / error
     pub log_level: String,
+    /// 判断类步骤（find/match/color）命中后、执行后续分支前的固定间隔毫秒
+    /// （0 = 关闭；仅 config.toml 全局生效，脚本 config: 不覆盖）
+    pub judge_delay_ms: u64,
 }
 
 impl EngineSettings {
@@ -38,6 +41,7 @@ impl EngineSettings {
             interval: cfg.interval.clone(),
             threshold: cfg.threshold,
             log_level: cfg.log_level.clone(),
+            judge_delay_ms: cfg.judge_delay_ms,
         }
     }
 }

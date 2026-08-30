@@ -167,6 +167,10 @@ config:
 整体省略 = 使用 `config.toml` 同名键（`interval` / `threshold` / `log_level`）。
 不允许未知 config 键；只能是映射（v1 的「映射列表按序覆盖」写法已删除）。
 
+另有仅全局生效的 `config.toml` 键 `judge_delay_ms`（默认 200，0=关闭，脚本 config:
+不覆盖）：find / match / color 的**命中路径**在执行后续分支步骤前固定等待该时长
+（给游戏 UI 留响应时间）；分支为空（无后续步骤）不等待，else / 超时路径不延迟。
+
 ## 5. 步骤（17 种）
 
 一个步骤只允许一个动作键（多动作键 → `step.multi_action`）；动作键之外的同级键是

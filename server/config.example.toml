@@ -31,6 +31,7 @@ password = "admin123"
 interval = "500ms"     # 轮询类间隔（find 每轮重试 / verify 复查）；带单位 ms/s/m/min/h/d，裸数字非法
 threshold = 0.85       # 模板匹配阈值，(0, 1]
 log_level = "info"     # debug / info / warn / error，低于等级的引擎日志丢弃
+judge_delay_ms = 200   # 判断类步骤（find/match/color）命中后、执行后续分支前的固定等待；0=关闭；脚本 config: 不覆盖
 decode_frames = true
 max_size = 0           # scrcpy 最大分辨率（0=原始；非 0 时须为 8 的倍数且 [16,4096]）
 bitrate_mbps = 12      # 码率上限区间 [1,50]：过高会挤占 WebRTC 发送帧预算导致投屏积压冻结

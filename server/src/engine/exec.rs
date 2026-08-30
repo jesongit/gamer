@@ -8,6 +8,8 @@
 //! - `match`：每轮只截一帧按序匹配全部候选（不点击）；首个命中执行其子流程；
 //!   无 timeout 单轮、有 timeout 按 config.interval 轮询；绑定后候选重复先报错。
 //! - `color`：单点按序判色（容差 30/通道），命中即执行该色值分支并结束。
+//! - 判断命中后延迟：find/match/color 命中路径在执行后续分支前统一插入
+//!   judge_delay（config.toml judge_delay_ms，默认 200ms，0=关）；else/超时不延迟。
 //! - `if`：仅布尔（无隐式转换）；`loop`：times 0/缺省=无限（10 万步 guard 兜底）。
 //! - `call`：同分区 yaml/ 脚本，压入目标 config 与参数作用域（返回恢复）；
 //!   `func`：`文件短路径/函数名`，继承调用点 config，返回布尔走 then/else。
@@ -933,7 +935,8 @@ impl Runner {
     /// find：超时时间内轮询等主模板出现并点击。每轮：主模板（新截图）命中 →
     /// 点击中心 → verify（true = 等 interval 重匹配，仍命中补一击，共两击）→
     /// then 结束；未命中 → block 依序匹配（命中即点击中心并结束本轮）→
-    /// 全未命中等 interval 重开一轮；超时 → else。
+    /// 全未命中等 interval 重开一轮；超时 → else。命中路径在 then 前插入
+    /// judge_delay（config.toml judge_delay_ms，默认 200ms，0=关；then 空不等待）。
     #[allow(clippy::too_many_arguments)]
     async fn exec_find(
         &self,
@@ -1071,6 +1074,10 @@ impl Runner {
                         );
                     }
                 }
+                if !then.is_empty() {
+                    // 命中路径：点击/verify 后、then 前固定间隔（config.toml judge_delay_ms）
+                    self.judge_delay(ctx).await;
+                }
                 self.run_steps(ctx, then).await?;
                 break;
             }
@@ -1116,7 +1123,8 @@ impl Runner {
 
     /// match：每轮只截一帧，候选按书写顺序匹配（不点击）；首个命中执行其
     /// 分支并结束本步；未配 timeout 只执行一轮（全未命中立即进 else），
-    /// 配了按 config.interval 轮询到超时才进 else。
+    /// 配了按 config.interval 轮询到超时才进 else。命中分支前插入 judge_delay
+    /// （config.toml judge_delay_ms，默认 200ms，0=关；分支空不等待，else 不延迟）。
     /// 参数绑定后候选实际重复 → 截图前报错（$ref 值静态校验无法覆盖）。
     async fn exec_match(
         &self,
@@ -1169,6 +1177,10 @@ impl Runner {
                         )
                         .await;
                         ctx.log("info", format!("match 命中 {name} @ ({}, {})", mm.x, mm.y));
+                        if !cand.steps.is_empty() {
+                            // 命中候选：先经 judge_delay 再执行其分支（空分支不白等）
+                            self.judge_delay(ctx).await;
+                        }
                         self.run_steps(ctx, &cand.steps).await?;
                         matched = true;
                         break;
@@ -1191,6 +1203,8 @@ impl Runner {
 
     /// color：单点坐标一次截图按序判色（容差 30/通道），命中即执行该色值
     /// 分支并结束本步；全未命中走 else。不轮询、不点击（重试套 loop）。
+    /// 命中分支前插入 judge_delay（config.toml judge_delay_ms，默认 200ms，
+    /// 0=关；分支空不等待，else 不延迟）。
     async fn exec_color(
         &self,
         ctx: &mut Ctx<'_>,
@@ -1266,6 +1280,10 @@ impl Runner {
                     },
                 )
                 .await;
+                if !branch.steps.is_empty() {
+                    // 命中色值分支：先经 judge_delay 再执行（空分支不白等；else 不延迟）
+                    self.judge_delay(ctx).await;
+                }
                 self.run_steps(ctx, &branch.steps).await?;
                 return Ok(());
             }
@@ -1419,6 +1437,17 @@ impl Runner {
             let slice = left.min(Duration::from_millis(WAIT_STOP_SLICE_MS));
             tokio::time::sleep(slice).await;
             left -= slice;
+        }
+    }
+
+    /// 判断类步骤（find/match/color）命中后、执行后续分支前的固定间隔
+    /// （config.toml judge_delay_ms，默认 200，0 = 关闭；脚本 config: 三键不覆盖）：
+    /// 给游戏 UI 留响应时间。分片睡眠可停；分支为空（无后续步骤）由调用方跳过
+    async fn judge_delay(&self, ctx: &mut Ctx<'_>) {
+        let ms = self.settings.judge_delay_ms;
+        if ms > 0 {
+            ctx.log("debug", format!("判断命中，延迟 {ms}ms 再执行后续步骤"));
+            self.sleep_interruptible(ctx, Duration::from_millis(ms)).await;
         }
     }
 
@@ -1823,6 +1852,16 @@ mod tests {
     }
 
     fn rig(hits: HashMap<&'static str, [u32; 4]>, png: Vec<u8>, log_level: &str) -> Arc<Rig> {
+        rig_with(hits, png, log_level, 0)
+    }
+
+    /// rig 变体：显式指定 judge_delay_ms（判断命中后延迟用例）
+    fn rig_with(
+        hits: HashMap<&'static str, [u32; 4]>,
+        png: Vec<u8>,
+        log_level: &str,
+        judge_delay_ms: u64,
+    ) -> Arc<Rig> {
         let dir = std::env::temp_dir().join(format!(
             "gamer-enginetest-{}-{}",
             std::process::id(),
@@ -1843,6 +1882,7 @@ mod tests {
                 interval: "20ms".into(),
                 threshold: 0.85,
                 log_level: log_level.to_string(),
+                judge_delay_ms,
             },
             shots.clone(),
             ctl.clone(),
@@ -1931,6 +1971,67 @@ mod tests {
         assert!(logs_contain(&logs, "main.png 已找到"));
         assert!(logs_contain(&logs, "进入主界面"));
         assert_eq!(r.shots.count(), 1);
+    }
+
+    /// judge_delay（config.toml judge_delay_ms）：find 命中后、then 执行前插入
+    /// 固定延迟（总耗时 ≥ 延迟值）；then 为空不白等。
+    #[tokio::test]
+    async fn judge_delay_applies_between_find_hit_and_then() {
+        let r = rig_with(
+            HashMap::from([("main.png", [400u32, 200, 200, 100])]),
+            solid_png(100, 100, [0, 0, 0]),
+            "info",
+            200,
+        );
+        r.tmpl("main.png");
+        r.save_script(
+            "f.yaml",
+            "steps:\n  - find: main.png\n    then:\n      - log: 进入主界面\n",
+        );
+        let start = Instant::now();
+        let logs = r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(200), "命中后应插入 judge_delay");
+        assert!(logs_contain(&logs, "进入主界面"));
+    }
+
+    /// judge_delay：then 为空（无后续步骤）不等待，运行立即结束。
+    #[tokio::test]
+    async fn judge_delay_skipped_when_find_then_empty() {
+        let r = rig_with(
+            HashMap::from([("main.png", [400u32, 200, 200, 100])]),
+            solid_png(100, 100, [0, 0, 0]),
+            "info",
+            200,
+        );
+        r.tmpl("main.png");
+        r.save_script("f.yaml", "steps:\n  - find: main.png\n");
+        let start = Instant::now();
+        r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert!(
+            start.elapsed() < Duration::from_millis(150),
+            "then 为空不应执行 judge_delay，实际 {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// judge_delay：match 命中候选后、分支执行前插入固定延迟；else 路径不延迟。
+    #[tokio::test]
+    async fn judge_delay_applies_between_match_hit_and_branch() {
+        let r = rig_with(
+            HashMap::from([("a.png", [0u32, 0, 100, 50])]),
+            solid_png(100, 100, [0, 0, 0]),
+            "info",
+            200,
+        );
+        r.tmpl("a.png");
+        r.save_script(
+            "f.yaml",
+            "steps:\n  - match:\n    - a.png:\n      - log: 分支执行\n",
+        );
+        let start = Instant::now();
+        let logs = r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(200), "命中分支前应插入 judge_delay");
+        assert!(logs_contain(&logs, "分支执行"));
     }
 
     /// block 有序：主模板未命中后按书写序匹配 block（matcher 调用序断言）；
