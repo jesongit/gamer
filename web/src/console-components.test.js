@@ -117,4 +117,31 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).toContain('cleanup(true)')
     expect(consoleSource).toContain('useWebRtcLifecycle')
   })
+
+  it('波次 2-F：运行与模板资源调用点只使用当前契约', () => {
+    const layout = read('./layouts/MainLayout.vue')
+    const editor = read('./views/ScriptEditor.vue')
+    const scheduler = read('./views/TaskScheduler.vue')
+    const capture = read('./components/console/TemplateCapture.vue')
+    const sources = [layout, consoleSource, editor, scheduler, capture]
+
+    for (const source of sources) {
+      expect(source).not.toContain('api.stopScript')
+      expect(source).not.toContain('api.scriptStatus')
+      expect(source).not.toContain('api.uploadTemplate')
+      expect(source).not.toContain('runScriptId')
+      expect(source).not.toContain('normalizeStartReply')
+      expect(source).not.toContain('normalizeActiveRunResponse')
+      expect(source).not.toContain('isMissingEndpointError')
+      expect(source).not.toContain('no_snapshot')
+    }
+    expect(layout).toContain('api.cancelRun(rid)')
+    expect(consoleSource).toContain('api.getRun(rid)')
+    expect(editor).toContain('api.getRun(rid)')
+    expect(scheduler).toContain('const rec = r.value.active ? r.value.run : null')
+    expect(editor).toContain('api.createTemplate(')
+    expect(editor).toContain('api.replaceTemplateImage(')
+    expect(consoleSource).toContain('api.replaceTemplateImage(')
+    expect(capture).toContain('ctx.replaceTemplateImage(target, file)')
+  })
 })

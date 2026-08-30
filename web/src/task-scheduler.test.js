@@ -100,6 +100,22 @@ describe('TaskScheduler 列表：param_stale 标注与立即运行禁用', () =>
   })
 })
 
+describe('TaskScheduler 立即运行契约', () => {
+  it('立即运行只消费当前 run_id 响应，并按任务 id 发起请求', async () => {
+    const routes = baseRoutes()
+    routes.push({ method: 'POST', url: '/api/tasks/t2/run', body: { run_id: 'task-run-1', state: 'queued' } })
+    const { wrapper, calls } = await mountView(routes)
+    const row = wrapper.findAll('tbody tr')[1]
+    await row.findAll('button').find(b => b.text().includes('▶ 立即')).trigger('click')
+    await flushPromises()
+
+    expect(calls.find(c => c.method === 'POST' && c.url === '/api/tasks/t2/run')).toMatchObject({
+      method: 'POST', url: '/api/tasks/t2/run', body: null,
+    })
+    expect(row.text()).toContain('挂机')
+  })
+})
+
 describe('编辑任务：快照带入 + 过期横幅/对比表 + 保存带稀疏 args', () => {
   async function openEdit(calls409 = false) {
     const routes = baseRoutes()

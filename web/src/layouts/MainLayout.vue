@@ -63,10 +63,9 @@
 
 <script setup>
 import { computed, ref, provide, onMounted } from 'vue'
-import { store, devicesData, tasksData, beginCancel, findRun } from '../store'
+import { store, devicesData, tasksData, beginCancel, useToast } from '../store'
 import { session, doLogout } from '../auth'
 import { api } from '../api'
-import { isMissingEndpointError } from '../runs'
 const navs = [
   { path: '/console', name: '投屏控制', icon: '🖥️' },
   { path: '/scripts', name: '脚本管理', icon: '📜' },
@@ -74,6 +73,7 @@ const navs = [
   { path: '/logs', name: '运行日志', icon: '📋' },
   { path: '/settings', name: '设置', icon: '⚙️' }
 ]
+const toast = useToast()
 
 // 侧边栏收起状态（图标模式）：默认收起；localStorage 持久化用户手动展开/收起的选择
 // （无记录或记录为 '1' = 收起；'0' = 用户显式展开过），provide 给子页面（投屏页据此调整布局）
@@ -103,26 +103,13 @@ async function onLogout() {
   await doLogout()
 }
 
-/** 顶栏芯片上的停止按钮：任何页面都能手动停止当前脚本。
- *  run_id 主链路：POST cancel 后记录迁 stopping（终态以查询为准，芯片显示"正在停止…"，
- *  回控制台时由刷新恢复/轮询确认终态复位）；cancel 端点缺失（旧后端）回退旧停止接口。 */
+/** 顶栏芯片上的停止按钮：任何页面都能按当前 run_id 取消运行。
+ * POST cancel 后记录迁 stopping，终态仍以 GET /api/runs/:run_id 查询为准。 */
 function stopRunning() {
-  if (store.runId) {
-    const rid = store.runId
-    beginCancel(rid)
-    api.cancelRun(rid).catch(e => {
-      if (isMissingEndpointError(e)) {
-        const sid = findRun(rid)?.script_id || store.runScriptId
-        if (sid) api.stopScript(sid).catch(() => {})
-        else { store.running = false; store.runId = null }
-      }
-    })
-    return
-  }
-  if (!store.runScriptId) { store.running = false; return }
-  api.stopScript(store.runScriptId).catch(() => {})
-  store.running = false
-  store.runScriptId = null
+  const rid = store.runId
+  if (!rid) return
+  beginCancel(rid)
+  api.cancelRun(rid).catch(e => toast('停止失败：' + e.message, 'error'))
 }
 </script>
 

@@ -7,6 +7,7 @@ import { useRecording } from './composables/useRecording'
 import { useScriptEditorShell } from './composables/useScriptEditorShell'
 import { serialize } from './script-editor/codec'
 import { api } from './api'
+import { createRecordingApi } from './components/console/current-api-adapters'
 
 /**
  * 阶段 6 后半接线回归（plan §11 / §16.3）：
@@ -33,10 +34,10 @@ async function makeHarness({ templates = [], cropImpl, start = true, scriptRunni
   const notifications = []
   const controlMsgs = []
   const freezeCalls = []
-  const api = {
-    uploadTemplateRegion: vi.fn(async (name, b64, pkg, region) => ({ ok: true, name })),
+  const api = createRecordingApi({
+    createTemplate: vi.fn(async (name, b64, pkg, region) => ({ ok: true, name })),
     listTemplates: vi.fn(async () => [...templates]),
-  }
+  })
   const shell = useScriptEditorShell({
     api: { getScript: async () => ({ id: 'com.demo/main.yaml', name: 'main.yaml', package: 'com.demo', version: 'v1', content: SCRIPT_YAML }) },
   })
@@ -233,8 +234,8 @@ describe('上传定稿 / 失败重试 / 坐标降级 / 丢弃', () => {
     const ok = h.rec.confirmCrop(view, { name: 'login_btn.png', rect: view.draft.aRect, adjusted: false })
     expect(ok).toBe(true)
     await flush()
-    expect(h.api.uploadTemplateRegion).toHaveBeenCalledTimes(1)
-    const [name, b64, pkg, region] = h.api.uploadTemplateRegion.mock.calls[0]
+    expect(h.api.createTemplate).toHaveBeenCalledTimes(1)
+    const [name, b64, pkg, region] = h.api.createTemplate.mock.calls[0]
     expect(name).toBe('login_btn.png')
     expect(b64).toBe('Zml4ZWQ=')
     expect(pkg).toBe('com.demo')
@@ -287,7 +288,7 @@ describe('上传定稿 / 失败重试 / 坐标降级 / 丢弃', () => {
     const view = h.rec.panelDraft
     expect(h.rec.confirmCrop(view, { name: 'bad name!.png', rect: view.draft.aRect, adjusted: false })).toBe(false)
     expect(h.rec.confirmCrop(view, { name: 'dup.png', rect: view.draft.aRect, adjusted: false })).toBe(false)
-    expect(h.api.uploadTemplateRegion).not.toHaveBeenCalled()
+    expect(h.api.createTemplate).not.toHaveBeenCalled()
     expect(h.notifications.some(n => n.type === 'warn' && n.msg.includes('已存在'))).toBe(true)
     // 改名后通过；短名与带 # 后缀文件都算冲突（shortNameTaken）
     expect(h.rec.shortNameTaken('dup.png')).toBe(true)
@@ -315,7 +316,7 @@ describe('上传定稿 / 失败重试 / 坐标降级 / 丢弃', () => {
     expect(h.rec.retry(view)).toBe(true)
     await flush()
     expect(h.rec.timeline[0].state).toBe('ready')
-    expect(h.api.uploadTemplateRegion).toHaveBeenCalledTimes(1)
+    expect(h.api.createTemplate).toHaveBeenCalledTimes(1)
 
     // 降级：新草稿 → tap（占位整体替换，坐标取按下点）
     h.rec.onPointerDown(pt(0.1, 0.9))
@@ -351,7 +352,7 @@ describe('停止排空与保存解锁（plan §11.3）', () => {
     expect(h.rec.phase).toBe('idle')
     expect(h.rec.busy).toBe(false)
     // 自动定稿用了控制器建议的默认短名
-    const uploaded = h.api.uploadTemplateRegion.mock.calls[0]
+    const uploaded = h.api.createTemplate.mock.calls[0]
     expect(uploaded[0]).toMatch(/^record_click_\d{8}_001\.png$/)
     const steps = h.shell.model.steps
     expect(steps[steps.length - 1].template).toEqual({ lit: uploaded[0] })

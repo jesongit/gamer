@@ -29,8 +29,9 @@
           <button v-if="tab === 'script'" class="btn btn-sm" @click="newScript">＋ 新建脚本</button>
           <button v-if="tab === 'func'" class="btn btn-sm" @click="newFunctionFile">＋ 新建函数库</button>
           <template v-if="tab === 'tmpl'">
-            <button class="btn btn-sm" @click="tplUploadEl && tplUploadEl.click()">⬆️ 上传模板</button>
+            <button class="btn btn-sm" @click="tplUploadEl && tplUploadEl.click()">⬆️ 新建模板</button>
             <input ref="tplUploadEl" type="file" accept="image/png,image/jpeg" hidden @change="onTplUpload" />
+            <input ref="tplReplaceEl" type="file" accept="image/png,image/jpeg" hidden @change="onTplReplaceUpload" />
             <button class="btn btn-sm" @click="goConsole">投屏框选截取 →</button>
           </template>
         </div>
@@ -58,6 +59,7 @@
                 <div class="ri-name">{{ shortName(t.name) }}</div>
                 <div class="ri-meta mono">{{ fmtSize(t.size) }}</div>
               </div>
+              <button class="ri-action" @click.stop="startTplReplace(t)" title="替换图片">替换</button>
               <button class="ri-del" @click.stop="removeTpl(t)" title="删除">🗑</button>
             </div>
             <div v-if="!templates.length" class="res-empty">该分区暂无模板（可在投屏控制台框选截取，或直接上传）</div>
@@ -218,12 +220,12 @@ import {
   applyRunRecord, beginCancel, findRun, resetStoreRunState, pushRunConflict,
 } from '../store'
 import { api } from '../api'
+import { createEditorShellApi } from '../components/console/current-api-adapters'
 import { serialize, parseScript, parseFunctionLibrary } from '../script-editor/codec'
 import { SE_TARGET_OPTIONS } from '../script-editor/targets'
 import { startIndexOf } from '../script-editor/selection'
 import {
-  normalizeActiveRunResponse, normalizeStartReply,
-  isMissingEndpointError, isDeviceBusyConflict, isTerminalRunState, terminalLabel,
+  isDeviceBusyConflict, isTerminalRunState, terminalLabel,
   describeConflict,
 } from '../runs'
 import RunConflictModal from '../components/RunConflictModal.vue'
@@ -241,7 +243,7 @@ const devices = devicesData
 
 // ---------- 外壳与资源 ----------
 const shell = useScriptEditorShell({
-  api,
+  api: createEditorShellApi(api),
   getContext: () => ({
     resolveTemplate: (n) => templates.value.some(t => t.name === n || shortName(t.name) === n),
   }),
@@ -532,6 +534,8 @@ function goConsole() {
 // ---------- 模板管理（并入本页：上传 / 预览 / 重命名 / 删除；框选与匹配测试在投屏控制台） ----------
 
 const tplUploadEl = ref(null)
+const tplReplaceEl = ref(null)
+const tplReplaceTarget = ref(null)
 const tplModal = ref(null)
 const tplRename = ref('')
 const tplDim = ref(null)
@@ -571,11 +575,35 @@ async function onTplUpload(e) {
   const name = file.name.toLowerCase().endsWith('.png') ? file.name : file.name.replace(/\.[^.]+$/, '') + '.png'
   try {
     const b64 = await fileToBase64(file)
-    await api.uploadTemplate(name, b64, pkg.value)
+    await api.createTemplate(name, b64, pkg.value)
     await refreshTemplates()
-    toast(`模板已上传到 ${pkg.value}`, 'success')
+    toast(`模板已新建到 ${pkg.value}`, 'success')
   } catch (err) {
-    toast('上传失败：' + err.message, 'error')
+    toast('新建失败：' + err.message, 'error')
+  }
+}
+
+function startTplReplace(t) {
+  tplReplaceTarget.value = t
+  tplReplaceEl.value?.click()
+}
+
+async function onTplReplaceUpload(e) {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  const target = tplReplaceTarget.value
+  tplReplaceTarget.value = null
+  if (!file || !target) return
+  try {
+    const b64 = await fileToBase64(file)
+    await api.replaceTemplateImage(target.name, b64, target.pkg || pkg.value)
+    await refreshTemplates()
+    if (tplModal.value?.name === target.name && tplModal.value?.pkg === target.pkg) {
+      tplModal.value = templates.value.find(t => t.name === target.name && t.pkg === target.pkg) || tplModal.value
+    }
+    toast(`模板 ${target.name} 图片已替换`, 'success')
+  } catch (err) {
+    toast('替换失败：' + err.message, 'error')
   }
 }
 
@@ -679,21 +707,7 @@ const canRun = computed(() => {
 const runFlow = useRunArgsFlow({
   exec: async ({ id, name, startIndex, args }) => {
     const rep = await api.runScript(id, store.deviceId, startIndex, args)
-    const started = normalizeStartReply(rep)
-    if (started) {
-      applyRunRecord({
-        run_id: started.run_id,
-        state: started.state,
-        device_id: store.deviceId,
-        script_id: id,
-        source: 'manual',
-        display: name,
-      })
-    } else {
-      store.running = true
-      store.runScript = name
-      store.runScriptId = id
-    }
+    applyRunRecord({ ...rep, device_id: store.deviceId, script_id: id, source: 'manual', display: name })
     return rep
   },
   notify: ({ summary }) => {
@@ -728,22 +742,8 @@ const testFlow = useRunArgsFlow({
       start_index: startIndex || 0,
       args,
     })
-    const started = normalizeStartReply(rep)
     const display = `${name || id} · ${fnName}()`
-    if (started) {
-      applyRunRecord({
-        run_id: started.run_id,
-        state: started.state,
-        device_id: store.deviceId,
-        script_id: id,
-        source: 'manual',
-        display,
-      })
-    } else {
-      store.running = true
-      store.runScript = display
-      store.runScriptId = id
-    }
+    applyRunRecord({ ...rep, device_id: store.deviceId, script_id: id, source: 'manual', display })
     return rep
   },
   notify: ({ summary }) => {
@@ -847,29 +847,16 @@ async function run() {
 }
 
 function stop() {
-  if (store.runId) {
-    const rid = store.runId
-    beginCancel(rid)
-    api.cancelRun(rid).catch(e => {
-      if (isMissingEndpointError(e)) {
-        const sid = findRun(rid)?.script_id || store.runScriptId
-        if (sid) api.stopScript(sid).catch(() => {})
-      }
-    })
-    // 保留 stopping 状态和轮询，直到服务端返回终态；避免停止请求尚未生效时
-    // 立即恢复运行按钮造成同设备并行启动。
-    toast('已发送停止指令，等待脚本退出…', 'warn')
-    return
-  }
-  // 兼容旧后端会话：没有 run_id 时才使用 script_id 停止并立即恢复旧 UI。
-  if (!store.runScriptId) return
-  api.stopScript(store.runScriptId).catch(() => {})
-  resetStoreRunState()
-  stopRunStatusPoll()
-  toast('已发送停止指令，脚本将在当前步骤结束后停止', 'warn')
+  const rid = store.runId
+  if (!rid) return
+  beginCancel(rid)
+  api.cancelRun(rid).catch(e => toast('停止失败：' + e.message, 'error'))
+  // 保留 stopping 状态和轮询，直到服务端返回终态；避免停止请求尚未生效时
+  // 立即恢复运行按钮造成同设备并行启动。
+  toast('已发送停止指令，等待脚本退出…', 'warn')
 }
 
-// 运行状态轮询：以当前 runId 单次查询，按 record.state 驱动状态机；旧后端降级 script status
+// 运行状态轮询：以当前 run_id 单次查询，按 record.state 驱动状态机。
 let runStatusTimer = null
 
 function startRunStatusPoll() {
@@ -884,42 +871,21 @@ function stopRunStatusPoll() {
 
 async function checkRunStatus() {
   if (!store.running) { stopRunStatusPoll(); return }
-  if (store.runId) {
-    const rid = store.runId
-    let rec = null
-    try {
-      rec = await api.getRun(rid)
-    } catch (e) {
-      if (!isMissingEndpointError(e)) return
-      const sid = findRun(rid)?.script_id || store.runScriptId
-      if (!sid) { stopRunStatusPoll(); resetStoreRunState(); return }
-      try {
-        const st = await api.scriptStatus(sid)
-        rec = { run_id: rid, device_id: store.deviceId, script_id: sid, state: st.running ? 'running' : 'cancelled', degraded: true }
-      } catch (e2) { return }
-    }
-    if (!rec || !rec.run_id) return
-    const merged = applyRunRecord(rec)
-    if (merged && isTerminalRunState(merged.state)) {
-      stopRunStatusPoll()
-      const detail = merged.degraded ? '' : `：${terminalLabel(merged.state)}${merged.error ? `（${merged.error}）` : ''}`
-      toast(`脚本已结束${detail}`, merged.degraded || merged.state === 'success' ? 'info' : 'warn')
-    }
-    return
-  }
-  // 兼容旧后端或旧页面会话：此分支没有执行实例 ID，只能使用旧 script_id 接口。
-  if (!store.runScriptId) { stopRunStatusPoll(); return }
+  const rid = store.runId
+  if (!rid) { stopRunStatusPoll(); resetStoreRunState(); return }
+  let rec
   try {
-    const st = await api.scriptStatus(store.runScriptId)
-    if (!st.running) {
-      resetStoreRunState()
-      stopRunStatusPoll()
-      toast('脚本已结束', 'info')
-    }
-  } catch (e) {}
+    rec = await api.getRun(rid)
+  } catch (e) { return }
+  const merged = applyRunRecord(rec)
+  if (merged && isTerminalRunState(merged.state)) {
+    stopRunStatusPoll()
+    const detail = `：${terminalLabel(merged.state)}${merged.error ? `（${merged.error}）` : ''}`
+    toast(`脚本已结束${detail}`, merged.state === 'success' ? 'info' : 'warn')
+  }
 }
 
-/** 页面刷新后按设备恢复活动运行实例；旧后端响应保留 script_id 降级路径。 */
+/** 页面刷新后按设备恢复活动运行实例；当前响应固定为嵌套 run。 */
 async function restoreRunState() {
   if (!store.deviceId || store.running) return
   let rep
@@ -928,18 +894,13 @@ async function restoreRunState() {
   } catch (e) {
     return
   }
-  const rec = normalizeActiveRunResponse(rep)
-  if (!rec) return
+  if (!rep.active) return
+  const rec = rep.run
+  if (!rec?.run_id) return
 
   const script = scripts.value.find(s => s.id === rec.script_id)
   const display = rec.script_name || script?.name || rec.script_id
-  if (rec.run_id) {
-    applyRunRecord({ ...rec, device_id: store.deviceId, display })
-  } else {
-    store.running = true
-    store.runScript = display
-    store.runScriptId = rec.script_id
-  }
+  applyRunRecord({ ...rec, device_id: store.deviceId, display })
   if (script) selScriptId.value = script.id
   startRunStatusPoll()
   toast(`检测到 ${display} 正在运行，已恢复状态`, 'info')
@@ -970,7 +931,7 @@ onMounted(async () => {
   // 刷新后 store 是空内存态：按当前设备恢复服务端活动 run；SPA 切页时则复用已有 run。
   if (!store.running) await restoreRunState()
   // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）。
-  if (store.running && (store.runId || store.runScriptId)) startRunStatusPoll()
+  if (store.running && store.runId) startRunStatusPoll()
 })
 onUnmounted(() => {
   stopRunStatusPoll()

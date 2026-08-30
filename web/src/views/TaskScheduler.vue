@@ -141,7 +141,7 @@ import ParamsForm from '../script-editor/components/ParamsForm.vue'
 import { extractParams, fmtLiteral } from '../script-editor/params'
 import { buildTaskSavePayload, isParamSignatureConflict, staleCompareRows, staleReason } from '../task-args'
 import RunConflictModal from '../components/RunConflictModal.vue'
-import { sourceLabel, shortRunId, normalizeActiveRunResponse, isDeviceBusyConflict } from '../runs'
+import { sourceLabel, shortRunId, isDeviceBusyConflict } from '../runs'
 
 const toast = useToast()
 const tasks = tasksData
@@ -250,15 +250,13 @@ async function toggle(t, e) {
   }
 }
 
-/** 立即运行：新契约 202 {run_id} —— 触发即返回并立刻恢复按钮可用（不等任务完成），
- *  提示「已触发（run xxxxxxxx）」；409 设备占用入队冲突弹窗；
- *  旧后端响应无 run_id → 静默降级为旧文案「已触发 <名>」 */
+/** 立即运行：当前契约固定返回 202 {run_id}，触发即返回并恢复按钮可用。 */
 async function runNow(t) {
   if (triggeringId.value) return
   triggeringId.value = t.id
   try {
     const rep = await api.runTaskNow(t.id)
-    toast(rep && rep.run_id ? `已触发（run ${shortRunId(rep.run_id)}）` : `已触发 ${t.name}`, 'success')
+    toast(`已触发（run ${shortRunId(rep.run_id)}）`, 'success')
     // 稍后刷新列表与活跃标注（服务端开始执行后设备侧才登记）
     setTimeout(() => { loadTasks(); refreshActiveRuns() }, 3000)
   } catch (e) {
@@ -275,7 +273,7 @@ async function runNow(t) {
 }
 
 /** 拉取各任务设备的当前活动 run（有则标注「运行中 · 来源」）。
- *  端点缺失（旧后端仅兼容形状也能归一化）或网络错 → 静默留空，不影响列表 */
+ * 当前设备响应固定为 {active:false} 或 {active:true,run}；网络错误不影响列表。 */
 async function refreshActiveRuns() {
   const ids = [...new Set(tasks.value.map(t => t.device_id).filter(Boolean))]
   if (!ids.length) { activeRuns.value = {}; return }
@@ -283,8 +281,8 @@ async function refreshActiveRuns() {
   const map = {}
   reps.forEach((r, i) => {
     if (r.status !== 'fulfilled') return
-    const rec = normalizeActiveRunResponse(r.value)
-    if (rec && rec.run_id) map[ids[i]] = rec
+    const rec = r.value.active ? r.value.run : null
+    if (rec?.run_id) map[ids[i]] = rec
   })
   activeRuns.value = map
 }
@@ -360,7 +358,7 @@ onMounted(async () => {
 
 <style scoped>
 .task-name { font-weight: 600; }
-/* 设备当前活动 run 标注（normalizeActiveRunResponse 命中时展示；配色复用全局 tag.run） */
+/* 设备当前活动 run 标注（当前 active/run 响应命中时展示；配色复用全局 tag.run） */
 .run-now { margin-left: 6px; font-weight: 400; vertical-align: 1px; }
 .cron { color: var(--accent-2); font-size: 12px; }
 tr.disabled { opacity: .45; }

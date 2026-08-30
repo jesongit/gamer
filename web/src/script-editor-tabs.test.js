@@ -11,7 +11,7 @@
  * - 跨页签模型不外泄（回归）：脚本打开时切到函数库页签，中央画布不显示脚本、
  *   测试函数面板/保存入口不出现，切回原页签模型仍在（不丢未保存内容）；
  * - 函数编辑上下文：打开函数文件进 FunctionLibraryModel（编辑函数/测试函数下拉）、
- *   新建函数库保存走 saveFunction 并刷新列表、测试函数经 functions run 接口发起。
+ *   新建函数库保存走 createFunction 并刷新列表、测试函数经 functions run 接口发起。
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -32,12 +32,14 @@ vi.mock('./api', async (importOriginal) => ({
     listFunctions: vi.fn(async () => []),
     getScript: vi.fn(),
     getFunction: vi.fn(),
-    saveScript: vi.fn(),
-    saveFunction: vi.fn(),
+    createScript: vi.fn(),
+    updateScript: vi.fn(),
+    createFunction: vi.fn(),
     updateFunction: vi.fn(),
     deleteScript: vi.fn(),
     deleteFunction: vi.fn(),
-    uploadTemplate: vi.fn(),
+    createTemplate: vi.fn(),
+    replaceTemplateImage: vi.fn(),
     renameTemplate: vi.fn(),
     deleteTemplate: vi.fn(),
     runScript: vi.fn(),
@@ -79,7 +81,7 @@ beforeEach(() => {
   scriptsData.value = [{ ...SCRIPT }]
   devicesData.value = []
   store.deviceId = null
-  Object.assign(store, { running: false, runId: null, runScriptId: null })
+  Object.assign(store, { running: false, runId: null })
   localStorage.clear()
 
   api.listScripts.mockResolvedValue([{ ...SCRIPT }])
@@ -87,7 +89,7 @@ beforeEach(() => {
   api.listFunctions.mockImplementation(async () => funcFiles.map((f) => ({ ...f })))
   api.listTemplates.mockResolvedValue(TMPLS.map((t) => ({ ...t })))
   // upsert + 列表可见（与真实服务端同构，保存后 refresh 能看到新文件）
-  api.saveFunction.mockImplementation(async (p) => {
+  api.createFunction.mockImplementation(async (p) => {
     const entry = { id: `${p.pkg}/${p.name}.yaml`, pkg: p.pkg, file: p.name, content: p.content, version: 'v2', functions: ['func1'], updated_at: '2026-08-30T03:00:00' }
     funcFiles.push(entry)
     return { ...entry }
@@ -133,7 +135,7 @@ describe('ScriptEditor 三页签外壳', () => {
     const tItems = items(wrapper)
     expect(tItems.map((i) => i.find('.ri-name').text())).toEqual(['开始挑战.png', 'plain.png'])
     expect(tItems[0].attributes('title')).toBe('开始挑战#757_909_857_971.png')
-    expect(findBtn(wrapper, '上传模板')).toBeTruthy()
+    expect(findBtn(wrapper, '新建模板')).toBeTruthy()
     await tItems[0].trigger('click')
     await flushPromises()
     const modal = wrapper.find('.tpl-modal')
@@ -176,25 +178,43 @@ describe('ScriptEditor 三页签外壳', () => {
     expect(wrapper.text()).toContain('该分区暂无模板')
   })
 
-  it('模板上传：选文件转 base64 走 uploadTemplate 上传到当前分区', async () => {
+  it('模板新建：选文件转 base64 走 createTemplate 上传到当前分区', async () => {
     await mountView()
     await tabs(wrapper)[2].trigger('click')
     await flushPromises()
 
-    api.uploadTemplate.mockResolvedValue({})
+    api.createTemplate.mockResolvedValue({})
     const file = new File(['png-bytes'], 'shot.png', { type: 'image/png' })
     const input = wrapper.find('input[type="file"]')
     Object.defineProperty(input.element, 'files', { value: [file] })
     await input.trigger('change')
     // FileReader 回调挂在真实宏任务上，flushPromises（微任务）覆盖不到 → waitFor 轮询
-    await vi.waitFor(() => expect(api.uploadTemplate).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(api.createTemplate).toHaveBeenCalledTimes(1))
     await flushPromises()
 
-    expect(api.uploadTemplate).toHaveBeenCalledTimes(1)
-    const [name, b64, pkg] = api.uploadTemplate.mock.calls[0]
+    expect(api.createTemplate).toHaveBeenCalledTimes(1)
+    const [name, b64, pkg] = api.createTemplate.mock.calls[0]
     expect(name).toBe('shot.png')
     expect(b64).toBe(btoa('png-bytes'))
     expect(pkg).toBe(PKG)
+  })
+
+  it('模板图片替换：条目替换走 replaceTemplateImage，不复用新建接口', async () => {
+    api.listTemplates.mockResolvedValue([{ name: 'plain.png', pkg: PKG, size: 10 }])
+    api.replaceTemplateImage.mockResolvedValue({})
+    await mountView()
+    await tabs(wrapper)[2].trigger('click')
+    await flushPromises()
+
+    await items(wrapper)[0].find('.ri-action').trigger('click')
+    const file = new File(['replacement'], 'replacement.png', { type: 'image/png' })
+    const replaceInput = wrapper.findAll('input[type="file"]')[1]
+    Object.defineProperty(replaceInput.element, 'files', { value: [file] })
+    await replaceInput.trigger('change')
+    await vi.waitFor(() => expect(api.replaceTemplateImage).toHaveBeenCalledTimes(1))
+
+    expect(api.replaceTemplateImage).toHaveBeenCalledWith('plain.png', btoa('replacement'), PKG)
+    expect(api.createTemplate).not.toHaveBeenCalled()
   })
 
   it('空态文案区分：三个页签各自的左栏空态互不串用', async () => {
@@ -245,7 +265,7 @@ describe('ScriptEditor 三页签外壳', () => {
     expect(opts.map((o) => o.text())).toEqual(['（画布当前函数）', 'f1'])
   })
 
-  it('新建函数库：初始函数模型，保存走 saveFunction 并刷新列表选中', async () => {
+  it('新建函数库：初始函数模型，保存走 createFunction 并刷新列表选中', async () => {
     await mountView()
     await tabs(wrapper)[1].trigger('click')
     vi.spyOn(window, 'prompt').mockReturnValue('helpers')
@@ -259,8 +279,8 @@ describe('ScriptEditor 三页签外壳', () => {
     await saveBtn.trigger('click')
     await flushPromises()
 
-    expect(api.saveFunction).toHaveBeenCalledTimes(1)
-    const payload = api.saveFunction.mock.calls[0][0]
+    expect(api.createFunction).toHaveBeenCalledTimes(1)
+    const payload = api.createFunction.mock.calls[0][0]
     expect(payload.pkg).toBe(PKG)
     expect(payload.name).toBe('helpers')
     expect(payload.content).toContain('func1')

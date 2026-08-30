@@ -146,8 +146,7 @@ import { store, devicesData, scriptsData, templatesData, useToast, applyRunRecor
 import { api, runPartitionImport } from '../api'
 import {
   sourceLabel, terminalLabel,
-  normalizeActiveRunResponse, normalizeStartReply,
-  isMissingEndpointError, isDeviceBusyConflict, isTerminalRunState,
+  isDeviceBusyConflict, isTerminalRunState,
 } from '../runs'
 import ConsoleVideoStage from '../components/console/ConsoleVideoStage.vue'
 import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
@@ -156,6 +155,7 @@ import ScriptRunner from '../components/console/ScriptRunner.vue'
 import RecordingCropPanel from '../components/console/RecordingCropPanel.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import RunParamsModal from '../components/RunParamsModal.vue'
+import { createEditorShellApi, createRecordingApi } from '../components/console/current-api-adapters'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
 import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
 import { useScriptEditorShell } from '../composables/useScriptEditorShell'
@@ -264,7 +264,7 @@ const panelTab = ref('script')
 // Console 与独立脚本页共用同一编辑核心（script-editor/*）。
 // resolvers 提供模板存在性校验（call/func 资源与 args 绑定检查需要目标参数表，客户端暂缺、由服务端权威校验）
 const scriptShell = useScriptEditorShell({
-  api,
+  api: createEditorShellApi(api),
   getContext: () => ({
     resolveTemplate: (n) => {
       const list = templatesData.value.filter(t => t.pkg === activePkg.value)
@@ -429,7 +429,7 @@ const recording = useRecording({
   scriptRunning: computed(() => store.running),
   videoElement,
   templatesData,
-  api,
+  api: createRecordingApi(api),
   notify: toast,
   sendControl,
   sendTouchMove: (x, y) => scheduleMove(x, y),
@@ -1775,14 +1775,21 @@ async function saveTemplate() {
   if (!raw) return toast('请输入模板名称', 'warn')
   if (!activePkg.value) return toast('请先选择应用分区', 'warn')
   const name = raw.toLowerCase().endsWith('.png') ? raw : raw + '.png'
+  const shortName = name.replace(/#[^#]+\.png$/i, '.png')
+  const region = [
+    crop.originX / crop.imgW,
+    crop.originY / crop.imgH,
+    (crop.originX + crop.baseW) / crop.imgW,
+    (crop.originY + crop.baseH) / crop.imgH,
+  ]
   saving.value = true
   try {
-    const rep = await api.uploadTemplate(name, crop.preview.split(',')[1], activePkg.value)
+    const rep = await api.createTemplate(shortName, crop.preview.split(',')[1], activePkg.value, region)
     templatesData.value = await api.listTemplates()
     crop.active = false
     cropBaseCanvas = null
     hideLoupe()
-    toast(`模板 ${name} 已保存${tplSizeHint(rep)}`, 'success')
+    toast(`模板 ${rep?.name || shortName} 已保存${tplSizeHint(rep)}`, 'success')
   } catch (e) {
     toast('保存失败：' + e.message, 'error')
   } finally {
@@ -2080,15 +2087,29 @@ async function onTplUpload(e) {
   const file = e.target.files[0]
   e.target.value = ''
   if (!file) return
-  let name = file.name
-  if (!/\.(png|jpe?g)$/i.test(name)) name += '.png'
+  const name = /\.png$/i.test(file.name)
+    ? file.name
+    : file.name.replace(/\.[^.]+$/, '') + '.png'
   try {
     const b64 = await fileToBase64(file)
-    const rep = await api.uploadTemplate(name, b64, activePkg.value)
+    const rep = await api.createTemplate(name, b64, activePkg.value)
     templatesData.value = await api.listTemplates()
-    toast(`模板已上传${tplSizeHint(rep)}`, 'success')
+    toast(`模板已新建${tplSizeHint(rep)}`, 'success')
   } catch (err) {
-    toast('上传失败：' + err.message, 'error')
+    toast('新建失败：' + err.message, 'error')
+  }
+}
+
+/** 替换已有模板图片：名称/分区来自当前模板，图片替换使用独立当前端点。 */
+async function replaceTemplateImage(t, file) {
+  if (!t || !file) return
+  try {
+    const b64 = await fileToBase64(file)
+    await api.replaceTemplateImage(t.name, b64, t.pkg || activePkg.value)
+    templatesData.value = await api.listTemplates()
+    toast(`模板 ${t.name} 图片已替换`, 'success')
+  } catch (err) {
+    toast('替换失败：' + err.message, 'error')
   }
 }
 
@@ -2434,9 +2455,8 @@ function onConflictDismiss() {
   scriptShell.dismissConflict()
 }
 
-// 运行状态轮询：以当前 runId 单次查询 GET /api/runs/:run_id，
-// 按 record.state 驱动状态机（stopping→停止中、终态→复位空闲并归档）；
-// 旧后端（run 查询端点 404/无 run_id 的兼容会话）静默降级为脚本 status 轮询
+// 运行状态轮询：以当前 run_id 单次查询 GET /api/runs/:run_id，
+// 按 record.state 驱动状态机（stopping→停止中、终态→复位空闲并归档）。
 let runStatusTimer = null
 
 function startRunStatusPoll() {
@@ -2451,42 +2471,18 @@ function stopRunStatusPoll() {
 
 async function checkRunStatus() {
   if (!store.running) { stopRunStatusPoll(); return }
-  if (store.runId) {
-    const rid = store.runId
-    let rec = null
-    try {
-      rec = await api.getRun(rid)
-    } catch (e) {
-      if (!isMissingEndpointError(e)) return // 网络抖动等：下轮再试，不中断轮询
-      // 旧后端降级：单次查询端点不存在 → 按注册表里的 script_id（或兼容句柄）查旧 status，
-      // 合成等效记录驱动同一套状态机（终态用 cancelled——旧接口没有结果语义）
-      const sid = findRun(rid)?.script_id || store.runScriptId
-      if (!sid) { stopRunStatusPoll(); resetStoreRunState(); return }
-      try {
-        const st = await api.scriptStatus(sid)
-        rec = { run_id: rid, device_id: store.deviceId, script_id: sid, state: st.running ? 'running' : 'cancelled', degraded: true }
-      } catch (e2) { return }
-    }
-    if (!rec || !rec.run_id) return
-    const m = applyRunRecord(rec)
-    if (m && isTerminalRunState(m.state)) {
-      stopRunStatusPoll()
-      const detail = m.degraded ? '' : `：${terminalLabel(m.state)}${m.error ? `（${m.error}）` : ''}`
-      toast(`脚本已结束${detail}`, m.degraded || m.state === 'success' ? 'info' : 'warn')
-    }
-    return
-  }
-  // 兼容降级会话（无 run_id，或从其他页面发起的旧式运行）：沿用脚本 status 轮询
-  if (!store.runScriptId) { stopRunStatusPoll(); return }
+  const rid = store.runId
+  if (!rid) { stopRunStatusPoll(); resetStoreRunState(); return }
+  let rec
   try {
-    const st = await api.scriptStatus(store.runScriptId)
-    if (!st.running) {
-      store.running = false
-      store.runScriptId = null
-      stopRunStatusPoll()
-      toast('脚本已结束', 'info')
-    }
-  } catch (e) {}
+    rec = await api.getRun(rid)
+  } catch (e) { return } // 网络抖动等：下轮再试，不提前复位运行态
+  const m = applyRunRecord(rec)
+  if (m && isTerminalRunState(m.state)) {
+    stopRunStatusPoll()
+    const detail = `：${terminalLabel(m.state)}${m.error ? `（${m.error}）` : ''}`
+    toast(`脚本已结束${detail}`, m.state === 'success' ? 'info' : 'warn')
+  }
 }
 
 // ---------- 运行模式：只读步骤摘要 + 从此步骤运行（plan §10「只读源码展示/从某行运行」行） ----------
@@ -2589,23 +2585,8 @@ const runArgsFlow = useRunArgsFlow({
       const rep = kind === 'function_library'
         ? await api.runFunction(id, store.deviceId, { function: fnName || undefined, start_index: startIndex, args })
         : await api.runScript(id, store.deviceId, startIndex, args)
-      const st = normalizeStartReply(rep)
-      if (st) {
-        // 新契约：202 {run_id} —— 启动即以 run_id 登记执行实例（主键），后续轮询按 record.state 驱动 UI
-        applyRunRecord({
-          run_id: st.run_id,
-          state: st.state,
-          device_id: store.deviceId,
-          script_id: id,
-          source: 'manual',
-          display: name,
-        })
-      } else {
-        // 兼容降级：旧后端响应无 run_id → 保持旧 script 句柄语义（status 轮询 / stop 停止）
-        store.running = true
-        store.runScript = name
-        store.runScriptId = id
-      }
+      // 当前运行响应固定含 run_id；启动即登记实例，后续查询只按该主键进行。
+      applyRunRecord({ ...rep, device_id: store.deviceId, script_id: id, source: 'manual', display: name })
       return rep
     } finally {
       startPending.value = false
@@ -2696,29 +2677,15 @@ function onRunArgsSubmit({ args }) {
 }
 
 function stopScript() {
-  // 「停止」只对当前 runId 发 cancel：本地先行迁 state=stopping（按钮转停止中…），
-  // 终态由轮询查询确认后统一复位；cancel 端点缺失（旧后端 404/网络错）静默回退旧停止接口
-  if (store.runId) {
-    const rid = store.runId
-    beginCancel(rid)
-    api.cancelRun(rid).catch(e => {
-      if (isMissingEndpointError(e)) {
-        const sid = findRun(rid)?.script_id || store.runScriptId
-        if (sid) api.stopScript(sid).catch(() => {})
-      }
-    })
-    pushLog('warn', '已发送停止指令，等待脚本退出…')
-    toast('已发送停止指令', 'warn')
-    return
-  }
-  // 兼容降级路径（旧后端会话）
-  const id = store.runScriptId || selScript.value
-  if (!id) return
-  api.stopScript(id).catch(() => {})
-  store.running = false
-  store.runScriptId = null
-  stopRunStatusPoll()
-  pushLog('warn', '已发送停止指令，脚本将在当前步骤结束后停止')
+  // 取消只按当前 run_id 寻址；本地先行迁 stopping，终态以轮询为准。
+  const rid = store.runId
+  if (!rid) return
+  beginCancel(rid)
+  api.cancelRun(rid).catch(e => {
+    pushLog('error', `停止失败：${e.message}`)
+    toast('停止失败：' + e.message, 'error')
+  })
+  pushLog('warn', '已发送停止指令，等待脚本退出…')
   toast('已发送停止指令', 'warn')
 }
 
@@ -2781,7 +2748,7 @@ const templateCaptureContext = {
   tplThumbUrl, onTplNameClick, setRenameInputEl, renameVal, confirmRename, cancelRename, startRename,
   onTplDeleteClick, onTplMatchClick, tplShortName, tplRegionBadge, cropSize, cropZoomPct,
   cropMouseDown, cropMouseMove, cropMouseUp, cropMouseLeave, cropWheel, saveTemplate, cancelCrop,
-  repick, saving, viewTpl, closeTplView,
+  repick, saving, viewTpl, closeTplView, replaceTemplateImage,
 }
 const scriptRunnerContext = {
   scriptMode, selScript, activePkg, store, startPending, runScript, runStopping, stopScript,
@@ -2828,39 +2795,32 @@ onMounted(async () => {
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('beforeunload', onBeforeUnload)
 
-  // 刷新恢复运行态：刷新前发起的脚本在服务端继续执行——按设备查询当前活动 run
-  // （新契约 active:true + 完整 RunRecord，含来源标签；旧后端 {running,script_id} 走兼容分支），
+  // 刷新恢复运行态：刷新前发起的脚本在服务端继续执行——按设备查询当前活动 run。
+  // 当前契约为 active:false 或 active:true + 嵌套完整 RunRecord，含来源标签；
   // 恢复运行状态/选中脚本/状态轮询与日志（不依赖投屏连接是否恢复成功）
   if (store.deviceId) await restoreRunState()
   // 画面恢复：SPA 内返回（store 存活）或刷新后脚本运行中/设备会话在线（此前正在
   // 投屏）→ 自动连接；设备空闲离线则保持首次进入行为；遇 conflict 不抢（connect 内处理）
   if (store.deviceId && (spaPreselected || store.running || current.value?.status === 'online')) connect(false)
   // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
-  if (store.running && (store.runId || store.runScriptId)) startRunStatusPoll()
+  if (store.running && store.runId) startRunStatusPoll()
 })
 
 /** 页面刷新 / 设备列表就绪后恢复该设备的活动 run：
- *  新契约 GET /api/devices/:id/run → {active:true,...RunRecord} 完整恢复（含来源标签）；
- *  旧后端形状由 normalizeActiveRunResponse 归一化兼容；无活动/请求失败静默跳过 */
+ * GET /api/devices/:id/run → {active:true,run:RunRecord}；无活动/请求失败静默跳过。 */
 async function restoreRunState() {
   if (!store.deviceId || store.running) return
   let rep = null
   try {
     rep = await api.deviceRun(store.deviceId)
   } catch (e) { /* 恢复失败不影响进入页面 */ return }
-  const rec = normalizeActiveRunResponse(rep)
-  if (!rec) return // {active:false}：无活动 run，保持空闲展示
+  if (!rep.active) return // {active:false}：无活动 run，保持空闲展示
+  const rec = rep.run
+  if (!rec?.run_id) return
   const s = scripts.value.find(x => x.id === rec.script_id)
   const baseName = rec.script_name || s?.name || rec.script_id
   const srcTag = sourceLabel(rec.source)
-  if (rec.run_id) {
-    applyRunRecord({ ...rec, device_id: store.deviceId, display: srcTag ? `${baseName}（${srcTag}）` : baseName })
-  } else {
-    // 兼容降级：旧后端恢复仅 script_id，无实例主键
-    store.running = true
-    store.runScriptId = rec.script_id
-    store.runScript = baseName
-  }
+  applyRunRecord({ ...rec, device_id: store.deviceId, display: srcTag ? `${baseName}（${srcTag}）` : baseName })
   selScript.value = rec.script_id
   scriptMode.value = 'run'
   runStartTime = 0   // 不按开始时间过滤，恢复最近日志
