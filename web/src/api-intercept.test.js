@@ -1,5 +1,4 @@
-// 全站 401 拦截验证：api.js 中任何非豁免端点响应 401 → handleUnauthorized 清态 + 跳 #/login，
-// 各视图调用方式不变（调用方只拿到普通 Error）。
+// 当前 API 认证契约：受保护端点 401 → Cookie 会话失效处理；调用方拿到稳定 ApiError。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 function lsStub(initial = {}) {
@@ -38,23 +37,23 @@ afterEach(() => {
 
 describe('api 层统一 401 拦截', () => {
   it('业务端点 401 → 清本地态、跳 #/login 保留回跳参数，并向调用方抛错', async () => {
-    localStorage.setItem('gb_token', 'demo')
     localStorage.setItem('gb_device_id', 'dev-1')
     fetch.mockResolvedValueOnce(res(401, { error: 'unauthorized' }))
-    await expect(api.listDevices()).rejects.toThrow('unauthorized')
-    expect(localStorage.getItem('gb_token')).toBeNull()
+    await expect(api.listDevices()).rejects.toMatchObject({
+      name: 'ApiError', status: 401, code: 'unauthorized', data: { error: 'unauthorized' },
+    })
     expect(localStorage.getItem('gb_device_id')).toBeNull()
     expect(location.hash).toBe(`#/login?redirect=${encodeURIComponent('/console')}`)
   })
 
   it('非 401 错误不触发跳转，错误原样透传', async () => {
     fetch.mockResolvedValueOnce(res(500, { error: 'internal' }))
-    await expect(api.listDevices()).rejects.toThrow('internal')
+    await expect(api.listDevices()).rejects.toMatchObject({ status: 500, code: 'internal' })
     expect(location.hash).toBe('#/console')
     // 本地态不被误清
     localStorage.setItem('gb_device_id', 'dev-1')
     fetch.mockResolvedValueOnce(res(503, {}))
-    await expect(api.listTasks()).rejects.toThrow(/^HTTP/)
+    await expect(api.listTasks()).rejects.toMatchObject({ status: 503, code: 'http_503', data: {} })
     expect(localStorage.getItem('gb_device_id')).toBe('dev-1')
   })
 
@@ -62,7 +61,7 @@ describe('api 层统一 401 拦截', () => {
     const exportRes = res(401, { error: 'unauthorized' })
     exportRes.blob = async () => new Blob()
     fetch.mockResolvedValueOnce(exportRes)
-    await expect(api.exportPartition('hkrpg')).rejects.toThrow('unauthorized')
+    await expect(api.exportPartition('hkrpg')).rejects.toMatchObject({ status: 401, code: 'unauthorized' })
     expect(location.hash).toBe(`#/login?redirect=${encodeURIComponent('/console')}`)
   })
 
@@ -70,5 +69,13 @@ describe('api 层统一 401 拦截', () => {
     fetch.mockResolvedValueOnce(res(200, [{ id: 'a/b.yaml' }]))
     await expect(api.listScripts()).resolves.toEqual([{ id: 'a/b.yaml' }])
     expect(location.hash).toBe('#/console')
+  })
+
+  it('网络异常也转换为稳定 ApiError，不触发任何旧 endpoint 探测', async () => {
+    fetch.mockRejectedValueOnce(new TypeError('offline'))
+    await expect(api.listDevices()).rejects.toMatchObject({
+      name: 'ApiError', status: 0, code: 'network_error', data: null,
+    })
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 })

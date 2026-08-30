@@ -112,7 +112,7 @@ describe('录制入口与状态栏 / 离开保护（静态接线）', () => {
   })
 })
 
-describe('api.uploadTemplateRegion 契约化（§11.7：短名+region 直传，完整名由服务端组合）', () => {
+describe('api.createTemplate 契约化（§11.7：短名+region 直传，完整名由服务端组合）', () => {
   it('POST /api/templates body 只带 short_name+region+data_b64+pkg，前端不拼 # 元数据', async () => {
     const calls = []
     const orig = globalThis.fetch
@@ -124,7 +124,7 @@ describe('api.uploadTemplateRegion 契约化（§11.7：短名+region 直传，�
       })
     }
     try {
-      await api.uploadTemplateRegion('x.png', 'QUJD', 'com.demo', [0.1, 0.2, 0.3, 0.4])
+      await api.createTemplate('x.png', 'QUJD', 'com.demo', [0.1, 0.2, 0.3, 0.4])
     } finally {
       globalThis.fetch = orig
     }
@@ -141,7 +141,7 @@ describe('api.uploadTemplateRegion 契约化（§11.7：短名+region 直传，�
 
   it('api.js 静态断言：录制上传走 short_name 参数，composeRegionName 前端拼接已删除', () => {
     const src = read('./api.js')
-    expect(src).toContain('uploadTemplateRegion:')
+    expect(src).toContain('createTemplate:')
     expect(src).toContain('short_name: shortName')
     expect(src).not.toContain('composeRegionName')
   })

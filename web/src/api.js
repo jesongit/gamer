@@ -1,24 +1,85 @@
-// 后端 API 封装（Rust 服务端）
-// 全站鉴权拦截（阶段 2）：除登录/探测/退出三个豁免端点外，任何响应 401 →
-// 清本地缓存态并跳 #/login（保留回跳参数），各视图不改调用方式。
+// 当前后端 API 封装（Rust 服务端）。
+// 所有受保护请求遇到 401 都交给 Cookie 会话层处理；资源与运行接口不保留旧契约降级。
 import { handleUnauthorized } from './auth'
 
 const BASE = ''
 
-// 认证三端点自身管理 401 语义，不走全站拦截（否则登录失败会被误跳转/死循环）
-function authExempt(url) {
-  return url.startsWith('/api/login') || url.startsWith('/api/session') || url.startsWith('/api/logout')
+/** 所有 API 失败的稳定错误形态，供视图只按 code/status/data 判断。 */
+export class ApiError extends Error {
+  constructor({ status = 0, code = 'unknown_error', message = '请求失败', data = null, details = null, cause } = {}) {
+    super(message, cause ? { cause } : undefined)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.data = data
+    this.details = details
+  }
 }
 
-// 错误响应 → 结构化 Error：保留 message（body.error 或 HTTP xxx，与旧文案一致），
-// 并附加 status / data 原始 JSON —— 调用方据此识别 409 设备冲突、404 端点缺失（旧后端降级）等
-async function errMsg(r) {
+async function errorFromResponse(r) {
   let body = null
-  try { body = await r.json() } catch (e) {}
-  const err = new Error(body && body.error ? body.error : `HTTP ${r.status}`)
-  err.status = r.status
-  err.data = body
-  return err
+  try { body = await r.json() } catch (e) { /* 非 JSON 错误响应 */ }
+  const code = body && typeof body === 'object'
+    ? String(body.code ?? body.error ?? `http_${r.status}`)
+    : `http_${r.status}`
+  const message = body && typeof body === 'object'
+    ? String(body.message ?? body.error ?? `HTTP ${r.status}`)
+    : `HTTP ${r.status}`
+  const details = body && typeof body === 'object' ? (body.diagnostics ?? null) : null
+  return new ApiError({ status: r.status, code, message, data: body, details })
+}
+
+function networkError(cause) {
+  return new ApiError({ status: 0, code: 'network_error', message: '网络请求失败', cause })
+}
+
+function invalidResponse(message, data = null) {
+  return new ApiError({ status: 502, code: 'invalid_response', message, data })
+}
+
+function requireId(value, field) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new ApiError({
+      status: 0,
+      code: 'invalid_argument',
+      message: `${field} 不能为空`,
+      data: { field },
+    })
+  }
+  return value
+}
+
+function requireRunResponse(rep) {
+  if (!rep || typeof rep !== 'object' || typeof rep.run_id !== 'string' || !rep.run_id) {
+    throw invalidResponse('服务端运行响应缺少 run_id', rep)
+  }
+  return rep
+}
+
+function requireDeviceRunResponse(rep) {
+  if (rep && rep.active === false) return rep
+  if (rep && rep.active === true && rep.run && typeof rep.run === 'object' && rep.run.run_id) return rep
+  throw invalidResponse('服务端设备运行响应不符合当前契约', rep)
+}
+
+function updateBody({ content, name, expected_version, force } = {}, resource) {
+  const body = { content }
+  if (name !== undefined) body.name = name
+  if (force === true) {
+    body.force = true
+    if (expected_version !== undefined) body.expected_version = expected_version
+    return body
+  }
+  if (typeof expected_version !== 'string' || !expected_version) {
+    throw new ApiError({
+      status: 409,
+      code: 'version_required',
+      message: '更新资源必须提供 expected_version，或显式 force:true',
+      data: { code: 'version_required', resource, field: 'expected_version' },
+    })
+  }
+  body.expected_version = expected_version
+  return body
 }
 
 async function readResult(r) {
@@ -27,21 +88,29 @@ async function readResult(r) {
   return r
 }
 
-async function req(method, path, body) {
+async function response(method, path, body, extra = {}) {
+  const { rawBody = false, ...fetchOptions } = extra
   const opt = { method, headers: {} }
   if (body !== undefined) {
-    opt.headers['Content-Type'] = 'application/json'
-    opt.body = typeof body === 'string' ? body : JSON.stringify(body)
+    if (!fetchOptions.headers) opt.headers['Content-Type'] = 'application/json'
+    opt.body = rawBody ? body : (typeof body === 'string' ? body : JSON.stringify(body))
   }
-  const r = await fetch(BASE + path, opt)
+  Object.assign(opt, fetchOptions)
+  let r
+  try {
+    r = await fetch(BASE + path, opt)
+  } catch (e) {
+    throw networkError(e)
+  }
   if (!r.ok) {
-    if (r.status === 401 && !authExempt(path)) {
-      handleUnauthorized()                    // 会话过期/未认证：清态 + 跳登录
-      throw await errMsg(r)                   // 调用方 catch 里仍能拿到原因（含 status/data）
-    }
-    throw await errMsg(r)
+    if (r.status === 401) handleUnauthorized()
+    throw await errorFromResponse(r)
   }
-  return readResult(r)
+  return r
+}
+
+async function req(method, path, body) {
+  return readResult(await response(method, path, body))
 }
 
 export const api = {
@@ -71,12 +140,16 @@ export const api = {
 
   // 模板（按应用分区 data/<pkg>/tmpl；pkg 缺省=跨分区全列）
   listTemplates: (pkg) => req('GET', `/api/templates${pkg ? `?pkg=${encodeURIComponent(pkg)}` : ''}`),
-  uploadTemplate: (name, dataB64, pkg) => req('POST', '/api/templates', { name, data_b64: dataB64, pkg }),
-  // 录制上传（阶段 6 + §11.7 契约化）：短名 + 搜索区域（相对坐标 [x1,y1,x2,y2]，0~1）。
-  // 完整文件名由服务端组合 `<短名去.png>#x1_y1_x2_y2.png`（×1000 三位整数），前端不拼接
-  // # 元数据；短名冲突服务端 409（要求改名不覆盖）。
-  uploadTemplateRegion: (shortName, dataB64, pkg, region) =>
-    req('POST', '/api/templates', { short_name: shortName, region, data_b64: dataB64, pkg }),
+  // 创建只接受短名；region 存在时由服务端组合带区域元数据的完整文件名。
+  createTemplate: (shortName, dataB64, pkg, region) => req('POST', '/api/templates', {
+    short_name: shortName,
+    ...(region !== undefined ? { region } : {}),
+    data_b64: dataB64,
+    pkg,
+  }),
+  // 图片替换与创建严格分离：名称/分区来自 URL/query，body 只有 data_b64。
+  replaceTemplateImage: (name, dataB64, pkg) =>
+    req('PUT', `/api/templates/${encodeURIComponent(name)}/image?pkg=${encodeURIComponent(pkg)}`, { data_b64: dataB64 }),
   renameTemplate: (oldName, newName, pkg) =>
     req('PUT', `/api/templates/${encodeURIComponent(oldName)}?pkg=${encodeURIComponent(pkg)}`, { name: newName }),
   deleteTemplate: (name, pkg) =>
@@ -86,59 +159,63 @@ export const api = {
   // 模板缩略图/预览 URL（<img :src> 用；pkg 必填）
   tplImageUrl: (name, pkg) => `/api/templates/${encodeURIComponent(name)}/image?pkg=${encodeURIComponent(pkg)}`,
 
-  // 脚本（id 形如 "<pkg>/<name>.yaml"，含 '/'，拼 URL 必须整体 encodeURIComponent；保存需 pkg=应用分区）
+  // 脚本（id 形如 "<pkg>/<name>.yaml"，含 '/'，拼 URL 必须整体 encodeURIComponent）
   listScripts: () => req('GET', '/api/scripts'),
   // 单脚本读取（含内容版本短码 version：编辑器 expected_version 冲突检测依据）
-  getScript: (id) => req('GET', `/api/scripts/${encodeURIComponent(id)}`),
-  // 保存（upsert；id 缺省=新建，id+新名=重命名并删旧文件）。expected_version 与磁盘不符
-  // → 409 {code:"version_conflict", message, resource}（err.status/err.data 可取）
-  saveScript: (s) => req('POST', '/api/scripts', s),
+  getScript: (id) => req('GET', `/api/scripts/${encodeURIComponent(requireId(id, 'script_id'))}`),
+  // POST 只创建；PUT 只更新。更新缺版本时在客户端拒绝，force 必须显式为 true。
+  createScript: ({ name, content, pkg } = {}) => req('POST', '/api/scripts', { name, content, pkg }),
+  updateScript: async (id, payload = {}) => req(
+    'PUT',
+    `/api/scripts/${encodeURIComponent(requireId(id, 'script_id'))}`,
+    updateBody(payload, id),
+  ),
   deleteScript: (id) => req('DELETE', `/api/scripts/${encodeURIComponent(id)}`),
   // 函数库（data/<pkg>/func/；id 形如 "<pkg>/<文件短路径>.yaml"，整体 encodeURIComponent。
   // 不进脚本列表/运行接口/任务选择器；GET 单文件含 content/version/functions（顶层函数名清单））
   listFunctions: (pkg) => req('GET', `/api/functions?pkg=${encodeURIComponent(pkg)}`),
   getFunction: (id) => req('GET', `/api/functions/${encodeURIComponent(id)}`),
-  // 创建/覆盖（upsert）：{pkg, name(短路径,缺扩展名自动补), content, expected_version?}
-  saveFunction: (f) => req('POST', '/api/functions', f),
-  // 覆盖更新（不重命名）：{content, expected_version?}；404（不存在）优先于 409
-  updateFunction: (id, f) => req('PUT', `/api/functions/${encodeURIComponent(id)}`, f),
+  // POST 只创建；PUT 只更新/重命名，更新缺版本时在客户端拒绝。
+  createFunction: ({ pkg, name, content } = {}) => req('POST', '/api/functions', { pkg, name, content }),
+  updateFunction: async (id, payload = {}) => req(
+    'PUT',
+    `/api/functions/${encodeURIComponent(requireId(id, 'function_id'))}`,
+    updateBody(payload, id),
+  ),
   deleteFunction: (id) => req('DELETE', `/api/functions/${encodeURIComponent(id)}`),
 
   // 脚本运行（阶段 5 契约）：body {device_id, start_index?, args?}——args 为稀疏显式覆盖映射
   //（bool/coord/time/color/tmpl/key/text 七类；「使用默认值」的参数省略，由服务端解析默认值）。
   // 成功 202 {run_id, state, resolved_args}；参数诊断 400 {error:"invalid_args", diagnostics:[...]}
   //（err.status/err.data 可取）；设备占用 409 {error:"device_busy", run_id, script_id, source, started_at}
-  runScript: (id, deviceId, startIndex, args) =>
-    req('POST', `/api/scripts/${encodeURIComponent(id)}/run`, {
+  runScript: async (id, deviceId, startIndex = 0, args) =>
+    requireRunResponse(await req('POST', `/api/scripts/${encodeURIComponent(requireId(id, 'script_id'))}/run`, {
       device_id: deviceId,
-      start_index: startIndex || 0,
+      start_index: startIndex,
       ...(args && Object.keys(args).length ? { args } : {}),
-    }),
+    })),
   // 函数测试（阶段 5）：id = 函数库文件 id（"<pkg>/<文件短路径>.yaml"，整体 encodeURIComponent）。
   // body {device_id, function?, start_index?, args?}（function 缺省 = 文件第一个函数）；
   // 响应/错误语义与脚本 run 相同（RunManager 统一 run_id 管理）
-  runFunction: (id, deviceId, opts = {}) =>
-    req('POST', `/api/functions/${encodeURIComponent(id)}/run`, {
+  runFunction: async (id, deviceId, opts = {}) =>
+    requireRunResponse(await req('POST', `/api/functions/${encodeURIComponent(requireId(id, 'function_id'))}/run`, {
       device_id: deviceId,
       ...(opts.function ? { function: opts.function } : {}),
-      ...(opts.start_index ? { start_index: opts.start_index } : {}),
+      ...(opts.start_index !== undefined ? { start_index: opts.start_index } : {}),
       ...(opts.args && Object.keys(opts.args).length ? { args: opts.args } : {}),
-    }),
-  stopScript: (id) => req('POST', `/api/scripts/${encodeURIComponent(id)}/stop`),
-  scriptStatus: (id) => req('GET', `/api/scripts/${encodeURIComponent(id)}/status`),
+    })),
   // 统一运行实例（run_id 主键）：单次查询 RunRecord / 按次取消（终态以查询为准）
-  getRun: (runId) => req('GET', `/api/runs/${encodeURIComponent(runId)}`),
-  cancelRun: (runId) => req('POST', `/api/runs/${encodeURIComponent(runId)}/cancel`),
+  getRun: async (runId) => requireRunResponse(await req('GET', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}`)),
+  cancelRun: async (runId) => {
+    const id = requireId(runId, 'run_id')
+    return req('POST', `/api/runs/${encodeURIComponent(id)}/cancel`)
+  },
   // 设备当前运行中的脚本（页面刷新后恢复运行态用）
-  // 新契约 → {active:true,...RunRecord} | {active:false}；旧后端 → {running, script_id?, script_name?}
-  deviceRun: (id) => req('GET', `/api/devices/${id}/run`),
+  // 当前契约 → {active:true,run:RunRecord} | {active:false}。
+  deviceRun: async (id) => requireDeviceRunResponse(await req('GET', `/api/devices/${id}/run`)),
   // 导出整分区快照 zip（yaml/ + tmpl/ 全量，?pkg= 指定分区）→ { blob, filename }
   exportPartition: async (pkg) => {
-    const r = await fetch(`/api/scripts/export?pkg=${encodeURIComponent(pkg)}`)
-    if (!r.ok) {
-      if (r.status === 401) handleUnauthorized()
-      throw await errMsg(r)
-    }
+    const r = await response('GET', `/api/scripts/export?pkg=${encodeURIComponent(pkg)}`)
     const cd = r.headers.get('content-disposition') || ''
     let filename = ''
     const m = cd.match(/filename\*=UTF-8''([^;\s]+)/) || cd.match(/filename="?([^";\s]+)"?/)
@@ -147,16 +224,13 @@ export const api = {
   },
   // 导入分区快照 zip 到指定应用分区：confirm=false dry-run 只解析报告，true 落盘（同名替换）
   importScripts: async (file, confirm, pkg) => {
-    const r = await fetch(`/api/scripts/import?confirm=${confirm ? 1 : 0}&pkg=${encodeURIComponent(pkg)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/zip' },
-      body: file
-    })
-    if (!r.ok) {
-      if (r.status === 401) handleUnauthorized()
-      throw await errMsg(r)
-    }
-    return r.json()
+    const r = await response(
+      'POST',
+      `/api/scripts/import?confirm=${confirm ? 1 : 0}&pkg=${encodeURIComponent(pkg)}`,
+      file,
+      { rawBody: true, headers: { 'Content-Type': 'application/zip' } },
+    )
+    return readResult(r)
   },
 
   // 定时任务（阶段 5 参数化）：创建/更新接受 args（稀疏显式覆盖映射，服务端解析为完整
@@ -168,9 +242,8 @@ export const api = {
   getTask: (id) => req('GET', `/api/tasks/${id}`),
   saveTask: (t) => req('POST', '/api/tasks', t),
   deleteTask: (id) => req('DELETE', `/api/tasks/${id}`),
-  // 任务立即执行（用任务已存参数快照；过期/无快照由服务端明确报错）：
-  // 新契约 202 {run_id}（触发即返回，不等任务完成）；旧后端 200 {ok:true}
-  runTaskNow: (id) => req('POST', `/api/tasks/${id}/run`),
+  // 任务立即执行（用任务已存参数快照；过期/无快照由服务端明确报错）：202 {run_id}
+  runTaskNow: async (id) => requireRunResponse(await req('POST', `/api/tasks/${id}/run`)),
 
   // 日志
   listLogs: (deviceId, level, limit) => {

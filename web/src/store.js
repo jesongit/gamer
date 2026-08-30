@@ -2,18 +2,16 @@
 // 不再有 localStorage 伪 token；authed 判定以 session.username 为准）
 //
 // 运行实例模型（OPTIMIZATION_PLAN 阶段3 / RUN-003）：执行实例以 run_id 为主键——
-// runRegistry.byId 正查 + activeByDevice 反查 + last 最近终态归档；
-// store.runScriptId 不再充当执行实例 ID，仅保留为旧后端兼容期的降级句柄。
-// 纯语义工具（标签/时间/新旧响应归一化）见 ./runs.js。
+// runRegistry.byId 正查 + activeByDevice 反查 + last 最近终态归档。
+// 纯语义工具（标签/时间/当前运行契约）见 ./runs.js。
 import { reactive, ref } from 'vue'
-import { isTerminalRunState } from './runs'
+import { isActiveRunState, isTerminalRunState } from './runs'
 
 export const store = reactive({
   deviceId: null,           // 当前控制的设备
   running: false,           // 当前设备脚本运行状态（由 runRegistry 终态/活动迁移驱动）
   runScript: null,          // 正在运行的脚本展示名（含 "函数()" 或来源后缀修饰）
-  runId: null,              // 当前展示的执行实例（run_id，run_id 主键的主消费位）
-  runScriptId: null,        // 兼容降级句柄：仅旧后端无 run_id 路径写入（script id 轮询/停止用）
+  runId: null,              // 当前展示的执行实例，唯一运行主键
   runStep: '',              // 当前步骤描述
   runProgress: 0,           // 0-100
 })
@@ -47,7 +45,6 @@ export function getActiveRun(deviceId) {
 export function resetStoreRunState() {
   store.running = false
   store.runId = null
-  store.runScriptId = null
   store.runScript = null
   store.runStep = ''
   store.runProgress = 0
@@ -60,7 +57,9 @@ export function resetStoreRunState() {
  * 已终态实例拒绝迟到的非终态刷新（防陈旧响应复活记录）。
  */
 export function applyRunRecord(rec) {
-  if (!rec || !rec.run_id) return null
+  if (!rec || !rec.run_id || (!isTerminalRunState(rec.state) && !isActiveRunState(rec.state))) {
+    return null
+  }
   // display 展示名（"名字 · 函数()"/来源后缀修饰）不属于服务端契约字段：
   // 仅调用方显式传入时刷新，轮询增量不携带则保留旧值，避免把精心拼好的展示名覆盖回裸 script_id
   const { display, ...data } = rec

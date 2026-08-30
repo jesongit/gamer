@@ -191,24 +191,20 @@ describe('login（POST /api/login）', () => {
 
 describe('doLogout（退出清理）', () => {
   it('204 成功 → POST /api/logout、清本地态、落 #/login', async () => {
-    localStorage.setItem('gb_token', 'demo')
     localStorage.setItem('gb_device_id', 'dev-1')
     vi.stubGlobal('location', { hash: '#/tasks' })
     vi.mocked(fetch).mockResolvedValue({ ...jsonRes(204, null), headers: { get: () => null } })
     await auth.doLogout()
     expect(fetch).toHaveBeenCalledWith('/api/logout', { method: 'POST' })
-    expect(localStorage.getItem('gb_token')).toBeNull()
     expect(localStorage.getItem('gb_device_id')).toBeNull()
     expect(auth.session.username).toBeNull()
     expect(location.hash).toBe('#/login')
   })
 
   it('请求失败/断网也必须清理（幂等语义），并回到登录页', async () => {
-    localStorage.setItem('gb_token', 'demo')
     vi.stubGlobal('location', { hash: '#/console' })
     vi.mocked(fetch).mockRejectedValue(new Error('network down'))
     await auth.doLogout()
-    expect(localStorage.getItem('gb_token')).toBeNull()
     expect(location.hash).toBe('#/login')
     await expect(auth.probeSession()).resolves.toBe(false)
   })
@@ -222,13 +218,11 @@ describe('doLogout（退出清理）', () => {
 })
 
 describe('handleUnauthorized（全站 401 拦截）', () => {
-  it('清本地缓存态（gb_device_id/gb_token）并带回跳参数跳 #/login', () => {
+  it('清本地界面缓存并带回跳参数跳 #/login；认证不读取本地 token', () => {
     localStorage.setItem('gb_device_id', 'dev-9')
-    localStorage.setItem('gb_token', 'demo')
     vi.stubGlobal('location', { hash: '#/devices?tab=a' })
     auth.handleUnauthorized()
     expect(localStorage.getItem('gb_device_id')).toBeNull()
-    expect(localStorage.getItem('gb_token')).toBeNull()
     expect(location.hash).toBe(`#/login?redirect=${encodeURIComponent('/devices?tab=a')}`)
   })
 
@@ -270,12 +264,24 @@ describe('认证放行与状态恢复', () => {
   })
 })
 
-describe('旧伪 token 清退（gb_token 兼容迁移）', () => {
-  it('purgeLegacySessionKeys 只删 gb_token', () => {
-    localStorage.setItem('gb_token', 'demo')
+describe('Cookie 会话唯一认证来源', () => {
+  it('登录只提交用户名密码，不写 token；认证态来自服务端成功响应', async () => {
     localStorage.setItem('gb_sidebar_collapsed', '1')
-    auth.purgeLegacySessionKeys()
-    expect(localStorage.getItem('gb_token')).toBeNull()
+    vi.mocked(fetch).mockResolvedValueOnce(jsonRes(200, { ok: true, username: 'cookie-user' }))
+    await expect(auth.login('cookie-user', 'pw')).resolves.toEqual({ ok: true, username: 'cookie-user' })
+    const [, options] = fetch.mock.calls[0]
+    expect(JSON.parse(options.body)).toEqual({ username: 'cookie-user', password: 'pw' })
+    expect(options.headers.Authorization).toBeUndefined()
     expect(localStorage.getItem('gb_sidebar_collapsed')).toBe('1')
+    expect(auth.session.username).toBe('cookie-user')
+    expect(auth).not.toHaveProperty('purgeLegacySessionKeys')
+  })
+
+  it('session 探测只消费服务端 authenticated/username，Cookie 由浏览器管理', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonRes(200, { authenticated: true, username: 'admin' }))
+    await expect(auth.probeSession()).resolves.toBe(true)
+    expect(fetch.mock.calls[0][0]).toBe('/api/session')
+    expect(fetch.mock.calls[0][1].credentials).toBeUndefined()
+    expect(fetch.mock.calls[0][1].headers).toBeUndefined()
   })
 })

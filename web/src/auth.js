@@ -4,7 +4,6 @@
 // - 退出   POST /api/logout  → 204 幂等（成败均清本地态）
 // 同源部署 SameSite=Strict：fetch 不设 credentials（默认同源自动携带/写回 Cookie），不引 CSRF token。
 // 会话态只存内存（session.username），刷新后由路由守卫重新探测；不再向 localStorage 写伪 token，
-// 旧键 gb_token 见到即删（purgeLegacySessionKeys）。
 // 供 api.js 使用的全站 401 拦截：handleUnauthorized() 清缓存态并跳 #/login（保留回跳参数）。
 import { reactive } from 'vue'
 
@@ -37,16 +36,10 @@ function safeRemove(key) {
   try { localStorage.removeItem(key) } catch (e) { /* 无 localStorage 环境（单测/隐私模式）忽略 */ }
 }
 
-// 旧版伪 token 清退：不读取、不复用，见到即删（应用启动、登录、登出、401 时都会触发一次）
-export function purgeLegacySessionKeys() {
-  safeRemove('gb_token')
-}
-
 // 清理本地缓存状态：会话内存态 + 登录期的界面缓存（设备选择等），供登出与 401 拦截共用
 export function clearLocalState() {
   session.username = null
   safeRemove('gb_device_id')
-  purgeLegacySessionKeys()
 }
 
 function currentHashPath() {
