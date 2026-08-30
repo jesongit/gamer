@@ -35,8 +35,8 @@
 //! 停在 no candidate pairs）。`local_addr()` 必须返回**具体 IP**，回归测试
 //! `gather_via_agent_mux_*` 用真实 agent + mux 跑 gather 产物兜底。
 //!
-//! 三键全缺省 → [`build_rtc_setting_engine`] 返回 None，PeerConnection 构建
-//! 路径与既有完全一致（Windows 直跑 / 既有部署零变化）。
+//! 三键全缺省 → [`build_rtc_setting_engine`] 仅带 mDNS Disabled（其余零
+//! 配置），Windows 直跑 / 既有部署除候选不再宣告 .local 外行为不变。
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -154,24 +154,28 @@ async fn shared_udp_mux(cfg: &Config) -> anyhow::Result<Arc<UDPMuxDefault>> {
         .cloned()
 }
 
-/// 按 rtc_* 配置构造 SettingEngine；三键全缺省返回 None（调用方保持既有
-/// 无 SettingEngine 的构建路径，行为零变化）。
+/// 按 rtc_* 配置构造 SettingEngine（恒返回 Some；viewer 构建路径统一带
+/// SettingEngine）。
 ///
+/// - **mDNS 一律 Disabled**（关键，2026-08-30 实证）：webrtc-rs 默认
+///   QueryAndGather 会把 answer 的 host 候选宣告成 `xxx.local`，浏览器必须
+///   经 mDNS 解析才能发起 ICE 检查——Windows 同机部署下这条解析链间歇性
+///   失效（防火墙/组播/网卡变化），表现即建连风暴（每 ~4.2s 一轮、连败十
+///   几次后自愈）。Disabled 后 answer 带明文 IP，浏览器检查直达（prflx 回
+///   路，实测秒连）；对端 offer 的 mDNS 候选无需解析——本 crate 版本
+///   webrtc-rs 从不解析远端 .local 候选（resolved_addr 恒 0.0.0.0:0），连接
+///   本就只靠浏览器侧检查驱动。日志里 `discard success message ... no such
+///   remote` 即该死路径的噪音，可忽略。
 /// - `rtc_external_ip` 非空：`set_nat_1to1_ips(.., Host)`——host 候选一律
-///   宣告该 IP。webrtc-rs 默认 mDNS 为 QueryOnly，不会触发 nat1to1×mDNS
-///   冲突（仅 QueryAndGather 报错）；ICE_SERVERS 的 STUN 不受影响。
+///   宣告该 IP。mDNS 已 Disabled，不存在 nat1to1×mDNS 冲突。
 /// - `rtc_udp_port` 非 0：媒体 UDP 换单 socket UDPMux 固定绑端口（进程级
 ///   共享，见 [`shared_udp_mux`]）；候选地址/端口 = mux conn 的
 ///   `local_addr()`（即 external_ip + [`advertised_port`]，见模块注记）。
-pub(crate) async fn build_rtc_setting_engine(
-    cfg: &Config,
-) -> anyhow::Result<Option<SettingEngine>> {
+pub(crate) async fn build_rtc_setting_engine(cfg: &Config) -> anyhow::Result<SettingEngine> {
     let nat_ip = cfg.rtc_external_ip.trim();
-    if nat_ip.is_empty() && cfg.rtc_udp_port == 0 {
-        return Ok(None);
-    }
 
     let mut se = SettingEngine::default();
+    se.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
     if !nat_ip.is_empty() {
         se.set_nat_1to1_ips(vec![nat_ip.to_string()], RTCIceCandidateType::Host);
     }
@@ -179,7 +183,7 @@ pub(crate) async fn build_rtc_setting_engine(
         let mux = shared_udp_mux(cfg).await?;
         se.set_udp_network(UDPNetwork::Muxed(mux));
     }
-    Ok(Some(se))
+    Ok(se)
 }
 
 #[cfg(test)]
@@ -320,33 +324,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_rtc_setting_engine_none_when_unconfigured() {
-        // 三键全缺省：不构造 SettingEngine（既有路径零变化的锚点）
+    async fn build_rtc_setting_engine_always_some() {
+        // 三键全缺省也恒返回 SettingEngine（mDNS Disabled 统一在此生效）
         let cfg = Config::default();
-        assert!(build_rtc_setting_engine(&cfg).await.unwrap().is_none());
+        assert!(build_rtc_setting_engine(&cfg).await.is_ok());
 
-        // 显式写回空串/0 同样按未配置处理
+        // 显式写回空串/0 同样按未配置处理（仅 mDNS Disabled）
         let cfg = Config {
             rtc_external_ip: "  ".into(),
             ..Default::default()
         };
-        assert!(build_rtc_setting_engine(&cfg).await.unwrap().is_none());
+        assert!(build_rtc_setting_engine(&cfg).await.is_ok());
     }
 
     #[tokio::test]
-    async fn build_rtc_setting_engine_some_with_ip_only() {
+    async fn build_rtc_setting_engine_ok_with_ip_only() {
         // 仅外部 IP（host 网络容器等端口本就可达的场景）：不绑定 socket 即可构造
         let cfg = Config {
             rtc_external_ip: "192.168.1.10".into(),
             ..Default::default()
         };
-        assert!(build_rtc_setting_engine(&cfg).await.unwrap().is_some());
+        assert!(build_rtc_setting_engine(&cfg).await.is_ok());
     }
 
     #[tokio::test]
     async fn build_rtc_setting_engine_some_with_fixed_port() {
         // 固定端口（合法成对配置）：绑定一次成功即可（进程级 OnceCell 共享，
-        // 先到先得；重复调用拿到缓存实例，返回值仍为 Some）
+        // 先到先得；重复调用拿到缓存实例）
         let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let free_port = probe.local_addr().unwrap().port();
         drop(probe);
@@ -356,7 +360,7 @@ mod tests {
             rtc_external_port: 0,
             ..Default::default()
         };
-        assert!(build_rtc_setting_engine(&cfg).await.unwrap().is_some());
-        assert!(build_rtc_setting_engine(&cfg).await.unwrap().is_some());
+        assert!(build_rtc_setting_engine(&cfg).await.is_ok());
+        assert!(build_rtc_setting_engine(&cfg).await.is_ok());
     }
 }

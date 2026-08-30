@@ -17,7 +17,6 @@ use tracing::{debug, info};
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
-use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
@@ -177,28 +176,13 @@ impl ViewerSession {
         let api_builder = APIBuilder::new()
             .with_media_engine(m)
             .with_interceptor_registry(registry);
-        let api = match super::rtc_net::build_rtc_setting_engine(cfg).await? {
-            Some(se) => api_builder.with_setting_engine(se).build(),
-            None => api_builder.build(),
-        };
+        let api = api_builder
+            .with_setting_engine(super::rtc_net::build_rtc_setting_engine(cfg).await?)
+            .build();
 
-        let ice = if let Ok(s) = std::env::var("ICE_SERVERS") {
-            s.split(';')
-                .map(|u| RTCIceServer {
-                    urls: vec![u.to_string()],
-                    ..Default::default()
-                })
-                .collect()
-        } else {
-            vec![RTCIceServer {
-                urls: vec!["stun:stun.l.google.com:19302".into()],
-                ..Default::default()
-            }]
-        };
-        let config = RTCConfiguration {
-            ice_servers: ice,
-            ..Default::default()
-        };
+        // 不配 STUN：本项目只面向同机/局域网投屏，ICE 走 host 候选直连；Google
+        // STUN 国内不可达，收集白等 5s 超时还拖慢 answer（实证见 docs/PITFALLS.md）
+        let config = RTCConfiguration::default();
 
         let peer = Arc::new(api.new_peer_connection(config).await?);
 
@@ -317,10 +301,14 @@ impl ViewerSession {
                     peer_connected2.store(false, std::sync::atomic::Ordering::SeqCst);
                 }
                 PeerConnectionEffect::Terminal => {
+                    // was_connected 区分两类断开：true = 已连通后正常终结（关页/
+                    // 踢下线）；false = ICE 从未连通（同机部署先查 mDNS 解析/防火墙）
+                    let was_connected =
+                        peer_connected2.load(std::sync::atomic::Ordering::SeqCst);
                     peer_connected2.store(false, std::sync::atomic::Ordering::SeqCst);
                     running2.store(false, std::sync::atomic::Ordering::SeqCst);
                     let _ = peer_closed_tx.send(true);
-                    info!("peer failed/closed, notified ws loop");
+                    info!(was_connected, "peer failed/closed, notified ws loop");
                 }
                 PeerConnectionEffect::Ignore => {}
             }

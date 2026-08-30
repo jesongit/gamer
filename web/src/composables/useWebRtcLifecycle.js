@@ -144,7 +144,9 @@ export function useWebRtcLifecycle({
         ws.onerror = () => reject(new Error('信令连接失败'))
       })
 
-      pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
+      // 不配 STUN：浏览器↔服务端同机/局域网直连走 host 候选即可（跨网不在
+      // 支持范围）；Google STUN 国内不可达，白等收集超时反而拖慢建连
+      pc = new RTCPeerConnection()
       onPeerCreated({ pc })
       pc.addTransceiver('video', { direction: 'recvonly' })
       pc.addTransceiver('audio', { direction: 'recvonly' })
