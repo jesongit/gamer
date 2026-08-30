@@ -708,6 +708,31 @@ impl ScrcpySession {
             let _ = self.send_start_control(pkg).await;
         }
     }
+
+    /// viewer 注册触发的冻结自愈入口：应用被 Greeze 冻结（挂机冻结 → 画面完全
+    /// 静止 → 编码器无帧可出、reset_video 也等不到 IDR）→ viewer 永远黑屏 →
+    /// 前端看门狗反复重连。检测到冻结（/proc stat 1s 零调度）后用 plain start
+    /// 捅醒（Activity Start 强制 THAW，应用原地恢复不重启），再走
+    /// watch_launch_freeze 复查兜底。应用没在跑 / 未冻结（健康静态屏）不动。
+    pub fn spawn_thaw_if_frozen(self: &Arc<Self>, pkg: &str) {
+        if !super::adb::is_safe_pkg(pkg) {
+            return;
+        }
+        let s = self.clone();
+        let pkg = pkg.to_string();
+        tokio::spawn(async move {
+            let Some(pid) = s.app_pidof(&pkg).await else {
+                return;
+            };
+            if !s.app_frozen(&pid).await {
+                return;
+            }
+            warn!(device = %s.device.name, pkg = %pkg,
+                "viewer connected but app frozen (greeze), poking with plain start to thaw");
+            let _ = s.send_start_control(&pkg).await;
+            s.watch_launch_freeze(&pkg).await;
+        });
+    }
 }
 
 fn parse_vd_res(s: &str) -> (u32, u32) {

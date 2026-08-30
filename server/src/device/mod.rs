@@ -748,6 +748,24 @@ impl DeviceManager {
         self.run_counts.lock().unwrap().contains_key(id)
     }
 
+    /// viewer 注册后的冻结自愈：应用被 Greeze 挂机冻结 → 画面完全静止 → 编码器
+    /// 无帧可出、reset_video 也等不到 IDR → viewer 黑屏 → 前端看门狗反复重连。
+    /// 脚本运行中跳过（脚本自管应用生命周期）；未配置应用包名跳过；其余交
+    /// session 探测冻结后 plain start 捅醒（Activity Start 强制 THAW，原地恢复）
+    pub fn poke_thaw_if_frozen(&self, id: &str) {
+        if self.has_running_scripts(id) {
+            return;
+        }
+        let map = self.devices.read();
+        let Some(rt) = map.get(id) else { return };
+        let Some(session) = rt.session.clone() else { return };
+        let Some(pkg) = rt.device.pkg.clone() else { return };
+        if pkg.trim().is_empty() {
+            return;
+        }
+        session.spawn_thaw_if_frozen(&pkg);
+    }
+
     /// 消费者出现（viewer 注册 / 脚本开始）：打断空闲计时；镜像模式若已
     /// 空闲关屏则立即唤醒（224 + dismiss-keyguard，幂等），避免 viewer 连上
     /// 黑屏等下一轮周期检查

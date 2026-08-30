@@ -173,6 +173,11 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                     info!(device = %device_id, viewer_id = %vs.viewer_id, "viewer registered");
                                     // 消费者出现：打断空闲低功耗计时（镜像模式若已关屏则唤醒）
                                     st.devices.notify_activity(&device_id);
+                                    // 冻结自愈：挂机 Greeze 冻结的应用 → 画面完全静止 →
+                                    // 编码器无帧可出（reset_video 也等不到 IDR）→ viewer
+                                    // 黑屏 → 前端看门狗反复重连。检测到冻结即 plain start
+                                    // 捅醒（应用原地恢复）；脚本运行中/未配 pkg 内部跳过
+                                    st.devices.poke_thaw_if_frozen(&device_id);
                                     let answer = vs.local_description();
                                     let _ = socket
                                         .send(Message::Text(json!({"type": "answer", "sdp": answer}).to_string()))
