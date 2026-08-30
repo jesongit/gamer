@@ -29,6 +29,11 @@ export const runRegistry = reactive({
   last: null,
 })
 
+// 本页面会话内已启动过应用的设备（Console 手动启动按钮 / 脚本 str_app 拉起）：
+// 投屏页「未启动应用」提示据此在重连（SPA 切页回来、看门狗重连）时不再打扰。
+// 模块级 Set 非响应式——只在事件回调里读写，不进模板。
+export const appStartedDevices = new Set()
+
 export function findRun(runId) {
   return (runId && runRegistry.byId[runId]) || null
 }

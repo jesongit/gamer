@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ref } from 'vue'
-import { altScopeFlags, PROJECTION_ALT_HINT, useRecording } from './composables/useRecording'
+import { useRecording } from './composables/useRecording'
 import { useScriptEditorShell } from './composables/useScriptEditorShell'
 import { serialize } from './script-editor/codec'
 import { api } from './api'
@@ -66,32 +66,6 @@ async function makeHarness({ templates = [], cropImpl, start = true, scriptRunni
   return el
 }
 
-describe('Alt 作用域拆分（plan §11.2）', () => {
-  it('三态真值表：altMode 开 + 非录制全开；录制中仅投屏 Alt 暂停；altMode 关全关', () => {
-    expect(altScopeFlags(true, false)).toEqual({ projection: true, template: true, crop: true })
-    expect(altScopeFlags(true, true)).toEqual({ projection: false, template: true, crop: true })
-    expect(altScopeFlags(false, false)).toEqual({ projection: false, template: false, crop: false })
-    expect(altScopeFlags(false, true)).toEqual({ projection: false, template: false, crop: false })
-  })
-
-  it('投屏 Alt 暂停的文案不是「已禁用」，而是「模板添加与取色仍可用」', () => {
-    expect(PROJECTION_ALT_HINT).toBe('投屏 Alt 暂停；模板添加与取色仍可用')
-  })
-
-  it('Console 静态接线：录制分支先于 Alt 分支，作用域 computed 与提示文案到位', () => {
-    const src = read('./views/Console.vue')
-    expect(src).toContain("import { useRecording, altScopeFlags, PROJECTION_ALT_HINT } from '../composables/useRecording'")
-    expect(src).toContain('const projectionAltEnabled = computed(() => altScopeFlags(altMode.value, recording.active).projection)')
-    expect(src).toContain('const templateAltEnabled = computed(() => altScopeFlags(altMode.value, recording.active).template)')
-    expect(src).toContain('const cropAltEnabled = computed(() => altScopeFlags(altMode.value, recording.active).crop)')
-    // 投屏 mouse 链路：录制分支在最前（录制中 Alt 特殊语义被透传取代）
-    const downFn = src.slice(src.indexOf('function onMouseDown'), src.indexOf('function onMouseMove'))
-    expect(downFn.indexOf('recording.active')).toBeGreaterThan(-1)
-    expect(downFn.indexOf('recording.active')).toBeLessThan(downFn.indexOf('isAltAction(e)'))
-    expect(downFn).toContain('e.button !== 0')
-  })
-})
-
 describe('录制入口与状态栏 / 离开保护（静态接线）', () => {
   const src = read('./views/Console.vue')
   const template = src.slice(0, src.indexOf('</template>'))
@@ -126,8 +100,6 @@ describe('录制入口与状态栏 / 离开保护（静态接线）', () => {
     expect(src).toContain('if (recording.busy || (scriptMode.value === \'edit\' && scriptShell.hasModel && scriptShell.dirty))')
     // 投屏链路丢失 → 取消手势并停止
     expect(src).toContain('recording.onLinkLost()')
-    // Alt 录制中走 onAltAdd 保序（buildOnly 构建纯步骤）
-    expect(src).toContain('recording.altAdd(')
   })
 
   it('shell 扩展与 ScriptRunner 画布锁到位', () => {
@@ -137,7 +109,6 @@ describe('录制入口与状态栏 / 离开保护（静态接线）', () => {
     const runner = read('./components/console/ScriptRunner.vue')
     expect(runner).toContain('ctx.recording.uploading')
     expect(runner).toContain('class="canvas-lock"')
-    expect(runner).toContain('ctx.altHint')
   })
 })
 

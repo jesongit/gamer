@@ -31,17 +31,6 @@ import { lit } from '../script-editor/model'
 import { resolveStepList } from '../script-editor/commands'
 import { breadcrumb, findStepLocation } from '../script-editor/selection'
 
-/** Alt 作用域拆分（plan §11.2）：录制中投屏 Alt 特殊语义暂停，模板/取色 Alt 保留。 */
-export function altScopeFlags(altModeActive, recordingActive) {
-  return {
-    projection: !!altModeActive && !recordingActive,
-    template: !!altModeActive,
-    crop: !!altModeActive,
-  }
-}
-
-export const PROJECTION_ALT_HINT = '投屏 Alt 暂停；模板添加与取色仍可用'
-
 const SWIPE_THROW_MSG = '未找到滑动起点'
 const SWIPE_TIMEOUT = '30s'
 const TERMINAL_STATES = new Set(['ready', 'discarded'])
@@ -708,6 +697,5 @@ export function useRecording({
     altAdd, confirmCrop, downgrade, discard, retry,
     shortNameTaken, nextShortName, regionOf, computeSearchRect,
     buildFindStep, buildSwipeMatchStep, buildTapStep, buildAltSwipeStep, buildColorStep,
-    PROJECTION_ALT_HINT,
   })
 }

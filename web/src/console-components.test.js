@@ -75,16 +75,17 @@ describe('Console 视觉组件拆分静态回归', () => {
     // 顶部「运行」恒从头跑），起点只经 run-from 事件直发，不得回潮
     expect(consoleSource).not.toContain('toggleRunStart')
     expect(consoleSource).not.toContain('runStartUuid')
-    // 保存走 shell（expected_version + 409 冲突回调），Alt 操作经 shell 生成类型化步骤
+    // 保存走 shell（expected_version + 409 冲突回调）
     expect(consoleSource).toContain('scriptShell.save()')
     expect(consoleSource).toContain('function onConflictReload(')
     expect(consoleSource).toContain('function onConflictOverwrite(')
-    expect(consoleSource).toContain('scriptShell.insertTapAt(')
-    expect(consoleSource).toContain('scriptShell.insertSwipeBetween(')
-    // 模板列表 alt 点文件名生成 find 已随可视化编辑移除（2026-08-30 用户决策），
-    // 插入 find 步骤统一走编辑器画布；不得回潮
-    expect(consoleSource).not.toContain('scriptShell.insertFindTemplate(')
-    expect(consoleSource).toContain('scriptShell.insertColorCheck(')
+    // alt 模式已整体移除（2026-08-31 用户决策：投屏 Alt 点击/滑动生成步骤、二次裁切
+    // Alt 取色均无使用场景），取值改走步骤编辑器的选坐标/屏幕选色按钮；不得回潮
+    expect(consoleSource).not.toContain('scriptShell.insertTapAt(')
+    expect(consoleSource).not.toContain('scriptShell.insertSwipeBetween(')
+    expect(consoleSource).not.toContain('scriptShell.insertColorCheck(')
+    expect(consoleSource).not.toContain('altMode')
+    expect(consoleSource).not.toContain('isAltAction')
     // opRecords 文本拼接路径停用：无 opRecords / renderOpTpl / DEFAULT_OP_TPL 残留
     expect(consoleSource).not.toContain('opRecords')
     expect(consoleSource).not.toContain('renderOpTpl')

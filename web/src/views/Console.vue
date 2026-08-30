@@ -46,7 +46,6 @@
         <span class="mono">录制到：{{ recording.targetLabel }}</span>
         <span class="mono">待处理 {{ recording.pendingCount }}</span>
         <span v-if="recording.failedCount" class="rec-bar-err">失败 {{ recording.failedCount }}</span>
-        <span v-if="altMode" class="mono rec-alt-hint" :title="PROJECTION_ALT_HINT">{{ PROJECTION_ALT_HINT }}</span>
         <button class="btn btn-sm" :disabled="recording.phase === 'stopping'" data-test="recording-stop" @click="recording.stop()">■ 停止</button>
       </div>
 
@@ -66,9 +65,6 @@
         :hit-label="hitLabel"
         :selecting="selecting"
         :sel-style="selStyle"
-        :alt-feedback="altFeedback"
-        :alt-tap-style="altTapStyle"
-        :alt-feedback-style="altFeedbackStyle"
         :script-fx="scriptFx"
         :fx-tap-style="fxTapStyle"
         :fx-swipe-style="fxSwipeStyle"
@@ -87,11 +83,9 @@
       />
 
       <!-- 未启动应用提示：连接不再自动启动应用，画面停在桌面/黑屏时容易被误以为卡住。
-           点「启动应用」或 ✕ 关闭；每次重新连接重新出现 -->
+           纯提示无按钮；显示几秒自动消失，应用已启动（手动/脚本拉起）或脚本运行中不出现 -->
       <div v-if="connected && !appHintDismissed" class="app-hint">
         <span>已连接。未启动应用时画面停在桌面/黑屏</span>
-        <button class="btn btn-sm btn-primary" @click="launchGame">🚀 启动应用</button>
-        <button class="btn btn-sm btn-ghost" title="本次连接不再提示" @click="appHintDismissed = true">✕</button>
       </div>
     </div>
 
@@ -148,7 +142,7 @@ const APP_CACHE_TTL = 5 * 60 * 1000
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, inject, provide } from 'vue'
 import { pinyin } from 'pinyin-pro'
 import { useRouter } from 'vue-router'
-import { store, devicesData, scriptsData, templatesData, useToast, applyRunRecord, findRun, beginCancel, resetStoreRunState, pushRunConflict } from '../store'
+import { store, devicesData, scriptsData, templatesData, useToast, applyRunRecord, findRun, beginCancel, resetStoreRunState, pushRunConflict, appStartedDevices } from '../store'
 import { api, runPartitionImport } from '../api'
 import {
   sourceLabel, terminalLabel,
@@ -167,8 +161,9 @@ import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
 import { useScriptEditorShell } from '../composables/useScriptEditorShell'
 import { useFunctionLibrary } from '../composables/useFunctionLibrary'
 import { useRunArgsFlow } from '../composables/useRunArgsFlow'
-import { useRecording, altScopeFlags, PROJECTION_ALT_HINT } from '../composables/useRecording'
-import { parseScript } from '../script-editor/codec'
+import { useRecording } from '../composables/useRecording'
+import { parseScript, parseFunctionLibrary } from '../script-editor/codec'
+import { SE_TARGET_OPTIONS } from '../script-editor/targets'
 import { startIndexOf } from '../script-editor/selection'
 import {
   defaultTemplateName,
@@ -235,8 +230,25 @@ let renderFpFrozen = 0
 let lastDragInputAt = 0
 let stallResetSent = false
 let blackResetSent = false
-// 未启动应用提示（app-hint）：每次连接重新出现；点启动/关闭后本次连接不再显示
+// 未启动应用提示（app-hint）：连接时出现、显示几秒自动消失（纯提示无按钮）。
+// 应用已启动（手动点过启动按钮 / 脚本 str_app 拉起——按设备记入共享 store，
+// 跨 SPA 切页存活）或脚本运行中则完全不出现
+const APP_HINT_AUTO_CLOSE_MS = 5000
 const appHintDismissed = ref(false)
+let appHintTimer = null
+watch(connected, (on) => {
+  if (appHintTimer) { clearTimeout(appHintTimer); appHintTimer = null }
+  if (!on) return
+  appHintTimer = setTimeout(() => {
+    appHintTimer = null
+    appHintDismissed.value = true
+  }, APP_HINT_AUTO_CLOSE_MS)
+})
+watch(() => store.running, (running) => {
+  if (!running) return
+  if (store.deviceId) appStartedDevices.add(store.deviceId)
+  appHintDismissed.value = true
+})
 let fpCanvas = null
 let fpCtx = null
 const selScript = ref('')
@@ -305,11 +317,91 @@ const funcSummaryError = computed(() => {
 })
 // 编辑态辅助 UI 开关
 const showYaml = ref(false)
-const showExtras = ref(false)
 // 模板短名候选（画布 tmpl 控件 datalist）
 const templateNames = computed(() =>
   templatesData.value.filter(t => t.pkg === activePkg.value).map(t => tplShortName(t.name)))
 watch(activePkg, pkg => { fnLib.refresh(pkg) })
+
+// ---------- call/func 目标候选与参数解析（编辑态画布下拉 + args 自动生成，同独立脚本页） ----------
+// func 参数直接从 fnLib.list 的文件内容解析（按内容版本 memo）；call 拉脚本内容按 id 缓存。
+
+const callScriptOptions = computed(() => {
+  if (!activePkg.value) return []
+  return scriptsData.value
+    .filter(s => s.package === activePkg.value && !(s.id === scriptShell.resourceId && scriptShell.kind === 'script'))
+    .map(s => ({ target: s.name, label: String(s.name || '').replace(/\.(ya?ml)$/i, '') }))
+})
+
+/** func 候选文件：正在编辑的函数库文件以画布实时模型为准（未保存的新增/改名函数立即可选），
+ *  其余文件用磁盘顶层函数名清单（fnLib 列表快照）。 */
+const funcFileOptions = computed(() => {
+  const live = scriptShell.kind === 'function_library' && scriptShell.hasModel && Array.isArray(scriptShell.model.functions)
+    ? scriptShell.model.functions.map(f => f.name)
+    : null
+  return fnLib.list.map(f => ({
+    file: f.file,
+    functions: live && f.id === scriptShell.resourceId ? live : (Array.isArray(f.functions) ? f.functions : []),
+  }))
+})
+
+const callParamsCache = new Map() // script id → ParamDecl[] | null
+const fnParamsMemo = new Map() // `<file>@<内容版本>` → Map(函数名 → ParamDecl[])
+
+function funcParamsFor(target) {
+  const s = String(target || '')
+  const i = s.indexOf('/')
+  if (i <= 0 || i === s.length - 1) return null
+  const file = s.slice(0, i)
+  const fn = s.slice(i + 1)
+  const entry = fnLib.list.find(f => f.file === file)
+  if (!entry || !entry.content) return null
+  const memoKey = `${file}@${entry.version || entry.content.length}`
+  let byName = fnParamsMemo.get(memoKey)
+  if (!byName) {
+    const parsed = parseFunctionLibrary(entry.content, { file })
+    byName = new Map((parsed.model?.functions || []).map(f => [f.name, f.params || []]))
+    fnParamsMemo.set(memoKey, byName)
+  }
+  return byName.has(fn) ? byName.get(fn) : null
+}
+
+function resolveTargetParamsSync(kind, target) {
+  if (!target) return null
+  if (kind === 'func') return funcParamsFor(target)
+  return callParamsCache.get(target) ?? null
+}
+
+async function resolveTargetParams(kind, target) {
+  if (!target) return null
+  if (kind === 'func') return funcParamsFor(target)
+  if (callParamsCache.has(target)) return callParamsCache.get(target)
+  const script = scriptsData.value.find(x => x.package === activePkg.value && x.name === target)
+  if (!script) return null
+  try {
+    const full = await api.getScript(script.id)
+    const parsed = parseScript(full.content ?? '')
+    const params = parsed.model?.params || []
+    callParamsCache.set(script.id, params)
+    return params
+  } catch {
+    return null
+  }
+}
+
+function clearCallParamsCache() {
+  callParamsCache.clear()
+}
+function resolveTargetSync(kind, target) {
+  const params = resolveTargetParamsSync(kind, target)
+  return params ? { params } : null
+}
+
+provide(SE_TARGET_OPTIONS, reactive({
+  callScripts: callScriptOptions,
+  funcFiles: funcFileOptions,
+  resolveParams: resolveTargetParams,
+  resolveParamsSync: resolveTargetParamsSync,
+}))
 
 // ---------- 录制接线（阶段 6，plan §11）：核心服务在 web/src/recording/，本层只做接入 ----------
 // 指针坐标换算（帧原始尺寸基准）、触控发送（move 走 rAF 合并）、冻结帧注入 useRecording；
@@ -362,21 +454,6 @@ const recordingCropContext = {
   computeSearchRect: (item, rect, adjusted) => recording.computeSearchRect(item, rect, adjusted),
 }
 
-// ---------- alt 模式（编辑态把投屏/模板/取色操作生成为类型化步骤插入当前锚点） ----------
-// alt 模式：仅在脚本编辑模式生效；开启后模板/投屏点击只生成类型化步骤，不发送控制指令
-const altMode = ref(false)
-// Alt 作用域拆分（plan §11.2）：录制中投屏 Alt 特殊语义忽略（按录制透传处理），
-// 模板 Alt 与二次裁切取色 Alt 保持可用；文案见 PROJECTION_ALT_HINT
-const projectionAltEnabled = computed(() => altScopeFlags(altMode.value, recording.active).projection)
-const templateAltEnabled = computed(() => altScopeFlags(altMode.value, recording.active).template)
-const cropAltEnabled = computed(() => altScopeFlags(altMode.value, recording.active).crop)
-// 录制中投屏 Alt 暂停的提示文案（alt 按钮 title 与录制状态栏共用）
-const altHint = computed(() => (recording.active && altMode.value) ? PROJECTION_ALT_HINT : '')
-// alt 手势（点击/滑动投屏时记录，不发送控制指令）
-const altGesture = reactive({ active: false, moved: false, start: { x: 0, y: 0 }, last: { x: 0, y: 0 }, startT: 0 })
-// alt 模式点击/滑动画面反馈（点击圆点 / 滑动 region 框）
-const altFeedback = reactive({ show: false, kind: '', x: 0, y: 0, w: 0, h: 0 })
-let altFeedbackTimer = null
 // 脚本运行可视化效果：服务端经 control DataChannel 推送 tap/swipe/hit/miss 事件（设备像素坐标），
 // 与手动 alt 反馈状态独立（脚本运行时用户仍可手动操作，两类效果互不覆盖）
 const scriptFx = reactive({
@@ -425,7 +502,16 @@ const loupe = reactive({ show: false, x: 0, y: 0, zoom: 2.5 })
 const loupeCanvas = ref(null)
 
 const webrtcLifecycle = useWebRtcLifecycle({
-  api,
+  // 包一层 connectDevice：捕获服务端 app_started（建会话探测/会话内启动过应用），
+  // 手动连接与自动重连两条路径都能及时把设备记入「已启动」，抑制未启动提示
+  api: {
+    ...api,
+    connectDevice: async (id) => {
+      const rep = await api.connectDevice(id)
+      if (rep?.app_started && id) appStartedDevices.add(id)
+      return rep
+    },
+  },
   deviceIdRef: computed(() => store.deviceId),
   connectedRef: connected,
   connectingRef: connecting,
@@ -465,7 +551,9 @@ const webrtcLifecycle = useWebRtcLifecycle({
     controlChannel = webrtcLifecycle.getControlChannel()
     videoConnectTs = Date.now()
     blackResetSent = false
-    appHintDismissed.value = false
+    // 该设备本会话已启动过应用（手动/脚本拉起/脚本仍在运行）→ 重连不再弹提示
+    appHintDismissed.value = store.running
+      || (store.deviceId ? appStartedDevices.has(store.deviceId) : false)
     sendControl({ type: 'audio', on: !audioMuted.value })
     toast('WebRTC 连接建立', 'success')
   },
@@ -935,37 +1023,7 @@ const hitStyle = computed(() => {
   return { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' }
 })
 
-/** alt 模式点击圆点位置（设备坐标 → 显示坐标） */
-const altTapStyle = computed(() => {
-  if (!altFeedback.show || altFeedback.kind !== 'tap') return {}
-  const vw = videoWrap.value
-  if (!vw) return {}
-  const rect = vw.getBoundingClientRect()
-  const vw_ = rect.width, vh = rect.height
-  const sw = videoElement.value?.videoWidth || 1920
-  const sh = videoElement.value?.videoHeight || 1080
-  const ratio = Math.min(vw_ / sw, vh / sh)
-  const x = (altFeedback.x * ratio) + (vw_ - sw * ratio) / 2
-  const y = (altFeedback.y * ratio) + (vh - sh * ratio) / 2
-  return { left: x + 'px', top: y + 'px' }
-})
 
-/** alt 模式滑动 region 框位置（设备坐标 → 显示坐标） */
-const altFeedbackStyle = computed(() => {
-  if (!altFeedback.show || altFeedback.kind !== 'region') return {}
-  const vw = videoWrap.value
-  if (!vw) return {}
-  const rect = vw.getBoundingClientRect()
-  const vw_ = rect.width, vh = rect.height
-  const sw = videoElement.value?.videoWidth || 1920
-  const sh = videoElement.value?.videoHeight || 1080
-  const ratio = Math.min(vw_ / sw, vh / sh)
-  const w = altFeedback.w * ratio
-  const h = altFeedback.h * ratio
-  const x = (altFeedback.x * ratio) + (vw_ - sw * ratio) / 2
-  const y = (altFeedback.y * ratio) + (vh - sh * ratio) / 2
-  return { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' }
-})
 
 /** 设备像素矩形 → 显示坐标样式（object-fit: contain 的 letterbox 映射；脚本事件效果用） */
 function deviceRectStyle(x, y, w = 0, h = 0) {
@@ -1352,24 +1410,9 @@ function onMouseDown(e) {
     recording.onPointerDown(m)
     return
   }
-  // alt 模式/按住 Alt：点击/滑动只生成操作记录，不发送控制指令
-  // （Alt 作用域拆分 §11.2：投屏 Alt 生效条件 = isAltAction && !recording —— 录制中上方
-  // 分支已按录制透传处理并返回；模板 Alt 与取色 Alt 不受影响，仍按 altMode 生效）
-  if (isAltAction(e) && !recording.active && connected.value) {
-    const { x, y } = toDeviceCoord(e.clientX, e.clientY)
-    altGesture.active = true
-    altGesture.moved = false
-    altGesture.start = { x, y }
-    altGesture.last = { x, y }
-    altGesture.startT = Date.now()
-    // 先显示点击位置，滑动时再切换成 region 框
-    if (altFeedbackTimer) clearTimeout(altFeedbackTimer)
-    altFeedback.show = true
-    altFeedback.kind = 'tap'
-    altFeedback.x = x
-    altFeedback.y = y
-    altFeedback.w = 0
-    altFeedback.h = 0
+  // 步骤编辑器取点/取色模式：本次画面点击被消费（不透传触控）
+  if (cellPick.mode && connected.value) {
+    finishCellPick(e)
     return
   }
   if (picking.value && connected.value) {
@@ -1396,28 +1439,15 @@ function onMouseMove(e) {
     if (m) recording.onPointerMove(m)
     return
   }
-  if (altGesture.active) {
-    const { x, y } = toDeviceCoord(e.clientX, e.clientY)
-    if (Math.abs(x - altGesture.last.x) + Math.abs(y - altGesture.last.y) > 6) {
-      altGesture.last = { x, y }
-      altGesture.moved = true
-    }
-    // 拖动时实时显示 region 框（起点 → 当前点）
-    if (altGesture.moved) {
-      altFeedback.show = true
-      altFeedback.kind = 'region'
-      altFeedback.x = Math.min(altGesture.start.x, x)
-      altFeedback.y = Math.min(altGesture.start.y, y)
-      altFeedback.w = Math.abs(x - altGesture.start.x)
-      altFeedback.h = Math.abs(y - altGesture.start.y)
-    }
-    return
-  }
   if (selecting.value) {
     const rect = videoWrap.value.getBoundingClientRect()
     selEnd.x = e.clientX - rect.left
     selEnd.y = e.clientY - rect.top
     updateLoupe(e.clientX, e.clientY, toDeviceCoord(e.clientX, e.clientY), 2.5, [selToDeviceRect()])
+    return
+  }
+  if (cellPick.mode) {
+    updateLoupe(e.clientX, e.clientY, toDeviceCoord(e.clientX, e.clientY), 3, [])
     return
   }
   if (picking.value) {
@@ -1446,16 +1476,6 @@ function onMouseUp(e) {
     if (m) recording.onPointerUp(m)
     return
   }
-  if (altGesture.active) {
-    const { x, y } = toDeviceCoord(e.clientX, e.clientY)
-    const start = altGesture.start
-    const moved = altGesture.moved || Math.hypot(x - start.x, y - start.y) > 8
-    const dur = Math.max(50, Date.now() - altGesture.startT)
-    altGesture.active = false
-    if (moved) setSwipeRecords(start, { x, y }, dur)
-    else setTapRecord({ x, y })
-    return
-  }
   if (selecting.value) {
     selecting.value = false
     picking.value = false
@@ -1475,9 +1495,6 @@ function onMouseUp(e) {
 /** 鼠标离开投屏区域时终止未完成的 alt 手势/录制手势，避免卡在记录模式 */
 function onVideoMouseLeave() {
   hideLoupe()
-  if (altGesture.active) altGesture.active = false
-  if (altFeedbackTimer) clearTimeout(altFeedbackTimer)
-  altFeedback.show = false
   if (recording.active) recording.cancelGesture('leave') // pointercancel/失焦同路径：UP 兜底 + 清理
 }
 
@@ -1653,34 +1670,8 @@ function cropEventDev(e) {
   }
 }
 
-/** 二次裁切底图（冻结的框选画面）上 alt 点击 → 取色生成 color 颜色判断步骤：
- *  颜色直接从 cropBaseCanvas 采样（所见即所得，同步生成无延迟）；
- *  点击点在底图上的设备坐标 = p + (originX, originY)，换算成相对坐标写入 color 步骤。
- *  阶段 4：不再拼接 YAML 文本，直接生成类型化 ColorStep 插入当前编辑锚点 */
-function cropPickColor(e) {
-  const p = cropEventDev(e)
-  const base = cropBaseCanvas
-  const px = Math.max(0, Math.min(base.width - 1, Math.round(p.x)))
-  const py = Math.max(0, Math.min(base.height - 1, Math.round(p.y)))
-  const g = base.getContext('2d', { willReadFrequently: true })
-  const d = g.getImageData(px, py, 1, 1).data
-  const hex = [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('')
-  const vw = crop.imgW || 1920
-  const vh = crop.imgH || 1080
-  const rx = (crop.originX + px) / vw
-  const ry = (crop.originY + py) / vh
-  insertAltStep(() => scriptShell.insertColorCheck([rx, ry], hex), `颜色判断 ${hex} @ (${rx.toFixed(4)}, ${ry.toFixed(4)})`, () => recording.buildColorStep([rx, ry], hex))
-}
 
 function cropMouseDown(e) {
-  // Alt/alt 模式点击 → 取色生成 color 颜色判断记录（底图坐标 = 冻结的框选画面，
-  // 颜色直接从 cropBaseCanvas 采样——与服务端截图同源 YUV→RGB 体系有差异，
-  // 但二次裁切底图就是浏览器画面本身，此处取的是"所见即所得"）
-  if (isAltAction(e) && cropBaseCanvas) {
-    cropPickColor(e)
-    e.preventDefault()
-    return
-  }
   const p = cropEventDev(e)
   const r = crop.rect
   const HIT = 12 / (cropCanvas.value.width / crop.baseW) // 底图像素命中半径
@@ -1878,6 +1869,7 @@ function launchGame() {
   if (!connected.value) return toast('请先连接设备', 'error')
   if (!currentPkg.value) return toast('该设备未配置应用包名', 'warn')
   sendControl({ type: 'start_app', app: currentPkg.value })
+  if (store.deviceId) appStartedDevices.add(store.deviceId)
   appHintDismissed.value = true
   toast(`正在启动 ${currentPkg.value}…`, 'info')
 }
@@ -1895,11 +1887,6 @@ function onTplRowClick(e, t) {
 /** 模板列表缩略图：alt（按住 Alt / alt 模式）→ 复制模板名；普通 → 查看大图 */
 async function onTplThumbClick(e, t) {
   confirmDelTpl.value = null
-  if (isAltAction(e)) {
-    const ok = await copyText(t.name)
-    toast(ok ? `已复制 ${t.name}` : '复制失败', ok ? 'success' : 'warn')
-    return
-  }
   openTplView(t.name)
 }
 
@@ -1907,6 +1894,87 @@ async function onTplThumbClick(e, t) {
 provide('tplPreviewUrl', (short) => {
   const full = templatesData.value.find(t => t.pkg === activePkg.value && tplShortName(t.name) === short)?.name
   return api.tplImageUrl(full || short, activePkg.value)
+})
+
+// ---------- 步骤编辑器取值工具（CellEditor inject('seCellTools')）：投屏选点/选色/框选 ----------
+// 选点/选色为单次点击模式：进入后下一次画面点击解析坐标/颜色（选色走放大镜），Esc 取消；
+// 框选复用模板页签的既有流程（进入框选 → 二次裁切 → 上传），完成后模板下拉自动可见新模板。
+
+const cellPick = reactive({ mode: null, resolve: null }) // mode: 'coord' | 'color'
+
+function beginCellPick(mode) {
+  if (!connected.value) {
+    toast('请先连接设备', 'error')
+    return Promise.resolve(null)
+  }
+  if (cellPick.mode) cellPick.resolve?.(null)
+  return new Promise((resolve) => {
+    cellPick.mode = mode
+    cellPick.resolve = resolve
+    toast(mode === 'color' ? '在画面上点击取色（Esc 取消）' : '在画面上点击选点（Esc 取消）', 'info')
+  })
+}
+
+function cancelCellPick() {
+  if (cellPick.mode) {
+    cellPick.resolve?.(null)
+    cellPick.mode = null
+    cellPick.resolve = null
+  }
+  hideLoupe()
+}
+
+/** 从当前视频帧采样设备像素颜色 → 6 位 hex（画面不可用返回 null） */
+function samplePixelHex(devX, devY) {
+  const v = videoElement.value
+  if (!v?.videoWidth) return null
+  const c = document.createElement('canvas')
+  c.width = 1
+  c.height = 1
+  const ctx = c.getContext('2d')
+  ctx.drawImage(v, Math.round(devX), Math.round(devY), 1, 1, 0, 0, 1, 1)
+  const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data
+  return [r, g, b].map(n => n.toString(16).padStart(2, '0')).join('')
+}
+
+/** 视频画面点击 → 结束取点模式：coord 回相对坐标，color 回采样 hex */
+function finishCellPick(e) {
+  const v = videoElement.value
+  const pt = toDeviceCoord(e.clientX, e.clientY)
+  const mode = cellPick.mode
+  cellPick.mode = null
+  const resolve = cellPick.resolve
+  cellPick.resolve = null
+  hideLoupe()
+  if (!v?.videoWidth) {
+    resolve?.(null)
+    toast('设备画面不可用', 'warn')
+    return
+  }
+  if (mode === 'coord') {
+    resolve?.({ x: Number((pt.x / v.videoWidth).toFixed(4)), y: Number((pt.y / v.videoHeight).toFixed(4)) })
+  } else if (mode === 'color') {
+    const hex = samplePixelHex(pt.x, pt.y)
+    if (hex) resolve?.({ hex, x: pt.x, y: pt.y })
+    else { resolve?.(null); toast('取色失败：画面不可用', 'warn') }
+  }
+}
+
+provide('seCellTools', {
+  pickCoord: () => beginCellPick('coord'),
+  pickColor: () => beginCellPick('color'),
+  /** 框选生成新模板：切到模板页签并进入框选，用户走既有 二次裁切→上传 流程，
+   *  上传成功后 templatesData 刷新，CellEditor 模板下拉即可选到新模板 */
+  captureTemplate: () => {
+    if (!connected.value) {
+      toast('请先连接设备', 'error')
+      return Promise.resolve(null)
+    }
+    panelTab.value = 'tpl'
+    picking.value = true
+    toast('在画面上框选模板区域，完成后保存模板', 'info')
+    return Promise.resolve(null)
+  },
 })
 
 /** 模板列表文件名点击：查看大图（alt 生成 find 已随可视化编辑移除，插入步骤走编辑器） */
@@ -2036,7 +2104,9 @@ function fileToBase64(file) {
 /** 全局按键：Esc 关闭设备设置弹窗 / 模板大图 / 取消删除确认 */
 function onGlobalKeydown(e) {
   if (e.key !== 'Escape') return
-  if (settingsOpen.value) {
+  if (cellPick.mode) {
+    cancelCellPick()
+  } else if (settingsOpen.value) {
     cancelSettings()
   } else if (viewTpl.value) {
     closeTplView()
@@ -2053,40 +2123,9 @@ function pushLog(level, msg) {
   scrollLogsToBottom()
 }
 
-/** 重置 alt 模式相关状态（进入/退出编辑模式时调用） */
-function resetAltState() {
-  altMode.value = false
-  altGesture.active = false
-  if (altFeedbackTimer) clearTimeout(altFeedbackTimer)
-  altFeedback.show = false
-}
 
-/** alt 模式切换按钮：只在编辑模式生效 */
-function toggleAltMode() {
-  if (scriptMode.value !== 'edit') return
-  altMode.value = !altMode.value
-}
 
-/** 当前是否应把模板/投屏操作转为类型化步骤（编辑模式 + 按住 Alt 或 alt 模式开启） */
-function isAltAction(e) {
-  return scriptMode.value === 'edit' && (altMode.value || (e && e.altKey))
-}
 
-/** Alt 生成步骤统一入口：仅编辑态且有模型时插入当前锚点（与「添加步骤」面板同源）；
- *  录制中改走 recording.altAdd（锁定锚点保序占位，不进上传队列，plan §11.8）——
- *  此时传 buildOnly 构建纯步骤（不落模型），由录制链路统一插入。
- *  plan §10：非录制状态 Alt 投屏记录保留，插入当前锚点可撤销 */
-function insertAltStep(make, label, buildOnly) {
-  if (scriptMode.value !== 'edit' || !scriptShell.hasModel) {
-    toast('进入脚本编辑态后，Alt 操作才会插入类型化步骤', 'warn')
-    return false
-  }
-  if (recording.active) return recording.altAdd(buildOnly ? buildOnly() : null, label)
-  const ok = make()
-  if (ok) toast(`${label} 已插入当前锚点`, 'success')
-  else toast('插入失败：锚点不可用', 'error')
-  return ok
-}
 
 /** 从模板名解析 #x1_y1_x2_y2（相对坐标 ×1000 存 3 位整数，如 123→0.123），返回 [x1,y1,x2,y2] 或 null */
 function parseTplRegion(name) {
@@ -2164,41 +2203,8 @@ function templateRegionPixels(name) {
   return null
 }
 
-/** 显示 alt 模式画面反馈（2 秒后自动消失） */
-function showAltFeedback(kind, x, y, w = 0, h = 0) {
-  altFeedback.show = true
-  altFeedback.kind = kind
-  altFeedback.x = x
-  altFeedback.y = y
-  altFeedback.w = w
-  altFeedback.h = h
-  if (altFeedbackTimer) clearTimeout(altFeedbackTimer)
-  altFeedbackTimer = setTimeout(() => { altFeedback.show = false }, 2000)
-}
 
-/** 投屏点击（alt 模式）→ 生成 tap 类型化步骤插入当前锚点（color 取色在二次裁切区，见 cropPickColor） */
-function setTapRecord(p) {
-  const vw = videoElement.value?.videoWidth || 1920
-  const vh = videoElement.value?.videoHeight || 1080
-  showAltFeedback('tap', p.x, p.y)
-  const x = p.x / vw
-  const y = p.y / vh
-  insertAltStep(() => scriptShell.insertTapAt(x, y), `点击 (${x.toFixed(4)}, ${y.toFixed(4)})`, () => recording.buildTapStep(x, y))
-}
 
-/** 投屏滑动（alt 模式）→ 生成 swipe 类型化步骤（time 用实际滑动时长 ms） */
-function setSwipeRecords(from, to, durationMs) {
-  const vw = videoElement.value?.videoWidth || 1920
-  const vh = videoElement.value?.videoHeight || 1080
-  const rx = Math.min(from.x, to.x)
-  const ry = Math.min(from.y, to.y)
-  const rw = Math.abs(to.x - from.x)
-  const rh = Math.abs(to.y - from.y)
-  showAltFeedback('region', rx, ry, rw, rh)
-  const f = [from.x / vw, from.y / vh]
-  const t = [to.x / vw, to.y / vh]
-  insertAltStep(() => scriptShell.insertSwipeBetween(f, t, durationMs), `滑动 (${f[0].toFixed(4)}, ${f[1].toFixed(4)}) → (${t[0].toFixed(4)}, ${t[1].toFixed(4)})`, () => recording.buildAltSwipeStep(f, t, durationMs))
-}
 
 /** 退出编辑（脏模型需确认丢弃）；若处于跳转栈中先返回上一资源。
  *  录制忙（录制中/停止中/有未完成草稿）时阻止退出——占位与草稿锚定当前模型（plan §11.3）。
@@ -2213,8 +2219,6 @@ async function cancelEditScript() {
   scriptShell.reset()
   scriptMode.value = 'run'
   showYaml.value = false
-  showExtras.value = false
-  resetAltState()
 }
 
 /** 新建脚本：空 ScriptModel（保存时落盘到当前应用分区） */
@@ -2222,8 +2226,6 @@ function startNewScript() {
   if (!activePkg.value) return toast('请先选择应用分区（设备页签配置应用包名）', 'warn')
   scriptMode.value = 'edit'
   showYaml.value = false
-  showExtras.value = false
-  resetAltState()
   scriptShell.newScript({ name: '新脚本.yml', pkg: activePkg.value })
 }
 
@@ -2234,8 +2236,6 @@ async function editCurrentTarget() {
   if (!f) return toast('请先选择函数库文件', 'error')
   scriptMode.value = 'edit'
   showYaml.value = false
-  showExtras.value = false
-  resetAltState()
   try {
     await scriptShell.loadFunctionFile(f.id)
   } catch (e) {
@@ -2253,8 +2253,6 @@ function startNewTarget() {
   if (!raw || !raw.trim()) return
   scriptMode.value = 'edit'
   showYaml.value = false
-  showExtras.value = false
-  resetAltState()
   scriptShell.newFunctionFile({ file: raw.trim(), pkg: activePkg.value })
 }
 
@@ -2280,8 +2278,6 @@ async function editCurrentScript() {
   if (!s) return toast('请先选择脚本', 'error')
   scriptMode.value = 'edit'
   showYaml.value = false
-  showExtras.value = false
-  resetAltState()
   try {
     await scriptShell.loadScript(s.id)
   } catch (e) {
@@ -2299,6 +2295,7 @@ async function deleteCurrentScript() {
   try {
     await api.deleteScript(s.id)
     await loadData()
+    clearCallParamsCache()
     if (selScript.value === s.id) selScript.value = ''
     toast('脚本已删除', 'success')
   } catch (e) {
@@ -2356,6 +2353,7 @@ async function saveEditScript() {
   if (!scriptShell.pkg && !activePkg.value) return toast('请先选择应用分区', 'warn')
   const r = await scriptShell.save()
   if (r.ok) {
+    clearCallParamsCache()
     await afterScriptSaved(r.result)
   } else if (r.reason === 'invalid') {
     toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
@@ -2381,6 +2379,11 @@ async function autoSave() {
   const wasNew = !scriptShell.resourceId
   const r = await scriptShell.save({ suppressConflict: true })
   if (r.ok) {
+    clearCallParamsCache()
+    // 函数库落盘后刷新文件清单（call/func 下拉与运行区函数下拉共用）；
+    // 新建脚本落盘后刷新脚本列表（call 目标下拉候选）
+    if (scriptShell.kind === 'function_library') await fnLib.refresh(activePkg.value)
+    else if (wasNew) await loadData()
     if (wasNew) selScript.value = scriptShell.resourceId // 首次落盘：运行区选择跟随
   } else if (r.reason === 'invalid') {
     toast('自动保存未通过：' + (r.diagnostics?.[0]?.message || '存在校验问题'), 'warn')
@@ -2406,8 +2409,6 @@ async function afterScriptSaved(rep) {
   scriptShell.reset()
   scriptMode.value = 'run'
   showYaml.value = false
-  showExtras.value = false
-  resetAltState()
   toast('脚本已保存', 'success')
 }
 
@@ -2537,8 +2538,6 @@ async function openScriptTarget({ kind, target }) {
   if (!id) return toast(`跳转目标不存在：${target}`, 'warn')
   scriptMode.value = 'edit'
   showYaml.value = false
-  showExtras.value = false
-  resetAltState()
   try {
     if (kind === 'call') await scriptShell.jumpToScript(id)
     else await scriptShell.jumpToFunctionFile(id)
@@ -2797,11 +2796,13 @@ const scriptRunnerContext = {
   // 运行参数表单（阶段 5）：脚本声明 params 时点运行/从此运行弹出
   runArgsFlow, onRunArgsSubmit,
   // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调 + Alt 录制开关
-  shell: scriptShell, saveEditScript, cancelEditScript, altMode, toggleAltMode,
-  showYaml, showExtras, templateNames, jumpBack,
+  shell: scriptShell, saveEditScript, cancelEditScript,
+  showYaml, templateNames, jumpBack,
   onConflictReload, onConflictOverwrite, onConflictDismiss,
+  // call/func 目标实参类型回显（同步缓存命中形态），ScriptRunner 经 ctx 传给画布
+  resolveTargetSync,
   // 录制（阶段 6）：上传进行中锁画布（占位不可跨分支拖动）+ 投屏 Alt 暂停提示
-  recording, altHint,
+  recording,
 }
 
 /** 关页保护：录制忙（录制/停止中/未完成草稿）或有未保存修改时浏览器弹出确认 */
@@ -2877,8 +2878,8 @@ onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('beforeunload', onBeforeUnload)
   consoleRuntime.cancelReconnect()
+  if (appHintTimer) { clearTimeout(appHintTimer); appHintTimer = null }
   if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
-  if (altFeedbackTimer) { clearTimeout(altFeedbackTimer); altFeedbackTimer = null }
   if (fxTapTimer) { clearTimeout(fxTapTimer); fxTapTimer = null }
   if (fxSwipeTimer) { clearTimeout(fxSwipeTimer); fxSwipeTimer = null }
   if (fxHitTimer) { clearTimeout(fxHitTimer); fxHitTimer = null }

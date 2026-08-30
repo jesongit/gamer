@@ -22,15 +22,7 @@
     <!-- 框选模板 -->
     <div v-if="props.selecting" class="select-box" :style="props.selStyle"></div>
 
-    <!-- alt 模式点击/滑动反馈 -->
-    <div v-if="props.altFeedback.show && props.altFeedback.kind === 'tap'" class="alt-tap" :style="props.altTapStyle">
-      <span class="alt-label">tap</span>
-    </div>
-    <div v-if="props.altFeedback.show && props.altFeedback.kind === 'region'" class="alt-region" :style="props.altFeedbackStyle">
-      <span class="alt-label">region</span>
-    </div>
-
-    <!-- 脚本运行可视化：引擎 tap/swipe/匹配命中（服务端经 control DataChannel 推送，样式复用 alt/hit） -->
+    <!-- 脚本运行可视化：引擎 tap/swipe/匹配命中（服务端经 control DataChannel 推送） -->
     <div v-if="props.scriptFx.tap.show" class="alt-tap" :style="props.fxTapStyle">
       <span class="alt-label">tap</span>
     </div>
@@ -89,9 +81,6 @@ const props = defineProps({
   hitLabel: { type: String, default: '' },
   selecting: { type: Boolean, default: false },
   selStyle: { type: Object, default: () => ({}) },
-  altFeedback: { type: Object, required: true },
-  altTapStyle: { type: Object, default: () => ({}) },
-  altFeedbackStyle: { type: Object, default: () => ({}) },
   scriptFx: { type: Object, required: true },
   fxTapStyle: { type: Object, default: () => ({}) },
   fxSwipeStyle: { type: Object, default: () => ({}) },
