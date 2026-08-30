@@ -1,6 +1,8 @@
 <template>
-  <div class="branch-container" :class="{ 'focus-only': depth >= 2 }">
-    <div class="branch-head" @click.stop>
+  <!-- 根容器（depth 0，主流程/专注视图当前层）：去掉外框与标题，步骤直接平铺；
+       容器外观只保留给嵌套分支（depth ≥ 1），减少一层多余的视觉嵌套 -->
+  <div class="branch-container" :class="{ 'focus-only': depth >= 2, root: depth === 0 }">
+    <div v-if="depth > 0" class="branch-head" @click.stop>
       <span class="branch-label">{{ label }}</span>
       <span class="branch-count">{{ list.length }} 步</span>
       <span class="branch-actions">
@@ -104,6 +106,9 @@ const list = computed<Step[]>(() => resolveStepList(props.model, props.container
   padding: 2px 6px 6px;
   background: rgba(23, 28, 41, .5);
 }
+.branch-container.root { border: none; margin: 0; padding: 0; background: transparent; }
+.branch-container.root .branch-steps { padding-left: 0; border-left: none; }
+.branch-container.root .branch-empty { padding: 18px 8px; text-align: center; border: 1px dashed var(--border); border-radius: var(--radius-sm); }
 .branch-container.focus-only { border-style: dotted; opacity: .92; }
 .branch-head {
   display: flex; align-items: center; gap: 8px;

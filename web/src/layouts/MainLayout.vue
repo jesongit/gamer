@@ -69,8 +69,7 @@ import { api } from '../api'
 import { isMissingEndpointError } from '../runs'
 const navs = [
   { path: '/console', name: '投屏控制', icon: '🖥️' },
-  { path: '/templates', name: '模板管理', icon: '🖼️' },
-  { path: '/scripts', name: '脚本编辑', icon: '📜' },
+  { path: '/scripts', name: '脚本管理', icon: '📜' },
   { path: '/tasks', name: '定时任务', icon: '⏰' },
   { path: '/logs', name: '运行日志', icon: '📋' },
   { path: '/settings', name: '设置', icon: '⚙️' }

@@ -28,19 +28,39 @@
     </template>
 
     <template v-else>
-      <!-- tmpl：模板短名（缩略图选择器由页面外壳注入，这里提供短名输入 + 候选 datalist） -->
+      <!-- tmpl：模板短名（自定义下拉，悬停行内预览缩略图；候选由页面外壳注入） -->
       <template v-if="type === 'tmpl'">
-        <input
-          class="cell-input"
-          list="se-tmpl-options"
-          :value="litString"
-          :placeholder="placeholder || '模板短名，如 account.png'"
-          :aria-label="label"
-          @input.stop="onText($event, (v) => emitLit(v))"
-        />
-        <datalist id="se-tmpl-options">
-          <option v-for="t in templates" :key="t" :value="t" />
-        </datalist>
+        <span class="tmpl-wrap">
+          <input
+            class="cell-input"
+            :value="litString"
+            :placeholder="placeholder || '模板短名，如 account.png'"
+            :aria-label="label"
+            autocomplete="off"
+            @input.stop="onText($event, (v) => { emitLit(v); open = true })"
+            @focus="open = true"
+            @blur="open = false"
+            @keydown.esc.stop="open = false"
+          />
+          <button
+            type="button" class="cell-tool tpl-toggle" :class="{ active: open }"
+            title="选择模板（悬停预览缩略图）"
+            @mousedown.prevent @click="open = !open"
+          >▾</button>
+          <div v-if="open" class="tpl-drop">
+            <div v-if="!filteredTemplates.length" class="tpl-drop-empty">无匹配模板</div>
+            <div
+              v-for="t in filteredTemplates" :key="t" class="tpl-drop-row"
+              @mousedown.prevent @click="pick(t)"
+              @mouseenter="hovered = t" @mouseleave="hovered = ''"
+            >
+              <span class="tpl-drop-thumb">
+                <img v-if="hovered === t && thumbUrl(t)" :src="thumbUrl(t)!" alt="" loading="lazy" />
+              </span>
+              <span class="tpl-drop-name mono">{{ t }}</span>
+            </div>
+          </div>
+        </span>
       </template>
 
       <!-- coord：X/Y 双数字 -->
@@ -133,7 +153,7 @@
  * 构造 update_step / update_param 命令经 CommandStack 提交。
  * 七类字面量控件：模板短名 / 坐标双数字 / hex 色+取色占位 / 数值+单位 / 按键枚举 / 文本 / 开关。
  */
-import { computed } from 'vue'
+import { computed, inject, ref } from 'vue'
 import type { PropType } from 'vue'
 import { isRefCell, type Cell, type ParamDecl, type ParamType } from '../model'
 import { KEY_ENUM } from '../schema'
@@ -165,6 +185,24 @@ const typeLabel = computed(() => TYPE_LABELS[props.type])
 
 const isRef = computed(() => props.allowRef && isRefCell(props.cell))
 const sameTypeParams = computed(() => props.params.filter((p) => p.type === props.type))
+
+// ---- tmpl 自定义下拉（替代原生 datalist）：悬停行内预览缩略图，缩略图 URL 由
+// 页面外壳 provide('tplPreviewUrl') 注入（短名 → 当前分区图片 URL）。 ----
+const open = ref(false)
+const hovered = ref('')
+const tplPreviewUrl = inject<((short: string) => string | null) | null>('tplPreviewUrl', null)
+const filteredTemplates = computed(() => {
+  const q = litString.value.trim().toLowerCase()
+  if (!q) return props.templates
+  return props.templates.filter((t) => t.toLowerCase().includes(q))
+})
+function thumbUrl(t: string): string | null {
+  return tplPreviewUrl.value ? tplPreviewUrl.value(t) : null
+}
+function pick(t: string): void {
+  emitLit(t)
+  open.value = false
+}
 
 const litString = computed(() => (isRefCell(props.cell) ? '' : String(props.cell.lit ?? '')))
 const coordLit = computed<[number, number]>(() => {
@@ -269,4 +307,22 @@ function onTimeUnit(e: Event): void {
 .cell-mini { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--text-2); }
 .cell-hint { font-size: 11px; color: var(--text-2); }
 .cell-err-msg { font-size: 11px; color: var(--danger); }
+.tmpl-wrap { display: inline-flex; align-items: center; gap: 4px; position: relative; }
+.tpl-toggle { cursor: pointer; border: 1px solid var(--border); background: var(--bg-2); color: var(--text-2); border-radius: var(--radius-sm); padding: 2px 7px; font-size: 10px; }
+.tpl-toggle.active { border-color: var(--accent); color: var(--accent); }
+.tpl-drop {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 60;
+  min-width: 210px; max-width: 320px; max-height: 260px; overflow: auto;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .45); display: flex; flex-direction: column;
+}
+.tpl-drop-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; cursor: pointer; }
+.tpl-drop-row:hover { background: var(--bg-3); }
+.tpl-drop-thumb {
+  width: 42px; height: 28px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  background: var(--bg-0); border: 1px solid var(--border); border-radius: 4px; overflow: hidden;
+}
+.tpl-drop-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.tpl-drop-name { font-size: 11px; color: var(--text-0); word-break: break-all; }
+.tpl-drop-empty { padding: 10px; font-size: 11px; color: var(--text-2); text-align: center; }
 </style>

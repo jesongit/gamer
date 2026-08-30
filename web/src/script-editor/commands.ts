@@ -166,6 +166,12 @@ export type Command =
   | { type: 'remove_param'; path?: Path; index: number }
   | { type: 'update_param'; path?: Path; index: number; decl: ParamDecl }
   | { type: 'set_config'; config: ScriptConfig | null }
+  /** 函数库专用：文件尾追加空函数（重名拒绝；函数体 steps 初始为空列表）。 */
+  | { type: 'insert_function'; name: string }
+  /** 函数库专用：按名删除函数（至少保留一个；undo 原位恢复，函数对象引用不变保证 uuid 稳定）。 */
+  | { type: 'remove_function'; name: string }
+  /** 函数库专用：函数改名（= 改 YAML 顶层键；空名/重名拒绝；引用它的 func 步骤不自动跟随）。 */
+  | { type: 'rename_function'; from: string; to: string }
 
 interface HistoryEntry {
   name: string
@@ -472,6 +478,59 @@ export class CommandStack {
           },
           undo: () => {
             m.config = oldConfig
+          },
+        }
+      }
+      case 'insert_function': {
+        if (!('functions' in this.model)) return null
+        const m = this.model as FunctionLibraryModel
+        if (m.functions.some((f) => f.name === command.name)) return null
+        // 空函数对象引用保持不变：undo 移除后 redo 原样放回，步骤 uuid 天然稳定
+        const fn: FunctionModel = { name: command.name, params: [], steps: [] }
+        return {
+          name,
+          redo: () => {
+            m.functions.push(fn)
+          },
+          undo: () => {
+            const idx = m.functions.indexOf(fn)
+            if (idx >= 0) m.functions.splice(idx, 1)
+          },
+        }
+      }
+      case 'remove_function': {
+        if (!('functions' in this.model)) return null
+        const m = this.model as FunctionLibraryModel
+        const idx = m.functions.findIndex((f) => f.name === command.name)
+        if (idx < 0) return null
+        if (m.functions.length <= 1) return null // 空函数库序列化为空 YAML，服务端拒绝保存
+        const removed = m.functions[idx]
+        return {
+          name,
+          redo: () => {
+            const at = m.functions.indexOf(removed)
+            if (at >= 0) m.functions.splice(at, 1)
+          },
+          undo: () => {
+            m.functions.splice(Math.min(idx, m.functions.length), 0, removed)
+          },
+        }
+      }
+      case 'rename_function': {
+        if (!('functions' in this.model)) return null
+        const m = this.model as FunctionLibraryModel
+        const to = command.to.trim()
+        if (!to || to === command.from) return null
+        if (m.functions.some((f) => f.name === to)) return null
+        const fn = m.functions.find((f) => f.name === command.from)
+        if (!fn) return null
+        return {
+          name,
+          redo: () => {
+            if (fn.name === command.from) fn.name = to
+          },
+          undo: () => {
+            if (fn.name === to) fn.name = command.from
           },
         }
       }

@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { reactive } from 'vue'
 import BranchContainer from '../components/BranchContainer.vue'
@@ -253,22 +253,53 @@ describe('StepCanvas：诊断定位联动（showErrorPanel）', () => {
 })
 
 describe('StepCanvas：函数库上下文', () => {
-  it('函数下拉 + 函数内卡片 + 面包屑函数名', async () => {
+  it('函数名输入框（切换/改名）+ 函数内卡片 + 面包屑函数名', async () => {
     const created = setupFunctions('login:\n  steps:\n    - log: hi\n\nother:\n  steps:\n    - log: y\n')
     const wrapper = mount(StepCanvas, {
       props: { model: created.model, stack: created.stack, context: 'function' },
     })
-    expect(wrapper.find('select.fn-select').exists()).toBe(true)
+    const nameInput = wrapper.find('input.fn-input')
+    expect(nameInput.exists()).toBe(true)
+    expect(nameInput.element.value).toBe('login')
     expect(wrapper.text()).toContain('记录日志 hi')
     const crumbs = wrapper.findAll('.crumb').map((c) => c.text())
     expect(crumbs).toEqual(['login'])
-    // 切换函数
-    await wrapper.find('select.fn-select').setValue('other')
+    // 输入已有函数名回车 = 切换（不改名）
+    await nameInput.setValue('other')
+    await nameInput.trigger('keydown.enter')
     expect(wrapper.text()).toContain('记录日志 y')
+    expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'other'])
+    // 输入新名字回车 = 重命名当前函数（画布跟随）
+    await nameInput.setValue('other2')
+    await nameInput.trigger('keydown.enter')
+    expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'other2'])
+    expect(wrapper.find('input.fn-input').element.value).toBe('other2')
     // 添加步骤插入当前函数末尾
     await wrapper.find('button.add-btn').trigger('click')
     await wrapper.findAll('.entry-btn')[0].trigger('click')
     expect(created.model.functions[1].steps).toHaveLength(2)
+    created.stack.undo() // 撤销插入步骤
+    created.stack.undo() // 撤销改名
+    expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'other'])
+  })
+
+  it('「＋ 函数」新增并切换画布到空函数；删除函数可撤销且仅剩一个时禁用', async () => {
+    const created = setupFunctions('login:\n  steps:\n    - log: hi\n')
+    const wrapper = mount(StepCanvas, {
+      props: { model: created.model, stack: created.stack, context: 'function' },
+    })
+    const fnBtns = () => wrapper.findAll('button.fn-btn')
+    expect(fnBtns()[1].attributes('disabled')).toBeDefined() // 仅一个函数：删除禁用
+    await fnBtns()[0].trigger('click') // ＋ 函数
+    expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'func1'])
+    expect(wrapper.find('input.fn-input').element.value).toBe('func1')
+    expect(wrapper.text()).not.toContain('记录日志 hi') // 画布已切到空的 func1
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await fnBtns()[1].trigger('click')
+    expect(created.model.functions.map((f) => f.name)).toEqual(['login'])
+    created.stack.undo()
+    expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'func1'])
+    confirmSpy.mockRestore()
   })
 
   it('reactive 模型下编辑 + undo/redo 正常（组件层接线形态）', async () => {

@@ -6,8 +6,8 @@
  *
  * 锁定的行为：
  * - 页签切换驱动左栏列表数据源 / 新建入口 / 空态文案：脚本=脚本列表+新建脚本、
- *   函数库=func 文件（file 短路径 + 函数名清单）+新建函数库、模板=模板短名
- *   （#区域元数据收进 title）+ 条目点击跳投屏控制台；
+ *   函数库=func 文件（file 短路径 + 函数名清单）+新建函数库、模板=管理形态
+ *   （缩略图短名列表 + 上传入口，条目点击开详情：预览/重命名/删除/跳控制台）；
  * - 跨页签模型不外泄（回归）：脚本打开时切到函数库页签，中央画布不显示脚本、
  *   测试函数面板/保存入口不出现，切回原页签模型仍在（不丢未保存内容）；
  * - 函数编辑上下文：打开函数文件进 FunctionLibraryModel（编辑函数/测试函数下拉）、
@@ -28,6 +28,7 @@ vi.mock('./api', async (importOriginal) => ({
     listScripts: vi.fn(async () => []),
     listDevices: vi.fn(async () => []),
     listTemplates: vi.fn(async () => []),
+    tplImageUrl: (name, pkg) => `/api/templates/${encodeURIComponent(name)}/image?pkg=${encodeURIComponent(pkg)}`,
     listFunctions: vi.fn(async () => []),
     getScript: vi.fn(),
     getFunction: vi.fn(),
@@ -36,6 +37,9 @@ vi.mock('./api', async (importOriginal) => ({
     updateFunction: vi.fn(),
     deleteScript: vi.fn(),
     deleteFunction: vi.fn(),
+    uploadTemplate: vi.fn(),
+    renameTemplate: vi.fn(),
+    deleteTemplate: vi.fn(),
     runScript: vi.fn(),
     runFunction: vi.fn(),
     getRun: vi.fn(),
@@ -122,17 +126,75 @@ describe('ScriptEditor 三页签外壳', () => {
     expect(findBtn(wrapper, '＋ 新建脚本')).toBeUndefined()
     expect(centerEmpty(wrapper).text()).toContain('从左侧选择函数库文件')
 
-    // 模板页签：短名列表（#区域元数据收进 title）、点击跳投屏控制台
+    // 模板页签：管理形态（缩略图 + 短名列表，#区域元数据收进 title）；点击打开详情弹窗
     await tabs(wrapper)[2].trigger('click')
     await flushPromises()
     expect(api.listTemplates).toHaveBeenCalledWith(PKG)
     const tItems = items(wrapper)
     expect(tItems.map((i) => i.find('.ri-name').text())).toEqual(['开始挑战.png', 'plain.png'])
     expect(tItems[0].attributes('title')).toBe('开始挑战#757_909_857_971.png')
-    expect(findBtn(wrapper, '投屏控制台管理')).toBeTruthy()
+    expect(findBtn(wrapper, '上传模板')).toBeTruthy()
     await tItems[0].trigger('click')
+    await flushPromises()
+    const modal = wrapper.find('.tpl-modal')
+    expect(modal.exists()).toBe(true)
+    expect(modal.text()).toContain('开始挑战#757_909_857_971.png')
+    await findBtn(wrapper, '前往投屏控制台').trigger('click')
     expect(routerPush).toHaveBeenCalledWith({ name: 'Console' })
     expect(centerEmpty(wrapper).text()).toContain('投屏控制台完成')
+  })
+
+  it('模板管理：重命名走 renameTemplate 并刷新列表，删除走 deleteTemplate 后列表为空', async () => {
+    let tpls = [{ name: 'plain.png', pkg: PKG, size: 1024 }]
+    api.listTemplates.mockImplementation(async () => tpls.map((t) => ({ ...t })))
+    api.renameTemplate.mockImplementation(async (oldName, newName, pkg) => {
+      tpls = tpls.map((t) => (t.name === oldName && t.pkg === pkg) ? { ...t, name: newName } : t)
+      return { ok: true }
+    })
+    api.deleteTemplate.mockImplementation(async (name, pkg) => {
+      tpls = tpls.filter((t) => !(t.name === name && t.pkg === pkg))
+      return {}
+    })
+    await mountView()
+    await tabs(wrapper)[2].trigger('click')
+    await flushPromises()
+
+    await items(wrapper)[0].trigger('click') // 打开详情
+    await flushPromises()
+    await wrapper.find('.tpl-modal input').setValue('renamed.png')
+    await findBtn(wrapper, '重命名').trigger('click')
+    await flushPromises()
+
+    expect(api.renameTemplate).toHaveBeenCalledWith('plain.png', 'renamed.png', PKG)
+    expect(items(wrapper)[0].find('.ri-name').text()).toBe('renamed.png')
+
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await items(wrapper)[0].find('.ri-del').trigger('click')
+    await flushPromises()
+
+    expect(api.deleteTemplate).toHaveBeenCalledWith('renamed.png', PKG)
+    expect(wrapper.text()).toContain('该分区暂无模板')
+  })
+
+  it('模板上传：选文件转 base64 走 uploadTemplate 上传到当前分区', async () => {
+    await mountView()
+    await tabs(wrapper)[2].trigger('click')
+    await flushPromises()
+
+    api.uploadTemplate.mockResolvedValue({})
+    const file = new File(['png-bytes'], 'shot.png', { type: 'image/png' })
+    const input = wrapper.find('input[type="file"]')
+    Object.defineProperty(input.element, 'files', { value: [file] })
+    await input.trigger('change')
+    // FileReader 回调挂在真实宏任务上，flushPromises（微任务）覆盖不到 → waitFor 轮询
+    await vi.waitFor(() => expect(api.uploadTemplate).toHaveBeenCalledTimes(1))
+    await flushPromises()
+
+    expect(api.uploadTemplate).toHaveBeenCalledTimes(1)
+    const [name, b64, pkg] = api.uploadTemplate.mock.calls[0]
+    expect(name).toBe('shot.png')
+    expect(b64).toBe(btoa('png-bytes'))
+    expect(pkg).toBe(PKG)
   })
 
   it('空态文案区分：三个页签各自的左栏空态互不串用', async () => {

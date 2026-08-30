@@ -2,8 +2,8 @@
   <div class="page">
     <div class="page-head">
       <div>
-        <div class="page-title">脚本编辑</div>
-        <div class="page-sub">可视化步骤画布：卡片编辑 · 撤销重做 · 字段级校验 · 保存版本冲突检测；脚本与函数库按应用分区存放（只读 YAML 在「诊断」中预览）</div>
+        <div class="page-title">脚本管理</div>
+        <div class="page-sub">可视化步骤画布：卡片编辑 · 撤销重做 · 字段级校验 · 保存版本冲突检测；脚本、函数库与模板按应用分区存放（只读 YAML 在「诊断」中预览）</div>
       </div>
       <div class="head-actions">
         <select v-model="pkg" class="select mono ed-pkg" title="应用分区（脚本/函数库/模板都存放在 data/<应用包名>/ 下）">
@@ -28,7 +28,11 @@
         <div class="res-actions">
           <button v-if="tab === 'script'" class="btn btn-sm" @click="newScript">＋ 新建脚本</button>
           <button v-if="tab === 'func'" class="btn btn-sm" @click="newFunctionFile">＋ 新建函数库</button>
-          <button v-if="tab === 'tmpl'" class="btn btn-sm" @click="goConsole">投屏控制台管理 →</button>
+          <template v-if="tab === 'tmpl'">
+            <button class="btn btn-sm" @click="tplUploadEl && tplUploadEl.click()">⬆️ 上传模板</button>
+            <input ref="tplUploadEl" type="file" accept="image/png,image/jpeg" hidden @change="onTplUpload" />
+            <button class="btn btn-sm" @click="goConsole">投屏框选截取 →</button>
+          </template>
         </div>
         <div class="res-items">
           <template v-if="tab === 'script'">
@@ -48,20 +52,25 @@
             <div v-if="!fnLib.list.length" class="res-empty">该分区暂无函数库文件</div>
           </template>
           <template v-else>
-            <div v-for="t in templates" :key="t.name" class="res-item" :title="t.name" @click="goConsole">
-              <div class="ri-name">{{ shortName(t.name) }}</div>
-              <div class="ri-meta mono">模板图片 · 框选/上传/匹配测试在投屏控制台</div>
+            <div v-for="t in templates" :key="t.pkg + '/' + t.name" class="res-item tpl-item" :title="t.name" @click="openTpl(t)">
+              <div class="tpl-thumb"><img :src="api.tplImageUrl(t.name, t.pkg)" alt="" loading="lazy" @error="onTplThumbErr" /></div>
+              <div class="tpl-info">
+                <div class="ri-name">{{ shortName(t.name) }}</div>
+                <div class="ri-meta mono">{{ fmtSize(t.size) }}</div>
+              </div>
+              <button class="ri-del" @click.stop="removeTpl(t)" title="删除">🗑</button>
             </div>
-            <div v-if="!templates.length" class="res-empty">该分区暂无模板</div>
+            <div v-if="!templates.length" class="res-empty">该分区暂无模板（可在投屏控制台框选截取，或直接上传）</div>
           </template>
         </div>
         <div class="res-foot mono">运行设备：{{ store.deviceId || '未选择（投屏控制台选择）' }}</div>
       </aside>
 
-      <!-- 中：共享编辑画布 -->
-      <section class="editor-main card">
+      <!-- 中：共享编辑画布（失焦自动保存，见 autoSaveDebounced/autoSave） -->
+      <section class="editor-main card" @focusout="autoSaveDebounced">
         <div v-if="tab === 'tmpl'" class="ed-empty">
-          <p>模板的框选截取、上传、二次裁切与匹配测试在投屏控制台完成（依赖设备画面）。</p>
+          <p>本页管理模板文件：上传 / 重命名 / 删除。</p>
+          <p>模板的框选截取、二次裁切与匹配测试在投屏控制台完成（依赖设备画面）。</p>
           <button class="btn btn-primary" @click="goConsole">前往投屏控制台</button>
         </div>
         <template v-else-if="modelOnTab">
@@ -162,6 +171,28 @@
       @close="testFlow.close()"
     />
     <RunConflictModal />
+    <!-- 模板详情：预览 / 重命名 / 删除（框选截取与匹配测试在投屏控制台完成） -->
+    <div v-if="tplModal" class="modal-mask" @click.self="tplModal = null">
+      <div class="modal tpl-modal">
+        <div class="modal-head">
+          <span class="title tpl-modal-title" :title="tplModal.name">{{ tplModal.name }}</span>
+          <button class="btn btn-ghost btn-sm" @click="tplModal = null">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="tpl-preview"><img :src="tplUrl" alt="模板预览" @load="onTplPreviewLoad" /></div>
+          <div class="tpl-modal-meta mono">{{ tplModal.pkg }} · {{ fmtSize(tplModal.size) }}<template v-if="tplDim"> · {{ tplDim.w }}×{{ tplDim.h }} px</template></div>
+          <div class="tpl-rename">
+            <input v-model="tplRename" class="input mono" placeholder="模板文件名（# 后缀为搜索区域元数据）" @keydown.enter="renameTpl" />
+            <button class="btn btn-sm" :disabled="!tplRename.trim() || tplRename.trim() === tplModal.name" @click="renameTpl">重命名</button>
+          </div>
+          <p class="tpl-note">框选截取、二次裁切与匹配测试依赖设备画面，在投屏控制台完成。</p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" @click="goConsole">前往投屏控制台</button>
+          <button class="btn btn-danger" @click="removeTpl(tplModal)">🗑 删除</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -181,10 +212,10 @@
  *   （function/start_index/args）；函数体顶层卡片「▶测试」映射 start_index 从该步测试；
  *   400 invalid_args 诊断回填表单字段标红，覆盖建议按函数库文件 id 存 localStorage。
  */
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, provide } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  scriptsData, devicesData, store, useToast,
+  scriptsData, devicesData, templatesData, store, useToast,
   applyRunRecord, beginCancel, findRun, resetStoreRunState, pushRunConflict,
 } from '../store'
 import { api } from '../api'
@@ -231,6 +262,12 @@ function shortName(name) {
   return String(name || '').replace(/#.*?(\.(png|jpe?g|bmp|webp))?$/i, '$1')
 }
 const templateNames = computed(() => templates.value.map(t => shortName(t.name)))
+
+// 画布模板下拉悬停缩略图（CellEditor inject；短名 → 当前分区图片 URL）
+provide('tplPreviewUrl', (short) => {
+  const full = templates.value.find(t => shortName(t.name) === short)?.name
+  return api.tplImageUrl(full || short, pkg.value)
+})
 
 const pkgScripts = computed(() => scripts.value.filter(s => !pkg.value || s.package === pkg.value))
 
@@ -347,6 +384,35 @@ function newFunctionFile() {
   selFnId.value = null
 }
 
+// ---------- 自动保存（编辑区失焦即存）：600ms 防抖合并连续失焦；成功静默，
+// 校验不通过 / 版本冲突 / 失败 toast 提示（不弹冲突窗、不切页签） ----------
+let autoSaveTimer = null
+function autoSaveDebounced() {
+  if (!shell.hasModel) return
+  if (autoSaveTimer) clearTimeout(autoSaveTimer)
+  autoSaveTimer = setTimeout(autoSave, 600)
+}
+async function autoSave() {
+  autoSaveTimer = null
+  if (!shell.hasModel || !shell.dirty || shell.saving) return
+  const wasNew = !shell.resourceId
+  const r = await shell.save({ suppressConflict: true })
+  if (r.ok) {
+    if (wasNew) {
+      await loadScripts()
+      fnLib.refresh(pkg.value)
+      if (shell.kind === 'script') selScriptId.value = shell.resourceId
+      else selFnId.value = shell.resourceId
+    }
+  } else if (r.reason === 'invalid') {
+    toast('自动保存未通过：' + (r.diagnostics?.[0]?.message || '存在校验问题'), 'warn')
+  } else if (r.reason === 'conflict') {
+    toast('自动保存遇到版本冲突，请点「💾 保存」手动处理', 'warn')
+  } else if (r.reason !== 'empty') {
+    toast('自动保存失败：' + (r.error?.message || '未知错误'), 'warn')
+  }
+}
+
 async function removeScript(s) {
   if (!s.id) return
   if (!window.confirm(`删除脚本 ${s.name}？`)) return
@@ -376,6 +442,94 @@ async function removeFunctionFile(f) {
 
 function goConsole() {
   router.push({ name: 'Console' })
+}
+
+// ---------- 模板管理（并入本页：上传 / 预览 / 重命名 / 删除；框选与匹配测试在投屏控制台） ----------
+
+const tplUploadEl = ref(null)
+const tplModal = ref(null)
+const tplRename = ref('')
+const tplDim = ref(null)
+
+const tplUrl = computed(() =>
+  tplModal.value ? api.tplImageUrl(tplModal.value.name, tplModal.value.pkg) : '')
+
+function fmtSize(n) {
+  if (!n) return '—'
+  return n > 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + ' MB' : (n / 1024).toFixed(1) + ' KB'
+}
+
+function onTplThumbErr(e) { e.target.style.visibility = 'hidden' }
+
+function openTpl(t) {
+  tplModal.value = t
+  tplRename.value = t.name
+  tplDim.value = null
+}
+
+function onTplPreviewLoad(e) {
+  const img = e.target
+  tplDim.value = { w: img.naturalWidth, h: img.naturalHeight }
+}
+
+/** 变更后刷新本页列表 + 全局 templatesData（投屏控制台共用同一数据源） */
+async function refreshTemplates() {
+  await loadTemplates()
+  try { templatesData.value = await api.listTemplates() } catch { /* 控制台侧自会刷新 */ }
+}
+
+async function onTplUpload(e) {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  if (!file) return
+  if (!pkg.value) return toast('请先选择应用分区', 'warn')
+  const name = file.name.toLowerCase().endsWith('.png') ? file.name : file.name.replace(/\.[^.]+$/, '') + '.png'
+  try {
+    const b64 = await fileToBase64(file)
+    await api.uploadTemplate(name, b64, pkg.value)
+    await refreshTemplates()
+    toast(`模板已上传到 ${pkg.value}`, 'success')
+  } catch (err) {
+    toast('上传失败：' + err.message, 'error')
+  }
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader()
+    fr.onload = () => resolve(fr.result.split(',')[1])
+    fr.onerror = reject
+    fr.readAsDataURL(file)
+  })
+}
+
+async function renameTpl() {
+  const t = tplModal.value
+  const next = tplRename.value.trim()
+  if (!t || !next || next === t.name) return
+  try {
+    await api.renameTemplate(t.name, next, t.pkg)
+    await refreshTemplates()
+    const nt = templates.value.find(x => x.pkg === t.pkg && x.name === next)
+    tplModal.value = nt || null
+    if (nt) tplRename.value = nt.name
+    toast('模板已重命名', 'success')
+  } catch (e) {
+    toast('重命名失败：' + e.message, 'error')
+  }
+}
+
+async function removeTpl(t) {
+  if (!t) return
+  if (!window.confirm(`删除模板 ${t.name}（${t.pkg}）？`)) return
+  try {
+    await api.deleteTemplate(t.name, t.pkg)
+    if (tplModal.value && tplModal.value.name === t.name && tplModal.value.pkg === t.pkg) tplModal.value = null
+    await refreshTemplates()
+    toast('模板已删除', 'success')
+  } catch (e) {
+    toast('删除失败：' + e.message, 'error')
+  }
 }
 
 // ---------- 保存 / 冲突 ----------
@@ -732,7 +886,10 @@ onMounted(async () => {
   // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）。
   if (store.running && (store.runId || store.runScriptId)) startRunStatusPoll()
 })
-onUnmounted(() => stopRunStatusPoll())
+onUnmounted(() => {
+  stopRunStatusPoll()
+  if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null }
+})
 </script>
 
 <style scoped>
@@ -794,6 +951,29 @@ onUnmounted(() => stopRunStatusPoll())
 .tf-title { font-size: 12px; font-weight: 600; color: var(--text-1); }
 .tf-fn { width: 100%; font-size: 12px; }
 .tf-desc { margin: 0; font-size: 11px; color: var(--text-2); line-height: 1.6; }
+
+/* 模板页签（管理形态）：缩略图条目 + 详情弹窗 */
+.tpl-item { display: flex; align-items: center; gap: 8px; padding-right: 30px; }
+.tpl-thumb {
+  width: 40px; height: 40px; flex-shrink: 0; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); overflow: hidden;
+  background: linear-gradient(135deg, #1e2434, #141a28);
+  display: flex; align-items: center; justify-content: center;
+}
+.tpl-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.tpl-info { min-width: 0; }
+.tpl-modal { width: 520px; max-width: calc(100vw - 32px); }
+.tpl-modal-title { max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-preview {
+  display: flex; align-items: center; justify-content: center; min-height: 120px;
+  background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 10px;
+}
+.tpl-preview img { max-width: 100%; max-height: 260px; image-rendering: pixelated; }
+.tpl-modal-meta { font-size: 11px; color: var(--text-2); }
+.tpl-rename { display: flex; gap: 6px; }
+.tpl-rename .input { flex: 1; }
+.tpl-note { margin: 0; font-size: 11px; color: var(--text-2); line-height: 1.6; }
 
 @media (max-width: 1100px) {
   .shell-layout { grid-template-columns: 200px 1fr 200px; }

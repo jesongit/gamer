@@ -1,17 +1,22 @@
 <template>
   <div ref="rootEl" class="se-canvas" @click.self="deselect">
-    <!-- 顶部：函数切换（函数库）+ 面包屑 + 添加入口 -->
+    <!-- 顶部：函数名输入（函数库，回车改名/切换）+ 面包屑 + 添加入口与函数管理 -->
     <div class="canvas-toolbar">
-      <select
-        v-if="isFunction"
-        class="fn-select"
-        :value="activeFnName"
-        aria-label="编辑函数"
-        @click.stop
-        @change="switchFn(($event.target as HTMLSelectElement).value)"
-      >
-        <option v-for="name in fnNames" :key="name" :value="name">{{ name }}</option>
-      </select>
+      <template v-if="isFunction">
+        <input
+          class="fn-input"
+          :value="activeFnName"
+          list="se-fn-name-options"
+          aria-label="函数名（输入后回车：同名切换，新名重命名当前函数）"
+          title="输入函数名回车：与现有函数同名 → 切换到它；新名字 → 重命名当前函数（可撤销）"
+          @click.stop
+          @keydown.enter="onFnNameEnter"
+          @blur="onFnNameBlur"
+        />
+        <datalist id="se-fn-name-options">
+          <option v-for="name in fnNames" :key="name" :value="name" />
+        </datalist>
+      </template>
       <nav class="breadcrumb" aria-label="当前编辑流程">
         <template v-for="(node, i) in breadcrumbNodes" :key="i">
           <span v-if="i" class="crumb-sep">/</span>
@@ -24,6 +29,21 @@
         </template>
       </nav>
       <button type="button" class="add-btn" @click.stop="panelOpen = !panelOpen">+ 添加步骤</button>
+      <template v-if="isFunction">
+        <button
+          type="button"
+          class="fn-btn"
+          title="在文件末尾新增一个空函数（func1/func2… 顺延命名，上方输入框改名），画布切到新函数"
+          @click.stop="addFunction"
+        >＋ 函数</button>
+        <button
+          type="button"
+          class="fn-btn fn-btn-danger"
+          :disabled="fnNames.length <= 1"
+          :title="fnNames.length <= 1 ? '至少保留一个函数' : `删除函数 ${activeFnName}（其 params 与 steps 一并移除，可撤销）`"
+          @click.stop="removeActiveFn"
+        >🗑 删除函数</button>
+      </template>
     </div>
 
     <!-- 插入锚点提示（§8.4/§10：可见「下一条将插入：主流程 / 第 N 步之后」） -->
@@ -192,6 +212,62 @@ function switchFn(name: string): void {
   currentContainer.value = ['functions', name, 'steps']
 }
 
+/**
+ * 函数名输入提交（回车/失焦）：与现有函数同名 → 切换到它；
+ * 新名字 → 重命名当前函数（rename_function 命令，可撤销）并保持画布跟随。
+ */
+function commitFnName(raw: string): void {
+  const to = String(raw || '').trim()
+  const current = activeFnName.value
+  if (!to || to === current) return
+  if (fnNames.value.includes(to)) {
+    switchFn(to)
+    return
+  }
+  if (props.stack.apply({ type: 'rename_function', from: current, to }, `重命名函数 ${current} → ${to}`)) {
+    focusPath.value = null
+    currentContainer.value = ['functions', to, 'steps']
+  }
+}
+
+function onFnNameEnter(e: Event): void {
+  const el = e.target as HTMLInputElement
+  commitFnName(el.value)
+  el.blur()
+}
+
+function onFnNameBlur(e: Event): void {
+  commitFnName((e.target as HTMLInputElement).value)
+}
+
+/** 新增空函数并切到它（func1/func2… 顺延命名，改名走上方输入框）。 */
+function addFunction(): void {
+  if (!isFunction.value) return
+  const fns = (props.model as { functions: { name: string }[] }).functions
+  let i = 1
+  while (fns.some((f) => f.name === `func${i}`)) i++
+  const name = `func${i}`
+  if (props.stack.apply({ type: 'insert_function', name }, `新增函数 ${name}`)) {
+    focusPath.value = null
+    currentContainer.value = ['functions', name, 'steps']
+    innerSelected.value = null
+    emit('select', null)
+  }
+}
+
+/** 删除当前函数（至少保留一个，命令栈可撤销）；画布回退到首个函数。 */
+function removeActiveFn(): void {
+  if (!isFunction.value || fnNames.value.length <= 1) return
+  const name = activeFnName.value
+  if (!name || !window.confirm(`删除函数 ${name}？（其 params 与 steps 一并移除，可撤销）`)) return
+  if (props.stack.apply({ type: 'remove_function', name }, `删除函数 ${name}`)) {
+    focusPath.value = null
+    currentContainer.value = rootPath.value
+    innerSelected.value = null
+    emit('select', null)
+  }
+}
+
 // ---------- 插入锚点 ----------
 
 function isPrefixPath(prefix: Path, path: Path): boolean {
@@ -308,11 +384,21 @@ defineExpose({ anchor, locate, activeFnName })
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding-bottom: 6px; border-bottom: 1px solid var(--border); margin-bottom: 4px;
 }
-.fn-select {
+.fn-input {
   background: var(--bg-3); color: var(--text-0);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 3px 8px; font-size: 12px;
+  padding: 3px 8px; font-size: 12px; width: 120px; min-width: 0;
+  font-family: var(--mono);
 }
+.fn-input:focus { outline: none; border-color: var(--accent-2); }
+.fn-btn {
+  border: 1px solid var(--border); background: transparent; color: var(--text-1);
+  border-radius: var(--radius-sm); font-size: 12px; padding: 4px 10px; cursor: pointer;
+  white-space: nowrap;
+}
+.fn-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+.fn-btn-danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+.fn-btn:disabled { opacity: .4; cursor: not-allowed; }
 .breadcrumb { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; flex: 1; min-width: 0; }
 .crumb {
   border: none; background: transparent; color: var(--accent-2);

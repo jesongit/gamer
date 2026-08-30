@@ -9,7 +9,8 @@ const routes = [
     children: [
       { path: '', redirect: '/console' },
       { path: 'console', name: 'Console', component: () => import('./views/Console.vue') },
-      { path: 'templates', name: 'Templates', component: () => import('./views/TemplateManager.vue') },
+      // 模板管理页已删除，模板并入 脚本管理（/scripts）的模板页签：旧地址重定向
+      { path: 'templates', redirect: '/scripts' },
       { path: 'scripts', name: 'Scripts', component: () => import('./views/ScriptEditor.vue') },
       { path: 'tasks', name: 'Tasks', component: () => import('./views/TaskScheduler.vue') },
       { path: 'logs', name: 'Logs', component: () => import('./views/RunLogs.vue') },

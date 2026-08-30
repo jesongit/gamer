@@ -293,3 +293,123 @@ describe('commands：函数级 params（阶段 4 path 容器）', () => {
     expect(() => stack.apply({ type: 'set_params', params: [] }, '编辑参数')).toThrow()
   })
 })
+
+describe('commands：insert_function（函数库新增函数）', () => {
+  function fnModel() {
+    const { model } = parseFunctionLibrary('f1:\n  steps:\n    - log: hello\n')
+    return model
+  }
+
+  it('文件尾追加空函数；undo 移除 / redo 原样放回', () => {
+    const model = fnModel()
+    const stack = new CommandStack(model)
+    expect(stack.apply({ type: 'insert_function', name: 'f2' })).toBe(true)
+    expect(model.functions.map((f) => f.name)).toEqual(['f1', 'f2'])
+    expect(model.functions[1].params).toEqual([])
+    expect(model.functions[1].steps).toEqual([])
+    stack.undo()
+    expect(model.functions.map((f) => f.name)).toEqual(['f1'])
+    stack.redo()
+    expect(model.functions[1].name).toBe('f2')
+  })
+
+  it('重名拒绝且不进历史；脚本模型拒绝该命令', () => {
+    const model = fnModel()
+    const stack = new CommandStack(model)
+    expect(stack.apply({ type: 'insert_function', name: 'f1' })).toBe(false)
+    expect(stack.depth).toBe(0)
+    const scriptStack = new CommandStack(scriptWithSteps(1))
+    expect(scriptStack.apply({ type: 'insert_function', name: 'f1' })).toBe(false)
+    expect(scriptStack.depth).toBe(0)
+  })
+})
+
+describe('commands：remove_function（函数库删除函数）', () => {
+  function fnModel() {
+    const { model } = parseFunctionLibrary(
+      'f1:\n  steps:\n    - log: one\nf2:\n  params:\n    - \'text:a:备注\'\n  steps:\n    - log: two\nf3:\n  steps:\n    - log: three\n',
+    )
+    return model
+  }
+
+  it('按名删除；undo 原位恢复（对象引用不变，uuid 稳定）/ redo 再删', () => {
+    const model = fnModel()
+    const stack = new CommandStack(model)
+    const removed = model.functions[1]
+    expect(stack.apply({ type: 'remove_function', name: 'f2' })).toBe(true)
+    expect(model.functions.map((f) => f.name)).toEqual(['f1', 'f3'])
+    stack.undo()
+    expect(model.functions.map((f) => f.name)).toEqual(['f1', 'f2', 'f3'])
+    expect(model.functions[1]).toBe(removed)
+    stack.redo()
+    expect(model.functions.map((f) => f.name)).toEqual(['f1', 'f3'])
+    expect(model.functions[1]).not.toBe(removed)
+  })
+
+  it('仅剩一个函数时拒绝；未知函数名拒绝且不进历史', () => {
+    const model = fnModel()
+    const stack = new CommandStack(model)
+    expect(stack.apply({ type: 'remove_function', name: 'nope' })).toBe(false)
+    expect(stack.depth).toBe(0)
+    stack.apply({ type: 'remove_function', name: 'f2' })
+    stack.apply({ type: 'remove_function', name: 'f1' })
+    expect(model.functions.map((f) => f.name)).toEqual(['f3'])
+    expect(stack.apply({ type: 'remove_function', name: 'f3' })).toBe(false)
+    expect(stack.depth).toBe(2)
+    const scriptStack = new CommandStack(scriptWithSteps(1))
+    expect(scriptStack.apply({ type: 'remove_function', name: 'f1' })).toBe(false)
+    expect(scriptStack.depth).toBe(0)
+  })
+
+  it('删除后 undo 新函数插入再 undo 删除：仍恢复到原位置', () => {
+    const model = fnModel()
+    const stack = new CommandStack(model)
+    stack.apply({ type: 'remove_function', name: 'f1' })
+    stack.apply({ type: 'insert_function', name: 'f9' })
+    expect(model.functions.map((f) => f.name)).toEqual(['f2', 'f3', 'f9'])
+    stack.undo() // 撤销插入 f9
+    stack.undo() // 撤销删除 f1 → 回到下标 0
+    expect(model.functions.map((f) => f.name)).toEqual(['f1', 'f2', 'f3'])
+  })
+})
+
+describe('commands：rename_function（函数库函数改名）', () => {
+  function fnModel() {
+    const { model } = parseFunctionLibrary('f1:\n  steps:\n    - log: one\nf2:\n  steps:\n    - log: two\n')
+    return model
+  }
+
+  it('改名即改 YAML 顶层键；undo/redo 恢复', () => {
+    const model = fnModel()
+    const stack = new CommandStack(model)
+    expect(stack.apply({ type: 'rename_function', from: 'f1', to: '登录' })).toBe(true)
+    expect(model.functions.map((f) => f.name)).toEqual(['登录', 'f2'])
+    stack.undo()
+    expect(model.functions.map((f) => f.name)).toEqual(['f1', 'f2'])
+    stack.redo()
+    expect(model.functions[0].name).toBe('登录')
+  })
+
+  it('空名/重名/原名/未知函数拒绝且不进历史；脚本模型拒绝该命令', () => {
+    const model = fnModel()
+    const stack = new CommandStack(model)
+    expect(stack.apply({ type: 'rename_function', from: 'f1', to: '  ' })).toBe(false)
+    expect(stack.apply({ type: 'rename_function', from: 'f1', to: 'f2' })).toBe(false)
+    expect(stack.apply({ type: 'rename_function', from: 'f1', to: 'f1' })).toBe(false)
+    expect(stack.apply({ type: 'rename_function', from: 'nope', to: 'f9' })).toBe(false)
+    expect(stack.depth).toBe(0)
+    const scriptStack = new CommandStack(scriptWithSteps(1))
+    expect(scriptStack.apply({ type: 'rename_function', from: 'f1', to: 'f9' })).toBe(false)
+    expect(scriptStack.depth).toBe(0)
+  })
+
+  it('改名后序列化顶层键跟随（params/steps 原样保留）', () => {
+    const model = fnModel()
+    const stack = new CommandStack(model)
+    stack.apply({ type: 'rename_function', from: 'f1', to: 'login' })
+    const yaml = serialize(model)
+    expect(yaml).toContain('login:')
+    expect(yaml).toContain('- log: one')
+    expect(yaml).not.toMatch(/^f1:/m)
+  })
+})

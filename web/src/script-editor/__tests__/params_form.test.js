@@ -67,7 +67,8 @@ describe('extractParams', () => {
 describe('ParamsForm 三态', () => {
   it('七类类型化控件渲染（复用 CellEditor）', () => {
     const w = mountForm({ initialArgs: { account: 'a.png', pos: [0.1, 0.2], target: '112233', timeout: '5s', quit: 'BACK', message: 'hi', enable: false } })
-    expect(w.find('input[list="se-tmpl-options"]').exists()).toBe(true) // tmpl
+    expect(w.find('.tmpl-wrap input.cell-input').exists()).toBe(true) // tmpl（自定义下拉 + ▾）
+    expect(w.find('.tmpl-wrap .tpl-toggle').exists()).toBe(true)       // 悬停缩略图下拉开关
     expect(w.findAll('input[type="number"]')).toHaveLength(3)           // coord X/Y + time 数值
     expect(w.find('input[type="color"]').exists()).toBe(true)           // color
     expect(w.find('select.cell-select.unit').exists()).toBe(true)       // time 单位
