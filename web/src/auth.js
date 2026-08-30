@@ -87,22 +87,38 @@ export async function login(username, password) {
   return { ok: false, code: `http_${r.status}` }
 }
 
-// 启动/首次导航探测会话（结论缓存：后续导航复用；login/doLogout/handleUnauthorized 翻转缓存，
-// 会话过期则由 api 层 401 拦截刷新为未认证——不会拿着陈旧结论放行）
+// 启动/首次导航探测会话（成功结论缓存复用；login/doLogout/handleUnauthorized 翻转缓存，
+// 会话过期由 api 层 401 拦截刷新为未认证——不会拿着陈旧结论放行）。
+// 探测超时/网络错误/5xx = 结论未知：不缓存、放行本次导航——未认证由 api 层 401 拦截兜底。
+// 此前「服务不可达按未认证处理」有两个副作用：pending fetch 挂住路由守卫 = 侧边栏点任何
+// 项都没反应；瞬时不可达被永久缓存成未认证。改为短超时 + 未知结论不缓存。
+const PROBE_TIMEOUT_MS = 4000
+
 export function probeSession() {
   if (_probe) return _probe
   _probe = (async () => {
     if (_forcedUnauthed) return false               // 已被 401 判死，别再问
+    const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null
+    const timer = setTimeout(() => { if (ctl) ctl.abort() }, PROBE_TIMEOUT_MS)
     try {
-      const r = await fetch('/api/session')
+      const r = await fetch('/api/session', ctl ? { signal: ctl.signal } : undefined)
       if (r.ok) {
         const b = await r.json().catch(() => ({}))
         markAuthed(b.username)
         return true
       }
-    } catch (e) { /* 服务不可达按未认证处理（后端未就绪属预期态） */ }
-    markUnauthed(_forcedUnauthed)                    // 保留 forced 标志不被普通 401 冲掉
-    return false
+      if (r.status === 401) {
+        markUnauthed(_forcedUnauthed)               // 明确未认证（保留 forced 标志不被冲掉）
+        return false
+      }
+      _probe = null                                 // 5xx 等：结论未知，不缓存，下次导航重试
+      return true
+    } catch (e) {
+      _probe = null                                 // 超时/网络错误：结论未知，不缓存
+      return true
+    } finally {
+      clearTimeout(timer)
+    }
   })()
   return _probe
 }

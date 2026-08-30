@@ -103,7 +103,7 @@ describe('probeSession（GET /api/session 探测）', () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonRes(200, { authenticated: true, username: 'admin' }))
     await expect(auth.probeSession()).resolves.toBe(true)
     expect(auth.session.username).toBe('admin')
-    expect(fetch).toHaveBeenCalledWith('/api/session')
+    expect(fetch.mock.calls[0][0]).toBe('/api/session')
   })
 
   it('结论缓存：二次导航不再重复探测', async () => {
@@ -120,10 +120,20 @@ describe('probeSession（GET /api/session 探测）', () => {
     expect(auth.session.username).toBeNull()
   })
 
-  it('服务不可达（网络错误）→ 按未认证处理，不抛异常', async () => {
-    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'))
-    await expect(auth.probeSession()).resolves.toBe(false)
+  it('5xx → 结论未知：放行导航且不缓存（api 层 401 拦截兜底）', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonRes(500, {}))
+    await expect(auth.probeSession()).resolves.toBe(true)
     expect(auth.session.username).toBeNull()
+  })
+
+  it('网络错误/超时 → 结论未知：放行且不缓存，下次导航重新探测（不永久缓存未认证卡死导航）', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'))
+    await expect(auth.probeSession()).resolves.toBe(true)
+    expect(auth.session.username).toBeNull()
+    // 结论未缓存 → 下次导航重试；服务恢复即恢复认证态
+    vi.mocked(fetch).mockResolvedValueOnce(jsonRes(200, { authenticated: true, username: 'admin' }))
+    await expect(auth.probeSession()).resolves.toBe(true)
+    expect(auth.session.username).toBe('admin')
   })
 })
 

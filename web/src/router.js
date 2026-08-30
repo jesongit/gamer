@@ -31,4 +31,27 @@ router.beforeEach(async (to) => {
   return resolveGuardTarget(authed, to.name, to.fullPath)
 })
 
+// 构建产物更新（gamer.ps1 restart -Build / 重新 npm run build）后，已打开的旧页面再点
+// 导航时懒加载旧 hash 的 chunk 会 404 → 导航静默失败，表现为「侧边栏点其他页面没反应」。
+// 命中 chunk 加载错误 → 整页刷新一次加载新产物（sessionStorage 标记防刷新循环，
+// afterEach 清标记，之后再次部署仍能触发）；其余错误只打日志不劫持。
+router.onError((err) => {
+  const msg = String((err && err.message) || err)
+  if (/dynamically imported module|Importing a module script failed|Loading chunk \d+ failed/i.test(msg)) {
+    try {
+      if (!sessionStorage.getItem('gb_chunk_reload')) {
+        sessionStorage.setItem('gb_chunk_reload', '1')
+        window.location.reload()
+        return
+      }
+    } catch { /* 无 sessionStorage 环境（隐私模式等）直接刷新 */ }
+    window.location.reload()
+    return
+  }
+  console.error('[router]', err)
+})
+router.afterEach(() => {
+  try { sessionStorage.removeItem('gb_chunk_reload') } catch { /* 忽略 */ }
+})
+
 export default router
