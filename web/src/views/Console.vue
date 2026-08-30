@@ -85,13 +85,31 @@
         @wrap-mounted="onVideoWrapMounted"
         @loupe-mounted="onLoupeMounted"
       />
+
+      <!-- 未启动应用提示：连接不再自动启动应用，画面停在桌面/黑屏时容易被误以为卡住。
+           点「启动应用」或 ✕ 关闭；每次重新连接重新出现 -->
+      <div v-if="connected && !appHintDismissed" class="app-hint">
+        <span>已连接。未启动应用时画面停在桌面/黑屏</span>
+        <button class="btn btn-sm btn-primary" @click="launchGame">🚀 启动应用</button>
+        <button class="btn btn-sm btn-ghost" title="本次连接不再提示" @click="appHintDismissed = true">✕</button>
+      </div>
     </div>
 
-    <!-- 右：功能区（模板 + 脚本独占；设备管理收进顶部工具条与设置弹窗） -->
+    <!-- 右：功能区（顶部 模板/脚本 页签切换整块内容；二次裁切为弹窗，见 TemplateCapture） -->
     <aside class="panel">
-      <div class="panel-sec script-tab">
-        <RecordingCropPanel v-if="recording.panelDraft" :context="recordingCropContext" />
+      <RecordingCropPanel v-if="recording.panelDraft" :context="recordingCropContext" />
+      <select v-model="activePkg" class="select mono func-pkg" title="应用分区：脚本/函数库/模板按应用包名分区存储（两页签共用）">
+        <option v-if="!pkgOptions.length" value="">（未配置应用包名）</option>
+        <option v-for="p in pkgOptions" :key="p" :value="p">{{ p }}</option>
+      </select>
+      <div class="func-tabs">
+        <button type="button" :class="{ active: panelTab === 'tpl' }" @click="panelTab = 'tpl'">🖼️ 模板</button>
+        <button type="button" :class="{ active: panelTab === 'script' }" @click="panelTab = 'script'">📜 脚本</button>
+      </div>
+      <div v-show="panelTab === 'tpl'" class="panel-sec tpl-tab">
         <TemplateCapture :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
+      </div>
+      <div v-show="panelTab === 'script'" class="panel-sec script-tab">
         <ScriptRunner :context="scriptRunnerContext" />
       </div>
     </aside>
@@ -127,7 +145,7 @@ const APP_CACHE_TTL = 5 * 60 * 1000
 </script>
 
 <script setup>
-import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, inject } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, inject, provide } from 'vue'
 import { pinyin } from 'pinyin-pro'
 import { useRouter } from 'vue-router'
 import { store, devicesData, scriptsData, templatesData, useToast, applyRunRecord, findRun, beginCancel, resetStoreRunState, pushRunConflict } from '../store'
@@ -216,6 +234,9 @@ let renderFpLast = ''
 let renderFpFrozen = 0
 let lastDragInputAt = 0
 let stallResetSent = false
+let blackResetSent = false
+// 未启动应用提示（app-hint）：每次连接重新出现；点启动/关闭后本次连接不再显示
+const appHintDismissed = ref(false)
 let fpCanvas = null
 let fpCtx = null
 const selScript = ref('')
@@ -224,6 +245,8 @@ const selScript = ref('')
 // 模板列表、脚本选择、模板/脚本读写都按该分区进行（后端 data/<pkg>/tmpl|yaml）
 const activePkg = ref('')
 const scriptMode = ref('run')
+// 右侧功能区页签：模板 / 脚本（整块切换，各自独占面板高度）
+const panelTab = ref('script')
 // ---------- 共享脚本编辑器外壳（阶段 4） ----------
 // 模型/命令栈/dirty/保存/409 冲突/校验/跳转全部收敛在 useScriptEditorShell，
 // Console 与独立脚本页共用同一编辑核心（script-editor/*）。
@@ -239,6 +262,47 @@ const scriptShell = useScriptEditorShell({
 })
 // 函数库列表与 func 目标解析（func 步骤「打开函数定义」跳转用）
 const fnLib = useFunctionLibrary({ api })
+// 运行区资源类型：脚本（yaml/）/ 函数（func/）。函数模式经函数测试接口运行单个函数
+const runKind = ref('script')
+const selFnFile = ref('')
+/** 运行按钮可用性：脚本模式看脚本选择，函数模式看函数库文件选择 */
+const canRunTarget = computed(() => (runKind.value === 'script' ? !!selScript.value : !!selFnFile.value))
+// 函数文件默认选中第一个：切类型/切分区/列表刷新后当前选择失效时回退第一个（与脚本下拉同形）
+watch([() => fnLib.list, runKind], () => {
+  if (runKind.value !== 'func') return
+  if (!fnLib.list.some(f => f.id === selFnFile.value)) selFnFile.value = fnLib.list[0]?.id || ''
+}, { immediate: true })
+/** 运行区当前选择 id（脚本 id / 函数库文件 id）：编辑、删除按钮与摘要区共用 */
+const selTargetId = computed(() => (runKind.value === 'script' ? selScript.value : selFnFile.value))
+/**
+ * 函数模式：整个函数库文件的解析模型（全部函数）。摘要区逐函数分组渲染
+ * （每组一个 ScriptSummary，steps 带稳定 uuid 供运行起点定位）。
+ * parseFunctionFile 返回 {model, diagnostics} 包装。
+ */
+const funcParsed = computed(() => {
+  if (runKind.value !== 'func') return null
+  const f = fnLib.list.find(x => x.id === selFnFile.value)
+  if (!f) return null
+  try {
+    const parsed = fnLib.parseFunctionFile(f.content ?? '', f.file || '')
+    const model = parsed && parsed.model
+    return model && Array.isArray(model.functions) ? model : null
+  } catch {
+    return null
+  }
+})
+/** 每个函数一个伪脚本模型（params + steps），复用 ScriptSummary 顶层卡片交互 */
+const funcFnViews = computed(() => {
+  const model = funcParsed.value
+  if (!model) return []
+  return model.functions.map(fn => ({ name: fn.name, model: { params: fn.params || [], steps: fn.steps || [] } }))
+})
+const funcSummaryError = computed(() => {
+  if (runKind.value !== 'func') return ''
+  const f = fnLib.list.find(x => x.id === selFnFile.value)
+  if (!f) return '请选择函数库文件'
+  return funcParsed.value ? '' : '函数库解析失败（可能含旧语法），请进编辑态查看诊断'
+})
 // 编辑态辅助 UI 开关
 const showYaml = ref(false)
 const showExtras = ref(false)
@@ -386,6 +450,7 @@ const webrtcLifecycle = useWebRtcLifecycle({
     renderFpLast = ''
     renderFpFrozen = 0
     stallResetSent = false
+    blackResetSent = false
     lastBytesReceived = 0
     lastBitrateTs = 0
     bitrate.value = '—'
@@ -399,6 +464,8 @@ const webrtcLifecycle = useWebRtcLifecycle({
     connecting.value = false
     controlChannel = webrtcLifecycle.getControlChannel()
     videoConnectTs = Date.now()
+    blackResetSent = false
+    appHintDismissed.value = false
     sendControl({ type: 'audio', on: !audioMuted.value })
     toast('WebRTC 连接建立', 'success')
   },
@@ -972,13 +1039,22 @@ function startStats() {
   statsTimer = setInterval(async () => {
     if (!webrtcLifecycle.getPeerConnection()) return
     const v = videoElement.value
-    // 黑屏看门狗：连接建立后 8s 内一直没有可解码视频帧（videoWidth 仍为 0，
-    // 如服务端未重放出 SPS/PPS+IDR）→ 判定异常，自动重连（重连时服务端会
-    // 强制设备出关键帧并重放初始帧，恢复画面）
+    // 两级黑屏处理（静态屏 MTK 编码器对 reset 响应极慢，实测要多次才吐 IDR）：
+    // 8s 仍无可解码帧 → 先补一次 reset_video 要 IDR，继续等到 16s；仍黑屏才重连。
+    // 旧实现 8s 直接重连：编码器还没来得及响应就被拆链，静态屏下形成重连风暴
     if (connected.value && v && !hadVideo && v.videoWidth === 0 && Date.now() - videoConnectTs > 8000) {
-      console.warn('[webrtc] no decodable video after 8s, reconnecting')
-      handleVideoSilence()
-      return
+      const blackFor = Date.now() - videoConnectTs
+      if (!blackResetSent && blackFor < 16000) {
+        blackResetSent = true
+        console.warn('[webrtc] no decodable video after 8s, requesting IDR via reset_video')
+        sendControl({ type: 'reset_video' })
+        return
+      }
+      if (blackFor >= 16000) {
+        console.warn('[webrtc] no decodable video after 16s, reconnecting')
+        handleVideoSilence()
+        return
+      }
     }
     // 视频静默检测：仅在见过画面后启用（连接初期 currentTime=0 不误判）
     if (connected.value && v && v.videoWidth > 0) {
@@ -1802,6 +1878,7 @@ function launchGame() {
   if (!connected.value) return toast('请先连接设备', 'error')
   if (!currentPkg.value) return toast('该设备未配置应用包名', 'warn')
   sendControl({ type: 'start_app', app: currentPkg.value })
+  appHintDismissed.value = true
   toast(`正在启动 ${currentPkg.value}…`, 'info')
 }
 
@@ -1826,16 +1903,16 @@ async function onTplThumbClick(e, t) {
   openTplView(t.name)
 }
 
-/** 模板列表文件名：alt → 生成 find 步骤插入当前编辑锚点；普通 → 查看大图 */
+// ---------- 画布模板下拉悬停缩略图（CellEditor inject；短名 → 当前分区图片 URL） ----------
+provide('tplPreviewUrl', (short) => {
+  const full = templatesData.value.find(t => t.pkg === activePkg.value && tplShortName(t.name) === short)?.name
+  return api.tplImageUrl(full || short, activePkg.value)
+})
+
+/** 模板列表文件名点击：查看大图（alt 生成 find 已随可视化编辑移除，插入步骤走编辑器） */
 function onTplNameClick(e, t) {
   if (renaming.value === t.name) return
   confirmDelTpl.value = null
-  if (isAltAction(e)) {
-    // 生成的步骤写短名（login.png）：引擎自动解析到带 #后缀 的文件，区域照常生效
-    const name = tplShortName(t.name)
-    insertAltStep(() => scriptShell.insertFindTemplate(name), `等待并点击 ${name}`, () => recording.buildFindStep(name))
-    return
-  }
   openTplView(t.name)
 }
 
@@ -2150,6 +2227,53 @@ function startNewScript() {
   scriptShell.newScript({ name: '新脚本.yml', pkg: activePkg.value })
 }
 
+/** 编辑当前选择（运行区资源类型分发）：脚本 = 脚本编辑上下文；函数 = 函数库编辑上下文 */
+async function editCurrentTarget() {
+  if (runKind.value !== 'func') return editCurrentScript()
+  const f = fnLib.list.find(x => x.id === selFnFile.value)
+  if (!f) return toast('请先选择函数库文件', 'error')
+  scriptMode.value = 'edit'
+  showYaml.value = false
+  showExtras.value = false
+  resetAltState()
+  try {
+    await scriptShell.loadFunctionFile(f.id)
+  } catch (e) {
+    scriptShell.reset()
+    scriptMode.value = 'run'
+    toast('函数库加载失败：' + e.message, 'error')
+  }
+}
+
+/** 新建当前类型（运行区「更多」）：脚本 = 新建脚本；函数 = 新建函数库文件 */
+function startNewTarget() {
+  if (runKind.value !== 'func') return startNewScript()
+  if (!activePkg.value) return toast('请先选择应用分区（设备页签配置应用包名）', 'warn')
+  const raw = window.prompt('函数库文件短名（缺省 .yaml 自动补）', 'functions')
+  if (!raw || !raw.trim()) return
+  scriptMode.value = 'edit'
+  showYaml.value = false
+  showExtras.value = false
+  resetAltState()
+  scriptShell.newFunctionFile({ file: raw.trim(), pkg: activePkg.value })
+}
+
+/** 删除当前选择（运行区「更多」）：脚本 / 函数库文件 */
+async function deleteCurrentTarget() {
+  if (runKind.value !== 'func') return deleteCurrentScript()
+  const f = fnLib.list.find(x => x.id === selFnFile.value)
+  if (!f) return toast('请先选择函数库文件', 'error')
+  if (!window.confirm(`删除函数库文件 ${f.file}？（引用它的 func 步骤将失效）`)) return
+  try {
+    await api.deleteFunction(f.id)
+    await fnLib.refresh(activePkg.value)
+    if (selFnFile.value === f.id) selFnFile.value = ''
+    toast('函数库文件已删除', 'success')
+  } catch (e) {
+    toast('删除失败：' + e.message, 'error')
+  }
+}
+
 /** 运行模式：编辑当前选中的脚本（getScript 读取最新内容与版本短码） */
 async function editCurrentScript() {
   const s = scripts.value.find(x => x.id === selScript.value)
@@ -2242,10 +2366,43 @@ async function saveEditScript() {
   }
 }
 
-/** 保存成功后置：刷新列表、选中保存后的脚本、退出编辑回到运行视图 */
+// ---------- 自动保存（编辑区失焦即存）：600ms 防抖合并连续失焦；成功静默，
+// 校验不通过 / 版本冲突 / 失败 toast 提示（不弹冲突窗、不退出编辑态） ----------
+let autoSaveTimer = null
+function autoSaveDebounced() {
+  if (scriptMode.value !== 'edit' || !scriptShell.hasModel) return
+  if (autoSaveTimer) clearTimeout(autoSaveTimer)
+  autoSaveTimer = setTimeout(autoSave, 600)
+}
+async function autoSave() {
+  autoSaveTimer = null
+  if (scriptMode.value !== 'edit' || !scriptShell.hasModel || !scriptShell.dirty || scriptShell.saving) return
+  if (recording.busy) return // 录制队列排空前不落盘（与手动保存同一闸门）
+  const wasNew = !scriptShell.resourceId
+  const r = await scriptShell.save({ suppressConflict: true })
+  if (r.ok) {
+    if (wasNew) selScript.value = scriptShell.resourceId // 首次落盘：运行区选择跟随
+  } else if (r.reason === 'invalid') {
+    toast('自动保存未通过：' + (r.diagnostics?.[0]?.message || '存在校验问题'), 'warn')
+  } else if (r.reason === 'conflict') {
+    toast('自动保存遇到版本冲突，请点「💾 保存」手动处理', 'warn')
+  } else if (r.reason !== 'empty') {
+    toast('自动保存失败：' + (r.error?.message || '未知错误'), 'warn')
+  }
+}
+
+/** 保存成功后置：刷新列表、选中保存后的资源（脚本/函数库文件）、退出编辑回到运行视图 */
 async function afterScriptSaved(rep) {
   await loadData()
-  if (rep?.id) selScript.value = rep.id
+  if (rep?.id) {
+    if (scriptShell.kind === 'function_library') {
+      runKind.value = 'func'
+      selFnFile.value = rep.id
+      await fnLib.refresh(activePkg.value)
+    } else {
+      selScript.value = rep.id
+    }
+  }
   scriptShell.reset()
   scriptMode.value = 'run'
   showYaml.value = false
@@ -2331,10 +2488,11 @@ async function checkRunStatus() {
   } catch (e) {}
 }
 
-// ---------- 运行模式：只读步骤摘要 + 运行起点选择（plan §10「只读源码展示/从某行运行」行） ----------
+// ---------- 运行模式：只读步骤摘要 + 从此步骤运行（plan §10「只读源码展示/从某行运行」行） ----------
 // 非编辑态不再展示源码文本：选中脚本解析为 ScriptModel，ScriptSummary 逐顶层卡片给出
-// 图标 + 中文动作名 + 自然语言摘要；卡片可选中为运行起点（uuid → startIndexOf 映射顶层序号）。
-// 解析失败（旧语法残留等）→ summaryError 提示，主视图不给摘要、不可选运行起点。
+// 图标 + 中文动作名 + 自然语言摘要；运行起点只经卡片「▶ 从此运行」直发（2026-08-30 用户
+// 决策：去掉点击卡片选中/取消，顶部「运行」按钮恒从头跑）。解析失败（旧语法残留等）→
+// summaryError 提示，主视图不给摘要。
 const summaryModel = computed(() => {
   const s = scripts.value.find(x => x.id === selScript.value)
   if (!s) return null
@@ -2351,26 +2509,9 @@ const summaryError = computed(() => {
   return ''
 })
 
-// 运行起点（顶层卡片 uuid；null = 从头运行）。脚本切换或内容重解析后重置
-const runStartUuid = ref(null)
-watch([selScript, summaryModel], () => { runStartUuid.value = null })
-
-/** 点击摘要卡片：选中/取消运行起点（嵌套卡片不会出现在摘要里，无需过滤） */
-function toggleRunStart(uuid) {
-  runStartUuid.value = runStartUuid.value === uuid ? null : uuid
-}
-
-/** 摘要卡片「▶ 从此运行」：选中该卡片并立即启动 */
+/** 摘要卡片「▶ 从此运行」：直接以该步骤为起点启动（不选中、不留驻，起点即发即用） */
 function runFromStep(uuid) {
-  if (store.running || startPending.value) return
-  runStartUuid.value = uuid
-  runScript()
-}
-
-/** 运行起点 uuid → 引擎 start_index（仅主流程顶层；找不到回退 0 从头跑） */
-function resolveRunStartIndex() {
-  if (!runStartUuid.value || !summaryModel.value) return 0
-  return startIndexOf(summaryModel.value, runStartUuid.value) ?? 0
+  return runScript({ fromUuid: uuid })
 }
 
 // ---------- 结构化跳转（plan §10「调用文本链接预览」行：正则扫描源码 → 结构化引用） ----------
@@ -2438,14 +2579,17 @@ function openRunConflict(d) {
 // ---------- 运行参数流程（阶段 5）：脚本声明 params 时先弹参数表单，稀疏 args 提交 ----------
 // exec 完成 API 调用与 run_id 登记；flow 负责表单开关/400 诊断回填字段/覆盖建议缓存/摘要
 const runArgsFlow = useRunArgsFlow({
-  exec: async ({ id, name, startIndex, args }) => {
+  exec: async ({ id, name, kind, fnName, startIndex, args }) => {
     startPending.value = true
     // 每次运行清空日志区域，只显示本次运行产生的日志
     runStartTime = Date.now()
     rawLogs = []
     liveLogs.value = []
     try {
-      const rep = await api.runScript(id, store.deviceId, startIndex, args)
+      // 函数模式（运行区资源类型=函数）：走函数测试接口运行单个函数
+      const rep = kind === 'function_library'
+        ? await api.runFunction(id, store.deviceId, { function: fnName || undefined, start_index: startIndex, args })
+        : await api.runScript(id, store.deviceId, startIndex, args)
       const st = normalizeStartReply(rep)
       if (st) {
         // 新契约：202 {run_id} —— 启动即以 run_id 登记执行实例（主键），后续轮询按 record.state 驱动 UI
@@ -2489,13 +2633,50 @@ function handleRunStartError(e) {
   }
 }
 
-/** 运行/从此步骤运行入口：解析当前脚本 params → 无参数直接运行，有参数弹参数表单 */
-async function runScript() {
-  if (!selScript.value || !store.deviceId || startPending.value || store.running) return
+/** 运行/从此步骤运行入口：解析当前脚本 params → 无参数直接运行，有参数弹参数表单；
+ *  函数模式：按函数 params 弹表单，经函数测试接口运行所选函数（缺省 = 文件第一个函数）。
+ *  opts.fromUuid（从此运行）→ 脚本取顶层 steps 序号 / 函数定位目标函数与步序；
+ *  顶部「运行」按钮不传 → 从头跑。守卫失败一律 toast 说明原因，不做静默 no-op */
+async function runScript(opts = {}) {
+  if (startPending.value || store.running) return
+  if (!store.deviceId) return toast('请先在上方选择设备再运行', 'warn')
+  if (runKind.value === 'func') {
+    const f = fnLib.list.find(x => x.id === selFnFile.value)
+    if (!f) return toast('请先选择函数库文件', 'warn')
+    // 运行目标：从此运行落在某函数的某步 → 该函数从该步；顶部运行 → 第一个函数从头
+    let fnName = (f.functions || [])[0] || ''
+    let startIndex = 0
+    if (opts.fromUuid && funcParsed.value) {
+      for (const fn of funcParsed.value.functions) {
+        const idx = fn.steps.findIndex(s => s.uuid === opts.fromUuid)
+        if (idx >= 0) { fnName = fn.name; startIndex = idx; break }
+      }
+    }
+    if (!fnName) return toast('该函数库文件没有可运行的函数', 'warn')
+    try {
+      await runArgsFlow.begin({
+        id: f.id,
+        name: `${f.file} · ${fnName}()`,
+        kind: 'function_library',
+        fnName,
+        yaml: f.content ?? '',
+        startIndex,
+        templates: templateNames.value,
+        title: '函数参数',
+        submitLabel: '▶ 运行',
+        desc: `运行函数 ${f.file}/${fnName}()${startIndex ? `（从第 ${startIndex + 1} 步）` : ''}`,
+      })
+    } catch (e) {
+      handleRunStartError(e)
+    }
+    return
+  }
+  if (!selScript.value || !scripts.value.find(x => x.id === selScript.value)) return toast('请先选择脚本', 'warn')
   const s = scripts.value.find(x => x.id === selScript.value)
-  if (!s) return
-  // 运行起点（摘要卡片选中）→ 顶层 steps 序号；未选中 = 从头运行（首版仅主流程顶层，plan §10）
-  const startIndex = resolveRunStartIndex()
+  // 运行起点：从此运行 → 顶层 steps 序号（找不到回退 0 从头跑）；顶部运行 → 从头
+  const startIndex = opts.fromUuid && summaryModel.value
+    ? (startIndexOf(summaryModel.value, opts.fromUuid) ?? 0)
+    : 0
   try {
     await runArgsFlow.begin({
       id: s.id,
@@ -2605,9 +2786,14 @@ const templateCaptureContext = {
 }
 const scriptRunnerContext = {
   scriptMode, selScript, activePkg, store, startPending, runScript, runStopping, stopScript,
+  // 运行区资源类型（脚本/函数）；Target 系列按类型分发编辑/新建/删除
+  runKind, selFnFile, canRunTarget, selTargetId, fnLib, autoSaveDebounced,
+  // 函数模式摘要：逐函数分组视图（每组一个 ScriptSummary）+ 解析失败文案
+  funcFnViews, funcSummaryError,
+  editCurrentTarget, startNewTarget, deleteCurrentTarget,
   editCurrentScript, moreOpen, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
   // 运行视图：只读摘要 + 运行起点 + call/func 结构化跳转（替代旧源码行点击/文本预览）
-  summaryModel, summaryError, runStartUuid, toggleRunStart, runFromStep, openScriptTarget,
+  summaryModel, summaryError, runFromStep, openScriptTarget,
   // 运行参数表单（阶段 5）：脚本声明 params 时点运行/从此运行弹出
   runArgsFlow, onRunArgsSubmit,
   // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调 + Alt 录制开关
@@ -2696,6 +2882,7 @@ onUnmounted(() => {
   if (fxTapTimer) { clearTimeout(fxTapTimer); fxTapTimer = null }
   if (fxSwipeTimer) { clearTimeout(fxSwipeTimer); fxSwipeTimer = null }
   if (fxHitTimer) { clearTimeout(fxHitTimer); fxHitTimer = null }
+  if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null }
   stopRunStatusPoll()
   cleanup(true)
 })
@@ -2709,7 +2896,13 @@ onUnmounted(() => {
 }
 
 /* ===== 画面区 ===== */
-.stage { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.stage { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; position: relative; }
+.app-hint {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 6;
+  display: flex; align-items: center; gap: 8px; padding: 5px 10px; white-space: nowrap;
+  background: rgba(4, 6, 10, .85); border: 1px solid var(--border); border-radius: 8px;
+  font-size: 12px; color: var(--text-1); backdrop-filter: blur(2px);
+}
 
 /* 二次裁切区 */
 .crop-stage {
@@ -2806,12 +2999,18 @@ onUnmounted(() => {
 
 /* 脚本页签 */
 .panel-sec.script-tab { flex: 1; min-height: 0; overflow: hidden; }
-/* 应用分区下拉：模板/脚本数据随分区切换（默认跟随设备页签的应用包名） */
-.pkg-bar { flex: none; display: flex; align-items: center; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
-.pkg-bar .pkg-label { flex: none; font-size: 12px; color: var(--text-2); }
-.pkg-bar .pkg-select { flex: 1; min-width: 0; }
-.pkg-bar .btn { flex: none; }
-.pkg-empty { flex: none; padding: 24px 10px; text-align: center; font-size: 12px; color: var(--text-2); }
+.panel-sec.tpl-tab { flex: 1; min-height: 0; overflow: hidden; }
+.func-pkg { flex-shrink: 0; font-size: 12px; }
+.func-tabs { display: flex; flex-shrink: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-2); }
+.func-tabs button {
+  flex: 1; padding: 7px 0; font-size: 12px; text-align: center; cursor: pointer;
+  border: none; background: transparent; color: var(--text-1);
+}
+.func-tabs button + button { border-left: 1px solid var(--border); }
+.func-tabs button.active {
+  color: var(--accent); background: rgba(34, 211, 165, .14); font-weight: 600;
+}
+/* 应用分区下拉：模板/脚本两页签共用，数据随分区切换（默认跟随设备页签的应用包名） */
 .script-tpl { flex: 4; min-height: 0; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
 .tpl-top { display: flex; align-items: center; gap: 8px; }
 /* 阈值输入 : 区域下拉 : 搜索框 : 框选按钮 : 上传按钮 = 2:4:5:3:3 */

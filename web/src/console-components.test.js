@@ -66,19 +66,24 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).toContain("import { useScriptEditorShell } from '../composables/useScriptEditorShell'")
     expect(consoleSource).not.toContain('script-language/validate')
     expect(consoleSource).not.toContain('script-language/line-map')
-    // 运行视图：ScriptSummary 摘要模型 + 运行起点 uuid → startIndexOf；call/func 结构化跳转
+    // 运行视图：ScriptSummary 摘要模型 + 「从此运行」直发 startIndexOf；call/func 结构化跳转
     expect(consoleSource).toContain('const summaryModel = computed(')
     expect(consoleSource).toContain('startIndexOf(summaryModel.value')
     expect(consoleSource).toContain('function openScriptTarget(')
-    expect(consoleSource).toContain('function toggleRunStart(')
     expect(consoleSource).toContain('function runFromStep(')
+    // 点击卡片选中/取消运行起点已删（2026-08-30 用户决策：「从此运行」按钮已覆盖，
+    // 顶部「运行」恒从头跑），起点只经 run-from 事件直发，不得回潮
+    expect(consoleSource).not.toContain('toggleRunStart')
+    expect(consoleSource).not.toContain('runStartUuid')
     // 保存走 shell（expected_version + 409 冲突回调），Alt 操作经 shell 生成类型化步骤
     expect(consoleSource).toContain('scriptShell.save()')
     expect(consoleSource).toContain('function onConflictReload(')
     expect(consoleSource).toContain('function onConflictOverwrite(')
     expect(consoleSource).toContain('scriptShell.insertTapAt(')
     expect(consoleSource).toContain('scriptShell.insertSwipeBetween(')
-    expect(consoleSource).toContain('scriptShell.insertFindTemplate(')
+    // 模板列表 alt 点文件名生成 find 已随可视化编辑移除（2026-08-30 用户决策），
+    // 插入 find 步骤统一走编辑器画布；不得回潮
+    expect(consoleSource).not.toContain('scriptShell.insertFindTemplate(')
     expect(consoleSource).toContain('scriptShell.insertColorCheck(')
     // opRecords 文本拼接路径停用：无 opRecords / renderOpTpl / DEFAULT_OP_TPL 残留
     expect(consoleSource).not.toContain('opRecords')

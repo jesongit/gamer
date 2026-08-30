@@ -1,28 +1,52 @@
 <template>
   <div v-if="ctx.scriptMode === 'run'" class="script-run">
-    <div class="auto-run"><ScriptPicker v-model="ctx.selScript" :package="ctx.activePkg" /></div>
+    <div class="auto-run">
+      <select v-model="ctx.runKind" class="select mono run-kind" title="资源类型：脚本存于 yaml/，函数库存于 func/">
+        <option value="script">脚本</option>
+        <option value="func">函数</option>
+      </select>
+      <ScriptPicker v-if="ctx.runKind === 'script'" v-model="ctx.selScript" :package="ctx.activePkg" />
+      <select v-else v-model="ctx.selFnFile" class="select mono fn-file" title="函数库文件（data/<应用分区>/func/）">
+        <option value="" disabled>选择函数库文件…</option>
+        <option v-for="f in ctx.fnLib.list" :key="f.id" :value="f.id">{{ f.file }}</option>
+      </select>
+    </div>
     <div class="run-actions">
-      <button v-if="!ctx.store.running" class="btn btn-primary" :disabled="!ctx.selScript || !ctx.store.deviceId || ctx.startPending" @click="ctx.runScript()">{{ ctx.startPending ? '提交中…' : '▶ 运行' }}</button>
+      <button v-if="!ctx.store.running" class="btn btn-primary" :disabled="!ctx.canRunTarget || !ctx.store.deviceId || ctx.startPending" @click="ctx.runScript()">{{ ctx.startPending ? '提交中…' : '▶ 运行' }}</button>
       <button v-else class="btn btn-danger" :disabled="ctx.runStopping" @click="ctx.stopScript">{{ ctx.runStopping ? '■ 停止中…' : '■ 停止' }}</button>
-      <button class="btn" :disabled="!ctx.selScript" @click="ctx.editCurrentScript">编辑</button>
-      <div class="more-wrap"><button class="btn" :class="{ active: ctx.moreOpen }" @click="ctx.moreOpen = !ctx.moreOpen">更多 ▾</button><div v-if="ctx.moreOpen" class="more-mask" @click="ctx.moreOpen = false"></div><div v-if="ctx.moreOpen" class="more-dropdown"><button class="more-item" @click="ctx.moreOpen = false; ctx.startNewScript()">＋ 新建</button><button class="more-item danger" :disabled="!ctx.selScript" @click="ctx.moreOpen = false; ctx.deleteCurrentScript()">🗑 删除</button></div></div>
+      <button class="btn" :disabled="!ctx.selTargetId" @click="ctx.editCurrentTarget()">编辑</button>
+      <div class="more-wrap"><button class="btn" :class="{ active: ctx.moreOpen }" @click="ctx.moreOpen = !ctx.moreOpen">更多 ▾</button><div v-if="ctx.moreOpen" class="more-mask" @click="ctx.moreOpen = false"></div><div v-if="ctx.moreOpen" class="more-dropdown"><button class="more-item" @click="ctx.moreOpen = false; ctx.startNewTarget()">＋ 新建</button><button class="more-item danger" :disabled="!ctx.selTargetId" @click="ctx.moreOpen = false; ctx.deleteCurrentTarget()">🗑 删除</button></div></div>
     </div>
     <RunLogPanel :context="ctx" :on-mounted="ctx.onLogBoxMounted" />
-    <template v-if="!ctx.store.running">
+    <!-- 摘要区独立滚动：panel-sec 是 overflow:hidden，内容超高（多函数分组/长脚本）必须在这里滚动 -->
+    <div v-if="!ctx.store.running" class="sum-wrap">
+      <!-- 函数模式：逐函数分组摘要（每组=函数名 + 该函数体顶层卡片；跨函数选运行起点） -->
+      <template v-if="ctx.runKind === 'func' && ctx.selTargetId">
+        <template v-if="ctx.funcFnViews.length">
+          <div v-for="view in ctx.funcFnViews" :key="view.name" class="fn-sum">
+            <div class="fn-sum-head mono">{{ view.name }}()</div>
+            <ScriptSummary
+              :model="view.model"
+              :error="ctx.funcSummaryError"
+              @run-from="ctx.runFromStep"
+              @open-target="ctx.openScriptTarget"
+            />
+          </div>
+        </template>
+        <div v-else class="script-view-empty">{{ ctx.funcSummaryError || '该函数库文件没有函数（编辑态画布「＋ 函数」添加）' }}</div>
+      </template>
       <ScriptSummary
-        v-if="ctx.selScript"
+        v-else-if="ctx.selTargetId"
         :model="ctx.summaryModel"
         :error="ctx.summaryError"
-        :run-uuid="ctx.runStartUuid"
-        @toggle-run-start="ctx.toggleRunStart"
         @run-from="ctx.runFromStep"
         @open-target="ctx.openScriptTarget"
       />
       <div v-else class="script-view-empty">请选择脚本</div>
-    </template>
+    </div>
   </div>
-  <div v-else class="script-edit">
-    <div class="edit-name-row"><input v-model="ctx.shell.name" class="input mono" placeholder="脚本名称（可省略 .yml 后缀）" @keydown.enter="ctx.saveEditScript" /></div>
+  <div v-else class="script-edit" @focusout="ctx.autoSaveDebounced()">
+    <div class="edit-name-row"><input v-model="ctx.shell.name" class="input mono" :placeholder="ctx.shell.kind === 'function_library' ? '函数库文件短名（缺省 .yaml 自动补）' : '脚本名称（可省略 .yml 后缀）'" @keydown.enter="ctx.saveEditScript" /></div>
     <div class="edit-actions">
       <button class="btn btn-primary" :disabled="ctx.shell.saving || !ctx.shell.hasModel" @click="ctx.saveEditScript">{{ ctx.shell.saving ? '保存中…' : '💾 保存' }}</button>
       <button class="btn" @click="ctx.cancelEditScript">取消</button>
@@ -43,7 +67,6 @@
         :context="ctx.shell.editorContext"
         :templates="ctx.templateNames"
         :selected-uuid="ctx.shell.selectedUuid"
-        show-error-panel
         @select="(u) => ctx.shell.select(u)"
       />
       <!-- 录制上传进行中：锁定画布交互（占位不可跨分支拖动，plan §11.8「禁用即可」） -->
@@ -69,8 +92,10 @@
 <script setup>
 /**
  * Console 紧凑脚本外壳（阶段 4，plan §10.1）：替换旧 textarea 文本编辑区。
- * - 运行态：ScriptPicker（锁分区）+ 运行/停止/更多 + 实时日志 + 只读步骤摘要列表
- *   （ScriptSummary：顶层卡片选运行起点、call/func 结构化跳转）；
+ * - 运行态：资源类型下拉（脚本/函数，区分 yaml/ 与 func/）+ 文件下拉（脚本 =
+ *   ScriptPicker 锁分区；函数 = 函数库文件 + 函数名下拉，同一行）+ 运行/停止/编辑/更多
+ *   （Target 系列按类型分发，新建/删除/编辑函数库文件与脚本同形）+ 实时日志 +
+ *   只读步骤摘要列表（脚本/函数体通用：「从此运行」选起点、call/func 结构化跳转）；
  * - 编辑态：StepCanvas 共享画布（面包屑/专注视图/诊断定位/添加面板均为组件现成能力）+
  *   撤销重做 + 参数/配置折叠区 + 只读 YAML 诊断预览 + 保存 409 冲突弹窗（SaveConflictModal）；
  * - shell（useScriptEditorShell）由 Console 持有并传入，本组件只做编排；
@@ -97,5 +122,5 @@ onMounted(syncCanvasRef)
 </script>
 
 <style scoped>
-.script-run{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.auto-run{display:flex;flex-wrap:wrap;gap:8px}.auto-run .spicker{flex:1 1 auto}.auto-run .select{flex:1;min-width:120px}.run-actions{display:flex;gap:8px}.run-actions .btn{flex:1}.run-actions .more-wrap{position:relative;flex:1}.run-actions .more-wrap .btn{width:100%}.more-mask{position:fixed;inset:0;z-index:20}.more-dropdown{position:absolute;right:0;top:calc(100% + 4px);z-index:30;display:flex;flex-direction:column;min-width:120px;padding:4px;gap:2px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 8px 24px rgba(0,0,0,.4)}.more-item{display:flex;align-items:center;gap:6px;text-align:left;white-space:nowrap;padding:6px 10px;border:none;background:none;border-radius:var(--radius-sm);color:var(--text-0);font-size:12px;cursor:pointer}.more-item:hover{background:var(--bg-3)}.more-item:disabled{color:var(--text-2);opacity:.5;cursor:not-allowed}.more-item.danger:hover{color:var(--danger)}.script-view-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:12px;background:var(--bg-0);border:1px dashed var(--border);border-radius:var(--radius-sm)}.script-edit{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.edit-name-row{display:flex}.edit-name-row .input{flex:1;min-width:0;width:100%}.edit-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.edit-actions .btn{flex:1;justify-content:center;min-width:0}.edit-actions .btn.active{border-color:var(--accent-2);color:var(--accent-2);background:rgba(56,189,248,.08)}.dirty-badge{flex:none;font-size:11px;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px}.jump-back{flex:none;align-self:flex-start}.canvas-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;position:relative}.canvas-wrap .canvas-lock{position:absolute;inset:0;z-index:6;cursor:wait;background:transparent}.canvas-wrap :deep(.se-canvas){flex:none}.extras{display:flex;flex-direction:column}.mono{font-family:var(--mono);font-size:11px;color:var(--text-1)}
+.script-run{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.auto-run{display:flex;flex-wrap:nowrap;gap:8px}.auto-run .spicker{width:auto;flex:1 1 auto;min-width:0}.auto-run .select{flex:1;min-width:0}.auto-run .run-kind{flex:0 0 auto;min-width:0;width:76px}.auto-run .fn-file{flex:1 1 auto;min-width:0}.sum-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:8px}.sum-wrap .script-summary{flex:none}.sum-wrap .script-view-empty{flex:none;min-height:160px}.fn-sum{display:flex;flex-direction:column;gap:4px}.fn-sum-head{font-size:12px;font-weight:600;color:var(--accent);padding:2px 2px 0}.run-actions{display:flex;gap:8px}.run-actions .btn{flex:1}.run-actions .more-wrap{position:relative;flex:1}.run-actions .more-wrap .btn{width:100%}.more-mask{position:fixed;inset:0;z-index:20}.more-dropdown{position:absolute;right:0;top:calc(100% + 4px);z-index:30;display:flex;flex-direction:column;min-width:120px;padding:4px;gap:2px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 8px 24px rgba(0,0,0,.4)}.more-item{display:flex;align-items:center;gap:6px;text-align:left;white-space:nowrap;padding:6px 10px;border:none;background:none;border-radius:var(--radius-sm);color:var(--text-0);font-size:12px;cursor:pointer}.more-item:hover{background:var(--bg-3)}.more-item:disabled{color:var(--text-2);opacity:.5;cursor:not-allowed}.more-item.danger:hover{color:var(--danger)}.script-view-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:12px;background:var(--bg-0);border:1px dashed var(--border);border-radius:var(--radius-sm)}.script-edit{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.edit-name-row{display:flex}.edit-name-row .input{flex:1;min-width:0;width:100%}.edit-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.edit-actions .btn{flex:1;justify-content:center;min-width:0}.edit-actions .btn.active{border-color:var(--accent-2);color:var(--accent-2);background:rgba(56,189,248,.08)}.dirty-badge{flex:none;font-size:11px;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px}.jump-back{flex:none;align-self:flex-start}.canvas-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;position:relative}.canvas-wrap .canvas-lock{position:absolute;inset:0;z-index:6;cursor:wait;background:transparent}.canvas-wrap :deep(.se-canvas){flex:none}.extras{display:flex;flex-direction:column}.mono{font-family:var(--mono);font-size:11px;color:var(--text-1)}
 </style>

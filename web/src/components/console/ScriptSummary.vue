@@ -8,8 +8,6 @@
         v-for="(row, i) in topSteps"
         :key="row.uuid"
         class="sum-row"
-        :class="{ sel: runUuid === row.uuid }"
-        @click="emit('toggle-run-start', row.uuid)"
       >
         <span class="idx mono">{{ i + 1 }}</span>
         <span class="icon" :title="row.meta.hint">{{ row.meta.icon }}</span>
@@ -21,7 +19,7 @@
         <button class="mini-btn run" type="button" title="从此步骤运行（顶层）" @click.stop="emit('run-from', row.uuid)">▶ 从此运行</button>
       </div>
     </div>
-    <div class="run-hint">点击卡片选中运行起点（再次点击取消，从头运行）；▶ 直接从该步骤运行。call/func 卡片可打开目标。</div>
+    <div class="run-hint">▶ 从此运行：直接从该步骤开始运行（顶部「运行」按钮从头跑）。call/func 卡片可打开目标。</div>
   </div>
 </template>
 
@@ -29,8 +27,8 @@
 /**
  * 只读步骤摘要列表（plan §10.1 Console 紧凑外壳非编辑态）：替代旧「只读源码 + 行点击」。
  * - 逐顶层卡片显示动作图标 + 中文动作名 + 自然语言摘要（kinds.stepSummary 同源）；
- * - 顶层卡片可选中为运行起点（uuid → startIndexOf 映射在宿主完成）；嵌套分支不展开、
- *   不提供运行入口（首版仅主流程顶层可选，plan §10「从某行运行」行）；
+ * - 运行起点只经卡片「▶ 从此运行」发起（2026-08-30 用户决策：去掉点击卡片选中/取消，
+ *   从此运行按钮已覆盖该场景）；嵌套分支不展开、不提供运行入口；
  * - call/func 卡片提供「打开子脚本/打开函数定义」结构化跳转入口（emit open-target）。
  */
 import { computed } from 'vue'
@@ -38,12 +36,11 @@ import { KIND_META, stepSummary } from '../../script-editor/components/kinds'
 
 const props = defineProps({
   model: { type: Object, default: null }, // ScriptModel（已分配 uuid；解析失败时可能为空壳）
-  runUuid: { type: String, default: null },
   /** 解析失败等摘要不可用原因（显示在空态，替代旧源码视图的报错入口）。 */
   error: { type: String, default: '' },
 })
 
-const emit = defineEmits(['toggle-run-start', 'run-from', 'open-target'])
+const emit = defineEmits(['run-from', 'open-target'])
 
 const topSteps = computed(() => {
   const m = props.model
@@ -84,12 +81,7 @@ const headLabel = computed(() => {
 .sum-row {
   display: flex; align-items: center; gap: 7px;
   background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 4px 8px; cursor: pointer; user-select: none;
-}
-.sum-row:hover { background: var(--bg-3); }
-.sum-row.sel {
-  background: rgba(34, 211, 165, .12); border-color: rgba(34, 211, 165, .45);
-  box-shadow: inset 2px 0 0 var(--accent);
+  padding: 4px 8px;
 }
 .idx { color: var(--text-2); width: 18px; text-align: right; flex: none; }
 .icon {

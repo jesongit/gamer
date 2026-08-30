@@ -162,6 +162,20 @@ describe('useRunArgsFlow', () => {
     expect(flow.modal.submitting).toBe(false)
   })
 
+  it('400 invalid_args 但表单未打开（无参数直跑）：原样上抛交宿主提示，不静默吞没', async () => {
+    const exec = vi.fn().mockRejectedValue(Object.assign(new Error('HTTP 400'), {
+      status: 400,
+      data: {
+        error: 'invalid_args',
+        diagnostics: [{ code: 'param.args.missing_required', message: '缺少必填参数 account', field: 'account' }],
+      },
+    }))
+    const flow = useRunArgsFlow({ exec, notify: () => {} })
+    await expect(flow.begin({ id: 's1', yaml: PLAIN_SCRIPT })).rejects.toMatchObject({ status: 400 })
+    expect(flow.modal.open).toBe(false)
+    expect(flow.modal.fieldErrors).toEqual({}) // 无处展示的诊断不再写入，由宿主 toast/日志呈现
+  })
+
   it('409 设备占用等其他错误：关闭表单并原样抛回宿主', async () => {
     const exec = vi.fn().mockRejectedValue(Object.assign(new Error('HTTP 409'), {
       status: 409,

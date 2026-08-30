@@ -104,7 +104,7 @@ export function useRunArgsFlow({ exec, notify = () => {}, storage = undefined } 
       })
       return { ok: true, rep }
     } catch (e) {
-      if (e && e.status === 400 && e.data && e.data.error === 'invalid_args') {
+      if (e && e.status === 400 && e.data && e.data.error === 'invalid_args' && modal.open) {
         const mapped = mapArgDiagnostics(
           e.data.diagnostics,
           modal.params.map((p) => p.name),
@@ -115,7 +115,8 @@ export function useRunArgsFlow({ exec, notify = () => {}, storage = undefined } 
         modal.generalErrors = general
         return { ok: false, reason: 'invalid_args', diagnostics: e.data.diagnostics || [] }
       }
-      // 设备占用 409 等其他错误：关闭表单，交宿主统一处理（冲突弹窗/报错提示）
+      // 设备占用 409 等其他错误：关闭表单，交宿主统一处理（冲突弹窗/报错提示）；
+      // invalid_args 但表单未打开（无参数直跑路径）同样上抛——否则诊断无处展示、点运行看似无反应
       reset()
       throw e
     } finally {

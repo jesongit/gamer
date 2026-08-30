@@ -224,9 +224,12 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
       return { ok: true, result: rep }
     } catch (e) {
       if (e && e.status === 409 && e.data && e.data.code === 'version_conflict') {
-        conflict.value = {
-          resource: e.data.resource || resourceId.value || '',
-          message: e.data.message || '资源已被其他页面修改，请重新加载后再保存',
+        // suppressConflict（自动保存）：不置 conflict 态（不弹重载/覆盖窗），由调用方提示
+        if (!opts.suppressConflict) {
+          conflict.value = {
+            resource: e.data.resource || resourceId.value || '',
+            message: e.data.message || '资源已被其他页面修改，请重新加载后再保存',
+          }
         }
         return { ok: false, reason: 'conflict', error: e }
       }
