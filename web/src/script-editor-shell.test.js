@@ -158,7 +158,7 @@ describe('useScriptEditorShell：函数库编辑（文件 → FunctionLibraryMod
     const { api, calls } = makeApi({ fnConflict: false })
     const shell = useScriptEditorShell({ api })
     await shell.loadFunctionFile('com.demo/common.yaml')
-    shell.stack.apply({ type: 'insert_param', path: ['functions', 'login', 'params'], index: 0, decl: { type: 'bool', name: 'dry', remark: '', default: false } }, '添加函数参数')
+    shell.stack.apply({ type: 'insert_param', path: ['functions', 'login', 'params'], index: 0, decl: { type: 'bool', name: 'dry', remark: '干跑', default: false } }, '添加函数参数')
     const r = await shell.save()
     expect(r.ok).toBe(true)
     expect(calls.updateFunction).toHaveLength(1)

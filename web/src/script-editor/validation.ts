@@ -91,6 +91,10 @@ function validateParamDecls(decls: ParamDecl[], basePath: string, diags: Diagnos
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(decl.name)) {
       diags.push(diag(CODES.paramDeclNameInvalid, path, 'name', `变量名 ${decl.name} 不符合 [A-Za-z_][A-Za-z0-9_]*`))
     }
+    // 备注段服务端必拒（param.decl.format）：codec 解析层宽容只为编辑中间态，保存前在此拦截
+    if (!decl.remark) {
+      diags.push(diag(CODES.paramDeclFormat, path, 'declaration', '备注不能为空：声明 类型:变量名:备注[:默认值] 前三段均须非空'))
+    }
     if (seen.has(decl.name)) {
       diags.push(diag(CODES.paramDeclNameDuplicate, path, 'name', `变量名 ${decl.name} 在同一参数表内重复`))
     }

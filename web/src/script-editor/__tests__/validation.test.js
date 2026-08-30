@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { validateSource, validateScript, validateFunctionLibrary } from '../validation'
-import { parseScript } from '../codec'
+import { parseFunctionLibrary, parseScript } from '../codec'
 import { makeStep } from '../factories'
 
 /**
@@ -197,5 +197,38 @@ describe('validation：resolver 接口（目标信息由调用方传入）', () 
   it('未提供 resolver 时跳过目标绑定检查（本层只留接口）', () => {
     const { model } = parseScript('steps:\n  - call: whatever.yaml\n    args: {}\n')
     expect(validateScript(model)).toEqual([])
+  })
+})
+
+describe('validation：参数声明保存前校验（备注段非空，与服务端 param.decl.format 同构）', () => {
+  it('备注段为空 → param.decl.format（codec 解析层宽容，校验层阻断保存）', () => {
+    // 解析层允许空备注（ParamEditor 新建行 remark='' 中间态）：无解析期诊断
+    const parsed = parseScript("params:\n  - 'text:tag:'\nsteps: []\n")
+    expect(parsed.diagnostics).toEqual([])
+    const diags = validateScript(parsed.model)
+    expect(diags).toContainEqual(expect.objectContaining({
+      code: 'param.decl.format',
+      step_path: 'params[0]',
+      field: 'declaration',
+    }))
+    expect(diags.find((d) => d.code === 'param.decl.format').message).toContain('备注不能为空')
+  })
+
+  it('空备注 + 默认值（第 4 段非空）同样被拦截', () => {
+    const { model } = parseScript("params:\n  - 'text:tag::vip'\nsteps: []\n")
+    expect(validateScript(model)).toContainEqual(expect.objectContaining({
+      code: 'param.decl.format',
+      step_path: 'params[0]',
+      field: 'declaration',
+    }))
+  })
+
+  it('函数库函数级参数空备注同样被拦截', () => {
+    const { model } = parseFunctionLibrary("login:\n  params:\n    - 'bool:dry:'\n  steps:\n    - return: true\n", { file: 'common' })
+    expect(validateFunctionLibrary(model)).toContainEqual(expect.objectContaining({
+      code: 'param.decl.format',
+      step_path: 'login.params[0]',
+      field: 'declaration',
+    }))
   })
 })

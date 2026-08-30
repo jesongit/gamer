@@ -150,6 +150,9 @@ function rowErrors(decl: ParamDecl, i: number): string[] {
   if (!PARAM_NAME_RE.test(decl.name)) {
     errs.push(`变量名 ${decl.name || '(空)'} 不符合 [A-Za-z_][A-Za-z0-9_]*`)
   }
+  if (!decl.remark) {
+    errs.push('备注不能为空（服务端拒绝空备注声明）')
+  }
   if (decl.name && rows.value.some((p, j) => j !== i && p.name === decl.name)) {
     errs.push(`变量名 ${decl.name} 重复`)
   }

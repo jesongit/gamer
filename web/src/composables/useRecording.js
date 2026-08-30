@@ -62,6 +62,7 @@ export function useRecording({
   shell,
   activePkg,
   connected,
+  scriptRunning = null, // 脚本运行中状态（ref/普通值，plan §11.1：运行中不可进入录制）
   videoElement,
   templatesData,
   api,
@@ -573,17 +574,19 @@ export function useRecording({
   }
 
   // ---- 启动 / 停止（deliverable 1/8）----
+  const scriptRunningValue = () => (scriptRunning && 'value' in scriptRunning ? scriptRunning.value : scriptRunning)
   const available = computed(() => {
     const pkg = activePkg && 'value' in activePkg ? activePkg.value : activePkg
     const conn = connected && 'value' in connected ? connected.value : connected
     const v = videoElement && 'value' in videoElement ? videoElement.value : videoElement
     const videoOk = hasVideo ? !!hasVideo() : !!(v && v.videoWidth > 0)
-    return !!(shell.hasModel && shell.kind === 'script' && pkg && conn && videoOk)
+    return !!(shell.hasModel && shell.kind === 'script' && pkg && conn && videoOk && !scriptRunningValue())
   })
 
   const unavailableReason = computed(() => {
     if (shell.hasModel && shell.kind !== 'script') return '函数库不支持录制'
     if (!shell.hasModel) return '请先进入脚本编辑态'
+    if (scriptRunningValue()) return '脚本运行中不可录制'
     if (!(activePkg && 'value' in activePkg ? activePkg.value : activePkg)) return '请先选择应用分区'
     if (!(connected && 'value' in connected ? connected.value : connected)) return '请先连接设备'
     return '设备画面不可用'

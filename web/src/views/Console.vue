@@ -270,6 +270,7 @@ const recording = useRecording({
   shell: scriptShell,
   activePkg,
   connected,
+  scriptRunning: computed(() => store.running),
   videoElement,
   templatesData,
   api,

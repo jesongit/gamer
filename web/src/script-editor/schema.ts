@@ -91,6 +91,27 @@ export interface LiteralParseResult {
   reason?: string
 }
 
+/** YAML 双引号风格反转义（`\\`、`\"`、`\n`、`\r`、`\t`）；悬空/未知转义返回 null（与 params.rs 对称）。 */
+function unescapeDoubleQuoted(s: string): string | null {
+  let out = ''
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (c !== '\\') {
+      out += c
+      continue
+    }
+    switch (s[++i]) {
+      case '\\': out += '\\'; break
+      case '"': out += '"'; break
+      case 'n': out += '\n'; break
+      case 'r': out += '\r'; break
+      case 't': out += '\t'; break
+      default: return null
+    }
+  }
+  return out
+}
+
 /** 按声明类型解析默认值原始尾串。空尾串由调用方先判（param.default.empty）。 */
 export function parseParamLiteral(type: ParamType, raw: string): LiteralParseResult {
   switch (type) {
@@ -127,11 +148,16 @@ export function parseParamLiteral(type: ParamType, raw: string): LiteralParseRes
       return { ok: true, value: raw }
     }
     case 'text': {
-      // text 默认值一律双引号包裹（契约 §3.3 规则 7），空字符串必须写 ""。
+      // 与服务端同构（params.rs Text）：外层双引号可选——有则剥离并反转义，无则取
+      // 原始尾串整体为默认值（可含冒号/空格）；空尾串由调用方先判（param.default.empty）。
       if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
-        return { ok: true, value: raw.slice(1, -1) }
+        const unescaped = unescapeDoubleQuoted(raw.slice(1, -1))
+        if (unescaped === null) {
+          return { ok: false, reason: `text 默认值 ${JSON.stringify(raw)} 的转义序列非法` }
+        }
+        return { ok: true, value: unescaped }
       }
-      return { ok: false, reason: 'text 默认值必须用双引号包裹（空字符串写 ""）' }
+      return { ok: true, value: raw }
     }
     case 'tmpl': {
       if (raw.length === 0) return { ok: false, reason: 'tmpl 默认值不能为空' }

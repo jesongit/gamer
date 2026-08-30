@@ -89,3 +89,31 @@ describe('codec 解析空文档与语法错误', () => {
     expect(result.diagnostics.map((d) => d.code)).toEqual(['yaml.syntax_error'])
   })
 })
+
+describe('codec params：text 默认值外层双引号可选（与服务端 params.rs 同构）', () => {
+  it('无引号：尾串整体为默认值（可含冒号/空格）', () => {
+    const { model, diagnostics } = parseScript("params:\n  - 'text:api_url:服务地址:https://example.com:8443'\nsteps: []\n")
+    expect(diagnostics).toEqual([])
+    expect(model.params[0].default).toBe('https://example.com:8443')
+  })
+
+  it('带引号：剥离外层双引号并反转义；"" 为空串', () => {
+    const { model } = parseScript("params:\n  - 'text:message:提示文本:\"示例文本\"'\n  - 'text:blank:空串:\"\"'\nsteps: []\n")
+    expect(model.params[0].default).toBe('示例文本')
+    expect(model.params[1].default).toBe('')
+  })
+
+  it('序列化端恒输出带引号规范形态（无引号默认值往返稳定）', () => {
+    const { model } = parseScript("params:\n  - 'text:api_url:服务地址:https://example.com:8443'\nsteps: []\n")
+    const yaml = serialize(model)
+    expect(yaml).toContain("'text:api_url:服务地址:\"https://example.com:8443\"'")
+    expect(parseScript(yaml).model.params[0].default).toBe('https://example.com:8443')
+  })
+
+  it('空尾串仍非法（param.default.empty）；未知转义非法（param.default.invalid）', () => {
+    const { diagnostics } = parseScript("params:\n  - 'text:tag:标签:'\nsteps: []\n")
+    expect(diagnostics.map((d) => d.code)).toContain('param.default.empty')
+    const { diagnostics: d2 } = parseScript("params:\n  - 'text:bad:备注:\"a\\qb\"'\nsteps: []\n")
+    expect(d2.map((d) => d.code)).toContain('param.default.invalid')
+  })
+})

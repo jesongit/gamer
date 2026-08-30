@@ -111,6 +111,13 @@ describe('ParamEditor：即时校验提示', () => {
     expect(wrapper.text()).toContain('重复')
   })
 
+  it('空备注提示（与保存前 param.decl.format 校验同源）', async () => {
+    const { wrapper } = mountParam()
+    const remark = wrapper.find('input[aria-label="备注"]')
+    await remark.setValue('')
+    expect(wrapper.text()).toContain('备注不能为空')
+  })
+
   it('外部诊断（params[i] step_path）透传不报错', () => {
     const { wrapper } = mountParam({
       diagnostics: [{ code: 'param.decl.name_invalid', step_path: 'params[0]', field: 'name', message: 'x' }],

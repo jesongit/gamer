@@ -29,7 +29,7 @@ const FRAME_URL = 'data:image/png;base64,QUJD'
 const flush = () => new Promise(r => setTimeout(r, 0))
 const pt = (relX, relY) => ({ relX, relY, frameW: 1920, frameH: 1080 })
 
-async function makeHarness({ templates = [], cropImpl, start = true } = {}) {
+async function makeHarness({ templates = [], cropImpl, start = true, scriptRunning = ref(false) } = {}) {
   const notifications = []
   const controlMsgs = []
   const freezeCalls = []
@@ -47,6 +47,7 @@ async function makeHarness({ templates = [], cropImpl, start = true } = {}) {
     shell,
     activePkg: ref('com.demo'),
     connected: ref(true),
+    scriptRunning,
     videoElement: ref({ videoWidth: 1920, videoHeight: 1080 }),
     templatesData,
     api,
@@ -172,6 +173,22 @@ describe('api.uploadTemplateRegion 契约化（§11.7：短名+region 直传，�
     expect(src).toContain('uploadTemplateRegion:')
     expect(src).toContain('short_name: shortName')
     expect(src).not.toContain('composeRegionName')
+  })
+})
+
+describe('录制入口与脚本运行互斥（plan §11.1：运行中不可进入录制）', () => {
+  it('脚本运行中 available=false、start 被阻断并给出原因；运行结束恢复可用', async () => {
+    const running = ref(true)
+    const h = await makeHarness({ start: false, scriptRunning: running })
+    expect(h.rec.available).toBe(false)
+    expect(h.rec.unavailableReason).toBe('脚本运行中不可录制')
+    expect(h.rec.start()).toBe(false)
+    expect(h.notifications.some(n => n.msg.includes('脚本运行中不可录制'))).toBe(true)
+    // 运行结束（终态回 idle）→ 恢复可录制
+    running.value = false
+    expect(h.rec.available).toBe(true)
+    expect(h.rec.start()).toBe(true)
+    await h.rec.stop()
   })
 })
 
