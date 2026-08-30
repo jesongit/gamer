@@ -4,8 +4,6 @@
 //! API args 同构）+ 保存时脚本的 psig1 参数签名。调度/立即运行前过本模块的门禁：
 //!
 //! - 脚本缺失 / 解析失败 → 明确失败（同口径，不空跑）；
-//! - 任务无快照（`args_json`/`param_signature` 为 NULL 的旧任务）→ 明确失败，
-//!   提示重新保存任务确认参数；
 //! - 签名不一致（脚本参数声明/默认值变化）→ 参数过期，明确失败，等待重新确认；
 //! - 门禁通过 → 快照整体作为 StartRequest.args 传入（快照是全量，天然不静默
 //!   继承新默认值）。
@@ -19,13 +17,12 @@ use crate::script_v2::{ParamDecl, ScriptError, TypedValue};
 use crate::scripts::ScriptStore;
 use crate::store::Task;
 
-/// API 409 冲突错误码（签名不一致 / 快照缺失共用的重确认信号）。
+/// API 409 冲突错误码（签名不一致的重确认信号）。
 /// CONTRACT 错误码表未列此码（契约缺口：snake_case 与 §5.2 dot 命名空间不一致，
 /// 以任务约定为准），前端按 `code + reason` 消费。
 pub const CODE_SIGNATURE_CONFLICT: &str = "param_signature_conflict";
 
-/// 门禁失败的机器可读原因（409 body 的 `reason` 字段）。
-pub const REASON_NO_SNAPSHOT: &str = "no_snapshot";
+/// 签名门禁失败的机器可读原因（409 body 的 `reason` 字段）。
 pub const REASON_SIGNATURE_MISMATCH: &str = "signature_mismatch";
 
 /// 任务参数门禁结果：签名 + 从已存快照重建的全量类型化覆盖。
@@ -44,17 +41,14 @@ pub enum GateError {
     ScriptMissing,
     /// 脚本读取/解析失败（携带结构化诊断，与保存期 400 同源）。
     ScriptInvalid(Vec<ScriptError>),
-    /// 旧任务无快照（args_json/param_signature 为 NULL）。
-    NoSnapshot,
     /// 签名不一致：stored = 保存时签名，current = 脚本当前声明签名。
     SignatureMismatch { stored: String, current: String },
 }
 
 impl GateError {
-    /// 409 body 的 `reason`（NoSnapshot/SignatureMismatch 才走 409）。
+    /// 409 body 的 `reason`（仅签名过期走 409）。
     pub fn reason(&self) -> &'static str {
         match self {
-            GateError::NoSnapshot => REASON_NO_SNAPSHOT,
             GateError::SignatureMismatch { .. } => REASON_SIGNATURE_MISMATCH,
             GateError::ScriptMissing | GateError::ScriptInvalid(_) => "",
         }
@@ -73,9 +67,6 @@ impl GateError {
                     .collect::<Vec<_>>()
                     .join("；")
             ),
-            GateError::NoSnapshot => {
-                "任务缺少参数快照（旧版本任务），请重新保存任务以确认参数".to_string()
-            }
             GateError::SignatureMismatch { .. } => {
                 "脚本参数声明已变化，任务参数过期，请重新确认任务参数".to_string()
             }
@@ -114,18 +105,14 @@ pub fn probe_script_signature(
 /// 全量类型化覆盖。返回 [`TaskArgs`] 供 StartRequest 使用。
 pub fn gate_task(scripts: &ScriptStore, task: &Task) -> Result<TaskArgs, GateError> {
     let (decls, current) = probe_script_signature(scripts, &task.script_id)?;
-    let Some(stored) = task.param_signature.as_deref() else {
-        return Err(GateError::NoSnapshot);
-    };
-    if stored != current {
+    if task.param_signature != current {
         return Err(GateError::SignatureMismatch {
-            stored: stored.to_string(),
+            stored: task.param_signature.clone(),
             current,
         });
     }
-    let args_json = task.args_json.as_deref().unwrap_or("{}");
-    let overrides =
-        rebind_snapshot(&decls, args_json, &task.script_id).map_err(GateError::ScriptInvalid)?;
+    let overrides = rebind_snapshot(&decls, &task.args_json, &task.script_id)
+        .map_err(GateError::ScriptInvalid)?;
     Ok(TaskArgs {
         signature: current,
         names: decls.iter().map(|d| d.name.clone()).collect(),
@@ -135,7 +122,7 @@ pub fn gate_task(scripts: &ScriptStore, task: &Task) -> Result<TaskArgs, GateErr
 
 /// 把已存快照 JSON 重新绑定到当前声明（门禁通过后的运行传参、以及「重新确认
 /// 不带 args」路径共用）：
-/// - 仍存在的参数保留原快照值（个别值解析失败回退声明默认值）；
+/// - 仍存在的参数保留原快照值；
 /// - 新增参数取声明默认值；
 /// - 已删除的参数静默丢弃（签名门禁先行，正常路径不会出现）。
 ///
@@ -147,30 +134,42 @@ pub fn rebind_snapshot(
 ) -> Result<Vec<(String, TypedValue)>, Vec<ScriptError>> {
     use crate::script_v2::error::codes;
     let stored: serde_json::Map<String, serde_json::Value> = match serde_json::from_str(args_json) {
-        Ok(serde_json::Value::Object(map)) => map,
-        other => {
-            // 快照损坏（手工改库等）：按空快照处理，交由默认值/必填校验兜底，
-            // 但记一条诊断让调用方可见。
-            if other.is_err() && !args_json.trim().is_empty() {
-                return Err(vec![ScriptError::new(
-                    codes::PARAM_ARGS_TYPE_MISMATCH,
-                    format!("任务参数快照不是合法 JSON 对象（{args_json} 前 64 字节被拒）"),
-                    resource,
-                )
-                .at("args", "args")]);
-            }
-            serde_json::Map::new()
+        Ok(serde_json::Value::Object(map)) if !args_json.trim().is_empty() => map,
+        _ => {
+            return Err(vec![ScriptError::new(
+                codes::PARAM_ARGS_TYPE_MISMATCH,
+                "任务参数快照必须是非空 JSON 对象",
+                resource,
+            )
+            .at("args", "args")])
         }
     };
     let mut overrides = Vec::new();
+    let mut errors = Vec::new();
     for decl in decls {
         if let Some(value) = stored.get(&decl.name) {
             if let Some(v) = parse_json_arg(decl.ty, value) {
                 overrides.push((decl.name.clone(), v));
+            } else {
+                errors.push(
+                    ScriptError::new(
+                        codes::PARAM_ARGS_TYPE_MISMATCH,
+                        format!("任务参数快照中的参数 {} 类型无效", decl.name),
+                        resource,
+                    )
+                    .at(format!("args.{}", decl.name), "args"),
+                );
             }
         }
     }
-    merge_args(decls, overrides, resource)
+    match merge_args(decls, overrides, resource) {
+        Ok(bound) if errors.is_empty() => Ok(bound),
+        Ok(_) => Err(errors),
+        Err(mut diagnostics) => {
+            errors.append(&mut diagnostics);
+            Err(errors)
+        }
+    }
 }
 
 /// 签名短码（日志展示用）：FNV-1a 64 高 32 位的 8 位十六进制。签名串本身
@@ -344,8 +343,8 @@ steps:
             last_result: None,
             last_run_at: None,
             created_at: String::new(),
-            args_json: Some(snapshot.to_string()),
-            param_signature: Some(signature.clone()),
+            args_json: snapshot.to_string(),
+            param_signature: signature.clone(),
         };
         let gate = gate_task(&scripts, &task).unwrap();
         assert_eq!(gate.signature, signature);
@@ -362,11 +361,12 @@ steps:
     }
 
     #[tokio::test]
-    async fn gate_task_detects_stale_signature_and_missing_snapshot() {
+    async fn gate_task_detects_stale_signature_and_rejects_invalid_snapshots() {
         let (cfg, dir) = script_dir("gate-stale");
         write_script(&cfg, "daily.yaml", SCRIPT);
         let scripts = std::sync::Arc::new(ScriptStore::open(&cfg).unwrap());
-        let mk = |args_json: Option<String>, sig: Option<String>| Task {
+        let (_, signature) = probe_script_signature(&scripts, "com.test.app/daily.yaml").unwrap();
+        let mk = |args_json: &str, sig: &str| Task {
             id: "t1".into(),
             name: "T".into(),
             cron: "0 * * * * *".into(),
@@ -376,11 +376,11 @@ steps:
             last_result: None,
             last_run_at: None,
             created_at: String::new(),
-            args_json,
-            param_signature: sig,
+            args_json: args_json.into(),
+            param_signature: sig.into(),
         };
         // 签名不一致 → 过期
-        let stale = mk(Some("{}".into()), Some("psig1|old".into()));
+        let stale = mk("{}", "psig1|old");
         match gate_task(&scripts, &stale) {
             Err(GateError::SignatureMismatch { stored, current }) => {
                 assert_eq!(stored, "psig1|old");
@@ -388,12 +388,14 @@ steps:
             }
             other => panic!("expected stale, got {:?}", other.is_ok()),
         }
-        // 无快照 → NoSnapshot
-        match gate_task(&scripts, &mk(None, None)) {
-            Err(err @ GateError::NoSnapshot) => {
-                assert_eq!(err.reason(), REASON_NO_SNAPSHOT);
+        // 空快照与非法 JSON 都必须拒绝，不得按默认值兜底。
+        for args_json in ["", "null", "not-json"] {
+            match gate_task(&scripts, &mk(args_json, &signature)) {
+                Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|diag| {
+                    diag.code == crate::script_v2::error::codes::PARAM_ARGS_TYPE_MISMATCH
+                })),
+                other => panic!("expected invalid snapshot, got {:?}", other.is_ok()),
             }
-            other => panic!("expected no snapshot, got {:?}", other.is_ok()),
         }
         drop(scripts);
         std::fs::remove_dir_all(dir).unwrap();

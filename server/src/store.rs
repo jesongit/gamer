@@ -1,5 +1,7 @@
-//! SQLite 持久化：设备、定时任务、运行日志
-//! （脚本已改为文件系统存储 data/scripts/<package>/，见 scripts.rs；scripts 表仅留迁移读取）
+//! SQLite 持久化：设备、定时任务、运行日志。
+//!
+//! 数据库只从当前 schema v1 空库创建；已有数据库必须声明并满足完整的 v1
+//! 结构，不提供开发期旧库迁移或补列路径。
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
@@ -56,12 +58,11 @@ pub struct Task {
     pub last_run_at: Option<String>,
     pub created_at: String,
     /// 完整类型化参数快照 JSON（plan §12.3：参数名 → 七类 TypedValue 的 JSON
-    /// 形态，与 run API args 同构；每个参数都有值）。`None` = 旧版本任务无快照，
-    /// 调度/立即运行前必须经 task_params 门禁重新确认。
-    pub args_json: Option<String>,
+    /// 形态，与 run API args 同构；每个参数都有值）。无参数任务也保存 `{}`。
+    pub args_json: String,
     /// 保存快照时脚本的 psig1 参数签名（CONTRACT §4.5）；与脚本当前声明复算
-    /// 值不一致 = 参数过期。`None` = 无快照（旧任务）。
-    pub param_signature: Option<String>,
+    /// 值不一致 = 参数过期。
+    pub param_signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +91,7 @@ const LOG_BATCH_SIZE: usize = 100;
 const LOG_PRUNE_BATCH_SIZE: i64 = 500;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_LOG_MESSAGE_CHARS: usize = 1024;
+const SCHEMA_VERSION: i64 = 1;
 
 #[cfg(test)]
 static DB_BLOCKING_GATE: tokio::sync::Semaphore =
@@ -124,87 +126,262 @@ enum DbCommand {
 }
 
 fn open_connection(path: &Path) -> anyhow::Result<Connection> {
+    let is_new_database = !path.exists();
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;\nPRAGMA synchronous = NORMAL;\nPRAGMA foreign_keys = ON;",
     )?;
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS devices (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            addr TEXT NOT NULL DEFAULT '',
-            screen_mode TEXT NOT NULL DEFAULT 'mirror',
-            vd_res TEXT,
-            vd_dpi INTEGER,
-            pkg TEXT,
-            fps INTEGER,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS tasks (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            cron TEXT NOT NULL,
-            script_id TEXT NOT NULL,
-            device_id TEXT NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1,
-            last_result TEXT,
-            last_run_at TEXT,
-            created_at TEXT NOT NULL,
-            args_json TEXT,
-            param_signature TEXT
-        );
-        CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            time TEXT NOT NULL,
-            device_id TEXT NOT NULL,
-            script_id TEXT NOT NULL,
-            level TEXT NOT NULL,
-            msg TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_logs_time ON logs(time DESC);
-        CREATE TABLE IF NOT EXISTS scheduled_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT NOT NULL,
-            scheduled_at INTEGER NOT NULL,
-            state TEXT NOT NULL DEFAULT 'running',
-            run_id TEXT,
-            error TEXT,
-            created_at TEXT NOT NULL
-        );
-        DELETE FROM scheduled_runs
-         WHERE id NOT IN (
-             SELECT MIN(id) FROM scheduled_runs GROUP BY task_id, scheduled_at
-         );
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_scheduled_runs_task_time
-            ON scheduled_runs(task_id, scheduled_at);
-        CREATE INDEX IF NOT EXISTS idx_scheduled_runs_created_at
-            ON scheduled_runs(created_at DESC);
-        "#,
-    )?;
-    let has_fps = conn
-        .prepare("PRAGMA table_info(devices)")?
-        .query_map([], |r| r.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?
-        .iter()
-        .any(|column| column == "fps");
-    if !has_fps {
-        conn.execute("ALTER TABLE devices ADD COLUMN fps INTEGER", [])?;
-    }
-    // 旧库补列（2026-08-29 阶段 5：任务参数快照与签名）。SQLite 无便捷
-    // DROP COLUMN，回滚 = 旧版程序读新库（SELECT 显式列名，新列被忽略）。
-    let task_columns: Vec<String> = conn
-        .prepare("PRAGMA table_info(tasks)")?
-        .query_map([], |r| r.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    for column in ["args_json", "param_signature"] {
-        if !task_columns.iter().any(|name| name == column) {
-            conn.execute(&format!("ALTER TABLE tasks ADD COLUMN {column} TEXT"), [])?;
-        }
-    }
+    ensure_schema(&conn, is_new_database)?;
     Ok(conn)
+}
+
+const SCHEMA_V1_DDL: &str = r#"
+CREATE TABLE devices (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    addr TEXT NOT NULL DEFAULT '',
+    screen_mode TEXT NOT NULL DEFAULT 'mirror',
+    vd_res TEXT,
+    vd_dpi INTEGER,
+    pkg TEXT,
+    fps INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE tasks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    script_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_result TEXT,
+    last_run_at TEXT,
+    created_at TEXT NOT NULL,
+    args_json TEXT NOT NULL,
+    param_signature TEXT NOT NULL
+);
+CREATE TABLE logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    time TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    script_id TEXT NOT NULL,
+    level TEXT NOT NULL,
+    msg TEXT NOT NULL
+);
+CREATE INDEX idx_logs_time ON logs(time DESC);
+CREATE TABLE scheduled_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    scheduled_at INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'running',
+    run_id TEXT,
+    error TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX uq_scheduled_runs_task_time
+    ON scheduled_runs(task_id, scheduled_at);
+CREATE INDEX idx_scheduled_runs_created_at
+    ON scheduled_runs(created_at DESC);
+"#;
+
+fn ensure_schema(conn: &Connection, is_new_database: bool) -> anyhow::Result<()> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if is_new_database {
+        anyhow::ensure!(
+            version == 0,
+            "new database has unexpected user_version={version}"
+        );
+        conn.execute_batch(SCHEMA_V1_DDL)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        return validate_schema_v1(conn);
+    }
+
+    match version {
+        0 => anyhow::bail!(
+            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v1"
+        ),
+        SCHEMA_VERSION => validate_schema_v1(conn),
+        other => apply_schema_migrations(conn, other),
+    }
+}
+
+/// Future schema upgrades have one explicit entry point. No migration from the
+/// unversioned development database (migration 0) is implemented.
+fn apply_schema_migrations(_conn: &Connection, from_version: i64) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "unsupported database schema version {from_version}; expected schema v1; back up and remove gamer.db (future versions require an explicit migration)"
+    )
+}
+
+fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )?;
+    let tables = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_tables = ["devices", "logs", "scheduled_runs", "tasks"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        tables == expected_tables,
+        "schema v1 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
+    );
+
+    validate_table(
+        conn,
+        "devices",
+        &[
+            ("id", "TEXT", 0, 1),
+            ("name", "TEXT", 1, 0),
+            ("kind", "TEXT", 1, 0),
+            ("addr", "TEXT", 1, 0),
+            ("screen_mode", "TEXT", 1, 0),
+            ("vd_res", "TEXT", 0, 0),
+            ("vd_dpi", "INTEGER", 0, 0),
+            ("pkg", "TEXT", 0, 0),
+            ("fps", "INTEGER", 0, 0),
+            ("created_at", "TEXT", 1, 0),
+        ],
+    )?;
+    validate_table(
+        conn,
+        "tasks",
+        &[
+            ("id", "TEXT", 0, 1),
+            ("name", "TEXT", 1, 0),
+            ("cron", "TEXT", 1, 0),
+            ("script_id", "TEXT", 1, 0),
+            ("device_id", "TEXT", 1, 0),
+            ("enabled", "INTEGER", 1, 0),
+            ("last_result", "TEXT", 0, 0),
+            ("last_run_at", "TEXT", 0, 0),
+            ("created_at", "TEXT", 1, 0),
+            ("args_json", "TEXT", 1, 0),
+            ("param_signature", "TEXT", 1, 0),
+        ],
+    )?;
+    validate_table(
+        conn,
+        "logs",
+        &[
+            ("id", "INTEGER", 0, 1),
+            ("time", "TEXT", 1, 0),
+            ("device_id", "TEXT", 1, 0),
+            ("script_id", "TEXT", 1, 0),
+            ("level", "TEXT", 1, 0),
+            ("msg", "TEXT", 1, 0),
+        ],
+    )?;
+    validate_table(
+        conn,
+        "scheduled_runs",
+        &[
+            ("id", "INTEGER", 0, 1),
+            ("task_id", "TEXT", 1, 0),
+            ("scheduled_at", "INTEGER", 1, 0),
+            ("state", "TEXT", 1, 0),
+            ("run_id", "TEXT", 0, 0),
+            ("error", "TEXT", 0, 0),
+            ("created_at", "TEXT", 1, 0),
+        ],
+    )?;
+
+    validate_index(conn, "logs", "idx_logs_time", false, &["time"])?;
+    validate_index(
+        conn,
+        "scheduled_runs",
+        "uq_scheduled_runs_task_time",
+        true,
+        &["task_id", "scheduled_at"],
+    )?;
+    validate_index(
+        conn,
+        "scheduled_runs",
+        "idx_scheduled_runs_created_at",
+        false,
+        &["created_at"],
+    )?;
+    Ok(())
+}
+
+fn validate_table(
+    conn: &Connection,
+    table: &str,
+    expected: &[(&str, &str, i64, i64)],
+) -> anyhow::Result<()> {
+    let pragma = format!("PRAGMA table_info('{table}')");
+    let mut stmt = conn.prepare(&pragma)?;
+    let actual = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected = expected
+        .iter()
+        .map(|(name, ty, not_null, primary_key)| {
+            (
+                (*name).to_string(),
+                (*ty).to_string(),
+                *not_null,
+                *primary_key,
+            )
+        })
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        actual == expected,
+        "schema v1 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
+    );
+    Ok(())
+}
+
+fn validate_index(
+    conn: &Connection,
+    table: &str,
+    index: &str,
+    expected_unique: bool,
+    expected_columns: &[&str],
+) -> anyhow::Result<()> {
+    let pragma = format!("PRAGMA index_list('{table}')");
+    let mut stmt = conn.prepare(&pragma)?;
+    let found = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(2)? != 0))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|(name, _)| name == index);
+    let Some((_, is_unique)) = found else {
+        anyhow::bail!(
+            "schema v1 is incomplete: missing index {index}; back up and rebuild gamer.db"
+        );
+    };
+    anyhow::ensure!(
+        is_unique == expected_unique,
+        "schema v1 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
+    );
+    let pragma = format!("PRAGMA index_info('{index}')");
+    let mut stmt = conn.prepare(&pragma)?;
+    let actual_columns = stmt
+        .query_map([], |row| row.get::<_, String>(2))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_columns = expected_columns
+        .iter()
+        .map(|column| (*column).to_string())
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        actual_columns == expected_columns,
+        "schema v1 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
+    );
+    Ok(())
 }
 
 fn run_worker(mut conn: Connection, rx: Receiver<DbCommand>, metrics: Arc<Metrics>) {
@@ -614,6 +791,7 @@ impl Store {
     }
 
     pub fn upsert_task(&self, t: &Task) -> anyhow::Result<()> {
+        validate_task_snapshot(&t.args_json, &t.param_signature)?;
         let t = t.clone();
         self.request(move |conn| {
             conn.execute(
@@ -685,7 +863,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn scheduled_run_count(&self, task_id: &str, scheduled_at: i64) -> i64 {
+    pub(crate) fn scheduled_run_count(&self, task_id: &str, scheduled_at: i64) -> i64 {
         let task_id = task_id.to_string();
         self.request(move |conn| {
             Ok(conn.query_row(
@@ -698,7 +876,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn scheduled_run_state(&self, task_id: &str, scheduled_at: i64) -> String {
+    pub(crate) fn scheduled_run_state(&self, task_id: &str, scheduled_at: i64) -> String {
         let task_id = task_id.to_string();
         self.request(move |conn| {
             Ok(conn.query_row(
@@ -967,6 +1145,21 @@ impl Store {
     }
 }
 
+fn validate_task_snapshot(args_json: &str, param_signature: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !args_json.trim().is_empty(),
+        "task args_json must be a non-empty JSON object"
+    );
+    let args = serde_json::from_str::<serde_json::Value>(args_json)
+        .map_err(|_| anyhow::anyhow!("task args_json must be valid JSON"))?;
+    anyhow::ensure!(args.is_object(), "task args_json must be a JSON object");
+    anyhow::ensure!(
+        param_signature.starts_with("psig1|"),
+        "task param_signature must be a psig1 signature"
+    );
+    Ok(())
+}
+
 pub type Db = Arc<Store>;
 
 #[cfg(test)]
@@ -1001,31 +1194,10 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_unique_index_migrates_duplicate_legacy_rows() {
-        let (cfg, dir) = temp_config("migration");
-        let db_path = dir.join("gamer.db");
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE scheduled_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                task_id TEXT NOT NULL,
-                scheduled_at INTEGER NOT NULL,
-                state TEXT NOT NULL,
-                run_id TEXT,
-                error TEXT,
-                created_at TEXT NOT NULL
-            );
-            INSERT INTO scheduled_runs(task_id, scheduled_at, state, created_at)
-                VALUES ('task', 42, 'running', '2026-01-01T00:00:00Z');
-            INSERT INTO scheduled_runs(task_id, scheduled_at, state, created_at)
-                VALUES ('task', 42, 'running', '2026-01-01T00:00:01Z');",
-        )
-        .unwrap();
-        drop(conn);
-
+    fn scheduled_finish_is_idempotent_after_claim() {
+        let (cfg, dir) = temp_config("finish");
         let store = Store::open(&cfg).unwrap();
-        assert_eq!(store.scheduled_run_count("task", 42), 1);
-        assert!(!store.claim_scheduled_run("task", 42).unwrap());
+        assert!(store.claim_scheduled_run("task", 42).unwrap());
         assert!(store
             .finish_scheduled_run("task", 42, "success", Some("run-1"), None)
             .unwrap());
@@ -1080,8 +1252,8 @@ mod tests {
             last_result: Some("ok".into()),
             last_run_at: Some("2026-08-28T00:00:00Z".into()),
             created_at: "2026-08-28T00:00:00Z".into(),
-            args_json: None,
-            param_signature: None,
+            args_json: "{}".into(),
+            param_signature: "psig1|".into(),
         };
         store.upsert_task(&task).unwrap();
 
@@ -1096,57 +1268,98 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// 旧库（无 args_json/param_signature 列）打开后自动 ALTER 补列：
-    /// 存量行读出为 NULL 快照（= 无快照语义），新列可正常写入回读。
     #[test]
-    fn tasks_table_migration_adds_param_columns_to_legacy_db() {
-        let (cfg, dir) = temp_config("task-migration");
+    fn empty_database_creates_complete_schema_v1() {
+        let (cfg, dir) = temp_config("schema-v1");
         let db_path = dir.join("gamer.db");
-        // 按旧版形状直建 tasks 表并塞一行存量任务
+        let store = Store::open(&cfg).unwrap();
+        drop(store);
+
         let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                cron TEXT NOT NULL,
-                script_id TEXT NOT NULL,
-                device_id TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                last_result TEXT,
-                last_run_at TEXT,
-                created_at TEXT NOT NULL
-            );
-            INSERT INTO tasks(id, name, cron, script_id, device_id, enabled, created_at)
-                VALUES ('legacy-1', 'Legacy', '0 * * * * *', 'pkg/old.yaml', 'dev-1', 1, '2026-01-01');",
-        )
-        .unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let tasks_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(tasks_sql.contains("args_json TEXT NOT NULL"));
+        assert!(tasks_sql.contains("param_signature TEXT NOT NULL"));
+        let unique_index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'uq_scheduled_runs_task_time'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unique_index, 1);
+
+        drop(conn);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unversioned_database_is_rejected_without_migration() {
+        let (cfg, dir) = temp_config("schema-unversioned");
+        let db_path = dir.join("gamer.db");
+        Connection::open(&db_path).unwrap();
+
+        let error = match Store::open(&cfg) {
+            Ok(_) => panic!("unversioned database must fail fast"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("user_version=0"));
+        assert!(error.to_string().contains("unversioned"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unsupported_schema_version_is_rejected_without_migration() {
+        let (cfg, dir) = temp_config("schema-unsupported");
+        let db_path = dir.join("gamer.db");
+        let store = Store::open(&cfg).unwrap();
+        drop(store);
+        let conn = Connection::open(&db_path).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
         drop(conn);
 
+        let error = match Store::open(&cfg) {
+            Ok(_) => panic!("unsupported database must fail fast"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("unsupported database schema version 2"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn incomplete_schema_v1_is_rejected_without_repair() {
+        let (cfg, dir) = temp_config("schema-incomplete");
+        let db_path = dir.join("gamer.db");
         let store = Store::open(&cfg).unwrap();
-        let tasks = store.list_tasks().unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].id, "legacy-1");
-        assert_eq!(tasks[0].args_json, None, "存量任务读出必须是无快照（NULL）");
-        assert_eq!(tasks[0].param_signature, None);
-
-        // 补列后可正常写入快照并回读
-        let mut updated = tasks[0].clone();
-        updated.args_json = Some(r#"{"enable":true}"#.into());
-        updated.param_signature = Some("psig1|bool,enable,0,true".into());
-        store.upsert_task(&updated).unwrap();
-        let fetched = store.get_task("legacy-1").unwrap().unwrap();
-        assert_eq!(fetched.args_json.as_deref(), Some(r#"{"enable":true}"#));
-        assert_eq!(
-            fetched.param_signature.as_deref(),
-            Some("psig1|bool,enable,0,true")
-        );
-
         drop(store);
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch("DROP TABLE logs;").unwrap();
+        drop(conn);
+
+        let error = match Store::open(&cfg) {
+            Ok(_) => panic!("incomplete database must fail fast"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("schema v1 is incomplete"));
+
         fs::remove_dir_all(dir).unwrap();
     }
 
     /// 任务参数快照往返：args_json / param_signature 经 upsert 落库、list/get
-    /// 读回一致；置回 None 也走同一通道（重新确认前的清空路径）。
+    /// 读回一致，结果写回不丢失快照。
     #[test]
     fn task_args_snapshot_roundtrip() {
         let (cfg, dir) = temp_config("task-snapshot");
@@ -1161,13 +1374,12 @@ mod tests {
             last_result: None,
             last_run_at: None,
             created_at: "2026-08-29T00:00:00Z".into(),
-            args_json: Some(
-                r#"{"enable":true,"timeout":"30s","message":"开始任务","pos":[0.5,0.5]}"#.into(),
-            ),
-            param_signature: Some(
+            args_json:
+                r#"{"enable":true,"timeout":"30s","message":"开始任务","pos":[0.5,0.5]}"#
+                    .into(),
+            param_signature:
                 "psig1|bool,enable,0,true|time,timeout,0,30s|text,message,0,开始任务|coord,pos,0,[0.5,0.5]"
                     .into(),
-            ),
         };
         store.upsert_task(&task).unwrap();
 
@@ -1186,6 +1398,42 @@ mod tests {
         let again = store.get_task("task-snap").unwrap().unwrap();
         assert_eq!(again.args_json, task.args_json, "结果写回不得丢快照");
         assert_eq!(again.param_signature, task.param_signature);
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn task_snapshot_must_be_nonempty_json_object_with_psig1_signature() {
+        let (cfg, dir) = temp_config("task-snapshot-validation");
+        let store = Store::open(&cfg).unwrap();
+        let mut task = Task {
+            id: "task-invalid-snapshot".into(),
+            name: "Invalid snapshot".into(),
+            cron: "0 0 0 * * *".into(),
+            script_id: "pkg/script.yaml".into(),
+            device_id: "device-1".into(),
+            enabled: true,
+            last_result: None,
+            last_run_at: None,
+            created_at: "2026-08-29T00:00:00Z".into(),
+            args_json: "".into(),
+            param_signature: "psig1|".into(),
+        };
+        assert!(store.upsert_task(&task).is_err());
+
+        task.args_json = "null".into();
+        assert!(store.upsert_task(&task).is_err());
+
+        task.args_json = "{}".into();
+        task.param_signature = "".into();
+        assert!(store.upsert_task(&task).is_err());
+
+        task.param_signature = "psig2|".into();
+        assert!(store.upsert_task(&task).is_err());
+
+        task.param_signature = "psig1|".into();
+        store.upsert_task(&task).unwrap();
 
         drop(store);
         fs::remove_dir_all(dir).unwrap();

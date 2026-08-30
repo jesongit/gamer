@@ -8,7 +8,7 @@
 //! - 不带 `args` 且已存快照签名与脚本当前声明不一致 → 409
 //!   `param_signature_conflict`（`reconfirm:true` 强制重确认：带 args 全量重拍，
 //!   不带 args 存活参数保留原值、新参数取当前默认值）；
-//! - 列表/详情带 `param_stale`（签名过期或无快照，前端展示"参数已过期"）；
+//! - 列表/详情带 `param_stale`（签名过期或脚本无效，前端展示"参数已过期"）；
 //! - 「立即运行」走已存快照（过同一签名门禁，过期明确失败不空跑）。
 
 use std::time::Instant;
@@ -44,7 +44,7 @@ pub(super) fn validate_task_req(req: &SaveTaskReq) -> Result<(), ApiError> {
 pub(super) fn signature_conflict_response(
     task_id: &str,
     script_id: &str,
-    stored: Option<&str>,
+    stored: &str,
     current: &str,
     message: &str,
 ) -> Response {
@@ -52,11 +52,7 @@ pub(super) fn signature_conflict_response(
         StatusCode::CONFLICT,
         Json(serde_json::json!({
             "code": task_params::CODE_SIGNATURE_CONFLICT,
-            "reason": if stored.is_none() {
-                task_params::REASON_NO_SNAPSHOT
-            } else {
-                task_params::REASON_SIGNATURE_MISMATCH
-            },
+            "reason": task_params::REASON_SIGNATURE_MISMATCH,
             "message": message,
             "resource": script_id,
             "task_id": task_id,
@@ -69,31 +65,31 @@ pub(super) fn signature_conflict_response(
 
 /// GET /api/tasks 列表项与 GET /api/tasks/:id 详情共用的 JSON 形状
 /// （`args` 仅详情返回——列表不带参数值，text 防泄露）。
-fn task_json(t: &Task, next: &str, param_stale: bool, with_args: bool) -> Value {
+fn task_json(t: &Task, next: &str, param_stale: bool, with_args: bool) -> Result<Value, ApiError> {
+    let args = serde_json::from_str::<Value>(&t.args_json)
+        .map_err(|e| ApiError::internal(format!("任务参数快照无效: {e}")))?;
+    if !args.is_object() {
+        return Err(ApiError::internal("任务参数快照必须是 JSON 对象"));
+    }
     let mut v = serde_json::json!({
         "id": t.id, "name": t.name, "cron": t.cron, "script_id": t.script_id,
         "device_id": t.device_id, "enabled": t.enabled, "last_result": t.last_result,
         "last_run_at": t.last_run_at, "next_run": next,
         "param_stale": param_stale,
-        "has_args": t.args_json.is_some(),
+        "has_args": true,
         "param_signature": t.param_signature,
     });
     if with_args {
-        let args = t
-            .args_json
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<Value>(s).ok())
-            .unwrap_or(Value::Null);
         v["args"] = args;
     }
-    v
+    Ok(v)
 }
 
-/// 逐任务计算 param_stale：脚本缺失/解析失败/无快照/签名不一致都算过期
+/// 逐任务计算 param_stale：脚本缺失/解析失败/签名不一致都算过期
 /// （统一口径：不能按快照安全运行的任务都提示重新确认）。
 fn param_stale_of(scripts: &crate::scripts::ScriptStore, t: &Task) -> bool {
     match task_params::probe_script_signature(scripts, &t.script_id) {
-        Ok((_, current)) => t.param_signature.as_deref() != Some(current.as_str()),
+        Ok((_, current)) => t.param_signature != current,
         Err(_) => true,
     }
 }
@@ -107,7 +103,7 @@ pub(super) async fn api_list_tasks(State(st): State<AppState>) -> Response {
         let tasks = db
             .list_tasks()
             .map_err(|e| ApiError::internal(e.to_string()))?;
-        Ok(tasks
+        let tasks = tasks
             .into_iter()
             .map(|t| {
                 let next = if t.enabled {
@@ -120,7 +116,8 @@ pub(super) async fn api_list_tasks(State(st): State<AppState>) -> Response {
                 let stale = param_stale_of(&scripts, &t);
                 task_json(&t, &next, stale, false)
             })
-            .collect::<Vec<_>>())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(tasks)
     })
     .await
     {
@@ -152,7 +149,7 @@ pub(super) async fn api_get_task(State(st): State<AppState>, Path(id): Path<Stri
         } else {
             "-".into()
         };
-        Ok(task_json(&t, &next, stale, true))
+        task_json(&t, &next, stale, true)
     })
     .await
     {
@@ -240,21 +237,14 @@ fn save_task_inner(
             Err(diags) => return diagnostics_response(&diags),
         },
         None => match existing.as_ref() {
-            Some(prev)
-                if prev.args_json.is_some()
-                    && prev.param_signature.as_deref() == Some(current_sig.as_str()) =>
-            {
+            Some(prev) if prev.param_signature == current_sig => {
                 // 声明未变：原快照原签名原样保留
-                (
-                    prev.args_json.clone().unwrap_or_default(),
-                    prev.param_signature.clone().unwrap_or_default(),
-                )
+                (prev.args_json.clone(), prev.param_signature.clone())
             }
             Some(prev) if req.reconfirm => {
                 // 不带 args 的重新确认：存活参数保留原值、新参数取当前默认值、
                 // 已删参数丢弃；必填缺失仍走 400 结构化诊断
-                let old = prev.args_json.as_deref().unwrap_or("{}");
-                match task_params::rebind_snapshot(&decls, old, &req.script_id) {
+                match task_params::rebind_snapshot(&decls, &prev.args_json, &req.script_id) {
                     Ok(bound) => (
                         task_params::typed_pairs_to_json(bound).to_string(),
                         current_sig,
@@ -263,22 +253,16 @@ fn save_task_inner(
                 }
             }
             Some(prev) => {
-                // 签名不一致（或无快照）且未 reconfirm → 409，前端弹重新确认
-                let (message, stored) = match prev.param_signature.as_deref() {
-                    None => (GateError::NoSnapshot.message(), None),
-                    Some(stored) => (
-                        GateError::SignatureMismatch {
-                            stored: stored.to_string(),
-                            current: current_sig.clone(),
-                        }
-                        .message(),
-                        Some(stored),
-                    ),
-                };
+                // 签名不一致且未 reconfirm → 409，前端弹重新确认
+                let message = GateError::SignatureMismatch {
+                    stored: prev.param_signature.clone(),
+                    current: current_sig.clone(),
+                }
+                .message();
                 return signature_conflict_response(
                     &prev.id,
                     &req.script_id,
-                    stored,
+                    &prev.param_signature,
                     &current_sig,
                     &message,
                 );
@@ -293,7 +277,11 @@ fn save_task_inner(
             }
         },
     };
-    let parsed_args: Value = serde_json::from_str(&args_json).unwrap_or(Value::Null);
+    let parsed_args = match serde_json::from_str::<Value>(&args_json) {
+        Ok(Value::Object(args)) => Value::Object(args),
+        Ok(_) => return ApiError::internal("任务参数快照必须是 JSON 对象").into_response(),
+        Err(_) => return ApiError::internal("任务参数快照不是合法 JSON").into_response(),
+    };
     let task = Task {
         id,
         name: req.name,
@@ -309,8 +297,8 @@ fn save_task_inner(
             .as_ref()
             .map(|t| t.created_at.clone())
             .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
-        args_json: Some(args_json),
-        param_signature: Some(signature.clone()),
+        args_json,
+        param_signature: signature.clone(),
     };
     if let Err(e) = db.upsert_task(&task) {
         return ApiError::internal(e.to_string()).into_response();
@@ -394,11 +382,10 @@ pub(super) async fn api_run_task_now(
             signature_conflict_response(
                 &task.id,
                 &task.script_id,
-                task.param_signature.as_deref(),
-                // expected 只在签名可比对时给出；无快照场景无期望值
+                &task.param_signature,
                 match &err {
-                    GateError::SignatureMismatch { current, .. } => current.as_str(),
-                    _ => "",
+                    GateError::SignatureMismatch { current, .. } => current,
+                    _ => unreachable!("ParamStale only contains signature mismatches"),
                 },
                 &err.message(),
             )

@@ -132,7 +132,7 @@ impl Scheduler {
     }
 
     /// 立即运行任务（手动触发）：202 契约 —— 提交即返回 run_id，不等完成。
-    /// 参数门禁与计划触发同口径：脚本缺失/解析失败 → 4xx；无快照/签名过期 →
+    /// 参数门禁与计划触发同口径：脚本缺失/解析失败 → 4xx；签名过期 →
     /// ParamStale（API 映射 409 param_signature_conflict，要求重新确认）。
     pub async fn run_now(&self, task: &Task) -> Result<String, RunNowError> {
         info!(task = %task.name, task_id = %task.id, device = %task.device_id, "manual trigger (task now)");
@@ -147,10 +147,10 @@ impl Scheduler {
                     "task now rejected: param gate failed"
                 );
                 record_scheduler_failure(&self.db.metrics());
-                return Err(match err {
+                return Err(match &err {
                     GateError::ScriptMissing => RunNowError::ScriptMissing,
                     GateError::ScriptInvalid(_) => RunNowError::ScriptInvalid(err.message()),
-                    stale => RunNowError::ParamStale(stale),
+                    GateError::SignatureMismatch { .. } => RunNowError::ParamStale(err),
                 });
             }
         };
@@ -199,7 +199,7 @@ pub enum RunNowError {
     ScriptMissing,
     /// 脚本读取/严格解析失败（携带人类可读摘要）
     ScriptInvalid(String),
-    /// 参数门禁未过：旧任务无快照 / 签名过期，需重新确认
+    /// 参数门禁未过：签名过期，需重新确认
     ParamStale(GateError),
     Start(StartError),
 }
@@ -269,22 +269,14 @@ async fn dispatch(
             mark_task_result(db, task, "失败", Some("任务执行失败: 脚本解析失败"));
             return;
         }
-        Err(err @ (GateError::NoSnapshot | GateError::SignatureMismatch { .. })) => {
-            // 签名过期 / 旧任务无快照：日志带期望 vs 实际签名短码（不含参数值）
-            let (actual, reason) = match &err {
-                GateError::NoSnapshot => (None, err.reason()),
-                GateError::SignatureMismatch { stored, .. } => (
-                    Some(task_params::signature_short_code(stored)),
-                    err.reason(),
-                ),
-                _ => unreachable!(),
-            };
+        Err(ref err @ GateError::SignatureMismatch { ref stored, .. }) => {
+            // 签名过期：日志带期望 vs 实际签名短码（不含参数值）
             warn!(
                 task = %task.name,
                 task_id = %task.id,
                 script = %task.script_id,
-                reason,
-                actual_signature = ?actual,
+                reason = %err.reason(),
+                actual_signature = %task_params::signature_short_code(stored),
                 "scheduled skip: task params stale, reconfirm required"
             );
             record_scheduler_event(&metrics, SchedulerEvent::Failed);
@@ -348,7 +340,7 @@ async fn submit_run(
     task_args: TaskArgs,
 ) -> Result<String, StartError> {
     let scheduled_at = trigger.map(|t| t.timestamp());
-    let hook = task_finish_hook(db.clone(), task.id.clone(), task.name.clone(), scheduled_at);
+    let hook = task_finish_hook(db.clone(), task.id.clone(), scheduled_at);
     let req = StartRequest {
         device_id: task.device_id.clone(),
         target: crate::engine::RunTarget::Script {
@@ -383,7 +375,7 @@ fn mark_task_result(db: &Db, task: &Task, result: &str, summary_log: Option<&str
     if let Some(msg) = summary_log {
         let _ = db.add_log(&task.device_id, &task.script_id, "error", msg);
     }
-    upsert_task_result(db, &task.id, task, |t| {
+    upsert_task_result(db, &task.id, |t| {
         t.last_result = Some(result.to_string());
         t.last_run_at = Some(now_utc_string());
     });
@@ -393,12 +385,17 @@ fn now_utc_string() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn upsert_task_result(db: &Db, task_id: &str, fallback: &Task, apply: impl FnOnce(&mut Task)) {
+fn upsert_task_result(db: &Db, task_id: &str, apply: impl FnOnce(&mut Task)) {
     let mut t = match db.list_tasks() {
-        Ok(ts) => ts.into_iter().find(|x| x.id == task_id),
-        Err(_) => None,
-    }
-    .unwrap_or_else(|| fallback.clone());
+        Ok(ts) => match ts.into_iter().find(|x| x.id == task_id) {
+            Some(task) => task,
+            None => return,
+        },
+        Err(e) => {
+            error!(task = %task_id, err = %e, "load task result target failed");
+            return;
+        }
+    };
     apply(&mut t);
     if let Err(e) = db.upsert_task(&t) {
         error!(task = %task_id, err = %e, "update task result failed");
@@ -407,12 +404,7 @@ fn upsert_task_result(db: &Db, task_id: &str, fallback: &Task, apply: impl FnOnc
 
 /// 任务级完成钩子：终态写回 last_result/last_run_at 并批量落库引擎日志
 /// （调度批量模式 realtime_logs=false，引擎日志未实时入库，由这里统一写入）
-fn task_finish_hook(
-    db: Db,
-    task_id: String,
-    task_name: String,
-    scheduled_at: Option<i64>,
-) -> FinishHook {
+fn task_finish_hook(db: Db, task_id: String, scheduled_at: Option<i64>) -> FinishHook {
     Arc::new(move |rec, outcome| {
         let logs = outcome.logs();
         for (level, msg) in logs {
@@ -440,33 +432,12 @@ fn task_finish_hook(
                 db.finish_scheduled_run(&task_id, scheduled_at, state, Some(&rec.run_id), error);
         }
         let rid = rec.run_id.clone();
-        upsert_task_result(
-            &db,
-            &task_id,
-            &fallback_task(&task_id, &task_name, rec),
-            |t| {
-                t.last_result = Some(label.to_string());
-                t.last_run_at = Some(now_utc_string());
-            },
-        );
+        upsert_task_result(&db, &task_id, |t| {
+            t.last_result = Some(label.to_string());
+            t.last_run_at = Some(now_utc_string());
+        });
         debug!(%task_id, %rid, result = label, "task finish hook applied");
     })
-}
-
-fn fallback_task(task_id: &str, task_name: &str, rec: &crate::run_manager::RunRecord) -> Task {
-    Task {
-        id: task_id.to_string(),
-        name: task_name.to_string(),
-        cron: String::new(),
-        script_id: rec.script_id.clone(),
-        device_id: rec.device_id.clone(),
-        enabled: true,
-        last_result: None,
-        last_run_at: None,
-        created_at: String::new(),
-        args_json: None,
-        param_signature: None,
-    }
 }
 
 /// 计算 cron 下次执行时间（用于 API 预览）
@@ -525,7 +496,7 @@ async fn watch_scheduled_completion(
         ) {
             Ok(changed) => changed,
             Err(e) => {
-                error!(task = %task.name, %run_id, err = %e, "scheduled completion fallback failed");
+                error!(task = %task.name, %run_id, err = %e, "scheduled completion persistence failed");
                 return;
             }
         };
@@ -536,7 +507,7 @@ async fn watch_scheduled_completion(
                 RunState::Cancelled => "取消",
                 _ => unreachable!("non-terminal run state mapped as terminal"),
             };
-            upsert_task_result(&db, &task.id, &task, |t| {
+            upsert_task_result(&db, &task.id, |t| {
                 t.last_result = Some(label.to_string());
                 t.last_run_at = Some(now_utc_string());
             });
@@ -739,7 +710,7 @@ steps:
         std::fs::write(dir.join(name), content).unwrap();
     }
 
-    fn mk_task(script_id: &str, args_json: Option<&str>, sig: Option<&str>) -> Task {
+    fn mk_task(script_id: &str, args_json: &str, sig: &str) -> Task {
         Task {
             id: "task-1".into(),
             name: "Daily".into(),
@@ -750,8 +721,8 @@ steps:
             last_result: None,
             last_run_at: None,
             created_at: "2026-08-29T00:00:00Z".into(),
-            args_json: args_json.map(str::to_string),
-            param_signature: sig.map(str::to_string),
+            args_json: args_json.to_string(),
+            param_signature: sig.to_string(),
         }
     }
 
@@ -775,14 +746,12 @@ steps:
             "enable": false,
             "message": SECRET_TEXT,
         });
-        let task = mk_task(
-            "com.test.app/daily.yaml",
-            Some(&snapshot.to_string()),
-            Some(&signature),
-        );
+        let snapshot_json = snapshot.to_string();
+        let task = mk_task("com.test.app/daily.yaml", &snapshot_json, &signature);
         rig.db.upsert_task(&task).unwrap();
 
-        dispatch(&rig.db, &rig.runs, &rig.scripts, &task, None).await;
+        let trigger = Local::now();
+        dispatch(&rig.db, &rig.runs, &rig.scripts, &task, Some(trigger)).await;
         settle(&rig.runs).await;
 
         let captured = rig.exec.captured();
@@ -802,7 +771,12 @@ steps:
             ],
             "调度必须把完整快照作为 args 传入 StartRequest"
         );
-        assert!(matches!(req.source, RunSource::TaskNow));
+        assert!(matches!(req.source, RunSource::Scheduled));
+        assert_eq!(rig.db.scheduled_run_count(&task.id, trigger.timestamp()), 1);
+        assert_eq!(
+            rig.db.scheduled_run_state(&task.id, trigger.timestamp()),
+            "success"
+        );
     }
 
     #[tokio::test]
@@ -812,8 +786,8 @@ steps:
         let trigger = Local::now();
         let task = mk_task(
             "com.test.app/daily.yaml",
-            Some(r#"{"enable":false,"message":"x"}"#),
-            Some("psig1|stale"),
+            r#"{"enable":false,"message":"x"}"#,
+            "psig1|stale",
         );
         rig.db.upsert_task(&task).unwrap();
 
@@ -840,29 +814,6 @@ steps:
     }
 
     #[tokio::test]
-    async fn legacy_task_without_snapshot_is_not_dispatched() {
-        let rig = rig("dispatch-legacy");
-        write_script(&rig, "daily.yaml", SCRIPT);
-        let trigger = Local::now();
-        // 旧任务：args_json / param_signature 均为 NULL
-        let task = mk_task("com.test.app/daily.yaml", None, None);
-        rig.db.upsert_task(&task).unwrap();
-
-        dispatch(&rig.db, &rig.runs, &rig.scripts, &task, Some(trigger)).await;
-        settle(&rig.runs).await;
-
-        assert!(rig.exec.captured().is_empty(), "无快照绝不调度");
-        let stored = rig
-            .db
-            .list_tasks()
-            .unwrap()
-            .into_iter()
-            .find(|t| t.id == "task-1")
-            .unwrap();
-        assert_eq!(stored.last_result.as_deref(), Some("失败"));
-    }
-
-    #[tokio::test]
     async fn missing_script_task_is_not_dispatched() {
         let rig = rig("dispatch-missing");
         // 探测不存在的脚本应报 ScriptMissing（保证门禁与既有 404 口径一致）
@@ -870,7 +821,7 @@ steps:
             Err(GateError::ScriptMissing) => {}
             other => panic!("expected ScriptMissing, got ok={}", other.is_ok()),
         }
-        let task = mk_task("com.test.app/missing.yaml", Some("{}"), Some("psig1|"));
+        let task = mk_task("com.test.app/missing.yaml", "{}", "psig1|");
         rig.db.upsert_task(&task).unwrap();
 
         dispatch(&rig.db, &rig.runs, &rig.scripts, &task, Some(Local::now())).await;
@@ -896,7 +847,7 @@ steps:
         let snapshot = serde_json::json!({ "enable": false, "message": SECRET_TEXT });
 
         // 过期：409 语义（ParamStale），不提交
-        let stale = mk_task("com.test.app/daily.yaml", Some("{}"), Some("psig1|old"));
+        let stale = mk_task("com.test.app/daily.yaml", "{}", "psig1|old");
         match rig.scheduler.run_now(&stale).await {
             Err(RunNowError::ParamStale(GateError::SignatureMismatch { stored, current })) => {
                 assert_eq!(stored, "psig1|old");
@@ -906,20 +857,9 @@ steps:
         }
         assert!(rig.exec.captured().is_empty());
 
-        // 无快照：同样拒绝
-        let legacy = mk_task("com.test.app/daily.yaml", None, None);
-        assert!(matches!(
-            rig.scheduler.run_now(&legacy).await,
-            Err(RunNowError::ParamStale(GateError::NoSnapshot))
-        ));
-        assert!(rig.exec.captured().is_empty());
-
         // 新鲜快照：run_now 通过并携带完整 args
-        let fresh = mk_task(
-            "com.test.app/daily.yaml",
-            Some(&snapshot.to_string()),
-            Some(&signature),
-        );
+        let snapshot_json = snapshot.to_string();
+        let fresh = mk_task("com.test.app/daily.yaml", &snapshot_json, &signature);
         let run_id = rig.scheduler.run_now(&fresh).await.unwrap();
         settle(&rig.runs).await;
         let rec = rig.runs.get_run(&run_id).unwrap();
@@ -977,11 +917,8 @@ steps:
         let (_, signature) =
             task_params::probe_script_signature(&rig.scripts, "com.test.app/daily.yaml").unwrap();
         let snapshot = serde_json::json!({ "enable": false, "message": SECRET_TEXT });
-        let task = mk_task(
-            "com.test.app/daily.yaml",
-            Some(&snapshot.to_string()),
-            Some(&signature),
-        );
+        let snapshot_json = snapshot.to_string();
+        let task = mk_task("com.test.app/daily.yaml", &snapshot_json, &signature);
         rig.db.upsert_task(&task).unwrap();
 
         let capture = CapturedLogs::new();

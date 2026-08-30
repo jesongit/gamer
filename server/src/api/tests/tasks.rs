@@ -18,6 +18,10 @@ steps:
   - log: 'ok'
 ";
 
+const TASK_SCRIPT_NO_PARAMS: &str = "steps:
+  - log: 'ok'
+";
+
 #[tokio::test]
 async fn task_args_snapshot_save_conflict_reconfirm_and_stale_flag() {
     let t = build_app(
@@ -166,6 +170,27 @@ async fn task_args_snapshot_save_conflict_reconfirm_and_stale_flag() {
     let j = json_body(resp).await;
     assert_eq!(j[0]["param_stale"], false);
     assert_eq!(j[0]["param_signature"], sig_v2);
+
+    // 无参数脚本也必须落完整、非空快照：{} + 有效 psig1 签名。
+    save_task_script(&t, &sid, TASK_SCRIPT_NO_PARAMS).await;
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/tasks",
+        serde_json::json!({"name": "NoArgs", "cron": "0 * * * * *",
+                "script_id": "com.test.app/no-params.yaml", "device_id": "d1"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    let j = json_body(resp).await;
+    let no_args_task_id = j["id"].as_str().unwrap().to_string();
+    assert_eq!(j["args"], serde_json::json!({}));
+    assert_eq!(j["param_signature"], "psig1|");
+    let resp = get_json(&t, &sid, &format!("/api/tasks/{no_args_task_id}")).await;
+    let j = json_body(resp).await;
+    assert_eq!(j["args"], serde_json::json!({}));
+    assert_eq!(j["has_args"], true);
+    assert_eq!(j["param_signature"], "psig1|");
 
     // 立即运行恢复 202（门禁通过；设备不存在→202 提交后 prepare 失败属正常语义）
     let resp = post_json(
