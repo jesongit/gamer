@@ -4,7 +4,8 @@
 # adbkey，手机信任该密钥无需配对码），adb reverse 隧道在容器内闭环——scrcpy
 # 实时会话（投屏/截图/控制）可用。WebRTC 出画三件套已就位：
 #   1. docker-config.toml 的 rtc_external_ip/rtc_udp_port/rtc_external_port
-#      （bridge 网络下宣告宿主可达的 ICE 候选，UDP 经 8444:8443/udp 映射）
+#      （bridge 网络下宣告宿主可达的 ICE 候选，UDP 经
+#      ${GAMER_WEBRTC_UDP_PORT:-8444}:8443/udp 映射）
 #   2. 前端 offer 等 ICE 候选收集完成再发送（b245cfb）
 #   3. ICE 候选 local_addr 具体化（1c6827d）
 # 实测：checking→connected 约 10ms，浏览器解出 1920x1080 真实画面（零丢帧）。
@@ -33,7 +34,7 @@ services:
     # 三键宣告宿主可达地址（127.0.0.1:8444），UDP 媒体流走 8444:8443/udp 映射
     ports: !override
       - "8444:8443"
-      - "8444:8443/udp"
+      - "${GAMER_WEBRTC_UDP_PORT:-8444}:8443/udp"
     volumes: !override
       # 独立数据目录：与开发实例 server/data 完全隔离
       - ./docker-data:/app/data
@@ -49,4 +50,11 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
-    # build / environment(GB_CONFIG) / restart 策略复用主文件定义
+    environment:
+      # docker-config.toml 的 rtc_external_port 必须与此宿主端口一致；
+      # 默认 8444，改变量时同时改配置文件，避免 ICE 候选端口漂移。
+      GB_CONFIG: /app/config.toml
+      TZ: ${TZ:-Asia/Shanghai}
+      GAMER_DEPLOYMENT_MODE: docker
+      GAMER_WEBRTC_UDP_PORT: ${GAMER_WEBRTC_UDP_PORT:-8444}
+    # build / restart 策略复用主文件定义

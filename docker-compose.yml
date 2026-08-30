@@ -9,13 +9,19 @@ services:
     container_name: gamer-server
     ports:
       - "8443:8443"
+      # 固定 WebRTC 媒体端口；若使用自定义 rtc_udp_port，容器侧端口必须同步修改。
+      # GAMER_WEBRTC_UDP_PORT 是宿主侧端口变量，默认与容器侧 8443 相同。
+      - "${GAMER_WEBRTC_UDP_PORT:-8443}:8443/udp"
     volumes:
       # 运行数据唯一口径 = 仓库 server/data/：
       #   <包名>/tmpl|yaml 分区 = 随仓库分发的种子数据（克隆即得）；
       #   gamer.db 等运行期产物首次启动自动生成
       - ./server/data:/app/data
     environment:
-      - GB_CONFIG=/app/config.toml
+      GB_CONFIG: /app/config.toml
+      TZ: ${TZ:-Asia/Shanghai}
+      GAMER_DEPLOYMENT_MODE: docker
+      GAMER_WEBRTC_UDP_PORT: ${GAMER_WEBRTC_UDP_PORT:-8443}
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8443/health/ready"]
       interval: 30s

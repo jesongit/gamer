@@ -1,6 +1,14 @@
-//! Health, metrics, watchdog, templates, and graceful shutdown endpoints.
+//! System information, health, metrics, watchdog, and graceful shutdown endpoints.
+//!
+//! `api_system_info` is intentionally not wired here: `api/mod.rs` is an
+//! integration-owned hotspot. The temporary dead-code allowance keeps this
+//! branch clippy-clean until that route is connected.
+#![allow(dead_code)]
 
 use std::fmt::Display;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::body::Body;
@@ -8,10 +16,429 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use chrono::Local;
+use tokio::process::Command;
 use tracing::{info, warn};
 
 use super::common::run_blocking_api;
 use super::{ApiError, AppState};
+
+// 与自动更新计划 §6.4/§6.7 的当前基线保持一致。这里的 schema_version 是
+// system/info 响应契约版本；schema.database/files 是当前数据契约的版本，
+// 不另建版本接口，也不把更新能力误当成已实现。
+const SYSTEM_INFO_SCHEMA_VERSION: u64 = 1;
+const DATABASE_SCHEMA_VERSION: u64 = 1;
+const FILE_SCHEMA_VERSION: u64 = 1;
+const ROLLBACK_FLOOR: u64 = 1;
+const TOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const ADB_PROBE_ARGS: &[&str] = &["version"];
+const FFMPEG_PROBE_ARGS: &[&str] = &["-version"];
+
+static BOOT_ID: OnceLock<String> = OnceLock::new();
+
+#[derive(Debug)]
+struct ToolProbeResult {
+    status: &'static str,
+    version: Option<String>,
+    source: &'static str,
+}
+
+/// 受保护的系统信息：版本/构建信息、部署能力、schema、时区和依赖状态。
+///
+/// 该响应只包含白名单字段。配置中的路径、认证材料和外部命令输出不会进入
+/// JSON；外部工具探针也有严格超时，避免 Settings 页面拖住服务端请求。
+pub(super) async fn api_system_info(State(st): State<AppState>) -> Response {
+    let mode = deployment_mode();
+    let data_source = st.cfg.data_dir.clone();
+    let scrcpy_source = st.cfg.scrcpy_server.clone();
+    let db = st.db.clone();
+
+    let (data_status, scrcpy_status, database_status) = tokio::join!(
+        run_blocking_api(move || Ok(path_status(&data_source, true))),
+        run_blocking_api(move || Ok(path_status(&scrcpy_source, false))),
+        run_blocking_api(move || Ok(database_status(&db))),
+    );
+    let data_status = data_status.unwrap_or("error");
+    let scrcpy_status = scrcpy_status.unwrap_or("error");
+    let database_status = database_status.unwrap_or("error");
+
+    let adb_path = st.cfg.adb_path.clone();
+    let ffmpeg_path = st.cfg.ffmpeg_path.clone();
+    let (adb, ffmpeg) = tokio::join!(
+        probe_tool(
+            adb_path,
+            ADB_PROBE_ARGS,
+            dependency_source("adb", &st.cfg.adb_path, mode),
+        ),
+        probe_tool(
+            ffmpeg_path,
+            FFMPEG_PROBE_ARGS,
+            dependency_source("ffmpeg", &st.cfg.ffmpeg_path, mode),
+        ),
+    );
+
+    let data_ok = data_status == "ready";
+    let scrcpy_ok = scrcpy_status == "ready";
+    let database_ok = database_status == "ready";
+    let adb_ok = adb.status == "ready";
+    let ffmpeg_ok = ffmpeg.status == "ready";
+    let ready = data_ok && scrcpy_ok && database_ok && adb_ok && ffmpeg_ok;
+
+    let dependencies = serde_json::json!({
+        "adb": {
+            "status": adb.status,
+            "version": adb.version,
+            "source": adb.source,
+        },
+        "ffmpeg": {
+            "status": ffmpeg.status,
+            "version": ffmpeg.version,
+            "source": ffmpeg.source,
+        },
+        "scrcpy": {
+            "status": scrcpy_status,
+            "version": if scrcpy_ok {
+                Some(crate::device::scrcpy::SCRCPY_VERSION)
+            } else {
+                None
+            },
+            "source": dependency_source(
+                "scrcpy",
+                &st.cfg.scrcpy_server.to_string_lossy(),
+                mode,
+            ),
+        },
+        "data": { "status": data_status },
+        "database": { "status": database_status },
+    });
+
+    let body = serde_json::json!({
+        "schema_version": SYSTEM_INFO_SCHEMA_VERSION,
+        "app": build_info(),
+        "deployment": {
+            "mode": mode.as_str(),
+            "update_strategy": update_strategy(mode),
+        },
+        "readiness": {
+            "ready": ready,
+            "status": if ready { "ready" } else { "not_ready" },
+            "checks": {
+                "data_dir": { "ok": data_ok },
+                "sqlite": { "ok": database_ok },
+                "scrcpy_server": { "ok": scrcpy_ok },
+                "adb": { "ok": adb_ok },
+                "ffmpeg": { "ok": ffmpeg_ok },
+            },
+        },
+        "dependencies": dependencies,
+        "schema": {
+            "database": { "version": DATABASE_SCHEMA_VERSION, "status": database_status },
+            "files": { "version": FILE_SCHEMA_VERSION, "status": data_status },
+            "rollback_floor": ROLLBACK_FLOOR,
+        },
+        // 当前基线没有 UpdateController；所有操作能力显式为 false，避免 UI
+        // 在 direct/Docker/尚未接通 launcher 时伪造可更新入口。
+        "capabilities": {
+            "check": false,
+            "download": false,
+            "install": false,
+            "rollback": false,
+        },
+        "timezone": timezone_info(),
+        "startup": {
+            "stage": "ready",
+            "boot_id": boot_id(),
+        },
+    });
+    Json(body).into_response()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeploymentMode {
+    Direct,
+    Docker,
+    Launcher,
+}
+
+impl DeploymentMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Docker => "docker",
+            Self::Launcher => "launcher",
+        }
+    }
+}
+
+fn deployment_mode() -> DeploymentMode {
+    match std::env::var("GAMER_DEPLOYMENT_MODE")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("docker") => DeploymentMode::Docker,
+        Some("launcher") => DeploymentMode::Launcher,
+        Some("direct") => DeploymentMode::Direct,
+        _ if std::env::var_os("GAMER_LAUNCHER_PIPE").is_some() => DeploymentMode::Launcher,
+        _ if Path::new("/.dockerenv").is_file() => DeploymentMode::Docker,
+        _ => DeploymentMode::Direct,
+    }
+}
+
+fn update_strategy(mode: DeploymentMode) -> &'static str {
+    match mode {
+        DeploymentMode::Direct => "unsupported",
+        DeploymentMode::Docker => "external",
+        DeploymentMode::Launcher => "managed",
+    }
+}
+
+fn build_info() -> serde_json::Value {
+    let git_commit = first_metadata(
+        &["GAMER_BUILD_COMMIT", "GAMER_GIT_COMMIT"],
+        &[
+            option_env!("GIT_COMMIT"),
+            option_env!("BUILD_GIT_COMMIT"),
+            option_env!("VERGEN_GIT_SHA"),
+            option_env!("GITHUB_SHA"),
+        ],
+        valid_commit,
+    )
+    .unwrap_or_else(|| "unknown".into());
+    let built_at = first_metadata(
+        &["GAMER_BUILD_AT"],
+        &[
+            option_env!("BUILD_TIMESTAMP"),
+            option_env!("VERGEN_BUILD_TIMESTAMP"),
+        ],
+        valid_timestamp,
+    )
+    .unwrap_or_else(|| "unknown".into());
+    let channel = first_metadata(
+        &["GAMER_CHANNEL"],
+        &[option_env!("BUILD_CHANNEL")],
+        |value| matches!(value, "stable" | "beta" | "dev" | "unknown"),
+    )
+    .unwrap_or_else(|| "dev".into());
+    let target = first_metadata(
+        &["GAMER_BUILD_TARGET"],
+        &[option_env!("BUILD_TARGET"), option_env!("TARGET")],
+        valid_token,
+    )
+    .unwrap_or_else(runtime_target);
+
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "git_commit": git_commit,
+        "built_at": built_at,
+        "channel": channel,
+        "target": target,
+    })
+}
+
+fn first_metadata(
+    runtime_keys: &[&str],
+    compiled_values: &[Option<&'static str>],
+    valid: impl Fn(&str) -> bool,
+) -> Option<String> {
+    runtime_keys
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .chain(
+            compiled_values
+                .iter()
+                .flatten()
+                .map(|value| value.to_string()),
+        )
+        .map(|value| value.trim().to_string())
+        .find(|value| !value.is_empty() && valid(value))
+}
+
+fn valid_commit(value: &str) -> bool {
+    (7..=64).contains(&value.len()) && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn valid_timestamp(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ".:+-".contains(ch))
+}
+
+fn valid_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || "._-".contains(ch))
+}
+
+fn runtime_target() -> String {
+    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+fn boot_id() -> &'static str {
+    BOOT_ID
+        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+        .as_str()
+}
+
+fn timezone_info() -> serde_json::Value {
+    let (name, source) = match std::env::var("TZ").ok().and_then(sanitize_timezone) {
+        Some(value) => (value, "TZ"),
+        None => {
+            let local_name = Local::now().format("%Z").to_string();
+            if local_name.is_empty() || local_name == "?" {
+                ("system".into(), "system")
+            } else {
+                (local_name, "system")
+            }
+        }
+    };
+    serde_json::json!({
+        "name": name,
+        "offset": Local::now().format("%:z").to_string(),
+        "source": source,
+    })
+}
+
+fn sanitize_timezone(value: String) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 64
+        || value.starts_with('/')
+        || value.starts_with('\\')
+        || value.contains("..")
+        || value.chars().any(|ch| ch.is_control() || ch == '\\')
+        || !value
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || "/_+-:".contains(ch))
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn dependency_source(component: &str, path: &str, mode: DeploymentMode) -> &'static str {
+    if mode == DeploymentMode::Docker {
+        // Dockerfile 内的 adb/ffmpeg 与 scrcpy jar 都随镜像发布；不把容器内路径
+        // 暴露给客户端，但来源仍可明确标为 bundled。
+        return "bundled";
+    }
+    if mode == DeploymentMode::Launcher {
+        // launcher 模式的路径由其 managed runtime 注入；当前 server 尚未接入
+        // 依赖修复 IPC，因此只报告约定来源，不宣称修复/更新能力可用。
+        return "bundled";
+    }
+    let path = Path::new(path.trim());
+    if component == "scrcpy"
+        && path.is_relative()
+        && path
+            .file_name()
+            .is_some_and(|name| name == "scrcpy-server.jar")
+        && path
+            .parent()
+            .is_some_and(|parent| parent.ends_with("assets"))
+    {
+        "bundled"
+    } else if path.components().count() == 1 {
+        "system"
+    } else {
+        "custom"
+    }
+}
+
+fn path_status(path: &Path, directory: bool) -> &'static str {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() == directory => "ready",
+        Ok(_) => "invalid",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
+        Err(_) => "error",
+    }
+}
+
+fn database_status(db: &crate::store::Db) -> &'static str {
+    if db.health_check().is_ok() {
+        "ready"
+    } else {
+        "error"
+    }
+}
+
+async fn probe_tool(
+    path: String,
+    args: &'static [&'static str],
+    source: &'static str,
+) -> ToolProbeResult {
+    let mut command = Command::new(path.trim());
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ToolProbeResult {
+                status: "missing",
+                version: None,
+                source,
+            }
+        }
+        Err(_) => {
+            return ToolProbeResult {
+                status: "error",
+                version: None,
+                source,
+            }
+        }
+    };
+
+    match tokio::time::timeout(TOOL_PROBE_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(output)) if output.status.success() => ToolProbeResult {
+            status: "ready",
+            version: first_version_token(&String::from_utf8_lossy(&output.stdout)),
+            source,
+        },
+        Ok(Ok(_)) => ToolProbeResult {
+            status: "error",
+            version: None,
+            source,
+        },
+        Ok(Err(_)) => ToolProbeResult {
+            status: "error",
+            version: None,
+            source,
+        },
+        Err(_) => ToolProbeResult {
+            status: "timeout",
+            version: None,
+            source,
+        },
+    }
+}
+
+fn first_version_token(output: &str) -> Option<String> {
+    let mut after_version = false;
+    for token in output.split_whitespace() {
+        if after_version && valid_version_token(token) {
+            return Some(token.to_string());
+        }
+        after_version = token.eq_ignore_ascii_case("version");
+    }
+    None
+}
+
+fn valid_version_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.contains('.')
+        && value.chars().any(|ch| ch.is_ascii_digit())
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ".-_+".contains(ch))
+}
 
 fn append_metric(body: &mut String, help: &str, kind: &str, metric: &str, value: impl Display) {
     body.push_str("# HELP ");
@@ -620,5 +1047,82 @@ pub(super) async fn api_maintenance_vacuum(State(st): State<AppState>) -> Respon
             Json(report).into_response()
         }
         Err(err) => err.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod system_info_tests {
+    use super::*;
+
+    #[test]
+    fn build_info_has_contract_fields_without_secrets_or_paths() {
+        let body = build_info();
+        for field in ["version", "git_commit", "built_at", "channel", "target"] {
+            assert!(body.get(field).is_some(), "missing app field {field}");
+        }
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        let serialized = body.to_string();
+        for forbidden in ["password", "token", "C:\\Users", "/home/"] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+    }
+
+    #[test]
+    fn deployment_strategy_is_conservative_for_each_mode() {
+        assert_eq!(update_strategy(DeploymentMode::Direct), "unsupported");
+        assert_eq!(update_strategy(DeploymentMode::Docker), "external");
+        assert_eq!(update_strategy(DeploymentMode::Launcher), "managed");
+    }
+
+    #[test]
+    fn dependency_source_does_not_echo_configured_paths() {
+        assert_eq!(
+            dependency_source("adb", "adb", DeploymentMode::Direct),
+            "system"
+        );
+        assert_eq!(
+            dependency_source(
+                "scrcpy",
+                "./assets/scrcpy-server.jar",
+                DeploymentMode::Direct
+            ),
+            "bundled"
+        );
+        assert_eq!(
+            dependency_source(
+                "ffmpeg",
+                "D:/private/tools/ffmpeg.exe",
+                DeploymentMode::Direct
+            ),
+            "custom"
+        );
+        assert_eq!(
+            dependency_source("adb", "/usr/bin/adb", DeploymentMode::Docker),
+            "bundled"
+        );
+    }
+
+    #[test]
+    fn timezone_sanitizer_rejects_path_like_values() {
+        assert_eq!(
+            sanitize_timezone("Asia/Shanghai".into()).as_deref(),
+            Some("Asia/Shanghai")
+        );
+        assert!(sanitize_timezone("/etc/localtime".into()).is_none());
+        assert!(sanitize_timezone("..\\secret".into()).is_none());
+    }
+
+    #[test]
+    fn tool_version_parser_only_returns_version_token() {
+        assert_eq!(
+            first_version_token("Android Debug Bridge version 1.0.41\nVersion 35.0.2"),
+            Some("1.0.41".into())
+        );
+        assert_eq!(
+            first_version_token("ffmpeg version 7.1.1 Copyright (c)"),
+            Some("7.1.1".into())
+        );
+        assert_eq!(first_version_token("not a version response"), None);
+        assert!(!valid_version_token("C:/private/tool.exe"));
     }
 }

@@ -6,6 +6,8 @@
 # 容器进程默认以 root 运行，device 映射后的 USB 节点可直接读写，
 # 无需 privileged；若宿主 udev 权限不足再自行追加 group_add/privileged。
 # 注意：Docker Desktop（Windows/macOS）无法把宿主 USB 设备直通进容器。
+# 该 override 继承主 compose 的 TCP/UDP WebRTC 映射；如需改变宿主 UDP 端口，
+# 设置 GAMER_WEBRTC_UDP_PORT，并同步更新实际配置中的 rtc_external_port。
 services:
   gamer:
     devices:

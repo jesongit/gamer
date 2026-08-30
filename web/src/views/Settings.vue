@@ -2,143 +2,245 @@
   <div class="page">
     <div class="page-head">
       <div>
-        <div class="page-title">设置</div>
-        <div class="page-sub">服务端与匹配引擎配置</div>
+        <div class="page-title">系统状态</div>
+        <div class="page-sub">只读运行信息与依赖健康状态，数据来自当前服务端</div>
       </div>
-      <button class="btn btn-primary" @click="save">💾 保存设置</button>
+      <button class="btn btn-primary" :disabled="loading" @click="load">
+        {{ loading ? '读取中…' : '↻ 刷新' }}
+      </button>
     </div>
 
-    <div class="settings-grid">
-      <!-- 服务设置 -->
-      <div class="card set-card">
-        <div class="sc-title">⚙️ 服务设置</div>
-        <div class="sc-body">
-          <div class="form-item">
-            <label>监听端口</label>
-            <input v-model="cfg.port" class="input mono" />
-          </div>
-          <div class="form-item">
-            <label>管理员密码</label>
-            <input v-model="cfg.pass" class="input" type="password" />
-          </div>
-          <div class="form-item">
-            <label>数据目录</label>
-            <input v-model="cfg.dataDir" class="input mono" />
-          </div>
-        </div>
-      </div>
-
-      <!-- 匹配引擎 -->
-      <div class="card set-card">
-        <div class="sc-title">🔍 匹配引擎</div>
-        <div class="sc-body">
-          <div class="form-item">
-            <label>默认匹配阈值 <span class="mono accent">{{ cfg.threshold }}</span></label>
-            <input v-model.number="cfg.threshold" type="range" class="range" min="0.5" max="0.99" step="0.01" />
-          </div>
-          <div class="form-item">
-            <label>截图缓存 <span class="desc">从视频流软解码取帧，找图延迟 &lt;50ms（需 ffmpeg）</span></label>
-            <label class="switch">
-              <input type="checkbox" v-model="cfg.frameCache" />
-              <span class="track"></span>
-            </label>
-          </div>
-          <div class="form-item">
-            <label>找图超时上限（ms）</label>
-            <input v-model="cfg.timeout" class="input mono" />
-          </div>
-          <div class="form-item">
-            <label>匹配失败重试次数</label>
-            <input v-model="cfg.retries" class="input mono" />
-          </div>
-        </div>
-      </div>
-
-      <!-- 连接设置 -->
-      <div class="card set-card">
-        <div class="sc-title">🎥 画面设置</div>
-        <div class="sc-body">
-          <div class="form-item">
-            <label>分辨率上限</label>
-            <select v-model="cfg.maxRes" class="select">
-              <option value="0">原始分辨率</option>
-              <option value="1920">1920</option>
-              <option value="1080">1080</option>
-              <option value="720">720</option>
-            </select>
-          </div>
-          <div class="form-item">
-            <label>码率上限（Mbps）</label>
-            <input v-model="cfg.bitrate" class="input mono" />
-          </div>
-          <div class="form-item">
-            <label>帧率上限</label>
-            <input v-model="cfg.fps" class="input mono" />
-          </div>
-          <div class="form-item">
-            <label>视频流软解码（供匹配取帧）</label>
-            <label class="switch">
-              <input type="checkbox" v-model="cfg.decode" />
-              <span class="track"></span>
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <!-- 关于 -->
-      <div class="card set-card">
-        <div class="sc-title">ℹ️ 关于</div>
-        <div class="sc-body about">
-          <div class="about-logo">🎮</div>
-          <div class="about-name">GameBot 游戏自动化助手</div>
-          <div class="about-ver mono">v0.1.0</div>
-          <div class="about-desc">
-            基于 scrcpy（官方开源 server）+ Rust 服务端 + WebRTC 的轻量游戏自动化方案。
-            <br />YAML 脚本 · 模板匹配 · 定时任务 · Docker 部署。
-          </div>
-          <div class="about-stack mono">
-            Rust (axum + webrtc-rs) · Vue 3 · scrcpy-server · adb
-          </div>
-        </div>
+    <div v-if="loading" class="card state-card" role="status">
+      <div class="state-icon">⏳</div>
+      <div>
+        <div class="state-title">正在读取系统状态</div>
+        <div class="state-desc">正在向服务端请求真实版本、部署和依赖信息。</div>
       </div>
     </div>
+
+    <div v-else-if="error" class="card state-card error-card" role="alert">
+      <div class="state-icon">⚠️</div>
+      <div class="state-copy">
+        <div class="state-title">系统状态暂不可用</div>
+        <div class="state-desc">{{ error }}</div>
+        <div class="state-desc muted">接口未接入或服务端不可达时不会显示伪造的默认状态。</div>
+      </div>
+      <button class="btn" @click="load">重试</button>
+    </div>
+
+    <template v-else-if="info">
+      <div class="readonly-note">🔒 只读视图：当前页面不会修改服务端配置或更新策略。</div>
+
+      <div class="settings-grid">
+        <div class="card set-card">
+          <div class="sc-title">🎮 应用与构建</div>
+          <div class="info-list">
+            <div v-for="row in buildRows" :key="row.label" class="info-row">
+              <span class="info-label">{{ row.label }}</span>
+              <span :class="row.mono ? 'mono' : ''">{{ row.value }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card set-card">
+          <div class="sc-title">🚀 部署与更新</div>
+          <div class="info-list">
+            <div v-for="row in deploymentRows" :key="row.label" class="info-row">
+              <span class="info-label">{{ row.label }}</span>
+              <span :class="row.state ? `state-${row.state}` : ''">{{ row.value }}</span>
+            </div>
+          </div>
+          <div class="card-footnote">当前版本只展示能力，不提供未接通的更新操作。</div>
+        </div>
+
+        <div class="card set-card dependency-card">
+          <div class="sc-title">🩺 依赖与健康</div>
+          <div class="dependency-list">
+            <div v-for="row in dependencyRows" :key="row.label" class="dep-row">
+              <div class="dep-main">
+                <span class="dep-dot" :class="statusClass(row.item)"></span>
+                <span>{{ row.label }}</span>
+                <span class="dep-status">{{ statusText(row.item) }}</span>
+              </div>
+              <div class="dep-meta">
+                <span v-if="row.item && row.item.version" class="mono">{{ row.item.version }}</span>
+                <span v-if="sourceText(row.item)">{{ sourceText(row.item) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card set-card">
+          <div class="sc-title">🗃️ 数据、时区与启动</div>
+          <div class="info-list">
+            <div v-for="row in runtimeRows" :key="row.label" class="info-row">
+              <span class="info-label">{{ row.label }}</span>
+              <span :class="row.mono ? 'mono' : ''">{{ row.value }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="readiness" :class="readinessClass">
+        <span class="readiness-dot"></span>
+        <span>服务就绪：{{ readinessText }}</span>
+        <span class="readiness-detail">黑屏依赖与数据库状态均来自本次服务端探测</span>
+      </div>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { reactive } from 'vue'
-import { useToast } from '../store'
+import { computed, onMounted, ref } from 'vue'
+import { handleUnauthorized } from '../auth'
 
-const toast = useToast()
-const cfg = reactive({
-  port: 8443,
-  pass: 'admin123',
-  dataDir: '/app/data',
-  threshold: 0.85,
-  frameCache: true,
-  timeout: 10000,
-  retries: 2,
-  maxRes: '0',
-  bitrate: 20,
-  fps: 60,
-  decode: true
+const info = ref(null)
+const loading = ref(true)
+const error = ref('')
+
+async function load() {
+  loading.value = true
+  error.value = ''
+  try {
+    const response = await fetch('/api/system/info', {
+      headers: { Accept: 'application/json' }
+    })
+    if (!response.ok) {
+      if (response.status === 401) handleUnauthorized()
+      const body = await response.json().catch(() => ({}))
+      throw new Error(body?.error || `HTTP ${response.status}`)
+    }
+    const body = await response.json()
+    if (!body || typeof body !== 'object') throw new Error('服务端响应格式异常')
+    info.value = body
+  } catch (cause) {
+    info.value = null
+    error.value = cause?.message || '网络请求失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+function display(value) {
+  return value === undefined || value === null || value === '' ? '未知' : String(value)
+}
+
+function capabilityText(name) {
+  return info.value?.capabilities?.[name] === true ? '可用' : '不可用'
+}
+
+function capabilityState(name) {
+  return info.value?.capabilities?.[name] === true ? 'ok' : 'off'
+}
+
+function statusText(item) {
+  const labels = { ready: '就绪', missing: '缺失', invalid: '无效', timeout: '超时', error: '异常' }
+  return labels[item?.status] || '未知'
+}
+
+function statusClass(item) {
+  return item?.status === 'ready' ? 'ok' : 'off'
+}
+
+function sourceText(item) {
+  const labels = { bundled: '随部署提供', system: '系统工具', custom: '自定义路径' }
+  return labels[item?.source] || ''
+}
+
+function schemaValue(name) {
+  const value = info.value?.schema?.[name]
+  if (value && typeof value === 'object') return `${display(value.version)} · ${statusText(value)}`
+  return display(value)
+}
+
+const timezoneValue = computed(() => {
+  const timezone = info.value?.timezone
+  if (!timezone) return '未知'
+  const offset = timezone.offset ? ` (${timezone.offset})` : ''
+  return `${display(timezone.name)}${offset}`
 })
 
-function save() { toast('设置已保存（原型）', 'success') }
+const buildRows = computed(() => [
+  { label: '版本', value: display(info.value?.app?.version), mono: true },
+  { label: 'Commit', value: display(info.value?.app?.git_commit), mono: true },
+  { label: '构建时间', value: display(info.value?.app?.built_at), mono: true },
+  { label: '通道', value: display(info.value?.app?.channel) },
+  { label: '目标', value: display(info.value?.app?.target), mono: true },
+])
+
+const deploymentRows = computed(() => [
+  { label: '部署模式', value: display(info.value?.deployment?.mode) },
+  { label: '更新策略', value: display(info.value?.deployment?.update_strategy) },
+  { label: '检查更新', value: capabilityText('check'), state: capabilityState('check') },
+  { label: '下载安装', value: capabilityText('download'), state: capabilityState('download') },
+  { label: '安装 / 回滚', value: `${capabilityText('install')} / ${capabilityText('rollback')}`, state: updateState.value },
+])
+
+const dependencyRows = computed(() => [
+  { label: 'ADB', item: info.value?.dependencies?.adb },
+  { label: 'ffmpeg', item: info.value?.dependencies?.ffmpeg },
+  { label: 'scrcpy-server', item: info.value?.dependencies?.scrcpy },
+  { label: '数据目录', item: info.value?.dependencies?.data },
+  { label: 'SQLite', item: info.value?.dependencies?.database },
+])
+
+const runtimeRows = computed(() => [
+  { label: '数据库 schema', value: schemaValue('database'), mono: true },
+  { label: '文件 schema', value: schemaValue('files'), mono: true },
+  { label: '回滚下限', value: schemaValue('rollback_floor'), mono: true },
+  { label: '服务端时区', value: timezoneValue.value, mono: true },
+  { label: '启动阶段', value: display(info.value?.startup?.stage) },
+  { label: 'Boot ID', value: display(info.value?.startup?.boot_id), mono: true },
+])
+
+const readinessText = computed(() => info.value?.readiness?.ready === true ? '是' : '否')
+const readinessClass = computed(() => info.value?.readiness?.ready === true ? 'ready' : 'not-ready')
+const updateState = computed(() => (
+  info.value?.capabilities?.install === true && info.value?.capabilities?.rollback === true ? 'ok' : 'off'
+))
+
+onMounted(load)
 </script>
 
 <style scoped>
 .settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
 .set-card { display: flex; flex-direction: column; gap: 14px; }
 .sc-title { font-size: 14px; font-weight: 700; }
-.sc-body { display: flex; flex-direction: column; gap: 14px; }
-.desc { color: var(--text-2); font-size: 11px; }
-.accent { color: var(--accent); }
+.info-list { display: flex; flex-direction: column; gap: 10px; }
+.info-row { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.info-label { flex: 0 0 92px; color: var(--text-2); font-size: 12px; }
+.info-row > span:last-child { min-width: 0; overflow-wrap: anywhere; text-align: right; margin-left: auto; }
+.state-ok { color: var(--green, #57d38c); }
+.state-off { color: var(--text-2); }
+.readonly-note { margin-bottom: 14px; color: var(--text-2); font-size: 12px; }
+.card-footnote { color: var(--text-2); font-size: 11px; line-height: 1.5; }
 
-.about { align-items: center; text-align: center; gap: 6px; }
-.about-logo { font-size: 40px; }
-.about-name { font-size: 16px; font-weight: 700; }
-.about-ver { color: var(--text-2); font-size: 12px; }
-.about-desc { color: var(--text-1); font-size: 12px; line-height: 1.7; }
-.about-stack { color: var(--text-2); font-size: 11px; margin-top: 6px; }
+.state-card { display: flex; align-items: center; gap: 14px; min-height: 92px; }
+.state-copy { flex: 1; min-width: 0; }
+.state-icon { font-size: 24px; }
+.state-title { font-size: 14px; font-weight: 700; }
+.state-desc { margin-top: 5px; color: var(--text-1); font-size: 12px; line-height: 1.5; }
+.muted { color: var(--text-2); }
+.error-card { border-color: color-mix(in srgb, var(--danger, #ef6b73) 45%, var(--border)); }
+
+.dependency-list { display: flex; flex-direction: column; gap: 12px; }
+.dep-row { display: flex; flex-direction: column; gap: 4px; }
+.dep-main, .dep-meta { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.dep-status { margin-left: auto; color: var(--text-2); }
+.dep-meta { padding-left: 16px; color: var(--text-2); font-size: 11px; }
+.dep-meta span + span { margin-left: auto; }
+.dep-dot, .readiness-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--text-2); }
+.dep-dot.ok, .readiness.ready .readiness-dot { background: var(--green, #57d38c); }
+.dep-dot.off, .readiness.not-ready .readiness-dot { background: var(--danger, #ef6b73); }
+.readiness { display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 11px 14px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
+.readiness.ready { color: var(--green, #57d38c); }
+.readiness.not-ready { color: var(--danger, #ef6b73); }
+.readiness-detail { margin-left: auto; color: var(--text-2); font-size: 11px; }
+
+@media (max-width: 640px) {
+  .state-card { align-items: flex-start; flex-wrap: wrap; }
+  .state-card .btn { margin-left: 38px; }
+  .readiness { align-items: flex-start; flex-wrap: wrap; }
+  .readiness-detail { flex-basis: 100%; margin-left: 15px; }
+}
 </style>
