@@ -197,7 +197,7 @@ const filteredTemplates = computed(() => {
   return props.templates.filter((t) => t.toLowerCase().includes(q))
 })
 function thumbUrl(t: string): string | null {
-  return tplPreviewUrl.value ? tplPreviewUrl.value(t) : null
+  return tplPreviewUrl ? tplPreviewUrl(t) : null
 }
 function pick(t: string): void {
   emitLit(t)
