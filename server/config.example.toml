@@ -2,7 +2,8 @@
 #
 # 注意：`server/config.toml` 是本机文件（含真实路径/凭据），已加入 .gitignore 不再入库；
 # 团队分发/评审一律以本示例文件为准。
-# 缺失该文件时：GAMER_PROFILE=dev（缺省）放行内置非凭据默认值（stderr 有醒目警告）；
+# 缺失该文件时：GAMER_PROFILE=dev（缺省）放行内置非凭据默认值（stderr 有醒目警告），
+# 但登录密码不会使用内置默认值，开发时必须设置 GAMER_ADMIN_PASSWORD；
 # GAMER_PROFILE=prod 直接报错退出。配置存在但解析失败/校验不过时进程即刻终止，
 # 错误信息带 TOML 行列位置与逐项违规清单。
 
@@ -50,10 +51,10 @@ log_retain_days = 14
 compute_max_concurrency = 0
 
 # WebRTC ICE 候选外部宣告（容器 / 公网 NAT 1-to-1 部署）：三键全部缺省时
-# 行为不变（接口枚举 + STUN，每会话临时端口）。Docker bridge 下服务端
-# host candidate 是容器内网 IP（172.x），宿主浏览器不可路由 → 信令正常但
-# 媒体协商不出候选对、投屏黑屏——此时按下面三键宣告宿主可达地址。
-# 容器配法示例（docker run ... -p 50000:3478/udp，宿主 50000 → 容器 3478）：
+# 本项目不内置 STUN/TURN；默认走 host candidate 直连，适合同机/局域网。
+# Docker bridge 下服务端 host candidate 是容器内网 IP（172.x），宿主浏览器不可路由 →
+# 信令正常但媒体协商不出候选对、投屏黑屏；此时用下面三键宣告宿主可达地址并发布 UDP。
+# 容器配法示例（宿主 50000 → 容器 3478）：
 #   rtc_external_ip = "192.168.1.10"   # 浏览器可达的宿主 IP
 #   rtc_udp_port = 3478                # 容器内绑定端口（= 映射 -p 的容器侧 A）
 #   rtc_external_port = 50000          # 宿主对外端口（= 映射 -p 的宿主侧 B）
@@ -68,9 +69,9 @@ rtc_external_ip = ""
 rtc_udp_port = 0
 rtc_external_port = 0
 
-# 鉴权与会话治理（阶段 2）。REST/WS 除登录三端点外全部要求浏览器会话 Cookie；
+# 鉴权与会话治理。REST/WS 除登录三端点外全部要求浏览器会话 Cookie；
 # gamer.ps1 走「回环 + X-Admin-Token」本机管理通道优雅停机。
-# 配置文件只接受固定参数 Argon2id PHC password_hash；初次开发启动也可设置
+# 配置文件只接受固定参数 Argon2id PHC password_hash；开发启动必须设置
 # GAMER_ADMIN_PASSWORD，服务端只在进程内将其转换为 PHC，不会写回任何文件。
 # 生产部署请预先生成并填入 password_hash，未配置凭据时认证 fail closed。
 [auth]

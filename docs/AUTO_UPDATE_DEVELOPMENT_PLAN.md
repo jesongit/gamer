@@ -27,7 +27,9 @@
 - Release manifest 使用 detached Ed25519 签名；签名覆盖 manifest 原始字节。SHA-256 负责内容完整性，不能替代签名和可信公钥。
 - 正式版本以 `server/Cargo.toml` 的 package version 为产品版本权威源，Git tag 必须严格等于 `v<version>`；前端不得继续硬编码版本。
 - 配置、数据、日志、运行依赖和版本目录完全分离。用户数据不能位于 `versions/<version>/` 内。
-- SQLite 和文件布局必须有显式 schema 版本、顺序迁移和兼容范围；当前“启动时检测列并直接 ALTER/逐文件删除旧布局”的方式不能直接承载自动回滚。
+- SQLite 和文件布局必须有显式 schema 版本、顺序迁移和兼容范围；当前服务端基线已固定为
+  SQLite schema v1，未版本化数据库不自动补齐，文件资源固定使用
+  `data/<pkg>/{yaml,func,tmpl}`。
 - 候选版本在提交升级前处于 activation gate：不运行 scheduler、不接受业务写请求、不建立设备会话；只有版本、schema、依赖和健康检查全部通过后才激活。
 - 自动模式默认允许检查和后台下载；自动安装只在维护窗口、没有活动运行、没有正在更新的事务且近期没有 cron 触发时执行。默认产品策略建议为 `notify`，由用户显式开启 `auto`。
 - 首版只承诺“前一稳定基线 → 当前稳定版本”的自动升级和 pre-commit 自动回滚，不承诺跨任意历史大版本升级，也不承诺已经正常使用新版本后的无损数据降级。
@@ -55,8 +57,8 @@
 | 健康检查 | `/health/ready` 检查 data、SQLite、jar、adb、ffmpeg | 只返回布尔状态；缺少 app version、boot id、schema 和候选启动阶段 |
 | 产品版本 | Cargo 和 web package 均为 0.1.0；服务端日志使用 `CARGO_PKG_VERSION` | Settings/MainLayout/Login 仍硬编码；没有 tag 校验和 build metadata |
 | 发布 | CI 已有 Rust/Web 测试构建门禁 | 没有 Release workflow、签名清单、Windows 包、GHCR 和 draft smoke |
-| SQLite | 建表后按 `table_info` 条件补列 | 没有 `user_version`/迁移表、兼容范围和整批事务迁移 |
-| 文件迁移 | `migrate_fs_layout` 启动时逐文件迁移 | 没有迁移 journal；源文件会删除；中断后可能成为混合布局 |
+| SQLite | 当前基线固定为 schema v1，启动校验 `PRAGMA user_version` | 尚未实现未来 schema 的顺序迁移、兼容范围和整批事务迁移 |
+| 文件布局 | 当前只读取 `data/<pkg>/{yaml,func,tmpl}`，不读取旧布局 | 尚未实现带 journal 的可恢复升级迁移 |
 | 停机 | `/api/shutdown` 先 drain run、关闭 viewer/session 再退出 | launcher 必须等待准确 PID 完整退出；不能只等 HTTP 或端口释放 |
 | Docker | 一体化镜像已包含运行依赖 | compose 使用本地 `build:`；缺少 release compose、GHCR digest 和宿主升级脚本 |
 | 设置页 | 有静态设置/关于原型 | 没有真实系统信息、依赖状态、升级状态和策略 API |
@@ -333,7 +335,8 @@ journal 至少记录 update id、from/to、准确 child PID/创建时间/exe、c
 ### 6.7 Schema、迁移与回滚承诺
 
 - SQLite 使用 `PRAGMA user_version` 或等价 `schema_migrations`；每个迁移单独编号并在事务内完成 DDL、数据修复和版本推进。
-- migration 0 兼容当前没有版本号的数据库，通过 table/index 检查建立明确 baseline。
+- 当前 schema v1 是唯一基线：新库直接创建 v1；`user_version=0` 或缺少版本号的既有库明确拒绝启动，
+  不存在 migration 0。后续迁移从 v1→v2 起按编号执行。
 - binary 声明 `min_read_schema`、`max_read_schema`、`target_schema`；数据库比 binary 更新时明确拒绝启动。
 - 文件迁移采用 plan → staging copy → hash/validate → marker 的顺序；旧源文件至少保留到升级提交和回滚保留期结束。
 - 文件迁移有独立 journal，重复运行必须幂等；不得把混合布局误标为成功。
@@ -374,7 +377,7 @@ journal 至少记录 update id、from/to、准确 child PID/创建时间/exe、c
 | ID | 任务 | 主要产出/文件 | 前置 | 验收标准 |
 |---|---|---|---|---|
 | DATA-001 | SQLite 编号迁移框架 | `store` migration module | ARC-004 | 单 migration 事务化、重复运行 no-op |
-| DATA-002 | 当前数据库 baseline 迁移 | migration 0/1 fixtures | DATA-001 | 旧库补齐后得到确定 schema，数据不丢 |
+| DATA-002 | 当前数据库 schema v1 baseline | schema v1 fixtures | DATA-001 | 新库得到确定 schema；无版本号旧库明确拒绝且不改数据 |
 | DATA-003 | schema 兼容门禁 | binary min/max/target schema | DATA-001 | newer schema 被明确拒绝，错误可诊断 |
 | DATA-004 | 可恢复文件迁移框架 | scripts migration plan/journal | ARC-004 | 中断后可 resume/rollback，源未丢 |
 | DATA-005 | Maintenance CLI | inspect/migrate JSON 模式 | DATA-002、DATA-004 | 不启动 HTTP/adb/scheduler 即可完整预检 |

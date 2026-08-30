@@ -1,5 +1,5 @@
 steps:
-  - find: 邮件按钮.png
+  - find: 邮件图标.png
     then:
       - find: 领取邮件.png
       - find: 点击空白关闭1.png

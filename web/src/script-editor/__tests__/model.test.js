@@ -6,7 +6,7 @@ import { parseScript, parseFunctionLibrary, serialize } from '../codec'
 import { stripUuids } from './helpers'
 
 /**
- * Model 字段名断言：解析结果与 golden JSON（阶段 0 冻结的前端 Model 字段名）深度一致。
+ * Model 字段名断言：解析结果与 golden JSON（当前前端 Model 字段名）深度一致。
  * golden 就分布在 __fixtures__/json/（与服务端逐字节一致的只读副本）。
  */
 

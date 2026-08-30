@@ -10,11 +10,11 @@
 - ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网低延迟
 - 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先从 H.264 GOP 帧环按需调用 ffmpeg 解码最新帧；无 ffmpeg 时 fallback adb screencap）；固定夹具 benchmark 脚本已兼容 Windows PowerShell 5.1（parser=0），正式跨平台 p50/p95 报告仍在计划中
-- 📜 **YAML 自动化**：find（找图等待+点击，block 障碍、verify 补点）/ color 颜色分支 / loop / func 自定义函数（$N 传参 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait（语法见 [docs/YAML.md](docs/YAML.md)）
+- 📜 **YAML 自动化**：当前 v2 严格语法支持 find（找图等待+点击，block 障碍、verify 补点）/ color 颜色分支 / loop / func 自定义函数（具名参数 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait（语法见 [docs/YAML.md](docs/YAML.md)）
 - ⏰ **定时任务**：cron 表达式，服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
-> 优化计划尚未整体验收完成：阶段 0/1 已完成，阶段 2/3 主体能力已有自动化证据；真实设备 DataChannel / WebRTC E2E、生产数据迁移回滚、正式跨平台 p50/p95、多平台基准和全面模块化仍待验证。2026-08-28 复核时，前端 `npm test` / `npm run build` 通过，`cargo test` 为 159 passed / 0 failed / 1 ignored，`cargo fmt --all -- --check` 与 `cargo clippy --all-targets --all-features -- -D warnings` 通过；`docker compose config`、`tools/verify-release.ps1`、`cargo metadata --locked --no-deps` 通过，`docker build -t gamer .` 与 `docker build --no-cache -t gamer .` 都可完成；`cargo-audit` 结果为 0 vulnerabilities，但仍提示 `bincode` unmaintained。详见 [docs/OPTIMIZATION_PLAN.md](docs/OPTIMIZATION_PLAN.md)。
+> 当前代码以无兼容 v2 基线为准，优化与自动升级仍未整体验收；真实设备 DataChannel / WebRTC E2E、生产升级回滚、正式跨平台 p50/p95、多平台基准仍待验证。验收命令以当前提交的 CI/本地门禁结果为准，自动升级设计见 [docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md](docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md)。
 
 ## 架构
 
@@ -47,11 +47,12 @@ gamer/
 │   │   ├── config.rs       # 配置（port / data_dir / adb / scrcpy-server / 阈值）
 │   │   ├── api/            # HTTP REST + WebSocket 信令
 │   │   ├── device/         # adb 封装 + scrcpy 会话 + ffmpeg 帧缓存
-│   │   ├── webrtc.rs       # WebRTC peer（H.264 推流 + DataChannel 控制）
-│   │   ├── matcher.rs      # NCC 模板匹配引擎
-│   │   ├── engine.rs       # YAML 脚本解释器
-│   │   ├── scheduler.rs    # cron 定时任务
+│   │   ├── webrtc/         # WebRTC peer（H.264 推流 + DataChannel 控制）
+│   │   ├── script_v2/      # YAML v2 严格装载、校验、序列化
+│   │   ├── engine/         # YAML 脚本执行引擎与调度
+│   │   ├── device/         # adb/scrcpy 会话与帧缓存
 │   │   └── store.rs        # SQLite 持久化
+│   ├── data/               # 按应用分区的 yaml/func/tmpl 种子与运行数据
 │   ├── assets/scrcpy-server.jar   # 官方 v3.3.3（仓库自带）
 │   └── Dockerfile          # 兼容保留：仅后端镜像（无前端页）
 ├── web/                    # Vue3 + Vite 前端（精简版）
@@ -100,14 +101,14 @@ docker compose --profile redroid up -d  # gamer + redroid 云手机
 docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d
 ```
 
-- 访问 `http://<服务器IP>:8443`，使用配置的管理员账号登录（默认开发配置为 `admin / admin123`）。登录成功后服务端通过 `HttpOnly; SameSite=Strict` Cookie 维护会话，前端不再依赖 localStorage 伪 token；生产部署请立即更换默认密码并通过 HTTPS 反向代理暴露。
+- 访问 `http://<服务器IP>:8443`，使用管理员账号登录。认证凭据只有配置的 Argon2id PHC `[auth].password_hash`，或开发时由 `GAMER_ADMIN_PASSWORD` 在进程内生成；没有凭据时 fail closed，不存在默认账号或默认密码。登录成功后服务端通过 `HttpOnly; SameSite=Strict` Cookie 维护会话，生产部署请通过 HTTPS 反向代理暴露。
 - `gamer` 容器默认**不带特权**运行；网络类设备（redroid / WiFi adb / 模拟器）
   无需宿主机特权，USB 直通所需的 device 映射由 `docker-compose.usb.yml` 承载
 - **运行数据目录**（唯一口径 = 仓库的 `server/data/`，容器内 `/app/data`）：
 
   | 内容 | 性质 | 来源 |
   |---|---|---|
-  | `<应用包名>/tmpl/` `<应用包名>/yaml/` | 种子数据 | 随仓库分发（git 跟踪），**不在镜像内** |
+  | `<应用包名>/tmpl/` `<应用包名>/yaml/` `<应用包名>/func/` | 种子数据 | 随仓库分发（git 跟踪），**不在镜像内** |
   | `gamer.db` | 运行期持久化 | 首次启动自动生成（gitignore） |
   | 其他临时文件 | 运行期产物 | 自动创建（gitignore） |
 
@@ -147,10 +148,14 @@ VITE_PROXY_TARGET=http://localhost:8443 pnpm dev
 - `虚拟屏`：统一分辨率（预设 1920x1080 / 1080x1920 / 1280x720，可自定义宽高+DPI），
   需 Android 10+；连接只建立投屏会话，应用由 Console 启动按钮或脚本 `str_app` 显式启动
 
+**WebRTC 网络**：服务端不内置 STUN/TURN，默认使用 host candidate 直连，适合同机或局域网。
+Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`、
+`rtc_udp_port`、`rtc_external_port` 并发布对应 UDP 端口；跨公网部署需自行提供可达网络路径。
+
 ## YAML 脚本语法
 
 YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAML.md](docs/YAML.md)**。
-模板与脚本按应用分区存放在 `data/<应用包名>/tmpl|yaml/`（web 端 Console 页框选/上传模板）。
+模板、脚本和函数库按应用分区存放在 `data/<应用包名>/{tmpl,yaml,func}/`（web 端 Console 页框选/上传模板）。
 
 ## API 一览
 
@@ -164,16 +169,22 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAM
 | POST | /api/devices/:id/connect | 连接设备 |
 | POST | /api/devices/:id/screenshot | 截图（PNG） |
 | POST | /api/devices/:id/control | 手动控制（tap/swipe/text/press/home/back/recents/start_app/rotate/clipboard） |
-| GET/POST | /api/templates | 模板列表 / 上传 |
+| GET/POST | /api/templates | 模板列表 / 创建 |
+| PUT | /api/templates/:name/image | 替换已有模板图像 |
 | POST | /api/templates/:name/test | 测试匹配 |
-| GET/POST | /api/scripts | 脚本列表 / 保存 |
-| POST | /api/scripts/:id/run / stop | 运行 / 停止脚本 |
+| GET/POST/PUT | /api/scripts | 脚本列表 / 创建 / 更新 |
+| POST | /api/scripts/:id/run | 运行脚本（异步 202） |
+| GET | /api/runs/:id | 查询运行 |
+| POST | /api/runs/:id/cancel | 取消运行 |
+| GET/POST/PUT | /api/functions | 函数库列表 / 创建 / 更新 |
+| POST | /api/functions/:id/run | 测试函数（异步 202） |
 | GET/POST | /api/tasks | 定时任务列表 / 保存 |
 | POST | /api/tasks/:id/run | 立即执行 |
 | GET/DELETE | /api/logs | 运行日志 / 清空 |
 | WS | /ws/device/:id | WebRTC 信令（offer → answer） |
 
-脚本运行以 `run_id` 标识一次执行实例。启动脚本或“立即运行任务”采用异步返回：接受后返回 HTTP `202` 和 `run_id`，前端按 `run_id` 查询、恢复和停止；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同脚本并发控制同一设备。
+脚本运行以 `run_id` 标识一次执行实例。启动脚本、函数测试或“立即运行任务”采用异步返回：
+接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同脚本并发控制同一设备。脚本/函数保存、导入、运行和任务保存共用严格 v2 loader，失败返回结构化诊断。
 
 ## 技术要点
 

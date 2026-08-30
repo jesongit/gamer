@@ -10,8 +10,9 @@
 //! tests/fixtures/script_v2/README.md（web/src/script-editor/__fixtures__/
 //! 存在逐字节一致副本，由前端测试守护）。
 
+use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
@@ -21,6 +22,41 @@ use super::{parse_function_file, parse_script_file, serialize_function_file, ser
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/script_v2")
+}
+
+fn repository_data_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data")
+}
+
+fn files_recursively(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let entries =
+        fs::read_dir(dir).unwrap_or_else(|e| panic!("读取目录 {} 失败: {e}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| panic!("读取目录项 {} 失败: {e}", dir.display()));
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(files_recursively(&path));
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    files
+}
+
+fn relative_resource(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or_else(|_| panic!("{} 不在 {} 下", path.display(), root.display()))
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn is_yaml(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("yaml" | "yml")
+    )
 }
 
 fn read_fixture(name: &str) -> String {
@@ -237,6 +273,101 @@ fn golden_fixtures_serialize_roundtrip() {
                 }
                 other => panic!("{id}/{file}: 未知 model_kind {other}"),
             }
+        }
+    }
+}
+
+/// 仓库内可执行数据必须与生产路径使用同一严格 loader，并按当前
+/// data/<pkg>/{yaml,func,tmpl} 分区布局解析；避免旧示例静默绕过契约。
+#[test]
+fn repository_data_resources_pass_strict_loader() {
+    let data_dir = repository_data_dir();
+    let packages = fs::read_dir(&data_dir)
+        .unwrap_or_else(|e| panic!("读取仓库数据目录 {} 失败: {e}", data_dir.display()))
+        .map(|entry| entry.unwrap_or_else(|e| panic!("读取仓库数据目录项失败: {e}")))
+        .filter(|entry| entry.path().is_dir())
+        .collect::<Vec<_>>();
+    assert!(!packages.is_empty(), "仓库数据目录必须至少包含一个应用分区");
+
+    for package in packages {
+        let package_dir = package.path();
+        let package_name = package.file_name().to_string_lossy().to_string();
+        let yaml_dir = package_dir.join("yaml");
+        let func_dir = package_dir.join("func");
+        let tmpl_dir = package_dir.join("tmpl");
+        for dir in [&yaml_dir, &func_dir, &tmpl_dir] {
+            assert!(
+                dir.is_dir(),
+                "{package_name}: 缺少当前三目录布局中的 {}",
+                dir.display()
+            );
+        }
+
+        let mut provider = InMemoryResources::new();
+        let mut template_bases: HashMap<String, usize> = HashMap::new();
+        for path in files_recursively(&tmpl_dir) {
+            let name = relative_resource(&tmpl_dir, &path);
+            provider.add_template(name.clone());
+            if let Some((base, ext)) = name.rsplit_once('.') {
+                if let Some(base) = base.split_once('#').map(|(base, _)| base) {
+                    *template_bases.entry(format!("{base}.{ext}")).or_default() += 1;
+                }
+            }
+        }
+        for (base, count) in template_bases {
+            if count == 1 {
+                provider.add_template(base);
+            }
+        }
+
+        let script_files = files_recursively(&yaml_dir)
+            .into_iter()
+            .filter(|path| is_yaml(path))
+            .collect::<Vec<_>>();
+        for path in &script_files {
+            let resource = relative_resource(&yaml_dir, path);
+            provider.add_script(
+                resource,
+                fs::read_to_string(path).unwrap_or_else(|e| {
+                    panic!("读取 {package_name}/yaml/{} 失败: {e}", path.display())
+                }),
+            );
+        }
+
+        let function_files = files_recursively(&func_dir)
+            .into_iter()
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("yaml"))
+            .collect::<Vec<_>>();
+        for path in &function_files {
+            let resource = relative_resource(&func_dir, path);
+            let short = resource
+                .strip_suffix(".yaml")
+                .unwrap_or_else(|| panic!("函数库文件扩展名异常: {resource}"));
+            provider.add_function_file(
+                short,
+                fs::read_to_string(path)
+                    .unwrap_or_else(|e| panic!("读取 {package_name}/func/{resource} 失败: {e}")),
+            );
+        }
+
+        for path in script_files {
+            let resource = relative_resource(&yaml_dir, &path);
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("读取 {package_name}/yaml/{resource} 失败: {e}"));
+            parse_script_file(&source, &resource, &provider).unwrap_or_else(|errors| {
+                panic!("仓库脚本 {package_name}/yaml/{resource} 未通过严格 loader: {errors:?}")
+            });
+        }
+        for path in function_files {
+            let resource = relative_resource(&func_dir, &path);
+            let short = resource
+                .strip_suffix(".yaml")
+                .unwrap_or_else(|| panic!("函数库文件扩展名异常: {resource}"));
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("读取 {package_name}/func/{resource} 失败: {e}"));
+            parse_function_file(&source, short, &provider).unwrap_or_else(|errors| {
+                panic!("仓库函数库 {package_name}/func/{resource} 未通过严格 loader: {errors:?}")
+            });
         }
     }
 }

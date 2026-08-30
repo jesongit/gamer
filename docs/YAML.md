@@ -1,9 +1,9 @@
 # YAML 脚本语法（v2）
 
-GameBot 自动化脚本的权威语法文档（2026-08 重写）。本文描述**全新 v2 语法**，与旧版
-v1 语法完全不兼容（差异清单见文末「与旧语法（v1）的差异」）。规则来源：
+GameBot 自动化脚本的权威语法文档（2026-08 重写）。本文描述当前唯一受支持的
+YAML v2 严格语法；不提供旧格式兼容或自动迁移。规则来源：
 
-- 契约：`docs/SCRIPT_EDITOR_CONTRACT.md`（阶段 0 冻结 + 实现期澄清）；
+- 契约：`docs/SCRIPT_EDITOR_CONTRACT.md`（与当前实现、fixture 同步）；
 - 可执行样例：`server/tests/fixtures/script_v2/`（本文所有示例与其同形态，装载由
   `server/src/script_v2/`（装载/校验/序列化）+ `server/src/engine/`（执行）保证）；
 - 前端：可视化编辑器（`web/src/script-editor/`）以此为唯一编辑模型，保存时由服务端
@@ -29,9 +29,7 @@ data/<pkg>/
 - **不做内容推断**：`yaml/` 里必须有顶层 `steps`；`func/` 顶层键全是函数名。
   放错目录按该目录的类型校验，报错即拒。
 - **跨分区一律不解析、不回退**：模板 / 函数 / 子脚本只在当前应用分区查找，
-  没有 default 兜底。旧目录布局（`data/scripts/<package>/` + 全局
-  `data/templates/`）由服务端启动时一次性迁移（`scripts::migrate_fs_layout`），
-  不再被读取。
+  没有 default 兜底；其他目录布局不属于当前资源，也不会被读取或迁移。
 - **模板引用写短名**（如 `account.png`）。磁盘文件名可带 `#` **搜索区后缀**
   （后缀在扩展名前，如 `xx#l.png`）：
   - 半区码：`a`=全屏、`u`/`d`/`l`/`r`=上/下/左/右半、`ul`/`ur`/`dl`/`dr`=四角；
@@ -58,10 +56,9 @@ steps:                      # 必需：可为空列表 steps: []，但不可省�
   - tap: [0.5, 0.5]
 ```
 
-- 出现旧语法顶层键（`func` / `name` / `action_wait` / `default_threshold` /
-  `package` / `until` / `cond`）报 `script.top_level.legacy_format`（前端展示
-  迁移引导）；其余未知键报 `script.top_level.unknown_key`。
-- 根节点必须是映射；`steps` 缺失报 `step.field.missing`（field=steps）。
+- 顶层出现白名单之外的任何键报 `script.top_level.unknown_key`；服务端不区分旧格式，
+  也不生成迁移引导。根节点必须是映射；`steps` 缺失报 `step.field.missing`
+  （field=steps）。
 
 ### 2.2 函数库（func/）
 
@@ -136,9 +133,9 @@ params:
 
 - 默认值按声明类型解析，非法报 `param.default.invalid`；
 - **color 是字符串不是数字**：所有位置（声明默认值、expect 候选、args、任务快照、
-  运行记录）统一为 6 位十六进制无 `#`。纯数字色值在 YAML 里**必须加引号**
+  运行记录统一为 6 位十六进制无 `#`。纯数字色值在 YAML 里**必须加引号**
   （`'123456'`）防止被解析成数字丢前导零；含字母色值（`ff8800`）可裸写，编辑器
-  保存时对纯数字色值统一加引号输出。
+  规范序列化时对纯数字色值保留引号，含字母色值可裸写。
 
 ### 3.3 `$name` 引用
 
@@ -454,29 +451,20 @@ steps:
   前端按 `code + step_path + field` 定位卡片与控件，`message` 仅展示；
 - 保存接口（脚本 / 函数库）带 `expected_version` 版本短码做双页面冲突检测，
   不符返回 `409 {code:"version_conflict"}`。
+- 保存、导入、手动运行、函数测试和任务保存都使用同一严格 v2 loader；解析失败返回
+  `code/message/resource/step_path/field` 结构化诊断，不按接口分别放宽格式。
+- 脚本/函数库创建使用 `POST`（同分区同名返回 409）；已有资源更新使用 `PUT`，
+  默认要求 `expected_version`，仅 `force:true` 跳过版本比较。模板上传是创建，
+  已有模板图像替换使用 `PUT /api/templates/:name/image`，不会由创建接口覆盖。
 
-## 10. 与旧语法（v1）的差异（破坏性）
+## 10. 严格基线与不兼容边界
 
-v2 与 2026-08-26 的 v1 精简语法**不兼容**，装载器对旧写法显式报错引导迁移：
+当前基线只接受本文件前述 v2 结构，所有不在白名单中的结构都按未知键或结构错误拒绝：
 
-| v1 | v2 |
-|---|---|
-| 顶层 `func:` 段定义自定义函数 | 删除；函数库独立放 `data/<pkg>/func/`，顶层键=函数名，经 `func: 文件/函数` 调用 |
-| `$N` 位置实参 / `^N` 上下文引用 | 删除；改为具名参数 `$name`（params 声明 + args 绑定） |
-| `call` 传 $N、`- 脚本名:函数名:` 跨文件函数调用 | 删除；`- call: <脚本>.yaml` + 具名 `args`，函数调用统一走 `- func: 文件/函数` |
-| 函数 `cond:` 条件（模板匹配决定是否执行） | 删除；布尔分支用 `if`，模板条件用 `find` 短 timeout + then/else |
-| `until:` 步骤 | 删除；由 `find` 取代 |
-| 脚本顶层 `name` / `action_wait` / `default_threshold` 键 | 删除；`config` 三键为 interval/threshold/log_level |
-| `package <名字>` 指令 | 删除；分区 = 目录名 `data/<pkg>/`，残留=解析报错 |
-| `config` 可写映射列表按序覆盖 | 删除；只能写单个映射 |
-| `steps:` / `func:` 段落键可省略（单段脚本简写） | 删除；`yaml/` 脚本必须显式 `steps:`（可空列表不可省略） |
-| `- color: [x, y]` + 兄弟键色值 | 删除；改为 `- color:` + `at` + `expect` 有序列表（§5.4） |
-| `loop` 的 times/steps 两种缩进均认 | 删除；只认 `- loop:` 映射形态（§5.5） |
-| `success` 日志级别 | 删除；四级 debug/info/warn/error，success 视同 info 的特例不再存在 |
-| 匹配只随 find 隐式发生 | `match`（不点击策略选择）成为正式步骤，录制滑动输出 match→swipe |
-| 脚本/函数混存 `data/<pkg>/yaml/`（v1 末期） | 目录即类型三分：`yaml/` + `func/` + `tmpl/`，函数库不可运行/调度 |
-
-保留不变（自 v1 沿用）：`str_app` / `cls_app` / `tap` / `swipe` / `key` / `text` /
-`log` / `wait`（含随机区间）；`find` 的 `block` / `verify` / `timeout` / `then` /
-`else` 骨架；`throw`；模板 `#` 搜索区后缀与短名引用；脚本 id
-`<pkg>/<名>.yaml`；10 万步 guard 与 tap/swipe/hit/miss 可视化事件。
+- 可执行脚本只能位于 `data/<pkg>/yaml/`，函数库只能位于 `data/<pkg>/func/`，
+  模板只能位于 `data/<pkg>/tmpl/`；分区之间不回退。
+- 脚本顶层只能是 `params/config/steps`，函数记录只能是 `params/steps`；
+  `color` 的 `else` 只能位于步骤级，与 `color` 同列，候选列表内的 `else` 是结构错误。
+- 参数和引用使用当前具名形式（`$name`）；调用使用 `call` 或
+  `func: <文件短路径>/<函数名>`，其他结构不属于输入契约。
+- 模板短名解析只接受当前分区内唯一文件，创建与图像替换遵循 §9 的独立 API 契约。

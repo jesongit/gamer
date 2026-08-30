@@ -141,7 +141,7 @@ describe('编辑往返一致性', () => {
     expect(strip(parsed.model)).toEqual(strip(direct))
   })
 
-  it('serialize(parse(fixture)) 幂等（阶段 0 契约的组件层旁证）', () => {
+  it('serialize(parse(fixture)) 幂等（契约的组件层旁证）', () => {
     const once = serialize(parseScript(NESTED_YAML).model)
     const twice = serialize(parseScript(once).model)
     expect(twice).toBe(once)

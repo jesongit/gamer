@@ -1,10 +1,9 @@
-# script_v2 契约 fixture（阶段 0）
+# script_v2 契约 fixture
 
-本目录是《脚本录制与可视化编辑器重构计划》（docs/SCRIPT_EDITOR_REDESIGN_PLAN.md）阶段 0
-冻结的 YAML 语法契约测试样例。**前端编辑器、服务端解析/校验、YAML 文档三方的行为
-以 `docs/SCRIPT_EDITOR_CONTRACT.md` 为准，本目录是其可执行样例。**
+本目录是当前 YAML v2 严格契约的可执行样例。**前端编辑器、服务端解析/校验、YAML
+文档三方的行为以 `docs/SCRIPT_EDITOR_CONTRACT.md` 为准，本目录是其可执行样例。**
 
-- 合法样例：`<id>.yaml` + 期望 JSON `<id>.golden.json`（用拟议前端 Model 字段名描述解析结果）
+- 合法样例：`<id>.yaml` + 期望 JSON `<id>.golden.json`（描述当前前端 Model 字段）
 - 非法样例：`<id>.yaml` + 期望错误 `<id>.expected.json`（code + step_path + field，错误码见 CONTRACT.md 第 5 节）
 - 前端副本：`web/src/script-editor/__fixtures__/yaml/`（YAML 逐字节一致）与
   `web/src/script-editor/__fixtures__/json/`（golden/expected JSON 副本），由
@@ -23,7 +22,7 @@
       "file": "<本目录内文件名>",
       "role": "main | call_target | func_library_common",
       "model_kind": "script | function_library",
-      "model": { }          // 拟议前端 ScriptModel / FunctionLibraryModel，字段见 CONTRACT.md
+      "model": { }          // 前端 ScriptModel / FunctionLibraryModel，字段见 CONTRACT.md
     }
   ],
   "task_snapshot": { }      // 仅 v12：定时任务参数快照形态（args 全量类型化 + param_signature）
@@ -71,18 +70,17 @@ ParamDecl 为 `{type, name, remark, default}`，`default: null` 表示必填。M
 | i03_default_type_mismatch | i03_default_type_mismatch.yaml | param.default.invalid @ params[0]、params[1]（bool 传字符串 / time 缺单位） |
 | i04_match_candidate_duplicate | i04_match_candidate_duplicate.yaml | step.match.candidate_duplicate @ steps[0].candidates |
 | i05_func_path_traversal | i05_func_path_traversal.yaml | ref.func.path_traversal @ steps[0..2].target（..、绝对路径、反斜杠） |
-| i06_call_cycle | i06_call_cycle.yaml | ref.call.self_cycle @ steps[0].target（call 自身；跨文件环归阶段 2 引用图） |
+| i06_call_cycle | i06_call_cycle.yaml | ref.call.self_cycle @ steps[0].target（call 自身；跨文件环由引用图校验） |
 | i07_unknown_top_key | i07_unknown_top_key.yaml | script.top_level.unknown_key @ metadata |
 | i08_else_in_candidates | i08_else_in_candidates.yaml | step.match.else_in_candidates @ steps[0].candidates（- else 写进候选列表） |
 | i09_empty_default | i09_empty_default.yaml | param.default.empty @ params[0].default（text:x:名:） |
 
-## 约定与阶段边界
+## 约定
 
 - 逻辑 ID 即文件主名（不含扩展名）；多文件样例（v09/v10）的辅助文件名 = `<主 ID>.<角色>.yaml`，
   真实目录布局中分别对应 `yaml/<主 ID>.yaml`、`yaml/<目标>.yaml`、`func/common.yaml`（见 CONTRACT.md 第 2 节）。
-- 本目录 fixture 只约束 **语法与结构形态**；完整语义校验（资源引用存在性、类型化绑定、运行行为）
-  在阶段 2 的服务端实现中覆盖（docs/SCRIPT_EDITOR_REDESIGN_PLAN.md §16.1）。
+- 服务端 fixture 测试直接调用当前严格 `parse_script_file()` /
+  `parse_function_file()`，同时覆盖结构、引用、类型绑定和资源存在性；运行行为由执行器测试覆盖。
 - 修改任何 fixture 必须同步：golden/expected JSON、web/src/script-editor/__fixtures__/ 副本、
   CONTRACT.md 对照表；两目录一致性由前端测试强制。
-- 阶段 0 的预校验实现位于 `server/tests/script_v2_contract/precheck.rs`（最小实现，阶段 2
-  迁入 `server/src` 并扩展为完整 parse_script_file()/parse_function_file() 校验器）。
+- 仓库内 `server/data/<pkg>/{yaml,func,tmpl}` 示例也由同一严格 loader 契约测试，避免示例绕过生产解析路径。

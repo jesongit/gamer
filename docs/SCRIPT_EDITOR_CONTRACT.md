@@ -1,37 +1,35 @@
-# 脚本 v2 语法契约（阶段 0 冻结）
+# 脚本 v2 语法契约
 
-> 状态：阶段 0 产出，契约冻结；后续阶段改动本文档需同步 fixture 与双方测试。
-> 依据：《脚本录制与可视化编辑器重构计划》（SCRIPT_EDITOR_REDESIGN_PLAN.md）§2 设计结论、§5–§7、§13.2。
+> 状态：当前无兼容基线；改动本文档需同步 fixture 与双方测试。
+> 依据：当前服务端严格 loader、编辑器 Model 与 YAML 文档的共同契约。
 > 可执行样例：`server/tests/fixtures/script_v2/`（索引见其 README.md），前端副本
 > `web/src/script-editor/__fixtures__/`（逐字节一致，一致性有测试守护）。
-> 注意：本文档描述的是**新语法**，与现行 `docs/YAML.md`（v1）不兼容；v1 文档在新引擎落地
-> （阶段 7）前保持原样，本文档是阶段 0~6 期间的唯一新契约来源。
+> 注意：本文档与 `docs/YAML.md` 描述同一套当前 v2 严格语法；不提供旧格式兼容或自动迁移。
 
 ## 1. 本文五方
 
 任何一条语法规则都必须在五方同时成立，五方互为镜像：
 
-1. **Rust AST（拟议）** — 阶段 2 服务端严格反序列化目标，禁止在执行循环里按 `serde_yaml::Value` 猜动作（plan §13.3）；
-2. **前端 Model（拟议）** — 可视化编辑器唯一编辑源（plan §8.2），golden JSON 即用该字段名书写；
-3. **规范 YAML** — 服务端持久化与导入导出格式，由 codec 统一序列化产出，不保留旧文件注释/排版（plan §2）；
+1. **Rust AST** — `server/src/script_v2/` 的严格装载与校验目标，禁止在执行循环里按 `serde_yaml::Value` 猜动作；
+2. **前端 Model** — 可视化编辑器唯一编辑源，golden JSON 即用该字段名书写；
+3. **规范 YAML** — 服务端持久化与导入导出格式，由 codec 统一序列化产出；
 4. **API JSON** — 保存/校验/运行/任务接口中模型与参数的 JSON 形态（与前端 Model 同构，见 §6）；
 5. **结构化错误码** — `code + message + resource + step_path + field` 五元组（plan §13.2），前端据此定位卡片，不解析中文文案。
 
 ## 2. 解析层选型结论（Rust）
 
-**结论：采用 `saphyr-parser 0.0.12`（crates.io，YAML 1.2 事件级解析器），以 dev-dependency 引入（阶段 0 仅测试使用；阶段 2 实装真实装载器时转入 `[dependencies]`）。**
+**结论：采用 `saphyr-parser 0.0.12`（crates.io，YAML 1.2 事件级解析器），由服务端严格 loader 使用。**
 
-- 需求背景：params 每项必须是「整条单引号」标量（§3.3），而 `serde_yaml 0.9` 反序列化成 `Value` 后**书写样式彻底丢失**——`'bool:enable:x:true'`（单引号）与 `bool:enable:x:true`（无引号）得到完全相同的 `Value::String`，无法校验引号契约。这一点已用测试固化：`tests/script_v2_contract/main.rs::serde_yaml_loses_scalar_style`。
+- 需求背景：params 每项必须是「整条单引号」标量（§3.3），而 `serde_yaml 0.9` 反序列化成 `Value` 后**书写样式彻底丢失**——`'bool:enable:x:true'`（单引号）与 `bool:enable:x:true`（无引号）得到完全相同的 `Value::String`，无法校验引号契约。这一点已用测试固化：`server/src/script_v2/fixtures_tests.rs::serde_yaml_loses_scalar_style`。
 - 选 `saphyr-parser` 的理由：
-  - 事件级 API：`Parser` 是 `Iterator<Item = Result<(Event, Span), ScanError>>`，`Event::Scalar(Cow<str>, ScalarStyle, anchor, tag)` 直接携带 `ScalarStyle::{Plain, SingleQuoted, DoubleQuoted, Literal, Folded}`，PoC 测试 `poc_scalar_style_is_preserved_by_saphyr` 已验证单引号/无引号可区分；
-  - 每个事件带 `Span`（行列区间），是阶段 2 错误定位到 `step_path`/`field` 乃至源码行列的基础；
+- 事件级 API：`Parser` 是 `Iterator<Item = Result<(Event, Span), ScanError>>`，`Event::Scalar(Cow<str>, ScalarStyle, anchor, tag)` 直接携带 `ScalarStyle::{Plain, SingleQuoted, DoubleQuoted, Literal, Folded}`，测试已验证单引号/无引号可区分；
+  - 每个事件带 `Span`（行列区间），是错误定位到 `step_path`/`field` 乃至源码行列的基础；
   - YAML 1.2、零拷贝（`Cow<'input, str>`）、saphyr 工作组维护（yaml-rust 的后继项目）；
   - 对 match 紧凑缩进（indentless sequence，§4.1）解析正确，golden 样例 v07/v11 已回归。
 - 备选 `yaml-rust2 0.12`：同为 YAML 1.2 且可取样式，但其高层 `YamlLoader` 同样丢样式、事件 API 无 Span、生态位是旧 yaml-rust 的延续维护，故不选。
 - 排除「serde_yaml + 源码正则预扫描」方案：对多行标量、注释、引号转义、嵌套结构的样式推断不可靠，且等于把解析做两遍；仅在“只需粗判、不要 span”的场景才值得。
-- 阶段 0 的落点：`server/tests/script_v2_contract/{yaml_loader,model,precheck}.rs` 是测试支持模块
-  （事件→带样式节点树→模型 JSON 断言 + 最小预校验），**阶段 2 迁入 `server/src` 扩展为正式
-  `parse_script_file()/parse_function_file()` 严格 AST 装载器后删除**。
+- 当前落点：`server/src/script_v2/` 提供 `parse_script_file()/parse_function_file()`，
+  服务端 fixture、仓库示例数据和 API 保存/导入/运行均通过这条严格装载路径。
 
 ## 3. 五方字段对照表
 
@@ -49,7 +47,7 @@
 
 ### 3.2 顶层结构与模型
 
-**Rust AST（拟议）：**
+**Rust AST：**
 
 ```rust
 enum Resource {
@@ -62,7 +60,7 @@ struct FunctionDecl { name: String, params: Vec<ParamDecl>, steps: Vec<Step> }
 struct ScriptConfig { interval: Duration, threshold: f64, log_level: LogLevel }  // 可缺省整体
 ```
 
-**前端 Model（拟议，golden JSON 用此字段名）：**
+**前端 Model（golden JSON 用此字段名）：**
 
 ```jsonc
 ScriptModel        { params: ParamDecl[], config: ScriptConfig | null, steps: Step[] }
@@ -93,11 +91,12 @@ login:
 ```
 
 顶层键白名单：脚本只允许 `params/config/steps`；函数记录只允许 `params/steps`。
-出现旧语法顶层键（`func/name/action_wait/default_threshold/package/until/cond`）报
-`script.top_level.legacy_format`（前端展示迁移引导），其余未知键报 `script.top_level.unknown_key`。
+出现白名单之外的任何顶层键统一报 `script.top_level.unknown_key`，不生成迁移引导。
 
-**API JSON（保存/读取接口拟议）：** `POST /api/scripts`（body 含 `pkg`、`file`、`model`，
-服务端由模型序列化出规范 YAML）与 `GET` 返回 `{file, model, version}`；`model` 即前端 Model 形态。
+**API JSON（当前实现）：** `POST /api/scripts` 与 `POST /api/functions` 创建资源，
+body 使用 `pkg/name/content`；已有资源用 `PUT` 更新，默认携带 `expected_version`，
+`force:true` 才跳过版本比较。响应/错误由服务端返回资源版本或结构化诊断，读取接口返回
+当前规范 YAML 与版本信息。
 
 ### 3.3 参数声明 ParamDecl
 
@@ -172,7 +171,7 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 | throw | `- throw` / `- throw: 原因` | `{kind:"throw", message: string\|null}` |
 | return | `- return: true` / `- return: $enable`（仅函数文件） | `{kind:"return", value: Cell<bool>}` |
 
-规则：一个步骤只允许一个动作键（多动作键 → `step.multi_action`）；动作键之外的同级键是步骤字段（未知字段 → 阶段 2 `step.field.unknown`）。
+规则：一个步骤只允许一个动作键（多动作键 → `step.multi_action`）；动作键之外的同级键是步骤字段（未知字段 → `step.field.unknown`）。
 
 ### 3.6 config
 
@@ -208,7 +207,7 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 ### 4.2 color 全位置字符串化 + 候选列表形态
 
 - 颜色在**所有位置**都是字符串：ParamDecl 默认值、`expect` 候选、`args` 实参、任务快照、RunRecord 摘要——统一为 6 位十六进制无 `#`（Model/API JSON 中即 string）。
-- 规范 YAML 中**纯数字色值必须加引号**（`'123456'`），防止被解析成数字丢前导零；含字母色值（`ff8800`）可裸写，但 codec 统一加引号输出。
+- 规范 YAML 中**纯数字色值必须加引号**（`'123456'`），防止被解析成数字丢前导零；含字母色值（`ff8800`）可裸写。
 - 解析端**不得**让 YAML 1.1 数字解析改变颜色值：事件级解析（§2）天然取原始串；任何基于 plain-object 的解析（serde_yaml Value、js-yaml load）必须把颜色位置重新字符串化。
 - `expect` 冻结为**有序列表**，每项是单键映射 `颜色: [分支步骤]`，与 match 候选同构；**不用**颜色做整个映射的键。原因：纯数字色作为映射键会被 JS plain object 按整数形键重排（js-yaml `load()` 实测把 `'123456'` 排到最前），候选顺序语义被静默破坏——该坑已记录 docs/PITFALLS.md。
 - `color` 不轮询、不点击；同色候选重复 → `step.color.duplicate`；颜色格式非法 → `step.color.format`。
@@ -231,9 +230,10 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 { "type": "function", "pkg": "<分区>", "file": "common", "function": "login", "start_index": 0 }
 ```
 
-- `start_index`：主流程顶层步骤序号（从 0）；函数为函数体内顶层步骤序号；从函数名行启动 = `start_index 0` 且**先判 cond**（沿用现行语义，阶段 2 迁移到 match+return 表达）。plan §3 非目标：首版不支持任意深层嵌套步骤直接启动。
+- `start_index`：主流程顶层步骤序号（从 0）；函数为函数体内顶层步骤序号；不支持任意深层嵌套步骤直接启动。
 - 运行前必须解析全部必填参数（后续步骤可能引用）；`args` 为稀疏映射（§4.3）。
-- API 拟议：`POST /api/run` body `{ device_id, target, args }` → `{ run_id, resolved_args }`；函数测试 `POST /api/functions/test` body `{ device_id, pkg, file, function, start_index, args }`。
+- 脚本运行使用 `POST /api/scripts/:id/run`，函数测试使用 `POST /api/functions/:id/run`；
+  两者都接受 `device_id/start_index?/args?`，异步成功返回 202 与 `run_id/resolved_args`。
 
 ### 4.5 任务参数签名算法（psig1）
 
@@ -278,8 +278,8 @@ canonical_default（required=1 时为空串）：
 ### 5.2 step_path 语法
 
 - 脚本：`params[0]`、`config`、`steps[0]`、`steps[1].then[0]`、`steps[2].candidates[1].steps[0]`、`steps[3].expect[0].steps[2].else[0]`；
-- 函数库：`functions` 段以函数名开头，如 `login.steps[0]`、`is_enabled.params[1]`（阶段 0 最小预校验中简写为 `login.steps`/`<函数名>`，阶段 2 统一为完整路径）；
-- 顶层/整文件错误 `step_path = ""`，`field` = 顶层键名（如 `func`）或 `"yaml"`（语法错误）。
+- 函数库：函数名直接作为顶层路径，如 `login.steps[0]`、`is_enabled.params[1]`；
+- 顶层/整文件错误 `step_path = ""`，`field` = 顶层键名或 `"yaml"`（语法错误）。
 
 ### 5.3 错误码命名空间清单（五域）
 
@@ -320,7 +320,7 @@ canonical_default（required=1 时为空串）：
 | | `step.nesting.depth` | 步骤嵌套超限 |
 | **引用 ref.** | `ref.call.path_traversal` | call 目标路径穿越/绝对路径/反斜杠 |
 | | `ref.call.self_cycle` | call 目标是脚本自身 |
-| | `ref.call.cross_cycle` | 跨文件调用成环（阶段 2 引用图） |
+| | `ref.call.cross_cycle` | 跨文件调用成环（引用图） |
 | | `ref.call.depth` | 调用深度超限（32 层） |
 | | `ref.func.path_traversal` | 函数路径穿越/绝对路径/反斜杠 |
 | | `ref.func.syntax` | 函数路径不是 `<文件短路径>/<函数名>` |
@@ -336,32 +336,37 @@ canonical_default（required=1 时为空串）：
 | | `runtime.engine.throw` | 脚本 throw 终止（携带原因） |
 | | `runtime.run.not_found` | 运行实例不存在/已归档 |
 
-阶段 0 已由非法 fixture 覆盖的码：`script.top_level.legacy_format`、`script.top_level.unknown_key`、
+当前 fixture 已由非法样例覆盖的码：`script.top_level.unknown_key`、
 `script.root_type`、`param.decl.quote_style`、`param.decl.format`、`param.decl.name_duplicate`、
 `param.default.empty`、`param.default.invalid`、`step.match.candidate_duplicate`、
 `step.match.else_in_candidates`、`step.match.candidates_type`、`step.list_type`、
 `ref.func.path_traversal`、`ref.call.self_cycle`、`func.record_unknown_key`、`func.record_type`、
-`yaml.syntax_error`（其余归阶段 2 及运行时）。
+`yaml.syntax_error`（其余由当前 loader 或运行时覆盖）。
 
-## 6. API JSON 形态（拟议，阶段 1/5 实装）
+## 6. API JSON 形态（当前实现）
 
-- **保存/读取**：`POST/PUT /api/scripts`、`/api/functions`（阶段 1）body 携带 `model`（= 前端 Model），响应 `{resource, version, diagnostics: Diagnostic[]}`；读取返回 `{file, model, version}`。版本号/ETag 用于双页面冲突检测（plan §13.1）。
-- **校验**：保存前服务端权威校验，返回结构化错误列表（§5.1），dry-run 导入同理。
-- **运行**：`POST /api/run` `{device_id, target: RunTarget(§4.4), args: {稀疏覆盖}}` → `{run_id, resolved_args}`；RunRecord 记录 resolved_args 快照或脱敏摘要。
-- **定时任务**：Task 增 `{args: 全量类型化快照, param_signature}`（§4.3/§4.5）；调度前比对签名，不一致即 `runtime.task.param_stale` 失败并明确记录。
+- **保存**：`POST /api/scripts`、`POST /api/functions` 创建（body 含 `pkg/name/content`）；`PUT` 更新已有资源，默认要求 `expected_version`，`force:true` 跳过版本比较。冲突返回 409。
+- **导入/读取**：脚本分区导入支持 preview 与 `confirm=1` 写入；读取返回当前规范 YAML 与版本。保存和导入均由服务端严格 loader 校验。
+- **运行**：`POST /api/scripts/:id/run` 与 `POST /api/functions/:id/run` 接受 `device_id/start_index?/args?`；成功异步返回 202 与 `run_id/resolved_args`，参数或 YAML 诊断为结构化错误。
+- **定时任务**：任务持久化全量类型化 `args` 快照与 `param_signature`；任务保存、启用和立即运行复用严格 loader 与签名门禁。
+- **模板**：`POST /api/templates` 只创建，`PUT /api/templates/:name/image` 只替换既有图像；创建接口不覆盖已有模板。
 
-## 7. fixture 体系与阶段边界
+## 7. fixture 体系
 
 - 逻辑 ID 体系、样例索引、golden/expected JSON 结构：见 `server/tests/fixtures/script_v2/README.md`。
 - 前端副本映射：`server/tests/fixtures/script_v2/<file>` ↔ `web/src/script-editor/__fixtures__/yaml|json/<file>`，逐字节一致由 `fixtures.test.js` 的漂移测试强制。
-- 服务端断言：`server/tests/script_v2_contract/`（事件树 → Model JSON 与 golden 相等；非法样例被最小预校验拒绝）。前端断言：`web/src/script-editor/__fixtures__/fixtures.test.js`（js-yaml 加载同一 YAML 校验同一模型形态 + psig1 双实现）。
-- 本阶段（阶段 0）只冻结**语法与结构形态**；语义校验（资源存在性、类型化绑定、args 绑定、运行行为）归阶段 2；目录/资源 API 归阶段 1。修改任何契约必须同步：本文档、双方 fixture、双方测试、（阶段 2 起）`docs/YAML.md`。
+- 服务端断言位于 `server/src/script_v2/fixtures_tests.rs`，直接调用严格 loader，并覆盖仓库
+  `server/data/<pkg>/{yaml,func,tmpl}` 示例；前端断言位于
+  `web/src/script-editor/__fixtures__/fixtures.test.js`。
+- 修改任何契约必须同步本文档、`docs/YAML.md`、双方 fixture 和双方测试；保存、导入、运行、
+  函数测试、任务保存均不得绕过严格 loader。
 
 
 ## 附：实现期澄清（阶段 1~3 期间冻结，与 fixture 同步）
 
-- **color 的 `else` 写在步骤级**（与 `color:` 键同列），`at`/`expect` 位于 color 值映射内；parse 对写在映射内的旧位置 `else` 容错接受（fixture v05/v08/v10 冻结）。
-- **色值序列化引号**：纯数字色值由 YAML 层自动加引号防前导零丢失；字母色值裸写（§4.2「统一加引号」按此修订）。
+- **color 的 `else` 写在步骤级**（与 `color:` 键同列），`at`/`expect` 位于 color 值映射内；
+  候选列表内的 `else` 属于结构错误。
+- **色值序列化引号**：纯数字色值必须加引号防止 YAML 数字化；含字母色值可裸写。
 - **args 字符串实参引号**：呈 time/key/color 形态的串 plain 输出，其余双引号——模型不带目标类型信息，这是唯一可判定规则（v09/v10 双向锁死）。
 - **time 单位大小写**：接受不敏感输入，存储原样；psig1 归一化仅在签名侧。
-- **config 未知键**：暂借用 `step.field.unknown` / `step.field.type_mismatch` 错误码（独立 config.* 码待阶段 2 定夺）。
+- **config 未知键**：使用当前 `script.config.unknown_key` / `script.config.invalid` 诊断。

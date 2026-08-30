@@ -7,7 +7,7 @@ import { parseFunctionLibrary, parseScript } from '../codec'
 import { makeStep } from '../factories'
 
 /**
- * 结构化校验：非法 fixture（i01~i09）必须被标出 expected.json 中的每一个
+ * 结构化校验：非法 fixture（i02~i09）必须被标出 expected.json 中的每一个
  * {code, step_path, field}；另覆盖 Model 层引用/上下文/绑定检查。
  */
 
@@ -16,7 +16,6 @@ const yamlDir = path.join(here, '..', '__fixtures__', 'yaml')
 const jsonDir = path.join(here, '..', '__fixtures__', 'json')
 
 const INVALID_IDS = [
-  'i01_old_top_format',
   'i02_params_unquoted',
   'i03_default_type_mismatch',
   'i04_match_candidate_duplicate',
@@ -27,7 +26,7 @@ const INVALID_IDS = [
   'i09_empty_default',
 ]
 
-describe('validation：非法 fixture i01~i09 全部标出期望错误', () => {
+describe('validation：非法 fixture i02~i09 全部标出期望错误', () => {
   for (const id of INVALID_IDS) {
     it(`${id}`, () => {
       const expected = JSON.parse(readFileSync(path.join(jsonDir, `${id}.expected.json`), 'utf8'))

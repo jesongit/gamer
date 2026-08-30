@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
 /**
- * script_v2 契约 fixture 前端断言（阶段 0）。
+ * script_v2 契约 fixture 前端断言。
  *
  * 本目录是 server/tests/fixtures/script_v2/ 的只读副本：
  * - yaml/ 与服务端逐字节一致（下方有专门的漂移测试守护）；
@@ -38,7 +38,6 @@ const VALID_IDS = [
 ]
 
 const INVALID_IDS = [
-  'i01_old_top_format',
   'i02_params_unquoted',
   'i03_default_type_mismatch',
   'i04_match_candidate_duplicate',
