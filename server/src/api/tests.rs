@@ -1917,7 +1917,8 @@ mod sec_tests {
         // 浅校验：顶层键保留字 / 非法函数名 / YAML 语法错 / 子目录短路径
         let cases = [
             ("match:\n  steps: []\n", "保留字"),
-            ("1abc:\n  steps: []\n", "不符合"),
+            ("1abc:\n  steps: []\n", "只允许 unicode 字母"),
+            ("带 空 格:\n  steps: []\n", "只允许 unicode 字母"),
             ("login: [unclosed", "YAML"),
             (
                 "123:

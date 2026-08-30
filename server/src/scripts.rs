@@ -344,17 +344,18 @@ const RESERVED_FUNCTION_NAMES: [&str; 32] = [
     "exit",
 ];
 
-/// 函数名合法性：`[A-Za-z_][A-Za-z0-9_]*` 且非保留字（完整校验归阶段 2）
+/// 函数名合法性：unicode 字母/数字/`_`（支持中文），首字符不得为数字，且非保留字
+/// （完整校验归阶段 2）
 pub fn validate_function_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     let ok = match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {
-            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        }
+        Some(c) if c.is_alphabetic() || c == '_' => chars.all(|c| c.is_alphanumeric() || c == '_'),
         _ => false,
     };
     if !ok {
-        return Err(format!("函数名 {name} 不符合 [A-Za-z_][A-Za-z0-9_]*"));
+        return Err(format!(
+            "函数名 {name} 只允许 unicode 字母/数字/下划线（支持中文），且不能以数字开头"
+        ));
     }
     if RESERVED_FUNCTION_NAMES.contains(&name) {
         return Err(format!("函数名 {name} 是保留字（动作键 / 结构键）"));
@@ -2124,8 +2125,8 @@ mod tests {
             ("YAML 语法错误", "login: [unclosed"),
             ("函数文件顶层必须是映射", "- login\n- logout\n"),
             ("没有定义任何函数", "{}\n"),
-            ("不符合 [A-Za-z_][A-Za-z0-9_]*", "1abc:\n  steps: []\n"),
-            ("不符合 [A-Za-z_][A-Za-z0-9_]*", "带 空 格:\n  steps: []\n"),
+            ("只允许 unicode 字母", "1abc:\n  steps: []\n"),
+            ("只允许 unicode 字母", "带 空 格:\n  steps: []\n"),
             ("是保留字", "match:\n  steps: []\n"),
             ("是保留字", "return:\n  steps: []\n"),
             ("不是字符串标量", "123:\n  steps: []\n"),
@@ -2139,6 +2140,11 @@ mod tests {
                 "{content:?}: 期望含 {marker:?}，实际 {err}"
             );
         }
+        // 中文函数名合法（顶层键 = 函数名，序列化 plain 往返）
+        let f = store
+            .save_function("com.test.app", "ok.yaml", "登录确认:\n  steps: []\n")
+            .unwrap();
+        assert_eq!(f.functions, vec!["登录确认".to_string()]);
         // 失败不留半个文件
         assert!(!dir.join("com.test.app/func/bad.yaml").exists());
         // 非法文件名 / 子目录拒绝
