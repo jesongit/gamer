@@ -225,37 +225,11 @@ pub(super) async fn api_run_function(
     submit_run(&st, req.device_id, target, req.args).await
 }
 
-/// 旧停止端点（兼容窗口）：按 script_id 定位活动 run 并取消。
-/// 同一脚本可能在不同设备各有一个实例——逐个取消。响应保持旧形状 {ok:true}。
-pub(super) async fn api_stop_script(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
-    for run in st.runs.active_for_script(&id) {
-        st.runs.cancel(&run.run_id);
-    }
-    Json(serde_json::json!({"ok": true})).into_response()
-}
-
-/// 旧脚本运行查询（兼容窗口）：内部经 RunManager 反查该脚本的任意活动实例
-pub(super) async fn api_script_status(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
-    let running = !st.runs.active_for_script(&id).is_empty();
-    Json(serde_json::json!({"running": running})).into_response()
-}
-
 /// 设备当前运行查询（前端刷新恢复运行态）：
-/// 新契约 active:true + 完整 RunRecord / active:false；
-/// （旧 {running,script_id,script_name} 形状已随阶段 3 废弃）
+/// 新契约固定为 active:true + 嵌套完整 RunRecord，或 active:false。
 pub(super) async fn api_device_run(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     match st.runs.active_for_device(&id) {
-        Some(rec) => {
-            let mut v = serde_json::to_value(&rec).unwrap_or_else(|_| serde_json::json!({}));
-            v["active"] = serde_json::json!(true);
-            Json(v).into_response()
-        }
+        Some(rec) => Json(serde_json::json!({"active": true, "run": rec})).into_response(),
         None => Json(serde_json::json!({"active": false})).into_response(),
     }
 }

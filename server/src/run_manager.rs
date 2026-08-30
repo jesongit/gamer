@@ -24,7 +24,7 @@
 //!   guard 的 Drop 在展开路径上必然执行（无需 catch_unwind）。
 //!
 //! 停止语义复用引擎现有停止通道（`stop: Arc<AtomicBool>`，Runner::run 消费），
-//! 按 run_id 精确定位，不再依赖旧 script-name 猜测路径。
+//! 按 run_id 精确定位，不依赖脚本名称猜测路径。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -63,7 +63,7 @@ impl RunState {
             RunState::Success | RunState::Failed | RunState::Cancelled
         )
     }
-    /// legacy 脚本 status 轮询口径：任何非终态都算"运行中"
+    /// 运行中的状态集合：任何非终态都仍占用设备运行槽。
     pub fn is_active(self) -> bool {
         !self.is_terminal()
     }
@@ -238,7 +238,7 @@ impl RunManager {
             .cloned()
     }
 
-    /// 设备当前活动运行（无则 None；manual 兼容查询/前端刷新恢复用）
+    /// 设备当前活动运行（无则 None；前端刷新恢复用）。
     pub fn active_for_device(&self, device_id: &str) -> Option<RunRecord> {
         let rid = self
             .active_by_device
@@ -251,18 +251,6 @@ impl RunManager {
             .unwrap()
             .get(&rid)
             .map(|e| e.record.clone())
-    }
-
-    /// 反查活动运行（legacy script status/stop 委托用；可能命中不同设备的同名脚本）
-    pub fn active_for_script(&self, script_id: &str) -> Vec<RunRecord> {
-        let by_dev = self.active_by_device.lock().unwrap();
-        let runs = self.runs.lock().unwrap();
-        by_dev
-            .values()
-            .filter_map(|rid| runs.get(rid))
-            .filter(|e| e.record.script_id == script_id && e.record.state.is_active())
-            .map(|e| e.record.clone())
-            .collect()
     }
 
     pub fn active_count(&self) -> usize {
@@ -1083,6 +1071,11 @@ mod tests {
         )
         .await;
         assert_eq!(mgr.cancel(&r.run_id), CancelOutcome::Accepted);
+        assert_eq!(
+            mgr.cancel(&r.run_id),
+            CancelOutcome::Accepted,
+            "repeating cancellation while stopping is idempotent"
+        );
         assert_eq!(
             mgr.get_run(&r.run_id).unwrap().state,
             RunState::Stopping,
