@@ -443,7 +443,13 @@ pub(super) async fn api_connect_device(
     match st.devices.connect_device(&id).await {
         Ok(_) => {
             st.metrics.scrcpy_connect(true);
-            Json(serde_json::json!({"ok": true})).into_response()
+            // 应用已启动（建会话探测存活 / 会话内启动过）：前端据此不弹「未启动应用」提示
+            let app_started = st
+                .devices
+                .session(&id)
+                .map(|s| s.app_started())
+                .unwrap_or(false);
+            Json(serde_json::json!({"ok": true, "app_started": app_started})).into_response()
         }
         Err(e) => {
             st.metrics.scrcpy_connect(false);

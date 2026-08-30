@@ -93,6 +93,9 @@ pub struct ScrcpySession {
     /// 最近一帧视频的到达时间（unix 微秒；0 = 尚无帧），
     /// 供视频静默看门狗检测断流并自动重连
     pub last_frame_at: std::sync::atomic::AtomicU64,
+    /// 应用是否已启动（建会话时探测配置应用进程存活 + start_app 置位）：
+    /// connect 响应据此告知前端抑制「未启动应用」提示
+    pub app_started: std::sync::atomic::AtomicBool,
 }
 
 impl ScrcpySession {
@@ -300,6 +303,7 @@ impl ScrcpySession {
             height: Mutex::new(height),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             last_frame_at: std::sync::atomic::AtomicU64::new(0),
+            app_started: std::sync::atomic::AtomicBool::new(false),
         });
 
         // 9. 视频读取循环（后台任务）
@@ -628,7 +632,27 @@ impl ScrcpySession {
                 tokio::spawn(async move { s.watch_launch_freeze(&pkg).await });
             }
         }
+        self.app_started
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.send_start_control(&effective).await
+    }
+
+    /// 探测配置应用进程是否存活（会话建立时调用）：此前启动过、跨空闲仍在跑的
+    /// 应用据此置位 app_started。Greeze 冻结壳也按已启动计（start_app 内有
+    /// 冻结升级路径兜底）；未配置包名一律 false
+    pub async fn probe_app_running(&self) -> bool {
+        let Some(pkg) = self.device.pkg.clone() else {
+            return false;
+        };
+        if !super::adb::is_safe_pkg(&pkg) {
+            return false;
+        }
+        self.app_pidof(&pkg).await.is_some()
+    }
+
+    /// 应用是否已启动（建会话探测或 start_app 置位）
+    pub fn app_started(&self) -> bool {
+        self.app_started.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 发送 TYPE_START_APP 控制消息（name 原样透传，"+"/"?" 前缀由设备端解析）

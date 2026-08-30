@@ -464,6 +464,13 @@ impl DeviceManager {
 
         // 后台消费视频帧：广播 + 帧缓存
         let session = handle.session.clone();
+        // 探测配置应用进程是否存活（此前启动过、跨空闲仍在跑）：pidof 单发约百毫秒；
+        // 置位后 connect 响应告知前端抑制「未启动应用」提示
+        if session.probe_app_running().await {
+            session
+                .app_started
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let s2 = session.clone();
         let device_name = device.name.clone();
         let dn1 = device_name.clone();
