@@ -14,15 +14,14 @@
         <router-link v-for="item in navs" :key="item.path" :to="item.path" class="nav-item" :class="{ active: $route.path === item.path }" :title="item.name">
           <span class="nav-icon">{{ item.icon }}</span>
           <span class="nav-label">{{ item.name }}</span>
-          <span v-if="item.path === '/logs'" class="nav-badge">3</span>
         </router-link>
       </nav>
 
       <div class="sidebar-foot">
-        <div class="sys-state" title="服务运行中 v0.1.0">
-          <span class="dot ok"></span>
-          <span class="sys-text">服务运行中</span>
-          <span class="sys-ver">v0.1.0</span>
+        <div class="sys-state" :title="`${systemStateText} · ${systemVersion}`">
+          <span class="dot" :class="systemStateClass"></span>
+          <span class="sys-text">{{ systemStateText }}</span>
+          <span class="sys-ver">{{ systemVersion }}</span>
         </div>
         <div class="sys-state" :title="`${onlineCount} 台设备在线 · 定时任务 ${taskCount} 个`">
           <span class="dot" :class="onlineCount ? 'ok' : 'off'"></span>
@@ -75,6 +74,30 @@ const navs = [
 ]
 const toast = useToast()
 
+const systemInfo = ref(null)
+const systemVersion = computed(() => {
+  const version = systemInfo.value?.app?.version
+  return version === undefined || version === null || version === '' ? 'dev/unknown' : String(version)
+})
+const systemStateText = computed(() => {
+  if (!systemInfo.value) return '服务状态未知'
+  return systemInfo.value.readiness?.status === 'ready' ? '服务运行中' : '服务未就绪'
+})
+const systemStateClass = computed(() => (
+  systemInfo.value?.readiness?.status === 'ready' ? 'ok' : 'off'
+))
+
+async function loadSystemInfo() {
+  try {
+    const response = await fetch('/api/system/info', { headers: { Accept: 'application/json' } })
+    if (!response.ok) return
+    const body = await response.json()
+    if (body && typeof body === 'object') systemInfo.value = body
+  } catch {
+    // 系统状态仅用于展示；请求失败时保留 dev/unknown 降级文案。
+  }
+}
+
 // 侧边栏收起状态（图标模式）：默认收起；localStorage 持久化用户手动展开/收起的选择
 // （无记录或记录为 '1' = 收起；'0' = 用户显式展开过），provide 给子页面（投屏页据此调整布局）
 const collapsed = ref(localStorage.getItem('gb_sidebar_collapsed') !== '0')
@@ -93,6 +116,7 @@ const currentDeviceName = computed(() => {
 })
 
 onMounted(() => {
+  loadSystemInfo()
   // 侧边栏底部状态：在线设备数 / 定时任务数
   api.listDevices().then(d => { devicesData.value = d }).catch(() => {})
   api.listTasks().then(t => { tasksData.value = t }).catch(() => {})
@@ -130,11 +154,6 @@ function stopRunning() {
 .sidebar.collapsed .sys-text,
 .sidebar.collapsed .sys-ver { display: none; }
 .sidebar.collapsed .nav-item { justify-content: center; gap: 0; padding: 9px 0; }
-.sidebar.collapsed .nav-badge {
-  position: absolute; top: 5px; right: 7px; margin-left: 0;
-  width: 8px; height: 8px; padding: 0; border-radius: 50%;
-  font-size: 0; line-height: 0;
-}
 .sidebar.collapsed .sidebar-foot { padding: 10px 0; align-items: center; gap: 12px; }
 .sidebar.collapsed .sys-state { justify-content: center; }
 
@@ -156,11 +175,6 @@ function stopRunning() {
   border-radius: 2px; background: var(--accent);
 }
 .nav-icon { font-size: 15px; width: 20px; text-align: center; }
-.nav-badge {
-  margin-left: auto; background: var(--accent); color: #06251c;
-  font-size: 10px; font-weight: 700; border-radius: 10px; padding: 1px 6px;
-}
-
 .sidebar-foot { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
 .sys-state { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-1); }
 .sys-ver { margin-left: auto; color: var(--text-2); font-size: 11px; }

@@ -9,7 +9,6 @@ port = 8443
 adb_path = "/usr/bin/adb"
 ffmpeg_path = "/usr/bin/ffmpeg"
 scrcpy_server = "/app/assets/scrcpy-server.jar"
-password = "admin123"
 interval = "500ms"
 threshold = 0.85
 log_level = "info"
@@ -27,3 +26,11 @@ log_retain_days = 14
 rtc_external_ip = "127.0.0.1"
 rtc_udp_port = 8443
 rtc_external_port = 8444
+
+# 鉴权入口：不内置默认账号或密码。
+# - 固定部署：在此处填入服务端支持的固定参数 Argon2id PHC 哈希；不要填明文口令。
+# - 开发启动：保持为空，并注入 GAMER_PROFILE=dev 与 GAMER_ADMIN_PASSWORD；服务端
+#   只在进程内将环境变量转换为 Argon2id PHC，不会写回该文件。
+# password_hash 留空且未设置开发环境变量时，认证按当前契约 fail closed。
+[auth]
+password_hash = ""

@@ -8,11 +8,11 @@
       <form class="login-form" @submit.prevent="onLogin">
         <div class="form-item">
           <label>用户名</label>
-          <input v-model="user" class="input" placeholder="admin" autocomplete="username" />
+          <input v-model="user" class="input" placeholder="当前部署的用户名" autocomplete="username" />
         </div>
         <div class="form-item">
           <label>密码</label>
-          <input v-model="pass" class="input" type="password" placeholder="••••••••" autocomplete="current-password" />
+          <input v-model="pass" class="input" type="password" placeholder="请输入部署凭据" autocomplete="current-password" />
         </div>
         <button class="btn btn-primary login-btn" type="submit" :disabled="busy || countdown > 0">
           {{ busy ? '登录中…' : (countdown > 0 ? `请稍候（${countdown}s）` : '登 录') }}
@@ -20,9 +20,9 @@
         <div v-if="errMsg" class="login-err">{{ errMsg }}</div>
       </form>
 
-      <div class="login-hint">默认账号 admin / admin123</div>
+      <div class="login-hint">请使用当前部署配置的管理员凭据；登录后由服务端会话维持认证状态。</div>
     </div>
-    <div class="login-foot">GameBot v0.1.0 · 基于 scrcpy + WebRTC 的游戏自动化方案</div>
+    <div class="login-foot">GameBot · 基于 scrcpy + WebRTC 的游戏自动化方案</div>
   </div>
 </template>
 
@@ -33,7 +33,7 @@ import { login, sanitizeRedirect, formatRetryCountdown } from '../auth'
 
 const router = useRouter()
 const route = useRoute()
-const user = ref('admin')
+const user = ref('')
 const pass = ref('')
 const busy = ref(false)
 const errMsg = ref('')
