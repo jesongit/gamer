@@ -388,7 +388,7 @@ POST /api/functions/:id/run   body { device_id, function?, start_index?, args? }
 - 脚本参数声明（类型/名称/必填性/默认值）变化 → 重算签名与存储值不一致 → 任务标
   「参数已过期」，保存 / 启用 / 立即运行被 **409
   `param_signature_conflict`** 拦截（body 带 `reason`：
-  `signature_mismatch`=声明已变 / `no_snapshot`=旧任务无快照）；
+  `signature_mismatch`=声明已变）；
 - 编辑任务里「重新确认」带 `reconfirm:true` 重存 → 按当前声明重算快照与签名。
 
 签名算法 `psig1`（按声明顺序，覆盖类型/名称/必填性/默认值，前端服务端各有一份

@@ -98,8 +98,8 @@ describe('selection：面包屑', () => {
       expect:
         - ff8800:
           - log: 红
-      else:
-        - log: 兜
+    else:
+      - log: 兜
   - loop:
       steps:
         - log: 体

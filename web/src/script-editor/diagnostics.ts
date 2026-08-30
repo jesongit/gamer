@@ -74,8 +74,7 @@ export const CODES = {
   refFuncPathTraversal: 'ref.func.path_traversal',
   refFuncSyntax: 'ref.func.syntax',
   refFuncMissingArgs: 'ref.func.missing_args',
-  // 顶层 / 文件（阶段 0 覆盖码）
-  scriptTopLevelLegacyFormat: 'script.top_level.legacy_format',
+  // 顶层 / 文件
   scriptTopLevelUnknownKey: 'script.top_level.unknown_key',
   scriptRootType: 'script.root_type',
   funcRecordUnknownKey: 'func.record_unknown_key',

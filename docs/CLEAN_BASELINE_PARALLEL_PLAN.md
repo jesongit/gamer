@@ -1,6 +1,6 @@
 # GameBot 无兼容基线并行开发计划
 
-> 状态：待执行
+> 状态：波次 2 集成完成（自动门禁通过；真实设备/发布运行验收待补）
 >
 > 目标：项目仍处于开发阶段，删除旧协议、旧数据和旧容错路径，形成单一、严格、可测试的当前基线。
 >
@@ -515,100 +515,105 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] `cargo fmt --check` 通过。
 - [x] `cargo clippy --all-targets --all-features -- -D warnings` 通过。
 - [x] `cargo test` 通过。
-- [ ] 已为 E～H 创建独立分支/worktree，并指定负责人。
+- [x] 已为 E～H 创建独立分支/worktree，并指定负责人。
 
 > 波次 1 集成证据（2026-08-31）：最终 commit `1c1fef8`；`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings` 通过，`cargo test` 299 passed/2 ignored；空库实际启动后 schema v1 为 `user_version=1` 且表完整，重建前 DB 已移入 `baseline-backups/wave1-20260831-db-rebuild/database-pre-rebuild/`；旧 stop/status=404、旧模板 body=422，当前 run/resource/auth/task smoke 通过。
+> E～H 分支证据（2026-08-31）：`codex/clean-web-contract`→`fd896de`、`codex/clean-web-views`→`6ee4b23`、`codex/clean-truth-ops`→`8e3c026`、`codex/clean-validation-docs`→`d7075de`；本次以不切换工作区的本地分支指针完成，不创建额外 worktree。
 
 ### 10.4 波次 2：前端、产品真相与文档
 
 #### E — 前端核心契约
 
-- [ ] `web/src/api.js` 只暴露当前 run/resource/auth API。
-- [ ] 删除旧运行响应归一化。
-- [ ] 删除 missing endpoint 探测和兼容 fallback。
-- [ ] 删除 `runScriptId`。
-- [ ] 删除 `gb_token` 清理逻辑。
-- [ ] 资源 API 明确区分 create/update/replace。
-- [ ] 强制覆盖只能显式传 `force:true`。
-- [ ] 旧兼容测试已删除或改为旧输入拒绝测试。
-- [ ] 当前契约单元测试通过。
-- [ ] E 已先行合入，F 使用固定 commit 开始迁移。
+- [x] `web/src/api.js` 只暴露当前 run/resource/auth API。
+- [x] 删除旧运行响应归一化。
+- [x] 删除 missing endpoint 探测和兼容 fallback。
+- [x] 删除 `runScriptId`。
+- [x] 删除 `gb_token` 清理逻辑。
+- [x] 资源 API 明确区分 create/update/replace。
+- [x] 强制覆盖只能显式传 `force:true`。
+- [x] 旧兼容测试已删除或改为旧输入拒绝测试。
+- [x] 当前契约单元测试通过。
+- [x] E 已先行合入，F 使用固定 commit 开始迁移。
 
 #### F — 前端调用点与交互
 
-- [ ] MainLayout 取消运行只使用 `run_id`。
-- [ ] Console 运行、轮询和取消只使用当前 API。
-- [ ] ScriptEditor 脚本运行和函数测试只使用当前 API。
-- [ ] TaskScheduler 立即运行只使用当前 API。
-- [ ] 模板新建和模板图片替换走不同方法。
-- [ ] 脚本/函数强制覆盖显式传 `force:true`。
-- [ ] 删除 `no_snapshot` UI 分支。
-- [ ] 删除旧 endpoint/旧响应 fallback UI。
-- [ ] 手动运行、从指定步骤运行、函数测试、任务立即运行和取消流程通过。
-- [ ] F 支线提交已完成并附 `BREAKING CHANGE`。
+- [x] MainLayout 取消运行只使用 `run_id`。
+- [x] Console 运行、轮询和取消只使用当前 API。
+- [x] ScriptEditor 脚本运行和函数测试只使用当前 API。
+- [x] TaskScheduler 立即运行只使用当前 API。
+- [x] 模板新建和模板图片替换走不同方法。
+- [x] 脚本/函数强制覆盖显式传 `force:true`。
+- [x] 删除 `no_snapshot` UI 分支。
+- [x] 删除旧 endpoint/旧响应 fallback UI。
+- [x] 手动运行、从指定步骤运行、函数测试、任务立即运行和取消流程通过。
+- [x] F 支线提交已完成并附 `BREAKING CHANGE`。
 
 #### G — 真实状态、部署与时区
 
-- [ ] 原型 Settings 已改为真实只读系统状态，或已从导航隐藏。
-- [ ] 版本来自服务端，不再硬编码 `v0.1.0`。
-- [ ] readiness、ADB、ffmpeg、scrcpy、data、DB 状态可见。
-- [ ] 固定日志徽标已删除。
-- [ ] 页面明确显示任务使用的服务端时区。
-- [ ] Docker 显式配置 `TZ`。
-- [ ] 部署入口明确说明 WebRTC UDP 端口。
-- [ ] system info/schema version 与自动更新计划共用一套定义。
+- [x] 原型 Settings 已改为真实只读系统状态，或已从导航隐藏。
+- [x] 版本来自服务端，不再硬编码 `v0.1.0`。
+- [x] readiness、ADB、ffmpeg、scrcpy、data、DB 状态可见。
+- [x] 固定日志徽标已删除。
+- [x] 页面明确显示任务使用的服务端时区。
+- [x] Docker 显式配置 `TZ`。
+- [x] 部署入口明确说明 WebRTC UDP 端口。
+- [x] system info/schema version 与自动更新计划共用一套定义。
 - [ ] 本机与 Docker 状态页冒烟测试通过。
-- [ ] G 支线提交已完成。
+- [x] G 支线提交已完成。
 
 #### H — 数据、验证与文档
 
-- [ ] 仓库当前脚本/函数示例均通过严格 loader。
-- [ ] 旧 fixture、旧开发示例和旧迁移说明已删除。
-- [ ] 前端 YAML 校验与服务端当前契约一致。
-- [ ] 模板代码与当前 YAML 契约一致。
-- [ ] `docs/YAML.md` 已同步。
-- [ ] `docs/SCRIPT_EDITOR_CONTRACT.md` 已同步。
-- [ ] `docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` 从 schema v1 开始，不再规划 migration 0。
-- [ ] README、AGENTS、示例配置只描述当前行为。
-- [ ] 自动启动、STUN、目录布局等漂移文案已修正。
-- [ ] 仅将真实新增构建/运行坑追加到 `docs/PITFALLS.md`。
-- [ ] H 支线提交已完成。
+- [x] 仓库当前脚本/函数示例均通过严格 loader。
+- [x] 旧 fixture、旧开发示例和旧迁移说明已删除。
+- [x] 前端 YAML 校验与服务端当前契约一致。
+- [x] 模板代码与当前 YAML 契约一致。
+- [x] `docs/YAML.md` 已同步。
+- [x] `docs/SCRIPT_EDITOR_CONTRACT.md` 已同步。
+- [x] `docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` 从 schema v1 开始，不再规划 migration 0。
+- [x] README、AGENTS、示例配置只描述当前行为。
+- [x] 自动启动、STUN、目录布局等漂移文案已修正。
+- [x] 仅将真实新增构建/运行坑追加到 `docs/PITFALLS.md`。
+- [x] H 支线提交已完成。
 
 ### 10.5 波次 2：集成与人工验收
 
-- [ ] 已按 E → F → G → H 顺序合并。
-- [ ] 合并未覆盖波次开始前的用户改动或开发数据。
-- [ ] 空数据目录启动成功并创建 schema v1。
+- [x] 已按 E → F → G → H 顺序合并。
+- [x] 合并未覆盖波次开始前的用户改动或开发数据。
+- [x] 空数据目录启动成功并创建 schema v1。
 - [ ] 登录、设备扫描、连接和投屏成功。
-- [ ] 脚本/函数/模板的新建、更新、重命名成功。
-- [ ] 版本冲突返回 409，显式强制覆盖成功。
-- [ ] 手动运行、从指定步骤运行、函数测试和取消成功。
-- [ ] 同设备并发运行仍被 409 拒绝。
-- [ ] 无参数/有参数定时任务保存和立即运行成功。
-- [ ] 参数声明变化后任务重新确认流程成功。
-- [ ] 当前分区导出、清空、重新导入成功。
+- [x] 脚本/函数/模板的新建、更新、重命名成功。
+- [x] 版本冲突返回 409，显式强制覆盖成功。
+- [x] 手动运行、从指定步骤运行、函数测试和取消成功。
+- [x] 同设备并发运行仍被 409 拒绝。
+- [x] 无参数/有参数定时任务保存和立即运行成功。
+- [x] 参数声明变化后任务重新确认流程成功。
+- [x] 当前分区导出、清空、重新导入成功。
 - [ ] DataChannel 控制正常，REST 可靠性降级仍可用。
 - [ ] viewer 接管、重连、watchdog 和 idle 生命周期未回归。
 - [ ] Docker readiness、时区和 WebRTC UDP 验证通过。
 
+> 波次 2 集成证据（2026-08-31）：公共 `GET /api/system/info` 已在 `protected_json` 接入，未放入 public；集成测试验证未认证 401、认证后结构化响应和无临时路径泄露。`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`（306 passed/2 ignored）、`pnpm test:run`（490 passed）、`pnpm build` 通过；`docker-compose.yml`、主+`docker-compose.local.yml`、主+`docker-compose.usb.yml` 的 `config --quiet` 通过。USB 文件单独 config 失败是 override 必须叠加主文件的预期限制。未执行真实设备、浏览器 WebRTC、Docker 容器 readiness/UDP 或发布运行验收，故上述对应项目保持未勾选；`baseline-backups/` 保持未跟踪且未改动。
+
 ### 10.6 最终清理与发布门禁
 
-- [ ] `cargo fmt --check` 通过。
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` 通过。
-- [ ] `cargo test` 通过。
-- [ ] `pnpm test:run` 通过。
-- [ ] `pnpm build` 通过。
-- [ ] 生产代码不存在 `scriptStatus`。
-- [ ] 生产代码不存在 `runScriptId` 或 `legacyRun`。
-- [ ] 生产代码不存在 `gb_token`。
-- [ ] 生产代码不存在 `LEGACY_TOP_KEYS`。
-- [ ] 生产代码不存在 `migrate_fs_layout`。
-- [ ] 生产代码不存在 `parse_legacy_sha256_hash`。
-- [ ] 生产代码不存在 `no_snapshot`。
-- [ ] 生产代码不存在脚本级 `/stop` 或 `/status` route。
-- [ ] 所有旧行为命中只存在于明确的 rejection 测试或历史文档中。
+- [x] `cargo fmt --check` 通过。
+- [x] `cargo clippy --all-targets --all-features -- -D warnings` 通过。
+- [x] `cargo test` 通过。
+- [x] `pnpm test:run` 通过。
+- [x] `pnpm build` 通过。
+- [x] 生产代码不存在 `scriptStatus`。
+- [x] 生产代码不存在 `runScriptId` 或 `legacyRun`。
+- [x] 生产代码不存在 `gb_token`。
+- [x] 生产代码不存在 `LEGACY_TOP_KEYS`。
+- [x] 生产代码不存在 `migrate_fs_layout`。
+- [x] 生产代码不存在 `parse_legacy_sha256_hash`。
+- [x] 生产代码不存在 `no_snapshot`。
+- [x] 生产代码不存在脚本级 `/stop` 或 `/status` route。
+- [x] 所有旧行为命中只存在于明确的 rejection 测试或历史文档中。
 - [ ] 所有破坏性提交均包含 `BREAKING CHANGE`。
-- [ ] 每个提交主题单一、可独立理解和回滚。
+- [x] 每个提交主题单一、可独立理解和回滚。
 - [ ] 最终文档、配置、fixture 和实际行为一致。
-- [ ] 已记录最终基线 commit 和开发数据重建说明。
-- [ ] 性能实验未夹带进本轮兼容清理提交。
+- [x] 已记录最终基线 commit 和开发数据重建说明。
+- [x] 性能实验未夹带进本轮兼容清理提交。
+
+> 自动门禁证据（2026-08-31）：生产代码扫描上述 8 个禁用标记均为 0 命中；脚本级 stop/status 仅命中 `server/src/api/tests/runs.rs` 的明确 404 rejection 测试，`web/src/console-components.test.js` 的 `no_snapshot` 为负向断言。G/H 原提交未带 `BREAKING CHANGE` 页脚，因此“所有破坏性提交均包含”保持未勾选；真实设备/WebRTC/Docker runtime 与发布验收同样未宣称完成。

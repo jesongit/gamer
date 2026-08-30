@@ -480,9 +480,6 @@ function toNumber(raw: string): number {
 /** 步骤动作键集合（YAML 键与 kind 同名）。 */
 const ACTION_KEY_SET = new Set<string>(ACTION_KEYS)
 
-/** 旧语法顶层键（契约 §3.2：出现即 legacy_format，引导迁移）。 */
-const LEGACY_TOP_KEYS = new Set(['func', 'name', 'action_wait', 'default_threshold', 'package', 'until', 'cond'])
-
 // ---------- 顶层解析 ----------
 
 function parseScriptRoot(root: YNode, diags: Diagnostic[]): ScriptModel {
@@ -509,11 +506,7 @@ function parseScriptRoot(root: YNode, diags: Diagnostic[]): ScriptModel {
       case '':
         break
       default:
-        if (LEGACY_TOP_KEYS.has(key)) {
-          diags.push(diag(CODES.scriptTopLevelLegacyFormat, '', key, `顶层键 ${key} 是旧语法，请迁移到 params/config/steps 新结构`))
-        } else {
-          diags.push(diag(CODES.scriptTopLevelUnknownKey, '', key, `未知顶层键 ${key}，只允许 params/config/steps`))
-        }
+        diags.push(diag(CODES.scriptTopLevelUnknownKey, '', key, `未知顶层键 ${key}，只允许 params/config/steps`))
         break
     }
   }
@@ -966,15 +959,9 @@ function parseStepFields(
         return { ...base, kind: 'color', at: { lit: null }, expect: [], else: branch('else') }
       }
       const get = (k: string) => map.entries.find((e) => entryKey(e) === k)?.value ?? null
-      // 规范形态（fixture 冻结）：else 写在步骤级与 color 同列；容错接受写在 color 映射内的旧位形态。
-      let elseSteps = branch('else')
-      if (elseSteps.length === 0) {
-        const innerElse = get('else')
-        if (innerElse !== null) elseSteps = parseStepsNode(innerElse, `${path}.else`, diags)
-      }
       for (const e of map.entries) {
         const k = entryKey(e)
-        if (k !== 'at' && k !== 'expect' && k !== 'else') {
+        if (k !== 'at' && k !== 'expect') {
           diags.push(diag(CODES.stepFieldUnknown, path, k, `color 不支持字段 ${k}`))
         }
       }
@@ -983,7 +970,7 @@ function parseStepFields(
         kind: 'color',
         at: coordCell(parseCellRaw(get('at')), path, 'at', diags),
         expect: parseColorExpect(get('expect'), `${path}.expect`, diags),
-        else: elseSteps,
+        else: branch('else'),
       }
     }
     case 'loop': {

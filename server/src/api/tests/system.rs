@@ -25,6 +25,42 @@ async fn readiness_is_public_structured_and_does_not_leak_paths() {
 }
 
 #[tokio::test]
+async fn system_info_is_protected_structured_and_does_not_leak_paths() {
+    let t = build_app(
+        "system-info",
+        test_credential("admin123"),
+        Default::default(),
+    );
+
+    let unauthenticated = send(&t.app, req("GET", "/api/system/info", None, &[], None)).await;
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(json_body(unauthenticated).await["error"], "unauthorized");
+
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let response = send(
+        &t.app,
+        req(
+            "GET",
+            "/api/system/info",
+            None,
+            &[(header::COOKIE.to_string(), sid)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert!(body["schema_version"].is_u64());
+    assert!(body["app"]["version"].is_string());
+    assert!(body["readiness"]["checks"].is_object());
+    assert!(body["dependencies"].is_object());
+    assert!(body["timezone"].is_object());
+    assert!(!body
+        .to_string()
+        .contains(&t.dir.to_string_lossy().to_string()));
+}
+
+#[tokio::test]
 async fn metrics_is_public_prometheus_text_with_low_cardinality() {
     let t = build_app(
         "metrics",

@@ -178,6 +178,7 @@ pub fn build_router(
             "/api/logs",
             get(logs::api_list_logs).delete(logs::api_clear_logs),
         )
+        .route("/api/system/info", get(system::api_system_info))
         .route("/api/shutdown", post(system::api_shutdown))
         .route(
             "/api/maintenance/vacuum",
