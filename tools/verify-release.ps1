@@ -8,19 +8,23 @@
     It does not build images or run a real deployment.
     It verifies:
       1. PowerShell syntax for tools/*.ps1;
-      2. docker compose config for the base file and the USB override;
+      2. docker compose config for development, USB, and release overlays;
       3. cargo metadata --locked --no-deps;
-      4. cargo audit, or a clear missing-tool report if unavailable.
+      4. strict cargo audit (warnings denied) for the server and launcher
+         lockfiles; missing cargo-audit is a hard failure.
     An optional benchmark smoke check can call tools\run-perf-benchmark.ps1.
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-release.ps1
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-release.ps1 -Benchmark
+.EXAMPLE
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools\verify-release.ps1 -CargoAuditNoFetch
 #>
 [CmdletBinding()]
 param(
     [switch]$Benchmark,
+    [switch]$CargoAuditNoFetch,
     [ValidateRange(1, 1000)]
     [int]$BenchmarkIterations = 1,
     [ValidateRange(0, 1000)]
@@ -48,6 +52,41 @@ function Test-Tool {
         }
     }
     return $null
+}
+
+function Invoke-ComposeConfig {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Files,
+        [hashtable]$Environment = @{}
+    )
+
+    foreach ($file in $Files) {
+        if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $file) -PathType Leaf)) {
+            throw "compose file not found: $file"
+        }
+    }
+
+    $previousEnvironment = @{}
+    foreach ($key in $Environment.Keys) {
+        $previousEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+        [Environment]::SetEnvironmentVariable($key, [string]$Environment[$key], 'Process')
+    }
+
+    try {
+        $composeArgs = @('compose')
+        foreach ($file in $Files) {
+            $composeArgs += @('-f', (Join-Path $RepoRoot $file))
+        }
+        $composeArgs += @('config', '--quiet')
+        & $docker @composeArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "docker compose config failed (files=$($Files -join ', '), exit=$LASTEXITCODE)"
+        }
+    } finally {
+        foreach ($key in $Environment.Keys) {
+            [Environment]::SetEnvironmentVariable($key, $previousEnvironment[$key], 'Process')
+        }
+    }
 }
 
 Write-Step 'PowerShell parser dry-run for tools/*.ps1'
@@ -79,53 +118,68 @@ $docker = Test-Tool @('docker')
 if ($null -eq $docker) {
     Write-Host '[compose] docker not found; skipping compose config check' -ForegroundColor Yellow
 } else {
-    Push-Location $RepoRoot
-    try {
-        & docker compose -f docker-compose.yml config | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "docker compose -f docker-compose.yml config failed (exit=$LASTEXITCODE)"
-        }
-        & docker compose -f docker-compose.yml -f docker-compose.usb.yml config | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "docker compose USB override config failed (exit=$LASTEXITCODE)"
-        }
-    } finally {
-        Pop-Location
+    Invoke-ComposeConfig -Files @('docker-compose.yml')
+    Invoke-ComposeConfig -Files @('docker-compose.yml', 'docker-compose.usb.yml')
+    Invoke-ComposeConfig -Files @('docker-compose.release.yml') -Environment @{
+        GAMER_IMAGE = 'ghcr.io/example/gamebot:release-preflight'
     }
-    Write-Host '[compose] config check passed' -ForegroundColor Green
+    Invoke-ComposeConfig -Files @('docker-compose.release.yml', 'docker-compose.release.override.example.yml') -Environment @{
+        GAMER_IMAGE = 'ghcr.io/example/gamebot:release-preflight'
+        GAMER_ADMIN_PASSWORD = 'release-preflight-placeholder'
+    }
+    Write-Host '[compose] development, USB, release, and release override config checks passed' -ForegroundColor Green
 }
 
-Write-Step 'cargo metadata --locked --no-deps'
+Write-Step 'cargo metadata --locked --no-deps (server + launcher)'
 $cargo = Test-Tool @('cargo')
 if ($null -eq $cargo) {
     throw 'cargo not found'
 }
-Push-Location (Join-Path $RepoRoot 'server')
-try {
-    & cargo metadata --format-version 1 --locked --no-deps | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo metadata failed (exit=$LASTEXITCODE)"
-    }
-} finally {
-    Pop-Location
-}
-
-Write-Step 'cargo audit'
-$auditTool = Test-Tool @('cargo-audit', 'cargo')
-if ($null -ne $auditTool -and (Get-Command cargo-audit -ErrorAction SilentlyContinue)) {
-    Push-Location (Join-Path $RepoRoot 'server')
+foreach ($cargoDir in @('server', 'launcher')) {
+    Push-Location (Join-Path $RepoRoot $cargoDir)
     try {
-        & cargo audit --color never
-        $auditExit = $LASTEXITCODE
-        if ($auditExit -ne 0) {
-            throw "cargo audit failed (exit=$auditExit)"
+        & $cargo metadata --format-version 1 --locked --no-deps | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo metadata failed for $cargoDir (exit=$LASTEXITCODE)"
         }
     } finally {
         Pop-Location
     }
-    Write-Host '[audit] cargo audit passed' -ForegroundColor Green
-} else {
-    Write-Host '[audit] cargo-audit / cargo audit subcommand not found; reported without fake success' -ForegroundColor Yellow
+    Write-Host ("[metadata] {0}: cargo metadata passed" -f $cargoDir) -ForegroundColor Green
+}
+
+Write-Step 'cargo audit (server + launcher lockfiles, warnings denied)'
+if (-not (Get-Command cargo-audit -ErrorAction SilentlyContinue)) {
+    throw 'cargo-audit not found; release audit gate cannot run. Install with: cargo install cargo-audit --locked'
+}
+# Strict audit gate: any vulnerability or warning fails the release check.
+# Documented exemption (re-evaluate on each webrtc upgrade):
+#   RUSTSEC-2025-0141 — bincode 1.x unmaintained. bincode 1.3.3 is only a
+#   transitive dep here: webrtc 0.13 -> webrtc-dtls 0.12 (bincode ^1), and the
+#   latest webrtc-dtls 0.12.x still requires bincode ^1, so no fixed version
+#   exists within the webrtc 0.13 line. webrtc >= 0.20 (rtc-dtls) drops bincode
+#   but is a cross-version API migration; drop this ignore after that upgrade.
+$auditIgnoreIds = @('RUSTSEC-2025-0141')
+foreach ($auditDir in @('server', 'launcher')) {
+    Push-Location (Join-Path $RepoRoot $auditDir)
+    try {
+        $auditArgs = @('audit', '--color', 'never', '-D', 'warnings')
+        if ($CargoAuditNoFetch) {
+            $auditArgs += '--no-fetch'
+        }
+        foreach ($advisoryId in $auditIgnoreIds) {
+            $auditArgs += @('--ignore', $advisoryId)
+        }
+        & cargo @auditArgs
+        $auditExit = $LASTEXITCODE
+        if ($auditExit -ne 0) {
+            throw "cargo audit failed for $auditDir (exit=$auditExit)"
+        }
+    } finally {
+        Pop-Location
+    }
+    $auditMode = if ($CargoAuditNoFetch) { 'offline advisory DB (--no-fetch)' } else { 'fresh advisory DB fetch' }
+    Write-Host ("[audit] {0}: cargo audit passed (strict; {1}; ignored: {2})" -f $auditDir, $auditMode, ($auditIgnoreIds -join ', ')) -ForegroundColor Green
 }
 
 if ($Benchmark) {
