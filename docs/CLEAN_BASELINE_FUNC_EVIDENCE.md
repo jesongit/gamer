@@ -129,3 +129,59 @@ MCP 托管的全新 Chrome 实例下 WebRTC 视频、DataChannel、接管互斥�
 4. **（行为确认·非缺陷）`POST /api/devices/:id/connect` 幂等 no-op 不唤醒已关屏**：唤醒只由 viewer 注册 / run_begin 触发；外部系统若只调 connect 期望“唤醒设备”不会生效。
 5. **（环境·非缺陷）**小米设备 `screencap` 返回 1200x2000 与显示 1880x3008 比例不一致（MIUI 截图缩放），外部坐标校准须以 `wm size` 为准；设备 mDNS 广播导致 adb 出现 USB+TLS 双 transport，裸 `adb shell` 需 `-s`。VOL 键在本机无 dumpsys 可见效果（remote_submix 路由特性）。
 6. **（风险·遗留）**watchdog「会话确死→force 拆会话→重连」路径与 Docker readiness/UDP 仍未实测（前者受验收约束、后者受 Docker daemon 限制），这两点在本轮未获得证据。
+
+---
+
+## 重连与 watchdog 回归（2026-09-01，Agent G3）
+
+针对 §10.5「viewer 接管、重连、watchdog 和 idle 生命周期未回归」中前两轮（2026-08-31，见上文步骤 5/7）未实测的两个子路径：**R1 配置变更踢 viewer → 前端自动重连**、**R2 watchdog 确死强拆**（含脚本运行中加测）。环境：scratch 配置 `D:\qa-agentG3-tmp\config.toml`（port=18600、独立 data_dir、`idle_power_secs=0` 防干扰；watchdog 阈值 `VIDEO_IDLE_RECONNECT_MS=20s`/`VIDEO_NUDGE_GRACE=15s` 为 `api/system.rs` 硬编码常量，非配置项，无需调整），一次性 `GAMER_ADMIN_PASSWORD`，`GB_LOG=D:\qa-agentG3-tmp\gamer-server.log.2026-08-31`（时间戳为 UTC，本地 +8）；HEAD `7595913` 重新 `cargo build` 后从 `server/` 目录启动；浏览器 Chrome DevTools MCP isolatedContext `g3-regression`。全新 SQLite 由启动扫描自动入库真机（TLS transport addr，连接时日志确认解析到 USB serial `HIUWUCNJOBEEOZDY`）。
+
+### R1 配置变更踢 viewer → 自动重连 — **PASS（首次踢）/ FAIL（第二次踢，新缺陷，见发现 1）**
+
+1. 初始：Console 手动连接 → 画面正常（截图 A，`shots/A-initial-connected.png`，真实设备帧，帧缓存解码 1880x3008）
+2. `PUT /api/devices/:id`（fps null→30，session_affecting）19:46:38.723：
+   - `casting config changed, kicked viewer` → peer closed → `viewer closed viewer_id=39c1…`
+   - 19:46:40.768 `session disconnected`；19:46:41.033 `process exited`（会话拆净）
+   - 19:46:41.863 `connecting...` —— **前端 3.14s 后自动重连 POST /connect**（scheduleReconnect 3s 退避；不带 force；无 conflict，符合「会话已拆无 viewer」预期）
+   - 19:46:42.442 online → 19:46:42.722 `viewer registered`（新 viewer_id）→ 19:46:42.736 control DC → 19:46:43.076 初始 GOP 重放 → 19:46:43.118 `pusher live`（**踢→恢复 4.4s**）
+3. 前端：无「已被接管」误报、无持久错误横幅；stats 徽标（fps/延迟/码率）恢复刷新；截图 B（`shots/B-after-config-change-reconnect.png`）为踢后新鲜帧（设备时钟 3:47，WLAN 列表较截图 A 增多，非陈旧重放）
+4. 复核（fps 30→null 二次踢）19:47:50：服务端正确踢 viewer + 拆会话，但**前端未发起重连**，定格最后一帧、无横幅、无任何重试（服务端此后无任何 offer；第三次 PUT 无 viewer 可踢、无日志）→ 页面刷新 + 手动连接恢复（19:51:38 viewer registered）。根因定位见发现 1
+
+### R2 watchdog 确死路径 — **PASS**
+
+1. 刷新页面后全新手动连接（19:51:38 viewer registered，pusher live）
+2. 设备侧杀 scrcpy 会话进程（`ps -A -o PID,ARGS` 定位 `app_process / com.genymobile.scrcpy.Server` pid 14941，`kill` 生效 19:52:07.08 本地）：
+   - 19:52:07.066 `video socket closed … kind=UnexpectedEof err=early eof` → session.connected=false
+   - 19:52:27.440 **`session dead (video socket closed), tearing down … idle_ms=20701`**（watchdog 5s 轮询 + 20s 静默阈值；ReconnectReason::WatchdogDead）→ 踢 viewer（19:52:27.642 viewer closed）→ force 拆会话（无脚本 → 服务端不自行重连，交前端）
+   - 19:52:30.583 前端自动重连 POST（踢后 3.14s，无 conflict）→ 19:52:31.179 online → 19:52:31.655 viewer registered → 19:52:32.061 pusher live（**杀进程→恢复 ≈25s** = 20s 阈值 + tick + 3s 退避 + ~1.5s 建会话）
+3. 前端画面自动恢复（截图 C，`shots/C-after-watchdog-reconnect.png`，设备时钟 3:53 新鲜帧、WLAN 重扫描）；设备侧确认旧进程已死、新 scrcpy 会话进程（新 pid/scid）已在跑
+
+### R2 加测：脚本运行中 watchdog 强拆接续 — **PASS**
+
+- `PUT pkg=com.android.settings`（非投屏字段 → `config changed (non-casting fields only), session kept`，会话不拆，与设计一致）→ 建脚本 `qa-g3-watchdog.yaml`（log + 12×`wait: 5s` + log）→ API 运行（19:54:20.633 `run accepted`）
+- 运行中杀 scrcpy 进程（19:54:36.0）→ 19:54:35.995 video socket closed → 19:54:57.477 watchdog `session dead … idle_ms=21567`（**唯一允许脚本运行中强拆的路径**）→ **服务端 132ms 内自行重连**（19:54:57.609 connecting → 19:54:58.265 online）
+- 19:55:21.027 `run finished … state=Success elapsed_ms=60393`（60s 脚本跑完）；`GET /api/runs/:id` → `state:"success"`
+- 附注：viewer 同样被踢，且因发现 1 前端未恢复画面——脚本接续不受影响（引擎逐步重取 session）
+
+### 清理 — 完成
+
+DELETE 脚本、PUT 恢复设备配置（pkg/fps 复原）、`POST /api/devices/:id/disconnect` → offline；`POST /api/shutdown` 优雅停机；18600 无 LISTEN、无 gamer-server 进程；设备双 transport 仍在线、无 scrcpy 孤儿进程；仓库零残留（`git status` 仅既有 `baseline-backups/`）；scratch 保留 `D:\qa-agentG3-tmp\{config.toml, gamer-server.log.2026-08-31, shots/}`（cookie/token/密码/data 已删）。
+
+### 发现与风险
+
+1. **（缺陷·前端，本轮新发现）自动重连链路只能成功一次**：`web/src/composables/useWebRtcLifecycle.js` 的 `doConnect()` 开头对残留旧 pc 调 `stopPeer({manual:true})` 置 `manualCloseRef=true`，重连成功后该标志**从不复位**；下一次服务端踢连接时 `bindControlChannel` 的 `channel.onclose` 守卫 `!manualCloseRef.value` 不成立 → 跳过 `scheduleReconnect`（守卫随后把它复位 false）。表现：页面定格最后一帧、回到「连接」按钮态、无错误横幅、永不重试。实测复现两次（R1 第二次配置变更踢；R2 加测 watchdog 踢——凡连接本身是自动重连建立的，下一次必现）。规避：手动「连接」或刷新页面。修复建议：`doConnect` 成功路径复位 `manualCloseRef=false`（或在 reconnect 路径不置 manual）。**服务端各路径（配置变更踢 / watchdog 确死踢 / force 拆会话）行为均正确**，本缺陷不影响设备会话与脚本运行。
+2. （边界确认·非缺陷）watchdog「会话确死」分支无脚本时只拆不建（服务端重连仅 `running` 时执行）——viewer 画面恢复完全依赖前端自动重连，正是发现 1 的依赖面；此前风险条目 6（上一轮）中「watchdog 死链路路径未实测」在本轮已补齐。
+3. （环境·非缺陷）设备 mDNS TLS transport 使启动扫描以 `adb-HIUWUCNJOBEEOZDY-…_adb-tls-connect._tcp` 入库（kind=wifi），连接时服务端自动解析到 USB serial；与上轮「adb 需 `-s`」观察一致，无新增问题。
+
+### 对 §10.5 checklist 的建议
+
+| 条目 | 建议 | 证据 |
+|---|---|---|
+| 「viewer 接管、重连、watchdog 和 idle 生命周期未回归」 | **建议勾选 [x]**：接管（上轮步骤 5）、idle/唤醒（上轮步骤 7）、R1 配置变更踢→自动重连（本轮，首次踢）、R2 watchdog 确死强拆 + 脚本运行中强拆接续（本轮）均已真机实测；发现 1 为新缺陷建议另立跟进项，不作为本勾选项阻塞（服务端行为全部正确，前端一次重连后的二次踢场景为本次新增覆盖面发现） | 本节 R1/R2 日志时间线 + `shots/A|B|C-*.png` |
+
+### 缺陷修复跟进（发现 1）
+
+- **根因**：`web/src/composables/useWebRtcLifecycle.js` 的 `doConnect()` 开头对残留旧 pc 调 `stopPeer({manual:true})` 置位 `manualCloseRef`，建链成功后该标志从不复位；下一次服务端踢连接时 `channel.onclose` 守卫 `!manualCloseRef.value` 不成立 → 跳过 `scheduleReconnect`。
+- **修法**：`doConnect()` 成功路径复位 `manualCloseRef=false`（紧邻既有 `closedByCleanup=false` 复位），手动关闭不重连 / taken_over 不重连 / conflict 放弃不重连三个既有行为不变；回归用例 `webrtc-lifecycle.test.js`「auto reconnect resets manual flag so a second server kick reconnects again」覆盖二次踢重连 + 手动关闭不重连（`FakeChannel.close` 同步改为幂等，贴近真实 DataChannel 已关闭再 close 不重复触发 onclose 的语义，否则用例无法复现缺陷）。
+- **验证**：修复前仅新用例红（stash 修复后单文件 1 failed / 6 passed，失败点即第二次踢后 `reconnectTimer` 为空）；修复后 `pnpm test:run` 全绿 **580 passed**（42 文件，基线 579 + 新增 1），`pnpm build` 通过。
+- **提交**：fix `539a073`（`fix(web): 修复自动重连成功一次后再次被踢不再重连`，仅涉上述两文件）。
