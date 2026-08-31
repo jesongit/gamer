@@ -1,60 +1,81 @@
 # Manifest 签名密钥轮换（REL-006 runbook）
 
-适用对象：release manifest 的 Ed25519 分离签名（`.sig` 首行 `gamebot-manifest-sig-1 <key_id>`）。
-信任锚 = 仓库 `release/keys/<key_id>.pem` **公钥**（随 full 包分发到 `keys/`，验签按 `.sig`
-首行 key_id 在信任库取对应公钥）。**私钥永不入库**。
+适用对象：release manifest 的 Ed25519 分离签名。`.sig` 首行格式固定为
+`gamebot-manifest-sig-1 <key_id>`，签名覆盖 manifest 原始字节（包括原始换行和编码）。
+信任锚是 `release/keys/<key_id>.pem` 公钥；私钥永不入库，也不写入构建产物。
 
 ## 密钥命名与存放
 
-| 密钥 | key_id 形态 | 私钥存放 | 公钥存放 |
+| 用途 | key_id 形态 | 私钥 | 公钥 |
 |---|---|---|---|
-| 开发/本地 | `dev-ed25519-1`（固定） | 本机 `release/keys/dev-ed25519-1.private.pem`（.gitignore 忽略，仅本地） | 仓库 `release/keys/dev-ed25519-1.pem` |
-| 生产（当前） | `prod-ed25519-<N>`（N 递增） | GitHub environment `release-sign` 的 secret `RELEASE_MANIFEST_PRIVATE_KEY`（PKCS#8 PEM 多行原样） | 仓库 `release/keys/prod-ed25519-<N>.pem` |
-| 生产（轮换预备） | 同上，N+1 | 仅本地离线保管，**不入 CI** | 同一 PR 提前入库（双钥共存） |
+| 开发/fixture | `dev-*` / `test-*` | 仅本机或 fixture 生成目录 | 可随代码/fixture 分发，但不得发布 |
+| 生产当前/下一把 | `prod-ed25519-N`（N 为正整数、递增） | GitHub environment `release-sign` 的 `RELEASE_MANIFEST_PRIVATE_KEY` | 仓库 `release/keys/prod-ed25519-N.pem` |
 
-配对 secret：`RELEASE_MANIFEST_KEY_ID` = 当前生产 key_id。发布签名禁止使用 dev key
-（workflow 内显式拒绝 `dev-ed25519-1`）。
+配对 secret 是 `RELEASE_MANIFEST_KEY_ID`。workflow 的生产签名 gate 只接受
+`^prod-ed25519-[1-9][0-9]*$`，并要求同名公钥已在仓库信任库；任何 dev、test、未知命名、
+缺公钥、空 secret 或私钥不能完成验签的情况都 fail closed。
 
-## 正常轮换步骤（当前/下一把双公钥共存）
+当前工作区只看到开发/fixture 公钥，未看到生产公钥或生产 secrets；这不是生产轮换证据，
+因此真实 Release 仍必须先配置 `release-sign` environment 后再验收。
 
-1. **离线生成新密钥对**（断网机器更佳）：
+## 正常轮换（当前/下一把双公钥共存）
 
-       node release/packaging/sign-manifest.mjs keygen --id prod-ed25519-<N+1> --out-dir <本地目录>
+1. 在离线机器生成新生产密钥对（私钥目录不要放进仓库）：
 
-2. **PR 提交新公钥** `release/keys/prod-ed25519-<N+1>.pem`。此时仓库同时存在新旧公钥
-   （双钥共存）：验签按 key_id 选钥，历史版本清单不受影响；workflow 的发布门禁只检查
-   `RELEASE_MANIFEST_KEY_ID` 指向的那把公钥在库。
-3. **更新两个 secret**（Settings → Environments → `release-sign`）：
-   `RELEASE_MANIFEST_PRIVATE_KEY` ← 新私钥 PEM；`RELEASE_MANIFEST_KEY_ID` ← `prod-ed25519-<N+1>`。
-4. **演练**：推一个预发布 tag（如 `v0.x.y-rc.1`）走完整 release workflow，确认
-   build-windows 签名步骤用新 key_id 签名且验签通过。
-5. **宣布切换**：新 key 成为"当前"，旧 key 降为"退役"——旧公钥**保留在仓库**
-   （历史 full 包的信任锚还要用它验签），在本文件末尾"密钥台账"补一行记录。
-6. **清理**：本地删除已退役私钥文件；GitHub 侧旧 secret 值被第 3 步覆盖，无需删除。
+   ```powershell
+   node release/packaging/sign-manifest.mjs keygen `
+     --id prod-ed25519-<N+1> --out-dir <离线私钥目录>
+   ```
 
-## 泄露应急（生产私钥怀疑/确认泄露）
+2. 只把 `prod-ed25519-<N+1>.pem` 作为 PR 提交到 `release/keys/`；检查 `git ls-files
+   release/keys` 不包含任何 `*.private.pem`。旧公钥必须暂时保留，历史 manifest 仍依赖它。
+3. 在 GitHub Settings → Environments → `release-sign` 更新两个 secrets：
+   `RELEASE_MANIFEST_PRIVATE_KEY` 写入 PKCS#8 PEM 原文，`RELEASE_MANIFEST_KEY_ID` 写入新 key id。
+   不把私钥复制到 repository secret、workflow 文件、日志或 ZIP。
+4. 先用预发布 tag（如 `v0.2.0-rc.1`）走完整 workflow。必须观察到 build job 使用新 key id，
+   仓库信任锚和 full 包内信任锚均验签通过，并由 `release` environment 的评审人放行 smoke。
+5. 在本台账登记新 key 为当前、旧 key 为退役；旧公钥保留在仓库，旧私钥的本地副本全部删除。
+6. 轮换完成后再发布正式 tag；不要用同一个 immutable semver tag 覆盖旧镜像或已发布 Release。
 
-1. **立即换钥**：按"正常轮换"第 1、3 步换成**全新生成的密钥对**（新 N+1，不复用预备钥），
-   公钥以最高优先级 PR 入库；两步之间不留可签名的窗口。
-2. **评估影响面**：泄露私钥可伪造任意 manifest。用 `gh api` 比对已发布 Release 资产的
-   SHA256 与本地/流水线记录是否一致（命令清单见 [ATTESTATION.md](ATTESTATION.md)），
-   确认是否存在被篡改的已发布版本；发现篡改立即删除对应 Release/镜像并公告。
-3. **发补丁版本**：下一个发布版本用新 key 签名；launcher 侧通过版本目录内 `keys/`
-   随包分发新公钥（用户升级即获得新信任锚）。
-4. **记录**：在下方台账登记泄露时间、处置与新 key_id；撤销 ≠ 删除旧公钥（历史包验证仍需要）。
+离线双钥 fixture 回归（只验证工具和信任模型，不接触生产 secret）：
 
-## Release environment 权限矩阵
+```powershell
+.\release\packaging\verify-key-rotation.ps1 `
+  -FixtureDir .\release\contracts\fixtures\key-rotation
+```
+
+该脚本验证 current/next fixture 公钥均可验签，并验证未签名、单字节篡改、移除 current
+公钥、错误公钥四种负例被拒。fixture key id 不是生产 key id，fixture PASS 不能勾选真实
+GitHub/GHCR 轮换验收。
+
+## 泄露应急
+
+1. 立即生成全新递增的 `prod-ed25519-N+1`，不复用预备钥；优先提交新公钥，并尽快更新
+   `release-sign` 两个 secrets。
+2. 按 [ATTESTATION.md](ATTESTATION.md) 重新下载并核对受影响 Release 的 SHA256、manifest
+   签名和 GHCR digest/attestation；发现篡改时按组织应急流程下架受影响 Release/镜像并公告。
+3. 用新 key 发布修复版本；full 包会携带新公钥。历史公钥不要从仓库删除，否则旧版本无法
+   验签；撤销的是签发能力，不是历史验证材料。
+4. 在台账记录泄露时间、影响版本、处置人、新 key id 和旧 key 退役时间；不要记录私钥内容。
+
+## Environment 权限矩阵
 
 | 项 | `release-sign` | `release` |
 |---|---|---|
-| 用途 | 签名 secrets 作用域隔离（build-windows job 引用） | draft 转正前人工批准门（smoke job 引用，publish 依赖 smoke） |
+| 用途 | 仅 build-windows 的生产签名 secret 作用域 | smoke 前人工批准，放行 draft 转正链路 |
 | secrets | `RELEASE_MANIFEST_PRIVATE_KEY`、`RELEASE_MANIFEST_KEY_ID` | 无 |
-| 必需评审人 | 不配置（不阻断自动构建） | **必须配置** ≥1 人（建议 ≥2）；批准动作 = 放行 smoke |
-| Deployment branches/tags | 建议限制为 tag `v*` | 建议限制为 tag `v*` |
-| 可见/可改者 | 仓库 admin（Settings → Environments） | 同左 |
+| 必需评审人 | 不配置，避免阻断构建前的签名 gate | 至少 1 人（建议 2 人） |
+| 限制 | 建议只允许 `v*` tag deployment | 建议只允许 `v*` tag deployment |
+| 发布权限 | `contents: read`，不创建/发布 Release | smoke 使用 `contents: write` 读取 draft 资产但不写 Release；publish 才改变 draft 状态 |
 
-## 密钥台账（轮换/泄露后必须更新）
+真实验收前必须确认 `release` environment 已配置 required reviewers；本地 fixture 和静态
+检查不能替代该审批门。
 
-| key_id | 状态（当前/退役） | 公钥入库 PR/commit | 启用日期 | 备注 |
+## 密钥台账
+
+| key_id | 状态 | 公钥入库 PR/commit | 启用日期 | 备注 |
 |---|---|---|---|---|
 | dev-ed25519-1 | 仅本地 | 首提交 | — | 禁止签发布 |
+
+生产 current/retired 记录必须在实际公钥 PR 与 environment secret 切换完成后填写；在此之前
+不得凭空补写生产 key id、commit 或启用日期。

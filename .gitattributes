@@ -1,0 +1,6 @@
+# 签名/哈希敏感文本的字节稳定性（REL-006）：
+# Ed25519 分离签名覆盖 manifest 原始字节，若检出行尾因 core.autocrlf 漂移（LF→CRLF），
+# 所有签名 fixture 与已发布 manifest 复验都会 signature-invalid。
+# 因此 fixtures 与信任锚公钥强制 LF 检出；其余文本维持仓库默认。
+release/contracts/fixtures/** text eol=lf
+release/keys/*.pem text eol=lf
