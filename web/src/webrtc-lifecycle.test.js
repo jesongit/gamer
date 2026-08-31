@@ -16,6 +16,8 @@ class FakeChannel {
   }
 
   close() {
+    // 真实 DataChannel 对已关闭通道再次 close 不会重复触发 onclose
+    if (this.readyState === 'closed') return
     this.readyState = 'closed'
     this.onclose?.()
   }
@@ -204,6 +206,46 @@ describe('useWebRtcLifecycle', () => {
     const connectDevice = vi.fn().mockRejectedValue(new Error('server down'))
     const lifecycle = makeLifecycle({ api: { connectDevice } })
     await lifecycle.connect(true)
+    expect(lifecycle.reconnectTimer.value).toBeNull()
+  })
+
+  // 自动重连建链必须复位 manualClose 标志：doConnect 开头对残留旧 pc 调
+  // stopPeer({manual:true}) 置位后无人复位，下一次服务端踢连接（配置变更踢
+  // viewer / watchdog 确死强拆）会被 onclose 守卫误判为手动关闭而跳过重连，
+  // 页面定格最后一帧永不重试（G3 回归实测复现两次）
+  it('auto reconnect resets manual flag so a second server kick reconnects again', async () => {
+    const connectedRef = ref(false)
+    const lifecycle = makeLifecycle({
+      connectedRef,
+      // 模拟 Console 接线：channel open/close 同步 connectedRef，
+      // 否则 connect() 的 connectedRef 守卫会拦截重连
+      onChannelOpen: () => { connectedRef.value = true },
+      onChannelClose: () => { connectedRef.value = false },
+    })
+
+    await lifecycle.connect(false)
+    const channel1 = lifecycle.getControlChannel()
+    expect(channel1.readyState).toBe('open')
+
+    // 第一次服务端踢连接 → 3s 后自动重连成功（新 channel）
+    channel1.close()
+    expect(lifecycle.reconnectTimer.value).not.toBeNull()
+    await vi.advanceTimersByTimeAsync(3000)
+    const channel2 = lifecycle.getControlChannel()
+    expect(channel2).not.toBe(channel1)
+    expect(channel2.readyState).toBe('open')
+
+    // 第二次服务端踢连接必须再次触发自动重连
+    // （修复前被 doConnect 遗留的 manualClose=true 拦截，定时器为空）
+    channel2.close()
+    expect(lifecycle.reconnectTimer.value).not.toBeNull()
+
+    // 重连恢复后用户手动关闭（cleanup(true) → manual 标志）不自动重连：
+    // 既有正确行为不因修复改变
+    await vi.advanceTimersByTimeAsync(3000)
+    const channel3 = lifecycle.getControlChannel()
+    expect(channel3.readyState).toBe('open')
+    lifecycle.cleanup(true)
     expect(lifecycle.reconnectTimer.value).toBeNull()
   })
 })

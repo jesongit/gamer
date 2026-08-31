@@ -228,6 +228,11 @@ export function useWebRtcLifecycle({
       connectedRef.value = true
       connectingRef.value = false
       closedByCleanup = false
+      // 自动重连发起的 doConnect 开头会对残留旧 pc 调 stopPeer({manual:true})
+      // 置位 manualCloseRef 且随后无人复位：不复位则下一次服务端主动踢连接
+      // （配置变更踢 viewer / watchdog 确死强拆）会被 onclose 守卫误判为手动
+      // 关闭而跳过自动重连，页面定格最后一帧永不重试
+      manualCloseRef.value = false
       reconnectAttempts.value = 0 // 连接成功即重置退避计数（不依赖调用方回调）
       onConnectSuccess({ pc, ws })
       onConnectFinish({ ok: true })
