@@ -239,6 +239,15 @@ pub fn repair_components(
     }
 }
 
+/// 单组件修复（不取锁）：升级下载阶段对候选 manifest 的组件逐个换装复用。
+pub fn repair_component(
+    layout: &InstallLayout,
+    spec: &ComponentSpec,
+    opts: &RepairOptions,
+) -> ComponentRepair {
+    repair_one(layout, spec, opts)
+}
+
 fn repair_one(
     layout: &InstallLayout,
     spec: &ComponentSpec,

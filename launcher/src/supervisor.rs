@@ -47,10 +47,52 @@ pub fn build_child_env(plan: &LaunchPlan) -> BTreeMap<String, String> {
     build_child_env_from(plan, |key| std::env::var(key).ok())
 }
 
+/// 额外注入集（批次 3）：候选维护门 + IPC 寻址/令牌。缺省 None/None 时
+/// 行为与批次 2 完全一致（server 走 UnsupportedUpdateController 降级）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchExtras {
+    /// 存在 = 注入 GAMER_ACTIVATION_GATE=1：候选维护门（只绑端口 + 健康探针 +
+    /// activate 端点，不启 scheduler/业务写）。
+    pub activation_gate: bool,
+    /// 完整 pipe 名（ipc-v1 §1.1），注入 GAMER_LAUNCHER_PIPE。
+    pub ipc_pipe: Option<String>,
+    /// 本次启动会话令牌，注入 GAMER_LAUNCHER_IPC_TOKEN。
+    pub ipc_token: Option<String>,
+}
+
+impl LaunchExtras {
+    /// 候选启动专用：gate + IPC 寻址一并注入。
+    pub fn candidate(pipe_name: String, token: String) -> Self {
+        Self {
+            activation_gate: true,
+            ipc_pipe: Some(pipe_name),
+            ipc_token: Some(token),
+        }
+    }
+
+    /// 常规启动：IPC 寻址注入、无维护门。
+    pub fn managed(pipe_name: String, token: String) -> Self {
+        Self {
+            activation_gate: false,
+            ipc_pipe: Some(pipe_name),
+            ipc_token: Some(token),
+        }
+    }
+}
+
 /// 纯函数构造（测试注入父环境取值）：键集合 = 最小系统集 + 契约注入集 +
 /// GAMER_ADMIN_PASSWORD（显式设置才透传）+ GAMER_DEPLOYMENT_MODE（缺省 launcher）。
 pub fn build_child_env_from(
     plan: &LaunchPlan,
+    getenv: impl Fn(&str) -> Option<String>,
+) -> BTreeMap<String, String> {
+    build_child_env_with_extras(plan, &LaunchExtras::default(), getenv)
+}
+
+/// 带额外注入集的构造（批次 3）。
+pub fn build_child_env_with_extras(
+    plan: &LaunchPlan,
+    extras: &LaunchExtras,
     getenv: impl Fn(&str) -> Option<String>,
 ) -> BTreeMap<String, String> {
     let non_empty = |v: Option<String>| -> Option<String> {
@@ -79,6 +121,17 @@ pub fn build_child_env_from(
     // 使 system/info 的 deployment.mode=managed 链路成立）；用户显式设置不覆盖。
     let mode = non_empty(getenv("GAMER_DEPLOYMENT_MODE")).unwrap_or_else(|| "launcher".to_string());
     env.insert("GAMER_DEPLOYMENT_MODE".to_string(), mode);
+
+    // 批次 3：候选维护门与 IPC 寻址（server 侧行为由并行轨道实现；存在即生效）。
+    if extras.activation_gate {
+        env.insert("GAMER_ACTIVATION_GATE".to_string(), "1".to_string());
+    }
+    if let Some(pipe) = non_empty(extras.ipc_pipe.clone()) {
+        env.insert("GAMER_LAUNCHER_PIPE".to_string(), pipe);
+    }
+    if let Some(token) = non_empty(extras.ipc_token.clone()) {
+        env.insert("GAMER_LAUNCHER_IPC_TOKEN".to_string(), token);
+    }
 
     env.insert(
         "GAMER_APP_DIR".to_string(),
@@ -134,6 +187,34 @@ pub fn spawn_supervised(plan: &LaunchPlan) -> std::io::Result<Child> {
     spawn_child(plan, &[], Stdio::inherit(), Stdio::inherit())
 }
 
+/// 带额外注入集的启动入口（批次 3：候选 gate / IPC 寻址）。
+pub fn spawn_supervised_with_extras(
+    plan: &LaunchPlan,
+    extras: &LaunchExtras,
+) -> std::io::Result<Child> {
+    spawn_child_with_extras(plan, &[], extras, Stdio::inherit(), Stdio::inherit())
+}
+
+/// 启动自更新 trampoline helper。helper 只接收绝对路径和数值环境变量，使用
+/// 已构建的 launcher 自身作为 helper 镜像；不启动 server，也不继承业务环境。
+pub fn spawn_trampoline(
+    launcher_exe: &Path,
+    trampoline_env: &BTreeMap<String, String>,
+) -> std::io::Result<Child> {
+    let mut command = Command::new(launcher_exe);
+    command
+        .arg("status")
+        .env_clear()
+        .env("SystemRoot", system_root())
+        .env("SystemDrive", "C:")
+        .env("PATH", minimal_path())
+        .envs(trampoline_env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.spawn()
+}
+
 /// 可控 stdio 的启动入口（测试用它捕获 `cmd /c set` 输出验证 env 注入）。
 pub fn spawn_child(
     plan: &LaunchPlan,
@@ -141,7 +222,17 @@ pub fn spawn_child(
     stdout: Stdio,
     stderr: Stdio,
 ) -> std::io::Result<Child> {
-    let env = build_child_env(plan);
+    spawn_child_with_extras(plan, args, &LaunchExtras::default(), stdout, stderr)
+}
+
+pub fn spawn_child_with_extras(
+    plan: &LaunchPlan,
+    args: &[&str],
+    extras: &LaunchExtras,
+    stdout: Stdio,
+    stderr: Stdio,
+) -> std::io::Result<Child> {
+    let env = build_child_env_with_extras(plan, extras, |key| std::env::var(key).ok());
     tracing::info!(exe = %plan.exe.display(), cwd = %plan.cwd.display(), env_keys = env.keys().count(), "启动受管子进程");
     Command::new(&plan.exe)
         .args(args)
@@ -437,5 +528,52 @@ mod tests {
             env.get("GAMER_DEPLOYMENT_MODE").map(String::as_str),
             Some("launcher")
         );
+    }
+
+    #[test]
+    fn extras_inject_gate_and_ipc_vars() {
+        let extras = LaunchExtras::candidate(
+            "\\\\.\\pipe\\gamebot-launcher-abc".to_string(),
+            "tok-123".to_string(),
+        );
+        let env = build_child_env_with_extras(&plan(), &extras, |_| None);
+        assert_eq!(
+            env.get("GAMER_ACTIVATION_GATE").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            env.get("GAMER_LAUNCHER_PIPE").map(String::as_str),
+            Some("\\\\.\\pipe\\gamebot-launcher-abc")
+        );
+        assert_eq!(
+            env.get("GAMER_LAUNCHER_IPC_TOKEN").map(String::as_str),
+            Some("tok-123")
+        );
+    }
+
+    #[test]
+    fn managed_extras_inject_pipe_without_gate() {
+        let extras = LaunchExtras::managed("p".to_string(), "t".to_string());
+        let env = build_child_env_with_extras(&plan(), &extras, |_| None);
+        assert!(
+            !env.contains_key("GAMER_ACTIVATION_GATE"),
+            "常规启动不得带维护门"
+        );
+        assert_eq!(
+            env.get("GAMER_LAUNCHER_PIPE").map(String::as_str),
+            Some("p")
+        );
+        assert_eq!(
+            env.get("GAMER_LAUNCHER_IPC_TOKEN").map(String::as_str),
+            Some("t")
+        );
+    }
+
+    #[test]
+    fn default_extras_inject_nothing_new() {
+        let env = build_child_env_from(&plan(), |_| None);
+        assert!(!env.contains_key("GAMER_ACTIVATION_GATE"));
+        assert!(!env.contains_key("GAMER_LAUNCHER_PIPE"));
+        assert!(!env.contains_key("GAMER_LAUNCHER_IPC_TOKEN"));
     }
 }

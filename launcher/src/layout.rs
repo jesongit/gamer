@@ -70,6 +70,11 @@ impl InstallLayout {
         self.root.join("quarantine")
     }
 
+    /// 升级前数据/配置快照保留区（backups/<update-id>/，LCH-011；按保留策略清理）。
+    pub fn backups_dir(&self) -> PathBuf {
+        self.root.join("backups")
+    }
+
     /// 业务数据目录（用户数据，升级必须保留）。
     pub fn data_dir(&self) -> PathBuf {
         self.root.join("data")

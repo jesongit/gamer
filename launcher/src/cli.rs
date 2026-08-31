@@ -66,6 +66,11 @@ pub enum Command {
         #[arg(long)]
         probe: bool,
     },
-    /// 检查并执行升级（LCH-010，未实现）
-    Upgrade,
+    /// 检查并执行升级（LCH-010：§6.6 全链路；committed 前失败自动回滚，
+    /// 回滚也失败进 manual_recovery_required）
+    Upgrade {
+        /// release manifest 路径或 URL（本地路径 = M2 演练主路径；远端走通道源）
+        #[arg(long, value_name = "PATH|URL")]
+        manifest: String,
+    },
 }

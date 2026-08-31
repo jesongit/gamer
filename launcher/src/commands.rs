@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::cli::{Cli, Command};
+use crate::installation;
 use crate::inventory::{CheckOptions, ComponentSpec, ComponentStatus, FileCheck, ProbeCheck};
+use crate::ipc::{self, Dispatcher, IpcServerConfig};
 use crate::layout::InstallLayout;
 use crate::manifest::model::Manifest;
 use crate::manifest::{validate_manifest_file, ValidateOptions};
@@ -14,7 +16,10 @@ use crate::repair::{self, RepairGate, RepairOptions};
 use crate::state::atomic::LoadOutcome;
 use crate::state::lock::InstanceLock;
 use crate::state::StateStore;
-use crate::supervisor::{self, LaunchPlan, ReadyProbe};
+use crate::supervisor::{self, LaunchExtras, LaunchPlan, ReadyProbe};
+use crate::upgrade::engine::{Engine, ManifestSource, UpgradeOptions, UpgradeOutcome};
+use crate::upgrade::recovery::{self, RecoveryOutcome};
+use crate::upgrade::trampoline;
 
 /// doctor --manifest 的参数集合。
 #[derive(Debug, Clone)]
@@ -27,8 +32,19 @@ pub struct DoctorInvocation {
 }
 
 pub fn dispatch(cli: &Cli, layout: &InstallLayout) -> i32 {
+    // trampoline helper 复用一个现有的无参数子命令形态以保持 CLI 兼容；必须在
+    // 普通 dispatch 前拦截，避免 helper 获取安装锁或启动 server。
+    if trampoline::is_requested() {
+        return match trampoline::run_from_environment() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("错误: launcher 自更新 trampoline 失败: {e}");
+                1
+            }
+        };
+    }
     match &cli.command {
-        Command::Start => cmd_start(layout),
+        Command::Start => cmd_start(layout, cli),
         Command::Status => cmd_status(layout),
         Command::Doctor {
             manifest,
@@ -56,15 +72,8 @@ pub fn dispatch(cli: &Cli, layout: &InstallLayout) -> i32 {
             }
         }
         Command::Repair { manifest, probe } => cmd_repair(layout, cli, manifest.as_deref(), *probe),
-        Command::Upgrade => not_implemented("upgrade", "批次 3 LCH-010：升级状态机编排"),
+        Command::Upgrade { manifest } => cmd_upgrade(layout, cli, manifest),
     }
-}
-
-fn not_implemented(name: &str, plan: &str) -> i32 {
-    tracing::warn!(command = name, "子命令尚未实现");
-    println!("{name}：尚未实现（计划 {plan} 后续批次提供）。");
-    println!("本次未执行任何动作，安装目录未被修改。");
-    1
 }
 
 /// status：只读查询，不获取单实例锁；current.json 损坏时报错而非崩溃。
@@ -520,8 +529,9 @@ fn cmd_repair(layout: &InstallLayout, cli: &Cli, manifest: Option<&Path>, probe:
     }
 }
 
-/// start（LCH-008 + OPS-003）：env 注入 + 最小 PATH + 句柄等待 + 就绪探测。
-fn cmd_start(layout: &InstallLayout) -> i32 {
+/// start（LCH-008 + OPS-003 + 批次 3）：env 注入（含 IPC 寻址）+ 句柄等待 +
+/// 就绪探测 + 启动 journal 恢复 + named pipe IPC server。
+fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
     println!("start：启动并监管 gamer-server");
     println!("安装根: {}", layout.root.display());
     let lock = match InstanceLock::acquire(&layout.state_dir()) {
@@ -538,6 +548,27 @@ fn cmd_start(layout: &InstallLayout) -> i32 {
     let _ = lock;
 
     let store = StateStore::new(&layout.root);
+    // 批次 3：启动恢复（未完成 journal 按失败分支处理；manual recovery 拒绝启动）
+    match recovery::recover_on_startup(layout, &store) {
+        Ok(report) => match &report.outcome {
+            RecoveryOutcome::NothingToDo => {}
+            RecoveryOutcome::ManualRequired { reason } => {
+                tracing::error!(%reason, "manual_recovery_required：拒绝启动（人工恢复前不再自动拉起）");
+                eprintln!(
+                    "错误: 上次升级与自动回滚均失败（manual_recovery_required）：{reason}\n\
+                     证据保留在 backups/、quarantine/ 与 state/update-journal.json；人工恢复并复位 journal 后方可启动。"
+                );
+                return 2;
+            }
+            other => {
+                println!("启动恢复: {other:?}");
+            }
+        },
+        Err(e) => {
+            eprintln!("错误: journal 恢复失败: {e}");
+            return 1;
+        }
+    }
     let current = match store.load_current() {
         Ok(LoadOutcome::Present(c)) => c,
         Ok(LoadOutcome::Missing) => {
@@ -564,6 +595,26 @@ fn cmd_start(layout: &InstallLayout) -> i32 {
             eprintln!("错误: {msg}");
             return 1;
         }
+    };
+
+    // 批次 3：installation-id + 本次会话令牌（IPC 寻址注入）
+    let installation_id = installation::load_or_create(&store).unwrap_or_else(|e| {
+        tracing::warn!("installation-id 生成失败（{e}），IPC 不启用");
+        String::new()
+    });
+    let ipc_enabled = !installation_id.is_empty();
+    let ipc_token = if ipc_enabled {
+        installation::new_session_token().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let extras = if ipc_enabled && !ipc_token.is_empty() {
+        LaunchExtras::managed(
+            installation::pipe_name_for(&installation_id),
+            ipc_token.clone(),
+        )
+    } else {
+        LaunchExtras::default()
     };
 
     let adb = supervisor::latest_component_exe(layout, "adb", "adb.exe");
@@ -597,8 +648,11 @@ fn cmd_start(layout: &InstallLayout) -> i32 {
         "就绪探测: http://127.0.0.1:{port}{}",
         supervisor::HEALTH_PATH
     );
+    if ipc_enabled {
+        println!("IPC: {}", installation::pipe_name_for(&installation_id));
+    }
 
-    let mut child = match supervisor::spawn_supervised(&plan) {
+    let mut child = match supervisor::spawn_supervised_with_extras(&plan, &extras) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("错误: 启动 server 子进程失败: {e}");
@@ -607,6 +661,18 @@ fn cmd_start(layout: &InstallLayout) -> i32 {
     };
     tracing::info!(pid = child.id(), exe = %plan.exe.display(), "server 子进程已启动");
     println!("server 子进程已启动 (pid={})，等待就绪…", child.id());
+
+    // 批次 3：named pipe IPC server（后台线程，进程退出即结束）
+    if ipc_enabled {
+        let keys_dir = resolve_keys_dir(cli.keys_dir.as_ref(), layout).ok();
+        spawn_ipc_server(
+            layout.clone(),
+            installation_id.clone(),
+            ipc_token,
+            keys_dir.unwrap_or_else(|| layout.root.join("keys")),
+        );
+    }
+
     match supervisor::wait_for_ready(port, &ReadyProbe::default()) {
         Ok(()) => println!(
             "[PASS] server 已就绪 (http://127.0.0.1:{port}{})",
@@ -634,6 +700,147 @@ fn cmd_start(layout: &InstallLayout) -> i32 {
             tracing::error!(error = %e, "等待子进程退出失败");
             eprintln!("错误: 等待子进程退出失败: {e}");
             1
+        }
+    }
+}
+
+/// 拉起 IPC named pipe 服务端（独立线程 + 独立 tokio runtime）。
+fn spawn_ipc_server(
+    layout: InstallLayout,
+    installation_id: String,
+    token: String,
+    keys_dir: PathBuf,
+) {
+    let check_source = check_source_from_env();
+    let dispatcher = Dispatcher::new(
+        layout,
+        installation_id.clone(),
+        check_source,
+        keys_dir.clone(),
+        UpgradeOptions {
+            keys_dir,
+            ..UpgradeOptions::default()
+        },
+        false,
+    );
+    let cfg = IpcServerConfig {
+        pipe_name: installation::pipe_name_for(&installation_id),
+        token,
+        ..IpcServerConfig::default()
+    };
+    let spawned = std::thread::Builder::new()
+        .name("launcher-ipc".to_string())
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::error!("IPC runtime 启动失败: {e}");
+                    return;
+                }
+            };
+            rt.block_on(async move {
+                if let Err(e) = ipc::run_server(dispatcher, cfg).await {
+                    tracing::error!(error = %e, "IPC server 退出");
+                }
+            });
+        });
+    match spawned {
+        Ok(_) => tracing::info!("IPC server 线程已启动"),
+        Err(e) => tracing::error!("IPC server 线程启动失败: {e}"),
+    }
+}
+
+/// check 的候选来源（通道配置；IPC 请求不接受来源指定）。
+/// `GAMER_LAUNCHER_RELEASE_MANIFEST`：URL 或本地路径；未设置 = 无远端源
+/// （check 按 update_not_available 拒绝）。
+fn check_source_from_env() -> ManifestSource {
+    let raw = std::env::var("GAMER_LAUNCHER_RELEASE_MANIFEST")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if raw.is_empty() {
+        return ManifestSource::None;
+    }
+    if raw.starts_with("http://") || raw.starts_with("https://") {
+        ManifestSource::Url(raw)
+    } else {
+        ManifestSource::Path(PathBuf::from(raw))
+    }
+}
+
+/// upgrade（LCH-010/011/012）：§6.6 全链路编排 + 启动恢复 + 自动回滚。
+/// 退出码：0=committed；1=失败但旧版健康/取消；2=manual_recovery_required。
+fn cmd_upgrade(layout: &InstallLayout, cli: &Cli, manifest: &str) -> i32 {
+    println!("upgrade：检查并执行升级");
+    println!("安装根: {}", layout.root.display());
+    let lock = match InstanceLock::acquire(&layout.state_dir()) {
+        Ok(l) => l,
+        Err(crate::state::lock::LockError::Held { path }) => {
+            eprintln!("错误: 已有 launcher 实例持有安装根（{}）", path.display());
+            return 1;
+        }
+        Err(crate::state::lock::LockError::Io(e)) => {
+            eprintln!("错误: 单实例锁操作失败: {e}");
+            return 1;
+        }
+    };
+    let _ = lock;
+    let store = StateStore::new(&layout.root);
+    match recovery::recover_on_startup(layout, &store) {
+        Ok(report) if report.is_manual() => {
+            eprintln!("错误: 上次升级与自动回滚均失败（manual_recovery_required），已停止自动重试；请人工恢复后重试。");
+            return 2;
+        }
+        Ok(report) => {
+            if !matches!(report.outcome, RecoveryOutcome::NothingToDo) {
+                println!("启动恢复: {:?}", report.outcome);
+            }
+        }
+        Err(e) => {
+            eprintln!("错误: journal 恢复失败: {e}");
+            return 1;
+        }
+    }
+    let keys_dir = match resolve_keys_dir(cli.keys_dir.as_ref(), layout) {
+        Ok(k) => k,
+        Err(msg) => {
+            eprintln!("错误: {msg}");
+            return 2;
+        }
+    };
+    let source = if manifest.starts_with("http://") || manifest.starts_with("https://") {
+        ManifestSource::Url(manifest.to_string())
+    } else {
+        ManifestSource::Path(PathBuf::from(manifest))
+    };
+    let installation_id = installation::load_or_create(&store).unwrap_or_default();
+    let ipc_token = installation::new_session_token().unwrap_or_default();
+    let opts = UpgradeOptions {
+        keys_dir,
+        ipc: Some((installation::pipe_name_for(&installation_id), ipc_token)),
+        ..UpgradeOptions::default()
+    };
+    let engine = Engine::new(layout.clone(), opts);
+    match engine.run_full(&source) {
+        UpgradeOutcome::Committed { from, to } => {
+            println!("升级完成: {from} → {to}（committed，旧版本保留可人工回退）");
+            0
+        }
+        UpgradeOutcome::Cancelled { reason } => {
+            println!("升级已取消（旧版本未动）: {reason}");
+            1
+        }
+        UpgradeOutcome::FailedOldHealthy { error } => {
+            eprintln!("升级失败（旧版本已恢复健康）: {error}");
+            1
+        }
+        UpgradeOutcome::ManualRecovery { error } => {
+            eprintln!("错误: 升级与自动回滚均失败（manual_recovery_required）: {error}");
+            2
         }
     }
 }
