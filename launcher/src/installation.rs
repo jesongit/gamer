@@ -2,6 +2,10 @@
 //! （ipc-v1.md §1.1：`[a-z0-9]`、8~32 字符，仅用于组成 pipe 名，不含机器敏感信息）。
 //! 持久化到 `state/installation-id`（原子写，缺失时生成）。
 //! IPC 会话令牌同样由此模块生成（≥32 字节随机 hex，ipc-v1 §1.1 建议值）。
+//!
+//! 回环管理通道令牌（`state/admin-token`）：launcher 注入 `GAMER_ADMIN_TOKEN`
+//! 给 server，使升级 drain（POST /api/shutdown + X-Admin-Token）能通过服务端
+//! 回环管理通道的鉴权；同样为本机敏感凭据，绝不写日志。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -75,6 +79,40 @@ pub fn new_session_token() -> io::Result<String> {
     Ok(crate::digest::to_hex(&bytes))
 }
 
+const ADMIN_TOKEN_FILE: &str = "admin-token";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct AdminToken {
+    token: String,
+}
+
+fn admin_token_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(ADMIN_TOKEN_FILE)
+}
+
+fn valid_token(token: &str) -> bool {
+    token.len() == TOKEN_BYTES * 2
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+/// 读取或生成本安装的回环管理通道令牌（幂等；损坏/非法时重新生成——
+/// 旧令牌随即失效，server 由 launcher 重新注入新值，无跨进程记忆）。
+pub fn load_or_create_admin_token(store: &StateStore) -> io::Result<String> {
+    let path = admin_token_path(&store.state_dir());
+    match load_json_recover::<AdminToken>(&path)? {
+        LoadOutcome::Present(v) if valid_token(&v.token) => Ok(v.token),
+        LoadOutcome::Present(_) | LoadOutcome::Corrupted { .. } | LoadOutcome::Missing => {
+            let value = AdminToken {
+                token: new_session_token()?,
+            };
+            write_json_atomic(&path, &value)?;
+            Ok(value.token)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +162,21 @@ mod tests {
         assert!(token
             .bytes()
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn admin_token_is_generated_once_and_regenerated_when_invalid() {
+        let layout = temp_root("admin-token");
+        let store = StateStore::new(&layout.root);
+        let first = load_or_create_admin_token(&store).expect("首次生成应成功");
+        assert!(valid_token(&first), "令牌必须为 64 位小写 hex: {first}");
+        let second = load_or_create_admin_token(&store).expect("二次读取应成功");
+        assert_eq!(first, second, "admin-token 必须恒定");
+
+        // 损坏 → 重新生成（新值合法且不同于旧值语义：旧令牌失效）
+        std::fs::write(admin_token_path(&store.state_dir()), b"{broken").unwrap();
+        let third = load_or_create_admin_token(&store).expect("损坏后应重新生成");
+        assert!(valid_token(&third));
+        let _ = std::fs::remove_dir_all(&layout.root);
     }
 }

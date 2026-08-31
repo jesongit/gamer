@@ -58,6 +58,9 @@ pub struct LaunchExtras {
     pub ipc_pipe: Option<String>,
     /// 本次启动会话令牌，注入 GAMER_LAUNCHER_IPC_TOKEN。
     pub ipc_token: Option<String>,
+    /// 回环管理通道令牌，注入 GAMER_ADMIN_TOKEN（升级 drain 的
+    /// X-Admin-Token 快捷通道与子进程同源；None = 不注入，server 按自身策略）。
+    pub admin_token: Option<String>,
 }
 
 impl LaunchExtras {
@@ -67,6 +70,7 @@ impl LaunchExtras {
             activation_gate: true,
             ipc_pipe: Some(pipe_name),
             ipc_token: Some(token),
+            admin_token: None,
         }
     }
 
@@ -76,7 +80,23 @@ impl LaunchExtras {
             activation_gate: false,
             ipc_pipe: Some(pipe_name),
             ipc_token: Some(token),
+            admin_token: None,
         }
+    }
+
+    /// 附加回环管理通道令牌（链式；升级 drain 与子进程同源必需）。
+    pub fn with_admin_token(mut self, admin_token: Option<String>) -> Self {
+        self.admin_token = admin_token;
+        self
+    }
+
+    /// 附加 IPC 寻址（pipe 名 + 会话令牌）。
+    pub fn pipe_with(mut self, ipc: Option<(String, String)>) -> Self {
+        if let Some((pipe, token)) = ipc {
+            self.ipc_pipe = Some(pipe);
+            self.ipc_token = Some(token);
+        }
+        self
     }
 }
 
@@ -131,6 +151,11 @@ pub fn build_child_env_with_extras(
     }
     if let Some(token) = non_empty(extras.ipc_token.clone()) {
         env.insert("GAMER_LAUNCHER_IPC_TOKEN".to_string(), token);
+    }
+    // 回环管理通道：launcher 注入的令牌使本机 drain（/api/shutdown +
+    // X-Admin-Token）能通过服务端鉴权；空白值视同未设置。
+    if let Some(token) = non_empty(extras.admin_token.clone()) {
+        env.insert("GAMER_ADMIN_TOKEN".to_string(), token);
     }
 
     env.insert(
@@ -233,10 +258,13 @@ pub fn spawn_child_with_extras(
     stderr: Stdio,
 ) -> std::io::Result<Child> {
     let env = build_child_env_with_extras(plan, extras, |key| std::env::var(key).ok());
-    tracing::info!(exe = %plan.exe.display(), cwd = %plan.cwd.display(), env_keys = env.keys().count(), "启动受管子进程");
+    // cwd 受 DOS 当前目录 ~260 上限（verbatim 超限同样 ERROR_DIRECTORY）：
+    // 超长时回退同树短祖先；业务路径全部经 env 绝对注入，server 不依赖 cwd。
+    let cwd = crate::winutil::fallback_current_dir(&plan.cwd, 240);
+    tracing::info!(exe = %plan.exe.display(), cwd = %cwd.display(), env_keys = env.keys().count(), "启动受管子进程");
     Command::new(&plan.exe)
         .args(args)
-        .current_dir(&plan.cwd)
+        .current_dir(cwd)
         .env_clear()
         .envs(&env)
         .stdout(stdout)
@@ -575,5 +603,19 @@ mod tests {
         assert!(!env.contains_key("GAMER_ACTIVATION_GATE"));
         assert!(!env.contains_key("GAMER_LAUNCHER_PIPE"));
         assert!(!env.contains_key("GAMER_LAUNCHER_IPC_TOKEN"));
+    }
+
+    #[test]
+    fn admin_token_extra_injects_loopback_admin_channel() {
+        let extras = LaunchExtras::default().with_admin_token(Some("abc123".to_string()));
+        let env = build_child_env_with_extras(&plan(), &extras, |_| None);
+        assert_eq!(
+            env.get("GAMER_ADMIN_TOKEN").map(String::as_str),
+            Some("abc123")
+        );
+        // 空白值视同未设置
+        let blank = LaunchExtras::default().with_admin_token(Some("  ".to_string()));
+        let env = build_child_env_with_extras(&plan(), &blank, |_| None);
+        assert!(!env.contains_key("GAMER_ADMIN_TOKEN"));
     }
 }

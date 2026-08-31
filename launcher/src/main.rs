@@ -8,7 +8,10 @@ use gamer_launcher::layout::InstallLayout;
 use gamer_launcher::logging;
 
 fn main() {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // CLI 路径（安装根/密钥目录/manifest 路径）先统一 verbatim 化，
+    // 再解析安装根——LongPathsEnabled=0 的主机上 >260 字符路径可用。
+    commands::normalize_cli_paths(&mut cli);
     let layout = InstallLayout::resolve(cli.install_root.clone());
     logging::init(&layout, cli.log_level.as_deref());
     tracing::debug!(install_root = %layout.root.display(), "gamer-launcher 启动");

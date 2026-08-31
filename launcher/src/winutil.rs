@@ -5,13 +5,17 @@
 //!   探测与终止孤儿候选进程（计划 §6.6：不用进程名/端口猜测，exe 匹配才动手）
 //! - `pipe_security_current_user`：SDDL 构造仅含 SYSTEM + 当前用户的 DACL，
 //!   供 named pipe 的 SECURITY_ATTRIBUTES 使用（ipc-v1.md §1.2）
+//! - `extended_len_path`：绝对路径 → `\\?\` 扩展长度（verbatim）形态。
+//!   LongPathsEnabled=0 的主机上 >260 字符路径只有 verbatim 形态可用（不过
+//!   Win32 归一化层）；安装根统一经 [`crate::layout::InstallLayout::resolve`]
+//!   转成该形态后，std::fs 与 CreateProcessW（lpApplicationName）均可正常工作。
 
 #![allow(unknown_lints)]
 #![allow(clippy::unsafe_derive_send_sync)]
 
 use std::ffi::c_void;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{LocalFree, HANDLE, HLOCAL};
@@ -31,6 +35,112 @@ use windows_sys::Win32::System::Threading::{
 
 const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x0000_0002;
 const SDDL_REVISION_1: u32 = 1;
+
+const BACKSLASH: u16 = b'\\' as u16;
+const SLASH: u16 = b'/' as u16;
+
+fn wide_to_path(wide: &[u16]) -> PathBuf {
+    PathBuf::from(std::ffi::OsString::from_wide(wide))
+}
+
+fn starts_with_device_prefix(wide: &[u16]) -> bool {
+    // `\\?\`（verbatim DOS）与 `\\.\`（设备）形态不做二次处理
+    wide.len() >= 4
+        && wide[0] == BACKSLASH
+        && wide[1] == BACKSLASH
+        && (wide[2] == b'?' as u16 || wide[2] == b'.' as u16)
+        && wide[3] == BACKSLASH
+}
+
+/// 绝对路径 → 扩展长度（verbatim）形态：`C:\...` → `\\?\C:\...`、
+/// UNC `\\server\share\...` → `\\?\UNC\server\share\...`。
+///
+/// LongPathsEnabled=0 的主机上，>260 字符的路径只有 verbatim 形态能通过
+/// Win32 文件 API 与 CreateProcessW（lpApplicationName 显式给出时）；本函数
+/// 同时做词法归一化（`/` → `\`）——verbatim 形态下系统不再做任何运行期
+/// 归一化，混入的 `/` 会被当成字面字符。相对路径与已有 `\\?\` / `\\.\`
+/// 前缀的输入原样返回（幂等）。
+pub fn extended_len_path(path: &Path) -> PathBuf {
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    for ch in wide.iter_mut() {
+        if *ch == SLASH {
+            *ch = BACKSLASH;
+        }
+    }
+    if starts_with_device_prefix(&wide) {
+        return wide_to_path(&wide);
+    }
+    if wide.len() >= 2 && wide[0] == BACKSLASH && wide[1] == BACKSLASH {
+        // UNC：\\server\share\... → \\?\UNC\server\share\...
+        let mut out = vec![
+            BACKSLASH,
+            BACKSLASH,
+            b'?' as u16,
+            BACKSLASH,
+            b'U' as u16,
+            b'N' as u16,
+            b'C' as u16,
+            BACKSLASH,
+        ];
+        out.extend_from_slice(&wide[2..]);
+        return wide_to_path(&out);
+    }
+    let drive_absolute = wide.len() >= 2
+        && wide[1] == b':' as u16
+        && (wide[0] >= b'A' as u16 && wide[0] <= b'Z' as u16
+            || wide[0] >= b'a' as u16 && wide[0] <= b'z' as u16);
+    if !drive_absolute {
+        // 相对路径无法安全加前缀（语义依赖 cwd），原样返回
+        return path.to_path_buf();
+    }
+    let mut out = vec![BACKSLASH, BACKSLASH, b'?' as u16, BACKSLASH];
+    out.extend_from_slice(&wide);
+    // `C:` → `\\?\C:\`（盘相对形态没有意义，补齐根分隔符）
+    if out.len() == 6 {
+        out.push(BACKSLASH);
+    }
+    wide_to_path(&out)
+}
+
+/// 进程镜像路径比较用的归一化形态：小写 + 去掉 verbatim 前缀
+/// （`\\?\UNC\server\share` → `\\server\share`，`\\?\C:\x` → `C:\x`）。
+/// spawn 用 verbatim 形态、而 QueryFullProcessImageNameW 的返回形态随系统
+/// 而异，逐字节比较会误判「PID 镜像不一致」。
+fn normalize_image_path(path: &Path) -> String {
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    let back = r"\\";
+    if let Some(rest) = lower.strip_prefix(r"\\?\unc\") {
+        return format!("{back}{rest}");
+    }
+    if let Some(rest) = lower.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    lower
+}
+
+/// CreateProcessW 的 lpCurrentDirectory 受 DOS 当前目录长度上限（~260，实测
+/// verbatim 形态超限同样报 ERROR_DIRECTORY/267）——长路径安装根下不能把
+/// `versions/<v>` 直接交给子进程当 cwd。回退策略：取同一目录树中不超过
+/// `max_len` 的最近祖先目录（它是真实存在的目录的前缀，必然存在）；server
+/// 的全部可解析路径经 GAMER_*/GB_* 环境变量绝对注入，不依赖 cwd。
+pub fn fallback_current_dir(path: &Path, max_len: usize) -> PathBuf {
+    let extended = extended_len_path(path);
+    let text = extended.to_string_lossy().into_owned();
+    if text.chars().count() <= max_len {
+        return extended;
+    }
+    let mut candidate = extended.clone();
+    while let Some(parent) = candidate.parent() {
+        if parent == candidate {
+            break;
+        }
+        candidate = parent.to_path_buf();
+        if candidate.to_string_lossy().chars().count() <= max_len {
+            return candidate;
+        }
+    }
+    extended
+}
 
 fn to_wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s)
@@ -99,14 +209,13 @@ pub fn process_image_path(pid: u32) -> Option<PathBuf> {
 }
 
 /// 终止 PID 指向的进程，但**仅当**其镜像路径与 `expected_exe` 一致（不区分大小写；
-/// 防 PID 复用误杀）。返回是否执行了终止。
+/// 防 PID 复用误杀；verbatim 前缀差异经 normalize_image_path 归一后比较）。
+/// 返回是否执行了终止。
 pub fn terminate_pid_if_image(pid: u32, expected_exe: &Path) -> bool {
     let Some(actual) = process_image_path(pid) else {
         return false;
     };
-    let matches = actual
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&expected_exe.to_string_lossy());
+    let matches = normalize_image_path(&actual) == normalize_image_path(expected_exe);
     if !matches {
         tracing::warn!(
             pid,
@@ -236,6 +345,73 @@ const _MEMORY_FEATURE_ANCHOR: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extended_len_path_prefixes_drive_absolute_paths() {
+        assert_eq!(
+            extended_len_path(Path::new(r"C:\x\y")),
+            PathBuf::from(r"\\?\C:\x\y")
+        );
+        // 盘相对形态补齐根分隔符
+        assert_eq!(
+            extended_len_path(Path::new(r"C:")),
+            PathBuf::from(r"\\?\C:\")
+        );
+        // 幂等：verbatim / 设备形态原样返回
+        assert_eq!(
+            extended_len_path(Path::new(r"\\?\C:\x")),
+            PathBuf::from(r"\\?\C:\x")
+        );
+        assert_eq!(
+            extended_len_path(Path::new(r"\\.\pipe\gamebot")),
+            PathBuf::from(r"\\.\pipe\gamebot")
+        );
+        // verbatim 下不再做归一化，这里提前统一分隔符
+        assert_eq!(
+            extended_len_path(Path::new(r"C:/x/y")),
+            PathBuf::from(r"\\?\C:\x\y")
+        );
+        // UNC → \\?\UNC\
+        assert_eq!(
+            extended_len_path(Path::new(r"\\srv\share\x")),
+            PathBuf::from(r"\\?\UNC\srv\share\x")
+        );
+        // 相对路径无法安全加前缀，原样返回
+        assert_eq!(
+            extended_len_path(Path::new(r"rel\dir")),
+            PathBuf::from(r"rel\dir")
+        );
+    }
+
+    #[test]
+    fn image_path_comparison_ignores_verbatim_prefix_and_case() {
+        assert_eq!(
+            normalize_image_path(Path::new(r"\\?\C:\Inst\gamer-server.exe")),
+            r"c:\inst\gamer-server.exe"
+        );
+        assert_eq!(
+            normalize_image_path(Path::new(r"\\?\UNC\srv\share\x")),
+            r"\\srv\share\x"
+        );
+        assert_eq!(
+            normalize_image_path(Path::new(r"C:\Inst\GAMER-SERVER.EXE")),
+            normalize_image_path(Path::new(r"\\?\c:\inst\gamer-server.exe"))
+        );
+    }
+
+    #[test]
+    fn fallback_current_dir_truncates_to_existing_ancestor() {
+        let long = Path::new(r"C:\base").join("a").join("bbbbbbbbbbbbbbbbbbbb");
+        let fb = fallback_current_dir(&long.join("c").join("d"), 24);
+        let s = fb.to_string_lossy().into_owned();
+        assert!(s.chars().count() <= 24 + 4, "回退 cwd 超限: {s}");
+        assert!(s.starts_with(r"\\?\C:\base"), "必须是同树祖先: {s}");
+        // 短路径原样返回
+        assert_eq!(
+            fallback_current_dir(Path::new(r"C:\base\a"), 24),
+            PathBuf::from(r"\\?\C:\base\a")
+        );
+    }
 
     #[test]
     fn random_bytes_are_nonzero_and_sized() {

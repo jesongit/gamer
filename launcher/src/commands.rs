@@ -31,6 +31,58 @@ pub struct DoctorInvocation {
     pub expect_channel: Option<String>,
 }
 
+/// CLI 提供的路径统一转成扩展长度（verbatim `\\?\`）形态：LongPathsEnabled=0
+/// 的主机上 >260 字符路径只有该形态可用（与安装根的 verbatim 化同源）。
+/// URL 形态的 manifest 来源保持原样。
+pub fn normalize_cli_paths(cli: &mut Cli) {
+    fn ext(p: &mut PathBuf) {
+        *p = crate::winutil::extended_len_path(p);
+    }
+    let mut manifest_url: Option<String> = None;
+    if let Command::Upgrade { manifest } = &mut cli.command {
+        if !(manifest.starts_with("http://") || manifest.starts_with("https://")) {
+            let p = PathBuf::from(manifest.as_str());
+            manifest_url = Some(
+                crate::winutil::extended_len_path(&p)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
+    if let Some(p) = cli.install_root.as_mut() {
+        ext(p);
+    }
+    if let Some(p) = cli.keys_dir.as_mut() {
+        ext(p);
+    }
+    match &mut cli.command {
+        Command::Doctor {
+            manifest, sig, key, ..
+        } => {
+            if let Some(p) = manifest.as_mut() {
+                ext(p);
+            }
+            if let Some(p) = sig.as_mut() {
+                ext(p);
+            }
+            if let Some(p) = key.as_mut() {
+                ext(p);
+            }
+        }
+        Command::Repair { manifest, .. } => {
+            if let Some(p) = manifest.as_mut() {
+                ext(p);
+            }
+        }
+        Command::Upgrade { manifest } => {
+            if let Some(normalized) = manifest_url {
+                *manifest = normalized;
+            }
+        }
+        Command::Start | Command::Status => {}
+    }
+}
+
 pub fn dispatch(cli: &Cli, layout: &InstallLayout) -> i32 {
     // trampoline helper 复用一个现有的无参数子命令形态以保持 CLI 兼容；必须在
     // 普通 dispatch 前拦截，避免 helper 获取安装锁或启动 server。
@@ -608,13 +660,19 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
     } else {
         String::new()
     };
+    // 回环管理通道令牌：注入子进程（GAMER_ADMIN_TOKEN），使升级 drain 的
+    // X-Admin-Token 快捷通道可用；生成失败仅降级为匿名 drain（与旧行为一致）。
+    let admin_token = installation::load_or_create_admin_token(&store)
+        .map_err(|e| tracing::warn!("admin-token 生成失败（{e}），drain 将为匿名请求"))
+        .ok();
     let extras = if ipc_enabled && !ipc_token.is_empty() {
         LaunchExtras::managed(
             installation::pipe_name_for(&installation_id),
             ipc_token.clone(),
         )
+        .with_admin_token(admin_token)
     } else {
-        LaunchExtras::default()
+        LaunchExtras::default().with_admin_token(admin_token)
     };
 
     let adb = supervisor::latest_component_exe(layout, "adb", "adb.exe");
@@ -712,6 +770,10 @@ fn spawn_ipc_server(
     keys_dir: PathBuf,
 ) {
     let check_source = check_source_from_env();
+    let store = StateStore::new(&layout.root);
+    let admin_token = installation::load_or_create_admin_token(&store)
+        .map_err(|e| tracing::warn!("admin-token 生成失败（{e}），IPC 回滚 drain 将为匿名请求"))
+        .ok();
     let dispatcher = Dispatcher::new(
         layout,
         installation_id.clone(),
@@ -719,6 +781,7 @@ fn spawn_ipc_server(
         keys_dir.clone(),
         UpgradeOptions {
             keys_dir,
+            admin_token,
             ..UpgradeOptions::default()
         },
         false,
@@ -819,9 +882,15 @@ fn cmd_upgrade(layout: &InstallLayout, cli: &Cli, manifest: &str) -> i32 {
     };
     let installation_id = installation::load_or_create(&store).unwrap_or_default();
     let ipc_token = installation::new_session_token().unwrap_or_default();
+    // 回环管理通道令牌：与 start 注入子进程的值同源（state/admin-token），
+    // drain 旧版本时以 X-Admin-Token 通过 /api/shutdown 鉴权。
+    let admin_token = installation::load_or_create_admin_token(&store)
+        .map_err(|e| tracing::warn!("admin-token 生成失败（{e}），drain 将为匿名请求"))
+        .ok();
     let opts = UpgradeOptions {
         keys_dir,
         ipc: Some((installation::pipe_name_for(&installation_id), ipc_token)),
+        admin_token,
         ..UpgradeOptions::default()
     };
     let engine = Engine::new(layout.clone(), opts);

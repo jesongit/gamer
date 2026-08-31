@@ -79,6 +79,9 @@ pub struct UpgradeOptions {
     pub ipc: Option<(String, String)>,
     /// 演练模式：无 IPC 令牌时不跳过 activate（夹具不校验 token 时可开）。
     pub activate_without_token: bool,
+    /// 回环管理通道令牌（与子进程 GAMER_ADMIN_TOKEN 同源）：drain 旧版本时以
+    /// X-Admin-Token 通过 /api/shutdown 鉴权；None = 匿名 drain（生产 server 会 401）。
+    pub admin_token: Option<String>,
 }
 
 impl Default for UpgradeOptions {
@@ -90,6 +93,7 @@ impl Default for UpgradeOptions {
             shutdown_timeout: Duration::from_secs(90),
             ipc: None,
             activate_without_token: false,
+            admin_token: None,
         }
     }
 }
@@ -1034,6 +1038,15 @@ impl Engine {
             Ok(j) => j,
             Err(e) => return UpgradeOutcome::ManualRecovery { error: e },
         };
+        // 失败原因先落 journal（计划 §6.6「错误摘要」）：rollback_procedure 的
+        // 终态只改 state/child/last_step，不覆盖 error——回滚成功后 journal 保持
+        // idle/failed + 原始错误，人工排查有据可查。
+        let _ = self.mutate_journal(|j| {
+            j.error = Some(crate::state::JournalError {
+                code: err.code.clone(),
+                message: err.message.clone(),
+            });
+        });
         match self.rollback_procedure(&journal, None, was_running) {
             Ok(()) => UpgradeOutcome::FailedOldHealthy { error: err },
             Err(rollback_err) => UpgradeOutcome::ManualRecovery {
@@ -1153,13 +1166,15 @@ impl Engine {
         };
         let app_dir = self.layout.versions_dir().join(&current.current);
         let plan = self.launch_plan_for(&current.current, exe, app_dir);
-        match spawn_child_with_extras(
-            &plan,
-            &[],
-            &LaunchExtras::default(),
-            Stdio::inherit(),
-            Stdio::inherit(),
-        ) {
+        // 重启的旧版本同样注入回环管理令牌，保证后续 drain/再次升级可用
+        let extras = LaunchExtras::default()
+            .with_admin_token(self.opts.admin_token.clone())
+            .pipe_with(self.opts.ipc.clone());
+        // stdio 全脱离（null）：升级器进程是一次性的（commit/回滚后即退出），
+        // 子进程必须不继承其控制台/管道——否则 CLI 退出、读取端关闭后，继承的
+        // stdio 句柄失效，子进程再派生的外部进程探针（adb/ffmpeg）会持续失败。
+        // server 自身日志走 GB_LOG 文件，不依赖继承的 stdout/stderr。
+        match spawn_child_with_extras(&plan, &[], &extras, Stdio::null(), Stdio::null()) {
             Ok(child) => {
                 let probe = self.opts.probe.clone();
                 match supervisor::wait_for_ready(port, &probe) {
@@ -1261,10 +1276,17 @@ impl Engine {
                 activation_gate: true,
                 ..LaunchExtras::default()
             },
-        };
-        spawn_child_with_extras(&plan, &[], &extras, Stdio::inherit(), Stdio::inherit()).map_err(
-            |e| BusinessError::new(codes::LAUNCHER_UNREACHABLE, format!("候选启动失败: {e}")),
-        )
+        }
+        // 候选就是提交后的「现网版本」：同样注入回环管理令牌，否则下一次升级
+        // 对它 drain 时 /api/shutdown 会 401（实测缺陷，2026-08-31）。
+        .with_admin_token(self.opts.admin_token.clone());
+        // stdio 全脱离（null）：升级器进程是一次性的（commit 后即退出，候选成为
+        // 孤儿继续服务）。继承 CLI 的 stdout/stderr 会在 CLI 退出、管道读取端关闭
+        // 后失效，导致候选再派生的外部进程探针（adb/ffmpeg readiness）持续失败
+        // （实测缺陷，2026-08-31）；server 日志走 GB_LOG 文件，无需继承 stdio。
+        spawn_child_with_extras(&plan, &[], &extras, Stdio::null(), Stdio::null()).map_err(|e| {
+            BusinessError::new(codes::LAUNCHER_UNREACHABLE, format!("候选启动失败: {e}"))
+        })
     }
 
     fn resolve_candidate_exe(&self, update_id: &str, version: &str) -> Option<PathBuf> {
@@ -1303,21 +1325,41 @@ impl Engine {
     }
 
     /// draining：POST /api/shutdown → 等待端口关闭（有句柄时调用方另以 wait 兜底）。
-    /// 超时 = 取消升级（契约默认，不硬杀）。
+    /// 超时 = 取消升级（契约默认，不硬杀）。带 X-Admin-Token 时走服务端回环
+    /// 管理通道鉴权（本机管理凭据与子进程注入值同源）。
+    ///
+    /// 读超时语义（缺陷 #1，真机验收 2026-08-31，见
+    /// docs/UPDATE_REALDEVICE_EVIDENCE.md §R-7）：server `/api/shutdown` handler
+    /// **同步 await 完整 drain**（活动 run 10s 宽限 + 拆全部 scrcpy 会话，实测
+    /// 11.6s）才回 200。读超时若小于完整 drain 时长，launcher 提前断开 →
+    /// hyper 取消 handler future → `ShutdownCoordinator::request()` 在
+    /// `(self.drain)().await` 处被 drop，drain 半途停滞且无自恢复 → 引擎只能
+    /// 在 shutdown_timeout 后取消升级（无会话场景 drain 秒级故 E2E 未暴露）。
+    /// 因此读超时必须覆盖 server 侧完整 drain：取 `shutdown_timeout + 5s`
+    /// （余量只用于把响应读回来）；总等待仍由下方以 `started` 起算的
+    /// shutdown_timeout deadline 收口，取消上界不变。
     fn drain_old_server(&self, port: u16, running: bool) -> Result<(), String> {
         if !running {
             return Ok(());
         }
+        let started = Instant::now();
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut headers: Vec<(&str, &str)> = Vec::new();
+        let admin_token = self
+            .opts
+            .admin_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        if let Some(token) = admin_token {
+            headers.push(("X-Admin-Token", token));
+        }
         let shutdown = http_request(
             addr,
             "POST",
             "/api/shutdown",
-            &[],
-            self.opts
-                .probe
-                .per_attempt_timeout
-                .max(Duration::from_secs(5)),
+            &headers,
+            self.opts.shutdown_timeout + Duration::from_secs(5),
         );
         match shutdown {
             Ok(resp) if (200..300).contains(&resp.status) => {}
@@ -1331,7 +1373,7 @@ impl Engine {
                 tracing::warn!(%reason, "/api/shutdown 请求失败（可能未在监听），继续等待端口关闭");
             }
         }
-        let deadline = Instant::now() + self.opts.shutdown_timeout;
+        let deadline = started + self.opts.shutdown_timeout;
         while Instant::now() < deadline {
             if !self.server_listening(port) {
                 return Ok(());
@@ -1346,6 +1388,9 @@ impl Engine {
 
     /// candidate_ready：/health/ready 200 + boot_id 差异 + 版本一致（info 优先，
     /// 非 200 回退 ready body 字段）。候选进程提前退出 → 立即失败。
+    /// 候选带激活闸时（ipc 已配置），/health/ready 在 activate 前恒为
+    /// 503 ready:false——引擎在此先完成 activate（幂等；后续 activating 边的
+    /// 重复调用命中幂等回执），否则门内候选永远等不到 200。
     fn wait_candidate_ready(
         &self,
         port: u16,
@@ -1357,6 +1402,8 @@ impl Engine {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let deadline = Instant::now() + self.opts.probe.overall_timeout;
         let mut last: Option<String> = None;
+        let gate_expected = self.opts.ipc.is_some();
+        let mut gate_activate_attempted = false;
         loop {
             if let Ok(Some(_)) = child.try_wait() {
                 return Err(BusinessError::new(
@@ -1388,7 +1435,30 @@ impl Engine {
                         expected_schema,
                     );
                 }
-                Ok(resp) => last = Some(format!("HTTP {}", resp.status)),
+                Ok(resp) => {
+                    last = Some(format!("HTTP {}", resp.status));
+                    if gate_expected
+                        && !gate_activate_attempted
+                        && resp.status == 503
+                        && resp
+                            .body_json()
+                            .and_then(|body| body.get("ready").and_then(serde_json::Value::as_bool))
+                            == Some(false)
+                    {
+                        gate_activate_attempted = true;
+                        match self.activate(port) {
+                            Ok(()) => {
+                                tracing::info!("候选处于激活闸内，已先行 activate（幂等）");
+                                last = Some("激活闸内，activate 已受理".to_string());
+                            }
+                            // 令牌被拒 = 无法激活的确定性失败，立即中止等待
+                            Err(err) if err.message.contains("(HTTP 403)") => return Err(err),
+                            Err(err) => {
+                                tracing::debug!(error = %err, "闸内 activate 未受理（继续等待就绪）")
+                            }
+                        }
+                    }
+                }
                 Err(reason) => last = Some(reason),
             }
             std::thread::sleep(self.opts.probe.interval);
@@ -1596,6 +1666,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::AtomicBool;
     use std::sync::Mutex;
     use std::thread::JoinHandle;
 
@@ -1671,6 +1742,76 @@ mod tests {
             ),
             root,
         )
+    }
+
+    /// 缺陷 #1 回归台架：模拟真实 server `/api/shutdown` 的耦合语义——
+    /// handler **同步 await 完整 drain**（本 mock 延迟 `delay_ms` 才回 200）；
+    /// 客户端若在读到响应前断开（旧缺陷：读超时 5s < drain 时长），等价于
+    /// hyper 取消 handler future → drain 永不完成 → 端口不关闭。
+    /// 客户端是否坚持到响应：mock 在延迟窗口内对连接做带超时的探测读——
+    /// 返回 `Ok(0)`/连接错误 = 客户端已断开（记入 abandoned 并保持监听，
+    /// 模拟 drain 停滞）；超时（连接仍在）= 客户端在等待 → 回 200 并关监听。
+    fn serve_slow_shutdown(delay_ms: u64) -> (SocketAddr, Arc<AtomicBool>, JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let abandoned = Arc::new(AtomicBool::new(false));
+        let handle = {
+            let abandoned = abandoned.clone();
+            std::thread::spawn(move || {
+                let listener = listener;
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            request.extend_from_slice(&buf[..n]);
+                            if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                assert!(
+                    String::from_utf8_lossy(&request).starts_with("POST /api/shutdown "),
+                    "台架只应收到 /api/shutdown"
+                );
+                stream
+                    .set_read_timeout(Some(Duration::from_millis(delay_ms + 500)))
+                    .unwrap();
+                let mut probe = [0u8; 1];
+                match stream.read(&mut probe) {
+                    Ok(0) => abandoned.store(true, Ordering::SeqCst),
+                    Err(e)
+                        if !matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        abandoned.store(true, Ordering::SeqCst)
+                    }
+                    _ => {}
+                }
+                if abandoned.load(Ordering::SeqCst) {
+                    // 客户端已断开（回归态）：保持端口监听，模拟 drain 停滞；
+                    // 线程只在回归路径存活，测试进程退出时随之消亡。
+                    loop {
+                        std::thread::sleep(Duration::from_secs(1));
+                    }
+                }
+                let body = br#"{"ok":true}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                drop(stream);
+                drop(listener); // 回 200 后关监听 → 端口关闭，drain 可完成
+            })
+        };
+        (addr, abandoned, handle)
     }
 
     fn prepare_switched_fixture(engine: &Engine, root: &Path, update_id: &str) {
@@ -1890,6 +2031,66 @@ mod tests {
             .drain_old_server(addr.port(), true)
             .expect_err("被占用端口在超时后必须取消升级");
         assert!(reason.contains("仍未关闭"));
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 缺陷 #1 回归：server /api/shutdown 同步 await 完整 drain（活动 run 宽限 +
+    /// 拆 scrcpy 会话，真机实测 11.6s > 旧读超时 5s）。drain 的读超时必须覆盖
+    /// 完整 drain 时长——慢响应（6s，超过旧 5s 读超时）必须等到 200 并完成
+    /// 停机，而不是 5s 断开导致 drain 半途停滞、升级在 shutdown_timeout 后被取消。
+    #[test]
+    fn drain_survives_slow_graceful_shutdown_beyond_legacy_read_timeout() {
+        let (base, root) = engine();
+        let mut opts = base.opts.clone();
+        // 总等待上界收口到 20s（回归态：5s 断开 + 20s 端口等待后取消）；
+        // 修复态：~6.5s 收到 200 + 端口关闭即成功。
+        opts.shutdown_timeout = Duration::from_secs(20);
+        let engine = Engine::new(base.layout.clone(), opts);
+        let (addr, abandoned, server) = serve_slow_shutdown(6_000);
+
+        let began = Instant::now();
+        engine
+            .drain_old_server(addr.port(), true)
+            .expect("慢响应 shutdown 必须等到完成，而非读超时断开");
+        let waited = began.elapsed();
+        assert!(
+            waited >= Duration::from_millis(6_000),
+            "drain 应等待完整 drain 时长，实际 {:?}",
+            waited
+        );
+        assert!(
+            !abandoned.load(Ordering::SeqCst),
+            "等待期间 launcher 不得提前断开 /api/shutdown 连接"
+        );
+        assert!(
+            !engine.server_listening(addr.port()),
+            "shutdown 完成后端口应已关闭"
+        );
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 加速路径不退化：秒级完成的空载 drain（M2 E2E 形态）不受更长读超时影响，
+    /// 响应即返回、端口关闭即成功，无新增等待。
+    #[test]
+    fn drain_fast_shutdown_path_stays_fast_under_longer_read_timeout() {
+        let (base, root) = engine();
+        let mut opts = base.opts.clone();
+        opts.shutdown_timeout = Duration::from_secs(20);
+        let engine = Engine::new(base.layout.clone(), opts);
+        let (addr, server) = serve_for(1_500, Arc::new(|_| (200, r#"{"ok":true}"#.to_string())));
+
+        let began = Instant::now();
+        engine
+            .drain_old_server(addr.port(), true)
+            .expect("空载秒级 drain 必须照常成功");
+        let waited = began.elapsed();
+        assert!(
+            waited < Duration::from_secs(5),
+            "快路径不应被新读超时拖慢，实际 {:?}",
+            waited
+        );
         server.join().unwrap();
         let _ = fs::remove_dir_all(root);
     }

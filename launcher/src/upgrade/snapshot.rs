@@ -115,12 +115,24 @@ fn safe_metadata(path: &Path) -> Result<fs::Metadata, String> {
     Ok(meta)
 }
 
+/// 目录**遍历根**自身的元数据：允许根是 symlink/junction（QA-005 跨盘部署形态：
+/// C: 安装根 + junction 形式的 data/ 指向另一块盘），但必须解析到目录；
+/// 树**内部**的条目仍走 safe_metadata 逐项拒绝（防 zip-slip/链接攻击语义不变）。
+fn dir_root_metadata(path: &Path) -> Result<fs::Metadata, String> {
+    let meta = fs::symlink_metadata(path).map_err(|e| format!("读取 {:?} 失败: {e}", path))?;
+    if meta.file_type().is_symlink() || is_reparse_point(&meta) {
+        return fs::metadata(path).map_err(|e| format!("读取 {:?} 目标失败: {e}", path));
+    }
+    Ok(meta)
+}
+
 /// 递归收集目录下全部常规文件；遇到链接、特殊文件或读取竞态直接失败。
+/// 只有 `base` 本身允许是 reparse point（见 dir_root_metadata）。
 fn walk_files(base: &Path) -> Result<Vec<PathBuf>, String> {
     if !base.exists() {
         return Ok(Vec::new());
     }
-    let base_meta = safe_metadata(base)?;
+    let base_meta = dir_root_metadata(base)?;
     if !base_meta.is_dir() {
         return Err(format!("路径不是目录: {}", base.display()));
     }
@@ -228,7 +240,44 @@ fn read_manifest(root: &Path, update_id: &str) -> Result<SnapshotManifest, Strin
     Ok(manifest)
 }
 
+/// SQLite 派生旁车文件（`<db>-wal` / `<db>-shm`，大小写不敏感后缀）且清单未收录：
+/// 快照完整性检查用 server `inspect` 打开副本时，对 WAL 库的读写兜底打开会在
+/// 快照 data/ 下留下这两个临时产物（实测缺陷，2026-08-31）。它们是派生文件、
+/// 不参与恢复（恢复只复制清单内文件），验证时按良性旁车忽略。
+fn is_unlisted_sqlite_sidecar(path: &str, listed: &BTreeSet<String>) -> bool {
+    let lower = path.to_lowercase();
+    for suffix in ["-wal", "-shm"] {
+        if let Some(base) = lower.strip_suffix(suffix) {
+            if listed.contains(&lower) {
+                // 清单里明确收录的旁车文件仍按普通条目校验
+                continue;
+            }
+            if listed.contains(base) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn listed_snapshot_files(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
+    // 恢复 staging 目录没有 manifest.json（只复制清单内文件，不存在旁车）；
+    // 快照目录则有——用清单判定「未收录的 SQLite 旁车」并按良性过滤。
+    let listed: BTreeSet<String> = {
+        let manifest_path = root.join(SNAPSHOT_MANIFEST);
+        match fs::read(&manifest_path) {
+            Ok(raw) => {
+                let manifest: SnapshotManifest =
+                    serde_json::from_slice(&raw).map_err(|e| format!("快照清单解析失败: {e}"))?;
+                manifest
+                    .files
+                    .iter()
+                    .map(|file| file.path.to_lowercase())
+                    .collect()
+            }
+            Err(_) => BTreeSet::new(),
+        }
+    };
     let mut actual = BTreeMap::new();
     for path in walk_files(root)? {
         let rel = rel_forward(root, &path);
@@ -236,6 +285,9 @@ fn listed_snapshot_files(root: &Path) -> Result<BTreeMap<String, PathBuf>, Strin
             continue;
         }
         check_manifest_path(&rel)?;
+        if is_unlisted_sqlite_sidecar(&rel, &listed) {
+            continue;
+        }
         if actual.insert(rel.to_lowercase(), path).is_some() {
             return Err("快照目录存在大小写碰撞文件".to_string());
         }
@@ -388,6 +440,21 @@ fn create_with_inspector(
     // 整体验证（不通过绝不返回成功——快照验证不全不进入 migrating）
     verify_with_inspector(layout, update_id, candidate_exe, true, inspector)?;
 
+    // 清理 inspect 在副本旁留下的临时旁车文件（WAL 库读写兜底打开的副作用），
+    // 让快照目录与清单精确一致；清理失败不影响快照有效性（验证已按忽略语义容忍）。
+    let data_root = root.join("data");
+    let listed: BTreeSet<String> = manifest
+        .files
+        .iter()
+        .map(|file| file.path.to_lowercase())
+        .collect();
+    for path in walk_files(&data_root).unwrap_or_default() {
+        let rel = rel_forward(&root, &path);
+        if is_unlisted_sqlite_sidecar(&rel, &listed) {
+            let _ = fs::remove_file(&path);
+        }
+    }
+
     Ok(SnapshotReport {
         id: update_id.to_string(),
         path: root.to_string_lossy().into_owned(),
@@ -492,7 +559,9 @@ pub fn restore(layout: &InstallLayout, update_id: &str) -> Result<(), String> {
             .map_err(|e| format!("创建 quarantine 事务目录失败: {e}"))?;
     }
     if data_live.exists() {
-        let meta = safe_metadata(&data_live)?;
+        // data 根本身允许是 junction（跨盘部署形态）；随后的 rename 只移动
+        // junction 条目本身（同卷），物理数据留在目标盘、经 quarantine 可追溯。
+        let meta = dir_root_metadata(&data_live)?;
         if !meta.is_dir() {
             return Err(format!("现网 data/ 不是目录: {}", data_live.display()));
         }
@@ -809,10 +878,106 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_sidecar_left_by_inspect_is_ignored_on_verify_and_cleaned_after_create() {
+        // 实测缺陷回归（2026-08-31）：server inspect 对 WAL 库的读写兜底打开会在
+        // 快照 data/ 下留下 <db>-wal/<db>-shm；恢复验证不得把它们当多余文件，
+        // 否则每次回滚都会落入 manual_recovery_required。
+        let layout = temp_layout("sidecar");
+        write(
+            &layout.root,
+            "data/gamer.db",
+            b"SQLite format 3\0wal-fixture",
+        );
+        write(&layout.root, "config/config.toml", b"port = 8443\n");
+        let inspector = MockInspector { schema: Some(1) };
+        create_with_inspector(
+            &layout,
+            "upd-sidecar",
+            Some(Path::new("candidate")),
+            &inspector,
+        )
+        .expect("快照应成功");
+
+        // 模拟 inspect 副作用：旁车文件出现在快照 data/ 下（不在清单内）
+        write(
+            &backup_dir(&layout, "upd-sidecar").join("data"),
+            "gamer.db-wal",
+            b"",
+        );
+        write(
+            &backup_dir(&layout, "upd-sidecar").join("data"),
+            "gamer.db-shm",
+            &[0u8; 32768],
+        );
+        verify_with_inspector(
+            &layout,
+            "upd-sidecar",
+            Some(Path::new("candidate")),
+            true,
+            &inspector,
+        )
+        .expect("未收录的 SQLite 旁车文件必须被容忍");
+
+        // 新建快照结束时自带旁车清理：create 后写入的旁车被移除
+        write(
+            &backup_dir(&layout, "upd-sidecar").join("data"),
+            "gamer.db-wal",
+            b"",
+        );
+        create_with_inspector(
+            &layout,
+            "upd-sidecar",
+            Some(Path::new("candidate")),
+            &inspector,
+        )
+        .expect("同事务重复快照应成功");
+        assert!(
+            !backup_dir(&layout, "upd-sidecar")
+                .join("data/gamer.db-wal")
+                .exists(),
+            "快照创建收尾必须清理未收录的旁车文件"
+        );
+
+        // 清单内未收录的旁车文件无论内容如何都按良性过滤（内容篡改由 gamer.db
+        // 自身的 hash 门禁负责——见 manifest-integrity 测试）
+        write(
+            &backup_dir(&layout, "upd-sidecar").join("data"),
+            "gamer.db-wal",
+            b"x",
+        );
+        verify_with_inspector(
+            &layout,
+            "upd-sidecar",
+            Some(Path::new("candidate")),
+            true,
+            &inspector,
+        )
+        .expect("旁车过滤与内容无关，验证应通过");
+
+        // 副本内 gamer.db 被篡改仍必须拒绝（过滤只针对旁车，不放松主文件门禁）
+        write(
+            &backup_dir(&layout, "upd-sidecar").join("data"),
+            "gamer.db",
+            b"TAMPERED",
+        );
+        let report_err = verify_with_inspector(
+            &layout,
+            "upd-sidecar",
+            Some(Path::new("candidate")),
+            true,
+            &inspector,
+        )
+        .unwrap_err();
+        assert!(
+            report_err.contains("sha256") || report_err.contains("size"),
+            "{report_err}"
+        );
+
+        let _ = fs::remove_dir_all(&layout.root);
+    }
+
+    #[test]
     fn qa007_many_small_files_snapshot_with_bounded_db_fixture() {
-        // QA-007 本地替代：受控大小的 DB fixture + 2048 个小文件，验证快照
-        // manifest 的文件数、逐文件 hash 和完整复验。1 GiB 稀疏文件只在
-        // engine 的 preflight 计数测试中建立，避免 fs::copy 将空洞物化。
         let layout = temp_layout("qa007-pressure");
         let db = layout.root.join("data/gamer.db");
         fs::create_dir_all(db.parent().unwrap()).unwrap();
@@ -857,5 +1022,125 @@ mod tests {
         assert_eq!(manifest.total_bytes, report.total_bytes);
 
         let _ = fs::remove_dir_all(&layout.root);
+    }
+
+    #[cfg(windows)]
+    fn create_junction(link: &Path, target: &Path) {
+        let output = Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .expect("mklink 进程应可启动");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.status.success() && link.exists(),
+            "创建 junction 失败（{link:?} → {target:?}）: {text}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn junctioned_data_root_snapshots_but_nested_reparse_is_rejected() {
+        // 实测缺陷回归（QA-005 跨盘，2026-09-01）：data 根本身是 junction
+        // （C: 安装根 + D: 物理 data）时快照必须成功；树**内部**嵌套的
+        // reparse point 仍然拒绝（防链接攻击语义不变）。
+        let base = std::env::temp_dir().join(format!(
+            "gamer-snapshot-junction-{}-{}",
+            std::process::id(),
+            now_unix_millis()
+        ));
+        let phys = base.join("phys-data");
+        fs::create_dir_all(phys.join("nested")).unwrap();
+        fs::write(phys.join("a.txt"), b"alpha").unwrap();
+        fs::write(phys.join("nested/b.txt"), b"beta").unwrap();
+
+        let layout = InstallLayout {
+            root: base.join("inst"),
+        };
+        fs::create_dir_all(&layout.root).unwrap();
+        create_junction(&layout.data_dir(), &phys);
+        assert!(layout.data_dir().is_dir(), "junction 应解析到目录");
+
+        let report = create(&layout, "upd-junction", None).expect("junction data 根快照应成功");
+        assert_eq!(report.file_count, 2, "应穿透 junction 收集全部常规文件");
+        assert!(verify(&layout, "upd-junction", None, false).is_ok());
+
+        // 树内部嵌套 reparse point → 快照必须失败
+        let elsewhere = base.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        create_junction(&layout.data_dir().join("sub"), &elsewhere);
+        let err = create(&layout, "upd-nested", None).unwrap_err();
+        assert!(
+            err.contains("symlink") || err.contains("reparse"),
+            "嵌套 reparse point 必须被拒绝: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restore_with_junctioned_data_root_swaps_real_dir_and_quarantines_link() {
+        // 回滚路径同样接受 junction data 根：恢复后现网 data/ 是含快照内容的
+        // 真实目录，原 junction（指向被候选写坏的物理数据）保留在 quarantine。
+        let base = std::env::temp_dir().join(format!(
+            "gamer-snapshot-restore-j-{}-{}",
+            std::process::id(),
+            now_unix_millis()
+        ));
+        let phys = base.join("phys-data");
+        fs::create_dir_all(&phys).unwrap();
+        fs::write(phys.join("state.bin"), b"old").unwrap();
+
+        let layout = InstallLayout {
+            root: base.join("inst"),
+        };
+        fs::create_dir_all(&layout.root).unwrap();
+        create_junction(&layout.data_dir(), &phys);
+        write(&layout.root, "config/config.toml", b"cfg");
+
+        create(&layout, "upd-restore-j", None).expect("junction data 根快照应成功");
+        // 候选写坏数据（写穿 junction → 物理盘）
+        fs::write(layout.data_dir().join("state.bin"), b"corrupted").unwrap();
+
+        restore(&layout, "upd-restore-j").expect("junction data 根的回滚恢复应成功");
+        assert_eq!(
+            fs::read(layout.data_dir().join("state.bin")).unwrap(),
+            b"old",
+            "恢复后现网数据必须来自快照"
+        );
+        // 恢复后的 data/ 是真实目录（不再是 junction），旧 junction 留在 quarantine
+        let meta = fs::symlink_metadata(layout.data_dir()).unwrap();
+        assert!(
+            !meta.file_type().is_symlink() && !is_reparse_point(&meta),
+            "恢复换入的 data/ 应为真实目录"
+        );
+        let quarantine = layout.quarantine_dir();
+        let txns: Vec<PathBuf> = fs::read_dir(&quarantine)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .collect();
+        let moved = txns
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("rollback-"))
+            })
+            .expect("旧数据必须留在 quarantine")
+            .join("data");
+        let moved_meta = fs::symlink_metadata(&moved).unwrap();
+        assert!(
+            moved_meta.file_type().is_symlink() || is_reparse_point(&moved_meta),
+            "被隔离的旧 data/ 应保留 junction 形态: {moved:?}"
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

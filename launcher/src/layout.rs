@@ -10,19 +10,20 @@ pub struct InstallLayout {
 
 impl InstallLayout {
     /// 显式 `--install-root` 优先；缺省取 exe 所在目录；均不可得时退回当前目录。
-    /// 相对 `--install-root` 会先按当前目录规范化为绝对路径——注入 server 的
-    /// GAMER_* 稳定路径必须是绝对路径（UPDATE_CONTRACT §1/§4，不依赖 cwd）。
+    /// 相对 `--install-root` 会先按当前目录规范化为绝对路径；最后统一转成
+    /// 扩展长度（verbatim `\\?\`）形态——LongPathsEnabled=0 的主机上 >260
+    /// 字符路径只有该形态可用（UPDATE_CONTRACT §1：安装根可为长路径）。
+    /// 注入 server 的 GAMER_* 稳定路径因此也是 verbatim 绝对路径（§4）。
     pub fn resolve(explicit: Option<PathBuf>) -> Self {
-        if let Some(root) = explicit {
-            return Self {
-                root: normalize_root(&root),
-            };
-        }
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(Path::to_path_buf));
+        let root = match explicit {
+            Some(root) => normalize_root(&root),
+            None => std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(Path::to_path_buf))
+                .unwrap_or_else(|| PathBuf::from(".")),
+        };
         Self {
-            root: exe_dir.unwrap_or_else(|| PathBuf::from(".")),
+            root: crate::winutil::extended_len_path(&root),
         }
     }
 
@@ -92,7 +93,7 @@ impl InstallLayout {
 }
 
 /// 相对路径 → 绝对路径（拼当前目录后做纯词法规范化：去掉 `.` 段、解析 `..` 段；
-/// 不触盘、不做 symlink 解析，避免 canonicalize 的 `\\?\` UNC 形态）。
+/// 不触盘、不做 symlink 解析）。verbatim 化由 [`InstallLayout::resolve`] 统一收口。
 fn normalize_root(root: &Path) -> PathBuf {
     if root.is_absolute() {
         return root.to_path_buf();
@@ -137,5 +138,28 @@ mod tests {
         let n = normalize_root(Path::new("sub/../other"));
         assert!(n.is_absolute());
         assert!(n.ends_with("other"), "应解析 `..`: {n:?}");
+    }
+
+    #[test]
+    fn resolve_normalizes_root_to_extended_len_form() {
+        // 安装根统一为 verbatim 形态（长路径契约）；相对段先词法归一
+        let layout = InstallLayout::resolve(Some(PathBuf::from("sub/../inst-root")));
+        let s = layout.root.to_string_lossy().into_owned();
+        assert!(s.starts_with(r"\\?\"), "安装根必须是扩展长度形态: {s}");
+        assert!(s.ends_with("\\inst-root"), "应解析 `..`: {s}");
+        // 幂等：已 verbatim 的输入不变
+        let again = InstallLayout::resolve(Some(layout.root.clone()));
+        assert_eq!(again.root, layout.root);
+    }
+
+    #[test]
+    fn derived_paths_stay_under_extended_root() {
+        let layout = InstallLayout::resolve(Some(std::env::temp_dir()));
+        assert!(layout.data_dir().starts_with(&layout.root));
+        assert!(layout.config_file().starts_with(&layout.root));
+        assert!(layout
+            .versions_dir()
+            .join("0.1.0")
+            .starts_with(&layout.root));
     }
 }
