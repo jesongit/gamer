@@ -41,6 +41,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
               target/release/gamer-server
 
 COPY server/src ./src
+# 构建元数据注入（REL-005）：与 server/build.rs 读取的变量一致（GAMER_GIT_COMMIT /
+# GAMER_BUILD_TIME / GAMER_CHANNEL；GAMER_BUILD_TARGET 由 cargo 自动提供，无需传）。
+# 默认空值 → build.rs 视为未设置 → build_info 回落 dev 缺省，无 build-arg 时行为不变。
+# 注意 app.version 以 server/Cargo.toml 的 package.version 为唯一权威源，无对应 ARG。
+ARG GAMER_GIT_COMMIT=
+ARG GAMER_BUILD_TIME=
+ARG GAMER_CHANNEL=
+ENV GAMER_GIT_COMMIT=${GAMER_GIT_COMMIT} \
+    GAMER_BUILD_TIME=${GAMER_BUILD_TIME} \
+    GAMER_CHANNEL=${GAMER_CHANNEL}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
