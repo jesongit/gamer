@@ -1,6 +1,6 @@
 # GameBot 运行依赖与自动升级开发计划
 
-> 状态：**实施中（批次 0 已完成，2026-08-31）**  
+> 状态：**实施中（批次 0、1 已完成，2026-08-31）**  
 > 编制日期：2026-08-31  
 > 适用范围：Windows x64 便携发行版、运行依赖管理、版本检查与升级、数据迁移与回滚、GitHub Release、GHCR、系统 API、设置页和发布验收  
 > 本文只定义设计契约、任务拆分、并行顺序和验收门禁，不代表相关功能已经实现。
@@ -803,43 +803,43 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 
 #### Launcher/Updater 轨
 
-- [ ] LCH-001：建立独立 launcher crate 和 `start/status/doctor/repair` CLI 骨架。
-- [ ] LCH-002：实现安装实例单写锁。
-- [ ] LCH-002：实现 `current.json` 和 `update-journal.json` 原子读写与损坏恢复。
-- [ ] LCH-003：实现 manifest 原始字节 Ed25519 验签。
-- [ ] LCH-003：实现 key id、当前/下一公钥和未知 key 拒绝。
-- [ ] LCH-003：实现 schema、平台、SemVer、降级和路径安全校验。
-- [ ] QA-001：manifest、签名和路径正反例测试全部通过。
+- [x] LCH-001：建立独立 launcher crate 和 `start/status/doctor/repair` CLI 骨架。（launcher/ 独立 crate，clap CLI + tracing 日志）
+- [x] LCH-002：实现安装实例单写锁。（CreateFile 独占 + 崩溃遗留锁接管，status 只读旁路）
+- [x] LCH-002：实现 `current.json` 和 `update-journal.json` 原子读写与损坏恢复。（临时文件+同卷 rename，损坏备份 .corrupt-<ts>）
+- [x] LCH-003：实现 manifest 原始字节 Ed25519 验签。（ed25519-dalek，fail closed：读字节→验签→解析→语义）
+- [x] LCH-003：实现 key id、当前/下一公钥和未知 key 拒绝。（信任库 <keys-dir>/<key_id>.pem，未知 key_id 拒绝）
+- [x] LCH-003：实现 schema、平台、SemVer、降级和路径安全校验。（语义错误码 + 路径安全全拒绝规则）
+- [x] QA-001：manifest、签名和路径正反例测试全部通过。（launcher 集成测试直接跑 26 个契约 fixtures，单字节翻转必拒）
 
 #### Server/Data 轨
 
-- [ ] VER-001：以 Cargo package version 为产品版本权威源。
-- [ ] VER-001：CI 校验 tag、Cargo、Web 和 manifest 版本一致。
-- [ ] VER-002：注入 commit、built_at、channel 和 target 构建信息。
-- [ ] PATH-001：支持 launcher 注入的绝对 app/data/tool/jar/config/log 路径。
-- [ ] PATH-001：相对 data/config 路径按冻结契约解析，不依赖偶然 cwd。
-- [ ] DATA-001：建立编号化 SQLite migration 框架。
-- [ ] DATA-004：建立文件迁移 plan、staging、hash、marker 和 journal 骨架。
-- [ ] OPS-001：API shutdown、Ctrl+C 和 SIGTERM 接入同一停机协调器。
+- [x] VER-001：以 Cargo package version 为产品版本权威源。（tools/check-version.ps1）
+- [x] VER-001：CI 校验 tag、Cargo、Web 和 manifest 版本一致。（ci.yml 新增 version job，pwsh）
+- [x] VER-002：注入 commit、built_at、channel 和 target 构建信息。（server/build.rs + build_info.rs，dev 缺省明确降级）
+- [x] PATH-001：支持 launcher 注入的绝对 app/data/tool/jar/config/log 路径。（config.rs PathEnv 环境变量覆盖，未设置行为不变）
+- [x] PATH-001：相对 data/config 路径按冻结契约解析，不依赖偶然 cwd。（相对配置文件目录/app dir 解析，中文空格路径测试）
+- [x] DATA-001：建立编号化 SQLite migration 框架。（migrations.rs 逐级单事务推进，v1 唯一基线语义不变）
+- [x] DATA-004：建立文件迁移 plan、staging、hash、marker 和 journal 骨架。（file_migration.rs 纯库 + 10 单测，未接线）
+- [x] OPS-001：API shutdown、Ctrl+C 和 SIGTERM 接入同一停机协调器。（shutdown.rs ShutdownCoordinator，一次性语义+状态可查）
 
 #### Dependencies/Release 轨
 
-- [ ] DEP-001：建立 `release/dependencies.lock.toml`。
-- [ ] DEP-001：锁定依赖版本、来源 URL、源 hash、产物文件和许可元数据。
-- [ ] DEP-002：固定并裁剪 Windows adb 组件。
-- [ ] DEP-002：确认 adb 包含 exe 和两个配套 DLL。
-- [ ] DEP-003：固定或构建 Windows ffmpeg 组件。
-- [ ] DEP-003：归档实际 `-buildconf`、源码版本和许可材料。
-- [ ] DEP-004：建立 scrcpy 代码常量、jar 版本和 manifest hash 强绑定检查。
+- [x] DEP-001：建立 `release/dependencies.lock.toml`。
+- [x] DEP-001：锁定依赖版本、来源 URL、源 hash、产物文件和许可元数据。（adb 37.0.1 / ffmpeg N-126335-gb32f8d1c23-20260830 / scrcpy 3.3.3 全实算 hash）
+- [x] DEP-002：固定并裁剪 Windows adb 组件。（fetch-adb.ps1 下载+裁包+逐文件校验）
+- [x] DEP-002：确认 adb 包含 exe 和两个配套 DLL。（clean VM 运行验证留待批次 5 QA-005）
+- [x] DEP-003：固定或构建 Windows ffmpeg 组件。（fetch-ffmpeg.ps1，BtbN win64-lgpl）
+- [x] DEP-003：归档实际 `-buildconf`、源码版本和许可材料。（BUILD-CONFIG.txt 入 vendor 归档，锁文件记 buildconf 关键行与源码 offer）
+- [x] DEP-004：建立 scrcpy 代码常量、jar 版本和 manifest hash 强绑定检查。（tools/check-scrcpy-binding.ps1，正反例实测拦截）
 
 #### Web/QA 轨
 
-- [ ] WEB-001：基于冻结 fixture 建立 system/update API client 和 store/composable。
-- [ ] WEB-002：完成系统和依赖状态卡片的 fixture 驱动实现。
-- [ ] WEB-003：完成更新状态卡片的 fixture 驱动实现。
-- [ ] WEB-004：完成安装、等待、重启、失败和回滚确认流程。
-- [ ] 前端覆盖 idle/checking/available/downloading/staged/waiting/installing/restarting/failed/rolling_back 状态。
-- [ ] 批次 1 合流门：launcher 能验 fixture，server 有路径/迁移骨架，依赖来源锁定，前端不依赖临时字段。
+- [x] WEB-001：基于冻结 fixture 建立 system/update API client 和 store/composable。（web/src/system/，26 fixture 全量对照测试）
+- [x] WEB-002：完成系统和依赖状态卡片的 fixture 驱动实现。（SystemInfoCard.vue，degraded/docker 降级态）
+- [x] WEB-003：完成更新状态卡片的 fixture 驱动实现。（UpdateStatusCard.vue，状态×动作受理矩阵）
+- [x] WEB-004：完成安装、等待、重启、失败和回滚确认流程。（UpdateConfirmModal.vue + useUpdateFlow.js，202 断连语义）
+- [x] 前端覆盖 idle/checking/available/downloading/staged/waiting/installing/restarting/failed/rolling_back 状态。（manual_recovery 同步覆盖，共 11 态）
+- [x] 批次 1 合流门：launcher 能验 fixture，server 有路径/迁移骨架，依赖来源锁定，前端不依赖临时字段。（fmt/clippy/test 全绿：launcher 28、server 336、web 556 测试 + 双脚本 PASS）
 
 ### 17.4 批次 2：Windows 完整包 MVP
 

@@ -92,3 +92,17 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **全量 `cargo test` 偶发 matcher 统计测试失败（TEST_HITS 3≠2 / 未命中增量 ≠1）并连锁 PoisonError**（2026-08-30 实证，单跑即绿，同日已修）：`matcher::tests` 的统计钩子/生产 metrics 测试断言进程级**精确**计数，而无锁并发的计算池测试会额外产生全屏命中。已治：命中/全屏断言改下界（与生产 metrics 测试同口径），未命中/区域无并发写入者保持精确。
 - **改了 Rust 代码但行为没生效：`gamer.ps1 start/restart` 不带 `-Build` 跑的是预构建 release 二进制**（2026-08-31 实证）：Start-Backend 只在二进制不存在或显式 `-Build` 时才 `cargo build --release`，改源码后直接 restart 会继续跑旧逻辑（案例：函数名 unicode 校验已放宽，线上仍报旧文案 `[A-Za-z_][A-Za-z0-9_]*`）。规避：改 Rust 后用 `.\gamer.ps1 restart -BackendOnly -Build`（或先 cargo build --release 再 restart）；前端无此问题（vite dev HMR / web-dist 由 `npm run build` 产出）。
 - **当前工作树执行 `pnpm build` 会因 `MainLayout.vue` 导入 `runs.js` 未导出的 `isMissingEndpointError` 而失败**（2026-08-31）：前端运行实现未合流导致导出契约不一致，恢复对应导出/合流前端改动后再验收；本轮文档与 fixture 支线不改业务实现。
+
+## 2026-08-31（自动升级批次 0/1 实施期）
+
+- **无 BOM 的 UTF-8 `.ps1` 含中文会被 Windows PowerShell 5.1 按 GBK 解析报语法错**：5.1 无 BOM 时按系统代码页读脚本；本批新增 release/packaging、tools 脚本统一写带 BOM 的 UTF-8（修复方式同 gamer.ps1 条目）。
+- **cmd 里 `命令 & echo %ERRORLEVEL%` 拿到的是旧值**：`%VAR%` 在整行解析期展开，验收退出码永远显示改动前的 0；用 PowerShell `$LASTEXITCODE` 或分步执行。
+- **本机 GitHub 直连超时而代理只配在 git config**：curl/Invoke-WebRequest 不读 `http.proxy`，下载 github.com 资产必须显式走代理；fetch 脚本已内置 `-Proxy` 参数并回退 `HTTPS_PROXY`（dl.google.com 可直连）。
+- **platform-tools 没有固定版本下载 URL**：`platform-tools_r<ver>-windows.zip` 命名 404，Google 只保留 latest 入口；adb 只能「latest 下载 + 锁文件内版本号/整包 hash 双门禁」锁定（`dependencies.lock.toml`）。
+- **BtbN win64-lgpl 构建没有 libx264**（GPL 组件已排除）：生成 H.264 冒烟流不能照抄 x264 命令，用 libopenh264（LGPL 兼容）；`fetch-ffmpeg.ps1` 按 openh264→x264→硬件编码器顺序自动选。
+- **.NET `Process` 重定向大输出先 `WaitForExit` 会父子互锁**：~30KB 的 `ffmpeg -encoders` 输出撑满管道缓冲后双方互等；必须先异步排空 stdout 再等退出。
+- **Node 与 Rust 对 manifest `schema_version` 类型判定不一致**：JS `1.0===1` 放行浮点写法，Rust serde 严格拒绝；launcher 取 fail closed 严格语义，Node 校验器用于发布门禁前需补该反例。
+- **clippy `doc_lazy_continuation`**：`//!` 文档行以 `+` 开头被当 doc 列表项，续行未缩进直接 `-D warnings` 失败；「A → B」式续行换措辞或缩进。
+- **Windows 相对路径拼接产生混合分隔符**：`PathBuf::join` 可得 `config\./data`，PathBuf 相等按组件归一，但 `to_string_lossy()` 后的字符串断言跨平台必挂；测试断言比 PathBuf 不比字符串。
+- **bin crate 里未接线的 `pub` 模块照样 dead_code**（`pub` 不豁免）：框架性「先交付后接线」模块（build_info/file_migration）需带理由注释的 `#![allow(dead_code)]`，接线时移除。
+- **build.rs 声明任何 `rerun-if-*` 后 cargo 即关闭「包内文件变化重跑」默认**：git commit 探测必须显式 `rerun-if-changed` 跟踪 `.git/HEAD`+`.git/refs`，否则同分支新提交的 hash 陈旧。
