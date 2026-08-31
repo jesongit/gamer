@@ -1,0 +1,27 @@
+[package]
+name = "gamer-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "GameBot 便携安装启动器/升级器（单实例锁、原子 state、release manifest 验签）"
+publish = false
+
+# 独立 crate：不加入任何 workspace，也不吸收子目录
+[workspace]
+
+[dependencies]
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = "0.3"
+
+[lib]
+name = "gamer_launcher"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gamer-launcher"
+path = "src/main.rs"
