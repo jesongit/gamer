@@ -27,6 +27,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ---------- 版本单一来源门禁（VER-001） ----------
+  # server/Cargo.toml package.version 为产品版本权威源；web/package.json 必须一致。
+  # 发布 workflow（REL-004）将以 -Tag v<semver> / -Manifest <file> 复用同一脚本。
+  version:
+    name: version (single source)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check version consistency (Cargo == web)
+        shell: pwsh
+        run: ./tools/check-version.ps1
+
   # ---------- Rust 服务端门禁 ----------
   # 单测已验证不依赖 adb/ffmpeg/Android 设备与真实 server/config.toml：
   # #[cfg(test)] 区段对 adb|ffmpeg|scrcpy|config::load 的引用为 0，
