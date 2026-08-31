@@ -157,36 +157,34 @@ function Get-InstallTemplate {
 与 `config\`、`manifests\`、`keys\`、`seeds\`、`licenses\`、`SHA256SUMS.txt` 在
 同一目录，不要单独把 exe 拖出去运行。
 
-## 第 2 步：自检（doctor）
+## 第 2 步：安装并启动
 
 打开命令行（cmd 或 PowerShell），进入解压目录：
 
-    gamer-launcher.exe doctor
-
-launcher 会核对安装库存、校验 release manifest 的 Ed25519 签名与种子文件完整性
-（公钥在 `keys\`，manifest 在 `manifests\`，组件种子在 `seeds\`）。
-全部 PASS 后进入下一步；报 FAIL 时按提示重试或重新解压。
-
-## 第 3 步：修复安装并启动
-
-    gamer-launcher.exe repair     # 把 seeds\ 里的 app/adb/ffmpeg/scrcpy-server 安装到位
+    gamer-launcher.exe repair     # 首次安装：把 seeds\ 里的 app/adb/ffmpeg 一步
+                                  # 安装到位（versions\<版本>\ + runtime\），校验
+                                  # 通过后写入 state\current.json 版本指针
     gamer-launcher.exe start      # 启动并持续监管 gamer-server
 
+`repair` 全程可用离线种子（seeds\），断网也能完成；组件已完好时自动跳过，
+版本目录已存在时不会覆盖（损坏目录会先移入 quarantine\ 再重装）。
+自检命令：安装前 `gamer-launcher.exe doctor` 会提示「未安装——先运行 repair」
+（WARN，退出码 0）；安装后 doctor 应全部 [PASS]（已安装后出现组件缺失才报
+FAIL / 退出码 1）。
+
 启动成功后用浏览器打开 `http://127.0.0.1:8443` 登录使用。
-（`repair`/`start` 属增量交付：若当前 launcher 版本提示子命令未实现，请升级
-launcher 后重试。）
 
 ## 首次设置登录密码
 
 服务端认证 fail closed——没有凭据无法登录，二选一：
 
-1. **本机/试用（推荐）**：启动前设置环境变量，由 launcher 拉起的 server 进程内
-   将其转为 Argon2id PHC（不写任何文件）：
+1. **本机/试用（推荐）**：启动前设置环境变量，`start` 会把它透传给 server
+   进程，由 server 进程内转为 Argon2id PHC（不写任何文件）：
 
        set GAMER_ADMIN_PASSWORD=你的口令      （cmd）
        $env:GAMER_ADMIN_PASSWORD='你的口令'   （PowerShell）
 
-   然后用该口令登录。
+   然后执行 `gamer-launcher.exe start`，并用该口令登录。
 
 2. **固定凭据**：编辑 `config\config.toml` 的 `[auth] password_hash`，填入固定
    参数 Argon2id PHC。注意该文件包含凭据材料，妥善保管访问权限。
