@@ -24,7 +24,8 @@ function Fail {
 
 if (-not (Test-Path -LiteralPath $SbomPath)) { Fail "SBOM 不存在: $SbomPath" }
 if (-not (Test-Path -LiteralPath $LockPath)) { Fail "依赖锁文件不存在: $LockPath" }
-try { $bom = Get-Content -LiteralPath $SbomPath -Raw | ConvertFrom-Json }
+# 显式 UTF8：SBOM 无 BOM，PS 5.1 下缺省按系统 ANSI 解码会把非 ASCII 字段读成乱码
+try { $bom = Get-Content -LiteralPath $SbomPath -Raw -Encoding UTF8 | ConvertFrom-Json }
 catch { Fail "SBOM 不是合法 JSON: $($_.Exception.Message)" }
 
 if ([string]$bom.bomFormat -cne 'CycloneDX') { Fail "bomFormat 不是 CycloneDX" }

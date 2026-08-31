@@ -247,6 +247,28 @@ function Get-RelativeFilePath {
     return $FilePath.Substring($prefix.Length).Replace('\', '/')
 }
 
+function Get-TolerantSha256 {
+    # Windows 上运行中的容器会经 bind mount 持有 gamer.db（SQLite 写句柄）；
+    # Get-FileHash 请求 FileShare.Read 与既有写句柄冲突 → 共享违规。
+    # 这里显式以 Read + ReadWrite|Delete 共享打开，只容忍并发写、不做快照一致性承诺。
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $fs = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        ([IO.FileShare]'ReadWrite, Delete'))
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha.ComputeHash($fs)) -replace '-', '').ToLowerInvariant()
+        } finally {
+            $sha.Dispose()
+        }
+    } finally {
+        $fs.Dispose()
+    }
+}
+
 function New-BackupSnapshot {
     param(
         [Parameter(Mandatory = $true)][string]$RootPath,
@@ -277,7 +299,7 @@ function New-BackupSnapshot {
                 [IO.Directory]::CreateDirectory($destinationParent) | Out-Null
             }
             Copy-Item -LiteralPath $file.FullName -Destination $destination -Force | Out-Null
-            $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $hash = Get-TolerantSha256 -Path ([IO.Path]::GetFullPath($file.FullName))
             $entries += [ordered]@{
                 area = $source.Name
                 path = $relative
@@ -351,6 +373,11 @@ function Restore-OldDigest {
     )
     Write-Warning "[upgrade-release] 新镜像未 ready，开始恢复旧 digest：$OldImage；原因：$Cause"
     try {
+        # force-recreate 不能与候选容器的异步 removal 重叠；先让 Compose
+        # 按 service 的 stop_grace_period 完整停掉并移除候选，再创建旧 digest。
+        # 这样回滚不会因 "removal ... already in progress" 竞态失败，且候选
+        # 若已启动仍走与正常 docker stop 相同的 SIGTERM 路径。
+        Invoke-Compose -Arguments @('rm', '-s', '-f', 'gamer') -ImageReference $OldImage | Out-Null
         Invoke-Compose -Arguments @('up', '-d', '--no-build', '--force-recreate', 'gamer') -ImageReference $OldImage | Out-Null
         Wait-Ready -ImageReference $OldImage -Label '旧镜像回滚'
         Write-Warning '[upgrade-release] 旧 digest 已恢复并 ready'

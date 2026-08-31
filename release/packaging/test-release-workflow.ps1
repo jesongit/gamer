@@ -95,22 +95,37 @@ foreach ($scriptName in @('upgrade-release.ps1', 'mock-docker.ps1', 'test-upgrad
 Assert-Text $workflow '(?ms)^\s*push:\s*$.*?tags:\s*\[.v\*.' 'workflow 必须只由 v* tag 触发'
 Assert-Text $workflow '(?ms)^\s*provenance:\s*mode=max\s*$' 'docker 构建缺少 provenance mode=max'
 Assert-Text $workflow '(?ms)^\s*sbom:\s*true\s*$' 'docker 构建缺少 SBOM attestation'
-Assert-Text $workflow 'gh release create "\$TAG" --draft' 'draft Release 创建必须带 --draft'
-Assert-Text $workflow 'gh release edit "\$TAG" --draft=false' 'publish 必须把 draft 转正式'
+Assert-Text $workflow 'gh release create "\$TAG" --repo "\$GH_REPO" --draft --verify-tag' 'draft Release 创建必须带 --draft 且绑定明确 repo'
+Assert-Text $workflow 'gh release edit "\$TAG" --repo "\$GH_REPO" --draft=false' 'publish 必须把 draft 转正式且绑定明确 repo'
 Assert-Text $workflow 'check-immutable-release\.ps1\s+-Mode\s+GitHub' 'verify 必须执行 GitHub immutable preflight'
 Assert-Text $workflow 'check-immutable-release\.ps1\s+-Mode\s+Registry' 'docker 必须执行 registry immutable preflight'
+Assert-Text $workflow '\$keyId -notmatch.*prod-ed25519-\[1-9\]' '生产签名必须拒绝 dev/fixture key，只允许 prod-ed25519-N'
+Assert-Text $workflow 'verify-image-attestations\.ps1\s+-Image \$env:IMAGE\s+-ExpectedDigest \$env:DIGEST' 'attestation 校验必须以 base image + expected digest 调用，避免重复 @digest'
+Assert-True ($workflow -notmatch 'check-immutable-release\.ps1[^\r\n]*stable') 'stable 滚动别名不得走 immutable version preflight'
+Assert-Text $workflow 'docker buildx imagetools inspect \$stableRef' 'stable 滚动别名 push 后必须回读并校验 digest'
+Assert-Text $workflow '"channel=\$channel"\s*>>\s*\$env:GITHUB_OUTPUT' 'Windows 构建必须从 tag 派生并输出 channel'
+Assert-Text $workflow 'package-app\.ps1\s+-Channel \$env:CHANNEL' 'app 包构建必须消费派生 channel'
+Assert-Text $workflow 'gen-manifest\.ps1\s+-SkipSign\s+-Channel \$env:CHANNEL' 'manifest 必须消费派生 channel'
+Assert-Text $workflow '--expect-current-version \$env:VERSION --expect-channel \$env:CHANNEL' '签名后的 manifest 验签必须绑定派生 channel'
+Assert-Text $workflow 'DOCKER_IMAGE_CHANNEL' 'artifact verify 必须核对镜像 channel 与 ZIP manifest 同源'
+Assert-Text $workflow 'release/keys.*\*\.private\.pem' '生产签名必须拒绝仓库内私钥文件'
 
 $draftPos = $workflow.IndexOf("`n  draft-release:")
+$uploadPos = $workflow.IndexOf("`n  upload-assets:")
 $artifactPos = $workflow.IndexOf("`n  artifact-verify:")
 $smokePos = $workflow.IndexOf("`n  smoke:")
 $publishPos = $workflow.IndexOf("`n  publish:")
-Assert-True ($draftPos -ge 0 -and $artifactPos -gt $draftPos -and $smokePos -gt $artifactPos -and $publishPos -gt $smokePos) 'job 顺序必须是 draft-release → artifact-verify → smoke → publish'
-Assert-Text $workflow '(?ms)^  draft-release:.*?^\s*needs:\s*\[build-windows,\s*docker\]' 'draft-release 必须等待 Windows artifact 与镜像 verify'
-Assert-Text $workflow '(?ms)^  artifact-verify:.*?^\s*needs:\s*\[draft-release,\s*docker,\s*build-windows\]' 'artifact-verify 依赖不完整'
+Assert-True ($draftPos -ge 0 -and $uploadPos -gt $draftPos -and $artifactPos -gt $uploadPos -and $smokePos -gt $artifactPos -and $publishPos -gt $smokePos) 'job 顺序必须是 draft-release → upload-assets → artifact-verify → smoke → publish'
+Assert-Text $workflow '(?ms)^  draft-release:.*?^\s*needs:\s*verify' 'draft-release 必须直接位于 tag/verify 后'
+Assert-Text $workflow '(?ms)^  build-windows:.*?^\s*needs:\s*\[verify,\s*draft-release\]' 'build-windows 必须等待 draft 建立'
+Assert-Text $workflow '(?ms)^  docker:.*?^\s*needs:\s*\[verify,\s*draft-release\]' 'docker 必须等待 draft 建立'
+Assert-Text $workflow '(?ms)^  upload-assets:.*?^\s*needs:\s*\[draft-release,\s*build-windows,\s*docker\]' 'upload-assets 依赖不完整'
+Assert-Text $workflow '(?ms)^  artifact-verify:.*?^\s*needs:\s*\[upload-assets,\s*docker,\s*build-windows\]' 'artifact-verify 依赖不完整'
 Assert-Text $workflow '(?ms)^  smoke:.*?^\s*needs:\s*\[artifact-verify,\s*docker,\s*build-windows\]' 'smoke 必须在 artifact-verify 后运行'
 Assert-Text $workflow '(?ms)^  publish:.*?^\s*needs:\s*smoke' 'publish 必须只由 smoke 放行'
 Assert-Text $workflow 'verify-sbom\.ps1.*ExpectedVersion' 'SBOM 校验必须绑定发布版本'
 Assert-Text $workflow 'verify-image-attestations\.ps1.*ExpectedDigest' '镜像 attestation 校验必须绑定 digest'
+Assert-Text $workflow 'gh release download "\$env:TAG" --repo "\$env:GH_REPO"' '跨 job 下载 Release 资产必须显式绑定 repo'
 
 $composePath = Join-Path $RepoRoot 'docker-compose.release.yml'
 if (-not (Test-Path -LiteralPath $composePath -PathType Leaf)) { Fail "release compose 不存在: $composePath" }
@@ -167,6 +182,32 @@ try {
     Write-Json $snapshotPath $state
     Invoke-Child -Path $immutable -ExpectedExit 1 -Arguments @('-Mode', 'Snapshot', '-Tag', 'v0.2.0', '-CommitSha', $commit, '-SnapshotPath', $snapshotPath)
 
+    # OCI tag 不能表达 SemVer build metadata；不能让它在 GitHub preflight 之外流入 GHCR。
+    $state.tagCommit = $commit
+    Write-Json $snapshotPath $state
+    Invoke-Child -Path $immutable -ExpectedExit 1 -Arguments @('-Mode', 'Snapshot', '-Tag', 'v0.2.0+build.1', '-CommitSha', $commit, '-SnapshotPath', $snapshotPath)
+    Invoke-Child -Path $immutable -ExpectedExit 1 -Arguments @('-Mode', 'Snapshot', '-Tag', 'v01.2.0', '-CommitSha', $commit, '-SnapshotPath', $snapshotPath)
+    Invoke-Child -Path $immutable -ExpectedExit 1 -Arguments @('-Mode', 'Snapshot', '-Tag', 'v0.2.0-01', '-CommitSha', $commit, '-SnapshotPath', $snapshotPath)
+
+    # 不存在的 version tag 不能伪造为 expected digest 已就绪。
+    Invoke-Child -Path $immutable -ExpectedExit 1 -Arguments @('-Mode', 'Snapshot', '-Tag', 'v0.2.0', '-CommitSha', $commit, '-SnapshotPath', $snapshotPath, '-ExpectedDigest', $digest)
+
+    # Registry preflight 的离线命令 fixture：只模拟 buildx inspect 的成功 digest，
+    # 覆盖 image tag 与 release semver 绑定，以及 digest 复用路径，不访问 GHCR。
+    $mockDockerDir = Join-Path $testRoot 'mock-docker-bin'
+    New-Item -ItemType Directory -Path $mockDockerDir -Force | Out-Null
+    $mockDockerPath = Join-Path $mockDockerDir 'docker.cmd'
+    [IO.File]::WriteAllText($mockDockerPath, "@echo off`r`necho Name: ghcr.io/example/gamebot:0.2.0`r`necho Digest: $digest`r`nexit /b 0`r`n", (New-Object Text.UTF8Encoding($false)))
+    $oldPath = $env:PATH
+    try {
+        $env:PATH = "$mockDockerDir;$oldPath"
+        Invoke-Child -Path $immutable -Arguments @('-Mode', 'Registry', '-Tag', 'v0.2.0', '-CommitSha', $commit, '-Image', 'ghcr.io/example/gamebot:0.2.0', '-ExpectedDigest', $digest)
+        Invoke-Child -Path $immutable -ExpectedExit 1 -Arguments @('-Mode', 'Registry', '-Tag', 'v0.2.0', '-CommitSha', $commit, '-Image', 'ghcr.io/example/gamebot:stable')
+        Invoke-Child -Path $immutable -ExpectedExit 1 -Arguments @('-Mode', 'Registry', '-Tag', 'v0.2.0', '-CommitSha', $commit, '-Image', ('ghcr.io/example/gamebot@' + $digest))
+    } finally {
+        $env:PATH = $oldPath
+    }
+
     Import-Module (Join-Path $PSScriptRoot 'LockFile.psm1') -Force
     $locked = Import-LockComponents -Path (Join-Path $RepoRoot 'release/dependencies.lock.toml')
     $sbomComponents = @()
@@ -210,6 +251,7 @@ try {
     New-Item -ItemType Directory -Path $attestationDir -Force | Out-Null
     $index = [ordered]@{
         schemaVersion = 2
+        mediaType = 'application/vnd.oci.image.index.v1+json'
         manifests = @(
             [ordered]@{ mediaType = 'application/vnd.oci.image.manifest.v1+json'; digest = 'sha256:' + ('4' * 64); size = 1 },
             [ordered]@{ mediaType = 'application/vnd.oci.image.manifest.v1+json'; digest = 'sha256:' + ('5' * 64); size = 1 },
@@ -219,14 +261,92 @@ try {
     }
     $indexPath = Join-Path $testRoot 'index.json'
     Write-Json $indexPath $index
-    Write-Json (Join-Path $attestationDir ('sha256-' + ('2' * 64) + '.json')) ([ordered]@{ schemaVersion = 2; layers = @([ordered]@{ mediaType = 'application/vnd.in-toto+json'; digest = 'sha256:' + ('6' * 64); size = 1 }) })
-    Write-Json (Join-Path $attestationDir ('sha256-' + ('3' * 64) + '.json')) ([ordered]@{ schemaVersion = 2; layers = @([ordered]@{ mediaType = 'application/vnd.cyclonedx+json'; digest = 'sha256:' + ('7' * 64); size = 1 }) })
+    Write-Json (Join-Path $attestationDir ('sha256-' + ('2' * 64) + '.json')) ([ordered]@{
+        schemaVersion = 2
+        config = [ordered]@{ mediaType = 'application/vnd.oci.image.config.v1+json'; digest = 'sha256:' + ('8' * 64); size = 1 }
+        layers = @([ordered]@{
+            mediaType = 'application/vnd.in-toto+json'
+            digest = 'sha256:' + ('6' * 64)
+            size = 1
+            annotations = [ordered]@{ 'in-toto.io/predicate-type' = 'https://slsa.dev/provenance/v1' }
+        })
+    })
+    Write-Json (Join-Path $attestationDir ('sha256-' + ('3' * 64) + '.json')) ([ordered]@{
+        schemaVersion = 2
+        config = [ordered]@{ mediaType = 'application/vnd.oci.image.config.v1+json'; digest = 'sha256:' + ('9' * 64); size = 1 }
+        layers = @([ordered]@{
+            mediaType = 'application/vnd.in-toto+json'
+            digest = 'sha256:' + ('7' * 64)
+            size = 1
+            annotations = [ordered]@{ 'in-toto.io/predicate-type' = 'https://spdx.dev/Document' }
+        })
+    })
     Invoke-Child -Path $attestationVerifier -Arguments @('-IndexPath', $indexPath, '-AttestationDir', $attestationDir, '-ExpectedDigest', $imageDigest)
+
+    # 一个 attestation manifest 可以同时承载 provenance + SBOM；OCI artifact 形式可只在
+    # manifest.subject.digest 绑定目标，不能把“必须两个 descriptor”当成协议要求。
+    $combinedAttestationDir = Join-Path $testRoot 'combined-attestations'
+    New-Item -ItemType Directory -Path $combinedAttestationDir -Force | Out-Null
+    $combinedIndex = [ordered]@{
+        schemaVersion = 2
+        mediaType = 'application/vnd.oci.image.index.v1+json'
+        manifests = @(
+            $index.manifests[0],
+            [ordered]@{
+                mediaType = 'application/vnd.oci.image.manifest.v1+json'
+                digest = $provenanceDigest
+                size = 1
+                annotations = [ordered]@{ 'vnd.docker.reference.type' = 'attestation-manifest' }
+            }
+        )
+    }
+    $combinedIndexPath = Join-Path $testRoot 'combined-index.json'
+    Write-Json $combinedIndexPath $combinedIndex
+    Write-Json (Join-Path $combinedAttestationDir ('sha256-' + ('2' * 64) + '.json')) ([ordered]@{
+        schemaVersion = 2
+        subject = [ordered]@{ mediaType = 'application/vnd.oci.image.manifest.v1+json'; digest = $imageDigest; size = 1 }
+        layers = @(
+            [ordered]@{ mediaType = 'application/vnd.in-toto+json'; digest = 'sha256:' + ('6' * 64); size = 1; annotations = [ordered]@{ 'in-toto.io/predicate-type' = 'https://slsa.dev/provenance/v1' } },
+            [ordered]@{ mediaType = 'application/vnd.in-toto+json'; digest = 'sha256:' + ('7' * 64); size = 1; annotations = [ordered]@{ 'in-toto.io/predicate-type' = 'https://spdx.dev/Document' } }
+        )
+    })
+    Invoke-Child -Path $attestationVerifier -Arguments @('-IndexPath', $combinedIndexPath, '-AttestationDir', $combinedAttestationDir, '-ExpectedDigest', $imageDigest)
+
+    $missingMediaType = [ordered]@{ schemaVersion = 2; manifests = $index.manifests }
+    $missingMediaTypePath = Join-Path $testRoot 'missing-index-media-type.json'
+    Write-Json $missingMediaTypePath $missingMediaType
+    Invoke-Child -Path $attestationVerifier -ExpectedExit 1 -Arguments @('-IndexPath', $missingMediaTypePath, '-AttestationDir', $attestationDir, '-ExpectedDigest', $imageDigest)
 
     $badIndex = [ordered]@{ schemaVersion = 2; manifests = @($index.manifests[0], $index.manifests[1], $index.manifests[2]) }
     $badIndexPath = Join-Path $testRoot 'bad-index.json'
     Write-Json $badIndexPath $badIndex
     Invoke-Child -Path $attestationVerifier -ExpectedExit 1 -Arguments @('-IndexPath', $badIndexPath, '-AttestationDir', $attestationDir, '-ExpectedDigest', $imageDigest)
+
+    # 证明必须绑定 subject digest；缺失/错绑不可被“有两个 attestation”掩盖。
+    $badSubjectIndex = [ordered]@{
+        schemaVersion = 2
+        manifests = @(
+            $index.manifests[0],
+            $index.manifests[1],
+            [ordered]@{ mediaType = 'application/vnd.oci.image.manifest.v1+json'; digest = $provenanceDigest; size = 1; annotations = [ordered]@{ 'vnd.docker.reference.type' = 'attestation-manifest'; 'vnd.docker.reference.digest' = $otherDigest } },
+            $index.manifests[3]
+        )
+    }
+    $badSubjectIndexPath = Join-Path $testRoot 'bad-subject-index.json'
+    Write-Json $badSubjectIndexPath $badSubjectIndex
+    Invoke-Child -Path $attestationVerifier -ExpectedExit 1 -Arguments @('-IndexPath', $badSubjectIndexPath, '-AttestationDir', $attestationDir, '-ExpectedDigest', $imageDigest)
+
+    # 两个 generic in-toto layer 没有 predicate type 时必须拒绝，不能猜测 provenance/SBOM。
+    $genericAttestationDir = Join-Path $testRoot 'generic-attestations'
+    New-Item -ItemType Directory -Path $genericAttestationDir -Force | Out-Null
+    foreach ($attestationDigest in @($provenanceDigest, $sbomDigest)) {
+        Write-Json (Join-Path $genericAttestationDir (('sha256-' + $attestationDigest.Substring(7) + '.json'))) ([ordered]@{
+            schemaVersion = 2
+            layers = @([ordered]@{ mediaType = 'application/vnd.in-toto+json'; digest = 'sha256:' + ('a' * 64); size = 1 })
+        })
+    }
+    Invoke-Child -Path $attestationVerifier -ExpectedExit 1 -Arguments @('-IndexPath', $indexPath, '-AttestationDir', $genericAttestationDir, '-ExpectedDigest', $imageDigest)
+    Invoke-Child -Path $attestationVerifier -ExpectedExit 1 -Arguments @('-IndexPath', $indexPath, '-AttestationDir', $attestationDir)
 
     Invoke-Child -Path $rotationVerifier -Arguments @('-FixtureDir', (Join-Path $RepoRoot 'release/contracts/fixtures/key-rotation'))
 } finally {

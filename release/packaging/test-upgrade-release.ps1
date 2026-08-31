@@ -59,6 +59,52 @@ function Read-EventLog {
     return @(Get-Content -LiteralPath $Path | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
 }
 
+function New-MockDockerWithRemove {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$BaseMockPath
+    )
+    $escapedBasePath = ([IO.Path]::GetFullPath($BaseMockPath)).Replace("'", "''")
+    $wrapper = @"
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)]
+    [string]`$Command = '',
+    [Parameter(Position = 1, ValueFromRemainingArguments = `$true)]
+    [string[]]`$Arguments = @()
+)
+
+`$ErrorActionPreference = 'Stop'
+if (`$Command -eq 'compose' -and `$Arguments -contains 'rm') {
+    `$statePath = [Environment]::GetEnvironmentVariable('GAMER_MOCK_DOCKER_STATE_PATH', 'Process')
+    `$logPath = [Environment]::GetEnvironmentVariable('GAMER_MOCK_DOCKER_LOG_PATH', 'Process')
+    `$backupRoot = [Environment]::GetEnvironmentVariable('GAMER_MOCK_DOCKER_BACKUP_ROOT', 'Process')
+    `$state = Get-Content -LiteralPath `$statePath -Raw | ConvertFrom-Json
+    `$backupReadyCount = if (Test-Path -LiteralPath `$backupRoot -PathType Container) {
+        @(Get-ChildItem -LiteralPath `$backupRoot -Directory -Force |
+            Where-Object { Test-Path -LiteralPath (Join-Path `$_.FullName 'BACKUP_READY') -PathType Leaf }).Count
+    } else { 0 }
+    `$event = [ordered]@{
+        command = `$Command
+        arguments = @(`$Arguments)
+        image = [Environment]::GetEnvironmentVariable('GAMER_IMAGE', 'Process')
+        dataDir = [Environment]::GetEnvironmentVariable('GAMER_DATA_DIR', 'Process')
+        configDir = [Environment]::GetEnvironmentVariable('GAMER_CONFIG_DIR', 'Process')
+        logDir = [Environment]::GetEnvironmentVariable('GAMER_LOG_DIR', 'Process')
+        backupReadyCount = `$backupReadyCount
+    }
+    `$state.calls = @(`$state.calls) + [pscustomobject]`$event
+    [IO.File]::WriteAllText(`$statePath, (`$state | ConvertTo-Json -Depth 30) + [Environment]::NewLine, (New-Object Text.UTF8Encoding(`$false)))
+    Add-Content -LiteralPath `$logPath -Value ((`$event | ConvertTo-Json -Depth 10 -Compress) + [Environment]::NewLine) -Encoding UTF8
+    Write-Output 'removed gamer'
+    exit 0
+}
+& '$escapedBasePath' -Command `$Command -Arguments `$Arguments
+exit `$LASTEXITCODE
+"@
+    Write-Utf8NoBom -Path $Path -Text $wrapper
+}
+
 function Invoke-Child {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -199,11 +245,13 @@ function Assert-CommonCallContract {
     Assert-True ($Events[2].command -eq 'compose' -and $Events[2].arguments -contains 'ps') 'readiness did not query compose ps'
     Assert-True ($Events[3].command -eq 'inspect') 'readiness did not inspect container health'
     Assert-True (($Events[3].arguments -join ' ') -match [regex]::Escape('{{.State.Health.Status}}')) 'readiness inspected the wrong field'
-    if ($ExpectedCount -eq 7) {
-        Assert-True ($Events[4].command -eq 'compose' -and $Events[4].arguments -contains 'up') 'rollback did not recreate the service'
-        Assert-Equal $Events[4].image $OldDigest 'rollback did not use the old digest'
-        Assert-True ($Events[5].command -eq 'compose' -and $Events[5].arguments -contains 'ps') 'rollback readiness did not query compose ps'
-        Assert-True ($Events[6].command -eq 'inspect') 'rollback readiness did not inspect container health'
+    if ($ExpectedCount -eq 8) {
+        Assert-True ($Events[4].command -eq 'compose' -and $Events[4].arguments -contains 'rm') 'rollback did not stop/remove the failed service first'
+        Assert-True ($Events[4].arguments -contains '-s' -and $Events[4].arguments -contains '-f') 'rollback removal did not request graceful stop and forced removal'
+        Assert-True ($Events[5].command -eq 'compose' -and $Events[5].arguments -contains 'up') 'rollback did not recreate the service'
+        Assert-Equal $Events[5].image $OldDigest 'rollback did not use the old digest'
+        Assert-True ($Events[6].command -eq 'compose' -and $Events[6].arguments -contains 'ps') 'rollback readiness did not query compose ps'
+        Assert-True ($Events[7].command -eq 'inspect') 'rollback readiness did not inspect container health'
     }
 }
 
@@ -249,6 +297,7 @@ $oldDigest = 'ghcr.io/example/gamebot@sha256:' + ('2' * 64)
 $composePath = Join-Path $RepoRoot 'docker-compose.release.yml'
 $mockPath = Join-Path $PSScriptRoot 'mock-docker.ps1'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('gamer-dkr002-' + [guid]::NewGuid().ToString('N'))
+$mockWithRemovePath = Join-Path $testRoot 'mock-docker-with-remove.ps1'
 $environmentNames = @('GAMER_MOCK_DOCKER_STATE_PATH', 'GAMER_MOCK_DOCKER_LOG_PATH', 'GAMER_MOCK_DOCKER_BACKUP_ROOT')
 $savedEnvironment = @{}
 foreach ($name in $environmentNames) {
@@ -257,8 +306,9 @@ foreach ($name in $environmentNames) {
 
 [IO.Directory]::CreateDirectory($testRoot) | Out-Null
 try {
+    New-MockDockerWithRemove -Path $mockWithRemovePath -BaseMockPath $mockPath
     $successCase = New-TestCase -CaseRoot (Join-Path $testRoot 'success') -NewDigest $newDigest -OldDigest $oldDigest -NewHealth 'healthy' -ComposePath $composePath
-    $successResult = Invoke-UpgradeCase -Case $successCase -NewDigest $newDigest -OldDigest $oldDigest -MockPath $mockPath -ComposePath $composePath
+    $successResult = Invoke-UpgradeCase -Case $successCase -NewDigest $newDigest -OldDigest $oldDigest -MockPath $mockWithRemovePath -ComposePath $composePath
     Assert-True ($successResult.Output -match 'PASS') 'healthy upgrade did not report PASS'
     $successEvents = Read-EventLog -Path $successCase.MockLogPath
     Assert-CommonCallContract -Events $successEvents -Case $successCase -NewDigest $newDigest -OldDigest $oldDigest -ExpectedCount 4
@@ -270,10 +320,10 @@ try {
     Assert-Equal $successRuntime.runtime.health 'healthy' 'new digest was not ready in the success case'
 
     $rollbackCase = New-TestCase -CaseRoot (Join-Path $testRoot 'rollback') -NewDigest $newDigest -OldDigest $oldDigest -NewHealth 'unhealthy' -ComposePath $composePath
-    $rollbackResult = Invoke-UpgradeCase -Case $rollbackCase -NewDigest $newDigest -OldDigest $oldDigest -MockPath $mockPath -ComposePath $composePath -ExpectedExit 1
+    $rollbackResult = Invoke-UpgradeCase -Case $rollbackCase -NewDigest $newDigest -OldDigest $oldDigest -MockPath $mockWithRemovePath -ComposePath $composePath -ExpectedExit 1
     Assert-True ($rollbackResult.Output.Contains($oldDigest)) 'rollback output did not identify the old digest'
     $rollbackEvents = Read-EventLog -Path $rollbackCase.MockLogPath
-    Assert-CommonCallContract -Events $rollbackEvents -Case $rollbackCase -NewDigest $newDigest -OldDigest $oldDigest -ExpectedCount 7
+    Assert-CommonCallContract -Events $rollbackEvents -Case $rollbackCase -NewDigest $newDigest -OldDigest $oldDigest -ExpectedCount 8
     $rollbackState = Assert-BackupSnapshot -Case $rollbackCase
     Assert-Equal $rollbackState.currentImage $oldDigest 'rollback changed the committed state away from the old digest'
     $rollbackRuntime = Read-Json -Path $rollbackCase.MockStatePath

@@ -16,7 +16,13 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
 if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
-if (-not $SbomPath) { $SbomPath = Join-Path $RepoRoot 'release\sbom' }
+if (-not $SbomPath) {
+    # 缺省取 release\sbom 下唯一的 *.cdx.json（tools/gen-sbom.ps1 的产物）
+    $sbomDir = Join-Path $RepoRoot 'release\sbom'
+    $candidates = @(Get-ChildItem -LiteralPath $sbomDir -File -Filter '*.cdx.json' -ErrorAction SilentlyContinue)
+    if ($candidates.Count -eq 1) { $SbomPath = $candidates[0].FullName }
+    else { $SbomPath = $sbomDir }
+}
 if (-not $LockPath) { $LockPath = Join-Path $RepoRoot 'release\dependencies.lock.toml' }
 
 function Fail {
@@ -31,7 +37,8 @@ if (-not (Test-Path -LiteralPath $LockPath)) { Fail "依赖锁文件不存在: $
 Import-Module (Join-Path $PSScriptRoot 'LockFile.psm1') -Force
 
 try {
-    $bom = Get-Content -LiteralPath $SbomPath -Raw | ConvertFrom-Json
+    # 显式 UTF8：SBOM 无 BOM，PS 5.1 下缺省按系统 ANSI 解码会把非 ASCII 字段读成乱码
+    $bom = Get-Content -LiteralPath $SbomPath -Raw -Encoding UTF8 | ConvertFrom-Json
 } catch {
     Fail "SBOM 不是合法 JSON: $SbomPath（$($_.Exception.Message)）"
 }
