@@ -8,6 +8,18 @@
 //!   - `prod`/`production`：直接报错退出——生产环境必须显式配置。
 //! - 路径字段先做规范化（去首尾空白），再执行启动校验；任一违规项即退出。
 //!
+//! 稳定路径契约（PATH-001 / docs/UPDATE_CONTRACT.md §4）：
+//! - launcher 启动 server 时注入绝对路径环境变量，优先级高于配置文件同名字段：
+//!   `GAMER_APP_DIR` / `GAMER_DATA_DIR` / `GAMER_ADB_PATH` / `GAMER_FFMPEG_PATH` /
+//!   `GAMER_SCRCPY_SERVER`；`GB_CONFIG` 指定配置文件路径、`GB_LOG` 指定日志
+//!   基准路径（二者在既有入口分别消费：`Config::load` / `logging::init`）。
+//! - 相对路径解析规则**冻结**：配置内的相对 `data_dir` 与相对 `adb_path` /
+//!   `ffmpeg_path` 相对**配置文件所在目录**解析（不再是进程 cwd）；应用内资产
+//!   （`scrcpy_server`，以及后续 PATH-002 的 web-dist）相对 `GAMER_APP_DIR`
+//!   解析，未注入时回退现状 cwd 相对逻辑。裸命令名（如 `adb`，无目录成分）
+//!   保持原样走 PATH 查找。`GB_CONFIG` 未设置（默认 `config.toml`，无目录成分）
+//!   时基准目录为 `.`——开发流 `cd server && cargo run` 行为逐字节不变。
+//!
 //! 外部工具可执行性：`scrcpy_server` 指向的 jar **必检**（缺失退出）；adb / ffmpeg
 //! 只探测记录 warn 日志不阻断启动（完整 readiness 端点属阶段 4 OBS-001，
 //! `probe_external_tools` 即为它预留的探测函数）。
@@ -90,12 +102,62 @@ pub struct LoadedConfig {
     pub profile: Profile,
 }
 
+/// 稳定路径契约的环境变量快照（PATH-001 / docs/UPDATE_CONTRACT.md §4）。
+///
+/// launcher 启动 server 时注入以下绝对路径（优先级高于配置文件同名字段）：
+/// `GAMER_APP_DIR` / `GAMER_DATA_DIR` / `GAMER_ADB_PATH` / `GAMER_FFMPEG_PATH` /
+/// `GAMER_SCRCPY_SERVER`。缺省（`PathEnv::default()`）= 无任何注入，行为与
+/// 既有开发流完全一致。测试经 `load_from_with_env` 显式传入，避免动进程级
+/// 环境变量造成串扰。
+#[derive(Debug, Clone, Default)]
+pub struct PathEnv {
+    /// 应用资产根目录（版本目录；jar / web-dist 解析基准）
+    pub app_dir: Option<PathBuf>,
+    /// 数据目录覆盖
+    pub data_dir: Option<PathBuf>,
+    /// adb 可执行文件路径覆盖
+    pub adb_path: Option<String>,
+    /// ffmpeg 可执行文件路径覆盖
+    pub ffmpeg_path: Option<String>,
+    /// scrcpy-server jar 路径覆盖
+    pub scrcpy_server: Option<PathBuf>,
+}
+
+impl PathEnv {
+    /// 从进程环境读取稳定路径注入（空白值视同未设置）
+    pub fn from_env() -> Self {
+        Self {
+            app_dir: env_path("GAMER_APP_DIR"),
+            data_dir: env_path("GAMER_DATA_DIR"),
+            adb_path: env_value("GAMER_ADB_PATH"),
+            ffmpeg_path: env_value("GAMER_FFMPEG_PATH"),
+            scrcpy_server: env_path("GAMER_SCRCPY_SERVER"),
+        }
+    }
+}
+
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn env_path(key: &str) -> Option<PathBuf> {
+    env_value(key).map(PathBuf::from)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// HTTP 监听端口
     pub port: u16,
     /// 数据目录（SQLite、模板图片、脚本）
     pub data_dir: PathBuf,
+    /// 应用资产根目录（PATH-001：GAMER_APP_DIR，launcher 注入；scrcpy jar 与
+    /// 后续 PATH-002 的 web-dist 相对它解析）。None = 未注入（开发模式，
+    /// 应用资产回退现状 cwd 相对逻辑）
+    #[serde(default)]
+    pub app_dir: Option<PathBuf>,
     /// adb 可执行文件路径
     pub adb_path: String,
     /// ffmpeg 可执行文件路径（帧缓存软解码用）
@@ -203,6 +265,7 @@ impl Default for Config {
         Self {
             port: 8443,
             data_dir: PathBuf::from("./data"),
+            app_dir: None,
             adb_path: "adb".into(),
             ffmpeg_path: "ffmpeg".into(),
             scrcpy_server: PathBuf::from("./assets/scrcpy-server.jar"),
@@ -262,14 +325,28 @@ pub struct ToolProbe {
 
 impl Config {
     /// 入口：GB_CONFIG 覆盖路径（默认 ./config.toml）+ GAMER_PROFILE 决定 profile
+    /// + 稳定路径环境变量注入（PATH-001）
     pub fn load() -> anyhow::Result<LoadedConfig> {
         let path =
             PathBuf::from(std::env::var("GB_CONFIG").unwrap_or_else(|_| "config.toml".into()));
-        Self::load_from(&path, Profile::from_env())
+        let env = PathEnv::from_env();
+        Self::load_from_with_env(&path, Profile::from_env(), &env)
     }
 
-    /// 纯函数化加载入口：路径与 profile 显式传入，便于测试而免动全局环境变量
+    /// 纯函数化加载入口：路径与 profile 显式传入、无环境变量注入，便于测试
+    /// （生产入口 `load` → `load_from_with_env`；本函数仅测试与工具链路使用）
+    #[allow(dead_code)]
     pub fn load_from(path: &Path, profile: Profile) -> anyhow::Result<LoadedConfig> {
+        Self::load_from_with_env(path, profile, &PathEnv::default())
+    }
+
+    /// 完整加载入口：`env` 为稳定路径注入快照（`load` 传 `PathEnv::from_env()`，
+    /// 测试可显式构造而不动进程级环境变量）
+    pub fn load_from_with_env(
+        path: &Path,
+        profile: Profile,
+        env: &PathEnv,
+    ) -> anyhow::Result<LoadedConfig> {
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -289,8 +366,9 @@ impl Config {
                             profile.as_str()
                         );
                         let mut cfg = Config::default();
-                        normalize_paths(&mut cfg);
+                        finalize_paths(&mut cfg, env, path);
                         ensure_valid(&cfg)?;
+                        // 计算池并发上限在启动期一次性注入（池首次使用时创建，之后配置不再生效）
                         crate::matcher::compute::configure(cfg.compute_max_concurrency as usize);
                         Ok(LoadedConfig {
                             cfg,
@@ -313,7 +391,7 @@ impl Config {
                 path.display()
             )
         })?;
-        normalize_paths(&mut cfg);
+        finalize_paths(&mut cfg, env, path);
         ensure_valid(&cfg)?;
         // 计算池并发上限在启动期一次性注入（池首次使用时创建，之后配置不再生效）
         crate::matcher::compute::configure(cfg.compute_max_concurrency as usize);
@@ -563,6 +641,91 @@ fn normalize_paths(cfg: &mut Config) {
             }
         }
     }
+    if let Some(p) = &mut cfg.app_dir {
+        if let Some(s) = p.to_str() {
+            let t = s.trim();
+            if t != s {
+                *p = PathBuf::from(t);
+            }
+        }
+    }
+}
+
+/// 加载收口（PATH-001 固定顺序）：环境变量覆盖 → 规范化 → 相对路径按冻结
+/// 契约解析（基准 = 配置文件所在目录 / GAMER_APP_DIR）
+fn finalize_paths(cfg: &mut Config, env: &PathEnv, config_path: &Path) {
+    apply_env_overrides(cfg, env);
+    normalize_paths(cfg);
+    resolve_stable_paths(cfg, &config_dir(config_path));
+}
+
+/// 稳定路径环境变量覆盖（PATH-001）：launcher 注入的绝对路径优先于配置文件
+/// 同名字段；未注入的字段保持配置文件值
+fn apply_env_overrides(cfg: &mut Config, env: &PathEnv) {
+    if let Some(v) = &env.data_dir {
+        cfg.data_dir = v.clone();
+    }
+    if let Some(v) = &env.adb_path {
+        cfg.adb_path = v.clone();
+    }
+    if let Some(v) = &env.ffmpeg_path {
+        cfg.ffmpeg_path = v.clone();
+    }
+    if let Some(v) = &env.scrcpy_server {
+        cfg.scrcpy_server = v.clone();
+    }
+    if let Some(v) = &env.app_dir {
+        cfg.app_dir = Some(v.clone());
+    }
+}
+
+/// 配置文件的基准目录（冻结规则的解析锚点）：无目录成分（如默认
+/// "config.toml"）时取 "."——等价现状 cwd 行为，开发流不变
+fn config_dir(config_path: &Path) -> PathBuf {
+    match config_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// 相对路径解析（纯函数，PATH-001 冻结规则）：绝对路径原样；相对路径拼到
+/// base 后。base 为空/"." 时原样返回——默认开发流（GB_CONFIG 未设置、
+/// cwd=server/）下解析结果与既有行为逐字节一致。"./" 等内嵌分段原样保留
+/// （OS 路径解析语义下等价，不做额外规范化以保持解析确定性）。
+fn resolve_relative(base: &Path, p: &Path) -> PathBuf {
+    if p.is_absolute() || base.as_os_str().is_empty() || base == Path::new(".") {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    }
+}
+
+/// 外部工具路径（adb/ffmpeg）解析：裸命令名（无目录成分，如 "adb"）保持
+/// 原样走 PATH 查找；带目录成分的相对路径相对配置文件目录解析
+fn resolve_tool_path(base: &Path, tool: &str) -> String {
+    let p = Path::new(tool);
+    let has_dir = p
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty());
+    if p.is_absolute() || !has_dir {
+        tool.to_string()
+    } else {
+        resolve_relative(base, p).to_string_lossy().into_owned()
+    }
+}
+
+/// 冻结的相对路径解析规则（PATH-001 / docs/UPDATE_CONTRACT.md §4）：
+/// - 相对 `data_dir`、`adb_path`、`ffmpeg_path` → 相对**配置文件所在目录**；
+/// - 相对 `scrcpy_server`（应用内资产）→ 相对 `GAMER_APP_DIR`（app_dir）；
+///   未注入时回退现状（进程 cwd 相对），开发流不变。
+fn resolve_stable_paths(cfg: &mut Config, base: &Path) {
+    cfg.data_dir = resolve_relative(base, &cfg.data_dir);
+    cfg.adb_path = resolve_tool_path(base, &cfg.adb_path);
+    cfg.ffmpeg_path = resolve_tool_path(base, &cfg.ffmpeg_path);
+    cfg.scrcpy_server = match &cfg.app_dir {
+        Some(app) => resolve_relative(app, &cfg.scrcpy_server),
+        None => cfg.scrcpy_server.clone(),
+    };
 }
 
 fn ensure_valid(cfg: &Config) -> anyhow::Result<()> {
@@ -964,5 +1127,153 @@ rtc_external_port = 50000
                 .any(|err| err.contains("password_hash")),
             "开发环境变量不能遮蔽配置中的坏哈希"
         );
+    }
+
+    // ---------- PATH-001：稳定路径契约 ----------
+
+    /// 中文 + 空格临时目录（PATH-001 验收：非常规路径下解析/读写正确）
+    fn temp_dir_cn(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-cfgtest-中文 目录-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 解析规则纯函数校验：冻结规则逐条成立；解析全程不依赖进程 cwd
+    /// （base 显式传入，测试间无串扰）
+    #[test]
+    fn stable_path_resolution_rules_are_frozen() {
+        // 默认开发流形态：GB_CONFIG 未设置（无目录成分）→ base "." → 逐字节不变
+        assert_eq!(config_dir(Path::new("config.toml")), PathBuf::from("."));
+        assert_eq!(
+            resolve_relative(Path::new("."), Path::new("./data")),
+            PathBuf::from("./data")
+        );
+        assert_eq!(resolve_tool_path(Path::new("."), "adb"), "adb");
+        assert_eq!(resolve_tool_path(Path::new("."), "./adb.exe"), "./adb.exe");
+
+        // 相对 data_dir / 带目录成分的工具路径 → 相对配置文件目录
+        // （PathBuf 比较按组件归一，跨平台分隔符差异不影响断言）
+        let base = Path::new("/opt/gamebot/config");
+        assert_eq!(
+            config_dir(Path::new("/opt/gamebot/config/config.toml")),
+            base
+        );
+        assert_eq!(
+            resolve_relative(base, Path::new("./data")),
+            base.join("./data")
+        );
+        assert_eq!(
+            PathBuf::from(resolve_tool_path(base, "./runtime/adb.exe")),
+            base.join("./runtime/adb.exe")
+        );
+        // 裸命令名不拼 base（保持 PATH 查找语义）；绝对路径原样
+        assert_eq!(resolve_tool_path(base, "adb"), "adb");
+        let abs_tool = std::env::temp_dir().join("abs-tools").join("adb.exe");
+        assert_eq!(
+            resolve_tool_path(base, abs_tool.to_str().unwrap()),
+            abs_tool.to_str().unwrap()
+        );
+        assert_eq!(resolve_relative(base, &abs_tool), abs_tool);
+    }
+
+    /// 完整加载链路（中文+空格路径、显式绝对配置路径）：相对 data_dir 解析到
+    /// 配置文件目录；无注入时 scrcpy jar 回退现状；任意 cwd 语义下结论一致
+    /// （解析纯函数化，不经 cwd）
+    #[test]
+    fn relative_paths_resolve_against_config_dir_under_cjk_path() {
+        let dir = temp_dir_cn("resolve");
+        let path = write_minimal_config(&dir, "配置 文件.toml");
+        let loaded = Config::load_from(&path, Profile::Prod).unwrap();
+
+        assert_eq!(
+            loaded.cfg.data_dir,
+            dir.join("./data"),
+            "相对 data_dir 必须相对配置文件目录解析"
+        );
+        // app_dir 未注入 → jar 回退现状（原样相对路径）
+        assert_eq!(loaded.cfg.app_dir, None);
+        assert_eq!(
+            loaded.cfg.scrcpy_server,
+            PathBuf::from("./assets/scrcpy-server.jar")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 环境变量注入优先于配置文件同名字段；覆盖后的相对工具路径同样按
+    /// 配置文件目录解析
+    #[test]
+    fn env_overrides_win_over_file_values() {
+        let dir = temp_dir_cn("env-覆盖");
+        let path = write_minimal_config(&dir, "config.toml");
+        let data_dir = dir.join("数 据");
+        let env = PathEnv {
+            app_dir: None,
+            data_dir: Some(data_dir.clone()),
+            adb_path: Some("./runtime/adb.exe".into()),
+            ffmpeg_path: Some("ffmpeg".into()),
+            scrcpy_server: Some(dir.join("assets/scrcpy-server.jar")),
+        };
+        let loaded = Config::load_from_with_env(&path, Profile::Prod, &env).unwrap();
+        assert_eq!(
+            loaded.cfg.data_dir, data_dir,
+            "注入的绝对 data_dir 原样生效"
+        );
+        assert_eq!(
+            loaded.cfg.adb_path,
+            dir.join("./runtime/adb.exe").to_string_lossy(),
+            "注入的相对工具路径相对配置文件目录解析"
+        );
+        assert_eq!(loaded.cfg.ffmpeg_path, "ffmpeg", "裸命令名不拼接");
+        assert_eq!(
+            loaded.cfg.scrcpy_server,
+            dir.join("assets/scrcpy-server.jar"),
+            "注入的绝对 jar 路径原样生效"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// app_dir 注入时应用内资产（scrcpy jar）相对 GAMER_APP_DIR 解析
+    #[test]
+    fn app_dir_bases_app_assets() {
+        let dir = temp_dir_cn("app-dir");
+        let path = write_minimal_config(&dir, "config.toml");
+        let app_dir = dir.join("versions").join("0.2.0");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let env = PathEnv {
+            app_dir: Some(app_dir.clone()),
+            ..Default::default()
+        };
+        let loaded = Config::load_from_with_env(&path, Profile::Prod, &env).unwrap();
+        assert_eq!(loaded.cfg.app_dir.as_deref(), Some(app_dir.as_path()));
+        assert_eq!(
+            loaded.cfg.scrcpy_server,
+            app_dir.join("./assets/scrcpy-server.jar"),
+            "应用内资产必须相对 GAMER_APP_DIR 解析"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 配置文件缺失 + dev 放行：注入的环境变量仍覆盖默认值
+    #[test]
+    fn missing_config_dev_defaults_still_honor_env_overrides() {
+        let dir = temp_dir_cn("missing-env");
+        let ghost = dir.join("不存在.toml");
+        let data_dir = dir.join("注入数据");
+        let env = PathEnv {
+            data_dir: Some(data_dir.clone()),
+            ..Default::default()
+        };
+        let loaded = Config::load_from_with_env(&ghost, Profile::Dev, &env).unwrap();
+        assert_eq!(loaded.cfg.data_dir, data_dir);
+        // 未注入字段保持默认（jar 相对路径原样）
+        assert_eq!(
+            loaded.cfg.scrcpy_server,
+            PathBuf::from("./assets/scrcpy-server.jar")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
