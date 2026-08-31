@@ -106,3 +106,17 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **Windows 相对路径拼接产生混合分隔符**：`PathBuf::join` 可得 `config\./data`，PathBuf 相等按组件归一，但 `to_string_lossy()` 后的字符串断言跨平台必挂；测试断言比 PathBuf 不比字符串。
 - **bin crate 里未接线的 `pub` 模块照样 dead_code**（`pub` 不豁免）：框架性「先交付后接线」模块（build_info/file_migration）需带理由注释的 `#![allow(dead_code)]`，接线时移除。
 - **build.rs 声明任何 `rerun-if-*` 后 cargo 即关闭「包内文件变化重跑」默认**：git commit 探测必须显式 `rerun-if-changed` 跟踪 `.git/HEAD`+`.git/refs`，否则同分支新提交的 hash 陈旧。
+
+## 2026-08-31（批次 2/发布链路实施期）
+
+- **zip crate 读取器按条目名建 IndexMap，重复条目被静默折叠**：依赖 `by_index` 遍历的安全解包器感受不到重复条目攻击；解压前须独立定位 EOCD 逐头清点 central directory 条目数，与折叠后不一致即拒。
+- **zip crate 写入器把 central directory 的 version-made-by system 写 0**：unix mode（含 symlink 标记）在写入再读出链路丢失、`is_symlink()` 恒 false；符号链接检测不能只信 unix mode，落地后全树 reparse point 扫描兜底，测试夹具须手工拼字节。
+- **Windows PowerShell 5.1 的 `Compress-Archive` 对子目录条目用 `\` 分隔**：跨工具验收（manifest 路径规则）直接拦截；组包用 `System.IO.Compression.ZipArchive` 逐文件建条目强制 `/`，组包后保留反斜杠条目自检。
+- **PS 方法调用参数列表里 `-f` 的逗号数组被拆成方法参数**：`$list.Add('{0}' -f $a, $b)` 报 FormatException，须写 `-f @($a, $b)` 显式打包（语句层同写法正常，极具迷惑性）。
+- **cmd 下 `node -e "code with =>"` 会把 `>` 当重定向**在 cwd 生成垃圾文件（如 0 字节的 `n`）；多行/含特殊字符脚本一律落临时 .mjs 文件再执行。
+- **SQLite `TEXT PRIMARY KEY` 在 `PRAGMA table_info` 中 `notnull=0`**（PK 不隐含 NOT NULL）：写 schema 快照 fixture 别按 DDL 直觉填 1。
+- **PS 5.1 `Set-Content -Encoding UTF8` 写出带 BOM 文件**：TOML 解析器把 BOM 并进首键报 `missing field`（column 1）；生成 config.toml 用 `-Encoding ASCII` 或无 BOM UTF8。
+- **server 的 config.toml 必填键比直觉多**（decode_frames/max_size/bitrate_mbps/fps 无 serde 默认）：手写最小配置缺一个即启动退出，排障时先对照 config.rs 全字段。
+- **运行中服务的 WAL 库只读打开可能失败**（无 -shm 时）：maintenance 工具做只读优先、失败退回读写打开但零写入的兜底。
+- **launcher `--install-root .` 相对根会让注入的 GAMER_* 稳定路径变相对路径**（违反路径契约，server 端 jar 路径被重复拼接启动失败）：注入前必须把安装根按 cwd 词法规范化为绝对路径。
+- **端口就绪探测按「端口 200」判定可被同端口无关进程误满足**：E2E 曾被遗留 dev server 占 8443 误报 PASS；集成验收前先清端口，升级验收需叠加 boot_id/版本断言。

@@ -1,6 +1,6 @@
 # GameBot 运行依赖与自动升级开发计划
 
-> 状态：**实施中（批次 0、1 已完成，2026-08-31）**  
+> 状态：**实施中（批次 0、1、2 已完成——M1 基线 E2E 通过，2026-08-31）**  
 > 编制日期：2026-08-31  
 > 适用范围：Windows x64 便携发行版、运行依赖管理、版本检查与升级、数据迁移与回滚、GitHub Release、GHCR、系统 API、设置页和发布验收  
 > 本文只定义设计契约、任务拆分、并行顺序和验收门禁，不代表相关功能已经实现。
@@ -874,10 +874,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 - [x] REL-002：生成 launcher + signed manifest + offline seeds 的 full ZIP。（71MB，解压复核+SHA256SUMS 全对）
 - [x] REL-003：生成 detached signature 和 `SHA256SUMS`。（dev-ed25519-1，validate-manifest check 验签通过）
 - [x] QA-002：慢流、断流、404、篡改、错误 Range 和并发 repair 不污染 runtime。（45 测试；未采用 Range 断点续传，该反例不适用，其余全覆盖）
-- [ ] Windows PATH 清空、断网、无 Node/Rust/adb/ffmpeg 时 full 包首次启动通过。（批次 2 合流门 E2E 实测）
-- [x] 删除 adb.exe、任一 adb DLL 或 ffmpeg.exe 后离线 repair 通过。（demo-install 实测删 AdbWinApi.dll → 离线恢复 hash 一致）
+- [x] Windows PATH 清空、断网、无 Node/Rust/adb/ffmpeg 时 full 包首次启动通过。（E2E 场景 A：死代理断网模拟 + PATH=System32，repair→start→/health/ready 200，见 docs/UPDATE_M1_EVIDENCE.md）
+- [x] 删除 adb.exe、任一 adb DLL 或 ffmpeg.exe 后离线 repair 通过。（E2E 场景 B：删 AdbWinApi.dll → 离线恢复 sha256 与锁一致）
 - [x] 项目真实 H.264 stdin→PNG stdout ffmpeg 命令通过。（fetch-ffmpeg.ps1 冒烟，BUILD-CONFIG 归档）
-- [ ] 批次 2 合流门：完成可手工安装的 M1 基线版本和可复现 full ZIP。（待 E2E）
+- [x] 批次 2 合流门：完成可手工安装的 M1 基线版本和可复现 full ZIP。（首轮 E2E 暴露 3 阻断缺陷已修复复验，full ZIP 从 HEAD 可重建）
 
 ### 17.5 批次 3：自动升级与回滚
 
