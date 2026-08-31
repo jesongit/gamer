@@ -3,6 +3,15 @@
 //! 架构：设备通过 adb 接入，服务端作为 scrcpy 客户端（官方 scrcpy-server）
 //! 采集 H.264 视频 + 注入控制；视频流经 WebRTC 转推浏览器；
 //! 模板匹配 / YAML 自动化 / 定时任务全部在服务端执行。
+//!
+//! 启动序列（OPS-004 activation gate）：
+//! - 常规路径（无 `GAMER_ACTIVATION_GATE`）：config/store/鉴权 → 设备/调度/
+//!   更新栈 → HTTP 服务，行为与历史版本一致；
+//! - 闸内路径（`GAMER_ACTIVATION_GATE=1`，候选进程启动形态）：只初始化
+//!   「gate 前必需」（config/store/鉴权/停机协调器）即绑端口放行探针与激活
+//!   端点；scheduler / 设备扫描 / watchdog / idle_power_loop / DeviceManager
+//!   全部延后到 `POST /api/system/activate` 校验通过后执行，完成后换入完整
+//!   路由并置 startup.stage=ready（/health/ready 翻转 200）。
 
 mod api;
 mod build_info;
@@ -23,6 +32,7 @@ mod scripts;
 mod shutdown;
 mod store;
 mod task_params;
+mod update;
 mod webrtc;
 
 use std::sync::Arc;
@@ -30,6 +40,8 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tracing::{info, warn};
+
+use update::gate::StartupGate;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -111,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
     metrics::install_global(db.metrics());
 
     // 鉴权状态（阶段 2）：凭据链路解析 + 回环管理通道令牌 + 会话治理参数
+    // 【gate 前必需】
     let credential = api::auth::resolve_credential(&cfg);
     let admin_token = api::auth::resolve_admin_token(loaded.profile);
     let auth = Arc::new(api::auth::AuthState::new(
@@ -124,6 +137,80 @@ async fn main() -> anyhow::Result<()> {
         secure_cookies = auth.secure_cookies(),
         "auth enabled (session cookies; /api/** requires login)"
     );
+
+    // activation gate（OPS-004）：GAMER_ACTIVATION_GATE=1 → 闸内启动
+    let gate = StartupGate::from_env();
+    let gate_shared = Arc::new(api::gate::GateShared::default());
+
+    // 统一停机协调器（OPS-001）：drain 依赖（runs/viewers/devices）在闸内路径
+    // 尚不存在 → 经 DrainSlot 延后装配（闸内无会话可拆 = no-op；完整初始化后
+    // 换入真实 drain），/api/shutdown 与 Ctrl+C / SIGTERM 共用同一入口。
+    let drain_slot: DrainSlot = Arc::new(std::sync::RwLock::new(None));
+    let shutdown = Arc::new(shutdown::ShutdownCoordinator::new(slot_drain(
+        drain_slot.clone(),
+    )));
+    shutdown::spawn_signal_listener(shutdown.clone());
+
+    if gate.enabled() {
+        info!("activation gate enabled (GAMER_ACTIVATION_GATE=1): booting behind maintenance gate");
+        let app = api::gate::build_gate_router(
+            cfg.clone(),
+            db.clone(),
+            shutdown.clone(),
+            gate.clone(),
+            gate_shared.clone(),
+        );
+        // 激活任务：等待 activate → 完整初始化（【activate 后】序列）→ 换入完整路由
+        let init_cfg = cfg.clone();
+        let init_db = db.clone();
+        let init_auth = auth.clone();
+        let init_shutdown = shutdown.clone();
+        let init_slot = drain_slot.clone();
+        let init_gate = gate.clone();
+        let init_shared = gate_shared.clone();
+        tokio::spawn(async move {
+            init_gate.wait_activation().await;
+            info!("activation received: completing full initialization");
+            match init_runtime(&init_cfg, init_db.clone(), init_slot.clone()).await {
+                Ok(ctx) => {
+                    let update = spawn_update_stack(&init_cfg, init_db.clone(), &ctx);
+                    // 运行日志保留（DATA-004）随完整初始化启动
+                    if init_cfg.log_retain_days > 0 {
+                        let retention_db = init_db.clone();
+                        let retain_days = init_cfg.log_retain_days;
+                        tokio::spawn(run_log_retention(
+                            retention_db,
+                            retain_days,
+                            init_shutdown.subscribe(),
+                        ));
+                    }
+                    update::gate::set_stage(update::gate::STAGE_READY);
+                    let router = api::build_router(
+                        init_db,
+                        ctx.devices,
+                        ctx.runs,
+                        ctx.scheduler,
+                        init_cfg.clone(),
+                        ctx.viewers,
+                        ctx.scripts,
+                        init_shutdown,
+                        init_auth,
+                        update,
+                    );
+                    init_shared.set(router);
+                    info!("full initialization complete: business routes open (stage=ready)");
+                }
+                Err(e) => {
+                    tracing::error!(err = %e, "post-activation initialization failed; staying gated");
+                }
+            }
+        });
+        serve(cfg, app, shutdown.clone()).await?;
+        info!("server exited");
+        return Ok(());
+    }
+
+    // ---- 常规启动路径（无 gate：行为与历史版本一致） ----
 
     // 脚本/模板按应用分区存储（data/<pkg>/yaml|tmpl）；旧目录布局不再自动迁移
     let scripts = Arc::new(scripts::ScriptStore::open(&cfg)?);
@@ -139,7 +226,6 @@ async fn main() -> anyhow::Result<()> {
         cfg.clone(),
         viewers.clone(),
     ));
-    devices.start().await?;
 
     // 统一运行管理（阶段 3 RUN-001）：手动 / 定时 / 立即运行共用 run_id 注册表，
     // 生产装配 EngineExecutor 直连 Runner + DeviceManager
@@ -161,25 +247,23 @@ async fn main() -> anyhow::Result<()> {
         scripts.clone(),
         runs.clone(),
     ));
-    scheduler.start().await;
 
-    // 统一停机协调器（OPS-001）：API（POST /api/shutdown）/ Ctrl+C / SIGTERM
-    // 三种触发源共用同一条 drain 入口（复用原 /api/shutdown 的会话拆解序列）；
-    // 一次性语义——首次触发执行完整 drain，后续触发 no-op。watch 停机信号由
-    // 协调器持有，axum graceful 与运行日志保留任务挂其 receiver。
-    let shutdown = Arc::new(shutdown::ShutdownCoordinator::new(Arc::new({
-        let runs = runs.clone();
-        let viewers = viewers.clone();
-        let devices = devices.clone();
-        move || {
-            let runs = runs.clone();
-            let viewers = viewers.clone();
-            let devices = devices.clone();
-            Box::pin(shutdown::drain_sessions(runs, viewers, devices))
-                as futures_util::future::BoxFuture<'static, ()>
-        }
-    })));
-    shutdown::spawn_signal_listener(shutdown.clone());
+    let ctx = RuntimeCtx {
+        scripts,
+        viewers,
+        devices,
+        runs,
+        scheduler,
+    };
+
+    // 先装配真实 drain，再启动设备扫描/保活；避免启动窗口收到 SIGTERM 时
+    // 协调器仍持有空槽而漏掉已创建的 DeviceManager。
+    install_drain(&drain_slot, &ctx);
+    ctx.devices.start().await?;
+    ctx.scheduler.start().await;
+
+    // 更新子系统（批次 3）：controller 按部署形态装配 + 策略协调器后台任务
+    let update = spawn_update_stack(&cfg, db.clone(), &ctx);
 
     // 运行日志保留策略（DATA-004）：启动时已做一次清理，这个低频任务负责长期
     // 运行实例。SQLite 调用放入 blocking 池，不占用 Tokio 核心线程；每次只删除小批量。
@@ -197,14 +281,15 @@ async fn main() -> anyhow::Result<()> {
     let mut shutdown_rx = shutdown.subscribe();
     let app = api::build_router(
         db,
-        devices,
-        runs,
-        scheduler,
+        ctx.devices,
+        ctx.runs,
+        ctx.scheduler,
         cfg.clone(),
-        viewers,
-        scripts,
-        shutdown,
+        ctx.viewers,
+        ctx.scripts,
+        shutdown.clone(),
         auth,
+        update,
     );
     let listener = TcpListener::bind(cfg.listen_addr()).await?;
     info!("GameBot server ready on http://{}", cfg.listen_addr());
@@ -219,6 +304,153 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     info!("server exited");
 
+    Ok(())
+}
+
+/// 运行时上下文：闸内路径激活后与常规路径共用的完整业务依赖集合
+struct RuntimeCtx {
+    scripts: Arc<scripts::ScriptStore>,
+    viewers: webrtc::ViewerMap,
+    devices: Arc<device::DeviceManager>,
+    runs: Arc<run_manager::RunManager>,
+    scheduler: Arc<scheduler::Scheduler>,
+}
+
+/// 【activate 后】完整业务初始化：脚本存储 / viewer 注册表 / DeviceManager
+/// （start 内含扫描自举 + WiFi adb 保活）/ Runner / RunManager / Scheduler。
+/// 常规路径同序列内联展开；gate 路径在激活任务中调用。
+async fn init_runtime(
+    cfg: &config::Config,
+    db: Arc<store::Store>,
+    drain_slot: DrainSlot,
+) -> anyhow::Result<RuntimeCtx> {
+    let scripts = Arc::new(scripts::ScriptStore::open(cfg)?);
+    let viewers: webrtc::ViewerMap =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let devices = Arc::new(device::DeviceManager::new(
+        db.clone(),
+        cfg.clone(),
+        viewers.clone(),
+    ));
+    let runner = Arc::new(engine::Runner::new(
+        devices.clone(),
+        viewers.clone(),
+        scripts.clone(),
+    ));
+    let executor = Arc::new(run_manager::EngineExecutor::new(
+        runner,
+        devices.clone(),
+        db.clone(),
+    ));
+    let runs = Arc::new(run_manager::RunManager::new(executor));
+    let scheduler = Arc::new(scheduler::Scheduler::new(
+        db.clone(),
+        scripts.clone(),
+        runs.clone(),
+    ));
+    let ctx = RuntimeCtx {
+        scripts,
+        viewers,
+        devices,
+        runs,
+        scheduler,
+    };
+    // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
+    // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。
+    install_drain(&drain_slot, &ctx);
+    ctx.devices.start().await?;
+    ctx.scheduler.start().await;
+    Ok(ctx)
+}
+
+/// 停机 drain 的延后装配槽：闸内启动时 drain 依赖不存在，完整初始化后写入
+type DrainSlot = Arc<std::sync::RwLock<Option<shutdown::DrainFn>>>;
+
+/// drain 闭包工厂：读槽取真实 drain；槽为空（闸内未激活）时无会话可拆 = no-op
+fn slot_drain(slot: DrainSlot) -> shutdown::DrainFn {
+    Arc::new(move || {
+        let slot = slot.clone();
+        Box::pin(async move {
+            let drain = slot.read().unwrap().clone();
+            if let Some(drain) = drain {
+                drain().await;
+            }
+        }) as futures_util::future::BoxFuture<'static, ()>
+    })
+}
+
+/// 完整初始化后装配真实 drain（RunManager drain → 踢 viewer → 拆 scrcpy 会话）
+fn install_drain(slot: &DrainSlot, ctx: &RuntimeCtx) {
+    let runs = ctx.runs.clone();
+    let viewers = ctx.viewers.clone();
+    let devices = ctx.devices.clone();
+    *slot.write().unwrap() = Some(Arc::new(move || {
+        let runs = runs.clone();
+        let viewers = viewers.clone();
+        let devices = devices.clone();
+        Box::pin(shutdown::drain_sessions(runs, viewers, devices))
+            as futures_util::future::BoxFuture<'static, ()>
+    }));
+}
+
+/// 更新子系统装配（两种启动路径共用）：controller 按部署形态选择（launcher
+/// named pipe / Docker external / 直跑 unsupported）→ 策略存储（config 基线 +
+/// state/ 持久化覆盖）→ workload 源（活跃运行/viewer/cron/升级事务）→ 服务 →
+/// 协调器后台任务。
+fn spawn_update_stack(
+    cfg: &config::Config,
+    db: Arc<store::Store>,
+    ctx: &RuntimeCtx,
+) -> Arc<update::service::UpdateService> {
+    let mode = deps_probe::Mode::detect();
+    let controller = update::controller::build_for_mode(mode);
+    let controller_strategy = controller.strategy();
+    let policy = update::policy::PolicyStore::load_blocking(
+        &cfg.data_dir,
+        update::policy::UpdatePolicy::from_config(&cfg.update),
+    );
+    let txn = Arc::new(update::service::UpdateTxn::default());
+    let runs = ctx.runs.clone();
+    let viewers = ctx.viewers.clone();
+    let scheduler = ctx.scheduler.clone();
+    let txn_for_workload = txn.clone();
+    let workload: update::service::WorkloadProvider = Arc::new(move || {
+        update::workload::WorkloadSource::new(runs.clone(), viewers.clone(), scheduler.clone(), {
+            let txn = txn_for_workload.clone();
+            Arc::new(move || txn.is_active()) as Arc<dyn Fn() -> bool + Send + Sync>
+        })
+        .snapshot()
+    });
+    let service = Arc::new(update::service::UpdateService::new(
+        controller, policy, txn, workload, db,
+    ));
+    update::coordinator::Coordinator::spawn(service.clone());
+    info!(
+        mode = mode.as_str(),
+        strategy = controller_strategy,
+        "update stack online (controller + policy + coordinator)"
+    );
+    service
+}
+
+/// 闸内/常规路径共用的 HTTP 服务装配：绑定端口 + 优雅停机挂协调器 watch
+async fn serve(
+    cfg: config::Config,
+    app: axum::Router,
+    shutdown: Arc<shutdown::ShutdownCoordinator>,
+) -> anyhow::Result<()> {
+    let mut shutdown_rx = shutdown.subscribe();
+    let listener = TcpListener::bind(cfg.listen_addr()).await?;
+    info!("GameBot server ready on http://{}", cfg.listen_addr());
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx.changed().await;
+        info!("graceful shutdown: http server draining");
+    })
+    .await?;
     Ok(())
 }
 

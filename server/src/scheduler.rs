@@ -175,6 +175,43 @@ impl Scheduler {
         }
         result
     }
+
+    /// 距下一次**启用** cron 任务触发的秒数（OPS-005：install 冻结窗口门禁的
+    /// 时间维度；禁用任务不计、非法表达式跳过、无启用任务返回 None）。
+    /// 本地时区口径，与调度触发判定一致。
+    pub fn next_enabled_trigger_in_secs(&self) -> Option<i64> {
+        let tasks = self.db.list_tasks().ok()?;
+        next_enabled_trigger_in_secs_from(&tasks, Local::now())
+    }
+}
+
+/// 纯函数（可注入 now 单测）：启用任务的最近下一次触发距 `now` 的秒数
+pub fn next_enabled_trigger_in_secs_from(
+    tasks: &[Task],
+    now: chrono::DateTime<Local>,
+) -> Option<i64> {
+    let mut best: Option<i64> = None;
+    for task in tasks {
+        if !task.enabled {
+            continue;
+        }
+        let Ok(sched) = Schedule::from_str(&normalize_cron(&task.cron)) else {
+            continue;
+        };
+        // `Schedule::after` is strictly exclusive. Probe one nanosecond before
+        // `now` so a trigger exactly at the current instant is reported as 0s,
+        // which keeps the cron freeze gate closed at the boundary.
+        let probe = now - chrono::Duration::nanoseconds(1);
+        let Some(next) = sched.after(&probe).next() else {
+            continue;
+        };
+        let secs = (next - now).num_seconds().max(0);
+        best = Some(match best {
+            Some(b) => b.min(secs),
+            None => secs,
+        });
+    }
+    best
 }
 
 /// 参数确认日志：只记参数名列表与签名（短码 + 全串），**不记参数值**
@@ -550,6 +587,61 @@ mod tests {
             .with_timezone(&Local);
         let trigger = latest_due_trigger(&sched, now).unwrap();
         assert_eq!(trigger.timestamp(), 1_787_834_040);
+    }
+
+    /// OPS-005：下一次启用触发秒数——启用任务取最小、禁用不计、非法表达式
+    /// 跳过、无启用任务 None（更新安装冻结窗口门禁的时间维度）
+    #[test]
+    fn next_enabled_trigger_secs_picks_minimum_of_enabled_tasks() {
+        // Construct local wall-clock values explicitly: production scheduling
+        // is local-time based, and the test must be stable on hosts outside
+        // UTC (e.g. Asia/Shanghai).
+        let now = Local
+            .with_ymd_and_hms(2026, 8, 31, 10, 0, 20)
+            .single()
+            .unwrap();
+        let task = |id: &str, cron: &str, enabled: bool| Task {
+            id: id.into(),
+            name: id.into(),
+            cron: cron.into(),
+            script_id: "com.x/y.yaml".into(),
+            device_id: "d".into(),
+            enabled,
+            last_result: None,
+            last_run_at: None,
+            created_at: "2026-08-29T00:00:00Z".into(),
+            args_json: "{}".into(),
+            param_signature: "psig1|".into(),
+        };
+        // 每 5 分钟触发：下一次 10:05:00 → 280s
+        let every5 = task("a", "*/5 * * * *", true);
+        assert_eq!(
+            next_enabled_trigger_in_secs_from(std::slice::from_ref(&every5), now),
+            Some(280)
+        );
+        // 禁用任务不计
+        let mut disabled = every5.clone();
+        disabled.enabled = false;
+        assert_eq!(next_enabled_trigger_in_secs_from(&[disabled], now), None);
+        // 多任务取最小；禁用/非法表达式被跳过
+        let hourly = task("b", "0 11 * * *", true); // 11:00 → 3580s
+        let broken = task("c", "not a cron", true);
+        assert_eq!(
+            next_enabled_trigger_in_secs_from(&[hourly, broken.clone(), every5], now),
+            Some(280)
+        );
+        // 只有非法表达式 → None（不 panic、不误报临近）
+        assert_eq!(next_enabled_trigger_in_secs_from(&[broken], now), None);
+        // 恰在触发点：0s（冻结窗口门禁语义下必然阻塞）
+        let at_trigger = task("d", "*/5 * * * *", true);
+        let exact = Local
+            .with_ymd_and_hms(2026, 8, 31, 10, 5, 0)
+            .single()
+            .unwrap();
+        assert_eq!(
+            next_enabled_trigger_in_secs_from(&[at_trigger], exact),
+            Some(0)
+        );
     }
 
     #[test]

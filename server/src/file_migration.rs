@@ -23,6 +23,7 @@
 // 纯框架批次：消费方接线属后续迁移需求落地时（batch 计划 DATA-006/QA-003）
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -90,26 +91,64 @@ pub fn plan(
     journal_path: &Path,
 ) -> anyhow::Result<Journal> {
     anyhow::ensure!(!entries.is_empty(), "file migration plan is empty");
+    let journal_tmp = atomic_temp_path(journal_path);
+    let marker_tmp = atomic_temp_path(&marker);
+    let reserved = [
+        (journal_path, "journal"),
+        (journal_tmp.as_path(), "journal temp"),
+        (marker.as_path(), "marker"),
+        (marker_tmp.as_path(), "marker temp"),
+    ];
+    for (index, (path, label)) in reserved.iter().enumerate() {
+        for (other, other_label) in reserved.iter().skip(index + 1) {
+            anyhow::ensure!(
+                path_key(path) != path_key(other),
+                "{label} path collides with {other_label}: {}",
+                path.display()
+            );
+        }
+    }
+    let mut sources = HashSet::new();
+    let mut targets = HashSet::new();
     for entry in &entries {
         anyhow::ensure!(
-            entry.source != entry.target,
+            path_key(&entry.source) != path_key(&entry.target),
             "plan entry source == target: {}",
             entry.source.display()
         );
+        anyhow::ensure!(
+            sources.insert(path_key(&entry.source)),
+            "duplicate migration source: {}",
+            entry.source.display()
+        );
+        anyhow::ensure!(
+            targets.insert(path_key(&entry.target)),
+            "duplicate migration target: {}",
+            entry.target.display()
+        );
         // journal / marker 是本次迁移的专用产物：不得与任何源或 staging 目标
         // 同文件（否则 journal/marker 落盘会覆盖源文件或顶掉迁移产物）
-        for (path, label) in [(journal_path, "journal"), (marker.as_path(), "marker")] {
+        for (path, label) in reserved {
             anyhow::ensure!(
-                entry.source != path,
+                path_key(&entry.source) != path_key(path),
                 "{label} path must not be a migration source: {}",
                 path.display()
             );
             anyhow::ensure!(
-                entry.target != path,
+                path_key(&entry.target) != path_key(path),
                 "{label} path must not collide with a staging target: {}",
                 path.display()
             );
         }
+    }
+    // A target must not replace another source: the source tree is the
+    // rollback boundary and remains untouched for the whole migration.
+    for entry in &entries {
+        anyhow::ensure!(
+            !sources.contains(&path_key(&entry.target)),
+            "migration target collides with a source: {}",
+            entry.target.display()
+        );
     }
     let journal = Journal {
         schema_version: JOURNAL_SCHEMA_VERSION,
@@ -127,6 +166,27 @@ pub fn plan(
     };
     save_journal(&journal, journal_path)?;
     Ok(journal)
+}
+
+/// Stable comparison key for paths that may not exist yet. Windows file
+/// lookups are case-insensitive, so a lower-cased lexical key catches target
+/// collisions before staging creates either file; non-Windows keeps the host's
+/// case-sensitive semantics.
+fn path_key(path: &Path) -> String {
+    #[cfg(windows)]
+    {
+        path.to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
+}
+
+fn atomic_temp_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.tmp", path.display()))
 }
 
 /// 同构目录映射：把 `old_root` 下全部文件（递归）映射为 `new_root` 下同相对
@@ -242,6 +302,16 @@ pub fn rollback(journal_path: &Path) -> anyhow::Result<Journal> {
             failures.push(format!("remove marker: {e}"));
         }
     }
+    for temp in [
+        atomic_temp_path(journal_path),
+        atomic_temp_path(&journal.marker),
+    ] {
+        if temp.exists() {
+            if let Err(e) = std::fs::remove_file(&temp) {
+                failures.push(format!("remove {}: {e}", temp.display()));
+            }
+        }
+    }
     for entry in &journal.entries {
         if entry.target.exists() {
             if let Err(e) = std::fs::remove_file(&entry.target) {
@@ -328,17 +398,24 @@ fn write_marker(journal: &Journal) -> anyhow::Result<()> {
 /// journal / marker 的原子写：同目录临时文件 + 落盘 flush + rename 替换
 /// （半截文件不可能顶替正式内容）
 fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    let tmp = PathBuf::from(format!("{}.tmp", path.display()));
-    {
+    let tmp = atomic_temp_path(path);
+    let mut temp_created = false;
+    let result = (|| -> anyhow::Result<()> {
         let mut file =
             File::create(&tmp).with_context(|| format!("create temp file {}", tmp.display()))?;
+        temp_created = true;
         std::io::Write::write_all(&mut file, bytes)
             .with_context(|| format!("write temp file {}", tmp.display()))?;
         file.sync_all()
             .with_context(|| format!("flush temp file {}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("atomic replace {}", path.display()))?;
+        Ok(())
+    })();
+    if temp_created && result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path).with_context(|| format!("atomic replace {}", path.display()))?;
-    Ok(())
+    result
 }
 
 fn save_journal(journal: &Journal, journal_path: &Path) -> anyhow::Result<()> {
@@ -438,6 +515,24 @@ mod tests {
         );
     }
 
+    fn snapshot_sources(entries: &[PlanEntry]) -> Vec<(PathBuf, Vec<u8>)> {
+        entries
+            .iter()
+            .map(|entry| (entry.source.clone(), std::fs::read(&entry.source).unwrap()))
+            .collect()
+    }
+
+    fn assert_sources_unchanged(snapshot: &[(PathBuf, Vec<u8>)]) {
+        for (path, expected) in snapshot {
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                *expected,
+                "source file changed: {}",
+                path.display()
+            );
+        }
+    }
+
     fn drop_fixture(fx: &Fixture) {
         let base = fx.journal_path.parent().unwrap().to_path_buf();
         let _ = std::fs::remove_dir_all(base);
@@ -508,6 +603,304 @@ mod tests {
             err.to_string().contains("not be a migration source"),
             "{err}"
         );
+        drop_fixture(&fx);
+    }
+
+    #[test]
+    fn plan_rejects_duplicate_targets_sources_and_cross_tree_collisions() {
+        let fx = fixture("plan-collisions");
+        seed_sources(&fx);
+        let first = fx.old_root.join("脚本一.yaml");
+        let second = fx.old_root.join("资源包").join("模板 图片.png");
+        let target = fx.new_root.join("same.bin");
+
+        let err = plan(
+            "collision-target",
+            vec![
+                PlanEntry {
+                    source: first.clone(),
+                    target: target.clone(),
+                },
+                PlanEntry {
+                    source: second.clone(),
+                    target: target.clone(),
+                },
+            ],
+            fx.marker.clone(),
+            &fx.journal_path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate migration target"),
+            "{err}"
+        );
+        assert!(!fx.journal_path.exists(), "拒绝计划不得落盘 journal");
+
+        let err = plan(
+            "collision-source",
+            vec![
+                PlanEntry {
+                    source: first.clone(),
+                    target: target.clone(),
+                },
+                PlanEntry {
+                    source: first.clone(),
+                    target: fx.new_root.join("other.bin"),
+                },
+            ],
+            fx.marker.clone(),
+            &fx.journal_path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate migration source"),
+            "{err}"
+        );
+
+        // 目标指向另一条源会在复制时毁掉 rollback 源，必须在 plan 阶段拒绝。
+        let err = plan(
+            "collision-cross-tree",
+            vec![
+                PlanEntry {
+                    source: first.clone(),
+                    target: fx.new_root.join("first.bin"),
+                },
+                PlanEntry {
+                    source: second.clone(),
+                    target: first.clone(),
+                },
+            ],
+            fx.marker.clone(),
+            &fx.journal_path,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("collides with a source"), "{err}");
+
+        let err = plan(
+            "collision-reserved",
+            vec![PlanEntry {
+                source: first,
+                target,
+            }],
+            fx.journal_path.clone(),
+            &fx.journal_path,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("journal path collides with marker"),
+            "{err}"
+        );
+        drop_fixture(&fx);
+    }
+
+    #[test]
+    fn preexisting_different_target_is_rejected_without_losing_source() {
+        let fx = fixture("target-collision");
+        seed_sources(&fx);
+        let target = fx.new_root.join("脚本一.yaml");
+        write_file(&target, b"another migration already owns this path");
+        plan(
+            "collision-existing",
+            vec![PlanEntry {
+                source: fx.old_root.join("脚本一.yaml"),
+                target: target.clone(),
+            }],
+            fx.marker.clone(),
+            &fx.journal_path,
+        )
+        .unwrap();
+        let source = fx.old_root.join("脚本一.yaml");
+        let original = std::fs::read(&source).unwrap();
+        let err = resume(&fx.journal_path).unwrap_err();
+        assert!(err.to_string().contains("different content"), "{err}");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        assert!(!fx.marker.exists());
+        let journal = load_journal(&fx.journal_path).unwrap();
+        assert_eq!(journal.phase, Phase::Copying);
+        drop_fixture(&fx);
+    }
+
+    #[test]
+    fn n_minus_one_to_n_supports_renamed_files_and_keeps_old_layout() {
+        let fx = fixture("n-minus-one-to-n");
+        seed_sources(&fx);
+        let entries = vec![
+            PlanEntry {
+                source: fx.old_root.join("脚本一.yaml"),
+                target: fx.new_root.join("yaml").join("main.yaml"),
+            },
+            PlanEntry {
+                source: fx.old_root.join("资源包").join("模板 图片.png"),
+                target: fx.new_root.join("tmpl").join("main.png"),
+            },
+            PlanEntry {
+                source: fx.old_root.join("a").join("b").join("deep.yaml"),
+                target: fx.new_root.join("func").join("library.yaml"),
+            },
+        ];
+        let before = snapshot_sources(&entries);
+        plan(
+            "layout-v1-to-v2",
+            entries.clone(),
+            fx.marker.clone(),
+            &fx.journal_path,
+        )
+        .unwrap();
+
+        let journal = resume(&fx.journal_path).unwrap();
+        assert_eq!(journal.phase, Phase::Committed);
+        assert!(fx.marker.is_file());
+        for entry in &journal.entries {
+            assert_eq!(
+                std::fs::read(&entry.target).unwrap(),
+                std::fs::read(&entry.source).unwrap(),
+                "migrated content differs: {}",
+                entry.target.display()
+            );
+        }
+        assert_sources_unchanged(&before);
+        drop_fixture(&fx);
+    }
+
+    #[test]
+    fn copy_failure_is_retryable_and_does_not_change_sources() {
+        let fx = fixture("copy-failure");
+        seed_sources(&fx);
+        let entries = standard_plan(&fx);
+        let before = snapshot_sources(&entries);
+        plan(
+            "copy-failure-retry",
+            entries,
+            fx.marker.clone(),
+            &fx.journal_path,
+        )
+        .unwrap();
+
+        // The destination root is a file, so creating the first staging parent fails.
+        write_file(&fx.new_root, b"destination obstruction");
+        let err = resume(&fx.journal_path).unwrap_err();
+        assert!(err.to_string().contains("create staging dir"), "{err}");
+        assert_eq!(
+            load_journal(&fx.journal_path).unwrap().phase,
+            Phase::Copying
+        );
+        assert!(!fx.marker.exists());
+        assert_sources_unchanged(&before);
+
+        std::fs::remove_file(&fx.new_root).unwrap();
+        let journal = resume(&fx.journal_path).unwrap();
+        assert_eq!(journal.phase, Phase::Committed);
+        assert_sources_unchanged(&before);
+        drop_fixture(&fx);
+    }
+
+    #[test]
+    fn hash_failure_is_retryable_and_never_commits_tampered_staging() {
+        let fx = fixture("hash-failure");
+        seed_sources(&fx);
+        let entries = standard_plan(&fx);
+        let before = snapshot_sources(&entries);
+        plan(
+            "hash-failure-retry",
+            entries,
+            fx.marker.clone(),
+            &fx.journal_path,
+        )
+        .unwrap();
+
+        // Simulate an interruption after copy + hash journal update, followed by
+        // corruption of that staging file before the process resumes.
+        let mut journal = load_journal(&fx.journal_path).unwrap();
+        journal.phase = Phase::Copying;
+        let first = &mut journal.entries[0];
+        std::fs::create_dir_all(first.target.parent().unwrap()).unwrap();
+        std::fs::copy(&first.source, &first.target).unwrap();
+        first.sha256 = Some(sha256_file(&first.target).unwrap());
+        save_journal(&journal, &fx.journal_path).unwrap();
+        write_file(&journal.entries[0].target, b"corrupt staging");
+
+        let err = resume(&fx.journal_path).unwrap_err();
+        assert!(err.to_string().contains("hash mismatch"), "{err}");
+        assert_eq!(
+            load_journal(&fx.journal_path).unwrap().phase,
+            Phase::Copying
+        );
+        assert!(!fx.marker.exists());
+        assert_sources_unchanged(&before);
+
+        // Once the staging file is restored, resume can finish without copying
+        // the already-journaled entry again.
+        std::fs::copy(&journal.entries[0].source, &journal.entries[0].target).unwrap();
+        let journal = resume(&fx.journal_path).unwrap();
+        assert_eq!(journal.phase, Phase::Committed);
+        assert_sources_unchanged(&before);
+        drop_fixture(&fx);
+    }
+
+    #[test]
+    fn marker_rename_failure_is_retryable_and_cleans_atomic_temp() {
+        let fx = fixture("rename-failure");
+        seed_sources(&fx);
+        let entries = standard_plan(&fx);
+        let before = snapshot_sources(&entries);
+        plan(
+            "rename-failure-retry",
+            entries,
+            fx.marker.clone(),
+            &fx.journal_path,
+        )
+        .unwrap();
+
+        // A directory at the marker destination makes the final temp->marker
+        // rename fail after validation has already been durably recorded.
+        std::fs::create_dir_all(&fx.marker).unwrap();
+        let err = resume(&fx.journal_path).unwrap_err();
+        assert!(err.to_string().contains("atomic replace"), "{err}");
+        assert_eq!(
+            load_journal(&fx.journal_path).unwrap().phase,
+            Phase::Validated
+        );
+        assert!(!PathBuf::from(format!("{}.tmp", fx.marker.display())).exists());
+        assert_sources_unchanged(&before);
+
+        std::fs::remove_dir_all(&fx.marker).unwrap();
+        let journal = resume(&fx.journal_path).unwrap();
+        assert_eq!(journal.phase, Phase::Committed);
+        assert_sources_unchanged(&before);
+        drop_fixture(&fx);
+    }
+
+    #[test]
+    fn marker_write_failure_is_retryable_and_preserves_sources() {
+        let mut fx = fixture("marker-failure");
+        seed_sources(&fx);
+        let entries = standard_plan(&fx);
+        let before = snapshot_sources(&entries);
+        let marker_parent = fx.journal_path.parent().unwrap().join("marker-parent");
+        write_file(&marker_parent, b"not a directory");
+        fx.marker = marker_parent.join("done.marker");
+        plan(
+            "marker-failure-retry",
+            entries,
+            fx.marker.clone(),
+            &fx.journal_path,
+        )
+        .unwrap();
+
+        let err = resume(&fx.journal_path).unwrap_err();
+        assert!(err.to_string().contains("create marker dir"), "{err}");
+        assert_eq!(
+            load_journal(&fx.journal_path).unwrap().phase,
+            Phase::Validated
+        );
+        assert!(!fx.marker.exists());
+        assert_sources_unchanged(&before);
+
+        std::fs::remove_file(&marker_parent).unwrap();
+        let journal = resume(&fx.journal_path).unwrap();
+        assert_eq!(journal.phase, Phase::Committed);
+        assert_sources_unchanged(&before);
         drop_fixture(&fx);
     }
 
@@ -651,11 +1044,18 @@ mod tests {
         std::fs::copy(&journal.entries[0].source, &first_target).unwrap();
         journal.entries[0].sha256 = Some(sha256_file(&first_target).unwrap());
         save_journal(&journal, &fx.journal_path).unwrap();
+        // 回滚也要清掉原子写在崩溃边界留下的临时文件。
+        let journal_tmp = atomic_temp_path(&fx.journal_path);
+        let marker_tmp = atomic_temp_path(&fx.marker);
+        write_file(&journal_tmp, b"partial journal");
+        write_file(&marker_tmp, b"partial marker");
 
         let journal = rollback(&fx.journal_path).unwrap();
         assert_eq!(journal.phase, Phase::RolledBack);
         assert!(!first_target.exists(), "staging 产物应清理");
         assert!(!fx.marker.exists());
+        assert!(!journal_tmp.exists(), "journal 临时文件应清理");
+        assert!(!marker_tmp.exists(), "marker 临时文件应清理");
         for entry in &journal.entries {
             assert!(entry.source.is_file(), "源文件必须原样保留");
         }

@@ -9,6 +9,8 @@ description = "GameBot 游戏自动化助手服务端：scrcpy 设备控制 + We
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
+# gate 路由的完整路由换入转发（ServiceExt::oneshot）；dev 同版本复用
+tower = { version = "0.4", features = ["util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

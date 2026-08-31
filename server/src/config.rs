@@ -64,6 +64,40 @@ impl Default for AuthConfig {
     }
 }
 
+/// 更新策略配置基线（SYS-005，config.toml `[update]` 段；§6 建议值为默认）。
+/// `PUT /api/system/update/policy` 的运行时覆盖持久化在
+/// `<data_dir>/state/update-policy.json`，**不改本段**；本段是持久化文件缺失/
+/// 损坏时的回落基线。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// 自动行为策略：off（不检查）| notify（检查+下载，安装等用户确认，默认）
+    /// | auto（窗口内 + 全空闲自动安装）
+    pub strategy: String,
+    /// 维护窗口起点（本地 HH:MM，允许跨午夜）
+    pub maintenance_window_start: String,
+    /// 维护窗口终点（本地 HH:MM；与起点相同视为非法）
+    pub maintenance_window_end: String,
+    /// cron 冻结窗口分钟数（0~1440；距下一次启用 cron 触发须大于该值才可安装）
+    pub freeze_minutes: i64,
+    /// 预留：更新检查源 URL（可空）。launcher 托管模式下远端检查由 launcher
+    /// 执行（通道来自 launcher 配置，ipc-v1 §4 check 载荷恒 `{}`），server 不消费
+    #[serde(default)]
+    pub check_url: Option<String>,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            strategy: "notify".into(),
+            maintenance_window_start: "02:00".into(),
+            maintenance_window_end: "06:00".into(),
+            freeze_minutes: 30,
+            check_url: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     Dev,
@@ -215,6 +249,9 @@ pub struct Config {
     /// 鉴权与会话治理（[auth] 段整体可缺省取默认值）
     #[serde(default)]
     pub auth: AuthConfig,
+    /// 更新策略基线（[update] 段整体可缺省取默认值，SYS-005）
+    #[serde(default)]
+    pub update: UpdateConfig,
     /// WebRTC ICE 候选宣告的外部 IP（容器 / 公网 NAT 1-to-1 部署，见
     /// webrtc/rtc_net.rs）：非空时 host 候选一律宣告该 IP（不经 STUN/接口
     /// 枚举，容器内网 IP 172.x 不再宣告）。空 = 既有行为（接口枚举 + STUN）。
@@ -285,6 +322,7 @@ impl Default for Config {
             log_retain_days: default_log_retain_days(),
             compute_max_concurrency: 0,
             auth: AuthConfig::default(),
+            update: UpdateConfig::default(),
             rtc_external_ip: String::new(),
             rtc_udp_port: 0,
             rtc_external_port: 0,
@@ -633,7 +671,55 @@ impl Config {
             }
         }
 
+        // [update] 段（SYS-005）：策略枚举 / 维护窗口 / 冻结窗口启动期校验，
+        // 非法值直接退出而非静默回落默认（与全文件校验口径一致）
+        if !matches!(self.update.strategy.as_str(), "off" | "notify" | "auto") {
+            errs.push(format!(
+                "update.strategy = \"{}\" 非法：只接受 off / notify / auto",
+                self.update.strategy
+            ));
+        }
+        if crate::update::policy::parse_hh_mm(&self.update.maintenance_window_start).is_none()
+            || crate::update::policy::parse_hh_mm(&self.update.maintenance_window_end).is_none()
+        {
+            errs.push(format!(
+                "update.maintenance_window_start/end = \"{}\"/\"{}\" 非法：须为 24 小时制 HH:MM",
+                self.update.maintenance_window_start, self.update.maintenance_window_end
+            ));
+        } else if self.update.maintenance_window_start == self.update.maintenance_window_end {
+            errs.push(
+                "update.maintenance_window_start/end 相同：维护窗口跨度不得为 0（契约 §6）"
+                    .to_string(),
+            );
+        }
+        if !(0..=1440).contains(&self.update.freeze_minutes) {
+            errs.push(format!(
+                "update.freeze_minutes = {} 超出区间 [0, 1440]（cron 冻结窗口分钟数）",
+                self.update.freeze_minutes
+            ));
+        }
+        if let Some(url) = &self.update.check_url {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                errs.push(format!(
+                    "update.check_url = \"{}\" 非法：须为 http(s) URL 或留空",
+                    redact_url(url)
+                ));
+            }
+        }
+
         errs
+    }
+}
+
+/// check_url 报错展示：只保留 scheme + host，剥离 query/路径（避免诊断日志
+/// 带上可能内嵌凭据的完整 URL）
+fn redact_url(url: &str) -> String {
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            format!("{scheme}://{authority}/…")
+        }
+        None => "<invalid>".to_string(),
     }
 }
 
@@ -830,6 +916,58 @@ fps = 15
         let msg = err.to_string();
         assert!(msg.contains("解析失败"), "{msg}");
         assert!(msg.contains("line"), "应包含错误位置行号信息: {msg}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_section_defaults_and_validation() {
+        // [update] 段整体可缺省：默认 notify / 02:00-06:00 / 30（契约 §6 建议值）
+        let defaults = UpdateConfig::default();
+        assert_eq!(defaults.strategy, "notify");
+        assert_eq!(defaults.maintenance_window_start, "02:00");
+        assert_eq!(defaults.maintenance_window_end, "06:00");
+        assert_eq!(defaults.freeze_minutes, 30);
+        assert!(defaults.check_url.is_none());
+
+        // 显式段落解析 + 非法值启动期拒绝
+        let dir = temp_dir("update-section");
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "port = 8443\ndata_dir = \"./data\"\nadb_path = \"adb\"\nffmpeg_path = \"ffmpeg\"\nscrcpy_server = \"./assets/scrcpy-server.jar\"\ndecode_frames = true\nmax_size = 0\nbitrate_mbps = 12\nfps = 15\n\n[update]\nstrategy = \"auto\"\nmaintenance_window_start = \"23:00\"\nmaintenance_window_end = \"05:00\"\nfreeze_minutes = 15\ncheck_url = \"https://releases.example.invalid/v1\"\n",
+        )
+        .unwrap();
+        let loaded = Config::load_from(&path, Profile::Dev).unwrap();
+        assert_eq!(loaded.cfg.update.strategy, "auto");
+        assert_eq!(loaded.cfg.update.maintenance_window_start, "23:00");
+        assert_eq!(loaded.cfg.update.freeze_minutes, 15);
+        assert_eq!(
+            loaded.cfg.update.check_url.as_deref(),
+            Some("https://releases.example.invalid/v1")
+        );
+
+        // 非法 strategy / start==end / freeze 越界 → validate 报错（含字段名）
+        let mut bad = loaded.cfg.clone();
+        bad.update.strategy = "sometimes".into();
+        let errs = bad.validate();
+        assert!(
+            errs.iter().any(|e| e.contains("update.strategy")),
+            "{errs:?}"
+        );
+        let mut bad = loaded.cfg.clone();
+        bad.update.maintenance_window_end = "23:00".into();
+        let errs = bad.validate();
+        assert!(
+            errs.iter().any(|e| e.contains("maintenance_window")),
+            "{errs:?}"
+        );
+        let mut bad = loaded.cfg;
+        bad.update.freeze_minutes = 1441;
+        let errs = bad.validate();
+        assert!(
+            errs.iter().any(|e| e.contains("update.freeze_minutes")),
+            "{errs:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -89,11 +89,11 @@ fn capabilities(mode: Mode) -> serde_json::Value {
     })
 }
 
-/// 启动阶段（契约 §2.1 枚举 starting | maintenance_gate | ready）。当前业务
-/// 路由随启动即打开 → ready；activation gate（§6.8，候选进程闸内报
-/// maintenance_gate）随更新协调器批次接入。
+/// 启动阶段（契约 §2.1 枚举 starting | maintenance_gate | ready）。业务路由
+/// 随启动即打开 → ready；activation gate（OPS-004，候选进程闸内报
+/// maintenance_gate）由 [`crate::update::gate`] 的进程级投影驱动。
 fn startup_stage() -> &'static str {
-    "ready"
+    crate::update::gate::stage_str()
 }
 
 fn append_metric(body: &mut String, help: &str, kind: &str, metric: &str, value: impl Display) {

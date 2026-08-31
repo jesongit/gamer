@@ -24,6 +24,8 @@
 //! 再做 `validate_schema_v1`。测试可用临时迁移表直接驱动 [`run_migrations`]，
 //! 不触碰对外"无版本库拒绝"行为。
 
+use std::collections::HashSet;
+
 use rusqlite::{Connection, Transaction};
 
 /// 本 binary 可打开并继续迁移的最低 user_version（v1 基线 → 1；0 永远拒绝）
@@ -64,6 +66,7 @@ pub(crate) fn run_migrations(
     current: i64,
     migrations: &[Migration],
 ) -> anyhow::Result<()> {
+    validate_registry(migrations)?;
     let target = migrations
         .iter()
         .map(|m| m.to)
@@ -115,6 +118,35 @@ pub(crate) fn run_migrations(
             "database schema migration applied"
         );
         version = migration.to;
+    }
+    Ok(())
+}
+
+/// Validate the static (or test-injected) migration table before opening any
+/// transaction. A duplicate `from` version would otherwise be silently hidden
+/// by `find`, and a duplicate `to` version could make the computed target
+/// ambiguous. Rejecting both keeps the N-1→N chain deterministic and makes a
+/// bad registry fail before it can partially advance a database.
+fn validate_registry(migrations: &[Migration]) -> anyhow::Result<()> {
+    let mut from_versions = HashSet::new();
+    let mut to_versions = HashSet::new();
+    for migration in migrations {
+        anyhow::ensure!(
+            migration.to == migration.from + 1,
+            "invalid migration registration v{} -> v{}: versions must advance exactly one step",
+            migration.from,
+            migration.to
+        );
+        anyhow::ensure!(
+            from_versions.insert(migration.from),
+            "duplicate migration registration from schema v{}",
+            migration.from
+        );
+        anyhow::ensure!(
+            to_versions.insert(migration.to),
+            "duplicate migration registration to schema v{}",
+            migration.to
+        );
     }
     Ok(())
 }
@@ -222,6 +254,69 @@ mod tests {
         assert_eq!(user_version(&conn), 3);
     }
 
+    fn anchor_has_column(conn: &Connection, column: &str) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('anchor') WHERE name = ?1)",
+            [column],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap()
+            != 0
+    }
+
+    #[test]
+    fn qa003_each_migration_failure_keeps_last_committed_schema_and_version() {
+        fn add_a(tx: &Transaction<'_>) -> anyhow::Result<()> {
+            tx.execute_batch("ALTER TABLE anchor ADD COLUMN a TEXT;")?;
+            Ok(())
+        }
+        fn fail_after_a(tx: &Transaction<'_>) -> anyhow::Result<()> {
+            tx.execute_batch("ALTER TABLE anchor ADD COLUMN a TEXT;")?;
+            anyhow::bail!("injected failure in v1 -> v2")
+        }
+        fn add_b(tx: &Transaction<'_>) -> anyhow::Result<()> {
+            tx.execute_batch("ALTER TABLE anchor ADD COLUMN b TEXT;")?;
+            Ok(())
+        }
+        fn fail_after_b(tx: &Transaction<'_>) -> anyhow::Result<()> {
+            tx.execute_batch("ALTER TABLE anchor ADD COLUMN b TEXT;")?;
+            anyhow::bail!("injected failure in v2 -> v3")
+        }
+
+        // v1 -> v2 fails after its DDL: neither the DDL nor user_version may
+        // escape the transaction. A corrected chain must be retryable.
+        let first_failure = [step(1, 2, fail_after_a), step(2, 3, add_b)];
+        let mut conn = versioned_memory_db(1);
+        let err = run_migrations(&mut conn, 1, &first_failure).unwrap_err();
+        assert!(err.to_string().contains("v1 -> v2"), "{err}");
+        assert_eq!(user_version(&conn), 1);
+        assert!(!anchor_has_column(&conn, "a"));
+        assert!(!anchor_has_column(&conn, "b"));
+
+        let retry = [step(1, 2, add_a), step(2, 3, add_b)];
+        let current = user_version(&conn);
+        run_migrations(&mut conn, current, &retry).unwrap();
+        assert_eq!(user_version(&conn), 3);
+        assert!(anchor_has_column(&conn, "a"));
+        assert!(anchor_has_column(&conn, "b"));
+
+        // v1 -> v2 commits first; v2 -> v3 then fails after its DDL. The
+        // database must remain exactly at the last committed v2 boundary.
+        let second_failure = [step(1, 2, add_a), step(2, 3, fail_after_b)];
+        let mut conn = versioned_memory_db(1);
+        let err = run_migrations(&mut conn, 1, &second_failure).unwrap_err();
+        assert!(err.to_string().contains("v2 -> v3"), "{err}");
+        assert_eq!(user_version(&conn), 2);
+        assert!(anchor_has_column(&conn, "a"));
+        assert!(!anchor_has_column(&conn, "b"));
+
+        let current = user_version(&conn);
+        run_migrations(&mut conn, current, &retry).unwrap();
+        assert_eq!(user_version(&conn), 3);
+        assert!(anchor_has_column(&conn, "a"));
+        assert!(anchor_has_column(&conn, "b"));
+    }
+
     #[test]
     fn failed_migration_rolls_back_version_and_ddl() {
         fn broken(tx: &Transaction<'_>) -> anyhow::Result<()> {
@@ -242,6 +337,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(t3, 0);
+    }
+
+    #[test]
+    fn sql_failure_rolls_back_version_and_partial_ddl() {
+        fn sql_broken(tx: &Transaction<'_>) -> anyhow::Result<()> {
+            tx.execute_batch(
+                "CREATE TABLE t_sql_failure (x TEXT); \
+                 INSERT INTO table_that_does_not_exist (x) VALUES ('boom');",
+            )?;
+            Ok(())
+        }
+
+        let migrations = [step(1, 2, sql_broken)];
+        let mut conn = versioned_memory_db(1);
+        let err = run_migrations(&mut conn, 1, &migrations).unwrap_err();
+        assert!(err.to_string().contains("no such table"), "{err}");
+        assert_eq!(user_version(&conn), 1);
+        let created: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='t_sql_failure'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(created, 0, "SQL 失败后部分 DDL 不得残留");
     }
 
     #[test]
@@ -292,5 +412,29 @@ mod tests {
         let err = run_migrations(&mut conn, 1, &migrations).unwrap_err();
         assert!(err.to_string().contains("exactly one step"));
         assert_eq!(user_version(&conn), 1);
+    }
+
+    #[test]
+    fn duplicate_registration_is_rejected_before_any_migration_runs() {
+        fn first(tx: &Transaction<'_>) -> anyhow::Result<()> {
+            tx.execute_batch("CREATE TABLE first (x TEXT);")?;
+            Ok(())
+        }
+        fn second(_tx: &Transaction<'_>) -> anyhow::Result<()> {
+            anyhow::bail!("must not run")
+        }
+        let migrations = [step(1, 2, first), step(1, 2, second)];
+        let mut conn = versioned_memory_db(1);
+        let err = run_migrations(&mut conn, 1, &migrations).unwrap_err();
+        assert!(err.to_string().contains("duplicate migration registration"));
+        assert_eq!(user_version(&conn), 1);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='first'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

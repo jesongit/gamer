@@ -182,6 +182,19 @@ mod sec_tests {
         let shutdown = Arc::new(crate::shutdown::ShutdownCoordinator::new(Arc::new(|| {
             Box::pin(async {})
         })));
+        // 更新服务：非托管实现（update 端点行为断言在 api/update.rs 契约测试；
+        // 既有测试不受影响——controller 从不触网、从不读环境）
+        let policy_store = crate::update::policy::PolicyStore::load_blocking(
+            &cfg.data_dir,
+            crate::update::policy::UpdatePolicy::default(),
+        );
+        let update = Arc::new(crate::update::service::UpdateService::new(
+            Arc::new(crate::update::controller::UnsupportedController),
+            policy_store,
+            Arc::new(crate::update::service::UpdateTxn::default()),
+            Arc::new(crate::update::workload::Workload::default),
+            db.clone(),
+        ));
         let dir = cfg.data_dir.clone();
         let app = build_router(
             db,
@@ -193,6 +206,7 @@ mod sec_tests {
             scripts,
             shutdown,
             auth.clone(),
+            update,
         );
         TestApp { app, dir }
     }
@@ -451,5 +465,8 @@ mod sec_tests {
     }
     mod tasks_tests {
         include!("tests/tasks.rs");
+    }
+    mod update {
+        include!("tests/update.rs");
     }
 }

@@ -18,6 +18,7 @@ mod common;
 mod devices;
 mod error;
 mod functions;
+pub(crate) mod gate;
 mod logs;
 mod runs;
 mod scripts;
@@ -26,6 +27,7 @@ mod tasks;
 mod templates;
 #[cfg(test)]
 mod tests;
+pub(crate) mod update;
 mod ws;
 
 pub(crate) use error::ApiError;
@@ -66,6 +68,8 @@ pub struct AppState {
     pub shutdown: Arc<crate::shutdown::ShutdownCoordinator>,
     /// 鉴权状态
     pub auth: Arc<auth::AuthState>,
+    /// 更新子系统（SYS-004：状态聚合 + 动作受理 + 策略存储）
+    pub update: Arc<crate::update::service::UpdateService>,
 }
 
 #[expect(
@@ -82,6 +86,7 @@ pub fn build_router(
     scripts: Arc<ScriptStore>,
     shutdown: Arc<crate::shutdown::ShutdownCoordinator>,
     auth: Arc<auth::AuthState>,
+    update: Arc<crate::update::service::UpdateService>,
 ) -> Router {
     let metrics = db.metrics();
     let state = AppState {
@@ -95,6 +100,7 @@ pub fn build_router(
         viewers,
         shutdown,
         auth,
+        update,
     };
 
     // 视频静默看门狗 + 会话过期清扫
@@ -185,6 +191,24 @@ pub fn build_router(
             get(logs::api_list_logs).delete(logs::api_clear_logs),
         )
         .route("/api/system/info", get(system::api_system_info))
+        .route("/api/system/update", get(update::api_get_update))
+        .route("/api/system/update/check", post(update::api_update_check))
+        .route(
+            "/api/system/update/download",
+            post(update::api_update_download),
+        )
+        .route(
+            "/api/system/update/install",
+            post(update::api_update_install),
+        )
+        .route(
+            "/api/system/update/rollback",
+            post(update::api_update_rollback),
+        )
+        .route(
+            "/api/system/update/policy",
+            axum::routing::put(update::api_update_policy),
+        )
         .route("/api/shutdown", post(system::api_shutdown))
         .route(
             "/api/maintenance/vacuum",
