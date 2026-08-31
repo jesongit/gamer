@@ -1,0 +1,130 @@
+# =============================================================================
+# GameBot 运行依赖锁文件（release/dependencies.lock.toml）
+# =============================================================================
+# 任务: AUTO_UPDATE_DEVELOPMENT_PLAN §7.4 DEP-001（依赖与发布轨）
+# 决策: release/contracts/dependency-licensing.md（ARC-005，已评审基线）
+#
+# 用途:
+#   - 固定每个 Windows 运行依赖（adb / ffmpeg / scrcpy-server）的版本、来源 URL、
+#     整包 sha256、逐产物文件 sha256+size、许可与 NOTICE 要求、构建参数与校验方式。
+#   - fetch 脚本（release/packaging/fetch-*.ps1）与发布门禁脚本
+#     （tools/check-scrcpy-binding.ps1）以本文件为唯一事实源。
+#
+# 格式约定（供 LockFile.psm1 的行级解析器使用，扩展时保持简单键值）:
+#   - 顶层: schema_version、locked_at
+#   - 每个依赖一个 [[component]]；其产物文件用 [[component.files]] 列出
+#     （path 为组件目录内相对路径；size 单位字节；sha256 一律小写 hex）
+#
+# 更新策略:
+#   - adb: 官方 latest 入口滚动；重新锁定时须核对 zip 内 source.properties 的
+#     Pkg.Revision 与包 sha256，并按 ARC-005 §1 重走许可确认。
+#   - ffmpeg: BtbN `latest` 为滚动 tag，资产会被覆盖；重装/修复一律取已锁定产物
+#     seed，不得反复追 latest。换新构建必须重走 ARC-005 §2.2 全部验收门禁
+#     （buildconf 无 gpl/nonfree、-L 为 LGPL、H.264 stdin→PNG 冒烟）。
+#   - scrcpy-server: 与应用协议版本强绑定，不独立升级；变更须同步
+#     server/src/device/scrcpy.rs 常量与 manifest（tools/check-scrcpy-binding.ps1 强制）。
+# =============================================================================
+
+schema_version = 1
+locked_at = "2026-08-31"
+
+# -----------------------------------------------------------------------------
+# adb —— Android Platform-Tools Windows 三件套裁包
+# 来源与再分发依据: dependency-licensing.md §1（Apache-2.0，SDK 条款 §3.5 豁免）
+# -----------------------------------------------------------------------------
+[[component]]
+id = "adb"
+description = "Android Platform-Tools（Windows）裁包: adb.exe + AdbWinApi.dll + AdbWinUsbApi.dll"
+version = "37.0.1"
+version_source = "官方 zip 内 platform-tools/source.properties 的 Pkg.Revision（锁定时实读）"
+source_url = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+source_artifact_name = "platform-tools-latest-windows.zip"
+source_url_note = "锁定时 Google latest 即 37.0.1；固定版本形态 platform-tools_r37.0.1-windows.zip 实测 404（Google 不保留该命名历史版本），以 latest 入口 + 本文件 hash/版本双门禁锁定"
+source_sha256 = "45f4d63113e895ebde0c90f194099a4676b6ac653bd28d54314a9e022bbc1a99"
+source_size = 8044989
+package_filter = "仅原样提取 adb.exe / AdbWinApi.dll / AdbWinUsbApi.dll 三件；fastboot 等其余文件不属于本项目运行面，不入包，不改任何字节"
+license = "Apache-2.0"
+license_url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+license_note = "包内 NOTICE.txt 首行声明 Apache License 2.0；Android SDK 条款 §3.5 规定开源许可组件仅受其开源许可管辖（ARC-005 §1.2 依据链）"
+notice = "随 full 包附 Apache-2.0 全文与归属（Copyright The Android Open Source Project）；逐文件 sha256 与 manifest components[id=adb].required_files 保持一致（DEP-005 生成）"
+build_params = "Google 官方预编译产物，无构建参数；重打包仅允许从官方 zip 原字节提取裁剪"
+verify_hint = "release/packaging/fetch-adb.ps1（默认=下载裁包，-VerifyOnly=只校验 vendor）；手动: vendor/adb/37.0.1/adb.exe version 应输出 'Version 37.0.1-...'"
+verify_command = "powershell -NoProfile -ExecutionPolicy Bypass -File release/packaging/fetch-adb.ps1 -VerifyOnly"
+locked_at = "2026-08-31"
+
+[[component.files]]
+path = "adb.exe"
+sha256 = "b4a6b455702684652cccf7b46258b29e653538904359a58fd4931cf3ef286b3f"
+size = 8273560
+
+[[component.files]]
+path = "AdbWinApi.dll"
+sha256 = "c1d653030b4bde65d3e07e4d0b0979e17be56df1436cdd15528630f27808050d"
+size = 108184
+
+[[component.files]]
+path = "AdbWinUsbApi.dll"
+sha256 = "0710e894d9b40f71a670c13c694079d564c92c1279da382cfe4850983aaebe1b"
+size = 73368
+
+# -----------------------------------------------------------------------------
+# ffmpeg —— BtbN win64-lgpl 静态构建（LGPL，禁 gpl/nonfree）
+# 来源与履约清单: dependency-licensing.md §2（ffmpeg.org/legal.html 合规项）
+# -----------------------------------------------------------------------------
+[[component]]
+id = "ffmpeg"
+description = "FFmpeg Windows x64 静态构建（BtbN/FFmpeg-Builds win64-lgpl，单文件 bin/ffmpeg.exe）"
+version = "N-126335-gb32f8d1c23-20260830"
+version_source = "ffmpeg.exe -version 首行版本串（N-<rev>-g<commit>-<date>，含 FFmpeg commit b32f8d1c23）"
+source_url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip"
+source_artifact_name = "ffmpeg-master-latest-win64-lgpl.zip"
+source_url_note = "latest 为滚动 tag；本条目以锁定时点产物 hash 固化（2026-08-31 下载复核与 ARC-005 记录一致），后续修复/重装从 seed 取该产物，不追 latest"
+source_sha256 = "c55a9c349ef915565c5755473d858c98d80d96feefe693fe6ab38705d29c920e"
+source_size = 148537845
+package_filter = "仅保留 zip 内 */bin/ffmpeg.exe；ffprobe/ffplay/doc/presets 不入包（dependency-licensing.md §2.2 第 4 条）"
+license = "LGPL-3.0-or-later"
+license_url = "https://www.gnu.org/licenses/lgpl-3.0.html"
+license_note = "构建带 --enable-version3，-L 输出 GNU Lesser General Public License v3+；本项目以 subprocess 管道聚合调用，义务只针对随包分发的 ffmpeg.exe（ARC-005 §2.3）"
+notice = "LGPL 履约: 随包附 LGPL-3.0 全文 + 与 commit b32f8d1c23 精确对应的源码 offer + BUILD-CONFIG.txt（-buildconf 归档）+ 发布页归属声明；严禁 GPL/nonfree 构建冒充分发（红线，见 §5）"
+build_params = "buildconf 关键行: --enable-version3 --disable-libx264 --disable-libx265 --disable-libxvid --disable-libfdk-aac --enable-libopenh264；完整 -buildconf 输出由 fetch-ffmpeg.ps1 归档到 vendor BUILD-CONFIG.txt"
+buildconf_gate = "--enable-gpl 与 --enable-nonfree 不得出现（fetch-ffmpeg.ps1 硬门禁，出现即失败）；-L 必须含 Lesser General Public License"
+source_offer = "https://github.com/FFmpeg/FFmpeg/archive/b32f8d1c23.tar.gz（与版本串 commit 对应；首发随发布资产提供直链）"
+verify_hint = "release/packaging/fetch-ffmpeg.ps1（默认=下载+三道验收+H.264 冒烟，-VerifyOnly=只校验 vendor 与红线）；手动: ffmpeg.exe -version / -hide_banner -buildconf / -L"
+verify_command = "powershell -NoProfile -ExecutionPolicy Bypass -File release/packaging/fetch-ffmpeg.ps1 -VerifyOnly"
+locked_at = "2026-08-31"
+
+[[component.files]]
+path = "ffmpeg.exe"
+sha256 = "140a7e1410159bcca2f2201cb3d0d97648c9689c940715d548ebfeecee346cbe"
+size = 115390976
+
+# -----------------------------------------------------------------------------
+# scrcpy-server —— 与应用版本强绑定，不独立升级
+# 强绑定门禁: tools/check-scrcpy-binding.ps1（代码常量 / jar hash / lock / manifest）
+# -----------------------------------------------------------------------------
+[[component]]
+id = "scrcpy-server"
+description = "scrcpy server jar（Android 端），与客户端协议严格对齐 3.3.3"
+version = "3.3.3"
+version_source = "官方 release tag v3.3.3；协议常量 server/src/device/scrcpy.rs 的 SCRCPY_VERSION"
+source_url = "https://github.com/Genymobile/scrcpy/releases/download/v3.3.3/scrcpy-server-v3.3.3"
+source_artifact_name = "scrcpy-server-v3.3.3"
+source_url_note = "jar 以仓库内 server/assets/scrcpy-server.jar 分发（repo_path）；不随 adb/ffmpeg 一样追新"
+source_sha256 = "7e70323ba7f259649dd4acce97ac4fefbae8102b2c6d91e2e7be613fd5354be0"
+source_size = 90164
+upstream_checksum = "https://github.com/Genymobile/scrcpy/releases/download/v3.3.3/SHA256SUMS.txt（2026-08-31 实取复核与本条 hash 一致；上游另提供 SHA256SUMS.txt.asc 可验签）"
+repo_path = "server/assets/scrcpy-server.jar"
+binding = "application"
+license = "Apache-2.0"
+license_url = "https://github.com/Genymobile/scrcpy/blob/master/LICENSE"
+license_note = "scrcpy 仓库无 NOTICE 文件，Apache-2.0 §4(d) 保留义务不触发；须履行的仅为随包附 Apache-2.0 文本与版权归属（ARC-005 §3）"
+notice = "随包附 Apache-2.0 全文 + 归属（scrcpy v3.3.3, Copyright (C) Genymobile）；version/hash 变更必须代码常量、jar、manifest 三方同步，门禁不过即阻断发布"
+build_params = "Genymobile 官方预编译产物，无构建参数；原字节分发，禁止重打包"
+verify_hint = "tools/check-scrcpy-binding.ps1 校验 ①scrcpy.rs 协议常量=3.3.3 ②jar 实算 sha256 ③lock 与 manifest fixture 三方一致"
+verify_command = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/check-scrcpy-binding.ps1"
+locked_at = "2026-08-31"
+
+[[component.files]]
+path = "scrcpy-server.jar"
+sha256 = "7e70323ba7f259649dd4acce97ac4fefbae8102b2c6d91e2e7be613fd5354be0"
+size = 90164

@@ -46,3 +46,7 @@ prompt.md
 
 # ===== 阶段备份（重构发布前的只读数据快照，如 backups/stage0-data）=====
 backups/
+
+# ===== Release 运行依赖 vendor（DEP-002/003：adb/ffmpeg 二进制绝不入库）=====
+# 由 release/packaging/fetch-adb.ps1 / fetch-ffmpeg.ps1 按锁文件重建；含下载缓存
+release/vendor/
