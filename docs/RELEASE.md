@@ -70,6 +70,9 @@ node release/contracts/validate-manifest.mjs check .\release\manifests\<version>
   --keys-dir .\release\keys --expect-current-version '<version>' --expect-channel stable
 .\release\packaging\package-full.ps1 -Version '<version>' -KeyId $env:RELEASE_MANIFEST_KEY_ID
 .\tools\gen-sbom.ps1
+$sbom = Get-ChildItem .\release\sbom\*.cdx.json | Select-Object -First 1
+.\release\packaging\augment-sbom.ps1 -SbomPath $sbom.FullName
+.\release\packaging\verify-sbom.ps1 -SbomPath $sbom.FullName -ExpectedVersion '<version>'
 ```
 
 生产签名由 workflow 在 `release-sign` environment 中从 `RELEASE_MANIFEST_PRIVATE_KEY` 和
@@ -135,9 +138,50 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 .\release\packaging\verify-key-rotation.ps1 -FixtureDir .\release\contracts\fixtures\key-rotation
 ```
 
-它只验证 fixture 和信任集合，不证明生产 secret、GitHub Release 或 GHCR 已经轮换成功。泄露应急
+它验证 fixture 双公钥（current/next 均可验签）并复测四类负例全部 fail closed：
+未签名（`unsigned-manifest`）、manifest 篡改 1 字节（`signature-invalid`）、
+撤销 current key——信任库移除其公钥后签名必拒（`unknown-key-id`）、
+错误 key——用另一把公钥验签名（`signature-invalid`）。它只消费 fixture 公钥与签名，
+不证明生产 secret、GitHub Release 或 GHCR 已经轮换成功。泄露应急
 仍按 `release/docs/KEY_ROTATION.md` 的新 key → 公钥 PR → 检查已发布资产 → 发布修复版本顺序
 处理，不删除历史公钥。
+
+### 3.1 本机 dev 密钥轮换演练记录（2026-08-31 实测）
+
+用 dev 密钥在本机完整走了一遍轮换语义（生成新钥 → 重签 → 双钥共存 → 撤销负例）。
+**这只验证工具链与信任库行为，不替代生产 Release environment 的真实轮换演练**
+（生产钥只能存在于 GitHub secrets，本机不存在也不许造）。
+
+已验证的步骤与实测结果（产品版本 0.1.0，manifest 由 `gen-manifest.ps1 -SkipSign` 按
+`release/dist/` 真实产物生成）：
+
+1. **生成新钥**：`node release/packaging/sign-manifest.mjs keygen --id dev-ed25519-2`
+   → 公钥 `release/keys/dev-ed25519-2.pem`（可提交），私钥
+   `release/keys/dev-ed25519-2.private.pem`（被 `.gitignore` 的 `release/keys/*.private.pem`
+   忽略，`git status`/`git check-ignore` 实证不入库）。
+2. **用新钥重签真实 manifest**：`node release/packaging/sign-manifest.mjs sign
+   release\manifests\0.1.0.json --key release\keys\dev-ed25519-2.private.pem`
+   （key_id 从文件名推断）→ `.sig` 首行 `gamebot-manifest-sig-1 dev-ed25519-2`。
+3. **双钥共存验签**（`release/keys/` 同时有 -1/-2 公钥）：`validate-manifest.mjs check
+   ... --expect-current-version 0.1.0 --expect-channel stable` 输出
+   `signature: verified (key_id=dev-ed25519-2)`；launcher 侧
+   `gamer-launcher doctor --manifest ... --keys-dir release\keys` 同样通过
+   （Node 与 Rust 双实现一致）。旧钥 -1 无本地私钥（符合"私钥永不落仓库机器"），
+   其双钥期正例由 fixture 脚本 current/next 双验签覆盖。
+4. **撤销负例**：临时信任库只保留另一把公钥 → 被撤 key 的签名 manifest 必须被拒，
+   双实现均 `[unknown-key-id]` 退出码 1；声称已撤 key_id 的签名同样
+   `[unknown-key-id]`（信任库查找先于验签，fail closed 顺序正确）。
+5. **未签名 / 篡改负例**：无 `.sig` → `unsigned-manifest`；manifest 翻转 1 字节或
+   `.sig` base64 翻转 1 字节 → `signature-invalid`（Node + launcher doctor 一致拒绝）。
+
+轮换时两条字节稳定性纪律（已固化为仓库约束）：
+
+- manifest/`.sig` 是对**原始字节**的签名：仓库 `.gitattributes` 已将
+  `release/contracts/fixtures/**`、`release/keys/*.pem` 固定 LF 检出。此前
+  `core.autocrlf=true` 的机器检出 fixture 为 CRLF 时，全部签名 fixture 会
+  `signature-invalid`（实测 validator selftest 5/28 通过）——凡新增签名覆盖的文本
+  fixture 必须纳入 LF 规则。
+- 生成的签名不要经会改行尾/编码的工具（编辑器、某些 scp/邮件网关）中转后再验。
 
 ## 4. `manual_recovery` 人工恢复指引
 
