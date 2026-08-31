@@ -217,3 +217,33 @@ describe('新建任务：选脚本渲染空表单，保存提交稀疏 args', ()
     expect(posted.body.args).toBeUndefined()
   })
 })
+
+describe('服务端时区标识（契约禁止 system/info 带 timezone，从任务时间戳偏移推导）', () => {
+  function tasksRoutes(tasks) {
+    const routes = baseRoutes()
+    routes[2].body = tasks
+    return routes
+  }
+
+  it('next_run 带 RFC3339 偏移 → 显示「服务端时区 UTC+08:00」', async () => {
+    const tasks = TASKS.map(t => ({ ...t, next_run: '2026-09-01T08:00:00+08:00', last_run_at: '2026-08-31T23:00:00.000Z' }))
+    const { wrapper } = await mountView(tasksRoutes(tasks))
+    const hint = wrapper.find('[data-testid="server-tz-hint"]')
+    expect(hint.exists()).toBe(true)
+    expect(hint.text()).toContain('服务端时区')
+    expect(hint.text()).toContain('UTC+08:00')
+  })
+
+  it('时间戳无偏移（现行服务端形态：next_run 本地串 / last_run_at 固定 Z）→ 兜底文案', async () => {
+    const tasks = TASKS.map(t => ({ ...t, next_run: '2026-09-01 08:00:00', last_run_at: '2026-08-31T23:00:00.000Z' }))
+    const { wrapper } = await mountView(tasksRoutes(tasks))
+    expect(wrapper.find('[data-testid="server-tz-hint"]').text())
+      .toContain('任务按服务端本地时区执行（Docker 部署可用 TZ 配置）')
+  })
+
+  it('无任务 → 兜底文案', async () => {
+    const { wrapper } = await mountView(tasksRoutes([]))
+    expect(wrapper.find('[data-testid="server-tz-hint"]').text())
+      .toContain('任务按服务端本地时区执行（Docker 部署可用 TZ 配置）')
+  })
+})

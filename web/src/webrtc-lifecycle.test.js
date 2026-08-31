@@ -137,10 +137,16 @@ describe('useWebRtcLifecycle', () => {
     socket.onmessage?.({ data: JSON.stringify({ type: 'taken_over' }) })
     expect(supersededRef.value).toBe(true)
     expect(toast).toHaveBeenCalledWith('连接已被其他页面接管', 'warn')
+    // 被接管落持久横幅（错误栏常驻），不再停在通用「未连接设备」
+    expect(errorMsgRef.value).toBe('本页投屏已被其它页面接管，可手动重新连接')
+    // superseded 置位后不再自动重连（scheduleReconnect 直接拒绝）
+    expect(lifecycle.scheduleReconnect({ superseded: supersededRef })).toBe(false)
+    expect(lifecycle.reconnectTimer.value).toBeNull()
 
     lifecycle.cleanup(true)
     lifecycle.cleanup(true)
-    expect(errorMsgRef.value).toBe('')
+    // cleanup 幂等且不清横幅：接管文案保留到用户手动重连（onConnectStart 清空）
+    expect(errorMsgRef.value).toBe('本页投屏已被其它页面接管，可手动重新连接')
     expect(lifecycle.reconnectTimer.value).toBeNull()
   })
 

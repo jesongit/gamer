@@ -2,6 +2,10 @@ import { ref } from 'vue'
 
 function makeNoop() {}
 
+// 被接管（服务端仲裁顶替）的持久文案：落在错误栏常驻显示（区别于一闪而过的
+// toast），用户手动重连（onConnectStart 清空 errorMsg）前不消失
+const TAKEN_OVER_MSG = '本页投屏已被其它页面接管，可手动重新连接'
+
 export function useWebRtcLifecycle({
   api,
   deviceIdRef,
@@ -47,7 +51,7 @@ export function useWebRtcLifecycle({
   function scheduleReconnect({ superseded } = {}) {
     if (reconnectTimer.value || !deviceIdRef?.value) return false
     if (superseded?.value) {
-      if (errorMsgRef) errorMsgRef.value = '连接已被其他页面接管'
+      if (errorMsgRef) errorMsgRef.value = TAKEN_OVER_MSG
       return false
     }
     const delay = [3000, 6000, 12000][Math.min(reconnectAttempts.value, 2)]
@@ -63,7 +67,7 @@ export function useWebRtcLifecycle({
     reconnectTimer.value = setTimeout(() => {
       reconnectTimer.value = null
       if (superseded?.value) {
-        if (errorMsgRef) errorMsgRef.value = '连接已被其他页面接管'
+        if (errorMsgRef) errorMsgRef.value = TAKEN_OVER_MSG
         return
       }
       connect(false)
@@ -213,6 +217,9 @@ export function useWebRtcLifecycle({
           onSignalMessage({ type: 'signal', message: msg, ws })
           if (msg.type === 'taken_over') {
             supersededRef.value = true
+            // 持久横幅 + toast：superseded=true 同时阻断自动重连（conflict 放弃
+            // 接管路径同口径），只留手动「连接」按钮重新进入
+            if (errorMsgRef) errorMsgRef.value = TAKEN_OVER_MSG
             toast('连接已被其他页面接管', 'warn')
           }
         } catch (e) {}

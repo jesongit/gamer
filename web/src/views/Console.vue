@@ -526,6 +526,9 @@ const webrtcLifecycle = useWebRtcLifecycle({
   onConnectSuccess() {
     startStats()
     startLogPolling()
+    // 连接成功（手动/自动重连/接管同路径）即拉一次设备列表：下拉里的
+    // 「在线/离线」标签随建链更新，不再停留「离线」等用户手动刷新
+    refreshDeviceStatus()
   },
   onDisconnect() {
     stopStats()
@@ -581,12 +584,9 @@ const webrtcLifecycle = useWebRtcLifecycle({
   onControlMessage(e) {
     onControlMessage(e)
   },
-  onSignalMessage({ type, message, channel }) {
-    if (type === 'signal' && message?.type === 'taken_over') {
-      superseded.value = true
-      toast('连接已被其他页面接管', 'warn')
-    }
-  },
+  // taken_over 处理收敛在 useWebRtcLifecycle 内部（superseded 置位 + toast +
+  // 错误栏持久文案「已被其它页面接管」），此处不再重复挂 onSignalMessage——
+  // 旧的双份 toast/置位会让提示重复且不落持久横幅
   onPeerDisposed() {
     controlChannel = null
     mediaStream = null
@@ -815,6 +815,14 @@ function onDeviceSelect() {
   const d = current.value
   if (d) loadForm(d)
   else { mode.value = 'edit'; pkgDraft.value = ''; appList.value = []; appHint.value = '' }
+}
+
+/** 连接成功后只拉设备列表（不扫描）：更新下拉「在线/离线」状态标签。
+ * 失败静默——状态刷新属附带增强，不打扰投屏主流程。 */
+async function refreshDeviceStatus() {
+  try {
+    devicesData.value = await api.listDevices()
+  } catch (e) { /* 状态刷新失败不提示 */ }
 }
 
 /** 刷新：扫描 adb 自动入库新设备，再拉列表 */

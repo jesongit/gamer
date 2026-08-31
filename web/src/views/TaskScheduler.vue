@@ -8,6 +8,17 @@
       <button class="btn btn-primary" @click="openAdd">＋ 新建任务</button>
     </div>
 
+    <!-- 服务端时区标识：契约禁止 /api/system/info 携带 timezone，只能从任务时间戳
+         的 RFC3339 偏移推导（task-tz.js）；推导不出时明确说明按服务端本地时区执行 -->
+    <div class="tz-hint" data-testid="server-tz-hint">
+      <template v-if="serverTzLabel">
+        <span>服务端时区</span>
+        <span class="tz-badge mono">{{ serverTzLabel }}</span>
+        <span>「下次执行」按服务端时区显示</span>
+      </template>
+      <template v-else>任务按服务端本地时区执行（Docker 部署可用 TZ 配置）</template>
+    </div>
+
     <div class="card" style="padding: 0; overflow: auto;">
       <table class="table">
         <thead>
@@ -140,6 +151,7 @@ import ScriptPicker from '../components/ScriptPicker.vue'
 import ParamsForm from '../script-editor/components/ParamsForm.vue'
 import { extractParams, fmtLiteral } from '../script-editor/params'
 import { buildTaskSavePayload, isParamSignatureConflict, staleCompareRows, staleReason } from '../task-args'
+import { serverTzLabelFromTasks } from '../task-tz'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import { sourceLabel, shortRunId, isDeviceBusyConflict } from '../runs'
 
@@ -172,6 +184,8 @@ const taskParams = computed(() => {
   if (!s) return []
   return extractParams(s.content ?? '')
 })
+// 服务端时区标签：从任务 next_run/last_run_at 的 RFC3339 偏移推导；null → 兜底文案
+const serverTzLabel = computed(() => serverTzLabelFromTasks(tasks.value))
 const staleRows = computed(() =>
   staleCompareRows(taskParams.value, taskInitialArgs.value, formChange.value.effective))
 
@@ -358,6 +372,15 @@ onMounted(async () => {
 
 <style scoped>
 .task-name { font-weight: 600; }
+/* 服务端时区标识（契约禁止 system/info 带 timezone，从任务时间戳偏移推导） */
+.tz-hint {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-size: 12px; color: var(--text-2); margin: -4px 0 10px;
+}
+.tz-badge {
+  color: var(--accent-2); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 1px 8px; background: var(--bg-3);
+}
 /* 设备当前活动 run 标注（当前 active/run 响应命中时展示；配色复用全局 tag.run） */
 .run-now { margin-left: 6px; font-weight: 400; vertical-align: 1px; }
 .cron { color: var(--accent-2); font-size: 12px; }

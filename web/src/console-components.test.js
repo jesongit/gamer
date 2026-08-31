@@ -118,6 +118,24 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).toContain('useWebRtcLifecycle')
   })
 
+  it('连接成功即刷新设备列表（下拉在线/离线随建链更新，不必手动刷新）', () => {
+    // onConnectSuccess（手动连接/自动重连/接管共用成功路径）触发轻量列表刷新
+    expect(consoleSource).toContain('refreshDeviceStatus()')
+    expect(consoleSource).toContain('async function refreshDeviceStatus()')
+    // 只拉列表不扫描（扫描是「🔄 刷新」按钮职责），失败静默不打扰投屏
+    const fn = consoleSource.slice(consoleSource.indexOf('async function refreshDeviceStatus()'))
+    expect(fn.slice(0, fn.indexOf('/** 刷新：扫描 adb'))).toContain('api.listDevices()')
+    expect(fn.slice(0, fn.indexOf('/** 刷新：扫描 adb'))).not.toContain('api.scanDevices()')
+  })
+
+  it('被接管（taken_over）提示收敛在 webrtc lifecycle：持久横幅 + 阻断自动重连', () => {
+    const lifecycle = read('./composables/useWebRtcLifecycle.js')
+    expect(lifecycle).toContain("const TAKEN_OVER_MSG = '本页投屏已被其它页面接管，可手动重新连接'")
+    expect(lifecycle).toContain('if (errorMsgRef) errorMsgRef.value = TAKEN_OVER_MSG')
+    // Console 不再重复挂 taken_over 分支（旧实现双 toast 且不落持久横幅）
+    expect(consoleSource).not.toContain("message?.type === 'taken_over'")
+  })
+
   it('波次 2-F：运行与模板资源调用点只使用当前契约', () => {
     const layout = read('./layouts/MainLayout.vue')
     const editor = read('./views/ScriptEditor.vue')
