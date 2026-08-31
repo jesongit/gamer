@@ -1,6 +1,6 @@
 # GameBot 无兼容基线并行开发计划
 
-> 状态：代码与本机 HTTP/设备冒烟完成；WebRTC/Docker/发布验收待环境
+> 状态：基线清理完成；本机/Docker/真机/浏览器（WebRTC、DataChannel、viewer 接管、重连、watchdog/idle）验收完成（2026-09-01）；发布链路验收在 docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md 单独跟踪
 >
 > 目标：项目仍处于开发阶段，删除旧协议、旧数据和旧容错路径，形成单一、严格、可测试的当前基线。
 >
@@ -566,7 +566,7 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] Docker 显式配置 `TZ`。
 - [x] 部署入口明确说明 WebRTC UDP 端口。
 - [x] system info/schema version 与自动更新计划共用一套定义。
-- [ ] 本机与 Docker 状态页冒烟测试通过。
+- [x] 本机与 Docker 状态页冒烟测试通过。（本机浏览器状态页与 /api/system/info 逐项一致：docs/CLEAN_BASELINE_FUNC_EVIDENCE.md；Docker 浏览器状态页 docker/external、依赖三行正常、更新能力禁用、控制台 0 报错：docs/UPDATE_DOCKER_E2E_EVIDENCE.md 状态页冒烟节；首轮发现的服务端时区显示缺失缺陷已修复——server 7166f1f + web f27acdd）
 - [x] G 支线提交已完成。
 
 > G 最终复核（2026-08-31）：`5ea58f2` 已移除 `docker-config.toml` 明文 `admin123`、Login 默认凭据/固定版本、MainLayout 固定版本与日志徽标；新增的基线真相测试随 Web 493 项测试通过。`/api/system/info` 认证后返回 schema=1 及 ADB/FFmpeg/scrcpy 版本，故版本与固定徽标项勾选；Docker runtime 与浏览器页面状态未实测，综合状态页项保持未勾选。
@@ -598,12 +598,13 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] 无参数/有参数定时任务保存和立即运行成功。
 - [x] 参数声明变化后任务重新确认流程成功。
 - [x] 当前分区导出、清空、重新导入成功。
-- [ ] DataChannel 控制正常，REST 可靠性降级仍可用。
-- [ ] viewer 接管、重连、watchdog 和 idle 生命周期未回归。
+- [x] DataChannel 控制正常，REST 可靠性降级仍可用。（DC 静音开关命中服务端独有日志、DC 触控设备侧生效；REST press/tap 200 且生效——docs/CLEAN_BASELINE_FUNC_EVIDENCE.md）
+- [x] viewer 接管、重连、watchdog 和 idle 生命周期未回归。（接管/被顶不重连/idle 拆会话与唤醒：FUNC_EVIDENCE 首轮；配置变更踢 viewer 后自动重连 4.4s 恢复、watchdog 确死强拆 viewer 重连 25s 恢复、脚本运行中确死强拆服务端 132ms 重连且 run Success：G3 回归节；回归暴露的「自动重连成功一次后再次被踢不再重连」前端缺陷已修复并加测试——539a073，web 580 tests 全绿）
 - [ ] Docker readiness、时区和 WebRTC UDP 验证通过。
 
 > 波次 2 集成证据（2026-08-31）：公共 `GET /api/system/info` 已在 `protected_json` 接入，未放入 public；集成测试验证未认证 401、认证后结构化响应和无临时路径泄露。`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`（306 passed/2 ignored）、`pnpm test:run`（493 passed）、`pnpm build` 通过；`docker-compose.yml`、主+`docker-compose.local.yml`、主+`docker-compose.usb.yml` 的 `config --quiet` 通过。一次性 `GAMER_ADMIN_PASSWORD` 临时服务已完成 readiness、错误/正确登录、session、system info、设备扫描、真实设备 connect（online mirror）和 shutdown 冒烟，且无进程/端口/ADB/scrcpy 残留；该结果覆盖 HTTP/session，浏览器视频轨道仍未验证。应用内浏览器 `ERR_BLOCKED_BY_CLIENT` 阻断 WebRTC/DataChannel 验证；Docker daemon 不可用，不能伪造容器 readiness/UDP；设备脚本、viewer 接管、watchdog/idle 生命周期及发布运行验收未执行，故对应项目保持未勾选；`baseline-backups/` 保持未跟踪且未改动。
 > 波次 2 合并顺序审计（2026-08-31）：实际父链为 E→H→G→F→最终集成，不是计划要求的 E→F→G→H，故顺序项保持未勾选。
+> 2026-09-01 收口：DataChannel 控制 + REST 降级、viewer 接管、配置变更踢 viewer 自动重连、watchdog 确死强拆（无脚本/脚本运行中两分支）、idle 拆会话与唤醒均已实测（docs/CLEAN_BASELINE_FUNC_EVIDENCE.md，含 G3 回归节）。Docker readiness/时区已实测（docs/UPDATE_DOCKER_E2E_EVIDENCE.md，API+浏览器双确认），WebRTC UDP 媒体面需容器内真机（USB 设备无法透传容器、未擅自改动设备网络配置），对应项保持未勾。10.3/10.5 的两个合并顺序审计项为历史过程记录（当时已注记实际父链），不作追溯改写。
 
 ### 10.6 最终清理与发布门禁
 
@@ -623,7 +624,7 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] 所有旧行为命中只存在于明确的 rejection 测试或历史文档中。
 - [x] 所有破坏性提交均包含 `BREAKING CHANGE`。
 - [x] 每个提交主题单一、可独立理解和回滚。
-- [ ] 最终文档、配置、fixture 和实际行为一致。
+- [x] 最终文档、配置、fixture 和实际行为一致。（2026-09-01：本文件与 AUTO_UPDATE 计划 checklist 已按实测证据同步；web 580/server 453/launcher 184 测试、compose 5 变体 config、tools/verify-release.ps1（含严格在线 cargo audit）全绿；清理扫描生产代码 0 命中；实测发现的缺陷（时区显示、taken_over 持久提示、二次重连、drain 超时、长路径/跨盘）均已修复；剩余 GitHub Release/GHCR/生产签名/clean VM 属 AUTO_UPDATE 计划外部环境项，不在本基线清理范围）
 - [x] 已记录最终基线 commit 和开发数据重建说明。
 - [x] 性能实验未夹带进本轮兼容清理提交。
 
