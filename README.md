@@ -85,6 +85,9 @@ rustup default stable                            # MSVC 工具链需先装 VS Bu
 
 ## 快速开始
 
+> **Windows 完整包（便携安装 / 依赖修复 / 升级回滚）**：目标流程与现状见 [docs/UPDATE.md](docs/UPDATE.md)
+> （full 包打包与升级编排按批次计划推进，未落地能力已在文中标注「规划中」，当前请用以下两种方式）。
+
 ### 方式一：Docker 一键部署（推荐）
 
 ```bash

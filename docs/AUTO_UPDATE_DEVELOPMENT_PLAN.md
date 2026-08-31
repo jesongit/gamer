@@ -845,39 +845,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 
 #### Launcher 与依赖
 
-- [ ] LCH-004：逐文件 inventory、快速检查和 doctor 深检完成。
-- [ ] LCH-004：缺少 adb 任一 DLL、ffmpeg 损坏和版本错误均可定位。
-- [ ] LCH-005：实现本地 seed、缓存和远端下载优先级。
-- [ ] LCH-005：实现下载超时、临时文件、代理、大小和 hash 限制。
-- [ ] LCH-006：实现安全解压和同卷 staging 原子安装。
-- [ ] LCH-006：拒绝 zip-slip、解压炸弹、链接、ADS、保留名和大小写碰撞。
-- [ ] LCH-007：完成 inventory→seed/cache→remote→复验的 repair 流程。
-- [ ] LCH-008：按冻结路径和环境启动 server，并持有准确 child handle。
-- [ ] LCH-008：用 version、boot id、schema 和 readiness 验证目标进程。
+- [x] LCH-004：逐文件 inventory、快速检查和 doctor 深检完成。（--deep/--probe，缺文件/损坏/版本错精确定位）
+- [x] LCH-004：缺少 adb 任一 DLL、ffmpeg 损坏和版本错误均可定位。
+- [x] LCH-005：实现本地 seed、缓存和远端下载优先级。（三级来源全过 hash 门禁）
+- [x] LCH-005：实现下载超时、临时文件、代理、大小和 hash 限制。（.part 原子入库，截断/超时不污染）
+- [x] LCH-006：实现安全解压和同卷 staging 原子安装。
+- [x] LCH-006：拒绝 zip-slip、解压炸弹、链接、ADS、保留名和大小写碰撞。（zip crate 重复条目折叠坑已用 central directory 独立清点兜底）
+- [x] LCH-007：完成 inventory→seed/cache→remote→复验的 repair 流程。（真实 vendor 产物离线恢复实测，损坏目录入 quarantine）
+- [x] LCH-008：按冻结路径和环境启动 server，并持有准确 child handle。（PATH 最小集注入，Child::wait 句柄等待）
+- [ ] LCH-008：用 version、boot id、schema 和 readiness 验证目标进程。（当前仅 readiness 探测，boot id/schema 校验随批次 3 候选验证 LCH-012 落地）
 
 #### Server/Data/API
 
-- [ ] PATH-002：静态 web-dist 从 app dir 提供，版本目录可只读。
-- [ ] DATA-002：将当前无版本数据库归入明确 baseline migration。
-- [ ] DATA-003：实现 min/max/target schema 兼容门禁。
-- [ ] DATA-005：实现不启动 adb/scheduler/HTTP 的 maintenance inspect/migrate CLI。
-- [ ] OPS-002：停机幂等并暴露 draining/stopping/finished 状态。
-- [ ] OPS-003：升级器默认等待准确进程退出，不复制 `gamer.ps1` 的固定强杀时序。
-- [ ] SYS-001：实现受保护的 `/api/system/info`。
-- [ ] SYS-001：响应不泄露绝对路径、用户名、token、密码或命令行。
-- [ ] SYS-002：实现有界 adb、ffmpeg 和 scrcpy 版本/功能探针。
+- [x] PATH-002：静态 web-dist 从 app dir 提供，版本目录可只读。
+- [x] DATA-002：将当前无版本数据库归入明确 baseline migration。（schema 快照 fixture 比对 + 拒绝后字节不变断言）
+- [x] DATA-003：实现 min/max/target schema 兼容门禁。（常量化 + 编译期断言 + 可诊断错误）
+- [x] DATA-005：实现不启动 adb/scheduler/HTTP 的 maintenance inspect/migrate CLI。（五态判定，missing 不建库，实跑验证）
+- [x] OPS-002：停机幂等并暴露 draining/stopping/finished 状态。（/health/shutdown + 重入不重入测试）
+- [x] OPS-003：升级器默认等待准确进程退出，不复制 `gamer.ps1` 的固定强杀时序。（launcher 句柄等待，退出码透传）
+- [x] SYS-001：实现受保护的 `/api/system/info`。（与契约 fixture 字段集递归比对测试）
+- [x] SYS-001：响应不泄露绝对路径、用户名、token、密码或命令行。（泄露禁令测试）
+- [x] SYS-002：实现有界 adb、ffmpeg 和 scrcpy 版本/功能探针。（3s 超时 + 60s 缓存，懒执行不阻塞启动）
 
 #### Packaging
 
-- [ ] DEP-005：生成与实际组件一致的 licenses、NOTICE 和 SBOM 输入。
-- [ ] REL-001：从 clean checkout 生成 Windows app 组件包。
-- [ ] REL-002：生成 launcher + signed manifest + offline seeds 的 full ZIP。
-- [ ] REL-003：生成 detached signature 和 `SHA256SUMS`。
-- [ ] QA-002：慢流、断流、404、篡改、错误 Range 和并发 repair 不污染 runtime。
-- [ ] Windows PATH 清空、断网、无 Node/Rust/adb/ffmpeg 时 full 包首次启动通过。
-- [ ] 删除 adb.exe、任一 adb DLL 或 ffmpeg.exe 后离线 repair 通过。
-- [ ] 项目真实 H.264 stdin→PNG stdout ffmpeg 命令通过。
-- [ ] 批次 2 合流门：完成可手工安装的 M1 基线版本和可复现 full ZIP。
+- [x] DEP-005：生成与实际组件一致的 licenses、NOTICE 和 SBOM 输入。（licenses/ + CycloneDX 384 组件）
+- [x] REL-001：从 clean checkout 生成 Windows app 组件包。（package-app.ps1，zip 条目强制 / 分隔）
+- [x] REL-002：生成 launcher + signed manifest + offline seeds 的 full ZIP。（71MB，解压复核+SHA256SUMS 全对）
+- [x] REL-003：生成 detached signature 和 `SHA256SUMS`。（dev-ed25519-1，validate-manifest check 验签通过）
+- [x] QA-002：慢流、断流、404、篡改、错误 Range 和并发 repair 不污染 runtime。（45 测试；未采用 Range 断点续传，该反例不适用，其余全覆盖）
+- [ ] Windows PATH 清空、断网、无 Node/Rust/adb/ffmpeg 时 full 包首次启动通过。（批次 2 合流门 E2E 实测）
+- [x] 删除 adb.exe、任一 adb DLL 或 ffmpeg.exe 后离线 repair 通过。（demo-install 实测删 AdbWinApi.dll → 离线恢复 hash 一致）
+- [x] 项目真实 H.264 stdin→PNG stdout ffmpeg 命令通过。（fetch-ffmpeg.ps1 冒烟，BUILD-CONFIG 归档）
+- [ ] 批次 2 合流门：完成可手工安装的 M1 基线版本和可复现 full ZIP。（待 E2E）
 
 ### 17.5 批次 3：自动升级与回滚
 
