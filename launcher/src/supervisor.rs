@@ -1,0 +1,353 @@
+//! LCH-008 + OPS-003：server 子进程监管。
+//!
+//! - 读 `state/current.json` 定位 `versions/<v>/`（缺失/损坏 = 清晰错误，不 panic）；
+//! - 注入稳定路径环境变量（UPDATE_CONTRACT §4）：GAMER_APP_DIR / GAMER_DATA_DIR /
+//!   GAMER_ADB_PATH / GAMER_FFMPEG_PATH / GAMER_SCRCPY_SERVER / GB_CONFIG / GB_LOG
+//!   （launcher 注入绝对路径）；
+//! - PATH 收敛到最小集（System32）——验收口径：PATH 清空仍能启动；
+//! - OPS-003：持有子进程句柄 `wait()` 等待退出（不按端口/进程名判定），
+//!   退出码写日志；
+//! - 启动后轮询 `http://127.0.0.1:<port>/health/ready`（端口来源 config.toml，
+//!   超时有界）确认就绪；就绪与否只影响报告，不影响监管持续。
+
+use std::collections::BTreeMap;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use crate::layout::InstallLayout;
+use crate::manifest::pathsafe;
+
+pub const HEALTH_PATH: &str = "/health/ready";
+pub const DEFAULT_SERVER_PORT: u16 = 8443;
+pub const DEFAULT_ENTRYPOINT: &str = "gamer-server.exe";
+
+/// server 启动计划（全部为绝对路径，来自安装根解析）。
+#[derive(Debug, Clone)]
+pub struct LaunchPlan {
+    pub exe: PathBuf,
+    pub cwd: PathBuf,
+    pub app_dir: PathBuf,
+    pub data_dir: PathBuf,
+    pub adb_path: Option<PathBuf>,
+    pub ffmpeg_path: Option<PathBuf>,
+    pub scrcpy_server: PathBuf,
+    pub config_path: PathBuf,
+    pub log_path: PathBuf,
+}
+
+/// 子进程环境：最小系统集（SystemRoot/SystemDrive/TEMP/TMP + PATH=System32，
+/// 系统 DLL 加载与 CRT 初始化所需）+ 注入变量。父进程其余环境一概不带。
+pub fn build_child_env(plan: &LaunchPlan) -> BTreeMap<String, String> {
+    let mut env = BTreeMap::new();
+    env.insert("SystemRoot".to_string(), system_root());
+    env.insert(
+        "SystemDrive".to_string(),
+        std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string()),
+    );
+    if let Ok(v) = std::env::var("TEMP") {
+        env.insert("TEMP".to_string(), v);
+    }
+    if let Ok(v) = std::env::var("TMP") {
+        env.insert("TMP".to_string(), v);
+    }
+    env.insert("PATH".to_string(), minimal_path());
+
+    env.insert(
+        "GAMER_APP_DIR".to_string(),
+        plan.app_dir.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "GAMER_DATA_DIR".to_string(),
+        plan.data_dir.to_string_lossy().into_owned(),
+    );
+    if let Some(p) = &plan.adb_path {
+        env.insert(
+            "GAMER_ADB_PATH".to_string(),
+            p.to_string_lossy().into_owned(),
+        );
+    }
+    if let Some(p) = &plan.ffmpeg_path {
+        env.insert(
+            "GAMER_FFMPEG_PATH".to_string(),
+            p.to_string_lossy().into_owned(),
+        );
+    }
+    env.insert(
+        "GAMER_SCRCPY_SERVER".to_string(),
+        plan.scrcpy_server.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "GB_CONFIG".to_string(),
+        plan.config_path.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "GB_LOG".to_string(),
+        plan.log_path.to_string_lossy().into_owned(),
+    );
+    env
+}
+
+fn system_root() -> String {
+    std::env::var("SystemRoot")
+        .or_else(|_| std::env::var("WINDIR"))
+        .unwrap_or_else(|_| "C:\\Windows".to_string())
+}
+
+/// 最小 PATH：仅 System32（不继承父进程 PATH；server 及其依赖只允许加载系统 DLL）。
+pub fn minimal_path() -> String {
+    Path::new(&system_root())
+        .join("System32")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// 按 plan 启动子进程（继承 launcher 的控制台，便于现场观察）。
+pub fn spawn_supervised(plan: &LaunchPlan) -> std::io::Result<Child> {
+    spawn_child(plan, &[], Stdio::inherit(), Stdio::inherit())
+}
+
+/// 可控 stdio 的启动入口（测试用它捕获 `cmd /c set` 输出验证 env 注入）。
+pub fn spawn_child(
+    plan: &LaunchPlan,
+    args: &[&str],
+    stdout: Stdio,
+    stderr: Stdio,
+) -> std::io::Result<Child> {
+    let env = build_child_env(plan);
+    tracing::info!(exe = %plan.exe.display(), cwd = %plan.cwd.display(), env_keys = env.keys().count(), "启动受管子进程");
+    Command::new(&plan.exe)
+        .args(args)
+        .current_dir(&plan.cwd)
+        .env_clear()
+        .envs(&env)
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+}
+
+/// 就绪探测参数（有界：整体 deadline + 单次超时 + 轮询间隔）。
+#[derive(Debug, Clone)]
+pub struct ReadyProbe {
+    pub overall_timeout: Duration,
+    pub per_attempt_timeout: Duration,
+    pub interval: Duration,
+}
+
+impl Default for ReadyProbe {
+    fn default() -> Self {
+        Self {
+            overall_timeout: Duration::from_secs(90),
+            per_attempt_timeout: Duration::from_secs(2),
+            interval: Duration::from_millis(500),
+        }
+    }
+}
+
+/// 轮询 `http://127.0.0.1:<port>/health/ready` 直到 200 或超时。
+/// Err 携带最后一次失败原因（连接拒绝 / 状态非 200 / 协议失败 / 超时）。
+pub fn wait_for_ready(port: u16, probe: &ReadyProbe) -> Result<(), String> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let deadline = Instant::now() + probe.overall_timeout;
+    let mut last: Option<String> = None;
+    loop {
+        if Instant::now() >= deadline {
+            let detail = last.as_deref().unwrap_or("首次探测未及执行");
+            return Err(format!(
+                "就绪探测超时（{}s）：{detail}",
+                probe.overall_timeout.as_secs()
+            ));
+        }
+        match probe_once(addr, HEALTH_PATH, probe.per_attempt_timeout) {
+            Ok(true) => return Ok(()),
+            Ok(false) => last = Some("HTTP 非 200（尚未就绪）".to_string()),
+            Err(reason) => last = Some(reason),
+        }
+        std::thread::sleep(probe.interval);
+    }
+}
+
+/// 单次探测：Ok(true)=就绪(200)；Ok(false)=服务可达但未就绪（5xx 等）；Err=连接/协议失败。
+pub fn probe_once(addr: SocketAddr, path: &str, timeout: Duration) -> Result<bool, String> {
+    let mut stream =
+        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("连接 {addr} 失败: {e}"))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|e| format!("设置读超时失败: {e}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|e| format!("设置写超时失败: {e}"))?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("发送请求失败: {e}"))?;
+    let mut buf = Vec::new();
+    match stream.read_to_end(&mut buf) {
+        Ok(_) => {}
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+            return Err("响应读取超时".to_string());
+        }
+        Err(e) => return Err(format!("读取响应失败: {e}")),
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let status = parse_status_code(&text)
+        .ok_or_else(|| "无法解析 HTTP 状态行（响应为空或非法）".to_string())?;
+    Ok(status == 200)
+}
+
+/// 从响应头解析状态码（首行 `HTTP/1.1 200 OK`）。
+pub(crate) fn parse_status_code(text: &str) -> Option<u16> {
+    let line = text.lines().next()?;
+    let mut it = line.split_whitespace();
+    it.next()?;
+    it.next()?.parse().ok()
+}
+
+/// 读取 config.toml 顶层 `port`；缺失/非法时回退默认 8443 并记日志。
+pub fn read_configured_port(config_path: &Path) -> u16 {
+    let text = match std::fs::read_to_string(config_path) {
+        Ok(t) => t,
+        Err(_) => {
+            tracing::warn!(
+                config = %config_path.display(),
+                "配置文件不存在，就绪探测端口按默认 {DEFAULT_SERVER_PORT}"
+            );
+            return DEFAULT_SERVER_PORT;
+        }
+    };
+    match toml::from_str::<toml::Value>(&text) {
+        Ok(v) => v
+            .get("port")
+            .and_then(toml::Value::as_integer)
+            .and_then(|p| u16::try_from(p).ok())
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    "config.toml 缺少合法的顶层 port，就绪探测端口按默认 {DEFAULT_SERVER_PORT}"
+                );
+                DEFAULT_SERVER_PORT
+            }),
+        Err(e) => {
+            tracing::warn!("config.toml 解析失败（{e}），就绪探测端口按默认 {DEFAULT_SERVER_PORT}");
+            DEFAULT_SERVER_PORT
+        }
+    }
+}
+
+/// 定位当前版本的入口程序：优先取缓存 manifest 的 `entrypoint`
+/// （路径安全校验 + 文件存在双门禁），否则回退 `gamer-server.exe`。
+pub fn resolve_entrypoint(layout: &InstallLayout, version: &str) -> Result<PathBuf, String> {
+    let app_dir = layout.versions_dir().join(version);
+    if !app_dir.is_dir() {
+        return Err(format!(
+            "版本目录不存在: {}（尚未安装或 state/current.json 指向被删版本）",
+            app_dir.display()
+        ));
+    }
+    for path in cached_manifests(layout) {
+        if let Some(ep) = peek_entrypoint(&path) {
+            if pathsafe::check_single_path(&ep).is_none() {
+                let exe = app_dir.join(&ep);
+                if exe.is_file() {
+                    return Ok(exe);
+                }
+                tracing::debug!(manifest = %path.display(), entrypoint = %ep, "manifest entrypoint 文件不存在，尝试下一候选");
+            }
+        }
+    }
+    let fallback = app_dir.join(DEFAULT_ENTRYPOINT);
+    if fallback.is_file() {
+        return Ok(fallback);
+    }
+    Err(format!(
+        "入口程序不存在: {}（版本目录缺 gamer-server.exe，且无可用 manifest 指定 entrypoint）",
+        fallback.display()
+    ))
+}
+
+fn cached_manifests(layout: &InstallLayout) -> Vec<PathBuf> {
+    let dir = layout.manifests_dir();
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+    out.sort();
+    out
+}
+
+fn peek_entrypoint(manifest_path: &Path) -> Option<String> {
+    let raw = std::fs::read(manifest_path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    value
+        .get("platforms")?
+        .get("windows-x86_64")?
+        .get("app")?
+        .get("entrypoint")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// managed 依赖可执行文件定位：`runtime/<id>/<version>/<exe_name>`，
+/// 多版本并存取目录名 SemVer 最大者（非 SemVer 目录名按字典序兜底比较）。
+pub fn latest_component_exe(layout: &InstallLayout, id: &str, exe_name: &str) -> Option<PathBuf> {
+    let base = layout.runtime_dir().join(id);
+    let mut candidates: Vec<(String, PathBuf)> = std::fs::read_dir(&base)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter_map(|p| {
+            let exe = p.join(exe_name);
+            exe.is_file().then(|| {
+                (
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    exe,
+                )
+            })
+        })
+        .collect();
+    candidates.sort_by(|a, b| {
+        match (
+            crate::manifest::semver::parse(&a.0),
+            crate::manifest::semver::parse(&b.0),
+        ) {
+            (Some(sa), Some(sb)) => {
+                if crate::manifest::semver::is_lt(&sa, &sb) {
+                    std::cmp::Ordering::Less
+                } else if crate::manifest::semver::is_lt(&sb, &sa) {
+                    std::cmp::Ordering::Greater
+                } else {
+                    a.0.cmp(&b.0)
+                }
+            }
+            _ => a.0.cmp(&b.0),
+        }
+    });
+    candidates.pop().map(|(_, exe)| exe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_status_lines() {
+        assert_eq!(
+            parse_status_code("HTTP/1.1 200 OK\r\nContent-Type: application/json"),
+            Some(200)
+        );
+        assert_eq!(
+            parse_status_code("HTTP/1.1 503 Service Unavailable\n"),
+            Some(503)
+        );
+        assert_eq!(parse_status_code("garbage"), None);
+        assert_eq!(parse_status_code(""), None);
+    }
+}

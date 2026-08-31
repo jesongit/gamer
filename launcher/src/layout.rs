@@ -45,4 +45,39 @@ impl InstallLayout {
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
     }
+
+    /// full 包内置离线组件包（UPDATE_CONTRACT §1：seeds/，运行期只读使用）。
+    pub fn seeds_dir(&self) -> PathBuf {
+        self.root.join("seeds")
+    }
+
+    /// 下载产物缓存中转区（cache/artifacts/，可随时清理重建）。
+    pub fn artifacts_dir(&self) -> PathBuf {
+        self.root.join("cache").join("artifacts")
+    }
+
+    /// 组件解压/校验临时区（与安装根同卷，staging→versions/runtime 才是原子 rename）。
+    pub fn staging_dir(&self) -> PathBuf {
+        self.root.join("staging")
+    }
+
+    /// 回滚失败或损坏组件的保留区（只增，不静默删除）。
+    pub fn quarantine_dir(&self) -> PathBuf {
+        self.root.join("quarantine")
+    }
+
+    /// 业务数据目录（用户数据，升级必须保留）。
+    pub fn data_dir(&self) -> PathBuf {
+        self.root.join("data")
+    }
+
+    /// 用户配置文件（稳定路径契约 GB_CONFIG 注入值）。
+    pub fn config_file(&self) -> PathBuf {
+        self.root.join("config").join("config.toml")
+    }
+
+    /// managed 组件目录 runtime/<id>/<version>/（哈希锚定的不可变组件目录）。
+    pub fn component_dir(&self, id: &str, version: &str) -> PathBuf {
+        self.runtime_dir().join(id).join(version)
+    }
 }

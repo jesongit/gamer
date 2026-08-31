@@ -85,6 +85,14 @@ pub struct ScrcpyServer {
     pub binding: String,
 }
 
+impl Manifest {
+    /// 从已验签的 manifest JSON 反序列化模型（调用方必须先完成验签与全部校验，
+    /// 本函数只负责类型化，不再做任何放宽）。
+    pub fn parse(raw: &serde_json::Value) -> Result<Manifest, String> {
+        serde_json::from_value(raw.clone()).map_err(|e| format!("manifest 模型解析失败: {e}"))
+    }
+}
+
 const I32_MAX: i64 = 2_147_483_647;
 const MAX_URL_LEN: usize = 2048;
 const MAX_REL_PATH_LEN: usize = 512;

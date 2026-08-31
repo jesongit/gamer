@@ -14,9 +14,13 @@ clap = { version = "4", features = ["derive"] }
 ed25519-dalek = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+toml = "0.8"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = "0.3"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lib]
 name = "gamer_launcher"
@@ -25,3 +29,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "gamer-launcher"
 path = "src/main.rs"
+
+[dev-dependencies]
+crc32fast = "1"

@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "gamer-launcher",
     version,
-    about = "GameBot 便携安装启动器/升级器（批次 1 骨架：CLI / 单实例锁 / 原子 state / manifest 验签）"
+    about = "GameBot 便携安装启动器/升级器（单实例锁 / 原子 state / manifest 验签 / 依赖修复 / server 监管）"
 )]
 pub struct Cli {
     /// 安装根目录；缺省取本 exe 所在目录
@@ -29,7 +29,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// 启动并监管 gamer-server 子进程（LCH-008，未实现）
+    /// 启动并监管 gamer-server 子进程（LCH-008/OPS-003：env 注入 + 句柄等待 + 就绪探测）
     Start,
     /// 查看当前安装状态（只读，不获取单实例锁）
     Status,
@@ -50,9 +50,22 @@ pub enum Command {
         /// 期望发布通道 stable|beta；不匹配时拒绝
         #[arg(long, value_name = "CHANNEL")]
         expect_channel: Option<String>,
+        /// 组件深检：逐文件 sha256 对 manifest（不带 --manifest 时用 manifests/ 缓存）
+        #[arg(long)]
+        deep: bool,
+        /// 深检附版本探针（adb version / ffmpeg -version，与 manifest 组件版本比对）
+        #[arg(long)]
+        probe: bool,
     },
-    /// 修复运行依赖与损坏组件（LCH-007，未实现）
-    Repair,
+    /// 修复运行依赖（LCH-007：inventory 深检 → seed/cache/remote → 原子换装 → 复验）
+    Repair {
+        /// 指定 release manifest；缺省用 manifests/ 缓存（优先匹配当前版本，其次 SemVer 最高）
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+        /// 修复后复验附版本探针
+        #[arg(long)]
+        probe: bool,
+    },
     /// 检查并执行升级（LCH-010，未实现）
     Upgrade,
 }
