@@ -15,13 +15,13 @@
 #   environment `release`（必需评审人 = 手动批准门；smoke 前置，publish 依赖 smoke）：
 #     无 secrets，仅作为 draft 转正前的人工批准点。
 #   轮换：生成新密钥对 → PR 提交公钥 → 更新两个 secret → 按 release/docs/KEY_ROTATION.md 走双钥期。
-#   工作流内兜底：key_id 为空 / 等于 dev-ed25519-1 / 公钥不在仓库 → 立即失败。
+#   工作流内兜底：key_id 为空 / 非 prod-ed25519-N / 公钥不在仓库 → 立即失败。
 #
 # Job 结构图：
-#   verify (win) ──┬─> build-windows (win, env:release-sign) ──┐
-#                 └─> docker (ubuntu, GHCR push + attestations) ─┴─> draft-release ──> artifact-verify ──> smoke (win, env:release 手动批准) ──> publish
+#   verify (win) ──> draft-release (empty draft) ──┬─> build-windows (win, env:release-sign) ──┐
+#                                                  └─> docker (ubuntu, GHCR push + attestations) ─┴─> upload-assets ─> artifact-verify ─> smoke (win, env:release 手动批准) ─> publish
 #
-# 发布语义：draft-release 只建 draft 并传 8 个内容资产（full/app/adb/ffmpeg/licenses zip、
+# 发布语义：draft-release 先建空 draft，upload-assets 再传 8 个内容资产（full/app/adb/ffmpeg/licenses zip、
 # manifest+.sig、SBOM；SHA256SUMS 单独生成上传；同 tag 重跑：同名资产 hash 一致跳过、
 # 不一致失败，绝不静默覆盖）；smoke 从 Release 重新下载全量资产核对 + manifest 双信任锚
 # 验签 + launcher doctor 冒烟 + 镜像/ZIP 版本同源核对，全过才允许 publish 把 draft 转正。
@@ -92,11 +92,64 @@ jobs:
           }
           Write-Host "tag $env:TAG == commit $($head.Substring(0,12))"
 
-  # ---------- job2 build-windows：构建 + 打包 + 生产钥签名 ----------
+  # ---------- job2 draft-release：tag 后先建立 draft，不发布任何资产 ----------
+  draft-release:
+    name: draft-release (create empty draft)
+    runs-on: ubuntu-latest
+    needs: verify
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create draft release before build (idempotent, fail closed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if view_output="$(gh release view "$TAG" --repo "$GH_REPO" --json isDraft -q .isDraft 2>&1)"; then
+            if [[ "$view_output" != "true" ]]; then
+              echo "::error::GitHub Release $TAG 已存在但不是 draft，拒绝覆盖"
+              exit 1
+            fi
+            echo "draft release $TAG 已存在且仍为 draft"
+            exit 0
+          fi
+
+          if [[ "$view_output" != *"404"* && "$view_output" != *"not found"* && "$view_output" != *"Not Found"* ]]; then
+            echo "::error::查询 GitHub Release $TAG 失败且不是明确的 not-found：$view_output"
+            exit 1
+          fi
+
+          v="${TAG#v}"
+          img="ghcr.io/${GH_REPO,,}"
+          cat > body.md <<BODY
+          # GameBot $TAG
+
+          ## 安装（Windows x64 便携包）
+          下载 \`GameBot-$v-windows-x64-full.zip\` 解压后按包内 **INSTALL.md** 三步完成：
+          \`gamer-launcher.exe repair\` → 首次设置登录密码 → \`gamer-launcher.exe start\`。
+
+          ## 资产校验
+          - 逐文件哈希：核对 \`SHA256SUMS.txt\`
+          - manifest 验签命令清单：仓库 \`release/docs/ATTESTATION.md\`
+          - 第三方许可：\`GameBot-$v-licenses.zip\`
+          - 供应链：CycloneDX SBOM + buildx provenance/SBOM attestation
+
+          ## 容器镜像（Docker）
+          \`\`\`bash
+          docker pull $img:$v
+          GAMER_IMAGE=$img:$v docker compose -f docker-compose.release.yml up -d
+          \`\`\`
+          BODY
+          gh release create "$TAG" --repo "$GH_REPO" --draft --verify-tag \
+            --title "GameBot $TAG" --notes-file body.md
+          echo "created draft release $TAG"
+
+  # ---------- job3 build-windows：构建 + 打包 + 生产钥签名 ----------
   build-windows:
     name: build-windows (build + package + sign)
     runs-on: windows-latest
-    needs: verify
+    needs: [verify, draft-release]
     timeout-minutes: 90
     permissions:
       contents: read
@@ -106,6 +159,7 @@ jobs:
     # smoke job 用 needs.build-windows.outputs.version 驱动资产/doctor 校验
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      channel: ${{ steps.ver.outputs.channel }}
     env:
       RELEASE_MANIFEST_KEY_ID: ${{ secrets.RELEASE_MANIFEST_KEY_ID }}
     steps:
@@ -115,11 +169,14 @@ jobs:
         id: ver
         shell: pwsh
         run: |
-          if ($env:TAG -notmatch '^v(?<v>[0-9]+\.[0-9]+\.[0-9]+.*)$') {
-            throw "tag 不合法: $env:TAG（须为 v<semver>）"
+          if ($env:TAG -notmatch '^v(?<v>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?)$') {
+            throw "tag 不合法: $env:TAG（须为可映射到 OCI tag 的 v<semver>，不含 +build metadata）"
           }
-          "version=$($Matches['v'])" >> $env:GITHUB_OUTPUT
-          Write-Host "product version = $($Matches['v'])"
+          $version = $Matches['v']
+          $channel = if ($version -match '-') { 'beta' } else { 'stable' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "channel=$channel" >> $env:GITHUB_OUTPUT
+          Write-Host "product version = $version; channel = $channel"
 
       - name: Setup Node.js 24 LTS (pnpm build + manifest 签名/校验)
         uses: actions/setup-node@v4
@@ -164,7 +221,9 @@ jobs:
       # 取自 git HEAD + rustc host triple），并复核 zip 布局与逐文件 sha256
       - name: Package app (server + web-dist + jar)
         shell: pwsh
-        run: ./release/packaging/package-app.ps1 -Channel stable
+        env:
+          CHANNEL: ${{ steps.ver.outputs.channel }}
+        run: ./release/packaging/package-app.ps1 -Channel $env:CHANNEL
 
       - name: Package components (adb + ffmpeg zips)
         shell: pwsh
@@ -173,9 +232,11 @@ jobs:
       # manifest 资产 URL 与 GitHub Release 扁平资产名一致（组件不使用虚拟 deps/ 子路径）。
       - name: Generate manifest (unsigned)
         shell: pwsh
+        env:
+          CHANNEL: ${{ steps.ver.outputs.channel }}
         run: |
           $base = 'https://github.com/${{ github.repository }}/releases/download/' + $env:TAG
-          ./release/packaging/gen-manifest.ps1 -SkipSign -Channel stable `
+          ./release/packaging/gen-manifest.ps1 -SkipSign -Channel $env:CHANNEL `
             -DownloadBaseUrl $base `
             -ReleaseNotesUrl ('https://github.com/${{ github.repository }}/releases/tag/' + $env:TAG)
 
@@ -185,14 +246,21 @@ jobs:
         env:
           RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.RELEASE_MANIFEST_PRIVATE_KEY }}
           VERSION: ${{ steps.ver.outputs.version }}
+          CHANNEL: ${{ steps.ver.outputs.channel }}
         run: |
           $keyId = $env:RELEASE_MANIFEST_KEY_ID
           if (-not $keyId) { throw "缺少 secret RELEASE_MANIFEST_KEY_ID（见 workflow 头部 secrets 约定表）" }
           if (-not $env:RELEASE_MANIFEST_PRIVATE_KEY) { throw "缺少 secret RELEASE_MANIFEST_PRIVATE_KEY（environment release-sign）" }
-          if ($keyId -ieq 'dev-ed25519-1') { throw "发布签名禁止使用 dev key（dev-ed25519-1 仅限本地）" }
+          if ($keyId -notmatch '^prod-ed25519-[1-9][0-9]*$') {
+            throw "发布签名 key_id=$keyId 不符合生产命名 prod-ed25519-N；dev/fixture key 仅限本地演练"
+          }
           $pubKey = Join-Path 'release/keys' ("$keyId.pem")
           if (-not (Test-Path -LiteralPath $pubKey)) {
             throw "信任库缺公钥 $pubKey —— 先按 release/docs/KEY_ROTATION.md 以 PR 提交生产公钥"
+          }
+          $privateKeys = @(Get-ChildItem -LiteralPath 'release/keys' -Filter '*.private.pem' -File -ErrorAction SilentlyContinue)
+          if ($privateKeys.Count -ne 0) {
+            throw "release/keys 不得包含私钥文件：$($privateKeys.Name -join ', ')"
           }
           $manifestPath = Join-Path 'release/manifests' ("$env:VERSION.json")
           node release/packaging/sign-manifest.mjs sign $manifestPath `
@@ -200,7 +268,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "manifest 签名失败（退出码 $LASTEXITCODE）" }
           node release/contracts/validate-manifest.mjs check $manifestPath `
             --keys-dir release/keys `
-            --expect-current-version $env:VERSION --expect-channel stable
+            --expect-current-version $env:VERSION --expect-channel $env:CHANNEL
           if ($LASTEXITCODE -ne 0) { throw "manifest 校验未通过（退出码 $LASTEXITCODE）" }
           Write-Host "manifest 已由生产钥 $keyId 签名并全量校验通过"
 
@@ -276,11 +344,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ---------- job2b docker：GHCR 镜像发布（REL-005） ----------
+  # ---------- job3b docker：GHCR 镜像发布（REL-005） ----------
   docker:
     name: docker (GHCR push + provenance/SBOM attestation)
     runs-on: ubuntu-latest
-    needs: verify
+    needs: [verify, draft-release]
     timeout-minutes: 40
     permissions:
       contents: read
@@ -289,6 +357,7 @@ jobs:
       image: ${{ steps.ver.outputs.img }}
       digest: ${{ steps.build.outputs.digest }}
       version: ${{ steps.ver.outputs.version }}
+      channel: ${{ steps.ver.outputs.channel }}
     steps:
       - uses: actions/checkout@v4
 
@@ -297,8 +366,13 @@ jobs:
         run: |
           v="${TAG#v}"
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          # 仅无预发布/构建后缀的正式 semver 才追加强滚动 channel tag :stable
-          if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "channel=stable" >> "$GITHUB_OUTPUT"; fi
+          # 仅无预发布/构建后缀的正式 semver 才追加强滚动 channel tag :stable；
+          # 预发布版本的镜像和 manifest 统一标记为 beta。
+          if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=beta" >> "$GITHUB_OUTPUT"
+          fi
           echo "img=ghcr.io/${GH_REPO,,}" >> "$GITHUB_OUTPUT"
 
       - id: tags
@@ -307,7 +381,7 @@ jobs:
           {
             echo "tags<<TAGS_EOF"
             echo "${img}:${{ steps.ver.outputs.version }}"
-            if [ -n "${{ steps.ver.outputs.channel }}" ]; then echo "${img}:stable"; fi
+            if [ "${{ steps.ver.outputs.channel }}" = "stable" ]; then echo "${img}:stable"; fi
             echo "TAGS_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -323,7 +397,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check immutable version/channel tags before push (REL-005)
+      - name: Check immutable semver tag before push (REL-005)
         shell: pwsh
         env:
           IMAGE: ${{ steps.ver.outputs.img }}
@@ -333,9 +407,8 @@ jobs:
         run: |
           $versionRef = '{0}:{1}' -f $env:IMAGE, $env:VERSION
           ./release/packaging/check-immutable-release.ps1 -Mode Registry -Tag $env:TAG -CommitSha $env:TRIGGER_SHA -Image $versionRef
-          if ($env:CHANNEL -eq 'stable') {
-            ./release/packaging/check-immutable-release.ps1 -Mode Registry -Tag $env:TAG -CommitSha $env:TRIGGER_SHA -Image ('{0}:stable' -f $env:IMAGE)
-          }
+          # :stable 是明确的滚动别名，只校验 semver tag 的 immutable preflight；
+          # push 后再确认 :stable 解析到同一个 digest。
 
       # Dockerfile 不带版本 ARG（本轨不得改动）：版本/commit 同源由三重机制保证——
       #   ① verify job 已锁 tag == v+Cargo 版本（镜像二进制内 CARGO_PKG_VERSION 同源）；
@@ -387,7 +460,7 @@ jobs:
           docker pull "$IMG@$DIGEST"
 
           channel_note=""
-          if [ -n "${{ steps.ver.outputs.channel }}" ]; then channel_note=" + \`stable\`"; fi
+          if [ "${{ steps.ver.outputs.channel }}" = "stable" ]; then channel_note=" + \`stable\`"; fi
           {
             echo "## GHCR 镜像（REL-005）"
             echo ""
@@ -413,7 +486,15 @@ jobs:
           $versionRef = '{0}:{1}' -f $env:IMAGE, $env:VERSION
           ./release/packaging/check-immutable-release.ps1 -Mode Registry -Tag $env:TAG -CommitSha $env:TRIGGER_SHA -Image $versionRef -ExpectedDigest $env:DIGEST
           if ($env:CHANNEL -eq 'stable') {
-            ./release/packaging/check-immutable-release.ps1 -Mode Registry -Tag $env:TAG -CommitSha $env:TRIGGER_SHA -Image ('{0}:stable' -f $env:IMAGE) -ExpectedDigest $env:DIGEST
+            $stableRef = '{0}:stable' -f $env:IMAGE
+            $stableInspect = (& docker buildx imagetools inspect $stableRef 2>&1 | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw "无法读取滚动别名 $stableRef：$($stableInspect.Trim())" }
+            $stableMatch = [regex]::Match($stableInspect, '(?im)^\s*Digest:\s*(sha256:[0-9a-f]{64})\s*$')
+            if (-not $stableMatch.Success) { throw "滚动别名 $stableRef 的 inspect 输出缺少 digest" }
+            if ($stableMatch.Groups[1].Value -ine $env:DIGEST) {
+              throw "滚动别名 $stableRef 指向 $($stableMatch.Groups[1].Value)，期望本次 digest $env:DIGEST"
+            }
+            Write-Host "$stableRef 是滚动别名，当前已解析到本次 immutable digest $env:DIGEST"
           }
 
       - name: Verify provenance and SBOM attestations (REL-006)
@@ -421,13 +502,13 @@ jobs:
         env:
           IMAGE: ${{ steps.ver.outputs.img }}
           DIGEST: ${{ steps.build.outputs.digest }}
-        run: ./release/packaging/verify-image-attestations.ps1 -Image ('{0}@{1}' -f $env:IMAGE, $env:DIGEST) -ExpectedDigest $env:DIGEST
+        run: ./release/packaging/verify-image-attestations.ps1 -Image $env:IMAGE -ExpectedDigest $env:DIGEST
 
-  # ---------- job3 draft-release：资产上传到 draft（重复构建 hash 门禁） ----------
-  draft-release:
-    name: draft-release (upload assets)
+  # ---------- job4 upload-assets：资产上传到已存在的 draft（hash 门禁） ----------
+  upload-assets:
+    name: upload-assets (draft hash guard)
     runs-on: ubuntu-latest
-    needs: [build-windows, docker]
+    needs: [draft-release, build-windows, docker]
     timeout-minutes: 15
     permissions:
       contents: write
@@ -437,38 +518,6 @@ jobs:
           name: release-assets
           path: dist
 
-      - name: Create draft release (idempotent)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          V: ${{ needs.build-windows.outputs.version }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "draft release $TAG 已存在，跳过创建"
-          else
-            img="ghcr.io/${GH_REPO,,}"
-            cat > body.md <<BODY
-          # GameBot $TAG
-
-          ## 安装（Windows x64 便携包）
-          下载 \`GameBot-$V-windows-x64-full.zip\` 解压后按包内 **INSTALL.md** 三步完成：
-          \`gamer-launcher.exe repair\` → 首次设置登录密码 → \`gamer-launcher.exe start\`。
-
-          ## 资产校验
-          - 逐文件哈希：核对 \`SHA256SUMS.txt\`（PowerShell: \`Get-FileHash -Algorithm SHA256 <file>\`）
-          - manifest 验签命令清单：仓库 \`release/docs/ATTESTATION.md\`
-          - 第三方许可：\`GameBot-$V-licenses.zip\`（与 full 包内 licenses/ 同源）
-          - 供应链：CycloneDX SBOM + buildx provenance/SBOM attestation
-
-          ## 容器镜像（Docker）
-          \`\`\`bash
-          docker pull $img:$V
-          GAMER_IMAGE=$img:$V docker compose -f docker-compose.release.yml up -d
-          \`\`\`
-          BODY
-            gh release create "$TAG" --draft --verify-tag \
-              --title "GameBot $TAG" --notes-file body.md
-          fi
-
       - name: Upload assets (hash guard — 不静默覆盖)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -477,9 +526,9 @@ jobs:
           for f in dist/*; do
             name="$(basename "$f")"
             local_hash="$(sha256sum "$f" | cut -d' ' -f1)"
-            if gh release view "$TAG" --json assets -q '.assets[].name' | grep -Fxq "$name"; then
+            if gh release view "$TAG" --repo "$GH_REPO" --json assets -q '.assets[].name' | grep -Fxq "$name"; then
               rm -rf existing && mkdir existing
-              gh release download "$TAG" --pattern "$name" --dir existing
+              gh release download "$TAG" --repo "$GH_REPO" --pattern "$name" --dir existing
               remote_hash="$(sha256sum "existing/$name" | cut -d' ' -f1)"
               if [ "$remote_hash" != "$local_hash" ]; then
                 echo "::error::资产 $name 已存在且 hash 不同（existing=$remote_hash new=$local_hash）——同一 tag 禁止覆盖不同内容，发布失败"
@@ -487,7 +536,7 @@ jobs:
               fi
               echo "skip（同名同 hash）: $name"
             else
-              gh release upload "$TAG" "$f"
+              gh release upload "$TAG" --repo "$GH_REPO" "$f"
               echo "uploaded: $name"
             fi
           done
@@ -503,9 +552,9 @@ jobs:
           cat SHA256SUMS.txt
           name="SHA256SUMS.txt"
           local_hash="$(sha256sum "$name" | cut -d' ' -f1)"
-          if gh release view "$TAG" --json assets -q '.assets[].name' | grep -Fxq "$name"; then
+          if gh release view "$TAG" --repo "$GH_REPO" --json assets -q '.assets[].name' | grep -Fxq "$name"; then
             rm -rf ../existing && mkdir ../existing
-            gh release download "$TAG" --pattern "$name" --dir ../existing
+            gh release download "$TAG" --repo "$GH_REPO" --pattern "$name" --dir ../existing
             remote_hash="$(sha256sum "../existing/$name" | cut -d' ' -f1)"
             if [ "$remote_hash" != "$local_hash" ]; then
               echo "::error::SHA256SUMS.txt 已存在且 hash 不同——说明早前上传的资产集合与本轮不一致，发布失败"
@@ -513,17 +562,17 @@ jobs:
             fi
             echo "skip（同名同 hash）: $name"
           else
-            gh release upload "$TAG" "$name"
+            gh release upload "$TAG" --repo "$GH_REPO" "$name"
             echo "uploaded: $name"
           fi
 
-  # ---------- job4 artifact-verify：从 draft Release 重新下载全量资产复核 ----------
+  # ---------- job5 artifact-verify：从 draft Release 重新下载全量资产复核 ----------
   artifact-verify:
     name: artifact-verify (re-download + verify)
     runs-on: windows-latest
     # build-windows 需列为直接依赖，smoke 才能读取 needs.build-windows.outputs.version；
-    # draft-release 虽间接依赖 build-windows，但 needs context 不会透传间接 job 输出。
-    needs: [draft-release, docker, build-windows]
+    # upload-assets 虽间接依赖 build-windows，但 needs context 不会透传间接 job 输出。
+    needs: [upload-assets, docker, build-windows]
     timeout-minutes: 30
     # contents:write 仅因 draft Release 对只读 token 不可见（gh release download 404）；
     # 本 job 不写任何内容
@@ -540,12 +589,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
-        run: gh release download "$env:TAG" --pattern '*' --dir assets --clobber
+        run: gh release download "$env:TAG" --repo "$env:GH_REPO" --pattern '*' --dir assets --clobber
 
       - name: Verify SHA256SUMS + manifest signature + package integrity
         env:
           VERSION: ${{ needs.build-windows.outputs.version }}
+          CHANNEL: ${{ needs.build-windows.outputs.channel }}
           DOCKER_IMAGE_VERSION: ${{ needs.docker.outputs.version }}
+          DOCKER_IMAGE_CHANNEL: ${{ needs.docker.outputs.channel }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -597,11 +648,11 @@ jobs:
           # ⑤ manifest 验签 ×2：仓库信任锚（release/keys）+ 包内信任锚（smoke/keys）
           node release/contracts/validate-manifest.mjs check "assets/$v.json" `
             --sig "assets/$v.sig" --keys-dir release/keys `
-            --expect-current-version $v --expect-channel stable
+            --expect-current-version $v --expect-channel $env:CHANNEL
           if ($LASTEXITCODE -ne 0) { throw "仓库信任锚验签失败" }
           node release/contracts/validate-manifest.mjs check (Join-Path $root "manifests/$v.json") `
             --sig (Join-Path $root "manifests/$v.sig") --keys-dir (Join-Path $root 'keys') `
-            --expect-current-version $v --expect-channel stable
+            --expect-current-version $v --expect-channel $env:CHANNEL
           if ($LASTEXITCODE -ne 0) { throw "包内信任锚验签失败" }
 
           # ⑥ manifest 声明的 app sha256 == 实际发布的 app zip
@@ -625,7 +676,7 @@ jobs:
 
           Write-Host "[smoke] 发布资产完整性 + manifest 验签（双信任锚）+ 镜像/ZIP 版本同源全部通过"
 
-  # ---------- job5 smoke：artifact verify 后的 launcher doctor 冒烟（environment: release 手动批准） ----------
+  # ---------- job6 smoke：artifact verify 后的 launcher doctor 冒烟（environment: release 手动批准） ----------
   smoke:
     name: smoke (launcher doctor)
     runs-on: windows-latest
@@ -643,8 +694,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build-windows.outputs.version }}
+          CHANNEL: ${{ needs.build-windows.outputs.channel }}
         shell: pwsh
-        run: gh release download "$env:TAG" --pattern "GameBot-$env:VERSION-windows-x64-full.zip" --dir assets --clobber
+        run: gh release download "$env:TAG" --repo "$env:GH_REPO" --pattern "GameBot-$env:VERSION-windows-x64-full.zip" --dir assets --clobber
 
       - name: launcher doctor smoke（未安装库存 + manifest 完整校验双跑）
         env:
@@ -666,12 +718,12 @@ jobs:
 
           & $exe --install-root $root doctor `
             --manifest (Join-Path $root "manifests/$v.json") `
-            --expect-current-version $v --expect-channel stable 2>&1 | Out-String | ForEach-Object { $_.Trim() -split "`r?`n" } | ForEach-Object { Write-Host "  | $_" }
+              --expect-current-version $v --expect-channel $env:CHANNEL 2>&1 | Out-String | ForEach-Object { $_.Trim() -split "`r?`n" } | ForEach-Object { Write-Host "  | $_" }
           if ($LASTEXITCODE -ne 0) { throw "launcher doctor --manifest 验签校验退出码 $LASTEXITCODE" }
 
           Write-Host "[smoke] launcher doctor 双跑通过（库存 + manifest 验签）"
 
-  # ---------- job5 publish：draft → 正式（smoke 全过后自动执行） ----------
+  # ---------- job7 publish：draft → 正式（smoke 全过后自动执行） ----------
   publish:
     name: publish (draft → public)
     runs-on: ubuntu-latest
@@ -684,6 +736,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          draft_state="$(gh release view "$TAG" --repo "$GH_REPO" --json isDraft -q .isDraft)"
+          if [[ "$draft_state" != "true" ]]; then
+            echo "::error::发布前 Release $TAG 不是 draft（状态=$draft_state），拒绝改变发布状态"
+            exit 1
+          fi
           v="${TAG#v}"
           extra=()
           if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -691,5 +749,10 @@ jobs:
           else
             echo "预发布版本（$v），不标记 latest"
           fi
-          gh release edit "$TAG" --draft=false "${extra[@]}"
-          gh release view "$TAG" --json url,isDraft -q '"published: " + .url + " (draft=" + (.isDraft|tostring) + ")"'
+          gh release edit "$TAG" --repo "$GH_REPO" --draft=false "${extra[@]}"
+          published_state="$(gh release view "$TAG" --repo "$GH_REPO" --json url,isDraft -q '"published: " + .url + " (draft=" + (.isDraft|tostring) + ")"')"
+          echo "$published_state"
+          if [[ "$published_state" != *"(draft=false)"* ]]; then
+            echo "::error::Release $TAG 转正后状态仍不是 draft=false"
+            exit 1
+          fi
