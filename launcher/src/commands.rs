@@ -130,7 +130,8 @@ fn cmd_status(layout: &InstallLayout) -> i32 {
 
 /// doctor（库存检查）：目录级检查恒做；能解析到 release manifest（--manifest 或
 /// manifests/ 缓存）时叠加组件级检查——quick = 存在 + size，deep = 逐文件 sha256，
-/// probe = 附 adb/ffmpeg 版本探针。
+/// probe = 附 adb/ffmpeg 版本探针。首装态（从未安装）输出 WARN 提示先运行 repair，
+/// 不按失败计（已安装后组件缺失仍 FAIL）。
 fn cmd_doctor_inventory(
     layout: &InstallLayout,
     cli: &Cli,
@@ -138,92 +139,78 @@ fn cmd_doctor_inventory(
     probe: bool,
     explicit_manifest: Option<&Path>,
 ) -> i32 {
+    let (lines, code) = doctor_inventory_report(layout, cli, deep, probe, explicit_manifest);
+    for line in &lines {
+        println!("{line}");
+    }
+    code
+}
+
+/// doctor 库存检查的报告形态（lines 逐行输出 + 退出码）；tests 直接断言内容。
+pub fn doctor_inventory_report(
+    layout: &InstallLayout,
+    cli: &Cli,
+    deep: bool,
+    probe: bool,
+    explicit_manifest: Option<&Path>,
+) -> (Vec<String>, i32) {
     let mode = if deep {
         "深检（逐文件 sha256）"
     } else {
         "快速检查（存在 + size）"
     };
-    println!("doctor：安装库存{mode}（probe={probe}）");
-    println!("安装根: {}", layout.root.display());
-    if !layout.root.is_dir() {
-        println!("[FAIL] 安装根目录不存在");
-        return 1;
-    }
-    println!("[PASS] 安装根目录存在");
-    let mut fail = run_layout_checks(layout);
-    let mut warn = 0usize;
-
-    let bundle = match load_manifest_model(layout, cli, explicit_manifest) {
-        Ok(bundle) => Some(bundle),
-        Err(msg) => {
-            if deep {
-                eprintln!("错误: 深检需要 release manifest：{msg}");
-                return 1;
-            }
-            println!("[WARN] 未找到可用 release manifest，跳过组件级检查（{msg}）");
-            warn += 1;
-            None
-        }
-    };
-
-    if let Some(bundle) = bundle {
-        let Some(platform) = bundle.model.platforms.get("windows-x86_64") else {
-            println!("[FAIL] manifest 缺少 windows-x86_64 平台");
-            return 1;
-        };
-        println!(
-            "manifest: {}（release {}）",
-            bundle.path.display(),
-            bundle.model.release.version
-        );
-        for comp in &platform.components {
-            let spec = match ComponentSpec::from_model(comp) {
-                Ok(s) => s,
-                Err(msg) => {
-                    println!("[FAIL] {msg}");
-                    fail += 1;
-                    continue;
-                }
-            };
-            let finding =
-                crate::inventory::check_installed(layout, &spec, CheckOptions { deep, probe });
-            print_component_finding(&finding);
-            if finding.status != ComponentStatus::Ok {
-                fail += 1;
-            }
-        }
-    }
-
-    println!("库存检查完成: {fail} 项失败 / {warn} 项警告");
-    i32::from(fail > 0)
-}
-
-/// 目录级检查（state/manifests/runtime/versions），返回失败数。
-fn run_layout_checks(layout: &InstallLayout) -> usize {
-    let store = StateStore::new(&layout.root);
+    let mut lines = Vec::new();
     let mut fail = 0usize;
+    let mut warn = 0usize;
+    lines.push(format!("doctor：安装库存{mode}（probe={probe}）"));
+    lines.push(format!("安装根: {}", layout.root.display()));
+    if !layout.root.is_dir() {
+        lines.push("[FAIL] 安装根目录不存在".to_string());
+        return (lines, 1);
+    }
+    lines.push("[PASS] 安装根目录存在".to_string());
 
+    let store = StateStore::new(&layout.root);
+    // 只读一次（Corrupted 分支会把坏文件备份改名，重复读会丢失该事实）
+    let current = store.load_current();
+    let never_installed = matches!(current, Ok(LoadOutcome::Missing));
+
+    // state/ 目录：首装态缺失属正常（repair 生成），已安装态缺失才是故障
     if layout.state_dir().is_dir() {
-        println!("[PASS] state/ 目录存在");
+        lines.push("[PASS] state/ 目录存在".to_string());
+    } else if never_installed {
+        lines.push(
+            "[WARN] state/ 目录不存在（尚未安装：单实例锁与版本指针将在首次 repair 时创建）"
+                .to_string(),
+        );
+        warn += 1;
     } else {
-        println!("[FAIL] state/ 目录不存在（单实例锁与版本指针无落点）");
+        lines.push("[FAIL] state/ 目录不存在（单实例锁与版本指针无落点）".to_string());
         fail += 1;
     }
 
-    match store.load_current() {
-        Ok(LoadOutcome::Present(current)) => {
-            println!("[PASS] 当前版本指针: {}", current.current);
+    // 指针版本提前提取（current 在下方按值消费）
+    let current_version = match &current {
+        Ok(LoadOutcome::Present(c)) => Some(c.current.clone()),
+        _ => None,
+    };
+    match current {
+        Ok(LoadOutcome::Present(c)) => {
+            lines.push(format!("[PASS] 当前版本指针: {}", c.current));
         }
-        Ok(LoadOutcome::Missing) => println!("[WARN] 尚未安装（state/current.json 不存在）"),
+        Ok(LoadOutcome::Missing) => {
+            lines.push("[WARN] 尚未安装（state/current.json 不存在）".to_string());
+            warn += 1;
+        }
         Ok(LoadOutcome::Corrupted { backup_path }) => {
-            println!(
+            lines.push(format!(
                 "[FAIL] state/current.json 损坏（已备份: {}）",
                 backup_path.display()
-            );
+            ));
             fail += 1;
         }
         Err(e) => {
-            println!("[FAIL] state/current.json 读取失败: {e}");
+            lines.push(format!("[FAIL] state/current.json 读取失败: {e}"));
             fail += 1;
         }
     }
@@ -231,62 +218,149 @@ fn run_layout_checks(layout: &InstallLayout) -> usize {
     let manifests = layout.manifests_dir();
     if manifests.is_dir() {
         let count = count_files_with_ext(&manifests, "json");
-        println!("[PASS] manifests/ 目录存在（{count} 份缓存 manifest）");
+        lines.push(format!(
+            "[PASS] manifests/ 目录存在（{count} 份缓存 manifest）"
+        ));
     } else {
-        println!("[WARN] manifests/ 目录不存在（尚未缓存任何 release manifest）");
+        lines.push("[WARN] manifests/ 目录不存在（尚未缓存任何 release manifest）".to_string());
+        warn += 1;
     }
 
     let runtime = layout.runtime_dir();
     if runtime.is_dir() {
         let detail = subdir_names(&runtime).join(", ");
-        println!("[PASS] runtime/ 目录存在（依赖: {detail}）");
+        lines.push(format!("[PASS] runtime/ 目录存在（依赖: {detail}）"));
     } else {
-        println!("[WARN] runtime/ 目录不存在（managed 依赖尚未安装）");
+        lines.push("[WARN] runtime/ 目录不存在（managed 依赖尚未安装）".to_string());
+        warn += 1;
     }
 
     let versions = layout.versions_dir();
     if versions.is_dir() {
         let detail = subdir_names(&versions).join(", ");
-        println!("[PASS] versions/ 目录存在（已装版本: {detail}）");
+        lines.push(format!("[PASS] versions/ 目录存在（已装版本: {detail}）"));
     } else {
-        println!("[WARN] versions/ 目录不存在（尚未安装任何应用版本）");
+        lines.push("[WARN] versions/ 目录不存在（尚未安装任何应用版本）".to_string());
+        warn += 1;
     }
-    fail
+
+    if never_installed {
+        lines.push(
+            "[WARN] 未安装——先运行 repair 完成首次安装（app + adb + ffmpeg 一步安装到位并写入版本指针）"
+                .to_string(),
+        );
+        lines.push(format!("库存检查完成: {fail} 项失败 / {warn} 项警告"));
+        return (lines, i32::from(fail > 0));
+    }
+
+    let bundle = match load_manifest_model(layout, cli, explicit_manifest) {
+        Ok(bundle) => Some(bundle),
+        Err(msg) => {
+            if deep {
+                lines.push(format!("错误: 深检需要 release manifest：{msg}"));
+                return (lines, 1);
+            }
+            lines.push(format!(
+                "[WARN] 未找到可用 release manifest，跳过组件级检查（{msg}）"
+            ));
+            warn += 1;
+            None
+        }
+    };
+
+    if let Some(bundle) = bundle {
+        let Some(platform) = bundle.model.platforms.get("windows-x86_64") else {
+            lines.push("[FAIL] manifest 缺少 windows-x86_64 平台".to_string());
+            return (lines, 1);
+        };
+        lines.push(format!(
+            "manifest: {}（release {}）",
+            bundle.path.display(),
+            bundle.model.release.version
+        ));
+        for comp in &platform.components {
+            let spec = match ComponentSpec::from_model(comp) {
+                Ok(s) => s,
+                Err(msg) => {
+                    lines.push(format!("[FAIL] {msg}"));
+                    fail += 1;
+                    continue;
+                }
+            };
+            let finding =
+                crate::inventory::check_installed(layout, &spec, CheckOptions { deep, probe });
+            print_component_finding(&finding, &mut lines);
+            if finding.status != ComponentStatus::Ok {
+                fail += 1;
+            }
+        }
+        // app 版本目录 quick 检查（entrypoint + scrcpy jar hash）；仅在已安装且
+        // 指针版本与 manifest release 一致时做（跨版本的 jar hash 对比无意义）
+        match crate::repair::AppInstallSpec::from_model(platform, &bundle.model.release.version) {
+            Ok(app_spec) => match current_version {
+                Some(v) if v == app_spec.version => {
+                    match crate::repair::verify_app_dir(&app_spec.install_dir(layout), &app_spec) {
+                        Ok(()) => lines.push(format!(
+                            "[PASS] app {}: 版本目录完好（entrypoint + scrcpy-server hash）",
+                            app_spec.version
+                        )),
+                        Err(reason) => {
+                            lines.push(format!("[FAIL] app {}: {reason}", app_spec.version));
+                            fail += 1;
+                        }
+                    }
+                }
+                Some(v) => {
+                    lines.push(format!(
+                        "[WARN] 当前版本 {v} 与 manifest release {} 不一致，跳过 app 版本目录检查",
+                        app_spec.version
+                    ));
+                    warn += 1;
+                }
+                None => {}
+            },
+            Err(msg) => {
+                lines.push(format!("[FAIL] {msg}"));
+                fail += 1;
+            }
+        }
+    }
+
+    lines.push(format!("库存检查完成: {fail} 项失败 / {warn} 项警告"));
+    (lines, i32::from(fail > 0))
 }
 
-fn print_component_finding(finding: &crate::inventory::ComponentFinding) {
-    println!("组件目录 {}", finding.dir.display());
+fn print_component_finding(finding: &crate::inventory::ComponentFinding, out: &mut Vec<String>) {
+    out.push(format!("组件目录 {}", finding.dir.display()));
     for f in &finding.files {
         match &f.check {
-            FileCheck::Ok => println!("  [PASS] {}", f.path),
-            FileCheck::Missing => println!("  [FAIL] {}: 文件缺失", f.path),
-            FileCheck::SizeMismatch { actual, expected } => {
-                println!(
-                    "  [FAIL] {}: size 不符（实际 {actual}，声明 {expected}）",
-                    f.path
-                )
-            }
-            FileCheck::HashMismatch { actual, expected } => {
-                println!(
-                    "  [FAIL] {}: sha256 不符（实际 {actual}，声明 {expected}）",
-                    f.path
-                )
-            }
-            FileCheck::Io(e) => println!("  [FAIL] {}: 读取失败（{e}）", f.path),
+            FileCheck::Ok => out.push(format!("  [PASS] {}", f.path)),
+            FileCheck::Missing => out.push(format!("  [FAIL] {}: 文件缺失", f.path)),
+            FileCheck::SizeMismatch { actual, expected } => out.push(format!(
+                "  [FAIL] {}: size 不符（实际 {actual}，声明 {expected}）",
+                f.path
+            )),
+            FileCheck::HashMismatch { actual, expected } => out.push(format!(
+                "  [FAIL] {}: sha256 不符（实际 {actual}，声明 {expected}）",
+                f.path
+            )),
+            FileCheck::Io(e) => out.push(format!("  [FAIL] {}: 读取失败（{e}）", f.path)),
         }
     }
     match &finding.probe {
-        Some(ProbeCheck::Match { reported }) => println!("  [PASS] 探针: 版本匹配（{reported}）"),
-        Some(ProbeCheck::Mismatch { reported }) => {
-            println!("  [FAIL] 探针: 版本不符（运行输出 {reported}）")
+        Some(ProbeCheck::Match { reported }) => {
+            out.push(format!("  [PASS] 探针: 版本匹配（{reported}）"))
         }
-        Some(ProbeCheck::Failed { reason }) => println!("  [FAIL] 探针: {reason}"),
+        Some(ProbeCheck::Mismatch { reported }) => {
+            out.push(format!("  [FAIL] 探针: 版本不符（运行输出 {reported}）"))
+        }
+        Some(ProbeCheck::Failed { reason }) => out.push(format!("  [FAIL] 探针: {reason}")),
         Some(ProbeCheck::Unsupported) | None => {}
     }
     if finding.status == ComponentStatus::Ok {
-        println!("  => 组件完好");
+        out.push("  => 组件完好".to_string());
     } else {
-        println!("  => 组件缺失/损坏（可运行 repair 修复）");
+        out.push("  => 组件缺失/损坏（可运行 repair 修复）".to_string());
     }
 }
 
@@ -336,9 +410,11 @@ fn cmd_doctor_manifest(
     }
 }
 
-/// repair（LCH-007）：深检 → seed/cache/remote 修复 → 复验探针。
+/// repair（LCH-007）：深检 → seed/cache/remote 修复 → 复验探针；
+/// 同时安装/修复 app 版本目录（manifest `app.artifact` + scrcpy jar）并写
+/// `state/current.json` 版本指针——首装一步到位，`start` 随即可用。
 fn cmd_repair(layout: &InstallLayout, cli: &Cli, manifest: Option<&Path>, probe: bool) -> i32 {
-    println!("repair：依赖修复（probe={probe}）");
+    println!("repair：依赖修复 + 应用安装（probe={probe}）");
     println!("安装根: {}", layout.root.display());
     let bundle = match load_manifest_model(layout, cli, manifest) {
         Ok(b) => b,
@@ -367,6 +443,15 @@ fn cmd_repair(layout: &InstallLayout, cli: &Cli, manifest: Option<&Path>, probe:
             }
         }
     }
+    let app_spec = match repair::AppInstallSpec::from_model(platform, &bundle.model.release.version)
+    {
+        Ok(a) => Some(a),
+        Err(msg) => {
+            println!("[FAIL] {msg}");
+            spec_errors += 1;
+            None
+        }
+    };
     if spec_errors > 0 {
         return 1;
     }
@@ -375,7 +460,7 @@ fn cmd_repair(layout: &InstallLayout, cli: &Cli, manifest: Option<&Path>, probe:
         fetch: Default::default(),
         probe,
     };
-    match repair::repair_with_lock(layout, &specs, &opts) {
+    match repair::repair_with_lock(layout, &specs, app_spec.as_ref(), &opts) {
         Err(RepairGate::Locked { path }) => {
             println!(
                 "已有 launcher 实例持有安装根（{}），本次未执行任何动作。",
@@ -401,13 +486,34 @@ fn cmd_repair(layout: &InstallLayout, cli: &Cli, manifest: Option<&Path>, probe:
                     }
                 }
             }
+            if let Some(app) = &report.app {
+                match &app.outcome {
+                    repair::AppOutcome::Healthy => {
+                        println!(
+                            "[PASS] app {}: 版本目录已安装且校验通过（不覆盖既有版本目录）",
+                            app.version
+                        );
+                    }
+                    repair::AppOutcome::Installed { source } => {
+                        println!(
+                            "[PASS] app {}: 应用安装完成（来源 {source}），版本指针已写入 state/current.json",
+                            app.version
+                        );
+                    }
+                    repair::AppOutcome::Failed { reason } => {
+                        println!("[FAIL] app {}: {reason}", app.version);
+                    }
+                }
+            }
             let failed = report.failed_count();
             let repaired = report.repaired_count();
             if failed == 0 {
-                println!("修复完成：{repaired} 个组件恢复 / 全部组件可用。");
+                println!("修复完成：{repaired} 项恢复 / 全部组件可用。");
                 0
             } else {
-                println!("修复完成：{repaired} 个组件恢复 / {failed} 个失败（失败组件的上一份 runtime 未被破坏）。");
+                println!(
+                    "修复完成：{repaired} 项恢复 / {failed} 项失败（失败项的既有安装未被破坏）。"
+                );
                 1
             }
         }

@@ -4,6 +4,8 @@
 //! - 注入稳定路径环境变量（UPDATE_CONTRACT §4）：GAMER_APP_DIR / GAMER_DATA_DIR /
 //!   GAMER_ADB_PATH / GAMER_FFMPEG_PATH / GAMER_SCRCPY_SERVER / GB_CONFIG / GB_LOG
 //!   （launcher 注入绝对路径）；
+//! - 透传 GAMER_ADMIN_PASSWORD（登录链路）并默认注入 GAMER_DEPLOYMENT_MODE=launcher
+//!   （用户显式设置不覆盖）；
 //! - PATH 收敛到最小集（System32）——验收口径：PATH 清空仍能启动；
 //! - OPS-003：持有子进程句柄 `wait()` 等待退出（不按端口/进程名判定），
 //!   退出码写日志；
@@ -39,21 +41,44 @@ pub struct LaunchPlan {
 }
 
 /// 子进程环境：最小系统集（SystemRoot/SystemDrive/TEMP/TMP + PATH=System32，
-/// 系统 DLL 加载与 CRT 初始化所需）+ 注入变量。父进程其余环境一概不带。
+/// 系统 DLL 加载与 CRT 初始化所需）+ 注入变量。父进程其余环境一概不带，
+/// 仅透传 GAMER_ADMIN_PASSWORD（登录链路）并默认注入 GAMER_DEPLOYMENT_MODE=launcher。
 pub fn build_child_env(plan: &LaunchPlan) -> BTreeMap<String, String> {
+    build_child_env_from(plan, |key| std::env::var(key).ok())
+}
+
+/// 纯函数构造（测试注入父环境取值）：键集合 = 最小系统集 + 契约注入集 +
+/// GAMER_ADMIN_PASSWORD（显式设置才透传）+ GAMER_DEPLOYMENT_MODE（缺省 launcher）。
+pub fn build_child_env_from(
+    plan: &LaunchPlan,
+    getenv: impl Fn(&str) -> Option<String>,
+) -> BTreeMap<String, String> {
+    let non_empty = |v: Option<String>| -> Option<String> {
+        v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    };
     let mut env = BTreeMap::new();
     env.insert("SystemRoot".to_string(), system_root());
     env.insert(
         "SystemDrive".to_string(),
-        std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string()),
+        getenv("SystemDrive").unwrap_or_else(|| "C:".to_string()),
     );
-    if let Ok(v) = std::env::var("TEMP") {
+    if let Some(v) = getenv("TEMP") {
         env.insert("TEMP".to_string(), v);
     }
-    if let Ok(v) = std::env::var("TMP") {
+    if let Some(v) = getenv("TMP") {
         env.insert("TMP".to_string(), v);
     }
     env.insert("PATH".to_string(), minimal_path());
+
+    // 登录链路：用户为 launcher 显式设置的管理口令透传给 server（server 启动时
+    // 进程内转 Argon2id PHC，不落盘、不进日志）。空白值视同未设置。
+    if let Some(v) = non_empty(getenv("GAMER_ADMIN_PASSWORD")) {
+        env.insert("GAMER_ADMIN_PASSWORD".to_string(), v);
+    }
+    // 部署模式：默认注入 launcher 托管（server Mode::detect 认得该枚举值，
+    // 使 system/info 的 deployment.mode=managed 链路成立）；用户显式设置不覆盖。
+    let mode = non_empty(getenv("GAMER_DEPLOYMENT_MODE")).unwrap_or_else(|| "launcher".to_string());
+    env.insert("GAMER_DEPLOYMENT_MODE".to_string(), mode);
 
     env.insert(
         "GAMER_APP_DIR".to_string(),
@@ -349,5 +374,68 @@ mod tests {
         );
         assert_eq!(parse_status_code("garbage"), None);
         assert_eq!(parse_status_code(""), None);
+    }
+
+    fn plan() -> LaunchPlan {
+        LaunchPlan {
+            exe: PathBuf::from("gamer-server.exe"),
+            cwd: PathBuf::from("."),
+            app_dir: PathBuf::from("versions/0.1.0"),
+            data_dir: PathBuf::from("data"),
+            adb_path: Some(PathBuf::from("runtime/adb/37.0.1/adb.exe")),
+            ffmpeg_path: Some(PathBuf::from("runtime/ffmpeg/n/ffmpeg.exe")),
+            scrcpy_server: PathBuf::from("versions/0.1.0/assets/scrcpy-server.jar"),
+            config_path: PathBuf::from("config/config.toml"),
+            log_path: PathBuf::from("logs/gamer-server.log"),
+        }
+    }
+
+    #[test]
+    fn child_env_defaults_to_launcher_mode_without_admin_password() {
+        let env = build_child_env_from(&plan(), |_| None);
+        assert_eq!(
+            env.get("GAMER_DEPLOYMENT_MODE").map(String::as_str),
+            Some("launcher"),
+            "默认注入 GAMER_DEPLOYMENT_MODE=launcher（server Mode::detect 合法枚举）"
+        );
+        assert!(
+            !env.contains_key("GAMER_ADMIN_PASSWORD"),
+            "父进程未设置口令时不得凭空注入"
+        );
+    }
+
+    #[test]
+    fn child_env_passes_through_admin_password_and_keeps_explicit_mode() {
+        let getenv = |key: &str| match key {
+            "GAMER_ADMIN_PASSWORD" => Some("e2e-admin-pass".to_string()),
+            "GAMER_DEPLOYMENT_MODE" => Some("docker".to_string()),
+            _ => None,
+        };
+        let env = build_child_env_from(&plan(), getenv);
+        assert_eq!(
+            env.get("GAMER_ADMIN_PASSWORD").map(String::as_str),
+            Some("e2e-admin-pass"),
+            "用户显式设置的登录口令必须透传（登录链路）"
+        );
+        assert_eq!(
+            env.get("GAMER_DEPLOYMENT_MODE").map(String::as_str),
+            Some("docker"),
+            "用户显式设置的部署模式不得被覆盖"
+        );
+    }
+
+    #[test]
+    fn child_env_treats_blank_values_as_unset() {
+        let getenv = |key: &str| match key {
+            "GAMER_ADMIN_PASSWORD" => Some("   ".to_string()),
+            "GAMER_DEPLOYMENT_MODE" => Some(" \t ".to_string()),
+            _ => None,
+        };
+        let env = build_child_env_from(&plan(), getenv);
+        assert!(!env.contains_key("GAMER_ADMIN_PASSWORD"));
+        assert_eq!(
+            env.get("GAMER_DEPLOYMENT_MODE").map(String::as_str),
+            Some("launcher")
+        );
     }
 }

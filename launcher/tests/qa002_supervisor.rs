@@ -58,7 +58,8 @@ fn child_env_injects_contract_vars_with_minimal_path() {
     fs::create_dir_all(layout.versions_dir().join("0.2.0")).unwrap();
     let plan = fake_plan(&layout);
 
-    // 纯函数视角：键集合 = 最小系统集 + 契约注入集，父环境其余一概不带
+    // 纯函数视角：键集合 = 最小系统集 + 契约注入集 + 透传/模式两键，
+    // 父环境其余一概不带
     let env = build_child_env(&plan);
     let allowed = [
         "PATH",
@@ -73,6 +74,8 @@ fn child_env_injects_contract_vars_with_minimal_path() {
         "GAMER_SCRCPY_SERVER",
         "GB_CONFIG",
         "GB_LOG",
+        "GAMER_ADMIN_PASSWORD",  // 仅父进程显式设置时透传（登录链路）
+        "GAMER_DEPLOYMENT_MODE", // 默认注入 launcher（用户显式设置不覆盖）
     ];
     for key in env.keys() {
         assert!(

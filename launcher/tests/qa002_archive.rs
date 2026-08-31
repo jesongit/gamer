@@ -400,3 +400,74 @@ fn install_staged_refuses_existing_target_and_renames_on_success() {
     assert_eq!(fs::read(target.join("adb.exe")).unwrap(), b"adb-binary");
     cleanup(&root);
 }
+
+// -- app 包（无逐文件白名单）解压 ----------------------------------------------
+
+/// app 包 zip：内容随构建变化（web-dist 全树），无 required_files 白名单。
+fn extract_app(
+    entries: &[ZipEntrySpec],
+    opts: &ExtractOptions,
+) -> (PathBuf, Result<(), ArchiveError>) {
+    let root = unique_root("archive-app");
+    let zip_path = root.join("app.zip");
+    build_zip(&zip_path, entries);
+    let stage = staging(&root);
+    let result = archive::extract_app_zip(&zip_path, &stage, opts);
+    (root, result)
+}
+
+#[test]
+fn app_zip_extracts_full_tree_without_whitelist() {
+    let (root, result) = extract_app(
+        &[
+            ZipEntrySpec::file("gamer-server.exe", b"exe-bytes"),
+            ZipEntrySpec::dir("assets"),
+            ZipEntrySpec::file("assets/scrcpy-server.jar", b"jar-bytes"),
+            ZipEntrySpec::dir("web-dist"),
+            ZipEntrySpec::dir("web-dist/assets"),
+            ZipEntrySpec::file("web-dist/index.html", b"<html></html>"),
+            ZipEntrySpec::file("web-dist/assets/app.js", b"console.log(1)"),
+        ],
+        &ExtractOptions::default(),
+    );
+    result.expect("app 包应整树解压成功（无白名单）");
+    let stage = staging(&root);
+    assert!(stage.join("gamer-server.exe").is_file());
+    assert!(stage.join("assets").join("scrcpy-server.jar").is_file());
+    assert_eq!(
+        fs::read(stage.join("web-dist").join("assets").join("app.js")).unwrap(),
+        b"console.log(1)"
+    );
+    cleanup(&root);
+}
+
+#[test]
+fn app_zip_still_rejects_slip_and_bombs() {
+    // 无白名单不等于无防线：zip-slip 与解压炸弹照旧拒绝
+    let (root, result) = extract_app(
+        &[
+            ZipEntrySpec::file("gamer-server.exe", b"exe-bytes"),
+            ZipEntrySpec::file("../evil.txt", b"evil"),
+        ],
+        &ExtractOptions::default(),
+    );
+    assert!(
+        matches!(result, Err(ArchiveError::DangerousEntry { .. })),
+        "zip-slip 必须被拒，实际 {result:?}"
+    );
+    cleanup(&root);
+
+    let big = vec![b'a'; 100];
+    let (root, result) = extract_app(
+        &[ZipEntrySpec::file("gamer-server.exe", &big)],
+        &ExtractOptions {
+            max_total_uncompressed: 10,
+            max_file_uncompressed: 10,
+        },
+    );
+    assert!(
+        matches!(result, Err(ArchiveError::BombFile { .. })),
+        "解压炸弹必须被拒，实际 {result:?}"
+    );
+    cleanup(&root);
+}

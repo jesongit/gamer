@@ -201,6 +201,27 @@ pub fn extract_component_zip(
     required: &[RequiredFile],
     opts: &ExtractOptions,
 ) -> Result<(), ArchiveError> {
+    extract_zip_checked(zip_path, staging_dir, Some(required), opts)
+}
+
+/// 把应用（app）压缩包安全解压到 `staging_dir`。app 包内容随构建变化
+/// （web-dist/ 全树），manifest 只锁定产物整体 sha256 与 entrypoint/jar 资源，
+/// 故无逐文件白名单；zip-slip / 炸弹 / 符号链接 / 大小写碰撞 / 重复条目等
+/// 防线全部保留，上限取 manifest Limits（ExtractOptions::default）。
+pub fn extract_app_zip(
+    zip_path: &Path,
+    staging_dir: &Path,
+    opts: &ExtractOptions,
+) -> Result<(), ArchiveError> {
+    extract_zip_checked(zip_path, staging_dir, None, opts)
+}
+
+fn extract_zip_checked(
+    zip_path: &Path,
+    staging_dir: &Path,
+    required: Option<&[RequiredFile]>,
+    opts: &ExtractOptions,
+) -> Result<(), ArchiveError> {
     prepare_fresh_staging(staging_dir)?;
     let mut file = fs::File::open(zip_path).map_err(ArchiveError::Open)?;
     // 读侧前置防线：zip crate 的读取器按条目名建索引（IndexMap），重复条目会被
@@ -255,19 +276,23 @@ pub fn extract_component_zip(
         seen.insert(key, clean.to_string());
 
         if entry.is_dir() {
-            if !required
-                .iter()
-                .any(|rf| rf.path.starts_with(&format!("{clean}/")))
-            {
-                return Err(ArchiveError::UnexpectedEntry {
-                    entry: name.clone(),
-                });
+            if let Some(required) = required {
+                if !required
+                    .iter()
+                    .any(|rf| rf.path.starts_with(&format!("{clean}/")))
+                {
+                    return Err(ArchiveError::UnexpectedEntry {
+                        entry: name.clone(),
+                    });
+                }
             }
         } else {
-            if !required.iter().any(|rf| rf.path == clean) {
-                return Err(ArchiveError::UnexpectedEntry {
-                    entry: name.clone(),
-                });
+            if let Some(required) = required {
+                if !required.iter().any(|rf| rf.path == clean) {
+                    return Err(ArchiveError::UnexpectedEntry {
+                        entry: name.clone(),
+                    });
+                }
             }
             if entry.size() > opts.max_file_uncompressed {
                 return Err(ArchiveError::BombFile {
@@ -333,8 +358,8 @@ pub fn extract_component_zip(
     // ---- pass 3：全树扫描 reparse point（symlink/junction 兜底） ----
     scan_no_reparse(staging_dir)?;
 
-    // ---- pass 4：required_files 逐文件（size+sha256）校验 ----
-    for rf in required {
+    // ---- pass 4：required_files 逐文件（size+sha256）校验（app 包无白名单则跳过） ----
+    for rf in required.into_iter().flatten() {
         let p = staging_dir.join(&rf.path);
         let expected_size = u64::try_from(rf.size).map_err(|_| ArchiveError::RequiredFileSize {
             path: rf.path.clone(),

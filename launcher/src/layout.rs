@@ -10,9 +10,13 @@ pub struct InstallLayout {
 
 impl InstallLayout {
     /// 显式 `--install-root` 优先；缺省取 exe 所在目录；均不可得时退回当前目录。
+    /// 相对 `--install-root` 会先按当前目录规范化为绝对路径——注入 server 的
+    /// GAMER_* 稳定路径必须是绝对路径（UPDATE_CONTRACT §1/§4，不依赖 cwd）。
     pub fn resolve(explicit: Option<PathBuf>) -> Self {
         if let Some(root) = explicit {
-            return Self { root };
+            return Self {
+                root: normalize_root(&root),
+            };
         }
         let exe_dir = std::env::current_exe()
             .ok()
@@ -79,5 +83,54 @@ impl InstallLayout {
     /// managed 组件目录 runtime/<id>/<version>/（哈希锚定的不可变组件目录）。
     pub fn component_dir(&self, id: &str, version: &str) -> PathBuf {
         self.runtime_dir().join(id).join(version)
+    }
+}
+
+/// 相对路径 → 绝对路径（拼当前目录后做纯词法规范化：去掉 `.` 段、解析 `..` 段；
+/// 不触盘、不做 symlink 解析，避免 canonicalize 的 `\\?\` UNC 形态）。
+fn normalize_root(root: &Path) -> PathBuf {
+    if root.is_absolute() {
+        return root.to_path_buf();
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let joined = cwd.join(root);
+    let mut out = PathBuf::new();
+    for comp in joined.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        joined
+    } else {
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_root_makes_relative_paths_absolute_without_dot_segments() {
+        let cwd = std::env::current_dir().unwrap();
+        // 绝对路径原样返回（不重写、不 canonicalize）
+        assert_eq!(normalize_root(&cwd), cwd);
+        // 相对路径拼 cwd 并去掉 `.` 段
+        let n = normalize_root(Path::new("./sub/dir"));
+        assert!(n.is_absolute());
+        assert!(
+            !n.to_string_lossy().contains("\\.\\"),
+            "不应残留 `.` 段: {n:?}"
+        );
+        assert!(n.ends_with("sub\\dir"));
+        // `..` 段按词法解析
+        let n = normalize_root(Path::new("sub/../other"));
+        assert!(n.is_absolute());
+        assert!(n.ends_with("other"), "应解析 `..`: {n:?}");
     }
 }
