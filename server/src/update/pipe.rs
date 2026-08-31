@@ -5,24 +5,37 @@
 //! 失败即断、下次交换重建（有界：连接 5s / 交换 30s 超时；ERROR_PIPE_BUSY
 //! 小睡重试至连接超时）——launcher 不在场时快速失败，不做重连风暴。
 //!
+//! named pipe 是 Windows 专属传输：非 Windows 目标（Linux 容器镜像）编译
+//! 本模块的桩实现，交换一律返回 `Unavailable`（Docker 部署本就是 external
+//! 更新策略，launcher 不在场，该桩只为让 `LauncherController` 类型在
+//! 全平台可装配）。
+//!
 //! 文件尾含进程内真 pipe 集成测试（#[cfg(all(test, windows))]）：起一个
 //! tokio named pipe 服务端模拟 launcher 应答 status 帧，客户端全链路走通。
 
+#[cfg(windows)]
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(windows)]
 use tokio::net::windows::named_pipe::ClientOptions;
+#[cfg(windows)]
 use tokio::sync::Mutex;
 
-use super::ipc::{
-    check_frame_limit, FrameError, FrameTransport, CONNECT_TIMEOUT, EXCHANGE_TIMEOUT,
-};
+use super::ipc::{check_frame_limit, FrameError, FrameTransport};
 
+#[cfg(windows)]
+use super::ipc::{CONNECT_TIMEOUT, EXCHANGE_TIMEOUT};
+
+#[cfg(windows)]
 /// ERROR_PIPE_BUSY（winerror.h）：当前无可用 pipe 实例，稍候重试
 const ERROR_PIPE_BUSY: i32 = 231 + 1;
 
 pub struct PipeTransport {
+    #[allow(dead_code)] // 非 Windows 平台保留名字仅用于错误信息可读性
     pipe_name: String,
+    #[cfg(windows)]
     conn: Mutex<Option<tokio::net::windows::named_pipe::NamedPipeClient>>,
 }
 
@@ -30,14 +43,17 @@ impl PipeTransport {
     pub fn new(pipe_name: impl Into<String>) -> Self {
         Self {
             pipe_name: pipe_name.into(),
+            #[cfg(windows)]
             conn: Mutex::new(None),
         }
     }
 
+    #[cfg(windows)]
     fn pipe_name(&self) -> &str {
         &self.pipe_name
     }
 
+    #[cfg(windows)]
     async fn connect(
         &self,
     ) -> Result<tokio::net::windows::named_pipe::NamedPipeClient, FrameError> {
@@ -69,6 +85,7 @@ impl PipeTransport {
 
     /// 单帧交换：确保连接（失败置空，下次重建）→ 写请求 → 读长度前缀 + 载荷。
     /// 连接 5s / 交换 30s 有界超时。
+    #[cfg(windows)]
     async fn run_exchange(&self, request: Vec<u8>) -> Result<Vec<u8>, FrameError> {
         let mut guard = self.conn.lock().await;
         if guard.is_none() {
@@ -105,6 +122,7 @@ impl PipeTransport {
 }
 
 impl FrameTransport for PipeTransport {
+    #[cfg(windows)]
     fn exchange(
         &self,
         request: Vec<u8>,
@@ -118,6 +136,22 @@ impl FrameTransport for PipeTransport {
                 *self.conn.lock().await = None;
             }
             outcome
+        })
+    }
+
+    #[cfg(not(windows))]
+    fn exchange(
+        &self,
+        request: Vec<u8>,
+        _request_id: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, FrameError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let _ = request;
+            let _ = &self.pipe_name;
+            Err(FrameError::Unavailable(
+                "launcher named-pipe IPC is Windows-only (linux container build)".into(),
+            ))
         })
     }
 }
