@@ -1,0 +1,22 @@
+{
+  "scenario": "launcher 模式但 launcher 进程死亡 / named pipe 不可达：POST check → 502 launcher_unreachable（可重试）",
+  "endpoint": "POST /api/system/update/check",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/check",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 502,
+    "body": {
+      "code": "launcher_unreachable",
+      "message": "无法连接升级器（launcher 未运行或 IPC 通道不可用），请确认 launcher 正在运行后重试"
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "scenario": "未登录 GET /api/system/update → 401",
+  "endpoint": "GET /api/system/update",
+  "request": {
+    "method": "GET",
+    "path": "/api/system/update",
+    "headers": { "Accept": "application/json" },
+    "cookies": [],
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "body": { "error": "unauthorized" }
+  }
+}

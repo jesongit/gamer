@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "product": "gamebot",
+  "release": {
+    "version": "0.1.0",
+    "channel": "stable",
+    "published_at": "2026-08-31T00:00:00Z",
+    "minimum_launcher_version": "0.1.0",
+    "minimum_upgrade_version": "0.1.0",
+    "data_schema": 1,
+    "rollback_floor": 1,
+    "release_notes_url": "https://example.invalid/releases/v0.2.0"
+  },
+  "platforms": {
+    "windows-x86_64": {
+      "app": {
+        "artifact": {
+          "name": "gamer-app-0.2.0-windows-x64.zip",
+          "url": "https://example.invalid/download/v0.2.0/gamer-app-0.2.0-windows-x64.zip",
+          "size": 152000000,
+          "sha256": "2a80fba8b44486145bc778e7e2d2fe8e512029ab2d1c7a3ebd9878477712578d"
+        },
+        "entrypoint": "gamer-server.exe"
+      },
+      "components": [
+        {
+          "id": "adb",
+          "version": "35.0.2",
+          "artifact": {
+            "name": "gamer-adb-35.0.2-windows-x64.zip",
+            "url": "https://example.invalid/download/deps/gamer-adb-35.0.2-windows-x64.zip",
+            "size": 5632000,
+            "sha256": "c74920ffbcba4d4e166fc6daa5d51f9167adc01db772ad31192049ce00453d7c"
+          },
+          "required_files": [
+            {
+              "path": "adb.exe",
+              "size": 4588544,
+              "sha256": "73325fd6fd22fd6427d82edc3b08ce7801141a7bc60e51c0645f22170944efa3"
+            }
+          ]
+        }
+      ],
+      "resources": {
+        "scrcpy_server": {
+          "version": "3.3.3",
+          "path": "assets/scrcpy-server.jar",
+          "sha256": "937e3b3897a3b8233787f0f7ce5fc98b5c36822a04509a88cfc2010804684c23",
+          "binding": "application"
+        }
+      }
+    }
+  }
+}

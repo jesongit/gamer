@@ -1,0 +1,24 @@
+{
+  "scenario": "匿名 GET /health/ready 就绪 → 200（轻量布尔探针，向后兼容；launcher 候选启动探活也用此端点）",
+  "endpoint": "GET /health/ready",
+  "request": {
+    "method": "GET",
+    "path": "/health/ready",
+    "headers": { "Accept": "application/json" },
+    "cookies": [],
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "ready": true,
+      "checks": {
+        "data_dir": { "ok": true },
+        "sqlite": { "ok": true },
+        "scrcpy_server": { "ok": true },
+        "adb": { "ok": true },
+        "ffmpeg": { "ok": true }
+      }
+    }
+  }
+}

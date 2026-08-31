@@ -1,0 +1,2 @@
+gamebot-manifest-sig-1 test-ed25519-public-unknown
+VZmQ5dpZSdCytCAdT2y0lUanT9RpYvE3FfCXFLT24gbY6aJz+JswH5ssPXPvaP8ptYe9oVxgzSfHf2c3+bt2Dg==

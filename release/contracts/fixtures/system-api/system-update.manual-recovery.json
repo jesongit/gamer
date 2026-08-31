@@ -1,0 +1,37 @@
+{
+  "scenario": "GET /api/system/update：升级与自动回滚均失败 → state=manual_recovery，last_error.code=manual_recovery_required，所有动作被拒",
+  "endpoint": "GET /api/system/update",
+  "request": {
+    "method": "GET",
+    "path": "/api/system/update",
+    "headers": { "Accept": "application/json" },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "state": "manual_recovery",
+      "detail": "manual_recovery_required",
+      "update_id": "upd-20260831-9f3ab2c1",
+      "candidate": {
+        "version": "0.3.0",
+        "channel": "stable",
+        "published_at": "2026-09-15T00:00:00Z",
+        "size_bytes": 893451200,
+        "release_notes_url": "https://example.invalid/releases/v0.3.0"
+      },
+      "progress": null,
+      "policy": {
+        "strategy": "notify",
+        "maintenance_window": { "start": "02:00", "end": "06:00" },
+        "freeze_window_minutes": 30
+      },
+      "last_error": {
+        "code": "manual_recovery_required",
+        "message": "自动升级与自动回滚均失败，已保留 journal、快照与新旧版本证据，请按维护手册执行人工恢复"
+      },
+      "updated_at": "2026-08-31T12:30:00Z"
+    }
+  }
+}

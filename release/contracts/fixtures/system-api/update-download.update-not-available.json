@@ -1,0 +1,22 @@
+{
+  "scenario": "无已验签候选（未检查或检查无新版本）时请求下载 → 409 update_not_available",
+  "endpoint": "POST /api/system/update/download",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/download",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 409,
+    "body": {
+      "code": "update_not_available",
+      "message": "当前没有可下载的更新候选，请先执行检查更新"
+    }
+  }
+}

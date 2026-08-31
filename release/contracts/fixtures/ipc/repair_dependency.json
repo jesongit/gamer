@@ -1,0 +1,23 @@
+{
+  "scenario": "repair_dependency 操作：受理即回（长操作），依赖修复编排 inventory→seed/cache→remote→probe；dependency 为内部枚举（adb|ffmpeg），不接受路径/命令字符串；修复结果经 status 轮询 dependencies.*.status",
+  "operation": "repair_dependency",
+  "note": "fixture 只含帧的 JSON 载荷；线上传输为 u32 little-endian 长度前缀 + UTF-8 JSON。scrcpy 不可修复（随应用版本整体更换），传入其他枚举值 → invalid_payload",
+  "request_frame": {
+    "protocol_version": 1,
+    "request_id": "4c8e2a19-7b30-4d6f-8e2b-1f5c9a3d70ee",
+    "auth": "<GAMER_LAUNCHER_IPC_TOKEN>",
+    "operation": "repair_dependency",
+    "payload": { "dependency": "adb" }
+  },
+  "response_frame": {
+    "protocol_version": 1,
+    "request_id": "4c8e2a19-7b30-4d6f-8e2b-1f5c9a3d70ee",
+    "ok": true,
+    "result": {
+      "accepted": true,
+      "operation": "repair_dependency",
+      "update_id": null,
+      "state": "idle"
+    }
+  }
+}

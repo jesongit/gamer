@@ -1,0 +1,51 @@
+{
+  "scenario": "download 操作：受理即回（长操作），下载/验签进度经 status 轮询；同 request_id 重发返回同一受理帧，不开第二次事务",
+  "operation": "download",
+  "note": "fixture 只含帧的 JSON 载荷；线上传输为 u32 little-endian 长度前缀 + UTF-8 JSON。长操作受理后以 status 轮询（活跃 1s / 空闲 5s，建议值），下方附一条轮询响应示例",
+  "request_frame": {
+    "protocol_version": 1,
+    "request_id": "c2a94f17-8e0d-4b53-a6c1-9d7b2e4f08aa",
+    "auth": "<GAMER_LAUNCHER_IPC_TOKEN>",
+    "operation": "download",
+    "payload": {}
+  },
+  "response_frame": {
+    "protocol_version": 1,
+    "request_id": "c2a94f17-8e0d-4b53-a6c1-9d7b2e4f08aa",
+    "ok": true,
+    "result": {
+      "accepted": true,
+      "operation": "download",
+      "update_id": "upd-20260831-9f3ab2c1",
+      "state": "downloading"
+    }
+  },
+  "status_poll_response_frame": {
+    "protocol_version": 1,
+    "request_id": "0b7f8c1e-5b6a-4a57-9a2e-2f1c3d4b5a6f",
+    "ok": true,
+    "result": {
+      "launcher_version": "0.1.0",
+      "installation_id": "a1b2c3d4e5f6a7b8",
+      "protocol_version": 1,
+      "versions": { "current": "0.2.0", "previous": "0.1.0" },
+      "schema": { "db": 1, "file": 1, "rollback_floor": 1 },
+      "update": {
+        "state": "downloading",
+        "detail": "verifying",
+        "update_id": "upd-20260831-9f3ab2c1",
+        "candidate": {
+          "version": "0.3.0",
+          "channel": "stable",
+          "published_at": "2026-09-15T00:00:00Z"
+        },
+        "progress": { "bytes_done": 893451200, "bytes_total": 893451200 },
+        "last_error": null
+      },
+      "dependencies": {
+        "adb": { "status": "ready", "version": "34.0.5" },
+        "ffmpeg": { "status": "ready", "version": "6.1.1" }
+      }
+    }
+  }
+}

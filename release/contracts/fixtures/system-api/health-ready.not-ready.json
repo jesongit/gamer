@@ -1,0 +1,24 @@
+{
+  "scenario": "匿名 GET /health/ready 未就绪 → 503（同一轻量 body；禁止塞入版本检查/发布说明/绝对路径）",
+  "endpoint": "GET /health/ready",
+  "request": {
+    "method": "GET",
+    "path": "/health/ready",
+    "headers": { "Accept": "application/json" },
+    "cookies": [],
+    "body": null
+  },
+  "response": {
+    "status": 503,
+    "body": {
+      "ready": false,
+      "checks": {
+        "data_dir": { "ok": true },
+        "sqlite": { "ok": true },
+        "scrcpy_server": { "ok": true },
+        "adb": { "ok": false },
+        "ffmpeg": { "ok": true }
+      }
+    }
+  }
+}

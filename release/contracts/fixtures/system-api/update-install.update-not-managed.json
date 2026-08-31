@@ -1,0 +1,22 @@
+{
+  "scenario": "Docker/direct 模式（无 launcher 托管）调用 install → 409 update_not_managed；前端应隐藏/禁用安装按钮",
+  "endpoint": "POST /api/system/update/install",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/install",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 409,
+    "body": {
+      "code": "update_not_managed",
+      "message": "当前部署模式不受升级器托管（Docker 升级请在宿主机更换镜像，直跑模式请手动替换程序）"
+    }
+  }
+}

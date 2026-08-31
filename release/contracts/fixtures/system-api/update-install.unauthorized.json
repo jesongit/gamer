@@ -1,0 +1,19 @@
+{
+  "scenario": "未登录 POST /api/system/update/install → 401（状态变更方法同样要求登录）",
+  "endpoint": "POST /api/system/update/install",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/install",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": [],
+    "body": {}
+  },
+  "response": {
+    "status": 401,
+    "body": { "error": "unauthorized" }
+  }
+}

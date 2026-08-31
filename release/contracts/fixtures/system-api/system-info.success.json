@@ -1,0 +1,32 @@
+{
+  "scenario": "launcher（便携托管）模式下已登录 GET /api/system/info 成功：全能力、managed 依赖",
+  "endpoint": "GET /api/system/info",
+  "request": {
+    "method": "GET",
+    "path": "/api/system/info",
+    "headers": { "Accept": "application/json" },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "app": {
+        "version": "0.2.0",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "built_at": "2026-08-31T00:00:00Z",
+        "channel": "stable",
+        "target": "x86_64-pc-windows-msvc"
+      },
+      "deployment": { "mode": "launcher", "update_strategy": "managed" },
+      "schema": { "db": 1, "file": 1, "rollback_floor": 1 },
+      "dependencies": {
+        "adb": { "status": "ready", "version": "34.0.5", "source": "managed", "binding": "runtime" },
+        "ffmpeg": { "status": "ready", "version": "6.1.1", "source": "managed", "binding": "runtime" },
+        "scrcpy": { "status": "ready", "version": "3.3.3", "source": "managed", "binding": "application" }
+      },
+      "capabilities": { "check": true, "download": true, "install": true, "rollback": true },
+      "startup": { "stage": "ready", "boot_id": "3f2c9a58-6d1e-4b7f-9a30-5c8b2e7d1f04" }
+    }
+  }
+}

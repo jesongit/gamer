@@ -1,0 +1,62 @@
+{
+  "scenario": "协议级错误帧示例集（仅 IPC；与 11 个业务错误码分属不同命名空间）",
+  "operation": "(多个)",
+  "note": "request_id 无法关联请求（JSON 解析失败、令牌不匹配）时填空字符串，且响应后立即断开连接",
+  "examples": [
+    {
+      "name": "unsupported_protocol_version",
+      "trigger": "请求帧 protocol_version != 1；回错误帧后断开",
+      "error_response_frame": {
+        "protocol_version": 1,
+        "request_id": "a1111111-1111-4111-8111-111111111111",
+        "ok": false,
+        "code": "unsupported_protocol_version",
+        "message": "不支持的 IPC 协议版本，本 launcher 仅支持 protocol_version=1"
+      }
+    },
+    {
+      "name": "unknown_operation",
+      "trigger": "operation 不在 status/check/download/prepare_install/rollback/repair_dependency 枚举内；连接可保留",
+      "error_response_frame": {
+        "protocol_version": 1,
+        "request_id": "a2222222-2222-4222-8222-222222222222",
+        "ok": false,
+        "code": "unknown_operation",
+        "message": "未知操作，接受的操作枚举为 status/check/download/prepare_install/rollback/repair_dependency"
+      }
+    },
+    {
+      "name": "invalid_payload",
+      "trigger": "payload 缺字段/多字段/枚举值非法（如 repair_dependency.dependency 传入枚举外的值）；fail closed，连接可保留",
+      "error_response_frame": {
+        "protocol_version": 1,
+        "request_id": "a3333333-3333-4333-8333-333333333333",
+        "ok": false,
+        "code": "invalid_payload",
+        "message": "payload 不符合该操作的契约，已拒绝"
+      }
+    },
+    {
+      "name": "unauthorized",
+      "trigger": "auth 令牌缺失/与 GAMER_LAUNCHER_IPC_TOKEN 不匹配；回错误帧后立即断开并记日志",
+      "error_response_frame": {
+        "protocol_version": 1,
+        "request_id": "",
+        "ok": false,
+        "code": "unauthorized",
+        "message": "IPC 会话令牌校验失败，连接已拒绝"
+      }
+    },
+    {
+      "name": "internal_error",
+      "trigger": "launcher 内部非预期失败；事务状态以 status 查询为准",
+      "error_response_frame": {
+        "protocol_version": 1,
+        "request_id": "a4444444-4444-4444-8444-444444444444",
+        "ok": false,
+        "code": "internal_error",
+        "message": "launcher 内部错误，请通过 status 查询事务实际状态"
+      }
+    }
+  ]
+}

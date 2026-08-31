@@ -1,0 +1,37 @@
+{
+  "scenario": "GET /api/system/update：下载产物校验失败 → state=failed，last_error.code=artifact_invalid（异步出现形态）",
+  "endpoint": "GET /api/system/update",
+  "request": {
+    "method": "GET",
+    "path": "/api/system/update",
+    "headers": { "Accept": "application/json" },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "state": "failed",
+      "detail": "failed",
+      "update_id": "upd-20260831-9f3ab2c1",
+      "candidate": {
+        "version": "0.3.0",
+        "channel": "stable",
+        "published_at": "2026-09-15T00:00:00Z",
+        "size_bytes": 893451200,
+        "release_notes_url": "https://example.invalid/releases/v0.3.0"
+      },
+      "progress": null,
+      "policy": {
+        "strategy": "notify",
+        "maintenance_window": { "start": "02:00", "end": "06:00" },
+        "freeze_window_minutes": 30
+      },
+      "last_error": {
+        "code": "artifact_invalid",
+        "message": "下载产物完整性校验失败，已丢弃且未污染安装目录，可重新下载"
+      },
+      "updated_at": "2026-08-31T12:10:00Z"
+    }
+  }
+}

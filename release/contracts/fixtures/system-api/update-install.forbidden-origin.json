@@ -1,0 +1,19 @@
+{
+  "scenario": "已登录但 Origin 与 Host 不一致（跨站状态变更）→ 403 forbidden_origin（body 与现有 auth 中间件一致）",
+  "endpoint": "POST /api/system/update/install",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/install",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://evil.example"
+    },
+    "cookies": ["gb_session=<被 CSRF 利用的会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 403,
+    "body": { "error": "forbidden_origin" }
+  }
+}

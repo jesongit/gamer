@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gamebot.invalid/schemas/release-manifest-v1.json",
+  "title": "GameBot Release Manifest v1",
+  "description": "ARC-002 冻结的 Release manifest v1 契约（docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md §6.2/§11.1）。detached Ed25519 签名覆盖 manifest 原始字节，key_id 位于签名文件头（见 manifest-v1.md），因此 manifest 本身不含 key_id 字段。任何字段变更必须 bump schema_version 并同步所有轨道。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "product", "release", "platforms"],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "manifest 自身的契约版本；本 schema 只接受 1。"
+    },
+    "product": {
+      "const": "gamebot",
+      "description": "产品标识，防止跨产品误用 manifest。"
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "channel",
+        "published_at",
+        "minimum_launcher_version",
+        "minimum_upgrade_version",
+        "data_schema",
+        "rollback_floor",
+        "release_notes_url"
+      ],
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/semver",
+          "description": "产品版本，权威源为 server/Cargo.toml package.version，tag 必须等于 v<version>。stable 通道禁止 prerelease/build metadata（校验器强制）。"
+        },
+        "channel": {
+          "enum": ["stable", "beta"],
+          "description": "发布通道；stable 轨道不消费 beta manifest（--expect-channel）。"
+        },
+        "published_at": {
+          "$ref": "#/$defs/rfc3339",
+          "description": "发布时间，RFC 3339 UTC。"
+        },
+        "minimum_launcher_version": {
+          "$ref": "#/$defs/semver",
+          "description": "能消费本 manifest 的最低 launcher 版本；低于它的 launcher 必须拒绝并提示升级 launcher。"
+        },
+        "minimum_upgrade_version": {
+          "$ref": "#/$defs/semver",
+          "description": "允许直接升级到本版本的最低起点版本；更旧的安装必须先落到中间版本。"
+        },
+        "data_schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "本版本要求的数据布局 schema 版本（SQLite user_version 与文件布局）。当前仓库基线为 v1。"
+        },
+        "rollback_floor": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "可回滚的最低 data schema 版本；低于它的旧数据不在自动回滚承诺内。"
+        },
+        "release_notes_url": {
+          "$ref": "#/$defs/httpsUrl",
+          "description": "发布说明；仅为展示用途，信任不来自 URL。"
+        }
+      }
+    },
+    "platforms": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "propertyNames": {
+        "enum": ["windows-x86_64"]
+      },
+      "required": ["windows-x86_64"],
+      "description": "平台白名单：v1 只定义 windows-x86_64 便携发行版，未知平台整体拒绝。",
+      "properties": {
+        "windows-x86_64": {
+          "$ref": "#/$defs/platform"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "semver": {
+      "type": "string",
+      "description": "SemVer 2.0.0。",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+([0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*))?$"
+    },
+    "rfc3339": {
+      "type": "string",
+      "description": "RFC 3339 date-time。",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "httpsUrl": {
+      "type": "string",
+      "maxLength": 2048,
+      "description": "仅接受 https；镜像可替换 URL，信任只来自签名与内容 hash。",
+      "pattern": "^https://\\S+$"
+    },
+    "sha256": {
+      "type": "string",
+      "description": "64 位小写十六进制 SHA-256。",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "规范化相对路径：'/' 分隔；禁止绝对路径、盘符、任何冒号（含 NTFS ADS）、反斜杠、'.'/'..' 段、空段。段级规则（Windows 保留名、尾随点/空格、大小写碰撞、重复条目）由 validate-manifest.mjs 强制，本 pattern 为粗筛。",
+      "pattern": "^(?!/)(?!\\./)(?!\\.\\./)(?!\\.\\.$)(?!\\.$)[^:\\\\]{1,512}$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "url", "size", "sha256"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/relPath",
+          "description": "发行资产文件名；同样必须通过安全相对路径校验。"
+        },
+        "url": {
+          "$ref": "#/$defs/httpsUrl"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483648,
+          "description": "压缩包字节数，上限 2 GiB。"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "requiredFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relPath",
+          "description": "解包后组件目录内的相对路径。"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824,
+          "description": "单文件字节数，上限 1 GiB。"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["app", "components", "resources"],
+      "properties": {
+        "app": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact", "entrypoint"],
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/artifact"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/relPath",
+              "description": "应用入口（gamer-server.exe），位于 versions/<version>/ 内。"
+            }
+          }
+        },
+        "components": {
+          "type": "array",
+          "maxItems": 16,
+          "description": "运行依赖组件（adb/ffmpeg 等）；scrcpy-server.jar 不在此列（与应用强绑定，见 resources）。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "version", "artifact", "required_files"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{0,31}$",
+                "description": "组件标识，对应 runtime/<id>/<version>/。"
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "description": "上游锁定版本（如 adb 35.0.2），需与 release/dependencies.lock.toml 一致。"
+              },
+              "artifact": {
+                "$ref": "#/$defs/artifact"
+              },
+              "required_files": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1024,
+                "description": "逐文件清单（如 adb.exe + 两个 DLL），安装/修复后逐文件校验。",
+                "items": {
+                  "$ref": "#/$defs/requiredFile"
+                }
+              }
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scrcpy_server"],
+          "properties": {
+            "scrcpy_server": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["version", "path", "sha256", "binding"],
+              "properties": {
+                "version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32,
+                  "description": "scrcpy 协议版本；当前客户端严格对齐 3.3.3，不得独立升级。"
+                },
+                "path": {
+                  "allOf": [
+                    {
+                      "$ref": "#/$defs/relPath"
+                    },
+                    {
+                      "pattern": "^assets/",
+                      "description": "jar 与应用版本绑定，必须位于 versions/<version>/assets/ 下（ARC-001 §2）。"
+                    }
+                  ]
+                },
+                "sha256": {
+                  "$ref": "#/$defs/sha256"
+                },
+                "binding": {
+                  "const": "application",
+                  "description": "jar 永远随应用版本更换，不接受独立更新语义。"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

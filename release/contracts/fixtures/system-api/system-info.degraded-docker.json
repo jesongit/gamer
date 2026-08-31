@@ -1,0 +1,32 @@
+{
+  "scenario": "Docker 模式 GET /api/system/info 成功：update_strategy=external、能力全 false、依赖随镜像（managed/external binding）",
+  "endpoint": "GET /api/system/info",
+  "request": {
+    "method": "GET",
+    "path": "/api/system/info",
+    "headers": { "Accept": "application/json" },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": null
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "app": {
+        "version": "0.2.0",
+        "commit": "0123456789abcdef0123456789abcdef01234567",
+        "built_at": "2026-08-31T00:00:00Z",
+        "channel": "stable",
+        "target": "x86_64-unknown-linux-musl"
+      },
+      "deployment": { "mode": "docker", "update_strategy": "external" },
+      "schema": { "db": 1, "file": 1, "rollback_floor": 1 },
+      "dependencies": {
+        "adb": { "status": "ready", "version": "34.0.5", "source": "managed", "binding": "external" },
+        "ffmpeg": { "status": "ready", "version": "6.1.1", "source": "managed", "binding": "external" },
+        "scrcpy": { "status": "ready", "version": "3.3.3", "source": "managed", "binding": "application" }
+      },
+      "capabilities": { "check": false, "download": false, "install": false, "rollback": false },
+      "startup": { "stage": "ready", "boot_id": "8a41d0c2-93b7-4f5e-b6d8-2c7f0a9e31b5" }
+    }
+  }
+}

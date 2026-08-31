@@ -1,0 +1,15 @@
+{
+  "scenario": "未登录 GET /api/system/info → 401（body 与现有 auth 中间件一致）",
+  "endpoint": "GET /api/system/info",
+  "request": {
+    "method": "GET",
+    "path": "/api/system/info",
+    "headers": { "Accept": "application/json" },
+    "cookies": [],
+    "body": null
+  },
+  "response": {
+    "status": 401,
+    "body": { "error": "unauthorized" }
+  }
+}

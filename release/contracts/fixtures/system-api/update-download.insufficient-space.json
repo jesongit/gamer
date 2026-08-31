@@ -1,0 +1,26 @@
+{
+  "scenario": "受理前磁盘空间预检不足 → 507 insufficient_space（含冻结的 details 键，不给路径）",
+  "endpoint": "POST /api/system/update/download",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/download",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 507,
+    "body": {
+      "code": "insufficient_space",
+      "message": "磁盘空间不足，无法容纳下载产物、数据快照与新旧两个版本，请清理空间后重试",
+      "details": {
+        "required_bytes": 2684354560,
+        "available_bytes": 1073741824
+      }
+    }
+  }
+}

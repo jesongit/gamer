@@ -1,0 +1,22 @@
+{
+  "scenario": "POST /api/system/update/download 受理：202 + 后台下载，随后轮询 GET /api/system/update（progress 字段推进）",
+  "endpoint": "POST /api/system/update/download",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/download",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 202,
+    "body": {
+      "update_id": "upd-20260831-9f3ab2c1",
+      "state": "downloading"
+    }
+  }
+}

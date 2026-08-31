@@ -1,0 +1,19 @@
+{
+  "scenario": "业务错误帧示例：check 受理后验签失败（此处为受理阶段即知悉的示例形态）；错误码与 HTTP API 的 11 个统一错误码共享，server 可 1:1 映射进 last_error",
+  "operation": "check",
+  "note": "错误帧冻结形态 = {protocol_version, request_id, ok:false, code, message}，恰好五个字段，无 details；message 不含路径/用户名/命令行",
+  "request_frame": {
+    "protocol_version": 1,
+    "request_id": "5d3e7a90-1c4b-4f28-8b6d-7e2a9c0d1f33",
+    "auth": "<GAMER_LAUNCHER_IPC_TOKEN>",
+    "operation": "check",
+    "payload": {}
+  },
+  "error_response_frame": {
+    "protocol_version": 1,
+    "request_id": "5d3e7a90-1c4b-4f28-8b6d-7e2a9c0d1f33",
+    "ok": false,
+    "code": "signature_invalid",
+    "message": "发布清单验签失败，已拒绝该候选版本"
+  }
+}

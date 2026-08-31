@@ -1,0 +1,23 @@
+{
+  "scenario": "prepare_install 操作：受理即回（长操作），对最近下载的候选复验 staging 完整性并标记可切换；结果经 status 轮询（staged）",
+  "operation": "prepare_install",
+  "note": "fixture 只含帧的 JSON 载荷；线上传输为 u32 little-endian 长度前缀 + UTF-8 JSON。候选未就位时回业务错误帧 update_not_ready",
+  "request_frame": {
+    "protocol_version": 1,
+    "request_id": "71b0c3d8-2f46-4a9e-b5c7-0e8d1a6f92bb",
+    "auth": "<GAMER_LAUNCHER_IPC_TOKEN>",
+    "operation": "prepare_install",
+    "payload": {}
+  },
+  "response_frame": {
+    "protocol_version": 1,
+    "request_id": "71b0c3d8-2f46-4a9e-b5c7-0e8d1a6f92bb",
+    "ok": true,
+    "result": {
+      "accepted": true,
+      "operation": "prepare_install",
+      "update_id": "upd-20260831-9f3ab2c1",
+      "state": "staged"
+    }
+  }
+}

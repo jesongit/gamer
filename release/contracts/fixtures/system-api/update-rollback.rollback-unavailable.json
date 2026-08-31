@@ -1,0 +1,22 @@
+{
+  "scenario": "无有效回滚点（无 previous 版本目录 / 无已验证快照），或上一事务已 committed（超出自动回滚承诺）→ 409 rollback_unavailable",
+  "endpoint": "POST /api/system/update/rollback",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/rollback",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 409,
+    "body": {
+      "code": "rollback_unavailable",
+      "message": "没有可用的自动回滚点（自动回滚仅承诺提交之前的事务），如需降级请按维护手册人工操作"
+    }
+  }
+}

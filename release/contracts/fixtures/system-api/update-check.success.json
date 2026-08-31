@@ -1,0 +1,22 @@
+{
+  "scenario": "POST /api/system/update/check 受理：202 + 后台检查，随后轮询 GET /api/system/update（checking → available/idle/failed）",
+  "endpoint": "POST /api/system/update/check",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/check",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 202,
+    "body": {
+      "update_id": "upd-20260831-9f3ab2c1",
+      "state": "checking"
+    }
+  }
+}

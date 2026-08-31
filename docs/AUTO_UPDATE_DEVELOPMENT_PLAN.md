@@ -1,6 +1,6 @@
 # GameBot 运行依赖与自动升级开发计划
 
-> 状态：**待实施**  
+> 状态：**实施中（批次 0 已完成，2026-08-31）**  
 > 编制日期：2026-08-31  
 > 适用范围：Windows x64 便携发行版、运行依赖管理、版本检查与升级、数据迁移与回滚、GitHub Release、GHCR、系统 API、设置页和发布验收  
 > 本文只定义设计契约、任务拆分、并行顺序和验收门禁，不代表相关功能已经实现。
@@ -786,18 +786,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 
 ### 17.2 批次 0：契约与许可冻结
 
-- [ ] ARC-001：冻结便携安装目录、组件边界、可写目录和原子切换边界。
-- [ ] ARC-002：完成 Release manifest v1 JSON Schema。
-- [ ] ARC-002：提供合法 manifest、签名和平台 fixture。
-- [ ] ARC-002：提供未知 schema、错误平台、降级、危险路径和篡改签名反例 fixture。
-- [ ] ARC-003：冻结 System API 请求、响应、状态和错误码。
-- [ ] ARC-003：冻结 launcher IPC protocol v1、消息上限、超时和幂等语义。
-- [ ] ARC-004：冻结 DB/file schema 兼容表和 rollback floor。
-- [ ] ARC-004：明确 pre-commit 自动回滚与 post-commit 人工降级承诺。
-- [ ] ARC-005：确认 Android Platform-Tools 获取与再分发方式。
-- [ ] ARC-005：确认 ffmpeg 来源、构建配置和 LGPL/GPL 履约方式。
-- [ ] ARC-005：冻结第三方 NOTICE、source offer 和 SBOM 策略。
-- [ ] 批次 0 合流门：所有契约通过评审，四条轨道可只依赖版本化 fixture 开工。
+- [x] ARC-001：冻结便携安装目录、组件边界、可写目录和原子切换边界。（docs/UPDATE_CONTRACT.md）
+- [x] ARC-002：完成 Release manifest v1 JSON Schema。（release/contracts/manifest-v1.schema.json）
+- [x] ARC-002：提供合法 manifest、签名和平台 fixture。（fixtures/manifest/valid/ 2 组 + 测试公钥）
+- [x] ARC-002：提供未知 schema、错误平台、降级、危险路径和篡改签名反例 fixture。（invalid/ 24 条，selftest 28/28）
+- [x] ARC-003：冻结 System API 请求、响应、状态和错误码。（release/contracts/system-api-v1.md + 26 fixtures）
+- [x] ARC-003：冻结 launcher IPC protocol v1、消息上限、超时和幂等语义。（release/contracts/ipc-v1.md + 8 fixtures）
+- [x] ARC-004：冻结 DB/file schema 兼容表和 rollback floor。（release/contracts/schema-policy.md，与 store.rs v1 基线对齐）
+- [x] ARC-004：明确 pre-commit 自动回滚与 post-commit 人工降级承诺。（schema-policy.md §6）
+- [x] ARC-005：确认 Android Platform-Tools 获取与再分发方式。（官方 platform-tools，Apache-2.0 NOTICE，三件套原字节分发）
+- [x] ARC-005：确认 ffmpeg 来源、构建配置和 LGPL/GPL 履约方式。（BtbN win64-lgpl，LGPL-3.0-or-later，禁 gpl/nonfree 门禁）
+- [x] ARC-005：冻结第三方 NOTICE、source offer 和 SBOM 策略。（release/contracts/dependency-licensing.md，CycloneDX JSON）
+- [x] 批次 0 合流门：所有契约通过评审，四条轨道可只依赖版本化 fixture 开工。
 
 ### 17.3 批次 1：四轨基础
 

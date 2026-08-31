@@ -1,0 +1,23 @@
+{
+  "scenario": "check 操作：受理即回（长操作），远端检查结果经 status 轮询获取（checking → available/idle/failed）；通道来自 launcher 配置，payload 不接受 channel 指定",
+  "operation": "check",
+  "note": "fixture 只含帧的 JSON 载荷；线上传输为 u32 little-endian 长度前缀 + UTF-8 JSON",
+  "request_frame": {
+    "protocol_version": 1,
+    "request_id": "5d3e7a90-1c4b-4f28-8b6d-7e2a9c0d1f33",
+    "auth": "<GAMER_LAUNCHER_IPC_TOKEN>",
+    "operation": "check",
+    "payload": {}
+  },
+  "response_frame": {
+    "protocol_version": 1,
+    "request_id": "5d3e7a90-1c4b-4f28-8b6d-7e2a9c0d1f33",
+    "ok": true,
+    "result": {
+      "accepted": true,
+      "operation": "check",
+      "update_id": "upd-20260831-9f3ab2c1",
+      "state": "checking"
+    }
+  }
+}

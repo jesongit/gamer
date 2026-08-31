@@ -1,0 +1,27 @@
+{
+  "scenario": "PUT /api/system/update/policy 整对象替换成功：200 回显保存后的策略（幂等）",
+  "endpoint": "PUT /api/system/update/policy",
+  "request": {
+    "method": "PUT",
+    "path": "/api/system/update/policy",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {
+      "strategy": "auto",
+      "maintenance_window": { "start": "02:00", "end": "06:00" },
+      "freeze_window_minutes": 30
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "strategy": "auto",
+      "maintenance_window": { "start": "02:00", "end": "06:00" },
+      "freeze_window_minutes": 30
+    }
+  }
+}

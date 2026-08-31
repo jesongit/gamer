@@ -1,0 +1,25 @@
+{
+  "scenario": "install 门禁未满足（活动脚本运行 + 距下次 cron 触发在冻结窗口内）→ 409 update_not_ready，details.blocking 列出全部未满足门禁",
+  "endpoint": "POST /api/system/update/install",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/install",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 409,
+    "body": {
+      "code": "update_not_ready",
+      "message": "安装条件未满足：存在运行中的脚本，且下一次定时任务触发时间在冻结窗口内",
+      "details": {
+        "blocking": ["active_run", "cron_freeze_window"]
+      }
+    }
+  }
+}

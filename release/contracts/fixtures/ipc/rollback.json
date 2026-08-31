@@ -1,0 +1,23 @@
+{
+  "scenario": "rollback 操作：受理即回（长操作），恢复 previous 版本与已验证快照；结果经 status 轮询（rolling_back → idle/manual_recovery）。仅承诺 committed 之前",
+  "operation": "rollback",
+  "note": "fixture 只含帧的 JSON 载荷；线上传输为 u32 little-endian 长度前缀 + UTF-8 JSON。无有效回滚点时回业务错误帧 rollback_unavailable",
+  "request_frame": {
+    "protocol_version": 1,
+    "request_id": "e9f12b64-3a57-4c80-9d1e-6b2c8f0a47cd",
+    "auth": "<GAMER_LAUNCHER_IPC_TOKEN>",
+    "operation": "rollback",
+    "payload": {}
+  },
+  "response_frame": {
+    "protocol_version": 1,
+    "request_id": "e9f12b64-3a57-4c80-9d1e-6b2c8f0a47cd",
+    "ok": true,
+    "result": {
+      "accepted": true,
+      "operation": "rollback",
+      "update_id": "upd-20260831-9f3ab2c1",
+      "state": "rolling_back"
+    }
+  }
+}

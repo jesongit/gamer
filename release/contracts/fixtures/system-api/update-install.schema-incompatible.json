@@ -1,0 +1,26 @@
+{
+  "scenario": "候选目标 schema 超出当前 binary 兼容范围 → 422 schema_incompatible（需等待兼容的新版本）",
+  "endpoint": "POST /api/system/update/install",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/install",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 422,
+    "body": {
+      "code": "schema_incompatible",
+      "message": "候选版本的数据 schema 超出当前程序可升级范围，已拒绝安装；请等待兼容的新版本",
+      "details": {
+        "candidate_schema": 4,
+        "supported_range": [1, 3]
+      }
+    }
+  }
+}

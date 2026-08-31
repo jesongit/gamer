@@ -1,0 +1,22 @@
+{
+  "scenario": "POST /api/system/update/install 受理：202 + 后台协调器接管停机/快照/迁移/切换；HTTP 服务随后会重启、连接会断开——前端断连不得报「安装失败」，重连后以 app.version/boot_id 判定结果",
+  "endpoint": "POST /api/system/update/install",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/install",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 202,
+    "body": {
+      "update_id": "upd-20260831-9f3ab2c1",
+      "state": "installing"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "scenario": "POST /api/system/update/rollback 受理（staged/failed/waiting 态、存在有效回滚点）：202 + 后台恢复 previous 版本与已验证快照",
+  "endpoint": "POST /api/system/update/rollback",
+  "request": {
+    "method": "POST",
+    "path": "/api/system/update/rollback",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Origin": "https://gamebot.local:8443"
+    },
+    "cookies": ["gb_session=<会话 Cookie>"],
+    "body": {}
+  },
+  "response": {
+    "status": 202,
+    "body": {
+      "update_id": "upd-20260831-9f3ab2c1",
+      "state": "rolling_back"
+    }
+  }
+}
