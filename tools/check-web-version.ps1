@@ -24,7 +24,8 @@
 param(
     # 扫描根目录；缺省为仓库内 web/src
     [string]$WebSrc,
-    # 只报告不失败（恒 exit 0）；缺省发现违规 exit 1。批次 3 CI 接入前建议先带此开关观察
+    # 只报告不失败（恒 exit 0）；缺省发现违规 exit 1。CI web job 已将其作为硬门禁
+    # （.github/workflows/ci.yml），此开关仅用于本地观察/临时豁免场景
     [switch]$ReportOnly
 )
 

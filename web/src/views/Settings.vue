@@ -2,245 +2,335 @@
   <div class="page">
     <div class="page-head">
       <div>
-        <div class="page-title">系统状态</div>
-        <div class="page-sub">只读运行信息与依赖健康状态，数据来自当前服务端</div>
+        <div class="page-title">系统与更新</div>
+        <div class="page-sub">系统信息、软件更新与更新策略；数据与操作均对接服务端真实 API</div>
       </div>
-      <button class="btn btn-primary" :disabled="loading" @click="load">
-        {{ loading ? '读取中…' : '↻ 刷新' }}
+      <button class="btn btn-primary" :disabled="st.loading" @click="ctl.refresh()">
+        {{ st.loading ? '读取中…' : '↻ 刷新' }}
       </button>
     </div>
 
-    <div v-if="loading" class="card state-card" role="status">
+    <div v-if="st.loading && !st.info && !st.update" class="card state-card" role="status">
       <div class="state-icon">⏳</div>
       <div>
         <div class="state-title">正在读取系统状态</div>
-        <div class="state-desc">正在向服务端请求真实版本、部署和依赖信息。</div>
+        <div class="state-desc">正在向服务端请求系统信息与更新状态。</div>
       </div>
     </div>
 
-    <div v-else-if="error" class="card state-card error-card" role="alert">
-      <div class="state-icon">⚠️</div>
-      <div class="state-copy">
-        <div class="state-title">系统状态暂不可用</div>
-        <div class="state-desc">{{ error }}</div>
-        <div class="state-desc muted">接口未接入或服务端不可达时不会显示伪造的默认状态。</div>
-      </div>
-      <button class="btn" @click="load">重试</button>
-    </div>
+    <template v-else>
+      <SystemInfoCard class="stack-gap" :info="st.info" :error="infoErrorText"
+        @check="onCheck" @install="requestInstall" />
 
-    <template v-else-if="info">
-      <div class="readonly-note">🔒 只读视图：当前页面不会修改服务端配置或更新策略。</div>
+      <div class="two-col">
+        <UpdateStatusCard :status="st.update" :info="st.info" :busy="flowBusy"
+          @action="onAction" @refresh="ctl.refresh()" />
 
-      <div class="settings-grid">
-        <div class="card set-card">
-          <div class="sc-title">🎮 应用与构建</div>
-          <div class="info-list">
-            <div v-for="row in buildRows" :key="row.label" class="info-row">
-              <span class="info-label">{{ row.label }}</span>
-              <span :class="row.mono ? 'mono' : ''">{{ row.value }}</span>
-            </div>
+        <!-- 更新策略（PUT /api/system/update/policy，整对象替换；能力全 false 时仍可保存，契约 §6） -->
+        <section class="card policy-card" data-testid="policy-card">
+          <div class="card-head">
+            <span class="card-title">更新策略</span>
           </div>
-        </div>
 
-        <div class="card set-card">
-          <div class="sc-title">🚀 部署与更新</div>
-          <div class="info-list">
-            <div v-for="row in deploymentRows" :key="row.label" class="info-row">
-              <span class="info-label">{{ row.label }}</span>
-              <span :class="row.state ? `state-${row.state}` : ''">{{ row.value }}</span>
-            </div>
-          </div>
-          <div class="card-footnote">当前版本只展示能力，不提供未接通的更新操作。</div>
-        </div>
+          <template v-if="policyAvailable">
+            <fieldset class="policy-form" :disabled="savingPolicy" @change="onPolicyEdit">
+              <label v-for="opt in STRATEGY_OPTIONS" :key="opt.value" class="strategy-row">
+                <input type="radio" name="update-strategy" :value="opt.value"
+                  v-model="policyForm.strategy" data-testid="policy-strategy" />
+                <span>
+                  <b>{{ opt.label }}</b>
+                  <small>{{ opt.desc }}</small>
+                </span>
+              </label>
 
-        <div class="card set-card dependency-card">
-          <div class="sc-title">🩺 依赖与健康</div>
-          <div class="dependency-list">
-            <div v-for="row in dependencyRows" :key="row.label" class="dep-row">
-              <div class="dep-main">
-                <span class="dep-dot" :class="statusClass(row.item)"></span>
-                <span>{{ row.label }}</span>
-                <span class="dep-status">{{ statusText(row.item) }}</span>
+              <div class="window-fields" :class="{ dim: policyForm.strategy !== 'auto' }">
+                <span>维护窗口（仅 auto 使用）</span>
+                <input type="time" v-model="policyForm.start" data-testid="window-start" />
+                <span>–</span>
+                <input type="time" v-model="policyForm.end" data-testid="window-end" />
+                <label class="freeze">
+                  冻结窗口
+                  <input type="number" min="0" max="1440" v-model.number="policyForm.freeze"
+                    data-testid="freeze-window" />
+                  分钟
+                </label>
               </div>
-              <div class="dep-meta">
-                <span v-if="row.item && row.item.version" class="mono">{{ row.item.version }}</span>
-                <span v-if="sourceText(row.item)">{{ sourceText(row.item) }}</span>
+
+              <p v-if="policyForm.strategy === 'auto'" class="gate-note" data-testid="gate-note">
+                auto 门禁：仅维护窗口内、无运行中脚本、无其他升级/维护事务、且距下一次定时任务触发大于冻结窗口时才自动安装；
+                不满足则一直等待，不会中断运行中的脚本。窗口允许跨午夜（如 23:00–05:00）。
+              </p>
+
+              <p v-if="caps && !caps.install" class="caps-note">
+                当前部署不受升级器托管（update_not_managed）：策略可保存，但不会产生任何自动更新行为。
+              </p>
+
+              <div class="policy-foot">
+                <button class="btn btn-primary btn-sm" data-testid="policy-save"
+                  :disabled="savingPolicy" @click="savePolicy">
+                  {{ savingPolicy ? '保存中…' : '保存策略' }}
+                </button>
+                <span v-if="policyNote" class="save-note" data-testid="policy-note">{{ policyNote }}</span>
+                <span v-if="policyError" class="save-error" data-testid="policy-error">{{ policyError }}</span>
               </div>
-            </div>
-          </div>
-        </div>
+            </fieldset>
+          </template>
 
-        <div class="card set-card">
-          <div class="sc-title">🗃️ 数据、时区与启动</div>
-          <div class="info-list">
-            <div v-for="row in runtimeRows" :key="row.label" class="info-row">
-              <span class="info-label">{{ row.label }}</span>
-              <span :class="row.mono ? 'mono' : ''">{{ row.value }}</span>
-            </div>
+          <div v-else class="policy-unavailable">
+            <p>更新状态接口暂不可用，无法编辑更新策略。</p>
+            <p v-if="updateErrorText" class="muted">{{ updateErrorText }}</p>
+            <button class="btn btn-sm" @click="ctl.refresh()">重试</button>
           </div>
-        </div>
-      </div>
-
-      <div class="readiness" :class="readinessClass">
-        <span class="readiness-dot"></span>
-        <span>服务就绪：{{ readinessText }}</span>
-        <span class="readiness-detail">黑屏依赖与数据库状态均来自本次服务端探测</span>
+        </section>
       </div>
     </template>
+
+    <!-- 安装/回滚确认 + 202 断连容忍流程（useUpdateFlow） -->
+    <UpdateConfirmModal :open="confirmOpen" :mode="confirmMode" :info="st.info" :status="st.update"
+      :submitting="flowBusy" :error="confirmError" @confirm="onConfirm" @close="closeConfirm" />
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
-import { handleUnauthorized } from '../auth'
+/**
+ * 设置页（WEB-005 重做）：静态原型与「已保存（原型）」假交互已移除，全部对接 system/update 真实 API
+ * （契约：release/contracts/system-api-v1.md；客户端/轮询/确认流复用 web/src/system 模块）。
+ * - SystemInfoCard：/api/system/info 展示（useSystemStatus 提供数据，页面卸载自动停止轮询）；
+ * - UpdateStatusCard：11 状态展示 + 动作按钮；check/download 直接提交，install/rollback 先过
+ *   §4.2 状态×动作受理矩阵（canAct）再弹 UpdateConfirmModal，确认后走 useUpdateFlow 完整流：
+ *   202 受理 → 断连容忍轮询 → 重连按 app.version / boot_id 判定成功/失败/人工恢复/超时；
+ * - 策略编辑：off/notify/auto + 维护窗口 + 冻结窗口，PUT /api/system/update/policy 整对象替换；
+ *   轮询不会回填覆盖编辑中的表单（仅首次与保存回显时同步服务端值）。
+ */
+import { computed, reactive, ref, watch } from 'vue'
+import SystemInfoCard from '../components/SystemInfoCard.vue'
+import UpdateStatusCard from '../components/UpdateStatusCard.vue'
+import UpdateConfirmModal from '../components/UpdateConfirmModal.vue'
+import { useToast } from '../store'
+import { systemApi, SYSTEM_ERRORS } from '../system/api'
+import { allowedActions } from '../system/states'
+import { useSystemStatus } from '../system/useSystemStatus'
+import { createUpdateFlow } from '../system/useUpdateFlow'
 
-const info = ref(null)
-const loading = ref(true)
-const error = ref('')
+const toast = useToast()
 
-async function load() {
-  loading.value = true
-  error.value = ''
+// ---- 系统信息 + 更新状态：页面级轮询（活跃更新高频 / 驻留低频，卸载自动停止） ----
+const ctl = useSystemStatus()
+const st = ctl.st
+const infoErrorText = computed(() => (st.infoError && (st.infoError.message || '系统信息加载失败')) || '')
+const updateErrorText = computed(() => (st.updateError && (st.updateError.message || '更新状态加载失败')) || '')
+const caps = computed(() => (st.info && st.info.capabilities) || null)
+
+// ---- 动作分发（check/download 直提交；install/rollback 先过矩阵再进确认弹窗） ----
+function errHint(e) {
+  const known = e && SYSTEM_ERRORS[e.code]
+  return known ? `${known.hint}（${e.code}）` : (e && e.message) || '操作失败'
+}
+
+async function onCheck() {
   try {
-    const response = await fetch('/api/system/info', {
-      headers: { Accept: 'application/json' }
-    })
-    if (!response.ok) {
-      if (response.status === 401) handleUnauthorized()
-      const body = await response.json().catch(() => ({}))
-      throw new Error(body?.error || `HTTP ${response.status}`)
-    }
-    const body = await response.json()
-    if (!body || typeof body !== 'object') throw new Error('服务端响应格式异常')
-    info.value = body
-  } catch (cause) {
-    info.value = null
-    error.value = cause?.message || '网络请求失败'
-  } finally {
-    loading.value = false
+    await systemApi.checkUpdate()
+    toast('已受理检查更新', 'info')
+  } catch (e) {
+    toast(errHint(e), 'error')
   }
+  ctl.refresh()
 }
 
-function display(value) {
-  return value === undefined || value === null || value === '' ? '未知' : String(value)
+async function onDownload() {
+  try {
+    await systemApi.downloadUpdate()
+    toast('已受理后台下载', 'info')
+  } catch (e) {
+    toast(errHint(e), 'error')
+  }
+  ctl.refresh()
 }
 
-function capabilityText(name) {
-  return info.value?.capabilities?.[name] === true ? '可用' : '不可用'
-}
-
-function capabilityState(name) {
-  return info.value?.capabilities?.[name] === true ? 'ok' : 'off'
-}
-
-function statusText(item) {
-  const labels = { ready: '就绪', missing: '缺失', invalid: '无效', timeout: '超时', error: '异常' }
-  return labels[item?.status] || '未知'
-}
-
-function statusClass(item) {
-  return item?.status === 'ready' ? 'ok' : 'off'
-}
-
-function sourceText(item) {
-  const labels = { bundled: '随部署提供', system: '系统工具', custom: '自定义路径' }
-  return labels[item?.source] || ''
-}
-
-function schemaValue(name) {
-  const value = info.value?.schema?.[name]
-  if (value && typeof value === 'object') return `${display(value.version)} · ${statusText(value)}`
-  return display(value)
-}
-
-const timezoneValue = computed(() => {
-  const timezone = info.value?.timezone
-  if (!timezone) return '未知'
-  const offset = timezone.offset ? ` (${timezone.offset})` : ''
-  return `${display(timezone.name)}${offset}`
+/** §4.2 状态×动作受理矩阵 ∧ capabilities：install/rollback 是否允许进确认弹窗 */
+const canAct = computed(() => {
+  const none = { install: false, rollback: false }
+  if (!st.update) return none
+  const a = allowedActions(st.update.state)
+  const c = caps.value || {}
+  return {
+    install: !!a.install && c.install === true,
+    rollback: !!a.rollback && c.rollback === true,
+  }
 })
 
-const buildRows = computed(() => [
-  { label: '版本', value: display(info.value?.app?.version), mono: true },
-  { label: 'Commit', value: display(info.value?.app?.git_commit), mono: true },
-  { label: '构建时间', value: display(info.value?.app?.built_at), mono: true },
-  { label: '通道', value: display(info.value?.app?.channel) },
-  { label: '目标', value: display(info.value?.app?.target), mono: true },
-])
+function onAction(name) {
+  if (name === 'check') return onCheck()
+  if (name === 'download') return onDownload()
+  if (name === 'install') return requestInstall()
+  if (name === 'rollback') return requestRollback()
+}
 
-const deploymentRows = computed(() => [
-  { label: '部署模式', value: display(info.value?.deployment?.mode) },
-  { label: '更新策略', value: display(info.value?.deployment?.update_strategy) },
-  { label: '检查更新', value: capabilityText('check'), state: capabilityState('check') },
-  { label: '下载安装', value: capabilityText('download'), state: capabilityState('download') },
-  { label: '安装 / 回滚', value: `${capabilityText('install')} / ${capabilityText('rollback')}`, state: updateState.value },
-])
+// ---- 安装/回滚确认流：确认弹窗 → 202 → 断连容忍 → 重连按版本/boot_id 判定 ----
+const flowCtl = createUpdateFlow()
+const flow = flowCtl.flow
+const flowBusy = computed(() => flow.phase === 'submitting' || flow.phase === 'waiting')
 
-const dependencyRows = computed(() => [
-  { label: 'ADB', item: info.value?.dependencies?.adb },
-  { label: 'ffmpeg', item: info.value?.dependencies?.ffmpeg },
-  { label: 'scrcpy-server', item: info.value?.dependencies?.scrcpy },
-  { label: '数据目录', item: info.value?.dependencies?.data },
-  { label: 'SQLite', item: info.value?.dependencies?.database },
-])
+const confirmOpen = ref(false)
+const confirmMode = ref('install')
 
-const runtimeRows = computed(() => [
-  { label: '数据库 schema', value: schemaValue('database'), mono: true },
-  { label: '文件 schema', value: schemaValue('files'), mono: true },
-  { label: '回滚下限', value: schemaValue('rollback_floor'), mono: true },
-  { label: '服务端时区', value: timezoneValue.value, mono: true },
-  { label: '启动阶段', value: display(info.value?.startup?.stage) },
-  { label: 'Boot ID', value: display(info.value?.startup?.boot_id), mono: true },
-])
+function requestInstall() {
+  if (!canAct.value.install) { toast('当前没有可安装的更新候选，请先检查更新', 'error'); return }
+  confirmMode.value = 'install'
+  flowCtl.reset()
+  confirmOpen.value = true
+}
 
-const readinessText = computed(() => info.value?.readiness?.ready === true ? '是' : '否')
-const readinessClass = computed(() => info.value?.readiness?.ready === true ? 'ready' : 'not-ready')
-const updateState = computed(() => (
-  info.value?.capabilities?.install === true && info.value?.capabilities?.rollback === true ? 'ok' : 'off'
-))
+function requestRollback() {
+  if (!canAct.value.rollback) { toast('当前没有可用的自动回滚点', 'error'); return }
+  confirmMode.value = 'rollback'
+  flowCtl.reset()
+  confirmOpen.value = true
+}
 
-onMounted(load)
+function closeConfirm() {
+  confirmOpen.value = false
+  flowCtl.reset()
+}
+
+async function onConfirm() {
+  const info = st.info
+  const r = confirmMode.value === 'rollback'
+    ? await flowCtl.submitRollback(info)
+    : await flowCtl.submitInstall(info)
+  // submit 的 ok:true 只表示「已受理且等待循环结束」；终态结论以 flow.verdict 为准——
+  // failed / manual_recovery / timeout 时弹窗保持打开，错误经 confirmError 回显
+  if (!r.ok || flow.verdict !== 'success') return
+  confirmOpen.value = false
+  flowCtl.reset()
+  toast(confirmMode.value === 'rollback' ? '回滚完成：已恢复上一版本' : '安装完成：服务已切换到新版本', 'success')
+  ctl.refresh()
+}
+
+const confirmError = computed(() => {
+  if (flow.verdict === 'timeout') {
+    return {
+      code: 'update_wait_timeout',
+      message: '等待超时：有界重连时间内服务未恢复，请确认服务进程状态后重试或刷新页面。',
+      details: null,
+    }
+  }
+  return flow.error
+})
+
+// ---- 更新策略（PUT /api/system/update/policy；契约 §6：400 invalid_argument → details.field） ----
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/
+const policyForm = reactive({ strategy: 'notify', start: '02:00', end: '06:00', freeze: 30 })
+const STRATEGY_OPTIONS = [
+  { value: 'off', label: 'off · 关闭', desc: '不检查更新' },
+  { value: 'notify', label: 'notify · 通知确认', desc: '自动检查并提示，由你确认后再安装（产品默认）' },
+  { value: 'auto', label: 'auto · 自动安装', desc: '自动下载，并在维护窗口与空闲门禁满足后自动安装' },
+]
+const policyAvailable = computed(() => !!st.update)
+
+let policyHydrated = false
+watch(() => st.update && st.update.policy, (p) => {
+  // 仅首次到达时回填；此后轮询刷新不覆盖用户编辑中的表单
+  if (p && !policyHydrated) applyPolicy(p)
+})
+
+function applyPolicy(p) {
+  policyHydrated = true
+  policyForm.strategy = typeof p.strategy === 'string' ? p.strategy : 'notify'
+  const w = p.maintenance_window && typeof p.maintenance_window === 'object' ? p.maintenance_window : {}
+  policyForm.start = TIME_RE.test(String(w.start ?? '')) ? w.start : '02:00'
+  policyForm.end = TIME_RE.test(String(w.end ?? '')) ? w.end : '06:00'
+  const f = Number(p.freeze_window_minutes)
+  policyForm.freeze = Number.isInteger(f) && f >= 0 && f <= 1440 ? f : 30
+}
+
+const savingPolicy = ref(false)
+const policyNote = ref('')
+const policyError = ref('')
+
+function onPolicyEdit() {
+  policyNote.value = ''
+  policyError.value = ''
+}
+
+async function savePolicy() {
+  policyNote.value = ''
+  policyError.value = ''
+  const { strategy, start, end } = policyForm
+  const freeze = Number(policyForm.freeze)
+  if (!TIME_RE.test(String(start)) || !TIME_RE.test(String(end))) {
+    policyError.value = '维护窗口时间格式应为 HH:MM（24 小时制）'
+    return
+  }
+  if (start === end) {
+    policyError.value = '维护窗口开始与结束时间不能相同'
+    return
+  }
+  if (!Number.isInteger(freeze) || freeze < 0 || freeze > 1440) {
+    policyError.value = '冻结窗口须为 0~1440 的整数分钟'
+    return
+  }
+  savingPolicy.value = true
+  try {
+    const echo = await systemApi.setUpdatePolicy({
+      strategy,
+      maintenance_window: { start, end },
+      freeze_window_minutes: freeze,
+    })
+    if (echo && typeof echo === 'object') applyPolicy(echo) // 保存回显（200 body = 保存后的策略）
+    policyNote.value = '已保存'
+    ctl.refresh()
+  } catch (e) {
+    policyError.value = errHint(e)
+  } finally {
+    savingPolicy.value = false
+  }
+}
 </script>
 
 <style scoped>
-.settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
-.set-card { display: flex; flex-direction: column; gap: 14px; }
-.sc-title { font-size: 14px; font-weight: 700; }
-.info-list { display: flex; flex-direction: column; gap: 10px; }
-.info-row { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
-.info-label { flex: 0 0 92px; color: var(--text-2); font-size: 12px; }
-.info-row > span:last-child { min-width: 0; overflow-wrap: anywhere; text-align: right; margin-left: auto; }
-.state-ok { color: var(--green, #57d38c); }
-.state-off { color: var(--text-2); }
-.readonly-note { margin-bottom: 14px; color: var(--text-2); font-size: 12px; }
-.card-footnote { color: var(--text-2); font-size: 11px; line-height: 1.5; }
+.stack-gap { margin-bottom: 14px; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; align-items: start; }
 
 .state-card { display: flex; align-items: center; gap: 14px; min-height: 92px; }
-.state-copy { flex: 1; min-width: 0; }
 .state-icon { font-size: 24px; }
 .state-title { font-size: 14px; font-weight: 700; }
 .state-desc { margin-top: 5px; color: var(--text-1); font-size: 12px; line-height: 1.5; }
-.muted { color: var(--text-2); }
-.error-card { border-color: color-mix(in srgb, var(--danger, #ef6b73) 45%, var(--border)); }
 
-.dependency-list { display: flex; flex-direction: column; gap: 12px; }
-.dep-row { display: flex; flex-direction: column; gap: 4px; }
-.dep-main, .dep-meta { display: flex; align-items: center; gap: 7px; font-size: 12px; }
-.dep-status { margin-left: auto; color: var(--text-2); }
-.dep-meta { padding-left: 16px; color: var(--text-2); font-size: 11px; }
-.dep-meta span + span { margin-left: auto; }
-.dep-dot, .readiness-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--text-2); }
-.dep-dot.ok, .readiness.ready .readiness-dot { background: var(--green, #57d38c); }
-.dep-dot.off, .readiness.not-ready .readiness-dot { background: var(--danger, #ef6b73); }
-.readiness { display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 11px 14px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
-.readiness.ready { color: var(--green, #57d38c); }
-.readiness.not-ready { color: var(--danger, #ef6b73); }
-.readiness-detail { margin-left: auto; color: var(--text-2); font-size: 11px; }
+.policy-card { display: flex; flex-direction: column; gap: 10px; }
+.card-head { display: flex; align-items: center; gap: 10px; }
+.card-title { font-size: 15px; font-weight: 600; }
+.policy-form { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+.strategy-row {
+  display: flex; gap: 9px; align-items: flex-start; cursor: pointer;
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.strategy-row b { font-size: 13px; }
+.strategy-row small { display: block; color: var(--text-2); font-size: 11px; margin-top: 2px; line-height: 1.5; }
+.window-fields { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-1); }
+.window-fields.dim { opacity: .55; }
+.window-fields input[type='time'],
+.window-fields input[type='number'] {
+  background: var(--bg-3); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text-0); padding: 4px 6px; font-size: 12px;
+}
+.window-fields input[type='number'] { width: 72px; }
+.freeze { display: flex; align-items: center; gap: 6px; }
+.gate-note { margin: 0; font-size: 12px; color: var(--text-2); line-height: 1.7; }
+.caps-note {
+  margin: 0; font-size: 12px; color: var(--warn); line-height: 1.6;
+  border: 1px solid rgba(251, 191, 36, .35); border-radius: var(--radius-sm);
+  padding: 6px 10px; background: rgba(251, 191, 36, .06);
+}
+.policy-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.save-note { color: var(--green, #57d38c); font-size: 12px; }
+.save-error { color: var(--danger, #ef6b73); font-size: 12px; }
+.policy-unavailable { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--text-1); }
+.policy-unavailable p { margin: 0; }
+.muted { color: var(--text-2); }
 
 @media (max-width: 640px) {
   .state-card { align-items: flex-start; flex-wrap: wrap; }
   .state-card .btn { margin-left: 38px; }
-  .readiness { align-items: flex-start; flex-wrap: wrap; }
-  .readiness-detail { flex-basis: 100%; margin-left: 15px; }
 }
 </style>

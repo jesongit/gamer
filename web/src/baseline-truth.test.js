@@ -38,4 +38,17 @@ describe('清洁基线的凭据与版本展示', () => {
     expect(layout).not.toContain(legacyBadgeClass)
     expect(layout).not.toContain('>3<')
   })
+
+  it('混包告警（WEB-006）：前端构建版本由 vite 注入，与服务端版本比对不一致时 MainLayout 显示警告条', () => {
+    const layout = read('./layouts/MainLayout.vue')
+
+    expect(layout).toContain('__APP_VERSION__')          // 消费构建期注入的版本
+    expect(layout).toContain('versionMismatch')
+    expect(layout).toContain('前端与服务端版本不一致')
+    expect(layout).not.toMatch(/v\d+\.\d+\.\d+/)         // 警告条本身也不得硬编码版本
+
+    const vite = read('../vite.config.js') // vite.config.js 在 web/ 根，不在 web/src/
+    expect(vite).toContain('__APP_VERSION__')
+    expect(vite).toContain('package.json')               // 注入源 = web/package.json version
+  })
 })

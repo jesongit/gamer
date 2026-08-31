@@ -33,6 +33,13 @@
 
     <!-- 主区域 -->
     <div class="main">
+      <!-- WEB-006 混包告警：前端构建版本（vite 注入 __APP_VERSION__）与服务端 app.version 不一致时提示 -->
+      <div v-if="versionMismatch" class="mismatch-bar" role="alert">
+        <span class="mb-icon">⚠</span>
+        <span>
+          前端与服务端版本不一致（前端 {{ webVersion }} / 服务端 {{ systemVersion }}），可能存在混包部署，请刷新页面或重新部署后再使用。
+        </span>
+      </div>
       <header class="topbar">
         <div class="tb-left">
           <router-link to="/console" class="tb-device" :class="{ on: store.deviceId }">
@@ -86,6 +93,15 @@ const systemStateText = computed(() => {
 const systemStateClass = computed(() => (
   systemInfo.value?.readiness?.status === 'ready' ? 'ok' : 'off'
 ))
+
+// 混包告警（WEB-006）：webVersion 来自构建期注入（web/package.json，CI 保证与 Cargo 同源）；
+// 服务端版本以 /api/system/info 的 app.version 为准。-dev 后缀视为同版本线不算不一致。
+const webVersion = typeof __APP_VERSION__ !== 'undefined' ? String(__APP_VERSION__) : ''
+const normVer = (v) => String(v ?? '').replace(/-dev$/, '')
+const versionMismatch = computed(() => {
+  const server = normVer(systemInfo.value && systemInfo.value.app && systemInfo.value.app.version)
+  return !!webVersion && !!server && normVer(webVersion) !== server
+})
 
 async function loadSystemInfo() {
   try {
@@ -180,6 +196,14 @@ function stopRunning() {
 .sys-ver { margin-left: auto; color: var(--text-2); font-size: 11px; }
 
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg-0); }
+
+.mismatch-bar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  font-size: 12px; color: var(--warn, #fbbf24);
+  background: rgba(251, 191, 36, .08);
+  border-bottom: 1px solid rgba(251, 191, 36, .35);
+}
+.mb-icon { flex-shrink: 0; }
 
 .topbar {
   height: 52px; flex-shrink: 0; background: var(--bg-1);
