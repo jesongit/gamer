@@ -61,8 +61,9 @@ pub struct AppState {
     pub scripts: Arc<ScriptStore>,
     /// 每设备的活跃 viewer 注册表。
     pub viewers: crate::webrtc::ViewerMap,
-    /// 优雅停机信号
-    pub shutdown: tokio::sync::watch::Sender<bool>,
+    /// 统一停机协调器（OPS-001）：/api/shutdown 经它触发 drain，
+    /// 与 Ctrl+C / SIGTERM 共用同一路径
+    pub shutdown: Arc<crate::shutdown::ShutdownCoordinator>,
     /// 鉴权状态
     pub auth: Arc<auth::AuthState>,
 }
@@ -79,7 +80,7 @@ pub fn build_router(
     cfg: Config,
     viewers: crate::webrtc::ViewerMap,
     scripts: Arc<ScriptStore>,
-    shutdown: tokio::sync::watch::Sender<bool>,
+    shutdown: Arc<crate::shutdown::ShutdownCoordinator>,
     auth: Arc<auth::AuthState>,
 ) -> Router {
     let metrics = db.metrics();

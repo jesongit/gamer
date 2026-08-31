@@ -5,16 +5,20 @@
 //! 模板匹配 / YAML 自动化 / 定时任务全部在服务端执行。
 
 mod api;
+mod build_info;
 mod config;
 mod device;
 mod engine;
+mod file_migration;
 mod logging;
 mod matcher;
 mod metrics;
+mod migrations;
 mod run_manager;
 mod scheduler;
 mod script_v2;
 mod scripts;
+mod shutdown;
 mod store;
 mod task_params;
 mod webrtc;
@@ -90,20 +94,6 @@ async fn main() -> anyhow::Result<()> {
     // 远离 AppState，经 metrics::global() 取同一实例；未安装时惰性兜底，
     // 采集失败/缺失不影响业务行为（观测为旁路）
     metrics::install_global(db.metrics());
-    // 优雅停机信号（POST /api/shutdown 拆完会话后触发）；先于周期任务创建，
-    // 运行日志保留任务同挂此信号——服务关闭时随之结束
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    // 运行日志保留策略（DATA-004）：启动时已做一次清理，这个低频任务负责长期
-    // 运行实例。SQLite 调用放入 blocking 池，不占用 Tokio 核心线程；每次只删除小批量。
-    if cfg.log_retain_days > 0 {
-        let retention_db = db.clone();
-        let retain_days = cfg.log_retain_days;
-        tokio::spawn(run_log_retention(
-            retention_db,
-            retain_days,
-            shutdown_rx.clone(),
-        ));
-    }
 
     // 鉴权状态（阶段 2）：凭据链路解析 + 回环管理通道令牌 + 会话治理参数
     let credential = api::auth::resolve_credential(&cfg);
@@ -158,7 +148,38 @@ async fn main() -> anyhow::Result<()> {
     ));
     scheduler.start().await;
 
-    // HTTP + WebSocket API（停机信号已在上方创建，由 /api/shutdown 触发）
+    // 统一停机协调器（OPS-001）：API（POST /api/shutdown）/ Ctrl+C / SIGTERM
+    // 三种触发源共用同一条 drain 入口（复用原 /api/shutdown 的会话拆解序列）；
+    // 一次性语义——首次触发执行完整 drain，后续触发 no-op。watch 停机信号由
+    // 协调器持有，axum graceful 与运行日志保留任务挂其 receiver。
+    let shutdown = Arc::new(shutdown::ShutdownCoordinator::new(Arc::new({
+        let runs = runs.clone();
+        let viewers = viewers.clone();
+        let devices = devices.clone();
+        move || {
+            let runs = runs.clone();
+            let viewers = viewers.clone();
+            let devices = devices.clone();
+            Box::pin(shutdown::drain_sessions(runs, viewers, devices))
+                as futures_util::future::BoxFuture<'static, ()>
+        }
+    })));
+    shutdown::spawn_signal_listener(shutdown.clone());
+
+    // 运行日志保留策略（DATA-004）：启动时已做一次清理，这个低频任务负责长期
+    // 运行实例。SQLite 调用放入 blocking 池，不占用 Tokio 核心线程；每次只删除小批量。
+    if cfg.log_retain_days > 0 {
+        let retention_db = db.clone();
+        let retain_days = cfg.log_retain_days;
+        tokio::spawn(run_log_retention(
+            retention_db,
+            retain_days,
+            shutdown.subscribe(),
+        ));
+    }
+
+    // HTTP + WebSocket API（停机经协调器：/api/shutdown 与信号同路径）
+    let mut shutdown_rx = shutdown.subscribe();
     let app = api::build_router(
         db,
         devices,
@@ -167,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.clone(),
         viewers,
         scripts,
-        shutdown_tx,
+        shutdown,
         auth,
     );
     let listener = TcpListener::bind(cfg.listen_addr()).await?;

@@ -73,8 +73,6 @@ mod sec_tests {
 
     struct TestApp {
         app: Router,
-        /// 保活 shutdown 接收端，模拟 main 的优雅退出监听
-        _shutdown_rx: tokio::sync::watch::Receiver<bool>,
         #[allow(dead_code)]
         dir: std::path::PathBuf,
     }
@@ -180,7 +178,10 @@ mod sec_tests {
             false,
             Some("test-token".into()),
         ));
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        // 测试用协调器：无会话可拆，drain 为空操作（行为断言在 shutdown.rs 单测）
+        let shutdown = Arc::new(crate::shutdown::ShutdownCoordinator::new(Arc::new(|| {
+            Box::pin(async {})
+        })));
         let dir = cfg.data_dir.clone();
         let app = build_router(
             db,
@@ -190,14 +191,10 @@ mod sec_tests {
             cfg,
             viewers,
             scripts,
-            shutdown_tx,
+            shutdown,
             auth.clone(),
         );
-        TestApp {
-            app,
-            _shutdown_rx: shutdown_rx,
-            dir,
-        }
+        TestApp { app, dir }
     }
 
     fn req(

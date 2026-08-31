@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::metrics::Metrics;
+use crate::migrations::TARGET_SCHEMA_VERSION;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -91,7 +92,9 @@ const LOG_BATCH_SIZE: usize = 100;
 const LOG_PRUNE_BATCH_SIZE: i64 = 500;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_LOG_MESSAGE_CHARS: usize = 1024;
-const SCHEMA_VERSION: i64 = 1;
+/// 目标 schema 版本（v1 唯一基线）：权威定义在 `migrations::TARGET_SCHEMA_VERSION`
+/// （DATA-001 迁移框架），此处仅别名沿用
+const SCHEMA_VERSION: i64 = TARGET_SCHEMA_VERSION;
 
 #[cfg(test)]
 static DB_BLOCKING_GATE: tokio::sync::Semaphore =
@@ -127,12 +130,12 @@ enum DbCommand {
 
 fn open_connection(path: &Path) -> anyhow::Result<Connection> {
     let is_new_database = !path.exists();
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;\nPRAGMA synchronous = NORMAL;\nPRAGMA foreign_keys = ON;",
     )?;
-    ensure_schema(&conn, is_new_database)?;
+    ensure_schema(&mut conn, is_new_database)?;
     Ok(conn)
 }
 
@@ -186,7 +189,7 @@ CREATE INDEX idx_scheduled_runs_created_at
     ON scheduled_runs(created_at DESC);
 "#;
 
-fn ensure_schema(conn: &Connection, is_new_database: bool) -> anyhow::Result<()> {
+fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if is_new_database {
         anyhow::ensure!(
@@ -207,12 +210,13 @@ fn ensure_schema(conn: &Connection, is_new_database: bool) -> anyhow::Result<()>
     }
 }
 
-/// Future schema upgrades have one explicit entry point. No migration from the
-/// unversioned development database (migration 0) is implemented.
-fn apply_schema_migrations(_conn: &Connection, from_version: i64) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "unsupported database schema version {from_version}; expected schema v1; back up and remove gamer.db (future versions require an explicit migration)"
-    )
+/// Future schema upgrades have one explicit entry point (DATA-001 numbered
+/// migration framework, see `crate::migrations`). No migration from the
+/// unversioned development database (migration 0) is implemented: `user_version=0`
+/// is rejected before this function is ever reached.
+fn apply_schema_migrations(conn: &mut Connection, from_version: i64) -> anyhow::Result<()> {
+    crate::migrations::run_migrations(conn, from_version, crate::migrations::MIGRATIONS)?;
+    validate_schema_v1(conn)
 }
 
 fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {

@@ -1005,28 +1005,15 @@ pub(super) fn spawn_watchdog(st: AppState) {
     });
 }
 
-/// 优雅停机（gamer.ps1 stop/rebuild 先调此端点，超时才兜底硬杀）：
-/// ① RunManager drain——先拒绝新 run（503），等待活动任务结束，超时强停
-/// （RUN-001：服务关闭先停止接收新任务再取消/等待活动任务）；
-/// ② 踢所有 viewer（只关 peer 不发 taken_over——那是"被顶替"信号会让页面放弃自动
-/// 重连；普通断开页面会在服务重启后自动重连）；③ 拆所有 scrcpy 会话/清 reverse
-/// 隧道（防孤儿 adb 楔死后续连接，见 DeviceManager::shutdown_all）；④ 触发进程退出
+/// 优雅停机（gamer.ps1 stop/rebuild 先调此端点，超时才兜底硬杀）。
+/// OPS-001：drain 序列收口进 [`crate::shutdown::ShutdownCoordinator`]——
+/// ① RunManager drain（拒绝新 run → 等待活动任务，宽限 10s）；② 踢全部 viewer；
+/// ③ 拆所有 scrcpy 会话/清 reverse 隧道（防孤儿 adb 楔死后续连接）——与
+/// Ctrl+C / SIGTERM 信号触发共用同一路径；并发/重复请求由协调器一次性语义
+/// 吸收（只执行一次，其余等待完成后返回）。
 pub(super) async fn api_shutdown(State(st): State<AppState>) -> Response {
     info!("graceful shutdown requested (POST /api/shutdown)");
-    // RunManager drain（宽限 10s；活动脚本短则提前返回）
-    st.runs.begin_shutdown(Duration::from_secs(10)).await;
-    // 踢 viewer：关 WebRTC peer（ws 循环随 peer_closed 退出），否则常驻 WS 连接
-    // 会让 axum 的 graceful drain 一直等不到收尾
-    let viewers = st.viewers.lock().unwrap().clone();
-    for (id, vh) in &viewers {
-        info!(device = %id, "shutdown: closing viewer peer");
-        vh.running.store(false, std::sync::atomic::Ordering::SeqCst);
-        if let Some(p) = vh.peer.upgrade() {
-            let _ = p.close().await;
-        }
-    }
-    st.devices.shutdown_all().await;
-    let _ = st.shutdown.send(true);
+    st.shutdown.request().await;
     Json(serde_json::json!({"ok": true})).into_response()
 }
 
