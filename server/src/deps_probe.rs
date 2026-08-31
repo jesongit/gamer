@@ -330,14 +330,20 @@ fn first_version_token(output: &str) -> Option<String> {
     None
 }
 
+/// 版本 token 规则：受限长度（≤64）的 ASCII 字母数字与 `. ~ - _ +` 组合，
+/// 至少含一个数字。不要求含 `.`——锁定的 BtbN 构建串
+/// `N-126335-gb32f8d1c23-20260830` 无点（release/dependencies.lock.toml），
+/// 曾因「必须含点」被误判非法 → ffmpeg 探针恒 broken、/health/ready 永 503。
+/// 空串 / 超长 / 含路径分隔符（`/` `\`）/ 含其他符号一律拒绝（防把命令行
+/// 或路径尾巴当版本号上报）。
 fn valid_version_token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
-        && value.contains('.')
+        && !value.contains(['/', '\\'])
         && value.chars().any(|ch| ch.is_ascii_digit())
         && value
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ".-_+".contains(ch))
+            .all(|ch| ch.is_ascii_alphanumeric() || ".~_+-".contains(ch))
 }
 
 #[cfg(test)]
@@ -539,7 +545,31 @@ mod tests {
             Some("1.2.3.4-rc1+b7".into())
         );
         assert!(!valid_version_token("C:/private/tool.exe"));
-        assert!(!valid_version_token("2026"));
+    }
+
+    #[test]
+    fn version_token_accepts_dotless_btbn_build_tag() {
+        // 锁定的 BtbN 构建串无点（release/dependencies.lock.toml §ffmpeg）：
+        // 曾被「必须含点」规则误判非法 → ffmpeg 探针恒 broken、/health/ready 永 503
+        let btbn = "N-126335-gb32f8d1c23-20260830";
+        assert!(valid_version_token(btbn));
+        assert_eq!(
+            first_version_token(&format!(
+                "ffmpeg version {btbn} Copyright (c) 2000-2026 the FFmpeg developers"
+            )),
+            Some(btbn.to_string())
+        );
+        // 合理形态：带点的常规版本 + tilde/加号修饰
+        assert!(valid_version_token("37.0.1"));
+        assert!(valid_version_token("1.2.3~rc1+build.2"));
+        assert!(valid_version_token("2026"));
+        // 拒绝：空串 / 超长（>64）/ 含路径分隔符 / 含非法符号
+        assert!(!valid_version_token(""));
+        assert!(!valid_version_token(&"v1a".repeat(22)));
+        assert!(!valid_version_token("a/b.exe"));
+        assert!(!valid_version_token(r"C:\tools\ffmpeg.exe"));
+        assert!(!valid_version_token("ver:1.2"));
+        assert!(!valid_version_token("no digits here!"));
     }
 
     #[test]
