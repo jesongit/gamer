@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::metrics::Metrics;
-use crate::migrations::TARGET_SCHEMA_VERSION;
+use crate::migrations::TARGET_SCHEMA;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -92,9 +92,9 @@ const LOG_BATCH_SIZE: usize = 100;
 const LOG_PRUNE_BATCH_SIZE: i64 = 500;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_LOG_MESSAGE_CHARS: usize = 1024;
-/// 目标 schema 版本（v1 唯一基线）：权威定义在 `migrations::TARGET_SCHEMA_VERSION`
-/// （DATA-001 迁移框架），此处仅别名沿用
-const SCHEMA_VERSION: i64 = TARGET_SCHEMA_VERSION;
+/// 目标 schema 版本（v1 唯一基线）：权威定义在 `migrations::TARGET_SCHEMA`
+/// （DATA-003 兼容常量），此处仅别名沿用
+const SCHEMA_VERSION: i64 = TARGET_SCHEMA;
 
 #[cfg(test)]
 static DB_BLOCKING_GATE: tokio::sync::Semaphore =
@@ -126,6 +126,12 @@ enum DbCommand {
         completion: Option<Sender<anyhow::Result<()>>>,
     },
     Shutdown,
+}
+
+/// 数据库主文件路径（DATA-005 maintenance CLI 与 Store::open 共用同一取值，
+/// 保证 CLI inspect/migrate 与启动路径打开的是同一个文件）
+pub(crate) fn db_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("gamer.db")
 }
 
 fn open_connection(path: &Path) -> anyhow::Result<Connection> {
@@ -219,7 +225,9 @@ fn apply_schema_migrations(conn: &mut Connection, from_version: i64) -> anyhow::
     validate_schema_v1(conn)
 }
 
-fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
+/// v1 结构校验。启动路径与 maintenance CLI（DATA-005 migrate 迁移后校验）
+/// 共用同一实现，保证「迁移后开放」的判定一致。
+pub(crate) fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )?;
@@ -555,7 +563,7 @@ impl Drop for Store {
 impl Store {
     pub fn open(cfg: &Config) -> anyhow::Result<Self> {
         std::fs::create_dir_all(&cfg.data_dir)?;
-        let path = cfg.data_dir.join("gamer.db");
+        let path = db_path(&cfg.data_dir);
         let (tx, rx) = mpsc::sync_channel(DB_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
         let metrics = Arc::new(Metrics::default());
@@ -583,7 +591,7 @@ impl Store {
             }
         }
         let store = Self {
-            path: cfg.data_dir.join("gamer.db"),
+            path: db_path(&cfg.data_dir),
             tx,
             worker: Mutex::new(Some(worker)),
             metrics,
@@ -1322,6 +1330,137 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// DATA-002：无版本旧库被拒绝后，数据库文件任何字节都不得被改写——
+    /// 「拒绝且不改数据」的可观测断言。准备阶段先按 open_connection 的同款
+    /// PRAGMA 预置 WAL 位并干净关闭，使快照前后唯一的差异来源就是拒绝路径本身。
+    #[test]
+    fn unversioned_rejection_leaves_database_bytes_unchanged() {
+        let (cfg, dir) = temp_config("schema-bytes");
+        let db_path = dir.join("gamer.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+            // 干净关闭：冲刷一切挂起状态，文件字节此后稳定
+        }
+        let before = fs::read(&db_path).unwrap();
+
+        let error = match Store::open(&cfg) {
+            Ok(_) => panic!("unversioned database must fail fast"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unversioned"));
+
+        let after = fs::read(&db_path).unwrap();
+        assert_eq!(
+            before, after,
+            "拒绝无版本旧库时不得改写数据库文件的任何字节"
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// DATA-002：全新建库得到**确定的 schema v1**——表/列（含顺序、类型、
+    /// NOT NULL、PK）与索引（含唯一性、列序）的完整快照与硬编码期望逐一比对。
+    /// 任何 DDL 漂移（新增列、改类型、动索引）都必须显式更新此快照并同步
+    /// schema-policy 契约，防止「新库 schema」悄悄分叉。
+    #[test]
+    fn new_database_schema_matches_v1_snapshot() {
+        let (cfg, dir) = temp_config("schema-snapshot");
+        let db_path = dir.join("gamer.db");
+        let store = Store::open(&cfg).unwrap();
+        drop(store);
+
+        let conn = Connection::open(&db_path).unwrap();
+        let actual = dump_schema(&conn);
+        let expected = serde_json::json!({
+            "user_version": 1,
+            "tables": [
+                {
+                    "name": "devices",
+                    "columns": [
+                        { "name": "id", "type": "TEXT", "notnull": 0, "pk": 1 },
+                        { "name": "name", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "kind", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "addr", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "screen_mode", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "vd_res", "type": "TEXT", "notnull": 0, "pk": 0 },
+                        { "name": "vd_dpi", "type": "INTEGER", "notnull": 0, "pk": 0 },
+                        { "name": "pkg", "type": "TEXT", "notnull": 0, "pk": 0 },
+                        { "name": "fps", "type": "INTEGER", "notnull": 0, "pk": 0 },
+                        { "name": "created_at", "type": "TEXT", "notnull": 1, "pk": 0 }
+                    ]
+                },
+                {
+                    "name": "logs",
+                    "columns": [
+                        { "name": "id", "type": "INTEGER", "notnull": 0, "pk": 1 },
+                        { "name": "time", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "device_id", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "script_id", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "level", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "msg", "type": "TEXT", "notnull": 1, "pk": 0 }
+                    ]
+                },
+                {
+                    "name": "scheduled_runs",
+                    "columns": [
+                        { "name": "id", "type": "INTEGER", "notnull": 0, "pk": 1 },
+                        { "name": "task_id", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "scheduled_at", "type": "INTEGER", "notnull": 1, "pk": 0 },
+                        { "name": "state", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "run_id", "type": "TEXT", "notnull": 0, "pk": 0 },
+                        { "name": "error", "type": "TEXT", "notnull": 0, "pk": 0 },
+                        { "name": "created_at", "type": "TEXT", "notnull": 1, "pk": 0 }
+                    ]
+                },
+                {
+                    "name": "tasks",
+                    "columns": [
+                        { "name": "id", "type": "TEXT", "notnull": 0, "pk": 1 },
+                        { "name": "name", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "cron", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "script_id", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "device_id", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "enabled", "type": "INTEGER", "notnull": 1, "pk": 0 },
+                        { "name": "last_result", "type": "TEXT", "notnull": 0, "pk": 0 },
+                        { "name": "last_run_at", "type": "TEXT", "notnull": 0, "pk": 0 },
+                        { "name": "created_at", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "args_json", "type": "TEXT", "notnull": 1, "pk": 0 },
+                        { "name": "param_signature", "type": "TEXT", "notnull": 1, "pk": 0 }
+                    ]
+                }
+            ],
+            "indexes": [
+                {
+                    "name": "idx_logs_time",
+                    "table": "logs",
+                    "unique": 0,
+                    "columns": ["time"]
+                },
+                {
+                    "name": "idx_scheduled_runs_created_at",
+                    "table": "scheduled_runs",
+                    "unique": 0,
+                    "columns": ["created_at"]
+                },
+                {
+                    "name": "uq_scheduled_runs_task_time",
+                    "table": "scheduled_runs",
+                    "unique": 1,
+                    "columns": ["task_id", "scheduled_at"]
+                }
+            ]
+        });
+        assert_eq!(
+            actual, expected,
+            "新库 schema 与 v1 基线快照不一致——如为有意的 DDL 变更，请同步更新本快照、\n\
+             validate_schema_v1 与 release/contracts/schema-policy.md"
+        );
+
+        drop(conn);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn unsupported_schema_version_is_rejected_without_migration() {
         let (cfg, dir) = temp_config("schema-unsupported");
@@ -1538,6 +1677,82 @@ mod tests {
         assert!(store.get_device("missing").unwrap().is_none());
         drop(store);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// DATA-002 schema 快照转储：user_version + 全部表（列名/类型/NOT NULL/PK，
+    /// 按声明序）+ 全部显式索引（唯一性、列序，按名称排序）。只转储确定形态，
+    /// 内部 sqlite_autoindex_*（TEXT PK 隐式索引）不进快照。
+    fn dump_schema(conn: &Connection) -> serde_json::Value {
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let mut tables = Vec::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for table in names {
+            let mut columns = Vec::new();
+            let mut cs = conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let rows = cs
+                .query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "name": row.get::<_, String>(1)?,
+                        "type": row.get::<_, String>(2)?,
+                        "notnull": row.get::<_, i64>(3)?,
+                        "pk": row.get::<_, i64>(5)?,
+                    }))
+                })
+                .unwrap();
+            for row in rows {
+                columns.push(row.unwrap());
+            }
+            tables.push(serde_json::json!({ "name": table, "columns": columns }));
+        }
+
+        let mut indexes = Vec::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' \
+                 AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for (name, table) in rows {
+            let unique: i64 = conn
+                .query_row(
+                    "SELECT \"unique\" FROM pragma_index_list(?) WHERE name = ?",
+                    rusqlite::params![table, name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut columns = Vec::new();
+            let mut cs = conn.prepare(&format!("PRAGMA index_info({name})")).unwrap();
+            let rows = cs.query_map([], |row| row.get::<_, String>(2)).unwrap();
+            for row in rows {
+                columns.push(row.unwrap());
+            }
+            indexes.push(serde_json::json!({
+                "name": name,
+                "table": table,
+                "unique": unique,
+                "columns": columns,
+            }));
+        }
+
+        serde_json::json!({ "user_version": version, "tables": tables, "indexes": indexes })
     }
 
     #[tokio::test]

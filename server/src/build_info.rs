@@ -13,16 +13,8 @@
 //! | `target` | 当前 target triple | build.rs 注入；再缺省退化为 `<arch>-<os>` |
 //!
 //! 同名环境变量在**运行期**也可注入（仅编译期缺失时生效——编译期值代表
-//! 二进制的真实构建信息，运行期不允许覆盖改写）。消费方接线属 SYS-001 /
-//! 后续批次；本批次交付模块与单测，不改动既有启动日志。
-//!
-//! 注意：`api::system` 另有一个面向 `/api/system/info` 的旧版 JSON 拼装
-//! `build_info()`（独立字段探测链），本模块与其互不依赖；后续 SYS-001
-//! 收口时再统一。
-
-// 消费方接线（SYS-001 /api/system/info、启动日志收口）属后续批次；本批次
-// 交付模块本体 + 单测，运行路径暂无引用，整体豁免 dead_code。
-#![allow(dead_code)]
+//! 二进制的真实构建信息，运行期不允许覆盖改写）。消费方：SYS-001
+//! `/api/system/info` 的 `app` 组（字段逐一对应，commit 不再叫 git_commit）。
 
 use std::sync::OnceLock;
 

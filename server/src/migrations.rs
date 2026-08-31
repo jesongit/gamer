@@ -3,7 +3,7 @@
 //! 与契约逐条对齐的规则：
 //! - `PRAGMA user_version` 是唯一权威版本标记；**不引入** `schema_migrations` 表，
 //!   不用文件名/旁路标记推断版本；
-//! - v1 是唯一基线（`TARGET_SCHEMA_VERSION=1`），迁移表当前为空；后续迁移从
+//! - v1 是唯一基线（[`TARGET_SCHEMA`] = 1），迁移表当前为空；后续迁移从
 //!   v1→v2 起逐级编号，静态注册于 [`MIGRATIONS`]，禁止运行期动态拼装；
 //! - `user_version=0`（无版本旧库）在进入本模块前即被 [`crate::store`] 明确拒绝
 //!   ——不存在 migration 0，本框架永不补齐/改写无版本库；
@@ -14,8 +14,11 @@
 //! - `user_version > target`（数据库比 binary 新）→ 明确拒绝启动，错误含实际
 //!   版本与支持范围（契约 §3 硬规则，不做静默降读）。
 //!
-//! 兼容常量（契约 §3，DATA-003 会将 min/max/target 暴露进 diagnostics）：
-//! 当前形态 `min_read_schema = target_schema = max_read_schema = 1`。
+//! 兼容常量（契约 §3，DATA-003 常量化）：[`MIN_READ_SCHEMA`] / [`MAX_READ_SCHEMA`] /
+//! [`TARGET_SCHEMA`] 是本 binary 的兼容声明唯一取值源——启动路径（[`crate::store`]）、
+//! maintenance CLI（DATA-005 inspect/migrate）与 `/api/system/info` 的 schema 字段
+//! 全部引用这组常量，禁止各处自抄数字。当前形态 `min = target = max = 1`；
+//! 取值变更必须与 release/contracts/schema-policy.md §3 取值表同步提交（§8）。
 //!
 //! 生产路径：[`crate::store`] 的 `apply_schema_migrations` 先跑 [`run_migrations`]
 //! 再做 `validate_schema_v1`。测试可用临时迁移表直接驱动 [`run_migrations`]，
@@ -23,10 +26,19 @@
 
 use rusqlite::{Connection, Transaction};
 
-/// 本 binary 迁移完成后的目标 schema 版本（v1 唯一基线）
-pub(crate) const TARGET_SCHEMA_VERSION: i64 = 1;
 /// 本 binary 可打开并继续迁移的最低 user_version（v1 基线 → 1；0 永远拒绝）
-pub(crate) const MIN_READ_SCHEMA_VERSION: i64 = 1;
+pub const MIN_READ_SCHEMA: i64 = 1;
+/// 可打开的最高 user_version；高于此值拒绝启动（schema-policy §3/§4 硬规则）
+pub const MAX_READ_SCHEMA: i64 = 1;
+/// 本 binary 迁移完成后的目标 schema 版本（v1 唯一基线；当前形态 target = max）
+pub const TARGET_SCHEMA: i64 = 1;
+
+/// 契约 §3 冻结约束 `min_read ≤ target ≤ max_read` 编译期固化：取值漂移在
+/// 编译期即失败，不等运行期诊断
+const _: () = assert!(
+    MIN_READ_SCHEMA <= TARGET_SCHEMA && TARGET_SCHEMA <= MAX_READ_SCHEMA,
+    "schema-policy §3 frozen constraint violated: min_read_schema <= target_schema <= max_read_schema",
+);
 
 /// 单条迁移的执行体：在迁移事务内完成该级全部 DDL/数据修复。
 /// `user_version` 推进由框架统一负责（与 DDL 同事务），迁移体不得自行推进。
@@ -45,7 +57,7 @@ pub(crate) struct Migration {
 pub(crate) static MIGRATIONS: &[Migration] = &[];
 
 /// 把 `current` 逐级迁移到目标版本。目标 = `migrations` 注册表覆盖到的最高
-/// 版本（生产路径注册表为空 → 即 [`TARGET_SCHEMA_VERSION`]）；测试注入临时
+/// 版本（生产路径注册表为空 → 即 [`TARGET_SCHEMA`]）；测试注入临时
 /// 迁移链验证框架逻辑，不改静态表、不触碰无版本库拒绝语义。
 pub(crate) fn run_migrations(
     conn: &mut Connection,
@@ -56,22 +68,23 @@ pub(crate) fn run_migrations(
         .iter()
         .map(|m| m.to)
         .max()
-        .unwrap_or(TARGET_SCHEMA_VERSION);
-    // 数据库比 binary 新：硬规则拒绝（错误含实际值与支持范围，契约 §3）
+        .unwrap_or(TARGET_SCHEMA);
+    // 数据库比 binary 新：硬规则拒绝（契约 §3，DATA-003——错误必须含实际
+    // user_version、支持范围 [min, max] 与 target，可诊断）
     if current > target {
         anyhow::bail!(
             "unsupported database schema version {current}: newer than the highest version \
-             this binary supports (supported range [{MIN_READ_SCHEMA_VERSION}, {target}], \
-             target {target}); downgrade is not supported; restore the snapshot taken \
-             before the upgrade"
+             this binary supports (supported range [{MIN_READ_SCHEMA}, {MAX_READ_SCHEMA}], \
+             target {TARGET_SCHEMA}, registry target {target}); downgrade is not supported; \
+             restore the snapshot taken before the upgrade"
         );
     }
-    if current < MIN_READ_SCHEMA_VERSION {
+    if current < MIN_READ_SCHEMA {
         // user_version=0 的对外拒绝在 store::ensure_schema（含"备份后重建"指引），
         // 此处为防御性兜底
         anyhow::bail!(
             "database schema version {current} is below the minimum supported version \
-             {MIN_READ_SCHEMA_VERSION}; unversioned databases are never migrated"
+             {MIN_READ_SCHEMA}; unversioned databases are never migrated"
         );
     }
 
@@ -134,11 +147,38 @@ mod tests {
         }
     }
 
+    /// DATA-003 门禁：静态注册表与兼容常量必须一致（schema-policy §8——
+    /// 代码常量、迁移注册表与契约取值表同批提交，任何一侧漂移在此失败）
+    #[test]
+    fn static_registry_and_compat_constants_are_coherent() {
+        let registry_target = MIGRATIONS
+            .iter()
+            .map(|m| m.to)
+            .max()
+            .unwrap_or(TARGET_SCHEMA);
+        assert_eq!(
+            registry_target, MAX_READ_SCHEMA,
+            "MIGRATIONS 注册表覆盖目标必须等于 MAX_READ_SCHEMA（schema-policy §8 同步规则）"
+        );
+        assert_eq!(
+            TARGET_SCHEMA, MAX_READ_SCHEMA,
+            "当前形态 target = max（启动即迁满，契约 §3）"
+        );
+        // 注册表必须从 MIN 起连续编号，不缺级
+        for v in MIN_READ_SCHEMA..registry_target {
+            assert!(
+                MIGRATIONS.iter().any(|m| m.from == v && m.to == v + 1),
+                "missing registered migration v{v} -> v{}",
+                v + 1
+            );
+        }
+    }
+
     #[test]
     fn empty_table_at_target_is_noop() {
         // 空迁移表 + u=1（已达 target）：no-op，结构校验语义不变
-        let mut conn = versioned_memory_db(TARGET_SCHEMA_VERSION);
-        run_migrations(&mut conn, TARGET_SCHEMA_VERSION, MIGRATIONS).unwrap();
+        let mut conn = versioned_memory_db(TARGET_SCHEMA);
+        run_migrations(&mut conn, TARGET_SCHEMA, MIGRATIONS).unwrap();
         assert_eq!(user_version(&conn), 1);
     }
 
@@ -210,11 +250,22 @@ mod tests {
             let mut conn = versioned_memory_db(too_new);
             let err = run_migrations(&mut conn, too_new, MIGRATIONS).unwrap_err();
             let msg = err.to_string();
+            // DATA-003：错误必须可诊断——含实际 user_version、支持范围 [min, max]
+            // 与 target（取值直接引用兼容常量，不重复手写数字）
             assert!(
                 msg.contains(&format!("unsupported database schema version {too_new}")),
                 "{msg}"
             );
-            assert!(msg.contains("[1, 1]"), "错误应含支持范围: {msg}");
+            assert!(
+                msg.contains(&format!(
+                    "supported range [{MIN_READ_SCHEMA}, {MAX_READ_SCHEMA}]"
+                )),
+                "错误应含支持范围: {msg}"
+            );
+            assert!(
+                msg.contains(&format!("target {TARGET_SCHEMA}")),
+                "错误应含 target: {msg}"
+            );
         }
     }
 

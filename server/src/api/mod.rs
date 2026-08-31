@@ -109,10 +109,15 @@ pub fn build_router(
         .route("/api/logout", post(auth::api_logout))
         .route("/health/live", get(|| async { (StatusCode::OK, "ok") }))
         .route("/health/ready", get(system::api_health_ready))
+        .route("/health/shutdown", get(system::api_shutdown_state))
         .route("/metrics", get(system::api_metrics))
-        .fallback_service(
-            ServeDir::new("./web-dist").fallback(ServeDir::new("./web-dist/index.html")),
-        )
+        .fallback_service({
+            // PATH-002：web-dist 相对 GAMER_APP_DIR（应用版本目录）解析；
+            // 未注入回退现状 cwd 相对（开发流不变）。ServeDir 只读取该目录，
+            // 版本目录只读时前端仍可服务
+            let web_dist = cfg.web_dist_dir();
+            ServeDir::new(&web_dist).fallback(ServeDir::new(web_dist.join("index.html")))
+        })
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(BODY_LIMIT_PUBLIC));
 

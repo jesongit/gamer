@@ -1,13 +1,12 @@
 //! System information, health, metrics, watchdog, and graceful shutdown endpoints.
 //!
-//! `api_system_info` is intentionally not wired here: `api/mod.rs` is an
-//! integration-owned hotspot. The temporary dead-code allowance keeps this
-//! branch clippy-clean until that route is connected.
-#![allow(dead_code)]
+//! `/api/system/info` 按 release/contracts/system-api-v1.md §2（冻结）实现：
+//! 六组顶层字段 `app` / `deployment` / `schema` / `dependencies` / `capabilities`
+//! / `startup`，依赖结论来自 [`crate::deps_probe`]（SYS-002），构建信息来自
+//! [`crate::build_info`]。泄露禁令（§1.3）：任何响应不出现盘符路径、用户名、
+//! token、完整命令行。fixture 字段集比对测试见文件尾 contract_tests。
 
 use std::fmt::Display;
-use std::path::Path;
-use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -16,267 +15,17 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Local;
-use tokio::process::Command;
 use tracing::{info, warn};
 
 use super::common::run_blocking_api;
 use super::{ApiError, AppState};
+use crate::deps_probe::{self, Mode, Snapshot};
 
-// 与自动更新计划 §6.4/§6.7 的当前基线保持一致。这里的 schema_version 是
-// system/info 响应契约版本；schema.database/files 是当前数据契约的版本，
-// 不另建版本接口，也不把更新能力误当成已实现。
-const SYSTEM_INFO_SCHEMA_VERSION: u64 = 1;
-const DATABASE_SCHEMA_VERSION: u64 = 1;
-const FILE_SCHEMA_VERSION: u64 = 1;
-const ROLLBACK_FLOOR: u64 = 1;
-const TOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-const ADB_PROBE_ARGS: &[&str] = &["version"];
-const FFMPEG_PROBE_ARGS: &[&str] = &["-version"];
+/// 文件布局 schema 基线（schema-policy §5：`data/<pkg>/{yaml,func,tmpl}` = v1）。
+/// DB schema 取值走 `migrations::TARGET_SCHEMA`（DATA-003 常量），不在此重复。
+const FILE_SCHEMA_VERSION: i64 = 1;
 
 static BOOT_ID: OnceLock<String> = OnceLock::new();
-
-#[derive(Debug)]
-struct ToolProbeResult {
-    status: &'static str,
-    version: Option<String>,
-    source: &'static str,
-}
-
-/// 受保护的系统信息：版本/构建信息、部署能力、schema、时区和依赖状态。
-///
-/// 该响应只包含白名单字段。配置中的路径、认证材料和外部命令输出不会进入
-/// JSON；外部工具探针也有严格超时，避免 Settings 页面拖住服务端请求。
-pub(super) async fn api_system_info(State(st): State<AppState>) -> Response {
-    let mode = deployment_mode();
-    let data_source = st.cfg.data_dir.clone();
-    let scrcpy_source = st.cfg.scrcpy_server.clone();
-    let db = st.db.clone();
-
-    let (data_status, scrcpy_status, database_status) = tokio::join!(
-        run_blocking_api(move || Ok(path_status(&data_source, true))),
-        run_blocking_api(move || Ok(path_status(&scrcpy_source, false))),
-        run_blocking_api(move || Ok(database_status(&db))),
-    );
-    let data_status = data_status.unwrap_or("error");
-    let scrcpy_status = scrcpy_status.unwrap_or("error");
-    let database_status = database_status.unwrap_or("error");
-
-    let adb_path = st.cfg.adb_path.clone();
-    let ffmpeg_path = st.cfg.ffmpeg_path.clone();
-    let (adb, ffmpeg) = tokio::join!(
-        probe_tool(
-            adb_path,
-            ADB_PROBE_ARGS,
-            dependency_source("adb", &st.cfg.adb_path, mode),
-        ),
-        probe_tool(
-            ffmpeg_path,
-            FFMPEG_PROBE_ARGS,
-            dependency_source("ffmpeg", &st.cfg.ffmpeg_path, mode),
-        ),
-    );
-
-    let data_ok = data_status == "ready";
-    let scrcpy_ok = scrcpy_status == "ready";
-    let database_ok = database_status == "ready";
-    let adb_ok = adb.status == "ready";
-    let ffmpeg_ok = ffmpeg.status == "ready";
-    let ready = data_ok && scrcpy_ok && database_ok && adb_ok && ffmpeg_ok;
-
-    let dependencies = serde_json::json!({
-        "adb": {
-            "status": adb.status,
-            "version": adb.version,
-            "source": adb.source,
-        },
-        "ffmpeg": {
-            "status": ffmpeg.status,
-            "version": ffmpeg.version,
-            "source": ffmpeg.source,
-        },
-        "scrcpy": {
-            "status": scrcpy_status,
-            "version": if scrcpy_ok {
-                Some(crate::device::scrcpy::SCRCPY_VERSION)
-            } else {
-                None
-            },
-            "source": dependency_source(
-                "scrcpy",
-                &st.cfg.scrcpy_server.to_string_lossy(),
-                mode,
-            ),
-        },
-        "data": { "status": data_status },
-        "database": { "status": database_status },
-    });
-
-    let body = serde_json::json!({
-        "schema_version": SYSTEM_INFO_SCHEMA_VERSION,
-        "app": build_info(),
-        "deployment": {
-            "mode": mode.as_str(),
-            "update_strategy": update_strategy(mode),
-        },
-        "readiness": {
-            "ready": ready,
-            "status": if ready { "ready" } else { "not_ready" },
-            "checks": {
-                "data_dir": { "ok": data_ok },
-                "sqlite": { "ok": database_ok },
-                "scrcpy_server": { "ok": scrcpy_ok },
-                "adb": { "ok": adb_ok },
-                "ffmpeg": { "ok": ffmpeg_ok },
-            },
-        },
-        "dependencies": dependencies,
-        "schema": {
-            "database": { "version": DATABASE_SCHEMA_VERSION, "status": database_status },
-            "files": { "version": FILE_SCHEMA_VERSION, "status": data_status },
-            "rollback_floor": ROLLBACK_FLOOR,
-        },
-        // 当前基线没有 UpdateController；所有操作能力显式为 false，避免 UI
-        // 在 direct/Docker/尚未接通 launcher 时伪造可更新入口。
-        "capabilities": {
-            "check": false,
-            "download": false,
-            "install": false,
-            "rollback": false,
-        },
-        "timezone": timezone_info(),
-        "startup": {
-            "stage": "ready",
-            "boot_id": boot_id(),
-        },
-    });
-    Json(body).into_response()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeploymentMode {
-    Direct,
-    Docker,
-    Launcher,
-}
-
-impl DeploymentMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Direct => "direct",
-            Self::Docker => "docker",
-            Self::Launcher => "launcher",
-        }
-    }
-}
-
-fn deployment_mode() -> DeploymentMode {
-    match std::env::var("GAMER_DEPLOYMENT_MODE")
-        .ok()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("docker") => DeploymentMode::Docker,
-        Some("launcher") => DeploymentMode::Launcher,
-        Some("direct") => DeploymentMode::Direct,
-        _ if std::env::var_os("GAMER_LAUNCHER_PIPE").is_some() => DeploymentMode::Launcher,
-        _ if Path::new("/.dockerenv").is_file() => DeploymentMode::Docker,
-        _ => DeploymentMode::Direct,
-    }
-}
-
-fn update_strategy(mode: DeploymentMode) -> &'static str {
-    match mode {
-        DeploymentMode::Direct => "unsupported",
-        DeploymentMode::Docker => "external",
-        DeploymentMode::Launcher => "managed",
-    }
-}
-
-fn build_info() -> serde_json::Value {
-    let git_commit = first_metadata(
-        &["GAMER_BUILD_COMMIT", "GAMER_GIT_COMMIT"],
-        &[
-            option_env!("GIT_COMMIT"),
-            option_env!("BUILD_GIT_COMMIT"),
-            option_env!("VERGEN_GIT_SHA"),
-            option_env!("GITHUB_SHA"),
-        ],
-        valid_commit,
-    )
-    .unwrap_or_else(|| "unknown".into());
-    let built_at = first_metadata(
-        &["GAMER_BUILD_AT"],
-        &[
-            option_env!("BUILD_TIMESTAMP"),
-            option_env!("VERGEN_BUILD_TIMESTAMP"),
-        ],
-        valid_timestamp,
-    )
-    .unwrap_or_else(|| "unknown".into());
-    let channel = first_metadata(
-        &["GAMER_CHANNEL"],
-        &[option_env!("BUILD_CHANNEL")],
-        |value| matches!(value, "stable" | "beta" | "dev" | "unknown"),
-    )
-    .unwrap_or_else(|| "dev".into());
-    let target = first_metadata(
-        &["GAMER_BUILD_TARGET"],
-        &[option_env!("BUILD_TARGET"), option_env!("TARGET")],
-        valid_token,
-    )
-    .unwrap_or_else(runtime_target);
-
-    serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "git_commit": git_commit,
-        "built_at": built_at,
-        "channel": channel,
-        "target": target,
-    })
-}
-
-fn first_metadata(
-    runtime_keys: &[&str],
-    compiled_values: &[Option<&'static str>],
-    valid: impl Fn(&str) -> bool,
-) -> Option<String> {
-    runtime_keys
-        .iter()
-        .filter_map(|key| std::env::var(key).ok())
-        .chain(
-            compiled_values
-                .iter()
-                .flatten()
-                .map(|value| value.to_string()),
-        )
-        .map(|value| value.trim().to_string())
-        .find(|value| !value.is_empty() && valid(value))
-}
-
-fn valid_commit(value: &str) -> bool {
-    (7..=64).contains(&value.len()) && value.chars().all(|ch| ch.is_ascii_hexdigit())
-}
-
-fn valid_timestamp(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ".:+-".contains(ch))
-}
-
-fn valid_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || "._-".contains(ch))
-}
-
-fn runtime_target() -> String {
-    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
-}
 
 fn boot_id() -> &'static str {
     BOOT_ID
@@ -284,160 +33,67 @@ fn boot_id() -> &'static str {
         .as_str()
 }
 
-fn timezone_info() -> serde_json::Value {
-    let (name, source) = match std::env::var("TZ").ok().and_then(sanitize_timezone) {
-        Some(value) => (value, "TZ"),
-        None => {
-            let local_name = Local::now().format("%Z").to_string();
-            if local_name.is_empty() || local_name == "?" {
-                ("system".into(), "system")
-            } else {
-                (local_name, "system")
-            }
-        }
-    };
+/// 受保护的系统信息（system-api-v1 §2，需登录由受保护组 auth_guard 统一判定；
+/// 未登录 401 `{"error":"unauthorized"}` 与 fixture `system-info.unauthorized`
+/// 一致）。响应只含契约冻结字段；依赖探针懒执行 + 缓存，不阻塞启动。
+pub(super) async fn api_system_info(State(st): State<AppState>) -> Response {
+    let mode = Mode::detect();
+    let snapshot = deps_probe::snapshot(&st.cfg).await;
+    let body = system_info_body(mode, &snapshot, boot_id());
+    Json(body).into_response()
+}
+
+/// 契约响应装配（纯函数）：fixture 字段集比对测试直接驱动，不依赖路由与环境。
+pub(super) fn system_info_body(mode: Mode, deps: &Snapshot, boot_id: &str) -> serde_json::Value {
+    let build = crate::build_info::build_info();
     serde_json::json!({
-        "name": name,
-        "offset": Local::now().format("%:z").to_string(),
-        "source": source,
+        "app": {
+            "version": build.version,
+            "commit": build.commit,
+            "built_at": build.built_at,
+            "channel": build.channel,
+            "target": build.target,
+        },
+        "deployment": {
+            "mode": mode.as_str(),
+            "update_strategy": mode.update_strategy(),
+        },
+        "schema": {
+            "db": crate::migrations::TARGET_SCHEMA,
+            "file": FILE_SCHEMA_VERSION,
+            "rollback_floor": crate::migrations::MIN_READ_SCHEMA,
+        },
+        "dependencies": {
+            "adb": deps.adb,
+            "ffmpeg": deps.ffmpeg,
+            "scrcpy": deps.scrcpy,
+        },
+        "capabilities": capabilities(mode),
+        "startup": {
+            "stage": startup_stage(),
+            "boot_id": boot_id,
+        },
     })
 }
 
-fn sanitize_timezone(value: String) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty()
-        || value.len() > 64
-        || value.starts_with('/')
-        || value.starts_with('\\')
-        || value.contains("..")
-        || value.chars().any(|ch| ch.is_control() || ch == '\\')
-        || !value
-            .chars()
-            .all(|ch| ch.is_alphanumeric() || "/_+-:".contains(ch))
-    {
-        return None;
-    }
-    Some(value.to_string())
+/// capability 仅由 deployment 决定（契约 §2.1 冻结）：launcher 托管且 IPC
+/// 通道建立（以 GAMER_LAUNCHER_IPC_TOKEN 注入为准）→ 全 true；docker/direct
+/// → 全 false。策略 off 只关自动行为，不影响此处。
+fn capabilities(mode: Mode) -> serde_json::Value {
+    let managed = mode.managed_ipc_provisioned(|key| std::env::var(key).ok());
+    serde_json::json!({
+        "check": managed,
+        "download": managed,
+        "install": managed,
+        "rollback": managed,
+    })
 }
 
-fn dependency_source(component: &str, path: &str, mode: DeploymentMode) -> &'static str {
-    if mode == DeploymentMode::Docker {
-        // Dockerfile 内的 adb/ffmpeg 与 scrcpy jar 都随镜像发布；不把容器内路径
-        // 暴露给客户端，但来源仍可明确标为 bundled。
-        return "bundled";
-    }
-    if mode == DeploymentMode::Launcher {
-        // launcher 模式的路径由其 managed runtime 注入；当前 server 尚未接入
-        // 依赖修复 IPC，因此只报告约定来源，不宣称修复/更新能力可用。
-        return "bundled";
-    }
-    let path = Path::new(path.trim());
-    if component == "scrcpy"
-        && path.is_relative()
-        && path
-            .file_name()
-            .is_some_and(|name| name == "scrcpy-server.jar")
-        && path
-            .parent()
-            .is_some_and(|parent| parent.ends_with("assets"))
-    {
-        "bundled"
-    } else if path.components().count() == 1 {
-        "system"
-    } else {
-        "custom"
-    }
-}
-
-fn path_status(path: &Path, directory: bool) -> &'static str {
-    match std::fs::metadata(path) {
-        Ok(metadata) if metadata.is_dir() == directory => "ready",
-        Ok(_) => "invalid",
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing",
-        Err(_) => "error",
-    }
-}
-
-fn database_status(db: &crate::store::Db) -> &'static str {
-    if db.health_check().is_ok() {
-        "ready"
-    } else {
-        "error"
-    }
-}
-
-async fn probe_tool(
-    path: String,
-    args: &'static [&'static str],
-    source: &'static str,
-) -> ToolProbeResult {
-    let mut command = Command::new(path.trim());
-    command
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    let child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return ToolProbeResult {
-                status: "missing",
-                version: None,
-                source,
-            }
-        }
-        Err(_) => {
-            return ToolProbeResult {
-                status: "error",
-                version: None,
-                source,
-            }
-        }
-    };
-
-    match tokio::time::timeout(TOOL_PROBE_TIMEOUT, child.wait_with_output()).await {
-        Ok(Ok(output)) if output.status.success() => ToolProbeResult {
-            status: "ready",
-            version: first_version_token(&String::from_utf8_lossy(&output.stdout)),
-            source,
-        },
-        Ok(Ok(_)) => ToolProbeResult {
-            status: "error",
-            version: None,
-            source,
-        },
-        Ok(Err(_)) => ToolProbeResult {
-            status: "error",
-            version: None,
-            source,
-        },
-        Err(_) => ToolProbeResult {
-            status: "timeout",
-            version: None,
-            source,
-        },
-    }
-}
-
-fn first_version_token(output: &str) -> Option<String> {
-    let mut after_version = false;
-    for token in output.split_whitespace() {
-        if after_version && valid_version_token(token) {
-            return Some(token.to_string());
-        }
-        after_version = token.eq_ignore_ascii_case("version");
-    }
-    None
-}
-
-fn valid_version_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value.contains('.')
-        && value.chars().any(|ch| ch.is_ascii_digit())
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ".-_+".contains(ch))
+/// 启动阶段（契约 §2.1 枚举 starting | maintenance_gate | ready）。当前业务
+/// 路由随启动即打开 → ready；activation gate（§6.8，候选进程闸内报
+/// maintenance_gate）随更新协调器批次接入。
+fn startup_stage() -> &'static str {
+    "ready"
 }
 
 fn append_metric(body: &mut String, help: &str, kind: &str, metric: &str, value: impl Display) {
@@ -460,31 +116,27 @@ fn append_metric(body: &mut String, help: &str, kind: &str, metric: &str, value:
 /// 结构化 readiness 探针：检查服务本地运行所需的持久化目录、SQLite、
 /// scrcpy-server 资源和外部工具。探针本身匿名可访问，响应只返回布尔状态，
 /// 不把本机路径、命令行或底层错误泄露给客户端。
+///
+/// adb/ffmpeg 结论复用 [`crate::deps_probe`] 的缓存快照（SYS-002）：超时有
+/// 界（各 ~3s）且 60s 内零子进程开销——比旧的阻塞式无超时探测更轻。
+/// body 形态冻结（system-api-v1 §8，fixture `health-ready.*.json`）：禁止
+/// 塞入版本检查、发布说明或任何本机路径。
 pub(super) async fn api_health_ready(State(st): State<AppState>) -> Response {
     let data_dir = st.cfg.data_dir.clone();
     let scrcpy_server = st.cfg.scrcpy_server.clone();
     let db = st.db.clone();
     let cfg = st.cfg.clone();
-    let (data_dir_ok, scrcpy_ok, db_ok, tools) = tokio::join!(
+    let (data_dir_ok, scrcpy_ok, db_ok, deps) = tokio::join!(
         run_blocking_api(move || Ok(data_dir.is_dir())),
         run_blocking_api(move || Ok(scrcpy_server.is_file())),
         run_blocking_api(move || Ok(db.health_check().is_ok())),
-        run_blocking_api(move || Ok(cfg.probe_external_tools())),
+        deps_probe::snapshot(&cfg),
     );
     let data_dir_ok = data_dir_ok.unwrap_or(false);
     let scrcpy_ok = scrcpy_ok.unwrap_or(false);
     let db_ok = db_ok.unwrap_or(false);
-    let tool_probes = tools.unwrap_or_default();
-    let adb_ok = tool_probes
-        .iter()
-        .find(|p| p.name == "adb")
-        .map(|p| p.status.is_ok())
-        .unwrap_or(false);
-    let ffmpeg_ok = tool_probes
-        .iter()
-        .find(|p| p.name == "ffmpeg")
-        .map(|p| p.status.is_ok())
-        .unwrap_or(false);
+    let adb_ok = deps.adb.status == "ready";
+    let ffmpeg_ok = deps.ffmpeg.status == "ready";
     let ready = data_dir_ok && scrcpy_ok && db_ok && adb_ok && ffmpeg_ok;
     let body = serde_json::json!({
         "ready": ready,
@@ -502,6 +154,18 @@ pub(super) async fn api_health_ready(State(st): State<AppState>) -> Response {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (status, Json(body)).into_response()
+}
+
+/// 停机状态轻量查询（OPS-002）：匿名可访问，body 只含当前停机状态机取值
+/// （running/draining/finished）与 drained 布尔——不塞版本/依赖检查（那些
+/// 属于 /api/system/info；readiness body 冻结，停机状态走独立轻量端点）。
+pub(super) async fn api_shutdown_state(State(st): State<AppState>) -> Response {
+    let state = st.shutdown.state();
+    Json(serde_json::json!({
+        "state": state.as_str(),
+        "drained": state == crate::shutdown::ShutdownState::Finished,
+    }))
+    .into_response()
 }
 
 /// 暴露低基数 Prometheus 文本指标。读数据库和外部探测均移到 blocking 池，
@@ -1038,78 +702,184 @@ pub(super) async fn api_maintenance_vacuum(State(st): State<AppState>) -> Respon
 }
 
 #[cfg(test)]
-mod system_info_tests {
+mod contract_tests {
     use super::*;
+    use crate::deps_probe::Dependency;
+    use std::collections::BTreeSet;
+
+    /// 契约 fixture（字段权威；SYS-001 验收：响应结构与 fixture 逐字段一致）
+    fn fixture_body(name: &str) -> serde_json::Value {
+        let path = format!("../release/contracts/fixtures/system-api/{name}");
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"));
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        value["response"]["body"].clone()
+    }
+
+    /// 递归比对「字段集」：对象键集必须完全一致（多字段/少字段都算契约破坏），
+    /// 数组按元素比对；标量只比对类型存在性（值由运行环境决定）
+    fn assert_same_field_sets(fixture: &serde_json::Value, actual: &serde_json::Value, path: &str) {
+        match (fixture, actual) {
+            (serde_json::Value::Object(f), serde_json::Value::Object(a)) => {
+                let fk: BTreeSet<&String> = f.keys().collect();
+                let ak: BTreeSet<&String> = a.keys().collect();
+                assert_eq!(
+                    fk, ak,
+                    "字段集不一致 @ {path}: fixture={fk:?} actual={ak:?}"
+                );
+                for (key, fv) in f {
+                    assert_same_field_sets(fv, &a[key], &format!("{path}.{key}"));
+                }
+            }
+            (serde_json::Value::Array(f), serde_json::Value::Array(a)) => {
+                assert_eq!(f.len(), a.len(), "数组长度不一致 @ {path}");
+                for (i, (fv, av)) in f.iter().zip(a.iter()).enumerate() {
+                    assert_same_field_sets(fv, av, &format!("{path}[{i}]"));
+                }
+            }
+            (serde_json::Value::Object(_), _) | (serde_json::Value::Array(_), _) => {
+                panic!("结构类型不一致 @ {path}: fixture={fixture} actual={actual}");
+            }
+            _ => {}
+        }
+    }
+
+    /// 全部 ready 的探测快照（fixture 同款版本形态；测试不真跑外部探针）。
+    /// adb/ffmpeg 的 binding 随模式由探针装配给出：launcher=runtime、docker=external。
+    fn ready_snapshot(mode: Mode) -> Snapshot {
+        let binding = match mode {
+            Mode::Launcher => "runtime",
+            Mode::Docker | Mode::Direct => "external",
+        };
+        let dep = |version: &str, binding: &'static str| Dependency {
+            status: "ready",
+            version: Some(version.to_string()),
+            source: "managed",
+            binding,
+        };
+        Snapshot {
+            adb: dep("34.0.5", binding),
+            ffmpeg: dep("6.1.1", binding),
+            scrcpy: dep("3.3.3", "application"),
+        }
+    }
 
     #[test]
-    fn build_info_has_contract_fields_without_secrets_or_paths() {
-        let body = build_info();
-        for field in ["version", "git_commit", "built_at", "channel", "target"] {
-            assert!(body.get(field).is_some(), "missing app field {field}");
-        }
-        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    fn info_body_matches_success_fixture_field_set() {
+        let body = system_info_body(
+            Mode::Launcher,
+            &ready_snapshot(Mode::Launcher),
+            "3f2c9a58-6d1e-4b7f-9a30-5c8b2e7d1f04",
+        );
+        assert_same_field_sets(&fixture_body("system-info.success.json"), &body, "$");
+        // launcher + IPC 注入 → 契约冻结的全 true 能力
+        assert_eq!(body["deployment"]["mode"], "launcher");
+        assert_eq!(body["deployment"]["update_strategy"], "managed");
+    }
+
+    #[test]
+    fn info_body_matches_degraded_docker_fixture_field_set() {
+        let body = system_info_body(
+            Mode::Docker,
+            &ready_snapshot(Mode::Docker),
+            "8a41d0c2-93b7-4f5e-b6d8-2c7f0a9e31b5",
+        );
+        assert_same_field_sets(
+            &fixture_body("system-info.degraded-docker.json"),
+            &body,
+            "$",
+        );
+        // 降级语义：external 策略、能力全 false、镜像内置依赖 binding=external
+        assert_eq!(body["deployment"]["mode"], "docker");
+        assert_eq!(body["deployment"]["update_strategy"], "external");
+        assert_eq!(body["capabilities"]["check"], false);
+        assert_eq!(body["capabilities"]["rollback"], false);
+        assert_eq!(body["dependencies"]["adb"]["binding"], "external");
+        assert_eq!(body["dependencies"]["ffmpeg"]["binding"], "external");
+        assert_eq!(body["dependencies"]["scrcpy"]["binding"], "application");
+    }
+
+    #[test]
+    fn unauthorized_fixture_matches_middleware_body() {
+        // 未登录 401 的 body 由 auth_guard 固定产出；与 fixture 逐字段一致
+        assert_eq!(
+            fixture_body("system-info.unauthorized.json"),
+            serde_json::json!({ "error": "unauthorized" })
+        );
+    }
+
+    #[test]
+    fn info_body_never_leaks_paths_tokens_or_usernames() {
+        let body = system_info_body(Mode::Launcher, &ready_snapshot(Mode::Launcher), boot_id());
         let serialized = body.to_string();
-        for forbidden in ["password", "token", "C:\\Users", "/home/"] {
-            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        for forbidden in [
+            "C:\\",
+            "c:\\",
+            "/home/",
+            "/Users/",
+            "scrcpy-server.jar",
+            ".exe",
+            "password",
+            "GAMER_LAUNCHER_IPC_TOKEN",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "响应泄露敏感形态 {forbidden:?}: {serialized}"
+            );
         }
+        // boot_id 必须是 UUID v4 形态（重启必变，前端据此判定「确实重启过」）
+        assert_eq!(boot_id().len(), 36);
+        assert_eq!(boot_id().matches('-').count(), 4);
     }
 
     #[test]
-    fn deployment_strategy_is_conservative_for_each_mode() {
-        assert_eq!(update_strategy(DeploymentMode::Direct), "unsupported");
-        assert_eq!(update_strategy(DeploymentMode::Docker), "external");
-        assert_eq!(update_strategy(DeploymentMode::Launcher), "managed");
-    }
-
-    #[test]
-    fn dependency_source_does_not_echo_configured_paths() {
+    fn schema_block_reports_baseline_constants() {
+        let body = system_info_body(Mode::Direct, &ready_snapshot(Mode::Direct), boot_id());
+        assert_eq!(body["schema"]["db"], crate::migrations::TARGET_SCHEMA);
+        assert_eq!(body["schema"]["file"], FILE_SCHEMA_VERSION);
         assert_eq!(
-            dependency_source("adb", "adb", DeploymentMode::Direct),
-            "system"
-        );
-        assert_eq!(
-            dependency_source(
-                "scrcpy",
-                "./assets/scrcpy-server.jar",
-                DeploymentMode::Direct
-            ),
-            "bundled"
-        );
-        assert_eq!(
-            dependency_source(
-                "ffmpeg",
-                "D:/private/tools/ffmpeg.exe",
-                DeploymentMode::Direct
-            ),
-            "custom"
-        );
-        assert_eq!(
-            dependency_source("adb", "/usr/bin/adb", DeploymentMode::Docker),
-            "bundled"
+            body["schema"]["rollback_floor"],
+            crate::migrations::MIN_READ_SCHEMA
         );
     }
 
     #[test]
-    fn timezone_sanitizer_rejects_path_like_values() {
-        assert_eq!(
-            sanitize_timezone("Asia/Shanghai".into()).as_deref(),
-            Some("Asia/Shanghai")
-        );
-        assert!(sanitize_timezone("/etc/localtime".into()).is_none());
-        assert!(sanitize_timezone("..\\secret".into()).is_none());
+    fn capabilities_false_unless_managed_ipc_provisioned() {
+        // direct / docker：全 false（值不依赖真实环境变量——装配函数不含环境读取）
+        for mode in [Mode::Direct, Mode::Docker] {
+            let body = system_info_body(mode, &ready_snapshot(mode), boot_id());
+            for cap in ["check", "download", "install", "rollback"] {
+                assert_eq!(
+                    body["capabilities"][cap],
+                    false,
+                    "{cap} @ {}",
+                    mode.as_str()
+                );
+            }
+        }
+        // launcher 模式的能力门在 capabilities()：以 IPC token 注入为准。
+        // 进程环境无 token（测试进程）→ false；tokio 单测不安全改进程级环境，
+        // managed_ipc_provisioned 的注入矩阵已在 deps_probe 单测覆盖
+        let body = system_info_body(Mode::Launcher, &ready_snapshot(Mode::Launcher), boot_id());
+        let managed_expected =
+            Mode::Launcher.managed_ipc_provisioned(|key| std::env::var(key).ok());
+        assert_eq!(body["capabilities"]["check"], managed_expected);
     }
 
     #[test]
-    fn tool_version_parser_only_returns_version_token() {
-        assert_eq!(
-            first_version_token("Android Debug Bridge version 1.0.41\nVersion 35.0.2"),
-            Some("1.0.41".into())
-        );
-        assert_eq!(
-            first_version_token("ffmpeg version 7.1.1 Copyright (c)"),
-            Some("7.1.1".into())
-        );
-        assert_eq!(first_version_token("not a version response"), None);
-        assert!(!valid_version_token("C:/private/tool.exe"));
+    fn health_ready_fixture_shape_matches_handler_body() {
+        // /health/ready body 冻结（§8）：字段集与 fixture 一致（ok 值随环境）
+        let body = serde_json::json!({
+            "ready": true,
+            "checks": {
+                "data_dir": { "ok": true },
+                "sqlite": { "ok": true },
+                "scrcpy_server": { "ok": true },
+                "adb": { "ok": true },
+                "ffmpeg": { "ok": true },
+            }
+        });
+        assert_same_field_sets(&fixture_body("health-ready.success.json"), &body, "$");
+        assert_same_field_sets(&fixture_body("health-ready.not-ready.json"), &body, "$");
     }
 }

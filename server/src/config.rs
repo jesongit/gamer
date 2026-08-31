@@ -15,7 +15,7 @@
 //!   基准路径（二者在既有入口分别消费：`Config::load` / `logging::init`）。
 //! - 相对路径解析规则**冻结**：配置内的相对 `data_dir` 与相对 `adb_path` /
 //!   `ffmpeg_path` 相对**配置文件所在目录**解析（不再是进程 cwd）；应用内资产
-//!   （`scrcpy_server`，以及后续 PATH-002 的 web-dist）相对 `GAMER_APP_DIR`
+//!   （`scrcpy_server` 与 `web_dist_dir()`，PATH-002）相对 `GAMER_APP_DIR`
 //!   解析，未注入时回退现状 cwd 相对逻辑。裸命令名（如 `adb`，无目录成分）
 //!   保持原样走 PATH 查找。`GB_CONFIG` 未设置（默认 `config.toml`，无目录成分）
 //!   时基准目录为 `.`——开发流 `cd server && cargo run` 行为逐字节不变。
@@ -404,6 +404,16 @@ impl Config {
 
     pub fn listen_addr(&self) -> String {
         format!("0.0.0.0:{}", self.port)
+    }
+
+    /// web-dist 静态资源目录（PATH-002）：GAMER_APP_DIR 注入时相对应用版本
+    /// 目录解析（版本目录只读也能服务——ServeDir 仅读取该路径）；未注入时
+    /// 回退现状 cwd 相对 `./web-dist`，开发流 `cd server && cargo run` 不变。
+    pub fn web_dist_dir(&self) -> PathBuf {
+        match &self.app_dir {
+            Some(app) => resolve_relative(app, Path::new("web-dist")),
+            None => PathBuf::from("./web-dist"),
+        }
     }
 
     /// 非敏感生效值摘要（供启动日志展示来源与关键参数；密码/哈希等敏感项绝不输出）
@@ -1274,6 +1284,41 @@ rtc_external_port = 50000
             loaded.cfg.scrcpy_server,
             PathBuf::from("./assets/scrcpy-server.jar")
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PATH-002：web-dist 相对 GAMER_APP_DIR（应用版本目录）解析；未注入回退
+    /// 现状 cwd 相对路径。版本目录只读时前端仍可服务——ServeDir 对该路径仅读取，
+    /// 解析纯函数不触盘（不依赖目录存在）。
+    #[test]
+    fn web_dist_dir_resolves_against_app_dir() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            cfg.web_dist_dir(),
+            PathBuf::from("./web-dist"),
+            "未注入 app_dir 时保持现状（cwd 相对），开发流不变"
+        );
+
+        let app = std::env::temp_dir()
+            .join("gamer-appdir")
+            .join("versions")
+            .join("0.2.0");
+        cfg.app_dir = Some(app.clone());
+        assert_eq!(
+            cfg.web_dist_dir(),
+            app.join("web-dist"),
+            "注入 app_dir 后 web-dist 必须相对应用版本目录解析"
+        );
+
+        // 完整加载链路同样成立（环境注入 → finalize_paths → 生效配置）
+        let dir = temp_dir_cn("web-dist");
+        let path = write_minimal_config(&dir, "config.toml");
+        let env = PathEnv {
+            app_dir: Some(app.clone()),
+            ..Default::default()
+        };
+        let loaded = Config::load_from_with_env(&path, Profile::Prod, &env).unwrap();
+        assert_eq!(loaded.cfg.web_dist_dir(), app.join("web-dist"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -50,14 +50,76 @@ async fn system_info_is_protected_structured_and_does_not_leak_paths() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
-    assert!(body["schema_version"].is_u64());
-    assert!(body["app"]["version"].is_string());
-    assert!(body["readiness"]["checks"].is_object());
-    assert!(body["dependencies"].is_object());
-    assert!(body["timezone"].is_object());
+    // 契约六组顶层字段（system-api-v1 §2）；原型自有字段 readiness/timezone/
+    // schema_version 已随契约化移除
+    for group in [
+        "app",
+        "deployment",
+        "schema",
+        "dependencies",
+        "capabilities",
+        "startup",
+    ] {
+        assert!(body[group].is_object(), "missing contract group {group}");
+    }
+    assert!(body.get("readiness").is_none(), "readiness 以 /health/ready 为准");
+    assert!(body.get("timezone").is_none());
+    assert!(body.get("schema_version").is_none());
+    // app 组接 build_info（SYS-001）
+    assert_eq!(body["app"]["version"], env!("CARGO_PKG_VERSION"));
+    for field in ["version", "commit", "built_at", "channel", "target"] {
+        assert!(body["app"][field].is_string(), "app.{field}");
+    }
+    // 依赖三组件 × 四字段（fixture 冻结结构）
+    for dep in ["adb", "ffmpeg", "scrcpy"] {
+        for field in ["status", "version", "source", "binding"] {
+            assert!(
+                body["dependencies"][dep].get(field).is_some(),
+                "dependencies.{dep}.{field}"
+            );
+        }
+    }
+    assert!(body["capabilities"]["check"].is_boolean());
+    assert!(body["startup"]["boot_id"].is_string());
     assert!(!body
         .to_string()
         .contains(&t.dir.to_string_lossy().to_string()));
+}
+
+#[tokio::test]
+async fn shutdown_state_endpoint_tracks_coordinator_anonymously() {
+    let t = build_app(
+        "shutdown-state",
+        test_credential("admin123"),
+        Default::default(),
+    );
+
+    // 匿名可查（OPS-002 轻量端点），初始 running
+    let resp = send(&t.app, req("GET", "/health/shutdown", None, &[], None)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = json_body(resp).await;
+    assert_eq!(body["state"], "running");
+    assert_eq!(body["drained"], false);
+
+    // POST /api/shutdown（需登录）触发协调器 → 状态推进到 finished
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let resp = send(
+        &t.app,
+        req(
+            "POST",
+            "/api/shutdown",
+            None,
+            &[(header::COOKIE.to_string(), sid)],
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = send(&t.app, req("GET", "/health/shutdown", None, &[], None)).await;
+    let body = json_body(resp).await;
+    assert_eq!(body["state"], "finished");
+    assert_eq!(body["drained"], true);
 }
 
 #[tokio::test]

@@ -7,10 +7,12 @@
 mod api;
 mod build_info;
 mod config;
+mod deps_probe;
 mod device;
 mod engine;
 mod file_migration;
 mod logging;
+mod maintenance;
 mod matcher;
 mod metrics;
 mod migrations;
@@ -31,6 +33,19 @@ use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // DATA-005：维护子命令最前分支（schema-policy §7 零后台服务）——inspect /
+    // migrate 在任何 adb / scheduler / HTTP / 设备扫描 / DeviceManager 初始化
+    // 之前执行完即退出；无子命令时走既有启动流程，行为逐字节不变
+    let argv: Vec<String> = std::env::args().collect();
+    match maintenance::parse_args(&argv) {
+        Ok(Some(command)) => std::process::exit(maintenance::run_cli(command)),
+        Ok(None) => {}
+        Err(usage) => {
+            eprintln!("{usage}");
+            std::process::exit(2);
+        }
+    }
+
     // Windows 定时器分辨率：默认 15.6ms 粒度会让 tokio::time::sleep(16ms) 实际睡
     // ~31ms，pusher 的帧率上限（60fps → 16ms 间隔）被砍半 → 设备帧爆发时队列积压
     // （内容滞后 + 画面跳动）。多媒体应用（OBS/游戏）都会调用 timeBeginPeriod(1)

@@ -42,8 +42,7 @@ pub enum ShutdownState {
 }
 
 impl ShutdownState {
-    /// 状态查询暴露（OPS-002 状态 API 接线前暂仅供诊断/测试）
-    #[allow(dead_code)]
+    /// 状态查询暴露（OPS-002：GET /health/shutdown 匿名轻量端点消费）
     pub fn as_str(self) -> &'static str {
         match self {
             ShutdownState::Running => "running",
@@ -244,6 +243,45 @@ mod tests {
         coordinator.request().await;
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(coordinator.state(), ShutdownState::Finished);
+    }
+
+    /// OPS-002：draining 状态下的重复触发——不拒绝、不重入、不报错，等待
+    /// 首次 drain 完成后以 Finished 返回；状态机全程可观测
+    #[tokio::test]
+    async fn request_during_drain_waits_without_reentering() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let coordinator = Arc::new(counting_coordinator(
+            counter.clone(),
+            Duration::from_millis(150),
+        ));
+
+        let first = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.request().await }
+        });
+        // 等首次触发进入 drain
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert_eq!(coordinator.state(), ShutdownState::Draining);
+        assert_eq!(coordinator.state().as_str(), "draining");
+
+        // draining 期间的重复请求被一次性语义吸收（挂起等待而非并发执行）
+        let second = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.request().await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "drain 未完成前不得重复执行或并行进入"
+        );
+        assert_eq!(coordinator.state(), ShutdownState::Draining);
+
+        assert_eq!(second.await.unwrap(), ShutdownState::Finished);
+        assert_eq!(first.await.unwrap(), ShutdownState::Finished);
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "drain 全程只执行一次");
+        assert_eq!(coordinator.state(), ShutdownState::Finished);
+        assert_eq!(coordinator.state().as_str(), "finished");
     }
 
     #[tokio::test]
