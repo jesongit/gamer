@@ -28,6 +28,9 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
+    # server's SIGTERM handler drains active runs/viewers/scrcpy before exit;
+    # leave enough time for the 10s run drain grace plus socket cleanup.
+    stop_grace_period: 30s
     restart: unless-stopped
     # USB 设备直通（物理手机场景）不放主文件：
     # 用 docker-compose.usb.yml override 承载 device 映射，网络类部署保持零特权
