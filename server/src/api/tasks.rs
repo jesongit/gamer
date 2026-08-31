@@ -94,6 +94,13 @@ fn param_stale_of(scripts: &crate::scripts::ScriptStore, t: &Task) -> bool {
     }
 }
 
+/// next_run 序列化：服务端本地墙钟 + 时区偏移（`%:z` → `2026-09-01 10:00:00+08:00`）。
+/// 前端 task-tz.js 靠该偏移推导「服务端时区 UTC+08:00」标签（SYS-001 禁止
+/// /api/system/info 暴露 timezone）；无偏移的旧形态会让标签一直处于兜底态。
+fn format_next_run(next: chrono::DateTime<chrono::Local>) -> String {
+    next.format("%Y-%m-%d %H:%M:%S%:z").to_string()
+}
+
 // ---------- 定时任务 ----------
 
 pub(super) async fn api_list_tasks(State(st): State<AppState>) -> Response {
@@ -108,7 +115,7 @@ pub(super) async fn api_list_tasks(State(st): State<AppState>) -> Response {
             .map(|t| {
                 let next = if t.enabled {
                     next_run(&t.cron)
-                        .map(|x| x.format("%Y-%m-%d %H:%M:%S").to_string())
+                        .map(format_next_run)
                         .unwrap_or_else(|| "-".into())
                 } else {
                     "-".into()
@@ -144,7 +151,7 @@ pub(super) async fn api_get_task(State(st): State<AppState>, Path(id): Path<Stri
         let stale = param_stale_of(&scripts, &t);
         let next = if t.enabled {
             next_run(&t.cron)
-                .map(|x| x.format("%Y-%m-%d %H:%M:%S").to_string())
+                .map(format_next_run)
                 .unwrap_or_else(|| "-".into())
         } else {
             "-".into()

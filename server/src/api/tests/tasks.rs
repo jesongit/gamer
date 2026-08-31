@@ -22,6 +22,52 @@ const TASK_SCRIPT_NO_PARAMS: &str = "steps:
   - log: 'ok'
 ";
 
+/// next_run 序列化必须带时区偏移（`2026-09-01 10:00:00+08:00` 形态）：前端
+/// task-tz.js 从该偏移推导「服务端时区 UTC+08:00」标签（/api/system/info 按契约
+/// 禁止暴露 timezone）；无偏移旧形态会让标签一直休眠兜底。
+#[tokio::test]
+async fn task_next_run_serialized_with_timezone_offset() {
+    let t = build_app(
+        "task-next-run",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    save_task_script(&t, &sid, "daily.yaml", TASK_SCRIPT_NO_PARAMS).await;
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/tasks",
+        serde_json::json!({"name": "Daily", "cron": "0 * * * * *",
+                "script_id": "com.test.app/daily.yaml", "device_id": "d1"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+
+    let resp = get_json(&t, &sid, "/api/tasks").await;
+    let j = json_body(resp).await;
+    let next = j[0]["next_run"]
+        .as_str()
+        .expect("next_run 必须是字符串")
+        .to_string();
+    let parsed = chrono::DateTime::parse_from_str(&next, "%Y-%m-%d %H:%M:%S%:z")
+        .unwrap_or_else(|e| panic!("next_run 必须带 ±HH:MM 时区偏移且可回读: {next} ({e})"));
+    assert_eq!(
+        parsed.offset().local_minus_utc(),
+        chrono::Local::now().offset().local_minus_utc(),
+        "偏移必须是服务端本地时区偏移: {next}"
+    );
+    // 详情端点同口径
+    let task_id = j[0]["id"].as_str().unwrap().to_string();
+    let resp = get_json(&t, &sid, &format!("/api/tasks/{task_id}")).await;
+    let j = json_body(resp).await;
+    let next = j["next_run"].as_str().unwrap();
+    assert!(
+        chrono::DateTime::parse_from_str(next, "%Y-%m-%d %H:%M:%S%:z").is_ok(),
+        "详情 next_run 必须带时区偏移: {next}"
+    );
+}
+
 #[tokio::test]
 async fn task_args_snapshot_save_conflict_reconfirm_and_stale_flag() {
     let t = build_app(
