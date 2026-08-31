@@ -50,3 +50,13 @@ backups/
 # ===== Release 运行依赖 vendor（DEP-002/003：adb/ffmpeg 二进制绝不入库）=====
 # 由 release/packaging/fetch-adb.ps1 / fetch-ffmpeg.ps1 按锁文件重建；含下载缓存
 release/vendor/
+
+# ===== Release 打包/签名/SBOM 运行产物（REL-001/002/003，全部可由脚本重建）=====
+# dist: package-app / package-components / package-full 的 zip 与临时 staging
+release/dist/
+# sbom: tools/gen-sbom.ps1 的 CycloneDX 输出
+release/sbom/
+# manifests: gen-manifest.ps1 产物（json+sig，随 dist 内容变化，随发布资产归档）
+release/manifests/
+# 签名私钥绝不入库；公钥 <key_id>.pem 允许提交（验签信任库）
+release/keys/*.private.pem
