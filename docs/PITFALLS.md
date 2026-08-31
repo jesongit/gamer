@@ -122,3 +122,12 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **端口就绪探测按「端口 200」判定可被同端口无关进程误满足**：E2E 曾被遗留 dev server 占 8443 误报 PASS；集成验收前先清端口，升级验收需叠加 boot_id/版本断言。
 - **PowerShell 的 `New-Item` 没有 `-LiteralPath` 参数**：升级器离线行为测试在 pwsh 7 直接失败；目录创建改用 `[IO.Directory]::CreateDirectory()`，路径检查/文件操作继续使用 LiteralPath。
 - **PowerShell 函数会捕获未管道丢弃的 `Copy-Item`/`Move-Item` 输出**：升级快照函数的返回路径会被文件对象污染并写入状态；这类副作用命令必须显式 `| Out-Null`。
+
+## 2026-09-01（升级验收/发布收口轮实测）
+
+- **PowerShell 双引号串不处理 `{}`，`"$Tag^{{commit}}"` 把字面双花括号传给 git refspec 必 fatal**：`{{`→`{` 转义只在 `-f` 格式串内生效，rev-parse/ls-remote 的 peel 语法收到的不是 `^{commit}`；refspec 一律单引号拼接（`check-immutable-release.ps1` 已修）。
+- **PS 5.1 `Join-Path` 不认 `\\?\` verbatim 前缀、`tar -C` 进不了 >260 字符目录**：长路径台架须用 `\\?\` 拼接 + robocopy 搬运、launcher exe 用短路径（8.3）中转 spawn——.NET 无法 spawn >260 的 exe，CreateProcess 的 cwd ~260 上限 verbatim 形态也不例外（launcher 侧已用 `fallback_current_dir` 回退短祖先）。
+- **server `/api/shutdown` handler 同步 await 完整 drain，客户端 HTTP 读超时主动断开会 drop handler 使 drain 永不完成**：hyper 在客户端断开时取消 handler future，`ShutdownCoordinator::request()` 停在 `(self.drain)().await` 且无自恢复（真机实测 drain 11.6s > 旧读超时 5s）；升级器对 shutdown 请求的读超时必须 ≥ 最长 drain 时长（run 宽限 + 会话拆除断链，现取 shutdown_timeout+5s）。
+- **容器内构建没有 .git，build.rs 自动探测必然回落 dev 提交信息**：镜像内 build_info 显示错误的 dev 提交；镜像构建必须显式传 `GAMER_GIT_COMMIT` 等 ARG（Dockerfile 已加，release workflow 注入）。
+- **`/api/tasks` 的 `last_run_at` 是固定 UTC Z 串不随 TZ 变化，前端推导服务端时区只能用 `next_run`**（现已带 `%:z` 偏移）：拿 Z 串当本地偏移会在 TZ≠UTC 部署下说谎；`task-tz.js` 对 last_run_at 只认显式数字偏移。
+- **MIUI 设备 adb 常见 USB+TLS 双 transport 并存**：扫描入库的 addr 可能被 TLS serial 覆盖（kind 显示 wifi），对设备执行 adb 命令需 `-s <serial>` 显式指定目标传输，别按 addr 形态臆断。
