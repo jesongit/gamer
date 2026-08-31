@@ -1,0 +1,16 @@
+{
+  "fixtureOnly": true,
+  "schemaVersion": 1,
+  "current": {
+    "key_id": "test-rotation-current-1",
+    "public_key": "../keys/test-rotation-current-1.pem",
+    "manifest": "../manifest/valid/manifest-valid-basic.json",
+    "signature": "current.sig"
+  },
+  "next": {
+    "key_id": "test-rotation-next-1",
+    "public_key": "../keys/test-rotation-next-1.pem",
+    "manifest": "../manifest/valid/manifest-valid-basic.json",
+    "signature": "next.sig"
+  }
+}

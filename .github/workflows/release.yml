@@ -1,0 +1,695 @@
+﻿# REL-004/REL-005：tag 触发的 Release workflow（发布 GitHub Release 资产 + GHCR 镜像）。
+# 版本单一来源门禁沿用 ci.yml 的 version job 同一脚本（tools/check-version.ps1）。
+#
+# 触发：push tag `v*`（演练用预发布 tag，如 v0.1.0-rc.1；不配置 workflow_dispatch，
+# 避免 tag 语义分叉）。
+#
+# Secrets 约定表（生产签名，dev key 仅本地、永不进 CI）：
+#   environment `release-sign`（无评审人，只为作用域隔离；签名 job 注入）：
+#     RELEASE_MANIFEST_PRIVATE_KEY  Ed25519 生产私钥（PKCS#8 PEM，多行原样存入 secret；
+#                                   工作流经 sign-manifest.mjs --key-env 从环境变量读入
+#                                   node 进程，不写临时文件）
+#     RELEASE_MANIFEST_KEY_ID       与私钥配对的 key_id（如 prod-ed25519-1）；
+#                                   对应公钥必须已按 release/docs/KEY_ROTATION.md
+#                                   以 PR 提交到 release/keys/<key_id>.pem（验签信任锚）
+#   environment `release`（必需评审人 = 手动批准门；smoke 前置，publish 依赖 smoke）：
+#     无 secrets，仅作为 draft 转正前的人工批准点。
+#   轮换：生成新密钥对 → PR 提交公钥 → 更新两个 secret → 按 release/docs/KEY_ROTATION.md 走双钥期。
+#   工作流内兜底：key_id 为空 / 等于 dev-ed25519-1 / 公钥不在仓库 → 立即失败。
+#
+# Job 结构图：
+#   verify (win) ──┬─> build-windows (win, env:release-sign) ──┐
+#                 └─> docker (ubuntu, GHCR push + attestations) ─┴─> draft-release ──> artifact-verify ──> smoke (win, env:release 手动批准) ──> publish
+#
+# 发布语义：draft-release 只建 draft 并传 8 个内容资产（full/app/adb/ffmpeg/licenses zip、
+# manifest+.sig、SBOM；SHA256SUMS 单独生成上传；同 tag 重跑：同名资产 hash 一致跳过、
+# 不一致失败，绝不静默覆盖）；smoke 从 Release 重新下载全量资产核对 + manifest 双信任锚
+# 验签 + launcher doctor 冒烟 + 镜像/ZIP 版本同源核对，全过才允许 publish 把 draft 转正。
+# environment `release` 需在仓库 Settings → Environments 配置必需评审人（首次演练待办）。
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+# 发布链路不允许中途取消（cancel 半途的 publish 比等待更危险）
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.ref_name }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  # ---------- job1 verify：tag/版本/依赖绑定门禁 ----------
+  # 注意跑在 windows-latest：check-scrcpy-binding.ps1 与其依赖的 LockFile.psm1
+  # 路径拼接为 Windows 分隔符字面量（Linux pwsh 下不解析），发布工具链整体按
+  # Windows 目标平台实现；check-version.ps1 本身跨平台。
+  verify:
+    name: verify (version gate + scrcpy binding)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check release workflow locally (AST + offline behavior)
+        shell: pwsh
+        run: ./release/packaging/test-release-workflow.ps1
+
+      - name: Verify key rotation fixture (offline, no production key)
+        shell: pwsh
+        run: ./release/packaging/verify-key-rotation.ps1 -FixtureDir release/contracts/fixtures/key-rotation
+
+      - name: Check immutable GitHub tag/release preflight (REL-005)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIGGER_SHA: ${{ github.sha }}
+        shell: pwsh
+        run: ./release/packaging/check-immutable-release.ps1 -Mode GitHub -Tag $env:TAG -CommitSha $env:TRIGGER_SHA -Repository $env:GH_REPO
+
+      - name: Check version single source (tag == v + Cargo == web)
+        shell: pwsh
+        run: ./tools/check-version.ps1 -Tag "$env:TAG"
+
+      - name: Check scrcpy three-way binding (code / jar / lock)
+        shell: pwsh
+        run: ./tools/check-scrcpy-binding.ps1
+
+      - name: Assert tag points at trigger commit
+        shell: pwsh
+        run: |
+          $head = (& git rev-parse HEAD | Out-String).Trim()
+          if ($head -ne '${{ github.sha }}') {
+            throw "tag $env:TAG 指向 $head，与触发 commit `${{ github.sha }}` 不一致——拒绝发布"
+          }
+          Write-Host "tag $env:TAG == commit $($head.Substring(0,12))"
+
+  # ---------- job2 build-windows：构建 + 打包 + 生产钥签名 ----------
+  build-windows:
+    name: build-windows (build + package + sign)
+    runs-on: windows-latest
+    needs: verify
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    # 签名 secrets（RELEASE_MANIFEST_*）只挂在该 environment 下作用域隔离；
+    # 无评审人配置时不阻断自动构建（手动批准门在 smoke 的 environment: release）
+    environment: release-sign
+    # smoke job 用 needs.build-windows.outputs.version 驱动资产/doctor 校验
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    env:
+      RELEASE_MANIFEST_KEY_ID: ${{ secrets.RELEASE_MANIFEST_KEY_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive product version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:TAG -notmatch '^v(?<v>[0-9]+\.[0-9]+\.[0-9]+.*)$') {
+            throw "tag 不合法: $env:TAG（须为 v<semver>）"
+          }
+          "version=$($Matches['v'])" >> $env:GITHUB_OUTPUT
+          Write-Host "product version = $($Matches['v'])"
+
+      - name: Setup Node.js 24 LTS (pnpm build + manifest 签名/校验)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Enable Corepack (pnpm pinned by web/packageManager)
+        shell: pwsh
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+        run: corepack enable
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (server + launcher)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            server/target
+            launcher/target
+          key: windows-release-cargo-${{ hashFiles('server/Cargo.lock', 'launcher/Cargo.lock') }}
+          restore-keys: |
+            windows-release-cargo-
+
+      - name: Cache release/vendor (adb / ffmpeg seed)
+        uses: actions/cache@v4
+        with:
+          path: release/vendor
+          key: release-vendor-${{ hashFiles('release/dependencies.lock.toml') }}
+
+      - name: Fetch adb (locked)
+        shell: pwsh
+        run: ./release/packaging/fetch-adb.ps1
+
+      - name: Fetch ffmpeg (locked + license red-line + smoke)
+        shell: pwsh
+        run: ./release/packaging/fetch-ffmpeg.ps1
+
+      # package-app 自带构建信息注入（GAMER_GIT_COMMIT/BUILD_TIME/CHANNEL/BUILD_TARGET，
+      # 取自 git HEAD + rustc host triple），并复核 zip 布局与逐文件 sha256
+      - name: Package app (server + web-dist + jar)
+        shell: pwsh
+        run: ./release/packaging/package-app.ps1 -Channel stable
+
+      - name: Package components (adb + ffmpeg zips)
+        shell: pwsh
+        run: ./release/packaging/package-components.ps1
+
+      # manifest 资产 URL 与 GitHub Release 扁平资产名一致（组件不使用虚拟 deps/ 子路径）。
+      - name: Generate manifest (unsigned)
+        shell: pwsh
+        run: |
+          $base = 'https://github.com/${{ github.repository }}/releases/download/' + $env:TAG
+          ./release/packaging/gen-manifest.ps1 -SkipSign -Channel stable `
+            -DownloadBaseUrl $base `
+            -ReleaseNotesUrl ('https://github.com/${{ github.repository }}/releases/tag/' + $env:TAG)
+
+      # 私钥经 --key-env 从环境变量读入 node 进程，不写临时文件、不进日志
+      - name: Sign manifest with production key (secret 注入)
+        shell: pwsh
+        env:
+          RELEASE_MANIFEST_PRIVATE_KEY: ${{ secrets.RELEASE_MANIFEST_PRIVATE_KEY }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $keyId = $env:RELEASE_MANIFEST_KEY_ID
+          if (-not $keyId) { throw "缺少 secret RELEASE_MANIFEST_KEY_ID（见 workflow 头部 secrets 约定表）" }
+          if (-not $env:RELEASE_MANIFEST_PRIVATE_KEY) { throw "缺少 secret RELEASE_MANIFEST_PRIVATE_KEY（environment release-sign）" }
+          if ($keyId -ieq 'dev-ed25519-1') { throw "发布签名禁止使用 dev key（dev-ed25519-1 仅限本地）" }
+          $pubKey = Join-Path 'release/keys' ("$keyId.pem")
+          if (-not (Test-Path -LiteralPath $pubKey)) {
+            throw "信任库缺公钥 $pubKey —— 先按 release/docs/KEY_ROTATION.md 以 PR 提交生产公钥"
+          }
+          $manifestPath = Join-Path 'release/manifests' ("$env:VERSION.json")
+          node release/packaging/sign-manifest.mjs sign $manifestPath `
+            --key-env RELEASE_MANIFEST_PRIVATE_KEY --key-id $keyId
+          if ($LASTEXITCODE -ne 0) { throw "manifest 签名失败（退出码 $LASTEXITCODE）" }
+          node release/contracts/validate-manifest.mjs check $manifestPath `
+            --keys-dir release/keys `
+            --expect-current-version $env:VERSION --expect-channel stable
+          if ($LASTEXITCODE -ne 0) { throw "manifest 校验未通过（退出码 $LASTEXITCODE）" }
+          Write-Host "manifest 已由生产钥 $keyId 签名并全量校验通过"
+
+      # package-full 内部自建 launcher 并复核：解压 → SHA256SUMS 逐条 → 包内公钥验签 → doctor 冒烟
+      - name: Package full bootstrap (launcher + manifest + seeds + licenses)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: ./release/packaging/package-full.ps1 -Version $env:VERSION -KeyId $env:RELEASE_MANIFEST_KEY_ID
+
+      # DEP-005 履约：第三方许可声明随 Release 独立分发（full 包内另有 licenses/ 副本）。
+      # 条目名强制 '/' 分隔，与 packaging 脚本同一手法（PS 5.1 Compress-Archive 的
+      # 反斜杠条目坑在此不适用，但保持一致防御）。
+      - name: Package licenses zip
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $srcAbs = (Resolve-Path 'licenses').Path
+          $dest = Join-Path 'release/dist' ('GameBot-' + $env:VERSION + '-licenses.zip')
+          if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force }
+          Add-Type -AssemblyName System.IO.Compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $fs = [System.IO.File]::Open($dest, [System.IO.FileMode]::CreateNew)
+          $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+          try {
+            foreach ($f in (Get-ChildItem -LiteralPath $srcAbs -Recurse -File | Sort-Object FullName)) {
+              $rel = $f.FullName.Substring($srcAbs.Length + 1) -replace '\\', '/'
+              [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $f.FullName, $rel, [System.IO.Compression.CompressionLevel]::Optimal)
+            }
+          } finally { $zip.Dispose(); $fs.Dispose() }
+          Write-Host ("[release] licenses zip: {0}（{1} 字节）" -f $dest, (Get-Item -LiteralPath $dest).Length)
+
+      - name: Generate SBOM (CycloneDX)
+        shell: pwsh
+        run: ./tools/gen-sbom.ps1
+
+      - name: Add locked runtime dependencies to SBOM (REL-006)
+        shell: pwsh
+        run: |
+          $sbom = Get-ChildItem 'release/sbom/*.cdx.json' | Select-Object -First 1
+          if (-not $sbom) { throw 'SBOM 生成后未找到 CycloneDX 文件' }
+          ./release/packaging/augment-sbom.ps1 -SbomPath $sbom.FullName
+          $null = node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" $sbom.FullName
+          if ($LASTEXITCODE -ne 0) { throw "增强后的 SBOM 不是合法 JSON: $($sbom.Name)" }
+          Write-Host "已将 adb/ffmpeg/scrcpy-server 锁定条目加入 $($sbom.Name)"
+
+      - name: Verify SBOM contents and locked hashes (REL-006)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $sbom = Get-ChildItem 'release/sbom/*.cdx.json' | Select-Object -First 1
+          if (-not $sbom) { throw 'SBOM 校验前未找到 CycloneDX 文件' }
+          ./release/packaging/verify-sbom.ps1 -SbomPath $sbom.FullName -ExpectedVersion $env:VERSION
+
+      - name: Collect release assets
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'release-assets'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item 'release/dist/*.zip' $stage
+          Copy-Item ('release/manifests/' + '${{ steps.ver.outputs.version }}' + '.json') $stage
+          Copy-Item ('release/manifests/' + '${{ steps.ver.outputs.version }}' + '.sig') $stage
+          Copy-Item 'release/sbom/*.cdx.json' $stage
+          Get-ChildItem $stage | ForEach-Object { Write-Host ("  asset: {0}  ({1} bytes)" -f $_.Name, $_.Length) }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: ${{ runner.temp }}/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------- job2b docker：GHCR 镜像发布（REL-005） ----------
+  docker:
+    name: docker (GHCR push + provenance/SBOM attestation)
+    runs-on: ubuntu-latest
+    needs: verify
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.ver.outputs.img }}
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version / channel tag / image name
+        id: ver
+        run: |
+          v="${TAG#v}"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          # 仅无预发布/构建后缀的正式 semver 才追加强滚动 channel tag :stable
+          if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "channel=stable" >> "$GITHUB_OUTPUT"; fi
+          echo "img=ghcr.io/${GH_REPO,,}" >> "$GITHUB_OUTPUT"
+
+      - id: tags
+        run: |
+          img="${{ steps.ver.outputs.img }}"
+          {
+            echo "tags<<TAGS_EOF"
+            echo "${img}:${{ steps.ver.outputs.version }}"
+            if [ -n "${{ steps.ver.outputs.channel }}" ]; then echo "${img}:stable"; fi
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Record build time
+        id: meta
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check immutable version/channel tags before push (REL-005)
+        shell: pwsh
+        env:
+          IMAGE: ${{ steps.ver.outputs.img }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          CHANNEL: ${{ steps.ver.outputs.channel }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          $versionRef = '{0}:{1}' -f $env:IMAGE, $env:VERSION
+          ./release/packaging/check-immutable-release.ps1 -Mode Registry -Tag $env:TAG -CommitSha $env:TRIGGER_SHA -Image $versionRef
+          if ($env:CHANNEL -eq 'stable') {
+            ./release/packaging/check-immutable-release.ps1 -Mode Registry -Tag $env:TAG -CommitSha $env:TRIGGER_SHA -Image ('{0}:stable' -f $env:IMAGE)
+          }
+
+      # Dockerfile 不带版本 ARG（本轨不得改动）：版本/commit 同源由三重机制保证——
+      #   ① verify job 已锁 tag == v+Cargo 版本（镜像二进制内 CARGO_PKG_VERSION 同源）；
+      #   ② OCI labels 写入 version/revision，push 后回读核对；
+      #   ③ 容器启动日志打印 GameBot server v<版本>，运行时实测核对。
+      - name: Build and push (provenance mode=max + SBOM attestation)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.title=GameBot
+            org.opencontainers.image.description=GameBot 游戏自动化助手（scrcpy 采集 + WebRTC 推流 + YAML 脚本引擎）
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify pushed image (labels / in-image version / attestations)
+        env:
+          IMG: ${{ steps.ver.outputs.img }}
+          V: ${{ steps.ver.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          docker pull "$IMG:$V"
+          lv=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$IMG:$V")
+          [ "$lv" = "$V" ] || fail "镜像 label version=$lv 与 tag 不一致（期望 $V）"
+          lr=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMG:$V")
+          [ "$lr" = "$GITHUB_SHA" ] || fail "镜像 label revision=$lr 与触发 commit 不一致（期望 $GITHUB_SHA）"
+
+          cid=$(docker run -d "$IMG:$V")
+          ok=0
+          for _ in $(seq 1 30); do
+            if docker logs "$cid" 2>&1 | grep -q "GameBot server v$V starting"; then ok=1; break; fi
+            sleep 2
+          done
+          docker logs "$cid" 2>&1 | tail -20 || true
+          docker rm -f "$cid" >/dev/null 2>&1 || true
+          [ "$ok" = "1" ] || fail "容器启动日志未见 GameBot server v$V（ZIP 与镜像版本同源校验失败）"
+
+          # digest 是发布后的不可变引用；tag 只用于人类友好寻址，smoke/部署应优先记录并使用该 digest。
+          docker pull "$IMG@$DIGEST"
+
+          channel_note=""
+          if [ -n "${{ steps.ver.outputs.channel }}" ]; then channel_note=" + \`stable\`"; fi
+          {
+            echo "## GHCR 镜像（REL-005）"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 镜像 | \`$IMG\` |"
+            echo "| tags | \`$V\`$channel_note |"
+            echo "| digest | \`$DIGEST\` |"
+            echo "| label version / revision | $V / $GITHUB_SHA（已回读核对） |"
+            echo "| 容器启动版本 | GameBot server v$V（已实测） |"
+            echo "| provenance + SBOM attestation | 已附加（attestation-manifest） |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify immutable digest after push (REL-005)
+        shell: pwsh
+        env:
+          IMAGE: ${{ steps.ver.outputs.img }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          CHANNEL: ${{ steps.ver.outputs.channel }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          $versionRef = '{0}:{1}' -f $env:IMAGE, $env:VERSION
+          ./release/packaging/check-immutable-release.ps1 -Mode Registry -Tag $env:TAG -CommitSha $env:TRIGGER_SHA -Image $versionRef -ExpectedDigest $env:DIGEST
+          if ($env:CHANNEL -eq 'stable') {
+            ./release/packaging/check-immutable-release.ps1 -Mode Registry -Tag $env:TAG -CommitSha $env:TRIGGER_SHA -Image ('{0}:stable' -f $env:IMAGE) -ExpectedDigest $env:DIGEST
+          }
+
+      - name: Verify provenance and SBOM attestations (REL-006)
+        shell: pwsh
+        env:
+          IMAGE: ${{ steps.ver.outputs.img }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: ./release/packaging/verify-image-attestations.ps1 -Image ('{0}@{1}' -f $env:IMAGE, $env:DIGEST) -ExpectedDigest $env:DIGEST
+
+  # ---------- job3 draft-release：资产上传到 draft（重复构建 hash 门禁） ----------
+  draft-release:
+    name: draft-release (upload assets)
+    runs-on: ubuntu-latest
+    needs: [build-windows, docker]
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Create draft release (idempotent)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.build-windows.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "draft release $TAG 已存在，跳过创建"
+          else
+            img="ghcr.io/${GH_REPO,,}"
+            cat > body.md <<BODY
+          # GameBot $TAG
+
+          ## 安装（Windows x64 便携包）
+          下载 \`GameBot-$V-windows-x64-full.zip\` 解压后按包内 **INSTALL.md** 三步完成：
+          \`gamer-launcher.exe repair\` → 首次设置登录密码 → \`gamer-launcher.exe start\`。
+
+          ## 资产校验
+          - 逐文件哈希：核对 \`SHA256SUMS.txt\`（PowerShell: \`Get-FileHash -Algorithm SHA256 <file>\`）
+          - manifest 验签命令清单：仓库 \`release/docs/ATTESTATION.md\`
+          - 第三方许可：\`GameBot-$V-licenses.zip\`（与 full 包内 licenses/ 同源）
+          - 供应链：CycloneDX SBOM + buildx provenance/SBOM attestation
+
+          ## 容器镜像（Docker）
+          \`\`\`bash
+          docker pull $img:$V
+          GAMER_IMAGE=$img:$V docker compose -f docker-compose.release.yml up -d
+          \`\`\`
+          BODY
+            gh release create "$TAG" --draft --verify-tag \
+              --title "GameBot $TAG" --notes-file body.md
+          fi
+
+      - name: Upload assets (hash guard — 不静默覆盖)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for f in dist/*; do
+            name="$(basename "$f")"
+            local_hash="$(sha256sum "$f" | cut -d' ' -f1)"
+            if gh release view "$TAG" --json assets -q '.assets[].name' | grep -Fxq "$name"; then
+              rm -rf existing && mkdir existing
+              gh release download "$TAG" --pattern "$name" --dir existing
+              remote_hash="$(sha256sum "existing/$name" | cut -d' ' -f1)"
+              if [ "$remote_hash" != "$local_hash" ]; then
+                echo "::error::资产 $name 已存在且 hash 不同（existing=$remote_hash new=$local_hash）——同一 tag 禁止覆盖不同内容，发布失败"
+                exit 1
+              fi
+              echo "skip（同名同 hash）: $name"
+            else
+              gh release upload "$TAG" "$f"
+              echo "uploaded: $name"
+            fi
+          done
+
+      - name: Generate and upload SHA256SUMS.txt (same hash guard)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          # *.cdx.json 已包含在 *.json 中，不能再次展开，否则 SUMS 会出现重复条目。
+          sha256sum *.zip *.json *.sig | sort -k2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          name="SHA256SUMS.txt"
+          local_hash="$(sha256sum "$name" | cut -d' ' -f1)"
+          if gh release view "$TAG" --json assets -q '.assets[].name' | grep -Fxq "$name"; then
+            rm -rf ../existing && mkdir ../existing
+            gh release download "$TAG" --pattern "$name" --dir ../existing
+            remote_hash="$(sha256sum "../existing/$name" | cut -d' ' -f1)"
+            if [ "$remote_hash" != "$local_hash" ]; then
+              echo "::error::SHA256SUMS.txt 已存在且 hash 不同——说明早前上传的资产集合与本轮不一致，发布失败"
+              exit 1
+            fi
+            echo "skip（同名同 hash）: $name"
+          else
+            gh release upload "$TAG" "$name"
+            echo "uploaded: $name"
+          fi
+
+  # ---------- job4 artifact-verify：从 draft Release 重新下载全量资产复核 ----------
+  artifact-verify:
+    name: artifact-verify (re-download + verify)
+    runs-on: windows-latest
+    # build-windows 需列为直接依赖，smoke 才能读取 needs.build-windows.outputs.version；
+    # draft-release 虽间接依赖 build-windows，但 needs context 不会透传间接 job 输出。
+    needs: [draft-release, docker, build-windows]
+    timeout-minutes: 30
+    # contents:write 仅因 draft Release 对只读 token 不可见（gh release download 404）；
+    # 本 job 不写任何内容
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Download all draft release assets (QA-008 语义：离开 workspace 重新下载)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release download "$env:TAG" --pattern '*' --dir assets --clobber
+
+      - name: Verify SHA256SUMS + manifest signature + package integrity
+        env:
+          VERSION: ${{ needs.build-windows.outputs.version }}
+          DOCKER_IMAGE_VERSION: ${{ needs.docker.outputs.version }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Get-Sha256([string]$Path) {
+            return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+          }
+          function Test-SumsFile([string]$SumsPath, [string]$BaseDir) {
+            $expected = @{}
+            foreach ($line in (Get-Content -LiteralPath $SumsPath)) {
+              if ($line.Trim().Length -eq 0) { continue }
+              if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "SHA256SUMS 行格式非法: $line" }
+              $expected[$Matches[2]] = $Matches[1]
+            }
+            if ($expected.Count -eq 0) { throw "SHA256SUMS 为空: $SumsPath" }
+            foreach ($rel in $expected.Keys) {
+              $p = Join-Path $BaseDir $rel
+              if (-not (Test-Path -LiteralPath $p)) { throw "SHA256SUMS 引用的文件缺失: $rel" }
+              if ((Get-Sha256 $p) -ne $expected[$rel]) { throw "SHA256 不符: $rel" }
+            }
+            Write-Host "  [OK] $($SumsPath)（$($expected.Count) 条全部一致）"
+            return $expected
+          }
+
+          $v = $env:VERSION
+
+          # ① 发布级 SHA256SUMS：覆盖且仅覆盖 8 个内容资产
+          # （full/app/adb/ffmpeg/licenses zip + manifest json/sig + SBOM）
+          $sums = Test-SumsFile -SumsPath 'assets/SHA256SUMS.txt' -BaseDir 'assets'
+          $listed = @($sums.Keys | Sort-Object)
+          if ($listed.Count -ne 8) { throw "SHA256SUMS 应列 8 个资产，实际 $($listed.Count)" }
+
+          # ② 下载目录完整性：9 个文件（8 资产 + SHA256SUMS），不多不少
+          $downloaded = @(Get-ChildItem -LiteralPath 'assets' -File | ForEach-Object { $_.Name })
+          if ($downloaded.Count -ne 9) { throw "资产数量异常: 期望 9，实际 $($downloaded.Count) —— $($downloaded -join ', ')" }
+
+          # ③ 解压 full 包并核对包内 SHA256SUMS
+          $root = Join-Path (Get-Location) 'smoke'
+          if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+          Expand-Archive -LiteralPath "assets/GameBot-$v-windows-x64-full.zip" -DestinationPath $root
+          Test-SumsFile -SumsPath (Join-Path $root 'SHA256SUMS.txt') -BaseDir $root | Out-Null
+
+          # ④ 发布级 manifest 与包内 manifest 字节一致
+          foreach ($ext in @('json', 'sig')) {
+            $a = (Get-Content -LiteralPath "assets/$v.$ext" -Raw)
+            $b = (Get-Content -LiteralPath (Join-Path $root "manifests/$v.$ext") -Raw)
+            if ($a -ne $b) { throw "manifest.$ext 与包内副本字节不一致" }
+          }
+
+          # ⑤ manifest 验签 ×2：仓库信任锚（release/keys）+ 包内信任锚（smoke/keys）
+          node release/contracts/validate-manifest.mjs check "assets/$v.json" `
+            --sig "assets/$v.sig" --keys-dir release/keys `
+            --expect-current-version $v --expect-channel stable
+          if ($LASTEXITCODE -ne 0) { throw "仓库信任锚验签失败" }
+          node release/contracts/validate-manifest.mjs check (Join-Path $root "manifests/$v.json") `
+            --sig (Join-Path $root "manifests/$v.sig") --keys-dir (Join-Path $root 'keys') `
+            --expect-current-version $v --expect-channel stable
+          if ($LASTEXITCODE -ne 0) { throw "包内信任锚验签失败" }
+
+          # ⑥ manifest 声明的 app sha256 == 实际发布的 app zip
+          $manifest = Get-Content -LiteralPath "assets/$v.json" -Raw | ConvertFrom-Json
+          $appArtifact = $manifest.platforms.'windows-x86_64'.app.artifact
+          $appZip = Get-ChildItem -LiteralPath 'assets' -Filter 'gamer-app-*.zip' | Select-Object -First 1
+          if (-not $appZip) { throw "缺少 gamer-app zip 资产" }
+          if ((Get-Sha256 $appZip.FullName) -ne $appArtifact.sha256) {
+            throw "manifest app sha256 与发布的 $($appZip.Name) 不一致"
+          }
+
+          # ⑦ SBOM 是合法 JSON
+          $null = node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" (Get-Item 'assets/*.cdx.json').FullName
+          if ($LASTEXITCODE -ne 0) { throw "SBOM 不是合法 JSON" }
+
+          # ⑧ 镜像↔ZIP 同源：docker job 输出的镜像 version 必须与发布 manifest 一致
+          # （commit 同源由 verify job 的 tag==commit 断言 + docker job 的 revision label 回读保证）
+          if ($env:DOCKER_IMAGE_VERSION -ne $v) {
+            throw "GHCR 镜像 version=$env:DOCKER_IMAGE_VERSION 与 manifest 版本 $v 不一致（同源校验失败）"
+          }
+
+          Write-Host "[smoke] 发布资产完整性 + manifest 验签（双信任锚）+ 镜像/ZIP 版本同源全部通过"
+
+  # ---------- job5 smoke：artifact verify 后的 launcher doctor 冒烟（environment: release 手动批准） ----------
+  smoke:
+    name: smoke (launcher doctor)
+    runs-on: windows-latest
+    needs: [artifact-verify, docker, build-windows]
+    # 手动批准门：仓库 Settings → Environments → release 配置必需评审人后，
+    # 本 job 挂起等待批准；批准且全过，publish 才把 draft 转正
+    environment: release
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download full package for launcher smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build-windows.outputs.version }}
+        shell: pwsh
+        run: gh release download "$env:TAG" --pattern "GameBot-$env:VERSION-windows-x64-full.zip" --dir assets --clobber
+
+      - name: launcher doctor smoke（未安装库存 + manifest 完整校验双跑）
+        env:
+          VERSION: ${{ needs.build-windows.outputs.version }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path (Get-Location) 'smoke'
+          $zip = Join-Path (Get-Location) ("assets\GameBot-$env:VERSION-windows-x64-full.zip")
+          if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+          Expand-Archive -LiteralPath $zip -DestinationPath $root
+          $exe = Join-Path $root 'gamer-launcher.exe'
+          $v = $env:VERSION
+
+          $out = & $exe --install-root $root doctor 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          foreach ($l in ($out.Trim() -split "`r?`n")) { Write-Host "  | $l" }
+          if ($code -ne 0) { throw "launcher doctor（库存）退出码 $code（期望 0：未安装应为 WARN 非 FAIL）" }
+
+          & $exe --install-root $root doctor `
+            --manifest (Join-Path $root "manifests/$v.json") `
+            --expect-current-version $v --expect-channel stable 2>&1 | Out-String | ForEach-Object { $_.Trim() -split "`r?`n" } | ForEach-Object { Write-Host "  | $_" }
+          if ($LASTEXITCODE -ne 0) { throw "launcher doctor --manifest 验签校验退出码 $LASTEXITCODE" }
+
+          Write-Host "[smoke] launcher doctor 双跑通过（库存 + manifest 验签）"
+
+  # ---------- job5 publish：draft → 正式（smoke 全过后自动执行） ----------
+  publish:
+    name: publish (draft → public)
+    runs-on: ubuntu-latest
+    needs: smoke
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${TAG#v}"
+          extra=()
+          if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            extra+=(--latest)
+          else
+            echo "预发布版本（$v），不标记 latest"
+          fi
+          gh release edit "$TAG" --draft=false "${extra[@]}"
+          gh release view "$TAG" --json url,isDraft -q '"published: " + .url + " (draft=" + (.isDraft|tostring) + ")"'

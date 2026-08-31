@@ -20,7 +20,7 @@ param(
     [string]$DistDir = '',
     [string]$OutDir = '',
     [string]$KeysDir = '',
-    # 下载基地址（https）；组件 zip 在其 deps/ 子路径下
+    # 下载基地址（https）；GitHub Release 资产使用扁平名称，不支持目录前缀
     [string]$DownloadBaseUrl = '',
     # 发布说明 URL（https）
     [string]$ReleaseNotesUrl = '',
@@ -149,13 +149,13 @@ $manifest = [ordered]@{
                 [ordered]@{
                     id             = 'adb'
                     version        = $adbVersion
-                    artifact       = New-Artifact -Name $adbZipName -Url ('{0}/deps/{1}' -f $DownloadBaseUrl, $adbZipName)
+                    artifact       = New-Artifact -Name $adbZipName -Url ('{0}/{1}' -f $DownloadBaseUrl, $adbZipName)
                     required_files = New-RequiredFiles -Files $adb.files
                 },
                 [ordered]@{
                     id             = 'ffmpeg'
                     version        = $ffmpegVersion
-                    artifact       = New-Artifact -Name $ffmpegZipName -Url ('{0}/deps/{1}' -f $DownloadBaseUrl, $ffmpegZipName)
+                    artifact       = New-Artifact -Name $ffmpegZipName -Url ('{0}/{1}' -f $DownloadBaseUrl, $ffmpegZipName)
                     required_files = New-RequiredFiles -Files $ffmpeg.files
                 }
             )

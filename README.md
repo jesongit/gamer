@@ -14,7 +14,7 @@
 - ⏰ **定时任务**：cron 表达式，服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
-> 当前代码以无兼容 v2 基线为准，优化与自动升级仍未整体验收；真实设备 DataChannel / WebRTC E2E、生产升级回滚、正式跨平台 p50/p95、多平台基准仍待验证。验收命令以当前提交的 CI/本地门禁结果为准，自动升级设计见 [docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md](docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md)。
+> 当前仓库同时提供 v2 脚本基线、Windows x64 完整包的 launcher 入口（`doctor` / `status` / `repair` / `start` / `upgrade`）和 launcher 托管更新 API。本文只记录仓库中已有的入口；不把 GitHub Release、生产升级/回滚或真实设备 E2E 当作已完成的外部结果。Docker/直跑模式的更新仍由外部部署管理。
 
 ## 架构
 
@@ -56,6 +56,8 @@ gamer/
 │   ├── assets/scrcpy-server.jar   # 官方 v3.3.3（仓库自带）
 │   └── Dockerfile          # 兼容保留：仅后端镜像（无前端页）
 ├── web/                    # Vue3 + Vite 前端（精简版）
+├── launcher/               # Windows 完整包 launcher
+├── release/packaging/      # 依赖获取、构包、manifest 与签名脚本
 ├── Dockerfile              # 推荐：一体化多阶段镜像（pnpm 前端 + Rust 服务端）
 ├── docker-compose.yml      # server + redroid 一键拉起
 └── docs/YAML.md            # YAML 自动化脚本语法（README 引用）
@@ -83,12 +85,87 @@ rustup default stable                            # MSVC 工具链需先装 VS Bu
 > ⚠️ ffmpeg 路径失效会直接导致**连接控制后无画面**（帧缓存启动失败 → WebRTC 无法重放
 > SPS/PPS + GOP → 浏览器 H.264 解码器无法初始化），详见下方「已知坑」。
 
+以上是从源码构建或本地开发所需的依赖。Windows x64 完整包会把 launcher、应用、ADB、FFmpeg、
+scrcpy server、配置模板、签名 manifest、许可证和离线 seeds 一起打包；完整包用户不需要预装
+Rust、Node.js、系统 ADB 或系统 FFmpeg，`repair` 会按 `seeds/` → `cache/artifacts/` →
+manifest artifact URL 的顺序取依赖，并校验大小与 SHA-256。
+
 ## 快速开始
 
-> **Windows 完整包（便携安装 / 依赖修复 / 升级回滚）**：目标流程与现状见 [docs/UPDATE.md](docs/UPDATE.md)
-> （full 包打包与升级编排按批次计划推进，未落地能力已在文中标注「规划中」，当前请用以下两种方式）。
+### 方式一：Windows x64 完整包（launcher 托管）
 
-### 方式一：Docker 一键部署（推荐）
+解压完整包后，把下面的 `<version>` 替换为包内 manifest 的版本；全局参数必须放在子命令之前。
+
+```powershell
+Set-Location -LiteralPath 'D:\GameBot'
+$version = '<version>'
+
+# 未安装时只做目录检查；带 manifest 的检查会验证签名、平台和版本。
+.\gamer-launcher.exe doctor
+.\gamer-launcher.exe doctor --manifest ".\manifests\$version.json" --expect-current-version $version --expect-channel stable
+
+# 离线 seeds、缓存或 manifest artifact 可用于依赖修复与首次安装。
+.\gamer-launcher.exe repair --manifest ".\manifests\$version.json" --probe
+
+# 没有默认账号/密码；必须在启动 launcher 的同一环境中提供管理员口令。
+$env:GAMER_ADMIN_PASSWORD = '<首次登录口令>'
+.\gamer-launcher.exe start
+```
+
+`start` 会前台托管服务进程，浏览器按配置访问 `8443` 端口。`GAMER_ADMIN_PASSWORD` 只在进程
+内生成 Argon2id PHC，不写回配置；也可以在 `server/config.toml` 中配置合法的 Argon2id PHC。
+仓库没有默认账号/密码，也没有单独的 launcher stop 子命令。
+
+若不在安装根目录执行：
+
+```powershell
+.\gamer-launcher.exe --install-root 'D:\GameBot' repair --probe
+```
+
+#### 完整包依赖修复
+
+```powershell
+.\gamer-launcher.exe repair --probe
+.\gamer-launcher.exe doctor --manifest ".\manifests\$version.json" --deep --probe
+```
+
+不带 `--manifest` 时，`repair` 从安装根目录已有 manifest 中选择当前版本或最高 SemVer 版本；
+显式 manifest 可固定目标版本。每个依赖先查 `seeds/`，再查 `cache/artifacts/`，最后才按
+manifest 的 URL 下载；大小、SHA-256 和原子落盘校验失败不会污染运行目录。`--probe` 会额外
+探测 ADB/FFmpeg；`doctor --deep --probe` 用显式 manifest 做完整清点。
+
+#### 升级与回滚入口
+
+launcher CLI 的升级入口是：
+
+```powershell
+.\gamer-launcher.exe status
+.\gamer-launcher.exe upgrade ".\manifests\<new-version>.json"
+# 或：.\gamer-launcher.exe upgrade 'https://<发布源>/<new-version>.json'
+```
+
+本地 manifest 默认要求同目录同名 `.sig`；URL manifest 要求签名位于 manifest URL 后追加 `.sig`。
+升级会校验签名、版本、schema、磁盘空间和依赖完整性，并在提交前候选启动或就绪失败时自动回到
+旧版本；退出码 `0` 表示提交完成，`1` 表示失败但旧版本仍可用，`2` 表示进入
+`manual_recovery_required`。CLI 没有独立的 rollback 子命令。
+
+完整包启动时若要启用 Web 设置页的托管更新，需要在同一环境配置 launcher 的 manifest 来源：
+
+```powershell
+$env:GAMER_LAUNCHER_RELEASE_MANIFEST = '<manifest 文件路径或 URL>'
+$env:GAMER_ADMIN_PASSWORD = '<首次登录口令>'
+.\gamer-launcher.exe start
+```
+
+服务端提供受保护的 `GET /api/system/info`、`GET /api/system/update`、
+`POST /api/system/update/check`、`POST /api/system/update/download`、
+`POST /api/system/update/install`、`POST /api/system/update/rollback` 和
+`PUT /api/system/update/policy`。检查、下载、安装、回滚均为异步协调入口，安装后重启导致连接
+短暂断开属于正常流程；轮询 update 状态，并用 `system/info` 的 `app.version` 与 `boot_id`
+判断新进程是否已生效。未配置 manifest 来源时检查会返回无可用更新；直跑服务或 Docker 模式
+未由 launcher 管理时，更新动作返回 `update_not_managed`。
+
+### 方式二：Docker 一键部署（开发或自建镜像）
 
 ```bash
 # 1. 构建一体化镜像（必须在仓库根执行：stage1 pnpm 构建前端 → stage2 cargo 编译服务端 →
@@ -122,7 +199,22 @@ docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d
 - redroid 容器启动后，在「设备列表」添加设备：类型 redroid、地址 `redroid:5555`、
   屏幕模式虚拟屏 `1920x1080`、游戏包名填你的游戏
 
-### 方式二：本地开发
+发布镜像使用仓库现有的 release compose，不在主机上构建完整包：
+
+```powershell
+$env:GAMER_IMAGE = 'ghcr.io/<owner>/gamebot:<version>'
+docker compose -f docker-compose.release.yml up -d
+
+# 也可固定到摘要，便于可审计地回滚。
+$env:GAMER_IMAGE = 'ghcr.io/<owner>/gamebot@sha256:<digest>'
+docker compose -f docker-compose.release.yml up -d
+```
+
+`docker-compose.release.yml` 不包含 launcher；Docker 更新由主机/镜像部署系统替换 image，回滚
+就是重新部署已知可用的旧 digest，并保留 `gamer-data` 卷。Docker 模式不能使用
+`/api/system/update/*` 的 launcher 托管安装/回滚。
+
+### 方式三：本地开发
 
 ```bash
 # 服务端
@@ -164,8 +256,16 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAM
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | /health/ready | 就绪探针，公开 |
 | POST | /api/login | 登录 |
 | POST | /api/logout | 退出并立即使当前 Cookie 会话失效 |
+| GET | /api/system/info | 系统/应用版本与运行信息，需认证 |
+| GET | /api/system/update | 更新状态，需认证 |
+| POST | /api/system/update/check | 检查更新，需认证；launcher 托管模式为异步入口 |
+| POST | /api/system/update/download | 下载更新，需认证；launcher 托管模式为异步入口 |
+| POST | /api/system/update/install | 安装更新，需认证；可能触发服务重启 |
+| POST | /api/system/update/rollback | 提交前的受支持回滚入口，需认证 |
+| PUT | /api/system/update/policy | 更新策略，需认证 |
 | GET/POST | /api/devices | 设备列表 / 创建 |
 | POST | /api/devices/scan | 扫描 `adb devices -l` 并自动注册新设备（前端"刷新"时调用） |
 | PUT/DELETE | /api/devices/:id | 更新配置（变更后自动重连）/ 删除 |

@@ -820,7 +820,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 - [x] PATH-001：相对 data/config 路径按冻结契约解析，不依赖偶然 cwd。（相对配置文件目录/app dir 解析，中文空格路径测试）
 - [x] DATA-001：建立编号化 SQLite migration 框架。（migrations.rs 逐级单事务推进，v1 唯一基线语义不变）
 - [x] DATA-004：建立文件迁移 plan、staging、hash、marker 和 journal 骨架。（file_migration.rs 纯库 + 10 单测，未接线）
-- [x] OPS-001：API shutdown、Ctrl+C 和 SIGTERM 接入同一停机协调器。（shutdown.rs ShutdownCoordinator，一次性语义+状态可查）
+- [x] OPS-001：API shutdown、Ctrl+C 和 SIGTERM 接入同一停机协调器。（`server/src/main.rs` 已修复统一 drain 安装顺序竞态；三条入口共用 `ShutdownCoordinator`，静态确认 drain 顺序为 `run→viewer→scrcpy/session/adb`；真实 Docker stop/SIGTERM 仍未验收）
 
 #### Dependencies/Release 轨
 
@@ -883,29 +883,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 
 #### Launcher/Updater
 
-- [ ] LCH-009：实现仅当前用户可访问的 Windows named pipe IPC。
-- [ ] LCH-009：IPC 请求 id、协议版本、大小限制、超时和幂等测试通过。
-- [ ] LCH-010：实现检查、下载、验签、staged、waiting 和 switch journal 状态。
-- [ ] LCH-010：launcher 启动时能恢复每个未完成 journal 状态。
-- [ ] LCH-011：实现离线数据/config 快照 manifest 和逐文件 hash。
-- [ ] LCH-011：快照前确认 server PID 已完整退出并验证 SQLite 完整性。
-- [ ] LCH-011：实现 data 同卷 staging 恢复和失败数据 quarantine。
-- [ ] LCH-012：实现 candidate start、版本/schema/boot id 验证和 commit。
-- [ ] LCH-012：实现 pre-commit 自动恢复 snapshot + previous binary。
-- [ ] LCH-012：回滚失败进入 `manual_recovery_required`，停止自动循环。
+- [x] LCH-009：实现仅当前用户可访问的 Windows named pipe IPC。
+- [x] LCH-009：IPC 请求 id、协议版本、大小限制、超时和幂等测试通过。
+- [x] LCH-010：实现检查、下载、验签、staged、waiting 和 switch journal 状态。
+- [x] LCH-010：launcher 启动时能恢复每个未完成 journal 状态。
+- [x] LCH-011：实现离线数据/config 快照 manifest 和逐文件 hash。
+- [x] LCH-011：快照前确认 server PID 已完整退出并验证 SQLite 完整性。
+- [x] LCH-011：实现 data 同卷 staging 恢复和失败数据 quarantine。
+- [x] LCH-012：实现 candidate start、版本/schema/boot id 验证和 commit。
+- [x] LCH-012：实现 pre-commit 自动恢复 snapshot + previous binary。
+- [x] LCH-012：回滚失败进入 `manual_recovery_required`，停止自动循环。
 
 #### Server/Data/API
 
-- [ ] DATA-006：完成 N-1→N、重复迁移、SQL 失败、文件碰撞和中断 fixtures。
-- [ ] OPS-004：实现 candidate activation gate。
-- [ ] OPS-004：commit 前不启动 scheduler、设备扫描或业务写 API。
-- [ ] OPS-005：暴露 active run、viewer、升级事务和下一 cron 摘要。
-- [ ] SYS-003：实现 launcher、unsupported 和 Docker UpdateController adapter。
-- [ ] SYS-004：实现 update query/check/download/install/rollback/policy API。
-- [ ] SYS-004：更新状态变更 API 继续通过登录、Origin 和并发事务门禁。
-- [ ] SYS-005：实现 off/notify/auto 和维护窗口策略。
-- [ ] SYS-005：auto 在活动运行或临近 cron 时只等待，不强制安装。
-- [ ] SYS-006：install 先返回 202，后台协调器再触发停机。
+- [x] DATA-006：完成 N-1→N、重复迁移、SQL 失败、文件碰撞和中断 fixtures。
+- [x] OPS-004：实现 candidate activation gate。
+- [x] OPS-004：commit 前不启动 scheduler、设备扫描或业务写 API。
+- [x] OPS-005：暴露 active run、viewer、升级事务和下一 cron 摘要。
+- [x] SYS-003：实现 launcher、unsupported 和 Docker UpdateController adapter。
+- [x] SYS-004：实现 update query/check/download/install/rollback/policy API。（`api::tests::update` 6 passed）
+- [x] SYS-004：更新状态变更 API 继续通过登录、Origin 和并发事务门禁。（`api::tests::update` 6 passed）
+- [x] SYS-005：实现 off/notify/auto 和维护窗口策略。
+- [x] SYS-005：auto 在活动运行或临近 cron 时只等待，不强制安装。
+- [x] SYS-006：install 先返回 202，后台协调器再触发停机。（同 6 个测试覆盖 install 202/后台协调）
 
 #### Release/Web
 
@@ -913,49 +913,57 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 - [ ] REL-004：所有资产、验签和 smoke 通过后才发布 Release。
 - [ ] REL-005：发布 GHCR semver tag 和 immutable digest。
 - [ ] REL-006：生成 SBOM、provenance/attestation 并演练 key rotation。
-- [ ] WEB-005：Settings 从 fixture 切换到真实 system/update API。
-- [ ] WEB-005：删除静态“设置已保存（原型）”交互。
-- [ ] WEB-006：MainLayout、Login、Settings 全部移除硬编码产品版本。
-- [ ] WEB-006：检测 server/web-dist 版本混包并显示明确警告。
-- [ ] QA-004：升级 journal 每个持久化边界的 kill/restart 测试通过。
-- [ ] QA-006：run/viewer/cron/install 并发门禁测试通过。
+- [x] WEB-005：Settings 从 fixture 切换到真实 system/update API。
+- [x] WEB-005：删除静态“设置已保存（原型）”交互。
+- [x] WEB-006：MainLayout、Login、Settings 全部移除硬编码产品版本。
+- [x] WEB-006：检测 server/web-dist 版本混包并显示明确警告。
+- [x] QA-004：升级 journal 每个持久化边界的 kill/restart 测试通过。
+- [x] QA-006：run/viewer/cron/install 并发门禁测试通过。
 - [ ] 批次 3 合流门：M1 基线能够升级到 M2，并在候选失败时自动恢复旧程序和数据。
+- 本轮验证：Launcher IPC/升级/快照/候选专项测试 `22+82+20+6 passed`；真实 Windows 重启/PID/DACL/文件占用、Windows clean VM 和真实 Android 设备仍未验收。
+- 本轮验证：Server `cargo test migrations::tests` 为 `11 passed`（含新增 SQLite migration failure boundary），`file_migration::tests` 为 `17 passed`，update `69 passed`；此前全库 `432 passed、0 failed、2 ignored`。
+- 本轮验证：Release 本地 workflow 与 Web 已通过，Web 保持 `564 tests passed`/build 通过；生产签名私钥/key ID/公钥配置、GitHub release 环境审批、GHCR/Docker/buildx attestation 实跑仍阻塞 REL-004/005/006。
+- Release 本地验收已通过：`release/packaging/test-release-workflow.ps1` 与 `release/packaging/test-upgrade-release.ps1` 在 `powershell.exe 5.1` 和 `pwsh` 下均 PASS，相关 AST/Node check 均通过；9 个 PowerShell fixture 已加 UTF-8 BOM，`augment-sbom` 的 `bom-ref` 兼容修复已完成。该结果仍不替代真实 GitHub/GHCR/生产签名环境验收，REL-004/005/006 继续保持 [ ]。
+- 本轮验证：`cargo test api::tests::sec_tests::update -- --nocapture` 为 `6 passed`，覆盖 SYS-004 两项及 SYS-006 的 install 202/后台协调；真实 Docker/GHCR/Windows VM/Android 仍缺。
 
 ### 17.6 批次 4：热点集成、Docker 与 Launcher 自更新
 
 - [ ] 指定唯一集成人修改 `server/src/main.rs` 和 `server/src/api/mod.rs`。
 - [ ] 指定唯一集成人修改 `web/src/api.js` 和 `web/src/views/Settings.vue`。
 - [ ] 指定唯一集成人修改 release workflow、compose 和 `gamer.ps1` 热点。
-- [ ] LCH-013：实现 launcher 自更新 trampoline 和最低 launcher 版本门禁。
-- [ ] LCH-013：launcher 文件被占用或替换失败时继续保留旧 launcher。
-- [ ] DKR-001：增加基于 `${GAMER_IMAGE}` 的 release compose，保留开发 build compose。
-- [ ] DKR-002：实现宿主 pull→backup→切 digest→ready→失败回旧 digest。
-- [ ] DKR-003：Docker system info 返回 external update strategy，安装能力为 false。
-- [ ] DKR-004：Docker 升级/降级过程中绑定数据目录保持不变。
+- [x] LCH-013：实现 launcher 自更新 trampoline 和最低 launcher 版本门禁。（`upgrade:: --lib` 26 passed）
+- [x] LCH-013：launcher 文件被占用或替换失败时继续保留旧 launcher。（`upgrade:: --lib` 26 passed）
+- [x] DKR-001：增加基于 `${GAMER_IMAGE}` 的 release compose，保留开发 build compose。（release compose 无 `build`、支持 `GAMER_IMAGE`/digest，config 通过）
+- [x] DKR-002：实现宿主 pull→backup→切 digest→ready→失败回旧 digest。（`release/packaging/test-upgrade-release.ps1` 离线 mock 覆盖健康升级与 ready 失败回滚；`pwsh` 与 `powershell.exe` 均 PASS）
+- [x] DKR-003：Docker system info 返回 external update strategy，安装能力为 false。（external strategy、`install=false` 及路由/fixture tests 通过）
+- [x] DKR-004：Docker 升级/降级过程中绑定数据目录保持不变。（现有静态契约明确覆盖 bind mount `data/` 保持；真实 Docker daemon 验证仍缺）
 - [ ] Docker stop/SIGTERM 确认走统一 run drain、viewer/session 和 adb 清理。
 - [ ] 开发模式、Windows portable 和 Docker 三种启动方式分别通过冒烟。
 - [ ] 批次 4 合流门：三种部署模式能力降级明确，热点文件完成唯一集成。
+- 本轮验证：`cargo test upgrade:: --lib` 为 `26 passed`，覆盖 trampoline、最低版本、占用重试、失败保留旧文件；release compose 静态检查及显式 `GAMER_IMAGE` 下 `docker compose -f docker-compose.release.yml config --quiet` 均通过。DKR-003 的 external strategy、`install=false` 及路由/fixture tests 通过。上述不替代真实 Docker/GHCR/Windows VM/Android 验收，外部环境验收仍缺。
+- 本轮验证：唯一集成 Agent 静态确认 `server/src/main.rs` 已修复统一 drain 安装顺序竞态；`/api/shutdown`、Ctrl+C、SIGTERM 共用 `ShutdownCoordinator`，drain 顺序为 `run→viewer→scrcpy/session/adb`。真实 Docker stop/SIGTERM 仍未验收，因此对应 checklist 保持 [ ]。
+- 本轮验证：开发 compose、release compose、USB override、redroid profile 的 `docker compose config --quiet` 全部通过；该证据不替代开发模式、Windows portable 和 Docker 三种运行冒烟，也不代表真实 Docker/GHCR 验收完成。
 
 ### 17.7 批次 5：RC、故障注入与发布签核
 
 #### Windows 与故障测试
 
-- [ ] QA-003：SQLite 每条 migration 前后失败均不越级 schema。
-- [ ] QA-003：文件 migration 每个 copy/hash/rename/marker 边界失败均不丢源文件。
+- [x] QA-003：SQLite 每条 migration 前后失败均不越级 schema。（新增 SQLite migration failure boundary；`cargo test migrations::tests` `11 passed`）
+- [x] QA-003：文件 migration 每个 copy/hash/rename/marker 边界失败均不丢源文件。（`cargo test file_migration::tests` `17 passed`）
 - [ ] QA-005：Windows 10 x64 clean VM 完整测试通过。
 - [ ] QA-005：Windows 11 x64 clean VM 完整测试通过。
 - [ ] QA-005：空格、中文和长路径安装测试通过。
 - [ ] QA-005：程序和 data 位于不同磁盘时测试通过。
 - [ ] QA-007：1GB DB 和大量小文件升级压力测试通过。
-- [ ] QA-007：磁盘空间不足在修改 current/data 前明确拒绝。
+- [x] QA-007：磁盘空间不足在修改 current/data 前明确拒绝。
 - [ ] 杀毒软件短暂占用 exe/current/journal 时有界重试且不误删 previous。
 - [ ] Windows 重启、用户注销、launcher 强杀后 journal 恢复通过。
-- [ ] candidate 立即退出、端口占用、ready 503、错误版本/schema/boot id 全部自动回滚。
-- [ ] rollback 也失败时保留 snapshot/quarantine/journal 和人工恢复命令。
+- [x] candidate 立即退出、端口占用、ready 503/超时、错误 version/schema/boot id 全部自动回滚。（`launcher/src/upgrade/**` 场景测试 `32 passed`）
+- [x] rollback 也失败时保留 snapshot/quarantine/journal 并进入 `manual_recovery_required`。
 
 #### Docker、Release 与真机
 
-- [ ] 开发 compose、release compose、USB override、redroid profile 全部 config 通过。
+- [x] 开发 compose、release compose、USB override、redroid profile 全部 config 通过。（四套均通过 `docker compose config --quiet`；不代表真实 Docker daemon、Windows、Android 或 GHCR 验收）
 - [ ] DKR-004：新镜像不健康后按旧 digest 自动恢复。
 - [ ] QA-008：从 GitHub Release 重新下载 Windows 资产后验签和启动通过。
 - [ ] QA-008：从 GHCR 重新拉取镜像后版本、commit、digest 和 OCI label 一致。
@@ -967,13 +975,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 
 #### 文档与全量门禁
 
-- [ ] DOC-001：README 包含完整包安装、依赖修复、升级和回滚入口。
-- [ ] DOC-002：维护者手册包含 draft 发布、密钥轮换和 manual recovery。
-- [ ] DOC-003：本轮真实新增坑全部进入 `docs/PITFALLS.md`。
-- [ ] Launcher fmt、clippy、unit/integration tests 全绿。
-- [ ] Server fmt、clippy `-D warnings`、cargo test 全绿。
-- [ ] Web `pnpm test:run` 和 `pnpm build` 全绿。
+- [x] DOC-001：README 包含完整包安装、依赖修复、升级和回滚入口。（README「Windows x64 完整包」「完整包依赖修复」「升级与回滚入口」）
+- [x] DOC-002：维护者手册包含 draft 发布、密钥轮换和 manual recovery。（`docs/RELEASE.md` §2/§3/§4）
+- [x] DOC-003：本轮真实新增坑全部进入 `docs/PITFALLS.md`。（`docs/PITFALLS.md` 2026-08-31 批次 0/1、批次 2/发布链路条目）
+- 本轮验证：QA-003 的 SQLite migration failure boundary 已加入并通过；`cargo test migrations::tests` 为 `11 passed`，`file_migration::tests` 为 `17 passed`。这只是专项测试证据，不代表 QA-005/007/008 或真实发布环境验收完成。
+- 本轮验证：QA-007 子 Agent 已完成本地替代测试但明确未完成全量验收：本地已通过 1 GiB 稀疏 DB preflight、2048 小文件 snapshot/manifest/hash/SQLite inspect（launcher snapshot 9 passed、server maintenance 9 passed）；真实 1GB 复制仍未执行，故第一条保持 [ ]；第二条空间不足拒绝已由定向测试验证并勾选。
+- 本轮验证：launcher Engine 可注入 available-space provider，生产默认 `winutil::free_disk_bytes`，定向测试 1 passed，确认 `current.json`、`data`、`config.toml`、`snapshot/manifest` 不变，journal 保持 idle/failed；真实 1GB 复制仍未执行。
+- 本轮验证：最新 launcher Agent 已在 `launcher/src/upgrade/**` 收口 candidate 立即退出、端口占用、ready 503/超时、错误 version/schema/boot id 的自动回滚，以及 rollback 再失败时保留 snapshot/quarantine/journal 并进入 `manual_recovery_required`；场景测试 `32 passed`，QA-004 回归 `6 passed`，`launcher cargo fmt --check` 与 `git diff --check` 通过。以上仍是本地 launcher/故障场景证据；Windows 10/11 clean VM、杀毒软件真实占用、重启/注销/强杀真实恢复、QA-007 第一条真实 1GB 复制与大量小文件升级压力测试、任何真实发布/真机项仍缺；QA-007 第二条已通过定向测试并勾选。
+- [x] Launcher fmt、clippy、unit/integration tests 全绿。
+- [x] Server fmt、clippy `-D warnings`、cargo test 全绿。
+- [x] Web `pnpm test:run` 和 `pnpm build` 全绿。
 - [ ] Compose config 和 `tools/verify-release.ps1` 全绿。
+- 本轮验证：DOC-001/002/003 条目已按 README、`docs/RELEASE.md` 和 `docs/PITFALLS.md` 现有内容核对；该文档证据不代表真实 GitHub/GHCR、生产密钥、Windows 真机或 Android 验收。
+- 本轮验证：全量门禁已通过：Launcher fmt、clippy、unit/integration tests；Server fmt、clippy `-D warnings`、cargo test；Web `pnpm test:run`、`pnpm build`。`tools/verify-release.ps1` 返回 0，但 `cargo audit` 实际出现 crates.io 403/yanked 检查错误及 1 条 `unmaintained` warning，依赖审计未完全成功，因此“Compose config 和 tools/verify-release.ps1 全绿”继续保持 [ ]。REL-004/005/006、批次 5 合流门，以及真实 GitHub/GHCR/生产签名、Docker daemon、Windows clean VM、Android 验收项继续保持 [ ]。
 - [ ] 批次 5 合流门：§16 Definition of Done 逐条有证据，发布负责人签核 stable。
 
 ### 17.8 发布后观察与收口

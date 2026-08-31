@@ -14,9 +14,13 @@
  *       私钥 <dir>/<id>.private.pem（PKCS#8，绝不入库）。默认 id=dev-ed25519-1，
  *       默认目录 <repo>/release/keys。
  *
- *   node sign-manifest.mjs sign <manifest.json> [--key <private.pem>] [--key-id <id>] [--out <sig>]
- *       对 manifest 原始字节签名，写出 .sig。默认 key=<repo>/release/keys/dev-ed25519-1.private.pem，
- *       key-id 缺省从私钥文件名 <id>.private.pem 推断，--out 缺省 <manifest 去掉 .json>.sig。
+ *   node sign-manifest.mjs sign <manifest.json> [--key <private.pem>] [--key-env <VAR>] [--key-id <id>] [--out <sig>]
+ *       对 manifest 原始字节签名，写出 .sig。私钥二选一：
+ *         --key <file>     私钥文件（缺省 <repo>/release/keys/dev-ed25519-1.private.pem，
+ *                          key-id 缺省从文件名 <id>.private.pem 推断）；
+ *         --key-env <VAR>  从环境变量 <VAR> 读 PKCS#8 PEM（CI 注入 secret 用，私钥不落盘），
+ *                          必须显式配对 --key-id（环境变量无法推断 key_id）。
+ *       --out 缺省 <manifest 去掉 .json>.sig。
  *
  * 验签走 release/contracts/validate-manifest.mjs check（--keys-dir 指向公钥目录）。
  */
@@ -42,7 +46,7 @@ function usage(exitCode) {
     [
       'Usage:',
       '  node sign-manifest.mjs keygen [--id <key_id>] [--out-dir <dir>] [--force]',
-      '  node sign-manifest.mjs sign <manifest.json> [--key <private.pem>] [--key-id <id>] [--out <sig>]',
+      '  node sign-manifest.mjs sign <manifest.json> [--key <private.pem>] [--key-env <VAR>] [--key-id <id>] [--out <sig>]',
     ].join('\n'),
   );
   return exitCode;
@@ -56,6 +60,7 @@ function parseArgs(args) {
     else if (a === '--id') opts.id = args[++i];
     else if (a === '--out-dir') opts.outDir = args[++i];
     else if (a === '--key') opts.key = args[++i];
+    else if (a === '--key-env') opts.keyEnv = args[++i];
     else if (a === '--key-id') opts.keyId = args[++i];
     else if (a === '--out') opts.out = args[++i];
     else if (a === '--help' || a === '-h') { process.exit(usage(0)); }
@@ -106,26 +111,44 @@ function cmdSign(opts) {
   if (opts._.length !== 1) process.exit(usage(2));
   const manifestPath = path.resolve(opts._[0]);
   if (!existsSync(manifestPath)) fail(`manifest 不存在: ${manifestPath}`);
-
-  // 私钥路径 → key_id 推断（<id>.private.pem）
-  let keyPath = opts.key ? path.resolve(opts.key) : path.join(DEFAULT_OUT_DIR, `${DEFAULT_ID}.private.pem`);
-  let keyId = opts.keyId || null;
-  if (!keyId) {
-    const base = path.basename(keyPath);
-    const m = /^(.*)\.private\.pem$/.exec(base);
-    keyId = m ? m[1] : DEFAULT_ID;
-  }
-  if (!KEY_ID_RE.test(keyId)) fail(`非法 key_id "${keyId}"`);
-  if (!existsSync(keyPath)) fail(`私钥不存在: ${keyPath}（先运行 keygen 子命令）`);
+  if (opts.keyEnv && opts.key) fail('--key-env 与 --key 互斥（私钥来源二选一）');
 
   let privateKey;
-  try {
-    privateKey = createPrivateKey(readFileSync(keyPath));
-  } catch (e) {
-    fail(`私钥解析失败: ${keyPath}（${e.message}）`);
+  let keyId;
+  let keyLabel;
+  if (opts.keyEnv) {
+    // CI 路径：私钥 PEM 从环境变量读入（如 GitHub secret RELEASE_MANIFEST_PRIVATE_KEY），
+    // 不经磁盘文件；必须显式 --key-id（无法从环境变量名推断）
+    if (!opts.keyId) fail(`--key-env ${opts.keyEnv} 需要显式 --key-id（环境变量无法推断 key_id）`);
+    keyId = opts.keyId;
+    const pem = process.env[opts.keyEnv];
+    if (!pem || pem.trim() === '') fail(`环境变量 ${opts.keyEnv} 未设置或为空（--key-env 指定）`);
+    keyLabel = `env:${opts.keyEnv}`;
+    try {
+      privateKey = createPrivateKey(Buffer.from(pem, 'utf8'));
+    } catch (e) {
+      fail(`私钥解析失败（来自环境变量 ${opts.keyEnv}，${e.message}）`);
+    }
+  } else {
+    // 私钥路径 → key_id 推断（<id>.private.pem）
+    const keyPath = opts.key ? path.resolve(opts.key) : path.join(DEFAULT_OUT_DIR, `${DEFAULT_ID}.private.pem`);
+    keyId = opts.keyId || null;
+    if (!keyId) {
+      const base = path.basename(keyPath);
+      const m = /^(.*)\.private\.pem$/.exec(base);
+      keyId = m ? m[1] : DEFAULT_ID;
+    }
+    if (!existsSync(keyPath)) fail(`私钥不存在: ${keyPath}（先运行 keygen 子命令）`);
+    keyLabel = keyPath;
+    try {
+      privateKey = createPrivateKey(readFileSync(keyPath));
+    } catch (e) {
+      fail(`私钥解析失败: ${keyPath}（${e.message}）`);
+    }
   }
+  if (!KEY_ID_RE.test(keyId)) fail(`非法 key_id "${keyId}"`);
   if (privateKey.asymmetricKeyType !== 'ed25519') {
-    fail(`密钥类型不是 Ed25519: ${keyPath}（${privateKey.asymmetricKeyType}）`);
+    fail(`密钥类型不是 Ed25519: ${keyLabel}（${privateKey.asymmetricKeyType}）`);
   }
 
   const raw = readFileSync(manifestPath); // 原始字节——不改写、不重排、不加 BOM
@@ -141,7 +164,7 @@ function cmdSign(opts) {
   writeFileSync(outPath, sigText, 'utf8');
 
   console.log(`[sign-manifest] sign OK: ${outPath}`);
-  console.log(`  key_id=${keyId}  覆盖字节=${raw.length}  manifest=${manifestPath}`);
+  console.log(`  key_id=${keyId}  key=${keyLabel}  覆盖字节=${raw.length}  manifest=${manifestPath}`);
 }
 
 const args = process.argv.slice(2);

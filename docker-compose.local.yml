@@ -24,7 +24,8 @@
 # 停止：
 #   docker compose -f docker-compose.yml -f docker-compose.local.yml down
 #
-# 登录：docker-config.toml 未配密码 → GAMER_PROFILE 缺省 dev → 默认凭据 admin/admin123
+# 登录：docker-config.toml 未配密码时不会生成默认账号/密码；请显式设置
+# GAMER_ADMIN_PASSWORD（开发）或在配置的 [auth].password_hash 中提供 Argon2id PHC。
 
 services:
   gamer:

@@ -100,6 +100,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # WEB-006 版本收口硬门禁：web/src 不得硬编码产品版本字面量（运行时一律消费
+      # /api/system/info 的 app.version）。默认即硬失败（-ReportOnly 仅人工观察用）。
+      - name: Check no hardcoded version in web/src (WEB-006)
+        working-directory: .
+        shell: pwsh
+        run: ./tools/check-web-version.ps1
+
       - name: Setup Node.js 24 LTS
         uses: actions/setup-node@v4
         with:

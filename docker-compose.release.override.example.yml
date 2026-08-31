@@ -1,0 +1,23 @@
+# GameBot 发行部署 overlay 示例（DKR-001 可选项）
+#
+# 用法：复制为 docker-compose.release.override.yml 后按需启用/修改——
+#   GAMER_IMAGE=ghcr.io/<owner>/gamebot:0.2.0 \
+#   docker compose -f docker-compose.release.yml -f docker-compose.release.override.yml up -d
+#
+# 本示例演示三类常见定制：
+#   1. 通过 GAMER_CONFIG_DIR 挂载自定义 config/config.toml（端口 / [auth] password_hash /
+#      rtc_external_* ICE 宣告等，字段与 server/config.example.toml 一致）；
+#   2. 显式传入首次登录密码 GAMER_ADMIN_PASSWORD（主文件已透传该变量，此处演示
+#      强制要求提供；与挂载的 [auth] password_hash 二选一，env 仅 dev profile 生效）；
+#   3. Linux 宿主 USB 物理设备直通（device 映射；Docker Desktop 无法直通 USB）。
+#
+# 云手机（redroid）按需从 docker-compose.yml 的 profiles 段复制后叠加。
+
+services:
+  gamer:
+    environment:
+      # 未设置该变量时 compose config/up 直接报错，防止无凭据静默启动
+      GAMER_ADMIN_PASSWORD: ${GAMER_ADMIN_PASSWORD:?在环境变量或 .env 中提供首次登录密码}
+    # USB 直通（仅 Linux 宿主；需要时取消注释）：
+    # devices:
+    #   - "/dev/bus/usb:/dev/bus/usb"

@@ -120,3 +120,5 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **运行中服务的 WAL 库只读打开可能失败**（无 -shm 时）：maintenance 工具做只读优先、失败退回读写打开但零写入的兜底。
 - **launcher `--install-root .` 相对根会让注入的 GAMER_* 稳定路径变相对路径**（违反路径契约，server 端 jar 路径被重复拼接启动失败）：注入前必须把安装根按 cwd 词法规范化为绝对路径。
 - **端口就绪探测按「端口 200」判定可被同端口无关进程误满足**：E2E 曾被遗留 dev server 占 8443 误报 PASS；集成验收前先清端口，升级验收需叠加 boot_id/版本断言。
+- **PowerShell 的 `New-Item` 没有 `-LiteralPath` 参数**：升级器离线行为测试在 pwsh 7 直接失败；目录创建改用 `[IO.Directory]::CreateDirectory()`，路径检查/文件操作继续使用 LiteralPath。
+- **PowerShell 函数会捕获未管道丢弃的 `Copy-Item`/`Move-Item` 输出**：升级快照函数的返回路径会被文件对象污染并写入状态；这类副作用命令必须显式 `| Out-Null`。

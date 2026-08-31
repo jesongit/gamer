@@ -1,0 +1,48 @@
+﻿# GameBot 发行镜像部署（DKR-001）：直接消费 GHCR 发布镜像，**无 build:**
+#
+# 用法（GAMER_IMAGE 必须显式提供；宿主升级脚本传入完整 digest 引用）：
+#   GAMER_IMAGE=ghcr.io/<owner>/gamebot:0.2.0 docker compose -f docker-compose.release.yml up -d
+#   GAMER_IMAGE=ghcr.io/<owner>/gamebot@sha256:<digest> docker compose -f docker-compose.release.yml up -d
+#
+# 与开发 docker-compose.yml 的对齐关系：
+#   端口/UDP 映射、healthcheck、restart、GB_CONFIG/TZ/GAMER_DEPLOYMENT_MODE/GAMER_WEBRTC_UDP_PORT
+#   完全一致；差异仅两处——
+#   ① image 取环境变量（无 build:），② data/config/log 使用宿主 bind mount；升级和回滚
+#   只替换镜像，不改变这三个宿主目录。首次部署请准备 config/config.toml。
+# 登录密码 / USB 直通见 docker-compose.release.override.example.yml。
+# 镜像版本核验命令清单见 release/docs/ATTESTATION.md §5。
+#
+# 开发部署（build: 链路）仍走 docker-compose.yml，本文件不参与开发流程。
+
+services:
+  gamer:
+    image: ${GAMER_IMAGE:?必须通过 GAMER_IMAGE 指定发布镜像，如 ghcr.io/<owner>/gamebot:0.2.0}
+    container_name: gamer-server
+    ports:
+      - "8443:8443"
+      # 固定 WebRTC 媒体端口；若使用自定义 rtc_udp_port，容器侧端口必须同步修改。
+      # GAMER_WEBRTC_UDP_PORT 是宿主侧端口变量，默认与容器侧 8443 相同。
+      - "${GAMER_WEBRTC_UDP_PORT:-8443}:8443/udp"
+    volumes:
+      # 这三个宿主目录是升级/回滚期间的稳定边界；不要改成匿名卷或镜像内路径。
+      - ${GAMER_DATA_DIR:-./data}:/app/data
+      - ${GAMER_CONFIG_DIR:-./config}:/app/config:ro
+      - ${GAMER_LOG_DIR:-./logs}:/app/log
+    environment:
+      GB_CONFIG: /app/config/config.toml
+      GB_LOG: /app/log/gamer-server.log
+      # 即使 config.toml 内 data_dir 不同，release 运行数据仍固定在绑定目录。
+      GAMER_DATA_DIR: /app/data
+      TZ: ${TZ:-Asia/Shanghai}
+      GAMER_DEPLOYMENT_MODE: docker
+      GAMER_WEBRTC_UDP_PORT: ${GAMER_WEBRTC_UDP_PORT:-8443}
+      # 首次设置登录密码（进程内转 Argon2id PHC 不落盘；留空 = 未设置，认证 fail closed，
+      # 走挂载配置的 [auth] password_hash 或后续用 override example 注入）
+      GAMER_ADMIN_PASSWORD: ${GAMER_ADMIN_PASSWORD:-}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8443/health/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
