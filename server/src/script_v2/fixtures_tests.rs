@@ -78,6 +78,8 @@ const VALID_IDS: &[&str] = &[
     "v10_func_call_cross_file",
     "v11_record_output",
     "v12_task_args_snapshot",
+    "v13_check_step",
+    "v14_branch_click",
 ];
 
 /// 非法样例逻辑 ID。
@@ -90,6 +92,7 @@ const INVALID_IDS: &[&str] = &[
     "i07_unknown_top_key",
     "i08_else_in_candidates",
     "i09_empty_default",
+    "i10_branch_click_type",
 ];
 
 /// 测试资源：call 目标脚本 / 函数库 common / 全部被引用模板短名。
@@ -113,6 +116,8 @@ fn fixture_provider() -> InMemoryResources {
         "record_click_20260829_001.png",
         "record_swipe_20260829_002.png",
         "icon.png",
+        // v13 check 步骤引用的模板。
+        "logo.png",
         // 非法 fixture 走到语义校验时引用的模板（i04 重复候选）。
         "dup.png",
     ] {

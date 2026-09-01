@@ -148,21 +148,26 @@ impl Serialize for Cell {
     }
 }
 
-/// match 候选（有序，单键映射 `模板: [分支步骤]` 的解析结果）。
+/// match 候选（有序，单键映射 `模板: [分支步骤]` 的解析结果；候选值也可为
+/// `{click: true, steps: [...]}` 映射——命中后点击模板中心，规范序列化时
+/// `click: false` 还原为列表形态、`click: true` 恒为映射形态）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MatchCandidate {
     pub template: Cell,
+    pub click: bool,
     pub steps: Vec<Step>,
 }
 
-/// color 候选分支（有序列表项，单键映射 `颜色: [分支步骤]`）。
+/// color 候选分支（有序列表项，单键映射 `颜色: [分支步骤]`；click 语义同
+/// match 候选，命中后点击取样点）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ColorBranch {
     pub color: Cell,
+    pub click: bool,
     pub steps: Vec<Step>,
 }
 
-/// 步骤十七类。分支子列表递归为 `Vec<Step>`；空分支/默认字段在 AST 中
+/// 步骤十八类。分支子列表递归为 `Vec<Step>`；空分支/默认字段在 AST 中
 /// 显式存在（序列化规范 YAML 时按契约省略）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
@@ -202,6 +207,12 @@ pub enum Step {
         candidates: Vec<MatchCandidate>,
         r#else: Vec<Step>,
         timeout: Option<Cell>,
+    },
+    /// check：单帧匹配模板（不点击、不轮询、无分支），未命中按 throw 文案结束运行。
+    Check {
+        template: Cell,
+        /// 未命中时的终止原因（必填，loader 保证非空）。
+        r#throw: String,
     },
     Color {
         at: Cell,
@@ -276,6 +287,7 @@ impl Step {
             Step::Wait { .. } => "wait",
             Step::Find { .. } => "find",
             Step::Match { .. } => "match",
+            Step::Check { .. } => "check",
             Step::Color { .. } => "color",
             Step::If { .. } => "if",
             Step::Loop { .. } => "loop",
@@ -335,6 +347,10 @@ impl Serialize for Step {
                 map.serialize_entry("candidates", candidates)?;
                 map.serialize_entry("else", r#else)?;
                 map.serialize_entry("timeout", timeout)?;
+            }
+            Step::Check { template, r#throw } => {
+                map.serialize_entry("template", template)?;
+                map.serialize_entry("throw", r#throw)?;
             }
             Step::Color { at, expect, r#else } => {
                 map.serialize_entry("at", at)?;

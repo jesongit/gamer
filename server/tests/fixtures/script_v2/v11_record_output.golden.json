@@ -25,6 +25,7 @@
             "candidates": [
               {
                 "template": { "lit": "record_swipe_20260829_002.png" },
+                "click": false,
                 "steps": [
                   {
                     "kind": "swipe",

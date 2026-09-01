@@ -219,10 +219,10 @@ fn key_loc(span: &Span) -> String {
 // 结构层构建（错误累积，不早退）
 // ---------------------------------------------------------------------------
 
-/// 步骤动作键（十七类）。
+/// 步骤动作键（十八类）。
 pub(crate) const ACTION_KEYS: &[&str] = &[
-    "str_app", "cls_app", "tap", "swipe", "key", "text", "log", "wait", "find", "match", "color",
-    "if", "loop", "call", "func", "throw", "return",
+    "str_app", "cls_app", "tap", "swipe", "key", "text", "log", "wait", "find", "match", "check",
+    "color", "if", "loop", "call", "func", "throw", "return",
 ];
 
 /// 函数名与步骤动作共用 YAML 键空间，撞名会让函数调用无法无歧义解析。
@@ -234,6 +234,7 @@ const RESERVED_FUNCTION_NAMES: &[&str] = &[
     "swipe",
     "find",
     "match",
+    "check",
     "color",
     "loop",
     "call",
@@ -255,6 +256,7 @@ const RESERVED_FUNCTION_NAMES: &[&str] = &[
     "args",
     "expect",
     "candidates",
+    "click",
     "if",
     "until",
     "cond",
@@ -825,10 +827,15 @@ fn build_step(ctx: &mut BuildCtx, item: &Node, path: &str) -> Option<Step> {
 }
 
 fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Option<Step> {
+    // check 的 throw 是兄弟字段（未命中终止原因），与 throw 动作键同名词——
+    // 步骤内存在 check 键时把 throw 降级为字段，避免误判多动作键。
+    let has_check = entries.iter().any(|e| e.key == "check");
+    let is_action =
+        |e: &MapEntry| ACTION_KEYS.contains(&e.key.as_str()) && !(has_check && e.key == "throw");
     let mut action: Option<(&str, &Node)> = None;
     let mut action_count = 0usize;
     for e in entries {
-        if ACTION_KEYS.contains(&e.key.as_str()) {
+        if is_action(e) {
             action_count += 1;
             action = Some((e.key.as_str(), &e.value));
         }
@@ -836,7 +843,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
     if action_count > 1 {
         let second = entries
             .iter()
-            .filter(|e| ACTION_KEYS.contains(&e.key.as_str()))
+            .filter(|e| is_action(e))
             .nth(1)
             .map(|e| e.key.clone())
             .unwrap_or_default();
@@ -854,7 +861,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
             codes::STEP_UNKNOWN_ACTION,
             path,
             "",
-            format!("步骤缺少动作键（十七类之一），现有键 {keys:?}"),
+            format!("步骤缺少动作键（十八类之一），现有键 {keys:?}"),
         );
         return None;
     };
@@ -862,6 +869,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
     let known: &[&str] = match action {
         "find" => &["block", "verify", "timeout", "then", "else"],
         "match" => &["else", "timeout"],
+        "check" => &["throw"],
         "color" => &["else"],
         "if" => &["then", "else"],
         "call" => &["args"],
@@ -869,7 +877,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
         _ => &[],
     };
     for e in entries {
-        if ACTION_KEYS.contains(&e.key.as_str()) || known.contains(&e.key.as_str()) {
+        if is_action(e) || known.contains(&e.key.as_str()) {
             continue;
         }
         ctx.push(
@@ -1035,6 +1043,46 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
             })
         }
         "match" => build_match_step(ctx, value, entries, path),
+        "check" => {
+            let template = build_cell(ctx, value, path, "template", Exp::Tmpl)?;
+            // throw 必填且非空：未命中时的终止原因，等价 throw 步骤的消息
+            let msg = match lookup(entries, "throw") {
+                Some(n) => match n.as_scalar() {
+                    Some((raw, _)) if !raw.trim().is_empty() => raw.to_string(),
+                    Some(_) => {
+                        ctx.push(
+                            codes::STEP_FIELD_TYPE_MISMATCH,
+                            path,
+                            "throw",
+                            "check 的 throw 必须是非空字符串（未命中时的终止原因）",
+                        );
+                        return None;
+                    }
+                    None => {
+                        ctx.push(
+                            codes::STEP_FIELD_TYPE_MISMATCH,
+                            path,
+                            "throw",
+                            "check 的 throw 必须是字符串标量",
+                        );
+                        return None;
+                    }
+                },
+                None => {
+                    ctx.push(
+                        codes::STEP_FIELD_MISSING,
+                        path,
+                        "throw",
+                        "check 缺少必需字段 throw（未命中时的终止原因）",
+                    );
+                    return None;
+                }
+            };
+            Some(Step::Check {
+                template,
+                r#throw: msg,
+            })
+        }
         "color" => build_color_step(ctx, value, entries, path),
         "if" => {
             let cond = build_cell(ctx, value, path, "cond", Exp::Bool)?;
@@ -1164,6 +1212,41 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
 
 /// match 紧凑缩进候选（CONTRACT §4.1）：候选列表是 match 键下的无缩进序列，
 /// else/timeout 是步骤兄弟键，绝不接受 `- else:` / `- timeout:` 写进候选列表。
+/// 候选值双形态解析（match/color 候选共用）：分支步骤列表（原形态，
+/// click=false），或 `{click: true, steps: [...]}` 映射（steps 可省略 =
+/// 空分支，命中即点）。返回 (click, 分支步骤)。
+fn build_candidate_branch(
+    ctx: &mut BuildCtx,
+    value: &Node,
+    path: &str,
+    steps_path: &str,
+    click_field: &str,
+) -> (bool, Vec<Step>) {
+    let Some(m) = value.as_map() else {
+        // 列表形态原样解析；非法标量走 build_steps 既有报错路径。
+        return (false, build_steps(ctx, value, steps_path));
+    };
+    for e in m {
+        if !matches!(e.key.as_str(), "click" | "steps") {
+            ctx.push(
+                codes::STEP_FIELD_UNKNOWN,
+                path,
+                &e.key,
+                format!("候选值不支持字段 {:?}（允许：click/steps）", e.key),
+            );
+        }
+    }
+    let click = match m.iter().find(|e| e.key == "click") {
+        Some(e) => build_bool_field(ctx, &e.value, path, click_field).unwrap_or(false),
+        None => false,
+    };
+    let steps = match m.iter().find(|e| e.key == "steps") {
+        Some(e) => build_steps(ctx, &e.value, steps_path),
+        None => Vec::new(),
+    };
+    (click, steps)
+}
+
 fn build_match_step(
     ctx: &mut BuildCtx,
     value: &Node,
@@ -1231,8 +1314,18 @@ fn build_match_step(
         } else {
             Cell::Lit(TypedValue::Tmpl(entry.key.clone()))
         };
-        let steps = build_steps(ctx, &entry.value, &steps_path);
-        candidates.push(MatchCandidate { template, steps });
+        let (click, steps) = build_candidate_branch(
+            ctx,
+            &entry.value,
+            path,
+            &steps_path,
+            &format!("candidates[{i}].click"),
+        );
+        candidates.push(MatchCandidate {
+            template,
+            click,
+            steps,
+        });
     }
     let timeout = match lookup(entries, "timeout") {
         Some(n) => Some(build_cell(ctx, n, path, "timeout", Exp::Time)?),
@@ -1335,8 +1428,18 @@ fn build_color_step(
         } else {
             Cell::Lit(TypedValue::Color(entry.key.clone()))
         };
-        let steps = build_steps(ctx, &entry.value, &steps_path);
-        expect.push(ColorBranch { color, steps });
+        let (click, steps) = build_candidate_branch(
+            ctx,
+            &entry.value,
+            path,
+            &steps_path,
+            &format!("expect[{i}].click"),
+        );
+        expect.push(ColorBranch {
+            color,
+            click,
+            steps,
+        });
     }
     let r#else = branch_steps(ctx, entries, path, "else");
     Some(Step::Color { at, expect, r#else })

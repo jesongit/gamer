@@ -16,10 +16,12 @@
             "candidates": [
               {
                 "template": { "lit": "test1.png" },
+                "click": false,
                 "steps": [{ "kind": "log", "message": { "lit": "命中 test1" } }]
               },
               {
                 "template": { "lit": "test2.png" },
+                "click": false,
                 "steps": [{ "kind": "log", "message": { "lit": "命中 test2" } }]
               }
             ],

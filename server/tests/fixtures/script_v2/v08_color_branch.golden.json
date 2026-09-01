@@ -17,10 +17,12 @@
             "expect": [
               {
                 "color": { "lit": "ff8800" },
+                "click": false,
                 "steps": [{ "kind": "tap", "at": { "lit": [0.5, 0.5] } }]
               },
               {
                 "color": { "lit": "123456" },
+                "click": false,
                 "steps": [{ "kind": "log", "message": { "lit": "深蓝分支" } }]
               }
             ],

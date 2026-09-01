@@ -61,6 +61,8 @@ ParamDecl 为 `{type, name, remark, default}`，`default: null` 表示必填。M
 | v10_func_call_cross_file | v10_func_call_cross_file.yaml + v10_func_call_cross_file.common.yaml | 跨文件函数调用 `func: common/login` + 函数库文件（短路径 common） |
 | v11_record_output | v11_record_output.yaml | 录制输出形态：点击→单条 find；滑动→match→swipe + throw + 30s timeout |
 | v12_task_args_snapshot | v12_task_args_snapshot.yaml | 定时任务参数快照形态：args 全量类型化 + param_signature（psig1 算法） |
+| v13_check_step | v13_check_step.yaml | check 界面断言：单帧匹配模板 + 必填兄弟键 throw（模板字面量与 $ref 两形态） |
+| v14_branch_click | v14_branch_click.yaml | 候选级命中点击：候选值映射形态 `{click: true, steps: [...]}`（steps 省略 = 命中即点；不点击走列表形态），match/color 各覆盖点击与非点击候选 |
 
 ## 非法样例索引
 
@@ -74,6 +76,7 @@ ParamDecl 为 `{type, name, remark, default}`，`default: null` 表示必填。M
 | i07_unknown_top_key | i07_unknown_top_key.yaml | script.top_level.unknown_key @ metadata |
 | i08_else_in_candidates | i08_else_in_candidates.yaml | step.match.else_in_candidates @ steps[0].candidates（- else 写进候选列表） |
 | i09_empty_default | i09_empty_default.yaml | param.default.empty @ params[0].default（text:x:名:） |
+| i10_branch_click_type | i10_branch_click_type.yaml | step.field.type_mismatch @ steps[0].candidates[0].click、steps[1].expect[0].click（候选级 click 非布尔字面量） |
 
 ## 约定
 

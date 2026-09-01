@@ -5,6 +5,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
+use image::GenericImageView;
 use serde::Deserialize;
 
 use super::common::{err_response, require_pkg, run_blocking_api};
@@ -40,8 +41,10 @@ pub(super) fn validate_template_name(name: &str) -> Result<String, ApiError> {
     Ok(name.to_string())
 }
 
-/// 录制上传短名校验（plan §11.7）：`[A-Za-z0-9_-]+\.png`。
-/// 完整文件名由服务端组合（短名 + 搜索区域 #×1000 后缀），前端不拼接 # 元数据。
+/// 录制/框选上传短名校验（plan §11.7）：unicode 字母数字 + `-` `_` + `.png`。
+/// 框选默认名与用户习惯都是中文（如「委托界面.png」），ASCII 白名单会整批拒掉；
+/// `#` 仍必须拒绝——它是服务端组合区域后缀的分隔符。完整文件名由服务端组合
+/// （短名 + 搜索区域 #×1000 后缀），前端不拼接 # 元数据。
 pub(super) fn validate_short_name(name: &str) -> Result<String, ApiError> {
     let name = name.trim();
     let Some(base) = name.strip_suffix(".png") else {
@@ -51,10 +54,10 @@ pub(super) fn validate_short_name(name: &str) -> Result<String, ApiError> {
         || base.len() > 251
         || !base
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
     {
         return Err(ApiError::bad_request(
-            "短名非法（只允许字母数字 - _，以 .png 结尾）",
+            "短名非法（只允许中英文/数字 - _，以 .png 结尾）",
         ));
     }
     Ok(name.to_string())
@@ -457,25 +460,50 @@ pub(super) async fn api_test_template(
         Ok(name) => name,
         Err(err) => return err.into_response(),
     };
-    let tpl_bytes = match run_blocking_api(move || {
-        let tpl_path = st.scripts.tmpl_dir(&pkg).join(&name);
-        std::fs::read(&tpl_path).map_err(|_| ApiError::not_found("模板不存在"))
+    // 与引擎一致：支持脚本中的模板短名，并以消歧后的实际文件名解析区域后缀。
+    // 编辑器的单次预览不应因为省略 #区域后缀而走另一套匹配语义。
+    let scripts = st.scripts.clone();
+    let (tpl_bytes, resolved_name) = match run_blocking_api(move || {
+        let tpl_path = scripts
+            .resolve_template_path(&pkg, &name)
+            .map_err(|e| ApiError::not_found(e.to_string()))?;
+        let resolved_name = tpl_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.clone());
+        let bytes = std::fs::read(&tpl_path).map_err(|_| ApiError::not_found("模板不存在"))?;
+        Ok((bytes, resolved_name))
     })
     .await
     {
-        Ok(bytes) => bytes,
+        Ok(result) => result,
         Err(err) => return err.into_response(),
     };
     let screen = match st.devices.screenshot(&req.device_id).await {
         Ok(s) => s,
         Err(e) => return ApiError::bad_gateway(format!("截图失败: {}", e)).into_response(),
     };
+    let (screen_w, screen_h) = st
+        .devices
+        .session(&req.device_id)
+        .map(|session| session.video_size())
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .unwrap_or_else(|| {
+            image::load_from_memory(&screen)
+                .map(|image| image.dimensions())
+                .unwrap_or((0, 0))
+        });
     let mr = matcher::MatchRequest {
         screen_png: screen,
         template_png: tpl_bytes,
-        threshold: req.threshold,
-        region: req.region,
+        // 缺省阈值与函数/脚本实际运行的服务端默认值一致；脚本编辑态会显式传
+        // 当前脚本 config.threshold 覆盖它。
+        threshold: req.threshold.or(Some(st.cfg.threshold)),
+        region: req
+            .region
+            .or_else(|| matcher::template_region_from_name(&resolved_name, screen_w, screen_h)),
     };
+    let miss_region = mr.region;
     // NCC 匹配（含截图/模板 PNG 解码）走专用计算池（PERF-003），与引擎同一条
     // CPU 预算通道，不再占用 API blocking 池名额
     match matcher::compute::run(move || {
@@ -486,7 +514,7 @@ pub(super) async fn api_test_template(
     .and_then(|inner| inner)
     {
         Ok(Some(m)) => Json(serde_json::json!({"hit": true, "x": m.x, "y": m.y, "width": m.width, "height": m.height, "score": m.score})).into_response(),
-        Ok(None) => Json(serde_json::json!({"hit": false})).into_response(),
+        Ok(None) => Json(serde_json::json!({"hit": false, "region": miss_region})).into_response(),
         Err(e) => e.into_response(),
     }
 }

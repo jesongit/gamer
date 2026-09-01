@@ -179,6 +179,7 @@ fn write_step(out: &mut String, step: &Step, indent: usize) {
                 .iter()
                 .map(|c| CandidateOut {
                     key: render_cell(&c.template),
+                    click: c.click,
                     steps: &c.steps,
                 })
                 .collect();
@@ -188,6 +189,11 @@ fn write_step(out: &mut String, step: &Step, indent: usize) {
                 push_indent(out, indent + 2);
                 out.push_str(&format!("timeout: {}\n", render_cell(t)));
             }
+        }
+        Step::Check { template, r#throw } => {
+            out.push_str(&format!("check: {}\n", render_cell(template)));
+            push_indent(out, indent + 2);
+            out.push_str(&format!("throw: {}\n", render_plain(r#throw)));
         }
         Step::Color { at, expect, r#else } => {
             out.push_str("color:\n");
@@ -200,6 +206,7 @@ fn write_step(out: &mut String, step: &Step, indent: usize) {
                     .iter()
                     .map(|e| CandidateOut {
                         key: render_color_key(&e.color),
+                        click: e.click,
                         steps: &e.steps,
                     })
                     .collect();
@@ -250,8 +257,12 @@ fn write_step(out: &mut String, step: &Step, indent: usize) {
 }
 
 /// 候选列表项：`- 键:` + 分支步骤（键下无缩进序列，键列 = 列表项键列）。
+/// `click: true` 时写映射形态 `{click: true, steps: [...]}`（steps 空则省略），
+/// false 保持列表形态——规范不变式：列表 ⇔ 不点击，映射 ⇔ 点击。
+/// 映射键比候选模板键深两级（YAML 映射值不能与键同列，序列才能同列）。
 struct CandidateOut<'a> {
     key: String,
+    click: bool,
     steps: &'a [Step],
 }
 
@@ -261,11 +272,21 @@ fn write_candidates(out: &mut String, items: &[CandidateOut<'_>], dash_indent: u
         out.push_str("- ");
         out.push_str(&item.key);
         out.push_str(":\n");
-        if item.steps.is_empty() {
-            push_indent(out, dash_indent + 2);
-            out.push_str("[]\n");
+        if !item.click {
+            if item.steps.is_empty() {
+                push_indent(out, dash_indent + 2);
+                out.push_str("[]\n");
+            } else {
+                write_steps(out, item.steps, dash_indent + 2);
+            }
         } else {
-            write_steps(out, item.steps, dash_indent + 2);
+            push_indent(out, dash_indent + 4);
+            out.push_str("click: true\n");
+            if !item.steps.is_empty() {
+                push_indent(out, dash_indent + 4);
+                out.push_str("steps:\n");
+                write_steps(out, item.steps, dash_indent + 6);
+            }
         }
     }
 }

@@ -1,0 +1,9 @@
+steps:
+  - match:
+    - test1.png:
+        click: 是
+  - color:
+      at: [0.5, 0.5]
+      expect:
+        - ff8800:
+            click: 1

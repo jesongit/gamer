@@ -42,10 +42,12 @@
             "expect": [
               {
                 "color": { "ref": "target_color" },
+                "click": false,
                 "steps": [{ "kind": "log", "message": { "lit": "参数色命中" } }]
               },
               {
                 "color": { "lit": "ff8800" },
+                "click": false,
                 "steps": [{ "kind": "log", "message": { "lit": "字面色命中" } }]
               }
             ],

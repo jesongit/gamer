@@ -1,0 +1,12 @@
+饰品提取:
+  params:
+    - 'bool:flag:是否花完体力:true'
+  steps:
+    - check: 饰品提取界面.png
+      throw: 非饰品提取界面
+    - find: 饰品提取空队伍.png
+      timeout: 2s
+    - find: 预设编队.png
+    - tap: [0.1776, 0.238]
+    - log: 修改挑战次数，带参数 flag
+    - find: 开始挑战.png

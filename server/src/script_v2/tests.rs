@@ -332,6 +332,22 @@ mod loader_tests {
         assert_code(&e, codes::STEP_FIELD_MISSING, "steps[0]", "to");
     }
 
+    /// check 断言步骤：throw 必填且非空标量、未知字段拒绝。
+    #[test]
+    fn check_step_shape() {
+        let e = errs("steps:\n  - check: logo.png\n");
+        assert_code(&e, codes::STEP_FIELD_MISSING, "steps[0]", "throw");
+
+        let e = errs("steps:\n  - check: logo.png\n    throw: \"\"\n");
+        assert_code(&e, codes::STEP_FIELD_TYPE_MISMATCH, "steps[0]", "throw");
+
+        let e = errs("steps:\n  - check: logo.png\n    throw:\n      - a\n");
+        assert_code(&e, codes::STEP_FIELD_TYPE_MISMATCH, "steps[0]", "throw");
+
+        let e = errs("steps:\n  - check: logo.png\n    throw: x\n    timeout: 3s\n");
+        assert_code(&e, codes::STEP_FIELD_UNKNOWN, "steps[0]", "timeout");
+    }
+
     /// key 步骤字面量按键枚举校验：非法键报 step.field.type_mismatch（与前端
     /// checkCellLiteral 同码），具名键与数字键合法。
     #[test]
@@ -516,6 +532,17 @@ mod validate_tests {
         }
         let e = parse_script_file("steps:\n  - find: icon.png\n", T, &Ambiguous).unwrap_err();
         assert_code(&e, codes::RESOURCE_TMPL_AMBIGUOUS, "steps[0]", "template");
+    }
+
+    /// check 模板域：字面量分区存在性走通用 tmpl 校验；$ref 类型一致即合法。
+    #[test]
+    fn check_template_domain() {
+        let e = errs("steps:\n  - check: missing.png\n    throw: x\n");
+        assert_code(&e, codes::RESOURCE_TMPL_NOT_FOUND, "steps[0]", "template");
+        ok_with(
+            "params:\n  - 'tmpl:logo:主模板'\nsteps:\n  - check: $logo\n    throw: x\n",
+            |_| {},
+        );
     }
 
     /// ref 域：路径穿越 / 函数路径语法（恰好一段 `/`）。
@@ -729,6 +756,18 @@ mod serialize_tests {
             ),
             "steps:\n  - color:\n      at: [0.5, 0.5]\n      expect:\n        - ff8800:\n          - log: a\n        - '123456':\n          - log: b\n"
         );
+    }
+
+    /// check 规范形态：throw 是步骤级兄弟键，消息按 plain 安全规则输出。
+    #[test]
+    fn check_rendering() {
+        // 用 $ref 模板避免字面量的分区存在性校验（roundtrip 资源表为空）。
+        let src =
+            "params:\n  - 'tmpl:logo:主模板'\nsteps:\n  - check: $logo\n    throw: 主界面未加载\n";
+        assert_eq!(roundtrip(src), src);
+        let src =
+            "params:\n  - 'tmpl:logo:主模板'\nsteps:\n  - check: $logo\n    throw: \"a: b\"\n";
+        assert_eq!(roundtrip(src), src);
     }
 
     /// 参数声明整条单引号；备注中的 `'` 转义为 `''`；text 默认值双引号包裹。

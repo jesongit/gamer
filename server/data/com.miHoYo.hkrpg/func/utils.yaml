@@ -29,7 +29,7 @@ itm_recv:
 ap_burn:
   steps:
     - find: 培养目标.png
-    - find: 培养目标进入战斗.png
+    - find: 角色培养进入.png
     - find: 快捷体力按钮.png
       timeout: 500ms
     - find: 增加次数.png

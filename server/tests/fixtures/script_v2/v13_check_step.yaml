@@ -1,0 +1,7 @@
+params:
+  - 'tmpl:logo:主模板'
+steps:
+  - check: logo.png
+    throw: 主界面按钮未出现
+  - check: $logo
+    throw: 结算界面未出现

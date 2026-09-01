@@ -43,6 +43,63 @@ pub struct MatchRequest {
     pub region: Option<[u32; 4]>,
 }
 
+/// 从模板实际文件名解析引擎使用的搜索区域。
+///
+/// 模板没有 `#` 后缀时返回 `None`（全屏）；`#a` 也代表全屏。
+/// `#u/#d/...` 是半区，四段数字是相对坐标乘 1000 后的矩形。
+/// 编辑器的单次匹配预览与脚本引擎共用此实现，避免两套区域语义漂移。
+pub fn template_region_from_name(template: &str, w: u32, h: u32) -> Option<[u32; 4]> {
+    let lower = template.to_ascii_lowercase();
+    let stem = if lower.ends_with(".jpeg") {
+        &template[..template.len() - 5]
+    } else if lower.ends_with(".png") || lower.ends_with(".jpg") {
+        &template[..template.len() - 4]
+    } else {
+        template
+    };
+    let idx = stem.rfind('#')?;
+    let suffix = stem[idx + 1..].trim().to_ascii_lowercase();
+    if suffix.is_empty() {
+        return None;
+    }
+    let half = match suffix.as_str() {
+        "a" => return None,
+        "u" => [0, 0, w, h / 2],
+        "d" => [0, h / 2, w, h - h / 2],
+        "l" => [0, 0, w / 2, h],
+        "r" => [w / 2, 0, w - w / 2, h],
+        "ul" => [0, 0, w / 2, h / 2],
+        "ur" => [w / 2, 0, w - w / 2, h / 2],
+        "dl" => [0, h / 2, w / 2, h - h / 2],
+        "dr" => [w / 2, h / 2, w - w / 2, h - h / 2],
+        _ => {
+            let nums: Option<Vec<f64>> = suffix
+                .split('_')
+                .map(|p| {
+                    p.parse::<u32>()
+                        .ok()
+                        .filter(|n| *n <= 999)
+                        .map(|n| n as f64 / 1000.0)
+                })
+                .collect();
+            let nums = nums?;
+            if nums.len() != 4 {
+                return None;
+            }
+            let [x1, y1, x2, y2] = [nums[0], nums[1], nums[2], nums[3]];
+            if x2 <= x1 || y2 <= y1 {
+                return None;
+            }
+            let x = (x1 * w as f64).round() as u32;
+            let y = (y1 * h as f64).round() as u32;
+            let rw = (((x2 - x1) * w as f64).round() as u32).max(1);
+            let rh = (((y2 - y1) * h as f64).round() as u32).max(1);
+            return Some([x, y, rw, rh]);
+        }
+    };
+    Some(half)
+}
+
 /// 模板预处理结果：缓存 PNG 解码后的灰度矩阵、f32 数据和 NCC 统计量。
 ///
 /// 缓存键是完整模板字节的 SHA-256，因此覆盖上传或同名文件内容变化会自然

@@ -880,13 +880,15 @@ async fn export_import_roundtrip_via_api() {
 
 #[test]
 fn short_name_and_region_composition_units() {
-    // 短名合法口径：[A-Za-z0-9_-]+\.png
+    // 短名合法口径：unicode 字母数字（含中文）+ `-` `_` + `.png`；`#` 是区域分隔符必须拒绝
     assert!(validate_short_name("record_click_20260829_001.png").is_ok());
     assert!(validate_short_name("  a-b_C9.png  ").is_ok());
+    assert!(validate_short_name("中文.png").is_ok());
+    assert!(validate_short_name("委托界面_2.png").is_ok());
     assert!(validate_short_name("x.jpg").is_err());
     assert!(validate_short_name("bad name!.png").is_err());
     assert!(validate_short_name(".png").is_err());
-    assert!(validate_short_name("中文.png").is_err());
+    assert!(validate_short_name("委#托.png").is_err());
     // 区域 ×1000 三位整数；1.0 钳到 999；越界夹取；退化（x2<=x1 / y2<=y1）拒绝
     assert_eq!(
         compose_region_suffix([0.1, 0.2, 0.3, 0.4]).unwrap(),

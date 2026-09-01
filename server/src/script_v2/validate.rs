@@ -296,6 +296,9 @@ impl<'a> Validator<'a> {
                 }
                 self.walk_branch(r#else, path, "else", depth);
             }
+            Step::Check { template, .. } => {
+                self.check_cell(template, ParamType::Tmpl, path, "template");
+            }
             Step::Color { at, expect, r#else } => {
                 self.check_cell(at, ParamType::Coord, path, "at");
                 // 静态重复：颜色统一小写后比较（FF8800 与 ff8800 视为重复）。

@@ -1,0 +1,52 @@
+{
+  "id": "v14_branch_click",
+  "kind": "valid",
+  "description": "候选级命中点击：候选值映射形态 {click: true, steps: [...]}（steps 可省略 = 命中即点；不点击走列表形态）。match 点命中模板框中心，color 点取样点",
+  "files": [
+    {
+      "file": "v14_branch_click.yaml",
+      "role": "main",
+      "model_kind": "script",
+      "model": {
+        "params": [],
+        "config": null,
+        "steps": [
+          {
+            "kind": "match",
+            "candidates": [
+              {
+                "template": { "lit": "test1.png" },
+                "click": true,
+                "steps": []
+              },
+              {
+                "template": { "lit": "test2.png" },
+                "click": true,
+                "steps": [{ "kind": "log", "message": { "lit": "命中 test2" } }]
+              }
+            ],
+            "else": [{ "kind": "log", "message": { "lit": "都未命中" } }],
+            "timeout": { "lit": "30s" }
+          },
+          {
+            "kind": "color",
+            "at": { "lit": [0.5, 0.5] },
+            "expect": [
+              {
+                "color": { "lit": "ff8800" },
+                "click": true,
+                "steps": []
+              },
+              {
+                "color": { "lit": "123456" },
+                "click": false,
+                "steps": [{ "kind": "log", "message": { "lit": "深蓝分支" } }]
+              }
+            ],
+            "else": [{ "kind": "throw", "message": "颜色未命中" }]
+          }
+        ]
+      }
+    }
+  ]
+}

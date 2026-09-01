@@ -764,6 +764,9 @@ impl Runner {
             } => {
                 self.exec_match(ctx, candidates, r#else, timeout).await?;
             }
+            Step::Check { template, r#throw } => {
+                self.exec_check(ctx, template, r#throw).await?;
+            }
             Step::Color { at, expect, r#else } => {
                 self.exec_color(ctx, at, expect, r#else).await?;
             }
@@ -1121,8 +1124,9 @@ impl Runner {
 
     // ---- match ---------------------------------------------------------------
 
-    /// match：每轮只截一帧，候选按书写顺序匹配（不点击）；首个命中执行其
-    /// 分支并结束本步；未配 timeout 只执行一轮（全未命中立即进 else），
+    /// match：每轮只截一帧，候选按书写顺序匹配；首个命中执行其分支并结束本步；
+    /// 候选 `click: true` 命中后先点匹配框中心（与 find 同语义）再进分支。
+    /// 未配 timeout 只执行一轮（全未命中立即进 else），
     /// 配了按 config.interval 轮询到超时才进 else。命中分支前插入 judge_delay
     /// （config.toml judge_delay_ms，默认 200ms，0=关；分支空不等待，else 不延迟）。
     /// 参数绑定后候选实际重复 → 截图前报错（$ref 值静态校验无法覆盖）。
@@ -1177,6 +1181,10 @@ impl Runner {
                         )
                         .await;
                         ctx.log("info", format!("match 命中 {name} @ ({}, {})", mm.x, mm.y));
+                        if cand.click {
+                            // 候选级命中点击：点匹配框中心（与 find 同语义）
+                            self.click_center(ctx, &mm).await?;
+                        }
                         if !cand.steps.is_empty() {
                             // 命中候选：先经 judge_delay 再执行其分支（空分支不白等）
                             self.judge_delay(ctx).await;
@@ -1199,10 +1207,52 @@ impl Runner {
         Ok(())
     }
 
+    // ---- check ---------------------------------------------------------------
+
+    /// check：单帧匹配模板（不点击、不轮询、无分支），界面断言用。
+    /// 命中 → Hit 可视化事件 + 日志后继续；未命中 → 以 throw 文案按 throw
+    /// 步骤同语义结束运行（Miss 搜索区域事件由 match_screen_one 统一推送）。
+    async fn exec_check(
+        &self,
+        ctx: &mut Ctx<'_>,
+        template: &Cell,
+        message: &str,
+    ) -> anyhow::Result<()> {
+        let name = self.tmpl_value(ctx, template, "check.template")?;
+        ctx.log("info", format!("检查模板 {name}"));
+        let screen = self.shot(ctx).await?;
+        if let Some(mm) = self.match_screen_one(ctx, &name, screen).await? {
+            self.emit(
+                &ctx.device_id,
+                ScriptEvent::Hit {
+                    tpl: name.clone(),
+                    x: mm.x,
+                    y: mm.y,
+                    w: mm.width,
+                    h: mm.height,
+                    score: mm.score,
+                },
+            )
+            .await;
+            ctx.log(
+                "info",
+                format!("检查通过：模板 {name} @ ({}, {})", mm.x, mm.y),
+            );
+        } else {
+            ctx.log(
+                "warn",
+                format!("检查未通过：模板 {name} 未命中 —— {message}"),
+            );
+            ctx.exit.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+
     // ---- color ---------------------------------------------------------------
 
     /// color：单点坐标一次截图按序判色（容差 30/通道），命中即执行该色值
-    /// 分支并结束本步；全未命中走 else。不轮询、不点击（重试套 loop）。
+    /// 分支并结束本步；全未命中走 else。不轮询（重试套 loop）；分支
+    /// `click: true` 命中后先点取样点再进分支。
     /// 命中分支前插入 judge_delay（config.toml judge_delay_ms，默认 200ms，
     /// 0=关；分支空不等待，else 不延迟）。
     async fn exec_color(
@@ -1280,6 +1330,20 @@ impl Runner {
                     },
                 )
                 .await;
+                if branch.click {
+                    // 候选级命中点击：点取样点（1×1 MatchResult 中心即 px,py，复用 click_center）
+                    self.click_center(
+                        ctx,
+                        &matcher::MatchResult {
+                            x: px,
+                            y: py,
+                            width: 1,
+                            height: 1,
+                            score: 1.0,
+                        },
+                    )
+                    .await?;
+                }
                 if !branch.steps.is_empty() {
                     // 命中色值分支：先经 judge_delay 再执行（空分支不白等；else 不延迟）
                     self.judge_delay(ctx).await;
@@ -1473,7 +1537,7 @@ impl Runner {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| template.to_string());
-        let region = tpl_region_from_name(&file_name, w, h);
+        let region = matcher::template_region_from_name(&file_name, w, h);
         if region.is_none()
             && !file_name.contains('#')
             && ctx.region_warned.insert(file_name.clone())
@@ -1569,64 +1633,6 @@ fn hex_to_rgb(hex: &str) -> anyhow::Result<(u8, u8, u8)> {
         u8::from_str_radix(&hex[2..4], 16)?,
         u8::from_str_radix(&hex[4..6], 16)?,
     ))
-}
-
-/// 从模板名解析自带区域后缀（与前端 parseTplRegion 同一套格式）：
-///   xx#a / xx#l …   → 半区码（a=全屏 None、u/d/l/r/ul/ur/dl/dr）
-///   xx#x1_y1_x2_y2  → 相对坐标 ×1000 的 1~3 位整数，需 x2 > x1 且 y2 > y1
-/// 后缀在扩展名之前（xx#l.png）；无 # / 解析不出 → None（全屏），不报错。
-fn tpl_region_from_name(template: &str, w: u32, h: u32) -> Option<[u32; 4]> {
-    let lower = template.to_ascii_lowercase();
-    let stem = if lower.ends_with(".jpeg") {
-        &template[..template.len() - 5]
-    } else if lower.ends_with(".png") || lower.ends_with(".jpg") {
-        &template[..template.len() - 4]
-    } else {
-        template
-    };
-    let idx = stem.rfind('#')?;
-    let suffix = stem[idx + 1..].trim().to_ascii_lowercase();
-    if suffix.is_empty() {
-        return None;
-    }
-    // 半区码：a → 全屏 None
-    let half = match suffix.as_str() {
-        "a" => return None,
-        "u" => [0, 0, w, h / 2],
-        "d" => [0, h / 2, w, h - h / 2],
-        "l" => [0, 0, w / 2, h],
-        "r" => [w / 2, 0, w - w / 2, h],
-        "ul" => [0, 0, w / 2, h / 2],
-        "ur" => [w / 2, 0, w - w / 2, h / 2],
-        "dl" => [0, h / 2, w / 2, h - h / 2],
-        "dr" => [w / 2, h / 2, w - w / 2, h - h / 2],
-        _ => {
-            // 数字坐标：4 段 1~3 位整数 ×1000 → 相对坐标
-            let nums: Option<Vec<f64>> = suffix
-                .split('_')
-                .map(|p| {
-                    p.parse::<u32>()
-                        .ok()
-                        .filter(|n| *n <= 999)
-                        .map(|n| n as f64 / 1000.0)
-                })
-                .collect();
-            let nums = nums?;
-            if nums.len() != 4 {
-                return None;
-            }
-            let [x1, y1, x2, y2] = [nums[0], nums[1], nums[2], nums[3]];
-            if x2 <= x1 || y2 <= y1 {
-                return None;
-            }
-            let x = (x1 * w as f64).round() as u32;
-            let y = (y1 * h as f64).round() as u32;
-            let rw = (((x2 - x1) * w as f64).round() as u32).max(1);
-            let rh = (((y2 - y1) * h as f64).round() as u32).max(1);
-            return Some([x, y, rw, rh]);
-        }
-    };
-    Some(half)
 }
 
 /// 常用按键映射（Android keycode）；纯数字 keycode 透传。未知键返回 `None`，
@@ -2163,6 +2169,43 @@ mod tests {
         assert!(logs_contain(&logs, "else 分支"));
     }
 
+    /// 候选级点击：click 候选命中点模板框中心，未命中的 click 候选不点；
+    /// 无 click 候选命中不点（分支级开关互不影响）。
+    #[tokio::test]
+    async fn match_branch_click_hits_clicked_candidate_center_only() {
+        let r = rig(
+            HashMap::from([("b.png", [10u32, 10, 50, 40])]),
+            solid_png(100, 100, [0, 0, 0]),
+            "info",
+        );
+        r.tmpl("a.png");
+        r.tmpl("b.png");
+        // a 带 click 但未命中、b 命中但无 click → 零点击
+        r.save_script(
+            "f.yaml",
+            "steps:\n  - match:\n    - a.png:\n        click: true\n    - b.png:\n      - log: 分支B\n",
+        );
+        let logs = r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert!(
+            r.ctl.calls().is_empty(),
+            "未命中不点、无 click 不点：{:?}",
+            r.ctl.calls()
+        );
+        assert!(logs_contain(&logs, "分支B"));
+        // b 也带 click → 只点 b 中心一次（a 未命中不点）
+        r.save_script(
+            "g.yaml",
+            "steps:\n  - match:\n    - a.png:\n        click: true\n    - b.png:\n        click: true\n        steps:\n          - log: 分支B\n",
+        );
+        let logs = r.run(script_target("g.yaml"), vec![]).await.unwrap();
+        assert_eq!(
+            r.ctl.calls(),
+            vec!["tap 35 30"],
+            "命中候选 click 点模板框中心 (10+50/2, 10+40/2)"
+        );
+        assert!(logs_contain(&logs, "分支B"));
+    }
+
     /// 参数绑定后候选实际重复 → 截图前拒绝（0 次截图）。
     #[tokio::test]
     async fn match_duplicate_after_args_binding_rejected_before_screenshot() {
@@ -2218,6 +2261,39 @@ mod tests {
         let logs = r.run(script_target("f.yaml"), vec![]).await.unwrap();
         assert!(logs_contain(&logs, "else 分支"));
         assert_eq!(r.shots.count(), 1);
+    }
+
+    /// color 候选级点击：click 分支命中点取样点；无 click 分支命中零点击。
+    #[tokio::test]
+    async fn color_branch_click_taps_sample_point() {
+        // 屏幕 1000×500 纯色 ff8800，at [0.5, 0.5] → 取样点 (500, 250)
+        let r = rig(
+            HashMap::new(),
+            solid_png(1000, 500, [0xff, 0x88, 0x00]),
+            "info",
+        );
+        r.save_script(
+            "f.yaml",
+            "steps:\n  - color:\n      at: [0.5, 0.5]\n      expect:\n        - ff8800:\n            click: true\n        - 0000ff:\n          - log: 蓝分支\n    else:\n      - log: else 分支\n",
+        );
+        r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert_eq!(
+            r.ctl.calls(),
+            vec!["tap 500 250"],
+            "命中分支 click 点取样点"
+        );
+        // 无 click 分支命中 → 不点击
+        let r = rig(
+            HashMap::new(),
+            solid_png(1000, 500, [0xff, 0x88, 0x00]),
+            "info",
+        );
+        r.save_script(
+            "f.yaml",
+            "steps:\n  - color:\n      at: [0.5, 0.5]\n      expect:\n        - ff8800:\n          - log: 橙分支\n",
+        );
+        r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert!(r.ctl.calls().is_empty(), "无 click 不点击");
     }
 
     // ---- if / loop / guard ---------------------------------------------------

@@ -1,0 +1,30 @@
+{
+  "id": "v13_check_step",
+  "kind": "valid",
+  "description": "check 断言：单帧匹配模板不点击，throw 为未命中终止原因（必填）；模板支持字面量与 $ref",
+  "files": [
+    {
+      "file": "v13_check_step.yaml",
+      "role": "main",
+      "model_kind": "script",
+      "model": {
+        "params": [
+          { "type": "tmpl", "name": "logo", "remark": "主模板", "default": null }
+        ],
+        "config": null,
+        "steps": [
+          {
+            "kind": "check",
+            "template": { "lit": "logo.png" },
+            "throw": "主界面按钮未出现"
+          },
+          {
+            "kind": "check",
+            "template": { "ref": "logo" },
+            "throw": "结算界面未出现"
+          }
+        ]
+      }
+    }
+  ]
+}

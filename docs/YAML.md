@@ -151,7 +151,7 @@ steps:
 - 引用必须占据整个标量（不支持把 `$name` 嵌在文本中间插值）；
 - 字段类型与参数类型不符报 `param.ref.type_mismatch`，未声明的名字报
   `param.ref.unknown`；
-- match 候选模板键与 color 候选色键同样接受 `$name`（见 §5.3/§5.4）；
+- match 候选模板键与 color 候选色键同样接受 `$name`（见 §5.3/§5.5）；
 - `$name` 只在引用处生效：call/func 的 `args`、入口运行参数按名字绑定（§6）。
 
 ## 4. config
@@ -170,7 +170,7 @@ config:
 不覆盖）：find / match / color 的**命中路径**在执行后续分支步骤前固定等待该时长
 （给游戏 UI 留响应时间）；分支为空（无后续步骤）不等待，else / 超时路径不延迟。
 
-## 5. 步骤（17 种）
+## 5. 步骤（18 种）
 
 一个步骤只允许一个动作键（多动作键 → `step.multi_action`）；动作键之外的同级键是
 该步骤的字段。步骤按书写顺序执行；空分支 / 默认字段在 YAML 里省略（编辑器保存
@@ -223,34 +223,57 @@ steps:
 全未命中等 `config.interval` 重开一轮。超过 `timeout` 执行 `else`。截图瞬态失败
 跳过本轮重试（持续失败约 20s 判链路异常带因中止）。
 
-### 5.3 match —— 多模板策略选择（不点击）
+### 5.3 match —— 多模板策略选择
 
 `match` 的候选列表是**紧凑缩进**（无缩进序列，唯一序列化格式）；`else` /
-`timeout` 是 `match` 步骤的**兄弟键**，与 `match` 同列：
+`timeout` 是 `match` 步骤的**兄弟键**，与 `match` 同列。候选值二选一：
+**分支步骤列表**（不点击，原形态），或**映射 `{click: true, steps: [...]}`**
+（命中后点击该候选模板匹配框的中心；`steps` 省略 = 空分支，即「命中即点」）：
 
 ```yaml
 - match:
   - test1.png:
     - log: 命中 test1
   - test2.png:
-    - log: 命中 test2
+      click: true                  # 命中 → 点击 test2 匹配框中心，无分支步骤
   else:
     - log: 都未命中
   timeout: 30s
 ```
 
 - 每轮只截**一帧**，候选按书写顺序匹配、首个命中获胜、执行其分支步骤并结束本步；
-  **不点击**（需要点用 find）。
+  默认不点击，候选可各自 `click: true`（点中该候选的匹配框中心，语义同 find）。
 - 未配 `timeout` 只执行一轮（全未命中立即进 `else`）；配了按 `config.interval`
   轮询到超时才进 `else`。
+- 规范序列化不变式：`click: false` ⇔ 列表形态，`click: true` ⇔ 映射形态
+  （`click`/`steps` 键比候选模板键深两级——映射值不能与键同列）；候选值映射内
+  只允许 `click`/`steps`（其余 → `step.field.unknown`），`click` 非布尔字面量 →
+  `step.field.type_mismatch`。
 - 候选模板短名不可重复（装载期与参数绑定后都查重 →
   `step.match.candidate_duplicate`）；不接受布尔条件（布尔走 `if`）。
 - `- else:` / `- timeout:` 写进候选列表是错误（`step.match.else_in_candidates`）。
 
-### 5.4 color —— 单点颜色分支
+### 5.4 check —— 界面断言（单帧匹配，未命中终止）
+
+```yaml
+- check: logo.png               # 模板短名或 $name
+  throw: 主界面按钮未出现        # 必填：未命中时的终止原因（非空字符串）
+```
+
+- **只截一帧**匹配模板：不点击、不轮询、无分支（重试自己套 `loop`）。
+- 命中 → 推送命中框可视化、记「检查通过」日志后继续后续步骤。
+- 未命中 → 记「检查未通过」日志（含 `throw` 文案），按 `throw` 步骤同语义
+  **结束整个运行**（含调用链）。
+- `throw` 必填且非空（缺失/空串 → `step.field.missing` /
+  `step.field.type_mismatch`）；模板字段 `throw` 与动作键 `throw` 同名词，
+  步骤内存在 `check` 键时该键固定解析为字段，不算第二个动作键。
+
+### 5.5 color —— 单点颜色分支
 
 `at` 与 `expect` 写在 `color` 值映射内；`expect` 是**有序列表**（不用颜色做映射键，
-防解析器重排），每项是单键映射 `颜色: [分支步骤]`；`else` 与 `color` 键同列：
+防解析器重排），每项单键映射的候选值二选一：**分支步骤列表**（不点击，原形态），
+或**映射 `{click: true, steps: [...]}`**（命中后点击取样点；`steps` 省略 =
+空分支）；`else` 与 `color` 键同列：
 
 ```yaml
 - color:
@@ -259,18 +282,19 @@ steps:
       - ff8800:
         - tap: [0.5, 0.5]
       - '123456':
-        - log: 深蓝分支
+          click: true              # 命中 → 点击取样点，无分支步骤
   else:
     - throw: 颜色未命中
 ```
 
 - 一次截图、按序判色：实际像素与期望色每通道差 ≤30 视为命中（容差固定 30，吸收
   H.264 有损压缩抖动），命中即执行该色分支并结束本步；全未命中走 `else`。
-- **不轮询、不点击**（重试套 `loop`）。
+- **不轮询**（重试套 `loop`）；默认不点击，候选可各自 `click: true`（点取样点，
+  语义同 find 的中心点击）。规范序列化不变式与错误码同 §5.3 match 候选。
 - 同色候选重复 → `step.color.duplicate`；颜色格式非法 → `step.color.format`；
   纯数字色值必须加引号（§3.2）。
 
-### 5.5 if / loop
+### 5.6 if / loop
 
 ```yaml
 - if: $enable                   # 条件严格布尔（bool 参数或 true/false），无隐式转换
@@ -279,7 +303,7 @@ steps:
   else:
     - log: 未启用
 
-- loop:                         # times 省略或 0 = 无限（10 万步 guard 兜底，见 §5.7）
+- loop:                         # times 省略或 0 = 无限（10 万步 guard 兜底，见 §5.8）
     times: 3
     steps:
       - wait: 1s
@@ -289,7 +313,7 @@ steps:
 - `loop` 值是映射：`times` 为非负整数字面量、`steps` 必需且非空
   （缺失 → `step.field.missing`，空 → `step.loop.empty_steps`）。
 
-### 5.6 call / func —— 子脚本与函数
+### 5.7 call / func —— 子脚本与函数
 
 ```yaml
 - call: sub/inner.yaml          # 调用同分区 yaml/ 脚本（缺 .yaml 自动补全）
@@ -318,7 +342,7 @@ steps:
   `param.args.unknown`、类型不符报 `param.args.type_mismatch`、必填缺失报
   `param.args.missing_required`。
 
-### 5.7 throw / return 与运行护栏
+### 5.8 throw / return 与运行护栏
 
 ```yaml
 - throw                         # 无原因
