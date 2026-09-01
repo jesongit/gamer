@@ -1,6 +1,6 @@
 # GameBot 无兼容基线并行开发计划
 
-> 状态：基线清理完成；本机/Docker/真机/浏览器（WebRTC、DataChannel、viewer 接管、重连、watchdog/idle）验收完成（2026-09-01）；发布链路验收在 docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md 单独跟踪
+> 状态：基线清理完成；本机/Docker/真机/浏览器（WebRTC、DataChannel、viewer 接管、重连、watchdog/idle）验收完成（2026-09-01）；发布链路验收在 docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md 单独跟踪；未完成项与阻塞原因统一见 [docs/REMAINING_BLOCKERS.md](REMAINING_BLOCKERS.md)
 >
 > 目标：项目仍处于开发阶段，删除旧协议、旧数据和旧容错路径，形成单一、严格、可测试的当前基线。
 >

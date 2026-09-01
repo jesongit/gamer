@@ -1,6 +1,6 @@
 # GameBot 运行依赖与自动升级开发计划
 
-> 状态：**实施中（批次 0～4 已完成；批次 5 本机可执行项完成——剩余集中在真实 GitHub Release/GHCR/生产签名、Windows clean VM 与发布签核，2026-09-01）**  
+> 状态：**实施中（批次 0～4 已完成；批次 5 本机可执行项完成——剩余集中在真实 GitHub Release/GHCR/生产签名、Windows clean VM 与发布签核，2026-09-01）**；未完成项与阻塞原因统一见 [docs/REMAINING_BLOCKERS.md](REMAINING_BLOCKERS.md)  
 > 编制日期：2026-08-31  
 > 适用范围：Windows x64 便携发行版、运行依赖管理、版本检查与升级、数据迁移与回滚、GitHub Release、GHCR、系统 API、设置页和发布验收  
 > 本文只定义设计契约、任务拆分、并行顺序和验收门禁，不代表相关功能已经实现。
