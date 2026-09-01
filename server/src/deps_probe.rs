@@ -492,12 +492,13 @@ mod tests {
             ),
             ("managed", "application")
         );
+        // 绝对路径按当前平台构造（is_absolute 判定平台相关，C:/ 在 Linux 非绝对）
+        #[cfg(windows)]
+        let absolute_jar = "C:/games/scrcpy-server.jar";
+        #[cfg(not(windows))]
+        let absolute_jar = "/opt/games/scrcpy-server.jar";
         assert_eq!(
-            classify(
-                Component::Scrcpy,
-                Mode::Direct,
-                "C:/games/scrcpy-server.jar"
-            ),
+            classify(Component::Scrcpy, Mode::Direct, absolute_jar),
             ("custom", "application")
         );
     }
