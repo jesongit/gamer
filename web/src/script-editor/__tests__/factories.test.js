@@ -37,7 +37,7 @@ describe('factories：17 类工厂创建 + 序列化往返', () => {
     expect(step2.message).toBe('原因')
   })
 
-  it('全部 17 类都在工厂表里', () => {
+  it('全部 18 类都在工厂表里', () => {
     expect(Object.keys(DEFAULT_FACTORIES).sort()).toEqual([...STEP_KINDS].sort())
   })
 })
@@ -48,10 +48,10 @@ describe('factories：添加面板分组（plan §8.5）', () => {
     expect(PANEL_GROUPS.map((g) => g.label)).toEqual(['应用', '操作', '识别', '流程', '复用', '函数专用'])
   })
 
-  it('分组条目覆盖全部 17 类且不重复', () => {
+  it('分组条目覆盖全部 18 类且不重复', () => {
     const kinds = PANEL_GROUPS.flatMap((g) => g.entries.map((e) => e.kind))
     expect(kinds.sort()).toEqual([...STEP_KINDS].sort())
-    expect(new Set(kinds).size).toBe(17)
+    expect(new Set(kinds).size).toBe(18)
   })
 
   it('return 仅函数上下文可见', () => {
@@ -59,7 +59,7 @@ describe('factories：添加面板分组（plan §8.5）', () => {
     const functionKinds = panelEntries('function').map((e) => e.kind)
     expect(scriptKinds).not.toContain('return')
     expect(functionKinds).toContain('return')
-    expect(scriptKinds).toHaveLength(16)
-    expect(functionKinds).toHaveLength(17)
+    expect(scriptKinds).toHaveLength(17)
+    expect(functionKinds).toHaveLength(18)
   })
 })

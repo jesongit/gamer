@@ -3,12 +3,16 @@
     <div class="pe-head">
       <span class="pe-title">{{ functionPath ? '函数参数' : '脚本参数' }}</span>
       <span class="pe-sub">{{ rows.length }} 个参数 · {{ rows.filter((p) => p.default !== null).length }} 个有默认值</span>
-      <button type="button" class="mini-btn add" @click="addParam">+ 添加参数</button>
+      <span v-if="!expanded && errorCount" class="pe-err-badge" title="存在参数问题，展开查看">{{ errorCount }} 处问题</span>
+      <button v-if="showAddButton" type="button" class="mini-btn add" @click="addParam">+ 添加参数</button>
+      <button type="button" class="mini-btn" :title="expanded ? '收起参数列表' : '展开参数列表'" @click="expanded = !expanded">
+        {{ expanded ? '收起 ▴' : '展开 ▾' }}
+      </button>
     </div>
 
     <div v-if="isFunctionLibrary && !functionPath" class="pe-hint warn">函数库没有文件级 params——请先在画布选择函数后按函数编辑参数</div>
 
-    <template v-else>
+    <template v-else-if="expanded">
       <div v-if="rows.length === 0" class="pe-hint">暂无参数。脚本可不声明参数；声明后可在步骤与运行表单中引用 $名称。</div>
 
       <div v-for="(decl, i) in rows" :key="i" class="param-row" :class="{ 'row-error': rowErrors(decl, i).length }">
@@ -44,6 +48,7 @@
           <span class="field-label">默认值</span>
           <CellEditor
             :cell="lit(decl.default)" :type="decl.type" :allow-ref="false"
+            :templates="templates"
             :label="`${decl.name} 默认值`" :error="defaultError(decl)"
             @change="(c) => setDefault(i, c)"
           />
@@ -64,7 +69,7 @@
  * 阶段 4：传 functionPath（['functions', 函数名, 'params']）时编辑函数级 params，
  * 命令携带 path 容器；缺省 = 脚本文件级（函数库模型未指明函数时仍显示提示）。
  */
-import { computed, type PropType } from 'vue'
+import { computed, ref, type PropType } from 'vue'
 import type { EditorModel, Path } from '../commands'
 import type { Diagnostic } from '../diagnostics'
 import { lit, PARAM_TYPES, type ParamDecl, type ParamType, type ScriptModel } from '../model'
@@ -78,6 +83,10 @@ const props = defineProps({
   diagnostics: { type: Array as PropType<Diagnostic[]>, default: () => [] },
   /** 函数级 params 容器（['functions', 函数名, 'params']）；缺省 = 脚本文件级。 */
   functionPath: { type: Array as PropType<Path | null>, default: null },
+  /** tmpl 参数默认值下拉的候选模板短名（由页面外壳注入，缺省无候选）。 */
+  templates: { type: Array as PropType<string[]>, default: () => [] },
+  /** 函数编辑外壳把添加参数按钮放到添加步骤按钮前时隐藏内部按钮。 */
+  showAddButton: { type: Boolean, default: true },
 })
 
 const TYPE_LABELS: Record<ParamType, string> = {
@@ -89,6 +98,9 @@ const DEFAULT_LITERALS: Record<ParamType, unknown> = {
 }
 
 const isFunctionLibrary = computed(() => 'functions' in props.model)
+
+/** 参数列表默认收起（头部摘要常驻），展开/收起由头部按钮切换。 */
+const expanded = ref(false)
 const rows = computed<ParamDecl[]>(() => {
   if (props.functionPath && props.functionPath.length === 3) {
     const fnName = props.functionPath[1]
@@ -109,6 +121,7 @@ function updateParam(index: number, decl: ParamDecl): boolean {
 }
 
 function addParam(): void {
+  expanded.value = true
   props.stack.apply(
     paramCmd({ type: 'insert_param', index: rows.value.length, decl: { type: 'text', name: '', remark: '', default: null } }),
     '添加参数',
@@ -145,6 +158,9 @@ function setDefault(i: number, cell: { lit?: unknown; ref?: string }): void {
 
 // ---------- 即时校验提示 ----------
 
+/** 收起态行错误不可见，头部以问题数徽标提示。 */
+const errorCount = computed(() => rows.value.reduce((n, p, i) => n + rowErrors(p, i).length, 0))
+
 function rowErrors(decl: ParamDecl, i: number): string[] {
   const errs: string[] = []
   if (!PARAM_NAME_RE.test(decl.name)) {
@@ -166,6 +182,8 @@ function defaultError(decl: ParamDecl): string {
   const err = checkCellLiteral(decl.type, decl.default)
   return err ? `默认值不合法：${err.message}` : ''
 }
+
+defineExpose({ addParam })
 </script>
 
 <style scoped>
@@ -181,6 +199,10 @@ function defaultError(decl: ParamDecl): string {
 .pe-sub { font-size: 12px; color: var(--text-2); flex: 1; }
 .pe-hint { font-size: 12px; color: var(--text-2); padding: 4px 0; }
 .pe-hint.warn { color: var(--warn); }
+.pe-err-badge {
+  flex: none; font-size: 11px; color: var(--danger);
+  border: 1px solid var(--danger); border-radius: 4px; padding: 0 5px;
+}
 .param-row {
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   padding: 6px 8px; margin: 6px 0; display: flex; flex-direction: column; gap: 4px;

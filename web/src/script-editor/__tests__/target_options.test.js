@@ -138,7 +138,7 @@ describe('新添加步骤自动展开', () => {
       },
     })
     await wrapper.find('.add-btn').trigger('click')
-    await wrapper.findAll('.entry-btn')[0].trigger('click') // 启动应用
+    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('str_app') // 启动应用
     const uuid = created.model.steps[1].uuid
     const card = wrapper.find(`[data-step-uuid="${uuid}"]`)
     expect(card.classes()).toContain('expanded')

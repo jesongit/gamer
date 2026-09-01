@@ -46,8 +46,13 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(settings).toContain('ctx.saveSettings')
     expect(settings).toContain('ctx.cancelSettings')
     expect(settings).toContain('ConsoleDeviceSummary')
-    expect(capture).toContain('props.onCropMounted({ canvas: cropCanvas.value, section: cropSec.value })')
-    expect(capture).toContain('ctx.cropMouseDown')
+    // 二次裁切弹窗独立成 TemplateCropModal：挂在面板层级（任何页签下框选可见，不切页签）
+    const cropModal = read('./components/console/TemplateCropModal.vue')
+    expect(cropModal).toContain('props.onCropMounted({ canvas: cropCanvas.value, section: cropSec.value })')
+    expect(cropModal).toContain('ctx.cropMouseDown')
+    expect(template).toContain('<TemplateCropModal ')
+    expect(template).toContain(':on-crop-mounted="onCropMounted"')
+    expect(capture).not.toContain('ctx.cropMouseDown')
     expect(capture).toContain('ctx.onTplUpload')
     // 阶段 4：编辑区换壳——画布锚点提供者注入 shell（Alt 插入与「添加步骤」面板同源），
     // textarea 与 onEditorMounted 挂载回调随旧文本编辑区一并删除
@@ -92,25 +97,36 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).not.toContain('DEFAULT_OP_TPL')
   })
 
-  it('阶段 4：独立脚本页为全屏三页签外壳（脚本/函数库/模板 + 右侧错误列表）', () => {
-    const editor = read('./views/ScriptEditor.vue')
-    expect(editor).toContain("import { useScriptEditorShell } from '../composables/useScriptEditorShell'")
-    expect(editor).toContain("import { useFunctionLibrary } from '../composables/useFunctionLibrary'")
-    expect(editor).toContain("import SaveConflictModal from '../components/console/SaveConflictModal.vue'")
-    expect(editor).toContain('<ErrorSummary ')
-    expect(editor).toContain('<StepCanvas')
-    // 函数级 params：画布当前函数 → ['functions', 名, 'params']
-    expect(editor).toContain(':function-path="fnParamsPath"')
-    expect(editor).toContain("['functions', fnName, 'params']")
-    // 409 冲突弹窗复用（重载/覆盖）
-    expect(editor).toContain('@reload="onConflictReload"')
-    expect(editor).toContain('@overwrite="onConflictOverwrite"')
-    // 旧文本编辑区（textarea/行号 gutter/Tab 缩进）已删除
-    expect(editor).not.toContain('<textarea')
-    expect(editor).not.toContain('onEditorTab')
-    // 模板页签占位跳 Console；「测试函数」占位（阶段 5）
-    expect(editor).toContain('function goConsole(')
-    expect(editor).toContain('测试函数')
+  it('阶段 4：Console 右侧功能区为模板/脚本/日志/任务/设置五页签', () => {
+    expect(consoleSource).toContain("import LogsPanel from '../components/LogsPanel.vue'")
+    expect(consoleSource).toContain("import TaskBoard from '../components/TaskBoard.vue'")
+    expect(consoleSource).toContain("import SystemPanel from '../components/SystemPanel.vue'")
+    expect(template).toContain("panelTab === 'logs'")
+    expect(template).toContain("panelTab === 'tasks'")
+    expect(template).toContain("panelTab === 'settings'")
+    expect(template).toContain('<LogsPanel />')
+    expect(template).toContain('<TaskBoard />')
+    expect(template).toContain('<SystemPanel />')
+    expect(template).toContain('<div class="func-pkg-row">')
+    expect(template).not.toContain('v-show="isResPanelTab"')
+    expect(consoleSource).toContain('class="panel-resizer"')
+    expect(consoleSource).toContain('startPanelResize')
+    expect(consoleSource).toContain(':style="{ width: `${panelWidth}px` }"')
+    expect(consoleSource).not.toContain('isResPanelTab')
+  })
+
+  it('旧侧边栏承载的独立页面与入口已删除', () => {
+    const layout = read('./layouts/MainLayout.vue')
+    const router = read('./router.js')
+    expect(layout).not.toContain('sidebar')
+    expect(layout).not.toContain('/scripts')
+    expect(router).not.toContain("views/ScriptEditor.vue")
+    expect(router).not.toContain("TaskScheduler.vue")
+    expect(router).not.toContain("RunLogs.vue")
+    expect(router).not.toContain("Settings.vue")
+    expect(router).not.toContain("path: 'tasks'")
+    expect(router).not.toContain("path: 'logs'")
+    expect(router).not.toContain("path: 'settings'")
   })
   it('Console 仍保留唯一页面级清理入口，未伪造真机 WebRTC 冒烟', () => {
     expect(consoleSource).toContain('onUnmounted(() => {')
@@ -136,12 +152,49 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).not.toContain("message?.type === 'taken_over'")
   })
 
+  it('分区行收纳导入/导出；框选不切页签且保存后回填；函数摘要直达编辑', () => {
+    // 导入/导出跟着应用分区下拉走（面板顶部 func-pkg-row），TemplateCapture 里的 pkg-bar 连分割线一并移除
+    expect(template).toContain('class="func-pkg-row"')
+    expect(template).toContain('@click="exportPartition"')
+    expect(template).toContain('@change="onImportFile"')
+    expect(read('./components/console/TemplateCapture.vue')).not.toContain('pkg-bar')
+    // 框选生成模板：不切页签 + captureTemplate 以 Promise 回传模板短名（保存/取消 resolve）
+    expect(consoleSource).toContain('cellCaptureResolve')
+    const captureFn = consoleSource.slice(consoleSource.indexOf('captureTemplate: () => {'))
+    expect(captureFn.slice(0, captureFn.indexOf('\n  },'))).not.toContain('panelTab')
+    // 函数模式：无总「编辑」按钮，摘要区逐函数「编辑」直达 + 签名展示；编辑态画布锁函数切换
+    const runner = read('./components/console/ScriptRunner.vue')
+    expect(runner).toContain(`v-if="ctx.runKind === 'script'"`)
+    expect(runner).toContain('ctx.editCurrentTarget(view.name)')
+    expect(runner).toContain('function fnSignature(')
+    expect(runner).toContain(':initial-fn="ctx.editFocusFn"')
+    expect(runner).toContain(`:lock-fn="ctx.shell.kind === 'function_library'"`)
+  })
+
+  it('函数库新建直接进入编辑态；参数入口位于步骤入口之前', () => {
+    const runner = read('./components/console/ScriptRunner.vue')
+    expect(consoleSource).toContain("scriptShell.newFunctionFile({ file: '新函数库', pkg: activePkg.value })")
+    expect(consoleSource).not.toContain("window.prompt('函数库文件短名'")
+    expect(runner).toContain(':autofocus="ctx.shell.kind === \'function_library\'"')
+    const toolbar = runner.slice(runner.indexOf('class="function-edit-toolbar"'))
+    expect(toolbar.indexOf('＋ 添加参数')).toBeLessThan(toolbar.indexOf('＋ 添加步骤'))
+    expect(runner).toContain(':show-add-button="ctx.shell.editorContext !== \'function\'"')
+  })
+
+  it('模板字段的匹配预览复用宿主步骤语义且只走匹配接口', () => {
+    const cell = read('./script-editor/components/CellEditor.vue')
+    expect(cell).toContain('框选')
+    expect(cell).toContain('匹配')
+    expect(cell).toContain('tools.matchTemplate(name)')
+    expect(consoleSource).toContain('matchTemplate: name => testMatch(name, { stepSemantics: true })')
+    expect(consoleSource).toContain('const region = stepSemantics ? undefined : templateRegionPixels(name)')
+  })
+
   it('波次 2-F：运行与模板资源调用点只使用当前契约', () => {
     const layout = read('./layouts/MainLayout.vue')
-    const editor = read('./views/ScriptEditor.vue')
-    const scheduler = read('./views/TaskScheduler.vue')
+    const taskBoard = read('./components/TaskBoard.vue')
     const capture = read('./components/console/TemplateCapture.vue')
-    const sources = [layout, consoleSource, editor, scheduler, capture]
+    const sources = [layout, consoleSource, taskBoard, capture]
 
     for (const source of sources) {
       expect(source).not.toContain('api.stopScript')
@@ -155,10 +208,7 @@ describe('Console 视觉组件拆分静态回归', () => {
     }
     expect(layout).toContain('api.cancelRun(rid)')
     expect(consoleSource).toContain('api.getRun(rid)')
-    expect(editor).toContain('api.getRun(rid)')
-    expect(scheduler).toContain('const rec = r.value.active ? r.value.run : null')
-    expect(editor).toContain('api.createTemplate(')
-    expect(editor).toContain('api.replaceTemplateImage(')
+    expect(taskBoard).toContain('api.runTaskNow(')
     expect(consoleSource).toContain('api.replaceTemplateImage(')
     expect(capture).toContain('ctx.replaceTemplateImage(target, file)')
   })

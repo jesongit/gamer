@@ -1,0 +1,20 @@
+steps:
+  - match:
+    - test1.png:
+        click: true
+    - test2.png:
+        click: true
+        steps:
+          - log: 命中 test2
+    else:
+      - log: 都未命中
+    timeout: 30s
+  - color:
+      at: [0.5, 0.5]
+      expect:
+        - ff8800:
+            click: true
+        - '123456':
+          - log: 深蓝分支
+    else:
+      - throw: 颜色未命中

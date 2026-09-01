@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
  * - api.runScript / api.runFunction 请求体断言（稀疏 args、start_index、URL 整体编码）；
  * - useRunArgsFlow 状态机：无参数直跑 / 有参数弹表单 / 400 invalid_args 回填字段 /
  *   409 交还宿主 / 覆盖建议缓存写入；
- * - Console / ScriptEditor 接线静态断言（视图含 WebRTC/设备依赖，按仓库惯例不整体挂载）。
+ * - Console 接线静态断言（视图含 WebRTC/设备依赖，按仓库惯例不整体挂载）。
  */
 
 // ---- fetch stub：按「METHOD 前缀匹配」注册响应，记录全部调用 ----
@@ -197,12 +197,11 @@ describe('useRunArgsFlow', () => {
   })
 })
 
-// ---- Console / ScriptEditor / ScriptRunner 接线静态断言（视图不整体挂载，仓库惯例） ----
+// ---- Console / ScriptRunner 接线静态断言（视图不整体挂载，仓库惯例） ----
 
-describe('Console / ScriptEditor 运行参数接线', () => {
+describe('Console 运行参数接线', () => {
   const read = p => readFileSync(new URL(p, import.meta.url), 'utf8')
   const consoleSrc = read('./views/Console.vue')
-  const editorSrc = read('./views/ScriptEditor.vue')
 
   it('Console：运行入口走参数流程（弹窗 + 稀疏 args + 409 冲突 + 摘要日志）', () => {
     expect(consoleSrc).toContain("import { useRunArgsFlow } from '../composables/useRunArgsFlow'")
@@ -221,16 +220,4 @@ describe('Console / ScriptEditor 运行参数接线', () => {
     expect(consoleSrc).toContain('@submit="onRunArgsSubmit"')
   })
 
-  it('ScriptEditor：脚本运行与函数测试均走参数流程；函数测试用 functions run 接口', () => {
-    expect(editorSrc).toContain("import { useRunArgsFlow } from '../composables/useRunArgsFlow'")
-    expect(editorSrc).toContain('<RunParamsModal')
-    expect(editorSrc).toContain('api.runFunction(id, store.deviceId, {')
-    expect(editorSrc).toContain('function: fnName')
-    // 「从此步骤测试」：画布 test-from → startIndexOf → start_index
-    expect(editorSrc).toContain(':test-from="tab === \'func\'"')
-    expect(editorSrc).toContain('function onTestFrom(')
-    expect(editorSrc).toContain('startIndexOf(shell.model, uuid)')
-    expect(editorSrc).toContain('function beginTestFn(')
-    expect(editorSrc).toContain('onTestArgsSubmit')
-  })
 })

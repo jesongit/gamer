@@ -1,7 +1,7 @@
 /**
  * 运行/测试/定时任务的参数表单共享工具（阶段 5，plan §12.1/§12.2/§12.3）。
  *
- * 三类入口（Console 手动运行 / 独立页函数测试 / TaskScheduler 任务快照）共用：
+ * 三类入口（Console 手动运行 / 函数测试 / TaskBoard 任务快照）共用：
  * - extractParams：从 YAML 源码提取 ParamDecl[]（codec 严格解析，不新建语法层）；
  * - mapArgDiagnostics：服务端 400 invalid_args 诊断 → 表单字段定位（五元组同构）；
  * - describeResolvedArgs：202 resolved_args 摘要（「默认继承/显式覆盖」来源标注）；

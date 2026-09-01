@@ -140,7 +140,7 @@ describe('StepCanvas：选中/锚点/添加', () => {
     await wrapper.find(`[data-step-uuid="${model.steps[0].uuid}"]`).trigger('click')
     await wrapper.find('button.add-btn').trigger('click')
     expect(wrapper.find('.add-step-panel').exists()).toBe(true)
-    await wrapper.findAll('.entry-btn')[0].trigger('click') // 启动应用
+    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('str_app') // 启动应用
     expect(model.steps.map((s) => s.kind)).toEqual(['log', 'str_app'])
     expect(wrapper.emitted('select').at(-1)).toEqual([model.steps[1].uuid])
     expect(wrapper.find('.add-step-panel').exists()).toBe(false)
@@ -154,10 +154,49 @@ describe('StepCanvas：选中/锚点/添加', () => {
     const thenContainer = wrapper.find(`[data-step-uuid="${model.steps[1].uuid}"] .card-body .branch-container`)
     await thenContainer.find('button.add').trigger('click')
     expect(wrapper.find('.add-step-panel').exists()).toBe(true)
-    const logEntry = wrapper.findAll('.entry-btn').filter((b) => b.text().includes('记录日志'))[0]
-    await logEntry.trigger('click')
+    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('log')
     expect(model.steps[1].then.at(-1).kind).toBe('log')
     expect(model.steps[1].then.at(-1).message.lit).toBe('')
+  })
+})
+
+describe('StepCanvas：添加下拉与视图保持', () => {
+  it('添加步骤为紧凑下拉态：保留插入位置提示，可关闭', async () => {
+    const { wrapper } = mountCanvas({ yaml: 'steps:\n  - log: a\n' })
+    await wrapper.find('button.add-btn').trigger('click')
+    expect(wrapper.find('.add-dropdown-wrap').exists()).toBe(true)
+    expect(wrapper.find('.add-overlay').exists()).toBe(false)
+    expect(wrapper.find('.add-dialog').exists()).toBe(false)
+    expect(wrapper.find('.panel-target').text()).toBe('插入到：主流程 / 末尾')
+    await wrapper.find('.add-step-panel button[title="关闭"]').trigger('click')
+    expect(wrapper.find('.add-dropdown-wrap').exists()).toBe(false)
+  })
+
+  it('嵌套分支「+ 添加」不切换视图：主流程卡仍可见，插入落点在该分支', async () => {
+    const { wrapper, model } = mountCanvas()
+    await wrapper.find(`[data-step-uuid="${model.steps[0].uuid}"]`).trigger('click')
+    await expandCard(wrapper, model.steps[1].uuid) // 展开 if
+    const thenContainer = wrapper.find(`[data-step-uuid="${model.steps[1].uuid}"] .card-body .branch-container`)
+    await thenContainer.find('button.add').trigger('click')
+    expect(wrapper.find('.add-dropdown-wrap').exists()).toBe(true)
+    expect(wrapper.find('.panel-target').text()).toContain('如果为真')
+    expect(wrapper.text()).toContain('记录日志 top1') // 视图未切进子流程
+    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('log')
+    expect(model.steps[1].then.at(-1).kind).toBe('log')
+    expect(wrapper.find('.add-dropdown-wrap').exists()).toBe(false)
+    expect(wrapper.text()).toContain('记录日志 top1') // 插入后仍停在主流程视图
+  })
+
+  it('非根视图出「返回主流程」按钮，点击回根视图', async () => {
+    const { wrapper, model } = mountCanvas()
+    expect(wrapper.find('button.back-btn').exists()).toBe(false)
+    await expandCard(wrapper, model.steps[1].uuid)
+    await expandCard(wrapper, model.steps[1].then[0].uuid)
+    await wrapper.findAll('button.focus-btn')[0].trigger('click')
+    expect(wrapper.find('button.back-btn').exists()).toBe(true)
+    await wrapper.find('button.back-btn').trigger('click')
+    expect(wrapper.find('button.back-btn').exists()).toBe(false)
+    expect(wrapper.text()).toContain('记录日志 top1')
   })
 })
 
@@ -270,15 +309,20 @@ describe('StepCanvas：函数库上下文', () => {
     await nameSel.setValue('other')
     expect(wrapper.text()).toContain('记录日志 y')
     expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'other'])
-    // ✏️ 输入新名字 = 重命名当前函数（画布跟随）
-    const promptSpy = vi.spyOn(window, 'prompt').mockReturnValue('other2')
+    // 「重命名」：下拉原地变输入框 + 确认按钮；新名字 = 重命名（画布跟随），Esc 取消
     await wrapper.find('button.fn-rename').trigger('click')
-    promptSpy.mockRestore()
+    expect(wrapper.find('select.fn-select').exists()).toBe(false)
+    expect(wrapper.find('button.fn-rename').text()).toBe('确认') // 确认态按钮文字
+    const renameInput = wrapper.find('input[aria-label="函数新名字"]')
+    expect(renameInput.element.value).toBe('other')
+    await renameInput.setValue('other2')
+    await wrapper.find('button.fn-rename').trigger('click') // 确认
     expect(created.model.functions.map((f) => f.name)).toEqual(['login', 'other2'])
     expect(wrapper.find('select.fn-select').element.value).toBe('other2')
+    expect(wrapper.find('button.fn-rename').text()).toBe('重命名') // 确认后回到下拉 + 重命名态
     // 添加步骤插入当前函数末尾
     await wrapper.find('button.add-btn').trigger('click')
-    await wrapper.findAll('.entry-btn')[0].trigger('click')
+    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('str_app')
     expect(created.model.functions[1].steps).toHaveLength(2)
     created.stack.undo() // 撤销插入步骤
     created.stack.undo() // 撤销改名
@@ -305,11 +349,37 @@ describe('StepCanvas：函数库上下文', () => {
     confirmSpy.mockRestore()
   })
 
+  it('initialFn 挂载即直达指定函数；lockFn 时函数名静态展示（不渲染切换下拉）', async () => {
+    const created = setupFunctions('login:\n  steps:\n    - log: hi\n\nother:\n  steps:\n    - log: y\n')
+    const wrapper = mount(StepCanvas, {
+      props: { model: created.model, stack: created.stack, context: 'function', initialFn: 'other', lockFn: true },
+    })
+    // 锁定态：无切换下拉，函数名静态展示且画布直接落在指定函数体
+    expect(wrapper.find('select.fn-select').exists()).toBe(false)
+    const stat = wrapper.find('.fn-static')
+    expect(stat.exists()).toBe(true)
+    expect(stat.text()).toBe('other')
+    expect(wrapper.text()).toContain('记录日志 y')
+    // 重命名仍可用（锁定只去掉切换下拉）：原地变输入框
+    await wrapper.find('button.fn-rename').trigger('click')
+    expect(wrapper.find('.fn-static').exists()).toBe(false)
+    expect(wrapper.find('input[aria-label="函数新名字"]').exists()).toBe(true)
+  })
+
+  it('initialFn 不在函数清单时回退默认（第一个函数），保留切换下拉', () => {
+    const created = setupFunctions('login:\n  steps:\n    - log: hi\n')
+    const wrapper = mount(StepCanvas, {
+      props: { model: created.model, stack: created.stack, context: 'function', initialFn: 'nope' },
+    })
+    expect(wrapper.text()).toContain('记录日志 hi')
+    expect(wrapper.find('select.fn-select').element.value).toBe('login')
+  })
+
   it('reactive 模型下编辑 + undo/redo 正常（组件层接线形态）', async () => {
     const created = setupScript('steps:\n  - log: a\n')
     const wrapper = mount(StepCanvas, { props: { model: created.model, stack: created.stack } })
     await wrapper.find('button.add-btn').trigger('click')
-    await wrapper.findAll('.entry-btn')[0].trigger('click')
+    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('str_app')
     expect(created.model.steps).toHaveLength(2)
     created.stack.undo()
     expect(created.model.steps).toHaveLength(1)

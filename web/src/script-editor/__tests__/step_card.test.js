@@ -8,7 +8,7 @@ import StepCard from '../components/StepCard.vue'
 import { expandCard, setupScript } from './component_helpers'
 
 /**
- * StepCard（17 类）：收起态摘要（§9 文案）、展开态强类型控件经 CommandStack 生效、
+ * StepCard（18 类）：收起态摘要（§9 文案）、展开态强类型控件经 CommandStack 生效、
  * 字段错误按 Diagnostic.field 标红、选中高亮、上移/下移/复制/删除。
  */
 
@@ -23,6 +23,7 @@ const YAML_BY_KIND = {
   wait: 'wait: 1s',
   find: 'find: ""',
   match: 'match:\n    - "":\n      - log: x',
+  check: 'check: ""\n    throw: ""',
   color: 'color:\n      at: [0.5, 0.5]\n      expect:\n        - "":\n          - log: x',
   if: 'if: true',
   loop: 'loop:\n      times: 1\n      steps:\n        - log: x',
@@ -43,6 +44,7 @@ const SUMMARY_BY_KIND = {
   wait: '等待 1s',
   find: '等待并点击 （未选模板）',
   match: '按顺序匹配 1 个模板',
+  check: '检查 （未选模板）',
   color: '在 0.5, 0.5 判断 1 种颜色',
   if: '如果 true',
   loop: '循环 1 次',
@@ -69,7 +71,7 @@ function mountCard({ yaml = 'steps:\n  - log: hello\n', index = 0, props = {} } 
   return { wrapper, model, stack }
 }
 
-describe('StepCard：收起态摘要（§9 文案，17 类全覆盖）', () => {
+describe('StepCard：收起态摘要（§9 文案，18 类全覆盖）', () => {
   for (const kind of STEP_KINDS) {
     it(`${kind} 摘要`, () => {
       expect(stepSummary(makeStep(kind))).toBe(SUMMARY_BY_KIND[kind])
@@ -150,6 +152,24 @@ describe('StepCard：展开编辑经 CommandStack 生效', () => {
     expect(model.steps[0].block).toHaveLength(0)
   })
 
+  it('find/match 超时未勾选展示默认行为提示，勾选后隐藏', async () => {
+    const checkboxByText = (wrapper, text) =>
+      wrapper.findAll('label.field-check').find((l) => l.text().includes(text)).find('input[type="checkbox"]')
+    const find = mountCard({ yaml: 'steps:\n  - find: login.png' })
+    await expandCard(find.wrapper, find.model.steps[0].uuid)
+    expect(find.wrapper.text()).toContain('默认 30min')
+    await checkboxByText(find.wrapper, '等待超时').setValue(true)
+    expect(find.wrapper.text()).not.toContain('默认 30min')
+    expect(find.model.steps[0].timeout).toEqual({ lit: '30s' })
+
+    const match = mountCard({ yaml: 'steps:\n  - match:\n    - a.png:\n      - log: x' })
+    await expandCard(match.wrapper, match.model.steps[0].uuid)
+    expect(match.wrapper.text()).toContain('未配置仅检测一轮')
+    await checkboxByText(match.wrapper, '轮询超时').setValue(true)
+    expect(match.wrapper.text()).not.toContain('未配置仅检测一轮')
+    expect(match.model.steps[0].timeout).toEqual({ lit: '30s' })
+  })
+
   it('match：候选增删', async () => {
     const { wrapper, model } = mountCard({
       yaml: 'steps:\n  - match:\n    - a.png:\n      - log: x',
@@ -161,6 +181,17 @@ describe('StepCard：展开编辑经 CommandStack 生效', () => {
     expect(model.steps[0].candidates).toHaveLength(1)
   })
 
+  it('match：候选勾选命中点击（经命令栈，可撤销）', async () => {
+    const { wrapper, model, stack } = mountCard({
+      yaml: 'steps:\n  - match:\n    - a.png:\n      - log: x',
+    })
+    await expandCard(wrapper, model.steps[0].uuid)
+    await wrapper.find('input[aria-label="命中点击1"]').setValue(true)
+    expect(model.steps[0].candidates[0].click).toBe(true)
+    stack.undo()
+    expect(model.steps[0].candidates[0].click).toBe(false)
+  })
+
   it('color：hex 输入', async () => {
     const { wrapper, model } = mountCard({
       yaml: "steps:\n  - color:\n      at: [0.5, 0.5]\n      expect:\n        - '123456':\n          - log: x",
@@ -168,6 +199,17 @@ describe('StepCard：展开编辑经 CommandStack 生效', () => {
     await expandCard(wrapper, model.steps[0].uuid)
     await wrapper.find('input[aria-label="颜色1hex"]').setValue('ff8800')
     expect(model.steps[0].expect[0].color.lit).toBe('ff8800')
+  })
+
+  it('color：候选勾选命中点击（经命令栈，可撤销）', async () => {
+    const { wrapper, model, stack } = mountCard({
+      yaml: "steps:\n  - color:\n      at: [0.5, 0.5]\n      expect:\n        - '123456':\n          - log: x",
+    })
+    await expandCard(wrapper, model.steps[0].uuid)
+    await wrapper.find('input[aria-label="命中点击1"]').setValue(true)
+    expect(model.steps[0].expect[0].click).toBe(true)
+    stack.undo()
+    expect(model.steps[0].expect[0].click).toBe(false)
   })
 
   it('if：字面量 ↔ 布尔参数切换', async () => {

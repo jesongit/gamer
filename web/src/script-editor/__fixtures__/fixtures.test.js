@@ -35,6 +35,8 @@ const VALID_IDS = [
   'v10_func_call_cross_file',
   'v11_record_output',
   'v12_task_args_snapshot',
+  'v13_check_step',
+  'v14_branch_click',
 ]
 
 const INVALID_IDS = [
@@ -46,6 +48,7 @@ const INVALID_IDS = [
   'i07_unknown_top_key',
   'i08_else_in_candidates',
   'i09_empty_default',
+  'i10_branch_click_type',
 ]
 
 const readJson = (dir, name) => JSON.parse(readFileSync(path.join(dir, name), 'utf8'))
@@ -118,11 +121,15 @@ function assertConfig(rawConfig, modelConfig, ctx) {
 
 const ACTION_KEYS = new Set([
   'str_app', 'cls_app', 'tap', 'swipe', 'key', 'text', 'log', 'wait',
-  'find', 'match', 'color', 'if', 'loop', 'call', 'func', 'throw', 'return',
+  'find', 'match', 'check', 'color', 'if', 'loop', 'call', 'func', 'throw', 'return',
 ])
 
 function findActionKey(step) {
-  return Object.keys(step).find((k) => ACTION_KEYS.has(k))
+  const keys = Object.keys(step)
+  // check 的 throw 是兄弟字段（未命中终止原因），与 throw 动作键同名词：
+  // 存在 check 键时 throw 不算动作键（与前后端 loader 同规则）。
+  const hasCheck = keys.includes('check')
+  return keys.find((k) => ACTION_KEYS.has(k) && !(hasCheck && k === 'throw'))
 }
 
 function assertSteps(rawSteps, modelSteps, ctx) {
@@ -188,7 +195,16 @@ function assertStep(s, m, ctx) {
         const keys = Object.keys(cand)
         expect(keys, `${ctx}.candidates[${i}]`).toHaveLength(1)
         expect(keys[0], `${ctx}.candidates[${i}].template`).toBe(expectCandidateKey(c.template))
-        assertSteps(cand[keys[0]], c.steps, `${ctx}.candidates[${i}].steps`)
+        // 候选值双形态：列表 = 不点击（原形态）；映射 {click: true, steps} = 命中点击。
+        const branch = cand[keys[0]]
+        if (c.click) {
+          expect(Array.isArray(branch), `${ctx}.candidates[${i}] 应为映射形态`).toBe(false)
+          expect(branch.click, `${ctx}.candidates[${i}].click`).toBe(true)
+          assertSteps(branch.steps ?? [], c.steps, `${ctx}.candidates[${i}].steps`)
+        } else {
+          expect(Array.isArray(branch), `${ctx}.candidates[${i}] 应为列表形态`).toBe(true)
+          assertSteps(branch, c.steps, `${ctx}.candidates[${i}].steps`)
+        }
       })
       assertSteps(s.else ?? [], m.else, `${ctx}.else`)
       if (m.timeout === null) expect(s.timeout ?? null, `${ctx}.timeout`).toBeNull()
@@ -207,7 +223,16 @@ function assertStep(s, m, ctx) {
         const keys = Object.keys(cand)
         expect(keys, `${ctx}.expect[${i}]`).toHaveLength(1)
         expect(keys[0], `${ctx}.expect[${i}].color`).toBe(expectCandidateKey(e.color))
-        assertSteps(cand[keys[0]], e.steps, `${ctx}.expect[${i}].steps`)
+        // 候选值双形态：列表 = 不点击；映射 {click: true, steps} = 命中点击。
+        const branch = cand[keys[0]]
+        if (e.click) {
+          expect(Array.isArray(branch), `${ctx}.expect[${i}] 应为映射形态`).toBe(false)
+          expect(branch.click, `${ctx}.expect[${i}].click`).toBe(true)
+          assertSteps(branch.steps ?? [], e.steps, `${ctx}.expect[${i}].steps`)
+        } else {
+          expect(Array.isArray(branch), `${ctx}.expect[${i}] 应为列表形态`).toBe(true)
+          assertSteps(branch, e.steps, `${ctx}.expect[${i}].steps`)
+        }
       })
       assertSteps(s.else ?? [], m.else, `${ctx}.else`)
       break
@@ -234,6 +259,10 @@ function assertStep(s, m, ctx) {
       break
     case 'throw':
       expect(sub, `${ctx}.message`).toBe(m.message)
+      break
+    case 'check':
+      assertCell(sub, m.template, 'str', `${ctx}.template`)
+      expect(s.throw, `${ctx}.throw`).toBe(m.throw)
       break
     case 'return':
       assertCell(sub, m.value, 'bool', `${ctx}.value`)

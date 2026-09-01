@@ -26,6 +26,7 @@ const SCRIPT_IDS = [
   'v09_call_script.target',
   'v11_record_output',
   'v12_task_args_snapshot',
+  'v14_branch_click',
 ]
 
 const FUNCTION_LIBRARY_IDS = [

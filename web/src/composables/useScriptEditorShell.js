@@ -372,7 +372,7 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
   function insertColorCheck(at, hex) {
     return insertStep(createStep('color', {
       at: lit([round4(at[0]), round4(at[1])]),
-      expect: [{ color: lit(hex), steps: [] }],
+      expect: [{ color: lit(hex), click: false, steps: [] }],
       else: [],
     }), `Alt 取色 → color ${hex}`)
   }

@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
-// WEB-005 Settings 页测试：静态原型与「已保存（原型）」假交互移除后，页面挂载
-// SystemInfoCard / UpdateStatusCard / UpdateConfirmModal 三组件，全部对接 system/update 真实 API。
+// WEB-005 设置页签（SystemPanel，Console 右侧面板）测试：静态原型与
+// 「已保存（原型）」假交互移除后，页签挂载 SystemInfoCard / UpdateStatusCard / UpdateConfirmModal
+// 三组件，全部对接 system/update 真实 API。
 // 响应 fixture 读自 release/contracts/fixtures/system-api/（与 system-components.test.js 同源）。
 // 覆盖：三卡片挂载、策略保存走真实 PUT（含客户端校验与 400 回显）、能力全 false 降级、
 // 安装确认完整流（202 → 断连容忍 → 重连按版本/boot_id 判定）、§4.2 矩阵门禁、卸载停轮询。
@@ -9,7 +10,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { flushPromises, mount } from '@vue/test-utils'
-import Settings from './views/Settings.vue'
+import SystemPanel from './components/SystemPanel.vue'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const FIX_DIR = resolve(HERE, '../../release/contracts/fixtures/system-api')
@@ -46,7 +47,7 @@ function installFetchMock(handlers) {
 }
 
 function mountSettings() {
-  return mount(Settings)
+  return mount(SystemPanel)
 }
 
 /** 挂载并等首轮 info+update 加载完成（fake timers 下轮询挂起在 30s 慢周期上） */

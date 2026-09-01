@@ -24,9 +24,10 @@ const INVALID_IDS = [
   'i07_unknown_top_key',
   'i08_else_in_candidates',
   'i09_empty_default',
+  'i10_branch_click_type',
 ]
 
-describe('validation：非法 fixture i02~i09 全部标出期望错误', () => {
+describe('validation：非法 fixture i02~i10 全部标出期望错误', () => {
   for (const id of INVALID_IDS) {
     it(`${id}`, () => {
       const expected = JSON.parse(readFileSync(path.join(jsonDir, `${id}.expected.json`), 'utf8'))
@@ -45,6 +46,26 @@ describe('validation：非法 fixture i02~i09 全部标出期望错误', () => {
       const { diagnostics } = validateSource(text, 'script')
       expect(diagnostics, id).toEqual([])
     }
+  })
+
+  it('check 缺 throw / 模板不存在 → step.field.missing / resource.tmpl.not_found', () => {
+    const { model } = parseScript('steps:\n  - check: logo.png\n')
+    const diags = validateScript(model)
+    expect(diags).toContainEqual(expect.objectContaining({
+      code: 'step.field.missing',
+      step_path: 'steps[0]',
+      field: 'throw',
+    }))
+
+    const created = parseScript('steps:\n  - check: logo.png\n    throw: 主界面未出现\n')
+    const diags2 = validateScript(created.model, { resolveTemplate: () => false })
+    expect(diags2).toContainEqual(expect.objectContaining({
+      code: 'resource.tmpl.not_found',
+      step_path: 'steps[0]',
+      field: 'template',
+    }))
+    const ok = validateScript(created.model, { resolveTemplate: () => true })
+    expect(ok).toEqual([])
   })
 })
 

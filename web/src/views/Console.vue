@@ -1,5 +1,5 @@
 <template>
-  <div class="console" :class="{ 'sb-collapsed': sidebarCollapsed }">
+  <div ref="consoleEl" class="console" :class="{ 'is-panel-resizing': panelResizing }">
     <!-- 左：画面区 -->
     <div class="stage">
       <!-- 顶部工具条：两行布局——上行设备管理（删除归设备组），下行投屏控制 -->
@@ -89,23 +89,55 @@
       </div>
     </div>
 
-    <!-- 右：功能区（顶部 模板/脚本 页签切换整块内容；二次裁切为弹窗，见 TemplateCapture） -->
-    <aside class="panel">
+    <!-- 左右分区拖拽条：拖动可手动调整画面区与功能区宽度 -->
+    <div
+      class="panel-resizer"
+      :class="{ active: panelResizing }"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="调整画面区与功能区宽度"
+      :aria-valuenow="panelWidth"
+      :aria-valuemin="PANEL_MIN_WIDTH"
+      :aria-valuemax="PANEL_MAX_WIDTH"
+      tabindex="0"
+      @pointerdown="startPanelResize"
+      @pointermove="onPanelResize"
+      @pointerup="stopPanelResize"
+      @pointercancel="stopPanelResize"
+      @lostpointercapture="stopPanelResize"
+      @keydown="onPanelResizeKeydown"
+    ></div>
+    <!-- 右：功能区（模板/脚本/日志/任务/设置五页签；二次裁切为弹窗，挂面板层级任何页签可见） -->
+    <aside class="panel" :style="{ width: `${panelWidth}px` }">
       <RecordingCropPanel v-if="recording.panelDraft" :context="recordingCropContext" />
-      <select v-model="activePkg" class="select mono func-pkg" title="应用分区：脚本/函数库/模板按应用包名分区存储（两页签共用）">
-        <option v-if="!pkgOptions.length" value="">（未配置应用包名）</option>
-        <option v-for="p in pkgOptions" :key="p" :value="p">{{ p }}</option>
-      </select>
+      <!-- 应用分区行：分区下拉 + 导入/导出（分区快照 zip 面向整个分区，跟下拉同排） -->
+      <div class="func-pkg-row">
+        <select v-model="activePkg" class="select mono func-pkg" title="应用分区：脚本/函数库/模板按应用包名分区存储（两页签共用）">
+          <option v-if="!pkgOptions.length" value="">（未配置应用包名）</option>
+          <option v-for="p in pkgOptions" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <button class="btn btn-sm" :disabled="!activePkg" title="导出当前应用分区快照（脚本/函数库/模板 zip）" @click="exportPartition">⬆ 导出</button>
+        <button class="btn btn-sm" :disabled="!activePkg" title="导入分区快照 zip 到当前应用分区" @click="impFile.click()">⬇ 导入</button>
+        <input ref="impFile" type="file" accept=".zip" hidden @change="onImportFile" />
+      </div>
       <div class="func-tabs">
         <button type="button" :class="{ active: panelTab === 'tpl' }" @click="panelTab = 'tpl'">🖼️ 模板</button>
         <button type="button" :class="{ active: panelTab === 'script' }" @click="panelTab = 'script'">📜 脚本</button>
+        <button type="button" :class="{ active: panelTab === 'logs' }" @click="panelTab = 'logs'">日志</button>
+        <button type="button" :class="{ active: panelTab === 'tasks' }" @click="panelTab = 'tasks'">任务</button>
+        <button type="button" :class="{ active: panelTab === 'settings' }" @click="panelTab = 'settings'">设置</button>
       </div>
       <div v-show="panelTab === 'tpl'" class="panel-sec tpl-tab">
-        <TemplateCapture :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
+        <TemplateCapture :context="templateCaptureContext" />
       </div>
       <div v-show="panelTab === 'script'" class="panel-sec script-tab">
         <ScriptRunner :context="scriptRunnerContext" />
       </div>
+      <div v-if="panelTab === 'logs'" class="panel-sec extra-tab"><LogsPanel /></div>
+      <div v-else-if="panelTab === 'tasks'" class="panel-sec extra-tab"><TaskBoard /></div>
+      <div v-else-if="panelTab === 'settings'" class="panel-sec extra-tab"><SystemPanel /></div>
+      <!-- 二次裁切弹窗：挂面板层级（不在模板页签 v-show 内），从脚本编辑发起框选时不切页签 -->
+      <TemplateCropModal :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
     </aside>
     <!-- 设备设置 / 新增设备弹窗 -->
     <DeviceSettingsModal :context="deviceSettingsContext" />
@@ -139,9 +171,8 @@ const APP_CACHE_TTL = 5 * 60 * 1000
 </script>
 
 <script setup>
-import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, inject, provide } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, provide } from 'vue'
 import { pinyin } from 'pinyin-pro'
-import { useRouter } from 'vue-router'
 import { store, devicesData, scriptsData, templatesData, useToast, applyRunRecord, findRun, beginCancel, resetStoreRunState, pushRunConflict, appStartedDevices } from '../store'
 import { api, runPartitionImport } from '../api'
 import {
@@ -151,8 +182,12 @@ import {
 import ConsoleVideoStage from '../components/console/ConsoleVideoStage.vue'
 import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
+import TemplateCropModal from '../components/console/TemplateCropModal.vue'
 import ScriptRunner from '../components/console/ScriptRunner.vue'
 import RecordingCropPanel from '../components/console/RecordingCropPanel.vue'
+import LogsPanel from '../components/LogsPanel.vue'
+import TaskBoard from '../components/TaskBoard.vue'
+import SystemPanel from '../components/SystemPanel.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import RunParamsModal from '../components/RunParamsModal.vue'
 import { createEditorShellApi, createRecordingApi } from '../components/console/current-api-adapters'
@@ -162,7 +197,7 @@ import { useScriptEditorShell } from '../composables/useScriptEditorShell'
 import { useFunctionLibrary } from '../composables/useFunctionLibrary'
 import { useRunArgsFlow } from '../composables/useRunArgsFlow'
 import { useRecording } from '../composables/useRecording'
-import { parseScript, parseFunctionLibrary } from '../script-editor/codec'
+import { parseScript, parseFunctionLibrary, serialize } from '../script-editor/codec'
 import { SE_TARGET_OPTIONS } from '../script-editor/targets'
 import { startIndexOf } from '../script-editor/selection'
 import {
@@ -173,11 +208,9 @@ import {
 } from '../console/geometry'
 import { formatScreenSummary } from '../console/device-summary'
 
-const router = useRouter()
 const toast = useToast()
 
-// 侧边栏收起状态（MainLayout provide）：收起时释放的宽度让给右侧操作区，投屏区保持不变
-const sidebarCollapsed = inject('sidebarCollapsed', ref(false))
+// 侧边栏已移除：右侧面板默认 340px，宽度由分隔条手动调整。
 const superseded = ref(false)
 const manualClose = ref(false)
 const connected = ref(false)
@@ -189,8 +222,88 @@ let delaySpikes = 0
 const res = ref('—')
 const bitrate = ref('—')
 const audioMuted = ref(true)
+const consoleEl = ref(null)
 const videoWrap = ref(null)
 const videoElement = ref(null)
+
+// 右侧功能区宽度：五个页签共用同一宽度，避免切换页签时布局突然跳变；拖拽条支持手动调整。
+const PANEL_STORAGE_KEY = 'gb_console_panel_width'
+const PANEL_DEFAULT_WIDTH = 340
+const PANEL_MIN_WIDTH = 280
+const PANEL_MAX_WIDTH = 560
+const MIN_STAGE_WIDTH = 360
+const panelWidth = ref(readPanelWidth())
+const panelResizing = ref(false)
+let panelResizeState = null
+
+function readPanelWidth() {
+  try {
+    const saved = Number(localStorage.getItem(PANEL_STORAGE_KEY))
+    return Number.isFinite(saved) && saved > 0
+      ? Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, Math.round(saved)))
+      : PANEL_DEFAULT_WIDTH
+  } catch {
+    return PANEL_DEFAULT_WIDTH
+  }
+}
+
+function panelMaxWidth() {
+  const total = consoleEl.value?.clientWidth || window.innerWidth || 0
+  if (!total) return PANEL_MAX_WIDTH
+  // 保留最小画面区，并扣除 Console 的左右内边距、间距和拖拽条占位。
+  return Math.max(PANEL_MIN_WIDTH, Math.min(PANEL_MAX_WIDTH, total - MIN_STAGE_WIDTH - 50))
+}
+
+function clampPanelWidth(value) {
+  return Math.round(Math.max(PANEL_MIN_WIDTH, Math.min(panelMaxWidth(), Number(value) || PANEL_DEFAULT_WIDTH)))
+}
+
+function savePanelWidth() {
+  try { localStorage.setItem(PANEL_STORAGE_KEY, String(panelWidth.value)) } catch { /* 忽略不可用的存储 */ }
+}
+
+function startPanelResize(e) {
+  if (e.button !== undefined && e.button !== 0) return
+  panelResizing.value = true
+  panelResizeState = { startX: e.clientX, startWidth: panelWidth.value, pointerId: e.pointerId }
+  e.currentTarget?.setPointerCapture?.(e.pointerId)
+  window.addEventListener('pointermove', onPanelResize)
+  window.addEventListener('pointerup', stopPanelResize)
+  window.addEventListener('pointercancel', stopPanelResize)
+  e.preventDefault()
+}
+
+function onPanelResize(e) {
+  if (!panelResizeState) return
+  // 分隔条向左移动 = 右侧面板变宽，向右移动 = 右侧面板变窄。
+  panelWidth.value = clampPanelWidth(panelResizeState.startWidth - (e.clientX - panelResizeState.startX))
+}
+
+function stopPanelResize(e) {
+  if (!panelResizeState) return
+  if (e?.pointerId !== undefined && panelResizeState.pointerId !== undefined && e.pointerId !== panelResizeState.pointerId) return
+  panelResizeState = null
+  panelResizing.value = false
+  savePanelWidth()
+  window.removeEventListener('pointermove', onPanelResize)
+  window.removeEventListener('pointerup', stopPanelResize)
+  window.removeEventListener('pointercancel', stopPanelResize)
+}
+
+function onPanelResizeKeydown(e) {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+  // 键盘方向与拖动方向一致：左键增大右侧面板，右键减小。
+  panelWidth.value = clampPanelWidth(panelWidth.value + (e.key === 'ArrowLeft' ? 20 : -20))
+  savePanelWidth()
+  e.preventDefault()
+}
+
+function clampPanelToViewport() {
+  const next = clampPanelWidth(panelWidth.value)
+  if (next === panelWidth.value) return
+  panelWidth.value = next
+  savePanelWidth()
+}
 
 function onVideoMounted(el) { videoElement.value = el }
 function onVideoWrapMounted(el) { videoWrap.value = el }
@@ -257,11 +370,11 @@ const selScript = ref('')
 // 模板列表、脚本选择、模板/脚本读写都按该分区进行（后端 data/<pkg>/tmpl|yaml）
 const activePkg = ref('')
 const scriptMode = ref('run')
-// 右侧功能区页签：模板 / 脚本（整块切换，各自独占面板高度）
+// 右侧功能区页签：模板 / 脚本 / 日志 / 任务 / 设置（资源页签共用分区行）
 const panelTab = ref('script')
 // ---------- 共享脚本编辑器外壳（阶段 4） ----------
 // 模型/命令栈/dirty/保存/409 冲突/校验/跳转全部收敛在 useScriptEditorShell，
-// Console 与独立脚本页共用同一编辑核心（script-editor/*）。
+// Console 的 ScriptRunner 编辑态使用同一共享核心（script-editor/*）。
 // resolvers 提供模板存在性校验（call/func 资源与 args 绑定检查需要目标参数表，客户端暂缺、由服务端权威校验）
 const scriptShell = useScriptEditorShell({
   api: createEditorShellApi(api),
@@ -317,6 +430,17 @@ const funcSummaryError = computed(() => {
 })
 // 编辑态辅助 UI 开关
 const showYaml = ref(false)
+/** 进入函数库编辑态时聚焦的函数名（摘要区逐函数「编辑」直达；空 = 默认第一个） */
+const editFocusFn = ref('')
+// 子脚本/函数跳转只打开只读预览，不切换当前运行/编辑资源。
+const resourcePreview = reactive({
+  open: false,
+  kind: 'script',
+  title: '',
+  resource: '',
+  model: null,
+  error: '',
+})
 // 模板短名候选（画布 tmpl 控件 datalist）
 const templateNames = computed(() =>
   templatesData.value.filter(t => t.pkg === activePkg.value).map(t => tplShortName(t.name)))
@@ -1474,7 +1598,11 @@ function togglePick() {
   confirmDelTpl.value = null
   if (!connected.value) return toast('请先连接设备', 'error')
   picking.value = !picking.value
-  if (!picking.value) hideLoupe()
+  if (!picking.value) {
+    hideLoupe()
+    // 框选模式被手动关掉且未进入裁切 → 未完成的回填请求按取消处理
+    if (cellCaptureResolve) { cellCaptureResolve(null); cellCaptureResolve = null }
+  }
 }
 
 function onMouseUp(e) {
@@ -1558,6 +1686,8 @@ function cancelCrop() {
   cropBaseCanvas = null
   crop.zoom = 1
   hideLoupe()
+  // 弹窗取消 → 未完成的回填请求按取消处理
+  if (cellCaptureResolve) { cellCaptureResolve(null); cellCaptureResolve = null }
 }
 
 function repick() {
@@ -1798,6 +1928,8 @@ async function saveTemplate() {
     cropBaseCanvas = null
     hideLoupe()
     toast(`模板 ${rep?.name || shortName} 已保存${tplSizeHint(rep)}`, 'success')
+    // 框选回填：保存成功把模板短名交回发起框选的单元格（CellEditor 自动填入）
+    if (cellCaptureResolve) { cellCaptureResolve(shortName); cellCaptureResolve = null }
   } catch (e) {
     toast('保存失败：' + e.message, 'error')
   } finally {
@@ -1889,8 +2021,6 @@ function launchGame() {
   toast(`正在启动 ${currentPkg.value}…`, 'info')
 }
 
-function openScripts() { router.push('/scripts') }
-
 function tplThumbUrl(name) { return api.tplImageUrl(name, activePkg.value) }
 
 /** 模板列表：行空白区点击 → 查看大图（缩略图/文件名单元格有各自的交互） */
@@ -1899,7 +2029,7 @@ function onTplRowClick(e, t) {
   openTplView(t.name)
 }
 
-/** 模板列表缩略图：alt（按住 Alt / alt 模式）→ 复制模板名；普通 → 查看大图 */
+/** 模板列表缩略图：点击查看大图 */
 async function onTplThumbClick(e, t) {
   confirmDelTpl.value = null
   openTplView(t.name)
@@ -1916,6 +2046,8 @@ provide('tplPreviewUrl', (short) => {
 // 框选复用模板页签的既有流程（进入框选 → 二次裁切 → 上传），完成后模板下拉自动可见新模板。
 
 const cellPick = reactive({ mode: null, resolve: null }) // mode: 'coord' | 'color'
+/** 进行中的「框选生成模板」回填 resolve（CellEditor captureTemplate 等待保存结果） */
+let cellCaptureResolve = null
 
 function beginCellPick(mode) {
   if (!connected.value) {
@@ -1978,25 +2110,30 @@ function finishCellPick(e) {
 provide('seCellTools', {
   pickCoord: () => beginCellPick('coord'),
   pickColor: () => beginCellPick('color'),
-  /** 框选生成新模板：切到模板页签并进入框选，用户走既有 二次裁切→上传 流程，
-   *  上传成功后 templatesData 刷新，CellEditor 模板下拉即可选到新模板 */
+  /** 按步骤实际规则匹配当前模板：服务端按短名消歧并解析文件名区域，不发送任何点击。 */
+  matchTemplate: name => testMatch(name, { stepSemantics: true }),
+  /** 框选生成新模板：不切页签（裁切弹窗挂面板层级，任何页签下可见），用户走既有
+   *  二次裁切→保存流程；保存成功后以模板短名 resolve，CellEditor 自动回填该字段 */
   captureTemplate: () => {
     if (!connected.value) {
       toast('请先连接设备', 'error')
       return Promise.resolve(null)
     }
-    panelTab.value = 'tpl'
+    // 上一次未完成的框选（未保存也未取消）作废
+    if (cellCaptureResolve) cellCaptureResolve(null)
     picking.value = true
-    toast('在画面上框选模板区域，完成后保存模板', 'info')
-    return Promise.resolve(null)
+    toast('在画面上框选模板区域，保存后自动填入', 'info')
+    return new Promise((resolve) => { cellCaptureResolve = resolve })
   },
 })
 
-/** 模板列表文件名点击：查看大图（alt 生成 find 已随可视化编辑移除，插入步骤走编辑器） */
-function onTplNameClick(e, t) {
+/** 模板列表文件名点击：复制当前分区可用的模板短名 */
+async function onTplNameClick(e, t) {
   if (renaming.value === t.name) return
   confirmDelTpl.value = null
-  openTplView(t.name)
+  const shortName = tplShortName(t.name)
+  if (await copyText(shortName)) toast(`已复制模板短名：${shortName}`, 'success')
+  else toast('复制模板短名失败', 'warn')
 }
 
 /** 复制文本到剪贴板：navigator.clipboard 需安全上下文（localhost），
@@ -2072,20 +2209,16 @@ function onTplMatchClick(t) {
   testMatch(t.name)
 }
 
-/** 模板列表：删除按钮（第一次变确认，第二次删除；其他操作自动取消） */
+/** 模板列表：更多菜单直接删除，不再二次确认 */
 async function onTplDeleteClick(t) {
-  if (confirmDelTpl.value === t.name) {
-    confirmDelTpl.value = null
-    try {
-      await api.deleteTemplate(t.name, activePkg.value)
-      templatesData.value = await api.listTemplates()
-      if (viewTpl.value === t.name) viewTpl.value = null
-      toast('模板已删除', 'success')
-    } catch (e) {
-      toast('删除失败：' + e.message, 'error')
-    }
-  } else {
-    confirmDelTpl.value = t.name
+  confirmDelTpl.value = null
+  try {
+    await api.deleteTemplate(t.name, activePkg.value)
+    templatesData.value = await api.listTemplates()
+    if (viewTpl.value === t.name) viewTpl.value = null
+    toast('模板已删除', 'success')
+  } catch (e) {
+    toast('删除失败：' + e.message, 'error')
   }
 }
 
@@ -2130,7 +2263,7 @@ function fileToBase64(file) {
   })
 }
 
-/** 全局按键：Esc 关闭设备设置弹窗 / 模板大图 / 取消删除确认 */
+/** 全局按键：Esc 关闭设备设置弹窗 / 模板大图 / 资源预览 / 取消删除确认 */
 function onGlobalKeydown(e) {
   if (e.key !== 'Escape') return
   if (cellPick.mode) {
@@ -2139,6 +2272,8 @@ function onGlobalKeydown(e) {
     cancelSettings()
   } else if (viewTpl.value) {
     closeTplView()
+  } else if (resourcePreview.open) {
+    closeResourcePreview()
   } else if (confirmDelTpl.value) {
     confirmDelTpl.value = null
   }
@@ -2258,11 +2393,13 @@ function startNewScript() {
   scriptShell.newScript({ name: '新脚本.yml', pkg: activePkg.value })
 }
 
-/** 编辑当前选择（运行区资源类型分发）：脚本 = 脚本编辑上下文；函数 = 函数库编辑上下文 */
-async function editCurrentTarget() {
+/** 编辑当前选择（运行区资源类型分发）：脚本 = 脚本编辑上下文；函数 = 函数库编辑上下文。
+ *  fnName 指定进入时聚焦的函数（摘要区逐函数「编辑」按钮直达），编辑态函数名为静态展示 */
+async function editCurrentTarget(fnName = '') {
   if (runKind.value !== 'func') return editCurrentScript()
   const f = fnLib.list.find(x => x.id === selFnFile.value)
   if (!f) return toast('请先选择函数库文件', 'error')
+  editFocusFn.value = fnName || ''
   scriptMode.value = 'edit'
   showYaml.value = false
   try {
@@ -2274,18 +2411,17 @@ async function editCurrentTarget() {
   }
 }
 
-/** 新建当前类型（运行区「更多」）：脚本 = 新建脚本；函数 = 新建函数库文件 */
+/** 新建当前类型：脚本 = 新建脚本；函数 = 直接进入新函数库文件编辑态，文件名可在编辑器顶部修改 */
 function startNewTarget() {
   if (runKind.value !== 'func') return startNewScript()
   if (!activePkg.value) return toast('请先选择应用分区（设备页签配置应用包名）', 'warn')
-  const raw = window.prompt('函数库文件短名（缺省 .yaml 自动补）', 'functions')
-  if (!raw || !raw.trim()) return
+  editFocusFn.value = ''
   scriptMode.value = 'edit'
   showYaml.value = false
-  scriptShell.newFunctionFile({ file: raw.trim(), pkg: activePkg.value })
+  scriptShell.newFunctionFile({ file: '新函数库', pkg: activePkg.value })
 }
 
-/** 删除当前选择（运行区「更多」）：脚本 / 函数库文件 */
+/** 删除当前选择：脚本 / 函数库文件 */
 async function deleteCurrentTarget() {
   if (runKind.value !== 'func') return deleteCurrentScript()
   const f = fnLib.list.find(x => x.id === selFnFile.value)
@@ -2299,6 +2435,124 @@ async function deleteCurrentTarget() {
   } catch (e) {
     toast('删除失败：' + e.message, 'error')
   }
+}
+
+/** 函数列表操作共用：读取当前文件、修改模型并按版本更新，完成后刷新函数库快照。 */
+async function updateCurrentFunctionFile(mutator, successMessage) {
+  const f = fnLib.list.find(x => x.id === selFnFile.value)
+  if (!f) {
+    toast('请先选择函数库文件', 'warn')
+    return false
+  }
+  let parsed
+  try {
+    parsed = fnLib.parseFunctionFile(f.content ?? '', f.file || '')
+  } catch (e) {
+    toast('函数库解析失败：' + e.message, 'error')
+    return false
+  }
+  if (!parsed?.model || parsed.diagnostics?.length) {
+    toast('函数库当前内容无法修改，请先进入编辑态修复诊断', 'error')
+    return false
+  }
+  const changed = mutator(parsed.model)
+  if (!changed) return false
+  try {
+    await api.updateFunction(f.id, {
+      content: serialize(parsed.model),
+      expected_version: f.version,
+    })
+    await fnLib.refresh(activePkg.value)
+    fnParamsMemo.clear()
+    clearCallParamsCache()
+    toast(successMessage, 'success')
+    return true
+  } catch (e) {
+    toast('函数库更新失败：' + e.message, 'error')
+    return false
+  }
+}
+
+/** 函数模式顶部「添加函数」：载入当前文件编辑态，在末尾插入空函数并选中它。 */
+async function addFunctionToCurrentFile() {
+  const f = fnLib.list.find(x => x.id === selFnFile.value)
+  if (!f) return toast('请先选择函数库文件', 'warn')
+  const names = Array.isArray(f.functions) ? f.functions : []
+  let i = 1
+  while (names.includes(`func${i}`)) i++
+  const name = `func${i}`
+
+  editFocusFn.value = ''
+  scriptMode.value = 'edit'
+  showYaml.value = false
+  try {
+    await scriptShell.loadFunctionFile(f.id)
+    const added = scriptShell.stack?.apply({ type: 'insert_function', name }, `新增函数 ${name}`)
+    if (!added) throw new Error(`函数 ${name} 已存在或当前内容无法修改`)
+    editFocusFn.value = name
+  } catch (e) {
+    scriptShell.reset()
+    scriptMode.value = 'run'
+    toast('添加函数失败：' + (e.message || e), 'error')
+  }
+}
+
+/** 函数编辑态名称输入框的唯一改名入口：写入命令栈，失焦后由编辑外壳自动保存。 */
+function renameEditingFunction(fromName, toName) {
+  const current = String(fromName || '').trim()
+  const next = String(toName || '').trim()
+  const functions = scriptShell.model?.functions
+  if (!current || !next || next === current || !Array.isArray(functions)) return false
+  if (functions.some(fn => fn.name === next)) {
+    toast(`已存在同名函数：${next}`, 'warn')
+    return false
+  }
+  const changed = scriptShell.stack?.apply(
+    { type: 'rename_function', from: current, to: next },
+    `重命名函数 ${current} → ${next}`,
+  )
+  if (changed) editFocusFn.value = next
+  return !!changed
+}
+
+/** 函数摘要「更多 → 重命名」：只改当前函数名，不改函数库文件名。 */
+async function renameFunction(fnName) {
+  const raw = window.prompt('函数名', fnName)
+  const next = raw?.trim()
+  if (!next || next === fnName) return
+  await updateCurrentFunctionFile(model => {
+    if (!Array.isArray(model.functions)) return false
+    if (model.functions.some(fn => fn.name === next)) {
+      toast(`已存在同名函数：${next}`, 'warn')
+      return false
+    }
+    const fn = model.functions.find(item => item.name === fnName)
+    if (!fn) {
+      toast(`函数不存在：${fnName}`, 'warn')
+      return false
+    }
+    fn.name = next
+    return true
+  }, `函数已重命名为 ${next}`)
+}
+
+/** 函数摘要「更多 → 删除」：删除当前文件中的一个函数，至少保留一个。 */
+async function deleteFunction(fnName) {
+  const f = fnLib.list.find(x => x.id === selFnFile.value)
+  if (!f) return toast('请先选择函数库文件', 'warn')
+  await updateCurrentFunctionFile(model => {
+    if (!Array.isArray(model.functions) || model.functions.length <= 1) {
+      toast('函数库至少保留一个函数', 'warn')
+      return false
+    }
+    const i = model.functions.findIndex(fn => fn.name === fnName)
+    if (i < 0) {
+      toast(`函数不存在：${fnName}`, 'warn')
+      return false
+    }
+    model.functions.splice(i, 1)
+    return true
+  }, `函数 ${fnName} 已删除`)
 }
 
 /** 运行模式：编辑当前选中的脚本（getScript 读取最新内容与版本短码） */
@@ -2332,8 +2586,8 @@ async function deleteCurrentScript() {
   }
 }
 
-// ---------- 更多菜单（新建 / 删除）；导入/导出在脚本页签顶部应用下拉旁 ----------
-const moreOpen = ref(false)
+// ---------- 分区导入/导出在右侧面板顶部应用分区下拉旁 ----------
+const impFile = ref(null) // 分区快照 zip 选择（应用分区行「⬇ 导入」触发）
 
 /** 导出当前应用分区快照（yaml/ + tmpl/ 全量）→ zip 下载 */
 async function exportPartition() {
@@ -2534,21 +2788,44 @@ function resolveCallTargetId(target) {
   return null
 }
 
-/** 摘要 call/func 卡片「↗ 打开子脚本/函数定义」：进入编辑态并把目标载入共享外壳。
- *  录制忙时阻止（同 jumpBack：跳转会整体替换模型） */
+function closeResourcePreview() {
+  resourcePreview.open = false
+  resourcePreview.kind = 'script'
+  resourcePreview.title = ''
+  resourcePreview.resource = ''
+  resourcePreview.model = null
+  resourcePreview.error = ''
+}
+
+/** 摘要 call/func 卡片「↗ 子脚本/函数」：只读弹窗展示目标的函数/步骤列表，
+ *  不切换当前资源，也不进入编辑器。func 目标 = `<文件短路径>/<函数名>`。 */
 async function openScriptTarget({ kind, target }) {
-  if (recording.busy) return toast('录制中不能跳转资源', 'warn')
   const id = kind === 'call' ? resolveCallTargetId(target) : fnLib.resolveTargetId(target)
   if (!id) return toast(`跳转目标不存在：${target}`, 'warn')
-  scriptMode.value = 'edit'
-  showYaml.value = false
+
+  const entry = kind === 'call'
+    ? scripts.value.find(s => s.id === id)
+    : fnLib.list.find(f => f.id === id)
+  if (!entry) return toast(`跳转目标不存在：${target}`, 'warn')
+
+  resourcePreview.open = true
+  resourcePreview.kind = kind === 'call' ? 'script' : 'function_library'
+  resourcePreview.title = kind === 'call' ? `子脚本：${entry.name || target}` : `函数：${target}`
+  resourcePreview.resource = entry.id || target
+  resourcePreview.model = null
+  resourcePreview.error = ''
   try {
-    if (kind === 'call') await scriptShell.jumpToScript(id)
-    else await scriptShell.jumpToFunctionFile(id)
+    const parsed = kind === 'call'
+      ? parseScript(entry.content ?? '')
+      : fnLib.parseFunctionFile(entry.content ?? '', entry.file || '')
+    if (!parsed?.model) throw new Error('资源内容为空或无法解析')
+    resourcePreview.model = parsed.model
+    if (parsed.diagnostics?.length) {
+      resourcePreview.error = parsed.diagnostics[0].message || '资源解析失败'
+      resourcePreview.model = null
+    }
   } catch (e) {
-    scriptShell.reset()
-    scriptMode.value = 'run'
-    toast('目标加载失败：' + e.message, 'error')
+    resourcePreview.error = '目标内容无法预览：' + (e.message || e)
   }
 }
 
@@ -2632,7 +2909,7 @@ async function runScript(opts = {}) {
     const f = fnLib.list.find(x => x.id === selFnFile.value)
     if (!f) return toast('请先选择函数库文件', 'warn')
     // 运行目标：从此运行落在某函数的某步 → 该函数从该步；顶部运行 → 第一个函数从头
-    let fnName = (f.functions || [])[0] || ''
+    let fnName = opts.fnName || (f.functions || [])[0] || ''
     let startIndex = 0
     if (opts.fromUuid && funcParsed.value) {
       for (const fn of funcParsed.value.functions) {
@@ -2697,13 +2974,22 @@ function stopScript() {
   toast('已发送停止指令', 'warn')
 }
 
-async function testMatch(name) {
+/** 编辑器模板预览的阈值：脚本沿用当前脚本 config，函数/无 config 时让服务端使用全局值。 */
+function editorMatchThreshold() {
+  const configured = scriptShell.kind === 'script' ? Number(scriptShell.model?.config?.threshold) : NaN
+  return Number.isFinite(configured) && configured > 0 && configured <= 1 ? configured : undefined
+}
+
+async function testMatch(name, { stepSemantics = false } = {}) {
   if (!connected.value) return toast('请先连接设备', 'error')
   if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
   showHit.value = false
   try {
-    const region = templateRegionPixels(name)
-    const r = await api.testTemplate(name, store.deviceId, Number(testThreshold.value) || 0.8, region, activePkg.value)
+    // 模板列表测试允许用户用测试区覆盖；步骤预览不覆盖，交给服务端按引擎规则
+    // 从实际模板文件名解析 #区域（短名也由服务端统一消歧）。
+    const region = stepSemantics ? undefined : templateRegionPixels(name)
+    const threshold = stepSemantics ? editorMatchThreshold() : (Number(testThreshold.value) || 0.8)
+    const r = await api.testTemplate(name, store.deviceId, threshold, region, activePkg.value)
     if (r.hit) {
       hit.x = r.x; hit.y = r.y; hit.w = r.width; hit.h = r.height
       hitLabel.value = `${name} ${r.score.toFixed(2)}`
@@ -2716,7 +3002,7 @@ async function testMatch(name) {
       // 未命中也画框：显示本次搜索区域（与引擎 miss 可视化同语义，便于发现区域配错）
       const vw2 = videoElement.value?.videoWidth || current.value?.width || 1920
       const vh2 = videoElement.value?.videoHeight || current.value?.height || 1080
-      const [rx, ry, rw2, rh2] = region || [0, 0, vw2, vh2]
+      const [rx, ry, rw2, rh2] = region || r.region || [0, 0, vw2, vh2]
       hit.x = rx; hit.y = ry; hit.w = rw2; hit.h = rh2
       hitLabel.value = `${name} 未命中`
       hitMiss.value = true
@@ -2754,7 +3040,7 @@ const templateCaptureContext = {
   activePkg, pkgOptions, exportPartition, onImportFile, crop, testThreshold, testRegion, tplSearch,
   picking, connected, togglePick, templates, confirmDelTpl, renaming, onTplRowClick, onTplThumbClick,
   tplThumbUrl, onTplNameClick, setRenameInputEl, renameVal, confirmRename, cancelRename, startRename,
-  onTplDeleteClick, onTplMatchClick, tplShortName, tplRegionBadge, cropSize, cropZoomPct,
+  onTplDeleteClick, onTplMatchClick, onTplUpload, tplShortName, tplRegionBadge, cropSize, cropZoomPct,
   cropMouseDown, cropMouseMove, cropMouseUp, cropMouseLeave, cropWheel, saveTemplate, cancelCrop,
   repick, saving, viewTpl, closeTplView, replaceTemplateImage,
 }
@@ -2764,15 +3050,17 @@ const scriptRunnerContext = {
   runKind, selFnFile, canRunTarget, selTargetId, fnLib, autoSaveDebounced,
   // 函数模式摘要：逐函数分组视图（每组一个 ScriptSummary）+ 解析失败文案
   funcFnViews, funcSummaryError,
-  editCurrentTarget, startNewTarget, deleteCurrentTarget,
-  editCurrentScript, moreOpen, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
+  editCurrentTarget, startNewTarget, deleteCurrentTarget, addFunctionToCurrentFile, renameEditingFunction, renameFunction, deleteFunction,
+  editCurrentScript, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
   // 运行视图：只读摘要 + 运行起点 + call/func 结构化跳转（替代旧源码行点击/文本预览）
-  summaryModel, summaryError, runFromStep, openScriptTarget,
+  summaryModel, summaryError, runFromStep, openScriptTarget, resourcePreview, closeResourcePreview,
   // 运行参数表单（阶段 5）：脚本声明 params 时点运行/从此运行弹出
   runArgsFlow, onRunArgsSubmit,
   // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调 + Alt 录制开关
   shell: scriptShell, saveEditScript, cancelEditScript,
   showYaml, templateNames, jumpBack,
+  // 函数编辑态聚焦的函数名（逐函数「编辑」直达；画布锁函数下拉为静态展示）
+  editFocusFn,
   onConflictReload, onConflictOverwrite, onConflictDismiss,
   // call/func 目标实参类型回显（同步缓存命中形态），ScriptRunner 经 ctx 传给画布
   resolveTargetSync,
@@ -2789,6 +3077,8 @@ function onBeforeUnload(e) {
 }
 
 onMounted(async () => {
+  clampPanelToViewport()
+  window.addEventListener('resize', clampPanelToViewport)
   // SPA 内跳转（store 存活）→ 自动重连恢复画面；页面刷新 → localStorage 恢复设备选择；
   // 首次进入仅选中第一台设备，等待用户点连接（不主动建会话，尊重空闲低功耗）
   const spaPreselected = !!store.deviceId
@@ -2843,6 +3133,8 @@ watch(() => store.deviceId, id => {
 })
 
 onUnmounted(() => {
+  stopPanelResize()
+  window.removeEventListener('resize', clampPanelToViewport)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('beforeunload', onBeforeUnload)
   consoleRuntime.cancelReconnect()
@@ -2860,8 +3152,6 @@ onUnmounted(() => {
 <style scoped>
 .console {
   display: flex; height: 100%; padding: 14px; gap: 14px;
-  /* 侧边栏收起时释放的宽度（展开 200px - 收起 52px，见 MainLayout.vue） */
-  --sb-free-w: 148px;
 }
 
 /* ===== 画面区 ===== */
@@ -2925,13 +3215,24 @@ onUnmounted(() => {
 @keyframes rec-blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 .rec-bar .btn { margin-left: auto; }
 
-/* ===== 右侧面板 ===== */
+/* ===== 左右分区与右侧面板 ===== */
+.console.is-panel-resizing,
+.console.is-panel-resizing * { cursor: col-resize !important; user-select: none !important; }
+.panel-resizer {
+  position: relative; z-index: 5; flex: 0 0 8px; width: 8px; margin: 0 -11px;
+  cursor: col-resize; touch-action: none; outline: none;
+}
+.panel-resizer::before {
+  content: ''; position: absolute; inset: 0 3px; border-radius: 4px; background: transparent;
+  transition: background .15s ease;
+}
+.panel-resizer:hover::before,
+.panel-resizer:focus-visible::before,
+.panel-resizer.active::before { background: var(--accent); }
 .panel {
   width: 340px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px;
-  overflow: hidden; transition: width .18s ease;
+  overflow: hidden;
 }
-/* 侧边栏收起：释放宽度全部给右侧操作区（340 + 148），中间投屏区宽度保持不变 */
-.console.sb-collapsed .panel { width: calc(340px + var(--sb-free-w)); }
 
 /* 工具条设备下拉（设备管理收进工具条后的宽度约束） */
 .tb-dev-select { flex: 0 1 auto; min-width: 130px; max-width: 200px; padding: 4px 6px; font-size: 12px; }
@@ -2969,7 +3270,10 @@ onUnmounted(() => {
 /* 脚本页签 */
 .panel-sec.script-tab { flex: 1; min-height: 0; overflow: hidden; }
 .panel-sec.tpl-tab { flex: 1; min-height: 0; overflow: hidden; }
-.func-pkg { flex-shrink: 0; font-size: 12px; }
+.panel-sec.extra-tab { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.func-pkg-row { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.func-pkg-row .func-pkg { flex: 1; min-width: 0; font-size: 12px; }
+.func-pkg-row .btn { flex: none; }
 .func-tabs { display: flex; flex-shrink: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-2); }
 .func-tabs button {
   flex: 1; padding: 7px 0; font-size: 12px; text-align: center; cursor: pointer;

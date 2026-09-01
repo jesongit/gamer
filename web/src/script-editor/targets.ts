@@ -1,7 +1,7 @@
 /**
  * call/func 步骤目标候选与参数解析的宿主注入契约。
  *
- * StepCard 自身不拉数据（组件纯受控、可独立挂载测试）：宿主页面（ScriptEditor）
+ * StepCard 自身不拉数据（组件纯受控、可独立挂载测试）：宿主页面（Console/ScriptRunner）
  * 持有分区脚本/函数库清单与解析缓存，经 provide(SE_TARGET_OPTIONS) 注入；
  * 未注入时 StepCard 回退自由文本输入框（旧行为）。
  */

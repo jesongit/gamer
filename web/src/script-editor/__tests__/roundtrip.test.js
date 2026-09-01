@@ -123,13 +123,20 @@ describe('编辑往返一致性', () => {
       steps: [
         createStep('swipe', { from: lit([0.1, 0.9]), to: lit([0.9, 0.1]), time: lit('800ms') }),
         createStep('match', {
-          candidates: [{ template: lit('a.png'), steps: [makeStep('key')] }],
+          candidates: [
+            { template: lit('a.png'), click: true, steps: [] },
+            { template: lit('b.png'), click: true, steps: [makeStep('key')] },
+            { template: lit('c.png'), click: false, steps: [makeStep('log')] },
+          ],
           else: [makeStep('throw')],
           timeout: lit('30s'),
         }),
         createStep('color', {
           at: lit([0.5, 0.5]),
-          expect: [{ color: lit('123456'), steps: [makeStep('log')] }],
+          expect: [
+            { color: lit('123456'), click: true, steps: [] },
+            { color: lit('ff8800'), click: false, steps: [makeStep('log')] },
+          ],
           else: [],
         }),
         createStep('func', { target: 'common/login', args: { account: lit('a.png') }, then: [], else: [] }),
@@ -139,6 +146,9 @@ describe('编辑往返一致性', () => {
     const parsed = parseScript(text)
     expect(parsed.diagnostics).toEqual([])
     expect(strip(parsed.model)).toEqual(strip(direct))
+    // 候选级点击不变式：click: true ⇒ 映射形态，false ⇒ 列表形态
+    expect(text).toContain('a.png:\n        click: true\n')
+    expect(text).toContain("c.png:\n      - log: ''\n")
   })
 
   it('serialize(parse(fixture)) 幂等（契约的组件层旁证）', () => {

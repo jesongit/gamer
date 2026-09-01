@@ -172,6 +172,7 @@ export function useRecording({
     return createStep('match', {
       candidates: [{
         template: lit(name),
+        click: false,
         steps: [createStep('swipe', { from: lit(from), to: lit(to), time: lit(`${ms}ms`) })],
       }],
       else: [createStep('throw', { message: SWIPE_THROW_MSG })],
@@ -193,7 +194,7 @@ export function useRecording({
   }
 
   function buildColorStep(at, hex) {
-    return createStep('color', { at: lit([round4(at[0]), round4(at[1])]), expect: [{ color: lit(hex), steps: [] }], else: [] })
+    return createStep('color', { at: lit([round4(at[0]), round4(at[1])]), expect: [{ color: lit(hex), click: false, steps: [] }], else: [] })
   }
 
   /**
@@ -239,7 +240,7 @@ export function useRecording({
   /** 占位构建（控制器 placeDraft → insert(kind, anchorInfo)）。 */
   function placeholderStep(kind) {
     return kind === 'swipe'
-      ? createStep('match', { candidates: [{ template: lit(''), steps: [] }], else: [], timeout: null })
+      ? createStep('match', { candidates: [{ template: lit(''), click: false, steps: [] }], else: [], timeout: null })
       : buildFindStep('')
   }
 
@@ -376,7 +377,7 @@ export function useRecording({
     if (!real || !real.draft || TERMINAL_STATES.has(real.state) || real.state === 'uploading') return false
     const nm = String(name || '').trim()
     if (!nm || !isValidShortName(nm)) {
-      notify('模板短名不合法（仅字母数字 - _ ，以 .png 结尾）', 'warn')
+      notify('模板短名不合法（仅中英文/数字 - _ ，以 .png 结尾）', 'warn')
       return false
     }
     if (shortNameTaken(nm)) {

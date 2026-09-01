@@ -6,7 +6,7 @@
 //   next_run    → 服务端本地墙钟 `%Y-%m-%d %H:%M:%S`（DateTime<Local> 格式化，无偏移）；
 //   last_run_at → `Utc::now().to_rfc3339_opts(Millis, true)` 固定 UTC `Z` 串（与本地时区无关）。
 // 因此只有当时间戳本身带偏移（含 Z 或 ±HH:MM）时才可推导服务端时区；
-// 推导不出时页面显示兜底文案（见 TaskScheduler.vue）。
+// 推导不出时页面显示兜底文案（见 TaskBoard.vue）。
 
 const OFFSET_RE = /(Z|z|[+-]\d{2}:?\d{2})$/
 // 数字偏移（非 Z）：last_run_at 固定为 UTC Z 串，不携带本地时区信息，

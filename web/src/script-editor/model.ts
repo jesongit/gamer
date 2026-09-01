@@ -3,7 +3,7 @@
  *
  * 本文件是可视化编辑器的唯一编辑源形态：
  * - 字段名严格等于 __fixtures__/json/*.golden.json（五方对照中的「前端 Model」）；
- * - Step 为 17 类判别联合，分支子流程一律 Step[]（Vec 语义，空列表显式存在）；
+ * - Step 为 18 类判别联合，分支子流程一律 Step[]（Vec 语义，空列表显式存在）；
  * - 每个步骤带浏览器内临时 uuid（选中/拖动/撤销/错误定位），**不写入 YAML**；
  * - Cell 是字段级取值单元格：{ lit: 类型化字面量 } 或 { ref: 参数名 }。
  */
@@ -69,11 +69,11 @@ export function isRefCell(cell: Cell | null | undefined): cell is { ref: string 
   return cell !== null && cell !== undefined && typeof (cell as Cell).ref === 'string'
 }
 
-// ---------- 步骤（17 类，契约 §3.5） ----------
+// ---------- 步骤（18 类，契约 §3.5） ----------
 
 export const STEP_KINDS = [
   'str_app', 'cls_app', 'tap', 'swipe', 'key', 'text', 'log', 'wait',
-  'find', 'match', 'color', 'if', 'loop', 'call', 'func', 'throw', 'return',
+  'find', 'match', 'check', 'color', 'if', 'loop', 'call', 'func', 'throw', 'return',
 ] as const
 
 export type StepKind = (typeof STEP_KINDS)[number]
@@ -87,15 +87,17 @@ export function isStepKind(v: unknown): v is StepKind {
   return typeof v === 'string' && (STEP_KINDS as readonly string[]).includes(v)
 }
 
-/** match 候选：单模板 → 分支步骤列表（不点击，首个命中获胜）。 */
+/** match 候选：单模板 → 分支步骤列表（首个命中获胜）；click=true 命中后点击模板框中心。 */
 export interface MatchCandidate {
   template: Cell
+  click: boolean
   steps: Step[]
 }
 
-/** color 候选：有序列表，每项单颜色 → 分支步骤列表（不用颜色做映射键，契约 §4.2）。 */
+/** color 候选：有序列表，每项单颜色 → 分支步骤列表（不用颜色做映射键，契约 §4.2）；click=true 命中后点击取样点。 */
 export interface ColorExpect {
   color: Cell
+  click: boolean
   steps: Step[]
 }
 
@@ -117,6 +119,7 @@ export type Step =
     | { kind: 'wait'; duration: Cell; duration_max: Cell | null }
     | { kind: 'find'; template: Cell; block: Cell[]; verify: boolean; timeout: Cell | null; then: Step[]; else: Step[] }
     | { kind: 'match'; candidates: MatchCandidate[]; else: Step[]; timeout: Cell | null }
+    | { kind: 'check'; template: Cell; throw: string }
     | { kind: 'color'; at: Cell; expect: ColorExpect[]; else: Step[] }
     | { kind: 'if'; cond: Cell; then: Step[]; else: Step[] }
     | { kind: 'loop'; times: number | null; steps: Step[] }

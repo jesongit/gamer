@@ -42,13 +42,14 @@ export const DEFAULT_FACTORIES: Record<StepKind, () => Step> = {
     else: [],
   }),
   match: () => createStep('match', {
-    candidates: [{ template: lit(''), steps: [] }],
+    candidates: [{ template: lit(''), click: false, steps: [] }],
     else: [],
     timeout: null,
   }),
+  check: () => createStep('check', { template: lit(''), throw: '' }),
   color: () => createStep('color', {
     at: CENTER,
-    expect: [{ color: lit(''), steps: [] }],
+    expect: [{ color: lit(''), click: false, steps: [] }],
     else: [],
   }),
   if: () => createStep('if', { cond: lit(true), then: [], else: [] }),
@@ -103,6 +104,7 @@ export const PANEL_GROUPS: { id: PanelGroupId; label: string; entries: PanelEntr
     entries: [
       { kind: 'find', label: '点击模板', group: 'recognition' },
       { kind: 'match', label: '匹配模板', group: 'recognition' },
+      { kind: 'check', label: '检查模板', group: 'recognition' },
       { kind: 'color', label: '判断颜色', group: 'recognition' },
     ],
   },
@@ -148,6 +150,7 @@ export const KIND_PARAM_FIELD_TYPES: Partial<Record<StepKind, Record<string, Par
   wait: { duration: 'time', duration_max: 'time' },
   find: { template: 'tmpl', timeout: 'time' },
   match: { timeout: 'time' },
+  check: { template: 'tmpl' },
   color: { at: 'coord' },
   if: { cond: 'bool' },
   return: { value: 'bool' },

@@ -1,9 +1,9 @@
 <template>
-  <div class="page">
-    <div class="page-head">
+  <div class="system-panel">
+    <div class="sp-head">
       <div>
-        <div class="page-title">系统与更新</div>
-        <div class="page-sub">系统信息、软件更新与更新策略；数据与操作均对接服务端真实 API</div>
+        <div class="sp-title">系统与更新</div>
+        <div class="sp-sub">系统信息、软件更新与更新策略；数据与操作均对接服务端真实 API（/api/system/*，更新策略持久化在服务端数据目录）</div>
       </div>
       <button class="btn btn-primary" :disabled="st.loading" @click="ctl.refresh()">
         {{ st.loading ? '读取中…' : '↻ 刷新' }}
@@ -93,9 +93,8 @@
 
 <script setup>
 /**
- * 设置页（WEB-005 重做）：静态原型与「已保存（原型）」假交互已移除，全部对接 system/update 真实 API
- * （契约：release/contracts/system-api-v1.md；客户端/轮询/确认流复用 web/src/system 模块）。
- * - SystemInfoCard：/api/system/info 展示（useSystemStatus 提供数据，页面卸载自动停止轮询）；
+ * Console 右侧设置页签内容（系统与更新功能全量保留）：
+ * - SystemInfoCard：/api/system/info 展示（useSystemStatus 提供数据，页签卸载自动停止轮询）；
  * - UpdateStatusCard：11 状态展示 + 动作按钮；check/download 直接提交，install/rollback 先过
  *   §4.2 状态×动作受理矩阵（canAct）再弹 UpdateConfirmModal，确认后走 useUpdateFlow 完整流：
  *   202 受理 → 断连容忍轮询 → 重连按 app.version / boot_id 判定成功/失败/人工恢复/超时；
@@ -103,9 +102,9 @@
  *   轮询不会回填覆盖编辑中的表单（仅首次与保存回显时同步服务端值）。
  */
 import { computed, reactive, ref, watch } from 'vue'
-import SystemInfoCard from '../components/SystemInfoCard.vue'
-import UpdateStatusCard from '../components/UpdateStatusCard.vue'
-import UpdateConfirmModal from '../components/UpdateConfirmModal.vue'
+import SystemInfoCard from './SystemInfoCard.vue'
+import UpdateStatusCard from './UpdateStatusCard.vue'
+import UpdateConfirmModal from './UpdateConfirmModal.vue'
 import { useToast } from '../store'
 import { systemApi, SYSTEM_ERRORS } from '../system/api'
 import { allowedActions } from '../system/states'
@@ -114,7 +113,7 @@ import { createUpdateFlow } from '../system/useUpdateFlow'
 
 const toast = useToast()
 
-// ---- 系统信息 + 更新状态：页面级轮询（活跃更新高频 / 驻留低频，卸载自动停止） ----
+// ---- 系统信息 + 更新状态：页签级轮询（活跃更新高频 / 驻留低频，卸载自动停止） ----
 const ctl = useSystemStatus()
 const st = ctl.st
 const infoErrorText = computed(() => (st.infoError && (st.infoError.message || '系统信息加载失败')) || '')
@@ -289,7 +288,11 @@ async function savePolicy() {
 </script>
 
 <style scoped>
-.stack-gap { margin-bottom: 14px; }
+.system-panel { display: flex; flex-direction: column; gap: 14px; flex: 1; min-height: 0; overflow: auto; padding-right: 2px; }
+.sp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.sp-title { font-size: 16px; font-weight: 700; }
+.sp-sub { font-size: 12px; color: var(--text-2); margin-top: 3px; }
+.stack-gap { margin-bottom: 0; }
 .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 14px; align-items: start; }
 
 .state-card { display: flex; align-items: center; gap: 14px; min-height: 92px; }

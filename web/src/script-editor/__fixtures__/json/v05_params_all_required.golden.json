@@ -40,6 +40,7 @@
             "expect": [
               {
                 "color": { "ref": "target_color" },
+                "click": false,
                 "steps": [{ "kind": "key", "key": { "ref": "cancel_key" } }]
               }
             ],

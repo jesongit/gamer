@@ -29,7 +29,7 @@
 
     <template v-else>
       <!-- tmpl：模板短名（自定义下拉，悬停行内预览缩略图；候选由页面外壳注入）
-           + 框选（宿主注入 seCellTools 时可用：跳转投屏框选生成新模板） -->
+           + 框选（宿主注入 seCellTools 时可用：投屏框选生成新模板，保存后自动填入） -->
       <template v-if="type === 'tmpl'">
         <span class="tmpl-wrap">
           <input
@@ -64,9 +64,17 @@
         </span>
         <button
           v-if="tools" type="button" class="cell-tool live"
-          title="跳转投屏框选截取新模板，完成后回到这里在下拉中选择"
-          @click.stop="tools.captureTemplate()"
-        >框选</button>
+          :class="{ active: capturing }"
+          title="在投屏画面框选新模板，保存后自动填入此处"
+          @click.stop="onCaptureTemplate"
+        >{{ capturing ? '框选中…' : '框选' }}</button>
+        <button
+          v-if="tools" type="button" class="cell-tool live"
+          :class="{ active: matching }"
+          :disabled="matching || isRef || !litString.trim()"
+          :title="isRef ? '参数引用需要运行时值，不能在编辑态预览匹配' : '按步骤实际匹配规则预览当前模板（只匹配，不点击）'"
+          @click.stop="onMatchTemplate"
+        >{{ matching ? '匹配中…' : '匹配' }}</button>
       </template>
 
       <!-- coord：X/Y 双数字 + 投屏选点（宿主注入 seCellTools 时可用） -->
@@ -196,16 +204,18 @@ const emit = defineEmits(['change'])
 const TIME_UNITS = ['ms', 's', 'm', 'min', 'h', 'd'] as const
 
 /**
- * 投屏取值工具（Console 编辑态 provide('seCellTools')）：选点/选色/框选生成模板。
+ * 投屏取值工具（Console 编辑态 provide('seCellTools')）：选点/选色/框选生成模板/匹配预览。
  * 未注入（独立脚本页无投屏、单测）时按钮不渲染。
  */
 interface CellTools {
   pickCoord(): Promise<{ x: number; y: number } | null>
   pickColor(): Promise<{ hex: string; x: number; y: number } | null>
   captureTemplate(): Promise<string | null>
+  matchTemplate(name: string): Promise<unknown>
 }
 const tools = inject<CellTools | null>('seCellTools', null)
 const picking = ref(false)
+const matching = ref(false)
 
 async function onPickCoord(): Promise<void> {
   if (!tools || picking.value) return
@@ -225,6 +235,29 @@ async function onPickColor(): Promise<void> {
     if (hit?.hex) emitLit(hit.hex)
   } finally {
     picking.value = false
+  }
+}
+/** 框选生成新模板：等待宿主裁切保存完成，成功则以模板短名自动填入本字段 */
+const capturing = ref(false)
+async function onCaptureTemplate(): Promise<void> {
+  if (!tools || capturing.value) return
+  capturing.value = true
+  try {
+    const name = await tools.captureTemplate()
+    if (name) emitLit(name)
+  } finally {
+    capturing.value = false
+  }
+}
+
+async function onMatchTemplate(): Promise<void> {
+  const name = litString.value.trim()
+  if (!tools || matching.value || isRef.value || !name) return
+  matching.value = true
+  try {
+    await tools.matchTemplate(name)
+  } finally {
+    matching.value = false
   }
 }
 

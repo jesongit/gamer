@@ -8,7 +8,7 @@ import { stripUuids } from './script-editor/__tests__/helpers'
 /**
  * 编辑器外壳（阶段 4）：加载 → 编辑（命令栈）→ dirty → 保存（expected_version）→
  * 409 version_conflict 冲突状态 → 重载/覆盖；运行起点映射；函数库编辑往返。
- * 页面（Console / ScriptEditor）只消费 shell 状态，SaveConflictModal 的打开与
+ * 页面（Console / ScriptRunner）只消费 shell 状态，SaveConflictModal 的打开与
  * 重载/覆盖回调即本文件断言的 conflict/reload/overwrite 契约。
  */
 

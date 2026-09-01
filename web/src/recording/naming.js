@@ -24,12 +24,12 @@ export function defaultShortName(kind, date, seq) {
 }
 
 /**
- * 短名合法性：[A-Za-z0-9_-]+\.png。
- * 不允许 `#`（`#` 是服务端搜索区域元数据分隔符，用户短名不得携带）。
+ * 短名合法性：unicode 字母数字 + `-` `_` + `.png`（与服务端 validate_short_name 同口径，
+ * 中文名合法）。不允许 `#`（`#` 是服务端搜索区域元数据分隔符，用户短名不得携带）。
  * @param {unknown} name
  */
 export function isValidShortName(name) {
-  return typeof name === 'string' && /^[A-Za-z0-9_-]+\.png$/.test(name)
+  return typeof name === 'string' && /^[\p{L}\p{N}_-]+\.png$/u.test(name)
 }
 
 /**

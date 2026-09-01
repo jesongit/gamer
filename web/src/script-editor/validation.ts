@@ -208,6 +208,12 @@ function validateStep(
       checkCell(step.timeout, 'time', path, 'timeout', paramTypes, diags)
       return
     }
+    case 'check':
+      checkCell(step.template, 'tmpl', path, 'template', paramTypes, diags, ctx)
+      if (!step.throw || !step.throw.trim()) {
+        diags.push(diag(CODES.stepFieldMissing, path, 'throw', 'check 缺少 throw（未命中时的终止原因）'))
+      }
+      return
     case 'color': {
       checkCell(step.at, 'coord', path, 'at', paramTypes, diags)
       const seenColors = new Set<string>()

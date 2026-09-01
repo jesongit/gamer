@@ -279,8 +279,17 @@ function emitStep(step: Step, col: number, lines: string[]): void {
       // 紧凑缩进（契约 §4.1）：候选列表是 match 键下的无缩进序列（与键内容列同列）。
       for (const cand of step.candidates) {
         lines.push(`${' '.repeat(contentCol)}- ${cellInline(cand.template, 'tmpl')}:`)
-        // 候选分支步骤 = 候选键的值序列，同样无缩进（项与键内容列同列）。
-        emitStepSeq(cand.steps, contentCol + 2, lines)
+        if (cand.click) {
+          // 命中点击候选 = 映射形态（契约 §4.1）；映射值不能与键同列，比候选键深两级。
+          lines.push(`${' '.repeat(contentCol + 4)}click: true`)
+          if (cand.steps.length > 0) {
+            lines.push(`${' '.repeat(contentCol + 4)}steps:`)
+            emitStepSeq(cand.steps, contentCol + 6, lines)
+          }
+        } else {
+          // 候选分支步骤 = 候选键的值序列，同样无缩进（项与键内容列同列）。
+          emitStepSeq(cand.steps, contentCol + 2, lines)
+        }
       }
       emitBranch('else', step.else, contentCol, lines)
       if (step.timeout !== null) {
@@ -288,6 +297,10 @@ function emitStep(step: Step, col: number, lines: string[]): void {
       }
       return
     }
+    case 'check':
+      lines.push(`${head}check: ${cellInline(step.template, 'tmpl')}`)
+      lines.push(`${' '.repeat(contentCol)}throw: ${plainScalar(step.throw)}`)
+      return
     case 'color': {
       lines.push(`${head}color:`)
       const mapCol = contentCol + 2
@@ -297,7 +310,16 @@ function emitStep(step: Step, col: number, lines: string[]): void {
         for (const exp of step.expect) {
           const candCol = mapCol + 2
           lines.push(`${' '.repeat(candCol)}- ${cellInline(exp.color, 'color')}:`)
-          emitStepSeq(exp.steps, candCol + 2, lines)
+          if (exp.click) {
+            // 命中点击候选 = 映射形态（契约 §4.2）；映射键比候选键深两级。
+            lines.push(`${' '.repeat(candCol + 4)}click: true`)
+            if (exp.steps.length > 0) {
+              lines.push(`${' '.repeat(candCol + 4)}steps:`)
+              emitStepSeq(exp.steps, candCol + 6, lines)
+            }
+          } else {
+            emitStepSeq(exp.steps, candCol + 2, lines)
+          }
         }
       }
       // 规范形态（fixture 冻结）：color 的 else 写在步骤级，与 color 键同列（兄弟键）。
@@ -795,8 +817,15 @@ function parseStepNode(node: YNode | null, path: string, diags: Diagnostic[]): S
     diags.push(diag(CODES.stepListType, path, '', '步骤项必须是标量动作或「动作键: 字段」映射'))
     return null
   }
-  const actionEntries = node.entries.filter((e) => ACTION_KEY_SET.has(entryKey(e)))
-  const fieldEntries = node.entries.filter((e) => !ACTION_KEY_SET.has(entryKey(e)))
+  // check 的 throw 是兄弟字段（未命中终止原因），与 throw 动作键同名词：
+  // 步骤内存在 check 键时把 throw 降级为字段，避免误判多动作键。
+  const hasCheck = node.entries.some((e) => entryKey(e) === 'check')
+  const actionEntries = node.entries.filter(
+    (e) => ACTION_KEY_SET.has(entryKey(e)) && !(hasCheck && entryKey(e) === 'throw'),
+  )
+  const fieldEntries = node.entries.filter(
+    (e) => !ACTION_KEY_SET.has(entryKey(e)) || (hasCheck && entryKey(e) === 'throw'),
+  )
   if (actionEntries.length === 0) {
     diags.push(diag(CODES.stepUnknownAction, path, '', '步骤缺少动作键'))
     return null
@@ -838,6 +867,8 @@ function isKnownField(kind: StepKind, key: string): boolean {
       return ['block', 'verify', 'timeout', 'then', 'else'].includes(key)
     case 'match':
       return ['else', 'timeout'].includes(key)
+    case 'check':
+      return ['throw'].includes(key)
     case 'color':
       return ['else'].includes(key)
     case 'if':
@@ -952,6 +983,17 @@ function parseStepFields(
       parseMatchCandidates(value, path, step, diags)
       return step
     }
+    case 'check': {
+      const template = requireCell(parseCellRaw(value), path, 'template', diags)
+      const throwNode = fields.get('throw') ?? null
+      if (throwNode === null || isNullScalar(throwNode)) {
+        diags.push(diag(CODES.stepFieldMissing, path, 'throw', 'check 缺少 throw（未命中时的终止原因）'))
+      } else if (throwNode.kind !== 'scalar') {
+        diags.push(diag(CODES.stepFieldTypeMismatch, path, 'throw', 'check 的 throw 必须是字符串标量'))
+      }
+      const throwMsg = throwNode !== null && throwNode.kind === 'scalar' ? throwNode.value : ''
+      return { ...base, kind: 'check', template, throw: throwMsg }
+    }
     case 'color': {
       const map = value !== null && value.kind === 'map' ? value : null
       if (map === null) {
@@ -969,7 +1011,7 @@ function parseStepFields(
         ...base,
         kind: 'color',
         at: coordCell(parseCellRaw(get('at')), path, 'at', diags),
-        expect: parseColorExpect(get('expect'), `${path}.expect`, diags),
+        expect: parseColorExpect(get('expect'), path, `${path}.expect`, diags),
         else: branch('else'),
       }
     }
@@ -1043,6 +1085,33 @@ function parseTmplList(node: YNode | null, basePath: string, diags: Diagnostic[]
   return node.items.map((item) => optionalCell(parseCellRaw(item)) ?? { lit: null })
 }
 
+/** 候选值双形态（契约 §4.1/§4.2）：分支步骤列表（click=false，原形态），或
+ *  `{click: true, steps: [...]}` 映射（steps 省略 = 空分支，命中即点）。
+ *  诊断与错误码同服务端：step_path = 步骤路径，click 字段 = `<候选>[i].click`。 */
+function parseCandidateBranch(
+  value: YNode | null,
+  path: string,
+  candPrefix: string,
+  stepsPath: string,
+  diags: Diagnostic[],
+): { click: boolean; steps: Step[] } {
+  if (value !== null && value.kind === 'map') {
+    for (const e of value.entries) {
+      const k = entryKey(e)
+      if (k !== 'click' && k !== 'steps') {
+        diags.push(diag(CODES.stepFieldUnknown, path, k, `候选值不支持字段 ${k}（允许：click/steps）`))
+      }
+    }
+    const clickNode = value.entries.find((e) => entryKey(e) === 'click')?.value ?? null
+    const stepsNode = value.entries.find((e) => entryKey(e) === 'steps')?.value ?? null
+    return {
+      click: parseBool(clickNode, path, `${candPrefix}.click`, diags) ?? false,
+      steps: parseStepsNode(stepsNode, stepsPath, diags),
+    }
+  }
+  return { click: false, steps: parseStepsNode(value, stepsPath, diags) }
+}
+
 /** match 候选：每项是单键映射 `模板: [分支步骤]`；`else`/`timeout` 误入候选列表 → 恢复到兄弟键并报错（契约 §4.1）。 */
 function parseMatchCandidates(
   node: YNode | null,
@@ -1078,18 +1147,18 @@ function parseMatchCandidates(
     const entry = item.entries[0]
     step.candidates.push({
       template: candidateKeyCell(entry.key),
-      steps: parseStepsNode(entry.value, `${candPath}.steps`, diags),
+      ...parseCandidateBranch(entry.value, path, `candidates[${i}]`, `${candPath}.steps`, diags),
     })
   })
 }
 
-function parseColorExpect(node: YNode | null, basePath: string, diags: Diagnostic[]): { color: Cell; steps: Step[] }[] {
+function parseColorExpect(node: YNode | null, path: string, basePath: string, diags: Diagnostic[]): { color: Cell; click: boolean; steps: Step[] }[] {
   if (node === null || isNullScalar(node)) return []
   if (node.kind !== 'seq') {
     diags.push(diag(CODES.stepListType, basePath, '', 'expect 必须是有序候选列表（每项 单键映射 颜色: 分支步骤）'))
     return []
   }
-  const expect: { color: Cell; steps: Step[] }[] = []
+  const expect: { color: Cell; click: boolean; steps: Step[] }[] = []
   node.items.forEach((item, i) => {
     const candPath = `${basePath}[${i}]`
     if (item === null || item.kind !== 'map' || item.entries.length !== 1) {
@@ -1099,7 +1168,7 @@ function parseColorExpect(node: YNode | null, basePath: string, diags: Diagnosti
     const entry = item.entries[0]
     expect.push({
       color: candidateKeyCell(entry.key),
-      steps: parseStepsNode(entry.value, `${candPath}.steps`, diags),
+      ...parseCandidateBranch(entry.value, path, `expect[${i}]`, `${candPath}.steps`, diags),
     })
   })
   return expect

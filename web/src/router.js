@@ -9,12 +9,6 @@ const routes = [
     children: [
       { path: '', redirect: '/console' },
       { path: 'console', name: 'Console', component: () => import('./views/Console.vue') },
-      // 模板管理页已删除，模板并入 脚本管理（/scripts）的模板页签：旧地址重定向
-      { path: 'templates', redirect: '/scripts' },
-      { path: 'scripts', name: 'Scripts', component: () => import('./views/ScriptEditor.vue') },
-      { path: 'tasks', name: 'Tasks', component: () => import('./views/TaskScheduler.vue') },
-      { path: 'logs', name: 'Logs', component: () => import('./views/RunLogs.vue') },
-      { path: 'settings', name: 'Settings', component: () => import('./views/Settings.vue') },
       { path: '/:pathMatch(.*)*', redirect: '/console' }
     ]
   }
@@ -33,7 +27,7 @@ router.beforeEach(async (to) => {
 })
 
 // 构建产物更新（gamer.ps1 restart -Build / 重新 npm run build）后，已打开的旧页面再点
-// 导航时懒加载旧 hash 的 chunk 会 404 → 导航静默失败，表现为「侧边栏点其他页面没反应」。
+// 导航时懒加载旧 hash 的 chunk 会 404 → 导航静默失败，表现为「点导航没反应」。
 // 命中 chunk 加载错误 → 整页刷新一次加载新产物（sessionStorage 标记防刷新循环，
 // afterEach 清标记，之后再次部署仍能触发）；其余错误只打日志不劫持。
 router.onError((err) => {

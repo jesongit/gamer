@@ -120,7 +120,7 @@
         </div>
         <div class="field-row">
           <button type="button" class="mini-btn add" title="添加障碍" @click.stop="addBlock">+ 添加障碍</button>
-          <label class="field-check">
+          <label class="field-check" title="未勾选时引擎默认等待 30min">
             <input type="checkbox" :checked="step.timeout !== null" @change="toggleFindTimeout" />
             等待超时
           </label>
@@ -128,6 +128,7 @@
             v-if="step.timeout" :cell="step.timeout" type="time" :params="params"
             label="超时" :error="fieldError('timeout')" @change="(c) => updateCell('timeout', c)"
           />
+          <span v-else class="field-hint" title="未勾选时引擎默认等待 30min">默认 30min</span>
         </div>
         <BranchContainer
           :model="model" :stack="stack" :container-path="subPath('then')" :base-path="subBase('then')"
@@ -151,7 +152,7 @@
 
       <!-- match -->
       <template v-else-if="step.kind === 'match'">
-        <div class="field-hint warn">仅检测不点击；按序首个命中分支获胜</div>
+        <div class="field-hint warn">按序首个命中分支获胜；候选可勾选「命中点击」，点中该模板框中心</div>
         <div v-for="(cand, ci) in step.candidates" :key="ci" class="cand-block" :class="{ 'cell-error': !!fieldError(`candidates[${ci}].template`) || !!fieldError('candidates') }">
           <div class="field-row">
             <span class="field-label">候选 {{ ci + 1 }}</span>
@@ -160,6 +161,10 @@
               :label="`候选${ci + 1}`" :error="fieldError(`candidates[${ci}].template`) || fieldError('candidates')"
               @change="(c) => updateCandidateTemplate(ci, c)"
             />
+            <label class="field-check" title="命中后点击该候选模板匹配框的中心（find 的点击语义）">
+              <input type="checkbox" :checked="cand.click" :aria-label="`命中点击${ci + 1}`" @change="setCandClick(ci, ($event.target as HTMLInputElement).checked)" />
+              命中点击
+            </label>
             <button v-if="step.candidates.length > 1" type="button" class="mini-btn" title="删除候选" @click.stop="removeCandidate(ci)">✕</button>
           </div>
           <BranchContainer
@@ -174,7 +179,7 @@
         </div>
         <div class="field-row">
           <button type="button" class="mini-btn add" title="添加候选" @click.stop="addCandidate">+ 添加候选</button>
-          <label class="field-check">
+          <label class="field-check" title="未配置超时时仅检测一轮：全未命中立即进「都未命中」分支">
             <input type="checkbox" :checked="step.timeout !== null" @change="toggleMatchTimeout" />
             轮询超时
           </label>
@@ -182,6 +187,7 @@
             v-if="step.timeout" :cell="step.timeout" type="time" :params="params"
             label="超时" :error="fieldError('timeout')" @change="(c) => updateCell('timeout', c)"
           />
+          <span v-else class="field-hint" title="未配置超时时仅检测一轮：全未命中立即进「都未命中」分支">未配置仅检测一轮</span>
         </div>
         <BranchContainer
           :model="model" :stack="stack" :container-path="subPath('else')" :base-path="subBase('else')"
@@ -194,12 +200,32 @@
         />
       </template>
 
+      <!-- check -->
+      <template v-else-if="step.kind === 'check'">
+        <div class="field-row">
+          <span class="field-label">模板</span>
+          <CellEditor
+            :cell="step.template" type="tmpl" :params="params" :templates="templates"
+            label="检查模板" :error="fieldError('template')" @change="(c) => updateCell('template', c)"
+          />
+          <span class="field-hint warn">仅检测不点击、不轮询；未命中结束运行</span>
+        </div>
+        <div class="field-row">
+          <span class="field-label">未命中提示</span>
+          <input
+            class="cell-input grow" :value="step.throw"
+            placeholder="未命中时终止运行的原因（必填）" aria-label="未命中提示"
+            @change="setThrow(($event.target as HTMLInputElement).value)"
+          />
+        </div>
+      </template>
+
       <!-- color -->
       <template v-else-if="step.kind === 'color'">
         <div class="field-row">
           <span class="field-label">坐标</span>
           <CellEditor :cell="step.at" type="coord" :params="params" label="取色坐标" :error="fieldError('at')" @change="(c) => updateCell('at', c)" />
-          <span class="field-hint warn">仅检测不点击</span>
+          <span class="field-hint warn">按序首个命中分支获胜；候选可勾选「命中点击」，点击取样点</span>
         </div>
         <div v-for="(exp, ei) in step.expect" :key="ei" class="cand-block" :class="{ 'cell-error': !!fieldError(`expect[${ei}].color`) || !!fieldError('expect') }">
           <div class="field-row">
@@ -209,6 +235,10 @@
               :error="fieldError(`expect[${ei}].color`) || fieldError('expect')"
               @change="(c) => updateExpectColor(ei, c)"
             />
+            <label class="field-check" title="命中后点击取色坐标的取样点">
+              <input type="checkbox" :checked="exp.click" :aria-label="`命中点击${ei + 1}`" @change="setExpectClick(ei, ($event.target as HTMLInputElement).checked)" />
+              命中点击
+            </label>
             <button v-if="step.expect.length > 1" type="button" class="mini-btn" title="删除颜色候选" @click.stop="removeExpect(ei)">✕</button>
           </div>
           <BranchContainer
@@ -528,6 +558,9 @@ function toggleRandom(e: Event): void {
 function setVerify(v: boolean): void {
   updateStep({ verify: v })
 }
+function setThrow(v: string): void {
+  updateStep({ throw: v })
+}
 function toggleFindTimeout(e: Event): void {
   updateStep({ timeout: (e.target as HTMLInputElement).checked ? { lit: '30s' } : null })
 }
@@ -544,7 +577,7 @@ function removeBlock(i: number): void {
   updateStep({ block: s.value.block.filter((_: Cell, j: number) => j !== i) })
 }
 function addCandidate(): void {
-  updateStep({ candidates: [...s.value.candidates, { template: { lit: '' }, steps: [] }] })
+  updateStep({ candidates: [...s.value.candidates, { template: { lit: '' }, click: false, steps: [] }] })
 }
 function removeCandidate(i: number): void {
   updateStep({ candidates: s.value.candidates.filter((_: unknown, j: number) => j !== i) })
@@ -552,14 +585,20 @@ function removeCandidate(i: number): void {
 function updateCandidateTemplate(i: number, cell: Cell): void {
   updateStep({ candidates: s.value.candidates.map((c: unknown, j: number) => (j === i ? { ...(c as object), template: cell } : c)) })
 }
+function setCandClick(i: number, on: boolean): void {
+  updateStep({ candidates: s.value.candidates.map((c: unknown, j: number) => (j === i ? { ...(c as object), click: on } : c)) })
+}
 function addExpect(): void {
-  updateStep({ expect: [...s.value.expect, { color: { lit: '' }, steps: [] }] })
+  updateStep({ expect: [...s.value.expect, { color: { lit: '' }, click: false, steps: [] }] })
 }
 function removeExpect(i: number): void {
   updateStep({ expect: s.value.expect.filter((_: unknown, j: number) => j !== i) })
 }
 function updateExpectColor(i: number, cell: Cell): void {
   updateStep({ expect: s.value.expect.map((c: unknown, j: number) => (j === i ? { ...(c as object), color: cell } : c)) })
+}
+function setExpectClick(i: number, on: boolean): void {
+  updateStep({ expect: s.value.expect.map((c: unknown, j: number) => (j === i ? { ...(c as object), click: on } : c)) })
 }
 function setTimes(raw: string): void {
   const n = Number(raw)

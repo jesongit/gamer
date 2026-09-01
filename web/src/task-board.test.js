@@ -1,11 +1,12 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
-import TaskScheduler from './views/TaskScheduler.vue'
+import TaskBoard from './components/TaskBoard.vue'
 
 /**
- * TaskScheduler 参数化挂载测试（阶段 5，plan §12.3，mock fetch）：
- * - param_stale 任务：列表「参数已过期」标注 + 立即运行禁用；
+ * TaskBoard（Console 任务页签）参数化挂载测试（阶段 5，plan §12.3，mock fetch）：
+ * - param_stale 任务：列表「参数已过期」标注 + 测试按钮禁用；
+ * - 测试（立即运行）：只消费当前 run_id 响应，并按任务 id 发起请求；
  * - 编辑任务：按脚本 params 渲染表单（快照整体带入覆盖态）+ 过期横幅与三列对比表；
  * - 保存：POST /api/tasks body 携带稀疏 args；409 签名冲突 → 横幅 + 重新确认（reconfirm:true）。
  */
@@ -78,7 +79,7 @@ const baseRoutes = () => [
 
 async function mountView(routes) {
   const calls = stubFetch(routes)
-  const wrapper = mount(TaskScheduler, {
+  const wrapper = mount(TaskBoard, {
     global: { stubs: { RunConflictModal: true, transition: true } },
     attachTo: document.body,
   })
@@ -86,27 +87,27 @@ async function mountView(routes) {
   return { wrapper, calls }
 }
 
-describe('TaskScheduler 列表：param_stale 标注与立即运行禁用', () => {
-  it('过期任务显示「参数已过期」徽标，立即按钮禁用且 title 说明原因', async () => {
+describe('TaskBoard 列表：param_stale 标注与测试按钮禁用', () => {
+  it('过期任务显示「参数已过期」徽标，测试按钮禁用且 title 说明原因', async () => {
     const { wrapper } = await mountView(baseRoutes())
     const rows = wrapper.findAll('tbody tr')
     expect(rows[0].text()).toContain('参数已过期')
-    const runBtn0 = rows[0].findAll('button').find(b => b.text().includes('▶ 立即'))
+    const runBtn0 = rows[0].findAll('button').find(b => b.text().includes('测试'))
     expect(runBtn0.attributes('disabled')).toBeDefined()
     expect(runBtn0.attributes('title')).toContain('过期')
     // 未过期任务不受影响
-    const runBtn1 = rows[1].findAll('button').find(b => b.text().includes('▶ 立即'))
+    const runBtn1 = rows[1].findAll('button').find(b => b.text().includes('测试'))
     expect(runBtn1.attributes('disabled')).toBeUndefined()
   })
 })
 
-describe('TaskScheduler 立即运行契约', () => {
-  it('立即运行只消费当前 run_id 响应，并按任务 id 发起请求', async () => {
+describe('TaskBoard 测试（立即运行）契约', () => {
+  it('测试运行只消费当前 run_id 响应，并按任务 id 发起请求', async () => {
     const routes = baseRoutes()
     routes.push({ method: 'POST', url: '/api/tasks/t2/run', body: { run_id: 'task-run-1', state: 'queued' } })
     const { wrapper, calls } = await mountView(routes)
     const row = wrapper.findAll('tbody tr')[1]
-    await row.findAll('button').find(b => b.text().includes('▶ 立即')).trigger('click')
+    await row.findAll('button').find(b => b.text().includes('测试')).trigger('click')
     await flushPromises()
 
     expect(calls.find(c => c.method === 'POST' && c.url === '/api/tasks/t2/run')).toMatchObject({
@@ -197,12 +198,12 @@ describe('编辑任务：快照带入 + 过期横幅/对比表 + 保存带稀疏
 describe('新建任务：选脚本渲染空表单，保存提交稀疏 args', () => {
   it('无快照：默认值字段不进 args；必填缺失校验阻断', async () => {
     const calls = stubFetch(baseRoutes())
-    const wrapper = mount(TaskScheduler, {
+    const wrapper = mount(TaskBoard, {
       global: { stubs: { RunConflictModal: true } },
       attachTo: document.body,
     })
     await flushPromises()
-    await wrapper.findAll('.page-head .btn').find(b => b.text().includes('新建任务')).trigger('click')
+    await wrapper.findAll('button').find(b => b.text().includes('新建任务')).trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-testid="params-form"]').exists()).toBe(true)
     // 名称必填：填入后再保存

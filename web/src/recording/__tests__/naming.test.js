@@ -32,21 +32,23 @@ describe('recording/naming：defaultShortName', () => {
 })
 
 describe('recording/naming：isValidShortName', () => {
-  it('合法：字母数字下划线连字符 + .png', () => {
+  it('合法：字母数字下划线连字符 + .png（中文名与服务端同口径合法）', () => {
     expect(isValidShortName('record_click_20260829_001.png')).toBe(true)
     expect(isValidShortName('A-Z_a-z_0-9.png')).toBe(true)
     expect(isValidShortName('login.png')).toBe(true)
+    expect(isValidShortName('账号.png')).toBe(true)
+    expect(isValidShortName('委托界面_2.png')).toBe(true)
   })
 
-  it('非法：空名/缺扩展名/其他扩展名/路径/#/空格/点/中文', () => {
+  it('非法：空名/缺扩展名/其他扩展名/路径/#/空格/点', () => {
     expect(isValidShortName('')).toBe(false)
     expect(isValidShortName('record')).toBe(false)
     expect(isValidShortName('record.jpg')).toBe(false)
     expect(isValidShortName('record.PNG')).toBe(false) // 大写扩展名不允许，短名小写约定
     expect(isValidShortName('re#50_50_100_100.png')).toBe(false) // # 是服务端元数据分隔符
+    expect(isValidShortName('委#托.png')).toBe(false)
     expect(isValidShortName('re cord.png')).toBe(false)
     expect(isValidShortName('re.cord.png')).toBe(false)
-    expect(isValidShortName('账号.png')).toBe(false)
     expect(isValidShortName('.png')).toBe(false)
     expect(isValidShortName(null)).toBe(false)
     expect(isValidShortName(123)).toBe(false)

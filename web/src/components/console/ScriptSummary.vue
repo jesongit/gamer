@@ -13,13 +13,13 @@
         <span class="icon" :title="row.meta.hint">{{ row.meta.icon }}</span>
         <span class="label">{{ row.meta.label }}</span>
         <span class="summary mono">{{ row.summary }}</span>
-        <span v-if="row.target" class="row-ops">
+        <span v-if="row.target && !readonly" class="row-ops">
           <button class="mini-btn link" type="button" :title="row.kind === 'call' ? '打开子脚本' : '打开函数定义'" @click.stop="emit('open-target', { kind: row.kind, target: row.target })">↗ {{ row.kind === 'call' ? '子脚本' : '函数' }}</button>
         </span>
-        <button class="mini-btn run" type="button" title="从此步骤运行（顶层）" @click.stop="emit('run-from', row.uuid)">▶ 从此运行</button>
+        <button v-if="!readonly" class="mini-btn run" type="button" title="从此步骤运行（顶层）" @click.stop="emit('run-from', row.uuid)">▶ 从此运行</button>
       </div>
     </div>
-    <div class="run-hint">▶ 从此运行：直接从该步骤开始运行（顶部「运行」按钮从头跑）。call/func 卡片可打开目标。</div>
+    <div v-if="!readonly" class="run-hint">▶ 从此运行：直接从该步骤开始运行（顶部「运行脚本」按钮从头跑）。call/func 卡片可打开目标。</div>
   </div>
 </template>
 
@@ -36,6 +36,8 @@ import { KIND_META, stepSummary } from '../../script-editor/components/kinds'
 
 const props = defineProps({
   model: { type: Object, default: null }, // ScriptModel（已分配 uuid；解析失败时可能为空壳）
+  /** 资源预览模式：只显示步骤，不提供运行或跳转操作。 */
+  readonly: { type: Boolean, default: false },
   /** 解析失败等摘要不可用原因（显示在空态，替代旧源码视图的报错入口）。 */
   error: { type: String, default: '' },
 })
