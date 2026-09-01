@@ -1,4 +1,4 @@
-//! 模板匹配引擎：灰度 + 归一化互相关（NCC）滑动窗口
+//! 模板匹配引擎：灰度 + 归一化互相关（NCC）滑动窗口，可选颜色复核
 //!
 //! 性能策略：截图先等比缩放到 ≤540px 宽（模板同比例），步长采样 + rayon 并行，
 //! 1080p 全图 + 小模板典型耗时 100~400ms；支持搜索区域裁剪进一步加速。
@@ -41,12 +41,16 @@ pub struct MatchRequest {
     pub threshold: Option<f32>,
     /// 搜索区域（原始截图坐标系，None = 全图）
     pub region: Option<[u32; 4]>,
+    /// 是否对文件名 `#1` 标记的彩色模板执行命中后颜色复核。
+    /// 该字段由调用方根据实际模板文件名推导，不是脚本 YAML 参数。
+    pub color: bool,
 }
 
 /// 从模板实际文件名解析引擎使用的搜索区域。
 ///
 /// 模板没有 `#` 后缀时返回 `None`（全屏）；`#a` 也代表全屏。
-/// `#u/#d/...` 是半区，四段数字是相对坐标乘 1000 后的矩形。
+/// `#u/#d/...` 是半区，四段数字是相对坐标乘 1000 后的矩形；末尾 `#1`
+/// 是彩色模板标记，不参与区域解析。
 /// 编辑器的单次匹配预览与脚本引擎共用此实现，避免两套区域语义漂移。
 pub fn template_region_from_name(template: &str, w: u32, h: u32) -> Option<[u32; 4]> {
     let lower = template.to_ascii_lowercase();
@@ -57,6 +61,7 @@ pub fn template_region_from_name(template: &str, w: u32, h: u32) -> Option<[u32;
     } else {
         template
     };
+    let stem = stem.strip_suffix("#1").unwrap_or(stem);
     let idx = stem.rfind('#')?;
     let suffix = stem[idx + 1..].trim().to_ascii_lowercase();
     if suffix.is_empty() {
@@ -98,6 +103,22 @@ pub fn template_region_from_name(template: &str, w: u32, h: u32) -> Option<[u32;
         }
     };
     Some(half)
+}
+
+/// 文件名末尾精确为 `#1` 时表示模板保留了颜色信息。
+pub fn template_color_from_name(template: &str) -> bool {
+    template_stem(template).ends_with("#1")
+}
+
+fn template_stem(template: &str) -> &str {
+    let lower = template.to_ascii_lowercase();
+    if lower.ends_with(".jpeg") {
+        &template[..template.len() - 5]
+    } else if lower.ends_with(".png") || lower.ends_with(".jpg") {
+        &template[..template.len() - 4]
+    } else {
+        template
+    }
 }
 
 /// 模板预处理结果：缓存 PNG 解码后的灰度矩阵、f32 数据和 NCC 统计量。
@@ -762,6 +783,7 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
         &screen,
         req.threshold,
         req.region,
+        req.color,
         template_key,
         template_source,
         None,
@@ -787,6 +809,12 @@ pub fn match_template_from_path(
         &screen,
         threshold,
         region,
+        template_color_from_name(
+            template_path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or_default(),
+        ),
         template_key,
         template_source,
         Some(&path_key),
@@ -798,6 +826,7 @@ fn match_template_with_source(
     screen: &image::RgbImage,
     threshold: Option<f32>,
     region: Option<[u32; 4]>,
+    color: bool,
     template_key: [u8; 32],
     template_source: Arc<DynamicImage>,
     path_key: Option<&TemplatePathKey>,
@@ -939,8 +968,26 @@ fn match_template_with_source(
         }
     }
 
+    let color_ok = if color && prepared_color_capable(&template_source) {
+        let screen_rgb = screen_small.to_rgb8();
+        let template_rgb = if scale < 1.0 {
+            DynamicImage::ImageRgb8(template_source.to_rgb8())
+                .resize(tw2, th2, image::imageops::FilterType::Triangle)
+                .to_rgb8()
+        } else {
+            template_source.to_rgb8()
+        };
+        color_matches_at(
+            &screen_rgb,
+            &template_rgb,
+            best_pos.0 as u32,
+            best_pos.1 as u32,
+        )
+    } else {
+        true
+    };
     let threshold = threshold.unwrap_or(0.8);
-    let result = if best_score < threshold {
+    let result = if best_score < threshold || !color_ok {
         None
     } else {
         // 映射回原始坐标系
@@ -1015,31 +1062,110 @@ fn to_gray(img: &DynamicImage) -> GrayImage {
     }
 }
 
-/// 模板落盘重编码：任意图片字节 → 8-bit 灰度 PNG（最高压缩 + 自适应滤波）。
-///
-/// 匹配只消费灰度（match_template 内统一 to_luma8），存灰度 = 存匹配器
-/// 实际读取的像素值——对匹配**零损失**（区域匹配逐位一致；全图缩放路径
-/// 仅存在 ±1 灰度级的滤波舍入差，对 NCC 分数影响 <0.001），体积较
-/// RGB PNG（尤其画布直出 PNG）典型下降 60~75%。缩略图/预览变灰是
-/// 已知取舍：颜色信息匹配从不使用（选型依据：灰度图上 WebP 无损相对
-/// PNG 无优势，无需引入新解码依赖）。JPEG 上传模板顺带摆脱再压缩损伤。
+/// 只有 RGB/RGBA 模板才有可供复核的颜色信息；旧灰度模板即使文件名被
+/// 手工改成 `#1`，也不会凭空制造颜色约束。
+fn prepared_color_capable(img: &DynamicImage) -> bool {
+    img.color().channel_count() >= 3
+}
+
+/// 命中位置的轻量颜色复核：只比较模板矩形内的色相/饱和度，不重新跑 RGB NCC。
+/// 低饱和度像素不参与，避免白色/灰色背景主导结果；两边一边有颜色、一边无颜色
+/// 时直接视为不一致，因此红色图标不会再被黑色图标通过。
+fn color_matches_at(
+    screen: &image::RgbImage,
+    template: &image::RgbImage,
+    x0: u32,
+    y0: u32,
+) -> bool {
+    let (tw, th) = template.dimensions();
+    if x0.saturating_add(tw) > screen.width() || y0.saturating_add(th) > screen.height() {
+        return false;
+    }
+    let pixels = (tw as usize).saturating_mul(th as usize);
+    let stride = if pixels > 16_384 {
+        ((pixels as f32 / 16_384.0).sqrt().ceil() as usize).max(1)
+    } else {
+        1
+    };
+    const SAT_MIN: f32 = 0.12;
+    const HUE_TOLERANCE: f32 = 0.10; // 36°，吸收压缩和抗锯齿扰动
+    const SAT_TOLERANCE: f32 = 0.38;
+    let mut considered = 0usize;
+    let mut matched = 0usize;
+    for y in (0..th as usize).step_by(stride) {
+        for x in (0..tw as usize).step_by(stride) {
+            let (thue, ts) = rgb_hue_saturation(template.get_pixel(x as u32, y as u32).0);
+            let (shue, ss) = rgb_hue_saturation(screen.get_pixel(x0 + x as u32, y0 + y as u32).0);
+            if ts < SAT_MIN && ss < SAT_MIN {
+                continue;
+            }
+            considered += 1;
+            if ts >= SAT_MIN && ss >= SAT_MIN {
+                let hue_delta = (thue - shue).abs().min(1.0 - (thue - shue).abs());
+                if hue_delta <= HUE_TOLERANCE && (ts - ss).abs() <= SAT_TOLERANCE {
+                    matched += 1;
+                }
+            }
+        }
+    }
+    considered == 0 || (matched as f32 / considered as f32) >= 0.75
+}
+
+/// 返回归一化色相 [0,1) 与饱和度 [0,1]。
+fn rgb_hue_saturation([r, g, b]: [u8; 3]) -> (f32, f32) {
+    let r = r as f32 / 255.0;
+    let g = g as f32 / 255.0;
+    let b = b as f32 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    if delta < f32::EPSILON || max < f32::EPSILON {
+        return (0.0, 0.0);
+    }
+    let mut hue = if (max - r).abs() < f32::EPSILON {
+        (g - b) / delta
+    } else if (max - g).abs() < f32::EPSILON {
+        2.0 + (b - r) / delta
+    } else {
+        4.0 + (r - g) / delta
+    };
+    hue /= 6.0;
+    if hue < 0.0 {
+        hue += 1.0;
+    }
+    (hue, delta / max)
+}
+
+/// 模板落盘重编码：任意图片字节 → PNG（最高压缩 + 自适应滤波）。
+/// `grayscale_only=true` 时转为 8-bit 灰度；否则保留 RGB/RGBA 颜色信息，
+/// 匹配仍默认只消费灰度，只有文件名带 `#1` 时才做颜色复核。
 ///
 /// 资源防护（阶段 2 SEC-004）：解码前字节数预检 + image crate 解码限额
 /// （单边尺寸/总分配）+ 解码后像素总量复核——三层挡"像素炸弹"
 /// （小体积声明超大分辨率，数十倍放大内存占用）。超限报清晰 4xx 文案。
-pub fn reencode_template_gray_png(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+pub fn reencode_template_png(bytes: &[u8], grayscale_only: bool) -> anyhow::Result<Vec<u8>> {
     let img = decode_image_limited(bytes, TEMPLATE_MAX_INPUT_BYTES, "图片")?;
-    let gray = img.to_luma8();
+    let normalized = if grayscale_only {
+        DynamicImage::ImageLuma8(img.to_luma8())
+    } else {
+        img
+    };
     let mut out = Vec::new();
     let enc = image::codecs::png::PngEncoder::new_with_quality(
         &mut out,
         image::codecs::png::CompressionType::Best,
         image::codecs::png::FilterType::Adaptive,
     );
-    DynamicImage::ImageLuma8(gray)
+    normalized
         .write_with_encoder(enc)
         .map_err(|e| anyhow::anyhow!("PNG 编码失败: {}", e))?;
     Ok(out)
+}
+
+/// 兼容旧调用方/测试：显式生成灰度模板。
+#[allow(dead_code)]
+pub fn reencode_template_gray_png(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    reencode_template_png(bytes, true)
 }
 
 /// 在所有图片解码入口统一执行字节数、单边尺寸、解码分配和像素总量限制。
@@ -1539,6 +1665,7 @@ mod tests {
             template_png: oversized_template,
             threshold: None,
             region: None,
+            color: false,
         })
         .unwrap_err();
         assert!(err.to_string().contains("模板"), "{}", err);
@@ -1548,6 +1675,7 @@ mod tests {
             template_png: screen_png,
             threshold: None,
             region: None,
+            color: false,
         })
         .unwrap_err();
         assert!(err.to_string().contains("截图"), "{}", err);
@@ -1598,11 +1726,86 @@ mod tests {
             template_png: tpl_bytes,
             threshold: Some(0.9),
             region: None,
+            color: false,
         };
         let m = match_template(&req).unwrap().expect("should hit");
         assert!((m.x as i64 - 140).abs() <= 2, "x={}", m.x);
         assert!((m.y as i64 - 190).abs() <= 2, "y={}", m.y);
         assert!(m.score > 0.9, "score={}", m.score);
+    }
+
+    #[test]
+    fn color_marked_template_rejects_same_shape_with_different_color() {
+        let _lock = TEST_GUARD.lock().unwrap();
+        let mut screen = RgbImage::new(200, 200);
+        for (_, _, p) in screen.enumerate_pixels_mut() {
+            *p = Rgb([40, 40, 40]);
+        }
+        for y in 70..130 {
+            for x in 80..120 {
+                screen.put_pixel(x, y, Rgb([220, 30, 40]));
+            }
+        }
+        let mut tpl = RgbImage::new(50, 50);
+        for y in 0..50 {
+            for x in 0..50 {
+                tpl.put_pixel(x, y, *screen.get_pixel(75 + x, 65 + y));
+            }
+        }
+
+        let same = match_template(&MatchRequest {
+            screen_png: encode_png(&screen),
+            template_png: encode_png(&tpl),
+            threshold: Some(0.9),
+            region: None,
+            color: true,
+        })
+        .unwrap();
+        assert!(same.is_some(), "same color should hit");
+
+        let mut different_color_screen = screen.clone();
+        for y in 70..130 {
+            for x in 80..120 {
+                // 与红色区域保持接近的灰度亮度，但色相不同，确保旧 NCC 仍会命中。
+                different_color_screen.put_pixel(x, y, Rgb([30, 125, 30]));
+            }
+        }
+        let gray_hit = match_template(&MatchRequest {
+            screen_png: encode_png(&different_color_screen),
+            template_png: encode_png(&tpl),
+            threshold: Some(0.9),
+            region: None,
+            color: false,
+        })
+        .unwrap();
+        assert!(
+            gray_hit.is_some(),
+            "grayscale matching should retain the old behavior"
+        );
+
+        let color_hit = match_template(&MatchRequest {
+            screen_png: encode_png(&different_color_screen),
+            template_png: encode_png(&tpl),
+            threshold: Some(0.9),
+            region: None,
+            color: true,
+        })
+        .unwrap();
+        assert!(
+            color_hit.is_none(),
+            "color-marked template must reject a different color"
+        );
+    }
+
+    #[test]
+    fn template_name_color_marker_is_not_a_region_suffix() {
+        assert!(template_color_from_name("test#100_200_800_900#1.png"));
+        assert!(!template_color_from_name("test#100_200_800_900.png"));
+        assert_eq!(
+            template_region_from_name("test#100_200_800_900#1.png", 1000, 1000),
+            Some([100, 200, 700, 700])
+        );
+        assert!(template_region_from_name("test#1.png", 1000, 1000).is_none());
     }
 
     #[test]
@@ -1625,6 +1828,19 @@ mod tests {
     }
 
     #[test]
+    fn color_template_reencode_preserves_rgb_channels() {
+        let mut tpl = RgbImage::new(4, 3);
+        for (x, y, p) in tpl.enumerate_pixels_mut() {
+            *p = Rgb([(x * 40) as u8, (y * 60) as u8, 180]);
+        }
+        let src = encode_png(&tpl);
+        let out = reencode_template_png(&src, false).unwrap();
+        let got = image::load_from_memory(&out).unwrap().to_rgb8();
+        assert_eq!(got.dimensions(), tpl.dimensions());
+        assert_eq!(got.into_raw(), tpl.into_raw());
+    }
+
+    #[test]
     fn test_template_match_miss() {
         let _lock = TEST_GUARD.lock().unwrap();
         let mut screen = RgbImage::new(200, 200);
@@ -1644,6 +1860,7 @@ mod tests {
             template_png: tpl_bytes,
             threshold: Some(0.9),
             region: None,
+            color: false,
         };
         assert!(match_template(&req).unwrap().is_none());
     }
@@ -1700,6 +1917,7 @@ mod tests {
             template_png: encode_luma_png(&tpl),
             threshold: Some(0.9),
             region: None,
+            color: false,
         };
         assert!(match_template(&hit_req).unwrap().is_some());
 
@@ -1713,6 +1931,7 @@ mod tests {
             template_png: encode_luma_png(&miss_tpl),
             threshold: Some(0.99),
             region: None,
+            color: false,
         };
         assert!(match_template(&miss_req).unwrap().is_none());
 
@@ -1721,6 +1940,7 @@ mod tests {
             template_png: encode_luma_png(&tpl),
             threshold: Some(0.9),
             region: Some([42, 38, 44, 44]),
+            color: false,
         };
         assert!(match_template(&region_req).unwrap().is_some());
 
@@ -1772,6 +1992,7 @@ mod tests {
             template_png: encode_png(&tpl),
             threshold: Some(0.9),
             region: None,
+            color: false,
         };
         assert!(match_template(&hit_req).unwrap().is_some(), "全屏应命中");
 
@@ -1785,6 +2006,7 @@ mod tests {
             template_png: encode_png(&miss_tpl),
             threshold: Some(0.99),
             region: None,
+            color: false,
         };
         assert!(match_template(&miss_req).unwrap().is_none(), "应未命中");
 
@@ -1794,6 +2016,7 @@ mod tests {
             template_png: encode_png(&tpl),
             threshold: Some(0.9),
             region: Some([100, 90, 220, 180]),
+            color: false,
         };
         assert!(match_template(&region_req).unwrap().is_some(), "区域应命中");
 
@@ -2049,6 +2272,7 @@ mod tests {
                 template_png: template.to_vec(),
                 threshold: Some(0.8),
                 region,
+                color: false,
             })
         };
         // 后续循环含 await，std MutexGuard 不能跨 await（clippy await_holding_lock）；

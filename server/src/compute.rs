@@ -174,6 +174,7 @@ mod tests {
             template_png: encode(&tpl),
             threshold: Some(0.9),
             region: None,
+            color: false,
         };
         let direct = crate::matcher::match_template(&req)
             .unwrap()

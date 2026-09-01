@@ -4,10 +4,11 @@
 //! → 严格解析（script_v2）→ 参数绑定（params::merge_args）→ AST 步骤执行。
 //!
 //! 语义要点（docs/SCRIPT_EDITOR_CONTRACT.md + plan §7/§12.2/§13.3）：
-//! - `find`：主模板 + block 有序障碍轮询；命中恒点中心；verify 两击；then/else。
-//! - `match`：每轮只截一帧按序匹配全部候选（不点击）；首个命中执行其子流程；
+//! - `find`：主模板 + block 有序障碍轮询；命中恒点中心；每次点击后等待 interval；verify 两击；then/else。
+//! - `match`：每轮只截一帧按序匹配全部候选；首个命中执行其子流程，候选可选点击；
 //!   无 timeout 单轮、有 timeout 按 config.interval 轮询；绑定后候选重复先报错。
 //! - `color`：单点按序判色（容差 30/通道），命中即执行该色值分支并结束。
+//! - 所有脚本点击（tap、find、match/color 的候选级点击）完成后统一等待 config.interval。
 //! - 判断命中后延迟：find/match/color 命中路径在执行后续分支前统一插入
 //!   judge_delay（config.toml judge_delay_ms，默认 200ms，0=关）；else/超时不延迟。
 //! - `if`：仅布尔（无隐式转换）；`loop`：times 0/缺省=无限，`break` 跳出最近一层循环
@@ -580,6 +581,21 @@ impl<'a> Ctx<'a> {
         self.stopped() || self.thrown() || self.returning()
     }
 
+    /// 当前步骤列表停止继续执行的原因，供 debug 轨迹说明被跳过的后续步骤。
+    fn halt_reason(&self) -> &'static str {
+        if self.stopped() {
+            "停止信号"
+        } else if self.thrown() {
+            "throw"
+        } else if self.returning() {
+            "return"
+        } else if self.breaking() {
+            "break"
+        } else {
+            "未知原因"
+        }
+    }
+
     fn log(&mut self, level: &str, msg: String) {
         let Some(rank) = level_rank(level) else {
             return;
@@ -654,6 +670,10 @@ impl Runner {
     async fn run_steps(&self, ctx: &mut Ctx<'_>, steps: &[Step]) -> anyhow::Result<()> {
         for step in steps {
             if ctx.aborted() || ctx.breaking() {
+                ctx.log(
+                    "debug",
+                    format!("步骤列表提前结束：{}，后续步骤未执行", ctx.halt_reason()),
+                );
                 break;
             }
             self.exec_step(ctx, step).await?;
@@ -664,6 +684,10 @@ impl Runner {
     #[async_recursion]
     async fn exec_step(&self, ctx: &mut Ctx<'_>, step: &Step) -> anyhow::Result<()> {
         if ctx.aborted() {
+            ctx.log(
+                "debug",
+                format!("跳过步骤 {}：{}", step.kind(), ctx.halt_reason()),
+            );
             return Ok(());
         }
         // 10 万步防死循环 guard（含嵌套子步骤与循环体）
@@ -671,6 +695,10 @@ impl Runner {
         if ctx.steps_run > STEP_BUDGET {
             anyhow::bail!("runtime.step.limit：已执行 {STEP_BUDGET} 步，疑似死循环，强制终止");
         }
+        ctx.log(
+            "debug",
+            format!("执行步骤 #{}：{}", ctx.steps_run, step.kind()),
+        );
         match step {
             Step::StrApp => self.exec_str_app(ctx).await?,
             Step::ClsApp => self.exec_cls_app(ctx).await?,
@@ -687,7 +715,7 @@ impl Runner {
                     format!("点击坐标 ({:.3}, {:.3}) → 像素 ({x}, {y})", rx, ry),
                 );
                 self.emit(&ctx.device_id, ScriptEvent::Tap { x, y }).await;
-                self.ctl.tap(&ctx.device_id, x as f32, y as f32).await?;
+                self.tap_and_wait_interval(ctx, x as f32, y as f32).await?;
             }
             Step::Swipe { from, to, time } => {
                 let [rx1, ry1] = self.coord_value(ctx, from, "swipe.from")?;
@@ -720,6 +748,7 @@ impl Runner {
                         duration,
                     )
                     .await?;
+                ctx.log("debug", "滑动完成".to_string());
             }
             Step::Key { key } => {
                 let key = self.text_value(ctx, key, "key", ParamType::Key)?;
@@ -784,8 +813,14 @@ impl Runner {
             Step::If { cond, then, r#else } => {
                 let value = self.typed_value(ctx, cond, "if.cond")?;
                 match value {
-                    TypedValue::Bool(true) => self.run_steps(ctx, then).await?,
-                    TypedValue::Bool(false) => self.run_steps(ctx, r#else).await?,
+                    TypedValue::Bool(true) => {
+                        ctx.log("debug", "if 条件为 true，执行 then 分支".to_string());
+                        self.run_steps(ctx, then).await?;
+                    }
+                    TypedValue::Bool(false) => {
+                        ctx.log("debug", "if 条件为 false，执行 else 分支".to_string());
+                        self.run_steps(ctx, r#else).await?;
+                    }
                     other => anyhow::bail!(
                         "if 条件需要布尔值，得到 {:?}（无隐式转换）",
                         other.param_type().as_str()
@@ -793,24 +828,32 @@ impl Runner {
                 }
             }
             Step::Loop { times, steps } => {
+                let limit = if *times == 0 {
+                    "无限".to_string()
+                } else {
+                    times.to_string()
+                };
+                ctx.log("debug", format!("循环开始：次数 {limit}"));
                 let mut n: u64 = 0;
-                loop {
+                let reason = loop {
                     if *times > 0 && n >= *times {
-                        break;
+                        break "达到设定次数".to_string();
                     }
                     if ctx.aborted() {
-                        break;
+                        break format!("{}中止", ctx.halt_reason());
                     }
                     ctx.log("debug", format!("循环第 {} 次", n + 1));
+                    n += 1;
                     self.run_steps(ctx, steps).await?;
                     if ctx.breaking() {
                         ctx.break_loop = false;
-                        break;
+                        break "break".to_string();
                     }
-                    n += 1;
-                }
+                };
+                ctx.log("debug", format!("循环结束：已执行 {n} 次，原因：{reason}"));
             }
             Step::Break => {
+                ctx.log("debug", "break：请求跳出最近一层循环".to_string());
                 ctx.break_loop = true;
             }
             Step::Call { target, args } => {
@@ -823,6 +866,11 @@ impl Runner {
                 r#else,
             } => {
                 let ret = self.exec_func(ctx, target, args).await?;
+                let branch = if ret { "then" } else { "else" };
+                ctx.log(
+                    "debug",
+                    format!("函数 {target} 返回 {ret}，执行 {branch} 分支"),
+                );
                 self.run_steps(ctx, if ret { then } else { r#else }).await?;
             }
             Step::Throw { message } => {
@@ -861,6 +909,7 @@ impl Runner {
         self.ctl
             .start_app(&ctx.device_id, &format!("+{pkg}"))
             .await?;
+        ctx.log("debug", format!("冷启动应用完成 {pkg}"));
         Ok(())
     }
 
@@ -879,6 +928,7 @@ impl Runner {
                 Duration::from_secs(8),
             )
             .await?;
+        ctx.log("debug", format!("关闭应用完成 {pkg}"));
         Ok(())
     }
 
@@ -952,8 +1002,8 @@ impl Runner {
     // ---- find ----------------------------------------------------------------
 
     /// find：超时时间内轮询等主模板出现并点击。每轮：主模板（新截图）命中 →
-    /// 点击中心 → verify（true = 等 interval 重匹配，仍命中补一击，共两击）→
-    /// then 结束；未命中 → block 依序匹配（命中即点击中心并结束本轮）→
+    /// 点击中心并等 interval → verify（true = 重匹配，仍命中补一击，补点后也等 interval）→
+    /// then 结束；未命中 → block 依序匹配（命中即点击中心并等 interval，结束本轮）→
     /// 全未命中等 interval 重开一轮；超时 → else。命中路径在 then 前插入
     /// judge_delay（config.toml judge_delay_ms，默认 200ms，0=关；then 空不等待）。
     #[allow(clippy::too_many_arguments)]
@@ -1057,7 +1107,6 @@ impl Runner {
                 );
                 self.click_center(ctx, &mm).await?;
                 if verify {
-                    self.sleep_interruptible(ctx, ctx.config.interval).await;
                     let recheck = match self.shot(ctx).await {
                         Ok(scr) => self.match_screen_one(ctx, &template, scr).await,
                         Err(e) => {
@@ -1094,13 +1143,16 @@ impl Runner {
                     }
                 }
                 if !then.is_empty() {
-                    // 命中路径：点击/verify 后、then 前固定间隔（config.toml judge_delay_ms）
+                    // 命中路径：点击后的 interval（以及 verify 补点后的 interval）已在点击辅助中等待；
+                    // 此处再追加 config.toml judge_delay_ms 后执行 then。
                     self.judge_delay(ctx).await;
                 }
                 self.run_steps(ctx, then).await?;
                 break;
             }
-            // 主模板未命中 → block 依序（命中即点击其中心并结束本轮）
+            // 主模板未命中 → block 依序（命中即点击其中心、等待 interval 并结束本轮）
+            let mut missed = vec![template.clone()];
+            let mut block_clicked = false;
             for b in &blocks {
                 if ctx.stopped() {
                     break;
@@ -1110,6 +1162,7 @@ impl Runner {
                     Err(_) => None, // 截图瞬态失败按本轮 block 未出现处理
                 };
                 if let Some(mm) = found {
+                    ctx.log("debug", format!("find 未命中：{}", missed.join("、")));
                     self.emit(
                         &ctx.device_id,
                         ScriptEvent::Hit {
@@ -1127,13 +1180,19 @@ impl Runner {
                         format!("障碍模板 {b} 出现，点击关闭 @ ({}, {})", mm.x, mm.y),
                     );
                     self.click_center(ctx, &mm).await?;
+                    block_clicked = true;
                     break;
+                } else {
+                    missed.push(b.clone());
                 }
             }
             if ctx.aborted() {
                 break;
             }
-            self.sleep_interruptible(ctx, ctx.config.interval).await;
+            if !block_clicked {
+                ctx.log("debug", format!("find 未命中：{}", missed.join("、")));
+                self.sleep_interruptible(ctx, ctx.config.interval).await;
+            }
         }
         Ok(())
     }
@@ -1141,10 +1200,11 @@ impl Runner {
     // ---- match ---------------------------------------------------------------
 
     /// match：每轮只截一帧，候选按书写顺序匹配；首个命中执行其分支并结束本步；
-    /// 候选 `click: true` 命中后先点匹配框中心（与 find 同语义）再进分支。
+    /// 候选 `click: true` 命中后先点匹配框中心并等待 interval（与 find 同语义）再进分支。
     /// 未配 timeout 只执行一轮（全未命中立即进 else），
-    /// 配了按 config.interval 轮询到超时才进 else。命中分支前插入 judge_delay
-    /// （config.toml judge_delay_ms，默认 200ms，0=关；分支空不等待，else 不延迟）。
+    /// 配了按 config.interval 轮询到超时才进 else。候选点击后等待 config.interval；
+    /// 命中分支前另插入 judge_delay（config.toml judge_delay_ms，默认 200ms，0=关；
+    /// 分支空不追加 judge_delay，else 不延迟）。
     /// 参数绑定后候选实际重复 → 截图前报错（$ref 值静态校验无法覆盖）。
     async fn exec_match(
         &self,
@@ -1181,6 +1241,7 @@ impl Runner {
             // 本轮唯一一帧：全部候选复用同一张截图
             let screen = self.shot(ctx).await?;
             let mut matched = false;
+            let mut missed = Vec::new();
             for (name, cand) in names.iter().zip(candidates.iter()) {
                 match self.match_screen_one(ctx, name, screen.clone()).await? {
                     Some(mm) => {
@@ -1209,8 +1270,19 @@ impl Runner {
                         matched = true;
                         break;
                     }
-                    None => continue, // Miss 事件在 match_screen_one 内统一推送
+                    None => {
+                        missed.push(name.as_str());
+                        continue;
+                    } // Miss 事件在 match_screen_one 内统一推送
                 }
+            }
+            if !matched {
+                ctx.log("debug", format!("match 未命中：{}", missed.join("、")));
+            } else if !missed.is_empty() {
+                ctx.log(
+                    "debug",
+                    format!("match 前置候选未命中：{}", missed.join("、")),
+                );
             }
             if matched || timeout_ms.is_none() {
                 if !matched {
@@ -1268,9 +1340,10 @@ impl Runner {
 
     /// color：单点坐标一次截图按序判色（容差 30/通道），命中即执行该色值
     /// 分支并结束本步；全未命中走 else。不轮询（重试套 loop）；分支
-    /// `click: true` 命中后先点取样点再进分支。
-    /// 命中分支前插入 judge_delay（config.toml judge_delay_ms，默认 200ms，
-    /// 0=关；分支空不等待，else 不延迟）。
+    /// `click: true` 命中后先点取样点并等待 interval 再进分支。
+    /// 候选点击后等待 config.interval；命中分支前另插入 judge_delay
+    /// （config.toml judge_delay_ms，默认 200ms，0=关；分支空不追加 judge_delay，
+    /// else 不延迟）。
     async fn exec_color(
         &self,
         ctx: &mut Ctx<'_>,
@@ -1398,6 +1471,10 @@ impl Runner {
         ctx.log("debug", format!("调用脚本 {target}"));
         self.enter_frame(ctx, script.config.as_ref(), bound.into_iter().collect())?;
         let result = self.run_steps(ctx, &script.steps).await;
+        match &result {
+            Ok(()) => ctx.log("debug", format!("脚本 {target} 执行结束")),
+            Err(e) => ctx.log("error", format!("脚本 {target} 执行失败：{e:#}")),
+        }
         ctx.leave_frame();
         result
     }
@@ -1427,6 +1504,11 @@ impl Runner {
         ctx.log("debug", format!("调用函数 {target}"));
         self.enter_frame(ctx, None, bound.into_iter().collect())?;
         let result = self.run_steps(ctx, &decl.steps).await;
+        let returned = ctx.return_value.unwrap_or(true);
+        match &result {
+            Ok(()) => ctx.log("debug", format!("函数 {target} 执行结束，返回 {returned}")),
+            Err(e) => ctx.log("error", format!("函数 {target} 执行失败：{e:#}")),
+        }
         let ret = ctx.leave_frame();
         // leave_frame 返回 return_value；错误仍向上传播
         result?;
@@ -1533,7 +1615,7 @@ impl Runner {
     }
 
     /// 匹配单个模板一次（复用给定截图，不取新帧）：模板路径经 ScriptStore
-    /// 分区寻址 + 短名消歧；区域由解析出的实际文件名 # 后缀决定（无后缀回退
+    /// 分区寻址 + 短名消歧；区域和颜色由解析出的实际文件名 # 后缀决定（无后缀回退
     /// 全屏并记一条日志提醒，每运行每模板一条）。未命中推送 Miss 事件。
     async fn match_screen_one(
         &self,
@@ -1554,6 +1636,7 @@ impl Runner {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| template.to_string());
         let region = matcher::template_region_from_name(&file_name, w, h);
+        let color = matcher::template_color_from_name(&file_name);
         if region.is_none()
             && !file_name.contains('#')
             && ctx.region_warned.insert(file_name.clone())
@@ -1567,7 +1650,7 @@ impl Runner {
         }
         let mm = self
             .matcher
-            .match_template(screen, template, path, ctx.config.threshold, region)
+            .match_template(screen, template, path, ctx.config.threshold, region, color)
             .await?;
         if mm.is_none() {
             let [x, y, rw, rh] = region.unwrap_or([0, 0, w, h]);
@@ -1586,7 +1669,7 @@ impl Runner {
         Ok(mm)
     }
 
-    /// 点击命中模板的中心（find 主模板与 block 障碍模板共用）。
+    /// 点击命中模板的中心（find 主模板与 block 障碍模板共用），点击完成后等待 interval。
     /// 会话判空在日志/事件之前（保序：未连接时不产生点击日志与 Tap 事件）
     async fn click_center(
         &self,
@@ -1600,7 +1683,23 @@ impl Runner {
         ctx.log("debug", format!("点击模板中心 @ ({cx}, {cy})"));
         self.emit(&ctx.device_id, ScriptEvent::Tap { x: cx, y: cy })
             .await;
-        self.ctl.tap(&ctx.device_id, cx as f32, cy as f32).await?;
+        self.tap_and_wait_interval(ctx, cx as f32, cy as f32)
+            .await?;
+        Ok(())
+    }
+
+    /// 执行一次脚本点击，并在点击成功后等待当前生效的 config.interval。
+    /// 统一覆盖显式 tap、find 点击和 match/color 候选级点击；点击失败时不等待。
+    async fn tap_and_wait_interval(&self, ctx: &mut Ctx<'_>, x: f32, y: f32) -> anyhow::Result<()> {
+        self.ctl.tap(&ctx.device_id, x, y).await?;
+        ctx.log(
+            "debug",
+            format!(
+                "点击完成，等待 {}ms 后继续",
+                ctx.config.interval.as_millis()
+            ),
+        );
+        self.sleep_interruptible(ctx, ctx.config.interval).await;
         Ok(())
     }
 
@@ -1843,6 +1942,7 @@ mod tests {
             _path: std::path::PathBuf,
             _threshold: f32,
             _region: Option<[u32; 4]>,
+            _color: bool,
         ) -> BoxFuture<'_, anyhow::Result<Option<matcher::MatchResult>>> {
             self.calls.lock().unwrap().push(template.to_string());
             let hit = self.hits.get(template).copied();
@@ -1996,8 +2096,26 @@ mod tests {
         assert_eq!(r.shots.count(), 1);
     }
 
+    /// 显式 tap 完成后，下一步执行前必须等待脚本生效的 interval。
+    #[tokio::test]
+    async fn tap_waits_for_interval_before_following_step() {
+        let r = rig(HashMap::new(), solid_png(100, 100, [0, 0, 0]), "info");
+        r.save_script(
+            "f.yaml",
+            "steps:\n  - tap: [0.5, 0.5]\n  - log: 点击后继续\n",
+        );
+        let start = Instant::now();
+        let logs = r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert!(
+            start.elapsed() >= Duration::from_millis(15),
+            "显式 tap 后应等待 interval"
+        );
+        assert!(logs_contain(&logs, "点击后继续"));
+        assert_eq!(r.ctl.calls(), vec!["tap 500 250"]);
+    }
+
     /// judge_delay（config.toml judge_delay_ms）：find 命中后、then 执行前插入
-    /// 固定延迟（总耗时 ≥ 延迟值）；then 为空不白等。
+    /// 固定延迟（总耗时 ≥ interval + 延迟值）；then 为空不追加 judge_delay。
     #[tokio::test]
     async fn judge_delay_applies_between_find_hit_and_then() {
         let r = rig_with(
@@ -2020,7 +2138,7 @@ mod tests {
         assert!(logs_contain(&logs, "进入主界面"));
     }
 
-    /// judge_delay：then 为空（无后续步骤）不等待，运行立即结束。
+    /// judge_delay：then 为空时不追加 judge_delay，但点击后的 interval 仍然生效。
     #[tokio::test]
     async fn judge_delay_skipped_when_find_then_empty() {
         let r = rig_with(
@@ -2034,8 +2152,9 @@ mod tests {
         let start = Instant::now();
         r.run(script_target("f.yaml"), vec![]).await.unwrap();
         assert!(
-            start.elapsed() < Duration::from_millis(150),
-            "then 为空不应执行 judge_delay，实际 {:?}",
+            start.elapsed() >= Duration::from_millis(15)
+                && start.elapsed() < Duration::from_millis(150),
+            "then 为空不应执行 judge_delay，但点击后应等待 interval，实际 {:?}",
             start.elapsed()
         );
     }
@@ -2102,7 +2221,12 @@ mod tests {
         );
         r.tmpl("main.png");
         r.save_script("f.yaml", "steps:\n  - find: main.png\n    verify: true\n");
+        let start = Instant::now();
         r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert!(
+            start.elapsed() >= Duration::from_millis(30),
+            "两次点击后都应等待 interval"
+        );
         assert_eq!(
             r.ctl.calls(),
             vec!["tap 500 250", "tap 500 250"],
@@ -2171,6 +2295,21 @@ mod tests {
         assert!(logs_contain(&logs, "else 分支"));
     }
 
+    /// debug：步骤入口和 match 全部未命中都应留下可定位的执行轨迹。
+    #[tokio::test]
+    async fn debug_logs_step_and_match_misses() {
+        let r = rig(HashMap::new(), solid_png(100, 100, [0, 0, 0]), "debug");
+        r.tmpl("a.png");
+        r.tmpl("b.png");
+        r.save_script(
+            "f.yaml",
+            "steps:\n  - match:\n    - a.png:\n        - log: A\n    - b.png:\n        - log: B\n",
+        );
+        let logs = r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert!(logs_contain(&logs, "执行步骤 #1：match"));
+        assert!(logs_contain(&logs, "match 未命中：a.png、b.png"));
+    }
+
     /// match 配 timeout：按 interval 轮询到超时才 else。
     #[tokio::test]
     async fn match_with_timeout_polls_then_else() {
@@ -2213,7 +2352,12 @@ mod tests {
             "g.yaml",
             "steps:\n  - match:\n    - a.png:\n        click: true\n    - b.png:\n        click: true\n        steps:\n          - log: 分支B\n",
         );
+        let start = Instant::now();
         let logs = r.run(script_target("g.yaml"), vec![]).await.unwrap();
+        assert!(
+            start.elapsed() >= Duration::from_millis(15),
+            "match 候选点击后应等待 interval"
+        );
         assert_eq!(
             r.ctl.calls(),
             vec!["tap 35 30"],
@@ -2292,7 +2436,12 @@ mod tests {
             "f.yaml",
             "steps:\n  - color:\n      at: [0.5, 0.5]\n      expect:\n        - ff8800:\n            click: true\n        - 0000ff:\n          - log: 蓝分支\n    else:\n      - log: else 分支\n",
         );
+        let start = Instant::now();
         r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert!(
+            start.elapsed() >= Duration::from_millis(15),
+            "color 候选点击后应等待 interval"
+        );
         assert_eq!(
             r.ctl.calls(),
             vec!["tap 500 250"],

@@ -136,7 +136,7 @@ pub(super) async fn api_list_templates(
     }
 }
 
-/// 模板创建请求固定为 {short_name, region?, pkg, data_b64}。短名冲突
+/// 模板创建请求为 {short_name, region?, pkg, data_b64, grayscale_only?}。短名冲突
 /// 409 且不覆盖；已有图片的替换走独立 image PUT。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -145,6 +145,13 @@ pub(super) struct UploadTemplateReq {
     region: Option<[f64; 4]>,
     data_b64: String,
     pkg: String,
+    /// 默认只压缩为灰度；裁切弹窗明确勾选“保留颜色”时传 false。
+    #[serde(default = "default_grayscale_only")]
+    grayscale_only: bool,
+}
+
+fn default_grayscale_only() -> bool {
+    true
 }
 
 /// 短名冲突检查（新形态专用，plan §11.7：冲突要求改名不覆盖）：分区内存在
@@ -189,12 +196,13 @@ pub(super) async fn api_create_template(
         Err(err) => return err.into_response(),
     };
     let base = short[..short.len() - 4].to_string(); // 去 ".png"
+    let color_suffix = if req.grayscale_only { "" } else { "#1" };
     let name = match req.region {
         Some(region) => match compose_region_suffix(region) {
-            Ok(suffix) => format!("{base}#{suffix}.png"),
+            Ok(suffix) => format!("{base}#{suffix}{color_suffix}.png"),
             Err(err) => return err.into_response(),
         },
-        None => short.clone(),
+        None => format!("{base}{color_suffix}.png"),
     };
     // base64 合法性与体积先于解码校验（4/3 膨胀后 16MiB ≈ 原始 12MiB 内的护栏）
     const MAX_B64_LEN: usize = (matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 1) * 4;
@@ -204,15 +212,16 @@ pub(super) async fn api_create_template(
             "图片超过上传上限（10 MiB），请裁剪后再试",
         );
     }
-    // base64 解码和统一灰度重编码都可能处理较大的上传内容，连同文件落盘
+    // base64 解码和 PNG 重编码都可能处理较大的上传内容，连同文件落盘
     // 一并放入 blocking 边界，避免占用 Tokio 核心线程。
     let data_b64 = req.data_b64;
+    let grayscale_only = req.grayscale_only;
     let (bytes, orig_size) = match run_blocking_api(move || {
         let orig = base64::engine::general_purpose::STANDARD
             .decode(data_b64)
             .map_err(|e| ApiError::bad_request(format!("base64 解码失败: {}", e)))?;
         let orig_size = orig.len();
-        let bytes = matcher::reencode_template_gray_png(&orig)
+        let bytes = matcher::reencode_template_png(&orig, grayscale_only)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         Ok((bytes, orig_size))
     })
@@ -277,12 +286,14 @@ pub(super) async fn api_replace_template_image(
         );
     }
     let data_b64 = req.data_b64;
+    // 替换沿用现有文件名语义：旧格式继续灰度，带 #1 的彩色模板继续保留颜色。
+    let grayscale_only = !matcher::template_color_from_name(&name);
     let (bytes, orig_size) = match run_blocking_api(move || {
         let orig = base64::engine::general_purpose::STANDARD
             .decode(data_b64)
             .map_err(|e| ApiError::bad_request(format!("base64 解码失败: {e}")))?;
         let orig_size = orig.len();
-        let bytes = matcher::reencode_template_gray_png(&orig)
+        let bytes = matcher::reencode_template_png(&orig, grayscale_only)
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         Ok((bytes, orig_size))
     })
@@ -502,6 +513,7 @@ pub(super) async fn api_test_template(
         region: req
             .region
             .or_else(|| matcher::template_region_from_name(&resolved_name, screen_w, screen_h)),
+        color: matcher::template_color_from_name(&resolved_name),
     };
     let miss_region = mr.region;
     // NCC 匹配（含截图/模板 PNG 解码）走专用计算池（PERF-003），与引擎同一条

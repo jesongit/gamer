@@ -968,6 +968,27 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
         .join("com.test.app/tmpl/login_btn#000_000_500_500.png")
         .is_file());
 
+    // 明确勾选保留颜色时，完整文件名尾部追加 #1；旧请求省略该字段仍是灰度格式。
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/templates",
+        serde_json::json!({
+            "pkg": "com.test.app",
+            "short_name": "color_btn.png",
+            "region": [0.1, 0.2, 0.3, 0.4],
+            "grayscale_only": false,
+            "data_b64": png,
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(json_body(resp).await["name"], "color_btn#100_200_300_400#1.png");
+    assert!(t
+        .dir
+        .join("com.test.app/tmpl/color_btn#100_200_300_400#1.png")
+        .is_file());
+
     // 非法短名 / 非法 region / 参数互斥与缺参 → 400
     for body in [
         serde_json::json!({"pkg": "com.test.app", "short_name": "bad name!.png", "data_b64": png}),

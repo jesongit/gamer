@@ -24,7 +24,7 @@ use crate::matcher;
 /// 一次，测试可直接手工构造）
 #[derive(Clone, Debug)]
 pub struct EngineSettings {
-    /// find / verify / match 轮询间隔（带单位字符串，如 "500ms"）
+    /// find / match 轮询及所有脚本点击后的等待间隔（带单位字符串，如 "500ms"）
     pub interval: String,
     /// 模板匹配阈值（0~1]
     pub threshold: f32,
@@ -102,6 +102,7 @@ pub trait TemplateMatcher: Send + Sync {
         template_path: PathBuf,
         threshold: f32,
         region: Option<[u32; 4]>,
+        color: bool,
     ) -> BoxFuture<'_, anyhow::Result<Option<matcher::MatchResult>>>;
 }
 
@@ -233,6 +234,7 @@ impl TemplateMatcher for ComputePoolMatcher {
         template_path: PathBuf,
         threshold: f32,
         region: Option<[u32; 4]>,
+        color: bool,
     ) -> BoxFuture<'_, anyhow::Result<Option<matcher::MatchResult>>> {
         // 错误标签在进入 async 块前构造（future 只借用 &self，不借用 template）
         let tpl_label = format!("{} (path={})", template, template_path.display());
@@ -245,6 +247,7 @@ impl TemplateMatcher for ComputePoolMatcher {
                     template_png: tpl_bytes,
                     threshold: Some(threshold),
                     region,
+                    color,
                 };
                 matcher::match_template(&req).map_err(|e| anyhow::anyhow!("模板匹配失败: {}", e))
             })

@@ -2,7 +2,7 @@
 //!
 //! 字段名与 golden JSON（前端 Model / API JSON）对齐：`Cell` 序列化为
 //! `{"lit": …}` / `{"ref": …}`，`Step` 以 `kind` 判别。时间字面量保留书写串
-//! （"800ms"），仅 config.interval 解析为 `Duration`（引擎轮询直接可用）。
+//! （"800ms"），仅 config.interval 解析为 `Duration`（引擎轮询与点击后等待直接可用）。
 
 use std::time::Duration;
 
@@ -149,7 +149,7 @@ impl Serialize for Cell {
 }
 
 /// match 候选（有序，单键映射 `模板: [分支步骤]` 的解析结果；候选值也可为
-/// `{click: true, steps: [...]}` 映射——命中后点击模板中心，规范序列化时
+/// `{click: true, steps: [...]}` 映射——命中后点击模板中心并等待 interval，规范序列化时
 /// `click: false` 还原为列表形态、`click: true` 恒为映射形态）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MatchCandidate {
@@ -159,7 +159,7 @@ pub struct MatchCandidate {
 }
 
 /// color 候选分支（有序列表项，单键映射 `颜色: [分支步骤]`；click 语义同
-/// match 候选，命中后点击取样点）。
+/// match 候选，命中后点击取样点并等待 interval）。
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ColorBranch {
     pub color: Cell,

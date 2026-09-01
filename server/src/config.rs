@@ -198,7 +198,7 @@ pub struct Config {
     pub ffmpeg_path: String,
     /// scrcpy-server jar 路径
     pub scrcpy_server: PathBuf,
-    /// 脚本引擎默认 interval（轮询类间隔，带单位时长串如 "500ms"；
+    /// 脚本引擎默认 interval（轮询与点击后等待间隔，带单位时长串如 "500ms"；
     /// 可被脚本内 config: 段覆盖；裸数字非法——引擎 parse_duration 强制单位）
     #[serde(default = "default_interval")]
     pub interval: String,
@@ -551,7 +551,7 @@ impl Config {
                 self.interval
             )),
             Some(ms) if ms <= 0.0 => errs.push(format!(
-                "interval = \"{}\" 非法：轮询间隔必须大于 0",
+                "interval = \"{}\" 非法：轮询/点击后等待间隔必须大于 0",
                 self.interval
             )),
             _ => {}

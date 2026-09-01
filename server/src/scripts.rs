@@ -1159,11 +1159,15 @@ impl ScriptStore {
                 );
             }
             // ZIP 内模板不能绕过 HTTP 上传的图片安全闸门：在任何落盘前
-            // 用同一套字节/尺寸/像素限额解码，并统一归一化为灰度 PNG。
+            // 用同一套字节/尺寸/像素限额解码；旧格式归一化为灰度 PNG，
+            // 文件名带 #1 的彩色模板保留颜色通道。
             // 否则一个 10MiB 以内的像素炸弹会在后续匹配时才触发高额分配。
             let buf = if zip_path.starts_with("tmpl/") {
-                crate::matcher::reencode_template_gray_png(&buf)
-                    .map_err(|e| anyhow::anyhow!("{zip_path} 模板校验失败: {e}"))?
+                crate::matcher::reencode_template_png(
+                    &buf,
+                    !crate::matcher::template_color_from_name(&zip_path),
+                )
+                .map_err(|e| anyhow::anyhow!("{zip_path} 模板校验失败: {e}"))?
             } else {
                 buf
             };

@@ -540,7 +540,7 @@ fn build_config(ctx: &mut BuildCtx, node: &Node) -> Option<super::model::ScriptC
                     codes::SCRIPT_CONFIG_INVALID,
                     "config",
                     "interval",
-                    "config.interval 必须是带单位时间（ms/s/m/min/h/d）且 > 0",
+                    "config.interval（轮询/点击后等待）必须是带单位时间（ms/s/m/min/h/d）且 > 0",
                 ),
             },
             "threshold" => match raw.and_then(|r| r.parse::<f64>().ok()) {
