@@ -10,3 +10,8 @@
     - tap: [0.1776, 0.238]
     - log: 修改挑战次数，带参数 flag
     - find: 开始挑战.png
+
+次数选择:
+  params:
+    - 'bool:flag:是否花费完体力:true'
+  steps: []
