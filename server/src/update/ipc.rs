@@ -19,8 +19,10 @@ use super::model::{UpdateErrorCode, UpdateState};
 /// 单帧上限 1 MiB（ipc-v1 §2 冻结）：长度前缀超限立即断开（不读载荷）
 pub const MAX_FRAME_BYTES: u32 = 1_048_576;
 /// 连接建立超时（建议值 5s）
+#[allow(dead_code)] // 仅 Windows pipe 传输消费；Linux 桩不发起真实连接
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// 单帧交换超时（建议值 30s；长操作受理时限相同）
+#[allow(dead_code)] // 仅 Windows pipe 传输消费；Linux 桩不发起真实交换
 pub const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 内部操作枚举（ipc-v1 §4 冻结 6 个；launcher 永不接受任意字符串）
@@ -82,6 +84,7 @@ pub enum FrameError {
     /// pipe 打不开（launcher 不在场）或中途断开
     Unavailable(String),
     /// 连接/交换超时
+    #[allow(dead_code)] // 仅 Windows pipe 传输构造；Linux 桩恒返回 Unavailable
     Timeout(&'static str),
     /// 长度前缀超限（ipc-v1 §2：立即断开，不读载荷）
     FrameTooLarge(u32),

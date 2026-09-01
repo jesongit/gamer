@@ -23,10 +23,10 @@ use tokio::net::windows::named_pipe::ClientOptions;
 #[cfg(windows)]
 use tokio::sync::Mutex;
 
-use super::ipc::{check_frame_limit, FrameError, FrameTransport};
+use super::ipc::{FrameError, FrameTransport};
 
 #[cfg(windows)]
-use super::ipc::{CONNECT_TIMEOUT, EXCHANGE_TIMEOUT};
+use super::ipc::{check_frame_limit, CONNECT_TIMEOUT, EXCHANGE_TIMEOUT};
 
 #[cfg(windows)]
 /// ERROR_PIPE_BUSY（winerror.h）：当前无可用 pipe 实例，稍候重试
