@@ -106,7 +106,7 @@ ffmpeg_path = ""
 scrcpy_server = ""
 
 # 脚本引擎默认参数（可被脚本内 config: 段覆盖）
-interval = "500ms"        # 轮询间隔，带单位 ms/s/m/min/h/d；裸数字非法
+interval = "500ms"        # 轮询与点击后等待间隔，带单位 ms/s/m/min/h/d；裸数字非法
 threshold = 0.85          # 模板匹配阈值，(0, 1]
 log_level = "info"        # debug / info / warn / error
 judge_delay_ms = 200      # 判断类步骤命中后延迟毫秒，0 = 关闭，上限 60000

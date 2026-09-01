@@ -161,10 +161,10 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 | text | `- text: "hello"` / `- text: $message` | `{kind:"text", value: Cell<text>}` |
 | log | `- log: 文本` / `- log: $msg` | `{kind:"log", message: Cell<text>}` |
 | wait | `- wait: 1s` / `- wait: [1s, 3s]`（随机区间） | `{kind:"wait", duration: Cell<time>, duration_max: Cell<time>\|null}` |
-| find | `- find: $account` + 兄弟键 `block`(模板列表)/`verify`(bool)/`timeout`/`then`/`else` | `{kind:"find", template: Cell<tmpl>, block: Cell<tmpl>[], verify: bool, timeout: Cell<time>\|null, then: Step[], else: Step[]}`；命中点击中心 |
-| match | 见 §4.1 紧凑缩进 | `{kind:"match", candidates: {template: Cell<tmpl>, click: boolean, steps: Step[]}[], else: Step[], timeout: Cell<time>\|null}`；候选默认不点击，`click:true` 命中点模板框中心 |
+| find | `- find: $account` + 兄弟键 `block`(模板列表)/`verify`(bool)/`timeout`/`then`/`else` | `{kind:"find", template: Cell<tmpl>, block: Cell<tmpl>[], verify: bool, timeout: Cell<time>\|null, then: Step[], else: Step[]}`；命中点击中心，点击后等 `config.interval` |
+| match | 见 §4.1 紧凑缩进 | `{kind:"match", candidates: {template: Cell<tmpl>, click: boolean, steps: Step[]}[], else: Step[], timeout: Cell<time>\|null}`；候选默认不点击，`click:true` 命中点模板框中心后等 `config.interval` |
 | check | `- check: logo.png` + 兄弟键 `throw`(非空字符串，必填) | `{kind:"check", template: Cell<tmpl>, throw: string}`；单帧匹配断言，未命中按 `throw` 文案结束运行（见 §4.6） |
-| color | 见 §4.2 | `{kind:"color", at: Cell<coord>, expect: {color: Cell<color>, click: boolean, steps: Step[]}[], else: Step[]}`；候选默认不点击，`click:true` 命中点取样点 |
+| color | 见 §4.2 | `{kind:"color", at: Cell<coord>, expect: {color: Cell<color>, click: boolean, steps: Step[]}[], else: Step[]}`；候选默认不点击，`click:true` 命中点取样点后等 `config.interval` |
 | if | `- if: $enable` + 兄弟键 `then`/`else` | `{kind:"if", cond: Cell<bool>, then: Step[], else: Step[]}` |
 | loop | `- loop:` + `{times: 3, steps: [...]}`；`times` 省略 = `0` = 无限 | `{kind:"loop", times: number, steps: Step[]}` |
 | break | `- break`（仅 loop 子流程内合法，跳出最近一层 loop） | `{kind:"break"}` |
@@ -179,7 +179,7 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 
 | 键 | YAML | Model/API | 约束 |
 |---|---|---|---|
-| interval | `500ms` | `"500ms"` | 带单位时间，>0 |
+| interval | `500ms` | `"500ms"` | 带单位时间，>0；轮询及所有脚本点击后的等待间隔 |
 | threshold | `0.85` | `0.85`（数字） | 0~1 |
 | log_level | `info` | `"info"` | debug/info/warn/error |
 
@@ -205,7 +205,7 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
   - **映射形态** `模板: {click: true, steps: [...]}`——命中后点击该候选模板匹配框中心（语义同 find 的中心点击）；`steps` 省略 = 空分支（命中即点）。
   规范序列化不变式：`click: false` ⇔ 列表形态，`click: true` ⇔ 映射形态；映射键比候选模板键**深两级**（YAML 映射值不能与键同列，序列才能同列）。候选值映射内只允许 `click`/`steps`（未知 → `step.field.unknown`），`click` 非布尔字面量 → `step.field.type_mismatch`。
 - `else` / `timeout` 是 `match` 步骤的**兄弟键**，与 `match` 同列；**绝不允许**写成候选列表里的 `- else:` / `- :`（→ `step.match.else_in_candidates`）。
-- 候选按书写顺序匹配、首个命中获胜、复用同一帧；默认不点击，仅 `click: true` 候选命中后点击；未配 `timeout` 只执行一轮，配了按 `config.interval` 轮询到超时才进 `else`。
+- 候选按书写顺序匹配、首个命中获胜、复用同一帧；默认不点击，仅 `click: true` 候选命中后点击并等待 `config.interval`；未配 `timeout` 只执行一轮，配了按 `config.interval` 轮询到超时才进 `else`。
 - 候选模板短名不可重复（→ `step.match.candidate_duplicate`）；不接受布尔条件（布尔走 `if`）。
 - 语义分工冻结（2026-09-01 候选级 `click` 增补）：`if`=布尔分支、`match`=模板策略选择（默认不点击，候选可选命中点击）、`find`=等待并点击中心、`color`=单点颜色分支（候选可选命中点击）。录制滑动输出 `match → swipe`（fixture v11，候选均为列表形态），避免 find 的命中点击破坏手势。
 
@@ -214,8 +214,8 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 - 颜色在**所有位置**都是字符串：ParamDecl 默认值、`expect` 候选、`args` 实参、任务快照、RunRecord 摘要——统一为 6 位十六进制无 `#`（Model/API JSON 中即 string）。
 - 规范 YAML 中**纯数字色值必须加引号**（`'123456'`），防止被解析成数字丢前导零；含字母色值（`ff8800`）可裸写。
 - 解析端**不得**让 YAML 1.1 数字解析改变颜色值：事件级解析（§2）天然取原始串；任何基于 plain-object 的解析（serde_yaml Value、js-yaml load）必须把颜色位置重新字符串化。
-- `expect` 冻结为**有序列表**，每项是单键映射，候选值与 match 候选同构（§4.1）：列表形态 `颜色: [分支步骤]` = 不点击；映射形态 `颜色: {click: true, steps: [...]}` = 命中后点击取样点；序列化不变式同 §4.1。**不用**颜色做整个映射的键。原因：纯数字色作为映射键会被 JS plain object 按整数形键重排（js-yaml `load()` 实测把 `'123456'` 排到最前），候选顺序语义被静默破坏——该坑已记录 docs/PITFALLS.md。
-- `color` 不轮询；默认不点击，仅 `click: true` 候选命中后点击取样点；同色候选重复 → `step.color.duplicate`；颜色格式非法 → `step.color.format`。
+- `expect` 冻结为**有序列表**，每项是单键映射，候选值与 match 候选同构（§4.1）：列表形态 `颜色: [分支步骤]` = 不点击；映射形态 `颜色: {click: true, steps: [...]}` = 命中后点击取样点并等待 `config.interval`；序列化不变式同 §4.1。**不用**颜色做整个映射的键。原因：纯数字色作为映射键会被 JS plain object 按整数形键重排（js-yaml `load()` 实测把 `'123456'` 排到最前），候选顺序语义被静默破坏——该坑已记录 docs/PITFALLS.md。
+- `color` 不轮询；默认不点击，仅 `click: true` 候选命中后点击取样点并等待 `config.interval`；同色候选重复 → `step.color.duplicate`；颜色格式非法 → `step.color.format`。
 
 ### 4.3 默认值解析时机
 

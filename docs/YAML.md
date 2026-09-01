@@ -17,7 +17,7 @@ YAML v2 严格语法；不提供旧格式兼容或自动迁移。规则来源：
 data/<pkg>/
 ├── yaml/    # 可运行脚本（.yaml/.yml，顶层必须有 steps）
 ├── func/    # 函数库（严格 .yaml，顶层键全是函数名）
-└── tmpl/    # 模板图片（8-bit 灰度 PNG，文件名可带 # 搜索区后缀）
+└── tmpl/    # 模板图片（默认 8-bit 灰度 PNG，文件名可带 # 搜索区/#1 颜色后缀）
 ```
 
 - **脚本资源 ID** = `<pkg>/<文件名>.yaml`（如 `daily/login.yaml`，可含子目录）。
@@ -35,6 +35,8 @@ data/<pkg>/
   - 半区码：`a`=全屏、`u`/`d`/`l`/`r`=上/下/左/右半、`ul`/`ur`/`dl`/`dr`=四角；
   - 数字坐标：`xx#x1_y1_x2_y2`，四段各为相对坐标 ×1000 的整数（如
     `xx#0_0_500_500` = 左上 1/4 区域），需 x2>x1、y2>y1。
+  - 颜色标记：末尾再加 `#1`（如 `xx#0_0_500_500#1.png`）表示保留颜色，
+    并在灰度 NCC 命中后复核颜色；不带 `#1` 的旧格式均按灰度匹配，脚本 YAML 无需颜色参数。
   脚本写 `xx.png` 而磁盘存在 `xx#l.png` 时按「基名 + `#` 后缀 + 同扩展名」唯一
   匹配；零候选报不存在、多候选报歧义（`resource.tmpl.ambiguous`），不猜测。
 
@@ -158,7 +160,7 @@ steps:
 
 ```yaml
 config:
-  interval: 500ms     # 轮询间隔（find 每轮重试 / verify 复查 / match 轮询），带单位 >0
+  interval: 500ms     # 轮询与点击后等待间隔（find/match 轮询、所有脚本点击后），带单位 >0
   threshold: 0.85     # 模板匹配阈值，0~1
   log_level: info     # debug / info / warn / error，低于等级的日志丢弃
 ```
@@ -168,7 +170,8 @@ config:
 
 另有仅全局生效的 `config.toml` 键 `judge_delay_ms`（默认 200，0=关闭，脚本 config:
 不覆盖）：find / match / color 的**命中路径**在执行后续分支步骤前固定等待该时长
-（给游戏 UI 留响应时间）；分支为空（无后续步骤）不等待，else / 超时路径不延迟。
+（给游戏 UI 留响应时间）；若命中路径发生点击，先等待 `config.interval`，再追加
+`judge_delay_ms`；分支为空（无后续步骤）不追加 `judge_delay_ms`，else / 超时路径不延迟。
 
 ## 5. 步骤（18 种）
 
@@ -182,7 +185,7 @@ config:
 ```yaml
 steps:
   - str_app                     # 冷启动当前分区应用（先 force-stop 再启动）；裸写，带值非法
-  - tap: [0.5, 0.5]             # 点击（相对坐标或 $name）
+  - tap: [0.5, 0.5]             # 点击（相对坐标或 $name），完成后等待 config.interval
   - swipe:                      # 滑动：YAML 键为 fm/to/time
       fm: [0.1, 0.9]
       to: [0.9, 0.1]
@@ -217,11 +220,12 @@ steps:
     - throw: 等待超时
 ```
 
-每轮：主模板（**新截图**）命中 → 恒点**模板中心** → `verify: true` 时等
-`config.interval` 重匹配一次、仍命中补一击（共两击，适合点击后弹窗关闭类按钮）→
-执行 `then` 结束本步；未命中 → `block` 依序匹配（命中即点其中心并结束本轮）→
-全未命中等 `config.interval` 重开一轮。超过 `timeout` 执行 `else`。截图瞬态失败
-跳过本轮重试（持续失败约 20s 判链路异常带因中止）。
+每轮：主模板（**新截图**）命中 → 恒点**模板中心** → 等 `config.interval`；
+`verify: true` 时重匹配一次，仍命中补一击（补点后也等 `config.interval`，共两击，
+适合点击后弹窗关闭类按钮）→ 执行 `then` 结束本步；未命中 → `block` 依序匹配
+（命中即点其中心并等 `config.interval`，结束本轮）→全未命中等 `config.interval`
+重开一轮。超过 `timeout` 执行 `else`。截图瞬态失败跳过本轮重试（持续失败约 20s
+判链路异常带因中止）。
 
 ### 5.3 match —— 多模板策略选择
 
@@ -242,7 +246,8 @@ steps:
 ```
 
 - 每轮只截**一帧**，候选按书写顺序匹配、首个命中获胜、执行其分支步骤并结束本步；
-  默认不点击，候选可各自 `click: true`（点中该候选的匹配框中心，语义同 find）。
+  默认不点击，候选可各自 `click: true`（点中该候选的匹配框中心，完成后等待
+  `config.interval`，语义同 find）。
 - 未配 `timeout` 只执行一轮（全未命中立即进 `else`）；配了按 `config.interval`
   轮询到超时才进 `else`。
 - 规范序列化不变式：`click: false` ⇔ 列表形态，`click: true` ⇔ 映射形态
@@ -290,7 +295,8 @@ steps:
 - 一次截图、按序判色：实际像素与期望色每通道差 ≤30 视为命中（容差固定 30，吸收
   H.264 有损压缩抖动），命中即执行该色分支并结束本步；全未命中走 `else`。
 - **不轮询**（重试套 `loop`）；默认不点击，候选可各自 `click: true`（点取样点，
-  语义同 find 的中心点击）。规范序列化不变式与错误码同 §5.3 match 候选。
+  完成后等待 `config.interval`，语义同 find 的中心点击）。规范序列化不变式与错误码
+  同 §5.3 match 候选。
 - 同色候选重复 → `step.color.duplicate`；颜色格式非法 → `step.color.format`；
   纯数字色值必须加引号（§3.2）。
 
