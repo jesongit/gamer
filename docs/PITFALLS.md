@@ -131,3 +131,4 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **容器内构建没有 .git，build.rs 自动探测必然回落 dev 提交信息**：镜像内 build_info 显示错误的 dev 提交；镜像构建必须显式传 `GAMER_GIT_COMMIT` 等 ARG（Dockerfile 已加，release workflow 注入）。
 - **`/api/tasks` 的 `last_run_at` 是固定 UTC Z 串不随 TZ 变化，前端推导服务端时区只能用 `next_run`**（现已带 `%:z` 偏移）：拿 Z 串当本地偏移会在 TZ≠UTC 部署下说谎；`task-tz.js` 对 last_run_at 只认显式数字偏移。
 - **MIUI 设备 adb 常见 USB+TLS 双 transport 并存**：扫描入库的 addr 可能被 TLS serial 覆盖（kind 显示 wifi），对设备执行 adb 命令需 `-s <serial>` 显式指定目标传输，别按 addr 形态臆断。
+- **本地 Windows rust 门禁全绿但 CI Linux job 挂 clippy/test**：`#[cfg(windows)]`/`#[cfg(unix)]` 互斥代码只在对方平台编译——bin crate 里仅 Windows 路径消费的 pub 常量/枚举变体在 Linux 下报 dead_code，`C:/...` 形态绝对路径在 Linux `is_absolute()==false`；本地复现 CI 链用 `docker run --rm -v "D:\code\gamer:/work" -v gamer-cargo:/usr/local/cargo -v gamer-target:/tmp/target -e CARGO_TARGET_DIR=/tmp/target -w /work/server rust:1.98`（先 `rustup component add clippy rustfmt`，镜像默认不带）跑 clippy/fmt/test。
