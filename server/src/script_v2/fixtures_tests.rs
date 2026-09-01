@@ -61,6 +61,7 @@ fn is_yaml(path: &Path) -> bool {
 
 fn read_fixture(name: &str) -> String {
     fs::read_to_string(fixtures_dir().join(name))
+        .map(|source| source.replace("\r\n", "\n"))
         .unwrap_or_else(|e| panic!("读取 fixture {name} 失败: {e}"))
 }
 

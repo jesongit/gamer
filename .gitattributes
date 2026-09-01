@@ -4,3 +4,6 @@
 # 因此 fixtures 与信任锚公钥强制 LF 检出；其余文本维持仓库默认。
 release/contracts/fixtures/** text eol=lf
 release/keys/*.pem text eol=lf
+# script_v2 fixture 的规范往返断言依赖 LF；避免 core.autocrlf=true 在 Windows 检出为 CRLF。
+server/tests/fixtures/script_v2/** text eol=lf
+web/src/script-editor/__fixtures__/** text eol=lf
