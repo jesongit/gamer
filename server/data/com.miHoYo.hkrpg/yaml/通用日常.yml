@@ -1,15 +1,15 @@
 params:
-  - 'tmpl:account:要点击的账号头像模板'
+  - 'tmpl:account:账号模板:账号155.png'
+config:
+  interval: 500ms
+  threshold: 0.85
+  log_level: debug
 steps:
-  - str_app
-  - find: 登录按钮.png
-    block:
-      - 关闭登录.png
-  - find: 切换账号.png
-    block:
-      - 确认登出.png
-  - find: $account
-  - find: 进入游戏.png
-  - find: 开始游戏.png
-  - find: 点击进入.png
-  - call: 日常遗器.yml
+  - func: 工具/登录
+    args:
+      account: $account
+    then:
+      - log: 登录成功
+    else:
+      - log: 登录失败
+  - func: 工具/每日任务

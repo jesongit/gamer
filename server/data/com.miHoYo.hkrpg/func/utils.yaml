@@ -39,7 +39,7 @@ ap_burn:
     - find: 增加次数.png
     - find: 挑战副本.png
     - find: 开始挑战.png
-    - find: 退出战斗.png
+    - find: 退出关卡.png
     - find: 关闭界面.png
       verify: true
 
