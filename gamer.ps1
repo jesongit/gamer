@@ -12,6 +12,8 @@
   %LOCALAPPDATA%\gamer\admin-token，启动后端时注入其进程环境）完成优雅停机。
   rebuild：停止前后端 → 重新编译（后端 cargo build，前端 vite build 产物输出到
   server/web-dist 由后端静态托管）→ 再启动（-Release 可指定 release 构建）。
+  启动后端若因「数据库 schema 门禁拒绝」秒退（旧开发库 user_version=0 等，
+  开发环境策略：数据可弃），自动把旧库挪入 baseline-backups/ 留存后重建重试一次。
 
 .EXAMPLE
   .\gamer.ps1 start              # 启动后端 + 前端（依赖缺失时自动安装/构建）
@@ -107,6 +109,19 @@ function Get-ServerPort {
         if ($m) { return [int]$m.Matches[0].Groups[1].Value }
     }
     return 8443
+}
+
+# 数据目录：config.toml 的 data_dir（相对路径按冻结规则以配置文件所在目录为基准解析）
+function Get-DataDir {
+    if (Test-Path $ConfigFile) {
+        $m = Select-String -Path $ConfigFile -Pattern '^\s*data_dir\s*=\s*["'']?([^"''\r\n]+?)["'']?\s*$' | Select-Object -First 1
+        if ($m) {
+            $d = $m.Matches[0].Groups[1].Value.Trim()
+            if ([IO.Path]::IsPathRooted($d)) { return $d }
+            return Join-Path $ServerDir $d
+        }
+    }
+    return (Join-Path $ServerDir 'data')
 }
 
 function Get-BinaryPath {
@@ -436,6 +451,29 @@ function Build-Frontend {
 
 # ---------- 启动 ----------
 
+# 后端秒退是否为「数据库 schema 门禁拒绝」——重建数据库即可恢复的一类：
+# 无版本旧库（user_version=0）/ 结构不完整 / 新库版本号异常。特征串来自
+# store.rs ensure_schema 的 bail 消息，落盘在 stderr 重定向日志里。
+function Test-DbGateFatal {
+    if (-not (Test-Path $BackendErrLog)) { return $false }
+    $tail = (Get-Content $BackendErrLog -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
+    return [bool]($tail -match 'database schema is unversioned|schema v1 is incomplete|new database has unexpected user_version')
+}
+
+# 把当前数据库（含 -wal/-shm）按时间戳挪入 baseline-backups/ 留存（目录已 gitignore）：
+# 开发环境策略是直接重建，但挪走不删，想找回数据还有机会。
+function Move-DbAside {
+    $backupDir = Join-Path $Root 'baseline-backups'
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    foreach ($suffix in @('', '-wal', '-shm')) {
+        $f = Join-Path $DataDir "gamer.db$suffix"
+        if (Test-Path -LiteralPath $f) {
+            Move-Item -LiteralPath $f -Destination (Join-Path $backupDir "gamer.db$suffix.auto-$stamp") -Force
+        }
+    }
+}
+
 function Start-Backend {
     # 已在运行：直接报状态（区分是否被其他程序占端口）
     if (@(Get-BackendProcs).Count -gt 0) {
@@ -458,31 +496,46 @@ function Start-Backend {
     # 服务端支持 GB_LOG=<文件> 自带文件日志（追加模式），不依赖 stdout 重定向；
     # GB_LOG 与 GAMER_ADMIN_TOKEN 在 WMI 包装进程内设置（包装进程与当前控制台
     # 无句柄关联）。token 注入后 server 的回环管理通道即认可本脚本 stop。
-    $launchTime = Get-Date
-    $null = Start-BackgroundProcess -FilePath $exe `
-        -WorkingDirectory $ServerDir `
-        -OutputFile $BackendOutLog `
-        -ErrorFile $BackendErrLog `
-        -InputFile $NullInputFile `
-        -EnvBlock ("`$env:GB_LOG='{0}'; `$env:GAMER_ADMIN_TOKEN='{1}'" -f $BackendLog, $script:AdminToken)
+    $rebuilt = $false
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $launchTime = Get-Date
+        $null = Start-BackgroundProcess -FilePath $exe `
+            -WorkingDirectory $ServerDir `
+            -OutputFile $BackendOutLog `
+            -ErrorFile $BackendErrLog `
+            -InputFile $NullInputFile `
+            -EnvBlock ("`$env:GB_LOG='{0}'; `$env:GAMER_ADMIN_TOKEN='{1}'" -f $BackendLog, $script:AdminToken)
 
-    # 等待端口监听（最多 60 秒）
-    $deadline = (Get-Date).AddSeconds(60)
-    while (-not (Test-PortListening $Port) -and (Get-Date) -lt $deadline) {
-        # 启动后 5 秒仍无 gamer-server 进程 → 判定为启动后立即退出
-        if ((Get-Date) - $launchTime -gt [TimeSpan]::FromSeconds(5)) {
-            $be = @(Get-Process -Name "$BackendName*" -ErrorAction SilentlyContinue |
-                Where-Object { $_.StartTime -ge $launchTime })
-            if ($be.Count -eq 0) {
-                throw "后端: 进程启动后立即退出，请查看日志: $BackendLog / $BackendErrLog"
+        # 等待端口监听（最多 60 秒）
+        $deadline = (Get-Date).AddSeconds(60)
+        $exitedEarly = $false
+        while (-not (Test-PortListening $Port) -and (Get-Date) -lt $deadline) {
+            # 启动后 5 秒仍无 gamer-server 进程 → 判定为启动后立即退出
+            if ((Get-Date) - $launchTime -gt [TimeSpan]::FromSeconds(5)) {
+                $be = @(Get-Process -Name "$BackendName*" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.StartTime -ge $launchTime })
+                if ($be.Count -eq 0) { $exitedEarly = $true; break }
             }
+            Start-Sleep -Seconds 1
         }
-        Start-Sleep -Seconds 1
-    }
-    if (-not (Test-PortListening $Port)) {
+        if (Test-PortListening $Port) {
+            Write-Host "后端: 启动成功  http://localhost:$Port" -ForegroundColor Green
+            return
+        }
+        if ($exitedEarly) {
+            # 开发环境兼容：数据库 schema 门禁拒绝（如旧开发库无版本号）→ 挪存旧库自动重建重试一次
+            if (-not $rebuilt -and (Test-DbGateFatal)) {
+                Write-Host "后端: 数据库 schema 门禁拒绝启动（开发环境策略：自动重建数据库）" -ForegroundColor Yellow
+                Move-DbAside
+                Write-Host ("后端: 旧库已挪入 {0}，重建后重试启动..." -f (Join-Path $Root 'baseline-backups')) -ForegroundColor Yellow
+                $rebuilt = $true
+                continue
+            }
+            $hint = if ($rebuilt) { "（数据库已自动重建过仍失败）" } else { "" }
+            throw "后端: 进程启动后立即退出$hint，请查看日志: $BackendLog / $BackendErrLog"
+        }
         throw "后端: 等待超时，端口 $Port 未监听，请查看日志: $BackendLog / $BackendErrLog"
     }
-    Write-Host "后端: 启动成功  http://localhost:$Port" -ForegroundColor Green
 }
 
 function Start-Frontend {
@@ -703,6 +756,7 @@ function Test-AdbUsb {
 # ---------- 入口 ----------
 
 $Port = Get-ServerPort
+$DataDir = Get-DataDir
 $Both = -not $BackendOnly -and -not $FrontendOnly
 Write-Host ("== gamer.ps1：GameBot 前后端管理（后端端口 {0} / 前端端口 {1}）==" -f $Port, $FrontendPort)
 

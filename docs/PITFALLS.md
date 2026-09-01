@@ -132,3 +132,10 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **`/api/tasks` 的 `last_run_at` 是固定 UTC Z 串不随 TZ 变化，前端推导服务端时区只能用 `next_run`**（现已带 `%:z` 偏移）：拿 Z 串当本地偏移会在 TZ≠UTC 部署下说谎；`task-tz.js` 对 last_run_at 只认显式数字偏移。
 - **MIUI 设备 adb 常见 USB+TLS 双 transport 并存**：扫描入库的 addr 可能被 TLS serial 覆盖（kind 显示 wifi），对设备执行 adb 命令需 `-s <serial>` 显式指定目标传输，别按 addr 形态臆断。
 - **本地 Windows rust 门禁全绿但 CI Linux job 挂 clippy/test**：`#[cfg(windows)]`/`#[cfg(unix)]` 互斥代码只在对方平台编译——bin crate 里仅 Windows 路径消费的 pub 常量/枚举变体在 Linux 下报 dead_code，`C:/...` 形态绝对路径在 Linux `is_absolute()==false`；本地复现 CI 链用 `docker run --rm -v "D:\code\gamer:/work" -v gamer-cargo:/usr/local/cargo -v gamer-target:/tmp/target -e CARGO_TARGET_DIR=/tmp/target -w /work/server rust:1.98`（先 `rustup component add clippy rustfmt`，镜像默认不带）跑 clippy/fmt/test。
+- **schema 版本化之前的旧开发库（`user_version=0`，含已退役 `scripts` 表、`tasks` 缺 args 两列）会被启动门禁拒绝**：报错只有 `gamer-server.err.log` 一行（`database schema is unversioned`），`gamer.ps1 rebuild` 构建全绿但后端"启动后立即退出"；用 `gamer-server.exe inspect --data-dir server/data --json` 确认 status。不实现 migration 0 是设计决策，别指望自动迁移——要保数据按 `store.rs` 的 `SCHEMA_V1_DDL` 手工重建新库迁数据（见 `baseline-backups/rebuild-v1.sql`）；开发环境不用管，`gamer.ps1` 启动秒退命中该类特征（unversioned / schema 不完整 / 新库版本号异常）即自动把旧库挪入 `baseline-backups/gamer.db.auto-<时间戳>` 后重建重试一次。
+- **登录报"账号或密码错误"真因常是「无凭据 fail closed」，换密码试多少次都没用**：认证只认 `[auth].password_hash`（固定参数 Argon2id PHC）或 dev 环境变量 `GAMER_ADMIN_PASSWORD`，config 顶层遗留的 `password = "..."` 明文字段不被消费；两者皆缺时启动即 fail closed，任何账密都 401。排障看启动日志 `credential_source`（`unavailable` = 没配凭据）；PHC 可用 python argon2-cffi 按固定参数生成（工具留档 `baseline-backups/gen_phc.py`）。
+- **`GB_LOG` 语义已变为「目录+前缀」按日轮转，不再是单文件追加**：传文件路径会被拆成前缀产出 `gamer-server.log.2026-09-01`，原 `gamer-server.log` 停在旧内容不再更新；`gamer.ps1` 的 Show-Status 与注释仍按单文件读，"最近日志"显示陈旧内容误导排障——先找当日 `*.log.<日期>` 文件。
+
+## 2026-09-01（match/color 候选级命中点击实测）
+
+- **候选映射形态 `{click: true, steps: [...]}` 的键若与候选模板键同列，会被解析成候选映射的第二个键报"必须是单键映射，得到 2 个键"**：YAML 映射值必须比键深一级缩进、序列才能与键同列（紧凑缩进特例只适用于列表形态分支步骤）；手写时 `click`/`steps` 必须比模板名多缩进两级，序列化器已按此冻结（fixture v14 锁死）。
