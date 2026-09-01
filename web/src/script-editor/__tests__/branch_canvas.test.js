@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { reactive } from 'vue'
+import { nextTick, reactive } from 'vue'
 import BranchContainer from '../components/BranchContainer.vue'
 import StepCanvas from '../components/StepCanvas.vue'
 import { expandCard, setupScript, setupFunctions } from './component_helpers'
@@ -23,6 +23,21 @@ const NESTED_YAML = [
   '        - log: inner',
   '    else:',
   '    - log: no',
+].join('\n')
+
+const DEEP_NESTED_YAML = [
+  'steps:',
+  '  - if: true',
+  '    then:',
+  '    - loop:',
+  '        times: 2',
+  '        steps:',
+  '        - if: true',
+  '          then:',
+  '          - loop:',
+  '              times: 2',
+  '              steps:',
+  '              - log: deep',
 ].join('\n')
 
 function mountBranch({ yaml = NESTED_YAML, depth = 0, containerPath = ['steps'], basePath = 'steps', label = '主流程', expandedUuids = null } = {}) {
@@ -105,7 +120,8 @@ describe('BranchContainer：嵌套与专注分界', () => {
     })
     expect(w.text()).toContain('空流程')
     await w.find('button.add').trigger('click')
-    expect(w.emitted('add-here')[0]).toEqual([['steps', 0, 'else']])
+    expect(w.emitted('add-here')[0][0]).toEqual(['steps', 0, 'else'])
+    expect(w.emitted('add-here')[0][1]).toBe(w.find('button.add').element)
     expect(wrapper).toBeTruthy()
   })
 })
@@ -140,7 +156,7 @@ describe('StepCanvas：选中/锚点/添加', () => {
     await wrapper.find(`[data-step-uuid="${model.steps[0].uuid}"]`).trigger('click')
     await wrapper.find('button.add-btn').trigger('click')
     expect(wrapper.find('.add-step-panel').exists()).toBe(true)
-    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('str_app') // 启动应用
+    await wrapper.find('button[data-kind="str_app"]').trigger('click') // 启动应用
     expect(model.steps.map((s) => s.kind)).toEqual(['log', 'str_app'])
     expect(wrapper.emitted('select').at(-1)).toEqual([model.steps[1].uuid])
     expect(wrapper.find('.add-step-panel').exists()).toBe(false)
@@ -154,7 +170,7 @@ describe('StepCanvas：选中/锚点/添加', () => {
     const thenContainer = wrapper.find(`[data-step-uuid="${model.steps[1].uuid}"] .card-body .branch-container`)
     await thenContainer.find('button.add').trigger('click')
     expect(wrapper.find('.add-step-panel').exists()).toBe(true)
-    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('log')
+    await wrapper.find('button[data-kind="log"]').trigger('click')
     expect(model.steps[1].then.at(-1).kind).toBe('log')
     expect(model.steps[1].then.at(-1).message.lit).toBe('')
   })
@@ -181,10 +197,33 @@ describe('StepCanvas：添加下拉与视图保持', () => {
     expect(wrapper.find('.add-dropdown-wrap').exists()).toBe(true)
     expect(wrapper.find('.panel-target').text()).toContain('如果为真')
     expect(wrapper.text()).toContain('记录日志 top1') // 视图未切进子流程
-    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('log')
+    await wrapper.find('button[data-kind="log"]').trigger('click')
     expect(model.steps[1].then.at(-1).kind).toBe('log')
     expect(wrapper.find('.add-dropdown-wrap').exists()).toBe(false)
     expect(wrapper.text()).toContain('记录日志 top1') // 插入后仍停在主流程视图
+  })
+
+  it('添加菜单靠近屏幕底部时自动翻到锚点上方', async () => {
+    const { wrapper } = mountCanvas({ yaml: 'steps:\n  - log: a\n' })
+    const originalHeight = window.innerHeight
+    const addButton = wrapper.find('button.add-btn').element
+    addButton.getBoundingClientRect = () => ({
+      left: 100, right: 160, top: 700, bottom: 724, width: 60, height: 24,
+      x: 100, y: 700, toJSON: () => ({}),
+    })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 })
+
+    await wrapper.find('button.add-btn').trigger('click')
+    const panel = wrapper.find('.add-step-panel').element
+    panel.getBoundingClientRect = () => ({
+      left: 100, right: 320, top: 724, bottom: 1024, width: 220, height: 300,
+      x: 100, y: 724, toJSON: () => ({}),
+    })
+    window.dispatchEvent(new Event('resize'))
+    await nextTick()
+
+    expect(wrapper.find('.add-step-panel').attributes('style')).toContain('top: 396px')
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: originalHeight })
   })
 
   it('非根视图出「返回主流程」按钮，点击回根视图', async () => {
@@ -197,6 +236,29 @@ describe('StepCanvas：添加下拉与视图保持', () => {
     await wrapper.find('button.back-btn').trigger('click')
     expect(wrapper.find('button.back-btn').exists()).toBe(false)
     expect(wrapper.text()).toContain('记录日志 top1')
+  })
+
+  it('连续进入专注视图后，返回按进入顺序回到上一个视图', async () => {
+    const { wrapper, model } = mountCanvas({ yaml: DEEP_NESTED_YAML })
+    const rootIf = model.steps[0]
+    const rootLoop = rootIf.then[0]
+    const innerIf = rootLoop.steps[0]
+    const innerLoop = innerIf.then[0]
+
+    await expandCard(wrapper, rootIf.uuid)
+    await expandCard(wrapper, rootLoop.uuid)
+    await wrapper.find('button.focus-btn').trigger('click') // rootLoop.steps
+    expect(wrapper.findAll('.crumb').map((c) => c.text())).toEqual(['主流程', '如果为真', '循环体'])
+
+    await expandCard(wrapper, innerIf.uuid)
+    await expandCard(wrapper, innerLoop.uuid)
+    await wrapper.find('button.focus-btn').trigger('click') // innerLoop.steps
+    expect(wrapper.findAll('.crumb').map((c) => c.text())).toEqual(['主流程', '如果为真', '循环体', '如果为真', '循环体'])
+
+    await wrapper.find('button.back-btn').trigger('click')
+    expect(wrapper.findAll('.crumb').map((c) => c.text())).toEqual(['主流程', '如果为真', '循环体'])
+    await wrapper.find('button.back-btn').trigger('click')
+    expect(wrapper.find('button.back-btn').exists()).toBe(false)
   })
 })
 
@@ -322,7 +384,7 @@ describe('StepCanvas：函数库上下文', () => {
     expect(wrapper.find('button.fn-rename').text()).toBe('重命名') // 确认后回到下拉 + 重命名态
     // 添加步骤插入当前函数末尾
     await wrapper.find('button.add-btn').trigger('click')
-    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('str_app')
+    await wrapper.find('button[data-kind="str_app"]').trigger('click')
     expect(created.model.functions[1].steps).toHaveLength(2)
     created.stack.undo() // 撤销插入步骤
     created.stack.undo() // 撤销改名
@@ -360,6 +422,8 @@ describe('StepCanvas：函数库上下文', () => {
     expect(stat.exists()).toBe(true)
     expect(stat.text()).toBe('other')
     expect(wrapper.text()).toContain('记录日志 y')
+    // 指定函数本身就是根视图，不应显示返回按钮，更不能返回到默认的第一个函数。
+    expect(wrapper.find('button.back-btn').exists()).toBe(false)
     // 重命名仍可用（锁定只去掉切换下拉）：原地变输入框
     await wrapper.find('button.fn-rename').trigger('click')
     expect(wrapper.find('.fn-static').exists()).toBe(false)
@@ -379,7 +443,7 @@ describe('StepCanvas：函数库上下文', () => {
     const created = setupScript('steps:\n  - log: a\n')
     const wrapper = mount(StepCanvas, { props: { model: created.model, stack: created.stack } })
     await wrapper.find('button.add-btn').trigger('click')
-    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('str_app')
+    await wrapper.find('button[data-kind="str_app"]').trigger('click')
     expect(created.model.steps).toHaveLength(2)
     created.stack.undo()
     expect(created.model.steps).toHaveLength(1)

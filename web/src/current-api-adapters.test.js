@@ -37,4 +37,11 @@ describe('当前 API 调用点窄适配', () => {
     await bridge[['upload', 'Template', 'Region'].join('')]('button.png', 'QUJD', 'com.demo', [0, 0, 1, 1])
     expect(api.createTemplate).toHaveBeenCalledWith('button.png', 'QUJD', 'com.demo', [0, 0, 1, 1])
   })
+
+  it('录制定稿勾选保留颜色时传递颜色选项', async () => {
+    const api = { createTemplate: vi.fn(async () => ({ ok: true })) }
+    const bridge = createRecordingApi(api)
+    await bridge[['upload', 'Template', 'Region'].join('')]('button.png', 'QUJD', 'com.demo', [0, 0, 1, 1], true)
+    expect(api.createTemplate).toHaveBeenCalledWith('button.png', 'QUJD', 'com.demo', [0, 0, 1, 1], true)
+  })
 })

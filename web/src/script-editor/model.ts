@@ -87,14 +87,14 @@ export function isStepKind(v: unknown): v is StepKind {
   return typeof v === 'string' && (STEP_KINDS as readonly string[]).includes(v)
 }
 
-/** match 候选：单模板 → 分支步骤列表（首个命中获胜）；click=true 命中后点击模板框中心。 */
+/** match 候选：单模板 → 分支步骤列表（首个命中获胜）；click=true 命中后点击模板框中心并等待 interval。 */
 export interface MatchCandidate {
   template: Cell
   click: boolean
   steps: Step[]
 }
 
-/** color 候选：有序列表，每项单颜色 → 分支步骤列表（不用颜色做映射键，契约 §4.2）；click=true 命中后点击取样点。 */
+/** color 候选：有序列表，每项单颜色 → 分支步骤列表（不用颜色做映射键，契约 §4.2）；click=true 命中后点击取样点并等待 interval。 */
 export interface ColorExpect {
   color: Cell
   click: boolean

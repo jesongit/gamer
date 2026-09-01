@@ -8,7 +8,7 @@
       <span class="branch-actions">
         <button
           v-if="depth < 2" type="button" class="mini-btn add" title="在此流程末尾添加步骤"
-          @click.stop="emit('add-here', containerPath)"
+          @click.stop="emit('add-here', containerPath, $event.currentTarget)"
         >+ 添加</button>
         <button
           v-else type="button" class="mini-btn focus-btn" title="全屏编辑该子流程（避免无限缩进）"
@@ -41,11 +41,17 @@
           @select="(u) => emit('select', u)"
           @toggle-expand="(u) => emit('toggle-expand', u)"
           @focus="(p) => emit('focus', p)"
-          @add-here="(p) => emit('add-here', p)"
+          @add-here="(p, el) => emit('add-here', p, el)"
           @test-from="(u) => emit('test-from', u)"
         />
       </div>
-      <div v-else class="branch-empty">空流程——点「+ 添加」插入步骤</div>
+      <div
+        v-else class="branch-empty"
+        :class="{ 'drop-active': emptyDropActive }"
+        @dragover.prevent.stop="onEmptyDragOver"
+        @dragleave.stop="onEmptyDragLeave"
+        @drop.prevent.stop="onEmptyDrop"
+      >空流程——点「+ 添加」插入步骤</div>
     </template>
     <div v-else class="branch-collapsed-hint">{{ list.length }} 个步骤，进入专注编辑查看与修改</div>
   </div>
@@ -62,11 +68,12 @@
  *   避免卡片无限向右缩进。
  * 所有写操作仍由 StepCard / 画布经 CommandStack 完成，本组件只做结构与转发。
  */
-import { computed, type PropType } from 'vue'
+import { computed, ref, type PropType } from 'vue'
 import type { Path } from '../commands'
 import { resolveStepList } from '../commands'
 import type { Diagnostic } from '../diagnostics'
 import type { ParamDecl, Step } from '../model'
+import { getActiveStepDrag, readStepDragPayload, type StepDragPayload } from '../step-dnd'
 import StepCard from './StepCard.vue'
 
 const props = defineProps({
@@ -96,6 +103,38 @@ const props = defineProps({
 const emit = defineEmits(['select', 'toggle-expand', 'focus', 'add-here', 'test-from'])
 
 const list = computed<Step[]>(() => resolveStepList(props.model, props.containerPath))
+
+const emptyDropActive = ref(false)
+
+function emptyDragPayload(event: DragEvent): StepDragPayload | null {
+  return readStepDragPayload(event.dataTransfer) ?? getActiveStepDrag()
+}
+
+function onEmptyDragOver(event: DragEvent): void {
+  emptyDropActive.value = !!emptyDragPayload(event)
+  if (emptyDropActive.value && event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+}
+
+function onEmptyDragLeave(event: DragEvent): void {
+  const current = event.currentTarget as HTMLElement
+  const next = event.relatedTarget
+  if (next instanceof Node && current.contains(next)) return
+  emptyDropActive.value = false
+}
+
+function onEmptyDrop(event: DragEvent): void {
+  const source = emptyDragPayload(event)
+  emptyDropActive.value = false
+  if (!source) return
+  props.stack.apply(
+    {
+      type: 'move_step',
+      from: { path: source.path, index: source.index },
+      to: { path: [...props.containerPath], index: 0 },
+    },
+    '拖动步骤',
+  )
+}
 </script>
 
 <style scoped>
@@ -128,6 +167,10 @@ const list = computed<Step[]>(() => resolveStepList(props.model, props.container
 .mini-btn.add { color: var(--accent-2); }
 .mini-btn.focus-btn { color: var(--warn); }
 .branch-steps { padding-left: 10px; border-left: 2px solid var(--border); }
-.branch-empty { font-size: 12px; color: var(--text-2); padding: 6px 2px 2px 10px; }
+.branch-empty {
+  font-size: 12px; color: var(--text-2); padding: 6px 2px 2px 10px;
+  border-radius: var(--radius-sm);
+}
+.branch-empty.drop-active { background: rgba(56, 189, 248, .12); outline: 1px dashed var(--accent); }
 .branch-collapsed-hint { font-size: 12px; color: var(--text-2); padding: 2px 2px 2px 10px; }
 </style>

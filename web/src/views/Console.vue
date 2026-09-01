@@ -468,7 +468,7 @@ const funcFileOptions = computed(() => {
   }))
 })
 
-const callParamsCache = new Map() // script id → ParamDecl[] | null
+const callParamsCache = new Map() // call 目标（脚本名/脚本 id）→ ParamDecl[] | null
 const fnParamsMemo = new Map() // `<file>@<内容版本>` → Map(函数名 → ParamDecl[])
 
 function funcParamsFor(target) {
@@ -492,7 +492,18 @@ function funcParamsFor(target) {
 function resolveTargetParamsSync(kind, target) {
   if (!target) return null
   if (kind === 'func') return funcParamsFor(target)
-  return callParamsCache.get(target) ?? null
+  if (callParamsCache.has(target)) return callParamsCache.get(target)
+  // /api/scripts 列表已带 content；优先同步解析，保证已有 call 步骤首次渲染时
+  // 就能按目标声明选择正确的 CellEditor 类型，不会先退化成 text。
+  const script = scriptsData.value.find(x => x.package === activePkg.value && x.name === target)
+  if (!script?.content) return null
+  try {
+    const params = parseScript(script.content).model?.params || []
+    callParamsCache.set(target, params)
+    return params
+  } catch {
+    return null
+  }
 }
 
 async function resolveTargetParams(kind, target) {
@@ -505,6 +516,7 @@ async function resolveTargetParams(kind, target) {
     const full = await api.getScript(script.id)
     const parsed = parseScript(full.content ?? '')
     const params = parsed.model?.params || []
+    callParamsCache.set(target, params)
     callParamsCache.set(script.id, params)
     return params
   } catch {
@@ -614,7 +626,7 @@ let hitTimer = null
 const liveLogs = ref([])
 const logBox = ref(null)
 // 二次裁切（右侧面板）
-const crop = reactive({ active: false, imgW: 0, imgH: 0, baseW: 0, baseH: 0, originX: 0, originY: 0, rect: { x: 0, y: 0, w: 0, h: 0 }, preview: '', name: '', zoom: 1 })
+const crop = reactive({ active: false, imgW: 0, imgH: 0, baseW: 0, baseH: 0, originX: 0, originY: 0, rect: { x: 0, y: 0, w: 0, h: 0 }, preview: '', name: '', zoom: 1, preserveColor: false, conflict: null })
 const cropCanvas = ref(null)
 const cropSec = ref(null)
 // 二次裁切底图：框选时冻结的初始画面，拖动时只动遮罩框
@@ -1657,6 +1669,7 @@ const cropZoomPct = computed(() => `${Math.round(crop.zoom * 100)}%`)
 /** 框选完成后打开右侧裁切区 */
 function openCrop(rect) {
   confirmDelTpl.value = null
+  crop.conflict = null
   const video = videoElement.value
   if (!video?.videoWidth) return toast('无法截取画面，请稍后重试', 'error')
   crop.imgW = video.videoWidth
@@ -1666,6 +1679,7 @@ function openCrop(rect) {
   crop.baseW = Math.round(rect.w)
   crop.baseH = Math.round(rect.h)
   crop.zoom = 1
+  crop.preserveColor = false
   // 冻结初始框选画面，二次裁切时底图不动，只动遮罩框
   cropBaseCanvas = document.createElement('canvas')
   cropBaseCanvas.width = crop.baseW
@@ -1683,6 +1697,7 @@ function openCrop(rect) {
 
 function cancelCrop() {
   crop.active = false
+  crop.conflict = null
   cropBaseCanvas = null
   crop.zoom = 1
   hideLoupe()
@@ -1692,6 +1707,7 @@ function cancelCrop() {
 
 function repick() {
   crop.active = false
+  crop.conflict = null
   cropBaseCanvas = null
   crop.zoom = 1
   picking.value = true
@@ -1901,17 +1917,17 @@ function cropMouseLeave() {
   if (cropDrag.mode) { cropDrag.mode = null; refreshCropPreview() }
 }
 
-/** 上传响应的体积提示：823KB → 96KB（服务端灰度 PNG 重编码） */
+/** 上传响应的体积提示：823KB → 96KB（服务端 PNG 重编码，默认灰度） */
 function tplSizeHint(rep) {
   if (!rep?.size || !rep?.orig_size) return ''
   const fmt = n => n >= 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + 'MB' : n >= 1024 ? Math.round(n / 1024) + 'KB' : n + 'B'
   return `（${fmt(rep.orig_size)} → ${fmt(rep.size)}）`
 }
 
-async function saveTemplate() {
+function cropUploadPayload() {
   const raw = crop.name.trim()
-  if (!raw) return toast('请输入模板名称', 'warn')
-  if (!activePkg.value) return toast('请先选择应用分区', 'warn')
+  if (!raw) { toast('请输入模板名称', 'warn'); return null }
+  if (!activePkg.value) { toast('请先选择应用分区', 'warn'); return null }
   const name = raw.toLowerCase().endsWith('.png') ? raw : raw + '.png'
   const shortName = name.replace(/#[^#]+\.png$/i, '.png')
   const region = [
@@ -1920,18 +1936,107 @@ async function saveTemplate() {
     (crop.originX + crop.baseW) / crop.imgW,
     (crop.originY + crop.baseH) / crop.imgH,
   ]
+  return { shortName, dataB64: crop.preview.split(',')[1], region, pkg: activePkg.value, preserveColor: crop.preserveColor }
+}
+
+function findCropConflict(shortName) {
+  const wanted = tplShortName(shortName).toLowerCase()
+  return templatesData.value.find(t => t.pkg === activePkg.value && tplShortName(t.name).toLowerCase() === wanted) || null
+}
+
+function showCropConflict(shortName, existing) {
+  crop.conflict = { name: existing.name, shortName }
+}
+
+function backToCrop() {
+  crop.conflict = null
+  nextTick(() => {
+    renderCropFrame()
+    refreshCropPreview()
+  })
+}
+
+async function refreshTemplatesData() {
+  try {
+    templatesData.value = await api.listTemplates()
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function finishCropSave(rep, shortName) {
+  const refreshed = await refreshTemplatesData()
+  crop.conflict = null
+  crop.active = false
+  cropBaseCanvas = null
+  hideLoupe()
+  toast(`模板 ${rep?.name || shortName} 已保存${tplSizeHint(rep)}${refreshed ? '' : '（模板列表刷新失败）'}`, refreshed ? 'success' : 'warn')
+  // 框选回填：保存成功把模板短名交回发起框选的单元格（CellEditor 自动填入）
+  if (cellCaptureResolve) { cellCaptureResolve(shortName); cellCaptureResolve = null }
+}
+
+async function saveTemplate() {
+  if (saving.value) return
+  const payload = cropUploadPayload()
+  if (!payload) return
+  const existing = findCropConflict(payload.shortName)
+  if (existing) {
+    showCropConflict(payload.shortName, existing)
+    return
+  }
   saving.value = true
   try {
-    const rep = await api.createTemplate(shortName, crop.preview.split(',')[1], activePkg.value, region)
-    templatesData.value = await api.listTemplates()
-    crop.active = false
-    cropBaseCanvas = null
-    hideLoupe()
-    toast(`模板 ${rep?.name || shortName} 已保存${tplSizeHint(rep)}`, 'success')
-    // 框选回填：保存成功把模板短名交回发起框选的单元格（CellEditor 自动填入）
-    if (cellCaptureResolve) { cellCaptureResolve(shortName); cellCaptureResolve = null }
+    const rep = await api.createTemplate(payload.shortName, payload.dataB64, payload.pkg, payload.region, payload.preserveColor)
+    await finishCropSave(rep, payload.shortName)
   } catch (e) {
+    // 列表可能在本页打开后被其他页面更新；把服务端 409 也转成同一对比态。
+    if (e?.status === 409) {
+      try {
+        templatesData.value = await api.listTemplates()
+        const current = findCropConflict(payload.shortName)
+        if (current) { showCropConflict(payload.shortName, current); return }
+      } catch { /* 刷新失败时保留原错误提示 */ }
+    }
     toast('保存失败：' + e.message, 'error')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function overwriteTemplate() {
+  if (saving.value || !crop.conflict) return
+  const payload = cropUploadPayload()
+  if (!payload) return
+  saving.value = true
+  let deleted = false
+  try {
+    // 覆盖确认可能停留较久，先拿最新列表，避免第一次操作后仍持有已删除的旧文件名。
+    const refreshed = await refreshTemplatesData()
+    const existing = refreshed ? findCropConflict(payload.shortName) : crop.conflict
+    // 旧模板已被其他页面删除时，覆盖动作退化为普通新建，保证重复点击可恢复。
+    if (!existing) {
+      const rep = await api.createTemplate(payload.shortName, payload.dataB64, payload.pkg, payload.region, payload.preserveColor)
+      await finishCropSave(rep, payload.shortName)
+      return
+    }
+    await api.deleteTemplate(existing.name, payload.pkg)
+    deleted = true
+    const rep = await api.createTemplate(payload.shortName, payload.dataB64, payload.pkg, payload.region, payload.preserveColor)
+    await finishCropSave(rep, payload.shortName)
+  } catch (e) {
+    if (deleted) {
+      // 删除成功但新图保存失败时，旧模板已经不存在；退出冲突态，避免下一次继续删除同一文件。
+      const refreshed = await refreshTemplatesData()
+      const current = refreshed && findCropConflict(payload.shortName)
+      if (refreshed && !current) {
+        crop.conflict = null
+        toast('旧模板已删除，但新模板保存失败，请返回裁切界面后再次点击保存', 'error')
+        return
+      }
+      if (current) showCropConflict(payload.shortName, current)
+    }
+    toast('覆盖失败：' + e.message, 'error')
   } finally {
     saving.value = false
   }
@@ -2291,9 +2396,14 @@ function pushLog(level, msg) {
 
 
 
+/** 去掉模板名尾部的颜色标记；#1 不是搜索区域的一部分。 */
+function stripTplColorMarker(name) {
+  return String(name || '').replace(/#1(\.(png|jpe?g))$/i, '$1')
+}
+
 /** 从模板名解析 #x1_y1_x2_y2（相对坐标 ×1000 存 3 位整数，如 123→0.123），返回 [x1,y1,x2,y2] 或 null */
 function parseTplRegion(name) {
-  const base = name.replace(/\.(png|jpe?g)$/i, '')
+  const base = stripTplColorMarker(name).replace(/\.(png|jpe?g)$/i, '')
   const idx = base.lastIndexOf('#')
   if (idx < 0) return null
   const parts = base.slice(idx + 1).split('_')
@@ -2305,7 +2415,7 @@ function parseTplRegion(name) {
 
 /** 从模板名解析半区代码后缀（#a/#u/#d/#l/#r/#ul/#ur/#dl/#dr），如 task_item#l.png → 'l'；无 → null */
 function parseTplRegionCode(name) {
-  const base = name.replace(/\.(png|jpe?g)$/i, '')
+  const base = stripTplColorMarker(name).replace(/\.(png|jpe?g)$/i, '')
   const idx = base.lastIndexOf('#')
   if (idx < 0) return null
   const code = base.slice(idx + 1).toLowerCase()
@@ -2315,12 +2425,12 @@ function parseTplRegionCode(name) {
 /** 模板短名：去掉 #区域后缀（login#0_0_500_500.png → login.png），无后缀原样返回。
  *  脚本里写短名即可，引擎自动解析到唯一匹配的带后缀文件（区域照常生效） */
 function tplShortName(name) {
-  return name.replace(/#[^#./\\]+(\.(png|jpe?g))$/i, '$1')
+  return stripTplColorMarker(name).replace(/#[^#./\\]+(\.(png|jpe?g))$/i, '$1')
 }
 
 /** 模板名区域徽标文本：半区码直接显示码字（l/r/dr…），数字坐标显示 ◧（悬停看全名） */
 function tplRegionBadge(name) {
-  const base = name.replace(/\.(png|jpe?g)$/i, '')
+  const base = stripTplColorMarker(name).replace(/\.(png|jpe?g)$/i, '')
   const idx = base.lastIndexOf('#')
   if (idx < 0) return ''
   const s = base.slice(idx + 1).toLowerCase()
@@ -2515,28 +2625,7 @@ function renameEditingFunction(fromName, toName) {
   return !!changed
 }
 
-/** 函数摘要「更多 → 重命名」：只改当前函数名，不改函数库文件名。 */
-async function renameFunction(fnName) {
-  const raw = window.prompt('函数名', fnName)
-  const next = raw?.trim()
-  if (!next || next === fnName) return
-  await updateCurrentFunctionFile(model => {
-    if (!Array.isArray(model.functions)) return false
-    if (model.functions.some(fn => fn.name === next)) {
-      toast(`已存在同名函数：${next}`, 'warn')
-      return false
-    }
-    const fn = model.functions.find(item => item.name === fnName)
-    if (!fn) {
-      toast(`函数不存在：${fnName}`, 'warn')
-      return false
-    }
-    fn.name = next
-    return true
-  }, `函数已重命名为 ${next}`)
-}
-
-/** 函数摘要「更多 → 删除」：删除当前文件中的一个函数，至少保留一个。 */
+/** 函数摘要「删除」：删除当前文件中的一个函数，至少保留一个。 */
 async function deleteFunction(fnName) {
   const f = fnLib.list.find(x => x.id === selFnFile.value)
   if (!f) return toast('请先选择函数库文件', 'warn')
@@ -3041,7 +3130,7 @@ const templateCaptureContext = {
   picking, connected, togglePick, templates, confirmDelTpl, renaming, onTplRowClick, onTplThumbClick,
   tplThumbUrl, onTplNameClick, setRenameInputEl, renameVal, confirmRename, cancelRename, startRename,
   onTplDeleteClick, onTplMatchClick, onTplUpload, tplShortName, tplRegionBadge, cropSize, cropZoomPct,
-  cropMouseDown, cropMouseMove, cropMouseUp, cropMouseLeave, cropWheel, saveTemplate, cancelCrop,
+  cropMouseDown, cropMouseMove, cropMouseUp, cropMouseLeave, cropWheel, saveTemplate, overwriteTemplate, backToCrop, cancelCrop,
   repick, saving, viewTpl, closeTplView, replaceTemplateImage,
 }
 const scriptRunnerContext = {
@@ -3050,7 +3139,7 @@ const scriptRunnerContext = {
   runKind, selFnFile, canRunTarget, selTargetId, fnLib, autoSaveDebounced,
   // 函数模式摘要：逐函数分组视图（每组一个 ScriptSummary）+ 解析失败文案
   funcFnViews, funcSummaryError,
-  editCurrentTarget, startNewTarget, deleteCurrentTarget, addFunctionToCurrentFile, renameEditingFunction, renameFunction, deleteFunction,
+  editCurrentTarget, startNewTarget, deleteCurrentTarget, addFunctionToCurrentFile, renameEditingFunction, deleteFunction,
   editCurrentScript, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
   // 运行视图：只读摘要 + 运行起点 + call/func 结构化跳转（替代旧源码行点击/文本预览）
   summaryModel, summaryError, runFromStep, openScriptTarget, resourcePreview, closeResourcePreview,

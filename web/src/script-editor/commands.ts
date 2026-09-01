@@ -188,6 +188,23 @@ function isDescendantPath(ancestor: Path, descendant: Path): boolean {
   return true
 }
 
+/**
+ * 源步骤删除后，目标容器路径中位于同一宿主列表、且排在源步骤后的祖先下标会左移一位。
+ * 例如从 steps[0] 拖到 steps[1].then，删除源步骤后目标路径变为 steps[0].then。
+ */
+function pathAfterRemoval(targetPath: Path, sourcePath: Path, sourceIndex: number): Path {
+  const result = clonePath(targetPath)
+  if (result.length <= sourcePath.length) return result
+  for (let i = 0; i < sourcePath.length; i++) {
+    if (result[i] !== sourcePath[i]) return result
+  }
+  const ancestorIndex = result[sourcePath.length]
+  if (typeof ancestorIndex === 'number' && ancestorIndex > sourceIndex) {
+    result[sourcePath.length] = ancestorIndex - 1
+  }
+  return result
+}
+
 export class CommandStack {
   private readonly model: EditorModel
   private readonly entries: HistoryEntry[] = []
@@ -354,20 +371,19 @@ export class CommandStack {
         const to = { path: clonePath(command.to.path), index: command.to.index }
         // to.index 语义：源元素删除后目标列表中的插入下标（post-removal）。
         // redo 后元素实际位于 min(to.index, 目标列表长度)；undo 按该位置取回并放回 from.index。
-        // 该推导对同列表/跨列表统一成立，无需区分。
-        // to.index 语义：源元素删除后目标列表中的插入下标（post-removal）。
-        // redo 后元素实际位于 min(to.index, 目标列表长度)；undo 按该位置取回并放回 from.index。
+        // 源步骤删除可能让目标容器路径中的祖先下标左移，需在两次方向上使用同一条修正路径。
+        const toPathAfterRemoval = pathAfterRemoval(to.path, from.path, from.index)
         const moveForward = (): void => {
           const fl = resolveStepList(this.model, from.path)
           if (from.index < 0 || from.index >= fl.length) return
           const s = fl[from.index]
           fl.splice(from.index, 1)
-          const tl = resolveStepList(this.model, to.path)
+          const tl = resolveStepList(this.model, toPathAfterRemoval)
           const insertAt = Math.max(0, Math.min(to.index, tl.length))
           tl.splice(insertAt, 0, s)
         }
         const moveBack = (): void => {
-          const tl = resolveStepList(this.model, to.path)
+          const tl = resolveStepList(this.model, toPathAfterRemoval)
           if (tl.length === 0) return
           const pos = Math.min(to.index, tl.length - 1)
           const s = tl[pos]

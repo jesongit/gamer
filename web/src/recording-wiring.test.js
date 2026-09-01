@@ -254,6 +254,21 @@ describe('上传定稿 / 失败重试 / 坐标降级 / 丢弃', () => {
     expect(serialize(h.shell.model)).toContain('- find: login_btn.png')
   })
 
+  it('确认裁切勾选保留颜色时把选项传给模板创建 API', async () => {
+    const h = await makeHarness()
+    h.rec.onPointerDown(pt(0.5, 0.5))
+    h.rec.onPointerUp(pt(0.5, 0.5))
+    const view = h.rec.panelDraft
+    expect(h.rec.confirmCrop(view, {
+      name: 'color_btn.png',
+      rect: view.draft.aRect,
+      adjusted: false,
+      preserveColor: true,
+    })).toBe(true)
+    await flush()
+    expect(h.api.createTemplate.mock.calls[0][4]).toBe(true)
+  })
+
   it('滑动定稿 → match 候选[短名]{swipe fm/to/time} + else throw + timeout 30s', async () => {
     const h = await makeHarness()
     h.rec.onPointerDown(pt(0.5, 0.8))

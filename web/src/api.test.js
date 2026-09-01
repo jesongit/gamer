@@ -33,6 +33,25 @@ describe('唯一资源 API surface', () => {
     }
   })
 
+  it('invalid_yaml 优先展示服务端首条结构化诊断，而不是只显示错误码', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(400, {
+      error: 'invalid_yaml',
+      diagnostics: [{
+        code: 'step.field.missing',
+        message: 'loop 缺少 steps',
+        step_path: 'steps[2]',
+        field: 'steps',
+      }],
+    }))
+
+    await expect(api.createScript({ pkg: 'com.demo', name: 'main.yaml', content: 'steps: []\n' }))
+      .rejects.toMatchObject({
+        code: 'invalid_yaml',
+        message: 'loop 缺少 steps（steps[2].steps）',
+        details: [{ code: 'step.field.missing' }],
+      })
+  })
+
   it('脚本创建 POST 只发送当前字段；更新 PUT 整体编码 id 并携带 expected_version', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/main.yaml' }))
     await api.createScript({ pkg: 'com.demo', name: 'main.yaml', content: 'steps: []\n', id: 'old-id' })
@@ -76,10 +95,17 @@ describe('唯一资源 API surface', () => {
       short_name: 'shot.png', region: [0.1, 0.2, 0.8, 0.9], data_b64: 'QUJD', pkg: 'com.demo',
     })
 
+    fetch.mockResolvedValueOnce(jsonRes(200, { ok: true, name: 'color#100_200_800_900#1.png' }))
+    await api.createTemplate('color.png', 'QUJD', 'com.demo', [0.1, 0.2, 0.8, 0.9], true)
+    expect(bodyOf(1)).toEqual({
+      short_name: 'color.png', region: [0.1, 0.2, 0.8, 0.9], grayscale_only: false,
+      data_b64: 'QUJD', pkg: 'com.demo',
+    })
+
     fetch.mockResolvedValueOnce(jsonRes(200, { ok: true, name: 'shot.png' }))
     await api.replaceTemplateImage('shot#100_200_800_900.png', 'REVG', 'com.demo')
-    expect(fetch.mock.calls[1][0]).toBe('/api/templates/shot%23100_200_800_900.png/image?pkg=com.demo')
-    expect(fetch.mock.calls[1][1].method).toBe('PUT')
-    expect(bodyOf(1)).toEqual({ data_b64: 'REVG' })
+    expect(fetch.mock.calls[2][0]).toBe('/api/templates/shot%23100_200_800_900.png/image?pkg=com.demo')
+    expect(fetch.mock.calls[2][1].method).toBe('PUT')
+    expect(bodyOf(2)).toEqual({ data_b64: 'REVG' })
   })
 })

@@ -299,6 +299,7 @@ export function useRecording({
           rect: draft.aRect,
           searchRect: draft.searchRect,
           name: nextShortName(entry.kind, draft.shortName),
+          preserveColor: false,
         })
       }
     }
@@ -306,7 +307,7 @@ export function useRecording({
 
   // ---- 裁切/上传（deliverable 5）----
   // 最近一次裁切尝试（重试沿用同一裁切结果与短名）
-  const attemptMeta = new Map() // uuid -> {rect, searchRect, name}
+  const attemptMeta = new Map() // uuid -> {rect, searchRect, name, preserveColor}
   function defaultCropPng(frameDataUrl, rect) {
     return new Promise((resolve, reject) => {
       const img = new Image()
@@ -336,7 +337,7 @@ export function useRecording({
     return [x1, y1, x2, y2]
   }
 
-  async function finalizeEntry(entry, { rect, searchRect, name }) {
+  async function finalizeEntry(entry, { rect, searchRect, name, preserveColor = false }) {
     if (!entry || !entry.draft) return
     if (TERMINAL_STATES.has(entry.state) || entry.state === 'uploading' || finalizing.has(entry.uuid)) return
     const pkg = activePkg && 'value' in activePkg ? activePkg.value : activePkg
@@ -345,12 +346,18 @@ export function useRecording({
       return
     }
     finalizing.add(entry.uuid)
-    attemptMeta.set(entry.uuid, { rect, searchRect, name })
+    attemptMeta.set(entry.uuid, { rect, searchRect, name, preserveColor })
     const p = (async () => {
       try { controller.queue.setUploading(entry.uuid) } catch { /* cropping 直传时不重复标记 */ }
       try {
         const b64 = await cropPng(entry.draft.frameDataUrl, rect)
-        await api.uploadTemplateRegion(name, b64, pkg, regionOf(searchRect, entry.draft.frameW, entry.draft.frameH))
+        await api.uploadTemplateRegion(
+          name,
+          b64,
+          pkg,
+          regionOf(searchRect, entry.draft.frameW, entry.draft.frameH),
+          preserveColor,
+        )
         try { templatesData.value = await api.listTemplates() } catch { /* 列表刷新失败不阻塞步骤定稿 */ }
         usedNames.add(name)
         const step = buildStep(entry.kind, { name, draft: entry.draft, uuid: entry.uuid })
@@ -372,7 +379,7 @@ export function useRecording({
   }
 
   /** 面板确认：短名校验（冲突要求改名不覆盖）→ 上传 → 定稿。 */
-  function confirmCrop(entry, { name, rect, adjusted }) {
+  function confirmCrop(entry, { name, rect, adjusted, preserveColor = false }) {
     const real = controller.queue.get(entry?.uuid) || entry
     if (!real || !real.draft || TERMINAL_STATES.has(real.state) || real.state === 'uploading') return false
     const nm = String(name || '').trim()
@@ -387,7 +394,7 @@ export function useRecording({
     const searchRect = adjusted
       ? searchRectManual(real.draft.aRect, rect, real.draft.frameW, real.draft.frameH)
       : (real.draft.searchRect || searchRectAuto(real.draft.aRect, real.draft.frameW, real.draft.frameH))
-    void finalizeEntry(real, { rect, searchRect, name: nm })
+    void finalizeEntry(real, { rect, searchRect, name: nm, preserveColor })
     return true
   }
 
@@ -435,6 +442,7 @@ export function useRecording({
       rect: last.rect || draft.aRect,
       searchRect: last.searchRect || draft.searchRect,
       name: last.name || nextShortName(real.kind, draft.shortName),
+      preserveColor: last.preserveColor || false,
     })
     return true
   }

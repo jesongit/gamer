@@ -180,6 +180,7 @@
  */
 import { computed, inject, ref } from 'vue'
 import type { PropType } from 'vue'
+import { pinyin } from 'pinyin-pro'
 import { isRefCell, type Cell, type ParamDecl, type ParamType } from '../model'
 import { checkCellLiteral, KEY_ENUM } from '../schema'
 
@@ -281,10 +282,37 @@ const selfError = computed(() => {
 const open = ref(false)
 const hovered = ref('')
 const tplPreviewUrl = inject<((short: string) => string | null) | null>('tplPreviewUrl', null)
+
+// 与模板列表保持同一搜索口径：名称子串 + 中文名拼音首字母；匹配位置越靠前越优先。
+const tplPinyinCache = new Map<string, string>()
+const PY_OFFSET = 1e4
+function tplPinyinInitials(name: string): string {
+  let initials = tplPinyinCache.get(name)
+  if (initials === undefined) {
+    initials = pinyin(name, { pattern: 'first', toneType: 'none', type: 'array' })
+      .join('').replace(/\s+/g, '').toLowerCase()
+    tplPinyinCache.set(name, initials)
+  }
+  return initials
+}
+function templateMatchIndex(name: string, query: string): number {
+  const direct = name.toLowerCase().indexOf(query)
+  if (direct !== -1) return direct
+  // 拼音首字母串不含中文，查询词含中文时跳过该口径。
+  if (!/[\u4e00-\u9fff]/.test(query)) {
+    const initial = tplPinyinInitials(name).indexOf(query)
+    if (initial !== -1) return PY_OFFSET + initial
+  }
+  return -1
+}
 const filteredTemplates = computed(() => {
   const q = litString.value.trim().toLowerCase()
   if (!q) return props.templates
-  return props.templates.filter((t) => t.toLowerCase().includes(q))
+  return props.templates
+    .map((name, index) => ({ name, index, match: templateMatchIndex(name, q) }))
+    .filter((item) => item.match !== -1)
+    .sort((a, b) => a.match - b.match || a.index - b.index)
+    .map((item) => item.name)
 })
 function thumbUrl(t: string): string | null {
   return tplPreviewUrl ? tplPreviewUrl(t) : null

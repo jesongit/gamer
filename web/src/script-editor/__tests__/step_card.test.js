@@ -5,6 +5,7 @@ import { makeStep } from '../factories'
 import { STEP_KINDS } from '../model'
 import { stepSummary } from '../components/kinds'
 import StepCard from '../components/StepCard.vue'
+import StepCanvas from '../components/StepCanvas.vue'
 import { expandCard, setupScript } from './component_helpers'
 
 /**
@@ -337,6 +338,53 @@ describe('StepCard：上移/下移/复制/删除（经 CommandStack）', () => {
     await wrapper.find('button[title="删除步骤"]').trigger('click')
     expect(model.steps).toHaveLength(0)
     expect(wrapper.emitted('select')[0]).toEqual([null])
+  })
+})
+
+describe('StepCard：拖动排序', () => {
+  function transfer() {
+    const data = new Map()
+    return {
+      setData(type, value) { data.set(type, value) },
+      getData(type) { return data.get(type) ?? '' },
+      effectAllowed: '',
+      dropEffect: '',
+    }
+  }
+
+  it('拖动手柄调整同列表顺序，并可撤销', async () => {
+    const created = setupScript('steps:\n  - log: a\n  - log: b\n  - log: c')
+    const wrapper = mount(StepCanvas, { props: { model: created.model, stack: created.stack } })
+    const source = created.model.steps[0]
+    const target = created.model.steps[2]
+    const dt = transfer()
+    const targetCard = wrapper.find(`[data-step-uuid="${target.uuid}"]`)
+    targetCard.element.getBoundingClientRect = () => ({ top: 0, bottom: 100, height: 100 })
+
+    await wrapper.find(`[data-step-uuid="${source.uuid}"] .drag-handle`).trigger('dragstart', { dataTransfer: dt })
+    await targetCard.trigger('dragover', { dataTransfer: dt, clientY: 90 })
+    await targetCard.trigger('drop', { dataTransfer: dt, clientY: 90 })
+
+    expect(created.model.steps.map((s) => s.message.lit)).toEqual(['b', 'c', 'a'])
+    created.stack.undo()
+    expect(created.model.steps.map((s) => s.message.lit)).toEqual(['a', 'b', 'c'])
+  })
+
+  it('拖入空分支时移动到该分支末尾', async () => {
+    const created = setupScript('steps:\n  - log: outside\n  - if: true\n    then: []\n    else: []')
+    const wrapper = mount(StepCanvas, { props: { model: created.model, stack: created.stack } })
+    const source = created.model.steps[0]
+    const ifStep = created.model.steps[1]
+    await wrapper.find(`[data-step-uuid="${ifStep.uuid}"] button[title="展开编辑"]`).trigger('click')
+    const dt = transfer()
+    await wrapper.find(`[data-step-uuid="${source.uuid}"] .drag-handle`).trigger('dragstart', { dataTransfer: dt })
+    const empty = wrapper.find(`[data-step-uuid="${ifStep.uuid}"] .branch-container .branch-empty`)
+    await empty.trigger('dragover', { dataTransfer: dt })
+    await empty.trigger('drop', { dataTransfer: dt })
+
+    expect(created.model.steps).toHaveLength(1)
+    expect(created.model.steps[0]).toBe(ifStep)
+    expect(ifStep.then.map((s) => s.message.lit)).toEqual(['outside'])
   })
 })
 

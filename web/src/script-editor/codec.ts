@@ -585,7 +585,7 @@ function parseConfig(node: YNode | null, diags: Diagnostic[]): ScriptConfig | nu
         if (raw !== null && raw.kind === 'scalar' && typeof scalarValue(raw) === 'string') {
           config.interval = String(scalarValue(raw))
         } else if (raw !== null && !isNullScalar(raw)) {
-          diags.push(diag(CODES.stepFieldTypeMismatch, 'config', 'interval', 'interval 必须是带单位时间串（如 500ms）'))
+          diags.push(diag(CODES.stepFieldTypeMismatch, 'config', 'interval', 'interval（轮询/点击后等待）必须是带单位时间串（如 500ms）'))
         }
         break
       case 'threshold':

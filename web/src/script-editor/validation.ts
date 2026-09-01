@@ -105,7 +105,7 @@ function validateParamDecls(decls: ParamDecl[], basePath: string, diags: Diagnos
 function validateConfig(config: ScriptModel['config'], diags: Diagnostic[]): void {
   if (!config) return
   if (typeof config.interval !== 'string' || parseTimeMs(config.interval) === null) {
-    diags.push(diag(CODES.stepTimeFormat, 'config', 'interval', `interval 须带单位（ms/s/m/min/h/d）且 >0，收到 ${JSON.stringify(config.interval)}`))
+    diags.push(diag(CODES.stepTimeFormat, 'config', 'interval', `interval（轮询/点击后等待）须带单位（ms/s/m/min/h/d）且 >0，收到 ${JSON.stringify(config.interval)}`))
   }
   if (typeof config.threshold !== 'number' || !Number.isFinite(config.threshold) || config.threshold < 0 || config.threshold > 1) {
     diags.push(diag(CODES.stepFieldTypeMismatch, 'config', 'threshold', 'threshold 必须是 0~1 的数字'))

@@ -41,13 +41,17 @@
           @click.stop="beginRename"
         >重命名</button>
       </template>
-      <!-- 非根视图（专注/面包屑导航后）：显式返回入口，与面包屑首节点等效 -->
+      <!-- 非根视图（专注/面包屑导航后）：返回上一个专注视图，而不是固定跳回根流程 -->
       <button
         v-if="!atRoot" type="button" class="fn-btn back-btn"
-        :title="`返回${rootLabel}步骤列表`"
-        @click.stop="goRoot"
-      >← 返回</button>
-      <button v-if="!hideFunctionToolbar" type="button" class="add-btn" :class="{ active: panelOpen }" title="添加步骤（选择后插入到当前锚点）" @click.stop="openAdd">+ 步骤</button>
+        :title="focusHistory.length ? '返回上一个专注视图' : `返回${rootLabel}步骤列表`"
+        @click.stop="goBack"
+      >← 返回上一级</button>
+      <button
+        v-if="!hideFunctionToolbar" ref="addButtonEl" type="button" class="add-btn"
+        :class="{ active: panelOpen }" title="添加步骤（选择后插入到当前锚点）"
+        @click.stop="openAdd($event.currentTarget)"
+      >+ 步骤</button>
       <template v-if="isFunction && !hideFunctionToolbar">
         <button
           type="button"
@@ -96,6 +100,7 @@
          选择步骤后由同一条 CommandStack 插入。 -->
     <div v-if="panelOpen" class="add-dropdown-wrap" @click.stop>
       <AddStepPanel
+        :style="addMenuStyle"
         :context="context"
         :stack="stack"
         :anchor="anchor"
@@ -206,7 +211,6 @@ function toggleExpand(uuid: string): void {
 
 // ---------- 容器状态（当前容器 + 专注视图） ----------
 
-const rootPath = computed<Path>(() => rootContainerPath(props.model))
 const isFunction = computed(() => 'functions' in props.model)
 const fnNames = computed<string[]>(() =>
   isFunction.value ? (props.model as { functions: { name: string }[] }).functions.map((f) => f.name) : [],
@@ -214,6 +218,19 @@ const fnNames = computed<string[]>(() =>
 
 const currentContainer = ref<Path>(rootContainerPath(props.model))
 const focusPath = ref<Path | null>(null)
+const focusHistory = ref<Path[]>([])
+
+/** 根路径必须是当前编辑函数的函数体，而不是函数库中的第一个函数。 */
+const rootPath = computed<Path>(() => {
+  if (!isFunction.value) return ['steps']
+  const currentFn = String(currentContainer.value[1] ?? '')
+  const name = fnNames.value.includes(currentFn) ? currentFn : (fnNames.value[0] ?? '')
+  return ['functions', name, 'steps']
+})
+
+function samePath(a: Path, b: Path): boolean {
+  return a.length === b.length && a.every((segment, i) => segment === b[i])
+}
 
 watch(
   () => [props.model, props.initialFn] as const,
@@ -225,6 +242,7 @@ watch(
       currentContainer.value = ['functions', want, 'steps']
     }
     focusPath.value = null
+    focusHistory.value = []
     innerSelected.value = null
   },
   { immediate: true },
@@ -252,8 +270,11 @@ const activeLabel = computed(() => {
 const basePathActive = computed(() => basePathOfContainer(activeContainer.value))
 
 function enterFocus(path: Path): void {
-  focusPath.value = path
-  currentContainer.value = path
+  const current = activeContainer.value
+  if (samePath(current, path)) return
+  focusHistory.value.push([...current])
+  focusPath.value = [...path]
+  currentContainer.value = [...path]
 }
 function navigateTo(node: BreadcrumbNode): void {
   const root = rootPath.value
@@ -261,8 +282,14 @@ function navigateTo(node: BreadcrumbNode): void {
   if (isRoot) {
     goRoot()
   } else {
-    focusPath.value = node.containerPath
-    currentContainer.value = node.containerPath
+    const target = node.containerPath
+    if (samePath(activeContainer.value, target)) return
+    const historyIndex = focusHistory.value.findIndex((path) => samePath(path, target))
+    focusHistory.value = historyIndex >= 0
+      ? focusHistory.value.slice(0, historyIndex)
+      : focusHistory.value.slice(0, -1)
+    focusPath.value = [...target]
+    currentContainer.value = [...target]
   }
 }
 
@@ -278,10 +305,22 @@ const rootLabel = computed(() => {
 })
 function goRoot(): void {
   focusPath.value = null
+  focusHistory.value = []
   currentContainer.value = rootPath.value
+}
+function goBack(): void {
+  const previous = focusHistory.value.pop() ?? rootPath.value
+  if (samePath(previous, rootPath.value)) {
+    focusPath.value = null
+    currentContainer.value = rootPath.value
+  } else {
+    focusPath.value = [...previous]
+    currentContainer.value = [...previous]
+  }
 }
 function switchFn(name: string): void {
   focusPath.value = null
+  focusHistory.value = []
   currentContainer.value = ['functions', name, 'steps']
   innerSelected.value = null
   emit('select', null)
@@ -316,6 +355,7 @@ function confirmRename(): void {
   }
   if (props.stack.apply({ type: 'rename_function', from: current, to }, `重命名函数 ${current} → ${to}`)) {
     focusPath.value = null
+    focusHistory.value = []
     currentContainer.value = ['functions', to, 'steps']
     innerSelected.value = null
     emit('select', null)
@@ -331,6 +371,7 @@ function addFunction(): void {
   const name = `func${i}`
   if (props.stack.apply({ type: 'insert_function', name }, `新增函数 ${name}`)) {
     focusPath.value = null
+    focusHistory.value = []
     currentContainer.value = ['functions', name, 'steps']
     innerSelected.value = null
     emit('select', null)
@@ -344,6 +385,7 @@ function removeActiveFn(): void {
   if (!name || !window.confirm(`删除函数 ${name}？（其 params 与 steps 一并移除，可撤销）`)) return
   if (props.stack.apply({ type: 'remove_function', name }, `删除函数 ${name}`)) {
     focusPath.value = null
+    focusHistory.value = []
     currentContainer.value = rootPath.value
     innerSelected.value = null
     emit('select', null)
@@ -383,22 +425,84 @@ const anchorLabel = computed(() => {
 // ---------- 添加面板（紧凑下拉态） ----------
 
 const panelOpen = ref(false)
+const addButtonEl = ref<HTMLElement | null>(null)
+const addAnchorEl = ref<HTMLElement | null>(null)
+const addMenuStyle = ref<Record<string, string>>({})
 
-function openAdd(): void {
+function updateAddMenuPosition(): void {
+  const target = addAnchorEl.value ?? addButtonEl.value
+  if (!target) return
+  const rect = target.getBoundingClientRect()
+  const width = Math.min(320, Math.max(220, window.innerWidth - 32))
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))
+  const panel = rootEl.value?.querySelector('.add-step-panel') as HTMLElement | null
+  // 先清掉上一次计算的高度，避免滚动后菜单只能保持此前较小的高度。
+  if (panel) panel.style.maxHeight = ''
+  const panelHeight = panel?.getBoundingClientRect().height ?? 0
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight
+  const margin = 8
+  const gap = 4
+  const spaceBelow = Math.max(0, viewportHeight - rect.bottom - margin)
+  const spaceAbove = Math.max(0, rect.top - margin)
+  // 下方放不下时翻到锚点上方；两边都放不下则选空间更大的一侧并滚动菜单内容。
+  const openAbove = panelHeight > spaceBelow && spaceAbove > spaceBelow
+  const available = openAbove ? spaceAbove : spaceBelow
+  const top = openAbove
+    ? Math.max(margin, rect.top - Math.min(panelHeight, available) - gap)
+    : Math.max(margin, rect.bottom + gap)
+  addMenuStyle.value = {
+    position: 'fixed',
+    left: `${left}px`,
+    top: `${top}px`,
+    maxHeight: `${Math.max(0, available)}px`,
+  }
+}
+
+function setAddAnchor(target: unknown): void {
+  addAnchorEl.value = target instanceof HTMLElement ? target : addButtonEl.value
+  void nextTick(updateAddMenuPosition)
+}
+
+function watchAddMenuPosition(): void {
+  window.addEventListener('resize', updateAddMenuPosition)
+  window.addEventListener('scroll', updateAddMenuPosition, true)
+  void nextTick(updateAddMenuPosition)
+}
+
+function unwatchAddMenuPosition(): void {
+  window.removeEventListener('resize', updateAddMenuPosition)
+  window.removeEventListener('scroll', updateAddMenuPosition, true)
+}
+
+function openAdd(target?: unknown): void {
   pendingAddPath.value = null
-  panelOpen.value = !panelOpen.value
+  const next = !panelOpen.value
+  panelOpen.value = next
+  if (next) {
+    setAddAnchor(target)
+    watchAddMenuPosition()
+  } else {
+    unwatchAddMenuPosition()
+    addAnchorEl.value = null
+    addMenuStyle.value = {}
+  }
 }
 function closeAdd(): void {
   panelOpen.value = false
   pendingAddPath.value = null
+  unwatchAddMenuPosition()
+  addAnchorEl.value = null
+  addMenuStyle.value = {}
 }
-function onAddHere(path: Path): void {
+function onAddHere(path: Path, target?: unknown): void {
   // 容器级「+ 添加」（含嵌套分支）：只记住插入目标并展开下拉，视图不再切进子流程
   // （此前会整屏跳到该容器，只有顶部面包屑能返回，容易被困在子流程里）
   innerSelected.value = null
   emit('select', null)
   pendingAddPath.value = path
   panelOpen.value = true
+  setAddAnchor(target)
+  watchAddMenuPosition()
 }
 function onInserted(uuid: string): void {
   closeAdd()
@@ -540,8 +644,7 @@ function locate(diag: Diagnostic): void {
   for (const u of hit.ancestorUuids) expandedUuids.add(u)
   // 宿主容器嵌套超过一层 → 专注到该容器；否则回根视图
   if (containerNesting(hit.containerPath) > 1) {
-    focusPath.value = hit.containerPath
-    currentContainer.value = hit.containerPath
+    enterFocus(hit.containerPath)
   } else if (!isFunction.value) {
     focusPath.value = null
     currentContainer.value = rootPath.value
@@ -554,6 +657,7 @@ function locate(diag: Diagnostic): void {
 onBeforeUnmount(() => {
   if (highlightTimer) clearTimeout(highlightTimer)
   crumbRo?.disconnect()
+  unwatchAddMenuPosition()
 })
 
 // ---------- 参数列表（CellEditor 引用下拉） ----------
@@ -635,6 +739,6 @@ defineExpose({ anchor, locate, activeFnName, openAdd })
 }
 .add-btn:hover { background: var(--accent); color: #06251c; }
 .anchor-hint { font-size: 12px; color: var(--text-2); padding: 4px 2px; }
-.add-dropdown-wrap { position: relative; z-index: 10; margin: 0 0 4px; }
+.add-dropdown-wrap { position: static; min-height: 0; margin: 0; }
 .back-btn { color: var(--accent-2); }
 </style>

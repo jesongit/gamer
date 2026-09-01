@@ -69,6 +69,27 @@ async function flush() {
 }
 
 describe('call 目标下拉 + args 自动生成', () => {
+  it('args 按目标参数类型复用步骤控件，并显示模板候选', async () => {
+    const options = makeOptions({
+      resolveParams: async () => [
+        { type: 'tmpl', name: 'account', remark: '账号模板', default: null },
+      ],
+      resolveParamsSync: () => [
+        { type: 'tmpl', name: 'account', remark: '账号模板', default: null },
+      ],
+    })
+    const { wrapper } = mountCard(
+      'steps:\n  - call: sub.yaml\n    args:\n      account: ""',
+      options,
+    )
+    await wrapper.setProps({ templates: ['account.png'] })
+    await wrapper.find('button[title="展开编辑"]').trigger('click')
+    const arg = wrapper.find('.arg-row')
+    expect(arg.find('.tmpl-wrap').exists()).toBe(true)
+    await arg.find('.tpl-toggle').trigger('click')
+    expect(arg.findAll('.tpl-drop-row').map(row => row.text())).toContain('account.png')
+  })
+
   it('选脚本后按声明生成 args：默认值预填、必填填类型空值', async () => {
     const { wrapper, model } = mountCard(
       'steps:\n  - call: old.yaml\n    args:\n      legacy: "1"',
@@ -138,7 +159,7 @@ describe('新添加步骤自动展开', () => {
       },
     })
     await wrapper.find('.add-btn').trigger('click')
-    await wrapper.find('select[aria-label="选择步骤类型"]').setValue('str_app') // 启动应用
+    await wrapper.find('button[data-kind="str_app"]').trigger('click') // 启动应用
     const uuid = created.model.steps[1].uuid
     const card = wrapper.find(`[data-step-uuid="${uuid}"]`)
     expect(card.classes()).toContain('expanded')

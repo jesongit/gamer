@@ -2,7 +2,7 @@
   <div class="config-editor" data-testid="config-editor" @click.stop>
     <div class="ce-head">
       <span class="ce-title">运行配置</span>
-      <span class="ce-sub">轮询 {{ config?.interval ?? '—' }} · 阈值 {{ config ? config.threshold : '—' }} · {{ config?.log_level ?? '—' }}</span>
+      <span class="ce-sub">点击后/轮询 {{ config?.interval ?? '—' }} · 阈值 {{ config ? config.threshold : '—' }} · {{ config?.log_level ?? '—' }}</span>
       <span v-if="!expanded && hasIssues" class="ce-err-badge" title="配置有误，展开查看">有误</span>
       <button v-if="!config" type="button" class="mini-btn add" @click="enable">启用配置</button>
       <button v-else type="button" class="mini-btn danger" title="清除配置（使用服务端默认值）" @click="clear">清除</button>
@@ -14,7 +14,7 @@
     <template v-if="config">
       <template v-if="expanded">
         <div class="ce-row">
-          <span class="ce-label">轮询间隔</span>
+          <span class="ce-label">点击后/轮询</span>
           <input
             class="cell-input num" type="number" min="0" step="any"
             :value="intervalParts[0]" aria-label="轮询间隔数值" @input="setIntervalNum($event)"
@@ -25,7 +25,7 @@
           >
             <option v-for="u in TIME_UNITS" :key="u" :value="u">{{ u }}</option>
           </select>
-          <span v-if="intervalInvalid" class="ce-err">interval 须 >0 且带单位（ms/s/m/min/h/d）</span>
+          <span v-if="intervalInvalid" class="ce-err">interval（轮询/点击后等待）须 &gt;0 且带单位（ms/s/m/min/h/d）</span>
         </div>
 
         <div class="ce-row">
@@ -62,7 +62,7 @@
 
 <script setup lang="ts">
 /**
- * 配置编辑器（plan §9 config 行）：interval 数值+单位、threshold 滑块+数值、log_level 下拉。
+ * 配置编辑器（plan §9 config 行）：interval 点击后/轮询间隔数值+单位、threshold 滑块+数值、log_level 下拉。
  * config 可整体缺省（用服务端默认值），启用/清除经 set_config 提交；未知键按 schema 提示。
  */
 import { computed, ref, type PropType } from 'vue'

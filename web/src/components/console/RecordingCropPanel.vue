@@ -21,6 +21,7 @@
       <span class="rec-crop-sizes">M {{ Math.round(mRect.w) }}×{{ Math.round(mRect.h) }} · S {{ Math.round(sRect.w) }}×{{ Math.round(sRect.h) }} px</span>
     </div>
     <input v-model="name" class="input mono" placeholder="模板短名（record_click_….png）" @keydown.enter="confirm" />
+    <label class="rec-crop-color"><input v-model="preserveColor" type="checkbox" /> 保留颜色（文件名自动加 <span class="mono">#1</span>）</label>
     <div v-if="nameTaken" class="rec-crop-err">短名已存在，请改名（不会覆盖）。</div>
     <div v-else-if="draft.status === 'failed'" class="rec-crop-err">上传失败：{{ draft.reason }}</div>
     <div class="crop-actions">
@@ -36,7 +37,7 @@
  * 录制二次裁切面板（阶段 6，plan §11.4-11.7）：复用「二次裁切」画布交互语言——
  * 底图 = 冻结帧（加载 searchRect 对应范围，绝不止 50×50 小图），叠加自动框 A、
  * 当前模板框 M（默认 = A，可拖/缩）、搜索区域框 S 与实际像素尺寸；短名可编辑
- * （冲突要求改名不覆盖）。确认 → 上传（服务端灰度重编码）→ find/match 步骤定稿；
+ * （冲突要求改名不覆盖）。确认 → 上传（默认灰度，可选保留颜色）→ find/match 步骤定稿；
  * 「只使用坐标」→ tap 降级；失败保留草稿可重试/丢弃。
  * 纯展示+画布交互组件：状态与上传流程在 useRecording（ctx 提供），本组件不直接发请求。
  */
@@ -48,6 +49,7 @@ const ctx = reactive(props.context)
 const canvasEl = ref(null)
 const stageEl = ref(null)
 const name = ref('')
+const preserveColor = ref(false)
 const adjusted = ref(false)
 const zoom = ref(1)
 const mRect = reactive({ x: 0, y: 0, w: 0, h: 0 })
@@ -107,6 +109,7 @@ function resetFor(d) {
   mRect.w = d.aRect.w
   mRect.h = d.aRect.h
   adjusted.value = false
+  preserveColor.value = false
   name.value = d.name || ctx.defaultNameFor(d.kind, d.draft && d.draft.shortName) || ''
   const s = d.searchRect || { w: 100, h: 100 }
   zoom.value = Math.max(1, Math.min(24, 200 / Math.max(s.w, s.h, 1) / baseFit()))
@@ -273,7 +276,7 @@ function confirm() {
   const d = draft.value
   if (!d) return
   if (d.status === 'failed') { ctx.retry(d); return }
-  ctx.confirm(d, { name: normalizeName(name.value), rect: { ...mRect }, adjusted: adjusted.value })
+  ctx.confirm(d, { name: normalizeName(name.value), rect: { ...mRect }, adjusted: adjusted.value, preserveColor: preserveColor.value })
 }
 </script>
 
@@ -293,6 +296,7 @@ function confirm() {
 .lg-s::before { border-color: rgba(96,165,250,.95); border-style: dashed; }
 .rec-crop-sizes { margin-left: auto; }
 .rec-crop-err { font-size: 11px; color: var(--danger); }
+.rec-crop-color { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-1); user-select: none; }
 .crop-actions { display: flex; gap: 8px; }
 .crop-actions .btn-primary { margin-left: auto; }
 .mono { font-family: var(--mono); font-size: 11px; color: var(--text-1); }

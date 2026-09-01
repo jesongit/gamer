@@ -19,4 +19,19 @@ describe('CellEditor：模板匹配预览', () => {
     expect(matchTemplate).toHaveBeenCalledTimes(1)
     expect(matchTemplate).toHaveBeenCalledWith('login.png')
   })
+
+  it('模板下拉支持名称子串与中文拼音首字母搜索，并按命中位置排序', async () => {
+    const wrapper = mount(CellEditor, {
+      props: {
+        cell: lit('rc'), type: 'tmpl', label: '主模板',
+        templates: ['普通.png', '日常战斗.png', '日常遗器.png'],
+      },
+    })
+
+    await wrapper.find('.tpl-toggle').trigger('click')
+    expect(wrapper.findAll('.tpl-drop-row').map((row) => row.text())).toEqual(['日常战斗.png', '日常遗器.png'])
+
+    await wrapper.setProps({ cell: lit('遗器') })
+    expect(wrapper.findAll('.tpl-drop-row').map((row) => row.text())).toEqual(['日常遗器.png'])
+  })
 })

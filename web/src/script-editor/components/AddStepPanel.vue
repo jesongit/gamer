@@ -1,18 +1,26 @@
 <template>
   <div class="add-step-panel" @click.stop>
+    <span class="add-step-mask" aria-hidden="true" @click.stop="emit('close')"></span>
     <div class="panel-head">
       <span class="panel-title">添加步骤</span>
-      <select v-model="selectedKind" class="step-select" aria-label="选择步骤类型" @change="insertSelected">
-        <option value="">选择步骤类型…</option>
-        <optgroup v-for="group in visibleGroups" :key="group.id" :label="group.label">
-          <option v-for="entry in group.entries" :key="entry.kind" :value="entry.kind">
-            {{ entry.label }}
-          </option>
-        </optgroup>
-      </select>
       <button type="button" class="mini-btn" title="关闭" @click.stop="emit('close')">✕</button>
     </div>
     <div v-if="targetLabel" class="panel-target">插入到：{{ targetLabel }}</div>
+    <div class="step-menu" role="menu" aria-label="选择步骤类型">
+      <div v-for="group in visibleGroups" :key="group.id" class="step-group">
+        <div class="step-group-label">{{ group.label }}</div>
+        <button
+          v-for="entry in group.entries"
+          :key="entry.kind"
+          type="button"
+          class="step-menu-item"
+          role="menuitem"
+          :data-kind="entry.kind"
+          :aria-label="`添加${entry.label}`"
+          @click.stop="insert(entry.kind)"
+        >{{ entry.label }}</button>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -22,7 +30,7 @@
  * 上下文过滤（script 隐藏 return）。选择条目 → 工厂 makeStep + CommandStack 插入到当前
  * 锚点（选中卡之后 / 当前流程末尾），不直接改模型；插入成功后由画布选中新卡。
  */
-import { computed, ref, type PropType } from 'vue'
+import { computed, type PropType } from 'vue'
 import type { Path } from '../commands'
 import { makeStep, PANEL_GROUPS, type PanelGroupId } from '../factories'
 import type { Step, StepKind } from '../model'
@@ -49,8 +57,6 @@ const visibleGroups = computed(() =>
     .map((g) => ({ ...g, entries: g.entries })),
 )
 
-const selectedKind = ref<StepKind | ''>('')
-
 function insert(kind: StepKind): void {
   const step = makeStep(kind)
   const label = KIND_META[kind].label
@@ -60,36 +66,47 @@ function insert(kind: StepKind): void {
   )
   if (ok) emit('inserted', step.uuid)
 }
-
-function insertSelected(event: Event): void {
-  const kind = (event.target as HTMLSelectElement).value as StepKind | ''
-  if (!kind) return
-  insert(kind)
-  selectedKind.value = ''
-}
 </script>
 
 <style scoped>
 .add-step-panel {
+  position: absolute; top: 0; left: 0; z-index: 30;
+  display: flex; flex-direction: column; box-sizing: border-box;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-1);
   box-shadow: var(--shadow);
-  min-width: 250px;
-  max-width: min(360px, calc(100vw - 32px));
+  min-width: 220px;
+  max-width: min(320px, calc(100vw - 32px));
 }
-.panel-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-.step-select {
-  flex: 1; min-width: 0; width: auto; padding: 4px 8px; font-size: 12px;
-  background: var(--bg-2); color: var(--text-0); border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+.add-step-mask {
+  position: fixed; inset: 0; z-index: 0;
 }
-.step-select:focus { outline: none; border-color: var(--accent); }
+.panel-head, .panel-target, .step-menu { position: relative; z-index: 1; }
+.panel-head, .panel-target { flex-shrink: 0; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
 .panel-target {
   padding: 5px 10px; font-size: 12px; color: var(--accent-2);
   border-bottom: 1px solid var(--border); background: var(--bg-2);
 }
 .panel-title { font-weight: 600; font-size: 13px; }
+.step-menu {
+  flex: 1 1 auto; min-height: 0;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px; padding: 8px; overflow: auto;
+}
+.step-group { min-width: 0; }
+.step-group-label {
+  padding: 2px 6px 4px; color: var(--text-2); font-size: 11px;
+}
+.step-menu-item {
+  display: block; width: 100%; padding: 6px 8px; border: none;
+  border-radius: var(--radius-sm); background: transparent; color: var(--text-0);
+  font-size: 12px; text-align: left; cursor: pointer;
+}
+.step-menu-item:hover, .step-menu-item:focus-visible {
+  outline: none; background: var(--bg-3); color: var(--accent);
+}
 .mini-btn {
   border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
   border-radius: 4px; font-size: 11px; padding: 2px 6px; cursor: pointer;

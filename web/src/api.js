@@ -22,10 +22,17 @@ async function errorFromResponse(r) {
   const code = body && typeof body === 'object'
     ? String(body.code ?? body.error ?? `http_${r.status}`)
     : `http_${r.status}`
-  const message = body && typeof body === 'object'
-    ? String(body.message ?? body.error ?? `HTTP ${r.status}`)
-    : `HTTP ${r.status}`
   const details = body && typeof body === 'object' ? (body.diagnostics ?? null) : null
+  const diagnostic = Array.isArray(details)
+    ? details.find(d => d && typeof d === 'object' && typeof d.message === 'string' && d.message)
+    : null
+  const diagnosticMessage = diagnostic
+    ? `${diagnostic.message}${[diagnostic.step_path, diagnostic.field].filter(Boolean).length
+      ? `（${[diagnostic.step_path, diagnostic.field].filter(Boolean).join('.')}）` : ''}`
+    : null
+  const message = body && typeof body === 'object'
+    ? String(body.message ?? diagnosticMessage ?? body.error ?? `HTTP ${r.status}`)
+    : `HTTP ${r.status}`
   return new ApiError({ status: r.status, code, message, data: body, details })
 }
 
@@ -141,9 +148,11 @@ export const api = {
   // 模板（按应用分区 data/<pkg>/tmpl；pkg 缺省=跨分区全列）
   listTemplates: (pkg) => req('GET', `/api/templates${pkg ? `?pkg=${encodeURIComponent(pkg)}` : ''}`),
   // 创建只接受短名；region 存在时由服务端组合带区域元数据的完整文件名。
-  createTemplate: (shortName, dataB64, pkg, region) => req('POST', '/api/templates', {
+  // preserveColor=true 时由服务端追加 #1 文件名标记并保留颜色通道；默认灰度压缩。
+  createTemplate: (shortName, dataB64, pkg, region, preserveColor = false) => req('POST', '/api/templates', {
     short_name: shortName,
     ...(region !== undefined ? { region } : {}),
+    ...(preserveColor ? { grayscale_only: false } : {}),
     data_b64: dataB64,
     pkg,
   }),

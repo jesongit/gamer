@@ -106,6 +106,7 @@
               ref="taskFormEl"
               :params="taskParams"
               :initial-args="taskInitialArgs"
+              :templates="taskTemplateNames"
               @change="onFormChange"
             />
           </div>
@@ -132,7 +133,7 @@
  *   「重新确认」带 reconfirm:true 按当前声明重算快照。
  */
 import { ref, reactive, computed, onMounted } from 'vue'
-import { tasksData, scriptsData, devicesData, useToast, pushRunConflict } from '../store'
+import { tasksData, scriptsData, devicesData, templatesData, useToast, pushRunConflict } from '../store'
 import { api } from '../api'
 import ScriptPicker from './ScriptPicker.vue'
 import ParamsForm from '../script-editor/components/ParamsForm.vue'
@@ -146,6 +147,7 @@ const toast = useToast()
 const tasks = tasksData
 const scripts = scriptsData
 const devices = devicesData
+const templates = templatesData
 const showAdd = ref(false)
 const editing = ref(false)
 const form = reactive({ id: null, name: '', cron: '', script_id: '', device_id: '' })
@@ -169,6 +171,14 @@ const taskParams = computed(() => {
   if (!s) return []
   return extractParams(s.content ?? '')
 })
+/** 参数里的 tmpl 控件与步骤画布共用当前脚本分区的模板短名候选。 */
+const taskTemplateNames = computed(() => {
+  const script = scripts.value.find(x => x.id === form.script_id)
+  if (!script?.package) return []
+  return templates.value
+    .filter(t => t.pkg === script.package)
+    .map(t => templateShortName(t.name))
+})
 // 服务端时区标签：从任务 next_run/last_run_at 的 RFC3339 偏移推导；null → 兜底文案
 const serverTzLabel = computed(() => serverTzLabelFromTasks(tasks.value))
 const staleRows = computed(() =>
@@ -183,6 +193,13 @@ function onScriptPicked(v) {
     taskInitialArgs.value = {}
     staleNotice.value = false
   }
+}
+
+/** 去掉模板文件名上的区域/保色后缀，保持与步骤画布的短名输入口径一致。 */
+function templateShortName(name) {
+  return String(name || '')
+    .replace(/#1(\.(png|jpe?g))$/i, '$1')
+    .replace(/#[^#./\\]+(\.(png|jpe?g))$/i, '$1')
 }
 
 const presets = [
@@ -316,10 +333,14 @@ async function loadScripts() {
 async function loadDevices() {
   try { devices.value = await api.listDevices() } catch (e) {}
 }
+async function loadTemplates() {
+  try { templates.value = await api.listTemplates() } catch (e) {}
+}
 
 onMounted(async () => {
   loadScripts()
   loadDevices()
+  loadTemplates()
   await loadTasks()
 })
 </script>

@@ -1,14 +1,24 @@
 <template>
   <div
     class="step-card"
-    :class="{ selected, expanded, 'has-error': ownErrors.length > 0, 'card-highlight': highlighted, [`kind-${step.kind}`]: true }"
+    :class="{
+      selected, expanded, dragging, 'has-error': ownErrors.length > 0, 'card-highlight': highlighted,
+      'drop-before': dropPosition === 'before', 'drop-after': dropPosition === 'after',
+      [`kind-${step.kind}`]: true,
+    }"
     :data-step-uuid="step.uuid"
     :data-step-path="stepPath"
     @click.stop="emit('select', step.uuid)"
+    @dragover.prevent.stop="onDragOver"
+    @dragleave.stop="onDragLeave"
+    @drop.prevent.stop="onDrop"
   >
-    <!-- 卡头：拖动手柄（占位）+ 图标 + 中文名 + 序号 + 摘要 + 动作按钮 -->
+    <!-- 卡头：拖动手柄 + 图标 + 中文名 + 序号 + 摘要 + 动作按钮 -->
     <div class="card-head">
-      <span class="drag-handle" title="拖动排序（占位，排序请用上移/下移）" @pointerdown.stop @click.stop>⋮⋮</span>
+      <span
+        class="drag-handle" title="拖动排序" draggable="true" role="button" aria-label="拖动排序"
+        @dragstart.stop="onDragStart" @dragend.stop="onDragEnd" @click.stop
+      >⋮⋮</span>
       <span class="kind-icon" :title="meta.hint">{{ meta.icon }}</span>
       <span class="kind-name">{{ meta.label }}</span>
       <span class="step-no">#{{ index + 1 }}</span>
@@ -108,7 +118,7 @@
         <div class="field-row">
           <span class="field-label">主模板</span>
           <CellEditor :cell="step.template" type="tmpl" :params="params" :templates="templates" label="主模板" :error="fieldError('template')" @change="(c) => updateCell('template', c)" />
-          <label class="field-check" title="命中点击后等 interval 重匹配，仍命中补一击">
+          <label class="field-check" title="点击后等 interval；再重匹配，仍命中补一击">
             <input type="checkbox" :checked="step.verify" @change="setVerify(($event.target as HTMLInputElement).checked)" />
             二次确认
           </label>
@@ -137,7 +147,7 @@
           :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
           :templates="templates"
           @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-          @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+          @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
         />
         <BranchContainer
           :model="model" :stack="stack" :container-path="subPath('else')" :base-path="subBase('else')"
@@ -146,13 +156,13 @@
           :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
           :templates="templates"
           @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-          @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+          @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
         />
       </template>
 
       <!-- match -->
       <template v-else-if="step.kind === 'match'">
-        <div class="field-hint warn">按序首个命中分支获胜；候选可勾选「命中点击」，点中该模板框中心</div>
+        <div class="field-hint warn">按序首个命中分支获胜；候选可勾选「命中点击」，点中该模板框中心后等待 interval</div>
         <div v-for="(cand, ci) in step.candidates" :key="ci" class="cand-block" :class="{ 'cell-error': !!fieldError(`candidates[${ci}].template`) || !!fieldError('candidates') }">
           <div class="field-row">
             <span class="field-label">候选 {{ ci + 1 }}</span>
@@ -161,7 +171,7 @@
               :label="`候选${ci + 1}`" :error="fieldError(`candidates[${ci}].template`) || fieldError('candidates')"
               @change="(c) => updateCandidateTemplate(ci, c)"
             />
-            <label class="field-check" title="命中后点击该候选模板匹配框的中心（find 的点击语义）">
+            <label class="field-check" title="命中后点击该候选模板匹配框的中心，并等待 interval（find 的点击语义）">
               <input type="checkbox" :checked="cand.click" :aria-label="`命中点击${ci + 1}`" @change="setCandClick(ci, ($event.target as HTMLInputElement).checked)" />
               命中点击
             </label>
@@ -174,7 +184,7 @@
             :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
             :templates="templates"
             @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-            @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+            @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
           />
         </div>
         <div class="field-row">
@@ -196,7 +206,7 @@
           :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
           :templates="templates"
           @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-          @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+          @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
         />
       </template>
 
@@ -225,7 +235,7 @@
         <div class="field-row">
           <span class="field-label">坐标</span>
           <CellEditor :cell="step.at" type="coord" :params="params" label="取色坐标" :error="fieldError('at')" @change="(c) => updateCell('at', c)" />
-          <span class="field-hint warn">按序首个命中分支获胜；候选可勾选「命中点击」，点击取样点</span>
+          <span class="field-hint warn">按序首个命中分支获胜；候选可勾选「命中点击」，点击取样点后等待 interval</span>
         </div>
         <div v-for="(exp, ei) in step.expect" :key="ei" class="cand-block" :class="{ 'cell-error': !!fieldError(`expect[${ei}].color`) || !!fieldError('expect') }">
           <div class="field-row">
@@ -235,7 +245,7 @@
               :error="fieldError(`expect[${ei}].color`) || fieldError('expect')"
               @change="(c) => updateExpectColor(ei, c)"
             />
-            <label class="field-check" title="命中后点击取色坐标的取样点">
+            <label class="field-check" title="命中后点击取色坐标的取样点，并等待 interval">
               <input type="checkbox" :checked="exp.click" :aria-label="`命中点击${ei + 1}`" @change="setExpectClick(ei, ($event.target as HTMLInputElement).checked)" />
               命中点击
             </label>
@@ -248,7 +258,7 @@
             :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
             :templates="templates"
             @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-            @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+            @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
           />
         </div>
         <div class="field-row">
@@ -261,7 +271,7 @@
           :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
           :templates="templates"
           @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-          @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+          @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
         />
       </template>
 
@@ -279,7 +289,7 @@
           :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
           :templates="templates"
           @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-          @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+          @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
         />
         <BranchContainer
           :model="model" :stack="stack" :container-path="subPath('else')" :base-path="subBase('else')"
@@ -288,7 +298,7 @@
           :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
           :templates="templates"
           @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-          @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+          @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
         />
       </template>
 
@@ -310,7 +320,7 @@
           :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
           :templates="templates"
           @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-          @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+          @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
         />
       </template>
 
@@ -368,6 +378,7 @@
             />
             <CellEditor
               :cell="step.args[name]" :type="argType(name)" :params="params"
+              :templates="templates"
               :label="`args ${name}`" @change="(c) => updateArgValue(name, c)"
             />
             <button type="button" class="mini-btn" title="删除实参" @click.stop="removeArg(name)">✕</button>
@@ -382,7 +393,7 @@
             :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
             :templates="templates"
             @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-            @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+            @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
           />
           <BranchContainer
             :model="model" :stack="stack" :container-path="subPath('else')" :base-path="subBase('else')"
@@ -391,7 +402,7 @@
             :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
             :templates="templates"
             @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-            @focus="(p) => emit('focus', p)" @add-here="(p) => emit('add-here', p)"
+            @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
           />
         </template>
       </template>
@@ -441,6 +452,14 @@ import type { Diagnostic } from '../diagnostics'
 import { joinStepPath } from '../diagnostics'
 import { childContainerPath, containerLabel } from '../selection'
 import type { Cell, ParamDecl, Step, StepKind } from '../model'
+import {
+  postRemovalIndex,
+  clearActiveStepDrag,
+  getActiveStepDrag,
+  readStepDragPayload,
+  writeStepDragPayload,
+  type StepDragPayload,
+} from '../step-dnd'
 import { SE_TARGET_OPTIONS, type SeTargetOptions } from '../targets'
 import { KIND_META, stepSummary } from './kinds'
 import CellEditor from './CellEditor.vue'
@@ -495,6 +514,70 @@ function onToggleExpand(): void {
 }
 const listLength = computed(() => resolveStepList(props.model, props.containerPath).length)
 const ownErrors = computed(() => props.diagnostics.filter((d) => d.step_path === stepPath.value))
+
+// ---------- 步骤拖放排序 ----------
+
+const dragging = ref(false)
+const dropPosition = ref<'before' | 'after' | null>(null)
+
+function clearDropPosition(): void {
+  dropPosition.value = null
+}
+
+function onDragStart(event: DragEvent): void {
+  if (!event.dataTransfer) return
+  const payload: StepDragPayload = {
+    uuid: props.step.uuid,
+    path: [...props.containerPath],
+    index: props.index,
+  }
+  writeStepDragPayload(event.dataTransfer, payload)
+  dragging.value = true
+}
+
+function onDragEnd(): void {
+  dragging.value = false
+  clearDropPosition()
+  clearActiveStepDrag()
+}
+
+function dragPayload(event: DragEvent): StepDragPayload | null {
+  return readStepDragPayload(event.dataTransfer) ?? getActiveStepDrag()
+}
+
+function onDragOver(event: DragEvent): void {
+  const source = dragPayload(event)
+  if (!source || source.uuid === props.step.uuid) {
+    clearDropPosition()
+    return
+  }
+  const rect = (event.currentTarget as HTMLElement).getBoundingClientRect()
+  dropPosition.value = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+}
+
+function onDragLeave(event: DragEvent): void {
+  const current = event.currentTarget as HTMLElement
+  const next = event.relatedTarget
+  if (next instanceof Node && current.contains(next)) return
+  clearDropPosition()
+}
+
+function onDrop(event: DragEvent): void {
+  const source = dragPayload(event)
+  const position = dropPosition.value
+  clearDropPosition()
+  if (!source || !position || source.uuid === props.step.uuid) return
+  const toIndex = postRemovalIndex(source, props.containerPath, props.index, position === 'before')
+  props.stack.apply(
+    {
+      type: 'move_step',
+      from: { path: source.path, index: source.index },
+      to: { path: [...props.containerPath], index: toIndex },
+    },
+    '拖动步骤',
+  )
+}
 
 function fieldError(field: string): string {
   return ownErrors.value.find((d) => d.field === field)?.message ?? ''
@@ -733,12 +816,29 @@ function addArg(): void {
 
 <style scoped>
 .step-card {
+  position: relative;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-1);
   margin: 6px 0;
   overflow: visible;
 }
+.step-card.dragging { opacity: .45; }
+.step-card.drop-before::before,
+.step-card.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 3px;
+  border-radius: 3px;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+  pointer-events: none;
+  z-index: 2;
+}
+.step-card.drop-before::before { top: -5px; }
+.step-card.drop-after::after { bottom: -5px; }
 .step-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .step-card.has-error { border-color: var(--danger); }
 .step-card.card-highlight { border-color: var(--warn); box-shadow: 0 0 0 2px var(--warn); }
@@ -752,7 +852,11 @@ function addArg(): void {
   min-height: 32px;
 }
 .card-head:hover { background: var(--bg-3); }
-.drag-handle { color: var(--text-2); cursor: grab; font-size: 11px; letter-spacing: -2px; user-select: none; }
+.drag-handle {
+  color: var(--text-2); cursor: grab; font-size: 11px; letter-spacing: -2px;
+  user-select: none; touch-action: none;
+}
+.drag-handle:active { cursor: grabbing; }
 .kind-icon {
   display: inline-flex; align-items: center; justify-content: center;
   width: 20px; height: 20px; border-radius: 4px;

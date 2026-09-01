@@ -23,6 +23,13 @@ const SCRIPT_YAML = [
   '  - log: hi',
 ].join('\n')
 
+const TMPL_SCRIPT_YAML = [
+  'params:',
+  "  - 'tmpl:account:账号模板'",
+  'steps:',
+  '  - find: $account',
+].join('\n')
+
 const TASKS = [
   {
     id: 't1', name: '每日签到', cron: '0 8 * * *', script_id: 'com.demo/main.yml',
@@ -71,6 +78,9 @@ const baseRoutes = () => [
   ] },
   { method: 'GET', url: '/api/devices', body: [
     { id: 'dev1', name: '设备一' }, { id: 'dev2', name: '设备二' },
+  ] },
+  { method: 'GET', url: '/api/templates', body: [
+    { name: '账号155#392_519_526_932.png', pkg: 'com.demo' },
   ] },
   { method: 'GET', url: '/api/tasks', body: TASKS },
   { method: 'GET', url: '/api/tasks/t1', body: TASK_DETAILS.t1 },
@@ -219,10 +229,27 @@ describe('新建任务：选脚本渲染空表单，保存提交稀疏 args', ()
   })
 })
 
+describe('任务参数：tmpl 类型复用步骤模板候选', () => {
+  it('account 参数的模板下拉显示当前脚本分区模板短名', async () => {
+    const routes = baseRoutes()
+    routes[0].body = [
+      { id: 'com.demo/main.yml', package: 'com.demo', name: 'main.yml', content: TMPL_SCRIPT_YAML },
+    ]
+    const { wrapper } = await mountView(routes)
+    await wrapper.findAll('button').find(b => b.text().includes('新建任务')).trigger('click')
+    await flushPromises()
+
+    const account = wrapper.find('[data-testid="params-form"] .pf-row')
+    expect(account.text()).toContain('$account')
+    await account.find('.tpl-toggle').trigger('click')
+    expect(account.findAll('.tpl-drop-row').map(row => row.text())).toContain('账号155.png')
+  })
+})
+
 describe('服务端时区标识（契约禁止 system/info 带 timezone，从任务时间戳偏移推导）', () => {
   function tasksRoutes(tasks) {
     const routes = baseRoutes()
-    routes[2].body = tasks
+    routes[3].body = tasks
     return routes
   }
 

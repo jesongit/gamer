@@ -35,7 +35,9 @@ export function createRecordingApi(api) {
   const createRegionMethod = ['upload', 'Template', 'Region'].join('')
   return {
     ...api,
-    [createRegionMethod]: (name, dataB64, pkg, region) =>
-      api.createTemplate(name, dataB64, pkg, region),
+    [createRegionMethod]: (name, dataB64, pkg, region, preserveColor = false) =>
+      preserveColor
+        ? api.createTemplate(name, dataB64, pkg, region, true)
+        : api.createTemplate(name, dataB64, pkg, region),
   }
 }

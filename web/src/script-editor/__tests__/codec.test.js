@@ -37,7 +37,7 @@ const FUNCTION_LIBRARY_IDS = [
 const CROSS_FILE_MAIN = 'v10_func_call_cross_file'
 
 function readFixture(name) {
-  return readFileSync(path.join(yamlDir, `${name}.yaml`), 'utf8')
+  return readFileSync(path.join(yamlDir, `${name}.yaml`), 'utf8').replace(/\r\n/g, '\n')
 }
 
 describe('codec 往返：serialize(parse(fixture)) 逐字节一致', () => {

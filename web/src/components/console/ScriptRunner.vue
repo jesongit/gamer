@@ -45,14 +45,7 @@
                   title="停止当前函数" @click="ctx.stopScript"
                 >{{ ctx.runStopping ? '停止中…' : '■ 停止' }}</button>
                 <button type="button" class="fn-edit-btn" :disabled="ctx.store.running" :title="`编辑函数 ${view.name}`" @click="ctx.editCurrentTarget(view.name)">编辑</button>
-                <span class="fn-more-wrap">
-                  <button type="button" class="fn-more-btn" :disabled="ctx.store.running" :class="{ active: fnMoreOpen === view.name }" @click.stop="toggleFnMore(view.name)">更多 ▾</button>
-                  <span v-if="fnMoreOpen === view.name" class="fn-more-mask" @click.stop="closeFnMore"></span>
-                  <span v-if="fnMoreOpen === view.name" class="fn-more-dropdown">
-                    <button type="button" class="fn-more-item" @click.stop="renameFn(view.name)">重命名</button>
-                    <button type="button" class="fn-more-item danger" @click.stop="deleteFn(view.name)">删除</button>
-                  </span>
-                </span>
+                <button type="button" class="fn-delete-btn" :disabled="ctx.store.running" :title="`删除函数 ${view.name}`" @click="deleteFn(view.name)">删除</button>
               </span>
             </div>
             <ScriptSummary
@@ -169,7 +162,6 @@ const props = defineProps({ context: { type: Object, required: true } })
 const ctx = reactive(props.context)
 const canvasEl = ref(null)
 const paramEditorEl = ref(null)
-const fnMoreOpen = ref(null)
 
 /** 当前编辑函数名（画布顶部下拉透出）→ 函数级 params 容器路径，ParamEditor 按 it 编辑。 */
 const fnParamsPath = computed(() => {
@@ -216,25 +208,11 @@ function commitFunctionName() {
   else functionNameDraft.value = current
 }
 
-function openFunctionStepPicker() {
-  canvasEl.value?.openAdd?.()
-}
-
-function closeFnMore() {
-  fnMoreOpen.value = null
-}
-
-function toggleFnMore(name) {
-  fnMoreOpen.value = fnMoreOpen.value === name ? null : name
-}
-
-async function renameFn(name) {
-  closeFnMore()
-  await ctx.renameFunction(name)
+function openFunctionStepPicker(event) {
+  canvasEl.value?.openAdd?.(event?.currentTarget)
 }
 
 async function deleteFn(name) {
-  closeFnMore()
   await ctx.deleteFunction(name)
 }
 
@@ -247,23 +225,25 @@ onMounted(syncCanvasRef)
 </script>
 
 <style scoped>
-.script-run{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.auto-run{display:flex;flex-wrap:nowrap;gap:8px}.auto-run .spicker{width:auto;flex:1 1 auto;min-width:0}.auto-run .select{flex:1;min-width:0}.auto-run .run-kind{flex:0 0 auto;min-width:0;width:76px}.auto-run .fn-file{flex:1 1 auto;min-width:0}.sum-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:8px}.sum-wrap .script-summary{flex:none}.sum-wrap .script-view-empty{flex:none;min-height:160px}.fn-sum{display:flex;flex-direction:column;gap:4px}.fn-sum-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--accent);padding:2px 2px 0}.fn-sig{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fn-actions{display:flex;align-items:center;gap:4px;flex:none}.fn-edit-btn,.fn-more-btn{flex:none;font-size:11px;padding:2px 8px;border:1px solid var(--border);background:var(--bg-2);color:var(--text-1);border-radius:var(--radius-sm);cursor:pointer}.fn-edit-btn:hover,.fn-more-btn:hover,.fn-more-btn.active{color:var(--accent);border-color:var(--accent)}.fn-more-wrap{position:relative;display:inline-flex}.fn-more-mask{position:fixed;inset:0;z-index:20}.fn-more-dropdown{position:absolute;right:0;top:calc(100% + 4px);z-index:30;display:flex;flex-direction:column;min-width:88px;padding:4px;gap:2px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 8px 24px rgba(0,0,0,.4)}.fn-more-item{display:flex;align-items:center;text-align:left;white-space:nowrap;padding:6px 10px;border:none;background:none;border-radius:var(--radius-sm);color:var(--text-0);font-size:12px;cursor:pointer}.fn-more-item:hover{background:var(--bg-3)}.fn-more-item.danger:hover{color:var(--danger)}.run-actions{display:flex;gap:8px}.run-actions .btn{flex:1}.run-actions .more-wrap{position:relative;flex:1}.run-actions .more-wrap .btn{width:100%}.more-mask{position:fixed;inset:0;z-index:20}.more-dropdown{position:absolute;right:0;top:calc(100% + 4px);z-index:30;display:flex;flex-direction:column;min-width:120px;padding:4px;gap:2px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 8px 24px rgba(0,0,0,.4)}.more-item{display:flex;align-items:center;gap:6px;text-align:left;white-space:nowrap;padding:6px 10px;border:none;background:none;border-radius:var(--radius-sm);color:var(--text-0);font-size:12px;cursor:pointer}.more-item:hover{background:var(--bg-3)}.more-item:disabled{color:var(--text-2);opacity:.5;cursor:not-allowed}.more-item.danger:hover{color:var(--danger)}.script-view-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:12px;background:var(--bg-0);border:1px dashed var(--border);border-radius:var(--radius-sm)}.script-edit{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.edit-name-row{display:flex}.edit-name-row .input{flex:1;min-width:0;width:100%}.edit-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.edit-actions .btn{flex:1;justify-content:center;min-width:0}.edit-actions .btn.active{border-color:var(--accent-2);color:var(--accent-2);background:rgba(56,189,248,.08)}.dirty-badge{flex:none;font-size:11px;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px}.function-edit-toolbar{display:flex;align-items:center;gap:8px;min-height:30px}.function-edit-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--accent)}.function-edit-toolbar .btn{flex:none}.jump-back{flex:none;align-self:flex-start}.canvas-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;position:relative}.canvas-wrap .canvas-lock{position:absolute;inset:0;z-index:6;cursor:wait;background:transparent}.canvas-wrap :deep(.se-canvas){flex:none}.extras{display:flex;flex-direction:column;flex:none;margin-bottom:8px}.mono{font-family:var(--mono);font-size:11px;color:var(--text-1)}
+.script-run{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.auto-run{display:flex;flex-wrap:nowrap;gap:8px}.auto-run .spicker{width:auto;flex:1 1 auto;min-width:0}.auto-run .select{flex:1;min-width:0}.auto-run .run-kind{flex:0 0 auto;min-width:0;width:76px}.auto-run .fn-file{flex:1 1 auto;min-width:0}.sum-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:8px}.sum-wrap .script-summary{flex:none}.sum-wrap .script-view-empty{flex:none;min-height:160px}.fn-sum{display:flex;flex-direction:column;gap:4px}.fn-sum-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--accent);padding:2px 2px 0}.fn-sig{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fn-actions{display:flex;align-items:center;gap:4px;flex:none}.fn-edit-btn,.fn-delete-btn{flex:none;font-size:11px;padding:2px 8px;border:1px solid var(--border);background:var(--bg-2);color:var(--text-1);border-radius:var(--radius-sm);cursor:pointer}.fn-edit-btn:hover{color:var(--accent);border-color:var(--accent)}.fn-delete-btn{color:var(--danger)}.fn-delete-btn:hover:not(:disabled){color:var(--danger);border-color:var(--danger)}.run-actions{display:flex;gap:8px}.run-actions .btn{flex:1}.run-actions .more-wrap{position:relative;flex:1}.run-actions .more-wrap .btn{width:100%}.more-mask{position:fixed;inset:0;z-index:20}.more-dropdown{position:absolute;right:0;top:calc(100% + 4px);z-index:30;display:flex;flex-direction:column;min-width:120px;padding:4px;gap:2px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 8px 24px rgba(0,0,0,.4)}.more-item{display:flex;align-items:center;gap:6px;text-align:left;white-space:nowrap;padding:6px 10px;border:none;background:none;border-radius:var(--radius-sm);color:var(--text-0);font-size:12px;cursor:pointer}.more-item:hover{background:var(--bg-3)}.more-item:disabled{color:var(--text-2);opacity:.5;cursor:not-allowed}.more-item.danger:hover{color:var(--danger)}.script-view-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:12px;background:var(--bg-0);border:1px dashed var(--border);border-radius:var(--radius-sm)}.script-edit{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.edit-name-row{display:flex}.edit-name-row .input{flex:1;min-width:0;width:100%}.edit-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.edit-actions .btn{flex:1;justify-content:center;min-width:0}.edit-actions .btn.active{border-color:var(--accent-2);color:var(--accent-2);background:rgba(56,189,248,.08)}.dirty-badge{flex:none;font-size:11px;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px}.function-edit-toolbar{display:flex;align-items:center;gap:8px;min-height:30px}.function-edit-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--accent)}.function-edit-toolbar .btn{flex:none}.jump-back{flex:none;align-self:flex-start}.canvas-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;position:relative}.canvas-wrap .canvas-lock{position:absolute;inset:0;z-index:6;cursor:wait;background:transparent}.canvas-wrap :deep(.se-canvas){flex:none}.extras{display:flex;flex-direction:column;flex:none;margin-bottom:8px}.mono{font-family:var(--mono);font-size:11px;color:var(--text-1)}
 .fn-sum { gap: 5px; }
 .fn-sum-head { gap: 10px; font-size: 14px; padding: 4px 2px 1px; }
 .fn-sig { font-size: 14px; line-height: 1.4; }
 .fn-actions { gap: 6px; }
-.fn-run-btn, .fn-edit-btn, .fn-more-btn {
+.fn-run-btn, .fn-edit-btn, .fn-delete-btn {
   flex: none; font-size: 13px; padding: 5px 10px; white-space: nowrap;
   border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
   border-radius: var(--radius-sm); cursor: pointer;
 }
 .fn-run-btn { color: var(--accent); }
 .fn-run-btn.danger { color: var(--danger); }
-.fn-run-btn:hover, .fn-edit-btn:hover, .fn-more-btn:hover, .fn-more-btn.active {
+.fn-run-btn:hover, .fn-edit-btn:hover {
   color: var(--accent); border-color: var(--accent);
 }
 .fn-run-btn.danger:hover { color: var(--danger); border-color: var(--danger); }
-.fn-run-btn:disabled, .fn-edit-btn:disabled, .fn-more-btn:disabled { opacity: .5; cursor: not-allowed; }
+.fn-delete-btn { color: var(--danger); }
+.fn-delete-btn:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+.fn-run-btn:disabled, .fn-edit-btn:disabled, .fn-delete-btn:disabled { opacity: .5; cursor: not-allowed; }
 .run-actions { flex-wrap: wrap; }
 .run-actions .btn { min-width: 0; flex: 1 1 96px; }
 .function-edit-name.input {
