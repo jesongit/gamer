@@ -10,7 +10,8 @@
 //! - `color`：单点按序判色（容差 30/通道），命中即执行该色值分支并结束。
 //! - 判断命中后延迟：find/match/color 命中路径在执行后续分支前统一插入
 //!   judge_delay（config.toml judge_delay_ms，默认 200ms，0=关）；else/超时不延迟。
-//! - `if`：仅布尔（无隐式转换）；`loop`：times 0/缺省=无限（10 万步 guard 兜底）。
+//! - `if`：仅布尔（无隐式转换）；`loop`：times 0/缺省=无限，`break` 跳出最近一层循环
+//!   （10 万步 guard 兜底）。
 //! - `call`：同分区 yaml/ 脚本，压入目标 config 与参数作用域（返回恢复）；
 //!   `func`：`文件短路径/函数名`，继承调用点 config，返回布尔走 then/else。
 //! - `throw` 跨调用链结束整个运行（失败终态）；`return` 仅退出当前函数（缺省 true）。
@@ -289,6 +290,7 @@ impl Runner {
             scopes: vec![scope],
             frames: Vec::new(),
             return_value: None,
+            break_loop: false,
             resources,
             cache,
             depth: 0,
@@ -298,6 +300,9 @@ impl Runner {
 
         self.run_steps(&mut ctx, &steps).await?;
 
+        if ctx.breaking() {
+            anyhow::bail!("runtime.break.outside_loop：break 只能出现在 loop 子流程内");
+        }
         if ctx.thrown() && !ctx.stopped() {
             // throw 携带原因跨调用链结束整个运行 → 失败终态（runtime.engine.throw）
             anyhow::bail!("脚本 throw 终止");
@@ -542,6 +547,8 @@ struct Ctx<'a> {
     frames: Vec<Frame>,
     /// 函数 return 值（Some 后嵌套步骤全部短路；函数边界取出）。
     return_value: Option<bool>,
+    /// 当前最近一层 loop 的退出请求；由 loop 消费，不跨 loop 传播。
+    break_loop: bool,
     resources: RunResources<'a>,
     cache: ResourceCache,
     /// call+func 合计嵌套深度。
@@ -562,6 +569,10 @@ impl<'a> Ctx<'a> {
 
     fn returning(&self) -> bool {
         self.return_value.is_some()
+    }
+
+    fn breaking(&self) -> bool {
+        self.break_loop
     }
 
     /// 嵌套步骤短路条件：停止 / throw / 函数 return。
@@ -642,7 +653,7 @@ impl Runner {
     /// 执行一个步骤列表（分支/子流程/函数体/被 call 脚本共用入口）。
     async fn run_steps(&self, ctx: &mut Ctx<'_>, steps: &[Step]) -> anyhow::Result<()> {
         for step in steps {
-            if ctx.aborted() {
+            if ctx.aborted() || ctx.breaking() {
                 break;
             }
             self.exec_step(ctx, step).await?;
@@ -784,18 +795,23 @@ impl Runner {
             Step::Loop { times, steps } => {
                 let mut n: u64 = 0;
                 loop {
-                    if let Some(t) = times {
-                        if *t > 0 && n >= *t {
-                            break;
-                        }
+                    if *times > 0 && n >= *times {
+                        break;
                     }
                     if ctx.aborted() {
                         break;
                     }
                     ctx.log("debug", format!("循环第 {} 次", n + 1));
                     self.run_steps(ctx, steps).await?;
+                    if ctx.breaking() {
+                        ctx.break_loop = false;
+                        break;
+                    }
                     n += 1;
                 }
+            }
+            Step::Break => {
+                ctx.break_loop = true;
             }
             Step::Call { target, args } => {
                 self.exec_call(ctx, target, args).await?;
@@ -2334,6 +2350,20 @@ mod tests {
         );
         let logs = r.run(script_target("f.yaml"), vec![]).await.unwrap();
         assert_eq!(logs.iter().filter(|(_, m)| m == "第几轮").count(), 3);
+    }
+
+    /// break 跳出最近一层 loop；省略 times 按 0 处理（无限循环），由 break 正常结束。
+    #[tokio::test]
+    async fn break_exits_nearest_loop() {
+        let r = rig(HashMap::new(), solid_png(10, 10, [0, 0, 0]), "info");
+        r.save_script(
+            "f.yaml",
+            "steps:\n  - loop:\n      steps:\n        - loop:\n            times: 2\n            steps:\n              - log: 内层\n              - break\n        - log: 外层\n        - break\n  - log: 循环后\n",
+        );
+        let logs = r.run(script_target("f.yaml"), vec![]).await.unwrap();
+        assert_eq!(logs.iter().filter(|(_, m)| m == "内层").count(), 1);
+        assert_eq!(logs.iter().filter(|(_, m)| m == "外层").count(), 1);
+        assert_eq!(logs.iter().filter(|(_, m)| m == "循环后").count(), 1);
     }
 
     /// 10 万步 guard：无限 loop 被强制终止（含嵌套子步骤计数）。

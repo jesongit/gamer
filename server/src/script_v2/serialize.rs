@@ -114,6 +114,7 @@ fn write_step(out: &mut String, step: &Step, indent: usize) {
     match step {
         Step::StrApp => out.push_str("str_app\n"),
         Step::ClsApp => out.push_str("cls_app\n"),
+        Step::Break => out.push_str("break\n"),
         Step::Tap { at } => {
             out.push_str(&format!("tap: {}\n", render_cell(at)));
         }
@@ -221,9 +222,9 @@ fn write_step(out: &mut String, step: &Step, indent: usize) {
         }
         Step::Loop { times, steps } => {
             out.push_str("loop:\n");
-            if let Some(n) = times {
+            if *times != 0 {
                 push_indent(out, indent + 4);
-                out.push_str(&format!("times: {n}\n"));
+                out.push_str(&format!("times: {times}\n"));
             }
             push_indent(out, indent + 4);
             if steps.is_empty() {

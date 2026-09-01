@@ -307,11 +307,18 @@ steps:
     times: 3
     steps:
       - wait: 1s
+
+- loop:                         # 0 次数表示无限，可用 break 跳出最近一层 loop
+    steps:
+      - break
 ```
 
 - `if` 条件非布尔报 `step.if.non_bool_cond`；
-- `loop` 值是映射：`times` 为非负整数字面量、`steps` 必需且非空
+- `loop` 值是映射：`times` 为非负整数字面量，省略时默认值为 `0`（`0` 表示无限）；
+  `steps` 必需且非空
   （缺失 → `step.field.missing`，空 → `step.loop.empty_steps`）。
+- `break` 必须位于 loop 子流程内，执行后跳出最近一层 loop；放在 loop 外报
+  `step.break.outside_loop`。
 
 ### 5.7 call / func —— 子脚本与函数
 
@@ -354,6 +361,7 @@ steps:
 - `throw` 立即结束整个运行（跨 call/func 调用链），运行以失败终态收场
   （`runtime.engine.throw`，携带原因）。
 - `return` 只退出当前函数，值必须是布尔。
+- `break` 只退出最近一层 loop，不影响外层调用链。
 - **护栏**：call+func 合计嵌套上限 **32 层**（超限 `runtime.nesting.limit`）；
   单次运行累计执行 **10 万步**（含循环体与嵌套子步骤，超限
   `runtime.step.limit` 强制终止）；「停止」在长 wait 中分片（200ms）生效。

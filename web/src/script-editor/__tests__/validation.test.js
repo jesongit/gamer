@@ -144,6 +144,18 @@ describe('validation：结构约束', () => {
     }))
   })
 
+  it('break 只能出现在 loop 子流程内', () => {
+    const outside = parseScript('steps:\n  - break\n')
+    expect(validateScript(outside.model)).toContainEqual(expect.objectContaining({
+      code: 'step.break.outside_loop', step_path: 'steps[0]',
+    }))
+
+    const inside = parseScript('steps:\n  - loop:\n      steps:\n        - if: true\n          then:\n            - break\n')
+    expect(validateScript(inside.model)).not.toContainEqual(expect.objectContaining({
+      code: 'step.break.outside_loop',
+    }))
+  })
+
   it('wait 随机区间起点大于终点 → step.wait.range_invalid', () => {
     const { model } = parseScript('steps:\n  - wait: [3s, 1s]\n')
     expect(validateScript(model)).toContainEqual(expect.objectContaining({

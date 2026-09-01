@@ -78,7 +78,7 @@ function expectedModel() {
       {
         kind: 'if',
         cond: { ref: 'enable' },
-        then: [{ kind: 'loop', times: null, steps: [{ kind: 'wait', duration: { lit: '1s' }, duration_max: null }] }],
+        then: [{ kind: 'loop', times: 0, steps: [{ kind: 'wait', duration: { lit: '1s' }, duration_max: null }] }],
         else: [{ kind: 'log', message: { lit: '已禁用' } }],
       },
       { kind: 'tap', at: { lit: [0.5, 0.8] } },

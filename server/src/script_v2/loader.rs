@@ -219,10 +219,10 @@ fn key_loc(span: &Span) -> String {
 // 结构层构建（错误累积，不早退）
 // ---------------------------------------------------------------------------
 
-/// 步骤动作键（十八类）。
+/// 步骤动作键（十九类）。
 pub(crate) const ACTION_KEYS: &[&str] = &[
     "str_app", "cls_app", "tap", "swipe", "key", "text", "log", "wait", "find", "match", "check",
-    "color", "if", "loop", "call", "func", "throw", "return",
+    "color", "if", "loop", "break", "call", "func", "throw", "return",
 ];
 
 /// 函数名与步骤动作共用 YAML 键空间，撞名会让函数调用无法无歧义解析。
@@ -237,6 +237,7 @@ const RESERVED_FUNCTION_NAMES: &[&str] = &[
     "check",
     "color",
     "loop",
+    "break",
     "call",
     "throw",
     "str_app",
@@ -807,6 +808,7 @@ fn build_step(ctx: &mut BuildCtx, item: &Node, path: &str) -> Option<Step> {
         NodeKind::Scalar { raw, .. } => match raw.as_str() {
             "str_app" => Some(Step::StrApp),
             "cls_app" => Some(Step::ClsApp),
+            "break" => Some(Step::Break),
             "throw" => Some(Step::Throw { message: None }),
             other => {
                 ctx.push(
@@ -861,7 +863,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
             codes::STEP_UNKNOWN_ACTION,
             path,
             "",
-            format!("步骤缺少动作键（十八类之一），现有键 {keys:?}"),
+            format!("步骤缺少动作键（十九类之一），现有键 {keys:?}"),
         );
         return None;
     };
@@ -892,7 +894,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
         );
     }
     match action {
-        "str_app" | "cls_app" => {
+        "str_app" | "cls_app" | "break" => {
             ctx.push(
                 codes::STEP_FIELD_TYPE_MISMATCH,
                 path,
@@ -1113,7 +1115,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
             let times = match m.iter().find(|e| e.key == "times").map(|e| &e.value) {
                 Some(n) => match n.as_scalar() {
                     Some((raw, ScalarStyle::Plain)) => match raw.parse::<u64>() {
-                        Ok(x) => Some(x),
+                        Ok(x) => x,
                         Err(_) => {
                             ctx.push(
                                 codes::STEP_FIELD_TYPE_MISMATCH,
@@ -1134,7 +1136,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
                         return None;
                     }
                 },
-                None => None,
+                None => 0,
             };
             let Some(steps_node) = m.iter().find(|e| e.key == "steps").map(|e| &e.value) else {
                 ctx.push(codes::STEP_FIELD_MISSING, path, "steps", "loop 缺少 steps");

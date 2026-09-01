@@ -135,7 +135,7 @@ pub(crate) fn validate_script_file(
     provider: &dyn ResourceProvider,
 ) -> Vec<ScriptError> {
     let mut v = Validator::new(resource, FileKind::Script, provider, &file.params);
-    v.walk_steps(&file.steps, "steps", 1);
+    v.walk_steps(&file.steps, "steps", 1, 0);
     v.walk_graph(GraphEntry::Script(resource.to_string(), file));
     v.errors
 }
@@ -148,7 +148,7 @@ pub(crate) fn validate_function_file(
     let mut errors = Vec::new();
     for func in &file.functions {
         let mut v = Validator::new(resource, FileKind::FunctionLibrary, provider, &func.params);
-        v.walk_steps(&func.steps, &format!("{}.steps", func.name), 1);
+        v.walk_steps(&func.steps, &format!("{}.steps", func.name), 1, 0);
         errors.append(&mut v.errors);
     }
     // 跨文件 func/call 引用图以文件为节点，统一走一遍。
@@ -205,7 +205,7 @@ impl<'a> Validator<'a> {
 
     // -- 步骤遍历 -----------------------------------------------------------
 
-    fn walk_steps(&mut self, steps: &[Step], path: &str, depth: usize) {
+    fn walk_steps(&mut self, steps: &[Step], path: &str, depth: usize, loop_depth: usize) {
         if depth > MAX_DEPTH {
             // 每个超限容器只报一次，且不再下钻。
             self.push(
@@ -218,13 +218,23 @@ impl<'a> Validator<'a> {
         }
         for (i, step) in steps.iter().enumerate() {
             let p = format!("{path}[{i}]");
-            self.walk_step(step, &p, depth);
+            self.walk_step(step, &p, depth, loop_depth);
         }
     }
 
-    fn walk_step(&mut self, step: &Step, path: &str, depth: usize) {
+    fn walk_step(&mut self, step: &Step, path: &str, depth: usize, loop_depth: usize) {
         match step {
             Step::StrApp | Step::ClsApp | Step::Throw { .. } => {}
+            Step::Break => {
+                if loop_depth == 0 {
+                    self.push(
+                        codes::STEP_BREAK_OUTSIDE_LOOP,
+                        path,
+                        "",
+                        "break 只能出现在 loop 子流程内",
+                    );
+                }
+            }
             Step::Tap { at } => self.check_cell(at, ParamType::Coord, path, "at"),
             Step::Swipe { from, to, time } => {
                 self.check_cell(from, ParamType::Coord, path, "from");
@@ -273,8 +283,8 @@ impl<'a> Validator<'a> {
                 if let Some(t) = timeout {
                     self.check_cell(t, ParamType::Time, path, "timeout");
                 }
-                self.walk_branch(then, path, "then", depth);
-                self.walk_branch(r#else, path, "else", depth);
+                self.walk_branch(then, path, "then", depth, loop_depth);
+                self.walk_branch(r#else, path, "else", depth, loop_depth);
             }
             Step::Match {
                 candidates,
@@ -289,12 +299,18 @@ impl<'a> Validator<'a> {
                         &format!("{path}.candidates[{i}]"),
                         "candidates",
                     );
-                    self.walk_branch(&c.steps, &format!("{path}.candidates[{i}]"), "steps", depth);
+                    self.walk_branch(
+                        &c.steps,
+                        &format!("{path}.candidates[{i}]"),
+                        "steps",
+                        depth,
+                        loop_depth,
+                    );
                 }
                 if let Some(t) = timeout {
                     self.check_cell(t, ParamType::Time, path, "timeout");
                 }
-                self.walk_branch(r#else, path, "else", depth);
+                self.walk_branch(r#else, path, "else", depth, loop_depth);
             }
             Step::Check { template, .. } => {
                 self.check_cell(template, ParamType::Tmpl, path, "template");
@@ -319,17 +335,17 @@ impl<'a> Validator<'a> {
                         }
                     }
                     self.check_cell(&e.color, ParamType::Color, &p, "expect");
-                    self.walk_branch(&e.steps, &p, "steps", depth);
+                    self.walk_branch(&e.steps, &p, "steps", depth, loop_depth);
                 }
-                self.walk_branch(r#else, path, "else", depth);
+                self.walk_branch(r#else, path, "else", depth, loop_depth);
             }
             Step::If { cond, then, r#else } => {
                 self.check_cell(cond, ParamType::Bool, path, "cond");
-                self.walk_branch(then, path, "then", depth);
-                self.walk_branch(r#else, path, "else", depth);
+                self.walk_branch(then, path, "then", depth, loop_depth);
+                self.walk_branch(r#else, path, "else", depth, loop_depth);
             }
             Step::Loop { steps, .. } => {
-                self.walk_branch(steps, path, "steps", depth);
+                self.walk_branch(steps, path, "steps", depth, loop_depth + 1);
             }
             Step::Call { target, args } => {
                 self.check_call(target, args, path);
@@ -341,8 +357,8 @@ impl<'a> Validator<'a> {
                 r#else,
             } => {
                 self.check_func(target, args, path);
-                self.walk_branch(then, path, "then", depth);
-                self.walk_branch(r#else, path, "else", depth);
+                self.walk_branch(then, path, "then", depth, loop_depth);
+                self.walk_branch(r#else, path, "else", depth, loop_depth);
             }
             Step::Return { value } => {
                 // parse 层已拒绝脚本中的 return；函数文件内做引用类型校验。
@@ -351,11 +367,18 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn walk_branch(&mut self, steps: &[Step], path: &str, key: &str, depth: usize) {
+    fn walk_branch(
+        &mut self,
+        steps: &[Step],
+        path: &str,
+        key: &str,
+        depth: usize,
+        loop_depth: usize,
+    ) {
         if steps.is_empty() {
             return;
         }
-        self.walk_steps(steps, &format!("{path}.{key}"), depth + 1);
+        self.walk_steps(steps, &format!("{path}.{key}"), depth + 1, loop_depth);
     }
 
     // -- 引用 / 资源 ---------------------------------------------------------

@@ -65,6 +65,7 @@ export const CODES = {
   stepTimeFormat: 'step.time.format',
   stepWaitRangeInvalid: 'step.wait.range_invalid',
   stepLoopEmptySteps: 'step.loop.empty_steps',
+  stepBreakOutsideLoop: 'step.break.outside_loop',
   stepReturnInScript: 'step.return.in_script',
   stepNestingDepth: 'step.nesting.depth',
   stepListType: 'step.list_type',

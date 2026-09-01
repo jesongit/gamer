@@ -3,7 +3,7 @@
 
 use super::error::codes;
 use super::error::ScriptError;
-use super::model::{ParamDecl, ParamType, TypedValue};
+use super::model::{ParamDecl, ParamType, Step, TypedValue};
 use super::params::{
     self, escape_double_quoted, fmt_duration, merge_args, parse_param_decl, parse_time_duration,
     parse_time_ms,
@@ -382,6 +382,23 @@ mod loader_tests {
         assert_code(&e, codes::STEP_FIELD_MISSING, "steps[0]", "steps");
         let e = errs("steps:\n  - loop:\n      times: x\n      steps:\n        - log: a\n");
         assert_code(&e, codes::STEP_FIELD_TYPE_MISMATCH, "steps[0]", "times");
+    }
+
+    #[test]
+    fn loop_defaults_times_to_zero_and_break_is_loop_local() {
+        let src = "steps:\n  - loop:\n      steps:\n        - break\n";
+        let file = parse_script_file(src, T, &InMemoryResources::new()).expect("应合法");
+        match &file.steps[0] {
+            Step::Loop { times, steps } => {
+                assert_eq!(*times, 0);
+                assert!(matches!(steps.as_slice(), [Step::Break]));
+            }
+            other => panic!("期望 loop，实际 {other:?}"),
+        }
+        assert_eq!(serialize_script(&file), src);
+
+        let e = errs("steps:\n  - break\n");
+        assert_code(&e, codes::STEP_BREAK_OUTSIDE_LOOP, "steps[0]", "");
     }
 
     /// if 条件非布尔（含被引号包裹的 "true"）。

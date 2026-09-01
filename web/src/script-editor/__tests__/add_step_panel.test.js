@@ -28,16 +28,16 @@ describe('AddStepPanel：分组下拉', () => {
     expect(labels).toEqual(['应用', '操作', '识别', '流程', '复用'])
   })
 
-  it('script 上下文隐藏 return（17 项）；function 上下文可见', () => {
+  it('script 上下文隐藏 return（18 项）；function 上下文可见', () => {
     const { wrapper } = mountPanel({ context: 'script' })
     expect(wrapper.text()).not.toContain('返回布尔值')
-    expect(wrapper.findAll('select[aria-label="选择步骤类型"] option')).toHaveLength(18) // 含占位项
+    expect(wrapper.findAll('select[aria-label="选择步骤类型"] option')).toHaveLength(19) // 含占位项
     const fn = setupFunctions('login:\n  steps:\n    - log: x\n')
     const w2 = mount(AddStepPanel, {
       props: { context: 'function', stack: fn.stack, anchor: { containerPath: ['functions', 'login', 'steps'], index: 1 } },
     })
     expect(w2.text()).toContain('返回布尔值')
-    expect(w2.findAll('select[aria-label="选择步骤类型"] option')).toHaveLength(19) // 含占位项
+    expect(w2.findAll('select[aria-label="选择步骤类型"] option')).toHaveLength(20) // 含占位项
   })
 
   it('下拉选择步骤类型后立即插入', async () => {

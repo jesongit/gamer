@@ -1,7 +1,7 @@
 {
   "id": "v06_nested_if_loop",
   "kind": "valid",
-  "description": "嵌套 if/loop：loop(3) > if > find(block+verify+then)，外加无限 loop（times 省略=null）",
+  "description": "嵌套 if/loop：loop(3) > if > find(block+verify+then)，外加无限 loop（times 省略=0）",
   "files": [
     {
       "file": "v06_nested_if_loop.yaml",
@@ -45,7 +45,7 @@
             "then": [
               {
                 "kind": "loop",
-                "times": null,
+                "times": 0,
                 "steps": [
                   { "kind": "wait", "duration": { "lit": "1s" }, "duration_max": null }
                 ]

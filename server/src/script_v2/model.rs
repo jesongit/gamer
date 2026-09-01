@@ -167,7 +167,7 @@ pub struct ColorBranch {
     pub steps: Vec<Step>,
 }
 
-/// 步骤十八类。分支子列表递归为 `Vec<Step>`；空分支/默认字段在 AST 中
+/// 步骤十九类。分支子列表递归为 `Vec<Step>`；空分支/默认字段在 AST 中
 /// 显式存在（序列化规范 YAML 时按契约省略）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
@@ -225,10 +225,12 @@ pub enum Step {
         r#else: Vec<Step>,
     },
     Loop {
-        /// `None` = 无限循环（times 省略）。
-        times: Option<u64>,
+        /// `0` = 无限循环（times 省略）。
+        times: u64,
         steps: Vec<Step>,
     },
+    /// 跳出最近一层 loop；结构校验保证只能出现在 loop 子流程内。
+    Break,
     Call {
         target: String,
         args: Vec<ArgAssign>,
@@ -291,6 +293,7 @@ impl Step {
             Step::Color { .. } => "color",
             Step::If { .. } => "if",
             Step::Loop { .. } => "loop",
+            Step::Break => "break",
             Step::Call { .. } => "call",
             Step::Func { .. } => "func",
             Step::Throw { .. } => "throw",
@@ -307,7 +310,7 @@ impl Serialize for Step {
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("kind", self.kind())?;
         match self {
-            Step::StrApp | Step::ClsApp => {}
+            Step::StrApp | Step::ClsApp | Step::Break => {}
             Step::Tap { at } => map.serialize_entry("at", at)?,
             Step::Swipe { from, to, time } => {
                 map.serialize_entry("from", from)?;

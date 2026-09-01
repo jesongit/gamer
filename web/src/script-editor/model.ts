@@ -3,7 +3,7 @@
  *
  * 本文件是可视化编辑器的唯一编辑源形态：
  * - 字段名严格等于 __fixtures__/json/*.golden.json（五方对照中的「前端 Model」）；
- * - Step 为 18 类判别联合，分支子流程一律 Step[]（Vec 语义，空列表显式存在）；
+ * - Step 为 19 类判别联合，分支子流程一律 Step[]（Vec 语义，空列表显式存在）；
  * - 每个步骤带浏览器内临时 uuid（选中/拖动/撤销/错误定位），**不写入 YAML**；
  * - Cell 是字段级取值单元格：{ lit: 类型化字面量 } 或 { ref: 参数名 }。
  */
@@ -69,11 +69,11 @@ export function isRefCell(cell: Cell | null | undefined): cell is { ref: string 
   return cell !== null && cell !== undefined && typeof (cell as Cell).ref === 'string'
 }
 
-// ---------- 步骤（18 类，契约 §3.5） ----------
+// ---------- 步骤（19 类，契约 §3.5） ----------
 
 export const STEP_KINDS = [
   'str_app', 'cls_app', 'tap', 'swipe', 'key', 'text', 'log', 'wait',
-  'find', 'match', 'check', 'color', 'if', 'loop', 'call', 'func', 'throw', 'return',
+  'find', 'match', 'check', 'color', 'if', 'loop', 'break', 'call', 'func', 'throw', 'return',
 ] as const
 
 export type StepKind = (typeof STEP_KINDS)[number]
@@ -122,7 +122,8 @@ export type Step =
     | { kind: 'check'; template: Cell; throw: string }
     | { kind: 'color'; at: Cell; expect: ColorExpect[]; else: Step[] }
     | { kind: 'if'; cond: Cell; then: Step[]; else: Step[] }
-    | { kind: 'loop'; times: number | null; steps: Step[] }
+    | { kind: 'loop'; times: number; steps: Step[] }
+    | { kind: 'break' }
     | { kind: 'call'; target: string; args: Record<string, Cell> }
     | { kind: 'func'; target: string; args: Record<string, Cell>; then: Step[]; else: Step[] }
     | { kind: 'throw'; message: string | null }

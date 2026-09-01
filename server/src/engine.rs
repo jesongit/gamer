@@ -8,7 +8,7 @@
 //!
 //! - [`exec`]：`RunTarget`（脚本 / 函数测试二选一）→ 快照 → 严格解析 →
 //!   参数绑定（声明默认值 → args 覆盖）→ AST 步骤执行（find/match/color/if/
-//!   loop/call/func/throw/return 等 17 类；10 万步 guard + 32 层嵌套 + 取消
+//!   loop/break/call/func/throw/return 等 19 类；10 万步 guard + 32 层嵌套 + 取消
 //!   轮询；tap/swipe/hit/miss 可视化事件经 control DataChannel 反向推送）。
 //! - [`snapshot`]：运行开始时整体捕获分区 `yaml/`+`func/` 源码，call/func 从
 //!   快照懒解析并按运行实例缓存——运行中改文件不影响已开始的实例。

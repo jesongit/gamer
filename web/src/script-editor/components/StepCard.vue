@@ -297,14 +297,10 @@
         <div class="field-row">
           <span class="field-label">次数</span>
           <input
-            v-if="step.times !== null" class="cell-input num" type="number" min="0"
+            class="cell-input num" type="number" min="0"
             :value="step.times" aria-label="循环次数" @change="setTimes(($event.target as HTMLInputElement).value)"
           />
-          <label class="field-check">
-            <input type="checkbox" :checked="step.times === null" @change="toggleInfinite(($event.target as HTMLInputElement).checked)" />
-            无限循环
-          </label>
-          <span v-if="step.times === null" class="field-hint warn">无限循环——请确保体内有退出条件</span>
+          <span v-if="step.times === 0" class="field-hint warn">0 = 无限循环——请确保体内有 break 或其他退出条件</span>
           <span v-if="fieldError('steps')" class="cell-err-msg">{{ fieldError('steps') }}</span>
         </div>
         <BranchContainer
@@ -400,6 +396,11 @@
         </template>
       </template>
 
+      <!-- break -->
+      <template v-else-if="step.kind === 'break'">
+        <div class="field-hint warn">跳出最近一层 loop；只能放在 loop 子流程内</div>
+      </template>
+
       <!-- throw -->
       <template v-else-if="step.kind === 'throw'">
         <div class="field-row">
@@ -426,7 +427,7 @@
 
 <script setup lang="ts">
 /**
- * 步骤卡片（plan §8.4 / §9）：17 类全覆盖。
+ * 步骤卡片（plan §8.4 / §9）：19 类全覆盖。
  * - 收起态 = 自然语言摘要（kinds.stepSummary，§9 表文案）；
  * - 展开态 = 该类型强类型控件（无任意键值编辑器）；字段错误按 Diagnostic.field 标红定位；
  * - 左侧动作图标 + 中文名 + 序号 + 上移/下移/复制/删除（全部经 CommandStack）；
@@ -602,10 +603,7 @@ function setExpectClick(i: number, on: boolean): void {
 }
 function setTimes(raw: string): void {
   const n = Number(raw)
-  updateStep({ times: Number.isFinite(n) && n >= 0 ? Math.floor(n) : 1 })
-}
-function toggleInfinite(on: boolean): void {
-  updateStep({ times: on ? null : 1 })
+  updateStep({ times: Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0 })
 }
 function setTarget(v: string): void {
   updateStep({ target: v })

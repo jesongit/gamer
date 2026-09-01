@@ -219,6 +219,9 @@ function emitStep(step: Step, col: number, lines: string[]): void {
     case 'cls_app':
       lines.push(`${head}cls_app`)
       return
+    case 'break':
+      lines.push(`${head}break`)
+      return
     case 'throw':
       if (step.message === null || step.message === undefined) {
         lines.push(`${head}throw`)
@@ -328,7 +331,7 @@ function emitStep(step: Step, col: number, lines: string[]): void {
     }
     case 'loop':
       lines.push(`${head}loop:`)
-      if (step.times !== null) {
+      if (step.times !== 0) {
         lines.push(`${' '.repeat(contentCol + 2)}times: ${fmtNum(step.times)}`)
       }
       if (step.steps.length === 0) {
@@ -807,6 +810,7 @@ function parseStepNode(node: YNode | null, path: string, diags: Diagnostic[]): S
   if (node.kind === 'scalar') {
     if (node.value === 'str_app') return { uuid: newStepUuid(), kind: 'str_app' }
     if (node.value === 'cls_app') return { uuid: newStepUuid(), kind: 'cls_app' }
+    if (node.value === 'break') return { uuid: newStepUuid(), kind: 'break' }
     if (node.value === 'throw') return { uuid: newStepUuid(), kind: 'throw', message: null }
     if (!isNullScalar(node)) {
       diags.push(diag(CODES.stepUnknownAction, path, '', `未知动作 ${JSON.stringify(node.value)}`))
@@ -860,6 +864,7 @@ function isKnownField(kind: StepKind, key: string): boolean {
     case 'log':
     case 'return':
     case 'throw':
+    case 'break':
       return false
     case 'swipe':
       return false // fm/to/time 由动作值映射携带
@@ -902,6 +907,11 @@ function parseStepFields(
         diags.push(diag(CODES.stepFieldTypeMismatch, path, '', 'cls_app 只允许裸写，不能带值'))
       }
       return { ...base, kind: 'cls_app' }
+    case 'break':
+      if (value !== null) {
+        diags.push(diag(CODES.stepFieldTypeMismatch, path, '', 'break 只允许裸写，不能带值'))
+      }
+      return { ...base, kind: 'break' }
     case 'throw': {
       if (value === null || isNullScalar(value)) return { ...base, kind: 'throw', message: null }
       if (value.kind === 'scalar') return { ...base, kind: 'throw', message: value.value }
@@ -1019,7 +1029,7 @@ function parseStepFields(
       const map = value !== null && value.kind === 'map' ? value : null
       if (map === null) {
         diags.push(diag(CODES.stepFieldMissing, path, 'steps', 'loop 需要 times/steps 字段'))
-        return { ...base, kind: 'loop', times: null, steps: [] }
+        return { ...base, kind: 'loop', times: 0, steps: [] }
       }
       for (const e of map.entries) {
         const k = entryKey(e)
@@ -1029,11 +1039,11 @@ function parseStepFields(
       }
       const get = (k: string) => map.entries.find((e) => entryKey(e) === k)?.value ?? null
       const timesNode = get('times')
-      let times: number | null = null
-      if (timesNode !== null && !isNullScalar(timesNode)) {
-        const v = timesNode.kind === 'scalar' ? scalarValue(timesNode) : null
+      let times = 0
+      if (timesNode !== null) {
+        const v = timesNode.kind === 'scalar' && !isNullScalar(timesNode) ? scalarValue(timesNode) : null
         if (typeof v === 'number') times = v
-        else diags.push(diag(CODES.stepFieldTypeMismatch, path, 'times', 'loop 的 times 必须是数字（省略 = 无限）'))
+        else diags.push(diag(CODES.stepFieldTypeMismatch, path, 'times', 'loop 的 times 必须是非负整数（省略或 0 = 无限）'))
       }
       const stepsNode = get('steps')
       if (stepsNode === null) {

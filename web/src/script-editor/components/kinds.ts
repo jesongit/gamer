@@ -1,7 +1,7 @@
 /**
  * 卡片层共享元数据与定位辅助（plan §8.4 / §9）。
  *
- * - KIND_META：18 类动作的中文名 + 单字图标（卡片左侧固定列）；
+ * - KIND_META：19 类动作的中文名 + 单字图标（卡片左侧固定列）；
  * - stepSummary：卡片收起态自然语言摘要（§9 表「卡片摘要」列）；
  * - breadcrumbForContainer / basePathOfContainer：容器路径 → 面包屑节点 / step_path 字符串基；
  * - parseStepPath / locateDiagnostic：诊断 step_path（如 steps[0].candidates[1].steps[0].then[0]）
@@ -40,7 +40,8 @@ export const KIND_META: Record<StepKind, KindMeta> = {
   check: { kind: 'check', label: '检查模板', icon: '检', hint: '单帧匹配模板做界面断言（不点击、不轮询）；未命中按 throw 文案结束运行' },
   color: { kind: 'color', label: '判断颜色', icon: '色', hint: '按序判断单点颜色，首个命中分支获胜；候选可勾选命中点击（点取样点）' },
   if: { kind: 'if', label: '布尔判断', icon: '判', hint: '布尔字面量或布尔参数的真假分支' },
-  loop: { kind: 'loop', label: '循环', icon: '循', hint: '有限次数或无限循环执行子流程' },
+  loop: { kind: 'loop', label: '循环', icon: '循', hint: '按次数执行子流程；次数 0 表示无限循环' },
+  break: { kind: 'break', label: '跳出循环', icon: '跳', hint: '跳出最近一层循环，仅能放在 loop 子流程内' },
   call: { kind: 'call', label: '调用脚本', icon: '调', hint: '调用同分区 yaml/ 下的另一个脚本（具名 args）' },
   func: { kind: 'func', label: '调用函数', icon: '函', hint: '调用同分区 func/ 的函数（具名 args，返回布尔走 then/else）' },
   throw: { kind: 'throw', label: '抛出错误', icon: '抛', hint: '结束整个运行（含调用链），原因可空' },
@@ -96,7 +97,8 @@ export function stepSummary(step: Step): string {
       const c = step.cond
       return `如果 ${isRefCell(c) ? c.ref : c.lit === true ? 'true' : 'false'}`
     }
-    case 'loop': return step.times === null ? '无限循环' : `循环 ${step.times} 次`
+    case 'loop': return step.times === 0 ? '无限循环' : `循环 ${step.times} 次`
+    case 'break': return '跳出循环'
     case 'call': return `调用脚本 ${step.target || '（未填目标）'}`
     case 'func': return `调用函数 ${step.target || '（未填目标）'}`
     case 'throw': return step.message ? `终止：${step.message}` : '终止'

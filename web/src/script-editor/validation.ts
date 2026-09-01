@@ -46,7 +46,7 @@ export function validateScript(model: ScriptModel, ctx: ValidationContext = {}):
   const paramTypes = paramTypeMap(model.params)
   validateParamDecls(model.params, 'params', diags)
   validateConfig(model.config, diags)
-  validateStepList(model.steps, 'steps', paramTypes, ctx, diags, 1)
+  validateStepList(model.steps, 'steps', paramTypes, ctx, diags, 1, 0)
   return diags
 }
 
@@ -58,7 +58,7 @@ export function validateFunctionLibrary(
   for (const fn of model.functions) {
     const paramTypes = paramTypeMap(fn.params)
     validateParamDecls(fn.params, `${fn.name}.params`, diags)
-    validateStepList(fn.steps, `${fn.name}.steps`, paramTypes, { ...ctx, context: 'function' }, diags, 1)
+    validateStepList(fn.steps, `${fn.name}.steps`, paramTypes, { ...ctx, context: 'function' }, diags, 1, 0)
   }
   return diags
 }
@@ -124,6 +124,7 @@ function validateStepList(
   ctx: ValidationContext,
   diags: Diagnostic[],
   depth: number,
+  loopDepth: number,
 ): void {
   const maxDepth = ctx.maxDepth ?? 32
   steps.forEach((step, i) => {
@@ -131,12 +132,13 @@ function validateStepList(
     if (depth > maxDepth) {
       diags.push(diag(CODES.stepNestingDepth, path, '', `步骤嵌套超过 ${maxDepth} 层`))
     }
-    validateStep(step, path, paramTypes, ctx, diags)
+    validateStep(step, path, paramTypes, ctx, diags, loopDepth)
+    const childLoopDepth = loopDepth + (step.kind === 'loop' ? 1 : 0)
     for (const child of childStepLists(step)) {
       const childBase = child.key === 'candidates'
         ? `${path}.${child.key}[${child.index}].steps`
         : `${path}.${child.key}`
-      validateStepList(child.list, childBase, paramTypes, ctx, diags, depth + 1)
+      validateStepList(child.list, childBase, paramTypes, ctx, diags, depth + 1, childLoopDepth)
     }
   })
 }
@@ -147,11 +149,17 @@ function validateStep(
   paramTypes: Map<string, ParamDecl>,
   ctx: ValidationContext,
   diags: Diagnostic[],
+  loopDepth: number,
 ): void {
   switch (step.kind) {
     case 'str_app':
     case 'cls_app':
     case 'throw':
+      return
+    case 'break':
+      if (loopDepth === 0) {
+        diags.push(diag(CODES.stepBreakOutsideLoop, path, '', 'break 只能出现在 loop 子流程内'))
+      }
       return
     case 'tap':
       checkCell(step.at, 'coord', path, 'at', paramTypes, diags)
@@ -230,6 +238,9 @@ function validateStep(
       return
     }
     case 'loop':
+      if (!Number.isSafeInteger(step.times) || step.times < 0) {
+        diags.push(diag(CODES.stepFieldTypeMismatch, path, 'times', 'loop 的 times 必须是非负整数（省略或 0 = 无限）'))
+      }
       if (step.steps.length === 0) {
         diags.push(diag(CODES.stepLoopEmptySteps, path, 'steps', 'loop 子流程为空'))
       }

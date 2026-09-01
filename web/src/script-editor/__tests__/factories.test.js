@@ -5,11 +5,11 @@ import { stripUuids } from './helpers'
 import { STEP_KINDS } from '../model'
 
 /**
- * 工厂与添加面板：17 类步骤工厂创建 + 序列化往返；面板分组（plan §8.5）、
+ * 工厂与添加面板：19 类步骤工厂创建 + 序列化往返；面板分组（plan §8.5）、
  * return 仅函数上下文。
  */
 
-describe('factories：17 类工厂创建 + 序列化往返', () => {
+describe('factories：19 类工厂创建 + 序列化往返', () => {
   for (const kind of STEP_KINDS) {
     it(`${kind}`, () => {
       const step = makeStep(kind)
@@ -37,7 +37,7 @@ describe('factories：17 类工厂创建 + 序列化往返', () => {
     expect(step2.message).toBe('原因')
   })
 
-  it('全部 18 类都在工厂表里', () => {
+  it('全部 19 类都在工厂表里', () => {
     expect(Object.keys(DEFAULT_FACTORIES).sort()).toEqual([...STEP_KINDS].sort())
   })
 })
@@ -48,18 +48,18 @@ describe('factories：添加面板分组（plan §8.5）', () => {
     expect(PANEL_GROUPS.map((g) => g.label)).toEqual(['应用', '操作', '识别', '流程', '复用', '函数专用'])
   })
 
-  it('分组条目覆盖全部 18 类且不重复', () => {
+  it('分组条目覆盖全部 19 类且不重复', () => {
     const kinds = PANEL_GROUPS.flatMap((g) => g.entries.map((e) => e.kind))
     expect(kinds.sort()).toEqual([...STEP_KINDS].sort())
-    expect(new Set(kinds).size).toBe(18)
+    expect(new Set(kinds).size).toBe(19)
   })
 
-  it('return 仅函数上下文可见', () => {
+  it('return 仅函数上下文可见（break 在两种上下文均可添加，位置由校验约束）', () => {
     const scriptKinds = panelEntries('script').map((e) => e.kind)
     const functionKinds = panelEntries('function').map((e) => e.kind)
     expect(scriptKinds).not.toContain('return')
     expect(functionKinds).toContain('return')
-    expect(scriptKinds).toHaveLength(17)
-    expect(functionKinds).toHaveLength(18)
+    expect(scriptKinds).toHaveLength(18)
+    expect(functionKinds).toHaveLength(19)
   })
 })

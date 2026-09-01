@@ -47,6 +47,7 @@ pub mod codes {
     pub const STEP_TIME_FORMAT: &str = "step.time.format";
     pub const STEP_WAIT_RANGE_INVALID: &str = "step.wait.range_invalid";
     pub const STEP_LOOP_EMPTY_STEPS: &str = "step.loop.empty_steps";
+    pub const STEP_BREAK_OUTSIDE_LOOP: &str = "step.break.outside_loop";
     pub const STEP_RETURN_IN_SCRIPT: &str = "step.return.in_script";
     pub const STEP_NESTING_DEPTH: &str = "step.nesting.depth";
     // 契约缺口：§5.3 未列 find 主模板与 block 重复的码，按域命名规则补

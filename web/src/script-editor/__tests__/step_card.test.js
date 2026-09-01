@@ -8,7 +8,7 @@ import StepCard from '../components/StepCard.vue'
 import { expandCard, setupScript } from './component_helpers'
 
 /**
- * StepCard（18 类）：收起态摘要（§9 文案）、展开态强类型控件经 CommandStack 生效、
+ * StepCard（19 类）：收起态摘要（§9 文案）、展开态强类型控件经 CommandStack 生效、
  * 字段错误按 Diagnostic.field 标红、选中高亮、上移/下移/复制/删除。
  */
 
@@ -26,7 +26,8 @@ const YAML_BY_KIND = {
   check: 'check: ""\n    throw: ""',
   color: 'color:\n      at: [0.5, 0.5]\n      expect:\n        - "":\n          - log: x',
   if: 'if: true',
-  loop: 'loop:\n      times: 1\n      steps:\n        - log: x',
+  loop: 'loop:\n      steps:\n        - log: x',
+  break: 'break',
   call: 'call: ""',
   func: 'func: ""',
   throw: 'throw: null',
@@ -47,7 +48,8 @@ const SUMMARY_BY_KIND = {
   check: '检查 （未选模板）',
   color: '在 0.5, 0.5 判断 1 种颜色',
   if: '如果 true',
-  loop: '循环 1 次',
+  loop: '无限循环',
+  break: '跳出循环',
   call: '调用脚本 （未填目标）',
   func: '调用函数 （未填目标）',
   throw: '终止',
@@ -71,7 +73,7 @@ function mountCard({ yaml = 'steps:\n  - log: hello\n', index = 0, props = {} } 
   return { wrapper, model, stack }
 }
 
-describe('StepCard：收起态摘要（§9 文案，18 类全覆盖）', () => {
+describe('StepCard：收起态摘要（§9 文案，19 类全覆盖）', () => {
   for (const kind of STEP_KINDS) {
     it(`${kind} 摘要`, () => {
       expect(stepSummary(makeStep(kind))).toBe(SUMMARY_BY_KIND[kind])
@@ -233,7 +235,7 @@ describe('StepCard：展开编辑经 CommandStack 生效', () => {
     expect(model.steps[0].cond).toEqual({ lit: true })
   })
 
-  it('loop：次数与无限切换', async () => {
+  it('loop：次数与 0（无限）', async () => {
     const { wrapper, model } = mountCard({
       yaml: 'steps:\n  - loop:\n      times: 3\n      steps:\n        - log: x',
     })
@@ -242,8 +244,9 @@ describe('StepCard：展开编辑经 CommandStack 生效', () => {
     await times.setValue('5')
     await times.trigger('change')
     expect(model.steps[0].times).toBe(5)
-    await wrapper.find('input[type="checkbox"]').setValue(true)
-    expect(model.steps[0].times).toBeNull()
+    await times.setValue('0')
+    await times.trigger('change')
+    expect(model.steps[0].times).toBe(0)
   })
 
   it('call 目标与 args', async () => {

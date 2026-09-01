@@ -147,7 +147,7 @@ body 使用 `pkg/name/content`；已有资源用 `PUT` 更新，默认携带 `ex
 - match 候选模板与 color 候选颜色处于“键位”，YAML 中同样接受 `$name` 引用串。
 - 编辑器显示 `$name`，底层保存类型化引用对象，不靠字符串前缀猜类型（plan §9）。
 
-### 3.5 Step 十八种对照
+### 3.5 Step 十九种对照
 
 YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所有分支子列表（`then/else/candidates[].steps/expect[].steps/loop.steps`）递归为 `Step[]`；Model 中显式存在（空列表 `[]`），规范 YAML 省略空分支与默认字段。Rust AST 为 `enum Step { ... }` 对应变体；API JSON 与 Model 同构。
 
@@ -166,7 +166,8 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 | check | `- check: logo.png` + 兄弟键 `throw`(非空字符串，必填) | `{kind:"check", template: Cell<tmpl>, throw: string}`；单帧匹配断言，未命中按 `throw` 文案结束运行（见 §4.6） |
 | color | 见 §4.2 | `{kind:"color", at: Cell<coord>, expect: {color: Cell<color>, click: boolean, steps: Step[]}[], else: Step[]}`；候选默认不点击，`click:true` 命中点取样点 |
 | if | `- if: $enable` + 兄弟键 `then`/`else` | `{kind:"if", cond: Cell<bool>, then: Step[], else: Step[]}` |
-| loop | `- loop:` + `{times: 3, steps: [...]}`；`times` 省略 = 无限 | `{kind:"loop", times: number\|null, steps: Step[]}` |
+| loop | `- loop:` + `{times: 3, steps: [...]}`；`times` 省略 = `0` = 无限 | `{kind:"loop", times: number, steps: Step[]}` |
+| break | `- break`（仅 loop 子流程内合法，跳出最近一层 loop） | `{kind:"break"}` |
 | call | `- call: sub/inner.yaml` + 兄弟键 `args`（具名映射） | `{kind:"call", target: string, args: {name: Cell}}`；无布尔分支 |
 | func | `- func: common/login` + `args`/`then`/`else` | `{kind:"func", target: string, args: {name: Cell}, then: Step[], else: Step[]}` |
 | throw | `- throw` / `- throw: 原因` | `{kind:"throw", message: string\|null}` |
@@ -333,6 +334,7 @@ canonical_default（required=1 时为空串）：
 | | `step.time.format` | 时间缺单位/非法/≤0 |
 | | `step.wait.range_invalid` | 随机区间起点大于终点 |
 | | `step.loop.empty_steps` | loop 子流程为空 |
+| | `step.break.outside_loop` | break 不在 loop 子流程内 |
 | | `step.return.in_script` | return 出现在脚本（仅函数合法） |
 | | `step.nesting.depth` | 步骤嵌套超限 |
 | **引用 ref.** | `ref.call.path_traversal` | call 目标路径穿越/绝对路径/反斜杠 |

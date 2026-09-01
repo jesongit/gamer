@@ -121,7 +121,7 @@ function assertConfig(rawConfig, modelConfig, ctx) {
 
 const ACTION_KEYS = new Set([
   'str_app', 'cls_app', 'tap', 'swipe', 'key', 'text', 'log', 'wait',
-  'find', 'match', 'check', 'color', 'if', 'loop', 'call', 'func', 'throw', 'return',
+  'find', 'match', 'check', 'color', 'if', 'loop', 'break', 'call', 'func', 'throw', 'return',
 ])
 
 function findActionKey(step) {
@@ -141,7 +141,7 @@ function assertSteps(rawSteps, modelSteps, ctx) {
 }
 
 function assertStep(s, m, ctx) {
-  if (m.kind === 'str_app' || m.kind === 'cls_app' || (m.kind === 'throw' && m.message === null)) {
+  if (m.kind === 'str_app' || m.kind === 'cls_app' || m.kind === 'break' || (m.kind === 'throw' && m.message === null)) {
     expect(typeof s, ctx).toBe('string')
     expect(s, ctx).toBe(m.kind)
     return
@@ -243,9 +243,11 @@ function assertStep(s, m, ctx) {
       assertSteps(s.else ?? [], m.else, `${ctx}.else`)
       break
     case 'loop':
-      if (m.times === null) expect(sub.times ?? null, `${ctx}.times`).toBeNull()
-      else expect(sub.times, `${ctx}.times`).toBe(m.times)
+      expect(sub.times ?? 0, `${ctx}.times`).toBe(m.times)
       assertSteps(sub.steps, m.steps, `${ctx}.steps`)
+      break
+    case 'break':
+      expect(sub, `${ctx}.break`).toBeNull()
       break
     case 'call':
       expect(sub, `${ctx}.target`).toBe(m.target)

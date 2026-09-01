@@ -53,7 +53,8 @@ export const DEFAULT_FACTORIES: Record<StepKind, () => Step> = {
     else: [],
   }),
   if: () => createStep('if', { cond: lit(true), then: [], else: [] }),
-  loop: () => createStep('loop', { times: 1, steps: [] }),
+  loop: () => createStep('loop', { times: 0, steps: [] }),
+  break: () => createStep('break'),
   call: () => createStep('call', { target: '', args: {} }),
   func: () => createStep('func', { target: '', args: {}, then: [], else: [] }),
   throw: () => createStep('throw', { message: null }),
@@ -114,6 +115,7 @@ export const PANEL_GROUPS: { id: PanelGroupId; label: string; entries: PanelEntr
     entries: [
       { kind: 'if', label: '布尔判断', group: 'flow' },
       { kind: 'loop', label: '循环', group: 'flow' },
+      { kind: 'break', label: '跳出循环', group: 'flow' },
       { kind: 'throw', label: '抛出错误', group: 'flow' },
       { kind: 'log', label: '记录日志', group: 'flow' },
     ],
