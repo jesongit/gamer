@@ -933,15 +933,13 @@ impl ScriptStore {
             }
         }
 
-        let mut written = 0;
-        for (path, _, content) in &rewrites {
+        for (written, (path, _, content)) in rewrites.iter().enumerate() {
             if let Err(error) = atomic_write(path, content.as_bytes()) {
                 for (rollback_path, original, _) in rewrites[..written].iter().rev() {
                     let _ = atomic_write(rollback_path, original.as_bytes());
                 }
                 return Err(error);
             }
-            written += 1;
         }
 
         if let Err(error) = atomic_write(&new_path, &template_bytes) {

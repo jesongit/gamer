@@ -822,6 +822,7 @@ pub fn match_template_from_path(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn match_template_with_source(
     screen: &image::RgbImage,
     threshold: Option<f32>,

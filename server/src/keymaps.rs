@@ -605,9 +605,7 @@ fn parse_optional_keycode(
     diagnostics: &mut Vec<KeymapDiagnostic>,
 ) -> Option<u32> {
     let path = format!("{binding_path}.action.keycode");
-    let Some(value) = value_for(map, "keycode") else {
-        return None;
-    };
+    let value = value_for(map, "keycode")?;
     let Some(keycode) = value.as_u64() else {
         diagnostics.push(diag(
             "keymap.raw_keycode",
