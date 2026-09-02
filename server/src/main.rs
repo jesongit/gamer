@@ -15,6 +15,7 @@
 
 mod api;
 mod build_info;
+pub(crate) mod capabilities;
 mod config;
 mod deps_probe;
 mod device;
