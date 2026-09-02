@@ -1,7 +1,7 @@
 {
   "id": "v13_check_step",
   "kind": "valid",
-  "description": "check 断言：单帧匹配模板不点击，throw 为未命中终止原因（必填）；模板支持字面量与 $ref",
+  "description": "check 断言：省略 timeout/throw 时使用默认值；模板支持字面量与 $ref",
   "files": [
     {
       "file": "v13_check_step.yaml",
@@ -16,12 +16,14 @@
           {
             "kind": "check",
             "template": { "lit": "logo.png" },
-            "throw": "主界面按钮未出现"
+            "timeout": null,
+            "throw": null
           },
           {
             "kind": "check",
             "template": { "ref": "logo" },
-            "throw": "结算界面未出现"
+            "timeout": null,
+            "throw": null
           }
         ]
       }

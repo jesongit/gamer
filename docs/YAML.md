@@ -258,19 +258,18 @@ steps:
   `step.match.candidate_duplicate`）；不接受布尔条件（布尔走 `if`）。
 - `- else:` / `- timeout:` 写进候选列表是错误（`step.match.else_in_candidates`）。
 
-### 5.4 check —— 界面断言（单帧匹配，未命中终止）
+### 5.4 check —— 界面断言（轮询匹配，未命中终止）
 
 ```yaml
 - check: logo.png               # 模板短名或 $name
-  throw: 主界面按钮未出现        # 必填：未命中时的终止原因（非空字符串）
 ```
 
-- **只截一帧**匹配模板：不点击、不轮询、无分支（重试自己套 `loop`）。
+- 省略 `timeout` 时默认 5s；配置后在该时间内按 `config.toml` 的 `interval` 重复截图匹配；`timeout: 0` 只检查首帧。不点击、无分支。
 - 命中 → 推送命中框可视化、记「检查通过」日志后继续后续步骤。
-- 未命中 → 记「检查未通过」日志（含 `throw` 文案），按 `throw` 步骤同语义
+- 超时仍未命中 → 记「检查未通过」日志（含 `throw` 文案），按 `throw` 步骤同语义
   **结束整个运行**（含调用链）。
-- `throw` 必填且非空（缺失/空串 → `step.field.missing` /
-  `step.field.type_mismatch`）；模板字段 `throw` 与动作键 `throw` 同名词，
+- `timeout` 省略时默认为 5s，必须带时间单位且大于等于 0；`throw` 省略时使用
+  `模板名 模板不存在`，显式值必须为非空字符串；模板字段 `throw` 与动作键 `throw` 同名词，
   步骤内存在 `check` 键时该键固定解析为字段，不算第二个动作键。
 
 ### 5.5 color —— 单点颜色分支
@@ -443,41 +442,7 @@ canonical_default: bool→true/false；coord→[x,y]（逗号后无空格）；c
 示例（fixture v12）：
 `psig1|bool,enable,0,true|time,timeout,0,30s|text,message,0,开始任务|coord,pos,0,[0.5,0.5]|color,target,0,123456|key,quit_key,0,ESC|tmpl,icon,0,icon.png`
 
-## 8. 录制输出形态
-
-投屏控制台（Console）录制手势，停止后按以下形态生成步骤（fixture v11）：
-
-- **点击** → 单条 `find`（模板短名，无 block/verify/timeout）：
-
-```yaml
-steps:
-  - find: record_click_20260829_001.png
-```
-
-- **滑动** → `match → swipe`（起点模板命中才滑，避免 find 的命中点击破坏手势），
-  默认 `else` 为 throw、`timeout: 30s`：
-
-```yaml
-  - match:
-    - record_swipe_20260829_002.png:
-      - swipe:
-          fm: [0.5, 0.8]
-          to: [0.5, 0.2]
-          time: 800ms
-    else:
-      - throw: 未找到滑动起点
-    timeout: 30s
-```
-
-- **模板命名**：默认 `record_<click|swipe>_YYYYMMDD_NNN.png`（NNN 三位序号，
-  分区内冲突自动顺延）；录制时框选的搜索区域写入完整文件名的 `#` 后缀
-  （半区码或 `#x1_y1_x2_y2` 相对 ×1000，见 §1），脚本里仍写短名引用。
-- **Alt 组合键**（编辑态，不经录制上传队列）：模板 → `find`；取色 → `color`；
-  Alt 拖动 → 裸 `swipe`。
-- 录制产出以「占位步骤 + 逐条定稿」写入编辑器命令栈，可撤销；上传失败保留草稿
-  可重试 / 降级为坐标 tap / 丢弃。
-
-## 9. 诊断错误
+## 8. 诊断错误
 
 装载 / 校验 / 运行错误统一为结构化五元组
 `{ code, message, resource, step_path, field }`：

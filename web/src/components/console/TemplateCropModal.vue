@@ -26,7 +26,7 @@
       </div>
       <div v-else class="modal-body">
         <div class="crop-stage"><canvas ref="cropCanvas" class="crop-canvas" @mousedown="ctx.cropMouseDown" @mousemove="ctx.cropMouseMove" @mouseup="ctx.cropMouseUp" @mouseleave="ctx.cropMouseLeave" @wheel="ctx.cropWheel"></canvas></div>
-        <div class="crop-hint">滚轮缩放（50%~800%）· 拖动边框/角调整选框 · Alt 点击任意处 → 取色生成 color 记录</div>
+        <div class="crop-hint">滚轮缩放（50%~800%）· 拖动边框/角调整选框</div>
         <input v-model="ctx.crop.name" class="input mono" placeholder="模板名称（默认自动生成，支持中文）" @keydown.enter="ctx.saveTemplate" />
         <label class="crop-color-option"><input v-model="ctx.crop.preserveColor" type="checkbox" /> 保留颜色（文件名自动加 <span class="mono">#1</span>）</label>
       </div>

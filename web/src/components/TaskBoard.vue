@@ -72,7 +72,12 @@
           <div class="form-row">
             <div class="form-item">
               <label>脚本</label>
-              <ScriptPicker v-model="form.script_id" @update:model-value="onScriptPicked" />
+              <ScriptPicker
+                v-model="form.script_id"
+                :package="props.activePkg || ''"
+                :lock-package="props.activePkg !== null"
+                @update:model-value="onScriptPicked"
+              />
             </div>
             <div class="form-item">
               <label>设备</label>
@@ -142,6 +147,11 @@ import { buildTaskSavePayload, isParamSignatureConflict, staleCompareRows, stale
 import { serverTzLabelFromTasks } from '../task-tz'
 import RunConflictModal from './RunConflictModal.vue'
 import { shortRunId, isDeviceBusyConflict } from '../runs'
+
+const props = defineProps({
+  // Console 传入当前包名后，任务脚本选择器锁定该分区；独立挂载时保留原有自选分区行为。
+  activePkg: { type: String, default: null },
+})
 
 const toast = useToast()
 const tasks = tasksData

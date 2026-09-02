@@ -50,6 +50,8 @@ use super::snapshot::{ResourceCache, RunResources, RunSnapshot};
 
 /// find 未显式指定 timeout 时的默认超时（30 分钟，必须 > 0 由装载层保证）。
 const FIND_DEFAULT_TIMEOUT_MS: u64 = 1_800_000;
+/// check 未显式指定 timeout 时的默认超时（5 秒）。
+const CHECK_DEFAULT_TIMEOUT_MS: u64 = 5_000;
 /// wait 分片睡眠的单片时长：停止请求最多延迟这么久生效。
 const WAIT_STOP_SLICE_MS: u64 = 200;
 /// find 截图持续失败的宽限期：超过则判定链路/会话异常，带因中止。
@@ -804,8 +806,12 @@ impl Runner {
             } => {
                 self.exec_match(ctx, candidates, r#else, timeout).await?;
             }
-            Step::Check { template, r#throw } => {
-                self.exec_check(ctx, template, r#throw).await?;
+            Step::Check {
+                template,
+                timeout,
+                r#throw,
+            } => {
+                self.exec_check(ctx, template, timeout, r#throw).await?;
             }
             Step::Color { at, expect, r#else } => {
                 self.exec_color(ctx, at, expect, r#else).await?;
@@ -958,6 +964,18 @@ impl Runner {
     fn time_value(&self, ctx: &Ctx<'_>, cell: &Cell, field: &str) -> anyhow::Result<u64> {
         match self.typed_value(ctx, cell, field)? {
             TypedValue::Time(s) => params::parse_time_ms(&s)
+                .map(|ms| ms as u64)
+                .ok_or_else(|| anyhow::anyhow!("{field} 时间 {s:?} 非法")),
+            other => anyhow::bail!(
+                "{field} 需要 time 类型，得到 {}",
+                other.param_type().as_str()
+            ),
+        }
+    }
+
+    fn timeout_value(&self, ctx: &Ctx<'_>, cell: &Cell, field: &str) -> anyhow::Result<u64> {
+        match self.typed_value(ctx, cell, field)? {
+            TypedValue::Time(s) => params::parse_time_ms_allow_zero(&s)
                 .map(|ms| ms as u64)
                 .ok_or_else(|| anyhow::anyhow!("{field} 时间 {s:?} 非法")),
             other => anyhow::bail!(
@@ -1297,41 +1315,81 @@ impl Runner {
 
     // ---- check ---------------------------------------------------------------
 
-    /// check：单帧匹配模板（不点击、不轮询、无分支），界面断言用。
-    /// 命中 → Hit 可视化事件 + 日志后继续；未命中 → 以 throw 文案按 throw
-    /// 步骤同语义结束运行（Miss 搜索区域事件由 match_screen_one 统一推送）。
+    /// check：在 timeout 内按 config.interval 轮询匹配模板（不点击、无分支），
+    /// timeout=0 时只检测首帧。命中 → Hit 可视化事件 + 日志后继续；超时未命中
+    /// → 以 throw 文案按 throw 步骤同语义结束运行（Miss 搜索区域事件由
+    /// match_screen_one 统一推送）。
     async fn exec_check(
         &self,
         ctx: &mut Ctx<'_>,
         template: &Cell,
-        message: &str,
+        timeout: &Option<Cell>,
+        message: &Option<String>,
     ) -> anyhow::Result<()> {
         let name = self.tmpl_value(ctx, template, "check.template")?;
-        ctx.log("info", format!("检查模板 {name}"));
-        let screen = self.shot(ctx).await?;
-        if let Some(mm) = self.match_screen_one(ctx, &name, screen).await? {
-            self.emit(
-                &ctx.device_id,
-                ScriptEvent::Hit {
-                    tpl: name.clone(),
-                    x: mm.x,
-                    y: mm.y,
-                    w: mm.width,
-                    h: mm.height,
-                    score: mm.score,
-                },
-            )
-            .await;
-            ctx.log(
-                "info",
-                format!("检查通过：模板 {name} @ ({}, {})", mm.x, mm.y),
-            );
-        } else {
-            ctx.log(
-                "warn",
-                format!("检查未通过：模板 {name} 未命中 —— {message}"),
-            );
-            ctx.exit.store(true, Ordering::SeqCst);
+        let timeout_ms = match timeout {
+            Some(cell) => self.timeout_value(ctx, cell, "check.timeout")?,
+            None => CHECK_DEFAULT_TIMEOUT_MS,
+        };
+        ctx.log(
+            "info",
+            format!(
+                "检查模板 {name}，超时 {timeout_ms}ms，轮询 {}ms",
+                ctx.config.interval.as_millis()
+            ),
+        );
+        let start = Instant::now();
+        let timeout = Duration::from_millis(timeout_ms);
+        loop {
+            if ctx.aborted() {
+                break;
+            }
+            // 睡眠结束后若已到 deadline，直接触发超时，不在 timeout 之外再截一帧。
+            if timeout_ms > 0 && start.elapsed() >= timeout {
+                let default_message = format!("{name} 模板不存在");
+                let message = message.as_deref().unwrap_or(&default_message);
+                ctx.log(
+                    "warn",
+                    format!("检查未通过：模板 {name} 未命中 —— {message}"),
+                );
+                ctx.exit.store(true, Ordering::SeqCst);
+                break;
+            }
+            let screen = self.shot(ctx).await?;
+            if let Some(mm) = self.match_screen_one(ctx, &name, screen).await? {
+                self.emit(
+                    &ctx.device_id,
+                    ScriptEvent::Hit {
+                        tpl: name.clone(),
+                        x: mm.x,
+                        y: mm.y,
+                        w: mm.width,
+                        h: mm.height,
+                        score: mm.score,
+                    },
+                )
+                .await;
+                ctx.log(
+                    "info",
+                    format!("检查通过：模板 {name} @ ({}, {})", mm.x, mm.y),
+                );
+                break;
+            }
+            if timeout_ms == 0 || start.elapsed() >= timeout {
+                let default_message = format!("{name} 模板不存在");
+                let message = message.as_deref().unwrap_or(&default_message);
+                ctx.log(
+                    "warn",
+                    format!("检查未通过：模板 {name} 未命中 —— {message}"),
+                );
+                ctx.exit.store(true, Ordering::SeqCst);
+                break;
+            }
+            let remaining = timeout.saturating_sub(start.elapsed());
+            if !remaining.is_zero() {
+                self.sleep_interruptible(ctx, ctx.config.interval.min(remaining))
+                    .await;
+            }
         }
         Ok(())
     }
@@ -2061,6 +2119,32 @@ mod tests {
             };
             self.runner.run(&spec, stop, None).await
         }
+
+        async fn run_capture_logs(
+            &self,
+            target: RunTarget,
+            args: Vec<(&str, TypedValue)>,
+        ) -> (anyhow::Result<Vec<(String, String)>>, Vec<(String, String)>) {
+            let spec = RunSpec {
+                device_id: "dev".into(),
+                target,
+                args: args.into_iter().map(|(n, v)| (n.to_string(), v)).collect(),
+            };
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let sink = captured.clone();
+            let result = self
+                .runner
+                .run(
+                    &spec,
+                    Arc::new(AtomicBool::new(false)),
+                    Some(Arc::new(move |level, message| {
+                        sink.lock().unwrap().push((level, message));
+                    })),
+                )
+                .await;
+            let logs = captured.lock().unwrap().clone();
+            (result, logs)
+        }
     }
 
     fn script_target(name: &str) -> RunTarget {
@@ -2279,6 +2363,40 @@ mod tests {
         assert!(logs_contain(&logs, "分支B"));
         assert!(!logs_contain(&logs, "分支A"));
         assert!(!logs_contain(&logs, "全未命中"));
+    }
+
+    // ---- check --------------------------------------------------------------
+
+    /// timeout=0 保持旧的单次检查语义，并在省略 throw 时生成默认原因。
+    #[tokio::test]
+    async fn check_zero_timeout_checks_once_with_default_message() {
+        let r = rig(HashMap::new(), solid_png(100, 100, [0, 0, 0]), "info");
+        r.tmpl("main.png");
+        r.save_script(
+            "f.yaml",
+            "steps:\n  - check: main.png\n    timeout: 0s\n  - log: 不应执行\n",
+        );
+        let (result, logs) = r.run_capture_logs(script_target("f.yaml"), vec![]).await;
+        assert!(result.is_err());
+        assert_eq!(r.shots.count(), 1, "timeout=0 只能截图一次");
+        assert_eq!(r.matcher.calls(), vec!["main.png"]);
+        assert!(logs_contain(&logs, "main.png 模板不存在"));
+        assert!(!logs_contain(&logs, "不应执行"));
+    }
+
+    /// timeout>0 按 config.interval 轮询，超时后使用显式 throw 文案结束。
+    #[tokio::test]
+    async fn check_timeout_polls_and_uses_explicit_message() {
+        let r = rig(HashMap::new(), solid_png(100, 100, [0, 0, 0]), "info");
+        r.tmpl("main.png");
+        r.save_script(
+            "f.yaml",
+            "steps:\n  - check: main.png\n    timeout: 55ms\n    throw: 主界面未出现\n",
+        );
+        let (result, logs) = r.run_capture_logs(script_target("f.yaml"), vec![]).await;
+        assert!(result.is_err());
+        assert!(r.shots.count() >= 2, "timeout>0 应按 interval 重复截图");
+        assert!(logs_contain(&logs, "主界面未出现"));
     }
 
     /// match 未配 timeout 全未命中 → 立即 else（单轮）。
@@ -2900,8 +3018,6 @@ mod tests {
             "dialog.png",
             "test1.png",
             "test2.png",
-            "record_click_20260829_001.png",
-            "record_swipe_20260829_002.png",
             "icon.png",
         ] {
             rig.tmpl(tpl);
@@ -3195,35 +3311,6 @@ mod tests {
         assert_eq!(r.ctl.calls(), vec!["tap 200 150"]);
         assert!(logs_contain(&logs, "登录成功"), "return true → then");
         assert!(!logs_contain(&logs, "登录失败"));
-    }
-
-    /// v11：录制输出形态 find + match → swipe。
-    #[tokio::test]
-    async fn golden_v11_record_output() {
-        let r = rig(
-            HashMap::from([
-                ("record_click_20260829_001.png", [100u32, 100, 100, 100]),
-                ("record_swipe_20260829_002.png", [400u32, 300, 100, 100]),
-            ]),
-            solid_png(1000, 500, [0, 0, 0]),
-            "info",
-        );
-        setup_golden(&r, &[("v11.yaml", "v11_record_output.yaml")], &[]);
-        let logs = r
-            .run(
-                RunTarget::Script {
-                    script_id: format!("{PKG}/v11.yaml"),
-                    start_index: 0,
-                },
-                vec![],
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            r.ctl.calls(),
-            vec!["tap 150 150", "swipe 500 400 500 100 800",]
-        );
-        let _ = logs;
     }
 
     /// v12：任务快照参数形态（全默认值）端到端执行。

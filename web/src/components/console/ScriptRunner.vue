@@ -5,7 +5,7 @@
         <option value="script">脚本</option>
         <option value="func">函数</option>
       </select>
-      <ScriptPicker v-if="ctx.runKind === 'script'" v-model="ctx.selScript" :package="ctx.activePkg" />
+      <ScriptPicker v-if="ctx.runKind === 'script'" v-model="ctx.selScript" :package="ctx.activePkg" :lock-package="true" />
       <select v-else v-model="ctx.selFnFile" class="select mono fn-file" title="函数库文件（data/<应用分区>/func/）">
         <option value="" disabled>选择函数库文件…</option>
         <option v-for="f in ctx.fnLib.list" :key="f.id" :value="f.id">{{ f.file }}</option>
@@ -15,6 +15,7 @@
       <template v-if="ctx.runKind === 'func'">
         <button class="btn" @click="ctx.startNewTarget">新建文件</button>
         <button class="btn" :disabled="!ctx.selTargetId" @click="ctx.addFunctionToCurrentFile">添加函数</button>
+        <button class="btn" :disabled="!ctx.selTargetId" @click="ctx.editRawCurrentTarget">原文编辑</button>
         <button class="btn btn-danger" :disabled="!ctx.selTargetId" @click="ctx.deleteCurrentTarget">删除文件</button>
       </template>
       <template v-else>
@@ -22,7 +23,11 @@
         <button v-else class="btn btn-danger" :disabled="ctx.runStopping" @click="ctx.stopScript">{{ ctx.runStopping ? '停止中…' : '停止脚本' }}</button>
         <button class="btn" @click="ctx.startNewTarget">新建脚本</button>
         <button class="btn" :disabled="!ctx.selTargetId" @click="ctx.editCurrentTarget()">编辑脚本</button>
-        <button class="btn btn-danger" :disabled="!ctx.selTargetId" @click="ctx.deleteCurrentTarget">删除脚本</button>
+        <button class="btn" :disabled="!ctx.selTargetId" @click="ctx.editRawCurrentTarget">原文编辑</button>
+        <button
+          class="btn btn-danger" :disabled="!ctx.selTargetId"
+          @click="ctx.deleteCurrentTarget"
+        >{{ ctx.scriptDeleteConfirmId === ctx.selScript ? '确认删除' : '删除脚本' }}</button>
       </template>
     </div>
     <RunLogPanel :context="ctx" :on-mounted="ctx.onLogBoxMounted" />
@@ -68,6 +73,21 @@
       <div v-else class="script-view-empty">请选择脚本</div>
     </div>
     <ResourcePreviewModal :preview="ctx.resourcePreview" @close="ctx.closeResourcePreview" />
+  </div>
+  <div v-else-if="ctx.scriptMode === 'raw'" class="raw-edit">
+    <div class="raw-actions">
+      <button class="btn btn-primary" :disabled="ctx.raw.loading || ctx.raw.saving" @click="ctx.saveRawScript">{{ ctx.raw.saving ? '保存中…' : '💾 保存' }}</button>
+      <button class="btn" :disabled="ctx.raw.loading || ctx.raw.saving" @click="ctx.cancelRawScript">取消</button>
+    </div>
+    <textarea
+      v-if="!ctx.raw.loading"
+      v-model="ctx.raw.content"
+      class="raw-editor mono"
+      spellcheck="false"
+      autofocus
+      aria-label="YAML 原文编辑区"
+    ></textarea>
+    <div v-else class="script-view-empty">原文加载中…</div>
   </div>
   <div v-else class="script-edit" @focusout="ctx.autoSaveDebounced()">
     <div class="edit-name-row"><input v-model="ctx.shell.name" class="input mono" :autofocus="ctx.shell.kind === 'function_library'" :placeholder="ctx.shell.kind === 'function_library' ? '函数库文件短名（缺省 .yaml 自动补）' : '脚本名称（可省略 .yml 后缀）'" @keydown.enter="ctx.saveEditScript" /></div>
@@ -122,8 +142,6 @@
         :hide-function-toolbar="ctx.shell.kind === 'function_library'"
         @select="(u) => ctx.shell.select(u)"
       />
-      <!-- 录制上传进行中：锁定画布交互（占位不可跨分支拖动，plan §11.8「禁用即可」） -->
-      <div v-if="ctx.recording && ctx.recording.uploading" class="canvas-lock" title="录制模板上传中，画布暂时锁定…"></div>
     </div>
     <div v-else class="script-view-empty">编辑器加载中…</div>
     <YamlPreview v-if="ctx.showYaml && ctx.shell.hasModel" :model="ctx.shell.model" :filename="ctx.shell.name || 'script.yaml'" @close="ctx.showYaml = false" />
@@ -145,12 +163,12 @@
  *   ScriptPicker 锁分区；函数 = 函数库文件 + 函数名下拉，同一行）+ 运行/停止/编辑/文件操作
  *   （Target 系列按类型分发，新建/删除/编辑函数库文件与脚本同形）+ 实时日志 +
  *   只读步骤摘要列表（脚本/函数体通用：「从此运行」选起点、call/func 结构化只读预览）；
- * - 编辑态：StepCanvas 共享画布（面包屑/专注视图/诊断定位/添加面板均为组件现成能力）+
+ * - 结构化编辑态：StepCanvas 共享画布（面包屑/专注视图/诊断定位/添加面板均为组件现成能力）+
  *   撤销重做 + 参数/配置折叠区 + 只读 YAML 诊断预览 + 保存 409 冲突弹窗（SaveConflictModal）；
- * - shell（useScriptEditorShell）由 Console 持有并传入，本组件只做编排；
- *   画布挂载后把 anchor 提供者注入 shell（Alt 生成的步骤与「添加步骤」面板同锚点插入）。
+ * - 原文编辑态：原始 YAML textarea + 保存/取消，用于直接修复或保留文本内容；
+ * - shell（useScriptEditorShell）由 Console 持有并传入，本组件只做编排。
  */
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import ScriptPicker from '../ScriptPicker.vue'
 import RunLogPanel from './RunLogPanel.vue'
 import ScriptSummary from './ScriptSummary.vue'
@@ -174,12 +192,6 @@ function fnSignature(view) {
   const ps = Array.isArray(view.model?.params) ? view.model.params : []
   const sig = ps.map(p => (p.remark ? `${p.name}:${p.remark}` : p.name)).join(', ')
   return `${view.name}(${sig})`
-}
-
-function syncCanvasRef() {
-  nextTick(() => {
-    ctx.shell.setAnchorProvider(() => canvasEl.value?.anchor ?? null)
-  })
 }
 
 const editFunctionName = computed(() => canvasEl.value?.activeFnName || ctx.editFocusFn || '')
@@ -220,12 +232,11 @@ function isRunningFunction(name) {
   return ctx.store.running && String(ctx.store.runScript || '').endsWith(`· ${name}()`)
 }
 
-watch(canvasEl, syncCanvasRef)
-onMounted(syncCanvasRef)
 </script>
 
 <style scoped>
-.script-run{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.auto-run{display:flex;flex-wrap:nowrap;gap:8px}.auto-run .spicker{width:auto;flex:1 1 auto;min-width:0}.auto-run .select{flex:1;min-width:0}.auto-run .run-kind{flex:0 0 auto;min-width:0;width:76px}.auto-run .fn-file{flex:1 1 auto;min-width:0}.sum-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:8px}.sum-wrap .script-summary{flex:none}.sum-wrap .script-view-empty{flex:none;min-height:160px}.fn-sum{display:flex;flex-direction:column;gap:4px}.fn-sum-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--accent);padding:2px 2px 0}.fn-sig{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fn-actions{display:flex;align-items:center;gap:4px;flex:none}.fn-edit-btn,.fn-delete-btn{flex:none;font-size:11px;padding:2px 8px;border:1px solid var(--border);background:var(--bg-2);color:var(--text-1);border-radius:var(--radius-sm);cursor:pointer}.fn-edit-btn:hover{color:var(--accent);border-color:var(--accent)}.fn-delete-btn{color:var(--danger)}.fn-delete-btn:hover:not(:disabled){color:var(--danger);border-color:var(--danger)}.run-actions{display:flex;gap:8px}.run-actions .btn{flex:1}.run-actions .more-wrap{position:relative;flex:1}.run-actions .more-wrap .btn{width:100%}.more-mask{position:fixed;inset:0;z-index:20}.more-dropdown{position:absolute;right:0;top:calc(100% + 4px);z-index:30;display:flex;flex-direction:column;min-width:120px;padding:4px;gap:2px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 8px 24px rgba(0,0,0,.4)}.more-item{display:flex;align-items:center;gap:6px;text-align:left;white-space:nowrap;padding:6px 10px;border:none;background:none;border-radius:var(--radius-sm);color:var(--text-0);font-size:12px;cursor:pointer}.more-item:hover{background:var(--bg-3)}.more-item:disabled{color:var(--text-2);opacity:.5;cursor:not-allowed}.more-item.danger:hover{color:var(--danger)}.script-view-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:12px;background:var(--bg-0);border:1px dashed var(--border);border-radius:var(--radius-sm)}.script-edit{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.edit-name-row{display:flex}.edit-name-row .input{flex:1;min-width:0;width:100%}.edit-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.edit-actions .btn{flex:1;justify-content:center;min-width:0}.edit-actions .btn.active{border-color:var(--accent-2);color:var(--accent-2);background:rgba(56,189,248,.08)}.dirty-badge{flex:none;font-size:11px;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px}.function-edit-toolbar{display:flex;align-items:center;gap:8px;min-height:30px}.function-edit-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--accent)}.function-edit-toolbar .btn{flex:none}.jump-back{flex:none;align-self:flex-start}.canvas-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;position:relative}.canvas-wrap .canvas-lock{position:absolute;inset:0;z-index:6;cursor:wait;background:transparent}.canvas-wrap :deep(.se-canvas){flex:none}.extras{display:flex;flex-direction:column;flex:none;margin-bottom:8px}.mono{font-family:var(--mono);font-size:11px;color:var(--text-1)}
+.script-run{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.auto-run{display:flex;flex-wrap:nowrap;gap:8px}.auto-run .spicker{width:auto;flex:1 1 auto;min-width:0}.auto-run .select{flex:1;min-width:0}.auto-run .run-kind{flex:0 0 auto;min-width:0;width:76px}.auto-run .fn-file{flex:1 1 auto;min-width:0}.sum-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:8px}.sum-wrap .script-summary{flex:none}.sum-wrap .script-view-empty{flex:none;min-height:160px}.fn-sum{display:flex;flex-direction:column;gap:4px}.fn-sum-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--accent);padding:2px 2px 0}.fn-sig{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fn-actions{display:flex;align-items:center;gap:4px;flex:none}.fn-edit-btn,.fn-delete-btn{flex:none;font-size:11px;padding:2px 8px;border:1px solid var(--border);background:var(--bg-2);color:var(--text-1);border-radius:var(--radius-sm);cursor:pointer}.fn-edit-btn:hover{color:var(--accent);border-color:var(--accent)}.fn-delete-btn{color:var(--danger)}.fn-delete-btn:hover:not(:disabled){color:var(--danger);border-color:var(--danger)}.run-actions{display:flex;gap:8px}.run-actions .btn{flex:1}.run-actions .more-wrap{position:relative;flex:1}.run-actions .more-wrap .btn{width:100%}.more-mask{position:fixed;inset:0;z-index:20}.more-dropdown{position:absolute;right:0;top:calc(100% + 4px);z-index:30;display:flex;flex-direction:column;min-width:120px;padding:4px;gap:2px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 8px 24px rgba(0,0,0,.4)}.more-item{display:flex;align-items:center;gap:6px;text-align:left;white-space:nowrap;padding:6px 10px;border:none;background:none;border-radius:var(--radius-sm);color:var(--text-0);font-size:12px;cursor:pointer}.more-item:hover{background:var(--bg-3)}.more-item:disabled{color:var(--text-2);opacity:.5;cursor:not-allowed}.more-item.danger:hover{color:var(--danger)}.script-view-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:12px;background:var(--bg-0);border:1px dashed var(--border);border-radius:var(--radius-sm)}.script-edit{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.edit-name-row{display:flex}.edit-name-row .input{flex:1;min-width:0;width:100%}.edit-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.edit-actions .btn{flex:1;justify-content:center;min-width:0}.edit-actions .btn.active{border-color:var(--accent-2);color:var(--accent-2);background:rgba(56,189,248,.08)}.dirty-badge{flex:none;font-size:11px;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px}.function-edit-toolbar{display:flex;align-items:center;gap:8px;min-height:30px}.function-edit-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--accent)}.function-edit-toolbar .btn{flex:none}.jump-back{flex:none;align-self:flex-start}.canvas-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;position:relative}.canvas-wrap :deep(.se-canvas){flex:none}.extras{display:flex;flex-direction:column;flex:none;margin-bottom:8px}.mono{font-family:var(--mono);font-size:11px;color:var(--text-1)}
+.raw-edit{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.raw-actions{display:flex;gap:8px;flex:none}.raw-actions .btn{flex:1;justify-content:center}.raw-editor{flex:1;min-height:240px;width:100%;box-sizing:border-box;resize:none;padding:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-0);color:var(--text-0);line-height:1.5;tab-size:2;outline:none}.raw-editor:focus{border-color:var(--accent)}
 .fn-sum { gap: 5px; }
 .fn-sum-head { gap: 10px; font-size: 14px; padding: 4px 2px 1px; }
 .fn-sig { font-size: 14px; line-height: 1.4; }

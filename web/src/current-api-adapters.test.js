@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createEditorShellApi, createRecordingApi } from './components/console/current-api-adapters'
+import { createEditorShellApi } from './components/console/current-api-adapters'
 
 describe('当前 API 调用点窄适配', () => {
   it('脚本/函数创建与更新遵守 expected_version / force 契约', async () => {
@@ -29,19 +29,5 @@ describe('当前 API 调用点窄适配', () => {
     expect(api.updateFunction).toHaveBeenCalledWith('f1', { content: 'f1: {}', expected_version: 'v2' })
     await bridge.updateFunction('f1', { content: 'f1: {}' })
     expect(api.updateFunction).toHaveBeenCalledWith('f1', { content: 'f1: {}', force: true })
-  })
-
-  it('录制定稿通过 createTemplate 传递短名、图片和 region', async () => {
-    const api = { createTemplate: vi.fn(async () => ({ ok: true })) }
-    const bridge = createRecordingApi(api)
-    await bridge[['upload', 'Template', 'Region'].join('')]('button.png', 'QUJD', 'com.demo', [0, 0, 1, 1])
-    expect(api.createTemplate).toHaveBeenCalledWith('button.png', 'QUJD', 'com.demo', [0, 0, 1, 1])
-  })
-
-  it('录制定稿勾选保留颜色时传递颜色选项', async () => {
-    const api = { createTemplate: vi.fn(async () => ({ ok: true })) }
-    const bridge = createRecordingApi(api)
-    await bridge[['upload', 'Template', 'Region'].join('')]('button.png', 'QUJD', 'com.demo', [0, 0, 1, 1], true)
-    expect(api.createTemplate).toHaveBeenCalledWith('button.png', 'QUJD', 'com.demo', [0, 0, 1, 1], true)
   })
 })

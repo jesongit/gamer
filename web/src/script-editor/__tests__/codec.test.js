@@ -24,7 +24,6 @@ const SCRIPT_IDS = [
   'v08_color_branch',
   'v09_call_script',
   'v09_call_script.target',
-  'v11_record_output',
   'v12_task_args_snapshot',
   'v14_branch_click',
 ]

@@ -191,10 +191,20 @@ fn write_step(out: &mut String, step: &Step, indent: usize) {
                 out.push_str(&format!("timeout: {}\n", render_cell(t)));
             }
         }
-        Step::Check { template, r#throw } => {
+        Step::Check {
+            template,
+            timeout,
+            r#throw,
+        } => {
             out.push_str(&format!("check: {}\n", render_cell(template)));
-            push_indent(out, indent + 2);
-            out.push_str(&format!("throw: {}\n", render_plain(r#throw)));
+            if let Some(t) = timeout {
+                push_indent(out, indent + 2);
+                out.push_str(&format!("timeout: {}\n", render_cell(t)));
+            }
+            if let Some(message) = r#throw {
+                push_indent(out, indent + 2);
+                out.push_str(&format!("throw: {}\n", render_plain(message)));
+            }
         }
         Step::Color { at, expect, r#else } => {
             out.push_str("color:\n");

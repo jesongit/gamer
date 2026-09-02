@@ -41,7 +41,7 @@ pub(super) fn validate_template_name(name: &str) -> Result<String, ApiError> {
     Ok(name.to_string())
 }
 
-/// 录制/框选上传短名校验（plan §11.7）：unicode 字母数字 + `-` `_` + `.png`。
+/// 框选上传短名校验：unicode 字母数字 + `-` `_` + `.png`。
 /// 框选默认名与用户习惯都是中文（如「委托界面.png」），ASCII 白名单会整批拒掉；
 /// `#` 仍必须拒绝——它是服务端组合区域后缀的分隔符。完整文件名由服务端组合
 /// （短名 + 搜索区域 #×1000 后缀），前端不拼接 # 元数据。
@@ -357,7 +357,7 @@ pub(super) struct RenameTemplateReq {
     name: String,
 }
 
-/// 重命名模板：把旧文件字节写入新文件名，再删除旧文件
+/// 重命名模板：同步改写当前分区脚本/函数中的模板引用，再改名模板文件。
 pub(super) async fn api_rename_template(
     State(st): State<AppState>,
     Path(old_name): Path<String>,
@@ -383,21 +383,26 @@ pub(super) async fn api_rename_template(
         let dir = st.scripts.tmpl_dir(&pkg);
         let old_path = dir.join(&old_name);
         let new_path = dir.join(&new_name);
-        if new_path.exists() {
-            return Err(ApiError::bad_request("已存在同名模板"));
-        }
-        let bytes = std::fs::read(&old_path).map_err(|_| ApiError::not_found("模板不存在"))?;
-        crate::scripts::atomic_write(&new_path, &bytes)
-            .map_err(|e| ApiError::internal(e.to_string()))?;
-        if std::fs::remove_file(&old_path).is_err() {
-            let _ = std::fs::remove_file(&new_path);
-            return Err(ApiError::internal("旧模板删除失败"));
-        }
-        // 重命名 = 写新删旧：新旧两条路径的模板缓存与短名解析缓存一起失效
-        // （PERF-002）；上方任一步失败时旧文件未动，不做失效
+        let updated_scripts = st
+            .scripts
+            .rename_template(&pkg, &old_name, &new_name)
+            .map_err(|e| {
+                if e.to_string().contains("模板不存在") {
+                    ApiError::not_found(e.to_string())
+                } else if e.to_string().contains("同名模板") {
+                    ApiError::bad_request(e.to_string())
+                } else {
+                    ApiError::internal(e.to_string())
+                }
+            })?;
+        // 重命名 = 写新删旧：新旧两条路径的模板缓存与短名解析缓存一起失效。
         matcher::invalidate_template_cache_path(&new_path);
         matcher::invalidate_template_cache_path(&old_path);
-        Ok(Json(serde_json::json!({"ok": true, "name": new_name})))
+        Ok(Json(serde_json::json!({
+            "ok": true,
+            "name": new_name,
+            "updated_scripts": updated_scripts,
+        })))
     })
     .await
     {

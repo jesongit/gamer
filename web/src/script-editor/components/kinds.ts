@@ -37,7 +37,7 @@ export const KIND_META: Record<StepKind, KindMeta> = {
   wait: { kind: 'wait', label: '等待', icon: '等', hint: '固定或随机区间等待，时间必须带单位' },
   find: { kind: 'find', label: '点击模板', icon: '找', hint: '轮询等待模板出现并点击中心，点击后等待 interval；block 为依次绕过的障碍模板' },
   match: { kind: 'match', label: '匹配模板', icon: '匹', hint: '按序检测候选模板，首个命中分支获胜；候选可勾选命中点击（点模板框中心后等待 interval）' },
-  check: { kind: 'check', label: '检查模板', icon: '检', hint: '单帧匹配模板做界面断言（不点击、不轮询）；未命中按 throw 文案结束运行' },
+  check: { kind: 'check', label: '检查模板', icon: '检', hint: '在 timeout 内轮询匹配模板做界面断言（不点击）；未命中按 throw 文案结束运行' },
   color: { kind: 'color', label: '判断颜色', icon: '色', hint: '按序判断单点颜色，首个命中分支获胜；候选可勾选命中点击（点取样点后等待 interval）' },
   if: { kind: 'if', label: '布尔判断', icon: '判', hint: '布尔字面量或布尔参数的真假分支' },
   loop: { kind: 'loop', label: '循环', icon: '循', hint: '按次数执行子流程；次数 0 表示无限循环' },

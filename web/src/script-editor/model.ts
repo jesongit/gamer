@@ -119,7 +119,7 @@ export type Step =
     | { kind: 'wait'; duration: Cell; duration_max: Cell | null }
     | { kind: 'find'; template: Cell; block: Cell[]; verify: boolean; timeout: Cell | null; then: Step[]; else: Step[] }
     | { kind: 'match'; candidates: MatchCandidate[]; else: Step[]; timeout: Cell | null }
-    | { kind: 'check'; template: Cell; throw: string }
+    | { kind: 'check'; template: Cell; timeout: Cell | null; throw: string | null }
     | { kind: 'color'; at: Cell; expect: ColorExpect[]; else: Step[] }
     | { kind: 'if'; cond: Cell; then: Step[]; else: Step[] }
     | { kind: 'loop'; times: number; steps: Step[] }

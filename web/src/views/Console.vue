@@ -2,9 +2,9 @@
   <div ref="consoleEl" class="console" :class="{ 'is-panel-resizing': panelResizing }">
     <!-- 左：画面区 -->
     <div class="stage">
-      <!-- 顶部工具条：两行布局——上行设备管理（删除归设备组），下行投屏控制 -->
+      <!-- 顶部工具条：设备管理与常用投屏控制合并为一行，次要控制收进「更多」 -->
       <div class="toolbar">
-        <div class="tb-row tb-row-dev">
+        <div class="tb-row">
           <select v-model="store.deviceId" class="select mono tb-dev-select" @change="onDeviceSelect">
             <option value="">选择设备…</option>
             <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
@@ -15,39 +15,39 @@
           <button class="btn btn-sm" @click="startAdd">＋ 新增</button>
           <button class="btn btn-sm" :disabled="!current" @click="openSettings">⚙️ 设置</button>
           <button class="btn btn-sm btn-danger" :disabled="!current" @click="removeDevice">🗑 删除</button>
-        </div>
-        <div class="tb-row tb-row-ctrl">
+          <div class="tb-sep"></div>
           <button class="btn btn-sm" @click="shot">📷 截图</button>
-          <button class="btn btn-sm" @click="rotate">🔄 旋转</button>
           <button class="btn btn-sm" @click="key('HOME')">🏠 Home</button>
           <button class="btn btn-sm" @click="key('BACK')">⬅ 返回</button>
-          <button class="btn btn-sm" @click="key('APP_SWITCH')">🪟 最近</button>
-          <button class="btn btn-sm" @click="key('VOL_UP')">🔊＋</button>
-          <button class="btn btn-sm" @click="key('VOL_DOWN')">🔊－</button>
-          <button class="btn btn-sm" @click="toggleAudio" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'">{{ audioMuted ? '🔇' : '🔊' }}</button>
-          <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (currentPkg || '未配置应用')">🚀 启动应用</button>
-          <button
-            class="btn btn-sm"
-            :class="{ active: recording.phase !== 'idle', 'rec-btn': recording.phase !== 'idle' }"
-            :disabled="recording.phase === 'stopping' || (recording.phase === 'idle' && !recording.available)"
-            :title="recording.buttonTitle"
-            data-test="recording-toggle"
-            @click="recording.toggle()"
-          >{{ recording.phase === 'idle' ? '⏺ 录制' : '■ 停止录制' }}</button>
-          <div class="tb-sep"></div>
+          <div class="tb-more-wrap">
+            <button
+              ref="toolbarMoreButton"
+              class="btn btn-sm"
+              :class="{ active: toolbarMoreOpen }"
+              aria-haspopup="menu"
+              :aria-expanded="toolbarMoreOpen"
+              @click.stop="toggleToolbarMore"
+            >更多 ▾</button>
+          </div>
+          <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (activePkg || '未选择包名')">🚀 启动应用</button>
           <button class="btn btn-sm" @click="clipboard">📋 剪贴板</button>
+          <span class="keyboard-status" :class="{ active: keyboardFocused }" role="status">
+            ⌨ {{ keyboardFocused ? '键盘已启用' : '点击画面启用键盘' }}
+          </span>
         </div>
       </div>
 
-      <!-- 录制状态栏（plan §10.1/§11.8）：状态 · 录制目标 · 待处理数量 · 停止按钮 -->
-      <div v-if="recording.phase !== 'idle'" class="rec-bar" data-test="recording-bar">
-        <span class="rec-dot" :class="{ stopping: recording.phase === 'stopping' }"></span>
-        <strong>{{ recording.phase === 'recording' ? '录制中' : '停止中…' }}</strong>
-        <span class="mono">录制到：{{ recording.targetLabel }}</span>
-        <span class="mono">待处理 {{ recording.pendingCount }}</span>
-        <span v-if="recording.failedCount" class="rec-bar-err">失败 {{ recording.failedCount }}</span>
-        <button class="btn btn-sm" :disabled="recording.phase === 'stopping'" data-test="recording-stop" @click="recording.stop()">■ 停止</button>
-      </div>
+      <!-- 菜单脱离横向滚动行挂到 body，避免窄窗口下被工具条裁掉 -->
+      <Teleport to="body">
+        <span v-if="toolbarMoreOpen" class="tb-more-mask" @click.stop="closeToolbarMore"></span>
+        <div v-if="toolbarMoreOpen" class="tb-more-dropdown tb-more-dropdown-fixed" :style="toolbarMoreStyle" role="menu">
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMore(); rotate()">🔄 旋转</button>
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMore(); key('APP_SWITCH')">🪟 最近</button>
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMore(); key('VOL_UP')">🔊＋ 音量加</button>
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMore(); key('VOL_DOWN')">🔊－ 音量减</button>
+          <button class="tb-more-item" role="menuitem" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'" @click="closeToolbarMore(); toggleAudio()">{{ audioMuted ? '🔊 取消静音' : '🔇 静音' }}</button>
+        </div>
+      </Teleport>
 
       <ConsoleVideoStage
         :connected="connected"
@@ -75,6 +75,11 @@
         :on-mouse-up="onMouseUp"
         :on-wheel="onWheel"
         :on-video-mouse-leave="onVideoMouseLeave"
+        :keyboard-focused="keyboardFocused"
+        :on-focus="onVideoFocus"
+        :on-blur="onVideoBlur"
+        :on-key-down="onVideoKeyDown"
+        :on-key-up="onVideoKeyUp"
         :flush-and-connect="flushAndConnect"
         :fullscreen="fullscreen"
         @video-mounted="onVideoMounted"
@@ -109,17 +114,18 @@
     ></div>
     <!-- 右：功能区（模板/脚本/日志/任务/设置五页签；二次裁切为弹窗，挂面板层级任何页签可见） -->
     <aside class="panel" :style="{ width: `${panelWidth}px` }">
-      <RecordingCropPanel v-if="recording.panelDraft" :context="recordingCropContext" />
-      <!-- 应用分区行：分区下拉 + 导入/导出（分区快照 zip 面向整个分区，跟下拉同排） -->
+      <!-- 包名行：当前包名下拉 + 读取应用 + 导入/导出（所有资源与控制操作共用 activePkg） -->
       <div class="func-pkg-row">
-        <select v-model="activePkg" class="select mono func-pkg" title="应用分区：脚本/函数库/模板按应用包名分区存储（两页签共用）">
-          <option v-if="!pkgOptions.length" value="">（未配置应用包名）</option>
-          <option v-for="p in pkgOptions" :key="p" :value="p">{{ p }}</option>
+        <select v-model="activePkg" class="select mono func-pkg" title="当前包名：脚本/函数库/模板和后续操作都使用此包名">
+          <option v-if="!pkgOptions.length" value="">（请选择包名）</option>
+          <option v-for="p in pkgOptions" :key="p" :value="p">{{ packageOptionLabel(p) }}</option>
         </select>
+        <button class="btn btn-sm" :disabled="!current || appLoading" title="读取当前设备已安装应用并加入包名下拉" @click="loadApps">{{ appLoading ? '读取中…' : '🔄 读取应用' }}</button>
         <button class="btn btn-sm" :disabled="!activePkg" title="导出当前应用分区快照（脚本/函数库/模板 zip）" @click="exportPartition">⬆ 导出</button>
         <button class="btn btn-sm" :disabled="!activePkg" title="导入分区快照 zip 到当前应用分区" @click="impFile.click()">⬇ 导入</button>
         <input ref="impFile" type="file" accept=".zip" hidden @change="onImportFile" />
       </div>
+      <div v-if="appHint" class="func-app-hint">{{ appHint }}</div>
       <div class="func-tabs">
         <button type="button" :class="{ active: panelTab === 'tpl' }" @click="panelTab = 'tpl'">🖼️ 模板</button>
         <button type="button" :class="{ active: panelTab === 'script' }" @click="panelTab = 'script'">📜 脚本</button>
@@ -134,7 +140,7 @@
         <ScriptRunner :context="scriptRunnerContext" />
       </div>
       <div v-if="panelTab === 'logs'" class="panel-sec extra-tab"><LogsPanel /></div>
-      <div v-else-if="panelTab === 'tasks'" class="panel-sec extra-tab"><TaskBoard /></div>
+      <div v-else-if="panelTab === 'tasks'" class="panel-sec extra-tab"><TaskBoard :active-pkg="activePkg" /></div>
       <div v-else-if="panelTab === 'settings'" class="panel-sec extra-tab"><SystemPanel /></div>
       <!-- 二次裁切弹窗：挂面板层级（不在模板页签 v-show 内），从脚本编辑发起框选时不切页签 -->
       <TemplateCropModal :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
@@ -165,7 +171,7 @@
 </template>
 
 <script>
-// 应用列表缓存：设备/地址 -> { list, ts }，应用列表不常变，避免每次重复读取
+// 应用列表缓存：设备 id -> { list, ts }，应用列表不常变，避免每次重复读取
 const appCache = new Map()
 const APP_CACHE_TTL = 5 * 60 * 1000
 </script>
@@ -184,19 +190,19 @@ import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
 import TemplateCropModal from '../components/console/TemplateCropModal.vue'
 import ScriptRunner from '../components/console/ScriptRunner.vue'
-import RecordingCropPanel from '../components/console/RecordingCropPanel.vue'
 import LogsPanel from '../components/LogsPanel.vue'
 import TaskBoard from '../components/TaskBoard.vue'
 import SystemPanel from '../components/SystemPanel.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import RunParamsModal from '../components/RunParamsModal.vue'
-import { createEditorShellApi, createRecordingApi } from '../components/console/current-api-adapters'
+import { createEditorShellApi } from '../components/console/current-api-adapters'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
 import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
 import { useScriptEditorShell } from '../composables/useScriptEditorShell'
+import { useRawYamlEditor } from '../composables/useRawYamlEditor'
 import { useFunctionLibrary } from '../composables/useFunctionLibrary'
 import { useRunArgsFlow } from '../composables/useRunArgsFlow'
-import { useRecording } from '../composables/useRecording'
+import { createKeyboardController } from '../keyboard-control'
 import { parseScript, parseFunctionLibrary, serialize } from '../script-editor/codec'
 import { SE_TARGET_OPTIONS } from '../script-editor/targets'
 import { startIndexOf } from '../script-editor/selection'
@@ -222,9 +228,13 @@ let delaySpikes = 0
 const res = ref('—')
 const bitrate = ref('—')
 const audioMuted = ref(true)
+const toolbarMoreOpen = ref(false)
+const toolbarMoreButton = ref(null)
+const toolbarMoreStyle = reactive({ top: '0px', left: '0px' })
 const consoleEl = ref(null)
 const videoWrap = ref(null)
 const videoElement = ref(null)
+const keyboardFocused = ref(false)
 
 // 右侧功能区宽度：五个页签共用同一宽度，避免切换页签时布局突然跳变；拖拽条支持手动调整。
 const PANEL_STORAGE_KEY = 'gb_console_panel_width'
@@ -309,6 +319,36 @@ function onVideoMounted(el) { videoElement.value = el }
 function onVideoWrapMounted(el) { videoWrap.value = el }
 function onLoupeMounted(el) { loupeCanvas.value = el }
 
+const keyboard = createKeyboardController({ send: sendKeyboardControl })
+
+function onVideoFocus() {
+  keyboardFocused.value = connected.value
+}
+
+function onVideoBlur() {
+  keyboardFocused.value = false
+  keyboard.releaseAll()
+}
+
+function onVideoKeyDown(e) {
+  if (!connected.value || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
+  // 控制器只对已映射且未被 UI 过滤的按键 preventDefault；未知按键保留浏览器行为。
+  keyboard.handleKeyDown(e)
+}
+
+function onVideoKeyUp(e) {
+  if (!connected.value) return
+  keyboard.handleKeyUp(e)
+}
+
+function onWindowBlur() {
+  keyboard.releaseAll()
+}
+
+function onVisibilityChange() {
+  if (document.hidden) keyboard.releaseAll()
+}
+
 const consoleRuntime = useConsoleRuntime({
   api,
   devicesData,
@@ -366,8 +406,8 @@ let fpCanvas = null
 let fpCtx = null
 const selScript = ref('')
 // 脚本页签：运行/编辑模式
-// 脚本页签当前应用分区（= 应用包名）：默认/自动跟随设备页签配置的 pkg，可手动切换；
-// 模板列表、脚本选择、模板/脚本读写都按该分区进行（后端 data/<pkg>/tmpl|yaml）
+// 当前包名：右侧下拉是唯一选择入口；模板、脚本、函数库和启动/匹配等后续操作都使用它。
+// 初始值仍可从旧设备记录的 pkg 恢复，兼容已有配置；切换 activePkg 不会启动应用。
 const activePkg = ref('')
 const scriptMode = ref('run')
 // 右侧功能区页签：模板 / 脚本 / 日志 / 任务 / 设置（资源页签共用分区行）
@@ -385,11 +425,13 @@ const scriptShell = useScriptEditorShell({
     },
   }),
 })
+const rawEditor = useRawYamlEditor({ api })
 // 函数库列表与 func 目标解析（func 步骤「打开函数定义」跳转用）
 const fnLib = useFunctionLibrary({ api })
 // 运行区资源类型：脚本（yaml/）/ 函数（func/）。函数模式经函数测试接口运行单个函数
 const runKind = ref('script')
 const selFnFile = ref('')
+const scriptDeleteConfirmId = ref('')
 /** 运行按钮可用性：脚本模式看脚本选择，函数模式看函数库文件选择 */
 const canRunTarget = computed(() => (runKind.value === 'script' ? !!selScript.value : !!selFnFile.value))
 // 函数文件默认选中第一个：切类型/切分区/列表刷新后当前选择失效时回退第一个（与脚本下拉同形）
@@ -399,6 +441,7 @@ watch([() => fnLib.list, runKind], () => {
 }, { immediate: true })
 /** 运行区当前选择 id（脚本 id / 函数库文件 id）：编辑、删除按钮与摘要区共用 */
 const selTargetId = computed(() => (runKind.value === 'script' ? selScript.value : selFnFile.value))
+watch([selScript, runKind, activePkg], () => { scriptDeleteConfirmId.value = '' })
 /**
  * 函数模式：整个函数库文件的解析模型（全部函数）。摘要区逐函数分组渲染
  * （每组一个 ScriptSummary，steps 带稳定 uuid 供运行起点定位）。
@@ -539,57 +582,6 @@ provide(SE_TARGET_OPTIONS, reactive({
   resolveParamsSync: resolveTargetParamsSync,
 }))
 
-// ---------- 录制接线（阶段 6，plan §11）：核心服务在 web/src/recording/，本层只做接入 ----------
-// 指针坐标换算（帧原始尺寸基准）、触控发送（move 走 rAF 合并）、冻结帧注入 useRecording；
-// 占位插入/最终替换经 shell 命令栈事务，草稿队列/裁切/上传/命名收敛在 composable。
-function recordingClientToDevice(clientX, clientY) {
-  const video = videoElement.value
-  const wrap = videoWrap.value
-  if (!video?.videoWidth || !wrap) return null
-  const rect = wrap.getBoundingClientRect()
-  const vw = video.videoWidth
-  const vh = video.videoHeight
-  const ratio = Math.min(rect.width / vw, rect.height / vh)
-  const offX = (rect.width - vw * ratio) / 2
-  const offY = (rect.height - vh * ratio) / 2
-  // 画面 letterbox 区域之外不透传（多指第二指在面板上滑动不应触达设备）
-  if (clientX < rect.left + offX || clientX > rect.right - offX) return null
-  if (clientY < rect.top + offY || clientY > rect.bottom - offY) return null
-  return toDeviceCoord(clientX, clientY)
-}
-
-const recording = useRecording({
-  shell: scriptShell,
-  activePkg,
-  connected,
-  scriptRunning: computed(() => store.running),
-  videoElement,
-  templatesData,
-  api: createRecordingApi(api),
-  notify: toast,
-  sendControl,
-  sendTouchMove: (x, y) => scheduleMove(x, y),
-  clientToDevice: recordingClientToDevice,
-})
-// 录制中分区锁定：busy（录制/停止中/有未完成草稿）时禁止切换应用分区
-watch(activePkg, (v, old) => {
-  if (recording.busy && old && v !== recording.lockPkg) {
-    activePkg.value = old
-    toast('录制中不能切换应用分区', 'warn')
-  }
-})
-// 二次裁切录制草稿面板上下文（getter 保响应式）
-const recordingCropContext = {
-  get draft() { return recording.panelDraft },
-  confirm: (item, payload) => recording.confirmCrop(item, payload),
-  downgrade: item => recording.downgrade(item),
-  discard: item => recording.discard(item),
-  retry: item => recording.retry(item),
-  shortNameTaken: name => recording.shortNameTaken(name),
-  defaultNameFor: (kind, suggested) => recording.nextShortName(kind, suggested),
-  computeSearchRect: (item, rect, adjusted) => recording.computeSearchRect(item, rect, adjusted),
-}
-
 // 脚本运行可视化效果：服务端经 control DataChannel 推送 tap/swipe/hit/miss 事件（设备像素坐标），
 // 与手动 alt 反馈状态独立（脚本运行时用户仍可手动操作，两类效果互不覆盖）
 const scriptFx = reactive({
@@ -667,6 +659,8 @@ const webrtcLifecycle = useWebRtcLifecycle({
     refreshDeviceStatus()
   },
   onDisconnect() {
+    keyboard.releaseAll()
+    keyboardFocused.value = false
     stopStats()
     stopLogPolling()
     connected.value = false
@@ -681,13 +675,13 @@ const webrtcLifecycle = useWebRtcLifecycle({
     bitrate.value = '—'
     if (videoElement.value) videoElement.value.srcObject = null
     hideLoupe()
-    // viewer 断开/被接管：取消录制手势并停止录制（草稿队列继续处理，plan §16.4）
-    recording.onLinkLost()
   },
   onChannelOpen() {
     connected.value = true
     connecting.value = false
     controlChannel = webrtcLifecycle.getControlChannel()
+    keyboardChannelWarned = false
+    keyboardFocused.value = document.activeElement === videoWrap.value
     videoConnectTs = Date.now()
     blackResetSent = false
     // 该设备本会话已启动过应用（手动/脚本拉起/脚本仍在运行）→ 重连不再弹提示
@@ -697,6 +691,7 @@ const webrtcLifecycle = useWebRtcLifecycle({
     toast('WebRTC 连接建立', 'success')
   },
   onChannelClose() {
+    keyboard.releaseAll()
     connected.value = false
     controlChannel = null
   },
@@ -757,20 +752,20 @@ const types = [
 // 表单状态：'edit' 编辑现有设备 / 'add' 手动新增（均在设置弹窗内完成）
 // 默认配置：分辨率 1920x1080 · 帧率 30 · DPI 自动（0）
 const mode = ref('edit')
-const form = reactive({ name: '', kind: 'redroid', addr: '', screen_mode: 'virtual', vd_res: '1920x1080', vd_dpi: 0, pkg: '', fps: 30 })
+const form = reactive({ name: '', kind: 'redroid', addr: '', screen_mode: 'virtual', vd_res: '1920x1080', vd_dpi: 0, fps: 30 })
 const scanning = consoleRuntime.scanning
 // 配置保存进行中标志：防止重复提交
 const configApplying = ref(false)
 
-// 应用下拉（应用选择）
+// 已安装应用列表：读取后合并到右侧包名下拉；选择包名本身不触发任何启动动作。
 const appList = ref([])
-const pkgDraft = ref('')
 const appLoading = ref(false)
-const appOpen = ref(false)
 const appHint = ref('')
 
 const devices = computed(() => devicesData.value)
 const scripts = computed(() => scriptsData.value)
+const current = computed(() => devices.value.find(d => d.id === store.deviceId) || null)
+const currentName = computed(() => current.value?.name || '未选择设备')
 // 模板模糊搜索词（短名/带 #后缀 全名均可命中）
 const tplSearch = ref('')
 // 模板名拼音首字母缓存（非汉字字符原样保留）：「日常遗器.png」→ "rcyq.png"，供搜索匹配
@@ -811,31 +806,30 @@ const templates = computed(() => {
   return list
 })
 
-/** 应用分区下拉选项：设备页签配置的包名 ∪ 脚本分区 ∪ 模板分区（字典序） */
+/** 应用包名下拉选项：旧设备记录包名 ∪ 已安装应用 ∪ 脚本分区 ∪ 模板分区（字典序） */
 const pkgOptions = computed(() => {
   const set = new Set()
-  const dp = (form.pkg || '').trim()
+  const dp = (current.value?.pkg || '').trim()
   if (dp) set.add(dp)
+  for (const a of appList.value) if (a.pkg) set.add(a.pkg)
   for (const s of scripts.value) if (s.package) set.add(s.package)
   for (const t of templatesData.value) if (t.pkg) set.add(t.pkg)
   return [...set].sort((a, b) => a.localeCompare(b))
 })
 
-// 设备页签应用包名变化（含未保存草稿、切换设备）→ 分区自动跟随；
-// 清空包名时保持当前分区（磁盘分区仍在），仅从未选择时兜底选第一个分区
-watch(() => form.pkg, v => {
-  const t = (v || '').trim()
-  if (t) activePkg.value = t
-  else if (!activePkg.value) activePkg.value = pkgOptions.value[0] || ''
-})
+const appLabelByPkg = computed(() => new Map(
+  appList.value.filter(a => a && a.pkg).map(a => [a.pkg, a.label || a.pkg])
+))
+
+function packageOptionLabel(pkg) {
+  const label = appLabelByPkg.value.get(pkg)
+  return label && label !== pkg ? `${label} · ${pkg}` : pkg
+}
+
 watch(pkgOptions, list => {
   if (!activePkg.value) activePkg.value = list[0] || ''
   else if (!list.includes(activePkg.value)) activePkg.value = list[0] || ''
 })
-
-const current = computed(() => devices.value.find(d => d.id === store.deviceId) || null)
-const currentName = computed(() => current.value?.name || '未选择设备')
-const currentPkg = computed(() => current.value?.pkg || '')
 
 /** 接入方式展示（新增时可选，编辑时只读徽章） */
 function kindInfo(k) {
@@ -847,28 +841,20 @@ const screenSummary = computed(() => {
   return formatScreenSummary(current.value)
 })
 
-const appFiltered = computed(() => {
-  const q = (pkgDraft.value || '').trim().toLowerCase()
-  return appList.value
-    .filter(a => !q || a.label.toLowerCase().includes(q) || a.pkg.toLowerCase().includes(q))
-    .slice(0, 50)
-})
-
-/** 当前应用列表缓存 key（编辑按设备 id，新增按 ADB 地址） */
+/** 当前应用列表缓存 key（按设备 id） */
 function appCacheKey() {
-  return mode.value === 'edit' && store.deviceId ? `device:${store.deviceId}` : `addr:${form.addr.trim()}`
+  return store.deviceId ? `device:${store.deviceId}` : ''
 }
 
 /** 从缓存恢复应用列表（切换设备时避免重新读取） */
 function restoreAppCache(id) {
   const cached = appCache.get(`device:${id}`)
   appList.value = cached?.list || []
-  appOpen.value = false
   appHint.value = cached ? `已缓存 ${cached.list.length} 个应用` : ''
 }
 
-/** 把设备记录载入表单（编辑模式） */
-function loadForm(d) {
+/** 把设备记录载入表单（编辑模式）；syncPkg 仅在切换设备/初始化时恢复默认包名。 */
+function loadForm(d, { syncPkg = false } = {}) {
   mode.value = 'edit'
   form.name = d.name || ''
   form.kind = d.kind || 'redroid'
@@ -876,10 +862,9 @@ function loadForm(d) {
   form.screen_mode = d.screen_mode || 'virtual'
   form.vd_res = d.vd_res || '1920x1080'
   form.vd_dpi = d.vd_dpi || 0
-  form.pkg = d.pkg || ''
-  pkgDraft.value = d.pkg || ''
   form.fps = d.fps || 30
   restoreAppCache(d.id)
+  if (syncPkg) activePkg.value = (d.pkg || '').trim()
 }
 
 /** 表单相对已保存配置是否有未保存修改 */
@@ -893,7 +878,6 @@ const formDirty = computed(() => {
     (d.screen_mode || 'virtual') === norm(form.screen_mode, 'virtual') &&
     (d.vd_res || '1920x1080') === norm(form.vd_res, '1920x1080') &&
     Number(d.vd_dpi || 0) === Number(norm(form.vd_dpi, 0)) &&
-    (d.pkg || '') === norm(form.pkg, '') &&
     (d.fps || 30) === Number(norm(form.fps, 30))
   )
 })
@@ -907,12 +891,7 @@ function startAdd() {
   form.screen_mode = 'virtual'
   form.vd_res = '1920x1080'
   form.vd_dpi = 0
-  form.pkg = ''
-  pkgDraft.value = ''
   form.fps = 30
-  appList.value = []
-  appOpen.value = false
-  appHint.value = ''
   errorMsg.value = ''
   settingsOpen.value = true
 }
@@ -933,7 +912,6 @@ function cancelSettings() {
   else {
     mode.value = 'edit'
     store.deviceId = null
-    pkgDraft.value = ''
     appList.value = []
     appHint.value = ''
   }
@@ -949,8 +927,8 @@ function onDeviceSelect() {
   reconnectAttempts = 0
   errorMsg.value = ''
   const d = current.value
-  if (d) loadForm(d)
-  else { mode.value = 'edit'; pkgDraft.value = ''; appList.value = []; appHint.value = '' }
+  if (d) loadForm(d, { syncPkg: true })
+  else { mode.value = 'edit'; appList.value = []; appHint.value = '' }
 }
 
 /** 连接成功后只拉设备列表（不扫描）：更新下拉「在线/离线」状态标签。
@@ -964,6 +942,7 @@ async function refreshDeviceStatus() {
 /** 刷新：扫描 adb 自动入库新设备，再拉列表 */
 async function refreshDevices() {
   if (scanning.value) return
+  const previousDeviceId = store.deviceId
   scanning.value = true
   try {
     const r = await api.scanDevices()
@@ -975,8 +954,11 @@ async function refreshDevices() {
     }
     const d = current.value
     // 仅编辑模式重新载入表单（不覆盖进行中的"新增"表单）
-    if (d && mode.value === 'edit') loadForm(d)
-    else if (!d) { mode.value = 'edit'; pkgDraft.value = ''; appList.value = []; appHint.value = '' }
+    if (d && mode.value === 'edit') {
+      // 刷新同一设备时保留用户手动切换的当前包名；仅在扫描导致设备选择改变时恢复该设备旧配置。
+      loadForm(d, { syncPkg: previousDeviceId !== store.deviceId })
+    }
+    else if (!d) { mode.value = 'edit'; appList.value = []; appHint.value = '' }
     toast(r.added > 0 ? `扫描到 ${r.added} 台新设备，已自动添加` : '已刷新设备状态', 'success')
   } catch (e) {
     toast('刷新失败：' + e.message, 'error')
@@ -994,14 +976,15 @@ function buildPayload() {
     screen_mode: form.screen_mode,
     vd_res: form.screen_mode === 'virtual' ? form.vd_res.trim() : null,
     vd_dpi: form.screen_mode === 'virtual' ? Number(form.vd_dpi) || 0 : null,
-    pkg: form.screen_mode === 'virtual' ? (form.pkg.trim() || null) : null,
+    // pkg 是旧版本设备配置字段；设备设置不再编辑它，保留旧值避免保存投屏参数时清空兼容数据。
+    pkg: mode.value === 'edit' ? (current.value?.pkg || null) : null,
     fps: Number(form.fps) || 30
   }
 }
 
 /** 判断本次保存的 payload 相对旧配置是否触碰投屏会话参数（与服务端
  *  session_affecting_change 同口径：kind/addr/screen_mode/vd_res/vd_dpi/fps）。
- *  仅名称/应用变更时服务端保持会话，前端据此前提示「不断开投屏」。 */
+ *  仅名称变更时服务端保持会话，前端据此前提示「不断开投屏」。 */
 function castingParamsChanged(d, p) {
   const normRes = s => String(s || '').trim().toLowerCase() || '1920x1080'
   return d.kind !== p.kind
@@ -1014,7 +997,7 @@ function castingParamsChanged(d, p) {
 
 /** 设置弹窗保存：编辑模式 PUT 更新配置，成功后关闭弹窗。
  *  投屏相关参数变更且已连接时，服务端踢 viewer → onclose → 自动重连生效，
- *  前端无需手动重连（避免与自动重连并发导致双连接）；仅改名称/应用时
+ *  前端无需手动重连（避免与自动重连并发导致双连接）；仅改名称时
  *  服务端保持会话，投屏不中断。 */
 async function saveSettings() {
   if (mode.value === 'add') return addDevice()
@@ -1060,7 +1043,7 @@ async function addDevice() {
     }
     store.deviceId = r.id
     const nd = devices.value.find(x => x.id === r.id)
-    if (nd) loadForm(nd)
+    if (nd) loadForm(nd, { syncPkg: true })
     settingsOpen.value = false
     toast('设备已添加，点击连接开始投屏', 'success')
   } catch (e) {
@@ -1081,11 +1064,10 @@ async function removeDevice() {
     devicesData.value = devices.value.filter(x => x.id !== d.id)
     if (devices.value.length) {
       store.deviceId = devices.value[0].id
-      loadForm(devices.value[0])
+      loadForm(devices.value[0], { syncPkg: true })
     } else {
       store.deviceId = null
       mode.value = 'edit'
-      pkgDraft.value = ''
       appList.value = []
       appHint.value = ''
     }
@@ -1105,9 +1087,10 @@ function disconnect() {
   toast('已断开投屏（设备会话保留）', 'info')
 }
 
-/** 从设备读取已安装应用（scrcpy list_apps，带真实软件名），带缓存避免重复读取 */
+/** 从设备读取已安装应用（scrcpy list_apps，带真实软件名），合并到右侧包名下拉。 */
 async function loadApps() {
   if (appLoading.value) return
+  if (!store.deviceId) return toast('请先选择设备', 'warn')
   const key = appCacheKey()
   const cached = appCache.get(key)
   // 5 分钟内直接用缓存，应用列表不是经常变
@@ -1119,31 +1102,16 @@ async function loadApps() {
   appLoading.value = true
   appHint.value = '正在读取设备应用…'
   try {
-    const list = mode.value === 'edit' && store.deviceId
-      ? await api.listApps(store.deviceId)
-      : await api.listAppsByAddr(form.addr.trim())
+    const list = await api.listApps(store.deviceId)
     appList.value = list || []
     appCache.set(key, { list: appList.value, ts: Date.now() })
-    appHint.value = appList.value.length ? `共 ${appList.value.length} 个应用，输入关键字搜索` : '设备上未发现第三方应用'
+    appHint.value = appList.value.length ? `共 ${appList.value.length} 个应用，已加入包名下拉` : '设备上未发现第三方应用'
   } catch (e) {
     appList.value = []
-    appHint.value = '读取失败：' + e.message + '（可直接手动输入包名后回车确认）'
+    appHint.value = '读取失败：' + e.message
   } finally {
     appLoading.value = false
   }
-}
-
-function pickApp(a) {
-  form.pkg = a.pkg
-  pkgDraft.value = a.pkg
-  appOpen.value = false
-}
-
-/** 手动输入包名不会自动保存；按回车确认后才写入配置并触发保存 */
-function commitPkg() {
-  const pkg = pkgDraft.value.trim()
-  form.pkg = pkg
-  appOpen.value = false
 }
 
 const selStyle = computed(() => ({
@@ -1441,6 +1409,24 @@ function startLogPolling() {
 
 // ---------- 控制（走 DataChannel） ----------
 
+let keyboardChannelWarned = false
+
+/** 键盘是有状态的 DOWN/UP 流，只允许走 DataChannel；不能复用 sendControl 的
+ * REST fallback，否则通道断开时一次 keydown 会被错误降级为不兼容的 press。 */
+function sendKeyboardControl(obj) {
+  const channel = webrtcLifecycle.getControlChannel() || controlChannel
+  if (channel && channel.readyState === 'open') {
+    channel.send(JSON.stringify(obj))
+    keyboardChannelWarned = false
+    return true
+  }
+  if (!keyboardChannelWarned) {
+    keyboardChannelWarned = true
+    toast('键盘控制通道未连接', 'warn')
+  }
+  return false
+}
+
 function sendControl(obj) {
   // 拖动/滚轮类输入打标（画面停滞看门狗用）：这类操作预期画面变化，
   // 若随后渲染指纹持续冻结则流已病态（见 startStats 处注释）
@@ -1456,6 +1442,19 @@ function sendControl(obj) {
   // fallback：REST API
   api.control(store.deviceId, obj).catch(e => toast('控制失败：' + e.message, 'error'))
   return false
+}
+
+/** 全局 Escape 关闭页面 UI 优先；只有没有待关闭 UI 时才把 Escape 转发给设备。 */
+function isGlobalEscapeConsumed(e) {
+  if (e?.code !== 'Escape' && e?.key !== 'Escape') return false
+  return !!(
+    cellPick.mode
+    || toolbarMoreOpen.value
+    || settingsOpen.value
+    || viewTpl.value
+    || resourcePreview.open
+    || confirmDelTpl.value
+  )
 }
 
 /** 服务端→浏览器脚本可视化事件（{"type":"se","ev":"tap"|"swipe"|"hit"|"miss", ...}，设备像素坐标）：
@@ -1536,24 +1535,7 @@ function cancelPendingMove() {
   pendingMove = null
 }
 
-/** 录制指针换算：设备像素 → 相对坐标（帧原始尺寸基准，plan §11.6）；画面未就绪返回 null */
-function recordingPointerMeta(e) {
-  const v = videoElement.value
-  if (!v || !v.videoWidth || !v.videoHeight) return null
-  const pt = toDeviceCoord(e.clientX, e.clientY)
-  return { relX: pt.x / v.videoWidth, relY: pt.y / v.videoHeight, frameW: v.videoWidth, frameH: v.videoHeight }
-}
-
 function onMouseDown(e) {
-  // 录制透传（plan §11）：DOWN 冻结帧→立即发送触控（不等待编码/上传）；右键/中键忽略
-  if (recording.active) {
-    if (e.button !== 0) return
-    if (!connected.value) return
-    const m = recordingPointerMeta(e)
-    if (!m) return toast('设备画面不可用，无法录制', 'warn')
-    recording.onPointerDown(m)
-    return
-  }
   // 步骤编辑器取点/取色模式：本次画面点击被消费（不透传触控）
   if (cellPick.mode && connected.value) {
     finishCellPick(e)
@@ -1577,12 +1559,6 @@ function onMouseDown(e) {
 }
 
 function onMouseMove(e) {
-  // 录制透传：MOVE 实时发送（useRecording 侧经 rAF 合并，不等待编码/上传）
-  if (recording.active) {
-    const m = recordingPointerMeta(e)
-    if (m) recording.onPointerMove(m)
-    return
-  }
   if (selecting.value) {
     const rect = videoWrap.value.getBoundingClientRect()
     selEnd.x = e.clientX - rect.left
@@ -1618,12 +1594,6 @@ function togglePick() {
 }
 
 function onMouseUp(e) {
-  // 录制透传：UP 记录终点/时长 → 手势分类 → 占位插入（控制早已在 DOWN/MOVE 发出）
-  if (recording.active) {
-    const m = recordingPointerMeta(e)
-    if (m) recording.onPointerUp(m)
-    return
-  }
   if (selecting.value) {
     selecting.value = false
     picking.value = false
@@ -1640,10 +1610,9 @@ function onMouseUp(e) {
   sendControl({ type: 'touch', action: 'up', x, y })
 }
 
-/** 鼠标离开投屏区域时终止未完成的 alt 手势/录制手势，避免卡在记录模式 */
+/** 鼠标离开投屏区域时隐藏取点/框选辅助层。 */
 function onVideoMouseLeave() {
   hideLoupe()
-  if (recording.active) recording.cancelGesture('leave') // pointercancel/失焦同路径：UP 兜底 + 清理
 }
 
 // ---------- 框选保存模板 ----------
@@ -2099,6 +2068,19 @@ function key(k) {
   sendControl({ type: 'press', keycode: codes[k] || 0 })
 }
 
+function closeToolbarMore() { toolbarMoreOpen.value = false }
+function positionToolbarMore() {
+  const rect = toolbarMoreButton.value?.getBoundingClientRect()
+  if (!rect) return
+  const menuWidth = 168
+  toolbarMoreStyle.top = `${Math.round(rect.bottom + 4)}px`
+  toolbarMoreStyle.left = `${Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8)))}px`
+}
+function toggleToolbarMore() {
+  toolbarMoreOpen.value = !toolbarMoreOpen.value
+  if (toolbarMoreOpen.value) nextTick(positionToolbarMore)
+}
+
 function shot() {
   if (!connected.value) return toast('请先连接设备', 'error')
   api.screenshot(store.deviceId).then(dataUrl => {
@@ -2119,11 +2101,11 @@ function clipboard() {
 
 function launchGame() {
   if (!connected.value) return toast('请先连接设备', 'error')
-  if (!currentPkg.value) return toast('该设备未配置应用包名', 'warn')
-  sendControl({ type: 'start_app', app: currentPkg.value })
+  if (!activePkg.value) return toast('请先在右侧选择包名', 'warn')
+  sendControl({ type: 'start_app', app: activePkg.value })
   if (store.deviceId) appStartedDevices.add(store.deviceId)
   appHintDismissed.value = true
-  toast(`正在启动 ${currentPkg.value}…`, 'info')
+  toast(`正在启动 ${activePkg.value}…`, 'info')
 }
 
 function tplThumbUrl(name) { return api.tplImageUrl(name, activePkg.value) }
@@ -2301,7 +2283,10 @@ async function confirmRename(t) {
   if (templatesData.value.some(x => x.pkg === activePkg.value && x.name === newName)) return toast(`已存在同名模板：${newName}`, 'warn')
   try {
     await api.renameTemplate(t.name, newName, activePkg.value)
-    templatesData.value = await api.listTemplates()
+    // 后端会同步改写当前分区 yaml/func 中的模板引用；刷新脚本与函数缓存，
+    // 让当前摘要、调用参数和后续编辑都立即看到新名称。
+    await loadData()
+    clearCallParamsCache()
     toast(`模板已重命名为 ${newName}`, 'success')
   } catch (e) {
     toast('重命名失败：' + e.message, 'error')
@@ -2368,11 +2353,13 @@ function fileToBase64(file) {
   })
 }
 
-/** 全局按键：Esc 关闭设备设置弹窗 / 模板大图 / 资源预览 / 取消删除确认 */
+/** 全局按键：Esc 关闭工具条菜单 / 设备设置弹窗 / 模板大图 / 资源预览 / 取消删除确认 */
 function onGlobalKeydown(e) {
   if (e.key !== 'Escape') return
   if (cellPick.mode) {
     cancelCellPick()
+  } else if (toolbarMoreOpen.value) {
+    closeToolbarMore()
   } else if (settingsOpen.value) {
     cancelSettings()
   } else if (viewTpl.value) {
@@ -2481,10 +2468,8 @@ function templateRegionPixels(name) {
 
 
 /** 退出编辑（脏模型需确认丢弃）；若处于跳转栈中先返回上一资源。
- *  录制忙（录制中/停止中/有未完成草稿）时阻止退出——占位与草稿锚定当前模型（plan §11.3）。
  *  注意 shell 是 reactive 包装：ref/computed 属性访问即解包，不能再取 .value */
 async function cancelEditScript() {
-  if (recording.busy) return toast('录制未完成：请先停止录制，并重试或丢弃未完成草稿', 'warn')
   if (scriptShell.hasModel && scriptShell.dirty && !window.confirm('有未保存修改，确认放弃？')) return
   if (scriptShell.canJumpBack) {
     await jumpBack()
@@ -2497,7 +2482,7 @@ async function cancelEditScript() {
 
 /** 新建脚本：空 ScriptModel（保存时落盘到当前应用分区） */
 function startNewScript() {
-  if (!activePkg.value) return toast('请先选择应用分区（设备页签配置应用包名）', 'warn')
+  if (!activePkg.value) return toast('请先在右侧选择包名', 'warn')
   scriptMode.value = 'edit'
   showYaml.value = false
   scriptShell.newScript({ name: '新脚本.yml', pkg: activePkg.value })
@@ -2521,10 +2506,51 @@ async function editCurrentTarget(fnName = '') {
   }
 }
 
+/** 进入原文编辑态：直接读取资源原文，不经过前端 YAML codec，保存仍由服务端校验。 */
+async function editRawCurrentTarget() {
+  const id = selTargetId.value
+  if (!id) return toast(runKind.value === 'func' ? '请先选择函数库文件' : '请先选择脚本', 'error')
+  scriptMode.value = 'raw'
+  try {
+    await rawEditor.load(runKind.value === 'func' ? 'function' : 'script', id)
+  } catch (e) {
+    rawEditor.reset()
+    scriptMode.value = 'run'
+    toast('原文加载失败：' + e.message, 'error')
+  }
+}
+
+/** 原文保存成功后刷新对应资源列表，避免摘要、函数候选和参数缓存继续使用旧内容。 */
+async function saveRawScript() {
+  if (rawEditor.loading.value || rawEditor.saving.value) return
+  const r = await rawEditor.save()
+  if (r.ok) {
+    clearCallParamsCache()
+    fnParamsMemo.clear()
+    if (rawEditor.kind.value === 'function') await fnLib.refresh(activePkg.value)
+    else await loadData()
+    rawEditor.reset()
+    scriptMode.value = 'run'
+    toast('原文已保存', 'success')
+  } else if (r.reason === 'invalid') {
+    toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
+  } else if (r.reason === 'conflict') {
+    toast('原文保存遇到版本冲突，请重新进入原文编辑后再试', 'warn')
+  } else if (r.reason !== 'empty') {
+    toast('原文保存失败：' + (r.error?.message || r.error), 'error')
+  }
+}
+
+/** 取消原文编辑：有修改时确认丢弃，回到资源运行视图。 */
+function cancelRawScript() {
+  rawEditor.reset()
+  scriptMode.value = 'run'
+}
+
 /** 新建当前类型：脚本 = 新建脚本；函数 = 直接进入新函数库文件编辑态，文件名可在编辑器顶部修改 */
 function startNewTarget() {
   if (runKind.value !== 'func') return startNewScript()
-  if (!activePkg.value) return toast('请先选择应用分区（设备页签配置应用包名）', 'warn')
+  if (!activePkg.value) return toast('请先在右侧选择包名', 'warn')
   editFocusFn.value = ''
   scriptMode.value = 'edit'
   showYaml.value = false
@@ -2663,14 +2689,19 @@ async function editCurrentScript() {
 async function deleteCurrentScript() {
   const s = scripts.value.find(x => x.id === selScript.value)
   if (!s) return toast('请先选择脚本', 'error')
-  if (!confirm(`删除脚本 ${s.name}？`)) return
+  if (scriptDeleteConfirmId.value !== s.id) {
+    scriptDeleteConfirmId.value = s.id
+    return
+  }
   try {
     await api.deleteScript(s.id)
     await loadData()
     clearCallParamsCache()
     if (selScript.value === s.id) selScript.value = ''
+    scriptDeleteConfirmId.value = ''
     toast('脚本已删除', 'success')
   } catch (e) {
+    scriptDeleteConfirmId.value = ''
     toast('删除失败：' + e.message, 'error')
   }
 }
@@ -2716,11 +2747,9 @@ async function onImportFile(e) {
 /** 脚本校验（结构化字段级）由 useScriptEditorShell.diagnostics 提供（validateScript + 解析期诊断） */
 
 /** 保存编辑中的脚本：shell.save() 序列化模型并携带 expected_version；
- *  校验失败 → 提示前 3 条诊断；409 version_conflict → shell.conflict 置位，SaveConflictModal 弹出。
- *  录制忙时阻断保存直至队列排空（stopping 中同样拦截，plan §11.3） */
+ *  校验失败 → 提示前 3 条诊断；409 version_conflict → shell.conflict 置位，SaveConflictModal 弹出。 */
 async function saveEditScript() {
   if (!scriptShell.hasModel) return
-  if (recording.busy) return toast(recording.phase === 'stopping' ? '停止中：等待录制队列排空后再保存' : '录制尚未结束：请先停止录制', 'warn')
   if (!String(scriptShell.name || '').trim()) return toast('请填写脚本名称', 'error')
   if (!scriptShell.pkg && !activePkg.value) return toast('请先选择应用分区', 'warn')
   const r = await scriptShell.save()
@@ -2747,7 +2776,6 @@ function autoSaveDebounced() {
 async function autoSave() {
   autoSaveTimer = null
   if (scriptMode.value !== 'edit' || !scriptShell.hasModel || !scriptShell.dirty || scriptShell.saving) return
-  if (recording.busy) return // 录制队列排空前不落盘（与手动保存同一闸门）
   const wasNew = !scriptShell.resourceId
   const r = await scriptShell.save({ suppressConflict: true })
   if (r.ok) {
@@ -2918,10 +2946,8 @@ async function openScriptTarget({ kind, target }) {
   }
 }
 
-/** 编辑态跳转返回（call/func 打开目标后）：载回上一资源；栈空时按钮不显示。
- *  录制忙时阻止（跳转会整体替换模型，录制占位会丢失） */
+/** 编辑态跳转返回（call/func 打开目标后）：载回上一资源；栈空时按钮不显示。 */
 async function jumpBack() {
-  if (recording.busy) return toast('录制中不能切换资源', 'warn')
   try {
     await scriptShell.jumpBack()
   } catch (e) {
@@ -3122,7 +3148,6 @@ function setRenameInputEl(el) { renameInputEl = el }
 
 const deviceSettingsContext = {
   settingsOpen, mode, form, types, vdPresets, fpsPresets, formDirty,
-  pkgDraft, appOpen, appFiltered, appLoading, loadApps, commitPkg, pickApp, appHint,
   configApplying, saveSettings, cancelSettings, current, connected, kindInfo, screenSummary,
 }
 const templateCaptureContext = {
@@ -3135,31 +3160,31 @@ const templateCaptureContext = {
 }
 const scriptRunnerContext = {
   scriptMode, selScript, activePkg, store, startPending, runScript, runStopping, stopScript,
+  scriptDeleteConfirmId,
   // 运行区资源类型（脚本/函数）；Target 系列按类型分发编辑/新建/删除
   runKind, selFnFile, canRunTarget, selTargetId, fnLib, autoSaveDebounced,
   // 函数模式摘要：逐函数分组视图（每组一个 ScriptSummary）+ 解析失败文案
   funcFnViews, funcSummaryError,
-  editCurrentTarget, startNewTarget, deleteCurrentTarget, addFunctionToCurrentFile, renameEditingFunction, deleteFunction,
+  editCurrentTarget, editRawCurrentTarget, startNewTarget, deleteCurrentTarget, addFunctionToCurrentFile, renameEditingFunction, deleteFunction,
   editCurrentScript, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
   // 运行视图：只读摘要 + 运行起点 + call/func 结构化跳转（替代旧源码行点击/文本预览）
   summaryModel, summaryError, runFromStep, openScriptTarget, resourcePreview, closeResourcePreview,
   // 运行参数表单（阶段 5）：脚本声明 params 时点运行/从此运行弹出
   runArgsFlow, onRunArgsSubmit,
-  // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调 + Alt 录制开关
-  shell: scriptShell, saveEditScript, cancelEditScript,
+  // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调
+  shell: scriptShell, raw: rawEditor, saveEditScript, cancelEditScript, saveRawScript, cancelRawScript,
   showYaml, templateNames, jumpBack,
   // 函数编辑态聚焦的函数名（逐函数「编辑」直达；画布锁函数下拉为静态展示）
   editFocusFn,
   onConflictReload, onConflictOverwrite, onConflictDismiss,
   // call/func 目标实参类型回显（同步缓存命中形态），ScriptRunner 经 ctx 传给画布
   resolveTargetSync,
-  // 录制（阶段 6）：上传进行中锁画布（占位不可跨分支拖动）+ 投屏 Alt 暂停提示
-  recording,
 }
 
-/** 关页保护：录制忙（录制/停止中/未完成草稿）或有未保存修改时浏览器弹出确认 */
+/** 关页保护：有未保存修改时浏览器弹出确认 */
 function onBeforeUnload(e) {
-  if (recording.busy || (scriptMode.value === 'edit' && scriptShell.hasModel && scriptShell.dirty)) {
+  if ((scriptMode.value === 'edit' && scriptShell.hasModel && scriptShell.dirty)
+    || (scriptMode.value === 'raw' && rawEditor.dirty.value)) {
     e.preventDefault()
     e.returnValue = ''
   }
@@ -3177,7 +3202,7 @@ onMounted(async () => {
     store.deviceId = (saved && devices.value.find(d => d.id === saved)) ? saved : (devices.value[0]?.id || null)
   }
   const d = current.value
-  if (d) loadForm(d)
+  if (d) loadForm(d, { syncPkg: true })
   else { mode.value = 'edit'; store.deviceId = null }
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('beforeunload', onBeforeUnload)
@@ -3191,6 +3216,8 @@ onMounted(async () => {
   if (store.deviceId && (spaPreselected || store.running || current.value?.status === 'online')) connect(false)
   // 其他页面已启动脚本时，本页接管状态轮询（脚本结束后复位运行状态）
   if (store.running && store.runId) startRunStatusPoll()
+  window.addEventListener('blur', onWindowBlur)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 /** 页面刷新 / 设备列表就绪后恢复该设备的活动 run：
@@ -3226,6 +3253,9 @@ onUnmounted(() => {
   window.removeEventListener('resize', clampPanelToViewport)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('beforeunload', onBeforeUnload)
+  window.removeEventListener('blur', onWindowBlur)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  keyboard.releaseAll()
   consoleRuntime.cancelReconnect()
   if (appHintTimer) { clearTimeout(appHintTimer); appHintTimer = null }
   if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
@@ -3271,38 +3301,39 @@ onUnmounted(() => {
 .crop-actions { display: flex; gap: 8px; }
 .crop-actions .btn-primary { margin-left: auto; }
 
-/* 工具条：两行布局（上行设备管理 / 下行投屏控制），行内各自 wrap 不出横向滚动 */
+/* 工具条：设备管理与投屏控制合并为同一横向行，窄窗口时横向滚动 */
 .toolbar {
-  display: flex; flex-direction: column; gap: 6px;
+  display: flex; align-items: center;
   background: var(--bg-1); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 8px 10px;
   box-sizing: border-box;
 }
 .tb-row {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  min-height: 29px; /* 单行高度（按钮 29px），wrap 换行后自然撑开 */
+  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  min-height: 29px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
 }
+.tb-row > .btn, .tb-row > .select, .tb-more-wrap, .tb-sep { flex-shrink: 0; }
 .tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+.keyboard-status {
+  flex-shrink: 0; color: var(--text-2); font-size: 11px; white-space: nowrap;
+  padding: 0 4px;
+}
+.keyboard-status.active { color: var(--accent); }
+.tb-more-wrap { position: relative; display: inline-flex; }
+.tb-more-mask { position: fixed; inset: 0; z-index: 20; }
+.tb-more-dropdown {
+  display: flex; flex-direction: column; min-width: 168px; padding: 4px; gap: 2px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+}
+.tb-more-dropdown-fixed { position: fixed; z-index: 30; }
+.tb-more-item {
+  display: flex; align-items: center; gap: 6px; text-align: left; white-space: nowrap;
+  padding: 6px 10px; border: none; background: none; border-radius: var(--radius-sm);
+  color: var(--text-0); font-size: 12px; cursor: pointer;
+}
+.tb-more-item:hover { background: var(--bg-3); }
 .btn.active { border-color: var(--accent-2); color: var(--accent-2); }
-.btn.rec-btn { border-color: var(--danger); color: var(--danger); }
-
-/* ===== 录制状态栏（plan §10.1：录制状态/插入位置/待处理数量/停止按钮） ===== */
-.rec-bar {
-  flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.4);
-  border-radius: var(--radius); padding: 6px 10px;
-}
-.rec-bar strong { font-size: 12px; color: var(--danger); }
-.rec-bar .mono { font-size: 11px; color: var(--text-1); }
-.rec-bar-err { font-size: 11px; color: var(--danger); font-weight: 600; }
-.rec-alt-hint { color: var(--text-2); }
-.rec-dot {
-  width: 10px; height: 10px; border-radius: 50%; background: var(--danger);
-  animation: rec-blink 1.2s ease-in-out infinite; flex-shrink: 0;
-}
-.rec-dot.stopping { background: var(--warn); animation: none; }
-@keyframes rec-blink { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
-.rec-bar .btn { margin-left: auto; }
 
 /* ===== 左右分区与右侧面板 ===== */
 .console.is-panel-resizing,
@@ -3363,6 +3394,7 @@ onUnmounted(() => {
 .func-pkg-row { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .func-pkg-row .func-pkg { flex: 1; min-width: 0; font-size: 12px; }
 .func-pkg-row .btn { flex: none; }
+.func-app-hint { flex: none; font-size: 11px; color: var(--text-2); line-height: 1.4; }
 .func-tabs { display: flex; flex-shrink: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-2); }
 .func-tabs button {
   flex: 1; padding: 7px 0; font-size: 12px; text-align: center; cursor: pointer;
@@ -3372,7 +3404,7 @@ onUnmounted(() => {
 .func-tabs button.active {
   color: var(--accent); background: rgba(34, 211, 165, .14); font-weight: 600;
 }
-/* 应用分区下拉：模板/脚本两页签共用，数据随分区切换（默认跟随设备页签的应用包名） */
+/* 包名下拉：模板/脚本两页签共用，数据随当前包名切换 */
 .script-tpl { flex: 4; min-height: 0; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
 .tpl-top { display: flex; align-items: center; gap: 8px; }
 /* 阈值输入 : 区域下拉 : 搜索框 : 框选按钮 : 上传按钮 = 2:4:5:3:3 */
@@ -3420,21 +3452,6 @@ onUnmounted(() => {
 .edit-actions { display: flex; gap: 8px; }
 .edit-actions .btn { flex: 1; justify-content: center; }
 .edit-actions .btn.active { border-color: var(--accent-2); color: var(--accent-2); background: rgba(56,189,248,.08); }
-.op-record {
-  flex-shrink: 0; height: 77px; display: flex; flex-direction: column;
-  background: var(--bg-0); border: 1px solid var(--border);
-  border-radius: var(--radius-sm); padding: 3px; overflow: hidden;
-}
-.op-record-line {
-  flex: 0 0 auto; height: 23px; display: flex; align-items: center; padding: 0 8px;
-  font-size: 11px; line-height: 1.4; color: var(--text-1); cursor: pointer;
-  border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
-.op-record-line:hover { background: var(--bg-3); color: var(--accent); }
-.op-record-empty {
-  height: 100%; display: flex; align-items: center; justify-content: center;
-  font-size: 11px; color: var(--text-2); text-align: center; padding: 0 8px;
-}
 .script-editor {
   flex: 1; min-height: 160px; resize: none; background: var(--bg-0);
   border: 1px solid var(--border); border-radius: var(--radius-sm);

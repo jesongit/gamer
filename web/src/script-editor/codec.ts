@@ -302,7 +302,12 @@ function emitStep(step: Step, col: number, lines: string[]): void {
     }
     case 'check':
       lines.push(`${head}check: ${cellInline(step.template, 'tmpl')}`)
-      lines.push(`${' '.repeat(contentCol)}throw: ${plainScalar(step.throw)}`)
+      if (step.timeout !== null) {
+        lines.push(`${' '.repeat(contentCol)}timeout: ${cellInline(step.timeout, 'time')}`)
+      }
+      if (step.throw !== null && step.throw !== undefined) {
+        lines.push(`${' '.repeat(contentCol)}throw: ${plainScalar(step.throw)}`)
+      }
       return
     case 'color': {
       lines.push(`${head}color:`)
@@ -873,7 +878,7 @@ function isKnownField(kind: StepKind, key: string): boolean {
     case 'match':
       return ['else', 'timeout'].includes(key)
     case 'check':
-      return ['throw'].includes(key)
+      return ['timeout', 'throw'].includes(key)
     case 'color':
       return ['else'].includes(key)
     case 'if':
@@ -995,14 +1000,21 @@ function parseStepFields(
     }
     case 'check': {
       const template = requireCell(parseCellRaw(value), path, 'template', diags)
+      const rawTimeout = optionalCell(parseCellRaw(fields.get('timeout') ?? null))
+      const timeout = rawTimeout && rawTimeout.ref === undefined && rawTimeout.lit === 0
+        ? { lit: '0ms' }
+        : rawTimeout
       const throwNode = fields.get('throw') ?? null
-      if (throwNode === null || isNullScalar(throwNode)) {
-        diags.push(diag(CODES.stepFieldMissing, path, 'throw', 'check 缺少 throw（未命中时的终止原因）'))
-      } else if (throwNode.kind !== 'scalar') {
+      if (throwNode !== null && !isNullScalar(throwNode) && throwNode.kind !== 'scalar') {
         diags.push(diag(CODES.stepFieldTypeMismatch, path, 'throw', 'check 的 throw 必须是字符串标量'))
       }
-      const throwMsg = throwNode !== null && throwNode.kind === 'scalar' ? throwNode.value : ''
-      return { ...base, kind: 'check', template, throw: throwMsg }
+      if (throwNode?.kind === 'scalar' && !isNullScalar(throwNode) && !throwNode.value.trim()) {
+        diags.push(diag(CODES.stepFieldTypeMismatch, path, 'throw', 'check 的 throw 必须是非空字符串'))
+      }
+      const throwMsg = throwNode !== null && throwNode.kind === 'scalar' && !isNullScalar(throwNode)
+        ? throwNode.value
+        : null
+      return { ...base, kind: 'check', template, timeout, throw: throwMsg }
     }
     case 'color': {
       const map = value !== null && value.kind === 'map' ? value : null

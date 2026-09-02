@@ -230,12 +230,24 @@ pub fn invalid_key_reason(s: &str) -> String {
 
 /// 时间书写串 → 毫秒数。单位 ms/s/m/min/h/d（m≡min，可小数），必须 > 0。
 pub fn parse_time_ms(raw: &str) -> Option<f64> {
+    parse_time_ms_impl(raw, false)
+}
+
+/// check.timeout 专用时间解析：与普通时间相同，但允许 0 表示只检测一次。
+pub fn parse_time_ms_allow_zero(raw: &str) -> Option<f64> {
+    parse_time_ms_impl(raw, true)
+}
+
+fn parse_time_ms_impl(raw: &str, allow_zero: bool) -> Option<f64> {
     let lower = raw.to_ascii_lowercase();
+    if allow_zero && lower == "0" {
+        return Some(0.0);
+    }
     // "min" 必须先于 "m" 尝试剥离。
     for unit in ["min", "ms", "s", "m", "h", "d"] {
         if let Some(num) = lower.strip_suffix(unit) {
             let x: f64 = num.parse().ok()?;
-            if !x.is_finite() || x <= 0.0 {
+            if !x.is_finite() || (!allow_zero && x <= 0.0) || (allow_zero && x < 0.0) {
                 return None;
             }
             let scale = match unit {
@@ -255,6 +267,16 @@ pub fn parse_time_ms(raw: &str) -> Option<f64> {
 /// 时间书写串 → Duration（供 config.interval 与阶段 2 引擎使用）。
 pub fn parse_time_duration(raw: &str) -> Option<Duration> {
     let ms = parse_time_ms(raw)?;
+    if ms.fract() == 0.0 && ms <= u64::MAX as f64 {
+        Some(Duration::from_millis(ms as u64))
+    } else {
+        Duration::try_from_secs_f64(ms / 1000.0).ok()
+    }
+}
+
+/// check.timeout 专用 Duration 解析，允许零时长。
+pub fn parse_time_duration_allow_zero(raw: &str) -> Option<Duration> {
+    let ms = parse_time_ms_allow_zero(raw)?;
     if ms.fract() == 0.0 && ms <= u64::MAX as f64 {
         Some(Duration::from_millis(ms as u64))
     } else {

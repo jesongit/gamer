@@ -3,7 +3,7 @@
  *
  * - 每个命令在应用时记录逆操作，undo/redo 依赖对象引用保持不变（删除步骤原对象
  *   原样放回，uuid 天然稳定）；
- * - 支持事务合并（录制用）：begin→多次 apply→commit，一次事务 = 一条历史 = 一次 undo；
+ * - 支持事务合并：begin→多次 apply→commit，一次事务 = 一条历史 = 一次 undo；
  *   abort 回滚本事务已应用的部分且不进历史；
  * - 命令路径用数组寻址（如 ['steps', 0, 'then', 1]），函数库支持 ['functions', 'login', 'steps', 0]。
  */

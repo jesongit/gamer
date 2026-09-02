@@ -1,7 +1,7 @@
 <template>
   <!-- 导入/导出按钮已上移到右侧面板顶部应用分区下拉旁（Console.vue func-pkg-row） -->
   <div v-if="!ctx.activePkg" class="pkg-empty">
-    暂无应用分区：请先在工具条「⚙️ 设置」中配置应用包名（模板与脚本按应用分区存储）
+    暂无应用分区：请先在右侧包名下拉中选择包名（模板与脚本按应用包名分区存储）
   </div>
   <template v-else>
     <div class="script-tpl">

@@ -1,5 +1,17 @@
 <template>
-  <div class="video-wrap" ref="videoWrap">
+  <div
+    ref="videoWrap"
+    class="video-wrap"
+    :class="{ 'keyboard-active': props.keyboardFocused }"
+    tabindex="0"
+    role="region"
+    aria-label="投屏画面，可接收键盘控制"
+    @focus="props.onFocus"
+    @blur="props.onBlur"
+    @keydown="props.onKeyDown"
+    @keyup="props.onKeyUp"
+    @click="focusStageOnClick"
+  >
     <video
       ref="videoElement"
       autoplay
@@ -58,6 +70,10 @@
       <span class="st">H.264 · WebRTC</span>
     </div>
 
+    <div v-if="props.connected && props.keyboardFocused" class="keyboard-focus-badge" role="status">
+      ⌨ 键盘控制已启用
+    </div>
+
     <button class="v-fs" @click="props.fullscreen" title="全屏">⛶</button>
   </div>
 </template>
@@ -91,6 +107,12 @@ const props = defineProps({
   onMouseUp: { type: Function, required: true },
   onWheel: { type: Function, required: true },
   onVideoMouseLeave: { type: Function, required: true },
+  keyboardFocused: { type: Boolean, default: false },
+  onFocus: { type: Function, default: () => {} },
+  // 失焦由父层负责释放仍处于按下状态的设备按键。
+  onBlur: { type: Function, default: () => {} },
+  onKeyDown: { type: Function, default: () => {} },
+  onKeyUp: { type: Function, default: () => {} },
   flushAndConnect: { type: Function, required: true },
   fullscreen: { type: Function, required: true },
 })
@@ -99,6 +121,18 @@ const emit = defineEmits(['video-mounted', 'wrap-mounted', 'loupe-mounted'])
 const videoWrap = ref(null)
 const videoElement = ref(null)
 const loupeCanvas = ref(null)
+
+function focusStageOnClick(event) {
+  const target = event.target
+  if (!target || typeof target.closest !== 'function') return
+
+  const interactive = target.closest(
+    'button, input, select, textarea, a, [contenteditable], [role="button"], [role="link"], [role="menuitem"]',
+  )
+  if (interactive) return
+
+  videoWrap.value?.focus()
+}
 
 onMounted(() => {
   emit('video-mounted', videoElement.value)
@@ -112,6 +146,14 @@ onMounted(() => {
   flex: 1; position: relative; background: #000;
   border: 1px solid var(--border); border-radius: var(--radius);
   overflow: hidden; min-height: 300px;
+}
+.video-wrap:focus-visible,
+.video-wrap.keyboard-active { outline: 2px solid var(--accent); outline-offset: -2px; }
+.keyboard-focus-badge {
+  position: absolute; left: 12px; bottom: 12px; z-index: 12;
+  padding: 5px 9px; border: 1px solid rgba(34,211,165,.7); border-radius: 7px;
+  background: rgba(4, 22, 18, .9); color: var(--accent); font-size: 11px;
+  box-shadow: 0 0 12px rgba(34,211,165,.22); pointer-events: none;
 }
 
 .video-stream { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; user-select: none; }

@@ -196,6 +196,8 @@ const props = defineProps({
   label: { type: String, default: '值' },
   placeholder: { type: String, default: '' },
   multiline: { type: Boolean, default: false },
+  /** check.timeout 专用：允许 0 表示只检查一次。 */
+  allowZeroTime: { type: Boolean, default: false },
   /** tmpl 字段的可选模板短名候选。 */
   templates: { type: Array as PropType<string[]>, default: () => [] },
 })
@@ -274,7 +276,7 @@ const sameTypeParams = computed(() => props.params.filter((p) => p.type === prop
  *  tmpl 非空…）当场校验，不等保存或父级诊断；参数引用态由父级校验覆盖 */
 const selfError = computed(() => {
   if (isRef.value) return ''
-  return checkCellLiteral(props.type, props.cell.lit)?.message ?? ''
+  return checkCellLiteral(props.type, props.cell.lit, { allowZeroTime: props.allowZeroTime })?.message ?? ''
 })
 
 // ---- tmpl 自定义下拉（替代原生 datalist）：悬停行内预览缩略图，缩略图 URL 由

@@ -20,9 +20,11 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(template).not.toContain('class="dev-pick"')
     expect(template).not.toContain('class="script-tpl"')
     expect(template).not.toContain('class="script-run"')
+    expect(consoleSource).not.toContain('录制')
+    expect(consoleSource).not.toContain('recording')
   })
 
-  it('设备选择/连接/设置/删除等设备控件位于投屏上方工具条', () => {
+  it('设备选择/连接/设置/删除与投屏控制合并在同一工具条行', () => {
     const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('ConsoleVideoStage'))
     expect(toolbar).toContain('v-model="store.deviceId"')
     expect(toolbar).toContain('flushAndConnect')
@@ -31,13 +33,22 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar).toContain('openSettings')
     expect(toolbar).toContain('removeDevice')
     expect(toolbar).toContain('⚙️ 设置')
-    // 删除属设备管理：归入设备行（tb-row-dev），不落在投屏控制行
-    const devRow = toolbar.slice(toolbar.indexOf('tb-row-dev'), toolbar.indexOf('tb-row-ctrl'))
-    expect(devRow).toContain('removeDevice')
+    expect(toolbar).toContain('更多 ▾')
+    expect(toolbar).toContain('toolbarMoreOpen')
+    expect(toolbar).toContain('🔄 旋转')
+    expect(toolbar).toContain("key('APP_SWITCH')")
+    expect((toolbar.match(/class="tb-row/g) || [])).toHaveLength(1)
+
+    // 删除与截图之间有分割线；启动应用与剪贴板之间不再有分割线。
+    const sep = toolbar.indexOf('class="tb-sep"')
+    expect(sep).toBeGreaterThan(toolbar.indexOf('removeDevice'))
+    expect(sep).toBeLessThan(toolbar.indexOf('>📷 截图</button>'))
+    expect(toolbar.lastIndexOf('class="tb-sep"')).toBe(sep)
   })
 
   it('子组件保留关键交互入口和挂载回调契约', () => {
     const settings = read('./components/console/DeviceSettingsModal.vue')
+    const virtualFields = read('./components/console/DeviceVirtualFields.vue')
     const capture = read('./components/console/TemplateCapture.vue')
     const runner = read('./components/console/ScriptRunner.vue')
     const logs = read('./components/console/RunLogPanel.vue')
@@ -46,6 +57,12 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(settings).toContain('ctx.saveSettings')
     expect(settings).toContain('ctx.cancelSettings')
     expect(settings).toContain('ConsoleDeviceSummary')
+    expect(virtualFields).not.toContain('读取应用')
+    expect(virtualFields).not.toContain('ctx.form.pkg')
+    expect(template).toContain('v-model="activePkg"')
+    expect(template).toContain('@click="loadApps"')
+    expect(consoleSource).toContain("sendControl({ type: 'start_app', app: activePkg.value })")
+    expect(consoleSource).not.toContain('currentPkg')
     // 二次裁切弹窗独立成 TemplateCropModal：挂在面板层级（任何页签下框选可见，不切页签）
     const cropModal = read('./components/console/TemplateCropModal.vue')
     expect(cropModal).toContain('props.onCropMounted({ canvas: cropCanvas.value, section: cropSec.value })')
@@ -57,8 +74,6 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(cropModal).toContain('ctx.backToCrop')
     expect(cropModal).toContain('当前裁切模板')
     expect(cropModal).toContain('模板库中的')
-    const recordingCrop = read('./components/console/RecordingCropPanel.vue')
-    expect(recordingCrop).toContain('v-model="preserveColor"')
     expect(consoleSource).toContain('crop.preserveColor')
     expect(consoleSource).toContain('function findCropConflict(')
     expect(consoleSource).toContain('function overwriteTemplate(')
@@ -66,11 +81,12 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(template).toContain(':on-crop-mounted="onCropMounted"')
     expect(capture).not.toContain('ctx.cropMouseDown')
     expect(capture).toContain('ctx.onTplUpload')
-    // 阶段 4：编辑区换壳——画布锚点提供者注入 shell（Alt 插入与「添加步骤」面板同源），
-    // textarea 与 onEditorMounted 挂载回调随旧文本编辑区一并删除
-    expect(runner).toContain('ctx.shell.setAnchorProvider')
+    // 阶段 4：结构化编辑区换壳；原文编辑区单独保留 textarea，不属于结构化编辑器
+    expect(runner).not.toContain('setAnchorProvider')
     expect(runner).not.toContain('onEditorMounted')
-    expect(runner).not.toContain('<textarea')
+    expect(runner).toContain('ctx.raw.content')
+    expect(runner).toContain('ctx.saveRawScript')
+    expect(runner).toContain('原文编辑')
     expect(runner).toContain('<StepCanvas')
     expect(runner).toContain('<ScriptSummary')
     expect(runner).toContain('<SaveConflictModal')
@@ -117,7 +133,7 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(template).toContain("panelTab === 'tasks'")
     expect(template).toContain("panelTab === 'settings'")
     expect(template).toContain('<LogsPanel />')
-    expect(template).toContain('<TaskBoard />')
+    expect(template).toContain('<TaskBoard :active-pkg="activePkg" />')
     expect(template).toContain('<SystemPanel />')
     expect(template).toContain('<div class="func-pkg-row">')
     expect(template).not.toContain('v-show="isResPanelTab"')

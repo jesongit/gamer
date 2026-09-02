@@ -621,6 +621,8 @@ fn last_segment(path: &str) -> &str {
 pub(crate) enum Exp {
     Coord,
     Time,
+    /// check.timeout：允许 0，表示只检查一次。
+    Timeout,
     Key,
     Text,
     Tmpl,
@@ -633,7 +635,7 @@ impl Exp {
         use super::model::ParamType;
         match self {
             Exp::Coord => ParamType::Coord,
-            Exp::Time => ParamType::Time,
+            Exp::Time | Exp::Timeout => ParamType::Time,
             Exp::Key => ParamType::Key,
             Exp::Text => ParamType::Text,
             Exp::Tmpl => ParamType::Tmpl,
@@ -646,7 +648,7 @@ impl Exp {
 fn exp_name(exp: Exp) -> &'static str {
     match exp {
         Exp::Coord => " [x, y] 坐标",
-        Exp::Time => "时间字面量",
+        Exp::Time | Exp::Timeout => "时间字面量",
         Exp::Key => "按键名",
         Exp::Text => "文本",
         Exp::Tmpl => "模板短名",
@@ -674,18 +676,32 @@ fn build_cell(ctx: &mut BuildCtx, node: &Node, path: &str, field: &str, exp: Exp
                     bad_cell(ctx, path, field, exp, raw);
                     return None;
                 }
-                Exp::Time => match params::parse_time_ms(raw) {
-                    Some(_) => TypedValue::Time(raw.clone()),
-                    None => {
+                Exp::Time | Exp::Timeout => {
+                    let valid = if exp == Exp::Timeout {
+                        params::parse_time_ms_allow_zero(raw)
+                    } else {
+                        params::parse_time_ms(raw)
+                    };
+                    if valid.is_none() {
                         ctx.push(
                             codes::STEP_TIME_FORMAT,
                             path,
                             field,
-                            format!("时间 {raw:?} 必须带单位（ms/s/m/min/h/d）且 > 0"),
+                            if exp == Exp::Timeout {
+                                format!("check.timeout 时间 {raw:?} 必须带单位（ms/s/m/min/h/d），或写 0")
+                            } else {
+                                format!("时间 {raw:?} 必须带单位（ms/s/m/min/h/d）且 > 0")
+                            },
                         );
                         return None;
                     }
-                },
+                    let value = if exp == Exp::Timeout && raw.trim() == "0" {
+                        "0ms".to_string()
+                    } else {
+                        raw.clone()
+                    };
+                    return Some(Cell::Lit(TypedValue::Time(value)));
+                }
                 Exp::Key => {
                     if !params::is_valid_key(raw) {
                         ctx.push(
@@ -871,7 +887,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
     let known: &[&str] = match action {
         "find" => &["block", "verify", "timeout", "then", "else"],
         "match" => &["else", "timeout"],
-        "check" => &["throw"],
+        "check" => &["timeout", "throw"],
         "color" => &["else"],
         "if" => &["then", "else"],
         "call" => &["args"],
@@ -1047,10 +1063,16 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
         "match" => build_match_step(ctx, value, entries, path),
         "check" => {
             let template = build_cell(ctx, value, path, "template", Exp::Tmpl)?;
-            // throw 必填且非空：未命中时的终止原因，等价 throw 步骤的消息
+            let timeout = match lookup(entries, "timeout") {
+                Some(n) if is_null_scalar(n) => None,
+                Some(n) => Some(build_cell(ctx, n, path, "timeout", Exp::Timeout)?),
+                None => None,
+            };
+            // throw 可选；未填写时由运行时按解析后的模板名生成默认提示。
             let msg = match lookup(entries, "throw") {
+                Some(n) if is_null_scalar(n) => None,
                 Some(n) => match n.as_scalar() {
-                    Some((raw, _)) if !raw.trim().is_empty() => raw.to_string(),
+                    Some((raw, _)) if !raw.trim().is_empty() => Some(raw.to_string()),
                     Some(_) => {
                         ctx.push(
                             codes::STEP_FIELD_TYPE_MISMATCH,
@@ -1070,18 +1092,11 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
                         return None;
                     }
                 },
-                None => {
-                    ctx.push(
-                        codes::STEP_FIELD_MISSING,
-                        path,
-                        "throw",
-                        "check 缺少必需字段 throw（未命中时的终止原因）",
-                    );
-                    return None;
-                }
+                None => None,
             };
             Some(Step::Check {
                 template,
+                timeout,
                 r#throw: msg,
             })
         }
@@ -1450,6 +1465,16 @@ fn build_color_step(
 /// 兄弟键查找。
 fn lookup<'a>(entries: &'a [MapEntry], name: &str) -> Option<&'a Node> {
     entries.iter().find(|e| e.key == name).map(|e| &e.value)
+}
+
+/// YAML 的 plain null（null/~，大小写不敏感）用于可选字段时表示省略；带引号的
+/// "null" 仍是普通字符串。
+fn is_null_scalar(node: &Node) -> bool {
+    matches!(
+        node.as_scalar(),
+        Some((raw, ScalarStyle::Plain))
+            if raw == "~" || raw.eq_ignore_ascii_case("null")
+    )
 }
 
 /// 兄弟分支键（then/else/steps）→ 子步骤列表（缺省为空）。

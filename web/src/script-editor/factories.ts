@@ -1,8 +1,8 @@
 /**
  * 步骤工厂与添加面板分组（plan §8.5）。
  *
- * 旧文本片段生成路径已删除；手动添加、Alt 添加、录制
- * 全部调用这里的强类型工厂。面板按任务分组（应用/操作/识别/流程/复用/函数专用），
+ * 旧文本片段生成路径已删除；手动添加全部调用这里的强类型工厂。
+ * 面板按任务分组（应用/操作/识别/流程/复用/函数专用），
  * return 仅函数上下文可见。
  */
 
@@ -46,7 +46,7 @@ export const DEFAULT_FACTORIES: Record<StepKind, () => Step> = {
     else: [],
     timeout: null,
   }),
-  check: () => createStep('check', { template: lit(''), throw: '' }),
+  check: () => createStep('check', { template: lit(''), timeout: null, throw: null }),
   color: () => createStep('color', {
     at: CENTER,
     expect: [{ color: lit(''), click: false, steps: [] }],

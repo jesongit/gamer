@@ -8,15 +8,12 @@
 //   409 {code:"version_conflict"} → conflict 状态，页面弹「重载 / 覆盖」选择；
 // - 校验：parse 期诊断（加载时冻结）+ validateScript/validateFunctionLibrary 即时结果合并，
 //   解析失败（旧语法残留等）阻塞保存，防止把部分模型序列化覆写磁盘；
-// - 选中与插入锚点：受控 selectedUuid；Alt 生成步骤经 setAnchorProvider 注入的画布锚点插入
-//   （无画布时回退 defaultAnchor：选中卡之后 / 当前流程末尾）；
+// - 选中：受控 selectedUuid；
 // - 结构化跳转：call/func 卡片打开子脚本/函数定义，jumpStack 记录返回位置（资源 + 选中）。
 import { computed, reactive, ref } from 'vue'
 import { CommandStack } from '../script-editor/commands'
 import { parseFunctionLibrary, parseScript, serialize } from '../script-editor/codec'
-import { createStep } from '../script-editor/factories'
-import { lit } from '../script-editor/model'
-import { defaultAnchor, findStepLocation, startIndexOf } from '../script-editor/selection'
+import { defaultAnchor, startIndexOf } from '../script-editor/selection'
 import { validateFunctionLibrary, validateScript } from '../script-editor/validation'
 
 const YAML_EXT_RE = /\.(ya?ml)$/i
@@ -25,13 +22,6 @@ function ensureYamlExt(name) {
   const t = String(name || '').trim()
   if (!t) return t
   return YAML_EXT_RE.test(t) ? t : `${t}.yml`
-}
-
-/** 相对坐标保留 4 位小数（与旧文本记录同精度），且夹取到 0~1。 */
-function round4(n) {
-  const v = Number(n)
-  if (!Number.isFinite(v)) return 0
-  return Number(Math.min(1, Math.max(0, v)).toFixed(4))
 }
 
 export function useScriptEditorShell({ api, getContext = null } = {}) {
@@ -52,7 +42,6 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
   const savedYaml = ref('') // 最近加载/保存的规范 YAML 快照
   const historyTick = ref(0) // 命令栈变更计数（驱动 undo/redo 可用性重算）
 
-  let anchorProvider = null
   let offChange = null
 
   // ---- 派生 ----
@@ -289,92 +278,16 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     historyTick.value++
   }
 
-  // ---- 选中 / 插入（Alt 与面板同源锚点） ----
+  // ---- 选中 ----
 
   function select(uuid) {
     selectedUuid.value = uuid
   }
 
-  /** 页面挂载画布后注入锚点提供者（StepCanvas defineExpose 的 anchor）。 */
-  function setAnchorProvider(fn) {
-    anchorProvider = typeof fn === 'function' ? fn : null
-  }
-
   function insertStep(step, label = '插入步骤') {
     if (!hasModel.value) return false
-    const anchor = (anchorProvider && anchorProvider()) || defaultAnchor(model.value, selectedUuid.value)
+    const anchor = defaultAnchor(model.value, selectedUuid.value)
     return stack.value.apply({ type: 'insert_step', path: anchor.containerPath, index: anchor.index, step }, label)
-  }
-
-  /** 录制接线（阶段 6）：在显式锚点插入步骤（不经 anchorProvider/选中态）——
-   *  录制开始时锁定的插入目标在多次插入间保持稳定。返回是否成功。 */
-  function insertStepWithAnchor(step, label = '插入步骤', anchor = null) {
-    if (!hasModel.value || !anchor) return false
-    return stack.value.apply({ type: 'insert_step', path: anchor.containerPath, index: anchor.index, step }, label)
-  }
-
-  /**
-   * 录制接线（阶段 6）：按 uuid 把占位步骤替换为最终步骤（一次事务 = 一次撤销）。
-   * 同 kind → update_step 就地改字段（uuid 稳定）；跨 kind（坐标降级 find→tap）→
-   * 同事务 remove+insert 整体替换。成功返回 { path, step }，失败（无模型/找不到）返回 null。
-   */
-  function replaceStepFields(uuid, fields, label = '替换录制占位') {
-    if (!hasModel.value) return null
-    const loc = findStepLocation(model.value, uuid)
-    if (!loc) return null
-    const sameKind = fields && fields.kind ? fields.kind === loc.step.kind : true
-    let ok = false
-    if (sameKind) {
-      const patch = { ...fields }
-      delete patch.uuid
-      delete patch.kind
-      stack.value.transaction(() => {
-        ok = stack.value.apply({ type: 'update_step', path: loc.path, fields: patch }, label)
-      }, label)
-    } else {
-      const next = { ...fields }
-      delete next.uuid
-      stack.value.transaction(() => {
-        const removed = stack.value.apply({ type: 'remove_step', path: loc.containerPath, index: loc.index }, label)
-        const inserted = stack.value.apply({ type: 'insert_step', path: loc.containerPath, index: loc.index, step: createStep(next.kind, next) }, label)
-        ok = removed && inserted
-      }, label)
-    }
-    return ok ? { path: loc.path, step: loc.step } : null
-  }
-
-  // ---- Alt 便捷工厂（plan §10 迁移矩阵：Alt 投屏/模板/取色 → 类型化步骤） ----
-
-  function insertTapAt(x, y) {
-    return insertStep(createStep('tap', { at: lit([round4(x), round4(y)]) }), `Alt 点击 → tap (${round4(x)}, ${round4(y)})`)
-  }
-
-  function insertSwipeBetween(from, to, durationMs) {
-    const dur = Math.max(1, Math.round(durationMs || 1000))
-    return insertStep(createStep('swipe', {
-      from: lit([round4(from[0]), round4(from[1])]),
-      to: lit([round4(to[0]), round4(to[1])]),
-      time: lit(`${dur}ms`),
-    }), `Alt 滑动 → swipe ${dur}ms`)
-  }
-
-  function insertFindTemplate(template) {
-    return insertStep(createStep('find', {
-      template: lit(template),
-      block: [],
-      verify: false,
-      timeout: null,
-      then: [],
-      else: [],
-    }), `Alt 模板 → find ${template}`)
-  }
-
-  function insertColorCheck(at, hex) {
-    return insertStep(createStep('color', {
-      at: lit([round4(at[0]), round4(at[1])]),
-      expect: [{ color: lit(hex), click: false, steps: [] }],
-      else: [],
-    }), `Alt 取色 → color ${hex}`)
   }
 
   // ---- 运行起点映射（uuid → 引擎 start_index；嵌套步骤返回 null） ----
@@ -425,8 +338,7 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     canJumpBack, jumpBackLabel,
     loadScript, loadFunctionFile, newScript, newFunctionFile,
     save, reload, overwrite, dismissConflict, reset, undo, redo,
-    select, setAnchorProvider, insertStep, insertStepWithAnchor, replaceStepFields,
-    insertTapAt, insertSwipeBetween, insertFindTemplate, insertColorCheck,
+    select, insertStep,
     runStartIndexOf, jumpToScript, jumpToFunctionFile, jumpBack,
   })
 }

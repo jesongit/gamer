@@ -218,13 +218,24 @@
             :cell="step.template" type="tmpl" :params="params" :templates="templates"
             label="检查模板" :error="fieldError('template')" @change="(c) => updateCell('template', c)"
           />
-          <span class="field-hint warn">仅检测不点击、不轮询；未命中结束运行</span>
+          <span class="field-hint warn">检测期间不点击；超时未命中结束运行</span>
+        </div>
+        <div class="field-row">
+          <label class="field-check" title="未配置时默认检测 5s；timeout=0 时只检测首帧">
+            <input type="checkbox" :checked="step.timeout !== null" @change="toggleCheckTimeout" />
+            检测超时
+          </label>
+          <CellEditor
+            v-if="step.timeout" :cell="step.timeout" type="time" :params="params" :allow-zero-time="true"
+            label="检测超时" :error="fieldError('timeout')" @change="(c) => updateCell('timeout', c)"
+          />
+          <span v-else class="field-hint" title="未配置时引擎默认检测 5s">默认 5s</span>
         </div>
         <div class="field-row">
           <span class="field-label">未命中提示</span>
-          <input
-            class="cell-input grow" :value="step.throw"
-            placeholder="未命中时终止运行的原因（必填）" aria-label="未命中提示"
+            <input
+            class="cell-input grow" :value="step.throw ?? ''"
+            placeholder="可选，默认“模板名 模板不存在”" aria-label="未命中提示"
             @change="setThrow(($event.target as HTMLInputElement).value)"
           />
         </div>
@@ -643,7 +654,10 @@ function setVerify(v: boolean): void {
   updateStep({ verify: v })
 }
 function setThrow(v: string): void {
-  updateStep({ throw: v })
+  updateStep({ throw: v.trim() ? v : null })
+}
+function toggleCheckTimeout(e: Event): void {
+  updateStep({ timeout: (e.target as HTMLInputElement).checked ? { lit: '5s' } : null })
 }
 function toggleFindTimeout(e: Event): void {
   updateStep({ timeout: (e.target as HTMLInputElement).checked ? { lit: '30s' } : null })

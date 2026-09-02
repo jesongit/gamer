@@ -163,7 +163,7 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 | wait | `- wait: 1s` / `- wait: [1s, 3s]`（随机区间） | `{kind:"wait", duration: Cell<time>, duration_max: Cell<time>\|null}` |
 | find | `- find: $account` + 兄弟键 `block`(模板列表)/`verify`(bool)/`timeout`/`then`/`else` | `{kind:"find", template: Cell<tmpl>, block: Cell<tmpl>[], verify: bool, timeout: Cell<time>\|null, then: Step[], else: Step[]}`；命中点击中心，点击后等 `config.interval` |
 | match | 见 §4.1 紧凑缩进 | `{kind:"match", candidates: {template: Cell<tmpl>, click: boolean, steps: Step[]}[], else: Step[], timeout: Cell<time>\|null}`；候选默认不点击，`click:true` 命中点模板框中心后等 `config.interval` |
-| check | `- check: logo.png` + 兄弟键 `throw`(非空字符串，必填) | `{kind:"check", template: Cell<tmpl>, throw: string}`；单帧匹配断言，未命中按 `throw` 文案结束运行（见 §4.6） |
+| check | `- check: logo.png` + 兄弟键 `timeout`(可选，默认 5s、0=单次)/`throw`(可选) | `{kind:"check", template: Cell<tmpl>, timeout: Cell<time>\|null, throw: string\|null}`；按 interval 轮询断言，未命中按 throw 文案结束运行（见 §4.6） |
 | color | 见 §4.2 | `{kind:"color", at: Cell<coord>, expect: {color: Cell<color>, click: boolean, steps: Step[]}[], else: Step[]}`；候选默认不点击，`click:true` 命中点取样点后等 `config.interval` |
 | if | `- if: $enable` + 兄弟键 `then`/`else` | `{kind:"if", cond: Cell<bool>, then: Step[], else: Step[]}` |
 | loop | `- loop:` + `{times: 3, steps: [...]}`；`times` 省略 = `0` = 无限 | `{kind:"loop", times: number, steps: Step[]}` |
@@ -207,7 +207,7 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 - `else` / `timeout` 是 `match` 步骤的**兄弟键**，与 `match` 同列；**绝不允许**写成候选列表里的 `- else:` / `- :`（→ `step.match.else_in_candidates`）。
 - 候选按书写顺序匹配、首个命中获胜、复用同一帧；默认不点击，仅 `click: true` 候选命中后点击并等待 `config.interval`；未配 `timeout` 只执行一轮，配了按 `config.interval` 轮询到超时才进 `else`。
 - 候选模板短名不可重复（→ `step.match.candidate_duplicate`）；不接受布尔条件（布尔走 `if`）。
-- 语义分工冻结（2026-09-01 候选级 `click` 增补）：`if`=布尔分支、`match`=模板策略选择（默认不点击，候选可选命中点击）、`find`=等待并点击中心、`color`=单点颜色分支（候选可选命中点击）。录制滑动输出 `match → swipe`（fixture v11，候选均为列表形态），避免 find 的命中点击破坏手势。
+- 语义分工冻结（2026-09-01 候选级 `click` 增补）：`if`=布尔分支、`match`=模板策略选择（默认不点击，候选可选命中点击）、`find`=等待并点击中心、`color`=单点颜色分支（候选可选命中点击）。
 
 ### 4.2 color 全位置字符串化 + 候选列表形态
 
@@ -264,16 +264,15 @@ canonical_default（required=1 时为空串）：
 - 签名与任务快照一起持久化；脚本参数声明变化 → 重算签名不一致 → 任务标“参数已过期”，禁用调度或调度时明确失败（`runtime.task.param_stale`）。
 - 服务端（`model::param_signature`）与前端（`fixtures.test.js::paramSignature`）各有一份实现，双向测试锁定。
 
-### 4.6 check 界面断言（2026-09-01 增补）
+### 4.6 check 界面断言（2026-09-02 增补）
 
 ```yaml
 - check: logo.png
-  throw: 主界面按钮未出现
 ```
 
-- **单帧语义**：只截一帧匹配模板（NCC 同 find），不点击、不轮询、无分支（重试自己套 `loop`）。
-- 命中 → 推送命中框可视化（Hit 事件，与 match 命中同构）后继续后续步骤；未命中 → 按 `throw` 步骤同语义**结束整个运行**（含调用链），`throw` 文案进运行日志。
-- `throw` 必填且非空：缺失/空串 → `step.field.missing` / `step.field.type_mismatch`；模板字面量做分区存在性校验（`resource.tmpl.not_found` / `resource.tmpl.ambiguous`），`$ref` 走通用 tmpl 引用校验。
+- **轮询语义**：在 `timeout` 内按 `config.toml` 的 `interval` 重复截图匹配（NCC 同 find），不点击、无分支；`timeout: 0` 只检查一次。
+- 命中 → 推送命中框可视化（Hit 事件，与 match 命中同构）后继续后续步骤；在 `timeout` 内仍未命中 → 按 `throw` 步骤同语义**结束整个运行**（含调用链），`throw` 文案进运行日志。
+- `timeout` 省略默认为 5s，必须带单位且 `>= 0`；`throw` 可省略，默认文案为 `模板名 模板不存在`，显式值必须非空；模板字面量做分区存在性校验（`resource.tmpl.not_found` / `resource.tmpl.ambiguous`），`$ref` 走通用 tmpl 引用校验。
 - `throw` 字段与动作键 `throw` 同名词：步骤内存在 `check` 键时该键固定解析为字段，不参与动作键计数（前端 codec、fixtures.test.js 与服务端 loader 同规则，fixture v13 锁定）。
 - 语义分工：`find`=等待并点击、`match`=策略选择、`check`=「界面必须长这样」的断言（不符合即终止并报原因）。
 

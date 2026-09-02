@@ -218,8 +218,9 @@ function validateStep(
     }
     case 'check':
       checkCell(step.template, 'tmpl', path, 'template', paramTypes, diags, ctx)
-      if (!step.throw || !step.throw.trim()) {
-        diags.push(diag(CODES.stepFieldMissing, path, 'throw', 'check 缺少 throw（未命中时的终止原因）'))
+      checkCell(step.timeout, 'time', path, 'timeout', paramTypes, diags, undefined, true)
+      if (step.throw !== null && step.throw !== undefined && !step.throw.trim()) {
+        diags.push(diag(CODES.stepFieldTypeMismatch, path, 'throw', 'check 的 throw 必须是非空字符串'))
       }
       return
     case 'color': {
@@ -266,6 +267,7 @@ function checkCell(
   paramTypes: Map<string, ParamDecl>,
   diags: Diagnostic[],
   ctx?: ValidationContext,
+  allowZeroTime = false,
 ): void {
   if (cell === null || cell === undefined) return
   if (typeof cell.ref === 'string') {
@@ -280,7 +282,7 @@ function checkCell(
     }
     return
   }
-  const err = checkCellLiteral(type, cell.lit)
+  const err = checkCellLiteral(type, cell.lit, { allowZeroTime })
   if (err) {
     diags.push(diag(err.code, path, field, err.message))
     return

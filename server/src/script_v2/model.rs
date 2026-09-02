@@ -208,11 +208,13 @@ pub enum Step {
         r#else: Vec<Step>,
         timeout: Option<Cell>,
     },
-    /// check：单帧匹配模板（不点击、不轮询、无分支），未命中按 throw 文案结束运行。
+    /// check：在 timeout 内轮询匹配模板（不点击、无分支），未命中按 throw 文案结束运行。
     Check {
         template: Cell,
-        /// 未命中时的终止原因（必填，loader 保证非空）。
-        r#throw: String,
+        /// 最大检测时长；None = 使用引擎默认 5s，0 = 只检测首帧。
+        timeout: Option<Cell>,
+        /// 未命中时的终止原因；None = 运行时生成“模板名 模板不存在”。
+        r#throw: Option<String>,
     },
     Color {
         at: Cell,
@@ -351,8 +353,13 @@ impl Serialize for Step {
                 map.serialize_entry("else", r#else)?;
                 map.serialize_entry("timeout", timeout)?;
             }
-            Step::Check { template, r#throw } => {
+            Step::Check {
+                template,
+                timeout,
+                r#throw,
+            } => {
                 map.serialize_entry("template", template)?;
+                map.serialize_entry("timeout", timeout)?;
                 map.serialize_entry("throw", r#throw)?;
             }
             Step::Color { at, expect, r#else } => {

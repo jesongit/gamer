@@ -77,7 +77,6 @@ const VALID_IDS: &[&str] = &[
     "v08_color_branch",
     "v09_call_script",
     "v10_func_call_cross_file",
-    "v11_record_output",
     "v12_task_args_snapshot",
     "v13_check_step",
     "v14_branch_click",
@@ -114,8 +113,6 @@ fn fixture_provider() -> InMemoryResources {
         "dialog.png",
         "test1.png",
         "test2.png",
-        "record_click_20260829_001.png",
-        "record_swipe_20260829_002.png",
         "icon.png",
         // v13 check 步骤引用的模板。
         "logo.png",

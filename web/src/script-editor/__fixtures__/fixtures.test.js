@@ -33,7 +33,6 @@ const VALID_IDS = [
   'v08_color_branch',
   'v09_call_script',
   'v10_func_call_cross_file',
-  'v11_record_output',
   'v12_task_args_snapshot',
   'v13_check_step',
   'v14_branch_click',
@@ -264,7 +263,9 @@ function assertStep(s, m, ctx) {
       break
     case 'check':
       assertCell(sub, m.template, 'str', `${ctx}.template`)
-      expect(s.throw, `${ctx}.throw`).toBe(m.throw)
+      if (m.timeout === null) expect(s.timeout ?? null, `${ctx}.timeout`).toBeNull()
+      else assertCell(s.timeout, m.timeout, 'str', `${ctx}.timeout`)
+      expect(s.throw ?? null, `${ctx}.throw`).toBe(m.throw ?? null)
       break
     case 'return':
       assertCell(sub, m.value, 'bool', `${ctx}.value`)

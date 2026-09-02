@@ -13,16 +13,16 @@
     - find: 进入游戏.png
     - find: 开始游戏.png
     - find: 点击进入.png
-    - find: 手机图标.png
-      block:
-        - 领取月卡.png
-      then:
-        - find: 关闭界面.png
+    - match:
+      - 领取月卡.png:
+          click: true
+          steps:
+            - find: 领取月卡.png
+      timeout: 1min
 
 每日任务:
   steps:
     - check: 手机图标.png
-      throw: 非主界面，无法开始每日任务
     - find: 指南.png
     - find: 每日任务列表.png
       then:
@@ -43,16 +43,15 @@
                           - find: 关闭界面.png
                         - 生存索引.png:
                           - find: 培养目标.png
-                          - find: 角色培养进入.png
                           - wait: 1s
-                          - func: 战斗/通用战斗
-                          - find: 关闭界面.png
-                        else:
-                          - find: 关闭界面.png
+                          - find: 角色培养进入.png
+                          - func: 工具/通用战斗
+                          - find: 指南.png
+                        timeout: 3s
                 - 每日任务达标奖励.png:
                     click: true
                     steps:
-                      - find: 关闭界面.png
+                      - find: 点击空白关闭1.png
                       - find: 关闭界面.png
                       - break
                 - 每日任务完成.png:
@@ -60,3 +59,53 @@
                   - break
       else:
         - return: false
+    - func: 工具/邮件领取
+
+通用战斗:
+  steps:
+    - find: 饰品提取空队伍.png
+      timeout: 1s
+      then:
+        - find: 预设编队.png
+        - tap: [0.1932, 0.2815]
+        - find: 返回.png
+    - find: 快捷体力按钮.png
+      timeout: 100ms
+    - match:
+      - 体力不足.png:
+        - return: false
+    - loop:
+        times: 24
+        steps:
+          - find: 增加次数.png
+          - wait: 200ms
+          - match:
+            - 体力不足.png:
+              - find: 减少次数.png
+              - break
+    - find: 开始挑战.png
+      block:
+        - 挑战副本.png
+      then:
+        - find: 退出关卡.png
+        - find: 关闭界面.png
+
+邮件领取:
+  steps:
+    - find: 手机图标.png
+      timeout: 2s
+      else:
+        - return: false
+    - find: 邮件图标.png
+      timeout: 2s
+      else:
+        - return: false
+    - find: 领取邮件.png
+      timeout: 2s
+      then:
+        - find: 点击空白关闭1.png
+    - find: 关闭界面.png
+    - find: 关闭界面.png
+
+func1:
+  steps: []

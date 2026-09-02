@@ -48,14 +48,10 @@ describe('validation：非法 fixture i02~i10 全部标出期望错误', () => {
     }
   })
 
-  it('check 缺 throw / 模板不存在 → step.field.missing / resource.tmpl.not_found', () => {
+  it('check 可省略 throw；模板不存在仍报 resource.tmpl.not_found', () => {
     const { model } = parseScript('steps:\n  - check: logo.png\n')
     const diags = validateScript(model)
-    expect(diags).toContainEqual(expect.objectContaining({
-      code: 'step.field.missing',
-      step_path: 'steps[0]',
-      field: 'throw',
-    }))
+    expect(diags.some((d) => d.field === 'throw')).toBe(false)
 
     const created = parseScript('steps:\n  - check: logo.png\n    throw: 主界面未出现\n')
     const diags2 = validateScript(created.model, { resolveTemplate: () => false })

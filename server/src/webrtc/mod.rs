@@ -1107,6 +1107,32 @@ fn verify_rtp_rebuild(frame: &VideoFrame, payloads: &[Bytes]) {
 /// DataChannel 控制消息协议（JSON）
 /// { "type": "tap"|"swipe"|"key"|"press"|"text"|"scroll"|"clipboard"|"start_app"|"rotate"|"back", ... }
 /// viewer 级消息：{"type":"reset_video"}（请求 IDR）、{"type":"audio","on":bool}（音频转发开关）
+fn key_control_fields(msg: &serde_json::Value) -> anyhow::Result<(u8, u32, u32, u32)> {
+    let action = msg
+        .get("action")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| *value <= 1)
+        .ok_or_else(|| anyhow::anyhow!("invalid key action"))?;
+    let keycode = msg
+        .get("keycode")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| (1..=1000).contains(value))
+        .ok_or_else(|| anyhow::anyhow!("invalid Android keycode"))?;
+    let repeat = msg
+        .get("repeat")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| anyhow::anyhow!("invalid key repeat"))?;
+    let meta = msg
+        .get("meta")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| anyhow::anyhow!("invalid key meta state"))?;
+    Ok((action, keycode, repeat, meta))
+}
+
 async fn handle_control_msg(
     session: &Arc<ScrcpySession>,
     audio_on: &Arc<std::sync::atomic::AtomicBool>,
@@ -1143,10 +1169,7 @@ async fn handle_control_msg(
             session.swipe(x1, y1, x2, y2, dur).await?;
         }
         "key" => {
-            let action = msg["action"].as_u64().unwrap_or(0) as u8;
-            let code = msg["keycode"].as_u64().unwrap_or(0) as u32;
-            let repeat = msg["repeat"].as_u64().unwrap_or(0) as u32;
-            let meta = msg["meta"].as_u64().unwrap_or(0) as u32;
+            let (action, code, repeat, meta) = key_control_fields(&msg)?;
             session.inject_keycode(action, code, repeat, meta).await?;
         }
         "press" => {
@@ -1338,6 +1361,49 @@ fn parse_opus_payload_type(sdp: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scrcpy_key_packet(action: u8, keycode: u32, repeat: u32, meta: u32) -> [u8; 14] {
+        let mut packet = [0u8; 14];
+        packet[0] = 0; // TYPE_INJECT_KEYCODE
+        packet[1] = action;
+        packet[2..6].copy_from_slice(&keycode.to_be_bytes());
+        packet[6..10].copy_from_slice(&repeat.to_be_bytes());
+        packet[10..14].copy_from_slice(&meta.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn data_channel_key_fields_encode_scrcpy_control_packet() {
+        for (json, expected) in [
+            (
+                r#"{"type":"key","action":0,"keycode":29,"repeat":0,"meta":0}"#,
+                [0, 0, 0, 0, 0, 29, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                r#"{"type":"key","action":1,"keycode":111,"repeat":7,"meta":256}"#,
+                [0, 1, 0, 0, 0, 111, 0, 0, 0, 7, 0, 0, 1, 0],
+            ),
+        ] {
+            let msg: serde_json::Value = serde_json::from_str(json).unwrap();
+            let fields = key_control_fields(&msg).unwrap();
+            assert_eq!(
+                scrcpy_key_packet(fields.0, fields.1, fields.2, fields.3),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn data_channel_key_invalid_fields_are_rejected() {
+        for json in [
+            r#"{"type":"key","action":2,"keycode":0,"repeat":0,"meta":0}"#,
+            r#"{"type":"key","action":-1,"keycode":4294967296,"repeat":0,"meta":0}"#,
+            r#"{"type":"key","action":"down","keycode":"A","repeat":{},"meta":null}"#,
+        ] {
+            let msg: serde_json::Value = serde_json::from_str(json).unwrap();
+            assert!(key_control_fields(&msg).is_err());
+        }
+    }
 
     /// OBS-003：RTP 帧发送结果采集——写入 >0 字节记发送，0 字节记丢弃
     #[test]

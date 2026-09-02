@@ -172,6 +172,7 @@ export function parseParamLiteral(type: ParamType, raw: string): LiteralParseRes
 export function checkCellLiteral(
   type: ParamType,
   lit: unknown,
+  options: { allowZeroTime?: boolean } = {},
 ): { code: string; message: string } | null {
   switch (type) {
     case 'coord':
@@ -185,7 +186,11 @@ export function checkCellLiteral(
       return null
     case 'time':
       if (typeof lit !== 'string' || parseTimeMs(lit) === null) {
-        return { code: 'step.time.format', message: `时间须带单位（ms/s/m/min/h/d）且 >0，收到 ${JSON.stringify(lit)}` }
+        const allowZero = options.allowZeroTime === true
+        const isZero = lit === 0 || (typeof lit === 'string' && /^(?:0|0(?:\.0+)?(?:ms|s|m|min|h|d))$/.test(lit.trim()))
+        if (!allowZero || !isZero) {
+          return { code: 'step.time.format', message: `时间须带单位（ms/s/m/min/h/d）且 ${allowZero ? '>=0（也可直接写 0）' : '>0'}，收到 ${JSON.stringify(lit)}` }
+        }
       }
       return null
     case 'key':

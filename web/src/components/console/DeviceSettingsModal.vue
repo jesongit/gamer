@@ -26,7 +26,7 @@
           </div>
         </div>
         <DeviceVirtualFields v-if="ctx.form.screen_mode === 'virtual'" :ctx="ctx" />
-        <div class="cfg-hint">{{ ctx.mode === 'add' ? '填写信息后确认添加，新设备会出现在工具条设备下拉中' : (ctx.formDirty ? '保存后生效：投屏参数（屏幕/分辨率/DPI/帧率）变更会自动重连，仅改名称/应用不断开投屏' : '投屏参数（屏幕/分辨率/DPI/帧率）变更保存后自动重连，仅改名称/应用不断开投屏') }}</div>
+        <div class="cfg-hint">{{ ctx.mode === 'add' ? '填写信息后确认添加，新设备会出现在工具条设备下拉中' : (ctx.formDirty ? '保存后生效：投屏参数（屏幕/分辨率/DPI/帧率）变更会自动重连，仅改名称不断开投屏' : '投屏参数（屏幕/分辨率/DPI/帧率）变更保存后自动重连，仅改名称不断开投屏') }}</div>
       </div>
       <div class="modal-foot">
         <button class="btn" @click="ctx.cancelSettings">取消</button>

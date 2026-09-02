@@ -315,6 +315,238 @@ fn normalize_script_name(name_raw: &str) -> anyhow::Result<String> {
     Ok(name)
 }
 
+/// 与前端模板短名规则保持一致：去掉颜色标记 `#1` 和搜索区域 `#...`，
+/// 保留扩展名。脚本通常引用短名，重命名模板时需要同时迁移这种引用。
+fn template_short_name(name: &str) -> String {
+    let mut value = name.to_string();
+    let lower = value.to_ascii_lowercase();
+    for extension in [".jpeg", ".jpg", ".png"] {
+        let suffix = format!("#1{extension}");
+        if lower.ends_with(&suffix) {
+            let stem_end = value.len() - extension.len();
+            let prefix_end = value.len() - suffix.len();
+            value = format!("{}{}", &value[..prefix_end], &value[stem_end..]);
+            break;
+        }
+    }
+    let lower = value.to_ascii_lowercase();
+    let ext_len = [".jpeg", ".jpg", ".png"]
+        .iter()
+        .find(|ext| lower.ends_with(**ext))
+        .map(|ext| ext.len());
+    let Some(ext_len) = ext_len else {
+        return value;
+    };
+    let stem_end = value.len() - ext_len;
+    let stem = &value[..stem_end];
+    match stem.rfind('#') {
+        Some(index) if index + 1 < stem.len() => {
+            format!("{}{}", &stem[..index], &value[stem_end..])
+        }
+        _ => value,
+    }
+}
+
+fn rename_template_value(
+    value: &mut crate::script_v2::TypedValue,
+    old_name: &str,
+    old_short: &str,
+    new_name: &str,
+    new_short: &str,
+) -> bool {
+    let crate::script_v2::TypedValue::Tmpl(current) = value else {
+        return false;
+    };
+    let replacement = if current == old_name {
+        Some(new_name)
+    } else if current == old_short {
+        Some(new_short)
+    } else {
+        None
+    };
+    let Some(replacement) = replacement else {
+        return false;
+    };
+    *current = replacement.to_string();
+    true
+}
+
+fn rename_template_cell(
+    cell: &mut crate::script_v2::Cell,
+    old_name: &str,
+    old_short: &str,
+    new_name: &str,
+    new_short: &str,
+) -> usize {
+    let crate::script_v2::Cell::Lit(value) = cell else {
+        return 0;
+    };
+    usize::from(rename_template_value(
+        value, old_name, old_short, new_name, new_short,
+    ))
+}
+
+fn rename_template_steps(
+    steps: &mut [crate::script_v2::Step],
+    old_name: &str,
+    old_short: &str,
+    new_name: &str,
+    new_short: &str,
+) -> usize {
+    use crate::script_v2::Step;
+
+    let mut changed = 0;
+    for step in steps {
+        changed += match step {
+            Step::StrApp | Step::ClsApp | Step::Break | Step::Throw { .. } => 0,
+            Step::Tap { at } => rename_template_cell(at, old_name, old_short, new_name, new_short),
+            Step::Swipe { from, to, time } => {
+                rename_template_cell(from, old_name, old_short, new_name, new_short)
+                    + rename_template_cell(to, old_name, old_short, new_name, new_short)
+                    + rename_template_cell(time, old_name, old_short, new_name, new_short)
+            }
+            Step::Key { key } => {
+                rename_template_cell(key, old_name, old_short, new_name, new_short)
+            }
+            Step::Text { value } => {
+                rename_template_cell(value, old_name, old_short, new_name, new_short)
+            }
+            Step::Log { message } => {
+                rename_template_cell(message, old_name, old_short, new_name, new_short)
+            }
+            Step::Wait {
+                duration,
+                duration_max,
+            } => {
+                let mut n =
+                    rename_template_cell(duration, old_name, old_short, new_name, new_short);
+                if let Some(max) = duration_max {
+                    n += rename_template_cell(max, old_name, old_short, new_name, new_short);
+                }
+                n
+            }
+            Step::Find {
+                template,
+                block,
+                then,
+                r#else,
+                ..
+            } => {
+                let mut n =
+                    rename_template_cell(template, old_name, old_short, new_name, new_short);
+                for cell in block {
+                    n += rename_template_cell(cell, old_name, old_short, new_name, new_short);
+                }
+                n + rename_template_steps(then, old_name, old_short, new_name, new_short)
+                    + rename_template_steps(r#else, old_name, old_short, new_name, new_short)
+            }
+            Step::Match {
+                candidates, r#else, ..
+            } => {
+                let mut n = 0;
+                for candidate in candidates {
+                    n += rename_template_cell(
+                        &mut candidate.template,
+                        old_name,
+                        old_short,
+                        new_name,
+                        new_short,
+                    );
+                    n += rename_template_steps(
+                        &mut candidate.steps,
+                        old_name,
+                        old_short,
+                        new_name,
+                        new_short,
+                    );
+                }
+                n + rename_template_steps(r#else, old_name, old_short, new_name, new_short)
+            }
+            Step::Check {
+                template, timeout, ..
+            } => {
+                let mut n =
+                    rename_template_cell(template, old_name, old_short, new_name, new_short);
+                if let Some(timeout) = timeout {
+                    n += rename_template_cell(timeout, old_name, old_short, new_name, new_short);
+                }
+                n
+            }
+            Step::Color { at, expect, r#else } => {
+                let mut n = rename_template_cell(at, old_name, old_short, new_name, new_short);
+                for branch in expect {
+                    n += rename_template_cell(
+                        &mut branch.color,
+                        old_name,
+                        old_short,
+                        new_name,
+                        new_short,
+                    );
+                    n += rename_template_steps(
+                        &mut branch.steps,
+                        old_name,
+                        old_short,
+                        new_name,
+                        new_short,
+                    );
+                }
+                n + rename_template_steps(r#else, old_name, old_short, new_name, new_short)
+            }
+            Step::If { cond, then, r#else } => {
+                rename_template_cell(cond, old_name, old_short, new_name, new_short)
+                    + rename_template_steps(then, old_name, old_short, new_name, new_short)
+                    + rename_template_steps(r#else, old_name, old_short, new_name, new_short)
+            }
+            Step::Loop { steps, .. } => {
+                rename_template_steps(steps, old_name, old_short, new_name, new_short)
+            }
+            Step::Call { args, .. } => args
+                .iter_mut()
+                .map(|arg| {
+                    rename_template_cell(&mut arg.value, old_name, old_short, new_name, new_short)
+                })
+                .sum(),
+            Step::Func {
+                args, then, r#else, ..
+            } => {
+                let n: usize = args
+                    .iter_mut()
+                    .map(|arg| {
+                        rename_template_cell(
+                            &mut arg.value,
+                            old_name,
+                            old_short,
+                            new_name,
+                            new_short,
+                        )
+                    })
+                    .sum();
+                n + rename_template_steps(then, old_name, old_short, new_name, new_short)
+                    + rename_template_steps(r#else, old_name, old_short, new_name, new_short)
+            }
+            Step::Return { value } => {
+                rename_template_cell(value, old_name, old_short, new_name, new_short)
+            }
+        };
+    }
+    changed
+}
+
+fn rename_template_in_params(
+    params: &mut [crate::script_v2::ParamDecl],
+    old_name: &str,
+    old_short: &str,
+    new_name: &str,
+    new_short: &str,
+) -> usize {
+    params
+        .iter_mut()
+        .filter_map(|param| param.default.as_mut())
+        .map(|value| rename_template_value(value, old_name, old_short, new_name, new_short))
+        .map(usize::from)
+        .sum()
+}
+
 /// 相对短路径分段校验（脚本/函数路径 resolver 共用）：
 /// 拒绝空串、反斜杠、空段（`a//b`、前导/尾随 `/`）、`.`、`..`、前导点与非法字符
 /// （逐段过 [`sanitize_part`]，含 Windows 保留名）；绝对路径（`/x`、`C:x`）被
@@ -613,6 +845,119 @@ impl ScriptStore {
             .map_err(|e| anyhow::anyhow!("删除失败: {} ({})", e, path.display()))?;
         self.cleanup_partition(pkg);
         Ok(())
+    }
+
+    /// 重命名模板文件，并同步改写当前分区 yaml/ 与 func/ 中的模板引用。
+    ///
+    /// 引用迁移走严格 AST，不做全局文本替换，避免误改日志/文本内容；同时处理
+    /// 模板参数默认值、步骤字段、match/color 候选与 call/func 实参。所有资源先
+    /// 解析并生成新内容，再开始落盘，写入失败时回滚已改写的资源。
+    pub fn rename_template(
+        &self,
+        pkg: &str,
+        old_name: &str,
+        new_name: &str,
+    ) -> anyhow::Result<usize> {
+        let package = sanitize_part(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法"))?;
+        let old_name = sanitize_template_name(old_name)
+            .ok_or_else(|| anyhow::anyhow!("模板名非法: {old_name}"))?;
+        let new_name = sanitize_template_name(new_name)
+            .ok_or_else(|| anyhow::anyhow!("模板名非法: {new_name}"))?;
+        let old_path = self.tmpl_dir(&package).join(&old_name);
+        let new_path = self.tmpl_dir(&package).join(&new_name);
+        if !old_path.is_file() {
+            anyhow::bail!("模板不存在");
+        }
+        if new_path.exists() {
+            anyhow::bail!("已存在同名模板");
+        }
+        let template_bytes = std::fs::read(&old_path)?;
+        let old_short = template_short_name(&old_name);
+        let new_short = template_short_name(&new_name);
+        let mut rewrites: Vec<(PathBuf, String, String)> = Vec::new();
+
+        for script in self.list()?.into_iter().filter(|s| s.package == package) {
+            let mut parsed = self
+                .parse_script_content(&package, &script.name, &script.content)
+                .map_err(|errors| anyhow::anyhow!(format_script_errors(&errors)))?;
+            let changed = rename_template_in_params(
+                &mut parsed.params,
+                &old_name,
+                &old_short,
+                &new_name,
+                &new_short,
+            ) + rename_template_steps(
+                &mut parsed.steps,
+                &old_name,
+                &old_short,
+                &new_name,
+                &new_short,
+            );
+            if changed > 0 {
+                rewrites.push((
+                    self.yaml_dir(&package).join(&script.name),
+                    script.content,
+                    crate::script_v2::serialize_script(&parsed),
+                ));
+            }
+        }
+
+        for function in self.list_functions(&package)? {
+            let mut parsed = self
+                .parse_function_content(&package, &function.file, &function.content)
+                .map_err(|errors| anyhow::anyhow!(format_script_errors(&errors)))?;
+            let mut changed = 0;
+            for declaration in &mut parsed.functions {
+                changed += rename_template_in_params(
+                    &mut declaration.params,
+                    &old_name,
+                    &old_short,
+                    &new_name,
+                    &new_short,
+                );
+                changed += rename_template_steps(
+                    &mut declaration.steps,
+                    &old_name,
+                    &old_short,
+                    &new_name,
+                    &new_short,
+                );
+            }
+            if changed > 0 {
+                rewrites.push((
+                    self.func_dir(&package)
+                        .join(format!("{}.yaml", function.file)),
+                    function.content,
+                    crate::script_v2::serialize_function_file(&parsed),
+                ));
+            }
+        }
+
+        let mut written = 0;
+        for (path, _, content) in &rewrites {
+            if let Err(error) = atomic_write(path, content.as_bytes()) {
+                for (rollback_path, original, _) in rewrites[..written].iter().rev() {
+                    let _ = atomic_write(rollback_path, original.as_bytes());
+                }
+                return Err(error);
+            }
+            written += 1;
+        }
+
+        if let Err(error) = atomic_write(&new_path, &template_bytes) {
+            for (rollback_path, original, _) in rewrites.iter().rev() {
+                let _ = atomic_write(rollback_path, original.as_bytes());
+            }
+            return Err(error);
+        }
+        if let Err(error) = std::fs::remove_file(&old_path) {
+            let _ = std::fs::remove_file(&new_path);
+            for (rollback_path, original, _) in rewrites.iter().rev() {
+                let _ = atomic_write(rollback_path, original.as_bytes());
+            }
+            return Err(error.into());
+        }
+        Ok(rewrites.len())
     }
 
     // ---------- 三套路径解析（阶段 1：目录即类型，互不回退、不做内容推断） ----------
@@ -2161,6 +2506,44 @@ mod tests {
         assert!(store
             .resolve_template_path("com.test.app", "x.png")
             .is_err());
+    }
+
+    #[test]
+    fn rename_template_updates_script_and_function_references() {
+        let (store, dir) = temp_store("rename-template");
+        let tmpl_dir = store.tmpl_dir("com.test.app");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+        std::fs::write(tmpl_dir.join("old.png"), b"png").unwrap();
+
+        store
+            .save(
+                None,
+                "com.test.app",
+                "main.yaml",
+                "steps:\n  - check: old.png\n    timeout: 0s\n  - log: old.png 文本不应改\n",
+            )
+            .unwrap();
+        store
+            .save_function(
+                "com.test.app",
+                "common",
+                "login:\n  steps:\n    - find: old.png\n",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store
+                .rename_template("com.test.app", "old.png", "new.png")
+                .unwrap(),
+            2
+        );
+        assert!(!tmpl_dir.join("old.png").exists());
+        assert_eq!(std::fs::read(tmpl_dir.join("new.png")).unwrap(), b"png");
+        let script = std::fs::read_to_string(dir.join("com.test.app/yaml/main.yaml")).unwrap();
+        assert!(script.contains("check: new.png"));
+        assert!(script.contains("old.png 文本不应改"));
+        let function = std::fs::read_to_string(dir.join("com.test.app/func/common.yaml")).unwrap();
+        assert!(function.contains("find: new.png"));
     }
 
     #[test]

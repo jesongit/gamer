@@ -197,7 +197,7 @@ mod params_tests {
         assert_eq!(e.field, "default");
     }
 
-    /// 时间单位解析（ms/s/m/min/h/d，m≡min，小数，>0）。
+    /// 时间单位解析（ms/s/m/min/h/d，m≡min，小数，>0；check.timeout 另允许 0）。
     #[test]
     fn time_units() {
         assert_eq!(parse_time_ms("500ms"), Some(500.0));
@@ -209,6 +209,9 @@ mod params_tests {
         assert_eq!(parse_time_ms("30"), None);
         assert_eq!(parse_time_ms("0s"), None);
         assert_eq!(parse_time_ms("s"), None);
+        assert_eq!(params::parse_time_ms_allow_zero("0s"), Some(0.0));
+        assert_eq!(params::parse_time_ms_allow_zero("0ms"), Some(0.0));
+        assert_eq!(params::parse_time_ms_allow_zero("0"), Some(0.0));
         assert_eq!(
             parse_time_duration("500ms"),
             Some(std::time::Duration::from_millis(500))
@@ -332,11 +335,33 @@ mod loader_tests {
         assert_code(&e, codes::STEP_FIELD_MISSING, "steps[0]", "to");
     }
 
-    /// check 断言步骤：throw 必填且非空标量、未知字段拒绝。
+    /// check 断言步骤：timeout 可选且允许 0；throw 可选但显式值必须非空标量。
     #[test]
     fn check_step_shape() {
-        let e = errs("steps:\n  - check: logo.png\n");
-        assert_code(&e, codes::STEP_FIELD_MISSING, "steps[0]", "throw");
+        let mut resources = InMemoryResources::new();
+        resources.add_template("logo.png");
+        let parsed = parse_script_file("steps:\n  - check: logo.png\n", T, &resources)
+            .expect("缺省 timeout/throw 的 check 应合法");
+        match &parsed.steps[0] {
+            Step::Check {
+                timeout, r#throw, ..
+            } => {
+                assert!(timeout.is_none());
+                assert!(r#throw.is_none());
+            }
+            other => panic!("预期 check，实际 {other:?}"),
+        }
+
+        ok_with("steps:\n  - check: logo.png\n    timeout: 0s\n", |p| {
+            p.add_template("logo.png")
+        });
+        ok_with("steps:\n  - check: logo.png\n    timeout: 0\n", |p| {
+            p.add_template("logo.png")
+        });
+        ok_with(
+            "steps:\n  - check: logo.png\n    timeout: null\n    throw: null\n",
+            |p| p.add_template("logo.png"),
+        );
 
         let e = errs("steps:\n  - check: logo.png\n    throw: \"\"\n");
         assert_code(&e, codes::STEP_FIELD_TYPE_MISMATCH, "steps[0]", "throw");
@@ -344,8 +369,8 @@ mod loader_tests {
         let e = errs("steps:\n  - check: logo.png\n    throw:\n      - a\n");
         assert_code(&e, codes::STEP_FIELD_TYPE_MISMATCH, "steps[0]", "throw");
 
-        let e = errs("steps:\n  - check: logo.png\n    throw: x\n    timeout: 3s\n");
-        assert_code(&e, codes::STEP_FIELD_UNKNOWN, "steps[0]", "timeout");
+        let e = errs("steps:\n  - check: logo.png\n    throw: x\n    bogus: 1\n");
+        assert_code(&e, codes::STEP_FIELD_UNKNOWN, "steps[0]", "bogus");
     }
 
     /// key 步骤字面量按键枚举校验：非法键报 step.field.type_mismatch（与前端
@@ -775,12 +800,14 @@ mod serialize_tests {
         );
     }
 
-    /// check 规范形态：throw 是步骤级兄弟键，消息按 plain 安全规则输出。
+    /// check 规范形态：timeout/throw 都是步骤级可选兄弟键。
     #[test]
     fn check_rendering() {
         // 用 $ref 模板避免字面量的分区存在性校验（roundtrip 资源表为空）。
         let src =
             "params:\n  - 'tmpl:logo:主模板'\nsteps:\n  - check: $logo\n    throw: 主界面未加载\n";
+        assert_eq!(roundtrip(src), src);
+        let src = "params:\n  - 'tmpl:logo:主模板'\nsteps:\n  - check: $logo\n    timeout: 0s\n";
         assert_eq!(roundtrip(src), src);
         let src =
             "params:\n  - 'tmpl:logo:主模板'\nsteps:\n  - check: $logo\n    throw: \"a: b\"\n";

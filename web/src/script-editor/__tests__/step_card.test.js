@@ -24,7 +24,7 @@ const YAML_BY_KIND = {
   wait: 'wait: 1s',
   find: 'find: ""',
   match: 'match:\n    - "":\n      - log: x',
-  check: 'check: ""\n    throw: ""',
+  check: 'check: ""',
   color: 'color:\n      at: [0.5, 0.5]\n      expect:\n        - "":\n          - log: x',
   if: 'if: true',
   loop: 'loop:\n      steps:\n        - log: x',
@@ -171,6 +171,18 @@ describe('StepCard：展开编辑经 CommandStack 生效', () => {
     await checkboxByText(match.wrapper, '轮询超时').setValue(true)
     expect(match.wrapper.text()).not.toContain('未配置仅检测一轮')
     expect(match.model.steps[0].timeout).toEqual({ lit: '30s' })
+  })
+
+  it('check 默认 5s；可显式改为 0s 单次检查；throw 可留空', async () => {
+    const check = mountCard({ yaml: 'steps:\n  - check: login.png' })
+    await expandCard(check.wrapper, check.model.steps[0].uuid)
+    expect(check.wrapper.text()).toContain('默认 5s')
+    await check.wrapper.findAll('label.field-check').find((l) => l.text().includes('检测超时')).find('input[type="checkbox"]').setValue(true)
+    expect(check.model.steps[0].timeout).toEqual({ lit: '5s' })
+    await check.wrapper.find('input[aria-label="检测超时数值"]').setValue(0)
+    expect(check.model.steps[0].timeout).toEqual({ lit: '0s' })
+    await check.wrapper.find('input[aria-label="未命中提示"]').setValue('')
+    expect(check.model.steps[0].throw).toBeNull()
   })
 
   it('match：候选增删', async () => {
