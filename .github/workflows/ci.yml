@@ -84,8 +84,16 @@ jobs:
       - name: cargo test
         run: cargo test
 
+      - name: Phase 0 fixture compatibility guard
+        run: cargo test phase0_ -- --nocapture
+
       - name: cargo build --release (release smoke)
         run: cargo build --release
+
+      - name: Phase 0 baseline schema
+        working-directory: .
+        shell: pwsh
+        run: ./tools/generate-phase0-baseline.ps1 -ValidateOnly
 
   # ---------- Web 前端门禁 ----------
   web:
@@ -132,6 +140,9 @@ jobs:
 
       - name: pnpm test:run
         run: pnpm test:run
+
+      - name: Phase 0 shared fixture guard
+        run: pnpm exec vitest run src/phase0-compatibility.test.js
 
       - name: pnpm build
         run: pnpm build

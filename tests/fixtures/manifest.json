@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "purpose": "phase0-compatibility-fixtures",
+  "files": {
+    "scripts": [
+      { "path": "scripts/phase0_smoke.yaml", "sha256": "a93a2a557070f6fa8bef66aab090711a2ea7031aa9f946c6afd3ff8c85bc55bb" }
+    ],
+    "keymaps": [
+      { "path": "keymaps/phase0_combat.yaml", "sha256": "6b50a52f37b075f06fd6ed1727b9bdb8346326111a850d07ddb6b151e36c0167" }
+    ],
+    "templates": [
+      { "path": "templates/primary#361_365_639_479.png", "sha256": "ad230dc4db0f4c00db789daf9bfc8342a8460f8e93bc0cc1667b5ce05dc611c4" },
+      { "path": "templates/status#130_219_185_240.png", "sha256": "3c8f8d842253f8498395cdc32be7be46bd019f0d1ee1d4bb1fbb5d112cac91cd" },
+      { "path": "templates/corner#dr.png", "sha256": "2cae5fbd354f17af960442d3d202e0cc1e929113b26a23cf32f9c9b2c2778517" }
+    ],
+    "tasks": [
+      { "path": "tasks/phase0_daily.json", "sha256": "8dfb882794889d92f5363ea34afb3a3b7287598259a4cd3c5a101fcb26f6e9b3" }
+    ],
+    "screenshots": [
+      { "path": "screenshots/match-success.png", "sha256": "3d37db686132d12141a5d7b8e84e89b6671eddb3ae78792797b2b0c5f613a34f" },
+      { "path": "screenshots/match-failure.png", "sha256": "be3ac6aaabbc4b5622c03c9497581d0cd0cab450d291229619ecb083eb12fd77" }
+    ]
+  },
+  "external_boundaries": {
+    "android": "integration_only",
+    "adb": "integration_only",
+    "scrcpy": "integration_only",
+    "ffmpeg": "explicit_offline_benchmark",
+    "webrtc_peer": "integration_only"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "id": "phase0-daily",
+  "name": "Phase 0 daily smoke",
+  "cron": "0 */15 * * * * *",
+  "script_id": "phase0_smoke.yaml",
+  "device_id": "fixture-device",
+  "enabled": true,
+  "args": {}
+}

@@ -36,6 +36,10 @@ mod task_params;
 mod update;
 mod webrtc;
 
+// Phase 0 兼容护栏只在测试构建挂载，不改变服务运行时模块图。
+#[cfg(test)]
+mod phase0_tests;
+
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -1,0 +1,14 @@
+steps:
+  - str_app
+  - log: Phase 0 smoke
+  - find: primary#361_365_639_479.png
+    timeout: 1s
+  - tap: [0.5, 0.5]
+  - swipe:
+      fm: [0.1, 0.9]
+      to: [0.9, 0.1]
+      time: 800ms
+  - key: ESC
+  - text: "hello world"
+  - wait: 10ms
+  - cls_app

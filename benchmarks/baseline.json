@@ -1,0 +1,97 @@
+{
+    "schema_version":  1,
+    "generated_by":  "tools/generate-phase0-baseline.ps1",
+    "captured_at_utc":  "2026-09-02T19:52:32.7020024Z",
+    "git_commit":  "a11ba6c73e3e6cc08256d17bd52472c30ce48841",
+    "toolchain":  {
+                      "cargo":  "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+                      "rustc":  "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+                      "node":  "v24.14.0",
+                      "pnpm":  "11.22.0",
+                      "ffmpeg":  "ffmpeg version 9.0.1-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+                      "os":  "Microsoft Windows NT 10.0.26200.0"
+                  },
+    "fixture_manifest":  {
+                             "path":  "tests/fixtures/manifest.json",
+                             "sha256":  "75c6b96cc42c38a7852356376f20d7e1a3d2526ee90df9b45507975a04ad3f03"
+                         },
+    "release_build":  {
+                          "status":  "available",
+                          "path":  "server/target/release/gamer-server.exe",
+                          "bytes":  44789604,
+                          "sha256":  "4ea02b9ab7158de44cbda90330cab857e0556f898d5b0c32bb7ea99daf886336"
+                      },
+    "benchmark":  {
+                      "status":  "not_run",
+                      "iterations":  null,
+                      "warmup":  null,
+                      "command":  "tools/run-perf-benchmark.ps1 -Release",
+                      "reason":  "未执行固定基准；使用 -RunPerf 且显式具备 ffmpeg 后采集",
+                      "reports":  {
+
+                                  }
+                  },
+    "metrics":  {
+                    "server_idle_rss_mb":  {
+                                               "value":  null,
+                                               "unit":  "MiB",
+                                               "status":  "not_measured",
+                                               "reason":  "需要启动服务并在固定空闲窗口采集进程 RSS；默认不启动服务"
+                                           },
+                    "server_idle_cpu_percent":  {
+                                                    "value":  null,
+                                                    "unit":  "%",
+                                                    "status":  "not_measured",
+                                                    "reason":  "需要启动服务并在固定空闲窗口采集 CPU；默认不启动服务"
+                                                },
+                    "scrcpy_connect_p95_ms":  {
+                                                  "value":  null,
+                                                  "unit":  "ms",
+                                                  "status":  "not_measured",
+                                                  "reason":  "需要真实 Android/ADB/scrcpy 会话；默认离线测试不接触设备"
+                                              },
+                    "screenshot_p95_ms":  {
+                                              "value":  null,
+                                              "unit":  "ms",
+                                              "status":  "not_measured",
+                                              "reason":  "需要 -RunPerf；其余截图链路需要真实设备"
+                                          },
+                    "find_p95_ms":  {
+                                        "value":  null,
+                                        "unit":  "ms",
+                                        "status":  "not_measured",
+                                        "reason":  "需要 -RunPerf；固定 PNG 模板 NCC 仅作为离线代理"
+                                    },
+                    "match_many_p95_ms":  {
+                                              "value":  null,
+                                              "unit":  "ms",
+                                              "status":  "not_measured",
+                                              "reason":  "需要 -RunPerf；以固定基准的 find_round 多模板样本为来源"
+                                          },
+                    "gop_cache_peak_bytes":  {
+                                                 "value":  null,
+                                                 "unit":  "bytes",
+                                                 "status":  "not_measured",
+                                                 "reason":  "需要真实 scrcpy 帧流期间采集 FrameCache 峰值"
+                                             },
+                    "db_log_write_p95_ms":  {
+                                                "value":  null,
+                                                "unit":  "ms",
+                                                "status":  "not_measured",
+                                                "reason":  "需要单独的固定高压日志写入采集；当前仅有行为护栏"
+                                            },
+                    "webrtc_stability":  {
+                                             "value":  null,
+                                             "unit":  "qualitative",
+                                             "status":  "not_measured",
+                                             "reason":  "需要浏览器 WebRTC peer/网络环境；默认 CI 不宣称投屏稳定性"
+                                         }
+                },
+    "external_boundaries":  {
+                                "android":  "integration_only",
+                                "adb":  "integration_only",
+                                "scrcpy":  "integration_only",
+                                "ffmpeg":  "explicit_offline_benchmark",
+                                "webrtc_peer":  "integration_only"
+                            }
+}
