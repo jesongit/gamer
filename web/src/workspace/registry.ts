@@ -17,6 +17,7 @@ export interface PanelContribution {
   requiresDevice?: boolean
   preferredWidth?: number
   keepAlive?: PanelKeepAlive
+  keep_alive?: PanelKeepAlive
   aliases?: string[]
   component?: unknown
   panelClass?: string
@@ -48,6 +49,7 @@ function normaliseContribution(input: PanelContribution, sequence: number): Regi
   if (input.location !== CONSOLE_RIGHT_LOCATION) throw new Error(`Unsupported panel location: ${String(input.location)}`)
   if (!['core', 'iframe', 'declarative'].includes(input.runtime)) throw new Error(`Unsupported panel runtime: ${String(input.runtime)}`)
   const key = makePanelKey(pluginId, panelId)
+  const keepAlive = input.keepAlive || input.keep_alive || (input.runtime === 'iframe' ? 'session' : 'none')
   return Object.freeze({
     ...input,
     pluginId,
@@ -55,7 +57,8 @@ function normaliseContribution(input: PanelContribution, sequence: number): Regi
     title,
     key,
     order: Number.isFinite(input.order) ? Number(input.order) : 1000,
-    keepAlive: input.keepAlive || (input.runtime === 'iframe' ? 'session' : 'none'),
+    keepAlive,
+    keep_alive: keepAlive,
     aliases: Array.isArray(input.aliases) ? [...new Set(input.aliases.map(String))] : [],
     sequence,
   })

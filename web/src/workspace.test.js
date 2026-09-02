@@ -6,13 +6,14 @@ import { createPanelUiLifecycle, createPluginRuntimeLifecycle } from './workspac
 describe('Frontend Plugin Workspace', () => {
   it('keeps contribution order, supports multiple panels per plugin, aliases, and stable fallback', () => {
     const registry = createPanelRegistry()
-    registry.register({ pluginId: 'plugin-a', panelId: 'second', title: '第二页', order: 20, location: 'console.right', runtime: 'iframe' })
+    registry.register({ pluginId: 'plugin-a', panelId: 'second', title: '第二页', order: 20, location: 'console.right', runtime: 'iframe', keep_alive: 'none' })
     registry.register({ pluginId: 'plugin-a', panelId: 'first', title: '第一页', order: 10, location: 'console.right', runtime: 'core', aliases: ['legacy-first'] })
     registry.register({ pluginId: 'plugin-b', panelId: 'third', title: '第三页', order: 20, location: 'console.right', runtime: 'declarative' })
 
     expect(registry.getPanels().map(item => item.key)).toEqual(['plugin-a:first', 'plugin-a:second', 'plugin-b:third'])
     expect(registry.resolve('legacy-first')?.key).toBe('plugin-a:first')
     expect(registry.resolve({ pluginId: 'plugin-a', panelId: 'second' })?.key).toBe('plugin-a:second')
+    expect(registry.resolve('plugin-a:second')?.keepAlive).toBe('none')
     expect(registry.defaultPanel()?.key).toBe('plugin-a:first')
     expect(registry.unregisterPlugin('plugin-a')).toBe(2)
     expect(registry.defaultPanel()?.key).toBe('plugin-b:third')

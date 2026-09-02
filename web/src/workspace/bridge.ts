@@ -108,6 +108,13 @@ export function createUiBridge(options: UiBridgeOptions = {}) {
   }
 
   const call = (method: string, payload?: unknown) => dispatch(method, payload)
+  const video = {
+    selectRegion: (payload?: unknown) => call('video.selectRegion', payload),
+    pickPoint: (payload?: unknown) => call('video.pickPoint', payload),
+    showOverlay: (payload?: unknown) => call('video.showOverlay', payload),
+    clearOverlay: (payload?: unknown) => call('video.clearOverlay', payload),
+  }
+  const workspace = { openPanel: (payload?: unknown) => call('workspace.openPanel', payload) }
   return Object.freeze({
     version: UI_BRIDGE_VERSION,
     methods: UI_BRIDGE_METHODS,
@@ -118,15 +125,17 @@ export function createUiBridge(options: UiBridgeOptions = {}) {
     plugin: Object.freeze({ call: (payload?: unknown) => call('plugin.call', payload) }),
     toast: Object.freeze({ show: (payload?: unknown) => call('toast.show', payload) }),
     dialog: Object.freeze({ confirm: (payload?: unknown) => call('dialog.confirm', payload) }),
-    workspace: Object.freeze({ openPanel: (payload?: unknown) => call('workspace.openPanel', payload) }),
-    video: Object.freeze({
-      selectRegion: (payload?: unknown) => call('video.selectRegion', payload),
-      pickPoint: (payload?: unknown) => call('video.pickPoint', payload),
-      showOverlay: (payload?: unknown) => call('video.showOverlay', payload),
-      clearOverlay: (payload?: unknown) => call('video.clearOverlay', payload),
-    }),
+    workspace: Object.freeze(workspace),
+    video: Object.freeze(video),
     overlay: Object.freeze({ show: (payload?: unknown) => call('overlay.show', payload), clear: (payload?: unknown) => call('overlay.clear', payload) }),
     storage: Object.freeze({ get: (payload?: unknown) => call('storage.get', payload), set: (payload?: unknown) => call('storage.set', payload) }),
+    // Host-side callers can use the short names; iframe callers use the
+    // explicit namespaced methods in the MessageChannel protocol.
+    selectRegion: video.selectRegion,
+    pickPoint: video.pickPoint,
+    openPanel: workspace.openPanel,
+    showOverlay: video.showOverlay,
+    clearOverlay: video.clearOverlay,
   })
 }
 
