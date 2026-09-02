@@ -584,8 +584,19 @@ fn cmd_repair(layout: &InstallLayout, cli: &Cli, manifest: Option<&Path>, probe:
 /// start（LCH-008 + OPS-003 + 批次 3）：env 注入（含 IPC 寻址）+ 句柄等待 +
 /// 就绪探测 + 启动 journal 恢复 + named pipe IPC server。
 fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
-    println!("start：启动并监管 gamer-server");
+    println!("start：自动检查依赖后启动并监管 gamer-server");
     println!("安装根: {}", layout.root.display());
+
+    // 仅首次双击入口自动完成离线种子安装/修复；显式 `start` 保持原有
+    // CLI 语义，供脚本和测试在已安装状态下纯粹启动监管。
+    if cli.implicit_start {
+        let repair_code = cmd_repair(layout, cli, None, false);
+        if repair_code != 0 {
+            eprintln!("错误: 自动安装/修复依赖失败，请检查上面的错误信息。\n");
+            return repair_code;
+        }
+    }
+
     let lock = match InstanceLock::acquire(&layout.state_dir()) {
         Ok(l) => l,
         Err(crate::state::lock::LockError::Held { path }) => {
@@ -732,10 +743,15 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
     }
 
     match supervisor::wait_for_ready(port, &ReadyProbe::default()) {
-        Ok(()) => println!(
-            "[PASS] server 已就绪 (http://127.0.0.1:{port}{})",
-            supervisor::HEALTH_PATH
-        ),
+        Ok(()) => {
+            println!(
+                "[PASS] server 已就绪 (http://127.0.0.1:{port}{})",
+                supervisor::HEALTH_PATH
+            );
+            if cli.implicit_start {
+                open_browser(port);
+            }
+        }
         Err(reason) => {
             tracing::error!(%reason, "就绪探测未通过（继续持有子进程监管）");
             println!("[WARN] 就绪探测未通过: {reason}（继续持有子进程监管，不按端口判定进程死活）");
@@ -759,6 +775,21 @@ fn cmd_start(layout: &InstallLayout, cli: &Cli) -> i32 {
             eprintln!("错误: 等待子进程退出失败: {e}");
             1
         }
+    }
+}
+
+/// 双击入口在服务就绪后打开本机控制台；显式 `start` 保持纯 CLI 行为，便于脚本监管。
+fn open_browser(port: u16) {
+    let url = format!("http://127.0.0.1:{port}/");
+    #[cfg(windows)]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn();
+    #[cfg(not(windows))]
+    let result = std::process::Command::new("xdg-open").arg(&url).spawn();
+    match result {
+        Ok(_) => println!("已打开浏览器: {url}"),
+        Err(e) => println!("浏览器自动打开失败，请手动访问 {url}（{e}）"),
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "gamer-server"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "GameBot 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
 
@@ -40,6 +40,7 @@ async-trait = "0.1"
 thiserror = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 base64 = "0.22"
 sha2 = "0.10"
 argon2 = "0.5"

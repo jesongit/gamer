@@ -11,7 +11,7 @@ URL、逐文件 sha256/size 与许可注记以 **release/dependencies.lock.toml*
 | Android platform-tools | adb.exe + AdbWinApi.dll + AdbWinUsbApi.dll（原字节裁包） | 37.0.1 | https://dl.google.com/android/repository/platform-tools-latest-windows.zip | Apache-2.0 | Copyright (C) The Android Open Source Project | [android-platform-tools/](./android-platform-tools/) |
 | FFmpeg | ffmpeg.exe（BtbN win64-lgpl 静态构建） | N-126335-gb32f8d1c23-20260830 | https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip | LGPL-3.0-or-later | FFmpeg contributors（构建: BtbN/FFmpeg-Builds） | [ffmpeg/](./ffmpeg/) |
 | scrcpy-server | scrcpy-server.jar（Android 端，原字节分发） | 3.3.3 | https://github.com/Genymobile/scrcpy/releases/download/v3.3.3/scrcpy-server-v3.3.3 | Apache-2.0 | Copyright (C) Genymobile | [scrcpy/](./scrcpy/) |
-| GameBot 本体 | gamer-server.exe / gamer-launcher.exe / web 前端 | 以 server/Cargo.toml 为权威（当前 0.1.0） | 本仓库 | GameBot 自有许可 | GameBot 项目 | — |
+| GameBot 本体 | gamer-server.exe / gamer-launcher.exe / web 前端 | 以 server/Cargo.toml 为权威（当前 0.1.1） | 本仓库 | GameBot 自有许可 | GameBot 项目 | — |
 
 Rust 依赖组件清单（含传递依赖）由 `tools/gen-sbom.ps1` 生成 CycloneDX 1.5
 格式清单（release/sbom/），不入库、随发布产物归档。

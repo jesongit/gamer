@@ -8,33 +8,41 @@
       <form class="login-form" @submit.prevent="onLogin">
         <div class="form-item">
           <label>用户名</label>
-          <input v-model="user" class="input" placeholder="当前部署的用户名" autocomplete="username" />
+          <input v-model="user" class="input" :placeholder="setupMode ? '管理员账号' : '当前部署的用户名'" :readonly="setupMode" autocomplete="username" />
         </div>
         <div class="form-item">
           <label>密码</label>
-          <input v-model="pass" class="input" type="password" placeholder="请输入部署凭据" autocomplete="current-password" />
+          <input v-model="pass" class="input" type="password" :placeholder="setupMode ? '设置管理员密码（至少 8 位）' : '请输入部署凭据'" :autocomplete="setupMode ? 'new-password' : 'current-password'" />
         </div>
-        <button class="btn btn-primary login-btn" type="submit" :disabled="busy || countdown > 0">
-          {{ busy ? '登录中…' : (countdown > 0 ? `请稍候（${countdown}s）` : '登 录') }}
+        <div v-if="setupMode" class="form-item">
+          <label>确认密码</label>
+          <input v-model="confirmPass" class="input" type="password" placeholder="再次输入管理员密码" autocomplete="new-password" />
+        </div>
+        <button class="btn btn-primary login-btn" type="submit" :disabled="checkingSetup || busy || countdown > 0">
+          {{ checkingSetup ? '检查中…' : (busy ? (setupMode ? '保存中…' : '登录中…') : (countdown > 0 ? `请稍候（${countdown}s）` : (setupMode ? '设置密码并进入' : '登 录'))) }}
         </button>
         <div v-if="errMsg" class="login-err">{{ errMsg }}</div>
       </form>
 
-      <div class="login-hint">请使用当前部署配置的管理员凭据；登录后由服务端会话维持认证状态。</div>
+      <div v-if="setupMode" class="login-hint setup-hint">首次使用，请先设置本机管理员密码；密码只保存为不可逆哈希。</div>
+      <div v-else class="login-hint">请使用当前部署配置的管理员凭据；登录后由服务端会话维持认证状态。</div>
     </div>
     <div class="login-foot">GameBot · 基于 scrcpy + WebRTC 的游戏自动化方案</div>
   </div>
 </template>
 
 <script setup>
-import { ref, onBeforeUnmount } from 'vue'
+import { ref, onBeforeUnmount, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { login, sanitizeRedirect, formatRetryCountdown } from '../auth'
+import { login, getSetupStatus, setupInitialPassword, sanitizeRedirect, formatRetryCountdown } from '../auth'
 
 const router = useRouter()
 const route = useRoute()
 const user = ref('')
 const pass = ref('')
+const confirmPass = ref('')
+const setupMode = ref(false)
+const checkingSetup = ref(true)
 const busy = ref(false)
 const errMsg = ref('')
 const countdown = ref(0)
@@ -58,13 +66,24 @@ function stopCountdown() {
 
 async function onLogin() {
   if (busy.value || countdown.value > 0) return
-  if (!user.value.trim() || !pass.value) {
+  if (setupMode.value) {
+    if (pass.value.length < 8) {
+      errMsg.value = '密码至少需要 8 个字符'
+      return
+    }
+    if (pass.value !== confirmPass.value) {
+      errMsg.value = '两次输入的密码不一致'
+      return
+    }
+  } else if (!user.value.trim() || !pass.value) {
     errMsg.value = '请输入用户名和密码'
     return
   }
   busy.value = true
   errMsg.value = ''
-  const res = await login(user.value.trim(), pass.value)   // 必须 await：凭 Set-Cookie 回包后才能放行路由
+  const res = setupMode.value
+    ? await setupInitialPassword(pass.value, confirmPass.value)
+    : await login(user.value.trim(), pass.value)   // 必须 await：凭 Set-Cookie 回包后才能放行路由
   busy.value = false
   if (res.ok) {
     // 服务端会话已建立（Cookie 同源自动携带）；回跳到被 401/守卫拦下的原目标
@@ -74,6 +93,19 @@ async function onLogin() {
     return
   }
   switch (res.code) {
+    case 'password_mismatch':
+      errMsg.value = '两次输入的密码不一致'
+      break
+    case 'weak_password':
+      errMsg.value = '密码至少需要 8 个字符'
+      break
+    case 'setup_already_completed':
+      setupMode.value = false
+      user.value = ''
+      pass.value = ''
+      confirmPass.value = ''
+      errMsg.value = '密码已设置，请使用管理员账号登录'
+      break
     case 'invalid_credentials':
       errMsg.value = '账号或密码错误'
       break
@@ -91,6 +123,18 @@ async function onLogin() {
       errMsg.value = '登录失败，请稍后再试'
   }
 }
+
+onMounted(async () => {
+  try {
+    const res = await getSetupStatus()
+    if (res.ok && res.setupRequired) {
+      setupMode.value = true
+      user.value = 'admin'
+    }
+  } finally {
+    checkingSetup.value = false
+  }
+})
 
 onBeforeUnmount(stopCountdown)
 </script>

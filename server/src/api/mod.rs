@@ -4,7 +4,8 @@
 //! WS:   WebRTC 信令（/ws/device/:id）
 //!
 //! 鉴权（阶段 2 SEC，见 auth.rs）：
-//! - 公开豁免组（public）：POST /api/login、GET /api/session、POST /api/logout
+//! - 公开豁免组（public）：POST /api/login、GET /api/session、POST /api/logout、
+//!   GET/POST /api/auth/setup（仅 POST 首次设置限制回环）
 //!   （三者自身实现契约语义）、GET /health/live、GET /health/ready、GET /metrics、静态资源 fallback；
 //! - 受保护组（protected）：其余全部 /api/** 与 /ws/device/:id——统一经 auth_guard：
 //!   未认证 401 {"error":"unauthorized"}；状态变更/WS 升级 Origin≠Host 403；
@@ -118,6 +119,10 @@ pub fn build_router(
         .route("/api/login", post(auth::api_login))
         .route("/api/session", get(auth::api_session))
         .route("/api/logout", post(auth::api_logout))
+        .route(
+            "/api/auth/setup",
+            get(auth::api_setup_status).post(auth::api_setup_password),
+        )
         .route("/health/live", get(|| async { (StatusCode::OK, "ok") }))
         .route("/health/ready", get(system::api_health_ready))
         .route("/health/shutdown", get(system::api_shutdown_state))

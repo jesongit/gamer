@@ -122,7 +122,7 @@ if (-not $SkipBuild) {
     Write-Host "[package-app] -SkipBuild: 复用既有产物"
 }
 
-foreach ($must in @($serverExe, (Join-Path $webDist 'index.html'), $jarSrc)) {
+foreach ($must in @($serverExe, (Join-Path $webDist 'index.html'), (Join-Path $webDist 'assets'), $jarSrc)) {
     if (-not (Test-Path -LiteralPath $must)) {
         Exit-Fail "缺少构建产物: $must（不带 -SkipBuild 重跑，或先完成 server/web 构建）"
     }
@@ -134,7 +134,9 @@ if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -F
 New-Item -ItemType Directory -Path $stage -Force | Out-Null
 
 Copy-Item -LiteralPath $serverExe -Destination (Join-Path $stage 'gamer-server.exe')
-Copy-Item -Path (Join-Path $webDist '*') -Destination (Join-Path $stage 'web-dist') -Recurse -Force
+# 必须复制整个 web-dist 目录；对 "web-dist\\*" 使用 PowerShell wildcard 会把
+# 子目录层级压平，导致浏览器请求 /assets/* 时得到 404（REL-003）。
+Copy-Item -LiteralPath $webDist -Destination $stage -Recurse -Force
 New-Item -ItemType Directory -Path (Join-Path $stage 'assets') -Force | Out-Null
 Copy-Item -LiteralPath $jarSrc -Destination (Join-Path $stage 'assets\scrcpy-server.jar')
 
@@ -172,6 +174,9 @@ try {
     }
     if (-not (Test-Path -LiteralPath (Join-Path $verifyDir 'web-dist\index.html'))) {
         Exit-Fail "复核缺失: web-dist/index.html"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $verifyDir 'web-dist\assets'))) {
+        Exit-Fail "复核缺失: web-dist/assets（前端静态资源目录）"
     }
     $zipSize = (Get-Item -LiteralPath $zipPath).Length
     Write-Host ("[package-app] PASS: {0}（{1} 字节, {2} 个条目）" -f $zipPath, $zipSize, $entryCount)

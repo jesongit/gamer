@@ -80,6 +80,39 @@ export async function login(username, password) {
   return { ok: false, code: `http_${r.status}` }
 }
 
+// 首次设置状态：full 包初次启动时服务端返回 setup_required=true。
+export async function getSetupStatus() {
+  let r
+  try {
+    r = await fetch('/api/auth/setup')
+  } catch (e) {
+    return { ok: false, code: 'network_error' }
+  }
+  const body = await r.json().catch(() => ({}))
+  if (r.ok) return { ok: true, setupRequired: body.setup_required === true }
+  return { ok: false, code: `http_${r.status}` }
+}
+
+// 首次设置密码成功后服务端会直接建立 Cookie 会话。
+export async function setupInitialPassword(password, confirmPassword) {
+  let r
+  try {
+    r = await fetch('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password, confirm_password: confirmPassword })
+    })
+  } catch (e) {
+    return { ok: false, code: 'network_error' }
+  }
+  const body = await r.json().catch(() => ({}))
+  if (r.ok) {
+    markAuthed(body.username || 'admin')
+    return { ok: true, username: session.username }
+  }
+  return { ok: false, code: body.error || `http_${r.status}` }
+}
+
 // 启动/首次导航探测会话（成功结论缓存复用；login/doLogout/handleUnauthorized 翻转缓存，
 // 会话过期由 api 层 401 拦截刷新为未认证——不会拿着陈旧结论放行）。
 // 探测超时/网络错误/5xx = 结论未知：不缓存、放行本次导航——未认证由 api 层 401 拦截兜底。

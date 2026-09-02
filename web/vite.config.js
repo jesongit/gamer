@@ -15,6 +15,8 @@ export default defineConfig({
   build: {
     // 构建产物直接输出到后端静态托管目录（server 服务于 ./web-dist）
     outDir: '../server/web-dist',
+    // 发布包校验与后端静态路由依赖这一目录契约，避免资源被平铺。
+    assetsDir: 'assets',
     emptyOutDir: true
   },
   server: {

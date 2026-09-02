@@ -1,6 +1,6 @@
 [package]
 name = "gamer-launcher"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "GameBot 便携安装启动器/升级器（单实例锁、原子 state、release manifest 验签）"
 publish = false

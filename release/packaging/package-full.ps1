@@ -4,11 +4,12 @@
 #   gamer-launcher.exe                  cargo build --release（launcher crate 独立工作区）
 #   config/config.toml                  模板（launcher 托管模式：路径留空由注入，
 #                                       password_hash 占位，字段按 server/src/config.rs 写全）
+#   data/<应用包名>/{yaml,func,tmpl,keymap}/ 仓库内置的脚本、函数、模板和映射种子
 #   manifests/<version>.json + .sig     gen-manifest.ps1 产物
 #   keys/<key_id>.pem                   dev 公钥（生产改为内置信任库）
 #   seeds/                              gamer-app zip、adb zip、ffmpeg zip、scrcpy-server jar
 #   SHA256SUMS.txt                      包内全部文件哈希清单
-#   INSTALL.md                          三步安装说明
+#   INSTALL.md                          解压即用说明
 #   licenses/                           DEP-005 第三方声明（NOTICE + 各许可全文 + FFmpeg
 #                                       源码 offer + BUILD-CONFIG，履约 dependencies.lock.toml）
 #
@@ -133,9 +134,9 @@ rtc_external_ip = ""
 rtc_udp_port = 0
 rtc_external_port = 0
 
-# 鉴权与会话治理。password_hash 为占位留空：首次设置登录密码见 INSTALL.md——
-# 环境变量 GAMER_ADMIN_PASSWORD（进程内转 Argon2id PHC，不落盘）或在此填入
-# 固定参数 Argon2id PHC。留空且无环境变量时认证 fail closed（无法登录）。
+# 鉴权与会话治理。password_hash 初始留空：首次打开登录页即可设置管理员密码，
+# 服务端会把密码转换为 Argon2id PHC 并保存；GAMER_ADMIN_PASSWORD 仍可供开发/自动化
+# 场景使用（仅进程内生效，不落盘）。
 [auth]
 session_abs_secs = 43200   # 会话绝对有效期秒 [60, 2592000]
 session_idle_secs = 7200   # 会话空闲有效期秒 [60, 604800]
@@ -154,45 +155,32 @@ function Get-InstallTemplate {
 
 把 `GameBot-__VERSION__-windows-x64-full.zip` 解压到本地目录（建议路径不含中文与
 空格，例如 `D:\GameBot`）。**必须保持解压出的相对布局**：`gamer-launcher.exe`
-与 `config\`、`manifests\`、`keys\`、`seeds\`、`licenses\`、`SHA256SUMS.txt` 在
+与 `config\`、`data\`、`manifests\`、`keys\`、`seeds\`、`licenses\`、`SHA256SUMS.txt` 在
 同一目录，不要单独把 exe 拖出去运行。
 
-## 第 2 步：安装并启动
+## 第 2 步：双击启动
 
-打开命令行（cmd 或 PowerShell），进入解压目录：
+双击解压目录中的 `gamer-launcher.exe` 即可。启动器会自动从包内 `seeds\` 安装
+或修复 adb、ffmpeg、scrcpy-server 和 GameBot 本体，首次运行不需要打开命令行，
+也不需要手动执行 `repair` 或 `start`；依赖已经完整时会自动跳过。
 
-    gamer-launcher.exe repair     # 首次安装：把 seeds\ 里的 app/adb/ffmpeg 一步
-                                  # 安装到位（versions\<版本>\ + runtime\），校验
-                                  # 通过后写入 state\current.json 版本指针
-    gamer-launcher.exe start      # 启动并持续监管 gamer-server
-
-`repair` 全程可用离线种子（seeds\），断网也能完成；组件已完好时自动跳过，
-版本目录已存在时不会覆盖（损坏目录会先移入 quarantine\ 再重装）。
-自检命令：安装前 `gamer-launcher.exe doctor` 会提示「未安装——先运行 repair」
-（WARN，退出码 0）；安装后 doctor 应全部 [PASS]（已安装后出现组件缺失才报
-FAIL / 退出码 1）。
-
-启动成功后用浏览器打开 `http://127.0.0.1:8443` 登录使用。
+启动成功后浏览器会打开（或手动打开）`http://127.0.0.1:8443`。
 
 ## 首次设置登录密码
 
-服务端认证 fail closed——没有凭据无法登录，二选一：
+第一次打开登录页时会显示“设置密码并进入”：输入至少 8 位管理员密码并确认即可，
+密码只以 Argon2id 不可逆哈希保存到 `config\config.toml`，设置成功后会自动登录。
+以后双击 `gamer-launcher.exe` 启动，再用该管理员密码登录即可。
 
-1. **本机/试用（推荐）**：启动前设置环境变量，`start` 会把它透传给 server
-   进程，由 server 进程内转为 Argon2id PHC（不写任何文件）：
-
-       set GAMER_ADMIN_PASSWORD=你的口令      （cmd）
-       $env:GAMER_ADMIN_PASSWORD='你的口令'   （PowerShell）
-
-   然后执行 `gamer-launcher.exe start`，并用该口令登录。
-
-2. **固定凭据**：编辑 `config\config.toml` 的 `[auth] password_hash`，填入固定
-   参数 Argon2id PHC。注意该文件包含凭据材料，妥善保管访问权限。
+包内已带入仓库中的脚本、函数库、模板图片和按应用分区的按键映射，首次启动即可使用；
+运行过程中新增或修改的资源会继续保存在 `data\`，升级时不会由 launcher 自动覆盖。
 
 ## 其他
 
 - 配置模板 `config\config.toml` 为 launcher 托管模式：`adb_path`/`ffmpeg_path`/
   `scrcpy_server`/`data_dir` 等路径留空即可，由 launcher 注入绝对路径，无需手改。
+- 高级维护仍可在命令行运行 `gamer-launcher.exe doctor`、`repair` 或 `upgrade`，
+  日常使用不需要这些命令。
 - 第三方组件许可声明见 `licenses\NOTICE.md`（Apache-2.0 / LGPL-3.0 履约文本）。
 - 升级：`gamer-launcher.exe upgrade`（检查 manifest 并原子升级；离线环境把新版
   full 包解压覆盖即可，数据目录不受影响）。
@@ -223,6 +211,7 @@ if (-not $Version) { Exit-Fail "无法确定产品版本" }
 # ---------- 输入清单 ----------
 $launcherExe    = Join-Path $repoRoot 'launcher\target\release\gamer-launcher.exe'
 $jarSrc         = Join-Path $repoRoot 'server\assets\scrcpy-server.jar'
+$dataSeedDir    = Join-Path $repoRoot 'server\data'
 $manifestJson   = Join-Path $ManifestDir ('{0}.json' -f $Version)
 $manifestSig    = Join-Path $ManifestDir ('{0}.sig' -f $Version)
 $pubKey         = Join-Path $KeysDir ('{0}.pem' -f $KeyId)
@@ -248,7 +237,7 @@ if (-not $SkipBuild) {
 }
 
 foreach ($must in @(
-    $launcherExe, $jarSrc, $manifestJson, $manifestSig, $pubKey,
+    $launcherExe, $jarSrc, $dataSeedDir, $manifestJson, $manifestSig, $pubKey,
     (Join-Path $DistDir $appZipName), (Join-Path $DistDir $adbZipName), (Join-Path $DistDir $ffmpegZipName),
     (Join-Path $licensesDir 'NOTICE.md')
 )) {
@@ -262,12 +251,18 @@ Write-Host "[package-full] 版本 $Version，key_id=$KeyId"
 # ---------- 组装 staging ----------
 $stage = Join-Path $DistDir ('staging-full-' + $Version)
 if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
-foreach ($d in @('config', 'manifests', 'keys', 'seeds')) {
+foreach ($d in @('config', 'data', 'manifests', 'keys', 'seeds')) {
     New-Item -ItemType Directory -Path (Join-Path $stage $d) -Force | Out-Null
 }
 try {
     Copy-Item -LiteralPath $launcherExe -Destination (Join-Path $stage 'gamer-launcher.exe')
     Write-Utf8BomFile -Path (Join-Path $stage 'config\config.toml') -Text (Get-ConfigTemplate)
+
+    # 初始业务资源随 Full 包分发，但只复制分区目录，不复制 server/data 根下的
+    # gamer.db / -shm / -wal 等开发机运行时数据库文件。
+    foreach ($partition in (Get-ChildItem -LiteralPath $dataSeedDir -Directory | Sort-Object Name)) {
+        Copy-Item -LiteralPath $partition.FullName -Destination (Join-Path $stage 'data') -Recurse -Force
+    }
     Copy-Item -LiteralPath $manifestJson -Destination (Join-Path $stage ('manifests\{0}.json' -f $Version))
     Copy-Item -LiteralPath $manifestSig  -Destination (Join-Path $stage ('manifests\{0}.sig' -f $Version))
     Copy-Item -LiteralPath $pubKey       -Destination (Join-Path $stage ('keys\{0}.pem' -f $KeyId))
@@ -345,6 +340,21 @@ try {
         'licenses\scrcpy\LICENSE.txt'
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $verify $rel))) { Exit-Fail "解压后缺失: $rel" }
+    }
+
+    # 每个仓库内置资源分区及其中的文件都必须进入 Full 包；数据库等运行时文件不属于种子。
+    foreach ($partition in (Get-ChildItem -LiteralPath $dataSeedDir -Directory | Sort-Object Name)) {
+        $expectedPartition = Join-Path $verify ('data\' + $partition.Name)
+        if (-not (Test-Path -LiteralPath $expectedPartition -PathType Container)) {
+            Exit-Fail "解压后缺失数据分区: data/$($partition.Name)"
+        }
+        foreach ($seedFile in (Get-ChildItem -LiteralPath $partition.FullName -Recurse -File)) {
+            $relative = $seedFile.FullName.Substring($dataSeedDir.Length + 1) -replace '\\', '/'
+            $expectedFile = Join-Path $verify ('data\' + ($relative -replace '/', '\'))
+            if (-not (Test-Path -LiteralPath $expectedFile -PathType Leaf)) {
+                Exit-Fail "解压后缺失种子文件: data/$relative"
+            }
+        }
     }
 
     # SHA256SUMS 逐条核对 + 完备性（除自身外每个文件都在清单里）

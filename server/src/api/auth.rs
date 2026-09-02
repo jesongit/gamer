@@ -20,8 +20,13 @@
 //! ZIP 导入另有资源硬限（见 scripts.rs import）。
 
 use std::collections::{HashMap, VecDeque};
+use std::fs;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, RwLock,
+};
 use std::time::{Duration, Instant};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -47,6 +52,7 @@ use crate::config::AuthConfig;
 //   401 {"error":"invalid_credentials"}；429 {"error":"too_many_attempts","retry_after":秒}
 // GET  /api/session → 200 {authenticated:true,username} / 401 {"error":"unauthorized"}
 // POST /api/logout → 204 销毁会话 + 过期 Set-Cookie（幂等）
+// GET  /api/auth/setup → 200 {setup_required}; POST 同路径首次设置密码并自动登录
 // Secure 标志仅 GAMER_PROFILE=prod 追加；dev 纯 HTTP LAN 保持无 Secure。
 // 旧响应壳 {token:"demo-token"} 已废除。
 
@@ -93,6 +99,56 @@ pub(super) async fn api_login(
             ),
         )
             .into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct SetupPasswordReq {
+    password: String,
+    confirm_password: String,
+}
+
+/// 首次启动状态探测。setup_required 只会在本机配置为空且未提供环境变量时为 true。
+pub(super) async fn api_setup_status(State(st): State<AppState>) -> Response {
+    Json(json!({"setup_required": st.auth.setup_required()})).into_response()
+}
+
+/// 首次设置管理员密码：仅允许回环来源，成功后直接下发普通会话 Cookie。
+pub(super) async fn api_setup_password(
+    State(st): State<AppState>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<SetupPasswordReq>,
+) -> Response {
+    if !remote.ip().is_loopback() {
+        return err_response(StatusCode::FORBIDDEN, "setup_local_only");
+    }
+    if !origin_allows_headers(&headers) {
+        return err_response(StatusCode::FORBIDDEN, "forbidden_origin");
+    }
+    if req.password.len() < 8 || req.password.len() > 1024 {
+        return err_response(StatusCode::BAD_REQUEST, "weak_password");
+    }
+    if req.password != req.confirm_password {
+        return err_response(StatusCode::BAD_REQUEST, "password_mismatch");
+    }
+    match st.auth.setup_initial_password(&req.password) {
+        Ok(()) => {
+            let (sid, username) = st.auth.issue_admin_session();
+            (
+                StatusCode::OK,
+                [(header::SET_COOKIE, st.auth.session_cookie_for(&sid))],
+                Json(json!({"ok": true, "username": username})),
+            )
+                .into_response()
+        }
+        Err(SetupError::AlreadyConfigured) => {
+            err_response(StatusCode::CONFLICT, "setup_already_completed")
+        }
+        Err(SetupError::Persist(msg)) => {
+            warn!(reason = %msg, "首次管理员密码保存失败");
+            err_response(StatusCode::INTERNAL_SERVER_ERROR, "setup_persist_failed")
+        }
     }
 }
 
@@ -280,11 +336,13 @@ pub enum LoginError {
 
 pub struct AuthState {
     inner: Mutex<Inner>,
-    credential: Credential,
+    credential: RwLock<Credential>,
     secure_cookies: bool,
     /// 回环管理令牌（None = 通道禁用）
     admin_token: Option<String>,
     cfg: AuthConfig,
+    setup_required: AtomicBool,
+    config_path: PathBuf,
 }
 
 struct Inner {
@@ -295,27 +353,42 @@ struct Inner {
 impl AuthState {
     /// 组装鉴权状态。credential 由 main 在配置加载后按开发环境变量或
     /// `[auth].password_hash` 解析传入，运行期只持有 Argon2id PHC 或不可用状态。
+    #[allow(dead_code)]
     pub fn new(
         credential: Credential,
         cfg: AuthConfig,
         secure_cookies: bool,
         admin_token: Option<String>,
     ) -> Self {
+        Self::new_with_setup(credential, cfg, secure_cookies, admin_token, false)
+    }
+
+    /// 组装带首次设置状态的鉴权状态。仅 full 包启动时允许 setup_required=true；
+    /// 测试与已有配置继续使用 [`Self::new`] 的关闭默认值。
+    pub fn new_with_setup(
+        credential: Credential,
+        cfg: AuthConfig,
+        secure_cookies: bool,
+        admin_token: Option<String>,
+        setup_required: bool,
+    ) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 sessions: HashMap::new(),
                 fails: HashMap::new(),
             }),
-            credential,
+            credential: RwLock::new(credential),
             secure_cookies,
             admin_token,
             cfg,
+            setup_required: AtomicBool::new(setup_required),
+            config_path: configured_path(),
         }
     }
 
     /// 当前生效的凭据来源描述（启动摘要日志用，绝不含凭据内容）
     pub fn credential_source(&self) -> &'static str {
-        match &self.credential {
+        match &*self.credential.read().unwrap() {
             Credential::Argon2 { source, .. } => source.label(),
             Credential::Unavailable => "unavailable:invalid-or-missing-credential",
         }
@@ -327,7 +400,7 @@ impl AuthState {
 
     /// 凭据核验：只使用固定参数 Argon2id PHC。
     pub(crate) fn verify_credentials(&self, input: &str) -> bool {
-        match &self.credential {
+        match &*self.credential.read().unwrap() {
             Credential::Argon2 { encoded, .. } => {
                 let Ok(parsed) = parse_fixed_argon2_phc(encoded) else {
                     return false;
@@ -406,6 +479,48 @@ impl AuthState {
             },
         );
         Ok((sid, "admin".to_string()))
+    }
+
+    pub fn setup_required(&self) -> bool {
+        self.setup_required.load(Ordering::Acquire)
+    }
+
+    /// 把首次设置的明文口令立即转换为 Argon2id PHC，并原子写回 launcher 注入的配置文件。
+    pub fn setup_initial_password(&self, password: &str) -> Result<(), SetupError> {
+        let encoded = hash_password(password).map_err(SetupError::Persist)?;
+        let mut credential = self.credential.write().unwrap();
+        if !self.setup_required.load(Ordering::Acquire) {
+            return Err(SetupError::AlreadyConfigured);
+        }
+        let current = if self.config_path.exists() {
+            fs::read_to_string(&self.config_path)
+                .map_err(|e| SetupError::Persist(format!("读取现有配置失败: {e}")))?
+        } else {
+            String::new()
+        };
+        let updated = replace_password_hash(&current, &encoded);
+        write_config_atomically(&self.config_path, &updated).map_err(SetupError::Persist)?;
+        *credential = Credential::Argon2 {
+            encoded,
+            source: CredentialSource::Config,
+        };
+        self.setup_required.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// 首次设置成功后直接创建管理员会话，避免用户再手工提交一次登录表单。
+    pub fn issue_admin_session(&self) -> (String, String) {
+        let now = Instant::now();
+        let sid = random_hex_id(32);
+        self.inner.lock().unwrap().sessions.insert(
+            sid.clone(),
+            Session {
+                username: "admin".to_string(),
+                abs_expire: now + self.abs_duration(),
+                last_seen: now,
+            },
+        );
+        (sid, "admin".to_string())
     }
 
     /// 校验并滑动续期：命中返回用户名；绝对/空闲到期均即时销毁并拒绝
@@ -518,6 +633,115 @@ impl AuthState {
         };
         ct_eq(got.as_bytes(), token.as_bytes())
     }
+}
+
+#[derive(Debug)]
+pub enum SetupError {
+    AlreadyConfigured,
+    Persist(String),
+}
+
+fn configured_path() -> PathBuf {
+    std::env::var_os("GB_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("config.toml"))
+}
+
+/// 只改写 [auth] 块中的 password_hash，保留用户已有配置与换行风格。
+fn replace_password_hash(content: &str, encoded: &str) -> String {
+    let newline = if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let had_trailing_newline = content.ends_with('\n');
+    let mut lines: Vec<String> = content
+        .lines()
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect();
+    let auth_start = lines.iter().position(|line| line.trim() == "[auth]");
+
+    if let Some(start) = auth_start {
+        let end = ((start + 1)..lines.len())
+            .find(|&i| {
+                let trimmed = lines[i].trim();
+                trimmed.starts_with('[') && trimmed.ends_with(']')
+            })
+            .unwrap_or(lines.len());
+        if let Some(index) = ((start + 1)..end).find(|&i| {
+            lines[i]
+                .split('#')
+                .next()
+                .unwrap_or("")
+                .split('=')
+                .next()
+                .map(str::trim)
+                == Some("password_hash")
+        }) {
+            let indent_len = lines[index].len() - lines[index].trim_start().len();
+            let indent = lines[index][..indent_len].to_string();
+            lines[index] = format!("{indent}password_hash = \"{encoded}\"");
+        } else {
+            lines.insert(end, format!("password_hash = \"{encoded}\""));
+        }
+    } else {
+        if lines.last().is_some_and(|line| !line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push("[auth]".to_string());
+        lines.push(format!("password_hash = \"{encoded}\""));
+    }
+
+    let mut updated = lines.join(newline);
+    if had_trailing_newline {
+        updated.push_str(newline);
+    }
+    updated
+}
+
+fn write_config_atomically(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.toml");
+    let tmp = path.with_file_name(format!(".{file_name}.setup-{}.tmp", std::process::id()));
+    fs::write(&tmp, content.as_bytes()).map_err(|e| format!("写入临时配置失败: {e}"))?;
+    if let Err(e) = replace_file(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("替换配置文件失败: {e}"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let ok = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            target.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    fs::rename(tmp, path)
 }
 
 // ---------- Origin/Host 同源防护（纯函数便于穷举测试） ----------
@@ -817,6 +1041,21 @@ mod tests {
     }
 
     #[test]
+    fn replace_password_hash_only_updates_auth_block() {
+        let old = "port = 8443\n[other]\npassword_hash = \"keep\"\n[auth]\nlogin_max_fails = 10\npassword_hash = \"old\"\n";
+        let updated = replace_password_hash(old, "$argon2id$v=19$m=19456,t=2,p=1$salt$digest");
+        assert!(updated.contains("[other]\npassword_hash = \"keep\""));
+        assert!(updated.contains("[auth]\nlogin_max_fails = 10\npassword_hash = \"$argon2id$v=19$m=19456,t=2,p=1$salt$digest\""));
+        assert_eq!(updated.matches("password_hash =").count(), 2);
+    }
+
+    #[test]
+    fn replace_password_hash_creates_auth_block_when_missing() {
+        let updated = replace_password_hash("port = 8443\n", "encoded");
+        assert!(updated.ends_with("[auth]\npassword_hash = \"encoded\"\n"));
+    }
+
+    #[test]
     fn argon2id_hash_roundtrip_and_wrong_password() {
         let encoded = hash_password("argon-secret").unwrap();
         assert!(encoded.starts_with("$argon2id$"), "{encoded}");
@@ -846,7 +1085,10 @@ mod tests {
     fn legacy_credentials_do_not_authenticate_or_upgrade() {
         let legacy = state(Credential::Unavailable, 60, 60, 10, 300);
         assert!(!legacy.verify_credentials("legacy-secret"));
-        assert!(matches!(legacy.credential, Credential::Unavailable));
+        assert!(matches!(
+            &*legacy.credential.read().unwrap(),
+            Credential::Unavailable
+        ));
     }
 
     #[test]

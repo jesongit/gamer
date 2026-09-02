@@ -23,6 +23,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "LEVEL")]
     pub log_level: Option<String>,
 
+    /// 无参数双击入口的内部标记，不对用户显示。
+    #[arg(skip)]
+    pub implicit_start: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }

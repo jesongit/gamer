@@ -189,6 +189,30 @@ describe('login（POST /api/login）', () => {
   })
 })
 
+describe('首次设置密码（GET/POST /api/auth/setup）', () => {
+  it('状态接口返回 setup_required', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonRes(200, { setup_required: true }))
+    await expect(auth.getSetupStatus()).resolves.toEqual({ ok: true, setupRequired: true })
+    expect(fetch.mock.calls[0][0]).toBe('/api/auth/setup')
+  })
+
+  it('设置成功提交确认密码并记录自动登录会话', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonRes(200, { ok: true, username: 'admin' }))
+    await expect(auth.setupInitialPassword('strong-pass', 'strong-pass'))
+      .resolves.toEqual({ ok: true, username: 'admin' })
+    const [, options] = fetch.mock.calls[0]
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(options.body)).toEqual({ password: 'strong-pass', confirm_password: 'strong-pass' })
+    expect(auth.session.username).toBe('admin')
+  })
+
+  it('设置接口错误透传结构化错误码', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonRes(400, { error: 'password_mismatch' }))
+    await expect(auth.setupInitialPassword('a', 'b'))
+      .resolves.toEqual({ ok: false, code: 'password_mismatch' })
+  })
+})
+
 describe('doLogout（退出清理）', () => {
   it('204 成功 → POST /api/logout、清本地态、落 #/login', async () => {
     localStorage.setItem('gb_device_id', 'dev-1')

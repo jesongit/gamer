@@ -126,16 +126,23 @@ async fn main() -> anyhow::Result<()> {
     // 鉴权状态（阶段 2）：凭据链路解析 + 回环管理通道令牌 + 会话治理参数
     // 【gate 前必需】
     let credential = api::auth::resolve_credential(&cfg);
+    let setup_required = loaded.profile == config::Profile::Dev
+        && cfg.auth.password_hash.trim().is_empty()
+        && !std::env::var("GAMER_ADMIN_PASSWORD")
+            .ok()
+            .is_some_and(|password| !password.trim().is_empty());
     let admin_token = api::auth::resolve_admin_token(loaded.profile);
-    let auth = Arc::new(api::auth::AuthState::new(
+    let auth = Arc::new(api::auth::AuthState::new_with_setup(
         credential,
         cfg.auth.clone(),
         loaded.profile == config::Profile::Prod,
         admin_token,
+        setup_required,
     ));
     info!(
         source = %auth.credential_source(),
         secure_cookies = auth.secure_cookies(),
+        setup_required,
         "auth enabled (session cookies; /api/** requires login)"
     );
 
