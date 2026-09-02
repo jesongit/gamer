@@ -14,6 +14,7 @@
 //!   路由并置 startup.stage=ready（/health/ready 翻转 200）。
 
 mod api;
+mod app_packages;
 mod build_info;
 mod core;
 pub(crate) mod capabilities;

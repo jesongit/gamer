@@ -150,6 +150,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **部分 Android 游戏在多指 `ACTION_POINTER_UP` 后不会继续处理仍按住的虚拟键**：scrcpy 触点仍然存在但游戏状态未重建；释放一个键后对剩余触点补发一次 `MOVE` 重新锚定，避免 A+D 松 D 后 A 失效。
 ## 2026-09-03
 
+- **ZIP 重复路径负例不能直接由 `zip 2.x` 写入器生成**：`ZipWriter::start_file` 会提前拒绝 `Duplicate filename`，安全校验测试需在合法归档中央目录中复制已有记录后再验证重复路径拒绝。
 - **PowerShell 用 `web-dist\*` 复制 Vite 产物会压平 `assets` 子目录，发布后 HTML 可打开但 JS/CSS 404**：改为复制整个目录并在打包复核中强制检查 `web-dist/assets`。
 - **Full 包只带程序和依赖会漏掉仓库内置 YAML、模板、函数库及 keymap，首次启动的数据目录为空**：打包时复制 `server/data` 下的分区目录，排除根级 SQLite 运行文件，并在解压复核中逐文件检查种子资源。
 - **sandbox iframe 的本地 PoC 若直接写源文件路径不会随 Vite 生产构建复制**：用 `?url` 导入生成 `web-dist/assets/iframe-poc-*.html`，Host 才能在开发与构建产物中复用同一静态 UI。
