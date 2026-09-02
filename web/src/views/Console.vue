@@ -1,9 +1,21 @@
 <template>
   <div ref="consoleEl" class="console" :class="{ 'is-panel-resizing': panelResizing }">
-    <!-- 左：画面区 -->
-    <div class="stage">
+    <!-- 左：工具条与投屏画面共用一个键盘焦点区域 -->
+    <div
+      ref="stageFocusEl"
+      class="stage"
+      :class="{ 'keyboard-active': keyboardFocused }"
+      tabindex="0"
+      role="region"
+      aria-label="投屏控制区，可接收键盘控制"
+      @focusin="onStageFocusIn"
+      @focusout="onStageFocusOut"
+      @keydown="onStageKeyDown"
+      @keyup="onStageKeyUp"
+      @click="onStageClick"
+    >
       <!-- 顶部工具条：设备管理与常用投屏控制合并为一行，次要控制收进「更多」 -->
-      <div class="toolbar">
+      <div ref="toolbarEl" class="toolbar" data-keyboard-ignore="true" @click="onToolbarClick">
         <div class="tb-row">
           <select v-model="store.deviceId" class="select mono tb-dev-select" @change="onDeviceSelect">
             <option value="">选择设备…</option>
@@ -30,10 +42,23 @@
             >更多 ▾</button>
           </div>
           <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (activePkg || '未选择包名')">🚀 启动应用</button>
-          <button class="btn btn-sm" @click="clipboard">📋 剪贴板</button>
-          <span class="keyboard-status" :class="{ active: keyboardFocused }" role="status">
-            ⌨ {{ keyboardFocused ? '键盘已启用' : '点击画面启用键盘' }}
-          </span>
+          <button class="btn btn-sm" @click="clipboard">📋 粘贴</button>
+          <button
+            class="btn btn-sm keyboard-mode-btn"
+            :class="{ active: keyboardMode === 'text' }"
+            :title="keyboardMode === 'text' ? '当前为文本模式，字母和空格按文本发送' : '当前为游戏模式，保留按下/释放按键语义'"
+            @click="toggleKeyboardMode"
+          >{{ keyboardMode === 'text' ? '⌨ 文本模式' : '🎮 游戏模式' }}</button>
+          <select
+            v-model="activeKeymapName"
+            class="select mono keymap-select"
+            :disabled="!activePkg || keymapLoading"
+            title="游戏模式下选择当前按键映射；文本模式保留选择但不生效"
+            @change="onKeymapChange"
+          >
+            <option value="">无映射</option>
+            <option v-for="item in keymapOptions" :key="item.id || item.file || item.name" :value="item.id || item.file || item.name">{{ item.name || item.file || item.id }}</option>
+          </select>
         </div>
       </div>
 
@@ -66,6 +91,8 @@
         :selecting="selecting"
         :sel-style="selStyle"
         :script-fx="scriptFx"
+        :keymap-overlay="keymapOverlay"
+        :keymap-status="keymapStatus"
         :fx-tap-style="fxTapStyle"
         :fx-swipe-style="fxSwipeStyle"
         :fx-hit-style="fxHitStyle"
@@ -76,10 +103,6 @@
         :on-wheel="onWheel"
         :on-video-mouse-leave="onVideoMouseLeave"
         :keyboard-focused="keyboardFocused"
-        :on-focus="onVideoFocus"
-        :on-blur="onVideoBlur"
-        :on-key-down="onVideoKeyDown"
-        :on-key-up="onVideoKeyUp"
         :flush-and-connect="flushAndConnect"
         :fullscreen="fullscreen"
         @video-mounted="onVideoMounted"
@@ -112,7 +135,7 @@
       @lostpointercapture="stopPanelResize"
       @keydown="onPanelResizeKeydown"
     ></div>
-    <!-- 右：功能区（模板/脚本/日志/任务/设置五页签；二次裁切为弹窗，挂面板层级任何页签可见） -->
+    <!-- 右：功能区（模板/脚本/映射/日志/任务/设置六页签；二次裁切为弹窗，挂面板层级任何页签可见） -->
     <aside class="panel" :style="{ width: `${panelWidth}px` }">
       <!-- 包名行：当前包名下拉 + 读取应用 + 导入/导出（所有资源与控制操作共用 activePkg） -->
       <div class="func-pkg-row">
@@ -125,10 +148,10 @@
         <button class="btn btn-sm" :disabled="!activePkg" title="导入分区快照 zip 到当前应用分区" @click="impFile.click()">⬇ 导入</button>
         <input ref="impFile" type="file" accept=".zip" hidden @change="onImportFile" />
       </div>
-      <div v-if="appHint" class="func-app-hint">{{ appHint }}</div>
       <div class="func-tabs">
         <button type="button" :class="{ active: panelTab === 'tpl' }" @click="panelTab = 'tpl'">🖼️ 模板</button>
         <button type="button" :class="{ active: panelTab === 'script' }" @click="panelTab = 'script'">📜 脚本</button>
+        <button type="button" :class="{ active: panelTab === 'keymap' }" @click="panelTab = 'keymap'">⌨ 映射</button>
         <button type="button" :class="{ active: panelTab === 'logs' }" @click="panelTab = 'logs'">日志</button>
         <button type="button" :class="{ active: panelTab === 'tasks' }" @click="panelTab = 'tasks'">任务</button>
         <button type="button" :class="{ active: panelTab === 'settings' }" @click="panelTab = 'settings'">设置</button>
@@ -139,6 +162,7 @@
       <div v-show="panelTab === 'script'" class="panel-sec script-tab">
         <ScriptRunner :context="scriptRunnerContext" />
       </div>
+      <div v-if="panelTab === 'keymap'" class="panel-sec extra-tab"><KeymapPanel :context="keymapPanelContext" /></div>
       <div v-if="panelTab === 'logs'" class="panel-sec extra-tab"><LogsPanel /></div>
       <div v-else-if="panelTab === 'tasks'" class="panel-sec extra-tab"><TaskBoard :active-pkg="activePkg" /></div>
       <div v-else-if="panelTab === 'settings'" class="panel-sec extra-tab"><SystemPanel /></div>
@@ -190,6 +214,7 @@ import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
 import TemplateCropModal from '../components/console/TemplateCropModal.vue'
 import ScriptRunner from '../components/console/ScriptRunner.vue'
+import KeymapPanel from '../components/console/KeymapPanel.vue'
 import LogsPanel from '../components/LogsPanel.vue'
 import TaskBoard from '../components/TaskBoard.vue'
 import SystemPanel from '../components/SystemPanel.vue'
@@ -202,7 +227,8 @@ import { useScriptEditorShell } from '../composables/useScriptEditorShell'
 import { useRawYamlEditor } from '../composables/useRawYamlEditor'
 import { useFunctionLibrary } from '../composables/useFunctionLibrary'
 import { useRunArgsFlow } from '../composables/useRunArgsFlow'
-import { createKeyboardController } from '../keyboard-control'
+import { createKeyboardController, shouldIgnoreKeyboardTarget } from '../keyboard-control'
+import { createKeymapController } from '../keymap-control'
 import { parseScript, parseFunctionLibrary, serialize } from '../script-editor/codec'
 import { SE_TARGET_OPTIONS } from '../script-editor/targets'
 import { startIndexOf } from '../script-editor/selection'
@@ -232,9 +258,19 @@ const toolbarMoreOpen = ref(false)
 const toolbarMoreButton = ref(null)
 const toolbarMoreStyle = reactive({ top: '0px', left: '0px' })
 const consoleEl = ref(null)
+const stageFocusEl = ref(null)
+const toolbarEl = ref(null)
 const videoWrap = ref(null)
 const videoElement = ref(null)
 const keyboardFocused = ref(false)
+const keyboardMode = ref('game')
+const keymaps = ref([])
+const activeKeymapName = ref('')
+const activeKeymapDisplayName = ref('')
+const activeKeymapModel = ref(null)
+const keymapLoading = ref(false)
+const keymapError = ref('')
+const keymapPressed = reactive(new Set())
 
 // 右侧功能区宽度：五个页签共用同一宽度，避免切换页签时布局突然跳变；拖拽条支持手动调整。
 const PANEL_STORAGE_KEY = 'gb_console_panel_width'
@@ -319,34 +355,102 @@ function onVideoMounted(el) { videoElement.value = el }
 function onVideoWrapMounted(el) { videoWrap.value = el }
 function onLoupeMounted(el) { loupeCanvas.value = el }
 
-const keyboard = createKeyboardController({ send: sendKeyboardControl })
+const keyboard = createKeyboardController({
+  send: sendKeyboardControl,
+  onText: sendControl,
+  mode: keyboardMode,
+})
 
-function onVideoFocus() {
-  keyboardFocused.value = connected.value
+// 映射层位于原始游戏键盘之前：命中时消费事件，未命中才交给 keyboard。
+// 通过回调读取当前活动模型，因此切换方案不需要重建控制器或刷新页面。
+const keymap = createKeymapController({
+  getKeymap: () => activeKeymapModel.value,
+  sendControl,
+  send: sendControl,
+  getVideoSize: () => ({
+    width: videoElement.value?.videoWidth || 1920,
+    height: videoElement.value?.videoHeight || 1080,
+  }),
+  mode: keyboardMode,
+})
+
+function syncKeymapPressed() {
+  const codes = typeof keymap.getPressedCodes === 'function' ? keymap.getPressedCodes() : []
+  keymapPressed.clear()
+  for (const code of codes || []) keymapPressed.add(code)
 }
 
-function onVideoBlur() {
+function onStageFocusIn(e) {
+  if (!connected.value || shouldIgnoreKeyboardTarget(e?.target)) return
+  keyboardFocused.value = true
+}
+
+function onStageFocusOut(e) {
+  const next = e?.relatedTarget
+  if (next && stageFocusEl.value?.contains(next)) return
   keyboardFocused.value = false
+  keymap.releaseAll()
+  syncKeymapPressed()
   keyboard.releaseAll()
 }
 
-function onVideoKeyDown(e) {
+function onStageKeyDown(e) {
   if (!connected.value || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
+  if (keyboardMode.value === 'game') {
+    const mapped = keymap.handleKeyDown(e)
+    syncKeymapPressed()
+    if (mapped?.handled || mapped === true) return
+  }
   // 控制器只对已映射且未被 UI 过滤的按键 preventDefault；未知按键保留浏览器行为。
   keyboard.handleKeyDown(e)
 }
 
-function onVideoKeyUp(e) {
+function onStageKeyUp(e) {
   if (!connected.value) return
+  const mapped = keymap.handleKeyUp(e)
+  syncKeymapPressed()
+  if (mapped?.handled || mapped === true) return
   keyboard.handleKeyUp(e)
 }
 
+function onStageClick(e) {
+  const target = e?.target
+  if (target?.closest?.('button, input, select, textarea, a, [contenteditable], [role="button"], [role="link"], [role="menuitem"]')) return
+  stageFocusEl.value?.focus()
+}
+
+function onToolbarClick(e) {
+  const target = e?.target
+  const button = target?.closest?.('button')
+  if (!button || !toolbarEl.value?.contains(button)) return
+  // 工具栏按钮执行完动作后把焦点还给组合区域，点击模式切换后可以直接输入。
+  nextTick(() => stageFocusEl.value?.focus())
+}
+
+function toggleKeyboardMode() {
+  keyboardMode.value = keyboardMode.value === 'game' ? 'text' : 'game'
+  nextTick(() => stageFocusEl.value?.focus())
+}
+
+watch(keyboardMode, mode => {
+  if (mode === 'text') {
+    keymap.releaseAll()
+    syncKeymapPressed()
+  }
+})
+
 function onWindowBlur() {
+  keymap.releaseAll()
+  syncKeymapPressed()
   keyboard.releaseAll()
 }
 
 function onVisibilityChange() {
-  if (document.hidden) keyboard.releaseAll()
+  if (document.hidden) {
+    keymap.releaseAll()
+    syncKeymapPressed()
+    keyboard.releaseAll()
+  }
 }
 
 const consoleRuntime = useConsoleRuntime({
@@ -487,7 +591,74 @@ const resourcePreview = reactive({
 // 模板短名候选（画布 tmpl 控件 datalist）
 const templateNames = computed(() =>
   templatesData.value.filter(t => t.pkg === activePkg.value).map(t => tplShortName(t.name)))
-watch(activePkg, pkg => { fnLib.refresh(pkg) })
+const keymapOptions = computed(() => Array.isArray(keymaps.value) ? keymaps.value : [])
+let keymapLoadSerial = 0
+
+function keymapModelFromResponse(rep) {
+  const candidate = rep?.model || rep?.keymap || rep?.data?.model || rep?.data || rep
+  return candidate && typeof candidate === 'object' && Array.isArray(candidate.bindings)
+    ? candidate
+    : null
+}
+
+function resetKeymapSelection() {
+  activeKeymapName.value = ''
+  activeKeymapDisplayName.value = ''
+  activeKeymapModel.value = null
+  keymapError.value = ''
+  keymapPressed.clear()
+}
+
+async function loadKeymaps(pkg) {
+  const serial = ++keymapLoadSerial
+  resetKeymapSelection()
+  keymaps.value = []
+  if (!pkg) return
+  keymapLoading.value = true
+  try {
+    const list = await api.listKeymaps(pkg)
+    if (serial !== keymapLoadSerial) return
+    keymaps.value = Array.isArray(list) ? list : (Array.isArray(list?.keymaps) ? list.keymaps : [])
+  } catch (e) {
+    if (serial === keymapLoadSerial) keymapError.value = `读取映射失败：${e.message}`
+  } finally {
+    if (serial === keymapLoadSerial) keymapLoading.value = false
+  }
+}
+
+async function onKeymapChange(item = null) {
+  keymap.releaseAll()
+  activeKeymapModel.value = null
+  keymapError.value = ''
+  if (item && typeof item === 'object') {
+    activeKeymapName.value = item.id || item.file || item.name || ''
+    activeKeymapDisplayName.value = item.name || item.file || item.id || ''
+  } else {
+    const selected = keymapOptions.value.find(candidate =>
+      (candidate.id || candidate.file || candidate.name) === activeKeymapName.value)
+    activeKeymapDisplayName.value = selected?.name || selected?.file || activeKeymapName.value || ''
+  }
+  if (!activeKeymapName.value || !activePkg.value) return
+  keymapLoading.value = true
+  try {
+    const rep = await api.getKeymap(activeKeymapName.value, activePkg.value)
+    const model = keymapModelFromResponse(rep)
+    if (!model) throw new Error('服务端返回的映射结构无效')
+    activeKeymapModel.value = model
+    activeKeymapDisplayName.value = model.name || activeKeymapDisplayName.value
+  } catch (e) {
+    activeKeymapName.value = ''
+    keymapError.value = `加载映射失败：${e.message}`
+    toast(keymapError.value, 'error')
+  } finally {
+    keymapLoading.value = false
+  }
+}
+
+watch(activePkg, pkg => {
+  fnLib.refresh(pkg)
+  loadKeymaps(pkg)
+})
 
 // ---------- call/func 目标候选与参数解析（编辑态画布下拉 + args 自动生成，同独立脚本页） ----------
 // func 参数直接从 fnLib.list 的文件内容解析（按内容版本 memo）；call 拉脚本内容按 id 缓存。
@@ -659,6 +830,8 @@ const webrtcLifecycle = useWebRtcLifecycle({
     refreshDeviceStatus()
   },
   onDisconnect() {
+    keymap.releaseAll()
+    syncKeymapPressed()
     keyboard.releaseAll()
     keyboardFocused.value = false
     stopStats()
@@ -681,7 +854,7 @@ const webrtcLifecycle = useWebRtcLifecycle({
     connecting.value = false
     controlChannel = webrtcLifecycle.getControlChannel()
     keyboardChannelWarned = false
-    keyboardFocused.value = document.activeElement === videoWrap.value
+    keyboardFocused.value = document.activeElement === stageFocusEl.value
     videoConnectTs = Date.now()
     blackResetSent = false
     // 该设备本会话已启动过应用（手动/脚本拉起/脚本仍在运行）→ 重连不再弹提示
@@ -691,6 +864,8 @@ const webrtcLifecycle = useWebRtcLifecycle({
     toast('WebRTC 连接建立', 'success')
   },
   onChannelClose() {
+    keymap.releaseAll()
+    syncKeymapPressed()
     keyboard.releaseAll()
     connected.value = false
     controlChannel = null
@@ -760,7 +935,6 @@ const configApplying = ref(false)
 // 已安装应用列表：读取后合并到右侧包名下拉；选择包名本身不触发任何启动动作。
 const appList = ref([])
 const appLoading = ref(false)
-const appHint = ref('')
 
 const devices = computed(() => devicesData.value)
 const scripts = computed(() => scriptsData.value)
@@ -850,7 +1024,6 @@ function appCacheKey() {
 function restoreAppCache(id) {
   const cached = appCache.get(`device:${id}`)
   appList.value = cached?.list || []
-  appHint.value = cached ? `已缓存 ${cached.list.length} 个应用` : ''
 }
 
 /** 把设备记录载入表单（编辑模式）；syncPkg 仅在切换设备/初始化时恢复默认包名。 */
@@ -913,7 +1086,6 @@ function cancelSettings() {
     mode.value = 'edit'
     store.deviceId = null
     appList.value = []
-    appHint.value = ''
   }
   errorMsg.value = ''
 }
@@ -928,7 +1100,7 @@ function onDeviceSelect() {
   errorMsg.value = ''
   const d = current.value
   if (d) loadForm(d, { syncPkg: true })
-  else { mode.value = 'edit'; appList.value = []; appHint.value = '' }
+  else { mode.value = 'edit'; appList.value = [] }
 }
 
 /** 连接成功后只拉设备列表（不扫描）：更新下拉「在线/离线」状态标签。
@@ -958,7 +1130,7 @@ async function refreshDevices() {
       // 刷新同一设备时保留用户手动切换的当前包名；仅在扫描导致设备选择改变时恢复该设备旧配置。
       loadForm(d, { syncPkg: previousDeviceId !== store.deviceId })
     }
-    else if (!d) { mode.value = 'edit'; appList.value = []; appHint.value = '' }
+    else if (!d) { mode.value = 'edit'; appList.value = [] }
     toast(r.added > 0 ? `扫描到 ${r.added} 台新设备，已自动添加` : '已刷新设备状态', 'success')
   } catch (e) {
     toast('刷新失败：' + e.message, 'error')
@@ -1069,7 +1241,6 @@ async function removeDevice() {
       store.deviceId = null
       mode.value = 'edit'
       appList.value = []
-      appHint.value = ''
     }
     toast('设备已删除', 'success')
   } catch (e) {
@@ -1096,19 +1267,16 @@ async function loadApps() {
   // 5 分钟内直接用缓存，应用列表不是经常变
   if (cached && Date.now() - cached.ts < APP_CACHE_TTL) {
     appList.value = cached.list
-    appHint.value = cached.list.length ? `已加载缓存（共 ${cached.list.length} 个应用）` : '设备上未发现第三方应用（缓存）'
     return
   }
   appLoading.value = true
-  appHint.value = '正在读取设备应用…'
   try {
     const list = await api.listApps(store.deviceId)
     appList.value = list || []
     appCache.set(key, { list: appList.value, ts: Date.now() })
-    appHint.value = appList.value.length ? `共 ${appList.value.length} 个应用，已加入包名下拉` : '设备上未发现第三方应用'
   } catch (e) {
     appList.value = []
-    appHint.value = '读取失败：' + e.message
+    toast('读取应用失败：' + e.message, 'error')
   } finally {
     appLoading.value = false
   }
@@ -1144,6 +1312,60 @@ function deviceRectStyle(x, y, w = 0, h = 0) {
   const rect = vw.getBoundingClientRect()
   return mapDeviceRectStyle(x, y, w, h, rect, videoElement.value?.videoWidth, videoElement.value?.videoHeight)
 }
+
+function normalizedPoint(value) {
+  if (Array.isArray(value) && value.length >= 2) {
+    const x = Number(value[0]); const y = Number(value[1])
+    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null
+  }
+  if (value && typeof value === 'object') {
+    const x = Number(value.x); const y = Number(value.y)
+    return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : null
+  }
+  return null
+}
+
+const keymapOverlay = computed(() => {
+  const bindings = activeKeymapModel.value?.bindings
+  if (!Array.isArray(bindings)) return []
+  const vw = videoElement.value?.videoWidth || 1920
+  const vh = videoElement.value?.videoHeight || 1080
+  return bindings.map((binding, index) => {
+    const action = binding?.action || {}
+    const type = String(action.type || 'raw_key')
+    const label = String(binding?.key || `键 ${index + 1}`)
+    const active = keymapPressed.has(binding?.key)
+    if (type === 'swipe' || type === 'hold') {
+      const from = normalizedPoint(action.from)
+      const to = normalizedPoint(action.to)
+      if (!from || !to) return null
+      const start = deviceRectStyle(from.x * vw, from.y * vh)
+      const dx = (to.x - from.x) * vw
+      const dy = (to.y - from.y) * vh
+      const scale = Math.min(
+        (videoWrap.value?.getBoundingClientRect?.().width || 0) / vw || 1,
+        (videoWrap.value?.getBoundingClientRect?.().height || 0) / vh || 1,
+      )
+      return {
+        id: `${label}-${index}`,
+        type: 'swipe',
+        label,
+        active,
+        style: { ...start, '--keymap-w': `${Math.hypot(dx, dy) * scale}px`, '--keymap-angle': `${Math.atan2(dy, dx) * 180 / Math.PI}deg` },
+      }
+    }
+    const at = normalizedPoint(action.at)
+    if (at) {
+      return { id: `${label}-${index}`, type: 'tap', label, active, style: deviceRectStyle(at.x * vw, at.y * vh) }
+    }
+    return { id: `${label}-${index}`, type: 'raw_key', label, active, style: { left: '12px', top: `${52 + index * 24}px`, transform: 'none' } }
+  }).filter(Boolean)
+})
+
+const keymapStatus = computed(() => ({
+  name: activeKeymapModel.value?.name || activeKeymapDisplayName.value,
+  inactive: keyboardMode.value === 'text',
+}))
 
 /** 脚本运行可视化效果位置（tap 圆点居中偏移由 .alt-tap 的 transform 处理） */
 const fxTapStyle = computed(() => (scriptFx.tap.show ? deviceRectStyle(scriptFx.tap.x, scriptFx.tap.y) : {}))
@@ -1185,6 +1407,9 @@ async function connect(manual = false) {
 
 /** 释放 WebRTC 资源；manual=true 表示主动关闭（不触发自动重连） */
 function cleanup(manual = false) {
+  keymap.releaseAll()
+  syncKeymapPressed()
+  keyboard.releaseAll()
   webrtcLifecycle.cleanup(manual)
   consoleRuntime.cleanup()
 }
@@ -2093,10 +2318,44 @@ function shot() {
 }
 
 function rotate() { if (connected.value) sendControl({ type: 'rotate' }) }
-function clipboard() {
-  if (!connected.value) return
-  const text = prompt('输入要发送到设备的剪贴板内容')
-  if (text !== null) sendControl({ type: 'clipboard', text, paste: true })
+
+function splitTextForScrcpy(text, maxBytes = 300) {
+  const encoder = new TextEncoder()
+  const chunks = []
+  let current = ''
+  let currentBytes = 0
+  for (const char of text) {
+    const charBytes = encoder.encode(char).length
+    if (current && currentBytes + charBytes > maxBytes) {
+      chunks.push(current)
+      current = ''
+      currentBytes = 0
+    }
+    current += char
+    currentBytes += charBytes
+  }
+  if (current) chunks.push(current)
+  return chunks
+}
+
+async function clipboard() {
+  if (!connected.value) return toast('请先连接设备', 'error')
+  if (!navigator.clipboard?.readText) {
+    return toast('当前浏览器不允许读取系统剪贴板，请使用 HTTPS 或 localhost', 'warn')
+  }
+  let text
+  try {
+    text = await navigator.clipboard.readText()
+  } catch (e) {
+    return toast('读取系统剪贴板失败，请允许浏览器访问剪贴板', 'error')
+  }
+  if (!text) return toast('系统剪贴板为空', 'warn')
+
+  // scrcpy 文本控制消息单条上限为 300 字节；按 UTF-8 字符切块，避免中文
+  // 或 emoji 被截断。DataChannel 本身有序，多个 text 消息会按原顺序提交。
+  const chunks = splitTextForScrcpy(text)
+  for (const chunk of chunks) sendControl({ type: 'text', text: chunk })
+  toast(`已粘贴 ${text.length} 个字符`, 'success')
 }
 
 function launchGame() {
@@ -3146,6 +3405,91 @@ function onCropMounted({ canvas, section }) {
 function onLogBoxMounted(el) { logBox.value = el }
 function setRenameInputEl(el) { renameInputEl = el }
 
+function keymapFileName(name) {
+  const value = String(name || '').trim().replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_')
+  return value || `keymap_${Date.now()}`
+}
+
+async function onKeymapSave(payload = {}) {
+  if (!payload.pkg || !payload.model || !payload.yaml) return
+  keymapLoading.value = true
+  keymapError.value = ''
+  try {
+    const source = payload.source
+    const rep = source?.id
+      ? await api.updateKeymap(source.id, payload.pkg, {
+        content: payload.yaml,
+        expected_version: payload.expected_version,
+      })
+      : await api.createKeymap({ pkg: payload.pkg, name: keymapFileName(payload.name), content: payload.yaml })
+    await loadKeymaps(payload.pkg)
+    activeKeymapName.value = rep?.id || source?.id || ''
+    activeKeymapDisplayName.value = rep?.name || payload.name || ''
+    await onKeymapChange()
+    toast(source ? '映射方案已保存' : '映射方案已创建', 'success')
+    return true
+  } catch (e) {
+    keymapError.value = `保存映射失败：${e.message}`
+    toast(keymapError.value, 'error')
+    return false
+  } finally {
+    keymapLoading.value = false
+  }
+}
+
+async function onKeymapDelete(payload = {}) {
+  const id = payload.source?.id || payload.id || payload.name
+  if (!id || !payload.pkg) return
+  try {
+    await api.deleteKeymap(id, payload.pkg)
+    if (id === activeKeymapName.value || payload.name === activeKeymapDisplayName.value) resetKeymapSelection()
+    await loadKeymaps(payload.pkg)
+    toast('映射方案已删除', 'success')
+  } catch (e) {
+    toast(`删除映射失败：${e.message}`, 'error')
+  }
+}
+
+async function onKeymapExport() {
+  if (!activePkg.value) return toast('请先选择应用分区', 'warn')
+  try {
+    const { blob, filename } = await api.exportKeymaps(activePkg.value)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename || `${activePkg.value}-keymaps.zip`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 0)
+    toast('映射方案已导出', 'success')
+  } catch (e) {
+    toast(`导出映射失败：${e.message}`, 'error')
+  }
+}
+
+async function onKeymapImport(file) {
+  if (!file || !activePkg.value) return
+  let preview
+  try {
+    preview = await api.importKeymaps(file, false, activePkg.value)
+  } catch (e) {
+    return toast(`导入映射失败：${e.message}`, 'error')
+  }
+  const invalid = Array.isArray(preview?.invalid) ? preview.invalid : []
+  if (invalid.length) {
+    const message = invalid.slice(0, 5).map(item => `${item.path || '文件'}（${item.diagnostics?.[0]?.message || '校验失败'}）`).join('；')
+    return toast(`导入被阻止：${invalid.length} 个文件未通过校验：${message}`, 'error')
+  }
+  const overwrite = Array.isArray(preview?.overwrite) ? preview.overwrite : []
+  if (overwrite.length && !window.confirm(`导入到 ${activePkg.value} 将覆盖 ${overwrite.length} 个映射方案，确认继续？`)) return
+  try {
+    await api.importKeymaps(file, true, activePkg.value)
+    await loadKeymaps(activePkg.value)
+    toast(`映射导入完成：新增 ${preview?.add?.length || 0} 个，覆盖 ${overwrite.length} 个`, 'success')
+  } catch (e) {
+    toast(`导入映射失败：${e.message}`, 'error')
+  }
+}
+
 const deviceSettingsContext = {
   settingsOpen, mode, form, types, vdPresets, fpsPresets, formDirty,
   configApplying, saveSettings, cancelSettings, current, connected, kindInfo, screenSummary,
@@ -3179,6 +3523,44 @@ const scriptRunnerContext = {
   onConflictReload, onConflictOverwrite, onConflictDismiss,
   // call/func 目标实参类型回显（同步缓存命中形态），ScriptRunner 经 ctx 传给画布
   resolveTargetSync,
+}
+const keymapPanelContext = {
+  api,
+  toast,
+  pkg: activePkg,
+  activePkg,
+  keymaps,
+  keymapOptions,
+  selectedName: activeKeymapDisplayName,
+  activeKeymapName,
+  usedName: activeKeymapDisplayName,
+  model: activeKeymapModel,
+  activeKeymapModel,
+  loading: keymapLoading,
+  keymapLoading,
+  error: keymapError,
+  keymapError,
+  refresh: () => loadKeymaps(activePkg.value),
+  onRefresh: () => loadKeymaps(activePkg.value),
+  select: onKeymapChange,
+  onSelect: onKeymapChange,
+  onSave: onKeymapSave,
+  onRequestPoint: () => beginCellPick('coord'),
+  onDelete: onKeymapDelete,
+  onExport: onKeymapExport,
+  onImport: onKeymapImport,
+  onSaved: async (item) => {
+    await loadKeymaps(activePkg.value)
+    const name = item?.name || item?.keymap?.name
+    if (name) {
+      activeKeymapName.value = name
+      await onKeymapChange()
+    }
+  },
+  onDeleted: (name) => {
+    if (!name || name === activeKeymapName.value) resetKeymapSelection()
+    return loadKeymaps(activePkg.value)
+  },
 }
 
 /** 关页保护：有未保存修改时浏览器弹出确认 */
@@ -3255,6 +3637,8 @@ onUnmounted(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('blur', onWindowBlur)
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  keymap.releaseAll()
+  syncKeymapPressed()
   keyboard.releaseAll()
   consoleRuntime.cancelReconnect()
   if (appHintTimer) { clearTimeout(appHintTimer); appHintTimer = null }
@@ -3274,9 +3658,15 @@ onUnmounted(() => {
 }
 
 /* ===== 画面区 ===== */
-.stage { flex: 1; display: flex; flex-direction: column; gap: 10px; min-width: 0; position: relative; }
+.stage {
+  flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+  position: relative; overflow: hidden;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1);
+  outline: none;
+}
+.stage.keyboard-active { outline: 2px solid var(--accent); outline-offset: -2px; }
 .app-hint {
-  position: absolute; top: 8px; left: 50%; transform: translateX(-50%); z-index: 6;
+  position: absolute; top: 54px; left: 50%; transform: translateX(-50%); z-index: 6;
   display: flex; align-items: center; gap: 8px; padding: 5px 10px; white-space: nowrap;
   background: rgba(4, 6, 10, .85); border: 1px solid var(--border); border-radius: 8px;
   font-size: 12px; color: var(--text-1); backdrop-filter: blur(2px);
@@ -3304,22 +3694,20 @@ onUnmounted(() => {
 /* 工具条：设备管理与投屏控制合并为同一横向行，窄窗口时横向滚动 */
 .toolbar {
   display: flex; align-items: center;
-  background: var(--bg-1); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 8px 10px;
+  flex: 0 0 auto; background: var(--bg-1); border-bottom: 1px solid var(--border);
+  padding: 8px 10px;
   box-sizing: border-box;
 }
 .tb-row {
   display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
-  min-height: 29px; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
+  min-height: 29px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
 }
+.tb-row::-webkit-scrollbar { display: none; width: 0; height: 0; }
 .tb-row > .btn, .tb-row > .select, .tb-more-wrap, .tb-sep { flex-shrink: 0; }
 .tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
-.keyboard-status {
-  flex-shrink: 0; color: var(--text-2); font-size: 11px; white-space: nowrap;
-  padding: 0 4px;
-}
-.keyboard-status.active { color: var(--accent); }
 .tb-more-wrap { position: relative; display: inline-flex; }
+.keymap-select { flex: 0 1 150px; min-width: 104px; max-width: 180px; padding: 4px 6px; font-size: 12px; }
+.keyboard-mode-btn.active { color: var(--accent-2); }
 .tb-more-mask { position: fixed; inset: 0; z-index: 20; }
 .tb-more-dropdown {
   display: flex; flex-direction: column; min-width: 168px; padding: 4px; gap: 2px;
@@ -3394,7 +3782,6 @@ onUnmounted(() => {
 .func-pkg-row { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .func-pkg-row .func-pkg { flex: 1; min-width: 0; font-size: 12px; }
 .func-pkg-row .btn { flex: none; }
-.func-app-hint { flex: none; font-size: 11px; color: var(--text-2); line-height: 1.4; }
 .func-tabs { display: flex; flex-shrink: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-2); }
 .func-tabs button {
   flex: 1; padding: 7px 0; font-size: 12px; text-align: center; cursor: pointer;

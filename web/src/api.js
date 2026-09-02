@@ -63,6 +63,11 @@ function requireRunResponse(rep) {
   return rep
 }
 
+function keymapId(value, pkg) {
+  const id = requireId(value, 'keymap')
+  return id.includes('/') ? id : `${requireId(pkg, 'pkg')}/${id}`
+}
+
 function requireDeviceRunResponse(rep) {
   if (rep && rep.active === false) return rep
   if (rep && rep.active === true && rep.run && typeof rep.run === 'object' && rep.run.run_id) return rep
@@ -144,6 +149,40 @@ export const api = {
   control: (id, cmd) => req('POST', `/api/devices/${id}/control`, cmd),
   listApps: (id) => req('GET', `/api/devices/${id}/apps`),
   listAppsByAddr: (addr) => req('GET', `/api/apps?addr=${encodeURIComponent(addr)}`),
+
+  // 按键映射（data/<pkg>/keymap；资源 id 为当前分区内的方案名）
+  listKeymaps: (pkg) => req('GET', `/api/keymaps?pkg=${encodeURIComponent(requireId(pkg, 'pkg'))}`),
+  getKeymap: (name, pkg) => req(
+    'GET',
+    `/api/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
+  ),
+  createKeymap: ({ pkg, name, content } = {}) => req('POST', '/api/keymaps', { pkg, name, content }),
+  updateKeymap: async (name, pkg, payload = {}) => req(
+    'PUT',
+    `/api/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
+    updateBody(payload, keymapId(name, pkg)),
+  ),
+  deleteKeymap: (name, pkg) => req(
+    'DELETE',
+    `/api/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
+  ),
+  exportKeymaps: async (pkg) => {
+    const r = await response('GET', `/api/keymaps/export?pkg=${encodeURIComponent(requireId(pkg, 'pkg'))}`)
+    const cd = r.headers.get('content-disposition') || ''
+    let filename = ''
+    const m = cd.match(/filename\*=UTF-8''([^;\s]+)/) || cd.match(/filename="?([^";\s]+)"?/)
+    if (m) { try { filename = decodeURIComponent(m[1]) } catch (e) { filename = m[1] } }
+    return { blob: await r.blob(), filename }
+  },
+  importKeymaps: async (file, confirm, pkg) => {
+    const r = await response(
+      'POST',
+      `/api/keymaps/import?confirm=${confirm ? 1 : 0}&pkg=${encodeURIComponent(requireId(pkg, 'pkg'))}`,
+      file,
+      { rawBody: true, headers: { 'Content-Type': 'application/zip' } },
+    )
+    return readResult(r)
+  },
 
   // 模板（按应用分区 data/<pkg>/tmpl；pkg 缺省=跨分区全列）
   listTemplates: (pkg) => req('GET', `/api/templates${pkg ? `?pkg=${encodeURIComponent(pkg)}` : ''}`),

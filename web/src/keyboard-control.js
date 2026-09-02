@@ -330,19 +330,44 @@ function eventPreventDefault(event) {
   if (typeof event?.preventDefault === 'function') event.preventDefault()
 }
 
+function isTextModeValue(value) {
+  if (typeof value === 'function') return value() === 'text'
+  if (value && typeof value === 'object' && 'value' in value) return value.value === 'text'
+  return value === 'text'
+}
+
+/**
+ * Return true for a character that should be committed as text instead of
+ * being interpreted by Android as a physical key. Modifier combinations stay
+ * as key events so shortcuts such as Ctrl+A and Shift+Arrow keep working.
+ */
+function isPrintableTextEvent(event) {
+  const key = event?.key
+  return typeof key === 'string'
+    && key.length === 1
+    && !event?.ctrlKey
+    && !event?.altKey
+    && !event?.metaKey
+    && !event?.isComposing
+}
+
 /**
  * Create a stateful keyboard event adapter.
  *
  * send receives plain objects ready for the WebRTC control DataChannel:
  * { type: 'key', action: 0|1, keycode, repeat: 0|1, meta }
+ * In text mode, printable characters are passed to onText as:
+ * { type: 'text', text }
  */
 export function createKeyboardController({
   onKey = null,
+  onText = null,
   // send is retained as a small backwards-compatible adapter for callers
   // written before the parent-facing onKey contract was finalized.
   send = null,
   enabled = true,
   isEnabled = null,
+  mode = 'game',
   shouldIgnoreTarget: ignoreTarget = shouldIgnoreKeyboardTarget,
 } = {}) {
   const pressedCodes = new Set()
@@ -350,6 +375,7 @@ export function createKeyboardController({
   const emitKey = typeof onKey === 'function'
     ? onKey
     : (typeof send === 'function' ? send : () => {})
+  const emitText = typeof onText === 'function' ? onText : emitKey
 
   const result = handled => ({ handled })
 
@@ -374,6 +400,12 @@ export function createKeyboardController({
     const code = eventCode(event)
     const keycode = mapKeyboardCode(code)
     if (keycode == null || !canHandle(event)) return result(false)
+
+    if (isTextModeValue(mode) && isPrintableTextEvent(event)) {
+      emitText({ type: 'text', text: event.key })
+      eventPreventDefault(event)
+      return result(true)
+    }
 
     // A non-repeat keydown for a held physical key is a browser/DOM duplicate.
     // Genuine browser auto-repeat remains observable through repeat: 1.

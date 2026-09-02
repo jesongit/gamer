@@ -20,6 +20,7 @@ mod deps_probe;
 mod device;
 mod engine;
 mod file_migration;
+mod keymaps;
 mod logging;
 mod maintenance;
 mod matcher;

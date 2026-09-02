@@ -116,6 +116,40 @@ describe('keyboard-control target filtering', () => {
 })
 
 describe('keyboard-control state controller', () => {
+  it('sends printable keys as text in text mode while preserving control keys', () => {
+    const onKey = vi.fn()
+    const onText = vi.fn()
+    const controller = createKeyboardController({ onKey, onText, mode: 'text' })
+    const letter = keyEvent('KeyA', { key: 'a' })
+    const space = keyEvent('Space', { key: ' ' })
+    const backspace = keyEvent('Backspace', { key: 'Backspace' })
+
+    expect(controller.handleKeyDown(letter)).toEqual({ handled: true })
+    expect(controller.handleKeyDown(space)).toEqual({ handled: true })
+    expect(controller.handleKeyDown(backspace)).toEqual({ handled: true })
+    expect(controller.handleKeyUp(letter)).toEqual({ handled: false })
+    expect(onText.mock.calls.map(([message]) => message)).toEqual([
+      { type: 'text', text: 'a' },
+      { type: 'text', text: ' ' },
+    ])
+    expect(onKey.mock.calls.map(([message]) => message.keycode)).toEqual([67])
+    expect(letter.preventDefault).toHaveBeenCalledTimes(1)
+    expect(space.preventDefault).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps modifier combinations as key events in text mode', () => {
+    const onKey = vi.fn()
+    const onText = vi.fn()
+    const controller = createKeyboardController({ onKey, onText, mode: 'text' })
+    controller.handleKeyDown(keyEvent('ControlLeft', { key: 'Control' }))
+    controller.handleKeyDown(keyEvent('KeyA', { key: 'a', ctrlKey: true }))
+    controller.handleKeyUp(keyEvent('KeyA', { key: 'a', ctrlKey: true }))
+    controller.handleKeyUp(keyEvent('ControlLeft', { key: 'Control' }))
+
+    expect(onText).not.toHaveBeenCalled()
+    expect(onKey.mock.calls.map(([message]) => message.keycode)).toEqual([113, 29, 29, 113])
+  })
+
   it('sends keydown and keyup, deduplicates non-repeat keydown, and forwards repeat', () => {
     const onKey = vi.fn()
     const controller = createKeyboardController({ onKey })

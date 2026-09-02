@@ -457,6 +457,9 @@ mod sec_tests {
     mod resources_tests {
         include!("tests/resources.rs");
     }
+    mod keymaps_tests {
+        include!("tests/keymaps.rs");
+    }
     mod runs_tests {
         include!("tests/runs.rs");
     }

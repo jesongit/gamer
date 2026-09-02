@@ -19,6 +19,7 @@ mod devices;
 mod error;
 mod functions;
 pub(crate) mod gate;
+mod keymaps;
 mod logs;
 mod runs;
 mod scripts;
@@ -43,6 +44,7 @@ use tower_http::services::ServeDir;
 
 use crate::config::Config;
 use crate::device::DeviceManager;
+use crate::keymaps::KeymapStore;
 use crate::scheduler::Scheduler;
 use crate::scripts::ScriptStore;
 use crate::store::Db;
@@ -61,6 +63,8 @@ pub struct AppState {
     pub cfg: Config,
     /// 脚本文件存储（data/<pkg>/yaml/ 与 tmpl/）
     pub scripts: Arc<ScriptStore>,
+    /// 按键映射文件存储（data/<pkg>/keymap/）
+    pub keymaps: Arc<KeymapStore>,
     /// 每设备的活跃 viewer 注册表。
     pub viewers: crate::webrtc::ViewerMap,
     /// 统一停机协调器（OPS-001）：/api/shutdown 经它触发 drain，
@@ -97,6 +101,7 @@ pub fn build_router(
         runs,
         cfg: cfg.clone(),
         scripts,
+        keymaps: Arc::new(KeymapStore::new(cfg.data_dir.clone())),
         viewers,
         shutdown,
         auth,
@@ -171,12 +176,19 @@ pub fn build_router(
                 .put(scripts::api_update_script)
                 .delete(scripts::api_delete_script),
         )
+        .route(
+            "/api/keymaps/:id",
+            get(keymaps::api_get_keymap)
+                .put(keymaps::api_update_keymap)
+                .delete(keymaps::api_delete_keymap),
+        )
         .route("/api/scripts/:id/run", post(runs::api_run_script))
         .route("/api/functions/:id/run", post(runs::api_run_function))
         .route("/api/devices/:id/run", get(runs::api_device_run))
         .route("/api/runs/:run_id", get(runs::api_get_run))
         .route("/api/runs/:run_id/cancel", post(runs::api_cancel_run))
         .route("/api/scripts/export", get(scripts::api_export_partition))
+        .route("/api/keymaps/export", get(keymaps::api_export_keymaps))
         .route(
             "/api/tasks",
             get(tasks::api_list_tasks).post(tasks::api_save_task),
@@ -243,6 +255,10 @@ pub fn build_router(
             get(functions::api_list_functions).post(functions::api_create_function),
         )
         .route(
+            "/api/keymaps",
+            get(keymaps::api_list_keymaps).post(keymaps::api_create_keymap),
+        )
+        .route(
             "/api/functions/:id",
             get(functions::api_get_function)
                 .put(functions::api_update_function)
@@ -258,6 +274,7 @@ pub fn build_router(
     // ---- 受保护组（ZIP 导入 ≤20MiB，高风险接口）：解压侧硬限另见 scripts.rs import
     let protected_import: Router<()> = Router::new()
         .route("/api/scripts/import", post(scripts::api_import_script))
+        .route("/api/keymaps/import", post(keymaps::api_import_keymaps))
         .with_state(state.clone())
         .route_layer(axmw::from_fn_with_state(
             state.auth.clone(),

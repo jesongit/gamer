@@ -1,0 +1,27 @@
+version: 1
+name: 默认方案
+bindings:
+- key: KeyW
+  action:
+    type: tap
+    at:
+    - 0.1917
+    - 0.65
+- key: KeyA
+  action:
+    type: tap
+    at:
+    - 0.1177
+    - 0.7722
+- key: KeyD
+  action:
+    type: tap
+    at:
+    - 0.263
+    - 0.7796
+- key: KeyS
+  action:
+    type: tap
+    at:
+    - 0.1844
+    - 0.887

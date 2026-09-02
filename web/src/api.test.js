@@ -108,4 +108,21 @@ describe('唯一资源 API surface', () => {
     expect(fetch.mock.calls[2][1].method).toBe('PUT')
     expect(bodyOf(2)).toEqual({ data_b64: 'REVG' })
   })
+
+  it('按键映射详情/更新使用整体编码资源 id，并保留版本门禁', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/combat.yaml' }))
+    await api.getKeymap('com.demo/combat.yaml', 'com.demo')
+    expect(fetch.mock.calls[0][0]).toBe('/api/keymaps/com.demo%2Fcombat.yaml')
+
+    fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/combat.yaml' }))
+    await api.updateKeymap('combat.yaml', 'com.demo', {
+      content: 'version: 1\nname: combat\nbindings: []\n',
+      expected_version: 'abc123',
+    })
+    expect(fetch.mock.calls[1][0]).toBe('/api/keymaps/com.demo%2Fcombat.yaml')
+    expect(bodyOf(1)).toEqual({
+      content: 'version: 1\nname: combat\nbindings: []\n',
+      expected_version: 'abc123',
+    })
+  })
 })

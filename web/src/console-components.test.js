@@ -12,9 +12,11 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).toContain("import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'")
     expect(consoleSource).toContain("import TemplateCapture from '../components/console/TemplateCapture.vue'")
     expect(consoleSource).toContain("import ScriptRunner from '../components/console/ScriptRunner.vue'")
+    expect(consoleSource).toContain("import KeymapPanel from '../components/console/KeymapPanel.vue'")
     expect(template).toContain('<DeviceSettingsModal ')
     expect(template).toContain('<TemplateCapture ')
     expect(template).toContain('<ScriptRunner ')
+    expect(template).toContain('<KeymapPanel ')
     expect(template).not.toContain('<DevicePanel ')
     expect(template).not.toContain('panel-tabs')
     expect(template).not.toContain('class="dev-pick"')
@@ -39,7 +41,7 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar).toContain("key('APP_SWITCH')")
     expect((toolbar.match(/class="tb-row/g) || [])).toHaveLength(1)
 
-    // 删除与截图之间有分割线；启动应用与剪贴板之间不再有分割线。
+    // 删除与截图之间有分割线；启动应用与粘贴之间不再有分割线。
     const sep = toolbar.indexOf('class="tb-sep"')
     expect(sep).toBeGreaterThan(toolbar.indexOf('removeDevice'))
     expect(sep).toBeLessThan(toolbar.indexOf('>📷 截图</button>'))
@@ -125,7 +127,7 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).not.toContain('DEFAULT_OP_TPL')
   })
 
-  it('阶段 4：Console 右侧功能区为模板/脚本/日志/任务/设置五页签', () => {
+  it('阶段 4：Console 右侧功能区为模板/脚本/映射/日志/任务/设置六页签', () => {
     expect(consoleSource).toContain("import LogsPanel from '../components/LogsPanel.vue'")
     expect(consoleSource).toContain("import TaskBoard from '../components/TaskBoard.vue'")
     expect(consoleSource).toContain("import SystemPanel from '../components/SystemPanel.vue'")
@@ -141,6 +143,19 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).toContain('startPanelResize')
     expect(consoleSource).toContain(':style="{ width: `${panelWidth}px` }"')
     expect(consoleSource).not.toContain('isResPanelTab')
+  })
+
+  it('按键映射页签与工具条选择器接入当前应用分区', () => {
+    const keymap = read('./components/console/KeymapPanel.vue')
+    expect(template).toContain("panelTab === 'keymap'")
+    expect(template).toContain('v-model="activeKeymapName"')
+    expect(template).toContain('无映射')
+    expect(consoleSource).toContain('api.listKeymaps(pkg)')
+    expect(consoleSource).toContain('api.getKeymap(activeKeymapName.value, activePkg.value)')
+    expect(consoleSource).toContain("onRequestPoint: () => beginCellPick('coord')")
+    expect(keymap).toContain('expected_version')
+    expect(consoleSource).not.toContain('func-app-hint')
+    expect(consoleSource).not.toContain('已加入包名下拉')
   })
 
   it('旧侧边栏承载的独立页面与入口已删除', () => {
