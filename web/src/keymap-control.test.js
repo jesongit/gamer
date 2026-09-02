@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   KEYMAP_ACTION_TYPES,
+  buildTouchPhase,
   createKeymapController,
   indexKeymap,
   normalizeKeymap,
@@ -37,6 +38,16 @@ const KEYMAP = {
 }
 
 describe('keymap-control schema', () => {
+  it('builds the shared touch phase message used by mouse and keyboard input', () => {
+    expect(buildTouchPhase('down', 3, 120, 240)).toEqual({
+      type: 'touch',
+      action: 'down',
+      pointer_id: 3,
+      x: 120,
+      y: 240,
+    })
+  })
+
   it('accepts the planned action types and indexes bindings by code', () => {
     expect(KEYMAP_ACTION_TYPES).toEqual(['tap', 'swipe', 'raw_key', 'hold'])
     expect(validateKeymap(KEYMAP).valid).toBe(true)
@@ -69,6 +80,27 @@ describe('keymap-control schema', () => {
       'keymap.coordinate',
       'keymap.duplicate_key',
       'keymap.duration',
+    ]))
+  })
+
+  it('keeps hold schema to a persisted single point without runtime pointer fields', () => {
+    const result = validateKeymap({
+      version: 1,
+      name: 'hold',
+      bindings: [{
+        key: 'KeyW',
+        action: {
+          type: 'hold',
+          at: [0.5, 0.5],
+          from: [0.1, 0.1],
+          to: [0.9, 0.9],
+          pointer_id: 1,
+        },
+      }],
+    })
+    expect(result.valid).toBe(false)
+    expect(result.issues.map(item => item.code)).toEqual(expect.arrayContaining([
+      'keymap.unknown_field',
     ]))
   })
 })
@@ -136,6 +168,25 @@ describe('keymap-control routing', () => {
     ])
   })
 
+  it('reuses the physical keyboard meta state for mapped raw keys', () => {
+    const sendControl = vi.fn()
+    const keyboard = { getMetaState: vi.fn(() => 0x1000) }
+    const controller = createKeymapController({
+      getKeymap: () => KEYMAP,
+      sendControl,
+      getKeyMetaState: keyboard.getMetaState,
+    })
+
+    controller.handleKeydown(keyEvent('KeyR', { shiftKey: true }))
+    controller.handleKeyup(keyEvent('KeyR', { shiftKey: true }))
+
+    expect(keyboard.getMetaState).toHaveBeenCalled()
+    expect(sendControl.mock.calls.map(([message]) => message)).toEqual([
+      { type: 'key', action: 0, keycode: 29, repeat: 0, meta: 0x1001 },
+      { type: 'key', action: 1, keycode: 29, repeat: 0, meta: 0x1001 },
+    ])
+  })
+
   it('holds touch state until keyup and releases it on keymap/mode switch', () => {
     const sendControl = vi.fn()
     const mode = { value: 'game' }
@@ -151,6 +202,7 @@ describe('keymap-control routing', () => {
     expect(sendControl).toHaveBeenLastCalledWith({
       type: 'touch',
       action: 'up',
+      pointer_id: 1,
       x: 0.4,
       y: 0.6,
     })
@@ -197,8 +249,140 @@ describe('keymap-control routing', () => {
     expect(controller.releaseAll().handled).toBe(true)
     expect(sendControl.mock.calls.slice(-2).map(([message]) => message)).toEqual([
       { type: 'key', action: 1, keycode: 29, repeat: 0, meta: 0 },
-      { type: 'touch', action: 'up', x: 0.4, y: 0.6 },
+      { type: 'touch', action: 'up', pointer_id: 1, x: 0.4, y: 0.6 },
     ])
     expect(fallback.releaseAll).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends one hold down, ignores repeat, and releases the saved point and pointer ID', () => {
+    const sendControl = vi.fn()
+    let size = { width: 1000, height: 500 }
+    const controller = createKeymapController({
+      getKeymap: () => KEYMAP,
+      sendControl,
+      getVideoSize: () => size,
+    })
+
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.handleKeydown(keyEvent('KeyW', { repeat: true }))
+    size = { width: 2000, height: 1000 }
+    controller.handleKeyup(keyEvent('KeyW'))
+
+    expect(sendControl.mock.calls.map(([message]) => message)).toEqual([
+      { type: 'touch', action: 'down', pointer_id: 1, x: 400, y: 300 },
+      { type: 'touch', action: 'up', pointer_id: 1, x: 400, y: 300 },
+    ])
+    expect(controller.isPressed('KeyW')).toBe(false)
+  })
+
+  it('produces a quick hold click as down then up with no timer or extra phases', () => {
+    const sendControl = vi.fn()
+    const controller = createKeymapController({
+      getKeymap: () => KEYMAP,
+      sendControl,
+    })
+
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.handleKeyup(keyEvent('KeyW'))
+
+    expect(sendControl.mock.calls.map(([message]) => message)).toEqual([
+      { type: 'touch', action: 'down', pointer_id: 1, x: 0.4, y: 0.6 },
+      { type: 'touch', action: 'up', pointer_id: 1, x: 0.4, y: 0.6 },
+    ])
+  })
+
+  it('assigns distinct 1..31 pointer IDs to simultaneous holds and releases independently', () => {
+    const sendControl = vi.fn()
+    const keymap = {
+      ...KEYMAP,
+      bindings: [
+        ...KEYMAP.bindings,
+        { key: 'KeyA', action: { type: 'hold', at: [0.1, 0.2] } },
+      ],
+    }
+    const controller = createKeymapController({
+      getKeymap: () => keymap,
+      sendControl,
+    })
+
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.handleKeydown(keyEvent('KeyA'))
+    controller.handleKeyup(keyEvent('KeyW'))
+    controller.handleKeyup(keyEvent('KeyA'))
+
+    expect(sendControl.mock.calls.map(([message]) => message)).toEqual([
+      { type: 'touch', action: 'down', pointer_id: 1, x: 0.4, y: 0.6 },
+      { type: 'touch', action: 'down', pointer_id: 2, x: 0.1, y: 0.2 },
+      { type: 'touch', action: 'up', pointer_id: 1, x: 0.4, y: 0.6 },
+      { type: 'touch', action: 'up', pointer_id: 2, x: 0.1, y: 0.2 },
+    ])
+  })
+
+  it('releases every active hold on scheme switch, mode switch, blur, hidden, and destroy', () => {
+    const sendControl = vi.fn()
+    const mode = { value: 'game' }
+    const controller = createKeymapController({
+      getKeymap: () => KEYMAP,
+      sendControl,
+      mode,
+    })
+
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.setKeymap(KEYMAP)
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.setMode('text')
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.setMode('game')
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.handleWindowBlur()
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.handleVisibilityChange(true)
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.destroy()
+
+    const phases = sendControl.mock.calls.map(([message]) => message)
+    expect(phases.filter(message => message.type === 'touch' && message.action === 'down')).toHaveLength(5)
+    expect(phases.filter(message => message.type === 'touch' && message.action === 'up')).toHaveLength(5)
+    expect(controller.isPressed('KeyW')).toBe(false)
+    expect(mode.value).toBe('game')
+  })
+
+  it('does not fallback stateful hold/raw_key actions when DataChannel sending fails', () => {
+    const sendControl = vi.fn(() => false)
+    const fallback = {
+      handleKeydown: vi.fn(),
+      handleKeyup: vi.fn(),
+    }
+    const controller = createKeymapController({
+      getKeymap: () => KEYMAP,
+      sendControl,
+      fallback,
+    })
+
+    const holdResult = controller.handleKeydown(keyEvent('KeyW'))
+    const rawResult = controller.handleKeydown(keyEvent('KeyR'))
+    controller.handleKeyup(keyEvent('KeyW'))
+    controller.handleKeyup(keyEvent('KeyR'))
+
+    expect(holdResult).toMatchObject({ handled: true, mapped: true, sent: false })
+    expect(rawResult).toMatchObject({ handled: true, mapped: true, sent: false })
+    expect(fallback.handleKeydown).not.toHaveBeenCalled()
+    expect(fallback.handleKeyup).not.toHaveBeenCalled()
+    expect(controller.getPressedCodes()).toEqual([])
+  })
+
+  it('keeps one-shot tap fallback behavior when the general sender reports not sent', () => {
+    const sendControl = vi.fn(() => false)
+    const fallback = { handleKeydown: vi.fn(() => ({ handled: true })) }
+    const controller = createKeymapController({
+      getKeymap: () => KEYMAP,
+      sendControl,
+      fallback,
+    })
+
+    const result = controller.handleKeydown(keyEvent('Space'))
+
+    expect(result).toEqual({ handled: true })
+    expect(fallback.handleKeydown).toHaveBeenCalledTimes(1)
   })
 })

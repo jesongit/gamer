@@ -75,13 +75,15 @@
 
 这样可以支持游戏中的长按、连续移动和组合键，同时避免设备出现按键卡住。
 
+键盘映射中的屏幕虚拟按键使用独立的 `hold` 动作，不发送 Android `key`：`keydown` 只发送一次 `touch down`，`keyup` 发送相同 `pointer_id` 的 `touch up`。快速按一下自然表现为 `down → up` 点击；按住期间不使用定时器，也不重复发送 `down`。同一页面的鼠标触控固定使用 `pointer_id=0`，键盘 hold 使用 `1..31`，因此 W+A 等组合可以同时保持且独立释放。`raw_key` 才用于把映射动作发送为真实 Android key 的 `action=0/1`。
+
 ### 3.4 浏览器默认行为和快捷键
 
 只对处于投屏键盘焦点、且成功映射的按键调用 `preventDefault()`，防止空格滚动页面或方向键移动页面。浏览器和操作系统保留的快捷键（例如关闭标签页、地址栏、刷新、开发者工具等）不能保证被网页拦截，应在文档和界面提示中说明。
 
 ## 4. DataChannel 与 REST fallback
 
-键盘按下/释放必须优先通过 WebRTC DataChannel 发送。当前 REST `/api/devices/:id/control` 只支持 `press`，不支持带按下/释放状态的 `key`。
+键盘按下/释放和屏幕触控 `down/move/up` 必须通过 WebRTC DataChannel 发送。当前 REST `/api/devices/:id/control` 只支持一次性动作（包括 `tap`、`swipe`、`press` 等），不支持有状态 `key` 或 `touch`，因此不能把 hold 降级为 REST `press`。
 
 推荐分两步处理：
 

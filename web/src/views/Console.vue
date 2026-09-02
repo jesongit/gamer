@@ -228,7 +228,7 @@ import { useRawYamlEditor } from '../composables/useRawYamlEditor'
 import { useFunctionLibrary } from '../composables/useFunctionLibrary'
 import { useRunArgsFlow } from '../composables/useRunArgsFlow'
 import { createKeyboardController, shouldIgnoreKeyboardTarget } from '../keyboard-control'
-import { createKeymapController } from '../keymap-control'
+import { buildTouchPhase, createKeymapController } from '../keymap-control'
 import { parseScript, parseFunctionLibrary, serialize } from '../script-editor/codec'
 import { SE_TARGET_OPTIONS } from '../script-editor/targets'
 import { startIndexOf } from '../script-editor/selection'
@@ -371,6 +371,7 @@ const keymap = createKeymapController({
     width: videoElement.value?.videoWidth || 1920,
     height: videoElement.value?.videoHeight || 1080,
   }),
+  getKeyMetaState: () => keyboard.getMetaState(),
   mode: keyboardMode,
 })
 
@@ -1635,6 +1636,9 @@ function startLogPolling() {
 // ---------- 控制（走 DataChannel） ----------
 
 let keyboardChannelWarned = false
+const REST_FALLBACK_CONTROL_TYPES = new Set([
+  'tap', 'swipe', 'text', 'press', 'home', 'back', 'recents', 'start_app', 'rotate', 'clipboard',
+])
 
 /** 键盘是有状态的 DOWN/UP 流，只允许走 DataChannel；不能复用 sendControl 的
  * REST fallback，否则通道断开时一次 keydown 会被错误降级为不兼容的 press。 */
@@ -1663,10 +1667,34 @@ function sendControl(obj) {
     channel.send(JSON.stringify(obj))
     return true
   }
+  // 有状态消息必须保持在 DataChannel 内：REST 只有一次性动作语义，
+  // 不能把 touch down/up 或 key down/up 降级成 press，否则会留下半截状态
+  // 或把虚拟触控误发成 Android 物理按键。
+  const stateful = obj?.type === 'touch'
+    || (obj?.type === 'key' && (obj?.action === 0 || obj?.action === 1))
+  if (stateful) {
+    console.warn('[control] channel not open, stateful control dropped', JSON.stringify(obj))
+    if (!keyboardChannelWarned) {
+      keyboardChannelWarned = true
+      toast('控制通道未连接', 'warn')
+    }
+    return false
+  }
+  if (!REST_FALLBACK_CONTROL_TYPES.has(obj?.type)) {
+    console.warn('[control] channel not open, unsupported control dropped', JSON.stringify(obj))
+    return false
+  }
   console.warn('[control] channel not open, fallback REST', JSON.stringify(obj))
   // fallback：REST API
   api.control(store.deviceId, obj).catch(e => toast('控制失败：' + e.message, 'error'))
-  return false
+  // REST 请求已经接管了一次性动作；返回 true 避免映射层误把同一按键
+  // 再交给原始 Android key 控制器。
+  return true
+}
+
+/** 统一构造触控阶段消息。pointer_id=0 保留给投屏鼠标。 */
+function sendTouchPhase(action, pointerId, x, y) {
+  return sendControl(buildTouchPhase(action, pointerId, x, y))
 }
 
 /** 全局 Escape 关闭页面 UI 优先；只有没有待关闭 UI 时才把 Escape 转发给设备。 */
@@ -1752,7 +1780,7 @@ function flushPendingMove() {
   }
 }
 function scheduleMove(x, y) {
-  pendingMove = { type: 'touch', action: 'move', x, y }
+  pendingMove = { type: 'touch', action: 'move', pointer_id: 0, x, y }
   if (!moveRaf) moveRaf = requestAnimationFrame(flushPendingMove)
 }
 function cancelPendingMove() {
@@ -1780,7 +1808,7 @@ function onMouseDown(e) {
   touchState.active = true
   touchState.lastX = x; touchState.lastY = y
   // 按下：发 DOWN（拖动时后续 move 事件组成轨迹，up 时收尾）
-  sendControl({ type: 'touch', action: 'down', x, y })
+  sendTouchPhase('down', 0, x, y)
 }
 
 function onMouseMove(e) {
@@ -1832,7 +1860,7 @@ function onMouseUp(e) {
   cancelPendingMove()
   touchState.active = false
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
-  sendControl({ type: 'touch', action: 'up', x, y })
+  sendTouchPhase('up', 0, x, y)
 }
 
 /** 鼠标离开投屏区域时隐藏取点/框选辅助层。 */

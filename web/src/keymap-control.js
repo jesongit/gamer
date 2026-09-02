@@ -15,18 +15,29 @@
  * tap/swipe/touch messages.
  */
 
-import { mapKeyboardCode } from './keyboard-control'
+import { ANDROID_META, mapKeyboardCode } from './keyboard-control'
 
 export const KEYMAP_VERSION = 1
 export const KEYMAP_ACTION_TYPES = Object.freeze(['tap', 'swipe', 'raw_key', 'hold'])
+
+/** Build the shared DataChannel touch-phase wire shape for mouse and keymap input. */
+export function buildTouchPhase(action, pointerId, x, y) {
+  return {
+    type: 'touch',
+    action,
+    pointer_id: pointerId,
+    x,
+    y,
+  }
+}
 
 const ROOT_KEYS = new Set(['version', 'name', 'bindings'])
 const ACTION_KEYS = {
   tap: new Set(['type', 'at']),
   swipe: new Set(['type', 'from', 'to', 'duration_ms']),
   raw_key: new Set(['type', 'code', 'keycode']),
-  // pointer_id is reserved for a future multi-pointer wire protocol.
-  hold: new Set(['type', 'at', 'from', 'to', 'pointer_id']),
+  // pointer_id is a runtime transport field, never persisted in keymap YAML.
+  hold: new Set(['type', 'at']),
 }
 
 function isRecord(value) {
@@ -87,15 +98,6 @@ function validateAction(action, path, errors) {
   unknownKeys(action, ACTION_KEYS[type], path, errors)
   if (type === 'tap' || type === 'hold') {
     validatePoint(action.at, path + '.at', errors)
-  }
-  if (type === 'hold' && action.pointer_id !== undefined
-    && (!Number.isInteger(action.pointer_id)
-      || action.pointer_id < 0 || action.pointer_id > 31)) {
-    errors.push(makeIssue(
-      path + '.pointer_id',
-      'pointer_id 必须是 0~31 的整数',
-      'keymap.pointer_id',
-    ))
   }
   if (type === 'swipe') {
     validatePoint(action.from, path + '.from', errors)
@@ -280,6 +282,20 @@ function fallbackResult(value) {
   return { handled: value !== false }
 }
 
+/**
+ * DataChannel senders historically returned nothing, while the Console
+ * sender returns true/false to report whether the channel actually sent.
+ * Keep the old callback contract working, but make an explicit false (or a
+ * result object carrying sent=false) observable by stateful actions.
+ */
+function controlWasSent(value) {
+  if (value && typeof value === 'object') {
+    if ('sent' in value) return value.sent === true
+    if ('dataChannelSent' in value) return value.dataChannelSent === true
+  }
+  return value !== false
+}
+
 function modeIsText(value) {
   return readValue(value, 'game') === 'text'
 }
@@ -304,6 +320,8 @@ export function createKeymapController({
   isEnabled = null,
   sendControl = null,
   send = null,
+  sendStateControl = null,
+  getKeyMetaState = null,
   getVideoSize = null,
   deviceSize = null,
   coordinateMapper = null,
@@ -321,6 +339,13 @@ export function createKeymapController({
   const emitControl = typeof sendControl === 'function'
     ? sendControl
     : (typeof send === 'function' ? send : () => {})
+  // A caller may provide a DataChannel-only sender separately from the
+  // general sender (which is allowed to REST-fallback for one-shot actions).
+  // The legacy `send` alias is also a useful DataChannel-only sender when it
+  // differs from sendControl.
+  const emitStateControl = typeof sendStateControl === 'function'
+    ? sendStateControl
+    : (typeof send === 'function' && send !== emitControl ? send : emitControl)
 
   function getCurrentKeymap() {
     if (typeof getKeymap === 'function') return getKeymap()
@@ -375,22 +400,20 @@ export function createKeymapController({
     if (action.type === 'tap') {
       const point = pointFor(action.at, action, event)
       if (!point) return false
-      emitControl({ type: 'tap', x: point.x, y: point.y })
-      return true
+      return controlWasSent(emitControl({ type: 'tap', x: point.x, y: point.y }))
     }
     if (action.type === 'swipe') {
       const from = pointFor(action.from, action, event)
       const to = pointFor(action.to, action, event)
       if (!from || !to) return false
-      emitControl({
+      return controlWasSent(emitControl({
         type: 'swipe',
         x1: from.x,
         y1: from.y,
         x2: to.x,
         y2: to.y,
         duration: action.duration_ms,
-      })
-      return true
+      }))
     }
     return false
   }
@@ -398,28 +421,60 @@ export function createKeymapController({
   function sendRawKey(action, event, keyAction) {
     const keycode = rawKeycode(action)
     if (keycode == null) return false
-    emitControl({
+    return controlWasSent(emitStateControl({
       type: 'key',
       action: keyAction,
       keycode,
       repeat: keyAction === 0 && event && event.repeat ? 1 : 0,
-      meta: 0,
-    })
-    return true
+      meta: keyMetaForEvent(event),
+    }))
   }
 
-  function sendHold(action, event, keyAction) {
-    const point = pointFor(action.at, action, event)
+  function sendTouchPhase(point, phase, pointerId) {
     if (!point) return false
-    const message = {
-      type: 'touch',
-      action: keyAction === 0 ? 'down' : 'up',
-      x: point.x,
-      y: point.y,
+    const message = buildTouchPhase(phase, pointerId, point.x, point.y)
+    return controlWasSent(emitStateControl(message))
+  }
+
+  function allocatePointerId() {
+    for (let pointerId = 1; pointerId <= 31; pointerId += 1) {
+      if (!Array.from(held.values()).some(item => item.pointerId === pointerId)) {
+        return pointerId
+      }
     }
-    if (Number.isInteger(action.pointer_id)) message.pointer_id = action.pointer_id
-    emitControl(message)
-    return true
+    return null
+  }
+
+  function keyMetaForEvent(event) {
+    const provider = typeof getKeyMetaState === 'function'
+      ? getKeyMetaState
+      : fallbackController?.getMetaState
+    let meta = 0
+    if (typeof provider === 'function') {
+      const value = Number(provider())
+      if (Number.isInteger(value) && value >= 0) meta = value
+    }
+    // DOM flags cover a modifier keydown that the fallback controller has not
+    // observed because the mapping layer consumed that event.
+    if (event?.shiftKey) meta |= ANDROID_META.SHIFT_ON
+    if (event?.ctrlKey) meta |= ANDROID_META.CTRL_ON
+    if (event?.altKey) meta |= ANDROID_META.ALT_ON
+    if (event?.metaKey) meta |= ANDROID_META.META_ON
+    return meta
+  }
+
+  function sendHoldDown(action, event, pointerId) {
+    const point = pointFor(action.at, action, event)
+    if (!point || pointerId == null) return { sent: false, point: null, pointerId: null }
+    return {
+      sent: sendTouchPhase(point, 'down', pointerId),
+      point,
+      pointerId,
+    }
+  }
+
+  function sendHoldUp(current) {
+    return sendTouchPhase(current.point, 'up', current.pointerId)
   }
 
   function mappedResult(action, code, sent) {
@@ -442,23 +497,47 @@ export function createKeymapController({
 
     const current = held.get(code)
     if (current) {
-      if (event && event.repeat && action.type === 'raw_key') {
-        sendRawKey(current.action, event, 0)
+      preventDefault(event)
+      if (event && event.repeat && current.action.type === 'raw_key') {
+        const sent = sendRawKey(current.action, event, 0)
+        return mappedResult(current.action, code, sent)
       }
       return mappedResult(current.action, code, false)
     }
 
     let sent = false
+    let state = null
     if (action.type === 'tap' || action.type === 'swipe') {
       sent = !(event && event.repeat) && sendPointAction(action, event)
     } else if (action.type === 'raw_key') {
       sent = sendRawKey(action, event, 0)
     } else if (action.type === 'hold') {
-      sent = !(event && event.repeat) && sendHold(action, event, 0)
+      if (!(event && event.repeat)) {
+        const pointerId = allocatePointerId()
+        state = sendHoldDown(action, event, pointerId)
+        sent = state.sent
+      }
     }
-    if (!sent) return fallbackDown(event)
+    if (!sent) {
+      // A stateful mapping must never become an unrelated fallback key/REST
+      // press when its DataChannel is unavailable.
+      if (action.type === 'hold' || action.type === 'raw_key') {
+        // Consume the matching keyup too.  There is no held state to release,
+        // but forwarding that keyup to the ordinary keyboard controller would
+        // turn a failed mapped action into an unrelated Android key event.
+        suppressedKeyups.add(code)
+        preventDefault(event)
+        return mappedResult(action, code, false)
+      }
+      return fallbackDown(event)
+    }
 
-    held.set(code, { action: clone(action) })
+    held.set(code, {
+      action: clone(action),
+      ...(action.type === 'hold'
+        ? { point: state.point, pointerId: state.pointerId }
+        : {}),
+    })
     preventDefault(event)
     return mappedResult(action, code, true)
   }
@@ -476,7 +555,7 @@ export function createKeymapController({
     held.delete(code)
     let sent = true
     if (current.action.type === 'raw_key') sent = sendRawKey(current.action, event, 1)
-    else if (current.action.type === 'hold') sent = sendHold(current.action, event, 1)
+    else if (current.action.type === 'hold') sent = sendHoldUp(current)
     preventDefault(event)
     return mappedResult(current.action, code, sent)
   }
@@ -491,7 +570,7 @@ export function createKeymapController({
       if (current.action.type === 'raw_key') {
         if (sendRawKey(current.action, null, 1)) released += 1
       } else if (current.action.type === 'hold') {
-        if (sendHold(current.action, null, 1)) released += 1
+        if (sendHoldUp(current)) released += 1
       } else {
         released += 1
       }
@@ -558,7 +637,10 @@ export function createKeymapController({
     setKeymap,
     setMapping: setKeymap,
     setMode,
-    setEnabled(value) { active = value },
+    setEnabled(value) {
+      if (value === false) releaseAll()
+      active = value
+    },
     isEnabled: () => routerEnabled(),
     getKeymap: getCurrentKeymap,
     getBinding: code => indexKeymap(getCurrentKeymap()).get(code) || null,

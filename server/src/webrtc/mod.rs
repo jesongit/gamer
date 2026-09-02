@@ -6,7 +6,7 @@
 //! viewer 生命周期在 `viewer`，编码器诊断探针在 `probe`，RTP 线格式在 `protocol`，
 //! ICE 候选外部宣告（容器/NAT 部署）在 `rtc_net`。
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1105,8 +1105,117 @@ fn verify_rtp_rebuild(frame: &VideoFrame, payloads: &[Bytes]) {
 }
 
 /// DataChannel 控制消息协议（JSON）
-/// { "type": "tap"|"swipe"|"key"|"press"|"text"|"scroll"|"clipboard"|"start_app"|"rotate"|"back", ... }
+/// { "type": "tap"|"swipe"|"key"|"touch"|"press"|"text"|"scroll"|"clipboard"|"start_app"|"rotate"|"back", ... }
 /// viewer 级消息：{"type":"reset_video"}（请求 IDR）、{"type":"audio","on":bool}（音频转发开关）
+pub(crate) enum ControlCommand {
+    Data(Vec<u8>),
+    ReleaseTouches {
+        done: Option<tokio::sync::oneshot::Sender<()>>,
+    },
+}
+
+/// 一个 viewer 的活动触点。状态只由该 viewer 的控制队列消费者访问，
+/// teardown 通过同一队列追加 ReleaseTouches，确保触控事件仍按接收顺序写入设备。
+#[derive(Default)]
+pub(crate) struct TouchState {
+    active: Mutex<BTreeMap<u64, (f32, f32)>>,
+}
+
+impl TouchState {
+    fn contains(&self, pointer_id: u64) -> bool {
+        self.active.lock().contains_key(&pointer_id)
+    }
+
+    fn insert(&self, pointer_id: u64, x: f32, y: f32) -> anyhow::Result<()> {
+        let mut active = self.active.lock();
+        if active.insert(pointer_id, (x, y)).is_some() {
+            anyhow::bail!("touch pointer {} is already active", pointer_id);
+        }
+        Ok(())
+    }
+
+    fn update(&self, pointer_id: u64, x: f32, y: f32) -> anyhow::Result<()> {
+        let mut active = self.active.lock();
+        let Some(position) = active.get_mut(&pointer_id) else {
+            anyhow::bail!("touch pointer {} is not active", pointer_id);
+        };
+        *position = (x, y);
+        Ok(())
+    }
+
+    fn remove(&self, pointer_id: u64) -> anyhow::Result<()> {
+        if self.active.lock().remove(&pointer_id).is_none() {
+            anyhow::bail!("touch pointer {} is not active", pointer_id);
+        }
+        Ok(())
+    }
+
+    fn take_all(&self) -> Vec<(u64, f32, f32)> {
+        std::mem::take(&mut *self.active.lock())
+            .into_iter()
+            .map(|(pointer_id, (x, y))| (pointer_id, x, y))
+            .collect()
+    }
+}
+
+fn touch_fields(msg: &serde_json::Value) -> anyhow::Result<(u8, u64, f32, f32)> {
+    let action = match msg.get("action").and_then(serde_json::Value::as_str) {
+        Some("down") => crate::device::scrcpy::ACTION_DOWN,
+        Some("move") => crate::device::scrcpy::ACTION_MOVE,
+        Some("up") => crate::device::scrcpy::ACTION_UP,
+        _ => anyhow::bail!("invalid touch action"),
+    };
+    let pointer_id = msg
+        .get("pointer_id")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|pointer_id| *pointer_id <= 31)
+        .ok_or_else(|| anyhow::anyhow!("invalid touch pointer_id"))?;
+
+    fn coordinate(msg: &serde_json::Value, name: &str) -> anyhow::Result<f32> {
+        let value = msg
+            .get(name)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| anyhow::anyhow!("invalid touch {}", name))?;
+        let value = value as f32;
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            anyhow::bail!("invalid touch {}", name)
+        }
+    }
+
+    Ok((
+        action,
+        pointer_id,
+        coordinate(msg, "x")?,
+        coordinate(msg, "y")?,
+    ))
+}
+
+pub(crate) async fn release_all_touches(
+    session: &Arc<ScrcpySession>,
+    touch_state: &TouchState,
+) -> anyhow::Result<()> {
+    let pointers = touch_state.take_all();
+    let mut first_error = None;
+    for (pointer_id, x, y) in pointers {
+        if let Err(error) = session
+            .inject_touch(crate::device::scrcpy::ACTION_UP, pointer_id, x, y, 0.0)
+            .await
+        {
+            debug!(pointer_id, "failed to release touch pointer: {}", error);
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 fn key_control_fields(msg: &serde_json::Value) -> anyhow::Result<(u8, u32, u32, u32)> {
     let action = msg
         .get("action")
@@ -1136,6 +1245,7 @@ fn key_control_fields(msg: &serde_json::Value) -> anyhow::Result<(u8, u32, u32, 
 async fn handle_control_msg(
     session: &Arc<ScrcpySession>,
     audio_on: &Arc<std::sync::atomic::AtomicBool>,
+    touch_state: &TouchState,
     data: &[u8],
 ) -> anyhow::Result<()> {
     let msg: serde_json::Value = serde_json::from_slice(data)?;
@@ -1150,15 +1260,34 @@ async fn handle_control_msg(
         // 不能用 tap 序列模拟拖动——每个 tap 都是独立 DOWN+UP，密集发送时乱序，
         // 设备收到几百次乱序"点击"，行为与实际操作对不上。
         "touch" => {
-            let action = msg["action"].as_str().unwrap_or("move");
-            let x = msg["x"].as_f64().unwrap_or(0.0) as f32;
-            let y = msg["y"].as_f64().unwrap_or(0.0) as f32;
-            let (act, pressure) = match action {
-                "down" => (crate::device::scrcpy::ACTION_DOWN, 1.0f32),
-                "up" => (crate::device::scrcpy::ACTION_UP, 0.0f32),
-                _ => (crate::device::scrcpy::ACTION_MOVE, 1.0f32),
+            let (act, pointer_id, x, y) = touch_fields(&msg)?;
+            match act {
+                crate::device::scrcpy::ACTION_DOWN if touch_state.contains(pointer_id) => {
+                    anyhow::bail!("touch pointer {} is already active", pointer_id);
+                }
+                crate::device::scrcpy::ACTION_MOVE | crate::device::scrcpy::ACTION_UP
+                    if !touch_state.contains(pointer_id) =>
+                {
+                    anyhow::bail!("touch pointer {} is not active", pointer_id);
+                }
+                _ => {}
+            }
+            let pressure = if act == crate::device::scrcpy::ACTION_DOWN
+                || act == crate::device::scrcpy::ACTION_MOVE
+            {
+                1.0f32
+            } else {
+                0.0f32
             };
-            session.inject_touch(act, 0, x, y, pressure).await?;
+            session
+                .inject_touch(act, pointer_id, x, y, pressure)
+                .await?;
+            match act {
+                crate::device::scrcpy::ACTION_DOWN => touch_state.insert(pointer_id, x, y)?,
+                crate::device::scrcpy::ACTION_MOVE => touch_state.update(pointer_id, x, y)?,
+                crate::device::scrcpy::ACTION_UP => touch_state.remove(pointer_id)?,
+                _ => unreachable!(),
+            }
         }
         "swipe" => {
             let x1 = msg["x1"].as_f64().unwrap_or(0.0) as f32;
@@ -1403,6 +1532,46 @@ mod tests {
             let msg: serde_json::Value = serde_json::from_str(json).unwrap();
             assert!(key_control_fields(&msg).is_err());
         }
+    }
+
+    #[test]
+    fn data_channel_touch_fields_are_strict() {
+        let valid: serde_json::Value = serde_json::from_str(
+            r#"{"type":"touch","action":"down","pointer_id":31,"x":12.5,"y":34}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            touch_fields(&valid).unwrap(),
+            (crate::device::scrcpy::ACTION_DOWN, 31, 12.5, 34.0)
+        );
+
+        for json in [
+            r#"{"type":"touch","action":"cancel","pointer_id":0,"x":1,"y":2}"#,
+            r#"{"type":"touch","action":"down","x":1,"y":2}"#,
+            r#"{"type":"touch","action":"down","pointer_id":32,"x":1,"y":2}"#,
+            r#"{"type":"touch","action":"down","pointer_id":1.0,"x":1,"y":2}"#,
+            r#"{"type":"touch","action":"down","pointer_id":0,"x":"1","y":2}"#,
+            r#"{"type":"touch","action":"down","pointer_id":0,"x":1,"y":null}"#,
+        ] {
+            let msg: serde_json::Value = serde_json::from_str(json).unwrap();
+            assert!(
+                touch_fields(&msg).is_err(),
+                "accepted invalid touch: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn touch_state_tracks_unique_active_pointers_and_last_position() {
+        let state = TouchState::default();
+        assert!(!state.contains(2));
+        state.insert(2, 10.0, 20.0).unwrap();
+        assert!(state.contains(2));
+        assert!(state.insert(2, 11.0, 21.0).is_err());
+        state.update(2, 30.0, 40.0).unwrap();
+        assert_eq!(state.take_all(), vec![(2, 30.0, 40.0)]);
+        assert!(!state.contains(2));
+        assert!(state.remove(2).is_err());
     }
 
     /// OBS-003：RTP 帧发送结果采集——写入 >0 字节记发送，0 字节记丢弃

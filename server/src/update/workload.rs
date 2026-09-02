@@ -290,6 +290,8 @@ mod tests {
             .unwrap();
 
         let viewers: ViewerMap = Arc::new(StdMutex::new(std::collections::HashMap::new()));
+        let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(control_rx);
         viewers.lock().unwrap().insert(
             "device-1".into(),
             crate::webrtc::ViewerHandle {
@@ -299,6 +301,7 @@ mod tests {
                 viewer_id: "viewer-1".into(),
                 last_serve: Arc::new(std::sync::atomic::AtomicI64::new(0)),
                 notify: Arc::new(Mutex::new(None)),
+                control_tx,
             },
         );
         let transaction_active = Arc::new(AtomicBool::new(true));

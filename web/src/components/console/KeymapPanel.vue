@@ -90,18 +90,20 @@
                 <label class="action-type">
                   <span>动作</span>
                   <select v-model="binding.action.type" class="select" @change="changeAction(binding)">
-                    <option value="tap">tap · 点击</option>
+                    <!-- tap 只为读取/编辑旧方案保留；新绑定不会生成 tap。 -->
+                    <option v-if="binding.action.type === 'tap'" value="tap">tap · 旧版点击（兼容）</option>
                     <option value="swipe">swipe · 滑动</option>
-                    <option value="raw_key">raw_key · 原始按键</option>
-                    <option value="hold">hold · 按住（预留）</option>
+                    <option value="raw_key">raw_key · 真实 Android 按键</option>
+                    <option value="hold">hold · 屏幕触控按住</option>
                   </select>
                 </label>
 
                 <template v-if="binding.action.type === 'tap' || binding.action.type === 'hold'">
-                  <span class="coord-label">{{ binding.action.type === 'hold' ? '按住位置' : '点击位置' }}</span>
+                  <span class="coord-label">{{ binding.action.type === 'hold' ? '触控点（按下/释放）' : '点击位置' }}</span>
                   <label class="coord"><span>X</span><input v-model.number="binding.action.at[0]" class="input mono" type="number" min="0" max="1" step="0.01" /></label>
                   <label class="coord"><span>Y</span><input v-model.number="binding.action.at[1]" class="input mono" type="number" min="0" max="1" step="0.01" /></label>
                   <button class="mini-btn" type="button" @click="requestPoint(index, 'at')">取点</button>
+                  <span v-if="binding.action.type === 'hold'" class="action-hint">快速按键 = touch down → up；按住期间不重复发送</span>
                 </template>
 
                 <template v-else-if="binding.action.type === 'swipe'">
@@ -369,7 +371,7 @@ function requestDelete(item) {
 function addBinding() {
   draft.value.bindings.push({
     key: '',
-    action: { type: 'tap', at: [0.5, 0.5] },
+    action: { type: 'hold', at: [0.5, 0.5] },
   })
 }
 
@@ -540,6 +542,7 @@ function cancelEdit() {
 .icon-btn { width: 25px; height: 25px; padding: 0; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; }
 .icon-btn:hover { color: var(--danger); border-color: var(--danger); }
 .action-row { color: var(--text-2); font-size: 10px; }
+.action-hint { color: var(--text-2); }
 .action-type, .coord, .duration, .raw-field { display: inline-flex; align-items: center; gap: 5px; }
 .action-type .select { min-width: 130px; padding: 4px 6px; font-size: 11px; }
 .coord-label { margin-left: 3px; }

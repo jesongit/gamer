@@ -50,19 +50,10 @@ pub enum KeymapAction {
         #[serde(skip_serializing_if = "Option::is_none")]
         keycode: Option<u32>,
     },
-    /// Reserved for the future stateful touch protocol.  It is accepted by the
-    /// server so a newer editor can round-trip it without losing data.
+    /// A stateful single-point touch binding.  The pointer id is assigned at
+    /// runtime and is intentionally not part of the persisted keymap schema.
     #[serde(rename = "hold")]
-    Hold {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        at: Option<[f64; 2]>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        from: Option<[f64; 2]>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        to: Option<[f64; 2]>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pointer_id: Option<u8>,
-    },
+    Hold { at: [f64; 2] },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -439,7 +430,7 @@ fn parse_action(
         "tap" => &["type", "at"],
         "swipe" => &["type", "from", "to", "duration_ms"],
         "raw_key" => &["type", "code", "keycode"],
-        "hold" => &["type", "at", "from", "to", "pointer_id"],
+        "hold" => &["type", "at"],
         other => {
             diagnostics.push(diag(
                 "keymap.action.type.unknown",
@@ -635,53 +626,8 @@ fn parse_hold(
     binding_path: &str,
     diagnostics: &mut Vec<KeymapDiagnostic>,
 ) -> Option<KeymapAction> {
-    let at = value_for(map, "at")
-        .and_then(|_| parse_coord_field(map, "at", resource, binding_path, diagnostics));
-    let from = value_for(map, "from")
-        .and_then(|_| parse_coord_field(map, "from", resource, binding_path, diagnostics));
-    let to = value_for(map, "to")
-        .and_then(|_| parse_coord_field(map, "to", resource, binding_path, diagnostics));
-    if at.is_none() && (from.is_none() != to.is_none()) {
-        diagnostics.push(diag(
-            "keymap.coordinate.invalid",
-            "hold 的 from 和 to 必须同时提供",
-            resource,
-            binding_path,
-            format!("{binding_path}.action"),
-        ));
-    }
-    if at.is_none() && from.is_none() && to.is_none() {
-        diagnostics.push(diag(
-            "keymap.coordinate.missing",
-            "hold 必须提供 at，或同时提供 from 和 to",
-            resource,
-            binding_path,
-            format!("{binding_path}.action"),
-        ));
-        return None;
-    }
-    let pointer_id = match value_for(map, "pointer_id") {
-        None => None,
-        Some(value) => match value.as_u64() {
-            Some(value) if value <= 31 => Some(value as u8),
-            _ => {
-                diagnostics.push(diag(
-                    "keymap.pointer_id",
-                    "pointer_id 必须是 0~31 的整数",
-                    resource,
-                    binding_path,
-                    format!("{binding_path}.action.pointer_id"),
-                ));
-                None
-            }
-        },
-    };
-    Some(KeymapAction::Hold {
-        at,
-        from,
-        to,
-        pointer_id,
-    })
+    parse_coord_field(map, "at", resource, binding_path, diagnostics)
+        .map(|at| KeymapAction::Hold { at })
 }
 
 fn known_keyboard_code(code: &str) -> bool {
@@ -1352,7 +1298,7 @@ mod tests {
         let keymap = parse_keymap_content(content, "reserved.yaml").unwrap();
         assert!(matches!(
             keymap.bindings[0].action,
-            KeymapAction::Hold { .. }
+            KeymapAction::Hold { at: [0.0, 1.0] }
         ));
         assert!(matches!(
             keymap.bindings[1].action,
@@ -1361,6 +1307,44 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn hold_requires_single_point_and_does_not_serialize_runtime_fields() {
+        let content = "version: 1\nname: Hold\nbindings:\n  - key: KeyW\n    action:\n      type: hold\n      at: [0.25, 0.75]\n";
+        let keymap = parse_keymap_content(content, "hold.yaml").unwrap();
+        assert_eq!(
+            keymap.bindings[0].action,
+            KeymapAction::Hold { at: [0.25, 0.75] }
+        );
+
+        let serialized = serialize_keymap(&keymap).unwrap();
+        assert!(serialized.contains("type: hold"));
+        assert!(serialized.contains("at:"));
+        assert!(serialized.contains("0.25"));
+        assert!(serialized.contains("0.75"));
+        assert!(!serialized.contains("from:"));
+        assert!(!serialized.contains("to:"));
+        assert!(!serialized.contains("pointer_id:"));
+    }
+
+    #[test]
+    fn hold_rejects_drag_coordinates_and_pointer_id() {
+        for field in ["from", "to", "pointer_id"] {
+            let content = format!(
+                "version: 1\nname: Hold\nbindings:\n  - key: KeyW\n    action:\n      type: hold\n      at: [0.25, 0.75]\n      {field}: {}\n",
+                if field == "pointer_id" {
+                    "1".to_string()
+                } else {
+                    "[0.1, 0.2]".to_string()
+                }
+            );
+            let diagnostics = parse_keymap_content(&content, "hold-invalid.yaml").unwrap_err();
+            assert!(diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "keymap.action.unknown_key"
+                    && diagnostic.field == format!("bindings[0].action.{field}")
+            }));
+        }
     }
 
     #[test]

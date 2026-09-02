@@ -62,6 +62,7 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
     assert_eq!(resp.status(), StatusCode::OK);
     let detail = json_body(resp).await;
     assert!(detail["content"].as_str().unwrap().contains("version: 1"));
+    assert!(detail["content"].as_str().unwrap().contains("type: tap"));
     assert_eq!(detail["keymap"]["bindings"].as_array().unwrap().len(), 2);
 
     // PUT 默认需要 expected_version；过期版本必须 409。
@@ -191,6 +192,14 @@ async fn keymaps_reject_invalid_yaml_fields_coordinates_and_duplicates() {
         ),
         (
             "version: 1\nname: bad\nbindings:\n  - key: Space\n    action:\n      type: tap\n      at: [0.5, 0.5]\n      type2: tap\n",
+            "keymap.action.unknown_key",
+        ),
+        (
+            "version: 1\nname: bad\nbindings:\n  - key: KeyW\n    action:\n      type: hold\n      at: [0.5, 0.5]\n      from: [0.1, 0.2]\n      to: [0.8, 0.9]\n",
+            "keymap.action.unknown_key",
+        ),
+        (
+            "version: 1\nname: bad\nbindings:\n  - key: KeyW\n    action:\n      type: hold\n      at: [0.5, 0.5]\n      pointer_id: 1\n",
             "keymap.action.unknown_key",
         ),
         ("version: 1\nname: [bad\nbindings: []\n", "keymap.yaml.syntax"),

@@ -27,7 +27,10 @@ use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use crate::config::Config;
 use crate::device::scrcpy::{AudioFrame, ScrcpySession, VideoFrame};
 
-use super::{handle_control_msg, peer_connection_effect, protocol, PeerConnectionEffect};
+use super::{
+    handle_control_msg, peer_connection_effect, protocol, release_all_touches, ControlCommand,
+    PeerConnectionEffect, TouchState,
+};
 
 /// viewer 断开原因：用于统一 takeover / device disconnect / shutdown / peer closed
 /// 的 teardown 行为与日志口径。
@@ -78,6 +81,8 @@ pub struct ViewerHandle {
     /// {"type":"taken_over"}，旧页面收到后不再自动重连（防互顶死循环）。
     /// None = 尚未注册或已被取用
     pub notify: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
+    /// 控制队列：teardown 通过它串行释放该 viewer 的残留触点。
+    pub(crate) control_tx: tokio::sync::mpsc::UnboundedSender<ControlCommand>,
 }
 
 /// device_id → 活跃 viewer（main.rs 创建，AppState / Scheduler / ws.rs 共享）
@@ -98,6 +103,16 @@ pub async fn teardown_viewer(handle: ViewerHandle, reason: ViewerDisconnectReaso
         if let Some(tx) = handle.notify.lock().take() {
             let _ = tx.send(serde_json::json!({"type": notification_type}).to_string());
         }
+    }
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    if handle
+        .control_tx
+        .send(ControlCommand::ReleaseTouches {
+            done: Some(done_tx),
+        })
+        .is_ok()
+    {
+        let _ = done_rx.await;
     }
     if let Some(peer) = handle.peer.upgrade() {
         let _ = peer.close().await;
@@ -145,6 +160,7 @@ pub struct ViewerSession {
     /// scrcpy 会话引用：pusher 初始重放全部 0 字节（SRTP 未就绪）时
     /// 请求编码器重置（RESET_VIDEO → 新 SPS/PPS + IDR），让浏览器快速恢复
     pub session: Arc<ScrcpySession>,
+    pub(crate) control_tx: tokio::sync::mpsc::UnboundedSender<ControlCommand>,
 }
 
 impl ViewerSession {
@@ -231,7 +247,8 @@ impl ViewerSession {
         // 导致拖拽错乱）。旧实现每条消息 tokio::spawn 一个任务，拖动时每秒几十上百
         // 个任务并发抢锁，顺序无法保证且开销大。这里改为单消费者队列：
         // DataChannel 回调只入队，专用任务按到达顺序逐条处理。
-        let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<ControlCommand>();
+        let touch_state = Arc::new(TouchState::default());
         // 音频按需发送（默认不发）：静音时也持续发音频 RTP 的话，部分浏览器
         // 内核即使音频轨 enabled=false 仍把它选为 A/V 同步主时钟（实测 ZCode
         // IAB webview；Chrome 无此问题），而虚拟屏 remote_submix 音频时钟有
@@ -242,15 +259,42 @@ impl ViewerSession {
         let audio_on = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let s_worker = session.clone();
         let worker_audio_on = audio_on.clone();
+        let worker_touch_state = touch_state.clone();
         tokio::spawn(async move {
-            while let Some(data) = control_rx.recv().await {
-                if let Err(e) = handle_control_msg(&s_worker, &worker_audio_on, &data).await {
-                    debug!("control msg error: {}", e);
+            let mut accepting = true;
+            while let Some(command) = control_rx.recv().await {
+                match command {
+                    ControlCommand::Data(data) if accepting => {
+                        if let Err(e) = handle_control_msg(
+                            &s_worker,
+                            &worker_audio_on,
+                            &worker_touch_state,
+                            &data,
+                        )
+                        .await
+                        {
+                            debug!("control msg error: {}", e);
+                        }
+                    }
+                    ControlCommand::Data(_) => {
+                        debug!("dropping control msg after touch cleanup");
+                    }
+                    ControlCommand::ReleaseTouches { done } => {
+                        accepting = false;
+                        if let Err(e) = release_all_touches(&s_worker, &worker_touch_state).await {
+                            debug!("touch cleanup error: {}", e);
+                        }
+                        if let Some(done) = done {
+                            let _ = done.send(());
+                        }
+                    }
                 }
             }
+            let _ = release_all_touches(&s_worker, &worker_touch_state).await;
         });
 
         let session_dc = session.clone();
+        let control_tx_for_dc = control_tx.clone();
         // control DataChannel 捕获：on_data_channel 回调触发时存入，
         // 供服务端反向推送（脚本事件）——浏览器只会创建 "control" 一个通道
         let control_dc: Arc<Mutex<Option<Arc<webrtc::data_channel::RTCDataChannel>>>> =
@@ -261,16 +305,21 @@ impl ViewerSession {
                 info!("control data channel opened: {}", dc.label());
                 *dc_holder.lock() = Some(dc.clone());
                 let s = session_dc.clone();
-                let tx = control_tx.clone();
+                let message_tx = control_tx_for_dc.clone();
                 dc.on_message(Box::new(move |msg| {
                     let data = msg.data.to_vec();
                     let s2 = s.clone();
                     // 只记录长度，不打印内容：拖动时每秒几十上百条消息，
                     // 逐条格式化打印会让服务端日志成为性能瓶颈（全局日志锁串行化）
                     debug!("control msg: {} bytes", data.len());
-                    if tx.send(data).is_err() {
+                    if message_tx.send(ControlCommand::Data(data)).is_err() {
                         debug!("control queue closed, dropping msg for {}", s2.device.name);
                     }
+                    Box::pin(async {})
+                }));
+                let close_tx = control_tx_for_dc.clone();
+                dc.on_close(Box::new(move || {
+                    let _ = close_tx.send(ControlCommand::ReleaseTouches { done: None });
                     Box::pin(async {})
                 }));
                 Box::pin(async {})
@@ -288,6 +337,7 @@ impl ViewerSession {
         let conn_tx2 = conn_tx.clone();
         // peer 死亡通知（Failed/Closed）：ws.rs 据此退出 ws 循环，释放 viewer（mDNS 等）
         let (peer_closed_tx, peer_closed_rx) = tokio::sync::watch::channel(false);
+        let peer_cleanup_tx = control_tx.clone();
         peer.on_peer_connection_state_change(Box::new(move |s| {
             debug!("peer state: {:?}", s);
             match peer_connection_effect(s) {
@@ -306,6 +356,7 @@ impl ViewerSession {
                     let was_connected = peer_connected2.load(std::sync::atomic::Ordering::SeqCst);
                     peer_connected2.store(false, std::sync::atomic::Ordering::SeqCst);
                     running2.store(false, std::sync::atomic::Ordering::SeqCst);
+                    let _ = peer_cleanup_tx.send(ControlCommand::ReleaseTouches { done: None });
                     let _ = peer_closed_tx.send(true);
                     info!(was_connected, "peer failed/closed, notified ws loop");
                 }
@@ -404,6 +455,7 @@ impl ViewerSession {
             peer_closed_rx,
             control_dc,
             session: session.clone(),
+            control_tx,
         };
         let fps = session
             .device
@@ -487,6 +539,8 @@ mod tests {
     async fn remove_and_teardown_viewer_clears_map_and_stops_running() {
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(control_rx);
         let handle = ViewerHandle {
             running: running.clone(),
             peer: std::sync::Weak::new(),
@@ -494,6 +548,7 @@ mod tests {
             viewer_id: "viewer-a".to_string(),
             last_serve: Arc::new(std::sync::atomic::AtomicI64::new(123)),
             notify: Arc::new(Mutex::new(Some(tx))),
+            control_tx,
         };
         let viewers: ViewerMap = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         viewers.lock().unwrap().insert("dev1".to_string(), handle);
@@ -515,6 +570,8 @@ mod tests {
     async fn takeover_reason_emits_taken_over_notification() {
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(control_rx);
         let handle = ViewerHandle {
             running: running.clone(),
             peer: std::sync::Weak::new(),
@@ -522,6 +579,7 @@ mod tests {
             viewer_id: "viewer-b".to_string(),
             last_serve: Arc::new(std::sync::atomic::AtomicI64::new(123)),
             notify: Arc::new(Mutex::new(Some(tx))),
+            control_tx,
         };
 
         teardown_viewer(handle, ViewerDisconnectReason::TakenOver).await;

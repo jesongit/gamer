@@ -13,7 +13,7 @@ function keymapContext(overrides = {}) {
         keymap: {
           version: 1,
           name: '战斗方案',
-          bindings: [{ key: 'Space', action: { type: 'tap', at: [0.7, 0.8] } }],
+          bindings: [{ key: 'Space', action: { type: 'hold', at: [0.7, 0.8] } }],
         },
       },
     ],
@@ -48,7 +48,7 @@ describe('KeymapPanel', () => {
     expect(onSelect).toHaveBeenCalledWith(context.keymaps[0])
   })
 
-  it('supports new binding capture and sends a validated save payload', async () => {
+  it('creates a screen-touch hold binding and sends a validated save payload', async () => {
     const onNew = vi.fn()
     const onSave = vi.fn(() => true)
     const wrapper = mount(KeymapPanel, {
@@ -60,6 +60,11 @@ describe('KeymapPanel', () => {
     expect(onNew).toHaveBeenCalled()
     await button(wrapper, '＋ 添加绑定').trigger('click')
     const binding = wrapper.get('[data-testid="keymap-binding"]')
+    expect(binding.get('select').element.value).toBe('hold')
+    expect(binding.text()).toContain('屏幕触控按住')
+    expect(binding.text()).toContain('快速按键 = touch down → up')
+    expect(binding.findAll('.coord')).toHaveLength(2)
+    expect(binding.findAll('button').filter(item => item.text() === '取点')).toHaveLength(1)
     await button(wrapper, '录入按键').trigger('click')
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(binding.get('.key-input').element).toBe(document.activeElement)
@@ -77,7 +82,7 @@ describe('KeymapPanel', () => {
       model: {
         version: 1,
         name: '新战斗',
-        bindings: [{ key: 'KeyQ', action: { type: 'tap', at: [0.5, 0.5] } }],
+        bindings: [{ key: 'KeyQ', action: { type: 'hold', at: [0.5, 0.5] } }],
       },
     }))
     wrapper.unmount()
@@ -95,6 +100,46 @@ describe('KeymapPanel', () => {
     expect(onRequestPoint).toHaveBeenCalledWith({ pkg: 'com.demo', index: 0, field: 'at' })
     expect(inputs[1].element.value).toBe('0.25')
     expect(inputs[2].element.value).toBe('0.75')
+  })
+
+  it('keeps a legacy tap binding unchanged when it is read and saved', async () => {
+    const onSave = vi.fn(() => true)
+    const legacy = {
+      name: '旧方案',
+      version: 2,
+      keymap: {
+        version: 1,
+        name: '旧方案',
+        bindings: [{ key: 'Space', action: { type: 'tap', at: [0.2, 0.3] } }],
+      },
+    }
+    const wrapper = mount(KeymapPanel, {
+      props: { context: keymapContext({ keymaps: [legacy], selectedName: '旧方案', onSave }) },
+    })
+
+    await button(wrapper, '编辑').trigger('click')
+    const binding = wrapper.get('[data-testid="keymap-binding"]')
+    expect(binding.get('select').element.value).toBe('tap')
+    expect(binding.text()).toContain('旧版点击（兼容）')
+    await button(wrapper, '💾 保存方案').trigger('click')
+
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      model: {
+        version: 1,
+        name: '旧方案',
+        bindings: [{ key: 'Space', action: { type: 'tap', at: [0.2, 0.3] } }],
+      },
+    }))
+  })
+
+  it('distinguishes screen-touch hold from a real Android key', async () => {
+    const wrapper = mount(KeymapPanel, { props: { context: keymapContext() } })
+
+    await button(wrapper, '编辑').trigger('click')
+    const select = wrapper.get('[data-testid="keymap-binding"] select')
+    expect(select.find('option[value="hold"]').text()).toContain('屏幕触控')
+    await select.setValue('raw_key')
+    expect(wrapper.get('[data-testid="keymap-binding"]').text()).toContain('真实 Android 按键')
   })
 
   it('keeps the editor open and reports failure when save is not confirmed', async () => {

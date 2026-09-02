@@ -150,6 +150,7 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                         viewer_id: vs.viewer_id.clone(),
                                         last_serve: vs.last_serve.clone(),
                                         notify: std::sync::Arc::new(parking_lot::Mutex::new(Some(notify_tx.clone()))),
+                                        control_tx: vs.control_tx.clone(),
                                     };
                                     let old_pair = {
                                         st.viewers

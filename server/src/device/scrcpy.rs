@@ -98,6 +98,31 @@ pub struct ScrcpySession {
     pub app_started: std::sync::atomic::AtomicBool,
 }
 
+/// Encode the scrcpy v3 touch control payload. Keeping the wire layout in a
+/// pure helper makes pointer-id propagation testable without a live socket.
+fn encode_touch_packet(
+    action: u8,
+    pointer_id: u64,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    pressure: f32,
+) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[0] = 2; // TYPE_INJECT_TOUCH_EVENT
+    buf[1] = action;
+    buf[2..10].copy_from_slice(&pointer_id.to_be_bytes());
+    buf[10..14].copy_from_slice(&x.to_be_bytes());
+    buf[14..18].copy_from_slice(&y.to_be_bytes());
+    buf[18..20].copy_from_slice(&(width as u16).to_be_bytes());
+    buf[20..22].copy_from_slice(&(height as u16).to_be_bytes());
+    let encoded_pressure = (pressure.clamp(0.0, 1.0) * 65535.0) as u16;
+    buf[22..24].copy_from_slice(&encoded_pressure.to_be_bytes());
+    // action_button / buttons = 0
+    buf
+}
+
 impl ScrcpySession {
     /// 距最近一帧的毫秒数（尚无帧返回 0，视为新鲜，给足首帧窗口）
     pub fn video_idle_ms(&self) -> u64 {
@@ -462,17 +487,7 @@ impl ScrcpySession {
         let (w, h) = (*self.width.lock(), *self.height.lock());
         let x = (x.max(0.0).min(w as f32 - 1.0)) as u32;
         let y = (y.max(0.0).min(h as f32 - 1.0)) as u32;
-        let mut buf = [0u8; 32];
-        buf[0] = 2; // TYPE_INJECT_TOUCH_EVENT
-        buf[1] = action;
-        buf[2..10].copy_from_slice(&pointer_id.to_be_bytes());
-        buf[10..14].copy_from_slice(&x.to_be_bytes());
-        buf[14..18].copy_from_slice(&y.to_be_bytes());
-        buf[18..20].copy_from_slice(&(w as u16).to_be_bytes());
-        buf[20..22].copy_from_slice(&(h as u16).to_be_bytes());
-        let p = (pressure.clamp(0.0, 1.0) * 65535.0) as u16;
-        buf[22..24].copy_from_slice(&p.to_be_bytes());
-        // action_button / buttons = 0
+        let buf = encode_touch_packet(action, pointer_id, x, y, w, h, pressure);
         self.send_control(&buf).await
     }
 
@@ -792,6 +807,22 @@ async fn accept_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::parse_stat_cpu_ticks;
+
+    #[test]
+    fn touch_packet_preserves_pointer_id_and_fields() {
+        let packet = super::encode_touch_packet(super::ACTION_DOWN, 7, 320, 640, 1920, 1080, 1.0);
+        assert_eq!(packet[0], 2);
+        assert_eq!(packet[1], super::ACTION_DOWN);
+        assert_eq!(u64::from_be_bytes(packet[2..10].try_into().unwrap()), 7);
+        assert_eq!(u32::from_be_bytes(packet[10..14].try_into().unwrap()), 320);
+        assert_eq!(u32::from_be_bytes(packet[14..18].try_into().unwrap()), 640);
+        assert_eq!(u16::from_be_bytes(packet[18..20].try_into().unwrap()), 1920);
+        assert_eq!(u16::from_be_bytes(packet[20..22].try_into().unwrap()), 1080);
+        assert_eq!(
+            u16::from_be_bytes(packet[22..24].try_into().unwrap()),
+            65535
+        );
+    }
 
     /// /proc stat 解析：comm 带空格/括号安全、字段偏移正确、垃圾输入返回 None
     #[test]

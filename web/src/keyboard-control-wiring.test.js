@@ -25,6 +25,7 @@ describe('投屏键盘控制接线', () => {
   it('父层只用 DataChannel 发送键盘，并在焦点/页面生命周期变化时释放', () => {
     expect(consoleSource).toContain('createKeyboardController({')
     expect(consoleSource).toContain('send: sendKeyboardControl')
+    expect(consoleSource).toContain('getKeyMetaState: () => keyboard.getMetaState()')
     expect(consoleSource).toContain('onText: sendControl')
     expect(consoleSource).toContain('mode: keyboardMode')
     expect(consoleSource).toContain("{ type: 'text', text: chunk }")
@@ -35,5 +36,7 @@ describe('投屏键盘控制接线', () => {
     expect(consoleSource).toContain("document.addEventListener('visibilitychange', onVisibilityChange)")
     expect(consoleSource).toContain('keyboard.releaseAll()')
     expect(consoleSource).toContain("channel.readyState === 'open'")
+    expect(consoleSource).toContain('pointer_id: 0')
+    expect(consoleSource).toContain('stateful control dropped')
   })
 })
