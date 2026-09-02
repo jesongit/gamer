@@ -81,7 +81,7 @@ pub(super) async fn api_create_script(
     if req.content.trim().is_empty() {
         return ApiError::bad_request("脚本内容不能为空").into_response();
     }
-    if req.content.len() > crate::scripts::IMPORT_MAX_YAML_BYTES {
+    if req.content.len() > crate::core::fs::archive_validation::IMPORT_MAX_YAML_BYTES {
         return ApiError::bad_request("脚本内容超过 1 MiB").into_response();
     }
     let pkg = match require_pkg(Some(&req.pkg)) {
@@ -148,7 +148,7 @@ pub(super) async fn api_update_script(
     if req.content.trim().is_empty() {
         return ApiError::bad_request("脚本内容不能为空").into_response();
     }
-    if req.content.len() > crate::scripts::IMPORT_MAX_YAML_BYTES {
+    if req.content.len() > crate::core::fs::archive_validation::IMPORT_MAX_YAML_BYTES {
         return ApiError::bad_request("脚本内容超过 1 MiB").into_response();
     }
     let (pkg, source_name) = match id.split_once('/') {

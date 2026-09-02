@@ -129,12 +129,11 @@ pub(super) async fn api_health_ready(State(st): State<AppState>) -> Response {
     let (data_dir_ok, scrcpy_ok, db_ok, deps) = tokio::join!(
         run_blocking_api(move || Ok(data_dir.is_dir())),
         run_blocking_api(move || Ok(scrcpy_server.is_file())),
-        run_blocking_api(move || Ok(db.health_check().is_ok())),
+        async move { db.health_check_async().await.is_ok() },
         deps_probe::snapshot(&cfg),
     );
     let data_dir_ok = data_dir_ok.unwrap_or(false);
     let scrcpy_ok = scrcpy_ok.unwrap_or(false);
-    let db_ok = db_ok.unwrap_or(false);
     let adb_ok = deps.adb.status == "ready";
     let ffmpeg_ok = deps.ffmpeg.status == "ready";
     let ready = data_dir_ok && scrcpy_ok && db_ok && adb_ok && ffmpeg_ok;
@@ -168,16 +167,11 @@ pub(super) async fn api_shutdown_state(State(st): State<AppState>) -> Response {
     .into_response()
 }
 
-/// 暴露低基数 Prometheus 文本指标。读数据库和外部探测均移到 blocking 池，
-/// 避免指标抓取把 rusqlite/命令执行带到 Tokio 核心线程；业务指标采集失败时
+/// 暴露低基数 Prometheus 文本指标。外部探测移到 blocking 池，数据库通过异步
+/// worker RPC 查询；业务指标采集失败时
 /// 仍返回合法响应，并用 `gamer_db_ready` 标记异常。
 pub(super) async fn api_metrics(State(st): State<AppState>) -> Response {
-    let db = st.db.clone();
-    let db_snapshot = run_blocking_api(move || {
-        db.metrics_snapshot()
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await;
+    let db_snapshot = st.db.metrics_snapshot_async().await;
     let db_ready = db_snapshot.is_ok();
     let db_metrics = db_snapshot.unwrap_or_default();
     let configured_devices = st.devices.list_snapshot().len();
@@ -683,12 +677,10 @@ pub(super) async fn api_shutdown(State(st): State<AppState>) -> Response {
 
 /// 手动维护动作（DATA-004）：SQLite VACUUM，返回 vacuum 前后的数据库文件
 /// 字节数。VACUUM 耗时且需独占锁——在 store 的 DB worker 线程串行执行，
-/// handler 经 blocking 池等待结果，不占用 Tokio 核心线程。
+/// handler 通过异步 worker RPC 等待结果，不占用 Tokio 核心线程。
 pub(super) async fn api_maintenance_vacuum(State(st): State<AppState>) -> Response {
-    let db = st.db.clone();
     info!("manual maintenance: sqlite vacuum requested");
-    match run_blocking_api(move || db.vacuum().map_err(|e| ApiError::internal(e.to_string()))).await
-    {
+    match st.db.vacuum_async().await {
         Ok(report) => {
             info!(
                 before_bytes = report.before_bytes,
@@ -697,7 +689,7 @@ pub(super) async fn api_maintenance_vacuum(State(st): State<AppState>) -> Respon
             );
             Json(report).into_response()
         }
-        Err(err) => err.into_response(),
+        Err(err) => ApiError::internal(err.to_string()).into_response(),
     }
 }
 

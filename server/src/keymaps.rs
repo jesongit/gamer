@@ -10,12 +10,15 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_yaml::{Mapping, Value};
 
-use crate::scripts::{atomic_write, content_version, sanitize_part};
+use crate::core::fs::{atomic_write, content_version, safe_name};
 
 pub const MAX_KEYMAP_YAML_BYTES: usize = 1024 * 1024;
-pub const MAX_KEYMAP_ARCHIVE_BYTES: usize = crate::scripts::IMPORT_MAX_ARCHIVE_BYTES;
-pub const MAX_KEYMAP_TOTAL_BYTES: usize = crate::scripts::IMPORT_MAX_TOTAL_BYTES;
-pub const MAX_KEYMAP_ARCHIVE_ENTRIES: usize = crate::scripts::IMPORT_MAX_ENTRIES;
+pub const MAX_KEYMAP_ARCHIVE_BYTES: usize =
+    crate::core::fs::archive_validation::IMPORT_MAX_ARCHIVE_BYTES;
+pub const MAX_KEYMAP_TOTAL_BYTES: usize =
+    crate::core::fs::archive_validation::IMPORT_MAX_TOTAL_BYTES;
+pub const MAX_KEYMAP_ARCHIVE_ENTRIES: usize =
+    crate::core::fs::archive_validation::IMPORT_MAX_ENTRIES;
 const MAX_SWIPE_DURATION_MS: u32 = 60_000;
 const MAX_ANDROID_KEYCODE: u32 = 1_000;
 
@@ -872,7 +875,7 @@ fn parse_keymap_id(id: &str) -> anyhow::Result<(String, String)> {
     let (pkg, name) = id
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("非法映射方案 id: {id}"))?;
-    let pkg = sanitize_part(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
+    let pkg = safe_name(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
     let name = normalize_keymap_name(name)?;
     Ok((pkg, name))
 }
@@ -887,13 +890,13 @@ impl KeymapStore {
     }
 
     pub fn keymap_dir(&self, pkg: &str) -> PathBuf {
-        sanitize_part(pkg)
+        safe_name(pkg)
             .map(|pkg| self.root.join(pkg).join("keymap"))
             .unwrap_or_else(|| self.root.join(".gamer-invalid-partition").join("keymap"))
     }
 
     pub fn create(&self, pkg: &str, name: &str, keymap: &Keymap) -> anyhow::Result<KeymapFile> {
-        let package = sanitize_part(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
+        let package = safe_name(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
         let name = normalize_keymap_name(name)?;
         let path = self.keymap_dir(&package).join(&name);
         if path.exists() {
@@ -958,7 +961,7 @@ impl KeymapStore {
     }
 
     pub fn list(&self, pkg: &str) -> anyhow::Result<Vec<KeymapSummary>> {
-        let package = sanitize_part(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
+        let package = safe_name(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
         let mut out = Vec::new();
         let dir = self.keymap_dir(&package);
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -1023,7 +1026,7 @@ impl KeymapStore {
     }
 
     pub fn export_partition(&self, pkg: &str) -> anyhow::Result<(String, Vec<u8>)> {
-        let package = sanitize_part(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
+        let package = safe_name(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
         let mut files = Vec::new();
         if let Ok(entries) = std::fs::read_dir(self.keymap_dir(&package)) {
             for entry in entries.flatten() {
@@ -1060,7 +1063,7 @@ impl KeymapStore {
         pkg: &str,
         confirm: bool,
     ) -> anyhow::Result<KeymapImportReport> {
-        let package = sanitize_part(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
+        let package = safe_name(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
         if bytes.len() > MAX_KEYMAP_ARCHIVE_BYTES {
             anyhow::bail!(
                 "压缩包超过 {} MiB",

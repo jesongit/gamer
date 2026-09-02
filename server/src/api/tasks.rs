@@ -104,12 +104,12 @@ fn format_next_run(next: chrono::DateTime<chrono::Local>) -> String {
 // ---------- 定时任务 ----------
 
 pub(super) async fn api_list_tasks(State(st): State<AppState>) -> Response {
-    let db = st.db.clone();
+    let tasks = match st.db.list_tasks_async().await {
+        Ok(tasks) => tasks,
+        Err(err) => return ApiError::internal(err.to_string()).into_response(),
+    };
     let scripts = st.scripts.clone();
     let out = match run_blocking_api(move || {
-        let tasks = db
-            .list_tasks()
-            .map_err(|e| ApiError::internal(e.to_string()))?;
         let tasks = tasks
             .into_iter()
             .map(|t| {
@@ -137,14 +137,12 @@ pub(super) async fn api_list_tasks(State(st): State<AppState>) -> Response {
 /// GET /api/tasks/:id：详情（比列表多 `args` 解析视图——重新确认对话框的
 /// 「任务原快照」来源）。
 pub(super) async fn api_get_task(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    let db = st.db.clone();
+    let task = match st.db.get_task_async(&id).await {
+        Ok(task) => task,
+        Err(err) => return ApiError::internal(err.to_string()).into_response(),
+    };
     let scripts = st.scripts.clone();
     match run_blocking_api(move || {
-        let task = db
-            .list_tasks()
-            .map_err(|e| ApiError::internal(e.to_string()))?
-            .into_iter()
-            .find(|t| t.id == id);
         let Some(t) = task else {
             return Err(ApiError::not_found("任务不存在"));
         };
@@ -198,39 +196,51 @@ pub(super) async fn api_save_task(
         .id
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
-    let db = st.db.clone();
+    let existing = match st.db.get_task_async(&id).await {
+        Ok(existing) => existing,
+        Err(err) => return ApiError::internal(err.to_string()).into_response(),
+    };
     let scripts = st.scripts.clone();
     // 快照解析需要分区快照（磁盘 IO + 严格解析），整体放 blocking 池。
-    // inner 直接产出 Response（409 冲突体与结构化诊断 400 均非 ApiError 文本形状）。
-    let result = run_blocking_api(move || -> Result<Response, ApiError> {
-        Ok(save_task_inner(db, scripts, id, req))
-    })
-    .await;
-    match result {
-        Ok(resp) => resp,
-        Err(err) => err.into_response(),
+    // inner 返回 Task 或现有的结构化 Response；数据库写入在异步 worker RPC 完成。
+    let result = run_blocking_api(move || Ok(save_task_inner(scripts, id, req, existing))).await;
+    let task = match result {
+        Ok(Ok(task)) => task,
+        Ok(Err(resp)) => return resp,
+        Err(err) => return err.into_response(),
+    };
+    if let Err(err) = st.db.upsert_task_async(&task).await {
+        return ApiError::internal(err.to_string()).into_response();
     }
+    let parsed_args = match serde_json::from_str::<Value>(&task.args_json) {
+        Ok(Value::Object(args)) => Value::Object(args),
+        Ok(_) => return ApiError::internal("任务参数快照必须是 JSON 对象").into_response(),
+        Err(_) => return ApiError::internal("任务参数快照不是合法 JSON").into_response(),
+    };
+    Json(serde_json::json!({
+        "ok": true,
+        "id": task.id,
+        "args": parsed_args,
+        "param_signature": task.param_signature,
+    }))
+    .into_response()
 }
 
 fn save_task_inner(
-    db: crate::store::Db,
     scripts: std::sync::Arc<crate::scripts::ScriptStore>,
     id: String,
     req: SaveTaskReq,
-) -> Response {
+    existing: Option<Task>,
+) -> Result<Task, Response> {
     use crate::engine::RunTarget;
-    let existing = match db.list_tasks() {
-        Ok(list) => list.into_iter().find(|t| t.id == id),
-        Err(e) => return ApiError::internal(e.to_string()).into_response(),
-    };
     // 脚本当前声明 + psig1 签名（缺失 → 404；解析失败 → 400 结构化诊断）
     let (decls, current_sig) = match task_params::probe_script_signature(&scripts, &req.script_id) {
         Ok(v) => v,
         Err(GateError::ScriptMissing) => {
-            return ApiError::not_found("脚本不存在，无法保存任务参数").into_response();
+            return Err(ApiError::not_found("脚本不存在，无法保存任务参数").into_response());
         }
-        Err(GateError::ScriptInvalid(diags)) => return diagnostics_response(&diags),
-        Err(_) => return ApiError::internal("参数探测失败").into_response(),
+        Err(GateError::ScriptInvalid(diags)) => return Err(diagnostics_response(&diags)),
+        Err(_) => return Err(ApiError::internal("参数探测失败").into_response()),
     };
     let target = RunTarget::Script {
         script_id: req.script_id.clone(),
@@ -241,7 +251,7 @@ fn save_task_inner(
     let (args_json, signature): (String, String) = match req.args {
         Some(args) => match crate::engine::resolve_entry_args(&scripts, &target, &args) {
             Ok(bound) => (bound.resolved.to_string(), bound.param_signature),
-            Err(diags) => return diagnostics_response(&diags),
+            Err(diags) => return Err(diagnostics_response(&diags)),
         },
         None => match existing.as_ref() {
             Some(prev) if prev.param_signature == current_sig => {
@@ -256,7 +266,7 @@ fn save_task_inner(
                         task_params::typed_pairs_to_json(bound).to_string(),
                         current_sig,
                     ),
-                    Err(diags) => return diagnostics_response(&diags),
+                    Err(diags) => return Err(diagnostics_response(&diags)),
                 }
             }
             Some(prev) => {
@@ -266,28 +276,23 @@ fn save_task_inner(
                     current: current_sig.clone(),
                 }
                 .message();
-                return signature_conflict_response(
+                return Err(signature_conflict_response(
                     &prev.id,
                     &req.script_id,
                     &prev.param_signature,
                     &current_sig,
                     &message,
-                );
+                ));
             }
             None => {
                 // 新建不带 args：纯当前默认值打底（必填缺失 → 400 结构化诊断）
                 match crate::engine::resolve_entry_args(&scripts, &target, &serde_json::Map::new())
                 {
                     Ok(bound) => (bound.resolved.to_string(), bound.param_signature),
-                    Err(diags) => return diagnostics_response(&diags),
+                    Err(diags) => return Err(diagnostics_response(&diags)),
                 }
             }
         },
-    };
-    let parsed_args = match serde_json::from_str::<Value>(&args_json) {
-        Ok(Value::Object(args)) => Value::Object(args),
-        Ok(_) => return ApiError::internal("任务参数快照必须是 JSON 对象").into_response(),
-        Err(_) => return ApiError::internal("任务参数快照不是合法 JSON").into_response(),
     };
     let task = Task {
         id,
@@ -305,33 +310,18 @@ fn save_task_inner(
             .map(|t| t.created_at.clone())
             .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
         args_json,
-        param_signature: signature.clone(),
+        param_signature: signature,
     };
-    if let Err(e) = db.upsert_task(&task) {
-        return ApiError::internal(e.to_string()).into_response();
-    }
-    Json(serde_json::json!({
-        "ok": true,
-        "id": task.id,
-        "args": parsed_args,
-        "param_signature": signature,
-    }))
-    .into_response()
+    Ok(task)
 }
 
 pub(super) async fn api_delete_task(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
-    let db = st.db.clone();
-    match run_blocking_api(move || {
-        db.delete_task(&id)
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await
-    {
+    match st.db.delete_task_async(&id).await {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(err) => err.into_response(),
+        Err(err) => ApiError::internal(err.to_string()).into_response(),
     }
 }
 
@@ -344,15 +334,9 @@ pub(super) async fn api_run_task_now(
 ) -> Response {
     use crate::scheduler::RunNowError;
     let trigger_started = Instant::now();
-    let db = st.db.clone();
-    let tasks = match run_blocking_api(move || {
-        db.list_tasks()
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await
-    {
+    let tasks = match st.db.list_tasks_async().await {
         Ok(tasks) => tasks,
-        Err(err) => return err.into_response(),
+        Err(err) => return ApiError::internal(err.to_string()).into_response(),
     };
     let Some(task) = tasks.into_iter().find(|t| t.id == id) else {
         return ApiError::not_found("任务不存在").into_response();

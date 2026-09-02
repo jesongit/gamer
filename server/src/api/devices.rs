@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use super::common::{err_response, require_pkg, run_blocking_api, validate_text_field};
+use super::common::{err_response, require_pkg, validate_text_field};
 use super::{ApiError, AppState};
 use crate::device::DeviceManager;
-use crate::store::{Db, Device, ScreenMode};
+use crate::store::{Device, ScreenMode};
 
 // ---------- 设备 ----------
 
@@ -107,18 +107,21 @@ pub(super) async fn api_list_devices(State(st): State<AppState>) -> Response {
     }
 }
 
-/// 渲染设备列表视图（带运行时状态/分辨率）。SQLite 查询和同步快照均在
-/// API blocking 边界内完成；数据库失败必须向调用方返回 500，而不是伪装成空列表。
+/// 渲染设备列表视图（带运行时状态/分辨率）。数据库查询走异步 worker RPC，
+/// 数据库失败必须向调用方返回 500，而不是伪装成空列表。
 async fn device_views(st: &AppState) -> Result<Vec<DeviceView>, ApiError> {
-    let db = st.db.clone();
-    let devices = st.devices.clone();
-    run_blocking_api(move || render_device_views(&db, &devices)).await
+    let devices_snapshot = st
+        .db
+        .list_devices_async()
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+    render_device_views(&devices_snapshot, &st.devices)
 }
 
-fn render_device_views(db: &Db, devices: &Arc<DeviceManager>) -> Result<Vec<DeviceView>, ApiError> {
-    let devices_snapshot = db
-        .list_devices()
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+fn render_device_views(
+    devices_snapshot: &[Device],
+    devices: &Arc<DeviceManager>,
+) -> Result<Vec<DeviceView>, ApiError> {
     let mut out = Vec::new();
     for d in devices_snapshot {
         let (_, status, error) = devices
@@ -131,9 +134,9 @@ fn render_device_views(db: &Db, devices: &Arc<DeviceManager>) -> Result<Vec<Devi
             .unwrap_or((0, 0));
         out.push(DeviceView {
             id: d.id.clone(),
-            name: d.name,
-            kind: d.kind,
-            addr: d.addr,
+            name: d.name.clone(),
+            kind: d.kind.clone(),
+            addr: d.addr.clone(),
             screen_mode: match d.screen_mode {
                 ScreenMode::Mirror => "mirror".into(),
                 ScreenMode::Virtual => "virtual".into(),
@@ -223,16 +226,9 @@ pub(super) async fn api_update_device(
     if let Err(err) = validate_device_req(&req) {
         return err.into_response();
     }
-    let db = st.db.clone();
-    let lookup_id = id.clone();
-    let existing = match run_blocking_api(move || {
-        db.get_device(&lookup_id)
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await
-    {
+    let existing = match st.db.get_device_async(&id).await {
         Ok(existing) => existing,
-        Err(err) => return err.into_response(),
+        Err(err) => return ApiError::internal(err.to_string()).into_response(),
     };
     let Some(existing) = existing else {
         return ApiError::not_found("设备不存在").into_response();
@@ -302,16 +298,10 @@ pub(super) async fn api_device_apps(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
-    let db = st.db.clone();
-    let device = match run_blocking_api(move || {
-        db.get_device(&id)
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await
-    {
+    let device = match st.db.get_device_async(&id).await {
         Ok(Some(device)) => device,
         Ok(None) => return ApiError::not_found("设备不存在").into_response(),
-        Err(err) => return err.into_response(),
+        Err(err) => return ApiError::internal(err.to_string()).into_response(),
     };
     let serial = if device.addr.is_empty() {
         "usb".to_string()

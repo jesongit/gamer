@@ -78,7 +78,7 @@ impl Scheduler {
             let mut tick = tokio::time::interval(Duration::from_secs(10));
             loop {
                 tick.tick().await;
-                let tasks = match db.list_tasks() {
+                let tasks = match db.list_tasks_async().await {
                     Ok(t) => t,
                     Err(e) => {
                         error!("list tasks failed: {}", e);
@@ -256,7 +256,7 @@ async fn dispatch(
         record_scheduler_trigger_latency(&metrics, scheduled_at);
     }
     if let Some(scheduled_at) = scheduled_at {
-        match db.claim_scheduled_run(&task.id, scheduled_at) {
+        match db.claim_scheduled_run_async(&task.id, scheduled_at).await {
             Ok(true) => {}
             Ok(false) => {
                 debug!(
@@ -290,8 +290,8 @@ async fn dispatch(
                 "scheduled skip: script not found"
             );
             record_scheduler_event(&metrics, SchedulerEvent::Failed);
-            finish_scheduled_run(db, task, scheduled_at, "failed", None, Some("脚本不存在"));
-            mark_task_result(db, task, "失败", Some("任务执行失败: 脚本不存在"));
+            finish_scheduled_run(db, task, scheduled_at, "failed", None, Some("脚本不存在")).await;
+            mark_task_result(db, task, "失败", Some("任务执行失败: 脚本不存在")).await;
             return;
         }
         Err(err @ GateError::ScriptInvalid(_)) => {
@@ -302,8 +302,9 @@ async fn dispatch(
                 "scheduled skip: script invalid"
             );
             record_scheduler_event(&metrics, SchedulerEvent::Failed);
-            finish_scheduled_run(db, task, scheduled_at, "failed", None, Some("脚本解析失败"));
-            mark_task_result(db, task, "失败", Some("任务执行失败: 脚本解析失败"));
+            finish_scheduled_run(db, task, scheduled_at, "failed", None, Some("脚本解析失败"))
+                .await;
+            mark_task_result(db, task, "失败", Some("任务执行失败: 脚本解析失败")).await;
             return;
         }
         Err(ref err @ GateError::SignatureMismatch { ref stored, .. }) => {
@@ -317,13 +318,15 @@ async fn dispatch(
                 "scheduled skip: task params stale, reconfirm required"
             );
             record_scheduler_event(&metrics, SchedulerEvent::Failed);
-            finish_scheduled_run(db, task, scheduled_at, "failed", None, Some(&err.message()));
+            finish_scheduled_run(db, task, scheduled_at, "failed", None, Some(&err.message()))
+                .await;
             mark_task_result(
                 db,
                 task,
                 "失败",
                 Some(&format!("任务执行失败: {}", err.message())),
-            );
+            )
+            .await;
             return;
         }
     };
@@ -343,13 +346,14 @@ async fn dispatch(
                 "scheduled trigger skipped: device busy"
             );
             record_scheduler_event(&metrics, SchedulerEvent::Conflict);
-            finish_scheduled_run(db, task, scheduled_at, "skipped", None, Some("设备忙"));
+            finish_scheduled_run(db, task, scheduled_at, "skipped", None, Some("设备忙")).await;
             mark_task_result(
                 db,
                 task,
                 "失败",
                 Some("任务执行失败: 设备忙（跳过本次触发）"),
-            );
+            )
+            .await;
         }
         Err(StartError::ShuttingDown) => {
             warn!(task = %task.name, "scheduled trigger dropped: server draining");
@@ -361,7 +365,8 @@ async fn dispatch(
                 "skipped",
                 None,
                 Some("服务正在关闭"),
-            );
+            )
+            .await;
         }
     }
 }
@@ -408,22 +413,25 @@ async fn submit_run(
 }
 
 /// 任务结果落库：更新 last_result / last_run_at + 可选摘要日志
-fn mark_task_result(db: &Db, task: &Task, result: &str, summary_log: Option<&str>) {
+async fn mark_task_result(db: &Db, task: &Task, result: &str, summary_log: Option<&str>) {
     if let Some(msg) = summary_log {
-        let _ = db.add_log(&task.device_id, &task.script_id, "error", msg);
+        let _ = db
+            .add_log_async(&task.device_id, &task.script_id, "error", msg)
+            .await;
     }
     upsert_task_result(db, &task.id, |t| {
         t.last_result = Some(result.to_string());
         t.last_run_at = Some(now_utc_string());
-    });
+    })
+    .await;
 }
 
 fn now_utc_string() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn upsert_task_result(db: &Db, task_id: &str, apply: impl FnOnce(&mut Task)) {
-    let mut t = match db.list_tasks() {
+async fn upsert_task_result(db: &Db, task_id: &str, apply: impl FnOnce(&mut Task)) {
+    let mut t = match db.list_tasks_async().await {
         Ok(ts) => match ts.into_iter().find(|x| x.id == task_id) {
             Some(task) => task,
             None => return,
@@ -434,7 +442,7 @@ fn upsert_task_result(db: &Db, task_id: &str, apply: impl FnOnce(&mut Task)) {
         }
     };
     apply(&mut t);
-    if let Err(e) = db.upsert_task(&t) {
+    if let Err(e) = db.upsert_task_async(&t).await {
         error!(task = %task_id, err = %e, "update task result failed");
     }
 }
@@ -443,10 +451,7 @@ fn upsert_task_result(db: &Db, task_id: &str, apply: impl FnOnce(&mut Task)) {
 /// （调度批量模式 realtime_logs=false，引擎日志未实时入库，由这里统一写入）
 fn task_finish_hook(db: Db, task_id: String, scheduled_at: Option<i64>) -> FinishHook {
     Arc::new(move |rec, outcome| {
-        let logs = outcome.logs();
-        for (level, msg) in logs {
-            let _ = db.add_log(&rec.device_id, &rec.script_id, level, msg);
-        }
+        let logs = outcome.logs().to_vec();
         let has_error =
             matches!(outcome, RunOutcome::Failed(_, _)) || logs.iter().any(|(l, _)| l == "error");
         let label = match outcome {
@@ -454,26 +459,46 @@ fn task_finish_hook(db: Db, task_id: String, scheduled_at: Option<i64>) -> Finis
             _ if has_error => "失败",
             _ => "成功",
         };
-        if let Some(scheduled_at) = scheduled_at {
-            let state = match outcome {
-                RunOutcome::Cancelled(_) => "skipped",
-                _ if has_error => "failed",
-                _ => "success",
-            };
-            let error = match outcome {
-                RunOutcome::Failed(msg, _) => Some(msg.as_str()),
-                RunOutcome::Cancelled(_) => Some("运行被取消"),
-                RunOutcome::Success(_) => None,
-            };
-            let _ =
-                db.finish_scheduled_run(&task_id, scheduled_at, state, Some(&rec.run_id), error);
-        }
         let rid = rec.run_id.clone();
-        upsert_task_result(&db, &task_id, |t| {
-            t.last_result = Some(label.to_string());
-            t.last_run_at = Some(now_utc_string());
+        let db = db.clone();
+        let device_id = rec.device_id.clone();
+        let script_id = rec.script_id.clone();
+        let run_id = rec.run_id.clone();
+        let scheduled_at = scheduled_at;
+        let task_id_for_log = task_id.clone();
+        let result_label = label.to_string();
+        let scheduled_state = match outcome {
+            RunOutcome::Cancelled(_) => "skipped",
+            _ if has_error => "failed",
+            _ => "success",
+        };
+        let scheduled_error = match outcome {
+            RunOutcome::Failed(msg, _) => Some(msg.clone()),
+            RunOutcome::Cancelled(_) => Some("运行被取消".to_string()),
+            RunOutcome::Success(_) => None,
+        };
+        tokio::spawn(async move {
+            for (level, msg) in logs {
+                let _ = db.add_log_async(&device_id, &script_id, &level, &msg).await;
+            }
+            if let Some(scheduled_at) = scheduled_at {
+                let _ = db
+                    .finish_scheduled_run_async(
+                        &task_id_for_log,
+                        scheduled_at,
+                        scheduled_state,
+                        Some(&run_id),
+                        scheduled_error.as_deref(),
+                    )
+                    .await;
+            }
+            upsert_task_result(&db, &task_id_for_log, |t| {
+                t.last_result = Some(result_label);
+                t.last_run_at = Some(now_utc_string());
+            })
+            .await;
+            debug!(%task_id_for_log, %rid, result = label, "task finish hook applied");
         });
-        debug!(%task_id, %rid, result = label, "task finish hook applied");
     })
 }
 
@@ -492,7 +517,7 @@ fn latest_due_trigger(sched: &Schedule, now: DateTime<Local>) -> Option<DateTime
     sched.after(&window_start).take_while(|t| *t <= now).last()
 }
 
-fn finish_scheduled_run(
+async fn finish_scheduled_run(
     db: &Db,
     task: &Task,
     scheduled_at: Option<i64>,
@@ -501,7 +526,10 @@ fn finish_scheduled_run(
     error: Option<&str>,
 ) {
     if let Some(scheduled_at) = scheduled_at {
-        if let Err(e) = db.finish_scheduled_run(&task.id, scheduled_at, state, run_id, error) {
+        if let Err(e) = db
+            .finish_scheduled_run_async(&task.id, scheduled_at, state, run_id, error)
+            .await
+        {
             error!(task = %task.name, scheduled_at, err = %e, "finish scheduled run failed");
         }
     }
@@ -524,13 +552,16 @@ async fn watch_scheduled_completion(
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
         };
-        let changed = match db.finish_scheduled_run(
-            &task.id,
-            scheduled_at,
-            state,
-            Some(&run_id),
-            rec.error.as_deref(),
-        ) {
+        let changed = match db
+            .finish_scheduled_run_async(
+                &task.id,
+                scheduled_at,
+                state,
+                Some(&run_id),
+                rec.error.as_deref(),
+            )
+            .await
+        {
             Ok(changed) => changed,
             Err(e) => {
                 error!(task = %task.name, %run_id, err = %e, "scheduled completion persistence failed");
@@ -547,7 +578,8 @@ async fn watch_scheduled_completion(
             upsert_task_result(&db, &task.id, |t| {
                 t.last_result = Some(label.to_string());
                 t.last_run_at = Some(now_utc_string());
-            });
+            })
+            .await;
         }
         return;
     }

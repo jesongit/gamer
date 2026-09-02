@@ -445,11 +445,11 @@ impl ViewerSession {
             running,
             ts_base: Arc::new(Mutex::new(None)),
             last_ts: Arc::new(Mutex::new(0)),
-            config_nalu: Arc::new(Mutex::new(initial_frames.as_ref().and_then(|f| {
-                f.iter()
-                    .find(|x| x.is_config)
-                    .map(|x| Bytes::from(x.data.clone()))
-            }))),
+            config_nalu: Arc::new(Mutex::new(
+                initial_frames
+                    .as_ref()
+                    .and_then(|f| f.iter().find(|x| x.is_config).map(|x| x.data.clone())),
+            )),
             last_serve: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             answer: answer_sdp,
             peer_closed_rx,

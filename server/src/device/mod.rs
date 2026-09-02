@@ -85,7 +85,7 @@ fn save_pending(data_dir: &std::path::Path, map: &HashMap<String, PendingRestore
         Ok(s) => {
             // 统一原子写（DATA-001）：崩溃自愈标记不允许半写状态——进程被硬杀时
             // 读到残缺 JSON 会让兜底恢复漏掉设备侧改写（freezer/静音回不来）
-            if let Err(e) = crate::scripts::atomic_write(&p, s.as_bytes()) {
+            if let Err(e) = crate::core::fs::atomic_write(&p, s.as_bytes()) {
                 warn!("pending_restore.json 写入失败: {}", e);
             }
         }
@@ -269,7 +269,7 @@ impl DeviceManager {
     }
 
     pub async fn start(self: &Arc<Self>) -> anyhow::Result<()> {
-        let list = self.db.list_devices()?;
+        let list = self.db.list_devices_async().await?;
         for d in list {
             self.devices.write().insert(
                 d.id.clone(),
@@ -323,7 +323,7 @@ impl DeviceManager {
 
     /// 娉ㄥ唽/鏇存柊璁惧
     pub async fn upsert_device(&self, device: &Device) -> anyhow::Result<()> {
-        self.db.upsert_device(device)?;
+        self.db.upsert_device_async(device).await?;
         self.devices
             .write()
             .entry(device.id.clone())
@@ -343,7 +343,7 @@ impl DeviceManager {
 
     pub async fn delete_device(&self, id: &str) -> anyhow::Result<()> {
         self.disconnect_device(id, true).await;
-        self.db.delete_device(id)?;
+        self.db.delete_device_async(id).await?;
         self.devices.write().remove(id);
         self.idle.lock().unwrap().remove(id);
         Ok(())
@@ -924,7 +924,7 @@ impl DeviceManager {
             .adb
             .run(&["devices", "-l"], Duration::from_secs(10))
             .await?;
-        let mut existing = self.db.list_devices()?;
+        let mut existing = self.db.list_devices_async().await?;
         let mut added = 0usize;
         for line in out.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();

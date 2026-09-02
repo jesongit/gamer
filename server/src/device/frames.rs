@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use parking_lot::{Mutex, RwLock};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -114,7 +115,7 @@ struct FrameKey {
 #[derive(Clone)]
 struct FrameSnapshot {
     key: FrameKey,
-    config: Vec<u8>,
+    config: Bytes,
     gop: Vec<VideoFrame>,
     /// Sequence of the most recently received frame when this snapshot was taken.
     frame_sequence: u64,
@@ -134,8 +135,10 @@ struct DecodedResultCacheEntry {
 }
 
 struct FrameState {
-    config_buf: Vec<u8>,
+    config_buf: Bytes,
     gop: Vec<VideoFrame>,
+    /// Total encoded bytes currently retained by `gop`; maintained incrementally.
+    gop_bytes: usize,
     /// Counts every received video frame, including repeated config frames.
     frame_sequence: u64,
     /// Advances when a decodable GOP is replaced or invalidated, not for ordinary P frames.
@@ -147,8 +150,9 @@ struct FrameState {
 impl FrameState {
     fn new() -> Self {
         Self {
-            config_buf: Vec::new(),
+            config_buf: Bytes::new(),
             gop: Vec::new(),
+            gop_bytes: 0,
             frame_sequence: 0,
             snapshot_generation: 0,
             config_generation: 0,
@@ -328,6 +332,7 @@ impl FrameCache {
                 // （repeat-previous-headers 会周期性重发相同参数集，字节相同则不清）
                 if !state.config_buf.is_empty() {
                     state.gop.clear();
+                    state.gop_bytes = 0;
                     // OBS-003：参数集切换清空 GOP → gauge 归零（多设备时为最后
                     // 更新者的快照，进程级单 gauge 的简化取舍）
                     self.metrics.set_gop_size(0, 0);
@@ -346,15 +351,25 @@ impl FrameCache {
         // GOP 缓存维护：IDR 清空重建；P 帧追加；超限丢弃整个 GOP（等待下一个 IDR）
         if frame.is_keyframe {
             state.gop.clear();
+            state.gop_bytes = 0;
             state.gop.push(frame.clone());
-            // OBS-003：GOP 起点 gauge（1 帧 = IDR 自身）
-            self.metrics.set_gop_size(1, frame.data.len() as i64);
-            state.snapshot_changed(sequence);
+            state.gop_bytes = frame.data.len();
+            if state.gop_bytes > GOP_MAX_BYTES {
+                state.gop.clear();
+                state.gop_bytes = 0;
+                self.metrics.set_gop_size(0, 0);
+                state.snapshot_changed(sequence);
+            } else {
+                // OBS-003：GOP 起点 gauge（1 帧 = IDR 自身）
+                self.metrics.set_gop_size(1, frame.data.len() as i64);
+                state.snapshot_changed(sequence);
+            }
         } else if !state.gop.is_empty() {
             state.gop.push(frame.clone());
-            let total: usize = state.gop.iter().map(|f| f.data.len()).sum();
-            if state.gop.len() > GOP_MAX_FRAMES || total > GOP_MAX_BYTES {
+            state.gop_bytes = state.gop_bytes.saturating_add(frame.data.len());
+            if state.gop.len() > GOP_MAX_FRAMES || state.gop_bytes > GOP_MAX_BYTES {
                 state.gop.clear();
+                state.gop_bytes = 0;
                 // OBS-003：超限整 GOP 丢弃 → gauge 归零
                 self.metrics.set_gop_size(0, 0);
                 // A discarded GOP is no longer a decodable snapshot, so invalidate any
@@ -362,9 +377,9 @@ impl FrameCache {
                 // generation: they must not make a live decode stale on every video tick.
                 state.snapshot_changed(sequence);
             } else {
-                // OBS-003：GOP 帧数/字节 gauge（跟随现有 O(GOP) 求和，不额外加重）
+                // OBS-003：GOP 帧数/字节 gauge（字节数由上面的增量计数维护）
                 self.metrics
-                    .set_gop_size(state.gop.len() as i64, total as i64);
+                    .set_gop_size(state.gop.len() as i64, state.gop_bytes as i64);
             }
         }
     }
@@ -426,6 +441,7 @@ impl FrameCache {
         let mut state = self.state.lock();
         if !state.gop.is_empty() && state.key() == key {
             state.gop.clear();
+            state.gop_bytes = 0;
             // OBS-003：解码失败清空当前 GOP → gauge 归零
             self.metrics.set_gop_size(0, 0);
             FrameState::next_counter(&mut state.snapshot_generation);
@@ -543,9 +559,10 @@ impl FrameCache {
         let cache = FrameCache::start_with(ffmpeg, configured_decode_freshness(), metrics);
         {
             let mut state = cache.state.lock();
-            state.config_buf = config.to_vec();
+            state.config_buf = Bytes::copy_from_slice(config);
             state.config_generation = 1;
             state.gop = gop.to_vec();
+            state.gop_bytes = state.gop.iter().map(|frame| frame.data.len()).sum();
             state.snapshot_generation = 1;
             state.frame_sequence = gop.len() as u64;
             state.latest_frame_at = Some(Instant::now());
@@ -710,12 +727,6 @@ impl FrameCache {
     ) -> anyhow::Result<Vec<u8>> {
         let spawn_started = Instant::now();
         let n = gop.len().saturating_sub(1);
-        let mut input =
-            Vec::with_capacity(config.len() + gop.iter().map(|f| f.data.len()).sum::<usize>());
-        input.extend_from_slice(config);
-        for f in gop {
-            input.extend_from_slice(&f.data);
-        }
         let filter = format!("select=gte(n\\,{})", n);
         let spawned = tokio::process::Command::new(ffmpeg)
             .args([
@@ -759,9 +770,15 @@ impl FrameCache {
         // 写输入与读输出并发：若先写完再读，ffmpeg 输出管道满时会堵住解码（死锁）
         let write = async move {
             stdin
-                .write_all(&input)
+                .write_all(config)
                 .await
                 .map_err(|e| anyhow::anyhow!("写入 ffmpeg stdin 失败: {}", e))?;
+            for frame in gop {
+                stdin
+                    .write_all(&frame.data)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("写入 ffmpeg stdin 失败: {}", e))?;
+            }
             drop(stdin); // 关闭 stdin → ffmpeg 读到 EOF
             Ok::<_, anyhow::Error>(Instant::now())
         };
@@ -873,6 +890,7 @@ mod tests {
 
     use super::{read_child_output, FrameCache, FrameKey, InFlight};
     use crate::device::scrcpy::VideoFrame;
+    use bytes::Bytes;
     use std::io;
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -916,6 +934,49 @@ mod tests {
         assert_eq!((snap.gop_frames, snap.gop_bytes), (0, 0));
     }
 
+    #[test]
+    fn gop_byte_limit_keeps_exact_boundary_and_clears_after_crossing() {
+        let cache =
+            FrameCache::start_with_metrics("ffmpeg", Arc::new(crate::metrics::Metrics::default()));
+        let keyframe = VideoFrame {
+            data: Bytes::from(vec![0; super::GOP_MAX_BYTES - 1]),
+            pts_us: 0,
+            is_config: false,
+            is_keyframe: true,
+            annex_b: true,
+        };
+        cache.feed(&keyframe);
+        cache.feed(&video_frame(1, false, false));
+        {
+            let state = cache.state.lock();
+            assert_eq!(state.gop_bytes, super::GOP_MAX_BYTES);
+            assert_eq!(state.gop.len(), 2);
+        }
+
+        // The first byte over the cap discards the whole GOP, including its
+        // incrementally maintained byte count.
+        cache.feed(&video_frame(2, false, false));
+        let state = cache.state.lock();
+        assert!(state.gop.is_empty());
+        assert_eq!(state.gop_bytes, 0);
+    }
+
+    #[test]
+    fn frame_and_gop_snapshot_clones_share_encoded_payload() {
+        let cache =
+            FrameCache::start_with_metrics("ffmpeg", Arc::new(crate::metrics::Metrics::default()));
+        let config = video_frame(7, true, false);
+        let keyframe = video_frame(8, false, true);
+        cache.feed(&config);
+        cache.feed(&keyframe);
+
+        let frame_clone = keyframe.clone();
+        assert_eq!(keyframe.data.as_ptr(), frame_clone.data.as_ptr());
+        let initial = cache.initial_frames().expect("initial frame snapshot");
+        assert_eq!(config.data.as_ptr(), initial[0].data.as_ptr());
+        assert_eq!(keyframe.data.as_ptr(), initial[1].data.as_ptr());
+    }
+
     /// OBS-003：解码失败计入 ffmpeg_decode 失败分类（不起真实 ffmpeg：
     /// 不存在的可执行文件在 spawn 阶段失败，走同一采集函数）
     #[tokio::test]
@@ -957,7 +1018,7 @@ mod tests {
 
     fn video_frame(data: u8, is_config: bool, is_keyframe: bool) -> VideoFrame {
         VideoFrame {
-            data: vec![data],
+            data: Bytes::from(vec![data]),
             pts_us: 0,
             is_config,
             is_keyframe,
@@ -1615,7 +1676,7 @@ mod tests {
             }
             if first_slice && current_has_slice {
                 frames.push(VideoFrame {
-                    data: std::mem::take(&mut current),
+                    data: Bytes::from(std::mem::take(&mut current)),
                     pts_us: frames.len() as u64 * 33_333,
                     is_config: false,
                     is_keyframe: current_is_keyframe,
@@ -1632,7 +1693,7 @@ mod tests {
         }
         if !current.is_empty() {
             frames.push(VideoFrame {
-                data: current,
+                data: Bytes::from(current),
                 pts_us: frames.len() as u64 * 33_333,
                 is_config: false,
                 is_keyframe: current_is_keyframe,

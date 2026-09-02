@@ -5,7 +5,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 
-use super::common::run_blocking_api;
 use super::{ApiError, AppState};
 
 // ---------- 日志 ----------
@@ -31,30 +30,22 @@ pub(super) async fn api_list_logs(
     State(st): State<AppState>,
     Query(q): Query<LogQuery>,
 ) -> Response {
-    let db = st.db.clone();
     let device_id = q.device_id;
     let level = q.level;
     let limit = clamp_log_limit(q.limit);
-    match run_blocking_api(move || {
-        db.list_logs(device_id.as_deref(), level.as_deref(), limit)
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await
+    match st
+        .db
+        .list_logs_async(device_id.as_deref(), level.as_deref(), limit)
+        .await
     {
         Ok(logs) => Json(logs).into_response(),
-        Err(err) => err.into_response(),
+        Err(err) => ApiError::internal(err.to_string()).into_response(),
     }
 }
 
 pub(super) async fn api_clear_logs(State(st): State<AppState>) -> Response {
-    let db = st.db.clone();
-    match run_blocking_api(move || {
-        db.clear_logs()
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await
-    {
+    match st.db.clear_logs_async().await {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
-        Err(err) => err.into_response(),
+        Err(err) => ApiError::internal(err.to_string()).into_response(),
     }
 }

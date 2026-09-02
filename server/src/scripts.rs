@@ -19,13 +19,18 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
-use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Serialize, Serializer};
 
 use crate::config::Config;
+use crate::core::fs::archive_validation::{
+    IMPORT_MAX_ARCHIVE_BYTES, IMPORT_MAX_ENTRIES, IMPORT_MAX_TMPL_BYTES, IMPORT_MAX_TOTAL_BYTES,
+    IMPORT_MAX_YAML_BYTES,
+};
+#[cfg(test)]
+use crate::core::fs::atomic_write_with_replace_err;
+use crate::core::fs::safe_name as sanitize_part;
+use crate::core::fs::{atomic_write, content_version, is_windows_reserved_name};
 
 fn format_script_errors(errors: &[crate::script_v2::ScriptError]) -> String {
     errors
@@ -34,127 +39,6 @@ fn format_script_errors(errors: &[crate::script_v2::ScriptError]) -> String {
         .collect::<Vec<_>>()
         .join("；")
 }
-
-/// 将一个文件以“同目录临时文件 + flush/sync + replace”方式写入。
-///
-/// 临时文件和目标文件必须位于同一文件系统，这样最后的替换才是原子的；
-/// 写入或替换失败时只清理临时文件，不触碰已有目标文件。
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    atomic_write_with(path, bytes, replace_file)
-}
-
-#[cfg(test)]
-fn atomic_write_with_replace_err(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    atomic_write_with(path, bytes, |_temp, _path| {
-        Err(std::io::Error::other("injected replace failure"))
-    })
-}
-
-fn atomic_write_with(
-    path: &Path,
-    bytes: &[u8],
-    replace: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
-) -> anyhow::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("目标路径没有父目录: {}", path.display()))?;
-    std::fs::create_dir_all(parent)?;
-
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| anyhow::anyhow!("目标文件名无效: {}", path.display()))?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    let mut temp = None;
-    let mut file = None;
-    for attempt in 0..16u32 {
-        let candidate = parent.join(format!(
-            ".{name}.tmp-{}-{nonce}-{attempt}",
-            std::process::id()
-        ));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(f) => {
-                temp = Some(candidate);
-                file = Some(f);
-                break;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.into()),
-        }
-    }
-    let temp = temp.ok_or_else(|| anyhow::anyhow!("无法创建临时文件: {}", path.display()))?;
-    let mut file = file.expect("临时文件句柄必须与路径同时创建");
-    let result = (|| -> anyhow::Result<()> {
-        file.write_all(bytes)?;
-        file.flush()?;
-        file.sync_all()?;
-        drop(file);
-        #[cfg(windows)]
-        let _guard = replace_lock().lock().unwrap();
-        replace(&temp, path)?;
-        sync_parent(parent)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result
-}
-
-#[cfg(not(windows))]
-fn replace_file(temp: &Path, path: &Path) -> std::io::Result<()> {
-    std::fs::rename(temp, path)
-}
-
-#[cfg(windows)]
-fn replace_file(temp: &Path, path: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn MoveFileExW(existing: *const u16, replacement: *const u16, flags: u32) -> i32;
-    }
-
-    let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
-    let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-    let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) };
-    if ok == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-fn sync_parent(parent: &Path) -> std::io::Result<()> {
-    std::fs::File::open(parent)?.sync_all()
-}
-
-#[cfg(windows)]
-fn replace_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-#[cfg(not(unix))]
-fn sync_parent(_parent: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
-/// ZIP 导入资源硬限（阶段 2 SEC-004；传输层另有 20MiB body 闸门）
-pub const IMPORT_MAX_ARCHIVE_BYTES: usize = 20 * 1024 * 1024; // 压缩包 ≤20MiB
-pub const IMPORT_MAX_TOTAL_BYTES: usize = 100 * 1024 * 1024; // 总解压量 ≤100MiB
-pub const IMPORT_MAX_ENTRIES: usize = 500; // 条目数 ≤500
-pub const IMPORT_MAX_YAML_BYTES: usize = 1024 * 1024; // 单 YAML ≤1MiB
-pub const IMPORT_MAX_TMPL_BYTES: usize = 10 * 1024 * 1024; // 单模板 ≤10MiB
 
 /// 磁盘上的一个脚本文件（id = `<pkg>/<name>`，name 含 .yaml/.yml 扩展名；package 字段 = 应用分区）
 #[derive(Debug, Clone)]
@@ -206,35 +90,6 @@ pub struct FunctionFile {
     pub updated_at: String,
 }
 
-/// 内容版本短码：SHA-256 前 12 位 hex（ETag 语义；内容不变 → 版本不变）
-pub fn content_version(content: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(content.as_bytes());
-    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    hex[..12].to_string()
-}
-
-/// 校验路径部件（应用包名 / 脚本文件名）：
-/// 允许 unicode 字母数字与 `. - _`；禁止空、路径分隔符、`..`、前导点
-pub fn sanitize_part(s: &str) -> Option<String> {
-    let t = s.trim();
-    if t.is_empty()
-        || t == "."
-        || t == ".."
-        || t.starts_with('.')
-        || t.ends_with('.')
-        || is_windows_reserved_name(t)
-    {
-        return None;
-    }
-    if t.chars()
-        .any(|c| !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_')))
-    {
-        return None;
-    }
-    Some(t.to_string())
-}
-
 /// 校验模板文件名：允许 unicode 字母数字与 `. - _ #`（模板名可带 #x1_y1_x2_y2 区域后缀）、空格
 fn sanitize_template_name(s: &str) -> Option<String> {
     let t = s.trim();
@@ -270,35 +125,6 @@ enum TplMatch {
 
 /// Windows 会把这些名字（包括带扩展名的形式）解析为设备文件；统一拒绝
 /// 可移植存储中对应的 basename，避免 Linux 上创建后在 Windows 产生歧义。
-fn is_windows_reserved_name(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or(name);
-    matches!(
-        stem.to_ascii_uppercase().as_str(),
-        "CON"
-            | "PRN"
-            | "AUX"
-            | "NUL"
-            | "COM1"
-            | "COM2"
-            | "COM3"
-            | "COM4"
-            | "COM5"
-            | "COM6"
-            | "COM7"
-            | "COM8"
-            | "COM9"
-            | "LPT1"
-            | "LPT2"
-            | "LPT3"
-            | "LPT4"
-            | "LPT5"
-            | "LPT6"
-            | "LPT7"
-            | "LPT8"
-            | "LPT9"
-    )
-}
-
 fn parse_script_id(id: &str) -> Option<(String, String)> {
     let (pkg, name) = id.split_once('/')?;
     Some((sanitize_part(pkg)?, sanitize_part(name)?))

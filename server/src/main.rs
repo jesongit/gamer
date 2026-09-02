@@ -16,9 +16,9 @@
 mod api;
 mod app_packages;
 mod build_info;
-mod core;
 pub(crate) mod capabilities;
 mod config;
+mod core;
 mod deps_probe;
 mod device;
 mod engine;
@@ -485,14 +485,12 @@ async fn run_log_retention(
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                let db = db.clone();
-                match tokio::task::spawn_blocking(move || db.prune_logs(retain_days)).await {
-                    Ok(Ok(deleted)) if deleted > 0 => {
+                match db.prune_logs_async(retain_days).await {
+                    Ok(deleted) if deleted > 0 => {
                         info!(deleted, retain_days, "periodic run log cleanup removed expired rows");
                     }
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => warn!(error = %e, "periodic run log cleanup failed"),
-                    Err(e) => warn!(error = %e, "run log cleanup worker failed"),
+                    Ok(_) => {}
+                    Err(e) => warn!(error = %e, "periodic run log cleanup failed"),
                 }
             }
             _ = shutdown.changed() => {

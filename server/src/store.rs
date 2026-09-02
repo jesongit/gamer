@@ -5,7 +5,7 @@
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use chrono::{Local, Utc};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 use crate::config::Config;
 use crate::metrics::Metrics;
@@ -113,19 +114,33 @@ struct LogRecord {
 
 struct PendingLog {
     record: LogRecord,
-    completion: Option<Sender<anyhow::Result<()>>>,
+    completion: Option<oneshot::Sender<anyhow::Result<()>>>,
 }
 
 enum DbCommand {
     Call {
         task: DbTask,
-        reply: Sender<ErasedDbResult>,
+        reply: oneshot::Sender<ErasedDbResult>,
     },
     Log {
         record: LogRecord,
-        completion: Option<Sender<anyhow::Result<()>>>,
+        completion: Option<oneshot::Sender<anyhow::Result<()>>>,
     },
     Shutdown,
+}
+
+/// Wait for a compatibility RPC from synchronous code. Tokio forbids
+/// `oneshot::Receiver::blocking_recv` on a runtime worker, so legacy sync
+/// callers use a tiny waiter thread when they happen to run under Tokio.
+fn blocking_recv_compat<T: Send + 'static>(receiver: oneshot::Receiver<T>) -> Option<T> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::spawn(move || receiver.blocking_recv())
+            .join()
+            .ok()
+            .and_then(Result::ok)
+    } else {
+        receiver.blocking_recv().ok()
+    }
 }
 
 /// 数据库主文件路径（DATA-005 maintenance CLI 与 Store::open 共用同一取值，
@@ -560,6 +575,10 @@ impl Drop for Store {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "synchronous compatibility adapters remain for startup and non-Tokio callers"
+)]
 impl Store {
     pub fn open(cfg: &Config) -> anyhow::Result<Self> {
         std::fs::create_dir_all(&cfg.data_dir)?;
@@ -613,15 +632,40 @@ impl Store {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> anyhow::Result<T> + Send + 'static,
     {
-        let (reply_tx, reply_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = oneshot::channel();
         let task: DbTask =
             Box::new(move |conn| task(conn).map(|value| Box::new(value) as Box<dyn Any + Send>));
         self.enqueue(DbCommand::Call {
             task,
             reply: reply_tx,
         })?;
+        let result = blocking_recv_compat(reply_rx)
+            .ok_or_else(|| anyhow::anyhow!("database worker stopped before replying"))??;
+        result
+            .downcast::<T>()
+            .map(|value| *value)
+            .map_err(|_| anyhow::anyhow!("database worker returned an unexpected result type"))
+    }
+
+    /// Async DB RPC boundary. The worker remains a single synchronous SQLite owner;
+    /// only the caller-side reply wait is asynchronous. A full bounded queue is
+    /// submitted from Tokio's blocking pool so queue backpressure cannot block a
+    /// Tokio worker thread.
+    async fn request_async<T, F>(&self, task: F) -> anyhow::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> anyhow::Result<T> + Send + 'static,
+    {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let task: DbTask =
+            Box::new(move |conn| task(conn).map(|value| Box::new(value) as Box<dyn Any + Send>));
+        self.enqueue_async(DbCommand::Call {
+            task,
+            reply: reply_tx,
+        })
+        .await?;
         let result = reply_rx
-            .recv()
+            .await
             .map_err(|_| anyhow::anyhow!("database worker stopped before replying"))??;
         result
             .downcast::<T>()
@@ -648,6 +692,18 @@ impl Store {
             anyhow::bail!("database worker is not running");
         }
         Ok(())
+    }
+
+    async fn enqueue_async(&self, command: DbCommand) -> anyhow::Result<()> {
+        self.metrics.db_enqueue();
+        let tx = self.tx.clone();
+        match tokio::task::spawn_blocking(move || tx.send(command)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) | Err(_) => {
+                self.metrics.db_dequeue();
+                anyhow::bail!("database worker is not running")
+            }
+        }
     }
 
     // ---------- 设备 ----------
@@ -747,6 +803,103 @@ impl Store {
         })
     }
 
+    pub async fn list_devices_async(&self) -> anyhow::Result<Vec<Device>> {
+        self.request_async(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at FROM devices ORDER BY created_at",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(Device {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    kind: r.get(2)?,
+                    addr: r.get(3)?,
+                    screen_mode: match r.get::<_, String>(4)?.as_str() {
+                        "virtual" => ScreenMode::Virtual,
+                        _ => ScreenMode::Mirror,
+                    },
+                    vd_res: r.get(5)?,
+                    vd_dpi: r.get(6)?,
+                    pkg: r.get(7)?,
+                    fps: r.get(8)?,
+                    created_at: r.get(9)?,
+                })
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    pub async fn get_device_async(&self, id: &str) -> anyhow::Result<Option<Device>> {
+        let id = id.to_string();
+        self.request_async(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at \
+                 FROM devices WHERE id = ?1",
+            )?;
+            match stmt.query_row([id], |r| {
+                Ok(Device {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    kind: r.get(2)?,
+                    addr: r.get(3)?,
+                    screen_mode: match r.get::<_, String>(4)?.as_str() {
+                        "virtual" => ScreenMode::Virtual,
+                        _ => ScreenMode::Mirror,
+                    },
+                    vd_res: r.get(5)?,
+                    vd_dpi: r.get(6)?,
+                    pkg: r.get(7)?,
+                    fps: r.get(8)?,
+                    created_at: r.get(9)?,
+                })
+            }) {
+                Ok(device) => Ok(Some(device)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await
+    }
+
+    pub async fn upsert_device_async(&self, d: &Device) -> anyhow::Result<()> {
+        let d = d.clone();
+        self.request_async(move |conn| {
+            conn.execute(
+                r#"INSERT INTO devices (id, name, kind, addr, screen_mode, vd_res, vd_dpi, pkg, fps, created_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                   ON CONFLICT(id) DO UPDATE SET
+                     name=?2, kind=?3, addr=?4, screen_mode=?5, vd_res=?6, vd_dpi=?7, pkg=?8, fps=?9"#,
+                rusqlite::params![
+                    d.id,
+                    d.name,
+                    d.kind,
+                    d.addr,
+                    match d.screen_mode {
+                        ScreenMode::Mirror => "mirror",
+                        ScreenMode::Virtual => "virtual",
+                    },
+                    d.vd_res,
+                    d.vd_dpi,
+                    d.pkg,
+                    d.fps,
+                    d.created_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn delete_device_async(&self, id: &str) -> anyhow::Result<()> {
+        let id = id.to_string();
+        self.request_async(move |conn| {
+            conn.execute("DELETE FROM devices WHERE id = ?1", [id])?;
+            Ok(())
+        })
+        .await
+    }
+
     // ---------- 定时任务 ----------
 
     pub fn list_tasks(&self) -> anyhow::Result<Vec<Task>> {
@@ -830,6 +983,90 @@ impl Store {
         })
     }
 
+    pub async fn list_tasks_async(&self) -> anyhow::Result<Vec<Task>> {
+        self.request_async(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, cron, script_id, device_id, enabled, last_result, last_run_at, created_at, args_json, param_signature FROM tasks ORDER BY created_at",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(Task {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    cron: r.get(2)?,
+                    script_id: r.get(3)?,
+                    device_id: r.get(4)?,
+                    enabled: r.get::<_, i64>(5)? != 0,
+                    last_result: r.get(6)?,
+                    last_run_at: r.get(7)?,
+                    created_at: r.get(8)?,
+                    args_json: r.get(9)?,
+                    param_signature: r.get(10)?,
+                })
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    pub async fn get_task_async(&self, id: &str) -> anyhow::Result<Option<Task>> {
+        let id = id.to_string();
+        self.request_async(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, cron, script_id, device_id, enabled, last_result, last_run_at, created_at, args_json, param_signature FROM tasks WHERE id = ?1",
+            )?;
+            match stmt.query_row([id], |r| {
+                Ok(Task {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    cron: r.get(2)?,
+                    script_id: r.get(3)?,
+                    device_id: r.get(4)?,
+                    enabled: r.get::<_, i64>(5)? != 0,
+                    last_result: r.get(6)?,
+                    last_run_at: r.get(7)?,
+                    created_at: r.get(8)?,
+                    args_json: r.get(9)?,
+                    param_signature: r.get(10)?,
+                })
+            }) {
+                Ok(task) => Ok(Some(task)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })
+        .await
+    }
+
+    pub async fn upsert_task_async(&self, t: &Task) -> anyhow::Result<()> {
+        validate_task_snapshot(&t.args_json, &t.param_signature)?;
+        let t = t.clone();
+        self.request_async(move |conn| {
+            conn.execute(
+                r#"INSERT INTO tasks (id, name, cron, script_id, device_id, enabled, last_result, last_run_at, created_at, args_json, param_signature)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                   ON CONFLICT(id) DO UPDATE SET
+                     name=?2, cron=?3, script_id=?4, device_id=?5, enabled=?6, last_result=?7, last_run_at=?8, args_json=?10, param_signature=?11"#,
+                rusqlite::params![
+                    t.id, t.name, t.cron, t.script_id, t.device_id,
+                    if t.enabled { 1 } else { 0 },
+                    t.last_result, t.last_run_at, t.created_at,
+                    t.args_json, t.param_signature,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn delete_task_async(&self, id: &str) -> anyhow::Result<()> {
+        let id = id.to_string();
+        self.request_async(move |conn| {
+            conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+            Ok(())
+        })
+        .await
+    }
+
     // ---------- 定时触发幂等记录 ----------
 
     /// 原子领取一个计划触发点。返回 true 表示本次调用取得执行权；false 表示
@@ -872,6 +1109,50 @@ impl Store {
             )?;
             Ok(changed == 1)
         })
+    }
+
+    pub async fn claim_scheduled_run_async(
+        &self,
+        task_id: &str,
+        scheduled_at: i64,
+    ) -> anyhow::Result<bool> {
+        let created_at = Utc::now().to_rfc3339();
+        let task_id = task_id.to_string();
+        self.request_async(move |conn| {
+            let changed = conn.execute(
+                r#"INSERT INTO scheduled_runs
+                       (task_id, scheduled_at, state, created_at)
+                   VALUES (?1, ?2, 'running', ?3)
+                   ON CONFLICT(task_id, scheduled_at) DO NOTHING"#,
+                rusqlite::params![task_id, scheduled_at, created_at],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
+    pub async fn finish_scheduled_run_async(
+        &self,
+        task_id: &str,
+        scheduled_at: i64,
+        state: &str,
+        run_id: Option<&str>,
+        error: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let task_id = task_id.to_string();
+        let state = state.to_string();
+        let run_id = run_id.map(str::to_string);
+        let error = error.map(str::to_string);
+        self.request_async(move |conn| {
+            let changed = conn.execute(
+                r#"UPDATE scheduled_runs
+                      SET state = ?3, run_id = COALESCE(?4, run_id), error = ?5
+                    WHERE task_id = ?1 AND scheduled_at = ?2 AND state = 'running'"#,
+                rusqlite::params![task_id, scheduled_at, state, run_id, error],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
     }
 
     #[cfg(test)]
@@ -921,7 +1202,7 @@ impl Store {
         let critical = matches!(level.to_ascii_lowercase().as_str(), "success" | "error");
         let is_debug = level.eq_ignore_ascii_case("debug");
         let (completion, completion_rx) = if critical {
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = oneshot::channel();
             (Some(tx), Some(rx))
         } else {
             (None, None)
@@ -946,8 +1227,57 @@ impl Store {
             anyhow::bail!("database worker is not running");
         }
         if let Some(reply) = completion_rx {
+            blocking_recv_compat(reply)
+                .ok_or_else(|| anyhow::anyhow!("database worker stopped before log flush"))??;
+        }
+        Ok(())
+    }
+
+    pub async fn add_log_async(
+        &self,
+        device_id: &str,
+        script_id: &str,
+        level: &str,
+        msg: &str,
+    ) -> anyhow::Result<()> {
+        let record = LogRecord {
+            time: chrono::Local::now()
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string(),
+            device_id: device_id.to_string(),
+            script_id: script_id.to_string(),
+            level: level.to_string(),
+            msg: sanitize_log_message(msg),
+        };
+        let critical = matches!(level.to_ascii_lowercase().as_str(), "success" | "error");
+        let is_debug = level.eq_ignore_ascii_case("debug");
+        let (completion, completion_rx) = if critical {
+            let (tx, rx) = oneshot::channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        let command = DbCommand::Log { record, completion };
+        if is_debug && !critical {
+            self.metrics.db_enqueue();
+            match self.tx.try_send(command) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_command)) => {
+                    self.metrics.db_dequeue();
+                    self.metrics.db_drop_debug_log();
+                    return Ok(());
+                }
+                Err(TrySendError::Disconnected(_command)) => {
+                    self.metrics.db_dequeue();
+                    anyhow::bail!("database worker is not running");
+                }
+            }
+        } else {
+            self.enqueue_async(command).await?;
+        }
+        if let Some(reply) = completion_rx {
             reply
-                .recv()
+                .await
                 .map_err(|_| anyhow::anyhow!("database worker stopped before log flush"))??;
         }
         Ok(())
@@ -998,11 +1328,65 @@ impl Store {
         })
     }
 
+    pub async fn list_logs_async(
+        &self,
+        device_id: Option<&str>,
+        level: Option<&str>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<LogEntry>> {
+        let device_id = device_id.map(str::to_string);
+        let level = level.map(str::to_string);
+        self.request_async(move |conn| {
+            let mut sql =
+                String::from("SELECT id, time, device_id, script_id, level, msg FROM logs");
+            let mut conds = Vec::new();
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(d) = device_id {
+                conds.push("device_id = ?".to_string());
+                params.push(Box::new(d));
+            }
+            if let Some(l) = level {
+                conds.push("level = ?".to_string());
+                params.push(Box::new(l));
+            }
+            if !conds.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&conds.join(" AND "));
+            }
+            sql.push_str(" ORDER BY id DESC LIMIT ?");
+            params.push(Box::new(limit));
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                |r| {
+                    Ok(LogEntry {
+                        id: r.get(0)?,
+                        time: r.get(1)?,
+                        device_id: r.get(2)?,
+                        script_id: r.get(3)?,
+                        level: r.get(4)?,
+                        msg: r.get(5)?,
+                    })
+                },
+            )?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
     pub fn clear_logs(&self) -> anyhow::Result<()> {
         self.request(|conn| {
             conn.execute("DELETE FROM logs", [])?;
             Ok(())
         })
+    }
+
+    pub async fn clear_logs_async(&self) -> anyhow::Result<()> {
+        self.request_async(|conn| {
+            conn.execute("DELETE FROM logs", [])?;
+            Ok(())
+        })
+        .await
     }
 
     /// 运行健康探测：只做一个极轻量的数据库 round-trip，不暴露底层错误给 HTTP 客户端。
@@ -1011,6 +1395,14 @@ impl Store {
             conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?;
             Ok(())
         })
+    }
+
+    pub async fn health_check_async(&self) -> anyhow::Result<()> {
+        self.request_async(|conn| {
+            conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?;
+            Ok(())
+        })
+        .await
     }
 
     /// 获取低基数行数指标。表名是代码内固定值，查询不接受外部输入。
@@ -1033,6 +1425,28 @@ impl Store {
                 },
             )?)
         })
+    }
+
+    pub async fn metrics_snapshot_async(&self) -> anyhow::Result<StoreMetrics> {
+        self.request_async(|conn| {
+            Ok(conn.query_row(
+                "SELECT\
+                    (SELECT COUNT(*) FROM devices),\
+                    (SELECT COUNT(*) FROM tasks),\
+                    (SELECT COUNT(*) FROM logs),\
+                    (SELECT COUNT(*) FROM scheduled_runs)",
+                [],
+                |r| {
+                    Ok(StoreMetrics {
+                        devices: r.get(0)?,
+                        tasks: r.get(1)?,
+                        logs: r.get(2)?,
+                        scheduled_runs: r.get(3)?,
+                    })
+                },
+            )?)
+        })
+        .await
     }
 
     /// 分批删除过期日志，避免一次大事务长时间占用数据库锁。
@@ -1101,6 +1515,71 @@ impl Store {
         })
     }
 
+    pub async fn prune_logs_async(&self, retain_days: u32) -> anyhow::Result<u64> {
+        if retain_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = (Local::now() - chrono::Duration::days(retain_days as i64))
+            .format("%Y-%m-%d %H:%M:%S%.3f")
+            .to_string();
+        self.request_async(move |conn| {
+            let mut total = 0u64;
+            let mut batches = 0u64;
+            let mut first_deleted_id = None;
+            let mut last_deleted_id = None;
+            loop {
+                let ids = {
+                    let mut stmt =
+                        conn.prepare("SELECT id FROM logs WHERE time < ?1 ORDER BY id LIMIT ?2")?;
+                    let rows = stmt.query_map(
+                        rusqlite::params![cutoff.as_str(), LOG_PRUNE_BATCH_SIZE],
+                        |r| r.get::<_, i64>(0),
+                    )?;
+                    rows.collect::<Result<Vec<_>, _>>()?
+                };
+                if ids.is_empty() {
+                    break;
+                }
+                let batch_first_id = ids[0];
+                let batch_last_id = *ids.last().unwrap();
+                first_deleted_id.get_or_insert(batch_first_id);
+                last_deleted_id = Some(batch_last_id);
+                let placeholders = std::iter::repeat_n("?", ids.len())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!("DELETE FROM logs WHERE id IN ({placeholders})");
+                let deleted = conn.execute(&sql, rusqlite::params_from_iter(ids.iter()))?;
+                total += deleted as u64;
+                batches += 1;
+                tracing::info!(
+                    retain_days,
+                    cutoff = %cutoff,
+                    batch = batches,
+                    deleted_rows = deleted,
+                    id_start = batch_first_id,
+                    id_end = batch_last_id,
+                    "expired run logs removed"
+                );
+                if deleted < LOG_PRUNE_BATCH_SIZE as usize {
+                    break;
+                }
+            }
+            if total > 0 {
+                tracing::info!(
+                    retain_days,
+                    cutoff = %cutoff,
+                    batches,
+                    deleted_rows = total,
+                    id_start = first_deleted_id.unwrap_or_default(),
+                    id_end = last_deleted_id.unwrap_or_default(),
+                    "expired run logs cleanup finished"
+                );
+            }
+            Ok(total)
+        })
+        .await
+    }
+
     /// 手动维护动作（DATA-004）：VACUUM 重建数据库文件、回收已删除行占用的页。
     /// VACUUM 需要独占锁且耗时，故放入 DB worker 线程串行执行——与 worker 内
     /// 其它操作天然互斥，也不阻塞异步调用侧。返回 vacuum 前后的文件字节数
@@ -1130,6 +1609,33 @@ impl Store {
                 after_bytes: after,
             })
         })
+    }
+
+    pub async fn vacuum_async(&self) -> anyhow::Result<VacuumReport> {
+        let path = self.path.clone();
+        self.request_async(move |conn| {
+            let file_bytes = |p: &Path| -> u64 {
+                let wal = PathBuf::from(format!("{}-wal", p.display()));
+                std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+                    + std::fs::metadata(&wal).map(|m| m.len()).unwrap_or(0)
+            };
+            let before = file_bytes(&path);
+            conn.execute_batch("VACUUM")?;
+            if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+                tracing::warn!(error = %e, "vacuum 后 WAL checkpoint 失败（不影响 VACUUM 结果）");
+            }
+            let after = file_bytes(&path);
+            tracing::info!(
+                before_bytes = before,
+                after_bytes = after,
+                "database vacuum finished"
+            );
+            Ok(VacuumReport {
+                before_bytes: before,
+                after_bytes: after,
+            })
+        })
+        .await
     }
 
     #[cfg(test)]

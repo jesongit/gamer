@@ -240,7 +240,7 @@ pub(super) async fn api_create_template(
         }
         std::fs::create_dir_all(&dir).map_err(|e| ApiError::internal(e.to_string()))?;
         let path = dir.join(&name);
-        crate::scripts::atomic_write(&path, &bytes)
+        crate::core::fs::atomic_write(&path, &bytes)
             .map_err(|e| ApiError::internal(e.to_string()))?;
         // 覆盖上传成功后主动失效该路径的模板预处理缓存（PERF-002；
         // mtime/size/hash 兜底仍在）。失败路径不失效。
@@ -307,7 +307,7 @@ pub(super) async fn api_replace_template_image(
         if !path.is_file() {
             return Err(ApiError::not_found("模板不存在"));
         }
-        crate::scripts::atomic_write(&path, &bytes)
+        crate::core::fs::atomic_write(&path, &bytes)
             .map_err(|e| ApiError::internal(e.to_string()))?;
         matcher::invalidate_template_cache_path(&path);
         Ok(Json(serde_json::json!({

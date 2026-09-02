@@ -58,7 +58,7 @@ pub struct GateDeps {
 async fn gate_health_ready(State(deps): State<GateDeps>) -> Response {
     let data_dir_ok = deps.cfg.data_dir.is_dir();
     let scrcpy_ok = deps.cfg.scrcpy_server.is_file();
-    let db_ok = deps.db.health_check().is_ok();
+    let db_ok = deps.db.health_check_async().await.is_ok();
     let body = serde_json::json!({
         "ready": false,
         "checks": {

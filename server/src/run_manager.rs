@@ -777,7 +777,16 @@ impl RunExecutor for EngineExecutor {
                 let device_id = req.device_id.clone();
                 let script_id = req.target.label();
                 Some(Arc::new(move |level, msg| {
-                    let _ = db.add_log(&device_id, &script_id, &level, &msg);
+                    let db = db.clone();
+                    let device_id = device_id.clone();
+                    let script_id = script_id.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) =
+                            db.add_log_async(&device_id, &script_id, &level, &msg).await
+                        {
+                            tracing::warn!(%error, "runtime log write failed");
+                        }
+                    });
                 }))
             } else {
                 None

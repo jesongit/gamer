@@ -69,18 +69,35 @@ fn manual_finish_hook(db: Db) -> crate::run_manager::FinishHook {
     use crate::run_manager::RunOutcome;
     Arc::new(move |rec, outcome| match outcome {
         RunOutcome::Success(_) => {
-            let _ = db.add_log(&rec.device_id, &rec.script_id, "success", "脚本执行完成");
+            let db = db.clone();
+            let device_id = rec.device_id.clone();
+            let script_id = rec.script_id.clone();
+            tokio::spawn(async move {
+                let _ = db
+                    .add_log_async(&device_id, &script_id, "success", "脚本执行完成")
+                    .await;
+            });
         }
         RunOutcome::Failed(msg, _) => {
-            let _ = db.add_log(
-                &rec.device_id,
-                &rec.script_id,
-                "error",
-                &format!("脚本执行失败: {}", msg),
-            );
+            let db = db.clone();
+            let device_id = rec.device_id.clone();
+            let script_id = rec.script_id.clone();
+            let message = format!("脚本执行失败: {}", msg);
+            tokio::spawn(async move {
+                let _ = db
+                    .add_log_async(&device_id, &script_id, "error", &message)
+                    .await;
+            });
         }
         RunOutcome::Cancelled(_) => {
-            let _ = db.add_log(&rec.device_id, &rec.script_id, "info", "脚本已停止");
+            let db = db.clone();
+            let device_id = rec.device_id.clone();
+            let script_id = rec.script_id.clone();
+            tokio::spawn(async move {
+                let _ = db
+                    .add_log_async(&device_id, &script_id, "info", "脚本已停止")
+                    .await;
+            });
         }
     })
 }

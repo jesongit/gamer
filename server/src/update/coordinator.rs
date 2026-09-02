@@ -132,7 +132,7 @@ impl Coordinator {
                 self.service.cached_state()
             }
         };
-        let workload = self.service.workload_snapshot();
+        let workload = self.service.workload_snapshot().await;
         let decision = decide(
             policy.strategy,
             policy.in_maintenance_window(self.clock.now_minutes_of_day()),

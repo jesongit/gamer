@@ -113,8 +113,8 @@ impl UpdateService {
         self.controller.capabilities() != Capabilities::NONE
     }
 
-    fn audit(&self, level: &str, msg: &str) {
-        if let Err(e) = self.db.add_log("system", "update", level, msg) {
+    async fn audit(&self, level: &str, msg: &str) {
+        if let Err(e) = self.db.add_log_async("system", "update", level, msg).await {
             tracing::warn!(error = %e, "update audit log write failed");
         }
     }
@@ -142,8 +142,11 @@ impl UpdateService {
     }
 
     /// 实时空闲快照（协调器评估用；§4.3 门禁与 auto 判定的统一输入）
-    pub fn workload_snapshot(&self) -> Workload {
-        (self.workload)()
+    pub async fn workload_snapshot(&self) -> Workload {
+        let workload = self.workload.clone();
+        tokio::task::spawn_blocking(move || workload())
+            .await
+            .unwrap_or_default()
     }
 
     /// 从 controller 拉一次 launcher journal 并入缓存。通道不通时保留缓存并
@@ -245,8 +248,10 @@ impl UpdateService {
         // §4.3 install 门禁：任一不满足 → 409 update_not_ready + blocking 全量
         // （viewer 在线不是硬门禁——由协调器经优雅停机链路处理）
         let policy = self.policy.get().await;
-        let mut blocking: Vec<InstallBlocking> =
-            (self.workload)().install_blockings(policy.freeze_minutes);
+        let mut blocking: Vec<InstallBlocking> = self
+            .workload_snapshot()
+            .await
+            .install_blockings(policy.freeze_minutes);
         // staging 完好性：staged/waiting 才视为就位；failed 态 staging 完整性
         // 未经验证（失败可能发生在下载/验签），保守要求重新下载
         if !matches!(state, UpdateState::Staged | UpdateState::Waiting) {
@@ -280,7 +285,8 @@ impl UpdateService {
                 "update install accepted (id={}): entering installing, handoff to launcher",
                 update_id.as_deref().unwrap_or("-")
             ),
-        );
+        )
+        .await;
 
         // 后台整备：202 已先行返回；launcher 受理后接管停机（它调 /api/shutdown
         // 优雅 drain 本进程 → 快照/迁移/切换/候选启动）。被拒 → failed + 错误码。
@@ -383,21 +389,27 @@ impl InstallBackground {
     async fn run(self) {
         match self.controller.prepare_install().await {
             Ok(_) => {
-                let _ = self.db.add_log(
-                    "system",
-                    "update",
-                    "info",
-                    "update prepare_install accepted: launcher takes over (drain/snapshot/switch)",
-                );
+                let _ = self
+                    .db
+                    .add_log_async(
+                        "system",
+                        "update",
+                        "info",
+                        "update prepare_install accepted: launcher takes over (drain/snapshot/switch)",
+                    )
+                    .await;
             }
             Err(e) => {
                 self.txn.end();
-                let _ = self.db.add_log(
-                    "system",
-                    "update",
-                    "error",
-                    &format!("update install failed: {} ({})", e.code.as_str(), e.message),
-                );
+                let _ = self
+                    .db
+                    .add_log_async(
+                        "system",
+                        "update",
+                        "error",
+                        &format!("update install failed: {} ({})", e.code.as_str(), e.message),
+                    )
+                    .await;
                 let mut cache = self.cache.lock().unwrap();
                 cache.status.state = Some(UpdateState::Failed);
                 cache.status.detail = Some("failed".into());

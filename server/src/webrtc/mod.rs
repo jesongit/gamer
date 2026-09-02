@@ -202,18 +202,11 @@ impl ViewerSession {
                     let mut ok = true;
                     for f in &frames {
                         if f.is_config {
-                            let _ = payloader.payload(1200, &Bytes::from(f.data.clone()));
+                            let _ = payloader.payload(1200, &f.data);
                             // SPS/PPS 独立单 NALU 包直接发送（见 send_config_nalus 注释：
                             // H264Payloader 的 STAP-A 在 IDR slice 超限时会静默丢弃参数集）。
-                            if !send_config_nalus(
-                                &track,
-                                &Bytes::from(f.data.clone()),
-                                payload_type,
-                                ssrc,
-                                &mut seq,
-                                0,
-                            )
-                            .await
+                            if !send_config_nalus(&track, &f.data, payload_type, ssrc, &mut seq, 0)
+                                .await
                             {
                                 ok = false;
                                 break;
@@ -816,7 +809,7 @@ async fn push_rtp(
     seq: &mut u16,
     ts: u32,
 ) -> (bool, usize) {
-    let payloads = match payloader.payload(1200, &Bytes::from(frame.data.clone())) {
+    let payloads = match payloader.payload(1200, &frame.data) {
         Ok(p) => p,
         Err(e) => {
             debug!("payload error: {}", e);

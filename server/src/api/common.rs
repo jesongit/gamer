@@ -70,6 +70,6 @@ pub(super) fn validate_text_field(
 pub(super) fn require_pkg(raw: Option<&str>) -> Result<String, ApiError> {
     raw.map(str::trim)
         .filter(|s| !s.is_empty())
-        .and_then(crate::scripts::sanitize_part)
+        .and_then(crate::core::fs::safe_name)
         .ok_or_else(|| ApiError::bad_request("应用包名非法（只允许字母数字 . _ -）"))
 }

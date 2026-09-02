@@ -16,7 +16,7 @@ use serde::Deserialize;
 use super::common::{require_pkg, run_blocking_api, validate_text_field};
 use super::templates::PkgQuery;
 use super::{ApiError, AppState};
-use crate::scripts::IMPORT_MAX_YAML_BYTES;
+use crate::core::fs::archive_validation::IMPORT_MAX_YAML_BYTES;
 
 /// 版本冲突 409：CONTRACT §5 错误结构（resource 级错误，step_path/field 留空）。
 /// scripts 与 functions 保存接口共用。

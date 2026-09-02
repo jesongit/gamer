@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::{Bytes, BytesMut};
 use parking_lot::Mutex;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -36,7 +37,9 @@ pub const ACTION_MOVE: u8 = 2;
 /// 一帧视频（H.264 Annex-B / 原始编码器输出）
 #[derive(Debug, Clone)]
 pub struct VideoFrame {
-    pub data: Vec<u8>,
+    /// Reference-counted encoded payload. Cloning a frame for the cache, queues, or
+    /// WebRTC fanout only clones this handle; the H.264 bytes are not copied.
+    pub data: Bytes,
     pub pts_us: u64,
     pub is_config: bool,
     pub is_keyframe: bool,
@@ -335,7 +338,6 @@ impl ScrcpySession {
         let s2 = session.clone();
         tokio::spawn(async move {
             let mut reader = video_reader;
-            let mut buf = Vec::with_capacity(256 * 1024);
             let mut frame_count: u64 = 0;
             // 诊断：前 200ms 不消费 video_tx（模拟背压前状态）
             loop {
@@ -361,14 +363,16 @@ impl ScrcpySession {
                     warn!(device = %s2.device.name, size, "oversized video packet, aborting");
                     break;
                 }
+                let mut buf = BytesMut::with_capacity(size);
                 buf.resize(size, 0);
-                match reader.read_exact(&mut buf).await {
+                match reader.read_exact(&mut buf[..]).await {
                     Ok(_) => {}
                     Err(e) => {
                         warn!(device = %s2.device.name, frames = frame_count, err = %e, "video socket closed mid-frame");
                         break;
                     }
                 }
+                let data = buf.freeze();
                 frame_count += 1;
                 s2.last_frame_at.store(
                     std::time::SystemTime::now()
@@ -378,7 +382,7 @@ impl ScrcpySession {
                     std::sync::atomic::Ordering::SeqCst,
                 );
                 let frame = VideoFrame {
-                    data: buf.clone(),
+                    data,
                     pts_us: pts_and_flags & !(PACKET_FLAG_CONFIG | PACKET_FLAG_KEY_FRAME),
                     is_config: pts_and_flags & PACKET_FLAG_CONFIG != 0,
                     is_keyframe: pts_and_flags & PACKET_FLAG_KEY_FRAME != 0,

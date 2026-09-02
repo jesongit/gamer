@@ -1,3 +1,4 @@
+pub(crate) mod fs;
 pub mod models;
 
 #[allow(

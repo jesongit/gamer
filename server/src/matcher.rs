@@ -1258,6 +1258,7 @@ impl Matcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use image::{Rgb, RgbImage};
     use std::hint::black_box;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1549,7 +1550,7 @@ mod tests {
             }
             if first_slice && current_has_slice {
                 frames.push(VideoFrame {
-                    data: std::mem::take(&mut current),
+                    data: Bytes::from(std::mem::take(&mut current)),
                     pts_us: frames.len() as u64 * 33_333,
                     is_config: false,
                     is_keyframe: current_is_keyframe,
@@ -1566,7 +1567,7 @@ mod tests {
         }
         if !current.is_empty() {
             frames.push(VideoFrame {
-                data: current,
+                data: Bytes::from(current),
                 pts_us: frames.len() as u64 * 33_333,
                 is_config: false,
                 is_keyframe: current_is_keyframe,
