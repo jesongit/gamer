@@ -54,6 +54,19 @@
       ⌨ {{ props.keymapStatus.name }}<span v-if="props.keymapStatus.inactive"> · 文本模式下映射不生效</span>
     </div>
 
+    <!-- UI Bridge overlays are host-rendered and cannot intercept device input. -->
+    <div v-if="props.bridgeOverlays.length" class="bridge-overlay-layer" aria-hidden="true">
+      <div
+        v-for="item in props.bridgeOverlays"
+        :key="item.id"
+        class="bridge-overlay"
+        :class="`bridge-overlay-${item.kind || 'region'}`"
+        :style="item.style"
+      >
+        <span v-if="item.label" class="bridge-overlay-label">{{ item.label }}</span>
+      </div>
+    </div>
+
     <!-- 放大预览镜 -->
     <div class="loupe" v-show="props.loupe.show" :style="{ left: props.loupe.x + 'px', top: props.loupe.y + 'px' }">
       <canvas ref="loupeCanvas" width="300" height="300"></canvas>
@@ -109,6 +122,7 @@ const props = defineProps({
   scriptFx: { type: Object, required: true },
   keymapOverlay: { type: Array, default: () => [] },
   keymapStatus: { type: Object, default: () => ({}) },
+  bridgeOverlays: { type: Array, default: () => [] },
   fxTapStyle: { type: Object, default: () => ({}) },
   fxSwipeStyle: { type: Object, default: () => ({}) },
   fxHitStyle: { type: Object, default: () => ({}) },
@@ -200,6 +214,11 @@ onMounted(() => {
 .keymap-label { position: absolute; left: 50%; top: -23px; transform: translateX(-50%); white-space: nowrap; padding: 2px 6px; border: 1px solid rgba(251,191,36,.55); border-radius: 5px; background: rgba(8,10,16,.82); color: #fde68a; font: 600 10px var(--mono); }
 .keymap-mark.active { filter: brightness(1.8); background: rgba(251,191,36,.44); }
 .keymap-status { position: absolute; left: 12px; top: 42px; z-index: 8; pointer-events: none; padding: 4px 8px; border: 1px solid rgba(251,191,36,.5); border-radius: 6px; background: rgba(8,10,16,.78); color: #fde68a; font: 11px var(--mono); }
+
+.bridge-overlay-layer { position:absolute; inset:0; z-index:8; pointer-events:none; }
+.bridge-overlay { position:absolute; border:2px solid var(--accent-2); background:rgba(56,189,248,.12); box-shadow:0 0 10px rgba(56,189,248,.25); }
+.bridge-overlay-point { width:14px; height:14px; border-radius:50%; transform:translate(-50%, -50%); }
+.bridge-overlay-label { position:absolute; top:-21px; left:0; padding:2px 5px; border-radius:4px; background:rgba(8,10,16,.82); color:var(--accent-2); font:11px var(--mono); white-space:nowrap; }
 
 .loupe {
   position: fixed; z-index: 200; width: 150px; height: 150px;

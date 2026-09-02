@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Gamer UI Bridge PoC</title></head>
+  <body>
+    <main style="font:12px system-ui;padding:12px;color:#d7e3e8;background:#10161b">
+      <strong>Sandbox iframe PoC</strong>
+      <p id="status">Connecting to gamer-ui@1…</p>
+      <button id="toast" type="button">Toast through Bridge</button>
+    </main>
+    <script>
+      (() => {
+        let port
+        let serial = 0
+        const status = document.querySelector('#status')
+        const request = (method, params) => new Promise((resolve, reject) => {
+          const id = `poc-${++serial}`
+          const onMessage = event => {
+            if (event.data?.id !== id) return
+            port.removeEventListener('message', onMessage)
+            event.data.ok ? resolve(event.data.result) : reject(new Error(event.data.error?.message || 'Bridge error'))
+          }
+          port.addEventListener('message', onMessage)
+          port.postMessage({ type: 'gamer-ui:request', version: 'gamer-ui@1', id, method, params })
+        })
+        window.addEventListener('message', event => {
+          if (event.source !== window.parent || event.data?.type !== 'gamer-ui:connect' || event.data.version !== 'gamer-ui@1' || !event.ports?.[0]) return
+          port = event.ports[0]
+          port.start()
+          status.textContent = 'Connected via MessageChannel (opaque sandbox origin)'
+          request('context.get').then(ctx => { status.textContent = `Connected · ${ctx.app?.package || 'no package'}` }).catch(() => {})
+        })
+        document.querySelector('#toast').addEventListener('click', () => request('toast.show', { message: 'iframe Bridge 正常工作', type: 'info' }))
+      })()
+    </script>
+  </body>
+</html>

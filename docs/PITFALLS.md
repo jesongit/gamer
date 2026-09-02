@@ -152,3 +152,6 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 
 - **PowerShell 用 `web-dist\*` 复制 Vite 产物会压平 `assets` 子目录，发布后 HTML 可打开但 JS/CSS 404**：改为复制整个目录并在打包复核中强制检查 `web-dist/assets`。
 - **Full 包只带程序和依赖会漏掉仓库内置 YAML、模板、函数库及 keymap，首次启动的数据目录为空**：打包时复制 `server/data` 下的分区目录，排除根级 SQLite 运行文件，并在解压复核中逐文件检查种子资源。
+- **sandbox iframe 的本地 PoC 若直接写源文件路径不会随 Vite 生产构建复制**：用 `?url` 导入生成 `web-dist/assets/iframe-poc-*.html`，Host 才能在开发与构建产物中复用同一静态 UI。
+- **多个 Phase 骨架以未提交状态同时存在时，cargo check/test 会先被前置模块的类型错误拦截**：本次工作树命中 Store oneshot、API 借用和 App Package 导出错误，模型层验收应先隔离工作树或合并前置改动。
+- **`web/package.json` 未提供 `lint` 脚本时直接运行 `pnpm lint` 会落到 PATH 中的 Android lint 并返回 usage**：本轮前端门禁以现有 `pnpm build`/`pnpm test:run` 为准，需另行引入 linter 才执行 JS lint。

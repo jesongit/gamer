@@ -74,7 +74,8 @@
         </div>
       </Teleport>
 
-      <ConsoleVideoStage
+      <DeviceStage
+        :bridge="deviceStageBridge"
         :connected="connected"
         :connecting="connecting"
         :error-msg="errorMsg"
@@ -93,6 +94,7 @@
         :script-fx="scriptFx"
         :keymap-overlay="keymapOverlay"
         :keymap-status="keymapStatus"
+        :bridge-overlays="bridgeOverlayView"
         :fx-tap-style="fxTapStyle"
         :fx-swipe-style="fxSwipeStyle"
         :fx-hit-style="fxHitStyle"
@@ -135,37 +137,29 @@
       @lostpointercapture="stopPanelResize"
       @keydown="onPanelResizeKeydown"
     ></div>
-    <!-- 右：功能区（模板/脚本/映射/日志/任务/设置六页签；二次裁切为弹窗，挂面板层级任何页签可见） -->
+    <!-- 右：动态 Extension Workspace；二次裁切弹窗仍挂在面板层级，任何页签可见。 -->
     <aside class="panel" :style="{ width: `${panelWidth}px` }">
-      <!-- 包名行：当前包名下拉 + 读取应用 + 导入/导出（所有资源与控制操作共用 activePkg） -->
-      <div class="func-pkg-row">
-        <select v-model="activePkg" class="select mono func-pkg" title="当前包名：脚本/函数库/模板和后续操作都使用此包名">
-          <option v-if="!pkgOptions.length" value="">（请选择包名）</option>
-          <option v-for="p in pkgOptions" :key="p" :value="p">{{ packageOptionLabel(p) }}</option>
-        </select>
-        <button class="btn btn-sm" :disabled="!current || appLoading" title="读取当前设备已安装应用并加入包名下拉" @click="loadApps">{{ appLoading ? '读取中…' : '🔄 读取应用' }}</button>
-        <button class="btn btn-sm" :disabled="!activePkg" title="导出当前应用分区快照（脚本/函数库/模板 zip）" @click="exportPartition">⬆ 导出</button>
-        <button class="btn btn-sm" :disabled="!activePkg" title="导入分区快照 zip 到当前应用分区" @click="impFile.click()">⬇ 导入</button>
-        <input ref="impFile" type="file" accept=".zip" hidden @change="onImportFile" />
-      </div>
-      <div class="func-tabs">
-        <button type="button" :class="{ active: panelTab === 'tpl' }" @click="panelTab = 'tpl'">🖼️ 模板</button>
-        <button type="button" :class="{ active: panelTab === 'script' }" @click="panelTab = 'script'">📜 脚本</button>
-        <button type="button" :class="{ active: panelTab === 'keymap' }" @click="panelTab = 'keymap'">⌨ 映射</button>
-        <button type="button" :class="{ active: panelTab === 'logs' }" @click="panelTab = 'logs'">日志</button>
-        <button type="button" :class="{ active: panelTab === 'tasks' }" @click="panelTab = 'tasks'">任务</button>
-        <button type="button" :class="{ active: panelTab === 'settings' }" @click="panelTab = 'settings'">设置</button>
-      </div>
-      <div v-show="panelTab === 'tpl'" class="panel-sec tpl-tab">
-        <TemplateCapture :context="templateCaptureContext" />
-      </div>
-      <div v-show="panelTab === 'script'" class="panel-sec script-tab">
-        <ScriptRunner :context="scriptRunnerContext" />
-      </div>
-      <div v-if="panelTab === 'keymap'" class="panel-sec extra-tab"><KeymapPanel :context="keymapPanelContext" /></div>
-      <div v-if="panelTab === 'logs'" class="panel-sec extra-tab"><LogsPanel /></div>
-      <div v-else-if="panelTab === 'tasks'" class="panel-sec extra-tab"><TaskBoard :active-pkg="activePkg" /></div>
-      <div v-else-if="panelTab === 'settings'" class="panel-sec extra-tab"><SystemPanel /></div>
+      <WorkspaceContextBar :context="workspaceContextBarContext" />
+      <PluginWorkspace
+        :registry="panelRegistry"
+        :active-panel="activePanelKey"
+        :context="workspaceContext"
+        :lifecycle="workspaceLifecycle"
+        @select="openPanel"
+        @fallback="fallbackPanel"
+      />
+      <!-- CorePanelHost now mounts these registry contributions. Kept in this
+           migration comment to document the old contracts for maintainers:
+           <div class="func-pkg-row"><select v-model="activePkg"></select>
+           <button @click="loadApps"></button><button @click="exportPartition"></button>
+           <input @change="onImportFile" /></div>
+           <TemplateCapture :context="templateCaptureContext" />
+           <ScriptRunner :context="scriptRunnerContext" />
+           <KeymapPanel :context="keymapPanelContext" />
+           <LogsPanel /> <TaskBoard :active-pkg="activePkg" /> <SystemPanel />
+           panelTab === 'tpl'; panelTab === 'script'; panelTab === 'keymap';
+           panelTab === 'logs'; panelTab === 'tasks'; panelTab === 'settings'.
+           The real mounts are registry-driven above. -->
       <!-- 二次裁切弹窗：挂面板层级（不在模板页签 v-show 内），从脚本编辑发起框选时不切页签 -->
       <TemplateCropModal :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
     </aside>
@@ -202,6 +196,7 @@ const APP_CACHE_TTL = 5 * 60 * 1000
 
 <script setup>
 import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted, provide } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { pinyin } from 'pinyin-pro'
 import { store, devicesData, scriptsData, templatesData, useToast, applyRunRecord, findRun, beginCancel, resetStoreRunState, pushRunConflict, appStartedDevices } from '../store'
 import { api, runPartitionImport } from '../api'
@@ -209,7 +204,13 @@ import {
   sourceLabel, terminalLabel,
   isDeviceBusyConflict, isTerminalRunState,
 } from '../runs'
-import ConsoleVideoStage from '../components/console/ConsoleVideoStage.vue'
+import DeviceStage from '../workspace/DeviceStage.vue'
+import WorkspaceContextBar from '../workspace/WorkspaceContextBar.vue'
+import PluginWorkspace from '../workspace/PluginWorkspace.vue'
+import { createPanelRegistry, DEFAULT_PANEL_KEY } from '../workspace/registry'
+import { registerCoreContributions } from '../workspace/core-contributions'
+import { createWorkspaceContext, PANEL_REGISTRY_KEY, WORKSPACE_CONTEXT_KEY } from '../workspace/context'
+import { createWorkspaceLifecycle } from '../workspace/lifecycle'
 import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
 import TemplateCropModal from '../components/console/TemplateCropModal.vue'
@@ -241,6 +242,8 @@ import {
 import { formatScreenSummary } from '../console/device-summary'
 
 const toast = useToast()
+const route = useRoute()
+const router = useRouter()
 
 // 侧边栏已移除：右侧面板默认 340px，宽度由分隔条手动调整。
 const superseded = ref(false)
@@ -515,8 +518,10 @@ const selScript = ref('')
 // 初始值仍可从旧设备记录的 pkg 恢复，兼容已有配置；切换 activePkg 不会启动应用。
 const activePkg = ref('')
 const scriptMode = ref('run')
-// 右侧功能区页签：模板 / 脚本 / 日志 / 任务 / 设置（资源页签共用分区行）
+// Workspace 以稳定的 pluginId:panelId 作为 URL key；panelTab 保留为旧上下文
+// 的兼容字段，实际导航由 activePanelKey + PanelRegistry 负责。
 const panelTab = ref('script')
+const activePanelKey = ref(DEFAULT_PANEL_KEY)
 // ---------- 共享脚本编辑器外壳（阶段 4） ----------
 // 模型/命令栈/dirty/保存/409 冲突/校验/跳转全部收敛在 useScriptEditorShell，
 // Console 的 ScriptRunner 编辑态使用同一共享核心（script-editor/*）。
@@ -769,9 +774,14 @@ let rawLogs = []
 // 本次运行开始时间：清空日志区后只显示本次运行产生的日志
 let runStartTime = 0
 const picking = ref(false)
+let bridgeRegionResolve = null
 const testThreshold = ref(0.8)
 // 模板匹配区域：'' = 默认（按模板名自动识别），否则 a/u/d/l/r/ul/ur/dl/dr（测试匹配与生成记录共用）
 const testRegion = ref('')
+// Host-owned overlays requested by sandbox UI; entries are plain data and
+// rendered by ConsoleVideoStage with pointer-events disabled.
+const bridgeOverlays = ref([])
+let bridgeOverlaySerial = 0
 // 模板列表：查看大图 / 删除二次确认 / 重命名
 const viewTpl = ref(null)
 const confirmDelTpl = ref(null)
@@ -1314,6 +1324,59 @@ function deviceRectStyle(x, y, w = 0, h = 0) {
   return mapDeviceRectStyle(x, y, w, h, rect, videoElement.value?.videoWidth, videoElement.value?.videoHeight)
 }
 
+function overlayRect(overlay) {
+  const item = overlay && typeof overlay === 'object' ? overlay : {}
+  const rect = item.rect && typeof item.rect === 'object' ? item.rect : item
+  let x = Number(rect.x || 0)
+  let y = Number(rect.y || 0)
+  let w = Number(rect.w ?? rect.width ?? 0)
+  let h = Number(rect.h ?? rect.height ?? 0)
+  const vw = videoElement.value?.videoWidth || 1920
+  const vh = videoElement.value?.videoHeight || 1080
+  if (item.normalized || rect.normalized) {
+    x *= vw; y *= vh; w *= vw; h *= vh
+  }
+  return { x, y, w, h }
+}
+
+function showBridgeOverlay(payload, meta = {}) {
+  const item = payload && typeof payload === 'object' ? payload : {}
+  const owner = `${meta.pluginId || 'anonymous'}:${meta.panelId || ''}`
+  const requestedId = String(item.id || `bridge-${++bridgeOverlaySerial}`)
+  const existing = bridgeOverlays.value.find(entry => entry.id === requestedId)
+  const id = existing && existing.owner !== owner ? `${owner}/${requestedId}` : requestedId
+  const next = { ...item, ...overlayRect(item), id, owner, label: String(item.label || '') }
+  bridgeOverlays.value = [...bridgeOverlays.value.filter(entry => entry.id !== id), next]
+  return id
+}
+
+function clearBridgeOverlay(payload, meta = {}) {
+  const id = typeof payload === 'object' && payload !== null ? payload.id : payload
+  const owner = `${meta.pluginId || 'anonymous'}:${meta.panelId || ''}`
+  if (id == null || id === '') {
+    bridgeOverlays.value = bridgeOverlays.value.filter(entry => entry.owner !== owner)
+    return true
+  }
+  const current = bridgeOverlays.value.find(entry => entry.id === String(id))
+  if (current && current.owner !== owner) return false
+  bridgeOverlays.value = bridgeOverlays.value.filter(entry => entry.id !== String(id))
+  return true
+}
+
+const bridgeOverlayView = computed(() => bridgeOverlays.value.map(item => ({
+  ...item,
+  style: bridgeOverlayStyle(item),
+})))
+
+function bridgeOverlayStyle(item) {
+  const style = deviceRectStyle(item.x, item.y, item.w, item.h)
+  if (item.kind === 'point') {
+    delete style.width
+    delete style.height
+  }
+  return style
+}
+
 function normalizedPoint(value) {
   if (Array.isArray(value) && value.length >= 2) {
     const x = Number(value[0]); const y = Number(value[1])
@@ -1841,6 +1904,7 @@ function togglePick() {
   picking.value = !picking.value
   if (!picking.value) {
     hideLoupe()
+    if (bridgeRegionResolve) { bridgeRegionResolve(null); bridgeRegionResolve = null }
     // 框选模式被手动关掉且未进入裁切 → 未完成的回填请求按取消处理
     if (cellCaptureResolve) { cellCaptureResolve(null); cellCaptureResolve = null }
   }
@@ -1852,6 +1916,15 @@ function onMouseUp(e) {
     picking.value = false
     hideLoupe()
     const rect = selToDeviceRect()
+    if (bridgeRegionResolve) {
+      const resolve = bridgeRegionResolve
+      bridgeRegionResolve = null
+      resolve(rect.w >= 8 && rect.h >= 8
+        ? { ...rect, width: videoElement.value?.videoWidth || 0, height: videoElement.value?.videoHeight || 0 }
+        : null)
+      if (rect.w < 8 || rect.h < 8) toast('框选区域太小，请重新框选', 'warn')
+      return
+    }
     if (rect.w >= 8 && rect.h >= 8) openCrop(rect)
     else toast('框选区域太小，请重新框选', 'warn')
     return
@@ -2423,6 +2496,20 @@ const cellPick = reactive({ mode: null, resolve: null }) // mode: 'coord' | 'col
 /** 进行中的「框选生成模板」回填 resolve（CellEditor captureTemplate 等待保存结果） */
 let cellCaptureResolve = null
 
+/** UI Bridge 的通用区域选择：只把设备像素矩形返回给调用方，不暴露视频 DOM。 */
+function selectRegionForBridge() {
+  if (!connected.value) {
+    toast('请先连接设备', 'error')
+    return Promise.resolve(null)
+  }
+  if (bridgeRegionResolve) bridgeRegionResolve(null)
+  if (cellPick.mode) cancelCellPick()
+  if (cellCaptureResolve) { cellCaptureResolve(null); cellCaptureResolve = null }
+  picking.value = true
+  toast('在画面上框选区域（Esc 取消）', 'info')
+  return new Promise(resolve => { bridgeRegionResolve = resolve })
+}
+
 function beginCellPick(mode) {
   if (!connected.value) {
     toast('请先连接设备', 'error')
@@ -2493,8 +2580,9 @@ provide('seCellTools', {
       toast('请先连接设备', 'error')
       return Promise.resolve(null)
     }
-    // 上一次未完成的框选（未保存也未取消）作废
-    if (cellCaptureResolve) cellCaptureResolve(null)
+     // 上一次未完成的框选（未保存也未取消）作废
+     if (cellCaptureResolve) cellCaptureResolve(null)
+     if (bridgeRegionResolve) { bridgeRegionResolve(null); bridgeRegionResolve = null }
     picking.value = true
     toast('在画面上框选模板区域，保存后自动填入', 'info')
     return new Promise((resolve) => { cellCaptureResolve = resolve })
@@ -2643,7 +2731,12 @@ function fileToBase64(file) {
 /** 全局按键：Esc 关闭工具条菜单 / 设备设置弹窗 / 模板大图 / 资源预览 / 取消删除确认 */
 function onGlobalKeydown(e) {
   if (e.key !== 'Escape') return
-  if (cellPick.mode) {
+  if (bridgeRegionResolve) {
+    bridgeRegionResolve(null)
+    bridgeRegionResolve = null
+    picking.value = false
+    hideLoupe()
+  } else if (cellPick.mode) {
     cancelCellPick()
   } else if (toolbarMoreOpen.value) {
     closeToolbarMore()
@@ -3591,6 +3684,79 @@ const keymapPanelContext = {
   },
 }
 
+// ---------- Frontend Plugin Workspace ----------
+// Core panels are contributions too: one plugin may register multiple panels,
+// and the workspace never needs to know a panel's component implementation.
+const workspaceLifecycle = createWorkspaceLifecycle()
+const panelRegistry = createPanelRegistry({ defaultPanelKey: DEFAULT_PANEL_KEY })
+const workspaceContextBarContext = {
+  activePkg, pkgOptions, current, appLoading, loadApps, packageOptionLabel,
+  exportPartition, openImport: () => impFile.value?.click(), onImportFile,
+}
+const workspaceContext = createWorkspaceContext({
+  device: current,
+  deviceId: computed(() => store.deviceId),
+  activePackage: activePkg,
+  connected,
+  stage: {
+    selectRegion: selectRegionForBridge,
+    pickPoint: () => beginCellPick('coord'),
+    overlay: { show: showBridgeOverlay, clear: clearBridgeOverlay },
+  },
+  openPanel,
+  toast,
+  dialogConfirm: message => window.confirm(message),
+  core: {
+    templateCapture: templateCaptureContext,
+    scriptRunner: scriptRunnerContext,
+    keymap: keymapPanelContext,
+    activePkg,
+  },
+})
+registerCoreContributions(panelRegistry, {
+  TemplateCapture, ScriptRunner, KeymapPanel, LogsPanel, TaskBoard, SystemPanel,
+}, {
+  templateCapture: templateCaptureContext,
+  scriptRunner: scriptRunnerContext,
+  keymap: keymapPanelContext,
+  activePkg,
+})
+const deviceStageBridge = workspaceContext.stage
+provide(PANEL_REGISTRY_KEY, panelRegistry)
+provide(WORKSPACE_CONTEXT_KEY, workspaceContext)
+
+function routePanelValue(value = route.query.panel) {
+  return Array.isArray(value) ? value[0] : value
+}
+
+function syncPanelFromRoute({ replaceInvalid = true } = {}) {
+  const requested = String(routePanelValue() || '')
+  const selected = panelRegistry.resolve(requested) || panelRegistry.defaultPanel()
+  const key = selected?.key || DEFAULT_PANEL_KEY
+  activePanelKey.value = key
+  panelTab.value = selected?.panelId || 'script'
+  if (replaceInvalid && requested !== key) {
+    router.replace({ path: route.path, query: { ...route.query, panel: key } })
+  }
+}
+
+function openPanel(panel, { replace = false } = {}) {
+  const selected = panelRegistry.resolve(panel) || panelRegistry.defaultPanel()
+  if (!selected) return null
+  if (activePanelKey.value === selected.key && String(routePanelValue() || '') === selected.key) return selected.key
+  activePanelKey.value = selected.key
+  panelTab.value = selected.panelId
+  const query = { ...route.query, panel: selected.key }
+  return router[replace ? 'replace' : 'push']({ path: route.path, query }).then(() => selected.key)
+}
+
+function fallbackPanel(key) {
+  if (panelRegistry.resolve(key)) openPanel(key, { replace: true })
+  else syncPanelFromRoute()
+}
+
+watch(() => route.query.panel, () => syncPanelFromRoute(), { immediate: true })
+
 /** 关页保护：有未保存修改时浏览器弹出确认 */
 function onBeforeUnload(e) {
   if ((scriptMode.value === 'edit' && scriptShell.hasModel && scriptShell.dirty)
@@ -3675,6 +3841,8 @@ onUnmounted(() => {
   if (fxSwipeTimer) { clearTimeout(fxSwipeTimer); fxSwipeTimer = null }
   if (fxHitTimer) { clearTimeout(fxHitTimer); fxHitTimer = null }
   if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null }
+  if (bridgeRegionResolve) { bridgeRegionResolve(null); bridgeRegionResolve = null }
+  bridgeOverlays.value = []
   stopRunStatusPoll()
   cleanup(true)
 })
