@@ -3,25 +3,25 @@ name: 默认方案
 bindings:
 - key: KeyW
   action:
-    type: tap
+    type: hold
     at:
-    - 0.1917
-    - 0.65
+    - 0.1891
+    - 0.6509
 - key: KeyA
   action:
-    type: tap
+    type: hold
     at:
-    - 0.1177
-    - 0.7722
+    - 0.125
+    - 0.7676
 - key: KeyD
   action:
-    type: tap
+    type: hold
     at:
-    - 0.263
-    - 0.7796
+    - 0.2724
+    - 0.7731
 - key: KeyS
   action:
-    type: tap
+    type: hold
     at:
-    - 0.1844
-    - 0.887
+    - 0.1969
+    - 0.8833

@@ -1150,6 +1150,18 @@ impl TouchState {
         Ok(())
     }
 
+    /// Return one still-active pointer after a release.  A few games stop
+    /// treating the remaining finger as held after an ACTION_POINTER_UP until
+    /// they receive a follow-up MOVE, so the control path uses this as a
+    /// re-anchor point for the remaining touch set.
+    fn first_active(&self) -> Option<(u64, f32, f32)> {
+        self.active
+            .lock()
+            .iter()
+            .next()
+            .map(|(&pointer_id, &(x, y))| (pointer_id, x, y))
+    }
+
     fn take_all(&self) -> Vec<(u64, f32, f32)> {
         std::mem::take(&mut *self.active.lock())
             .into_iter()
@@ -1285,7 +1297,25 @@ async fn handle_control_msg(
             match act {
                 crate::device::scrcpy::ACTION_DOWN => touch_state.insert(pointer_id, x, y)?,
                 crate::device::scrcpy::ACTION_MOVE => touch_state.update(pointer_id, x, y)?,
-                crate::device::scrcpy::ACTION_UP => touch_state.remove(pointer_id)?,
+                crate::device::scrcpy::ACTION_UP => {
+                    touch_state.remove(pointer_id)?;
+                    // Keep the remaining virtual key alive for games which
+                    // clear their directional state on POINTER_UP and only
+                    // rebuild it when the active pointer moves again.
+                    if let Some((remaining_id, remaining_x, remaining_y)) =
+                        touch_state.first_active()
+                    {
+                        session
+                            .inject_touch(
+                                crate::device::scrcpy::ACTION_MOVE,
+                                remaining_id,
+                                remaining_x,
+                                remaining_y,
+                                1.0,
+                            )
+                            .await?;
+                    }
+                }
                 _ => unreachable!(),
             }
         }
@@ -1572,6 +1602,17 @@ mod tests {
         assert_eq!(state.take_all(), vec![(2, 30.0, 40.0)]);
         assert!(!state.contains(2));
         assert!(state.remove(2).is_err());
+    }
+
+    #[test]
+    fn touch_state_exposes_a_remaining_pointer_for_release_reanchor() {
+        let state = TouchState::default();
+        state.insert(1, 10.0, 20.0).unwrap();
+        state.insert(2, 30.0, 40.0).unwrap();
+
+        state.remove(2).unwrap();
+
+        assert_eq!(state.first_active(), Some((1, 10.0, 20.0)));
     }
 
     /// OBS-003：RTP 帧发送结果采集——写入 >0 字节记发送，0 字节记丢弃
