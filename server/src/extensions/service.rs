@@ -23,6 +23,9 @@ use super::{
     InputEvent, InputResult, KeymapWasmInstanceHandle, KeymapWasmRuntime, KeymapWasmStartRequest,
     NoKeymapWasmRuntime, ScreenSize, KEYMAP_EXTENSION_ID,
 };
+use crate::yaml_extension::{
+    NoYamlWasmRuntime, YamlProgramResolver, YamlWasmRunRequest, YamlWasmRuntime,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ExtensionSnapshot {
@@ -114,6 +117,7 @@ pub(crate) struct ExtensionService {
     store: ExtensionStore,
     runtime: Arc<dyn WasmRuntime>,
     keymap_runtime: Arc<dyn KeymapWasmRuntime>,
+    yaml_runtime: Arc<dyn YamlWasmRuntime>,
     capabilities: CapabilityRegistry,
     host_api: HostApiCatalog,
     signature: SignatureVerifier,
@@ -160,10 +164,29 @@ impl ExtensionService {
         capabilities: CapabilityRegistry,
         signature: SignatureVerifier,
     ) -> Self {
+        Self::with_keymap_runtime_and_signature_and_yaml(
+            store,
+            runtime,
+            keymap_runtime,
+            Arc::new(NoYamlWasmRuntime),
+            capabilities,
+            signature,
+        )
+    }
+
+    fn with_keymap_runtime_and_signature_and_yaml(
+        store: ExtensionStore,
+        runtime: Arc<dyn WasmRuntime>,
+        keymap_runtime: Arc<dyn KeymapWasmRuntime>,
+        yaml_runtime: Arc<dyn YamlWasmRuntime>,
+        capabilities: CapabilityRegistry,
+        signature: SignatureVerifier,
+    ) -> Self {
         Self {
             store,
             runtime,
             keymap_runtime,
+            yaml_runtime,
             capabilities,
             host_api: HostApiCatalog::default(),
             signature,
@@ -194,18 +217,74 @@ impl ExtensionService {
             Arc::new(super::keymap::LazyKeymapWasmRuntime::new());
         #[cfg(not(feature = "wasm-runtime"))]
         let keymap_runtime: Arc<dyn KeymapWasmRuntime> = Arc::new(NoKeymapWasmRuntime);
+        #[cfg(feature = "wasm-runtime")]
+        let yaml_runtime: Arc<dyn YamlWasmRuntime> =
+            Arc::new(super::wasm::LazyYamlWasmtimeRuntime::new());
+        #[cfg(not(feature = "wasm-runtime"))]
+        let yaml_runtime: Arc<dyn YamlWasmRuntime> = Arc::new(NoYamlWasmRuntime);
         let signature = SignatureVerifier::from_data_root(data_root.as_ref());
-        Self::with_keymap_runtime_and_signature(
+        Self::with_keymap_runtime_and_signature_and_yaml(
             ExtensionStore::new(data_root),
             runtime,
             keymap_runtime,
+            yaml_runtime,
             capabilities,
             signature,
         )
     }
 
     pub(crate) fn runtime_available(&self) -> bool {
-        self.runtime.is_available() || self.keymap_runtime.is_available()
+        self.runtime.is_available()
+            || self.keymap_runtime.is_available()
+            || self.yaml_runtime.is_available()
+    }
+
+    /// Execute a lowered YAML v3 program in the installed `gamer.yaml`
+    /// Component guest. The lifecycle lock only protects the immutable package
+    /// lookup; the guest itself runs after the lock is released so uninstall or
+    /// update cannot be interleaved with reading its bytes.
+    pub(crate) async fn run_yaml_vnext(
+        &self,
+        program: crate::yaml_vnext::Program,
+        context: crate::core::AppContext,
+        args: BTreeMap<String, crate::yaml_vnext::Value>,
+        resolver: Option<Arc<dyn YamlProgramResolver>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> ExtensionResult<crate::yaml_vnext::Value> {
+        let id = ExtensionId::parse(crate::yaml_extension::YAML_EXTENSION_ID)
+            .expect("built-in YAML extension id is valid");
+        let (wasm, host) = {
+            let _guard = self.operation_lock.lock().await;
+            let states = self.store.read_state()?;
+            let versions = self.versions_for(&id)?;
+            let record = state_for_versions(&id, &versions, states.get(&id).cloned())?;
+            if !matches!(
+                record.state,
+                ExtensionState::Enabled | ExtensionState::Running
+            ) {
+                return Err(invalid_transition(&id, "run", record.state));
+            }
+            let active = active_version(&versions, &record)?;
+            let host = HostApi::for_manifest(
+                self.capabilities.clone(),
+                self.host_api.clone(),
+                active.manifest(),
+            )?;
+            (active.read_wasm()?, host)
+        };
+        self.yaml_runtime
+            .run(YamlWasmRunRequest {
+                wasm,
+                program,
+                args,
+                resolver,
+                host,
+                context,
+                stop,
+            })
+            .await
+            .map(|result| result.value)
+            .map_err(|error| ExtensionError::Runtime(error.to_string()))
     }
 
     /// Dispatch an input envelope to the running keymap extension. A missing

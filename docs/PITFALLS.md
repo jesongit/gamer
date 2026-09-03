@@ -163,3 +163,5 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **Wasmtime 48 在 Windows 启用 `component-model-async` 后执行 Component 的 `call_async` 会破坏 Tokio 线程上下文并在运行时退出崩溃**：Phase 6 仅启用 `async + component-model`，保留异步 Host bindings，关闭当前未使用的 Component Concurrency 提案。
 - **Timer Core 的 `next_wakeup` 持久化为 Unix 秒而内存时间带有更高精度**：重启恢复时会截断亚秒部分，持久化恢复断言与比较必须按秒精度处理。
 - **Runner 可能在 `submit` 返回前同步完成**：完成事件若早于 active-run 登记会留下不可取消句柄，需用完成游标/通知和登记前交接处理。
+- **YAML Component 的同步 WIT `call` 若沿用通用 async bindgen 会要求 async Store，并在 Windows GNU Tokio fiber 清理时崩溃**：YAML world 保持同步 bindgen，能力调用在独立 current-thread Tokio runtime 中执行；通用 extensions Host 不启用 YAML world。
+- **Vitest 默认 include 只覆盖 `src/*.test.js` 与 `src/script-editor/**/*.test.js`**：YAML workspace 测试放在 `src/workspace/` 会被静默跳过，必须放到 `src/` 根级或显式扩展配置。

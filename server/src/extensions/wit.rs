@@ -18,5 +18,16 @@ pub(crate) mod keymap {
     });
 }
 
+/// YAML v3 uses a request/response export so the app package can provide a
+/// lowered program for each run. It shares the generic capability.invoke host
+/// import; no YAML type enters the Core capability layer.
+#[cfg(feature = "wasm-runtime")]
+pub(crate) mod yaml {
+    wasmtime::component::bindgen!({
+        path: "wit/gamer",
+        world: "yaml-extension-host",
+    });
+}
+
 pub(crate) const WIT_PACKAGE: &str = include_str!("../../wit/gamer/host.wit");
 pub(crate) const WIT_PACKAGE_VERSION: &str = "1.0.0";

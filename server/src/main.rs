@@ -42,6 +42,8 @@ mod timer_core;
 mod timer_yaml;
 mod update;
 mod webrtc;
+mod yaml_extension;
+mod yaml_vnext;
 
 // Phase 0 兼容护栏只在测试构建挂载，不改变服务运行时模块图。
 #[cfg(test)]
@@ -316,7 +318,7 @@ impl RuntimeServices {
             devices.clone(),
             db.clone(),
         ));
-        let runs = Arc::new(run_manager::RunManager::new(executor));
+        let runs = Arc::new(run_manager::RunManager::new(executor.clone()));
         let scheduler = Arc::new(scheduler::Scheduler::new(
             db.clone(),
             scripts.clone(),
@@ -332,6 +334,7 @@ impl RuntimeServices {
         // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
         // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。
         install_drain(&drain_slot, &ctx);
+        executor.attach_yaml_vnext(ctx.scripts.clone(), ctx.extensions.clone());
         ctx.devices.start().await?;
         ctx.scheduler.start().await;
         Ok(ctx)

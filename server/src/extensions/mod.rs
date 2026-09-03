@@ -60,6 +60,8 @@ pub(crate) use wasm::{NoWasmRuntime, WasmInstanceHandle, WasmRuntime, WasmStartR
 pub(crate) use keymap::LazyKeymapWasmRuntime;
 #[cfg(feature = "wasm-runtime")]
 pub(crate) use wasm::LazyWasmtimeRuntime;
+#[cfg(feature = "wasm-runtime")]
+pub(crate) use wasm::LazyYamlWasmtimeRuntime;
 
 #[cfg(test)]
 mod tests {

@@ -50,7 +50,7 @@ pub(super) struct UpdateScriptReq {
     force: bool,
 }
 
-fn invalid_yaml_response(diagnostics: Vec<crate::script_v2::ScriptError>) -> Response {
+fn invalid_yaml_json_response(diagnostics: serde_json::Value) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({
@@ -93,14 +93,17 @@ pub(super) async fn api_create_script(
     let parse_content = req.content.clone();
     let st_parse = st.clone();
     let parsed = run_blocking_api(move || {
-        Ok(st_parse
-            .scripts
-            .parse_script_content(&parse_pkg, &parse_name, &parse_content))
+        Ok(crate::yaml_extension::validate_compatible_script(
+            &st_parse.scripts,
+            &parse_pkg,
+            &parse_name,
+            &parse_content,
+        ))
     })
     .await;
     match parsed {
         Err(err) => return err.into_response(),
-        Ok(Err(diagnostics)) => return invalid_yaml_response(diagnostics),
+        Ok(Err(error)) => return invalid_yaml_json_response(error.into_json()),
         Ok(Ok(_)) => {}
     }
     let name = req.name.clone();
@@ -191,14 +194,17 @@ pub(super) async fn api_update_script(
     let parse_content = req.content.clone();
     let st_parse = st.clone();
     let parsed = run_blocking_api(move || {
-        Ok(st_parse
-            .scripts
-            .parse_script_content(&parse_pkg, &parse_name, &parse_content))
+        Ok(crate::yaml_extension::validate_compatible_script(
+            &st_parse.scripts,
+            &parse_pkg,
+            &parse_name,
+            &parse_content,
+        ))
     })
     .await;
     match parsed {
         Err(err) => return err.into_response(),
-        Ok(Err(diagnostics)) => return invalid_yaml_response(diagnostics),
+        Ok(Err(error)) => return invalid_yaml_json_response(error.into_json()),
         Ok(Ok(_)) => {}
     }
     match run_blocking_api(move || {

@@ -703,6 +703,32 @@ impl ScriptStore {
         let mut rewrites: Vec<(PathBuf, String, String)> = Vec::new();
 
         for script in self.list()?.into_iter().filter(|s| s.package == package) {
+            if crate::yaml_vnext::is_v3_source(&script.content) {
+                if let Some((rewritten, _changed)) = crate::yaml_vnext::rename_template_source(
+                    &script.content,
+                    &old_name,
+                    &old_short,
+                    &new_name,
+                    &new_short,
+                )
+                .map_err(|diagnostics| {
+                    anyhow::anyhow!(
+                        "v3 脚本模板引用无法重写: {}",
+                        diagnostics
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join("；")
+                    )
+                })? {
+                    rewrites.push((
+                        self.yaml_dir(&package).join(&script.name),
+                        script.content,
+                        rewritten,
+                    ));
+                }
+                continue;
+            }
             let mut parsed = self
                 .parse_script_content(&package, &script.name, &script.content)
                 .map_err(|errors| anyhow::anyhow!(format_script_errors(&errors)))?;
@@ -1388,7 +1414,25 @@ impl ScriptStore {
                 ImportKind::Script => match std::str::from_utf8(&buf) {
                     Ok(text) => {
                         let name = zip_path.strip_prefix("yaml/").unwrap_or(&zip_path);
-                        crate::script_v2::parse_script_file(text, name, &resources).map(|_| ())
+                        if crate::yaml_vnext::is_v3_source(text) {
+                            crate::yaml_vnext::load(text)
+                                .map(|_| ())
+                                .map_err(|diagnostics| {
+                                    diagnostics
+                                        .into_iter()
+                                        .map(|diagnostic| {
+                                            crate::script_v2::ScriptError::new(
+                                                diagnostic.code,
+                                                diagnostic.message,
+                                                name,
+                                            )
+                                            .at(diagnostic.path, "")
+                                        })
+                                        .collect()
+                                })
+                        } else {
+                            crate::script_v2::parse_script_file(text, name, &resources).map(|_| ())
+                        }
                     }
                     Err(err) => Err(vec![crate::script_v2::ScriptError::new(
                         crate::script_v2::error::codes::YAML_SYNTAX_ERROR,
@@ -2368,6 +2412,31 @@ mod tests {
         assert!(script.contains("old.png 文本不应改"));
         let function = std::fs::read_to_string(dir.join("com.test.app/func/common.yaml")).unwrap();
         assert!(function.contains("find: new.png"));
+    }
+
+    #[test]
+    fn rename_template_updates_v3_surface_references_without_touching_text() {
+        let (store, dir) = temp_store("rename-template-v3");
+        let tmpl_dir = store.tmpl_dir("com.test.app");
+        std::fs::create_dir_all(&tmpl_dir).unwrap();
+        std::fs::write(tmpl_dir.join("old.png"), b"png").unwrap();
+        store
+            .save(
+                None,
+                "com.test.app",
+                "main.yaml",
+                "version: 3\nsteps:\n  - find:\n      template: old.png\n      then:\n        - log: old.png 文本不应改\n  - match_first:\n      candidates: [old.png]\n",
+            )
+            .unwrap();
+
+        let renamed = store
+            .rename_template("com.test.app", "old.png", "new.png")
+            .unwrap();
+        assert_eq!(renamed, 1);
+        let script = std::fs::read_to_string(dir.join("com.test.app/yaml/main.yaml")).unwrap();
+        assert!(script.contains("template: new.png"));
+        assert!(script.contains("- new.png"));
+        assert!(script.contains("old.png 文本不应改"));
     }
 
     #[test]

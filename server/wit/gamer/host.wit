@@ -94,6 +94,15 @@ interface log {
     -> result<_, host-error>;
 }
 
+/// Generic, versioned capability escape hatch. The JSON wire is intentionally
+/// owned by the extension boundary rather than Core: capability names still
+/// resolve only to registered Core services and permissions are checked by the
+/// host before dispatch.
+interface capability {
+  use types.{host-error};
+  invoke: func(capability: string, args-json: string) -> result<string, host-error>;
+}
+
 /// The immutable application scope supplied to an extension invocation.
 interface context {
   record app-context {
@@ -118,6 +127,25 @@ world extension-host {
   /// The required extension entrypoint. The host invokes it after all imports
   /// have been linked and the component has been instantiated.
   export extension;
+}
+
+/// YAML v3 has a request/response entrypoint because the source is supplied by
+/// the app package at run time. It is separate from the long-lived generic
+/// extension lifecycle world, while sharing the same capability import.
+interface automation {
+  run: func(program-json: string) -> result<string, string>;
+}
+
+/// YAML extension-only program lookup used by the small AST `call` node. It
+/// is intentionally not part of the generic Core capability catalog.
+interface programs {
+  resolve: func(target: string, args-json: string) -> result<string, string>;
+}
+
+world yaml-extension-host {
+  import capability;
+  import programs;
+  export automation;
 }
 
 interface extension {
