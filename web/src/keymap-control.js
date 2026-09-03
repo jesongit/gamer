@@ -19,6 +19,67 @@ import { ANDROID_META, mapKeyboardCode } from './keyboard-control'
 
 export const KEYMAP_VERSION = 1
 export const KEYMAP_ACTION_TYPES = Object.freeze(['tap', 'swipe', 'raw_key', 'hold'])
+export const INPUT_PROTOCOL_VERSION = 'gamer-input@1'
+
+const MOUSE_SELECTORS = new Set([
+  'MouseLeft', 'MouseMiddle', 'MouseRight', 'MouseBack', 'MouseForward', 'MouseMove',
+])
+
+/** Validate the closed selector vocabulary shared with server InputEvent. */
+export function isInputSelector(value) {
+  if (typeof value !== 'string' || !value) return false
+  if (mapKeyboardCode(value) != null || MOUSE_SELECTORS.has(value)) return true
+  const button = value.match(/^GamepadButton(\d+)$/)
+  if (button) return Number(button[1]) <= 31
+  const axis = value.match(/^GamepadAxis(\d+)$/)
+  return !!axis && Number(axis[1]) <= 7
+}
+
+/** Convert browser input values into the small event envelope used by Core. */
+export function normalizeInputEvent(event, phase = undefined) {
+  if (!event || typeof event !== 'object') return null
+  if (typeof event.code === 'string' && event.code) {
+    const type = phase === 'up' || event.type === 'keyup' ? 'key_up' : 'key_down'
+    return {
+      type,
+      code: event.code,
+      ...(type === 'key_down' ? { repeat: !!event.repeat } : {}),
+      meta: Number.isInteger(event.meta) && event.meta >= 0 ? event.meta : 0,
+    }
+  }
+  const mouseType = event.type
+  if ((phase === 'move' || mouseType === 'mousemove')
+    && Number.isFinite(Number(event.x)) && Number.isFinite(Number(event.y))) {
+    return {
+      type: 'mouse_move',
+      x: Math.max(0, Math.round(event.x)),
+      y: Math.max(0, Math.round(event.y)),
+      delta_x: Number.isFinite(Number(event.movementX)) ? Math.round(event.movementX) : 0,
+      delta_y: Number.isFinite(Number(event.movementY)) ? Math.round(event.movementY) : 0,
+    }
+  }
+  if ((phase === 'wheel' || mouseType === 'wheel')
+    && Number.isFinite(Number(event.x)) && Number.isFinite(Number(event.y))) {
+    return {
+      type: 'wheel',
+      x: Math.max(0, Math.round(event.x)),
+      y: Math.max(0, Math.round(event.y)),
+      delta_x: Number.isFinite(Number(event.deltaX)) ? Math.round(event.deltaX) : 0,
+      delta_y: Number.isFinite(Number(event.deltaY)) ? Math.round(event.deltaY) : 0,
+    }
+  }
+  if (Number.isInteger(event.button) && Number.isFinite(Number(event.x)) && Number.isFinite(Number(event.y))) {
+    const type = phase === 'up' || mouseType === 'mouseup' ? 'mouse_up' : 'mouse_down'
+    return { type, button: event.button, x: Math.max(0, Math.round(event.x)), y: Math.max(0, Math.round(event.y)) }
+  }
+  if (event.kind === 'gamepad_button' && Number.isInteger(event.index)) {
+    return { type: 'gamepad_button', index: event.index, pressed: !!event.pressed, value: Number(event.value) || 0 }
+  }
+  if (event.kind === 'gamepad_axis' && Number.isInteger(event.index)) {
+    return { type: 'gamepad_axis', index: event.index, value: Number(event.value) || 0 }
+  }
+  return null
+}
 
 /** Build the shared DataChannel touch-phase wire shape for mouse and keymap input. */
 export function buildTouchPhase(action, pointerId, x, y) {
@@ -188,10 +249,10 @@ export function validateKeymap(value) {
       } else {
         seen.add(binding.key)
       }
-      if (typeof binding.key === 'string' && binding.key.trim() && mapKeyboardCode(binding.key) == null) {
+      if (typeof binding.key === 'string' && binding.key.trim() && !isInputSelector(binding.key)) {
         errors.push(makeIssue(
           path + '.key',
-          '无法映射 KeyboardEvent.code：' + binding.key,
+          '无法映射输入选择器：' + binding.key,
           'keymap.key_code',
         ))
       }

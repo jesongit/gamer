@@ -4,7 +4,6 @@ import { CONSOLE_RIGHT_LOCATION } from './registry'
 type CoreComponents = {
   TemplateCapture: unknown
   ScriptRunner: unknown
-  KeymapPanel: unknown
   LogsPanel: unknown
   TaskBoard: unknown
   SystemPanel: unknown
@@ -13,7 +12,6 @@ type CoreComponents = {
 type CoreContexts = {
   templateCapture: Record<string, unknown>
   scriptRunner: Record<string, unknown>
-  keymap: Record<string, unknown>
   activePkg: { value?: string } | string
 }
 
@@ -35,12 +33,6 @@ export function registerCoreContributions(
       location: CONSOLE_RIGHT_LOCATION, runtime: 'core', keepAlive: 'session', aliases: ['script'],
       component: components.ScriptRunner, panelClass: 'script-tab',
       getProps: () => ({ context: contexts.scriptRunner }),
-    },
-    {
-      pluginId: 'gamer.keymap', panelId: 'keymaps', title: '映射', icon: '⌨', order: 30,
-      location: CONSOLE_RIGHT_LOCATION, runtime: 'core', aliases: ['keymap'],
-      component: components.KeymapPanel, panelClass: 'extra-tab',
-      getProps: () => ({ context: contexts.keymap }),
     },
     {
       pluginId: 'gamer.core', panelId: 'logs', title: '日志', order: 40,

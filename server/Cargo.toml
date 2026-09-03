@@ -9,6 +9,9 @@ default = []
 # The first extension phase keeps WASM execution opt-in. The default server
 # does not carry or initialize a WASM engine.
 wasm-runtime = ["dep:wasmtime"]
+# Runs the small scalar ABI harness in extensions::keymap.  This is a test and
+# diagnostics seam, not the Phase 6 component-model Host implementation.
+keymap-wasm-harness = ["wasm-runtime"]
 
 [dependencies]
 # Web 框架

@@ -324,7 +324,7 @@ fn parse_bindings(
             diagnostics,
         );
         let key = match value_for(map, "key") {
-            Some(Value::String(value)) if valid_key_code(value) && known_keyboard_code(value) => {
+            Some(Value::String(value)) if valid_key_code(value) && known_input_code(value) => {
                 value.clone()
             }
             Some(Value::String(_)) => {
@@ -633,6 +633,10 @@ fn parse_hold(
         .map(|at| KeymapAction::Hold { at })
 }
 
+/// Return whether a value is a supported browser keyboard physical code.
+///
+/// `raw_key.code` deliberately continues to use this narrower predicate;
+/// binding selectors additionally accept mouse buttons and gamepad controls.
 fn known_keyboard_code(code: &str) -> bool {
     if let Some(letter) = code.strip_prefix("Key") {
         return letter.len() == 1 && letter.as_bytes()[0].is_ascii_uppercase();
@@ -716,6 +720,29 @@ fn known_keyboard_code(code: &str) -> bool {
             | "NumpadParenLeft"
             | "NumpadParenRight"
     )
+}
+
+/// Binding selectors are intentionally closed.  They use the same names as
+/// the normalized InputEvent gateway, so a YAML keymap cannot accidentally
+/// become a free-form event filter.
+fn known_input_code(code: &str) -> bool {
+    if known_keyboard_code(code) {
+        return true;
+    }
+    if matches!(
+        code,
+        "MouseLeft" | "MouseMiddle" | "MouseRight" | "MouseBack" | "MouseForward" | "MouseMove"
+    ) {
+        return true;
+    }
+    let (prefix, max) = if let Some(rest) = code.strip_prefix("GamepadButton") {
+        (rest, 31)
+    } else if let Some(rest) = code.strip_prefix("GamepadAxis") {
+        (rest, 7)
+    } else {
+        return false;
+    };
+    prefix.parse::<u8>().ok().is_some_and(|index| index <= max)
 }
 
 fn parse_duration(
@@ -1310,6 +1337,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn strict_loader_accepts_closed_mouse_and_gamepad_binding_selectors() {
+        let content = "version: 1\nname: Inputs\nbindings:\n  - key: MouseLeft\n    action:\n      type: hold\n      at: [0.1, 0.2]\n  - key: GamepadButton0\n    action:\n      type: tap\n      at: [0.3, 0.4]\n  - key: GamepadAxis7\n    action:\n      type: hold\n      at: [0.5, 0.6]\n";
+        let keymap = parse_keymap_content(content, "inputs.yaml").unwrap();
+        assert_eq!(
+            keymap
+                .bindings
+                .iter()
+                .map(|binding| binding.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["MouseLeft", "GamepadButton0", "GamepadAxis7"]
+        );
+        for key in ["MouseSide", "GamepadButton32", "GamepadAxis8"] {
+            let invalid = format!(
+                "version: 1\nname: bad\nbindings:\n  - key: {key}\n    action:\n      type: tap\n      at: [0, 0]\n"
+            );
+            assert!(
+                parse_keymap_content(&invalid, "inputs.yaml").is_err(),
+                "{key}"
+            );
+        }
     }
 
     #[test]

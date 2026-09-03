@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   KEYMAP_ACTION_TYPES,
+  INPUT_PROTOCOL_VERSION,
   buildTouchPhase,
   createKeymapController,
   indexKeymap,
+  isInputSelector,
+  normalizeInputEvent,
   normalizeKeymap,
   validateKeymap,
 } from './keymap-control'
@@ -38,6 +41,36 @@ const KEYMAP = {
 }
 
 describe('keymap-control schema', () => {
+  it('shares a closed input selector vocabulary with the server gateway', () => {
+    expect(INPUT_PROTOCOL_VERSION).toBe('gamer-input@1')
+    expect(isInputSelector('MouseLeft')).toBe(true)
+    expect(isInputSelector('GamepadButton31')).toBe(true)
+    expect(isInputSelector('GamepadAxis7')).toBe(true)
+    expect(isInputSelector('GamepadButton32')).toBe(false)
+    expect(isInputSelector('MouseSide')).toBe(false)
+    expect(normalizeInputEvent({ code: 'KeyW', repeat: true })).toEqual({
+      type: 'key_down', code: 'KeyW', repeat: true, meta: 0,
+    })
+    expect(normalizeInputEvent({ code: 'KeyW' }, 'up')).toEqual({
+      type: 'key_up', code: 'KeyW', meta: 0,
+    })
+    expect(normalizeInputEvent({ type: 'keyup', code: 'KeyW' })).toEqual({
+      type: 'key_up', code: 'KeyW', meta: 0,
+    })
+    expect(normalizeInputEvent({ button: 0, x: 10.4, y: 20.6 })).toEqual({
+      type: 'mouse_down', button: 0, x: 10, y: 21,
+    })
+    expect(normalizeInputEvent({ type: 'mousemove', x: 12.4, y: 8.6, movementX: 2, movementY: -1 })).toEqual({
+      type: 'mouse_move', x: 12, y: 9, delta_x: 2, delta_y: -1,
+    })
+    expect(normalizeInputEvent({ type: 'wheel', x: 12, y: 9, deltaX: 1.2, deltaY: -3.4 })).toEqual({
+      type: 'wheel', x: 12, y: 9, delta_x: 1, delta_y: -3,
+    })
+    expect(normalizeInputEvent({ kind: 'gamepad_axis', index: 2, value: -0.5 })).toEqual({
+      type: 'gamepad_axis', index: 2, value: -0.5,
+    })
+  })
+
   it('builds the shared touch phase message used by mouse and keyboard input', () => {
     expect(buildTouchPhase('down', 3, 120, 240)).toEqual({
       type: 'touch',

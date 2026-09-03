@@ -17,6 +17,7 @@
 mod archive;
 mod error;
 mod host_api;
+mod keymap;
 mod manifest;
 mod model;
 mod permissions;
@@ -27,6 +28,17 @@ mod wit;
 
 pub(crate) use error::{ExtensionError, ExtensionResult, PermissionError};
 pub(crate) use host_api::{HostApi, HostApiCatalog, HostApiDomain, HOST_API_VERSION};
+pub(crate) use keymap::{
+    decode_input_event, real_wasm_host_status, AppPackageKeymapData, AppPackageKeymapSource,
+    CapabilityDeviceActionExecutor, DeviceAction, DeviceActionExecutor, InputError, InputEvent,
+    InputGateway, InputResult, KeymapContributionRegistry, KeymapPanelContribution, KeymapProgram,
+    KeymapRunner, KeymapRuntime, KeymapRuntimeState, NativeKeymapRunner, NormalizedPoint,
+    ScrcpyDeviceActionExecutor, ScreenSize, INPUT_PROTOCOL_VERSION, KEYMAP_EXTENSION_ID,
+    KEYMAP_EXTENSION_MANIFEST_TOML, KEYMAP_PANEL_ID, KEYMAP_WASM_ABI_VERSION,
+};
+
+#[cfg(all(feature = "wasm-runtime", feature = "keymap-wasm-harness"))]
+pub(crate) use keymap::KeymapWasmHarness;
 pub(crate) use manifest::{
     parse_manifest, ExtensionManifest, HostApiRequirements, MANIFEST_FILE_NAME, MANIFEST_VERSION,
 };

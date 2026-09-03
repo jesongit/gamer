@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createUiBridge, replyToBridgeRequest, UI_BRIDGE_VERSION } from './workspace/bridge'
 import { createPanelRegistry, DEFAULT_PANEL_KEY } from './workspace/registry'
 import { createPanelUiLifecycle, createPluginRuntimeLifecycle } from './workspace/lifecycle'
+import { registerKeymapExtension } from './workspace/keymap-extension'
 
 describe('Frontend Plugin Workspace', () => {
   it('keeps contribution order, supports multiple panels per plugin, aliases, and stable fallback', () => {
@@ -64,5 +65,31 @@ describe('Frontend Plugin Workspace', () => {
     expect(stop).not.toHaveBeenCalled()
     await runtime.stop('plugin-a')
     expect(runtime.state('plugin-a')).toBe('stopped')
+  })
+
+  it('adds and removes the Keymap contribution without coupling panel close to runtime', async () => {
+    const registry = createPanelRegistry()
+    const lifecycle = { runtime: createPluginRuntimeLifecycle() }
+    const start = vi.fn()
+    const stop = vi.fn()
+    const extension = registerKeymapExtension(registry, lifecycle, {
+      component: {},
+      context: { pkg: 'com.demo' },
+      runtime: { start, stop },
+    })
+
+    await extension.start()
+    expect(registry.resolve('gamer.keymap:keymaps')).toMatchObject({ title: '映射', runtime: 'core' })
+    expect(lifecycle.runtime.state('gamer.keymap')).toBe('running')
+    await extension.stop()
+    expect(registry.resolve('gamer.keymap:keymaps')).not.toBeNull()
+    expect(stop).toHaveBeenCalledTimes(1)
+
+    await extension.start()
+    await extension.uninstall()
+    expect(registry.resolve('gamer.keymap:keymaps')).toBeNull()
+    expect(lifecycle.runtime.state('gamer.keymap')).toBe('missing')
+    expect(start).toHaveBeenCalledTimes(2)
+    expect(stop).toHaveBeenCalledTimes(2)
   })
 })

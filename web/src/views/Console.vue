@@ -211,6 +211,7 @@ import { createPanelRegistry, DEFAULT_PANEL_KEY } from '../workspace/registry'
 import { registerCoreContributions } from '../workspace/core-contributions'
 import { createWorkspaceContext, PANEL_REGISTRY_KEY, WORKSPACE_CONTEXT_KEY } from '../workspace/context'
 import { createWorkspaceLifecycle } from '../workspace/lifecycle'
+import { registerKeymapExtension } from '../workspace/keymap-extension'
 import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
 import TemplateCropModal from '../components/console/TemplateCropModal.vue'
@@ -3714,13 +3715,26 @@ const workspaceContext = createWorkspaceContext({
   },
 })
 registerCoreContributions(panelRegistry, {
-  TemplateCapture, ScriptRunner, KeymapPanel, LogsPanel, TaskBoard, SystemPanel,
+  TemplateCapture, ScriptRunner, LogsPanel, TaskBoard, SystemPanel,
 }, {
   templateCapture: templateCaptureContext,
   scriptRunner: scriptRunnerContext,
-  keymap: keymapPanelContext,
   activePkg,
 })
+const keymapExtension = registerKeymapExtension(panelRegistry, workspaceLifecycle, {
+  component: KeymapPanel,
+  context: keymapPanelContext,
+  // The browser controller is the transport-facing part of this extension;
+  // its runtime is independent from whether the panel tab is mounted.
+  runtime: {
+    start: () => keymap.setEnabled(true),
+    stop: () => {
+      keymap.releaseAll()
+      keymap.setEnabled(false)
+    },
+  },
+})
+void keymapExtension.start()
 const deviceStageBridge = workspaceContext.stage
 provide(PANEL_REGISTRY_KEY, panelRegistry)
 provide(WORKSPACE_CONTEXT_KEY, workspaceContext)
