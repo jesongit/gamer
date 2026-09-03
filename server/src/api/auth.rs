@@ -1113,6 +1113,7 @@ mod tests {
 
     #[test]
     fn session_sliding_idle_expires_and_renews() {
+        // 空闲到期：idle=1s，sleep 1.5s 留 500ms 裕量吸收线程调度抖动
         let st = state(
             credential("pw"),
             /*idle*/ 1,
@@ -1121,14 +1122,15 @@ mod tests {
             300,
         );
         let (sid, _) = st.attempt_login("admin", "pw", "ipB").unwrap();
-        sleep_ms(1200);
+        sleep_ms(1500);
         assert_eq!(st.validate(&sid), None, "空闲超期未活动应失效");
 
-        // 活动即续期：idle=1s 下每 600ms 探一次，远小于 abs，永远活着
-        let st2 = state(credential("pw"), 2, 10_000, 10, 300);
+        // 活动即续期：idle=4s 下每 900ms 探一次，远小于 abs，永远活着；
+        // 窗口裕量 >3s，并行测试负载下的单次唤醒延迟不会误判空闲
+        let st2 = state(credential("pw"), 4, 10_000, 10, 300);
         let (sid2, _) = st2.attempt_login("admin", "pw", "ipC").unwrap();
         for _ in 0..4 {
-            sleep_ms(600);
+            sleep_ms(900);
             assert_eq!(
                 st2.validate(&sid2).as_deref(),
                 Some("admin"),
