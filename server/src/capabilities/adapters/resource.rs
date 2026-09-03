@@ -56,11 +56,16 @@ impl ResourceAdapter {
 #[async_trait]
 impl ResourceService for ResourceAdapter {
     async fn resolve(&self, id: &ResourceId) -> CapabilityResult<ResourceHandle> {
-        let logical_name = id.name().strip_prefix("tmpl/").unwrap_or(id.name());
-        let path = self
-            .scripts
-            .resolve_template_path(id.namespace(), logical_name)
-            .map_err(|error| CapabilityError::NotFound(error.to_string()))?;
+        let path = if let Some(logical_name) = id.name().strip_prefix("yaml/") {
+            self.scripts
+                .resolve_script_path(id.namespace(), logical_name)
+                .map_err(|error| CapabilityError::NotFound(error.to_string()))?
+        } else {
+            let logical_name = id.name().strip_prefix("tmpl/").unwrap_or(id.name());
+            self.scripts
+                .resolve_template_path(id.namespace(), logical_name)
+                .map_err(|error| CapabilityError::NotFound(error.to_string()))?
+        };
         if !path.is_file() {
             return Err(CapabilityError::NotFound(format!(
                 "resource {}/{}",

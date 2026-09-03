@@ -79,6 +79,9 @@ pub struct AppState {
     pub update: Arc<crate::update::service::UpdateService>,
     /// 已安装扩展与其 Host/UI 生命周期。
     pub extensions: Arc<crate::extensions::ExtensionService>,
+    /// Immutable App Package storage. Its unload path is wired to the Timer
+    /// task-suspension hook at the composition root.
+    pub app_packages: Arc<crate::app_packages::AppPackageStore>,
 }
 
 #[expect(
@@ -97,8 +100,12 @@ pub fn build_router(
     auth: Arc<auth::AuthState>,
     update: Arc<crate::update::service::UpdateService>,
 ) -> Router {
-    let capabilities =
-        crate::capabilities::adapters::build_registry(devices.clone(), scripts.clone(), db.clone());
+    let capabilities = crate::capabilities::adapters::build_registry(
+        devices.clone(),
+        scripts.clone(),
+        db.clone(),
+        runs.clone(),
+    );
     let extensions = Arc::new(crate::extensions::ExtensionService::for_data_root(
         cfg.data_dir.clone(),
         capabilities,
@@ -130,7 +137,7 @@ pub(crate) fn build_router_with_extensions(
         db,
         metrics,
         devices,
-        scheduler,
+        scheduler: scheduler.clone(),
         runs,
         cfg: cfg.clone(),
         scripts,
@@ -140,6 +147,12 @@ pub(crate) fn build_router_with_extensions(
         auth,
         update,
         extensions,
+        app_packages: Arc::new(crate::app_packages::AppPackageStore::with_task_hook(
+            cfg.data_dir.clone(),
+            Arc::new(crate::app_packages::SchedulerTaskSuspendedHook::new(
+                scheduler.clone(),
+            )),
+        )),
     };
 
     // 视频静默看门狗 + 会话过期清扫

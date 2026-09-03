@@ -3,6 +3,7 @@ import { createUiBridge, replyToBridgeRequest, UI_BRIDGE_VERSION } from './works
 import { createPanelRegistry, DEFAULT_PANEL_KEY } from './workspace/registry'
 import { createPanelUiLifecycle, createPluginRuntimeLifecycle } from './workspace/lifecycle'
 import { registerKeymapExtension } from './workspace/keymap-extension'
+import { createServerUiContributionAdapter } from './workspace/plugin-center/adapter/server-ui'
 
 describe('Frontend Plugin Workspace', () => {
   it('keeps contribution order, supports multiple panels per plugin, aliases, and stable fallback', () => {
@@ -91,5 +92,31 @@ describe('Frontend Plugin Workspace', () => {
     expect(lifecycle.runtime.state('gamer.keymap')).toBe('missing')
     expect(start).toHaveBeenCalledTimes(2)
     expect(stop).toHaveBeenCalledTimes(2)
+  })
+
+  it('registers backend UI contributions and cleans stale panels on refresh/unmount', async () => {
+    const registry = createPanelRegistry()
+    const load = vi.fn()
+      .mockResolvedValueOnce({ ui_contributions: [{
+        plugin_id: 'plugin-a', panel_id: 'old', title: '旧面板',
+        runtime: 'iframe', location: 'console.right', entry: 'ui/old.html',
+      }] })
+      .mockResolvedValueOnce({ ui_contributions: [{
+        plugin_id: 'plugin-a', panel_id: 'new', title: '新面板',
+        runtime: 'declarative', location: 'console.right',
+      }] })
+    const adapter = createServerUiContributionAdapter(registry, { load })
+
+    await adapter.refresh()
+    expect(registry.resolve('plugin-a:old')?.iframe?.src).toBe('/api/extensions/plugin-a/ui/old.html')
+    await adapter.refresh()
+    expect(registry.resolve('plugin-a:old')).toBeNull()
+    expect(registry.resolve('plugin-a:new')).not.toBeNull()
+
+    load.mockRejectedValueOnce(new Error('temporary backend failure'))
+    await expect(adapter.refresh()).rejects.toThrow('temporary backend failure')
+    expect(registry.resolve('plugin-a:new')).not.toBeNull()
+    adapter.dispose()
+    expect(registry.resolve('plugin-a:new')).toBeNull()
   })
 })

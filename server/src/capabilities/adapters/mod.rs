@@ -27,6 +27,7 @@ pub(crate) use vision::VisionAdapter;
 use std::sync::Arc;
 
 use crate::device::DeviceManager;
+use crate::run_manager::RunManager;
 use crate::scripts::ScriptStore;
 use crate::store::Db;
 
@@ -38,6 +39,7 @@ pub(crate) fn build_registry(
     devices: Arc<DeviceManager>,
     scripts: Arc<ScriptStore>,
     db: Db,
+    runs: Arc<RunManager>,
 ) -> CapabilityRegistry {
     let device = Arc::new(DeviceAdapter::new(devices.clone()));
     let touch = Arc::new(TouchAdapter::new(device.clone()));
@@ -53,8 +55,8 @@ pub(crate) fn build_registry(
         .with_touch_service(touch)
         .with_frame_service(frame)
         .with_vision_service(vision)
-        .with_resource_service(resource)
-        .with_run_service(Arc::new(RunAdapter))
+        .with_resource_service(resource.clone())
+        .with_run_service(Arc::new(RunAdapter::new(runs, resource.clone())))
         .with_log(LogAdapter::new(db))
         .build()
 }
@@ -63,6 +65,7 @@ pub(crate) fn build_registry(
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use futures_util::future::BoxFuture;
     use image::{Rgb, RgbImage};
 
     use super::*;
@@ -215,16 +218,67 @@ mod tests {
         assert_eq!(logs[0].msg, "capability log");
     }
 
+    struct SuccessfulExecutor;
+
+    impl crate::run_manager::RunExecutor for SuccessfulExecutor {
+        fn prepare<'a>(
+            &'a self,
+            _context: &'a crate::core::RunContext,
+            _request: &'a crate::core::RunRequest,
+        ) -> BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _context: &'a crate::core::RunContext,
+            _request: &'a crate::core::RunRequest,
+            _realtime_logs: bool,
+            _stop: Arc<AtomicBool>,
+        ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
+            Box::pin(async { Ok(vec![("info".into(), "run bridge ok".into())]) })
+        }
+
+        fn acquire(
+            &self,
+            _context: &crate::core::RunContext,
+        ) -> anyhow::Result<Box<dyn crate::core::ActivityLease>> {
+            Ok(Box::new(crate::core::NoopLease))
+        }
+    }
+
     #[tokio::test]
-    async fn run_adapter_is_explicitly_blocked_until_request_mapping_is_stable() {
-        let adapter = RunAdapter;
-        let request = RunRequest::new(
-            DeviceHandle::new(DeviceId::new("d1")),
-            ResourceHandle::new(),
-        );
+    async fn run_adapter_submits_to_run_manager_and_reports_terminal_state() {
+        let (_dir, store) = template_store();
+        let script_dir = store.yaml_dir("com.test.game");
+        std::fs::create_dir_all(&script_dir).unwrap();
+        std::fs::write(script_dir.join("daily.yaml"), b"steps: []\n").unwrap();
+        let resources = Arc::new(ResourceAdapter::new(store));
+        let entry = resources
+            .resolve(&super::super::ResourceId::new(
+                "com.test.game",
+                "yaml/daily.yaml",
+            ))
+            .await
+            .unwrap();
+        let manager = Arc::new(crate::run_manager::RunManager::new(Arc::new(
+            SuccessfulExecutor,
+        )));
+        let adapter = RunAdapter::new(manager.clone(), resources);
+        let request = RunRequest::new(DeviceHandle::new(DeviceId::new("d1")), entry);
+        let handle = adapter.submit(request).await.unwrap();
         assert!(matches!(
-            adapter.submit(request).await,
-            Err(CapabilityError::Unavailable(_))
+            adapter.status(handle).await,
+            Ok(crate::capabilities::RunStatus::Queued
+                | crate::capabilities::RunStatus::Running
+                | crate::capabilities::RunStatus::Succeeded)
         ));
+        let run_id = adapter.run_id(handle).unwrap();
+        let record = manager.wait_terminal(&run_id).await.unwrap();
+        assert_eq!(record.state, crate::run_manager::RunState::Success);
+        assert_eq!(
+            adapter.status(handle).await.unwrap(),
+            crate::capabilities::RunStatus::Succeeded
+        );
     }
 }

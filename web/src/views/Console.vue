@@ -210,7 +210,7 @@ import WorkspaceContextBar from '../workspace/WorkspaceContextBar.vue'
 import PluginWorkspace from '../workspace/PluginWorkspace.vue'
 import { createPanelRegistry, DEFAULT_PANEL_KEY } from '../workspace/registry'
 import { registerCoreContributions } from '../workspace/core-contributions'
-import { registerServerUiContributions } from '../workspace/contribution-manager'
+import { createServerUiContributionAdapter } from '../workspace/plugin-center/adapter/server-ui'
 import { createWorkspaceContext, PANEL_REGISTRY_KEY, WORKSPACE_CONTEXT_KEY } from '../workspace/context'
 import { createWorkspaceLifecycle } from '../workspace/lifecycle'
 import {
@@ -3767,26 +3767,16 @@ const keymapExtension = registerKeymapExtension(panelRegistry, workspaceLifecycl
   },
 })
 void keymapExtension.start()
-let serverUiRegistration = null
+const serverUiAdapter = createServerUiContributionAdapter(panelRegistry, {
+  load: () => api.listExtensions(),
+})
 let extensionUiPollTimer = null
 let gamepadPollTimer = null
 const gamepadSnapshot = new Map()
 
-function extensionUiEntryUrl(manifest, entry) {
-  const path = String(entry || '').replace(/^ui\//, '')
-  return `/api/extensions/${encodeURIComponent(manifest.id)}/ui/${path}`
-}
-
 async function refreshServerExtensions() {
   try {
-    const response = await api.listExtensions()
-    const contributions = Array.isArray(response?.ui_contributions)
-      ? response.ui_contributions
-      : []
-    serverUiRegistration?.dispose?.()
-    serverUiRegistration = registerServerUiContributions(panelRegistry, contributions, {
-      resolveEntry: extensionUiEntryUrl,
-    })
+    const response = await serverUiAdapter.refresh()
     // The built-in editor remains the safe fallback when the installable
     // extension is disabled or uninstalled. An enabled server contribution
     // with the same key intentionally replaces it with its iframe panel.
@@ -3944,8 +3934,7 @@ onUnmounted(() => {
   if (extensionUiPollTimer) { clearInterval(extensionUiPollTimer); extensionUiPollTimer = null }
   if (gamepadPollTimer) { clearInterval(gamepadPollTimer); gamepadPollTimer = null }
   gamepadSnapshot.clear()
-  serverUiRegistration?.dispose?.()
-  serverUiRegistration = null
+  serverUiAdapter.dispose()
   keymap.releaseAll()
   syncKeymapPressed()
   keyboard.releaseAll()

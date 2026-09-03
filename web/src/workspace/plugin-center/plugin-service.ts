@@ -63,6 +63,32 @@ export function normalizeSignature(value: unknown, fallback: PluginSignature['st
     ...(item.key_id ? { key_id: String(item.key_id) } : {}),
     ...(item.algorithm ? { algorithm: String(item.algorithm) } : {}),
     ...(item.verified_at ? { verified_at: String(item.verified_at) } : {}),
+    ...(item.value ? { value: String(item.value) } : {}),
+    ...(item.signature ? { signature: String(item.signature) } : {}),
+  }
+}
+
+/** Build the signed Registry claim sent to the server-side install gate. */
+export function registryProofFor(entry?: RegistryPluginVersion): {
+  id: string
+  version: string
+  download_url: string
+  sha256: string
+  key_id: string
+  signature: string
+} | null {
+  const signature = normalizeSignature(entry?.signature)
+  const value = signature.value || signature.signature
+  if (!entry?.id || !entry.version || !entry.download_url || !entry.sha256 || !signature.key_id || !value) {
+    return null
+  }
+  return {
+    id: entry.id,
+    version: entry.version,
+    download_url: entry.download_url,
+    sha256: entry.sha256.toLowerCase(),
+    key_id: signature.key_id,
+    signature: value,
   }
 }
 

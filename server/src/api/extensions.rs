@@ -6,7 +6,7 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -42,21 +42,37 @@ pub(super) async fn api_list_ui_contributions(State(st): State<AppState>) -> Res
     }
 }
 
-pub(super) async fn api_install_extension(State(st): State<AppState>, body: Bytes) -> Response {
+pub(super) async fn api_install_extension(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if body.is_empty() {
         return ApiError::bad_request("插件归档不能为空").into_response();
     }
-    match st.extensions.install(&body).await {
+    let context = match super::extensions_management::install_context(&headers) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    match st.extensions.install_with_context(&body, &context).await {
         Ok(snapshot) => (StatusCode::CREATED, Json(snapshot_json(&snapshot))).into_response(),
         Err(error) => extension_error(error),
     }
 }
 
-pub(super) async fn api_update_extension(State(st): State<AppState>, body: Bytes) -> Response {
+pub(super) async fn api_update_extension(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if body.is_empty() {
         return ApiError::bad_request("插件归档不能为空").into_response();
     }
-    match st.extensions.update(&body).await {
+    let context = match super::extensions_management::install_context(&headers) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    match st.extensions.update_with_context(&body, &context).await {
         Ok(snapshot) => Json(snapshot_json(&snapshot)).into_response(),
         Err(error) => extension_error(error),
     }
@@ -227,6 +243,7 @@ fn snapshot_json(snapshot: &ExtensionSnapshot) -> serde_json::Value {
         "entry": manifest.entry().as_str(),
         "state": snapshot.state(),
         "last_error": snapshot.last_error(),
+        "signature": snapshot.signature(),
         "host_api": host_api,
         "permissions": manifest.permissions().names(),
         "ui": manifest.ui().iter().map(ui_json).collect::<Vec<_>>(),
@@ -273,6 +290,10 @@ fn extension_error(error: ExtensionError) -> Response {
         | ExtensionError::UiUnavailable { .. } => ApiError::not_found(error.to_string()),
         ExtensionError::InvalidState(_) => ApiError::internal(error.to_string()),
         ExtensionError::AlreadyInstalled { .. } | ExtensionError::InvalidTransition { .. } => {
+            ApiError::conflict(error.to_string())
+        }
+        ExtensionError::RegistryProofRequired
+        | ExtensionError::PermissionConfirmationRequired(_) => {
             ApiError::conflict(error.to_string())
         }
         ExtensionError::RuntimeUnavailable(_) => ApiError::service_unavailable(error.to_string()),

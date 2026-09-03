@@ -1,6 +1,9 @@
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::core::fs::atomic_write;
@@ -13,6 +16,66 @@ use super::model::{
     InstalledVersion, ResourcePath,
 };
 use super::resolver::ResourceResolver;
+
+/// App Package 卸载后的唯一生命周期接缝。实现者只负责把仍持久化的
+/// User Task 置为 Suspended，不得删除任务或修改基础设备能力。
+#[async_trait]
+pub(crate) trait AppPackageTaskHook: Send + Sync {
+    async fn suspend_for_package(&self, package: &AppPackageId) -> anyhow::Result<usize>;
+}
+
+#[derive(Default)]
+struct NoopAppPackageTaskHook;
+
+#[async_trait]
+impl AppPackageTaskHook for NoopAppPackageTaskHook {
+    async fn suspend_for_package(&self, _package: &AppPackageId) -> anyhow::Result<usize> {
+        Ok(0)
+    }
+}
+
+/// Production hook adapter. Keeping Scheduler behind this small trait means
+/// AppPackageStore does not know Timer Core internals and can be tested with a
+/// fake hook.
+pub(crate) struct TimerTaskSuspendedHook {
+    timer: Arc<crate::timer_core::TimerCore>,
+}
+
+impl TimerTaskSuspendedHook {
+    pub(crate) fn new(timer: Arc<crate::timer_core::TimerCore>) -> Self {
+        Self { timer }
+    }
+}
+
+#[async_trait]
+impl AppPackageTaskHook for TimerTaskSuspendedHook {
+    async fn suspend_for_package(&self, package: &AppPackageId) -> anyhow::Result<usize> {
+        self.timer
+            .on_app_package_uninstalled(package.as_str())
+            .await
+    }
+}
+
+/// Composition-root adapter used by the running service. The package store
+/// talks to this hook only; it does not gain a dependency on Timer Core.
+pub(crate) struct SchedulerTaskSuspendedHook {
+    scheduler: Arc<crate::scheduler::Scheduler>,
+}
+
+impl SchedulerTaskSuspendedHook {
+    pub(crate) fn new(scheduler: Arc<crate::scheduler::Scheduler>) -> Self {
+        Self { scheduler }
+    }
+}
+
+#[async_trait]
+impl AppPackageTaskHook for SchedulerTaskSuspendedHook {
+    async fn suspend_for_package(&self, package: &AppPackageId) -> anyhow::Result<usize> {
+        self.scheduler
+            .on_app_package_uninstalled(package.as_str())
+            .await
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct InstalledPackage {
@@ -31,15 +94,33 @@ impl InstalledPackage {
 }
 
 /// Filesystem boundary for immutable App Packages and user-owned overrides.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct AppPackageStore {
     data_root: PathBuf,
+    task_hook: Arc<dyn AppPackageTaskHook>,
+}
+
+impl fmt::Debug for AppPackageStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AppPackageStore")
+            .field("data_root", &self.data_root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AppPackageStore {
     pub(crate) fn new(data_root: impl AsRef<Path>) -> Self {
+        Self::with_task_hook(data_root, Arc::new(NoopAppPackageTaskHook))
+    }
+
+    pub(crate) fn with_task_hook(
+        data_root: impl AsRef<Path>,
+        task_hook: Arc<dyn AppPackageTaskHook>,
+    ) -> Self {
         Self {
             data_root: data_root.as_ref().to_path_buf(),
+            task_hook,
         }
     }
 
@@ -149,12 +230,37 @@ impl AppPackageStore {
 
     /// Remove one immutable version only. User overrides and unrelated data
     /// are deliberately outside this path and remain untouched.
-    pub(crate) fn uninstall(
+    /// Remove one immutable version, then notify the single task lifecycle
+    /// hook if this was the last version of the App Package. The async API is
+    /// intentional: no caller can silently forget the Suspended transition.
+    pub(crate) async fn uninstall(
         &self,
         package: &AppPackageId,
         version: &InstalledVersion,
     ) -> AppPackageResult<bool> {
         let package = parse_app_package_id(package.as_str())?;
+        let removed = self.remove_version(&package, version)?;
+        if !removed {
+            return Ok(false);
+        }
+        let package_still_installed = self
+            .list_installed()?
+            .iter()
+            .any(|installed| installed.manifest().id() == &package);
+        if !package_still_installed {
+            self.task_hook
+                .suspend_for_package(&package)
+                .await
+                .map_err(|error| AppPackageError::TaskHook(error.to_string()))?;
+        }
+        Ok(true)
+    }
+
+    fn remove_version(
+        &self,
+        package: &AppPackageId,
+        version: &InstalledVersion,
+    ) -> AppPackageResult<bool> {
         let package_root = self.app_packages_root().join(package.as_str());
         let version_root = package_root.join(version.as_str());
         if !path_exists(&version_root)? {
@@ -164,31 +270,6 @@ impl AppPackageStore {
         let _ = fs::remove_dir(&package_root);
         sync_directory(&self.app_packages_root())?;
         Ok(true)
-    }
-
-    /// Uninstall a version and notify Timer Core only when the package has no
-    /// remaining installed version. User tasks stay persisted and become
-    /// Suspended; deleting a package must never delete a user schedule.
-    pub(crate) async fn uninstall_and_update_tasks(
-        &self,
-        package: &AppPackageId,
-        version: &InstalledVersion,
-        timer: &crate::timer_core::TimerCore,
-    ) -> anyhow::Result<(bool, usize)> {
-        let removed = self.uninstall(package, version)?;
-        if !removed {
-            return Ok((false, 0));
-        }
-        let package_still_installed = self
-            .list_installed()?
-            .iter()
-            .any(|installed| installed.manifest().id() == package);
-        let suspended = if package_still_installed {
-            0
-        } else {
-            timer.on_app_package_uninstalled(package.as_str()).await?
-        };
-        Ok((true, suspended))
     }
 
     pub(crate) fn write_user_override(

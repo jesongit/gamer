@@ -11,6 +11,7 @@ import {
   lifecyclePrompt,
   permissionDiff,
   uninstallPrompt,
+  registryProofFor,
 } from './workspace/plugin-center/plugin-service'
 
 function jsonResponse(status, body) {
@@ -77,6 +78,24 @@ describe('Phase 10 plugin center contracts', () => {
     expect(installPolicy({ kind: 'official', signature: { status: 'valid' } }).requiresWarning).toBe(false)
     expect(installPolicy({ kind: 'local', signature: { status: 'unsigned' } })).toMatchObject({ allowed: true, requiresWarning: true })
     expect(lifecyclePrompt('disable', { id: 'official.vision', version: '1.0.0', state: 'enabled' })).toMatch(/停用 official\.vision@1\.0\.0/)
+  })
+
+  it('sends the official Registry proof and permission confirmation to the server', async () => {
+    fetch.mockResolvedValueOnce(jsonResponse(200, { id: 'official.vision', version: '1.0.0' }))
+    const entry = {
+      id: 'official.vision', version: '1.0.0', name: 'Vision',
+      download_url: 'https://registry.example/vision.gplugin', sha256: 'a'.repeat(64),
+      signature: { status: 'valid', key_id: 'registry-1', value: 'signature-value' },
+    }
+    const proof = registryProofFor(entry)
+    expect(proof).toMatchObject({ id: entry.id, version: entry.version, key_id: 'registry-1' })
+    await api.inspectExtension(new Blob([new Uint8Array([1])]), {
+      source: 'official', registryProof: proof, permissionConfirmed: true,
+    })
+    const headers = fetch.mock.calls[0][1].headers
+    expect(headers['X-Gamer-Extension-Source']).toBe('official')
+    expect(headers['X-Gamer-Permission-Confirm']).toBe('1')
+    expect(headers['X-Gamer-Registry-Proof']).toBeTruthy()
   })
 
   it('computes permission additions and dependency failures deterministically', () => {

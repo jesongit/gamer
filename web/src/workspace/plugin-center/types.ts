@@ -6,6 +6,9 @@ export interface PluginSignature {
   key_id?: string
   algorithm?: string
   verified_at?: string
+  /** Detached Ed25519 value for official Registry proof or package metadata. */
+  value?: string
+  signature?: string
 }
 
 export interface PluginPermissionSet {

@@ -37,6 +37,9 @@ pub(crate) enum AppPackageError {
 
     #[error("App Package ZIP 错误: {0}")]
     Zip(#[from] zip::result::ZipError),
+
+    #[error("App Package 卸载后的任务挂起通知失败: {0}")]
+    TaskHook(String),
 }
 
 pub(crate) type AppPackageResult<T> = Result<T, AppPackageError>;

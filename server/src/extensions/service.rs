@@ -15,6 +15,7 @@ use super::error::{ExtensionError, ExtensionResult};
 use super::host_api::{HostApi, HostApiCatalog};
 use super::manifest::ExtensionManifest;
 use super::model::{ExtensionId, ExtensionRecord, ExtensionState, ExtensionVersion};
+use super::signature::{RegistryProof, SignatureInfo, SignatureStatus, SignatureVerifier};
 use super::store::{ExtensionStore, InstalledExtension};
 use super::ui::{RegisteredUiContribution, UiContributionRegistry};
 use super::wasm::{WasmInstanceHandle, WasmRuntime, WasmStartRequest};
@@ -30,6 +31,7 @@ pub(crate) struct ExtensionSnapshot {
     installed_versions: Vec<ExtensionVersion>,
     state: ExtensionState,
     last_error: Option<String>,
+    signature: SignatureInfo,
 }
 
 /// Management-only result for the pre-install inspection step. Keeping this
@@ -39,6 +41,25 @@ pub(crate) struct ExtensionSnapshot {
 pub(crate) struct ExtensionInspection {
     manifest: ExtensionManifest,
     archive_sha256: String,
+    signature: SignatureInfo,
+    permission_diff: PermissionDiff,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct PermissionDiff {
+    pub(crate) added: Vec<String>,
+    pub(crate) removed: Vec<String>,
+    pub(crate) unchanged: Vec<String>,
+}
+
+/// Trust and confirmation metadata supplied by the management boundary. The
+/// browser may request an inspection without confirmation; install/update
+/// re-checks both fields while holding the lifecycle lock.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExtensionInstallContext {
+    pub(crate) official: bool,
+    pub(crate) registry_proof: Option<RegistryProof>,
+    pub(crate) permission_confirmed: bool,
 }
 
 impl ExtensionInspection {
@@ -48,6 +69,14 @@ impl ExtensionInspection {
 
     pub(crate) fn archive_sha256(&self) -> &str {
         &self.archive_sha256
+    }
+
+    pub(crate) fn signature(&self) -> &SignatureInfo {
+        &self.signature
+    }
+
+    pub(crate) fn permission_diff(&self) -> &PermissionDiff {
+        &self.permission_diff
     }
 }
 
@@ -75,6 +104,10 @@ impl ExtensionSnapshot {
     pub(crate) fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
+
+    pub(crate) fn signature(&self) -> &SignatureInfo {
+        &self.signature
+    }
 }
 
 pub(crate) struct ExtensionService {
@@ -83,6 +116,7 @@ pub(crate) struct ExtensionService {
     keymap_runtime: Arc<dyn KeymapWasmRuntime>,
     capabilities: CapabilityRegistry,
     host_api: HostApiCatalog,
+    signature: SignatureVerifier,
     operation_lock: Mutex<()>,
     running: std::sync::Mutex<HashMap<ExtensionId, WasmInstanceHandle>>,
     keymap_running: std::sync::Mutex<HashMap<ExtensionId, KeymapWasmInstanceHandle>>,
@@ -95,7 +129,13 @@ impl ExtensionService {
         runtime: Arc<dyn WasmRuntime>,
         capabilities: CapabilityRegistry,
     ) -> Self {
-        Self::with_keymap_runtime(store, runtime, Arc::new(NoKeymapWasmRuntime), capabilities)
+        Self::with_keymap_runtime_and_signature(
+            store,
+            runtime,
+            Arc::new(NoKeymapWasmRuntime),
+            capabilities,
+            SignatureVerifier::default(),
+        )
     }
 
     pub(crate) fn with_keymap_runtime(
@@ -104,12 +144,29 @@ impl ExtensionService {
         keymap_runtime: Arc<dyn KeymapWasmRuntime>,
         capabilities: CapabilityRegistry,
     ) -> Self {
+        Self::with_keymap_runtime_and_signature(
+            store,
+            runtime,
+            keymap_runtime,
+            capabilities,
+            SignatureVerifier::default(),
+        )
+    }
+
+    fn with_keymap_runtime_and_signature(
+        store: ExtensionStore,
+        runtime: Arc<dyn WasmRuntime>,
+        keymap_runtime: Arc<dyn KeymapWasmRuntime>,
+        capabilities: CapabilityRegistry,
+        signature: SignatureVerifier,
+    ) -> Self {
         Self {
             store,
             runtime,
             keymap_runtime,
             capabilities,
             host_api: HostApiCatalog::default(),
+            signature,
             operation_lock: Mutex::new(()),
             running: std::sync::Mutex::new(HashMap::new()),
             keymap_running: std::sync::Mutex::new(HashMap::new()),
@@ -137,11 +194,13 @@ impl ExtensionService {
             Arc::new(super::keymap::LazyKeymapWasmRuntime::new());
         #[cfg(not(feature = "wasm-runtime"))]
         let keymap_runtime: Arc<dyn KeymapWasmRuntime> = Arc::new(NoKeymapWasmRuntime);
-        Self::with_keymap_runtime(
+        let signature = SignatureVerifier::from_data_root(data_root.as_ref());
+        Self::with_keymap_runtime_and_signature(
             ExtensionStore::new(data_root),
             runtime,
             keymap_runtime,
             capabilities,
+            signature,
         )
     }
 
@@ -179,11 +238,39 @@ impl ExtensionService {
     /// Validate an archive without staging it. The management UI uses this
     /// as the confirmation boundary for source, signature, and permissions.
     pub(crate) fn inspect(&self, archive: &[u8]) -> ExtensionResult<ExtensionInspection> {
+        self.inspect_with_context(archive, &ExtensionInstallContext::default())
+    }
+
+    pub(crate) fn inspect_with_context(
+        &self,
+        archive: &[u8],
+        context: &ExtensionInstallContext,
+    ) -> ExtensionResult<ExtensionInspection> {
         let manifest = self.inspect_compatible(archive)?;
+        if context.official && context.registry_proof.is_none() {
+            return Err(ExtensionError::RegistryProofRequired);
+        }
+        let signature = self.signature.verify_archive(archive)?;
+        if context.official && signature.status != SignatureStatus::Valid {
+            return Err(ExtensionError::InvalidSignature(
+                "官方插件必须带有可验证的 manifest.toml Ed25519 签名".into(),
+            ));
+        }
+        if let Some(proof) = context.registry_proof.as_ref() {
+            self.signature.verify_registry_proof(
+                proof,
+                manifest.id(),
+                manifest.version(),
+                archive,
+            )?;
+        }
         let archive_sha256 = format!("{:x}", Sha256::digest(archive));
+        let permission_diff = self.permission_diff_for(&manifest)?;
         Ok(ExtensionInspection {
             manifest,
             archive_sha256,
+            signature,
+            permission_diff,
         })
     }
 
@@ -231,7 +318,7 @@ impl ExtensionService {
         let mut snapshots = Vec::with_capacity(by_id.len());
         for (id, versions) in by_id {
             let record = state_for_versions(&id, &versions, states.get(&id).cloned())?;
-            snapshots.push(snapshot_from_versions(versions, record)?);
+            snapshots.push(snapshot_from_versions(versions, record, &self.signature)?);
         }
         if let Some(id) = states
             .keys()
@@ -248,8 +335,25 @@ impl ExtensionService {
     /// Install a new immutable version. A second version of an existing ID is
     /// kept side-by-side and does not silently become active.
     pub(crate) async fn install(&self, archive: &[u8]) -> ExtensionResult<ExtensionSnapshot> {
+        self.install_with_context(
+            archive,
+            &ExtensionInstallContext {
+                permission_confirmed: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn install_with_context(
+        &self,
+        archive: &[u8],
+        context: &ExtensionInstallContext,
+    ) -> ExtensionResult<ExtensionSnapshot> {
         let _guard = self.operation_lock.lock().await;
-        let manifest = self.inspect_compatible(archive)?;
+        let inspection = self.inspect_with_context(archive, context)?;
+        ensure_permission_confirmation(&inspection, context)?;
+        let manifest = inspection.manifest().clone();
         let installed = self.store.install_archive(archive)?;
         let mut states = self.store.read_state()?;
         states.entry(manifest.id().clone()).or_insert_with(|| {
@@ -263,8 +367,25 @@ impl ExtensionService {
     /// Update means install a new immutable version and select it as active.
     /// A running extension must be stopped explicitly before it can update.
     pub(crate) async fn update(&self, archive: &[u8]) -> ExtensionResult<ExtensionSnapshot> {
+        self.update_with_context(
+            archive,
+            &ExtensionInstallContext {
+                permission_confirmed: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn update_with_context(
+        &self,
+        archive: &[u8],
+        context: &ExtensionInstallContext,
+    ) -> ExtensionResult<ExtensionSnapshot> {
         let _guard = self.operation_lock.lock().await;
-        let manifest = self.inspect_compatible(archive)?;
+        let inspection = self.inspect_with_context(archive, context)?;
+        ensure_permission_confirmation(&inspection, context)?;
+        let manifest = inspection.manifest().clone();
         let mut states = self.store.read_state()?;
         let versions = self.versions_for(manifest.id())?;
         if versions.is_empty() {
@@ -520,7 +641,7 @@ impl ExtensionService {
         let states = self.store.read_state()?;
         let versions = self.versions_for(id)?;
         let record = state_for_versions(id, &versions, states.get(id).cloned())?;
-        snapshot_from_versions(versions, record)
+        snapshot_from_versions(versions, record, &self.signature)
     }
 
     fn versions_for(&self, id: &ExtensionId) -> ExtensionResult<Vec<InstalledExtension>> {
@@ -643,8 +764,13 @@ fn active_version<'a>(
 fn snapshot_from_versions(
     versions: Vec<InstalledExtension>,
     record: ExtensionRecord,
+    signature: &SignatureVerifier,
 ) -> ExtensionResult<ExtensionSnapshot> {
     let active = active_version(&versions, &record)?;
+    let signature_info = signature.verify_installed(
+        active.root(),
+        &active.root().join(super::manifest::MANIFEST_FILE_NAME),
+    );
     Ok(ExtensionSnapshot {
         manifest: active.manifest().clone(),
         active_version: active.manifest().version().clone(),
@@ -654,7 +780,50 @@ fn snapshot_from_versions(
             .collect(),
         state: record.state,
         last_error: record.last_error,
+        signature: signature_info,
     })
+}
+
+impl ExtensionService {
+    fn permission_diff_for(&self, manifest: &ExtensionManifest) -> ExtensionResult<PermissionDiff> {
+        let current = self
+            .list()?
+            .into_iter()
+            .find(|snapshot| snapshot.id() == manifest.id())
+            .map(|snapshot| snapshot.manifest().permissions().names())
+            .unwrap_or_default();
+        let requested = manifest.permissions().names();
+        Ok(PermissionDiff {
+            added: requested
+                .iter()
+                .filter(|permission| !current.contains(permission))
+                .map(|permission| (*permission).to_string())
+                .collect(),
+            removed: current
+                .iter()
+                .filter(|permission| !requested.contains(permission))
+                .map(|permission| (*permission).to_string())
+                .collect(),
+            unchanged: requested
+                .iter()
+                .filter(|permission| current.contains(permission))
+                .map(|permission| (*permission).to_string())
+                .collect(),
+        })
+    }
+}
+
+fn ensure_permission_confirmation(
+    inspection: &ExtensionInspection,
+    context: &ExtensionInstallContext,
+) -> ExtensionResult<()> {
+    if inspection.permission_diff().added.is_empty() || context.permission_confirmed {
+        return Ok(());
+    }
+    Err(ExtensionError::PermissionConfirmationRequired(format!(
+        "新增权限: {}",
+        inspection.permission_diff().added.join(", ")
+    )))
 }
 
 fn invalid_transition(

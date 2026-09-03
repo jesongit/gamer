@@ -132,7 +132,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api'
 import { compareVersions, downloadDirectUrl, downloadFixedVersion, fetchRegistry, findRegistryPlugin } from './registry-client'
-import { dependencyRefsFor, dependencyStatus, installPolicy, installSummary, lifecyclePrompt, mergeManagementResponse, readPluginSourceMetadata, rememberPluginSource, signatureLabel, sourceLabel as sourceText, uninstallPrompt } from './plugin-service'
+import { dependencyRefsFor, dependencyStatus, installPolicy, installSummary, lifecyclePrompt, mergeManagementResponse, readPluginSourceMetadata, rememberPluginSource, registryProofFor, signatureLabel, sourceLabel as sourceText, uninstallPrompt } from './plugin-service'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -210,7 +210,8 @@ function marketUpdate(plugin) {
   return entry
 }
 function canInstallMarket(entry) {
-  return !!entry?.sha256 && installPolicy({ kind: 'official', signature: entry.signature, registryEntry: entry }).allowed
+  return !!registryProofFor(entry)
+    && installPolicy({ kind: 'official', signature: entry.signature, registryEntry: entry }).allowed
 }
 function uiType(entry) {
   const contributions = entry.ui?.contributions
@@ -267,11 +268,17 @@ async function inspectAndConfirm(file, source, current, providedInspection = nul
 }
 
 async function installArchive(file, source, current) {
-  const inspection = await props.apiClient.inspectExtension(file)
+  const uploadOptions = source.kind === 'official'
+    ? { source: 'official', registryProof: registryProofFor(source.registryEntry) }
+    : {}
+  const inspection = await props.apiClient.inspectExtension(file, uploadOptions)
   const existing = current || installedPlugin(inspection.id)
   const result = await inspectAndConfirm(file, source, existing, inspection)
   if (!result) return false
-  const operation = existing ? props.apiClient.updateExtension(existing.id, file) : props.apiClient.installExtension(file)
+  const confirmedOptions = { ...uploadOptions, permissionConfirmed: true }
+  const operation = existing
+    ? props.apiClient.updateExtension(existing.id, file, confirmedOptions)
+    : props.apiClient.installExtension(file, confirmedOptions)
   const snapshot = await operation
   sourceMetadata.value = rememberPluginSource(sourceMetadata.value, result.inspection.id, result.inspection.version, source)
   if (!existing || existing.state !== 'disabled') {

@@ -125,34 +125,53 @@ async function req(method, path, body) {
   return readResult(await response(method, path, body))
 }
 
+function base64Utf8(value) {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+function extensionUploadOptions(options = {}) {
+  const headers = { 'Content-Type': 'application/zip' }
+  if (options.source === 'official') headers['X-Gamer-Extension-Source'] = 'official'
+  if (options.registryProof) {
+    headers['X-Gamer-Registry-Proof'] = typeof options.registryProof === 'string'
+      ? options.registryProof
+      : base64Utf8(JSON.stringify(options.registryProof))
+  }
+  if (options.permissionConfirmed === true) headers['X-Gamer-Permission-Confirm'] = '1'
+  return { rawBody: true, headers }
+}
+
 export const api = {
   // 登录/会话/退出见 src/auth.js（阶段 2 Cookie 会话；本封装不持有认证端点）
 
   // 扩展生命周期与动态 UI contribution
   listExtensions: () => req('GET', '/api/extensions'),
   listExtensionUi: () => req('GET', '/api/extensions/ui'),
-  // Phase 10 插件管理：归档始终以 application/zip 上传，服务端先 inspect
-  // 再由 UI 做来源/签名/权限确认；URL 不会作为 iframe 来源传入。
+  // Phase 10 插件管理：归档始终以 application/zip 上传，服务端重新验证
+  // 来源、Registry proof、包签名与权限确认；URL 不会作为 iframe 来源传入。
   getExtensionManagement: () => req('GET', '/api/extensions/management'),
-  inspectExtension: async (file) => {
+  inspectExtension: async (file, options = {}) => {
     const r = await response(
       'POST', '/api/extensions/inspect', file,
-      { rawBody: true, headers: { 'Content-Type': 'application/zip' } },
+      extensionUploadOptions(options),
     )
     return readResult(r)
   },
-  installExtension: async (file) => {
+  installExtension: async (file, options = {}) => {
     const r = await response(
       'POST', '/api/extensions', file,
-      { rawBody: true, headers: { 'Content-Type': 'application/zip' } },
+      extensionUploadOptions(options),
     )
     return readResult(r)
   },
-  updateExtension: async (id, file) => {
+  updateExtension: async (id, file, options = {}) => {
     const pluginId = requireId(id, 'extension_id')
     const r = await response(
       'POST', `/api/extensions/${encodeURIComponent(pluginId)}/update`, file,
-      { rawBody: true, headers: { 'Content-Type': 'application/zip' } },
+      extensionUploadOptions(options),
     )
     return readResult(r)
   },

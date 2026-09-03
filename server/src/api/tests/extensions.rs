@@ -44,8 +44,11 @@ entry = "ui/index.html"
     let inspected_json = json_body(inspected).await;
     assert_eq!(inspected_json["id"], "com.example.extension");
     assert_eq!(inspected_json["version"], "1.0.0");
-    assert_eq!(inspected_json["signature"]["status"], "unknown");
-    assert_eq!(inspected_json["permission_diff"]["added"], serde_json::json!([]));
+    assert_eq!(inspected_json["signature"]["status"], "unsigned");
+    assert_eq!(
+        inspected_json["permission_diff"]["added"],
+        serde_json::json!([])
+    );
 
     let management = get_json(&test_app, &session, "/api/extensions/management").await;
     assert_eq!(management.status(), StatusCode::OK);
@@ -70,7 +73,11 @@ entry = "ui/index.html"
 
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
     assert_eq!(contributions.status(), StatusCode::OK);
-    assert!(json_body(contributions).await.as_array().unwrap().is_empty());
+    assert!(json_body(contributions)
+        .await
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     let enabled = post_json(
         &test_app,
@@ -91,7 +98,10 @@ entry = "ui/index.html"
     )
     .await;
     assert_eq!(asset.status(), StatusCode::OK);
-    assert_eq!(axum::body::to_bytes(asset.into_body(), 1024).await.unwrap(), "<h1>hello</h1>");
+    assert_eq!(
+        axum::body::to_bytes(asset.into_body(), 1024).await.unwrap(),
+        "<h1>hello</h1>"
+    );
 
     let disabled = post_json(
         &test_app,
@@ -102,7 +112,11 @@ entry = "ui/index.html"
     .await;
     assert_eq!(disabled.status(), StatusCode::OK);
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
-    assert!(json_body(contributions).await.as_array().unwrap().is_empty());
+    assert!(json_body(contributions)
+        .await
+        .as_array()
+        .unwrap()
+        .is_empty());
     let asset = get_json(
         &test_app,
         &session,
@@ -143,7 +157,9 @@ entry = "ui/index.html"
     assert_eq!(disabled.status(), StatusCode::OK);
     std::fs::create_dir_all(test_app.dir.join("extension-data/com.example.extension")).unwrap();
     std::fs::write(
-        test_app.dir.join("extension-data/com.example.extension/preferences.json"),
+        test_app
+            .dir
+            .join("extension-data/com.example.extension/preferences.json"),
         b"keep-until-confirmed",
     )
     .unwrap();

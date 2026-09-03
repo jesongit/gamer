@@ -24,6 +24,14 @@ pub(crate) enum ExtensionError {
     InvalidManifest(String),
     #[error("插件归档无效: {0}")]
     InvalidArchive(String),
+    #[error("插件签名无效: {0}")]
+    InvalidSignature(String),
+    #[error("官方 Registry 证明无效: {0}")]
+    InvalidRegistryProof(String),
+    #[error("官方 Registry 安装必须提供签名证明")]
+    RegistryProofRequired,
+    #[error("插件权限变更需要用户确认: {0}")]
+    PermissionConfirmationRequired(String),
     #[error("插件归档大小 {actual} 字节超过上限 {limit} 字节")]
     ArchiveTooLarge { actual: usize, limit: usize },
     #[error("插件 {id}@{version} 已安装")]

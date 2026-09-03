@@ -23,7 +23,10 @@ pub(crate) use model::{
     AppPackageId, InstalledVersion, ResourceId, ResourceKind, ResourcePath,
 };
 pub(crate) use resolver::{ResolvedResource, ResourceResolver, ResourceSource};
-pub(crate) use store::{AppPackageStore, InstalledPackage};
+pub(crate) use store::{
+    AppPackageStore, AppPackageTaskHook, InstalledPackage, SchedulerTaskSuspendedHook,
+    TimerTaskSuspendedHook,
+};
 
 #[cfg(test)]
 mod tests {
@@ -154,8 +157,8 @@ packages = ["com.example.game"]
         ));
     }
 
-    #[test]
-    fn fresh_store_has_zero_business_resources() {
+    #[tokio::test]
+    async fn fresh_store_has_zero_business_resources() {
         let temp = TempDir::new().unwrap();
         let store = AppPackageStore::new(temp.path());
         let (package, version, android, path) = ids();
@@ -169,7 +172,9 @@ packages = ["com.example.game"]
         // a storage path; the App Package boundary must revalidate it.
         let unsafe_package = AppPackageId::new("..").unwrap();
         assert!(matches!(
-            store.uninstall(&unsafe_package, &InstalledVersion::parse("1.0.0").unwrap()),
+            store
+                .uninstall(&unsafe_package, &InstalledVersion::parse("1.0.0").unwrap())
+                .await,
             Err(AppPackageError::InvalidAppPackageId(_))
         ));
     }
@@ -256,8 +261,8 @@ packages = ["com.example.game"]
             .unwrap_or(false));
     }
 
-    #[test]
-    fn override_wins_and_uninstall_preserves_base_and_override_data() {
+    #[tokio::test]
+    async fn override_wins_and_uninstall_preserves_base_and_override_data() {
         let temp = TempDir::new().unwrap();
         let store = AppPackageStore::new(temp.path());
         let base_marker = temp.path().join("base-capability.marker");
@@ -308,9 +313,11 @@ packages = ["com.example.game"]
 
         assert!(store
             .uninstall(installed.manifest().id(), installed.manifest().version())
+            .await
             .unwrap());
         assert!(store
             .uninstall(updated.manifest().id(), updated.manifest().version())
+            .await
             .unwrap());
         assert!(base_marker.is_file());
         assert!(temp
@@ -360,7 +367,10 @@ packages = ["com.example.game"]
         };
         let db = Arc::new(crate::store::Store::open(&cfg).unwrap());
         let timer = TimerCore::new(db.clone());
-        let store = AppPackageStore::new(temp.path());
+        let store = AppPackageStore::with_task_hook(
+            temp.path(),
+            Arc::new(TimerTaskSuspendedHook::new(timer)),
+        );
         let manifest = package_manifest("official.xxx", "1.2.0", "com.example.game");
         let package = archive(vec![("manifest.toml", &manifest)]);
         let installed = store.install_archive(&package).unwrap();
@@ -380,16 +390,10 @@ packages = ["com.example.game"]
         .unwrap();
         db.upsert_timer_task_async(&task).await.unwrap();
 
-        let (removed, suspended) = store
-            .uninstall_and_update_tasks(
-                installed.manifest().id(),
-                installed.manifest().version(),
-                &timer,
-            )
+        assert!(store
+            .uninstall(installed.manifest().id(), installed.manifest().version())
             .await
-            .unwrap();
-        assert!(removed);
-        assert_eq!(suspended, 1);
+            .unwrap());
         let saved = db.get_timer_task_async("task-1").await.unwrap().unwrap();
         assert_eq!(saved.state, TimerTaskState::Suspended);
         assert_eq!(
@@ -399,17 +403,10 @@ packages = ["com.example.game"]
 
         // A repeated lifecycle notification is idempotent and does not delete
         // the persisted User Task.
-        assert_eq!(
-            store
-                .uninstall_and_update_tasks(
-                    installed.manifest().id(),
-                    installed.manifest().version(),
-                    &timer,
-                )
-                .await
-                .unwrap(),
-            (false, 0)
-        );
+        assert!(!store
+            .uninstall(installed.manifest().id(), installed.manifest().version())
+            .await
+            .unwrap());
         assert!(db.get_timer_task_async("task-1").await.unwrap().is_some());
     }
 }

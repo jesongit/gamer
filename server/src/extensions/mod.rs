@@ -22,6 +22,7 @@ mod manifest;
 mod model;
 mod permissions;
 mod service;
+mod signature;
 mod store;
 mod ui;
 mod wasm;
@@ -154,6 +155,23 @@ mod tests {
 
         async fn stop(&self, _instance: WasmInstanceHandle) -> ExtensionResult<()> {
             *self.stops.lock().unwrap() += 1;
+            Ok(())
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    struct FailingRuntime;
+
+    #[async_trait]
+    impl WasmRuntime for FailingRuntime {
+        async fn start(&self, _request: WasmStartRequest) -> ExtensionResult<WasmInstanceHandle> {
+            Err(ExtensionError::Runtime("runner failed during start".into()))
+        }
+
+        async fn stop(&self, _instance: WasmInstanceHandle) -> ExtensionResult<()> {
             Ok(())
         }
 
@@ -329,6 +347,62 @@ mod tests {
             Err(ExtensionError::RuntimeUnavailable(_))
         ));
         assert_eq!(service.list().unwrap()[0].state(), ExtensionState::Enabled);
+    }
+
+    #[tokio::test]
+    async fn install_rejects_new_permissions_and_official_source_without_proof() {
+        let temp = TempDir::new().unwrap();
+        let service = ExtensionService::new(
+            ExtensionStore::new(temp.path()),
+            Arc::new(CountingRuntime::default()),
+            CapabilityRegistry::default(),
+        );
+        let archive = archive(
+            &manifest("com.example.extension", "1.0.0", &["device.read"], "^1.0"),
+            VALID_WASM,
+        );
+        assert!(matches!(
+            service
+                .install_with_context(&archive, &ExtensionInstallContext::default())
+                .await,
+            Err(ExtensionError::PermissionConfirmationRequired(_))
+        ));
+        assert!(service.list().unwrap().is_empty());
+        assert!(matches!(
+            service.inspect_with_context(
+                &archive,
+                &ExtensionInstallContext {
+                    official: true,
+                    ..Default::default()
+                }
+            ),
+            Err(ExtensionError::RegistryProofRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn runner_failure_is_persisted_as_failed_without_claiming_running() {
+        let temp = TempDir::new().unwrap();
+        let service = ExtensionService::new(
+            ExtensionStore::new(temp.path()),
+            Arc::new(FailingRuntime),
+            CapabilityRegistry::default(),
+        );
+        let installed = service
+            .install(&archive(
+                &manifest("com.example.extension", "1.0.0", &[], "^1.0"),
+                VALID_WASM,
+            ))
+            .await
+            .unwrap();
+        service.enable(installed.id()).await.unwrap();
+        assert!(matches!(
+            service.start(installed.id()).await,
+            Err(ExtensionError::Runtime(_))
+        ));
+        let snapshot = service.list().unwrap().pop().unwrap();
+        assert_eq!(snapshot.state(), ExtensionState::Failed);
+        assert!(snapshot.last_error().unwrap().contains("runner failed"));
     }
 
     #[tokio::test]

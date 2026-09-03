@@ -30,6 +30,8 @@ function normaliseSignature(value: unknown) {
     ...(signature.key_id ? { key_id: String(signature.key_id) } : {}),
     ...(signature.algorithm ? { algorithm: String(signature.algorithm) } : {}),
     ...(signature.verified_at ? { verified_at: String(signature.verified_at) } : {}),
+    ...(signature.value ? { value: String(signature.value) } : {}),
+    ...(signature.signature ? { signature: String(signature.signature) } : {}),
   }
 }
 

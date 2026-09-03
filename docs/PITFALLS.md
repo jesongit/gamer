@@ -159,6 +159,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **Timer Core schema 升级后旧 `tasks` 表仍是 YAML 兼容 API 的入口**：迁移会回填 `timer_tasks`，后续旧任务写入必须走 Store 双写，直接操作单表会让调度状态与 REST 数据分叉。
 - **Phase 7 的 keymap WASM harness 仍是独立标量 ABI**：它不经过本轮 Component/WIT Host、权限或 iframe Bridge，测试通过不能据此宣称插件运行链路已验收。
 - **Wasmtime bindgen 的 WIT `path` 按 Cargo 包根解析且 `resource` 是保留字**：绑定路径使用 `wit/gamer`，资源域接口命名为 `resources`（Host API 仍为 `resource`），否则会在编译期解析失败。
+- **Capability 层若每次匹配都生成新的 frame/resource handle 而不回收，会让长运行内存随匹配次数增长**：FrameStore 限制短帧窗口，ResourceAdapter 按逻辑 ResourceId 复用句柄，跨层只传 Handle。
 - **Wasmtime 48 在 Windows 启用 `component-model-async` 后执行 Component 的 `call_async` 会破坏 Tokio 线程上下文并在运行时退出崩溃**：Phase 6 仅启用 `async + component-model`，保留异步 Host bindings，关闭当前未使用的 Component Concurrency 提案。
 - **Timer Core 的 `next_wakeup` 持久化为 Unix 秒而内存时间带有更高精度**：重启恢复时会截断亚秒部分，持久化恢复断言与比较必须按秒精度处理。
 - **Runner 可能在 `submit` 返回前同步完成**：完成事件若早于 active-run 登记会留下不可取消句柄，需用完成游标/通知和登记前交接处理。

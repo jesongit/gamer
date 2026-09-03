@@ -6,10 +6,11 @@
 
 use axum::body::Bytes;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-use crate::extensions::ExtensionError;
+use crate::extensions::{ExtensionError, ExtensionInstallContext, RegistryProof};
 
 use super::{ApiError, AppState};
 
@@ -54,8 +55,8 @@ pub(super) async fn api_extension_management(State(st): State<AppState>) -> Resp
                     .collect::<std::collections::BTreeMap<_, _>>(),
                 "permissions": snapshot.manifest().permissions().names(),
                 "ui": snapshot.manifest().ui().iter().map(ui_json).collect::<Vec<_>>(),
-                "source": "unknown",
-                "signature": { "status": "unknown" },
+                "source": "local",
+                "signature": snapshot.signature(),
                 "dependent": {
                     "app_packages": dependents.iter()
                         .filter_map(|item| item.get("app_package"))
@@ -96,39 +97,24 @@ pub(super) async fn api_extension_management(State(st): State<AppState>) -> Resp
     .into_response()
 }
 
-pub(super) async fn api_inspect_extension(State(st): State<AppState>, body: Bytes) -> Response {
+pub(super) async fn api_inspect_extension(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if body.is_empty() {
         return ApiError::bad_request("插件归档不能为空").into_response();
     }
-    let inspection = match st.extensions.inspect(&body) {
+    let context = match install_context(&headers) {
+        Ok(context) => context,
+        Err(response) => return response,
+    };
+    let inspection = match st.extensions.inspect_with_context(&body, &context) {
         Ok(value) => value,
         Err(error) => return extension_error(error),
     };
     let manifest = inspection.manifest();
-    let current_permissions = match st.extensions.list() {
-        Ok(items) => items
-            .into_iter()
-            .find(|snapshot| snapshot.id() == manifest.id())
-            .map(|snapshot| snapshot.manifest().permissions().names())
-            .unwrap_or_default(),
-        Err(error) => return extension_error(error),
-    };
     let requested_permissions = manifest.permissions().names();
-    let added = requested_permissions
-        .iter()
-        .filter(|permission| !current_permissions.contains(permission))
-        .copied()
-        .collect::<Vec<_>>();
-    let removed = current_permissions
-        .iter()
-        .filter(|permission| !requested_permissions.contains(permission))
-        .copied()
-        .collect::<Vec<_>>();
-    let unchanged = requested_permissions
-        .iter()
-        .filter(|permission| current_permissions.contains(permission))
-        .copied()
-        .collect::<Vec<_>>();
     let already_installed = st
         .extensions
         .list()
@@ -150,11 +136,11 @@ pub(super) async fn api_inspect_extension(State(st): State<AppState>, body: Byte
         "name": manifest.name(),
         "description": manifest.description(),
         "archive_sha256": inspection.archive_sha256(),
-        "source": "unknown",
+        "source": if context.official { "official" } else { "local" },
         "publisher": null,
-        "signature": { "status": "unknown" },
+        "signature": inspection.signature(),
         "permissions": requested_permissions,
-        "permission_diff": { "added": added, "removed": removed, "unchanged": unchanged },
+        "permission_diff": inspection.permission_diff(),
         "host_api": manifest.host_api().iter()
             .map(|(domain, requirement)| (domain.to_string(), requirement.to_string()))
             .collect::<std::collections::BTreeMap<_, _>>(),
@@ -162,6 +148,37 @@ pub(super) async fn api_inspect_extension(State(st): State<AppState>, body: Byte
         "already_installed": already_installed,
     }))
     .into_response()
+}
+
+/// Parse the management boundary once so inspect, install, and update share
+/// exactly the same official-source and confirmation semantics.
+pub(super) fn install_context(headers: &HeaderMap) -> Result<ExtensionInstallContext, Response> {
+    let official = headers
+        .get("x-gamer-extension-source")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("official"));
+    let registry_proof = match headers.get("x-gamer-registry-proof") {
+        Some(value) => {
+            let value = match value.to_str() {
+                Ok(value) => value,
+                Err(error) => return Err(ApiError::bad_request(error.to_string()).into_response()),
+            };
+            match RegistryProof::from_base64(value) {
+                Ok(proof) => Some(proof),
+                Err(error) => return Err(extension_error(error)),
+            }
+        }
+        None => None,
+    };
+    let permission_confirmed = headers
+        .get("x-gamer-permission-confirm")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| matches!(value, "1" | "true" | "yes"));
+    Ok(ExtensionInstallContext {
+        official,
+        registry_proof,
+        permission_confirmed,
+    })
 }
 
 fn ui_json(contribution: &crate::extensions::UiContribution) -> serde_json::Value {
@@ -185,6 +202,10 @@ fn extension_error(error: ExtensionError) -> Response {
         | ExtensionError::UiUnavailable { .. } => ApiError::not_found(error.to_string()),
         ExtensionError::InvalidState(_) => ApiError::internal(error.to_string()),
         ExtensionError::AlreadyInstalled { .. } | ExtensionError::InvalidTransition { .. } => {
+            ApiError::conflict(error.to_string())
+        }
+        ExtensionError::RegistryProofRequired
+        | ExtensionError::PermissionConfirmationRequired(_) => {
             ApiError::conflict(error.to_string())
         }
         ExtensionError::RuntimeUnavailable(_) => ApiError::service_unavailable(error.to_string()),
