@@ -1013,8 +1013,40 @@ impl DeviceManager {
         map.get(id)?.frame_cache.clone()
     }
 
-    /// 截图（PNG）：帧缓存按需解码（每次全新解码最新帧，天然实时），
-    /// 不可用/失败时回退 adb 虚拟屏截图，再失败直接报错（不静默回退物理屏）。
+    /// 已解码帧（capability / 模板匹配链路）：帧缓存按需解码，直接拿解码后
+    /// 的 RGB 帧（无 PNG 编码/解码往返，与 REST 截图共享同一次解码缓存）。
+    /// 帧缓存不可用/失败时回退 adb 截图（该边界本身产出 PNG，需一次 PNG 解码）。
+    pub async fn screenshot_frame(&self, id: &str) -> anyhow::Result<crate::matcher::DecodedFrame> {
+        let (device, cache) = {
+            let map = self.devices.read();
+            let rt = map
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("device not found"))?;
+            (rt.device.clone(), rt.frame_cache.clone())
+        };
+        if let Some(fc) = cache {
+            match fc.decode_latest_frame().await {
+                Ok(Some(frame)) => {
+                    debug!(
+                        "screenshot decoded on demand: {}x{}",
+                        frame.width(),
+                        frame.height()
+                    );
+                    return frame.to_decoded_frame();
+                }
+                Ok(None) => debug!("frame cache: no decodable frames yet (waiting first IDR)"),
+                Err(e) => warn!("frame cache decode failed: {}", e),
+            }
+        }
+        let png = self
+            .screenshot_png_via_adb(&device, &Self::serial_of(&device))
+            .await?;
+        crate::matcher::DecodedFrame::from_png(&png)
+    }
+
+    /// 截图（PNG，HTTP 边界）：帧缓存按需解码（每次全新解码最新帧，天然实时，
+    /// PNG 编码只发生在此边界），不可用/失败时回退 adb 虚拟屏截图，再失败直接
+    /// 报错（不静默回退物理屏）。
     pub async fn screenshot(&self, id: &str) -> anyhow::Result<Vec<u8>> {
         let (device, cache) = {
             let map = self.devices.read();
@@ -1033,11 +1065,18 @@ impl DeviceManager {
                 Err(e) => warn!("frame cache decode failed: {}", e),
             }
         }
-        let serial = if device.addr.is_empty() {
-            "usb".to_string()
-        } else {
-            device.addr.clone()
-        };
+        self.screenshot_png_via_adb(&device, &Self::serial_of(&device))
+            .await
+    }
+
+    /// adb 侧 PNG 截图兜底（虚拟屏优先，物理屏直接 screencap）。
+    async fn screenshot_png_via_adb(
+        &self,
+        device: &crate::store::Device,
+        serial: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        let serial = serial.to_string();
+
         // 虚拟屏模式：优先截 scrcpy 虚拟屏；部分设备 adb screencap -d 不支持该虚拟屏，
         // 会返回非图片错误文本，此时**不再回退物理屏**——物理屏与虚拟屏内容/分辨率不同，
         // 静默回退会让模板匹配拿到错误的画面（如主屏竖屏数据）。
@@ -1063,6 +1102,14 @@ impl DeviceManager {
         let png = self.adb.screencap(&serial).await?;
         debug!("screenshot from adb screencap: {} bytes", png.len());
         Ok(png)
+    }
+
+    fn serial_of(device: &crate::store::Device) -> String {
+        if device.addr.is_empty() {
+            "usb".to_string()
+        } else {
+            device.addr.clone()
+        }
     }
 
     /// 解析虚拟屏 display id（dumpsys display 中 type=VIRTUAL 且分辨率匹配 scrcpy 虚拟屏）

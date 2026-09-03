@@ -74,22 +74,6 @@ impl FrameAdapter {
     pub(crate) fn new(devices: Arc<DeviceManager>, store: Arc<FrameStore>) -> Self {
         Self { devices, store }
     }
-
-    pub(crate) async fn import_png(&self, png: Vec<u8>) -> CapabilityResult<FrameHandle> {
-        let frame =
-            crate::matcher::compute::run(move || crate::matcher::DecodedFrame::from_png(&png))
-                .await
-                .map_err(|error| CapabilityError::Failed(error.to_string()))?
-                .map_err(|error| CapabilityError::Failed(error.to_string()))?;
-        self.store.insert(frame)
-    }
-
-    async fn capture_png(&self, device: &DeviceHandle) -> CapabilityResult<Vec<u8>> {
-        self.devices
-            .screenshot(device.id().as_str())
-            .await
-            .map_err(|error| CapabilityError::Failed(error.to_string()))
-    }
 }
 
 #[async_trait]
@@ -98,12 +82,18 @@ impl FrameService for FrameAdapter {
         self.capture(device).await.map(Some)
     }
 
+    /// 截图直连 FrameCache 按需解码路径（`DeviceManager::screenshot_frame`）：
+    /// 拿到的是已解码 RGB 帧（Arc 共享），注册进 FrameStore 返回 handle——
+    /// 不再有「ffmpeg 出 PNG → Rust 解 PNG」的往返；PNG 编码只保留在 HTTP
+    /// 截图边界（`DeviceManager::screenshot` / `decode_latest_png`）。帧缓存
+    /// 不可用时由 DeviceManager 回退 adb 截图（该边界本身产出 PNG）。
     async fn capture(&self, device: &DeviceHandle) -> CapabilityResult<FrameHandle> {
-        // TODO(phase4): expose a decoded FrameCache snapshot so this adapter can
-        // consume the H264/GOP path directly without changing the existing PNG
-        // screenshot hot path. The handle boundary is already stable today.
-        let png = self.capture_png(device).await?;
-        self.import_png(png).await
+        let frame = self
+            .devices
+            .screenshot_frame(device.id().as_str())
+            .await
+            .map_err(|error| CapabilityError::Failed(error.to_string()))?;
+        self.store.insert(frame)
     }
 
     async fn size(&self, frame: FrameHandle) -> CapabilityResult<FrameSize> {

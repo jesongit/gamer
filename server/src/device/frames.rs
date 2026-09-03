@@ -1,9 +1,10 @@
 //! 帧缓存（帧环 + 按需解码）：
 //! 缓存 scrcpy 的 H.264 原始帧（SPS/PPS 配置帧 + 自最近关键帧起的完整 GOP），
 //! 用途：
-//!   1. 截图/模板匹配 —— 用**临时 ffmpeg** 把最新一帧解码成 PNG 返回；同一
-//!      generation/frame sequence 在短 freshness 窗口内复用已完成 PNG，帧一变就失效。
-//!      cache miss 仍按需解码，避免常驻解码管线停滞后持续返回旧画面。
+//!   1. 截图/模板匹配 —— 用**临时 ffmpeg** 把最新一帧解码为已解码 RGB 帧
+//!      （[`DecodedScreen`]，PPM 自描述载荷，无 PNG 编解码往返）；同一
+//!      generation/frame sequence 在短 freshness 窗口内复用同一已解码帧（Arc 共享），
+//!      帧一变就失效。PNG 编码只保留在 HTTP 截图边界（decode_latest_png）。
 //!   2. WebRTC 新 viewer 初始重放（SPS/PPS + 最近 GOP，见 initial_frames）。
 
 use std::collections::HashMap;
@@ -23,16 +24,114 @@ use tracing::{debug, warn};
 use super::scrcpy::VideoFrame;
 use crate::metrics::FfmpegStage;
 
-const PNG_SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+/// 已解码的一帧画面（RGB24，行紧邻存储）。ffmpeg 以 PPM（P6，自描述头 +
+/// 原始像素）跨进程边界输出——只有 H.264 解码，没有 PNG 编码/解码往返；
+/// PNG 编码仅在 HTTP 截图边界按需进行（[`FrameCache::decode_latest_png`]）。
+#[derive(Clone, Debug)]
+pub(crate) struct DecodedScreen {
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+}
 
-/// 从 PNG 头（IHDR）取宽高：8 字节签名 + 4 长度 + 4 "IHDR" → width@16 / height@20（大端）
-fn png_dims(png: &[u8]) -> Option<(u32, u32)> {
-    if png.len() < 24 || png[..8] != PNG_SIG {
-        return None;
+impl DecodedScreen {
+    /// 解析 ffmpeg 输出的单帧 PPM（P6）。头部形如 `P6\n<w> <h>\n255\n`，
+    /// 允许任意空白分隔；maxval 只接受 ≤255（1 字节/分量）。
+    pub(crate) fn from_ppm(bytes: &[u8]) -> anyhow::Result<Self> {
+        let mut rest = bytes;
+        let mut values = [0u64; 3]; // magic 标记后的 w / h / maxval 三个整数
+        if rest.starts_with(b"P6") {
+            rest = &rest[2..];
+        } else {
+            anyhow::bail!("解码输出不是 PPM（P6）格式");
+        }
+        for slot in values.iter_mut() {
+            // 跳过 magic/整数之间的空白（含 PNM 注释行）
+            loop {
+                match rest.first() {
+                    Some(b'#') => rest = rest.split(|b| *b == b'\n').next_back().unwrap_or(&[]),
+                    Some(b) if b.is_ascii_whitespace() => rest = &rest[1..],
+                    _ => break,
+                }
+            }
+            let digits = rest
+                .iter()
+                .position(|b| !b.is_ascii_digit())
+                .unwrap_or(rest.len());
+            if digits == 0 {
+                anyhow::bail!("PPM 头部不完整");
+            }
+            let text = std::str::from_utf8(&rest[..digits])
+                .map_err(|_| anyhow::anyhow!("PPM 头部非法"))?;
+            *slot = text
+                .parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("PPM 头部数值溢出"))?;
+            rest = &rest[digits..];
+        }
+        // 头部结束：PNM 规范在 maxval 之后是**恰好一个**空白字节，然后是
+        // 二进制像素数据（像素可以是任意字节值，不能循环吞空白）。
+        match rest.first() {
+            Some(b) if b.is_ascii_whitespace() => rest = &rest[1..],
+            _ => anyhow::bail!("PPM 头部与像素数据之间缺少空白分隔"),
+        }
+        let width = values[0];
+        let height = values[1];
+        let maxval = values[2];
+        if maxval == 0 || maxval > 255 {
+            anyhow::bail!("PPM maxval 仅支持 ≤255: {maxval}");
+        }
+        let Ok(width) = u32::try_from(width) else {
+            anyhow::bail!("PPM 宽度溢出: {width}");
+        };
+        let Ok(height) = u32::try_from(height) else {
+            anyhow::bail!("PPM 高度溢出: {height}");
+        };
+        let pixels = width as usize * height as usize * 3;
+        if rest.len() < pixels {
+            anyhow::bail!(
+                "PPM 像素数据不足: 期望 {pixels} 字节（{width}x{height}），得到 {}",
+                rest.len()
+            );
+        }
+        Ok(Self {
+            width,
+            height,
+            rgb: rest[..pixels].to_vec(),
+        })
     }
-    let w = u32::from_be_bytes(png[16..20].try_into().ok()?);
-    let h = u32::from_be_bytes(png[20..24].try_into().ok()?);
-    Some((w, h))
+
+    pub(crate) fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// 测试诊断用（bin 构建无可调用方）。
+    #[allow(dead_code)]
+    pub(crate) fn pixel_count(&self) -> usize {
+        self.rgb.len() / 3
+    }
+
+    /// HTTP 截图边界：把已解码帧按需编码为 PNG。
+    pub(crate) fn encode_png(&self) -> anyhow::Result<Vec<u8>> {
+        let Some(image) = image::RgbImage::from_raw(self.width, self.height, self.rgb.clone())
+        else {
+            anyhow::bail!("解码帧尺寸与像素数不一致（{}x{}）", self.width, self.height);
+        };
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+        Ok(png)
+    }
+
+    /// Vision/matcher 边界：共享同一次解码的像素（Arc 包裹，零复制）。
+    pub(crate) fn to_decoded_frame(&self) -> anyhow::Result<crate::matcher::DecodedFrame> {
+        let image = image::RgbImage::from_raw(self.width, self.height, self.rgb.clone())
+            .ok_or_else(|| anyhow::anyhow!("解码帧尺寸与像素数不一致"))?;
+        Ok(crate::matcher::DecodedFrame::from_rgb(image))
+    }
 }
 
 /// GOP 缓存上限（帧数与字节数，超限丢弃整个 GOP 等下一个 IDR 重建）。
@@ -43,7 +142,7 @@ fn png_dims(png: &[u8]) -> Option<(u32, u32)> {
 const GOP_MAX_FRAMES: usize = 800;
 const GOP_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-/// 按需解码超时（spawn + 解码 + PNG 编码的预算）
+/// 按需解码超时（spawn + 解码的预算）
 const DECODE_TIMEOUT: Duration = Duration::from_secs(3);
 /// 等待首个可解码帧（GOP 非空）的最长时间：会话刚建立时首个 IDR 通常 ≤1s 到达
 const WAIT_FIRST_GOP: Duration = Duration::from_millis(1500);
@@ -124,13 +223,13 @@ struct FrameSnapshot {
 
 #[derive(Debug)]
 struct DecodedFrame {
-    png: Vec<u8>,
+    frame: Arc<DecodedScreen>,
     frame_sequence: u64,
 }
 
 struct DecodedResultCacheEntry {
     key: FrameKey,
-    png: Arc<Vec<u8>>,
+    frame: Arc<DecodedScreen>,
     completed_at: Instant,
 }
 
@@ -275,10 +374,10 @@ pub struct FrameCache {
     state: Mutex<FrameState>,
     /// 同一个精确帧快照只允许一个真实 ffmpeg 解码，结果/错误由所有 waiter 共享。
     decode_in_flight: InFlight<FrameKey, DecodedFrame, String>,
-    /// 已完成 PNG 的短缓存。键必须精确匹配 generation + frame sequence，不能跨帧复用。
+    /// 已完成解码帧的短缓存。键必须精确匹配 generation + frame sequence，不能跨帧复用。
     decoded_result: Mutex<Option<DecodedResultCacheEntry>>,
     decode_freshness: Duration,
-    /// 单设备有界闸门：避免同一设备上出现多个 ffmpeg / PNG 解码同时占用 Tokio 资源。
+    /// 单设备有界闸门：避免同一设备上出现多个 ffmpeg 解码同时占用 Tokio 资源。
     decode_budget: Arc<Semaphore>,
     /// 帧尺寸（最近一次成功解码的 PNG 尺寸，供设备信息展示）
     width: RwLock<u32>,
@@ -452,13 +551,20 @@ impl FrameCache {
         }
     }
 
-    /// 按需解码最新帧为 PNG（供截图/模板匹配）。当前帧的已完成 PNG 可在短
-    /// freshness 窗口内复用；相同帧序号的并发请求共享同一个真实 ffmpeg future。
-    /// 解码完成后重新核对 key，避免把 config/GOP 已替换的旧 PNG 当成当前帧。
-    /// 无帧（会话刚建立/刚清空）时等首个 IDR ≤1.5s；解码失败时仅当失败仍对应当前
-    /// 快照才清空 GOP，随后等待新 IDR 重试一次。
+    /// 按需解码最新帧为 PNG（HTTP 截图边界专用：PNG 编码在此发生）。
     /// Ok(None) = 等待超时仍无关键帧（会话刚建立，稍后再试）。
     pub async fn decode_latest_png(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        let frame = self.decode_latest_frame().await?;
+        frame.map(|frame| frame.encode_png()).transpose()
+    }
+
+    /// 按需解码最新帧（供截图/模板匹配/取色共享同一次解码）。当前帧的已完成
+    /// 解码结果可在短 freshness 窗口内复用（Arc 共享像素，无重复解码）；相同
+    /// 帧序号的并发请求共享同一个真实 ffmpeg future。
+    /// 解码完成后重新核对 key，避免把 config/GOP 已替换的旧帧当成当前帧。
+    /// 无帧（会话刚建立/刚清空）时等首个 IDR ≤1.5s；解码失败时仅当失败仍对应当前
+    /// 快照才清空 GOP，随后等待新 IDR 重试一次。
+    pub async fn decode_latest_frame(&self) -> anyhow::Result<Option<Arc<DecodedScreen>>> {
         let ffmpeg = self.ffmpeg_path.lock().clone();
         let decode_budget = Arc::clone(&self.decode_budget);
         let mut decode_error = None;
@@ -476,9 +582,9 @@ impl FrameCache {
             };
             let key = snapshot.key;
             let snapshot_latest_frame_at = snapshot.latest_frame_at;
-            if let Some(png) = self.cached_decoded_png(key, snapshot.frame_sequence) {
-                self.record_png_dims(&png);
-                return Ok(Some(png));
+            if let Some(frame) = self.cached_decoded_frame(key, snapshot.frame_sequence) {
+                self.record_frame_dims(&frame);
+                return Ok(Some(frame));
             }
             let ffmpeg_for_decode = ffmpeg.clone();
             let decode_budget = Arc::clone(&decode_budget);
@@ -499,9 +605,9 @@ impl FrameCache {
             match decoded {
                 Ok(decoded) => {
                     if self.is_snapshot_current(key) {
-                        self.record_png_dims(&decoded.png);
-                        self.store_decoded_png(key, &decoded.png);
-                        return Ok(Some(decoded.png.clone()));
+                        self.record_frame_dims(&decoded.frame);
+                        self.store_decoded_frame(key, decoded.frame.clone());
+                        return Ok(Some(decoded.frame.clone()));
                     }
 
                     // 不能返回被替换的 config/GOP（代际已推进 = 编码器重启/新 IDR）。
@@ -517,7 +623,7 @@ impl FrameCache {
                         );
                         continue;
                     }
-                    warn!("按需解码完成时帧快照已更新，丢弃过期 PNG");
+                    warn!("按需解码完成时帧快照已更新，丢弃过期帧");
                     return Ok(None);
                 }
                 Err(error) => {
@@ -536,7 +642,8 @@ impl FrameCache {
     }
 
     /// Test-only entry point for the fixed offline benchmark. It exercises the
-    /// production `decode_latest_png` path with a deterministic packetized GOP.
+    /// production decode path with a deterministic packetized GOP and returns
+    /// PNG bytes（与 HTTP 截图边界及历史基准口径可比）。
     #[cfg(test)]
     pub(crate) async fn benchmark_decode_latest_png(
         ffmpeg: &str,
@@ -573,7 +680,11 @@ impl FrameCache {
             .ok_or_else(|| anyhow::anyhow!("固定 GOP 未产生 PNG"))
     }
 
-    fn cached_decoded_png(&self, key: FrameKey, frame_sequence: u64) -> Option<Vec<u8>> {
+    fn cached_decoded_frame(
+        &self,
+        key: FrameKey,
+        frame_sequence: u64,
+    ) -> Option<Arc<DecodedScreen>> {
         let _ = frame_sequence; // 复用按代际判定；序号仅用于日志/追踪
         if !self.is_snapshot_current(key) {
             return None;
@@ -586,19 +697,19 @@ impl FrameCache {
             return None;
         }
         if entry.completed_at.elapsed() <= self.decode_freshness {
-            return Some(entry.png.as_ref().clone());
+            return Some(entry.frame.clone());
         }
         *cached = None;
         None
     }
 
-    fn store_decoded_png(&self, key: FrameKey, png: &[u8]) {
+    fn store_decoded_frame(&self, key: FrameKey, frame: Arc<DecodedScreen>) {
         if !self.is_snapshot_current(key) {
             return;
         }
         *self.decoded_result.lock() = Some(DecodedResultCacheEntry {
             key,
-            png: Arc::new(png.to_vec()),
+            frame,
             completed_at: Instant::now(),
         });
     }
@@ -620,8 +731,9 @@ impl FrameCache {
             .run(key, move || async move {
                 decode(snapshot)
                     .await
-                    .map(|png| DecodedFrame {
-                        png,
+                    .and_then(|ppm| DecodedScreen::from_ppm(&ppm))
+                    .map(|frame| DecodedFrame {
+                        frame: Arc::new(frame),
                         frame_sequence,
                     })
                     .map_err(|error| error.to_string())
@@ -663,7 +775,7 @@ impl FrameCache {
             }
             Err(_) => {
                 metrics.record_ffmpeg_decode(elapsed_ms, crate::metrics::FfmpegResult::Timeout);
-                Err(anyhow::anyhow!("ffmpeg 解码超时（3s 未产出 PNG）"))
+                Err(anyhow::anyhow!("ffmpeg 解码超时（3s 未产出解码帧）"))
             }
         };
         drop(permit);
@@ -702,7 +814,8 @@ impl FrameCache {
         }
     }
 
-    /// 用临时 ffmpeg 解码 config+GOP，输出 GOP 最后一帧的 PNG。
+    /// 用临时 ffmpeg 解码 config+GOP，输出 GOP 最后一帧（PPM/P6：自描述头 +
+    /// 原始 RGB 像素，只有 H.264 解码、无 PNG 编码；PNG 编码在 HTTP 截图边界）。
     /// select=gte(n\,N)（N = GOP 帧数-1）：demuxer 会把配置帧也算进帧索引，
     /// gte 容忍 ±1~2 帧偏移，最多取到倒数第 3 帧（~100ms 旧），仍是实时画面。
     ///
@@ -713,8 +826,8 @@ impl FrameCache {
     ///   write  = spawn 段终点 → stdin 写入完成并关闭（EOF）。写入与读输出
     ///            在 tokio::join! 下并发执行，重叠窗口归 write 段
     ///   decode = write 段终点 → stdout/stderr 读到 EOF（进程此时已退出）。
-    ///            ffmpeg 进程内的 H.264 解码与 PNG 编码都发生在该等待窗口内，
-    ///            Rust 侧无法再细分，故 PNG 编码归 decode 段
+    ///            ffmpeg 进程内的 H.264 解码发生在该等待窗口内（PPM 输出无
+    ///            容器编码；PNG 编码如需仅在 HTTP 截图边界按需进行）
     ///   png    = stdout EOF → 函数返回：child.wait() 收割 + 退出码/输出校验
     ///            + stderr 尾部截取（µs 级后处理，用于校验四段并集完整性）
     /// 失败路径按已完成的段如实记录：spawn 失败只记 spawn 段；写入失败记
@@ -743,9 +856,7 @@ impl FrameCache {
                 "-f",
                 "image2pipe",
                 "-vcodec",
-                "png",
-                "-compression_level",
-                "1",
+                "ppm",
                 "pipe:1",
             ])
             .stdin(std::process::Stdio::piped())
@@ -848,11 +959,9 @@ impl FrameCache {
         Ok(out)
     }
 
-    fn record_png_dims(&self, png: &[u8]) {
-        if let Some((w, h)) = png_dims(png) {
-            *self.width.write() = w;
-            *self.height.write() = h;
-        }
+    fn record_frame_dims(&self, frame: &DecodedScreen) {
+        *self.width.write() = frame.width();
+        *self.height.write() = frame.height();
     }
 }
 
@@ -1016,6 +1125,37 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct TestError(&'static str);
 
+    fn ppm(pixel: u8) -> Vec<u8> {
+        let mut payload = b"P6\n1 1\n255\n".to_vec();
+        payload.extend([pixel, pixel, pixel]);
+        payload
+    }
+
+    fn test_frame(marker: u8) -> super::DecodedScreen {
+        let mut frame = super::DecodedScreen::from_ppm(b"P6\n2 2\n255\nXXXXXXXXXXXX").unwrap();
+        frame.rgb[0] = marker;
+        frame
+    }
+
+    /// 解码产物是 PPM/P6（自描述 RGB）而非 PNG：capture 链路因此不再有
+    /// PNG 编码/解码往返；PNG 字节流必须被拒绝。
+    #[test]
+    fn decoded_screen_parses_ppm_and_rejects_png() {
+        let mut payload = b"P6  3 2  255\n".to_vec();
+        payload.extend(1u8..=18);
+        let frame = super::DecodedScreen::from_ppm(&payload).unwrap();
+        assert_eq!((frame.width(), frame.height()), (3, 2));
+        assert_eq!(frame.pixel_count(), 6); // 3x2 像素 = 18 字节 RGB
+        assert_eq!(frame.rgb[0], 1);
+
+        // PNG 签名不是 PPM：直接拒绝，不会走 PNG 解码
+        assert!(super::DecodedScreen::from_ppm(b"\x89PNG\r\n\x1a\n rest").is_err());
+        // 像素数不足必须报错（不静默截断）
+        assert!(super::DecodedScreen::from_ppm(b"P6\n3 2\n255\nshort").is_err());
+        // maxval >255（2 字节/分量）不支持
+        assert!(super::DecodedScreen::from_ppm(b"P6\n1 1\n65535\n").is_err());
+    }
+
     fn video_frame(data: u8, is_config: bool, is_keyframe: bool) -> VideoFrame {
         VideoFrame {
             data: Bytes::from(vec![data]),
@@ -1086,14 +1226,15 @@ mod tests {
 
     /// 动态画面回归：解码耗时内 P 帧持续到达不能让截图失效（否则 30fps 下
     /// 任何解码都追不上帧序，冷启动动画期间截图 100% 失败）。
-    /// 代际内已解码 PNG 在 freshness 窗口内跨 frame_sequence 复用。
+    /// 代际内已解码帧在 freshness 窗口内跨 frame_sequence 复用（同一帧内容，
+    /// 不重复解码、不复制像素）。
     #[test]
-    fn decoded_png_survives_p_frame_arrivals_within_same_generation() {
+    fn decoded_frame_survives_p_frame_arrivals_within_same_generation() {
         let cache = FrameCache::start_with_freshness("ffmpeg", std::time::Duration::from_secs(1));
         cache.feed(&video_frame(1, true, false));
         cache.feed(&video_frame(2, false, true));
         let first = cache.snapshot().expect("snapshot before motion");
-        cache.store_decoded_png(first.key, b"png-v1");
+        cache.store_decoded_frame(first.key, Arc::new(test_frame(1)));
 
         // 模拟解码期间/之后画面持续运动：P 帧推进序号，代际不变
         cache.feed(&video_frame(3, false, false));
@@ -1101,19 +1242,17 @@ mod tests {
         let second = cache.snapshot().expect("snapshot after motion");
         assert_ne!(second.key, first.key);
         assert!(cache.is_snapshot_current(first.key));
-        assert_eq!(
-            cache
-                .cached_decoded_png(second.key, second.frame_sequence)
-                .as_deref(),
-            Some(&b"png-v1"[..])
-        );
+        let reused = cache
+            .cached_decoded_frame(second.key, second.frame_sequence)
+            .expect("fresh frame must be reused within the same generation");
+        assert_eq!(reused.rgb[0], 1);
 
         // 新 IDR 推进代际：旧解码结果彻底失效
         cache.feed(&video_frame(9, false, true));
         let third = cache.snapshot().expect("snapshot after new IDR");
         assert!(!cache.is_snapshot_current(first.key));
         assert!(cache
-            .cached_decoded_png(third.key, third.frame_sequence)
+            .cached_decoded_frame(third.key, third.frame_sequence)
             .is_none());
     }
 
@@ -1198,7 +1337,7 @@ mod tests {
                     first_executions.fetch_add(1, Ordering::SeqCst);
                     first_started.notify_one();
                     first_release.notified().await;
-                    Ok(vec![7])
+                    Ok(ppm(7))
                 })
                 .await
         });
@@ -1211,7 +1350,7 @@ mod tests {
             second_cache
                 .request_snapshot(snapshot, move |_| async move {
                     second_executions.fetch_add(1, Ordering::SeqCst);
-                    Ok(vec![99])
+                    Ok(ppm(99))
                 })
                 .await
         });
@@ -1219,8 +1358,8 @@ mod tests {
         wait_for_waiters(&cache, key, 2).await;
         release.notify_one();
 
-        assert_eq!(first.await.unwrap().unwrap().png, vec![7]);
-        assert_eq!(second.await.unwrap().unwrap().png, vec![7]);
+        assert_eq!(first.await.unwrap().unwrap().frame.rgb, vec![7, 7, 7]);
+        assert_eq!(second.await.unwrap().unwrap().frame.rgb, vec![7, 7, 7]);
         assert_eq!(executions.load(Ordering::SeqCst), 1);
     }
 
@@ -1280,11 +1419,11 @@ mod tests {
         let retry = cache
             .request_snapshot(snapshot, move |_| async move {
                 retry_executions.fetch_add(1, Ordering::SeqCst);
-                Ok(vec![9])
+                Ok(ppm(9))
             })
             .await
             .unwrap();
-        assert_eq!(retry.png, vec![9]);
+        assert_eq!(retry.frame.rgb, vec![9, 9, 9]);
         assert_eq!(executions.load(Ordering::SeqCst), 2);
     }
 
@@ -1306,7 +1445,7 @@ mod tests {
                 .request_snapshot(first_snapshot, move |_| async move {
                     started.notify_one();
                     release.notified().await;
-                    Ok(vec![1])
+                    Ok(ppm(1))
                 })
                 .await
         });
@@ -1318,15 +1457,15 @@ mod tests {
 
         let second = tokio::time::timeout(
             Duration::from_secs(1),
-            cache.request_snapshot(second_snapshot, |_| async move { Ok(vec![2]) }),
+            cache.request_snapshot(second_snapshot, |_| async move { Ok(ppm(2)) }),
         )
         .await
         .expect("a different frame key must not wait for the first decode")
         .unwrap();
-        assert_eq!(second.png, vec![2]);
+        assert_eq!(second.frame.rgb, vec![2, 2, 2]);
 
         first_release.notify_one();
-        assert_eq!(first.await.unwrap().unwrap().png, vec![1]);
+        assert_eq!(first.await.unwrap().unwrap().frame.rgb, vec![1, 1, 1]);
     }
 
     #[tokio::test]
@@ -1351,7 +1490,7 @@ mod tests {
                 .request_snapshot(first_snapshot, move |_| async move {
                     task_started.notify_one();
                     task_release.notified().await;
-                    Ok(vec![1])
+                    Ok(ppm(1))
                 })
                 .await
         });
@@ -1359,15 +1498,15 @@ mod tests {
         started.notified().await;
         let second = tokio::time::timeout(
             Duration::from_secs(1),
-            second_cache.request_snapshot(second_snapshot, |_| async move { Ok(vec![2]) }),
+            second_cache.request_snapshot(second_snapshot, |_| async move { Ok(ppm(2)) }),
         )
         .await
         .expect("another device cache must have an independent in-flight map")
         .unwrap();
-        assert_eq!(second.png, vec![2]);
+        assert_eq!(second.frame.rgb, vec![2, 2, 2]);
 
         release.notify_one();
-        assert_eq!(first.await.unwrap().unwrap().png, vec![1]);
+        assert_eq!(first.await.unwrap().unwrap().frame.rgb, vec![1, 1, 1]);
     }
 
     #[tokio::test]
@@ -1456,12 +1595,12 @@ mod tests {
         let retry = cache
             .request_snapshot(retry_snapshot, move |_| async move {
                 retry_executed.fetch_add(1, Ordering::SeqCst);
-                Ok(vec![9])
+                Ok(ppm(9))
             })
             .await
             .expect("retry should recover");
 
-        assert_eq!(retry.png, vec![9]);
+        assert_eq!(retry.frame.rgb, vec![9, 9, 9]);
         assert_eq!(executed.load(Ordering::SeqCst), 2);
     }
 
@@ -1601,20 +1740,25 @@ mod tests {
         cache.feed(&video_frame(2, false, true));
         let first = cache.snapshot().expect("first snapshot");
 
-        cache.store_decoded_png(first.key, b"first");
-        assert_eq!(
-            cache.cached_decoded_png(first.key, first.frame_sequence),
-            Some(b"first".to_vec())
+        let first_frame = Arc::new(test_frame(1));
+        cache.store_decoded_frame(first.key, first_frame.clone());
+        let got = cache
+            .cached_decoded_frame(first.key, first.frame_sequence)
+            .expect("fresh frame");
+        assert!(
+            Arc::ptr_eq(&got, &first_frame),
+            "cache hit must return the same decoded frame without re-decode"
         );
 
         // 同代际内 P 帧推进序号：freshness 窗口内复用（陈旧度由窗口承诺）
         cache.feed(&video_frame(3, false, false));
         let second = cache.snapshot().expect("second snapshot");
         assert_ne!(first.key, second.key);
-        assert_eq!(
-            cache.cached_decoded_png(second.key, second.frame_sequence),
-            Some(b"first".to_vec()),
-            "same generation + fresh window must reuse the decoded PNG"
+        assert!(
+            cache
+                .cached_decoded_frame(second.key, second.frame_sequence)
+                .is_some(),
+            "same generation + fresh window must reuse the decoded frame"
         );
 
         // 新代际（config 变更清 GOP）后不得复用
@@ -1623,18 +1767,20 @@ mod tests {
         let third = cache
             .snapshot()
             .expect("third snapshot after config change");
-        assert_eq!(
-            cache.cached_decoded_png(third.key, third.frame_sequence),
-            None,
-            "replaced generation must not reuse the old PNG"
+        assert!(
+            cache
+                .cached_decoded_frame(third.key, third.frame_sequence)
+                .is_none(),
+            "replaced generation must not reuse the old frame"
         );
 
-        cache.store_decoded_png(third.key, b"third");
+        cache.store_decoded_frame(third.key, Arc::new(test_frame(3)));
         std::thread::sleep(Duration::from_millis(60));
-        assert_eq!(
-            cache.cached_decoded_png(third.key, third.frame_sequence),
-            None,
-            "completed PNG must expire after the configured freshness window"
+        assert!(
+            cache
+                .cached_decoded_frame(third.key, third.frame_sequence)
+                .is_none(),
+            "completed frame must expire after the configured freshness window"
         );
     }
 
@@ -1842,6 +1988,44 @@ mod tests {
             warmup,
             std::env::consts::OS,
             gop.len(),
+        );
+    }
+
+    /// Phase 0 基线补充：固定夹具 GOP 喂入 FrameCache 后的缓存峰值（bytes/frames）。
+    /// 离线代理：以 testdata/perf/stream.h264（SPS/PPS + 单 GOP）为输入，逐帧 feed
+    /// 并记录 Metrics gop gauge 的峰值；不接触真实设备帧流，真实流峰值随分辨率/
+    /// 码率不同，仅作同夹具可比基线。
+    #[test]
+    fn gop_cache_peak_fixture_benchmark() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/perf");
+        let stream = std::fs::read(dir.join("stream.h264")).expect("读取固定夹具 stream.h264 失败");
+        let (config, frames) = split_benchmark_gop(&stream);
+        assert!(!config.is_empty(), "固定 H.264 fixture 缺少 SPS/PPS");
+        assert!(!frames.is_empty(), "固定 H.264 fixture 未解析出视频帧");
+        let metrics = Arc::new(crate::metrics::Metrics::default());
+        let cache = FrameCache::start_with_metrics("ffmpeg", Arc::clone(&metrics));
+        cache.feed(&VideoFrame {
+            data: Bytes::from(config),
+            pts_us: 0,
+            is_config: true,
+            is_keyframe: false,
+            annex_b: true,
+        });
+        let mut peak_bytes: i64 = 0;
+        let mut peak_frames: i64 = 0;
+        for frame in &frames {
+            cache.feed(frame);
+            let snap = metrics.snapshot();
+            peak_bytes = peak_bytes.max(snap.gop_bytes);
+            peak_frames = peak_frames.max(snap.gop_frames);
+        }
+        assert!(peak_bytes > 0, "GOP 缓存峰值应大于 0");
+        println!(
+            "PERF metric=gop_cache_peak_bytes peak_bytes={} peak_frames={} frames_fed={} platform={}",
+            peak_bytes,
+            peak_frames,
+            frames.len(),
+            std::env::consts::OS,
         );
     }
 }
