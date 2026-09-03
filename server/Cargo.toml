@@ -9,9 +9,6 @@ default = []
 # The first extension phase keeps WASM execution opt-in. The default server
 # does not carry or initialize a WASM engine.
 wasm-runtime = ["dep:wasmtime"]
-# Runs the small scalar ABI harness in extensions::keymap.  This is a test and
-# diagnostics seam, not the Phase 6 component-model Host implementation.
-keymap-wasm-harness = ["wasm-runtime"]
 
 [dependencies]
 # Web 框架
@@ -74,5 +71,6 @@ saphyr-parser = "0.0.12"
 [dev-dependencies]
 tempfile = "3"
 wat = "1"
+wit-component = "0.254.0"
 # router 集成测试用 oneshot 驱动（tower ServiceExt）
 tower = { version = "0.4", features = ["util"] }

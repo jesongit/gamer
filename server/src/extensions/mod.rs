@@ -30,16 +30,18 @@ mod wit;
 pub(crate) use error::{ExtensionError, ExtensionResult, PermissionError};
 pub(crate) use host_api::{HostApi, HostApiCatalog, HostApiDomain, HOST_API_VERSION};
 pub(crate) use keymap::{
-    decode_input_event, real_wasm_host_status, AppPackageKeymapData, AppPackageKeymapSource,
-    CapabilityDeviceActionExecutor, DeviceAction, DeviceActionExecutor, InputError, InputEvent,
-    InputGateway, InputResult, KeymapContributionRegistry, KeymapPanelContribution, KeymapProgram,
-    KeymapRunner, KeymapRuntime, KeymapRuntimeState, NativeKeymapRunner, NormalizedPoint,
-    ScrcpyDeviceActionExecutor, ScreenSize, INPUT_PROTOCOL_VERSION, KEYMAP_EXTENSION_ID,
-    KEYMAP_EXTENSION_MANIFEST_TOML, KEYMAP_PANEL_ID, KEYMAP_WASM_ABI_VERSION,
+    android_keycode, decode_input_event, real_wasm_host_status, AppPackageKeymapData,
+    AppPackageKeymapSource, CapabilityDeviceActionExecutor, DeviceAction, DeviceActionExecutor,
+    InputError, InputEvent, InputGateway, InputResult, KeymapContributionRegistry,
+    KeymapPanelContribution, KeymapProgram, KeymapRunner, KeymapRuntime, KeymapRuntimeState,
+    NativeKeymapRunner, NormalizedPoint, ScrcpyDeviceActionExecutor, ScreenSize,
+    INPUT_PROTOCOL_VERSION, KEYMAP_EXTENSION_ID, KEYMAP_EXTENSION_MANIFEST_TOML, KEYMAP_PANEL_ID,
+    KEYMAP_WASM_ABI_VERSION,
+};
+pub(crate) use keymap::{
+    KeymapWasmInstanceHandle, KeymapWasmRuntime, KeymapWasmStartRequest, NoKeymapWasmRuntime,
 };
 
-#[cfg(all(feature = "wasm-runtime", feature = "keymap-wasm-harness"))]
-pub(crate) use keymap::KeymapWasmHarness;
 pub(crate) use manifest::{
     parse_manifest, ExtensionManifest, HostApiRequirements, UiContribution, UiRuntime,
     MANIFEST_FILE_NAME, MANIFEST_VERSION,
@@ -53,6 +55,8 @@ pub(crate) use store::{ExtensionStore, InstalledExtension};
 pub(crate) use ui::{RegisteredUiContribution, UiContributionRegistry};
 pub(crate) use wasm::{NoWasmRuntime, WasmInstanceHandle, WasmRuntime, WasmStartRequest};
 
+#[cfg(feature = "wasm-runtime")]
+pub(crate) use keymap::LazyKeymapWasmRuntime;
 #[cfg(feature = "wasm-runtime")]
 pub(crate) use wasm::LazyWasmtimeRuntime;
 

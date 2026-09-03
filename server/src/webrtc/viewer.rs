@@ -27,6 +27,7 @@ use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use crate::config::Config;
 use crate::core::DeviceLease;
 use crate::device::scrcpy::{AudioFrame, ScrcpySession, VideoFrame};
+use crate::extensions::ExtensionService;
 
 use super::{
     handle_control_msg, peer_connection_effect, protocol, release_all_touches, ControlCommand,
@@ -178,6 +179,7 @@ impl ViewerSession {
     pub async fn create(
         cfg: &Config,
         session: Arc<ScrcpySession>,
+        extensions: Arc<ExtensionService>,
         frame_q: Arc<Mutex<VecDeque<VideoFrame>>>,
         frame_notify: Arc<Notify>,
         overflowed: Arc<std::sync::atomic::AtomicBool>,
@@ -261,6 +263,7 @@ impl ViewerSession {
         // 任何内核都无法拿音频做主时钟
         let audio_on = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let s_worker = session.clone();
+        let worker_extensions = extensions;
         let worker_audio_on = audio_on.clone();
         let worker_touch_state = touch_state.clone();
         tokio::spawn(async move {
@@ -272,6 +275,7 @@ impl ViewerSession {
                             &s_worker,
                             &worker_audio_on,
                             &worker_touch_state,
+                            &worker_extensions,
                             &data,
                         )
                         .await

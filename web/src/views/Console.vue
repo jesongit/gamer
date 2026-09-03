@@ -209,9 +209,14 @@ import WorkspaceContextBar from '../workspace/WorkspaceContextBar.vue'
 import PluginWorkspace from '../workspace/PluginWorkspace.vue'
 import { createPanelRegistry, DEFAULT_PANEL_KEY } from '../workspace/registry'
 import { registerCoreContributions } from '../workspace/core-contributions'
+import { registerServerUiContributions } from '../workspace/contribution-manager'
 import { createWorkspaceContext, PANEL_REGISTRY_KEY, WORKSPACE_CONTEXT_KEY } from '../workspace/context'
 import { createWorkspaceLifecycle } from '../workspace/lifecycle'
-import { registerKeymapExtension } from '../workspace/keymap-extension'
+import {
+  registerKeymapExtension,
+  KEYMAP_EXTENSION_ID,
+  KEYMAP_PANEL_ID,
+} from '../workspace/keymap-extension'
 import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
 import TemplateCropModal from '../components/console/TemplateCropModal.vue'
@@ -275,6 +280,7 @@ const activeKeymapModel = ref(null)
 const keymapLoading = ref(false)
 const keymapError = ref('')
 const keymapPressed = reactive(new Set())
+const remoteKeymapRunning = ref(false)
 
 // 右侧功能区宽度：五个页签共用同一宽度，避免切换页签时布局突然跳变；拖拽条支持手动调整。
 const PANEL_STORAGE_KEY = 'gb_console_panel_width'
@@ -371,6 +377,8 @@ const keymap = createKeymapController({
   getKeymap: () => activeKeymapModel.value,
   sendControl,
   send: sendControl,
+  remote: remoteKeymapRunning,
+  sendInputEvent: sendControl,
   getVideoSize: () => ({
     width: videoElement.value?.videoWidth || 1920,
     height: videoElement.value?.videoHeight || 1080,
@@ -1735,6 +1743,7 @@ function sendControl(obj) {
   // 不能把 touch down/up 或 key down/up 降级成 press，否则会留下半截状态
   // 或把虚拟触控误发成 Android 物理按键。
   const stateful = obj?.type === 'touch'
+    || obj?.type === 'input_event'
     || (obj?.type === 'key' && (obj?.action === 0 || obj?.action === 1))
   if (stateful) {
     console.warn('[control] channel not open, stateful control dropped', JSON.stringify(obj))
@@ -1869,6 +1878,10 @@ function onMouseDown(e) {
   if (!connected.value) return
   cancelPendingMove()
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
+  if (remoteKeymapRunning.value) {
+    keymap.handleInputEvent({ type: 'mousedown', button: e.button, x, y }, 'down', e)
+    return
+  }
   touchState.active = true
   touchState.lastX = x; touchState.lastY = y
   // 按下：发 DOWN（拖动时后续 move 事件组成轨迹，up 时收尾）
@@ -1889,6 +1902,13 @@ function onMouseMove(e) {
   }
   if (picking.value) {
     updateLoupe(e.clientX, e.clientY, toDeviceCoord(e.clientX, e.clientY), 2.5, [])
+    return
+  }
+  if (remoteKeymapRunning.value && connected.value) {
+    const { x, y } = toDeviceCoord(e.clientX, e.clientY)
+    keymap.handleInputEvent({
+      type: 'mousemove', x, y, movementX: e.movementX, movementY: e.movementY,
+    }, 'move', e)
     return
   }
   if (!touchState.active || !connected.value) return
@@ -1928,6 +1948,11 @@ function onMouseUp(e) {
     }
     if (rect.w >= 8 && rect.h >= 8) openCrop(rect)
     else toast('框选区域太小，请重新框选', 'warn')
+    return
+  }
+  if (remoteKeymapRunning.value && connected.value) {
+    const { x, y } = toDeviceCoord(e.clientX, e.clientY)
+    keymap.handleInputEvent({ type: 'mouseup', button: e.button, x, y }, 'up', e)
     return
   }
   if (!touchState.active) return
@@ -2386,6 +2411,12 @@ function hideLoupe() { loupe.show = false }
 function onWheel(e) {
   if (!connected.value) return
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
+  if (remoteKeymapRunning.value) {
+    keymap.handleInputEvent({
+      type: 'wheel', x, y, deltaX: e.deltaX, deltaY: e.deltaY,
+    }, 'wheel', e)
+    return
+  }
   sendControl({ type: 'scroll', x, y, scroll_x: e.deltaX, scroll_y: e.deltaY })
 }
 
@@ -3735,6 +3766,67 @@ const keymapExtension = registerKeymapExtension(panelRegistry, workspaceLifecycl
   },
 })
 void keymapExtension.start()
+let serverUiRegistration = null
+let extensionUiPollTimer = null
+let gamepadPollTimer = null
+const gamepadSnapshot = new Map()
+
+function extensionUiEntryUrl(manifest, entry) {
+  const path = String(entry || '').replace(/^ui\//, '')
+  return `/api/extensions/${encodeURIComponent(manifest.id)}/ui/${path}`
+}
+
+async function refreshServerExtensions() {
+  try {
+    const response = await api.listExtensions()
+    const contributions = Array.isArray(response?.ui_contributions)
+      ? response.ui_contributions
+      : []
+    serverUiRegistration?.dispose?.()
+    serverUiRegistration = registerServerUiContributions(panelRegistry, contributions, {
+      resolveEntry: extensionUiEntryUrl,
+    })
+    // The built-in editor remains the safe fallback when the installable
+    // extension is disabled or uninstalled. An enabled server contribution
+    // with the same key intentionally replaces it with its iframe panel.
+    if (!panelRegistry.has(`${KEYMAP_EXTENSION_ID}:${KEYMAP_PANEL_ID}`)) {
+      panelRegistry.register(keymapExtension.contribution)
+    }
+    const keymapSnapshot = (response?.extensions || []).find(item => item?.id === KEYMAP_EXTENSION_ID)
+    remoteKeymapRunning.value = keymapSnapshot?.state === 'running'
+  } catch (error) {
+    // Extension discovery is additive; a transient failure must not tear down
+    // the already mounted core panels or the currently active input route.
+  }
+}
+
+function pollRemoteGamepads() {
+  if (!remoteKeymapRunning.value || !connected.value || !navigator.getGamepads) {
+    gamepadSnapshot.clear()
+    return
+  }
+  for (const gamepad of navigator.getGamepads()) {
+    if (!gamepad) continue
+    gamepad.buttons.forEach((button, buttonIndex) => {
+      const key = `${gamepad.index}:button:${buttonIndex}`
+      const next = { pressed: !!button.pressed, value: Number(button.value) || 0 }
+      const previous = gamepadSnapshot.get(key)
+      if (previous && (previous.pressed !== next.pressed || Math.abs(previous.value - next.value) > 0.02)) {
+        keymap.handleInputEvent({ kind: 'gamepad_button', index: buttonIndex, ...next })
+      }
+      gamepadSnapshot.set(key, next)
+    })
+    gamepad.axes.forEach((value, axisIndex) => {
+      const key = `${gamepad.index}:axis:${axisIndex}`
+      const next = Number(value) || 0
+      const previous = gamepadSnapshot.get(key)
+      if (previous !== undefined && Math.abs(previous - next) > 0.02) {
+        keymap.handleInputEvent({ kind: 'gamepad_axis', index: axisIndex, value: next })
+      }
+      gamepadSnapshot.set(key, next)
+    })
+  }
+}
 const deviceStageBridge = workspaceContext.stage
 provide(PANEL_REGISTRY_KEY, panelRegistry)
 provide(WORKSPACE_CONTEXT_KEY, workspaceContext)
@@ -3787,6 +3879,9 @@ onMounted(async () => {
   // 首次进入仅选中第一台设备，等待用户点连接（不主动建会话，尊重空闲低功耗）
   const spaPreselected = !!store.deviceId
   await loadData()
+  await refreshServerExtensions()
+  extensionUiPollTimer = window.setInterval(refreshServerExtensions, 2000)
+  gamepadPollTimer = window.setInterval(pollRemoteGamepads, 16)
   if (!store.deviceId) {
     const saved = localStorage.getItem('gb_device_id')
     store.deviceId = (saved && devices.value.find(d => d.id === saved)) ? saved : (devices.value[0]?.id || null)
@@ -3845,6 +3940,11 @@ onUnmounted(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('blur', onWindowBlur)
   document.removeEventListener('visibilitychange', onVisibilityChange)
+  if (extensionUiPollTimer) { clearInterval(extensionUiPollTimer); extensionUiPollTimer = null }
+  if (gamepadPollTimer) { clearInterval(gamepadPollTimer); gamepadPollTimer = null }
+  gamepadSnapshot.clear()
+  serverUiRegistration?.dispose?.()
+  serverUiRegistration = null
   keymap.releaseAll()
   syncKeymapPressed()
   keyboard.releaseAll()

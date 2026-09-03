@@ -28,6 +28,7 @@ use crate::keymaps::{parse_keymap_content, Keymap, KeymapAction, KeymapBinding};
 use super::error::{ExtensionError, ExtensionResult};
 use super::host_api::{HostApi, HostApiCatalog};
 use super::manifest::ExtensionManifest;
+use super::model::{ExtensionId, ExtensionVersion};
 use super::permissions::Permission;
 
 pub const KEYMAP_EXTENSION_ID: &str = "gamer.keymap";
@@ -1072,10 +1073,679 @@ impl KeymapContributionRegistry {
     }
 }
 
-/// Human-readable status used by diagnostics and the feature-gated harness.
+/// Human-readable status used by diagnostics and runtime checks.
 pub fn real_wasm_host_status() -> &'static str {
-    "WIT Host imports are not executable until Phase 6 component bindings are wired"
+    "keymap WIT component entrypoint is executable; actions remain capability-gated"
 }
+
+/// Start request for the keymap-specific Component world. It intentionally
+/// lives beside the keymap adapter rather than extending the generic Phase 6
+/// extension Host contract.
+#[derive(Clone)]
+pub(crate) struct KeymapWasmStartRequest {
+    pub(crate) id: ExtensionId,
+    pub(crate) version: ExtensionVersion,
+    pub(crate) wasm: Vec<u8>,
+    pub(crate) host: HostApi,
+    pub(crate) app_context: Option<crate::core::AppContext>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct KeymapWasmInstanceHandle(uuid::Uuid);
+
+impl KeymapWasmInstanceHandle {
+    fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+#[async_trait]
+pub(crate) trait KeymapWasmRuntime: Send + Sync {
+    async fn start(
+        &self,
+        request: KeymapWasmStartRequest,
+    ) -> ExtensionResult<KeymapWasmInstanceHandle>;
+
+    async fn stop(&self, instance: KeymapWasmInstanceHandle) -> ExtensionResult<()>;
+
+    async fn dispatch(
+        &self,
+        instance: KeymapWasmInstanceHandle,
+        device: DeviceHandle,
+        screen: ScreenSize,
+        event: InputEvent,
+    ) -> ExtensionResult<InputResult>;
+
+    fn is_available(&self) -> bool;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct NoKeymapWasmRuntime;
+
+#[async_trait]
+impl KeymapWasmRuntime for NoKeymapWasmRuntime {
+    async fn start(
+        &self,
+        _request: KeymapWasmStartRequest,
+    ) -> ExtensionResult<KeymapWasmInstanceHandle> {
+        Err(ExtensionError::RuntimeUnavailable(
+            "未启用 wasm-runtime feature",
+        ))
+    }
+
+    async fn stop(&self, _instance: KeymapWasmInstanceHandle) -> ExtensionResult<()> {
+        Err(ExtensionError::RuntimeUnavailable(
+            "未启用 wasm-runtime feature",
+        ))
+    }
+
+    async fn dispatch(
+        &self,
+        _instance: KeymapWasmInstanceHandle,
+        _device: DeviceHandle,
+        _screen: ScreenSize,
+        _event: InputEvent,
+    ) -> ExtensionResult<InputResult> {
+        Err(ExtensionError::RuntimeUnavailable(
+            "未启用 wasm-runtime feature",
+        ))
+    }
+
+    fn is_available(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(feature = "wasm-runtime")]
+mod keymap_wasmtime {
+    use std::collections::HashMap;
+    use std::sync::{Arc, OnceLock};
+
+    use sha2::{Digest, Sha256};
+    use tokio::sync::{mpsc, oneshot, Mutex};
+    use wasmtime::component::{Component, Linker};
+    use wasmtime::{Engine, Store};
+
+    use crate::capabilities::{KeyAction, KeyCode, KeyInput, SwipeGesture, TextInput, TouchPoint};
+
+    use super::super::error::{ExtensionError, ExtensionResult};
+    use super::super::permissions::Permission;
+    use super::super::wit::keymap::{exports::gamer::keymap::keymap as guest, KeymapHost};
+    use super::{
+        CapabilityDeviceActionExecutor, DeviceAction, DeviceActionExecutor, DeviceHandle,
+        InputEvent, InputResult, KeymapWasmInstanceHandle, KeymapWasmRuntime,
+        KeymapWasmStartRequest, ScreenSize,
+    };
+
+    type GuestEvent = guest::InputEvent;
+    type GuestResult = guest::InputResult;
+    type GuestError = String;
+
+    struct Invoke {
+        device: DeviceHandle,
+        screen: ScreenSize,
+        event: InputEvent,
+        reply: oneshot::Sender<ExtensionResult<InputResult>>,
+    }
+
+    enum Command {
+        Invoke(Invoke),
+        Stop(oneshot::Sender<()>),
+    }
+
+    struct RunningKeymap {
+        commands: mpsc::Sender<Command>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    /// The keymap guest has no WASI imports. Its only effect is the typed
+    /// `handle` result, which this task authorizes and executes through the
+    /// native capability adapter before the result is returned to Core.
+    pub(crate) struct LazyKeymapWasmRuntime {
+        engine: OnceLock<Engine>,
+        components: Mutex<HashMap<[u8; 32], Arc<Component>>>,
+        instances: Mutex<HashMap<KeymapWasmInstanceHandle, RunningKeymap>>,
+    }
+
+    impl LazyKeymapWasmRuntime {
+        pub(crate) fn new() -> Self {
+            Self {
+                engine: OnceLock::new(),
+                components: Mutex::new(HashMap::new()),
+                instances: Mutex::new(HashMap::new()),
+            }
+        }
+
+        pub(crate) fn is_initialized(&self) -> bool {
+            self.engine.get().is_some()
+        }
+
+        fn engine(&self) -> &Engine {
+            self.engine.get_or_init(|| {
+                let config = wasmtime::Config::new();
+                Engine::new(&config).expect("Wasmtime keymap engine config is valid")
+            })
+        }
+
+        async fn component(&self, bytes: &[u8]) -> ExtensionResult<Arc<Component>> {
+            let mut digest = [0u8; 32];
+            digest.copy_from_slice(Sha256::digest(bytes).as_slice());
+            let mut components = self.components.lock().await;
+            if let Some(component) = components.get(&digest).cloned() {
+                return Ok(component);
+            }
+            let component = Arc::new(Component::new(self.engine(), bytes).map_err(|error| {
+                ExtensionError::Runtime(format!("keymap 组件编译失败: {error}"))
+            })?);
+            components.insert(digest, component.clone());
+            Ok(component)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KeymapWasmRuntime for LazyKeymapWasmRuntime {
+        async fn start(
+            &self,
+            request: KeymapWasmStartRequest,
+        ) -> ExtensionResult<KeymapWasmInstanceHandle> {
+            let component = self.component(&request.wasm).await?;
+            let engine = self.engine().clone();
+            let (commands_tx, mut commands_rx) = mpsc::channel(32);
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let executor = CapabilityDeviceActionExecutor::new(request.host.registry().clone());
+            let host = request.host;
+            let instance_id = KeymapWasmInstanceHandle::new();
+            let app_context = request.app_context;
+            let id = request.id;
+            let version = request.version;
+            let log_id = id.clone();
+            let log_version = version.clone();
+
+            let task = tokio::spawn(async move {
+                let linker: Linker<()> = Linker::new(&engine);
+                let mut store = Store::new(&engine, ());
+                let instance = match KeymapHost::instantiate(&mut store, &component, &linker) {
+                    Ok(instance) => instance,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(ExtensionError::Runtime(format!(
+                            "keymap 组件实例化失败: {error}"
+                        ))));
+                        return;
+                    }
+                };
+                let keymap = instance.gamer_keymap_keymap();
+                match keymap.call_start(&mut store) {
+                    Ok(Ok(())) => {
+                        let _ = ready_tx.send(Ok(()));
+                    }
+                    Ok(Err(error)) => {
+                        let _ = ready_tx.send(Err(ExtensionError::Runtime(format!(
+                            "keymap start 失败: {error}"
+                        ))));
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(ExtensionError::Runtime(format!(
+                            "keymap start trap: {error}"
+                        ))));
+                        return;
+                    }
+                }
+
+                let mut touches: HashMap<u64, (DeviceHandle, crate::capabilities::TouchHandle)> =
+                    HashMap::new();
+                while let Some(command) = commands_rx.recv().await {
+                    match command {
+                        Command::Invoke(invoke) => {
+                            if let Some(context) = &app_context {
+                                if context.device_id.as_str() != invoke.device.id().as_str() {
+                                    let _ = invoke.reply.send(Err(ExtensionError::Runtime(
+                                        "keymap AppContext 与输入设备不匹配".to_string(),
+                                    )));
+                                    continue;
+                                }
+                            }
+                            let guest_event = guest_event(&invoke.event);
+                            let guest_result = keymap.call_handle(&mut store, &guest_event);
+                            let result = invoke_guest_result(
+                                &host,
+                                &executor,
+                                &mut touches,
+                                &invoke,
+                                guest_result,
+                            )
+                            .await;
+                            let _ = invoke.reply.send(result);
+                        }
+                        Command::Stop(reply) => {
+                            for (_, (device, touch)) in touches.drain() {
+                                let action = DeviceAction::TouchEnd { touch };
+                                if let Err(error) = executor.execute(&device, &action).await {
+                                    tracing::warn!(%error, "keymap touch cleanup failed");
+                                }
+                            }
+                            let _ = reply.send(());
+                            break;
+                        }
+                    }
+                }
+                tracing::debug!(extension = %id, version = %version, ?app_context, "keymap WASM instance stopped");
+            });
+
+            match ready_rx.await {
+                Ok(Ok(())) => {
+                    self.instances.lock().await.insert(
+                        instance_id,
+                        RunningKeymap {
+                            commands: commands_tx,
+                            task,
+                        },
+                    );
+                    tracing::info!(extension = %log_id, version = %log_version, "keymap WASM component started");
+                    Ok(instance_id)
+                }
+                Ok(Err(error)) => {
+                    let _ = task.await;
+                    Err(error)
+                }
+                Err(_) => {
+                    let _ = task.await;
+                    Err(ExtensionError::Runtime(
+                        "keymap 启动任务意外退出".to_string(),
+                    ))
+                }
+            }
+        }
+
+        async fn stop(&self, instance: KeymapWasmInstanceHandle) -> ExtensionResult<()> {
+            let running = self
+                .instances
+                .lock()
+                .await
+                .remove(&instance)
+                .ok_or(ExtensionError::RuntimeUnavailable("keymap WASM 实例不存在"))?;
+            let RunningKeymap { commands, task } = running;
+            let (reply, wait) = oneshot::channel();
+            if commands.send(Command::Stop(reply)).await.is_err() {
+                let _ = task.await;
+                return Err(ExtensionError::RuntimeUnavailable("keymap WASM 实例已退出"));
+            }
+            let wait_result = wait.await;
+            let task_result = task.await;
+            wait_result.map_err(|_| ExtensionError::Runtime("keymap 停止确认失败".to_string()))?;
+            task_result.map_err(|error| {
+                ExtensionError::Runtime(format!("keymap 停止任务失败: {error}"))
+            })?;
+            Ok(())
+        }
+
+        async fn dispatch(
+            &self,
+            instance: KeymapWasmInstanceHandle,
+            device: DeviceHandle,
+            screen: ScreenSize,
+            event: InputEvent,
+        ) -> ExtensionResult<InputResult> {
+            let commands = self
+                .instances
+                .lock()
+                .await
+                .get(&instance)
+                .map(|running| running.commands.clone())
+                .ok_or(ExtensionError::RuntimeUnavailable("keymap WASM 实例不存在"))?;
+            let (reply, wait) = oneshot::channel();
+            commands
+                .send(Command::Invoke(Invoke {
+                    device,
+                    screen,
+                    event,
+                    reply,
+                }))
+                .await
+                .map_err(|_| ExtensionError::RuntimeUnavailable("keymap WASM 实例已退出"))?;
+            wait.await
+                .map_err(|_| ExtensionError::RuntimeUnavailable("keymap 调用任务已退出"))?
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    fn guest_event(event: &InputEvent) -> GuestEvent {
+        use guest::EventKind;
+        let (kind, code, repeat, meta, button, x, y, delta_x, delta_y, index, pressed, value) =
+            match event {
+                InputEvent::KeyDown { code, repeat, meta } => (
+                    EventKind::KeyDown,
+                    Some(code.clone()),
+                    *repeat,
+                    *meta,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    false,
+                    0.0,
+                ),
+                InputEvent::KeyUp { code, meta } => (
+                    EventKind::KeyUp,
+                    Some(code.clone()),
+                    false,
+                    *meta,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    false,
+                    0.0,
+                ),
+                InputEvent::MouseDown { button, x, y } => (
+                    EventKind::MouseDown,
+                    None,
+                    false,
+                    0,
+                    *button,
+                    *x,
+                    *y,
+                    0,
+                    0,
+                    0,
+                    true,
+                    0.0,
+                ),
+                InputEvent::MouseUp { button, x, y } => (
+                    EventKind::MouseUp,
+                    None,
+                    false,
+                    0,
+                    *button,
+                    *x,
+                    *y,
+                    0,
+                    0,
+                    0,
+                    false,
+                    0.0,
+                ),
+                InputEvent::MouseMove {
+                    x,
+                    y,
+                    delta_x,
+                    delta_y,
+                } => (
+                    EventKind::MouseMove,
+                    None,
+                    false,
+                    0,
+                    0,
+                    *x,
+                    *y,
+                    *delta_x,
+                    *delta_y,
+                    0,
+                    false,
+                    0.0,
+                ),
+                InputEvent::Wheel {
+                    x,
+                    y,
+                    delta_x,
+                    delta_y,
+                } => (
+                    EventKind::Wheel,
+                    None,
+                    false,
+                    0,
+                    0,
+                    *x,
+                    *y,
+                    *delta_x,
+                    *delta_y,
+                    0,
+                    false,
+                    0.0,
+                ),
+                InputEvent::GamepadButton {
+                    index,
+                    pressed,
+                    value,
+                } => (
+                    EventKind::GamepadButton,
+                    None,
+                    false,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    *index,
+                    *pressed,
+                    *value,
+                ),
+                InputEvent::GamepadAxis { index, value } => (
+                    EventKind::GamepadAxis,
+                    None,
+                    false,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    *index,
+                    false,
+                    *value,
+                ),
+            };
+        GuestEvent {
+            kind,
+            code,
+            repeat,
+            meta,
+            button,
+            x,
+            y,
+            delta_x,
+            delta_y,
+            index,
+            pressed,
+            value,
+        }
+    }
+
+    async fn invoke_guest_result(
+        host: &super::super::host_api::HostApi,
+        executor: &CapabilityDeviceActionExecutor,
+        touches: &mut HashMap<u64, (DeviceHandle, crate::capabilities::TouchHandle)>,
+        invoke: &Invoke,
+        guest_result: Result<Result<GuestResult, GuestError>, wasmtime::Error>,
+    ) -> ExtensionResult<InputResult> {
+        let guest_result: Result<GuestResult, GuestError> = guest_result
+            .map_err(|error| ExtensionError::Runtime(format!("keymap handle trap: {error}")))?;
+        let guest_result = guest_result
+            .map_err(|error| ExtensionError::Runtime(format!("keymap handle 失败: {error}")))?;
+        // Authorize the complete result before executing its first native
+        // action. A malicious component must not be able to smuggle an
+        // allowed tap before a later forbidden action makes the invocation
+        // fail; the WIT result is one permission-checked transaction. The
+        // conversion itself stays sequential so a single result can legally
+        // begin, move, and end a new touch contact.
+        for action in &guest_result.actions {
+            host.authorize(guest_action_permission(action))?;
+        }
+
+        let mut actions = Vec::with_capacity(guest_result.actions.len());
+        for action in guest_result.actions {
+            let (_, native, slot) = native_action(action, invoke.screen, &invoke.device, touches)?;
+            if let DeviceAction::TouchBegin { .. } = native {
+                let slot =
+                    slot.ok_or_else(|| ExtensionError::Runtime("touch slot 丢失".to_string()))?;
+                if touches.contains_key(&slot) {
+                    return Err(ExtensionError::Runtime(format!(
+                        "touch slot 已占用: {slot}"
+                    )));
+                }
+                let touch = executor
+                    .execute(&invoke.device, &native)
+                    .await?
+                    .ok_or_else(|| {
+                        ExtensionError::Runtime("touch.begin 未返回 TouchHandle".to_string())
+                    })?;
+                touches.insert(slot, (invoke.device.clone(), touch));
+            } else {
+                executor.execute(&invoke.device, &native).await?;
+                if let DeviceAction::TouchEnd { touch } = &native {
+                    touches.retain(|_, (_, active)| active != touch);
+                }
+            }
+            actions.push(native);
+        }
+        Ok(InputResult {
+            consume: guest_result.consume,
+            actions,
+        })
+    }
+
+    fn guest_action_permission(action: &guest::DeviceAction) -> Permission {
+        use guest::DeviceAction as GuestAction;
+        match action {
+            GuestAction::Tap(_) => Permission::InputTap,
+            GuestAction::Swipe(_) => Permission::InputSwipe,
+            GuestAction::Key(_) => Permission::InputKey,
+            GuestAction::Text(_) => Permission::InputText,
+            GuestAction::TouchBegin(_) | GuestAction::TouchMove(_) | GuestAction::TouchEnd(_) => {
+                Permission::Touch
+            }
+        }
+    }
+
+    fn point(screen: ScreenSize, point: guest::Point) -> TouchPoint {
+        TouchPoint::new(
+            (point.x.clamp(0.0, 1.0) * screen.width as f32).round() as u32,
+            (point.y.clamp(0.0, 1.0) * screen.height as f32).round() as u32,
+            1.0,
+        )
+    }
+
+    fn native_action(
+        action: guest::DeviceAction,
+        screen: ScreenSize,
+        device: &DeviceHandle,
+        touches: &HashMap<u64, (DeviceHandle, crate::capabilities::TouchHandle)>,
+    ) -> ExtensionResult<(Permission, DeviceAction, Option<u64>)> {
+        use guest::DeviceAction as GuestAction;
+        Ok(match action {
+            GuestAction::Tap(p) => (
+                Permission::InputTap,
+                DeviceAction::Tap {
+                    point: point(screen, p),
+                },
+                None,
+            ),
+            GuestAction::Swipe(swipe) => (
+                Permission::InputSwipe,
+                DeviceAction::Swipe {
+                    gesture: SwipeGesture::new(
+                        point(screen, swipe.from_point),
+                        point(screen, swipe.to),
+                        std::time::Duration::from_millis(swipe.duration_ms.min(600_000)),
+                    ),
+                },
+                None,
+            ),
+            GuestAction::Key(key) => {
+                if !(1..=1000).contains(&key.code) {
+                    return Err(ExtensionError::Runtime(format!(
+                        "Android keycode 超出允许范围: {}",
+                        key.code
+                    )));
+                }
+                let action = match key.action.trim().to_ascii_lowercase().as_str() {
+                    "down" => KeyAction::Down,
+                    "up" => KeyAction::Up,
+                    "press" => KeyAction::Press,
+                    other => {
+                        return Err(ExtensionError::Runtime(format!("未知 key action: {other}")))
+                    }
+                };
+                (
+                    Permission::InputKey,
+                    DeviceAction::Key {
+                        input: KeyInput::new(KeyCode::new(key.code), action),
+                    },
+                    None,
+                )
+            }
+            GuestAction::Text(value) => {
+                if value.len() > 16 * 1024 {
+                    return Err(ExtensionError::Runtime(
+                        "keymap text 超过 16KiB".to_string(),
+                    ));
+                }
+                (
+                    Permission::InputText,
+                    DeviceAction::Text {
+                        input: TextInput::new(value),
+                    },
+                    None,
+                )
+            }
+            GuestAction::TouchBegin(begin) => (
+                Permission::Touch,
+                DeviceAction::TouchBegin {
+                    point: point(screen, begin.point),
+                },
+                if (1..=1024).contains(&begin.slot) {
+                    Some(begin.slot)
+                } else {
+                    return Err(ExtensionError::Runtime(format!(
+                        "guest touch slot 超出范围: {}",
+                        begin.slot
+                    )));
+                },
+            ),
+            GuestAction::TouchMove(move_) => {
+                let (active_device, touch) =
+                    touches.get(&move_.slot).cloned().ok_or_else(|| {
+                        ExtensionError::Runtime(format!("未知 guest touch slot: {}", move_.slot))
+                    })?;
+                if active_device.id() != device.id() {
+                    return Err(ExtensionError::Runtime(
+                        "guest touch 不能跨设备继续操作".to_string(),
+                    ));
+                }
+                (
+                    Permission::Touch,
+                    DeviceAction::TouchMove {
+                        touch,
+                        point: point(screen, move_.point),
+                    },
+                    None,
+                )
+            }
+            GuestAction::TouchEnd(slot) => {
+                let (active_device, touch) = touches.get(&slot).cloned().ok_or_else(|| {
+                    ExtensionError::Runtime(format!("未知 guest touch slot: {slot}"))
+                })?;
+                if active_device.id() != device.id() {
+                    return Err(ExtensionError::Runtime(
+                        "guest touch 不能跨设备结束".to_string(),
+                    ));
+                }
+                (Permission::Touch, DeviceAction::TouchEnd { touch }, None)
+            }
+        })
+    }
+}
+
+#[cfg(feature = "wasm-runtime")]
+pub(crate) use keymap_wasmtime::LazyKeymapWasmRuntime;
 
 /// Resolve an application-specific `keymaps/<file>` resource from an App
 /// Package.  App Package data is immutable and user overrides are selected by
@@ -1146,7 +1816,7 @@ fn raw_keycode(action: &KeymapAction) -> Option<u32> {
     keycode.or_else(|| code.as_deref().and_then(android_keycode))
 }
 
-fn android_keycode(code: &str) -> Option<u32> {
+pub(crate) fn android_keycode(code: &str) -> Option<u32> {
     if let Some(letter) = code.strip_prefix("Key") {
         let byte = letter.as_bytes().first().copied()?;
         if letter.len() == 1 && byte.is_ascii_uppercase() {
@@ -1234,44 +1904,6 @@ fn android_keycode(code: &str) -> Option<u32> {
         "NumpadParenRight" => 163,
         _ => return None,
     })
-}
-
-/// The generic Phase 6 Host currently stops after module validation.  This
-/// harness makes that boundary executable in CI without pretending that an
-/// extension can already call WIT imports.  It validates the first keymap ABI
-/// exports and returns a stable, actionable error from `invoke`.
-#[cfg(all(feature = "wasm-runtime", feature = "keymap-wasm-harness"))]
-pub struct KeymapWasmHarness {
-    engine: wasmtime::Engine,
-    module: wasmtime::Module,
-}
-
-#[cfg(all(feature = "wasm-runtime", feature = "keymap-wasm-harness"))]
-impl KeymapWasmHarness {
-    pub fn load(bytes: &[u8]) -> ExtensionResult<Self> {
-        let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::new(&engine, bytes)
-            .map_err(|error| ExtensionError::Runtime(format!("keymap WASM 无效: {error}")))?;
-        for export in ["memory", "keymap_alloc", "keymap_handle_v1"] {
-            if module.get_export(export).is_none() {
-                return Err(ExtensionError::Runtime(format!(
-                    "keymap WASM 缺少 ABI export: {export}"
-                )));
-            }
-        }
-        Ok(Self { engine, module })
-    }
-
-    pub fn abi_version(&self) -> &'static str {
-        KEYMAP_WASM_ABI_VERSION
-    }
-
-    pub fn invoke(&self, _event: &InputEvent) -> ExtensionResult<InputResult> {
-        let _ = (&self.engine, &self.module);
-        Err(ExtensionError::RuntimeUnavailable(
-            "Phase 6 Host 尚未提供 gamer:input/touch 的 WIT 实例调用；仅完成 ABI harness 校验",
-        ))
-    }
 }
 
 #[cfg(test)]
@@ -1604,26 +2236,491 @@ mod tests {
             .load("com.other", "official.game", "1.0.0", "default.yaml")
             .is_err());
     }
+}
 
-    #[cfg(all(feature = "wasm-runtime", feature = "keymap-wasm-harness"))]
-    #[test]
-    fn wasm_harness_loads_keymap_abi_but_fails_clearly_at_wit_boundary() {
-        // Keep the fixture dependency-free: the harness is feature-gated and
-        // must remain runnable even when no WAT toolchain is installed.
-        let bytes: &[u8] = &[
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x0c, 0x02, 0x60, 0x01, 0x7f,
-            0x01, 0x7f, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7e, 0x03, 0x03, 0x02, 0x00, 0x01, 0x05,
-            0x03, 0x01, 0x00, 0x01, 0x07, 0x2c, 0x03, 0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79,
-            0x02, 0x00, 0x0c, 0x6b, 0x65, 0x79, 0x6d, 0x61, 0x70, 0x5f, 0x61, 0x6c, 0x6c, 0x6f,
-            0x63, 0x00, 0x00, 0x10, 0x6b, 0x65, 0x79, 0x6d, 0x61, 0x70, 0x5f, 0x68, 0x61, 0x6e,
-            0x64, 0x6c, 0x65, 0x5f, 0x76, 0x31, 0x00, 0x01, 0x0a, 0x0b, 0x02, 0x04, 0x00, 0x41,
-            0x00, 0x0b, 0x04, 0x00, 0x42, 0x00, 0x0b,
-        ];
-        let harness = KeymapWasmHarness::load(bytes).unwrap();
-        assert_eq!(harness.abi_version(), KEYMAP_WASM_ABI_VERSION);
+#[cfg(all(test, feature = "wasm-runtime"))]
+mod wasm_component_tests {
+    use std::fs;
+    use std::io::{Cursor, Write};
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    use async_trait::async_trait;
+    use tempfile::TempDir;
+    use zip::write::SimpleFileOptions;
+
+    use super::*;
+    use crate::capabilities::{
+        CapabilityError, CapabilityRegistry, DeviceId, InputService, KeyInput, SwipeGesture,
+        TextInput, TouchService,
+    };
+    use crate::core::AppContext;
+    use crate::extensions::{
+        ExtensionError, ExtensionId, ExtensionPath, ExtensionService, ExtensionState,
+        ExtensionStore, NoWasmRuntime, PermissionError,
+    };
+
+    #[derive(Default)]
+    struct Trace {
+        events: Mutex<Vec<String>>,
+    }
+
+    impl Trace {
+        fn push(&self, event: impl Into<String>) {
+            self.events.lock().unwrap().push(event.into());
+        }
+
+        fn snapshot(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl InputService for Trace {
+        async fn tap(
+            &self,
+            _device: &DeviceHandle,
+            point: TouchPoint,
+        ) -> Result<(), CapabilityError> {
+            self.push(format!("input.tap:{}:{}", point.x(), point.y()));
+            Ok(())
+        }
+
+        async fn swipe(
+            &self,
+            _device: &DeviceHandle,
+            gesture: SwipeGesture,
+        ) -> Result<(), CapabilityError> {
+            self.push(format!(
+                "input.swipe:{}:{}:{}:{}:{}",
+                gesture.start().x(),
+                gesture.start().y(),
+                gesture.end().x(),
+                gesture.end().y(),
+                gesture.duration().as_millis()
+            ));
+            Ok(())
+        }
+
+        async fn key(
+            &self,
+            _device: &DeviceHandle,
+            input: KeyInput,
+        ) -> Result<(), CapabilityError> {
+            self.push(format!(
+                "input.key:{}:{:?}",
+                input.code().value(),
+                input.action()
+            ));
+            Ok(())
+        }
+
+        async fn text(
+            &self,
+            _device: &DeviceHandle,
+            input: TextInput,
+        ) -> Result<(), CapabilityError> {
+            self.push(format!("input.text:{}", input.as_str()));
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl TouchService for Trace {
+        async fn begin(
+            &self,
+            _device: &DeviceHandle,
+            point: TouchPoint,
+        ) -> Result<TouchHandle, CapabilityError> {
+            self.push(format!("touch.begin:{}:{}", point.x(), point.y()));
+            Ok(TouchHandle::new())
+        }
+
+        async fn move_touch(
+            &self,
+            _touch: &TouchHandle,
+            point: TouchPoint,
+        ) -> Result<(), CapabilityError> {
+            self.push(format!("touch.move:{}:{}", point.x(), point.y()));
+            Ok(())
+        }
+
+        async fn end(&self, _touch: &TouchHandle) -> Result<(), CapabilityError> {
+            self.push("touch.end");
+            Ok(())
+        }
+    }
+
+    fn fixture_component() -> Vec<u8> {
+        static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+        COMPONENT
+            .get_or_init(|| {
+                let server_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                let guest_dir = server_dir.join("tests").join("keymap-guest");
+                let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+                let status = Command::new(cargo)
+                    .current_dir(&guest_dir)
+                    .args([
+                        "build",
+                        "--quiet",
+                        "--release",
+                        "--target",
+                        "wasm32-unknown-unknown",
+                    ])
+                    .status()
+                    .expect("无法构建 keymap guest fixture");
+                assert!(status.success(), "keymap guest fixture 构建失败");
+                let module = fs::read(
+                    guest_dir
+                        .join("target")
+                        .join("wasm32-unknown-unknown")
+                        .join("release")
+                        .join("gamer_keymap_fixture.wasm"),
+                )
+                .expect("keymap guest fixture wasm 不存在");
+                wit_component::ComponentEncoder::default()
+                    .module(&module)
+                    .expect("keymap guest module 不是合法 WIT module")
+                    .validate(true)
+                    .encode()
+                    .expect("keymap guest module 无法 componentize")
+            })
+            .clone()
+    }
+
+    fn gplugin_manifest(permissions: &[&str]) -> Vec<u8> {
+        let permissions = permissions
+            .iter()
+            .map(|permission| format!("\"{permission}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"manifest_version = 1
+id = "gamer.keymap"
+version = "1.0.0"
+name = "Keymap"
+description = "WIT keymap component fixture"
+entry = "plugin.wasm"
+permissions = [{permissions}]
+
+[host_api]
+input = "^1.0"
+touch = "^1.0"
+
+[[ui.contributions]]
+panel_id = "keymaps"
+title = "映射"
+icon = "⌨"
+order = 30
+location = "console.right"
+runtime = "iframe"
+requires_device = true
+preferred_width = 360
+entry = "ui/index.html"
+"#
+        )
+        .into_bytes()
+    }
+
+    fn gplugin(component: &[u8], permissions: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
+        let options = SimpleFileOptions::default();
+        archive
+            .start_file("manifest.toml", options)
+            .expect("manifest entry");
+        archive
+            .write_all(&gplugin_manifest(permissions))
+            .expect("manifest bytes");
+        archive
+            .start_file("plugin.wasm", options)
+            .expect("wasm entry");
+        archive.write_all(component).expect("wasm bytes");
+        archive
+            .start_file("ui/index.html", options)
+            .expect("ui entry");
+        archive
+            .write_all(include_bytes!("../../tests/keymap-guest/ui/index.html"))
+            .expect("ui bytes");
+        archive.finish().expect("finish gplugin");
+        bytes
+    }
+
+    fn registry(trace: Arc<Trace>) -> CapabilityRegistry {
+        CapabilityRegistry::builder()
+            .with_input_service(trace.clone() as Arc<dyn InputService>)
+            .with_touch_service(trace as Arc<dyn TouchService>)
+            .build()
+    }
+
+    fn service(
+        temp: &TempDir,
+        trace: Arc<Trace>,
+        runtime: Arc<LazyKeymapWasmRuntime>,
+    ) -> ExtensionService {
+        ExtensionService::with_keymap_runtime(
+            ExtensionStore::new(temp.path()),
+            Arc::new(NoWasmRuntime),
+            runtime,
+            registry(trace),
+        )
+    }
+
+    fn device() -> DeviceHandle {
+        DeviceHandle::new(DeviceId::new("device-1"))
+    }
+
+    fn app_context() -> AppContext {
+        AppContext::from_legacy_package("device-1", "com.example.game").unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_keymap_gplugin_invokes_wit_and_native_capabilities() {
+        let component = fixture_component();
+        assert!(component.starts_with(b"\0asm"));
+        let package = gplugin(
+            &component,
+            &["input.tap", "input.swipe", "input.key", "touch"],
+        );
+        let mut archive = zip::ZipArchive::new(Cursor::new(&package)).unwrap();
+        for path in ["manifest.toml", "plugin.wasm", "ui/index.html"] {
+            assert!(archive.by_name(path).is_ok(), "真实 gplugin 缺少 {path}");
+        }
+
+        let temp = TempDir::new().unwrap();
+        let trace = Arc::new(Trace::default());
+        let runtime = Arc::new(LazyKeymapWasmRuntime::new());
+        let service = service(&temp, trace.clone(), runtime);
+        let installed = service.install(&package).await.unwrap();
+        assert_eq!(installed.state(), ExtensionState::Installed);
+        let id = ExtensionId::parse(KEYMAP_EXTENSION_ID).unwrap();
+        let enabled = service.enable(&id).await.unwrap();
+        assert_eq!(enabled.state(), ExtensionState::Enabled);
+        let contributions = service.ui_contributions().unwrap();
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(contributions[0].panel_id, KEYMAP_PANEL_ID);
+        assert_eq!(
+            service
+                .read_ui_file(&id, &ExtensionPath::parse("ui/index.html").unwrap())
+                .unwrap()
+                .0,
+            include_bytes!("../../tests/keymap-guest/ui/index.html")
+        );
+
+        let running = service
+            .start_with_context(&id, Some(app_context()))
+            .await
+            .unwrap();
+        assert_eq!(running.state(), ExtensionState::Running);
+        let device = device();
+        let screen = ScreenSize::new(1000, 500);
+
+        for event in [
+            InputEvent::key_down("KeyW"),
+            InputEvent::key_down("KeyA"),
+            InputEvent::MouseDown {
+                button: 0,
+                x: 10,
+                y: 20,
+            },
+            InputEvent::MouseMove {
+                x: 400,
+                y: 300,
+                delta_x: 390,
+                delta_y: 280,
+            },
+            InputEvent::MouseUp {
+                button: 0,
+                x: 400,
+                y: 300,
+            },
+            InputEvent::GamepadButton {
+                index: 0,
+                pressed: true,
+                value: 1.0,
+            },
+            InputEvent::GamepadButton {
+                index: 0,
+                pressed: false,
+                value: 0.0,
+            },
+            InputEvent::GamepadAxis {
+                index: 0,
+                value: 0.5,
+            },
+            InputEvent::GamepadAxis {
+                index: 0,
+                value: -0.5,
+            },
+            InputEvent::GamepadAxis {
+                index: 0,
+                value: 0.0,
+            },
+            InputEvent::key_up("KeyW"),
+            InputEvent::key_up("KeyA"),
+            InputEvent::key_down("Space"),
+            InputEvent::key_down("KeyE"),
+        ] {
+            let result = service
+                .dispatch_keymap_input(device.clone(), screen, event)
+                .await
+                .unwrap();
+            assert!(result.consume, "fixture action should consume input");
+        }
+        let passed = service
+            .dispatch_keymap_input(
+                device.clone(),
+                screen,
+                InputEvent::Wheel {
+                    x: 500,
+                    y: 250,
+                    delta_x: 0,
+                    delta_y: -120,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!passed.consume);
+        assert!(passed.actions.is_empty());
+
+        let events = trace.snapshot();
+        assert!(events.iter().any(|event| event.starts_with("input.tap:")));
+        assert!(events.iter().any(|event| event.starts_with("input.swipe:")));
+        assert!(events
+            .iter()
+            .any(|event| event.starts_with("input.key:62:Down")));
+        assert!(events
+            .iter()
+            .any(|event| event.starts_with("input.key:62:Up")));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.starts_with("touch.begin:"))
+                .count(),
+            4
+        );
+        assert!(events.iter().any(|event| event.starts_with("touch.move:")));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event == &&"touch.end".to_string())
+                .count(),
+            4
+        );
+
+        // Stop must clean a live WASM-owned contact before the component task
+        // is dropped; the UI contribution remains available while enabled.
+        service
+            .dispatch_keymap_input(device, screen, InputEvent::key_down("KeyW"))
+            .await
+            .unwrap();
+        let stopped = service.stop(&id).await.unwrap();
+        assert_eq!(stopped.state(), ExtensionState::Enabled);
+        assert_eq!(service.ui_contributions().unwrap().len(), 1);
+        assert!(
+            trace
+                .snapshot()
+                .iter()
+                .filter(|event| *event == "touch.end")
+                .count()
+                >= 5
+        );
+
+        assert!(service
+            .uninstall(&id, installed.active_version())
+            .await
+            .unwrap());
+        assert!(service.ui_contributions().unwrap().is_empty());
+        assert!(!temp
+            .path()
+            .join("extensions")
+            .join(KEYMAP_EXTENSION_ID)
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn real_wit_action_is_rejected_without_touch_permission() {
+        let package = gplugin(&fixture_component(), &["input.key"]);
+        let temp = TempDir::new().unwrap();
+        let trace = Arc::new(Trace::default());
+        let service = service(&temp, trace.clone(), Arc::new(LazyKeymapWasmRuntime::new()));
+        let installed = service.install(&package).await.unwrap();
+        let id = ExtensionId::parse(KEYMAP_EXTENSION_ID).unwrap();
+        service.enable(&id).await.unwrap();
+        service
+            .start_with_context(&id, Some(app_context()))
+            .await
+            .unwrap();
+
+        let error = service
+            .dispatch_keymap_input(
+                device(),
+                ScreenSize::new(1000, 500),
+                InputEvent::key_down("KeyW"),
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(
-            harness.invoke(&InputEvent::key_down("KeyA")),
-            Err(ExtensionError::RuntimeUnavailable(_))
+            error,
+            ExtensionError::Permission(PermissionError::NotGranted(permission))
+                if permission == "touch"
         ));
+        assert!(trace
+            .snapshot()
+            .iter()
+            .all(|event| !event.starts_with("touch.begin:")));
+        service.stop(&id).await.unwrap();
+        service
+            .uninstall(&id, installed.active_version())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn real_wit_input_to_native_chain_p95_stays_bounded() {
+        let package = gplugin(
+            &fixture_component(),
+            &["input.tap", "input.swipe", "input.key", "touch"],
+        );
+        let temp = TempDir::new().unwrap();
+        let trace = Arc::new(Trace::default());
+        let service = service(&temp, trace, Arc::new(LazyKeymapWasmRuntime::new()));
+        let installed = service.install(&package).await.unwrap();
+        let id = ExtensionId::parse(KEYMAP_EXTENSION_ID).unwrap();
+        service.enable(&id).await.unwrap();
+        service
+            .start_with_context(&id, Some(app_context()))
+            .await
+            .unwrap();
+
+        let mut samples = Vec::with_capacity(64);
+        for _ in 0..64 {
+            let started = Instant::now();
+            let result = service
+                .dispatch_keymap_input(
+                    device(),
+                    ScreenSize::new(1000, 500),
+                    InputEvent::key_down("Space"),
+                )
+                .await
+                .unwrap();
+            assert!(result.consume);
+            samples.push(started.elapsed());
+        }
+        samples.sort_unstable();
+        eprintln!(
+            "real keymap WIT latency: p50={:?}, p95={:?}",
+            samples[31], samples[60]
+        );
+        assert!(samples[31] < Duration::from_millis(50));
+        assert!(samples[60] < Duration::from_millis(100));
+
+        service.stop(&id).await.unwrap();
+        service
+            .uninstall(&id, installed.active_version())
+            .await
+            .unwrap();
     }
 }

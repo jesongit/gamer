@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>Keymap</title>
+  </head>
+  <body>
+    <main>
+      <h1>映射</h1>
+      <p id="status">正在连接 Gamer UI Bridge…</p>
+    </main>
+    <script>
+      (() => {
+        let port;
+        let serial = 0;
+        const status = document.querySelector('#status');
+        const request = (method, params) => new Promise((resolve, reject) => {
+          const id = `keymap-${++serial}`;
+          const onMessage = event => {
+            if (event.data?.id !== id) return;
+            port.removeEventListener('message', onMessage);
+            event.data.ok ? resolve(event.data.result) : reject(new Error(event.data.error?.message || 'Bridge error'));
+          };
+          port.addEventListener('message', onMessage);
+          port.postMessage({ type: 'gamer-ui:request', version: 'gamer-ui@1', id, method, params });
+        });
+        window.addEventListener('message', event => {
+          if (event.source !== window.parent || event.data?.type !== 'gamer-ui:connect' || event.data.version !== 'gamer-ui@1' || !event.ports?.[0]) return;
+          port = event.ports[0];
+          port.start();
+          request('context.get').then(context => {
+            status.textContent = `已连接 · ${context.app?.package || '未选择应用'}`;
+          }).catch(() => {
+            status.textContent = 'Bridge 连接失败';
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

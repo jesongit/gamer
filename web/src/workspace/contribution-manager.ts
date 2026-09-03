@@ -19,6 +19,12 @@ export interface ExtensionUiManifest {
   ui?: { contributions?: ManifestUiContribution[] }
 }
 
+/** JSON shape returned by GET /api/extensions/ui. */
+export interface ServerUiContribution extends ManifestUiContribution {
+  plugin_id: string
+  version?: string
+}
+
 export interface ExtensionRuntime {
   start?: () => unknown
   stop?: () => unknown
@@ -93,6 +99,42 @@ export function manifestPanels(
   options: ManifestContributionOptions = {},
 ): PanelContribution[] {
   return (manifest?.ui?.contributions || []).map(item => panelFromManifest(manifest, item, options))
+}
+
+/**
+ * Register the currently visible server contributions as ordinary panels.
+ * The returned disposer is UI-only; stopping/uninstalling the WASM runtime
+ * remains a server lifecycle operation and never follows a tab close or a
+ * registry refresh.
+ */
+export function registerServerUiContributions(
+  registry: PanelRegistry,
+  contributions: ServerUiContribution[] = [],
+  options: Omit<ManifestContributionOptions, 'runtime'> = {},
+) {
+  const unregister: Array<() => void> = []
+  const panels: RegisteredPanel[] = []
+  try {
+    for (const item of contributions) {
+      const pluginId = String(item?.plugin_id || '').trim()
+      if (!pluginId) throw new Error('server UI contribution requires plugin_id')
+      const entries = manifestPanels({
+        id: pluginId,
+        ui: { contributions: [item] },
+      }, options)
+      for (const entry of entries) {
+        unregister.push(registry.register(entry))
+        panels.push(registry.get({ pluginId, panelId: entry.panelId })!)
+      }
+    }
+  } catch (error) {
+    unregister.reverse().forEach(remove => remove())
+    throw error
+  }
+  return {
+    panels,
+    dispose() { unregister.reverse().forEach(remove => remove()) },
+  }
 }
 
 /**

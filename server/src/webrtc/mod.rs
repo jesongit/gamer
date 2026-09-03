@@ -15,7 +15,9 @@ use parking_lot::Mutex;
 use tokio::sync::{broadcast, Notify};
 use tracing::{debug, info, warn};
 
+use crate::capabilities::{DeviceHandle, DeviceId};
 use crate::device::scrcpy::{AudioFrame, ScrcpySession, VideoFrame};
+use crate::extensions::{ExtensionService, InputEvent};
 
 mod events;
 mod protocol;
@@ -1253,11 +1255,32 @@ async fn handle_control_msg(
     session: &Arc<ScrcpySession>,
     audio_on: &Arc<std::sync::atomic::AtomicBool>,
     touch_state: &TouchState,
+    extensions: &Arc<ExtensionService>,
     data: &[u8],
 ) -> anyhow::Result<()> {
     let msg: serde_json::Value = serde_json::from_slice(data)?;
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match t {
+        "input_event" => {
+            let event: InputEvent = serde_json::from_value(
+                msg.get("event")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("missing input event"))?,
+            )?;
+            let (width, height) = session.video_size();
+            let result = extensions
+                .dispatch_keymap_input(
+                    DeviceHandle::new(DeviceId::new(session.device.id.clone())),
+                    crate::extensions::ScreenSize::new(width, height),
+                    event.clone(),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if result.consume {
+                return Ok(());
+            }
+            handle_passed_input_event(session, touch_state, event).await?;
+        }
         "tap" => {
             let x = msg["x"].as_f64().unwrap_or(0.0) as f32;
             let y = msg["y"].as_f64().unwrap_or(0.0) as f32;
@@ -1370,6 +1393,88 @@ async fn handle_control_msg(
             session.back_or_screen_on(0).await?;
         }
         _ => warn!("unknown control msg type: {}", t),
+    }
+    Ok(())
+}
+
+/// Preserve the existing native control semantics for an input event which
+/// the WASM keymap explicitly passed through. This keeps the adapter boundary
+/// in one place: WASM may consume or pass, but never writes scrcpy packets.
+async fn handle_passed_input_event(
+    session: &Arc<ScrcpySession>,
+    touch_state: &TouchState,
+    event: InputEvent,
+) -> anyhow::Result<()> {
+    match event {
+        InputEvent::KeyDown { code, repeat, meta } => {
+            if let Some(keycode) = crate::extensions::android_keycode(&code) {
+                session
+                    .inject_keycode(
+                        crate::device::scrcpy::ACTION_DOWN,
+                        keycode,
+                        u32::from(repeat),
+                        meta,
+                    )
+                    .await?;
+            }
+        }
+        InputEvent::KeyUp { code, meta } => {
+            if let Some(keycode) = crate::extensions::android_keycode(&code) {
+                session
+                    .inject_keycode(crate::device::scrcpy::ACTION_UP, keycode, 0, meta)
+                    .await?;
+            }
+        }
+        InputEvent::MouseDown { x, y, .. } => {
+            if touch_state.contains(0) {
+                anyhow::bail!("mouse touch pointer is already active");
+            }
+            session
+                .inject_touch(
+                    crate::device::scrcpy::ACTION_DOWN,
+                    0,
+                    x as f32,
+                    y as f32,
+                    1.0,
+                )
+                .await?;
+            touch_state.insert(0, x as f32, y as f32)?;
+        }
+        InputEvent::MouseMove { x, y, .. } => {
+            if !touch_state.contains(0) {
+                return Ok(());
+            }
+            session
+                .inject_touch(
+                    crate::device::scrcpy::ACTION_MOVE,
+                    0,
+                    x as f32,
+                    y as f32,
+                    1.0,
+                )
+                .await?;
+            touch_state.update(0, x as f32, y as f32)?;
+        }
+        InputEvent::MouseUp { x, y, .. } => {
+            if !touch_state.contains(0) {
+                return Ok(());
+            }
+            session
+                .inject_touch(crate::device::scrcpy::ACTION_UP, 0, x as f32, y as f32, 0.0)
+                .await?;
+            touch_state.remove(0)?;
+        }
+        InputEvent::Wheel {
+            x,
+            y,
+            delta_x,
+            delta_y,
+        } => {
+            session
+                .inject_scroll(x as f32, y as f32, delta_x as f32, delta_y as f32)
+                .await?;
+        }
+        InputEvent::GamepadButton { .. } | InputEvent::GamepadAxis { .. } => {}
     }
     Ok(())
 }

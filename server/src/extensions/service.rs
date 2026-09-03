@@ -17,6 +17,10 @@ use super::model::{ExtensionId, ExtensionRecord, ExtensionState, ExtensionVersio
 use super::store::{ExtensionStore, InstalledExtension};
 use super::ui::{RegisteredUiContribution, UiContributionRegistry};
 use super::wasm::{WasmInstanceHandle, WasmRuntime, WasmStartRequest};
+use super::{
+    InputEvent, InputResult, KeymapWasmInstanceHandle, KeymapWasmRuntime, KeymapWasmStartRequest,
+    NoKeymapWasmRuntime, ScreenSize, KEYMAP_EXTENSION_ID,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct ExtensionSnapshot {
@@ -56,10 +60,12 @@ impl ExtensionSnapshot {
 pub(crate) struct ExtensionService {
     store: ExtensionStore,
     runtime: Arc<dyn WasmRuntime>,
+    keymap_runtime: Arc<dyn KeymapWasmRuntime>,
     capabilities: CapabilityRegistry,
     host_api: HostApiCatalog,
     operation_lock: Mutex<()>,
     running: std::sync::Mutex<HashMap<ExtensionId, WasmInstanceHandle>>,
+    keymap_running: std::sync::Mutex<HashMap<ExtensionId, KeymapWasmInstanceHandle>>,
     ui: UiContributionRegistry,
 }
 
@@ -69,13 +75,24 @@ impl ExtensionService {
         runtime: Arc<dyn WasmRuntime>,
         capabilities: CapabilityRegistry,
     ) -> Self {
+        Self::with_keymap_runtime(store, runtime, Arc::new(NoKeymapWasmRuntime), capabilities)
+    }
+
+    pub(crate) fn with_keymap_runtime(
+        store: ExtensionStore,
+        runtime: Arc<dyn WasmRuntime>,
+        keymap_runtime: Arc<dyn KeymapWasmRuntime>,
+        capabilities: CapabilityRegistry,
+    ) -> Self {
         Self {
             store,
             runtime,
+            keymap_runtime,
             capabilities,
             host_api: HostApiCatalog::default(),
             operation_lock: Mutex::new(()),
             running: std::sync::Mutex::new(HashMap::new()),
+            keymap_running: std::sync::Mutex::new(HashMap::new()),
             ui: UiContributionRegistry::default(),
         }
     }
@@ -95,11 +112,44 @@ impl ExtensionService {
         let runtime: Arc<dyn WasmRuntime> = Arc::new(super::wasm::LazyWasmtimeRuntime::new());
         #[cfg(not(feature = "wasm-runtime"))]
         let runtime: Arc<dyn WasmRuntime> = Arc::new(super::wasm::NoWasmRuntime);
-        Self::new(ExtensionStore::new(data_root), runtime, capabilities)
+        #[cfg(feature = "wasm-runtime")]
+        let keymap_runtime: Arc<dyn KeymapWasmRuntime> =
+            Arc::new(super::keymap::LazyKeymapWasmRuntime::new());
+        #[cfg(not(feature = "wasm-runtime"))]
+        let keymap_runtime: Arc<dyn KeymapWasmRuntime> = Arc::new(NoKeymapWasmRuntime);
+        Self::with_keymap_runtime(
+            ExtensionStore::new(data_root),
+            runtime,
+            keymap_runtime,
+            capabilities,
+        )
     }
 
     pub(crate) fn runtime_available(&self) -> bool {
-        self.runtime.is_available()
+        self.runtime.is_available() || self.keymap_runtime.is_available()
+    }
+
+    /// Dispatch an input envelope to the running keymap extension. A missing
+    /// or stopped keymap is a normal pass-through so the legacy control path
+    /// remains available.
+    pub(crate) async fn dispatch_keymap_input(
+        &self,
+        device: crate::capabilities::DeviceHandle,
+        screen: ScreenSize,
+        event: InputEvent,
+    ) -> ExtensionResult<InputResult> {
+        let instance = self
+            .keymap_running
+            .lock()
+            .expect("keymap running map poisoned")
+            .get(&ExtensionId::parse(KEYMAP_EXTENSION_ID).expect("built-in keymap id"))
+            .copied();
+        let Some(instance) = instance else {
+            return Ok(InputResult::pass());
+        };
+        self.keymap_runtime
+            .dispatch(instance, device, screen, event)
+            .await
     }
 
     pub(crate) fn store(&self) -> &ExtensionStore {
@@ -271,30 +321,41 @@ impl ExtensionService {
             self.host_api.clone(),
             active.manifest(),
         )?;
-        let handle = match self
-            .runtime
-            .start(WasmStartRequest {
-                id: id.clone(),
-                version: active.manifest().version().clone(),
-                wasm: active.read_wasm()?,
-                host,
-                app_context,
-            })
-            .await
-        {
-            Ok(handle) => handle,
-            Err(error) => {
-                if matches!(&error, ExtensionError::Runtime(_)) {
-                    let mut failed_record = record.clone();
-                    failed_record.state = ExtensionState::Failed;
-                    failed_record.last_error = Some(error.to_string());
-                    let mut next = states;
-                    next.insert(id.clone(), failed_record);
-                    self.store.write_state(&next)?;
-                    self.refresh_ui_registry()?;
-                }
-                return Err(error);
+        let handle = if id.as_str() == KEYMAP_EXTENSION_ID {
+            match self
+                .keymap_runtime
+                .start(KeymapWasmStartRequest {
+                    id: id.clone(),
+                    version: active.manifest().version().clone(),
+                    wasm: active.read_wasm()?,
+                    host,
+                    app_context,
+                })
+                .await
+            {
+                Ok(handle) => StartHandle::Keymap(handle),
+                Err(error) => return self.mark_start_failed(id, states, record, error).await,
             }
+        } else {
+            match self
+                .runtime
+                .start(WasmStartRequest {
+                    id: id.clone(),
+                    version: active.manifest().version().clone(),
+                    wasm: active.read_wasm()?,
+                    host,
+                    app_context,
+                })
+                .await
+            {
+                Ok(handle) => StartHandle::Generic(handle),
+                Err(error) => return self.mark_start_failed(id, states, record, error).await,
+            }
+        };
+
+        let instance_insert = match handle {
+            StartHandle::Generic(handle) => RunningHandle::Generic(handle),
+            StartHandle::Keymap(handle) => RunningHandle::Keymap(handle),
         };
 
         let mut running_record = record;
@@ -305,13 +366,23 @@ impl ExtensionService {
             next.insert(id.clone(), running_record.clone());
             next
         }) {
-            let _ = self.runtime.stop(handle).await;
+            let _ = self.stop_running_handle(instance_insert).await;
             return Err(error);
         }
-        self.running
-            .lock()
-            .expect("extension running map poisoned")
-            .insert(id.clone(), handle);
+        match instance_insert {
+            RunningHandle::Generic(handle) => {
+                self.running
+                    .lock()
+                    .expect("extension running map poisoned")
+                    .insert(id.clone(), handle);
+            }
+            RunningHandle::Keymap(handle) => {
+                self.keymap_running
+                    .lock()
+                    .expect("keymap running map poisoned")
+                    .insert(id.clone(), handle);
+            }
+        }
         self.refresh_ui_registry()?;
         self.snapshot_for(id)
     }
@@ -324,16 +395,29 @@ impl ExtensionService {
         if !record.state.is_running() {
             return Err(invalid_transition(id, "stop", record.state));
         }
-        let handle = self
-            .running
-            .lock()
-            .expect("extension running map poisoned")
-            .get(id)
-            .copied()
-            .ok_or(ExtensionError::RuntimeUnavailable(
-                "当前进程没有该插件的运行实例",
-            ))?;
-        self.runtime.stop(handle).await?;
+        if id.as_str() == KEYMAP_EXTENSION_ID {
+            let handle = self
+                .keymap_running
+                .lock()
+                .expect("keymap running map poisoned")
+                .get(id)
+                .copied()
+                .ok_or(ExtensionError::RuntimeUnavailable(
+                    "当前进程没有该插件的运行实例",
+                ))?;
+            self.keymap_runtime.stop(handle).await?;
+        } else {
+            let handle = self
+                .running
+                .lock()
+                .expect("extension running map poisoned")
+                .get(id)
+                .copied()
+                .ok_or(ExtensionError::RuntimeUnavailable(
+                    "当前进程没有该插件的运行实例",
+                ))?;
+            self.runtime.stop(handle).await?;
+        }
         record.state = ExtensionState::Enabled;
         record.last_error = None;
         states.insert(id.clone(), record);
@@ -341,6 +425,10 @@ impl ExtensionService {
         self.running
             .lock()
             .expect("extension running map poisoned")
+            .remove(id);
+        self.keymap_running
+            .lock()
+            .expect("keymap running map poisoned")
             .remove(id);
         self.refresh_ui_registry()?;
         self.snapshot_for(id)
@@ -440,6 +528,44 @@ impl ExtensionService {
         }
         Ok(())
     }
+
+    async fn mark_start_failed(
+        &self,
+        id: &ExtensionId,
+        states: BTreeMap<ExtensionId, ExtensionRecord>,
+        record: ExtensionRecord,
+        error: ExtensionError,
+    ) -> ExtensionResult<ExtensionSnapshot> {
+        if matches!(&error, ExtensionError::Runtime(_)) {
+            let mut failed_record = record;
+            failed_record.state = ExtensionState::Failed;
+            failed_record.last_error = Some(error.to_string());
+            let mut next = states;
+            next.insert(id.clone(), failed_record);
+            self.store.write_state(&next)?;
+            self.refresh_ui_registry()?;
+        }
+        Err(error)
+    }
+
+    async fn stop_running_handle(&self, handle: RunningHandle) -> ExtensionResult<()> {
+        match handle {
+            RunningHandle::Generic(handle) => self.runtime.stop(handle).await,
+            RunningHandle::Keymap(handle) => self.keymap_runtime.stop(handle).await,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StartHandle {
+    Generic(WasmInstanceHandle),
+    Keymap(KeymapWasmInstanceHandle),
+}
+
+#[derive(Clone, Copy)]
+enum RunningHandle {
+    Generic(WasmInstanceHandle),
+    Keymap(KeymapWasmInstanceHandle),
 }
 
 fn state_for_versions(

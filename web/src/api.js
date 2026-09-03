@@ -128,6 +128,10 @@ async function req(method, path, body) {
 export const api = {
   // 登录/会话/退出见 src/auth.js（阶段 2 Cookie 会话；本封装不持有认证端点）
 
+  // 扩展生命周期与动态 UI contribution
+  listExtensions: () => req('GET', '/api/extensions'),
+  listExtensionUi: () => req('GET', '/api/extensions/ui'),
+
   // 设备
   listDevices: () => req('GET', '/api/devices'),
   scanDevices: () => req('POST', '/api/devices/scan'),

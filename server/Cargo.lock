@@ -1122,6 +1122,7 @@ dependencies = [
  "wat",
  "webrtc",
  "windows-sys 0.59.0",
+ "wit-component",
  "zip",
 ]
 

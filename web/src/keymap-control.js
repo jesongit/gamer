@@ -381,6 +381,8 @@ export function createKeymapController({
   isEnabled = null,
   sendControl = null,
   send = null,
+  remote = false,
+  sendInputEvent = null,
   sendStateControl = null,
   getKeyMetaState = null,
   getVideoSize = null,
@@ -395,6 +397,7 @@ export function createKeymapController({
   let keymapSource = mapping !== undefined ? mapping : keymap
   let active = enabled
   const held = new Map()
+  const remoteHeld = new Set()
   const suppressedKeyups = new Set()
   const fallbackController = fallback || keyboard
   const emitControl = typeof sendControl === 'function'
@@ -407,6 +410,7 @@ export function createKeymapController({
   const emitStateControl = typeof sendStateControl === 'function'
     ? sendStateControl
     : (typeof send === 'function' && send !== emitControl ? send : emitControl)
+  const emitInput = typeof sendInputEvent === 'function' ? sendInputEvent : emitControl
 
   function getCurrentKeymap() {
     if (typeof getKeymap === 'function') return getKeymap()
@@ -415,6 +419,20 @@ export function createKeymapController({
 
   function routerEnabled() {
     return readValue(isEnabled === null ? active : isEnabled, true) !== false
+  }
+
+  function remoteEnabled() {
+    return readValue(remote, false) === true
+  }
+
+  function forwardRemoteInput(event, phase, domEvent = null) {
+    const normalized = normalizeInputEvent(event, phase)
+    if (!normalized) return { handled: false, remote: true, sent: false }
+    const sent = controlWasSent(emitInput({ type: 'input_event', event: normalized }))
+    if (domEvent) preventDefault(domEvent)
+    if (normalized.type === 'key_down') remoteHeld.add(normalized.code)
+    if (normalized.type === 'key_up') remoteHeld.delete(normalized.code)
+    return { handled: true, mapped: true, remote: true, sent }
   }
 
   function fallbackDown(event) {
@@ -549,6 +567,7 @@ export function createKeymapController({
   }
 
   function handleKeydown(event) {
+    if (remoteEnabled() && !modeIsText(mode)) return forwardRemoteInput(event, 'down', event)
     const code = eventCode(event)
     if (!code || !routerEnabled() || modeIsText(mode)) return fallbackDown(event)
 
@@ -605,6 +624,9 @@ export function createKeymapController({
 
   function handleKeyup(event) {
     const code = eventCode(event)
+    if (remoteEnabled() || (code && remoteHeld.has(code))) {
+      return forwardRemoteInput(event, 'up', event)
+    }
     if (!code) return fallbackUp(event)
     if (suppressedKeyups.delete(code)) {
       preventDefault(event)
@@ -641,10 +663,19 @@ export function createKeymapController({
   }
 
   function releaseAll() {
+    let remoteReleased = 0
+    for (const code of remoteHeld) {
+      if (controlWasSent(emitInput({
+        type: 'input_event',
+        event: { type: 'key_up', code, meta: 0 },
+      }))) remoteReleased += 1
+    }
+    remoteHeld.clear()
     const mappedReleased = releaseMapped(false)
     const fallback = fallbackReleaseAll()
     return {
-      handled: mappedReleased > 0 || fallback.handled,
+      handled: remoteReleased > 0 || mappedReleased > 0 || fallback.handled,
+      remoteReleased,
       mappedReleased,
       fallback,
     }
@@ -679,6 +710,11 @@ export function createKeymapController({
     return hidden ? releaseAll() : { handled: false }
   }
 
+  function handleInputEvent(event, phase = undefined, domEvent = null) {
+    if (!remoteEnabled() || modeIsText(mode)) return { handled: false, remote: false, sent: false }
+    return forwardRemoteInput(event, phase, domEvent)
+  }
+
   function destroy() {
     releaseAll()
     suppressedKeyups.clear()
@@ -691,6 +727,8 @@ export function createKeymapController({
     handleKeyUp: handleKeyup,
     keydown: handleKeydown,
     keyup: handleKeyup,
+    handleInputEvent,
+    forwardInputEvent: handleInputEvent,
     releaseAll,
     releaseMapped,
     handleWindowBlur,
@@ -701,6 +739,11 @@ export function createKeymapController({
     setEnabled(value) {
       if (value === false) releaseAll()
       active = value
+    },
+    setRemote(value) {
+      if (value === false) remoteHeld.clear()
+      if (remote && typeof remote === 'object' && 'value' in remote) remote.value = value
+      else remote = value
     },
     isEnabled: () => routerEnabled(),
     getKeymap: getCurrentKeymap,

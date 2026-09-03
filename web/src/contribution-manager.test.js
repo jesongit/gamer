@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createPanelRegistry } from './workspace/registry'
 import { createPluginRuntimeLifecycle, createPanelUiLifecycle } from './workspace/lifecycle'
-import { createContributionManager, manifestPanels } from './workspace/contribution-manager'
+import { createContributionManager, manifestPanels, registerServerUiContributions } from './workspace/contribution-manager'
 
 const manifest = {
   id: 'gamer.keymap',
@@ -17,6 +17,23 @@ const manifest = {
 }
 
 describe('Workspace manifest contribution manager', () => {
+  it('registers and disposes server contributions without touching runtime state', () => {
+    const registry = createPanelRegistry()
+    const registered = registerServerUiContributions(registry, [
+      {
+        plugin_id: 'gamer.keymap', version: '1.0.0', panel_id: 'remote', title: '远端映射',
+        runtime: 'iframe', entry: 'ui/index.html', requires_device: true,
+      },
+    ], { resolveEntry: (manifest, entry) => `/api/extensions/${manifest.id}/${entry}` })
+
+    expect(registered.panels).toHaveLength(1)
+    expect(registry.get('gamer.keymap:remote')).toMatchObject({
+      runtime: 'iframe', iframe: { src: '/api/extensions/gamer.keymap/ui/index.html' },
+    })
+    registered.dispose()
+    expect(registry.get('gamer.keymap:remote')).toBeNull()
+  })
+
   it('maps manifest panels and keeps iframe panels session-alive', () => {
     const panels = manifestPanels(manifest, { resolveEntry: (_, entry) => `/ext/${entry}` })
     expect(panels).toMatchObject([

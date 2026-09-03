@@ -140,7 +140,7 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                     info!(device = %device_id, "waited for initial frames after reset_video");
                                 }
                             }
-                            match ViewerSession::create(&st.cfg, session.clone(), frame_q, frame_notify, overflowed, audio_rx, offer, initial_frames).await {
+                            match ViewerSession::create(&st.cfg, session.clone(), st.extensions.clone(), frame_q, frame_notify, overflowed, audio_rx, offer, initial_frames).await {
                                 Ok(vs) => {
                                     // 单 viewer 限制：同一设备的新连接踢掉旧连接
                                     // （旧 pusher 停止 + 旧 peer 关闭），避免多连接多推流

@@ -139,6 +139,45 @@ describe('keymap-control schema', () => {
 })
 
 describe('keymap-control routing', () => {
+  it('forwards keyboard, mouse, wheel, and gamepad events to the running server keymap', () => {
+    const sendInputEvent = vi.fn()
+    const remote = { value: true }
+    const controller = createKeymapController({ remote, sendInputEvent })
+    const down = keyEvent('KeyW')
+    const mouseDown = { type: 'mousedown', button: 0, x: 10, y: 20, preventDefault: vi.fn() }
+
+    expect(controller.handleKeydown(down)).toMatchObject({ handled: true, remote: true, sent: true })
+    expect(controller.handleInputEvent(mouseDown, 'down', mouseDown))
+      .toMatchObject({ handled: true, remote: true })
+    controller.handleInputEvent({ type: 'mousemove', x: 12, y: 21, movementX: 2, movementY: 1 }, 'move')
+    controller.handleInputEvent({ type: 'wheel', x: 12, y: 21, deltaX: 1, deltaY: -2 }, 'wheel')
+    controller.handleInputEvent({ kind: 'gamepad_button', index: 2, pressed: true, value: 1 })
+    controller.handleInputEvent({ kind: 'gamepad_axis', index: 1, value: -0.75 })
+    controller.handleKeyup(keyEvent('KeyW'))
+
+    expect(sendInputEvent.mock.calls.map(([message]) => message)).toEqual([
+      { type: 'input_event', event: { type: 'key_down', code: 'KeyW', repeat: false, meta: 0 } },
+      { type: 'input_event', event: { type: 'mouse_down', button: 0, x: 10, y: 20 } },
+      { type: 'input_event', event: { type: 'mouse_move', x: 12, y: 21, delta_x: 2, delta_y: 1 } },
+      { type: 'input_event', event: { type: 'wheel', x: 12, y: 21, delta_x: 1, delta_y: -2 } },
+      { type: 'input_event', event: { type: 'gamepad_button', index: 2, pressed: true, value: 1 } },
+      { type: 'input_event', event: { type: 'gamepad_axis', index: 1, value: -0.75 } },
+      { type: 'input_event', event: { type: 'key_up', code: 'KeyW', meta: 0 } },
+    ])
+    expect(down.preventDefault).toHaveBeenCalledTimes(1)
+    expect(mouseDown.preventDefault).toHaveBeenCalledTimes(1)
+  })
+
+  it('releases remote key state on blur and never falls back when the channel is closed', () => {
+    const sendInputEvent = vi.fn(() => false)
+    const fallback = { handleKeydown: vi.fn(), handleKeyup: vi.fn() }
+    const controller = createKeymapController({ remote: true, sendInputEvent, fallback })
+    controller.handleKeydown(keyEvent('KeyA'))
+    controller.handleWindowBlur()
+    expect(sendInputEvent).toHaveBeenCalledTimes(2)
+    expect(fallback.handleKeydown).not.toHaveBeenCalled()
+  })
+
   it('uses the stable getter/sendControl/getVideoSize contract for a tap hit', () => {
     const sendControl = vi.fn()
     const getKeymap = vi.fn(() => KEYMAP)
