@@ -201,7 +201,7 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 ```
 
 - 候选列表是 `match` 键下的**无缩进序列**（indentless sequence，标准 YAML 语法）；每项候选是单键映射，候选值二选一：
-  - **列表形态**（原形态）`模板: [分支步骤]`——不点击；
+  - **列表形态**（原形态）`模板: [分支步骤]`——不点击；空分支必须显式写为 `模板: []`，不能省略值；
   - **映射形态** `模板: {click: true, steps: [...]}`——命中后点击该候选模板匹配框中心（语义同 find 的中心点击）；`steps` 省略 = 空分支（命中即点）。
   规范序列化不变式：`click: false` ⇔ 列表形态，`click: true` ⇔ 映射形态；映射键比候选模板键**深两级**（YAML 映射值不能与键同列，序列才能同列）。候选值映射内只允许 `click`/`steps`（未知 → `step.field.unknown`），`click` 非布尔字面量 → `step.field.type_mismatch`。
 - `else` / `timeout` 是 `match` 步骤的**兄弟键**，与 `match` 同列；**绝不允许**写成候选列表里的 `- else:` / `- :`（→ `step.match.else_in_candidates`）。
@@ -214,7 +214,7 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 - 颜色在**所有位置**都是字符串：ParamDecl 默认值、`expect` 候选、`args` 实参、任务快照、RunRecord 摘要——统一为 6 位十六进制无 `#`（Model/API JSON 中即 string）。
 - 规范 YAML 中**纯数字色值必须加引号**（`'123456'`），防止被解析成数字丢前导零；含字母色值（`ff8800`）可裸写。
 - 解析端**不得**让 YAML 1.1 数字解析改变颜色值：事件级解析（§2）天然取原始串；任何基于 plain-object 的解析（serde_yaml Value、js-yaml load）必须把颜色位置重新字符串化。
-- `expect` 冻结为**有序列表**，每项是单键映射，候选值与 match 候选同构（§4.1）：列表形态 `颜色: [分支步骤]` = 不点击；映射形态 `颜色: {click: true, steps: [...]}` = 命中后点击取样点并等待 `config.interval`；序列化不变式同 §4.1。**不用**颜色做整个映射的键。原因：纯数字色作为映射键会被 JS plain object 按整数形键重排（js-yaml `load()` 实测把 `'123456'` 排到最前），候选顺序语义被静默破坏——该坑已记录 docs/PITFALLS.md。
+- `expect` 冻结为**有序列表**，每项是单键映射，候选值与 match 候选同构（§4.1）：列表形态 `颜色: [分支步骤]` = 不点击，空分支必须显式写 `颜色: []`；映射形态 `颜色: {click: true, steps: [...]}` = 命中后点击取样点并等待 `config.interval`；序列化不变式同 §4.1。**不用**颜色做整个映射的键。原因：纯数字色作为映射键会被 JS plain object 按整数形键重排（js-yaml `load()` 实测把 `'123456'` 排到最前），候选顺序语义被静默破坏——该坑已记录 docs/PITFALLS.md。
 - `color` 不轮询；默认不点击，仅 `click: true` 候选命中后点击取样点并等待 `config.interval`；同色候选重复 → `step.color.duplicate`；颜色格式非法 → `step.color.format`。
 
 ### 4.3 默认值解析时机

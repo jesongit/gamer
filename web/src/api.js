@@ -27,8 +27,7 @@ async function errorFromResponse(r) {
     ? details.find(d => d && typeof d === 'object' && typeof d.message === 'string' && d.message)
     : null
   const diagnosticMessage = diagnostic
-    ? `${diagnostic.message}${[diagnostic.step_path, diagnostic.field].filter(Boolean).length
-      ? `（${[diagnostic.step_path, diagnostic.field].filter(Boolean).join('.')}）` : ''}`
+    ? `${diagnostic.message}${diagnosticLocation(diagnostic) ? `（${diagnosticLocation(diagnostic)}）` : ''}`
     : null
   const message = body && typeof body === 'object'
     ? String(body.message ?? diagnosticMessage ?? body.error ?? `HTTP ${r.status}`)
@@ -38,6 +37,13 @@ async function errorFromResponse(r) {
 
 function networkError(cause) {
   return new ApiError({ status: 0, code: 'network_error', message: '网络请求失败', cause })
+}
+
+function diagnosticLocation(diagnostic) {
+  const path = diagnostic?.step_path ? String(diagnostic.step_path) : ''
+  const field = diagnostic?.field ? String(diagnostic.field) : ''
+  const alreadyIncludesField = path === field || path.endsWith(`.${field}`)
+  return [path, alreadyIncludesField ? '' : field].filter(Boolean).join('.')
 }
 
 function invalidResponse(message, data = null) {

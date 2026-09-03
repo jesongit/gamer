@@ -166,3 +166,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **YAML Component 的同步 WIT `call` 若沿用通用 async bindgen 会要求 async Store，并在 Windows GNU Tokio fiber 清理时崩溃**：YAML world 保持同步 bindgen，能力调用在独立 current-thread Tokio runtime 中执行；通用 extensions Host 不启用 YAML world。
 - **Vitest 默认 include 只覆盖 `src/*.test.js` 与 `src/script-editor/**/*.test.js`**：YAML workspace 测试放在 `src/workspace/` 会被静默跳过，必须放到 `src/` 根级或显式扩展配置。
 - **WASM guest fixture 的 Cargo 构建会在各 fixture 目录生成独立 `target/`，不会命中 `server/target/` 规则**：这些目录均为可重建生成物，按 fixture 路径精确忽略，不要提交。
+
+## 2026-09-04
+
+- **match/color 候选不点击且无分支步骤时不能省略 YAML 值**：`- 模板:` 会解析为 `null`，严格 loader 报“步骤必须是列表”；序列化必须写 `- 模板: []`，点击候选仍可用 `click: true` 并省略 `steps`。

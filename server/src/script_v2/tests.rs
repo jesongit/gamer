@@ -800,6 +800,13 @@ mod serialize_tests {
         );
     }
 
+    /// 空的非点击候选必须显式写成 `模板: []`，不能省略值成为 null。
+    #[test]
+    fn empty_candidate_branches_are_explicit_sequences() {
+        let src = "params:\n  - 'tmpl:phone:手机图标'\n  - 'tmpl:other:其他图标'\nsteps:\n  - match:\n    - $phone: []\n    - $other:\n        click: true\n  - color:\n      at: [0.5, 0.5]\n      expect:\n        - ff8800: []\n";
+        assert_eq!(roundtrip(src), src);
+    }
+
     /// check 规范形态：timeout/throw 都是步骤级可选兄弟键。
     #[test]
     fn check_rendering() {

@@ -282,14 +282,13 @@ fn write_candidates(out: &mut String, items: &[CandidateOut<'_>], dash_indent: u
         push_indent(out, dash_indent);
         out.push_str("- ");
         out.push_str(&item.key);
+        if !item.click && item.steps.is_empty() {
+            out.push_str(": []\n");
+            continue;
+        }
         out.push_str(":\n");
         if !item.click {
-            if item.steps.is_empty() {
-                push_indent(out, dash_indent + 2);
-                out.push_str("[]\n");
-            } else {
-                write_steps(out, item.steps, dash_indent + 2);
-            }
+            write_steps(out, item.steps, dash_indent + 2);
         } else {
             push_indent(out, dash_indent + 4);
             out.push_str("click: true\n");

@@ -18,13 +18,20 @@
           click: true
           steps:
             - find: 领取月卡.png
-      timeout: 1min
+            - return: true
+      - 手机图标.png: []
+      timeout: 5min
+    - find: 领取月卡.png
+      timeout: 3s
+      then:
+        - find: 领取月卡.png
 
 每日任务:
   steps:
     - check: 手机图标.png
     - find: 指南.png
     - find: 每日任务列表.png
+      timeout: 3s
       then:
         - loop:
             times: 5
@@ -35,19 +42,7 @@
                 - 每日任务前往.png:
                     click: true
                     steps:
-                      - match:
-                        - 委托界面.png:
-                          - find: 领取委托.png
-                            timeout: 1s
-                          - find: 点击空白关闭1.png
-                          - find: 关闭界面.png
-                        - 生存索引.png:
-                          - find: 培养目标.png
-                          - wait: 1s
-                          - find: 角色培养进入.png
-                          - func: 工具/通用战斗
-                          - find: 指南.png
-                        timeout: 3s
+                      - func: 工具/每日任务前往
                 - 每日任务达标奖励.png:
                     click: true
                     steps:
@@ -58,8 +53,21 @@
                   - find: 关闭界面.png
                   - break
       else:
+        - find: 关闭界面.png
         - return: false
-    - func: 工具/邮件领取
+
+每日任务前往:
+  steps:
+    - match:
+      - 委托界面.png:
+        - find: 领取委托.png
+        - find: 点击空白关闭1.png
+        - find: 关闭界面.png
+      - 生存索引.png:
+        - find: 培养目标.png
+        - find: 角色培养进入.png
+        - func: 工具/通用战斗
+        - find: 指南.png
 
 通用战斗:
   steps:
@@ -78,10 +86,11 @@
         times: 24
         steps:
           - find: 增加次数.png
-          - wait: 200ms
           - match:
             - 体力不足.png:
               - find: 减少次数.png
+              - break
+            - 次数上限.png:
               - break
     - find: 开始挑战.png
       block:
@@ -99,6 +108,7 @@
     - find: 邮件图标.png
       timeout: 2s
       else:
+        - find: 关闭界面.png
         - return: false
     - find: 领取邮件.png
       timeout: 2s
@@ -106,6 +116,3 @@
         - find: 点击空白关闭1.png
     - find: 关闭界面.png
     - find: 关闭界面.png
-
-func1:
-  steps: []

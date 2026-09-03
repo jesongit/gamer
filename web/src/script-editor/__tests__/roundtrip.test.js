@@ -127,6 +127,7 @@ describe('编辑往返一致性', () => {
             { template: lit('a.png'), click: true, steps: [] },
             { template: lit('b.png'), click: true, steps: [makeStep('key')] },
             { template: lit('c.png'), click: false, steps: [makeStep('log')] },
+            { template: lit('d.png'), click: false, steps: [] },
           ],
           else: [makeStep('throw')],
           timeout: lit('30s'),
@@ -136,6 +137,7 @@ describe('编辑往返一致性', () => {
           expect: [
             { color: lit('123456'), click: true, steps: [] },
             { color: lit('ff8800'), click: false, steps: [makeStep('log')] },
+            { color: lit('00ff00'), click: false, steps: [] },
           ],
           else: [],
         }),
@@ -149,6 +151,8 @@ describe('编辑往返一致性', () => {
     // 候选级点击不变式：click: true ⇒ 映射形态，false ⇒ 列表形态
     expect(text).toContain('a.png:\n        click: true\n')
     expect(text).toContain("c.png:\n      - log: ''\n")
+    expect(text).toContain('d.png: []\n')
+    expect(text).toContain('00ff00: []\n')
   })
 
   it('serialize(parse(fixture)) 幂等（契约的组件层旁证）', () => {

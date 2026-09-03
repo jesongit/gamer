@@ -281,7 +281,12 @@ function emitStep(step: Step, col: number, lines: string[]): void {
       lines.push(`${head}match:`)
       // 紧凑缩进（契约 §4.1）：候选列表是 match 键下的无缩进序列（与键内容列同列）。
       for (const cand of step.candidates) {
-        lines.push(`${' '.repeat(contentCol)}- ${cellInline(cand.template, 'tmpl')}:`)
+        const candidateKey = cellInline(cand.template, 'tmpl')
+        if (!cand.click && cand.steps.length === 0) {
+          lines.push(`${' '.repeat(contentCol)}- ${candidateKey}: []`)
+          continue
+        }
+        lines.push(`${' '.repeat(contentCol)}- ${candidateKey}:`)
         if (cand.click) {
           // 命中点击候选 = 映射形态（契约 §4.1）；映射值不能与键同列，比候选键深两级。
           lines.push(`${' '.repeat(contentCol + 4)}click: true`)
@@ -317,7 +322,12 @@ function emitStep(step: Step, col: number, lines: string[]): void {
         lines.push(`${' '.repeat(mapCol)}expect:`)
         for (const exp of step.expect) {
           const candCol = mapCol + 2
-          lines.push(`${' '.repeat(candCol)}- ${cellInline(exp.color, 'color')}:`)
+          const candidateKey = cellInline(exp.color, 'color')
+          if (!exp.click && exp.steps.length === 0) {
+            lines.push(`${' '.repeat(candCol)}- ${candidateKey}: []`)
+            continue
+          }
+          lines.push(`${' '.repeat(candCol)}- ${candidateKey}:`)
           if (exp.click) {
             // 命中点击候选 = 映射形态（契约 §4.2）；映射键比候选键深两级。
             lines.push(`${' '.repeat(candCol + 4)}click: true`)

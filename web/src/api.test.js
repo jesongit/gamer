@@ -52,6 +52,24 @@ describe('唯一资源 API surface', () => {
       })
   })
 
+  it('诊断路径已包含 field 时不重复追加字段名', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(400, {
+      error: 'invalid_yaml',
+      diagnostics: [{
+        code: 'step.field.type',
+        message: '步骤必须是列表',
+        step_path: '登录.steps[7].candidates[1].steps',
+        field: 'steps',
+      }],
+    }))
+
+    await expect(api.createScript({ pkg: 'com.demo', name: 'main.yaml', content: 'steps: []\n' }))
+      .rejects.toMatchObject({
+        code: 'invalid_yaml',
+        message: '步骤必须是列表（登录.steps[7].candidates[1].steps）',
+      })
+  })
+
   it('脚本创建 POST 只发送当前字段；更新 PUT 整体编码 id 并携带 expected_version', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/main.yaml' }))
     await api.createScript({ pkg: 'com.demo', name: 'main.yaml', content: 'steps: []\n', id: 'old-id' })
