@@ -236,3 +236,18 @@ export function lifecyclePrompt(action: 'enable' | 'disable' | 'start' | 'stop',
   }[action]
   return `确认${verb} ${name}？\n${message}`
 }
+
+/** 版本切换（含回滚到旧版本）确认文案：明确目标版本与运行前提。 */
+export function activateVersionPrompt(plugin: InstalledPluginSnapshot, version: string): string {
+  const name = plugin.name || plugin.id
+  const current = plugin.active_version || plugin.version || '未知版本'
+  return `确认将 ${name} 从 ${current} 切换到 ${version}？\n切换后插件以该版本重新加载；插件运行中需先停止才能切换。`
+}
+
+/** activate 失败的友好提示：409（插件 Running）/404（版本未安装）映射为行动指引，其余原样透传。 */
+export function activateVersionErrorText(errorValue: unknown): string {
+  const status = (errorValue as { status?: unknown } | null)?.status
+  if (status === 409) return '插件正在运行，请先停止插件再切换版本。'
+  if (status === 404) return '目标版本未安装，无法切换。'
+  return String((errorValue as { message?: unknown } | null)?.message || errorValue || '操作失败')
+}

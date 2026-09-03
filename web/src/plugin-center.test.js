@@ -130,4 +130,14 @@ describe('Phase 10 plugin center contracts', () => {
     expect(fetch.mock.calls[3][0]).toBe('/api/extensions/official.vision/1.0.0?delete_data=1')
     expect(uninstallPrompt({ id: 'official.vision', version: '1.0.0', state: 'enabled' }, true)).toMatch(/删除该插件的用户数据/)
   })
+
+  it('activate posts the target version to the activate endpoint（回滚走同一契约）', async () => {
+    fetch.mockResolvedValueOnce(jsonResponse(200, { id: 'official.vision', active_version: '2.9.0', state: 'enabled' }))
+    const result = await api.activateExtension('official.vision', '2.9.0')
+    expect(fetch.mock.calls[0][0]).toBe('/api/extensions/official.vision/activate')
+    expect(fetch.mock.calls[0][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ version: '2.9.0' }) })
+    expect(result).toMatchObject({ active_version: '2.9.0', state: 'enabled' })
+    // requireId 在进入 fetch 前同步拒绝空版本
+    expect(() => api.activateExtension('official.vision', '')).toThrow('extension_version 不能为空')
+  })
 })

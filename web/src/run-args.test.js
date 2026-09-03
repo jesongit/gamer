@@ -202,20 +202,22 @@ describe('useRunArgsFlow', () => {
 describe('Console 运行参数接线', () => {
   const read = p => readFileSync(new URL(p, import.meta.url), 'utf8')
   const consoleSrc = read('./views/Console.vue')
+  // Console 拆分后：运行参数流程实现移入脚本运行 composable
+  const runnerSrc = read('./components/console/useConsoleScriptRunner.js')
 
   it('Console：运行入口走参数流程（弹窗 + 稀疏 args + 409 冲突 + 摘要日志）', () => {
-    expect(consoleSrc).toContain("import { useRunArgsFlow } from '../composables/useRunArgsFlow'")
+    expect(runnerSrc).toContain("import { useRunArgsFlow } from '../../composables/useRunArgsFlow'")
     expect(consoleSrc).toContain("import RunParamsModal from '../components/RunParamsModal.vue'")
     expect(consoleSrc).toContain('<RunParamsModal')
-    expect(consoleSrc).toContain('api.runScript(id, store.deviceId, startIndex, args)')
-    expect(consoleSrc).toContain('function onRunArgsSubmit(')
-    expect(consoleSrc).toContain('runArgsFlow.confirm(args).catch(handleRunStartError)')
-    expect(consoleSrc).toContain('function handleRunStartError(')
-    expect(consoleSrc).toContain('isDeviceBusyConflict(e)')
+    expect(runnerSrc).toContain('api.runScript(id, store.deviceId, startIndex, args)')
+    expect(runnerSrc).toContain('function onRunArgsSubmit(')
+    expect(runnerSrc).toContain('runArgsFlow.confirm(args).catch(handleRunStartError)')
+    expect(runnerSrc).toContain('function handleRunStartError(')
+    expect(runnerSrc).toContain('isDeviceBusyConflict(e)')
     // resolved_args 摘要进运行日志区（「默认继承/显式覆盖」来源标注）
-    expect(consoleSrc).toContain('if (summary) pushLog(\'info\', summary)')
+    expect(runnerSrc).toContain('if (summary) pushLog(\'info\', summary)')
     // 上下文透传（弹窗在 Console 根部渲染，绑定 runArgsFlow.modal）
-    expect(consoleSrc).toContain('runArgsFlow, onRunArgsSubmit,')
+    expect(runnerSrc).toContain('runArgsFlow, onRunArgsSubmit,')
     expect(consoleSrc).toContain(':field-errors="runArgsFlow.modal.fieldErrors"')
     expect(consoleSrc).toContain('@submit="onRunArgsSubmit"')
   })

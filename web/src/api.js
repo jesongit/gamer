@@ -185,6 +185,19 @@ export const api = {
   disableExtension: (id) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/disable`, {}),
   startExtension: (id, app_context) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/start`, app_context ? { app_context } : {}),
   stopExtension: (id) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/stop`, {}),
+  // declarative 面板 plugin.call：action 必须在插件 manifest 的声明按钮集合内（服务端校验）
+  callExtension: (id, action, values = {}) => req(
+    'POST',
+    `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/call`,
+    { action, values },
+  ),
+  // 版本切换（含回滚）：把已安装的某个版本设为活动版本；插件 Running 时服务端 409，
+  // 版本未安装 404，成功返回 { id, active_version, state }
+  activateExtension: (id, version) => req(
+    'POST',
+    `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/activate`,
+    { version: requireId(version, 'extension_version') },
+  ),
   uninstallExtension: (id, version, { deleteData = false } = {}) => req(
     'DELETE',
     `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/${encodeURIComponent(requireId(version, 'extension_version'))}?delete_data=${deleteData ? '1' : '0'}`,

@@ -73,6 +73,14 @@
                   <span>权限：{{ (plugin.permissions || []).length ? plugin.permissions.join('、') : '无' }}</span>
                   <span>已保留版本：{{ (plugin.installed_versions || []).join('、') || '无' }}</span>
                 </div>
+                <!-- 版本切换（旧版本即回滚入口）：active 版本不可选，切换需插件非 Running（服务端 409 门禁） -->
+                <div v-if="switchableVersions(plugin).length" class="version-switch-line">
+                  <span class="version-switch-label">历史版本：</span>
+                  <span v-for="version in switchableVersions(plugin)" :key="version" class="version-switch-item">
+                    <code>{{ version }}</code>
+                    <button class="btn btn-sm" type="button" :disabled="busy" @click="activateVersion(plugin, version)">切换到此版本</button>
+                  </span>
+                </div>
                 <div v-if="plugin.last_error" class="dependency-line danger-text">失败：{{ plugin.last_error }}</div>
                 <div v-if="dependencyItems(plugin).length" class="dependency-line">
                   依赖：{{ dependencyItems(plugin).map(item => item.name || item.id).join('、') }}
@@ -132,7 +140,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api'
 import { compareVersions, downloadDirectUrl, downloadFixedVersion, fetchRegistry, findRegistryPlugin } from './registry-client'
-import { dependencyRefsFor, dependencyStatus, installPolicy, installSummary, lifecyclePrompt, mergeManagementResponse, readPluginSourceMetadata, rememberPluginSource, registryProofFor, signatureLabel, sourceLabel as sourceText, uninstallPrompt } from './plugin-service'
+import { activateVersionErrorText, activateVersionPrompt, dependencyRefsFor, dependencyStatus, installPolicy, installSummary, lifecyclePrompt, mergeManagementResponse, readPluginSourceMetadata, rememberPluginSource, registryProofFor, signatureLabel, sourceLabel as sourceText, uninstallPrompt } from './plugin-service'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -342,6 +350,28 @@ async function runAction(action, plugin) {
   } catch (errorValue) { error.value = messageFor(errorValue) } finally { busy.value = false }
 }
 
+/** 可切换（含回滚）的历史版本：已安装列表里排除当前活动版本。 */
+function switchableVersions(plugin) {
+  const active = plugin.active_version || plugin.version || ''
+  return (plugin.installed_versions || []).filter(version => version && version !== active)
+}
+
+/** 切换活动版本（旧版本即回滚入口）：409（Running）/404（版本未安装）由 activateVersionErrorText 转友好提示。 */
+async function activateVersion(plugin, version) {
+  if (!globalThis.confirm(activateVersionPrompt(plugin, version))) return
+  busy.value = true
+  clearMessages()
+  try {
+    const result = await props.apiClient.activateExtension(plugin.id, version)
+    emit('changed')
+    await refresh()
+    // notice 放在 refresh 之后：refresh 内部 clearMessages 会清掉先行的提示
+    notice.value = `${plugin.name || plugin.id} 已切换到 ${result?.active_version || version}。`
+  } catch (errorValue) {
+    error.value = activateVersionErrorText(errorValue)
+  } finally { busy.value = false }
+}
+
 async function uninstall(plugin, deleteData) {
   if (!globalThis.confirm(uninstallPrompt(plugin, deleteData))) return
   busy.value = true
@@ -380,6 +410,9 @@ async function uninstall(plugin, deleteData) {
 .plugin-meta code, .selected-file code, .import-pane code { color:var(--accent-2); font-family:var(--mono); }
 .plugin-description { margin-top:9px; color:var(--text-1); font-size:12px; line-height:1.5; }
 .dependency-line { margin-top:8px; color:var(--text-1); font-size:11px; line-height:1.45; }
+.version-switch-line { display:flex; align-items:center; flex-wrap:wrap; gap:6px 10px; margin-top:8px; font-size:11px; }
+.version-switch-label { color:var(--text-2); }
+.version-switch-item { display:inline-flex; align-items:center; gap:6px; }
 .danger-text { color:var(--danger); }
 .warn-text { color:var(--warn); }
 .plugin-card-actions { display:flex; flex-direction:column; align-items:flex-end; justify-content:flex-start; gap:7px; flex-shrink:0; }

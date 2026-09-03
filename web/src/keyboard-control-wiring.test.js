@@ -7,6 +7,8 @@ const read = path => readFileSync(new URL(path, root), 'utf8')
 describe('投屏键盘控制接线', () => {
   const consoleSource = read('./views/Console.vue')
   const stageSource = read('./components/console/ConsoleVideoStage.vue')
+  // Console 拆分后：剪贴板粘贴等输入发送细节移入设备管理 composable，对整体实现断言
+  const consoleImpl = consoleSource + '\n' + read('./components/console/useConsoleDeviceManager.js')
 
   it('工具条与投屏区域共用键盘焦点容器', () => {
     expect(consoleSource).toContain('ref="stageFocusEl"')
@@ -28,8 +30,8 @@ describe('投屏键盘控制接线', () => {
     expect(consoleSource).toContain('getKeyMetaState: () => keyboard.getMetaState()')
     expect(consoleSource).toContain('onText: sendControl')
     expect(consoleSource).toContain('mode: keyboardMode')
-    expect(consoleSource).toContain("{ type: 'text', text: chunk }")
-    expect(consoleSource).toContain('navigator.clipboard.readText()')
+    expect(consoleImpl).toContain("{ type: 'text', text: chunk }")
+    expect(consoleImpl).toContain('navigator.clipboard.readText()')
     expect(consoleSource).toContain('toggleKeyboardMode')
     expect(consoleSource).toContain("toast('键盘控制通道未连接', 'warn')")
     expect(consoleSource).toContain("window.addEventListener('blur', onWindowBlur)")

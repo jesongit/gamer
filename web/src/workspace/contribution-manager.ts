@@ -1,4 +1,4 @@
-import type { PanelContribution, PanelRegistry, RegisteredPanel } from './registry'
+import type { DeclarativeUiSchema, PanelContribution, PanelRegistry, RegisteredPanel } from './registry'
 import { CONSOLE_RIGHT_LOCATION } from './registry'
 import type { PluginRuntimeLifecycle } from './lifecycle'
 
@@ -12,6 +12,8 @@ export interface ManifestUiContribution {
   requires_device?: boolean
   preferred_width?: number
   entry?: string
+  /** declarative 面板的表单 schema（服务端 manifest.rs 校验后原样透传） */
+  schema?: DeclarativeUiSchema
 }
 
 export interface ExtensionUiManifest {
@@ -90,6 +92,7 @@ function panelFromManifest(
       title,
     }
   }
+  if (item.schema) contribution.schema = item.schema
   return contribution
 }
 

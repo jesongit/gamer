@@ -22,7 +22,30 @@ export interface PanelContribution {
   component?: unknown
   panelClass?: string
   iframe?: { src?: string; title?: string }
+  /** declarative 面板的表单 schema（服务端 manifest 原样透传），由 PluginPanelHost 原生渲染 */
+  schema?: DeclarativeUiSchema
   getProps?: (context: Record<string, unknown>) => Record<string, unknown>
+}
+
+export interface DeclarativeUiFieldOption {
+  value: string | number | boolean
+  label?: string
+}
+
+export interface DeclarativeUiField {
+  type: 'text' | 'number' | 'boolean' | 'select' | 'button'
+  name?: string
+  label: string
+  placeholder?: string
+  default?: string | number | boolean
+  options?: DeclarativeUiFieldOption[]
+  action?: string
+  description?: string
+}
+
+export interface DeclarativeUiSchema {
+  description?: string
+  fields: DeclarativeUiField[]
 }
 
 export interface RegisteredPanel extends PanelContribution {

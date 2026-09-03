@@ -7,6 +7,20 @@ const read = (path) => readFileSync(new URL(path, root), 'utf8')
 describe('Console 视觉组件拆分静态回归', () => {
   const consoleSource = read('./views/Console.vue')
   const template = consoleSource.slice(0, consoleSource.indexOf('</template>'))
+  // phase-05 Console 物理拆分后，实现细节分布在 components/console/ 的拆分模块中；
+  // 静态回归统一对「Console 壳 + 拆分模块」整体断言，契约不变。
+  const consoleModules = [
+    './views/Console.vue',
+    './components/console/useConsoleDeviceManager.js',
+    './components/console/useConsoleTemplates.js',
+    './components/console/useConsoleBridgeOverlays.js',
+    './components/console/useConsoleScriptRunner.js',
+    './components/console/useConsoleKeymap.js',
+    './components/console/useWebrtcStats.js',
+    './components/console/useConsolePanelResize.js',
+    './components/console/useConsoleWorkspacePanels.js',
+  ]
+  const consoleImpl = consoleModules.map(read).join('\n')
 
   it('Console 只编排视觉子组件，设备管理收进工具条 + 设置弹窗', () => {
     expect(consoleSource).toContain("import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'")
@@ -63,7 +77,7 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(virtualFields).not.toContain('ctx.form.pkg')
     expect(template).toContain('v-model="activePkg"')
     expect(template).toContain('@click="loadApps"')
-    expect(consoleSource).toContain("sendControl({ type: 'start_app', app: activePkg.value })")
+    expect(consoleImpl).toContain("sendControl({ type: 'start_app', app: activePkg.value })")
     expect(consoleSource).not.toContain('currentPkg')
     // 二次裁切弹窗独立成 TemplateCropModal：挂在面板层级（任何页签下框选可见，不切页签）
     const cropModal = read('./components/console/TemplateCropModal.vue')
@@ -76,9 +90,9 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(cropModal).toContain('ctx.backToCrop')
     expect(cropModal).toContain('当前裁切模板')
     expect(cropModal).toContain('模板库中的')
-    expect(consoleSource).toContain('crop.preserveColor')
-    expect(consoleSource).toContain('function findCropConflict(')
-    expect(consoleSource).toContain('function overwriteTemplate(')
+    expect(consoleImpl).toContain('crop.preserveColor')
+    expect(consoleImpl).toContain('function findCropConflict(')
+    expect(consoleImpl).toContain('function overwriteTemplate(')
     expect(template).toContain('<TemplateCropModal ')
     expect(template).toContain(':on-crop-mounted="onCropMounted"')
     expect(capture).not.toContain('ctx.cropMouseDown')
@@ -98,33 +112,33 @@ describe('Console 视觉组件拆分静态回归', () => {
 
   it('阶段 4：Console 接入共享编辑器外壳，运行视图为只读摘要 + 结构化跳转', () => {
     // 编辑核心收敛在 useScriptEditorShell；旧文本校验器/行扫描模块已删除
-    expect(consoleSource).toContain("import { useScriptEditorShell } from '../composables/useScriptEditorShell'")
+    expect(consoleImpl).toContain("import { useScriptEditorShell } from '../../composables/useScriptEditorShell'")
     expect(consoleSource).not.toContain('script-language/validate')
     expect(consoleSource).not.toContain('script-language/line-map')
     // 运行视图：ScriptSummary 摘要模型 + 「从此运行」直发 startIndexOf；call/func 结构化跳转
-    expect(consoleSource).toContain('const summaryModel = computed(')
-    expect(consoleSource).toContain('startIndexOf(summaryModel.value')
-    expect(consoleSource).toContain('function openScriptTarget(')
-    expect(consoleSource).toContain('function runFromStep(')
+    expect(consoleImpl).toContain('const summaryModel = computed(')
+    expect(consoleImpl).toContain('startIndexOf(summaryModel.value')
+    expect(consoleImpl).toContain('function openScriptTarget(')
+    expect(consoleImpl).toContain('function runFromStep(')
     // 点击卡片选中/取消运行起点已删（2026-08-30 用户决策：「从此运行」按钮已覆盖，
     // 顶部「运行」恒从头跑），起点只经 run-from 事件直发，不得回潮
-    expect(consoleSource).not.toContain('toggleRunStart')
-    expect(consoleSource).not.toContain('runStartUuid')
+    expect(consoleImpl).not.toContain('toggleRunStart')
+    expect(consoleImpl).not.toContain('runStartUuid')
     // 保存走 shell（expected_version + 409 冲突回调）
-    expect(consoleSource).toContain('scriptShell.save()')
-    expect(consoleSource).toContain('function onConflictReload(')
-    expect(consoleSource).toContain('function onConflictOverwrite(')
+    expect(consoleImpl).toContain('scriptShell.save()')
+    expect(consoleImpl).toContain('function onConflictReload(')
+    expect(consoleImpl).toContain('function onConflictOverwrite(')
     // alt 模式已整体移除（2026-08-31 用户决策：投屏 Alt 点击/滑动生成步骤、二次裁切
     // Alt 取色均无使用场景），取值改走步骤编辑器的选坐标/屏幕选色按钮；不得回潮
-    expect(consoleSource).not.toContain('scriptShell.insertTapAt(')
-    expect(consoleSource).not.toContain('scriptShell.insertSwipeBetween(')
-    expect(consoleSource).not.toContain('scriptShell.insertColorCheck(')
-    expect(consoleSource).not.toContain('altMode')
-    expect(consoleSource).not.toContain('isAltAction')
+    expect(consoleImpl).not.toContain('scriptShell.insertTapAt(')
+    expect(consoleImpl).not.toContain('scriptShell.insertSwipeBetween(')
+    expect(consoleImpl).not.toContain('scriptShell.insertColorCheck(')
+    expect(consoleImpl).not.toContain('altMode')
+    expect(consoleImpl).not.toContain('isAltAction')
     // opRecords 文本拼接路径停用：无 opRecords / renderOpTpl / DEFAULT_OP_TPL 残留
-    expect(consoleSource).not.toContain('opRecords')
-    expect(consoleSource).not.toContain('renderOpTpl')
-    expect(consoleSource).not.toContain('DEFAULT_OP_TPL')
+    expect(consoleImpl).not.toContain('opRecords')
+    expect(consoleImpl).not.toContain('renderOpTpl')
+    expect(consoleImpl).not.toContain('DEFAULT_OP_TPL')
   })
 
   it('阶段 4：Console 右侧功能区为模板/脚本/映射/日志/任务/设置六页签', () => {
@@ -150,12 +164,13 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(template).toContain("panelTab === 'keymap'")
     expect(template).toContain('v-model="activeKeymapName"')
     expect(template).toContain('无映射')
-    expect(consoleSource).toContain('api.listKeymaps(pkg)')
-    expect(consoleSource).toContain('api.getKeymap(activeKeymapName.value, activePkg.value)')
-    expect(consoleSource).toContain("onRequestPoint: () => beginCellPick('coord')")
+    expect(consoleImpl).toContain('api.listKeymaps(pkg)')
+    expect(consoleImpl).toContain('api.getKeymap(activeKeymapName.value, activePkg.value)')
+    expect(consoleImpl).toContain("onRequestPoint: () => pickCoord()")
+    expect(consoleImpl).toContain("pickCoord: () => beginCellPick('coord')")
     expect(keymap).toContain('expected_version')
-    expect(consoleSource).not.toContain('func-app-hint')
-    expect(consoleSource).not.toContain('已加入包名下拉')
+    expect(consoleImpl).not.toContain('func-app-hint')
+    expect(consoleImpl).not.toContain('已加入包名下拉')
   })
 
   it('旧侧边栏承载的独立页面与入口已删除', () => {
@@ -180,9 +195,9 @@ describe('Console 视觉组件拆分静态回归', () => {
   it('连接成功即刷新设备列表（下拉在线/离线随建链更新，不必手动刷新）', () => {
     // onConnectSuccess（手动连接/自动重连/接管共用成功路径）触发轻量列表刷新
     expect(consoleSource).toContain('refreshDeviceStatus()')
-    expect(consoleSource).toContain('async function refreshDeviceStatus()')
+    expect(consoleImpl).toContain('async function refreshDeviceStatus()')
     // 只拉列表不扫描（扫描是「🔄 刷新」按钮职责），失败静默不打扰投屏
-    const fn = consoleSource.slice(consoleSource.indexOf('async function refreshDeviceStatus()'))
+    const fn = consoleImpl.slice(consoleImpl.indexOf('async function refreshDeviceStatus()'))
     expect(fn.slice(0, fn.indexOf('/** 刷新：扫描 adb'))).toContain('api.listDevices()')
     expect(fn.slice(0, fn.indexOf('/** 刷新：扫描 adb'))).not.toContain('api.scanDevices()')
   })
@@ -202,8 +217,8 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(template).toContain('@change="onImportFile"')
     expect(read('./components/console/TemplateCapture.vue')).not.toContain('pkg-bar')
     // 框选生成模板：不切页签 + captureTemplate 以 Promise 回传模板短名（保存/取消 resolve）
-    expect(consoleSource).toContain('cellCaptureResolve')
-    const captureFn = consoleSource.slice(consoleSource.indexOf('captureTemplate: () => {'))
+    expect(consoleImpl).toContain('cellCaptureResolve')
+    const captureFn = consoleImpl.slice(consoleImpl.indexOf('captureTemplate: () => {'))
     expect(captureFn.slice(0, captureFn.indexOf('\n  },'))).not.toContain('panelTab')
     // 函数模式：无总「编辑」按钮，摘要区逐函数「编辑」直达 + 签名展示；编辑态画布锁函数切换
     const runner = read('./components/console/ScriptRunner.vue')
@@ -218,8 +233,8 @@ describe('Console 视觉组件拆分静态回归', () => {
 
   it('函数库新建直接进入编辑态；参数入口位于步骤入口之前', () => {
     const runner = read('./components/console/ScriptRunner.vue')
-    expect(consoleSource).toContain("scriptShell.newFunctionFile({ file: '新函数库', pkg: activePkg.value })")
-    expect(consoleSource).not.toContain("window.prompt('函数库文件短名'")
+    expect(consoleImpl).toContain("scriptShell.newFunctionFile({ file: '新函数库', pkg: activePkg.value })")
+    expect(consoleImpl).not.toContain("window.prompt('函数库文件短名'")
     expect(runner).toContain(':autofocus="ctx.shell.kind === \'function_library\'"')
     const toolbar = runner.slice(runner.indexOf('class="function-edit-toolbar"'))
     expect(toolbar.indexOf('＋ 添加参数')).toBeLessThan(toolbar.indexOf('＋ 添加步骤'))
@@ -231,15 +246,15 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(cell).toContain('框选')
     expect(cell).toContain('匹配')
     expect(cell).toContain('tools.matchTemplate(name)')
-    expect(consoleSource).toContain('matchTemplate: name => testMatch(name, { stepSemantics: true })')
-    expect(consoleSource).toContain('const region = stepSemantics ? undefined : templateRegionPixels(name)')
+    expect(consoleImpl).toContain('matchTemplate: name => testMatch(name, { stepSemantics: true })')
+    expect(consoleImpl).toContain('const region = stepSemantics ? undefined : templateRegionPixels(name)')
   })
 
   it('波次 2-F：运行与模板资源调用点只使用当前契约', () => {
     const layout = read('./layouts/MainLayout.vue')
     const taskBoard = read('./components/TaskBoard.vue')
     const capture = read('./components/console/TemplateCapture.vue')
-    const sources = [layout, consoleSource, taskBoard, capture]
+    const sources = [layout, consoleImpl, taskBoard, capture]
 
     for (const source of sources) {
       expect(source).not.toContain('api.stopScript')
@@ -252,9 +267,9 @@ describe('Console 视觉组件拆分静态回归', () => {
       expect(source).not.toContain('no_snapshot')
     }
     expect(layout).toContain('api.cancelRun(rid)')
-    expect(consoleSource).toContain('api.getRun(rid)')
+    expect(consoleImpl).toContain('api.getRun(rid)')
     expect(taskBoard).toContain('api.runTaskNow(')
-    expect(consoleSource).toContain('api.replaceTemplateImage(')
+    expect(consoleImpl).toContain('api.replaceTemplateImage(')
     expect(capture).toContain('ctx.replaceTemplateImage(target, file)')
   })
 })
