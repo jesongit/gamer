@@ -24,6 +24,7 @@ pub(crate) struct ExtensionManifest {
     entry: ExtensionPath,
     host_api: HostApiRequirements,
     permissions: PermissionSet,
+    ui: Vec<UiContribution>,
 }
 
 impl ExtensionManifest {
@@ -58,6 +59,83 @@ impl ExtensionManifest {
     pub(crate) fn permissions(&self) -> &PermissionSet {
         &self.permissions
     }
+
+    pub(crate) fn ui(&self) -> &[UiContribution] {
+        &self.ui
+    }
+}
+
+/// A panel contribution is declarative metadata. The actual iframe remains
+/// served by the authenticated extension resource endpoint; it is never
+/// mounted as a host Vue component.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct UiContribution {
+    panel_id: String,
+    title: String,
+    icon: Option<String>,
+    order: i32,
+    location: String,
+    runtime: UiRuntime,
+    requires_device: bool,
+    preferred_width: Option<u16>,
+    entry: Option<ExtensionPath>,
+}
+
+impl UiContribution {
+    pub(crate) fn panel_id(&self) -> &str {
+        &self.panel_id
+    }
+
+    pub(crate) fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub(crate) fn icon(&self) -> Option<&str> {
+        self.icon.as_deref()
+    }
+
+    pub(crate) fn order(&self) -> i32 {
+        self.order
+    }
+
+    pub(crate) fn location(&self) -> &str {
+        &self.location
+    }
+
+    pub(crate) fn runtime(&self) -> UiRuntime {
+        self.runtime
+    }
+
+    pub(crate) fn requires_device(&self) -> bool {
+        self.requires_device
+    }
+
+    pub(crate) fn preferred_width(&self) -> Option<u16> {
+        self.preferred_width
+    }
+
+    pub(crate) fn entry(&self) -> Option<&ExtensionPath> {
+        self.entry.as_ref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum UiRuntime {
+    Declarative,
+    Iframe,
+}
+
+impl UiRuntime {
+    fn parse(value: &str) -> ExtensionResult<Self> {
+        match value.trim() {
+            "declarative" => Ok(Self::Declarative),
+            "iframe" => Ok(Self::Iframe),
+            other => Err(ExtensionError::InvalidManifest(format!(
+                "ui.contributions.runtime 不受支持: {other}"
+            ))),
+        }
+    }
 }
 
 /// Domain-specific host requirements from the `[host_api]` table.
@@ -89,6 +167,39 @@ struct RawManifest {
     host_api: RawHostApiRequirements,
     #[serde(default)]
     permissions: Vec<String>,
+    #[serde(default)]
+    ui: RawUi,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUi {
+    #[serde(default)]
+    contributions: Vec<RawUiContribution>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUiContribution {
+    panel_id: String,
+    title: String,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    order: i32,
+    #[serde(default = "default_ui_location")]
+    location: String,
+    runtime: String,
+    #[serde(default)]
+    requires_device: bool,
+    #[serde(default)]
+    preferred_width: Option<u16>,
+    #[serde(default)]
+    entry: Option<String>,
+}
+
+fn default_ui_location() -> String {
+    "console.right".to_string()
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -178,6 +289,12 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> ExtensionResult<ExtensionManifest>
     }
     let host_api = raw.host_api.into_requirements()?;
     let permissions = PermissionSet::parse(raw.permissions)?;
+    let ui = raw
+        .ui
+        .contributions
+        .into_iter()
+        .map(parse_ui_contribution)
+        .collect::<ExtensionResult<Vec<_>>>()?;
 
     Ok(ExtensionManifest {
         manifest_version: raw.manifest_version,
@@ -188,5 +305,72 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> ExtensionResult<ExtensionManifest>
         entry,
         host_api,
         permissions,
+        ui,
+    })
+}
+
+fn parse_ui_contribution(raw: RawUiContribution) -> ExtensionResult<UiContribution> {
+    let panel_id = ExtensionPath::parse(&raw.panel_id)
+        .map_err(|_| ExtensionError::InvalidManifest("ui panel_id 无效".to_string()))?;
+    let title = validate_display_name(&raw.title)?;
+    let icon = match raw.icon {
+        Some(icon) => {
+            if icon.chars().any(char::is_control) {
+                return Err(ExtensionError::InvalidManifest(
+                    "ui icon 不能包含控制字符".to_string(),
+                ));
+            }
+            let icon = icon.trim();
+            (!icon.is_empty()).then(|| icon.to_string())
+        }
+        None => None,
+    };
+    if raw.location != "console.right" {
+        return Err(ExtensionError::InvalidManifest(format!(
+            "ui.contributions.location 不受支持: {}",
+            raw.location
+        )));
+    }
+    let runtime = UiRuntime::parse(&raw.runtime)?;
+    let entry = match (runtime, raw.entry) {
+        (UiRuntime::Declarative, Some(_)) => {
+            return Err(ExtensionError::InvalidManifest(
+                "declarative contribution 不能带 entry".to_string(),
+            ));
+        }
+        (UiRuntime::Declarative, None) => None,
+        (UiRuntime::Iframe, Some(entry)) => {
+            let entry = ExtensionPath::parse(&entry)?;
+            if !entry.as_str().starts_with("ui/") {
+                return Err(ExtensionError::InvalidManifest(
+                    "iframe contribution entry 必须位于 ui/ 下".to_string(),
+                ));
+            }
+            Some(entry)
+        }
+        (UiRuntime::Iframe, None) => {
+            return Err(ExtensionError::InvalidManifest(
+                "iframe contribution 必须指定 entry".to_string(),
+            ));
+        }
+    };
+    if raw
+        .preferred_width
+        .is_some_and(|width| !(200..=800).contains(&width))
+    {
+        return Err(ExtensionError::InvalidManifest(
+            "preferred_width 必须在 200..=800 之间".to_string(),
+        ));
+    }
+    Ok(UiContribution {
+        panel_id: panel_id.as_str().to_string(),
+        title,
+        icon,
+        order: raw.order,
+        location: raw.location,
+        runtime,
+        requires_device: raw.requires_device,
+        preferred_width: raw.preferred_width,
+        entry,
     })
 }

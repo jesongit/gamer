@@ -58,6 +58,24 @@ pub(crate) fn inspect_archive(bytes: &[u8]) -> ExtensionResult<ExtensionManifest
             "entry 不是 WASM 二进制: {entry}"
         )));
     }
+    for contribution in manifest.ui() {
+        let Some(entry) = contribution.entry() else {
+            continue;
+        };
+        let Some(entry_info) = entries
+            .iter()
+            .find(|candidate| candidate.name == entry.as_str())
+        else {
+            return Err(ExtensionError::InvalidArchive(format!(
+                "UI entry 不存在: {entry}"
+            )));
+        };
+        if entry_info.is_dir {
+            return Err(ExtensionError::InvalidArchive(format!(
+                "UI entry 不能是目录: {entry}"
+            )));
+        }
+    }
     Ok(manifest)
 }
 

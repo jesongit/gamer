@@ -2,6 +2,7 @@
 //! and durable metadata, and the runtime only owns an optional instance.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -14,6 +15,7 @@ use super::host_api::{HostApi, HostApiCatalog};
 use super::manifest::ExtensionManifest;
 use super::model::{ExtensionId, ExtensionRecord, ExtensionState, ExtensionVersion};
 use super::store::{ExtensionStore, InstalledExtension};
+use super::ui::{RegisteredUiContribution, UiContributionRegistry};
 use super::wasm::{WasmInstanceHandle, WasmRuntime, WasmStartRequest};
 
 #[derive(Clone, Debug)]
@@ -58,6 +60,7 @@ pub(crate) struct ExtensionService {
     host_api: HostApiCatalog,
     operation_lock: Mutex<()>,
     running: std::sync::Mutex<HashMap<ExtensionId, WasmInstanceHandle>>,
+    ui: UiContributionRegistry,
 }
 
 impl ExtensionService {
@@ -73,6 +76,7 @@ impl ExtensionService {
             host_api: HostApiCatalog::default(),
             operation_lock: Mutex::new(()),
             running: std::sync::Mutex::new(HashMap::new()),
+            ui: UiContributionRegistry::default(),
         }
     }
 
@@ -83,6 +87,17 @@ impl ExtensionService {
         Self::new(store, Arc::new(super::wasm::NoWasmRuntime), capabilities)
     }
 
+    pub(crate) fn for_data_root(
+        data_root: impl AsRef<Path>,
+        capabilities: CapabilityRegistry,
+    ) -> Self {
+        #[cfg(feature = "wasm-runtime")]
+        let runtime: Arc<dyn WasmRuntime> = Arc::new(super::wasm::LazyWasmtimeRuntime::new());
+        #[cfg(not(feature = "wasm-runtime"))]
+        let runtime: Arc<dyn WasmRuntime> = Arc::new(super::wasm::NoWasmRuntime);
+        Self::new(ExtensionStore::new(data_root), runtime, capabilities)
+    }
+
     pub(crate) fn runtime_available(&self) -> bool {
         self.runtime.is_available()
     }
@@ -91,7 +106,38 @@ impl ExtensionService {
         &self.store
     }
 
+    pub(crate) fn ui_contributions(&self) -> ExtensionResult<Vec<RegisteredUiContribution>> {
+        self.refresh_ui_registry()?;
+        Ok(self.ui.list())
+    }
+
+    pub(crate) fn read_ui_file(
+        &self,
+        id: &ExtensionId,
+        path: &super::model::ExtensionPath,
+    ) -> ExtensionResult<(Vec<u8>, String)> {
+        if !path.as_str().starts_with("ui/") {
+            return Err(ExtensionError::InvalidPath(path.to_string()));
+        }
+        self.refresh_ui_registry()?;
+        let visible = self
+            .ui
+            .list()
+            .into_iter()
+            .any(|contribution| contribution.plugin_id == *id);
+        if !visible {
+            return Err(ExtensionError::UiUnavailable { id: id.to_string() });
+        }
+        let versions = self.versions_for(id)?;
+        let states = self.store.read_state()?;
+        let record = state_for_versions(id, &versions, states.get(id).cloned())?;
+        let active = active_version(&versions, &record)?;
+        let bytes = active.read_file(path)?;
+        Ok((bytes, path.as_str().to_string()))
+    }
+
     pub(crate) fn list(&self) -> ExtensionResult<Vec<ExtensionSnapshot>> {
+        self.refresh_ui_registry()?;
         let installed = self.store.list_installed()?;
         let states = self.store.read_state()?;
         let mut by_id: BTreeMap<ExtensionId, Vec<InstalledExtension>> = BTreeMap::new();
@@ -129,6 +175,7 @@ impl ExtensionService {
             ExtensionRecord::new(manifest.id().clone(), manifest.version().clone())
         });
         self.store.write_state(&states)?;
+        self.refresh_ui_registry()?;
         self.snapshot_for(&installed.manifest().id().clone())
     }
 
@@ -160,6 +207,7 @@ impl ExtensionService {
         record.last_error = None;
         states.insert(manifest.id().clone(), record);
         self.store.write_state(&states)?;
+        self.refresh_ui_registry()?;
         self.snapshot_for(manifest.id())
     }
 
@@ -178,6 +226,7 @@ impl ExtensionService {
         }
         states.insert(id.clone(), record);
         self.store.write_state(&states)?;
+        self.refresh_ui_registry()?;
         self.snapshot_for(id)
     }
 
@@ -196,10 +245,19 @@ impl ExtensionService {
         }
         states.insert(id.clone(), record);
         self.store.write_state(&states)?;
+        self.refresh_ui_registry()?;
         self.snapshot_for(id)
     }
 
     pub(crate) async fn start(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
+        self.start_with_context(id, None).await
+    }
+
+    pub(crate) async fn start_with_context(
+        &self,
+        id: &ExtensionId,
+        app_context: Option<crate::core::AppContext>,
+    ) -> ExtensionResult<ExtensionSnapshot> {
         let _guard = self.operation_lock.lock().await;
         let states = self.store.read_state()?;
         let versions = self.versions_for(id)?;
@@ -213,15 +271,31 @@ impl ExtensionService {
             self.host_api.clone(),
             active.manifest(),
         )?;
-        let handle = self
+        let handle = match self
             .runtime
             .start(WasmStartRequest {
                 id: id.clone(),
                 version: active.manifest().version().clone(),
                 wasm: active.read_wasm()?,
                 host,
+                app_context,
             })
-            .await?;
+            .await
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                if matches!(&error, ExtensionError::Runtime(_)) {
+                    let mut failed_record = record.clone();
+                    failed_record.state = ExtensionState::Failed;
+                    failed_record.last_error = Some(error.to_string());
+                    let mut next = states;
+                    next.insert(id.clone(), failed_record);
+                    self.store.write_state(&next)?;
+                    self.refresh_ui_registry()?;
+                }
+                return Err(error);
+            }
+        };
 
         let mut running_record = record;
         running_record.state = ExtensionState::Running;
@@ -238,6 +312,7 @@ impl ExtensionService {
             .lock()
             .expect("extension running map poisoned")
             .insert(id.clone(), handle);
+        self.refresh_ui_registry()?;
         self.snapshot_for(id)
     }
 
@@ -267,6 +342,7 @@ impl ExtensionService {
             .lock()
             .expect("extension running map poisoned")
             .remove(id);
+        self.refresh_ui_registry()?;
         self.snapshot_for(id)
     }
 
@@ -311,6 +387,7 @@ impl ExtensionService {
             states.insert(id.clone(), next_record);
         }
         self.store.write_state(&states)?;
+        self.refresh_ui_registry()?;
         Ok(true)
     }
 
@@ -335,6 +412,34 @@ impl ExtensionService {
             .filter(|extension| extension.manifest().id() == id)
             .collect())
     }
+
+    fn refresh_ui_registry(&self) -> ExtensionResult<()> {
+        let installed = self.store.list_installed()?;
+        let states = self.store.read_state()?;
+        let mut by_id: BTreeMap<ExtensionId, Vec<InstalledExtension>> = BTreeMap::new();
+        for extension in installed {
+            by_id
+                .entry(extension.manifest().id().clone())
+                .or_default()
+                .push(extension);
+        }
+        self.ui.clear();
+        for (id, versions) in by_id {
+            let record = state_for_versions(&id, &versions, states.get(&id).cloned())?;
+            // A disabled or merely installed package must not remain visible
+            // to the dynamic panel registry. Stopping a running extension
+            // transitions back to Enabled, so its declarative UI remains
+            // available while its WASM entrypoint is not executing.
+            if matches!(
+                record.state,
+                ExtensionState::Enabled | ExtensionState::Running
+            ) {
+                self.ui
+                    .register(active_version(&versions, &record)?.manifest());
+            }
+        }
+        Ok(())
+    }
 }
 
 fn state_for_versions(
@@ -342,6 +447,9 @@ fn state_for_versions(
     versions: &[InstalledExtension],
     record: Option<ExtensionRecord>,
 ) -> ExtensionResult<ExtensionRecord> {
+    if versions.is_empty() {
+        return Err(ExtensionError::NotInstalled { id: id.to_string() });
+    }
     let fallback = versions
         .iter()
         .map(|extension| extension.manifest().version().clone())

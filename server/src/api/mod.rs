@@ -18,6 +18,7 @@ pub mod auth;
 mod common;
 mod devices;
 mod error;
+mod extensions;
 mod functions;
 pub(crate) mod gate;
 mod keymaps;
@@ -75,6 +76,8 @@ pub struct AppState {
     pub auth: Arc<auth::AuthState>,
     /// 更新子系统（SYS-004：状态聚合 + 动作受理 + 策略存储）
     pub update: Arc<crate::update::service::UpdateService>,
+    /// 已安装扩展与其 Host/UI 生命周期。
+    pub extensions: Arc<crate::extensions::ExtensionService>,
 }
 
 #[expect(
@@ -93,6 +96,34 @@ pub fn build_router(
     auth: Arc<auth::AuthState>,
     update: Arc<crate::update::service::UpdateService>,
 ) -> Router {
+    let capabilities =
+        crate::capabilities::adapters::build_registry(devices.clone(), scripts.clone(), db.clone());
+    let extensions = Arc::new(crate::extensions::ExtensionService::for_data_root(
+        cfg.data_dir.clone(),
+        capabilities,
+    ));
+    build_router_with_extensions(
+        db, devices, runs, scheduler, cfg, viewers, scripts, shutdown, auth, update, extensions,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "router assembly keeps existing call shape while injecting extensions"
+)]
+pub(crate) fn build_router_with_extensions(
+    db: Db,
+    devices: Arc<DeviceManager>,
+    runs: Arc<crate::run_manager::RunManager>,
+    scheduler: Arc<Scheduler>,
+    cfg: Config,
+    viewers: crate::webrtc::ViewerMap,
+    scripts: Arc<ScriptStore>,
+    shutdown: Arc<crate::shutdown::ShutdownCoordinator>,
+    auth: Arc<auth::AuthState>,
+    update: Arc<crate::update::service::UpdateService>,
+    extensions: Arc<crate::extensions::ExtensionService>,
+) -> Router {
     let metrics = db.metrics();
     let state = AppState {
         db,
@@ -107,6 +138,7 @@ pub fn build_router(
         shutdown,
         auth,
         update,
+        extensions,
     };
 
     // 视频静默看门狗 + 会话过期清扫
@@ -287,11 +319,62 @@ pub fn build_router(
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_ZIP_IMPORT));
 
+    // ---- 受保护的扩展包组：归档安装/更新与 UI iframe 静态资源。
+    // 生命周期接口留在普通 JSON 组以复用同一认证与错误语义。
+    let protected_extensions: Router<()> = Router::new()
+        .route(
+            "/api/extensions",
+            get(extensions::api_list_extensions).post(extensions::api_install_extension),
+        )
+        .route(
+            "/api/extensions/ui",
+            get(extensions::api_list_ui_contributions),
+        )
+        .route(
+            "/api/extensions/contributions",
+            get(extensions::api_list_ui_contributions),
+        )
+        .route(
+            "/api/extensions/:id/update",
+            post(extensions::api_update_extension),
+        )
+        .route(
+            "/api/extensions/:id/enable",
+            post(extensions::api_enable_extension),
+        )
+        .route(
+            "/api/extensions/:id/disable",
+            post(extensions::api_disable_extension),
+        )
+        .route(
+            "/api/extensions/:id/start",
+            post(extensions::api_start_extension),
+        )
+        .route(
+            "/api/extensions/:id/stop",
+            post(extensions::api_stop_extension),
+        )
+        .route(
+            "/api/extensions/:id/:version",
+            delete(extensions::api_uninstall_extension),
+        )
+        .route(
+            "/api/extensions/:id/ui/*path",
+            get(extensions::api_get_extension_ui_asset),
+        )
+        .with_state(state.clone())
+        .route_layer(axmw::from_fn_with_state(
+            state.auth.clone(),
+            auth::auth_guard,
+        ))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_ZIP_IMPORT));
+
     // 最外层注入来源 IP 键（登录限流用）；CORS 层已移除——vite dev proxy 同源转发不受影响
     Router::new()
         .merge(public)
         .merge(protected_json)
         .merge(protected_upload)
         .merge(protected_import)
+        .merge(protected_extensions)
         .layer(axmw::from_fn(auth::inject_ip_key))
 }

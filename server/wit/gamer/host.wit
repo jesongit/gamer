@@ -36,7 +36,7 @@ interface device {
 interface vision {
   use types.{device-handle, frame-handle, resource-handle, host-error};
   record point { x: u32, y: u32 }
-  record match-box { x: u32, y: u32, width: u32, height: u32, score: float32 }
+  record match-box { x: u32, y: u32, width: u32, height: u32, score: f32 }
   variant match-outcome { found(match-box), not-found }
   match-template: func(frame: frame-handle, template: resource-handle)
     -> result<match-outcome, host-error>;
@@ -58,7 +58,7 @@ interface input {
 /// Host API domain: touch.
 interface touch {
   use types.{device-handle, touch-handle, host-error};
-  record point { x: u32, y: u32, pressure: float32 }
+  record point { x: u32, y: u32, pressure: f32 }
   begin: func(device: device-handle, point: point) -> result<touch-handle, host-error>;
   move: func(touch: touch-handle, point: point) -> result<_, host-error>;
   end: func(touch: touch-handle) -> result<_, host-error>;
@@ -66,10 +66,10 @@ interface touch {
 
 /// Host API domain: resource. Resource names are logical identifiers, never
 /// paths supplied to the host filesystem.
-interface resource {
+interface resources {
   use types.{resource-handle, host-error};
   resolve: func(namespace: string, name: string) -> result<resource-handle, host-error>;
-  open: func(resource: resource-handle) -> result<u64, host-error>;
+  open: func(handle: resource-handle) -> result<u64, host-error>;
 }
 
 /// Host API domain: run.
@@ -94,13 +94,32 @@ interface log {
     -> result<_, host-error>;
 }
 
+/// The immutable application scope supplied to an extension invocation.
+interface context {
+  record app-context {
+    device-id: option<string>,
+    android-package: option<string>,
+    content-package: option<string>,
+  }
+  get: func() -> app-context;
+}
+
 world extension-host {
   import device;
   import vision;
   import input;
   import touch;
-  import resource;
+  import resources;
   import run;
   import runtime;
   import log;
+  import context;
+
+  /// The required extension entrypoint. The host invokes it after all imports
+  /// have been linked and the component has been instantiated.
+  export extension;
+}
+
+interface extension {
+  run: func();
 }

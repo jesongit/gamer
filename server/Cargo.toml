@@ -60,10 +60,10 @@ parking_lot = "0.12"
 bytes = "1"
 async-recursion = "1"
 
-# Optional and intentionally not enabled by default. The first adapter only
-# validates a module lazily; WIT host bindings and entrypoint execution are a
-# later phase.
-wasmtime = { version = "48", optional = true, default-features = false, features = ["cranelift", "runtime"] }
+# Optional and intentionally not enabled by default. When enabled, this is the
+# Component Model runtime for the checked-in WIT world; the Engine remains
+# lazy and is created only when an installed extension is started.
+wasmtime = { version = "48", optional = true, default-features = false, features = ["cranelift", "runtime", "async", "component-model"] }
 
 # 脚本包导出/导入（zip）
 zip = "2"
@@ -73,5 +73,6 @@ saphyr-parser = "0.0.12"
 
 [dev-dependencies]
 tempfile = "3"
+wat = "1"
 # router 集成测试用 oneshot 驱动（tower ServiceExt）
 tower = { version = "0.4", features = ["util"] }

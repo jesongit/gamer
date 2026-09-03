@@ -160,6 +160,10 @@ impl HostApi {
             HostApiDomain::Log => self.registry.log().is_some(),
         }
     }
+
+    pub(crate) fn registry(&self) -> &CapabilityRegistry {
+        &self.registry
+    }
 }
 
 /// Keep the public requirement type behind the manifest API while still

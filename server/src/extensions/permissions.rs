@@ -51,6 +51,8 @@ impl Permission {
                     || forbidden.starts_with("network.")
                     || forbidden == "shell"
                     || forbidden.starts_with("shell.")
+                    || forbidden == "device.shell"
+                    || forbidden.starts_with("device.shell.")
                     || forbidden == "process"
                     || forbidden.starts_with("process.") =>
             {

@@ -32,6 +32,8 @@ pub(crate) enum ExtensionError {
     NotInstalled { id: String },
     #[error("插件版本未安装: {id}@{version}")]
     VersionNotInstalled { id: String, version: String },
+    #[error("插件 UI 未注册: {id}")]
+    UiUnavailable { id: String },
     #[error("插件 {id} 的生命周期不允许执行 {operation}: 当前状态为 {state:?}")]
     InvalidTransition {
         id: String,

@@ -472,4 +472,7 @@ mod sec_tests {
     mod update {
         include!("tests/update.rs");
     }
+    mod extensions_tests {
+        include!("tests/extensions.rs");
+    }
 }

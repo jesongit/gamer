@@ -12,7 +12,7 @@ use crate::core::fs::atomic_write;
 use super::archive::{extract_archive, inspect_archive};
 use super::error::{ExtensionError, ExtensionResult};
 use super::manifest::{parse_manifest, ExtensionManifest, MANIFEST_FILE_NAME};
-use super::model::{ExtensionId, ExtensionRecord, ExtensionVersion};
+use super::model::{ExtensionId, ExtensionPath, ExtensionRecord, ExtensionVersion};
 
 #[derive(Clone, Debug)]
 pub(crate) struct InstalledExtension {
@@ -35,6 +35,17 @@ impl InstalledExtension {
 
     pub(crate) fn read_wasm(&self) -> ExtensionResult<Vec<u8>> {
         Ok(fs::read(self.wasm_path())?)
+    }
+
+    pub(crate) fn read_file(&self, path: &ExtensionPath) -> ExtensionResult<Vec<u8>> {
+        let full_path = self.root.join(path.as_str());
+        if !is_regular_file(&full_path)? {
+            return Err(ExtensionError::VersionNotInstalled {
+                id: self.manifest.id().to_string(),
+                version: self.manifest.version().to_string(),
+            });
+        }
+        Ok(fs::read(full_path)?)
     }
 }
 

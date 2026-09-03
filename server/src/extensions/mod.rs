@@ -1,9 +1,9 @@
 //! Phase 6 extension boundary.
 //!
-//! This module is deliberately not wired into REST, SQLite, the scheduler,
-//! YAML, keymaps, FrameCache, or WebRTC. It provides installable immutable
-//! package storage, explicit lifecycle transitions, a versioned Host API
-//! facade for eight host domains, and an opt-in/lazy WASM adapter seam.
+//! This module owns installable immutable package storage, lifecycle
+//! transitions, the versioned Host API facade, and opt-in/lazy WASM execution.
+//! REST injects the service through [`crate::api::AppState`]; it does not own
+//! extension bytes or lifecycle state.
 
 #![allow(
     dead_code,
@@ -23,6 +23,7 @@ mod model;
 mod permissions;
 mod service;
 mod store;
+mod ui;
 mod wasm;
 mod wit;
 
@@ -40,7 +41,8 @@ pub(crate) use keymap::{
 #[cfg(all(feature = "wasm-runtime", feature = "keymap-wasm-harness"))]
 pub(crate) use keymap::KeymapWasmHarness;
 pub(crate) use manifest::{
-    parse_manifest, ExtensionManifest, HostApiRequirements, MANIFEST_FILE_NAME, MANIFEST_VERSION,
+    parse_manifest, ExtensionManifest, HostApiRequirements, UiContribution, UiRuntime,
+    MANIFEST_FILE_NAME, MANIFEST_VERSION,
 };
 pub(crate) use model::{
     ExtensionId, ExtensionPath, ExtensionRecord, ExtensionState, ExtensionVersion,
@@ -48,6 +50,7 @@ pub(crate) use model::{
 pub(crate) use permissions::{Permission, PermissionSet};
 pub(crate) use service::{ExtensionService, ExtensionSnapshot};
 pub(crate) use store::{ExtensionStore, InstalledExtension};
+pub(crate) use ui::{RegisteredUiContribution, UiContributionRegistry};
 pub(crate) use wasm::{NoWasmRuntime, WasmInstanceHandle, WasmRuntime, WasmStartRequest};
 
 #[cfg(feature = "wasm-runtime")]
@@ -107,6 +110,23 @@ mod tests {
             writer.write_all(VALID_WASM).unwrap();
             writer.start_file(name, options).unwrap();
             writer.write_all(b"untrusted").unwrap();
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    fn archive_with_ui(manifest: &[u8], wasm: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            writer.start_file(MANIFEST_FILE_NAME, options).unwrap();
+            writer.write_all(manifest).unwrap();
+            writer.start_file("plugin.wasm", options).unwrap();
+            writer.write_all(wasm).unwrap();
+            writer.start_file("ui/index.html", options).unwrap();
+            writer.write_all(b"<!doctype html>").unwrap();
             writer.finish().unwrap();
         }
         bytes
@@ -176,6 +196,7 @@ mod tests {
             "filesystem.read",
             "network.connect",
             "shell.execute",
+            "device.shell",
             "process.spawn",
         ] {
             assert!(matches!(
@@ -337,18 +358,59 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn ui_contributions_appear_after_install_and_are_removed_after_uninstall() {
+        let temp = TempDir::new().unwrap();
+        let service = ExtensionService::with_default_runtime(
+            ExtensionStore::new(temp.path()),
+            CapabilityRegistry::default(),
+        );
+        let manifest = format!(
+            "{}[ui]\n[[ui.contributions]]\npanel_id = \"hello\"\ntitle = \"Hello\"\nruntime = \"iframe\"\nentry = \"ui/index.html\"\n",
+            String::from_utf8(manifest("com.example.extension", "1.0.0", &[], "^1.0")).unwrap()
+        );
+        let installed = service
+            .install(&archive_with_ui(manifest.as_bytes(), VALID_WASM))
+            .await
+            .unwrap();
+        assert!(service.ui_contributions().unwrap().is_empty());
+        service.enable(installed.id()).await.unwrap();
+        let contributions = service.ui_contributions().unwrap();
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(contributions[0].panel_id, "hello");
+        assert_eq!(contributions[0].version.as_str(), "1.0.0");
+
+        let path = ExtensionPath::parse("ui/index.html").unwrap();
+        assert_eq!(
+            service.read_ui_file(installed.id(), &path).unwrap().0,
+            b"<!doctype html>"
+        );
+        service.disable(installed.id()).await.unwrap();
+        assert!(service.ui_contributions().unwrap().is_empty());
+        assert!(service
+            .uninstall(installed.id(), installed.active_version())
+            .await
+            .unwrap());
+        assert!(service.ui_contributions().unwrap().is_empty());
+    }
+
     #[test]
     fn wit_contract_contains_every_versioned_domain() {
         assert_eq!(wit::WIT_PACKAGE_VERSION, HOST_API_VERSION);
         for domain in HostApiDomain::ALL {
-            assert!(wit::WIT_PACKAGE.contains(&format!("interface {}", domain.as_str())));
+            let wit_name = if domain == HostApiDomain::Resource {
+                "resources"
+            } else {
+                domain.as_str()
+            };
+            assert!(wit::WIT_PACKAGE.contains(&format!("interface {wit_name}")));
         }
         assert!(wit::WIT_PACKAGE.contains("world extension-host"));
     }
 
     #[cfg(feature = "wasm-runtime")]
     #[test]
-    fn optional_wasmtime_adapter_is_lazy_and_does_not_execute_wasm() {
+    fn optional_wasmtime_adapter_is_lazy_and_does_not_initialize_without_a_start() {
         let runtime = LazyWasmtimeRuntime::new();
         assert!(!runtime.is_initialized());
         assert!(runtime.is_available());
@@ -361,5 +423,33 @@ mod tests {
         );
         assert!(service.list().unwrap().is_empty());
         assert!(!lazy.is_initialized());
+    }
+
+    #[cfg(feature = "wasm-runtime")]
+    #[tokio::test]
+    async fn wasmtime_component_runtime_rejects_a_core_module_as_a_component() {
+        let runtime = LazyWasmtimeRuntime::new();
+        let manifest =
+            parse_manifest(&manifest("com.example.extension", "1.0.0", &[], "^1.0")).unwrap();
+        let host = HostApi::for_manifest(
+            CapabilityRegistry::default(),
+            HostApiCatalog::default(),
+            &manifest,
+        )
+        .unwrap();
+        let error = runtime
+            .start(WasmStartRequest {
+                id: manifest.id().clone(),
+                version: manifest.version().clone(),
+                wasm: VALID_WASM.to_vec(),
+                host,
+                app_context: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ExtensionError::Runtime(message) if message.contains("组件编译失败"))
+        );
+        assert!(runtime.is_initialized());
     }
 }
