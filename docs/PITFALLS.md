@@ -157,3 +157,4 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **多个 Phase 骨架以未提交状态同时存在时，cargo check/test 会先被前置模块的类型错误拦截**：本次工作树命中 Store oneshot、API 借用和 App Package 导出错误，模型层验收应先隔离工作树或合并前置改动。
 - **`web/package.json` 未提供 `lint` 脚本时直接运行 `pnpm lint` 会落到 PATH 中的 Android lint 并返回 usage**：本轮前端门禁以现有 `pnpm build`/`pnpm test:run` 为准，需另行引入 linter 才执行 JS lint。
 - **Timer Core schema 升级后旧 `tasks` 表仍是 YAML 兼容 API 的入口**：迁移会回填 `timer_tasks`，后续旧任务写入必须走 Store 双写，直接操作单表会让调度状态与 REST 数据分叉。
+- **Phase 7 的 keymap WASM harness 只能校验模块 ABI**：真实 invoke 仍因 Phase 6 WIT Host 未接线而明确失败，Host、权限和 iframe Bridge 验收完成前不得宣称 Gate B 通过。
