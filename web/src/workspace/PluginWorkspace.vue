@@ -1,6 +1,11 @@
 <template>
   <div class="plugin-workspace">
-    <WorkspaceTabs :panels="panels" :active-panel="selected?.key || ''" @select="selectPanel" />
+    <WorkspaceTabs
+      :panels="panels"
+      :active-panel="selected?.key || ''"
+      @select="selectPanel"
+      @open-plugin-center="centerOpen = true"
+    />
     <div class="workspace-panel-slot">
       <template v-if="selected">
         <KeepAlive v-if="selected.keepAlive === 'session'">
@@ -32,14 +37,16 @@
       </template>
       <div v-else class="workspace-empty">没有可用面板</div>
     </div>
+    <PluginCenter :open="centerOpen" @close="centerOpen = false" @changed="emit('extensions-changed')" />
   </div>
 </template>
 
 <script setup>
-import { computed, onUnmounted, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import WorkspaceTabs from './WorkspaceTabs.vue'
 import CorePanelHost from './CorePanelHost.vue'
 import PluginPanelHost from './PluginPanelHost.vue'
+import PluginCenter from './plugin-center/PluginCenter.vue'
 import { createWorkspaceLifecycle } from './lifecycle'
 
 const props = defineProps({
@@ -48,13 +55,14 @@ const props = defineProps({
   context: { type: Object, default: () => ({}) },
   lifecycle: { type: Object, default: null },
 })
-const emit = defineEmits(['select', 'fallback'])
+const emit = defineEmits(['select', 'fallback', 'extensions-changed'])
 
 const lifecycle = props.lifecycle || createWorkspaceLifecycle()
 const panels = computed(() => props.registry.getPanels())
 const selected = computed(() => props.registry.resolve(props.activePanel) || props.registry.defaultPanel())
 const coreContext = computed(() => props.context.core || {})
 const uiBridge = computed(() => props.context.uiBridge || props.context.bridge)
+const centerOpen = ref(false)
 
 function selectPanel(key) { emit('select', key) }
 

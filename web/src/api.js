@@ -131,6 +131,39 @@ export const api = {
   // 扩展生命周期与动态 UI contribution
   listExtensions: () => req('GET', '/api/extensions'),
   listExtensionUi: () => req('GET', '/api/extensions/ui'),
+  // Phase 10 插件管理：归档始终以 application/zip 上传，服务端先 inspect
+  // 再由 UI 做来源/签名/权限确认；URL 不会作为 iframe 来源传入。
+  getExtensionManagement: () => req('GET', '/api/extensions/management'),
+  inspectExtension: async (file) => {
+    const r = await response(
+      'POST', '/api/extensions/inspect', file,
+      { rawBody: true, headers: { 'Content-Type': 'application/zip' } },
+    )
+    return readResult(r)
+  },
+  installExtension: async (file) => {
+    const r = await response(
+      'POST', '/api/extensions', file,
+      { rawBody: true, headers: { 'Content-Type': 'application/zip' } },
+    )
+    return readResult(r)
+  },
+  updateExtension: async (id, file) => {
+    const pluginId = requireId(id, 'extension_id')
+    const r = await response(
+      'POST', `/api/extensions/${encodeURIComponent(pluginId)}/update`, file,
+      { rawBody: true, headers: { 'Content-Type': 'application/zip' } },
+    )
+    return readResult(r)
+  },
+  enableExtension: (id) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/enable`, {}),
+  disableExtension: (id) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/disable`, {}),
+  startExtension: (id, app_context) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/start`, app_context ? { app_context } : {}),
+  stopExtension: (id) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/stop`, {}),
+  uninstallExtension: (id, version, { deleteData = false } = {}) => req(
+    'DELETE',
+    `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/${encodeURIComponent(requireId(version, 'extension_version'))}?delete_data=${deleteData ? '1' : '0'}`,
+  ),
 
   // 设备
   listDevices: () => req('GET', '/api/devices'),

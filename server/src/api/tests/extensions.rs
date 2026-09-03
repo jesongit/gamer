@@ -29,6 +29,30 @@ entry = "ui/index.html"
         ("ui/index.html", b"<h1>hello</h1>".to_vec()),
     ]);
 
+    let inspected = send(
+        &test_app.app,
+        req_bytes(
+            "POST",
+            "/api/extensions/inspect",
+            None,
+            &zip_headers(session.clone()),
+            archive.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(inspected.status(), StatusCode::OK);
+    let inspected_json = json_body(inspected).await;
+    assert_eq!(inspected_json["id"], "com.example.extension");
+    assert_eq!(inspected_json["version"], "1.0.0");
+    assert_eq!(inspected_json["signature"]["status"], "unknown");
+    assert_eq!(inspected_json["permission_diff"]["added"], serde_json::json!([]));
+
+    let management = get_json(&test_app, &session, "/api/extensions/management").await;
+    assert_eq!(management.status(), StatusCode::OK);
+    let management_json = json_body(management).await;
+    assert_eq!(management_json["schema_version"], 1);
+    assert!(management_json["extensions"].as_array().unwrap().is_empty());
+
     let installed = send(
         &test_app.app,
         req_bytes(
@@ -117,11 +141,17 @@ entry = "ui/index.html"
     )
     .await;
     assert_eq!(disabled.status(), StatusCode::OK);
+    std::fs::create_dir_all(test_app.dir.join("extension-data/com.example.extension")).unwrap();
+    std::fs::write(
+        test_app.dir.join("extension-data/com.example.extension/preferences.json"),
+        b"keep-until-confirmed",
+    )
+    .unwrap();
     let removed = send(
         &test_app.app,
         req(
             "DELETE",
-            "/api/extensions/com.example.extension/1.0.0",
+            "/api/extensions/com.example.extension/1.0.0?delete_data=1",
             None,
             &json_headers(session),
             None,
@@ -132,5 +162,9 @@ entry = "ui/index.html"
     assert!(!test_app
         .dir
         .join("extensions/com.example.extension")
+        .exists());
+    assert!(!test_app
+        .dir
+        .join("extension-data/com.example.extension")
         .exists());
 }

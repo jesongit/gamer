@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::capabilities::CapabilityRegistry;
@@ -29,6 +30,25 @@ pub(crate) struct ExtensionSnapshot {
     installed_versions: Vec<ExtensionVersion>,
     state: ExtensionState,
     last_error: Option<String>,
+}
+
+/// Management-only result for the pre-install inspection step. Keeping this
+/// separate from lifecycle snapshots lets REST validate an archive and show a
+/// permission diff before any bytes are staged.
+#[derive(Clone, Debug)]
+pub(crate) struct ExtensionInspection {
+    manifest: ExtensionManifest,
+    archive_sha256: String,
+}
+
+impl ExtensionInspection {
+    pub(crate) fn manifest(&self) -> &ExtensionManifest {
+        &self.manifest
+    }
+
+    pub(crate) fn archive_sha256(&self) -> &str {
+        &self.archive_sha256
+    }
 }
 
 impl ExtensionSnapshot {
@@ -154,6 +174,17 @@ impl ExtensionService {
 
     pub(crate) fn store(&self) -> &ExtensionStore {
         &self.store
+    }
+
+    /// Validate an archive without staging it. The management UI uses this
+    /// as the confirmation boundary for source, signature, and permissions.
+    pub(crate) fn inspect(&self, archive: &[u8]) -> ExtensionResult<ExtensionInspection> {
+        let manifest = self.inspect_compatible(archive)?;
+        let archive_sha256 = format!("{:x}", Sha256::digest(archive));
+        Ok(ExtensionInspection {
+            manifest,
+            archive_sha256,
+        })
     }
 
     pub(crate) fn ui_contributions(&self) -> ExtensionResult<Vec<RegisteredUiContribution>> {

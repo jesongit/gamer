@@ -14,6 +14,15 @@
       <span v-if="panel.icon" class="workspace-tab-icon" aria-hidden="true">{{ panel.icon }}</span>
       <span>{{ panel.title }}</span>
     </button>
+    <button
+      type="button"
+      class="workspace-tab workspace-tab-add"
+      title="打开插件中心"
+      aria-label="打开插件中心"
+      @click="$emit('open-plugin-center')"
+    >
+      <span aria-hidden="true">＋</span>
+    </button>
   </nav>
 </template>
 
@@ -22,7 +31,7 @@ defineProps({
   panels: { type: Array, default: () => [] },
   activePanel: { type: String, default: '' },
 })
-defineEmits(['select'])
+defineEmits(['select', 'open-plugin-center'])
 </script>
 
 <style scoped>
@@ -32,4 +41,6 @@ defineEmits(['select'])
 .workspace-tab:hover { color:var(--text-0); background:var(--bg-3); }
 .workspace-tab.active { color:var(--accent); background:rgba(34,211,165,.14); font-weight:600; }
 .workspace-tab-icon { margin-right:2px; }
+.workspace-tab-add { flex:0 0 34px; color:var(--accent-2); font-size:17px; font-weight:600; }
+.workspace-tab-add:hover { color:var(--text-0); background:rgba(56,189,248,.12); }
 </style>

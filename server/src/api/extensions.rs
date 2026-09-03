@@ -5,7 +5,7 @@
 //! the in-process UI registry after every mutation.
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -102,6 +102,7 @@ pub(super) async fn api_stop_extension(
 pub(super) async fn api_uninstall_extension(
     State(st): State<AppState>,
     Path((id, version)): Path<(String, String)>,
+    Query(query): Query<UninstallQuery>,
 ) -> Response {
     let id = match ExtensionId::parse(&id) {
         Ok(id) => id,
@@ -111,11 +112,47 @@ pub(super) async fn api_uninstall_extension(
         Ok(version) => version,
         Err(error) => return extension_error(error),
     };
+    let delete_data = query
+        .delete_data
+        .as_deref()
+        .is_some_and(|value| matches!(value, "1" | "true" | "yes"));
     match st.extensions.uninstall(&id, &version).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            // WASM user data is deliberately outside immutable plugin
+            // versions. The management flag deletes only this exact,
+            // validated plugin-owned directory; the default keeps it.
+            if delete_data {
+                let data_root = st
+                    .extensions
+                    .store()
+                    .data_root()
+                    .join("extension-data")
+                    .join(id.as_str());
+                match std::fs::symlink_metadata(&data_root) {
+                    Ok(metadata) if metadata.is_dir() => {
+                        if let Err(error) = std::fs::remove_dir_all(&data_root) {
+                            return ApiError::internal(format!(
+                                "插件已卸载，但用户数据删除失败: {error}"
+                            ))
+                            .into_response();
+                        }
+                    }
+                    Ok(_) => return ApiError::internal("插件用户数据路径不是目录").into_response(),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return ApiError::internal(error.to_string()).into_response(),
+                }
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => ApiError::not_found("插件版本不存在").into_response(),
         Err(error) => extension_error(error),
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct UninstallQuery {
+    #[serde(default)]
+    delete_data: Option<String>,
 }
 
 pub(super) async fn api_get_extension_ui_asset(

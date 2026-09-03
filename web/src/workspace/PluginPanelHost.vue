@@ -1,7 +1,7 @@
 <template>
   <div class="plugin-panel-host panel-sec">
     <iframe
-      v-if="contribution.runtime === 'iframe'"
+      v-if="contribution.runtime === 'iframe' && !remoteUiBlocked"
       ref="iframeEl"
       class="plugin-panel-frame"
       :src="iframeSrc"
@@ -10,6 +10,10 @@
       :title="contribution.iframe?.title || contribution.title"
       @load="connect"
     ></iframe>
+    <div v-else-if="contribution.runtime === 'iframe' && remoteUiBlocked" class="declarative-panel-placeholder plugin-remote-blocked" role="alert">
+      <div class="workspace-empty-title">已阻止远程插件界面</div>
+      <div>插件界面必须来自已安装的本地归档。</div>
+    </div>
     <div v-else class="declarative-panel-placeholder">
       <div class="workspace-empty-title">{{ contribution.title }}</div>
       <div>Declarative 插件面板 Host 预留中。</div>
@@ -39,6 +43,7 @@ let channel = null
 let port = null
 
 const iframeSrc = computed(() => props.contribution.iframe?.src || iframePocUrl)
+const remoteUiBlocked = computed(() => /^https?:\/\//i.test(String(props.contribution.iframe?.src || '')))
 
 function disconnect() {
   if (port) {

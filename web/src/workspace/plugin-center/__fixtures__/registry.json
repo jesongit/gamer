@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "host_api": "1.0.0",
+  "plugins": [
+    {
+      "id": "vision.template-match",
+      "version": "1.2.0",
+      "name": "模板匹配",
+      "description": "为当前 App Package 提供模板匹配能力。",
+      "publisher": "Gamer Official",
+      "download_url": "https://registry.gamer.example/plugins/vision.template-match/1.2.0.gplugin",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "signature": { "status": "valid", "key_id": "gamer-official-1", "algorithm": "ed25519" },
+      "permissions": ["device.read", "vision.match", "resource.read"],
+      "dependencies": [],
+      "app_packages": ["official.xxx@1"]
+    }
+  ]
+}

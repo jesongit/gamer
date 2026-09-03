@@ -19,6 +19,7 @@ mod common;
 mod devices;
 mod error;
 mod extensions;
+mod extensions_management;
 mod functions;
 pub(crate) mod gate;
 mod keymaps;
@@ -380,6 +381,14 @@ pub(crate) fn build_router_with_extensions(
     // ---- 受保护的扩展包组：归档安装/更新与 UI iframe 静态资源。
     // 生命周期接口留在普通 JSON 组以复用同一认证与错误语义。
     let protected_extensions: Router<()> = Router::new()
+        .route(
+            "/api/extensions/management",
+            get(extensions_management::api_extension_management),
+        )
+        .route(
+            "/api/extensions/inspect",
+            post(extensions_management::api_inspect_extension),
+        )
         .route(
             "/api/extensions",
             get(extensions::api_list_extensions).post(extensions::api_install_extension),

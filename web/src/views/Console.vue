@@ -147,6 +147,7 @@
         :lifecycle="workspaceLifecycle"
         @select="openPanel"
         @fallback="fallbackPanel"
+        @extensions-changed="refreshServerExtensions"
       />
       <!-- CorePanelHost now mounts these registry contributions. Kept in this
            migration comment to document the old contracts for maintainers:
