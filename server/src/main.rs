@@ -266,6 +266,7 @@ struct RuntimeServices {
     devices: Arc<device::DeviceManager>,
     runs: Arc<run_manager::RunManager>,
     scheduler: Arc<scheduler::Scheduler>,
+    extensions: Arc<extensions::ExtensionService>,
 }
 
 impl RuntimeServices {
@@ -280,7 +281,7 @@ impl RuntimeServices {
         auth: Arc<api::auth::AuthState>,
         update: Arc<update::service::UpdateService>,
     ) -> axum::Router {
-        api::build_router(
+        api::build_router_with_extensions(
             db,
             self.devices.clone(),
             self.runs.clone(),
@@ -291,6 +292,7 @@ impl RuntimeServices {
             shutdown,
             auth,
             update,
+            self.extensions.clone(),
         )
     }
 }
@@ -324,12 +326,23 @@ impl RuntimeServices {
             scripts.clone(),
             runs.clone(),
         ));
+        let capabilities = capabilities::adapters::build_registry(
+            devices.clone(),
+            scripts.clone(),
+            db.clone(),
+            runs.clone(),
+        );
+        let extensions = Arc::new(extensions::ExtensionService::for_data_root(
+            cfg.data_dir.clone(),
+            capabilities,
+        ));
         let ctx = Self {
             scripts,
             viewers,
             devices,
             runs,
             scheduler,
+            extensions,
         };
         // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
         // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。

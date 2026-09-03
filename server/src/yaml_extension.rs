@@ -196,7 +196,7 @@ impl NativeYamlHost {
         let device = device_service
             .resolve(&DeviceId::new(context.device_id.as_str()))
             .await
-            .map_err(|error| anyhow!(error.to_string()))?;
+            .map_err(anyhow::Error::new)?;
         Ok(Self {
             host,
             registry,
@@ -244,9 +244,7 @@ impl NativeYamlHost {
             "log.write" => Permission::LogWrite,
             other => bail!("未知 capability: {other}"),
         };
-        self.host
-            .authorize(permission)
-            .map_err(|error| anyhow!(error.to_string()))
+        self.host.authorize(permission).map_err(anyhow::Error::new)
     }
 
     fn args_map(args: Value) -> Result<BTreeMap<String, Value>> {
@@ -301,7 +299,7 @@ impl NativeYamlHost {
     async fn template(&self, value: &Value) -> Result<crate::capabilities::ResourceHandle> {
         self.host
             .authorize(Permission::ResourceRead)
-            .map_err(|error| anyhow!(error.to_string()))?;
+            .map_err(anyhow::Error::new)?;
         let name = Self::resource_name(value)?;
         let package = self
             .context
@@ -317,7 +315,7 @@ impl NativeYamlHost {
                 format!("tmpl/{name}"),
             ))
             .await
-            .map_err(|error| anyhow!(error.to_string()))?;
+            .map_err(anyhow::Error::new)?;
         Ok(resource)
     }
 
@@ -327,7 +325,7 @@ impl NativeYamlHost {
             .ok_or_else(|| anyhow!("frame capability 未注册"))?
             .capture(&self.device)
             .await
-            .map_err(|error| anyhow!(error.to_string()))
+            .map_err(anyhow::Error::new)
     }
 
     fn match_value(outcome: MatchOutcome) -> Value {
@@ -385,7 +383,7 @@ impl CapabilityInvoker for NativeYamlHost {
                         &AppId::new(format!("+{}", self.package(&args)?)),
                     )
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 Ok(Value::Null)
             }
             "app.stop" | "device.stop_app" => {
@@ -394,7 +392,7 @@ impl CapabilityInvoker for NativeYamlHost {
                     .ok_or_else(|| anyhow!("device capability 未注册"))?
                     .stop_app(&self.device, &AppId::new(self.package(&args)?))
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 Ok(Value::Null)
             }
             "input.tap" => {
@@ -405,7 +403,7 @@ impl CapabilityInvoker for NativeYamlHost {
                     .ok_or_else(|| anyhow!("input capability 未注册"))?
                     .tap(&self.device, point)
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 Ok(Value::Null)
             }
             "input.swipe" => {
@@ -422,7 +420,7 @@ impl CapabilityInvoker for NativeYamlHost {
                         SwipeGesture::new(from, to, Duration::from_millis(duration)),
                     )
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 Ok(Value::Null)
             }
             "input.key" => {
@@ -443,7 +441,7 @@ impl CapabilityInvoker for NativeYamlHost {
                     .ok_or_else(|| anyhow!("input capability 未注册"))?
                     .key(&self.device, KeyInput::new(KeyCode::new(code), action))
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 Ok(Value::Null)
             }
             "input.text" => {
@@ -455,7 +453,7 @@ impl CapabilityInvoker for NativeYamlHost {
                     .ok_or_else(|| anyhow!("input capability 未注册"))?
                     .text(&self.device, TextInput::new(value))
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 Ok(Value::Null)
             }
             "runtime.sleep" => {
@@ -465,7 +463,7 @@ impl CapabilityInvoker for NativeYamlHost {
                 self.runtime
                     .sleep(Duration::from_millis(duration.min(3_600_000)))
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 Ok(Value::Null)
             }
             "frame.capture" => Ok(Value::Handle {
@@ -481,7 +479,7 @@ impl CapabilityInvoker for NativeYamlHost {
                     .ok_or_else(|| anyhow!("vision capability 未注册"))?
                     .match_template(frame, TemplateQuery::new(template, MatchOptions::default()))
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 Ok(Self::match_value(outcome))
             }
             "vision.match_many" => {
@@ -502,7 +500,7 @@ impl CapabilityInvoker for NativeYamlHost {
                     .ok_or_else(|| anyhow!("vision capability 未注册"))?
                     .match_many(&request)
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 let matches = results
                     .into_iter()
                     .map(|result| Self::match_value(result.outcome))
@@ -523,7 +521,7 @@ impl CapabilityInvoker for NativeYamlHost {
                     .ok_or_else(|| anyhow!("vision capability 未注册"))?
                     .sample_color(frame, point)
                     .await
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 Ok(Self::color_value(color.red, color.green, color.blue))
             }
             "log.write" => {
@@ -546,7 +544,7 @@ impl CapabilityInvoker for NativeYamlHost {
                     .log()
                     .ok_or_else(|| anyhow!("log capability 未注册"))?
                     .write(LogRecord::new(level, message))
-                    .map_err(|error| anyhow!(error.to_string()))?;
+                    .map_err(anyhow::Error::new)?;
                 Ok(Value::Null)
             }
             other => bail!("未知 capability: {other}"),
@@ -1119,8 +1117,8 @@ mod wasm_tests {
     use crate::yaml_vnext::load;
     use async_trait::async_trait;
     use std::fs;
-    use std::path::PathBuf;
-    use std::process::Command;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
     use std::sync::{Arc, Mutex, OnceLock};
 
     #[derive(Default)]
@@ -1175,55 +1173,170 @@ mod wasm_tests {
         }
     }
 
-    fn fixture_component() -> Vec<u8> {
-        static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-        COMPONENT
+    fn fixture_guest_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("yaml-guest")
+    }
+
+    fn fixture_target_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("yaml-guest")
+    }
+
+    fn fixture_module_path() -> PathBuf {
+        fixture_target_dir()
+            .join("wasm32-unknown-unknown")
+            .join("release")
+            .join("gamer_yaml_fixture.wasm")
+    }
+
+    fn run_fixture_cargo(args: &[String]) -> Output {
+        let (subcommand, rest) = args
+            .split_first()
+            .expect("yaml guest cargo 子进程缺少 subcommand");
+        let guest_dir = fixture_guest_dir();
+        let target_dir = fixture_target_dir();
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let mut command = Command::new(cargo);
+        command
+            .current_dir(&guest_dir)
+            .arg(subcommand)
+            .arg("--manifest-path")
+            .arg(guest_dir.join("Cargo.toml"))
+            // Do not inherit the server's target directory. In particular,
+            // CARGO_TARGET_DIR is often set by CI and must not redirect the
+            // nested wasm build into the host test's files.
+            .arg("--target-dir")
+            .arg(&target_dir);
+        for arg in rest {
+            command.arg(arg);
+        }
+        command.output().unwrap_or_else(|error| {
+            panic!(
+                "无法启动 yaml guest cargo 子进程: {error}; guest_dir={}; target_dir={}",
+                guest_dir.display(),
+                target_dir.display()
+            )
+        })
+    }
+
+    fn assert_fixture_command(output: Output, stage: &str) {
+        if output.status.success() {
+            return;
+        }
+        panic!(
+            "yaml guest {stage} 失败: status={:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn fixture_module() -> Vec<u8> {
+        static MODULE: OnceLock<Vec<u8>> = OnceLock::new();
+        MODULE
             .get_or_init(|| {
-                let server_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-                let guest_dir = server_dir.join("tests").join("yaml-guest");
-                let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-                let status = Command::new(cargo)
-                    .current_dir(&guest_dir)
-                    .args([
-                        "build",
-                        "--quiet",
-                        "--release",
-                        "--target",
-                        "wasm32-unknown-unknown",
-                    ])
-                    .status()
-                    .expect("无法构建 yaml guest fixture");
-                assert!(status.success(), "yaml guest fixture 构建失败");
-                let module = fs::read(
-                    guest_dir
-                        .join("target")
-                        .join("wasm32-unknown-unknown")
-                        .join("release")
-                        .join("gamer_yaml_fixture.wasm"),
-                )
-                .expect("yaml guest fixture wasm 不存在");
-                wit_component::ComponentEncoder::default()
-                    .module(&module)
-                    .expect("yaml guest module 不是合法 WIT module")
-                    .validate(true)
-                    .encode()
-                    .expect("yaml guest module 无法 componentize")
+                let output = run_fixture_cargo(&[
+                    "build".into(),
+                    "--locked".into(),
+                    "--quiet".into(),
+                    "--release".into(),
+                    "--lib".into(),
+                    "--target".into(),
+                    "wasm32-unknown-unknown".into(),
+                ]);
+                assert_fixture_command(output, "guest wasm 构建");
+                let path = fixture_module_path();
+                fs::read(&path).unwrap_or_else(|error| {
+                    panic!("yaml guest wasm 不存在: {}: {error}", path.display())
+                })
             })
             .clone()
     }
 
-    fn host(trace: Arc<Trace>) -> HostApi {
+    fn componentize_fixture(output_path: &Path) -> Vec<u8> {
+        let module_path = fixture_module_path();
+        let output = run_fixture_cargo(&[
+            "run".into(),
+            "--locked".into(),
+            "--quiet".into(),
+            "--release".into(),
+            "--bin".into(),
+            "componentize".into(),
+            "--".into(),
+            module_path.to_string_lossy().into_owned(),
+            output_path.to_string_lossy().into_owned(),
+        ]);
+        assert_fixture_command(output, "WIT Component 封装");
+        fs::read(output_path).unwrap_or_else(|error| {
+            panic!(
+                "yaml guest Component 输出不存在: {}: {error}",
+                output_path.display()
+            )
+        })
+    }
+
+    fn fixture_component() -> Vec<u8> {
+        static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+        COMPONENT
+            .get_or_init(|| {
+                fixture_module();
+                let temp = tempfile::tempdir().expect("无法创建 YAML Component 临时目录");
+                componentize_fixture(&temp.path().join("yaml-guest.component.wasm"))
+            })
+            .clone()
+    }
+
+    #[test]
+    fn yaml_guest_fixture_builds_wasm_module() {
+        let module = fixture_module();
+        assert!(module.len() >= 8, "guest wasm 太短");
+        assert_eq!(&module[..4], b"\0asm");
+        assert_eq!(&module[4..8], [1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn yaml_guest_fixture_componentizes_with_checked_in_wit() {
+        let component = fixture_component();
+        assert!(component.len() >= 8, "YAML Component 太短");
+        assert_eq!(&component[..4], b"\0asm");
+        assert_eq!(&component[4..8], [13, 0, 1, 0]);
+    }
+
+    #[test]
+    fn yaml_componentizer_releases_output_file_before_returning() {
+        fixture_module();
+        let temp = tempfile::tempdir().expect("无法创建 YAML Component 生命周期临时目录");
+        let output = temp.path().join("yaml-guest.component.wasm");
+        componentize_fixture(&output);
+        let moved = temp.path().join("yaml-guest.component.moved.wasm");
+        fs::rename(&output, &moved).expect("Componentizer 返回后输出文件仍被占用");
+        fs::remove_file(&moved).expect("无法删除已关闭的 Component 输出文件");
+    }
+
+    fn host_with_permissions(trace: Arc<Trace>, permissions: &[&str]) -> HostApi {
+        let permissions = permissions
+            .iter()
+            .map(|permission| format!("\"{permission}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         let manifest = crate::extensions::parse_manifest(
-            br#"manifest_version = 1
+            format!(
+                r#"manifest_version = 1
 id = "gamer.yaml"
 version = "3.0.0"
 name = "YAML vNext"
 entry = "plugin.wasm"
-permissions = ["device.read", "input.text"]
+permissions = [{permissions}]
 [host_api]
 device = "^1.0"
 input = "^1.0"
-"#,
+runtime = "^1.0"
+"#
+            )
+            .as_bytes(),
         )
         .unwrap();
         HostApi::for_manifest(
@@ -1235,6 +1348,10 @@ input = "^1.0"
             &manifest,
         )
         .unwrap()
+    }
+
+    fn host(trace: Arc<Trace>) -> HostApi {
+        host_with_permissions(trace, &["device.read", "input.text"])
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1260,5 +1377,73 @@ input = "^1.0"
         assert_eq!(result.value, Value::String("from-call".into()));
         assert_eq!(trace.text.lock().unwrap().as_slice(), ["from-real-wasm"]);
         assert!(runtime.is_available());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_sync_wit_call_is_safe_on_multithread_tokio() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let program = load(
+            "version: 3\nsteps:\n  - invoke:\n      capability: device.resolve\n      with:\n        id: device-1\n  - return: from-multithread\n",
+        )
+        .unwrap();
+        let result = runtime
+            .run(YamlWasmRunRequest {
+                wasm: fixture_component(),
+                program,
+                args: BTreeMap::new(),
+                resolver: None,
+                host: host_with_permissions(Arc::new(Trace::default()), &["device.read"]),
+                context: AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+                stop: Arc::new(AtomicBool::new(false)),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.value, Value::String("from-multithread".into()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn yaml_component_preserves_permission_and_cancellation_kinds() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let denied_program = load("version: 3\nsteps:\n  - text: denied\n").unwrap();
+        let denied = runtime
+            .run(YamlWasmRunRequest {
+                wasm: fixture_component(),
+                program: denied_program,
+                args: BTreeMap::new(),
+                resolver: None,
+                host: host_with_permissions(Arc::new(Trace::default()), &["device.read"]),
+                context: AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+                stop: Arc::new(AtomicBool::new(false)),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            denied.to_string().contains("kind=denied"),
+            "permission denial lost its WIT kind: {denied:#}"
+        );
+
+        let cancelled_program = load(
+        "version: 3\nsteps:\n  - invoke:\n      capability: runtime.sleep\n      with:\n        duration: 1000\n",
+        )
+        .unwrap();
+        let cancelled = runtime
+            .run(YamlWasmRunRequest {
+                wasm: fixture_component(),
+                program: cancelled_program,
+                args: BTreeMap::new(),
+                resolver: None,
+                host: host_with_permissions(
+                    Arc::new(Trace::default()),
+                    &["device.read", "runtime.sleep"],
+                ),
+                context: AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+                stop: Arc::new(AtomicBool::new(true)),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            cancelled.to_string().contains("kind=cancelled"),
+            "cancellation lost its WIT kind: {cancelled:#}"
+        );
     }
 }

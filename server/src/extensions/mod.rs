@@ -51,7 +51,13 @@ pub(crate) use model::{
     ExtensionId, ExtensionPath, ExtensionRecord, ExtensionState, ExtensionVersion,
 };
 pub(crate) use permissions::{Permission, PermissionSet};
-pub(crate) use service::{ExtensionInspection, ExtensionService, ExtensionSnapshot};
+pub(crate) use service::{
+    ExtensionInspection, ExtensionInstallContext, ExtensionService, ExtensionSnapshot,
+    PermissionDiff,
+};
+pub(crate) use signature::{
+    RegistryProof, SignatureInfo, SignatureStatus, SignatureVerifier, TrustStore,
+};
 pub(crate) use store::{ExtensionStore, InstalledExtension};
 pub(crate) use ui::{RegisteredUiContribution, UiContributionRegistry};
 pub(crate) use wasm::{NoWasmRuntime, WasmInstanceHandle, WasmRuntime, WasmStartRequest};

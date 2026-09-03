@@ -713,12 +713,7 @@ mod wasmtime_runtime {
                 .await?;
                 Ok::<_, anyhow::Error>(serde_json::to_string(&value)?)
             });
-            result.map_err(|error| {
-                yaml_error(
-                    crate::extensions::wit::yaml::gamer::host::types::HostErrorKind::Failed,
-                    error.to_string(),
-                )
-            })
+            result.map_err(|error| yaml_capability_error(&error))
         }
     }
 
@@ -767,6 +762,32 @@ mod wasmtime_runtime {
             kind,
             message: message.into(),
         }
+    }
+
+    fn yaml_capability_error(
+        error: &anyhow::Error,
+    ) -> crate::extensions::wit::yaml::gamer::host::types::HostError {
+        use crate::capabilities::CapabilityError;
+        use crate::extensions::error::ExtensionError;
+        use crate::extensions::wit::yaml::gamer::host::types::HostErrorKind;
+
+        let kind = if error
+            .downcast_ref::<ExtensionError>()
+            .is_some_and(|error| matches!(error, ExtensionError::Permission(_)))
+        {
+            HostErrorKind::Denied
+        } else if let Some(error) = error.downcast_ref::<CapabilityError>() {
+            match error {
+                CapabilityError::Unavailable(_) => HostErrorKind::Unavailable,
+                CapabilityError::InvalidRequest(_) => HostErrorKind::InvalidRequest,
+                CapabilityError::NotFound(_) => HostErrorKind::NotFound,
+                CapabilityError::Cancelled => HostErrorKind::Cancelled,
+                CapabilityError::Failed(_) => HostErrorKind::Failed,
+            }
+        } else {
+            HostErrorKind::Failed
+        };
+        yaml_error(kind, error.to_string())
     }
 
     impl context::Host for HostState {

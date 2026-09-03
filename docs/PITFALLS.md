@@ -165,3 +165,4 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **Runner 可能在 `submit` 返回前同步完成**：完成事件若早于 active-run 登记会留下不可取消句柄，需用完成游标/通知和登记前交接处理。
 - **YAML Component 的同步 WIT `call` 若沿用通用 async bindgen 会要求 async Store，并在 Windows GNU Tokio fiber 清理时崩溃**：YAML world 保持同步 bindgen，能力调用在独立 current-thread Tokio runtime 中执行；通用 extensions Host 不启用 YAML world。
 - **Vitest 默认 include 只覆盖 `src/*.test.js` 与 `src/script-editor/**/*.test.js`**：YAML workspace 测试放在 `src/workspace/` 会被静默跳过，必须放到 `src/` 根级或显式扩展配置。
+- **WASM guest fixture 的 Cargo 构建会在各 fixture 目录生成独立 `target/`，不会命中 `server/target/` 规则**：这些目录均为可重建生成物，按 fixture 路径精确忽略，不要提交。

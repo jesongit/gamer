@@ -494,7 +494,12 @@ mod tests {
                 &archive,
             )
             .unwrap();
-        proof.sha256.replace_range(0..1, "0");
+        let replacement = if proof.sha256.starts_with('0') {
+            '1'
+        } else {
+            '0'
+        };
+        proof.sha256.replace_range(0..1, &replacement.to_string());
         assert!(matches!(
             verifier.verify_registry_proof(
                 &proof,

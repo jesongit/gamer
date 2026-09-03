@@ -29,8 +29,10 @@ impl Guest for Fixture {
                 .ok_or_else(|| "program 缺少 steps".to_string())?,
             &mut values,
         )?;
-        Ok(serde_json::to_string(&values.remove("__return").unwrap_or(serde_json::Value::Null))
-            .map_err(|error| error.to_string())?)
+        Ok(
+            serde_json::to_string(&values.remove("__return").unwrap_or(serde_json::Value::Null))
+                .map_err(|error| error.to_string())?,
+        )
     }
 }
 
@@ -63,8 +65,8 @@ fn execute_step(
                 .ok_or_else(|| "invoke 缺少 capability".to_string())?;
             let args = evaluate_map(step.get("args"), values)?;
             let args_json = serde_json::to_string(&args).map_err(|error| error.to_string())?;
-            let result = capability::invoke(capability_name, &args_json)
-            .map_err(|error| error.message)?;
+            let result =
+                capability::invoke(capability_name, &args_json).map_err(format_host_error)?;
             let result: serde_json::Value = serde_json::from_str(&result)
                 .map_err(|error| format!("capability 返回值无效: {error}"))?;
             if let Some(save) = step.get("save").and_then(serde_json::Value::as_str) {
@@ -82,7 +84,11 @@ fn execute_step(
         }
         "if" => {
             let condition = evaluate_condition(step.get("cond"), values)?;
-            let key = if condition { "then_steps" } else { "else_steps" };
+            let key = if condition {
+                "then_steps"
+            } else {
+                "else_steps"
+            };
             match execute_steps(
                 step.get(key)
                     .and_then(serde_json::Value::as_array)
@@ -94,16 +100,36 @@ fn execute_step(
             }
         }
         "loop" => {
-            let times = step.get("times").and_then(|value| evaluate_value(value, values).ok());
+            let times = step
+                .get("times")
+                .and_then(|value| evaluate_value(value, values).ok());
             let limit = times.as_ref().and_then(|value| match value {
-                serde_json::Value::Object(value) if value.get("type") == Some(&serde_json::Value::String("int".into())) => value.get("value").and_then(serde_json::Value::as_u64),
-                serde_json::Value::Object(value) if value.get("type") == Some(&serde_json::Value::String("duration".into())) => value.get("value").and_then(serde_json::Value::as_u64).map(|value| (value / 100).max(1)),
+                serde_json::Value::Object(value)
+                    if value.get("type") == Some(&serde_json::Value::String("int".into())) =>
+                {
+                    value.get("value").and_then(serde_json::Value::as_u64)
+                }
+                serde_json::Value::Object(value)
+                    if value.get("type") == Some(&serde_json::Value::String("duration".into())) =>
+                {
+                    value
+                        .get("value")
+                        .and_then(serde_json::Value::as_u64)
+                        .map(|value| (value / 100).max(1))
+                }
                 _ => None,
             });
-            let body = step.get("body").and_then(serde_json::Value::as_array).ok_or_else(|| "loop 缺少 body".to_string())?;
+            let body = step
+                .get("body")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "loop 缺少 body".to_string())?;
             let mut count = 0;
             loop {
-                if let Some(limit) = limit { if count >= limit { break; } }
+                if let Some(limit) = limit {
+                    if count >= limit {
+                        break;
+                    }
+                }
                 count += 1;
                 match execute_steps(body, values)? {
                     Flow::Continue => {}
@@ -131,8 +157,7 @@ fn execute_step(
                 .ok_or_else(|| "call 缺少 target".to_string())?;
             let args = evaluate_map(step.get("args"), values)?;
             let args_json = serde_json::to_string(&args).map_err(|error| error.to_string())?;
-            let callee_json = programs::resolve(target, &args_json)
-                .map_err(|error| error)?;
+            let callee_json = programs::resolve(target, &args_json).map_err(|error| error)?;
             let callee: serde_json::Value = serde_json::from_str(&callee_json)
                 .map_err(|error| format!("call 目标不是有效程序: {error}"))?;
             let callee_steps = callee
@@ -160,6 +185,20 @@ fn execute_step(
     }
 }
 
+fn format_host_error(error: gamer::host::types::HostError) -> String {
+    use gamer::host::types::HostErrorKind;
+
+    let kind = match error.kind {
+        HostErrorKind::Denied => "denied",
+        HostErrorKind::Unavailable => "unavailable",
+        HostErrorKind::InvalidRequest => "invalid-request",
+        HostErrorKind::NotFound => "not-found",
+        HostErrorKind::Cancelled => "cancelled",
+        HostErrorKind::Failed => "failed",
+    };
+    format!("kind={kind}; message={}", error.message)
+}
+
 fn evaluate_map(
     value: Option<&serde_json::Value>,
     values: &serde_json::Map<String, serde_json::Value>,
@@ -182,19 +221,38 @@ fn evaluate(
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "表达式缺少 expr".to_string())?;
     match expr {
-        "literal" => Ok(value.get("value").cloned().ok_or_else(|| "literal 缺少 value".to_string())?),
+        "literal" => Ok(value
+            .get("value")
+            .cloned()
+            .ok_or_else(|| "literal 缺少 value".to_string())?),
         "ref" => {
-            let path = value.get("value").and_then(serde_json::Value::as_str).ok_or_else(|| "ref 缺少 value".to_string())?;
+            let path = value
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "ref 缺少 value".to_string())?;
             lookup_path(values, path.trim_start_matches('$'))
                 .ok_or_else(|| format!("未定义变量 {path}"))
         }
-        "list" => value.get("value").and_then(serde_json::Value::as_array).ok_or_else(|| "list 缺少 value".to_string()).and_then(|items| items.iter().map(|item| evaluate(Some(item), values)).collect::<Result<Vec<_>, _>>().map(serde_json::Value::Array)),
+        "list" => value
+            .get("value")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "list 缺少 value".to_string())
+            .and_then(|items| {
+                items
+                    .iter()
+                    .map(|item| evaluate(Some(item), values))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(serde_json::Value::Array)
+            }),
         "map" => evaluate_map(value.get("value"), values).map(serde_json::Value::Object),
         other => Err(format!("未知表达式: {other}")),
     }
 }
 
-fn evaluate_value(value: &serde_json::Value, values: &serde_json::Map<String, serde_json::Value>) -> Result<serde_json::Value, String> {
+fn evaluate_value(
+    value: &serde_json::Value,
+    values: &serde_json::Map<String, serde_json::Value>,
+) -> Result<serde_json::Value, String> {
     evaluate(Some(value), values)
 }
 
@@ -264,10 +322,9 @@ fn truthy(value: &serde_json::Value) -> bool {
         serde_json::Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
         serde_json::Value::String(value) => !value.is_empty(),
         serde_json::Value::Array(value) => !value.is_empty(),
-        serde_json::Value::Object(value) => value
-            .get("found")
-            .map(truthy)
-            .unwrap_or(!value.is_empty()),
+        serde_json::Value::Object(value) => {
+            value.get("found").map(truthy).unwrap_or(!value.is_empty())
+        }
     }
 }
 
@@ -312,8 +369,12 @@ fn parse_segment(segment: &str) -> (&str, Vec<usize>) {
     let mut indexes = Vec::new();
     let mut rest = segment.strip_prefix(name).unwrap_or_default();
     while let Some(rest_value) = rest.strip_prefix('[') {
-        let Some(end) = rest_value.find(']') else { break };
-        let Ok(index) = rest_value[..end].parse() else { break };
+        let Some(end) = rest_value.find(']') else {
+            break;
+        };
+        let Ok(index) = rest_value[..end].parse() else {
+            break;
+        };
         indexes.push(index);
         rest = &rest_value[end + 1..];
     }
@@ -349,7 +410,8 @@ fn values_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
             }
         };
         return color(left).zip(color(right)).is_some_and(|(left, right)| {
-            left.trim_start_matches('#').eq_ignore_ascii_case(right.trim_start_matches('#'))
+            left.trim_start_matches('#')
+                .eq_ignore_ascii_case(right.trim_start_matches('#'))
         });
     }
     false
