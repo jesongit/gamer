@@ -475,4 +475,7 @@ mod sec_tests {
     mod extensions_tests {
         include!("tests/extensions.rs");
     }
+    mod app_packages_tests {
+        include!("tests/app_packages.rs");
+    }
 }

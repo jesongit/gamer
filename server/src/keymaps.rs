@@ -909,11 +909,16 @@ fn parse_keymap_id(id: &str) -> anyhow::Result<(String, String)> {
 
 pub struct KeymapStore {
     root: PathBuf,
+    /// Composite 资源解析缝（user-overrides → active App Package → 本分区兜底）。
+    /// 只影响读取（get/list）；创建/更新/删除仍只写分区目录，包内置方案不可
+    /// 直接改写（需复制为分区副本）。
+    composite: crate::app_packages::CompositeResolver,
 }
 
 impl KeymapStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        let composite = crate::app_packages::CompositeResolver::new(root.clone());
+        Self { root, composite }
     }
 
     pub fn keymap_dir(&self, pkg: &str) -> PathBuf {
@@ -925,6 +930,11 @@ impl KeymapStore {
     pub fn create(&self, pkg: &str, name: &str, keymap: &Keymap) -> anyhow::Result<KeymapFile> {
         let package = safe_name(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
         let name = normalize_keymap_name(name)?;
+        // 包内置映射方案同名保护：分区副本会被包内方案遮蔽（composite 顺序
+        // override → 包 → 分区），创建时直接拒绝避免用户写入后不可见。
+        if self.composite.keymap(&package, &name).is_some() {
+            anyhow::bail!("映射方案 {package}/{name} 已由 App Package 提供，请更换名称");
+        }
         let path = self.keymap_dir(&package).join(&name);
         if path.exists() {
             anyhow::bail!("映射方案已存在: {package}/{name}");
@@ -945,6 +955,11 @@ impl KeymapStore {
         let (package, old_name) = parse_keymap_id(id)?;
         let old_path = self.keymap_dir(&package).join(&old_name);
         if !old_path.is_file() {
+            if self.composite.keymap(&package, &old_name).is_some() {
+                anyhow::bail!(
+                    "映射方案 {id} 由 App Package 提供，不可直接修改；请复制为新方案后调整"
+                );
+            }
             anyhow::bail!("映射方案不存在: {id}");
         }
         let old_content = std::fs::read_to_string(&old_path)?;
@@ -980,6 +995,10 @@ impl KeymapStore {
             Ok(parts) => parts,
             Err(_) => return Ok(None),
         };
+        // composite 顺序：user override → active App Package → 分区（兜底）。
+        if let Some(hit) = self.composite.keymap(&package, &name) {
+            return self.load_file_at(&package, &name, &hit.path).map(Some);
+        }
         let path = self.keymap_dir(&package).join(&name);
         if !path.is_file() {
             return Ok(None);
@@ -1024,7 +1043,7 @@ impl KeymapStore {
                     id: format!("{package}/{file}"),
                     package: package.clone(),
                     pkg: package.clone(),
-                    file,
+                    file: file.clone(),
                     name,
                     version,
                     binding_count,
@@ -1033,6 +1052,54 @@ impl KeymapStore {
                     diagnostics,
                 });
             }
+        }
+        // 追加包内置/override 方案：分区已列出的文件名不重复展示
+        // （分区副本优先可编辑；包内置方案的元数据以其文件为准）。
+        let listed: std::collections::HashSet<String> = out
+            .iter()
+            .map(|summary| summary.file.to_ascii_lowercase())
+            .collect();
+        for file in self.composite.keymap_names(&package) {
+            if listed.contains(&file.to_ascii_lowercase()) {
+                continue;
+            }
+            if normalize_keymap_name(&file).ok().as_deref() != Some(file.as_str()) {
+                continue;
+            }
+            let path = self
+                .composite
+                .keymap(&package, &file)
+                .map(|hit| hit.path)
+                .unwrap_or_else(|| dir.join(&file));
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let version = content_version(&content);
+            let (name, binding_count, valid, diagnostics) =
+                match parse_keymap_content(&content, &format!("{package}/{file}")) {
+                    Ok(keymap) => (keymap.name, keymap.bindings.len(), true, Vec::new()),
+                    Err(diagnostics) => (
+                        file.strip_suffix(".yaml")
+                            .or_else(|| file.strip_suffix(".yml"))
+                            .unwrap_or(&file)
+                            .to_string(),
+                        0,
+                        false,
+                        diagnostics,
+                    ),
+                };
+            out.push(KeymapSummary {
+                id: format!("{package}/{file}"),
+                package: package.clone(),
+                pkg: package.clone(),
+                file,
+                name,
+                version,
+                binding_count,
+                updated_at: fmt_mtime(&path),
+                valid,
+                diagnostics,
+            });
         }
         out.sort_by(|a, b| {
             b.updated_at
@@ -1257,7 +1324,12 @@ impl KeymapStore {
 
     fn load_file(&self, package: &str, name: &str) -> anyhow::Result<KeymapFile> {
         let path = self.keymap_dir(package).join(name);
-        let content = std::fs::read_to_string(&path)?;
+        self.load_file_at(package, name, &path)
+    }
+
+    /// 从任意宿主路径装载（分区文件或 composite 命中的 override/包内文件）。
+    fn load_file_at(&self, package: &str, name: &str, path: &Path) -> anyhow::Result<KeymapFile> {
+        let content = std::fs::read_to_string(path)?;
         let keymap = parse_keymap_content(&content, &format!("{package}/{name}"))
             .map_err(|diagnostics| anyhow::anyhow!(format_diagnostics(&diagnostics)))?;
         Ok(KeymapFile {
@@ -1270,7 +1342,7 @@ impl KeymapStore {
             version: content_version(&content),
             binding_count: keymap.bindings.len(),
             keymap,
-            updated_at: fmt_mtime(&path),
+            updated_at: fmt_mtime(path),
         })
     }
 }
@@ -1313,6 +1385,72 @@ mod tests {
     use super::*;
 
     const VALID: &str = "version: 1\nname: 战斗方案\nbindings:\n  - key: Space\n    action:\n      type: tap\n      at: [0.72, 0.86]\n  - key: KeyE\n    action:\n      type: swipe\n      from: [0.4, 0.8]\n      to: [0.6, 0.8]\n      duration_ms: 300\n";
+
+    /// composite 解析缝（Phase 4）：包内置映射方案对 get/list 可见，
+    /// create 拒绝同名防止分区副本被包内方案遮蔽。
+    #[tokio::test]
+    async fn package_keymaps_are_visible_and_protected_from_shadowing() {
+        use crate::app_packages::AppPackageStore;
+        use zip::write::SimpleFileOptions;
+
+        let dir = std::env::temp_dir().join(format!(
+            "gamer-keymap-composite-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = KeymapStore::new(dir.clone());
+        let packages = AppPackageStore::new(dir.clone());
+        let manifest = br#"id = "official.km"
+version = "1.0.0"
+
+[android]
+packages = ["com.test.app"]
+"#;
+        let mut archive = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
+            let opts =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("manifest.toml", opts).unwrap();
+            std::io::Write::write_all(&mut zw, manifest).unwrap();
+            zw.start_file("keymaps/default.yaml", opts).unwrap();
+            std::io::Write::write_all(&mut zw, VALID.as_bytes()).unwrap();
+            zw.finish().unwrap();
+        }
+        packages.install_and_activate(&archive, None).await.unwrap();
+
+        // 包内置方案经 get 可读
+        let loaded = store.get("com.test.app/default.yaml").unwrap().unwrap();
+        assert_eq!(loaded.file, "default.yaml");
+        assert_eq!(loaded.keymap.name, "战斗方案");
+
+        // list 合并展示包内置方案
+        let summaries = store.list("com.test.app").unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].file, "default.yaml");
+
+        // 同名 create 被拒绝（避免分区副本被包内方案遮蔽）
+        let keymap = parse_keymap_content(VALID, "com.test.app/default.yaml").unwrap();
+        let blocked = store.create("com.test.app", "default.yaml", &keymap);
+        assert!(blocked.is_err());
+        assert!(blocked.unwrap_err().to_string().contains("App Package"));
+
+        // 不同名 create 正常写入分区
+        store
+            .create("com.test.app", "自定义.yaml", &keymap)
+            .unwrap();
+        let summaries = store.list("com.test.app").unwrap();
+        assert_eq!(summaries.len(), 2);
+
+        // update 指向包内置方案给出明确指引（分区无此文件）
+        let err = store
+            .update("com.test.app/default.yaml", None, &keymap, None, true)
+            .unwrap_err();
+        assert!(err.to_string().contains("App Package"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn strict_loader_accepts_all_first_release_actions() {

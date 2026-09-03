@@ -1066,6 +1066,9 @@ impl Store {
         Ok(())
     }
 
+    // 闭包返回 SendError<DbCommand>（DbCommand 较大）；两个 Err 分支同义处理，
+    // 箱化只增分配不改行为
+    #[allow(clippy::result_large_err)]
     async fn enqueue_async(&self, command: DbCommand) -> anyhow::Result<()> {
         self.metrics.db_enqueue();
         let tx = self.tx.clone();
@@ -3084,5 +3087,61 @@ PRAGMA user_version = 1;
             handle.await.unwrap();
         }
         assert!(max_active.load(Ordering::SeqCst) <= DB_BLOCKING_PERMITS);
+    }
+
+    /// Phase 0 基线补充：logs 表高压写入延迟（add_log_async critical 路径，
+    /// 端到端含 channel 排队 + 事务提交）。8 并发 × 250 条 error 级日志，
+    /// 每条 critical 日志带 completion 并触发批量 flush，测每次调用的墙钟
+    /// 延迟 p50/p95/max。默认 #[ignore]，仅基线采集显式运行；本测试只写
+    /// 临时目录数据库，不影响仓库数据。
+    #[tokio::test]
+    #[ignore = "仅 Phase 0 基线采集时运行：cargo test --release db_log -- --ignored --nocapture"]
+    async fn db_log_high_pressure_write_latency_p50_p95() {
+        let (cfg, dir) = temp_config("dblog-bench");
+        let store = Arc::new(Store::open(&cfg).unwrap());
+        let concurrency = 8usize;
+        let per_task = 250usize;
+        let mut handles = Vec::new();
+        for task_id in 0..concurrency {
+            let store = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                let mut samples = Vec::with_capacity(per_task);
+                for i in 0..per_task {
+                    let started = std::time::Instant::now();
+                    store
+                        .add_log_async(
+                            "bench-device",
+                            "bench-script",
+                            "error",
+                            &format!("perf-load t{task_id} n{i}"),
+                        )
+                        .await
+                        .expect("critical log write failed");
+                    samples.push(started.elapsed().as_nanos() / 1000);
+                }
+                samples
+            }));
+        }
+        let mut all = Vec::new();
+        for handle in handles {
+            all.extend(handle.await.unwrap());
+        }
+        all.sort_unstable();
+        let total = all.len();
+        let p = |ratio: f64| -> u128 {
+            let rank = ((total as f64) * ratio).ceil() as usize;
+            all[(rank - 1).min(total - 1)]
+        };
+        println!(
+            "PERF metric=db_log_write samples={} p50_us={} p95_us={} max_us={} concurrency={} platform={}",
+            total,
+            p(0.50),
+            p(0.95),
+            all[total - 1],
+            concurrency,
+            std::env::consts::OS,
+        );
+        drop(store);
+        fs::remove_dir_all(dir).ok();
     }
 }

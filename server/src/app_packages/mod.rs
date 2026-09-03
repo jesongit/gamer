@@ -2,19 +2,25 @@
 
 //! Phase 4 App Package storage boundary.
 //!
-//! This module is intentionally not wired into REST or any existing script,
-//! keymap, matcher, WebRTC, or database path yet. It provides the safe storage
-//! and resolution seam for those later adapters.
+//! REST wiring (`api/app_packages.rs`) installs/activates packages; resource
+//! consumers reach packages through the composite seam in [`composite`]
+//! (user-overrides → active App Package → legacy partition fallback) used by
+//! `scripts.rs` / `keymaps.rs` / the engine matcher adapters.
 
 mod archive;
+mod composite;
 mod error;
 mod manifest;
 mod model;
+mod presets;
 mod resolver;
 mod store;
 
 pub(crate) use archive::{
     MAX_PACKAGE_ARCHIVE_BYTES, MAX_PACKAGE_ENTRIES, MAX_PACKAGE_FILE_BYTES, MAX_PACKAGE_TOTAL_BYTES,
+};
+pub(crate) use composite::{
+    ActivePackage, CompositeHit, CompositeResolver, CompositeSource, TemplateLookup,
 };
 pub(crate) use error::{AppPackageError, AppPackageResult};
 pub(crate) use manifest::{parse_manifest, PackageManifest};
@@ -22,10 +28,11 @@ pub(crate) use model::{
     parse_android_package_name, parse_app_package_id, resource_id, AndroidPackageName,
     AppPackageId, InstalledVersion, ResourceId, ResourceKind, ResourcePath,
 };
+pub(crate) use presets::PresetDeclaration;
 pub(crate) use resolver::{ResolvedResource, ResourceResolver, ResourceSource};
 pub(crate) use store::{
-    AppPackageStore, AppPackageTaskHook, InstalledPackage, SchedulerTaskSuspendedHook,
-    TimerTaskSuspendedHook,
+    ActiveRegistry, AppPackagePresetHook, AppPackageStore, AppPackageTaskHook, InstallMeta,
+    InstalledPackage, SchedulerTaskSuspendedHook, TimerPresetPublishHook, TimerTaskSuspendedHook,
 };
 
 #[cfg(test)]
@@ -234,12 +241,25 @@ packages = ["com.example.game"]
             ("scripts/daily.yaml", b"steps: []\n"),
         ]);
 
-        let installed = store.install_archive(&package).unwrap();
+        let installed = store.install_archive(&package, None).unwrap();
         assert!(installed.root().join("manifest.toml").is_file());
+        let meta = store
+            .install_meta(installed.manifest().id(), installed.manifest().version())
+            .unwrap()
+            .expect("install metadata recorded");
+        assert_eq!(meta.sha256, {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&package))
+        });
         assert_eq!(store.list_installed().unwrap().len(), 1);
         assert!(matches!(
-            store.install_archive(&package),
+            store.install_archive(&package, None),
             Err(AppPackageError::AlreadyInstalled { .. })
+        ));
+        let wrong_digest = store.install_archive(&package, Some(&"0".repeat(64)));
+        assert!(matches!(
+            wrong_digest,
+            Err(AppPackageError::Sha256Mismatch { .. })
         ));
         let broken = archive(vec![
             (
@@ -248,7 +268,7 @@ packages = ["com.example.game"]
             ),
             ("../outside.txt", b"must not stage"),
         ]);
-        assert!(store.install_archive(&broken).is_err());
+        assert!(store.install_archive(&broken, None).is_err());
         assert!(!store
             .data_root()
             .join("app-packages/official.xxx/1.3.0")
@@ -272,7 +292,7 @@ packages = ["com.example.game"]
             ("manifest.toml", &manifest),
             ("templates/main.png", b"installed"),
         ]);
-        let installed = store.install_archive(&package).unwrap();
+        let installed = store.install_archive(&package, None).unwrap();
         let android = parse_android_package_name("com.example.game").unwrap();
         let path = ResourcePath::parse("templates/main.png").unwrap();
         store
@@ -297,7 +317,7 @@ packages = ["com.example.game"]
             ("manifest.toml", &updated_manifest),
             ("templates/main.png", b"updated installed bytes"),
         ]);
-        let updated = store.install_archive(&updated_package).unwrap();
+        let updated = store.install_archive(&updated_package, None).unwrap();
         let updated_id = resource_id(
             updated.manifest().id().clone(),
             updated.manifest().version(),
@@ -336,7 +356,7 @@ packages = ["com.example.game"]
             ("manifest.toml", &manifest),
             ("resources/config.json", b"{}"),
         ]);
-        let installed = store.install_archive(&package).unwrap();
+        let installed = store.install_archive(&package, None).unwrap();
         let id = resource_id(
             installed.manifest().id().clone(),
             installed.manifest().version(),
@@ -373,7 +393,7 @@ packages = ["com.example.game"]
         );
         let manifest = package_manifest("official.xxx", "1.2.0", "com.example.game");
         let package = archive(vec![("manifest.toml", &manifest)]);
-        let installed = store.install_archive(&package).unwrap();
+        let installed = store.install_archive(&package, None).unwrap();
         let task = TimerTask::new(
             "task-1",
             "Task",
@@ -408,5 +428,122 @@ packages = ["com.example.game"]
             .await
             .unwrap());
         assert!(db.get_timer_task_async("task-1").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn install_and_activate_publishes_presets_and_enforces_primary_uniqueness() {
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct RecordingPresetHook(Mutex<Vec<(String, Vec<String>)>>);
+
+        #[async_trait::async_trait]
+        impl AppPackagePresetHook for RecordingPresetHook {
+            async fn publish_presets(
+                &self,
+                package: &AppPackageId,
+                presets: &[PresetDeclaration],
+            ) -> anyhow::Result<usize> {
+                self.0.lock().unwrap().push((
+                    package.as_str().to_string(),
+                    presets.iter().map(|preset| preset.name.clone()).collect(),
+                ));
+                Ok(presets.len())
+            }
+        }
+
+        let temp = TempDir::new().unwrap();
+        let hook = std::sync::Arc::new(RecordingPresetHook::default());
+        let store = AppPackageStore::with_hooks(
+            temp.path(),
+            Arc::new(crate::app_packages::store::NoopAppPackageTaskHook),
+            hook.clone(),
+        );
+
+        let preset_body = br#"name: daily
+runner_id: gamer.yaml
+entrypoint: run
+schedule:
+  kind: cron
+  value:
+    expression: "0 8 * * *"
+"#;
+        let first = archive(vec![
+            (
+                "manifest.toml",
+                &package_manifest("official.a", "1.0.0", "com.example.game"),
+            ),
+            ("templates/main.png", b"a-bytes"),
+            ("presets/daily.yaml", &preset_body[..]),
+        ]);
+        let installed = store.install_and_activate(&first, None).await.unwrap();
+        assert_eq!(
+            store
+                .active_version(installed.manifest().id())
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "1.0.0"
+        );
+        // 作用域内断言并释放锁（clippy await_holding_lock 不识别显式 drop）
+        {
+            let published = hook.0.lock().unwrap();
+            assert_eq!(published.len(), 1);
+            assert_eq!(published[0].0, "official.a");
+            assert_eq!(published[0].1, vec!["daily".to_string()]);
+        }
+
+        // A second content package claiming the same Android target conflicts
+        // with the active primary and must not stage anything.
+        let conflicting = archive(vec![(
+            "manifest.toml",
+            &package_manifest("official.b", "2.0.0", "com.example.game"),
+        )]);
+        let conflict = store
+            .install_and_activate(&conflicting, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(conflict, AppPackageError::PrimaryConflict { .. }));
+        assert!(store.list_installed().unwrap().len() == 1);
+
+        // Unrelated Android target installs and activates alongside.
+        let other = archive(vec![(
+            "manifest.toml",
+            &package_manifest("official.b", "2.0.0", "com.other.game"),
+        )]);
+        let other = store.install_and_activate(&other, None).await.unwrap();
+        assert_eq!(
+            store
+                .active_version(other.manifest().id())
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "2.0.0"
+        );
+
+        // Explicit activation of a specific version re-targets the registry.
+        let upgraded = archive(vec![(
+            "manifest.toml",
+            &package_manifest("official.a", "1.1.0", "com.example.game"),
+        )]);
+        let upgraded = store.install_and_activate(&upgraded, None).await.unwrap();
+        assert_eq!(
+            store
+                .active_version(upgraded.manifest().id())
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            "1.1.0"
+        );
+
+        // Uninstalling the active version clears the registry entry only.
+        assert!(store
+            .uninstall(upgraded.manifest().id(), upgraded.manifest().version())
+            .await
+            .unwrap());
+        assert!(store
+            .active_version(upgraded.manifest().id())
+            .unwrap()
+            .is_none());
     }
 }

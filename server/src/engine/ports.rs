@@ -16,8 +16,7 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 
 use crate::capabilities::adapters::{
-    DeviceAdapter, FrameAdapter, FrameStore, InputAdapter, ResourceAdapter, TouchAdapter,
-    VisionAdapter,
+    DeviceAdapter, FrameAdapter, InputAdapter, ResourceAdapter, TouchAdapter, VisionAdapter,
 };
 use crate::capabilities::{
     ColorSample, DeviceId, DeviceService, FrameHandle, FramePoint, FrameService, FrameSize,
@@ -331,11 +330,15 @@ pub struct ComputePoolMatcher {
 /// Adapter from the current file-backed template store to the core logical
 /// resource contract.  The host path is resolved and consumed entirely inside
 /// this adapter; callers only receive a logical handle plus bytes.
+/// 语义锁定测试专用缝（override → 包 → 分区复合解析经 ResourceAdapter 达成；
+/// 生产 find/match 直接走 ResourceAdapter）。bin 构建视为 dead code 保留。
+#[allow(dead_code)]
 pub(crate) struct LegacyResourceResolver {
     resources: Arc<ResourceAdapter>,
 }
 
 impl LegacyResourceResolver {
+    #[allow(dead_code)]
     pub(crate) fn new(resources: Arc<ResourceAdapter>) -> Self {
         Self { resources }
     }
@@ -359,12 +362,6 @@ impl ResourceResolver for LegacyResourceResolver {
 }
 
 impl ComputePoolMatcher {
-    pub fn new(devices: Arc<DeviceManager>, scripts: Arc<crate::scripts::ScriptStore>) -> Self {
-        let frame_store = Arc::new(FrameStore::new());
-        let frames = Arc::new(FrameAdapter::new(devices, frame_store.clone()));
-        Self::with_frame_adapter(scripts, frames)
-    }
-
     pub fn with_frame_adapter(
         scripts: Arc<crate::scripts::ScriptStore>,
         frames: Arc<FrameAdapter>,
@@ -505,5 +502,79 @@ mod tests {
 
         assert_eq!(resource.id(), &id);
         assert_eq!(resource.bytes(), b"template");
+    }
+
+    /// Composite 解析缝（Phase 4）：模板解析顺序 user-overrides → active App
+    /// Package → legacy 分区。生产 find/match 链路经 LegacyResourceResolver
+    /// → ResourceAdapter → ScriptStore::resolve_template_path 到达同一实现。
+    #[tokio::test]
+    async fn legacy_resource_resolver_prefers_override_then_package_then_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let store = Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
+        // legacy 分区兜底层
+        std::fs::create_dir_all(store.tmpl_dir("com.test.game")).unwrap();
+        std::fs::write(
+            store.tmpl_dir("com.test.game").join("icon.png"),
+            b"partition",
+        )
+        .unwrap();
+
+        // 安装并激活带 templates/icon.png 的 App Package
+        let packages = crate::app_packages::AppPackageStore::new(cfg.data_dir.clone());
+        let manifest = br#"id = "official.test"
+version = "1.0.0"
+
+[android]
+packages = ["com.test.game"]
+"#;
+        let mut archive = Vec::new();
+        {
+            use std::io::Write as _;
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("manifest.toml", opts).unwrap();
+            zw.write_all(manifest).unwrap();
+            zw.start_file("templates/icon.png", opts).unwrap();
+            zw.write_all(b"package").unwrap();
+            zw.finish().unwrap();
+        }
+        packages.install_and_activate(&archive, None).await.unwrap();
+
+        let resolver = LegacyResourceResolver::new(Arc::new(ResourceAdapter::new(store.clone())));
+        let id = ResourceId::new(
+            crate::core::AppPackageId::new("com.test.game").unwrap(),
+            "tmpl/icon.png",
+        )
+        .unwrap();
+
+        // 包内模板胜过 legacy 分区同名文件
+        let resource = resolver.resolve(&id).await.unwrap();
+        assert_eq!(resource.bytes(), b"package");
+
+        // user override 再胜过包内模板
+        let override_dir = dir.path().join("user-overrides/com.test.game/templates");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(override_dir.join("icon.png"), b"override").unwrap();
+        let resource = resolver.resolve(&id).await.unwrap();
+        assert_eq!(resource.bytes(), b"override");
+
+        // 包内/override 都没有的模板回退分区
+        std::fs::write(
+            store.tmpl_dir("com.test.game").join("only-partition.png"),
+            b"partition-only",
+        )
+        .unwrap();
+        let id = ResourceId::new(
+            crate::core::AppPackageId::new("com.test.game").unwrap(),
+            "tmpl/only-partition.png",
+        )
+        .unwrap();
+        let resource = resolver.resolve(&id).await.unwrap();
+        assert_eq!(resource.bytes(), b"partition-only");
     }
 }

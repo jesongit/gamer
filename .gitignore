@@ -2,21 +2,34 @@
 server/target/
 # RC 独立构建目录（正式服务运行中锁定 target/release 时的替代产物位，同不入库）
 server/target-rc/
+# 并行任务/本地隔离构建目录（CARGO_TARGET_DIR 替代位，均为可重建生成物）
+server/target-b/
+server/target-d/
 # Phase 3 与 WASM guest fixture 的独立 Cargo 输出目录（均为可重建生成物）
 server/target-phase3/
 server/tests/keymap-guest/target/
 server/tests/yaml-guest/target/
+server/tests/call-guest/target/
 # 本机配置（真实路径/密码，不入库）；分发以 server/config.example.toml 为准
 server/config.toml
 # 按天轮转的日志产物（gamer-server.log.YYYY-MM-DD；裸 *.log 规则盖不住带日期后缀的名）
 server/gamer-server.log.*
 # GB_LOG 误设裸词（无目录成分）时轮转文件落在 server/ 根，名如 1.2026-08-30
 server/*.20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]
-# 运行时产物不入库；模板/脚本分区目录 server/data/<pkg>/{tmpl,yaml} 需入库
+# 运行时产物不入库；默认发行「零业务资源」：业务分区（yaml/func/tmpl/keymap）
+# 不入库——应用资产经 App Package 安装（POST /api/app-packages/install；迁移打包用
+# tools/export-app-package.ps1），已装包（app-packages/）与用户覆盖（user-overrides/）
+# 同属本机数据。个人资产如需随仓库保留，可在此追加显式例外（!server/data/<pkg>/...）
 server/data/gamer.db
 server/data/*.db-shm
 server/data/*.db-wal
 server/data/pending_restore.json
+server/data/*/yaml/
+server/data/*/func/
+server/data/*/tmpl/
+server/data/*/keymap/
+server/data/app-packages/
+server/data/user-overrides/
 
 # ===== Docker 并存部署（docker-compose.local.yml，宿主 8444）=====
 # 独立数据目录（volume 挂载，本机运行数据不随仓库分发）：需要种子分区时
@@ -29,7 +42,7 @@ web/dist/
 
 # ===== 运行时/调试产物 =====
 mcp-test/
-/data/   # 仅忽略仓库根目录遗留的旧 data/；server/data/<pkg> 分区需入库
+/data/   # 仅忽略仓库根目录遗留的旧 data/；业务分区策略见上方 server/data 段
 *.log
 run-body.json
 
@@ -65,3 +78,6 @@ release/sbom/
 release/manifests/
 # 签名私钥绝不入库；公钥 <key_id>.pem 允许提交（验签信任库）
 release/keys/*.private.pem
+# Dev 插件市场签名私钥同样不入库；公钥 gamer-dev-1.pem 提交并被 server 内嵌信任
+tools/plugin-signing/*.key
+tools/plugin-signer/target/

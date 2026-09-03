@@ -14,6 +14,8 @@ pub enum ActivityKind {
     Viewer,
     Run,
     Capture,
+    /// 预留：扩展（keymap/wasm 插件）作为设备消费者纳入活跃度管理（Phase 10）。
+    #[allow(dead_code)]
     Extension,
 }
 
@@ -107,6 +109,8 @@ impl DeviceActivity {
             .is_some_and(|counts| counts.count(kind) > 0)
     }
 
+    /// 活跃消费者总数（测试与诊断观测用；功耗策略走 has_active / has_kind）。
+    #[allow(dead_code)]
     pub fn active_count(&self, device_id: &str) -> usize {
         self.counts
             .lock()
@@ -138,22 +142,7 @@ pub struct DeviceLease {
     released: AtomicBool,
 }
 
-/// Semantic aliases keep call sites self-documenting while all lease
-/// implementations continue to share the same device activity registry.
-pub type ViewerLease = DeviceLease;
-pub type RunLease = DeviceLease;
-pub type CaptureLease = DeviceLease;
-pub type ExtensionLease = DeviceLease;
-
 impl DeviceLease {
-    pub fn device_id(&self) -> &str {
-        &self.device_id
-    }
-
-    pub fn kind(&self) -> ActivityKind {
-        self.kind
-    }
-
     /// Explicitly release before drop when a caller needs a precise boundary.
     pub fn release(&self) {
         if self.released.swap(true, Ordering::SeqCst) {
@@ -178,6 +167,7 @@ pub trait ActivityLease: Send + Sync + 'static {}
 impl ActivityLease for DeviceLease {}
 
 /// A no-op lease for tests and adapters that do not own a device resource.
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct NoopLease;
 

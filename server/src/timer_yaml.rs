@@ -256,6 +256,8 @@ pub(crate) fn timer_from_legacy(task: &Task) -> anyhow::Result<TimerTask> {
     Ok(timer)
 }
 
+/// 通用任务 → 旧 YAML 任务模型（兼容适配；roundtrip 由测试锁定）。
+#[allow(dead_code)]
 fn legacy_from_timer(task: &TimerTask) -> Result<Task, String> {
     let payload = task
         .payload

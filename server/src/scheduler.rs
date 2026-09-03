@@ -45,10 +45,14 @@ impl Scheduler {
 
     /// Register an extension runner before or after the timer loop starts.
     /// Duplicate ids are rejected without changing the active runner.
+    /// 扩展 runner/schedule 注册缝（Phase 9/10 预留）：当前内置 runner/Cron
+    /// 已在 new() 直接注册，公开包装由后续扩展消费者使用。
+    #[allow(dead_code)]
     pub fn register_runner(&self, runner: Arc<dyn TimerRunner>) -> anyhow::Result<()> {
         self.runners.register(runner)
     }
 
+    #[allow(dead_code)]
     pub fn register_schedule(
         &self,
         kind: impl Into<String>,
@@ -93,6 +97,8 @@ impl Scheduler {
         self.core.on_app_package_uninstalled(package).await
     }
 
+    /// 下次唤醒时间查询（诊断/编排预读用；调度循环自身不经过它）。
+    #[allow(dead_code)]
     pub async fn next_wakeup(&self) -> anyhow::Result<Option<DateTime<Utc>>> {
         self.core.next_wakeup().await
     }

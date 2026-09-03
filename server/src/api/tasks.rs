@@ -258,6 +258,8 @@ pub(super) async fn api_save_task(
     .into_response()
 }
 
+// axum `Response` 体量超过 clippy result_large_err 阈值；错误即响应，箱化不改变语义
+#[allow(clippy::result_large_err)]
 fn save_task_inner(
     scripts: std::sync::Arc<crate::scripts::ScriptStore>,
     id: String,

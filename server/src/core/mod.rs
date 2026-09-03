@@ -5,10 +5,7 @@ pub mod models;
 pub mod resources;
 
 #[allow(unused_imports)]
-pub use activity::{
-    ActivityKind, ActivityLease, CaptureLease, DeviceActivity, DeviceLease, ExtensionLease,
-    NoopLease, RunLease, ViewerLease,
-};
+pub use activity::{ActivityKind, ActivityLease, DeviceActivity, DeviceLease, NoopLease};
 #[allow(unused_imports)]
 pub use events::{EventSink, NullEventSink, RuntimeEvent, RuntimeEventKind};
 #[allow(

@@ -1,9 +1,12 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::core::fs::atomic_write;
@@ -15,6 +18,7 @@ use super::model::{
     parse_android_package_name, parse_app_package_id, AndroidPackageName, AppPackageId,
     InstalledVersion, ResourcePath,
 };
+use super::presets::PresetDeclaration;
 use super::resolver::ResourceResolver;
 
 /// App Package 卸载后的唯一生命周期接缝。实现者只负责把仍持久化的
@@ -24,12 +28,37 @@ pub(crate) trait AppPackageTaskHook: Send + Sync {
     async fn suspend_for_package(&self, package: &AppPackageId) -> anyhow::Result<usize>;
 }
 
+/// 激活版本时的任务预设发布接缝（Phase 9「包提供任务预设」）。实现者把
+/// 包内 `presets/` 声明灌入任务预设存储；幂等性由确定性发布 id 保证。
+#[async_trait]
+pub(crate) trait AppPackagePresetHook: Send + Sync {
+    async fn publish_presets(
+        &self,
+        package: &AppPackageId,
+        presets: &[PresetDeclaration],
+    ) -> anyhow::Result<usize>;
+}
+
 #[derive(Default)]
-struct NoopAppPackageTaskHook;
+pub(crate) struct NoopAppPackageTaskHook;
 
 #[async_trait]
 impl AppPackageTaskHook for NoopAppPackageTaskHook {
     async fn suspend_for_package(&self, _package: &AppPackageId) -> anyhow::Result<usize> {
+        Ok(0)
+    }
+}
+
+#[derive(Default)]
+struct NoopAppPackagePresetHook;
+
+#[async_trait]
+impl AppPackagePresetHook for NoopAppPackagePresetHook {
+    async fn publish_presets(
+        &self,
+        _package: &AppPackageId,
+        _presets: &[PresetDeclaration],
+    ) -> anyhow::Result<usize> {
         Ok(0)
     }
 }
@@ -77,6 +106,116 @@ impl AppPackageTaskHook for SchedulerTaskSuspendedHook {
     }
 }
 
+/// Production preset-publish adapter over Timer Core. The package store only
+/// sees the narrow [`AppPackagePresetHook`] seam, never Timer Core internals.
+pub(crate) struct TimerPresetPublishHook {
+    timer: Arc<crate::timer_core::TimerCore>,
+}
+
+impl TimerPresetPublishHook {
+    pub(crate) fn new(timer: Arc<crate::timer_core::TimerCore>) -> Self {
+        Self { timer }
+    }
+}
+
+#[async_trait]
+impl AppPackagePresetHook for TimerPresetPublishHook {
+    async fn publish_presets(
+        &self,
+        package: &AppPackageId,
+        presets: &[PresetDeclaration],
+    ) -> anyhow::Result<usize> {
+        let converted = presets
+            .iter()
+            .map(|preset| {
+                Ok(crate::timer_core::PackagePreset {
+                    name: preset.name.clone(),
+                    runner_id: preset.runner_id.clone(),
+                    entrypoint: preset.entrypoint.clone(),
+                    payload: preset.payload.clone(),
+                    schedule: serde_json::from_value(preset.schedule.clone())?,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.timer
+            .publish_package_presets(package, &converted)
+            .await
+    }
+}
+
+/// Per-version install metadata persisted next to `manifest.toml`
+/// (`install.json`): the archive digest recorded at install time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct InstallMeta {
+    pub(crate) sha256: String,
+    pub(crate) installed_at: String,
+}
+
+/// Active-version registry (`app-packages/active.json`): AppPackageId → the
+/// version users of that package resolve against. One active version per App
+/// Package; the primary-uniqueness rule (one active content package per
+/// Android package) is enforced on install/activate.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ActiveRegistry(BTreeMap<String, String>);
+
+impl ActiveRegistry {
+    pub(crate) fn load(data_root: &Path) -> AppPackageResult<Self> {
+        let path = data_root.join("app-packages").join("active.json");
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default())
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+            return Ok(Self::default());
+        }
+        serde_json::from_slice(&bytes)
+            .map_err(|error| AppPackageError::InvalidManifest(format!("active.json: {error}")))
+    }
+
+    pub(crate) fn save(&self, data_root: &Path) -> AppPackageResult<()> {
+        let path = data_root.join("app-packages").join("active.json");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| AppPackageError::InvalidManifest(format!("active.json: {error}")))?;
+        atomic_write(&path, &bytes)
+            .map_err(|error| AppPackageError::Io(std::io::Error::other(error.to_string())))
+    }
+
+    pub(crate) fn get(&self, package: &AppPackageId) -> Option<&str> {
+        self.0.get(package.as_str()).map(String::as_str)
+    }
+
+    pub(crate) fn remove(&mut self, package: &AppPackageId) -> Option<String> {
+        self.0.remove(package.as_str())
+    }
+
+    pub(crate) fn insert(&mut self, package: AppPackageId, version: InstalledVersion) {
+        self.0.insert(package.into_string(), version.into_string());
+    }
+
+    /// Iterate `(package_id, version)` pairs in deterministic id order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.0
+            .iter()
+            .map(|(id, version)| (id.as_str(), version.as_str()))
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl FromIterator<(String, String)> for ActiveRegistry {
+    fn from_iter<I: IntoIterator<Item = (String, String)>>(items: I) -> Self {
+        Self(items.into_iter().collect())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct InstalledPackage {
     manifest: PackageManifest,
@@ -98,6 +237,7 @@ impl InstalledPackage {
 pub(crate) struct AppPackageStore {
     data_root: PathBuf,
     task_hook: Arc<dyn AppPackageTaskHook>,
+    preset_hook: Arc<dyn AppPackagePresetHook>,
 }
 
 impl fmt::Debug for AppPackageStore {
@@ -118,9 +258,18 @@ impl AppPackageStore {
         data_root: impl AsRef<Path>,
         task_hook: Arc<dyn AppPackageTaskHook>,
     ) -> Self {
+        Self::with_hooks(data_root, task_hook, Arc::new(NoopAppPackagePresetHook))
+    }
+
+    pub(crate) fn with_hooks(
+        data_root: impl AsRef<Path>,
+        task_hook: Arc<dyn AppPackageTaskHook>,
+        preset_hook: Arc<dyn AppPackagePresetHook>,
+    ) -> Self {
         Self {
             data_root: data_root.as_ref().to_path_buf(),
             task_hook,
+            preset_hook,
         }
     }
 
@@ -178,7 +327,16 @@ impl AppPackageStore {
 
     /// Install one validated archive into a new version directory. Existing
     /// versions are never overwritten, even when the incoming bytes differ.
-    pub(crate) fn install_archive(&self, archive: &[u8]) -> AppPackageResult<InstalledPackage> {
+    /// The archive SHA-256 is computed here and persisted next to the
+    /// manifest (`install.json`); when `expected_sha256` is provided, a
+    /// mismatch aborts the install before anything is staged.
+    pub(crate) fn install_archive(
+        &self,
+        archive: &[u8],
+        expected_sha256: Option<&str>,
+    ) -> AppPackageResult<InstalledPackage> {
+        let digest = archive_sha256(archive);
+        verify_expected_sha256(expected_sha256, &digest)?;
         let manifest_bytes = validate_and_read_manifest(archive)?;
         let manifest = parse_manifest(&manifest_bytes)?;
         let final_root = self
@@ -197,6 +355,16 @@ impl AppPackageStore {
         let staging = create_staging_directory(&staging_parent, manifest.id(), manifest.version())?;
         let result = (|| -> AppPackageResult<InstalledPackage> {
             extract_archive(archive, &staging)?;
+            let meta = InstallMeta {
+                sha256: digest.clone(),
+                installed_at: chrono::Utc::now()
+                    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            };
+            let meta_bytes = serde_json::to_vec_pretty(&meta).map_err(|error| {
+                AppPackageError::InvalidManifest(format!("install.json: {error}"))
+            })?;
+            atomic_write(&staging.join("install.json"), &meta_bytes)
+                .map_err(|error| AppPackageError::Io(std::io::Error::other(error.to_string())))?;
             if path_exists(&final_root)? {
                 return Err(AppPackageError::AlreadyInstalled {
                     package: manifest.id().to_string(),
@@ -228,11 +396,149 @@ impl AppPackageStore {
         result
     }
 
-    /// Remove one immutable version only. User overrides and unrelated data
-    /// are deliberately outside this path and remain untouched.
+    /// REST install path: verify the optional digest expectation, enforce the
+    /// primary-uniqueness rule against currently active packages, install, then
+    /// activate the new version (publishing its task presets). The primary
+    /// check runs before staging so a conflicting archive never lands on disk.
+    pub(crate) async fn install_and_activate(
+        &self,
+        archive: &[u8],
+        expected_sha256: Option<&str>,
+    ) -> AppPackageResult<InstalledPackage> {
+        let digest = archive_sha256(archive);
+        verify_expected_sha256(expected_sha256, &digest)?;
+        let manifest = parse_manifest(&validate_and_read_manifest(archive)?)?;
+        self.ensure_primary_available(&manifest)?;
+        let installed = self.install_archive(archive, Some(&digest))?;
+        if let Err(error) = self
+            .activate(installed.manifest().id(), installed.manifest().version())
+            .await
+        {
+            // Roll the just-staged version back so an activation failure never
+            // leaves an installed-but-never-activatable package behind.
+            let _ = self.remove_version(installed.manifest().id(), installed.manifest().version());
+            return Err(error);
+        }
+        Ok(installed)
+    }
+
+    /// Point the active version of one App Package at an installed version and
+    /// (re)publish its bundled task presets. Activation enforces the
+    /// primary-uniqueness rule: an Android package may have only one active
+    /// content package.
+    pub(crate) async fn activate(
+        &self,
+        package: &AppPackageId,
+        version: &InstalledVersion,
+    ) -> AppPackageResult<InstalledPackage> {
+        let package = parse_app_package_id(package.as_str())?;
+        let version = InstalledVersion::parse(version.as_str())?;
+        let installed = self
+            .list_installed()?
+            .into_iter()
+            .find(|installed| {
+                installed.manifest().id() == &package && installed.manifest().version() == &version
+            })
+            .ok_or_else(|| AppPackageError::NotInstalled {
+                package: package.to_string(),
+                version: version.to_string(),
+            })?;
+        self.ensure_primary_available(installed.manifest())?;
+
+        let presets = super::presets::read_package_presets(installed.root())?;
+        if !presets.is_empty() {
+            self.preset_hook
+                .publish_presets(&package, &presets)
+                .await
+                .map_err(|error| AppPackageError::PresetHook(error.to_string()))?;
+        }
+
+        let mut registry = ActiveRegistry::load(&self.data_root)?;
+        registry.insert(package, version);
+        registry.save(&self.data_root)?;
+        Ok(installed)
+    }
+
+    /// The Android targets of `incoming` must not intersect with the targets
+    /// of any *other* currently active App Package.
+    fn ensure_primary_available(&self, incoming: &PackageManifest) -> AppPackageResult<()> {
+        let registry = ActiveRegistry::load(&self.data_root)?;
+        for (active_id, active_version) in registry.iter() {
+            if active_id == incoming.id().as_str() {
+                continue;
+            }
+            let Ok(active_id) = parse_app_package_id(active_id) else {
+                continue;
+            };
+            let Ok(active_version) = InstalledVersion::parse(active_version) else {
+                continue;
+            };
+            let active_root = self
+                .app_packages_root()
+                .join(active_id.as_str())
+                .join(active_version.as_str());
+            let Ok(bytes) = fs::read(active_root.join("manifest.toml")) else {
+                continue;
+            };
+            let Ok(active_manifest) = parse_manifest(&bytes) else {
+                continue;
+            };
+            if active_manifest.id() != &active_id || active_manifest.version() != &active_version {
+                continue;
+            }
+            for android in active_manifest.android_packages() {
+                if incoming.supports_android_package(android) {
+                    return Err(AppPackageError::PrimaryConflict {
+                        android: android.to_string(),
+                        active_package: active_id.to_string(),
+                        active_version: active_version.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Active version of one App Package, if any.
+    pub(crate) fn active_version(
+        &self,
+        package: &AppPackageId,
+    ) -> AppPackageResult<Option<InstalledVersion>> {
+        let registry = ActiveRegistry::load(&self.data_root)?;
+        registry
+            .get(package)
+            .map(InstalledVersion::parse)
+            .transpose()
+    }
+
+    /// Persisted install metadata (archive digest) of one version.
+    pub(crate) fn install_meta(
+        &self,
+        package: &AppPackageId,
+        version: &InstalledVersion,
+    ) -> AppPackageResult<Option<InstallMeta>> {
+        let path = self
+            .app_packages_root()
+            .join(package.as_str())
+            .join(version.as_str())
+            .join("install.json");
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|error| AppPackageError::InvalidManifest(format!("install.json: {error}")))
+    }
+
     /// Remove one immutable version, then notify the single task lifecycle
     /// hook if this was the last version of the App Package. The async API is
     /// intentional: no caller can silently forget the Suspended transition.
+    /// User overrides and unrelated data are deliberately outside this path
+    /// and remain untouched. A removed active version drops out of the active
+    /// registry (task preset rows deliberately stay persisted; a later
+    /// activate republishes them).
     pub(crate) async fn uninstall(
         &self,
         package: &AppPackageId,
@@ -242,6 +548,11 @@ impl AppPackageStore {
         let removed = self.remove_version(&package, version)?;
         if !removed {
             return Ok(false);
+        }
+        let mut registry = ActiveRegistry::load(&self.data_root)?;
+        let was_active = registry.remove(&package).is_some();
+        if was_active {
+            registry.save(&self.data_root)?;
         }
         let package_still_installed = self
             .list_installed()?
@@ -363,4 +674,25 @@ fn sync_directory(path: &Path) -> std::io::Result<()> {
         let _ = path;
         Ok(())
     }
+}
+
+fn archive_sha256(archive: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(archive))
+}
+
+/// Optional install-time integrity gate: a present expectation must be a
+/// 64-hex digest and must match the computed archive digest.
+fn verify_expected_sha256(expected: Option<&str>, digest: &str) -> AppPackageResult<()> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let expected = expected.trim().to_ascii_lowercase();
+    let valid = expected.len() == 64 && expected.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !valid || expected != digest {
+        return Err(AppPackageError::Sha256Mismatch {
+            expected,
+            actual: digest.to_string(),
+        });
+    }
+    Ok(())
 }

@@ -1,4 +1,10 @@
 //! Logical resource resolution boundary.
+//!
+//! Core 侧的逻辑资源解析契约（ResourceId → bytes）。生产复合解析由
+//! `app_packages::resolver::ResourceResolver`（override → 包 → 分区）承担，
+//! 本边界当前仅由 `engine::ports::LegacyResourceResolver` 的语义锁定测试消费，
+//! 故对 bin 构建保留 allow(dead_code)。
+#![allow(dead_code)]
 
 use futures_util::future::BoxFuture;
 

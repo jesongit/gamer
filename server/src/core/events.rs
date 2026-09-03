@@ -55,6 +55,8 @@ pub trait EventSink: Send + Sync + 'static {
     fn emit(&self, event: RuntimeEvent) -> BoxFuture<'_, anyhow::Result<()>>;
 }
 
+/// 测试 / 无事件订阅装配用的空事件汇（engine 测试 Rig 兜底）。
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct NullEventSink;
 

@@ -242,6 +242,25 @@ impl TaskPreset {
     }
 }
 
+/// A package-bundled preset declaration (converted from a package's
+/// `presets/*.yaml`). Not yet bound to a persistence id; see
+/// [`TimerCore::publish_package_presets`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackagePreset {
+    pub name: String,
+    pub runner_id: String,
+    pub entrypoint: String,
+    pub payload: Value,
+    pub schedule: ScheduleSpec,
+}
+
+/// Deterministic publish id for a package-provided preset. Re-installing or
+/// re-activating the same package + preset name therefore updates in place
+/// instead of duplicating a row.
+pub fn package_preset_id(app_package: &AppPackageId, name: &str) -> String {
+    format!("pkg:{}/{}", app_package.as_str(), name.trim())
+}
+
 /// System wall clock boundary.  Tests can inject a deterministic clock.
 pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
@@ -308,13 +327,6 @@ impl ScheduleRegistry {
         );
         extensions.insert(kind, extension);
         Ok(())
-    }
-
-    pub fn contains(&self, kind: &str) -> bool {
-        self.extensions
-            .read()
-            .expect("schedule registry poisoned")
-            .contains_key(kind)
     }
 
     fn get(&self, kind: &str) -> Option<Arc<dyn ScheduleExtension>> {
@@ -1131,6 +1143,49 @@ impl TimerCore {
             .filter_map(|task| task.next_wakeup)
             .min())
     }
+
+    /// Publish (upsert) package-provided task presets. Ids are deterministic
+    /// per source package + preset name, so repeated activation of the same or
+    /// a newer package version updates rows in place and never duplicates.
+    /// Preset rows are independent of `TimerTask`: uninstalling a package
+    /// suspends user tasks but deliberately keeps preset records.
+    pub async fn publish_package_presets(
+        &self,
+        app_package: &AppPackageId,
+        presets: &[PackagePreset],
+    ) -> anyhow::Result<usize> {
+        let mut published = 0;
+        for preset in presets {
+            let id = package_preset_id(app_package, &preset.name);
+            // Preserve the original created_at across re-publication so the
+            // listing order stays stable across package reinstalls.
+            let created_at = self
+                .db
+                .get_task_preset_async(&id)
+                .await?
+                .map(|existing| existing.created_at)
+                .unwrap_or_else(Utc::now);
+            let task_preset = TaskPreset {
+                id,
+                app_package: app_package.as_str().to_string(),
+                name: preset.name.clone(),
+                runner_id: preset.runner_id.clone(),
+                entrypoint: preset.entrypoint.clone(),
+                payload: preset.payload.clone(),
+                schedule: preset.schedule.clone(),
+                created_at,
+            };
+            task_preset.validate()?;
+            self.db.upsert_task_preset_async(&task_preset).await?;
+            published += 1;
+        }
+        Ok(published)
+    }
+
+    /// Query task presets by source App Package (`app_package` column).
+    pub async fn package_presets(&self, app_package: &str) -> anyhow::Result<Vec<TaskPreset>> {
+        self.db.list_task_presets_async(Some(app_package)).await
+    }
 }
 
 fn min_instant(current: Option<DateTime<Utc>>, candidate: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -1462,11 +1517,62 @@ mod tests {
         task.next_wakeup = Some(wakeup);
         db.upsert_timer_task_async(&task).await.unwrap();
         drop(TimerCore::new(db.clone()));
-        let expected = DateTime::<Utc>::from_timestamp(wakeup.timestamp(), 0);
+        let expected = chrono::DateTime::<Utc>::from_timestamp(wakeup.timestamp(), 0);
         assert_eq!(
             TimerCore::new(db.clone()).next_wakeup().await.unwrap(),
             expected
         );
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn package_preset_publish_is_deterministic_and_idempotent() {
+        let (db, dir) = test_db("package-presets");
+        let core = TimerCore::new(db.clone());
+        let package = AppPackageId::new("official.example").unwrap();
+        let schedule =
+            ScheduleSpec::new("cron", serde_json::json!({"expression": "0 8 * * *"})).unwrap();
+        let preset = PackagePreset {
+            name: "每日领取".into(),
+            runner_id: "gamer.yaml".into(),
+            entrypoint: "run".into(),
+            payload: serde_json::json!({}),
+            schedule: schedule.clone(),
+        };
+
+        let published = core
+            .publish_package_presets(&package, std::slice::from_ref(&preset))
+            .await
+            .unwrap();
+        assert_eq!(published, 1);
+        // Same source package + name → in-place update, never a second row.
+        core.publish_package_presets(&package, std::slice::from_ref(&preset))
+            .await
+            .unwrap();
+        let presets = core.package_presets("official.example").await.unwrap();
+        assert_eq!(presets.len(), 1);
+        assert_eq!(presets[0].id, package_preset_id(&package, "每日领取"));
+        assert_eq!(presets[0].schedule, schedule);
+        assert_ne!(presets[0].id, package_preset_id(&package, "other"));
+        // A different source package never collides.
+        let other = AppPackageId::new("official.other").unwrap();
+        core.publish_package_presets(&other, std::slice::from_ref(&preset))
+            .await
+            .unwrap();
+        assert_eq!(
+            core.package_presets("official.other").await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            core.package_presets("official.example")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        drop(core);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

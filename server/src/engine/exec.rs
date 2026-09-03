@@ -3110,6 +3110,110 @@ mod tests {
 
     // ---- 快照隔离 --------------------------------------------------------------
 
+    /// Phase 4/8 收口：包内 `scripts/` 可直接运行（入口脚本、call/func 目标），
+    /// override 优先于包、包优先于分区同名文件，分区脚本继续可用。
+    #[tokio::test]
+    async fn package_scripts_run_with_composite_priority() {
+        let r = rig(HashMap::new(), solid_png(10, 10, [0, 0, 0]), "info");
+        let manifest = br#"id = "official.test"
+version = "1.0.0"
+
+[android]
+packages = ["com.test.app"]
+"#;
+        let mut archive = Vec::new();
+        {
+            use std::io::Write as _;
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("manifest.toml", opts).unwrap();
+            zw.write_all(manifest).unwrap();
+            zw.start_file("scripts/main.yaml", opts).unwrap();
+            let main_script = "steps:
+  - func: pack_lib/always
+    then:
+      - log: 包内函数
+  - call: sub.yaml
+";
+            zw.write_all(main_script.as_bytes()).unwrap();
+            zw.start_file("scripts/pack_lib.yaml", opts).unwrap();
+            zw.write_all(
+                "always:
+  steps:
+    - log: 包内函数体
+"
+                .as_bytes(),
+            )
+            .unwrap();
+            zw.start_file("scripts/sub.yaml", opts).unwrap();
+            zw.write_all(
+                "steps:
+  - log: 包内子脚本
+"
+                .as_bytes(),
+            )
+            .unwrap();
+            zw.start_file("scripts/dup.yaml", opts).unwrap();
+            zw.write_all(
+                "steps:
+  - log: 包内重名
+"
+                .as_bytes(),
+            )
+            .unwrap();
+            zw.finish().unwrap();
+        }
+        crate::app_packages::AppPackageStore::new(r.dir.clone())
+            .install_and_activate(&archive, None)
+            .await
+            .unwrap();
+
+        // 分区兜底脚本继续可用（包内/override 未覆盖的名字）
+        r.save_script(
+            "partition.yaml",
+            "steps:
+  - log: 分区脚本
+",
+        );
+
+        // 包内入口脚本可运行：func 目标（包内函数库）+ call 目标（包内子脚本）
+        let logs = r.run(script_target("main.yaml"), vec![]).await.unwrap();
+        assert!(logs_contain(&logs, "包内函数"));
+        assert!(logs_contain(&logs, "包内子脚本"));
+
+        let logs = r
+            .run(script_target("partition.yaml"), vec![])
+            .await
+            .unwrap();
+        assert!(logs_contain(&logs, "分区脚本"));
+
+        // 同名优先级：分区 < 包
+        r.save_script(
+            "dup.yaml",
+            "steps:
+  - log: 分区重名
+",
+        );
+        let logs = r.run(script_target("dup.yaml"), vec![]).await.unwrap();
+        assert!(logs_contain(&logs, "包内重名"));
+        assert!(!logs_contain(&logs, "分区重名"));
+
+        // user override 再胜过包
+        let override_dir = r.dir.join("user-overrides").join(PKG).join("scripts");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("dup.yaml"),
+            "steps:
+  - log: 覆盖重名
+",
+        )
+        .unwrap();
+        let logs = r.run(script_target("dup.yaml"), vec![]).await.unwrap();
+        assert!(logs_contain(&logs, "覆盖重名"));
+        assert!(!logs_contain(&logs, "包内重名"));
+    }
+
     /// 运行开始后修改 call 目标文件：本实例仍用开始时的内容；下一次运行用新内容。
     #[tokio::test]
     async fn snapshot_isolates_running_instance_from_file_changes() {

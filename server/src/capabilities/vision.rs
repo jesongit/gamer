@@ -33,21 +33,11 @@ impl SearchRegion {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct MatchOptions {
     pub threshold: Option<f32>,
     pub region: Option<SearchRegion>,
     pub color_check: bool,
-}
-
-impl Default for MatchOptions {
-    fn default() -> Self {
-        Self {
-            threshold: None,
-            region: None,
-            color_check: false,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

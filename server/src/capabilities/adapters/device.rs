@@ -25,7 +25,7 @@ impl DeviceAdapter {
     ) -> CapabilityResult<Arc<crate::device::scrcpy::ScrcpySession>> {
         self.devices
             .session(device.id().as_str())
-            .ok_or_else(|| CapabilityError::Unavailable("device session"))
+            .ok_or(CapabilityError::Unavailable("device session"))
     }
 
     fn check_app_name(app: &AppId) -> CapabilityResult<()> {
@@ -73,7 +73,7 @@ impl DeviceService for DeviceAdapter {
             .devices
             .snapshot(device.id().as_str())
             .ok_or_else(|| CapabilityError::NotFound(format!("device {}", device.id().as_str())))?;
-        let serial = serial.ok_or_else(|| CapabilityError::Unavailable("adb serial"))?;
+        let serial = serial.ok_or(CapabilityError::Unavailable("adb serial"))?;
         self.devices
             .adb
             .shell(

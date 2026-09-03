@@ -91,7 +91,7 @@ pub struct FunctionFile {
 }
 
 /// 校验模板文件名：允许 unicode 字母数字与 `. - _ #`（模板名可带 #x1_y1_x2_y2 区域后缀）、空格
-fn sanitize_template_name(s: &str) -> Option<String> {
+pub(crate) fn sanitize_template_name(s: &str) -> Option<String> {
     let t = s.trim();
     if t.is_empty()
         || t == "."
@@ -396,12 +396,17 @@ pub(crate) fn sanitize_rel_segments(rel: &str) -> anyhow::Result<Vec<String>> {
 pub struct ScriptStore {
     /// 数据根目录（data/），一级子目录 = 应用分区（内含 yaml/ 与 tmpl/）
     root: PathBuf,
+    /// Composite 资源解析缝（user-overrides → active App Package → 本分区兜底）。
+    /// 仅模板解析接入（find/match 与 script_v2 校验共用）；脚本/函数库快照仍
+    /// 以分区目录为唯一来源，包内脚本待后续波次。
+    composite: crate::app_packages::CompositeResolver,
 }
 
 impl ScriptStore {
     pub fn open(cfg: &Config) -> anyhow::Result<Self> {
         let store = Self {
             root: cfg.data_dir.clone(),
+            composite: crate::app_packages::CompositeResolver::new(cfg.data_dir.clone()),
         };
         store.reject_legacy_layout()?;
         store.cleanup_staging();
@@ -431,6 +436,15 @@ impl ScriptStore {
     /// 会在此视图中覆盖待写文件，使引用校验与运行时使用同一套资源寻址。
     pub fn resources(&self, pkg: &str) -> PartitionResources<'_> {
         PartitionResources::new(self, pkg)
+    }
+
+    /// Composite 脚本/函数库源码（engine RunSnapshot 合并用）：
+    /// override → active 包 `scripts/`；分区目录由调用方自行兜底。
+    pub(crate) fn composite_script_sources(
+        &self,
+        pkg: &str,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+        Ok(self.composite.script_sources(pkg)?)
     }
 
     pub fn parse_script_content(
@@ -851,29 +865,48 @@ impl ScriptStore {
         Ok(p)
     }
 
-    /// 模板短名/完整名 → 分区 `tmpl/` 内**现存**文件的路径。
+    /// 模板短名/完整名 → **现存**文件路径。composite 顺序：user override →
+    /// active App Package → 分区 `tmpl/`（legacy 兜底，老数据行为不变）。
     /// 精确名优先；否则按「基名 + `#` 后缀 + 同扩展名」唯一匹配（短名消歧语义
     /// 与 script_v2 校验一致）；零候选/多候选均报错，不猜测、不跨目录回退。
     pub fn resolve_template_path(&self, pkg: &str, short: &str) -> anyhow::Result<PathBuf> {
-        match self.match_template_in_partition(pkg, short) {
-            TplMatch::Found(path) => Ok(path),
-            TplMatch::NotFound { name, path } => {
-                anyhow::bail!("模板 {name} 不存在 (path={})", path.display())
-            }
-            TplMatch::Ambiguous { name, candidates } => anyhow::bail!(
+        match self.composite.template(pkg, short) {
+            crate::app_packages::TemplateLookup::Found(hit) => Ok(hit.path),
+            crate::app_packages::TemplateLookup::Ambiguous { name, candidates } => anyhow::bail!(
                 "模板 {name} 匹配到多个候选：{}，请用完整文件名指定",
                 candidates.join("、")
             ),
+            crate::app_packages::TemplateLookup::NotFound => {
+                match self.match_template_in_partition(pkg, short) {
+                    TplMatch::Found(path) => Ok(path),
+                    TplMatch::NotFound { name, path } => {
+                        anyhow::bail!("模板 {name} 不存在 (path={})", path.display())
+                    }
+                    TplMatch::Ambiguous { name, candidates } => anyhow::bail!(
+                        "模板 {name} 匹配到多个候选：{}，请用完整文件名指定",
+                        candidates.join("、")
+                    ),
+                }
+            }
         }
     }
 
     /// 模板短名可用性（script_v2 校验 ResourceProvider 消费）：
     /// 唯一存在 / 缺失 / 同短名多个 `#` 后缀候选（歧义）。
+    /// 解析顺序与 resolve_template_path 完全一致（override → 包 → 分区）。
     pub fn template_avail(&self, pkg: &str, short: &str) -> crate::script_v2::TemplateAvail {
-        match self.match_template_in_partition(pkg, short) {
-            TplMatch::Found(_) => crate::script_v2::TemplateAvail::Found,
-            TplMatch::NotFound { .. } => crate::script_v2::TemplateAvail::NotFound,
-            TplMatch::Ambiguous { .. } => crate::script_v2::TemplateAvail::Ambiguous,
+        match self.composite.template(pkg, short) {
+            crate::app_packages::TemplateLookup::Found(_) => crate::script_v2::TemplateAvail::Found,
+            crate::app_packages::TemplateLookup::Ambiguous { .. } => {
+                crate::script_v2::TemplateAvail::Ambiguous
+            }
+            crate::app_packages::TemplateLookup::NotFound => {
+                match self.match_template_in_partition(pkg, short) {
+                    TplMatch::Found(_) => crate::script_v2::TemplateAvail::Found,
+                    TplMatch::NotFound { .. } => crate::script_v2::TemplateAvail::NotFound,
+                    TplMatch::Ambiguous { .. } => crate::script_v2::TemplateAvail::Ambiguous,
+                }
+            }
         }
     }
 
@@ -1941,7 +1974,10 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let store = ScriptStore { root: dir.clone() };
+        let store = ScriptStore {
+            root: dir.clone(),
+            composite: crate::app_packages::CompositeResolver::new(dir.clone()),
+        };
         (store, dir)
     }
 
