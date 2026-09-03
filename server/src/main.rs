@@ -19,6 +19,7 @@ mod build_info;
 pub(crate) mod capabilities;
 mod config;
 mod core;
+mod cron_extension;
 mod deps_probe;
 mod device;
 mod engine;

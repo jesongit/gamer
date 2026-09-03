@@ -265,3 +265,178 @@ async fn task_args_snapshot_save_conflict_reconfirm_and_stale_flag() {
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn user_tasks_and_presets_have_independent_lifecycles() {
+    let t = build_app(
+        "generic-user-task",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let schedule = serde_json::json!({
+        "kind": "cron",
+        "value": {"expression": "*/5 * * * *"}
+    });
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/task-presets",
+        serde_json::json!({
+            "id": "preset-daily",
+            "app_package": "official.xxx",
+            "name": "Daily preset",
+            "runner_id": "missing.runner",
+            "entrypoint": "daily",
+            "payload": {"mode": "safe"},
+            "schedule": schedule
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{:?}",
+        json_body(resp).await
+    );
+
+    let resp = send(
+        &t.app,
+        req(
+            "GET",
+            "/api/task-presets?app_package=official.xxx",
+            None,
+            &json_headers(sid.to_string()),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(json_body(resp).await.as_array().unwrap().len(), 1);
+    let resp = send(
+        &t.app,
+        req(
+            "GET",
+            "/api/task-presets?app_package=other.xxx",
+            None,
+            &json_headers(sid.to_string()),
+            None,
+        ),
+    )
+    .await;
+    assert!(json_body(resp).await.as_array().unwrap().is_empty());
+
+    let resp = send(
+        &t.app,
+        req(
+            "PUT",
+            "/api/task-presets/preset-daily",
+            None,
+            &json_headers(sid.to_string()),
+            Some(
+                serde_json::json!({
+                    "app_package": "official.xxx",
+                    "name": "Updated preset",
+                    "runner_id": "missing.runner",
+                    "entrypoint": "daily",
+                    "payload": {"mode": "safe", "revision": 2},
+                    "schedule": schedule
+                })
+                .to_string(),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/task-presets/preset-daily/instantiate",
+        serde_json::json!({
+            "app": {
+                "device_id": "d1",
+                "android_package": "com.example.game",
+                "content_package": "official.xxx"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "{:?}",
+        json_body(resp).await
+    );
+    let task = json_body(resp).await;
+    let task_id = task["id"].as_str().unwrap().to_string();
+    assert_eq!(task["app"]["content_package"], "official.xxx");
+    assert_eq!(task["preset_id"], "preset-daily");
+    assert_eq!(task["state"], "active");
+
+    let resp = get_json(&t, &sid, "/api/user-tasks").await;
+    let tasks = json_body(resp).await;
+    assert_eq!(tasks.as_array().unwrap().len(), 1);
+    assert_eq!(tasks[0]["runner_id"], "missing.runner");
+
+    // The missing runner is a task dependency failure. It is persisted as
+    // Suspended and returned as a dependency error, not surfaced at startup.
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/user-tasks/{task_id}/run"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FAILED_DEPENDENCY);
+    assert_eq!(json_body(resp).await["code"], "dependency_unavailable");
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/user-tasks/{task_id}/run"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FAILED_DEPENDENCY);
+    let resp = get_json(&t, &sid, &format!("/api/user-tasks/{task_id}")).await;
+    let task = json_body(resp).await;
+    assert_eq!(task["state"], "suspended");
+    assert_eq!(task["suspend_reason"], "runner unavailable: missing.runner");
+
+    // Suspend/resume are explicit and preserve the opaque schedule.
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/user-tasks/{task_id}/suspend"),
+        serde_json::json!({"reason": "maintenance"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(json_body(resp).await["state"], "suspended");
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/user-tasks/{task_id}/resume"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resumed = json_body(resp).await;
+    assert_eq!(resumed["state"], "active");
+    assert_eq!(resumed["schedule"], schedule);
+
+    // Removing a preset never removes the generated user-owned schedule.
+    let resp = send(
+        &t.app,
+        req(
+            "DELETE",
+            "/api/task-presets/preset-daily",
+            None,
+            &json_headers(sid.to_string()),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = get_json(&t, &sid, &format!("/api/user-tasks/{task_id}")).await;
+    assert_eq!(json_body(resp).await["preset_id"], "preset-daily");
+}

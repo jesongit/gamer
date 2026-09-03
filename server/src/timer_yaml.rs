@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
 
-use crate::core::AppContext;
+use crate::core::{AppContext, RunRequest};
 use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartError};
 use crate::scripts::ScriptStore;
 use crate::store::{Db, Task};
@@ -47,17 +47,19 @@ impl TimerRunner for YamlTimerRunner {
 
     async fn submit(
         &self,
-        task: TimerTask,
+        request: RunRequest,
+        task_id: &str,
         scheduled_at: Option<i64>,
         on_complete: Arc<dyn Fn(TimerCompletion) + Send + Sync>,
     ) -> Result<TimerRun, TimerRunnerError> {
-        let legacy = legacy_from_timer(&task).map_err(TimerRunnerError::Invalid)?;
+        let legacy = legacy_from_request(&request, task_id).map_err(TimerRunnerError::Invalid)?;
+        let task = legacy.clone();
         let task_args = match task_params::gate_task(&self.scripts, &legacy) {
             Ok(args) => args,
             Err(error) => {
                 tracing::warn!(
                     task = %task.id,
-                    script = %task.entrypoint,
+                    script = %task.script_id,
                     reason = %error.reason(),
                     detail = %error.message(),
                     "YAML timer runner rejected task parameters"
@@ -67,16 +69,16 @@ impl TimerRunner for YamlTimerRunner {
         };
         tracing::info!(
             task = %task.id,
-            script = %task.entrypoint,
+            script = %task.script_id,
             params = %task_args.names.join(","),
             signature = %task_args.signature,
             signature_short = %task_params::signature_short_code(&task_args.signature),
             "YAML timer task parameters confirmed"
         );
         let req = crate::engine::yaml_start_request(
-            task.app.clone(),
+            request.app.clone(),
             crate::engine::RunTarget::Script {
-                script_id: task.entrypoint.clone(),
+                script_id: request.entrypoint.clone(),
                 start_index: 0,
             },
             if scheduled_at.is_some() {
@@ -92,9 +94,9 @@ impl TimerRunner for YamlTimerRunner {
         .map_err(|error| TimerRunnerError::Invalid(error.to_string()))?;
         let hook = yaml_finish_hook(
             self.db.clone(),
-            task.app.device_id.to_string(),
-            task.entrypoint.clone(),
-            task.id,
+            request.app.device_id.to_string(),
+            request.entrypoint.clone(),
+            task_id.to_string(),
             scheduled_at,
             on_complete,
         );
@@ -138,6 +140,38 @@ fn map_start_error(error: StartError) -> TimerRunnerError {
         StartError::Conflict(record) => TimerRunnerError::Conflict(record),
         StartError::ShuttingDown => TimerRunnerError::ShuttingDown,
     }
+}
+
+/// Translate the generic RunRequest into the legacy YAML task shape only at
+/// the YAML runner boundary. The Timer Core and Scheduler never inspect it.
+fn legacy_from_request(request: &RunRequest, task_id: &str) -> Result<Task, String> {
+    let payload = request
+        .payload
+        .as_value()
+        .as_object()
+        .ok_or_else(|| "YAML runner payload must be an object".to_string())?;
+    let args = payload
+        .get("args")
+        .cloned()
+        .ok_or_else(|| "YAML runner payload misses args".to_string())?;
+    let args_json = serde_json::to_string(&args).map_err(|error| error.to_string())?;
+    let signature = payload
+        .get("param_signature")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "YAML runner payload misses param_signature".to_string())?;
+    Ok(Task {
+        id: task_id.to_string(),
+        name: request.entrypoint.clone(),
+        cron: String::new(),
+        script_id: request.entrypoint.clone(),
+        device_id: request.app.device_id.to_string(),
+        enabled: true,
+        last_result: None,
+        last_run_at: None,
+        created_at: Utc::now().to_rfc3339(),
+        args_json,
+        param_signature: signature.to_string(),
+    })
 }
 
 fn yaml_finish_hook(

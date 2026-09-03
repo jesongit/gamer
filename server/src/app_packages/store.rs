@@ -166,6 +166,31 @@ impl AppPackageStore {
         Ok(true)
     }
 
+    /// Uninstall a version and notify Timer Core only when the package has no
+    /// remaining installed version. User tasks stay persisted and become
+    /// Suspended; deleting a package must never delete a user schedule.
+    pub(crate) async fn uninstall_and_update_tasks(
+        &self,
+        package: &AppPackageId,
+        version: &InstalledVersion,
+        timer: &crate::timer_core::TimerCore,
+    ) -> anyhow::Result<(bool, usize)> {
+        let removed = self.uninstall(package, version)?;
+        if !removed {
+            return Ok((false, 0));
+        }
+        let package_still_installed = self
+            .list_installed()?
+            .iter()
+            .any(|installed| installed.manifest().id() == package);
+        let suspended = if package_still_installed {
+            0
+        } else {
+            timer.on_app_package_uninstalled(package.as_str()).await?
+        };
+        Ok((true, suspended))
+    }
+
     pub(crate) fn write_user_override(
         &self,
         android_package: &AndroidPackageName,

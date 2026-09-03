@@ -235,6 +235,64 @@ pub(crate) fn build_router_with_extensions(
             get(tasks::api_get_task).delete(tasks::api_delete_task),
         )
         .route("/api/tasks/:id/run", post(tasks::api_run_task_now))
+        // Generic Timer Core API. The legacy `/api/tasks` routes above remain
+        // as a compatibility adapter for the existing YAML task editor.
+        .route(
+            "/api/user-tasks",
+            get(tasks::api_list_user_tasks).post(tasks::api_save_user_task),
+        )
+        .route(
+            "/api/user-tasks/:id",
+            get(tasks::api_get_user_task)
+                .put(tasks::api_update_user_task)
+                .delete(tasks::api_delete_user_task),
+        )
+        .route(
+            "/api/user-tasks/:id/run",
+            post(tasks::api_run_user_task_now),
+        )
+        .route(
+            "/api/user-tasks/:id/suspend",
+            post(tasks::api_suspend_user_task),
+        )
+        .route(
+            "/api/user-tasks/:id/resume",
+            post(tasks::api_resume_user_task),
+        )
+        .route(
+            "/api/user-tasks/:id/cancel",
+            post(tasks::api_cancel_user_task),
+        )
+        .route(
+            "/api/task-presets",
+            get(tasks::api_list_task_presets).post(tasks::api_save_task_preset),
+        )
+        .route(
+            "/api/task-presets/:id",
+            get(tasks::api_get_task_preset)
+                .put(tasks::api_update_task_preset)
+                .delete(tasks::api_delete_task_preset),
+        )
+        .route(
+            "/api/task-presets/:id/instantiate",
+            post(tasks::api_instantiate_task_preset),
+        )
+        // Short aliases keep the task panel namespace discoverable while the
+        // resource types remain separate in persistence and responses.
+        .route(
+            "/api/tasks/presets",
+            get(tasks::api_list_task_presets).post(tasks::api_save_task_preset),
+        )
+        .route(
+            "/api/tasks/presets/:id",
+            get(tasks::api_get_task_preset)
+                .put(tasks::api_update_task_preset)
+                .delete(tasks::api_delete_task_preset),
+        )
+        .route(
+            "/api/tasks/presets/:id/instantiate",
+            post(tasks::api_instantiate_task_preset),
+        )
         .route(
             "/api/logs",
             get(logs::api_list_logs).delete(logs::api_clear_logs),

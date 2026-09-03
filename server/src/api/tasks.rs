@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -24,9 +24,40 @@ use uuid::Uuid;
 use super::common::{err_response, run_blocking_api, validate_text_field};
 use super::runs::diagnostics_response;
 use super::{ApiError, AppState};
-use crate::scheduler::next_run;
+use crate::cron_extension::{next_run, validate_cron};
 use crate::store::Task;
 use crate::task_params::{self, GateError};
+use crate::timer_core::{ScheduleSpec, TaskPreset, TimerRunnerError, TimerTask, TimerTaskState};
+use crate::{core::AppContext, timer_yaml};
+
+#[derive(Debug)]
+enum LegacyRunNowError {
+    ScriptMissing,
+    ScriptInvalid(String),
+    ParamStale(GateError),
+    Start(crate::run_manager::StartError),
+}
+
+fn map_legacy_run_now_error(error: TimerRunnerError) -> LegacyRunNowError {
+    match error {
+        TimerRunnerError::DependencyMissing(message) if message == "脚本不存在" => {
+            LegacyRunNowError::ScriptMissing
+        }
+        TimerRunnerError::DependencyMissing(message) => LegacyRunNowError::ScriptInvalid(message),
+        TimerRunnerError::Invalid(message) | TimerRunnerError::Other(message) => {
+            LegacyRunNowError::ScriptInvalid(message)
+        }
+        TimerRunnerError::ParamStale {
+            stored, current, ..
+        } => LegacyRunNowError::ParamStale(GateError::SignatureMismatch { stored, current }),
+        TimerRunnerError::Conflict(record) => {
+            LegacyRunNowError::Start(crate::run_manager::StartError::Conflict(record))
+        }
+        TimerRunnerError::ShuttingDown => {
+            LegacyRunNowError::Start(crate::run_manager::StartError::ShuttingDown)
+        }
+    }
+}
 
 pub(super) fn validate_task_req(req: &SaveTaskReq) -> Result<(), ApiError> {
     validate_text_field(&req.name, "任务名称", 255)?;
@@ -186,7 +217,7 @@ pub(super) async fn api_save_task(
     Json(req): Json<SaveTaskReq>,
 ) -> Response {
     // 校验 cron（5/6/7 字段）
-    if !crate::scheduler::validate_cron(&req.cron) {
+    if !validate_cron(&req.cron) {
         return err_response(StatusCode::BAD_REQUEST, "cron 表达式无效");
     }
     if let Err(err) = validate_task_req(&req) {
@@ -336,7 +367,6 @@ pub(super) async fn api_run_task_now(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
-    use crate::scheduler::RunNowError;
     let trigger_started = Instant::now();
     let tasks = match st.db.list_tasks_async().await {
         Ok(tasks) => tasks,
@@ -345,7 +375,18 @@ pub(super) async fn api_run_task_now(
     let Some(task) = tasks.into_iter().find(|t| t.id == id) else {
         return ApiError::not_found("任务不存在").into_response();
     };
-    match st.scheduler.run_now(&task).await {
+    let timer = match timer_yaml::timer_from_legacy(&task) {
+        Ok(timer) => timer,
+        Err(error) => {
+            return err_response(StatusCode::BAD_REQUEST, &error.to_string());
+        }
+    };
+    match st
+        .scheduler
+        .run_now(&timer)
+        .await
+        .map_err(map_legacy_run_now_error)
+    {
         Ok(run_id) => {
             st.metrics
                 .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
@@ -355,21 +396,21 @@ pub(super) async fn api_run_task_now(
             )
                 .into_response()
         }
-        Err(RunNowError::Start(crate::run_manager::StartError::Conflict(busy))) => {
+        Err(LegacyRunNowError::Start(crate::run_manager::StartError::Conflict(busy))) => {
             st.metrics
                 .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
             st.metrics
                 .record_scheduler_event(crate::metrics::SchedulerEvent::Conflict);
             (StatusCode::CONFLICT, Json(busy.busy_payload())).into_response()
         }
-        Err(RunNowError::Start(crate::run_manager::StartError::ShuttingDown)) => {
+        Err(LegacyRunNowError::Start(crate::run_manager::StartError::ShuttingDown)) => {
             st.metrics
                 .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
             st.metrics
                 .record_scheduler_event(crate::metrics::SchedulerEvent::Skipped);
             err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
         }
-        Err(RunNowError::ParamStale(err)) => {
+        Err(LegacyRunNowError::ParamStale(err)) => {
             st.metrics
                 .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
             st.metrics
@@ -385,14 +426,14 @@ pub(super) async fn api_run_task_now(
                 &err.message(),
             )
         }
-        Err(RunNowError::ScriptMissing) => {
+        Err(LegacyRunNowError::ScriptMissing) => {
             st.metrics
                 .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
             st.metrics
                 .record_scheduler_event(crate::metrics::SchedulerEvent::Failed);
             err_response(StatusCode::BAD_REQUEST, "脚本不存在")
         }
-        Err(RunNowError::ScriptInvalid(message)) => {
+        Err(LegacyRunNowError::ScriptInvalid(message)) => {
             st.metrics
                 .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
             st.metrics
@@ -400,4 +441,488 @@ pub(super) async fn api_run_task_now(
             err_response(StatusCode::BAD_REQUEST, &format!("脚本解析失败: {message}"))
         }
     }
+}
+
+// ---------- 通用 User Task / Task Preset API ----------
+
+/// JSON shape for the timer-owned task. Unlike the legacy `/api/tasks` shape,
+/// this endpoint carries an explicit AppContext and opaque runner payload.
+fn timer_task_json(task: &TimerTask) -> Value {
+    serde_json::json!({
+        "id": task.id,
+        "name": task.name,
+        "app": task.app,
+        "runner_id": task.runner_id,
+        "entrypoint": task.entrypoint,
+        "payload": task.payload,
+        "schedule": task.schedule,
+        "state": task.state,
+        "enabled": task.enabled,
+        "next_wakeup": task.next_wakeup,
+        "last_result": task.last_result,
+        "last_run_at": task.last_run_at,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+        "preset_id": task.preset_id,
+        "suspend_reason": task.suspend_reason,
+    })
+}
+
+fn preset_json(preset: &TaskPreset) -> Value {
+    serde_json::json!({
+        "id": preset.id,
+        "app_package": preset.app_package,
+        "name": preset.name,
+        "runner_id": preset.runner_id,
+        "entrypoint": preset.entrypoint,
+        "payload": preset.payload,
+        "schedule": preset.schedule,
+        "created_at": preset.created_at,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SaveUserTaskReq {
+    #[serde(default)]
+    pub(super) id: Option<String>,
+    pub(super) name: String,
+    #[serde(alias = "app_context")]
+    pub(super) app: AppContext,
+    pub(super) runner_id: String,
+    pub(super) entrypoint: String,
+    #[serde(default = "empty_payload")]
+    pub(super) payload: Value,
+    pub(super) schedule: ScheduleSpec,
+    #[serde(default)]
+    pub(super) enabled: Option<bool>,
+    #[serde(default)]
+    pub(super) preset_id: Option<String>,
+}
+
+fn empty_payload() -> Value {
+    Value::Object(serde_json::Map::new())
+}
+
+fn validate_schedule(schedule: &ScheduleSpec) -> Result<(), ApiError> {
+    schedule
+        .validate()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if schedule.kind == crate::cron_extension::CRON_SCHEDULE_KIND {
+        let expression = schedule
+            .value
+            .get("expression")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request("cron schedule misses expression"))?;
+        if !validate_cron(expression) {
+            return Err(ApiError::bad_request("cron 表达式无效"));
+        }
+    }
+    Ok(())
+}
+
+fn build_user_task(
+    id: String,
+    req: SaveUserTaskReq,
+    existing: Option<TimerTask>,
+) -> Result<TimerTask, ApiError> {
+    validate_text_field(&req.name, "任务名称", 255)?;
+    validate_text_field(&req.runner_id, "runner_id", 255)?;
+    validate_text_field(&req.entrypoint, "entrypoint", 1024)?;
+    if let Some(preset_id) = &req.preset_id {
+        validate_text_field(preset_id, "preset_id", 255)?;
+    }
+    validate_schedule(&req.schedule)?;
+    let enabled = req
+        .enabled
+        .or_else(|| existing.as_ref().map(|task| task.enabled))
+        .unwrap_or(true);
+    let mut task = TimerTask::new(
+        id,
+        req.name,
+        req.app,
+        req.runner_id,
+        req.entrypoint,
+        req.payload,
+        req.schedule,
+    )
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if let Some(previous) = existing {
+        task.created_at = previous.created_at;
+        task.last_result = previous.last_result;
+        task.last_run_at = previous.last_run_at;
+        task.preset_id = req.preset_id.or(previous.preset_id);
+        task.updated_at = chrono::Utc::now();
+    } else {
+        task.preset_id = req.preset_id;
+    }
+    task.enabled = enabled;
+    task.state = if enabled {
+        TimerTaskState::Active
+    } else {
+        TimerTaskState::Suspended
+    };
+    task.suspend_reason = (!enabled).then(|| "disabled".to_string());
+    Ok(task)
+}
+
+pub(super) async fn api_list_user_tasks(State(st): State<AppState>) -> Response {
+    match st.db.list_timer_tasks_async().await {
+        Ok(tasks) => Json(tasks.iter().map(timer_task_json).collect::<Vec<_>>()).into_response(),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+pub(super) async fn api_get_user_task(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match st.db.get_timer_task_async(&id).await {
+        Ok(Some(task)) => Json(timer_task_json(&task)).into_response(),
+        Ok(None) => ApiError::not_found("任务不存在").into_response(),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+pub(super) async fn api_save_user_task(
+    State(st): State<AppState>,
+    Json(req): Json<SaveUserTaskReq>,
+) -> Response {
+    let id = req
+        .id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+    let existing = match st.db.get_timer_task_async(&id).await {
+        Ok(existing) => existing,
+        Err(error) => return ApiError::internal(error.to_string()).into_response(),
+    };
+    let is_new = existing.is_none();
+    let task = match build_user_task(id, req, existing) {
+        Ok(task) => task,
+        Err(error) => return error.into_response(),
+    };
+    if let Err(error) = st.db.upsert_timer_task_async(&task).await {
+        return ApiError::internal(error.to_string()).into_response();
+    }
+    st.scheduler.notify_tasks_changed();
+    let status = if is_new {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    (status, Json(timer_task_json(&task))).into_response()
+}
+
+pub(super) async fn api_update_user_task(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(mut req): Json<SaveUserTaskReq>,
+) -> Response {
+    if req.id.as_deref().is_some_and(|body_id| body_id != id) {
+        return ApiError::bad_request("路径任务 id 与请求体 id 不一致").into_response();
+    }
+    req.id = Some(id);
+    api_save_user_task(State(st), Json(req)).await
+}
+
+pub(super) async fn api_delete_user_task(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let exists = match st.db.get_timer_task_async(&id).await {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(error) => return ApiError::internal(error.to_string()).into_response(),
+    };
+    if !exists {
+        return ApiError::not_found("任务不存在").into_response();
+    }
+    match st.db.delete_timer_task_async(&id).await {
+        Ok(()) => {
+            st.scheduler.notify_tasks_changed();
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+pub(super) async fn api_suspend_user_task(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let reason = if body.is_empty() {
+        "suspended".to_string()
+    } else {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SuspendReq {
+            reason: String,
+        }
+        match serde_json::from_slice::<SuspendReq>(&body) {
+            Ok(req) => req.reason,
+            Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
+        }
+    };
+    if reason.trim().is_empty() || reason.chars().any(char::is_control) {
+        return ApiError::bad_request("挂起原因无效").into_response();
+    }
+    match st.scheduler.suspend_task(&id, &reason).await {
+        Ok(()) => match st.db.get_timer_task_async(&id).await {
+            Ok(Some(task)) => Json(timer_task_json(&task)).into_response(),
+            Ok(None) => ApiError::not_found("任务不存在").into_response(),
+            Err(error) => ApiError::internal(error.to_string()).into_response(),
+        },
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+pub(super) async fn api_resume_user_task(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match st.scheduler.resume_task(&id).await {
+        Ok(()) => match st.db.get_timer_task_async(&id).await {
+            Ok(Some(task)) => Json(timer_task_json(&task)).into_response(),
+            Ok(None) => ApiError::not_found("任务不存在").into_response(),
+            Err(error) => ApiError::internal(error.to_string()).into_response(),
+        },
+        Err(error) if error.to_string().contains("timer task not found") => {
+            ApiError::not_found("任务不存在").into_response()
+        }
+        Err(error) => ApiError::bad_request(error.to_string()).into_response(),
+    }
+}
+
+pub(super) async fn api_cancel_user_task(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match st.scheduler.cancel_task(&id).await {
+        Ok(()) => match st.db.get_timer_task_async(&id).await {
+            Ok(Some(task)) => Json(timer_task_json(&task)).into_response(),
+            Ok(None) => ApiError::not_found("任务不存在").into_response(),
+            Err(error) => ApiError::internal(error.to_string()).into_response(),
+        },
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+pub(super) async fn api_run_user_task_now(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let task = match st.db.get_timer_task_async(&id).await {
+        Ok(Some(task)) => task,
+        Ok(None) => return ApiError::not_found("任务不存在").into_response(),
+        Err(error) => return ApiError::internal(error.to_string()).into_response(),
+    };
+    match st.scheduler.run_now(&task).await {
+        Ok(run_id) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "run_id": run_id })),
+        )
+            .into_response(),
+        Err(crate::timer_core::TimerRunnerError::Conflict(busy)) => {
+            (StatusCode::CONFLICT, Json(busy.busy_payload())).into_response()
+        }
+        Err(crate::timer_core::TimerRunnerError::ShuttingDown) => {
+            err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
+        }
+        Err(crate::timer_core::TimerRunnerError::DependencyMissing(message)) => (
+            StatusCode::FAILED_DEPENDENCY,
+            Json(serde_json::json!({
+                "code": "dependency_unavailable",
+                "message": message,
+                "task_id": task.id,
+                "runner_id": task.runner_id,
+                "state": "suspended"
+            })),
+        )
+            .into_response(),
+        Err(crate::timer_core::TimerRunnerError::Invalid(message))
+        | Err(crate::timer_core::TimerRunnerError::Other(message))
+        | Err(crate::timer_core::TimerRunnerError::ParamStale { message, .. }) => {
+            ApiError::bad_request(message).into_response()
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct TaskPresetQuery {
+    pub(super) app_package: Option<String>,
+}
+
+pub(super) async fn api_list_task_presets(
+    State(st): State<AppState>,
+    Query(query): Query<TaskPresetQuery>,
+) -> Response {
+    match st
+        .db
+        .list_task_presets_async(query.app_package.as_deref())
+        .await
+    {
+        Ok(presets) => Json(presets.iter().map(preset_json).collect::<Vec<_>>()).into_response(),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+pub(super) async fn api_get_task_preset(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match st.db.get_task_preset_async(&id).await {
+        Ok(Some(preset)) => Json(preset_json(&preset)).into_response(),
+        Ok(None) => ApiError::not_found("任务预设不存在").into_response(),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SaveTaskPresetReq {
+    #[serde(default)]
+    pub(super) id: Option<String>,
+    #[serde(alias = "content_package")]
+    pub(super) app_package: String,
+    pub(super) name: String,
+    pub(super) runner_id: String,
+    pub(super) entrypoint: String,
+    #[serde(default = "empty_payload")]
+    pub(super) payload: Value,
+    pub(super) schedule: ScheduleSpec,
+}
+
+pub(super) async fn api_save_task_preset(
+    State(st): State<AppState>,
+    Json(req): Json<SaveTaskPresetReq>,
+) -> Response {
+    if let Err(error) = validate_text_field(&req.app_package, "app_package", 255)
+        .and_then(|_| validate_text_field(&req.name, "任务预设名称", 255))
+        .and_then(|_| validate_text_field(&req.runner_id, "runner_id", 255))
+        .and_then(|_| validate_text_field(&req.entrypoint, "entrypoint", 1024))
+    {
+        return error.into_response();
+    }
+    if let Err(error) = validate_schedule(&req.schedule) {
+        return error.into_response();
+    }
+    let id = req
+        .id
+        .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+    let previous = match st.db.get_task_preset_async(&id).await {
+        Ok(previous) => previous,
+        Err(error) => return ApiError::internal(error.to_string()).into_response(),
+    };
+    let existed = previous.is_some();
+    let preset = TaskPreset {
+        id,
+        app_package: req.app_package,
+        name: req.name,
+        runner_id: req.runner_id,
+        entrypoint: req.entrypoint,
+        payload: req.payload,
+        schedule: req.schedule,
+        created_at: previous
+            .map(|preset| preset.created_at)
+            .unwrap_or_else(chrono::Utc::now),
+    };
+    if let Err(error) = preset.validate() {
+        return ApiError::bad_request(error.to_string()).into_response();
+    }
+    match st.db.upsert_task_preset_async(&preset).await {
+        Ok(()) => (
+            if existed {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            },
+            Json(preset_json(&preset)),
+        )
+            .into_response(),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+pub(super) async fn api_update_task_preset(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(mut req): Json<SaveTaskPresetReq>,
+) -> Response {
+    if req.id.as_deref().is_some_and(|body_id| body_id != id) {
+        return ApiError::bad_request("路径预设 id 与请求体 id 不一致").into_response();
+    }
+    req.id = Some(id);
+    api_save_task_preset(State(st), Json(req)).await
+}
+
+pub(super) async fn api_delete_task_preset(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match st.db.delete_task_preset_async(&id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => ApiError::not_found("任务预设不存在").into_response(),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InstantiatePresetReq {
+    #[serde(alias = "app_context")]
+    pub(super) app: AppContext,
+    #[serde(default)]
+    pub(super) id: Option<String>,
+    #[serde(default)]
+    pub(super) name: Option<String>,
+    #[serde(default)]
+    pub(super) enabled: Option<bool>,
+}
+
+pub(super) async fn api_instantiate_task_preset(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<InstantiatePresetReq>,
+) -> Response {
+    let preset = match st.db.get_task_preset_async(&id).await {
+        Ok(Some(preset)) => preset,
+        Ok(None) => return ApiError::not_found("任务预设不存在").into_response(),
+        Err(error) => return ApiError::internal(error.to_string()).into_response(),
+    };
+    let expected_package = match crate::core::AppPackageId::new(preset.app_package.clone()) {
+        Ok(package) => package,
+        Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
+    };
+    if req.app.content_package.as_ref() != Some(&expected_package) {
+        return ApiError::bad_request("AppContext.content_package 与任务预设不匹配")
+            .into_response();
+    }
+    let enabled = req.enabled.unwrap_or(true);
+    let mut task = match TimerTask::new(
+        req.id
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string()),
+        req.name.unwrap_or_else(|| preset.name.clone()),
+        req.app,
+        preset.runner_id.clone(),
+        preset.entrypoint.clone(),
+        preset.payload.clone(),
+        preset.schedule.clone(),
+    ) {
+        Ok(task) => task,
+        Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
+    };
+    task.preset_id = Some(preset.id);
+    task.enabled = enabled;
+    task.state = if enabled {
+        TimerTaskState::Active
+    } else {
+        TimerTaskState::Suspended
+    };
+    task.suspend_reason = (!enabled).then(|| "disabled".to_string());
+    if let Err(error) = st.db.upsert_timer_task_async(&task).await {
+        return ApiError::internal(error.to_string()).into_response();
+    }
+    st.scheduler.notify_tasks_changed();
+    (StatusCode::CREATED, Json(timer_task_json(&task))).into_response()
 }

@@ -28,11 +28,16 @@ pub(crate) use store::{AppPackageStore, InstalledPackage};
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::sync::Arc;
 
     use tempfile::TempDir;
     use zip::write::SimpleFileOptions;
 
     use super::*;
+
+    use crate::config::Config;
+    use crate::core::AppContext;
+    use crate::timer_core::{ScheduleSpec, TimerCore, TimerTask, TimerTaskState};
 
     fn package_manifest(id: &str, version: &str, android: &str) -> Vec<u8> {
         format!("id = \"{id}\"\nversion = \"{version}\"\n[android]\npackages = [\"{android}\"]\n")
@@ -344,5 +349,67 @@ packages = ["com.example.game"]
             .resolve(&unsupported, &id)
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn uninstalling_last_package_version_suspends_tasks_without_deleting_them() {
+        let temp = TempDir::new().unwrap();
+        let cfg = Config {
+            data_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let db = Arc::new(crate::store::Store::open(&cfg).unwrap());
+        let timer = TimerCore::new(db.clone());
+        let store = AppPackageStore::new(temp.path());
+        let manifest = package_manifest("official.xxx", "1.2.0", "com.example.game");
+        let package = archive(vec![("manifest.toml", &manifest)]);
+        let installed = store.install_archive(&package).unwrap();
+        let task = TimerTask::new(
+            "task-1",
+            "Task",
+            AppContext::new(
+                crate::core::DeviceId::new("device-1").unwrap(),
+                crate::core::AndroidPackageName::new("com.example.game").unwrap(),
+                Some(crate::core::AppPackageId::new("official.xxx").unwrap()),
+            ),
+            "runner.example",
+            "entry",
+            serde_json::json!({}),
+            ScheduleSpec::new("cron", serde_json::json!({"expression": "* * * * *"})).unwrap(),
+        )
+        .unwrap();
+        db.upsert_timer_task_async(&task).await.unwrap();
+
+        let (removed, suspended) = store
+            .uninstall_and_update_tasks(
+                installed.manifest().id(),
+                installed.manifest().version(),
+                &timer,
+            )
+            .await
+            .unwrap();
+        assert!(removed);
+        assert_eq!(suspended, 1);
+        let saved = db.get_timer_task_async("task-1").await.unwrap().unwrap();
+        assert_eq!(saved.state, TimerTaskState::Suspended);
+        assert_eq!(
+            saved.suspend_reason.as_deref(),
+            Some("app package unavailable")
+        );
+
+        // A repeated lifecycle notification is idempotent and does not delete
+        // the persisted User Task.
+        assert_eq!(
+            store
+                .uninstall_and_update_tasks(
+                    installed.manifest().id(),
+                    installed.manifest().version(),
+                    &timer,
+                )
+                .await
+                .unwrap(),
+            (false, 0)
+        );
+        assert!(db.get_timer_task_async("task-1").await.unwrap().is_some());
     }
 }

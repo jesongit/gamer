@@ -6,8 +6,8 @@
 //! resources.  The current YAML/cron path lives in `timer_yaml` and is kept as
 //! an adapter for the existing HTTP API.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Notify;
 
-use crate::core::{AndroidPackageName, AppContext, AppPackageId, DeviceId};
+use crate::core::{AndroidPackageName, AppContext, AppPackageId, DeviceId, RunPayload, RunRequest};
 use crate::metrics::SchedulerEvent;
 use crate::run_manager::RunRecord;
 use crate::store::{Db, TimerTaskStorage};
@@ -37,6 +37,18 @@ impl ScheduleSpec {
             anyhow::bail!("schedule kind must not be empty");
         }
         Ok(Self { kind, value })
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.kind.trim().is_empty(),
+            "schedule kind must not be empty"
+        );
+        anyhow::ensure!(
+            !self.kind.chars().any(char::is_control),
+            "schedule kind contains a control character"
+        );
+        Ok(())
     }
 }
 
@@ -140,6 +152,7 @@ impl TimerTask {
                 "{field} contains a control character"
             );
         }
+        self.schedule.validate()?;
         Ok(())
     }
 
@@ -224,6 +237,7 @@ impl TaskPreset {
                 "{field} contains a control character"
             );
         }
+        self.schedule.validate()?;
         Ok(())
     }
 }
@@ -256,6 +270,83 @@ pub trait ScheduleExtension: Send + Sync {
         now: DateTime<Utc>,
         lookback: Duration,
     ) -> Result<Option<DateTime<Utc>>, String>;
+}
+
+/// Schedule extension registry. Timer Core asks this registry for instants;
+/// individual extensions own parsing and schedule semantics.
+pub struct ScheduleRegistry {
+    extensions: std::sync::RwLock<HashMap<String, Arc<dyn ScheduleExtension>>>,
+}
+
+impl Default for ScheduleRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScheduleRegistry {
+    pub fn new() -> Self {
+        Self {
+            extensions: std::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn register(
+        &self,
+        kind: impl Into<String>,
+        extension: Arc<dyn ScheduleExtension>,
+    ) -> anyhow::Result<()> {
+        let kind = kind.into();
+        anyhow::ensure!(
+            !kind.trim().is_empty(),
+            "schedule extension kind must not be empty"
+        );
+        let mut extensions = self.extensions.write().expect("schedule registry poisoned");
+        anyhow::ensure!(
+            !extensions.contains_key(&kind),
+            "schedule extension already registered: {kind}"
+        );
+        extensions.insert(kind, extension);
+        Ok(())
+    }
+
+    pub fn contains(&self, kind: &str) -> bool {
+        self.extensions
+            .read()
+            .expect("schedule registry poisoned")
+            .contains_key(kind)
+    }
+
+    fn get(&self, kind: &str) -> Option<Arc<dyn ScheduleExtension>> {
+        self.extensions
+            .read()
+            .expect("schedule registry poisoned")
+            .get(kind)
+            .cloned()
+    }
+}
+
+impl ScheduleExtension for ScheduleRegistry {
+    fn next_after(
+        &self,
+        schedule: &ScheduleSpec,
+        after: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, String> {
+        self.get(&schedule.kind)
+            .ok_or_else(|| format!("schedule extension unavailable: {}", schedule.kind))?
+            .next_after(schedule, after)
+    }
+
+    fn latest_due(
+        &self,
+        schedule: &ScheduleSpec,
+        now: DateTime<Utc>,
+        lookback: Duration,
+    ) -> Result<Option<DateTime<Utc>>, String> {
+        self.get(&schedule.kind)
+            .ok_or_else(|| format!("schedule extension unavailable: {}", schedule.kind))?
+            .latest_due(schedule, now, lookback)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -319,15 +410,122 @@ pub struct TimerRun {
 pub trait TimerRunner: Send + Sync {
     fn runner_id(&self) -> &str;
 
+    /// A registry/multiplexer can accept more than one runner id while a
+    /// concrete runner keeps the strict one-id default.
+    fn supports(&self, runner_id: &str) -> bool {
+        self.runner_id() == runner_id
+    }
+
     async fn submit(
         &self,
-        task: TimerTask,
+        request: RunRequest,
+        task_id: &str,
         scheduled_at: Option<i64>,
         on_complete: TimerCompletionHook,
     ) -> Result<TimerRun, TimerRunnerError>;
 
     #[allow(dead_code, reason = "used by the task cancellation lifecycle API")]
     async fn cancel(&self, run_id: &str) -> Result<(), TimerRunnerError>;
+}
+
+/// In-process runner registry used by Timer Core. It is the extension-facing
+/// registration point: adding a runner does not change scheduling or task
+/// persistence, and a missing id is reported when the task is triggered.
+pub struct TimerRunnerRegistry {
+    runners: std::sync::RwLock<HashMap<String, Arc<dyn TimerRunner>>>,
+}
+
+impl Default for TimerRunnerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TimerRunnerRegistry {
+    pub fn new() -> Self {
+        Self {
+            runners: std::sync::RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn register(&self, runner: Arc<dyn TimerRunner>) -> anyhow::Result<()> {
+        let runner_id = runner.runner_id().trim();
+        anyhow::ensure!(!runner_id.is_empty(), "runner id must not be empty");
+        let mut runners = self
+            .runners
+            .write()
+            .expect("timer runner registry poisoned");
+        anyhow::ensure!(
+            !runners.contains_key(runner_id),
+            "runner already registered: {runner_id}"
+        );
+        runners.insert(runner_id.to_string(), runner);
+        Ok(())
+    }
+
+    pub fn contains(&self, runner_id: &str) -> bool {
+        self.runners
+            .read()
+            .expect("timer runner registry poisoned")
+            .contains_key(runner_id)
+    }
+
+    fn get(&self, runner_id: &str) -> Option<Arc<dyn TimerRunner>> {
+        self.runners
+            .read()
+            .expect("timer runner registry poisoned")
+            .get(runner_id)
+            .cloned()
+    }
+}
+
+#[async_trait]
+impl TimerRunner for TimerRunnerRegistry {
+    fn runner_id(&self) -> &str {
+        "<timer-runner-registry>"
+    }
+
+    fn supports(&self, runner_id: &str) -> bool {
+        self.contains(runner_id)
+    }
+
+    async fn submit(
+        &self,
+        request: RunRequest,
+        task_id: &str,
+        scheduled_at: Option<i64>,
+        on_complete: TimerCompletionHook,
+    ) -> Result<TimerRun, TimerRunnerError> {
+        let Some(runner) = self.get(&request.runner_id) else {
+            return Err(TimerRunnerError::DependencyMissing(format!(
+                "runner unavailable: {}",
+                request.runner_id
+            )));
+        };
+        runner
+            .submit(request, task_id, scheduled_at, on_complete)
+            .await
+    }
+
+    async fn cancel(&self, run_id: &str) -> Result<(), TimerRunnerError> {
+        let runners = self
+            .runners
+            .read()
+            .expect("timer runner registry poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut last_error = None;
+        for runner in runners {
+            match runner.cancel(run_id).await {
+                Ok(()) => return Ok(()),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            TimerRunnerError::DependencyMissing(format!("runner unavailable for run: {run_id}"))
+        }))
+    }
 }
 
 /// Compatibility construction seam used by the existing three-argument
@@ -347,8 +545,14 @@ pub struct TimerCore {
     db: Db,
     clock: Arc<dyn Clock>,
     wakeup: Notify,
+    completion_notify: Arc<Notify>,
+    completion_generation: Arc<AtomicU64>,
     started: AtomicBool,
     active_runs: Arc<Mutex<HashMap<String, String>>>,
+    /// A runner is allowed to complete synchronously from `submit`. Keep a
+    /// small hand-off set so that such a completion cannot be lost between
+    /// the callback and the active-run registration below.
+    completed_before_registration: Arc<Mutex<HashSet<String>>>,
 }
 
 #[allow(
@@ -365,8 +569,11 @@ impl TimerCore {
             db,
             clock,
             wakeup: Notify::new(),
+            completion_notify: Arc::new(Notify::new()),
+            completion_generation: Arc::new(AtomicU64::new(0)),
             started: AtomicBool::new(false),
             active_runs: Arc::new(Mutex::new(HashMap::new())),
+            completed_before_registration: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -376,6 +583,26 @@ impl TimerCore {
 
     pub fn notify_changed(&self) {
         self.wakeup.notify_one();
+    }
+
+    /// Return a monotonic completion event cursor for consumers that need to
+    /// await bookkeeping without polling task or run state.
+    pub fn completion_generation(&self) -> u64 {
+        self.completion_generation.load(Ordering::Acquire)
+    }
+
+    /// Wait until at least one runner completion has been persisted by the
+    /// Timer Core completion handler. The cursor makes a notification that
+    /// raced with the caller's snapshot observable instead of lost.
+    pub async fn wait_for_completion(&self, after: u64) -> u64 {
+        loop {
+            let notified = self.completion_notify.notified();
+            let current = self.completion_generation();
+            if current > after {
+                return current;
+            }
+            notified.await;
+        }
     }
 
     pub async fn save_task(&self, task: &TimerTask) -> anyhow::Result<()> {
@@ -451,12 +678,12 @@ impl TimerCore {
                                     None
                                 }
                                 Err(error) => {
-                                    tracing::warn!(task = %task.id, %error, "timer schedule extension rejected task");
+                                    self.reject_schedule(&task, error).await;
                                     None
                                 }
                             },
                             Err(error) => {
-                                tracing::warn!(task = %task.id, %error, "timer schedule extension rejected task");
+                                self.reject_schedule(&task, error).await;
                                 None
                             }
                         }
@@ -482,12 +709,12 @@ impl TimerCore {
                                 None
                             }
                             Err(error) => {
-                                tracing::warn!(task = %task.id, %error, "timer schedule extension rejected task");
+                                self.reject_schedule(&task, error).await;
                                 None
                             }
                         },
                         Err(error) => {
-                            tracing::warn!(task = %task.id, %error, "timer schedule extension rejected task");
+                            self.reject_schedule(&task, error).await;
                             None
                         }
                     },
@@ -497,8 +724,10 @@ impl TimerCore {
                     next_wakeup = min_instant(next_wakeup, due);
                     continue;
                 }
-                // Advance the persisted cursor before submitting.  A crash
-                // after this point is recovered by scheduled_runs' claim.
+                // Advance the persisted cursor before submitting. The unique
+                // scheduled-run claim below makes repeated dispatches
+                // idempotent after a restart; the cursor itself prevents the
+                // same in-memory loop from repeatedly seeing this occurrence.
                 match extension.next_after(&task.schedule, now) {
                     Ok(next) => {
                         task.next_wakeup = next;
@@ -518,7 +747,8 @@ impl TimerCore {
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(task = %task.id, %error, "timer task has no next wakeup");
+                        self.reject_schedule(&task, error).await;
+                        continue;
                     }
                 }
                 self.dispatch(task, Some(due.timestamp()), runner.clone())
@@ -567,7 +797,7 @@ impl TimerCore {
                 }
             }
         }
-        if runner.runner_id() != task.runner_id {
+        if !runner.supports(&task.runner_id) {
             let reason = format!("runner unavailable: {}", task.runner_id);
             self.db
                 .metrics()
@@ -577,14 +807,43 @@ impl TimerCore {
                 .await;
             return;
         }
+        let request = match RunRequest::for_app(
+            task.app.clone(),
+            task.runner_id.clone(),
+            task.entrypoint.clone(),
+            RunPayload::new(task.payload.clone()),
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                self.handle_runner_error(
+                    &task,
+                    scheduled_at,
+                    TimerRunnerError::Invalid(error.to_string()),
+                )
+                .await;
+                return;
+            }
+        };
         let run_id = task.id.clone();
         let completion = self.completion_hook(task.id.clone(), scheduled_at);
-        match runner.submit(task.clone(), scheduled_at, completion).await {
+        match runner
+            .submit(request, &task.id, scheduled_at, completion)
+            .await
+        {
             Ok(run) => {
-                self.active_runs
-                    .lock()
-                    .expect("timer active run mutex poisoned")
-                    .insert(run_id, run.run_id.clone());
+                {
+                    let mut active_runs_guard = self
+                        .active_runs
+                        .lock()
+                        .expect("timer active run mutex poisoned");
+                    let mut completed_before_registration = self
+                        .completed_before_registration
+                        .lock()
+                        .expect("timer completed-run mutex poisoned");
+                    if !completed_before_registration.remove(&run.run_id) {
+                        active_runs_guard.insert(run_id, run.run_id.clone());
+                    }
+                }
                 if let Some(scheduled_at) = scheduled_at {
                     if let Err(error) = self
                         .db
@@ -638,6 +897,17 @@ impl TimerCore {
             .await;
     }
 
+    async fn reject_schedule(&self, task: &TimerTask, error: String) {
+        let reason = format!("schedule unavailable: {error}");
+        tracing::warn!(task = %task.id, %reason, "timer schedule rejected task");
+        let _ = self.db.suspend_timer_task_async(&task.id, &reason).await;
+        self.db
+            .metrics()
+            .record_scheduler_event(SchedulerEvent::Failed);
+        self.finish_rejected(task, None, "failed", None, Some(&reason))
+            .await;
+    }
+
     async fn finish_rejected(
         &self,
         task: &TimerTask,
@@ -666,13 +936,33 @@ impl TimerCore {
     fn completion_hook(&self, _task_id: String, _scheduled_at: Option<i64>) -> TimerCompletionHook {
         let db = self.db.clone();
         let active_runs = self.active_runs.clone();
+        let completed_before_registration = self.completed_before_registration.clone();
+        let completion_generation = self.completion_generation.clone();
+        let completion_notify = self.completion_notify.clone();
         Arc::new(move |completion| {
             let db = db.clone();
             let active_runs = active_runs.clone();
+            let completed_before_registration = completed_before_registration.clone();
+            let completion_generation = completion_generation.clone();
+            let completion_notify = completion_notify.clone();
+            let task_id = completion.task_id.clone();
+            let run_id = completion.run_id.clone();
+            let mut active_runs_guard =
+                active_runs.lock().expect("timer active run mutex poisoned");
+            let mut completed_before_registration_guard = completed_before_registration
+                .lock()
+                .expect("timer completed-run mutex poisoned");
+            if active_runs_guard
+                .get(&task_id)
+                .is_some_and(|active_run_id| active_run_id == &run_id)
+            {
+                active_runs_guard.remove(&task_id);
+            } else {
+                completed_before_registration_guard.insert(run_id);
+            }
             // RunManager calls FinishHook synchronously from the run task.  DB
             // writes remain asynchronous and event-driven, never a poll loop.
             tokio::spawn(async move {
-                let task_id = completion.task_id.clone();
                 let scheduled_at = completion.scheduled_at;
                 let (state, label, error) = match &completion.outcome {
                     TimerOutcome::Success => ("success", "成功", None),
@@ -693,10 +983,8 @@ impl TimerCore {
                 let _ = db
                     .update_timer_task_result_async(&task_id, label, error)
                     .await;
-                active_runs
-                    .lock()
-                    .expect("timer active run mutex poisoned")
-                    .remove(&task_id);
+                completion_generation.fetch_add(1, Ordering::Release);
+                completion_notify.notify_waiters();
             });
         })
     }
@@ -706,18 +994,44 @@ impl TimerCore {
         task: TimerTask,
         runner: Arc<dyn TimerRunner>,
     ) -> Result<TimerRun, TimerRunnerError> {
-        if runner.runner_id() != task.runner_id {
-            return Err(TimerRunnerError::DependencyMissing(format!(
-                "runner unavailable: {}",
-                task.runner_id
-            )));
+        if !runner.supports(&task.runner_id) {
+            let reason = format!("runner unavailable: {}", task.runner_id);
+            self.db
+                .suspend_timer_task_async(&task.id, &reason)
+                .await
+                .map_err(|error| TimerRunnerError::Other(error.to_string()))?;
+            self.db
+                .update_timer_task_result_async(&task.id, "失败", Some(&reason))
+                .await
+                .map_err(|error| TimerRunnerError::Other(error.to_string()))?;
+            self.notify_changed();
+            return Err(TimerRunnerError::DependencyMissing(reason));
         }
+        if !task.is_schedulable() {
+            return Err(TimerRunnerError::Invalid(
+                "timer task is not active".to_string(),
+            ));
+        }
+        let request = RunRequest::for_app(
+            task.app.clone(),
+            task.runner_id.clone(),
+            task.entrypoint.clone(),
+            RunPayload::new(task.payload.clone()),
+        )
+        .map_err(|error| TimerRunnerError::Invalid(error.to_string()))?;
         let completion = self.completion_hook(task.id.clone(), None);
-        let run = runner.submit(task.clone(), None, completion).await?;
-        self.active_runs
+        let run = runner.submit(request, &task.id, None, completion).await?;
+        let mut active_runs_guard = self
+            .active_runs
             .lock()
-            .expect("timer active run mutex poisoned")
-            .insert(task.id, run.run_id.clone());
+            .expect("timer active run mutex poisoned");
+        let mut completed_before_registration = self
+            .completed_before_registration
+            .lock()
+            .expect("timer completed-run mutex poisoned");
+        if !completed_before_registration.remove(&run.run_id) {
+            active_runs_guard.insert(task.id, run.run_id.clone());
+        }
         Ok(run)
     }
 
@@ -762,6 +1076,10 @@ impl TimerCore {
             .get_timer_task_async(task_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("timer task not found: {task_id}"))?;
+        anyhow::ensure!(
+            task.state != TimerTaskState::Cancelled,
+            "cancelled timer task cannot be resumed"
+        );
         let next = extension
             .next_after(&task.schedule, self.clock.now())
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -778,12 +1096,29 @@ impl TimerCore {
     /// App Package lifecycle hook.  It intentionally changes state only; the
     /// persisted user schedule remains available for a later resume.
     pub async fn on_app_package_uninstalled(&self, package: &str) -> anyhow::Result<usize> {
-        let result = self
-            .db
-            .suspend_timer_tasks_for_package_async(package, "app package unavailable")
-            .await;
+        // Enumerate first so a repeated uninstall notification is a no-op and
+        // cancelled tasks are not accidentally changed into suspended tasks.
+        // The bulk Store helper remains available for older callers, while
+        // this lifecycle boundary needs the stronger idempotent semantics.
+        let tasks = self.db.list_timer_tasks_async().await?;
+        let matching = tasks
+            .into_iter()
+            .filter(|task| task.is_schedulable())
+            .filter(|task| {
+                task.app
+                    .content_package
+                    .as_ref()
+                    .is_some_and(|value| value.as_str() == package)
+                    || task.app.android_package.as_str() == package
+            })
+            .collect::<Vec<_>>();
+        for task in &matching {
+            self.db
+                .suspend_timer_task_async(&task.id, "app package unavailable")
+                .await?;
+        }
         self.notify_changed();
-        result
+        Ok(matching.len())
     }
 
     pub async fn next_wakeup(&self) -> anyhow::Result<Option<DateTime<Utc>>> {
@@ -821,33 +1156,40 @@ mod tests {
     use async_trait::async_trait;
 
     struct FakeRunner {
+        id: &'static str,
         submissions: AtomicUsize,
         cancellations: AtomicUsize,
         complete_immediately: bool,
+        submit_error: Option<TimerRunnerError>,
     }
 
     #[async_trait]
     impl TimerRunner for FakeRunner {
         fn runner_id(&self) -> &str {
-            "fake.runner"
+            self.id
         }
 
         async fn submit(
             &self,
-            task: TimerTask,
+            request: RunRequest,
+            task_id: &str,
             scheduled_at: Option<i64>,
             on_complete: TimerCompletionHook,
         ) -> Result<TimerRun, TimerRunnerError> {
             self.submissions.fetch_add(1, Ordering::SeqCst);
+            if let Some(error) = self.submit_error.clone() {
+                return Err(error);
+            }
             let run_id = format!("run-{}", self.submissions.load(Ordering::SeqCst));
             if self.complete_immediately {
                 on_complete(TimerCompletion {
-                    task_id: task.id,
+                    task_id: task_id.to_string(),
                     scheduled_at,
                     run_id: run_id.clone(),
                     outcome: TimerOutcome::Success,
                 });
             }
+            assert_eq!(request.runner_id, self.id);
             Ok(TimerRun { run_id })
         }
 
@@ -915,15 +1257,18 @@ mod tests {
         let task = test_task();
         db.upsert_timer_task_async(&task).await.unwrap();
         let runner = Arc::new(FakeRunner {
+            id: "fake.runner",
             submissions: AtomicUsize::new(0),
             cancellations: AtomicUsize::new(0),
             complete_immediately: true,
+            submit_error: None,
         });
         let core = TimerCore::new(db.clone());
+        let completion_before = core.completion_generation();
 
         core.dispatch(task.clone(), Some(42), runner.clone()).await;
         core.dispatch(task, Some(42), runner.clone()).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        core.wait_for_completion(completion_before).await;
 
         assert_eq!(runner.submissions.load(Ordering::SeqCst), 1);
         assert_eq!(db.scheduled_run_state("task-1", 42), "success");
@@ -939,6 +1284,189 @@ mod tests {
 
         drop(runner);
         drop(core);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn synchronous_completion_does_not_retain_an_active_run() {
+        let (db, dir) = test_db("sync-completion");
+        let task = test_task();
+        db.upsert_timer_task_async(&task).await.unwrap();
+        let runner = Arc::new(FakeRunner {
+            id: "fake.runner",
+            submissions: AtomicUsize::new(0),
+            cancellations: AtomicUsize::new(0),
+            complete_immediately: true,
+            submit_error: None,
+        });
+        let core = TimerCore::new(db.clone());
+        let completion_before = core.completion_generation();
+        let run = core.submit_now(task, runner.clone()).await.unwrap();
+        core.wait_for_completion(completion_before).await;
+
+        core.cancel_task("task-1", runner.clone()).await.unwrap();
+        assert_eq!(runner.cancellations.load(Ordering::SeqCst), 0);
+        assert_eq!(run.run_id, "run-1");
+        drop(core);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_runner_is_a_persisted_dependency_error_not_a_startup_failure() {
+        let (db, dir) = test_db("missing-runner");
+        let mut task = test_task();
+        task.runner_id = "missing.runner".into();
+        db.upsert_timer_task_async(&task).await.unwrap();
+        let runner = Arc::new(FakeRunner {
+            id: "fake.runner",
+            submissions: AtomicUsize::new(0),
+            cancellations: AtomicUsize::new(0),
+            complete_immediately: false,
+            submit_error: None,
+        });
+        TimerCore::new(db.clone())
+            .dispatch(task, Some(7), runner)
+            .await;
+
+        let saved = db.get_timer_task_async("task-1").await.unwrap().unwrap();
+        assert_eq!(saved.state, TimerTaskState::Suspended);
+        assert_eq!(
+            saved.suspend_reason.as_deref(),
+            Some("runner unavailable: missing.runner")
+        );
+        assert_eq!(db.scheduled_run_state("task-1", 7), "failed");
+        assert_eq!(saved.last_result.as_deref(), Some("失败"));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn runner_failure_is_recovered_and_recorded_for_the_trigger() {
+        let (db, dir) = test_db("runner-failure");
+        let task = test_task();
+        db.upsert_timer_task_async(&task).await.unwrap();
+        let runner = Arc::new(FakeRunner {
+            id: "fake.runner",
+            submissions: AtomicUsize::new(0),
+            cancellations: AtomicUsize::new(0),
+            complete_immediately: false,
+            submit_error: Some(TimerRunnerError::Invalid("runner rejected payload".into())),
+        });
+        TimerCore::new(db.clone())
+            .dispatch(task, Some(8), runner)
+            .await;
+
+        assert_eq!(db.scheduled_run_state("task-1", 8), "failed");
+        let saved = db.get_timer_task_async("task-1").await.unwrap().unwrap();
+        assert_eq!(saved.state, TimerTaskState::Active);
+        assert_eq!(saved.last_result.as_deref(), Some("失败"));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_schedule_extension_suspends_task_and_records_failure() {
+        let (db, dir) = test_db("missing-schedule");
+        let mut task = test_task();
+        task.schedule = ScheduleSpec::new("missing.schedule", serde_json::json!({})).unwrap();
+        db.upsert_timer_task_async(&task).await.unwrap();
+        let schedules = ScheduleRegistry::new();
+        let error = schedules
+            .next_after(&task.schedule, Utc::now())
+            .unwrap_err();
+        assert_eq!(error, "schedule extension unavailable: missing.schedule");
+        db.suspend_timer_task_async(&task.id, &error).await.unwrap();
+        let saved = db.get_timer_task_async(&task.id).await.unwrap().unwrap();
+        assert_eq!(saved.state, TimerTaskState::Suspended);
+        assert_eq!(saved.suspend_reason.as_deref(), Some(error.as_str()));
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn registry_routes_the_same_generic_request_to_different_runners() {
+        let (db, dir) = test_db("runner-registry");
+        let mut task = test_task();
+        task.runner_id = "second.runner".into();
+        db.upsert_timer_task_async(&task).await.unwrap();
+        let first = Arc::new(FakeRunner {
+            id: "fake.runner",
+            submissions: AtomicUsize::new(0),
+            cancellations: AtomicUsize::new(0),
+            complete_immediately: false,
+            submit_error: None,
+        });
+        let second = Arc::new(FakeRunner {
+            id: "second.runner",
+            submissions: AtomicUsize::new(0),
+            cancellations: AtomicUsize::new(0),
+            complete_immediately: false,
+            submit_error: None,
+        });
+        let registry = Arc::new(TimerRunnerRegistry::new());
+        registry.register(first).unwrap();
+        registry.register(second.clone()).unwrap();
+        TimerCore::new(db.clone())
+            .dispatch(task, Some(9), registry)
+            .await;
+        assert_eq!(second.submissions.load(Ordering::SeqCst), 1);
+        assert_eq!(db.scheduled_run_state("task-1", 9), "running");
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn suspend_resume_preserves_schedule_and_repeated_transitions_are_safe() {
+        let (db, dir) = test_db("suspend-resume");
+        let mut task = test_task();
+        task.schedule =
+            ScheduleSpec::new("cron", serde_json::json!({"expression": "*/5 * * * *"})).unwrap();
+        db.upsert_timer_task_async(&task).await.unwrap();
+        let core = TimerCore::new(db.clone());
+        core.suspend_task("task-1", "dependency unavailable")
+            .await
+            .unwrap();
+        core.suspend_task("task-1", "dependency unavailable")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_timer_task_async("task-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            TimerTaskState::Suspended
+        );
+        core.resume_task("task-1", &crate::cron_extension::CronExtension)
+            .await
+            .unwrap();
+        core.resume_task("task-1", &crate::cron_extension::CronExtension)
+            .await
+            .unwrap();
+        let resumed = db.get_timer_task_async("task-1").await.unwrap().unwrap();
+        assert_eq!(resumed.state, TimerTaskState::Active);
+        assert!(resumed.next_wakeup.is_some());
+        assert_eq!(resumed.schedule.kind, "cron");
+        drop(core);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn persisted_wakeup_is_available_to_a_new_core_after_restart() {
+        let (db, dir) = test_db("restore");
+        let mut task = test_task();
+        let wakeup = Utc::now() + chrono::Duration::minutes(5);
+        task.next_wakeup = Some(wakeup);
+        db.upsert_timer_task_async(&task).await.unwrap();
+        drop(TimerCore::new(db.clone()));
+        let expected = DateTime::<Utc>::from_timestamp(wakeup.timestamp(), 0);
+        assert_eq!(
+            TimerCore::new(db.clone()).next_wakeup().await.unwrap(),
+            expected
+        );
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }
