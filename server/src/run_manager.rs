@@ -16,8 +16,8 @@
 //! ```
 //!
 //! 退出路径保障（RAII）：run 任务体内持两把 guard——
-//! - [`OccupyGuard`]：prepare 成功后占用（对应 `DeviceManager::run_begin`），drop 时
-//!   经 executor 归还计数；panic 展开同样触发。
+//! - [`ActivityLease`]：prepare 成功后由执行器取得，drop 时释放具体活动资源；
+//!   panic 展开同样触发。
 //! - [`FinishGuard`]：整个任务体作用域，drop 时从注册表摘除 + 写终态档案；
 //!   正常路径已显式置终态则按显式值归档，残留非终态（panic/忘记置位）判 failed，
 //!   取消请求在册判 cancelled。tokio spawn 任务 panic 时 future 被 drop，
@@ -34,6 +34,8 @@ use chrono::{DateTime, Utc};
 use futures_util::future::BoxFuture;
 use serde::Serialize;
 use tracing::{debug, info, warn};
+
+use crate::core::{ActivityLease, RunContext, RunId, RunRequest};
 
 /// 运行来源
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -74,6 +76,11 @@ impl RunState {
 pub struct RunRecord {
     pub run_id: String,
     pub device_id: String,
+    /// Generic runner identity.  `script_id` below is retained as the legacy
+    /// display field for the existing HTTP contract.
+    pub runner_id: String,
+    pub entrypoint: String,
+    /// Compatibility display label; this is not interpreted by RunManager.
     pub script_id: String,
     pub source: RunSource,
     /// 关联定时任务 id（manual 为 null）
@@ -108,6 +115,8 @@ impl RunRecord {
             "error": "device_busy",
             "run_id": self.run_id,
             "script_id": self.script_id,
+            "runner_id": self.runner_id,
+            "entrypoint": self.entrypoint,
             "source": self.source,
             "started_at": self.started_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         })
@@ -117,18 +126,26 @@ impl RunRecord {
 /// 提交给执行器的一次运行请求
 #[derive(Debug, Clone)]
 pub struct StartRequest {
-    pub device_id: String,
-    /// 统一运行目标：脚本（yaml/，含从步骤运行）/ 函数测试（func/）
-    pub target: crate::engine::RunTarget,
+    /// Runner-agnostic request.  Runner-specific target decoding belongs to
+    /// the selected executor adapter, never to RunManager.
+    pub request: RunRequest,
     pub source: RunSource,
     /// 关联定时任务 id（manual 为 null）
     pub task_id: Option<String>,
     /// 计划触发点 unix 秒 UTC（scheduled 来源携带）
     pub scheduled_at: Option<i64>,
-    /// 稀疏类型化参数覆盖（API/任务快照按七类解析；引擎按快照声明绑定默认值）
-    pub args: Vec<(String, crate::script_v2::TypedValue)>,
     /// 实时逐条落库日志（Console 是；调度批量为 false，由完成钩子批量写）
     pub realtime_logs: bool,
+}
+
+impl StartRequest {
+    pub fn device_id(&self) -> &str {
+        self.request.device_id.as_str()
+    }
+
+    pub fn display_label(&self) -> &str {
+        self.request.entrypoint.as_str()
+    }
 }
 
 /// 运行终态结果
@@ -150,23 +167,26 @@ impl RunOutcome {
 /// 完成钩子：终态落定后同步回调（调度器借此更新任务 last_result/last_run_at）
 pub type FinishHook = Arc<dyn Fn(&RunRecord, &RunOutcome) + Send + Sync>;
 
-/// 执行器接缝（窄接口，阶段 6 大拆分不动它）：
-/// 生产装配 [`EngineExecutor`] 直连 Runner+DeviceManager；
-/// 仲裁层单测装配假执行器，不碰真设备。
+/// 执行器接缝：RunManager 只传递通用请求和运行上下文；具体 runner 通过
+/// adapter 解释 payload，并返回一个自有的 activity lease。
 pub trait RunExecutor: Send + Sync + 'static {
-    /// 启动前准备（生产=确保 scrcpy 会话在线）。失败 → run 直接 failed，
-    /// 此时尚未 occupy（不占设备运行计数）。
-    fn prepare<'a>(&'a self, req: &'a StartRequest) -> BoxFuture<'a, anyhow::Result<()>>;
-    /// 执行脚本主体。取消经 stop 标志传递（引擎轮询退出）。
+    /// 启动前准备（例如连接采集会话）。失败 → run 直接 failed。
+    fn prepare<'a>(
+        &'a self,
+        context: &'a RunContext,
+        request: &'a RunRequest,
+    ) -> BoxFuture<'a, anyhow::Result<()>>;
+    /// 执行主体。取消经 stop 标志传递给具体 runner。
     fn execute<'a>(
         &'a self,
-        req: &'a StartRequest,
+        context: &'a RunContext,
+        request: &'a RunRequest,
+        realtime_logs: bool,
         stop: Arc<AtomicBool>,
     ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>>;
-    /// 占用设备（生产=DeviceManager::run_begin：空闲低功耗守卫 +1 + notify_activity）
-    fn occupy(&self, device_id: &str);
-    /// 释放设备（生产=DeviceManager::run_end）；必须与 occupy 严格配对
-    fn release(&self, device_id: &str);
+    /// Acquire a generic lease.  RunManager owns the returned guard until the
+    /// execution task ends, so panic/cancel paths release activity as well.
+    fn acquire(&self, context: &RunContext) -> anyhow::Result<Box<dyn ActivityLease>>;
 }
 
 /// 提交失败
@@ -294,7 +314,7 @@ impl RunManager {
         }
         // 锁序恒定：active_by_device 先于 runs（finalize 只做两次独立短锁，无嵌套）
         let mut dev = self.active_by_device.lock().unwrap();
-        if let Some(existing_rid) = dev.get(&req.device_id) {
+        if let Some(existing_rid) = dev.get(req.device_id()) {
             let cur = self
                 .runs
                 .lock()
@@ -305,8 +325,8 @@ impl RunManager {
                 Some(rec) => Err(StartError::Conflict(Box::new(rec))),
                 None => {
                     // 幽灵条目（活动表指向已消失记录——理论不可达，防御性清理后放行）
-                    warn!(device = %req.device_id, "stale device slot without run entry, reclaimed");
-                    dev.remove(&req.device_id);
+                    warn!(device = %req.device_id(), "stale device slot without run entry, reclaimed");
+                    dev.remove(req.device_id());
                     self.submit_inner(req, on_finish, &mut dev)
                 }
             };
@@ -323,8 +343,10 @@ impl RunManager {
         let run_id = uuid::Uuid::new_v4().to_string();
         let record = RunRecord {
             run_id: run_id.clone(),
-            device_id: req.device_id.clone(),
-            script_id: req.target.label(),
+            device_id: req.device_id().to_string(),
+            runner_id: req.request.runner_id.clone(),
+            entrypoint: req.request.entrypoint.clone(),
+            script_id: req.display_label().to_string(),
             source: req.source,
             task_id: req.task_id.clone(),
             scheduled_at: req.scheduled_at,
@@ -336,7 +358,8 @@ impl RunManager {
         info!(
             run_id = %run_id,
             device = %record.device_id,
-            script = %record.script_id,
+            runner = %record.runner_id,
+            entrypoint = %record.entrypoint,
             source = ?record.source,
             task_id = record.task_id.as_deref().unwrap_or("-"),
             "run accepted"
@@ -349,7 +372,7 @@ impl RunManager {
                 cancel_requested: false,
             },
         );
-        dev.insert(req.device_id.clone(), run_id.clone());
+        dev.insert(req.device_id().to_string(), run_id.clone());
         self.state_changed.notify_waiters();
 
         let mgr = self.clone();
@@ -374,6 +397,10 @@ impl RunManager {
             run_id: run_id.clone(),
             on_finish,
         };
+        let context = RunContext::new(
+            RunId::new(run_id.clone()).expect("run ids are generated UUIDs"),
+            req.request.app.clone(),
+        );
         // starting 阶段取消短路：不入执行器，但仍需调用完成钩子，
         // 否则 scheduled_runs 会一直停在 running。
         if self.is_cancelled(&run_id) {
@@ -381,7 +408,7 @@ impl RunManager {
             drop(finish);
             return;
         }
-        let prepare = self.executor.prepare(&req).await;
+        let prepare = self.executor.prepare(&context, &req.request).await;
         if let Err(e) = prepare {
             warn!(run_id = %run_id, err = %format!("{e:#}"), "run prepare (connect) failed");
             if self.is_cancelled(&run_id) {
@@ -395,28 +422,38 @@ impl RunManager {
             drop(finish);
             return;
         }
-        // 占用计数：RAII 配对 release（executor.release / 生产=run_end），
+        // 活动租约：RAII 配对 release，
         // panic 展开时 Drop 必然归还
-        self.executor.occupy(&req.device_id);
-        let _occupy = OccupyGuard {
-            exec: self.executor.clone(),
-            device_id: req.device_id.clone(),
+        let _lease = match self.executor.acquire(&context) {
+            Ok(lease) => lease,
+            Err(e) => {
+                finish.complete(
+                    &run_id,
+                    RunOutcome::Failed(format!("设备活动租约获取失败: {e:#}"), vec![]),
+                );
+                return;
+            }
         };
         self.mark_state(&run_id, RunState::Running, None);
 
         // starting→running 竞态取消：置位后再补一次检查
         if self.is_cancelled(&run_id) {
             finish.complete(&run_id, RunOutcome::Cancelled(vec![]));
-            return; // _occupy → finish → _inflight 逆序 drop
+            return; // _lease → finish → _inflight 逆序 drop
         }
 
-        let outcome = self.execute(req, run_id.clone()).await;
+        let outcome = self.execute(req, context, run_id.clone()).await;
         finish.complete(&run_id, outcome);
-        // finish / occupy / inflight 依声明逆序自动释放
+        // finish / lease / inflight 依声明逆序自动释放
     }
 
     /// 执行主体（独立函数便于阅读）：入口已过取消闸，出口把结果归类
-    async fn execute(self: &Arc<Self>, req: Arc<StartRequest>, run_id: String) -> RunOutcome {
+    async fn execute(
+        self: &Arc<Self>,
+        req: Arc<StartRequest>,
+        context: RunContext,
+        run_id: String,
+    ) -> RunOutcome {
         let entry_stop = self
             .runs
             .lock()
@@ -427,7 +464,11 @@ impl RunManager {
             return RunOutcome::Failed("注册表条目丢失".into(), vec![]);
         };
         let was_cancelled = || self.cancel_requested(&run_id);
-        match self.executor.execute(&req, stop.clone()).await {
+        match self
+            .executor
+            .execute(&context, &req.request, req.realtime_logs, stop.clone())
+            .await
+        {
             Ok(logs) => {
                 if was_cancelled() {
                     RunOutcome::Cancelled(logs)
@@ -529,6 +570,8 @@ impl RunManager {
         self.get_run(run_id).unwrap_or_else(|| RunRecord {
             run_id: run_id.to_string(),
             device_id: String::new(),
+            runner_id: String::new(),
+            entrypoint: String::new(),
             script_id: String::new(),
             source: RunSource::Manual,
             task_id: None,
@@ -687,18 +730,6 @@ impl Drop for CountGuard<'_> {
     }
 }
 
-/// 占用计数 guard：Drop 归还（release 与 occupy 严格配对；panic 展开也触发）
-struct OccupyGuard {
-    exec: Arc<dyn RunExecutor>,
-    device_id: String,
-}
-
-impl Drop for OccupyGuard {
-    fn drop(&mut self) {
-        self.exec.release(&self.device_id);
-    }
-}
-
 /// 注册表终态 guard：Drop 保证任何退出路径（含 panic 展开）都收敛入档并释放设备槽
 struct FinishGuard {
     mgr: Arc<RunManager>,
@@ -751,85 +782,6 @@ impl Drop for FinishGuard {
 }
 
 // ---------------------------------------------------------------------------
-// 生产执行器：直连 Runner + DeviceManager
-// ---------------------------------------------------------------------------
-
-pub struct EngineExecutor {
-    runner: Arc<crate::engine::Runner>,
-    devices: Arc<crate::device::DeviceManager>,
-    db: crate::store::Db,
-}
-
-impl EngineExecutor {
-    pub fn new(
-        runner: Arc<crate::engine::Runner>,
-        devices: Arc<crate::device::DeviceManager>,
-        db: crate::store::Db,
-    ) -> Self {
-        Self {
-            runner,
-            devices,
-            db,
-        }
-    }
-}
-
-impl RunExecutor for EngineExecutor {
-    fn prepare<'a>(&'a self, req: &'a StartRequest) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async move {
-            if self.devices.session(&req.device_id).is_none() {
-                self.devices.connect_device(&req.device_id).await?;
-            }
-            Ok(())
-        })
-    }
-
-    fn execute<'a>(
-        &'a self,
-        req: &'a StartRequest,
-        stop: Arc<AtomicBool>,
-    ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
-        Box::pin(async move {
-            // 实时日志：每条立刻写 DB（Console 页轮询实时显示）；调度批量为 None，
-            // 由完成钩子统一落库
-            let log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>> = if req.realtime_logs {
-                let db = self.db.clone();
-                let device_id = req.device_id.clone();
-                let script_id = req.target.label();
-                Some(Arc::new(move |level, msg| {
-                    let db = db.clone();
-                    let device_id = device_id.clone();
-                    let script_id = script_id.clone();
-                    tokio::spawn(async move {
-                        if let Err(error) =
-                            db.add_log_async(&device_id, &script_id, &level, &msg).await
-                        {
-                            tracing::warn!(%error, "runtime log write failed");
-                        }
-                    });
-                }))
-            } else {
-                None
-            };
-            let spec = crate::engine::RunSpec {
-                device_id: req.device_id.clone(),
-                target: req.target.clone(),
-                args: req.args.clone(),
-            };
-            self.runner.run(&spec, stop, log_cb).await
-        })
-    }
-
-    fn occupy(&self, device_id: &str) {
-        self.devices.run_begin(device_id);
-    }
-
-    fn release(&self, device_id: &str) {
-        self.devices.run_end(device_id);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // 测试：仲裁层全场景走假执行器（连接/执行可控、可观测）
 // ---------------------------------------------------------------------------
 
@@ -846,7 +798,7 @@ mod tests {
         step_error: Option<String>,
         prepare_gate: Option<Arc<tokio::sync::Notify>>,
         prepare_started: Arc<tokio::sync::Notify>,
-        state: PlMutex<FakeState>,
+        state: Arc<PlMutex<FakeState>>,
     }
 
     struct FakeState {
@@ -860,6 +812,16 @@ mod tests {
         last_stops: Vec<Arc<AtomicBool>>,
     }
 
+    struct FakeLease(Arc<PlMutex<FakeState>>);
+
+    impl ActivityLease for FakeLease {}
+
+    impl Drop for FakeLease {
+        fn drop(&mut self) {
+            self.0.lock().releases += 1;
+        }
+    }
+
     impl Default for FakeExecutor {
         fn default() -> Self {
             Self {
@@ -868,7 +830,7 @@ mod tests {
                 step_error: None,
                 prepare_gate: None,
                 prepare_started: Arc::new(tokio::sync::Notify::new()),
-                state: PlMutex::new(FakeState {
+                state: Arc::new(PlMutex::new(FakeState {
                     prepare_calls: 0,
                     occupies: 0,
                     releases: 0,
@@ -876,7 +838,7 @@ mod tests {
                     cur_in_exec: 0,
                     max_concurrent: 0,
                     last_stops: vec![],
-                }),
+                })),
             }
         }
     }
@@ -909,7 +871,11 @@ mod tests {
     }
 
     impl RunExecutor for FakeExecutor {
-        fn prepare<'a>(&'a self, _req: &'a StartRequest) -> BoxFuture<'a, anyhow::Result<()>> {
+        fn prepare<'a>(
+            &'a self,
+            _context: &'a RunContext,
+            _request: &'a RunRequest,
+        ) -> BoxFuture<'a, anyhow::Result<()>> {
             let gate = self.prepare_gate.clone();
             let started = self.prepare_started.clone();
             Box::pin(async move {
@@ -928,7 +894,9 @@ mod tests {
 
         fn execute<'a>(
             &'a self,
-            _req: &'a StartRequest,
+            _context: &'a RunContext,
+            _request: &'a RunRequest,
+            _realtime_logs: bool,
             stop: Arc<AtomicBool>,
         ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
             Box::pin(async move {
@@ -960,25 +928,27 @@ mod tests {
             })
         }
 
-        fn occupy(&self, _device_id: &str) {
+        fn acquire(&self, _context: &RunContext) -> anyhow::Result<Box<dyn ActivityLease>> {
             self.state.lock().occupies += 1;
-        }
-        fn release(&self, _device_id: &str) {
-            self.state.lock().releases += 1;
+            Ok(Box::new(FakeLease(self.state.clone())))
         }
     }
 
     fn req(device_id: &str, script_id: &str, source: RunSource) -> StartRequest {
+        let package = script_id.split('/').next().unwrap_or("legacy");
+        let app = crate::core::AppContext::from_legacy_package(device_id, package).unwrap();
+        let request = RunRequest::for_app(
+            app,
+            "test.runner",
+            script_id,
+            crate::core::RunPayload::empty(),
+        )
+        .unwrap();
         StartRequest {
-            device_id: device_id.into(),
-            target: crate::engine::RunTarget::Script {
-                script_id: script_id.into(),
-                start_index: 0,
-            },
+            request,
             source,
             task_id: None,
             scheduled_at: None,
-            args: vec![],
             realtime_logs: false,
         }
     }
@@ -1026,12 +996,18 @@ mod tests {
             barrier: std::sync::OnceLock<Arc<tokio::sync::Barrier>>,
         }
         impl RunExecutor for ParExec {
-            fn prepare<'a>(&'a self, _: &'a StartRequest) -> BoxFuture<'a, anyhow::Result<()>> {
+            fn prepare<'a>(
+                &'a self,
+                _: &'a RunContext,
+                _: &'a RunRequest,
+            ) -> BoxFuture<'a, anyhow::Result<()>> {
                 Box::pin(async { Ok(()) })
             }
             fn execute<'a>(
                 &'a self,
-                _: &'a StartRequest,
+                _: &'a RunContext,
+                _: &'a RunRequest,
+                _realtime_logs: bool,
                 _stop: Arc<AtomicBool>,
             ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
                 Box::pin(async move {
@@ -1046,8 +1022,9 @@ mod tests {
                     Ok(vec![])
                 })
             }
-            fn occupy(&self, _: &str) {}
-            fn release(&self, _: &str) {}
+            fn acquire(&self, _: &RunContext) -> anyhow::Result<Box<dyn ActivityLease>> {
+                Ok(Box::new(crate::core::NoopLease))
+            }
         }
         let par = Arc::new(ParExec::default());
         let mgr = Arc::new(RunManager::new(par.clone()));
@@ -1267,43 +1244,59 @@ mod tests {
     async fn panic_inside_execute_is_caught_by_guards() {
         struct Panicky;
         impl RunExecutor for Panicky {
-            fn prepare<'a>(&'a self, _: &'a StartRequest) -> BoxFuture<'a, anyhow::Result<()>> {
+            fn prepare<'a>(
+                &'a self,
+                _: &'a RunContext,
+                _: &'a RunRequest,
+            ) -> BoxFuture<'a, anyhow::Result<()>> {
                 Box::pin(async { Ok(()) })
             }
             fn execute<'a>(
                 &'a self,
-                _: &'a StartRequest,
+                _: &'a RunContext,
+                _: &'a RunRequest,
+                _realtime_logs: bool,
                 _: Arc<AtomicBool>,
             ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
                 Box::pin(async {
                     panic!("boom inside executor");
                 })
             }
-            fn occupy(&self, _: &str) {}
-            fn release(&self, _: &str) {}
+            fn acquire(&self, _: &RunContext) -> anyhow::Result<Box<dyn ActivityLease>> {
+                Ok(Box::new(crate::core::NoopLease))
+            }
         }
         // 借助包装执行器断言 release 被调用（panic 展开 guard 生效）
         struct WrapProxy {
             inner: Arc<Panicky>,
             releases: Arc<AtomicUsize>,
         }
+        struct CountedLease(Arc<AtomicUsize>);
+        impl ActivityLease for CountedLease {}
+        impl Drop for CountedLease {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
         impl RunExecutor for WrapProxy {
-            fn prepare<'a>(&'a self, req: &'a StartRequest) -> BoxFuture<'a, anyhow::Result<()>> {
-                self.inner.prepare(req)
+            fn prepare<'a>(
+                &'a self,
+                context: &'a RunContext,
+                request: &'a RunRequest,
+            ) -> BoxFuture<'a, anyhow::Result<()>> {
+                self.inner.prepare(context, request)
             }
             fn execute<'a>(
                 &'a self,
-                req: &'a StartRequest,
+                context: &'a RunContext,
+                request: &'a RunRequest,
+                realtime_logs: bool,
                 stop: Arc<AtomicBool>,
             ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
-                self.inner.execute(req, stop)
+                self.inner.execute(context, request, realtime_logs, stop)
             }
-            fn occupy(&self, d: &str) {
-                self.inner.occupy(d);
-            }
-            fn release(&self, d: &str) {
-                self.releases.fetch_add(1, Ordering::SeqCst);
-                self.inner.release(d);
+            fn acquire(&self, _: &RunContext) -> anyhow::Result<Box<dyn ActivityLease>> {
+                Ok(Box::new(CountedLease(self.releases.clone())))
             }
         }
         let releases = Arc::new(AtomicUsize::new(0));
@@ -1339,12 +1332,20 @@ mod tests {
     async fn function_run_target_conflicts_and_cancels() {
         let fake = Arc::new(FakeExecutor::hanging());
         let mgr = Arc::new(RunManager::new(fake.clone()));
-        let mut req = req("d1", "p/s.yaml", RunSource::Manual);
-        req.target = crate::engine::RunTarget::Function {
-            pkg: "com.test.app".into(),
-            file: "common".into(),
-            function: Some("login".into()),
-            start_index: 0,
+        let app = crate::core::AppContext::from_legacy_package("d1", "com.test.app").unwrap();
+        let request = RunRequest::for_app(
+            app,
+            "gamer.yaml",
+            "com.test.app/common.yaml#login",
+            crate::core::RunPayload::empty(),
+        )
+        .unwrap();
+        let req = StartRequest {
+            request,
+            source: RunSource::Manual,
+            task_id: None,
+            scheduled_at: None,
+            realtime_logs: false,
         };
         let a = mgr.submit(req.clone(), None).unwrap();
         assert_eq!(a.script_id, "com.test.app/common.yaml#login", "展示标签");

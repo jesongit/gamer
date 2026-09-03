@@ -81,13 +81,16 @@ mod update_flow_tests {
     impl crate::run_manager::RunExecutor for BlockingExec {
         fn prepare<'a>(
             &'a self,
-            _req: &'a crate::run_manager::StartRequest,
+            _context: &'a crate::core::RunContext,
+            _request: &'a crate::core::RunRequest,
         ) -> futures_util::future::BoxFuture<'a, anyhow::Result<()>> {
             Box::pin(async { Ok(()) })
         }
         fn execute<'a>(
             &'a self,
-            _req: &'a crate::run_manager::StartRequest,
+            _context: &'a crate::core::RunContext,
+            _request: &'a crate::core::RunRequest,
+            _realtime_logs: bool,
             _stop: Arc<AtomicBool>,
         ) -> futures_util::future::BoxFuture<
             'a,
@@ -99,8 +102,12 @@ mod update_flow_tests {
                 unreachable!("pending executor never resolves")
             })
         }
-        fn occupy(&self, _device_id: &str) {}
-        fn release(&self, _device_id: &str) {}
+        fn acquire(
+            &self,
+            _context: &crate::core::RunContext,
+        ) -> anyhow::Result<Box<dyn crate::core::ActivityLease>> {
+            Ok(Box::new(crate::core::NoopLease))
+        }
     }
 
     struct UpdateRig {
@@ -132,7 +139,7 @@ mod update_flow_tests {
         let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone(), viewers.clone()));
+        let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
         let started = Arc::new(AtomicUsize::new(0));
         let executor = Arc::new(BlockingExec { started });
         let runs = Arc::new(crate::run_manager::RunManager::new(executor));

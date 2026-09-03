@@ -1,8 +1,9 @@
 //! Gamer Core 的稳定能力边界。
 //!
-//! 这是 Phase 3 的接口骨架，不承载现有设备、scrcpy、matcher 或 YAML
-//! Engine 的实现。当前消费者通过 crate-visible 的 service trait 接入；未来
-//! 既有实现和 WASM Host 都应在这里与具体后端之间增加 adapter。
+//! 稳定能力边界与现有 native backend 的 adapter。
+//!
+//! trait 本身只携带逻辑 ID、Handle 和小结构；具体设备、scrcpy、文件和
+//! matcher 实现集中在 [`adapters`]，为旧 YAML Engine 与未来 WASM Host 共用。
 
 #![allow(
     dead_code,
@@ -24,6 +25,8 @@ mod run;
 mod runtime;
 mod touch;
 mod vision;
+
+pub(crate) mod adapters;
 
 pub(crate) use device::{AppId, DeviceHandle, DeviceId, DeviceService};
 pub(crate) use error::{CapabilityError, CapabilityResult};

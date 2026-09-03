@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::core::AppContext;
 use crate::script_v2::error::codes;
 use crate::script_v2::validate::{
     normalize_id, try_build_function_file, ResourceProvider, TemplateAvail,
@@ -113,15 +114,15 @@ fn read_sources(dir: &Path, strip_ext: bool) -> anyhow::Result<BTreeMap<String, 
 pub(crate) struct RunResources<'a> {
     snapshot: &'a RunSnapshot,
     store: &'a ScriptStore,
-    pkg: String,
+    app: AppContext,
 }
 
 impl<'a> RunResources<'a> {
-    pub fn new(snapshot: &'a RunSnapshot, store: &'a ScriptStore, pkg: impl Into<String>) -> Self {
+    pub fn new(snapshot: &'a RunSnapshot, store: &'a ScriptStore, app: AppContext) -> Self {
         Self {
             snapshot,
             store,
-            pkg: pkg.into(),
+            app,
         }
     }
 
@@ -152,7 +153,11 @@ impl ResourceProvider for RunResources<'_> {
     }
 
     fn resolve_template(&self, short_name: &str) -> TemplateAvail {
-        self.store.template_avail(&self.pkg, short_name)
+        self.app
+            .content_package
+            .as_ref()
+            .map(|pkg| self.store.template_avail(pkg.as_str(), short_name))
+            .unwrap_or(TemplateAvail::NotFound)
     }
 }
 
@@ -179,7 +184,15 @@ impl ResourceCache {
         let Some(content) = resources.snapshot.script(resource_id) else {
             return Err(vec![ScriptError::new(
                 codes::RESOURCE_SCRIPT_NOT_FOUND,
-                format!("脚本 {resource_id:?} 不存在（分区 {}）", resources.pkg),
+                format!(
+                    "脚本 {resource_id:?} 不存在（分区 {}）",
+                    resources
+                        .app
+                        .content_package
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "<none>".to_string())
+                ),
                 key.clone(),
             )]);
         };
@@ -201,7 +214,15 @@ impl ResourceCache {
         let Some(content) = resources.snapshot.function_file(file_short) else {
             return Err(vec![ScriptError::new(
                 codes::RESOURCE_FUNC_NOT_FOUND,
-                format!("函数文件 {file_short:?} 不存在（分区 {}）", resources.pkg),
+                format!(
+                    "函数文件 {file_short:?} 不存在（分区 {}）",
+                    resources
+                        .app
+                        .content_package
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "<none>".to_string())
+                ),
                 key.clone(),
             )
             .at("", "file")]);

@@ -1,37 +1,10 @@
-//! Script execution events emitted to the active WebRTC viewer.
+//! Compatibility export for the old engine event name.
 //!
-//! Keeping the wire-facing event model separate from the runner makes the
-//! execution engine independent from the viewer registry implementation while
-//! preserving the existing `engine::ScriptEvent` export.
+//! The event model now lives in `core`; this alias keeps the YAML engine and
+//! existing tests source-compatible while removing all viewer knowledge from
+//! the runner.
 
-use serde::Serialize;
-
-/// Script execution visualization event (server → browser).
-#[derive(Clone, Debug, Serialize)]
-#[serde(tag = "ev", rename_all = "snake_case")]
-pub enum ScriptEvent {
-    /// Engine tap in device pixel coordinates.
-    Tap { x: u32, y: u32 },
-    /// Engine swipe in device pixel coordinates.
-    Swipe { x1: u32, y1: u32, x2: u32, y2: u32 },
-    /// Template match hit in device pixel coordinates.
-    Hit {
-        tpl: String,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-        score: f32,
-    },
-    /// Search area shown when a template did not match.
-    Miss {
-        tpl: String,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-    },
-}
+pub use crate::core::RuntimeEventKind as ScriptEvent;
 
 #[cfg(test)]
 mod tests {

@@ -14,8 +14,10 @@ use uuid::Uuid;
 
 use super::common::{err_response, require_pkg, validate_text_field};
 use super::{ApiError, AppState};
+use crate::core::ActivityKind;
 use crate::device::DeviceManager;
 use crate::store::{Device, ScreenMode};
+use crate::webrtc::{remove_and_teardown_viewer, ViewerDisconnectReason};
 
 // ---------- 设备 ----------
 
@@ -254,18 +256,16 @@ pub(super) async fn api_update_device(
     // 等非投屏字段时保持现有连接不中断。脚本运行中仍受运行守卫保护不拆会话
     // （旧参数跑完当前脚本，新配置下次连接生效）。
     if session_affecting_change(&existing, &device, st.cfg.fps) {
-        if st.devices.has_running_scripts(&id) {
+        if st.devices.activity().has_kind(&id, ActivityKind::Run) {
             info!(device = %id, "casting config changed while script running, session kept (applied on next connect)");
         } else {
-            let kicked = {
-                let mut map = st.viewers.lock().unwrap();
-                map.remove(&id)
-            };
-            if let Some(h) = kicked {
-                h.running.store(false, std::sync::atomic::Ordering::SeqCst);
-                if let Some(p) = h.peer.upgrade() {
-                    let _ = p.close().await;
-                }
+            if remove_and_teardown_viewer(
+                &st.viewers,
+                &id,
+                ViewerDisconnectReason::DeviceDisconnected,
+            )
+            .await
+            {
                 info!(device = %id, "casting config changed, kicked viewer");
             }
             st.devices.disconnect_device(&id, false).await;
@@ -283,6 +283,7 @@ pub(super) async fn api_delete_device(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
+    remove_and_teardown_viewer(&st.viewers, &id, ViewerDisconnectReason::DeviceDisconnected).await;
     match st.devices.delete_device(&id).await {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => err_response(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
@@ -454,11 +455,13 @@ pub(super) async fn api_disconnect_device(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
+    remove_and_teardown_viewer(&st.viewers, &id, ViewerDisconnectReason::DeviceDisconnected).await;
     st.devices.disconnect_device(&id, true).await;
     Json(serde_json::json!({"ok": true})).into_response()
 }
 
 pub(super) async fn api_screenshot(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    let _capture_lease = st.devices.acquire_activity(&id, ActivityKind::Capture);
     match st.devices.screenshot(&id).await {
         Ok(png) => Response::builder()
             .status(StatusCode::OK)

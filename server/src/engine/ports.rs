@@ -3,20 +3,31 @@
 //!
 //! Runner 执行路径只依赖这里的 trait，不再直接持有 DeviceManager 具体类型；
 //! 生产在 `Runner::new` 装配 adapter（`DeviceGateway` / `ComputePoolMatcher`，
-//! 逐字节转发 DeviceManager 与 matcher::compute 真实实现），单元测试注入内存
-//! fake（预置截图字节 + 记录控制调用）。trait 按凝聚力拆分：fake 实现任一个
+//! 转发 DeviceManager 与 capability 真实实现），单元测试注入内存 fake（记录
+//! 控制调用）。trait 按凝聚力拆分：fake 实现任一个
 //! 都不需要携带无关依赖。
 //!
 //! 异步方法统一返回 `BoxFuture` 以保持对象安全（`Arc<dyn Trait>`，不引入
 //! async-trait 依赖）；`futures-util` 已在依赖中。
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 
+use crate::capabilities::adapters::{
+    DeviceAdapter, FrameAdapter, FrameStore, InputAdapter, ResourceAdapter, TouchAdapter,
+    VisionAdapter,
+};
+use crate::capabilities::{
+    ColorSample, DeviceId, DeviceService, FrameHandle, FramePoint, FrameService, FrameSize,
+    InputService, KeyAction, KeyCode, KeyInput, MatchManyRequest, MatchOptions, ResourceService,
+    SearchRegion, TemplateQuery, TouchPoint, VisionService,
+};
 use crate::config::Config;
+use crate::core::{
+    ResolvedResource, ResourceHandle as CoreResourceHandle, ResourceId, ResourceResolver,
+};
 use crate::device::DeviceManager;
 use crate::matcher;
 
@@ -46,10 +57,21 @@ impl EngineSettings {
     }
 }
 
-/// 截图源：按设备返回最新一帧的 PNG 字节（帧缓存优先/新鲜度语义由生产实现
-/// DeviceManager::screenshot 原样保持）
+/// 截图源返回一个小的帧描述；编码字节和解码存储都留在 Frame capability。
+#[derive(Clone, Copy, Debug)]
+pub struct ScreenFrame {
+    pub handle: FrameHandle,
+    pub size: FrameSize,
+}
+
+impl ScreenFrame {
+    pub fn new(handle: FrameHandle, size: FrameSize) -> Self {
+        Self { handle, size }
+    }
+}
+
 pub trait ScreenshotSource: Send + Sync {
-    fn screenshot(&self, device_id: &str) -> BoxFuture<'_, anyhow::Result<Vec<u8>>>;
+    fn screenshot(&self, device_id: &str) -> BoxFuture<'_, anyhow::Result<ScreenFrame>>;
 }
 
 /// 设备控制：Runner 实际用到的最小集合（scrcpy 会话控制 + adb + 会话/设备
@@ -91,19 +113,49 @@ pub trait DeviceControl: Send + Sync {
     ) -> BoxFuture<'_, anyhow::Result<()>>;
 }
 
-/// 模板匹配：在给定截图 PNG 上匹配一个模板文件。模板名 → 文件解析由引擎完成
-/// （分区寻址 + 短名消歧），这里只消费解析结果；threshold / region 语义与旧
-/// Runner 内联调用完全一致
+/// Engine 的模板查询。模板由逻辑 ResourceId 标识，主机路径只存在于
+/// ResourceAdapter 内部。
+#[derive(Clone, Debug)]
+pub struct TemplateMatchQuery {
+    pub resource: ResourceId,
+    pub threshold: f32,
+    pub region: Option<[u32; 4]>,
+    pub color: bool,
+}
+
+/// 模板匹配：在给定截图上匹配一个逻辑模板资源。模板解析由 Resource
+/// capability 完成，接口不接收 PathBuf。
 pub trait TemplateMatcher: Send + Sync {
     fn match_template(
         &self,
-        screen_png: Vec<u8>,
-        template: &str,
-        template_path: PathBuf,
-        threshold: f32,
-        region: Option<[u32; 4]>,
-        color: bool,
+        frame: ScreenFrame,
+        query: TemplateMatchQuery,
     ) -> BoxFuture<'_, anyhow::Result<Option<matcher::MatchResult>>>;
+
+    /// 批量请求共享同一份 frame。旧 fake 走默认逐项实现，生产 adapter
+    /// 覆盖为 capability `vision.match_many`。
+    fn match_many(
+        &self,
+        frame: ScreenFrame,
+        queries: Vec<TemplateMatchQuery>,
+    ) -> BoxFuture<'_, anyhow::Result<Vec<Option<matcher::MatchResult>>>> {
+        Box::pin(async move {
+            let mut results = Vec::with_capacity(queries.len());
+            for query in queries {
+                results.push(self.match_template(frame, query).await?);
+            }
+            Ok(results)
+        })
+    }
+
+    /// 取色也消费同一个已捕获帧，避免重新从截图格式解码。
+    fn sample_color(
+        &self,
+        _frame: ScreenFrame,
+        _point: FramePoint,
+    ) -> BoxFuture<'_, anyhow::Result<ColorSample>> {
+        Box::pin(async { Err(anyhow::anyhow!("当前 matcher 未提供取色能力")) })
+    }
 }
 
 // ---- 生产 adapter（Runner::new 装配，转发真实实现，行为零变化）--------------
@@ -111,18 +163,52 @@ pub trait TemplateMatcher: Send + Sync {
 /// 生产端口适配：截图源 + 设备控制统一转发 DeviceManager
 pub struct DeviceGateway {
     devices: Arc<DeviceManager>,
+    device: Arc<DeviceAdapter>,
+    input: Arc<InputAdapter>,
+    frames: Arc<FrameAdapter>,
 }
 
 impl DeviceGateway {
-    pub fn new(devices: Arc<DeviceManager>) -> Self {
-        Self { devices }
+    pub fn new(devices: Arc<DeviceManager>, frames: Arc<FrameAdapter>) -> Self {
+        let device = Arc::new(DeviceAdapter::new(devices.clone()));
+        let touch = Arc::new(TouchAdapter::new(device.clone()));
+        let input = Arc::new(InputAdapter::new(device.clone(), touch));
+        Self {
+            devices,
+            device,
+            input,
+            frames,
+        }
+    }
+
+    async fn resolve_device(
+        &self,
+        device_id: &str,
+    ) -> anyhow::Result<crate::capabilities::DeviceHandle> {
+        self.device
+            .resolve(&DeviceId::new(device_id))
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 }
 
 impl ScreenshotSource for DeviceGateway {
-    fn screenshot(&self, device_id: &str) -> BoxFuture<'_, anyhow::Result<Vec<u8>>> {
+    fn screenshot(&self, device_id: &str) -> BoxFuture<'_, anyhow::Result<ScreenFrame>> {
         let device_id = device_id.to_string();
-        Box::pin(async move { self.devices.screenshot(&device_id).await })
+        Box::pin(async move {
+            let device = self.resolve_device(&device_id).await?;
+            let handle = self
+                .frames
+                .capture(&device)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let size = self
+                .frames
+                .size(handle)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(ScreenFrame::new(handle, size))
+        })
     }
 }
 
@@ -145,11 +231,14 @@ impl DeviceControl for DeviceGateway {
     fn tap(&self, device_id: &str, x: f32, y: f32) -> BoxFuture<'_, anyhow::Result<()>> {
         let device_id = device_id.to_string();
         Box::pin(async move {
-            let s = self
-                .devices
-                .session(&device_id)
-                .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-            s.tap(x, y).await
+            let device = self.resolve_device(&device_id).await?;
+            self.input
+                .tap(
+                    &device,
+                    TouchPoint::new(x.max(0.0) as u32, y.max(0.0) as u32, 1.0),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
         })
     }
 
@@ -164,22 +253,32 @@ impl DeviceControl for DeviceGateway {
     ) -> BoxFuture<'_, anyhow::Result<()>> {
         let device_id = device_id.to_string();
         Box::pin(async move {
-            let s = self
-                .devices
-                .session(&device_id)
-                .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-            s.swipe(x1, y1, x2, y2, duration_ms).await
+            let device = self.resolve_device(&device_id).await?;
+            self.input
+                .swipe(
+                    &device,
+                    crate::capabilities::SwipeGesture::new(
+                        TouchPoint::new(x1.max(0.0) as u32, y1.max(0.0) as u32, 1.0),
+                        TouchPoint::new(x2.max(0.0) as u32, y2.max(0.0) as u32, 1.0),
+                        Duration::from_millis(duration_ms),
+                    ),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
         })
     }
 
     fn key(&self, device_id: &str, keycode: u32) -> BoxFuture<'_, anyhow::Result<()>> {
         let device_id = device_id.to_string();
         Box::pin(async move {
-            let s = self
-                .devices
-                .session(&device_id)
-                .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-            s.press_key(keycode).await
+            let device = self.resolve_device(&device_id).await?;
+            self.input
+                .key(
+                    &device,
+                    KeyInput::new(KeyCode::new(keycode), KeyAction::Press),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
         })
     }
 
@@ -187,11 +286,11 @@ impl DeviceControl for DeviceGateway {
         let device_id = device_id.to_string();
         let text = text.to_string();
         Box::pin(async move {
-            let s = self
-                .devices
-                .session(&device_id)
-                .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-            s.inject_text(&text).await
+            let device = self.resolve_device(&device_id).await?;
+            self.input
+                .text(&device, crate::capabilities::TextInput::new(text))
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
         })
     }
 
@@ -199,11 +298,11 @@ impl DeviceControl for DeviceGateway {
         let device_id = device_id.to_string();
         let name = name.to_string();
         Box::pin(async move {
-            let s = self
-                .devices
-                .session(&device_id)
-                .ok_or_else(|| anyhow::anyhow!("设备未连接"))?;
-            s.start_app(&name).await
+            let device = self.resolve_device(&device_id).await?;
+            self.device
+                .start_app(&device, &crate::capabilities::AppId::new(name))
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
         })
     }
 
@@ -222,37 +321,189 @@ impl DeviceControl for DeviceGateway {
     }
 }
 
-/// 生产模板匹配适配：模板读取 + PNG 解码 + NCC 提交专用计算池执行
+/// 生产模板匹配适配：模板资源与已解码帧经 Vision capability 提交 NCC 计算池
 /// （PERF-003；原 Runner::match_on_screen 内联逻辑原样搬移，只移动执行位置）
-pub struct ComputePoolMatcher;
+pub struct ComputePoolMatcher {
+    resources: Arc<ResourceAdapter>,
+    vision: Arc<VisionAdapter>,
+}
+
+/// Adapter from the current file-backed template store to the core logical
+/// resource contract.  The host path is resolved and consumed entirely inside
+/// this adapter; callers only receive a logical handle plus bytes.
+pub(crate) struct LegacyResourceResolver {
+    resources: Arc<ResourceAdapter>,
+}
+
+impl LegacyResourceResolver {
+    pub(crate) fn new(resources: Arc<ResourceAdapter>) -> Self {
+        Self { resources }
+    }
+}
+
+impl ResourceResolver for LegacyResourceResolver {
+    fn resolve(&self, id: &ResourceId) -> BoxFuture<'_, anyhow::Result<ResolvedResource>> {
+        let capability_id = ComputePoolMatcher::to_capability_resource(id);
+        let resources = self.resources.clone();
+        let id = id.clone();
+        Box::pin(async move {
+            let handle = ResourceService::resolve(resources.as_ref(), &capability_id)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let bytes = resources
+                .read(handle)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(ResolvedResource::new(CoreResourceHandle::new(id), bytes))
+        })
+    }
+}
+
+impl ComputePoolMatcher {
+    pub fn new(devices: Arc<DeviceManager>, scripts: Arc<crate::scripts::ScriptStore>) -> Self {
+        let frame_store = Arc::new(FrameStore::new());
+        let frames = Arc::new(FrameAdapter::new(devices, frame_store.clone()));
+        Self::with_frame_adapter(scripts, frames)
+    }
+
+    pub fn with_frame_adapter(
+        scripts: Arc<crate::scripts::ScriptStore>,
+        frames: Arc<FrameAdapter>,
+    ) -> Self {
+        let frame_store = frames.store.clone();
+        let resources = Arc::new(ResourceAdapter::new(scripts));
+        let vision = Arc::new(VisionAdapter::new(frame_store, resources.clone()));
+        Self { resources, vision }
+    }
+
+    fn options(query: &TemplateMatchQuery) -> MatchOptions {
+        MatchOptions {
+            threshold: Some(query.threshold),
+            region: query
+                .region
+                .map(|[x, y, width, height]| SearchRegion::new(x, y, width, height)),
+            color_check: query.color,
+        }
+    }
+
+    fn to_capability_resource(id: &ResourceId) -> crate::capabilities::ResourceId {
+        let name = id
+            .logical_path()
+            .strip_prefix("tmpl/")
+            .or_else(|| id.logical_path().strip_prefix("templates/"))
+            .unwrap_or_else(|| id.logical_path());
+        crate::capabilities::ResourceId::new(id.app_package().to_string(), name)
+    }
+}
 
 impl TemplateMatcher for ComputePoolMatcher {
     fn match_template(
         &self,
-        screen_png: Vec<u8>,
-        template: &str,
-        template_path: PathBuf,
-        threshold: f32,
-        region: Option<[u32; 4]>,
-        color: bool,
+        frame: ScreenFrame,
+        query: TemplateMatchQuery,
     ) -> BoxFuture<'_, anyhow::Result<Option<matcher::MatchResult>>> {
-        // 错误标签在进入 async 块前构造（future 只借用 &self，不借用 template）
-        let tpl_label = format!("{} (path={})", template, template_path.display());
         Box::pin(async move {
-            matcher::compute::run(move || {
-                let tpl_bytes = std::fs::read(&template_path)
-                    .map_err(|e| anyhow::anyhow!("读取模板 {} 失败: {}", tpl_label, e))?;
-                let req = matcher::MatchRequest {
-                    screen_png,
-                    template_png: tpl_bytes,
-                    threshold: Some(threshold),
-                    region,
-                    color,
-                };
-                matcher::match_template(&req).map_err(|e| anyhow::anyhow!("模板匹配失败: {}", e))
+            let resource = self
+                .resources
+                .resolve(&Self::to_capability_resource(&query.resource))
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let template = TemplateQuery::new(resource, Self::options(&query));
+            let result = self
+                .vision
+                .match_template(frame.handle, template)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(match result {
+                crate::capabilities::MatchOutcome::Found(m) => Some(m.into()),
+                crate::capabilities::MatchOutcome::NotFound => None,
             })
-            .await
-            .and_then(|inner| inner)
         })
+    }
+
+    fn match_many(
+        &self,
+        frame: ScreenFrame,
+        queries: Vec<TemplateMatchQuery>,
+    ) -> BoxFuture<'_, anyhow::Result<Vec<Option<matcher::MatchResult>>>> {
+        Box::pin(async move {
+            let mut request = MatchManyRequest::new(frame.handle);
+            for query in &queries {
+                let resource = self
+                    .resources
+                    .resolve(&Self::to_capability_resource(&query.resource))
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                request = request.with_template(TemplateQuery::new(resource, Self::options(query)));
+            }
+            let results = self
+                .vision
+                .match_many(&request)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(results
+                .into_iter()
+                .map(|result| match result.outcome {
+                    crate::capabilities::MatchOutcome::Found(m) => Some(m.into()),
+                    crate::capabilities::MatchOutcome::NotFound => None,
+                })
+                .collect())
+        })
+    }
+
+    fn sample_color(
+        &self,
+        frame: ScreenFrame,
+        point: FramePoint,
+    ) -> BoxFuture<'_, anyhow::Result<ColorSample>> {
+        Box::pin(async move {
+            self.vision
+                .sample_color(frame.handle, point)
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        })
+    }
+}
+
+impl From<crate::capabilities::MatchBox> for matcher::MatchResult {
+    fn from(value: crate::capabilities::MatchBox) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+            score: value.score,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn legacy_resource_adapter_resolves_logical_id_without_exposing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let store = Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
+        std::fs::create_dir_all(store.tmpl_dir("com.test.game")).unwrap();
+        std::fs::write(
+            store.tmpl_dir("com.test.game").join("icon.png"),
+            b"template",
+        )
+        .unwrap();
+
+        let resolver = LegacyResourceResolver::new(Arc::new(ResourceAdapter::new(store)));
+        let id = ResourceId::new(
+            crate::core::AppPackageId::new("com.test.game").unwrap(),
+            "tmpl/icon.png",
+        )
+        .unwrap();
+        let resource = resolver.resolve(&id).await.unwrap();
+
+        assert_eq!(resource.id(), &id);
+        assert_eq!(resource.bytes(), b"template");
     }
 }

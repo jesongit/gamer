@@ -25,6 +25,7 @@ use webrtc::rtp_transceiver::rtp_sender::RTCRtpSender;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 
 use crate::config::Config;
+use crate::core::DeviceLease;
 use crate::device::scrcpy::{AudioFrame, ScrcpySession, VideoFrame};
 
 use super::{
@@ -83,6 +84,8 @@ pub struct ViewerHandle {
     pub notify: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>,
     /// 控制队列：teardown 通过它串行释放该 viewer 的残留触点。
     pub(crate) control_tx: tokio::sync::mpsc::UnboundedSender<ControlCommand>,
+    /// Keeps the device active while this viewer remains registered.
+    pub activity_lease: Option<Arc<DeviceLease>>,
 }
 
 /// device_id → 活跃 viewer（main.rs 创建，AppState / Scheduler / ws.rs 共享）
@@ -549,6 +552,7 @@ mod tests {
             last_serve: Arc::new(std::sync::atomic::AtomicI64::new(123)),
             notify: Arc::new(Mutex::new(Some(tx))),
             control_tx,
+            activity_lease: None,
         };
         let viewers: ViewerMap = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         viewers.lock().unwrap().insert("dev1".to_string(), handle);
@@ -580,6 +584,7 @@ mod tests {
             last_serve: Arc::new(std::sync::atomic::AtomicI64::new(123)),
             notify: Arc::new(Mutex::new(Some(tx))),
             control_tx,
+            activity_lease: None,
         };
 
         teardown_viewer(handle, ViewerDisconnectReason::TakenOver).await;

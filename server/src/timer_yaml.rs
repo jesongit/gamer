@@ -12,7 +12,7 @@ use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
 
 use crate::core::AppContext;
-use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartError, StartRequest};
+use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartError};
 use crate::scripts::ScriptStore;
 use crate::store::{Db, Task};
 use crate::task_params::{self, GateError};
@@ -73,22 +73,23 @@ impl TimerRunner for YamlTimerRunner {
             signature_short = %task_params::signature_short_code(&task_args.signature),
             "YAML timer task parameters confirmed"
         );
-        let req = StartRequest {
-            device_id: task.app.device_id.to_string(),
-            target: crate::engine::RunTarget::Script {
+        let req = crate::engine::yaml_start_request(
+            task.app.clone(),
+            crate::engine::RunTarget::Script {
                 script_id: task.entrypoint.clone(),
                 start_index: 0,
             },
-            source: if scheduled_at.is_some() {
+            if scheduled_at.is_some() {
                 RunSource::Scheduled
             } else {
                 RunSource::TaskNow
             },
-            task_id: Some(task.id.clone()),
+            Some(task.id.clone()),
             scheduled_at,
-            args: task_args.overrides,
-            realtime_logs: false,
-        };
+            task_args.overrides,
+            false,
+        )
+        .map_err(|error| TimerRunnerError::Invalid(error.to_string()))?;
         let hook = yaml_finish_hook(
             self.db.clone(),
             task.app.device_id.to_string(),

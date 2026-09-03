@@ -112,12 +112,12 @@ mod sec_tests {
         let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone(), viewers.clone()));
+        let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
         // 生产执行器装配（设备离线时 prepare 即失败，正好覆盖"连接失败锁释放"路径）
-        let executor = Arc::new(crate::run_manager::EngineExecutor::new(
+        let executor = Arc::new(crate::engine::EngineExecutor::new(
             Arc::new(crate::engine::Runner::new(
                 devices.clone(),
-                viewers.clone(),
+                Arc::new(crate::webrtc::ViewerEventSink::new(viewers.clone())),
                 scripts.clone(),
             )),
             devices.clone(),
@@ -152,7 +152,7 @@ mod sec_tests {
         let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone(), viewers.clone()));
+        let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
         assemble_app(
             db, devices, cfg, scripts, viewers, credential, auth_cfg, executor,
         )

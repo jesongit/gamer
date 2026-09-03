@@ -7,7 +7,7 @@
 
 #![allow(
     dead_code,
-    reason = "Phase 2 model skeleton is adopted incrementally by existing adapters"
+    reason = "core boundary helpers are adopted incrementally by concrete adapters"
 )]
 
 use std::fmt;

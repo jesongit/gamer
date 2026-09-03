@@ -13,8 +13,8 @@ use tokio::sync::Mutex as TokioMutex;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
+use crate::core::{ActivityKind, DeviceActivity, DeviceLease};
 use crate::store::{Db, Device, ScreenMode};
-use crate::webrtc::{remove_and_teardown_viewer, ViewerDisconnectReason, ViewerMap};
 
 use self::adb::Adb;
 use self::frames::FrameCache;
@@ -246,23 +246,21 @@ pub struct DeviceManager {
     pub cfg: Config,
     pub adb: Adb,
     pub devices: RwLock<HashMap<String, DeviceRuntime>>,
-    /// 每设备活跃 viewer（空闲低功耗守卫：有 viewer = 有人在投屏，不进低功耗）
-    pub viewers: ViewerMap,
-    /// 每设备脚本运行计数（空闲低功耗守卫；归零时移除条目）
-    run_counts: std::sync::Mutex<HashMap<String, u32>>,
+    /// Active consumer registry used by power policy; concrete consumers own
+    /// their leases and are not stored in DeviceManager.
+    activity: Arc<DeviceActivity>,
     /// 空闲低功耗状态（idle_power_loop / notify_activity 共享）
     idle: std::sync::Mutex<HashMap<String, IdleState>>,
 }
 
 impl DeviceManager {
-    pub fn new(db: Db, cfg: Config, viewers: ViewerMap) -> Self {
+    pub fn new(db: Db, cfg: Config) -> Self {
         let adb = Adb::new(&cfg);
         Self {
             db,
             cfg,
             adb,
-            viewers,
-            run_counts: std::sync::Mutex::new(HashMap::new()),
+            activity: Arc::new(DeviceActivity::default()),
             idle: std::sync::Mutex::new(HashMap::new()),
             devices: RwLock::new(HashMap::new()),
         }
@@ -361,6 +359,23 @@ impl DeviceManager {
         map.values()
             .map(|rt| (rt.device.clone(), rt.status, rt.error.clone()))
             .collect()
+    }
+
+    /// Shared activity registry used by viewer, run, capture, and extension
+    /// adapters.  DeviceManager only consumes its aggregate for power policy.
+    pub fn activity(&self) -> Arc<DeviceActivity> {
+        self.activity.clone()
+    }
+
+    /// Acquire a device consumer lease and wake a possibly sleeping mirror.
+    pub fn acquire_activity(&self, id: &str, kind: ActivityKind) -> DeviceLease {
+        let lease = self.activity.acquire(id.to_string(), kind);
+        self.notify_activity(id);
+        lease
+    }
+
+    pub fn has_active_consumers(&self, id: &str) -> bool {
+        self.activity.has_active(id)
     }
 
     /// 全量快照（含设备 id；idle_power_loop 遍历用）
@@ -638,8 +653,8 @@ impl DeviceManager {
     }
 
     pub async fn disconnect_device_with_reason(&self, id: &str, reason: DeviceDisconnectReason) {
-        if matches!(reason, DeviceDisconnectReason::Managed) && self.has_running_scripts(id) {
-            warn!(device = %id, "script running, skip disconnect (use force to override)");
+        if matches!(reason, DeviceDisconnectReason::Managed) && self.activity.has_active(id) {
+            warn!(device = %id, "active device consumer, skip disconnect (use force to override)");
             return;
         }
         let (addr, mode, pkg) = {
@@ -651,8 +666,6 @@ impl DeviceManager {
                 rt.device.pkg.clone(),
             )
         };
-        let viewer_reason = reason.viewer_disconnect_reason();
-        let _ = remove_and_teardown_viewer(&self.viewers, id, viewer_reason).await;
         {
             let mut map = self.devices.write();
             let Some(rt) = map.get_mut(id) else { return };
@@ -730,37 +743,12 @@ impl DeviceManager {
         }
     }
 
-    /// 脚本运行开始：设备运行计数 +1（空闲低功耗守卫）+ 消费者出现
-    /// （打断空闲计时，镜像模式唤醒已关的屏）
-    pub fn run_begin(&self, id: &str) {
-        let mut counts = self.run_counts.lock().unwrap();
-        *counts.entry(id.to_string()).or_insert(0) += 1;
-        drop(counts);
-        self.notify_activity(id);
-    }
-
-    /// 脚本运行结束：计数 -1，归零移除条目（防 map 无限增长）
-    pub fn run_end(&self, id: &str) {
-        let mut counts = self.run_counts.lock().unwrap();
-        if let Some(v) = counts.get_mut(id) {
-            *v = v.saturating_sub(1);
-            if *v == 0 {
-                counts.remove(id);
-            }
-        }
-    }
-
-    /// 该设备是否有正在运行的脚本（视频静默看门狗/空闲断开的消费者判断）
-    pub fn has_running_scripts(&self, id: &str) -> bool {
-        self.run_counts.lock().unwrap().contains_key(id)
-    }
-
     /// viewer 注册后的冻结自愈：应用被 Greeze 挂机冻结 → 画面完全静止 → 编码器
     /// 无帧可出、reset_video 也等不到 IDR → viewer 黑屏 → 前端看门狗反复重连。
-    /// 脚本运行中跳过（脚本自管应用生命周期）；未配置应用包名跳过；其余交
+    /// 有运行租约时跳过（runner 自管应用生命周期）；未配置应用包名跳过；其余交
     /// session 探测冻结后 plain start 捅醒（Activity Start 强制 THAW，原地恢复）
     pub fn poke_thaw_if_frozen(&self, id: &str) {
-        if self.has_running_scripts(id) {
+        if self.activity.has_kind(id, ActivityKind::Run) {
             return;
         }
         let map = self.devices.read();
@@ -814,12 +802,12 @@ impl DeviceManager {
             let _ = adb
                 .shell(&serial, "wm dismiss-keyguard", Duration::from_secs(8))
                 .await;
-            info!(device = %dn, "idle screen woke up (viewer/script active)");
+            info!(device = %dn, "idle screen woke up (device consumer active)");
         });
     }
 
     /// 空闲低功耗循环（start 时 spawn，10s 周期）：会话存活的唯一管理者。
-    /// 无 viewer 且无脚本运行持续 cfg.idle_power_secs 秒 → 虚拟屏拆 scrcpy
+    /// 无设备消费者持续 cfg.idle_power_secs 秒 → 虚拟屏拆 scrcpy
     /// 会话（adb 保留，下次消费者自动重连 ~2-4s）；镜像模式关物理屏
     /// （keyevent 223，会话保留，消费者回来 notify_activity 唤醒）。
     /// 有消费者时镜像模式每 30s 补一次 WAKEUP 兜底（用户按电源键等）
@@ -836,8 +824,7 @@ impl DeviceManager {
                     self.idle.lock().unwrap().remove(&id);
                     continue;
                 }
-                let active =
-                    self.viewers.lock().unwrap().contains_key(&id) || self.has_running_scripts(&id);
+                let active = self.has_active_consumers(&id);
                 if active {
                     // 锁内改状态、锁外做异步动作（guard 不能跨 await 存活）
                     let (slept, wake_expired) = {
@@ -1118,17 +1105,6 @@ pub enum DeviceDisconnectReason {
     WatchdogDead,
     WatchdogSilent,
     Shutdown,
-}
-
-impl DeviceDisconnectReason {
-    fn viewer_disconnect_reason(self) -> ViewerDisconnectReason {
-        match self {
-            Self::Managed | Self::IdleTimeout | Self::WatchdogSilent => {
-                ViewerDisconnectReason::DeviceDisconnected
-            }
-            Self::Forced | Self::WatchdogDead | Self::Shutdown => ViewerDisconnectReason::Shutdown,
-        }
-    }
 }
 
 /// 解析 "1920x1080" → (1920, 1080)

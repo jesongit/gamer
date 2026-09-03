@@ -12,6 +12,7 @@ use tracing::{debug, info, warn};
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use super::AppState;
+use crate::core::ActivityKind;
 use crate::device::scrcpy::VideoFrame;
 use crate::webrtc::{
     make_audio_queue, make_frame_queue, remove_and_teardown_viewer, ViewerDisconnectReason,
@@ -151,6 +152,10 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                         last_serve: vs.last_serve.clone(),
                                         notify: std::sync::Arc::new(parking_lot::Mutex::new(Some(notify_tx.clone()))),
                                         control_tx: vs.control_tx.clone(),
+                                        activity_lease: Some(std::sync::Arc::new(
+                                            st.devices
+                                                .acquire_activity(&device_id, ActivityKind::Viewer),
+                                        )),
                                     };
                                     let old_pair = {
                                         st.viewers
@@ -172,8 +177,6 @@ async fn handle_ws(mut socket: WebSocket, st: AppState, device_id: String) {
                                         info!(device = %device_id, old_viewer_id = %old_viewer_id, new_viewer_id = %vs.viewer_id, "kicked previous viewer (takeover)");
                                     }
                                     info!(device = %device_id, viewer_id = %vs.viewer_id, "viewer registered");
-                                    // 消费者出现：打断空闲低功耗计时（镜像模式若已关屏则唤醒）
-                                    st.devices.notify_activity(&device_id);
                                     // 冻结自愈：挂机 Greeze 冻结的应用 → 画面完全静止 →
                                     // 编码器无帧可出（reset_video 也等不到 IDR）→ viewer
                                     // 黑屏 → 前端看门狗反复重连。检测到冻结即 plain start

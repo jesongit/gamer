@@ -50,13 +50,16 @@ impl HangExecutor {
 impl crate::run_manager::RunExecutor for HangExecutor {
     fn prepare<'a>(
         &'a self,
-        _: &'a crate::run_manager::StartRequest,
+        _: &'a crate::core::RunContext,
+        _: &'a crate::core::RunRequest,
     ) -> futures_util::future::BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
     fn execute<'a>(
         &'a self,
-        _: &'a crate::run_manager::StartRequest,
+        _: &'a crate::core::RunContext,
+        _: &'a crate::core::RunRequest,
+        _realtime_logs: bool,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> futures_util::future::BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
         Box::pin(async move {
@@ -67,8 +70,12 @@ impl crate::run_manager::RunExecutor for HangExecutor {
             Ok(vec![("info".into(), "stopped".into())])
         })
     }
-    fn occupy(&self, _: &str) {}
-    fn release(&self, _: &str) {}
+    fn acquire(
+        &self,
+        _: &crate::core::RunContext,
+    ) -> anyhow::Result<Box<dyn crate::core::ActivityLease>> {
+        Ok(Box::new(crate::core::NoopLease))
+    }
 }
 
 #[tokio::test]

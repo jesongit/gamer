@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use image::{DynamicImage, GenericImageView, GrayImage};
+use image::{DynamicImage, GenericImageView, GrayImage, RgbImage};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,52 @@ pub struct MatchRequest {
     pub region: Option<[u32; 4]>,
     /// 是否对文件名 `#1` 标记的彩色模板执行命中后颜色复核。
     /// 该字段由调用方根据实际模板文件名推导，不是脚本 YAML 参数。
+    pub color: bool,
+}
+
+/// 解码后的单帧图像。
+///
+/// 这个类型是 Frame 与 Vision 之间的最小内部数据通路：PNG/H264 的来源
+/// 不会继续向 matcher API 泄漏，多个模板可以共享同一个 `DecodedFrame`。
+#[derive(Clone)]
+pub struct DecodedFrame {
+    rgb: Arc<RgbImage>,
+}
+
+impl DecodedFrame {
+    pub fn from_png(bytes: &[u8]) -> anyhow::Result<Self> {
+        let image = decode_image_limited(bytes, SCREEN_MAX_INPUT_BYTES, "截图")?.to_rgb8();
+        Ok(Self {
+            rgb: Arc::new(image),
+        })
+    }
+
+    pub fn from_rgb(image: RgbImage) -> Self {
+        Self {
+            rgb: Arc::new(image),
+        }
+    }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        self.rgb.dimensions()
+    }
+
+    pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 3]> {
+        self.rgb.get_pixel_checked(x, y).map(|pixel| pixel.0)
+    }
+
+    fn image(&self) -> &RgbImage {
+        &self.rgb
+    }
+}
+
+/// Vision adapter 使用的模板查询。模板内容由 Resource adapter 读取，
+/// matcher 只消费已授权的字节，不接受主机路径。
+#[derive(Clone, Debug)]
+pub struct DecodedMatchRequest {
+    pub template_png: Vec<u8>,
+    pub threshold: Option<f32>,
+    pub region: Option<[u32; 4]>,
     pub color: bool,
 }
 
@@ -774,13 +820,16 @@ fn resolve_template_file_impl(tpl_dir: &Path, template: &str) -> anyhow::Result<
     }
 }
 
-pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>> {
+/// 在同一份已解码帧上匹配一个模板。
+pub fn match_decoded_frame(
+    frame: &DecodedFrame,
+    req: &DecodedMatchRequest,
+) -> anyhow::Result<Option<MatchResult>> {
     let started = (matcher_stats().now)();
-    let screen = decode_image_limited(&req.screen_png, SCREEN_MAX_INPUT_BYTES, "截图")?.to_rgb8();
     let (template_key, template_source) = cached_template_source(&req.template_png)?;
 
     match_template_with_source(
-        &screen,
+        frame.image(),
         req.threshold,
         req.region,
         req.color,
@@ -791,10 +840,37 @@ pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>>
     )
 }
 
+/// 在同一份已解码帧上按请求顺序匹配多个模板。
+///
+/// 解码帧发生在调用方，故这里不会为每个模板重新解码截图；模板缓存仍按
+/// 内容复用，返回结果顺序与输入请求严格一致。
+pub fn match_decoded_many(
+    frame: &DecodedFrame,
+    requests: &[DecodedMatchRequest],
+) -> anyhow::Result<Vec<Option<MatchResult>>> {
+    requests
+        .iter()
+        .map(|request| match_decoded_frame(frame, request))
+        .collect()
+}
+
+pub fn match_template(req: &MatchRequest) -> anyhow::Result<Option<MatchResult>> {
+    let frame = DecodedFrame::from_png(&req.screen_png)?;
+    match_decoded_frame(
+        &frame,
+        &DecodedMatchRequest {
+            template_png: req.template_png.clone(),
+            threshold: req.threshold,
+            region: req.region,
+            color: req.color,
+        },
+    )
+}
+
 /// 通过规范化路径读取并匹配模板。路径入口的缓存键包含路径、mtime、文件大小
 /// 和内容哈希；现有字节入口保持兼容，不改变 MatchRequest 或调用方语义。
 #[allow(dead_code)]
-pub fn match_template_from_path(
+fn match_template_from_path(
     screen_png: &[u8],
     template_path: &Path,
     threshold: Option<f32>,

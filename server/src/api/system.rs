@@ -562,7 +562,10 @@ pub(super) fn spawn_watchdog(st: AppState) {
                     nudged.remove(&id);
                     continue;
                 }
-                let running = st.devices.has_running_scripts(&id);
+                let running = st
+                    .devices
+                    .activity()
+                    .has_kind(&id, crate::core::ActivityKind::Run);
                 // 会话确死（video socket 已关）：唯一允许脚本运行中强拆重连的
                 // 路径——控制 socket 同链路已死，不重连脚本会永远卡死
                 if !session.connected.load(std::sync::atomic::Ordering::SeqCst) {

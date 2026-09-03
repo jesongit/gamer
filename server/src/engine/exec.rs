@@ -19,7 +19,7 @@
 //! - 嵌套上限 32 层（call+func 合计）；取消经 stop 标志轮询退出。
 //!
 //! 设备访问与模板匹配经窄 trait 端口（`ports.rs`）注入；可视化事件
-//! （tap/swipe/hit/miss）经 viewers 注册表 control DataChannel 反向推送。
+//! （tap/swipe/hit/miss）经注入的 EventSink 反向推送。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,9 +27,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_recursion::async_recursion;
-use image::GenericImageView;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
+use crate::capabilities::adapters::RuntimeAdapter;
+use crate::capabilities::RuntimeService;
+use crate::core::{AppPackageId, DeviceId, EventSink, ResourceId, RunContext, RuntimeEvent};
 use crate::device::DeviceManager;
 use crate::matcher;
 use crate::script_v2::params::{self, merge_args};
@@ -39,12 +41,11 @@ use crate::script_v2::{
     Step, TypedValue,
 };
 use crate::scripts::ScriptStore;
-use crate::webrtc::ViewerMap;
 
 use super::events::ScriptEvent;
 use super::ports::{
-    ComputePoolMatcher, DeviceControl, DeviceGateway, EngineSettings, ScreenshotSource,
-    TemplateMatcher,
+    ComputePoolMatcher, DeviceControl, DeviceGateway, EngineSettings, ScreenFrame,
+    ScreenshotSource, TemplateMatchQuery, TemplateMatcher,
 };
 use super::snapshot::{ResourceCache, RunResources, RunSnapshot};
 
@@ -70,7 +71,8 @@ const COLOR_TOLERANCE: i32 = 30;
 // ---------------------------------------------------------------------------
 
 /// 统一运行目标（CONTRACT §4.4）：手动运行 / 从步骤运行 / 函数测试 / 定时任务。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunTarget {
     /// 可执行脚本（yaml/）。`start_index` = 顶层步骤序号（0=从头）。
     Script {
@@ -150,7 +152,7 @@ impl Serialize for RunTarget {
 /// 一次执行的完整规格（RunManager StartRequest → 引擎的直通车）。
 #[derive(Debug, Clone)]
 pub struct RunSpec {
-    pub device_id: String,
+    pub context: RunContext,
     pub target: RunTarget,
     /// 稀疏类型化参数覆盖（API 已按七类解析；引擎按快照声明绑定默认值）。
     pub args: Vec<(String, TypedValue)>,
@@ -170,8 +172,8 @@ pub struct Runner {
     pub ctl: Arc<dyn DeviceControl>,
     /// 模板匹配端口：生产 = ComputePoolMatcher → matcher::compute 计算池
     pub matcher: Arc<dyn TemplateMatcher>,
-    /// Active viewer registry used for script visualization events.
-    pub viewers: ViewerMap,
+    /// Runtime event output selected by the composition root.
+    pub events: Arc<dyn EventSink>,
     /// 脚本存储：快照捕获、模板路径解析（分区寻址）
     pub scripts: Arc<ScriptStore>,
 }
@@ -179,15 +181,27 @@ pub struct Runner {
 impl Runner {
     /// 生产装配：在构造点包一层端口 adapter，内部转发 DeviceManager / matcher
     /// 真实实现；Runner 执行路径只依赖窄 trait，生产行为零变化
-    pub fn new(devices: Arc<DeviceManager>, viewers: ViewerMap, scripts: Arc<ScriptStore>) -> Self {
+    pub fn new(
+        devices: Arc<DeviceManager>,
+        events: Arc<dyn EventSink>,
+        scripts: Arc<ScriptStore>,
+    ) -> Self {
         let settings = EngineSettings::from_config(&devices.cfg);
-        let gateway = Arc::new(DeviceGateway::new(devices));
+        let frame_store = Arc::new(crate::capabilities::adapters::FrameStore::new());
+        let frame_adapter = Arc::new(crate::capabilities::adapters::FrameAdapter::new(
+            devices.clone(),
+            frame_store,
+        ));
+        let gateway = Arc::new(DeviceGateway::new(devices.clone(), frame_adapter.clone()));
         Self::with_ports(
             settings,
             gateway.clone(),
             gateway,
-            Arc::new(ComputePoolMatcher),
-            viewers,
+            Arc::new(ComputePoolMatcher::with_frame_adapter(
+                scripts.clone(),
+                frame_adapter,
+            )),
+            events,
             scripts,
         )
     }
@@ -198,7 +212,7 @@ impl Runner {
         shots: Arc<dyn ScreenshotSource>,
         ctl: Arc<dyn DeviceControl>,
         matcher: Arc<dyn TemplateMatcher>,
-        viewers: ViewerMap,
+        events: Arc<dyn EventSink>,
         scripts: Arc<ScriptStore>,
     ) -> Self {
         Self {
@@ -206,7 +220,7 @@ impl Runner {
             shots,
             ctl,
             matcher,
-            viewers,
+            events,
             scripts,
         }
     }
@@ -219,7 +233,12 @@ impl Runner {
         stop: Arc<AtomicBool>,
         log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>>,
     ) -> anyhow::Result<Vec<(String, String)>> {
-        let pkg = spec.target.pkg().to_string();
+        let app = spec.context.app.clone();
+        let pkg = app
+            .content_package
+            .as_ref()
+            .map(ToString::to_string)
+            .ok_or_else(|| anyhow::anyhow!("运行请求未指定内容包"))?;
         // 快照捕获（文件 IO 放 blocking 池）：本次运行实例的不可变源码集
         let scripts = self.scripts.clone();
         let capture_pkg = pkg.clone();
@@ -228,7 +247,7 @@ impl Runner {
                 .await
                 .map_err(|e| anyhow::anyhow!("运行快照任务失败: {e}"))?
                 .map_err(|e| anyhow::anyhow!("运行快照构建失败: {e:#}"))?;
-        let resources = RunResources::new(&snapshot, &self.scripts, pkg.clone());
+        let resources = RunResources::new(&snapshot, &self.scripts, app);
         let mut cache = ResourceCache::default();
 
         // 入口解析 + 参数绑定 + 运行配置（入口 Arc 在本作用域内保活，steps
@@ -283,8 +302,10 @@ impl Runner {
         };
 
         let mut ctx = Ctx {
-            device_id: spec.device_id.clone(),
+            device_id: spec.context.app.device_id.to_string(),
+            android_package: spec.context.app.android_package.to_string(),
             pkg,
+            runtime: Arc::new(RuntimeAdapter::new(stop.clone())),
             stop,
             exit: Arc::new(AtomicBool::new(false)),
             config,
@@ -313,27 +334,24 @@ impl Runner {
         Ok(ctx.log)
     }
 
-    /// 推送脚本可视化事件给该设备当前的 viewer（无 viewer / 通道未开 / 发送失败均静默忽略）
+    /// 推送脚本可视化事件；WebRTC/日志/空实现等目的地由 EventSink 适配。
     async fn emit(&self, device_id: &str, ev: ScriptEvent) {
-        let dc = {
-            let map = self.viewers.lock().unwrap();
-            map.get(device_id).and_then(|h| h.control_dc.lock().clone())
-        };
-        let Some(dc) = dc else {
-            tracing::debug!(device = %device_id, "script event dropped: no viewer control_dc");
+        let Ok(device_id) = DeviceId::new(device_id) else {
             return;
         };
-        let mut v = match serde_json::to_value(&ev) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        if let Some(o) = v.as_object_mut() {
-            o.insert("type".into(), serde_json::json!("se"));
-        }
-        if let Err(e) = dc.send_text(v.to_string()).await {
-            tracing::warn!(device = %device_id, "script event send failed: {}", e);
+        if let Err(error) = self.events.emit(RuntimeEvent::new(device_id, ev)).await {
+            tracing::warn!("runtime event sink failed: {error:#}");
         }
     }
+}
+
+/// Map the old `tmpl/<short-name>` layout to a logical Core resource id.
+/// Path resolution remains exclusively in the capability adapter.
+fn legacy_template_resource_id(pkg: &str, template: &str) -> anyhow::Result<ResourceId> {
+    Ok(ResourceId::new(
+        AppPackageId::new(pkg.to_string())?,
+        format!("tmpl/{template}"),
+    )?)
 }
 
 /// 完整脚本 id（`<pkg>/<rel>`）→ 分区内相对 id（`<rel>`）；已是相对形态原样返回。
@@ -440,7 +458,19 @@ pub fn load_entry_param_decls(
             pkg.clone(),
         )]
     })?;
-    let resources = RunResources::new(&snapshot, scripts, pkg.clone());
+    let app = crate::engine::runner_adapter::yaml_app_context(
+        "parameter-probe",
+        Some(pkg.clone()),
+        pkg.clone(),
+    )
+    .map_err(|error| {
+        vec![crate::script_v2::ScriptError::new(
+            codes::YAML_SYNTAX_ERROR,
+            format!("运行上下文构建失败: {error:#}"),
+            pkg.clone(),
+        )]
+    })?;
+    let resources = RunResources::new(&snapshot, scripts, app);
     let mut cache = ResourceCache::default();
     match target {
         RunTarget::Script { script_id, .. } => {
@@ -536,9 +566,12 @@ struct Frame {
 /// 一次运行的执行上下文（v1 Ctx 的 v2 重写：参数作用域栈替代 $N/^N 文本替换）。
 struct Ctx<'a> {
     device_id: String,
-    /// 运行分区（应用包名）：模板/子脚本解析域 + str_app/cls_app 包名。
+    /// Android package used by explicit app lifecycle actions.
+    android_package: String,
+    /// 运行分区（内容包名）：模板/子脚本解析域。
     pkg: String,
     stop: Arc<AtomicBool>,
+    runtime: Arc<dyn RuntimeService>,
     /// throw 共享标志：跨 call/func 调用链结束整个运行。
     exit: Arc<AtomicBool>,
     config: RunConfig,
@@ -905,9 +938,9 @@ impl Runner {
     // ---- 基础动作 -----------------------------------------------------------
 
     /// str_app：冷启动应用（"+" 前缀 = 先 force-stop 再启动，scrcpy 定制控制
-    /// 消息）。包名 = 运行分区。
+    /// 消息）。包名来自 AppContext 的 Android namespace。
     async fn exec_str_app(&self, ctx: &mut Ctx<'_>) -> anyhow::Result<()> {
-        let pkg = validate_pkg(&ctx.pkg)?;
+        let pkg = validate_pkg(&ctx.android_package)?;
         if !self.ctl.has_session(&ctx.device_id) {
             anyhow::bail!("设备未连接");
         }
@@ -921,7 +954,7 @@ impl Runner {
 
     /// cls_app：adb force-stop 关闭应用（不碰 scrcpy 会话，投屏不中断）。
     async fn exec_cls_app(&self, ctx: &mut Ctx<'_>) -> anyhow::Result<()> {
-        let pkg = validate_pkg(&ctx.pkg)?;
+        let pkg = validate_pkg(&ctx.android_package)?;
         let serial = self
             .ctl
             .adb_serial(&ctx.device_id)
@@ -1258,10 +1291,11 @@ impl Runner {
             }
             // 本轮唯一一帧：全部候选复用同一张截图
             let screen = self.shot(ctx).await?;
+            let matches = self.match_screen_many(ctx, &names, screen).await?;
             let mut matched = false;
             let mut missed = Vec::new();
-            for (name, cand) in names.iter().zip(candidates.iter()) {
-                match self.match_screen_one(ctx, name, screen.clone()).await? {
+            for ((name, cand), result) in names.iter().zip(candidates.iter()).zip(matches) {
+                match result {
                     Some(mm) => {
                         self.emit(
                             &ctx.device_id,
@@ -1433,21 +1467,18 @@ impl Runner {
                 }
             }
         };
-        let (w, h) = self.screen_size(ctx, &screen).await;
+        let (w, h) = self.screen_size(ctx, &screen);
         if w == 0 || h == 0 {
             anyhow::bail!("无法获取屏幕尺寸");
         }
         let px = ((rx * w as f64).round() as i64).clamp(0, w as i64 - 1) as u32;
         let py = ((ry * h as f64).round() as i64).clamp(0, h as i64 - 1) as u32;
         // 截图整图解码 + 采样点读值提交计算池（PERF-003）
-        let (ar, ag, ab) = matcher::compute::run(move || {
-            let img = image::load_from_memory(&screen)
-                .map_err(|e| anyhow::anyhow!("解析截图失败: {}", e))?;
-            let p = img.to_rgb8().get_pixel(px, py).0;
-            Ok((p[0] as i32, p[1] as i32, p[2] as i32))
-        })
-        .await
-        .and_then(|inner| inner)?;
+        let sample = self
+            .matcher
+            .sample_color(screen, crate::capabilities::FramePoint::new(px, py))
+            .await?;
+        let (ar, ag, ab) = (sample.red as i32, sample.green as i32, sample.blue as i32);
         for branch in expect {
             let hex = match self.typed_value(ctx, &branch.color, "color.expect")? {
                 TypedValue::Color(c) => c,
@@ -1640,7 +1671,7 @@ impl Runner {
     // ---- 设备/匹配辅助 -----------------------------------------------------------
 
     /// 截图（错误包装；find 的软重试语义由调用方实现）。
-    async fn shot(&self, ctx: &Ctx<'_>) -> anyhow::Result<Vec<u8>> {
+    async fn shot(&self, ctx: &Ctx<'_>) -> anyhow::Result<ScreenFrame> {
         self.shots
             .screenshot(&ctx.device_id)
             .await
@@ -1655,7 +1686,7 @@ impl Runner {
                 return;
             }
             let slice = left.min(Duration::from_millis(WAIT_STOP_SLICE_MS));
-            tokio::time::sleep(slice).await;
+            let _ = ctx.runtime.sleep(slice).await;
             left -= slice;
         }
     }
@@ -1679,9 +1710,9 @@ impl Runner {
         &self,
         ctx: &mut Ctx<'_>,
         template: &str,
-        screen: Vec<u8>,
+        screen: ScreenFrame,
     ) -> anyhow::Result<Option<matcher::MatchResult>> {
-        let (w, h) = self.screen_size(ctx, &screen).await;
+        let (w, h) = self.screen_size(ctx, &screen);
         if w == 0 || h == 0 {
             anyhow::bail!("无法获取屏幕尺寸");
         }
@@ -1708,7 +1739,15 @@ impl Runner {
         }
         let mm = self
             .matcher
-            .match_template(screen, template, path, ctx.config.threshold, region, color)
+            .match_template(
+                screen,
+                TemplateMatchQuery {
+                    resource: legacy_template_resource_id(&ctx.pkg, template)?,
+                    threshold: ctx.config.threshold,
+                    region,
+                    color,
+                },
+            )
             .await?;
         if mm.is_none() {
             let [x, y, rw, rh] = region.unwrap_or([0, 0, w, h]);
@@ -1725,6 +1764,71 @@ impl Runner {
             .await;
         }
         Ok(mm)
+    }
+
+    /// `match` 的一轮批量匹配：模板资源仍逐项解析其区域/颜色后缀，但只把
+    /// 一帧交给 matcher，生产 adapter 会经 vision.match_many 复用一次解码帧。
+    async fn match_screen_many(
+        &self,
+        ctx: &mut Ctx<'_>,
+        templates: &[String],
+        screen: ScreenFrame,
+    ) -> anyhow::Result<Vec<Option<matcher::MatchResult>>> {
+        let (w, h) = self.screen_size(ctx, &screen);
+        if w == 0 || h == 0 {
+            anyhow::bail!("无法获取屏幕尺寸");
+        }
+        let mut queries = Vec::with_capacity(templates.len());
+        let mut regions = Vec::with_capacity(templates.len());
+        for template in templates {
+            let path = self
+                .scripts
+                .resolve_template_path(&ctx.pkg, template)
+                .map_err(|e| anyhow::anyhow!("模板 {template} 解析失败: {e:#}"))?;
+            let file_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| template.to_string());
+            let region = matcher::template_region_from_name(&file_name, w, h);
+            let color = matcher::template_color_from_name(&file_name);
+            if region.is_none()
+                && !file_name.contains('#')
+                && ctx.region_warned.insert(file_name.clone())
+            {
+                ctx.log(
+                    "info",
+                    format!(
+                        "模板 {file_name} 未带 #区域后缀，回退全屏搜索（区域写法：xx#l / xx#0_0_500_500）"
+                    ),
+                );
+            }
+            regions.push(region.unwrap_or([0, 0, w, h]));
+            queries.push(TemplateMatchQuery {
+                resource: legacy_template_resource_id(&ctx.pkg, template)?,
+                threshold: ctx.config.threshold,
+                region,
+                color,
+            });
+        }
+        let results = self.matcher.match_many(screen, queries).await?;
+        for (template, (result, [x, y, width, height])) in
+            templates.iter().zip(results.iter().zip(regions))
+        {
+            if result.is_none() {
+                self.emit(
+                    &ctx.device_id,
+                    ScriptEvent::Miss {
+                        tpl: template.clone(),
+                        x,
+                        y,
+                        w: width,
+                        h: height,
+                    },
+                )
+                .await;
+            }
+        }
+        Ok(results)
     }
 
     /// 点击命中模板的中心（find 主模板与 block 障碍模板共用），点击完成后等待 interval。
@@ -1761,24 +1865,14 @@ impl Runner {
         Ok(())
     }
 
-    /// 屏幕尺寸：会话视频参数优先，兜底解码截图（计算池）。
-    async fn screen_size(&self, ctx: &Ctx<'_>, screen: &[u8]) -> (u32, u32) {
+    /// 屏幕尺寸：会话视频参数优先，兜底使用截图源携带的帧元数据。
+    fn screen_size(&self, ctx: &Ctx<'_>, screen: &ScreenFrame) -> (u32, u32) {
         if let Some((w, h)) = self.ctl.video_size(&ctx.device_id) {
             if w > 0 && h > 0 {
                 return (w, h);
             }
         }
-        let png = screen.to_vec();
-        match matcher::compute::run(move || {
-            image::load_from_memory(&png)
-                .map(|img| img.dimensions())
-                .unwrap_or((0, 0))
-        })
-        .await
-        {
-            Ok((w, h)) => (w, h),
-            Err(_) => (0, 0),
-        }
+        (screen.size.width, screen.size.height)
     }
 }
 
@@ -1855,7 +1949,10 @@ pub fn key_code(key: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::ports::{DeviceControl, EngineSettings, ScreenshotSource, TemplateMatcher};
+    use crate::engine::ports::{
+        DeviceControl, EngineSettings, ScreenFrame, ScreenshotSource, TemplateMatchQuery,
+        TemplateMatcher,
+    };
     use futures_util::future::BoxFuture;
     use std::sync::Mutex;
 
@@ -1896,10 +1993,16 @@ mod tests {
     }
 
     impl ScreenshotSource for FakeShots {
-        fn screenshot(&self, _device_id: &str) -> BoxFuture<'_, anyhow::Result<Vec<u8>>> {
+        fn screenshot(&self, _device_id: &str) -> BoxFuture<'_, anyhow::Result<ScreenFrame>> {
             self.count.fetch_add(1, Ordering::SeqCst);
             let png = self.png.clone();
-            Box::pin(async move { Ok(png) })
+            Box::pin(async move {
+                let image = image::load_from_memory(&png)?;
+                Ok(ScreenFrame::new(
+                    crate::capabilities::FrameHandle::new(),
+                    crate::capabilities::FrameSize::new(image.width(), image.height()),
+                ))
+            })
         }
     }
 
@@ -1977,13 +2080,15 @@ mod tests {
     /// 模板匹配 fake：按模板短名查表命中（未注册 = 未命中），记录调用顺序。
     struct FakeMatcher {
         hits: HashMap<String, [u32; 4]>,
+        color: [u8; 3],
         calls: Mutex<Vec<String>>,
     }
 
     impl FakeMatcher {
-        fn new(hits: HashMap<&'static str, [u32; 4]>) -> Arc<Self> {
+        fn new(hits: HashMap<&'static str, [u32; 4]>, color: [u8; 3]) -> Arc<Self> {
             Arc::new(Self {
                 hits: hits.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+                color,
                 calls: Mutex::new(Vec::new()),
             })
         }
@@ -1995,15 +2100,17 @@ mod tests {
     impl TemplateMatcher for FakeMatcher {
         fn match_template(
             &self,
-            _screen_png: Vec<u8>,
-            template: &str,
-            _path: std::path::PathBuf,
-            _threshold: f32,
-            _region: Option<[u32; 4]>,
-            _color: bool,
+            _frame: ScreenFrame,
+            query: TemplateMatchQuery,
         ) -> BoxFuture<'_, anyhow::Result<Option<matcher::MatchResult>>> {
-            self.calls.lock().unwrap().push(template.to_string());
-            let hit = self.hits.get(template).copied();
+            let template = query
+                .resource
+                .logical_path()
+                .strip_prefix("tmpl/")
+                .unwrap_or_else(|| query.resource.logical_path())
+                .to_string();
+            self.calls.lock().unwrap().push(template.clone());
+            let hit = self.hits.get(&template).copied();
             Box::pin(async move {
                 Ok(hit.map(|[x, y, w, h]| matcher::MatchResult {
                     x,
@@ -2013,6 +2120,34 @@ mod tests {
                     score: 0.99,
                 }))
             })
+        }
+
+        fn match_many(
+            &self,
+            frame: ScreenFrame,
+            queries: Vec<TemplateMatchQuery>,
+        ) -> BoxFuture<'_, anyhow::Result<Vec<Option<matcher::MatchResult>>>> {
+            Box::pin(async move {
+                let mut results = Vec::with_capacity(queries.len());
+                for query in queries {
+                    let result = self.match_template(frame, query).await?;
+                    let matched = result.is_some();
+                    results.push(result);
+                    if matched {
+                        break;
+                    }
+                }
+                Ok(results)
+            })
+        }
+
+        fn sample_color(
+            &self,
+            _frame: ScreenFrame,
+            _point: crate::capabilities::FramePoint,
+        ) -> BoxFuture<'_, anyhow::Result<crate::capabilities::ColorSample>> {
+            let [red, green, blue] = self.color;
+            Box::pin(async move { Ok(crate::capabilities::ColorSample { red, green, blue }) })
         }
     }
 
@@ -2054,10 +2189,14 @@ mod tests {
             ..Default::default()
         };
         let store = Arc::new(ScriptStore::open(&cfg).unwrap());
-        let viewers: ViewerMap = Arc::new(Mutex::new(HashMap::new()));
         let ctl = FakeCtl::new();
+        let color = image::load_from_memory(&png)
+            .unwrap()
+            .to_rgb8()
+            .get_pixel(0, 0)
+            .0;
+        let matcher = FakeMatcher::new(hits, color);
         let shots = FakeShots::new(png);
-        let matcher = FakeMatcher::new(hits);
         let runner = Runner::with_ports(
             EngineSettings {
                 interval: "20ms".into(),
@@ -2068,7 +2207,7 @@ mod tests {
             shots.clone(),
             ctl.clone(),
             matcher.clone(),
-            viewers,
+            Arc::new(crate::core::NullEventSink),
             store.clone(),
         );
         Arc::new(Rig {
@@ -2113,7 +2252,10 @@ mod tests {
             stop: Arc<AtomicBool>,
         ) -> anyhow::Result<Vec<(String, String)>> {
             let spec = RunSpec {
-                device_id: "dev".into(),
+                context: crate::core::RunContext::new(
+                    crate::core::RunId::generate(),
+                    crate::core::AppContext::from_legacy_package("dev", PKG).unwrap(),
+                ),
                 target,
                 args: args.into_iter().map(|(n, v)| (n.to_string(), v)).collect(),
             };
@@ -2126,7 +2268,10 @@ mod tests {
             args: Vec<(&str, TypedValue)>,
         ) -> (anyhow::Result<Vec<(String, String)>>, Vec<(String, String)>) {
             let spec = RunSpec {
-                device_id: "dev".into(),
+                context: crate::core::RunContext::new(
+                    crate::core::RunId::generate(),
+                    crate::core::AppContext::from_legacy_package("dev", PKG).unwrap(),
+                ),
                 target,
                 args: args.into_iter().map(|(n, v)| (n.to_string(), v)).collect(),
             };
@@ -2336,7 +2481,7 @@ mod tests {
 
     // ---- match ---------------------------------------------------------------
 
-    /// match：每轮单帧、候选按序、命中即停且不点击；无 timeout 单轮。
+    /// match：每轮单帧、候选按序、首个命中分支且不点击；无 timeout 单轮。
     #[tokio::test]
     async fn match_single_frame_per_round_ordered_candidates_no_click() {
         let r = rig(
@@ -2356,7 +2501,7 @@ mod tests {
         assert_eq!(
             r.matcher.calls(),
             vec!["a.png", "b.png"],
-            "命中即停，后续候选不匹配"
+            "匹配按序命中后停止，候选仍共享同一帧"
         );
         assert!(r.ctl.calls().is_empty(), "match 永不点击");
         assert!(logs_contain(&logs, "match 命中 b.png"));

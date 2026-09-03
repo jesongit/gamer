@@ -132,14 +132,25 @@ async fn submit_run(
             Err(e) => return e.into_response(),
         }
     };
-    let rreq = crate::run_manager::StartRequest {
-        device_id,
+    let android_package = st
+        .devices
+        .snapshot(&device_id)
+        .and_then(|(device, _, _)| device.pkg);
+    let app = match crate::engine::yaml_app_context(&device_id, android_package, target.pkg()) {
+        Ok(app) => app,
+        Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
+    };
+    let rreq = match crate::engine::yaml_start_request(
+        app,
         target,
-        source: crate::run_manager::RunSource::Manual,
-        task_id: None,
-        scheduled_at: None,
-        args: bound.overrides,
-        realtime_logs: true,
+        crate::run_manager::RunSource::Manual,
+        None,
+        None,
+        bound.overrides,
+        true,
+    ) {
+        Ok(request) => request,
+        Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
     };
     match st
         .runs

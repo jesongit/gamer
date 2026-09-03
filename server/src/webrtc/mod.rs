@@ -17,12 +17,14 @@ use tracing::{debug, info, warn};
 
 use crate::device::scrcpy::{AudioFrame, ScrcpySession, VideoFrame};
 
+mod events;
 mod protocol;
 
 mod probe;
 mod rtc_net;
 mod viewer;
 
+pub use events::ViewerEventSink;
 pub use viewer::{
     remove_and_teardown_viewer, teardown_viewer, ViewerDisconnectReason, ViewerHandle, ViewerMap,
     ViewerSession,

@@ -105,7 +105,7 @@ impl WorkloadSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::RunTarget;
+    use crate::core::{ActivityLease, RunContext, RunRequest};
     use crate::run_manager::{RunExecutor, RunSource, RunState, StartRequest};
     use crate::store::{Db, Store, Task};
     use crate::update::service::UpdateTxn;
@@ -117,13 +117,19 @@ mod tests {
     struct HangingExecutor;
 
     impl RunExecutor for HangingExecutor {
-        fn prepare<'a>(&'a self, _req: &'a StartRequest) -> BoxFuture<'a, anyhow::Result<()>> {
+        fn prepare<'a>(
+            &'a self,
+            _context: &'a RunContext,
+            _request: &'a RunRequest,
+        ) -> BoxFuture<'a, anyhow::Result<()>> {
             Box::pin(async { Ok(()) })
         }
 
         fn execute<'a>(
             &'a self,
-            _req: &'a StartRequest,
+            _context: &'a RunContext,
+            _request: &'a RunRequest,
+            _realtime_logs: bool,
             stop: Arc<AtomicBool>,
         ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
             Box::pin(async move {
@@ -134,9 +140,9 @@ mod tests {
             })
         }
 
-        fn occupy(&self, _device_id: &str) {}
-
-        fn release(&self, _device_id: &str) {}
+        fn acquire(&self, _context: &RunContext) -> anyhow::Result<Box<dyn ActivityLease>> {
+            Ok(Box::new(crate::core::NoopLease))
+        }
     }
 
     fn wl(runs: usize, viewers: usize, txns: usize, cron: Option<i64>) -> Workload {
@@ -271,18 +277,21 @@ mod tests {
         db.upsert_task(&enabled).unwrap();
         db.upsert_task(&disabled).unwrap();
 
+        let app = crate::core::AppContext::from_legacy_package("device-1", "pkg").unwrap();
+        let request = RunRequest::for_app(
+            app,
+            "test.runner",
+            "pkg/script.yaml",
+            crate::core::RunPayload::empty(),
+        )
+        .unwrap();
         let run = runs
             .submit(
                 StartRequest {
-                    device_id: "device-1".into(),
-                    target: RunTarget::Script {
-                        script_id: "pkg/script.yaml".into(),
-                        start_index: 0,
-                    },
+                    request,
                     source: RunSource::Scheduled,
                     task_id: Some("enabled".into()),
                     scheduled_at: Some(now.timestamp()),
-                    args: vec![],
                     realtime_logs: false,
                 },
                 None,
@@ -302,6 +311,7 @@ mod tests {
                 last_serve: Arc::new(std::sync::atomic::AtomicI64::new(0)),
                 notify: Arc::new(Mutex::new(None)),
                 control_tx,
+                activity_lease: None,
             },
         );
         let transaction_active = Arc::new(AtomicBool::new(true));

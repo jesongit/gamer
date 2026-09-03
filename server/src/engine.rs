@@ -16,13 +16,14 @@
 //!   `Runner::new` 装配 adapter 转发 DeviceManager / matcher，测试注入 fake。
 //!
 //! 可视化事件（v1 语义保持）：tap/swipe/匹配命中/未命中时推送给该设备当前
-//! viewer（emit → viewers 注册表查 control_dc；无 viewer 时静默丢弃）。
+//! viewer（emit → 注入的 EventSink；WebRTC adapter 无 viewer 时静默丢弃）。
 
 #[path = "engine_events.rs"]
 mod events;
 
 pub mod exec;
 pub mod ports;
+pub mod runner_adapter;
 pub mod snapshot;
 
 // bin crate：部分再导出仅被 API/测试/未来阶段消费，未在本 crate 内使用
@@ -33,3 +34,4 @@ pub use exec::{
     key_code, load_entry_param_decls, resolve_entry_args, BoundEntryArgs, RunSpec, RunTarget,
     Runner,
 };
+pub use runner_adapter::{yaml_app_context, yaml_start_request, EngineExecutor};

@@ -189,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             init_gate.wait_activation().await;
             info!("activation received: completing full initialization");
-            match init_runtime(&init_cfg, init_db.clone(), init_slot.clone()).await {
+            match RuntimeServices::start(&init_cfg, init_db.clone(), init_slot.clone()).await {
                 Ok(ctx) => {
                     let update = spawn_update_stack(&init_cfg, init_db.clone(), &ctx);
                     // 运行日志保留（DATA-004）随完整初始化启动
@@ -203,18 +203,8 @@ async fn main() -> anyhow::Result<()> {
                         ));
                     }
                     update::gate::set_stage(update::gate::STAGE_READY);
-                    let router = api::build_router(
-                        init_db,
-                        ctx.devices,
-                        ctx.runs,
-                        ctx.scheduler,
-                        init_cfg.clone(),
-                        ctx.viewers,
-                        ctx.scripts,
-                        init_shutdown,
-                        init_auth,
-                        update,
-                    );
+                    let router =
+                        ctx.router(init_db, init_cfg.clone(), init_shutdown, init_auth, update);
                     init_shared.set(router);
                     info!("full initialization complete: business routes open (stage=ready)");
                 }
@@ -229,56 +219,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ---- 常规启动路径（无 gate：行为与历史版本一致） ----
-
-    // 脚本/模板按应用分区存储（data/<pkg>/yaml|tmpl）；旧目录布局不再自动迁移
-    let scripts = Arc::new(scripts::ScriptStore::open(&cfg)?);
-
-    // 每设备活跃 viewer 注册表：AppState / Scheduler / DeviceManager（空闲断开守卫）共享
-    // （引擎经 control DataChannel 反向推送脚本可视化事件，定时任务运行时同样生效）
-    let viewers: webrtc::ViewerMap =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-
-    // 设备管理器：负责 adb 发现 + scrcpy 会话（start 内含启动扫描自举 + WiFi adb 保活）
-    let devices = Arc::new(device::DeviceManager::new(
-        db.clone(),
-        cfg.clone(),
-        viewers.clone(),
-    ));
-
-    // 统一运行管理（阶段 3 RUN-001）：手动 / 定时 / 立即运行共用 run_id 注册表，
-    // 生产装配 EngineExecutor 直连 Runner + DeviceManager
-    let runner = Arc::new(engine::Runner::new(
-        devices.clone(),
-        viewers.clone(),
-        scripts.clone(),
-    ));
-    let executor = Arc::new(run_manager::EngineExecutor::new(
-        runner,
-        devices.clone(),
-        db.clone(),
-    ));
-    let runs = Arc::new(run_manager::RunManager::new(executor));
-
-    // 调度器：cron 定时任务（执行经 RunManager 统一仲裁）
-    let scheduler = Arc::new(scheduler::Scheduler::new(
-        db.clone(),
-        scripts.clone(),
-        runs.clone(),
-    ));
-
-    let ctx = RuntimeCtx {
-        scripts,
-        viewers,
-        devices,
-        runs,
-        scheduler,
-    };
-
-    // 先装配真实 drain，再启动设备扫描/保活；避免启动窗口收到 SIGTERM 时
-    // 协调器仍持有空槽而漏掉已创建的 DeviceManager。
-    install_drain(&drain_slot, &ctx);
-    ctx.devices.start().await?;
-    ctx.scheduler.start().await;
+    // 与激活路径共用同一个 composition root，避免两条启动路径的依赖图漂移。
+    let ctx = RuntimeServices::start(&cfg, db.clone(), drain_slot.clone()).await?;
 
     // 更新子系统（批次 3）：controller 按部署形态装配 + 策略协调器后台任务
     let update = spawn_update_stack(&cfg, db.clone(), &ctx);
@@ -297,18 +239,7 @@ async fn main() -> anyhow::Result<()> {
 
     // HTTP + WebSocket API（停机经协调器：/api/shutdown 与信号同路径）
     let mut shutdown_rx = shutdown.subscribe();
-    let app = api::build_router(
-        db,
-        ctx.devices,
-        ctx.runs,
-        ctx.scheduler,
-        cfg.clone(),
-        ctx.viewers,
-        ctx.scripts,
-        shutdown.clone(),
-        auth,
-        update,
-    );
+    let app = ctx.router(db, cfg.clone(), shutdown.clone(), auth, update);
     let listener = TcpListener::bind(cfg.listen_addr()).await?;
     info!("GameBot server ready on http://{}", cfg.listen_addr());
     axum::serve(
@@ -326,7 +257,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// 运行时上下文：闸内路径激活后与常规路径共用的完整业务依赖集合
-struct RuntimeCtx {
+struct RuntimeServices {
     scripts: Arc<scripts::ScriptStore>,
     viewers: webrtc::ViewerMap,
     devices: Arc<device::DeviceManager>,
@@ -334,51 +265,76 @@ struct RuntimeCtx {
     scheduler: Arc<scheduler::Scheduler>,
 }
 
-/// 【activate 后】完整业务初始化：脚本存储 / viewer 注册表 / DeviceManager
-/// （start 内含扫描自举 + WiFi adb 保活）/ Runner / RunManager / Scheduler。
-/// 常规路径同序列内联展开；gate 路径在激活任务中调用。
-async fn init_runtime(
-    cfg: &config::Config,
-    db: Arc<store::Store>,
-    drain_slot: DrainSlot,
-) -> anyhow::Result<RuntimeCtx> {
-    let scripts = Arc::new(scripts::ScriptStore::open(cfg)?);
-    let viewers: webrtc::ViewerMap =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    let devices = Arc::new(device::DeviceManager::new(
-        db.clone(),
-        cfg.clone(),
-        viewers.clone(),
-    ));
-    let runner = Arc::new(engine::Runner::new(
-        devices.clone(),
-        viewers.clone(),
-        scripts.clone(),
-    ));
-    let executor = Arc::new(run_manager::EngineExecutor::new(
-        runner,
-        devices.clone(),
-        db.clone(),
-    ));
-    let runs = Arc::new(run_manager::RunManager::new(executor));
-    let scheduler = Arc::new(scheduler::Scheduler::new(
-        db.clone(),
-        scripts.clone(),
-        runs.clone(),
-    ));
-    let ctx = RuntimeCtx {
-        scripts,
-        viewers,
-        devices,
-        runs,
-        scheduler,
-    };
-    // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
-    // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。
-    install_drain(&drain_slot, &ctx);
-    ctx.devices.start().await?;
-    ctx.scheduler.start().await;
-    Ok(ctx)
+impl RuntimeServices {
+    /// Build the HTTP graph from one fully initialized dependency set. Both
+    /// normal startup and activation-gate startup use this composition root;
+    /// the gate itself remains a deliberately smaller router.
+    fn router(
+        &self,
+        db: Arc<store::Store>,
+        cfg: config::Config,
+        shutdown: Arc<shutdown::ShutdownCoordinator>,
+        auth: Arc<api::auth::AuthState>,
+        update: Arc<update::service::UpdateService>,
+    ) -> axum::Router {
+        api::build_router(
+            db,
+            self.devices.clone(),
+            self.runs.clone(),
+            self.scheduler.clone(),
+            cfg,
+            self.viewers.clone(),
+            self.scripts.clone(),
+            shutdown,
+            auth,
+            update,
+        )
+    }
+}
+
+impl RuntimeServices {
+    /// Complete service graph for both normal startup and activation-gate
+    /// startup. Device and scheduler background work begins only after the
+    /// drain slot is populated.
+    async fn start(
+        cfg: &config::Config,
+        db: Arc<store::Store>,
+        drain_slot: DrainSlot,
+    ) -> anyhow::Result<Self> {
+        let scripts = Arc::new(scripts::ScriptStore::open(cfg)?);
+        let viewers: webrtc::ViewerMap =
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let devices = Arc::new(device::DeviceManager::new(db.clone(), cfg.clone()));
+        let runner = Arc::new(engine::Runner::new(
+            devices.clone(),
+            Arc::new(webrtc::ViewerEventSink::new(viewers.clone())),
+            scripts.clone(),
+        ));
+        let executor = Arc::new(engine::EngineExecutor::new(
+            runner,
+            devices.clone(),
+            db.clone(),
+        ));
+        let runs = Arc::new(run_manager::RunManager::new(executor));
+        let scheduler = Arc::new(scheduler::Scheduler::new(
+            db.clone(),
+            scripts.clone(),
+            runs.clone(),
+        ));
+        let ctx = Self {
+            scripts,
+            viewers,
+            devices,
+            runs,
+            scheduler,
+        };
+        // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
+        // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。
+        install_drain(&drain_slot, &ctx);
+        ctx.devices.start().await?;
+        ctx.scheduler.start().await;
+        Ok(ctx)
+    }
 }
 
 /// 停机 drain 的延后装配槽：闸内启动时 drain 依赖不存在，完整初始化后写入
@@ -398,7 +354,7 @@ fn slot_drain(slot: DrainSlot) -> shutdown::DrainFn {
 }
 
 /// 完整初始化后装配真实 drain（RunManager drain → 踢 viewer → 拆 scrcpy 会话）
-fn install_drain(slot: &DrainSlot, ctx: &RuntimeCtx) {
+fn install_drain(slot: &DrainSlot, ctx: &RuntimeServices) {
     let runs = ctx.runs.clone();
     let viewers = ctx.viewers.clone();
     let devices = ctx.devices.clone();
@@ -418,7 +374,7 @@ fn install_drain(slot: &DrainSlot, ctx: &RuntimeCtx) {
 fn spawn_update_stack(
     cfg: &config::Config,
     db: Arc<store::Store>,
-    ctx: &RuntimeCtx,
+    ctx: &RuntimeServices,
 ) -> Arc<update::service::UpdateService> {
     let mode = deps_probe::Mode::detect();
     let controller = update::controller::build_for_mode(mode);
