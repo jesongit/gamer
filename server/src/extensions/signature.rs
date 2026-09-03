@@ -26,6 +26,17 @@ const SIGNATURE_FILE: &str = "signature.sig";
 const LEGACY_SIGNATURE_FILE: &str = "manifest.toml.sig";
 const REGISTRY_CLAIM_MAGIC: &str = "gamebot-gplugin-registry-entry-1";
 
+/// Bundled local-market trust anchor (Phase 10 验收：无编译环境用户开箱可安装
+/// 官方插件)。公钥对应 tools/plugin-signing/gamer-dev-1.pem；私钥永不入库，
+/// 仅由 tools/build-plugins.ps1 在本机用于给官方演示包签名。
+/// 生产部署可以放置同名 <key_id>.pem 到信任目录（GAMER_PLUGIN_TRUST_DIR 或
+/// `<data>/plugin-trust`）覆盖该锚，换用独立发布 keypair。
+const BUNDLED_DEV_KEY_ID: &str = "gamer-dev-1";
+const BUNDLED_DEV_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAH+vZStb7t9CVlPFoXgZJxJCTSNRHuGfIZWW8sOyuXCY=
+-----END PUBLIC KEY-----
+";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum SignatureStatus {
@@ -149,6 +160,21 @@ impl TrustStore {
         Ok(Self { entries: trusted })
     }
 
+    /// 内置本地市场信任锚：信任目录未提供同 key_id 覆盖时补充 dev 公钥，
+    /// 使官方演示包开箱可验证；目录内的同名 pem 始终优先。
+    fn ensure_bundled_anchor(&mut self) {
+        if self.entries.iter().any(|(id, _)| id == BUNDLED_DEV_KEY_ID) {
+            return;
+        }
+        let key = parse_public_key_pem(BUNDLED_DEV_PUBLIC_KEY_PEM);
+        if key.is_none() {
+            tracing::error!("内置 dev 公钥无法解析，官方插件将不可安装");
+            return;
+        }
+        self.entries.push((BUNDLED_DEV_KEY_ID.to_string(), key));
+        self.entries.sort_by(|left, right| left.0.cmp(&right.0));
+    }
+
     #[cfg(test)]
     fn from_keys(entries: Vec<(String, VerifyingKey)>) -> Self {
         Self {
@@ -177,10 +203,11 @@ impl SignatureVerifier {
         let trust_dir = std::env::var_os("GAMER_PLUGIN_TRUST_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_root.as_ref().join("plugin-trust"));
-        let trust_store = TrustStore::from_dir(&trust_dir).unwrap_or_else(|error| {
+        let mut trust_store = TrustStore::from_dir(&trust_dir).unwrap_or_else(|error| {
             tracing::warn!(path = %trust_dir.display(), %error, "插件信任库不可读，官方包将被拒绝");
             TrustStore::default()
         });
+        trust_store.ensure_bundled_anchor();
         Self { trust_store }
     }
 
@@ -272,9 +299,13 @@ impl SignatureVerifier {
                 "proof 的插件 id/version 与归档不一致".into(),
             ));
         }
-        if !proof.download_url.starts_with("https://") {
+        if !proof.download_url.starts_with("https://")
+            // 随包分发的本地市场使用同源相对路径（web-dist 托管 registry.json 与
+            // .gplugin）；proof 签名绑定完整 URL 字符串，篡改依旧会验签失败。
+            && !proof.download_url.starts_with('/')
+        {
             return Err(ExtensionError::InvalidRegistryProof(
-                "官方 download_url 必须是 https://".into(),
+                "官方 download_url 必须是 https:// 或同源绝对路径".into(),
             ));
         }
         if !is_sha256(&proof.sha256) {
@@ -414,6 +445,14 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use std::io::Write;
     use zip::write::SimpleFileOptions;
+
+    /// 内置信任锚必须与提交进仓库的 dev 公钥一致；换 keypair 时两处同步更新。
+    #[test]
+    fn bundled_anchor_pem_stays_in_sync_with_committed_public_key() {
+        let committed = include_str!("../../../tools/plugin-signing/gamer-dev-1.pem");
+        assert_eq!(BUNDLED_DEV_PUBLIC_KEY_PEM, committed);
+        assert!(parse_public_key_pem(BUNDLED_DEV_PUBLIC_KEY_PEM).is_some());
+    }
 
     fn package(signing: &SigningKey, manifest: &[u8]) -> Vec<u8> {
         package_with_signed_manifest(signing, manifest, manifest)

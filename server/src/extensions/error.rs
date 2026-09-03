@@ -59,6 +59,8 @@ pub(crate) enum ExtensionError {
     RuntimeUnavailable(&'static str),
     #[error("WASM runtime 错误: {0}")]
     Runtime(String),
+    #[error("插件调用被拒绝: {0}")]
+    CallRejected(String),
     #[error("插件权限错误: {0}")]
     Permission(#[from] PermissionError),
     #[error("插件状态文件无效: {0}")]

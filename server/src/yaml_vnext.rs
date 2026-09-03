@@ -88,16 +88,16 @@ impl Value {
         }
     }
 
-    pub fn map() -> BTreeMap<String, Value> {
-        BTreeMap::new()
-    }
-
+    /// JSON 出口（roundtrip 测试消费；生产 WASM 边界直接 serde 序列化）。
+    #[allow(dead_code)]
     pub fn into_json(self) -> serde_json::Value {
         serde_json::to_value(self).expect("yaml vnext values are JSON representable")
     }
 
     /// Accept both the typed wire format emitted by `Value` and ordinary JSON
     /// values supplied by a third-party capability guest.
+    /// 消费方在 wasm-runtime 侧（guest 输入/输出 JSON 边界）。
+    #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
     pub fn from_json(value: serde_json::Value) -> Result<Self, String> {
         match serde_json::from_value::<Self>(value.clone()) {
             Ok(value) => Ok(value),
@@ -1618,13 +1618,13 @@ fn parse_duration_ms(raw: &str) -> Option<u64> {
     if number == 0 {
         return Some(0);
     }
-    Some(number.checked_mul(match unit {
+    number.checked_mul(match unit {
         "ms" => 1,
         "s" => 1_000,
         "m" => 60_000,
         "h" => 3_600_000,
         _ => return None,
-    })?)
+    })
 }
 
 fn args_map(map: &Mapping, path: &str) -> Result<BTreeMap<String, Expr>, Vec<Diagnostic>> {

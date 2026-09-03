@@ -267,6 +267,9 @@ struct YamlVnextAdapter {
     extensions: Weak<crate::extensions::ExtensionService>,
 }
 
+/// 包内脚本（`scripts/`）解析器：resolve 仅被 wasm-runtime 的 YAML guest
+/// programs 通道调用，无该 feature 时字段不被读取。
+#[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
 struct ScriptProgramResolver {
     scripts: Arc<crate::scripts::ScriptStore>,
     package: String,

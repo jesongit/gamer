@@ -9,8 +9,16 @@ use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
 
-use super::manifest::{ExtensionManifest, UiRuntime};
+use super::manifest::{ExtensionManifest, UiField, UiRuntime};
 use super::model::{ExtensionId, ExtensionVersion};
+
+/// Declarative 表单 schema 的注册快照：字段随 `GET /api/extensions` 的
+/// `ui_contributions` 原样透传给前端，由 PluginPanelHost 原生渲染。
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RegisteredUiSchema {
+    pub(crate) description: Option<String>,
+    pub(crate) fields: Vec<UiField>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct RegisteredUiContribution {
@@ -25,6 +33,7 @@ pub(crate) struct RegisteredUiContribution {
     pub(crate) requires_device: bool,
     pub(crate) preferred_width: Option<u16>,
     pub(crate) entry: Option<String>,
+    pub(crate) schema: Option<RegisteredUiSchema>,
 }
 
 #[derive(Clone, Default)]
@@ -60,6 +69,10 @@ impl UiContributionRegistry {
                     requires_device: contribution.requires_device(),
                     preferred_width: contribution.preferred_width(),
                     entry: contribution.entry().map(|entry| entry.as_str().to_string()),
+                    schema: contribution.schema().map(|schema| RegisteredUiSchema {
+                        description: schema.description().map(ToOwned::to_owned),
+                        fields: schema.fields().to_vec(),
+                    }),
                 },
             );
         }
@@ -72,5 +85,52 @@ impl UiContributionRegistry {
             .values()
             .cloned()
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extensions::parse_manifest;
+
+    fn manifest_with_declarative_ui() -> ExtensionManifest {
+        let manifest = "manifest_version = 1\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\n\
+             [ui]\n[[ui.contributions]]\npanel_id = \"settings\"\ntitle = \"设置\"\nruntime = \"declarative\"\ndescription = \"说明\"\n\
+             [[ui.contributions.fields]]\ntype = \"boolean\"\nname = \"enabled\"\nlabel = \"启用\"\ndefault = true\n".to_string();
+        parse_manifest(manifest.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn registry_passes_declarative_schema_through_to_json() {
+        let registry = UiContributionRegistry::default();
+        let manifest = manifest_with_declarative_ui();
+        registry.register(&manifest);
+        let contributions = registry.list();
+        assert_eq!(contributions.len(), 1);
+        let schema = contributions[0].schema.as_ref().unwrap();
+        assert_eq!(schema.description.as_deref(), Some("说明"));
+        assert_eq!(schema.fields.len(), 1);
+        assert_eq!(schema.fields[0].name(), Some("enabled"));
+
+        let json = serde_json::to_value(&contributions[0]).unwrap();
+        assert_eq!(json["runtime"], "declarative");
+        assert_eq!(json["schema"]["fields"][0]["type"], "boolean");
+        assert_eq!(json["schema"]["fields"][0]["default"], true);
+        assert!(json.get("entry").unwrap().is_null());
+
+        registry.clear();
+        assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn iframe_contributions_keep_schema_absent() {
+        let registry = UiContributionRegistry::default();
+        let manifest = parse_manifest(
+            b"manifest_version = 1\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\n\
+              [ui]\n[[ui.contributions]]\npanel_id = \"panel\"\ntitle = \"P\"\nruntime = \"iframe\"\nentry = \"ui/index.html\"\n",
+        )
+        .unwrap();
+        registry.register(&manifest);
+        assert!(registry.list()[0].schema.is_none());
     }
 }

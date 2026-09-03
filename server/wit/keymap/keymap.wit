@@ -73,9 +73,12 @@ interface keymap {
     actions: list<device-action>,
   }
 
-  /// Called once after the component is instantiated. This is the real
-  /// Keymap extension entry, separate from each event invocation.
-  start: func() -> result<_, string>;
+  /// Called once after the component is instantiated. `profile` carries the
+  /// user-selected keymap YAML for the current device partition (the same
+  /// schema as `data/<pkg>/keymap/*.yaml`: version/name/bindings with
+  /// tap|swipe|raw_key|hold actions). `none` starts with the guest's built-in
+  /// default rules; unmapped input falls through to the native control path.
+  start: func(profile: option<string>) -> result<_, string>;
   handle: func(event: input-event) -> result<input-result, string>;
 }
 

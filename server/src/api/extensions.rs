@@ -105,7 +105,75 @@ pub(super) async fn api_start_extension(
             Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
         }
     };
-    lifecycle(&st.extensions, &id, Lifecycle::Start(request.app_context)).await
+    let profile = match request.profile.as_deref() {
+        None => None,
+        Some(name) => {
+            // keymap profile 数据通道：分区取自 start 请求的 AppContext，
+            // 方案 YAML 从现有 data/<pkg>/keymap 存储原样读出交给 guest。
+            if id != crate::extensions::KEYMAP_EXTENSION_ID {
+                return ApiError::bad_request("仅 keymap 插件支持 profile 启动参数")
+                    .into_response();
+            }
+            let partition = request
+                .app_context
+                .as_ref()
+                .map(|context| context.android_package.as_str().to_string());
+            let Some(partition) = partition.filter(|value| !value.trim().is_empty()) else {
+                return ApiError::bad_request(
+                    "keymap profile 启动必须携带 app_context.android_package 指定分区",
+                )
+                .into_response();
+            };
+            match crate::extensions::load_user_profile(&st.keymaps, &partition, name) {
+                Ok(content) => Some(content),
+                Err(error) => return extension_error(error),
+            }
+        }
+    };
+    lifecycle(
+        &st.extensions,
+        &id,
+        Lifecycle::Start(request.app_context, profile),
+    )
+    .await
+}
+
+/// 版本回滚/前滚：切换 active_version 指针（不复制不删除文件）。与前端约定
+/// 契约：成功 200 返回 `{"id","active_version","state"}`；版本未安装 404；
+/// 插件 Running 时 409（要求先 stop）。此前 Enabled 的插件保持 Enabled，
+/// 下一次 start 用新版本。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ActivateExtensionRequest {
+    version: String,
+}
+
+pub(super) async fn api_activate_extension(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<ActivateExtensionRequest>,
+) -> Response {
+    let extension_id = match ExtensionId::parse(&id) {
+        Ok(id) => id,
+        Err(error) => return extension_error(error),
+    };
+    let version = match ExtensionVersion::parse(&body.version) {
+        Ok(version) => version,
+        Err(error) => return extension_error(error),
+    };
+    match st
+        .extensions
+        .activate_version(&extension_id, &version)
+        .await
+    {
+        Ok(snapshot) => Json(serde_json::json!({
+            "id": snapshot.id().to_string(),
+            "active_version": snapshot.active_version().to_string(),
+            "state": snapshot.state(),
+        }))
+        .into_response(),
+        Err(error) => extension_error(error),
+    }
 }
 
 pub(super) async fn api_stop_extension(
@@ -113,6 +181,36 @@ pub(super) async fn api_stop_extension(
     Path(id): Path<String>,
 ) -> Response {
     lifecycle(&st.extensions, &id, Lifecycle::Stop).await
+}
+
+/// Declarative 面板最后一公里：`plugin.call` 的服务端入口。插件必须处于
+/// Running 且 action 必须出现在其 manifest declarative UI 的按钮集合内；
+/// 调用经通用扩展 Component 的 `call` 导出执行，结果原样返回 guest JSON。
+pub(super) async fn api_call_extension(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<CallExtensionRequest>,
+) -> Response {
+    let extension_id = match ExtensionId::parse(&id) {
+        Ok(id) => id,
+        Err(error) => return extension_error(error),
+    };
+    match st
+        .extensions
+        .call_extension(&extension_id, &body.action, body.values.unwrap_or_default())
+        .await
+    {
+        Ok(result) => Json(result).into_response(),
+        Err(error) => extension_error(error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CallExtensionRequest {
+    action: String,
+    #[serde(default)]
+    values: Option<serde_json::Value>,
 }
 
 pub(super) async fn api_uninstall_extension(
@@ -198,7 +296,7 @@ pub(super) async fn api_get_extension_ui_asset(
 enum Lifecycle {
     Enable,
     Disable,
-    Start(Option<crate::core::AppContext>),
+    Start(Option<crate::core::AppContext>, Option<String>),
     Stop,
 }
 
@@ -207,6 +305,9 @@ enum Lifecycle {
 struct StartExtensionRequest {
     #[serde(default)]
     app_context: Option<crate::core::AppContext>,
+    /// keymap 专用：当前分区内的映射方案名；缺省 = guest 内置默认规则。
+    #[serde(default)]
+    profile: Option<String>,
 }
 
 async fn lifecycle(service: &ExtensionService, raw_id: &str, operation: Lifecycle) -> Response {
@@ -217,7 +318,9 @@ async fn lifecycle(service: &ExtensionService, raw_id: &str, operation: Lifecycl
     let result = match operation {
         Lifecycle::Enable => service.enable(&id).await,
         Lifecycle::Disable => service.disable(&id).await,
-        Lifecycle::Start(app_context) => service.start_with_context(&id, app_context).await,
+        Lifecycle::Start(app_context, profile) => {
+            service.start_with_context(&id, app_context, profile).await
+        }
         Lifecycle::Stop => service.stop(&id).await,
     };
     match result {
@@ -297,6 +400,7 @@ fn extension_error(error: ExtensionError) -> Response {
             ApiError::conflict(error.to_string())
         }
         ExtensionError::RuntimeUnavailable(_) => ApiError::service_unavailable(error.to_string()),
+        ExtensionError::CallRejected(_) => ApiError::bad_request(error.to_string()),
         ExtensionError::Io(_)
         | ExtensionError::Json(_)
         | ExtensionError::Zip(_)

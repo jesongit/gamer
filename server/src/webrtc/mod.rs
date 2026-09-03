@@ -356,7 +356,7 @@ impl ViewerSession {
                         while i < q.len() {
                             if q[i].is_config {
                                 if let Some(cf) = q.remove(i) {
-                                    *config_nalu.lock() = Some(Bytes::from(cf.data));
+                                    *config_nalu.lock() = Some(cf.data);
                                     pending_config = true;
                                 }
                             } else {

@@ -152,6 +152,9 @@ pub(super) async fn api_inspect_extension(
 
 /// Parse the management boundary once so inspect, install, and update share
 /// exactly the same official-source and confirmation semantics.
+/// axum `Response` 体量超过 clippy result_large_err 阈值；错误即响应，
+/// 箱化不改变语义只增分配。
+#[allow(clippy::result_large_err)]
 pub(super) fn install_context(headers: &HeaderMap) -> Result<ExtensionInstallContext, Response> {
     let official = headers
         .get("x-gamer-extension-source")

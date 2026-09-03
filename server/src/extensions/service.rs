@@ -310,6 +310,49 @@ impl ExtensionService {
             .await
     }
 
+    /// Declarative UI backend call (`plugin.call`). The extension must be
+    /// Running, and the action must be one of the button actions declared in
+    /// the active manifest's declarative UI schema — the manifest is the only
+    /// allowed call surface, so a panel cannot invoke arbitrary guest logic.
+    /// The lifecycle lock only guards the lookup; the guest call itself runs
+    /// after it is released so uninstall/update cannot interleave with a live
+    /// instance dispatch.
+    pub(crate) async fn call_extension(
+        &self,
+        id: &ExtensionId,
+        action: &str,
+        values: serde_json::Value,
+    ) -> ExtensionResult<serde_json::Value> {
+        if action.trim().is_empty() {
+            return Err(ExtensionError::CallRejected("action 不能为空".into()));
+        }
+        let (handle, runtime) = {
+            let snapshot = self.snapshot_for(id)?;
+            if snapshot.state() != ExtensionState::Running {
+                return Err(invalid_transition(id, "call", snapshot.state()));
+            }
+            let allowed = declarative_actions(snapshot.manifest());
+            if !allowed.iter().any(|candidate| candidate == action) {
+                return Err(ExtensionError::CallRejected(format!(
+                    "action 不在插件 declarative UI 声明的按钮集合内: {action}"
+                )));
+            }
+            let handle = self
+                .running
+                .lock()
+                .expect("extension running map poisoned")
+                .get(id)
+                .copied()
+                .ok_or(ExtensionError::RuntimeUnavailable(
+                    "当前进程没有该插件的运行实例",
+                ))?;
+            (handle, self.runtime.clone())
+        };
+        let result = runtime.call(handle, action, &values.to_string()).await?;
+        serde_json::from_str::<serde_json::Value>(&result)
+            .map_err(|error| ExtensionError::Runtime(format!("插件 call 返回值不是 JSON: {error}")))
+    }
+
     pub(crate) fn store(&self) -> &ExtensionStore {
         &self.store
     }
@@ -492,6 +535,38 @@ impl ExtensionService {
         self.snapshot_for(manifest.id())
     }
 
+    /// 切换 active_version 指针（版本回滚/前滚）。不复制、不删除任何版本
+    /// 目录；Running 时拒绝（需先 stop），目标版本未安装报 VersionNotInstalled。
+    /// 插件状态保持不变——Enabled 的插件下一次 start 即运行新版本。
+    pub(crate) async fn activate_version(
+        &self,
+        id: &ExtensionId,
+        version: &ExtensionVersion,
+    ) -> ExtensionResult<ExtensionSnapshot> {
+        let _guard = self.operation_lock.lock().await;
+        let mut states = self.store.read_state()?;
+        let versions = self.versions_for(id)?;
+        let mut record = state_for_versions(id, &versions, states.get(id).cloned())?;
+        if record.state.is_running() {
+            return Err(invalid_transition(id, "activate", record.state));
+        }
+        if !versions
+            .iter()
+            .any(|candidate| candidate.manifest().version() == version)
+        {
+            return Err(ExtensionError::VersionNotInstalled {
+                id: id.to_string(),
+                version: version.to_string(),
+            });
+        }
+        record.active_version = Some(version.clone());
+        record.last_error = None;
+        states.insert(id.clone(), record);
+        self.store.write_state(&states)?;
+        self.refresh_ui_registry()?;
+        self.snapshot_for(id)
+    }
+
     pub(crate) async fn enable(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
         let _guard = self.operation_lock.lock().await;
         let mut states = self.store.read_state()?;
@@ -531,13 +606,17 @@ impl ExtensionService {
     }
 
     pub(crate) async fn start(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
-        self.start_with_context(id, None).await
+        self.start_with_context(id, None, None).await
     }
 
+    /// `keymap_profile` carries the raw user-selected keymap YAML resolved by
+    /// the REST layer; it is consumed only by the keymap Component world and
+    /// ignored by every other extension kind.
     pub(crate) async fn start_with_context(
         &self,
         id: &ExtensionId,
         app_context: Option<crate::core::AppContext>,
+        keymap_profile: Option<String>,
     ) -> ExtensionResult<ExtensionSnapshot> {
         let _guard = self.operation_lock.lock().await;
         let states = self.store.read_state()?;
@@ -561,6 +640,7 @@ impl ExtensionService {
                     wasm: active.read_wasm()?,
                     host,
                     app_context,
+                    profile: keymap_profile,
                 })
                 .await
             {
@@ -915,4 +995,16 @@ fn invalid_transition(
         operation,
         state,
     }
+}
+
+/// Button actions exposed by a manifest's declarative UI contributions.
+fn declarative_actions(manifest: &ExtensionManifest) -> Vec<String> {
+    manifest
+        .ui()
+        .iter()
+        .filter_map(|contribution| contribution.schema())
+        .flat_map(|schema| schema.fields())
+        .filter_map(|field| field.action())
+        .map(str::to_string)
+        .collect()
 }

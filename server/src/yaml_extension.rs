@@ -28,6 +28,9 @@ use crate::yaml_vnext::{Condition, Expr, Program, SmallStep, Value};
 pub(crate) const YAML_EXTENSION_ID: &str = "gamer.yaml";
 /// Reference manifest for the installable YAML guest. The server never embeds
 /// its WASM bytes; package installation supplies `plugin.wasm` independently.
+/// 仅测试引用：与 tools/plugins/gamer.yaml/manifest.toml 的同步护栏 +
+/// 安装/卸载面板测试以此为打包 manifest 源。
+#[allow(dead_code)]
 pub(crate) const YAML_EXTENSION_MANIFEST_TOML: &str = r#"manifest_version = 1
 id = "gamer.yaml"
 version = "3.0.0"
@@ -67,6 +70,21 @@ preferred_width = 440
 entry = "ui/functions.html"
 "#;
 
+/// 官方市场打包源（tools/plugins/gamer.yaml/manifest.toml）与本常量锁同步：
+/// build-plugins.ps1 以文件为准打包，漂移会导致线上包与运行时语义不一致。
+#[cfg(test)]
+mod manifest_sync_tests {
+    #[test]
+    fn yaml_packaging_manifest_stays_in_sync_with_shipped_constant() {
+        let packaged = include_str!("../../tools/plugins/gamer.yaml/manifest.toml");
+        assert_eq!(
+            super::YAML_EXTENSION_MANIFEST_TOML.trim(),
+            packaged.trim(),
+            "tools/plugins/gamer.yaml/manifest.toml 与 YAML_EXTENSION_MANIFEST_TOML 不一致"
+        );
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum CompatibleYamlError {
     V2(Vec<crate::script_v2::ScriptError>),
@@ -85,6 +103,8 @@ impl CompatibleYamlError {
 #[derive(Debug)]
 pub(crate) enum CompatibleYamlSource {
     V2,
+    /// 载荷当前仅作判别保留（调用方未消费 AST 本体）。
+    #[allow(dead_code)]
     V3(Program),
 }
 
@@ -110,11 +130,17 @@ pub(crate) fn validate_compatible_script(
 
 const DEFAULT_SCREEN_WIDTH: u32 = 1000;
 const DEFAULT_SCREEN_HEIGHT: u32 = 1000;
+/// v3 原生参考解释器的步数护栏；生产链路走 WASM guest，仅测试消费。
+#[allow(dead_code)]
 const MAX_STEP_BUDGET: u64 = 100_000;
 
 /// Request passed to the real YAML Component runtime. The program is already
 /// lowered by the extension front-end; the guest only interprets the small
 /// wire AST and calls capability.invoke.
+/// WASM guest 执行请求。字段仅由 wasm-runtime feature 的
+/// `LazyYamlWasmtimeRuntime` 消费；无该 feature 时（NoYamlWasmRuntime 只回错）
+/// 字段不会被读取，故按 feature 条件豁免 dead_code。
+#[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
 #[derive(Clone)]
 pub(crate) struct YamlWasmRunRequest {
     pub(crate) wasm: Vec<u8>,
@@ -159,6 +185,9 @@ impl YamlWasmRuntime for NoYamlWasmRuntime {
 pub(crate) trait CapabilityInvoker: Send + Sync {
     async fn invoke(&self, capability: &str, args: Value) -> Result<Value>;
 
+    /// 取消查询属于 invoker 契约的一部分（原生解释器消费；WASM 链路经
+    /// YamlHostState.cancelled 传递，生产构建中无直接调用方）。
+    #[allow(dead_code)]
     fn cancelled(&self) -> bool {
         false
     }
@@ -168,6 +197,7 @@ pub(crate) trait CapabilityInvoker: Send + Sync {
 /// enter `CapabilityRegistry`, so YAML source/resource semantics stay out of
 /// Core capabilities.
 pub(crate) trait YamlProgramResolver: Send + Sync {
+    #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
     fn resolve(&self, target: &str, args: &BTreeMap<String, Value>) -> Result<Program>;
 }
 
@@ -184,6 +214,9 @@ pub(crate) struct NativeYamlHost {
 }
 
 impl NativeYamlHost {
+    /// `new`/`invoke_json` 是 WASM guest 的 capability.invoke 后端
+    /// （wasm.rs 的 YamlHostState 调用）；无 wasm-runtime feature 时仅测试使用。
+    #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
     pub(crate) async fn new(
         host: HostApi,
         context: AppContext,
@@ -207,11 +240,7 @@ impl NativeYamlHost {
         })
     }
 
-    pub(crate) fn with_screen(mut self, screen: FrameSize) -> Self {
-        self.screen = screen;
-        self
-    }
-
+    #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
     pub(crate) async fn invoke_json(
         host: HostApi,
         context: AppContext,
@@ -581,17 +610,24 @@ fn key_code(value: &Value) -> Result<u32> {
 
 /// Optional provider for `call`; a resolver can load a target from an app
 /// package without changing the AST or the host capability contract.
+/// v3 原生参考解释器（下方 Interpreter/ExecutionResult/Flow）：生产执行走
+/// WASM guest（LazyYamlWasmtimeRuntime），本块仅由单元测试消费。
+#[allow(dead_code)]
 #[async_trait]
 pub(crate) trait ProgramResolver: Send + Sync {
     async fn resolve(&self, target: &str) -> Result<Program>;
 }
 
+/// v3 原生参考解释器专用（见 ProgramResolver 注）。
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct ExecutionResult {
     pub value: Value,
     pub logs: Vec<(String, String)>,
 }
 
+/// v3 原生参考解释器专用（见 ProgramResolver 注）。
+#[allow(dead_code)]
 enum Flow {
     Continue,
     Break,
@@ -599,6 +635,8 @@ enum Flow {
     Throw(String),
 }
 
+/// v3 原生参考解释器（见 ProgramResolver 注）。
+#[allow(dead_code)]
 pub(crate) struct Interpreter {
     invoker: Arc<dyn CapabilityInvoker>,
     resolver: Option<Arc<dyn ProgramResolver>>,
@@ -607,6 +645,7 @@ pub(crate) struct Interpreter {
     steps: u64,
 }
 
+#[allow(dead_code)]
 impl Interpreter {
     pub(crate) fn new(invoker: Arc<dyn CapabilityInvoker>) -> Self {
         Self {
@@ -816,6 +855,8 @@ impl Interpreter {
     }
 }
 
+/// v3 原生参考解释器的表达式求值辅助（仅测试链路消费）。
+#[allow(dead_code)]
 fn lookup_path(values: &BTreeMap<String, Value>, path: &str) -> Option<Value> {
     let mut segments = path.split('.');
     let mut current = values.get(segments.next()?)?.clone();
@@ -837,6 +878,8 @@ fn lookup_path(values: &BTreeMap<String, Value>, path: &str) -> Option<Value> {
     Some(current)
 }
 
+/// v3 原生参考解释器的表达式求值辅助（仅测试链路消费）。
+#[allow(dead_code)]
 fn parse_segment(segment: &str) -> (&str, Vec<usize>) {
     let name = segment.split('[').next().unwrap_or(segment);
     let mut indices = Vec::new();
@@ -851,6 +894,8 @@ fn parse_segment(segment: &str) -> (&str, Vec<usize>) {
     (name, indices)
 }
 
+/// v3 原生参考解释器的表达式求值辅助（仅测试链路消费）。
+#[allow(dead_code)]
 fn values_equal(left: &Value, right: &Value) -> bool {
     if left == right {
         return true;
@@ -1057,8 +1102,10 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
     #[test]
     fn compatibility_adapter_keeps_v2_and_v3_on_separate_loaders() {
         let temp = TempDir::new().unwrap();
-        let mut config = crate::config::Config::default();
-        config.data_dir = temp.path().to_path_buf();
+        let config = crate::config::Config {
+            data_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        };
         let scripts = crate::scripts::ScriptStore::open(&config).unwrap();
 
         assert!(matches!(
@@ -1112,14 +1159,16 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
 #[cfg(all(test, feature = "wasm-runtime"))]
 mod wasm_tests {
     use super::*;
-    use crate::capabilities::{CapabilityRegistry, CapabilityResult};
+    use crate::capabilities::{CapabilityRegistry, CapabilityResult, LogRecord, LogService};
     use crate::extensions::{HostApiCatalog, LazyYamlWasmtimeRuntime};
     use crate::yaml_vnext::load;
     use async_trait::async_trait;
     use std::fs;
+    use std::io::Write as _;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
     use std::sync::{Arc, Mutex, OnceLock};
+    use zip::write::SimpleFileOptions;
 
     #[derive(Default)]
     struct Trace {
@@ -1170,6 +1219,18 @@ mod wasm_tests {
             }
             load("version: 3\nsteps:\n  - return: from-call\n")
                 .map_err(|diagnostics| anyhow!("fixture resolver: {diagnostics:?}"))
+        }
+    }
+
+    /// 捕获 log.write 的 Trace 服务（v3 端到端用）。
+    struct LogTrace {
+        logs: Mutex<Vec<String>>,
+    }
+
+    impl LogService for LogTrace {
+        fn write(&self, record: LogRecord) -> CapabilityResult<()> {
+            self.logs.lock().unwrap().push(record.message().to_string());
+            Ok(())
         }
     }
 
@@ -1445,5 +1506,77 @@ runtime = "^1.0"
             cancelled.to_string().contains("kind=cancelled"),
             "cancellation lost its WIT kind: {cancelled:#}"
         );
+    }
+
+    /// Phase 10 验收（yaml 插件侧）：安装 → 启用 → 一个最小 `version: 3`
+    /// 脚本（log 级别）经 ExtensionService::run_yaml_vnext 用真实 Component
+    /// guest 跑通；卸载后同一脚本明确失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn installed_yaml_extension_runs_v3_program_end_to_end() {
+        let temp = tempfile::tempdir().expect("无法创建 yaml 扩展临时目录");
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        let registry = CapabilityRegistry::builder()
+            .with_device_service(
+                Arc::new(Trace::default()) as Arc<dyn crate::capabilities::DeviceService>
+            )
+            .with_log_service(logs.clone() as Arc<dyn LogService>)
+            .build();
+        let service = crate::extensions::ExtensionService::for_data_root(temp.path(), registry);
+
+        let mut archive = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
+            let options = SimpleFileOptions::default();
+            writer.start_file("manifest.toml", options).unwrap();
+            writer
+                .write_all(YAML_EXTENSION_MANIFEST_TOML.as_bytes())
+                .unwrap();
+            writer.start_file("plugin.wasm", options).unwrap();
+            writer.write_all(&fixture_component()).unwrap();
+            for entry in ["ui/automation.html", "ui/functions.html"] {
+                writer.start_file(entry, options).unwrap();
+                writer.write_all(b"<!doctype html>").unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let installed = service.install(&archive).await.unwrap();
+        let id = crate::extensions::ExtensionId::parse(YAML_EXTENSION_ID).unwrap();
+        service.enable(&id).await.unwrap();
+
+        let program = load(
+            "version: 3\nsteps:\n  - invoke:\n      capability: log.write\n      with:\n        level: info\n        message: from-v3-e2e\n  - set: {done: true}\n  - return: $done\n",
+        )
+        .unwrap();
+        let value = service
+            .run_yaml_vnext(
+                program,
+                AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+                BTreeMap::new(),
+                None,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(value, Value::Bool(true));
+        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["from-v3-e2e"]);
+
+        service.disable(&id).await.unwrap();
+        assert!(service
+            .uninstall(&id, installed.active_version())
+            .await
+            .unwrap());
+        let program = load("version: 3\nsteps:\n  - set: {done: true}\n").unwrap();
+        assert!(service
+            .run_yaml_vnext(
+                program,
+                AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+                BTreeMap::new(),
+                None,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .is_err());
     }
 }

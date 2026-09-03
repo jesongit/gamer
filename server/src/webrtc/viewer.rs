@@ -40,6 +40,9 @@ use super::{
 pub enum ViewerDisconnectReason {
     TakenOver,
     DeviceDisconnected,
+    /// 停机 drain 拆除（当前 drain 统一走 DeviceDisconnected 口径，变体保留
+    /// 以完整覆盖 teardown 分类）。
+    #[allow(dead_code)]
     Shutdown,
     PeerClosed,
 }
@@ -86,6 +89,8 @@ pub struct ViewerHandle {
     /// 控制队列：teardown 通过它串行释放该 viewer 的残留触点。
     pub(crate) control_tx: tokio::sync::mpsc::UnboundedSender<ControlCommand>,
     /// Keeps the device active while this viewer remains registered.
+    /// RAII 字段：只需持有（Drop 释放活跃度），从不读取。
+    #[allow(dead_code)]
     pub activity_lease: Option<Arc<DeviceLease>>,
 }
 

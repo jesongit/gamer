@@ -1080,7 +1080,9 @@ pub fn real_wasm_host_status() -> &'static str {
 
 /// Start request for the keymap-specific Component world. It intentionally
 /// lives beside the keymap adapter rather than extending the generic Phase 6
-/// extension Host contract.
+/// extension Host contract. `profile` carries the raw user-selected keymap
+/// YAML for the current partition (None = guest built-in defaults, which is
+/// full pass-through for keys the defaults do not map).
 #[derive(Clone)]
 pub(crate) struct KeymapWasmStartRequest {
     pub(crate) id: ExtensionId,
@@ -1088,6 +1090,7 @@ pub(crate) struct KeymapWasmStartRequest {
     pub(crate) wasm: Vec<u8>,
     pub(crate) host: HostApi,
     pub(crate) app_context: Option<crate::core::AppContext>,
+    pub(crate) profile: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1260,6 +1263,7 @@ mod keymap_wasmtime {
             let version = request.version;
             let log_id = id.clone();
             let log_version = version.clone();
+            let profile = request.profile;
 
             let task = tokio::spawn(async move {
                 let linker: Linker<()> = Linker::new(&engine);
@@ -1274,7 +1278,7 @@ mod keymap_wasmtime {
                     }
                 };
                 let keymap = instance.gamer_keymap_keymap();
-                match keymap.call_start(&mut store) {
+                match keymap.call_start(&mut store, profile.as_deref()) {
                     Ok(Ok(())) => {
                         let _ = ready_tx.send(Ok(()));
                     }
@@ -1801,6 +1805,25 @@ fn to_runtime(error: impl std::fmt::Display) -> ExtensionError {
     ExtensionError::Runtime(error.to_string())
 }
 
+/// Load the raw YAML content of a user-selected keymap profile from the
+/// existing per-partition storage (`data/<pkg>/keymap/<name>.yaml`). The
+/// content is handed to the keymap guest verbatim; the store already validated
+/// the schema (`version/name/bindings`) when the file was written and
+/// normalizes the scheme name, and a missing scheme is a start-time error
+/// rather than a silent pass-through.
+pub fn load_user_profile(
+    store: &crate::keymaps::KeymapStore,
+    partition: &str,
+    name: &str,
+) -> ExtensionResult<String> {
+    let id = format!("{partition}/{name}");
+    let file = store
+        .get(&id)
+        .map_err(to_runtime)?
+        .ok_or_else(|| ExtensionError::Runtime(format!("keymap 方案不存在: {id}")))?;
+    Ok(file.content)
+}
+
 fn format_diagnostics(diagnostics: &[crate::keymaps::KeymapDiagnostic]) -> String {
     diagnostics
         .iter()
@@ -1976,6 +1999,18 @@ mod tests {
         assert!(KEYMAP_EXTENSION_MANIFEST_TOML.contains("runtime = \"iframe\""));
     }
 
+    /// 官方市场打包源（tools/plugins/gamer.keymap/manifest.toml）与本常量锁同步：
+    /// build-plugins.ps1 以文件为准打包，漂移会导致线上包与运行时语义不一致。
+    #[test]
+    fn packaging_manifest_stays_in_sync_with_shipped_constant() {
+        let packaged = include_str!("../../../tools/plugins/gamer.keymap/manifest.toml");
+        assert_eq!(
+            KEYMAP_EXTENSION_MANIFEST_TOML.trim(),
+            packaged.trim(),
+            "tools/plugins/gamer.keymap/manifest.toml 与 KEYMAP_EXTENSION_MANIFEST_TOML 不一致"
+        );
+    }
+
     #[test]
     fn input_event_decoder_keeps_the_wire_contract_small() {
         let event =
@@ -1988,6 +2023,22 @@ mod tests {
             }
         );
         assert!(decode_input_event(br#"{"type":"pointer","pointer_id":3}"#).is_err());
+    }
+
+    #[test]
+    fn user_profile_loader_reads_partition_yaml_verbatim() {
+        let temp = TempDir::new().unwrap();
+        let store = crate::keymaps::KeymapStore::new(temp.path().to_path_buf());
+        store
+            .create(
+                "com.example.game",
+                "测试方案",
+                &keymap(&[("KeyW", KeymapAction::Hold { at: [0.1, 0.9] })]),
+            )
+            .unwrap();
+        let profile = load_user_profile(&store, "com.example.game", "测试方案").unwrap();
+        assert!(profile.contains("KeyW"));
+        assert!(load_user_profile(&store, "com.example.game", "缺失方案").is_err());
     }
 
     #[tokio::test]
@@ -2226,7 +2277,7 @@ mod tests {
             std::io::Write::write_all(&mut writer, keymap).unwrap();
             writer.finish().unwrap();
         }
-        store.install_archive(&bytes).unwrap();
+        store.install_archive(&bytes, None).unwrap();
         let source = AppPackageKeymapSource::new(store);
         let loaded = source
             .load("com.game", "official.game", "1.0.0", "default.yaml")
@@ -2274,6 +2325,10 @@ mod wasm_component_tests {
 
         fn snapshot(&self) -> Vec<String> {
             self.events.lock().unwrap().clone()
+        }
+
+        fn clear(&self) {
+            self.events.lock().unwrap().clear();
         }
     }
 
@@ -2510,7 +2565,7 @@ entry = "ui/index.html"
         );
 
         let running = service
-            .start_with_context(&id, Some(app_context()))
+            .start_with_context(&id, Some(app_context()), None)
             .await
             .unwrap();
         assert_eq!(running.state(), ExtensionState::Running);
@@ -2640,6 +2695,94 @@ entry = "ui/index.html"
             .exists());
     }
 
+    /// Profile 数据通道端到端：start 携带的 keymap YAML 覆盖内置 WASD 规则，
+    /// 未覆盖的按键回落内置默认，非法 profile 使 start 失败而非静默降级。
+    #[tokio::test]
+    async fn real_keymap_guest_consumes_user_profile_yaml() {
+        let package = gplugin(
+            &fixture_component(),
+            &["input.tap", "input.swipe", "input.key", "touch"],
+        );
+        let temp = TempDir::new().unwrap();
+        let trace = Arc::new(Trace::default());
+        let service = service(&temp, trace.clone(), Arc::new(LazyKeymapWasmRuntime::new()));
+        let installed = service.install(&package).await.unwrap();
+        let id = ExtensionId::parse(KEYMAP_EXTENSION_ID).unwrap();
+        service.enable(&id).await.unwrap();
+
+        let profile = "version: 1\nname: fixture\nbindings:\n\
+             - key: KeyW\n  action:\n    type: hold\n    at: [0.10, 0.90]\n\
+             - key: KeyQ\n  action:\n    type: raw_key\n    code: Enter\n";
+        let running = service
+            .start_with_context(&id, Some(app_context()), Some(profile.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(running.state(), ExtensionState::Running);
+
+        let screen = ScreenSize::new(1000, 500);
+        // KeyW 被 profile 覆盖：hold at [0.10, 0.90] → (100, 450)，slot=guest 规则序号段。
+        service
+            .dispatch_keymap_input(device(), screen, InputEvent::key_down("KeyW"))
+            .await
+            .unwrap();
+        assert!(trace
+            .snapshot()
+            .contains(&"touch.begin:100:450".to_string()));
+        service
+            .dispatch_keymap_input(device(), screen, InputEvent::key_up("KeyW"))
+            .await
+            .unwrap();
+        // KeyQ raw_key Enter(66)：down/up 配对。
+        service
+            .dispatch_keymap_input(device(), screen, InputEvent::key_down("KeyQ"))
+            .await
+            .unwrap();
+        service
+            .dispatch_keymap_input(device(), screen, InputEvent::key_up("KeyQ"))
+            .await
+            .unwrap();
+        // 未被 profile 覆盖的 KeyA 回落内置默认：touch.begin at (200, 300)。
+        service
+            .dispatch_keymap_input(device(), screen, InputEvent::key_down("KeyA"))
+            .await
+            .unwrap();
+        let events = trace.snapshot();
+        assert!(events
+            .iter()
+            .any(|event| event.starts_with("input.key:66:Down")));
+        assert!(events
+            .iter()
+            .any(|event| event.starts_with("input.key:66:Up")));
+        assert!(events.iter().any(|event| event == "touch.begin:200:300"));
+
+        service.stop(&id).await.unwrap();
+        trace.clear();
+
+        // 非法 profile：guest start 返回错误 → 插件进入 Failed，不静默降级。
+        let bad_profile =
+            "version: 1\nbindings:\n  - key: KeyW\n    action:\n      type: nope\n".to_string();
+        let error = service
+            .start_with_context(&id, Some(app_context()), Some(bad_profile))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ExtensionError::Runtime(message) if message.contains("keymap start 失败"))
+        );
+        let failed = service.list().unwrap().remove(0);
+        assert_eq!(failed.state(), ExtensionState::Failed);
+        // 重新启用恢复可启动状态（Failed → Enabled），再以合法 profile 启动成功。
+        service.enable(&id).await.unwrap();
+        service
+            .start_with_context(&id, Some(app_context()), Some(profile.to_string()))
+            .await
+            .unwrap();
+        service.stop(&id).await.unwrap();
+        service
+            .uninstall(&id, installed.active_version())
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn real_wit_action_is_rejected_without_touch_permission() {
         let package = gplugin(&fixture_component(), &["input.key"]);
@@ -2650,7 +2793,7 @@ entry = "ui/index.html"
         let id = ExtensionId::parse(KEYMAP_EXTENSION_ID).unwrap();
         service.enable(&id).await.unwrap();
         service
-            .start_with_context(&id, Some(app_context()))
+            .start_with_context(&id, Some(app_context()), None)
             .await
             .unwrap();
 
@@ -2691,7 +2834,7 @@ entry = "ui/index.html"
         let id = ExtensionId::parse(KEYMAP_EXTENSION_ID).unwrap();
         service.enable(&id).await.unwrap();
         service
-            .start_with_context(&id, Some(app_context()))
+            .start_with_context(&id, Some(app_context()), None)
             .await
             .unwrap();
 

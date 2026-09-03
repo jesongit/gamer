@@ -1,6 +1,93 @@
 {
-  "schema_version": 1,
-  "generated_at": "2026-09-03T00:00:00Z",
-  "host_api": "1.0.0",
-  "plugins": []
+    "schema_version":  1,
+    "generated_at":  "2026-09-03T20:01:53Z",
+    "host_api":  "1.0.0",
+    "plugins":  [
+                    {
+                        "id":  "gamer.keymap",
+                        "version":  "1.0.0",
+                        "name":  "Keymap",
+                        "description":  "Application-specific keyboard, mouse, and gamepad mappings（WASM keymap 扩展，profile 数据通道见 keymap 存储）",
+                        "publisher":  "gamer.dev",
+                        "download_url":  "/plugins/gamer.keymap-1.0.0.gplugin",
+                        "sha256":  "d331bc3c069d5bfc2ef7c3bea2d3a5f8ee65e16f444f1e32239df70c93f77b5f",
+                        "size":  100040,
+                        "signature":  {
+                                          "status":  "valid",
+                                          "key_id":  "gamer-dev-1",
+                                          "algorithm":  "ed25519",
+                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci5rZXltYXAtMS4wLjAuZ3BsdWdpbiIsImlkIjoiZ2FtZXIua2V5bWFwIiwia2V5X2lkIjoiZ2FtZXItZGV2LTEiLCJzaGEyNTYiOiJkMzMxYmMzYzA2OWQ1YmZjMmVmN2MzYmVhMmQzYTVmOGVlNjVlMTZmNDQ0ZjFlMzIyMzlkZjcwYzkzZjc3YjVmIiwic2lnbmF0dXJlIjoicEoydGhyb3ZnWU1hWUNYbS9MK2pTNWRLalVha1FzR3lUVTYyRjhYSUdJVkU0Ukt4T0dnS2loOGJRYm5MVEtvdmI0SXYvbjV5Ky9aTE1OOXM5ZkpERFE9PSIsInZlcnNpb24iOiIxLjAuMCJ9"
+                                      },
+                        "permissions":  [
+                                            "input.tap",
+                                            "input.swipe",
+                                            "input.key",
+                                            "touch"
+                                        ],
+                        "host_api":  {
+                                         "input":  "^1.0",
+                                         "touch":  "^1.0"
+                                     },
+                        "ui":  {
+                                   "contributions":  [
+                                                         {
+                                                             "panel_id":  "keymaps",
+                                                             "title":  "映射",
+                                                             "runtime":  "iframe"
+                                                         }
+                                                     ]
+                               }
+                    },
+                    {
+                        "id":  "gamer.yaml",
+                        "version":  "3.0.0",
+                        "name":  "Gamer YAML vNext",
+                        "description":  "Surface YAML v3 lowering and execution guest（version: 3 脚本经 YamlVnextAdapter 执行）",
+                        "publisher":  "gamer.dev",
+                        "download_url":  "/plugins/gamer.yaml-3.0.0.gplugin",
+                        "sha256":  "a214bf40d65317e2cafdd03b1e8c288780820dae3a1cf820dbfe69817a25d37d",
+                        "size":  69185,
+                        "signature":  {
+                                          "status":  "valid",
+                                          "key_id":  "gamer-dev-1",
+                                          "algorithm":  "ed25519",
+                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci55YW1sLTMuMC4wLmdwbHVnaW4iLCJpZCI6ImdhbWVyLnlhbWwiLCJrZXlfaWQiOiJnYW1lci1kZXYtMSIsInNoYTI1NiI6ImEyMTRiZjQwZDY1MzE3ZTJjYWZkZDAzYjFlOGMyODg3ODA4MjBkYWUzYTFjZjgyMGRiZmU2OTgxN2EyNWQzN2QiLCJzaWduYXR1cmUiOiJ2RTVKMjhZZFhpdndOM2ZHR1dIR3AvaTVsdk1mSVl4ZGNUbFM0NGwra1FZOGtwb3QzL1BlTW1xQmVvQVp1MURNSDlYNENJakZxVGlzTFdpbWFxZk9DUT09IiwidmVyc2lvbiI6IjMuMC4wIn0="
+                                      },
+                        "permissions":  [
+                                            "device.read",
+                                            "device.app",
+                                            "input.tap",
+                                            "input.swipe",
+                                            "input.key",
+                                            "input.text",
+                                            "vision.match",
+                                            "vision.color",
+                                            "resource.read",
+                                            "runtime.sleep",
+                                            "log.write"
+                                        ],
+                        "host_api":  {
+                                         "device":  "^1.0",
+                                         "vision":  "^1.0",
+                                         "input":  "^1.0",
+                                         "resource":  "^1.0",
+                                         "runtime":  "^1.0",
+                                         "log":  "^1.0"
+                                     },
+                        "ui":  {
+                                   "contributions":  [
+                                                         {
+                                                             "panel_id":  "automation",
+                                                             "title":  "自动化",
+                                                             "runtime":  "iframe"
+                                                         },
+                                                         {
+                                                             "panel_id":  "functions",
+                                                             "title":  "函数",
+                                                             "runtime":  "iframe"
+                                                         }
+                                                     ]
+                               }
+                    }
+                ]
 }

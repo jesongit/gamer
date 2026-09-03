@@ -150,4 +150,10 @@ world yaml-extension-host {
 
 interface extension {
   run: func();
+
+  /// Declarative UI backend entrypoint. `action` must be one of the buttons
+  /// declared in the manifest's declarative UI schema (the host enforces this
+  /// before dispatch); `values-json` is the collected form payload. The guest
+  /// returns a JSON string result.
+  call: func(action: string, values-json: string) -> result<string, string>;
 }

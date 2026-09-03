@@ -1,0 +1,22 @@
+manifest_version = 1
+id = "gamer.keymap"
+version = "1.0.0"
+name = "Keymap"
+description = "Application-specific keyboard, mouse, and gamepad mappings"
+entry = "plugin.wasm"
+permissions = ["input.tap", "input.swipe", "input.key", "touch"]
+
+[host_api]
+input = "^1.0"
+touch = "^1.0"
+
+[[ui.contributions]]
+panel_id = "keymaps"
+title = "映射"
+icon = "⌨"
+order = 30
+location = "console.right"
+runtime = "iframe"
+requires_device = true
+preferred_width = 360
+entry = "ui/index.html"

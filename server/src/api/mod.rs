@@ -14,6 +14,7 @@
 //!   （data_b64/base64 膨胀需要余量，真实图片字节上限在 matcher 收口）；
 //!   ZIP 导入 ≤20MiB。CORS 层已整体移除（vite 代理同源不受影响）。
 
+mod app_packages;
 pub mod auth;
 mod common;
 mod devices;
@@ -26,7 +27,7 @@ mod keymaps;
 mod logs;
 mod runs;
 mod scripts;
-mod system;
+pub(crate) mod system;
 mod tasks;
 mod templates;
 #[cfg(test)]
@@ -84,6 +85,9 @@ pub struct AppState {
     pub app_packages: Arc<crate::app_packages::AppPackageStore>,
 }
 
+/// 测试专用兼容入口：自建 capabilities registry / ExtensionService / AppState
+/// 后装配完整路由（生产由 main.rs 的组合根 `RuntimeServices::start` 装配并注入）。
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
     reason = "router assembly keeps existing call shape"
@@ -133,6 +137,10 @@ pub(crate) fn build_router_with_extensions(
     extensions: Arc<crate::extensions::ExtensionService>,
 ) -> Router {
     let metrics = db.metrics();
+    // 预设发布用 Timer Core 门面：publish_package_presets 只写 task_presets
+    // 行，不触碰调度循环（Scheduler 内核另持有一个已 start 的实例，字段私有；
+    // 该未 start 门面与其共享同一 Db，预设发布与调度互不可见对方的通知通道）。
+    let preset_timer = crate::timer_core::TimerCore::new(db.clone());
     let state = AppState {
         db,
         metrics,
@@ -147,17 +155,16 @@ pub(crate) fn build_router_with_extensions(
         auth,
         update,
         extensions,
-        app_packages: Arc::new(crate::app_packages::AppPackageStore::with_task_hook(
+        app_packages: Arc::new(crate::app_packages::AppPackageStore::with_hooks(
             cfg.data_dir.clone(),
             Arc::new(crate::app_packages::SchedulerTaskSuspendedHook::new(
                 scheduler.clone(),
             )),
+            Arc::new(crate::app_packages::TimerPresetPublishHook::new(
+                preset_timer,
+            )),
         )),
     };
-
-    // 视频静默看门狗 + 会话过期清扫
-    system::spawn_watchdog(state.clone());
-    auth::spawn_sweeper(state.auth.clone());
 
     // ---- 公开豁免组：登录三端点自身实现契约语义；health/metrics 探针匿名；
     //      静态资源兜底（前端 SPA）。这些路径不经过 auth_guard。
@@ -312,6 +319,18 @@ pub(crate) fn build_router_with_extensions(
             get(logs::api_list_logs).delete(logs::api_clear_logs),
         )
         .route("/api/system/info", get(system::api_system_info))
+        .route(
+            "/api/app-packages",
+            get(app_packages::api_list_app_packages),
+        )
+        .route(
+            "/api/app-packages/:id/activate",
+            post(app_packages::api_activate_app_package),
+        )
+        .route(
+            "/api/app-packages/:id/:version",
+            delete(app_packages::api_uninstall_app_package),
+        )
         .route("/api/system/update", get(update::api_get_update))
         .route("/api/system/update/check", post(update::api_update_check))
         .route(
@@ -380,10 +399,15 @@ pub(crate) fn build_router_with_extensions(
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_UPLOAD));
 
-    // ---- 受保护组（ZIP 导入 ≤20MiB，高风险接口）：解压侧硬限另见 scripts.rs import
+    // ---- 受保护组（ZIP 导入 ≤20MiB，高风险接口）：解压侧硬限另见 scripts.rs import。
+    //      App Package 安装同限（归档侧另有 entries/解压总量/单文件硬限）。
     let protected_import: Router<()> = Router::new()
         .route("/api/scripts/import", post(scripts::api_import_script))
         .route("/api/keymaps/import", post(keymaps::api_import_keymaps))
+        .route(
+            "/api/app-packages/install",
+            post(app_packages::api_install_app_package),
+        )
         .with_state(state.clone())
         .route_layer(axmw::from_fn_with_state(
             state.auth.clone(),
@@ -427,12 +451,20 @@ pub(crate) fn build_router_with_extensions(
             post(extensions::api_disable_extension),
         )
         .route(
+            "/api/extensions/:id/activate",
+            post(extensions::api_activate_extension),
+        )
+        .route(
             "/api/extensions/:id/start",
             post(extensions::api_start_extension),
         )
         .route(
             "/api/extensions/:id/stop",
             post(extensions::api_stop_extension),
+        )
+        .route(
+            "/api/extensions/:id/call",
+            post(extensions::api_call_extension),
         )
         .route(
             "/api/extensions/:id/:version",

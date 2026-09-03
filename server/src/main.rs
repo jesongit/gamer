@@ -192,7 +192,14 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             init_gate.wait_activation().await;
             info!("activation received: completing full initialization");
-            match RuntimeServices::start(&init_cfg, init_db.clone(), init_slot.clone()).await {
+            match RuntimeServices::start(
+                &init_cfg,
+                init_db.clone(),
+                init_auth.clone(),
+                init_slot.clone(),
+            )
+            .await
+            {
                 Ok(ctx) => {
                     let update = spawn_update_stack(&init_cfg, init_db.clone(), &ctx);
                     // 运行日志保留（DATA-004）随完整初始化启动
@@ -223,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ---- 常规启动路径（无 gate：行为与历史版本一致） ----
     // 与激活路径共用同一个 composition root，避免两条启动路径的依赖图漂移。
-    let ctx = RuntimeServices::start(&cfg, db.clone(), drain_slot.clone()).await?;
+    let ctx = RuntimeServices::start(&cfg, db.clone(), auth.clone(), drain_slot.clone()).await?;
 
     // 更新子系统（批次 3）：controller 按部署形态装配 + 策略协调器后台任务
     let update = spawn_update_stack(&cfg, db.clone(), &ctx);
@@ -300,10 +307,13 @@ impl RuntimeServices {
 impl RuntimeServices {
     /// Complete service graph for both normal startup and activation-gate
     /// startup. Device and scheduler background work begins only after the
-    /// drain slot is populated.
+    /// drain slot is populated. Background lifecycles (video watchdog, auth
+    /// session sweeper) are also started here so that router assembly stays
+    /// pure route registration.
     async fn start(
         cfg: &config::Config,
         db: Arc<store::Store>,
+        auth: Arc<api::auth::AuthState>,
         drain_slot: DrainSlot,
     ) -> anyhow::Result<Self> {
         let scripts = Arc::new(scripts::ScriptStore::open(cfg)?);
@@ -348,6 +358,10 @@ impl RuntimeServices {
         // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。
         install_drain(&drain_slot, &ctx);
         executor.attach_yaml_vnext(ctx.scripts.clone(), ctx.extensions.clone());
+        // 后台生命周期统一在组合根启动：视频静默看门狗（devices/viewers/metrics
+        // 三依赖）+ 会话过期清扫（小时级）。路由组装（api::build_router_*）只注册路由。
+        api::system::spawn_watchdog(ctx.devices.clone(), ctx.viewers.clone(), db.metrics());
+        api::auth::spawn_sweeper(auth);
         ctx.devices.start().await?;
         ctx.scheduler.start().await;
         Ok(ctx)

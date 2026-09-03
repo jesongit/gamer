@@ -1,0 +1,14 @@
+[package]
+name = "gamer-plugin-signer"
+version = "0.1.0"
+edition = "2021"
+description = "Dev 插件市场签名工具：生成 ed25519 keypair、打包 .gplugin（manifest+签名）、产出 Registry proof。仅本地市场用。"
+
+[dependencies]
+ed25519-dalek = "2"
+sha2 = "0.10"
+base64 = "0.22"
+zip = "2"
+serde_json = "1"
+# keygen 的 OS 随机源（与主仓 rand 版本对齐，复用编译缓存）
+rand = "0.8"

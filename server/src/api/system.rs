@@ -7,7 +7,7 @@
 //! token、完整命令行。fixture 字段集比对测试见文件尾 contract_tests。
 
 use std::fmt::Display;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -20,6 +20,7 @@ use tracing::{info, warn};
 use super::common::run_blocking_api;
 use super::{ApiError, AppState};
 use crate::deps_probe::{self, Mode, Snapshot};
+use crate::device::DeviceManager;
 
 /// 文件布局 schema 基线（schema-policy §5：`data/<pkg>/{yaml,func,tmpl}` = v1）。
 /// DB schema 取值走 `migrations::TARGET_SCHEMA`（DATA-003 常量），不在此重复。
@@ -549,34 +550,38 @@ fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
-pub(super) fn spawn_watchdog(st: AppState) {
+/// 看门狗只消费设备会话 / viewer 注册表 / 指标三个依赖——与路由装配解耦，
+/// 由组合根（main.rs RuntimeServices::start）随其他后台生命周期统一启动。
+pub(crate) fn spawn_watchdog(
+    devices: Arc<DeviceManager>,
+    viewers: crate::webrtc::ViewerMap,
+    metrics: Arc<crate::metrics::Metrics>,
+) {
     tokio::spawn(async move {
         // 已发过 reset_video 探测的设备 → 探测时刻
         let mut nudged: std::collections::HashMap<String, std::time::Instant> =
             std::collections::HashMap::new();
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            for (id, session) in st.devices.online_sessions() {
+            for (id, session) in devices.online_sessions() {
                 let idle = session.video_idle_ms();
                 if idle < VIDEO_IDLE_RECONNECT_MS {
                     nudged.remove(&id);
                     continue;
                 }
-                let running = st
-                    .devices
+                let running = devices
                     .activity()
                     .has_kind(&id, crate::core::ActivityKind::Run);
                 // 会话确死（video socket 已关）：唯一允许脚本运行中强拆重连的
                 // 路径——控制 socket 同链路已死，不重连脚本会永远卡死
                 if !session.connected.load(std::sync::atomic::Ordering::SeqCst) {
-                    st.metrics
-                        .scrcpy_reconnect(crate::metrics::ReconnectReason::WatchdogDead);
+                    metrics.scrcpy_reconnect(crate::metrics::ReconnectReason::WatchdogDead);
                     warn!(device = %id, idle_ms = idle, "session dead (video socket closed), tearing down");
                     nudged.remove(&id);
                     // 踢 viewer：旧 pusher 挂在旧帧通道上，重连建新通道后不会
                     // 自动迁移；踢掉让前端 onclose 立即重连到新会话
                     let kicked = {
-                        let mut map = st.viewers.lock().unwrap();
+                        let mut map = viewers.lock().unwrap();
                         map.remove(&id)
                     };
                     if let Some(h) = kicked {
@@ -585,9 +590,9 @@ pub(super) fn spawn_watchdog(st: AppState) {
                             let _ = p.close().await;
                         }
                     }
-                    st.devices.disconnect_device(&id, true).await;
+                    devices.disconnect_device(&id, true).await;
                     if running {
-                        if let Err(e) = st.devices.connect_device(&id).await {
+                        if let Err(e) = devices.connect_device(&id).await {
                             warn!(device = %id, err = %e, "auto-reconnect failed");
                         }
                     }
@@ -600,7 +605,7 @@ pub(super) fn spawn_watchdog(st: AppState) {
                     continue;
                 }
                 // 无消费者：空闲低功耗统一交给 idle_power_loop
-                let has_viewer = st.viewers.lock().unwrap().contains_key(&id);
+                let has_viewer = viewers.lock().unwrap().contains_key(&id);
                 if !has_viewer {
                     nudged.remove(&id);
                     continue;
@@ -611,7 +616,7 @@ pub(super) fn spawn_watchdog(st: AppState) {
                 // 35s 兜底重连（静态屏挂机会话会被无限循环重连踢 viewer）。
                 // 真断流时 pusher 退出、last_serve 过期，仍走 nudge → 15s → 重连兜底
                 let served_ago_ms = {
-                    let map = st.viewers.lock().unwrap();
+                    let map = viewers.lock().unwrap();
                     match map.get(&id) {
                         Some(h) => {
                             let t = h.last_serve.load(std::sync::atomic::Ordering::Relaxed);
@@ -632,7 +637,7 @@ pub(super) fn spawn_watchdog(st: AppState) {
                     None => {
                         // 第一轮：reset_video 请求 config+IDR——编码器活着会立即出帧，
                         // idle 归零回到健康分支，避免黑屏空转被误判为断流
-                        if let Some(s) = st.devices.session(&id) {
+                        if let Some(s) = devices.session(&id) {
                             let _ = s.reset_video().await;
                         }
                         nudged.insert(id.clone(), std::time::Instant::now());
@@ -644,11 +649,10 @@ pub(super) fn spawn_watchdog(st: AppState) {
                     }
                 }
                 warn!(device = %id, idle_ms = idle, "video stream silent after keyframe nudge, auto-reconnecting scrcpy session");
-                st.metrics
-                    .scrcpy_reconnect(crate::metrics::ReconnectReason::WatchdogSilent);
+                metrics.scrcpy_reconnect(crate::metrics::ReconnectReason::WatchdogSilent);
                 // 踢旧 viewer：pusher 停止 + peer 关闭 → ws.rs 退出清理
                 let kicked = {
-                    let mut map = st.viewers.lock().unwrap();
+                    let mut map = viewers.lock().unwrap();
                     map.remove(&id)
                 };
                 if let Some(h) = kicked {
@@ -657,8 +661,8 @@ pub(super) fn spawn_watchdog(st: AppState) {
                         let _ = p.close().await;
                     }
                 }
-                st.devices.disconnect_device(&id, false).await;
-                if let Err(e) = st.devices.connect_device(&id).await {
+                devices.disconnect_device(&id, false).await;
+                if let Err(e) = devices.connect_device(&id).await {
                     warn!(device = %id, err = %e, "auto-reconnect failed");
                 }
             }
