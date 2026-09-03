@@ -170,3 +170,10 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 ## 2026-09-04
 
 - **match/color 候选不点击且无分支步骤时不能省略 YAML 值**：`- 模板:` 会解析为 `null`，严格 loader 报“步骤必须是列表”；序列化必须写 `- 模板: []`，点击候选仍可用 `click: true` 并省略 `steps`。
+- **业务数据出库后全新 clone 无任何脚本/模板/按键映射资源，属预期**：默认发行「零业务资源」，`server/data/<pkg>/{yaml,func,tmpl,keymap}/` 已从 git 索引移除并整体忽略；迁移既有资产用 `tools/export-app-package.ps1` 把旧分区打成 .gamerpkg 经 `POST /api/app-packages/install` 安装（安装即激活、包内 presets 自动发布），或把旧分区目录整份拷入新机 `server/data/` 作为本地分区兜底。
+- **`<script setup>` 内隐式全局赋值（如 `reconnectAttempts = 0`）编译期不报错、运行时才抛 ReferenceError**：SFC 编译为严格模式 ES Module，误写未声明变量只会在触发对应回调时崩掉后半段；拆分 `useConsoleDeviceManager` 时改为 `consoleRuntime.reconnectAttempts.value = 0`，同批还发现 `onDisconnect` 引用了不存在的 `stopLogPolling`（断连清理中断），由脚本运行 composable 补齐同名包装。
+- **declarative 插件面板的按钮动作链路已收口到 `POST /api/extensions/:id/call`**：服务端校验插件必须 Running 且 `action` 在该 manifest declarative schema 的按钮集合内（`ExtensionError::CallRejected` → 400），声明过的按钮之外没有任意调用入口；guest 侧由通用 extension world 新增的 `call` 导出执行。
+- **通用 extension world 新增导出会让旧 guest 直接实例化失败**：`gamer:host/extension@1.0.0` 增加 `call` 后，该 world 的组件必须同时导出 `run` 与 `call`；手写 wat fixture 需自带 `memory`+`realloc`，`result<string,string>` 按 canonical ABI 经调用方 retptr 写回（判别字 + ptr/len 三个 i32，扁平结果超 1 个即走返回区）。
+- **Registry proof 的 download_url 原本强制 `https://`，会拒绝随包本地市场的同源相对路径**：官方 .gplugin 随 web-dist 托管为 `/plugins/<id>-<version>.gplugin`，该 URL 已被 proof 签名绑定，验签侧放行 `https://` 或 `/` 开头的绝对路径即可，篡改仍会被哈希/签名校验拦截。
+- **PowerShell 5.1 里 `@('a' + (X), 'b' + (Y))` 的逗号优先级高于 `+`**：实际解析为 `'a' + (X,'b') + (Y)`，数组元素被静默吞并成一个字符串；每项各自加括号 `@(('a'+X), ('b'+Y))`。
+- **Wasmtime 实例任务进入"命令循环待命"后 stop 必须经通道优雅收尾再 join**：entry 返回后任务停在命令通道 `recv()`，直接 abort 会跳过 Store/Component 正常清理（Windows GNU 下 async fiber unwind 不安全）；`plugin.call` 复用同一通道分发调用。

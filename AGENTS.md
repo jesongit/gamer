@@ -14,6 +14,7 @@ scrcpy 采集 Android 设备画面 → WebRTC（H.264 视频轨 + DataChannel �
 - `server/data/gamer.db` — SQLite（设备/任务/日志）；脚本/函数库/模板按应用分区文件存储：`data/<应用包名>/yaml/` 可运行脚本、`data/<应用包名>/func/` 函数库、`data/<应用包名>/tmpl/` 模板图片（分区名=设备配置的 pkg，目录即类型、跨分区不解析、无 default 兜底）
 - 认证：配置只接受 Argon2id PHC `[auth].password_hash`；开发登录密码只用 `GAMER_ADMIN_PASSWORD`，无默认账号/密码。WebRTC 不内置 STUN/TURN，默认 host candidate 直连；Docker/NAT 需配置 `rtc_external_ip/rtc_udp_port/rtc_external_port` 并发布 UDP。
 - 数据基线：SQLite 当前为 schema v1；`user_version=0`/无版本号数据库不自动迁移，后续迁移从 v1→v2 开始。
+- 资源发行：**默认发行零业务资源**——业务分区目录（`data/<pkg>/{yaml,func,tmpl,keymap}/`）不再 git 跟踪；应用资产经 App Package 安装（`POST /api/app-packages/install`，zip/.gamerpkg，可带 `X-Expected-Sha256` 校验头；已装包存 `data/app-packages/`，安装即激活并发布包内 `presets/` 为任务预设），既有本地分区继续作为兜底可用；存量资产迁移用 `tools/export-app-package.ps1`。
 
 ## 常用命令
 
@@ -34,14 +35,19 @@ cd web && pnpm dev                      # 单起前端
 - 设备扫描：`POST /api/devices/scan` 执行 `adb devices -l`，按 addr 去重自动入库（逻辑在 `DeviceManager::scan_and_sync`，服务器启动时也自动跑一次）
 - App 生命周期 / 空闲低功耗（2026-08-22 重做）：连接**不再自动启动应用**（由脚本 `str_app`（冷启动，"+" 前缀控制消息）或 Console 启动按钮显式触发）；**会话存活由 `DeviceManager::idle_power_loop`（10s 周期）唯一管理**——无 viewer 且无脚本运行持续 `idle_power_secs`（config.toml，默认 300，0=关）秒 → 虚拟屏模式拆 scrcpy 会话（编码停止/虚拟屏销毁，恢复 freezer 禁用/音量静音等设备侧改写，**adb 链路保留**：WiFi/emu 设备每 60s 补 `adb connect` 保活，启动时自举扫描+连接、不建会话不启动应用）；镜像模式关物理屏（keyevent 223，**会话保留**），消费者回来即唤醒。消费者出现（ws viewer 注册 / 脚本 `run_begin` → `notify_activity`）打断空闲计时并即时唤醒已关的屏；镜像 30s 补醒也移入该循环（connect 时的保活任务只管拉满/恢复熄屏超时）。**`disconnect_device` 带运行守卫**：脚本运行中拒绝拆会话（虚拟屏销毁会杀掉屏上游戏），仅 force=true 绕过（删除设备 / 看门狗确认死链路 / 手动 `POST /api/devices/:id/disconnect` 管理动作）；前端"断开连接"按钮只断本页 WebRTC **不再调该接口**。下次运行脚本/定时任务自动重连（~2-4s）
 - 模板/脚本存储：分区 = 设备配置的应用包名（pkg），目录即类型 `data/<pkg>/{yaml,func,tmpl}/`；脚本顶层只允许 `params/config/steps` 且 `steps` 必需，函数库顶层键为函数名且记录只允许 `params/steps`。三类资源跨分区不解析、不回退；模板为 8-bit 灰度 PNG，短名在当前分区唯一匹配 `#` 后缀。脚本 id = `<pkg>/<名>.yaml`（前端拼 URL 必须整体 `encodeURIComponent`）；函数路径 = `<文件短路径>/<函数名>`。`POST` 创建、`PUT` 更新默认带 `expected_version`，`force:true` 跳过版本比较；导入/导出为分区快照，模板创建与图像替换分开。
+- App Package / composite 解析（Phase 4 接线）：`server/src/app_packages/` 负责不可变包的安装（staging+原子安装、每版本 `install.json` 记录归档 SHA-256）、active 版本注册表（`app-packages/active.json`）与 primary 唯一约束（一个 android package 只允许一个 active 内容包，安装/激活冲突返回 409）。资源解析顺序 **user-overrides → active App Package → legacy 分区目录**（`app_packages/composite.rs`；分区为兜底层，老数据行为零破坏）：模板经 `ScriptStore::resolve_template_path`/`template_avail`（find/match 与 script_v2 校验共用）、按键映射经 `KeymapStore::get/list`（包内方案只读，`create` 拒绝同名防遮蔽）；脚本/函数库快照仍以分区目录为唯一来源。REST：`POST /api/app-packages/install`（zip/.gamerpkg，可选 `X-Expected-Sha256`）、`GET /api/app-packages`、`DELETE /api/app-packages/:id/:version`（卸最后一版触发既有任务挂起链路，预设记录保留）、`POST /api/app-packages/:id/activate`；包内 `presets/*.yaml` 在安装/激活时经 `TimerCore::publish_package_presets` 灌入任务预设（发布 id = `pkg:<包>/<名>` 确定性生成，幂等）。
 - **YAML 脚本引擎 v2**：严格 loader 由 `server/src/script_v2/` 提供，错误统一为 `{code,message,resource,step_path,field}`；保存、导入、脚本运行、函数测试和任务保存共用该 loader。白名单外顶层键统一为 `script.top_level.unknown_key`，不提供格式迁移；`color` 的 `else` 只能在步骤级，候选列表内写入属于结构错误。
+- Console 壳（2026-09-04 物理拆分）：`web/src/views/Console.vue` 只保留模板装配 + 投屏连接/输入控制接线，按域拆为 `web/src/components/console/use{ConsolePanelResize,ConsoleDeviceManager,ConsoleTemplates,ConsoleBridgeOverlays,ConsoleScriptRunner,ConsoleKeymap}*.js` 组合式函数；行为契约（hash 路由 panel 同步、连接锁、坐标映射、框选、运行守卫）不变。
+- Declarative 插件 UI（Phase 5/10）：manifest.toml 里 `runtime = "declarative"` 的 `[[ui.contributions]]` 可带 `description` + `[[ui.contributions.fields]]`（`type` 限 text/number/boolean/select/button，支持 `name`(alias `key`)/`label`/`placeholder`/`default`/select 的 `options`/button 的 `action` 与字段 `description`，未知控件类型解析报错）；schema 由 `manifest.rs` 校验、`ui.rs` 随 `RegisteredUiContribution` 透传到 `GET /api/extensions` 的 `ui_contributions`，前端 `PluginPanelHost.vue` 原生渲染表单，按钮直接调 `POST /api/extensions/:id/call`（body `{action, values}`）。
+- **WASM 插件生态（Phase 6/7/8/10 已收口为产品能力）**：`wasm-runtime` 进 default feature（lazy init——不装/不启动插件不建 Wasmtime Engine；`--no-default-features` 保留无 WASM 退出路径，CI 有防退化检查）。keymap 扩展启动可带 `profile`（start body `{profile: <分区方案名>}` + `app_context.android_package` 指定分区，从 `data/<pkg>/keymap/` 读 YAML 原文经 WIT `start(profile)` 传给 guest，guest 内置 WASD 默认规则、profile 覆盖之，缺省/空 profile = 未映射键全部 pass-through）。declarative `plugin.call` 走通用 extension world 新增的 `call(action, values-json)` 导出，action 必须在该 manifest declarative schema 按钮集合内否则 400。官方市场：`tools/build-plugins.ps1` 把 `server/tests/{keymap,yaml}-guest` 打成签名 `.gplugin` 输出到 `web/public/plugins/` 并生成 `web/public/registry.json`（ed25519 签名，dev keypair 在 `tools/plugin-signing/` 仅本地市场用，公钥内嵌 server 信任锚 `signature.rs`；Registry proof 绑定 id/version/download_url/sha256，官方源安装必须验签通过）。
 
 ## 关键文件
 
 | 文件 | 职责 |
 |---|---|
-| `server/src/api/mod.rs` | REST：设备 CRUD / scan / connect / control / 截图 / 模板 / 脚本 / 任务 / 日志 |
+| `server/src/api/mod.rs` | REST：设备 CRUD / scan / connect / control / 截图 / 模板 / 脚本 / 任务 / 日志 / App Package |
 | `server/src/api/ws.rs` | WebRTC 信令；取 `frame_cache.initial_frames()` 传给 ViewerSession |
+| `server/src/app_packages/` | App Package 存储/解析边界：安装（staging+原子、SHA-256、primary 唯一约束）、active 注册表、composite 解析（override→包→分区兜底）、包内 presets 解析 |
 | `server/src/webrtc/` | pusher 推流 / viewer 生命周期 / 初始 GOP 重放 / 静止补帧 / DataChannel 控制转发 |
 | `server/src/device/scrcpy.rs` | scrcpy 会话：视频/音频/控制 socket 协议（v3.3.3） |
 | `server/src/device/frames.rs` | 帧缓存：帧环（SPS/PPS + GOP）+ 按需解码截图 |
@@ -57,6 +63,7 @@ cd web && pnpm dev                      # 单起前端
 | `web/src/views/Console.vue` | 投屏控制：WebRTC 前端（连接锁防双 PC / 坐标映射 / 框选模板）+ 设备列表管理（scan/连接/删除）+ 脚本运行模式：只读步骤摘要卡片（ScriptSummary），「▶ 从此运行」→ start_index 提交（顶层步骤序号；点击卡片选中已删，顶部「运行」恒从头跑），有 params 先弹参数表单（RunParamsModal，400 诊断回填、resolved_args 摘要进日志）；call/func 卡片可跳转目标资源 |
 | `web/src/components/console/ScriptRunner.vue` / `useScriptEditorShell.js` | 主控制台脚本运行/编辑外壳与共享可视化编辑核心（独立脚本管理页已移除） |
 | `web/src/components/LogsPanel.vue` / `TaskBoard.vue` / `SystemPanel.vue` | 投屏控制台右侧面板的日志/任务/设置页签（Console.vue 五页签：模板/脚本/日志/任务/设置；旧独立页面与 URL 已删除） |
+| `tools/build-plugins.ps1` + `tools/plugin-signer/` | 官方插件产物链：guest→Component→签名 .gplugin（web/public/plugins/）→registry.json；打包 manifest 源在 `tools/plugins/<id>/manifest.toml`（与 Rust 常量 include_str! 锁同步） |
 
 ## 规则
 
