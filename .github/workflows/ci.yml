@@ -81,6 +81,11 @@ jobs:
       - name: cargo clippy (-D warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      # 无 WASM 退出路径防退化：--no-default-features 必须始终可编译
+      # （NoWasmRuntime 拒绝启动插件，wasmtime 依赖整体退出依赖图）。
+      - name: cargo check --no-default-features (no-WASM exit path)
+        run: cargo check --locked --no-default-features
+
       - name: cargo test
         run: cargo test
 

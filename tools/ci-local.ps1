@@ -59,6 +59,8 @@ if (-not $SkipRust) {
     $env:GAMER_PROFILE = 'dev'
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo fmt --check';        Exe = 'cargo'; ArgList = @('fmt', '--all', '--', '--check');                       Dir = $serverDir })
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo clippy -D warnings'; Exe = 'cargo'; ArgList = @('clippy', '--all-targets', '--all-features', '--', '-D', 'warnings'); Dir = $serverDir })
+    # 无 WASM 退出路径防退化（与 ci.yml 同步）：default 已含 wasm-runtime
+    $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo check --no-default-features'; Exe = 'cargo'; ArgList = @('check', '--locked', '--no-default-features'); Dir = $serverDir })
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo test';               Exe = 'cargo'; ArgList = @('test');                                                Dir = $serverDir })
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo build --release';    Exe = 'cargo'; ArgList = @('build', '--release');                                  Dir = $serverDir })
 }

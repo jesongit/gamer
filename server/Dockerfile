@@ -5,6 +5,7 @@ FROM rust:1.97-slim AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# default features 已含 wasm-runtime（插件运行时随镜像分发；lazy init，不装插件不初始化）
 RUN cargo build --release
 
 FROM debian:bookworm-slim

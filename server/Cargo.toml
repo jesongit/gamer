@@ -5,9 +5,10 @@ edition = "2021"
 description = "GameBot 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
 
 [features]
-default = []
-# The first extension phase keeps WASM execution opt-in. The default server
-# does not carry or initialize a WASM engine.
+# Phase 10 收口：WASM 插件运行时进入默认构建（插件中心/官方市场为产品能力）。
+# lazy init 语义不变：不安装/不启动插件就不会创建 Wasmtime Engine；
+# `--no-default-features` 保留为无 WASM 退出路径（NoWasmRuntime 直接拒绝启动）。
+default = ["wasm-runtime"]
 wasm-runtime = ["dep:wasmtime"]
 
 [dependencies]
@@ -58,8 +59,8 @@ parking_lot = "0.12"
 bytes = "1"
 async-recursion = "1"
 
-# Optional and intentionally not enabled by default. When enabled, this is the
-# Component Model runtime for the checked-in WIT world; the Engine remains
+# Component Model runtime for the checked-in WIT world; enabled by default
+# since Phase 10 (the plugin market is a product capability). The Engine remains
 # lazy and is created only when an installed extension is started.
 wasmtime = { version = "48", optional = true, default-features = false, features = ["cranelift", "runtime", "async", "component-model"] }
 
