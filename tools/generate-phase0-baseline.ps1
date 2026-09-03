@@ -180,7 +180,9 @@ if ($RunPerf) {
             if ($code -ne 0) { throw "固定基准失败（exit=$code）：$testName" }
             foreach ($line in $lines) {
                 $text = [string]$line
-                if ($text -match 'PERF metric=(?<metric>\S+).*p50_us=(?<p50>\S+).*p95_us=(?<p95>\S+).*max_us=(?<max>\S+)') {
+                # 显式匹配 samples 字段并按固定字段顺序取首个出现（贪婪 .* 会
+                # 越过真实值抓到行尾 cpu_p50_us=未实测 这类占位段）
+                if ($text -match 'PERF metric=(?<metric>\S+)\s+samples=(?<samples>\S+)\s+p50_us=(?<p50>\S+)\s+p95_us=(?<p95>\S+)\s+max_us=(?<max>\S+)') {
                     $perfReports[$Matches.metric] = [ordered]@{
                         p50_us = [int64]$Matches.p50
                         p95_us = [int64]$Matches.p95

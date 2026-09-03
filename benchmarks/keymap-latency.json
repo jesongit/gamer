@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "captured_at_utc": "2026-09-03T19:07:49.121Z",
+  "git_commit": "e1e542cf7535b3389bf03fa651bfda18befad454",
+  "purpose": "Phase 7 计划要求的 keymap native vs WASM 延迟基线（Phase 0 补测）",
+  "environment": {
+    "os": "Microsoft Windows NT 10.0.26200.0",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "toolchain": {
+      "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+      "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+    },
+    "build_profile": "release",
+    "host_target": "x86_64-pc-windows-gnu",
+    "wasm_guest_target": "wasm32-unknown-unknown",
+    "wasmtime": "48 (cranelift, runtime, async, component-model)"
+  },
+  "method": "两测试均为进程内 mock 设备执行器（不含真机触控/网络）；各样本原地计时后排序取分位数，经 -- --nocapture 读取测试输出原文登记",
+  "native": {
+    "test": "extensions::keymap::tests::hot_path_dispatch_p95_is_bounded",
+    "command": "cargo test --release hot_path_dispatch_p95_is_bounded -- --nocapture",
+    "chain": "InputGateway.dispatch_timed → KeymapRunner 规则匹配 → mock DeviceExecutor",
+    "samples": 128,
+    "p50_ns": 200,
+    "p95_ns": 200,
+    "output": "keymap dispatch latency: p50=200ns, p95=200ns"
+  },
+  "wasm": {
+    "test": "extensions::keymap::wasm_component_tests::real_wit_input_to_native_chain_p95_stays_bounded",
+    "command": "cargo test --release --features wasm-runtime real_wit_input_to_native_chain_p95_stays_bounded -- --nocapture",
+    "chain": "dispatch_keymap_input → wasmtime 组件实例（keymap guest fixture，wit-component 编码）→ native capability（trace mock）",
+    "samples": 64,
+    "p50_us": 3,
+    "p95_us": 3.7,
+    "output": "real keymap WIT latency: p50=3µs, p95=3.7µs"
+  },
+  "notes": [
+    "native 链路 200ns 受 Windows Instant 计时分辨率限制，量级为亚微秒级",
+    "WASM 链路为真实 wasmtime 组件调用（含 WIT 边界跨越），比 native 慢约一个数量级，仍远低于 Phase 7 护栏断言（p50<50ms / p95<100ms）",
+    "guest fixture 由 tests/keymap-guest 以 wasm32-unknown-unknown 单独构建（需 env -u CARGO_TARGET_DIR 预构建到 guest 目录，否则测试读不到 wasm）"
+  ]
+}
