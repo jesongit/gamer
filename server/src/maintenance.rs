@@ -557,7 +557,7 @@ mod tests {
         let dir = temp_dir("too-new");
         let db_path = crate::store::db_path(&dir);
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch("CREATE TABLE future (x TEXT); PRAGMA user_version = 2;")
+        conn.execute_batch("CREATE TABLE future (x TEXT); PRAGMA user_version = 3;")
             .unwrap();
         drop(conn);
         let report = inspect(&dir);
@@ -566,12 +566,12 @@ mod tests {
         assert_eq!(report["status"], "too_new");
         assert_eq!(report["ok"], false);
         let err = report["error"].as_str().unwrap();
-        assert!(err.contains("supported range [1, 1]"), "{err}");
+        assert!(err.contains("supported range [1, 2]"), "{err}");
         let version: i64 = rusqlite::Connection::open(&db_path)
             .unwrap()
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2, "too_new 拒绝后不得改写数据");
+        assert_eq!(version, 3, "too_new 拒绝后不得改写数据");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

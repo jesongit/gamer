@@ -212,6 +212,7 @@ pub(super) async fn api_save_task(
     if let Err(err) = st.db.upsert_task_async(&task).await {
         return ApiError::internal(err.to_string()).into_response();
     }
+    st.scheduler.notify_tasks_changed();
     let parsed_args = match serde_json::from_str::<Value>(&task.args_json) {
         Ok(Value::Object(args)) => Value::Object(args),
         Ok(_) => return ApiError::internal("任务参数快照必须是 JSON 对象").into_response(),
@@ -320,7 +321,10 @@ pub(super) async fn api_delete_task(
     Path(id): Path<String>,
 ) -> Response {
     match st.db.delete_task_async(&id).await {
-        Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
+        Ok(_) => {
+            st.scheduler.notify_tasks_changed();
+            Json(serde_json::json!({"ok": true})).into_response()
+        }
         Err(err) => ApiError::internal(err.to_string()).into_response(),
     }
 }

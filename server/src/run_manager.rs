@@ -238,6 +238,26 @@ impl RunManager {
             .cloned()
     }
 
+    /// Wait for a run to reach a terminal state without polling the registry.
+    /// The notification is registered before each snapshot, so a completion
+    /// racing with the snapshot cannot be missed.  Terminal records remain in
+    /// the bounded history and are returned just like active records.
+    #[allow(
+        dead_code,
+        reason = "completion consumers adopt this event boundary incrementally"
+    )]
+    pub async fn wait_terminal(&self, run_id: &str) -> Option<RunRecord> {
+        loop {
+            let notified = self.state_changed.notified();
+            match self.get_run(run_id) {
+                Some(record) if record.state.is_terminal() => return Some(record),
+                Some(_) => {}
+                None => return None,
+            }
+            notified.await;
+        }
+    }
+
     /// 设备当前活动运行（无则 None；前端刷新恢复用）。
     pub fn active_for_device(&self, device_id: &str) -> Option<RunRecord> {
         let rid = self
@@ -330,7 +350,7 @@ impl RunManager {
             },
         );
         dev.insert(req.device_id.clone(), run_id.clone());
-        self.state_changed.notify_one();
+        self.state_changed.notify_waiters();
 
         let mgr = self.clone();
         tokio::spawn(async move {
@@ -454,7 +474,7 @@ impl RunManager {
                     .unwrap_or(CancelOutcome::NotFound)
             }
         };
-        self.state_changed.notify_one();
+        self.state_changed.notify_waiters();
         outcome
     }
 
@@ -482,7 +502,7 @@ impl RunManager {
                 e.record.finished_at = Some(Utc::now());
             }
         });
-        self.state_changed.notify_one();
+        self.state_changed.notify_waiters();
     }
 
     fn mark_terminal_checked(&self, run_id: &str, class: RunOutcomeClass, error: Option<String>) {
@@ -502,7 +522,7 @@ impl RunManager {
         entry.record.state = state;
         entry.record.error = error;
         entry.record.finished_at = Some(Utc::now());
-        self.state_changed.notify_one();
+        self.state_changed.notify_waiters();
     }
 
     fn snapshot_or_placeholder(&self, run_id: &str) -> RunRecord {
@@ -567,7 +587,7 @@ impl RunManager {
         );
         let finished = rec.clone();
         hist.push_back(rec);
-        self.state_changed.notify_one();
+        self.state_changed.notify_waiters();
         Some(finished)
     }
 
@@ -1186,6 +1206,23 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, r.run_id);
         assert_eq!(calls[0].1, 1);
+    }
+
+    #[tokio::test]
+    async fn wait_terminal_resolves_from_state_notification() {
+        let mgr = Arc::new(RunManager::new(Arc::new(FakeExecutor::default())));
+        let run = mgr
+            .submit(req("d1", "p/s.yaml", RunSource::Scheduled), None)
+            .unwrap();
+        let record = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            mgr.wait_terminal(&run.run_id),
+        )
+        .await
+        .expect("terminal notification timed out")
+        .expect("run record should remain queryable");
+        assert_eq!(record.run_id, run.run_id);
+        assert_eq!(record.state, RunState::Success);
     }
 
     #[tokio::test]

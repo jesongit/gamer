@@ -37,6 +37,8 @@ mod scripts;
 mod shutdown;
 mod store;
 mod task_params;
+mod timer_core;
+mod timer_yaml;
 mod update;
 mod webrtc;
 

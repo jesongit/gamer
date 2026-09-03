@@ -1,7 +1,7 @@
 //! SQLite 持久化：设备、定时任务、运行日志。
 //!
-//! 数据库只从当前 schema v1 空库创建；已有数据库必须声明并满足完整的 v1
-//! 结构，不提供开发期旧库迁移或补列路径。
+//! 数据库从当前 schema v2 空库创建；声明为 v1 的历史库通过唯一的
+//! v1→v2 Timer Core 迁移升级，user_version=0 仍拒绝自动补齐。
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use chrono::{Local, Utc};
+use chrono::{DateTime, Local, Utc};
+use rusqlite::types::Type;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -18,6 +19,7 @@ use tokio::sync::oneshot;
 use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::migrations::TARGET_SCHEMA;
+use crate::timer_core::{TaskPreset, TimerTask, TimerTaskState};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -67,6 +69,55 @@ pub struct Task {
     pub param_signature: String,
 }
 
+/// Raw SQLite representation used by the generic Timer Core model.
+#[derive(Debug, Clone)]
+pub(crate) struct TimerTaskStorage {
+    pub id: String,
+    pub name: String,
+    pub device_id: String,
+    pub android_package: String,
+    pub content_package: Option<String>,
+    pub runner_id: String,
+    pub entrypoint: String,
+    pub payload_json: String,
+    pub schedule_json: String,
+    pub state: String,
+    pub enabled: bool,
+    pub next_wakeup: Option<i64>,
+    pub last_result: Option<String>,
+    pub last_run_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub preset_id: Option<String>,
+    pub suspend_reason: Option<String>,
+}
+
+impl TimerTaskStorage {
+    fn from_task(task: &TimerTask) -> anyhow::Result<Self> {
+        task.validate()?;
+        Ok(Self {
+            id: task.id.clone(),
+            name: task.name.clone(),
+            device_id: task.app.device_id.to_string(),
+            android_package: task.app.android_package.to_string(),
+            content_package: task.app.content_package.as_ref().map(ToString::to_string),
+            runner_id: task.runner_id.clone(),
+            entrypoint: task.entrypoint.clone(),
+            payload_json: serde_json::to_string(&task.payload)?,
+            schedule_json: serde_json::to_string(&task.schedule)?,
+            state: task.state.as_str().to_string(),
+            enabled: task.enabled,
+            next_wakeup: task.next_wakeup.map(|value| value.timestamp()),
+            last_result: task.last_result.clone(),
+            last_run_at: task.last_run_at.map(|value| value.to_rfc3339()),
+            created_at: task.created_at.to_rfc3339(),
+            updated_at: task.updated_at.to_rfc3339(),
+            preset_id: task.preset_id.clone(),
+            suspend_reason: task.suspend_reason.clone(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub id: i64,
@@ -93,7 +144,7 @@ const LOG_BATCH_SIZE: usize = 100;
 const LOG_PRUNE_BATCH_SIZE: i64 = 500;
 const LOG_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_LOG_MESSAGE_CHARS: usize = 1024;
-/// 目标 schema 版本（v1 唯一基线）：权威定义在 `migrations::TARGET_SCHEMA`
+/// 目标 schema 版本：权威定义在 `migrations::TARGET_SCHEMA`
 /// （DATA-003 兼容常量），此处仅别名沿用
 const SCHEMA_VERSION: i64 = TARGET_SCHEMA;
 
@@ -160,7 +211,7 @@ fn open_connection(path: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
-const SCHEMA_V1_DDL: &str = r#"
+const SCHEMA_V2_DDL: &str = r#"
 CREATE TABLE devices (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -208,6 +259,39 @@ CREATE UNIQUE INDEX uq_scheduled_runs_task_time
     ON scheduled_runs(task_id, scheduled_at);
 CREATE INDEX idx_scheduled_runs_created_at
     ON scheduled_runs(created_at DESC);
+CREATE TABLE timer_tasks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    android_package TEXT NOT NULL,
+    content_package TEXT,
+    runner_id TEXT NOT NULL,
+    entrypoint TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    schedule_json TEXT NOT NULL,
+    state TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    next_wakeup INTEGER,
+    last_result TEXT,
+    last_run_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    preset_id TEXT,
+    suspend_reason TEXT
+);
+CREATE INDEX idx_timer_tasks_wakeup ON timer_tasks(state, enabled, next_wakeup);
+CREATE INDEX idx_timer_tasks_app ON timer_tasks(android_package, content_package);
+CREATE TABLE task_presets (
+    id TEXT PRIMARY KEY,
+    app_package TEXT NOT NULL,
+    name TEXT NOT NULL,
+    runner_id TEXT NOT NULL,
+    entrypoint TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    schedule_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_task_presets_package ON task_presets(app_package);
 "#;
 
 fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result<()> {
@@ -217,16 +301,16 @@ fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result
             version == 0,
             "new database has unexpected user_version={version}"
         );
-        conn.execute_batch(SCHEMA_V1_DDL)?;
+        conn.execute_batch(SCHEMA_V2_DDL)?;
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return validate_schema_v1(conn);
+        return validate_schema_v2(conn);
     }
 
     match version {
         0 => anyhow::bail!(
-            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v1"
+            "database schema is unversioned (user_version=0); back up and remove gamer.db to rebuild schema v2"
         ),
-        SCHEMA_VERSION => validate_schema_v1(conn),
+        SCHEMA_VERSION => validate_schema_v2(conn),
         other => apply_schema_migrations(conn, other),
     }
 }
@@ -237,25 +321,32 @@ fn ensure_schema(conn: &mut Connection, is_new_database: bool) -> anyhow::Result
 /// is rejected before this function is ever reached.
 fn apply_schema_migrations(conn: &mut Connection, from_version: i64) -> anyhow::Result<()> {
     crate::migrations::run_migrations(conn, from_version, crate::migrations::MIGRATIONS)?;
-    validate_schema_v1(conn)
+    validate_schema_v2(conn)
 }
 
-/// v1 结构校验。启动路径与 maintenance CLI（DATA-005 migrate 迁移后校验）
+/// v2 结构校验。启动路径与 maintenance CLI（DATA-005 migrate 迁移后校验）
 /// 共用同一实现，保证「迁移后开放」的判定一致。
-pub(crate) fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
+pub(crate) fn validate_schema_v2(conn: &Connection) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )?;
     let tables = stmt
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    let expected_tables = ["devices", "logs", "scheduled_runs", "tasks"]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let expected_tables = [
+        "devices",
+        "logs",
+        "scheduled_runs",
+        "task_presets",
+        "tasks",
+        "timer_tasks",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
     anyhow::ensure!(
         tables == expected_tables,
-        "schema v1 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
+        "schema v2 is incomplete: expected tables {expected_tables:?}, found {tables:?}; back up and rebuild gamer.db"
     );
 
     validate_table(
@@ -317,6 +408,45 @@ pub(crate) fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
         ],
     )?;
 
+    validate_table(
+        conn,
+        "timer_tasks",
+        &[
+            ("id", "TEXT", 0, 1),
+            ("name", "TEXT", 1, 0),
+            ("device_id", "TEXT", 1, 0),
+            ("android_package", "TEXT", 1, 0),
+            ("content_package", "TEXT", 0, 0),
+            ("runner_id", "TEXT", 1, 0),
+            ("entrypoint", "TEXT", 1, 0),
+            ("payload_json", "TEXT", 1, 0),
+            ("schedule_json", "TEXT", 1, 0),
+            ("state", "TEXT", 1, 0),
+            ("enabled", "INTEGER", 1, 0),
+            ("next_wakeup", "INTEGER", 0, 0),
+            ("last_result", "TEXT", 0, 0),
+            ("last_run_at", "TEXT", 0, 0),
+            ("created_at", "TEXT", 1, 0),
+            ("updated_at", "TEXT", 1, 0),
+            ("preset_id", "TEXT", 0, 0),
+            ("suspend_reason", "TEXT", 0, 0),
+        ],
+    )?;
+    validate_table(
+        conn,
+        "task_presets",
+        &[
+            ("id", "TEXT", 0, 1),
+            ("app_package", "TEXT", 1, 0),
+            ("name", "TEXT", 1, 0),
+            ("runner_id", "TEXT", 1, 0),
+            ("entrypoint", "TEXT", 1, 0),
+            ("payload_json", "TEXT", 1, 0),
+            ("schedule_json", "TEXT", 1, 0),
+            ("created_at", "TEXT", 1, 0),
+        ],
+    )?;
+
     validate_index(conn, "logs", "idx_logs_time", false, &["time"])?;
     validate_index(
         conn,
@@ -331,6 +461,105 @@ pub(crate) fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
         "idx_scheduled_runs_created_at",
         false,
         &["created_at"],
+    )?;
+    validate_index(
+        conn,
+        "timer_tasks",
+        "idx_timer_tasks_wakeup",
+        false,
+        &["state", "enabled", "next_wakeup"],
+    )?;
+    validate_index(
+        conn,
+        "timer_tasks",
+        "idx_timer_tasks_app",
+        false,
+        &["android_package", "content_package"],
+    )?;
+    validate_index(
+        conn,
+        "task_presets",
+        "idx_task_presets_package",
+        false,
+        &["app_package"],
+    )?;
+    Ok(())
+}
+
+/// Compatibility name retained for maintenance callers while the validator
+/// now checks the complete v2 schema.
+pub(crate) fn validate_schema_v1(conn: &Connection) -> anyhow::Result<()> {
+    validate_schema_v2(conn)
+}
+
+/// v1→v2 migration.  Legacy rows are copied into generic timer rows; the old
+/// table remains for the HTTP/YAML compatibility adapter.
+pub(crate) fn migrate_v1_to_v2(tx: &rusqlite::Transaction<'_>) -> anyhow::Result<()> {
+    tx.execute_batch(
+        r#"
+CREATE TABLE timer_tasks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    android_package TEXT NOT NULL,
+    content_package TEXT,
+    runner_id TEXT NOT NULL,
+    entrypoint TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    schedule_json TEXT NOT NULL,
+    state TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    next_wakeup INTEGER,
+    last_result TEXT,
+    last_run_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    preset_id TEXT,
+    suspend_reason TEXT
+);
+CREATE INDEX idx_timer_tasks_wakeup ON timer_tasks(state, enabled, next_wakeup);
+CREATE INDEX idx_timer_tasks_app ON timer_tasks(android_package, content_package);
+CREATE TABLE task_presets (
+    id TEXT PRIMARY KEY,
+    app_package TEXT NOT NULL,
+    name TEXT NOT NULL,
+    runner_id TEXT NOT NULL,
+    entrypoint TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    schedule_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_task_presets_package ON task_presets(app_package);
+INSERT OR IGNORE INTO timer_tasks (
+    id, name, device_id, android_package, content_package, runner_id,
+    entrypoint, payload_json, schedule_json, state, enabled, next_wakeup,
+    last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason
+)
+SELECT
+    id,
+    name,
+    device_id,
+    CASE WHEN instr(script_id, '/') > 1
+         THEN substr(script_id, 1, instr(script_id, '/') - 1)
+         ELSE 'legacy' END,
+    CASE WHEN instr(script_id, '/') > 1
+         THEN substr(script_id, 1, instr(script_id, '/') - 1)
+         ELSE 'legacy' END,
+    'gamer.yaml',
+    script_id,
+    json_object('args', json(args_json), 'param_signature', param_signature),
+    json_object('kind', 'cron', 'value', json_object('expression', cron)),
+    CASE WHEN enabled <> 0 THEN 'active' ELSE 'suspended' END,
+    enabled,
+    NULL,
+    last_result,
+    last_run_at,
+    created_at,
+    created_at,
+    NULL,
+    CASE WHEN enabled <> 0 THEN NULL ELSE 'disabled' END
+FROM tasks;
+"#,
     )?;
     Ok(())
 }
@@ -365,7 +594,7 @@ fn validate_table(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         actual == expected,
-        "schema v1 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
+        "schema v2 is incomplete: table {table} has unexpected columns; back up and rebuild gamer.db"
     );
     Ok(())
 }
@@ -388,12 +617,12 @@ fn validate_index(
         .find(|(name, _)| name == index);
     let Some((_, is_unique)) = found else {
         anyhow::bail!(
-            "schema v1 is incomplete: missing index {index}; back up and rebuild gamer.db"
+            "schema v2 is incomplete: missing index {index}; back up and rebuild gamer.db"
         );
     };
     anyhow::ensure!(
         is_unique == expected_unique,
-        "schema v1 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
+        "schema v2 is incomplete: index {index} has unexpected uniqueness; back up and rebuild gamer.db"
     );
     let pragma = format!("PRAGMA index_info('{index}')");
     let mut stmt = conn.prepare(&pragma)?;
@@ -406,9 +635,152 @@ fn validate_index(
         .collect::<Vec<_>>();
     anyhow::ensure!(
         actual_columns == expected_columns,
-        "schema v1 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
+        "schema v2 is incomplete: index {index} has unexpected columns; back up and rebuild gamer.db"
     );
     Ok(())
+}
+
+const TIMER_TASK_SELECT: &str = "SELECT id, name, device_id, android_package, content_package, runner_id, entrypoint, payload_json, schedule_json, state, enabled, next_wakeup, last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason FROM timer_tasks";
+
+fn timer_tasks_from_conn(conn: &Connection, suffix: &str) -> anyhow::Result<Vec<TimerTask>> {
+    let sql = format!("{TIMER_TASK_SELECT} {suffix}");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], timer_task_storage_from_row)?;
+    rows.collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(TimerTask::from_storage)
+        .collect()
+}
+
+fn timer_task_storage_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TimerTaskStorage> {
+    Ok(TimerTaskStorage {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        device_id: r.get(2)?,
+        android_package: r.get(3)?,
+        content_package: r.get(4)?,
+        runner_id: r.get(5)?,
+        entrypoint: r.get(6)?,
+        payload_json: r.get(7)?,
+        schedule_json: r.get(8)?,
+        state: r.get(9)?,
+        enabled: r.get::<_, i64>(10)? != 0,
+        next_wakeup: r.get(11)?,
+        last_result: r.get(12)?,
+        last_run_at: r.get(13)?,
+        created_at: r.get(14)?,
+        updated_at: r.get(15)?,
+        preset_id: r.get(16)?,
+        suspend_reason: r.get(17)?,
+    })
+}
+
+fn task_preset_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<TaskPreset> {
+    let payload_json: String = r.get(5)?;
+    let schedule_json: String = r.get(6)?;
+    let created_at: String = r.get(7)?;
+    let payload = serde_json::from_str(&payload_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, Type::Text, Box::new(error))
+    })?;
+    let schedule = serde_json::from_str(&schedule_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(6, Type::Text, Box::new(error))
+    })?;
+    let created_at = DateTime::parse_from_rfc3339(&created_at)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(7, Type::Text, Box::new(error))
+        })?;
+    Ok(TaskPreset {
+        id: r.get(0)?,
+        app_package: r.get(1)?,
+        name: r.get(2)?,
+        runner_id: r.get(3)?,
+        entrypoint: r.get(4)?,
+        payload,
+        schedule,
+        created_at,
+    })
+}
+
+fn write_timer_task(conn: &Connection, row: &TimerTaskStorage) -> anyhow::Result<()> {
+    conn.execute(
+        r#"INSERT INTO timer_tasks
+           (id, name, device_id, android_package, content_package, runner_id,
+            entrypoint, payload_json, schedule_json, state, enabled, next_wakeup,
+            last_result, last_run_at, created_at, updated_at, preset_id, suspend_reason)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+           ON CONFLICT(id) DO UPDATE SET
+            name=?2, device_id=?3, android_package=?4, content_package=?5,
+            runner_id=?6, entrypoint=?7, payload_json=?8, schedule_json=?9,
+            state=?10, enabled=?11, next_wakeup=?12, last_result=?13,
+            last_run_at=?14, created_at=?15, updated_at=?16, preset_id=?17,
+            suspend_reason=?18"#,
+        rusqlite::params![
+            row.id,
+            row.name,
+            row.device_id,
+            row.android_package,
+            row.content_package,
+            row.runner_id,
+            row.entrypoint,
+            row.payload_json,
+            row.schedule_json,
+            row.state,
+            if row.enabled { 1 } else { 0 },
+            row.next_wakeup,
+            row.last_result,
+            row.last_run_at,
+            row.created_at,
+            row.updated_at,
+            row.preset_id,
+            row.suspend_reason,
+        ],
+    )?;
+    Ok(())
+}
+
+fn legacy_timer_storage(task: &Task) -> anyhow::Result<TimerTaskStorage> {
+    let package = task
+        .script_id
+        .split_once('/')
+        .map(|(package, _)| package)
+        .unwrap_or("legacy");
+    let args: serde_json::Value = serde_json::from_str(&task.args_json)?;
+    let payload_json = serde_json::json!({
+        "args": args,
+        "param_signature": task.param_signature,
+    })
+    .to_string();
+    let schedule_json = serde_json::json!({
+        "kind": "cron",
+        "value": {"expression": task.cron},
+    })
+    .to_string();
+    let created_at = task
+        .created_at
+        .parse::<chrono::DateTime<Utc>>()
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|_| Utc::now().to_rfc3339());
+    Ok(TimerTaskStorage {
+        id: task.id.clone(),
+        name: task.name.clone(),
+        device_id: task.device_id.clone(),
+        android_package: package.to_string(),
+        content_package: Some(package.to_string()),
+        runner_id: "gamer.yaml".into(),
+        entrypoint: task.script_id.clone(),
+        payload_json,
+        schedule_json,
+        state: if task.enabled { "active" } else { "suspended" }.into(),
+        enabled: task.enabled,
+        next_wakeup: None,
+        last_result: task.last_result.clone(),
+        last_run_at: task.last_run_at.clone(),
+        created_at: created_at.clone(),
+        updated_at: Utc::now().to_rfc3339(),
+        preset_id: None,
+        suspend_reason: (!task.enabled).then(|| "disabled".into()),
+    })
 }
 
 fn run_worker(mut conn: Connection, rx: Receiver<DbCommand>, metrics: Arc<Metrics>) {
@@ -957,6 +1329,7 @@ impl Store {
 
     pub fn upsert_task(&self, t: &Task) -> anyhow::Result<()> {
         validate_task_snapshot(&t.args_json, &t.param_signature)?;
+        let timer_row = legacy_timer_storage(t)?;
         let t = t.clone();
         self.request(move |conn| {
             conn.execute(
@@ -971,6 +1344,7 @@ impl Store {
                     t.args_json, t.param_signature,
                 ],
             )?;
+            write_timer_task(conn, &timer_row)?;
             Ok(())
         })
     }
@@ -978,7 +1352,8 @@ impl Store {
     pub fn delete_task(&self, id: &str) -> anyhow::Result<()> {
         let id = id.to_string();
         self.request(move |conn| {
-            conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+            conn.execute("DELETE FROM tasks WHERE id = ?1", [&id])?;
+            conn.execute("DELETE FROM timer_tasks WHERE id = ?1", [&id])?;
             Ok(())
         })
     }
@@ -1039,6 +1414,7 @@ impl Store {
 
     pub async fn upsert_task_async(&self, t: &Task) -> anyhow::Result<()> {
         validate_task_snapshot(&t.args_json, &t.param_signature)?;
+        let timer_row = legacy_timer_storage(t)?;
         let t = t.clone();
         self.request_async(move |conn| {
             conn.execute(
@@ -1053,6 +1429,7 @@ impl Store {
                     t.args_json, t.param_signature,
                 ],
             )?;
+            write_timer_task(conn, &timer_row)?;
             Ok(())
         })
         .await
@@ -1061,8 +1438,255 @@ impl Store {
     pub async fn delete_task_async(&self, id: &str) -> anyhow::Result<()> {
         let id = id.to_string();
         self.request_async(move |conn| {
-            conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+            conn.execute("DELETE FROM tasks WHERE id = ?1", [&id])?;
+            conn.execute("DELETE FROM timer_tasks WHERE id = ?1", [&id])?;
             Ok(())
+        })
+        .await
+    }
+
+    // ---------- Timer Core task persistence ----------
+
+    pub fn list_timer_tasks(&self) -> anyhow::Result<Vec<TimerTask>> {
+        self.request(|conn| timer_tasks_from_conn(conn, "ORDER BY created_at"))
+    }
+
+    pub async fn list_timer_tasks_async(&self) -> anyhow::Result<Vec<TimerTask>> {
+        self.request_async(|conn| timer_tasks_from_conn(conn, "ORDER BY created_at"))
+            .await
+    }
+
+    pub fn get_timer_task(&self, id: &str) -> anyhow::Result<Option<TimerTask>> {
+        let id = id.to_string();
+        self.request(move |conn| {
+            let mut stmt = conn.prepare(&format!("{TIMER_TASK_SELECT} WHERE id = ?1"))?;
+            let mut rows = stmt.query([id])?;
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
+            Ok(Some(TimerTask::from_storage(timer_task_storage_from_row(
+                row,
+            )?)?))
+        })
+    }
+
+    pub async fn get_timer_task_async(&self, id: &str) -> anyhow::Result<Option<TimerTask>> {
+        let id = id.to_string();
+        self.request_async(move |conn| {
+            let mut stmt = conn.prepare(&format!("{TIMER_TASK_SELECT} WHERE id = ?1"))?;
+            let mut rows = stmt.query([id])?;
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
+            Ok(Some(TimerTask::from_storage(timer_task_storage_from_row(
+                row,
+            )?)?))
+        })
+        .await
+    }
+
+    pub fn upsert_timer_task(&self, task: &TimerTask) -> anyhow::Result<()> {
+        let row = TimerTaskStorage::from_task(task)?;
+        self.request(move |conn| write_timer_task(conn, &row))
+    }
+
+    pub async fn upsert_timer_task_async(&self, task: &TimerTask) -> anyhow::Result<()> {
+        let row = TimerTaskStorage::from_task(task)?;
+        self.request_async(move |conn| write_timer_task(conn, &row))
+            .await
+    }
+
+    pub async fn delete_timer_task_async(&self, id: &str) -> anyhow::Result<()> {
+        let id = id.to_string();
+        self.request_async(move |conn| {
+            conn.execute("DELETE FROM timer_tasks WHERE id = ?1", [id])?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn set_timer_task_wakeup_async(
+        &self,
+        id: &str,
+        next_wakeup: Option<i64>,
+    ) -> anyhow::Result<()> {
+        let id = id.to_string();
+        let updated_at = Utc::now().to_rfc3339();
+        self.request_async(move |conn| {
+            conn.execute(
+                "UPDATE timer_tasks SET next_wakeup = ?2, updated_at = ?3 WHERE id = ?1",
+                rusqlite::params![id, next_wakeup, updated_at],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn attach_scheduled_run_async(
+        &self,
+        task_id: &str,
+        scheduled_at: i64,
+        run_id: &str,
+    ) -> anyhow::Result<()> {
+        let task_id = task_id.to_string();
+        let run_id = run_id.to_string();
+        self.request_async(move |conn| {
+            conn.execute(
+                "UPDATE scheduled_runs SET run_id = ?3 WHERE task_id = ?1 AND scheduled_at = ?2 AND state = 'running'",
+                rusqlite::params![task_id, scheduled_at, run_id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn set_timer_task_state_async(
+        &self,
+        id: &str,
+        state: TimerTaskState,
+        enabled: bool,
+        reason: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let id = id.to_string();
+        let state = state.as_str().to_string();
+        let reason = reason.map(str::to_string);
+        let updated_at = Utc::now().to_rfc3339();
+        self.request_async(move |conn| {
+            conn.execute(
+                "UPDATE timer_tasks SET state = ?2, enabled = ?3, next_wakeup = NULL, suspend_reason = ?4, updated_at = ?5 WHERE id = ?1",
+                rusqlite::params![id, state, if enabled { 1 } else { 0 }, reason, updated_at],
+            )?;
+            conn.execute(
+                "UPDATE tasks SET enabled = ?2 WHERE id = ?1",
+                rusqlite::params![id, if enabled { 1 } else { 0 }],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn suspend_timer_task_async(&self, id: &str, reason: &str) -> anyhow::Result<()> {
+        let id = id.to_string();
+        let reason = reason.to_string();
+        let updated_at = Utc::now().to_rfc3339();
+        self.request_async(move |conn| {
+            conn.execute(
+                "UPDATE timer_tasks SET state = 'suspended', enabled = 0, next_wakeup = NULL, suspend_reason = ?2, updated_at = ?3 WHERE id = ?1",
+                rusqlite::params![id, reason, updated_at],
+            )?;
+            conn.execute("UPDATE tasks SET enabled = 0 WHERE id = ?1", [id])?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn suspend_timer_tasks_for_package_async(
+        &self,
+        package: &str,
+        reason: &str,
+    ) -> anyhow::Result<usize> {
+        let package = package.to_string();
+        let reason = reason.to_string();
+        let updated_at = Utc::now().to_rfc3339();
+        self.request_async(move |conn| {
+            let changed = conn.execute(
+                "UPDATE timer_tasks SET state = 'suspended', enabled = 0, next_wakeup = NULL, suspend_reason = ?2, updated_at = ?3 WHERE android_package = ?1 OR content_package = ?1",
+                rusqlite::params![package, reason, updated_at],
+            )?;
+            conn.execute(
+                "UPDATE tasks SET enabled = 0 WHERE id IN (SELECT id FROM timer_tasks WHERE android_package = ?1 OR content_package = ?1)",
+                [&package],
+            )?;
+            Ok(changed)
+        })
+        .await
+    }
+
+    pub async fn update_timer_task_result_async(
+        &self,
+        id: &str,
+        result: &str,
+        _error: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let id = id.to_string();
+        let result = result.to_string();
+        let last_run_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.request_async(move |conn| {
+            conn.execute(
+                "UPDATE timer_tasks SET last_result = ?2, last_run_at = ?3, updated_at = ?3 WHERE id = ?1",
+                rusqlite::params![id, result, last_run_at],
+            )?;
+            conn.execute(
+                "UPDATE tasks SET last_result = ?2, last_run_at = ?3 WHERE id = ?1",
+                rusqlite::params![id, result, last_run_at],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn upsert_task_preset_async(&self, preset: &TaskPreset) -> anyhow::Result<()> {
+        preset.validate()?;
+        let payload_json = serde_json::to_string(&preset.payload)?;
+        let schedule_json = serde_json::to_string(&preset.schedule)?;
+        let preset = preset.clone();
+        self.request_async(move |conn| {
+            conn.execute(
+                r#"INSERT INTO task_presets
+                   (id, app_package, name, runner_id, entrypoint, payload_json, schedule_json, created_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                   ON CONFLICT(id) DO UPDATE SET app_package=?2, name=?3, runner_id=?4,
+                     entrypoint=?5, payload_json=?6, schedule_json=?7, created_at=?8"#,
+                rusqlite::params![
+                    preset.id,
+                    preset.app_package,
+                    preset.name,
+                    preset.runner_id,
+                    preset.entrypoint,
+                    payload_json,
+                    schedule_json,
+                    preset.created_at.to_rfc3339(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn list_task_presets_async(
+        &self,
+        app_package: Option<&str>,
+    ) -> anyhow::Result<Vec<TaskPreset>> {
+        let app_package = app_package.map(str::to_string);
+        self.request_async(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, app_package, name, runner_id, entrypoint, payload_json, schedule_json, created_at FROM task_presets WHERE (?1 IS NULL OR app_package = ?1) ORDER BY created_at, id",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![app_package], task_preset_from_row)?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+    }
+
+    pub async fn get_task_preset_async(&self, id: &str) -> anyhow::Result<Option<TaskPreset>> {
+        let id = id.to_string();
+        self.request_async(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, app_package, name, runner_id, entrypoint, payload_json, schedule_json, created_at FROM task_presets WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query([id])?;
+            let Some(row) = rows.next()? else {
+                return Ok(None);
+            };
+            Ok(Some(task_preset_from_row(row)?))
+        })
+        .await
+    }
+
+    pub async fn delete_task_preset_async(&self, id: &str) -> anyhow::Result<bool> {
+        let id = id.to_string();
+        self.request_async(move |conn| {
+            Ok(conn.execute("DELETE FROM task_presets WHERE id = ?1", [id])? != 0)
         })
         .await
     }
@@ -1821,6 +2445,131 @@ mod tests {
     }
 
     #[test]
+    fn v1_database_migrates_legacy_tasks_into_timer_core_rows() {
+        let (cfg, dir) = temp_config("timer-v1-migration");
+        let db_path = dir.join("gamer.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+CREATE TABLE devices (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+    addr TEXT NOT NULL DEFAULT '', screen_mode TEXT NOT NULL DEFAULT 'mirror',
+    vd_res TEXT, vd_dpi INTEGER, pkg TEXT, fps INTEGER, created_at TEXT NOT NULL
+);
+CREATE TABLE tasks (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, cron TEXT NOT NULL,
+    script_id TEXT NOT NULL, device_id TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1, last_result TEXT, last_run_at TEXT,
+    created_at TEXT NOT NULL, args_json TEXT NOT NULL,
+    param_signature TEXT NOT NULL
+);
+CREATE TABLE logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL,
+    device_id TEXT NOT NULL, script_id TEXT NOT NULL, level TEXT NOT NULL,
+    msg TEXT NOT NULL
+);
+CREATE INDEX idx_logs_time ON logs(time DESC);
+CREATE TABLE scheduled_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL,
+    scheduled_at INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'running',
+    run_id TEXT, error TEXT, created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX uq_scheduled_runs_task_time ON scheduled_runs(task_id, scheduled_at);
+CREATE INDEX idx_scheduled_runs_created_at ON scheduled_runs(created_at DESC);
+INSERT INTO tasks
+  (id, name, cron, script_id, device_id, enabled, created_at, args_json, param_signature)
+VALUES ('legacy-1', 'Legacy', '*/5 * * * *',
+        'com.example/daily.yaml', 'device-1', 1,
+        '2026-08-29T00:00:00Z', '{}', 'psig1|');
+PRAGMA user_version = 1;
+"#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(&cfg).unwrap();
+        let tasks = store.list_timer_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].runner_id, "gamer.yaml");
+        assert_eq!(tasks[0].entrypoint, "com.example/daily.yaml");
+        assert_eq!(tasks[0].payload["args"], serde_json::json!({}));
+        assert_eq!(tasks[0].schedule.kind, "cron");
+        assert_eq!(tasks[0].schedule.value["expression"], "*/5 * * * *");
+
+        let version: i64 = Connection::open(&db_path)
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, TARGET_SCHEMA);
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_preset_is_independent_from_user_timer_task() {
+        let (cfg, dir) = temp_config("timer-preset");
+        let store = Store::open(&cfg).unwrap();
+        let app = crate::core::AppContext::from_legacy_package("device-1", "com.example").unwrap();
+        let schedule =
+            crate::timer_core::ScheduleSpec::new("opaque", serde_json::json!({"rule": "every"}))
+                .unwrap();
+        let task = TimerTask::new(
+            "user-task",
+            "User task",
+            app,
+            "runner.example",
+            "entrypoint",
+            serde_json::json!({"input": 1}),
+            schedule.clone(),
+        )
+        .unwrap();
+        let preset = TaskPreset {
+            id: "preset-1".into(),
+            app_package: "com.example".into(),
+            name: "Preset".into(),
+            runner_id: "runner.example".into(),
+            entrypoint: "entrypoint".into(),
+            payload: serde_json::json!({"input": 0}),
+            schedule,
+            created_at: Utc::now(),
+        };
+        store.upsert_timer_task_async(&task).await.unwrap();
+        store.upsert_task_preset_async(&preset).await.unwrap();
+
+        assert_eq!(store.list_task_presets_async(None).await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .suspend_timer_tasks_for_package_async("com.example", "package removed")
+                .await
+                .unwrap(),
+            1
+        );
+        let suspended = store
+            .get_timer_task_async("user-task")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suspended.state, TimerTaskState::Suspended);
+        assert_eq!(suspended.suspend_reason.as_deref(), Some("package removed"));
+        assert_eq!(suspended.schedule, preset.schedule);
+
+        assert!(store.delete_task_preset_async("preset-1").await.unwrap());
+        assert!(store
+            .get_task_preset_async("preset-1")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .get_timer_task_async("user-task")
+            .await
+            .unwrap()
+            .is_some());
+
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn unversioned_database_is_rejected_without_migration() {
         let (cfg, dir) = temp_config("schema-unversioned");
         let db_path = dir.join("gamer.db");
@@ -1957,11 +2706,50 @@ mod tests {
                 }
             ]
         });
-        assert_eq!(
-            actual, expected,
-            "新库 schema 与 v1 基线快照不一致——如为有意的 DDL 变更，请同步更新本快照、\n\
-             validate_schema_v1 与 release/contracts/schema-policy.md"
-        );
+        // The v1 tables remain byte-for-byte compatible; v2 adds the generic
+        // Timer Core tables without changing the legacy API tables.
+        for expected_table in expected["tables"].as_array().unwrap() {
+            let name = expected_table["name"].as_str().unwrap();
+            let actual_table = actual["tables"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|table| table["name"] == name);
+            assert_eq!(
+                actual_table,
+                Some(expected_table),
+                "legacy table changed: {name}"
+            );
+        }
+        for expected_index in expected["indexes"].as_array().unwrap() {
+            let name = expected_index["name"].as_str().unwrap();
+            let actual_index = actual["indexes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|index| index["name"] == name);
+            assert_eq!(
+                actual_index,
+                Some(expected_index),
+                "legacy index changed: {name}"
+            );
+        }
+        assert_eq!(actual["user_version"], TARGET_SCHEMA);
+        for table in ["task_presets", "timer_tasks"] {
+            assert!(
+                actual["tables"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["name"] == table),
+                "v2 schema must include {table}"
+            );
+        }
+        assert!(actual["indexes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "idx_timer_tasks_wakeup"));
 
         drop(conn);
         fs::remove_dir_all(dir).unwrap();
@@ -1974,7 +2762,7 @@ mod tests {
         let store = Store::open(&cfg).unwrap();
         drop(store);
         let conn = Connection::open(&db_path).unwrap();
-        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
         drop(conn);
 
         let error = match Store::open(&cfg) {
@@ -1983,7 +2771,7 @@ mod tests {
         };
         assert!(error
             .to_string()
-            .contains("unsupported database schema version 2"));
+            .contains("unsupported database schema version 3"));
 
         fs::remove_dir_all(dir).unwrap();
     }
@@ -2002,7 +2790,7 @@ mod tests {
             Ok(_) => panic!("incomplete database must fail fast"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("schema v1 is incomplete"));
+        assert!(error.to_string().contains("schema v2 is incomplete"));
 
         fs::remove_dir_all(dir).unwrap();
     }

@@ -3,8 +3,8 @@
 //! 与契约逐条对齐的规则：
 //! - `PRAGMA user_version` 是唯一权威版本标记；**不引入** `schema_migrations` 表，
 //!   不用文件名/旁路标记推断版本；
-//! - v1 是唯一基线（[`TARGET_SCHEMA`] = 1），迁移表当前为空；后续迁移从
-//!   v1→v2 起逐级编号，静态注册于 [`MIGRATIONS`]，禁止运行期动态拼装；
+//! - v1 是历史基线；当前目标为 v2，v1→v2 为 Timer Core 数据迁移，静态
+//!   注册于 [`MIGRATIONS`]，禁止运行期动态拼装；
 //! - `user_version=0`（无版本旧库）在进入本模块前即被 [`crate::store`] 明确拒绝
 //!   ——不存在 migration 0，本框架永不补齐/改写无版本库；
 //! - 每个迁移 v(n-1)→vn 在**单个事务**内完成 DDL + 数据修复 + `user_version`
@@ -17,23 +17,23 @@
 //! 兼容常量（契约 §3，DATA-003 常量化）：[`MIN_READ_SCHEMA`] / [`MAX_READ_SCHEMA`] /
 //! [`TARGET_SCHEMA`] 是本 binary 的兼容声明唯一取值源——启动路径（[`crate::store`]）、
 //! maintenance CLI（DATA-005 inspect/migrate）与 `/api/system/info` 的 schema 字段
-//! 全部引用这组常量，禁止各处自抄数字。当前形态 `min = target = max = 1`；
+//! 全部引用这组常量，禁止各处自抄数字。当前形态 `min = 1, target = max = 2`；
 //! 取值变更必须与 release/contracts/schema-policy.md §3 取值表同步提交（§8）。
 //!
 //! 生产路径：[`crate::store`] 的 `apply_schema_migrations` 先跑 [`run_migrations`]
-//! 再做 `validate_schema_v1`。测试可用临时迁移表直接驱动 [`run_migrations`]，
+//! 再做 `validate_schema_v2`。测试可用临时迁移表直接驱动 [`run_migrations`]，
 //! 不触碰对外"无版本库拒绝"行为。
 
 use std::collections::HashSet;
 
 use rusqlite::{Connection, Transaction};
 
-/// 本 binary 可打开并继续迁移的最低 user_version（v1 基线 → 1；0 永远拒绝）
+/// 本 binary 可打开并继续迁移的最低 user_version（v1 基线；0 永远拒绝）
 pub const MIN_READ_SCHEMA: i64 = 1;
 /// 可打开的最高 user_version；高于此值拒绝启动（schema-policy §3/§4 硬规则）
-pub const MAX_READ_SCHEMA: i64 = 1;
-/// 本 binary 迁移完成后的目标 schema 版本（v1 唯一基线；当前形态 target = max）
-pub const TARGET_SCHEMA: i64 = 1;
+pub const MAX_READ_SCHEMA: i64 = 2;
+/// 本 binary 迁移完成后的目标 schema 版本
+pub const TARGET_SCHEMA: i64 = 2;
 
 /// 契约 §3 冻结约束 `min_read ≤ target ≤ max_read` 编译期固化：取值漂移在
 /// 编译期即失败，不等运行期诊断
@@ -54,9 +54,13 @@ pub(crate) struct Migration {
     pub apply: MigrationFn,
 }
 
-/// 静态注册表：v1 是唯一基线，当前为空。首个 v1→v2 迁移在此追加，
-/// 并按 schema-policy §8 同步更新契约文档兼容表。
-pub(crate) static MIGRATIONS: &[Migration] = &[];
+/// 静态注册表：Timer Core 的首个持久化迁移。
+pub(crate) static MIGRATIONS: &[Migration] = &[Migration {
+    from: 1,
+    to: 2,
+    description: "add generic timer tasks and task presets",
+    apply: crate::store::migrate_v1_to_v2,
+}];
 
 /// 把 `current` 逐级迁移到目标版本。目标 = `migrations` 注册表覆盖到的最高
 /// 版本（生产路径注册表为空 → 即 [`TARGET_SCHEMA`]）；测试注入临时
@@ -208,10 +212,10 @@ mod tests {
 
     #[test]
     fn empty_table_at_target_is_noop() {
-        // 空迁移表 + u=1（已达 target）：no-op，结构校验语义不变
+        // 已达 target 的数据库迁移是 no-op。
         let mut conn = versioned_memory_db(TARGET_SCHEMA);
         run_migrations(&mut conn, TARGET_SCHEMA, MIGRATIONS).unwrap();
-        assert_eq!(user_version(&conn), 1);
+        assert_eq!(user_version(&conn), TARGET_SCHEMA);
     }
 
     #[test]
@@ -366,7 +370,7 @@ mod tests {
 
     #[test]
     fn too_new_database_is_rejected_with_actual_version_and_range() {
-        for too_new in [2i64, 5, 99] {
+        for too_new in [3i64, 5, 99] {
             let mut conn = versioned_memory_db(too_new);
             let err = run_migrations(&mut conn, too_new, MIGRATIONS).unwrap_err();
             let msg = err.to_string();
