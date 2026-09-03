@@ -4,6 +4,12 @@ version = "0.1.1"
 edition = "2021"
 description = "GameBot 游戏自动化助手服务端：scrcpy 设备控制 + WebRTC 推流 + 模板匹配 + YAML 自动化 + 定时任务"
 
+[features]
+default = []
+# The first extension phase keeps WASM execution opt-in. The default server
+# does not carry or initialize a WASM engine.
+wasm-runtime = ["dep:wasmtime"]
+
 [dependencies]
 # Web 框架
 axum = { version = "0.7", features = ["ws"] }
@@ -15,6 +21,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 toml = "0.8"
+semver = { version = "1", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # 按天滚动文件日志 + 非阻塞 worker（OPS-003）
@@ -49,6 +56,11 @@ futures-util = "0.3"
 parking_lot = "0.12"
 bytes = "1"
 async-recursion = "1"
+
+# Optional and intentionally not enabled by default. The first adapter only
+# validates a module lazily; WIT host bindings and entrypoint execution are a
+# later phase.
+wasmtime = { version = "48", optional = true, default-features = false, features = ["cranelift", "runtime"] }
 
 # 脚本包导出/导入（zip）
 zip = "2"

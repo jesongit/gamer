@@ -1,0 +1,106 @@
+package gamer:host@1.0.0;
+
+/// Shared opaque handles and errors. Handles are owned by the host and are
+/// never host filesystem paths or transport pointer IDs.
+interface types {
+  type device-handle = u64;
+  type frame-handle = u64;
+  type resource-handle = u64;
+  type run-handle = u64;
+  type touch-handle = u64;
+
+  enum host-error-kind {
+    denied,
+    unavailable,
+    invalid-request,
+    not-found,
+    cancelled,
+    failed,
+  }
+
+  record host-error {
+    kind: host-error-kind,
+    message: string,
+  }
+}
+
+/// Host API domain: device. Version is the package/domain contract version.
+interface device {
+  use types.{device-handle, host-error};
+  resolve: func(id: string) -> result<device-handle, host-error>;
+  start-app: func(device: device-handle, app: string) -> result<_, host-error>;
+  stop-app: func(device: device-handle, app: string) -> result<_, host-error>;
+}
+
+/// Host API domain: vision.
+interface vision {
+  use types.{device-handle, frame-handle, resource-handle, host-error};
+  record point { x: u32, y: u32 }
+  record match-box { x: u32, y: u32, width: u32, height: u32, score: float32 }
+  variant match-outcome { found(match-box), not-found }
+  match-template: func(frame: frame-handle, template: resource-handle)
+    -> result<match-outcome, host-error>;
+  capture: func(device: device-handle) -> result<frame-handle, host-error>;
+  sample-color: func(frame: frame-handle, point: point) -> result<tuple<u8, u8, u8>, host-error>;
+}
+
+/// Host API domain: input.
+interface input {
+  use types.{device-handle, host-error};
+  record point { x: u32, y: u32 }
+  tap: func(device: device-handle, point: point) -> result<_, host-error>;
+  swipe: func(device: device-handle, start: point, end: point, duration-ms: u64)
+    -> result<_, host-error>;
+  key: func(device: device-handle, code: u32, action: string) -> result<_, host-error>;
+  text: func(device: device-handle, value: string) -> result<_, host-error>;
+}
+
+/// Host API domain: touch.
+interface touch {
+  use types.{device-handle, touch-handle, host-error};
+  record point { x: u32, y: u32, pressure: float32 }
+  begin: func(device: device-handle, point: point) -> result<touch-handle, host-error>;
+  move: func(touch: touch-handle, point: point) -> result<_, host-error>;
+  end: func(touch: touch-handle) -> result<_, host-error>;
+}
+
+/// Host API domain: resource. Resource names are logical identifiers, never
+/// paths supplied to the host filesystem.
+interface resource {
+  use types.{resource-handle, host-error};
+  resolve: func(namespace: string, name: string) -> result<resource-handle, host-error>;
+  open: func(resource: resource-handle) -> result<u64, host-error>;
+}
+
+/// Host API domain: run.
+interface run {
+  use types.{device-handle, resource-handle, run-handle, host-error};
+  submit: func(device: device-handle, entry: resource-handle) -> result<run-handle, host-error>;
+  cancel: func(run: run-handle) -> result<_, host-error>;
+  status: func(run: run-handle) -> result<string, host-error>;
+}
+
+/// Host API domain: runtime.
+interface runtime {
+  use types.{host-error};
+  sleep: func(milliseconds: u64) -> result<_, host-error>;
+  cancelled: func() -> bool;
+}
+
+/// Host API domain: log.
+interface log {
+  use types.{device-handle, run-handle, host-error};
+  write: func(level: string, message: string, device: option<device-handle>, run: option<run-handle>)
+    -> result<_, host-error>;
+}
+
+world extension-host {
+  import device;
+  import vision;
+  import input;
+  import touch;
+  import resource;
+  import run;
+  import runtime;
+  import log;
+}

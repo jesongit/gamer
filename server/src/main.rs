@@ -22,6 +22,7 @@ mod core;
 mod deps_probe;
 mod device;
 mod engine;
+mod extensions;
 mod file_migration;
 mod keymaps;
 mod logging;
