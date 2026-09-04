@@ -14,7 +14,7 @@
       { "path": "templates/corner#dr.png", "sha256": "2cae5fbd354f17af960442d3d202e0cc1e929113b26a23cf32f9c9b2c2778517" }
     ],
     "tasks": [
-      { "path": "tasks/phase0_daily.json", "sha256": "8dfb882794889d92f5363ea34afb3a3b7287598259a4cd3c5a101fcb26f6e9b3" }
+      { "path": "tasks/phase0_daily.json", "sha256": "f7cb954c3b7f0c03c0b66692bd64da82a666db7a2f456cb70c9d093f877299e7" }
     ],
     "screenshots": [
       { "path": "screenshots/match-success.png", "sha256": "3d37db686132d12141a5d7b8e84e89b6671eddb3ae78792797b2b0c5f613a34f" },

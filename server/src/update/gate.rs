@@ -344,7 +344,7 @@ mod tests {
 
         assert!(!gate.is_active());
         assert!(db.list_devices().unwrap().is_empty());
-        assert!(db.list_tasks().unwrap().is_empty());
+        assert!(db.list_timer_tasks().unwrap().is_empty());
         set_stage(STAGE_READY);
         let _ = std::fs::remove_dir_all(dir);
     }

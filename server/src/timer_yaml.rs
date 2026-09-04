@@ -2,23 +2,26 @@
 //!
 //! This is the only timer-side module that knows the current ScriptStore,
 //! typed parameter snapshot, and `RunTarget::Script`.  It translates the
-//! generic TimerTask payload into the existing RunManager request so the
-//! public task API and existing YAML runs remain compatible.
+//! generic Task payload into the existing RunManager request so YAML runs
+//! scheduled through the unified task API remain compatible.
+//!
+//! P11.1（ADR-12）：Task 的 `runner.payload` 是 runner 私有不透明值。本 runner
+//! 约定 `payload = {args: <稀疏或全量参数>}`；旧数据里可能还带
+//! `param_signature`（有则继续做过期门禁），新保存路径不带签名——运行时按
+//! 脚本当前声明重绑参数（存活值保留、新参数取默认值、必填缺失报错）。
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Local, Utc};
 use serde_json::Value;
 
-use crate::core::{AppContext, RunRequest};
+use crate::core::RunRequest;
 use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartError};
 use crate::scripts::ScriptStore;
-use crate::store::{Db, Task};
+use crate::store::Db;
 use crate::task_params::{self, GateError};
 use crate::timer_core::{
-    ScheduleSpec, TimerCompletion, TimerCore, TimerOutcome, TimerRun, TimerRunner,
-    TimerRunnerError, TimerRunnerFactory, TimerTask, TimerTaskState,
+    TimerCompletion, TimerOutcome, TimerRun, TimerRunner, TimerRunnerError, TimerRunnerFactory,
 };
 
 pub(crate) struct YamlTimerRunner {
@@ -39,6 +42,36 @@ impl TimerRunnerFactory for Arc<ScriptStore> {
     }
 }
 
+/// YAML runner 的不透明 payload 视图：`{args, param_signature?}`。
+struct YamlPayload {
+    script_id: String,
+    args: Value,
+    /// 旧数据携带的 psig1 快照签名；新保存路径为 None（不做过期门禁）。
+    param_signature: Option<String>,
+}
+
+/// Translate the generic RunRequest into the YAML runner payload view only at
+/// the YAML runner boundary. The Timer Core and Scheduler never inspect it.
+fn payload_from_request(request: &RunRequest) -> Result<YamlPayload, String> {
+    let payload = request
+        .payload
+        .as_value()
+        .as_object()
+        .ok_or_else(|| "YAML runner payload must be an object".to_string())?;
+    let args = payload
+        .get("args")
+        .cloned()
+        .ok_or_else(|| "YAML runner payload misses args".to_string())?;
+    Ok(YamlPayload {
+        script_id: request.entrypoint.clone(),
+        args,
+        param_signature: payload
+            .get("param_signature")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
 #[async_trait]
 impl TimerRunner for YamlTimerRunner {
     fn runner_id(&self) -> &str {
@@ -52,14 +85,18 @@ impl TimerRunner for YamlTimerRunner {
         scheduled_at: Option<i64>,
         on_complete: Arc<dyn Fn(TimerCompletion) + Send + Sync>,
     ) -> Result<TimerRun, TimerRunnerError> {
-        let legacy = legacy_from_request(&request, task_id).map_err(TimerRunnerError::Invalid)?;
-        let task = legacy.clone();
-        let task_args = match task_params::gate_task(&self.scripts, &legacy) {
+        let payload = payload_from_request(&request).map_err(TimerRunnerError::Invalid)?;
+        let task_args = match task_params::gate_task(
+            &self.scripts,
+            &payload.script_id,
+            &payload.args,
+            payload.param_signature.as_deref(),
+        ) {
             Ok(args) => args,
             Err(error) => {
                 tracing::warn!(
-                    task = %task.id,
-                    script = %task.script_id,
+                    task = %task_id,
+                    script = %payload.script_id,
                     reason = %error.reason(),
                     detail = %error.message(),
                     "YAML timer runner rejected task parameters"
@@ -68,8 +105,8 @@ impl TimerRunner for YamlTimerRunner {
             }
         };
         tracing::info!(
-            task = %task.id,
-            script = %task.script_id,
+            task = %task_id,
+            script = %payload.script_id,
             params = %task_args.names.join(","),
             signature = %task_args.signature,
             signature_short = %task_params::signature_short_code(&task_args.signature),
@@ -78,7 +115,7 @@ impl TimerRunner for YamlTimerRunner {
         let req = crate::engine::yaml_start_request(
             request.app.clone(),
             crate::engine::RunTarget::Script {
-                script_id: request.entrypoint.clone(),
+                script_id: payload.script_id.clone(),
                 start_index: 0,
             },
             if scheduled_at.is_some() {
@@ -86,7 +123,7 @@ impl TimerRunner for YamlTimerRunner {
             } else {
                 RunSource::TaskNow
             },
-            Some(task.id.clone()),
+            Some(task_id.to_string()),
             scheduled_at,
             task_args.overrides,
             false,
@@ -95,7 +132,7 @@ impl TimerRunner for YamlTimerRunner {
         let hook = yaml_finish_hook(
             self.db.clone(),
             request.app.device_id.to_string(),
-            request.entrypoint.clone(),
+            payload.script_id.clone(),
             task_id.to_string(),
             scheduled_at,
             on_complete,
@@ -123,15 +160,13 @@ fn map_gate_error(error: GateError) -> TimerRunnerError {
         GateError::ScriptInvalid(diagnostics) => {
             TimerRunnerError::Invalid(GateError::ScriptInvalid(diagnostics).message())
         }
-        GateError::SignatureMismatch { stored, current } => TimerRunnerError::ParamStale {
-            message: GateError::SignatureMismatch {
+        GateError::SignatureMismatch { stored, current } => TimerRunnerError::ParamStale(
+            GateError::SignatureMismatch {
                 stored: stored.clone(),
                 current: current.clone(),
             }
             .message(),
-            stored,
-            current,
-        },
+        ),
     }
 }
 
@@ -140,38 +175,6 @@ fn map_start_error(error: StartError) -> TimerRunnerError {
         StartError::Conflict(record) => TimerRunnerError::Conflict(record),
         StartError::ShuttingDown => TimerRunnerError::ShuttingDown,
     }
-}
-
-/// Translate the generic RunRequest into the legacy YAML task shape only at
-/// the YAML runner boundary. The Timer Core and Scheduler never inspect it.
-fn legacy_from_request(request: &RunRequest, task_id: &str) -> Result<Task, String> {
-    let payload = request
-        .payload
-        .as_value()
-        .as_object()
-        .ok_or_else(|| "YAML runner payload must be an object".to_string())?;
-    let args = payload
-        .get("args")
-        .cloned()
-        .ok_or_else(|| "YAML runner payload misses args".to_string())?;
-    let args_json = serde_json::to_string(&args).map_err(|error| error.to_string())?;
-    let signature = payload
-        .get("param_signature")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "YAML runner payload misses param_signature".to_string())?;
-    Ok(Task {
-        id: task_id.to_string(),
-        name: request.entrypoint.clone(),
-        cron: String::new(),
-        script_id: request.entrypoint.clone(),
-        device_id: request.app.device_id.to_string(),
-        enabled: true,
-        last_result: None,
-        last_run_at: None,
-        created_at: Utc::now().to_rfc3339(),
-        args_json,
-        param_signature: signature.to_string(),
-    })
 }
 
 fn yaml_finish_hook(
@@ -213,148 +216,4 @@ fn yaml_finish_hook(
             outcome: timer_outcome,
         });
     })
-}
-
-/// Legacy task wire format carries a raw cron string; this is the single
-/// translation point from that string to an opaque [`ScheduleSpec`].  The
-/// "cron" kind literal lives only in this legacy adapter (and in the native
-/// provider's registration), never in the API or core.
-pub(crate) fn legacy_schedule_spec(cron: &str) -> ScheduleSpec {
-    ScheduleSpec::new("cron", serde_json::json!({ "expression": cron }))
-        .expect("legacy cron schedule kind is a valid static kind")
-}
-
-/// Convert the current legacy task row to the generic Timer Core model.
-pub(crate) fn timer_from_legacy(task: &Task) -> anyhow::Result<TimerTask> {
-    let package = task
-        .script_id
-        .split_once('/')
-        .map(|(package, _)| package)
-        .unwrap_or("legacy");
-    let app = AppContext::from_legacy_package(&task.device_id, package)?;
-    let args: Value = serde_json::from_str(&task.args_json)?;
-    let payload = serde_json::json!({
-        "args": args,
-        "param_signature": task.param_signature,
-    });
-    let schedule = legacy_schedule_spec(&task.cron);
-    let now = Utc::now();
-    let mut timer = TimerTask::new(
-        task.id.clone(),
-        task.name.clone(),
-        app,
-        "gamer.yaml",
-        task.script_id.clone(),
-        payload,
-        schedule,
-    )?;
-    timer.enabled = task.enabled;
-    timer.state = if task.enabled {
-        TimerTaskState::Active
-    } else {
-        TimerTaskState::Suspended
-    };
-    timer.suspend_reason = (!task.enabled).then(|| "disabled".to_string());
-    timer.last_result = task.last_result.clone();
-    timer.last_run_at = task
-        .last_run_at
-        .as_deref()
-        .and_then(|value| value.parse::<DateTime<Utc>>().ok());
-    timer.created_at = task.created_at.parse::<DateTime<Utc>>().unwrap_or(now);
-    timer.updated_at = now;
-    Ok(timer)
-}
-
-/// 通用任务 → 旧 YAML 任务模型（兼容适配；roundtrip 由测试锁定）。
-#[allow(dead_code)]
-fn legacy_from_timer(task: &TimerTask) -> Result<Task, String> {
-    let payload = task
-        .payload
-        .as_object()
-        .ok_or_else(|| "YAML runner payload must be an object".to_string())?;
-    let args = payload
-        .get("args")
-        .cloned()
-        .ok_or_else(|| "YAML runner payload misses args".to_string())?;
-    let args_json = serde_json::to_string(&args).map_err(|error| error.to_string())?;
-    let signature = payload
-        .get("param_signature")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "YAML runner payload misses param_signature".to_string())?;
-    let expression = task
-        .schedule
-        .value
-        .get("expression")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    Ok(Task {
-        id: task.id.clone(),
-        name: task.name.clone(),
-        cron: expression,
-        script_id: task.entrypoint.clone(),
-        device_id: task.app.device_id.to_string(),
-        enabled: task.enabled,
-        last_result: task.last_result.clone(),
-        last_run_at: task.last_run_at.map(|value| value.to_rfc3339()),
-        created_at: task.created_at.to_rfc3339(),
-        args_json,
-        param_signature: signature.to_string(),
-    })
-}
-
-/// Compatibility helper retained for the existing scheduler tests and callers.
-#[allow(
-    dead_code,
-    reason = "legacy callers are retained while the Timer Core adapter rolls out"
-)]
-pub(crate) async fn dispatch(
-    db: &Db,
-    runs: &Arc<RunManager>,
-    scripts: &Arc<ScriptStore>,
-    task: &Task,
-    trigger: Option<DateTime<Local>>,
-) {
-    let timer = match timer_from_legacy(task) {
-        Ok(timer) => timer,
-        Err(error) => {
-            tracing::error!(task = %task.id, %error, "legacy task conversion failed");
-            return;
-        }
-    };
-    let core = TimerCore::new(db.clone());
-    let runner = Arc::new(YamlTimerRunner::new(
-        db.clone(),
-        runs.clone(),
-        scripts.clone(),
-    ));
-    core.dispatch(timer, trigger.map(|value| value.timestamp()), runner)
-        .await;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn legacy_task_round_trips_generic_runner_payload() {
-        let task = Task {
-            id: "task".into(),
-            name: "Task".into(),
-            cron: "0 * * * * *".into(),
-            script_id: "com.example/daily.yaml".into(),
-            device_id: "device".into(),
-            enabled: true,
-            last_result: None,
-            last_run_at: None,
-            created_at: "2026-01-01T00:00:00Z".into(),
-            args_json: "{}".into(),
-            param_signature: "psig1|".into(),
-        };
-        let generic = timer_from_legacy(&task).unwrap();
-        let back = legacy_from_timer(&generic).unwrap();
-        assert_eq!(back.script_id, task.script_id);
-        assert_eq!(back.args_json, task.args_json);
-        assert_eq!(back.param_signature, task.param_signature);
-    }
 }

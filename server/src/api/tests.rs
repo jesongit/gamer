@@ -21,9 +21,10 @@ use super::devices::{
 };
 use super::logs::clamp_log_limit;
 use super::runs::{validate_run_req, RunReqArgs};
-use super::tasks::{validate_task_req, SaveTaskReq};
+use super::tasks::{build_task, RunnerSpecDto, SaveTaskReq};
 use super::templates::{compose_region_suffix, validate_short_name, validate_template_name};
 use super::{auth, build_router, ApiError};
+use crate::timer_core::{ScheduleRegistry, TaskSchedule};
 
 // ---------- 集成测试（阶段 2 SEC 验收矩阵自动化子集） ----------
 //
@@ -402,43 +403,6 @@ mod sec_tests {
             req("GET", uri, None, &json_headers(sid.to_string()), None),
         )
         .await
-    }
-
-    async fn save_task_script(t: &TestApp, sid: &str, name: &str, content: &str) {
-        let body = serde_json::json!({
-            "pkg": "com.test.app",
-            "name": name,
-            "content": content,
-        });
-        let resp = post_json(t, sid, "/api/scripts", body).await;
-        assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
-    }
-
-    async fn update_task_script(t: &TestApp, sid: &str, content: &str) {
-        let get = get_json(t, sid, "/api/scripts/com.test.app%2Fdaily.yaml").await;
-        assert_eq!(get.status(), StatusCode::OK);
-        let version = json_body(get).await["version"]
-            .as_str()
-            .expect("script version")
-            .to_string();
-        let resp = send(
-            &t.app,
-            req(
-                "PUT",
-                "/api/scripts/com.test.app%2Fdaily.yaml",
-                None,
-                &json_headers(sid.to_string()),
-                Some(
-                    serde_json::json!({
-                        "content": content,
-                        "expected_version": version,
-                    })
-                    .to_string(),
-                ),
-            ),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     }
 
     mod auth_tests {

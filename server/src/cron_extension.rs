@@ -1,7 +1,7 @@
 //! Native Cron schedule extension.
 //!
 //! Cron parsing and the local-time policy live here so the Timer Core only
-//! deals in opaque [`ScheduleSpec`] values and wakeup instants.  This adapter
+//! deals in opaque [`TaskSchedule`] values and wakeup instants.  This adapter
 //! is intentionally independent from the YAML runner and from the extension
 //! Host; a task can select any registered runner through the generic timer
 //! boundary.
@@ -13,7 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Local, Utc};
 use cron::Schedule;
 
-use crate::timer_core::{ScheduleExtension, ScheduleRegistry, ScheduleSpec};
+use crate::timer_core::{ScheduleExtension, ScheduleRegistry, TaskSchedule};
 
 pub(crate) const CRON_SCHEDULE_KIND: &str = "cron";
 
@@ -43,9 +43,9 @@ pub fn register_builtin(registry: &ScheduleRegistry) -> anyhow::Result<()> {
 }
 
 impl CronExtension {
-    fn parse_schedule(&self, schedule: &ScheduleSpec) -> Result<Schedule, String> {
+    fn parse_schedule(&self, schedule: &TaskSchedule) -> Result<Schedule, String> {
         let expression = schedule
-            .value
+            .config
             .get("expression")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "cron schedule misses expression".to_string())?;
@@ -57,11 +57,14 @@ impl CronExtension {
 impl ScheduleExtension for CronExtension {
     fn next_after(
         &self,
-        schedule: &ScheduleSpec,
+        schedule: &TaskSchedule,
         after: DateTime<Utc>,
     ) -> Result<Option<DateTime<Utc>>, String> {
-        if schedule.kind != CRON_SCHEDULE_KIND {
-            return Err(format!("unsupported schedule extension: {}", schedule.kind));
+        if schedule.provider_id != CRON_SCHEDULE_KIND {
+            return Err(format!(
+                "unsupported schedule extension: {}",
+                schedule.provider_id
+            ));
         }
         let schedule = self.parse_schedule(schedule)?;
         let local_after = after.with_timezone(&Local);
@@ -73,12 +76,15 @@ impl ScheduleExtension for CronExtension {
 
     fn latest_due(
         &self,
-        schedule: &ScheduleSpec,
+        schedule: &TaskSchedule,
         now: DateTime<Utc>,
         lookback: Duration,
     ) -> Result<Option<DateTime<Utc>>, String> {
-        if schedule.kind != CRON_SCHEDULE_KIND {
-            return Err(format!("unsupported schedule extension: {}", schedule.kind));
+        if schedule.provider_id != CRON_SCHEDULE_KIND {
+            return Err(format!(
+                "unsupported schedule extension: {}",
+                schedule.provider_id
+            ));
         }
         let schedule = self.parse_schedule(schedule)?;
         let local_now = now.with_timezone(&Local);
@@ -107,7 +113,7 @@ mod tests {
             .single()
             .unwrap()
             .with_timezone(&Utc);
-        let spec = ScheduleSpec::new(
+        let spec = TaskSchedule::new(
             CRON_SCHEDULE_KIND,
             serde_json::json!({"expression": "*/5 * * * *"}),
         )
@@ -133,7 +139,7 @@ mod tests {
             .single()
             .unwrap()
             .with_timezone(&Utc);
-        let spec = ScheduleSpec::new(
+        let spec = TaskSchedule::new(
             CRON_SCHEDULE_KIND,
             serde_json::json!({"expression": "*/5 * * * *"}),
         )
@@ -163,7 +169,7 @@ mod tests {
         register_builtin(&registry).unwrap();
         let probe = |expression: &str| {
             registry.next_after(
-                &ScheduleSpec::new(
+                &TaskSchedule::new(
                     CRON_SCHEDULE_KIND,
                     serde_json::json!({"expression": expression}),
                 )
@@ -179,7 +185,7 @@ mod tests {
 
     #[test]
     fn rejects_non_cron_schedule_kind() {
-        let schedule = ScheduleSpec::new("other", serde_json::json!({})).unwrap();
+        let schedule = TaskSchedule::new("other", serde_json::json!({})).unwrap();
         assert!(CronExtension.next_after(&schedule, Utc::now()).is_err());
     }
 }

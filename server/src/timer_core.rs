@@ -20,33 +20,37 @@ use tokio::sync::Notify;
 use crate::core::{AndroidPackageName, AppContext, AppPackageId, DeviceId, RunPayload, RunRequest};
 use crate::metrics::SchedulerEvent;
 use crate::run_manager::RunRecord;
-use crate::store::{Db, TimerTaskStorage};
+use crate::store::{Db, TaskStorage};
 
-/// An extension-owned schedule.  `kind` selects the extension and `value` is
-/// interpreted only by that extension.
+/// A schedule owned by a ScheduleProvider.  `provider_id` selects the
+/// registered provider and `config` is interpreted only by that provider
+/// (ADR-12: Task = 任意 ScheduleProvider + 任意 Runner).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ScheduleSpec {
-    pub kind: String,
-    pub value: Value,
+pub struct TaskSchedule {
+    pub provider_id: String,
+    pub config: Value,
 }
 
-impl ScheduleSpec {
-    pub fn new(kind: impl Into<String>, value: Value) -> anyhow::Result<Self> {
-        let kind = kind.into();
-        if kind.trim().is_empty() {
-            anyhow::bail!("schedule kind must not be empty");
+impl TaskSchedule {
+    pub fn new(provider_id: impl Into<String>, config: Value) -> anyhow::Result<Self> {
+        let provider_id = provider_id.into();
+        if provider_id.trim().is_empty() {
+            anyhow::bail!("schedule provider_id must not be empty");
         }
-        Ok(Self { kind, value })
+        Ok(Self {
+            provider_id,
+            config,
+        })
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
-            !self.kind.trim().is_empty(),
-            "schedule kind must not be empty"
+            !self.provider_id.trim().is_empty(),
+            "schedule provider_id must not be empty"
         );
         anyhow::ensure!(
-            !self.kind.chars().any(char::is_control),
-            "schedule kind contains a control character"
+            !self.provider_id.chars().any(char::is_control),
+            "schedule provider_id contains a control character"
         );
         Ok(())
     }
@@ -54,20 +58,25 @@ impl ScheduleSpec {
 
 /// User-owned task lifecycle.  Suspended tasks remain persisted and can carry
 /// a dependency reason (for example, an uninstalled app package).
+/// `DependencyMissing` marks a task whose runner or schedule provider is not
+/// registered at dispatch time: the task is kept verbatim (never deleted) and
+/// stays dormant until its dependency reappears (recovery semantics: Wave2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TimerTaskState {
+pub enum TaskState {
     Active,
     Suspended,
     Cancelled,
+    DependencyMissing,
 }
 
-impl TimerTaskState {
+impl TaskState {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
             Self::Suspended => "suspended",
             Self::Cancelled => "cancelled",
+            Self::DependencyMissing => "dependency_missing",
         }
     }
 
@@ -76,23 +85,27 @@ impl TimerTaskState {
             "active" => Ok(Self::Active),
             "suspended" => Ok(Self::Suspended),
             "cancelled" => Ok(Self::Cancelled),
+            "dependency_missing" => Ok(Self::DependencyMissing),
             other => anyhow::bail!("unknown timer task state: {other}"),
         }
     }
 }
 
-/// A persisted user task.  All runner-specific input is kept in `payload`.
+/// A persisted user task (ADR-12 model).  The runner is expressed as the flat
+/// `runner_id`/`entrypoint`/`payload` triple in Rust and in SQLite columns;
+/// the HTTP API nests it as `runner: {runner_id, entrypoint, payload}`.  All
+/// runner-specific input is kept in the opaque `payload`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TimerTask {
+pub struct Task {
     pub id: String,
     pub name: String,
     pub app: AppContext,
     pub runner_id: String,
     pub entrypoint: String,
     pub payload: Value,
-    pub schedule: ScheduleSpec,
-    pub state: TimerTaskState,
-    /// Compatibility flag for the legacy task API.  New callers should use
+    pub schedule: TaskSchedule,
+    pub state: TaskState,
+    /// Compatibility flag for disabled tasks.  New callers should use
     /// `state`; false always makes a task non-schedulable.
     pub enabled: bool,
     pub next_wakeup: Option<DateTime<Utc>>,
@@ -106,7 +119,7 @@ pub struct TimerTask {
     pub suspend_reason: Option<String>,
 }
 
-impl TimerTask {
+impl Task {
     pub fn new(
         id: impl Into<String>,
         name: impl Into<String>,
@@ -114,7 +127,7 @@ impl TimerTask {
         runner_id: impl Into<String>,
         entrypoint: impl Into<String>,
         payload: Value,
-        schedule: ScheduleSpec,
+        schedule: TaskSchedule,
     ) -> anyhow::Result<Self> {
         let now = Utc::now();
         let task = Self {
@@ -125,7 +138,7 @@ impl TimerTask {
             entrypoint: entrypoint.into(),
             payload,
             schedule,
-            state: TimerTaskState::Active,
+            state: TaskState::Active,
             enabled: true,
             next_wakeup: None,
             last_result: None,
@@ -157,16 +170,16 @@ impl TimerTask {
     }
 
     pub fn is_schedulable(&self) -> bool {
-        self.enabled && self.state == TimerTaskState::Active
+        self.enabled && self.state == TaskState::Active
     }
 
-    pub(crate) fn from_storage(row: TimerTaskStorage) -> anyhow::Result<Self> {
+    pub(crate) fn from_storage(row: TaskStorage) -> anyhow::Result<Self> {
         let device_id = DeviceId::new(row.device_id)?;
         let android_package = AndroidPackageName::new(row.android_package)?;
         let content_package = row.content_package.map(AppPackageId::new).transpose()?;
         let payload = serde_json::from_str(&row.payload_json)?;
-        let schedule: ScheduleSpec = serde_json::from_str(&row.schedule_json)?;
-        let state = TimerTaskState::parse(&row.state)?;
+        let schedule: TaskSchedule = serde_json::from_str(&row.schedule_json)?;
+        let state = TaskState::parse(&row.state)?;
         let last_run_at = row.last_run_at.map(parse_timestamp).transpose()?;
         let created_at = parse_timestamp(row.created_at)?;
         let updated_at = parse_timestamp(row.updated_at)?;
@@ -209,7 +222,7 @@ fn parse_timestamp(value: String) -> anyhow::Result<DateTime<Utc>> {
 }
 
 /// A package-provided task template.  Presets are not user schedules and can
-/// be removed/reinstalled independently from `TimerTask` rows.
+/// be removed/reinstalled independently from `Task` rows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskPreset {
     pub id: String,
@@ -218,7 +231,7 @@ pub struct TaskPreset {
     pub runner_id: String,
     pub entrypoint: String,
     pub payload: Value,
-    pub schedule: ScheduleSpec,
+    pub schedule: TaskSchedule,
     pub created_at: DateTime<Utc>,
 }
 
@@ -251,7 +264,7 @@ pub struct PackagePreset {
     pub runner_id: String,
     pub entrypoint: String,
     pub payload: Value,
-    pub schedule: ScheduleSpec,
+    pub schedule: TaskSchedule,
 }
 
 /// Deterministic publish id for a package-provided preset. Re-installing or
@@ -279,13 +292,13 @@ impl Clock for SystemClock {
 pub trait ScheduleExtension: Send + Sync {
     fn next_after(
         &self,
-        schedule: &ScheduleSpec,
+        schedule: &TaskSchedule,
         after: DateTime<Utc>,
     ) -> Result<Option<DateTime<Utc>>, String>;
 
     fn latest_due(
         &self,
-        schedule: &ScheduleSpec,
+        schedule: &TaskSchedule,
         now: DateTime<Utc>,
         lookback: Duration,
     ) -> Result<Option<DateTime<Utc>>, String>;
@@ -312,36 +325,50 @@ impl ScheduleRegistry {
 
     pub fn register(
         &self,
-        kind: impl Into<String>,
+        provider_id: impl Into<String>,
         extension: Arc<dyn ScheduleExtension>,
     ) -> anyhow::Result<()> {
-        let kind = kind.into();
+        let provider_id = provider_id.into();
         anyhow::ensure!(
-            !kind.trim().is_empty(),
-            "schedule extension kind must not be empty"
+            !provider_id.trim().is_empty(),
+            "schedule extension provider_id must not be empty"
         );
         let mut extensions = self.extensions.write().expect("schedule registry poisoned");
         anyhow::ensure!(
-            !extensions.contains_key(&kind),
-            "schedule extension already registered: {kind}"
+            !extensions.contains_key(&provider_id),
+            "schedule extension already registered: {provider_id}"
         );
-        extensions.insert(kind, extension);
+        extensions.insert(provider_id, extension);
         Ok(())
     }
 
-    fn get(&self, kind: &str) -> Option<Arc<dyn ScheduleExtension>> {
+    /// Registered provider ids, sorted for stable UI output
+    /// (`GET /api/schedule-providers`).
+    pub fn list(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .extensions
+            .read()
+            .expect("schedule registry poisoned")
+            .keys()
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn get(&self, provider_id: &str) -> Option<Arc<dyn ScheduleExtension>> {
         self.extensions
             .read()
             .expect("schedule registry poisoned")
-            .get(kind)
+            .get(provider_id)
             .cloned()
     }
 
-    /// Validate an opaque spec against its registered provider. Kinds without
-    /// a registered provider are accepted here so tasks can be saved before
+    /// Validate an opaque schedule against its registered provider. Providers
+    /// without a registration are accepted here so tasks can be saved before
     /// their provider ships; the run loop rejects them at trigger time.
-    pub fn probe(&self, schedule: &ScheduleSpec) -> Result<(), String> {
-        match self.get(&schedule.kind) {
+    pub fn probe(&self, schedule: &TaskSchedule) -> Result<(), String> {
+        match self.get(&schedule.provider_id) {
             Some(extension) => extension.next_after(schedule, Utc::now()).map(|_| ()),
             None => Ok(()),
         }
@@ -351,22 +378,22 @@ impl ScheduleRegistry {
 impl ScheduleExtension for ScheduleRegistry {
     fn next_after(
         &self,
-        schedule: &ScheduleSpec,
+        schedule: &TaskSchedule,
         after: DateTime<Utc>,
     ) -> Result<Option<DateTime<Utc>>, String> {
-        self.get(&schedule.kind)
-            .ok_or_else(|| format!("schedule extension unavailable: {}", schedule.kind))?
+        self.get(&schedule.provider_id)
+            .ok_or_else(|| format!("schedule extension unavailable: {}", schedule.provider_id))?
             .next_after(schedule, after)
     }
 
     fn latest_due(
         &self,
-        schedule: &ScheduleSpec,
+        schedule: &TaskSchedule,
         now: DateTime<Utc>,
         lookback: Duration,
     ) -> Result<Option<DateTime<Utc>>, String> {
-        self.get(&schedule.kind)
-            .ok_or_else(|| format!("schedule extension unavailable: {}", schedule.kind))?
+        self.get(&schedule.provider_id)
+            .ok_or_else(|| format!("schedule extension unavailable: {}", schedule.provider_id))?
             .latest_due(schedule, now, lookback)
     }
 }
@@ -375,11 +402,8 @@ impl ScheduleExtension for ScheduleRegistry {
 pub enum TimerRunnerError {
     DependencyMissing(String),
     Invalid(String),
-    ParamStale {
-        stored: String,
-        current: String,
-        message: String,
-    },
+    /// 脚本参数声明已变化（psig1 签名不一致）：message 面向用户。
+    ParamStale(String),
     Conflict(Box<RunRecord>),
     ShuttingDown,
     #[allow(
@@ -394,7 +418,7 @@ impl std::fmt::Display for TimerRunnerError {
         match self {
             Self::DependencyMissing(message) => write!(f, "dependency unavailable: {message}"),
             Self::Invalid(message) => f.write_str(message),
-            Self::ParamStale { message, .. } => f.write_str(message),
+            Self::ParamStale(message) => f.write_str(message),
             Self::Conflict(record) => write!(f, "device busy: {}", record.run_id),
             Self::ShuttingDown => f.write_str("server is shutting down"),
             Self::Other(message) => f.write_str(message),
@@ -490,6 +514,19 @@ impl TimerRunnerRegistry {
             .read()
             .expect("timer runner registry poisoned")
             .contains_key(runner_id)
+    }
+
+    /// Registered runner ids, sorted for stable UI output (`GET /api/runners`).
+    pub fn list_runners(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .runners
+            .read()
+            .expect("timer runner registry poisoned")
+            .keys()
+            .cloned()
+            .collect();
+        ids.sort();
+        ids
     }
 
     fn get(&self, runner_id: &str) -> Option<Arc<dyn TimerRunner>> {
@@ -627,7 +664,7 @@ impl TimerCore {
         }
     }
 
-    pub async fn save_task(&self, task: &TimerTask) -> anyhow::Result<()> {
+    pub async fn save_task(&self, task: &Task) -> anyhow::Result<()> {
         self.db.upsert_timer_task_async(task).await?;
         self.notify_changed();
         Ok(())
@@ -792,7 +829,7 @@ impl TimerCore {
 
     pub async fn dispatch(
         &self,
-        task: TimerTask,
+        task: Task,
         scheduled_at: Option<i64>,
         runner: Arc<dyn TimerRunner>,
     ) {
@@ -820,11 +857,16 @@ impl TimerCore {
             }
         }
         if !runner.supports(&task.runner_id) {
-            let reason = format!("runner unavailable: {}", task.runner_id);
+            // ADR-12：runner 缺失是显式的运行依赖缺失状态——任务保留、休眠，
+            // 不删除也不按普通挂起处理（恢复语义 Wave2 接管）。
+            let reason = format!("missing_dependency={}", task.runner_id);
             self.db
                 .metrics()
                 .record_scheduler_event(SchedulerEvent::Failed);
-            let _ = self.db.suspend_timer_task_async(&task.id, &reason).await;
+            let _ = self
+                .db
+                .set_timer_task_dependency_missing_async(&task.id, &reason)
+                .await;
             self.finish_rejected(&task, scheduled_at, "failed", None, Some(&reason))
                 .await;
             return;
@@ -882,7 +924,7 @@ impl TimerCore {
 
     async fn handle_runner_error(
         &self,
-        task: &TimerTask,
+        task: &Task,
         scheduled_at: Option<i64>,
         error: TimerRunnerError,
     ) {
@@ -903,12 +945,15 @@ impl TimerCore {
                 self.db
                     .metrics()
                     .record_scheduler_event(SchedulerEvent::Failed);
-                let _ = self.db.suspend_timer_task_async(&task.id, message).await;
+                let _ = self
+                    .db
+                    .set_timer_task_dependency_missing_async(&task.id, message)
+                    .await;
                 ("failed", message.clone())
             }
             TimerRunnerError::Invalid(message)
             | TimerRunnerError::Other(message)
-            | TimerRunnerError::ParamStale { message, .. } => {
+            | TimerRunnerError::ParamStale(message) => {
                 self.db
                     .metrics()
                     .record_scheduler_event(SchedulerEvent::Failed);
@@ -919,10 +964,15 @@ impl TimerCore {
             .await;
     }
 
-    async fn reject_schedule(&self, task: &TimerTask, error: String) {
-        let reason = format!("schedule unavailable: {error}");
-        tracing::warn!(task = %task.id, %reason, "timer schedule rejected task");
-        let _ = self.db.suspend_timer_task_async(&task.id, &reason).await;
+    async fn reject_schedule(&self, task: &Task, error: String) {
+        // 调度 provider 缺失/拒绝与 runner 缺失同口径：进入显式
+        // DependencyMissing 状态，任务保留、休眠等待恢复（Wave2）。
+        let reason = format!("missing_dependency={}", task.schedule.provider_id);
+        tracing::warn!(task = %task.id, %error, %reason, "timer schedule rejected task");
+        let _ = self
+            .db
+            .set_timer_task_dependency_missing_async(&task.id, &reason)
+            .await;
         self.db
             .metrics()
             .record_scheduler_event(SchedulerEvent::Failed);
@@ -932,7 +982,7 @@ impl TimerCore {
 
     async fn finish_rejected(
         &self,
-        task: &TimerTask,
+        task: &Task,
         scheduled_at: Option<i64>,
         state: &str,
         run_id: Option<&str>,
@@ -1013,13 +1063,13 @@ impl TimerCore {
 
     pub async fn submit_now(
         &self,
-        task: TimerTask,
+        task: Task,
         runner: Arc<dyn TimerRunner>,
     ) -> Result<TimerRun, TimerRunnerError> {
         if !runner.supports(&task.runner_id) {
-            let reason = format!("runner unavailable: {}", task.runner_id);
+            let reason = format!("missing_dependency={}", task.runner_id);
             self.db
-                .suspend_timer_task_async(&task.id, &reason)
+                .set_timer_task_dependency_missing_async(&task.id, &reason)
                 .await
                 .map_err(|error| TimerRunnerError::Other(error.to_string()))?;
             self.db
@@ -1076,7 +1126,7 @@ impl TimerCore {
         }
         let result = self
             .db
-            .set_timer_task_state_async(task_id, TimerTaskState::Cancelled, false, None)
+            .set_timer_task_state_async(task_id, TaskState::Cancelled, false, None)
             .await;
         self.notify_changed();
         result
@@ -1099,14 +1149,14 @@ impl TimerCore {
             .await?
             .ok_or_else(|| anyhow::anyhow!("timer task not found: {task_id}"))?;
         anyhow::ensure!(
-            task.state != TimerTaskState::Cancelled,
+            task.state != TaskState::Cancelled,
             "cancelled timer task cannot be resumed"
         );
         let next = extension
             .next_after(&task.schedule, self.clock.now())
             .map_err(|error| anyhow::anyhow!(error))?;
         self.db
-            .set_timer_task_state_async(task_id, TimerTaskState::Active, true, None)
+            .set_timer_task_state_async(task_id, TaskState::Active, true, None)
             .await?;
         self.db
             .set_timer_task_wakeup_async(task_id, next.map(|v| v.timestamp()))
@@ -1156,7 +1206,7 @@ impl TimerCore {
             .list_timer_tasks()
             .ok()?
             .into_iter()
-            .filter(TimerTask::is_schedulable)
+            .filter(Task::is_schedulable)
             .filter_map(|task| task.next_wakeup)
             .min()
     }
@@ -1172,7 +1222,7 @@ impl TimerCore {
     /// Publish (upsert) package-provided task presets. Ids are deterministic
     /// per source package + preset name, so repeated activation of the same or
     /// a newer package version updates rows in place and never duplicates.
-    /// Preset rows are independent of `TimerTask`: uninstalling a package
+    /// Preset rows are independent of `Task`: uninstalling a package
     /// suspends user tasks but deliberately keeps preset records.
     pub async fn publish_package_presets(
         &self,
@@ -1290,15 +1340,15 @@ mod tests {
         (Arc::new(crate::store::Store::open(&cfg).unwrap()), dir)
     }
 
-    fn test_task() -> TimerTask {
-        TimerTask::new(
+    fn test_task() -> Task {
+        Task::new(
             "task-1",
             "Task",
             AppContext::from_legacy_package("device-1", "com.example").unwrap(),
             "fake.runner",
             "entry",
             serde_json::json!({"value": 1}),
-            ScheduleSpec::new("opaque", serde_json::json!({"rule": "test"})).unwrap(),
+            TaskSchedule::new("opaque", serde_json::json!({"rule": "test"})).unwrap(),
         )
         .unwrap()
     }
@@ -1310,18 +1360,21 @@ mod tests {
     impl ScheduleExtension for FixedDelaySchedule {
         fn next_after(
             &self,
-            schedule: &ScheduleSpec,
+            schedule: &TaskSchedule,
             after: DateTime<Utc>,
         ) -> Result<Option<DateTime<Utc>>, String> {
-            if schedule.kind != "fixed" {
-                return Err(format!("unsupported schedule extension: {}", schedule.kind));
+            if schedule.provider_id != "fixed" {
+                return Err(format!(
+                    "unsupported schedule extension: {}",
+                    schedule.provider_id
+                ));
             }
             Ok(Some(after + chrono::Duration::minutes(5)))
         }
 
         fn latest_due(
             &self,
-            _schedule: &ScheduleSpec,
+            _schedule: &TaskSchedule,
             _now: DateTime<Utc>,
             _lookback: Duration,
         ) -> Result<Option<DateTime<Utc>>, String> {
@@ -1336,14 +1389,17 @@ mod tests {
     impl ScheduleExtension for StrictSchedule {
         fn next_after(
             &self,
-            schedule: &ScheduleSpec,
+            schedule: &TaskSchedule,
             after: DateTime<Utc>,
         ) -> Result<Option<DateTime<Utc>>, String> {
-            if schedule.kind != "strict" {
-                return Err(format!("unsupported schedule extension: {}", schedule.kind));
+            if schedule.provider_id != "strict" {
+                return Err(format!(
+                    "unsupported schedule extension: {}",
+                    schedule.provider_id
+                ));
             }
             let steps = schedule
-                .value
+                .config
                 .get("steps")
                 .and_then(serde_json::Value::as_i64)
                 .unwrap_or(0);
@@ -1355,7 +1411,7 @@ mod tests {
 
         fn latest_due(
             &self,
-            _schedule: &ScheduleSpec,
+            _schedule: &TaskSchedule,
             _now: DateTime<Utc>,
             _lookback: Duration,
         ) -> Result<Option<DateTime<Utc>>, String> {
@@ -1365,17 +1421,17 @@ mod tests {
 
     #[test]
     fn schedule_is_opaque_to_core_models() {
-        let spec = ScheduleSpec::new("future-extension", serde_json::json!({"rule": "x"})).unwrap();
-        assert_eq!(spec.kind, "future-extension");
-        assert_eq!(spec.value["rule"], "x");
+        let spec = TaskSchedule::new("future-extension", serde_json::json!({"rule": "x"})).unwrap();
+        assert_eq!(spec.provider_id, "future-extension");
+        assert_eq!(spec.config["rule"], "x");
     }
 
     #[test]
     fn task_state_is_suspendable_without_losing_schedule() {
         let app = AppContext::from_legacy_package("d1", "com.example.game").unwrap();
         let schedule =
-            ScheduleSpec::new("cron", serde_json::json!({"expression": "* * * * *"})).unwrap();
-        let mut task = TimerTask::new(
+            TaskSchedule::new("cron", serde_json::json!({"expression": "* * * * *"})).unwrap();
+        let mut task = Task::new(
             "task",
             "Task",
             app,
@@ -1385,7 +1441,7 @@ mod tests {
             schedule.clone(),
         )
         .unwrap();
-        task.state = TimerTaskState::Suspended;
+        task.state = TaskState::Suspended;
         task.suspend_reason = Some("app package unavailable".into());
         assert!(!task.is_schedulable());
         assert_eq!(task.schedule, schedule);
@@ -1470,11 +1526,13 @@ mod tests {
             .dispatch(task, Some(7), runner)
             .await;
 
+        // ADR-12：runner 缺失 → 显式 DependencyMissing 状态 + 可诊断 reason；
+        // 任务必须保留（不删除），等待依赖恢复（Wave2 接管恢复语义）。
         let saved = db.get_timer_task_async("task-1").await.unwrap().unwrap();
-        assert_eq!(saved.state, TimerTaskState::Suspended);
+        assert_eq!(saved.state, TaskState::DependencyMissing);
         assert_eq!(
             saved.suspend_reason.as_deref(),
-            Some("runner unavailable: missing.runner")
+            Some("missing_dependency=missing.runner")
         );
         assert_eq!(db.scheduled_run_state("task-1", 7), "failed");
         assert_eq!(saved.last_result.as_deref(), Some("失败"));
@@ -1500,27 +1558,34 @@ mod tests {
 
         assert_eq!(db.scheduled_run_state("task-1", 8), "failed");
         let saved = db.get_timer_task_async("task-1").await.unwrap().unwrap();
-        assert_eq!(saved.state, TimerTaskState::Active);
+        assert_eq!(saved.state, TaskState::Active);
         assert_eq!(saved.last_result.as_deref(), Some("失败"));
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
-    async fn missing_schedule_extension_suspends_task_and_records_failure() {
+    async fn missing_schedule_extension_marks_task_dependency_missing() {
         let (db, dir) = test_db("missing-schedule");
         let mut task = test_task();
-        task.schedule = ScheduleSpec::new("missing.schedule", serde_json::json!({})).unwrap();
+        task.schedule = TaskSchedule::new("missing.schedule", serde_json::json!({})).unwrap();
         db.upsert_timer_task_async(&task).await.unwrap();
+        // 未注册 provider：registry 查询明确报错（run loop 据此触发 reject_schedule）
         let schedules = ScheduleRegistry::new();
         let error = schedules
             .next_after(&task.schedule, Utc::now())
             .unwrap_err();
         assert_eq!(error, "schedule extension unavailable: missing.schedule");
-        db.suspend_timer_task_async(&task.id, &error).await.unwrap();
+        // 与 dispatch 的 runner 缺失同口径：显式 DependencyMissing、任务保留
+        let core = TimerCore::new(db.clone());
+        core.reject_schedule(&task, error).await;
         let saved = db.get_timer_task_async(&task.id).await.unwrap().unwrap();
-        assert_eq!(saved.state, TimerTaskState::Suspended);
-        assert_eq!(saved.suspend_reason.as_deref(), Some(error.as_str()));
+        assert_eq!(saved.state, TaskState::DependencyMissing);
+        assert_eq!(
+            saved.suspend_reason.as_deref(),
+            Some("missing_dependency=missing.schedule")
+        );
+        drop(core);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1548,6 +1613,10 @@ mod tests {
         let registry = Arc::new(TimerRunnerRegistry::new());
         registry.register(first).unwrap();
         registry.register(second.clone()).unwrap();
+        assert_eq!(
+            registry.list_runners(),
+            vec!["fake.runner".to_string(), "second.runner".to_string()]
+        );
         TimerCore::new(db.clone())
             .dispatch(task, Some(9), registry)
             .await;
@@ -1561,7 +1630,7 @@ mod tests {
     async fn suspend_resume_preserves_schedule_and_repeated_transitions_are_safe() {
         let (db, dir) = test_db("suspend-resume");
         let mut task = test_task();
-        task.schedule = ScheduleSpec::new("fixed", serde_json::json!({})).unwrap();
+        task.schedule = TaskSchedule::new("fixed", serde_json::json!({})).unwrap();
         db.upsert_timer_task_async(&task).await.unwrap();
         let core = TimerCore::new(db.clone());
         core.suspend_task("task-1", "dependency unavailable")
@@ -1576,7 +1645,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            TimerTaskState::Suspended
+            TaskState::Suspended
         );
         core.resume_task("task-1", &FixedDelaySchedule)
             .await
@@ -1585,9 +1654,9 @@ mod tests {
             .await
             .unwrap();
         let resumed = db.get_timer_task_async("task-1").await.unwrap().unwrap();
-        assert_eq!(resumed.state, TimerTaskState::Active);
+        assert_eq!(resumed.state, TaskState::Active);
         assert!(resumed.next_wakeup.is_some());
-        assert_eq!(resumed.schedule.kind, "fixed");
+        assert_eq!(resumed.schedule.provider_id, "fixed");
         drop(core);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
@@ -1616,20 +1685,25 @@ mod tests {
         registry
             .register("strict", Arc::new(StrictSchedule))
             .unwrap();
+        // GET /api/schedule-providers 的数据源：已注册 provider 全量、稳定排序
+        assert_eq!(
+            registry.list(),
+            vec!["fixed".to_string(), "strict".to_string()]
+        );
         let now = Utc::now();
         // 每个 kind 只路由到自己的 provider（互不串扰）
-        let fixed = ScheduleSpec::new("fixed", serde_json::json!({})).unwrap();
+        let fixed = TaskSchedule::new("fixed", serde_json::json!({})).unwrap();
         assert_eq!(
             registry.next_after(&fixed, now).unwrap(),
             Some(now + chrono::Duration::minutes(5))
         );
-        let strict = ScheduleSpec::new("strict", serde_json::json!({"steps": 20})).unwrap();
+        let strict = TaskSchedule::new("strict", serde_json::json!({"steps": 20})).unwrap();
         assert_eq!(
             registry.next_after(&strict, now).unwrap(),
             Some(now + chrono::Duration::seconds(20))
         );
         // 未注册 kind → 明确错误（不 panic）；触发路径据此挂起任务而不是丢弃
-        let unknown = ScheduleSpec::new("gamma", serde_json::json!({})).unwrap();
+        let unknown = TaskSchedule::new("gamma", serde_json::json!({})).unwrap();
         assert_eq!(
             registry.next_after(&unknown, now).unwrap_err(),
             "schedule extension unavailable: gamma"
@@ -1650,18 +1724,18 @@ mod tests {
             .register("strict", Arc::new(StrictSchedule))
             .unwrap();
         assert!(registry
-            .probe(&ScheduleSpec::new("strict", serde_json::json!({"steps": 30})).unwrap())
+            .probe(&TaskSchedule::new("strict", serde_json::json!({"steps": 30})).unwrap())
             .is_ok());
         // 已注册但 spec 非法 → 保存边界即可 400
         assert_eq!(
             registry
-                .probe(&ScheduleSpec::new("strict", serde_json::json!({})).unwrap())
+                .probe(&TaskSchedule::new("strict", serde_json::json!({})).unwrap())
                 .expect_err("非法 spec 必须被已注册 provider 拒绝"),
             "strict schedule misses positive steps"
         );
         // 未注册 kind：保存时放行（未来扩展可先存任务），触发时由 run loop 挂起
         assert!(registry
-            .probe(&ScheduleSpec::new("future.kind", serde_json::json!({})).unwrap())
+            .probe(&TaskSchedule::new("future.kind", serde_json::json!({})).unwrap())
             .is_ok());
     }
 
@@ -1669,7 +1743,7 @@ mod tests {
     async fn resume_with_unregistered_schedule_kind_fails_without_losing_the_task() {
         let (db, dir) = test_db("resume-unsupported");
         let mut task = test_task();
-        task.schedule = ScheduleSpec::new("missing.kind", serde_json::json!({})).unwrap();
+        task.schedule = TaskSchedule::new("missing.kind", serde_json::json!({})).unwrap();
         db.upsert_timer_task_async(&task).await.unwrap();
         let core = TimerCore::new(db.clone());
         let registry = ScheduleRegistry::new();
@@ -1685,8 +1759,8 @@ mod tests {
         );
         // 任务原样保留：不 panic、不改状态、不丢任务
         let saved = db.get_timer_task_async("task-1").await.unwrap().unwrap();
-        assert_eq!(saved.state, TimerTaskState::Active);
-        assert_eq!(saved.schedule.kind, "missing.kind");
+        assert_eq!(saved.state, TaskState::Active);
+        assert_eq!(saved.schedule.provider_id, "missing.kind");
         assert!(saved.next_wakeup.is_none());
         drop(core);
         drop(db);
@@ -1710,7 +1784,7 @@ mod tests {
         // 挂起任务即使留着更早的游标也不参与计算
         let mut suspended = test_task();
         suspended.id = "suspended".into();
-        suspended.state = TimerTaskState::Suspended;
+        suspended.state = TaskState::Suspended;
         suspended.enabled = false;
         suspended.next_wakeup = Some(now);
         for task in [&soon, &later, &suspended] {
@@ -1733,7 +1807,7 @@ mod tests {
         let core = TimerCore::new(db.clone());
         let package = AppPackageId::new("official.example").unwrap();
         let schedule =
-            ScheduleSpec::new("cron", serde_json::json!({"expression": "0 8 * * *"})).unwrap();
+            TaskSchedule::new("cron", serde_json::json!({"expression": "0 8 * * *"})).unwrap();
         let preset = PackagePreset {
             name: "每日领取".into(),
             runner_id: "gamer.yaml".into(),

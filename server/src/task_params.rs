@@ -15,14 +15,8 @@ use crate::script_v2::model::param_signature;
 use crate::script_v2::params::{merge_args, parse_json_arg};
 use crate::script_v2::{ParamDecl, ScriptError, TypedValue};
 use crate::scripts::ScriptStore;
-use crate::store::Task;
 
-/// API 409 冲突错误码（签名不一致的重确认信号）。
-/// CONTRACT 错误码表未列此码（契约缺口：snake_case 与 §5.2 dot 命名空间不一致，
-/// 以任务约定为准），前端按 `code + reason` 消费。
-pub const CODE_SIGNATURE_CONFLICT: &str = "param_signature_conflict";
-
-/// 签名门禁失败的机器可读原因（409 body 的 `reason` 字段）。
+/// 签名门禁失败的机器可读原因（依赖缺失/参数过期的细分信号）。
 pub const REASON_SIGNATURE_MISMATCH: &str = "signature_mismatch";
 
 /// 任务参数门禁结果：签名 + 从已存快照重建的全量类型化覆盖。
@@ -101,18 +95,27 @@ pub fn probe_script_signature(
     Ok((decls, signature))
 }
 
-/// 完整任务门禁：载入脚本当前签名 → 与存储签名比对 → 从已存快照 JSON 重建
-/// 全量类型化覆盖。返回 [`TaskArgs`] 供 StartRequest 使用。
-pub fn gate_task(scripts: &ScriptStore, task: &Task) -> Result<TaskArgs, GateError> {
-    let (decls, current) = probe_script_signature(scripts, &task.script_id)?;
-    if task.param_signature != current {
-        return Err(GateError::SignatureMismatch {
-            stored: task.param_signature.clone(),
-            current,
-        });
+/// 完整任务门禁：载入脚本当前签名 →（旧数据带签名时）与存储签名比对 → 从
+/// payload 的 args 重建全量类型化覆盖。返回 [`TaskArgs`] 供 StartRequest 使用。
+///
+/// P11.1（ADR-12）：`stored_signature` 为 None（新 Task 模型保存的 payload
+/// 不携带 psig1 快照签名）时跳过过期门禁，按当前声明重绑参数。
+pub fn gate_task(
+    scripts: &ScriptStore,
+    script_id: &str,
+    args: &serde_json::Value,
+    stored_signature: Option<&str>,
+) -> Result<TaskArgs, GateError> {
+    let (decls, current) = probe_script_signature(scripts, script_id)?;
+    if let Some(stored) = stored_signature {
+        if stored != current {
+            return Err(GateError::SignatureMismatch {
+                stored: stored.to_string(),
+                current,
+            });
+        }
     }
-    let overrides = rebind_snapshot(&decls, &task.args_json, &task.script_id)
-        .map_err(GateError::ScriptInvalid)?;
+    let overrides = rebind_snapshot(&decls, args, script_id).map_err(GateError::ScriptInvalid)?;
     Ok(TaskArgs {
         signature: current,
         names: decls.iter().map(|d| d.name.clone()).collect(),
@@ -120,25 +123,24 @@ pub fn gate_task(scripts: &ScriptStore, task: &Task) -> Result<TaskArgs, GateErr
     })
 }
 
-/// 把已存快照 JSON 重新绑定到当前声明（门禁通过后的运行传参、以及「重新确认
-/// 不带 args」路径共用）：
-/// - 仍存在的参数保留原快照值；
+/// 把已存 args 重新绑定到当前声明（YAML runner 运行传参共用）：
+/// - 仍存在的参数保留原值；
 /// - 新增参数取声明默认值；
-/// - 已删除的参数静默丢弃（签名门禁先行，正常路径不会出现）。
+/// - 已删除的参数静默丢弃（签名门禁先行时正常路径不会出现）。
 ///
 /// 绑定后缺失必填参数 → 结构化诊断（param.args.missing_required）。
 pub fn rebind_snapshot(
     decls: &[ParamDecl],
-    args_json: &str,
+    args: &serde_json::Value,
     resource: &str,
 ) -> Result<Vec<(String, TypedValue)>, Vec<ScriptError>> {
     use crate::script_v2::error::codes;
-    let stored: serde_json::Map<String, serde_json::Value> = match serde_json::from_str(args_json) {
-        Ok(serde_json::Value::Object(map)) if !args_json.trim().is_empty() => map,
+    let stored: serde_json::Map<String, serde_json::Value> = match args.as_object() {
+        Some(map) => map.clone(),
         _ => {
             return Err(vec![ScriptError::new(
                 codes::PARAM_ARGS_TYPE_MISMATCH,
-                "任务参数快照必须是非空 JSON 对象",
+                "任务参数快照必须是 JSON 对象",
                 resource,
             )
             .at("args", "args")])
@@ -181,16 +183,6 @@ pub fn signature_short_code(signature: &str) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{:08x}", (hash >> 32) as u32)
-}
-
-/// 类型化绑定对 → JSON 对象（快照存储形态；TypedValue 的 JSON 形态与 run API
-/// args 同构：bool=布尔、coord=[x,y]、其余五类=字符串）。
-pub fn typed_pairs_to_json(pairs: Vec<(String, TypedValue)>) -> serde_json::Value {
-    let mut map = serde_json::Map::new();
-    for (name, value) in pairs {
-        map.insert(name, serde_json::to_value(&value).unwrap_or_default());
-    }
-    serde_json::Value::Object(map)
 }
 
 #[cfg(test)]
@@ -262,8 +254,7 @@ steps:
             "timeout": "1m",
             "message": "TOP-SECRET",
             "pos": [0.1, 0.2],
-        })
-        .to_string();
+        });
         // 声明不变：全部保留原值
         let bound = rebind_snapshot(&old_decls, &old_snapshot, "t").unwrap();
         let map: std::collections::HashMap<String, TypedValue> = bound.into_iter().collect();
@@ -293,8 +284,7 @@ steps:
             "message": "keep",
             "pos": [0.1, 0.2],
             "ghost": "已删参数",
-        })
-        .to_string();
+        });
         let bound = rebind_snapshot(&new_decls, &old_snapshot, "t").unwrap();
         let map: std::collections::HashMap<String, TypedValue> = bound.into_iter().collect();
         assert_eq!(map["enable"], TypedValue::Bool(false), "存活参数保留原值");
@@ -311,7 +301,7 @@ steps:
     #[test]
     fn rebind_missing_required_reports_structured_diagnostic() {
         let decls = parse(SCRIPT_REQUIRED);
-        let err = rebind_snapshot(&decls, "{}", "t").unwrap_err();
+        let err = rebind_snapshot(&decls, &serde_json::json!({}), "t").unwrap_err();
         assert!(
             err.iter()
                 .any(|e| e.code == crate::script_v2::error::codes::PARAM_ARGS_MISSING_REQUIRED),
@@ -326,27 +316,20 @@ steps:
         let scripts = std::sync::Arc::new(ScriptStore::open(&cfg).unwrap());
         let (decls, signature) =
             probe_script_signature(&scripts, "com.test.app/daily.yaml").unwrap();
-        // 快照 = 完整覆盖（含覆盖值）
+        // 快照 = 完整覆盖（含覆盖值），并带 psig1 签名做过期门禁
         let snapshot = serde_json::json!({
             "enable": false,
             "timeout": "45s",
             "message": "SECRET-VALUE",
             "pos": [0.25, 0.75],
         });
-        let task = Task {
-            id: "t1".into(),
-            name: "T".into(),
-            cron: "0 * * * * *".into(),
-            script_id: "com.test.app/daily.yaml".into(),
-            device_id: "dev".into(),
-            enabled: true,
-            last_result: None,
-            last_run_at: None,
-            created_at: String::new(),
-            args_json: snapshot.to_string(),
-            param_signature: signature.clone(),
-        };
-        let gate = gate_task(&scripts, &task).unwrap();
+        let gate = gate_task(
+            &scripts,
+            "com.test.app/daily.yaml",
+            &snapshot,
+            Some(&signature),
+        )
+        .unwrap();
         assert_eq!(gate.signature, signature);
         assert_eq!(
             gate.names,
@@ -366,22 +349,14 @@ steps:
         write_script(&cfg, "daily.yaml", SCRIPT);
         let scripts = std::sync::Arc::new(ScriptStore::open(&cfg).unwrap());
         let (_, signature) = probe_script_signature(&scripts, "com.test.app/daily.yaml").unwrap();
-        let mk = |args_json: &str, sig: &str| Task {
-            id: "t1".into(),
-            name: "T".into(),
-            cron: "0 * * * * *".into(),
-            script_id: "com.test.app/daily.yaml".into(),
-            device_id: "dev".into(),
-            enabled: true,
-            last_result: None,
-            last_run_at: None,
-            created_at: String::new(),
-            args_json: args_json.into(),
-            param_signature: sig.into(),
-        };
         // 签名不一致 → 过期
-        let stale = mk("{}", "psig1|old");
-        match gate_task(&scripts, &stale) {
+        let stale = gate_task(
+            &scripts,
+            "com.test.app/daily.yaml",
+            &serde_json::json!({}),
+            Some("psig1|old"),
+        );
+        match stale {
             Err(GateError::SignatureMismatch { stored, current }) => {
                 assert_eq!(stored, "psig1|old");
                 assert!(current.starts_with("psig1|"));
@@ -389,14 +364,28 @@ steps:
             other => panic!("expected stale, got {:?}", other.is_ok()),
         }
         // 空快照与非法 JSON 都必须拒绝，不得按默认值兜底。
-        for args_json in ["", "null", "not-json"] {
-            match gate_task(&scripts, &mk(args_json, &signature)) {
+        for args in ["", "null", "not-json"] {
+            let args: serde_json::Value =
+                serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+            match gate_task(&scripts, "com.test.app/daily.yaml", &args, Some(&signature)) {
                 Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|diag| {
                     diag.code == crate::script_v2::error::codes::PARAM_ARGS_TYPE_MISMATCH
                 })),
                 other => panic!("expected invalid snapshot, got {:?}", other.is_ok()),
             }
         }
+        // 新 Task 模型保存的 payload 无 param_signature → 跳过过期门禁、重绑生效
+        let untyped = gate_task(
+            &scripts,
+            "com.test.app/daily.yaml",
+            &serde_json::json!({"timeout": "10s"}),
+            None,
+        )
+        .unwrap();
+        let map: std::collections::HashMap<String, TypedValue> =
+            untyped.overrides.into_iter().collect();
+        assert_eq!(map["timeout"], TypedValue::Time("10s".into()));
+        assert_eq!(map["enable"], TypedValue::Bool(true), "新参数取当前默认值");
         drop(scripts);
         std::fs::remove_dir_all(dir).unwrap();
     }

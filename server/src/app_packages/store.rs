@@ -106,6 +106,22 @@ impl AppPackageTaskHook for SchedulerTaskSuspendedHook {
     }
 }
 
+/// 包内 `presets/*.yaml` 的 schedule 以 `{kind, value}` 声明（包格式契约）；
+/// 在包存储 → Timer Core 边界翻译为 `{provider_id, config}`（ADR-12）。
+fn package_schedule(value: &serde_json::Value) -> anyhow::Result<crate::timer_core::TaskSchedule> {
+    let kind = value
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("schedule.kind 必须是非空字符串"))?;
+    crate::timer_core::TaskSchedule::new(
+        kind,
+        value
+            .get("value")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    )
+}
+
 /// Production preset-publish adapter over Timer Core. The package store only
 /// sees the narrow [`AppPackagePresetHook`] seam, never Timer Core internals.
 pub(crate) struct TimerPresetPublishHook {
@@ -133,7 +149,7 @@ impl AppPackagePresetHook for TimerPresetPublishHook {
                     runner_id: preset.runner_id.clone(),
                     entrypoint: preset.entrypoint.clone(),
                     payload: preset.payload.clone(),
-                    schedule: serde_json::from_value(preset.schedule.clone())?,
+                    schedule: package_schedule(&preset.schedule)?,
                 })
             })
             .collect::<anyhow::Result<Vec<_>>>()?;

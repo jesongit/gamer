@@ -53,7 +53,7 @@ mod tests {
 
     use crate::config::Config;
     use crate::core::AppContext;
-    use crate::timer_core::{ScheduleSpec, TimerCore, TimerTask, TimerTaskState};
+    use crate::timer_core::{TaskSchedule, TaskState, TimerCore};
 
     fn package_manifest(id: &str, version: &str, android: &str) -> Vec<u8> {
         format!(
@@ -565,7 +565,7 @@ packages = ["com.example.game"]
         let manifest = package_manifest("official.xxx", "1.2.0", "com.example.game");
         let package = archive(vec![("manifest.toml", &manifest)]);
         let installed = store.install_archive(&package, None).unwrap();
-        let task = TimerTask::new(
+        let task = crate::timer_core::Task::new(
             "task-1",
             "Task",
             AppContext::new(
@@ -576,7 +576,7 @@ packages = ["com.example.game"]
             "runner.example",
             "entry",
             serde_json::json!({}),
-            ScheduleSpec::new("cron", serde_json::json!({"expression": "* * * * *"})).unwrap(),
+            TaskSchedule::new("cron", serde_json::json!({"expression": "* * * * *"})).unwrap(),
         )
         .unwrap();
         db.upsert_timer_task_async(&task).await.unwrap();
@@ -586,7 +586,7 @@ packages = ["com.example.game"]
             .await
             .unwrap());
         let saved = db.get_timer_task_async("task-1").await.unwrap().unwrap();
-        assert_eq!(saved.state, TimerTaskState::Suspended);
+        assert_eq!(saved.state, TaskState::Suspended);
         assert_eq!(
             saved.suspend_reason.as_deref(),
             Some("app package unavailable")

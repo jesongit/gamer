@@ -420,17 +420,22 @@ fn route_validation_bounds_run_and_task_requests() {
     let task = SaveTaskReq {
         id: None,
         name: "daily".into(),
-        cron: "*/5 * * * *".into(),
-        script_id: "com.example.game/daily.yaml".into(),
-        device_id: "device-1".into(),
+        app: crate::core::AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+        runner: RunnerSpecDto {
+            runner_id: "gamer.yaml".into(),
+            entrypoint: "com.example.game/daily.yaml".into(),
+            payload: serde_json::json!({}),
+        },
+        schedule: TaskSchedule::new("cron", serde_json::json!({"expression": "*/5 * * * *"}))
+            .unwrap(),
         enabled: Some(true),
-        args: None,
-        reconfirm: false,
+        preset_id: None,
     };
-    assert!(validate_task_req(&task).is_ok());
+    // 未注册 provider（空 registry）保存放行：未来扩展可先存任务、后装 provider
+    assert!(build_task(&ScheduleRegistry::new(), "t1".into(), task.clone(), None).is_ok());
     let mut bad_task = task;
-    bad_task.device_id.clear();
-    assert!(validate_task_req(&bad_task).is_err());
+    bad_task.name.clear();
+    assert!(build_task(&ScheduleRegistry::new(), "t1".into(), bad_task, None).is_err());
 
     let run = RunReqArgs {
         device_id: "device-1".into(),

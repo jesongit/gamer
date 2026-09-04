@@ -101,7 +101,7 @@ async fn app_package_install_list_activate_uninstall_lifecycle() {
     assert_eq!(presets_json.as_array().unwrap().len(), 1);
     assert_eq!(presets_json[0]["name"], "daily");
     assert_eq!(presets_json[0]["app_package"], "official.a");
-    assert_eq!(presets_json[0]["schedule"]["kind"], "cron");
+    assert_eq!(presets_json[0]["schedule"]["provider_id"], "cron");
 
     // 新版本安装 → 自动切换 active（旧版本保留可回滚）
     let upgraded = craft_zip(vec![(

@@ -16,7 +16,7 @@ use crate::run_manager::RunManager;
 use crate::store::Db;
 use crate::timer_core::{
     ScheduleExtension, ScheduleRegistry, TimerCore, TimerRunner, TimerRunnerFactory,
-    TimerRunnerRegistry, TimerTask,
+    TimerRunnerRegistry,
 };
 
 pub struct Scheduler {
@@ -61,10 +61,20 @@ impl Scheduler {
     }
 
     /// Generic schedule registry access for boundary callers (API 校验/预览)
-    /// that must turn an opaque [`ScheduleSpec`] into instants without
-    /// knowing any concrete provider.
+    /// that must turn an opaque [`crate::timer_core::TaskSchedule`] into
+    /// instants without knowing any concrete provider.
     pub fn schedules(&self) -> Arc<ScheduleRegistry> {
         Arc::clone(&self.schedules)
+    }
+
+    /// Registered runner ids（`GET /api/runners` 数据源），稳定排序。
+    pub fn runner_ids(&self) -> Vec<String> {
+        self.runners.list_runners()
+    }
+
+    /// Registered schedule provider ids（`GET /api/schedule-providers` 数据源）。
+    pub fn schedule_provider_ids(&self) -> Vec<String> {
+        self.schedules.list()
     }
 
     pub async fn start(&self) {
@@ -77,7 +87,7 @@ impl Scheduler {
     /// semantics are decoded in this composition layer.
     pub async fn run_now(
         &self,
-        task: &TimerTask,
+        task: &crate::timer_core::Task,
     ) -> Result<String, crate::timer_core::TimerRunnerError> {
         self.core
             .submit_now(task.clone(), self.runners.clone())

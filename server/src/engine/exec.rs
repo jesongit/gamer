@@ -409,9 +409,6 @@ fn fail_diagnostics(errors: &[crate::script_v2::ScriptError]) -> anyhow::Error {
 pub struct BoundEntryArgs {
     pub overrides: Vec<(String, TypedValue)>,
     pub resolved: serde_json::Value,
-    /// 目标当前声明的 psig1 参数签名（CONTRACT §4.5）：定时任务保存时与快照
-    /// 一起持久化，调度/立即运行前与脚本当前声明复算值比对做过期门禁。
-    pub param_signature: String,
 }
 
 /// API 入口参数解析：按分区当前磁盘状态捕获快照、严格解析入口文件，
@@ -433,7 +430,6 @@ pub fn resolve_entry_args(
     Ok(BoundEntryArgs {
         overrides,
         resolved: serde_json::Value::Object(map),
-        param_signature: crate::script_v2::param_signature(&decls),
     })
 }
 
