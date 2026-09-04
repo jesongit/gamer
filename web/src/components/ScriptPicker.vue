@@ -20,7 +20,10 @@ const props = defineProps({
   // 传入则锁定该分区并隐藏包名下拉（Console 脚本页签：分区由页签顶部下拉统一控制）
   package: { type: String, default: '' },
   // 强制锁定当前包名；即使当前包名为空，也不允许组件自行切换到其它分区。
-  lockPackage: { type: Boolean, default: false }
+  lockPackage: { type: Boolean, default: false },
+  // 列表就绪后自动选中分区第一个脚本（历史行为，Console 脚本运行页签依赖）。
+  // false：纯受控——列表晚于挂载到达时不得清空/改写外部已选值（任务编辑等场景）。
+  autoPick: { type: Boolean, default: true }
 })
 const emit = defineEmits(['update:modelValue'])
 const scripts = scriptsData
@@ -46,7 +49,9 @@ watch([packages, () => props.package, () => props.lockPackage], ([list]) => {
   innerPkg.value = list[0] || ''
 }, { immediate: true })
 // 切分区 / 列表刷新后：当前选择不在分区内时自动选中该分区第一个脚本
+//（autoPick=false 时只渲染不回写：外部已选值在列表迟到时保持原样）
 watch(pkgScripts, list => {
+  if (!props.autoPick) return
   if (!list.some(s => s.id === props.modelValue)) emit('update:modelValue', list[0]?.id || '')
 }, { immediate: true })
 </script>
