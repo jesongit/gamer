@@ -282,15 +282,18 @@ fn golden_fixtures_serialize_roundtrip() {
 
 /// 仓库内可执行数据必须与生产路径使用同一严格 loader，并按当前
 /// data/<pkg>/{yaml,func,tmpl} 分区布局解析；避免旧示例静默绕过契约。
+/// 业务资源已出库（默认发行零业务资源）：data 目录缺失或为空是合法状态，
+/// 直接通过；本地保留的分区仍按同一契约校验。
 #[test]
 fn repository_data_resources_pass_strict_loader() {
     let data_dir = repository_data_dir();
-    let packages = fs::read_dir(&data_dir)
-        .unwrap_or_else(|e| panic!("读取仓库数据目录 {} 失败: {e}", data_dir.display()))
+    let Ok(entries) = fs::read_dir(&data_dir) else {
+        return;
+    };
+    let packages = entries
         .map(|entry| entry.unwrap_or_else(|e| panic!("读取仓库数据目录项失败: {e}")))
         .filter(|entry| entry.path().is_dir())
         .collect::<Vec<_>>();
-    assert!(!packages.is_empty(), "仓库数据目录必须至少包含一个应用分区");
 
     for package in packages {
         let package_dir = package.path();

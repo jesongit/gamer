@@ -61,6 +61,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          # 扩展 guest fixture（keymap/yaml/call）在 cargo test 时现场编译
+          targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry / git / target
         uses: actions/cache@v4
