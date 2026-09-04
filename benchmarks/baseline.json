@@ -107,10 +107,12 @@
       "method": "TotalProcessorTime delta / wall delta"
     },
     "scrcpy_connect_p95_ms": {
-      "value": null,
+      "value": 829.153,
       "unit": "ms",
-      "status": "requires_hardware",
-      "reason": "需要真实 Android 设备建立 ADB + scrcpy 会话；测量机无设备连接，不伪造"
+      "status": "measured",
+      "reason": "真机实测（2026-09-04，Redmi 25079RPDCC USB，镜像主屏 3008x1880）：生产连接入口 ScrcpySession::connect（is_connected→reverse→push server→accept 三 socket→视频元信息）发起至收到首帧视频数据计时，5 次迭代 5/5 成功、0 次 reset_video 兜底，p50=750.2 p95=829.153（nearest-rank）；连接本身（不含首帧等待）p50=562.3/p95=582.5。三次运行 p95 829~974ms，取最终干净串行轮",
+      "source_test": "phase0_tests::android_bench::phase0_android_scrcpy_connect_first_frame_latency_p50_p95",
+      "samples": 5
     },
     "screenshot_p95_ms": {
       "value": 307.517,
@@ -154,10 +156,19 @@
       "concurrency": 8
     },
     "webrtc_stability": {
-      "value": null,
+      "value": {
+        "seconds": 45,
+        "frames_received": 317,
+        "packets_received": 971,
+        "bytes_received": 885539,
+        "stalls": 0,
+        "max_gap_ms": 515,
+        "read_errors": 0
+      },
       "unit": "qualitative",
-      "status": "requires_hardware",
-      "reason": "需要浏览器 WebRTC peer 与真实网络环境；离线 CI 不宣称投屏稳定性"
+      "status": "measured",
+      "reason": "真机实测（2026-09-04）：进程内 webrtc-rs 回环——本端一对 peer connection 经内存信令互连（ICE host 候选本机直连，ICE/DTLS/SRTP 全真实链路），推送端把真实 scrcpy H.264 帧按生产 pusher 语义（关键帧前独立参数集 + 静止期 500ms 补帧）写入 TrackLocalStaticRTP，接收端统计 45s 窗口：317 帧/971 包零停顿（>1s 无包记 stall），max_gap=515ms ≈ 补帧节奏，发送 318 帧零错误零丢写；重复一轮同为 0 停顿。浏览器端解码渲染与真实网络路径未覆盖",
+      "source_test": "phase0_tests::android_bench::phase0_android_webrtc_loopback_stability_45s"
     }
   },
   "external_boundaries": {
@@ -174,14 +185,15 @@
     "ram_gb": 31.9
   },
   "backfill": {
-    "refreshed_at_utc": "2026-09-03T21:47:17.253Z",
-    "worktree": "主树 D:/code/gamer（收尾波次；前值采集于 D:/code/gamer-bench worktree @ e1e542cf7535b3389bf03fa651bfda18befad454）",
+    "refreshed_at_utc": "2026-09-04T04:03:04Z",
+    "worktree": "主树 D:/code/gamer（2026-09-04 真机补测波次；前值采集于 D:/code/gamer-bench worktree @ e1e542cf7535b3389bf03fa651bfda18befad454）",
     "perf_command": "pwsh tools/generate-phase0-baseline.ps1 -RunPerf -Iterations 30（主树执行；PERF-002/003 固定夹具基准 + 移植后的 gop/db_log 基准 release 重测）",
     "notes": [
       "E1 截图解码改 PPM 直通后 decode_latest_png/screenshot_p95 失真，本轮整体重测：decode_latest_png p95 340218→307517µs，find_round p95 109133→122895µs（NCC 量级不变，单次采样抖动）",
       "GOP 峰值与 db_log 两条基准自 worktree 移植进主树（frames.rs/store.rs 测试区），本轮 release 重测回填",
-      "本机 adb 存在（启动扫描通过）但无 Android 设备，scrcpy/WebRTC/真机触控类指标保持 null + requires_hardware",
-      "server_idle_rss_mb / server_idle_cpu_percent 沿用上一轮空闲窗口采样（本轮未重采），方法描述随条目保留"
+      "本机 adb 存在（启动扫描通过）但无 Android 设备，scrcpy/WebRTC/真机触控类指标保持 null + requires_hardware（2026-09-04 真机补测已覆盖 scrcpy_connect_p95_ms 与 webrtc_stability 两条，转 measured，见各条 reason/source_test）",
+      "server_idle_rss_mb / server_idle_cpu_percent 沿用上一轮空闲窗口采样（本轮未重采），方法描述随条目保留",
+      "2026-09-04 真机补测：新增 server/src/phase0_tests.rs android_bench 模块两个 #[ignore] 基准（GAMER_PHASE0_ANDROID=1 opt-in，模块内 DEVICE_LOCK 串行防互踩），scrcpy 连接 5 迭代 5 成功 0 兜底、WebRTC 回环 45s 零停顿，收尾校验设备无 scrcpy app_process 残留、reverse 隧道清空；测试期间用户 server（8443）空闲未受扰（scrcpy 多客户端并存）"
     ]
   }
 }

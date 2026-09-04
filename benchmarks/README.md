@@ -40,3 +40,22 @@ powershell -ExecutionPolicy Bypass -File tools\generate-phase0-baseline.ps1 -Val
 - 已知坑：`-RunPerf` 解析 PERF 行的正则是贪婪匹配，会被 frames 分段基准行尾的
   `cpu_*_us=未实测` 占位段捕获，PowerShell 5.1 下直接抛错中断；回填时在 worktree
   改为显式字段匹配并用 **pwsh 7** 执行。主树脚本修复前建议一律用 pwsh 跑 `-RunPerf`。
+
+## 2026-09-04 真机补测（scrcpy 连接 + WebRTC 稳定性）
+
+- 测量环境：Redmi 25079RPDCC（USB adb，镜像主屏 3008x1880），主树 release
+  profile，用户 server（8443）空闲并存（scrcpy 多客户端）。
+- `scrcpy_connect_p95_ms` = **829.153**（p50=750.2，5 迭代 5 成功 0 兜底）：
+  生产入口 `ScrcpySession::connect` 发起至收到首帧视频数据计时（镜像会话先按
+  生产同款唤醒屏幕，计时不含唤醒）；三次运行 p95 829~974ms。
+- `webrtc_stability` = **45s 回环 317 帧 / 971 包 / 0 停顿 / max_gap 515ms**：
+  进程内 webrtc-rs 一对 peer connection 内存信令互连，推送端按生产 pusher
+  语义（关键帧前独立参数集 + 静止期 500ms 补帧）转发真实 scrcpy H.264 流，
+  接收端统计 >1s 无包为 stall；浏览器端解码渲染与真实网络未覆盖。
+- 测试：`server/src/phase0_tests.rs` `android_bench` 模块
+  `phase0_android_scrcpy_connect_first_frame_latency_p50_p95` /
+  `phase0_android_webrtc_loopback_stability_45s`，`GAMER_PHASE0_ANDROID=1`
+  opt-in（默认全跳过）；`GAMER_PHASE0_ANDROID=1 cargo test --release -- \
+  --ignored --nocapture phase0_android_` 复现。模块内 `DEVICE_LOCK` 串行
+  （并行会互拆 reverse 隧道产生短暂孤儿 scrcpy server）；结束后轮询校验设备
+  无 `app_process` 残留、reverse 隧道清空、屏幕恢复熄灭。
