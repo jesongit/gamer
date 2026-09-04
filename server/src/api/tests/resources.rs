@@ -1,6 +1,6 @@
 use super::*;
 
-// ---------- 阶段 1 资源 API：/api/functions CRUD、版本冲突、dry-run 导入 ----------
+// ---------- 资源 API：/api/functions CRUD、版本冲突、脚本/函数目录隔离 ----------
 //
 // 资源 id 含 `/`，URL 里整体 encodeURIComponent（%2F），与 scripts 路由同规则。
 
@@ -87,48 +87,7 @@ async fn template_upload_rejects_byte_and_pixel_bombs_with_4xx() {
 }
 
 #[tokio::test]
-async fn zip_import_rejects_slip_duplicate_and_pixel_bomb_with_4xx() {
-    let t = build_app(
-        "ziplimits",
-        test_credential("admin123"),
-        Default::default(),
-    );
-    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-    let headers = |cookie: String| {
-        vec![
-            (header::COOKIE.to_string(), cookie),
-            (header::CONTENT_TYPE.to_string(), "application/zip".into()),
-        ]
-    };
-    let cases = [
-        craft_zip(vec![("yaml/../escape.yaml", b"steps: []\n".to_vec())]),
-        craft_zip(vec![("../escape.yaml", b"steps: []\n".to_vec())]),
-        craft_zip(vec![("/absolute.yaml", b"steps: []\n".to_vec())]),
-        craft_zip(vec![("yaml\\..\\escape.yaml", b"steps: []\n".to_vec())]),
-        craft_zip(vec![
-            ("yaml/one.yaml", b"steps: []\n".to_vec()),
-            ("yaml/ONE.yaml", b"steps: []\n".to_vec()),
-        ]),
-        craft_zip(vec![("tmpl/bomb.png", pixel_bomb_png(30_000, 30_000))]),
-    ];
-    for zip_bytes in cases {
-        let resp = send(
-            &t.app,
-            req_bytes(
-                "POST",
-                "/api/scripts/import?pkg=com.test.app&confirm=1",
-                None,
-                &headers(sid.clone()),
-                zip_bytes,
-            ),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-}
-
-#[tokio::test]
-async fn request_body_limits_reject_oversize_json_and_zip_with_413() {
+async fn request_body_limits_reject_oversize_json_and_package_install_with_413() {
     let t = build_app(
         "bodylimits",
         test_credential("admin123"),
@@ -152,6 +111,7 @@ async fn request_body_limits_reject_oversize_json_and_zip_with_413() {
     .await;
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
+    // App Package 安装 body 上限对齐包归档解压总量预算（BODY_LIMIT_PACKAGE_INSTALL）
     let zip_headers = [
         (header::COOKIE.to_string(), sid),
         (header::CONTENT_TYPE.to_string(), "application/zip".into()),
@@ -160,10 +120,10 @@ async fn request_body_limits_reject_oversize_json_and_zip_with_413() {
         &t.app,
         req_bytes(
             "POST",
-            "/api/scripts/import?pkg=com.test.app",
+            "/api/app-packages/install",
             None,
             &zip_headers,
-            vec![0u8; BODY_LIMIT_ZIP_IMPORT + 1],
+            vec![0u8; BODY_LIMIT_PACKAGE_INSTALL + 1],
         ),
     )
     .await;
@@ -560,7 +520,7 @@ async fn functions_never_leak_into_script_sources() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // 脚本列表只含 yaml/ 脚本，func 文件绝不混入
+    // 脚本列表只含 scripts/ 脚本，functions/ 文件绝不混入
     let resp = send(
         &t.app,
         req(
@@ -603,7 +563,7 @@ async fn functions_never_leak_into_script_sources() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     assert_eq!(json_body(resp).await["error"], "脚本不存在");
 
-    // 函数列表也只含 func/ 文件
+    // 函数列表也只含 functions/ 文件
     let resp = send(
         &t.app,
         req(
@@ -672,210 +632,6 @@ async fn scripts_get_version_and_save_expected_version_conflict() {
     assert!(resp.status().is_client_error());
 }
 
-#[tokio::test]
-async fn import_dry_run_reports_then_confirm_writes() {
-    let t = build_app(
-        "dryrun",
-        test_credential("admin123"),
-        Default::default(),
-    );
-    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-    let z = craft_zip(vec![
-        ("yaml/ok.yaml", b"steps: []\n".to_vec()),
-        ("func/common.yaml", FUNC_YAML.as_bytes().to_vec()),
-        ("tmpl/a.png", valid_template_png()),
-    ]);
-
-    // dry-run：三类资源报告、不落盘
-    let resp = send(
-        &t.app,
-        req_bytes(
-            "POST",
-            "/api/scripts/import?pkg=com.test.app",
-            None,
-            &zip_headers(sid.clone()),
-            z.clone(),
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let j = json_body(resp).await;
-    assert_eq!(j["scripts"]["add"], serde_json::json!(["yaml/ok.yaml"]));
-    assert_eq!(
-        j["functions"]["add"],
-        serde_json::json!(["func/common.yaml"])
-    );
-    assert_eq!(j["templates"]["add"].as_array().unwrap().len(), 1);
-    assert!(j["scripts"]["invalid"].as_array().unwrap().is_empty());
-    assert!(j["functions"]["invalid"].as_array().unwrap().is_empty());
-    assert!(!t.dir.join("com.test.app/yaml/ok.yaml").exists());
-
-    // confirm：落盘
-    let resp = send(
-        &t.app,
-        req_bytes(
-            "POST",
-            "/api/scripts/import?pkg=com.test.app&confirm=1",
-            None,
-            &zip_headers(sid.clone()),
-            z,
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(t.dir.join("com.test.app/yaml/ok.yaml").is_file());
-    assert!(t.dir.join("com.test.app/func/common.yaml").is_file());
-
-    // dry-run 报告 invalid（函数名保留字）；confirm 整体拒绝、合法条目不写入
-    let bad = craft_zip(vec![
-        ("yaml/ok.yaml", b"steps: []\n".to_vec()),
-        ("func/bad.yaml", b"return:\n  steps: []\n".to_vec()),
-    ]);
-    let resp = send(
-        &t.app,
-        req_bytes(
-            "POST",
-            "/api/scripts/import?pkg=com.test.app",
-            None,
-            &zip_headers(sid.clone()),
-            bad.clone(),
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let j = json_body(resp).await;
-    assert_eq!(j["functions"]["invalid"][0]["path"], "func/bad.yaml");
-    assert!(j["functions"]["invalid"][0]["diagnostics"].is_array());
-    let resp = send(
-        &t.app,
-        req_bytes(
-            "POST",
-            "/api/scripts/import?pkg=com.test.app&confirm=1",
-            None,
-            &zip_headers(sid.clone()),
-            bad,
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    assert!(!t.dir.join("com.test.app/func/bad.yaml").exists());
-    // ok.yaml 上一轮 confirm 已存在，本轮整体拒绝不覆盖（mtime 校验过重，查内容即可）
-    assert_eq!(
-        std::fs::read_to_string(t.dir.join("com.test.app/yaml/ok.yaml")).unwrap(),
-        "steps: []\n"
-    );
-}
-
-#[tokio::test]
-async fn export_import_roundtrip_via_api() {
-    let t = build_app(
-        "roundtrip",
-        test_credential("admin123"),
-        Default::default(),
-    );
-    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-    // 造齐三类资源
-    let script = serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps:\n  - log: x\n"});
-    let resp = send(
-        &t.app,
-        req(
-            "POST",
-            "/api/scripts",
-            None,
-            &json_headers(sid.clone()),
-            Some(script.to_string()),
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let func = serde_json::json!({"pkg": "com.test.app", "name": "common", "content": FUNC_YAML});
-    let resp = send(
-        &t.app,
-        req(
-            "POST",
-            "/api/functions",
-            None,
-            &json_headers(sid.clone()),
-            Some(func.to_string()),
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let tmpl = serde_json::json!({
-        "pkg": "com.test.app",
-        "short_name": "icon.png",
-        "data_b64": base64::engine::general_purpose::STANDARD.encode(valid_template_png()),
-    });
-    let resp = send(
-        &t.app,
-        req(
-            "POST",
-            "/api/templates",
-            None,
-            &json_headers(sid.clone()),
-            Some(tmpl.to_string()),
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    // 导出（zip 字节）→ 导入到另一分区
-    let resp = send(
-        &t.app,
-        req(
-            "GET",
-            "/api/scripts/export?pkg=com.test.app",
-            None,
-            &json_headers(sid.clone()),
-            None,
-        ),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let zip_bytes = axum::body::to_bytes(resp.into_body(), 32 * 1024 * 1024)
-        .await
-        .unwrap()
-        .to_vec();
-    let resp = send(
-        &t.app,
-        req_bytes(
-            "POST",
-            "/api/scripts/import?pkg=com.other.app&confirm=1",
-            None,
-            &zip_headers(sid.clone()),
-            zip_bytes,
-        ),
-    )
-    .await;
-    assert_eq!(
-        resp.status(),
-        StatusCode::OK,
-        "导入失败: {:?}",
-        json_body(resp).await
-    );
-
-    // 零差异：脚本/函数/模板三类资源逐项一致
-    let resp = get_json(&t, &sid, "/api/scripts").await;
-    let j = json_body(resp).await;
-    let content_of = |pkg: &str| {
-        j.as_array()
-            .unwrap()
-            .iter()
-            .find(|s| s["package"] == pkg)
-            .map(|s| s["content"].as_str().unwrap().to_string())
-            .unwrap_or_default()
-    };
-    assert_eq!(content_of("com.test.app"), content_of("com.other.app"));
-    assert_eq!(
-        func_first(&t, &sid, "com.test.app").await,
-        func_first(&t, &sid, "com.other.app").await
-    );
-    let resp = get_json(&t, &sid, "/api/templates?pkg=com.other.app").await;
-    let j = json_body(resp).await;
-    assert_eq!(j.as_array().unwrap().len(), 1);
-    assert_eq!(j[0]["name"], "icon.png");
-}
-
 // ---------- 模板上传命名契约（短名 + 搜索区域由服务端组合完整名）----------
 
 #[test]
@@ -937,7 +693,7 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
     // 磁盘文件与列表都呈现完整名（引擎 #后缀即搜索区域元数据）
     assert!(t
         .dir
-        .join("com.test.app/tmpl/login_btn#100_200_300_400.png")
+        .join("com.test.app/templates/login_btn#100_200_300_400.png")
         .is_file());
     let resp = get_json(&t, &sid, "/api/templates?pkg=com.test.app").await;
     let j = json_body(resp).await;
@@ -961,11 +717,11 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     assert!(t
         .dir
-        .join("com.test.app/tmpl/login_btn#100_200_300_400.png")
+        .join("com.test.app/templates/login_btn#100_200_300_400.png")
         .is_file());
     assert!(!t
         .dir
-        .join("com.test.app/tmpl/login_btn#000_000_500_500.png")
+        .join("com.test.app/templates/login_btn#000_000_500_500.png")
         .is_file());
 
     // 明确勾选保留颜色时，完整文件名尾部追加 #1；旧请求省略该字段仍是灰度格式。
@@ -986,7 +742,7 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
     assert_eq!(json_body(resp).await["name"], "color_btn#100_200_300_400#1.png");
     assert!(t
         .dir
-        .join("com.test.app/tmpl/color_btn#100_200_300_400#1.png")
+        .join("com.test.app/templates/color_btn#100_200_300_400#1.png")
         .is_file());
 
     // 非法短名 / 非法 region / 参数互斥与缺参 → 400

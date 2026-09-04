@@ -12,7 +12,8 @@
 //!   回环 + X-Admin-Token 快捷通道放行本机管理脚本；
 //! - 分路由 body 限额：普通 JSON ≤256KiB；模板上传/脚本保存 JSON ≤16MiB
 //!   （data_b64/base64 膨胀需要余量，真实图片字节上限在 matcher 收口）；
-//!   ZIP 导入 ≤20MiB。CORS 层已整体移除（vite 代理同源不受影响）。
+//!   扩展包归档 ≤20MiB；App Package 安装 ≤100MiB（对齐解压总量预算）。
+//!   CORS 层已整体移除（vite 代理同源不受影响）。
 
 mod app_packages;
 pub mod auth;
@@ -53,7 +54,10 @@ use crate::scheduler::Scheduler;
 use crate::scripts::ScriptStore;
 use crate::store::Db;
 
-use common::{BODY_LIMIT_JSON, BODY_LIMIT_PUBLIC, BODY_LIMIT_UPLOAD, BODY_LIMIT_ZIP_IMPORT};
+use common::{
+    BODY_LIMIT_JSON, BODY_LIMIT_PACKAGE_INSTALL, BODY_LIMIT_PUBLIC, BODY_LIMIT_UPLOAD,
+    BODY_LIMIT_ZIP_IMPORT,
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -65,9 +69,9 @@ pub struct AppState {
     /// 统一运行管理（阶段 3 RUN-001）：手动/调度共用 run_id 注册表与设备级互斥
     pub runs: Arc<crate::run_manager::RunManager>,
     pub cfg: Config,
-    /// 脚本文件存储（data/<pkg>/yaml/ 与 tmpl/）
+    /// 脚本文件存储（data/<pkg>/scripts/ 与 templates/）
     pub scripts: Arc<ScriptStore>,
-    /// 按键映射文件存储（data/<pkg>/keymap/）
+    /// 按键映射文件存储（data/<pkg>/keymaps/）
     pub keymaps: Arc<KeymapStore>,
     /// 每设备的活跃 viewer 注册表。
     pub viewers: crate::webrtc::ViewerMap,
@@ -245,8 +249,6 @@ pub(crate) fn build_router_with_extensions(
         .route("/api/devices/:id/run", get(runs::api_device_run))
         .route("/api/runs/:run_id", get(runs::api_get_run))
         .route("/api/runs/:run_id/cancel", post(runs::api_cancel_run))
-        .route("/api/scripts/export", get(scripts::api_export_partition))
-        .route("/api/keymaps/export", get(keymaps::api_export_keymaps))
         .route(
             "/api/tasks",
             get(tasks::api_list_tasks).post(tasks::api_save_task),
@@ -367,7 +369,7 @@ pub(crate) fn build_router_with_extensions(
         .layer(DefaultBodyLimit::max(BODY_LIMIT_JSON));
 
     // ---- 受保护组（大 JSON，≤16MiB）：模板上传（data_b64）/ 脚本保存+列表 /
-    //      函数库 CRUD（func/ 函数库与脚本同限：内容 ≤1MiB，JSON 余量对齐）。
+    //      函数库 CRUD（functions/ 函数库与脚本同限：内容 ≤1MiB，JSON 余量对齐）。
     //      GET 与 POST 同路径注册在一组以避免 merge 冲突，GET 本身无 body 不受限额影响。
     let protected_upload: Router<()> = Router::new()
         .route(
@@ -399,11 +401,9 @@ pub(crate) fn build_router_with_extensions(
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_UPLOAD));
 
-    // ---- 受保护组（ZIP 导入 ≤20MiB，高风险接口）：解压侧硬限另见 scripts.rs import。
-    //      App Package 安装同限（归档侧另有 entries/解压总量/单文件硬限）。
+    // ---- 受保护组（App Package 安装，body 上限对齐包归档解压总量预算）：
+    //      归档侧另有 entries/解压总量/单文件/manifest 硬限（archive_validation）。
     let protected_import: Router<()> = Router::new()
-        .route("/api/scripts/import", post(scripts::api_import_script))
-        .route("/api/keymaps/import", post(keymaps::api_import_keymaps))
         .route(
             "/api/app-packages/install",
             post(app_packages::api_install_app_package),
@@ -413,7 +413,7 @@ pub(crate) fn build_router_with_extensions(
             state.auth.clone(),
             auth::auth_guard,
         ))
-        .layer(DefaultBodyLimit::max(BODY_LIMIT_ZIP_IMPORT));
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_PACKAGE_INSTALL));
 
     // ---- 受保护的扩展包组：归档安装/更新与 UI iframe 静态资源。
     // 生命周期接口留在普通 JSON 组以复用同一认证与错误语义。

@@ -319,7 +319,7 @@ impl NativeYamlHost {
     fn resource_name(value: &Value) -> Result<String> {
         match value {
             Value::String(value) | Value::Color(value) if !value.trim().is_empty() => {
-                Ok(value.trim_start_matches("tmpl/").to_string())
+                Ok(value.trim_start_matches("templates/").to_string())
             }
             _ => bail!("template 必须是非空字符串"),
         }
@@ -341,7 +341,7 @@ impl NativeYamlHost {
             .ok_or_else(|| anyhow!("resource capability 未注册"))?
             .resolve(&ResourceId::new(
                 package.as_str().to_string(),
-                format!("tmpl/{name}"),
+                format!("templates/{name}"),
             ))
             .await
             .map_err(anyhow::Error::new)?;

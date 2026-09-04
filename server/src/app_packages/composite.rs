@@ -2,14 +2,14 @@
 //!
 //! 解析顺序固定为：**user-overrides → active App Package → legacy 分区目录**。
 //! 前两层在本模块实现；legacy 分区目录由调用方（scripts.rs / keymaps.rs 的
-//! 既有分区逻辑）兜底，保证老用户数据继续可用、行为零破坏。
+//! 既有分区逻辑）兜底。
 //!
 //! 覆盖范围：
 //! - 模板：`find`/`match` 匹配路径与 script_v2 校验可用性共用
 //!   （`ScriptStore::resolve_template_path` / `template_avail`）；
 //! - 按键映射：`KeymapStore::get` / `list` 可见包内置方案；
-//! - 脚本/函数库：运行快照（engine/snapshot.rs）合并包内 `scripts/`（对应分区
-//!   yaml/ + func/ 语义），override 优先、分区兜底。
+//! - 脚本/函数库：运行快照（engine/snapshot.rs）分别合并包内 `scripts/` 与
+//!   `functions/`（对应分区 scripts/ + functions/ 语义），override 优先、分区兜底。
 //!
 //! override 目录沿用 `user-overrides/<android-package>/<资源根>/<路径>` 布局
 //! （与 [`super::store::AppPackageStore::write_user_override`] 一致）；模板
@@ -81,11 +81,17 @@ impl ActivePackage {
         }
     }
 
-    /// 包内脚本/函数库源码（`scripts/` 递归，key = 包内相对路径含扩展名，
-    /// 分隔符统一 `/`）。对应分区 yaml/（call 目标）与 func/（func 目标，
-    /// 短路径 = 去 `.yaml`）双语义，由运行快照按 key 形态分别索引。
+    /// 包内脚本源码（`scripts/` 递归，key = 包内相对路径含扩展名，分隔符统一
+    /// `/`）。对应分区 scripts/（call 目标）。函数库在包内 `functions/`，
+    /// 经 [`ActivePackage::function_sources`] 提供，两类索引互不混入。
     pub(crate) fn script_sources(&self) -> std::io::Result<BTreeMap<String, String>> {
         read_yaml_sources(&self.root.join("scripts"))
+    }
+
+    /// 包内函数库源码（`functions/` 递归，key = 包内相对路径含扩展名；运行
+    /// 快照按去扩展名短路径索引）。对应分区 functions/ 语义。
+    pub(crate) fn function_sources(&self) -> std::io::Result<BTreeMap<String, String>> {
+        read_yaml_sources(&self.root.join("functions"))
     }
 
     /// 包内按键映射：`keymaps/<名称>` 精确文件名。
@@ -206,8 +212,8 @@ impl CompositeResolver {
         })
     }
 
-    /// 脚本/函数库 composite 源码：override（`user-overrides/<android>/scripts/`）
-    /// 覆盖 active 包 `scripts/`；分区 `yaml/`+`func/` 由运行快照兜底（优先级最低）。
+    /// 脚本 composite 源码：override（`user-overrides/<android>/scripts/`）
+    /// 覆盖 active 包 `scripts/`；分区 scripts/ 由运行快照兜底（优先级最低）。
     pub(crate) fn script_sources(
         &self,
         android: &str,
@@ -219,6 +225,24 @@ impl CompositeResolver {
         if let Ok(android) = parse_android_package_name(android) {
             merged.extend(read_yaml_sources(
                 &self.overrides_root(&android).join("scripts"),
+            )?);
+        }
+        Ok(merged)
+    }
+
+    /// 函数库 composite 源码：override（`user-overrides/<android>/functions/`）
+    /// 覆盖 active 包 `functions/`；分区 functions/ 由运行快照兜底。
+    pub(crate) fn function_sources(
+        &self,
+        android: &str,
+    ) -> std::io::Result<BTreeMap<String, String>> {
+        let mut merged = BTreeMap::new();
+        if let Some(active) = self.active_package(android) {
+            merged.extend(active.function_sources()?);
+        }
+        if let Ok(android) = parse_android_package_name(android) {
+            merged.extend(read_yaml_sources(
+                &self.overrides_root(&android).join("functions"),
             )?);
         }
         Ok(merged)
@@ -345,7 +369,7 @@ mod tests {
         std::fs::write(
             root.join("manifest.toml"),
             format!(
-                "id = \"{id}\"\nversion = \"{version}\"\n[android]\npackages = [\"{android}\"]\n"
+                "format_version = 2\nid = \"{id}\"\nversion = \"{version}\"\n[android]\npackages = [\"{android}\"]\n"
             ),
         )
         .unwrap();
@@ -422,5 +446,57 @@ mod tests {
             resolver.template("com.example.game", "../escape"),
             TemplateLookup::NotFound
         ));
+    }
+
+    /// 包内 scripts/ 与 functions/ 两个索引互不混入；override 函数库覆盖包内同名。
+    #[test]
+    fn script_and_function_sources_stay_in_their_own_roots() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        let package_root = root.join("app-packages/official.a/1.0.0");
+        write_manifest(&package_root, "official.a", "1.0.0", "com.example.game");
+        std::fs::create_dir_all(package_root.join("scripts")).unwrap();
+        std::fs::write(package_root.join("scripts/daily.yaml"), b"package script").unwrap();
+        std::fs::create_dir_all(package_root.join("functions")).unwrap();
+        std::fs::write(
+            package_root.join("functions/common.yaml"),
+            b"package function",
+        )
+        .unwrap();
+
+        ActiveRegistry::from_iter([("official.a".to_string(), "1.0.0".to_string())])
+            .save(root)
+            .unwrap();
+        let resolver = CompositeResolver::new(root);
+
+        let scripts = resolver.script_sources("com.example.game").unwrap();
+        assert_eq!(
+            scripts.get("daily.yaml").map(String::as_str),
+            Some("package script")
+        );
+        assert!(
+            !scripts.contains_key("common.yaml"),
+            "包内 functions/ 不得混入脚本索引"
+        );
+
+        let functions = resolver.function_sources("com.example.game").unwrap();
+        assert_eq!(
+            functions.get("common.yaml").map(String::as_str),
+            Some("package function")
+        );
+        assert!(
+            !functions.contains_key("daily.yaml"),
+            "包内 scripts/ 不得混入函数库索引"
+        );
+
+        let override_dir = root.join("user-overrides/com.example.game/functions");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(override_dir.join("common.yaml"), b"override function").unwrap();
+        let functions = resolver.function_sources("com.example.game").unwrap();
+        assert_eq!(
+            functions.get("common.yaml").map(String::as_str),
+            Some("override function"),
+            "override 必须覆盖包内同名函数库"
+        );
     }
 }

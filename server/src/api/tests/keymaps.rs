@@ -32,7 +32,7 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
     assert_eq!(created["binding_count"], 2);
     let v1 = created["version"].as_str().unwrap().to_string();
     assert_eq!(v1.len(), 12);
-    assert!(t.dir.join("com.test.app/keymap/combat.yaml").is_file());
+    assert!(t.dir.join("com.test.app/keymaps/combat.yaml").is_file());
 
     // POST 只创建，不覆盖同名方案。
     let resp = post_json(
@@ -142,7 +142,7 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(json_body(resp).await["id"], "com.test.app/explore.yaml");
-    assert!(!t.dir.join("com.test.app/keymap/combat.yaml").exists());
+    assert!(!t.dir.join("com.test.app/keymaps/combat.yaml").exists());
 
     // 另一应用分区看不到该方案。
     let resp = get_json(&t, &sid, "/api/keymaps?pkg=com.other.app").await;
@@ -221,85 +221,5 @@ async fn keymaps_reject_invalid_yaml_fields_coordinates_and_duplicates() {
             .iter()
             .any(|diagnostic| diagnostic["code"] == code), "{body}");
     }
-    assert!(!t.dir.join("com.test.app/keymap/bad.yaml").exists());
-}
-
-#[tokio::test]
-async fn keymaps_partition_export_import_is_validated_before_commit() {
-    let t = build_app(
-        "keymaparchive",
-        test_credential("admin123"),
-        Default::default(),
-    );
-    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-    let resp = post_json(
-        &t,
-        &sid,
-        "/api/keymaps",
-        serde_json::json!({"pkg": "com.test.app", "name": "combat", "content": KEYMAP_V1}),
-    )
-    .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let response = get_json(&t, &sid, "/api/keymaps/export?pkg=com.test.app").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/zip");
-    let archive = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-        .await
-        .unwrap()
-        .to_vec();
-
-    let response = send(
-        &t.app,
-        req_bytes(
-            "POST",
-            "/api/keymaps/import?pkg=com.other.app",
-            None,
-            &zip_headers(sid.clone()),
-            archive.clone(),
-        ),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(json_body(response).await["add"], serde_json::json!(["keymap/combat.yaml"]));
-    assert!(!t.dir.join("com.other.app/keymap/combat.yaml").exists());
-
-    let response = send(
-        &t.app,
-        req_bytes(
-            "POST",
-            "/api/keymaps/import?pkg=com.other.app&confirm=1",
-            None,
-            &zip_headers(sid.clone()),
-            archive,
-        ),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(t.dir.join("com.other.app/keymap/combat.yaml").is_file());
-
-    let invalid = craft_zip(vec![
-        (
-            "keymap/good.yaml",
-            KEYMAP_V1.as_bytes().to_vec(),
-        ),
-        (
-            "keymap/bad.yaml",
-            b"version: 1\nname: bad\nunknown: true\nbindings: []\n".to_vec(),
-        ),
-    ]);
-    let response = send(
-        &t.app,
-        req_bytes(
-            "POST",
-            "/api/keymaps/import?pkg=com.invalid.app&confirm=1",
-            None,
-            &zip_headers(sid.clone()),
-            invalid,
-        ),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(!t.dir.join("com.invalid.app/keymap/good.yaml").exists());
-    assert!(!t.dir.join("com.invalid.app/keymap/bad.yaml").exists());
+    assert!(!t.dir.join("com.test.app/keymaps/bad.yaml").exists());
 }

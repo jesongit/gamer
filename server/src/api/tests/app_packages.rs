@@ -4,7 +4,7 @@ use super::*;
 
 fn gamer_pkg_manifest(id: &str, version: &str, android: &str) -> Vec<u8> {
     format!(
-        "id = \"{id}\"\nversion = \"{version}\"\n[android]\npackages = [\"{android}\"]\n"
+        "format_version = 2\nid = \"{id}\"\nversion = \"{version}\"\n[android]\npackages = [\"{android}\"]\n"
     )
     .into_bytes()
 }

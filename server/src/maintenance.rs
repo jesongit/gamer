@@ -396,10 +396,17 @@ pub(crate) fn migrate(data_dir: &Path) -> serde_json::Value {
 }
 
 /// 文件布局 v1 符合性（诊断用，宽松口径）：数据目录存在，且每个应用分区
-/// 子目录内的子目录名都落在 {yaml, func, tmpl} 白名单内。数据目录不存在
-/// → null；散落文件（gamer.db 等）不计违规。
+/// 子目录内的子目录名都落在 {scripts, functions, templates, keymaps, presets,
+/// resources} 白名单内。数据目录不存在 → null；散落文件（gamer.db 等）不计违规。
 fn file_layout_v1_ok(data_dir: &Path) -> serde_json::Value {
-    const RESOURCE_DIRS: [&str; 3] = ["yaml", "func", "tmpl"];
+    const RESOURCE_DIRS: [&str; 6] = [
+        "scripts",
+        "functions",
+        "templates",
+        "keymaps",
+        "presets",
+        "resources",
+    ];
     if !data_dir.is_dir() {
         return serde_json::Value::Null;
     }
@@ -602,9 +609,9 @@ mod tests {
         assert_eq!(file_layout_v1_ok(&dir), serde_json::Value::Bool(true));
         // 合规分区
         let pkg = dir.join("com.example.game");
-        std::fs::create_dir_all(pkg.join("yaml")).unwrap();
-        std::fs::create_dir_all(pkg.join("func")).unwrap();
-        std::fs::create_dir_all(pkg.join("tmpl")).unwrap();
+        std::fs::create_dir_all(pkg.join("scripts")).unwrap();
+        std::fs::create_dir_all(pkg.join("functions")).unwrap();
+        std::fs::create_dir_all(pkg.join("templates")).unwrap();
         assert_eq!(file_layout_v1_ok(&dir), serde_json::Value::Bool(true));
         // 分区内出现白名单外子目录 → 违规
         std::fs::create_dir_all(pkg.join("old_scripts")).unwrap();

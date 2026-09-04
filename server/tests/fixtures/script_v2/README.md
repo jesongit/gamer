@@ -80,9 +80,9 @@ ParamDecl 为 `{type, name, remark, default}`，`default: null` 表示必填。M
 ## 约定
 
 - 逻辑 ID 即文件主名（不含扩展名）；多文件样例（v09/v10）的辅助文件名 = `<主 ID>.<角色>.yaml`，
-  真实目录布局中分别对应 `yaml/<主 ID>.yaml`、`yaml/<目标>.yaml`、`func/common.yaml`（见 CONTRACT.md 第 2 节）。
+  真实目录布局中分别对应 `scripts/<主 ID>.yaml`、`scripts/<目标>.yaml`、`functions/common.yaml`（见 CONTRACT.md 第 2 节）。
 - 服务端 fixture 测试直接调用当前严格 `parse_script_file()` /
   `parse_function_file()`，同时覆盖结构、引用、类型绑定和资源存在性；运行行为由执行器测试覆盖。
 - 修改任何 fixture 必须同步：golden/expected JSON、web/src/script-editor/__fixtures__/ 副本、
   CONTRACT.md 对照表；两目录一致性由前端测试强制。
-- 仓库内 `server/data/<pkg>/{yaml,func,tmpl}` 示例也由同一严格 loader 契约测试，避免示例绕过生产解析路径。
+- 仓库内 `server/data/<pkg>/{scripts,functions,templates}` 示例也由同一严格 loader 契约测试，避免示例绕过生产解析路径。

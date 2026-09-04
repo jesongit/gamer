@@ -84,6 +84,7 @@ impl fmt::Display for InstalledVersion {
 pub(crate) enum ResourceKind {
     Templates,
     Scripts,
+    Functions,
     Keymaps,
     Presets,
     Resources,
@@ -94,6 +95,7 @@ impl ResourceKind {
         match value {
             "templates" => Some(Self::Templates),
             "scripts" => Some(Self::Scripts),
+            "functions" => Some(Self::Functions),
             "keymaps" => Some(Self::Keymaps),
             "presets" => Some(Self::Presets),
             "resources" => Some(Self::Resources),
@@ -105,6 +107,7 @@ impl ResourceKind {
         match self {
             Self::Templates => "templates",
             Self::Scripts => "scripts",
+            Self::Functions => "functions",
             Self::Keymaps => "keymaps",
             Self::Presets => "presets",
             Self::Resources => "resources",

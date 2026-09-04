@@ -1,11 +1,11 @@
-//! 函数库（data/<pkg>/func/）CRUD 路由：风格对齐 scripts 路由（契约 plan §13.1）。
+//! 函数库（data/<pkg>/functions/）CRUD 路由：风格对齐 scripts 路由（契约 plan §13.1）。
 //!
 //! - id = `<pkg>/<文件短路径>.yaml`（含 `/`，前端拼 URL 必须整体 encodeURIComponent，
 //!   axum 对 %2F 解码，与 scripts 路由同规则）；
 //! - GET 返回内容版本短码 version；POST 只创建，PUT 更新/重命名。PUT 默认要求
 //!   expected_version，不提供时只有 force:true 才能跳过版本门禁；
 //! - 严格 loader 失败返回统一结构化五元组诊断；
-//! - func/ 函数库不进脚本列表/运行接口/任务选择器（数据源物理隔离，测试锁死）。
+//! - functions/ 函数库不进脚本列表/运行接口/任务选择器（数据源物理隔离，测试锁死）。
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;

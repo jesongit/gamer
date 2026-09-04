@@ -698,8 +698,9 @@ pub fn invalidate_template_cache_path(path: &Path) {
 
 /// 主动使模板目录中的文件缓存和短名解析代数缓存失效。
 ///
-/// 上传、覆盖、重命名、删除等目录操作完成后调用即可；下次路径匹配会重新
-/// 读取并预处理，短名解析也会重新枚举目录。
+/// 分区快照 zip 导入删除后，生产路径的模板写操作都走单文件
+/// [`invalidate_template_cache_path`]；目录级失效仅测试使用。
+#[cfg(test)]
 pub fn invalidate_template_cache_dir(dir: &Path) {
     let normalized = normalize_path(dir);
     let mut cache = template_cache().lock();
@@ -2313,14 +2314,14 @@ mod tests {
         let ffmpeg = std::env::var("GAMER_PERF_FFMPEG").unwrap_or_else(|_| "ffmpeg".to_string());
         let cases = [
             (
-                "tmpl/perf_btn_primary#361_365_639_479.png",
+                "templates/perf_btn_primary#361_365_639_479.png",
                 [390, 700, 300, 220],
             ),
             (
-                "tmpl/perf_txt_status#130_219_185_240.png",
+                "templates/perf_txt_status#130_219_185_240.png",
                 [140, 420, 60, 40],
             ),
-            ("tmpl/perf_corner_menu#dr.png", [540, 960, 540, 960]),
+            ("templates/perf_corner_menu#dr.png", [540, 960, 540, 960]),
         ];
         let templates: Vec<_> = cases
             .iter()

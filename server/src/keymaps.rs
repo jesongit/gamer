@@ -1,10 +1,9 @@
-//! Keymap YAML storage, validation, canonical serialization, and partition snapshots.
+//! Keymap YAML storage, validation, and canonical serialization.
 //!
 //! Keymaps deliberately use a schema separate from the script-v2 loader.  They are
-//! stored below `data/<package>/keymap/` and never fall back to another package.
+//! stored below `data/<package>/keymaps/` and never fall back to another package.
 
 use std::collections::HashSet;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -13,12 +12,6 @@ use serde_yaml::{Mapping, Value};
 use crate::core::fs::{atomic_write, content_version, safe_name};
 
 pub const MAX_KEYMAP_YAML_BYTES: usize = 1024 * 1024;
-pub const MAX_KEYMAP_ARCHIVE_BYTES: usize =
-    crate::core::fs::archive_validation::IMPORT_MAX_ARCHIVE_BYTES;
-pub const MAX_KEYMAP_TOTAL_BYTES: usize =
-    crate::core::fs::archive_validation::IMPORT_MAX_TOTAL_BYTES;
-pub const MAX_KEYMAP_ARCHIVE_ENTRIES: usize =
-    crate::core::fs::archive_validation::IMPORT_MAX_ENTRIES;
 const MAX_SWIPE_DURATION_MS: u32 = 60_000;
 const MAX_ANDROID_KEYCODE: u32 = 1_000;
 
@@ -116,19 +109,6 @@ pub struct KeymapFile {
     pub binding_count: usize,
     pub keymap: Keymap,
     pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct KeymapImportReport {
-    pub add: Vec<String>,
-    pub overwrite: Vec<String>,
-    pub invalid: Vec<KeymapImportInvalid>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct KeymapImportInvalid {
-    pub path: String,
-    pub diagnostics: Vec<KeymapDiagnostic>,
 }
 
 /// Parse a keymap YAML document and return the typed model only after all
@@ -923,8 +903,8 @@ impl KeymapStore {
 
     pub fn keymap_dir(&self, pkg: &str) -> PathBuf {
         safe_name(pkg)
-            .map(|pkg| self.root.join(pkg).join("keymap"))
-            .unwrap_or_else(|| self.root.join(".gamer-invalid-partition").join("keymap"))
+            .map(|pkg| self.root.join(pkg).join("keymaps"))
+            .unwrap_or_else(|| self.root.join(".gamer-invalid-partition").join("keymaps"))
     }
 
     pub fn create(&self, pkg: &str, name: &str, keymap: &Keymap) -> anyhow::Result<KeymapFile> {
@@ -1119,209 +1099,6 @@ impl KeymapStore {
         Ok(())
     }
 
-    pub fn export_partition(&self, pkg: &str) -> anyhow::Result<(String, Vec<u8>)> {
-        let package = safe_name(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
-        let mut files = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(self.keymap_dir(&package)) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = entry.file_name().to_string_lossy().to_string();
-                let lower = name.to_ascii_lowercase();
-                if path.is_file()
-                    && normalize_keymap_name(&name).ok().as_deref() == Some(name.as_str())
-                    && (lower.ends_with(".yaml") || lower.ends_with(".yml"))
-                {
-                    files.push(name);
-                }
-            }
-        }
-        files.sort();
-        let mut bytes = Vec::new();
-        {
-            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
-            let options = zip::write::SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
-            writer.add_directory("keymap", options)?;
-            for name in files {
-                writer.start_file(format!("keymap/{name}"), options)?;
-                writer.write_all(&std::fs::read(self.keymap_dir(&package).join(name))?)?;
-            }
-            writer.finish()?;
-        }
-        Ok((format!("{package}-keymaps.zip"), bytes))
-    }
-
-    pub fn import_partition(
-        &self,
-        bytes: &[u8],
-        pkg: &str,
-        confirm: bool,
-    ) -> anyhow::Result<KeymapImportReport> {
-        let package = safe_name(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
-        if bytes.len() > MAX_KEYMAP_ARCHIVE_BYTES {
-            anyhow::bail!(
-                "压缩包超过 {} MiB",
-                MAX_KEYMAP_ARCHIVE_BYTES / (1024 * 1024)
-            );
-        }
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-        if archive.len() > MAX_KEYMAP_ARCHIVE_ENTRIES {
-            anyhow::bail!("包内条目数超过上限 {MAX_KEYMAP_ARCHIVE_ENTRIES}");
-        }
-        let mut declared_total = 0u64;
-        for index in 0..archive.len() {
-            declared_total = declared_total.saturating_add(archive.by_index(index)?.size());
-            if declared_total > MAX_KEYMAP_TOTAL_BYTES as u64 {
-                anyhow::bail!("声明解压总量超过上限");
-            }
-        }
-
-        let mut report = KeymapImportReport::default();
-        let mut seen = HashSet::new();
-        let mut files: Vec<(String, Vec<u8>, String)> = Vec::new();
-        let mut actual_total = 0usize;
-        for index in 0..archive.len() {
-            let mut entry = archive.by_index(index)?;
-            if entry.is_dir() {
-                continue;
-            }
-            let zip_path = entry.name().to_string();
-            if zip_path.contains('\\') {
-                anyhow::bail!("包内路径非法: {zip_path}");
-            }
-            let Some(rest) = zip_path.strip_prefix("keymap/") else {
-                anyhow::bail!("包内路径需为 keymap/<映射方案>: {zip_path}");
-            };
-            if rest.is_empty() || rest.contains('/') {
-                anyhow::bail!("包内路径需为 keymap/<映射方案>: {zip_path}");
-            }
-            let name = match normalize_keymap_name(rest) {
-                Ok(name) if name == rest => name,
-                Ok(_) => {
-                    report.invalid.push(KeymapImportInvalid {
-                        path: zip_path.clone(),
-                        diagnostics: vec![diag(
-                            "keymap.filename.invalid",
-                            "导入文件必须显式使用 .yaml 或 .yml 扩展名",
-                            &zip_path,
-                            "",
-                            "filename",
-                        )],
-                    });
-                    continue;
-                }
-                Err(error) => {
-                    report.invalid.push(KeymapImportInvalid {
-                        path: zip_path.clone(),
-                        diagnostics: vec![diag(
-                            "keymap.filename.invalid",
-                            error.to_string(),
-                            &zip_path,
-                            "",
-                            "filename",
-                        )],
-                    });
-                    continue;
-                }
-            };
-            if !seen.insert(name.to_ascii_lowercase()) {
-                anyhow::bail!("包内存在重复文件: {zip_path}");
-            }
-            if entry.size() > MAX_KEYMAP_YAML_BYTES as u64 {
-                anyhow::bail!("{zip_path} 解压后超过 1 MiB");
-            }
-            let mut content = Vec::new();
-            (&mut entry)
-                .take(MAX_KEYMAP_YAML_BYTES as u64 + 1)
-                .read_to_end(&mut content)?;
-            if content.len() > MAX_KEYMAP_YAML_BYTES {
-                anyhow::bail!("{zip_path} 解压后超过 1 MiB");
-            }
-            actual_total = actual_total.saturating_add(content.len());
-            if actual_total > MAX_KEYMAP_TOTAL_BYTES {
-                anyhow::bail!("总解压量超过上限");
-            }
-            let text = match std::str::from_utf8(&content) {
-                Ok(text) => text,
-                Err(error) => {
-                    report.invalid.push(KeymapImportInvalid {
-                        path: zip_path.clone(),
-                        diagnostics: vec![diag(
-                            "keymap.yaml.utf8",
-                            format!("内容不是合法 UTF-8 文本: {error}"),
-                            &zip_path,
-                            "",
-                            "yaml",
-                        )],
-                    });
-                    continue;
-                }
-            };
-            match parse_keymap_content(text, &zip_path) {
-                Ok(keymap) => {
-                    let canonical = serialize_keymap(&keymap)?;
-                    files.push((name, canonical.into_bytes(), zip_path));
-                }
-                Err(diagnostics) => report.invalid.push(KeymapImportInvalid {
-                    path: zip_path,
-                    diagnostics,
-                }),
-            }
-        }
-        if files.is_empty() && report.invalid.is_empty() {
-            anyhow::bail!("包内没有可导入的 keymap YAML 文件");
-        }
-        for (name, _, _) in &files {
-            let destination = self.keymap_dir(&package).join(name);
-            if destination.exists() {
-                report.overwrite.push(format!("keymap/{name}"));
-            } else {
-                report.add.push(format!("keymap/{name}"));
-            }
-        }
-        if !confirm {
-            return Ok(report);
-        }
-        if !report.invalid.is_empty() {
-            anyhow::bail!("导入被拒绝：{} 个条目未通过严格校验", report.invalid.len());
-        }
-
-        let staging = self.root.join(format!(
-            ".gamer-keymap-staging-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let backup_dir = staging.join("backup");
-        std::fs::create_dir_all(&backup_dir)?;
-        let mut committed: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
-        let result = (|| -> anyhow::Result<()> {
-            for (name, content, _) in files {
-                let destination = self.keymap_dir(&package).join(name);
-                let backup = if destination.exists() {
-                    let backup = backup_dir.join(destination.file_name().unwrap());
-                    std::fs::rename(&destination, &backup)?;
-                    Some(backup)
-                } else {
-                    None
-                };
-                if let Err(error) = atomic_write(&destination, &content) {
-                    restore_file(&destination, backup.as_deref());
-                    rollback_files(&committed);
-                    return Err(error);
-                }
-                committed.push((destination, backup));
-            }
-            Ok(())
-        })();
-        if let Err(error) = result {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-        if let Err(error) = std::fs::remove_dir_all(&staging) {
-            tracing::warn!(error = %error, "keymap 导入 staging 清理失败，将在下次启动时清理");
-        }
-        Ok(report)
-    }
-
     fn load_file(&self, package: &str, name: &str) -> anyhow::Result<KeymapFile> {
         let path = self.keymap_dir(package).join(name);
         self.load_file_at(package, name, &path)
@@ -1365,21 +1142,6 @@ fn fmt_mtime(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-fn restore_file(destination: &Path, backup: Option<&Path>) {
-    if let Some(backup) = backup {
-        let _ = std::fs::remove_file(destination);
-        let _ = std::fs::rename(backup, destination);
-    } else {
-        let _ = std::fs::remove_file(destination);
-    }
-}
-
-fn rollback_files(committed: &[(PathBuf, Option<PathBuf>)]) {
-    for (destination, backup) in committed.iter().rev() {
-        restore_file(destination, backup.as_deref());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1401,7 +1163,8 @@ mod tests {
 
         let store = KeymapStore::new(dir.clone());
         let packages = AppPackageStore::new(dir.clone());
-        let manifest = br#"id = "official.km"
+        let manifest = br#"format_version = 2
+id = "official.km"
 version = "1.0.0"
 
 [android]
@@ -1573,7 +1336,10 @@ packages = ["com.test.app"]
         let store = KeymapStore::new(dir.path().to_path_buf());
         let keymap = parse_keymap_content(VALID, "test.yaml").unwrap();
         let created = store.create("com.test.app", "combat", &keymap).unwrap();
-        assert!(dir.path().join("com.test.app/keymap/combat.yaml").is_file());
+        assert!(dir
+            .path()
+            .join("com.test.app/keymaps/combat.yaml")
+            .is_file());
         assert!(store.list("com.other.app").unwrap().is_empty());
         assert!(store
             .update(

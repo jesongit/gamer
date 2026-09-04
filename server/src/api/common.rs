@@ -12,8 +12,12 @@ use super::ApiError;
 pub(super) const BODY_LIMIT_JSON: usize = 256 * 1024;
 /// 模板上传 / 脚本保存的 JSON 上限
 pub(super) const BODY_LIMIT_UPLOAD: usize = 16 * 1024 * 1024;
-/// ZIP 导入请求体上限
+/// 扩展包归档请求体上限
 pub(super) const BODY_LIMIT_ZIP_IMPORT: usize = 20 * 1024 * 1024;
+/// App Package 安装请求体上限：对齐包归档解压总量预算
+/// （archive_validation::IMPORT_MAX_TOTAL_BYTES = 100MiB）
+pub(super) const BODY_LIMIT_PACKAGE_INSTALL: usize =
+    crate::core::fs::archive_validation::IMPORT_MAX_TOTAL_BYTES;
 /// 公开豁免组请求体上限
 pub(super) const BODY_LIMIT_PUBLIC: usize = 64 * 1024;
 /// API 侧同步文件/SQLite/外部探测任务的并发上限

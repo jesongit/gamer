@@ -1,7 +1,7 @@
 //! Keymap WASM fixture guest (gamer.keymap plugin.wasm).
 //!
 //! Profile 通道（gamer-keymap@1）：`start(profile)` 携带当前分区的 keymap
-//! YAML 原文（与 `data/<pkg>/keymap/*.yaml` 完全相同的 schema，由 host 侧
+//! YAML 原文（与 `data/<pkg>/keymaps/*.yaml` 完全相同的 schema，由 host 侧
 //! `KeymapStore` 写入时校验）：
 //!
 //! ```yaml

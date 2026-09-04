@@ -43,7 +43,7 @@ pub use serialize::{serialize_function_file, serialize_script};
 #[allow(unused_imports)]
 pub use validate::{InMemoryResources, ResourceProvider, TemplateAvail};
 
-/// 严格装载一个可执行脚本（yaml/）：解析 + 结构校验 + 语义校验。
+/// 严格装载一个可执行脚本（scripts/）：解析 + 结构校验 + 语义校验。
 ///
 /// `resource` 为脚本资源 id（call 自引用比较用，如 `daily/login.yaml` 或
 /// 测试用逻辑 ID）；校验失败返回全部结构化错误（带定位）。
@@ -70,7 +70,7 @@ pub fn parse_script_file(
     }
 }
 
-/// 严格装载一个函数库文件（func/）：顶层键 = 函数名，记录只允许 params/steps。
+/// 严格装载一个函数库文件（functions/）：顶层键 = 函数名，记录只允许 params/steps。
 pub fn parse_function_file(
     content: &str,
     resource: &str,

@@ -16,7 +16,7 @@ use super::ResourceAdapter;
 ///
 /// The WIT contract deliberately passes an opaque resource handle instead of a
 /// host path. The resource adapter resolves that handle back to its logical
-/// id, and this adapter translates the `yaml/<script>.yaml` convention into a
+/// id, and this adapter translates the `scripts/<script>.yaml` convention into a
 /// generic `gamer.yaml` request. RunManager still owns mutual exclusion,
 /// cancellation, terminal state, and history.
 pub(crate) struct RunAdapter {
@@ -48,9 +48,9 @@ impl RunAdapter {
         request: RunRequest,
     ) -> CapabilityResult<crate::run_manager::StartRequest> {
         let resource = self.resources.id(request.entry())?;
-        let script = resource.name().strip_prefix("yaml/").ok_or_else(|| {
+        let script = resource.name().strip_prefix("scripts/").ok_or_else(|| {
             CapabilityError::InvalidRequest(
-                "run.submit entry 必须是 yaml/<script>.yaml 逻辑资源".into(),
+                "run.submit entry 必须是 scripts/<script>.yaml 逻辑资源".into(),
             )
         })?;
         if script.is_empty() || !script.to_ascii_lowercase().ends_with(".yaml") {

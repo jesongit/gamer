@@ -281,6 +281,9 @@ impl AppPackageStore {
         ResourceResolver::new(self)
     }
 
+    /// 列出全部已安装版本。单个版本目录损坏（manifest 缺失/解析失败、目录名与
+    /// manifest 不一致、非法版本目录名）只 `tracing::warn` 并跳过，不影响其余
+    /// 版本列出；uninstall 按目录名删除、无需 manifest 解析，仍可清理这类目录。
     pub(crate) fn list_installed(&self) -> AppPackageResult<Vec<InstalledPackage>> {
         let root = self.app_packages_root();
         let entries = match fs::read_dir(&root) {
@@ -290,25 +293,68 @@ impl AppPackageStore {
         };
         let mut installed = Vec::new();
         for package_entry in entries {
-            let package_entry = package_entry?;
+            let package_entry = match package_entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(error = %error, "app-packages 目录项读取失败，已跳过");
+                    continue;
+                }
+            };
             if !package_entry.file_type()?.is_dir() || package_entry.file_name() == ".staging" {
                 continue;
             }
-            let package_id = parse_app_package_id(&package_entry.file_name().to_string_lossy())?;
-            for version_entry in fs::read_dir(package_entry.path())? {
-                let version_entry = version_entry?;
+            let package_name = package_entry.file_name().to_string_lossy().to_string();
+            let Ok(package_id) = parse_app_package_id(&package_name) else {
+                tracing::warn!(directory = %package_name, "app-packages 下存在非法包目录，已跳过");
+                continue;
+            };
+            let versions = match fs::read_dir(package_entry.path()) {
+                Ok(versions) => versions,
+                Err(error) => {
+                    tracing::warn!(directory = %package_name, error = %error, "版本目录读取失败，已跳过");
+                    continue;
+                }
+            };
+            for version_entry in versions {
+                let version_entry = match version_entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        tracing::warn!(directory = %package_name, error = %error, "版本目录项读取失败，已跳过");
+                        continue;
+                    }
+                };
                 if !version_entry.file_type()?.is_dir() {
                     continue;
                 }
-                let version =
-                    InstalledVersion::parse(&version_entry.file_name().to_string_lossy())?;
-                let manifest =
-                    parse_manifest(&fs::read(version_entry.path().join("manifest.toml"))?)?;
+                let version_dir = version_entry.file_name().to_string_lossy().to_string();
+                let skipped = |reason: String| {
+                    tracing::warn!(
+                        directory = %format!("{package_name}/{version_dir}"),
+                        reason,
+                        "损坏的已安装包版本目录已跳过"
+                    );
+                };
+                let Ok(version) = InstalledVersion::parse(&version_dir) else {
+                    skipped("非法版本目录名".to_string());
+                    continue;
+                };
+                let manifest_bytes = match fs::read(version_entry.path().join("manifest.toml")) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        skipped(format!("manifest.toml 读取失败: {error}"));
+                        continue;
+                    }
+                };
+                let manifest = match parse_manifest(&manifest_bytes) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        skipped(format!("manifest 解析失败: {error}"));
+                        continue;
+                    }
+                };
                 if manifest.id() != &package_id || manifest.version() != &version {
-                    return Err(AppPackageError::InvalidManifest(format!(
-                        "目录与 manifest 不一致: {}@{}",
-                        package_id, version
-                    )));
+                    skipped("目录与 manifest 不一致".to_string());
+                    continue;
                 }
                 installed.push(InstalledPackage {
                     manifest,

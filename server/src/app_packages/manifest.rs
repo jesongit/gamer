@@ -45,11 +45,17 @@ impl PackageManifest {
     }
 }
 
+/// 当前 manifest 格式版本（V2：必填 `format_version = 2`）。
+pub(crate) const MANIFEST_FORMAT_VERSION: u64 = 2;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPackageManifest {
     id: String,
     version: String,
+    /// 必填整数格式版本；缺省以 `None` 表示，由 parse_manifest 给出明确诊断
+    #[serde(default)]
+    format_version: Option<u64>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -68,6 +74,20 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> AppPackageResult<PackageManifest> 
         .map_err(|error| AppPackageError::InvalidManifest(format!("必须是 UTF-8: {error}")))?;
     let raw: RawPackageManifest = toml::from_str(text)
         .map_err(|error| AppPackageError::InvalidManifest(error.to_string()))?;
+    // 格式门禁先行：旧格式包在其它字段校验前就得到明确的版本诊断
+    match raw.format_version {
+        None => {
+            return Err(AppPackageError::InvalidManifest(
+                "缺少 format_version（当前仅支持 2）".to_string(),
+            ));
+        }
+        Some(value) if value != MANIFEST_FORMAT_VERSION => {
+            return Err(AppPackageError::InvalidManifest(format!(
+                "format_version 不为 {MANIFEST_FORMAT_VERSION}（当前仅支持 {MANIFEST_FORMAT_VERSION}）"
+            )));
+        }
+        Some(_) => {}
+    }
     if raw
         .name
         .as_deref()

@@ -59,7 +59,7 @@ async fn unauthenticated_high_risk_endpoints_are_all_401() {
         ("POST", "/api/devices/missing/control"),
         ("POST", "/api/scripts/missing/run"),
         ("DELETE", "/api/templates/missing?pkg=com.test.app"),
-        ("POST", "/api/scripts/import?pkg=com.test.app"),
+        ("POST", "/api/app-packages/install"),
     ];
     for (method, uri) in cases {
         let resp = send(&t.app, req(method, uri, None, &[], None)).await;
@@ -594,7 +594,7 @@ async fn cross_origin_high_risk_endpoints_are_all_403_after_authentication() {
         ("DELETE", "/api/templates/missing?pkg=com.test.app", None),
         (
             "POST",
-            "/api/scripts/import?pkg=com.test.app",
+            "/api/app-packages/install",
             Some("not-a-zip"),
         ),
     ];

@@ -385,8 +385,7 @@ impl ComputePoolMatcher {
     fn to_capability_resource(id: &ResourceId) -> crate::capabilities::ResourceId {
         let name = id
             .logical_path()
-            .strip_prefix("tmpl/")
-            .or_else(|| id.logical_path().strip_prefix("templates/"))
+            .strip_prefix("templates/")
             .unwrap_or_else(|| id.logical_path());
         crate::capabilities::ResourceId::new(id.app_package().to_string(), name)
     }
@@ -485,9 +484,9 @@ mod tests {
             ..Default::default()
         };
         let store = Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
-        std::fs::create_dir_all(store.tmpl_dir("com.test.game")).unwrap();
+        std::fs::create_dir_all(store.templates_dir("com.test.game")).unwrap();
         std::fs::write(
-            store.tmpl_dir("com.test.game").join("icon.png"),
+            store.templates_dir("com.test.game").join("icon.png"),
             b"template",
         )
         .unwrap();
@@ -495,7 +494,7 @@ mod tests {
         let resolver = LegacyResourceResolver::new(Arc::new(ResourceAdapter::new(store)));
         let id = ResourceId::new(
             crate::core::AppPackageId::new("com.test.game").unwrap(),
-            "tmpl/icon.png",
+            "templates/icon.png",
         )
         .unwrap();
         let resource = resolver.resolve(&id).await.unwrap();
@@ -516,16 +515,17 @@ mod tests {
         };
         let store = Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
         // legacy 分区兜底层
-        std::fs::create_dir_all(store.tmpl_dir("com.test.game")).unwrap();
+        std::fs::create_dir_all(store.templates_dir("com.test.game")).unwrap();
         std::fs::write(
-            store.tmpl_dir("com.test.game").join("icon.png"),
+            store.templates_dir("com.test.game").join("icon.png"),
             b"partition",
         )
         .unwrap();
 
         // 安装并激活带 templates/icon.png 的 App Package
         let packages = crate::app_packages::AppPackageStore::new(cfg.data_dir.clone());
-        let manifest = br#"id = "official.test"
+        let manifest = br#"format_version = 2
+id = "official.test"
 version = "1.0.0"
 
 [android]
@@ -548,7 +548,7 @@ packages = ["com.test.game"]
         let resolver = LegacyResourceResolver::new(Arc::new(ResourceAdapter::new(store.clone())));
         let id = ResourceId::new(
             crate::core::AppPackageId::new("com.test.game").unwrap(),
-            "tmpl/icon.png",
+            "templates/icon.png",
         )
         .unwrap();
 
@@ -565,13 +565,15 @@ packages = ["com.test.game"]
 
         // 包内/override 都没有的模板回退分区
         std::fs::write(
-            store.tmpl_dir("com.test.game").join("only-partition.png"),
+            store
+                .templates_dir("com.test.game")
+                .join("only-partition.png"),
             b"partition-only",
         )
         .unwrap();
         let id = ResourceId::new(
             crate::core::AppPackageId::new("com.test.game").unwrap(),
-            "tmpl/only-partition.png",
+            "templates/only-partition.png",
         )
         .unwrap();
         let resource = resolver.resolve(&id).await.unwrap();

@@ -9,7 +9,7 @@
 |---|---|
 | `stream.h264` | 1080x1920 竖屏 H.264 裸流（Annex-B），90 帧、固定 GOP=30，IDR 落在第 1/31/61 帧；恒定 QP 编码（qp=22、0 B 帧、threads=1）避免码率漂移 |
 | `keyframe_001/031/061.png` | 从上述三个 IDR 解出的 1080x1920 RGB 截图 |
-| `tmpl/*.png` | 三个目标矩形的灰度裁片（与服务端模板重编码后的消费形态一致），文件名带 `#后缀` 区域元数据 |
+| `templates/*.png` | 三个目标矩形的灰度裁片（与服务端模板重编码后的消费形态一致），文件名带 `#后缀` 区域元数据 |
 | `tmpl-rgb/*.png` | 同一区域彩色版孪生（用于验证灰度转换一致性） |
 | `templates.txt` | 模板名清单，命名风格对齐 `web/src/script-language/fixtures/templates.txt`；两种区域形态各占其一：×1000 相对坐标（`361_365_639_479`）与半区码（`dr`） |
 
@@ -38,7 +38,7 @@
    无后缀回退全屏）与**全屏**两种搜索窗下做归一化互相关；期望命中中心即上表"中心"列，
    全屏 vs 区域的倍差即 PERF-002/003 优化的上限空间；
 5. **模板读取预处理**——从磁盘读 PNG 到产出匹配器所需灰度矩阵（不含 NCC 计算）；
-6. **find 整轮**——主模板 + N 个 block（block 可复用 `tmpl/perf_btn_primary#...` 反相裁块或
+6. **find 整轮**——主模板 + N 个 block（block 可复用 `templates/perf_btn_primary#...` 反相裁块或
    decoy 区域裁片）按 YAML 引擎 find 语义完整一轮（一次截图 + 1+N 次 NCC）。
 
 统计口径按 OPTIMIZATION_PLAN.md §11.1：p50 / p95 / 最大值，另记 CPU 与峰值内存；

@@ -105,7 +105,7 @@ pub(super) async fn api_list_templates(
     match run_blocking_api(move || {
         let mut out = Vec::new();
         for pkg in pkgs {
-            let dir = scripts.tmpl_dir(&pkg);
+            let dir = scripts.templates_dir(&pkg);
             if let Ok(entries) = std::fs::read_dir(&dir) {
                 for e in entries.flatten() {
                     // 模板目录专用：列出所有非隐藏文件（模板名可能带 .png/.jpg，也可能是 随机名字#x1_y1_x2_y2 这种带小数点无后缀名）
@@ -231,7 +231,7 @@ pub(super) async fn api_create_template(
         Err(e) => return e.into_response(),
     };
     match run_blocking_api(move || {
-        let dir = st.scripts.tmpl_dir(&pkg);
+        let dir = st.scripts.templates_dir(&pkg);
         // 短名冲突即 409（§11.7 冲突要求改名不自动覆盖）。
         if short_name_conflict(&dir, &base) {
             return Err(ApiError::conflict(format!(
@@ -303,7 +303,7 @@ pub(super) async fn api_replace_template_image(
         Err(err) => return err.into_response(),
     };
     match run_blocking_api(move || {
-        let path = st.scripts.tmpl_dir(&pkg).join(&name);
+        let path = st.scripts.templates_dir(&pkg).join(&name);
         if !path.is_file() {
             return Err(ApiError::not_found("模板不存在"));
         }
@@ -338,11 +338,11 @@ pub(super) async fn api_delete_template(
         Err(err) => return err.into_response(),
     };
     match run_blocking_api(move || {
-        let path = st.scripts.tmpl_dir(&pkg).join(&name);
+        let path = st.scripts.templates_dir(&pkg).join(&name);
         std::fs::remove_file(&path).map_err(|e| ApiError::internal(e.to_string()))?;
         // 删除成功后主动失效该路径缓存（PERF-002）；失败路径不失效
         matcher::invalidate_template_cache_path(&path);
-        st.scripts.cleanup_partition(&pkg); // 分区 yaml/tmpl 都空了则清理目录
+        st.scripts.cleanup_partition(&pkg); // 分区 scripts/templates 都空了则清理目录
         Ok(Json(serde_json::json!({"ok": true})))
     })
     .await
@@ -380,7 +380,7 @@ pub(super) async fn api_rename_template(
         return ApiError::bad_request("名称未变化").into_response();
     }
     match run_blocking_api(move || {
-        let dir = st.scripts.tmpl_dir(&pkg);
+        let dir = st.scripts.templates_dir(&pkg);
         let old_path = dir.join(&old_name);
         let new_path = dir.join(&new_name);
         let updated_scripts = st
@@ -427,7 +427,7 @@ pub(super) async fn api_get_template_image(
         Err(err) => return err.into_response(),
     };
     match run_blocking_api(move || {
-        let path = st.scripts.tmpl_dir(&pkg).join(&name);
+        let path = st.scripts.templates_dir(&pkg).join(&name);
         let bytes = std::fs::read(&path).map_err(|_| ApiError::not_found("模板不存在"))?;
         let mime = match path
             .extension()

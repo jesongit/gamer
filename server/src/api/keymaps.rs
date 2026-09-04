@@ -1,11 +1,10 @@
-//! Keymap partition CRUD and import/export endpoints.
+//! Keymap partition CRUD endpoints.
 //!
 //! Resource IDs use the same shape as scripts: `<pkg>/<file>.yaml`; callers
 //! must URL-encode the complete ID when it contains `/`.
 
-use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -13,7 +12,7 @@ use serde::Deserialize;
 use super::common::{require_pkg, run_blocking_api, validate_text_field};
 use super::templates::PkgQuery;
 use super::{ApiError, AppState};
-use crate::keymaps::{self, KeymapDiagnostic, KeymapImportReport};
+use crate::keymaps::{self, KeymapDiagnostic};
 
 fn invalid_yaml_response(diagnostics: Vec<KeymapDiagnostic>) -> Response {
     (
@@ -260,87 +259,6 @@ pub(super) async fn api_delete_keymap(
     }
 }
 
-#[derive(Deserialize)]
-pub(super) struct ImportQuery {
-    #[serde(default)]
-    confirm: Option<String>,
-    #[serde(default)]
-    pkg: Option<String>,
-}
-
-/// GET /api/keymaps/export?pkg=<package>：导出 keymap 分区 ZIP。
-pub(super) async fn api_export_keymaps(
-    State(st): State<AppState>,
-    Query(q): Query<PkgQuery>,
-) -> Response {
-    let pkg = match require_pkg(q.pkg.as_deref()) {
-        Ok(pkg) => pkg,
-        Err(error) => return error.into_response(),
-    };
-    match run_blocking_api(move || {
-        st.keymaps
-            .export_partition(&pkg)
-            .map_err(|error| ApiError::not_found(error.to_string()))
-    })
-    .await
-    {
-        Ok((filename, bytes)) => zip_response(&filename, bytes),
-        Err(error) => error.into_response(),
-    }
-}
-
-/// POST /api/keymaps/import?pkg=<package>[&confirm=1]：dry-run 或提交分区 ZIP。
-pub(super) async fn api_import_keymaps(
-    State(st): State<AppState>,
-    Query(q): Query<ImportQuery>,
-    body: axum::body::Bytes,
-) -> Response {
-    let pkg = match require_pkg(q.pkg.as_deref()) {
-        Ok(pkg) => pkg,
-        Err(error) => return error.into_response(),
-    };
-    let confirm = matches!(q.confirm.as_deref(), Some("1") | Some("true"));
-    if confirm {
-        let preview = run_blocking_api({
-            let st = st.clone();
-            let body = body.clone();
-            let pkg = pkg.clone();
-            move || {
-                st.keymaps
-                    .import_partition(&body, &pkg, false)
-                    .map_err(|error| ApiError::bad_request(error.to_string()))
-            }
-        })
-        .await;
-        match preview {
-            Err(error) => return error.into_response(),
-            Ok(report) if !report.invalid.is_empty() => {
-                return invalid_import_response(&report);
-            }
-            Ok(_) => {}
-        }
-    }
-    match run_blocking_api(move || {
-        st.keymaps
-            .import_partition(&body, &pkg, confirm)
-            .map_err(|error| ApiError::bad_request(error.to_string()))
-    })
-    .await
-    {
-        Ok(report) => Json(report).into_response(),
-        Err(error) => error.into_response(),
-    }
-}
-
-fn invalid_import_response(report: &KeymapImportReport) -> Response {
-    let diagnostics = report
-        .invalid
-        .iter()
-        .flat_map(|entry| entry.diagnostics.iter().cloned())
-        .collect();
-    invalid_yaml_response(diagnostics)
-}
-
 fn write_api_error(error: anyhow::Error, resource: &str) -> ApiError {
     let message = error.to_string();
     if message.contains("版本冲突") {
@@ -360,20 +278,4 @@ fn write_api_error(error: anyhow::Error, resource: &str) -> ApiError {
     } else {
         ApiError::bad_request(message)
     }
-}
-
-fn zip_response(filename: &str, bytes: Vec<u8>) -> Response {
-    let encoded: String = filename
-        .bytes()
-        .map(|byte| format!("%{byte:02X}"))
-        .collect();
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/zip")
-        .header(
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename*=UTF-8''{encoded}"),
-        )
-        .body(Body::from(bytes))
-        .unwrap()
 }

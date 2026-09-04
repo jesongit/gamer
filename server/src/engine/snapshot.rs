@@ -1,4 +1,4 @@
-//! 运行源码快照（阶段 2 交付 3）：运行开始时把当前分区 `yaml/` 与 `func/`
+//! 运行源码快照：运行开始时把当前分区 `scripts/` 与 `functions/`
 //! 的全部源文件内容整体读入内存（本次运行不可变）；call/func 在执行期从
 //! 快照**懒解析**并按运行实例缓存——运行中修改文件不影响已开始的实例，
 //! 下一次运行生效（plan §12.2）。
@@ -29,30 +29,31 @@ use crate::scripts::ScriptStore;
 
 /// 一次运行的分区源码快照（构建后不可变）。
 pub(crate) struct RunSnapshot {
-    /// `yaml/` 全部脚本源码：key = 分区内相对路径（含扩展名）
+    /// `scripts/` 全部脚本源码：key = 分区内相对路径（含扩展名）
     scripts: BTreeMap<String, String>,
-    /// `func/` 全部函数库源码：key = 文件短路径（去 `.yaml`）
+    /// `functions/` 全部函数库源码：key = 文件短路径（去 `.yaml`）
     functions: BTreeMap<String, String>,
 }
 
 impl RunSnapshot {
-    /// 递归读取分区 `yaml/` 与 `func/` 下全部源文件（目录缺失视为空快照），
-    /// 并合并 active App Package `scripts/` 与用户 override 的同名资源：
+    /// 递归读取分区 `scripts/` 与 `functions/` 下全部源文件（目录缺失视为空
+    /// 快照），并合并 active App Package 与用户 override 的同名资源：
     /// 优先级 **override → 包 → 分区**（与模板/键位 composite 顺序一致）。
-    /// 包内 `scripts/` 同时承载脚本（call 目标，含扩展名 key）与函数库
-    /// （func 目标，去扩展名短路径 key）两种语义。
+    /// 包内 `scripts/` 只进脚本索引、包内 `functions/` 只进函数库索引
+    /// （去扩展名短路径 key），两类索引互不混入。
     pub fn capture(store: &ScriptStore, pkg: &str) -> anyhow::Result<Self> {
-        let mut scripts = read_sources(&store.yaml_dir(pkg), false)?;
-        let mut functions = read_sources(&store.func_dir(pkg), true)?;
+        let mut scripts = read_sources(&store.script_dir(pkg), false)?;
+        let mut functions = read_sources(&store.functions_dir(pkg), true)?;
         for (key, content) in store.composite_script_sources(pkg)? {
-            functions.insert(
-                key.strip_suffix(".yaml")
-                    .or_else(|| key.strip_suffix(".yml"))
-                    .map(str::to_string)
-                    .unwrap_or_else(|| key.clone()),
-                content.clone(),
-            );
             scripts.insert(key, content);
+        }
+        for (key, content) in store.composite_function_sources(pkg)? {
+            let short = key
+                .strip_suffix(".yaml")
+                .or_else(|| key.strip_suffix(".yml"))
+                .map(str::to_string)
+                .unwrap_or_else(|| key.clone());
+            functions.insert(short, content);
         }
         Ok(Self { scripts, functions })
     }
@@ -273,9 +274,12 @@ mod tests {
     use crate::config::Config;
 
     /// 安装一个 active 包：scripts/dup.yaml（与分区/override 同名不同内容）、
-    /// scripts/lib/helpers.yaml（子目录脚本）。
+    /// scripts/lib/helpers.yaml（子目录脚本）、functions/common.yaml（函数库，
+    /// 与分区同名不同内容）、functions/dup.yaml（与包内脚本同名的函数库，
+    /// 用于证明两个索引互不混入）。
     async fn install_package(data_dir: &Path) {
-        let manifest = br#"id = "official.test"
+        let manifest = br#"format_version = 2
+id = "official.test"
 version = "1.0.0"
 
 [android]
@@ -293,14 +297,18 @@ packages = ["com.test.app"]
             zw.write_all(b"steps: [] # package").unwrap();
             zw.start_file("scripts/lib/helpers.yaml", opts).unwrap();
             zw.write_all(b"steps: [] # helpers").unwrap();
+            zw.start_file("functions/common.yaml", opts).unwrap();
+            zw.write_all(b"noop:\n  steps: [] # package\n").unwrap();
+            zw.start_file("functions/dup.yaml", opts).unwrap();
+            zw.write_all(b"dup:\n  steps: []\n").unwrap();
             zw.finish().unwrap();
         }
         let packages = crate::app_packages::AppPackageStore::new(data_dir);
         packages.install_and_activate(&archive, None).await.unwrap();
     }
 
-    /// RunSnapshot composite 优先级：override → 包 → 分区；包内 `scripts/`
-    /// 同时进入脚本（含扩展名）与函数库（去扩展名短路径）两个索引。
+    /// RunSnapshot composite 优先级：override → 包 → 分区；包内 `scripts/` 与
+    /// `functions/` 分别只进脚本（含扩展名）与函数库（去扩展名短路径）索引。
     #[tokio::test]
     async fn snapshot_merges_package_and_override_sources_with_priority() {
         let dir = tempfile::tempdir().unwrap();
@@ -312,20 +320,20 @@ packages = ["com.test.app"]
         let pkg = "com.test.app";
 
         // 分区兜底层
-        std::fs::create_dir_all(store.yaml_dir(pkg)).unwrap();
+        std::fs::create_dir_all(store.script_dir(pkg)).unwrap();
         std::fs::write(
-            store.yaml_dir(pkg).join("dup.yaml"),
+            store.script_dir(pkg).join("dup.yaml"),
             b"steps: [] # partition",
         )
         .unwrap();
         std::fs::write(
-            store.yaml_dir(pkg).join("partition-only.yaml"),
+            store.script_dir(pkg).join("partition-only.yaml"),
             b"steps: [] # partition-only",
         )
         .unwrap();
-        std::fs::create_dir_all(store.func_dir(pkg)).unwrap();
+        std::fs::create_dir_all(store.functions_dir(pkg)).unwrap();
         std::fs::write(
-            store.func_dir(pkg).join("common.yaml"),
+            store.functions_dir(pkg).join("common.yaml"),
             b"noop:\n  steps: []\n",
         )
         .unwrap();
@@ -347,23 +355,41 @@ packages = ["com.test.app"]
             Some("steps: [] # partition-only"),
             "包内/override 未覆盖的脚本继续由分区兜底"
         );
-        // 包内脚本同时可作函数库（短路径 key），分区 func/ 不受影响
-        assert_eq!(snapshot.function_file("dup"), Some("steps: [] # package"));
+        // 包内 functions/dup.yaml 进入函数库索引，包内 scripts/dup.yaml 的脚本
+        // 内容不再混入（Script/Function 索引分离）
+        assert_eq!(snapshot.function_file("dup"), Some("dup:\n  steps: []\n"));
+        // 包内 functions/ 覆盖分区同名函数库；分区独有函数库继续可见
         assert_eq!(
             snapshot.function_file("common"),
-            Some("noop:\n  steps: []\n")
+            Some("noop:\n  steps: [] # package\n")
         );
+        // 包内 functions/ 不进入脚本索引
+        assert_eq!(snapshot.script("common.yaml"), None);
 
-        // user override 再覆盖包内同名脚本
-        let override_dir = dir.path().join("user-overrides").join(pkg).join("scripts");
-        std::fs::create_dir_all(&override_dir).unwrap();
-        std::fs::write(override_dir.join("dup.yaml"), b"steps: [] # override").unwrap();
+        // user override 再覆盖包内同名脚本与函数库
+        let override_root = dir.path().join("user-overrides").join(pkg);
+        std::fs::create_dir_all(override_root.join("scripts")).unwrap();
+        std::fs::write(
+            override_root.join("scripts").join("dup.yaml"),
+            b"steps: [] # override",
+        )
+        .unwrap();
+        std::fs::create_dir_all(override_root.join("functions")).unwrap();
+        std::fs::write(
+            override_root.join("functions").join("common.yaml"),
+            b"noop:\n  steps: [] # override\n",
+        )
+        .unwrap();
         let snapshot = RunSnapshot::capture(&store, pkg).unwrap();
         assert_eq!(
             snapshot.script("dup.yaml"),
             Some("steps: [] # override"),
             "override 必须优先于包内与分区"
         );
-        assert_eq!(snapshot.function_file("dup"), Some("steps: [] # override"));
+        assert_eq!(
+            snapshot.function_file("common"),
+            Some("noop:\n  steps: [] # override\n"),
+            "override 函数库必须优先于包内与分区"
+        );
     }
 }

@@ -10,7 +10,7 @@
 //!   参数绑定（声明默认值 → args 覆盖）→ AST 步骤执行（find/match/color/if/
 //!   loop/break/call/func/throw/return 等 19 类；10 万步 guard + 32 层嵌套 + 取消
 //!   轮询；tap/swipe/hit/miss 可视化事件经 control DataChannel 反向推送）。
-//! - [`snapshot`]：运行开始时整体捕获分区 `yaml/`+`func/` 源码，call/func 从
+//! - [`snapshot`]：运行开始时整体捕获分区 `scripts/`+`functions/` 源码，call/func 从
 //!   快照懒解析并按运行实例缓存——运行中改文件不影响已开始的实例。
 //! - [`ports`]：截图源 / 设备控制 / 模板匹配三个窄 trait；生产在
 //!   `Runner::new` 装配 adapter 转发 DeviceManager / matcher，测试注入 fake。

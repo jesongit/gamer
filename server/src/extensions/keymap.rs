@@ -2082,7 +2082,7 @@ fn to_runtime(error: impl std::fmt::Display) -> ExtensionError {
 }
 
 /// Load the raw YAML content of a user-selected keymap profile from the
-/// existing per-partition storage (`data/<pkg>/keymap/<name>.yaml`). The
+/// existing per-partition storage (`data/<pkg>/keymaps/<name>.yaml`). The
 /// content is handed to the keymap guest verbatim; the store already validated
 /// the schema (`version/name/bindings`) when the file was written and
 /// normalizes the scheme name, and a missing scheme is a start-time error
@@ -2540,8 +2540,7 @@ mod tests {
     fn app_package_keymap_source_reads_only_the_selected_package() {
         let temp = TempDir::new().unwrap();
         let store = AppPackageStore::new(temp.path());
-        let manifest =
-            b"id = \"official.game\"\nversion = \"1.0.0\"\n[android]\npackages = [\"com.game\"]\n";
+        let manifest = b"format_version = 2\nid = \"official.game\"\nversion = \"1.0.0\"\n[android]\npackages = [\"com.game\"]\n";
         let keymap = b"version: 1\nname: package\nbindings: []\n";
         let mut bytes = Vec::new();
         {

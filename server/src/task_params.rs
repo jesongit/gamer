@@ -229,7 +229,7 @@ steps:
     }
 
     fn write_script(cfg: &Config, name: &str, content: &str) {
-        let dir = cfg.data_dir.join("com.test.app").join("yaml");
+        let dir = cfg.data_dir.join("com.test.app").join("scripts");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), content).unwrap();
     }

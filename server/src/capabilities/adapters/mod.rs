@@ -99,7 +99,7 @@ mod tests {
     #[tokio::test]
     async fn resource_adapter_resolves_and_opens_logical_template() {
         let (_dir, store) = template_store();
-        let template_dir = store.tmpl_dir("com.test.game");
+        let template_dir = store.templates_dir("com.test.game");
         std::fs::create_dir_all(&template_dir).unwrap();
         std::fs::write(template_dir.join("icon.png"), b"template").unwrap();
 
@@ -133,7 +133,7 @@ mod tests {
                 template.put_pixel(x, y, *screen.get_pixel(11 + x, 7 + y));
             }
         }
-        let template_dir = store.tmpl_dir("com.test.game");
+        let template_dir = store.templates_dir("com.test.game");
         std::fs::create_dir_all(&template_dir).unwrap();
         std::fs::write(template_dir.join("icon.png"), png(&template)).unwrap();
 
@@ -250,14 +250,14 @@ mod tests {
     #[tokio::test]
     async fn run_adapter_submits_to_run_manager_and_reports_terminal_state() {
         let (_dir, store) = template_store();
-        let script_dir = store.yaml_dir("com.test.game");
+        let script_dir = store.script_dir("com.test.game");
         std::fs::create_dir_all(&script_dir).unwrap();
         std::fs::write(script_dir.join("daily.yaml"), b"steps: []\n").unwrap();
         let resources = Arc::new(ResourceAdapter::new(store));
         let entry = resources
             .resolve(&super::super::ResourceId::new(
                 "com.test.game",
-                "yaml/daily.yaml",
+                "scripts/daily.yaml",
             ))
             .await
             .unwrap();

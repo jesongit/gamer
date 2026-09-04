@@ -15,7 +15,7 @@ use axum::response::IntoResponse;
 use axum::Router;
 use base64::Engine;
 
-use super::common::{BODY_LIMIT_JSON, BODY_LIMIT_ZIP_IMPORT};
+use super::common::{BODY_LIMIT_JSON, BODY_LIMIT_PACKAGE_INSTALL};
 use super::devices::{
     parse_ctl, session_affecting_change, validate_device_req, ControlReq, CreateDeviceReq,
 };
@@ -402,16 +402,6 @@ mod sec_tests {
             req("GET", uri, None, &json_headers(sid.to_string()), None),
         )
         .await
-    }
-
-    async fn func_first(t: &TestApp, sid: &str, pkg: &str) -> (String, String, serde_json::Value) {
-        let resp = get_json(t, sid, &format!("/api/functions?pkg={pkg}")).await;
-        let j = json_body(resp).await;
-        (
-            j[0]["file"].as_str().unwrap().to_string(),
-            j[0]["content"].as_str().unwrap().to_string(),
-            j[0]["functions"].clone(),
-        )
     }
 
     async fn save_task_script(t: &TestApp, sid: &str, name: &str, content: &str) {

@@ -13,7 +13,7 @@
 //!   judge_delay（config.toml judge_delay_ms，默认 200ms，0=关）；else/超时不延迟。
 //! - `if`：仅布尔（无隐式转换）；`loop`：times 0/缺省=无限，`break` 跳出最近一层循环
 //!   （10 万步 guard 兜底）。
-//! - `call`：同分区 yaml/ 脚本，压入目标 config 与参数作用域（返回恢复）；
+//! - `call`：同分区 scripts/ 脚本，压入目标 config 与参数作用域（返回恢复）；
 //!   `func`：`文件短路径/函数名`，继承调用点 config，返回布尔走 then/else。
 //! - `throw` 跨调用链结束整个运行（失败终态）；`return` 仅退出当前函数（缺省 true）。
 //! - 嵌套上限 32 层（call+func 合计）；取消经 stop 标志轮询退出。
@@ -74,12 +74,12 @@ const COLOR_TOLERANCE: i32 = 30;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunTarget {
-    /// 可执行脚本（yaml/）。`start_index` = 顶层步骤序号（0=从头）。
+    /// 可执行脚本（scripts/）。`start_index` = 顶层步骤序号（0=从头）。
     Script {
         script_id: String,
         start_index: usize,
     },
-    /// 函数测试（func/）。`file` = 文件短路径；`function` = 函数名
+    /// 函数测试（functions/）。`file` = 文件短路径；`function` = 函数名
     /// （None = 文件第一个函数，由入口/API 解析）；`start_index` = 函数体内
     /// 顶层步骤序号。函数不伪装成脚本 ID 进入选择器。
     Function {
@@ -345,12 +345,12 @@ impl Runner {
     }
 }
 
-/// Map the old `tmpl/<short-name>` layout to a logical Core resource id.
+/// Map the `templates/<short-name>` layout to a logical Core resource id.
 /// Path resolution remains exclusively in the capability adapter.
 fn legacy_template_resource_id(pkg: &str, template: &str) -> anyhow::Result<ResourceId> {
     Ok(ResourceId::new(
         AppPackageId::new(pkg.to_string())?,
-        format!("tmpl/{template}"),
+        format!("templates/{template}"),
     )?)
 }
 
@@ -438,8 +438,8 @@ pub fn resolve_entry_args(
 }
 
 /// 载入运行目标的参数声明（分区磁盘快照 + 严格解析）：
-/// - Script：yaml/ 脚本顶层 params；
-/// - Function：func/ 文件中目标函数（缺省 = 第一个函数）的 params。
+/// - Script：scripts/ 脚本顶层 params；
+/// - Function：functions/ 文件中目标函数（缺省 = 第一个函数）的 params。
 ///
 /// 同时返回诊断定位用的资源标签（脚本相对 id / `file/function`）；
 /// 脚本/函数不存在或解析失败 → 全部结构化诊断（RESOURCE_*.not_found 等）。
@@ -1541,7 +1541,7 @@ impl Runner {
 
     // ---- call / func -----------------------------------------------------------
 
-    /// call：同分区 yaml/ 脚本。压入目标脚本 config（interval/threshold/
+    /// call：同分区 scripts/ 脚本。压入目标脚本 config（interval/threshold/
     /// log_level 三键覆盖）与参数作用域（声明默认值 → args 覆盖），返回后恢复。
     /// throw 穿透（exit 标志共享）。
     async fn exec_call(
@@ -1568,7 +1568,7 @@ impl Runner {
         result
     }
 
-    /// func：`文件短路径/函数名`（func/ 下，文件补 .yaml）。绑定
+    /// func：`文件短路径/函数名`（functions/ 下，文件补 .yaml）。绑定
     /// merge_args；继承调用点 config（不压栈）；函数体走完未 return 默认
     /// 返回 true；返回布尔驱动调用点 then/else。
     async fn exec_func(
@@ -2106,7 +2106,7 @@ mod tests {
             let template = query
                 .resource
                 .logical_path()
-                .strip_prefix("tmpl/")
+                .strip_prefix("templates/")
                 .unwrap_or_else(|| query.resource.logical_path())
                 .to_string();
             self.calls.lock().unwrap().push(template.clone());
@@ -2221,9 +2221,9 @@ mod tests {
     }
 
     impl Rig {
-        /// 在分区 tmpl/ 下落一个占位模板文件（fake matcher 不读内容）。
+        /// 在分区 templates/ 下落一个占位模板文件（fake matcher 不读内容）。
         fn tmpl(&self, name: &str) {
-            let d = self.store.tmpl_dir(PKG);
+            let d = self.store.templates_dir(PKG);
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join(name), b"png").unwrap();
         }
@@ -3110,12 +3110,14 @@ mod tests {
 
     // ---- 快照隔离 --------------------------------------------------------------
 
-    /// Phase 4/8 收口：包内 `scripts/` 可直接运行（入口脚本、call/func 目标），
-    /// override 优先于包、包优先于分区同名文件，分区脚本继续可用。
+    /// Phase 4/8 收口：包内 `scripts/` 可直接运行（入口脚本、call 目标），
+    /// 包内 `functions/` 提供 func 目标；override 优先于包、包优先于分区同名
+    /// 文件，分区脚本/函数库继续可用。
     #[tokio::test]
     async fn package_scripts_run_with_composite_priority() {
         let r = rig(HashMap::new(), solid_png(10, 10, [0, 0, 0]), "info");
-        let manifest = br#"id = "official.test"
+        let manifest = br#"format_version = 2
+id = "official.test"
 version = "1.0.0"
 
 [android]
@@ -3137,7 +3139,7 @@ packages = ["com.test.app"]
   - call: sub.yaml
 ";
             zw.write_all(main_script.as_bytes()).unwrap();
-            zw.start_file("scripts/pack_lib.yaml", opts).unwrap();
+            zw.start_file("functions/pack_lib.yaml", opts).unwrap();
             zw.write_all(
                 "always:
   steps:

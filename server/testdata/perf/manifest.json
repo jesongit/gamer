@@ -76,7 +76,7 @@
                                             },
                       "region_suffix":  "361_365_639_479",
                       "region_suffix_form":  "per_mille_xyxy",
-                      "gray_template":  "tmpl/perf_btn_primary#361_365_639_479.png",
+                      "gray_template":  "templates/perf_btn_primary#361_365_639_479.png",
                       "rgb_template":  "tmpl-rgb/perf_btn_primary#361_365_639_479.png"
                   },
                   {
@@ -101,7 +101,7 @@
                                             },
                       "region_suffix":  "130_219_185_240",
                       "region_suffix_form":  "per_mille_xyxy",
-                      "gray_template":  "tmpl/perf_txt_status#130_219_185_240.png",
+                      "gray_template":  "templates/perf_txt_status#130_219_185_240.png",
                       "rgb_template":  "tmpl-rgb/perf_txt_status#130_219_185_240.png"
                   },
                   {
@@ -126,7 +126,7 @@
                                             },
                       "region_suffix":  "dr",
                       "region_suffix_form":  "half_code_dr",
-                      "gray_template":  "tmpl/perf_corner_menu#dr.png",
+                      "gray_template":  "templates/perf_corner_menu#dr.png",
                       "rgb_template":  "tmpl-rgb/perf_corner_menu#dr.png"
                   }
               ],
@@ -163,17 +163,17 @@
                       "sha256":  "b323aec8231c348f46b999f6efc8b506e74c90d8ff89ce84433e31c02530af43"
                   },
                   {
-                      "path":  "tmpl/perf_btn_primary#361_365_639_479.png",
+                      "path":  "templates/perf_btn_primary#361_365_639_479.png",
                       "bytes":  1214,
                       "sha256":  "ad230dc4db0f4c00db789daf9bfc8342a8460f8e93bc0cc1667b5ce05dc611c4"
                   },
                   {
-                      "path":  "tmpl/perf_corner_menu#dr.png",
+                      "path":  "templates/perf_corner_menu#dr.png",
                       "bytes":  181,
                       "sha256":  "2cae5fbd354f17af960442d3d202e0cc1e929113b26a23cf32f9c9b2c2778517"
                   },
                   {
-                      "path":  "tmpl/perf_txt_status#130_219_185_240.png",
+                      "path":  "templates/perf_txt_status#130_219_185_240.png",
                       "bytes":  200,
                       "sha256":  "3c8f8d842253f8498395cdc32be7be46bd019f0d1ee1d4bb1fbb5d112cac91cd"
                   },
@@ -197,7 +197,7 @@
                      "encode_stream":  "ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=0x121A26:s=1080x1920:r=30:d=3 -vf format=rgb24,geq=r=\u002712+mod(31*X+17*Y+53*(X/32)*(Y/32),23)+mod(N*5+(X+Y)/2,7)\u0027:g=\u002714+mod(37*X+11*Y+59*(X/24)*(Y/40),25)+mod(N*7+X,9)\u0027:b=\u002718+mod(23*X+41*Y+67*(X/48)*(Y/28),27)+mod(N*9+Y,8)\u0027,drawbox=x=110:y=180:w=200:h=150:color=0x27324A:t=fill,drawbox=x=770:y=300:w=180:h=200:color=0x33284A:t=fill,drawbox=x=480:y=1450:w=260:h=160:color=0x1F3A2E:t=fill,drawbox=x=390:y=700:w=300:h=220:color=0xFF5533:t=fill,drawbox=x=140:y=420:w=60:h=40:color=0x35E6FF:t=fill,drawbox=x=1040:y=1880:w=80:h=80:color=0x7DFF4D:t=fill,format=yuv420p -c:v libx264 -preset slow -qp 22 -bf 0 -threads 1 -g 30 -x264-params keyint=30:min-keyint=30:scenecut=0:open_gop=0 -an -f h264",
                      "extract_keyframe_template":  "ffmpeg -hide_banner -loglevel error -y -i stream.h264 -vf \"select=\u0027eq(n,{IDX})\u0027\" -frames:v 1 keyframe_{NNN}.png  # IDX in {0,30,60}",
                      "crop_rgb_template":  "ffmpeg -hide_banner -loglevel error -y -i keyframe_001.png -vf \"crop={W}:{H}:{X}:{Y}\" -frames:v 1 -pix_fmt rgb24 tmpl-rgb/{NAME}#{SUFFIX}.png",
-                     "crop_gray_template":  "ffmpeg -hide_banner -loglevel error -y -i keyframe_001.png -vf \"crop={W}:{H}:{X}:{Y},format=gray\" -frames:v 1 -pix_fmt gray tmpl/{NAME}#{SUFFIX}.png",
+                     "crop_gray_template":  "ffmpeg -hide_banner -loglevel error -y -i keyframe_001.png -vf \"crop={W}:{H}:{X}:{Y},format=gray\" -frames:v 1 -pix_fmt gray templates/{NAME}#{SUFFIX}.png",
                      "verify_idr":  "ffprobe -show_frames -show_entries frame=pict_type,coded_picture_number -of csv=p=0 stream.h264"
                  }
 }

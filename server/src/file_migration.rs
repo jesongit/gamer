@@ -17,7 +17,7 @@
 //!   改动，故回滚无需恢复源。Committed 之后走快照恢复路径（契约 §6）；
 //! - 旧源文件保留到升级提交 + 回滚保留期结束——本框架不提供源清理入口。
 //!
-//! **当前布局（`data/<pkg>/{yaml,func,tmpl}/`）无迁移需求**：本模块为纯库代码
+//! **当前布局（`data/<pkg>/{scripts,functions,templates}/`）无迁移需求**：本模块为纯库代码
 //! 骨架 + 单测，未接线任何运行路径；未来文件布局迁移在此框架上落地。
 
 // 纯框架批次：消费方接线属后续迁移需求落地时（batch 计划 DATA-006/QA-003）
@@ -728,15 +728,15 @@ mod tests {
         let entries = vec![
             PlanEntry {
                 source: fx.old_root.join("脚本一.yaml"),
-                target: fx.new_root.join("yaml").join("main.yaml"),
+                target: fx.new_root.join("scripts").join("main.yaml"),
             },
             PlanEntry {
                 source: fx.old_root.join("资源包").join("模板 图片.png"),
-                target: fx.new_root.join("tmpl").join("main.png"),
+                target: fx.new_root.join("templates").join("main.png"),
             },
             PlanEntry {
                 source: fx.old_root.join("a").join("b").join("deep.yaml"),
-                target: fx.new_root.join("func").join("library.yaml"),
+                target: fx.new_root.join("functions").join("library.yaml"),
             },
         ];
         let before = snapshot_sources(&entries);

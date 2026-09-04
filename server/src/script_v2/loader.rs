@@ -1208,7 +1208,7 @@ fn build_map_step(ctx: &mut BuildCtx, entries: &[MapEntry], path: &str) -> Optio
                     codes::STEP_RETURN_IN_SCRIPT,
                     path,
                     "",
-                    "return 只能出现在函数文件（func/）中",
+                    "return 只能出现在函数文件（functions/）中",
                 );
                 return None;
             }

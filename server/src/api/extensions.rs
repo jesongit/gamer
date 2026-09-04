@@ -109,7 +109,7 @@ pub(super) async fn api_start_extension(
         None => None,
         Some(name) => {
             // keymap profile 数据通道：分区取自 start 请求的 AppContext，
-            // 方案 YAML 从现有 data/<pkg>/keymap 存储原样读出交给 guest。
+            // 方案 YAML 从现有 data/<pkg>/keymaps 存储原样读出交给 guest。
             if id != crate::extensions::KEYMAP_EXTENSION_ID {
                 return ApiError::bad_request("仅 keymap 插件支持 profile 启动参数")
                     .into_response();

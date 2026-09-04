@@ -50,8 +50,10 @@ mod tests {
     use crate::timer_core::{ScheduleSpec, TimerCore, TimerTask, TimerTaskState};
 
     fn package_manifest(id: &str, version: &str, android: &str) -> Vec<u8> {
-        format!("id = \"{id}\"\nversion = \"{version}\"\n[android]\npackages = [\"{android}\"]\n")
-            .into_bytes()
+        format!(
+            "format_version = 2\nid = \"{id}\"\nversion = \"{version}\"\n[android]\npackages = [\"{android}\"]\n"
+        )
+        .into_bytes()
     }
 
     fn archive(entries: Vec<(&str, &[u8])>) -> Vec<u8> {
@@ -141,6 +143,7 @@ mod tests {
             .supports_android_package(&parse_android_package_name("com.example.game").unwrap()));
 
         let duplicate = br#"
+format_version = 2
 id = "official.xxx"
 version = "1.2.0"
 [android]
@@ -152,6 +155,7 @@ packages = ["com.example.game", "com.example.game"]
         ));
 
         let unknown = br#"
+format_version = 2
 id = "official.xxx"
 version = "1.2.0"
 unexpected = true
@@ -162,6 +166,59 @@ packages = ["com.example.game"]
             parse_manifest(unknown),
             Err(AppPackageError::InvalidManifest(_))
         ));
+    }
+
+    /// Manifest V2 门禁：必填 format_version，且只接受 2。
+    #[test]
+    fn manifest_requires_format_version_two() {
+        let android = "[android]\npackages = [\"com.example.game\"]\n";
+        let missing = format!("id = \"official.xxx\"\nversion = \"1.2.0\"\n{android}");
+        let err = parse_manifest(missing.as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("缺少 format_version"), "{err}");
+
+        for version in ["1", "3"] {
+            let wrong = format!(
+                "format_version = {version}\nid = \"official.xxx\"\nversion = \"1.2.0\"\n{android}"
+            );
+            let err = parse_manifest(wrong.as_bytes()).unwrap_err();
+            assert!(
+                err.to_string().contains("format_version 不为 2"),
+                "format_version={version}: {err}"
+            );
+        }
+
+        let ok =
+            format!("format_version = 2\nid = \"official.xxx\"\nversion = \"1.2.0\"\n{android}");
+        assert!(parse_manifest(ok.as_bytes()).is_ok());
+    }
+
+    /// 包内 functions/ 可安装（ResourceKind::Functions），且函数库内容只进
+    /// functions 索引、绝不混入 scripts 索引。
+    #[tokio::test]
+    async fn install_accepts_functions_directory_and_keeps_indexes_separate() {
+        let temp = TempDir::new().unwrap();
+        let store = AppPackageStore::new(temp.path());
+        let manifest = package_manifest("official.fn", "1.0.0", "com.example.game");
+        let package = archive(vec![
+            ("manifest.toml", &manifest),
+            ("functions/common.yaml", b"login:\n  steps: []\n"),
+            ("scripts/daily.yaml", b"steps: []\n"),
+        ]);
+        store.install_and_activate(&package, None).await.unwrap();
+
+        let resolver = CompositeResolver::new(temp.path());
+        let scripts = resolver.script_sources("com.example.game").unwrap();
+        assert!(scripts.contains_key("daily.yaml"));
+        assert!(
+            !scripts.contains_key("common.yaml"),
+            "functions/ 内容不得进入脚本索引"
+        );
+        let functions = resolver.function_sources("com.example.game").unwrap();
+        assert!(functions.contains_key("common.yaml"));
+        assert!(
+            !functions.contains_key("daily.yaml"),
+            "scripts/ 内容不得进入函数库索引"
+        );
     }
 
     #[tokio::test]
@@ -184,6 +241,54 @@ packages = ["com.example.game"]
                 .await,
             Err(AppPackageError::InvalidAppPackageId(_))
         ));
+    }
+
+    /// list_installed 容错：单个损坏版本目录（无 format_version 的旧格式
+    /// manifest / 目录与 manifest 不一致）只跳过 + tracing::warn，不炸整个列表；
+    /// uninstall 按目录名删除、无需 manifest 解析，仍可清理这类目录。
+    #[tokio::test]
+    async fn list_installed_skips_corrupt_version_directories_with_warning() {
+        let temp = TempDir::new().unwrap();
+        let store = AppPackageStore::new(temp.path());
+        let good = archive(vec![(
+            "manifest.toml",
+            &package_manifest("official.good", "1.0.0", "com.example.game"),
+        )]);
+        store.install_archive(&good, None).unwrap();
+
+        // 手工放一个旧格式（缺 format_version）的版本目录
+        let legacy_root = temp.path().join("app-packages/official.bad/0.9.0");
+        std::fs::create_dir_all(&legacy_root).unwrap();
+        std::fs::write(
+            legacy_root.join("manifest.toml"),
+            br#"id = "official.bad"
+version = "0.9.0"
+[android]
+packages = ["com.example.game"]
+"#,
+        )
+        .unwrap();
+        // 再放一个目录名与 manifest 不一致的版本目录
+        let mismatched_root = temp.path().join("app-packages/official.bad/9.9.9");
+        std::fs::create_dir_all(&mismatched_root).unwrap();
+        std::fs::write(
+            mismatched_root.join("manifest.toml"),
+            package_manifest("official.bad", "1.0.0", "com.example.game"),
+        )
+        .unwrap();
+
+        let installed = store.list_installed().unwrap();
+        assert_eq!(installed.len(), 1, "损坏版本目录必须被跳过");
+        assert_eq!(installed[0].manifest().id().as_str(), "official.good");
+
+        // uninstall 仍可按 id/version 删除损坏目录（不解析 manifest）
+        let bad_id = parse_app_package_id("official.bad").unwrap();
+        assert!(store
+            .uninstall(&bad_id, &InstalledVersion::parse("0.9.0").unwrap())
+            .await
+            .unwrap());
+        assert!(!legacy_root.exists());
+        assert_eq!(store.list_installed().unwrap().len(), 1);
     }
 
     #[test]
