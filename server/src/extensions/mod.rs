@@ -55,7 +55,7 @@ pub(crate) use model::{
 pub(crate) use permissions::{Permission, PermissionSet};
 pub(crate) use service::{
     ExtensionInspection, ExtensionInstallContext, ExtensionService, ExtensionSnapshot,
-    PermissionDiff,
+    PermissionDiff, TimerRunnerRegistrar,
 };
 pub(crate) use signature::{
     RegistryProof, SignatureInfo, SignatureStatus, SignatureVerifier, TrustStore,
@@ -187,6 +187,39 @@ mod tests {
 
         fn is_available(&self) -> bool {
             true
+        }
+    }
+
+    /// 记录扩展生命周期回调的 registrar 桩（ADR-13 测试用）。
+    #[derive(Default, Clone)]
+    struct RecordingRegistrar {
+        started: Arc<Mutex<Vec<String>>>,
+        stopped: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl TimerRunnerRegistrar for RecordingRegistrar {
+        async fn extension_started(&self, extension_id: &str) -> anyhow::Result<()> {
+            self.started.lock().unwrap().push(extension_id.to_string());
+            Ok(())
+        }
+
+        async fn extension_stopped(&self, extension_id: &str) -> anyhow::Result<()> {
+            self.stopped.lock().unwrap().push(extension_id.to_string());
+            Ok(())
+        }
+    }
+
+    struct FailingRegistrar;
+
+    #[async_trait]
+    impl TimerRunnerRegistrar for FailingRegistrar {
+        async fn extension_started(&self, _extension_id: &str) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("registry exploded"))
+        }
+
+        async fn extension_stopped(&self, _extension_id: &str) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("registry exploded"))
         }
     }
 
@@ -480,6 +513,86 @@ mod tests {
             .await
             .unwrap());
         assert!(service.ui_contributions().unwrap().is_empty());
+    }
+
+    /// ADR-13 / P11.2：runner 注册缝跟随扩展生命周期——start 注册（owner 正确）、
+    /// enable 不注册、disable 运行中 = 自动 stop + 注销 + UI 贡献消失、再 start
+    /// 可重复注册。
+    #[tokio::test]
+    async fn lifecycle_hooks_register_runners_on_start_and_disable_running_stops_them() {
+        let temp = TempDir::new().unwrap();
+        let runtime = Arc::new(CountingRuntime::default());
+        let registrar = Arc::new(RecordingRegistrar::default());
+        let service = ExtensionService::new(
+            ExtensionStore::new(temp.path()),
+            runtime.clone(),
+            CapabilityRegistry::default(),
+        )
+        .with_runner_registrar(registrar.clone());
+        let installed = service
+            .install(&archive(
+                &manifest("com.example.extension", "1.0.0", &[], "^1.0"),
+                VALID_WASM,
+            ))
+            .await
+            .unwrap();
+        let id = installed.id().clone();
+
+        // enable 不触碰 runner：Running 才是 runner 生命周期边界
+        service.enable(&id).await.unwrap();
+        assert!(registrar.started.lock().unwrap().is_empty());
+        assert!(registrar.stopped.lock().unwrap().is_empty());
+
+        service.start(&id).await.unwrap();
+        assert_eq!(*runtime.starts.lock().unwrap(), 1);
+        assert_eq!(
+            registrar.started.lock().unwrap().as_slice(),
+            ["com.example.extension"]
+        );
+
+        // disable 运行中：先自动 stop（实例结束 + runner 注销）再 Disabled
+        let disabled = service.disable(&id).await.unwrap();
+        assert_eq!(disabled.state(), ExtensionState::Disabled);
+        assert_eq!(*runtime.stops.lock().unwrap(), 1);
+        assert_eq!(
+            registrar.stopped.lock().unwrap().as_slice(),
+            ["com.example.extension"]
+        );
+        assert!(
+            service.ui_contributions().unwrap().is_empty(),
+            "disable 后 UI 贡献消失"
+        );
+
+        // 再 enable+start → 再注册（同 owner 重复注册 = 原地替换）
+        service.enable(&id).await.unwrap();
+        service.start(&id).await.unwrap();
+        assert_eq!(*runtime.starts.lock().unwrap(), 2);
+        assert_eq!(registrar.started.lock().unwrap().len(), 2);
+    }
+
+    /// registrar 回调失败不得影响生命周期本身：start 仍进入 Running（缺
+    /// runner 的后果由任务侧 DependencyMissing 语义兜底），stop 仍回到 Enabled。
+    #[tokio::test]
+    async fn failing_registrar_does_not_break_lifecycle_transitions() {
+        let temp = TempDir::new().unwrap();
+        let service = ExtensionService::new(
+            ExtensionStore::new(temp.path()),
+            Arc::new(CountingRuntime::default()),
+            CapabilityRegistry::default(),
+        )
+        .with_runner_registrar(Arc::new(FailingRegistrar));
+        let installed = service
+            .install(&archive(
+                &manifest("com.example.extension", "1.0.0", &[], "^1.0"),
+                VALID_WASM,
+            ))
+            .await
+            .unwrap();
+        service.enable(installed.id()).await.unwrap();
+        let running = service.start(installed.id()).await.unwrap();
+        assert_eq!(running.state(), ExtensionState::Running);
+        let stopped = service.stop(installed.id()).await.unwrap();
+        assert_eq!(stopped.state(), ExtensionState::Enabled);
     }
 
     #[test]

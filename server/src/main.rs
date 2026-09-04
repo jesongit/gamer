@@ -331,21 +331,25 @@ impl RuntimeServices {
             db.clone(),
         ));
         let runs = Arc::new(run_manager::RunManager::new(executor.clone()));
-        let scheduler = Arc::new(scheduler::Scheduler::new(
-            db.clone(),
-            scripts.clone(),
-            runs.clone(),
-        ));
+        // ADR-13：裸 Core 组合——Scheduler 不再预置任何 runner；gamer.yaml 的
+        // 定时 runner 由扩展 start 生命周期经 registrar 钩子注册。
+        let scheduler = Arc::new(scheduler::Scheduler::new(db.clone()));
         let capabilities = capabilities::adapters::build_registry(
             devices.clone(),
             scripts.clone(),
             db.clone(),
             runs.clone(),
         );
-        let extensions = Arc::new(extensions::ExtensionService::for_data_root(
-            cfg.data_dir.clone(),
-            capabilities,
+        let runner_registrar = Arc::new(timer_yaml::YamlTimerRunnerRegistrar::new(
+            scheduler.clone(),
+            db.clone(),
+            runs.clone(),
+            scripts.clone(),
         ));
+        let extensions = Arc::new(
+            extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities)
+                .with_runner_registrar(runner_registrar),
+        );
         let ctx = Self {
             scripts,
             viewers,

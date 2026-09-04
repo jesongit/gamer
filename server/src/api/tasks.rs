@@ -81,12 +81,19 @@ fn preset_json(preset: &TaskPreset) -> Value {
 
 // ---------- UI 支撑只读端点 ----------
 
-/// GET /api/runners：已注册 runner id 列表（TaskBoard 执行器下拉数据源）。
+/// GET /api/runners：已注册 runner 列表（含 owner 扩展，TaskBoard 执行器下拉
+/// 数据源）。裸 Core（无扩展 start）时为空数组。
 pub(super) async fn api_list_runners(State(st): State<AppState>) -> Response {
-    let ids = st.scheduler.runner_ids();
+    let runners = st.scheduler.runners();
     Json(
-        ids.into_iter()
-            .map(|runner_id| serde_json::json!({ "runner_id": runner_id }))
+        runners
+            .into_iter()
+            .map(|runner| {
+                serde_json::json!({
+                    "runner_id": runner.runner_id,
+                    "owner_extension_id": runner.owner_extension_id,
+                })
+            })
             .collect::<Vec<_>>(),
     )
     .into_response()

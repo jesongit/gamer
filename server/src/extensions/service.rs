@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
@@ -24,8 +25,29 @@ use super::{
     KeymapWasmStartRequest, NoKeymapWasmRuntime, ScreenSize, KEYMAP_EXTENSION_ID,
 };
 use crate::yaml_extension::{
-    NoYamlWasmRuntime, YamlProgramResolver, YamlWasmRunRequest, YamlWasmRuntime,
+    NoYamlWasmRuntime, YamlProgramResolver, YamlWasmRunRequest, YamlWasmRuntime, YAML_EXTENSION_ID,
 };
+
+/// Extension lifecycle → Timer runner registry seam（ADR-13 / P11.2）。The
+/// service only knows *when* a lifecycle transition happened; the
+/// composition-root implementation owns the registry (the Scheduler) and any
+/// extension-id specific runner construction.  The interface is generic — any
+/// extension may register runners it owns; today only `gamer.yaml` does, and
+/// that special case lives behind this seam until Wave3 moves the runner into
+/// the extension boundary.  Optional so minimal assemblies (tests, gate
+/// router) can run without a scheduler.
+#[async_trait]
+pub(crate) trait TimerRunnerRegistrar: Send + Sync {
+    /// The extension entered `Running`: register every runner it owns
+    /// (owner = extension id) and resume tasks that were suspended because
+    /// those runners were missing.
+    async fn extension_started(&self, extension_id: &str) -> anyhow::Result<()>;
+
+    /// The extension left `Running` (stop / disable / uninstall): unregister
+    /// every runner it owns; Active tasks bound to them enter
+    /// `DependencyMissing` (tasks are kept, never deleted).
+    async fn extension_stopped(&self, extension_id: &str) -> anyhow::Result<()>;
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ExtensionSnapshot {
@@ -125,6 +147,7 @@ pub(crate) struct ExtensionService {
     running: std::sync::Mutex<HashMap<ExtensionId, WasmInstanceHandle>>,
     keymap_running: std::sync::Mutex<HashMap<ExtensionId, KeymapWasmInstanceHandle>>,
     ui: UiContributionRegistry,
+    runner_registrar: Option<Arc<dyn TimerRunnerRegistrar>>,
 }
 
 impl ExtensionService {
@@ -194,7 +217,19 @@ impl ExtensionService {
             running: std::sync::Mutex::new(HashMap::new()),
             keymap_running: std::sync::Mutex::new(HashMap::new()),
             ui: UiContributionRegistry::default(),
+            runner_registrar: None,
         }
+    }
+
+    /// Attach the ADR-13 runner registration seam (composition root only).
+    /// Without it, lifecycle transitions simply do not touch any runner
+    /// registry — assemblies without a scheduler stay bare-core.
+    pub(crate) fn with_runner_registrar(
+        mut self,
+        registrar: Arc<dyn TimerRunnerRegistrar>,
+    ) -> Self {
+        self.runner_registrar = Some(registrar);
+        self
     }
 
     pub(crate) fn with_default_runtime(
@@ -589,13 +624,22 @@ impl ExtensionService {
         self.snapshot_for(id)
     }
 
+    /// Disable an extension.  A Running instance is stopped first (ADR-13
+    /// disable semantics: the WASM entrypoint ends and every runner the
+    /// extension owns is unregistered) instead of the old behaviour of
+    /// rejecting disable-while-running.
     pub(crate) async fn disable(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
         let _guard = self.operation_lock.lock().await;
         let mut states = self.store.read_state()?;
         let versions = self.versions_for(id)?;
         let mut record = state_for_versions(id, &versions, states.get(id).cloned())?;
         match record.state {
-            ExtensionState::Running => return Err(invalid_transition(id, "disable", record.state)),
+            ExtensionState::Running => {
+                self.stop_running_instance(id).await?;
+                self.unregister_extension_runners(id).await;
+                record.state = ExtensionState::Disabled;
+                record.last_error = None;
+            }
             ExtensionState::Disabled => {}
             ExtensionState::Installed | ExtensionState::Enabled | ExtensionState::Failed => {
                 record.state = ExtensionState::Disabled;
@@ -634,7 +678,13 @@ impl ExtensionService {
             self.host_api.clone(),
             active.manifest(),
         )?;
-        let handle = if id.as_str() == KEYMAP_EXTENSION_ID {
+        let handle = if id.as_str() == YAML_EXTENSION_ID {
+            // 过渡缝（Wave3 随 YAML 栈迁移）：gamer.yaml 的执行模型是按调用
+            // 惰性实例化（run_yaml_vnext / LazyYamlWasmtimeRuntime），不实现
+            // extension-host 常驻实例 world。start 只表示"作为 timer runner
+            // 提供方在线"（ADR-13 注册缝），不启动实例。
+            None
+        } else if id.as_str() == KEYMAP_EXTENSION_ID {
             match self
                 .keymap_runtime
                 .start(KeymapWasmStartRequest {
@@ -647,7 +697,7 @@ impl ExtensionService {
                 })
                 .await
             {
-                Ok(handle) => StartHandle::Keymap(handle),
+                Ok(handle) => Some(StartHandle::Keymap(handle)),
                 Err(error) => return self.mark_start_failed(id, states, record, error).await,
             }
         } else {
@@ -662,14 +712,15 @@ impl ExtensionService {
                 })
                 .await
             {
-                Ok(handle) => StartHandle::Generic(handle),
+                Ok(handle) => Some(StartHandle::Generic(handle)),
                 Err(error) => return self.mark_start_failed(id, states, record, error).await,
             }
         };
 
         let instance_insert = match handle {
-            StartHandle::Generic(handle) => RunningHandle::Generic(handle),
-            StartHandle::Keymap(handle) => RunningHandle::Keymap(handle),
+            Some(StartHandle::Generic(handle)) => Some(RunningHandle::Generic(handle)),
+            Some(StartHandle::Keymap(handle)) => Some(RunningHandle::Keymap(handle)),
+            None => None,
         };
 
         let mut running_record = record;
@@ -680,23 +731,30 @@ impl ExtensionService {
             next.insert(id.clone(), running_record.clone());
             next
         }) {
-            let _ = self.stop_running_handle(instance_insert).await;
+            if let Some(handle) = instance_insert {
+                let _ = self.stop_running_handle(handle).await;
+            }
             return Err(error);
         }
         match instance_insert {
-            RunningHandle::Generic(handle) => {
+            Some(RunningHandle::Generic(handle)) => {
                 self.running
                     .lock()
                     .expect("extension running map poisoned")
                     .insert(id.clone(), handle);
             }
-            RunningHandle::Keymap(handle) => {
+            Some(RunningHandle::Keymap(handle)) => {
                 self.keymap_running
                     .lock()
                     .expect("keymap running map poisoned")
                     .insert(id.clone(), handle);
             }
+            None => {}
         }
+        // ADR-13：进入 Running 即注册该扩展拥有的 runner（owner=扩展 id）并
+        // 恢复其缺依赖任务。注册失败不回滚 Running 状态（缺 runner 的后果
+        // 由 dispatch 时的 DependencyMissing 语义兜底），只记录告警。
+        self.register_extension_runners(id).await;
         self.refresh_ui_registry()?;
         self.snapshot_for(id)
     }
@@ -709,41 +767,12 @@ impl ExtensionService {
         if !record.state.is_running() {
             return Err(invalid_transition(id, "stop", record.state));
         }
-        if id.as_str() == KEYMAP_EXTENSION_ID {
-            let handle = self
-                .keymap_running
-                .lock()
-                .expect("keymap running map poisoned")
-                .get(id)
-                .copied()
-                .ok_or(ExtensionError::RuntimeUnavailable(
-                    "当前进程没有该插件的运行实例",
-                ))?;
-            self.keymap_runtime.stop(handle).await?;
-        } else {
-            let handle = self
-                .running
-                .lock()
-                .expect("extension running map poisoned")
-                .get(id)
-                .copied()
-                .ok_or(ExtensionError::RuntimeUnavailable(
-                    "当前进程没有该插件的运行实例",
-                ))?;
-            self.runtime.stop(handle).await?;
-        }
+        self.stop_running_instance(id).await?;
         record.state = ExtensionState::Enabled;
         record.last_error = None;
         states.insert(id.clone(), record);
         self.store.write_state(&states)?;
-        self.running
-            .lock()
-            .expect("extension running map poisoned")
-            .remove(id);
-        self.keymap_running
-            .lock()
-            .expect("keymap running map poisoned")
-            .remove(id);
+        self.unregister_extension_runners(id).await;
         self.refresh_ui_registry()?;
         self.snapshot_for(id)
     }
@@ -769,6 +798,9 @@ impl ExtensionService {
                 version: version.to_string(),
             });
         }
+        // ADR-13 卸载清场：Running 已被上方守卫拒绝，正常路径 owner 名下本就
+        // 无 runner（stop/disable 已注销）；此处兜底摘除，幂等 no-op。
+        self.unregister_extension_runners(id).await;
         if !self.store.remove_version(id, version)? {
             return Ok(false);
         }
@@ -866,6 +898,71 @@ impl ExtensionService {
         match handle {
             RunningHandle::Generic(handle) => self.runtime.stop(handle).await,
             RunningHandle::Keymap(handle) => self.keymap_runtime.stop(handle).await,
+        }
+    }
+
+    /// Stop the live instance (whichever world it runs in) and clear the
+    /// running maps.  State persistence, runner hooks and UI refresh stay
+    /// with the callers so `stop` (→ Enabled) and `disable` (→ Disabled)
+    /// keep their distinct end states.  Instance-free extensions (gamer.yaml
+    /// 的按调用惰性执行模型) simply have nothing to stop.
+    async fn stop_running_instance(&self, id: &ExtensionId) -> ExtensionResult<()> {
+        if id.as_str() == YAML_EXTENSION_ID {
+            return Ok(());
+        }
+        if id.as_str() == KEYMAP_EXTENSION_ID {
+            let handle = self
+                .keymap_running
+                .lock()
+                .expect("keymap running map poisoned")
+                .get(id)
+                .copied()
+                .ok_or(ExtensionError::RuntimeUnavailable(
+                    "当前进程没有该插件的运行实例",
+                ))?;
+            self.keymap_runtime.stop(handle).await?;
+        } else {
+            let handle = self
+                .running
+                .lock()
+                .expect("extension running map poisoned")
+                .get(id)
+                .copied()
+                .ok_or(ExtensionError::RuntimeUnavailable(
+                    "当前进程没有该插件的运行实例",
+                ))?;
+            self.runtime.stop(handle).await?;
+        }
+        self.running
+            .lock()
+            .expect("extension running map poisoned")
+            .remove(id);
+        self.keymap_running
+            .lock()
+            .expect("keymap running map poisoned")
+            .remove(id);
+        Ok(())
+    }
+
+    /// ADR-13 start hook: registration failures never fail the start itself —
+    /// the extension is durably Running at this point, and a genuinely missing
+    /// runner resurfaces as task-level `DependencyMissing` at dispatch time.
+    async fn register_extension_runners(&self, id: &ExtensionId) {
+        if let Some(registrar) = &self.runner_registrar {
+            if let Err(error) = registrar.extension_started(id.as_str()).await {
+                tracing::warn!(extension = %id, %error, "extension runner registration failed");
+            }
+        }
+    }
+
+    /// ADR-13 stop/disable/uninstall hook.  Failures are logged, never
+    /// propagated: the instance is already gone at this point and the next
+    /// lifecycle transition retries the idempotent unregister.
+    async fn unregister_extension_runners(&self, id: &ExtensionId) {
+        if let Some(registrar) = &self.runner_registrar {
+            if let Err(error) = registrar.extension_stopped(id.as_str()).await {
+                tracing::warn!(extension = %id, %error, "extension runner unregister failed");
+            }
         }
     }
 }

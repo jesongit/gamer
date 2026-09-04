@@ -172,7 +172,7 @@ mod sec_tests {
         executor: Arc<dyn crate::run_manager::RunExecutor>,
     ) -> TestApp {
         let runs = Arc::new(crate::run_manager::RunManager::new(executor));
-        let scheduler = Arc::new(Scheduler::new(db.clone(), scripts.clone(), runs.clone()));
+        let scheduler = Arc::new(Scheduler::new(db.clone()));
         let auth = Arc::new(auth::AuthState::new(
             credential,
             auth_cfg,

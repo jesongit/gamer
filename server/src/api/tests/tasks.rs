@@ -273,8 +273,10 @@ async fn task_presets_use_new_schema_and_instantiate_independently() {
     assert_eq!(json_body(resp).await["preset_id"], "preset-daily");
 }
 
-/// UI 支撑只读端点：GET /api/runners、GET /api/schedule-providers 列出
-/// 已注册 runner / provider（内置 gamer.yaml runner 与 cron provider）。
+/// UI 支撑只读端点：GET /api/runners、GET /api/schedule-providers。
+/// P11.2 裸 Core 语义（ADR-13）：测试组合根不接扩展 registrar，没有任何
+/// runner 注册——/api/runners 为空数组；gamer.yaml 任务仍可保存，但立即
+/// 运行会因 runner 缺失进入 dependency_missing。cron provider 仍内置注册。
 #[tokio::test]
 async fn runner_and_schedule_provider_lists_are_exposed() {
     let t = build_app(
@@ -286,11 +288,38 @@ async fn runner_and_schedule_provider_lists_are_exposed() {
 
     let resp = get_json(&t, &sid, "/api/runners").await;
     let runners = json_body(resp).await;
-    assert_eq!(runners.as_array().unwrap().len(), 1);
-    assert_eq!(runners[0]["runner_id"], YAML_RUNNER);
+    assert_eq!(
+        runners.as_array().unwrap().len(),
+        0,
+        "裸 Core 不预置任何 runner"
+    );
 
     let resp = get_json(&t, &sid, "/api/schedule-providers").await;
     let providers = json_body(resp).await;
     assert_eq!(providers.as_array().unwrap().len(), 1);
     assert_eq!(providers[0]["provider_id"], "cron");
+
+    // gamer.yaml 任务可保存（runner 未注册不阻止保存），立即运行 → 显式
+    // 依赖缺失（任务保留），响应里带 runner_id 诊断。
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/tasks",
+        task_body("BareCore", YAML_RUNNER, "com.example.game/daily.yaml"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let task_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{task_id}/run"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FAILED_DEPENDENCY);
+    assert_eq!(json_body(resp).await["runner_id"], YAML_RUNNER);
+    let task = json_body(get_json(&t, &sid, &format!("/api/tasks/{task_id}")).await).await;
+    assert_eq!(task["state"], "dependency_missing");
+    assert_eq!(task["suspend_reason"], "missing_dependency=gamer.yaml");
 }

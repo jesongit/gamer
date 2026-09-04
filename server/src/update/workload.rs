@@ -251,9 +251,8 @@ mod tests {
             ..Default::default()
         };
         let db: Db = Arc::new(Store::open(&cfg).unwrap());
-        let scripts = Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
         let runs = Arc::new(RunManager::new(Arc::new(HangingExecutor)));
-        let scheduler = Arc::new(Scheduler::new(db.clone(), scripts, runs.clone()));
+        let scheduler = Arc::new(Scheduler::new(db.clone()));
 
         let app = AppContext::from_legacy_package("device-1", "pkg").unwrap();
         let schedule =
