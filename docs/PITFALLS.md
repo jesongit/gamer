@@ -188,3 +188,6 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 ## 2026-09-05
 
 - **新建/同步 worktree 后，`.gitattributes` 已钉 `text eol=lf` 的夹具仍可能是 CRLF**：attribute 变更（或 merge/rebase 同步）不会对已检出文件重 smudge，phase0 夹具逐一报"SHA-256 漂移"而主工作区全绿；解法：`rm <文件> && git checkout -- <文件>` 强制重 smudge（单 `git checkout --` 不重算），逐个修到全 LF。新 worktree 先跑一遍哈希锁测试再开工。
+- **happy-dom 环境下 `import.meta.url` 不是 `file://` scheme**（location 指向 http），`new URL(rel, import.meta.url)` 读 fixture 文件直接抛 "URL must be of scheme file"；组件测试（`// @vitest-environment happy-dom`）里读源码/夹具用 `join(process.cwd(), 'src', ...)`，只有 node 环境测试能走 import.meta.url 方案（console-components.test.js 即此）。
+- **@vue/test-utils 的 DOMWrapper 不透传原生属性访问器**：`wrapper.title` 返回 undefined（不是空串），`find(b => b.title.includes(...))` 会在谓词里自己炸 "reading 'includes' of undefined"；一律 `b.attributes('title')?.includes(...)`。
+- **vitest 同文件用例共享模块级单例 store（scriptsData/templatesData/devicesData 等 ref）**：上一用例填充后，下一用例"为空才拉取"的懒加载被短路，列表内容错位且报错点远离根因；组件挂载测试在 afterEach 显式清空这些 data ref。
