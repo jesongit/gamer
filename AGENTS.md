@@ -13,7 +13,7 @@ scrcpy 采集 Android 设备画面 → WebRTC（H.264 视频轨 + DataChannel �
 - `server/config.toml` — 关键项：`adb_path`、`ffmpeg_path`、`scrcpy_server`、`[auth].password_hash`；开发登录密码只从 `GAMER_ADMIN_PASSWORD` 读取并在进程内生成 Argon2id PHC，无默认账号/密码
 - `server/data/gamer.db` — SQLite（设备/任务/日志）；脚本/函数库/模板/按键映射按应用分区文件存储：`data/<应用包名>/{scripts,functions,templates,keymaps,presets,resources}/` + 工作区元数据 `package.toml`（分区名=设备配置的 pkg，目录即类型、跨分区不解析、无 default 兜底；资源解析优先级 **EditableLocal（分区目录）> UserOverride > InstalledPackage**）
 - 认证：配置只接受 Argon2id PHC `[auth].password_hash`；开发登录密码只用 `GAMER_ADMIN_PASSWORD`，无默认账号/密码。WebRTC 不内置 STUN/TURN，默认 host candidate 直连；Docker/NAT 需配置 `rtc_external_ip/rtc_udp_port/rtc_external_port` 并发布 UDP。
-- 数据基线：SQLite 当前为 schema v1；`user_version=0`/无版本号数据库不自动迁移，后续迁移从 v1→v2 开始。
+- 数据基线：SQLite 当前为 schema v3（P11.1：legacy `tasks` 表已删除，schedule JSON 为 `{provider_id,config}` 形态；v1→v2 Timer Core 泛化、v2→v3 Task 模型收口逐级迁移）；`user_version=0`/无版本号数据库不自动迁移。
 - 资源发行：**默认发行零业务资源**——业务分区目录（`data/<pkg>/{scripts,functions,templates,keymaps,presets,resources}/`）不再 git 跟踪；应用资产经 App Package 安装（`POST /api/app-packages/install`，zip/.gamerpkg，Manifest V2 强制 `format_version=2` 且新增 `functions/` 根，可带 `X-Expected-Sha256` 校验头；已装包存 `data/app-packages/`，安装即激活并发布包内 `presets/` 为任务预设），本地分区目录（EditableLocal）继续作为一等资源源可用；存量资产迁移用 Gamer 内置导出（`POST /api/app-packages/export`）与编辑提取（`POST /api/app-packages/:id/:version/edit`）。
 
 ## 常用命令

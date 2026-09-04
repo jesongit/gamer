@@ -184,3 +184,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **edit 提取 preflight 曾以本地工作区解析包内脚本的 func/call 引用，提取到空工作区必 400**：`PackageBuilder::validate_dir` 的跨文件引用校验读的是本地编辑区 functions/（此时已被删空），`resource.func.not_found` 与「包内脚本/函数内容缺失」无关；已修复为 validate_dir 注入被校验目录自身 scripts/functions 内容作最高优先引用视图（导出路径目录即工作区、行为不变），回归锁在 `builder::tests::validate_dir_resolves_cross_references_from_directory_itself`。
 - **本地删空后 `POST /api/scripts/:id/run` 对纯包内脚本返回 404，属当前实现边界而非包损坏**：run 端点的脚本存在性前置校验只读本地编辑区（`ScriptStore::get`），不查 composite 三层；包内资源的运行链路由引擎运行快照（EditableLocal > UserOverride > InstalledPackage）保证，验证包内容用引擎快照/composite 读面（keymap GET、脚本保存期模板校验），或先 edit 提取到本地再运行。
 - **Windows `core.autocrlf=true` 把仓库内 LF 的哈希/签名钉死文本检出成 CRLF，直接打爆锁测试**：phase0 夹具（SHA-256 锁）、`tools/plugins/*/manifest.toml`（include_str! 同步锁）、`tools/plugin-signing/gamer-dev-1.pem`（内嵌信任锚锁）逐一报"哈希/内容漂移"；解法：每类钉死文本在 `.gitattributes` 加 `text eol=lf`（二进制 PNG 勿加 `text`，其内部本就可能含 0x0D0A 字节序列），再 `git checkout --` 重 smudge 即恢复；Windows 上新建此类文件也要 LF 落盘。
+
+## 2026-09-05
+
+- **新建/同步 worktree 后，`.gitattributes` 已钉 `text eol=lf` 的夹具仍可能是 CRLF**：attribute 变更（或 merge/rebase 同步）不会对已检出文件重 smudge，phase0 夹具逐一报"SHA-256 漂移"而主工作区全绿；解法：`rm <文件> && git checkout -- <文件>` 强制重 smudge（单 `git checkout --` 不重算），逐个修到全 LF。新 worktree 先跑一遍哈希锁测试再开工。
