@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createUiBridge, replyToBridgeRequest, UI_BRIDGE_VERSION } from './workspace/bridge'
 import { createPanelRegistry, DEFAULT_PANEL_KEY } from './workspace/registry'
 import { createPanelUiLifecycle, createPluginRuntimeLifecycle } from './workspace/lifecycle'
-import { registerKeymapExtension } from './workspace/keymap-extension'
+import { registerCoreContributions } from './workspace/core-contributions'
 import { createServerUiContributionAdapter } from './workspace/plugin-center/adapter/server-ui'
 
 describe('Frontend Plugin Workspace', () => {
@@ -68,32 +68,6 @@ describe('Frontend Plugin Workspace', () => {
     expect(runtime.state('plugin-a')).toBe('stopped')
   })
 
-  it('adds and removes the Keymap contribution without coupling panel close to runtime', async () => {
-    const registry = createPanelRegistry()
-    const lifecycle = { runtime: createPluginRuntimeLifecycle() }
-    const start = vi.fn()
-    const stop = vi.fn()
-    const extension = registerKeymapExtension(registry, lifecycle, {
-      component: {},
-      context: { pkg: 'com.demo' },
-      runtime: { start, stop },
-    })
-
-    await extension.start()
-    expect(registry.resolve('gamer.keymap:keymaps')).toMatchObject({ title: '映射', runtime: 'core' })
-    expect(lifecycle.runtime.state('gamer.keymap')).toBe('running')
-    await extension.stop()
-    expect(registry.resolve('gamer.keymap:keymaps')).not.toBeNull()
-    expect(stop).toHaveBeenCalledTimes(1)
-
-    await extension.start()
-    await extension.uninstall()
-    expect(registry.resolve('gamer.keymap:keymaps')).toBeNull()
-    expect(lifecycle.runtime.state('gamer.keymap')).toBe('missing')
-    expect(start).toHaveBeenCalledTimes(2)
-    expect(stop).toHaveBeenCalledTimes(2)
-  })
-
   it('registers backend UI contributions and cleans stale panels on refresh/unmount', async () => {
     const registry = createPanelRegistry()
     const load = vi.fn()
@@ -119,4 +93,68 @@ describe('Frontend Plugin Workspace', () => {
     adapter.dispose()
     expect(registry.resolve('plugin-a:new')).toBeNull()
   })
+
+  it('mounts runtime=core contributions through the host component registry and follows panel lifecycle', async () => {
+    const registry = createPanelRegistry()
+    const load = vi.fn().mockResolvedValue({ ui_contributions: [
+      {
+        plugin_id: 'gamer.yaml', panel_id: 'automation', title: '自动化',
+        runtime: 'core', location: 'console.right', component: 'console.scripts',
+        requires_device: true, preferred_width: 440,
+      },
+      {
+        plugin_id: 'gamer.keymap', panel_id: 'keymaps', title: '映射',
+        runtime: 'core', location: 'console.right', component: 'console.keymaps',
+      },
+    ] })
+    const adapter = createServerUiContributionAdapter(registry, { load })
+
+    await adapter.refresh()
+    // 组件键解析为宿主组件；旧 hash 别名（script/keymap）继续可用；编辑器面板 session keep-alive
+    const automation = registry.resolve('gamer.yaml:automation')
+    expect(automation?.component).toBeTruthy()
+    expect(automation?.keepAlive).toBe('session')
+    expect(registry.resolve('script')?.key).toBe('gamer.yaml:automation')
+    expect(registry.resolve('keymap')?.key).toBe('gamer.keymap:keymaps')
+    // getProps 从 workspace core context 提取对应上下文
+    expect(automation?.getProps?.({ scriptRunner: { kind: 'runner' } })).toEqual({ context: { kind: 'runner' } })
+
+    // 扩展停用 → 服务端贡献消失 → 面板从注册表移除（生命周期跟随）
+    load.mockResolvedValueOnce({ ui_contributions: [] })
+    await adapter.refresh()
+    expect(registry.resolve('gamer.yaml:automation')).toBeNull()
+    expect(registry.resolve('gamer.keymap:keymaps')).toBeNull()
+    adapter.dispose()
+  })
+
+  it('renders a placeholder for unrecognized core component keys instead of dropping the panel', async () => {
+    const registry = createPanelRegistry()
+    const adapter = createServerUiContributionAdapter(registry, {
+      load: vi.fn().mockResolvedValue({ ui_contributions: [{
+        plugin_id: 'com.third.party', panel_id: 'widget', title: '组件面板',
+        runtime: 'core', location: 'console.right', component: 'future.widget',
+      }] }),
+    })
+
+    await adapter.refresh()
+    const panel = registry.resolve('com.third.party:widget')
+    expect(panel?.component).toBeTruthy()
+    // 占位面板不依赖扩展知识：只标记不可用，不抛错
+    expect(String(panel?.title)).toBe('组件面板')
+    adapter.dispose()
+    expect(registry.resolve('com.third.party:widget')).toBeNull()
+  })
+
+  it('bare core contributions (tasks/logs/settings) register through the same contract with gamer.core:tasks as default', () => {
+    const registry = createPanelRegistry()
+    registerCoreContributions(registry, { activePkg: { value: 'com.demo' } })
+
+    expect(registry.getPanels().map(panel => panel.key)).toEqual([
+      'gamer.core:tasks', 'gamer.core:logs', 'gamer.core:settings',
+    ])
+    expect(registry.defaultPanel()?.key).toBe(DEFAULT_PANEL_KEY)
+    expect(registry.resolve('tasks')?.key).toBe('gamer.core:tasks')
+    expect(registry.get('gamer.core:tasks')?.getProps?.({})).toEqual({ activePkg: 'com.demo' })
+  })
 })
+

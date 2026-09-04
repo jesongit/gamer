@@ -79,6 +79,9 @@ pub(crate) struct UiContribution {
     requires_device: bool,
     preferred_width: Option<u16>,
     entry: Option<ExtensionPath>,
+    /// `runtime = "core"` 贡献的宿主组件键（如 "console.scripts"）。组件名的
+    /// 解释权在前端 core-component-registry，服务端只保证非空并原样透传。
+    component: Option<String>,
     /// Declarative form schema；仅 `declarative` 贡献携带，随 UI 贡献注册表原样透传给前端。
     schema: Option<UiSchema>,
 }
@@ -120,6 +123,10 @@ impl UiContribution {
         self.entry.as_ref()
     }
 
+    pub(crate) fn component(&self) -> Option<&str> {
+        self.component.as_deref()
+    }
+
     pub(crate) fn schema(&self) -> Option<&UiSchema> {
         self.schema.as_ref()
     }
@@ -128,6 +135,8 @@ impl UiContribution {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum UiRuntime {
+    /// 宿主原生 Vue 面板：前端按 `component` 键从 core-component-registry 取组件。
+    Core,
     Declarative,
     Iframe,
 }
@@ -135,6 +144,7 @@ pub(crate) enum UiRuntime {
 impl UiRuntime {
     fn parse(value: &str) -> ExtensionResult<Self> {
         match value.trim() {
+            "core" => Ok(Self::Core),
             "declarative" => Ok(Self::Declarative),
             "iframe" => Ok(Self::Iframe),
             other => Err(ExtensionError::InvalidManifest(format!(
@@ -366,6 +376,8 @@ struct RawUiContribution {
     #[serde(default)]
     entry: Option<String>,
     #[serde(default)]
+    component: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     fields: Vec<RawUiField>,
@@ -538,6 +550,32 @@ fn parse_ui_contribution(raw: RawUiContribution) -> ExtensionResult<UiContributi
         )));
     }
     let runtime = UiRuntime::parse(&raw.runtime)?;
+    // 组件键只属于 core 贡献：服务端不做组件名白名单（组件名是前端知识），
+    // 只要求非空字符串并原样透传；其余 runtime 携带 component 视为拼写错误。
+    let component = match runtime {
+        UiRuntime::Core => {
+            let component = clean_ui_text(raw.component, "component")?.ok_or_else(|| {
+                ExtensionError::InvalidManifest(
+                    "core contribution 需要 component（宿主组件键，如 \"console.scripts\"）"
+                        .to_string(),
+                )
+            })?;
+            Some(component)
+        }
+        UiRuntime::Declarative | UiRuntime::Iframe => {
+            if raw.component.is_some() {
+                let name = if runtime == UiRuntime::Declarative {
+                    "declarative"
+                } else {
+                    "iframe"
+                };
+                return Err(ExtensionError::InvalidManifest(format!(
+                    "{name} contribution 不能带 component"
+                )));
+            }
+            None
+        }
+    };
     let entry = match (runtime, raw.entry) {
         (UiRuntime::Declarative, Some(_)) => {
             return Err(ExtensionError::InvalidManifest(
@@ -559,7 +597,14 @@ fn parse_ui_contribution(raw: RawUiContribution) -> ExtensionResult<UiContributi
                 "iframe contribution 必须指定 entry".to_string(),
             ));
         }
+        (UiRuntime::Core, Some(_)) => {
+            return Err(ExtensionError::InvalidManifest(
+                "core contribution 不能带 entry（面板由宿主组件渲染）".to_string(),
+            ));
+        }
+        (UiRuntime::Core, None) => None,
     };
+    // 组件键只属于 core 贡献；其余 runtime 携带即视为 manifest 拼写错误。
     if raw
         .preferred_width
         .is_some_and(|width| !(200..=800).contains(&width))
@@ -579,11 +624,12 @@ fn parse_ui_contribution(raw: RawUiContribution) -> ExtensionResult<UiContributi
         requires_device: raw.requires_device,
         preferred_width: raw.preferred_width,
         entry,
+        component,
         schema,
     })
 }
 
-/// declarative 贡献的 fields/description → 表单 schema；iframe 贡献禁止声明。
+/// declarative 贡献的 fields/description → 表单 schema；其余 runtime 禁止声明。
 fn parse_ui_schema(
     runtime: UiRuntime,
     raw_description: Option<String>,
@@ -592,7 +638,7 @@ fn parse_ui_schema(
     if runtime != UiRuntime::Declarative {
         if raw_description.is_some() || !raw_fields.is_empty() {
             return Err(ExtensionError::InvalidManifest(
-                "iframe contribution 不能声明 declarative 的 fields/description".to_string(),
+                "非 declarative contribution 不能声明 fields/description".to_string(),
             ));
         }
         return Ok(None);
@@ -1006,5 +1052,51 @@ mod tests {
             contribution.schema().unwrap().fields()[0].name(),
             Some("api_key")
         );
+    }
+
+    const CORE_HEADER: &str = "[ui]\n[[ui.contributions]]\npanel_id = \"scripts\"\ntitle = \"自动化\"\nruntime = \"core\"\n";
+
+    #[test]
+    fn core_contribution_parses_component_and_serializes_for_the_frontend() {
+        let ui = format!(
+            "{CORE_HEADER}component = \"console.scripts\"\nrequires_device = true\npreferred_width = 440\n"
+        );
+        let contribution = parse_ui(&ui).unwrap();
+        assert!(matches!(contribution.runtime(), UiRuntime::Core));
+        assert_eq!(contribution.component(), Some("console.scripts"));
+        assert!(contribution.entry().is_none());
+        assert!(contribution.schema().is_none());
+        assert!(contribution.requires_device());
+        assert_eq!(contribution.preferred_width(), Some(440));
+    }
+
+    #[test]
+    fn core_contribution_rejects_missing_blank_or_reserved_attributes() {
+        // 缺 component
+        assert!(parse_ui(CORE_HEADER).is_err());
+        // component 空白
+        let ui = format!("{CORE_HEADER}component = \"   \"\n");
+        assert!(parse_ui(&ui).is_err());
+        // core 不能带 iframe entry
+        let ui =
+            format!("{CORE_HEADER}component = \"console.scripts\"\nentry = \"ui/index.html\"\n");
+        assert!(parse_ui(&ui).is_err());
+        // core 不能声明 declarative fields
+        let ui = format!(
+            "{CORE_HEADER}component = \"console.scripts\"\n\
+             [[ui.contributions.fields]]\ntype = \"text\"\nname = \"a\"\nlabel = \"L\"\n"
+        );
+        assert!(parse_ui(&ui).is_err());
+        // component 首尾空白被归一
+        let ui = format!("{CORE_HEADER}component = \" console.scripts \"\n");
+        assert_eq!(parse_ui(&ui).unwrap().component(), Some("console.scripts"));
+    }
+
+    #[test]
+    fn non_core_contributions_reject_component() {
+        let ui = "[ui]\n[[ui.contributions]]\npanel_id = \"p\"\ntitle = \"P\"\nruntime = \"iframe\"\nentry = \"ui/index.html\"\ncomponent = \"console.scripts\"\n";
+        assert!(parse_ui(ui).is_err());
+        let ui = "[ui]\n[[ui.contributions]]\npanel_id = \"p\"\ntitle = \"P\"\nruntime = \"declarative\"\ndescription = \"说明\"\ncomponent = \"console.scripts\"\n";
+        assert!(parse_ui(ui).is_err());
     }
 }

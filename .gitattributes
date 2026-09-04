@@ -7,3 +7,13 @@ release/keys/*.pem text eol=lf
 # script_v2 fixture 的规范往返断言依赖 LF；避免 core.autocrlf=true 在 Windows 检出为 CRLF。
 server/tests/fixtures/script_v2/** text eol=lf
 web/src/script-editor/__fixtures__/** text eol=lf
+# Phase 0 跨端文本夹具同样哈希钉死（phase0_tests 校验 SHA-256），autocrlf 检出成
+# CRLF 会直接判哈希漂移；只钉文本夹具（fixtures 内的 PNG/截图是二进制，
+# 内部本就可能出现 0x0D0A 字节序列，禁止按文本转换）。
+tests/fixtures/manifest.json text eol=lf
+tests/fixtures/README.md text eol=lf
+tests/fixtures/keymaps/*.yaml text eol=lf
+tests/fixtures/scripts/*.yaml text eol=lf
+tests/fixtures/tasks/*.json text eol=lf
+# 内嵌信任锚公钥（signature.rs include_str! 锁同步）同样禁止 CRLF 漂移。
+tools/plugin-signing/*.pem text eol=lf

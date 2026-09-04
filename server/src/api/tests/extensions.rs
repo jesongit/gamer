@@ -185,6 +185,96 @@ entry = "ui/index.html"
         .exists());
 }
 
+/// runtime = "core" 的 UI 贡献 REST 契约：安装 → enable → `ui_contributions`
+/// 原样透传 component（服务端不做组件名白名单）→ disable 后不再发布
+/// （非 Enabled|Running 不进面板注册表）。
+#[tokio::test]
+async fn core_runtime_contributions_publish_component_and_follow_enabled_state() {
+    let test_app = build_app(
+        "extensions-core-ui",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let login_response = login(&test_app.app).await;
+    let session = first_cookie_pair(&cookie_of(&login_response));
+
+    let manifest = r#"manifest_version = 1
+id = "com.example.coreui"
+version = "1.0.0"
+name = "Core UI extension"
+entry = "plugin.wasm"
+
+[ui]
+[[ui.contributions]]
+panel_id = "automation"
+title = "自动化"
+runtime = "core"
+requires_device = true
+component = "console.scripts"
+"#
+    .as_bytes();
+    let archive = craft_zip(vec![
+        ("manifest.toml", manifest.to_vec()),
+        ("plugin.wasm", b"\0asm\x01\0\0\0".to_vec()),
+    ]);
+
+    let installed = send(
+        &test_app.app,
+        req_bytes(
+            "POST",
+            "/api/extensions",
+            None,
+            &zip_headers(session.clone()),
+            archive,
+        ),
+    )
+    .await;
+    assert_eq!(installed.status(), StatusCode::CREATED);
+
+    let enabled = post_json(
+        &test_app,
+        &session,
+        "/api/extensions/com.example.coreui/enable",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(enabled.status(), StatusCode::OK);
+
+    let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
+    let panels = json_body(contributions).await;
+    let panels = panels.as_array().unwrap();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(panels[0]["panel_id"], "automation");
+    assert_eq!(panels[0]["runtime"], "core");
+    assert_eq!(panels[0]["component"], "console.scripts");
+    assert_eq!(panels[0]["requires_device"], true);
+    assert!(panels[0]["entry"].is_null());
+
+    // 列表视图的 snapshot.ui 同样透传 component。
+    let list = get_json(&test_app, &session, "/api/extensions").await;
+    let list_json = json_body(list).await;
+    assert_eq!(list_json["extensions"][0]["ui"][0]["runtime"], "core");
+    assert_eq!(
+        list_json["extensions"][0]["ui"][0]["component"],
+        "console.scripts"
+    );
+
+    let disabled = post_json(
+        &test_app,
+        &session,
+        "/api/extensions/com.example.coreui/disable",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(disabled.status(), StatusCode::OK);
+    let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
+    assert!(json_body(contributions)
+        .await
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
 /// declarative `plugin.call` REST 往返：真实 Component guest（tests/call-guest），
 /// 安装 → 启动 → call（回声校验 action/values 全链路）→ 未声明 action 拒绝 →
 /// stop 后 call 冲突 → 卸载。

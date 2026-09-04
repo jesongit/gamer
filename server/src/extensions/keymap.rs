@@ -50,15 +50,17 @@ input = "^1.0"
 touch = "^1.0"
 
 [[ui.contributions]]
+# runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端
+# core-component-registry 解释（console.keymaps = 映射面板）。
 panel_id = "keymaps"
 title = "映射"
 icon = "⌨"
 order = 30
 location = "console.right"
-runtime = "iframe"
+runtime = "core"
 requires_device = true
 preferred_width = 360
-entry = "ui/index.html"
+component = "console.keymaps"
 "#;
 
 // ===================== Phase 6 Keymap E2E trace（默认关闭） =====================
@@ -1572,7 +1574,9 @@ mod tests {
         assert!(KEYMAP_EXTENSION_MANIFEST_TOML.contains("permissions = [\"input.tap\""));
         assert!(KEYMAP_EXTENSION_MANIFEST_TOML.contains("panel_id = \"keymaps\""));
         assert!(KEYMAP_EXTENSION_MANIFEST_TOML.contains("title = \"映射\""));
-        assert!(KEYMAP_EXTENSION_MANIFEST_TOML.contains("runtime = \"iframe\""));
+        assert!(KEYMAP_EXTENSION_MANIFEST_TOML.contains("runtime = \"core\""));
+        assert!(KEYMAP_EXTENSION_MANIFEST_TOML.contains("component = \"console.keymaps\""));
+        assert!(!KEYMAP_EXTENSION_MANIFEST_TOML.contains("entry = \"ui/"));
     }
 
     /// 官方市场打包源（tools/plugins/gamer.keymap/manifest.toml）与本常量锁同步：

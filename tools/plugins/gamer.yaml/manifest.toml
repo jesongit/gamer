@@ -14,16 +14,20 @@ resource = "^1.0"
 runtime = "^1.0"
 log = "^1.0"
 
+# runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端
+# core-component-registry 解释（console.scripts = 自动化编辑器、
+# console.functions = 函数库模式、console.templates = 模板框选）。
+
 [[ui.contributions]]
 panel_id = "automation"
 title = "自动化"
 icon = "⚙️"
 order = 25
 location = "console.right"
-runtime = "iframe"
+runtime = "core"
 requires_device = true
 preferred_width = 440
-entry = "ui/automation.html"
+component = "console.scripts"
 
 [[ui.contributions]]
 panel_id = "functions"
@@ -31,7 +35,18 @@ title = "函数"
 icon = "ƒ"
 order = 30
 location = "console.right"
-runtime = "iframe"
+runtime = "core"
 requires_device = false
 preferred_width = 440
-entry = "ui/functions.html"
+component = "console.functions"
+
+[[ui.contributions]]
+panel_id = "templates"
+title = "模板"
+icon = "🖼️"
+order = 35
+location = "console.right"
+runtime = "core"
+requires_device = true
+preferred_width = 440
+component = "console.templates"

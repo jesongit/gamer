@@ -24,13 +24,21 @@ describe('Console 视觉组件拆分静态回归', () => {
 
   it('Console 只编排视觉子组件，设备管理收进工具条 + 设置弹窗', () => {
     expect(consoleSource).toContain("import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'")
-    expect(consoleSource).toContain("import TemplateCapture from '../components/console/TemplateCapture.vue'")
-    expect(consoleSource).toContain("import ScriptRunner from '../components/console/ScriptRunner.vue'")
-    expect(consoleSource).toContain("import KeymapPanel from '../components/console/KeymapPanel.vue'")
+    // P11.5：业务面板组件不再由 Console 壳直接引入——解析收敛到
+    // workspace/core-component-registry（runtime=core + component 键）
+    expect(consoleSource).not.toContain("import TemplateCapture from")
+    expect(consoleSource).not.toContain("import ScriptRunner from")
+    expect(consoleSource).not.toContain("import KeymapPanel from")
+    expect(consoleSource).not.toContain("import LogsPanel from")
+    expect(consoleSource).not.toContain("import TaskBoard from")
+    expect(consoleSource).not.toContain("import SystemPanel from")
     expect(template).toContain('<DeviceSettingsModal ')
-    expect(template).toContain('<TemplateCapture ')
-    expect(template).toContain('<ScriptRunner ')
-    expect(template).toContain('<KeymapPanel ')
+    expect(template).not.toContain('<TemplateCapture ')
+    expect(template).not.toContain('<ScriptRunner ')
+    expect(template).not.toContain('<KeymapPanel ')
+    expect(template).not.toContain('<LogsPanel ')
+    expect(template).not.toContain('<TaskBoard ')
+    expect(template).not.toContain('<SystemPanel ')
     expect(template).not.toContain('<DevicePanel ')
     expect(template).not.toContain('panel-tabs')
     expect(template).not.toContain('class="dev-pick"')
@@ -75,8 +83,10 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(settings).toContain('ConsoleDeviceSummary')
     expect(virtualFields).not.toContain('读取应用')
     expect(virtualFields).not.toContain('ctx.form.pkg')
-    expect(template).toContain('v-model="activePkg"')
-    expect(template).toContain('@click="loadApps"')
+    // 分区下拉挂在 WorkspaceContextBar（右侧上下文条），不再由壳内注释性代码承载
+    const contextBar = read('./workspace/WorkspaceContextBar.vue')
+    expect(contextBar).toContain('v-model="ctx.activePkg"')
+    expect(contextBar).toContain('@click="ctx.loadApps"')
     expect(consoleImpl).toContain("sendControl({ type: 'start_app', app: activePkg.value })")
     expect(consoleSource).not.toContain('currentPkg')
     // 二次裁切弹窗独立成 TemplateCropModal：挂在面板层级（任何页签下框选可见，不切页签）
@@ -141,18 +151,31 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleImpl).not.toContain('DEFAULT_OP_TPL')
   })
 
-  it('阶段 4：Console 右侧功能区为模板/脚本/映射/日志/任务/设置六页签', () => {
-    expect(consoleSource).toContain("import LogsPanel from '../components/LogsPanel.vue'")
-    expect(consoleSource).toContain("import TaskBoard from '../components/TaskBoard.vue'")
-    expect(consoleSource).toContain("import SystemPanel from '../components/SystemPanel.vue'")
-    expect(template).toContain("panelTab === 'logs'")
-    expect(template).toContain("panelTab === 'tasks'")
-    expect(template).toContain("panelTab === 'settings'")
-    expect(template).toContain('<LogsPanel />')
-    expect(template).toContain('<TaskBoard :active-pkg="activePkg" />')
-    expect(template).toContain('<SystemPanel />')
-    expect(template).toContain('<div class="func-pkg-row">')
-    expect(template).not.toContain('v-show="isResPanelTab"')
+  it('P11.5：裸 Core 只注册 任务/日志/设置（gamer.core:*），业务面板全部 manifest 驱动', () => {
+    const core = read('./workspace/core-contributions.ts')
+    // Core 自有 UI 只有 gamer.core:*（ADR-11）；gamer.yaml/gamer.keymap 硬编码注册已删
+    expect(core).toContain("pluginId: 'gamer.core', panelId: 'tasks'")
+    expect(core).toContain("pluginId: 'gamer.core', panelId: 'logs'")
+    expect(core).toContain("pluginId: 'gamer.core', panelId: 'settings'")
+    expect(core).not.toContain('gamer.yaml')
+    expect(core).not.toContain('gamer.keymap')
+    // 本地回退注册模块与 iframe fixture 已删除
+    expect(() => read('./workspace/keymap-extension.ts')).toThrow()
+    expect(() => read('./workspace/yaml-extension.ts')).toThrow()
+    expect(read('./workspace/index.ts')).not.toContain('keymap-extension')
+    expect(read('./workspace/index.ts')).not.toContain('yaml-extension')
+    // Console 壳不再出现扩展 id 硬编码；面板经 server-ui adapter（runtime=core）驱动
+    expect(consoleSource).toContain('registerCoreContributions(panelRegistry')
+    expect(consoleSource).toContain('createServerUiContributionAdapter')
+    expect(consoleSource).not.toContain('gamer.yaml')
+    expect(consoleSource).not.toContain('gamer.keymap')
+    expect(consoleSource).not.toContain('registerKeymapExtension')
+    expect(consoleSource).not.toContain('registerYamlExtensionPanels')
+    // 默认面板 = 裸 Core 的任务页签
+    expect(read('./workspace/registry.ts')).toContain("DEFAULT_PANEL_KEY = 'gamer.core:tasks'")
+    expect(consoleSource).toContain(`panelTab = ref('tasks')`)
+    // 分区下拉挂在工具条（func-pkg-row 仅存样式），面板挂载全部走 PluginWorkspace
+    expect(template).not.toContain('<div class="func-pkg-row">')
     expect(consoleSource).toContain('class="panel-resizer"')
     expect(consoleSource).toContain('startPanelResize')
     expect(consoleSource).toContain(':style="{ width: `${panelWidth}px` }"')
@@ -161,7 +184,8 @@ describe('Console 视觉组件拆分静态回归', () => {
 
   it('按键映射页签与工具条选择器接入当前应用分区', () => {
     const keymap = read('./components/console/KeymapPanel.vue')
-    expect(template).toContain("panelTab === 'keymap'")
+    // 映射面板经 console.keymaps 组件键解析，不再有壳内 keymap 页签模板分支
+    expect(read('./workspace/core-component-registry.ts')).toContain('console.keymaps')
     expect(template).toContain('v-model="activeKeymapName"')
     expect(template).toContain('无映射')
     expect(consoleImpl).toContain('api.listKeymaps(pkg)')

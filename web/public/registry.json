@@ -1,6 +1,6 @@
 {
     "schema_version":  1,
-    "generated_at":  "2026-09-03T20:01:53Z",
+    "generated_at":  "2026-09-04T19:25:38Z",
     "host_api":  "1.0.0",
     "plugins":  [
                     {
@@ -10,13 +10,13 @@
                         "description":  "Application-specific keyboard, mouse, and gamepad mappings（WASM keymap 扩展，profile 数据通道见 keymap 存储）",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.keymap-1.0.0.gplugin",
-                        "sha256":  "d331bc3c069d5bfc2ef7c3bea2d3a5f8ee65e16f444f1e32239df70c93f77b5f",
-                        "size":  100040,
+                        "sha256":  "d2e0f1a478976419a63d434e61b9894e09134c4dd709772673ddb1388da05a0b",
+                        "size":  99363,
                         "signature":  {
                                           "status":  "valid",
                                           "key_id":  "gamer-dev-1",
                                           "algorithm":  "ed25519",
-                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci5rZXltYXAtMS4wLjAuZ3BsdWdpbiIsImlkIjoiZ2FtZXIua2V5bWFwIiwia2V5X2lkIjoiZ2FtZXItZGV2LTEiLCJzaGEyNTYiOiJkMzMxYmMzYzA2OWQ1YmZjMmVmN2MzYmVhMmQzYTVmOGVlNjVlMTZmNDQ0ZjFlMzIyMzlkZjcwYzkzZjc3YjVmIiwic2lnbmF0dXJlIjoicEoydGhyb3ZnWU1hWUNYbS9MK2pTNWRLalVha1FzR3lUVTYyRjhYSUdJVkU0Ukt4T0dnS2loOGJRYm5MVEtvdmI0SXYvbjV5Ky9aTE1OOXM5ZkpERFE9PSIsInZlcnNpb24iOiIxLjAuMCJ9"
+                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci5rZXltYXAtMS4wLjAuZ3BsdWdpbiIsImlkIjoiZ2FtZXIua2V5bWFwIiwia2V5X2lkIjoiZ2FtZXItZGV2LTEiLCJzaGEyNTYiOiJkMmUwZjFhNDc4OTc2NDE5YTYzZDQzNGU2MWI5ODk0ZTA5MTM0YzRkZDcwOTc3MjY3M2RkYjEzODhkYTA1YTBiIiwic2lnbmF0dXJlIjoialJNdWtFdUNmczFBZExkUXJrd3RaT29HNHlKRkJxcFErWHdRQkpPWmkxSGwvMUw1VGx3WklwUnhLT0gxUy9UZ0R0dW1kd1lOZ29CTS9zWCs0ZFcvQmc9PSIsInZlcnNpb24iOiIxLjAuMCJ9"
                                       },
                         "permissions":  [
                                             "input.tap",
@@ -33,7 +33,8 @@
                                                          {
                                                              "panel_id":  "keymaps",
                                                              "title":  "映射",
-                                                             "runtime":  "iframe"
+                                                             "runtime":  "core",
+                                                             "component":  "console.keymaps"
                                                          }
                                                      ]
                                }
@@ -45,13 +46,13 @@
                         "description":  "Surface YAML v3 lowering and execution guest（version: 3 脚本经 YamlVnextAdapter 执行）",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.yaml-3.0.0.gplugin",
-                        "sha256":  "a214bf40d65317e2cafdd03b1e8c288780820dae3a1cf820dbfe69817a25d37d",
-                        "size":  69185,
+                        "sha256":  "322641d52ebe51d63bc14a0f2c7e2bf794e8886f5d7299bc34fb046b86ecba38",
+                        "size":  68221,
                         "signature":  {
                                           "status":  "valid",
                                           "key_id":  "gamer-dev-1",
                                           "algorithm":  "ed25519",
-                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci55YW1sLTMuMC4wLmdwbHVnaW4iLCJpZCI6ImdhbWVyLnlhbWwiLCJrZXlfaWQiOiJnYW1lci1kZXYtMSIsInNoYTI1NiI6ImEyMTRiZjQwZDY1MzE3ZTJjYWZkZDAzYjFlOGMyODg3ODA4MjBkYWUzYTFjZjgyMGRiZmU2OTgxN2EyNWQzN2QiLCJzaWduYXR1cmUiOiJ2RTVKMjhZZFhpdndOM2ZHR1dIR3AvaTVsdk1mSVl4ZGNUbFM0NGwra1FZOGtwb3QzL1BlTW1xQmVvQVp1MURNSDlYNENJakZxVGlzTFdpbWFxZk9DUT09IiwidmVyc2lvbiI6IjMuMC4wIn0="
+                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci55YW1sLTMuMC4wLmdwbHVnaW4iLCJpZCI6ImdhbWVyLnlhbWwiLCJrZXlfaWQiOiJnYW1lci1kZXYtMSIsInNoYTI1NiI6IjMyMjY0MWQ1MmViZTUxZDYzYmMxNGEwZjJjN2UyYmY3OTRlODg4NmY1ZDcyOTliYzM0ZmIwNDZiODZlY2JhMzgiLCJzaWduYXR1cmUiOiJhYzdqOURER284dENiVURnd21pcWJZeGZ4Q0EvTERyWGw1N1BEQ3hVbzFWY1pLSjFBZXVjTkJLa2pTQ094aTVaRG9hcitmUjVnSE9NTXFyZlJrQVZEQT09IiwidmVyc2lvbiI6IjMuMC4wIn0="
                                       },
                         "permissions":  [
                                             "device.read",
@@ -79,12 +80,20 @@
                                                          {
                                                              "panel_id":  "automation",
                                                              "title":  "自动化",
-                                                             "runtime":  "iframe"
+                                                             "runtime":  "core",
+                                                             "component":  "console.scripts"
                                                          },
                                                          {
                                                              "panel_id":  "functions",
                                                              "title":  "函数",
-                                                             "runtime":  "iframe"
+                                                             "runtime":  "core",
+                                                             "component":  "console.functions"
+                                                         },
+                                                         {
+                                                             "panel_id":  "templates",
+                                                             "title":  "模板",
+                                                             "runtime":  "core",
+                                                             "component":  "console.templates"
                                                          }
                                                      ]
                                }

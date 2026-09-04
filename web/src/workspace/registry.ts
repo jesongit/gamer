@@ -1,7 +1,8 @@
 import { ref } from 'vue'
 
 export const CONSOLE_RIGHT_LOCATION = 'console.right'
-export const DEFAULT_PANEL_KEY = 'gamer.yaml:scripts'
+/** 裸 Core（无任何扩展）的默认面板：任务（ADR-11 Core 自有 UI 之一）。 */
+export const DEFAULT_PANEL_KEY = 'gamer.core:tasks'
 
 export type PanelRuntime = 'core' | 'iframe' | 'declarative'
 export type PanelKeepAlive = 'none' | 'session'

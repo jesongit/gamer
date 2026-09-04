@@ -47,16 +47,20 @@ resource = "^1.0"
 runtime = "^1.0"
 log = "^1.0"
 
+# runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端
+# core-component-registry 解释（console.scripts = 自动化编辑器、
+# console.functions = 函数库模式、console.templates = 模板框选）。
+
 [[ui.contributions]]
 panel_id = "automation"
 title = "自动化"
 icon = "⚙️"
 order = 25
 location = "console.right"
-runtime = "iframe"
+runtime = "core"
 requires_device = true
 preferred_width = 440
-entry = "ui/automation.html"
+component = "console.scripts"
 
 [[ui.contributions]]
 panel_id = "functions"
@@ -64,10 +68,21 @@ title = "函数"
 icon = "ƒ"
 order = 30
 location = "console.right"
-runtime = "iframe"
+runtime = "core"
 requires_device = false
 preferred_width = 440
-entry = "ui/functions.html"
+component = "console.functions"
+
+[[ui.contributions]]
+panel_id = "templates"
+title = "模板"
+icon = "🖼️"
+order = 35
+location = "console.right"
+runtime = "core"
+requires_device = true
+preferred_width = 440
+component = "console.templates"
 "#;
 
 /// 官方市场打包源（tools/plugins/gamer.yaml/manifest.toml）与本常量锁同步：
@@ -1150,18 +1165,25 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
                 .unwrap();
             writer.start_file("plugin.wasm", options).unwrap();
             writer.write_all(b"\0asm\x01\0\0\0").unwrap();
-            for entry in ["ui/automation.html", "ui/functions.html"] {
-                writer.start_file(entry, options).unwrap();
-                writer.write_all(b"<!doctype html>").unwrap();
-            }
             writer.finish().unwrap();
         }
         let installed = service.install(&archive).await.unwrap();
         service.enable(installed.id()).await.unwrap();
         let panels = service.ui_contributions().unwrap();
-        assert_eq!(panels.len(), 2);
-        assert!(panels.iter().any(|panel| panel.panel_id == "automation"));
-        assert!(panels.iter().any(|panel| panel.panel_id == "functions"));
+        assert_eq!(panels.len(), 3);
+        let component_of = |panel_id: &str| {
+            panels
+                .iter()
+                .find(|panel| panel.panel_id == panel_id)
+                .map(|panel| panel.component.clone().unwrap_or_default())
+                .unwrap_or_default()
+        };
+        assert_eq!(component_of("automation"), "console.scripts");
+        assert_eq!(component_of("functions"), "console.functions");
+        assert_eq!(component_of("templates"), "console.templates");
+        assert!(panels
+            .iter()
+            .all(|panel| panel.runtime == crate::extensions::UiRuntime::Core));
         service.disable(installed.id()).await.unwrap();
         assert!(service
             .uninstall(installed.id(), installed.active_version())
@@ -1550,10 +1572,6 @@ runtime = "^1.0"
                 .unwrap();
             writer.start_file("plugin.wasm", options).unwrap();
             writer.write_all(&fixture_component()).unwrap();
-            for entry in ["ui/automation.html", "ui/functions.html"] {
-                writer.start_file(entry, options).unwrap();
-                writer.write_all(b"<!doctype html>").unwrap();
-            }
             writer.finish().unwrap();
         }
         let installed = service.install(&archive).await.unwrap();

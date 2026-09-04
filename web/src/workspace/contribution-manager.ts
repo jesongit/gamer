@@ -1,3 +1,4 @@
+import { h } from 'vue'
 import type { DeclarativeUiSchema, PanelContribution, PanelRegistry, RegisteredPanel } from './registry'
 import { CONSOLE_RIGHT_LOCATION } from './registry'
 import type { PluginRuntimeLifecycle } from './lifecycle'
@@ -8,10 +9,12 @@ export interface ManifestUiContribution {
   icon?: string
   order?: number
   location?: string
-  runtime: 'iframe' | 'declarative'
+  runtime: 'core' | 'iframe' | 'declarative'
   requires_device?: boolean
   preferred_width?: number
   entry?: string
+  /** runtime = "core" 时指向宿主组件键（console.scripts 等），由 resolveCore 解释 */
+  component?: string
   /** declarative 面板的表单 schema（服务端 manifest.rs 校验后原样透传） */
   schema?: DeclarativeUiSchema
 }
@@ -32,10 +35,36 @@ export interface ExtensionRuntime {
   stop?: () => unknown
 }
 
+/**
+ * runtime = "core" 贡献的宿主组件描述：贡献本身只携带组件键，注册时经
+ * resolveCore 换取真实 Vue 组件与 props 提取逻辑。
+ */
+export interface CorePanelDescriptor {
+  component: unknown
+  panelClass?: string
+  aliases?: string[]
+  getProps?: (context: Record<string, unknown>) => Record<string, unknown>
+}
+
+export type ResolveCoreComponent = (componentKey: string) => CorePanelDescriptor | null
+
 export interface ManifestContributionOptions {
   runtime?: ExtensionRuntime
   resolveEntry?: (manifest: ExtensionUiManifest, entry: string) => string
+  /** runtime = "core" 贡献的组件键解析；缺省/未知键渲染占位面板 */
+  resolveCore?: ResolveCoreComponent
   aliases?: (contribution: ManifestUiContribution) => string[]
+}
+
+/** 未识别组件键的占位面板：面板仍可出现/消失，只是内容不可用。 */
+export function unknownCorePanel(componentKey: string): CorePanelDescriptor {
+  return {
+    component: () => h(
+      'div',
+      { class: 'workspace-empty' },
+      `面板组件未注册：${componentKey}`,
+    ),
+  }
 }
 
 export interface InstalledContribution {
@@ -68,10 +97,25 @@ function panelFromManifest(
   if (location !== CONSOLE_RIGHT_LOCATION) {
     throw new Error(`Unsupported panel location: ${location}`)
   }
+  if (item.runtime === 'core' && !String(item.component || '').trim()) {
+    throw new Error(`core panel requires component: ${pluginId}:${panelId}`)
+  }
   if (item.runtime === 'iframe' && !item.entry) {
     throw new Error(`iframe panel requires entry: ${pluginId}:${panelId}`)
   }
-  const aliases = options.aliases?.(item) || []
+  // core 贡献挂宿主组件：编辑器/映射状态跨页签保留，与旧 iframe 行为一致。
+  const keepAlive = item.runtime === 'declarative' ? 'none' : 'session'
+  let descriptor: CorePanelDescriptor | null = null
+  if (item.runtime === 'core') {
+    const componentKey = String(item.component || '').trim()
+    descriptor = options.resolveCore?.(componentKey) || unknownCorePanel(componentKey)
+  }
+  const aliases = [
+    ...new Set([
+      ...(options.aliases?.(item) || []),
+      ...(descriptor?.aliases || []),
+    ].map(String).filter(Boolean)),
+  ]
   const contribution: PanelContribution = {
     pluginId,
     panelId,
@@ -82,8 +126,13 @@ function panelFromManifest(
     runtime: item.runtime,
     requiresDevice: item.requires_device === true,
     preferredWidth: item.preferred_width,
-    keepAlive: item.runtime === 'iframe' ? 'session' : 'none',
-    aliases: [...new Set(aliases.map(String).filter(Boolean))],
+    keepAlive,
+    aliases,
+  }
+  if (descriptor) {
+    contribution.component = descriptor.component
+    if (descriptor.panelClass) contribution.panelClass = descriptor.panelClass
+    if (descriptor.getProps) contribution.getProps = context => descriptor!.getProps!(context) || {}
   }
   if (item.runtime === 'iframe') {
     const resolveEntry = options.resolveEntry || ((_, entry) => entry)
