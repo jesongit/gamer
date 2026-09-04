@@ -3,14 +3,13 @@
 //! 快照**懒解析**并按运行实例缓存——运行中修改文件不影响已开始的实例，
 //! 下一次运行生效（plan §12.2）。
 //!
-//! 脚本/函数源码经 [`crate::scripts::ScriptStore`] 的 composite 解析缝取
+//! 脚本/函数源码经 Core [`crate::resources::ResourceStore`] 的 composite 解析缝取
 //! 三层合并结果：**本地编辑区（分区目录）→ user-overrides → active App
 //! Package**（与模板/键位顺序一致）；包内 `scripts/` 只进脚本索引、包内
 //! `functions/` 只进函数索引（Wave 1 起两类索引彻底分离）。
 //!
-//! 模板是二进制资源，不进快照：校验期可用性经
-//! [`crate::scripts::ScriptStore::template_avail`]、匹配期路径经
-//! [`crate::scripts::ScriptStore::resolve_template_path`] 落盘解析。
+//! 模板是二进制资源，不进快照：校验期可用性、匹配期路径均经 composite
+//! 三层解析（`ResourceStore::composite().template` / `resolve_template_path`）落盘解析。
 //!
 //! 资源 id 形态（与 script_v2 校验的 provider 契约一致）：
 //! - 脚本 = 分区内相对路径（含 `.yaml`，与 call 目标书写一致），缺扩展名自动
@@ -23,13 +22,15 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use crate::app_packages::TemplateLookup;
 use crate::core::AppContext;
-use crate::script_v2::error::codes;
-use crate::script_v2::validate::{
-    normalize_id, try_build_function_file, ResourceProvider, TemplateAvail,
+use crate::extensions::gamer_yaml::script_v2::error::codes;
+use crate::extensions::gamer_yaml::script_v2::validate::TemplateAvail as ProviderTemplateAvail;
+use crate::extensions::gamer_yaml::script_v2::validate::{
+    normalize_id, try_build_function_file, ResourceProvider,
 };
-use crate::script_v2::{FunctionFile, ScriptError, ScriptFile};
-use crate::scripts::ScriptStore;
+use crate::extensions::gamer_yaml::script_v2::{FunctionFile, ScriptError, ScriptFile};
+use crate::resources::ResourceStore;
 
 /// 一次运行的分区源码快照（构建后不可变）。
 pub(crate) struct RunSnapshot {
@@ -44,10 +45,10 @@ impl RunSnapshot {
     ///（三层合并：本地编辑区 → override → active 包；目录缺失视为空层，
     /// 不报错）。包内 `scripts/` 只进脚本索引、包内 `functions/` 只进函数库
     /// 索引（去扩展名短路径 key），两类索引互不混入。
-    pub fn capture(store: &ScriptStore, pkg: &str) -> anyhow::Result<Self> {
-        let scripts = store.composite_script_sources(pkg)?;
+    pub fn capture(store: &ResourceStore, pkg: &str) -> anyhow::Result<Self> {
+        let scripts = store.composite().script_sources(pkg)?;
         let mut functions = BTreeMap::new();
-        for (key, content) in store.composite_function_sources(pkg)? {
+        for (key, content) in store.composite().function_sources(pkg)? {
             let short = key
                 .strip_suffix(".yaml")
                 .or_else(|| key.strip_suffix(".yml"))
@@ -90,12 +91,12 @@ impl RunSnapshot {
 /// `pkg` 自有（运行实例生命周期一致，`Ctx` 持有；分区名在运行期间不变）。
 pub(crate) struct RunResources<'a> {
     snapshot: &'a RunSnapshot,
-    store: &'a ScriptStore,
+    store: &'a ResourceStore,
     app: AppContext,
 }
 
 impl<'a> RunResources<'a> {
-    pub fn new(snapshot: &'a RunSnapshot, store: &'a ScriptStore, app: AppContext) -> Self {
+    pub fn new(snapshot: &'a RunSnapshot, store: &'a ResourceStore, app: AppContext) -> Self {
         Self {
             snapshot,
             store,
@@ -129,12 +130,26 @@ impl ResourceProvider for RunResources<'_> {
             .is_some_and(|ff| ff.find(function).is_some())
     }
 
-    fn resolve_template(&self, short_name: &str) -> TemplateAvail {
+    fn resolve_template(&self, short_name: &str) -> ProviderTemplateAvail {
         self.app
             .content_package
             .as_ref()
-            .map(|pkg| self.store.template_avail(pkg.as_str(), short_name))
-            .unwrap_or(TemplateAvail::NotFound)
+            .map(|pkg| template_avail(self.store, pkg.as_str(), short_name))
+            .unwrap_or(ProviderTemplateAvail::NotFound)
+    }
+}
+
+/// 模板短名可用性（composite 三层，与 `resolve_template_path` 完全一致）：
+/// 唯一存在 / 缺失 / 同短名多个 `#` 后缀候选（歧义）。
+pub(crate) fn template_avail(
+    store: &ResourceStore,
+    pkg: &str,
+    short: &str,
+) -> ProviderTemplateAvail {
+    match store.composite().template(pkg, short) {
+        TemplateLookup::Found(_) => ProviderTemplateAvail::Found,
+        TemplateLookup::Ambiguous { .. } => ProviderTemplateAvail::Ambiguous,
+        TemplateLookup::NotFound => ProviderTemplateAvail::NotFound,
     }
 }
 
@@ -220,7 +235,7 @@ fn script_v2_parse(
     content: &str,
     provider: &dyn ResourceProvider,
 ) -> Result<ScriptFile, Vec<ScriptError>> {
-    crate::script_v2::parse_script_file(content, resource, provider)
+    crate::extensions::gamer_yaml::script_v2::parse_script_file(content, resource, provider)
 }
 
 fn script_v2_parse_function(
@@ -228,7 +243,7 @@ fn script_v2_parse_function(
     content: &str,
     provider: &dyn ResourceProvider,
 ) -> Result<FunctionFile, Vec<ScriptError>> {
-    crate::script_v2::parse_function_file(content, resource, provider)
+    crate::extensions::gamer_yaml::script_v2::parse_function_file(content, resource, provider)
 }
 
 #[cfg(test)]
@@ -281,20 +296,32 @@ packages = ["com.test.app"]
             data_dir: dir.path().to_path_buf(),
             ..Default::default()
         };
-        let store = ScriptStore::open(&cfg).unwrap();
+        let store = ResourceStore::open(&cfg).unwrap();
         let pkg = "com.test.app";
 
         // 本地编辑区（分区）层
-        std::fs::create_dir_all(store.script_dir(pkg)).unwrap();
-        std::fs::write(store.script_dir(pkg).join("dup.yaml"), b"steps: [] # local").unwrap();
+        std::fs::create_dir_all(store.kind_dir(pkg, crate::resources::ResourceKind::Scripts))
+            .unwrap();
         std::fs::write(
-            store.script_dir(pkg).join("local-only.yaml"),
+            store
+                .kind_dir(pkg, crate::resources::ResourceKind::Scripts)
+                .join("dup.yaml"),
+            b"steps: [] # local",
+        )
+        .unwrap();
+        std::fs::write(
+            store
+                .kind_dir(pkg, crate::resources::ResourceKind::Scripts)
+                .join("local-only.yaml"),
             b"steps: [] # local-only",
         )
         .unwrap();
-        std::fs::create_dir_all(store.functions_dir(pkg)).unwrap();
+        std::fs::create_dir_all(store.kind_dir(pkg, crate::resources::ResourceKind::Functions))
+            .unwrap();
         std::fs::write(
-            store.functions_dir(pkg).join("common.yaml"),
+            store
+                .kind_dir(pkg, crate::resources::ResourceKind::Functions)
+                .join("common.yaml"),
             b"noop:\n  steps: [] # local\n",
         )
         .unwrap();
@@ -328,7 +355,12 @@ packages = ["com.test.app"]
         assert_eq!(snapshot.script("common.yaml"), None);
 
         // 删掉本地 dup.yaml 后，包内同名脚本浮现
-        std::fs::remove_file(store.script_dir(pkg).join("dup.yaml")).unwrap();
+        std::fs::remove_file(
+            store
+                .kind_dir(pkg, crate::resources::ResourceKind::Scripts)
+                .join("dup.yaml"),
+        )
+        .unwrap();
         let snapshot = RunSnapshot::capture(&store, pkg).unwrap();
         assert_eq!(
             snapshot.script("dup.yaml"),
@@ -363,7 +395,13 @@ packages = ["com.test.app"]
         );
 
         // 本地编辑区重新出现同名 → 再次胜过 override
-        std::fs::write(store.script_dir(pkg).join("dup.yaml"), b"steps: [] # local").unwrap();
+        std::fs::write(
+            store
+                .kind_dir(pkg, crate::resources::ResourceKind::Scripts)
+                .join("dup.yaml"),
+            b"steps: [] # local",
+        )
+        .unwrap();
         let snapshot = RunSnapshot::capture(&store, pkg).unwrap();
         assert_eq!(
             snapshot.script("dup.yaml"),

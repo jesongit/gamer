@@ -1,6 +1,37 @@
 // 当前后端 API 封装（Rust 服务端）。
 // 所有受保护请求遇到 401 都交给 Cookie 会话层处理；资源与运行接口不保留旧契约降级。
+//
+// P11.6 通用资源 API：脚本/函数库/模板/按键映射统一走
+// `/api/apps/:app/resources[...]`（kind ∈ scripts|functions|templates|keymaps|...）；
+// 运行统一走 POST /api/runs（runner_id + entrypoint + payload）。方法名保持
+// 业务语义（listScripts/createTemplate…），URL 为通用形态。
 import { handleUnauthorized } from './auth'
+
+// gamer.yaml 自动化 runner 的注册 id（统一执行入口分发目标）
+const GAMER_YAML_RUNNER_ID = 'gamer.yaml'
+
+/** base64 → Uint8Array（模板原始字节上传用） */
+function base64ToBytes(dataB64) {
+  const binary = atob(dataB64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+/** 客户端组合模板完整文件名：短名 + #x1_y1_x2_y2 区域后缀 + #1 颜色标记 + .png。
+ * 与服务端 matcher tpl_region_from_name 同编码（区域 ×1000 三位整数）。 */
+function composeTemplateName(shortName, region, preserveColor) {
+  const raw = String(shortName || '').trim()
+  const lower = raw.toLowerCase()
+  const stem = lower.endsWith('.png') ? raw.slice(0, -4) : raw
+  let name = stem
+  if (Array.isArray(region) && region.length === 4) {
+    const toInt3 = v => String(Math.min(999, Math.round(v * 1000))).padStart(3, '0')
+    name += `#${region.map(toInt3).join('_')}`
+  }
+  if (preserveColor) name += '#1'
+  return `${name}.png`
+}
 
 const BASE = ''
 
@@ -231,90 +262,153 @@ export const api = {
   listApps: (id) => req('GET', `/api/devices/${id}/apps`),
   listAppsByAddr: (addr) => req('GET', `/api/apps?addr=${encodeURIComponent(addr)}`),
 
-  // 按键映射（data/<pkg>/keymap；资源 id 为当前分区内的方案名）
-  listKeymaps: (pkg) => req('GET', `/api/keymaps?pkg=${encodeURIComponent(requireId(pkg, 'pkg'))}`),
+  // 按键映射（通用资源 API keymaps kind；资源 id = "<pkg>/<方案名>.yaml"）
+  listKeymaps: (pkg) => req('GET', `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/keymaps`),
   getKeymap: (name, pkg) => req(
     'GET',
-    `/api/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
+    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
   ),
-  createKeymap: ({ pkg, name, content } = {}) => req('POST', '/api/keymaps', { pkg, name, content }),
+  createKeymap: ({ pkg, name, content } = {}) => req(
+    'POST',
+    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/keymaps`,
+    { name, content },
+  ),
   updateKeymap: async (name, pkg, payload = {}) => req(
     'PUT',
-    `/api/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
+    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
     updateBody(payload, keymapId(name, pkg)),
   ),
   deleteKeymap: (name, pkg) => req(
     'DELETE',
-    `/api/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
+    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
   ),
 
-  // 模板（按应用分区 data/<pkg>/tmpl；pkg 缺省=跨分区全列）
-  listTemplates: (pkg) => req('GET', `/api/templates${pkg ? `?pkg=${encodeURIComponent(pkg)}` : ''}`),
-  // 创建只接受短名；region 存在时由服务端组合带区域元数据的完整文件名。
-  // preserveColor=true 时由服务端追加 #1 文件名标记并保留颜色通道；默认灰度压缩。
-  createTemplate: (shortName, dataB64, pkg, region, preserveColor = false) => req('POST', '/api/templates', {
-    short_name: shortName,
-    ...(region !== undefined ? { region } : {}),
-    ...(preserveColor ? { grayscale_only: false } : {}),
-    data_b64: dataB64,
-    pkg,
-  }),
-  // 图片替换与创建严格分离：名称/分区来自 URL/query，body 只有 data_b64。
-  replaceTemplateImage: (name, dataB64, pkg) =>
-    req('PUT', `/api/templates/${encodeURIComponent(name)}/image?pkg=${encodeURIComponent(pkg)}`, { data_b64: dataB64 }),
+  // 模板（通用资源 API templates kind；pkg 缺省 = "-" 跨分区通配）
+  listTemplates: (pkg) => req(
+    'GET',
+    `/api/apps/${pkg ? encodeURIComponent(pkg) : '-'}/resources/templates`,
+  ),
+  // 客户端组合完整文件名（短名 + #区域后缀 + #1 颜色标记），原始字节上传；
+  // 灰度重编码由服务端按文件名 #1 标记决定。
+  createTemplate: async (shortName, dataB64, pkg, region, preserveColor = false) => {
+    const app = encodeURIComponent(requireId(pkg, 'pkg'))
+    const name = composeTemplateName(shortName, region, preserveColor)
+    const r = await response(
+      'POST',
+      `/api/apps/${app}/resources/templates?name=${encodeURIComponent(name)}`,
+      base64ToBytes(dataB64),
+      { rawBody: true, headers: { 'Content-Type': 'image/png' } },
+    )
+    return readResult(r)
+  },
+  // 图片替换：名称/分区来自 URL，body 只有原始图片字节。
+  replaceTemplateImage: async (name, dataB64, pkg) => {
+    const app = encodeURIComponent(requireId(pkg, 'pkg'))
+    const r = await response(
+      'PUT',
+      `/api/apps/${app}/resources/templates/${encodeURIComponent(name)}`,
+      base64ToBytes(dataB64),
+      { rawBody: true, headers: { 'Content-Type': 'image/png' } },
+    )
+    return readResult(r)
+  },
+  // 重命名：JSON {name}；服务端经 gamer.yaml 钩子同步改写脚本/函数引用。
   renameTemplate: (oldName, newName, pkg) =>
-    req('PUT', `/api/templates/${encodeURIComponent(oldName)}?pkg=${encodeURIComponent(pkg)}`, { name: newName }),
+    req(
+      'PUT',
+      `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/templates/${encodeURIComponent(oldName)}`,
+      { name: newName },
+    ),
   deleteTemplate: (name, pkg) =>
-    req('DELETE', `/api/templates/${encodeURIComponent(name)}?pkg=${encodeURIComponent(pkg)}`),
+    req(
+      'DELETE',
+      `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/templates/${encodeURIComponent(name)}`,
+    ),
+  // 模板匹配测试 = vision 能力位语义
   testTemplate: (name, deviceId, threshold, region, pkg) =>
-    req('POST', `/api/templates/${encodeURIComponent(name)}/test`, { device_id: deviceId, threshold, region, pkg }),
+    req('POST', '/api/capabilities/vision/test', { device_id: deviceId, threshold, region, pkg, name }),
   // 模板缩略图/预览 URL（<img :src> 用；pkg 必填）
-  tplImageUrl: (name, pkg) => `/api/templates/${encodeURIComponent(name)}/image?pkg=${encodeURIComponent(pkg)}`,
+  tplImageUrl: (name, pkg) => `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/templates/${encodeURIComponent(name)}`,
 
-  // 脚本（id 形如 "<pkg>/<name>.yaml"，含 '/'，拼 URL 必须整体 encodeURIComponent）
-  listScripts: () => req('GET', '/api/scripts'),
+  // 脚本（通用资源 API scripts kind；id 形如 "<pkg>/<name>.yaml"，含 '/'，
+  // 拼 URL 必须整体 encodeURIComponent；app 段传 "-" 由 id 自带分区）
+  listScripts: () => req('GET', '/api/apps/-/resources/scripts'),
   // 单脚本读取（含内容版本短码 version：编辑器 expected_version 冲突检测依据）
-  getScript: (id) => req('GET', `/api/scripts/${encodeURIComponent(requireId(id, 'script_id'))}`),
+  getScript: (id) => req(
+    'GET',
+    `/api/apps/-/resources/scripts/${encodeURIComponent(requireId(id, 'script_id'))}`,
+  ),
   // POST 只创建；PUT 只更新。更新缺版本时在客户端拒绝，force 必须显式为 true。
-  createScript: ({ name, content, pkg } = {}) => req('POST', '/api/scripts', { name, content, pkg }),
+  createScript: ({ name, content, pkg } = {}) => req(
+    'POST',
+    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/scripts`,
+    { name, content },
+  ),
   updateScript: async (id, payload = {}) => req(
     'PUT',
-    `/api/scripts/${encodeURIComponent(requireId(id, 'script_id'))}`,
+    `/api/apps/-/resources/scripts/${encodeURIComponent(requireId(id, 'script_id'))}`,
     updateBody(payload, id),
   ),
-  deleteScript: (id) => req('DELETE', `/api/scripts/${encodeURIComponent(id)}`),
-  // 函数库（data/<pkg>/func/；id 形如 "<pkg>/<文件短路径>.yaml"，整体 encodeURIComponent。
-  // 不进脚本列表/运行接口/任务选择器；GET 单文件含 content/version/functions（顶层函数名清单））
-  listFunctions: (pkg) => req('GET', `/api/functions?pkg=${encodeURIComponent(pkg)}`),
-  getFunction: (id) => req('GET', `/api/functions/${encodeURIComponent(id)}`),
+  deleteScript: (id) => req(
+    'DELETE',
+    `/api/apps/-/resources/scripts/${encodeURIComponent(id)}`,
+  ),
+  // 函数库（通用资源 API functions kind；id 形如 "<pkg>/<文件短路径>.yaml"，
+  // 整体 encodeURIComponent。不进脚本列表/运行接口/任务选择器；GET 单文件含
+  // content/version/functions（顶层函数名清单，gamer.yaml 注记提供））
+  listFunctions: (pkg) => req(
+    'GET',
+    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/functions`,
+  ),
+  getFunction: (id) => req(
+    'GET',
+    `/api/apps/-/resources/functions/${encodeURIComponent(id)}`,
+  ),
   // POST 只创建；PUT 只更新/重命名，更新缺版本时在客户端拒绝。
-  createFunction: ({ pkg, name, content } = {}) => req('POST', '/api/functions', { pkg, name, content }),
+  createFunction: ({ pkg, name, content } = {}) => req(
+    'POST',
+    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/functions`,
+    { name, content },
+  ),
   updateFunction: async (id, payload = {}) => req(
     'PUT',
-    `/api/functions/${encodeURIComponent(requireId(id, 'function_id'))}`,
+    `/api/apps/-/resources/functions/${encodeURIComponent(requireId(id, 'function_id'))}`,
     updateBody(payload, id),
   ),
-  deleteFunction: (id) => req('DELETE', `/api/functions/${encodeURIComponent(id)}`),
+  deleteFunction: (id) => req(
+    'DELETE',
+    `/api/apps/-/resources/functions/${encodeURIComponent(id)}`,
+  ),
 
-  // 脚本运行（阶段 5 契约）：body {device_id, start_index?, args?}——args 为稀疏显式覆盖映射
-  //（bool/coord/time/color/tmpl/key/text 七类；「使用默认值」的参数省略，由服务端解析默认值）。
-  // 成功 202 {run_id, state, resolved_args}；参数诊断 400 {error:"invalid_args", diagnostics:[...]}
-  //（err.status/err.data 可取）；设备占用 409 {error:"device_busy", run_id, script_id, source, started_at}
+  // 脚本运行（P11.6 统一执行入口）：POST /api/runs {runner_id, entrypoint,
+  // device_id, payload}——payload 为 runner 私有不透明值；gamer.yaml 约定
+  // {args, start_index}（args 为稀疏显式覆盖映射，省略的参数由服务端解析默认值）。
+  // 成功 202 {run_id, state, resolved_args}；参数诊断 400 {error:"invalid_args",
+  // diagnostics:[...]}；设备占用 409 {error:"device_busy", ...}；运行依赖缺失
+  //（runner 未注册）424 {code:"dependency_unavailable"}
   runScript: async (id, deviceId, startIndex = 0, args) =>
-    requireRunResponse(await req('POST', `/api/scripts/${encodeURIComponent(requireId(id, 'script_id'))}/run`, {
+    requireRunResponse(await req('POST', '/api/runs', {
+      runner_id: GAMER_YAML_RUNNER_ID,
+      entrypoint: requireId(id, 'script_id'),
       device_id: deviceId,
-      start_index: startIndex,
-      ...(args && Object.keys(args).length ? { args } : {}),
+      payload: {
+        ...(startIndex ? { start_index: startIndex } : {}),
+        ...(args && Object.keys(args).length ? { args } : {}),
+      },
     })),
-  // 函数测试（阶段 5）：id = 函数库文件 id（"<pkg>/<文件短路径>.yaml"，整体 encodeURIComponent）。
-  // body {device_id, function?, start_index?, args?}（function 缺省 = 文件第一个函数）；
-  // 响应/错误语义与脚本 run 相同（RunManager 统一 run_id 管理）
+  // 函数测试：entrypoint = "<pkg>/<文件短路径>.yaml[#函数名]"（function 缺省 =
+  // 文件第一个函数）；响应/错误语义与脚本运行相同
   runFunction: async (id, deviceId, opts = {}) =>
-    requireRunResponse(await req('POST', `/api/functions/${encodeURIComponent(requireId(id, 'function_id'))}/run`, {
+    requireRunResponse(await req('POST', '/api/runs', {
+      runner_id: GAMER_YAML_RUNNER_ID,
+      entrypoint: opts.function
+        ? `${requireId(id, 'function_id')}#${opts.function}`
+        : requireId(id, 'function_id'),
       device_id: deviceId,
-      ...(opts.function ? { function: opts.function } : {}),
-      ...(opts.start_index !== undefined ? { start_index: opts.start_index } : {}),
-      ...(opts.args && Object.keys(opts.args).length ? { args: opts.args } : {}),
+      payload: {
+        ...(opts.start_index !== undefined ? { start_index: opts.start_index } : {}),
+        ...(opts.args && Object.keys(opts.args).length ? { args: opts.args } : {}),
+      },
     })),
   // 统一运行实例（run_id 主键）：单次查询 RunRecord / 按次取消（终态以查询为准）
   getRun: async (runId) => requireRunResponse(await req('GET', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}`)),

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::matcher;
-use crate::scripts::ScriptStore;
+use crate::resources::ResourceStore;
 
 use super::builder::{CollectedFile, PackageBuilder, RESOURCE_ROOTS};
 use super::error::{AppPackageError, AppPackageResult};
@@ -60,7 +60,7 @@ pub(crate) fn extract_to_workspace(
     data_root: &Path,
     installed: &InstalledPackage,
     android: &AndroidPackageName,
-    scripts: Arc<ScriptStore>,
+    resources: Arc<ResourceStore>,
 ) -> AppPackageResult<EditOutcome> {
     let manifest = installed.manifest();
     if !manifest.supports_android_package(android) {
@@ -96,7 +96,7 @@ pub(crate) fn extract_to_workspace(
 
         // 2) Preflight：与导出同源的校验器跑在 staging 目录上（收集全部问题）。
         //    PreflightFailed 原样上抛（400）；其余意外错误包一层提取语境（500）。
-        let builder = PackageBuilder::new(data_root, android.clone(), scripts);
+        let builder = PackageBuilder::new(data_root, android.clone(), resources);
         let files = builder
             .validate_dir(&staging)
             .map_err(|error| match error {

@@ -22,28 +22,21 @@ mod core;
 mod cron_extension;
 mod deps_probe;
 mod device;
-mod engine;
 mod extensions;
 mod file_migration;
-mod keymaps;
 mod logging;
 mod maintenance;
 mod matcher;
 mod metrics;
 mod migrations;
+mod resources;
 mod run_manager;
 mod scheduler;
-mod script_v2;
-mod scripts;
 mod shutdown;
 mod store;
-mod task_params;
 mod timer_core;
-mod timer_yaml;
 mod update;
 mod webrtc;
-mod yaml_extension;
-mod yaml_vnext;
 
 // Phase 0 兼容护栏只在测试构建挂载，不改变服务运行时模块图。
 #[cfg(test)]
@@ -268,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// 运行时上下文：闸内路径激活后与常规路径共用的完整业务依赖集合
 struct RuntimeServices {
-    scripts: Arc<scripts::ScriptStore>,
+    resources: Arc<resources::ResourceStore>,
     viewers: webrtc::ViewerMap,
     devices: Arc<device::DeviceManager>,
     runs: Arc<run_manager::RunManager>,
@@ -295,7 +288,7 @@ impl RuntimeServices {
             self.scheduler.clone(),
             cfg,
             self.viewers.clone(),
-            self.scripts.clone(),
+            self.resources.clone(),
             shutdown,
             auth,
             update,
@@ -316,16 +309,21 @@ impl RuntimeServices {
         auth: Arc<api::auth::AuthState>,
         drain_slot: DrainSlot,
     ) -> anyhow::Result<Self> {
-        let scripts = Arc::new(scripts::ScriptStore::open(cfg)?);
+        let resources = Arc::new(resources::ResourceStore::open(cfg)?);
+        // P11.3：扩展内容钩子注册（组合根引导期）——gamer.yaml 的脚本/函数/
+        // 模板校验与 gamer.keymap 的方案校验。裸 Core（不注册）时保存不做
+        // 内容校验（§8.9 验收锚点）。
+        extensions::gamer_yaml::register_resource_handlers(&resources);
+        extensions::register_resource_handlers(&resources);
         let viewers: webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(device::DeviceManager::new(db.clone(), cfg.clone()));
-        let runner = Arc::new(engine::Runner::new(
+        let runner = Arc::new(extensions::gamer_yaml::engine::Runner::new(
             devices.clone(),
             Arc::new(webrtc::ViewerEventSink::new(viewers.clone())),
-            scripts.clone(),
+            resources.clone(),
         ));
-        let executor = Arc::new(engine::EngineExecutor::new(
+        let executor = Arc::new(extensions::gamer_yaml::engine::EngineExecutor::new(
             runner,
             devices.clone(),
             db.clone(),
@@ -336,22 +334,24 @@ impl RuntimeServices {
         let scheduler = Arc::new(scheduler::Scheduler::new(db.clone()));
         let capabilities = capabilities::adapters::build_registry(
             devices.clone(),
-            scripts.clone(),
+            resources.clone(),
             db.clone(),
             runs.clone(),
         );
-        let runner_registrar = Arc::new(timer_yaml::YamlTimerRunnerRegistrar::new(
-            scheduler.clone(),
-            db.clone(),
-            runs.clone(),
-            scripts.clone(),
-        ));
+        let runner_registrar = Arc::new(
+            extensions::gamer_yaml::timer_yaml::YamlTimerRunnerRegistrar::new(
+                scheduler.clone(),
+                db.clone(),
+                runs.clone(),
+                resources.clone(),
+            ),
+        );
         let extensions = Arc::new(
             extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities)
                 .with_runner_registrar(runner_registrar),
         );
         let ctx = Self {
-            scripts,
+            resources,
             viewers,
             devices,
             runs,
@@ -361,7 +361,7 @@ impl RuntimeServices {
         // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
         // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。
         install_drain(&drain_slot, &ctx);
-        executor.attach_yaml_vnext(ctx.scripts.clone(), ctx.extensions.clone());
+        executor.attach_yaml_vnext(ctx.resources.clone(), ctx.extensions.clone());
         // 后台生命周期统一在组合根启动：视频静默看门狗（devices/viewers/metrics
         // 三依赖）+ 会话过期清扫（小时级）。路由组装（api::build_router_*）只注册路由。
         api::system::spawn_watchdog(ctx.devices.clone(), ctx.viewers.clone(), db.metrics());

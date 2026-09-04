@@ -84,8 +84,8 @@ mod contract_tests {
     use super::*;
     use crate::config::Config;
     use crate::device::DeviceManager;
+    use crate::resources::ResourceStore;
     use crate::scheduler::Scheduler;
-    use crate::scripts::ScriptStore;
     use crate::store::Db;
     use crate::update::controller::mock::MockController;
     use crate::update::ipc::{Candidate, LastErrorCodeMessage, LauncherUpdateStatus};
@@ -424,12 +424,12 @@ mod contract_tests {
             ..Default::default()
         };
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
-        let executor = Arc::new(crate::engine::EngineExecutor::new(
-            Arc::new(crate::engine::Runner::new(
+        let executor = Arc::new(crate::extensions::gamer_yaml::engine::EngineExecutor::new(
+            Arc::new(crate::extensions::gamer_yaml::engine::Runner::new(
                 devices.clone(),
                 Arc::new(crate::webrtc::ViewerEventSink::new(viewers.clone())),
                 scripts.clone(),
@@ -577,12 +577,12 @@ mod contract_tests {
             ..Default::default()
         };
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
-        let executor = Arc::new(crate::engine::EngineExecutor::new(
-            Arc::new(crate::engine::Runner::new(
+        let executor = Arc::new(crate::extensions::gamer_yaml::engine::EngineExecutor::new(
+            Arc::new(crate::extensions::gamer_yaml::engine::Runner::new(
                 devices.clone(),
                 Arc::new(crate::webrtc::ViewerEventSink::new(viewers.clone())),
                 scripts.clone(),

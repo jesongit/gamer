@@ -57,8 +57,8 @@ async fn unauthenticated_high_risk_endpoints_are_all_401() {
     let cases = [
         ("POST", "/api/shutdown"),
         ("POST", "/api/devices/missing/control"),
-        ("POST", "/api/scripts/missing/run"),
-        ("DELETE", "/api/templates/missing?pkg=com.test.app"),
+        ("POST", "/api/runs"),
+        ("DELETE", "/api/apps/com.test.app/resources/templates/missing"),
         ("POST", "/api/app-packages/install"),
     ];
     for (method, uri) in cases {
@@ -588,10 +588,10 @@ async fn cross_origin_high_risk_endpoints_are_all_403_after_authentication() {
         ),
         (
             "POST",
-            "/api/scripts/missing/run",
-            Some(r#"{"device_id":"d1"}"#),
+            "/api/runs",
+            Some(r#"{"runner_id":"gamer.yaml","entrypoint":"com.test.app/missing.yaml","device_id":"d1"}"#),
         ),
-        ("DELETE", "/api/templates/missing?pkg=com.test.app", None),
+        ("DELETE", "/api/apps/com.test.app/resources/templates/missing", None),
         (
             "POST",
             "/api/app-packages/install",

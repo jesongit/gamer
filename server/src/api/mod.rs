@@ -22,18 +22,16 @@ mod devices;
 mod error;
 mod extensions;
 mod extensions_management;
-mod functions;
 pub(crate) mod gate;
-mod keymaps;
 mod logs;
+mod resources;
 mod runs;
-mod scripts;
 pub(crate) mod system;
 mod tasks;
-mod templates;
 #[cfg(test)]
 mod tests;
 pub(crate) mod update;
+mod vision;
 mod ws;
 
 pub(crate) use error::ApiError;
@@ -43,15 +41,14 @@ use std::sync::Arc;
 use axum::extract::DefaultBodyLimit;
 use axum::http::StatusCode;
 use axum::middleware as axmw;
-use axum::routing::{any, delete, get, post};
+use axum::routing::{any, delete, get, post, put};
 use axum::Router;
 use tower_http::services::ServeDir;
 
 use crate::config::Config;
 use crate::device::DeviceManager;
-use crate::keymaps::KeymapStore;
+use crate::resources::ResourceStore;
 use crate::scheduler::Scheduler;
-use crate::scripts::ScriptStore;
 use crate::store::Db;
 
 use common::{
@@ -69,10 +66,9 @@ pub struct AppState {
     /// 统一运行管理（阶段 3 RUN-001）：手动/调度共用 run_id 注册表与设备级互斥
     pub runs: Arc<crate::run_manager::RunManager>,
     pub cfg: Config,
-    /// 脚本文件存储（data/<pkg>/scripts/ 与 templates/）
-    pub scripts: Arc<ScriptStore>,
-    /// 按键映射文件存储（data/<pkg>/keymaps/）
-    pub keymaps: Arc<KeymapStore>,
+    /// 通用资源存储（六目录 + composite 三层 + 扩展注册的内容钩子；
+    /// P11.3：ScriptStore/KeymapStore 消解后的 Core 侧唯一资源层）
+    pub resources: Arc<ResourceStore>,
     /// 每设备的活跃 viewer 注册表。
     pub viewers: crate::webrtc::ViewerMap,
     /// 统一停机协调器（OPS-001）：/api/shutdown 经它触发 drain，
@@ -103,14 +99,14 @@ pub fn build_router(
     scheduler: Arc<Scheduler>,
     cfg: Config,
     viewers: crate::webrtc::ViewerMap,
-    scripts: Arc<ScriptStore>,
+    resources: Arc<ResourceStore>,
     shutdown: Arc<crate::shutdown::ShutdownCoordinator>,
     auth: Arc<auth::AuthState>,
     update: Arc<crate::update::service::UpdateService>,
 ) -> Router {
     let capabilities = crate::capabilities::adapters::build_registry(
         devices.clone(),
-        scripts.clone(),
+        resources.clone(),
         db.clone(),
         runs.clone(),
     );
@@ -119,7 +115,7 @@ pub fn build_router(
         capabilities,
     ));
     build_router_with_extensions(
-        db, devices, runs, scheduler, cfg, viewers, scripts, shutdown, auth, update, extensions,
+        db, devices, runs, scheduler, cfg, viewers, resources, shutdown, auth, update, extensions,
     )
 }
 
@@ -134,7 +130,7 @@ pub(crate) fn build_router_with_extensions(
     scheduler: Arc<Scheduler>,
     cfg: Config,
     viewers: crate::webrtc::ViewerMap,
-    scripts: Arc<ScriptStore>,
+    resources: Arc<ResourceStore>,
     shutdown: Arc<crate::shutdown::ShutdownCoordinator>,
     auth: Arc<auth::AuthState>,
     update: Arc<crate::update::service::UpdateService>,
@@ -152,8 +148,7 @@ pub(crate) fn build_router_with_extensions(
         scheduler: scheduler.clone(),
         runs,
         cfg: cfg.clone(),
-        scripts,
-        keymaps: Arc::new(KeymapStore::new(cfg.data_dir.clone())),
+        resources,
         viewers,
         shutdown,
         auth,
@@ -194,10 +189,10 @@ pub(crate) fn build_router_with_extensions(
         .with_state(state.clone())
         .layer(DefaultBodyLimit::max(BODY_LIMIT_PUBLIC));
 
-    // ---- 受保护组（普通 JSON API，≤256KiB）：设备 / 截图 / 控制 / 模板查询删除 /
-    //      脚本运行与状态查询 / 任务 / 日志 / shutdown / 维护 vacuum。
+    // ---- 受保护组（普通 JSON API，≤256KiB）：设备 / 截图 / 控制 / 通用资源
+    //      CRUD / 统一运行分发与状态查询 / 任务 / 日志 / shutdown / 维护 vacuum。
     //      高风险接口标注（专项测试见文件尾 tests）：shutdown、设备控制
-    //      （devices::api_control）、脚本运行、模板删除（templates::api_delete_template）。
+    //      （devices::api_control）、运行分发、资源删除。
     let protected_json: Router<()> = Router::new()
         .route(
             "/api/devices",
@@ -220,32 +215,29 @@ pub(crate) fn build_router_with_extensions(
         )
         .route("/api/devices/:id/screenshot", post(devices::api_screenshot))
         .route("/api/devices/:id/control", post(devices::api_control))
+        // Generic Resource API（P11.6 / §11.2）：scripts/functions/templates/
+        // keymaps/presets/resources 六类别统一；内容校验经扩展注册的
+        // ResourceKindHandler 回调（gamer.yaml / gamer.keymap）。
         .route(
-            "/api/templates/:name",
-            delete(templates::api_delete_template).put(templates::api_rename_template),
+            "/api/apps/:app/resources",
+            get(resources::api_list_all_resources),
         )
         .route(
-            "/api/templates/:name/image",
-            get(templates::api_get_template_image).put(templates::api_replace_template_image),
+            "/api/apps/:app/resources/:kind",
+            get(resources::api_list_kind_resources),
         )
         .route(
-            "/api/templates/:name/test",
-            post(templates::api_test_template),
+            "/api/apps/:app/resources/:kind/*id",
+            get(resources::api_get_resource).delete(resources::api_delete_resource),
         )
+        // Vision 能力位（模板匹配测试 = vision 语义，Core 合法）
         .route(
-            "/api/scripts/:id",
-            get(scripts::api_get_script)
-                .put(scripts::api_update_script)
-                .delete(scripts::api_delete_script),
+            "/api/capabilities/vision/test",
+            post(vision::api_vision_test_template),
         )
-        .route(
-            "/api/keymaps/:id",
-            get(keymaps::api_get_keymap)
-                .put(keymaps::api_update_keymap)
-                .delete(keymaps::api_delete_keymap),
-        )
-        .route("/api/scripts/:id/run", post(runs::api_run_script))
-        .route("/api/functions/:id/run", post(runs::api_run_function))
+        // 统一执行入口（P11.6 / §11.3）：原 /api/scripts/:id/run 与
+        // /api/functions/:id/run 删除，经 Runner 注册表分发。
+        .route("/api/runs", post(runs::api_dispatch_run))
         .route("/api/devices/:id/run", get(runs::api_device_run))
         .route("/api/runs/:run_id", get(runs::api_get_run))
         .route("/api/runs/:run_id/cancel", post(runs::api_cancel_run))
@@ -352,31 +344,18 @@ pub(crate) fn build_router_with_extensions(
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_JSON));
 
-    // ---- 受保护组（大 JSON，≤16MiB）：模板上传（data_b64）/ 脚本保存+列表 /
-    //      函数库 CRUD（functions/ 函数库与脚本同限：内容 ≤1MiB，JSON 余量对齐）。
-    //      GET 与 POST 同路径注册在一组以避免 merge 冲突，GET 本身无 body 不受限额影响。
+    // ---- 受保护组（≤16MiB）：资源创建（POST）与更新/替换/重命名（PUT）。
+    //      文本 kind 收 JSON、字节 kind 收原始字节（模板按 Content-Type 区分
+    //      字节替换与重命名）。统一注册在本组以获得上传体限额；文本内容另有
+    //      1MiB 校验兜底。GET/DELETE 在 protected_json 组（小响应、无 body）。
     let protected_upload: Router<()> = Router::new()
         .route(
-            "/api/templates",
-            get(templates::api_list_templates).post(templates::api_upload_template),
+            "/api/apps/:app/resources/:kind",
+            post(resources::api_create_resource),
         )
         .route(
-            "/api/scripts",
-            get(scripts::api_list_scripts).post(scripts::api_create_script),
-        )
-        .route(
-            "/api/functions",
-            get(functions::api_list_functions).post(functions::api_create_function),
-        )
-        .route(
-            "/api/keymaps",
-            get(keymaps::api_list_keymaps).post(keymaps::api_create_keymap),
-        )
-        .route(
-            "/api/functions/:id",
-            get(functions::api_get_function)
-                .put(functions::api_update_function)
-                .delete(functions::api_delete_function),
+            "/api/apps/:app/resources/:kind/*id",
+            put(resources::api_update_resource),
         )
         .with_state(state.clone())
         .route_layer(axmw::from_fn_with_state(

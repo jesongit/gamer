@@ -1,5 +1,9 @@
 use super::*;
 
+// P11.6：keymap CRUD 并入通用资源 API（/api/apps/:app/resources/keymaps）。
+// 注记字段（显示名 name / binding_count / valid / diagnostics）由 gamer.keymap
+// 扩展注册的 ResourceKindHandler 提供。
+
 const KEYMAP_V1: &str = "version: 1\nname: 战斗方案\nbindings:\n  - key: Space\n    action:\n      type: tap\n      at: [0.72, 0.86]\n  - key: KeyE\n    action:\n      type: swipe\n      from: [0.4, 0.8]\n      to: [0.6, 0.8]\n      duration_ms: 300\n";
 
 const KEYMAP_V2: &str = "version: 1\nname: 探索方案\nbindings:\n  - key: KeyW\n    action:\n      type: hold\n      at: [0.5, 0.5]\n";
@@ -16,15 +20,14 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
     let resp = post_json(
         &t,
         &sid,
-        "/api/keymaps",
+        "/api/apps/com.test.app/resources/keymaps",
         serde_json::json!({
-            "pkg": "com.test.app",
             "name": "combat",
             "content": KEYMAP_V1,
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
     let created = json_body(resp).await;
     assert_eq!(created["id"], "com.test.app/combat.yaml");
     assert_eq!(created["package"], "com.test.app");
@@ -38,9 +41,8 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
     let resp = post_json(
         &t,
         &sid,
-        "/api/keymaps",
+        "/api/apps/com.test.app/resources/keymaps",
         serde_json::json!({
-            "pkg": "com.test.app",
             "name": "combat.yaml",
             "content": KEYMAP_V1,
         }),
@@ -48,7 +50,7 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 
-    let resp = get_json(&t, &sid, "/api/keymaps?pkg=com.test.app").await;
+    let resp = get_json(&t, &sid, "/api/apps/com.test.app/resources/keymaps").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let list = json_body(resp).await;
     assert_eq!(list.as_array().unwrap().len(), 1);
@@ -57,20 +59,35 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
     assert_eq!(list[0]["binding_count"], 2);
     assert_eq!(list[0]["version"], v1.as_str());
 
-    // 详情返回规范化 YAML 和结构化模型。
-    let resp = get_json(&t, &sid, "/api/keymaps/com.test.app%2Fcombat.yaml").await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    // 详情返回规范化 YAML 原文与注记（结构化模型不再经通用层透出）。
+    let resp = get_json(
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/keymaps/com.test.app%2Fcombat.yaml",
+    )
+    .await;
+    let status = resp.status();
     let detail = json_body(resp).await;
-    assert!(detail["content"].as_str().unwrap().contains("version: 1"));
+    eprintln!("encoded-id GET: {status} body: {detail}");
+    let resp = get_json(
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/keymaps/com.test.app/combat.yaml",
+    )
+    .await;
+    let status2 = resp.status();
+    let detail2 = json_body(resp).await;
+    eprintln!("physical-slash GET: {status2} body: {detail2}");
+    assert_eq!(status, StatusCode::OK, "detail body: {detail}");
     assert!(detail["content"].as_str().unwrap().contains("type: tap"));
-    assert_eq!(detail["keymap"]["bindings"].as_array().unwrap().len(), 2);
+    assert_eq!(detail["binding_count"], 2);
 
     // PUT 默认需要 expected_version；过期版本必须 409。
     let resp = send(
         &t.app,
         req(
             "PUT",
-            "/api/keymaps/com.test.app%2Fcombat.yaml",
+            "/api/apps/com.test.app/resources/keymaps/com.test.app%2Fcombat.yaml",
             None,
             &json_headers(sid.clone()),
             Some(serde_json::json!({"content": KEYMAP_V2}).to_string()),
@@ -84,7 +101,7 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
         &t.app,
         req(
             "PUT",
-            "/api/keymaps/com.test.app%2Fcombat.yaml",
+            "/api/apps/com.test.app/resources/keymaps/com.test.app%2Fcombat.yaml",
             None,
             &json_headers(sid.clone()),
             Some(
@@ -104,7 +121,7 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
         &t.app,
         req(
             "PUT",
-            "/api/keymaps/com.test.app%2Fcombat.yaml",
+            "/api/apps/com.test.app/resources/keymaps/com.test.app%2Fcombat.yaml",
             None,
             &json_headers(sid.clone()),
             Some(
@@ -126,7 +143,7 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
         &t.app,
         req(
             "PUT",
-            "/api/keymaps/com.test.app%2Fcombat.yaml",
+            "/api/apps/com.test.app/resources/keymaps/com.test.app%2Fcombat.yaml",
             None,
             &json_headers(sid.clone()),
             Some(
@@ -145,7 +162,7 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
     assert!(!t.dir.join("com.test.app/keymaps/combat.yaml").exists());
 
     // 另一应用分区看不到该方案。
-    let resp = get_json(&t, &sid, "/api/keymaps?pkg=com.other.app").await;
+    let resp = get_json(&t, &sid, "/api/apps/com.other.app/resources/keymaps").await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(json_body(resp).await.as_array().unwrap().is_empty());
 
@@ -153,7 +170,7 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
         &t.app,
         req(
             "DELETE",
-            "/api/keymaps/com.test.app%2Fexplore.yaml",
+            "/api/apps/com.test.app/resources/keymaps/com.test.app%2Fexplore.yaml",
             None,
             &json_headers(sid.clone()),
             None,
@@ -161,8 +178,42 @@ async fn keymaps_crud_is_partitioned_and_version_guarded() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let resp = get_json(&t, &sid, "/api/keymaps/com.test.app%2Fexplore.yaml").await;
+    let resp = get_json(
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/keymaps/com.test.app%2Fexplore.yaml",
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// 存储层直接探针：get_text 经 composite 三层应命中本地编辑区文件。
+#[tokio::test]
+async fn keymap_store_get_text_probe() {
+    let t = build_app(
+        "keymapprobe",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/keymaps",
+        serde_json::json!({"name": "combat", "content": KEYMAP_V1}),
+    )
+    .await;
+    eprintln!("create: {}", resp.status());
+    let dir = t.dir.clone();
+    let store = crate::resources::ResourceStore::open(&crate::config::Config {
+        data_dir: dir,
+        ..Default::default()
+    })
+    .unwrap();
+    let hit = store
+        .get_text(crate::resources::ResourceKind::Keymaps, "com.test.app/combat.yaml")
+        .unwrap();
+    eprintln!("store get_text: {hit:?}");
 }
 
 #[tokio::test]
@@ -208,8 +259,8 @@ async fn keymaps_reject_invalid_yaml_fields_coordinates_and_duplicates() {
         let resp = post_json(
             &t,
             &sid,
-            "/api/keymaps",
-            serde_json::json!({"pkg": "com.test.app", "name": "bad", "content": content}),
+            "/api/apps/com.test.app/resources/keymaps",
+            serde_json::json!({"name": "bad", "content": content}),
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{content}");

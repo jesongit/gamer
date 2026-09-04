@@ -23,8 +23,7 @@ use std::sync::Arc;
 use zip::write::SimpleFileOptions;
 
 use crate::matcher;
-use crate::scripts::ScriptStore;
-use crate::yaml_extension::{validate_compatible_script_in, CompatibleYamlError};
+use crate::resources::{ResourceKind as CoreKind, ResourceStore};
 
 use super::archive::{
     validate_and_read_manifest, MAX_PACKAGE_ENTRIES, MAX_PACKAGE_FILE_BYTES,
@@ -71,19 +70,19 @@ pub(crate) struct BuiltPackage {
 pub(crate) struct PackageBuilder {
     data_root: PathBuf,
     android: AndroidPackageName,
-    scripts: Arc<ScriptStore>,
+    resources: Arc<ResourceStore>,
 }
 
 impl PackageBuilder {
     pub(crate) fn new(
         data_root: impl Into<PathBuf>,
         android: AndroidPackageName,
-        scripts: Arc<ScriptStore>,
+        resources: Arc<ResourceStore>,
     ) -> Self {
         Self {
             data_root: data_root.into(),
             android,
-            scripts,
+            resources,
         }
     }
 
@@ -132,30 +131,63 @@ impl PackageBuilder {
             ));
         }
 
-        // v2 脚本/函数跨文件引用（call/func）的自洽校验视图：以「被校验目录
-        // 自身」的 scripts/functions 内容打底（注入内容优先于本地编辑区参与
-        // 引用解析）。edit 提取校验的是 staging 快照——本地编辑区此时可能为
-        // 空或不同源，若只读本地目录，「提取到空工作区」会永远 preflight 失败；
-        // 导出路径目录即工作区，注入内容与本地一致，行为不变。模板可用性仍经
-        // composite 解析（与运行时同源），不在此注入。
-        let mut reference_view = self.scripts.resources(self.android.as_str());
+        // 脚本/函数跨文件引用（call/func）的自洽校验：以「被校验目录自身」的
+        // scripts/functions 内容为最高优先视图（扩展经 StagedResourceValidator
+        // 回调）。edit 提取校验的是 staging 快照——本地编辑区此时可能为空或
+        // 不同源，若只读本地目录，「提取到空工作区」会永远 preflight 失败；
+        // 导出路径目录即工作区，注入内容与本地一致，行为不变。keymaps 内容
+        // 校验经各自 kind 的 ResourceKindHandler 逐文件回调。模板可用性不在
+        // 此注入。
+        let mut staged: Vec<(CoreKind, String, String)> = Vec::new();
         for file in &files {
-            if let Some((kind, rel)) = Self::yaml_reference_entry(file) {
-                let Ok(content) = read_utf8(&file.absolute) else {
-                    continue; // 读取失败由 validate_file 记入 problems
-                };
-                match kind {
-                    super::model::ResourceKind::Scripts => reference_view.add_script(rel, &content),
-                    super::model::ResourceKind::Functions => {
-                        reference_view.add_function(rel, &content)
-                    }
-                    _ => unreachable!("yaml_reference_entry 只产出 scripts/functions"),
-                }
+            let name = file
+                .path
+                .as_str()
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if !(name.ends_with(".yaml") || name.ends_with(".yml")) {
+                continue;
+            }
+            let kind = match file.path.kind() {
+                super::model::ResourceKind::Scripts => CoreKind::Scripts,
+                super::model::ResourceKind::Functions => CoreKind::Functions,
+                super::model::ResourceKind::Keymaps => CoreKind::Keymaps,
+                _ => continue,
+            };
+            let Ok(content) = read_utf8(&file.absolute) else {
+                continue; // 读取失败由下方逐文件校验记入 problems
+            };
+            staged.push((kind, trim_root_for_kind(file.path.as_str(), kind), content));
+        }
+        // scripts/functions 走跨文件引用视图（staged 内容自身为最高优先）；
+        // keymaps 等无引用语义的 kind 逐条经各自 handler 校验。
+        let (script_func, standalone): (Vec<_>, Vec<_>) = staged
+            .into_iter()
+            .partition(|(kind, ..)| matches!(kind, CoreKind::Scripts | CoreKind::Functions));
+        for problem in self
+            .resources
+            .validate_staged(self.android.as_str(), &script_func)
+        {
+            problems.push(problem);
+        }
+        for (kind, rel, content) in standalone {
+            if let Err(diagnostics) =
+                self.resources
+                    .validate_content(kind, self.android.as_str(), &rel, &content)
+            {
+                problems.push(format!(
+                    "{}/{}: {}",
+                    kind.as_str(),
+                    rel,
+                    crate::resources::format_diagnostics_value(&diagnostics)
+                ));
             }
         }
-
+        // 逐文件校验（templates PNG 解码 / presets 解析器）
         for file in &files {
-            self.validate_file(file, &mut reference_view, &mut problems);
+            self.validate_file(file, &mut problems);
         }
 
         if !problems.is_empty() {
@@ -250,14 +282,10 @@ impl PackageBuilder {
     }
 
     /// 单文件按资源根分发到各自现有校验器（不写包专用 parser）。
-    /// `reference_view` = 跨文件引用（call/func）解析视图：被校验目录自身内容
-    /// 优先、本地编辑区兜底（见 validate_dir 注释）。
-    fn validate_file(
-        &self,
-        file: &CollectedFile,
-        reference_view: &mut crate::scripts::PartitionResources<'_>,
-        problems: &mut Vec<String>,
-    ) {
+    /// scripts/functions/keymaps 的内容校验已经过 staged 回调（见
+    /// validate_dir），这里保留 templates（PNG 解码）与 presets（包安装侧
+    /// 同一解析器）的逐文件校验。
+    fn validate_file(&self, file: &CollectedFile, problems: &mut Vec<String>) {
         let relative = file.path.as_str();
         let name = file
             .path
@@ -268,51 +296,10 @@ impl PackageBuilder {
             .to_ascii_lowercase();
         let is_yaml = name.ends_with(".yaml") || name.ends_with(".yml");
         match file.path.kind() {
-            super::model::ResourceKind::Scripts => {
-                if !is_yaml {
-                    return; // 非 YAML 文件不进脚本索引，放行为包内附件
-                }
-                let content = match read_utf8(&file.absolute) {
-                    Ok(content) => content,
-                    Err(error) => {
-                        problems.push(error);
-                        return;
-                    }
-                };
-                // 资源名用 scripts/ 内相对路径，与 ScriptStore 保存链路一致
-                let resource = trim_root(relative, "scripts");
-                if let Err(error) =
-                    validate_compatible_script_in(resource, &content, reference_view)
-                {
-                    problems.push(format!("{relative}: {}", compatible_error_text(&error)));
-                }
-            }
-            super::model::ResourceKind::Functions => {
-                if !is_yaml {
-                    return;
-                }
-                let content = match read_utf8(&file.absolute) {
-                    Ok(content) => content,
-                    Err(error) => {
-                        problems.push(error);
-                        return;
-                    }
-                };
-                let resource = trim_root(relative, "functions");
-                reference_view.add_function(resource, &content);
-                if let Err(errors) =
-                    crate::script_v2::parse_function_file(&content, resource, reference_view)
-                {
-                    problems.push(format!(
-                        "{relative}: {}",
-                        errors
-                            .iter()
-                            .map(|error| error.to_string())
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ));
-                }
-            }
+            // 非 YAML 文件不进索引，放行为包内附件（staged 校验已跳过）
+            super::model::ResourceKind::Scripts
+            | super::model::ResourceKind::Functions
+            | super::model::ResourceKind::Keymaps => {}
             super::model::ResourceKind::Templates => {
                 // 内存中重编码即校验（不落盘）；`#1` 后缀保留颜色，其余灰度——
                 // 与模板上传/替换链路同一语义
@@ -326,33 +313,6 @@ impl PackageBuilder {
                 };
                 if let Err(error) = matcher::reencode_template_png(&bytes, grayscale_only) {
                     problems.push(format!("{relative}: 模板无法解码: {error}"));
-                }
-            }
-            super::model::ResourceKind::Keymaps => {
-                if !is_yaml {
-                    return;
-                }
-                let content = match read_utf8(&file.absolute) {
-                    Ok(content) => content,
-                    Err(error) => {
-                        problems.push(error);
-                        return;
-                    }
-                };
-                if let Err(diagnostics) =
-                    crate::keymaps::parse_keymap_content(&content, trim_root(relative, "keymaps"))
-                {
-                    problems.push(format!(
-                        "{relative}: {}",
-                        diagnostics
-                            .iter()
-                            .map(|diagnostic| format!(
-                                "{}: {} ({})",
-                                diagnostic.code, diagnostic.message, diagnostic.step_path
-                            ))
-                            .collect::<Vec<_>>()
-                            .join("; ")
-                    ));
                 }
             }
             super::model::ResourceKind::Presets => {
@@ -474,31 +434,22 @@ fn read_utf8(path: &Path) -> Result<String, String> {
 
 /// 去掉资源根前缀（`scripts/daily.yaml` → `daily.yaml`），作为校验器 resource
 /// 语境（与分区存储链路的资源命名一致）。
+/// staged 条目的资源 id：scripts/ 内相对路径、functions/ 文件短路径、
+/// keymaps 文件名（与各保存链路的资源命名一致）。
+fn trim_root_for_kind(relative: &str, kind: CoreKind) -> String {
+    match kind {
+        CoreKind::Scripts => trim_root(relative, "scripts").to_string(),
+        CoreKind::Functions => trim_root(relative, "functions").to_string(),
+        CoreKind::Keymaps => trim_root(relative, "keymaps").to_string(),
+        _ => relative.to_string(),
+    }
+}
+
 fn trim_root<'a>(relative: &'a str, root: &str) -> &'a str {
     relative
         .strip_prefix(root)
         .and_then(|rest| rest.strip_prefix('/'))
         .unwrap_or(relative)
-}
-
-fn compatible_error_text(error: &CompatibleYamlError) -> String {
-    match error {
-        CompatibleYamlError::V2(errors) => errors
-            .iter()
-            .map(|error| error.to_string())
-            .collect::<Vec<_>>()
-            .join("; "),
-        CompatibleYamlError::V3(diagnostics) => diagnostics
-            .iter()
-            .map(|diagnostic| {
-                format!(
-                    "{}: {} @ {}",
-                    diagnostic.code, diagnostic.message, diagnostic.path
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; "),
-    }
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -524,11 +475,11 @@ mod tests {
             data_dir: data_root.to_path_buf(),
             ..Default::default()
         };
-        PackageBuilder::new(
-            data_root.to_path_buf(),
-            android(),
-            Arc::new(ScriptStore::open(&config).unwrap()),
-        )
+        let resources = Arc::new(ResourceStore::open(&config).unwrap());
+        // 与生产组合根一致：注册扩展内容校验钩子
+        crate::extensions::gamer_yaml::register_resource_handlers(&resources);
+        crate::extensions::register_resource_handlers(&resources);
+        PackageBuilder::new(data_root.to_path_buf(), android(), resources)
     }
 
     fn write_metadata(data_root: &Path, id: &str, version: &str) -> PackageManifest {

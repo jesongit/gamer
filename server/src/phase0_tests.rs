@@ -14,9 +14,11 @@ use sha2::{Digest, Sha256};
 use crate::config::Config;
 use crate::core::AppContext;
 use crate::cron_extension;
-use crate::keymaps::{parse_keymap_content, serialize_keymap};
+use crate::extensions::gamer_yaml::script_v2::{
+    parse_script_file, serialize_script, InMemoryResources,
+};
+use crate::extensions::{parse_keymap_content, serialize_keymap};
 use crate::matcher::{match_template, template_region_from_name, MatchRequest};
-use crate::script_v2::{parse_script_file, serialize_script, InMemoryResources};
 use crate::store::Store;
 use crate::timer_core::{ScheduleExtension, ScheduleRegistry, Task, TaskSchedule};
 

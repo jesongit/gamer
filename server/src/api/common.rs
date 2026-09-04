@@ -20,6 +20,9 @@ pub(super) const BODY_LIMIT_PACKAGE_INSTALL: usize =
     crate::core::fs::archive_validation::IMPORT_MAX_TOTAL_BYTES;
 /// 公开豁免组请求体上限
 pub(super) const BODY_LIMIT_PUBLIC: usize = 64 * 1024;
+/// 文本资源（脚本/函数库/映射方案/预设）内容上限（与归档侧 YAML 上限同源）
+pub(super) const TEXT_RESOURCE_MAX_BYTES: usize =
+    crate::core::fs::archive_validation::IMPORT_MAX_YAML_BYTES;
 /// API 侧同步文件/SQLite/外部探测任务的并发上限
 const API_BLOCKING_CONCURRENCY: usize = 16;
 

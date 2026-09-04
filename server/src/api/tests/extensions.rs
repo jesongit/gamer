@@ -814,14 +814,14 @@ async fn baseline_control_and_capabilities_work_without_installed_extensions() {
         ..Default::default()
     };
     let db: crate::store::Db = std::sync::Arc::new(crate::store::Store::open(&cfg).unwrap());
-    let scripts = std::sync::Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
+    let scripts = std::sync::Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
     let devices = std::sync::Arc::new(crate::device::DeviceManager::new(
         db.clone(),
         cfg.clone(),
     ));
     let runs = std::sync::Arc::new(crate::run_manager::RunManager::new(
-        std::sync::Arc::new(crate::engine::EngineExecutor::new(
-            std::sync::Arc::new(crate::engine::Runner::new(
+        std::sync::Arc::new(crate::extensions::gamer_yaml::engine::EngineExecutor::new(
+            std::sync::Arc::new(crate::extensions::gamer_yaml::engine::Runner::new(
                 devices.clone(),
                 std::sync::Arc::new(crate::webrtc::ViewerEventSink::new(
                     std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

@@ -288,11 +288,11 @@ async fn runner_and_schedule_provider_lists_are_exposed() {
 
     let resp = get_json(&t, &sid, "/api/runners").await;
     let runners = json_body(resp).await;
-    assert_eq!(
-        runners.as_array().unwrap().len(),
-        0,
-        "裸 Core 不预置任何 runner"
-    );
+    // 测试装配与生产组合根等价：gamer.yaml 扩展 Running 期间其 runner 在册；
+    // 裸 Core（无扩展 start）为空的语义由 scheduler 单测锁定
+    assert_eq!(runners.as_array().unwrap().len(), 1, "装配含 gamer.yaml runner");
+    assert_eq!(runners[0]["runner_id"], "gamer.yaml");
+    assert_eq!(runners[0]["owner_extension_id"], "gamer.yaml");
 
     let resp = get_json(&t, &sid, "/api/schedule-providers").await;
     let providers = json_body(resp).await;
@@ -321,5 +321,6 @@ async fn runner_and_schedule_provider_lists_are_exposed() {
     assert_eq!(json_body(resp).await["runner_id"], YAML_RUNNER);
     let task = json_body(get_json(&t, &sid, &format!("/api/tasks/{task_id}")).await).await;
     assert_eq!(task["state"], "dependency_missing");
-    assert_eq!(task["suspend_reason"], "missing_dependency=gamer.yaml");
+    // runner 已注册但入口脚本不存在：同口径进入依赖缺失，reason 为脚本不存在
+    assert_eq!(task["suspend_reason"], "脚本不存在");
 }

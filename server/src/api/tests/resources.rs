@@ -1,8 +1,10 @@
 use super::*;
 
-// ---------- 资源 API：/api/functions CRUD、版本冲突、脚本/函数目录隔离 ----------
+// ---------- 通用资源 API（P11.6）：/api/apps/:app/resources/:kind ----------
 //
-// 资源 id 含 `/`，URL 里整体 encodeURIComponent（%2F），与 scripts 路由同规则。
+// 文本 kind（scripts/functions/keymaps/presets）走 JSON；字节 kind
+// （templates/resources）走原始字节 + ?name=。资源 id 含 `/`，URL 里整体
+// encodeURIComponent（%2F）。`app = "-"` 为跨分区通配。
 
 const FUNC_YAML: &str = "login:\n  steps:\n    - return: true\n";
 const FUNC_YAML_V2: &str = "login:\n  steps:\n    - return: false\n";
@@ -42,45 +44,39 @@ async fn template_upload_rejects_byte_and_pixel_bombs_with_4xx() {
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-    let headers = |cookie: String| {
+    let png_headers = |cookie: String| {
         vec![
             (header::COOKIE.to_string(), cookie),
-            (header::CONTENT_TYPE.to_string(), JSON_CT.into()),
+            (header::CONTENT_TYPE.to_string(), "image/png".into()),
         ]
     };
 
-    let bomb_b64 = base64::engine::general_purpose::STANDARD.encode(pixel_bomb_png(30_000, 30_000));
-    let body = serde_json::json!({
-        "short_name": "bomb.png",
-        "pkg": "com.test.app",
-        "data_b64": bomb_b64,
-    })
-    .to_string();
+    // 像素炸弹：base64 体积小但解码尺寸超限 → 400
+    let bomb = pixel_bomb_png(30_000, 30_000);
     let resp = send(
         &t.app,
-        req(
+        req_bytes(
             "POST",
-            "/api/templates",
+            "/api/apps/com.test.app/resources/templates?name=bomb.png",
             None,
-            &headers(sid.clone()),
-            Some(body),
+            &png_headers(sid.clone()),
+            bomb,
         ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // 构造超过原始模板字节上限的 base64，但保持请求体低于 16MiB 路由上限，
-    // 断言 API 在解码前直接以 400 拒绝，不分配/解码图片。
-    let too_large_b64 = "A".repeat((matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 2) * 4);
-    let body = serde_json::json!({
-        "short_name": "large.png",
-        "pkg": "com.test.app",
-        "data_b64": too_large_b64,
-    })
-    .to_string();
+    // 超过原始模板字节上限：API 在解码前直接以 4xx 拒绝，不分配/解码图片
+    let too_large = vec![b'A'; (matcher::TEMPLATE_MAX_INPUT_BYTES / 3 + 2) * 4];
     let resp = send(
         &t.app,
-        req("POST", "/api/templates", None, &headers(sid), Some(body)),
+        req_bytes(
+            "POST",
+            "/api/apps/com.test.app/resources/templates?name=large.png",
+            None,
+            &png_headers(sid),
+            too_large,
+        ),
     )
     .await;
     assert!(resp.status().is_client_error());
@@ -138,19 +134,27 @@ async fn functions_routes_require_auth() {
         Default::default(),
     );
     let cases = [
-        ("GET", "/api/functions?pkg=com.test.app", None),
+        ("GET", "/api/apps/com.test.app/resources/functions", None),
         (
             "POST",
-            "/api/functions",
-            Some(r#"{"pkg":"p","name":"a","content":"x: {}\n"}"#),
+            "/api/apps/com.test.app/resources/functions",
+            Some(r#"{"name":"a","content":"x: {}\n"}"#),
         ),
-        ("GET", "/api/functions/com.test.app%2Fa.yaml", None),
+        (
+            "GET",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fa.yaml",
+            None,
+        ),
         (
             "PUT",
-            "/api/functions/com.test.app%2Fa.yaml",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fa.yaml",
             Some(r#"{"content":"x: {}\n"}"#),
         ),
-        ("DELETE", "/api/functions/com.test.app%2Fa.yaml", None),
+        (
+            "DELETE",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fa.yaml",
+            None,
+        ),
     ];
     for (method, uri, body) in cases {
         let resp = send(
@@ -172,21 +176,20 @@ async fn functions_crud_cycle_with_version_conflict() {
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     // create：缺扩展名自动补 .yaml，返回 id/file/version/函数名清单
-    let body = serde_json::json!({"pkg": "com.test.app", "name": "common", "content": FUNC_YAML});
+    let body = serde_json::json!({"name": "common", "content": FUNC_YAML});
     let resp = send(
         &t.app,
         req(
             "POST",
-            "/api/functions",
+            "/api/apps/com.test.app/resources/functions",
             None,
             &json_headers(sid.clone()),
             Some(body.to_string()),
         ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
     let j = json_body(resp).await;
-    assert_eq!(j["ok"], true);
     assert_eq!(j["id"], "com.test.app/common.yaml");
     assert_eq!(j["file"], "common");
     assert_eq!(j["functions"], serde_json::json!(["login"]));
@@ -198,27 +201,19 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "POST",
-            "/api/functions",
+            "/api/apps/com.test.app/resources/functions",
             None,
             &json_headers(sid.clone()),
-            Some(body.to_string()),
+            Some(
+                serde_json::json!({"name": "common", "content": FUNC_YAML}).to_string(),
+            ),
         ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
 
-    // list：pkg 必填、返回文件短路径 + 函数名清单
-    let resp = send(
-        &t.app,
-        req(
-            "GET",
-            "/api/functions?pkg=com.test.app",
-            None,
-            &json_headers(sid.clone()),
-            None,
-        ),
-    )
-    .await;
+    // list：返回文件短路径 + 函数名清单
+    let resp = get_json(&t, &sid, "/api/apps/com.test.app/resources/functions").await;
     assert_eq!(resp.status(), StatusCode::OK);
     let j = json_body(resp).await;
     assert_eq!(j[0]["id"], "com.test.app/common.yaml");
@@ -226,16 +221,11 @@ async fn functions_crud_cycle_with_version_conflict() {
     assert_eq!(j[0]["version"], v1.as_str());
     assert_eq!(j[0]["functions"], serde_json::json!(["login"]));
 
-    // get（%2F 编码 id）：内容往返一致
-    let resp = send(
-        &t.app,
-        req(
-            "GET",
-            "/api/functions/com.test.app%2Fcommon.yaml",
-            None,
-            &json_headers(sid.clone()),
-            None,
-        ),
+    // get：内容往返一致
+    let resp = get_json(
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/functions/com.test.app%2Fcommon.yaml",
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -249,7 +239,7 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "PUT",
-            "/api/functions/com.test.app%2Fcommon.yaml",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fcommon.yaml",
             None,
             &json_headers(sid.clone()),
             Some(body.to_string()),
@@ -269,7 +259,7 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "PUT",
-            "/api/functions/com.test.app%2Fcommon.yaml",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fcommon.yaml",
             None,
             &json_headers(sid.clone()),
             Some(body.to_string()),
@@ -288,7 +278,7 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "PUT",
-            "/api/functions/com.test.app%2Fcommon.yaml",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fcommon.yaml",
             None,
             &json_headers(sid.clone()),
             Some(body.to_string()),
@@ -301,7 +291,7 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "PUT",
-            "/api/functions/com.test.app%2Fcommon.yaml",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fcommon.yaml",
             None,
             &json_headers(sid.clone()),
             Some(body.to_string()),
@@ -321,7 +311,7 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "PUT",
-            "/api/functions/com.test.app%2Fcommon.yaml",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fcommon.yaml",
             None,
             &json_headers(sid.clone()),
             Some(body.to_string()),
@@ -335,7 +325,7 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "DELETE",
-            "/api/functions/com.test.app%2Frenamed.yaml",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Frenamed.yaml",
             None,
             &json_headers(sid.clone()),
             None,
@@ -347,7 +337,7 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "GET",
-            "/api/functions/com.test.app%2Frenamed.yaml",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Frenamed.yaml",
             None,
             &json_headers(sid.clone()),
             None,
@@ -359,7 +349,7 @@ async fn functions_crud_cycle_with_version_conflict() {
         &t.app,
         req(
             "DELETE",
-            "/api/functions/com.test.app%2Fcommon.yaml",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fcommon.yaml",
             None,
             &json_headers(sid),
             None,
@@ -378,34 +368,23 @@ async fn functions_input_validation_and_missing_pkg() {
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
-    // pkg 缺失/空 → 400（GET 与 POST）
-    let resp = send(
-        &t.app,
-        req(
-            "GET",
-            "/api/functions",
-            None,
-            &json_headers(sid.clone()),
-            None,
-        ),
-    )
-    .await;
+    // 非法分区名（路径段）→ 400
+    let resp = get_json(&t, &sid, "/api/apps/bad%2Fpkg/resources/functions").await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = serde_json::json!({"pkg": "", "name": "a", "content": "x:\n  steps: []\n"});
     let resp = send(
         &t.app,
         req(
             "POST",
-            "/api/functions",
+            "/api/apps/bad%2Fpkg/resources/functions",
             None,
             &json_headers(sid.clone()),
-            Some(body.to_string()),
+            Some(r#"{"name":"a","content":"x:\n  steps: []\n"}"#.into()),
         ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // 严格 loader：顶层键保留字 / 非法函数名 / YAML 语法错 / 子目录短路径
+    // 严格 loader：顶层键保留字 / 非法函数名 / YAML 语法错 / 非字符串标量
     let cases = [
         ("match:\n  steps: []\n", "保留字"),
         ("1abc:\n  steps: []\n", "只允许 unicode 字母"),
@@ -419,12 +398,12 @@ async fn functions_input_validation_and_missing_pkg() {
         ),
     ];
     for (content, marker) in cases {
-        let body = serde_json::json!({"pkg": "com.test.app", "name": "bad", "content": content});
+        let body = serde_json::json!({"name": "bad", "content": content});
         let resp = send(
             &t.app,
             req(
                 "POST",
-                "/api/functions",
+                "/api/apps/com.test.app/resources/functions",
                 None,
                 &json_headers(sid.clone()),
                 Some(body.to_string()),
@@ -443,13 +422,13 @@ async fn functions_input_validation_and_missing_pkg() {
             "{content}: {j}"
         );
     }
-    let body =
-        serde_json::json!({"pkg": "com.test.app", "name": "sub/common", "content": FUNC_YAML});
+    // 函数库存储扁平：子目录短路径拒绝
+    let body = serde_json::json!({"name": "sub/common", "content": FUNC_YAML});
     let resp = send(
         &t.app,
         req(
             "POST",
-            "/api/functions",
+            "/api/apps/com.test.app/resources/functions",
             None,
             &json_headers(sid.clone()),
             Some(body.to_string()),
@@ -460,10 +439,14 @@ async fn functions_input_validation_and_missing_pkg() {
 
     // PUT / GET 不存在的函数文件 → 404
     for (method, uri, body) in [
-        ("GET", "/api/functions/com.test.app%2Fnope.yaml", None),
+        (
+            "GET",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fnope.yaml",
+            None,
+        ),
         (
             "PUT",
-            "/api/functions/com.test.app%2Fnope.yaml",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fnope.yaml",
             Some(r#"{"content":"a:\n  steps: []\n"}"#),
         ),
     ] {
@@ -491,90 +474,54 @@ async fn functions_never_leak_into_script_sources() {
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
     // 同分区各建一个脚本与一个函数库文件
-    let script =
-        serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps: []\n"});
-    let resp = send(
-        &t.app,
-        req(
-            "POST",
-            "/api/scripts",
-            None,
-            &json_headers(sid.clone()),
-            Some(script.to_string()),
-        ),
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/scripts",
+        serde_json::json!({"name": "main.yaml", "content": "steps: []\n"}),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    let func =
-        serde_json::json!({"pkg": "com.test.app", "name": "common.yaml", "content": FUNC_YAML});
-    let resp = send(
-        &t.app,
-        req(
-            "POST",
-            "/api/functions",
-            None,
-            &json_headers(sid.clone()),
-            Some(func.to_string()),
-        ),
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/functions",
+        serde_json::json!({"name": "common.yaml", "content": FUNC_YAML}),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
 
     // 脚本列表只含 scripts/ 脚本，functions/ 文件绝不混入
-    let resp = send(
-        &t.app,
-        req(
-            "GET",
-            "/api/scripts",
-            None,
-            &json_headers(sid.clone()),
-            None,
-        ),
-    )
-    .await;
+    let resp = get_json(&t, &sid, "/api/apps/com.test.app/resources/scripts").await;
     let j = json_body(resp).await;
     assert_eq!(j.as_array().unwrap().len(), 1);
     assert_eq!(j[0]["name"], "main.yaml");
 
-    // 函数 id 在脚本读取/运行接口一律 404（目录即类型，不做内容推断）
-    let resp = send(
-        &t.app,
-        req(
-            "GET",
-            "/api/scripts/com.test.app%2Fcommon.yaml",
-            None,
-            &json_headers(sid.clone()),
-            None,
-        ),
+    // 函数 id 在脚本读取/运行接口一律不可见（目录即类型，不做内容推断）
+    let resp = get_json(
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/scripts/com.test.app%2Fcommon.yaml",
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let resp = send(
-        &t.app,
-        req(
-            "POST",
-            "/api/scripts/com.test.app%2Fcommon.yaml/run",
-            None,
-            &json_headers(sid.clone()),
-            Some(r#"{"device_id":"d1"}"#.into()),
-        ),
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/runs",
+        serde_json::json!({
+            "runner_id": "gamer.yaml",
+            "entrypoint": "com.test.app/common.yaml",
+            "device_id": "d1",
+            "payload": {},
+        }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert_eq!(json_body(resp).await["error"], "脚本不存在");
+    assert!(resp.status().is_client_error());
+    assert_eq!(json_body(resp).await["error"], "not_found");
 
     // 函数列表也只含 functions/ 文件
-    let resp = send(
-        &t.app,
-        req(
-            "GET",
-            "/api/functions?pkg=com.test.app",
-            None,
-            &json_headers(sid),
-            None,
-        ),
-    )
-    .await;
+    let resp = get_json(&t, &sid, "/api/apps/com.test.app/resources/functions").await;
     let j = json_body(resp).await;
     assert_eq!(j.as_array().unwrap().len(), 1);
     assert_eq!(j[0]["file"], "common");
@@ -590,49 +537,54 @@ async fn scripts_get_version_and_save_expected_version_conflict() {
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     let resp = post_json(
-            &t,
-            &sid,
-            "/api/scripts",
-            serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps:\n  - log: v1\n"}),
-        )
-        .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/scripts",
+        serde_json::json!({"name": "main.yaml", "content": "steps:\n  - log: v1\n"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED);
     let v1 = json_body(resp).await["version"]
         .as_str()
         .unwrap()
         .to_string();
 
     // GET 单脚本返回内容与版本
-    let resp = get_json(&t, &sid, "/api/scripts/com.test.app%2Fmain.yaml").await;
+    let resp = get_json(
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/scripts/com.test.app%2Fmain.yaml",
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let j = json_body(resp).await;
     assert_eq!(j["version"], v1.as_str());
     assert!(j["content"].as_str().unwrap().contains("log: v1"));
 
-    // POST 只创建：已有资源再次 POST → 409，且不接受更新字段
+    // POST 只创建：已有资源再次 POST → 409
     let resp = post_json(
-            &t,
-            &sid,
-            "/api/scripts",
-            serde_json::json!({"pkg": "com.test.app", "name": "main.yaml", "content": "steps: []\n"}),
-        )
-        .await;
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/scripts",
+        serde_json::json!({"name": "main.yaml", "content": "steps: []\n"}),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let j = json_body(resp).await;
     assert_eq!(j["error"], "资源已存在: com.test.app/main.yaml");
 
-    // POST body 不再接受旧的 id/expected_version 更新形态
+    // POST body 拒绝旧的 id/expected_version 更新形态（deny_unknown_fields）
     let resp = post_json(
-            &t,
-            &sid,
-            "/api/scripts",
-            serde_json::json!({"pkg": "com.test.app", "name": "other.yaml", "content": "steps: []\n", "expected_version": v1}),
-        )
-        .await;
+        &t,
+        &sid,
+        "/api/apps/com.test.app/resources/scripts",
+        serde_json::json!({"name": "other.yaml", "content": "steps: []\n", "expected_version": v1}),
+    )
+    .await;
     assert!(resp.status().is_client_error());
 }
 
-// ---------- 模板上传命名契约（短名 + 搜索区域由服务端组合完整名）----------
+// ---------- 模板上传（通用资源 API：客户端组合完整名，原始字节 body）----------
 
 #[test]
 fn short_name_and_region_composition_units() {
@@ -662,6 +614,16 @@ fn short_name_and_region_composition_units() {
     assert!(compose_region_suffix([0.1, 0.9, 0.3, 0.2]).is_err());
 }
 
+fn png_headers(cookie: &str) -> Vec<(String, String)> {
+    vec![
+        (header::COOKIE.to_string(), cookie.to_string()),
+        (
+            header::CONTENT_TYPE.to_string(),
+            "image/png".to_string(),
+        ),
+    ]
+}
+
 #[tokio::test]
 async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
     let t = build_app(
@@ -670,22 +632,40 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
         Default::default(),
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-    let png = base64::engine::general_purpose::STANDARD.encode(valid_template_png());
+    let png = valid_template_png();
+    // 客户端组合完整名（与前端 defaultTemplateName 同编码）：短名 + region 后缀
+    let compose = |short: &str, region: Option<[f64; 4]>, color: bool| {
+        let base = short.trim_end_matches(".png");
+        let suffix = region.map(|r| compose_region_suffix(r).unwrap());
+        let mut name = String::from(base);
+        if let Some(suffix) = suffix {
+            name.push('#');
+            name.push_str(&suffix);
+        }
+        if color {
+            name.push_str("#1");
+        }
+        name.push_str(".png");
+        name
+    };
 
-    // 短名 + region → 服务端组合 `<短名去.png>#x1_y1_x2_y2.png`
-    let resp = post_json(
-        &t,
-        &sid,
-        "/api/templates",
-        serde_json::json!({
-            "pkg": "com.test.app",
-            "short_name": "login_btn.png",
-            "region": [0.1, 0.2, 0.3, 0.4],
-            "data_b64": png,
-        }),
+    // 短名 + region → `login_btn#100_200_300_400.png`
+    let name = compose("login_btn.png", Some([0.1, 0.2, 0.3, 0.4]), false);
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            &format!(
+                "/api/apps/com.test.app/resources/templates?name={}",
+                urlencoding_encode(&name)
+            ),
+            None,
+            &png_headers(&sid),
+            png.clone(),
+        ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED, "{}", text_or_empty(resp).await);
     let j = json_body(resp).await;
     assert_eq!(j["ok"], true);
     assert_eq!(j["name"], "login_btn#100_200_300_400.png");
@@ -695,23 +675,26 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
         .dir
         .join("com.test.app/templates/login_btn#100_200_300_400.png")
         .is_file());
-    let resp = get_json(&t, &sid, "/api/templates?pkg=com.test.app").await;
+    let resp = get_json(&t, &sid, "/api/apps/com.test.app/resources/templates").await;
     let j = json_body(resp).await;
     assert_eq!(j.as_array().unwrap().len(), 1);
     assert_eq!(j[0]["name"], "login_btn#100_200_300_400.png");
 
     // 同短名再传（不同区域）→ 409 冲突不覆盖（§11.7 冲突要求改名）；
     // 磁盘上仍是第一次的完整名
-    let resp = post_json(
-        &t,
-        &sid,
-        "/api/templates",
-        serde_json::json!({
-            "pkg": "com.test.app",
-            "short_name": "login_btn.png",
-            "region": [0.0, 0.0, 0.5, 0.5],
-            "data_b64": png,
-        }),
+    let name = compose("login_btn.png", Some([0.0, 0.0, 0.5, 0.5]), false);
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            &format!(
+                "/api/apps/com.test.app/resources/templates?name={}",
+                urlencoding_encode(&name)
+            ),
+            None,
+            &png_headers(&sid),
+            png.clone(),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -724,63 +707,92 @@ async fn template_upload_short_name_composes_full_name_and_rejects_conflict() {
         .join("com.test.app/templates/login_btn#000_000_500_500.png")
         .is_file());
 
-    // 明确勾选保留颜色时，完整文件名尾部追加 #1；旧请求省略该字段仍是灰度格式。
-    let resp = post_json(
-        &t,
-        &sid,
-        "/api/templates",
-        serde_json::json!({
-            "pkg": "com.test.app",
-            "short_name": "color_btn.png",
-            "region": [0.1, 0.2, 0.3, 0.4],
-            "grayscale_only": false,
-            "data_b64": png,
-        }),
+    // 明确勾选保留颜色时，完整文件名尾部追加 #1；省略该标记仍是灰度格式。
+    let name = compose("color_btn.png", Some([0.1, 0.2, 0.3, 0.4]), true);
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            &format!(
+                "/api/apps/com.test.app/resources/templates?name={}",
+                urlencoding_encode(&name)
+            ),
+            None,
+            &png_headers(&sid),
+            png.clone(),
+        ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(json_body(resp).await["name"], "color_btn#100_200_300_400#1.png");
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    assert_eq!(
+        json_body(resp).await["name"],
+        "color_btn#100_200_300_400#1.png"
+    );
     assert!(t
         .dir
         .join("com.test.app/templates/color_btn#100_200_300_400#1.png")
         .is_file());
 
-    // 非法短名 / 非法 region / 参数互斥与缺参 → 400
-    for body in [
-        serde_json::json!({"pkg": "com.test.app", "short_name": "bad name!.png", "data_b64": png}),
-        serde_json::json!({"pkg": "com.test.app", "short_name": "x.jpg", "data_b64": png}),
-        serde_json::json!({"pkg": "com.test.app", "short_name": "ok.png", "region": [0.5, 0.5, 0.5, 0.5], "data_b64": png}),
-        serde_json::json!({"pkg": "com.test.app", "short_name": "ok.png", "name": "y.png", "data_b64": png}),
-        serde_json::json!({"pkg": "com.test.app", "data_b64": png}),
+    // 非法模板名 → 400；缺 name 参数 → 400
+    for query in [
+        format!("name={}&pkg=com.test.app", urlencoding_encode("bad name!.png")),
+        format!("name={}&pkg=com.test.app", urlencoding_encode("a/b.png")),
+        String::from("pkg=com.test.app"),
     ] {
-        let resp = post_json(&t, &sid, "/api/templates", body).await;
-        assert!(resp.status().is_client_error());
+        let resp = send(
+            &t.app,
+            req_bytes(
+                "POST",
+                &format!("/api/apps/com.test.app/resources/templates?{query}"),
+                None,
+                &png_headers(&sid),
+                png.clone(),
+            ),
+        )
+        .await;
+        assert!(
+            resp.status().is_client_error(),
+            "{query}: {}",
+            resp.status()
+        );
     }
 
-    // 短名无 region → 无 # 后缀普通名落盘；旧的 name/data 上传形态拒绝
-    let resp = post_json(
-        &t,
-        &sid,
-        "/api/templates",
-        serde_json::json!({
-            "pkg": "com.test.app",
-            "short_name": "plain.png",
-            "data_b64": png,
-        }),
+    // 短名无 region → 无 # 后缀普通名落盘
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            &format!(
+                "/api/apps/com.test.app/resources/templates?name={}",
+                urlencoding_encode("plain.png")
+            ),
+            None,
+            &png_headers(&sid),
+            png,
+        ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::CREATED);
     assert_eq!(json_body(resp).await["name"], "plain.png");
-    let resp = post_json(
-        &t,
-        &sid,
-        "/api/templates",
-        serde_json::json!({
-            "pkg": "com.test.app",
-            "name": "plain.png",
-            "data_b64": png,
-        }),
-    )
-    .await;
-    assert!(resp.status().is_client_error());
+}
+
+/// 极简 percent-encode（测试用：模板名只含 #/_/字母数字/点）
+fn urlencoding_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => {
+                out.push(byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+async fn text_or_empty(mut resp: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(std::mem::take(resp.body_mut()), 64 * 1024)
+        .await
+        .unwrap_or_default();
+    String::from_utf8_lossy(&bytes).to_string()
 }

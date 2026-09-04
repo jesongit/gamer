@@ -11,10 +11,11 @@
 //! 日志约束：运行链路只记录参数签名与参数名列表，**绝不记录参数值**（text
 //! 参数防泄露）；日志侧展示签名用 [`signature_short_code`] 短码。
 
-use crate::script_v2::model::param_signature;
-use crate::script_v2::params::{merge_args, parse_json_arg};
-use crate::script_v2::{ParamDecl, ScriptError, TypedValue};
-use crate::scripts::ScriptStore;
+use crate::extensions::gamer_yaml::script_v2::model::param_signature;
+use crate::extensions::gamer_yaml::script_v2::params::{merge_args, parse_json_arg};
+use crate::extensions::gamer_yaml::script_v2::{ParamDecl, ScriptError, TypedValue};
+use crate::resources::ResourceKind as RK;
+use crate::resources::ResourceStore;
 
 /// 签名门禁失败的机器可读原因（依赖缺失/参数过期的细分信号）。
 pub const REASON_SIGNATURE_MISMATCH: &str = "signature_mismatch";
@@ -71,26 +72,27 @@ impl GateError {
 /// 载入脚本当前参数声明并复算 psig1 签名。
 /// 脚本缺失 / 读取失败 / 严格解析失败分别映射到 [`GateError`]。
 pub fn probe_script_signature(
-    scripts: &ScriptStore,
+    scripts: &ResourceStore,
     script_id: &str,
 ) -> Result<(Vec<ParamDecl>, String), GateError> {
-    match scripts.get(script_id) {
+    match scripts.get_text(RK::Scripts, script_id) {
         Ok(Some(_)) => {}
         Ok(None) => return Err(GateError::ScriptMissing),
         Err(e) => {
             return Err(GateError::ScriptInvalid(vec![ScriptError::new(
-                crate::script_v2::error::codes::YAML_SYNTAX_ERROR,
+                crate::extensions::gamer_yaml::script_v2::error::codes::YAML_SYNTAX_ERROR,
                 format!("读取脚本失败: {e:#}"),
                 script_id,
             )]))
         }
     }
-    let target = crate::engine::RunTarget::Script {
+    let target = crate::extensions::gamer_yaml::engine::RunTarget::Script {
         script_id: script_id.to_string(),
         start_index: 0,
     };
-    let (decls, _label) = crate::engine::load_entry_param_decls(scripts, &target)
-        .map_err(GateError::ScriptInvalid)?;
+    let (decls, _label) =
+        crate::extensions::gamer_yaml::engine::load_entry_param_decls(scripts, &target)
+            .map_err(GateError::ScriptInvalid)?;
     let signature = param_signature(&decls);
     Ok((decls, signature))
 }
@@ -101,7 +103,7 @@ pub fn probe_script_signature(
 /// P11.1（ADR-12）：`stored_signature` 为 None（新 Task 模型保存的 payload
 /// 不携带 psig1 快照签名）时跳过过期门禁，按当前声明重绑参数。
 pub fn gate_task(
-    scripts: &ScriptStore,
+    scripts: &ResourceStore,
     script_id: &str,
     args: &serde_json::Value,
     stored_signature: Option<&str>,
@@ -134,7 +136,7 @@ pub fn rebind_snapshot(
     args: &serde_json::Value,
     resource: &str,
 ) -> Result<Vec<(String, TypedValue)>, Vec<ScriptError>> {
-    use crate::script_v2::error::codes;
+    use crate::extensions::gamer_yaml::script_v2::error::codes;
     let stored: serde_json::Map<String, serde_json::Value> = match args.as_object() {
         Some(map) => map.clone(),
         _ => {
@@ -189,7 +191,9 @@ pub fn signature_short_code(signature: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::script_v2::{parse_script_file, validate::InMemoryResources};
+    use crate::extensions::gamer_yaml::script_v2::{
+        parse_script_file, validate::InMemoryResources,
+    };
 
     const SCRIPT: &str = "\
 params:
@@ -304,7 +308,7 @@ steps:
         let err = rebind_snapshot(&decls, &serde_json::json!({}), "t").unwrap_err();
         assert!(
             err.iter()
-                .any(|e| e.code == crate::script_v2::error::codes::PARAM_ARGS_MISSING_REQUIRED),
+                .any(|e| e.code == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_MISSING_REQUIRED),
             "必填缺失必须有结构化诊断: {err:?}"
         );
     }
@@ -313,7 +317,7 @@ steps:
     async fn gate_task_passes_with_matching_signature_and_rebuilds_overrides() {
         let (cfg, dir) = script_dir("gate-ok");
         write_script(&cfg, "daily.yaml", SCRIPT);
-        let scripts = std::sync::Arc::new(ScriptStore::open(&cfg).unwrap());
+        let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
         let (decls, signature) =
             probe_script_signature(&scripts, "com.test.app/daily.yaml").unwrap();
         // 快照 = 完整覆盖（含覆盖值），并带 psig1 签名做过期门禁
@@ -347,7 +351,7 @@ steps:
     async fn gate_task_detects_stale_signature_and_rejects_invalid_snapshots() {
         let (cfg, dir) = script_dir("gate-stale");
         write_script(&cfg, "daily.yaml", SCRIPT);
-        let scripts = std::sync::Arc::new(ScriptStore::open(&cfg).unwrap());
+        let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
         let (_, signature) = probe_script_signature(&scripts, "com.test.app/daily.yaml").unwrap();
         // 签名不一致 → 过期
         let stale = gate_task(
@@ -369,7 +373,7 @@ steps:
                 serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
             match gate_task(&scripts, "com.test.app/daily.yaml", &args, Some(&signature)) {
                 Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|diag| {
-                    diag.code == crate::script_v2::error::codes::PARAM_ARGS_TYPE_MISMATCH
+                    diag.code == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_TYPE_MISMATCH
                 })),
                 other => panic!("expected invalid snapshot, got {:?}", other.is_ok()),
             }
@@ -398,7 +402,7 @@ steps:
             "broken.yaml",
             "params:\n  - '不是合法声明'\nsteps: []\n",
         );
-        let scripts = std::sync::Arc::new(ScriptStore::open(&cfg).unwrap());
+        let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
         match probe_script_signature(&scripts, "com.test.app/missing.yaml") {
             Err(GateError::ScriptMissing) => {}
             other => panic!("expected missing, got {:?}", other.is_ok()),

@@ -6,9 +6,8 @@ use async_trait::async_trait;
 use super::super::{
     CapabilityError, CapabilityResult, RunHandle, RunRequest, RunService, RunStatus,
 };
-use crate::core::{AndroidPackageName, AppContext, AppPackageId, DeviceId};
-use crate::engine::{yaml_start_request, RunTarget};
-use crate::run_manager::{CancelOutcome, RunManager, RunSource, StartError};
+use crate::core::{AndroidPackageName, AppContext, AppPackageId, DeviceId, RunPayload};
+use crate::run_manager::{CancelOutcome, RunManager, RunSource, StartError, StartRequest};
 
 use super::ResourceAdapter;
 
@@ -43,10 +42,7 @@ impl RunAdapter {
             .ok_or_else(|| CapabilityError::NotFound("run handle".into()))
     }
 
-    fn request_for(
-        &self,
-        request: RunRequest,
-    ) -> CapabilityResult<crate::run_manager::StartRequest> {
+    fn request_for(&self, request: RunRequest) -> CapabilityResult<StartRequest> {
         let resource = self.resources.id(request.entry())?;
         let script = resource.name().strip_prefix("scripts/").ok_or_else(|| {
             CapabilityError::InvalidRequest(
@@ -68,19 +64,24 @@ impl RunAdapter {
             android,
             Some(package),
         );
-        yaml_start_request(
+        // 通用 runner 分发约定（P11.6）：runner_id = 自动化 runner 注册 id，
+        // entrypoint = `<内容分区>/<脚本>`，payload 为 runner 私有不透明值
+        // （缺省对象 = 默认目标从头跑）。目标/payload 语义由注册该 runner 的
+        // 扩展（gamer.yaml）解码，Core 只构造 generic RunRequest。
+        let inner = crate::core::RunRequest::for_app(
             app,
-            RunTarget::Script {
-                script_id: format!("{}/{}", resource.namespace(), script),
-                start_index: 0,
-            },
-            RunSource::Manual,
-            None,
-            None,
-            Vec::new(),
-            false,
+            "gamer.yaml",
+            format!("{}/{}", resource.namespace(), script),
+            RunPayload::new(serde_json::json!({})),
         )
-        .map_err(|error| CapabilityError::InvalidRequest(error.to_string()))
+        .map_err(|error| CapabilityError::InvalidRequest(error.to_string()))?;
+        Ok(StartRequest {
+            request: inner,
+            source: RunSource::Manual,
+            task_id: None,
+            scheduled_at: None,
+            realtime_logs: false,
+        })
     }
 }
 

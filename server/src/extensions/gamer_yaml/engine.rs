@@ -3,7 +3,7 @@
 //!
 //! 语法与执行语义的权威定义：docs/reference/SCRIPT_EDITOR_CONTRACT.md +
 //! docs/plans/archive/SCRIPT_EDITOR_REDESIGN_PLAN.md §7/§12.2/§13.3。装载/校验在
-//! `crate::script_v2`（parse_script_file / parse_function_file，
+//! `crate::extensions::gamer_yaml::script_v2`（parse_script_file / parse_function_file，
 //! `Result<_, Vec<ScriptError>>`）；本模块只做执行与运行编排：
 //!
 //! - [`exec`]：`RunTarget`（脚本 / 函数测试二选一）→ 快照 → 严格解析 →
@@ -18,7 +18,6 @@
 //! 可视化事件（v1 语义保持）：tap/swipe/匹配命中/未命中时推送给该设备当前
 //! viewer（emit → 注入的 EventSink；WebRTC adapter 无 viewer 时静默丢弃）。
 
-#[path = "engine_events.rs"]
 mod events;
 
 pub mod exec;

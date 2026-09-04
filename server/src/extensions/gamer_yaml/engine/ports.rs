@@ -363,7 +363,7 @@ impl ResourceResolver for LegacyResourceResolver {
 
 impl ComputePoolMatcher {
     pub fn with_frame_adapter(
-        scripts: Arc<crate::scripts::ScriptStore>,
+        scripts: Arc<crate::resources::ResourceStore>,
         frames: Arc<FrameAdapter>,
     ) -> Self {
         let frame_store = frames.store.clone();
@@ -483,10 +483,15 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             ..Default::default()
         };
-        let store = Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
-        std::fs::create_dir_all(store.templates_dir("com.test.game")).unwrap();
+        let store = Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
+        std::fs::create_dir_all(
+            store.kind_dir("com.test.game", crate::resources::ResourceKind::Templates),
+        )
+        .unwrap();
         std::fs::write(
-            store.templates_dir("com.test.game").join("icon.png"),
+            store
+                .kind_dir("com.test.game", crate::resources::ResourceKind::Templates)
+                .join("icon.png"),
             b"template",
         )
         .unwrap();
@@ -505,7 +510,7 @@ mod tests {
 
     /// Composite 解析缝（三层统一）：模板解析顺序 **本地编辑区（分区）→
     /// user-overrides → active App Package**。生产 find/match 链路经
-    /// LegacyResourceResolver → ResourceAdapter → ScriptStore::resolve_template_path
+    /// LegacyResourceResolver → ResourceAdapter → ResourceStore::resolve_template_path
     /// 到达同一实现。
     #[tokio::test]
     async fn resource_resolver_prefers_editable_local_then_override_then_package() {
@@ -514,11 +519,16 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             ..Default::default()
         };
-        let store = Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
+        let store = Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
         // 本地编辑区（分区）层
-        std::fs::create_dir_all(store.templates_dir("com.test.game")).unwrap();
+        std::fs::create_dir_all(
+            store.kind_dir("com.test.game", crate::resources::ResourceKind::Templates),
+        )
+        .unwrap();
         std::fs::write(
-            store.templates_dir("com.test.game").join("icon.png"),
+            store
+                .kind_dir("com.test.game", crate::resources::ResourceKind::Templates)
+                .join("icon.png"),
             b"editable",
         )
         .unwrap();
@@ -558,7 +568,12 @@ packages = ["com.test.game"]
         assert_eq!(resource.bytes(), b"editable");
 
         // 删本地副本 → 回落包内模板；user override 再胜过包
-        std::fs::remove_file(store.templates_dir("com.test.game").join("icon.png")).unwrap();
+        std::fs::remove_file(
+            store
+                .kind_dir("com.test.game", crate::resources::ResourceKind::Templates)
+                .join("icon.png"),
+        )
+        .unwrap();
         let resource = resolver.resolve(&id).await.unwrap();
         assert_eq!(resource.bytes(), b"package");
         let override_dir = dir.path().join("user-overrides/com.test.game/templates");
@@ -570,7 +585,7 @@ packages = ["com.test.game"]
         // 包内/override 都没有的模板由本地编辑区提供
         std::fs::write(
             store
-                .templates_dir("com.test.game")
+                .kind_dir("com.test.game", crate::resources::ResourceKind::Templates)
                 .join("only-partition.png"),
             b"partition-only",
         )

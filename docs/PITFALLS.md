@@ -193,3 +193,9 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **happy-dom 环境下 `import.meta.url` 不是 `file://` scheme**（location 指向 http），`new URL(rel, import.meta.url)` 读 fixture 文件直接抛 "URL must be of scheme file"；组件测试（`// @vitest-environment happy-dom`）里读源码/夹具用 `join(process.cwd(), 'src', ...)`，只有 node 环境测试能走 import.meta.url 方案（console-components.test.js 即此）。
 - **@vue/test-utils 的 DOMWrapper 不透传原生属性访问器**：`wrapper.title` 返回 undefined（不是空串），`find(b => b.title.includes(...))` 会在谓词里自己炸 "reading 'includes' of undefined"；一律 `b.attributes('title')?.includes(...)`。
 - **vitest 同文件用例共享模块级单例 store（scriptsData/templatesData/devicesData 等 ref）**：上一用例填充后，下一用例"为空才拉取"的懒加载被短路，列表内容错位且报错点远离根因；组件挂载测试在 afterEach 显式清空这些 data ref。
+
+- **axum 0.7 多个 Router merge 后同一路径+方法注册两个 handler 只在运行期 panic**：`Overlapping method route. Handler for POST ... already exists`（编译期完全无提示，首个请求/测试才炸）；通用资源路由同时出现在 protected_json 与 protected_upload 两组时触发。规避：每个「路径+方法」只注册一次，文本/字节分派收进同一 handler 内按 kind/Content-Type 走，上传体限额组独占 POST/PUT。
+- **axum 0.7 通配段 `*id` 的 Path 提取**：`/api/apps/:app/resources/:kind/*id` 里 id 是完整 `<pkg>/<rel>`（%2F 会被解码），handler 里**不要再拼一次 app 前缀**（拼了就是 `<pkg>/<pkg>/<rel>` 必 404）；字节 kind（templates）的 id 是不带分区的裸文件名，文本 kind 才带前缀，app 路径段只做可选前缀校验。
+- **`core::fs::safe_name`（safe_name/`sanitize_rel_segments`）拒绝 `#`，而模板文件名合法字符集恰恰含 `#`**（区域/颜色后缀）：字节资源名校验不能走通用分段校验，templates 必须用 `sanitize_template_name`（resources.rs `normalize_binary_name` 分.kind 处理），否则模板创建全 400。
+- **模板「同基名冲突」的基名要剥离区域后缀再比对**：新名 `login_btn#000_000_500_500.png` 与存量 `login_btn#100_200_300_400.png` 冲突——从 stem 里 `split('#')` 取首段做基名、再查「等于基名或以 `基名#` 开头」，拿完整 stem 当基名会漏判。
+- **` cargo test` 里 `unwrap_err()`/`unwrap()` 要求 Err/Ok 两侧实现 Debug**：给含 `Arc<dyn Trait>` 字段的 Store 手写行为时，trait 对象没有 Debug 会连累 `unwrap_err()` 编译失败；测试里用 `match` + `panic!` 替代。

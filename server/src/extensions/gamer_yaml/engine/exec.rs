@@ -33,14 +33,14 @@ use crate::capabilities::adapters::RuntimeAdapter;
 use crate::capabilities::RuntimeService;
 use crate::core::{AppPackageId, DeviceId, EventSink, ResourceId, RunContext, RuntimeEvent};
 use crate::device::DeviceManager;
-use crate::matcher;
-use crate::script_v2::params::{self, merge_args};
-use crate::script_v2::validate::{coerce_literal, split_func_path};
-use crate::script_v2::{
+use crate::extensions::gamer_yaml::script_v2::params::{self, merge_args};
+use crate::extensions::gamer_yaml::script_v2::validate::{coerce_literal, split_func_path};
+use crate::extensions::gamer_yaml::script_v2::{
     ArgAssign, Cell, ColorBranch, LogLevel, MatchCandidate, ParamDecl, ParamType, ScriptConfig,
     Step, TypedValue,
 };
-use crate::scripts::ScriptStore;
+use crate::matcher;
+use crate::resources::ResourceStore;
 
 use super::events::ScriptEvent;
 use super::ports::{
@@ -175,7 +175,7 @@ pub struct Runner {
     /// Runtime event output selected by the composition root.
     pub events: Arc<dyn EventSink>,
     /// 脚本存储：快照捕获、模板路径解析（分区寻址）
-    pub scripts: Arc<ScriptStore>,
+    pub scripts: Arc<ResourceStore>,
 }
 
 impl Runner {
@@ -184,7 +184,7 @@ impl Runner {
     pub fn new(
         devices: Arc<DeviceManager>,
         events: Arc<dyn EventSink>,
-        scripts: Arc<ScriptStore>,
+        scripts: Arc<ResourceStore>,
     ) -> Self {
         let settings = EngineSettings::from_config(&devices.cfg);
         let frame_store = Arc::new(crate::capabilities::adapters::FrameStore::new());
@@ -213,7 +213,7 @@ impl Runner {
         ctl: Arc<dyn DeviceControl>,
         matcher: Arc<dyn TemplateMatcher>,
         events: Arc<dyn EventSink>,
-        scripts: Arc<ScriptStore>,
+        scripts: Arc<ResourceStore>,
     ) -> Self {
         Self {
             settings,
@@ -385,7 +385,9 @@ fn bind_entry_args(
 }
 
 /// 结构化诊断 → 运行失败消息（逐条 Display 展开）。
-fn fail_diagnostics(errors: &[crate::script_v2::ScriptError]) -> anyhow::Error {
+fn fail_diagnostics(
+    errors: &[crate::extensions::gamer_yaml::script_v2::ScriptError],
+) -> anyhow::Error {
     anyhow::anyhow!(
         "脚本解析/校验失败（{} 项）：{}",
         errors.len(),
@@ -416,10 +418,10 @@ pub struct BoundEntryArgs {
 /// 解析/校验失败返回全部结构化诊断（API 映射 400 + 诊断列表）。
 /// 注意：这只是提交前的即时解析；运行开始时引擎会以当时的快照重新绑定。
 pub fn resolve_entry_args(
-    scripts: &ScriptStore,
+    scripts: &ResourceStore,
     target: &RunTarget,
     args: &serde_json::Map<String, serde_json::Value>,
-) -> Result<BoundEntryArgs, Vec<crate::script_v2::ScriptError>> {
+) -> Result<BoundEntryArgs, Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>> {
     let (decls, label) = load_entry_param_decls(scripts, target)?;
     let overrides = params::parse_json_args(&decls, args, &label)?;
     let resolved = params::merge_args(&decls, overrides.iter().cloned(), &label)?;
@@ -440,11 +442,11 @@ pub fn resolve_entry_args(
 /// 同时返回诊断定位用的资源标签（脚本相对 id / `file/function`）；
 /// 脚本/函数不存在或解析失败 → 全部结构化诊断（RESOURCE_*.not_found 等）。
 pub fn load_entry_param_decls(
-    scripts: &ScriptStore,
+    scripts: &ResourceStore,
     target: &RunTarget,
-) -> Result<(Vec<ParamDecl>, String), Vec<crate::script_v2::ScriptError>> {
-    use crate::script_v2::error::codes;
-    use crate::script_v2::ScriptError;
+) -> Result<(Vec<ParamDecl>, String), Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>> {
+    use crate::extensions::gamer_yaml::script_v2::error::codes;
+    use crate::extensions::gamer_yaml::script_v2::ScriptError;
 
     let pkg = target.pkg().to_string();
     let snapshot = RunSnapshot::capture(scripts, &pkg).map_err(|e| {
@@ -454,13 +456,13 @@ pub fn load_entry_param_decls(
             pkg.clone(),
         )]
     })?;
-    let app = crate::engine::runner_adapter::yaml_app_context(
+    let app = crate::extensions::gamer_yaml::engine::runner_adapter::yaml_app_context(
         "parameter-probe",
         Some(pkg.clone()),
         pkg.clone(),
     )
     .map_err(|error| {
-        vec![crate::script_v2::ScriptError::new(
+        vec![crate::extensions::gamer_yaml::script_v2::ScriptError::new(
             codes::YAML_SYNTAX_ERROR,
             format!("运行上下文构建失败: {error:#}"),
             pkg.clone(),
@@ -1699,7 +1701,7 @@ impl Runner {
         }
     }
 
-    /// 匹配单个模板一次（复用给定截图，不取新帧）：模板路径经 ScriptStore
+    /// 匹配单个模板一次（复用给定截图，不取新帧）：模板路径经 ResourceStore
     /// 分区寻址 + 短名消歧；区域和颜色由解析出的实际文件名 # 后缀决定（无后缀回退
     /// 全屏并记一条日志提醒，每运行每模板一条）。未命中推送 Miss 事件。
     async fn match_screen_one(
@@ -1945,7 +1947,7 @@ pub fn key_code(key: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::ports::{
+    use crate::extensions::gamer_yaml::engine::ports::{
         DeviceControl, EngineSettings, ScreenFrame, ScreenshotSource, TemplateMatchQuery,
         TemplateMatcher,
     };
@@ -2153,7 +2155,7 @@ mod tests {
         ctl: Arc<FakeCtl>,
         shots: Arc<FakeShots>,
         matcher: Arc<FakeMatcher>,
-        store: Arc<ScriptStore>,
+        store: Arc<ResourceStore>,
         dir: std::path::PathBuf,
     }
 
@@ -2184,7 +2186,7 @@ mod tests {
             data_dir: dir.clone(),
             ..Default::default()
         };
-        let store = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let store = Arc::new(ResourceStore::open(&cfg).unwrap());
         let ctl = FakeCtl::new();
         let color = image::load_from_memory(&png)
             .unwrap()
@@ -2219,17 +2221,51 @@ mod tests {
     impl Rig {
         /// 在分区 templates/ 下落一个占位模板文件（fake matcher 不读内容）。
         fn tmpl(&self, name: &str) {
-            let d = self.store.templates_dir(PKG);
+            let d = self
+                .store
+                .kind_dir(PKG, crate::resources::ResourceKind::Templates);
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join(name), b"png").unwrap();
         }
 
         fn save_script(&self, name: &str, content: &str) {
-            self.store.save(None, PKG, name, content).unwrap();
+            // rig 语义 = 覆盖写（旧 ScriptStore::save 允许覆盖）：已存在时按
+            // 更新路径落盘
+            let id = format!("{PKG}/{name}");
+            let old_id = self
+                .store
+                .get_text(crate::resources::ResourceKind::Scripts, &id)
+                .ok()
+                .flatten()
+                .map(|_| id.clone());
+            self.store
+                .save_text(
+                    crate::resources::ResourceKind::Scripts,
+                    old_id.as_deref(),
+                    PKG,
+                    name,
+                    content,
+                )
+                .unwrap();
         }
 
         fn save_func(&self, name: &str, content: &str) {
-            self.store.save_function(PKG, name, content).unwrap();
+            let id = format!("{PKG}/{name}");
+            let old_id = self
+                .store
+                .get_text(crate::resources::ResourceKind::Functions, &id)
+                .ok()
+                .flatten()
+                .map(|_| id.clone());
+            self.store
+                .save_text(
+                    crate::resources::ResourceKind::Functions,
+                    old_id.as_deref(),
+                    PKG,
+                    name,
+                    content,
+                )
+                .unwrap();
         }
 
         async fn run(
@@ -2792,7 +2828,7 @@ mod tests {
     /// 非 0 映射；数字串透传；未知键返回 None。
     #[test]
     fn key_code_matches_key_enum() {
-        use crate::script_v2::params::KEY_NAMES;
+        use crate::extensions::gamer_yaml::script_v2::params::KEY_NAMES;
         for name in KEY_NAMES {
             let code = key_code(name).unwrap_or_else(|| panic!("枚举键 {name} 无 keycode 映射"));
             assert_ne!(code, 0, "枚举键 {name} 映射为 keycode 0");
@@ -3212,7 +3248,12 @@ packages = ["com.test.app"]
         assert!(!logs_contain(&logs, "覆盖重名"));
 
         // 删本地副本 → 回落 override；再删 override → 回落包
-        std::fs::remove_file(r.store.script_dir(PKG).join("dup.yaml")).unwrap();
+        std::fs::remove_file(
+            r.store
+                .kind_dir(PKG, crate::resources::ResourceKind::Scripts)
+                .join("dup.yaml"),
+        )
+        .unwrap();
         let logs = r.run(script_target("dup.yaml"), vec![]).await.unwrap();
         assert!(logs_contain(&logs, "覆盖重名"));
         std::fs::remove_file(override_dir.join("dup.yaml")).unwrap();
@@ -3261,10 +3302,26 @@ packages = ["com.test.app"]
     /// 不读模板内容，占位即可；命中表由各用例单独给）。
     fn setup_golden(rig: &Rig, scripts: &[(&str, &str)], funcs: &[(&str, &str)]) {
         for (name, file) in scripts {
-            rig.store.save(None, PKG, name, &fixture(file)).unwrap();
+            rig.store
+                .save_text(
+                    crate::resources::ResourceKind::Scripts,
+                    None,
+                    PKG,
+                    name,
+                    &fixture(file),
+                )
+                .unwrap();
         }
         for (name, file) in funcs {
-            rig.store.save_function(PKG, name, &fixture(file)).unwrap();
+            rig.store
+                .save_text(
+                    crate::resources::ResourceKind::Functions,
+                    None,
+                    PKG,
+                    name,
+                    &fixture(file),
+                )
+                .unwrap();
         }
         for tpl in [
             "account.png",

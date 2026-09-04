@@ -436,7 +436,7 @@ enum ShortMatch {
 /// 精确名优先；否则按「基名 + `#` 后缀 + 同扩展名」唯一匹配（与
 /// scripts.rs 分区内核同规则，短名消歧语义在包内保持一致）。
 fn match_short_name(dir: &Path, short: &str) -> ShortMatch {
-    let Some(name) = crate::scripts::sanitize_template_name(short) else {
+    let Some(name) = crate::resources::sanitize_template_name(short) else {
         return ShortMatch::NotFound;
     };
     let exact = dir.join(&name);

@@ -382,6 +382,7 @@ pub(super) async fn api_run_task_now(
         )
             .into_response(),
         Err(TimerRunnerError::Invalid(message))
+        | Err(TimerRunnerError::InvalidDetail { message, .. })
         | Err(TimerRunnerError::Other(message))
         | Err(TimerRunnerError::ParamStale(message)) => {
             ApiError::bad_request(message).into_response()

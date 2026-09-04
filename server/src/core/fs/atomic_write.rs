@@ -9,13 +9,6 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     atomic_write_with(path, bytes, replace_file)
 }
 
-#[cfg(test)]
-pub(crate) fn atomic_write_with_replace_err(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    atomic_write_with(path, bytes, |_temp, _path| {
-        Err(std::io::Error::other("injected replace failure"))
-    })
-}
-
 fn atomic_write_with(
     path: &Path,
     bytes: &[u8],

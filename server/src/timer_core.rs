@@ -404,6 +404,12 @@ impl ScheduleExtension for ScheduleRegistry {
 pub enum TimerRunnerError {
     DependencyMissing(String),
     Invalid(String),
+    /// 结构化参数诊断（手动运行 400 透传；detail 形态由 runner 自定，Core
+    /// 不解读——gamer.yaml 传脚本参数五元组诊断列表）。
+    InvalidDetail {
+        message: String,
+        detail: serde_json::Value,
+    },
     /// 脚本参数声明已变化（psig1 签名不一致）：message 面向用户。
     ParamStale(String),
     Conflict(Box<RunRecord>),
@@ -420,6 +426,7 @@ impl std::fmt::Display for TimerRunnerError {
         match self {
             Self::DependencyMissing(message) => write!(f, "dependency unavailable: {message}"),
             Self::Invalid(message) => f.write_str(message),
+            Self::InvalidDetail { message, .. } => f.write_str(message),
             Self::ParamStale(message) => f.write_str(message),
             Self::Conflict(record) => write!(f, "device busy: {}", record.run_id),
             Self::ShuttingDown => f.write_str("server is shutting down"),
@@ -447,9 +454,21 @@ pub struct TimerCompletion {
 
 pub type TimerCompletionHook = Arc<dyn Fn(TimerCompletion) + Send + Sync>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimerRun {
     pub run_id: String,
+    /// runner 自定义的透明结果载荷（如手动运行的 resolved_args 摘要）；
+    /// Core 不解读，仅经 POST /api/runs 响应透传。
+    pub detail: Option<serde_json::Value>,
+}
+
+impl TimerRun {
+    pub fn new(run_id: impl Into<String>) -> Self {
+        Self {
+            run_id: run_id.into(),
+            detail: None,
+        }
+    }
 }
 
 /// Runner implementation boundary.  Completion is pushed by the runner via
@@ -1035,7 +1054,8 @@ impl TimerCore {
                     .await;
                 ("failed", message.clone())
             }
-            TimerRunnerError::Invalid(message)
+            TimerRunnerError::InvalidDetail { message, .. }
+            | TimerRunnerError::Invalid(message)
             | TimerRunnerError::Other(message)
             | TimerRunnerError::ParamStale(message) => {
                 self.db
@@ -1176,7 +1196,24 @@ impl TimerCore {
         )
         .map_err(|error| TimerRunnerError::Invalid(error.to_string()))?;
         let completion = self.completion_hook(task.id.clone(), None);
-        let run = runner.submit(request, &task.id, None, completion).await?;
+        let run = match runner.submit(request, &task.id, None, completion).await {
+            Ok(run) => run,
+            // runner 已注册但运行依赖缺失（如入口资源不存在）：与 runner 缺失
+            // 同口径——任务显式进入 dependency_missing 并保留（不空跑）。
+            Err(TimerRunnerError::DependencyMissing(reason)) => {
+                self.db
+                    .metrics()
+                    .record_scheduler_event(SchedulerEvent::Failed);
+                let _ = self
+                    .db
+                    .set_timer_task_dependency_missing_async(&task.id, &reason)
+                    .await;
+                self.finish_rejected(&task, None, "failed", None, Some(&reason))
+                    .await;
+                return Err(TimerRunnerError::DependencyMissing(reason));
+            }
+            Err(error) => return Err(error),
+        };
         let mut active_runs_guard = self
             .active_runs
             .lock()
@@ -1465,7 +1502,7 @@ mod tests {
                 });
             }
             assert_eq!(request.runner_id, self.id);
-            Ok(TimerRun { run_id })
+            Ok(TimerRun::new(run_id))
         }
 
         async fn cancel(&self, _run_id: &str) -> Result<(), TimerRunnerError> {

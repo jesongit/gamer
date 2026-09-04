@@ -24,9 +24,9 @@ use super::{
     InputEvent, InputResult, KeymapTraceContext, KeymapWasmInstanceHandle, KeymapWasmRuntime,
     KeymapWasmStartRequest, NoKeymapWasmRuntime, ScreenSize, KEYMAP_EXTENSION_ID,
 };
-use crate::yaml_extension::{
-    NoYamlWasmRuntime, YamlProgramResolver, YamlWasmRunRequest, YamlWasmRuntime, YAML_EXTENSION_ID,
-};
+/// gamer.yaml 的扩展 id。这是个路由层标识字符串（与 TimerRunner::runner_id
+/// 同层），不是对 YAML 扩展内部符号的依赖——本文件不 import gamer_yaml 模块。
+const INSTANCE_FREE_EXTENSION_ID: &str = "gamer.yaml";
 
 /// Extension lifecycle → Timer runner registry seam（ADR-13 / P11.2）。The
 /// service only knows *when* a lifecycle transition happened; the
@@ -139,7 +139,6 @@ pub(crate) struct ExtensionService {
     store: ExtensionStore,
     runtime: Arc<dyn WasmRuntime>,
     keymap_runtime: Arc<dyn KeymapWasmRuntime>,
-    yaml_runtime: Arc<dyn YamlWasmRuntime>,
     capabilities: CapabilityRegistry,
     host_api: HostApiCatalog,
     signature: SignatureVerifier,
@@ -187,29 +186,10 @@ impl ExtensionService {
         capabilities: CapabilityRegistry,
         signature: SignatureVerifier,
     ) -> Self {
-        Self::with_keymap_runtime_and_signature_and_yaml(
-            store,
-            runtime,
-            keymap_runtime,
-            Arc::new(NoYamlWasmRuntime),
-            capabilities,
-            signature,
-        )
-    }
-
-    fn with_keymap_runtime_and_signature_and_yaml(
-        store: ExtensionStore,
-        runtime: Arc<dyn WasmRuntime>,
-        keymap_runtime: Arc<dyn KeymapWasmRuntime>,
-        yaml_runtime: Arc<dyn YamlWasmRuntime>,
-        capabilities: CapabilityRegistry,
-        signature: SignatureVerifier,
-    ) -> Self {
         Self {
             store,
             runtime,
             keymap_runtime,
-            yaml_runtime,
             capabilities,
             host_api: HostApiCatalog::default(),
             signature,
@@ -252,74 +232,48 @@ impl ExtensionService {
             Arc::new(super::keymap::LazyKeymapWasmRuntime::new());
         #[cfg(not(feature = "wasm-runtime"))]
         let keymap_runtime: Arc<dyn KeymapWasmRuntime> = Arc::new(NoKeymapWasmRuntime);
-        #[cfg(feature = "wasm-runtime")]
-        let yaml_runtime: Arc<dyn YamlWasmRuntime> =
-            Arc::new(super::wasm::LazyYamlWasmtimeRuntime::new());
-        #[cfg(not(feature = "wasm-runtime"))]
-        let yaml_runtime: Arc<dyn YamlWasmRuntime> = Arc::new(NoYamlWasmRuntime);
         let signature = SignatureVerifier::from_data_root(data_root.as_ref());
-        Self::with_keymap_runtime_and_signature_and_yaml(
+        Self::with_keymap_runtime_and_signature(
             ExtensionStore::new(data_root),
             runtime,
             keymap_runtime,
-            yaml_runtime,
             capabilities,
             signature,
         )
     }
 
     pub(crate) fn runtime_available(&self) -> bool {
-        self.runtime.is_available()
-            || self.keymap_runtime.is_available()
-            || self.yaml_runtime.is_available()
+        self.runtime.is_available() || self.keymap_runtime.is_available()
     }
 
-    /// Execute a lowered YAML v3 program in the installed `gamer.yaml`
-    /// Component guest. The lifecycle lock only protects the immutable package
-    /// lookup; the guest itself runs after the lock is released so uninstall or
-    /// update cannot be interleaved with reading its bytes.
-    pub(crate) async fn run_yaml_vnext(
+    /// Resolve the active-version guest bytes and host API for an extension
+    /// that executes per-call instead of holding a resident instance. Generic
+    /// mechanism: callers (extension boundaries such as gamer_yaml) supply
+    /// their own runtime; this only performs the locked state/manifest lookup.
+    /// The lifecycle lock only protects the immutable package lookup; the
+    /// guest itself runs after the lock is released so uninstall or update
+    /// cannot be interleaved with reading its bytes.
+    pub(crate) async fn guest_for_run(
         &self,
-        program: crate::yaml_vnext::Program,
-        context: crate::core::AppContext,
-        args: BTreeMap<String, crate::yaml_vnext::Value>,
-        resolver: Option<Arc<dyn YamlProgramResolver>>,
-        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) -> ExtensionResult<crate::yaml_vnext::Value> {
-        let id = ExtensionId::parse(crate::yaml_extension::YAML_EXTENSION_ID)
-            .expect("built-in YAML extension id is valid");
-        let (wasm, host) = {
-            let _guard = self.operation_lock.lock().await;
-            let states = self.store.read_state()?;
-            let versions = self.versions_for(&id)?;
-            let record = state_for_versions(&id, &versions, states.get(&id).cloned())?;
-            if !matches!(
-                record.state,
-                ExtensionState::Enabled | ExtensionState::Running
-            ) {
-                return Err(invalid_transition(&id, "run", record.state));
-            }
-            let active = active_version(&versions, &record)?;
-            let host = HostApi::for_manifest(
-                self.capabilities.clone(),
-                self.host_api.clone(),
-                active.manifest(),
-            )?;
-            (active.read_wasm()?, host)
-        };
-        self.yaml_runtime
-            .run(YamlWasmRunRequest {
-                wasm,
-                program,
-                args,
-                resolver,
-                host,
-                context,
-                stop,
-            })
-            .await
-            .map(|result| result.value)
-            .map_err(|error| ExtensionError::Runtime(error.to_string()))
+        id: &ExtensionId,
+    ) -> ExtensionResult<(Vec<u8>, HostApi)> {
+        let _guard = self.operation_lock.lock().await;
+        let states = self.store.read_state()?;
+        let versions = self.versions_for(id)?;
+        let record = state_for_versions(id, &versions, states.get(id).cloned())?;
+        if !matches!(
+            record.state,
+            ExtensionState::Enabled | ExtensionState::Running
+        ) {
+            return Err(invalid_transition(id, "run", record.state));
+        }
+        let active = active_version(&versions, &record)?;
+        let host = HostApi::for_manifest(
+            self.capabilities.clone(),
+            self.host_api.clone(),
+            active.manifest(),
+        )?;
+        Ok((active.read_wasm()?, host))
     }
 
     /// Dispatch an input envelope to the running keymap extension. A missing
@@ -678,7 +632,7 @@ impl ExtensionService {
             self.host_api.clone(),
             active.manifest(),
         )?;
-        let handle = if id.as_str() == YAML_EXTENSION_ID {
+        let handle = if id.as_str() == INSTANCE_FREE_EXTENSION_ID {
             // 过渡缝（Wave3 随 YAML 栈迁移）：gamer.yaml 的执行模型是按调用
             // 惰性实例化（run_yaml_vnext / LazyYamlWasmtimeRuntime），不实现
             // extension-host 常驻实例 world。start 只表示"作为 timer runner
@@ -907,7 +861,7 @@ impl ExtensionService {
     /// keep their distinct end states.  Instance-free extensions (gamer.yaml
     /// 的按调用惰性执行模型) simply have nothing to stop.
     async fn stop_running_instance(&self, id: &ExtensionId) -> ExtensionResult<()> {
-        if id.as_str() == YAML_EXTENSION_ID {
+        if id.as_str() == INSTANCE_FREE_EXTENSION_ID {
             return Ok(());
         }
         if id.as_str() == KEYMAP_EXTENSION_ID {
