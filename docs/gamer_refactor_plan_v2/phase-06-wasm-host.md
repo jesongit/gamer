@@ -250,3 +250,11 @@ WASM 不直接：
 
 暂不迁移 YAML。
 先让插件基础设施稳定。
+
+---
+
+## 收口记录（2026-09-04）
+
+- Original Plan：第 7 节生命周期状态建议 7 态（Available / Installed / Disabled / Starting / Running / Failed / Stopping）。
+- Final Decision：稳定运行态保持 4 态 `Installed / Disabled / Running / Failed`（操作互斥由 operation lock 表达）；`Starting / Stopping` 属 Operation State 不持久化，未来 UI 需求用独立 operation 对象表达（计划 6.4）；`Available` 属 Plugin Catalog 语义，不入 Runtime State。
+- Reason：启停过程持久化为状态需引入 operation timeout / recovery / stale operation 等复杂度，当前收益不成立；"存在于仓库/来源、尚未安装"与插件运行生命周期分属两个模型（Stable State 与 Temporary Operation State 分离）。见 ADR-02（README 8.3）。

@@ -146,3 +146,11 @@ Panel UI 可以是：
 - 服务重启后任务恢复
 - Plugin UI 关闭不影响定时运行
 - 缺少 Runner 时 Task 显示依赖错误，而不是服务启动失败
+
+---
+
+## 收口记录（2026-09-04）
+
+- Original Plan：第 2 节「Cron WASM 负责 parse cron / register schedule semantics / trigger behavior」；第 4 节去 completion polling 改 `run.wait_terminal(run_id)`。
+- Final Decision：Cron 保持 **Native Builtin Schedule Provider**（`cron_extension.rs` 经 `register_builtin` 注册缝接入 `ScheduleRegistry`，Scheduler/API 零直接依赖，update 门禁与诊断改用 `TimerCore::next_wakeup_in()/next_wakeup_at()`）；`wait_terminal` 已事件化落地（去 50ms 轮询）。
+- Reason：cron 解析为纯计算、无权限/沙箱诉求，跨 WASM 边界只有成本；「TimerCore 不感知 schedule 语义」经 Registry 抽象同样达成，未来第三方触发语义可经独立 Adapter 接入（ADR-01，README 8.3）。命名保持 `CronExtension`——Native 也是 Extension，Extension ≠ WASM。

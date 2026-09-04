@@ -177,3 +177,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **Registry proof 的 download_url 原本强制 `https://`，会拒绝随包本地市场的同源相对路径**：官方 .gplugin 随 web-dist 托管为 `/plugins/<id>-<version>.gplugin`，该 URL 已被 proof 签名绑定，验签侧放行 `https://` 或 `/` 开头的绝对路径即可，篡改仍会被哈希/签名校验拦截。
 - **PowerShell 5.1 里 `@('a' + (X), 'b' + (Y))` 的逗号优先级高于 `+`**：实际解析为 `'a' + (X,'b') + (Y)`，数组元素被静默吞并成一个字符串；每项各自加括号 `@(('a'+X), ('b'+Y))`。
 - **Wasmtime 实例任务进入"命令循环待命"后 stop 必须经通道优雅收尾再 join**：entry 返回后任务停在命令通道 `recv()`，直接 abort 会跳过 Store/Component 正常清理（Windows GNU 下 async fiber unwind 不安全）；`plugin.call` 复用同一通道分发调用。
+- **update 安装门禁的 `next_cron_secs` 改读 TimerCore 持久化唤醒游标后，刚保存的任务存在一个"游标未计算"的极短窗口**：`Scheduler::next_wakeup_in_secs()` 读 `timer_tasks.next_wakeup`（与调度循环睡眠同源，不再经 CronExtension 逐任务重算），新任务保存后游标由 notify 唤醒的 run loop 毫秒级补上，窗口内门禁视为无待执行任务；测试模拟需手动 `set_timer_task_wakeup_async` 预置游标（无 run loop）。
+- **Keymap E2E 基准断言"scrcpy 写顺序"不能用相对阶段值 `scrcpy_write_us`**：它是各事件"写完成−收到"的时长，处理快慢波动下天然非单调（实测第 2 条 53µs < 第 1 条 102µs 直接误报乱序）；判序必须用进程内单调钟（`KeymapTraceRecord.scrcpy_write_instant`，`#[serde(skip_serializing)]` 不进 JSON）。
+- **WASM guest fixture 的内层 `cargo build` 也会吃外层 `CARGO_TARGET_DIR`**：设置该变量跑测试时 fixture wasm 落到外层 target，测试按 `tests/keymap-guest/target/...` 读取落空；已在 `keymap.rs::build_guest_fixture_component` 统一 `env_remove("CARGO_TARGET_DIR")` 根治（组件测试与 Phase 6 真机 E2E 基准共用该入口）。
+- **rustdoc 注释某行以 `+` 开头会被解析为文档列表项**（如换行后写 "` + wit-component 编码`"），`clippy -D warnings` 报 `doc list item without indentation`；避免行首出现 `+`/`-`/数字列表前缀。

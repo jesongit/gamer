@@ -194,3 +194,11 @@ stop
 - 权限边界成立
 - iframe Bridge 成立
 - UI/Runtime 生命周期解耦
+
+---
+
+## 收口记录（2026-09-04）
+
+- Original Plan：第 6 节延迟测量为"建议测量"（browser → server → WASM → DeviceAction → scrcpy control，比较迁移前后 KeyDown/KeyUp P50/P95 等）。
+- Final Decision：已建成两层测量并形成 baseline——进程内微基准（native vs WASM dispatch p95 3.7µs）+ 真机 E2E 基准 `phase0_android_keymap_e2e_latency_native_vs_wasm`（进程内 DataChannel 客户端替代浏览器，7 阶段 trace 埋点，native/WASM 同设备同会话对照），结果在 `benchmarks/results/keymap-e2e.json`：Server Internal Total P95 native 74µs vs WASM 102µs（WASM 增量 ≈+28µs），burst 热身后 wasm 执行 P50=2µs、无尾延迟退化；浏览器端 JS 开销未含（Browser RTT 与 Server 内部阶段分开统计）。
+- Reason：Validation-01 落地，Gate B「Keymap 延迟可接受」由真机实测数据支撑；trace 信封字段与收集器默认关闭零开销，生产行为不变，后续可按 baseline 设 WASM−Native P95 增量阈值防架构退化。

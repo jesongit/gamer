@@ -4,7 +4,7 @@
 >
 > **Native Core + Core Capability API + Frontend Plugin Workspace + WASM Extensions + App Packages**
 >
-> 📍 **实施状态（2026-09-04）：Phase 0–10 已全部实施完成。验收结论、有意偏离与遗留项见文末「八、实施状态」。**
+> 📍 **实施状态（2026-09-04）：Phase 0–10 已全部实施完成，架构收尾已裁决。验收结论、已确认的架构决策与后续验证见文末「八、实施状态」。**
 
 ---
 
@@ -230,27 +230,28 @@ Keymap 作为首个真实 WASM 插件跑通后，应验证：
 | Phase 4 App Package | ✅ 完成 | `.gamerpkg` 安装/激活/卸载 REST、一个 Android 包仅一个 active 内容包、每版本 SHA-256、包内 presets 自动发布为任务预设、复合解析（user-overrides → 包 → 旧分区兜底）、业务资源出库（默认发行零业务资源） |
 | Phase 5 前端工作区 | ✅ 完成 | PanelRegistry 动态页签、`?panel=` URL 状态、MessageChannel UI Bridge（`gamer-ui@1`）、sandbox iframe（无 allow-same-origin）、UI/Runtime 生命周期分离、lazy mount/keep_alive；Console.vue 4230 → 1355 行 |
 | Phase 6 WASM Host | ✅ 完成 | wasmtime component-model 进默认构建（lazy init，无插件零开销）、WIT 分域 `@1`、权限 allowlist（默认禁 filesystem/network/shell/process）、生命周期状态机 + 全套 REST + 版本回滚、`plugin.call` |
-| Phase 7 Keymap WASM | ✅ 完成 | InputEvent → WASM → DeviceAction 真链路、profile 数据通道（分区键位 YAML → guest，未映射键 pass-through 回落）、touch handle 归 Core、官方 keymap 插件产物；进程内 dispatch p95 3.7µs（护栏 100ms） |
+| Phase 7 Keymap WASM | ✅ 完成 | InputEvent → WASM → DeviceAction 真链路、profile 数据通道（分区键位 YAML → guest，未映射键 pass-through 回落）、touch handle 归 Core、官方 keymap 插件产物；进程内 dispatch p95 3.7µs（护栏 100ms）；真机 E2E 延迟基准与 baseline 已补齐（Validation-01，见 8.3） |
 | Phase 8 YAML vNext | ✅ 完成 | v3 分层 DSL（Surface → Small AST → Host API）、`invoke` 逃生口、`func` 并入 `call`、`app.start/stop`、返回值泛化（含 handle）、v2/v3 兼容并存、官方 gamer.yaml 插件可安装可运行 |
-| Phase 9 Timer Core | ✅ 完成 | TimerCore 持久化/重启恢复/挂起恢复、`wait_terminal` 事件化（去 50ms 轮询）、任务预设与包安装卸载联动、缺 runner 明确依赖错误；Cron 的实现偏离见 8.3-1 |
+| Phase 9 Timer Core | ✅ 完成 | TimerCore 持久化/重启恢复/挂起恢复、`wait_terminal` 事件化（去 50ms 轮询）、任务预设与包安装卸载联动、缺 runner 明确依赖错误；Scheduler/API 经 `ScheduleRegistry` 与 Cron provider 解耦（ADR-01） |
 | Phase 10 插件中心 | ✅ 完成 | 市场/本地导入/URL 导入、ed25519 签名 + 内嵌信任锚、权限 diff 二次确认、版本回滚 UI、「卸载 / 卸载并删除数据」双语义、declarative/iframe/none 三档 UI（declarative Host 已实现） |
 
 ### 8.2 Gate 结论
 
 - **Gate A（Phase 4 后）：通过。** ResourceId / AppContext 模型稳定；默认发行零业务资源成立；包可安装/更新/卸载且 user override 不被更新覆盖。
-- **Gate B（Phase 7 后）：通过。** `.gplugin` 真装真卸、权限边界成立、无插件时零 WASM 开销、keymap 进程内延迟远低于护栏、UI 与 Runtime 生命周期解耦。浏览器 → 设备全链路端到端延迟未单测（进程内两段均已测且达标），有需要可在真机环境补测。
+- **Gate B（Phase 7 后）：通过。** `.gplugin` 真装真卸、权限边界成立、无插件时零 WASM 开销、keymap 进程内延迟远低于护栏、UI 与 Runtime 生命周期解耦。浏览器 → 设备链路的真机 E2E 延迟基准已补齐（Validation-01，见 8.3；浏览器端 JS 开销未含）。
 
-### 8.3 有意偏离与遗留项
+### 8.3 已确认的架构决策与后续验证
 
-1. **Cron 为 native `ScheduleExtension` 而非 WASM（待决策）**
-   现状：cron 表达式解析与触发语义在 `server/src/cron_extension.rs`（native），由 scheduler 静态注册；「TimerCore 不感知 schedule 语义」的目标已达成。与计划「Cron WASM 负责 parse cron」偏离的实现理由：cron 解析是纯计算、无权限/沙箱诉求，跨 WASM 边界只有成本；且现有 WASM 实例生命周期为请求型（call / run），长驻触发器需要新增 timer/trigger capability 面与长驻实例管理，当前收益存疑。
-   待选方向（后续决策）：
-   - 保持 native，记录为最终形态（成本最低；除非确需第三方自定义触发语义，推荐此项）
-   - 迁移为 WASM 长驻扩展（host 需补 trigger capability 与长驻生命周期管理，成本最高）
-   - 折中：next/parse 留 native，触发行为（payload 改写、触发条件）交由扩展声明
-2. WASM 扩展状态机未做 Available/Starting/Stopping 瞬态（计划为「建议」项；现有 Installed/Disabled/Running/Failed + operation lock 已覆盖全部操作语义）。
-3. 生产仅注册 `gamer.yaml` 一个 runner（`ScheduleRegistry` 扩展点已就绪，多 runner 有测试覆盖），未来 `gamer.macro` 等接入无需改 scheduler。
-4. Keymap 浏览器 → 设备全链路延迟未单独成测（见 8.2 Gate B 备注）。
+> 原「有意偏离与遗留项」已随 2026-09-04 的 V2 架构收尾（`gamer_v2_architecture_closure_plan.md`）全部裁决，以下为最终结论，不再是待决事项。
+
+1. **ADR-01 Cron Provider（ACCEPTED）**
+   Cron 保持 **Native Schedule Provider**，不迁移 WASM：cron 是标准、稳定、纯计算能力，无权限/沙箱诉求，跨 WASM 边界只有成本。收口后 Scheduler/API 对 `CronExtension` 的直接依赖清零——调度只经 `ScheduleRegistry`（provider 经 `cron_extension::register_builtin` 注册缝安装）；`next_enabled_trigger_in_secs()` 已删除，update 安装门禁与诊断改用 `TimerCore::next_wakeup_in()/next_wakeup_at()`（直接读持久化唤醒游标）；API 校验/预览统一走 `ScheduleRegistry.next_after/probe`；源码自检测试 `schedule_computation_is_locked_to_the_registry_abstraction` 把该边界锁进 CI。命名保持 `CronExtension`：Native 实现同样是 Extension（**Extension ≠ WASM**），改名零收益。
+2. **ADR-02 WASM Runtime State（ACCEPTED）**
+   稳定运行态保持 `Installed / Disabled / Running / Failed` 四态，operation lock 已覆盖全部操作语义。`Starting / Stopping` 属 Operation State，不持久化为生命周期状态；未来 UI 需要展示"正在启动/停止"时，用独立 operation 对象表达（计划 6.4）。`Available` 表示插件存在于仓库/来源，属 Plugin Catalog 语义，不进入 Runtime State。不为计划补齐状态机复杂度。
+3. **ADR-03 Timer Runner（DEFERRED）**
+   `gamer.yaml` 为当前唯一 Runner，不为验证 `TimerRunnerRegistry` 抽象而虚构第二个 Runner。抽象保留（TimerCore 只依赖 `runner_id`，未来新增 Runner 不改 TimerCore）；待第一个真实第二 Runner 出现时，再补 `register/unregister/replace` 与 plugin ownership、插件卸载对既有 TimerTask 的依赖处理（计划 7.3/7.4 要点保留为届时清单）。
+4. **Validation-01 Keymap E2E（DONE）**
+   已建成真实链路基准 `phase0_android_keymap_e2e_latency_native_vs_wasm`（进程内 webrtc-rs DataChannel 客户端替代浏览器，ICE/DTLS/SCTP 全真实；**浏览器端 JS 开销未含**——按计划 8.3 将 Browser RTT 与 Server 内部阶段分开统计）与第一版 baseline：`benchmarks/results/keymap-e2e.json`（Redmi / Android 16 / USB，native+wasm 两轮共 620 事件，普通按键/长按/组合键/burst 四场景，只断言正确性不断言延迟数值）。关键结论：Server Internal Total P95 native 74µs vs WASM 102µs，**WASM 增量 ≈+28µs**；burst 热身后 wasm 执行 P50=2µs，无尾延迟退化。后续可按 baseline 设"WASM−Native P95 增量阈值"防止架构退化。
 
 ### 8.4 用户可感知变化（相对计划实施前）
 
@@ -260,3 +261,9 @@ Keymap 作为首个真实 WASM 插件跑通后，应验证：
 - **YAML v3 脚本**：`app.start/stop`、`invoke` 能力逃生口、`call` 合并 `func`、返回值泛化；v2 脚本完全兼容无需迁移
 - **定时任务**：事件化触发（去轮询）、服务重启恢复、依赖缺失明确挂起、任务预设一键实例化
 - **性能**：帧零拷贝共享、截图直通解码（P95 340→307ms）、日志/任务写库异步化；基线数据见 `benchmarks/`
+
+### 8.5 最终架构原则（2026-09-04 收口确认）
+
+> **Core 提供稳定机制，Extension 提供可替换语义；Extension 不等于 WASM。**
+
+Timer、持久化、设备控制、WebRTC、插件 Runtime 与各类 Registry 属 Native Core；Schedule Provider、Keymap、Runner 及未来能力属 Extension。对稳定、标准、高频且无第三方替换价值的能力（如 Cron）采用 Native Extension；需要第三方扩展、用户自定义或独立发布的能力再经 WASM 接入——既不把所有东西塞进 Core，也不为插件化把所有东西强制 WASM 化。完整表述见 `gamer_v2_architecture_closure_plan.md` 第 13 节。
