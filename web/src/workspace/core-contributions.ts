@@ -1,48 +1,27 @@
+import LogsPanel from '../components/LogsPanel.vue'
+import SystemPanel from '../components/SystemPanel.vue'
+import TaskBoard from '../components/TaskBoard.vue'
 import type { PanelContribution, PanelRegistry } from './registry'
 import { CONSOLE_RIGHT_LOCATION } from './registry'
 
-type CoreComponents = {
-  TemplateCapture: unknown
-  ScriptRunner: unknown
-  LogsPanel: unknown
-  TaskBoard: unknown
-  SystemPanel: unknown
-}
-
 type CoreContexts = {
-  templateCapture: Record<string, unknown>
-  scriptRunner: Record<string, unknown>
-  activePkg: { value?: string } | string
+  activePkg?: { value?: string } | string
 }
 
-/** Register built-in panels through the same contract later used by plugins. */
+/**
+ * Core 自有 UI（ADR-11：任务/日志/设置）。业务面板（自动化/函数/模板/映射）
+ * 全部由扩展 manifest 驱动（runtime = "core" + component 键），不再在 Core 壳
+ * 里无条件注册；裸 Core 右侧只有 任务|日志|设置。
+ */
 export function registerCoreContributions(
   registry: PanelRegistry,
-  components: CoreComponents,
-  contexts: CoreContexts,
+  contexts: CoreContexts = {},
 ) {
   const entries: PanelContribution[] = [
     {
-      pluginId: 'gamer.yaml', panelId: 'templates', title: '模板', icon: '🖼️', order: 10,
-      location: CONSOLE_RIGHT_LOCATION, runtime: 'core', keepAlive: 'session', aliases: ['tpl'],
-      component: components.TemplateCapture, panelClass: 'tpl-tab',
-      getProps: () => ({ context: contexts.templateCapture }),
-    },
-    {
-      pluginId: 'gamer.yaml', panelId: 'scripts', title: '脚本', icon: '📜', order: 20,
-      location: CONSOLE_RIGHT_LOCATION, runtime: 'core', keepAlive: 'session', aliases: ['script'],
-      component: components.ScriptRunner, panelClass: 'script-tab',
-      getProps: () => ({ context: contexts.scriptRunner }),
-    },
-    {
-      pluginId: 'gamer.core', panelId: 'logs', title: '日志', order: 40,
-      location: CONSOLE_RIGHT_LOCATION, runtime: 'core', aliases: ['logs'],
-      component: components.LogsPanel, panelClass: 'extra-tab',
-    },
-    {
-      pluginId: 'gamer.core', panelId: 'tasks', title: '任务', order: 50,
+      pluginId: 'gamer.core', panelId: 'tasks', title: '任务', order: 40,
       location: CONSOLE_RIGHT_LOCATION, runtime: 'core', aliases: ['tasks'],
-      component: components.TaskBoard, panelClass: 'extra-tab',
+      component: TaskBoard, panelClass: 'extra-tab',
       getProps: () => ({
         activePkg: contexts.activePkg && typeof contexts.activePkg === 'object' && 'value' in contexts.activePkg
           ? contexts.activePkg.value ?? null
@@ -50,9 +29,14 @@ export function registerCoreContributions(
       }),
     },
     {
+      pluginId: 'gamer.core', panelId: 'logs', title: '日志', order: 50,
+      location: CONSOLE_RIGHT_LOCATION, runtime: 'core', aliases: ['logs'],
+      component: LogsPanel, panelClass: 'extra-tab',
+    },
+    {
       pluginId: 'gamer.core', panelId: 'settings', title: '设置', order: 60,
       location: CONSOLE_RIGHT_LOCATION, runtime: 'core', aliases: ['settings'],
-      component: components.SystemPanel, panelClass: 'extra-tab',
+      component: SystemPanel, panelClass: 'extra-tab',
     },
   ]
   return entries.map(contribution => ({ contribution, unregister: registry.register(contribution) }))

@@ -1,17 +1,19 @@
-import { nextTick, onUnmounted, watch } from 'vue'
+import { onUnmounted, watch } from 'vue'
 import { DEFAULT_PANEL_KEY } from '../../workspace/registry'
-import { KEYMAP_EXTENSION_ID, KEYMAP_PANEL_ID } from '../../workspace/keymap-extension'
+
+/** 长驻 keymap 扩展 id：输入控制器只观察它的运行状态，与面板注册解耦。 */
+const KEYMAP_EXTENSION_ID = 'gamer.keymap'
 
 /**
  * Console 右侧 Workspace 接线：URL panel 同步（hash 路由 query）、
  * 服务端扩展 UI 贡献轮询、远端 keymap 运行态与手柄输入轮询。
- * 自 Console.vue 原样拆出，行为零变化。
+ * 面板注册完全由服务端 ui_contributions 驱动（runtime=core 面板挂宿主组件），
+ * 本模块不再做任何本地回退注册。
  */
 export function useConsoleWorkspacePanels({
   route,
   router,
   panelRegistry,
-  keymapExtension,
   serverUiAdapter,
   remoteKeymapRunning,
   keymap,
@@ -26,12 +28,6 @@ export function useConsoleWorkspacePanels({
   async function refreshServerExtensions() {
     try {
       const response = await serverUiAdapter.refresh()
-      // The built-in editor remains the safe fallback when the installable
-      // extension is disabled or uninstalled. An enabled server contribution
-      // with the same key intentionally replaces it with its iframe panel.
-      if (!panelRegistry.has(`${KEYMAP_EXTENSION_ID}:${KEYMAP_PANEL_ID}`)) {
-        panelRegistry.register(keymapExtension.contribution)
-      }
       const keymapSnapshot = (response?.extensions || []).find(item => item?.id === KEYMAP_EXTENSION_ID)
       remoteKeymapRunning.value = keymapSnapshot?.state === 'running'
     } catch (error) {
@@ -91,7 +87,7 @@ export function useConsoleWorkspacePanels({
     const selected = panelRegistry.resolve(requested) || panelRegistry.defaultPanel()
     const key = selected?.key || DEFAULT_PANEL_KEY
     activePanelKey.value = key
-    panelTab.value = selected?.panelId || 'script'
+    panelTab.value = selected?.panelId || 'tasks'
     if (replaceInvalid && requested !== key) {
       router.replace({ path: route.path, query: { ...route.query, panel: key } })
     }

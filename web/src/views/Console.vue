@@ -149,17 +149,11 @@
         @fallback="fallbackPanel"
         @extensions-changed="refreshServerExtensions"
       />
-      <!-- CorePanelHost now mounts these registry contributions. Kept in this
-           migration comment to document the old contracts for maintainers:
-           <div class="func-pkg-row"><select v-model="activePkg"></select>
-           <button @click="loadApps"></button></div>
-           <TemplateCapture :context="templateCaptureContext" />
-           <ScriptRunner :context="scriptRunnerContext" />
-           <KeymapPanel :context="keymapPanelContext" />
-           <LogsPanel /> <TaskBoard :active-pkg="activePkg" /> <SystemPanel />
-           panelTab === 'tpl'; panelTab === 'script'; panelTab === 'keymap';
-           panelTab === 'logs'; panelTab === 'tasks'; panelTab === 'settings'.
-           The real mounts are registry-driven above. -->
+      <!-- 面板全部由 PanelRegistry 驱动（上方 PluginWorkspace）：
+           gamer.core:tasks|logs|settings 是 Core 自有 UI（core-contributions）；
+           扩展业务面板（自动化/函数/模板/映射）随扩展生命周期经服务端
+           ui_contributions（runtime=core + component 键，前端
+           core-component-registry 解析组件）出现/消失，壳内不再硬编码注册。 -->
       <!-- 二次裁切弹窗：挂面板层级（不在模板页签 v-show 内），从脚本编辑发起框选时不切页签 -->
       <TemplateCropModal :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
     </aside>
@@ -203,16 +197,9 @@ import { createPanelRegistry, DEFAULT_PANEL_KEY } from '../workspace/registry'
 import { createWorkspaceContext, PANEL_REGISTRY_KEY, WORKSPACE_CONTEXT_KEY } from '../workspace/context'
 import { createWorkspaceLifecycle } from '../workspace/lifecycle'
 import { registerCoreContributions } from '../workspace/core-contributions'
-import { registerKeymapExtension } from '../workspace/keymap-extension'
 import { createServerUiContributionAdapter } from '../workspace/plugin-center/adapter/server-ui'
 import DeviceSettingsModal from '../components/console/DeviceSettingsModal.vue'
-import TemplateCapture from '../components/console/TemplateCapture.vue'
 import TemplateCropModal from '../components/console/TemplateCropModal.vue'
-import ScriptRunner from '../components/console/ScriptRunner.vue'
-import KeymapPanel from '../components/console/KeymapPanel.vue'
-import LogsPanel from '../components/LogsPanel.vue'
-import TaskBoard from '../components/TaskBoard.vue'
-import SystemPanel from '../components/SystemPanel.vue'
 import RunConflictModal from '../components/RunConflictModal.vue'
 import RunParamsModal from '../components/RunParamsModal.vue'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
@@ -475,33 +462,15 @@ const { startStats, stopStats, resetWatchdogs, resetBlackWatchdog } = useWebrtcS
 // ---------- Frontend Plugin Workspace ----------
 // Core panels are contributions too: one plugin may register multiple panels,
 // and the workspace never needs to know a panel's component implementation.
+// 裸 Core 只保留 任务/日志/设置；自动化/函数/模板/映射面板由扩展 manifest
+// （runtime = "core" + component 键）经 server-ui adapter 驱动出现/消失。
 const workspaceLifecycle = createWorkspaceLifecycle()
 const panelRegistry = createPanelRegistry({ defaultPanelKey: DEFAULT_PANEL_KEY })
 // Workspace 以稳定的 pluginId:panelId 作为 URL key；panelTab 保留为旧上下文
 // 的兼容字段，实际导航由 activePanelKey + PanelRegistry 负责。
-const panelTab = ref('script')
+const panelTab = ref('tasks')
 const activePanelKey = ref(DEFAULT_PANEL_KEY)
-registerCoreContributions(panelRegistry, {
-  TemplateCapture, ScriptRunner, LogsPanel, TaskBoard, SystemPanel,
-}, {
-  templateCapture: templateCaptureContext,
-  scriptRunner: scriptRunnerContext,
-  activePkg,
-})
-const keymapExtension = registerKeymapExtension(panelRegistry, workspaceLifecycle, {
-  component: KeymapPanel,
-  context: keymapPanelContext,
-  // The browser controller is the transport-facing part of this extension;
-  // its runtime is independent from whether the panel tab is mounted.
-  runtime: {
-    start: () => keymap.setEnabled(true),
-    stop: () => {
-      keymap.releaseAll()
-      keymap.setEnabled(false)
-    },
-  },
-})
-void keymapExtension.start()
+registerCoreContributions(panelRegistry, { activePkg })
 const serverUiAdapter = createServerUiContributionAdapter(panelRegistry, {
   load: () => api.listExtensions(),
 })
@@ -511,13 +480,19 @@ const {
   route,
   router,
   panelRegistry,
-  keymapExtension,
   serverUiAdapter,
   remoteKeymapRunning,
   keymap,
   connected,
   panelTab,
   activePanelKey,
+})
+// keymap 输入控制器接线：与面板注册解耦——挂载即启用本地映射（旧注册 lifecycle
+// 的 start 语义），远端停止时释放残留按键（stop 语义）；远端模式本身只看
+// remoteKeymapRunning（由扩展轮询写入，控制器内 remoteEnabled 读取）。
+keymap.setEnabled(true)
+watch(remoteKeymapRunning, running => {
+  if (!running) keymap.releaseAll()
 })
 
 const workspaceContext = createWorkspaceContext({

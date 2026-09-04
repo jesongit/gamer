@@ -1,6 +1,7 @@
 import type { PanelRegistry } from '../../registry'
 import { registerServerUiContributions } from '../../contribution-manager'
 import type { ServerUiContribution } from '../../contribution-manager'
+import { resolveCoreComponent } from '../../core-component-registry'
 
 export interface ServerUiListResponse {
   ui_contributions?: ServerUiContribution[]
@@ -11,6 +12,8 @@ export interface ServerUiListResponse {
 export interface ServerUiContributionAdapterOptions {
   load?: () => Promise<ServerUiListResponse>
   resolveEntry?: (pluginId: string, entry: string) => string
+  /** runtime = "core" 贡献的组件键解析；缺省用 Console 内置组件表 */
+  resolveCore?: typeof resolveCoreComponent
 }
 
 function defaultResolveEntry(pluginId: string, entry: string): string {
@@ -54,8 +57,10 @@ export function createServerUiContributionAdapter(
     registration = null
     previous?.dispose()
     try {
+      const resolveCore = options.resolveCore || resolveCoreComponent
       registration = registerServerUiContributions(registry, contributions, {
         resolveEntry: (manifest, entry) => (options.resolveEntry || defaultResolveEntry)(manifest.id, entry),
+        resolveCore,
       })
     } catch (error) {
       // The manager rolls back the partial registration. Keep the adapter

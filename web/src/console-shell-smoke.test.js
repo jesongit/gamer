@@ -67,13 +67,17 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
         swipe: { show: false, x: 0, y: 0, w: 0, h: 0 },
         hit: { show: false, x: 0, y: 0, w: 0, h: 0, label: '', miss: false },
       })
-      // 右侧 Workspace 由 PanelRegistry 驱动：核心页签仍全部注册
+      // 右侧 Workspace 由 PanelRegistry 驱动：裸 Core（listExtensions 空）
+      // 只有 任务/日志/设置 三个自有页签（P11.5：业务面板全部 manifest 驱动）
       const tabTexts = wrapper.findAll('.workspace-tab').map(tab => tab.text())
-      for (const title of ['模板', '脚本', '映射', '日志', '任务', '设置']) {
+      for (const title of ['任务', '日志', '设置']) {
         expect(tabTexts.some(text => text.includes(title))).toBe(true)
       }
-      // URL panel 同步兜底：默认面板写入 activePanelKey（registry 驱动）
-      expect(wrapper.text()).toContain('运行')
+      for (const gone of ['模板', '脚本', '映射']) {
+        expect(tabTexts.some(text => text.includes(gone))).toBe(false)
+      }
+      // 默认面板 = gamer.core:tasks（裸 Core 兜底）
+      expect(wrapper.text()).toContain('新建任务')
     } finally {
       warn.mockRestore()
       vi.useRealTimers()

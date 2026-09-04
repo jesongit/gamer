@@ -42,6 +42,46 @@ describe('Workspace manifest contribution manager', () => {
     ])
   })
 
+  it('resolves core contributions through resolveCore and merges descriptor aliases', () => {
+    const panels = manifestPanels({
+      id: 'gamer.yaml',
+      ui: { contributions: [
+        {
+          panel_id: 'automation', title: '自动化', runtime: 'core',
+          location: 'console.right', component: 'console.scripts',
+          requires_device: true, preferred_width: 440, order: 25,
+        },
+        {
+          panel_id: 'future', title: '未注册', runtime: 'core',
+          location: 'console.right', component: 'future.widget',
+        },
+      ] },
+    }, {
+      resolveCore: key => (key === 'console.scripts'
+        ? { component: { vue: 'script-runner' }, panelClass: 'script-tab', aliases: ['script'] }
+        : null),
+    })
+
+    expect(panels).toHaveLength(2)
+    expect(panels[0]).toMatchObject({
+      pluginId: 'gamer.yaml', panelId: 'automation', runtime: 'core',
+      component: { vue: 'script-runner' }, panelClass: 'script-tab',
+      keepAlive: 'session', aliases: ['script'], order: 25, requiresDevice: true,
+    })
+    // 未知组件键 → 占位面板（面板可见、内容不可用），不抛错
+    expect(panels[1].component).toBeTruthy()
+    expect(panels[1].keepAlive).toBe('session')
+  })
+
+  it('core contributions without a component key are rejected', () => {
+    expect(() => manifestPanels({
+      id: 'gamer.yaml',
+      ui: { contributions: [
+        { panel_id: 'automation', title: '自动化', runtime: 'core', location: 'console.right' },
+      ] },
+    })).toThrow(/core panel requires component/)
+  })
+
   it('starts runtime independently of opening and closing its panel', async () => {
     const registry = createPanelRegistry()
     const ui = createPanelUiLifecycle()
