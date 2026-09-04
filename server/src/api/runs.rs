@@ -1,13 +1,16 @@
-//! 手动运行（脚本 / 函数测试）与运行生命周期端点。
+//! 统一执行入口（P11.6 / plan §11.3）与运行生命周期端点。
 //!
-//! - `POST /api/scripts/:id/run` body `{device_id, start_index?, args?}`：
-//!   统一 RunTarget::Script（CONTRACT §4.4）；`args` 为稀疏映射（§4.3），
-//!   提交前按声明七类解析并合并默认值，诊断失败 → 400 {error:"invalid_args",
-//!   diagnostics:[...]};；
-//! - `POST /api/functions/:id/run` body `{device_id, function?, start_index?,
-//!   args?}`：函数测试（RunTarget::Function），RunRecord.script_id 记
-//!   `<pkg>/<file>.yaml[#函数]` 展示标签；函数库不进脚本运行接口，
-//!   函数体内步骤定位 = function + start_index。
+//! - `POST /api/runs` body `{runner_id, entrypoint, device_id, payload?,
+//!   content_package?}`：Core 只做通用分发——按 `runner_id` 在
+//!   [`crate::timer_core::TimerRunnerRegistry`] 查找已注册 runner 并转发；
+//!   entrypoint/payload 语义属于注册该 runner 的扩展（gamer.yaml 的契约见
+//!   `extensions::gamer_yaml::timer_yaml`）。`task_id` 为空 = 手动 ad-hoc
+//!   运行（任务路径复用同一 runner，`/api/tasks/:id/run`）。
+//! - `GET /api/runs/:run_id` / `POST /api/runs/:run_id/cancel`：
+//!   RunManager 统一 run_id 注册表（活动 + 终态档案均可查）。
+//! - `GET /api/devices/:id/run`：设备当前运行（前端刷新恢复运行态）。
+//!
+//! 原 `/api/scripts/:id/run`、`/api/functions/:id/run` 已删除（ADR-14 零兼容）。
 
 use std::sync::Arc;
 
@@ -16,249 +19,157 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::Value;
 
-use super::common::{err_response, run_blocking_api, validate_text_field};
+use super::common::{err_response, validate_text_field};
 use super::{ApiError, AppState};
-use crate::extensions::gamer_yaml::engine::RunTarget;
-use crate::store::Db;
+use crate::core::{AppContext, AppPackageId, DeviceId, RunPayload, RunRequest};
+use crate::timer_core::{TimerCompletion, TimerRunnerError};
 
-/// 稀疏 args 请求形态（手动运行 / 函数测试共用）。
-#[derive(Deserialize)]
-pub(super) struct RunReqArgs {
+/// POST /api/runs 请求形态（plan §11.3）。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct DispatchRunReq {
+    pub(super) runner_id: String,
+    pub(super) entrypoint: String,
     pub(super) device_id: String,
-    /// 从第几个顶层步骤开始运行（0=从头；「从某行运行」选中逻辑行时传入）
     #[serde(default)]
-    pub(super) start_index: Option<usize>,
-    /// 函数测试：目标函数名；缺省 = 文件第一个函数
+    pub(super) payload: Option<serde_json::Value>,
+    /// 内容分区（runner 资源解析域）；缺省取 entrypoint 首段
+    /// （`<content_package>/<path>` 约定）。
     #[serde(default)]
-    pub(super) function: Option<String>,
-    /// 稀疏参数覆盖：键 = 参数名，值按七类解析（bool=布尔、coord=[x,y]、
-    /// 其余五类=字符串）
-    #[serde(default)]
-    pub(super) args: Option<serde_json::Map<String, Value>>,
+    pub(super) content_package: Option<String>,
 }
 
-pub(super) fn validate_run_req(req: &RunReqArgs) -> Result<(), ApiError> {
-    validate_text_field(&req.device_id, "device_id", 255)?;
-    if req.start_index.is_some_and(|index| index > 100_000) {
-        return Err(ApiError::bad_request("start_index 超过脚本步数上限"));
-    }
-    if let Some(func) = req.function.as_deref().filter(|v| !v.trim().is_empty()) {
-        validate_text_field(func, "function", 255)?;
-    }
-    Ok(())
-}
-
-/// 结构化诊断 400 响应（CONTRACT §5.1 五元组列表，前端按 code/step_path 定位）。
-/// 任务保存的 args 解析与脚本解析诊断共用同一形态。
-pub(super) fn diagnostics_response(
-    diagnostics: &[crate::extensions::gamer_yaml::script_v2::ScriptError],
+/// POST /api/runs：统一执行分发（202 提交即返回；RUN-002 契约）。
+pub(super) async fn api_dispatch_run(
+    State(st): State<AppState>,
+    Json(req): Json<DispatchRunReq>,
 ) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(serde_json::json!({
-            "error": "invalid_args",
-            "diagnostics": diagnostics,
-        })),
-    )
-        .into_response()
-}
-
-/// 手动运行的完成钩子：终态摘要行落库（realtime 模式引擎日志已实时入库，
-/// 这里只补一条终局提示，与旧实现的"脚本执行完成/失败"行语义对齐）
-fn manual_finish_hook(db: Db) -> crate::run_manager::FinishHook {
-    use crate::run_manager::RunOutcome;
-    Arc::new(move |rec, outcome| match outcome {
-        RunOutcome::Success(_) => {
-            let db = db.clone();
-            let device_id = rec.device_id.clone();
-            let script_id = rec.script_id.clone();
-            tokio::spawn(async move {
-                let _ = db
-                    .add_log_async(&device_id, &script_id, "success", "脚本执行完成")
-                    .await;
-            });
+    if let Err(err) = validate_text_field(&req.runner_id, "runner_id", 255) {
+        return err.into_response();
+    }
+    if let Err(err) = validate_text_field(&req.entrypoint, "entrypoint", 1024) {
+        return err.into_response();
+    }
+    if let Err(err) = validate_text_field(&req.device_id, "device_id", 255) {
+        return err.into_response();
+    }
+    if let Some(payload) = &req.payload {
+        if !payload.is_object() {
+            return ApiError::bad_request("payload 必须是对象").into_response();
         }
-        RunOutcome::Failed(msg, _) => {
-            let db = db.clone();
-            let device_id = rec.device_id.clone();
-            let script_id = rec.script_id.clone();
-            let message = format!("脚本执行失败: {}", msg);
-            tokio::spawn(async move {
-                let _ = db
-                    .add_log_async(&device_id, &script_id, "error", &message)
-                    .await;
-            });
-        }
-        RunOutcome::Cancelled(_) => {
-            let db = db.clone();
-            let device_id = rec.device_id.clone();
-            let script_id = rec.script_id.clone();
-            tokio::spawn(async move {
-                let _ = db
-                    .add_log_async(&device_id, &script_id, "info", "脚本已停止")
-                    .await;
-            });
-        }
-    })
-}
-
-/// 统一提交入口：解析 args（blocking 池内做磁盘快照 + 严格解析）→
-/// RunManager.submit → 202 {run_id, state, resolved_args}。
-async fn submit_run(
-    st: &AppState,
-    device_id: String,
-    target: RunTarget,
-    args_json: Option<serde_json::Map<String, Value>>,
-) -> Response {
-    // args 解析需要分区快照（磁盘 IO + 严格解析），放 blocking 池。
-    // 闭包返回 Result<绑定结果, ApiError> 以适配 run_blocking_api；诊断在
-    // 内层 Result 里透传给 400 响应。
-    let scripts = st.scripts.clone();
-    let bound = {
-        let target = target.clone();
-        match run_blocking_api(move || {
-            let r: Result<
-                crate::extensions::gamer_yaml::engine::BoundEntryArgs,
-                Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>,
-            > = crate::extensions::gamer_yaml::engine::resolve_entry_args(
-                &scripts,
-                &target,
-                &args_json.unwrap_or_default(),
-            );
-            Ok(r)
-        })
-        .await
-        {
-            Ok(Ok(bound)) => bound,
-            Ok(Err(diagnostics)) => return diagnostics_response(&diagnostics),
-            Err(e) => return e.into_response(),
-        }
+    }
+    // 内容分区：显式 content_package 优先，缺省按 entrypoint 首段约定解析
+    let content_package = match &req.content_package {
+        Some(pkg) => pkg.clone(),
+        None => req
+            .entrypoint
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .to_string(),
+    };
+    let Ok(content) = AppPackageId::new(&content_package) else {
+        return ApiError::bad_request(format!(
+            "内容分区非法（只允许字母数字 . _ -）: {content_package}"
+        ))
+        .into_response();
     };
     let android_package = st
         .devices
-        .snapshot(&device_id)
-        .and_then(|(device, _, _)| device.pkg);
-    let app = match crate::extensions::gamer_yaml::engine::yaml_app_context(
-        &device_id,
-        android_package,
-        target.pkg(),
-    ) {
-        Ok(app) => app,
+        .snapshot(&req.device_id)
+        .and_then(|(device, _, _)| device.pkg)
+        .unwrap_or_else(|| content_package.clone());
+    let device_id = match DeviceId::new(&req.device_id) {
+        Ok(id) => id,
         Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
     };
-    let rreq = match crate::extensions::gamer_yaml::engine::yaml_start_request(
+    let android = match crate::core::AndroidPackageName::new(&android_package) {
+        Ok(name) => name,
+        Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
+    };
+    let app = AppContext::new(device_id, android, Some(content));
+    let request = match RunRequest::for_app(
         app,
-        target,
-        crate::run_manager::RunSource::Manual,
-        None,
-        None,
-        bound.overrides,
-        true,
+        req.runner_id.clone(),
+        req.entrypoint.clone(),
+        RunPayload::new(req.payload.unwrap_or(serde_json::json!({}))),
     ) {
         Ok(request) => request,
         Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
     };
+    // 手动运行终态摘要行由 gamer.yaml runner 落库（实时日志 realtime 入库）；
+    // 完成回调当前无 TimerCore 记账需求，传 no-op。
+    let hook: crate::timer_core::TimerCompletionHook = Arc::new(|_completion: TimerCompletion| {});
+    use crate::timer_core::TimerRunner as _;
     match st
-        .runs
-        .submit(rreq, Some(manual_finish_hook(st.db.clone())))
+        .scheduler
+        .runner_registry()
+        .submit(request, "", None, hook)
+        .await
     {
-        Ok(rec) => (
+        Ok(run) => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({
-                "run_id": rec.run_id,
-                "state": serde_json::to_value(rec.state).unwrap_or_default(),
-                "resolved_args": bound.resolved,
+                "run_id": run.run_id,
+                "state": "starting",
+                "resolved_args": run.detail.and_then(|detail| detail.get("resolved_args").cloned()),
             })),
         )
             .into_response(),
-        Err(crate::run_manager::StartError::Conflict(busy)) => {
+        Err(error) => dispatch_error_response(error),
+    }
+}
+
+/// runner 分发错误 → HTTP（与 /api/tasks/:id/run 同口径；参数诊断 400 透传）。
+fn dispatch_error_response(error: TimerRunnerError) -> Response {
+    match error {
+        TimerRunnerError::Conflict(busy) => {
             (StatusCode::CONFLICT, Json(busy.busy_payload())).into_response()
         }
-        Err(crate::run_manager::StartError::ShuttingDown) => {
+        TimerRunnerError::ShuttingDown => {
             err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
         }
+        TimerRunnerError::DependencyMissing(message) => (
+            StatusCode::FAILED_DEPENDENCY,
+            Json(serde_json::json!({
+                "code": "dependency_unavailable",
+                "message": message,
+            })),
+        )
+            .into_response(),
+        TimerRunnerError::ParamStale(message) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "code": "signature_mismatch",
+                "message": message,
+            })),
+        )
+            .into_response(),
+        TimerRunnerError::InvalidDetail { message, detail } => (
+            StatusCode::BAD_REQUEST,
+            Json(match detail {
+                serde_json::Value::Null => {
+                    serde_json::json!({ "error": "invalid_args", "message": message })
+                }
+                value if value.is_object() && value.get("error").is_some() => {
+                    let mut map = value.as_object().cloned().unwrap_or_default();
+                    map.entry("message".to_string())
+                        .or_insert(serde_json::json!(message));
+                    serde_json::Value::Object(map)
+                }
+                value => serde_json::json!({
+                    "error": "invalid_args",
+                    "message": message,
+                    "diagnostics": value
+                }),
+            }),
+        )
+            .into_response(),
+        TimerRunnerError::Invalid(message) | TimerRunnerError::Other(message) => {
+            ApiError::bad_request(message).into_response()
+        }
     }
-}
-
-/// POST /api/scripts/:id/run（id = `<pkg>/<name>.yaml`，整体 encodeURIComponent）
-pub(super) async fn api_run_script(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<RunReqArgs>,
-) -> Response {
-    // 脚本存在性先校验（404 优先于设备冲突）
-    let scripts = st.scripts.clone();
-    let probe = id.clone();
-    let exists = match run_blocking_api(move || {
-        scripts
-            .get(&probe)
-            .map(|s| s.is_some())
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await
-    {
-        Ok(ok) => ok,
-        Err(e) => return e.into_response(),
-    };
-    if !exists {
-        return ApiError::not_found("脚本不存在").into_response();
-    }
-    if let Err(err) = validate_run_req(&req) {
-        return err.into_response();
-    }
-    // RUN-002 契约：启动即返回 202 {run_id, state:"starting"}，不等脚本结束；
-    // 设备级互斥冲突 → 409 {error:"device_busy", run_id, script_id, source, started_at}
-    let target = RunTarget::Script {
-        script_id: id,
-        start_index: req.start_index.unwrap_or(0),
-    };
-    submit_run(&st, req.device_id, target, req.args).await
-}
-
-/// POST /api/functions/:id/run（id = `<pkg>/<文件短路径>.yaml`）：
-/// 函数测试运行（RunTarget::Function）。函数文件不存在 → 404；
-/// 指定 function 不存在 → 400 诊断（resource.func.not_found）。
-pub(super) async fn api_run_function(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<RunReqArgs>,
-) -> Response {
-    // 函数文件存在性先校验（404 优先于设备冲突）；文件短路径去扩展名
-    let scripts = st.scripts.clone();
-    let probe = id.clone();
-    let file_short = match run_blocking_api(move || {
-        scripts
-            .get_function(&probe)
-            .map(|f| f.map(|f| f.file))
-            .map_err(|e| ApiError::internal(e.to_string()))
-    })
-    .await
-    {
-        Ok(Some(file)) => file,
-        Ok(None) => return ApiError::not_found("函数文件不存在").into_response(),
-        Err(e) => return e.into_response(),
-    };
-    if let Err(err) = validate_run_req(&req) {
-        return err.into_response();
-    }
-    let Some((pkg, _)) = id.split_once('/') else {
-        return ApiError::not_found("函数文件不存在").into_response();
-    };
-    let function = req
-        .function
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let target = RunTarget::Function {
-        pkg: pkg.to_string(),
-        file: file_short,
-        function,
-        start_index: req.start_index.unwrap_or(0),
-    };
-    submit_run(&st, req.device_id, target, req.args).await
 }
 
 /// 设备当前运行查询（前端刷新恢复运行态）：

@@ -6,23 +6,21 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::device::DeviceManager;
 use crate::matcher;
+use crate::resources::ResourceStore;
 use crate::scheduler::Scheduler;
-use crate::scripts::ScriptStore;
 use crate::store::{Db, Device, ScreenMode};
 use axum::body::Body;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Router;
-use base64::Engine;
 
 use super::common::{BODY_LIMIT_JSON, BODY_LIMIT_PACKAGE_INSTALL};
 use super::devices::{
     parse_ctl, session_affecting_change, validate_device_req, ControlReq, CreateDeviceReq,
 };
 use super::logs::clamp_log_limit;
-use super::runs::{validate_run_req, RunReqArgs};
+use super::resources::{compose_region_suffix, validate_short_name, validate_template_name};
 use super::tasks::{build_task, RunnerSpecDto, SaveTaskReq};
-use super::templates::{compose_region_suffix, validate_short_name, validate_template_name};
 use super::{auth, build_router, ApiError};
 use crate::timer_core::{ScheduleRegistry, TaskSchedule};
 
@@ -110,7 +108,7 @@ mod sec_tests {
             ..Default::default()
         };
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
@@ -150,7 +148,7 @@ mod sec_tests {
             ..Default::default()
         };
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
@@ -165,7 +163,7 @@ mod sec_tests {
         db: Db,
         devices: Arc<DeviceManager>,
         cfg: Config,
-        scripts: Arc<ScriptStore>,
+        scripts: Arc<ResourceStore>,
         viewers: crate::webrtc::ViewerMap,
         credential: auth::Credential,
         auth_cfg: crate::config::AuthConfig,
@@ -173,6 +171,21 @@ mod sec_tests {
     ) -> TestApp {
         let runs = Arc::new(crate::run_manager::RunManager::new(executor));
         let scheduler = Arc::new(Scheduler::new(db.clone()));
+        // 与生产等价：gamer.yaml 扩展 Running 时注册其 timer runner（POST
+        // /api/runs 手动分发与任务路径共用同一注册表）。测试装配直接同步注册。
+        scheduler
+            .register_runner_for_tests(
+                "gamer.yaml",
+                "gamer.yaml",
+                Arc::new(
+                    crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::new(
+                        db.clone(),
+                        runs.clone(),
+                        scripts.clone(),
+                    ),
+                ),
+            )
+            .unwrap();
         let auth = Arc::new(auth::AuthState::new(
             credential,
             auth_cfg,
@@ -196,6 +209,9 @@ mod sec_tests {
             Arc::new(crate::update::workload::Workload::default),
             db.clone(),
         ));
+        // 与生产组合根一致：注册扩展资源内容钩子（保存校验/注记）
+        crate::extensions::gamer_yaml::register_resource_handlers(&scripts);
+        crate::extensions::register_resource_handlers(&scripts);
         let dir = cfg.data_dir.clone();
         let app = build_router(
             db,

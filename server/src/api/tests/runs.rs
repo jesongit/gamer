@@ -10,8 +10,9 @@ async fn removed_script_stop_and_status_routes_return_not_found() {
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     for (method, uri) in [
-        ("POST", "/api/scripts/missing/stop"),
+        ("POST", "/api/scripts/missing/run"),
         ("GET", "/api/scripts/missing/status"),
+        ("POST", "/api/functions/nope/run"),
     ] {
         let resp = send(
             &t.app,
@@ -28,7 +29,10 @@ async fn removed_script_stop_and_status_routes_return_not_found() {
     }
 }
 
-// ---------- 统一 RunTarget：函数测试运行端点（POST /api/functions/:id/run）----------
+// ---------- 统一执行入口（POST /api/runs，P11.6）----------
+//
+// 经 TimerRunnerRegistry 分发到 gamer.yaml runner（测试装配同步注册）；
+// payload/entrypoint 语义为 runner 私有契约。
 
 /// 挂起到取消的假执行器（真实 RunManager 语义下测 router 行为）。
 struct HangExecutor {
@@ -78,6 +82,15 @@ impl crate::run_manager::RunExecutor for HangExecutor {
     }
 }
 
+fn dispatch_body(entrypoint: &str, payload: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "runner_id": "gamer.yaml",
+        "entrypoint": entrypoint,
+        "device_id": "d1",
+        "payload": payload,
+    })
+}
+
 #[tokio::test]
 async fn function_run_endpoint_conflict_args_and_cancel() {
     let (executor, release) = HangExecutor::new();
@@ -92,7 +105,6 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
 
     // 建函数库（带参数声明）
     let body = serde_json::json!({
-        "pkg": "com.test.app",
         "name": "common",
         "content": "login:
   params:
@@ -102,25 +114,29 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     - log: $who
 ",
     });
-    let resp = post_json(&t, &sid, "/api/functions", body).await;
-    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    let resp = post_json(&t, &sid, "/api/apps/com.test.app/resources/functions", body).await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
 
-    // 未知函数文件 → 404
+    // 未知函数文件 → 结构化 not_found（runner 边界判定，400 透传）
     let resp = post_json(
         &t,
         &sid,
-        "/api/functions/com.test.app%2Fnope.yaml/run",
-        serde_json::json!({"device_id": "d1"}),
+        "/api/runs",
+        dispatch_body("com.test.app/nope.yaml#login", serde_json::json!({})),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(resp).await["error"], "not_found");
 
     // args 类型不符 → 400 + 结构化诊断
     let resp = post_json(
         &t,
         &sid,
-        "/api/functions/com.test.app%2Fcommon.yaml/run",
-        serde_json::json!({"device_id": "d1", "args": {"fast": "不是布尔"}}),
+        "/api/runs",
+        dispatch_body(
+            "com.test.app/common.yaml#login",
+            serde_json::json!({"args": {"fast": "不是布尔"}}),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -136,8 +152,11 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     let resp = post_json(
         &t,
         &sid,
-        "/api/functions/com.test.app%2Fcommon.yaml/run",
-        serde_json::json!({"device_id": "d1", "function": "login", "args": {"who": "路由"}}),
+        "/api/runs",
+        dispatch_body(
+            "com.test.app/common.yaml#login",
+            serde_json::json!({"function": "login", "args": {"who": "路由"}}),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -178,8 +197,8 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     let resp = post_json(
         &t,
         &sid,
-        "/api/functions/com.test.app%2Fcommon.yaml/run",
-        serde_json::json!({"device_id": "d1"}),
+        "/api/runs",
+        dispatch_body("com.test.app/common.yaml#login", serde_json::json!({})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -245,7 +264,6 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
 
     // 设备恢复：取消后可再次提交（脚本入口同样带 args）
     let body = serde_json::json!({
-        "pkg": "com.test.app",
         "name": "runme.yaml",
         "content": "params:
   - 'text:msg:消息:\"默认\"'
@@ -253,13 +271,16 @@ steps:
   - log: $msg
 ",
     });
-    let resp = post_json(&t, &sid, "/api/scripts", body).await;
-    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    let resp = post_json(&t, &sid, "/api/apps/com.test.app/resources/scripts", body).await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
     let resp = post_json(
         &t,
         &sid,
-        "/api/scripts/com.test.app%2Frunme.yaml/run",
-        serde_json::json!({"device_id": "d1", "args": {"msg": "脚本实参"}}),
+        "/api/runs",
+        dispatch_body(
+            "com.test.app/runme.yaml",
+            serde_json::json!({"args": {"msg": "脚本实参"}}),
+        ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -284,4 +305,32 @@ steps:
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("second run must reach cancelled");
+}
+
+/// 运行依赖缺失（runner 未注册）：424 dependency_unavailable（ADR-13 缝，
+/// 与任务路径同口径）。
+#[tokio::test]
+async fn dispatch_without_registered_runner_reports_dependency_missing() {
+    let t = build_app(
+        "dispatch-missing",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    // build_app 已注册 gamer.yaml；用未知 runner_id 断言依赖缺失分发语义
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/runs",
+        serde_json::json!({
+            "runner_id": "no.such/runner",
+            "entrypoint": "com.test.app/x.yaml",
+            "device_id": "d1",
+            "payload": {},
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::FAILED_DEPENDENCY);
+    let j = json_body(resp).await;
+    assert_eq!(j["code"], "dependency_unavailable");
 }

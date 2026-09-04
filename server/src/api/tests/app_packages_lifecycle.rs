@@ -8,17 +8,18 @@
 // EditableLocal > UserOverride > InstalledPackage 的 composite 缝，测试另外
 // 直接断言该快照的内容来源。
 //
-// 已知实现边界（按实际行为断言，不放宽语义）：POST /api/scripts/:id/run 的
-// 脚本存在性前置校验只读本地编辑区（ScriptStore::get），纯包内脚本在本地
-// 删空后 run 端点返回 404；包内容来源改经引擎运行快照 + composite 资源面
+// 已知实现边界（按实际行为断言，不放宽语义）：统一执行入口 /api/runs 的
+// 脚本存在性前置校验只读本地编辑区（ResourceStore::get_text），纯包内脚本
+// 在本地删空后手动运行返回结构化 not_found；包内容来源改经引擎运行快照 +
+// composite 资源面
 // （keymap GET/list、脚本保存期模板校验）断言，见步骤 ⑩ 注释。
 use super::*;
 
 const ANDROID: &str = "com.test.game";
 const PKG_ID: &str = "official.test";
-const SCRIPT_URI: &str = "/api/scripts/com.test.game%2Fdaily.yaml";
-const FUNC_URI: &str = "/api/functions/com.test.game%2Fcommon.yaml";
-const KEYMAP_URI: &str = "/api/keymaps/com.test.game%2Fwasd.yaml";
+const SCRIPT_URI: &str = "/api/apps/com.test.game/resources/scripts/com.test.game%2Fdaily.yaml";
+const FUNC_URI: &str = "/api/apps/com.test.game/resources/functions/com.test.game%2Fcommon.yaml";
+const KEYMAP_URI: &str = "/api/apps/com.test.game/resources/keymaps/com.test.game%2Fwasd.yaml";
 const DEVICE: &str = "device-e2e";
 
 const KEYMAP_YAML: &str = "version: 1\nname: wasd\nbindings:\n  - key: KeyW\n    action:\n      type: tap\n      at: [0.5, 0.5]\n";
@@ -183,8 +184,13 @@ async fn run_script_to_success(t: &TestApp, sid: &str) -> serde_json::Value {
     let resp = post_json(
         t,
         sid,
-        &format!("{SCRIPT_URI}/run"),
-        serde_json::json!({ "device_id": DEVICE }),
+        "/api/runs",
+        serde_json::json!({
+            "runner_id": "gamer.yaml",
+            "entrypoint": "com.test.game/daily.yaml",
+            "device_id": DEVICE,
+            "payload": {},
+        }),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED, "{:?}", json_body(resp).await);
@@ -249,61 +255,60 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
     let resp = post_json(
         &test_app,
         &sid,
-        "/api/functions",
+        "/api/apps/com.test.game/resources/functions",
         serde_json::json!({
-            "pkg": ANDROID,
             "name": "common",
             "content": FUNC_YAML_V1,
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
     assert_eq!(json_body(resp).await["id"], "com.test.game/common.yaml");
 
     // ② 新建脚本：log 参数化输出 + func 步骤调用 ③ 的函数（无 find/match 模板步骤）
     let resp = post_json(
         &test_app,
         &sid,
-        "/api/scripts",
+        "/api/apps/com.test.game/resources/scripts",
         serde_json::json!({
-            "pkg": ANDROID,
             "name": "daily.yaml",
             "content": script_yaml("editable-v1"),
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
     assert_eq!(json_body(resp).await["id"], "com.test.game/daily.yaml");
 
-    // ④ 添加模板（harness 合法灰度 PNG → base64 上传）
-    let png_b64 = base64::engine::general_purpose::STANDARD.encode(valid_template_png());
-    let resp = post_json(
-        &test_app,
-        &sid,
-        "/api/templates",
-        serde_json::json!({
-            "short_name": "icon.png",
-            "pkg": ANDROID,
-            "data_b64": png_b64,
-        }),
+    // ④ 添加模板（通用资源 API：原始字节 body + ?name=）
+    let resp = send(
+        &test_app.app,
+        req_bytes(
+            "POST",
+            "/api/apps/com.test.game/resources/templates?name=icon.png",
+            None,
+            &[
+                (header::COOKIE.to_string(), sid.clone()),
+                (header::CONTENT_TYPE.to_string(), "image/png".to_string()),
+            ],
+            valid_template_png(),
+        ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
     assert_eq!(json_body(resp).await["name"], "icon.png");
 
     // ⑤ 添加按键映射
     let resp = post_json(
         &test_app,
         &sid,
-        "/api/keymaps",
+        "/api/apps/com.test.game/resources/keymaps",
         serde_json::json!({
-            "pkg": ANDROID,
             "name": "wasd",
             "content": KEYMAP_YAML,
         }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
     assert_eq!(json_body(resp).await["id"], "com.test.game/wasd.yaml");
 
     // ⑥ 直接运行：EditableLocal 层生效 → success；resolved_args 暴露本地参数默认值
@@ -321,7 +326,7 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
         (SCRIPT_URI.to_string(), "脚本"),
         (FUNC_URI.to_string(), "函数"),
         (KEYMAP_URI.to_string(), "keymap"),
-        ("/api/templates/icon.png?pkg=com.test.game".to_string(), "模板"),
+        (format!("/api/apps/{ANDROID}/resources/templates/icon.png"), "模板"),
     ] {
         let resp = delete_json(&test_app, &sid, &method_uri).await;
         assert_eq!(
@@ -337,16 +342,11 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let resp = get_json(&test_app, &sid, FUNC_URI).await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let resp = get_json(&test_app, &sid, &format!("/api/functions?pkg={ANDROID}")).await;
+    let resp = get_json(&test_app, &sid, &format!("/api/apps/{ANDROID}/resources/functions")).await;
     assert!(json_body(resp).await.as_array().unwrap().is_empty());
-    let resp = get_json(
-        &test_app,
-        &sid,
-        &format!("/api/templates?pkg={ANDROID}"),
-    )
-    .await;
+    let resp = get_json(&test_app, &sid, &format!("/api/apps/{ANDROID}/resources/templates")).await;
     assert!(json_body(resp).await.as_array().unwrap().is_empty());
-    let resp = get_json(&test_app, &sid, &format!("/api/keymaps?pkg={ANDROID}")).await;
+    let resp = get_json(&test_app, &sid, &format!("/api/apps/{ANDROID}/resources/keymaps")).await;
     assert!(json_body(resp).await.as_array().unwrap().is_empty());
     let resp = get_json(&test_app, &sid, &format!("/api/workspace/{ANDROID}")).await;
     let body = json_body(resp).await;
@@ -364,28 +364,31 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
     );
 
     // ⑩ 只装包不装本地的运行语义：
-    //   a) run 端点脚本存在性前置校验只读本地编辑区 → 404（当前实现边界，
-    //      如实断言；语义是「本地删空后手动 run 入口不可达」，不是包内容缺失）
+    //   a) 统一执行入口的脚本存在性前置校验只读本地编辑区 → 结构化 not_found
+    //      （当前实现边界，如实断言；语义是「本地删空后手动 run 入口不可达」，
+    //      不是包内容缺失）
     let resp = post_json(
         &test_app,
         &sid,
-        &format!("{SCRIPT_URI}/run"),
-        serde_json::json!({ "device_id": DEVICE }),
+        "/api/runs",
+        serde_json::json!({
+            "runner_id": "gamer.yaml",
+            "entrypoint": "com.test.game/daily.yaml",
+            "device_id": DEVICE,
+            "payload": {},
+        }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = json_body(resp).await;
-    assert!(
-        body["error"].as_str().unwrap().contains("脚本不存在"),
-        "{body}"
-    );
+    assert_eq!(body["error"], "not_found", "{body}");
     //   b) 引擎运行快照（composite：EditableLocal > UserOverride > InstalledPackage）
     //      必须取到包内脚本/函数内容——本地已删空，内容只能来自 InstalledPackage 层
     let cfg = crate::config::Config {
         data_dir: test_app.dir.clone(),
         ..Default::default()
     };
-    let store = crate::scripts::ScriptStore::open(&cfg).unwrap();
+    let store = crate::resources::ResourceStore::open(&cfg).unwrap();
     let snapshot = crate::extensions::gamer_yaml::engine::snapshot::RunSnapshot::capture(&store, ANDROID).unwrap();
     let app = crate::core::AppContext::new(
         crate::core::DeviceId::new(DEVICE).unwrap(),
@@ -409,7 +412,7 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
         "包内模板必须经 composite 解析可见"
     );
     //   c) 包内 keymap 经 composite 读面可见（GET/list 只读兜底）
-    let resp = get_json(&test_app, &sid, &format!("/api/keymaps?pkg={ANDROID}")).await;
+    let resp = get_json(&test_app, &sid, &format!("/api/apps/{ANDROID}/resources/keymaps")).await;
     let list = json_body(resp).await;
     assert_eq!(
         list.as_array().unwrap().len(),
@@ -424,9 +427,8 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
     let resp = post_json(
         &test_app,
         &sid,
-        "/api/scripts",
+        "/api/apps/com.test.game/resources/scripts",
         serde_json::json!({
-            "pkg": ANDROID,
             "name": "probe-pkg-template.yaml",
             "content": "steps:\n  - check: icon.png\n",
         }),
@@ -434,23 +436,22 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
     .await;
     assert_eq!(
         resp.status(),
-        StatusCode::OK,
+        StatusCode::CREATED,
         "引用包内模板的脚本必须保存成功: {:?}",
         json_body(resp).await
     );
     let resp = post_json(
         &test_app,
         &sid,
-        "/api/scripts",
+        "/api/apps/com.test.game/resources/scripts",
         serde_json::json!({
-            "pkg": ANDROID,
             "name": "probe-missing-template.yaml",
             "content": "steps:\n  - check: missing-tpl.png\n",
         }),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let resp = delete_json(&test_app, &sid, "/api/scripts/com.test.game%2Fprobe-pkg-template.yaml").await;
+    let resp = delete_json(&test_app, &sid, "/api/apps/com.test.game/resources/scripts/com.test.game%2Fprobe-pkg-template.yaml").await;
     assert_eq!(resp.status(), StatusCode::OK);
 
     // ⑪ 编辑提取：official.test@1.0.0 → 本地编辑区（受管理条目 1:1 还原）
@@ -528,8 +529,13 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
     let resp = post_json(
         &test_app,
         &sid,
-        &format!("{FUNC_URI}/run"),
-        serde_json::json!({ "device_id": DEVICE, "function": "greet" }),
+        "/api/runs",
+        serde_json::json!({
+            "runner_id": "gamer.yaml",
+            "entrypoint": "com.test.game/common.yaml#greet",
+            "device_id": DEVICE,
+            "payload": {},
+        }),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED, "{:?}", json_body(resp).await);

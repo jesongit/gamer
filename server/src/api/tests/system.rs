@@ -437,16 +437,4 @@ fn route_validation_bounds_run_and_task_requests() {
     bad_task.name.clear();
     assert!(build_task(&ScheduleRegistry::new(), "t1".into(), bad_task, None).is_err());
 
-    let run = RunReqArgs {
-        device_id: "device-1".into(),
-        start_index: Some(100_000),
-        function: None,
-        args: None,
-    };
-    assert!(validate_run_req(&run).is_ok());
-    let bad_run = RunReqArgs {
-        start_index: Some(100_001),
-        ..run
-    };
-    assert!(validate_run_req(&bad_run).is_err());
 }

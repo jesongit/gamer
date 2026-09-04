@@ -149,7 +149,7 @@ impl EngineExecutor {
 
     pub fn attach_yaml_vnext(
         &self,
-        scripts: Arc<crate::scripts::ScriptStore>,
+        scripts: Arc<crate::resources::ResourceStore>,
         extensions: Arc<crate::extensions::ExtensionService>,
     ) {
         *self
@@ -263,7 +263,7 @@ impl RunExecutor for EngineExecutor {
 }
 
 struct YamlVnextAdapter {
-    scripts: Arc<crate::scripts::ScriptStore>,
+    scripts: Arc<crate::resources::ResourceStore>,
     extensions: Weak<crate::extensions::ExtensionService>,
 }
 
@@ -271,7 +271,7 @@ struct YamlVnextAdapter {
 /// programs 通道调用，无该 feature 时字段不被读取。
 #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
 struct ScriptProgramResolver {
-    scripts: Arc<crate::scripts::ScriptStore>,
+    scripts: Arc<crate::resources::ResourceStore>,
     package: String,
 }
 
@@ -289,7 +289,7 @@ impl YamlProgramResolver for ScriptProgramResolver {
         };
         let script = self
             .scripts
-            .get(&target)?
+            .get_text(crate::resources::ResourceKind::Scripts, &target)?
             .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 目标: {target}"))?;
         if !crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(&script.content) {
             anyhow::bail!("call 目标不是 v3 脚本: {target}");
@@ -339,9 +339,11 @@ impl YamlVnextAdapter {
         };
         let scripts = self.scripts.clone();
         let script_id = script_id.clone();
-        let script = tokio::task::spawn_blocking(move || scripts.get(&script_id))
-            .await
-            .map_err(|error| anyhow::anyhow!("读取 v3 脚本失败: {error}"))??;
+        let script = tokio::task::spawn_blocking(move || {
+            scripts.get_text(crate::resources::ResourceKind::Scripts, &script_id)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("读取 v3 脚本失败: {error}"))??;
         let Some(script) = script else {
             return Ok(None);
         };

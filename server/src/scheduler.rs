@@ -65,6 +65,19 @@ impl Scheduler {
         Ok(())
     }
 
+    /// 同步注册（不触发 dependency-missing 任务恢复）：HTTP 集成测试装配用，
+    /// 生产路径一律走 `register_extension_runner`（扩展 start 生命周期）。
+    #[cfg(test)]
+    pub(crate) fn register_runner_for_tests(
+        &self,
+        runner_id: &str,
+        owner_extension_id: &str,
+        runner: Arc<dyn TimerRunner>,
+    ) -> anyhow::Result<()> {
+        self.runners
+            .register_runner(runner_id, owner_extension_id, runner)
+    }
+
     /// ADR-13: unregister every runner owned by `extension_id` (idempotent)
     /// and suspend the still-Active tasks bound to the removed runners into
     /// `DependencyMissing`.  Returns the removed runner ids.
@@ -97,6 +110,13 @@ impl Scheduler {
     /// Registered schedule provider ids（`GET /api/schedule-providers` 数据源）。
     pub fn schedule_provider_ids(&self) -> Vec<String> {
         self.schedules.list()
+    }
+
+    /// 通用执行分发注册表（`POST /api/runs` 手动运行的 runner 查找源）。
+    /// Core 只按 request.runner_id 查找并转发；runner 的 payload 语义属于
+    /// 注册它的扩展（ADR-13）。
+    pub fn runner_registry(&self) -> Arc<TimerRunnerRegistry> {
+        Arc::clone(&self.runners)
     }
 
     pub async fn start(&self) {

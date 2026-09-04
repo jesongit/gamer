@@ -56,9 +56,8 @@ mod update_flow_tests {
         let resp = post_json(
             t,
             sid,
-            "/api/scripts",
+            "/api/apps/com.test.app/resources/scripts",
             serde_json::json!({
-                "pkg": "com.test.app",
                 "name": name,
                 "content": content,
             }),
@@ -66,7 +65,7 @@ mod update_flow_tests {
         .await;
         let status = resp.status();
         let response_body = json_body(resp).await;
-        assert_eq!(status, StatusCode::OK, "{response_body}");
+        assert_eq!(status, StatusCode::CREATED, "{response_body}");
     }
 
     /// 可注入 viewer 数的 workload 提供者（QA-006 viewer 维度）
@@ -136,7 +135,7 @@ mod update_flow_tests {
             ..Default::default()
         };
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let scripts = Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
@@ -144,6 +143,18 @@ mod update_flow_tests {
         let executor = Arc::new(BlockingExec { started });
         let runs = Arc::new(crate::run_manager::RunManager::new(executor));
         let scheduler = Arc::new(Scheduler::new(db.clone()));
+        // gamer.yaml timer runner 注册（与生产扩展 start 生命周期等价）
+        scheduler
+            .register_runner_for_tests(
+                "gamer.yaml",
+                "gamer.yaml",
+                Arc::new(crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::new(
+                    db.clone(),
+                    runs.clone(),
+                    scripts.clone(),
+                )),
+            )
+            .unwrap();
         let auth = Arc::new(auth::AuthState::new(
             test_credential("admin123"),
             Default::default(),
@@ -371,8 +382,12 @@ mod update_flow_tests {
         let resp = post_json(
             &t,
             &sid,
-            "/api/scripts/com.test.app%2Fforever.yaml/run",
-            serde_json::json!({ "device_id": "dev-1" }),
+            "/api/runs",
+            serde_json::json!({
+                "runner_id": "gamer.yaml",
+                "entrypoint": "com.test.app/forever.yaml",
+                "device_id": "dev-1"
+            }),
         )
         .await;
         let status = resp.status();
@@ -455,7 +470,7 @@ mod update_flow_tests {
         for uri in [
             "/api/devices",
             "/api/tasks",
-            "/api/scripts?pkg=com.test.app",
+            "/api/apps/com.test.app/resources/scripts",
             "/api/system/info",
         ] {
             let resp = get_json(&t, &sid, uri).await;

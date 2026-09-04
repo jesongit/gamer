@@ -100,64 +100,6 @@ mod manifest_sync_tests {
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum CompatibleYamlError {
-    V2(Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>),
-    V3(Vec<crate::extensions::gamer_yaml::yaml_vnext::Diagnostic>),
-}
-
-impl CompatibleYamlError {
-    pub(crate) fn into_json(self) -> serde_json::Value {
-        match self {
-            Self::V2(diagnostics) => serde_json::to_value(diagnostics).unwrap_or_default(),
-            Self::V3(diagnostics) => serde_json::to_value(diagnostics).unwrap_or_default(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum CompatibleYamlSource {
-    V2,
-    /// 载荷当前仅作判别保留（调用方未消费 AST 本体）。
-    #[allow(dead_code)]
-    V3(Program),
-}
-
-/// Compatibility adapter used by save/import/run boundaries. v2 remains
-/// owned by the existing strict loader; v3 is parsed only by yaml_vnext.
-pub(crate) fn validate_compatible_script(
-    scripts: &crate::scripts::ScriptStore,
-    package: &str,
-    resource: &str,
-    source: &str,
-) -> Result<CompatibleYamlSource, CompatibleYamlError> {
-    // 保存边界：无目录覆盖层，call/func 引用解析 = 本地编辑区视图 + 待写文件自身
-    let mut resources = scripts.resources(package);
-    validate_compatible_script_in(resource, source, &mut resources)
-}
-
-/// Same as [`validate_compatible_script`], but the caller supplies the v2
-/// reference view (call/func targets). PackageBuilder preflight over a staged
-/// directory snapshot pre-injects that directory's own scripts/functions so
-/// extraction into an empty workspace validates self-consistently; save
-/// boundaries pass a fresh view (equivalent to the plain variant).
-pub(crate) fn validate_compatible_script_in(
-    resource: &str,
-    source: &str,
-    resources: &mut crate::scripts::PartitionResources<'_>,
-) -> Result<CompatibleYamlSource, CompatibleYamlError> {
-    if crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(source) {
-        crate::extensions::gamer_yaml::yaml_vnext::load(source)
-            .map(CompatibleYamlSource::V3)
-            .map_err(CompatibleYamlError::V3)
-    } else {
-        resources.add_script(resource, source);
-        crate::extensions::gamer_yaml::script_v2::parse_script_file(source, resource, resources)
-            .map(|_| CompatibleYamlSource::V2)
-            .map_err(CompatibleYamlError::V2)
-    }
-}
-
 const DEFAULT_SCREEN_WIDTH: u32 = 1000;
 const DEFAULT_SCREEN_HEIGHT: u32 = 1000;
 /// v3 原生参考解释器的步数护栏；生产链路走 WASM guest，仅测试消费。
@@ -1129,25 +1071,6 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
         );
     }
 
-    #[test]
-    fn compatibility_adapter_keeps_v2_and_v3_on_separate_loaders() {
-        let temp = TempDir::new().unwrap();
-        let config = crate::config::Config {
-            data_dir: temp.path().to_path_buf(),
-            ..Default::default()
-        };
-        let scripts = crate::scripts::ScriptStore::open(&config).unwrap();
-
-        assert!(matches!(
-            validate_compatible_script(&scripts, "com.test", "old.yaml", "steps: []\n"),
-            Ok(CompatibleYamlSource::V2)
-        ));
-        assert!(matches!(
-            validate_compatible_script(&scripts, "com.test", "new.yaml", "version: 3\nsteps: []\n"),
-            Ok(CompatibleYamlSource::V3(_))
-        ));
-    }
-
     #[tokio::test]
     async fn yaml_manifest_panels_are_removed_after_uninstall() {
         let temp = TempDir::new().unwrap();
@@ -1657,7 +1580,7 @@ runtime = "^1.0"
             ..Default::default()
         };
         let db: crate::store::Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
+        let scripts = Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
         let runs = Arc::new(crate::run_manager::RunManager::new(Arc::new(
             UnreachableExecutor,
         )));

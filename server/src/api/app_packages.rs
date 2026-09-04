@@ -372,9 +372,9 @@ pub(super) async fn api_export_app_package(
         Err(error) => return error.into_response(),
     };
     let data_dir = st.cfg.data_dir.clone();
-    let scripts = st.scripts.clone();
+    let resources = st.resources.clone();
     let built: Result<BuiltPackage, ApiError> = run_blocking_api(move || {
-        PackageBuilder::new(data_dir, android, scripts)
+        PackageBuilder::new(data_dir, android, resources)
             .export()
             .map_err(app_package_api_error)
     })
@@ -435,7 +435,7 @@ pub(super) async fn api_edit_app_package(
     };
     let android_label = android.as_str().to_string();
     let data_dir = st.cfg.data_dir.clone();
-    let scripts = st.scripts.clone();
+    let resources = st.resources.clone();
     let extract = run_blocking_api(move || {
         let installed = st
             .app_packages
@@ -450,7 +450,7 @@ pub(super) async fn api_edit_app_package(
                 version: version.to_string(),
             })
             .map_err(app_package_api_error)?;
-        edit::extract_to_workspace(&data_dir, &installed, &android, scripts)
+        edit::extract_to_workspace(&data_dir, &installed, &android, resources)
             .map_err(app_package_api_error)
     })
     .await;

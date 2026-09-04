@@ -21,7 +21,12 @@ use crate::capabilities::{
     CapabilityRegistry, DeviceHandle, KeyAction, KeyCode, KeyInput, SwipeGesture, TextInput,
     TouchHandle, TouchPoint,
 };
-use crate::keymaps::{parse_keymap_content, Keymap};
+pub(crate) mod dsl;
+
+pub(crate) use dsl::{
+    parse_keymap_content, serialize_keymap, Keymap, KeymapAction, KeymapBinding, KeymapDiagnostic,
+    MAX_KEYMAP_YAML_BYTES,
+};
 
 use super::error::{ExtensionError, ExtensionResult};
 use super::host_api::HostApi;
@@ -665,7 +670,7 @@ entry = "ui/index.html"
         .start_file("ui/index.html", options)
         .expect("ui entry");
     archive
-        .write_all(include_bytes!("../../tests/keymap-guest/ui/index.html"))
+        .write_all(include_bytes!("../../../tests/keymap-guest/ui/index.html"))
         .expect("ui bytes");
     archive.finish().expect("finish gplugin");
     bytes
@@ -1431,20 +1436,80 @@ fn to_runtime(error: impl std::fmt::Display) -> ExtensionError {
 /// the schema (`version/name/bindings`) when the file was written and
 /// normalizes the scheme name, and a missing scheme is a start-time error
 /// rather than a silent pass-through.
+/// gamer.keymap 的资源内容钩子（组合根引导期注册；P11.3）：
+/// keymaps kind 的保存期 schema 校验 + 列表注记（显示名 / binding 数 /
+/// 有效性 / 诊断）。未注册时 Core 保存不做内容校验（裸 Core 语义）。
+pub fn register_resource_handlers(store: &crate::resources::ResourceStore) {
+    store.register_handler(
+        crate::resources::ResourceKind::Keymaps,
+        std::sync::Arc::new(KeymapResourceHandler),
+    );
+}
+
+struct KeymapResourceHandler;
+
+impl crate::resources::ResourceKindHandler for KeymapResourceHandler {
+    fn validate_save(
+        &self,
+        req: crate::resources::SaveValidation<'_>,
+    ) -> Result<(), serde_json::Value> {
+        let resource = format!("{}/{}", req.app, req.id);
+        parse_keymap_content(req.content, &resource)
+            .map(|_| ())
+            .map_err(|diagnostics| serde_json::json!(diagnostics))
+    }
+
+    fn annotate(&self, entries: &[(String, String)]) -> serde_json::Map<String, serde_json::Value> {
+        let mut out = serde_json::Map::new();
+        for (id, content) in entries {
+            let stem = id
+                .strip_suffix(".yaml")
+                .or_else(|| id.strip_suffix(".yml"))
+                .unwrap_or(id);
+            let mut meta = serde_json::Map::new();
+            match parse_keymap_content(content, id) {
+                Ok(keymap) => {
+                    meta.insert("name".into(), serde_json::json!(keymap.name));
+                    meta.insert(
+                        "binding_count".into(),
+                        serde_json::json!(keymap.bindings.len()),
+                    );
+                    meta.insert("valid".into(), serde_json::json!(true));
+                }
+                Err(diagnostics) => {
+                    meta.insert("name".into(), serde_json::json!(stem));
+                    meta.insert("binding_count".into(), serde_json::json!(0));
+                    meta.insert("valid".into(), serde_json::json!(false));
+                    meta.insert("diagnostics".into(), serde_json::json!(diagnostics));
+                }
+            }
+            out.insert(id.clone(), serde_json::Value::Object(meta));
+        }
+        out
+    }
+}
+
 pub fn load_user_profile(
-    store: &crate::keymaps::KeymapStore,
+    store: &crate::resources::ResourceStore,
     partition: &str,
     name: &str,
 ) -> ExtensionResult<String> {
-    let id = format!("{partition}/{name}");
+    // 方案名兼容裸名（缺扩展名自动补 .yaml），与旧 KeymapStore 归一化语义一致
+    let file_name = match name.rsplit_once('.') {
+        Some((_, ext)) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") => {
+            name.to_string()
+        }
+        _ => format!("{name}.yaml"),
+    };
+    let id = format!("{partition}/{file_name}");
     let file = store
-        .get(&id)
+        .get_text(crate::resources::ResourceKind::Keymaps, &id)
         .map_err(to_runtime)?
         .ok_or_else(|| ExtensionError::Runtime(format!("keymap 方案不存在: {id}")))?;
     Ok(file.content)
 }
 
-fn format_diagnostics(diagnostics: &[crate::keymaps::KeymapDiagnostic]) -> String {
+fn format_diagnostics(diagnostics: &[KeymapDiagnostic]) -> String {
     diagnostics
         .iter()
         .map(|diagnostic| diagnostic.message.as_str())
@@ -1547,9 +1612,9 @@ mod tests {
     use tempfile::TempDir;
     use zip::write::SimpleFileOptions;
 
+    use super::dsl::{KeymapAction, KeymapBinding};
     use super::*;
     use crate::app_packages::AppPackageStore;
-    use crate::keymaps::{KeymapAction, KeymapBinding};
 
     fn keymap(bindings: &[(&str, KeymapAction)]) -> Keymap {
         Keymap {
@@ -1583,7 +1648,7 @@ mod tests {
     /// build-plugins.ps1 以文件为准打包，漂移会导致线上包与运行时语义不一致。
     #[test]
     fn packaging_manifest_stays_in_sync_with_shipped_constant() {
-        let packaged = include_str!("../../../tools/plugins/gamer.keymap/manifest.toml");
+        let packaged = include_str!("../../../../tools/plugins/gamer.keymap/manifest.toml");
         assert_eq!(
             KEYMAP_EXTENSION_MANIFEST_TOML.trim(),
             packaged.trim(),
@@ -1608,12 +1673,20 @@ mod tests {
     #[test]
     fn user_profile_loader_reads_partition_yaml_verbatim() {
         let temp = TempDir::new().unwrap();
-        let store = crate::keymaps::KeymapStore::new(temp.path().to_path_buf());
+        let cfg = crate::config::Config {
+            data_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let store = crate::resources::ResourceStore::open(&cfg).unwrap();
+        let content =
+            serialize_keymap(&keymap(&[("KeyW", KeymapAction::Hold { at: [0.1, 0.9] })])).unwrap();
         store
-            .create(
+            .save_text(
+                crate::resources::ResourceKind::Keymaps,
+                None,
                 "com.example.game",
-                "测试方案",
-                &keymap(&[("KeyW", KeymapAction::Hold { at: [0.1, 0.9] })]),
+                "测试方案.yaml",
+                &content,
             )
             .unwrap();
         let profile = load_user_profile(&store, "com.example.game", "测试方案").unwrap();
@@ -1852,7 +1925,7 @@ mod wasm_component_tests {
                 .read_ui_file(&id, &ExtensionPath::parse("ui/index.html").unwrap())
                 .unwrap()
                 .0,
-            include_bytes!("../../tests/keymap-guest/ui/index.html")
+            include_bytes!("../../../tests/keymap-guest/ui/index.html")
         );
 
         let running = service

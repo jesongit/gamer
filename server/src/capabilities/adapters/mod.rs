@@ -27,8 +27,8 @@ pub(crate) use vision::VisionAdapter;
 use std::sync::Arc;
 
 use crate::device::DeviceManager;
+use crate::resources::ResourceStore;
 use crate::run_manager::RunManager;
-use crate::scripts::ScriptStore;
 use crate::store::Db;
 
 use super::CapabilityRegistry;
@@ -37,7 +37,7 @@ use super::CapabilityRegistry;
 /// intentionally created per run because its cancellation token is per run.
 pub(crate) fn build_registry(
     devices: Arc<DeviceManager>,
-    scripts: Arc<ScriptStore>,
+    resources: Arc<ResourceStore>,
     db: Db,
     runs: Arc<RunManager>,
 ) -> CapabilityRegistry {
@@ -45,7 +45,7 @@ pub(crate) fn build_registry(
     let touch = Arc::new(TouchAdapter::new(device.clone()));
     let input = Arc::new(InputAdapter::new(device.clone(), touch.clone()));
     let frame_store = Arc::new(FrameStore::new());
-    let resource = Arc::new(ResourceAdapter::new(scripts));
+    let resource = Arc::new(ResourceAdapter::new(resources));
     let frame = Arc::new(FrameAdapter::new(devices, frame_store.clone()));
     let vision = Arc::new(VisionAdapter::new(frame_store, resource.clone()));
 
@@ -75,13 +75,13 @@ mod tests {
         RunRequest, RunService, RuntimeService, TemplateQuery, VisionService,
     };
 
-    fn template_store() -> (tempfile::TempDir, Arc<ScriptStore>) {
+    fn template_store() -> (tempfile::TempDir, Arc<ResourceStore>) {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config {
             data_dir: dir.path().to_path_buf(),
             ..Default::default()
         };
-        let store = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let store = Arc::new(ResourceStore::open(&cfg).unwrap());
         (dir, store)
     }
 
@@ -99,7 +99,8 @@ mod tests {
     #[tokio::test]
     async fn resource_adapter_resolves_and_opens_logical_template() {
         let (_dir, store) = template_store();
-        let template_dir = store.templates_dir("com.test.game");
+        let template_dir =
+            store.kind_dir("com.test.game", crate::resources::ResourceKind::Templates);
         std::fs::create_dir_all(&template_dir).unwrap();
         std::fs::write(template_dir.join("icon.png"), b"template").unwrap();
 
@@ -133,7 +134,8 @@ mod tests {
                 template.put_pixel(x, y, *screen.get_pixel(11 + x, 7 + y));
             }
         }
-        let template_dir = store.templates_dir("com.test.game");
+        let template_dir =
+            store.kind_dir("com.test.game", crate::resources::ResourceKind::Templates);
         std::fs::create_dir_all(&template_dir).unwrap();
         std::fs::write(template_dir.join("icon.png"), png(&template)).unwrap();
 
@@ -250,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn run_adapter_submits_to_run_manager_and_reports_terminal_state() {
         let (_dir, store) = template_store();
-        let script_dir = store.script_dir("com.test.game");
+        let script_dir = store.kind_dir("com.test.game", crate::resources::ResourceKind::Scripts);
         std::fs::create_dir_all(&script_dir).unwrap();
         std::fs::write(script_dir.join("daily.yaml"), b"steps: []\n").unwrap();
         let resources = Arc::new(ResourceAdapter::new(store));

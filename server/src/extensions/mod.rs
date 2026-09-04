@@ -35,10 +35,10 @@ pub(crate) use error::{ExtensionError, ExtensionResult, PermissionError};
 pub(crate) use host_api::{HostApi, HostApiCatalog, HostApiDomain, HOST_API_VERSION};
 pub(crate) use keymap::{
     android_keycode, decode_input_event, emit_keymap_trace, keymap_trace_active, load_user_profile,
-    now_epoch_us, real_wasm_host_status, AppPackageKeymapSource, CapabilityDeviceActionExecutor,
-    DeviceAction, DeviceActionExecutor, InputEvent, InputResult, KeymapContributionRegistry,
-    KeymapPanelContribution, KeymapTraceContext, KeymapTracePath, KeymapTraceRecord,
-    NormalizedPoint, ScreenSize, INPUT_PROTOCOL_VERSION, KEYMAP_EXTENSION_ID,
+    now_epoch_us, real_wasm_host_status, register_resource_handlers, AppPackageKeymapSource,
+    CapabilityDeviceActionExecutor, DeviceAction, DeviceActionExecutor, InputEvent, InputResult,
+    KeymapContributionRegistry, KeymapPanelContribution, KeymapTraceContext, KeymapTracePath,
+    KeymapTraceRecord, NormalizedPoint, ScreenSize, INPUT_PROTOCOL_VERSION, KEYMAP_EXTENSION_ID,
     KEYMAP_EXTENSION_MANIFEST_TOML, KEYMAP_PANEL_ID, KEYMAP_WASM_ABI_VERSION,
 };
 #[cfg(all(test, feature = "wasm-runtime"))]
@@ -47,6 +47,8 @@ pub(crate) use keymap::{
     clear_keymap_trace_sink, install_keymap_trace_sink, KeymapWasmInstanceHandle,
     KeymapWasmRuntime, KeymapWasmStartRequest, NoKeymapWasmRuntime,
 };
+#[cfg(test)]
+pub(crate) use keymap::{parse_keymap_content, serialize_keymap};
 
 pub(crate) use manifest::{
     parse_manifest, ExtensionManifest, HostApiRequirements, UiContribution, UiRuntime,

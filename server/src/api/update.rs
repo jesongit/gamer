@@ -84,8 +84,8 @@ mod contract_tests {
     use super::*;
     use crate::config::Config;
     use crate::device::DeviceManager;
+    use crate::resources::ResourceStore;
     use crate::scheduler::Scheduler;
-    use crate::scripts::ScriptStore;
     use crate::store::Db;
     use crate::update::controller::mock::MockController;
     use crate::update::ipc::{Candidate, LastErrorCodeMessage, LauncherUpdateStatus};
@@ -424,7 +424,7 @@ mod contract_tests {
             ..Default::default()
         };
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
@@ -577,7 +577,7 @@ mod contract_tests {
             ..Default::default()
         };
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(ScriptStore::open(&cfg).unwrap());
+        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));

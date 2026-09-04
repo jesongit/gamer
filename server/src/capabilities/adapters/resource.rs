@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::scripts::ScriptStore;
+use crate::resources::ResourceKind;
+use crate::resources::ResourceStore;
 
 use super::super::{
     CapabilityError, CapabilityResult, ResourceHandle, ResourceId, ResourceLease, ResourceService,
@@ -18,15 +19,15 @@ struct ResolvedResource {
 /// Logical template resource adapter. `PathBuf` is retained only in this module
 /// and is never placed in a capability request or response.
 pub(crate) struct ResourceAdapter {
-    scripts: Arc<ScriptStore>,
+    store: Arc<ResourceStore>,
     resources: Mutex<HashMap<ResourceHandle, ResolvedResource>>,
     by_id: Mutex<HashMap<ResourceId, ResourceHandle>>,
 }
 
 impl ResourceAdapter {
-    pub(crate) fn new(scripts: Arc<ScriptStore>) -> Self {
+    pub(crate) fn new(store: Arc<ResourceStore>) -> Self {
         Self {
-            scripts,
+            store,
             resources: Mutex::new(HashMap::new()),
             by_id: Mutex::new(HashMap::new()),
         }
@@ -57,12 +58,12 @@ impl ResourceAdapter {
 impl ResourceService for ResourceAdapter {
     async fn resolve(&self, id: &ResourceId) -> CapabilityResult<ResourceHandle> {
         let path = if let Some(logical_name) = id.name().strip_prefix("scripts/") {
-            self.scripts
-                .resolve_script_path(id.namespace(), logical_name)
+            self.store
+                .resolve_path(id.namespace(), ResourceKind::Scripts, logical_name)
                 .map_err(|error| CapabilityError::NotFound(error.to_string()))?
         } else {
             let logical_name = id.name().strip_prefix("templates/").unwrap_or(id.name());
-            self.scripts
+            self.store
                 .resolve_template_path(id.namespace(), logical_name)
                 .map_err(|error| CapabilityError::NotFound(error.to_string()))?
         };

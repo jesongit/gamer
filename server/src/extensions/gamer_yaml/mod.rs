@@ -18,6 +18,7 @@
 //! 窄 trait（`TimerRunner`、`ResourceKindHandler` 等）与本文件显式导出的门面。
 
 pub(crate) mod engine;
+pub(crate) mod resources;
 pub(crate) mod script_v2;
 pub(crate) mod task_params;
 pub(crate) mod timer_yaml;
@@ -25,10 +26,10 @@ pub(crate) mod yaml_extension;
 pub(crate) mod yaml_vnext;
 
 pub(crate) use engine::{yaml_app_context, yaml_start_request, EngineExecutor};
+pub(crate) use resources::{register_resource_handlers, CompatibleYamlError, CompatibleYamlSource};
 pub(crate) use timer_yaml::{YamlTimerRunner, YamlTimerRunnerRegistrar};
 pub(crate) use yaml_extension::{
-    validate_compatible_script, CompatibleYamlError, CompatibleYamlSource, YamlProgramResolver,
-    YAML_EXTENSION_ID, YAML_EXTENSION_MANIFEST_TOML,
+    YamlProgramResolver, YAML_EXTENSION_ID, YAML_EXTENSION_MANIFEST_TOML,
 };
 
 /// gamer.yaml 的进程级 WASM runtime（feature 选择 Lazy / No 实现）。

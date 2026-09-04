@@ -268,7 +268,7 @@ async fn edit_makes_workspace_highest_priority_for_engine_snapshot() {
         data_dir: test_app.dir.clone(),
         ..Default::default()
     };
-    let store = crate::scripts::ScriptStore::open(&cfg).unwrap();
+    let store = crate::resources::ResourceStore::open(&cfg).unwrap();
     let snapshot = crate::extensions::gamer_yaml::engine::snapshot::RunSnapshot::capture(&store, ANDROID).unwrap();
     let app = crate::core::AppContext::new(
         crate::core::DeviceId::new("device-1").unwrap(),

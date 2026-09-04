@@ -814,7 +814,7 @@ async fn baseline_control_and_capabilities_work_without_installed_extensions() {
         ..Default::default()
     };
     let db: crate::store::Db = std::sync::Arc::new(crate::store::Store::open(&cfg).unwrap());
-    let scripts = std::sync::Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
+    let scripts = std::sync::Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
     let devices = std::sync::Arc::new(crate::device::DeviceManager::new(
         db.clone(),
         cfg.clone(),

@@ -1,6 +1,6 @@
 //! Legacy YAML task adapter for Timer Core.
 //!
-//! This is the only timer-side module that knows the current ScriptStore,
+//! This is the only timer-side module that knows the current ResourceStore,
 //! typed parameter snapshot, and `RunTarget::Script`.  It translates the
 //! generic Task payload into the existing RunManager request so YAML runs
 //! scheduled through the unified task API remain compatible.
@@ -9,6 +9,11 @@
 //! 约定 `payload = {args: <稀疏或全量参数>}`；旧数据里可能还带
 //! `param_signature`（有则继续做过期门禁），新保存路径不带签名——运行时按
 //! 脚本当前声明重绑参数（存活值保留、新参数取默认值、必填缺失报错）。
+//!
+//! P11.6（POST /api/runs 统一执行入口）：手动/函数测试运行经同一 runner。
+//! `task_id` 为空 = 手动 ad-hoc 运行：`entrypoint` = `<pkg>/<脚本>.yaml` 或
+//! `<pkg>/<文件短路径>.yaml#<函数名>`，payload = `{args?, start_index?,
+//! function?}`（稀疏参数按声明解析并合并默认值，诊断 → `InvalidDetail`）。
 //!
 //! P11.2（ADR-13）：runner 注册由扩展生命周期驱动。本文件另提供
 //! [`YamlTimerRunnerRegistrar`]——`TimerRunnerRegistrar` 钩子的 YAML 侧实现：
@@ -24,19 +29,20 @@ use serde_json::Value;
 
 use crate::core::RunRequest;
 use crate::extensions::gamer_yaml::task_params::{self, GateError};
+use crate::resources::ResourceKind as RK;
+use crate::resources::ResourceStore;
 use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartError};
-use crate::scripts::ScriptStore;
 use crate::store::Db;
 use crate::timer_core::{TimerCompletion, TimerOutcome, TimerRun, TimerRunner, TimerRunnerError};
 
 pub(crate) struct YamlTimerRunner {
     db: Db,
     runs: Arc<RunManager>,
-    scripts: Arc<ScriptStore>,
+    scripts: Arc<ResourceStore>,
 }
 
 impl YamlTimerRunner {
-    fn new(db: Db, runs: Arc<RunManager>, scripts: Arc<ScriptStore>) -> Self {
+    pub(crate) fn new(db: Db, runs: Arc<RunManager>, scripts: Arc<ResourceStore>) -> Self {
         Self { db, runs, scripts }
     }
 }
@@ -84,6 +90,9 @@ impl TimerRunner for YamlTimerRunner {
         scheduled_at: Option<i64>,
         on_complete: Arc<dyn Fn(TimerCompletion) + Send + Sync>,
     ) -> Result<TimerRun, TimerRunnerError> {
+        if task_id.is_empty() {
+            return self.submit_manual(request, on_complete).await;
+        }
         let payload = payload_from_request(&request).map_err(TimerRunnerError::Invalid)?;
         let task_args = match task_params::gate_task(
             &self.scripts,
@@ -137,9 +146,7 @@ impl TimerRunner for YamlTimerRunner {
             on_complete,
         );
         let record = self.runs.submit(req, Some(hook)).map_err(map_start_error)?;
-        Ok(TimerRun {
-            run_id: record.run_id,
-        })
+        Ok(TimerRun::new(record.run_id))
     }
 
     async fn cancel(&self, run_id: &str) -> Result<(), TimerRunnerError> {
@@ -151,6 +158,189 @@ impl TimerRunner for YamlTimerRunner {
             crate::run_manager::CancelOutcome::AlreadyFinished(_) => Ok(()),
         }
     }
+}
+
+/// 手动运行 payload 视图：`{args?, start_index?, function?}`。
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+struct ManualPayload {
+    #[serde(default)]
+    args: Option<serde_json::Map<String, Value>>,
+    #[serde(default)]
+    start_index: Option<usize>,
+    #[serde(default)]
+    function: Option<String>,
+}
+
+fn invalid_detail(message: impl Into<String>, detail: serde_json::Value) -> TimerRunnerError {
+    TimerRunnerError::InvalidDetail {
+        message: message.into(),
+        detail,
+    }
+}
+
+impl YamlTimerRunner {
+    /// POST /api/runs 手动路径（task_id 为空）：entrypoint + 稀疏 args 在
+    /// 本 runner 边界内翻译为 RunTarget::Script / Function 并交 RunManager。
+    async fn submit_manual(
+        &self,
+        request: RunRequest,
+        on_complete: Arc<dyn Fn(TimerCompletion) + Send + Sync>,
+    ) -> Result<TimerRun, TimerRunnerError> {
+        let payload: ManualPayload = if request.payload.as_value().is_null() {
+            ManualPayload::default()
+        } else {
+            serde_json::from_value(request.payload.as_value().clone()).map_err(|error| {
+                invalid_detail(
+                    "gamer.yaml payload 无效",
+                    serde_json::json!({
+                        "error": "invalid_payload",
+                        "message": error.to_string(),
+                    }),
+                )
+            })?
+        };
+        let entrypoint = request.entrypoint.clone();
+        let app = request.app.clone();
+        let args: serde_json::Map<String, Value> = payload.args.clone().unwrap_or_default();
+        let target = if let Some((base, func)) = entrypoint.clone().rsplit_once('#') {
+            let (pkg, file) = base.split_once('/').ok_or_else(|| {
+                invalid_detail(
+                    "非法函数目标 entrypoint",
+                    serde_json::json!({
+                        "error": "invalid_payload", "entrypoint": entrypoint,
+                    }),
+                )
+            })?;
+            let file = file
+                .trim()
+                .trim_end_matches(".yaml")
+                .trim_end_matches(".yml")
+                .to_string();
+            crate::extensions::gamer_yaml::engine::RunTarget::Function {
+                pkg: pkg.to_string(),
+                file,
+                function: Some(payload.function.clone().unwrap_or_else(|| func.to_string())),
+                start_index: payload.start_index.unwrap_or(0),
+            }
+        } else {
+            crate::extensions::gamer_yaml::engine::RunTarget::Script {
+                script_id: entrypoint.clone(),
+                start_index: payload.start_index.unwrap_or(0),
+            }
+        };
+        // 存在性先行（与旧运行端点的 404 语义对齐，此处统一为结构化失败：
+        // 手动运行无任务可挂起）
+        match &target {
+            crate::extensions::gamer_yaml::engine::RunTarget::Script { script_id, .. } => {
+                let exists = self
+                    .scripts
+                    .get_text(RK::Scripts, script_id)
+                    .map_err(|error| invalid_detail(error.to_string(), serde_json::json!([])))?
+                    .is_some();
+                if !exists {
+                    return Err(invalid_detail(
+                        "脚本不存在",
+                        serde_json::json!({ "error": "not_found", "resource": script_id }),
+                    ));
+                }
+            }
+            crate::extensions::gamer_yaml::engine::RunTarget::Function { pkg, file, .. } => {
+                let rel = format!("{pkg}/{file}.yaml");
+                let exists = self
+                    .scripts
+                    .get_text(RK::Functions, &rel)
+                    .map_err(|error| invalid_detail(error.to_string(), serde_json::json!([])))?
+                    .is_some();
+                if !exists {
+                    return Err(invalid_detail(
+                        "函数文件不存在",
+                        serde_json::json!({ "error": "not_found", "resource": rel }),
+                    ));
+                }
+            }
+        }
+        // 稀疏 args → 七类解析 + 默认值合并（blocking 池内做磁盘快照 + 严格解析）
+        let scripts = self.scripts.clone();
+        let bound = {
+            let target = target.clone();
+            let args_owned = args.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::extensions::gamer_yaml::engine::resolve_entry_args(
+                    &scripts,
+                    &target,
+                    &args_owned,
+                )
+            })
+            .await
+            .map_err(|error| {
+                invalid_detail(format!("参数解析任务失败: {error}"), serde_json::json!([]))
+            })?
+            .map_err(|diagnostics| {
+                invalid_detail(
+                    "参数解析失败",
+                    serde_json::json!({
+                        "error": "invalid_args",
+                        "diagnostics": diagnostics,
+                    }),
+                )
+            })?
+        };
+        let start_request = crate::extensions::gamer_yaml::yaml_start_request(
+            app,
+            target,
+            RunSource::Manual,
+            None,
+            None,
+            bound.overrides,
+            true,
+        )
+        .map_err(|error| invalid_detail(error.to_string(), serde_json::json!([])))?;
+        let db = self.db.clone();
+        let hook: FinishHook = Arc::new(move |record, outcome| {
+            write_manual_terminal_log(&db, record, outcome);
+            on_complete(TimerCompletion {
+                task_id: String::new(),
+                scheduled_at: None,
+                run_id: record.run_id.clone(),
+                outcome: match outcome {
+                    RunOutcome::Success(_) => TimerOutcome::Success,
+                    RunOutcome::Failed(message, _) => TimerOutcome::Failed(message.clone()),
+                    RunOutcome::Cancelled(_) => TimerOutcome::Cancelled,
+                },
+            });
+        });
+        let record = self
+            .runs
+            .submit(start_request, Some(hook))
+            .map_err(map_start_error)?;
+        Ok(TimerRun {
+            run_id: record.run_id,
+            detail: Some(serde_json::json!({ "resolved_args": bound.resolved })),
+        })
+    }
+}
+
+/// 手动运行终态摘要行落库（realtime 模式引擎日志已实时入库，只补终局提示，
+/// 与统一执行入口的手动语义对齐）。
+fn write_manual_terminal_log(
+    db: &Db,
+    record: &crate::run_manager::RunRecord,
+    outcome: &RunOutcome,
+) {
+    let (level, message) = match outcome {
+        RunOutcome::Success(_) => ("success", "脚本执行完成".to_string()),
+        RunOutcome::Failed(message, _) => ("error", format!("脚本执行失败: {message}")),
+        RunOutcome::Cancelled(_) => ("info", "脚本已停止".to_string()),
+    };
+    let db = db.clone();
+    let device_id = record.device_id.clone();
+    let script_id = record.script_id.clone();
+    tokio::spawn(async move {
+        let _ = db
+            .add_log_async(&device_id, &script_id, level, &message)
+            .await;
+    });
 }
 
 fn map_gate_error(error: GateError) -> TimerRunnerError {
@@ -226,7 +416,7 @@ pub(crate) struct YamlTimerRunnerRegistrar {
     scheduler: Arc<crate::scheduler::Scheduler>,
     db: Db,
     runs: Arc<RunManager>,
-    scripts: Arc<ScriptStore>,
+    scripts: Arc<ResourceStore>,
 }
 
 impl YamlTimerRunnerRegistrar {
@@ -234,7 +424,7 @@ impl YamlTimerRunnerRegistrar {
         scheduler: Arc<crate::scheduler::Scheduler>,
         db: Db,
         runs: Arc<RunManager>,
-        scripts: Arc<ScriptStore>,
+        scripts: Arc<ResourceStore>,
     ) -> Self {
         Self {
             scheduler,
