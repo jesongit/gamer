@@ -90,12 +90,14 @@ pub(super) async fn api_create_script(
     let parse_content = req.content.clone();
     let st_parse = st.clone();
     let parsed = run_blocking_api(move || {
-        Ok(crate::yaml_extension::validate_compatible_script(
-            &st_parse.scripts,
-            &parse_pkg,
-            &parse_name,
-            &parse_content,
-        ))
+        Ok(
+            crate::extensions::gamer_yaml::yaml_extension::validate_compatible_script(
+                &st_parse.scripts,
+                &parse_pkg,
+                &parse_name,
+                &parse_content,
+            ),
+        )
     })
     .await;
     match parsed {
@@ -191,12 +193,14 @@ pub(super) async fn api_update_script(
     let parse_content = req.content.clone();
     let st_parse = st.clone();
     let parsed = run_blocking_api(move || {
-        Ok(crate::yaml_extension::validate_compatible_script(
-            &st_parse.scripts,
-            &parse_pkg,
-            &parse_name,
-            &parse_content,
-        ))
+        Ok(
+            crate::extensions::gamer_yaml::yaml_extension::validate_compatible_script(
+                &st_parse.scripts,
+                &parse_pkg,
+                &parse_name,
+                &parse_content,
+            ),
+        )
     })
     .await;
     match parsed {

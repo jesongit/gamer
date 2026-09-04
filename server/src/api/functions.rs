@@ -48,7 +48,9 @@ pub(super) fn version_required(resource: &str) -> Response {
         .into_response()
 }
 
-fn invalid_yaml_response(diagnostics: Vec<crate::script_v2::ScriptError>) -> Response {
+fn invalid_yaml_response(
+    diagnostics: Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>,
+) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({

@@ -33,13 +33,13 @@ use crate::capabilities::adapters::RuntimeAdapter;
 use crate::capabilities::RuntimeService;
 use crate::core::{AppPackageId, DeviceId, EventSink, ResourceId, RunContext, RuntimeEvent};
 use crate::device::DeviceManager;
-use crate::matcher;
-use crate::script_v2::params::{self, merge_args};
-use crate::script_v2::validate::{coerce_literal, split_func_path};
-use crate::script_v2::{
+use crate::extensions::gamer_yaml::script_v2::params::{self, merge_args};
+use crate::extensions::gamer_yaml::script_v2::validate::{coerce_literal, split_func_path};
+use crate::extensions::gamer_yaml::script_v2::{
     ArgAssign, Cell, ColorBranch, LogLevel, MatchCandidate, ParamDecl, ParamType, ScriptConfig,
     Step, TypedValue,
 };
+use crate::matcher;
 use crate::scripts::ScriptStore;
 
 use super::events::ScriptEvent;
@@ -385,7 +385,9 @@ fn bind_entry_args(
 }
 
 /// 结构化诊断 → 运行失败消息（逐条 Display 展开）。
-fn fail_diagnostics(errors: &[crate::script_v2::ScriptError]) -> anyhow::Error {
+fn fail_diagnostics(
+    errors: &[crate::extensions::gamer_yaml::script_v2::ScriptError],
+) -> anyhow::Error {
     anyhow::anyhow!(
         "脚本解析/校验失败（{} 项）：{}",
         errors.len(),
@@ -419,7 +421,7 @@ pub fn resolve_entry_args(
     scripts: &ScriptStore,
     target: &RunTarget,
     args: &serde_json::Map<String, serde_json::Value>,
-) -> Result<BoundEntryArgs, Vec<crate::script_v2::ScriptError>> {
+) -> Result<BoundEntryArgs, Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>> {
     let (decls, label) = load_entry_param_decls(scripts, target)?;
     let overrides = params::parse_json_args(&decls, args, &label)?;
     let resolved = params::merge_args(&decls, overrides.iter().cloned(), &label)?;
@@ -442,9 +444,9 @@ pub fn resolve_entry_args(
 pub fn load_entry_param_decls(
     scripts: &ScriptStore,
     target: &RunTarget,
-) -> Result<(Vec<ParamDecl>, String), Vec<crate::script_v2::ScriptError>> {
-    use crate::script_v2::error::codes;
-    use crate::script_v2::ScriptError;
+) -> Result<(Vec<ParamDecl>, String), Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>> {
+    use crate::extensions::gamer_yaml::script_v2::error::codes;
+    use crate::extensions::gamer_yaml::script_v2::ScriptError;
 
     let pkg = target.pkg().to_string();
     let snapshot = RunSnapshot::capture(scripts, &pkg).map_err(|e| {
@@ -454,13 +456,13 @@ pub fn load_entry_param_decls(
             pkg.clone(),
         )]
     })?;
-    let app = crate::engine::runner_adapter::yaml_app_context(
+    let app = crate::extensions::gamer_yaml::engine::runner_adapter::yaml_app_context(
         "parameter-probe",
         Some(pkg.clone()),
         pkg.clone(),
     )
     .map_err(|error| {
-        vec![crate::script_v2::ScriptError::new(
+        vec![crate::extensions::gamer_yaml::script_v2::ScriptError::new(
             codes::YAML_SYNTAX_ERROR,
             format!("运行上下文构建失败: {error:#}"),
             pkg.clone(),
@@ -1945,7 +1947,7 @@ pub fn key_code(key: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::ports::{
+    use crate::extensions::gamer_yaml::engine::ports::{
         DeviceControl, EngineSettings, ScreenFrame, ScreenshotSource, TemplateMatchQuery,
         TemplateMatcher,
     };
@@ -2792,7 +2794,7 @@ mod tests {
     /// 非 0 映射；数字串透传；未知键返回 None。
     #[test]
     fn key_code_matches_key_enum() {
-        use crate::script_v2::params::KEY_NAMES;
+        use crate::extensions::gamer_yaml::script_v2::params::KEY_NAMES;
         for name in KEY_NAMES {
             let code = key_code(name).unwrap_or_else(|| panic!("枚举键 {name} 无 keycode 映射"));
             assert_ne!(code, 0, "枚举键 {name} 映射为 keycode 0");

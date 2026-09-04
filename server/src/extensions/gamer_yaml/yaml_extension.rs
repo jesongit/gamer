@@ -23,7 +23,7 @@ use crate::capabilities::{
 use crate::core::AppContext;
 use crate::extensions::{HostApi, Permission};
 
-use crate::yaml_vnext::{Condition, Expr, Program, SmallStep, Value};
+use crate::extensions::gamer_yaml::yaml_vnext::{Condition, Expr, Program, SmallStep, Value};
 
 pub(crate) const YAML_EXTENSION_ID: &str = "gamer.yaml";
 /// Reference manifest for the installable YAML guest. The server never embeds
@@ -91,7 +91,7 @@ component = "console.templates"
 mod manifest_sync_tests {
     #[test]
     fn yaml_packaging_manifest_stays_in_sync_with_shipped_constant() {
-        let packaged = include_str!("../../tools/plugins/gamer.yaml/manifest.toml");
+        let packaged = include_str!("../../../../tools/plugins/gamer.yaml/manifest.toml");
         assert_eq!(
             super::YAML_EXTENSION_MANIFEST_TOML.trim(),
             packaged.trim(),
@@ -102,8 +102,8 @@ mod manifest_sync_tests {
 
 #[derive(Debug)]
 pub(crate) enum CompatibleYamlError {
-    V2(Vec<crate::script_v2::ScriptError>),
-    V3(Vec<crate::yaml_vnext::Diagnostic>),
+    V2(Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>),
+    V3(Vec<crate::extensions::gamer_yaml::yaml_vnext::Diagnostic>),
 }
 
 impl CompatibleYamlError {
@@ -146,13 +146,13 @@ pub(crate) fn validate_compatible_script_in(
     source: &str,
     resources: &mut crate::scripts::PartitionResources<'_>,
 ) -> Result<CompatibleYamlSource, CompatibleYamlError> {
-    if crate::yaml_vnext::is_v3_source(source) {
-        crate::yaml_vnext::load(source)
+    if crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(source) {
+        crate::extensions::gamer_yaml::yaml_vnext::load(source)
             .map(CompatibleYamlSource::V3)
             .map_err(CompatibleYamlError::V3)
     } else {
         resources.add_script(resource, source);
-        crate::script_v2::parse_script_file(source, resource, resources)
+        crate::extensions::gamer_yaml::script_v2::parse_script_file(source, resource, resources)
             .map(|_| CompatibleYamlSource::V2)
             .map_err(CompatibleYamlError::V2)
     }
@@ -946,7 +946,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
 mod tests {
     use super::*;
     use crate::capabilities::{DeviceService, InputService};
-    use crate::yaml_vnext::load;
+    use crate::extensions::gamer_yaml::yaml_vnext::load;
     use std::io::Write;
     use tempfile::TempDir;
     use zip::write::SimpleFileOptions;
@@ -1195,10 +1195,11 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
 
 #[cfg(all(test, feature = "wasm-runtime"))]
 mod wasm_tests {
+    use super::super::wasm_host::LazyYamlWasmtimeRuntime;
     use super::*;
     use crate::capabilities::{CapabilityRegistry, CapabilityResult, LogRecord, LogService};
-    use crate::extensions::{HostApiCatalog, LazyYamlWasmtimeRuntime};
-    use crate::yaml_vnext::load;
+    use crate::extensions::gamer_yaml::yaml_vnext::load;
+    use crate::extensions::HostApiCatalog;
     use async_trait::async_trait;
     use std::fs;
     use std::io::Write as _;
@@ -1582,16 +1583,16 @@ runtime = "^1.0"
             "version: 3\nsteps:\n  - invoke:\n      capability: log.write\n      with:\n        level: info\n        message: from-v3-e2e\n  - set: {done: true}\n  - return: $done\n",
         )
         .unwrap();
-        let value = service
-            .run_yaml_vnext(
-                program,
-                AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
-                BTreeMap::new(),
-                None,
-                Arc::new(AtomicBool::new(false)),
-            )
-            .await
-            .unwrap();
+        let value = super::super::run_yaml_vnext(
+            &service,
+            program,
+            AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+            BTreeMap::new(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
         assert_eq!(value, Value::Bool(true));
         assert_eq!(logs.logs.lock().unwrap().as_slice(), ["from-v3-e2e"]);
 
@@ -1601,16 +1602,16 @@ runtime = "^1.0"
             .await
             .unwrap());
         let program = load("version: 3\nsteps:\n  - set: {done: true}\n").unwrap();
-        assert!(service
-            .run_yaml_vnext(
-                program,
-                AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
-                BTreeMap::new(),
-                None,
-                Arc::new(AtomicBool::new(false)),
-            )
-            .await
-            .is_err());
+        assert!(super::super::run_yaml_vnext(
+            &service,
+            program,
+            AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+            BTreeMap::new(),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .is_err());
     }
 
     /// 生命周期执行器桩：本测试只验证 runner 注册/注销与任务挂起/恢复，
@@ -1666,12 +1667,14 @@ runtime = "^1.0"
             "裸 Core：扩展 start 之前没有任何 runner"
         );
 
-        let registrar = Arc::new(crate::timer_yaml::YamlTimerRunnerRegistrar::new(
-            scheduler.clone(),
-            db.clone(),
-            runs.clone(),
-            scripts.clone(),
-        ));
+        let registrar = Arc::new(
+            crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunnerRegistrar::new(
+                scheduler.clone(),
+                db.clone(),
+                runs.clone(),
+                scripts.clone(),
+            ),
+        );
         let service = crate::extensions::ExtensionService::for_data_root(
             data.path(),
             CapabilityRegistry::default(),

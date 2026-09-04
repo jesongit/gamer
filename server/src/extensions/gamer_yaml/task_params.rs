@@ -11,9 +11,9 @@
 //! 日志约束：运行链路只记录参数签名与参数名列表，**绝不记录参数值**（text
 //! 参数防泄露）；日志侧展示签名用 [`signature_short_code`] 短码。
 
-use crate::script_v2::model::param_signature;
-use crate::script_v2::params::{merge_args, parse_json_arg};
-use crate::script_v2::{ParamDecl, ScriptError, TypedValue};
+use crate::extensions::gamer_yaml::script_v2::model::param_signature;
+use crate::extensions::gamer_yaml::script_v2::params::{merge_args, parse_json_arg};
+use crate::extensions::gamer_yaml::script_v2::{ParamDecl, ScriptError, TypedValue};
 use crate::scripts::ScriptStore;
 
 /// 签名门禁失败的机器可读原因（依赖缺失/参数过期的细分信号）。
@@ -79,18 +79,19 @@ pub fn probe_script_signature(
         Ok(None) => return Err(GateError::ScriptMissing),
         Err(e) => {
             return Err(GateError::ScriptInvalid(vec![ScriptError::new(
-                crate::script_v2::error::codes::YAML_SYNTAX_ERROR,
+                crate::extensions::gamer_yaml::script_v2::error::codes::YAML_SYNTAX_ERROR,
                 format!("读取脚本失败: {e:#}"),
                 script_id,
             )]))
         }
     }
-    let target = crate::engine::RunTarget::Script {
+    let target = crate::extensions::gamer_yaml::engine::RunTarget::Script {
         script_id: script_id.to_string(),
         start_index: 0,
     };
-    let (decls, _label) = crate::engine::load_entry_param_decls(scripts, &target)
-        .map_err(GateError::ScriptInvalid)?;
+    let (decls, _label) =
+        crate::extensions::gamer_yaml::engine::load_entry_param_decls(scripts, &target)
+            .map_err(GateError::ScriptInvalid)?;
     let signature = param_signature(&decls);
     Ok((decls, signature))
 }
@@ -134,7 +135,7 @@ pub fn rebind_snapshot(
     args: &serde_json::Value,
     resource: &str,
 ) -> Result<Vec<(String, TypedValue)>, Vec<ScriptError>> {
-    use crate::script_v2::error::codes;
+    use crate::extensions::gamer_yaml::script_v2::error::codes;
     let stored: serde_json::Map<String, serde_json::Value> = match args.as_object() {
         Some(map) => map.clone(),
         _ => {
@@ -189,7 +190,9 @@ pub fn signature_short_code(signature: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::script_v2::{parse_script_file, validate::InMemoryResources};
+    use crate::extensions::gamer_yaml::script_v2::{
+        parse_script_file, validate::InMemoryResources,
+    };
 
     const SCRIPT: &str = "\
 params:
@@ -304,7 +307,7 @@ steps:
         let err = rebind_snapshot(&decls, &serde_json::json!({}), "t").unwrap_err();
         assert!(
             err.iter()
-                .any(|e| e.code == crate::script_v2::error::codes::PARAM_ARGS_MISSING_REQUIRED),
+                .any(|e| e.code == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_MISSING_REQUIRED),
             "必填缺失必须有结构化诊断: {err:?}"
         );
     }
@@ -369,7 +372,7 @@ steps:
                 serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
             match gate_task(&scripts, "com.test.app/daily.yaml", &args, Some(&signature)) {
                 Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|diag| {
-                    diag.code == crate::script_v2::error::codes::PARAM_ARGS_TYPE_MISMATCH
+                    diag.code == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_TYPE_MISMATCH
                 })),
                 other => panic!("expected invalid snapshot, got {:?}", other.is_ok()),
             }

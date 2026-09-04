@@ -22,9 +22,11 @@ use std::sync::Arc;
 
 use zip::write::SimpleFileOptions;
 
+use crate::extensions::gamer_yaml::yaml_extension::{
+    validate_compatible_script_in, CompatibleYamlError,
+};
 use crate::matcher;
 use crate::scripts::ScriptStore;
-use crate::yaml_extension::{validate_compatible_script_in, CompatibleYamlError};
 
 use super::archive::{
     validate_and_read_manifest, MAX_PACKAGE_ENTRIES, MAX_PACKAGE_FILE_BYTES,
@@ -300,9 +302,11 @@ impl PackageBuilder {
                 };
                 let resource = trim_root(relative, "functions");
                 reference_view.add_function(resource, &content);
-                if let Err(errors) =
-                    crate::script_v2::parse_function_file(&content, resource, reference_view)
-                {
+                if let Err(errors) = crate::extensions::gamer_yaml::script_v2::parse_function_file(
+                    &content,
+                    resource,
+                    reference_view,
+                ) {
                     problems.push(format!(
                         "{relative}: {}",
                         errors

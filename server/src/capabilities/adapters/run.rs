@@ -7,7 +7,7 @@ use super::super::{
     CapabilityError, CapabilityResult, RunHandle, RunRequest, RunService, RunStatus,
 };
 use crate::core::{AndroidPackageName, AppContext, AppPackageId, DeviceId};
-use crate::engine::{yaml_start_request, RunTarget};
+use crate::extensions::gamer_yaml::engine::{yaml_start_request, RunTarget};
 use crate::run_manager::{CancelOutcome, RunManager, RunSource, StartError};
 
 use super::ResourceAdapter;

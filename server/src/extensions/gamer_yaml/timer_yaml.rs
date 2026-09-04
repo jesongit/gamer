@@ -23,10 +23,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::core::RunRequest;
+use crate::extensions::gamer_yaml::task_params::{self, GateError};
 use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartError};
 use crate::scripts::ScriptStore;
 use crate::store::Db;
-use crate::task_params::{self, GateError};
 use crate::timer_core::{TimerCompletion, TimerOutcome, TimerRun, TimerRunner, TimerRunnerError};
 
 pub(crate) struct YamlTimerRunner {
@@ -111,9 +111,9 @@ impl TimerRunner for YamlTimerRunner {
             signature_short = %task_params::signature_short_code(&task_args.signature),
             "YAML timer task parameters confirmed"
         );
-        let req = crate::engine::yaml_start_request(
+        let req = crate::extensions::gamer_yaml::engine::yaml_start_request(
             request.app.clone(),
-            crate::engine::RunTarget::Script {
+            crate::extensions::gamer_yaml::engine::RunTarget::Script {
                 script_id: payload.script_id.clone(),
                 start_index: 0,
             },
@@ -248,7 +248,7 @@ impl YamlTimerRunnerRegistrar {
 #[async_trait]
 impl crate::extensions::TimerRunnerRegistrar for YamlTimerRunnerRegistrar {
     async fn extension_started(&self, extension_id: &str) -> anyhow::Result<()> {
-        if extension_id != crate::yaml_extension::YAML_EXTENSION_ID {
+        if extension_id != crate::extensions::gamer_yaml::yaml_extension::YAML_EXTENSION_ID {
             return Ok(());
         }
         let runner = Arc::new(YamlTimerRunner::new(
@@ -258,7 +258,7 @@ impl crate::extensions::TimerRunnerRegistrar for YamlTimerRunnerRegistrar {
         ));
         self.scheduler
             .register_extension_runner(
-                crate::yaml_extension::YAML_EXTENSION_ID,
+                crate::extensions::gamer_yaml::yaml_extension::YAML_EXTENSION_ID,
                 extension_id,
                 runner,
             )

@@ -22,7 +22,6 @@ mod core;
 mod cron_extension;
 mod deps_probe;
 mod device;
-mod engine;
 mod extensions;
 mod file_migration;
 mod keymaps;
@@ -33,17 +32,12 @@ mod metrics;
 mod migrations;
 mod run_manager;
 mod scheduler;
-mod script_v2;
 mod scripts;
 mod shutdown;
 mod store;
-mod task_params;
 mod timer_core;
-mod timer_yaml;
 mod update;
 mod webrtc;
-mod yaml_extension;
-mod yaml_vnext;
 
 // Phase 0 兼容护栏只在测试构建挂载，不改变服务运行时模块图。
 #[cfg(test)]
@@ -320,12 +314,12 @@ impl RuntimeServices {
         let viewers: webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(device::DeviceManager::new(db.clone(), cfg.clone()));
-        let runner = Arc::new(engine::Runner::new(
+        let runner = Arc::new(extensions::gamer_yaml::engine::Runner::new(
             devices.clone(),
             Arc::new(webrtc::ViewerEventSink::new(viewers.clone())),
             scripts.clone(),
         ));
-        let executor = Arc::new(engine::EngineExecutor::new(
+        let executor = Arc::new(extensions::gamer_yaml::engine::EngineExecutor::new(
             runner,
             devices.clone(),
             db.clone(),
@@ -340,12 +334,14 @@ impl RuntimeServices {
             db.clone(),
             runs.clone(),
         );
-        let runner_registrar = Arc::new(timer_yaml::YamlTimerRunnerRegistrar::new(
-            scheduler.clone(),
-            db.clone(),
-            runs.clone(),
-            scripts.clone(),
-        ));
+        let runner_registrar = Arc::new(
+            extensions::gamer_yaml::timer_yaml::YamlTimerRunnerRegistrar::new(
+                scheduler.clone(),
+                db.clone(),
+                runs.clone(),
+                scripts.clone(),
+            ),
+        );
         let extensions = Arc::new(
             extensions::ExtensionService::for_data_root(cfg.data_dir.clone(), capabilities)
                 .with_runner_registrar(runner_registrar),

@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use super::common::{err_response, run_blocking_api, validate_text_field};
 use super::{ApiError, AppState};
-use crate::engine::RunTarget;
+use crate::extensions::gamer_yaml::engine::RunTarget;
 use crate::store::Db;
 
 /// 稀疏 args 请求形态（手动运行 / 函数测试共用）。
@@ -52,7 +52,9 @@ pub(super) fn validate_run_req(req: &RunReqArgs) -> Result<(), ApiError> {
 
 /// 结构化诊断 400 响应（CONTRACT §5.1 五元组列表，前端按 code/step_path 定位）。
 /// 任务保存的 args 解析与脚本解析诊断共用同一形态。
-pub(super) fn diagnostics_response(diagnostics: &[crate::script_v2::ScriptError]) -> Response {
+pub(super) fn diagnostics_response(
+    diagnostics: &[crate::extensions::gamer_yaml::script_v2::ScriptError],
+) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(serde_json::json!({
@@ -117,12 +119,14 @@ async fn submit_run(
     let bound = {
         let target = target.clone();
         match run_blocking_api(move || {
-            let r: Result<crate::engine::BoundEntryArgs, Vec<crate::script_v2::ScriptError>> =
-                crate::engine::resolve_entry_args(
-                    &scripts,
-                    &target,
-                    &args_json.unwrap_or_default(),
-                );
+            let r: Result<
+                crate::extensions::gamer_yaml::engine::BoundEntryArgs,
+                Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>,
+            > = crate::extensions::gamer_yaml::engine::resolve_entry_args(
+                &scripts,
+                &target,
+                &args_json.unwrap_or_default(),
+            );
             Ok(r)
         })
         .await
@@ -136,11 +140,15 @@ async fn submit_run(
         .devices
         .snapshot(&device_id)
         .and_then(|(device, _, _)| device.pkg);
-    let app = match crate::engine::yaml_app_context(&device_id, android_package, target.pkg()) {
+    let app = match crate::extensions::gamer_yaml::engine::yaml_app_context(
+        &device_id,
+        android_package,
+        target.pkg(),
+    ) {
         Ok(app) => app,
         Err(error) => return ApiError::bad_request(error.to_string()).into_response(),
     };
-    let rreq = match crate::engine::yaml_start_request(
+    let rreq = match crate::extensions::gamer_yaml::engine::yaml_start_request(
         app,
         target,
         crate::run_manager::RunSource::Manual,

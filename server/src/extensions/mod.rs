@@ -16,6 +16,9 @@
 
 mod archive;
 mod error;
+
+/// gamer.yaml 扩展（YAML 栈边界）：见 gamer_yaml/mod.rs。
+pub(crate) mod gamer_yaml;
 mod host_api;
 mod keymap;
 mod manifest;
@@ -68,8 +71,6 @@ pub(crate) use wasm::{NoWasmRuntime, WasmInstanceHandle, WasmRuntime, WasmStartR
 pub(crate) use keymap::LazyKeymapWasmRuntime;
 #[cfg(feature = "wasm-runtime")]
 pub(crate) use wasm::LazyWasmtimeRuntime;
-#[cfg(feature = "wasm-runtime")]
-pub(crate) use wasm::LazyYamlWasmtimeRuntime;
 
 #[cfg(test)]
 mod tests {

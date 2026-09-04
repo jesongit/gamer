@@ -820,8 +820,8 @@ async fn baseline_control_and_capabilities_work_without_installed_extensions() {
         cfg.clone(),
     ));
     let runs = std::sync::Arc::new(crate::run_manager::RunManager::new(
-        std::sync::Arc::new(crate::engine::EngineExecutor::new(
-            std::sync::Arc::new(crate::engine::Runner::new(
+        std::sync::Arc::new(crate::extensions::gamer_yaml::engine::EngineExecutor::new(
+            std::sync::Arc::new(crate::extensions::gamer_yaml::engine::Runner::new(
                 devices.clone(),
                 std::sync::Arc::new(crate::webrtc::ViewerEventSink::new(
                     std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

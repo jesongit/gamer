@@ -115,8 +115,8 @@ mod sec_tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
         // 生产执行器装配（设备离线时 prepare 即失败，正好覆盖"连接失败锁释放"路径）
-        let executor = Arc::new(crate::engine::EngineExecutor::new(
-            Arc::new(crate::engine::Runner::new(
+        let executor = Arc::new(crate::extensions::gamer_yaml::engine::EngineExecutor::new(
+            Arc::new(crate::extensions::gamer_yaml::engine::Runner::new(
                 devices.clone(),
                 Arc::new(crate::webrtc::ViewerEventSink::new(viewers.clone())),
                 scripts.clone(),

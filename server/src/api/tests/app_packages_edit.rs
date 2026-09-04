@@ -269,13 +269,13 @@ async fn edit_makes_workspace_highest_priority_for_engine_snapshot() {
         ..Default::default()
     };
     let store = crate::scripts::ScriptStore::open(&cfg).unwrap();
-    let snapshot = crate::engine::snapshot::RunSnapshot::capture(&store, ANDROID).unwrap();
+    let snapshot = crate::extensions::gamer_yaml::engine::snapshot::RunSnapshot::capture(&store, ANDROID).unwrap();
     let app = crate::core::AppContext::new(
         crate::core::DeviceId::new("device-1").unwrap(),
         crate::core::AndroidPackageName::new(ANDROID).unwrap(),
         None,
     );
-    let resources = crate::engine::snapshot::RunResources::new(&snapshot, &store, app);
+    let resources = crate::extensions::gamer_yaml::engine::snapshot::RunResources::new(&snapshot, &store, app);
     // as_provider() 返回 &dyn ResourceProvider，方法调用无需导入 trait
     assert_eq!(
         resources.as_provider().script_content("daily.yaml"),

@@ -24,11 +24,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use crate::core::AppContext;
-use crate::script_v2::error::codes;
-use crate::script_v2::validate::{
+use crate::extensions::gamer_yaml::script_v2::error::codes;
+use crate::extensions::gamer_yaml::script_v2::validate::{
     normalize_id, try_build_function_file, ResourceProvider, TemplateAvail,
 };
-use crate::script_v2::{FunctionFile, ScriptError, ScriptFile};
+use crate::extensions::gamer_yaml::script_v2::{FunctionFile, ScriptError, ScriptFile};
 use crate::scripts::ScriptStore;
 
 /// 一次运行的分区源码快照（构建后不可变）。
@@ -220,7 +220,7 @@ fn script_v2_parse(
     content: &str,
     provider: &dyn ResourceProvider,
 ) -> Result<ScriptFile, Vec<ScriptError>> {
-    crate::script_v2::parse_script_file(content, resource, provider)
+    crate::extensions::gamer_yaml::script_v2::parse_script_file(content, resource, provider)
 }
 
 fn script_v2_parse_function(
@@ -228,7 +228,7 @@ fn script_v2_parse_function(
     content: &str,
     provider: &dyn ResourceProvider,
 ) -> Result<FunctionFile, Vec<ScriptError>> {
-    crate::script_v2::parse_function_file(content, resource, provider)
+    crate::extensions::gamer_yaml::script_v2::parse_function_file(content, resource, provider)
 }
 
 #[cfg(test)]

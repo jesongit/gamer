@@ -22,7 +22,9 @@ use crate::core::fs::atomic_write_with_replace_err;
 use crate::core::fs::safe_name as sanitize_part;
 use crate::core::fs::{atomic_write, content_version, is_windows_reserved_name};
 
-fn format_script_errors(errors: &[crate::script_v2::ScriptError]) -> String {
+fn format_script_errors(
+    errors: &[crate::extensions::gamer_yaml::script_v2::ScriptError],
+) -> String {
     errors
         .iter()
         .map(ToString::to_string)
@@ -151,13 +153,13 @@ fn template_short_name(name: &str) -> String {
 }
 
 fn rename_template_value(
-    value: &mut crate::script_v2::TypedValue,
+    value: &mut crate::extensions::gamer_yaml::script_v2::TypedValue,
     old_name: &str,
     old_short: &str,
     new_name: &str,
     new_short: &str,
 ) -> bool {
-    let crate::script_v2::TypedValue::Tmpl(current) = value else {
+    let crate::extensions::gamer_yaml::script_v2::TypedValue::Tmpl(current) = value else {
         return false;
     };
     let replacement = if current == old_name {
@@ -175,13 +177,13 @@ fn rename_template_value(
 }
 
 fn rename_template_cell(
-    cell: &mut crate::script_v2::Cell,
+    cell: &mut crate::extensions::gamer_yaml::script_v2::Cell,
     old_name: &str,
     old_short: &str,
     new_name: &str,
     new_short: &str,
 ) -> usize {
-    let crate::script_v2::Cell::Lit(value) = cell else {
+    let crate::extensions::gamer_yaml::script_v2::Cell::Lit(value) = cell else {
         return 0;
     };
     usize::from(rename_template_value(
@@ -190,13 +192,13 @@ fn rename_template_cell(
 }
 
 fn rename_template_steps(
-    steps: &mut [crate::script_v2::Step],
+    steps: &mut [crate::extensions::gamer_yaml::script_v2::Step],
     old_name: &str,
     old_short: &str,
     new_name: &str,
     new_short: &str,
 ) -> usize {
-    use crate::script_v2::Step;
+    use crate::extensions::gamer_yaml::script_v2::Step;
 
     let mut changed = 0;
     for step in steps {
@@ -336,7 +338,7 @@ fn rename_template_steps(
 }
 
 fn rename_template_in_params(
-    params: &mut [crate::script_v2::ParamDecl],
+    params: &mut [crate::extensions::gamer_yaml::script_v2::ParamDecl],
     old_name: &str,
     old_short: &str,
     new_name: &str,
@@ -439,10 +441,13 @@ impl ScriptStore {
         pkg: &str,
         resource: &str,
         content: &str,
-    ) -> Result<crate::script_v2::ScriptFile, Vec<crate::script_v2::ScriptError>> {
+    ) -> Result<
+        crate::extensions::gamer_yaml::script_v2::ScriptFile,
+        Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>,
+    > {
         let mut resources = self.resources(pkg);
         resources.add_script(resource, content);
-        crate::script_v2::parse_script_file(content, resource, &resources)
+        crate::extensions::gamer_yaml::script_v2::parse_script_file(content, resource, &resources)
     }
 
     pub fn parse_function_content(
@@ -450,10 +455,13 @@ impl ScriptStore {
         pkg: &str,
         resource: &str,
         content: &str,
-    ) -> Result<crate::script_v2::FunctionFile, Vec<crate::script_v2::ScriptError>> {
+    ) -> Result<
+        crate::extensions::gamer_yaml::script_v2::FunctionFile,
+        Vec<crate::extensions::gamer_yaml::script_v2::ScriptError>,
+    > {
         let mut resources = self.resources(pkg);
         resources.add_function(resource, content);
-        crate::script_v2::parse_function_file(content, resource, &resources)
+        crate::extensions::gamer_yaml::script_v2::parse_function_file(content, resource, &resources)
     }
 
     /// 分区脚本目录
@@ -700,24 +708,26 @@ impl ScriptStore {
         let mut rewrites: Vec<(PathBuf, String, String)> = Vec::new();
 
         for script in self.list()?.into_iter().filter(|s| s.package == package) {
-            if crate::yaml_vnext::is_v3_source(&script.content) {
-                if let Some((rewritten, _changed)) = crate::yaml_vnext::rename_template_source(
-                    &script.content,
-                    &old_name,
-                    &old_short,
-                    &new_name,
-                    &new_short,
-                )
-                .map_err(|diagnostics| {
-                    anyhow::anyhow!(
-                        "v3 脚本模板引用无法重写: {}",
-                        diagnostics
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join("；")
+            if crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(&script.content) {
+                if let Some((rewritten, _changed)) =
+                    crate::extensions::gamer_yaml::yaml_vnext::rename_template_source(
+                        &script.content,
+                        &old_name,
+                        &old_short,
+                        &new_name,
+                        &new_short,
                     )
-                })? {
+                    .map_err(|diagnostics| {
+                        anyhow::anyhow!(
+                            "v3 脚本模板引用无法重写: {}",
+                            diagnostics
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join("；")
+                        )
+                    })?
+                {
                     rewrites.push((
                         self.script_dir(&package).join(&script.name),
                         script.content,
@@ -746,7 +756,7 @@ impl ScriptStore {
                 rewrites.push((
                     self.script_dir(&package).join(&script.name),
                     script.content,
-                    crate::script_v2::serialize_script(&parsed),
+                    crate::extensions::gamer_yaml::script_v2::serialize_script(&parsed),
                 ));
             }
         }
@@ -777,7 +787,7 @@ impl ScriptStore {
                     self.functions_dir(&package)
                         .join(format!("{}.yaml", function.file)),
                     function.content,
-                    crate::script_v2::serialize_function_file(&parsed),
+                    crate::extensions::gamer_yaml::script_v2::serialize_function_file(&parsed),
                 ));
             }
         }
@@ -869,14 +879,20 @@ impl ScriptStore {
     /// 模板短名可用性（script_v2 校验 ResourceProvider 消费）：
     /// 唯一存在 / 缺失 / 同短名多个 `#` 后缀候选（歧义）。
     /// 解析顺序与 resolve_template_path 完全一致（本地编辑区 → override → 包）。
-    pub fn template_avail(&self, pkg: &str, short: &str) -> crate::script_v2::TemplateAvail {
+    pub fn template_avail(
+        &self,
+        pkg: &str,
+        short: &str,
+    ) -> crate::extensions::gamer_yaml::script_v2::TemplateAvail {
         match self.composite.template(pkg, short) {
-            crate::app_packages::TemplateLookup::Found(_) => crate::script_v2::TemplateAvail::Found,
+            crate::app_packages::TemplateLookup::Found(_) => {
+                crate::extensions::gamer_yaml::script_v2::TemplateAvail::Found
+            }
             crate::app_packages::TemplateLookup::Ambiguous { .. } => {
-                crate::script_v2::TemplateAvail::Ambiguous
+                crate::extensions::gamer_yaml::script_v2::TemplateAvail::Ambiguous
             }
             crate::app_packages::TemplateLookup::NotFound => {
-                crate::script_v2::TemplateAvail::NotFound
+                crate::extensions::gamer_yaml::script_v2::TemplateAvail::NotFound
             }
         }
     }
@@ -991,9 +1007,10 @@ impl ScriptStore {
         }
         let content = std::fs::read_to_string(&p).ok()?;
         let version = content_version(&content);
-        let functions = crate::script_v2::validate::try_build_function_file(&content)
-            .map(|file| file.functions.iter().map(|f| f.name.clone()).collect())
-            .unwrap_or_default();
+        let functions =
+            crate::extensions::gamer_yaml::script_v2::validate::try_build_function_file(&content)
+                .map(|file| file.functions.iter().map(|f| f.name.clone()).collect())
+                .unwrap_or_default();
         Some(FunctionFile {
             id: format!("{pkg}/{rel}"),
             pkg: pkg.to_string(),
@@ -1102,7 +1119,7 @@ impl<'a> PartitionResources<'a> {
     }
 
     pub fn add_script(&mut self, resource: &str, content: &str) {
-        let key = crate::script_v2::validate::normalize_id(resource.trim());
+        let key = crate::extensions::gamer_yaml::script_v2::validate::normalize_id(resource.trim());
         self.script_overrides.insert(key, content.to_string());
     }
 
@@ -1117,7 +1134,7 @@ impl<'a> PartitionResources<'a> {
 
     fn script_content_override(&self, resource: &str) -> Option<String> {
         self.script_overrides
-            .get(&crate::script_v2::validate::normalize_id(resource.trim()))
+            .get(&crate::extensions::gamer_yaml::script_v2::validate::normalize_id(resource.trim()))
             .cloned()
     }
 
@@ -1129,12 +1146,17 @@ impl<'a> PartitionResources<'a> {
         self.function_overrides.get(key).cloned()
     }
 
-    fn template_available(&self, short_name: &str) -> crate::script_v2::TemplateAvail {
+    fn template_available(
+        &self,
+        short_name: &str,
+    ) -> crate::extensions::gamer_yaml::script_v2::TemplateAvail {
         self.store.template_avail(&self.pkg, short_name)
     }
 }
 
-impl crate::script_v2::validate::ResourceProvider for PartitionResources<'_> {
+impl crate::extensions::gamer_yaml::script_v2::validate::ResourceProvider
+    for PartitionResources<'_>
+{
     fn script_exists(&self, resource_id: &str) -> bool {
         self.script_content(resource_id).is_some()
     }
@@ -1143,7 +1165,8 @@ impl crate::script_v2::validate::ResourceProvider for PartitionResources<'_> {
         if let Some(content) = self.script_content_override(resource_id) {
             return Some(content);
         }
-        let key = crate::script_v2::validate::normalize_id(resource_id.trim());
+        let key =
+            crate::extensions::gamer_yaml::script_v2::validate::normalize_id(resource_id.trim());
         let candidates = [key.clone(), format!("{key}.yaml")];
         candidates
             .iter()
@@ -1167,11 +1190,18 @@ impl crate::script_v2::validate::ResourceProvider for PartitionResources<'_> {
 
     fn function_exists(&self, file_short: &str, function: &str) -> bool {
         self.function_file_content(file_short)
-            .and_then(|content| crate::script_v2::validate::try_build_function_file(&content))
+            .and_then(|content| {
+                crate::extensions::gamer_yaml::script_v2::validate::try_build_function_file(
+                    &content,
+                )
+            })
             .is_some_and(|file| file.find(function).is_some())
     }
 
-    fn resolve_template(&self, short_name: &str) -> crate::script_v2::TemplateAvail {
+    fn resolve_template(
+        &self,
+        short_name: &str,
+    ) -> crate::extensions::gamer_yaml::script_v2::TemplateAvail {
         self.template_available(short_name)
     }
 }

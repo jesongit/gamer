@@ -15,11 +15,11 @@ use crate::core::{
     RunContext, RunPayload, RunRequest,
 };
 use crate::device::DeviceManager;
+use crate::extensions::gamer_yaml::script_v2::TypedValue;
+use crate::extensions::gamer_yaml::yaml_extension::YamlProgramResolver;
+use crate::extensions::gamer_yaml::yaml_vnext::{Program, Value};
 use crate::run_manager::{RunExecutor, RunSource, StartRequest};
-use crate::script_v2::TypedValue;
 use crate::store::Db;
-use crate::yaml_extension::YamlProgramResolver;
-use crate::yaml_vnext::{Program, Value};
 
 use super::exec::{RunSpec, RunTarget, Runner};
 
@@ -291,10 +291,10 @@ impl YamlProgramResolver for ScriptProgramResolver {
             .scripts
             .get(&target)?
             .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 目标: {target}"))?;
-        if !crate::yaml_vnext::is_v3_source(&script.content) {
+        if !crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(&script.content) {
             anyhow::bail!("call 目标不是 v3 脚本: {target}");
         }
-        crate::yaml_vnext::load(&script.content).map_err(|diagnostics| {
+        crate::extensions::gamer_yaml::yaml_vnext::load(&script.content).map_err(|diagnostics| {
             anyhow::anyhow!(
                 "v3 call 目标无效: {}",
                 diagnostics
@@ -345,16 +345,17 @@ impl YamlVnextAdapter {
         let Some(script) = script else {
             return Ok(None);
         };
-        if !crate::yaml_vnext::is_v3_source(&script.content) {
+        if !crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(&script.content) {
             return Ok(None);
         }
-        let mut program = crate::yaml_vnext::load(&script.content).map_err(|diagnostics| {
-            anyhow::anyhow!(diagnostics
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("；"))
-        })?;
+        let mut program = crate::extensions::gamer_yaml::yaml_vnext::load(&script.content)
+            .map_err(|diagnostics| {
+                anyhow::anyhow!(diagnostics
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("；"))
+            })?;
         if *start_index > program.steps.len() {
             anyhow::bail!(
                 "start_index {} 超过 v3 脚本步数 {}",
@@ -373,17 +374,17 @@ impl YamlVnextAdapter {
             .extensions
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("YAML 扩展服务已关闭"))?;
-        extensions
-            .run_yaml_vnext(
-                program,
-                spec.context.app.clone(),
-                yaml_args(&spec.args),
-                Some(resolver),
-                stop,
-            )
-            .await
-            .map(|_| Some(Vec::new()))
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
+        crate::extensions::gamer_yaml::run_yaml_vnext(
+            &extensions,
+            program,
+            spec.context.app.clone(),
+            yaml_args(&spec.args),
+            Some(resolver),
+            stop,
+        )
+        .await
+        .map(|_| Some(Vec::new()))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 }
 

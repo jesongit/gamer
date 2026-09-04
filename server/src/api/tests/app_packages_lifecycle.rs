@@ -386,13 +386,13 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
         ..Default::default()
     };
     let store = crate::scripts::ScriptStore::open(&cfg).unwrap();
-    let snapshot = crate::engine::snapshot::RunSnapshot::capture(&store, ANDROID).unwrap();
+    let snapshot = crate::extensions::gamer_yaml::engine::snapshot::RunSnapshot::capture(&store, ANDROID).unwrap();
     let app = crate::core::AppContext::new(
         crate::core::DeviceId::new(DEVICE).unwrap(),
         crate::core::AndroidPackageName::new(ANDROID).unwrap(),
         Some(crate::core::AppPackageId::new(ANDROID).unwrap()),
     );
-    let resources = crate::engine::snapshot::RunResources::new(&snapshot, &store, app);
+    let resources = crate::extensions::gamer_yaml::engine::snapshot::RunResources::new(&snapshot, &store, app);
     assert_eq!(
         resources.as_provider().script_content("daily.yaml"),
         Some(script_yaml("editable-v1")),
@@ -405,7 +405,7 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
     );
     assert_eq!(
         resources.as_provider().resolve_template("icon.png"),
-        crate::script_v2::validate::TemplateAvail::Found,
+        crate::extensions::gamer_yaml::script_v2::validate::TemplateAvail::Found,
         "包内模板必须经 composite 解析可见"
     );
     //   c) 包内 keymap 经 composite 读面可见（GET/list 只读兜底）
