@@ -364,6 +364,7 @@ fn ui_json(contribution: &crate::extensions::UiContribution) -> serde_json::Valu
         "requires_device": contribution.requires_device(),
         "preferred_width": contribution.preferred_width(),
         "entry": contribution.entry().map(|entry| entry.as_str()),
+        "component": contribution.component(),
     })
 }
 

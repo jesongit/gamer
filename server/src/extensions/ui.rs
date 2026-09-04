@@ -33,6 +33,8 @@ pub(crate) struct RegisteredUiContribution {
     pub(crate) requires_device: bool,
     pub(crate) preferred_width: Option<u16>,
     pub(crate) entry: Option<String>,
+    /// `runtime = "core"` 贡献的宿主组件键；由前端 core-component-registry 解释。
+    pub(crate) component: Option<String>,
     pub(crate) schema: Option<RegisteredUiSchema>,
 }
 
@@ -69,6 +71,7 @@ impl UiContributionRegistry {
                     requires_device: contribution.requires_device(),
                     preferred_width: contribution.preferred_width(),
                     entry: contribution.entry().map(|entry| entry.as_str().to_string()),
+                    component: contribution.component().map(ToOwned::to_owned),
                     schema: contribution.schema().map(|schema| RegisteredUiSchema {
                         description: schema.description().map(ToOwned::to_owned),
                         fields: schema.fields().to_vec(),
@@ -132,5 +135,32 @@ mod tests {
         .unwrap();
         registry.register(&manifest);
         assert!(registry.list()[0].schema.is_none());
+    }
+
+    #[test]
+    fn core_contributions_pass_component_through_to_json() {
+        let manifest_text = "manifest_version = 1\nid = \"gamer.yaml\"\nversion = \"3.0.0\"\nname = \"Gamer YAML vNext\"\nentry = \"plugin.wasm\"\n\
+              [ui]\n[[ui.contributions]]\npanel_id = \"automation\"\ntitle = \"自动化\"\nruntime = \"core\"\ncomponent = \"console.scripts\"\nrequires_device = true\n";
+        let registry = UiContributionRegistry::default();
+        let manifest = parse_manifest(manifest_text.as_bytes()).unwrap();
+        registry.register(&manifest);
+        let contributions = registry.list();
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(
+            contributions[0].component.as_deref(),
+            Some("console.scripts")
+        );
+        assert!(contributions[0].entry.is_none());
+        assert!(contributions[0].schema.is_none());
+
+        // 前端契约：runtime = "core" + component 原样透传，entry 缺省为 null。
+        let json = serde_json::to_value(&contributions[0]).unwrap();
+        assert_eq!(json["runtime"], "core");
+        assert_eq!(json["component"], "console.scripts");
+        assert!(json.get("entry").unwrap().is_null());
+
+        // 卸载/停用后注册表清空：非 Enabled|Running 不发布由 service 层保证。
+        registry.clear();
+        assert!(registry.list().is_empty());
     }
 }

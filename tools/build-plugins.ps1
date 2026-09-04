@@ -128,20 +128,19 @@ function Get-ManifestVersion {
 }
 
 $packages = @(
+    # 两个官方插件的面板均为 runtime = "core"（宿主组件渲染，manifest 只声明
+    # component 键），包内不再携带 ui/ iframe 资产。
     @{
         Id = 'gamer.keymap'; Version = $null
         Manifest = Join-Path $RepoRoot 'tools\plugins\gamer.keymap\manifest.toml'
         Component = $keymapComponent
-        Files = @(('ui/index.html=' + (Join-Path $ServerDir 'tests\keymap-guest\ui\index.html')))
+        Files = @()
     },
     @{
         Id = 'gamer.yaml'; Version = $null
         Manifest = Join-Path $RepoRoot 'tools\plugins\gamer.yaml\manifest.toml'
         Component = $yamlComponent
-        Files = @(
-            ('ui/automation.html=' + (Join-Path $RepoRoot 'tools\plugins\gamer.yaml\ui\automation.html')),
-            ('ui/functions.html=' + (Join-Path $RepoRoot 'tools\plugins\gamer.yaml\ui\functions.html'))
-        )
+        Files = @()
     }
 )
 
@@ -193,7 +192,7 @@ foreach ($result in $results) {
             signature = [ordered]@{ status = 'valid'; key_id = $KeyId; algorithm = 'ed25519'; value = $result.Proof }
             permissions = @('input.tap', 'input.swipe', 'input.key', 'touch')
             host_api = [ordered]@{ input = '^1.0'; touch = '^1.0' }
-            ui = [ordered]@{ contributions = @([ordered]@{ panel_id = 'keymaps'; title = '映射'; runtime = 'iframe' }) }
+            ui = [ordered]@{ contributions = @([ordered]@{ panel_id = 'keymaps'; title = '映射'; runtime = 'core'; component = 'console.keymaps' }) }
         }
     }
     else {
@@ -209,8 +208,9 @@ foreach ($result in $results) {
             permissions = @('device.read', 'device.app', 'input.tap', 'input.swipe', 'input.key', 'input.text', 'vision.match', 'vision.color', 'resource.read', 'runtime.sleep', 'log.write')
             host_api = [ordered]@{ device = '^1.0'; vision = '^1.0'; input = '^1.0'; resource = '^1.0'; runtime = '^1.0'; log = '^1.0' }
             ui = [ordered]@{ contributions = @(
-                [ordered]@{ panel_id = 'automation'; title = '自动化'; runtime = 'iframe' },
-                [ordered]@{ panel_id = 'functions'; title = '函数'; runtime = 'iframe' }
+                [ordered]@{ panel_id = 'automation'; title = '自动化'; runtime = 'core'; component = 'console.scripts' },
+                [ordered]@{ panel_id = 'functions'; title = '函数'; runtime = 'core'; component = 'console.functions' },
+                [ordered]@{ panel_id = 'templates'; title = '模板'; runtime = 'core'; component = 'console.templates' }
             ) }
         }
     }

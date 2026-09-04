@@ -11,12 +11,14 @@ input = "^1.0"
 touch = "^1.0"
 
 [[ui.contributions]]
+# runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端
+# core-component-registry 解释（console.keymaps = 映射面板）。
 panel_id = "keymaps"
 title = "映射"
 icon = "⌨"
 order = 30
 location = "console.right"
-runtime = "iframe"
+runtime = "core"
 requires_device = true
 preferred_width = 360
-entry = "ui/index.html"
+component = "console.keymaps"
