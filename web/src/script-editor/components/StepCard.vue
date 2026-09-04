@@ -437,7 +437,7 @@
 
       <!-- return -->
       <template v-else-if="step.kind === 'return'">
-        <div v-if="context !== 'function'" class="field-hint warn">return 在脚本中非法——只能出现在函数库（func/）的函数体内</div>
+        <div v-if="context !== 'function'" class="field-hint warn">return 在脚本中非法——只能出现在函数库（functions/）的函数体内</div>
         <div class="field-row">
           <span class="field-label">返回值</span>
           <CellEditor :cell="step.value" type="bool" :params="params" label="返回值" :error="fieldError('value')" @change="(c) => updateCell('value', c)" />

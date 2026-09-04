@@ -1,12 +1,12 @@
 <template>
   <div v-if="ctx.scriptMode === 'run'" class="script-run">
     <div class="auto-run">
-      <select v-model="ctx.runKind" class="select mono run-kind" title="资源类型：脚本存于 yaml/，函数库存于 func/">
+      <select v-model="ctx.runKind" class="select mono run-kind" title="资源类型：脚本存于 scripts/，函数库存于 functions/">
         <option value="script">脚本</option>
         <option value="func">函数</option>
       </select>
       <ScriptPicker v-if="ctx.runKind === 'script'" v-model="ctx.selScript" :package="ctx.activePkg" :lock-package="true" />
-      <select v-else v-model="ctx.selFnFile" class="select mono fn-file" title="函数库文件（data/<应用分区>/func/）">
+      <select v-else v-model="ctx.selFnFile" class="select mono fn-file" title="函数库文件（data/<应用分区>/functions/）">
         <option value="" disabled>选择函数库文件…</option>
         <option v-for="f in ctx.fnLib.list" :key="f.id" :value="f.id">{{ f.file }}</option>
       </select>
@@ -159,7 +159,7 @@
 <script setup>
 /**
  * Console 紧凑脚本外壳（阶段 4，plan §10.1）：替换旧 textarea 文本编辑区。
- * - 运行态：资源类型下拉（脚本/函数，区分 yaml/ 与 func/）+ 文件下拉（脚本 =
+ * - 运行态：资源类型下拉（脚本/函数，区分 scripts/ 与 functions/）+ 文件下拉（脚本 =
  *   ScriptPicker 锁分区；函数 = 函数库文件 + 函数名下拉，同一行）+ 运行/停止/编辑/文件操作
  *   （Target 系列按类型分发，新建/删除/编辑函数库文件与脚本同形）+ 实时日志 +
  *   只读步骤摘要列表（脚本/函数体通用：「从此运行」选起点、call/func 结构化只读预览）；

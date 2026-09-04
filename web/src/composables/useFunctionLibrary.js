@@ -1,4 +1,4 @@
-// 函数库（data/<pkg>/func/）外壳辅助：文件列表、目标解析、FunctionLibraryModel 解析
+// 函数库（data/<pkg>/functions/）外壳辅助：文件列表、目标解析、FunctionLibraryModel 解析
 // 与函数级 params 扩展命令（阶段 4：commands set_params/insert_param/update_param/
 // remove_param 支持 ['functions', 函数名, 'params'] 容器路径）。
 import { reactive, ref } from 'vue'

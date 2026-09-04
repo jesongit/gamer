@@ -806,7 +806,7 @@ export function useConsoleTemplates({
     if (templatesData.value.some(x => x.pkg === activePkg.value && x.name === newName)) return toast(`已存在同名模板：${newName}`, 'warn')
     try {
       await api.renameTemplate(t.name, newName, activePkg.value)
-      // 后端会同步改写当前分区 yaml/func 中的模板引用；刷新脚本与函数缓存，
+      // 后端会同步改写当前分区 scripts/functions 中的模板引用；刷新脚本与函数缓存，
       // 让当前摘要、调用参数和后续编辑都立即看到新名称。
       await loadData()
       clearCallParamsCache()

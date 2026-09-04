@@ -46,7 +46,7 @@ export function useConsoleScriptRunner({
   const rawEditor = useRawYamlEditor({ api })
   // 函数库列表与 func 目标解析（func 步骤「打开函数定义」跳转用）
   const fnLib = useFunctionLibrary({ api })
-  // 运行区资源类型：脚本（yaml/）/ 函数（func/）。函数模式经函数测试接口运行单个函数
+  // 运行区资源类型：脚本（scripts/）/ 函数（functions/）。函数模式经函数测试接口运行单个函数
   const runKind = ref('script')
   const selFnFile = ref('')
   const scriptDeleteConfirmId = ref('')
