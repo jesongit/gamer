@@ -92,6 +92,43 @@ export function buildTouchPhase(action, pointerId, x, y) {
   }
 }
 
+let traceCounter = 0
+
+/**
+ * Phase 6 keymap E2E trace fields for one input_event envelope:
+ * `trace_id` (UUID when available) and `client_send_ts` in epoch
+ * microseconds (performance.timeOrigin based, Date.now fallback).
+ */
+export function makeTraceFields() {
+  traceCounter += 1
+  const id = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : 'trace-' + Date.now().toString(36) + '-' + traceCounter + '-' + Math.random().toString(36).slice(2, 8)
+  let timestamp
+  if (typeof performance !== 'undefined' && typeof performance.timeOrigin === 'number') {
+    timestamp = Math.round((performance.timeOrigin + performance.now()) * 1000)
+  } else {
+    timestamp = Date.now() * 1000
+  }
+  return { trace_id: id, client_send_ts: timestamp }
+}
+
+/**
+ * Build the `input_event` envelope. `trace` is optional: when absent the
+ * envelope is byte-for-byte identical to the pre-trace wire shape, so the
+ * production path stays unchanged unless the benchmark (or a debugging
+ * session) opts in.
+ */
+export function buildInputEventEnvelope(event, trace) {
+  const envelope = { type: 'input_event', event }
+  if (trace && typeof trace === 'object') {
+    if (typeof trace.trace_id === 'string' && trace.trace_id) envelope.trace_id = trace.trace_id
+    const ts = Number(trace.client_send_ts)
+    if (Number.isFinite(ts) && ts > 0) envelope.client_send_ts = Math.round(ts)
+  }
+  return envelope
+}
+
 const ROOT_KEYS = new Set(['version', 'name', 'bindings'])
 const ACTION_KEYS = {
   tap: new Set(['type', 'at']),
@@ -393,6 +430,7 @@ export function createKeymapController({
   onFallbackKeydown = null,
   onFallbackKeyup = null,
   onFallbackReleaseAll = null,
+  traceInput = false,
 } = {}) {
   let keymapSource = mapping !== undefined ? mapping : keymap
   let active = enabled
@@ -425,10 +463,17 @@ export function createKeymapController({
     return readValue(remote, false) === true
   }
 
+  function resolveTraceFields(event) {
+    if (traceInput === true) return makeTraceFields()
+    if (typeof traceInput === 'function') return traceInput(event) || null
+    return null
+  }
+
   function forwardRemoteInput(event, phase, domEvent = null) {
     const normalized = normalizeInputEvent(event, phase)
     if (!normalized) return { handled: false, remote: true, sent: false }
-    const sent = controlWasSent(emitInput({ type: 'input_event', event: normalized }))
+    const envelope = buildInputEventEnvelope(normalized, resolveTraceFields(normalized))
+    const sent = controlWasSent(emitInput(envelope))
     if (domEvent) preventDefault(domEvent)
     if (normalized.type === 'key_down') remoteHeld.add(normalized.code)
     if (normalized.type === 'key_up') remoteHeld.delete(normalized.code)
@@ -665,10 +710,11 @@ export function createKeymapController({
   function releaseAll() {
     let remoteReleased = 0
     for (const code of remoteHeld) {
-      if (controlWasSent(emitInput({
-        type: 'input_event',
-        event: { type: 'key_up', code, meta: 0 },
-      }))) remoteReleased += 1
+      const envelope = buildInputEventEnvelope(
+        { type: 'key_up', code, meta: 0 },
+        resolveTraceFields({ type: 'key_up', code }),
+      )
+      if (controlWasSent(emitInput(envelope))) remoteReleased += 1
     }
     remoteHeld.clear()
     const mappedReleased = releaseMapped(false)

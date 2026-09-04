@@ -31,16 +31,20 @@ mod wit;
 pub(crate) use error::{ExtensionError, ExtensionResult, PermissionError};
 pub(crate) use host_api::{HostApi, HostApiCatalog, HostApiDomain, HOST_API_VERSION};
 pub(crate) use keymap::{
-    android_keycode, decode_input_event, load_user_profile, real_wasm_host_status,
-    AppPackageKeymapData, AppPackageKeymapSource, CapabilityDeviceActionExecutor, DeviceAction,
-    DeviceActionExecutor, InputError, InputEvent, InputGateway, InputResult,
-    KeymapContributionRegistry, KeymapPanelContribution, KeymapProgram, KeymapRunner,
-    KeymapRuntime, KeymapRuntimeState, NativeKeymapRunner, NormalizedPoint,
-    ScrcpyDeviceActionExecutor, ScreenSize, INPUT_PROTOCOL_VERSION, KEYMAP_EXTENSION_ID,
-    KEYMAP_EXTENSION_MANIFEST_TOML, KEYMAP_PANEL_ID, KEYMAP_WASM_ABI_VERSION,
+    android_keycode, decode_input_event, emit_keymap_trace, keymap_trace_active, load_user_profile,
+    now_epoch_us, real_wasm_host_status, AppPackageKeymapData, AppPackageKeymapSource,
+    CapabilityDeviceActionExecutor, DeviceAction, DeviceActionExecutor, InputError, InputEvent,
+    InputGateway, InputResult, KeymapContributionRegistry, KeymapPanelContribution, KeymapProgram,
+    KeymapRunner, KeymapRuntime, KeymapRuntimeState, KeymapTraceContext, KeymapTracePath,
+    KeymapTraceRecord, NativeKeymapRunner, NormalizedPoint, ScrcpyDeviceActionExecutor, ScreenSize,
+    INPUT_PROTOCOL_VERSION, KEYMAP_EXTENSION_ID, KEYMAP_EXTENSION_MANIFEST_TOML, KEYMAP_PANEL_ID,
+    KEYMAP_WASM_ABI_VERSION,
 };
+#[cfg(all(test, feature = "wasm-runtime"))]
+pub(crate) use keymap::{build_guest_fixture_component, package_guest_fixture_gplugin};
 pub(crate) use keymap::{
-    KeymapWasmInstanceHandle, KeymapWasmRuntime, KeymapWasmStartRequest, NoKeymapWasmRuntime,
+    clear_keymap_trace_sink, install_keymap_trace_sink, KeymapWasmInstanceHandle,
+    KeymapWasmRuntime, KeymapWasmStartRequest, NoKeymapWasmRuntime,
 };
 
 pub(crate) use manifest::{

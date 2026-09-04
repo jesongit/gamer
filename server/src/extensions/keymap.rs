@@ -65,6 +65,144 @@ preferred_width = 360
 entry = "ui/index.html"
 "#;
 
+// ===================== Phase 6 Keymap E2E trace（默认关闭） =====================
+//
+// 计划 8.3：`input_event` 信封可选携带 `trace_id` 与 `client_send_ts`（epoch
+// 微秒），服务端沿链路记录各阶段时间戳并产出 [`KeymapTraceRecord`]。默认零
+// 开销零行为变化：仅当基准/测试经 [`install_keymap_trace_sink`] 安装收集器，
+// 或设置 `GAMER_KEYMAP_E2E_TRACE=1`（每条记录以 tracing::info 输出）时激活。
+//
+// 阶段口径（均为相对 server_receive 的单调微秒）：
+// - `wasm_begin`：WASM 链路 = guest handle 调用前（含 service 实例查找与
+//   命令队列排队）；native 链路 = native_mapping 开始（pass-through 判定后）。
+// - `wasm_end`：guest handle 返回 / native 映射决策完成。
+// - `device_action`：guest 结果授权+映射完成、执行第一个动作前。
+// - `scrcpy_write`：最后一个动作的 scrcpy 控制写完成。
+//
+// `server_receive_epoch_us` / `client_send_epoch_us` 是 epoch 微秒绝对时间，
+// 仅在同进程（时钟同源，基准的进程内 DataChannel 客户端）时可直接相减得到
+// Browser→Server；真实浏览器与服务器时钟不可靠同步，必须按计划 8.3 把
+// Browser RTT 与服务端内部阶段分开统计。
+
+/// trace 记录的链路形态：WASM 插件 or 原生直通。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeymapTracePath {
+    Native,
+    Wasm,
+}
+
+/// 单个输入事件的全链路时间戳记录（Phase 6 基准的数据单元）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct KeymapTraceRecord {
+    pub trace_id: String,
+    pub path: KeymapTracePath,
+    pub client_send_epoch_us: Option<u64>,
+    pub server_receive_epoch_us: u64,
+    pub wasm_begin_us: u64,
+    pub wasm_end_us: u64,
+    pub device_action_us: u64,
+    pub scrcpy_write_us: u64,
+    /// scrcpy 控制写完成时刻的进程内单调时钟（只供同进程基准做写顺序
+    /// 断言，不参与 JSON 输出；相对阶段值不再承担顺序语义）
+    #[serde(skip_serializing)]
+    pub scrcpy_write_instant: Instant,
+}
+
+/// 链路起点（WebRTC 信令解析处）构造、随调用传递的 trace 上下文。
+#[derive(Clone, Debug)]
+pub struct KeymapTraceContext {
+    pub trace_id: String,
+    pub client_send_epoch_us: Option<u64>,
+    server_receive_epoch_us: u64,
+    server_receive_instant: Instant,
+}
+
+impl KeymapTraceContext {
+    pub fn new(trace_id: impl Into<String>, client_send_epoch_us: Option<u64>) -> Self {
+        Self {
+            trace_id: trace_id.into(),
+            client_send_epoch_us,
+            server_receive_epoch_us: now_epoch_us(),
+            server_receive_instant: Instant::now(),
+        }
+    }
+
+    fn since_receive(&self, at: Instant) -> u64 {
+        at.saturating_duration_since(self.server_receive_instant)
+            .as_micros() as u64
+    }
+
+    /// 由链路各埋点处在阶段完成时刻调用，产出记录（阶段值为相对
+    /// server_receive 的单调微秒）。
+    pub fn record(
+        &self,
+        path: KeymapTracePath,
+        wasm_begin: Instant,
+        wasm_end: Instant,
+        device_action: Instant,
+        scrcpy_write: Instant,
+    ) -> KeymapTraceRecord {
+        KeymapTraceRecord {
+            trace_id: self.trace_id.clone(),
+            path,
+            client_send_epoch_us: self.client_send_epoch_us,
+            server_receive_epoch_us: self.server_receive_epoch_us,
+            wasm_begin_us: self.since_receive(wasm_begin),
+            wasm_end_us: self.since_receive(wasm_end),
+            device_action_us: self.since_receive(device_action),
+            scrcpy_write_us: self.since_receive(scrcpy_write),
+            scrcpy_write_instant: scrcpy_write,
+        }
+    }
+}
+
+/// 当前 epoch 微秒（与前端 `client_send_ts` 同单位；同进程内可直接比较）。
+pub fn now_epoch_us() -> u64 {
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or_default()
+}
+
+type KeymapTraceSink = tokio::sync::mpsc::UnboundedSender<KeymapTraceRecord>;
+
+static TRACE_SINK: std::sync::RwLock<Option<KeymapTraceSink>> = std::sync::RwLock::new(None);
+static ENV_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn env_trace_enabled() -> bool {
+    *ENV_TRACE.get_or_init(|| std::env::var("GAMER_KEYMAP_E2E_TRACE").as_deref() == Ok("1"))
+}
+
+/// trace 是否激活（基准安装了收集器，或显式 env 门禁开启）。
+pub fn keymap_trace_active() -> bool {
+    TRACE_SINK.read().expect("keymap trace sink").is_some() || env_trace_enabled()
+}
+
+/// 基准/测试安装进程内收集器（未消费上限的 channel，绝不阻塞控制链路）。
+pub fn install_keymap_trace_sink(sink: KeymapTraceSink) {
+    *TRACE_SINK.write().expect("keymap trace sink") = Some(sink);
+}
+
+/// 基准/测试结束移除收集器，恢复默认零开销路径。
+pub fn clear_keymap_trace_sink() {
+    *TRACE_SINK.write().expect("keymap trace sink") = None;
+}
+
+pub(crate) fn emit_keymap_trace(record: KeymapTraceRecord) {
+    if env_trace_enabled() {
+        tracing::info!(
+            target: "keymap_e2e_trace",
+            trace = %serde_json::to_string(&record).unwrap_or_default(),
+            "keymap e2e trace"
+        );
+    }
+    if let Some(sink) = TRACE_SINK.read().expect("keymap trace sink").as_ref() {
+        let _ = sink.send(record);
+    }
+}
+
 /// Decode the transport-neutral input envelope before it reaches a runner.
 /// WebRTC remains responsible for framing; this function owns only the
 /// versioned JSON payload used by the keymap extension.
@@ -1078,6 +1216,117 @@ pub fn real_wasm_host_status() -> &'static str {
     "keymap WIT component entrypoint is executable; actions remain capability-gated"
 }
 
+/// 构建 keymap guest fixture 组件（`tests/keymap-guest`，wasm32 target 经
+/// wit-component 编码）。WASM 组件测试与 Phase 6 真机 E2E 基准共用。
+/// 仅测试构建可用（wit-component 是 dev-dependency）；内部显式清除
+/// `CARGO_TARGET_DIR`，guest 产物固定落在 `tests/keymap-guest/target/`，
+/// 避免外层基准目录设置导致读取落空。
+#[cfg(all(test, feature = "wasm-runtime"))]
+pub(crate) fn build_guest_fixture_component() -> Vec<u8> {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::OnceLock;
+
+    static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+    COMPONENT
+        .get_or_init(|| {
+            let server_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let guest_dir = server_dir.join("tests").join("keymap-guest");
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let status = Command::new(cargo)
+                .current_dir(&guest_dir)
+                .env_remove("CARGO_TARGET_DIR")
+                .args([
+                    "build",
+                    "--quiet",
+                    "--release",
+                    "--target",
+                    "wasm32-unknown-unknown",
+                ])
+                .status()
+                .expect("无法构建 keymap guest fixture");
+            assert!(status.success(), "keymap guest fixture 构建失败");
+            let module = fs::read(
+                guest_dir
+                    .join("target")
+                    .join("wasm32-unknown-unknown")
+                    .join("release")
+                    .join("gamer_keymap_fixture.wasm"),
+            )
+            .expect("keymap guest fixture wasm 不存在");
+            wit_component::ComponentEncoder::default()
+                .module(&module)
+                .expect("keymap guest module 不是合法 WIT module")
+                .validate(true)
+                .encode()
+                .expect("keymap guest module 无法 componentize")
+        })
+        .clone()
+}
+
+/// 把 guest 组件打包成可安装的 `gplugin` 归档（manifest + plugin.wasm + UI）。
+/// 权限集合由调用方按 profile 实际动作声明。仅测试构建可用。
+#[cfg(all(test, feature = "wasm-runtime"))]
+pub(crate) fn package_guest_fixture_gplugin(component: &[u8], permissions: &[&str]) -> Vec<u8> {
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    fn manifest(permissions: &[&str]) -> String {
+        let joined = permissions
+            .iter()
+            .map(|permission| format!("\"{permission}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"manifest_version = 1
+id = "gamer.keymap"
+version = "1.0.0"
+name = "Keymap"
+description = "WIT keymap component fixture"
+entry = "plugin.wasm"
+permissions = [{joined}]
+
+[host_api]
+input = "^1.0"
+touch = "^1.0"
+
+[[ui.contributions]]
+panel_id = "keymaps"
+title = "映射"
+icon = "⌨"
+order = 30
+location = "console.right"
+runtime = "iframe"
+requires_device = true
+preferred_width = 360
+entry = "ui/index.html"
+"#
+        )
+    }
+
+    let mut bytes = Vec::new();
+    let mut archive = ZipWriter::new(Cursor::new(&mut bytes));
+    let options = SimpleFileOptions::default();
+    archive
+        .start_file("manifest.toml", options)
+        .expect("manifest entry");
+    archive.write_all(manifest(permissions).as_bytes()).unwrap();
+    archive
+        .start_file("plugin.wasm", options)
+        .expect("wasm entry");
+    archive.write_all(component).expect("wasm bytes");
+    archive
+        .start_file("ui/index.html", options)
+        .expect("ui entry");
+    archive
+        .write_all(include_bytes!("../../tests/keymap-guest/ui/index.html"))
+        .expect("ui bytes");
+    archive.finish().expect("finish gplugin");
+    bytes
+}
+
 /// Start request for the keymap-specific Component world. It intentionally
 /// lives beside the keymap adapter rather than extending the generic Phase 6
 /// extension Host contract. `profile` carries the raw user-selected keymap
@@ -1117,6 +1366,7 @@ pub(crate) trait KeymapWasmRuntime: Send + Sync {
         device: DeviceHandle,
         screen: ScreenSize,
         event: InputEvent,
+        trace: Option<KeymapTraceContext>,
     ) -> ExtensionResult<InputResult>;
 
     fn is_available(&self) -> bool;
@@ -1148,6 +1398,7 @@ impl KeymapWasmRuntime for NoKeymapWasmRuntime {
         _device: DeviceHandle,
         _screen: ScreenSize,
         _event: InputEvent,
+        _trace: Option<KeymapTraceContext>,
     ) -> ExtensionResult<InputResult> {
         Err(ExtensionError::RuntimeUnavailable(
             "未启用 wasm-runtime feature",
@@ -1163,6 +1414,7 @@ impl KeymapWasmRuntime for NoKeymapWasmRuntime {
 mod keymap_wasmtime {
     use std::collections::HashMap;
     use std::sync::{Arc, OnceLock};
+    use std::time::Instant;
 
     use sha2::{Digest, Sha256};
     use tokio::sync::{mpsc, oneshot, Mutex};
@@ -1175,9 +1427,9 @@ mod keymap_wasmtime {
     use super::super::permissions::Permission;
     use super::super::wit::keymap::{exports::gamer::keymap::keymap as guest, KeymapHost};
     use super::{
-        CapabilityDeviceActionExecutor, DeviceAction, DeviceActionExecutor, DeviceHandle,
-        InputEvent, InputResult, KeymapWasmInstanceHandle, KeymapWasmRuntime,
-        KeymapWasmStartRequest, ScreenSize,
+        emit_keymap_trace, CapabilityDeviceActionExecutor, DeviceAction, DeviceActionExecutor,
+        DeviceHandle, InputEvent, InputResult, KeymapTraceContext, KeymapTracePath,
+        KeymapWasmInstanceHandle, KeymapWasmRuntime, KeymapWasmStartRequest, ScreenSize,
     };
 
     type GuestEvent = guest::InputEvent;
@@ -1188,6 +1440,7 @@ mod keymap_wasmtime {
         device: DeviceHandle,
         screen: ScreenSize,
         event: InputEvent,
+        trace: Option<KeymapTraceContext>,
         reply: oneshot::Sender<ExtensionResult<InputResult>>,
     }
 
@@ -1309,14 +1562,21 @@ mod keymap_wasmtime {
                                     continue;
                                 }
                             }
+                            // Phase 6 E2E：wasm_begin 覆盖 guest 调用排队完成后的
+                            // 实际执行起点（service 查找与命令队列排队计入
+                            // Server Receive → WASM Begin 阶段）
+                            let wasm_begin = Instant::now();
                             let guest_event = guest_event(&invoke.event);
                             let guest_result = keymap.call_handle(&mut store, &guest_event);
+                            let wasm_end = Instant::now();
                             let result = invoke_guest_result(
                                 &host,
                                 &executor,
                                 &mut touches,
                                 &invoke,
                                 guest_result,
+                                wasm_begin,
+                                wasm_end,
                             )
                             .await;
                             let _ = invoke.reply.send(result);
@@ -1389,6 +1649,7 @@ mod keymap_wasmtime {
             device: DeviceHandle,
             screen: ScreenSize,
             event: InputEvent,
+            trace: Option<KeymapTraceContext>,
         ) -> ExtensionResult<InputResult> {
             let commands = self
                 .instances
@@ -1403,6 +1664,7 @@ mod keymap_wasmtime {
                     device,
                     screen,
                     event,
+                    trace,
                     reply,
                 }))
                 .await
@@ -1569,6 +1831,8 @@ mod keymap_wasmtime {
         touches: &mut HashMap<u64, (DeviceHandle, crate::capabilities::TouchHandle)>,
         invoke: &Invoke,
         guest_result: Result<Result<GuestResult, GuestError>, wasmtime::Error>,
+        wasm_begin: Instant,
+        wasm_end: Instant,
     ) -> ExtensionResult<InputResult> {
         let guest_result: Result<GuestResult, GuestError> = guest_result
             .map_err(|error| ExtensionError::Runtime(format!("keymap handle trap: {error}")))?;
@@ -1585,6 +1849,8 @@ mod keymap_wasmtime {
         }
 
         let mut actions = Vec::with_capacity(guest_result.actions.len());
+        // Phase 6 E2E：device_action 记授权+映射完成、动作执行开始
+        let device_action = Instant::now();
         for action in guest_result.actions {
             let (_, native, slot) = native_action(action, invoke.screen, &invoke.device, touches)?;
             if let DeviceAction::TouchBegin { .. } = native {
@@ -1609,6 +1875,16 @@ mod keymap_wasmtime {
                 }
             }
             actions.push(native);
+        }
+        if let Some(trace) = &invoke.trace {
+            // scrcpy_write 记最后一个动作的控制写完成；无动作时与 device_action 同刻
+            emit_keymap_trace(trace.record(
+                KeymapTracePath::Wasm,
+                wasm_begin,
+                wasm_end,
+                device_action,
+                Instant::now(),
+            ));
         }
         Ok(InputResult {
             consume: guest_result.consume,
@@ -2291,16 +2567,12 @@ mod tests {
 
 #[cfg(all(test, feature = "wasm-runtime"))]
 mod wasm_component_tests {
-    use std::fs;
-    use std::io::{Cursor, Write};
-    use std::path::PathBuf;
-    use std::process::Command;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::io::Cursor;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use async_trait::async_trait;
     use tempfile::TempDir;
-    use zip::write::SimpleFileOptions;
 
     use super::*;
     use crate::capabilities::{
@@ -2409,98 +2681,11 @@ mod wasm_component_tests {
     }
 
     fn fixture_component() -> Vec<u8> {
-        static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
-        COMPONENT
-            .get_or_init(|| {
-                let server_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-                let guest_dir = server_dir.join("tests").join("keymap-guest");
-                let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-                let status = Command::new(cargo)
-                    .current_dir(&guest_dir)
-                    .args([
-                        "build",
-                        "--quiet",
-                        "--release",
-                        "--target",
-                        "wasm32-unknown-unknown",
-                    ])
-                    .status()
-                    .expect("无法构建 keymap guest fixture");
-                assert!(status.success(), "keymap guest fixture 构建失败");
-                let module = fs::read(
-                    guest_dir
-                        .join("target")
-                        .join("wasm32-unknown-unknown")
-                        .join("release")
-                        .join("gamer_keymap_fixture.wasm"),
-                )
-                .expect("keymap guest fixture wasm 不存在");
-                wit_component::ComponentEncoder::default()
-                    .module(&module)
-                    .expect("keymap guest module 不是合法 WIT module")
-                    .validate(true)
-                    .encode()
-                    .expect("keymap guest module 无法 componentize")
-            })
-            .clone()
-    }
-
-    fn gplugin_manifest(permissions: &[&str]) -> Vec<u8> {
-        let permissions = permissions
-            .iter()
-            .map(|permission| format!("\"{permission}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            r#"manifest_version = 1
-id = "gamer.keymap"
-version = "1.0.0"
-name = "Keymap"
-description = "WIT keymap component fixture"
-entry = "plugin.wasm"
-permissions = [{permissions}]
-
-[host_api]
-input = "^1.0"
-touch = "^1.0"
-
-[[ui.contributions]]
-panel_id = "keymaps"
-title = "映射"
-icon = "⌨"
-order = 30
-location = "console.right"
-runtime = "iframe"
-requires_device = true
-preferred_width = 360
-entry = "ui/index.html"
-"#
-        )
-        .into_bytes()
+        super::build_guest_fixture_component()
     }
 
     fn gplugin(component: &[u8], permissions: &[&str]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let mut archive = zip::ZipWriter::new(Cursor::new(&mut bytes));
-        let options = SimpleFileOptions::default();
-        archive
-            .start_file("manifest.toml", options)
-            .expect("manifest entry");
-        archive
-            .write_all(&gplugin_manifest(permissions))
-            .expect("manifest bytes");
-        archive
-            .start_file("plugin.wasm", options)
-            .expect("wasm entry");
-        archive.write_all(component).expect("wasm bytes");
-        archive
-            .start_file("ui/index.html", options)
-            .expect("ui entry");
-        archive
-            .write_all(include_bytes!("../../tests/keymap-guest/ui/index.html"))
-            .expect("ui bytes");
-        archive.finish().expect("finish gplugin");
-        bytes
+        super::package_guest_fixture_gplugin(component, permissions)
     }
 
     fn registry(trace: Arc<Trace>) -> CapabilityRegistry {
@@ -2619,7 +2804,7 @@ entry = "ui/index.html"
             InputEvent::key_down("KeyE"),
         ] {
             let result = service
-                .dispatch_keymap_input(device.clone(), screen, event)
+                .dispatch_keymap_input(device.clone(), screen, event, None)
                 .await
                 .unwrap();
             assert!(result.consume, "fixture action should consume input");
@@ -2634,6 +2819,7 @@ entry = "ui/index.html"
                     delta_x: 0,
                     delta_y: -120,
                 },
+                None,
             )
             .await
             .unwrap();
@@ -2668,7 +2854,7 @@ entry = "ui/index.html"
         // Stop must clean a live WASM-owned contact before the component task
         // is dropped; the UI contribution remains available while enabled.
         service
-            .dispatch_keymap_input(device, screen, InputEvent::key_down("KeyW"))
+            .dispatch_keymap_input(device, screen, InputEvent::key_down("KeyW"), None)
             .await
             .unwrap();
         let stopped = service.stop(&id).await.unwrap();
@@ -2722,28 +2908,28 @@ entry = "ui/index.html"
         let screen = ScreenSize::new(1000, 500);
         // KeyW 被 profile 覆盖：hold at [0.10, 0.90] → (100, 450)，slot=guest 规则序号段。
         service
-            .dispatch_keymap_input(device(), screen, InputEvent::key_down("KeyW"))
+            .dispatch_keymap_input(device(), screen, InputEvent::key_down("KeyW"), None)
             .await
             .unwrap();
         assert!(trace
             .snapshot()
             .contains(&"touch.begin:100:450".to_string()));
         service
-            .dispatch_keymap_input(device(), screen, InputEvent::key_up("KeyW"))
+            .dispatch_keymap_input(device(), screen, InputEvent::key_up("KeyW"), None)
             .await
             .unwrap();
         // KeyQ raw_key Enter(66)：down/up 配对。
         service
-            .dispatch_keymap_input(device(), screen, InputEvent::key_down("KeyQ"))
+            .dispatch_keymap_input(device(), screen, InputEvent::key_down("KeyQ"), None)
             .await
             .unwrap();
         service
-            .dispatch_keymap_input(device(), screen, InputEvent::key_up("KeyQ"))
+            .dispatch_keymap_input(device(), screen, InputEvent::key_up("KeyQ"), None)
             .await
             .unwrap();
         // 未被 profile 覆盖的 KeyA 回落内置默认：touch.begin at (200, 300)。
         service
-            .dispatch_keymap_input(device(), screen, InputEvent::key_down("KeyA"))
+            .dispatch_keymap_input(device(), screen, InputEvent::key_down("KeyA"), None)
             .await
             .unwrap();
         let events = trace.snapshot();
@@ -2802,6 +2988,7 @@ entry = "ui/index.html"
                 device(),
                 ScreenSize::new(1000, 500),
                 InputEvent::key_down("KeyW"),
+                None,
             )
             .await
             .unwrap_err();
@@ -2846,6 +3033,7 @@ entry = "ui/index.html"
                     device(),
                     ScreenSize::new(1000, 500),
                     InputEvent::key_down("Space"),
+                    None,
                 )
                 .await
                 .unwrap();

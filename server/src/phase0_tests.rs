@@ -295,13 +295,16 @@ fn phase0_android_smoke_requires_explicit_opt_in() {
 //   （stable 工具链：`cargo test --release -- --ignored --nocapture` 后按
 //   名字过滤两行 phase0_android_ 前缀测试）
 mod android_bench {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     use bytes::Bytes;
     use webrtc::api::interceptor_registry::register_default_interceptors;
     use webrtc::api::media_engine::MediaEngine;
     use webrtc::api::APIBuilder;
+    use webrtc::data_channel::RTCDataChannel;
     use webrtc::interceptor::registry::Registry;
     use webrtc::interceptor::Attributes;
     use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -316,9 +319,20 @@ mod android_bench {
     use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
     use webrtc::track::track_remote::TrackRemote;
 
+    use crate::capabilities::{
+        CapabilityError, CapabilityRegistry, DeviceHandle, InputService, KeyAction, KeyInput,
+        SwipeGesture, TextInput, TouchHandle, TouchPoint, TouchService,
+    };
     use crate::config::Config;
     use crate::device::adb::Adb;
-    use crate::device::scrcpy::{ScrcpySession, SessionHandle, VideoFrame};
+    use crate::device::scrcpy::{
+        ScrcpySession, SessionHandle, VideoFrame, ACTION_DOWN, ACTION_MOVE, ACTION_UP,
+    };
+    use crate::extensions::{
+        clear_keymap_trace_sink, install_keymap_trace_sink, now_epoch_us, ExtensionId,
+        ExtensionService, ExtensionStore, KeymapTracePath, KeymapTraceRecord, NoWasmRuntime,
+        KEYMAP_EXTENSION_ID,
+    };
     use crate::store::{Device, ScreenMode};
 
     const CONNECT_ITERS: usize = 5;
@@ -1082,6 +1096,890 @@ mod android_bench {
             stats.read_errors, 0,
             "WebRTC 回环链路中途断开（SRTP read error）：{stats:?}"
         );
+        assert!(
+            residue_after <= residue_before,
+            "设备侧出现 scrcpy app_process 残留进程（before={residue_before} after={residue_after}）"
+        );
+    }
+
+    // ===================== Phase 6：keymap E2E 延迟（opt-in 真机） =====================
+    //
+    // 计划 8.1-8.8：真实链路 DataChannel → Server → keymap（native/wasm）→
+    // DeviceAction → scrcpy control write。浏览器用进程内 webrtc-rs
+    // DataChannel 客户端替身（ICE/DTLS/SCTP 全真实；浏览器 JS 开销不在测量
+    // 范围——即计划 8.3 允许的 Browser RTT 与 Server 内部阶段分开统计；
+    // client_send_ts 与 server_receive 同进程时钟同源，可直接相减）。
+    //
+    // 两轮同环境：Native（无 keymap 实例 → pass-through 直通）与 WASM（安装
+    // 并启动 gamer.keymap fixture guest，profile 把 W/A/S/D/Space/ShiftLeft
+    // 绑定为与 android_keycode 相同的 raw_key keycode——两轮最终 scrcpy 写
+    // 完全一致，只有映射层不同）。场景：普通按键 / 长按 1~2s / 组合键 /
+    // 连续 burst（120 事件）。只断言正确性（不丢、不乱序、KeyUp 全送达），
+    // 不断言延迟数值（计划 8.8：第一阶段只建 baseline，防 flaky）。
+
+    /// E2E 场景按键集合（KeyboardEvent.code, Android keycode）
+    const E2E_KEYS: &[(&str, u32)] = &[
+        ("KeyW", 51),
+        ("KeyA", 29),
+        ("KeyS", 47),
+        ("KeyD", 32),
+        ("Space", 62),
+    ];
+    /// 组合键修饰键
+    const E2E_COMBO_MOD: &str = "ShiftLeft";
+
+    fn e2e_profile_yaml() -> String {
+        let mut bindings = String::new();
+        for (code, keycode) in E2E_KEYS {
+            bindings.push_str(&format!(
+                "  - key: {code}\n    action:\n      type: raw_key\n      keycode: {keycode}\n"
+            ));
+        }
+        bindings
+            .push_str("  - key: ShiftLeft\n    action:\n      type: raw_key\n      keycode: 59\n");
+        format!("version: 1\nname: phase0-e2e\nbindings:\n{bindings}")
+    }
+
+    /// bench 输入能力：与生产 InputAdapter::key 同款语义（inject_keycode 写 scrcpy）
+    struct BenchInputService {
+        session: Arc<ScrcpySession>,
+    }
+
+    #[async_trait::async_trait]
+    impl InputService for BenchInputService {
+        async fn tap(
+            &self,
+            _device: &DeviceHandle,
+            point: TouchPoint,
+        ) -> Result<(), CapabilityError> {
+            self.session
+                .tap(point.x() as f32, point.y() as f32)
+                .await
+                .map_err(|e| CapabilityError::Failed(e.to_string()))
+        }
+
+        async fn swipe(
+            &self,
+            _device: &DeviceHandle,
+            gesture: SwipeGesture,
+        ) -> Result<(), CapabilityError> {
+            let start = gesture.start();
+            let end = gesture.end();
+            self.session
+                .swipe(
+                    start.x() as f32,
+                    start.y() as f32,
+                    end.x() as f32,
+                    end.y() as f32,
+                    gesture.duration().as_millis() as u64,
+                )
+                .await
+                .map_err(|e| CapabilityError::Failed(e.to_string()))
+        }
+
+        async fn key(
+            &self,
+            _device: &DeviceHandle,
+            input: KeyInput,
+        ) -> Result<(), CapabilityError> {
+            let action = match input.action() {
+                KeyAction::Down => ACTION_DOWN,
+                KeyAction::Up => ACTION_UP,
+                KeyAction::Press => {
+                    return self
+                        .session
+                        .press_key(input.code().value())
+                        .await
+                        .map_err(|e| CapabilityError::Failed(e.to_string()));
+                }
+            };
+            self.session
+                .inject_keycode(action, input.code().value(), 0, 0)
+                .await
+                .map_err(|e| CapabilityError::Failed(e.to_string()))
+        }
+
+        async fn text(
+            &self,
+            _device: &DeviceHandle,
+            input: TextInput,
+        ) -> Result<(), CapabilityError> {
+            self.session
+                .inject_text(input.as_str())
+                .await
+                .map_err(|e| CapabilityError::Failed(e.to_string()))
+        }
+    }
+
+    /// bench 触控能力：与生产 TouchAdapter 同款语义（指针号映射留在适配层）
+    struct BenchTouchService {
+        session: Arc<ScrcpySession>,
+        next_pointer_id: AtomicU64,
+        active: std::sync::Mutex<HashMap<TouchHandle, u64>>,
+    }
+
+    impl BenchTouchService {
+        fn new(session: Arc<ScrcpySession>) -> Self {
+            Self {
+                session,
+                next_pointer_id: AtomicU64::new(1),
+                active: std::sync::Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TouchService for BenchTouchService {
+        async fn begin(
+            &self,
+            _device: &DeviceHandle,
+            point: TouchPoint,
+        ) -> Result<TouchHandle, CapabilityError> {
+            let pointer_id = self.next_pointer_id.fetch_add(1, Ordering::Relaxed);
+            self.session
+                .inject_touch(
+                    ACTION_DOWN,
+                    pointer_id,
+                    point.x() as f32,
+                    point.y() as f32,
+                    point.pressure(),
+                )
+                .await
+                .map_err(|e| CapabilityError::Failed(e.to_string()))?;
+            let handle = TouchHandle::new();
+            self.active
+                .lock()
+                .expect("bench touch state")
+                .insert(handle, pointer_id);
+            Ok(handle)
+        }
+
+        async fn move_touch(
+            &self,
+            touch: &TouchHandle,
+            point: TouchPoint,
+        ) -> Result<(), CapabilityError> {
+            let pointer_id = *self
+                .active
+                .lock()
+                .expect("bench touch state")
+                .get(touch)
+                .ok_or_else(|| CapabilityError::Failed("unknown bench touch handle".into()))?;
+            self.session
+                .inject_touch(
+                    ACTION_MOVE,
+                    pointer_id,
+                    point.x() as f32,
+                    point.y() as f32,
+                    point.pressure(),
+                )
+                .await
+                .map_err(|e| CapabilityError::Failed(e.to_string()))
+        }
+
+        async fn end(&self, touch: &TouchHandle) -> Result<(), CapabilityError> {
+            let pointer_id = self
+                .active
+                .lock()
+                .expect("bench touch state")
+                .remove(touch)
+                .ok_or_else(|| CapabilityError::Failed("unknown bench touch handle".into()))?;
+            self.session
+                .inject_touch(ACTION_UP, pointer_id, 0.0, 0.0, 0.0)
+                .await
+                .map_err(|e| CapabilityError::Failed(e.to_string()))
+        }
+    }
+
+    fn bench_capability_registry(session: Arc<ScrcpySession>) -> CapabilityRegistry {
+        let input: Arc<dyn InputService> = Arc::new(BenchInputService {
+            session: session.clone(),
+        });
+        let touch: Arc<dyn TouchService> = Arc::new(BenchTouchService::new(session));
+        CapabilityRegistry::builder()
+            .with_input_service(input)
+            .with_touch_service(touch)
+            .build()
+    }
+
+    /// 浏览器替身 ↔ 服务端 的进程内 DataChannel 回环（浏览器=offerer，与生产
+    /// 同构：control DataChannel 必须由浏览器创建，服务端 on_data_channel 接收）
+    async fn connect_control_channel_pair() -> (
+        Arc<RTCDataChannel>,
+        Arc<RTCDataChannel>,
+        (
+            Arc<webrtc::peer_connection::RTCPeerConnection>,
+            Arc<webrtc::peer_connection::RTCPeerConnection>,
+        ),
+    ) {
+        let browser_pc = Arc::new(
+            build_api()
+                .await
+                .new_peer_connection(RTCConfiguration::default())
+                .await
+                .expect("浏览器替身 peer connection"),
+        );
+        let server_pc = Arc::new(
+            build_api()
+                .await
+                .new_peer_connection(RTCConfiguration::default())
+                .await
+                .expect("服务端 peer connection"),
+        );
+
+        let (server_dc_tx, server_dc_rx) = tokio::sync::oneshot::channel::<Arc<RTCDataChannel>>();
+        let slot: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Arc<RTCDataChannel>>>> =
+            std::sync::Mutex::new(Some(server_dc_tx));
+        server_pc.on_data_channel(Box::new(move |dc| {
+            if let Some(tx) = slot.lock().unwrap().take() {
+                let _ = tx.send(dc);
+            }
+            Box::pin(async {})
+        }));
+
+        let dc = browser_pc
+            .create_data_channel("control", None)
+            .await
+            .expect("浏览器替身 data channel");
+        let (open_tx, open_rx) = tokio::sync::oneshot::channel::<()>();
+        dc.on_open(Box::new(move || {
+            let _ = open_tx.send(());
+            Box::pin(async {})
+        }));
+
+        let offer = {
+            let o = browser_pc.create_offer(None).await.expect("offer");
+            let mut gather = browser_pc.gathering_complete_promise().await;
+            browser_pc
+                .set_local_description(o)
+                .await
+                .expect("set local offer");
+            let _ = tokio::time::timeout(Duration::from_secs(5), gather.recv()).await;
+            browser_pc.local_description().await.expect("local offer")
+        };
+        server_pc
+            .set_remote_description(offer)
+            .await
+            .expect("server set remote offer");
+        let answer = {
+            let a = server_pc.create_answer(None).await.expect("answer");
+            let mut gather = server_pc.gathering_complete_promise().await;
+            server_pc
+                .set_local_description(a)
+                .await
+                .expect("set local answer");
+            let _ = tokio::time::timeout(Duration::from_secs(5), gather.recv()).await;
+            server_pc.local_description().await.expect("local answer")
+        };
+        browser_pc
+            .set_remote_description(answer)
+            .await
+            .expect("browser set remote answer");
+
+        let server_dc = tokio::time::timeout(Duration::from_secs(15), server_dc_rx)
+            .await
+            .expect("15s 内服务端 DataChannel 未建立")
+            .expect("server dc oneshot dropped");
+        tokio::time::timeout(Duration::from_secs(15), open_rx)
+            .await
+            .expect("15s 内浏览器 DataChannel 未打开")
+            .expect("open oneshot dropped");
+        (dc, server_dc, (browser_pc, server_pc))
+    }
+
+    /// 浏览器替身客户端：input_event 信封（trace_id + client_send_ts + event）
+    struct BenchKeyClient {
+        dc: Arc<RTCDataChannel>,
+        counter: usize,
+    }
+
+    impl BenchKeyClient {
+        async fn send_key(
+            &mut self,
+            round: &str,
+            scenario: &str,
+            code: &str,
+            down: bool,
+        ) -> String {
+            let seq = self.counter;
+            self.counter += 1;
+            let trace_id = format!(
+                "{round}/{scenario}/#{seq}:{}:{code}",
+                if down { "down" } else { "up" }
+            );
+            let event = if down {
+                serde_json::json!({"type": "key_down", "code": code, "repeat": false, "meta": 0})
+            } else {
+                serde_json::json!({"type": "key_up", "code": code, "meta": 0})
+            };
+            let msg = serde_json::json!({
+                "type": "input_event",
+                "trace_id": trace_id,
+                "client_send_ts": now_epoch_us(),
+                "event": event,
+            });
+            let bytes = serde_json::to_vec(&msg).expect("serialize input_event");
+            self.dc
+                .send(&Bytes::from(bytes))
+                .await
+                .expect("DataChannel send");
+            trace_id
+        }
+    }
+
+    async fn wait_for_records(
+        records: &std::sync::Mutex<Vec<KeymapTraceRecord>>,
+        expected: usize,
+    ) -> Vec<KeymapTraceRecord> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let snapshot = records.lock().expect("trace records").clone();
+            if snapshot.len() >= expected {
+                return snapshot;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "30s 内只收到 {}/{} 条 trace 记录（丢事件或链路卡死）",
+                    snapshot.len(),
+                    expected
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[derive(Debug, Clone, serde::Serialize)]
+    struct StageStats {
+        samples: usize,
+        p50_us: f64,
+        p95_us: f64,
+        p99_us: f64,
+        max_us: f64,
+    }
+
+    fn stage_stats(values: Vec<f64>) -> StageStats {
+        let mut sorted = values;
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        StageStats {
+            samples: sorted.len(),
+            p50_us: nearest_rank(&sorted, 50.0),
+            p95_us: nearest_rank(&sorted, 95.0),
+            p99_us: nearest_rank(&sorted, 99.0),
+            max_us: sorted.last().copied().unwrap_or(0.0),
+        }
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    struct ScenarioStats {
+        events: usize,
+        stages: BTreeMap<&'static str, StageStats>,
+    }
+
+    /// 正确性断言 + 阶段统计。只校验不丢/不乱序/KeyUp 全送达/链路正确，
+    /// 不对延迟数值做任何断言（防 flaky，计划 8.8）。
+    fn analyze_scenario(
+        expected_path: KeymapTracePath,
+        scenario: &'static str,
+        sent: &[String],
+        got: &[KeymapTraceRecord],
+    ) -> ScenarioStats {
+        assert_eq!(
+            got.len(),
+            sent.len(),
+            "{scenario} 丢/多事件：sent={} got={}",
+            sent.len(),
+            got.len()
+        );
+        let mut keydown_by_code: BTreeMap<String, usize> = BTreeMap::new();
+        let mut keyup_by_code: BTreeMap<String, usize> = BTreeMap::new();
+        for (index, (id, record)) in sent.iter().zip(got.iter()).enumerate() {
+            assert_eq!(
+                id, &record.trace_id,
+                "{scenario} 第 {index} 条 trace_id 不匹配（乱序或串扰）"
+            );
+            assert_eq!(
+                record.path, expected_path,
+                "{scenario} 走了错误链路（期望 {expected_path:?}）"
+            );
+            if id.contains(":down:") {
+                let code = id.rsplit(':').next().unwrap_or_default().to_string();
+                *keydown_by_code.entry(code).or_default() += 1;
+            } else if id.contains(":up:") {
+                let code = id.rsplit(':').next().unwrap_or_default().to_string();
+                *keyup_by_code.entry(code).or_default() += 1;
+            }
+        }
+        assert_eq!(
+            keydown_by_code, keyup_by_code,
+            "{scenario} KeyDown/KeyUp 不配对（KeyUp 未全部送达）"
+        );
+        // 服务端单消费者串行写 scrcpy：写完成时刻（进程内单调钟）必须不降。
+        // 注意不能用相对值 scrcpy_write_us 判序——它是各事件"写完成-收到"
+        // 的时长，处理快慢波动下天然非单调。
+        for pair in got.windows(2) {
+            assert!(
+                pair[1].scrcpy_write_instant >= pair[0].scrcpy_write_instant,
+                "{scenario} scrcpy 写乱序：{} -> {}",
+                pair[0].trace_id,
+                pair[1].trace_id
+            );
+        }
+
+        let browser_to_server = |r: &KeymapTraceRecord| {
+            r.server_receive_epoch_us
+                .saturating_sub(r.client_send_epoch_us.unwrap_or(r.server_receive_epoch_us))
+                as f64
+        };
+        let mut stages = BTreeMap::new();
+        stages.insert(
+            "browser_to_server",
+            stage_stats(got.iter().map(browser_to_server).collect()),
+        );
+        stages.insert(
+            "server_receive_to_wasm_begin",
+            stage_stats(got.iter().map(|r| r.wasm_begin_us as f64).collect()),
+        );
+        stages.insert(
+            "wasm_execution",
+            stage_stats(
+                got.iter()
+                    .map(|r| r.wasm_end_us.saturating_sub(r.wasm_begin_us) as f64)
+                    .collect(),
+            ),
+        );
+        stages.insert(
+            "wasm_end_to_device_action",
+            stage_stats(
+                got.iter()
+                    .map(|r| r.device_action_us.saturating_sub(r.wasm_end_us) as f64)
+                    .collect(),
+            ),
+        );
+        stages.insert(
+            "device_action_to_scrcpy_write",
+            stage_stats(
+                got.iter()
+                    .map(|r| r.scrcpy_write_us.saturating_sub(r.device_action_us) as f64)
+                    .collect(),
+            ),
+        );
+        stages.insert(
+            "server_internal_total",
+            stage_stats(got.iter().map(|r| r.scrcpy_write_us as f64).collect()),
+        );
+        stages.insert(
+            "full_chain_in_process",
+            stage_stats(
+                got.iter()
+                    .map(|r| r.scrcpy_write_us as f64 + browser_to_server(r))
+                    .collect(),
+            ),
+        );
+        ScenarioStats {
+            events: got.len(),
+            stages,
+        }
+    }
+
+    /// 单场景：等全部 trace 到齐 → 断言并统计 → 打 PERF 行（调用前已清空收集器）
+    async fn run_one_scenario(
+        records: &std::sync::Mutex<Vec<KeymapTraceRecord>>,
+        expected_path: KeymapTracePath,
+        scenario: &'static str,
+        sent: Vec<String>,
+    ) -> ScenarioStats {
+        let got = wait_for_records(records, sent.len()).await;
+        let stats = analyze_scenario(expected_path, scenario, &sent, &got);
+        for (stage, s) in &stats.stages {
+            println!(
+                "PERF metric=keymap_e2e path={expected_path:?} scenario={scenario} stage={stage} samples={} p50_us={:.1} p95_us={:.1} p99_us={:.1} max_us={:.1}",
+                s.samples, s.p50_us, s.p95_us, s.p99_us, s.max_us
+            );
+        }
+        stats
+    }
+
+    async fn scenario_normal(client: &mut BenchKeyClient, round: &str) -> Vec<String> {
+        let mut sent = Vec::new();
+        for _ in 0..20 {
+            for (code, _) in E2E_KEYS {
+                sent.push(client.send_key(round, "normal", code, true).await);
+                tokio::time::sleep(Duration::from_millis(12)).await;
+                sent.push(client.send_key(round, "normal", code, false).await);
+                tokio::time::sleep(Duration::from_millis(8)).await;
+            }
+        }
+        sent
+    }
+
+    /// 长按：每键 1s / 2s 轮流（Down → 保持 → Up）
+    async fn scenario_long_press(client: &mut BenchKeyClient, round: &str) -> Vec<String> {
+        let mut sent = Vec::new();
+        for (index, (code, _)) in E2E_KEYS.iter().enumerate() {
+            let hold = if index % 2 == 0 { 1000 } else { 2000 };
+            sent.push(client.send_key(round, "long_press", code, true).await);
+            tokio::time::sleep(Duration::from_millis(hold)).await;
+            sent.push(client.send_key(round, "long_press", code, false).await);
+        }
+        sent
+    }
+
+    /// 组合键：ShiftLeft + KeyW 同时按住 200ms × 10
+    async fn scenario_combo(client: &mut BenchKeyClient, round: &str) -> Vec<String> {
+        let mut sent = Vec::new();
+        for _ in 0..10 {
+            sent.push(client.send_key(round, "combo", E2E_COMBO_MOD, true).await);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            sent.push(client.send_key(round, "combo", "KeyW", true).await);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            sent.push(client.send_key(round, "combo", "KeyW", false).await);
+            sent.push(client.send_key(round, "combo", E2E_COMBO_MOD, false).await);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        sent
+    }
+
+    /// 连续输入 burst：6 轮 × 5 键 ×（down,up）= 60 事件不间歇发送
+    async fn scenario_burst(client: &mut BenchKeyClient, round: &str) -> Vec<String> {
+        let mut sent = Vec::new();
+        for _ in 0..6 {
+            for (code, _) in E2E_KEYS {
+                sent.push(client.send_key(round, "burst", code, true).await);
+                sent.push(client.send_key(round, "burst", code, false).await);
+            }
+        }
+        sent
+    }
+
+    async fn scenario_round(
+        client: &mut BenchKeyClient,
+        records: &std::sync::Mutex<Vec<KeymapTraceRecord>>,
+        expected_path: KeymapTracePath,
+        round: &str,
+    ) -> BTreeMap<&'static str, ScenarioStats> {
+        let mut results = BTreeMap::new();
+        records.lock().expect("trace records").clear();
+        results.insert(
+            "normal",
+            run_one_scenario(
+                records,
+                expected_path,
+                "normal",
+                scenario_normal(client, round).await,
+            )
+            .await,
+        );
+        records.lock().expect("trace records").clear();
+        results.insert(
+            "long_press",
+            run_one_scenario(
+                records,
+                expected_path,
+                "long_press",
+                scenario_long_press(client, round).await,
+            )
+            .await,
+        );
+        records.lock().expect("trace records").clear();
+        results.insert(
+            "combo",
+            run_one_scenario(
+                records,
+                expected_path,
+                "combo",
+                scenario_combo(client, round).await,
+            )
+            .await,
+        );
+        records.lock().expect("trace records").clear();
+        results.insert(
+            "burst",
+            run_one_scenario(
+                records,
+                expected_path,
+                "burst",
+                scenario_burst(client, round).await,
+            )
+            .await,
+        );
+        results
+    }
+
+    fn git_commit() -> String {
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|commit| !commit.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    fn delta_json(
+        native: &BTreeMap<&'static str, ScenarioStats>,
+        wasm: &BTreeMap<&'static str, ScenarioStats>,
+    ) -> serde_json::Value {
+        let mut out = serde_json::Map::new();
+        for (scenario, wasm_stats) in wasm {
+            let Some(native_stats) = native.get(scenario) else {
+                continue;
+            };
+            let mut stages = serde_json::Map::new();
+            for (stage, ws) in &wasm_stats.stages {
+                if let Some(ns) = native_stats.stages.get(stage) {
+                    stages.insert(
+                        stage.to_string(),
+                        serde_json::json!({
+                            "p50_us": ws.p50_us - ns.p50_us,
+                            "p95_us": ws.p95_us - ns.p95_us,
+                            "p99_us": ws.p99_us - ns.p99_us,
+                            "max_us": ws.max_us - ns.max_us,
+                        }),
+                    );
+                }
+            }
+            out.insert(scenario.to_string(), serde_json::Value::Object(stages));
+        }
+        serde_json::Value::Object(out)
+    }
+
+    fn sample_count_json(round: &BTreeMap<&'static str, ScenarioStats>) -> serde_json::Value {
+        serde_json::Value::Object(
+            round
+                .iter()
+                .map(|(scenario, stats)| (scenario.to_string(), serde_json::json!(stats.events)))
+                .collect(),
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "需要真实 Android 设备；设置 GAMER_PHASE0_ANDROID=1 后显式运行"]
+    async fn phase0_android_keymap_e2e_latency_native_vs_wasm() {
+        android_gate();
+        let _device = lock_device().await;
+        let cfg = bench_config();
+        let adb = Adb::new(&cfg);
+        let serial = require_device(&adb).await;
+        let model = adb
+            .shell(&serial, "getprop ro.product.model", Duration::from_secs(8))
+            .await
+            .unwrap_or_default();
+        let android_version = adb
+            .shell(
+                &serial,
+                "getprop ro.build.version.release",
+                Duration::from_secs(8),
+            )
+            .await
+            .unwrap_or_default();
+        println!(
+            "PHASE0 keymap_e2e device={serial} model={} android={}",
+            model.trim(),
+            android_version.trim()
+        );
+        wake_screen(&adb, &serial).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let residue_before = scrcpy_residue(&adb, &serial).await;
+        let device = bench_device(&serial);
+
+        // 1) 真实 scrcpy 会话（生产连接入口）
+        let outcome = connect_to_first_frame(&adb, &cfg, &device)
+            .await
+            .expect("scrcpy 会话建立失败");
+        let session = outcome.session.clone();
+        let (width, height) = session.video_size();
+        println!("PHASE0 keymap_e2e session_ready res={width}x{height}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // 2) ExtensionService：native 轮无 keymap 实例 → dispatch 全部
+        //    pass-through；wasm 轮安装并启动 fixture guest 走组件链路
+        let plugin_temp = tempfile::tempdir().expect("临时插件存储");
+        let extensions = Arc::new(ExtensionService::with_keymap_runtime(
+            ExtensionStore::new(plugin_temp.path()),
+            Arc::new(NoWasmRuntime),
+            Arc::new(crate::extensions::LazyKeymapWasmRuntime::new()),
+            bench_capability_registry(session.clone()),
+        ));
+
+        // 3) DataChannel 回环 + 生产同构 control worker（DC 回调只入队，
+        //    单消费者按到达顺序串行处理，保证 scrcpy 控制写保序）
+        let (browser_dc, server_dc, pcs) = connect_control_channel_pair().await;
+        let touch_state = Arc::new(crate::webrtc::TouchState::default());
+        let audio_on = Arc::new(AtomicBool::new(false));
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        {
+            let worker_session = session.clone();
+            let worker_extensions = extensions.clone();
+            let worker_touch = touch_state.clone();
+            tokio::spawn(async move {
+                while let Some(data) = control_rx.recv().await {
+                    if let Err(error) = crate::webrtc::handle_control_msg(
+                        &worker_session,
+                        &audio_on,
+                        &worker_touch,
+                        &worker_extensions,
+                        &data,
+                    )
+                    .await
+                    {
+                        println!("PHASE0 keymap_e2e control error: {error:#}");
+                    }
+                }
+            });
+        }
+        {
+            let tx = control_tx.clone();
+            server_dc.on_message(Box::new(move |msg| {
+                let _ = tx.send(msg.data.to_vec());
+                Box::pin(async {})
+            }));
+        }
+
+        // 4) trace 收集器（进程内 unbounded channel，永不阻塞控制链路；
+        //    结束移除恢复默认零开销路径）
+        let (trace_tx, mut trace_rx) = tokio::sync::mpsc::unbounded_channel::<KeymapTraceRecord>();
+        let records = Arc::new(std::sync::Mutex::new(Vec::<KeymapTraceRecord>::new()));
+        {
+            let records = records.clone();
+            tokio::spawn(async move {
+                while let Some(record) = trace_rx.recv().await {
+                    records.lock().expect("trace records").push(record);
+                }
+            });
+        }
+        install_keymap_trace_sink(trace_tx);
+
+        let mut client = BenchKeyClient {
+            dc: browser_dc.clone(),
+            counter: 0,
+        };
+
+        // ---------- Native 轮（无 keymap 实例 → pass-through 直通） ----------
+        let native = scenario_round(&mut client, &records, KeymapTracePath::Native, "native").await;
+
+        // ---------- WASM 轮（安装并启动 gamer.keymap fixture guest） ----------
+        let keymap_id = ExtensionId::parse(KEYMAP_EXTENSION_ID).expect("built-in keymap id");
+        let component = crate::extensions::build_guest_fixture_component();
+        let package =
+            crate::extensions::package_guest_fixture_gplugin(&component, &["input.key", "touch"]);
+        extensions
+            .install(&package)
+            .await
+            .expect("安装 keymap fixture gplugin");
+        extensions.enable(&keymap_id).await.expect("enable keymap");
+        extensions
+            .start_with_context(&keymap_id, None, Some(e2e_profile_yaml()))
+            .await
+            .expect("启动 keymap WASM 实例");
+        // warmup：一对 down/up，确认事件确实走 WASM 链路（trace path=wasm）
+        {
+            records.lock().expect("trace records").clear();
+            let sent = vec![
+                client.send_key("wasm", "warmup", "KeyW", true).await,
+                client.send_key("wasm", "warmup", "KeyW", false).await,
+            ];
+            let got = wait_for_records(&records, sent.len()).await;
+            analyze_scenario(KeymapTracePath::Wasm, "warmup", &sent, &got);
+            println!("PHASE0 keymap_e2e wasm warmup ok（guest 已消费并写 scrcpy）");
+        }
+        let wasm = scenario_round(&mut client, &records, KeymapTracePath::Wasm, "wasm").await;
+        let _ = extensions.stop(&keymap_id).await;
+
+        // ---------- 汇总输出（计划 8.7：机器可读 baseline） ----------
+        // 每轮 = 20×2×5(normal) + 2×5(long_press) + 4×10(combo) + 60(burst) = 310
+        let expected_per_round = 20 * 2 * E2E_KEYS.len() + 2 * E2E_KEYS.len() + 4 * 10 + 60;
+        let native_events: usize = native.values().map(|s| s.events).sum();
+        let wasm_events: usize = wasm.values().map(|s| s.events).sum();
+        assert_eq!(
+            native_events, expected_per_round,
+            "native 轮样本量 {native_events} ≠ 预期 {expected_per_round}"
+        );
+        assert_eq!(
+            wasm_events, expected_per_round,
+            "wasm 轮样本量 {wasm_events} ≠ 预期 {expected_per_round}"
+        );
+        let result = serde_json::json!({
+            "schema_version": 1,
+            "captured_at_utc": chrono::Utc::now().to_rfc3339(),
+            "git_commit": git_commit(),
+            "purpose": "Phase 6 keymap 真机 E2E 延迟 baseline（gamer_v2_architecture_closure_plan 8.7）",
+            "device": {
+                "model": model.trim(),
+                "serial": serial,
+                "android_version": android_version.trim(),
+                "screen": format!("{width}x{height}"),
+            },
+            "browser": "webrtc-rs in-process DataChannel client（浏览器端 JS 开销未含；browser_to_server 为进程内 SCTP 传输）",
+            "connection_type": "usb adb",
+            "build_profile": "release",
+            "trace": {
+                "envelope_fields": "input_event 信封可选 trace_id/client_send_ts（epoch 微秒）",
+                "gating": "默认关闭；基准在进程内安装收集器；GAMER_KEYMAP_E2E_TRACE=1 时生产路径额外输出 tracing 日志",
+                "stages": [
+                    "browser_to_server: server_receive - client_send（仅同进程时钟同源可直接相减；真实浏览器须按计划 8.3 分开统计）",
+                    "server_receive_to_wasm_begin: WASM=实例查找+命令队列排队至 guest 调用前；native=native_mapping 开始",
+                    "wasm_execution: guest handle 调用（native 链路为映射决策，≈0）",
+                    "wasm_end_to_device_action: guest 结果授权+映射至动作执行前",
+                    "device_action_to_scrcpy_write: 动作执行至 scrcpy 控制写完成",
+                    "server_internal_total: server_receive → scrcpy 写完成",
+                    "full_chain_in_process: browser_to_server + server_internal_total",
+                ],
+            },
+            "sample_count": {
+                "native": sample_count_json(&native),
+                "wasm": sample_count_json(&wasm),
+            },
+            "native": serde_json::to_value(&native).unwrap(),
+            "wasm": serde_json::to_value(&wasm).unwrap(),
+            "delta_wasm_minus_native_us": delta_json(&native, &wasm),
+            "notes": [
+                "两轮同设备同会话同 DataChannel；WASM profile 用 raw_key 复刻 android_keycode 映射，两轮最终 scrcpy 写一致",
+                "设备端 Android 输入管线到游戏的延迟不在两轮测量范围内（终点点为 scrcpy control write 完成）",
+                "本测试不断言任何延迟数值（计划 8.8：先建 baseline），只断言事件不丢/不乱序/KeyUp 全送达",
+            ],
+        });
+        let out_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../benchmarks/results");
+        std::fs::create_dir_all(&out_dir).expect("创建 benchmarks/results 目录");
+        let out_path = out_dir.join("keymap-e2e.json");
+        std::fs::write(
+            &out_path,
+            serde_json::to_string_pretty(&result).expect("序列化 E2E 结果"),
+        )
+        .expect("写入 keymap-e2e.json");
+        let native_total_p95 = native["normal"].stages["server_internal_total"].p95_us;
+        let wasm_total_p95 = wasm["normal"].stages["server_internal_total"].p95_us;
+        println!(
+            "PERF metric=keymap_e2e summary native_events={} wasm_events={} native_normal_total_p95_us={native_total_p95:.1} wasm_normal_total_p95_us={wasm_total_p95:.1} delta_p95_us={:.1}",
+            native.values().map(|s| s.events).sum::<usize>(),
+            wasm.values().map(|s| s.events).sum::<usize>(),
+            wasm_total_p95 - native_total_p95
+        );
+        println!(
+            "RESULT keymap_e2e_baseline={}",
+            std::fs::canonicalize(&out_path)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| out_path.display().to_string())
+        );
+
+        // ---------- 收尾 ----------
+        clear_keymap_trace_sink();
+        drop(client);
+        let _ = browser_dc.close().await;
+        let _ = server_dc.close().await;
+        let _ = pcs.0.close().await;
+        let _ = pcs.1.close().await;
+        teardown(outcome).await;
+        let residue_after = wait_residue_settles(&adb, &serial, residue_before).await;
+        let _ = adb
+            .run(
+                &["-s", &serial, "reverse", "--remove-all"],
+                Duration::from_secs(5),
+            )
+            .await;
+        sleep_screen(&adb, &serial).await;
         assert!(
             residue_after <= residue_before,
             "设备侧出现 scrcpy app_process 残留进程（before={residue_before} after={residue_after}）"

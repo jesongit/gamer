@@ -20,8 +20,8 @@ use super::store::{ExtensionStore, InstalledExtension};
 use super::ui::{RegisteredUiContribution, UiContributionRegistry};
 use super::wasm::{WasmInstanceHandle, WasmRuntime, WasmStartRequest};
 use super::{
-    InputEvent, InputResult, KeymapWasmInstanceHandle, KeymapWasmRuntime, KeymapWasmStartRequest,
-    NoKeymapWasmRuntime, ScreenSize, KEYMAP_EXTENSION_ID,
+    InputEvent, InputResult, KeymapTraceContext, KeymapWasmInstanceHandle, KeymapWasmRuntime,
+    KeymapWasmStartRequest, NoKeymapWasmRuntime, ScreenSize, KEYMAP_EXTENSION_ID,
 };
 use crate::yaml_extension::{
     NoYamlWasmRuntime, YamlProgramResolver, YamlWasmRunRequest, YamlWasmRuntime,
@@ -289,12 +289,15 @@ impl ExtensionService {
 
     /// Dispatch an input envelope to the running keymap extension. A missing
     /// or stopped keymap is a normal pass-through so the legacy control path
-    /// remains available.
+    /// remains available. `trace` is the optional Phase 6 E2E latency context
+    /// (present only when the trace sink is installed or the env gate is on);
+    /// it flows through to the runtime for stage stamping.
     pub(crate) async fn dispatch_keymap_input(
         &self,
         device: crate::capabilities::DeviceHandle,
         screen: ScreenSize,
         event: InputEvent,
+        trace: Option<KeymapTraceContext>,
     ) -> ExtensionResult<InputResult> {
         let instance = self
             .keymap_running
@@ -306,7 +309,7 @@ impl ExtensionService {
             return Ok(InputResult::pass());
         };
         self.keymap_runtime
-            .dispatch(instance, device, screen, event)
+            .dispatch(instance, device, screen, event, trace)
             .await
     }
 

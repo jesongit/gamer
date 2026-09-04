@@ -59,3 +59,41 @@ powershell -ExecutionPolicy Bypass -File tools\generate-phase0-baseline.ps1 -Val
   --ignored --nocapture phase0_android_` 复现。模块内 `DEVICE_LOCK` 串行
   （并行会互拆 reverse 隧道产生短暂孤儿 scrcpy server）；结束后轮询校验设备
   无 `app_process` 残留、reverse 隧道清空、屏幕恢复熄灭。
+
+## keymap E2E（Phase 6，真机 opt-in）
+
+`results/keymap-e2e.json` 由真机基准
+`phase0_android_keymap_e2e_latency_native_vs_wasm` 自动生成（不手填）：
+
+```powershell
+$env:GAMER_PHASE0_ANDROID="1"
+cd server; cargo test --release -- --ignored --nocapture phase0_android_keymap_e2e
+```
+
+### 测量方法
+
+- **链路**：进程内 webrtc-rs DataChannel 客户端（浏览器替身）→ 真实 SCTP/DTLS
+  DataChannel → 生产同构 control worker（单消费者串行）→ `handle_control_msg`
+  → keymap（native 直通 / WASM `gamer.keymap` 组件）→ DeviceAction → scrcpy
+  control socket 写。ICE/DTLS/SRTP/SCTP 全真实；**浏览器 JS 开销不在测量
+  范围**（计划 8.3 允许 Browser RTT 与 Server 内部阶段分开统计）。
+- **两轮同环境**：同一 scrcpy 会话 + 同一 DataChannel。Native 轮无 keymap
+  实例（事件 pass-through 直通）；WASM 轮安装并启动 fixture guest，profile
+  用 `raw_key` 复刻 `android_keycode` 的 W/A/S/D/Space/ShiftLeft 映射——两轮
+  最终 scrcpy 控制写完全一致，差异只在映射层。
+- **阶段**（`input_event` 信封可选 `trace_id`/`client_send_ts`，服务端
+  `KeymapTraceRecord` 记录）：`browser_to_server`（仅进程内时钟同源可直接
+  相减；真实浏览器须分开统计）、`server_receive_to_wasm_begin`、
+  `wasm_execution`、`wasm_end_to_device_action`、`device_action_to_scrcpy_write`、
+  `server_internal_total`、`full_chain_in_process`；`delta_wasm_minus_native_us`
+  为计划 8.5 的关注点。native 链路的 wasm 阶段记为 native_mapping（即查即决，
+  ≈0）。
+- **场景**（计划 8.6）：普通按键（W/A/S/D/Space × 20 轮 down/up）、长按
+  （每键 1s/2s 轮流）、组合键（ShiftLeft+KeyW 按住 200ms × 10）、连续 burst
+  （6 轮 × 5 键 × down/up = 60 事件不间歇发送）。正确性断言：不丢事件、
+  顺序一致、KeyUp 全部送达、scrcpy 写单调不降；**不断言任何延迟数值**
+  （计划 8.8：先建 baseline，防 flaky）。
+- **trace 门禁**：默认关闭零开销；基准在进程内安装收集器，
+  `GAMER_KEYMAP_E2E_TRACE=1` 时生产路径额外以 tracing 日志输出记录。
+- 设备端 Android 输入管线到游戏的延迟不在测量范围内（终点点为 scrcpy
+  control write 完成），对两轮等同。

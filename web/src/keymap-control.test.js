@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   KEYMAP_ACTION_TYPES,
   INPUT_PROTOCOL_VERSION,
+  buildInputEventEnvelope,
   buildTouchPhase,
   createKeymapController,
   indexKeymap,
   isInputSelector,
+  makeTraceFields,
   normalizeInputEvent,
   normalizeKeymap,
   validateKeymap,
@@ -456,5 +458,107 @@ describe('keymap-control routing', () => {
 
     expect(result).toEqual({ handled: true })
     expect(fallback.handleKeydown).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('keymap-control e2e trace envelope', () => {
+  it('keeps the default envelope free of trace fields', () => {
+    const event = { type: 'key_down', code: 'KeyW', repeat: false, meta: 0 }
+    expect(buildInputEventEnvelope(event)).toEqual({ type: 'input_event', event })
+    expect(buildInputEventEnvelope(event, null)).toEqual({ type: 'input_event', event })
+  })
+
+  it('attaches trace_id and epoch-microsecond client_send_ts when asked', () => {
+    const fields = makeTraceFields()
+    expect(typeof fields.trace_id).toBe('string')
+    expect(fields.trace_id.length).toBeGreaterThan(0)
+    expect(Number.isInteger(fields.client_send_ts)).toBe(true)
+    expect(fields.client_send_ts).toBeGreaterThan(1_600_000_000_000_000)
+
+    const event = { type: 'key_up', code: 'KeyW', meta: 0 }
+    const envelope = buildInputEventEnvelope(event, fields)
+    expect(envelope).toEqual({
+      type: 'input_event',
+      event,
+      trace_id: fields.trace_id,
+      client_send_ts: fields.client_send_ts,
+    })
+  })
+
+  it('generates distinct trace ids and non-decreasing timestamps', () => {
+    const first = makeTraceFields()
+    const second = makeTraceFields()
+    expect(second.trace_id).not.toBe(first.trace_id)
+    expect(second.client_send_ts).toBeGreaterThanOrEqual(first.client_send_ts)
+  })
+
+  it('emits no trace fields unless traceInput is enabled', () => {
+    const sendInputEvent = vi.fn()
+    const remote = { value: true }
+    const controller = createKeymapController({ remote, sendInputEvent })
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.handleKeyup(keyEvent('KeyW'))
+    for (const [message] of sendInputEvent.mock.calls) {
+      expect(message).not.toHaveProperty('trace_id')
+      expect(message).not.toHaveProperty('client_send_ts')
+    }
+  })
+
+  it('adds trace fields to input_event envelopes when traceInput is on', () => {
+    const sendInputEvent = vi.fn()
+    const remote = { value: true }
+    const controller = createKeymapController({ remote, sendInputEvent, traceInput: true })
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.handleKeyup(keyEvent('KeyW'))
+
+    expect(sendInputEvent).toHaveBeenCalledTimes(2)
+    const ids = sendInputEvent.mock.calls.map(([message]) => message.trace_id)
+    expect(ids[0]).toBeTruthy()
+    expect(ids[1]).toBeTruthy()
+    expect(ids[1]).not.toBe(ids[0])
+    for (const [message] of sendInputEvent.mock.calls) {
+      expect(message.type).toBe('input_event')
+      expect(Number.isInteger(message.client_send_ts)).toBe(true)
+      expect(message.client_send_ts).toBeGreaterThan(1_600_000_000_000_000)
+    }
+    // key_up with trace on still matches the shared wire shape
+    const [, upMessage] = sendInputEvent.mock.calls.map(([message]) => message)
+    expect(upMessage.event).toEqual({ type: 'key_up', code: 'KeyW', meta: 0 })
+  })
+
+  it('honours a traceInput provider function (including opt-out per event)', () => {
+    const sendInputEvent = vi.fn()
+    const remote = { value: true }
+    const fixed = { trace_id: 'fixed-id', client_send_ts: 123 }
+    const controller = createKeymapController({
+      remote,
+      sendInputEvent,
+      traceInput: event => (event.type === 'key_down' ? fixed : null),
+    })
+    controller.handleKeydown(keyEvent('KeyW'))
+    controller.handleKeyup(keyEvent('KeyW'))
+
+    const [down, up] = sendInputEvent.mock.calls.map(([message]) => message)
+    expect(down).toEqual({
+      type: 'input_event',
+      event: { type: 'key_down', code: 'KeyW', repeat: false, meta: 0 },
+      trace_id: 'fixed-id',
+      client_send_ts: 123,
+    })
+    expect(up).not.toHaveProperty('trace_id')
+  })
+
+  it('traces the releaseAll remote key_up flush too', () => {
+    const sendInputEvent = vi.fn(() => false)
+    const remote = { value: true }
+    const controller = createKeymapController({ remote, sendInputEvent, traceInput: true })
+    controller.handleKeydown(keyEvent('KeyA'))
+    controller.handleWindowBlur()
+
+    expect(sendInputEvent).toHaveBeenCalledTimes(2)
+    const messages = sendInputEvent.mock.calls.map(([message]) => message)
+    expect(messages[1].event).toEqual({ type: 'key_up', code: 'KeyA', meta: 0 })
+    expect(messages[1].trace_id).toBeTruthy()
+    expect(Number.isInteger(messages[1].client_send_ts)).toBe(true)
   })
 })

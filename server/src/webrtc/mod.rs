@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -17,7 +17,10 @@ use tracing::{debug, info, warn};
 
 use crate::capabilities::{DeviceHandle, DeviceId};
 use crate::device::scrcpy::{AudioFrame, ScrcpySession, VideoFrame};
-use crate::extensions::{ExtensionService, InputEvent};
+use crate::extensions::{
+    emit_keymap_trace, keymap_trace_active, ExtensionService, InputEvent, KeymapTraceContext,
+    KeymapTracePath, KeymapTraceRecord,
+};
 
 mod events;
 mod protocol;
@@ -1251,7 +1254,7 @@ fn key_control_fields(msg: &serde_json::Value) -> anyhow::Result<(u8, u32, u32, 
     Ok((action, keycode, repeat, meta))
 }
 
-async fn handle_control_msg(
+pub(crate) async fn handle_control_msg(
     session: &Arc<ScrcpySession>,
     audio_on: &Arc<std::sync::atomic::AtomicBool>,
     touch_state: &TouchState,
@@ -1262,6 +1265,9 @@ async fn handle_control_msg(
     let t = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match t {
         "input_event" => {
+            // Phase 6 E2E trace：信封可选 trace_id/client_send_ts（epoch µs）。
+            // trace 未激活时这里是单次原子检查，默认零行为变化。
+            let trace = trace_context_from_message(&msg);
             let event: InputEvent = serde_json::from_value(
                 msg.get("event")
                     .cloned()
@@ -1273,13 +1279,16 @@ async fn handle_control_msg(
                     DeviceHandle::new(DeviceId::new(session.device.id.clone())),
                     crate::extensions::ScreenSize::new(width, height),
                     event.clone(),
+                    trace.clone(),
                 )
                 .await
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             if result.consume {
                 return Ok(());
             }
-            handle_passed_input_event(session, touch_state, event).await?;
+            // native 直通链路：wasm 阶段记为 native_mapping（映射即决策）
+            let native_map_begin = Instant::now();
+            handle_passed_input_event(session, touch_state, event, trace, native_map_begin).await?;
         }
         "tap" => {
             let x = msg["x"].as_f64().unwrap_or(0.0) as f32;
@@ -1400,11 +1409,20 @@ async fn handle_control_msg(
 /// Preserve the existing native control semantics for an input event which
 /// the WASM keymap explicitly passed through. This keeps the adapter boundary
 /// in one place: WASM may consume or pass, but never writes scrcpy packets.
+///
+/// Phase 6 E2E trace：native 链路的 wasm 阶段记为 native_mapping——映射是
+/// 纯查表决策，`map_begin`（pass-through 判定后）到写出动作决策几乎为零，
+/// 因此 wasm_begin/wasm_end/device_action 三点并记，`scrcpy_write` 记
+/// scrcpy 控制写完成的时刻。
 async fn handle_passed_input_event(
     session: &Arc<ScrcpySession>,
     touch_state: &TouchState,
     event: InputEvent,
+    trace: Option<KeymapTraceContext>,
+    map_begin: Instant,
 ) -> anyhow::Result<()> {
+    // 最后一次 scrcpy 控制写完成时刻；无写出的分支保持 map_begin
+    let mut write_at = map_begin;
     match event {
         InputEvent::KeyDown { code, repeat, meta } => {
             if let Some(keycode) = crate::extensions::android_keycode(&code) {
@@ -1416,6 +1434,7 @@ async fn handle_passed_input_event(
                         meta,
                     )
                     .await?;
+                write_at = Instant::now();
             }
         }
         InputEvent::KeyUp { code, meta } => {
@@ -1423,6 +1442,7 @@ async fn handle_passed_input_event(
                 session
                     .inject_keycode(crate::device::scrcpy::ACTION_UP, keycode, 0, meta)
                     .await?;
+                write_at = Instant::now();
             }
         }
         InputEvent::MouseDown { x, y, .. } => {
@@ -1438,6 +1458,7 @@ async fn handle_passed_input_event(
                     1.0,
                 )
                 .await?;
+            write_at = Instant::now();
             touch_state.insert(0, x as f32, y as f32)?;
         }
         InputEvent::MouseMove { x, y, .. } => {
@@ -1453,6 +1474,7 @@ async fn handle_passed_input_event(
                     1.0,
                 )
                 .await?;
+            write_at = Instant::now();
             touch_state.update(0, x as f32, y as f32)?;
         }
         InputEvent::MouseUp { x, y, .. } => {
@@ -1462,6 +1484,7 @@ async fn handle_passed_input_event(
             session
                 .inject_touch(crate::device::scrcpy::ACTION_UP, 0, x as f32, y as f32, 0.0)
                 .await?;
+            write_at = Instant::now();
             touch_state.remove(0)?;
         }
         InputEvent::Wheel {
@@ -1473,10 +1496,44 @@ async fn handle_passed_input_event(
             session
                 .inject_scroll(x as f32, y as f32, delta_x as f32, delta_y as f32)
                 .await?;
+            write_at = Instant::now();
         }
         InputEvent::GamepadButton { .. } | InputEvent::GamepadAxis { .. } => {}
     }
+    if let Some(trace) = trace {
+        // native_mapping 是即查即决的纯查表：wasm_begin/wasm_end/device_action
+        // 三点并记于映射开始时刻，scrcpy_write 单独记控制写完成
+        let record: KeymapTraceRecord = trace.record(
+            KeymapTracePath::Native,
+            map_begin,
+            map_begin,
+            map_begin,
+            write_at,
+        );
+        emit_keymap_trace(record);
+    }
     Ok(())
+}
+
+/// Phase 6 E2E trace：从 `input_event` 信封提取可选 trace 字段。
+/// 仅在 trace 激活（基准安装收集器 / GAMER_KEYMAP_E2E_TRACE=1）时返回
+/// 上下文；客户端未携带 trace_id 时自动生成，保证基准不依赖客户端改动。
+fn trace_context_from_message(msg: &serde_json::Value) -> Option<KeymapTraceContext> {
+    if !keymap_trace_active() {
+        return None;
+    }
+    let trace_id = match msg.get("trace_id").and_then(serde_json::Value::as_str) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => format!("auto-{}", uuid::Uuid::new_v4()),
+    };
+    // client_send_ts：epoch 微秒；同进程客户端可与 server_receive 直接相减，
+    // 真实浏览器跨机器时钟不可靠同步，分析时只作参考值记录。
+    let client_send_ts = msg
+        .get("client_send_ts")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value as u64);
+    Some(KeymapTraceContext::new(trace_id, client_send_ts))
 }
 
 /// 订阅设备帧广播 → 有界环形缓冲（每个 viewer 独立）
