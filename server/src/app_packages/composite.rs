@@ -1,19 +1,26 @@
-//! Composite 资源解析缝（Phase 4「务实范围」接线）。
+//! Composite 资源解析缝（三层统一）。
 //!
-//! 解析顺序固定为：**user-overrides → active App Package → legacy 分区目录**。
-//! 前两层在本模块实现；legacy 分区目录由调用方（scripts.rs / keymaps.rs 的
-//! 既有分区逻辑）兜底。
+//! 解析顺序固定为：**EditableLocal（本地编辑区）→ user-overrides → active
+//! App Package**，对所有资源类型（模板/按键映射/脚本/函数库）一致；同名资源
+//! 高优先层遮蔽低优先层。三层都在本模块实现，调用方不再各自兜底。
 //!
 //! 覆盖范围：
 //! - 模板：`find`/`match` 匹配路径与 script_v2 校验可用性共用
 //!   （`ScriptStore::resolve_template_path` / `template_avail`）；
-//! - 按键映射：`KeymapStore::get` / `list` 可见包内置方案；
-//! - 脚本/函数库：运行快照（engine/snapshot.rs）分别合并包内 `scripts/` 与
-//!   `functions/`（对应分区 scripts/ + functions/ 语义），override 优先、分区兜底。
+//! - 按键映射：`KeymapStore::get` / `list` 可见全部三层方案；
+//! - 脚本/函数库：运行快照（engine/snapshot.rs）分别合并 `scripts/` 与
+//!   `functions/` 三层同名源码（对应分区 scripts/ + functions/ 语义）。
 //!
-//! override 目录沿用 `user-overrides/<android-package>/<资源根>/<路径>` 布局
-//! （与 [`super::store::AppPackageStore::write_user_override`] 一致）；模板
-//! override 只认精确文件名，包内与分区一致支持「基名 + `#` 后缀」唯一消歧。
+//! 各层布局（目录即类型）：
+//! - EditableLocal = 本地编辑区，即 server 数据根下的分区目录
+//!   `<data_root>/<android_package>/<资源根>/…`（用户可直接编辑，写入接口
+//!   也只写这一层）；
+//! - override 沿用 `user-overrides/<android-package>/<资源根>/<路径>` 布局
+//!   （与 [`super::store::AppPackageStore::write_user_override`] 一致）；
+//! - active App Package 为安装目录内不可变内容。
+//!
+//! 任务预设（presets/）明确不接 composite：预设只在包激活时发布为任务预设，
+//! 本地 presets/ 仅随包搬运，不参与运行时解析。
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,9 +32,11 @@ use super::model::{
     InstalledVersion,
 };
 
-/// 命中资源的来源层（诊断与测试用）。
+/// 命中资源的来源层（诊断与测试可断言「这资源来自哪一层」）。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CompositeSource {
+    /// 本地编辑区分区目录（`<data_root>/<android_package>/…`），最高优先。
+    EditableLocal,
     UserOverride,
     InstalledPackage {
         app_package: AppPackageId,
@@ -42,7 +51,7 @@ pub(crate) struct CompositeHit {
     pub(crate) source: CompositeSource,
 }
 
-/// 模板短名解析结果：与 legacy 分区语义对齐（零候选 / 多候选均明确区分）。
+/// 模板短名解析结果：与本地编辑区分区语义对齐（零候选 / 多候选均明确区分）。
 #[derive(Clone, Debug)]
 pub(crate) enum TemplateLookup {
     Found(CompositeHit),
@@ -119,8 +128,9 @@ impl ActivePackage {
     }
 }
 
-/// 无状态 composite 解析器：全部事实（overrides、active 注册表、安装包）
-/// 都落在 `data_root` 文件系统上，可按需随处构造。
+/// 无状态 composite 解析器：全部事实（本地编辑区分区、overrides、active 注册
+/// 表、安装包）都落在 `data_root` 文件系统上，可按需随处构造。本地编辑区根 =
+/// `data_root` 本身（分区即 `<data_root>/<android_package>/`），无需额外装配。
 #[derive(Clone, Debug)]
 pub(crate) struct CompositeResolver {
     data_root: PathBuf,
@@ -135,6 +145,19 @@ impl CompositeResolver {
 
     fn overrides_root(&self, android: &AndroidPackageName) -> PathBuf {
         self.data_root.join("user-overrides").join(android.as_str())
+    }
+
+    /// 本地编辑区分区根：`<data_root>/<pkg>/`。分区名走与 ScriptStore /
+    /// KeymapStore 相同的 [`crate::core::fs::safe_name`] 校验（分区名不必满足
+    /// Android 包名文法），非法名 = 该层为空。
+    fn editable_partition(&self, pkg: &str) -> Option<PathBuf> {
+        crate::core::fs::safe_name(pkg).map(|name| self.data_root.join(name))
+    }
+
+    /// keymap 文件名防穿越/分隔符守卫（合法名由调用方规范化，这里只挡显式
+    /// 路径拼接逃逸）。
+    fn keymap_name_is_plain(name: &str) -> bool {
+        !name.is_empty() && !name.contains(['/', '\\']) && !name.contains("..")
     }
 
     /// 查找对某 Android package 生效的 active App Package（读 active 注册表
@@ -170,38 +193,75 @@ impl CompositeResolver {
         None
     }
 
-    /// 模板短名 composite 解析（override 精确名 → active 包短名消歧）。
-    /// 两层都未命中时返回 [`TemplateLookup::NotFound`]，由调用方回退 legacy 分区。
+    /// 模板短名 composite 解析：**本地编辑区 → override → active 包**，逐层
+    /// 解析（每层内先精确名、再「基名 + `#` 后缀」同扩展名唯一候选）。该层
+    /// Found 即返回；Ambiguous 只在本层产生并直接返回（不跨层吞掉）；NotFound
+    /// 落到下一层，三层都未命中返回 [`TemplateLookup::NotFound`]。
     pub(crate) fn template(&self, android: &str, short: &str) -> TemplateLookup {
-        let Some(android) = parse_android_package_name(android).ok() else {
-            return TemplateLookup::NotFound;
-        };
-        if let Some(name) = crate::scripts::sanitize_template_name(short) {
-            let path = self.overrides_root(&android).join("templates").join(&name);
-            if is_regular_file(&path).unwrap_or(false) {
-                return TemplateLookup::Found(CompositeHit {
-                    path,
-                    source: CompositeSource::UserOverride,
-                });
+        // 层 1：本地编辑区（分区 templates/）
+        if let Some(partition) = self.editable_partition(android) {
+            match match_short_name(&partition.join("templates"), short) {
+                ShortMatch::Found(path) => {
+                    return TemplateLookup::Found(CompositeHit {
+                        path,
+                        source: CompositeSource::EditableLocal,
+                    });
+                }
+                ShortMatch::Ambiguous { name, candidates } => {
+                    return TemplateLookup::Ambiguous { name, candidates };
+                }
+                ShortMatch::NotFound => {}
             }
         }
-        match self.active_package(android.as_str()) {
+        // 层 2：user-overrides
+        if let Ok(android) = parse_android_package_name(android) {
+            match match_short_name(&self.overrides_root(&android).join("templates"), short) {
+                ShortMatch::Found(path) => {
+                    return TemplateLookup::Found(CompositeHit {
+                        path,
+                        source: CompositeSource::UserOverride,
+                    });
+                }
+                ShortMatch::Ambiguous { name, candidates } => {
+                    return TemplateLookup::Ambiguous { name, candidates };
+                }
+                ShortMatch::NotFound => {}
+            }
+        }
+        // 层 3：active App Package
+        match self.active_package(android) {
             Some(active) => active.template(short),
             None => TemplateLookup::NotFound,
         }
     }
 
-    /// 按键映射 composite 解析（override 精确名 → active 包）。
+    /// 按键映射 composite 解析：**本地编辑区 → override → active 包**。
     pub(crate) fn keymap(&self, android: &str, name: &str) -> Option<CompositeHit> {
-        let android = parse_android_package_name(android).ok()?;
-        let override_path = self.overrides_root(&android).join("keymaps").join(name);
-        if is_regular_file(&override_path).unwrap_or(false) {
-            return Some(CompositeHit {
-                path: override_path,
-                source: CompositeSource::UserOverride,
-            });
+        if !Self::keymap_name_is_plain(name) {
+            return None;
         }
-        let active = self.active_package(android.as_str())?;
+        // 层 1：本地编辑区（分区 keymaps/）
+        if let Some(partition) = self.editable_partition(android) {
+            let path = partition.join("keymaps").join(name);
+            if is_regular_file(&path).unwrap_or(false) {
+                return Some(CompositeHit {
+                    path,
+                    source: CompositeSource::EditableLocal,
+                });
+            }
+        }
+        // 层 2：user-overrides
+        if let Ok(android) = parse_android_package_name(android) {
+            let path = self.overrides_root(&android).join("keymaps").join(name);
+            if is_regular_file(&path).unwrap_or(false) {
+                return Some(CompositeHit {
+                    path,
+                    source: CompositeSource::UserOverride,
+                });
+            }
+        }
+        // 层 3：active App Package
+        let active = self.active_package(android)?;
         let path = active.keymap(name)?;
         Some(CompositeHit {
             path,
@@ -212,58 +272,109 @@ impl CompositeResolver {
         })
     }
 
-    /// 脚本 composite 源码：override（`user-overrides/<android>/scripts/`）
-    /// 覆盖 active 包 `scripts/`；分区 scripts/ 由运行快照兜底（优先级最低）。
+    /// 脚本 composite 源码：三层 map 合并，同 key 高优先层覆盖低优先层
+    ///（合并顺序 = 包 → override → 本地编辑区）。key = 资源根内相对路径
+    /// 含扩展名。
     pub(crate) fn script_sources(
         &self,
         android: &str,
     ) -> std::io::Result<BTreeMap<String, String>> {
-        let mut merged = BTreeMap::new();
-        if let Some(active) = self.active_package(android) {
-            merged.extend(active.script_sources()?);
-        }
-        if let Ok(android) = parse_android_package_name(android) {
-            merged.extend(read_yaml_sources(
-                &self.overrides_root(&android).join("scripts"),
-            )?);
-        }
-        Ok(merged)
+        Ok(self
+            .layered_yaml_sources(android, "scripts")?
+            .into_iter()
+            .map(|(key, (content, _))| (key, content))
+            .collect())
     }
 
-    /// 函数库 composite 源码：override（`user-overrides/<android>/functions/`）
-    /// 覆盖 active 包 `functions/`；分区 functions/ 由运行快照兜底。
+    /// [`CompositeResolver::script_sources`] 的来源标注版（诊断/测试断言
+    /// 「这资源来自哪一层」）。
+    pub(crate) fn script_sources_with_source(
+        &self,
+        android: &str,
+    ) -> std::io::Result<BTreeMap<String, (String, CompositeSource)>> {
+        self.layered_yaml_sources(android, "scripts")
+    }
+
+    /// 函数库 composite 源码：三层 map 合并（包 → override → 本地编辑区）。
+    /// key = 资源根内相对路径含扩展名（运行快照按去扩展名短路径索引）。
     pub(crate) fn function_sources(
         &self,
         android: &str,
     ) -> std::io::Result<BTreeMap<String, String>> {
+        Ok(self
+            .layered_yaml_sources(android, "functions")?
+            .into_iter()
+            .map(|(key, (content, _))| (key, content))
+            .collect())
+    }
+
+    /// [`CompositeResolver::function_sources`] 的来源标注版。
+    pub(crate) fn function_sources_with_source(
+        &self,
+        android: &str,
+    ) -> std::io::Result<BTreeMap<String, (String, CompositeSource)>> {
+        self.layered_yaml_sources(android, "functions")
+    }
+
+    /// 三层 YAML 源码合并内核：低优先层先 insert、高优先层后覆盖。
+    /// 分区目录不存在 = 该层为空，不报错。
+    fn layered_yaml_sources(
+        &self,
+        android: &str,
+        subdir: &str,
+    ) -> std::io::Result<BTreeMap<String, (String, CompositeSource)>> {
         let mut merged = BTreeMap::new();
+        // 层 3（最低）：active App Package
         if let Some(active) = self.active_package(android) {
-            merged.extend(active.function_sources()?);
+            let source = CompositeSource::InstalledPackage {
+                app_package: active.id.clone(),
+                version: active.version.clone(),
+            };
+            for (key, content) in read_yaml_sources(&active.root.join(subdir))? {
+                merged.insert(key, (content, source.clone()));
+            }
         }
+        // 层 2：user-overrides
         if let Ok(android) = parse_android_package_name(android) {
-            merged.extend(read_yaml_sources(
-                &self.overrides_root(&android).join("functions"),
-            )?);
+            for (key, content) in read_yaml_sources(&self.overrides_root(&android).join(subdir))? {
+                merged.insert(key, (content, CompositeSource::UserOverride));
+            }
+        }
+        // 层 1（最高）：本地编辑区
+        if let Some(partition) = self.editable_partition(android) {
+            for (key, content) in read_yaml_sources(&partition.join(subdir))? {
+                merged.insert(key, (content, CompositeSource::EditableLocal));
+            }
         }
         Ok(merged)
     }
 
-    /// 按键映射文件名 union（override 优先、其后包内；均为字典序）。
+    /// 按键映射文件名三层并集（本地编辑区 → override → 包；按文件名去重、
+    /// 字典序）。高优先层的名字拼写优先保留。
     pub(crate) fn keymap_names(&self, android: &str) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        if let Ok(android) = parse_android_package_name(android) {
-            if let Ok(entries) = fs::read_dir(self.overrides_root(&android).join("keymaps")) {
+        let push_layer = |dir: PathBuf, names: &mut Vec<String>| {
+            if let Ok(entries) = fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     if let Ok(name) = entry.file_name().into_string() {
                         let lower = name.to_ascii_lowercase();
                         if entry.path().is_file()
                             && (lower.ends_with(".yaml") || lower.ends_with(".yml"))
+                            && !names
+                                .iter()
+                                .any(|existing| existing.eq_ignore_ascii_case(&name))
                         {
                             names.push(name);
                         }
                     }
                 }
             }
+        };
+        if let Some(partition) = self.editable_partition(android) {
+            push_layer(partition.join("keymaps"), &mut names);
+        }
+        if let Ok(android) = parse_android_package_name(android) {
+            push_layer(self.overrides_root(&android).join("keymaps"), &mut names);
         }
         if let Some(active) = self.active_package(android) {
             for name in active.keymap_names() {
@@ -397,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn template_lookup_prefers_override_then_package() {
+    fn template_lookup_prefers_editable_then_override_then_package() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path();
         let package_root = root.join("app-packages/official.a/1.0.0");
@@ -425,6 +536,7 @@ mod tests {
             other => panic!("expected package hit, got {other:?}"),
         }
 
+        // override 层命中（含来源断言）
         let override_file = root
             .join("user-overrides/com.example.game/templates")
             .join("icon.png");
@@ -438,6 +550,35 @@ mod tests {
             other => panic!("expected override hit, got {other:?}"),
         }
 
+        // 本地编辑区最高优先，且遮蔽 override/包
+        let local_file = root.join("com.example.game/templates").join("icon.png");
+        std::fs::create_dir_all(local_file.parent().unwrap()).unwrap();
+        std::fs::write(&local_file, b"editable").unwrap();
+        match resolver.template("com.example.game", "icon.png") {
+            TemplateLookup::Found(hit) => {
+                assert_eq!(hit.source, CompositeSource::EditableLocal);
+                assert_eq!(std::fs::read(&hit.path).unwrap(), b"editable");
+            }
+            other => panic!("expected editable hit, got {other:?}"),
+        }
+
+        // 删本地编辑区 → 回落 override；再删 override → 回落包
+        std::fs::remove_file(&local_file).unwrap();
+        match resolver.template("com.example.game", "icon.png") {
+            TemplateLookup::Found(hit) => {
+                assert_eq!(hit.source, CompositeSource::UserOverride);
+            }
+            other => panic!("expected override fallback, got {other:?}"),
+        }
+        std::fs::remove_file(&override_file).unwrap();
+        match resolver.template("com.example.game", "icon.png") {
+            TemplateLookup::Found(hit) => assert!(matches!(
+                hit.source,
+                CompositeSource::InstalledPackage { .. }
+            )),
+            other => panic!("expected package fallback, got {other:?}"),
+        }
+
         assert!(matches!(
             resolver.template("com.example.game", "missing"),
             TemplateLookup::NotFound
@@ -448,19 +589,49 @@ mod tests {
         ));
     }
 
-    /// 包内 scripts/ 与 functions/ 两个索引互不混入；override 函数库覆盖包内同名。
+    /// 模板歧义只在本层内产生并直接返回，不静默落到低优先层。
     #[test]
-    fn script_and_function_sources_stay_in_their_own_roots() {
+    fn template_ambiguity_does_not_fall_through_to_lower_layers() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        let package_root = root.join("app-packages/official.a/1.0.0");
+        write_manifest(&package_root, "official.a", "1.0.0", "com.example.game");
+        std::fs::create_dir_all(package_root.join("templates")).unwrap();
+        std::fs::write(package_root.join("templates/icon#only.png"), b"package").unwrap();
+        ActiveRegistry::from_iter([("official.a".to_string(), "1.0.0".to_string())])
+            .save(root)
+            .unwrap();
+
+        // 本地编辑区同短名两个 # 后缀候选 → Ambiguous（尽管包层有唯一命中）
+        let local_dir = root.join("com.example.game/templates");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::write(local_dir.join("icon#a.png"), b"one").unwrap();
+        std::fs::write(local_dir.join("icon#b.png"), b"two").unwrap();
+
+        let resolver = CompositeResolver::new(root);
+        match resolver.template("com.example.game", "icon.png") {
+            TemplateLookup::Ambiguous { name, candidates } => {
+                assert_eq!(name, "icon.png");
+                assert_eq!(candidates, vec!["icon#a.png", "icon#b.png"]);
+            }
+            other => panic!("expected ambiguity in editable layer, got {other:?}"),
+        }
+    }
+
+    /// 三层 scripts/functions 合并：editable > override > 包；两类索引互不
+    /// 混入；来源标注可断言。
+    #[test]
+    fn script_and_function_sources_layer_editable_over_override_over_package() {
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path();
         let package_root = root.join("app-packages/official.a/1.0.0");
         write_manifest(&package_root, "official.a", "1.0.0", "com.example.game");
         std::fs::create_dir_all(package_root.join("scripts")).unwrap();
-        std::fs::write(package_root.join("scripts/daily.yaml"), b"package script").unwrap();
+        std::fs::write(package_root.join("scripts/dup.yaml"), b"package script").unwrap();
         std::fs::create_dir_all(package_root.join("functions")).unwrap();
         std::fs::write(
             package_root.join("functions/common.yaml"),
-            b"package function",
+            b"noop:\n  steps: [] # package\n",
         )
         .unwrap();
 
@@ -469,34 +640,157 @@ mod tests {
             .unwrap();
         let resolver = CompositeResolver::new(root);
 
+        let override_scripts = root.join("user-overrides/com.example.game/scripts");
+        std::fs::create_dir_all(&override_scripts).unwrap();
+        std::fs::write(override_scripts.join("dup.yaml"), b"override script").unwrap();
+        let override_functions = root.join("user-overrides/com.example.game/functions");
+        std::fs::create_dir_all(&override_functions).unwrap();
+        std::fs::write(
+            override_functions.join("common.yaml"),
+            b"noop:\n  steps: [] # override\n",
+        )
+        .unwrap();
+
+        let local_scripts = root.join("com.example.game/scripts");
+        std::fs::create_dir_all(&local_scripts).unwrap();
+        std::fs::write(local_scripts.join("dup.yaml"), b"local script").unwrap();
+        let local_functions = root.join("com.example.game/functions");
+        std::fs::create_dir_all(&local_functions).unwrap();
+        std::fs::write(
+            local_functions.join("common.yaml"),
+            b"noop:\n  steps: [] # local\n",
+        )
+        .unwrap();
+
         let scripts = resolver.script_sources("com.example.game").unwrap();
         assert_eq!(
-            scripts.get("daily.yaml").map(String::as_str),
-            Some("package script")
+            scripts.get("dup.yaml").map(String::as_str),
+            Some("local script")
         );
         assert!(
             !scripts.contains_key("common.yaml"),
-            "包内 functions/ 不得混入脚本索引"
+            "functions/ 内容不得混入脚本索引"
         );
-
         let functions = resolver.function_sources("com.example.game").unwrap();
         assert_eq!(
             functions.get("common.yaml").map(String::as_str),
-            Some("package function")
+            Some("noop:\n  steps: [] # local\n")
         );
         assert!(
-            !functions.contains_key("daily.yaml"),
-            "包内 scripts/ 不得混入函数库索引"
+            !functions.contains_key("dup.yaml"),
+            "scripts/ 内容不得混入函数库索引"
         );
 
-        let override_dir = root.join("user-overrides/com.example.game/functions");
-        std::fs::create_dir_all(&override_dir).unwrap();
-        std::fs::write(override_dir.join("common.yaml"), b"override function").unwrap();
-        let functions = resolver.function_sources("com.example.game").unwrap();
+        // 删本地编辑区 → 回落 override
+        std::fs::remove_file(local_scripts.join("dup.yaml")).unwrap();
+        std::fs::remove_file(local_functions.join("common.yaml")).unwrap();
         assert_eq!(
-            functions.get("common.yaml").map(String::as_str),
-            Some("override function"),
-            "override 必须覆盖包内同名函数库"
+            resolver
+                .script_sources("com.example.game")
+                .unwrap()
+                .get("dup.yaml")
+                .map(String::as_str),
+            Some("override script")
         );
+        assert_eq!(
+            resolver
+                .function_sources("com.example.game")
+                .unwrap()
+                .get("common.yaml")
+                .map(String::as_str),
+            Some("noop:\n  steps: [] # override\n")
+        );
+
+        // 再删 override → 回落包
+        std::fs::remove_file(override_scripts.join("dup.yaml")).unwrap();
+        std::fs::remove_file(override_functions.join("common.yaml")).unwrap();
+        assert_eq!(
+            resolver
+                .script_sources("com.example.game")
+                .unwrap()
+                .get("dup.yaml")
+                .map(String::as_str),
+            Some("package script")
+        );
+        assert_eq!(
+            resolver
+                .function_sources("com.example.game")
+                .unwrap()
+                .get("common.yaml")
+                .map(String::as_str),
+            Some("noop:\n  steps: [] # package\n")
+        );
+
+        // 来源标注
+        let tagged = resolver
+            .script_sources_with_source("com.example.game")
+            .unwrap();
+        assert_eq!(
+            tagged.get("dup.yaml").map(|(_, s)| s),
+            Some(&CompositeSource::InstalledPackage {
+                app_package: parse_app_package_id("official.a").unwrap(),
+                version: InstalledVersion::parse("1.0.0").unwrap(),
+            })
+        );
+        std::fs::write(local_scripts.join("dup.yaml"), b"local script").unwrap();
+        let tagged = resolver
+            .script_sources_with_source("com.example.game")
+            .unwrap();
+        assert_eq!(
+            tagged.get("dup.yaml").map(|(_, s)| s),
+            Some(&CompositeSource::EditableLocal)
+        );
+    }
+
+    /// 按键映射三层：editable > override > 包；keymap_names 为三层并集。
+    #[test]
+    fn keymaps_layer_editable_over_override_over_package() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        let package_root = root.join("app-packages/official.a/1.0.0");
+        write_manifest(&package_root, "official.a", "1.0.0", "com.example.game");
+        std::fs::create_dir_all(package_root.join("keymaps")).unwrap();
+        std::fs::write(package_root.join("keymaps/dup.yaml"), b"package").unwrap();
+        std::fs::write(package_root.join("keymaps/pkg-only.yaml"), b"package").unwrap();
+        ActiveRegistry::from_iter([("official.a".to_string(), "1.0.0".to_string())])
+            .save(root)
+            .unwrap();
+
+        let resolver = CompositeResolver::new(root);
+        let override_dir = root.join("user-overrides/com.example.game/keymaps");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(override_dir.join("dup.yaml"), b"override").unwrap();
+
+        let local_dir = root.join("com.example.game/keymaps");
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::write(local_dir.join("dup.yaml"), b"local").unwrap();
+
+        let hit = resolver.keymap("com.example.game", "dup.yaml").unwrap();
+        assert_eq!(hit.source, CompositeSource::EditableLocal);
+        assert_eq!(std::fs::read(&hit.path).unwrap(), b"local");
+
+        // 删本地 → override；再删 override → 包
+        std::fs::remove_file(local_dir.join("dup.yaml")).unwrap();
+        assert_eq!(
+            resolver
+                .keymap("com.example.game", "dup.yaml")
+                .unwrap()
+                .source,
+            CompositeSource::UserOverride
+        );
+        std::fs::remove_file(override_dir.join("dup.yaml")).unwrap();
+        let hit = resolver.keymap("com.example.game", "dup.yaml").unwrap();
+        assert!(matches!(
+            hit.source,
+            CompositeSource::InstalledPackage { .. }
+        ));
+
+        // names 并集：dup.yaml 各层同名只出现一次，独有名可见
+        let names = resolver.keymap_names("com.example.game");
+        assert_eq!(names, vec!["dup.yaml", "pkg-only.yaml"]);
+
+        assert!(resolver
+            .keymap("com.example.game", "../escape.yaml")
+            .is_none());
     }
 }

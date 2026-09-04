@@ -889,9 +889,10 @@ fn parse_keymap_id(id: &str) -> anyhow::Result<(String, String)> {
 
 pub struct KeymapStore {
     root: PathBuf,
-    /// Composite 资源解析缝（user-overrides → active App Package → 本分区兜底）。
-    /// 只影响读取（get/list）；创建/更新/删除仍只写分区目录，包内置方案不可
-    /// 直接改写（需复制为分区副本）。
+    /// Composite 资源解析缝（EditableLocal 本地编辑区 → user-overrides →
+    /// active App Package，三层统一）。读取（get/list）覆盖全部三层；写入
+    /// （create/update）只落地本地编辑区（分区目录）——本地副本在该层可见且
+    /// 优先，删除本地副本后下层内容重新可见（分层语义）。
     composite: crate::app_packages::CompositeResolver,
 }
 
@@ -910,11 +911,8 @@ impl KeymapStore {
     pub fn create(&self, pkg: &str, name: &str, keymap: &Keymap) -> anyhow::Result<KeymapFile> {
         let package = safe_name(pkg).ok_or_else(|| anyhow::anyhow!("应用包名非法: {pkg}"))?;
         let name = normalize_keymap_name(name)?;
-        // 包内置映射方案同名保护：分区副本会被包内方案遮蔽（composite 顺序
-        // override → 包 → 分区），创建时直接拒绝避免用户写入后不可见。
-        if self.composite.keymap(&package, &name).is_some() {
-            anyhow::bail!("映射方案 {package}/{name} 已由 App Package 提供，请更换名称");
-        }
+        // 本地编辑区是最高优先层：同名 override/包内置方案存在时也允许创建，
+        // 本地副本立即可见并遮蔽下层（删除本地副本后下层内容重新可见）。
         let path = self.keymap_dir(&package).join(&name);
         if path.exists() {
             anyhow::bail!("映射方案已存在: {package}/{name}");
@@ -935,12 +933,23 @@ impl KeymapStore {
         let (package, old_name) = parse_keymap_id(id)?;
         let old_path = self.keymap_dir(&package).join(&old_name);
         if !old_path.is_file() {
-            if self.composite.keymap(&package, &old_name).is_some() {
-                anyhow::bail!(
-                    "映射方案 {id} 由 App Package 提供，不可直接修改；请复制为新方案后调整"
-                );
+            // 本地无副本但 override/包层提供同名方案 → 首次物化：把新内容写为
+            // 本地编辑区副本（用户改的就是本地副本，立即可见生效）。物化视为
+            // 首次写入，不做 expected_version 版本比较（force 与否均一致）。
+            if self.composite.keymap(&package, &old_name).is_none() {
+                anyhow::bail!("映射方案不存在: {id}");
             }
-            anyhow::bail!("映射方案不存在: {id}");
+            let target_name = match new_name {
+                Some(name) => normalize_keymap_name(name)?,
+                None => old_name.clone(),
+            };
+            let target_path = self.keymap_dir(&package).join(&target_name);
+            if target_path.exists() {
+                anyhow::bail!("映射方案已存在: {package}/{target_name}");
+            }
+            let content = serialize_keymap(keymap)?;
+            atomic_write(&target_path, content.as_bytes())?;
+            return self.load_file(&package, &target_name);
         }
         let old_content = std::fs::read_to_string(&old_path)?;
         if !force {
@@ -975,15 +984,11 @@ impl KeymapStore {
             Ok(parts) => parts,
             Err(_) => return Ok(None),
         };
-        // composite 顺序：user override → active App Package → 分区（兜底）。
-        if let Some(hit) = self.composite.keymap(&package, &name) {
-            return self.load_file_at(&package, &name, &hit.path).map(Some);
+        // composite 三层顺序：本地编辑区（分区）→ user override → active App Package。
+        match self.composite.keymap(&package, &name) {
+            Some(hit) => self.load_file_at(&package, &name, &hit.path).map(Some),
+            None => Ok(None),
         }
-        let path = self.keymap_dir(&package).join(&name);
-        if !path.is_file() {
-            return Ok(None);
-        }
-        Ok(Some(self.load_file(&package, &name)?))
     }
 
     pub fn list(&self, pkg: &str) -> anyhow::Result<Vec<KeymapSummary>> {
@@ -1033,8 +1038,9 @@ impl KeymapStore {
                 });
             }
         }
-        // 追加包内置/override 方案：分区已列出的文件名不重复展示
-        // （分区副本优先可编辑；包内置方案的元数据以其文件为准）。
+        // 追加 override/包内置方案：分区（本地编辑区）已列出的文件名不重复
+        // 展示——composite.keymap_names 为三层并集，本地副本优先可编辑，
+        // 下层方案的元数据以其文件为准。
         let listed: std::collections::HashSet<String> = out
             .iter()
             .map(|summary| summary.file.to_ascii_lowercase())
@@ -1148,10 +1154,11 @@ mod tests {
 
     const VALID: &str = "version: 1\nname: 战斗方案\nbindings:\n  - key: Space\n    action:\n      type: tap\n      at: [0.72, 0.86]\n  - key: KeyE\n    action:\n      type: swipe\n      from: [0.4, 0.8]\n      to: [0.6, 0.8]\n      duration_ms: 300\n";
 
-    /// composite 解析缝（Phase 4）：包内置映射方案对 get/list 可见，
-    /// create 拒绝同名防止分区副本被包内方案遮蔽。
+    /// composite 三层（本地编辑区 → override → 包）：包内置方案对 get/list
+    /// 可见；同名 create 落地本地副本并立即遮蔽包内方案；update 直接改写本地
+    /// 副本；本地无副本时 update 首次物化；delete 后下层内容重新可见。
     #[tokio::test]
-    async fn package_keymaps_are_visible_and_protected_from_shadowing() {
+    async fn package_keymaps_visible_and_local_editable_layer_wins() {
         use crate::app_packages::AppPackageStore;
         use zip::write::SimpleFileOptions;
 
@@ -1170,6 +1177,7 @@ version = "1.0.0"
 [android]
 packages = ["com.test.app"]
 "#;
+        let package_keymap = "version: 1\nname: 包内方案\nbindings:\n  - key: Space\n    action:\n      type: tap\n      at: [0.5, 0.5]\n";
         let mut archive = Vec::new();
         {
             let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
@@ -1178,7 +1186,7 @@ packages = ["com.test.app"]
             zw.start_file("manifest.toml", opts).unwrap();
             std::io::Write::write_all(&mut zw, manifest).unwrap();
             zw.start_file("keymaps/default.yaml", opts).unwrap();
-            std::io::Write::write_all(&mut zw, VALID.as_bytes()).unwrap();
+            std::io::Write::write_all(&mut zw, package_keymap.as_bytes()).unwrap();
             zw.finish().unwrap();
         }
         packages.install_and_activate(&archive, None).await.unwrap();
@@ -1186,31 +1194,72 @@ packages = ["com.test.app"]
         // 包内置方案经 get 可读
         let loaded = store.get("com.test.app/default.yaml").unwrap().unwrap();
         assert_eq!(loaded.file, "default.yaml");
-        assert_eq!(loaded.keymap.name, "战斗方案");
+        assert_eq!(loaded.keymap.name, "包内方案");
 
         // list 合并展示包内置方案
         let summaries = store.list("com.test.app").unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].file, "default.yaml");
 
-        // 同名 create 被拒绝（避免分区副本被包内方案遮蔽）
-        let keymap = parse_keymap_content(VALID, "com.test.app/default.yaml").unwrap();
-        let blocked = store.create("com.test.app", "default.yaml", &keymap);
-        assert!(blocked.is_err());
-        assert!(blocked.unwrap_err().to_string().contains("App Package"));
-
-        // 不同名 create 正常写入分区
-        store
-            .create("com.test.app", "自定义.yaml", &keymap)
+        // 同名 create 成功：本地副本落地并立即可见（遮蔽包内方案）
+        let local_keymap =
+            parse_keymap_content("version: 1\nname: 本地方案\nbindings: []\n", "local").unwrap();
+        let created = store
+            .create("com.test.app", "default.yaml", &local_keymap)
             .unwrap();
+        assert!(dir.join("com.test.app/keymaps/default.yaml").is_file());
+        let local_version = created.version.clone();
+        let loaded = store.get("com.test.app/default.yaml").unwrap().unwrap();
+        assert_eq!(loaded.keymap.name, "本地方案", "本地副本必须优先于包内方案");
         let summaries = store.list("com.test.app").unwrap();
-        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries.len(), 1, "同名本地副本不得在 list 中重复出现");
+        assert_eq!(summaries[0].name, "本地方案");
 
-        // update 指向包内置方案给出明确指引（分区无此文件）
-        let err = store
-            .update("com.test.app/default.yaml", None, &keymap, None, true)
-            .unwrap_err();
-        assert!(err.to_string().contains("App Package"));
+        // update 改写本地副本：expected_version 版本守卫照常生效
+        let updated = store
+            .update(
+                "com.test.app/default.yaml",
+                None,
+                &local_keymap,
+                Some(&local_version),
+                false,
+            )
+            .unwrap();
+        assert_eq!(updated.keymap.name, "本地方案");
+        assert!(store
+            .update(
+                "com.test.app/default.yaml",
+                None,
+                &local_keymap,
+                Some("stale"),
+                false
+            )
+            .is_err());
+
+        // 删除本地副本 → 包内方案重新可见
+        store.delete("com.test.app/default.yaml").unwrap();
+        let loaded = store.get("com.test.app/default.yaml").unwrap().unwrap();
+        assert_eq!(loaded.keymap.name, "包内方案");
+
+        // 本地无副本时 update = 首次物化：不做版本比较，新内容落地本地副本
+        let materialized = store
+            .update(
+                "com.test.app/default.yaml",
+                None,
+                &local_keymap,
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(materialized.keymap.name, "本地方案");
+        assert!(dir.join("com.test.app/keymaps/default.yaml").is_file());
+        let loaded = store.get("com.test.app/default.yaml").unwrap().unwrap();
+        assert_eq!(loaded.keymap.name, "本地方案");
+
+        // 本地不存在的方案 update 仍然报不存在
+        assert!(store
+            .update("com.test.app/missing.yaml", None, &local_keymap, None, true)
+            .is_err());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

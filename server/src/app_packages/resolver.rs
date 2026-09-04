@@ -11,6 +11,10 @@ use super::store::AppPackageStore;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ResourceSource {
+    /// 本地编辑区分区文件（`data/<android>/<logical_path>`），最高优先。
+    EditableLocal {
+        android_package: AndroidPackageName,
+    },
     UserOverride {
         android_package: AndroidPackageName,
     },
@@ -45,7 +49,9 @@ impl ResolvedResource {
     }
 }
 
-/// Resolves user-owned overrides before immutable installed package content.
+/// Resolves editable-local partition content first, then user-owned overrides,
+/// before immutable installed package content (same priority as
+/// [`super::composite::CompositeResolver`]).
 #[derive(Clone, Debug)]
 pub(crate) struct ResourceResolver {
     data_root: PathBuf,
@@ -70,6 +76,23 @@ impl ResourceResolver {
             None => return Ok(None),
         };
         let logical_path = ResourcePath::parse(id.logical_path())?;
+
+        // 层 1：本地编辑区（分区目录，目录即类型 —— logical_path 首段即资源根）
+        let local_path = append_resource_path(
+            &self.data_root.join(android_package.as_str()),
+            &logical_path,
+        );
+        if is_regular_file(&local_path)? {
+            return Ok(Some(ResolvedResource {
+                id: id.clone(),
+                source: ResourceSource::EditableLocal {
+                    android_package: android_package.clone(),
+                },
+                path: local_path,
+            }));
+        }
+
+        // 层 2：user-overrides
         let override_path = append_resource_path(
             &self
                 .data_root
@@ -87,6 +110,7 @@ impl ResourceResolver {
             }));
         }
 
+        // 层 3：指定版本的已安装包内容
         let installed_root = self
             .data_root
             .join("app-packages")

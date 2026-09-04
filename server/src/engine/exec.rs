@@ -3110,9 +3110,9 @@ mod tests {
 
     // ---- 快照隔离 --------------------------------------------------------------
 
-    /// Phase 4/8 收口：包内 `scripts/` 可直接运行（入口脚本、call 目标），
-    /// 包内 `functions/` 提供 func 目标；override 优先于包、包优先于分区同名
-    /// 文件，分区脚本/函数库继续可用。
+    /// Phase 4/8 收口 + 本地编辑区升层：包内 `scripts/` 可直接运行（入口脚本、
+    /// call 目标），包内 `functions/` 提供 func 目标；composite 优先级统一为
+    /// **本地编辑区（分区）→ override → 包**，删除高层同名文件后逐层回落。
     #[tokio::test]
     async fn package_scripts_run_with_composite_priority() {
         let r = rig(HashMap::new(), solid_png(10, 10, [0, 0, 0]), "info");
@@ -3171,9 +3171,9 @@ packages = ["com.test.app"]
             .await
             .unwrap();
 
-        // 分区兜底脚本继续可用（包内/override 未覆盖的名字）
+        // 本地编辑区（分区）脚本继续可用（包内/override 未覆盖的名字）
         r.save_script(
-            "partition.yaml",
+            "local-only.yaml",
             "steps:
   - log: 分区脚本
 ",
@@ -3185,12 +3185,12 @@ packages = ["com.test.app"]
         assert!(logs_contain(&logs, "包内子脚本"));
 
         let logs = r
-            .run(script_target("partition.yaml"), vec![])
+            .run(script_target("local-only.yaml"), vec![])
             .await
             .unwrap();
         assert!(logs_contain(&logs, "分区脚本"));
 
-        // 同名优先级：分区 < 包
+        // 同名优先级：本地编辑区（分区）最高，胜过包
         r.save_script(
             "dup.yaml",
             "steps:
@@ -3198,10 +3198,10 @@ packages = ["com.test.app"]
 ",
         );
         let logs = r.run(script_target("dup.yaml"), vec![]).await.unwrap();
-        assert!(logs_contain(&logs, "包内重名"));
-        assert!(!logs_contain(&logs, "分区重名"));
+        assert!(logs_contain(&logs, "分区重名"));
+        assert!(!logs_contain(&logs, "包内重名"));
 
-        // user override 再胜过包
+        // override 同名也不能撼动本地编辑区
         let override_dir = r.dir.join("user-overrides").join(PKG).join("scripts");
         std::fs::create_dir_all(&override_dir).unwrap();
         std::fs::write(
@@ -3212,8 +3212,16 @@ packages = ["com.test.app"]
         )
         .unwrap();
         let logs = r.run(script_target("dup.yaml"), vec![]).await.unwrap();
+        assert!(logs_contain(&logs, "分区重名"));
+        assert!(!logs_contain(&logs, "覆盖重名"));
+
+        // 删本地副本 → 回落 override；再删 override → 回落包
+        std::fs::remove_file(r.store.script_dir(PKG).join("dup.yaml")).unwrap();
+        let logs = r.run(script_target("dup.yaml"), vec![]).await.unwrap();
         assert!(logs_contain(&logs, "覆盖重名"));
-        assert!(!logs_contain(&logs, "包内重名"));
+        std::fs::remove_file(override_dir.join("dup.yaml")).unwrap();
+        let logs = r.run(script_target("dup.yaml"), vec![]).await.unwrap();
+        assert!(logs_contain(&logs, "包内重名"));
     }
 
     /// 运行开始后修改 call 目标文件：本实例仍用开始时的内容；下一次运行用新内容。

@@ -100,19 +100,6 @@ pub(crate) fn sanitize_template_name(s: &str) -> Option<String> {
     Some(t.to_string())
 }
 
-/// 模板短名匹配结果（resolve_template_path / template_avail 共用内核）。
-enum TplMatch {
-    Found(PathBuf),
-    NotFound {
-        name: String,
-        path: PathBuf,
-    },
-    Ambiguous {
-        name: String,
-        candidates: Vec<String>,
-    },
-}
-
 /// Windows 会把这些名字（包括带扩展名的形式）解析为设备文件；统一拒绝
 /// 可移植存储中对应的 basename，避免 Linux 上创建后在 Windows 产生歧义。
 fn parse_script_id(id: &str) -> Option<(String, String)> {
@@ -386,9 +373,9 @@ pub(crate) fn sanitize_rel_segments(rel: &str) -> anyhow::Result<Vec<String>> {
 pub struct ScriptStore {
     /// 数据根目录（data/），一级子目录 = 应用分区（内含 scripts/ 与 templates/）
     root: PathBuf,
-    /// Composite 资源解析缝（user-overrides → active App Package → 本分区兜底）。
-    /// 仅模板解析接入（find/match 与 script_v2 校验共用）；脚本/函数库快照仍
-    /// 以分区目录为唯一来源，包内脚本待后续波次。
+    /// Composite 资源解析缝（EditableLocal 本地编辑区 → user-overrides →
+    /// active App Package，三层统一）。模板解析（find/match 与 script_v2 校验
+    /// 共用）与脚本/函数库快照全部经此寻址；本地编辑区即 `root` 下的分区目录。
     composite: crate::app_packages::CompositeResolver,
 }
 
@@ -428,8 +415,9 @@ impl ScriptStore {
         PartitionResources::new(self, pkg)
     }
 
-    /// Composite 脚本源码（engine RunSnapshot 合并用）：override → active 包
-    /// `scripts/`；分区目录由调用方自行兜底。
+    /// Composite 脚本源码（engine RunSnapshot 合并用）：本地编辑区（分区
+    /// `scripts/`）→ user-overrides → active 包 `scripts/`，三层 map 合并、
+    /// 同名高优先层覆盖低优先层。
     pub(crate) fn composite_script_sources(
         &self,
         pkg: &str,
@@ -437,8 +425,8 @@ impl ScriptStore {
         Ok(self.composite.script_sources(pkg)?)
     }
 
-    /// Composite 函数库源码（engine RunSnapshot 合并用）：override → active 包
-    /// `functions/`；分区目录由调用方自行兜底。
+    /// Composite 函数库源码（engine RunSnapshot 合并用）：本地编辑区（分区
+    /// `functions/`）→ user-overrides → active 包 `functions/`，三层 map 合并。
     pub(crate) fn composite_function_sources(
         &self,
         pkg: &str,
@@ -860,10 +848,10 @@ impl ScriptStore {
         Ok(p)
     }
 
-    /// 模板短名/完整名 → **现存**文件路径。composite 顺序：user override →
-    /// active App Package → 分区 `templates/`（兜底层）。
+    /// 模板短名/完整名 → **现存**文件路径。composite 三层统一顺序：本地编辑区
+    /// （分区 `templates/`）→ user override → active App Package，逐层解析。
     /// 精确名优先；否则按「基名 + `#` 后缀 + 同扩展名」唯一匹配（短名消歧语义
-    /// 与 script_v2 校验一致）；零候选/多候选均报错，不猜测、不跨目录回退。
+    /// 与 script_v2 校验一致）；零候选/多候选均报错，不猜测、不跨层回退吞并。
     pub fn resolve_template_path(&self, pkg: &str, short: &str) -> anyhow::Result<PathBuf> {
         match self.composite.template(pkg, short) {
             crate::app_packages::TemplateLookup::Found(hit) => Ok(hit.path),
@@ -871,24 +859,16 @@ impl ScriptStore {
                 "模板 {name} 匹配到多个候选：{}，请用完整文件名指定",
                 candidates.join("、")
             ),
-            crate::app_packages::TemplateLookup::NotFound => {
-                match self.match_template_in_partition(pkg, short) {
-                    TplMatch::Found(path) => Ok(path),
-                    TplMatch::NotFound { name, path } => {
-                        anyhow::bail!("模板 {name} 不存在 (path={})", path.display())
-                    }
-                    TplMatch::Ambiguous { name, candidates } => anyhow::bail!(
-                        "模板 {name} 匹配到多个候选：{}，请用完整文件名指定",
-                        candidates.join("、")
-                    ),
-                }
-            }
+            crate::app_packages::TemplateLookup::NotFound => anyhow::bail!(
+                "模板 {short} 不存在 (path={})",
+                self.templates_dir(pkg).display()
+            ),
         }
     }
 
     /// 模板短名可用性（script_v2 校验 ResourceProvider 消费）：
     /// 唯一存在 / 缺失 / 同短名多个 `#` 后缀候选（歧义）。
-    /// 解析顺序与 resolve_template_path 完全一致（override → 包 → 分区）。
+    /// 解析顺序与 resolve_template_path 完全一致（本地编辑区 → override → 包）。
     pub fn template_avail(&self, pkg: &str, short: &str) -> crate::script_v2::TemplateAvail {
         match self.composite.template(pkg, short) {
             crate::app_packages::TemplateLookup::Found(_) => crate::script_v2::TemplateAvail::Found,
@@ -896,61 +876,8 @@ impl ScriptStore {
                 crate::script_v2::TemplateAvail::Ambiguous
             }
             crate::app_packages::TemplateLookup::NotFound => {
-                match self.match_template_in_partition(pkg, short) {
-                    TplMatch::Found(_) => crate::script_v2::TemplateAvail::Found,
-                    TplMatch::NotFound { .. } => crate::script_v2::TemplateAvail::NotFound,
-                    TplMatch::Ambiguous { .. } => crate::script_v2::TemplateAvail::Ambiguous,
-                }
+                crate::script_v2::TemplateAvail::NotFound
             }
-        }
-    }
-
-    /// 短名/完整名 → 磁盘文件的统一匹配内核（resolve_template_path 与
-    /// template_avail 共用）：精确名优先，短名在同扩展名文件中唯一匹配。
-    fn match_template_in_partition(&self, pkg: &str, short: &str) -> TplMatch {
-        let Some(package) = sanitize_part(pkg) else {
-            return TplMatch::NotFound {
-                name: short.to_string(),
-                path: self.templates_dir(pkg),
-            };
-        };
-        if short.contains('\\') || short.contains('/') {
-            return TplMatch::NotFound {
-                name: short.to_string(),
-                path: self.templates_dir(&package),
-            };
-        }
-        let Some(name) = sanitize_template_name(short) else {
-            return TplMatch::NotFound {
-                name: short.to_string(),
-                path: self.templates_dir(&package),
-            };
-        };
-        let dir = self.templates_dir(&package);
-        let exact = dir.join(&name);
-        if exact.is_file() {
-            return TplMatch::Found(exact);
-        }
-        let Some((base, ext)) = name.rsplit_once('.') else {
-            return TplMatch::NotFound { name, path: exact };
-        };
-        let prefix = format!("{}#", base.to_ascii_lowercase());
-        let dotted = format!(".{}", ext.to_ascii_lowercase());
-        let mut candidates: Vec<String> = std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| {
-                let lower = n.to_ascii_lowercase();
-                lower.starts_with(&prefix) && lower.ends_with(&dotted)
-            })
-            .collect();
-        candidates.sort();
-        match candidates.len() {
-            1 => TplMatch::Found(dir.join(&candidates[0])),
-            0 => TplMatch::NotFound { name, path: exact },
-            _ => TplMatch::Ambiguous { name, candidates },
         }
     }
 
