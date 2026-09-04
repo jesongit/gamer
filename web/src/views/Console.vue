@@ -217,6 +217,7 @@ import RunConflictModal from '../components/RunConflictModal.vue'
 import RunParamsModal from '../components/RunParamsModal.vue'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
 import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
+import { useWorkspacePackages } from '../composables/useWorkspacePackages'
 import { createKeyboardController, shouldIgnoreKeyboardTarget } from '../keyboard-control'
 import { buildTouchPhase, createKeymapController } from '../keymap-control'
 import { useConsolePanelResize } from '../components/console/useConsolePanelResize'
@@ -444,6 +445,18 @@ watch(activePkg, pkg => {
   fnLib.refresh(pkg)
   loadKeymaps(pkg)
 })
+
+// ---------- 游戏包三入口（导入/导出/编辑）：逻辑在 composable，context 并入右侧上下文条 ----------
+// WorkspaceContextBar 只透传；导入/编辑替换当前分区资源后经注入的刷新回调全量重拉
+//（activePkg 未变，watch 不触发，必须显式刷新 fnLib/keymap）
+const workspacePackages = useWorkspacePackages({
+  toast,
+  activePkg,
+  loadData,
+  refreshFnLib: pkg => fnLib.refresh(pkg),
+  refreshKeymaps: pkg => loadKeymaps(pkg),
+})
+Object.assign(workspaceContextBarContext, workspacePackages.context)
 
 // ---------- 传输统计与画面自愈看门狗 ----------
 const { startStats, stopStats, resetWatchdogs, resetBlackWatchdog } = useWebrtcStats({

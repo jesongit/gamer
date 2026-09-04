@@ -74,6 +74,12 @@ function keymapId(value, pkg) {
   return id.includes('/') ? id : `${requireId(pkg, 'pkg')}/${id}`
 }
 
+/** Content-Disposition: attachment; filename="<id>-<version>.gamerpkg" → 文件名（解析不出返回空串） */
+function filenameFromDisposition(value) {
+  const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(String(value || ''))
+  return m ? m[1] : ''
+}
+
 function requireDeviceRunResponse(rep) {
   if (rep && rep.active === false) return rep
   if (rep && rep.active === true && rep.run && typeof rep.run === 'object' && rep.run.run_id) return rep
@@ -331,6 +337,52 @@ export const api = {
   deleteTask: (id) => req('DELETE', `/api/tasks/${id}`),
   // 任务立即执行（用任务已存参数快照；过期/无快照由服务端明确报错）：202 {run_id}
   runTaskNow: async (id) => requireRunResponse(await req('POST', `/api/tasks/${id}/run`)),
+
+  // ---- App Package（游戏包）与本地编辑区（workspace）----
+  // 已装游戏包列表：{packages:[{id,name,active_version(null=无激活),android_packages,versions:[...]}]}
+  listAppPackages: () => req('GET', '/api/app-packages'),
+  // 安装 .gamerpkg 归档原始字节（Content-Type: application/zip）；expectedSha256 提供时
+  // 带 X-Expected-Sha256 校验头（不匹配 400）。成功 201 返回包 JSON；409 = 同 id+version
+  // 已安装或 primary 冲突（同一安卓应用已有激活内容包），错误体 {error} 文本区分
+  installAppPackage: async (bytes, expectedSha256) => {
+    const headers = { 'Content-Type': 'application/zip' }
+    if (expectedSha256) headers['X-Expected-Sha256'] = String(expectedSha256)
+    const r = await response('POST', '/api/app-packages/install', bytes, { rawBody: true, headers })
+    return readResult(r)
+  },
+  // 本地编辑区导出为 .gamerpkg：200 二进制 + Content-Disposition 文件名 + X-Content-Sha256；
+  // 404 = 工作区没有 package.toml（先 PUT workspace 初始化）；400 {code:"preflight_failed"}
+  // 错误体 error 为逐行问题列表
+  exportAppPackage: async (androidPackage) => {
+    const r = await req('POST', '/api/app-packages/export', {
+      android_package: requireId(androidPackage, 'android_package'),
+    })
+    const blob = await r.blob()
+    return {
+      blob,
+      filename: filenameFromDisposition(r.headers.get('content-disposition')),
+      sha256: r.headers.get('x-content-sha256') || '',
+    }
+  },
+  // 把已安装的某版本游戏包导入到指定安卓应用的本地编辑区（替换现场资源）；
+  // 400 = target 不在该包 android.packages 或提取后校验失败，404 = 包/版本不存在
+  editAppPackage: (id, version, androidPackage) => req(
+    'POST',
+    `/api/app-packages/${encodeURIComponent(requireId(id, 'package_id'))}/${encodeURIComponent(requireId(version, 'package_version'))}/edit`,
+    { android_package: requireId(androidPackage, 'android_package') },
+  ),
+  // 本地编辑区（data/<android 包名>/）元数据（package.toml；null = 未初始化）+ 六目录资源统计
+  getWorkspace: (androidPackage) => req(
+    'GET',
+    `/api/workspace/${encodeURIComponent(requireId(androidPackage, 'android_package'))}`,
+  ),
+  // 保存工作区元数据（服务端 deny_unknown_fields：只发 id?/version/name?/android_packages；
+  // name 为空串时整个省略——服务端拒绝空名称）
+  saveWorkspace: (androidPackage, payload = {}) => req(
+    'PUT',
+    `/api/workspace/${encodeURIComponent(requireId(androidPackage, 'android_package'))}`,
+    payload,
+  ),
 
   // 日志
   listLogs: (deviceId, level, limit) => {

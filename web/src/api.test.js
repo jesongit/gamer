@@ -144,3 +144,72 @@ describe('唯一资源 API surface', () => {
     })
   })
 })
+
+describe('游戏包（App Package）与本地编辑区 API', () => {
+  it('列表/安装：安装发送原始字节 + application/zip + X-Expected-Sha256 校验头', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(200, { packages: [] }))
+    await api.listAppPackages()
+    expect(fetch.mock.calls[0][0]).toBe('/api/app-packages')
+    expect(fetch.mock.calls[0][1].method).toBe('GET')
+
+    fetch.mockResolvedValueOnce(jsonRes(201, { id: 'pkg.demo', active_version: '1.0.0' }))
+    const bytes = new TextEncoder().encode('archive-bytes').buffer
+    await api.installAppPackage(bytes, 'a'.repeat(64))
+    const [url, opt] = fetch.mock.calls[1]
+    expect(url).toBe('/api/app-packages/install')
+    expect(opt.method).toBe('POST')
+    expect(opt.headers['Content-Type']).toBe('application/zip')
+    expect(opt.headers['X-Expected-Sha256']).toBe('a'.repeat(64))
+    expect(opt.body).toBe(bytes)
+
+    // 未提供 sha 时不带头
+    fetch.mockResolvedValueOnce(jsonRes(201, { id: 'pkg.demo' }))
+    await api.installAppPackage(bytes)
+    expect(fetch.mock.calls[2][1].headers['X-Expected-Sha256']).toBeUndefined()
+  })
+
+  it('导出：POST android_package，返回 blob + 响应头解析的文件名与 SHA-256', async () => {
+    const blob = new Blob(['archive'])
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      blob: async () => blob,
+      headers: {
+        get: name => ({
+          'content-type': 'application/octet-stream',
+          'content-disposition': 'attachment; filename="pkg.demo-1.0.0.gamerpkg"',
+          'x-content-sha256': 'b'.repeat(64),
+        })[String(name).toLowerCase()] || null,
+      },
+    })
+    const rep = await api.exportAppPackage('com.demo')
+    const [url, opt] = fetch.mock.calls[0]
+    expect(url).toBe('/api/app-packages/export')
+    expect(opt.method).toBe('POST')
+    expect(bodyOf()).toEqual({ android_package: 'com.demo' })
+    expect(rep.blob).toBe(blob)
+    expect(rep.filename).toBe('pkg.demo-1.0.0.gamerpkg')
+    expect(rep.sha256).toBe('b'.repeat(64))
+  })
+
+  it('编辑：POST /api/app-packages/:id/:version/edit（URL 编码）+ android_package body', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(200, { android_package: 'com.demo', replaced: {} }))
+    await api.editAppPackage('pkg.demo', '1.0.0', 'com.demo')
+    expect(fetch.mock.calls[0][0]).toBe('/api/app-packages/pkg.demo/1.0.0/edit')
+    expect(fetch.mock.calls[0][1].method).toBe('POST')
+    expect(bodyOf()).toEqual({ android_package: 'com.demo' })
+  })
+
+  it('工作区：GET/PUT /api/workspace/:android_package（整体编码），PUT 只发给定字段', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(200, { metadata: null, stats: {} }))
+    await api.getWorkspace('com.demo')
+    expect(fetch.mock.calls[0][0]).toBe('/api/workspace/com.demo')
+    expect(fetch.mock.calls[0][1].method).toBe('GET')
+
+    fetch.mockResolvedValueOnce(jsonRes(200, { metadata: { id: 'pkg.demo' } }))
+    await api.saveWorkspace('com.demo', { id: 'pkg.demo', version: '1.0.0', android_packages: ['com.demo'] })
+    expect(fetch.mock.calls[1][0]).toBe('/api/workspace/com.demo')
+    expect(fetch.mock.calls[1][1].method).toBe('PUT')
+    expect(bodyOf(1)).toEqual({ id: 'pkg.demo', version: '1.0.0', android_packages: ['com.demo'] })
+  })
+})

@@ -278,4 +278,37 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleImpl).toContain('api.replaceTemplateImage(')
     expect(capture).toContain('ctx.replaceTemplateImage(target, file)')
   })
+
+  it('游戏包三入口（导入/导出/编辑）落在 WorkspaceContextBar，逻辑收敛在 useWorkspacePackages', () => {
+    const bar = read('./workspace/WorkspaceContextBar.vue')
+    expect(bar).toContain('title="导入 Gamer 游戏包"')
+    expect(bar).toContain('title="导出当前编辑区为 .gamerpkg"')
+    expect(bar).toContain('title="编辑已安装的游戏包"')
+    // 导出/编辑依赖当前分区；导入不受限。三个按钮同一行，仅透传 composable 动作
+    expect(bar).toContain(':disabled="!ctx.activePkg || ctx.busy"')
+    expect(bar).toContain('@click="ctx.openExport"')
+    expect(bar).toContain('@click="ctx.openEdit"')
+    expect(bar).toContain('accept=".gamerpkg"')
+    expect(bar).toContain('@change="ctx.onImportPicked"')
+    // 三个弹窗同域挂载；旧分区 zip 快照入口不回潮（.gamerpkg 是唯一归档形态）
+    expect(bar).toContain('<PackageMetaModal')
+    expect(bar).toContain('<PackageExportModal')
+    expect(bar).toContain('<PackageEditModal')
+    expect(bar).not.toContain('exportPartition')
+    expect(bar).not.toContain('onImportFile')
+
+    const composable = read('./composables/useWorkspacePackages.js')
+    expect(composable).toContain('api.listAppPackages')
+    expect(composable).toContain('api.installAppPackage')
+    expect(composable).toContain('api.exportAppPackage')
+    expect(composable).toContain('api.editAppPackage')
+    expect(composable).toContain('api.getWorkspace')
+    expect(composable).toContain('api.saveWorkspace')
+    // 资源替换后必须全量刷新（函数库 + 按键映射 + Console 基础数据）
+    expect(composable).toContain('refreshFnLib')
+    expect(composable).toContain('refreshKeymaps')
+
+    expect(consoleSource).toContain("import { useWorkspacePackages } from '../composables/useWorkspacePackages'")
+    expect(consoleSource).toContain('Object.assign(workspaceContextBarContext, workspacePackages.context)')
+  })
 })
