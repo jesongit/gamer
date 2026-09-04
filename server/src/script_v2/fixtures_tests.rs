@@ -294,6 +294,8 @@ fn repository_data_resources_pass_strict_loader() {
     let packages = entries
         .map(|entry| entry.unwrap_or_else(|e| panic!("读取仓库数据目录项失败: {e}")))
         .filter(|entry| entry.path().is_dir())
+        // app-packages/ 是不可变安装包系统存储（ADR-11 Core 自有），不是业务分区
+        .filter(|entry| entry.file_name() != "app-packages")
         .collect::<Vec<_>>();
 
     for package in packages {
