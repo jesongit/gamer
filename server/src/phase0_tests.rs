@@ -12,11 +12,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::config::Config;
+use crate::cron_extension;
 use crate::keymaps::{parse_keymap_content, serialize_keymap};
 use crate::matcher::{match_template, template_region_from_name, MatchRequest};
-use crate::scheduler;
 use crate::script_v2::{parse_script_file, serialize_script, InMemoryResources};
 use crate::store::{Store, Task};
+use crate::timer_core::{ScheduleExtension, ScheduleRegistry};
+use crate::timer_yaml;
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures")
@@ -186,10 +188,19 @@ fn phase0_scheduler_and_task_fixture_are_compatible() {
         .expect("任务 fixture 必须是合法 JSON");
     assert_eq!(task["enabled"], true);
     assert_eq!(task["args"], serde_json::json!({}));
-    assert!(scheduler::validate_cron(task["cron"].as_str().unwrap()));
-    assert!(!scheduler::validate_cron("not a cron"));
+    // fixture cron 合法性经通用 Registry 判定（已注册 provider 必须能解析）
+    let registry = ScheduleRegistry::new();
+    cron_extension::register_builtin(&registry).expect("内置 Cron provider 必须可注册");
+    let probe = |expression: &str| {
+        registry.next_after(
+            &timer_yaml::legacy_schedule_spec(expression),
+            chrono::Utc::now(),
+        )
+    };
+    assert!(probe(task["cron"].as_str().unwrap()).is_ok());
+    assert!(probe("not a cron").is_err());
     assert_eq!(
-        scheduler::normalize_cron("*/15 * * * *"),
+        cron_extension::normalize_cron("*/15 * * * *"),
         "0 */15 * * * * *"
     );
 }

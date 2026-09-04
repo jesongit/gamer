@@ -336,6 +336,16 @@ impl ScheduleRegistry {
             .get(kind)
             .cloned()
     }
+
+    /// Validate an opaque spec against its registered provider. Kinds without
+    /// a registered provider are accepted here so tasks can be saved before
+    /// their provider ships; the run loop rejects them at trigger time.
+    pub fn probe(&self, schedule: &ScheduleSpec) -> Result<(), String> {
+        match self.get(&schedule.kind) {
+            Some(extension) => extension.next_after(schedule, Utc::now()).map(|_| ()),
+            None => Ok(()),
+        }
+    }
 }
 
 impl ScheduleExtension for ScheduleRegistry {
@@ -1133,15 +1143,30 @@ impl TimerCore {
         Ok(matching.len())
     }
 
-    pub async fn next_wakeup(&self) -> anyhow::Result<Option<DateTime<Utc>>> {
-        Ok(self
-            .db
-            .list_timer_tasks_async()
-            .await?
+    /// Next pending wakeup across schedulable tasks, read from the persisted
+    /// per-task cursors that [`TimerCore::run_loop`] maintains.  Callers see
+    /// exactly when the timer will next act because the loop sleeps on the
+    /// same cursors; a task saved less than one loop tick ago may not have its
+    /// cursor computed yet (`notify_changed` wakes the loop immediately, so
+    /// the window is negligible).  Diagnostics/orchestration pre-read only —
+    /// the scheduling loop itself does not go through it.  A storage error is
+    /// reported as "no pending wakeup".
+    pub fn next_wakeup_at(&self) -> Option<DateTime<Utc>> {
+        self.db
+            .list_timer_tasks()
+            .ok()?
             .into_iter()
             .filter(TimerTask::is_schedulable)
             .filter_map(|task| task.next_wakeup)
-            .min())
+            .min()
+    }
+
+    /// Seconds from `now` until the next pending timer wakeup; `0` when the
+    /// work is already due, `None` when no schedulable task has a pending
+    /// wakeup.
+    pub fn next_wakeup_in(&self, now: DateTime<Utc>) -> Option<i64> {
+        self.next_wakeup_at()
+            .map(|next| (next - now).num_seconds().max(0))
     }
 
     /// Publish (upsert) package-provided task presets. Ids are deterministic
@@ -1276,6 +1301,66 @@ mod tests {
             ScheduleSpec::new("opaque", serde_json::json!({"rule": "test"})).unwrap(),
         )
         .unwrap()
+    }
+
+    /// 固定步进的测试 provider：core 只面向 `ScheduleExtension`，测试同样
+    /// 不需要任何具体（cron）实现。
+    struct FixedDelaySchedule;
+
+    impl ScheduleExtension for FixedDelaySchedule {
+        fn next_after(
+            &self,
+            schedule: &ScheduleSpec,
+            after: DateTime<Utc>,
+        ) -> Result<Option<DateTime<Utc>>, String> {
+            if schedule.kind != "fixed" {
+                return Err(format!("unsupported schedule extension: {}", schedule.kind));
+            }
+            Ok(Some(after + chrono::Duration::minutes(5)))
+        }
+
+        fn latest_due(
+            &self,
+            _schedule: &ScheduleSpec,
+            _now: DateTime<Utc>,
+            _lookback: Duration,
+        ) -> Result<Option<DateTime<Utc>>, String> {
+            Ok(None)
+        }
+    }
+
+    /// 只接受 `{"steps": N>0}` 的严格测试 provider，覆盖“已注册但 spec 非法”
+    /// 的 probe / resume 错误路径。
+    struct StrictSchedule;
+
+    impl ScheduleExtension for StrictSchedule {
+        fn next_after(
+            &self,
+            schedule: &ScheduleSpec,
+            after: DateTime<Utc>,
+        ) -> Result<Option<DateTime<Utc>>, String> {
+            if schedule.kind != "strict" {
+                return Err(format!("unsupported schedule extension: {}", schedule.kind));
+            }
+            let steps = schedule
+                .value
+                .get("steps")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            if steps <= 0 {
+                return Err("strict schedule misses positive steps".to_string());
+            }
+            Ok(Some(after + chrono::Duration::seconds(steps)))
+        }
+
+        fn latest_due(
+            &self,
+            _schedule: &ScheduleSpec,
+            _now: DateTime<Utc>,
+            _lookback: Duration,
+        ) -> Result<Option<DateTime<Utc>>, String> {
+            Ok(None)
+        }
     }
 
     #[test]
@@ -1476,8 +1561,7 @@ mod tests {
     async fn suspend_resume_preserves_schedule_and_repeated_transitions_are_safe() {
         let (db, dir) = test_db("suspend-resume");
         let mut task = test_task();
-        task.schedule =
-            ScheduleSpec::new("cron", serde_json::json!({"expression": "*/5 * * * *"})).unwrap();
+        task.schedule = ScheduleSpec::new("fixed", serde_json::json!({})).unwrap();
         db.upsert_timer_task_async(&task).await.unwrap();
         let core = TimerCore::new(db.clone());
         core.suspend_task("task-1", "dependency unavailable")
@@ -1494,16 +1578,16 @@ mod tests {
                 .state,
             TimerTaskState::Suspended
         );
-        core.resume_task("task-1", &crate::cron_extension::CronExtension)
+        core.resume_task("task-1", &FixedDelaySchedule)
             .await
             .unwrap();
-        core.resume_task("task-1", &crate::cron_extension::CronExtension)
+        core.resume_task("task-1", &FixedDelaySchedule)
             .await
             .unwrap();
         let resumed = db.get_timer_task_async("task-1").await.unwrap().unwrap();
         assert_eq!(resumed.state, TimerTaskState::Active);
         assert!(resumed.next_wakeup.is_some());
-        assert_eq!(resumed.schedule.kind, "cron");
+        assert_eq!(resumed.schedule.kind, "fixed");
         drop(core);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
@@ -1518,10 +1602,127 @@ mod tests {
         db.upsert_timer_task_async(&task).await.unwrap();
         drop(TimerCore::new(db.clone()));
         let expected = chrono::DateTime::<Utc>::from_timestamp(wakeup.timestamp(), 0);
+        assert_eq!(TimerCore::new(db.clone()).next_wakeup_at(), expected);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn registry_dispatches_each_schedule_kind_to_its_own_extension() {
+        let registry = ScheduleRegistry::new();
+        registry
+            .register("fixed", Arc::new(FixedDelaySchedule))
+            .unwrap();
+        registry
+            .register("strict", Arc::new(StrictSchedule))
+            .unwrap();
+        let now = Utc::now();
+        // 每个 kind 只路由到自己的 provider（互不串扰）
+        let fixed = ScheduleSpec::new("fixed", serde_json::json!({})).unwrap();
         assert_eq!(
-            TimerCore::new(db.clone()).next_wakeup().await.unwrap(),
-            expected
+            registry.next_after(&fixed, now).unwrap(),
+            Some(now + chrono::Duration::minutes(5))
         );
+        let strict = ScheduleSpec::new("strict", serde_json::json!({"steps": 20})).unwrap();
+        assert_eq!(
+            registry.next_after(&strict, now).unwrap(),
+            Some(now + chrono::Duration::seconds(20))
+        );
+        // 未注册 kind → 明确错误（不 panic）；触发路径据此挂起任务而不是丢弃
+        let unknown = ScheduleSpec::new("gamma", serde_json::json!({})).unwrap();
+        assert_eq!(
+            registry.next_after(&unknown, now).unwrap_err(),
+            "schedule extension unavailable: gamma"
+        );
+        // 注册过的 provider 拒绝不认识的 kind（双保险）
+        assert_eq!(
+            StrictSchedule
+                .next_after(&fixed, now)
+                .expect_err("strict provider 必须拒绝他 kind"),
+            "unsupported schedule extension: fixed"
+        );
+    }
+
+    #[test]
+    fn probe_enforces_registered_kinds_and_defers_unknown_ones() {
+        let registry = ScheduleRegistry::new();
+        registry
+            .register("strict", Arc::new(StrictSchedule))
+            .unwrap();
+        assert!(registry
+            .probe(&ScheduleSpec::new("strict", serde_json::json!({"steps": 30})).unwrap())
+            .is_ok());
+        // 已注册但 spec 非法 → 保存边界即可 400
+        assert_eq!(
+            registry
+                .probe(&ScheduleSpec::new("strict", serde_json::json!({})).unwrap())
+                .expect_err("非法 spec 必须被已注册 provider 拒绝"),
+            "strict schedule misses positive steps"
+        );
+        // 未注册 kind：保存时放行（未来扩展可先存任务），触发时由 run loop 挂起
+        assert!(registry
+            .probe(&ScheduleSpec::new("future.kind", serde_json::json!({})).unwrap())
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn resume_with_unregistered_schedule_kind_fails_without_losing_the_task() {
+        let (db, dir) = test_db("resume-unsupported");
+        let mut task = test_task();
+        task.schedule = ScheduleSpec::new("missing.kind", serde_json::json!({})).unwrap();
+        db.upsert_timer_task_async(&task).await.unwrap();
+        let core = TimerCore::new(db.clone());
+        let registry = ScheduleRegistry::new();
+        let error = core
+            .resume_task("task-1", &registry)
+            .await
+            .expect_err("未注册 schedule kind 必须明确失败");
+        assert!(
+            error
+                .to_string()
+                .contains("schedule extension unavailable: missing.kind"),
+            "unexpected error: {error}"
+        );
+        // 任务原样保留：不 panic、不改状态、不丢任务
+        let saved = db.get_timer_task_async("task-1").await.unwrap().unwrap();
+        assert_eq!(saved.state, TimerTaskState::Active);
+        assert_eq!(saved.schedule.kind, "missing.kind");
+        assert!(saved.next_wakeup.is_none());
+        drop(core);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn next_wakeup_in_reports_the_nearest_schedulable_cursor_clamped_at_zero() {
+        let (db, dir) = test_db("wakeup-in");
+        let core = TimerCore::new(db.clone());
+        assert_eq!(core.next_wakeup_in(Utc::now()), None, "空库无待唤醒工作");
+
+        let now = chrono::DateTime::<Utc>::from_timestamp(Utc::now().timestamp(), 0)
+            .expect("当前秒级时间戳必然合法");
+        let mut soon = test_task();
+        soon.id = "soon".into();
+        soon.next_wakeup = Some(now + chrono::Duration::seconds(30));
+        let mut later = test_task();
+        later.id = "later".into();
+        later.next_wakeup = Some(now + chrono::Duration::seconds(120));
+        // 挂起任务即使留着更早的游标也不参与计算
+        let mut suspended = test_task();
+        suspended.id = "suspended".into();
+        suspended.state = TimerTaskState::Suspended;
+        suspended.enabled = false;
+        suspended.next_wakeup = Some(now);
+        for task in [&soon, &later, &suspended] {
+            db.upsert_timer_task_async(task).await.unwrap();
+        }
+        assert_eq!(core.next_wakeup_in(now), Some(30));
+        // 已到期（游标在过去）→ 钳到 0
+        let mut due = soon;
+        due.next_wakeup = Some(now - chrono::Duration::seconds(5));
+        db.upsert_timer_task_async(&due).await.unwrap();
+        assert_eq!(core.next_wakeup_in(now), Some(0));
+        drop(core);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

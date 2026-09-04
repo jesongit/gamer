@@ -5,8 +5,8 @@
 //! - `viewers`：活跃 WebRTC viewer 数（auto 安装的软门禁——等待不强制）；
 //! - `update_transactions`：进行中的升级/回滚/备份/迁移事务（当前形态 =
 //!   update 协调器自身事务标志；文件迁移框架为纯库代码，接线后在此并入）；
-//! - `next_cron_secs`：距下一次**启用** cron 任务触发的秒数（禁用任务不计；
-//!   None = 无启用任务）。
+//! - `next_cron_secs`：距 TimerCore 下一次待执行触发的秒数（挂起/禁用任务
+//!   不计；None = 无待执行工作；字段名保留历史 cron 词汇）。
 //!
 //! 暴露两条路：① [`Workload::install_blockings`] 产出 §4.3 门禁 `blocking`
 //! 数组（SYS-004 手动 install 409 详情）；② [`Workload::auto_install_ready`]
@@ -25,7 +25,7 @@ pub struct Workload {
     pub active_runs: usize,
     pub viewers: usize,
     pub update_transactions: usize,
-    /// 距下一次启用 cron 触发的秒数；None = 无启用任务
+    /// 距 TimerCore 下一次待执行触发的秒数；None = 无待执行任务
     pub next_cron_secs: Option<i64>,
 }
 
@@ -91,13 +91,13 @@ impl WorkloadSource {
         }
     }
 
-    /// 采集当前快照（下一次 cron 时间以本地时区的 `now` 为基准计算）
+    /// 采集当前快照（下一次定时触发秒数取自 Scheduler/TimerCore 的唤醒游标）
     pub fn snapshot(&self) -> Workload {
         Workload {
             active_runs: self.runs.active_count(),
             viewers: self.viewers.lock().map(|v| v.len()).unwrap_or_default(),
             update_transactions: usize::from((self.update_busy)()),
-            next_cron_secs: self.scheduler.next_enabled_trigger_in_secs(),
+            next_cron_secs: self.scheduler.next_wakeup_in_secs(),
         }
     }
 }
@@ -276,6 +276,15 @@ mod tests {
         };
         db.upsert_task(&enabled).unwrap();
         db.upsert_task(&disabled).unwrap();
+        // next_wakeup_in_secs 读 TimerCore 持久化唤醒游标（与调度循环睡眠同源，
+        // 生产中保存任务后 notify 会立即驱动 run loop 补上）；测试无 loop，直接
+        // 模拟"游标已计算"的状态：enabled 任务 60s 后触发。
+        db.set_timer_task_wakeup_async(
+            "enabled",
+            Some((chrono::Utc::now() + chrono::Duration::seconds(60)).timestamp()),
+        )
+        .await
+        .unwrap();
 
         let app = crate::core::AppContext::from_legacy_package("device-1", "pkg").unwrap();
         let request = RunRequest::for_app(

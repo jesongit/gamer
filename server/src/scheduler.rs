@@ -2,16 +2,16 @@
 //!
 //! Scheduling policy and runner implementations are registered adapters. The
 //! scheduler itself only composes the generic timer service and exposes the
-//! small compatibility façade used by the existing REST/update callers.
+//! small compatibility façade used by the existing REST/update callers.  The
+//! native Cron provider is installed through its registration seam; every
+//! later schedule computation goes through [`ScheduleRegistry`], so this
+//! composition never references concrete schedule types.
 
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use tracing::info;
 
-use crate::cron_extension::{next_enabled_trigger_in_secs, CronExtension};
-#[allow(unused_imports)]
-pub use crate::cron_extension::{next_run, normalize_cron, validate_cron};
 use crate::run_manager::RunManager;
 use crate::store::Db;
 use crate::timer_core::{
@@ -33,8 +33,7 @@ impl Scheduler {
             .register(runner)
             .expect("the built-in timer runner must have a non-empty unique id");
         let schedules = Arc::new(ScheduleRegistry::new());
-        schedules
-            .register("cron", CronExtension::new())
+        crate::cron_extension::register_builtin(&schedules)
             .expect("the built-in Cron schedule extension must register");
         Self {
             core: TimerCore::new(db),
@@ -59,6 +58,13 @@ impl Scheduler {
         extension: Arc<dyn ScheduleExtension>,
     ) -> anyhow::Result<()> {
         self.schedules.register(kind, extension)
+    }
+
+    /// Generic schedule registry access for boundary callers (API 校验/预览)
+    /// that must turn an opaque [`ScheduleSpec`] into instants without
+    /// knowing any concrete provider.
+    pub fn schedules(&self) -> Arc<ScheduleRegistry> {
+        Arc::clone(&self.schedules)
     }
 
     pub async fn start(&self) {
@@ -99,19 +105,19 @@ impl Scheduler {
 
     /// 下次唤醒时间查询（诊断/编排预读用；调度循环自身不经过它）。
     #[allow(dead_code)]
-    pub async fn next_wakeup(&self) -> anyhow::Result<Option<DateTime<Utc>>> {
-        self.core.next_wakeup().await
+    pub fn next_wakeup_at(&self) -> Option<DateTime<Utc>> {
+        self.core.next_wakeup_at()
+    }
+
+    /// 距 TimerCore 下一次待执行触发的秒数（update 安装门禁等空闲判定用）。
+    /// 直接读 TimerCore 持久化的唤醒游标（与调度循环睡眠同源，不重复逐任务
+    /// 计算）；`0` = 已到期，`None` = 无待执行任务。
+    pub fn next_wakeup_in_secs(&self) -> Option<i64> {
+        self.core.next_wakeup_in(Utc::now())
     }
 
     pub fn notify_tasks_changed(&self) {
         self.core.notify_changed();
-    }
-
-    /// Existing update/install workload gate, now calculated from generic
-    /// TimerTask rows that Store keeps synchronized with the legacy view.
-    pub fn next_enabled_trigger_in_secs(&self) -> Option<i64> {
-        let tasks = self.core.db().list_timer_tasks().ok()?;
-        next_enabled_trigger_in_secs(&tasks, Utc::now())
     }
 }
 
@@ -123,5 +129,34 @@ mod tests {
         assert!(!source.contains(&["Script", "Store"].concat()));
         assert!(!source.contains(&["timer_", "yaml"].concat()));
         assert!(!source.contains(&["Run", "Target"].concat()));
+    }
+
+    /// 架构收口（Phase 1 / ADR-01）源码自检：schedule 计算只允许经过
+    /// ScheduleRegistry 抽象。scheduler/timer_core/api 的任务触发路径不得
+    /// 引用 cron 具体类型/函数——唯一例外是 scheduler 组装层的注册缝。
+    #[test]
+    fn schedule_computation_is_locked_to_the_registry_abstraction() {
+        let scheduler_source = include_str!("scheduler.rs");
+        let cron_module = ["cron_", "extension"].concat();
+        // 注册缝是 scheduler 允许的唯一 cron 引用，剥离后再断言
+        let registration_seam = ["cron_", "extension::register_builtin"].concat();
+        let without_seam = scheduler_source.replace(&registration_seam, "");
+        assert!(
+            !without_seam.contains(&cron_module),
+            "scheduler 只允许通过注册缝引用 cron provider"
+        );
+        assert!(
+            !scheduler_source.contains(&["next_enabled_trigger_", "in_secs"].concat()),
+            "scheduler 不得保留逐任务 cron 直算入口"
+        );
+        for (path, source) in [
+            ("timer_core.rs", include_str!("timer_core.rs")),
+            ("api/tasks.rs", include_str!("api/tasks.rs")),
+        ] {
+            assert!(
+                !source.contains(&cron_module),
+                "{path} 的任务触发路径不得引用具体 cron 实现"
+            );
+        }
     }
 }

@@ -215,6 +215,15 @@ fn yaml_finish_hook(
     })
 }
 
+/// Legacy task wire format carries a raw cron string; this is the single
+/// translation point from that string to an opaque [`ScheduleSpec`].  The
+/// "cron" kind literal lives only in this legacy adapter (and in the native
+/// provider's registration), never in the API or core.
+pub(crate) fn legacy_schedule_spec(cron: &str) -> ScheduleSpec {
+    ScheduleSpec::new("cron", serde_json::json!({ "expression": cron }))
+        .expect("legacy cron schedule kind is a valid static kind")
+}
+
 /// Convert the current legacy task row to the generic Timer Core model.
 pub(crate) fn timer_from_legacy(task: &Task) -> anyhow::Result<TimerTask> {
     let package = task
@@ -228,7 +237,7 @@ pub(crate) fn timer_from_legacy(task: &Task) -> anyhow::Result<TimerTask> {
         "args": args,
         "param_signature": task.param_signature,
     });
-    let schedule = ScheduleSpec::new("cron", serde_json::json!({"expression": task.cron}))?;
+    let schedule = legacy_schedule_spec(&task.cron);
     let now = Utc::now();
     let mut timer = TimerTask::new(
         task.id.clone(),

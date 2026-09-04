@@ -24,10 +24,12 @@ use uuid::Uuid;
 use super::common::{err_response, run_blocking_api, validate_text_field};
 use super::runs::diagnostics_response;
 use super::{ApiError, AppState};
-use crate::cron_extension::{next_run, validate_cron};
 use crate::store::Task;
 use crate::task_params::{self, GateError};
-use crate::timer_core::{ScheduleSpec, TaskPreset, TimerRunnerError, TimerTask, TimerTaskState};
+use crate::timer_core::{
+    ScheduleExtension, ScheduleRegistry, ScheduleSpec, TaskPreset, TimerRunnerError, TimerTask,
+    TimerTaskState,
+};
 use crate::{core::AppContext, timer_yaml};
 
 #[derive(Debug)]
@@ -132,6 +134,20 @@ fn format_next_run(next: chrono::DateTime<chrono::Local>) -> String {
     next.format("%Y-%m-%d %H:%M:%S%:z").to_string()
 }
 
+/// 旧任务 cron 字符串 → Registry 查询下次触发（UTC → 服务端本地时区）。
+/// 解析失败/不再触发返回 None（接口显示 "-"）；cron 语义全部留在已注册的
+/// schedule provider 内，本模块不感知任何具体 schedule 类型。
+fn legacy_next_run(
+    registry: &ScheduleRegistry,
+    cron: &str,
+) -> Option<chrono::DateTime<chrono::Local>> {
+    registry
+        .next_after(&timer_yaml::legacy_schedule_spec(cron), chrono::Utc::now())
+        .ok()
+        .flatten()
+        .map(|next| next.with_timezone(&chrono::Local))
+}
+
 // ---------- 定时任务 ----------
 
 pub(super) async fn api_list_tasks(State(st): State<AppState>) -> Response {
@@ -140,12 +156,13 @@ pub(super) async fn api_list_tasks(State(st): State<AppState>) -> Response {
         Err(err) => return ApiError::internal(err.to_string()).into_response(),
     };
     let scripts = st.scripts.clone();
+    let schedules = st.scheduler.schedules();
     let out = match run_blocking_api(move || {
         let tasks = tasks
             .into_iter()
             .map(|t| {
                 let next = if t.enabled {
-                    next_run(&t.cron)
+                    legacy_next_run(&schedules, &t.cron)
                         .map(format_next_run)
                         .unwrap_or_else(|| "-".into())
                 } else {
@@ -173,13 +190,14 @@ pub(super) async fn api_get_task(State(st): State<AppState>, Path(id): Path<Stri
         Err(err) => return ApiError::internal(err.to_string()).into_response(),
     };
     let scripts = st.scripts.clone();
+    let schedules = st.scheduler.schedules();
     match run_blocking_api(move || {
         let Some(t) = task else {
             return Err(ApiError::not_found("任务不存在"));
         };
         let stale = param_stale_of(&scripts, &t);
         let next = if t.enabled {
-            next_run(&t.cron)
+            legacy_next_run(&schedules, &t.cron)
                 .map(format_next_run)
                 .unwrap_or_else(|| "-".into())
         } else {
@@ -216,8 +234,16 @@ pub(super) async fn api_save_task(
     State(st): State<AppState>,
     Json(req): Json<SaveTaskReq>,
 ) -> Response {
-    // 校验 cron（5/6/7 字段）
-    if !validate_cron(&req.cron) {
+    // 校验 cron（5/6/7 字段）：经通用 Registry 交给已注册 provider 解析判定
+    if st
+        .scheduler
+        .schedules()
+        .next_after(
+            &timer_yaml::legacy_schedule_spec(&req.cron),
+            chrono::Utc::now(),
+        )
+        .is_err()
+    {
         return err_response(StatusCode::BAD_REQUEST, "cron 表达式无效");
     }
     if let Err(err) = validate_task_req(&req) {
@@ -506,24 +532,18 @@ fn empty_payload() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
-fn validate_schedule(schedule: &ScheduleSpec) -> Result<(), ApiError> {
+/// 通用 schedule 校验：已注册 provider 必须接受该 spec（cron 表达式错误在
+/// 保存边界即 400）；未注册 kind 保存时放行，触发时由 TimerCore 明确挂起
+/// （既有语义：未来扩展允许先存任务、后装 provider）。
+fn validate_schedule(registry: &ScheduleRegistry, schedule: &ScheduleSpec) -> Result<(), ApiError> {
     schedule
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    if schedule.kind == crate::cron_extension::CRON_SCHEDULE_KIND {
-        let expression = schedule
-            .value
-            .get("expression")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ApiError::bad_request("cron schedule misses expression"))?;
-        if !validate_cron(expression) {
-            return Err(ApiError::bad_request("cron 表达式无效"));
-        }
-    }
-    Ok(())
+    registry.probe(schedule).map_err(ApiError::bad_request)
 }
 
 fn build_user_task(
+    registry: &ScheduleRegistry,
     id: String,
     req: SaveUserTaskReq,
     existing: Option<TimerTask>,
@@ -534,7 +554,7 @@ fn build_user_task(
     if let Some(preset_id) = &req.preset_id {
         validate_text_field(preset_id, "preset_id", 255)?;
     }
-    validate_schedule(&req.schedule)?;
+    validate_schedule(registry, &req.schedule)?;
     let enabled = req
         .enabled
         .or_else(|| existing.as_ref().map(|task| task.enabled))
@@ -599,7 +619,7 @@ pub(super) async fn api_save_user_task(
         Err(error) => return ApiError::internal(error.to_string()).into_response(),
     };
     let is_new = existing.is_none();
-    let task = match build_user_task(id, req, existing) {
+    let task = match build_user_task(st.scheduler.schedules().as_ref(), id, req, existing) {
         Ok(task) => task,
         Err(error) => return error.into_response(),
     };
@@ -806,7 +826,7 @@ pub(super) async fn api_save_task_preset(
     {
         return error.into_response();
     }
-    if let Err(error) = validate_schedule(&req.schedule) {
+    if let Err(error) = validate_schedule(st.scheduler.schedules().as_ref(), &req.schedule) {
         return error.into_response();
     }
     let id = req

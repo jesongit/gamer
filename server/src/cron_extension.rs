@@ -13,7 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Local, Utc};
 use cron::Schedule;
 
-use crate::timer_core::{ScheduleExtension, ScheduleSpec, TimerTask};
+use crate::timer_core::{ScheduleExtension, ScheduleRegistry, ScheduleSpec};
 
 pub(crate) const CRON_SCHEDULE_KIND: &str = "cron";
 
@@ -32,20 +32,17 @@ pub fn normalize_cron(expr: &str) -> String {
     }
 }
 
-/// Validate a Cron expression at an API boundary without teaching the
-/// generic task model about Cron syntax.
-pub fn validate_cron(expr: &str) -> bool {
-    Schedule::from_str(&normalize_cron(expr)).is_ok()
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct CronExtension;
 
-impl CronExtension {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self)
-    }
+/// Composition-root seam: installs the native Cron schedule extension into
+/// the generic [`ScheduleRegistry`].  Callers only see the registration; all
+/// later schedule computation goes through the registry, never this type.
+pub fn register_builtin(registry: &ScheduleRegistry) -> anyhow::Result<()> {
+    registry.register(CRON_SCHEDULE_KIND, Arc::new(CronExtension))
+}
 
+impl CronExtension {
     fn parse_schedule(&self, schedule: &ScheduleSpec) -> Result<Schedule, String> {
         let expression = schedule
             .value
@@ -96,66 +93,88 @@ impl ScheduleExtension for CronExtension {
     }
 }
 
-/// Cron preview retained for the legacy task endpoint. The endpoint owns the
-/// legacy string shape; this function still keeps parsing in the extension.
-pub fn next_run(cron_expr: &str) -> Option<DateTime<Local>> {
-    let schedule = Schedule::from_str(&normalize_cron(cron_expr)).ok()?;
-    schedule.after(&Local::now()).next()
-}
-
-/// Return the nearest enabled generic task wakeup. This is used by the update
-/// workload gate and deliberately consumes `TimerTask`, not the legacy task
-/// or script model.
-pub(crate) fn next_enabled_trigger_in_secs(tasks: &[TimerTask], now: DateTime<Utc>) -> Option<i64> {
-    let extension = CronExtension;
-    tasks
-        .iter()
-        .filter(|task| task.is_schedulable())
-        .filter_map(|task| extension.next_after(&task.schedule, now).ok().flatten())
-        .map(|next| (next - now).num_seconds().max(0))
-        .min()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::AppContext;
     use chrono::TimeZone;
 
     #[test]
-    fn parses_five_six_and_seven_field_cron_without_core_knowledge() {
-        assert!(validate_cron("*/5 * * * *"));
-        assert!(validate_cron("0 */5 * * * *"));
-        assert!(validate_cron("0 */5 * * * * *"));
-        assert!(!validate_cron("not a cron"));
-    }
-
-    #[test]
-    fn computes_next_wakeup_from_opaque_schedule() {
+    fn registered_provider_answers_generic_registry_queries() {
+        let registry = ScheduleRegistry::new();
+        register_builtin(&registry).expect("内置 Cron provider 必须可注册");
         let now = Local
             .with_ymd_and_hms(2026, 8, 31, 10, 0, 20)
             .single()
             .unwrap()
             .with_timezone(&Utc);
-        let task = TimerTask::new(
-            "task",
-            "Task",
-            AppContext::from_legacy_package("d1", "com.example").unwrap(),
-            "runner.example",
-            "entry",
-            serde_json::json!({}),
-            ScheduleSpec::new(
-                CRON_SCHEDULE_KIND,
-                serde_json::json!({"expression": "*/5 * * * *"}),
-            )
-            .unwrap(),
+        let spec = ScheduleSpec::new(
+            CRON_SCHEDULE_KIND,
+            serde_json::json!({"expression": "*/5 * * * *"}),
         )
         .unwrap();
-        assert_eq!(
-            next_enabled_trigger_in_secs(&[task], now),
-            Some(280),
-            "10:05:00 is 280 seconds after 10:00:20"
-        );
+        let next = registry
+            .next_after(&spec, now)
+            .expect("已注册 provider 必须解析 spec")
+            .expect("*/5 永远存在下一次触发");
+        let expected = Local
+            .with_ymd_and_hms(2026, 8, 31, 10, 5, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(next, expected, "10:05:00 local is 280s after 10:00:20");
+    }
+
+    #[test]
+    fn latest_due_returns_the_most_recent_occurrence_within_lookback() {
+        let registry = ScheduleRegistry::new();
+        register_builtin(&registry).unwrap();
+        let now = Local
+            .with_ymd_and_hms(2026, 8, 31, 10, 3, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        let spec = ScheduleSpec::new(
+            CRON_SCHEDULE_KIND,
+            serde_json::json!({"expression": "*/5 * * * *"}),
+        )
+        .unwrap();
+        let due = registry
+            .latest_due(&spec, now, Duration::from_secs(60 * 60))
+            .expect("已注册 provider 必须解析 spec")
+            .expect("10:00:00 local 在回看窗口内");
+        let expected = Local
+            .with_ymd_and_hms(2026, 8, 31, 10, 0, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(due, expected);
+    }
+
+    #[test]
+    fn duplicate_builtin_registration_is_rejected() {
+        let registry = ScheduleRegistry::new();
+        register_builtin(&registry).unwrap();
+        assert!(register_builtin(&registry).is_err());
+    }
+
+    #[test]
+    fn parses_five_six_and_seven_field_cron_without_core_knowledge() {
+        let registry = ScheduleRegistry::new();
+        register_builtin(&registry).unwrap();
+        let probe = |expression: &str| {
+            registry.next_after(
+                &ScheduleSpec::new(
+                    CRON_SCHEDULE_KIND,
+                    serde_json::json!({"expression": expression}),
+                )
+                .unwrap(),
+                Utc::now(),
+            )
+        };
+        assert!(probe("*/5 * * * *").is_ok());
+        assert!(probe("0 */5 * * * *").is_ok());
+        assert!(probe("0 */5 * * * * *").is_ok());
+        assert!(probe("not a cron").is_err());
     }
 
     #[test]
