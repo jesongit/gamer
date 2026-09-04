@@ -145,6 +145,55 @@ describe('唯一资源 API surface', () => {
   })
 })
 
+describe('统一任务 API（P11.1 ADR-12）', () => {
+  it('CRUD：GET/POST /api/tasks，PUT/DELETE /api/tasks/:id；启停走 enable/disable', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(200, []))
+    await api.listTasks()
+    expect(fetch.mock.calls[0][0]).toBe('/api/tasks')
+    expect(fetch.mock.calls[0][1].method).toBe('GET')
+
+    fetch.mockResolvedValueOnce(jsonRes(201, {}))
+    const body = { name: 't', runner: { runner_id: 'gamer.yaml', entrypoint: 'p/a.yaml', payload: {} }, schedule: { provider_id: 'cron', config: { expression: '0 8 * * *' } } }
+    await api.saveTask(body)
+    expect(fetch.mock.calls[1][0]).toBe('/api/tasks')
+    expect(fetch.mock.calls[1][1].method).toBe('POST')
+    expect(JSON.parse(fetch.mock.calls[1][1].body)).toEqual(body)
+
+    fetch.mockResolvedValueOnce(jsonRes(200, {}))
+    await api.updateTask('t1', body)
+    expect(fetch.mock.calls[2][0]).toBe('/api/tasks/t1')
+    expect(fetch.mock.calls[2][1].method).toBe('PUT')
+
+    fetch.mockResolvedValueOnce(jsonRes(204, ''))
+    await api.deleteTask('t1')
+    expect(fetch.mock.calls[3][0]).toBe('/api/tasks/t1')
+    expect(fetch.mock.calls[3][1].method).toBe('DELETE')
+
+    fetch.mockResolvedValue(jsonRes(200, {}))
+    await api.enableTask('t1')
+    await api.disableTask('t1')
+    const urls = fetch.mock.calls.slice(4).map(c => c[0])
+    expect(urls).toEqual(['/api/tasks/t1/enable', '/api/tasks/t1/disable'])
+  })
+
+  it('runTaskNow 要求 202 带 run_id；UI 支撑端点列 runner 与 schedule provider', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(202, { run_id: 'run-9' }))
+    await expect(api.runTaskNow('t1')).resolves.toMatchObject({ run_id: 'run-9' })
+    expect(fetch.mock.calls[0][0]).toBe('/api/tasks/t1/run')
+
+    fetch.mockResolvedValueOnce(jsonRes(202, { ok: true }))
+    await expect(api.runTaskNow('t1')).rejects.toMatchObject({ code: 'invalid_response' })
+
+    fetch.mockResolvedValueOnce(jsonRes(200, [{ runner_id: 'gamer.yaml' }]))
+    await expect(api.listRunners()).resolves.toEqual([{ runner_id: 'gamer.yaml' }])
+    expect(fetch.mock.calls[2][0]).toBe('/api/runners')
+
+    fetch.mockResolvedValueOnce(jsonRes(200, [{ provider_id: 'cron' }]))
+    await expect(api.listScheduleProviders()).resolves.toEqual([{ provider_id: 'cron' }])
+    expect(fetch.mock.calls[3][0]).toBe('/api/schedule-providers')
+  })
+})
+
 describe('游戏包（App Package）与本地编辑区 API', () => {
   it('列表/安装：安装发送原始字节 + application/zip + X-Expected-Sha256 校验头', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { packages: [] }))
