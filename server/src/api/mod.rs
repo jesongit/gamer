@@ -326,12 +326,20 @@ pub(crate) fn build_router_with_extensions(
             get(app_packages::api_list_app_packages),
         )
         .route(
+            "/api/app-packages/export",
+            post(app_packages::api_export_app_package),
+        )
+        .route(
             "/api/app-packages/:id/activate",
             post(app_packages::api_activate_app_package),
         )
         .route(
             "/api/app-packages/:id/:version",
             delete(app_packages::api_uninstall_app_package),
+        )
+        .route(
+            "/api/workspace/:android_package",
+            get(app_packages::api_get_workspace).put(app_packages::api_put_workspace),
         )
         .route("/api/system/update", get(update::api_get_update))
         .route("/api/system/update/check", post(update::api_update_check))

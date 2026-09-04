@@ -59,6 +59,35 @@ pub(crate) enum AppPackageError {
 
     #[error("包内任务预设发布失败: {0}")]
     PresetHook(String),
+
+    /// 本地编辑区（workspace）没有 package.toml：导出前必须先在工作区初始化元数据。
+    #[error("工作区未初始化: {0}")]
+    WorkspaceNotFound(String),
+
+    /// 本地编辑区 `package.toml` 无效（与包内 manifest 同一套校验规则，仅文件语境不同）。
+    #[error("package.toml 无效: {0}")]
+    InvalidWorkspaceMetadata(String),
+
+    /// 导出 preflight 失败：收集到的问题全量返回（首失败即停会逼用户多跑几轮）。
+    #[error("导出 preflight 失败:\n{problems}")]
+    PreflightFailed { problems: String },
+
+    #[error("App Package 构建失败: {0}")]
+    PackageBuildFailed(String),
+}
+
+impl AppPackageError {
+    /// preflight 问题列表 → 单个错误（Display 内按行展开，供 400 消息直接展示）。
+    pub(crate) fn preflight_failed(problems: Vec<String>) -> Self {
+        Self::PreflightFailed {
+            problems: problems.join("\n"),
+        }
+    }
+
+    /// preflight 失败的机器码（api 层错误体 `code` 字段用）。
+    pub(crate) fn is_preflight_failed(&self) -> bool {
+        matches!(self, Self::PreflightFailed { .. })
+    }
 }
 
 pub(crate) type AppPackageResult<T> = Result<T, AppPackageError>;

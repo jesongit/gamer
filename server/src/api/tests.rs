@@ -468,4 +468,7 @@ mod sec_tests {
     mod app_packages_tests {
         include!("tests/app_packages.rs");
     }
+    mod app_packages_export_tests {
+        include!("tests/app_packages_export.rs");
+    }
 }

@@ -1,22 +1,34 @@
-//! App Package REST 端点：安装 / 列表 / 卸载 / 激活。
+//! App Package REST 端点：安装 / 列表 / 卸载 / 激活 / 工作区导出。
 //!
 //! 端点不持有包状态：全部读写走 [`AppPackageStore`]（staging + 原子安装、
 //! active 注册表、primary 唯一约束与预设发布 hook 都在 store 层收口）。
 //! 安装归档为 zip/.gamerpkg 字节流，可选 `X-Expected-Sha256` 头做完整性校验。
+//!
+//! 本地编辑区导出：`POST /api/app-packages/export` 走
+//! `crate::app_packages::builder::PackageBuilder` 流水线
+//! （preflight → collect → manifest → zip → verify），handler 只做参数与响应装配；
+//! 工作区元数据由 `crate::app_packages::workspace` 提供 package.toml 读写。
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::Value;
 
+use super::common::run_blocking_api;
 use super::{ApiError, AppState};
-use crate::app_packages::{AppPackageError, InstalledPackage};
+use crate::app_packages::builder::{BuiltPackage, PackageBuilder};
+use crate::app_packages::workspace;
+use crate::app_packages::{
+    parse_android_package_name, AppPackageError, InstalledPackage, PackageManifest,
+};
 
 /// 归档完整性校验头（64 位 hex，大小写不敏感）。
 const EXPECTED_SHA256_HEADER: &str = "x-expected-sha256";
+/// 导出响应头：归档字节的 SHA-256（64 位 hex）。
+const CONTENT_SHA256_HEADER: &str = "x-content-sha256";
 
 // axum `Response` 体量超过 clippy result_large_err 阈值；错误即响应，箱化不改变语义
 #[allow(clippy::result_large_err)]
@@ -192,13 +204,19 @@ fn package_json_for(
     }))
 }
 
-fn app_package_error(error: AppPackageError) -> Response {
-    let api_error = match &error {
+/// AppPackageError → 统一 ApiError（含机器码 `code`）。
+fn app_package_api_error(error: AppPackageError) -> ApiError {
+    match &error {
         AppPackageError::AlreadyInstalled { .. } | AppPackageError::PrimaryConflict { .. } => {
             ApiError::conflict(error.to_string())
         }
         AppPackageError::NotInstalled { .. } | AppPackageError::NotActive(_) => {
             ApiError::not_found(error.to_string())
+        }
+        // 工作区没有 package.toml：提示先在工作区初始化元数据
+        AppPackageError::WorkspaceNotFound(_) => ApiError::not_found(error.to_string()),
+        AppPackageError::PreflightFailed { .. } => {
+            ApiError::bad_request(error.to_string()).with_code("preflight_failed")
         }
         AppPackageError::Sha256Mismatch { .. }
         | AppPackageError::InvalidAppPackageId(_)
@@ -206,13 +224,180 @@ fn app_package_error(error: AppPackageError) -> Response {
         | AppPackageError::InvalidInstalledVersion(_)
         | AppPackageError::InvalidResourcePath(_)
         | AppPackageError::InvalidManifest(_)
+        | AppPackageError::InvalidWorkspaceMetadata(_)
         | AppPackageError::InvalidArchive(_)
         | AppPackageError::ArchiveTooLarge { .. }
+        | AppPackageError::PackageBuildFailed(_)
         | AppPackageError::InvalidPreset(_) => ApiError::bad_request(error.to_string()),
         AppPackageError::TaskHook(_) | AppPackageError::PresetHook(_) => {
             ApiError::internal(error.to_string())
         }
         AppPackageError::Io(_) | AppPackageError::Zip(_) => ApiError::internal(error.to_string()),
+    }
+}
+
+fn app_package_error(error: AppPackageError) -> Response {
+    app_package_api_error(error).into_response()
+}
+
+/// 工作区元数据 JSON 视图：`name`/`revision` 缺省时省略（存在即有值）。
+fn metadata_json(metadata: &PackageManifest) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "format_version".to_string(),
+        serde_json::json!(crate::app_packages::MANIFEST_FORMAT_VERSION),
+    );
+    map.insert("id".to_string(), serde_json::json!(metadata.id().as_str()));
+    map.insert(
+        "version".to_string(),
+        serde_json::json!(metadata.version().as_str()),
+    );
+    if let Some(name) = metadata.name() {
+        map.insert("name".to_string(), serde_json::json!(name));
+    }
+    if let Some(revision) = metadata.revision() {
+        map.insert("revision".to_string(), serde_json::json!(revision));
+    }
+    map.insert(
+        "android_packages".to_string(),
+        serde_json::json!(metadata
+            .android_packages()
+            .iter()
+            .map(|package| package.as_str())
+            .collect::<Vec<_>>()),
+    );
+    Value::Object(map)
+}
+
+/// 校验路径参数为 Android 包名（工作区目录名 = 设备配置的应用包名）。
+fn android_of_path(
+    android_package: &str,
+) -> Result<crate::app_packages::AndroidPackageName, ApiError> {
+    parse_android_package_name(android_package.trim()).map_err(app_package_api_error)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WorkspacePutReq {
+    /// 内容包 id（缺省取路径上的 android 包名）。
+    #[serde(default)]
+    id: Option<String>,
+    version: String,
+    #[serde(default)]
+    name: Option<String>,
+    android_packages: Vec<String>,
+}
+
+/// `GET /api/workspace/:android_package`：工作区元数据 + 六目录资源统计。
+pub(super) async fn api_get_workspace(
+    State(st): State<AppState>,
+    Path(android_package): Path<String>,
+) -> Response {
+    let android = match android_of_path(&android_package) {
+        Ok(android) => android,
+        Err(error) => return error.into_response(),
     };
-    api_error.into_response()
+    let data_dir = st.cfg.data_dir.clone();
+    let payload = run_blocking_api(move || {
+        let dir = workspace::workspace_dir(&data_dir, &android);
+        let metadata = workspace::read_metadata(&dir).map_err(app_package_api_error)?;
+        Ok(serde_json::json!({
+            "metadata": metadata.as_ref().map(metadata_json),
+            "stats": workspace::compute_stats(&dir).to_json(),
+        }))
+    })
+    .await;
+    match payload {
+        Ok(json) => Json(json).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+/// `PUT /api/workspace/:android_package`：校验并原子写 package.toml。
+pub(super) async fn api_put_workspace(
+    State(st): State<AppState>,
+    Path(android_package): Path<String>,
+    Json(req): Json<WorkspacePutReq>,
+) -> Response {
+    let android = match android_of_path(&android_package) {
+        Ok(android) => android,
+        Err(error) => return error.into_response(),
+    };
+    let id = req
+        .id
+        .unwrap_or_else(|| android.as_str().to_string())
+        .trim()
+        .to_string();
+    let data_dir = st.cfg.data_dir.clone();
+    let result = run_blocking_api(move || {
+        // 与 manifest V2 同一套校验规则（metadata_from_parts 内部回灌 parse_manifest）
+        let metadata = workspace::metadata_from_parts(
+            &id,
+            &req.version,
+            req.name.as_deref(),
+            &req.android_packages,
+        )
+        .map_err(app_package_api_error)?;
+        let dir = workspace::workspace_dir(&data_dir, &android);
+        workspace::write_metadata(&dir, &metadata).map_err(app_package_api_error)?;
+        Ok(metadata)
+    })
+    .await;
+    match result {
+        Ok(metadata) => {
+            Json(serde_json::json!({ "metadata": metadata_json(&metadata) })).into_response()
+        }
+        Err(error) => error.into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ExportReq {
+    android_package: String,
+}
+
+/// `POST /api/app-packages/export`：本地编辑区 → `.gamerpkg` 归档（二进制响应）。
+pub(super) async fn api_export_app_package(
+    State(st): State<AppState>,
+    Json(req): Json<ExportReq>,
+) -> Response {
+    let android = match android_of_path(&req.android_package) {
+        Ok(android) => android,
+        Err(error) => return error.into_response(),
+    };
+    let data_dir = st.cfg.data_dir.clone();
+    let scripts = st.scripts.clone();
+    let built: Result<BuiltPackage, ApiError> = run_blocking_api(move || {
+        PackageBuilder::new(data_dir, android, scripts)
+            .export()
+            .map_err(app_package_api_error)
+    })
+    .await;
+    match built {
+        Ok(built) => {
+            // id/version 已过 ASCII 安全名校验，可直接拼入 Content-Disposition
+            let filename = format!(
+                "{}-{}.gamerpkg",
+                built.manifest.id(),
+                built.manifest.version()
+            );
+            let mut response = (StatusCode::OK, built.archive).into_response();
+            let headers = response.headers_mut();
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            if let Ok(value) =
+                HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            {
+                headers.insert(header::CONTENT_DISPOSITION, value);
+            }
+            if let Ok(value) = HeaderValue::from_str(&built.sha256) {
+                headers.insert(CONTENT_SHA256_HEADER, value);
+            }
+            response
+        }
+        Err(error) => error.into_response(),
+    }
 }

@@ -4,10 +4,12 @@
 //!
 //! REST wiring (`api/app_packages.rs`) installs/activates packages; resource
 //! consumers reach packages through the composite seam in [`composite`]
-//! (user-overrides → active App Package → legacy partition fallback) used by
+//! (editable local partition → user-overrides → active App Package) used by
 //! `scripts.rs` / `keymaps.rs` / the engine matcher adapters.
 
 mod archive;
+/// PackageBuilder：工作区 → `.gamerpkg` 导出流水线（builder/导出 API 专用）。
+pub(crate) mod builder;
 mod composite;
 mod error;
 mod manifest;
@@ -15,6 +17,8 @@ mod model;
 mod presets;
 mod resolver;
 mod store;
+/// 本地编辑区元数据与统计（package.toml / workspace API 专用）。
+pub(crate) mod workspace;
 
 pub(crate) use archive::{
     MAX_PACKAGE_ARCHIVE_BYTES, MAX_PACKAGE_ENTRIES, MAX_PACKAGE_FILE_BYTES, MAX_PACKAGE_TOTAL_BYTES,
@@ -23,7 +27,7 @@ pub(crate) use composite::{
     ActivePackage, CompositeHit, CompositeResolver, CompositeSource, TemplateLookup,
 };
 pub(crate) use error::{AppPackageError, AppPackageResult};
-pub(crate) use manifest::{parse_manifest, PackageManifest};
+pub(crate) use manifest::{parse_manifest, PackageManifest, MANIFEST_FORMAT_VERSION};
 pub(crate) use model::{
     parse_android_package_name, parse_app_package_id, resource_id, AndroidPackageName,
     AppPackageId, InstalledVersion, ResourceId, ResourceKind, ResourcePath,
@@ -481,6 +485,66 @@ packages = ["com.example.game"]
             .resolve(&unsupported, &id)
             .unwrap()
             .is_none());
+    }
+
+    /// ResourceResolver 三层顺序：**本地编辑区（分区目录）→ override → 指定
+    /// 版本安装包**。运行时读路径（keymap 扩展按包版本加载 profile）与
+    /// CompositeResolver 优先级保持一致：用户改本地副本立即生效。
+    #[test]
+    fn resolver_prefers_editable_local_then_override_then_installed() {
+        let temp = TempDir::new().unwrap();
+        let store = AppPackageStore::new(temp.path());
+        let manifest = package_manifest("official.xxx", "1.2.0", "com.example.game");
+        let package = archive(vec![
+            ("manifest.toml", &manifest),
+            ("keymaps/default.yaml", b"installed"),
+        ]);
+        let installed = store.install_archive(&package, None).unwrap();
+        let android = parse_android_package_name("com.example.game").unwrap();
+        let id = resource_id(
+            installed.manifest().id().clone(),
+            installed.manifest().version(),
+            &ResourcePath::parse("keymaps/default.yaml").unwrap(),
+        )
+        .unwrap();
+        let resolver = store.resolver();
+
+        let resolved = resolver.resolve(&android, &id).unwrap().unwrap();
+        assert_eq!(resolved.read_bytes().unwrap(), b"installed");
+
+        // 本地编辑区（分区 keymaps/）出现同名文件 → 最高优先
+        let local = temp.path().join("com.example.game/keymaps/default.yaml");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, b"editable").unwrap();
+        let resolved = resolver.resolve(&android, &id).unwrap().unwrap();
+        assert!(matches!(
+            resolved.source(),
+            ResourceSource::EditableLocal { .. }
+        ));
+        assert_eq!(resolved.read_bytes().unwrap(), b"editable");
+
+        // 删本地 → override 层可见
+        std::fs::remove_file(&local).unwrap();
+        let override_file = temp
+            .path()
+            .join("user-overrides/com.example.game/keymaps/default.yaml");
+        std::fs::create_dir_all(override_file.parent().unwrap()).unwrap();
+        std::fs::write(&override_file, b"override").unwrap();
+        let resolved = resolver.resolve(&android, &id).unwrap().unwrap();
+        assert!(matches!(
+            resolved.source(),
+            ResourceSource::UserOverride { .. }
+        ));
+        assert_eq!(resolved.read_bytes().unwrap(), b"override");
+
+        // 删 override → 指定版本安装包内容重新可见
+        std::fs::remove_file(&override_file).unwrap();
+        let resolved = resolver.resolve(&android, &id).unwrap().unwrap();
+        assert!(matches!(
+            resolved.source(),
+            ResourceSource::Installed { .. }
+        ));
+        assert_eq!(resolved.read_bytes().unwrap(), b"installed");
     }
 
     #[tokio::test]
