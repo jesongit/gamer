@@ -52,7 +52,7 @@ gamer/
 │   │   ├── engine/         # YAML 脚本执行引擎与调度
 │   │   ├── device/         # adb/scrcpy 会话与帧缓存
 │   │   └── store.rs        # SQLite 持久化
-│   ├── data/               # 按应用分区的 yaml/func/tmpl 种子与运行数据
+│   ├── data/               # 按应用分区的 scripts/functions/templates/keymaps/presets/resources 运行数据 + package.toml
 │   ├── assets/scrcpy-server.jar   # 官方 v3.3.3（仓库自带）
 │   └── Dockerfile          # 兼容保留：仅后端镜像（无前端页）
 ├── web/                    # Vue3 + Vite 前端（精简版）
@@ -188,7 +188,8 @@ docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d
 
   | 内容 | 性质 | 来源 |
   |---|---|---|
-  | `<应用包名>/tmpl/` `<应用包名>/yaml/` `<应用包名>/func/` | 种子数据 | 随仓库分发（git 跟踪），**不在镜像内** |
+  | `<应用包名>/{scripts,functions,templates,keymaps,presets,resources}/` + `<应用包名>/package.toml` | 业务分区资源与工作区元数据 | 使用中自动创建（gitignore，零业务资源随仓库分发） |
+  | `app-packages/` `user-overrides/` | 已装 App Package / 用户覆盖 | 安装与使用中生成（gitignore） |
   | `gamer.db` | 运行期持久化 | 首次启动自动生成（gitignore） |
   | 其他临时文件 | 运行期产物 | 自动创建（gitignore） |
 
@@ -250,7 +251,7 @@ Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`�
 ## YAML 脚本语法
 
 YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAML.md](docs/YAML.md)**。
-模板、脚本和函数库按应用分区存放在 `data/<应用包名>/{tmpl,yaml,func}/`（web 端 Console 页框选/上传模板）。
+可执行脚本、函数库和模板按应用分区存放在 `data/<应用包名>/{scripts,functions,templates}/`，按键映射在 `keymaps/`（web 端 Console 页框选/上传模板）。
 
 ## API 一览
 
@@ -283,11 +284,18 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAM
 | POST | /api/functions/:id/run | 测试函数（异步 202） |
 | GET/POST | /api/tasks | 定时任务列表 / 保存 |
 | POST | /api/tasks/:id/run | 立即执行 |
+| POST | /api/app-packages/install | 安装 .gamerpkg/zip 归档（可选 `X-Expected-Sha256` 校验头），安装即激活 |
+| GET | /api/app-packages | 已装 App Package 列表（版本、激活版本、SHA-256） |
+| DELETE | /api/app-packages/:id/:version | 卸载指定版本 |
+| POST | /api/app-packages/:id/activate | 激活指定版本 |
+| POST | /api/app-packages/export | 本地编辑区导出为 .gamerpkg（body `{android_package}`） |
+| POST | /api/app-packages/:id/:version/edit | 已装包整体提取到本地编辑区 |
+| GET/PUT | /api/workspace/:android_package | 工作区元数据（package.toml）与六目录资源统计 |
 | GET/DELETE | /api/logs | 运行日志 / 清空 |
 | WS | /ws/device/:id | WebRTC 信令（offer → answer） |
 
 脚本运行以 `run_id` 标识一次执行实例。启动脚本、函数测试或“立即运行任务”采用异步返回：
-接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同脚本并发控制同一设备。脚本/函数保存、导入、运行和任务保存共用严格 v2 loader，失败返回结构化诊断。
+接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同脚本并发控制同一设备。脚本/函数保存、运行和任务保存共用严格 v2 loader，失败返回结构化诊断。
 
 ## 技术要点
 

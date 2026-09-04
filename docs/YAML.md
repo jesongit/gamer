@@ -15,18 +15,25 @@ YAML v2 严格语法；不提供旧格式兼容或自动迁移。规则来源：
 
 ```
 data/<pkg>/
-├── yaml/    # 可运行脚本（.yaml/.yml，顶层必须有 steps）
-├── func/    # 函数库（严格 .yaml，顶层键全是函数名）
-└── tmpl/    # 模板图片（默认 8-bit 灰度 PNG，文件名可带 # 搜索区/#1 颜色后缀）
+├── scripts/     # 可运行脚本（.yaml/.yml，顶层必须有 steps）
+├── functions/   # 函数库（严格 .yaml，顶层键全是函数名）
+├── templates/   # 模板图片（默认 8-bit 灰度 PNG，文件名可带 # 搜索区/#1 颜色后缀）
+├── keymaps/     # 按键映射方案（WASM keymap 扩展 profile 数据源）
+├── presets/     # App Package 发布的任务预设
+└── resources/   # 包附带的其他资源
 ```
 
+- **解析优先级**：同名资源按 **EditableLocal（分区目录）→ UserOverride →
+  active App Package** 三层解析，高层覆盖低层；本地分区目录即本地编辑区
+  （可执行脚本只能位于 `data/<pkg>/scripts/`，函数库 `functions/`，
+  模板 `templates/`）。
 - **脚本资源 ID** = `<pkg>/<文件名>.yaml`（如 `daily/login.yaml`，可含子目录）。
   含 `/`，前端拼 URL 必须整体 `encodeURIComponent`。
-- **函数路径** = `<文件短路径>/<函数名>`（如 `common/login` = `func/common.yaml`
+- **函数路径** = `<文件短路径>/<函数名>`（如 `common/login` = `functions/common.yaml`
   里的 `login`；一个函数库文件可定义多个函数）。
-- **运行边界**：只有 `yaml/` 下的脚本可手动运行 / 立即运行 / 进入定时任务；
-  `func/` 只能被 `func` 步骤调用或走函数测试 API，不进脚本列表与任务选择器。
-- **不做内容推断**：`yaml/` 里必须有顶层 `steps`；`func/` 顶层键全是函数名。
+- **运行边界**：只有 `scripts/` 下的脚本可手动运行 / 立即运行 / 进入定时任务；
+  `functions/` 只能被 `func` 步骤调用或走函数测试 API，不进脚本列表与任务选择器。
+- **不做内容推断**：`scripts/` 里必须有顶层 `steps`；`functions/` 顶层键全是函数名。
   放错目录按该目录的类型校验，报错即拒。
 - **跨分区一律不解析、不回退**：模板 / 函数 / 子脚本只在当前应用分区查找，
   没有 default 兜底；其他目录布局不属于当前资源，也不会被读取或迁移。
@@ -42,7 +49,7 @@ data/<pkg>/
 
 ## 2. 顶层结构
 
-### 2.1 脚本（yaml/）
+### 2.1 脚本（scripts/）
 
 顶层只允许 **params / config / steps** 三个键（顺序不限）：
 
@@ -62,7 +69,7 @@ steps:                      # 必需：可为空列表 steps: []，但不可省�
   也不生成迁移引导。根节点必须是映射；`steps` 缺失报 `step.field.missing`
   （field=steps）。
 
-### 2.2 函数库（func/）
+### 2.2 函数库（functions/）
 
 顶层键 = 函数名（保持书写顺序），每个函数记录只允许 **params / steps** 两个键；
 **没有文件级 config**。函数内的 `steps` 同样必需（可空列表不可省略）。
@@ -328,12 +335,12 @@ steps:
 ### 5.7 call / func —— 子脚本与函数
 
 ```yaml
-- call: sub/inner.yaml          # 调用同分区 yaml/ 脚本（缺 .yaml 自动补全）
+- call: sub/inner.yaml          # 调用同分区 scripts/ 脚本（缺 .yaml 自动补全）
   args:                         # 具名实参（稀疏：未给的参数走声明默认值）
     enable: $enable
     message: "字面量消息"
 
-- func: common/login            # 调用 func/<文件短路径>.yaml 里的函数 login
+- func: common/login            # 调用 functions/common.yaml 里的函数 login
   args:
     account: $account
     timeout: 30s
@@ -454,7 +461,7 @@ canonical_default: bool→true/false；coord→[x,y]（逗号后无空格）；c
   前端按 `code + step_path + field` 定位卡片与控件，`message` 仅展示；
 - 保存接口（脚本 / 函数库）带 `expected_version` 版本短码做双页面冲突检测，
   不符返回 `409 {code:"version_conflict"}`。
-- 保存、导入、手动运行、函数测试和任务保存都使用同一严格 v2 loader；解析失败返回
+- 保存、手动运行、函数测试和任务保存都使用同一严格 v2 loader；解析失败返回
   `code/message/resource/step_path/field` 结构化诊断，不按接口分别放宽格式。
 - 脚本/函数库创建使用 `POST`（同分区同名返回 409）；已有资源更新使用 `PUT`，
   默认要求 `expected_version`，仅 `force:true` 跳过版本比较。模板上传是创建，
@@ -464,8 +471,8 @@ canonical_default: bool→true/false；coord→[x,y]（逗号后无空格）；c
 
 当前基线只接受本文件前述 v2 结构，所有不在白名单中的结构都按未知键或结构错误拒绝：
 
-- 可执行脚本只能位于 `data/<pkg>/yaml/`，函数库只能位于 `data/<pkg>/func/`，
-  模板只能位于 `data/<pkg>/tmpl/`；分区之间不回退。
+- 可执行脚本只能位于 `data/<pkg>/scripts/`，函数库只能位于 `data/<pkg>/functions/`，
+  模板只能位于 `data/<pkg>/templates/`；分区之间不回退。
 - 脚本顶层只能是 `params/config/steps`，函数记录只能是 `params/steps`；
   `color` 的 `else` 只能位于步骤级，与 `color` 同列，候选列表内的 `else` 是结构错误。
 - 参数和引用使用当前具名形式（`$name`）；调用使用 `call` 或

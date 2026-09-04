@@ -145,7 +145,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 
 ## 2026-09-02
 
-- **全量 `cargo test` 的仓库数据严格加载测试会因工作树脚本引用已删除的函数库文件失败**：同步恢复 `data/<pkg>/func/` 依赖或清理对应脚本引用后再跑全量测试，功能单测仍可独立通过。
+- **全量 `cargo test` 的仓库数据严格加载测试会因工作树脚本引用已删除的函数库文件失败**：同步恢复 `data/<pkg>/functions/` 依赖或清理对应脚本引用后再跑全量测试，功能单测仍可独立通过。
 - **Windows 上 Rust 全量测试与前端构建并行时 `rustc` 可能内存分配失败并退出**：多个重型编译任务同时占满内存；先结束并行构建，再单独重跑 `cargo test`（必要时降低并行度）。
 - **部分 Android 游戏在多指 `ACTION_POINTER_UP` 后不会继续处理仍按住的虚拟键**：scrcpy 触点仍然存在但游戏状态未重建；释放一个键后对剩余触点补发一次 `MOVE` 重新锚定，避免 A+D 松 D 后 A 失效。
 ## 2026-09-03
@@ -170,7 +170,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 ## 2026-09-04
 
 - **match/color 候选不点击且无分支步骤时不能省略 YAML 值**：`- 模板:` 会解析为 `null`，严格 loader 报“步骤必须是列表”；序列化必须写 `- 模板: []`，点击候选仍可用 `click: true` 并省略 `steps`。
-- **业务数据出库后全新 clone 无任何脚本/模板/按键映射资源，属预期**：默认发行「零业务资源」，`server/data/<pkg>/{yaml,func,tmpl,keymap}/` 已从 git 索引移除并整体忽略；迁移既有资产用 `tools/export-app-package.ps1` 把旧分区打成 .gamerpkg 经 `POST /api/app-packages/install` 安装（安装即激活、包内 presets 自动发布），或把旧分区目录整份拷入新机 `server/data/` 作为本地分区兜底。
+- **业务数据出库后全新 clone 无任何脚本/模板/按键映射资源，属预期**：默认发行「零业务资源」，`server/data/<pkg>/{scripts,functions,templates,keymaps,presets,resources}/` 已从 git 索引移除并整体忽略；迁移既有资产用 Gamer 内置导出（`POST /api/app-packages/export`，需先 `PUT /api/workspace/<pkg>` 初始化 package.toml）打成 .gamerpkg 经 `POST /api/app-packages/install` 安装（安装即激活、包内 presets 自动发布），或把旧分区目录整份拷入新机 `server/data/` 作为本地编辑区（EditableLocal 一等源）。
 - **`<script setup>` 内隐式全局赋值（如 `reconnectAttempts = 0`）编译期不报错、运行时才抛 ReferenceError**：SFC 编译为严格模式 ES Module，误写未声明变量只会在触发对应回调时崩掉后半段；拆分 `useConsoleDeviceManager` 时改为 `consoleRuntime.reconnectAttempts.value = 0`，同批还发现 `onDisconnect` 引用了不存在的 `stopLogPolling`（断连清理中断），由脚本运行 composable 补齐同名包装。
 - **declarative 插件面板的按钮动作链路已收口到 `POST /api/extensions/:id/call`**：服务端校验插件必须 Running 且 `action` 在该 manifest declarative schema 的按钮集合内（`ExtensionError::CallRejected` → 400），声明过的按钮之外没有任意调用入口；guest 侧由通用 extension world 新增的 `call` 导出执行。
 - **通用 extension world 新增导出会让旧 guest 直接实例化失败**：`gamer:host/extension@1.0.0` 增加 `call` 后，该 world 的组件必须同时导出 `run` 与 `call`；手写 wat fixture 需自带 `memory`+`realloc`，`result<string,string>` 按 canonical ABI 经调用方 retptr 写回（判别字 + ptr/len 三个 i32，扁平结果超 1 个即走返回区）。
@@ -181,3 +181,5 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **Keymap E2E 基准断言"scrcpy 写顺序"不能用相对阶段值 `scrcpy_write_us`**：它是各事件"写完成−收到"的时长，处理快慢波动下天然非单调（实测第 2 条 53µs < 第 1 条 102µs 直接误报乱序）；判序必须用进程内单调钟（`KeymapTraceRecord.scrcpy_write_instant`，`#[serde(skip_serializing)]` 不进 JSON）。
 - **WASM guest fixture 的内层 `cargo build` 也会吃外层 `CARGO_TARGET_DIR`**：设置该变量跑测试时 fixture wasm 落到外层 target，测试按 `tests/keymap-guest/target/...` 读取落空；已在 `keymap.rs::build_guest_fixture_component` 统一 `env_remove("CARGO_TARGET_DIR")` 根治（组件测试与 Phase 6 真机 E2E 基准共用该入口）。
 - **rustdoc 注释某行以 `+` 开头会被解析为文档列表项**（如换行后写 "` + wit-component 编码`"），`clippy -D warnings` 报 `doc list item without indentation`；避免行首出现 `+`/`-`/数字列表前缀。
+- **edit 提取 preflight 曾以本地工作区解析包内脚本的 func/call 引用，提取到空工作区必 400**：`PackageBuilder::validate_dir` 的跨文件引用校验读的是本地编辑区 functions/（此时已被删空），`resource.func.not_found` 与「包内脚本/函数内容缺失」无关；已修复为 validate_dir 注入被校验目录自身 scripts/functions 内容作最高优先引用视图（导出路径目录即工作区、行为不变），回归锁在 `builder::tests::validate_dir_resolves_cross_references_from_directory_itself`。
+- **本地删空后 `POST /api/scripts/:id/run` 对纯包内脚本返回 404，属当前实现边界而非包损坏**：run 端点的脚本存在性前置校验只读本地编辑区（`ScriptStore::get`），不查 composite 三层；包内资源的运行链路由引擎运行快照（EditableLocal > UserOverride > InstalledPackage）保证，验证包内容用引擎快照/composite 读面（keymap GET、脚本保存期模板校验），或先 edit 提取到本地再运行。

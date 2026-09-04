@@ -253,3 +253,15 @@ Phase 4 完成后进行一次架构与性能验收。
 - 性能明显退化
 
 先修正，不进入 WASM。
+
+---
+
+## V2 收口记录（2026-09-04）
+
+- **Manifest V2**：`format_version = 2` 必填（旧归档安装明确拒绝）；新增 `functions/` 资源根（六目录统一为 `scripts/functions/templates/keymaps/presets/resources/`），Script/Function 索引彻底分离——包内 `scripts/` 只进脚本索引、`functions/` 只进函数索引，同名不混入。
+- **EditableLocal 一等源**：资源解析优先级定为 **EditableLocal（本地分区目录 `data/<android>/`）> UserOverride > InstalledPackage**（`app_packages/composite.rs`），覆盖模板、按键映射与脚本/函数库运行快照（`RunSnapshot::capture` 三层合并）；分区目录不再是「兜底层」而是本地编辑区，engine 运行快照经 composite 缝取源。
+- **导出/编辑 API**：Rust `PackageBuilder` 正式落地 `.gamerpkg` 导出（`POST /api/app-packages/export`：load_metadata → validate_source → collect → manifest → zip → verify，可复现打包：条目排序 + 固定 mtime + 无额外字段）；工作区元数据 `package.toml` 经 `GET|PUT /api/workspace/:android_package` 读写；已装包一键提取回编辑区（`POST /api/app-packages/:id/:version/edit`，staging + Preflight + 原子替换 + 失败回滚，preflight 以 staging 目录自身内容为最高优先引用视图，保证「提取到空工作区」可过校验）。
+- **快照 ZIP 退役**：分区快照 ZIP 导入导出（前后端 `/api/scripts|keymaps/import|export` 与 `scripts.rs` zip 快照链路）已整体移除，打包/迁移统一走 App Package 导出/安装/编辑三入口。
+- **PowerShell 打包删除**：`tools/export-app-package.ps1` 已删；打包能力收口在 Rust `PackageBuilder`（`app_packages/builder.rs`），不再依赖脚本侧工具。
+- **验收测试指针**：全生命周期 E2E 见 `server/src/api/tests/app_packages_lifecycle.rs`（工作区初始化 → 脚本/函数/模板/keymap 创建 → 运行 → 导出 → 删本地 → 安装激活 → 包层解析 → 编辑提取 → 本地改脚本/函数 → EditableLocal 胜出 → 1.0.1 重发布 → 多版本共存/激活切换 → 同版本重装 409）；导出/工作区/edit/composite 专项见 `app_packages_export.rs` / `app_packages_edit.rs` 与 `app_packages/tests/{builder,workspace,edit,composite,resolver}.rs`。
+- 已知边界：`POST /api/scripts/:id/run` 的脚本存在性前置校验只读本地编辑区（`ScriptStore::get`），纯包内脚本经该入口返回 404；包内资源的运行链路由引擎运行快照（composite）保证，后续如需放开可在 run 端点前置校验改走 composite。
