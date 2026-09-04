@@ -14,7 +14,7 @@
 //!       at: [0.40, 0.60]   # 归一化坐标 [0..1]
 //! ```
 //!
-//! 规则语义与 Native KeymapRunner 对齐：
+//! 规则语义与 keymap YAML schema 一致（guest 即唯一映射引擎）：
 //! - `tap`：按下时在 `at` 归一化点执行一次点击；
 //! - `swipe`：按下时执行 `from → to`、`duration_ms` 的滑动；
 //! - `hold`：按下时在 `at` 处 touch-begin（guest 自有 slot），抬起时 touch-end；
