@@ -88,9 +88,9 @@ afterEach(() => {
 
 function baseRoutes() {
   return [
-    { method: 'GET', url: '/api/scripts', body: SCRIPTS },
-    { method: 'GET', url: '/api/scripts/com.demo%2Fmain.yml', body: SCRIPTS[0] },
-    { method: 'GET', url: '/api/templates', body: [
+    { method: 'GET', url: '/api/apps/-/resources/scripts', body: SCRIPTS },
+    { method: 'GET', url: '/api/apps/-/resources/scripts/com.demo%2Fmain.yml', body: SCRIPTS[0] },
+    { method: 'GET', url: '/api/apps/-/resources/templates', body: [
       { name: '账号155#392_519_526_932.png', pkg: 'com.demo' },
     ] },
     { method: 'GET', url: '/api/devices', body: [
@@ -308,8 +308,8 @@ describe('新建任务：贡献渲染 + cron 触发方式 + 保存 ADR-12 body',
   it('tmpl 参数的模板候选 = 脚本分区模板短名（候选逻辑自 TaskBoard 迁入贡献）', async () => {
     const routes = baseRoutes()
     const tmpl = { id: 'com.demo/main.yml', package: 'com.demo', name: 'main.yml', content: TMPL_SCRIPT_YAML }
-    routes.find(r => r.url === '/api/scripts').body = [tmpl]
-    routes.find(r => r.url === '/api/scripts/com.demo%2Fmain.yml').body = tmpl
+    routes.find(r => r.url === '/api/apps/-/resources/scripts').body = [tmpl]
+    routes.find(r => r.url === '/api/apps/-/resources/scripts/com.demo%2Fmain.yml').body = tmpl
     const { wrapper } = await mountView(routes)
     await openAdd(wrapper)
     await wrapper.find('.sp-name').setValue('com.demo/main.yml')
@@ -374,7 +374,7 @@ describe('编辑任务：payload.args 采用与保存形状', () => {
     const { wrapper, calls } = await mountView(routes)
     await openEdit(wrapper, 0)
     // 表单按脚本 params 渲染（内容经 GET /api/scripts/:id 获取——贡献内部事务）
-    expect(calls.some(c => c.method === 'GET' && c.url === '/api/scripts/com.demo%2Fmain.yml')).toBe(true)
+    expect(calls.some(c => c.method === 'GET' && c.url === '/api/apps/-/resources/scripts/com.demo%2Fmain.yml')).toBe(true)
     const form = wrapper.find('[data-testid="params-form"]')
     expect(form.exists()).toBe(true)
     expect(form.findAll('.pf-row')).toHaveLength(2)
@@ -401,8 +401,8 @@ describe('编辑任务：payload.args 采用与保存形状', () => {
   it('切换执行目标后原 payload 不再适用：保存时 args 清空', async () => {
     const routes = baseRoutes()
     const second = { id: 'com.demo/other.yml', package: 'com.demo', name: 'other.yml', content: SCRIPT_YAML }
-    routes.find(r => r.url === '/api/scripts').body = [...SCRIPTS, second]
-    routes.push({ method: 'GET', url: '/api/scripts/com.demo%2Fother.yml', body: second })
+    routes.find(r => r.url === '/api/apps/-/resources/scripts').body = [...SCRIPTS, second]
+    routes.push({ method: 'GET', url: '/api/apps/-/resources/scripts/com.demo%2Fother.yml', body: second })
     routes.push({ method: 'PUT', url: '/api/tasks/t1', body: {} })
     const { wrapper, calls } = await mountView(routes)
     await openEdit(wrapper, 0)

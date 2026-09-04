@@ -73,15 +73,15 @@ describe('唯一资源 API surface', () => {
   it('脚本创建 POST 只发送当前字段；更新 PUT 整体编码 id 并携带 expected_version', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/main.yaml' }))
     await api.createScript({ pkg: 'com.demo', name: 'main.yaml', content: 'steps: []\n', id: 'old-id' })
-    expect(fetch.mock.calls[0][0]).toBe('/api/scripts')
+    expect(fetch.mock.calls[0][0]).toBe('/api/apps/com.demo/resources/scripts')
     expect(fetch.mock.calls[0][1].method).toBe('POST')
-    expect(bodyOf()).toEqual({ pkg: 'com.demo', name: 'main.yaml', content: 'steps: []\n' })
+    expect(bodyOf()).toEqual({ name: 'main.yaml', content: 'steps: []\n' })
 
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/main.yaml', version: 'v2' }))
     await api.updateScript('com.demo/main.yaml', {
       name: 'renamed.yaml', content: 'steps: []\n', expected_version: 'v1',
     })
-    expect(fetch.mock.calls[1][0]).toBe('/api/scripts/com.demo%2Fmain.yaml')
+    expect(fetch.mock.calls[1][0]).toBe('/api/apps/-/resources/scripts/com.demo%2Fmain.yaml')
     expect(fetch.mock.calls[1][1].method).toBe('PUT')
     expect(bodyOf(1)).toEqual({ content: 'steps: []\n', name: 'renamed.yaml', expected_version: 'v1' })
   })
@@ -89,9 +89,9 @@ describe('唯一资源 API surface', () => {
   it('函数创建 POST 与更新 PUT 分离；缺版本不发请求，force:true 才跳过版本门禁', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/common.yaml' }))
     await api.createFunction({ pkg: 'com.demo', name: 'common', content: 'login:\n  steps: []\n' })
-    expect(fetch.mock.calls[0][0]).toBe('/api/functions')
+    expect(fetch.mock.calls[0][0]).toBe('/api/apps/com.demo/resources/functions')
     expect(fetch.mock.calls[0][1].method).toBe('POST')
-    expect(bodyOf()).toEqual({ pkg: 'com.demo', name: 'common', content: 'login:\n  steps: []\n' })
+    expect(bodyOf()).toEqual({ name: 'common', content: 'login:\n  steps: []\n' })
 
     await expect(api.updateFunction('com.demo/common.yaml', { content: 'login:\n  steps: []\n' }))
       .rejects.toMatchObject({ status: 409, code: 'version_required' })
@@ -99,45 +99,45 @@ describe('唯一资源 API surface', () => {
 
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/common.yaml', version: 'v3' }))
     await api.updateFunction('com.demo/common.yaml', { content: 'login:\n  steps: []\n', force: true })
-    expect(fetch.mock.calls[1][0]).toBe('/api/functions/com.demo%2Fcommon.yaml')
+    expect(fetch.mock.calls[1][0]).toBe('/api/apps/-/resources/functions/com.demo%2Fcommon.yaml')
     expect(fetch.mock.calls[1][1].method).toBe('PUT')
     expect(bodyOf(1)).toEqual({ content: 'login:\n  steps: []\n', force: true })
   })
 
-  it('模板创建与图片替换使用不同 endpoint/body，替换不伪装成创建', async () => {
+  it('模板创建与图片替换：通用资源 API 原始字节 body，客户端组合完整文件名', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { ok: true, name: 'shot#100_200_800_900.png' }))
     await api.createTemplate('shot.png', 'QUJD', 'com.demo', [0.1, 0.2, 0.8, 0.9])
-    expect(fetch.mock.calls[0][0]).toBe('/api/templates')
+    expect(fetch.mock.calls[0][0]).toBe(
+      '/api/apps/com.demo/resources/templates?name=shot%23100_200_800_900.png',
+    )
     expect(fetch.mock.calls[0][1].method).toBe('POST')
-    expect(bodyOf()).toEqual({
-      short_name: 'shot.png', region: [0.1, 0.2, 0.8, 0.9], data_b64: 'QUJD', pkg: 'com.demo',
-    })
+    expect(fetch.mock.calls[0][1].headers['Content-Type']).toBe('image/png')
+    expect(new TextDecoder().decode(fetch.mock.calls[0][1].body)).toBe('ABC')
 
     fetch.mockResolvedValueOnce(jsonRes(200, { ok: true, name: 'color#100_200_800_900#1.png' }))
     await api.createTemplate('color.png', 'QUJD', 'com.demo', [0.1, 0.2, 0.8, 0.9], true)
-    expect(bodyOf(1)).toEqual({
-      short_name: 'color.png', region: [0.1, 0.2, 0.8, 0.9], grayscale_only: false,
-      data_b64: 'QUJD', pkg: 'com.demo',
-    })
+    expect(fetch.mock.calls[1][0]).toBe(
+      '/api/apps/com.demo/resources/templates?name=color%23100_200_800_900%231.png',
+    )
 
     fetch.mockResolvedValueOnce(jsonRes(200, { ok: true, name: 'shot.png' }))
     await api.replaceTemplateImage('shot#100_200_800_900.png', 'REVG', 'com.demo')
-    expect(fetch.mock.calls[2][0]).toBe('/api/templates/shot%23100_200_800_900.png/image?pkg=com.demo')
+    expect(fetch.mock.calls[2][0]).toBe('/api/apps/com.demo/resources/templates/shot%23100_200_800_900.png')
     expect(fetch.mock.calls[2][1].method).toBe('PUT')
-    expect(bodyOf(2)).toEqual({ data_b64: 'REVG' })
+    expect(new TextDecoder().decode(fetch.mock.calls[2][1].body)).toBe('DEF')
   })
 
   it('按键映射详情/更新使用整体编码资源 id，并保留版本门禁', async () => {
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/combat.yaml' }))
     await api.getKeymap('com.demo/combat.yaml', 'com.demo')
-    expect(fetch.mock.calls[0][0]).toBe('/api/keymaps/com.demo%2Fcombat.yaml')
+    expect(fetch.mock.calls[0][0]).toBe('/api/apps/com.demo/resources/keymaps/com.demo%2Fcombat.yaml')
 
     fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/combat.yaml' }))
     await api.updateKeymap('combat.yaml', 'com.demo', {
       content: 'version: 1\nname: combat\nbindings: []\n',
       expected_version: 'abc123',
     })
-    expect(fetch.mock.calls[1][0]).toBe('/api/keymaps/com.demo%2Fcombat.yaml')
+    expect(fetch.mock.calls[1][0]).toBe('/api/apps/com.demo/resources/keymaps/com.demo%2Fcombat.yaml')
     expect(bodyOf(1)).toEqual({
       content: 'version: 1\nname: combat\nbindings: []\n',
       expected_version: 'abc123',

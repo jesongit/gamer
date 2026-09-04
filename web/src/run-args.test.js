@@ -38,39 +38,52 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('api.runScript / api.runFunction 请求体（阶段 5 契约）', () => {
-  it('runScript：body = {device_id, start_index, args}；空 args 不携带', async () => {
+describe('api.runScript / api.runFunction 请求体（P11.6 统一执行入口契约）', () => {
+  it('runScript：POST /api/runs {runner_id, entrypoint, device_id, payload}；空 args 不携带', async () => {
     const calls = stubFetch([
-      { method: 'POST', url: '/api/scripts/com.demo%2Fmain.yaml/run', body: { run_id: 'r1', state: 'starting' } },
+      { method: 'POST', url: '/api/runs', body: { run_id: 'r1', state: 'starting' } },
     ])
     await api.runScript('com.demo/main.yaml', 'dev1', 2, { timeout: '10s', pos: [0.1, 0.2] })
     expect(calls[0]).toEqual({
-      url: '/api/scripts/com.demo%2Fmain.yaml/run',
+      url: '/api/runs',
       method: 'POST',
-      body: { device_id: 'dev1', start_index: 2, args: { timeout: '10s', pos: [0.1, 0.2] } },
+      body: {
+        runner_id: 'gamer.yaml',
+        entrypoint: 'com.demo/main.yaml',
+        device_id: 'dev1',
+        payload: { start_index: 2, args: { timeout: '10s', pos: [0.1, 0.2] } },
+      },
     })
     await api.runScript('com.demo/main.yaml', 'dev1', 0, {})
-    expect(calls[1].body).toEqual({ device_id: 'dev1', start_index: 0 }) // 稀疏空映射 → 省略
+    expect(calls[1].body.payload).toEqual({}) // 稀疏空映射 → 省略
   })
 
-  it('runFunction：URL 整体编码文件 id；body = {device_id, function?, start_index?, args?}', async () => {
+  it('runFunction：entrypoint = "<file id>#<函数名>"；payload = {start_index?, args?}', async () => {
     const calls = stubFetch([
-      { method: 'POST', url: '/api/functions/com.demo%2Fcommon.yaml/run', body: { run_id: 'r2', state: 'starting' } },
+      { method: 'POST', url: '/api/runs', body: { run_id: 'r2', state: 'starting' } },
     ])
     await api.runFunction('com.demo/common.yaml', 'dev1', {
       function: 'login', start_index: 1, args: { account: 'a.png' },
     })
     expect(calls[0].body).toEqual({
-      device_id: 'dev1', function: 'login', start_index: 1, args: { account: 'a.png' },
+      runner_id: 'gamer.yaml',
+      entrypoint: 'com.demo/common.yaml#login',
+      device_id: 'dev1',
+      payload: { start_index: 1, args: { account: 'a.png' } },
     })
     await api.runFunction('com.demo/common.yaml', 'dev2', {})
-    expect(calls[1].body).toEqual({ device_id: 'dev2' }) // 全省略 → 文件第一个函数从头跑
+    expect(calls[1].body).toEqual({
+      runner_id: 'gamer.yaml',
+      entrypoint: 'com.demo/common.yaml',
+      device_id: 'dev2',
+      payload: {},
+    }) // function/start_index/args 全省略 → 文件第一个函数从头跑
   })
 
   it('runScript 400 invalid_args：err.status/err.data.diagnostics 可取', async () => {
     stubFetch([
       {
-        method: 'POST', url: '/api/scripts/x/run', status: 400,
+        method: 'POST', url: '/api/runs', status: 400,
         body: { error: 'invalid_args', diagnostics: [{ code: 'param.args.missing_required', message: '缺少 account', field: 'account' }] },
       },
     ])

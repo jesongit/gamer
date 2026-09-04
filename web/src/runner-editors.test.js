@@ -95,8 +95,8 @@ describe('gamer.yaml 内置贡献', () => {
 
   it('entrypoints(ctx)：拉取脚本进 store 后返回候选（value=脚本 id）', async () => {
     stubFetch([
-      { url: '/api/scripts', body: [{ id: 'com.demo/main.yml', package: 'com.demo', name: 'main.yml', content: 'steps: []' }] },
-      { url: '/api/templates', body: [] },
+      { url: '/api/apps/-/resources/scripts', body: [{ id: 'com.demo/main.yml', package: 'com.demo', name: 'main.yml', content: 'steps: []' }] },
+      { url: '/api/apps/-/resources/templates', body: [] },
     ])
     const unregister = registerGamerYamlRunnerEditor()
     const contrib = getRunnerEditor(GAMER_YAML_RUNNER_ID)
