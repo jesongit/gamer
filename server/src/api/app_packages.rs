@@ -22,7 +22,7 @@ use super::{ApiError, AppState};
 use crate::app_packages::builder::{BuiltPackage, PackageBuilder};
 use crate::app_packages::workspace;
 use crate::app_packages::{
-    parse_android_package_name, AppPackageError, InstalledPackage, PackageManifest,
+    edit, parse_android_package_name, AppPackageError, InstalledPackage, PackageManifest,
 };
 
 /// 归档完整性校验头（64 位 hex，大小写不敏感）。
@@ -228,11 +228,16 @@ fn app_package_api_error(error: AppPackageError) -> ApiError {
         | AppPackageError::InvalidArchive(_)
         | AppPackageError::ArchiveTooLarge { .. }
         | AppPackageError::PackageBuildFailed(_)
-        | AppPackageError::InvalidPreset(_) => ApiError::bad_request(error.to_string()),
+        | AppPackageError::InvalidPreset(_)
+        | AppPackageError::AndroidTargetNotSupported { .. } => {
+            ApiError::bad_request(error.to_string())
+        }
         AppPackageError::TaskHook(_) | AppPackageError::PresetHook(_) => {
             ApiError::internal(error.to_string())
         }
-        AppPackageError::Io(_) | AppPackageError::Zip(_) => ApiError::internal(error.to_string()),
+        AppPackageError::PackageEditFailed(_)
+        | AppPackageError::Io(_)
+        | AppPackageError::Zip(_) => ApiError::internal(error.to_string()),
     }
 }
 
@@ -398,6 +403,64 @@ pub(super) async fn api_export_app_package(
             }
             response
         }
+        Err(error) => error.into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct EditReq {
+    android_package: String,
+}
+
+/// `POST /api/app-packages/:id/:version/edit`：已安装 App Package 整体提取为
+/// 本地编辑区（受管理条目替换，不做 merge）。业务逻辑在
+/// `crate::app_packages::edit`，这里只做参数解析、404 定位与响应装配。
+pub(super) async fn api_edit_app_package(
+    State(st): State<AppState>,
+    Path((id, version)): Path<(String, String)>,
+    Json(req): Json<EditReq>,
+) -> Response {
+    let id = match crate::app_packages::parse_app_package_id(&id) {
+        Ok(id) => id,
+        Err(error) => return app_package_error(error),
+    };
+    let version = match crate::app_packages::InstalledVersion::parse(&version) {
+        Ok(version) => version,
+        Err(error) => return app_package_error(error),
+    };
+    let android = match android_of_path(&req.android_package) {
+        Ok(android) => android,
+        Err(error) => return error.into_response(),
+    };
+    let android_label = android.as_str().to_string();
+    let data_dir = st.cfg.data_dir.clone();
+    let scripts = st.scripts.clone();
+    let extract = run_blocking_api(move || {
+        let installed = st
+            .app_packages
+            .list_installed()
+            .map_err(app_package_api_error)?
+            .into_iter()
+            .find(|installed| {
+                installed.manifest().id() == &id && installed.manifest().version() == &version
+            })
+            .ok_or_else(|| AppPackageError::NotInstalled {
+                package: id.to_string(),
+                version: version.to_string(),
+            })
+            .map_err(app_package_api_error)?;
+        edit::extract_to_workspace(&data_dir, &installed, &android, scripts)
+            .map_err(app_package_api_error)
+    })
+    .await;
+    match extract {
+        Ok(outcome) => Json(serde_json::json!({
+            "android_package": android_label,
+            "metadata": metadata_json(&outcome.metadata),
+            "replaced": outcome.replaced.to_json(),
+        }))
+        .into_response(),
         Err(error) => error.into_response(),
     }
 }

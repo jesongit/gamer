@@ -11,6 +11,8 @@ mod archive;
 /// PackageBuilder：工作区 → `.gamerpkg` 导出流水线（builder/导出 API 专用）。
 pub(crate) mod builder;
 mod composite;
+/// 已安装包 → 本地编辑区整体提取（edit API 专用）。
+pub(crate) mod edit;
 mod error;
 mod manifest;
 mod model;

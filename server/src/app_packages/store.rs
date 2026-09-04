@@ -710,7 +710,7 @@ fn append_resource_path(root: &Path, resource_path: &ResourcePath) -> PathBuf {
         .fold(root.to_path_buf(), |path, component| path.join(component))
 }
 
-fn sync_directory(path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_directory(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         fs::File::open(path)?.sync_all()

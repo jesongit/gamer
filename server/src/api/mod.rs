@@ -338,6 +338,10 @@ pub(crate) fn build_router_with_extensions(
             delete(app_packages::api_uninstall_app_package),
         )
         .route(
+            "/api/app-packages/:id/:version/edit",
+            post(app_packages::api_edit_app_package),
+        )
+        .route(
             "/api/workspace/:android_package",
             get(app_packages::api_get_workspace).put(app_packages::api_put_workspace),
         )

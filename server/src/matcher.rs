@@ -698,9 +698,9 @@ pub fn invalidate_template_cache_path(path: &Path) {
 
 /// 主动使模板目录中的文件缓存和短名解析代数缓存失效。
 ///
-/// 分区快照 zip 导入删除后，生产路径的模板写操作都走单文件
-/// [`invalidate_template_cache_path`]；目录级失效仅测试使用。
-#[cfg(test)]
+/// 分区快照 zip 导入删除后，生产路径的单文件写操作走
+/// [`invalidate_template_cache_path`]；目录级失效用于 App Package 提取到本地
+/// 编辑区这类整体替换链路（edit），测试同样使用。
 pub fn invalidate_template_cache_dir(dir: &Path) {
     let normalized = normalize_path(dir);
     let mut cache = template_cache().lock();

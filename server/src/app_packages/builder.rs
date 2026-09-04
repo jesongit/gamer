@@ -35,8 +35,9 @@ use super::manifest::PackageManifest;
 use super::model::{parse_android_package_name, AndroidPackageName, ResourcePath};
 use super::{presets, workspace};
 
-/// 六个合法资源根（与 `ResourceKind` 一致；显式列出用于递归扫描入口）。
-const RESOURCE_ROOTS: [&str; 6] = [
+/// 六个合法资源根（与 `ResourceKind` 一致；显式列出用于递归扫描入口，
+/// edit 提取链路复用同一清单）。
+pub(crate) const RESOURCE_ROOTS: [&str; 6] = [
     "scripts",
     "functions",
     "templates",
@@ -107,8 +108,15 @@ impl PackageBuilder {
     /// package.toml 字段已在 load_metadata 经 parse_manifest 全量校验），
     /// 有问题 → `PreflightFailed{problems}`；通过 → 返回排序后的收集结果。
     pub(crate) fn validate_source(&self) -> AppPackageResult<Vec<CollectedFile>> {
+        self.validate_dir(&self.dir())
+    }
+
+    /// Preflight 任意目录（edit 提取链路对 staging 目录复用同一套校验器）。
+    /// 目录形状与工作区一致（六个资源根 + 可选 package.toml）；资源校验语境
+    /// （脚本/函数分区名、模板解析兜底）仍取 `self.android`。
+    pub(crate) fn validate_dir(&self, dir: &Path) -> AppPackageResult<Vec<CollectedFile>> {
         let mut problems: Vec<String> = Vec::new();
-        let files = self.collect_resources(&mut problems);
+        let files = Self::collect_resources(dir, &mut problems);
         // 上限护栏：条目数（含 manifest.toml）与解压总量对齐安装侧预算
         if files.len() + 1 > MAX_PACKAGE_ENTRIES {
             problems.push(format!(
@@ -135,22 +143,16 @@ impl PackageBuilder {
 
     /// 六目录递归收集：排序、跳过隐藏文件/目录；路径非法与单文件超限记入
     /// problems（不中止），其余文件原样收集。
-    fn collect_resources(&self, problems: &mut Vec<String>) -> Vec<CollectedFile> {
+    fn collect_resources(dir: &Path, problems: &mut Vec<String>) -> Vec<CollectedFile> {
         let mut files = Vec::new();
         for kind in RESOURCE_ROOTS {
-            self.collect_kind(
-                &self.dir().join(kind),
-                kind.to_string(),
-                &mut files,
-                problems,
-            );
+            Self::collect_kind(&dir.join(kind), kind.to_string(), &mut files, problems);
         }
         files.sort_by(|left, right| left.path.as_str().cmp(right.path.as_str()));
         files
     }
 
     fn collect_kind(
-        &self,
         dir: &Path,
         relative: String,
         files: &mut Vec<CollectedFile>,
@@ -171,7 +173,7 @@ impl PackageBuilder {
             let path = entry.path();
             let child_relative = format!("{relative}/{name}");
             if path.is_dir() {
-                self.collect_kind(&path, child_relative, files, problems);
+                Self::collect_kind(&path, child_relative, files, problems);
                 continue;
             }
             if !path.is_file() {

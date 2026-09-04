@@ -74,6 +74,19 @@ pub(crate) enum AppPackageError {
 
     #[error("App Package 构建失败: {0}")]
     PackageBuildFailed(String),
+
+    /// App Package 提取到本地编辑区失败（staging/替换阶段的错误，工作区已回滚）。
+    #[error("App Package 提取为本地编辑区失败: {0}")]
+    PackageEditFailed(String),
+
+    /// 请求提取到的 android_package 不在该包 manifest 的 android.packages 内。
+    #[error("Android package {android} 不在包 {package}@{version} 的 targets 中（合法 targets: {targets}）")]
+    AndroidTargetNotSupported {
+        android: String,
+        package: String,
+        version: String,
+        targets: String,
+    },
 }
 
 impl AppPackageError {
