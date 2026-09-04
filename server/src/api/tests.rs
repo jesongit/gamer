@@ -474,4 +474,7 @@ mod sec_tests {
     mod app_packages_edit_tests {
         include!("tests/app_packages_edit.rs");
     }
+    mod app_packages_lifecycle_tests {
+        include!("tests/app_packages_lifecycle.rs");
+    }
 }
