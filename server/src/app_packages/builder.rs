@@ -24,7 +24,7 @@ use zip::write::SimpleFileOptions;
 
 use crate::matcher;
 use crate::scripts::ScriptStore;
-use crate::yaml_extension::{validate_compatible_script, CompatibleYamlError};
+use crate::yaml_extension::{validate_compatible_script_in, CompatibleYamlError};
 
 use super::archive::{
     validate_and_read_manifest, MAX_PACKAGE_ENTRIES, MAX_PACKAGE_FILE_BYTES,
@@ -113,7 +113,8 @@ impl PackageBuilder {
 
     /// Preflight 任意目录（edit 提取链路对 staging 目录复用同一套校验器）。
     /// 目录形状与工作区一致（六个资源根 + 可选 package.toml）；资源校验语境
-    /// （脚本/函数分区名、模板解析兜底）仍取 `self.android`。
+    /// （脚本/函数分区名、模板解析兜底）仍取 `self.android`；脚本/函数跨文件
+    /// 引用（call/func）以被校验目录自身内容为最高优先视图（见函数体注释）。
     pub(crate) fn validate_dir(&self, dir: &Path) -> AppPackageResult<Vec<CollectedFile>> {
         let mut problems: Vec<String> = Vec::new();
         let files = Self::collect_resources(dir, &mut problems);
@@ -131,14 +132,58 @@ impl PackageBuilder {
             ));
         }
 
+        // v2 脚本/函数跨文件引用（call/func）的自洽校验视图：以「被校验目录
+        // 自身」的 scripts/functions 内容打底（注入内容优先于本地编辑区参与
+        // 引用解析）。edit 提取校验的是 staging 快照——本地编辑区此时可能为
+        // 空或不同源，若只读本地目录，「提取到空工作区」会永远 preflight 失败；
+        // 导出路径目录即工作区，注入内容与本地一致，行为不变。模板可用性仍经
+        // composite 解析（与运行时同源），不在此注入。
+        let mut reference_view = self.scripts.resources(self.android.as_str());
         for file in &files {
-            self.validate_file(file, &mut problems);
+            if let Some((kind, rel)) = Self::yaml_reference_entry(file) {
+                let Ok(content) = read_utf8(&file.absolute) else {
+                    continue; // 读取失败由 validate_file 记入 problems
+                };
+                match kind {
+                    super::model::ResourceKind::Scripts => reference_view.add_script(rel, &content),
+                    super::model::ResourceKind::Functions => {
+                        reference_view.add_function(rel, &content)
+                    }
+                    _ => unreachable!("yaml_reference_entry 只产出 scripts/functions"),
+                }
+            }
+        }
+
+        for file in &files {
+            self.validate_file(file, &mut reference_view, &mut problems);
         }
 
         if !problems.is_empty() {
             return Err(AppPackageError::preflight_failed(problems));
         }
         Ok(files)
+    }
+
+    /// YAML 资源在跨文件引用视图里的注入键：(资源种类, scripts/ 相对资源 id
+    /// 或 functions/ 文件短路径)。非 scripts/functions 的 YAML 返回 None。
+    fn yaml_reference_entry(file: &CollectedFile) -> Option<(super::model::ResourceKind, &str)> {
+        let relative = file.path.as_str();
+        let name = relative.rsplit('/').next().unwrap_or_default();
+        let lower = name.to_ascii_lowercase();
+        if !(lower.ends_with(".yaml") || lower.ends_with(".yml")) {
+            return None;
+        }
+        match file.path.kind() {
+            super::model::ResourceKind::Scripts => Some((
+                super::model::ResourceKind::Scripts,
+                trim_root(relative, "scripts"),
+            )),
+            super::model::ResourceKind::Functions => Some((
+                super::model::ResourceKind::Functions,
+                trim_root(relative, "functions"),
+            )),
+            _ => None,
+        }
     }
 
     /// 六目录递归收集：排序、跳过隐藏文件/目录；路径非法与单文件超限记入
@@ -205,7 +250,14 @@ impl PackageBuilder {
     }
 
     /// 单文件按资源根分发到各自现有校验器（不写包专用 parser）。
-    fn validate_file(&self, file: &CollectedFile, problems: &mut Vec<String>) {
+    /// `reference_view` = 跨文件引用（call/func）解析视图：被校验目录自身内容
+    /// 优先、本地编辑区兜底（见 validate_dir 注释）。
+    fn validate_file(
+        &self,
+        file: &CollectedFile,
+        reference_view: &mut crate::scripts::PartitionResources<'_>,
+        problems: &mut Vec<String>,
+    ) {
         let relative = file.path.as_str();
         let name = file
             .path
@@ -229,12 +281,9 @@ impl PackageBuilder {
                 };
                 // 资源名用 scripts/ 内相对路径，与 ScriptStore 保存链路一致
                 let resource = trim_root(relative, "scripts");
-                if let Err(error) = validate_compatible_script(
-                    &self.scripts,
-                    self.android.as_str(),
-                    resource,
-                    &content,
-                ) {
+                if let Err(error) =
+                    validate_compatible_script_in(resource, &content, reference_view)
+                {
                     problems.push(format!("{relative}: {}", compatible_error_text(&error)));
                 }
             }
@@ -250,9 +299,9 @@ impl PackageBuilder {
                     }
                 };
                 let resource = trim_root(relative, "functions");
+                reference_view.add_function(resource, &content);
                 if let Err(errors) =
-                    self.scripts
-                        .parse_function_content(self.android.as_str(), resource, &content)
+                    crate::script_v2::parse_function_file(&content, resource, reference_view)
                 {
                     problems.push(format!(
                         "{relative}: {}",
@@ -702,5 +751,45 @@ mod tests {
         let smaller = PackageBuilder::build_archive(&metadata, &fewer).unwrap();
         let error = PackageBuilder::verify_archive(&smaller, &files, &metadata).unwrap_err();
         assert!(matches!(error, AppPackageError::PackageBuildFailed(_)));
+    }
+
+    /// edit 提取 preflight 的目录自洽性：被校验目录（staging 快照）自身的
+    /// scripts/functions 内容优先参与 call/func 引用解析，本地编辑区为空时
+    /// 不得误报 resource.func.not_found；目录内部引用悬空仍必须报出。
+    #[test]
+    fn validate_dir_resolves_cross_references_from_directory_itself() {
+        let temp = TempDir::new().unwrap();
+        // 被校验目录（模拟 staging）：脚本引用同目录函数库，本地编辑区完全为空
+        let staging = temp.path().join("staging");
+        std::fs::create_dir_all(staging.join("scripts")).unwrap();
+        std::fs::write(
+            staging.join("scripts/daily.yaml"),
+            b"steps:\n  - func: common/greet\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(staging.join("functions")).unwrap();
+        std::fs::write(
+            staging.join("functions/common.yaml"),
+            b"greet:\n  steps:\n    - return: true\n",
+        )
+        .unwrap();
+        assert!(builder_with(temp.path()).validate_dir(&staging).is_ok());
+
+        // 目录内引用悬空（函数文件缺 greet）→ preflight 必须失败
+        std::fs::write(
+            staging.join("functions/common.yaml"),
+            b"other:\n  steps:\n    - return: true\n",
+        )
+        .unwrap();
+        let error = builder_with(temp.path())
+            .validate_dir(&staging)
+            .unwrap_err();
+        let AppPackageError::PreflightFailed { problems } = error else {
+            panic!("期望 PreflightFailed，实际 {error:?}");
+        };
+        assert!(
+            problems.contains("resource.func.not_found"),
+            "悬空 func 引用必须报 not_found: {problems}"
+        );
     }
 }

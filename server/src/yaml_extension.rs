@@ -116,13 +116,28 @@ pub(crate) fn validate_compatible_script(
     resource: &str,
     source: &str,
 ) -> Result<CompatibleYamlSource, CompatibleYamlError> {
+    // 保存边界：无目录覆盖层，call/func 引用解析 = 本地编辑区视图 + 待写文件自身
+    let mut resources = scripts.resources(package);
+    validate_compatible_script_in(resource, source, &mut resources)
+}
+
+/// Same as [`validate_compatible_script`], but the caller supplies the v2
+/// reference view (call/func targets). PackageBuilder preflight over a staged
+/// directory snapshot pre-injects that directory's own scripts/functions so
+/// extraction into an empty workspace validates self-consistently; save
+/// boundaries pass a fresh view (equivalent to the plain variant).
+pub(crate) fn validate_compatible_script_in(
+    resource: &str,
+    source: &str,
+    resources: &mut crate::scripts::PartitionResources<'_>,
+) -> Result<CompatibleYamlSource, CompatibleYamlError> {
     if crate::yaml_vnext::is_v3_source(source) {
         crate::yaml_vnext::load(source)
             .map(CompatibleYamlSource::V3)
             .map_err(CompatibleYamlError::V3)
     } else {
-        scripts
-            .parse_script_content(package, resource, source)
+        resources.add_script(resource, source);
+        crate::script_v2::parse_script_file(source, resource, resources)
             .map(|_| CompatibleYamlSource::V2)
             .map_err(CompatibleYamlError::V2)
     }
