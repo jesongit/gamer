@@ -345,6 +345,11 @@ export const api = {
   // 启用/停用调度：显式状态迁移（enable 重算唤醒游标；disable 挂起并记 "disabled"）
   enableTask: (id) => req('POST', `/api/tasks/${id}/enable`),
   disableTask: (id) => req('POST', `/api/tasks/${id}/disable`),
+  // 挂起（带原因，任务保留）/ 恢复（= enable 语义：重算唤醒、清 reason）/ 取消调度
+  //（终态 cancelled，不再排程）。suspend/resume/cancel 返回迁移后的任务 JSON。
+  suspendTask: (id, reason = 'suspended') => req('POST', `/api/tasks/${id}/suspend`, { reason }),
+  resumeTask: (id) => req('POST', `/api/tasks/${id}/resume`),
+  cancelTask: (id) => req('POST', `/api/tasks/${id}/cancel`),
   // UI 支撑只读端点：已注册 runner / schedule provider（执行器与触发方式下拉）
   listRunners: () => req('GET', '/api/runners'),
   listScheduleProviders: () => req('GET', '/api/schedule-providers'),
