@@ -17,3 +17,6 @@ tests/fixtures/scripts/*.yaml text eol=lf
 tests/fixtures/tasks/*.json text eol=lf
 # 内嵌信任锚公钥（signature.rs include_str! 锁同步）同样禁止 CRLF 漂移。
 tools/plugin-signing/*.pem text eol=lf
+
+# 官方插件 manifest（include_str! 同步锁 + 签名覆盖原始字节）禁止 CRLF 漂移。
+tools/plugins/**/*.toml text eol=lf
