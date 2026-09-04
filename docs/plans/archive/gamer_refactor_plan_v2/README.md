@@ -234,6 +234,7 @@ Keymap 作为首个真实 WASM 插件跑通后，应验证：
 | Phase 8 YAML vNext | ✅ 完成 | v3 分层 DSL（Surface → Small AST → Host API）、`invoke` 逃生口、`func` 并入 `call`、`app.start/stop`、返回值泛化（含 handle）、v2/v3 兼容并存、官方 gamer.yaml 插件可安装可运行 |
 | Phase 9 Timer Core | ✅ 完成 | TimerCore 持久化/重启恢复/挂起恢复、`wait_terminal` 事件化（去 50ms 轮询）、任务预设与包安装卸载联动、缺 runner 明确依赖错误；Scheduler/API 经 `ScheduleRegistry` 与 Cron provider 解耦（ADR-01） |
 | Phase 10 插件中心 | ✅ 完成 | 市场/本地导入/URL 导入、ed25519 签名 + 内嵌信任锚、权限 diff 二次确认、版本回滚 UI、「卸载 / 卸载并删除数据」双语义、declarative/iframe/none 三档 UI（declarative Host 已实现） |
+| Phase 11 Breaking Architecture Cleanup | 🚧 实施中（2026-09-05 启动） | 删除过渡层、保留最终架构：Core/Extension 边界、泛化 Task、Runner 归插件、零兼容收口；计划见 [docs/plans/gamer_v2_phase11_breaking_architecture_cleanup_plan.md](../../gamer_v2_phase11_breaking_architecture_cleanup_plan.md)，ADR 见 `docs/reference/adr/`（ADR-11~14） |
 
 ### 8.2 Gate 结论
 
