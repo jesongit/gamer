@@ -9,9 +9,6 @@
       </div>
       <div class="head-actions">
         <button v-if="hasCallback('onRefresh')" class="btn btn-sm" type="button" :disabled="loading" @click="invoke('onRefresh')">↻ 刷新</button>
-        <button v-if="hasCallback('onExport')" class="btn btn-sm" type="button" :disabled="!pkg || loading" @click="invoke('onExport')">⬆ 导出</button>
-        <button v-if="hasCallback('onImport')" class="btn btn-sm" type="button" :disabled="!pkg || loading" @click="importInput?.click()">⬇ 导入</button>
-        <input v-if="hasCallback('onImport')" ref="importInput" type="file" accept=".zip" hidden @change="onImportChange" />
         <button class="btn btn-sm btn-primary" type="button" :disabled="!pkg || loading || editing" @click="startNew">＋ 新增映射</button>
       </div>
     </div>
@@ -195,7 +192,6 @@ const captureIndex = ref(-1)
 const keyInputEls = ref([])
 const deleteName = ref('')
 const note = ref('')
-const importInput = ref(null)
 
 function read(name, fallback) {
   const value = ctx[name]
@@ -214,12 +210,6 @@ function hasCallback(name) {
 function invoke(name, payload) {
   const fn = callback(name)
   return fn ? fn(payload) : undefined
-}
-
-function onImportChange(event) {
-  const file = event?.target?.files?.[0]
-  if (file) invoke('onImport', file)
-  if (event?.target) event.target.value = ''
 }
 
 function clone(value) {

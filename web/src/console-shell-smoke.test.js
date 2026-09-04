@@ -19,7 +19,6 @@ vi.mock('./api', () => {
         return vi.fn().mockResolvedValue({})
       },
     }),
-    runPartitionImport: vi.fn().mockResolvedValue({ ok: true, add: 0, overwrite: 0 }),
   }
 })
 

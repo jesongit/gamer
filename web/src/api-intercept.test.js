@@ -57,14 +57,6 @@ describe('api 层统一 401 拦截', () => {
     expect(localStorage.getItem('gb_device_id')).toBe('dev-1')
   })
 
-  it('raw fetch 路径（分区导出 zip）同样拦截 401', async () => {
-    const exportRes = res(401, { error: 'unauthorized' })
-    exportRes.blob = async () => new Blob()
-    fetch.mockResolvedValueOnce(exportRes)
-    await expect(api.exportPartition('hkrpg')).rejects.toMatchObject({ status: 401, code: 'unauthorized' })
-    expect(location.hash).toBe(`#/login?redirect=${encodeURIComponent('/console')}`)
-  })
-
   it('登录成功路径不受影响：POST /api/scripts 照常解析 JSON', async () => {
     fetch.mockResolvedValueOnce(res(200, [{ id: 'a/b.yaml' }]))
     await expect(api.listScripts()).resolves.toEqual([{ id: 'a/b.yaml' }])

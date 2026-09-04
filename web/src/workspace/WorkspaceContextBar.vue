@@ -5,24 +5,14 @@
       <option v-for="pkg in ctx.pkgOptions" :key="pkg" :value="pkg">{{ ctx.packageOptionLabel(pkg) }}</option>
     </select>
     <button class="btn btn-sm" :disabled="!ctx.current || ctx.appLoading" title="读取当前设备已安装应用并加入包名下拉" @click="ctx.loadApps">{{ ctx.appLoading ? '读取中…' : '🔄 读取应用' }}</button>
-    <button class="btn btn-sm" :disabled="!ctx.activePkg" title="导出当前应用分区快照（脚本/函数库/模板 zip）" @click="ctx.exportPartition">⬆ 导出</button>
-    <button class="btn btn-sm" :disabled="!ctx.activePkg" title="导入分区快照 zip 到当前应用分区" @click="ctx.openImport">⬇ 导入</button>
-    <input ref="importInput" type="file" accept=".zip" hidden @change="onImport" />
   </div>
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { reactive } from 'vue'
 
 const props = defineProps({ context: { type: Object, required: true } })
 const ctx = reactive(props.context)
-const importInput = ref(null)
-
-function onImport(event) {
-  const file = event?.target?.files?.[0]
-  if (file) ctx.onImportFile({ target: { files: [file], value: '' } })
-  if (event?.target) event.target.value = ''
-}
 </script>
 
 <style scoped>

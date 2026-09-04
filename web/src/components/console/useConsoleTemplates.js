@@ -24,8 +24,6 @@ export function useConsoleTemplates({
   current,
   // 来自设备管理 composable（模板页签顶部的分区行）
   pkgOptions,
-  exportPartition,
-  onImportFile,
   loadData,
   // 来自脚本运行 composable（懒解析箭头，规避组合顺序）
   editorMatchThreshold,
@@ -1015,7 +1013,7 @@ export function useConsoleTemplates({
   })
 
   const templateCaptureContext = {
-    activePkg, pkgOptions, exportPartition, onImportFile, crop, testThreshold, testRegion, tplSearch,
+    activePkg, pkgOptions, crop, testThreshold, testRegion, tplSearch,
     picking, connected, togglePick, templates, confirmDelTpl, renaming, onTplRowClick, onTplThumbClick,
     tplThumbUrl, onTplNameClick, setRenameInputEl, renameVal, confirmRename, cancelRename, startRename,
     onTplDeleteClick, onTplMatchClick, onTplUpload, tplShortName, tplRegionBadge, cropSize, cropZoomPct,

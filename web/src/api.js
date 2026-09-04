@@ -241,23 +241,6 @@ export const api = {
     'DELETE',
     `/api/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
   ),
-  exportKeymaps: async (pkg) => {
-    const r = await response('GET', `/api/keymaps/export?pkg=${encodeURIComponent(requireId(pkg, 'pkg'))}`)
-    const cd = r.headers.get('content-disposition') || ''
-    let filename = ''
-    const m = cd.match(/filename\*=UTF-8''([^;\s]+)/) || cd.match(/filename="?([^";\s]+)"?/)
-    if (m) { try { filename = decodeURIComponent(m[1]) } catch (e) { filename = m[1] } }
-    return { blob: await r.blob(), filename }
-  },
-  importKeymaps: async (file, confirm, pkg) => {
-    const r = await response(
-      'POST',
-      `/api/keymaps/import?confirm=${confirm ? 1 : 0}&pkg=${encodeURIComponent(requireId(pkg, 'pkg'))}`,
-      file,
-      { rawBody: true, headers: { 'Content-Type': 'application/zip' } },
-    )
-    return readResult(r)
-  },
 
   // 模板（按应用分区 data/<pkg>/tmpl；pkg 缺省=跨分区全列）
   listTemplates: (pkg) => req('GET', `/api/templates${pkg ? `?pkg=${encodeURIComponent(pkg)}` : ''}`),
@@ -336,25 +319,6 @@ export const api = {
   // 设备当前运行中的脚本（页面刷新后恢复运行态用）
   // 当前契约 → {active:true,run:RunRecord} | {active:false}。
   deviceRun: async (id) => requireDeviceRunResponse(await req('GET', `/api/devices/${id}/run`)),
-  // 导出整分区快照 zip（yaml/ + tmpl/ 全量，?pkg= 指定分区）→ { blob, filename }
-  exportPartition: async (pkg) => {
-    const r = await response('GET', `/api/scripts/export?pkg=${encodeURIComponent(pkg)}`)
-    const cd = r.headers.get('content-disposition') || ''
-    let filename = ''
-    const m = cd.match(/filename\*=UTF-8''([^;\s]+)/) || cd.match(/filename="?([^";\s]+)"?/)
-    if (m) { try { filename = decodeURIComponent(m[1]) } catch (e) { filename = m[1] } }
-    return { blob: await r.blob(), filename }
-  },
-  // 导入分区快照 zip 到指定应用分区：confirm=false dry-run 只解析报告，true 落盘（同名替换）
-  importScripts: async (file, confirm, pkg) => {
-    const r = await response(
-      'POST',
-      `/api/scripts/import?confirm=${confirm ? 1 : 0}&pkg=${encodeURIComponent(pkg)}`,
-      file,
-      { rawBody: true, headers: { 'Content-Type': 'application/zip' } },
-    )
-    return readResult(r)
-  },
 
   // 定时任务（阶段 5 参数化）：创建/更新接受 args（稀疏显式覆盖映射，服务端解析为完整
   // 快照存储并计算 param_signature）；列表响应含 args 视图 / param_signature / param_stale。
@@ -377,90 +341,4 @@ export const api = {
     return req('GET', `/api/logs?${p.toString()}`)
   },
   clearLogs: () => req('DELETE', '/api/logs')
-}
-
-// ---- 分区快照导入（服务端 ImportReport 契约，scripts.rs ImportReport 同构）----
-// POST /api/scripts/import?pkg=<分区>：confirm 缺省（或非 1/true）= dry-run，只解析不落盘，
-// 返回 {scripts,functions,templates} 三类资源同构报告，每类
-// {add:[zip相对路径], overwrite:[同名将被覆盖路径], invalid:[{path,reason}]}；
-// confirm=1 落盘（报告同构，add/overwrite 变为实际结果），任一 invalid 整体拒绝（400 {error}）。
-
-// 归一化 ImportReport：三类资源合并为统一 {add, overwrite, invalid} 列表；
-// 形态不符（未来端点契约再变）返回 null —— 调用方必须按错误处理，不得当「无冲突」放行直接导入。
-export function summarizeImportReport(rep) {
-  const buckets = rep && typeof rep === 'object' ? [rep.scripts, rep.functions, rep.templates] : []
-  if (buckets.length !== 3 || buckets.some(b => !isReportBucket(b))) return null
-  return {
-    add: buckets.flatMap(b => b.add),
-    overwrite: buckets.flatMap(b => b.overwrite),
-    invalid: buckets.flatMap(b => b.invalid).map(e => ({ path: String(e.path), reason: String(e.reason ?? '') })),
-  }
-}
-
-function isReportBucket(b) {
-  return !!b && typeof b === 'object'
-    && Array.isArray(b.add) && Array.isArray(b.overwrite) && Array.isArray(b.invalid)
-    && b.invalid.every(e => !!e && typeof e === 'object' && typeof e.path === 'string')
-}
-
-// 长列表截断展示（覆盖确认弹窗用）：最多 max 行，超出追加「…等共 N 个」
-function importListPreview(paths, max = 10) {
-  const lines = paths.slice(0, max).map(p => `- ${p}`)
-  if (paths.length > max) lines.push(`…等共 ${paths.length} 个`)
-  return lines.join('\n')
-}
-
-// 导入完整流程（dry-run 报告 → 覆盖二次确认 → confirm 落盘）。抽成依赖注入的纯流程便于
-// node 单测覆盖（vitest 无 vue 插件不能加载 Console.vue）。依赖：
-//   importScripts(file, confirm, pkg)  api.importScripts
-//   confirmDialog(msg) → bool          覆盖确认弹窗（Console 注入 window.confirm）
-//   notify(msg, type)                  提示（Console 注入 toast）
-//   refresh()                          导入成功后刷新列表
-// 所有失败分支自行 notify 不向调用方抛错；返回 {ok, ...} 供测试断言。
-export async function runPartitionImport({ file, pkg, importScripts, confirmDialog, notify, refresh }) {
-  let dry
-  try {
-    dry = await importScripts(file, false, pkg)
-  } catch (e) {
-    notify('导入失败：' + e.message, 'error')
-    return { ok: false }
-  }
-  const plan = summarizeImportReport(dry)
-  if (!plan) {
-    notify('导入失败：导入响应格式异常（端点契约可能已变更），未执行导入', 'error')
-    return { ok: false }
-  }
-  if (plan.invalid.length) {
-    const list = plan.invalid.slice(0, 8).map(e => `${e.path}（${e.reason}）`).join('；')
-    const more = plan.invalid.length > 8 ? `…等共 ${plan.invalid.length} 个` : ''
-    notify(`导入被阻止：${plan.invalid.length} 个文件未通过校验（服务端会整体拒绝导入），请修正压缩包后重试：${list}${more}`, 'error')
-    return { ok: false }
-  }
-  if (plan.overwrite.length) {
-    let msg = `导入到 ${pkg} 将覆盖 ${plan.overwrite.length} 个同名文件：\n${importListPreview(plan.overwrite)}`
-    if (plan.add.length) msg += `\n\n另将新增 ${plan.add.length} 个文件：\n${importListPreview(plan.add)}`
-    if (!confirmDialog(msg + '\n\n确认替换导入？')) return { ok: false, cancelled: true }
-  }
-  let rep
-  try {
-    rep = await importScripts(file, true, pkg)
-  } catch (e) {
-    // 服务端 confirm 遇 invalid 整体拒绝（400）等：error 字段即结构化原因
-    notify('导入失败：' + e.message, 'error')
-    return { ok: false }
-  }
-  const done = summarizeImportReport(rep)
-  if (!done) {
-    try { await refresh() } catch (e) { /* 刷新失败不吞导入结果提示 */ }
-    notify('导入已执行，但结果报告无法解析（端点契约可能已变更）', 'warn')
-    return { ok: true, parsed: false }
-  }
-  try {
-    await refresh()
-  } catch (e) {
-    notify(`导入完成：新增 ${done.add.length} 个，覆盖 ${done.overwrite.length} 个；刷新列表失败：${e.message}`, 'warn')
-    return { ok: true, add: done.add.length, overwrite: done.overwrite.length }
-  }
-  notify(`导入完成：新增 ${done.add.length} 个，覆盖 ${done.overwrite.length} 个`, 'success')
-  return { ok: true, add: done.add.length, overwrite: done.overwrite.length }
 }

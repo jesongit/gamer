@@ -15,7 +15,7 @@ function normalizedPoint(value) {
 }
 
 /**
- * 按键映射面板：映射方案列表/选择/保存/删除/导入导出、当前激活模型、
+ * 按键映射面板：映射方案列表/选择/保存/删除、当前激活模型、
  * 投屏画面上的映射可视化（keymapOverlay）与状态徽标（keymapStatus）。
  * 自 Console.vue 原样拆出，行为零变化。
  */
@@ -192,46 +192,6 @@ export function useConsoleKeymap({
     }
   }
 
-  async function onKeymapExport() {
-    if (!activePkg.value) return toast('请先选择应用分区', 'warn')
-    try {
-      const { blob, filename } = await api.exportKeymaps(activePkg.value)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename || `${activePkg.value}-keymaps.zip`
-      a.click()
-      setTimeout(() => URL.revokeObjectURL(url), 0)
-      toast('映射方案已导出', 'success')
-    } catch (e) {
-      toast(`导出映射失败：${e.message}`, 'error')
-    }
-  }
-
-  async function onKeymapImport(file) {
-    if (!file || !activePkg.value) return
-    let preview
-    try {
-      preview = await api.importKeymaps(file, false, activePkg.value)
-    } catch (e) {
-      return toast(`导入映射失败：${e.message}`, 'error')
-    }
-    const invalid = Array.isArray(preview?.invalid) ? preview.invalid : []
-    if (invalid.length) {
-      const message = invalid.slice(0, 5).map(item => `${item.path || '文件'}（${item.diagnostics?.[0]?.message || '校验失败'}）`).join('；')
-      return toast(`导入被阻止：${invalid.length} 个文件未通过校验：${message}`, 'error')
-    }
-    const overwrite = Array.isArray(preview?.overwrite) ? preview.overwrite : []
-    if (overwrite.length && !window.confirm(`导入到 ${activePkg.value} 将覆盖 ${overwrite.length} 个映射方案，确认继续？`)) return
-    try {
-      await api.importKeymaps(file, true, activePkg.value)
-      await loadKeymaps(activePkg.value)
-      toast(`映射导入完成：新增 ${preview?.add?.length || 0} 个，覆盖 ${overwrite.length} 个`, 'success')
-    } catch (e) {
-      toast(`导入映射失败：${e.message}`, 'error')
-    }
-  }
-
   const keymapPanelContext = {
     api,
     toast,
@@ -255,8 +215,6 @@ export function useConsoleKeymap({
     onSave: onKeymapSave,
     onRequestPoint: () => pickCoord(),
     onDelete: onKeymapDelete,
-    onExport: onKeymapExport,
-    onImport: onKeymapImport,
     onSaved: async (item) => {
       await loadKeymaps(activePkg.value)
       const name = item?.name || item?.keymap?.name

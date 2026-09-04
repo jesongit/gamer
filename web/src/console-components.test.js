@@ -169,6 +169,11 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleImpl).toContain("onRequestPoint: () => pickCoord()")
     expect(consoleImpl).toContain("pickCoord: () => beginCellPick('coord')")
     expect(keymap).toContain('expected_version')
+    // keymap zip 导入/导出随分区快照一起退役：面板不再渲染按钮，context 不再注入回调
+    expect(keymap).not.toContain('onExport')
+    expect(keymap).not.toContain('onImport')
+    expect(consoleImpl).not.toContain('api.exportKeymaps')
+    expect(consoleImpl).not.toContain('api.importKeymaps')
     expect(consoleImpl).not.toContain('func-app-hint')
     expect(consoleImpl).not.toContain('已加入包名下拉')
   })
@@ -210,11 +215,12 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).not.toContain("message?.type === 'taken_over'")
   })
 
-  it('分区行收纳导入/导出；框选不切页签且保存后回填；函数摘要直达编辑', () => {
-    // 导入/导出跟着应用分区下拉走（面板顶部 func-pkg-row），TemplateCapture 里的 pkg-bar 连分割线一并移除
-    expect(template).toContain('class="func-pkg-row"')
-    expect(template).toContain('@click="exportPartition"')
-    expect(template).toContain('@change="onImportFile"')
+  it('分区快照 zip 导入/导出已退役；框选不切页签且保存后回填；函数摘要直达编辑', () => {
+    // 分区快照 zip 导入/导出前后端整体退役（替代入口由后续波次重建），不得回潮
+    expect(template).not.toContain('exportPartition')
+    expect(template).not.toContain('onImportFile')
+    expect(consoleImpl).not.toContain('api.exportPartition')
+    expect(consoleImpl).not.toContain('runPartitionImport')
     expect(read('./components/console/TemplateCapture.vue')).not.toContain('pkg-bar')
     // 框选生成模板：不切页签 + captureTemplate 以 Promise 回传模板短名（保存/取消 resolve）
     expect(consoleImpl).toContain('cellCaptureResolve')

@@ -152,8 +152,7 @@
       <!-- CorePanelHost now mounts these registry contributions. Kept in this
            migration comment to document the old contracts for maintainers:
            <div class="func-pkg-row"><select v-model="activePkg"></select>
-           <button @click="loadApps"></button><button @click="exportPartition"></button>
-           <input @change="onImportFile" /></div>
+           <button @click="loadApps"></button></div>
            <TemplateCapture :context="templateCaptureContext" />
            <ScriptRunner :context="scriptRunnerContext" />
            <KeymapPanel :context="keymapPanelContext" />
@@ -304,14 +303,13 @@ async function loadData() {
   await consoleRuntime.loadData()
 }
 
-// ---------- 设备管理（工具条设备控件 + 设置弹窗 + 分区导入导出 + 工具条快捷动作） ----------
+// ---------- 设备管理（工具条设备控件 + 设置弹窗 + 工具条快捷动作） ----------
 const {
   devices, current, currentName, pkgOptions,
   mode, form, scanning, configApplying, settingsOpen,
   kindInfo, screenSummary, formDirty,
   startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
   saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
-  impFile, exportPartition, onImportFile,
   key, toolbarMoreOpen, toolbarMoreButton, toolbarMoreStyle,
   closeToolbarMore, toggleToolbarMore, shot, rotate, clipboard, launchGame,
   deviceSettingsContext, workspaceContextBarContext,
@@ -385,8 +383,6 @@ const {
   videoWrap,
   current,
   pkgOptions,
-  exportPartition,
-  onImportFile,
   loadData,
   // 脚本运行 composable 的能力经懒解析箭头注入（规避组合顺序）
   editorMatchThreshold: () => editorMatchThreshold(),

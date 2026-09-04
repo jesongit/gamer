@@ -1,5 +1,5 @@
 import { computed, nextTick, reactive, ref, watch } from 'vue'
-import { api, runPartitionImport } from '../../api'
+import { api } from '../../api'
 import { appStartedDevices } from '../../store'
 import { formatScreenSummary } from '../../console/device-summary'
 
@@ -9,8 +9,8 @@ const APP_CACHE_TTL = 5 * 60 * 1000
 
 /**
  * 设备管理（工具条设备控件 + 设置弹窗；原右侧设备页签已收编）：
- * 设备 CRUD/扫描/连接动作、已安装应用列表、应用分区下拉候选、
- * 分区快照导入导出，以及工具条「更多」菜单与快捷投屏动作。
+ * 设备 CRUD/扫描/连接动作、已安装应用列表、应用分区下拉候选，
+ * 以及工具条「更多」菜单与快捷投屏动作。
  * 自 Console.vue 原样拆出，行为零变化。
  */
 export function useConsoleDeviceManager({
@@ -369,44 +369,6 @@ export function useConsoleDeviceManager({
     }
   }
 
-  // ---------- 分区导入/导出在右侧面板顶部应用分区下拉旁 ----------
-  const impFile = ref(null) // 分区快照 zip 选择（应用分区行「⬇ 导入」触发）
-
-  /** 导出当前应用分区快照（yaml/ + tmpl/ 全量）→ zip 下载 */
-  async function exportPartition() {
-    if (!activePkg.value) return toast('请先选择应用分区', 'warn')
-    try {
-      const { blob, filename } = await api.exportPartition(activePkg.value)
-      const name = filename || `${activePkg.value}.zip`
-      const a = document.createElement('a')
-      a.href = URL.createObjectURL(blob)
-      a.download = name
-      a.click()
-      setTimeout(() => URL.revokeObjectURL(a.href), 5000)
-      toast(`已导出 ${name}`, 'success')
-    } catch (e) {
-      toast('导出失败：' + e.message, 'error')
-    }
-  }
-
-  /** 导入分区快照 zip（模板+脚本）到当前应用分区：先 dry-run 解析报告；invalid 条目直接阻止
-   *  （服务端 confirm 模式遇任一非法文件整体拒绝），同名覆盖弹二次确认后 confirm 落盘。
-   *  流程实现抽离至 api.js runPartitionImport（依赖注入，node 单测覆盖）。 */
-  async function onImportFile(e) {
-    const file = e.target.files?.[0]
-    e.target.value = ''
-    if (!file) return
-    if (!activePkg.value) return toast('请先选择应用分区', 'warn')
-    await runPartitionImport({
-      file,
-      pkg: activePkg.value,
-      importScripts: api.importScripts,
-      confirmDialog: msg => window.confirm(msg),
-      notify: toast,
-      refresh: loadData,
-    })
-  }
-
   // ---------- 工具条快捷动作与「更多」菜单 ----------
 
   function key(k) {
@@ -504,7 +466,6 @@ export function useConsoleDeviceManager({
   }
   const workspaceContextBarContext = {
     activePkg, pkgOptions, current, appLoading, loadApps, packageOptionLabel,
-    exportPartition, openImport: () => impFile.value?.click(), onImportFile,
   }
 
   return {
@@ -515,8 +476,6 @@ export function useConsoleDeviceManager({
     loadForm,
     startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
     saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
-    // 分区导入导出
-    impFile, exportPartition, onImportFile,
     // 工具条快捷动作与菜单
     key, toolbarMoreOpen, toolbarMoreButton, toolbarMoreStyle,
     closeToolbarMore, toggleToolbarMore, shot, rotate, clipboard, launchGame,
