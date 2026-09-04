@@ -331,12 +331,11 @@ mod android_bench {
     /// 两个真机基准共享唯一设备：cargo test 默认并行跑测试，这里串行化，
     /// 避免一个测试的 `reverse --remove-all` 拆掉另一个正在握手的隧道
     /// （互踩会产生短暂的孤儿 scrcpy server 与失败迭代）。
-    static DEVICE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// 异步锁：持锁横跨整个基准的 await 区间，std Mutex 会触发 clippy::await_holding_lock。
+    static DEVICE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    fn lock_device() -> std::sync::MutexGuard<'static, ()> {
-        DEVICE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    async fn lock_device() -> tokio::sync::MutexGuard<'static, ()> {
+        DEVICE_LOCK.lock().await
     }
 
     fn bench_config() -> Config {
@@ -448,29 +447,26 @@ mod android_bench {
         let connect_ms = t0.elapsed().as_secs_f64() * 1000.0;
         // audio_rx 必须保活（scrcpy 任一 socket 断开即整机退出）；收包任务在
         // teardown 时 abort 释放
-        let audio_task = tokio::spawn(async move {
-            while audio_rx.recv().await.is_some() {}
-        });
+        let audio_task = tokio::spawn(async move { while audio_rx.recv().await.is_some() {} });
         let mut video_rx = video_rx;
-        let (first_frame, used_reset) = match tokio::time::timeout(
-            FIRST_FRAME_WINDOW,
-            video_rx.recv(),
-        )
-        .await {
-            Ok(Some(frame)) => (frame, false),
-            _ => {
-                // 静止屏/熄屏编码器可能不主动出帧：与生产 pusher 同款 RESET_VIDEO 要帧
-                let _ = session.reset_video().await;
-                let frame = tokio::time::timeout(RESET_FRAME_WINDOW, video_rx.recv())
-                    .await
-                    .ok()
-                    .flatten()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("连接已建立但 15s 内未收到首帧视频数据（含 reset_video 兜底）")
-                    })?;
-                (frame, true)
-            }
-        };
+        let (first_frame, used_reset) =
+            match tokio::time::timeout(FIRST_FRAME_WINDOW, video_rx.recv()).await {
+                Ok(Some(frame)) => (frame, false),
+                _ => {
+                    // 静止屏/熄屏编码器可能不主动出帧：与生产 pusher 同款 RESET_VIDEO 要帧
+                    let _ = session.reset_video().await;
+                    let frame = tokio::time::timeout(RESET_FRAME_WINDOW, video_rx.recv())
+                        .await
+                        .ok()
+                        .flatten()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "连接已建立但 15s 内未收到首帧视频数据（含 reset_video 兜底）"
+                            )
+                        })?;
+                    (frame, true)
+                }
+            };
         let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let (width, height) = session.video_size();
         Ok(ConnectOutcome {
@@ -516,7 +512,7 @@ mod android_bench {
     #[ignore = "需要真实 Android 设备；设置 GAMER_PHASE0_ANDROID=1 后显式运行"]
     async fn phase0_android_scrcpy_connect_first_frame_latency_p50_p95() {
         android_gate();
-        let _device = lock_device();
+        let _device = lock_device().await;
         let cfg = bench_config();
         let adb = Adb::new(&cfg);
         let serial = require_device(&adb).await;
@@ -645,10 +641,11 @@ mod android_bench {
 
     async fn build_api() -> webrtc::api::API {
         let mut m = MediaEngine::default();
-        m.register_default_codecs().expect("register default codecs");
+        m.register_default_codecs()
+            .expect("register default codecs");
         let mut registry = Registry::new();
-        registry = register_default_interceptors(registry, &mut m)
-            .expect("register default interceptors");
+        registry =
+            register_default_interceptors(registry, &mut m).expect("register default interceptors");
         APIBuilder::new()
             .with_media_engine(m)
             .with_interceptor_registry(registry)
@@ -670,7 +667,7 @@ mod android_bench {
     #[ignore = "需要真实 Android 设备；设置 GAMER_PHASE0_ANDROID=1 后显式运行"]
     async fn phase0_android_webrtc_loopback_stability_45s() {
         android_gate();
-        let _device = lock_device();
+        let _device = lock_device().await;
         let cfg = bench_config();
         let adb = Adb::new(&cfg);
         let serial = require_device(&adb).await;
@@ -713,9 +710,8 @@ mod android_bench {
             mime_type: "video/H264".into(),
             clock_rate: 90000,
             channels: 0,
-            sdp_fmtp_line:
-                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-                    .into(),
+            sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                .into(),
             rtcp_feedback: vec![],
         };
         let track = std::sync::Arc::new(TrackLocalStaticRTP::new(
@@ -755,8 +751,9 @@ mod android_bench {
             .await
             .expect("add recvonly transceiver");
         let (remote_tx, remote_rx) = tokio::sync::oneshot::channel::<std::sync::Arc<TrackRemote>>();
-        let remote_slot: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::sync::Arc<TrackRemote>>>> =
-            std::sync::Mutex::new(Some(remote_tx));
+        let remote_slot: std::sync::Mutex<
+            Option<tokio::sync::oneshot::Sender<std::sync::Arc<TrackRemote>>>,
+        > = std::sync::Mutex::new(Some(remote_tx));
         recv_pc.on_track(Box::new(move |remote, _receiver, _transceiver| {
             if let Some(tx) = remote_slot.lock().unwrap().take() {
                 let _ = tx.send(remote);
@@ -920,11 +917,7 @@ mod android_bench {
                     };
                     match tokio::time::timeout(
                         Duration::from_secs(3),
-                        track.write_rtp_with_extensions_attributes(
-                            &pkt,
-                            &[],
-                            &Attributes::new(),
-                        ),
+                        track.write_rtp_with_extensions_attributes(&pkt, &[], &Attributes::new()),
                     )
                     .await
                     {
@@ -978,11 +971,7 @@ mod android_bench {
                         break;
                     }
                 }
-                match tokio::time::timeout(
-                    Duration::from_millis(1500),
-                    remote.read(&mut buf),
-                )
-                .await
+                match tokio::time::timeout(Duration::from_millis(1500), remote.read(&mut buf)).await
                 {
                     Ok(Ok((pkt, _))) => {
                         let now = Instant::now();
