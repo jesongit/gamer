@@ -9,7 +9,7 @@
 //! 路径解析（目录即类型）：resolve_script_path / resolve_function_path /
 //! resolve_template_path 三套拆开——拒绝绝对路径、反斜杠、空段、`.`、`..`、跨分区与
 //! 扩展名错配；不回退（脚本只认 scripts/、函数库只认 functions/、模板只认 templates/
-//! 现存文件）、不做内容推断。契约见 docs/SCRIPT_EDITOR_CONTRACT.md §3.1。
+//! 现存文件）、不做内容推断。契约见 docs/reference/SCRIPT_EDITOR_CONTRACT.md §3.1。
 
 use std::collections::HashMap;
 use std::path::PathBuf;

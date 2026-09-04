@@ -1,4 +1,4 @@
-//! 结构化脚本错误（docs/SCRIPT_EDITOR_CONTRACT.md §5.1 五元组）。
+//! 结构化脚本错误（docs/reference/SCRIPT_EDITOR_CONTRACT.md §5.1 五元组）。
 //!
 //! 前端以 `{code, step_path, field}` 定位卡片与控件，`message` 仅展示；
 //! `resource` 标识出错资源。顶层/整文件错误 `step_path` 为 `None`（序列化为 `""`）。

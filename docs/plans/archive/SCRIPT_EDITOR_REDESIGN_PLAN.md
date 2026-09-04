@@ -1,6 +1,6 @@
 # GameBot 脚本录制与可视化编辑器重构计划
 
-> 状态：**已实施完成**（阶段 0～8 于 2026-08-29～08-30 全部落地并通过复验；§20 核对清单已逐条审计勾验；剩余发布签核项——真机录制确认/回滚演练/破坏性版本标签——待人工，见第 19 节与 docs/SCRIPT_EDITOR_REDESIGN_EVIDENCE.md 阶段 8 收口记录）  
+> 状态：**已实施完成**（阶段 0～8 于 2026-08-29～08-30 全部落地并通过复验；§20 核对清单已逐条审计勾验；剩余发布签核项——真机录制确认/回滚演练/破坏性版本标签——待人工，见第 19 节与 docs/evidence/SCRIPT_EDITOR_REDESIGN_EVIDENCE.md 阶段 8 收口记录）  
 > 编制日期：2026-08-29（2026-08-30 收口更新）  
 > 适用范围：脚本/函数/模板存储、YAML 语法、脚本引擎、Console 录制、可视化编辑器、手动运行与定时任务  
 > 破坏性说明：本计划采用新目录和新语法，不兼容旧脚本、旧函数库及旧编辑器生成格式，也不在运行时提供自动识别、迁移或回退逻辑。
@@ -80,7 +80,7 @@
 - 导入/导出按应用分区工作，重构后需包含 `yaml/`、`func/`、`tmpl/`。
 - 模板短名、`#` 搜索区域元数据、缩略图、二次裁切、重命名、删除和引用检查。
 - 运行事件在投屏上显示 tap、swipe、hit、miss；重构不能破坏该链路。
-- 前端校验、服务端校验、默认操作模板和 `docs/YAML.md` 当前共同描述语法，切换时必须同时替换。
+- 前端校验、服务端校验、默认操作模板和 `docs/reference/YAML.md` 当前共同描述语法，切换时必须同时替换。
 
 ## 5. 目标目录与资源边界
 
@@ -769,7 +769,7 @@ parse_function_file() # 只接受 FunctionLibraryModel
 
 - [x] 删除 `[op_templates]`、`DEFAULT_OP_TPL`、`opRecords` YAML 文本拼接和旧前端文本 validator。
 - [x] 删除服务端旧语法兼容/提示分支及旧测试 fixture。
-- [x] 重写 `docs/YAML.md`，同步更新 `AGENTS.md` 的目录、语法和关键链路。
+- [x] 重写 `docs/reference/YAML.md`，同步更新 `AGENTS.md` 的目录、语法和关键链路。
 - [x] 对新增真实踩坑仅按仓库规则追加 `docs/PITFALLS.md`；不要把计划项当成踩坑记录。
 - [x] 完成构建、自动测试、真机录制和回滚演练后再宣布发布完成。
 
@@ -786,7 +786,7 @@ parse_function_file() # 只接受 FunctionLibraryModel
 | 选择器/任务 | `web/src/components/ScriptPicker.vue`、`web/src/views/TaskScheduler.vue` | 严格资源列表、参数表单 |
 | 旧语言工具 | `web/src/script-language/*` | 由结构化 codec/schema 替代，保留必要运行映射测试后删除旧文本逻辑 |
 | 新编辑器 | `web/src/script-editor/*` | 模型、codec、卡片、命令、校验和测试 |
-| 文档 | `docs/YAML.md`、`AGENTS.md` | 只描述新目录和新语法 |
+| 文档 | `docs/reference/YAML.md`、`AGENTS.md` | 只描述新目录和新语法 |
 
 实际拆分时应避免继续把录制和编辑状态全部堆回 `Console.vue`；设备坐标映射、截图冻结、录制队列和步骤编辑分别形成可测试的 composable/service。
 
@@ -878,9 +878,9 @@ parse_function_file() # 只接受 FunctionLibraryModel
 > find/match→swipe 输出形态、match 紧凑缩进、无 $N 残留、参数四层语义），审计发现的 4 处边缘
 > 宽严差异（空备注前端放行、text 默认值引号前端过严、key 枚举服务端宽松+运行期静默降级、
 > 录制入口未排除运行中）已全部修复并通过门禁。证据与修复清单见
-> docs/SCRIPT_EDITOR_REDESIGN_EVIDENCE.md「阶段 8（收口）」。
+> docs/evidence/SCRIPT_EDITOR_REDESIGN_EVIDENCE.md「阶段 8（收口）」。
 
-- [x] 新增或修改 YAML 引擎时同步检查服务端 AST、前端 codec/schema、步骤工厂、校验测试和 `docs/YAML.md`。
+- [x] 新增或修改 YAML 引擎时同步检查服务端 AST、前端 codec/schema、步骤工厂、校验测试和 `docs/reference/YAML.md`。
 - [x] Console 和独立编辑页的全部现有能力都在第 10 节矩阵中对账，没有以“改成可视化”为由直接删除运行相关功能。（附注：实时日志按 §10「独立页可用抽屉」的许可式措辞仅保留在 Console，独立页以终态 toast + resolved_args 摘要替代）
 - [x] 录制按钮位置、编辑状态限制、投屏 Alt 限制和侧栏 Alt 保留符合已确认需求。
 - [x] 点击和滑动分别生成 `find` 与 `match → swipe`，没有语义重复动作。

@@ -3,7 +3,7 @@
 //! 执行目标 [`RunTarget`]（脚本 / 函数二选一）→ 分区源码快照（`snapshot.rs`）
 //! → 严格解析（script_v2）→ 参数绑定（params::merge_args）→ AST 步骤执行。
 //!
-//! 语义要点（docs/SCRIPT_EDITOR_CONTRACT.md + plan §7/§12.2/§13.3）：
+//! 语义要点（docs/reference/SCRIPT_EDITOR_CONTRACT.md + plan §7/§12.2/§13.3）：
 //! - `find`：主模板 + block 有序障碍轮询；命中恒点中心；每次点击后等待 interval；verify 两击；then/else。
 //! - `match`：每轮只截一帧按序匹配全部候选；首个命中执行其子流程，候选可选点击；
 //!   无 timeout 单轮、有 timeout 按 config.interval 轮询；绑定后候选重复先报错。

@@ -1,6 +1,6 @@
 ﻿# WEB-006 前置工具：扫描 web/src/**（.vue / .js）中的硬编码产品版本字面量。
 #
-# 背景（docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md §2/§6.1）：产品版本权威源 = server/Cargo.toml
+# 背景（docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md §2/§6.1）：产品版本权威源 = server/Cargo.toml
 # package.version，前端运行时必须显示服务端返回的版本（/api/system/info），不得硬编码。
 # 本脚本静态检查源码中残留的版本形态字面量（如 v0.1.0 / 0.1.0 出现在版本展示语境）。
 #

@@ -1,8 +1,8 @@
 # Launcher IPC protocol v1 契约（ARC-003）
 
 > 状态：**冻结**（批次 0 契约；帧格式、字段、操作枚举、上限/超时建议值只能以版本化契约变更——任何变更必须 bump 到 `ipc-v2` 并单独提交 fixture，通知 server/launcher/web 三轨同步）。
-> 依据：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.4（Launcher IPC 与 System API）、§6.6（持久化升级状态机）；`docs/UPDATE_CONTRACT.md` §3.1（launcher 职责：Windows named pipe IPC server，protocol v1，仅当前用户 DACL，只接受内部枚举操作）。
-> 产出位置登记于 `docs/UPDATE_CONTRACT.md` §6 文件地图（`release/contracts/ipc-v1.md`）。
+> 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.4（Launcher IPC 与 System API）、§6.6（持久化升级状态机）；`docs/guides/UPDATE_CONTRACT.md` §3.1（launcher 职责：Windows named pipe IPC server，protocol v1，仅当前用户 DACL，只接受内部枚举操作）。
+> 产出位置登记于 `docs/guides/UPDATE_CONTRACT.md` §6 文件地图（`release/contracts/ipc-v1.md`）。
 > 配套 fixture：`release/contracts/fixtures/ipc/*.json`（帧的 JSON 载荷部分；长度前缀为二进制，不在 fixture 内）。
 > HTTP 侧的错误码/状态机见同目录 `system-api-v1.md`；IPC 与 HTTP 共享同一套业务错误码。
 

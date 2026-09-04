@@ -2,7 +2,7 @@
 
 > 用途：批次 4「Docker stop/SIGTERM 统一 drain」「DKR-004 新镜像不健康按旧 digest
 > 自动恢复」「Docker readiness/时区收口」的真实 Docker daemon 端到端证据。
-> 仿照 `docs/UPDATE_M2_EVIDENCE.md` 结构。依据：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md`
+> 仿照 `docs/evidence/UPDATE_M2_EVIDENCE.md` 结构。依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md`
 > DKR-001~004、§11.7（Docker 与发布硬门禁）、§17.6/§17.7 对应条目。
 > 状态：**已实测（2026-09-01）**——Docker daemon 29.7.2 实跑，构建/冒烟、健康升级、
 > 不健康候选自动回滚、SIGTERM 统一停机、数据锚点与 SQLite 完整性全部 PASS。

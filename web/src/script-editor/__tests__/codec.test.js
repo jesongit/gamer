@@ -6,7 +6,7 @@ import { parseScript, parseFunctionLibrary, serialize } from '../codec'
 import { stripUuids } from './helpers'
 
 /**
- * 验收锚点（任务书 + docs/SCRIPT_EDITOR_CONTRACT.md §7）：
+ * 验收锚点（任务书 + docs/reference/SCRIPT_EDITOR_CONTRACT.md §7）：
  * 对每个合法 fixture，serialize(parse(fixture.yaml)) 与 fixture 原文逐字节一致（含结尾单换行）。
  * fixture 即序列化 golden——这是前后端一致性的根。
  */

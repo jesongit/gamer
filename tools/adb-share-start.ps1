@@ -4,7 +4,7 @@
 #       ADB_SERVER_SOCKET=tcp:host.docker.internal:5037 复用宿主 adb server，
 #       USB / 无线设备对容器天然全可见，无需在容器内单独跑 server 或配对密钥。
 #       标准方式拉起的 adb server 只听 127.0.0.1，容器访问不到，必须以 -a 重新拉起。
-#       完整方案与验证步骤见 docs/DEVICE_ACCESS.md。
+#       完整方案与验证步骤见 docs/reference/DEVICE_ACCESS.md。
 #
 # 注意：adb server 被 kill（gamer.ps1 rebuild/restart 内部 Reset-AdbServer、服务端
 #       Adb::reset_server 自愈）或重启机器后会回到标准模式，需重跑本脚本。

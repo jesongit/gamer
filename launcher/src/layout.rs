@@ -1,4 +1,4 @@
-//! 安装根目录布局（docs/UPDATE_CONTRACT.md §1）。
+//! 安装根目录布局（docs/guides/UPDATE_CONTRACT.md §1）。
 
 use std::path::{Path, PathBuf};
 

@@ -1,4 +1,4 @@
-//! script_v2：脚本新语法（2026-08 冻结契约，docs/SCRIPT_EDITOR_CONTRACT.md）
+//! script_v2：脚本新语法（2026-08 冻结契约，docs/reference/SCRIPT_EDITOR_CONTRACT.md）
 //! 的严格装载、AST 与语义校验。
 //!
 //! 阶段 2 执行引擎（engine.rs）与运行 API 消费本模块：

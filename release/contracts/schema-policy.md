@@ -2,7 +2,7 @@
 
 > 状态：**冻结**（批次 0 契约；变更须按 §8 与 DATA 轨代码、manifest 字段同步提交）
 > 编制日期：2026-08-31
-> 依据：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.6/§6.7/§6.8/§11.3/§15/§17.2（ARC-004 两个 checklist 项）；目录属主见 `docs/UPDATE_CONTRACT.md` §1，本文即其 §6 文件地图登记的 `release/contracts/schema-policy.md`
+> 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.6/§6.7/§6.8/§11.3/§15/§17.2（ARC-004 两个 checklist 项）；目录属主见 `docs/guides/UPDATE_CONTRACT.md` §1，本文即其 §6 文件地图登记的 `release/contracts/schema-policy.md`
 > 现状锚点：`server/src/store.rs`（`SCHEMA_VERSION=1`、`ensure_schema`、`apply_schema_migrations`、`validate_schema_v1`）——本文规则与该实现现状一致，后续迁移框架（DATA-001/003）不得偏离
 
 ## 1. DB schema 版本规则

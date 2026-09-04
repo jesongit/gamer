@@ -1,5 +1,5 @@
 /**
- * 脚本编辑器前端 Model（阶段 0 冻结契约，见 docs/SCRIPT_EDITOR_CONTRACT.md §3）。
+ * 脚本编辑器前端 Model（阶段 0 冻结契约，见 docs/reference/SCRIPT_EDITOR_CONTRACT.md §3）。
  *
  * 本文件是可视化编辑器的唯一编辑源形态：
  * - 字段名严格等于 __fixtures__/json/*.golden.json（五方对照中的「前端 Model」）；

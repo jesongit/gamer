@@ -4,8 +4,8 @@
 > immutable digest 或可用 `gh` 登录环境；以下只提供可执行命令和证据格式，不把
 > `release/dist/`、本地 manifest、dev key 或离线 fixture 记作外部通过。
 >
-> 依据：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` 的 REL-004/REL-005/QA-008、
-> `docs/RELEASE.md` §2.5、`release/docs/ATTESTATION.md`。脚本为
+> 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` 的 REL-004/REL-005/QA-008、
+> `docs/guides/RELEASE.md` §2.5、`release/docs/ATTESTATION.md`。脚本为
 > `tools/verify-external-release.ps1`。
 
 ## 1. 完整 QA-008 命令
@@ -201,10 +201,10 @@ draft/GHCR 按 workflow 结构推断不会产生）→ 满足"拿到可用凭据
 | A | verify step 3 破损：**远端 HEAD** 的 test-release-workflow.ps1 在 pwsh 下 draft-release 静态匹配 FAIL（本轮 run 33416440024 实证） | 工作树已有修复，**未提交** | 提交并推送工作树修复（feat/fix(release)） |
 | B | `check-immutable-release.ps1` GitHub preflight **必挂**：L152 `"$Tag^{{commit}}"` 在 PowerShell 双引号里是字面量（不转义 `{}`），传给 `git rev-parse --verify` → `fatal: Needed a single revision`（本地实测 exit 128）；L103 ls-remote peel 模式 `refs/tags/{0}^{{}}` 同类问题（annotated tag 会取到 tag object SHA 而非 peeled commit）。**HEAD 与当前工作树版本都带此 bug** | `release/packaging/check-immutable-release.ps1:152`（工作树行号）；CI 路径：verify step 5 | 改为单引号 `'^{commit}'` / `'^{}'`。该文件不在本轮 Agent C 允许修改名单，未动；**A 修复后这是下一个必炸点** |
 | C | 生产签名 secrets 未配置：build-windows 签名步骤显式 throw（缺 key_id/私钥即失败） | environment `release-sign`：`RELEASE_MANIFEST_PRIVATE_KEY`（PKCS#8 PEM）+ `RELEASE_MANIFEST_KEY_ID`（须 `prod-ed25519-N` 且公钥已 PR 入库 `release/keys/`）；workflow L157-158、L247-267 | 按 release/docs/KEY_ROTATION.md 配置；这是 REL-004 预期观察点（演练 tag 到位后 workflow 会真实失败于此） |
-| D | smoke 人工批准门未配置 | environment `release` 需 required reviewers（docs/RELEASE.md §5 首次演练前必须配置） | 仓库 Settings → Environments → release |
+| D | smoke 人工批准门未配置 | environment `release` 需 required reviewers（docs/guides/RELEASE.md §5 首次演练前必须配置） | 仓库 Settings → Environments → release |
 | E | 本机无 GitHub API 凭据 | `gh auth login` 或 `GH_TOKEN`；删除 draft release / GHCR package version、读取 job 日志文本、QA-008 partial 下载都需要它 | 用户配置 token 后才能做完整演练闭环（含 draft 清理）与 QA-008 §2 partial 冒烟 |
 | F | 本机 docker 未登录 ghcr.io | `docker login ghcr.io`（QA-008 的 GHCR 段需要） | 用户执行 |
-| G | 远端 main 上一轮 CI 为 failure（run 33386993573，2026-08-31） | 与本轮演练无关，但 docs/RELEASE.md §5 要求 main CI 全绿为发布前置 | 另行排查 |
+| G | 远端 main 上一轮 CI 为 failure（run 33386993573，2026-08-31） | 与本轮演练无关，但 docs/guides/RELEASE.md §5 要求 main CI 全绿为发布前置 | 另行排查 |
 
 ### 5.6 本轮环境副作用（如实记录）
 

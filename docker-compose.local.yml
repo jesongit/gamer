@@ -14,7 +14,7 @@
 # - 手机「无线调试」端口每次重新开启都会变化，设备连接地址需随之更新
 # - 熄屏/深睡或 adb server 重启会掉无线连接，重新 connect 即可（密钥已互信）
 # - 备选模式「共享宿主 adb server」（adb 层共享但 reverse 隧道死结致容器内无
-#   实时会话）见 git 历史 b2dedc7 与 docs/DEVICE_ACCESS.md 的方案对比
+#   实时会话）见 git 历史 b2dedc7 与 docs/reference/DEVICE_ACCESS.md 的方案对比
 #
 # 数据目录准备（种子 = server/data 下各应用分区 <pkg>/{tmpl,yaml}，不含 gamer.db*）：
 #   mkdir -p docker-data && cp -r server/data/<pkg>… docker-data/

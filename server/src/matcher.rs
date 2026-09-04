@@ -1320,7 +1320,7 @@ pub type SharedMatcher = Arc<Matcher>;
 pub struct Matcher;
 
 // 统一匹配入口（预留挂载点）：当前引擎直接调用自由函数 match_template，
-// 该对象为模板缓存/计算池阶段预留的统一入口（见 docs/OPTIMIZATION_PLAN.md §11），
+// 该对象为模板缓存/计算池阶段预留的统一入口（见 docs/plans/archive/OPTIMIZATION_PLAN.md §11），
 // 预留期仅 tests 间接触达
 #[allow(dead_code)]
 impl Matcher {

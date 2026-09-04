@@ -1,7 +1,7 @@
 # script_v2 契约 fixture
 
 本目录是当前 YAML v2 严格契约的可执行样例。**前端编辑器、服务端解析/校验、YAML
-文档三方的行为以 `docs/SCRIPT_EDITOR_CONTRACT.md` 为准，本目录是其可执行样例。**
+文档三方的行为以 `docs/reference/SCRIPT_EDITOR_CONTRACT.md` 为准，本目录是其可执行样例。**
 
 - 合法样例：`<id>.yaml` + 期望 JSON `<id>.golden.json`（描述当前前端 Model 字段）
 - 非法样例：`<id>.yaml` + 期望错误 `<id>.expected.json`（code + step_path + field，错误码见 CONTRACT.md 第 5 节）

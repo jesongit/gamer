@@ -1,7 +1,7 @@
 # script_v2 契约 fixture 前端副本
 
 本目录是 `server/tests/fixtures/script_v2/` 的**只读副本**，供前端契约断言与
-编辑器 codec 测试使用。契约正文见 `docs/SCRIPT_EDITOR_CONTRACT.md`，
+编辑器 codec 测试使用。契约正文见 `docs/reference/SCRIPT_EDITOR_CONTRACT.md`，
 样例索引见 `server/tests/fixtures/script_v2/README.md`。
 
 ## 两目录映射
@@ -22,4 +22,4 @@
 - **前端**（js-yaml）对同一 YAML 断言同一模型形态 + psig1 签名双实现 + 副本漂移守护
   （`fixtures.test.js`）；
 - 两目录逐字节一致是「同一份 YAML、前后端读出同一形态」的前提，任何契约改动必须
-  同步：服务端 fixture、golden/expected JSON、本目录副本、`docs/SCRIPT_EDITOR_CONTRACT.md`。
+  同步：服务端 fixture、golden/expected JSON、本目录副本、`docs/reference/SCRIPT_EDITOR_CONTRACT.md`。

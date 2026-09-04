@@ -14,7 +14,7 @@
 | golden 合法 fixture ×12（v01~v12，含 2 个多文件样例的辅助文件） | `server/tests/fixtures/script_v2/*.yaml` |
 | 非法 fixture ×9（i01~i09） | 同上 |
 | golden/期望 JSON ×21 + README 索引 | `server/tests/fixtures/script_v2/*.golden.json`、`*.expected.json`、`README.md` |
-| 契约文档（五方对照、错误码五域、文字契约、解析层选型） | `docs/SCRIPT_EDITOR_CONTRACT.md` |
+| 契约文档（五方对照、错误码五域、文字契约、解析层选型） | `docs/reference/SCRIPT_EDITOR_CONTRACT.md` |
 | 服务端契约测试（事件树→Model 断言 + 最小预校验 + 单引号样式 PoC） | `server/tests/script_v2_contract/{main.rs,yaml_loader.rs,model.rs,precheck.rs}` |
 | 前端 fixture 副本（yaml/ 与 json/ 两目录，逐字节一致） | `web/src/script-editor/__fixtures__/` |
 | 前端契约断言（js-yaml 读 YAML 断言 golden + psig1 双实现 + 漂移测试） | `web/src/script-editor/__fixtures__/fixtures.test.js` |
@@ -64,7 +64,7 @@
 
 ### 解析层选型
 
-**saphyr-parser 0.0.12**（dev-dependency，阶段 2 实装时转 `[dependencies]`）——事件级 + `Span` + `ScalarStyle` 齐备、YAML 1.2、零拷贝、yaml-rust 后继维护；serde_yaml 0.9 丢样式无法校验单引号契约（PoC 已固化），yaml-rust2 0.12 无事件 Span 不选，正则预扫描方案不可靠弃用。完整论证见 `docs/SCRIPT_EDITOR_CONTRACT.md` §2。
+**saphyr-parser 0.0.12**（dev-dependency，阶段 2 实装时转 `[dependencies]`）——事件级 + `Span` + `ScalarStyle` 齐备、YAML 1.2、零拷贝、yaml-rust 后继维护；serde_yaml 0.9 丢样式无法校验单引号契约（PoC 已固化），yaml-rust2 0.12 无事件 Span 不选，正则预扫描方案不可靠弃用。完整论证见 `docs/reference/SCRIPT_EDITOR_CONTRACT.md` §2。
 
 ### 过程踩坑（已按仓库规则记入 docs/PITFALLS.md）
 
@@ -260,7 +260,7 @@
 - fca868b feat(web): 录制上传直传 short_name+region，删前端 composeRegionName（§11.7 收口）
 - e60addf refactor(api)!: 删除 /api/op-templates 端点与 [op_templates] 配置结构；导入浅校验收紧为只认 params/config/steps（v1 语法记 invalid，与严格装载对齐）
 - 3107018 refactor(web)!: 删除 script-language/（validate/line-map/fixtures）、op-template.js、op-template.test.js，-1590 行
-- d1919e5 docs(yaml)!: 重写 docs/YAML.md（617 行：目录/params/17 步/绑定/运行入口/录制形态/诊断/v1 差异对照）+ AGENTS.md 同步；14 个 YAML 示例全部通过 script_v2 严格装载验证（临时 doccheck 测试验证后移除）
+- d1919e5 docs(yaml)!: 重写 docs/reference/YAML.md（617 行：目录/params/17 步/绑定/运行入口/录制形态/诊断/v1 差异对照）+ AGENTS.md 同步；14 个 YAML 示例全部通过 script_v2 严格装载验证（临时 doccheck 测试验证后移除）
 - 主线补：vitest include 移除 script-language 死条目、移除 recording 补收集
 
 ### rg 残留扫描（最终态）
@@ -304,7 +304,7 @@
 ### §17/§20 只读审计结论
 
 按计划 §20 七条核对清单与 §17 验收标准中可静态验证条目逐条审计（独立只读 Agent，file:line 级证据）：
-17 种步骤类型在服务端 AST/loader/白名单、前端 model/factories/kinds、exec 引擎、docs/YAML.md 四方完全一致；
+17 种步骤类型在服务端 AST/loader/白名单、前端 model/factories/kinds、exec 引擎、docs/reference/YAML.md 四方完全一致；
 前端仅剩 script-editor/codec.ts 一处 YAML 解析/序列化（script-language 已删、守卫测试在位）；
 §10 迁移矩阵两页逐项落点（运行/停止/冲突/恢复/从步骤运行/结构化跳转/409 版本冲突）；
 录制 Alt 三分作用域与 §11.2 文案逐字一致；点击→find、滑动→match{swipe+else throw+timeout 30s}

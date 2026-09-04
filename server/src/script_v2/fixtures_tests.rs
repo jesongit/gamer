@@ -6,7 +6,7 @@
 //! precheck 三份测试本地实现已删除，全部走 parse_script_file/
 //! parse_function_file（规范序列化往返断言见 serialize 往返用例）。
 //!
-//! 契约文档：docs/SCRIPT_EDITOR_CONTRACT.md；fixture 索引：
+//! 契约文档：docs/reference/SCRIPT_EDITOR_CONTRACT.md；fixture 索引：
 //! tests/fixtures/script_v2/README.md（web/src/script-editor/__fixtures__/
 //! 存在逐字节一致副本，由前端测试守护）。
 

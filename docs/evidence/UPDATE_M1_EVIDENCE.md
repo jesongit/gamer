@@ -3,7 +3,7 @@
 > 用途：批次 2「Windows 完整包 MVP」合流门的验收证据索引模板。
 > 各条目先登记**证据来源命令**与期望形态；**实测输出/数字留空**，
 > 待批次 2 合流门后由主控统一执行并回填，不用口头结论代替证据。
-> 依据：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §8.4（批次 2 完成门）、§11.1/§11.2（发布与依赖硬门禁）、§17.4 checklist。
+> 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §8.4（批次 2 完成门）、§11.1/§11.2（发布与依赖硬门禁）、§17.4 checklist。
 > 状态：**已回填（2026-08-31 实测）**。
 > - **第一轮**（commit `3a82420e`，见 E-1~E-5）：总体结论 **M1 合流门不通过**
 >   （3 项阻断缺陷）；打包链路（E-1 组包 / E-2 验签 / E-4 离线修复）可用，
@@ -22,14 +22,14 @@
 
 - 「实测记录」处回填：执行日期、commit、命令原文、关键输出摘录（目录树/哈希/状态码/版本号）。
 - 任一条目无法取得证据时，在「实测记录」写明阻塞原因与对应任务 ID，不得留空或标"通过"。
-- 证据与契约冲突时以 `docs/UPDATE_CONTRACT.md` 与 `release/contracts/` 为准，并先修契约或实现再回填。
+- 证据与契约冲突时以 `docs/guides/UPDATE_CONTRACT.md` 与 `release/contracts/` 为准，并先修契约或实现再回填。
 
 ## E-1 full ZIP 布局
 
 - **结论：FAIL（偏差）** —— 组包/校验流程本身全部成功，负面项全过；但解压布局与模板期望
   列表不符（不含 `state/`、`versions/`、`runtime/`、`cache/`、`staging/`、`backups/`、`quarantine/`），
   且后文 E-3 证明 `repair` 无法补齐 `versions/`，首启后的安装根永远缺应用版本目录。
-- **期望证据**：full ZIP 解包后的顶层目录树，与计划 §5.1 / `docs/UPDATE_CONTRACT.md` §1 一致：
+- **期望证据**：full ZIP 解包后的顶层目录树，与计划 §5.1 / `docs/guides/UPDATE_CONTRACT.md` §1 一致：
   `gamer-launcher.exe`、`config/`、`state/`、`manifests/`、`versions/<ver>/`（含 `web-dist/`、
   `assets/scrcpy-server.jar`）、`runtime/adb|ffmpeg/<ver>/`（adb 三件套 exe+DLL）、
   `seeds/`（离线组件包）、`cache/`、`staging/`、`backups/`、`quarantine/`；

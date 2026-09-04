@@ -1,10 +1,10 @@
 # 未完成项与阻塞原因清单
 
 > 维护日期：2026-09-01
-> 范围：[docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md](AUTO_UPDATE_DEVELOPMENT_PLAN.md)（下称「更新计划」）与
-> [docs/CLEAN_BASELINE_PARALLEL_PLAN.md](CLEAN_BASELINE_PARALLEL_PLAN.md)（下称「基线计划」）中**全部未勾选 checklist 项**。
-> 口径：已完成项不在此列出，勾选依据见各计划内注记与 `docs/UPDATE_*_EVIDENCE.md`、
-> `docs/CLEAN_BASELINE_FUNC_EVIDENCE.md` 证据文档。某项解除阻塞后：先在原计划勾选并回填证据，再从本文档移除该条。
+> 范围：[docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md](plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md)（下称「更新计划」）与
+> [docs/plans/archive/CLEAN_BASELINE_PARALLEL_PLAN.md](plans/archive/CLEAN_BASELINE_PARALLEL_PLAN.md)（下称「基线计划」）中**全部未勾选 checklist 项**。
+> 口径：已完成项不在此列出，勾选依据见各计划内注记与 `docs/evidence/UPDATE_*_EVIDENCE.md`、
+> `docs/evidence/CLEAN_BASELINE_FUNC_EVIDENCE.md` 证据文档。某项解除阻塞后：先在原计划勾选并回填证据，再从本文档移除该条。
 > 当前基线：本地 main 领先 origin/main 17 个提交（含全部修复与证据），**未推送**。
 
 ## 总览
@@ -47,7 +47,7 @@ harness（`release/packaging/test-release-workflow.ps1`）已 PASS。
 
 | 计划出处 | 条目 | 阻塞原因（具体） |
 |---|---|---|
-| 更新计划 §17.5 | REL-004：tag 触发 Release workflow，先创建 draft | 依赖共同前置 1/2/3。首支演练 tag `v0.2.0-rc-drill1` 已真实触发 run 33416440024 并在 verify 步骤失败（当时远端 HEAD 缺 `a7e5ef1` 修复），失败形态与清零残留均已留档（[UPDATE_EXTERNAL_QA_EVIDENCE.md](UPDATE_EXTERNAL_QA_EVIDENCE.md) §5），不是脚本未就绪 |
+| 更新计划 §17.5 | REL-004：tag 触发 Release workflow，先创建 draft | 依赖共同前置 1/2/3。首支演练 tag `v0.2.0-rc-drill1` 已真实触发 run 33416440024 并在 verify 步骤失败（当时远端 HEAD 缺 `a7e5ef1` 修复），失败形态与清零残留均已留档（[UPDATE_EXTERNAL_QA_EVIDENCE.md](evidence/UPDATE_EXTERNAL_QA_EVIDENCE.md) §5），不是脚本未就绪 |
 | 更新计划 §17.5 | REL-004：所有资产、验签和 smoke 通过后才发布 | 同上，另需 `release` environment 评审人执行手动批准 |
 | 更新计划 §17.5 | REL-005：发布 GHCR semver tag 和 immutable digest | GHCR 推送用内置 `GITHUB_TOKEN`（无需额外凭据），但 job 在 workflow 内位于签名/构建之后——REL-004 通了它才通 |
 | 更新计划 §17.5 | REL-006：生成 SBOM、provenance/attestation 并演练 key rotation | SBOM 与 key rotation 的**本地部分已全 PASS**（verify-sbom / augment-sbom / verify-key-rotation / check-immutable-release）；未勾只剩 provenance/SBOM attestation——它们在 workflow 构建阶段生成并绑定真实镜像 digest，依赖 REL-004/005 完成 |
@@ -130,6 +130,6 @@ full ZIP、真实更新闭环检查、失败率/回滚率观察、保留策略�
 - 基线计划现存未勾项：§10.3×2、§10.5×2。
 - 凭据/secrets 名称取自 `.github/workflows/release.yml`（`RELEASE_MANIFEST_KEY_ID`、
   `RELEASE_MANIFEST_PRIVATE_KEY`、environments `release-sign`/`release`）。
-- 演练与外部链路证据：[UPDATE_EXTERNAL_QA_EVIDENCE.md](UPDATE_EXTERNAL_QA_EVIDENCE.md)；
+- 演练与外部链路证据：[UPDATE_EXTERNAL_QA_EVIDENCE.md](evidence/UPDATE_EXTERNAL_QA_EVIDENCE.md)；
   Docker/真机/Windows QA 证据：`UPDATE_DOCKER_E2E_EVIDENCE.md`、`UPDATE_REALDEVICE_EVIDENCE.md`、
   `UPDATE_WINDOWS_QA_EVIDENCE.md`、`UPDATE_M2_EVIDENCE.md`、`CLEAN_BASELINE_FUNC_EVIDENCE.md`。

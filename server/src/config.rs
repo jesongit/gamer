@@ -8,7 +8,7 @@
 //!   - `prod`/`production`：直接报错退出——生产环境必须显式配置。
 //! - 路径字段先做规范化（去首尾空白），再执行启动校验；任一违规项即退出。
 //!
-//! 稳定路径契约（PATH-001 / docs/UPDATE_CONTRACT.md §4）：
+//! 稳定路径契约（PATH-001 / docs/guides/UPDATE_CONTRACT.md §4）：
 //! - launcher 启动 server 时注入绝对路径环境变量，优先级高于配置文件同名字段：
 //!   `GAMER_APP_DIR` / `GAMER_DATA_DIR` / `GAMER_ADB_PATH` / `GAMER_FFMPEG_PATH` /
 //!   `GAMER_SCRCPY_SERVER`；`GB_CONFIG` 指定配置文件路径、`GB_LOG` 指定日志
@@ -136,7 +136,7 @@ pub struct LoadedConfig {
     pub profile: Profile,
 }
 
-/// 稳定路径契约的环境变量快照（PATH-001 / docs/UPDATE_CONTRACT.md §4）。
+/// 稳定路径契约的环境变量快照（PATH-001 / docs/guides/UPDATE_CONTRACT.md §4）。
 ///
 /// launcher 启动 server 时注入以下绝对路径（优先级高于配置文件同名字段）：
 /// `GAMER_APP_DIR` / `GAMER_DATA_DIR` / `GAMER_ADB_PATH` / `GAMER_FFMPEG_PATH` /
@@ -810,7 +810,7 @@ fn resolve_tool_path(base: &Path, tool: &str) -> String {
     }
 }
 
-/// 冻结的相对路径解析规则（PATH-001 / docs/UPDATE_CONTRACT.md §4）：
+/// 冻结的相对路径解析规则（PATH-001 / docs/guides/UPDATE_CONTRACT.md §4）：
 /// - 相对 `data_dir`、`adb_path`、`ffmpeg_path` → 相对**配置文件所在目录**；
 /// - 相对 `scrcpy_server`（应用内资产）→ 相对 `GAMER_APP_DIR`（app_dir）；
 ///   未注入时回退现状（进程 cwd 相对），开发流不变。

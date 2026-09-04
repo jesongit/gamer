@@ -2,9 +2,9 @@
 
 > 用途：批次 5 §17.7「至少一台真实 Android 设备完成升级前后 adb、投屏、控制、截图
 > 和模板匹配」「至少一次脚本运行和定时任务升级门禁/升级后恢复验证通过」两项的真实
-> 设备端到端证据。仿照 `docs/UPDATE_M2_EVIDENCE.md` 结构；台架方法复用其 E-2/E-4。
-> 依据：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.5（业务空闲门禁契约）、§11 测试
-> 矩阵、§17.7 checklist；升级链路以 `docs/UPDATE_CONTRACT.md` §6.6 状态机为准。
+> 设备端到端证据。仿照 `docs/evidence/UPDATE_M2_EVIDENCE.md` 结构；台架方法复用其 E-2/E-4。
+> 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.5（业务空闲门禁契约）、§11 测试
+> 矩阵、§17.7 checklist；升级链路以 `docs/guides/UPDATE_CONTRACT.md` §6.6 状态机为准。
 > 状态：**已实测（2026-08-31～09-01）**——真实小米设备（MIUI/HyperOS）在 0.1.0→0.2.0
 > 真实升级前后全部功能等价通过（S1 19 项 / S4 16 项全 PASS），升级门禁真实竞争
 > 全程观测并留痕；本轮发现 **1 个阻断级升级链路缺陷 + 1 个中级缺陷**（只记录未改码，

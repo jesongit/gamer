@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://gamebot.invalid/schemas/release-manifest-v1.json",
   "title": "GameBot Release Manifest v1",
-  "description": "ARC-002 冻结的 Release manifest v1 契约（docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md §6.2/§11.1）。detached Ed25519 签名覆盖 manifest 原始字节，key_id 位于签名文件头（见 manifest-v1.md），因此 manifest 本身不含 key_id 字段。任何字段变更必须 bump schema_version 并同步所有轨道。",
+  "description": "ARC-002 冻结的 Release manifest v1 契约（docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md §6.2/§11.1）。detached Ed25519 签名覆盖 manifest 原始字节，key_id 位于签名文件头（见 manifest-v1.md），因此 manifest 本身不含 key_id 字段。任何字段变更必须 bump schema_version 并同步所有轨道。",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "product", "release", "platforms"],

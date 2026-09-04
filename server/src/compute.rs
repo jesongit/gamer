@@ -1,6 +1,6 @@
 //! PERF-003：CPU 密集任务专用计算池（NCC 匹配 / PNG 解码 / 灰度化）。
 //!
-//! 设计（docs/OPTIMIZATION_PLAN.md §11.3）：
+//! 设计（docs/plans/archive/OPTIMIZATION_PLAN.md §11.3）：
 //! - **专用 rayon 线程池**（Cargo.toml 已有 rayon，复用）：线程数固定 = 并发
 //!   上限。NCC 滑窗的 `par_iter`（`match_template_with_source`）经
 //!   `pool.install` 落在本池，CPU 并行度被硬性限制在上限内；

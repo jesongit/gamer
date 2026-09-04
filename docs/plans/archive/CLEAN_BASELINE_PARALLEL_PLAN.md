@@ -1,6 +1,6 @@
 # GameBot 无兼容基线并行开发计划
 
-> 状态：基线清理完成；本机/Docker/真机/浏览器（WebRTC、DataChannel、viewer 接管、重连、watchdog/idle）验收完成（2026-09-01）；发布链路验收在 docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md 单独跟踪；未完成项与阻塞原因统一见 [docs/REMAINING_BLOCKERS.md](REMAINING_BLOCKERS.md)
+> 状态：基线清理完成；本机/Docker/真机/浏览器（WebRTC、DataChannel、viewer 接管、重连、watchdog/idle）验收完成（2026-09-01）；发布链路验收在 docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md 单独跟踪；未完成项与阻塞原因统一见 [docs/REMAINING_BLOCKERS.md](../../REMAINING_BLOCKERS.md)
 >
 > 目标：项目仍处于开发阶段，删除旧协议、旧数据和旧容错路径，形成单一、严格、可测试的当前基线。
 >
@@ -119,7 +119,7 @@ codex/clean-validation-docs        H
 | `web/src/store.js`、`web/src/runs.js` | E：前端契约 | F 在 E 合并后开始 |
 | `web/src/views/Console.vue` | F：前端视图 | 其他支线不碰 |
 | `web/src/views/ScriptEditor.vue` | F：前端视图 | 其他支线不碰 |
-| `docs/YAML.md`、`docs/SCRIPT_EDITOR_CONTRACT.md` | H：验证与文档 | B 提供契约变化清单与 fixture |
+| `docs/reference/YAML.md`、`docs/reference/SCRIPT_EDITOR_CONTRACT.md` | H：验证与文档 | B 提供契约变化清单与 fixture |
 | `README.md`、`AGENTS.md`、`docs/PITFALLS.md` | H：验证与文档 | 只有真实新坑才追加 PITFALLS |
 | `server/data/**` | H 或指定数据负责人 | B 只改测试 fixture，避免覆盖开发数据 |
 
@@ -300,12 +300,12 @@ pnpm build
 允许修改：
 
 - `server/data/**`
-- `docs/YAML.md`
-- `docs/SCRIPT_EDITOR_CONTRACT.md`
+- `docs/reference/YAML.md`
+- `docs/reference/SCRIPT_EDITOR_CONTRACT.md`
 - `docs/PITFALLS.md`
 - `README.md`
 - `AGENTS.md`
-- `docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md`
+- `docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md`
 - 契约/集成测试，但不改业务实现
 
 任务：
@@ -419,7 +419,7 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 ```text
 你正在执行 GameBot“无兼容基线”计划中的【支线 X】。项目仍在开发期，不需要兼容旧 API、旧响应、旧数据库、旧凭据、旧 YAML 或旧文件布局；请删除旧分支，不要保留双轨。注意：DataChannel→REST、WebRTC 恢复、设备命令/截图的模式安全降级属于运行可靠性，不得当作旧兼容删除。
 
-只修改计划为本支线分配的文件。公共热点由集成负责人处理；发现跨支线需求时输出精确变更清单，不越界编辑。先阅读 AGENTS.md 和 docs/CLEAN_BASELINE_PARALLEL_PLAN.md 对应章节，再检查真实调用与测试。实现后运行本支线测试；不要为了旧测试恢复兼容逻辑，应改成当前契约或“旧输入被拒绝”测试。
+只修改计划为本支线分配的文件。公共热点由集成负责人处理；发现跨支线需求时输出精确变更清单，不越界编辑。先阅读 AGENTS.md 和 docs/plans/archive/CLEAN_BASELINE_PARALLEL_PLAN.md 对应章节，再检查真实调用与测试。实现后运行本支线测试；不要为了旧测试恢复兼容逻辑，应改成当前契约或“旧输入被拒绝”测试。
 
 交付时列出：修改文件、删除的旧路径、保留的可靠性路径、跨支线接口变化、测试命令与结果、剩余风险。提交遵循 Conventional Commits；破坏性改动使用 ! 并添加 BREAKING CHANGE。
 ```
@@ -479,7 +479,7 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] YAML/fixture 文档变化清单已交给 H。
 - [x] B 支线提交已完成并附 `BREAKING CHANGE`。
 
-> B→E/H 交接证据（2026-08-31）：E 提交 `fd896de` 正文逐项列出资源 create/update/replace、`expected_version`/`force`、`run_id` 与认证清理；H 提交 `d7075de` 的变更集覆盖 `docs/YAML.md`、契约文档、服务端/前端 fixture 及当前分区资源，当前 fixture 严格 loader 测试通过。
+> B→E/H 交接证据（2026-08-31）：E 提交 `fd896de` 正文逐项列出资源 create/update/replace、`expected_version`/`force`、`run_id` 与认证清理；H 提交 `d7075de` 的变更集覆盖 `docs/reference/YAML.md`、契约文档、服务端/前端 fixture 及当前分区资源，当前 fixture 严格 loader 测试通过。
 
 #### C — schema 与任务
 
@@ -566,7 +566,7 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] Docker 显式配置 `TZ`。
 - [x] 部署入口明确说明 WebRTC UDP 端口。
 - [x] system info/schema version 与自动更新计划共用一套定义。
-- [x] 本机与 Docker 状态页冒烟测试通过。（本机浏览器状态页与 /api/system/info 逐项一致：docs/CLEAN_BASELINE_FUNC_EVIDENCE.md；Docker 浏览器状态页 docker/external、依赖三行正常、更新能力禁用、控制台 0 报错：docs/UPDATE_DOCKER_E2E_EVIDENCE.md 状态页冒烟节；首轮发现的服务端时区显示缺失缺陷已修复——server 7166f1f + web f27acdd）
+- [x] 本机与 Docker 状态页冒烟测试通过。（本机浏览器状态页与 /api/system/info 逐项一致：docs/evidence/CLEAN_BASELINE_FUNC_EVIDENCE.md；Docker 浏览器状态页 docker/external、依赖三行正常、更新能力禁用、控制台 0 报错：docs/evidence/UPDATE_DOCKER_E2E_EVIDENCE.md 状态页冒烟节；首轮发现的服务端时区显示缺失缺陷已修复——server 7166f1f + web f27acdd）
 - [x] G 支线提交已完成。
 
 > G 最终复核（2026-08-31）：`5ea58f2` 已移除 `docker-config.toml` 明文 `admin123`、Login 默认凭据/固定版本、MainLayout 固定版本与日志徽标；新增的基线真相测试随 Web 493 项测试通过。`/api/system/info` 认证后返回 schema=1 及 ADB/FFmpeg/scrcpy 版本，故版本与固定徽标项勾选；Docker runtime 与浏览器页面状态未实测，综合状态页项保持未勾选。
@@ -577,9 +577,9 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] 旧 fixture、旧开发示例和旧迁移说明已删除。
 - [x] 前端 YAML 校验与服务端当前契约一致。
 - [x] 模板代码与当前 YAML 契约一致。
-- [x] `docs/YAML.md` 已同步。
-- [x] `docs/SCRIPT_EDITOR_CONTRACT.md` 已同步。
-- [x] `docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` 从 schema v1 开始，不再规划 migration 0。
+- [x] `docs/reference/YAML.md` 已同步。
+- [x] `docs/reference/SCRIPT_EDITOR_CONTRACT.md` 已同步。
+- [x] `docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` 从 schema v1 开始，不再规划 migration 0。
 - [x] README、AGENTS、示例配置只描述当前行为。
 - [x] 自动启动、STUN、目录布局等漂移文案已修正。
 - [x] 仅将真实新增构建/运行坑追加到 `docs/PITFALLS.md`。
@@ -598,13 +598,13 @@ rg -n "/api/scripts/.+/(stop|status)" server/src web/src
 - [x] 无参数/有参数定时任务保存和立即运行成功。
 - [x] 参数声明变化后任务重新确认流程成功。
 - [x] 当前分区导出、清空、重新导入成功。
-- [x] DataChannel 控制正常，REST 可靠性降级仍可用。（DC 静音开关命中服务端独有日志、DC 触控设备侧生效；REST press/tap 200 且生效——docs/CLEAN_BASELINE_FUNC_EVIDENCE.md）
+- [x] DataChannel 控制正常，REST 可靠性降级仍可用。（DC 静音开关命中服务端独有日志、DC 触控设备侧生效；REST press/tap 200 且生效——docs/evidence/CLEAN_BASELINE_FUNC_EVIDENCE.md）
 - [x] viewer 接管、重连、watchdog 和 idle 生命周期未回归。（接管/被顶不重连/idle 拆会话与唤醒：FUNC_EVIDENCE 首轮；配置变更踢 viewer 后自动重连 4.4s 恢复、watchdog 确死强拆 viewer 重连 25s 恢复、脚本运行中确死强拆服务端 132ms 重连且 run Success：G3 回归节；回归暴露的「自动重连成功一次后再次被踢不再重连」前端缺陷已修复并加测试——539a073，web 580 tests 全绿）
 - [ ] Docker readiness、时区和 WebRTC UDP 验证通过。
 
 > 波次 2 集成证据（2026-08-31）：公共 `GET /api/system/info` 已在 `protected_json` 接入，未放入 public；集成测试验证未认证 401、认证后结构化响应和无临时路径泄露。`cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo test`（306 passed/2 ignored）、`pnpm test:run`（493 passed）、`pnpm build` 通过；`docker-compose.yml`、主+`docker-compose.local.yml`、主+`docker-compose.usb.yml` 的 `config --quiet` 通过。一次性 `GAMER_ADMIN_PASSWORD` 临时服务已完成 readiness、错误/正确登录、session、system info、设备扫描、真实设备 connect（online mirror）和 shutdown 冒烟，且无进程/端口/ADB/scrcpy 残留；该结果覆盖 HTTP/session，浏览器视频轨道仍未验证。应用内浏览器 `ERR_BLOCKED_BY_CLIENT` 阻断 WebRTC/DataChannel 验证；Docker daemon 不可用，不能伪造容器 readiness/UDP；设备脚本、viewer 接管、watchdog/idle 生命周期及发布运行验收未执行，故对应项目保持未勾选；`baseline-backups/` 保持未跟踪且未改动。
 > 波次 2 合并顺序审计（2026-08-31）：实际父链为 E→H→G→F→最终集成，不是计划要求的 E→F→G→H，故顺序项保持未勾选。
-> 2026-09-01 收口：DataChannel 控制 + REST 降级、viewer 接管、配置变更踢 viewer 自动重连、watchdog 确死强拆（无脚本/脚本运行中两分支）、idle 拆会话与唤醒均已实测（docs/CLEAN_BASELINE_FUNC_EVIDENCE.md，含 G3 回归节）。Docker readiness/时区已实测（docs/UPDATE_DOCKER_E2E_EVIDENCE.md，API+浏览器双确认），WebRTC UDP 媒体面需容器内真机（USB 设备无法透传容器、未擅自改动设备网络配置），对应项保持未勾。10.3/10.5 的两个合并顺序审计项为历史过程记录（当时已注记实际父链），不作追溯改写。
+> 2026-09-01 收口：DataChannel 控制 + REST 降级、viewer 接管、配置变更踢 viewer 自动重连、watchdog 确死强拆（无脚本/脚本运行中两分支）、idle 拆会话与唤醒均已实测（docs/evidence/CLEAN_BASELINE_FUNC_EVIDENCE.md，含 G3 回归节）。Docker readiness/时区已实测（docs/evidence/UPDATE_DOCKER_E2E_EVIDENCE.md，API+浏览器双确认），WebRTC UDP 媒体面需容器内真机（USB 设备无法透传容器、未擅自改动设备网络配置），对应项保持未勾。10.3/10.5 的两个合并顺序审计项为历史过程记录（当时已注记实际父链），不作追溯改写。
 
 ### 10.6 最终清理与发布门禁
 

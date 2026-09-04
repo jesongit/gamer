@@ -1,4 +1,4 @@
-# QG-005：前后端构建测试门禁（对应 docs/OPTIMIZATION_PLAN.md 阶段 0）。
+# QG-005：前后端构建测试门禁（对应 docs/plans/archive/OPTIMIZATION_PLAN.md 阶段 0）。
 # 门禁链与 tools/ci-local.ps1 一一对应，本地可先跑脚本再推送。
 name: CI
 

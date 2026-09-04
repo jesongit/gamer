@@ -10,7 +10,7 @@ import path from 'node:path'
  * 本目录是 server/tests/fixtures/script_v2/ 的只读副本：
  * - yaml/ 与服务端逐字节一致（下方有专门的漂移测试守护）；
  * - json/ 为 golden / expected 期望副本；
- * - 契约字段定义见 docs/SCRIPT_EDITOR_CONTRACT.md 第 3 节五方对照表。
+ * - 契约字段定义见 docs/reference/SCRIPT_EDITOR_CONTRACT.md 第 3 节五方对照表。
  *
  * 服务端（saphyr-parser 事件层）负责权威解析与非法拒绝；本测试用 js-yaml
  * 在前端侧做同一套结构断言，保证「同一份 YAML、前后端读出同一形态」。

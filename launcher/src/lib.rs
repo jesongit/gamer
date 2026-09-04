@@ -9,8 +9,8 @@
 //! 升级状态机编排（§6.6 全链路 + 启动恢复）、离线快照与恢复（LCH-011）、
 //! 候选启动/提交/回滚（LCH-012）、journal 断电矩阵（QA-004）。
 //!
-//! 契约来源：`docs/UPDATE_CONTRACT.md`、`release/contracts/manifest-v1.md`、
-//! `release/contracts/ipc-v1.md`、`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.6-6.8。
+//! 契约来源：`docs/guides/UPDATE_CONTRACT.md`、`release/contracts/manifest-v1.md`、
+//! `release/contracts/ipc-v1.md`、`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.6-6.8。
 
 pub mod archive;
 pub mod cli;

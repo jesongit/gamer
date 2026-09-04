@@ -182,7 +182,7 @@ pub fn is_valid_color(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// key 类型具名按键枚举（大小写不敏感；含 `engine::exec::key_code` 认可的别名
-/// 拼写，与前端 schema.KEY_ENUM、docs/YAML.md §5.1 保持一致）。
+/// 拼写，与前端 schema.KEY_ENUM、docs/reference/YAML.md §5.1 保持一致）。
 pub const KEY_NAMES: &[&str] = &[
     "HOME",
     "BACK",
@@ -220,7 +220,7 @@ pub fn is_valid_key(s: &str) -> bool {
 /// 非法 key 值的统一报错原因（默认值 / 步骤字面量 / args 共用文案基调）。
 pub fn invalid_key_reason(s: &str) -> String {
     format!(
-        "未知按键 {s:?}（受支持枚举见 docs/YAML.md §5.1：HOME/BACK/ESC 等具名键，或纯数字 Android keycode）"
+        "未知按键 {s:?}（受支持枚举见 docs/reference/YAML.md §5.1：HOME/BACK/ESC 等具名键，或纯数字 Android keycode）"
     )
 }
 

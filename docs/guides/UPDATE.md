@@ -1,7 +1,7 @@
 # GameBot 安装、依赖修复与升级指南
 
 > 面向最终用户与维护者的 Windows x64 便携版（full 包）安装 / 修复 / 升级手册。
-> 事实依据：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md`（计划）、`docs/UPDATE_CONTRACT.md`（目录契约）、
+> 事实依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md`（计划）、`docs/guides/UPDATE_CONTRACT.md`（目录契约）、
 > `release/contracts/*.md`（manifest / API / IPC / schema / 许可契约）、`launcher/`（启动器实现）。
 >
 > **诚实声明**：本文按「自动升级」项目的批次计划编写，**只在批次 0/1 已落地事实上描述现状**，
@@ -200,8 +200,8 @@ idle → checking（检查新版本）→ available（发现候选）→ downloa
 
 ## 6. 相关文档
 
-- 计划与任务拆分：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md`
-- 安装目录契约：`docs/UPDATE_CONTRACT.md`
+- 计划与任务拆分：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md`
+- 安装目录契约：`docs/guides/UPDATE_CONTRACT.md`
 - manifest/API/IPC/schema/许可契约：`release/contracts/`
-- 日常使用（设备、脚本、定时任务）：`README.md`、`docs/YAML.md`
+- 日常使用（设备、脚本、定时任务）：`README.md`、`docs/reference/YAML.md`
 - 踩坑记录：`docs/PITFALLS.md`

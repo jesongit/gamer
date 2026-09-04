@@ -10,7 +10,7 @@
 - ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网低延迟
 - 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先从 H.264 GOP 帧环按需调用 ffmpeg 解码最新帧；无 ffmpeg 时 fallback adb screencap）；固定夹具 benchmark 脚本已兼容 Windows PowerShell 5.1（parser=0），正式跨平台 p50/p95 报告仍在计划中
-- 📜 **YAML 自动化**：当前 v2 严格语法支持 find（找图等待+点击，block 障碍、verify 补点）/ color 颜色分支 / loop / func 自定义函数（具名参数 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait（语法见 [docs/YAML.md](docs/YAML.md)）
+- 📜 **YAML 自动化**：当前 v2 严格语法支持 find（找图等待+点击，block 障碍、verify 补点）/ color 颜色分支 / loop / func 自定义函数（具名参数 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait（语法见 [docs/reference/YAML.md](docs/reference/YAML.md)）
 - ⏰ **定时任务**：cron 表达式，服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
@@ -60,7 +60,7 @@ gamer/
 ├── release/packaging/      # 依赖获取、构包、manifest 与签名脚本
 ├── Dockerfile              # 推荐：一体化多阶段镜像（pnpm 前端 + Rust 服务端）
 ├── docker-compose.yml      # server + redroid 一键拉起
-└── docs/YAML.md            # YAML 自动化脚本语法（README 引用）
+└── docs/reference/YAML.md            # YAML 自动化脚本语法（README 引用）
 ```
 
 ## 依赖清单（Windows / scoop 安装示例）
@@ -250,7 +250,7 @@ Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`�
 
 ## YAML 脚本语法
 
-YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/YAML.md](docs/YAML.md)**。
+YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/reference/YAML.md](docs/reference/YAML.md)**。
 可执行脚本、函数库和模板按应用分区存放在 `data/<应用包名>/{scripts,functions,templates}/`，按键映射在 `keymaps/`（web 端 Console 页框选/上传模板）。
 
 ## API 一览

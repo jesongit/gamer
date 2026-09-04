@@ -2,7 +2,7 @@
 
 > 面向维护者的发布 runbook：draft 发布流程、签名密钥轮换、`manual_recovery` 人工恢复、
 > 首次真实 tag 演练 checklist。
-> 事实依据：`.github/workflows/release.yml`（发布 workflow）、`docs/UPDATE_CONTRACT.md`（安装目录契约）、
+> 事实依据：`.github/workflows/release.yml`（发布 workflow）、`docs/guides/UPDATE_CONTRACT.md`（安装目录契约）、
 > `release/contracts/`（manifest / system-api / IPC 契约）、`launcher/` 与 `release/packaging/`（当前实现）。
 > 计划文档仅作背景，不作为“已完成”依据；最终用户以完整包内生成的 `INSTALL.md` 和 launcher CLI 为准。
 > 本手册不代表当前已经有成功的 GitHub Release、GHCR 推送或生产演练结果。
@@ -185,7 +185,7 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 
 ## 4. `manual_recovery` 人工恢复指引
 
-> 依据当前 `launcher/` 实现与 `docs/UPDATE_CONTRACT.md` 的目录契约编写。
+> 依据当前 `launcher/` 实现与 `docs/guides/UPDATE_CONTRACT.md` 的目录契约编写。
 > `state/current.json` 保存版本字符串而不是目录路径；仓库没有独立的
 > `manual-recovery` / `reset-journal` CLI，journal 修复属于受控人工维护动作。
 
@@ -297,8 +297,8 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 
 ## 6. 相关文档
 
-- 计划与批次 checklist：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md`（§14 / §17.5）
-- 安装目录契约（journal/backups/quarantine 语义）：`docs/UPDATE_CONTRACT.md`
+- 计划与批次 checklist：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md`（§14 / §17.5）
+- 安装目录契约（journal/backups/quarantine 语义）：`docs/guides/UPDATE_CONTRACT.md`
 - manifest/API/IPC/schema/许可契约与 fixtures：`release/contracts/`
 - 密钥轮换 runbook：`release/docs/KEY_ROTATION.md`
 - 完整包用户入口：打包生成的 `INSTALL.md`；launcher 参数以 `launcher/src/cli.rs` 为准

@@ -1610,8 +1610,8 @@ manifest.toml → package.toml
 
 ```text
 README.md
-docs/YAML.md
-docs/gamer_refactor_plan_v2/phase-04-app-package.md
+docs/reference/YAML.md
+docs/plans/archive/gamer_refactor_plan_v2/phase-04-app-package.md
 ```
 
 删除：

@@ -105,8 +105,8 @@
 
 涉及文档：
 
-- `docs/KEYMAP_SCHEMA.md`
-- `docs/KEYBOARD_CONTROL_PLAN.md`
+- `docs/reference/KEYMAP_SCHEMA.md`
+- `docs/plans/archive/KEYBOARD_CONTROL_PLAN.md`
 - 本文档
 
 ### 阶段二：前端键盘映射改为统一触控

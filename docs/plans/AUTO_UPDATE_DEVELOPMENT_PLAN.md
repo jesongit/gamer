@@ -1,6 +1,6 @@
 # GameBot 运行依赖与自动升级开发计划
 
-> 状态：**实施中（批次 0～4 已完成；批次 5 本机可执行项完成——剩余集中在真实 GitHub Release/GHCR/生产签名、Windows clean VM 与发布签核，2026-09-01）**；未完成项与阻塞原因统一见 [docs/REMAINING_BLOCKERS.md](REMAINING_BLOCKERS.md)  
+> 状态：**实施中（批次 0～4 已完成；批次 5 本机可执行项完成——剩余集中在真实 GitHub Release/GHCR/生产签名、Windows clean VM 与发布签核，2026-09-01）**；未完成项与阻塞原因统一见 [docs/REMAINING_BLOCKERS.md](../REMAINING_BLOCKERS.md)  
 > 编制日期：2026-08-31  
 > 适用范围：Windows x64 便携发行版、运行依赖管理、版本检查与升级、数据迁移与回滚、GitHub Release、GHCR、系统 API、设置页和发布验收  
 > 本文只定义设计契约、任务拆分、并行顺序和验收门禁，不代表相关功能已经实现。
@@ -362,7 +362,7 @@ journal 至少记录 update id、from/to、准确 child PID/创建时间/exe、c
 
 | ID | 任务 | 主要产出/文件 | 前置 | 验收标准 |
 |---|---|---|---|---|
-| ARC-001 | 冻结目录和组件边界 | 本文、后续 `docs/UPDATE_CONTRACT.md` | 无 | 目录、owner、可写区域、原子切换边界评审通过 |
+| ARC-001 | 冻结目录和组件边界 | 本文、后续 `docs/guides/UPDATE_CONTRACT.md` | 无 | 目录、owner、可写区域、原子切换边界评审通过 |
 | ARC-002 | 冻结 manifest 和签名规则 | JSON Schema、valid/invalid fixtures | ARC-001 | fixture 可自动校验；改一字节验签失败 |
 | ARC-003 | 冻结 API、IPC、状态和错误码 | OpenAPI/JSON fixtures、IPC protocol v1 | ARC-001 | launcher/server/web 均以同一 fixture 开发 |
 | ARC-004 | 冻结 schema 兼容和回滚承诺 | migration policy、compatibility table | ARC-001 | 明确 pre/post commit 行为和人工恢复边界 |
@@ -786,7 +786,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 
 ### 17.2 批次 0：契约与许可冻结
 
-- [x] ARC-001：冻结便携安装目录、组件边界、可写目录和原子切换边界。（docs/UPDATE_CONTRACT.md）
+- [x] ARC-001：冻结便携安装目录、组件边界、可写目录和原子切换边界。（docs/guides/UPDATE_CONTRACT.md）
 - [x] ARC-002：完成 Release manifest v1 JSON Schema。（release/contracts/manifest-v1.schema.json）
 - [x] ARC-002：提供合法 manifest、签名和平台 fixture。（fixtures/manifest/valid/ 2 组 + 测试公钥）
 - [x] ARC-002：提供未知 schema、错误平台、降级、危险路径和篡改签名反例 fixture。（invalid/ 24 条，selftest 28/28）
@@ -874,7 +874,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 - [x] REL-002：生成 launcher + signed manifest + offline seeds 的 full ZIP。（71MB，解压复核+SHA256SUMS 全对）
 - [x] REL-003：生成 detached signature 和 `SHA256SUMS`。（dev-ed25519-1，validate-manifest check 验签通过）
 - [x] QA-002：慢流、断流、404、篡改、错误 Range 和并发 repair 不污染 runtime。（45 测试；未采用 Range 断点续传，该反例不适用，其余全覆盖）
-- [x] Windows PATH 清空、断网、无 Node/Rust/adb/ffmpeg 时 full 包首次启动通过。（E2E 场景 A：死代理断网模拟 + PATH=System32，repair→start→/health/ready 200，见 docs/UPDATE_M1_EVIDENCE.md）
+- [x] Windows PATH 清空、断网、无 Node/Rust/adb/ffmpeg 时 full 包首次启动通过。（E2E 场景 A：死代理断网模拟 + PATH=System32，repair→start→/health/ready 200，见 docs/evidence/UPDATE_M1_EVIDENCE.md）
 - [x] 删除 adb.exe、任一 adb DLL 或 ffmpeg.exe 后离线 repair 通过。（E2E 场景 B：删 AdbWinApi.dll → 离线恢复 sha256 与锁一致）
 - [x] 项目真实 H.264 stdin→PNG stdout ffmpeg 命令通过。（fetch-ffmpeg.ps1 冒烟，BUILD-CONFIG 归档）
 - [x] 批次 2 合流门：完成可手工安装的 M1 基线版本和可复现 full ZIP。（首轮 E2E 暴露 3 阻断缺陷已修复复验，full ZIP 从 HEAD 可重建）
@@ -919,13 +919,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 - [x] WEB-006：检测 server/web-dist 版本混包并显示明确警告。
 - [x] QA-004：升级 journal 每个持久化边界的 kill/restart 测试通过。
 - [x] QA-006：run/viewer/cron/install 并发门禁测试通过。
-- [x] 批次 3 合流门：M1 基线能够升级到 M2，并在候选失败时自动恢复旧程序和数据。（docs/UPDATE_M2_EVIDENCE.md：真实 Windows 进程级 E2E 75 PASS/0 FAIL——0.1.0→0.2.0 committed、候选启动失败自动回滚恢复 0.1.0 与升级前快照；复现脚本 `release/packaging/test-upgrade-launcher-e2e.ps1`。边界：单机 Windows 实测非 clean VM；install API 止于 prepare_install，完整接管走 launcher CLI（§E-6 #4））
+- [x] 批次 3 合流门：M1 基线能够升级到 M2，并在候选失败时自动恢复旧程序和数据。（docs/evidence/UPDATE_M2_EVIDENCE.md：真实 Windows 进程级 E2E 75 PASS/0 FAIL——0.1.0→0.2.0 committed、候选启动失败自动回滚恢复 0.1.0 与升级前快照；复现脚本 `release/packaging/test-upgrade-launcher-e2e.ps1`。边界：单机 Windows 实测非 clean VM；install API 止于 prepare_install，完整接管走 launcher CLI（§E-6 #4））
 - 本轮验证：Launcher IPC/升级/快照/候选专项测试 `22+82+20+6 passed`；真实 Windows 重启/PID/DACL/文件占用、Windows clean VM 和真实 Android 设备仍未验收。
 - 本轮验证：Server `cargo test migrations::tests` 为 `11 passed`（含新增 SQLite migration failure boundary），`file_migration::tests` 为 `17 passed`，update `69 passed`；此前全库 `432 passed、0 failed、2 ignored`。
 - 本轮验证：Release 本地 workflow 与 Web 已通过，Web 保持 `564 tests passed`/build 通过；生产签名私钥/key ID/公钥配置、GitHub release 环境审批、GHCR/Docker/buildx attestation 实跑仍阻塞 REL-004/005/006。
 - Release 本地验收已通过：`release/packaging/test-release-workflow.ps1` 与 `release/packaging/test-upgrade-release.ps1` 在 `powershell.exe 5.1` 和 `pwsh` 下均 PASS，相关 AST/Node check 均通过；9 个 PowerShell fixture 已加 UTF-8 BOM，`augment-sbom` 的 `bom-ref` 兼容修复已完成。该结果仍不替代真实 GitHub/GHCR/生产签名环境验收，REL-004/005/006 继续保持 [ ]。
 - 本轮验证：`cargo test api::tests::sec_tests::update -- --nocapture` 为 `6 passed`，覆盖 SYS-004 两项及 SYS-006 的 install 202/后台协调；真实 Docker/GHCR/Windows VM/Android 仍缺。
-- 2026-09-01 收口：批次 3 合流门已按 UPDATE_M2_EVIDENCE 勾选。REL-004/005/006、QA-008 当前精确阻塞：GitHub 侧 release-sign 签名 secrets 与 release environment 评审人未配置、本机 gh 已安装（2.97.0）但无凭据、docker 未登录 ghcr；临时 tag `v0.2.0-rc-drill1` 演练已真实触发 Release workflow（run 33416440024，因当时远端 HEAD 缺少本地已修的校验脚本修复而失败，tag/draft 零残留），详见 docs/UPDATE_EXTERNAL_QA_EVIDENCE.md；check-immutable-release 的 refspec 引号缺陷已修复（`a7e5ef1`），test-release-workflow.ps1 双 PS 版本门禁 PASS。
+- 2026-09-01 收口：批次 3 合流门已按 UPDATE_M2_EVIDENCE 勾选。REL-004/005/006、QA-008 当前精确阻塞：GitHub 侧 release-sign 签名 secrets 与 release environment 评审人未配置、本机 gh 已安装（2.97.0）但无凭据、docker 未登录 ghcr；临时 tag `v0.2.0-rc-drill1` 演练已真实触发 Release workflow（run 33416440024，因当时远端 HEAD 缺少本地已修的校验脚本修复而失败，tag/draft 零残留），详见 docs/evidence/UPDATE_EXTERNAL_QA_EVIDENCE.md；check-immutable-release 的 refspec 引号缺陷已修复（`a7e5ef1`），test-release-workflow.ps1 双 PS 版本门禁 PASS。
 
 ### 17.6 批次 4：热点集成、Docker 与 Launcher 自更新
 
@@ -944,7 +944,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 - 本轮验证：`cargo test upgrade:: --lib` 为 `26 passed`，覆盖 trampoline、最低版本、占用重试、失败保留旧文件；release compose 静态检查及显式 `GAMER_IMAGE` 下 `docker compose -f docker-compose.release.yml config --quiet` 均通过。DKR-003 的 external strategy、`install=false` 及路由/fixture tests 通过。上述不替代真实 Docker/GHCR/Windows VM/Android 验收，外部环境验收仍缺。
 - 本轮验证：唯一集成 Agent 静态确认 `server/src/main.rs` 已修复统一 drain 安装顺序竞态；`/api/shutdown`、Ctrl+C、SIGTERM 共用 `ShutdownCoordinator`，drain 顺序为 `run→viewer→scrcpy/session/adb`。真实 Docker stop/SIGTERM 仍未验收，因此对应 checklist 保持 [ ]。
 - 本轮验证：开发 compose、release compose、USB override、redroid profile 的 `docker compose config --quiet` 全部通过；该证据不替代开发模式、Windows portable 和 Docker 三种运行冒烟，也不代表真实 Docker/GHCR 验收完成。
-- 2026-09-01 收口：DKR-004 真实 Docker 升级/回滚（不健康候选自动回旧 digest、绑定数据保持）、SIGTERM 统一 drain、Docker 浏览器状态页冒烟、三种启动方式冒烟全部完成（docs/UPDATE_DOCKER_E2E_EVIDENCE.md）；容器内 WebRTC/ICE 媒体面未做（USB 真机无法透传容器，未擅自改设备网络配置）。
+- 2026-09-01 收口：DKR-004 真实 Docker 升级/回滚（不健康候选自动回旧 digest、绑定数据保持）、SIGTERM 统一 drain、Docker 浏览器状态页冒烟、三种启动方式冒烟全部完成（docs/evidence/UPDATE_DOCKER_E2E_EVIDENCE.md）；容器内 WebRTC/ICE 媒体面未做（USB 真机无法透传容器，未擅自改设备网络配置）。
 
 ### 17.7 批次 5：RC、故障注入与发布签核
 
@@ -978,7 +978,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 #### 文档与全量门禁
 
 - [x] DOC-001：README 包含完整包安装、依赖修复、升级和回滚入口。（README「Windows x64 完整包」「完整包依赖修复」「升级与回滚入口」）
-- [x] DOC-002：维护者手册包含 draft 发布、密钥轮换和 manual recovery。（`docs/RELEASE.md` §2/§3/§4）
+- [x] DOC-002：维护者手册包含 draft 发布、密钥轮换和 manual recovery。（`docs/guides/RELEASE.md` §2/§3/§4）
 - [x] DOC-003：本轮真实新增坑全部进入 `docs/PITFALLS.md`。（`docs/PITFALLS.md` 2026-08-31 批次 0/1、批次 2/发布链路条目）
 - 本轮验证：QA-003 的 SQLite migration failure boundary 已加入并通过；`cargo test migrations::tests` 为 `11 passed`，`file_migration::tests` 为 `17 passed`。这只是专项测试证据，不代表 QA-005/007/008 或真实发布环境验收完成。
 - 本轮验证：QA-007 子 Agent 已完成本地替代测试但明确未完成全量验收：本地已通过 1 GiB 稀疏 DB preflight、2048 小文件 snapshot/manifest/hash/SQLite inspect（launcher snapshot 9 passed、server maintenance 9 passed）；真实 1GB 复制仍未执行，故第一条保持 [ ]；第二条空间不足拒绝已由定向测试验证并勾选。
@@ -988,7 +988,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/verify-release.ps1
 - [x] Server fmt、clippy `-D warnings`、cargo test 全绿。
 - [x] Web `pnpm test:run` 和 `pnpm build` 全绿。
 - [x] Compose config 和 `tools/verify-release.ps1` 全绿。（compose 5 变体 config 全过；verify-release.ps1 默认模式全 PASS——advisory DB 在线刷新成功、严格 cargo audit 两 lockfile 仅存量豁免 RUSTSEC-2025-0141，无需降级离线模式）
-- 本轮验证：DOC-001/002/003 条目已按 README、`docs/RELEASE.md` 和 `docs/PITFALLS.md` 现有内容核对；该文档证据不代表真实 GitHub/GHCR、生产密钥、Windows 真机或 Android 验收。
+- 本轮验证：DOC-001/002/003 条目已按 README、`docs/guides/RELEASE.md` 和 `docs/PITFALLS.md` 现有内容核对；该文档证据不代表真实 GitHub/GHCR、生产密钥、Windows 真机或 Android 验收。
 - 本轮验证：全量门禁已通过：Launcher fmt、clippy、unit/integration tests；Server fmt、clippy `-D warnings`、cargo test；Web `pnpm test:run`、`pnpm build`。`tools/verify-release.ps1` 返回 0，但 `cargo audit` 实际出现 crates.io 403/yanked 检查错误及 1 条 `unmaintained` warning，依赖审计未完全成功，因此“Compose config 和 tools/verify-release.ps1 全绿”继续保持 [ ]。REL-004/005/006、批次 5 合流门，以及真实 GitHub/GHCR/生产签名、Docker daemon、Windows clean VM、Android 验收项继续保持 [ ]。
 - 2026-09-01 收口（本机可执行项全部完成）：QA-005 长路径/跨盘、QA-007 真实 1 GiB 压力、杀毒占用模拟、强杀恢复、DKR-004 真实回滚、真机升级前后功能与门禁、compose/verify-release 全绿均已实测勾选（证据：UPDATE_WINDOWS_QA_EVIDENCE.md、UPDATE_M2_EVIDENCE.md §E-8、UPDATE_DOCKER_E2E_EVIDENCE.md、UPDATE_REALDEVICE_EVIDENCE.md）。真机轮发现并修复升级阻断缺陷：launcher 对 `/api/shutdown` 的读超时 5s < server 完整 drain 11.6s，handler 被 drop 致升级必取消；修复后活动脚本运行中升级自动继续 committed（24039a1，含 mock 回归测试）。保持未勾项的边界：Windows 10/11 clean VM、真实 Windows 重启/注销、真实杀毒引擎需物理环境；GitHub Release/GHCR/生产签名/QA-008 需仓库 secrets 与凭据（精确阻塞清单见 UPDATE_EXTERNAL_QA_EVIDENCE.md）；§17.8 为发布后观察项。真机轮另记录两个观察项：CLI 接管候选不继承 GAMER_ADMIN_PASSWORD（生产以 config password_hash 认证，不受影响）、cron 冻结窗口在 CLI 手动升级路径以「drain 期拒绝 + 新版补跑」呈现（触发点零丢失），§6.5 的前置策略判断仍以 SYS-005 服务端 auto 策略为准。
 - [ ] 批次 5 合流门：§16 Definition of Done 逐条有证据，发布负责人签核 stable。

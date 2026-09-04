@@ -1,7 +1,7 @@
 # 批次 5 Windows 本机 QA 证据（QA-007 第一条 / 杀毒占用 / 强杀恢复）
 
 > 用途：批次 5 中三项目前未勾选、但本机可实证的 QA 项验收证据
-> （`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §17.7）。
+> （`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §17.7）。
 > 依据：§11.3（快照/恢复硬门禁）、§11.5（杀毒占用、launcher 强杀恢复）、§17.7 checklist。
 > 状态：**已实测（2026-08-31，HEAD `6f7792a` + 本轮未提交 launcher 修复）**。
 > 本轮共发现 **3 个真实缺陷**（升级链路阻断级 2 个 + 回滚阻断级 1 个），已按最小修复原则

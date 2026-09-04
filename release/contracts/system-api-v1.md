@@ -1,8 +1,8 @@
 # System API v1 契约（ARC-003）
 
 > 状态：**冻结**（批次 0 契约；字段、枚举、状态码、错误码只能以版本化契约变更——任何字段/枚举/状态码/语义变更必须 bump 到 `system-api-v2` 并单独提交 fixture，不得口头改字段）。
-> 依据：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.4（Launcher IPC 与 System API）、§6.5（更新策略与门禁）、§6.6（持久化升级状态机）、§6.8（candidate activation gate）、§11.6（API 与前端验收）。
-> 产出位置登记于 `docs/UPDATE_CONTRACT.md` §6 文件地图（`release/contracts/system-api-v1.md`）。
+> 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.4（Launcher IPC 与 System API）、§6.5（更新策略与门禁）、§6.6（持久化升级状态机）、§6.8（candidate activation gate）、§11.6（API 与前端验收）。
+> 产出位置登记于 `docs/guides/UPDATE_CONTRACT.md` §6 文件地图（`release/contracts/system-api-v1.md`）。
 > 配套 fixture：`release/contracts/fixtures/system-api/*.json`（server / launcher / web 三方开发的唯一依据，字段名以 fixture 为准）。
 
 ## 0. 适用端点

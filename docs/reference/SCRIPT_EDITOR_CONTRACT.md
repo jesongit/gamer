@@ -4,7 +4,7 @@
 > 依据：当前服务端严格 loader、编辑器 Model 与 YAML 文档的共同契约。
 > 可执行样例：`server/tests/fixtures/script_v2/`（索引见其 README.md），前端副本
 > `web/src/script-editor/__fixtures__/`（逐字节一致，一致性有测试守护）。
-> 注意：本文档与 `docs/YAML.md` 描述同一套当前 v2 严格语法；不提供旧格式兼容或自动迁移。
+> 注意：本文档与 `docs/reference/YAML.md` 描述同一套当前 v2 严格语法；不提供旧格式兼容或自动迁移。
 
 ## 1. 本文五方
 
@@ -376,7 +376,7 @@ canonical_default（required=1 时为空串）：
 - 服务端断言位于 `server/src/script_v2/fixtures_tests.rs`，直接调用严格 loader，并覆盖仓库
   `server/data/<pkg>/{yaml,func,tmpl}` 示例；前端断言位于
   `web/src/script-editor/__fixtures__/fixtures.test.js`。
-- 修改任何契约必须同步本文档、`docs/YAML.md`、双方 fixture 和双方测试；保存、导入、运行、
+- 修改任何契约必须同步本文档、`docs/reference/YAML.md`、双方 fixture 和双方测试；保存、导入、运行、
   函数测试、任务保存均不得绕过严格 loader。
 
 

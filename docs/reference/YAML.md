@@ -3,7 +3,7 @@
 GameBot 自动化脚本的权威语法文档（2026-08 重写）。本文描述当前唯一受支持的
 YAML v2 严格语法；不提供旧格式兼容或自动迁移。规则来源：
 
-- 契约：`docs/SCRIPT_EDITOR_CONTRACT.md`（与当前实现、fixture 同步）；
+- 契约：`docs/reference/SCRIPT_EDITOR_CONTRACT.md`（与当前实现、fixture 同步）；
 - 可执行样例：`server/tests/fixtures/script_v2/`（本文所有示例与其同形态，装载由
   `server/src/script_v2/`（装载/校验/序列化）+ `server/src/engine/`（执行）保证）；
 - 前端：可视化编辑器（`web/src/script-editor/`）以此为唯一编辑模型，保存时由服务端
@@ -456,7 +456,7 @@ canonical_default: bool→true/false；coord→[x,y]（逗号后无空格）；c
 
 - `code` 命名空间五域：`resource.*`（模板/脚本/函数/分区）、`param.*`（声明/引用/
   args）、`step.*`（字段与候选）、`ref.*`（call/func 引用图）、`runtime.*`
-  （运行期）；完整清单见 `docs/SCRIPT_EDITOR_CONTRACT.md` §5.3；
+  （运行期）；完整清单见 `docs/reference/SCRIPT_EDITOR_CONTRACT.md` §5.3；
 - `step_path` 定位到步骤（如 `steps[1].then[0]`、`params[0]`、`login.steps[2]`），
   前端按 `code + step_path + field` 定位卡片与控件，`message` 仅展示；
 - 保存接口（脚本 / 函数库）带 `expected_version` 版本短码做双页面冲突检测，

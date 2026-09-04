@@ -1,9 +1,9 @@
 # 批次 3（M2 自动升级与回滚）验收证据索引
 
 > 用途：批次 3 合流门「M1 基线能够升级到 M2，并在候选失败时自动恢复旧程序和数据」
-> 的真实 Windows 进程级端到端证据。仿照 `docs/UPDATE_M1_EVIDENCE.md` 结构。
-> 依据：`docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §8.5（批次 3 完成门）、§11.3（数据、停机
-> 和升级硬门禁）、§17.5 checklist；契约以 `docs/UPDATE_CONTRACT.md` 与
+> 的真实 Windows 进程级端到端证据。仿照 `docs/evidence/UPDATE_M1_EVIDENCE.md` 结构。
+> 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §8.5（批次 3 完成门）、§11.3（数据、停机
+> 和升级硬门禁）、§17.5 checklist；契约以 `docs/guides/UPDATE_CONTRACT.md` 与
 > `release/contracts/` 为准。
 > 状态：**已实测（2026-08-31）**——M1(0.1.0) → M2(0.2.0) 真实升级 committed，
 > 候选启动失败自动回滚恢复 0.1.0 + 升级前数据快照，两场景全部 PASS

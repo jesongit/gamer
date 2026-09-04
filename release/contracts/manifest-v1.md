@@ -1,7 +1,7 @@
 # Release Manifest v1 契约（ARC-002）
 
-> 状态：**冻结**（批次 0 契约）。依据 `docs/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.2 / §11.1 与
-> `docs/UPDATE_CONTRACT.md` §6 的产物位置；字段变更必须走 §6 变更规则。
+> 状态：**冻结**（批次 0 契约）。依据 `docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.2 / §11.1 与
+> `docs/guides/UPDATE_CONTRACT.md` §6 的产物位置；字段变更必须走 §6 变更规则。
 > 本文件、`manifest-v1.schema.json` 与 `validate-manifest.mjs` 三者描述同一契约；冲突时以 fixtures + selftest 实际行为为准。
 
 ## 1. 文件清单

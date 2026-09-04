@@ -11,7 +11,7 @@
 #   candidate 阶段失败 → 验证自动回滚：快照恢复 + current.json 切回 0.1.0 + 旧版
 #   重新 ready + 数据完整（升级前写入的设备仍在、候选期间零业务写入）+ journal 失败记录。
 #
-# 与冻结契约的两个边界（详见 docs/UPDATE_M2_EVIDENCE.md）：
+# 与冻结契约的两个边界（详见 docs/evidence/UPDATE_M2_EVIDENCE.md）：
 # - manifest 内 artifact.url 契约强制 https（launcher model 与 JSON Schema 双重门禁），
 #   本机临时 HTTP 服务只承载 manifest 本体（引擎 fetch_remote_manifest 接受 http://
 #   并按 <url>.sig 拉分离签名）；候选 app zip 经 cache/artifacts 种子命中

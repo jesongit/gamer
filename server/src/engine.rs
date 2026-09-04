@@ -1,8 +1,8 @@
 //! YAML 自动化脚本执行引擎（2026-08 阶段 2 后半重写：严格 AST 执行，取代
 //! v1 serde_yaml 动态解析；旧语法在装载层给出结构化诊断，不再兼容）。
 //!
-//! 语法与执行语义的权威定义：docs/SCRIPT_EDITOR_CONTRACT.md +
-//! docs/SCRIPT_EDITOR_REDESIGN_PLAN.md §7/§12.2/§13.3。装载/校验在
+//! 语法与执行语义的权威定义：docs/reference/SCRIPT_EDITOR_CONTRACT.md +
+//! docs/plans/archive/SCRIPT_EDITOR_REDESIGN_PLAN.md §7/§12.2/§13.3。装载/校验在
 //! `crate::script_v2`（parse_script_file / parse_function_file，
 //! `Result<_, Vec<ScriptError>>`）；本模块只做执行与运行编排：
 //!

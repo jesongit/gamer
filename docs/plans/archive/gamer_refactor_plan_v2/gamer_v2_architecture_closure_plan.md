@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-针对 `docs/gamer_refactor_plan_v2/README.md` 中 `8.3` 的已知偏差与待决项进行最终收口。
+针对 `docs/plans/archive/gamer_refactor_plan_v2/README.md` 中 `8.3` 的已知偏差与待决项进行最终收口。
 
 本阶段不继续扩大 V2 重构范围，主要目标是：
 

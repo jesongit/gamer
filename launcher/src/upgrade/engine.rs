@@ -1329,7 +1329,7 @@ impl Engine {
     /// 管理通道鉴权（本机管理凭据与子进程注入值同源）。
     ///
     /// 读超时语义（缺陷 #1，真机验收 2026-08-31，见
-    /// docs/UPDATE_REALDEVICE_EVIDENCE.md §R-7）：server `/api/shutdown` handler
+    /// docs/evidence/UPDATE_REALDEVICE_EVIDENCE.md §R-7）：server `/api/shutdown` handler
     /// **同步 await 完整 drain**（活动 run 10s 宽限 + 拆全部 scrcpy 会话，实测
     /// 11.6s）才回 200。读超时若小于完整 drain 时长，launcher 提前断开 →
     /// hyper 取消 handler future → `ShutdownCoordinator::request()` 在

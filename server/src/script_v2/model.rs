@@ -1,4 +1,4 @@
-//! script_v2 严格 AST（docs/SCRIPT_EDITOR_CONTRACT.md §3 五方对照的 Rust 侧）。
+//! script_v2 严格 AST（docs/reference/SCRIPT_EDITOR_CONTRACT.md §3 五方对照的 Rust 侧）。
 //!
 //! 字段名与 golden JSON（前端 Model / API JSON）对齐：`Cell` 序列化为
 //! `{"lit": …}` / `{"ref": …}`，`Step` 以 `kind` 判别。时间字面量保留书写串

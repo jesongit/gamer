@@ -11,7 +11,7 @@ Docker 实例（`docker-compose.local.yml`，宿主 8444）采用**手机无线�
 | 方案 | 设备可见性 | scrcpy 实时会话（投屏/帧缓存截图/控制） | 手机侧操作 | 结论 |
 |---|---|---|---|---|
 | **共享宿主 adb server**（当前采用） | USB / 无线通吃，零手机操作（容器 adb 客户端复用宿主 server） | **容器内不可用**（reverse 隧道死结，见下节）；adb 层操作（scan/shell/设备管理/screencap 类）全部正常 | 无 | **采用**。adb 可见性即插即用；实时会话暂由宿主实例承担，待源码改造解锁 |
-| 手机无线调试直连（容器内独立 server + 密钥挂载） | 需手机开「无线调试」，端口每次重开变化；熄屏深睡时 mDNS 停止广播（见 [PITFALLS](PITFALLS.md)） | 会话可建立（reverse 隧道在容器 server 与容器客户端间闭环）；**投屏出画已验证**（ICE checking→connected ≈10ms，浏览器解出 1920x1080 零丢帧，2026-08-29） | 需开启无线调试 + 配对 | **当前采用模式**（docker-compose.local.yml 现状） |
+| 手机无线调试直连（容器内独立 server + 密钥挂载） | 需手机开「无线调试」，端口每次重开变化；熄屏深睡时 mDNS 停止广播（见 [PITFALLS](../PITFALLS.md)） | 会话可建立（reverse 隧道在容器 server 与容器客户端间闭环）；**投屏出画已验证**（ICE checking→connected ≈10ms，浏览器解出 1920x1080 零丢帧，2026-08-29） | 需开启无线调试 + 配对 | **当前采用模式**（docker-compose.local.yml 现状） |
 | usbipd-win USB 直通（容器内独立 server） | 容器独占 USB 设备，宿主 adb 失去设备（attach/detach 切换麻烦） | 可用（容器 server 与容器客户端闭环） | 无 | 不推荐：Windows Docker Desktop 需管理员 + 宿主失去设备，与「宿主实例同时在用手机」互斥 |
 
 ## 共享宿主 adb server：原理与操作
@@ -113,7 +113,7 @@ Docker 实例（`docker-compose.local.yml`，宿主 8444）采用**手机无线�
   连接地址需随 `adb devices -l` 的 mDNS 条目或手机屏显更新。
 - **熄屏断连坑**：无线 adb 的重连由手机侧 mDNS 广播驱动，熄屏/深睡时不广播，`adb connect`
   对裸设备名无效——服务端保活只对可寻址的经典网络地址（含 `:`）补连。详见
-  [PITFALLS](PITFALLS.md)「adb server 重启会掉无线调试连接」条目。
+  [PITFALLS](../PITFALLS.md)「adb server 重启会掉无线调试连接」条目。
 - **WebRTC 出画 root cause 链**（投屏黑屏，**已修复并实测出画**，2026-08-29）：
   1. 容器 bridge 网络的 ICE 候选是容器内网 172.x，宿主浏览器不可达 → 信令（WS）通但视频黑屏；
   2. 加 `rtc_external_ip` / `rtc_udp_port` / `rtc_external_port` 配置宣告宿主可达候选

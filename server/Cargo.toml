@@ -67,7 +67,7 @@ wasmtime = { version = "48", optional = true, default-features = false, features
 # 脚本包导出/导入（zip）
 zip = "2"
 
-# script_v2 严格装载：事件级解析携带标量样式与 Span（契约见 docs/SCRIPT_EDITOR_CONTRACT.md）
+# script_v2 严格装载：事件级解析携带标量样式与 Span（契约见 docs/reference/SCRIPT_EDITOR_CONTRACT.md）
 saphyr-parser = "0.0.12"
 
 [dev-dependencies]
