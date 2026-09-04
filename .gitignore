@@ -29,6 +29,7 @@ server/data/*/scripts/
 server/data/*/functions/
 server/data/*/templates/
 server/data/*/keymaps/
+server/data/*/package.toml
 server/data/*/presets/
 server/data/*/resources/
 server/data/app-packages/
