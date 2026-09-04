@@ -326,17 +326,28 @@ export const api = {
   // 当前契约 → {active:true,run:RunRecord} | {active:false}。
   deviceRun: async (id) => requireDeviceRunResponse(await req('GET', `/api/devices/${id}/run`)),
 
-  // 定时任务（阶段 5 参数化）：创建/更新接受 args（稀疏显式覆盖映射，服务端解析为完整
-  // 快照存储并计算 param_signature）；列表响应含 args 视图 / param_signature / param_stale。
-  // PUT/更新签名不匹配且无 reconfirm:true → 409 {code:"param_signature_conflict"}；
-  // 带 reconfirm 则按当前参数声明重算快照
+  // 统一任务 API（P11.1 / ADR-12：Task = 任意 ScheduleProvider + 任意 Runner）。
+  // JSON 形状：runner 嵌套 {runner_id, entrypoint, payload}（payload 为 runner
+  // 私有不透明值，允许保存未知 runner）；schedule = {provider_id, config}
+  // （内置 gamer.cron → provider_id "cron"，config.expression 为 cron 表达式）。
+  // state ∈ active | suspended | cancelled | dependency_missing（依赖缺失任务
+  // 保留，等待恢复）；enable/disable 为显式状态迁移端点。
   listTasks: () => req('GET', '/api/tasks'),
-  // 任务详情（args 解析视图所在端点；列表仅带 param_stale/has_args/param_signature）
+  // 任务详情（与列表同形状；详情与列表无字段差异）
   getTask: (id) => req('GET', `/api/tasks/${id}`),
   saveTask: (t) => req('POST', '/api/tasks', t),
+  updateTask: (id, t) => req('PUT', `/api/tasks/${id}`, t),
   deleteTask: (id) => req('DELETE', `/api/tasks/${id}`),
-  // 任务立即执行（用任务已存参数快照；过期/无快照由服务端明确报错）：202 {run_id}
+  // 任务立即执行：202 {run_id}；设备占用 409 device_busy；运行依赖缺失
+  //（runner/schedule provider/脚本不存在）424 {code:"dependency_unavailable"}，
+  // 任务随之进入 dependency_missing 状态
   runTaskNow: async (id) => requireRunResponse(await req('POST', `/api/tasks/${id}/run`)),
+  // 启用/停用调度：显式状态迁移（enable 重算唤醒游标；disable 挂起并记 "disabled"）
+  enableTask: (id) => req('POST', `/api/tasks/${id}/enable`),
+  disableTask: (id) => req('POST', `/api/tasks/${id}/disable`),
+  // UI 支撑只读端点：已注册 runner / schedule provider（执行器与触发方式下拉）
+  listRunners: () => req('GET', '/api/runners'),
+  listScheduleProviders: () => req('GET', '/api/schedule-providers'),
 
   // ---- App Package（游戏包）与本地编辑区（workspace）----
   // 已装游戏包列表：{packages:[{id,name,active_version(null=无激活),android_packages,versions:[...]}]}

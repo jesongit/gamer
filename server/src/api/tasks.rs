@@ -1,17 +1,11 @@
-//! Scheduled task CRUD and immediate trigger endpoints.
+//! Unified Task API（P11.1 / ADR-12：Task = 任意 ScheduleProvider + 任意 Runner）。
 //!
-//! 阶段 5（plan §12.3 / CONTRACT §4.3–4.5）：任务保存**完整类型化参数快照**
-//! （args_json = 七类 TypedValue 的 JSON 形态对象，与 run API args 同构）+
-//! 保存时脚本的 psig1 签名：
-//! - 创建/更新接受稀疏或全量 `args`，服务端按脚本当前声明解析为完整快照存储；
-//!   缺必填/未知参数 → 400 结构化诊断；
-//! - 不带 `args` 且已存快照签名与脚本当前声明不一致 → 409
-//!   `param_signature_conflict`（`reconfirm:true` 强制重确认：带 args 全量重拍，
-//!   不带 args 存活参数保留原值、新参数取当前默认值）；
-//! - 列表/详情带 `param_stale`（签名过期或脚本无效，前端展示"参数已过期"）；
-//! - 「立即运行」走已存快照（过同一签名门禁，过期明确失败不空跑）。
-
-use std::time::Instant;
+//! 唯一任务资源端点组：`/api/tasks`（原 `/api/user-tasks` 收口升级）。
+//! - `schedule = {provider_id, config}`：调度语义由已注册 ScheduleProvider 解释；
+//!   未注册 provider 保存时放行（未来扩展可先存任务），触发时由 TimerCore 进入
+//!   `dependency_missing` 状态（任务保留，不删除）。
+//! - `runner = {runner_id, entrypoint, payload}`：执行语义由 Runner 解释，
+//!   payload 为 runner 私有不透明值；允许保存未知 runner_id。
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -21,468 +15,42 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::common::{err_response, run_blocking_api, validate_text_field};
-use super::runs::diagnostics_response;
+use super::common::validate_text_field;
 use super::{ApiError, AppState};
-use crate::store::Task;
-use crate::task_params::{self, GateError};
+use crate::core::AppContext;
 use crate::timer_core::{
-    ScheduleExtension, ScheduleRegistry, ScheduleSpec, TaskPreset, TimerRunnerError, TimerTask,
-    TimerTaskState,
+    ScheduleRegistry, Task, TaskPreset, TaskSchedule, TaskState, TimerRunnerError,
 };
-use crate::{core::AppContext, timer_yaml};
 
-#[derive(Debug)]
-enum LegacyRunNowError {
-    ScriptMissing,
-    ScriptInvalid(String),
-    ParamStale(GateError),
-    Start(crate::run_manager::StartError),
+// ---------- JSON DTO（ADR-12 嵌套形状；持久层列保持平铺） ----------
+
+/// API 层的 runner 声明（Rust 模型与 SQLite 列保持 runner_id/entrypoint/payload
+/// 平铺，仅 HTTP JSON 嵌套表达）。
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct RunnerSpecDto {
+    pub(super) runner_id: String,
+    pub(super) entrypoint: String,
+    #[serde(default = "empty_payload")]
+    pub(super) payload: Value,
 }
 
-fn map_legacy_run_now_error(error: TimerRunnerError) -> LegacyRunNowError {
-    match error {
-        TimerRunnerError::DependencyMissing(message) if message == "脚本不存在" => {
-            LegacyRunNowError::ScriptMissing
-        }
-        TimerRunnerError::DependencyMissing(message) => LegacyRunNowError::ScriptInvalid(message),
-        TimerRunnerError::Invalid(message) | TimerRunnerError::Other(message) => {
-            LegacyRunNowError::ScriptInvalid(message)
-        }
-        TimerRunnerError::ParamStale {
-            stored, current, ..
-        } => LegacyRunNowError::ParamStale(GateError::SignatureMismatch { stored, current }),
-        TimerRunnerError::Conflict(record) => {
-            LegacyRunNowError::Start(crate::run_manager::StartError::Conflict(record))
-        }
-        TimerRunnerError::ShuttingDown => {
-            LegacyRunNowError::Start(crate::run_manager::StartError::ShuttingDown)
-        }
-    }
+fn empty_payload() -> Value {
+    Value::Object(serde_json::Map::new())
 }
 
-pub(super) fn validate_task_req(req: &SaveTaskReq) -> Result<(), ApiError> {
-    validate_text_field(&req.name, "任务名称", 255)?;
-    validate_text_field(&req.cron, "cron", 256)?;
-    validate_text_field(&req.script_id, "script_id", 512)?;
-    validate_text_field(&req.device_id, "device_id", 255)?;
-    Ok(())
-}
-
-// ---------- 响应形状 ----------
-
-/// 409 参数签名冲突（保存时不带 reconfirm / 立即运行时门禁未过共用）。
-/// CONTRACT §5.2 错误码表未列 `param_signature_conflict`（契约缺口，按任务
-/// 约定使用 snake_case；`reason`/`expected`/`actual` 供前端区分细分原因）。
-pub(super) fn signature_conflict_response(
-    task_id: &str,
-    script_id: &str,
-    stored: &str,
-    current: &str,
-    message: &str,
-) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(serde_json::json!({
-            "code": task_params::CODE_SIGNATURE_CONFLICT,
-            "reason": task_params::REASON_SIGNATURE_MISMATCH,
-            "message": message,
-            "resource": script_id,
-            "task_id": task_id,
-            "expected": current,
-            "actual": stored,
-        })),
-    )
-        .into_response()
-}
-
-/// GET /api/tasks 列表项与 GET /api/tasks/:id 详情共用的 JSON 形状
-/// （`args` 仅详情返回——列表不带参数值，text 防泄露）。
-fn task_json(t: &Task, next: &str, param_stale: bool, with_args: bool) -> Result<Value, ApiError> {
-    let args = serde_json::from_str::<Value>(&t.args_json)
-        .map_err(|e| ApiError::internal(format!("任务参数快照无效: {e}")))?;
-    if !args.is_object() {
-        return Err(ApiError::internal("任务参数快照必须是 JSON 对象"));
-    }
-    let mut v = serde_json::json!({
-        "id": t.id, "name": t.name, "cron": t.cron, "script_id": t.script_id,
-        "device_id": t.device_id, "enabled": t.enabled, "last_result": t.last_result,
-        "last_run_at": t.last_run_at, "next_run": next,
-        "param_stale": param_stale,
-        "has_args": true,
-        "param_signature": t.param_signature,
-    });
-    if with_args {
-        v["args"] = args;
-    }
-    Ok(v)
-}
-
-/// 逐任务计算 param_stale：脚本缺失/解析失败/签名不一致都算过期
-/// （统一口径：不能按快照安全运行的任务都提示重新确认）。
-fn param_stale_of(scripts: &crate::scripts::ScriptStore, t: &Task) -> bool {
-    match task_params::probe_script_signature(scripts, &t.script_id) {
-        Ok((_, current)) => t.param_signature != current,
-        Err(_) => true,
-    }
-}
-
-/// next_run 序列化：服务端本地墙钟 + 时区偏移（`%:z` → `2026-09-01 10:00:00+08:00`）。
-/// 前端 task-tz.js 靠该偏移推导「服务端时区 UTC+08:00」标签（SYS-001 禁止
-/// /api/system/info 暴露 timezone）；无偏移的旧形态会让标签一直处于兜底态。
-fn format_next_run(next: chrono::DateTime<chrono::Local>) -> String {
-    next.format("%Y-%m-%d %H:%M:%S%:z").to_string()
-}
-
-/// 旧任务 cron 字符串 → Registry 查询下次触发（UTC → 服务端本地时区）。
-/// 解析失败/不再触发返回 None（接口显示 "-"）；cron 语义全部留在已注册的
-/// schedule provider 内，本模块不感知任何具体 schedule 类型。
-fn legacy_next_run(
-    registry: &ScheduleRegistry,
-    cron: &str,
-) -> Option<chrono::DateTime<chrono::Local>> {
-    registry
-        .next_after(&timer_yaml::legacy_schedule_spec(cron), chrono::Utc::now())
-        .ok()
-        .flatten()
-        .map(|next| next.with_timezone(&chrono::Local))
-}
-
-// ---------- 定时任务 ----------
-
-pub(super) async fn api_list_tasks(State(st): State<AppState>) -> Response {
-    let tasks = match st.db.list_tasks_async().await {
-        Ok(tasks) => tasks,
-        Err(err) => return ApiError::internal(err.to_string()).into_response(),
-    };
-    let scripts = st.scripts.clone();
-    let schedules = st.scheduler.schedules();
-    let out = match run_blocking_api(move || {
-        let tasks = tasks
-            .into_iter()
-            .map(|t| {
-                let next = if t.enabled {
-                    legacy_next_run(&schedules, &t.cron)
-                        .map(format_next_run)
-                        .unwrap_or_else(|| "-".into())
-                } else {
-                    "-".into()
-                };
-                let stale = param_stale_of(&scripts, &t);
-                task_json(&t, &next, stale, false)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(tasks)
-    })
-    .await
-    {
-        Ok(out) => out,
-        Err(err) => return err.into_response(),
-    };
-    Json(out).into_response()
-}
-
-/// GET /api/tasks/:id：详情（比列表多 `args` 解析视图——重新确认对话框的
-/// 「任务原快照」来源）。
-pub(super) async fn api_get_task(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    let task = match st.db.get_task_async(&id).await {
-        Ok(task) => task,
-        Err(err) => return ApiError::internal(err.to_string()).into_response(),
-    };
-    let scripts = st.scripts.clone();
-    let schedules = st.scheduler.schedules();
-    match run_blocking_api(move || {
-        let Some(t) = task else {
-            return Err(ApiError::not_found("任务不存在"));
-        };
-        let stale = param_stale_of(&scripts, &t);
-        let next = if t.enabled {
-            legacy_next_run(&schedules, &t.cron)
-                .map(format_next_run)
-                .unwrap_or_else(|| "-".into())
-        } else {
-            "-".into()
-        };
-        task_json(&t, &next, stale, true)
-    })
-    .await
-    {
-        Ok(v) => Json(v).into_response(),
-        Err(err) => err.into_response(),
-    }
-}
-
-#[derive(Deserialize)]
-pub(super) struct SaveTaskReq {
-    pub(super) id: Option<String>,
-    pub(super) name: String,
-    pub(super) cron: String,
-    pub(super) script_id: String,
-    pub(super) device_id: String,
-    pub(super) enabled: Option<bool>,
-    /// 稀疏或全量参数覆盖（键 = 参数名，值按七类解析）。缺省时：已存快照
-    /// 签名一致则原样保留；否则需 `reconfirm:true`（不带 args 的 reconfirm =
-    /// 存活参数保留原值 + 新参数取当前默认值）。
-    #[serde(default)]
-    pub(super) args: Option<serde_json::Map<String, Value>>,
-    /// 重新确认：按脚本当前声明重算签名并更新快照。
-    #[serde(default)]
-    pub(super) reconfirm: bool,
-}
-
-pub(super) async fn api_save_task(
-    State(st): State<AppState>,
-    Json(req): Json<SaveTaskReq>,
-) -> Response {
-    // 校验 cron（5/6/7 字段）：经通用 Registry 交给已注册 provider 解析判定
-    if st
-        .scheduler
-        .schedules()
-        .next_after(
-            &timer_yaml::legacy_schedule_spec(&req.cron),
-            chrono::Utc::now(),
-        )
-        .is_err()
-    {
-        return err_response(StatusCode::BAD_REQUEST, "cron 表达式无效");
-    }
-    if let Err(err) = validate_task_req(&req) {
-        return err.into_response();
-    }
-    let id = req
-        .id
-        .clone()
-        .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
-    let existing = match st.db.get_task_async(&id).await {
-        Ok(existing) => existing,
-        Err(err) => return ApiError::internal(err.to_string()).into_response(),
-    };
-    let scripts = st.scripts.clone();
-    // 快照解析需要分区快照（磁盘 IO + 严格解析），整体放 blocking 池。
-    // inner 返回 Task 或现有的结构化 Response；数据库写入在异步 worker RPC 完成。
-    let result = run_blocking_api(move || Ok(save_task_inner(scripts, id, req, existing))).await;
-    let task = match result {
-        Ok(Ok(task)) => task,
-        Ok(Err(resp)) => return resp,
-        Err(err) => return err.into_response(),
-    };
-    if let Err(err) = st.db.upsert_task_async(&task).await {
-        return ApiError::internal(err.to_string()).into_response();
-    }
-    st.scheduler.notify_tasks_changed();
-    let parsed_args = match serde_json::from_str::<Value>(&task.args_json) {
-        Ok(Value::Object(args)) => Value::Object(args),
-        Ok(_) => return ApiError::internal("任务参数快照必须是 JSON 对象").into_response(),
-        Err(_) => return ApiError::internal("任务参数快照不是合法 JSON").into_response(),
-    };
-    Json(serde_json::json!({
-        "ok": true,
-        "id": task.id,
-        "args": parsed_args,
-        "param_signature": task.param_signature,
-    }))
-    .into_response()
-}
-
-// axum `Response` 体量超过 clippy result_large_err 阈值；错误即响应，箱化不改变语义
-#[allow(clippy::result_large_err)]
-fn save_task_inner(
-    scripts: std::sync::Arc<crate::scripts::ScriptStore>,
-    id: String,
-    req: SaveTaskReq,
-    existing: Option<Task>,
-) -> Result<Task, Response> {
-    use crate::engine::RunTarget;
-    // 脚本当前声明 + psig1 签名（缺失 → 404；解析失败 → 400 结构化诊断）
-    let (decls, current_sig) = match task_params::probe_script_signature(&scripts, &req.script_id) {
-        Ok(v) => v,
-        Err(GateError::ScriptMissing) => {
-            return Err(ApiError::not_found("脚本不存在，无法保存任务参数").into_response());
-        }
-        Err(GateError::ScriptInvalid(diags)) => return Err(diagnostics_response(&diags)),
-        Err(_) => return Err(ApiError::internal("参数探测失败").into_response()),
-    };
-    let target = RunTarget::Script {
-        script_id: req.script_id.clone(),
-        start_index: 0,
-    };
-    // 快照决策（plan §12.3）：显式 args 全量重拍 > 签名一致保留原快照 >
-    // reconfirm 重绑定 > 409 冲突 / 新建取纯默认值
-    let (args_json, signature): (String, String) = match req.args {
-        Some(args) => match crate::engine::resolve_entry_args(&scripts, &target, &args) {
-            Ok(bound) => (bound.resolved.to_string(), bound.param_signature),
-            Err(diags) => return Err(diagnostics_response(&diags)),
-        },
-        None => match existing.as_ref() {
-            Some(prev) if prev.param_signature == current_sig => {
-                // 声明未变：原快照原签名原样保留
-                (prev.args_json.clone(), prev.param_signature.clone())
-            }
-            Some(prev) if req.reconfirm => {
-                // 不带 args 的重新确认：存活参数保留原值、新参数取当前默认值、
-                // 已删参数丢弃；必填缺失仍走 400 结构化诊断
-                match task_params::rebind_snapshot(&decls, &prev.args_json, &req.script_id) {
-                    Ok(bound) => (
-                        task_params::typed_pairs_to_json(bound).to_string(),
-                        current_sig,
-                    ),
-                    Err(diags) => return Err(diagnostics_response(&diags)),
-                }
-            }
-            Some(prev) => {
-                // 签名不一致且未 reconfirm → 409，前端弹重新确认
-                let message = GateError::SignatureMismatch {
-                    stored: prev.param_signature.clone(),
-                    current: current_sig.clone(),
-                }
-                .message();
-                return Err(signature_conflict_response(
-                    &prev.id,
-                    &req.script_id,
-                    &prev.param_signature,
-                    &current_sig,
-                    &message,
-                ));
-            }
-            None => {
-                // 新建不带 args：纯当前默认值打底（必填缺失 → 400 结构化诊断）
-                match crate::engine::resolve_entry_args(&scripts, &target, &serde_json::Map::new())
-                {
-                    Ok(bound) => (bound.resolved.to_string(), bound.param_signature),
-                    Err(diags) => return Err(diagnostics_response(&diags)),
-                }
-            }
-        },
-    };
-    let task = Task {
-        id,
-        name: req.name,
-        cron: req.cron,
-        script_id: req.script_id,
-        device_id: req.device_id,
-        enabled: req
-            .enabled
-            .unwrap_or(existing.as_ref().map(|t| t.enabled).unwrap_or(true)),
-        last_result: existing.as_ref().and_then(|t| t.last_result.clone()),
-        last_run_at: existing.as_ref().and_then(|t| t.last_run_at.clone()),
-        created_at: existing
-            .as_ref()
-            .map(|t| t.created_at.clone())
-            .unwrap_or_else(|| chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
-        args_json,
-        param_signature: signature,
-    };
-    Ok(task)
-}
-
-pub(super) async fn api_delete_task(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
-    match st.db.delete_task_async(&id).await {
-        Ok(_) => {
-            st.scheduler.notify_tasks_changed();
-            Json(serde_json::json!({"ok": true})).into_response()
-        }
-        Err(err) => ApiError::internal(err.to_string()).into_response(),
-    }
-}
-
-/// 立即运行定时任务（RUN-002 契约）：202 {run_id} 提交即返回，不占用 HTTP
-/// 连接等任务完成；设备冲突 409 device_busy；参数门禁未过 409
-/// param_signature_conflict；停机 drain 中 503。
-pub(super) async fn api_run_task_now(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
-    let trigger_started = Instant::now();
-    let tasks = match st.db.list_tasks_async().await {
-        Ok(tasks) => tasks,
-        Err(err) => return ApiError::internal(err.to_string()).into_response(),
-    };
-    let Some(task) = tasks.into_iter().find(|t| t.id == id) else {
-        return ApiError::not_found("任务不存在").into_response();
-    };
-    let timer = match timer_yaml::timer_from_legacy(&task) {
-        Ok(timer) => timer,
-        Err(error) => {
-            return err_response(StatusCode::BAD_REQUEST, &error.to_string());
-        }
-    };
-    match st
-        .scheduler
-        .run_now(&timer)
-        .await
-        .map_err(map_legacy_run_now_error)
-    {
-        Ok(run_id) => {
-            st.metrics
-                .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
-            (
-                StatusCode::ACCEPTED,
-                Json(serde_json::json!({ "run_id": run_id })),
-            )
-                .into_response()
-        }
-        Err(LegacyRunNowError::Start(crate::run_manager::StartError::Conflict(busy))) => {
-            st.metrics
-                .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
-            st.metrics
-                .record_scheduler_event(crate::metrics::SchedulerEvent::Conflict);
-            (StatusCode::CONFLICT, Json(busy.busy_payload())).into_response()
-        }
-        Err(LegacyRunNowError::Start(crate::run_manager::StartError::ShuttingDown)) => {
-            st.metrics
-                .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
-            st.metrics
-                .record_scheduler_event(crate::metrics::SchedulerEvent::Skipped);
-            err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
-        }
-        Err(LegacyRunNowError::ParamStale(err)) => {
-            st.metrics
-                .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
-            st.metrics
-                .record_scheduler_event(crate::metrics::SchedulerEvent::Failed);
-            signature_conflict_response(
-                &task.id,
-                &task.script_id,
-                &task.param_signature,
-                match &err {
-                    GateError::SignatureMismatch { current, .. } => current,
-                    _ => unreachable!("ParamStale only contains signature mismatches"),
-                },
-                &err.message(),
-            )
-        }
-        Err(LegacyRunNowError::ScriptMissing) => {
-            st.metrics
-                .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
-            st.metrics
-                .record_scheduler_event(crate::metrics::SchedulerEvent::Failed);
-            err_response(StatusCode::BAD_REQUEST, "脚本不存在")
-        }
-        Err(LegacyRunNowError::ScriptInvalid(message)) => {
-            st.metrics
-                .record_scheduler_trigger(trigger_started.elapsed().as_millis() as u64);
-            st.metrics
-                .record_scheduler_event(crate::metrics::SchedulerEvent::Failed);
-            err_response(StatusCode::BAD_REQUEST, &format!("脚本解析失败: {message}"))
-        }
-    }
-}
-
-// ---------- 通用 User Task / Task Preset API ----------
-
-/// JSON shape for the timer-owned task. Unlike the legacy `/api/tasks` shape,
-/// this endpoint carries an explicit AppContext and opaque runner payload.
-fn timer_task_json(task: &TimerTask) -> Value {
+/// JSON shape for the timer-owned task. The runner is nested
+/// (`runner: {runner_id, entrypoint, payload}`) and the schedule is
+/// `{provider_id, config}` per ADR-12.
+fn task_json(task: &Task) -> Value {
     serde_json::json!({
         "id": task.id,
         "name": task.name,
         "app": task.app,
-        "runner_id": task.runner_id,
-        "entrypoint": task.entrypoint,
-        "payload": task.payload,
+        "runner": {
+            "runner_id": task.runner_id,
+            "entrypoint": task.entrypoint,
+            "payload": task.payload,
+        },
         "schedule": task.schedule,
         "state": task.state,
         "enabled": task.enabled,
@@ -501,56 +69,77 @@ fn preset_json(preset: &TaskPreset) -> Value {
         "id": preset.id,
         "app_package": preset.app_package,
         "name": preset.name,
-        "runner_id": preset.runner_id,
-        "entrypoint": preset.entrypoint,
-        "payload": preset.payload,
+        "runner": {
+            "runner_id": preset.runner_id,
+            "entrypoint": preset.entrypoint,
+            "payload": preset.payload,
+        },
         "schedule": preset.schedule,
         "created_at": preset.created_at,
     })
 }
 
-#[derive(Debug, Deserialize)]
+// ---------- UI 支撑只读端点 ----------
+
+/// GET /api/runners：已注册 runner id 列表（TaskBoard 执行器下拉数据源）。
+pub(super) async fn api_list_runners(State(st): State<AppState>) -> Response {
+    let ids = st.scheduler.runner_ids();
+    Json(
+        ids.into_iter()
+            .map(|runner_id| serde_json::json!({ "runner_id": runner_id }))
+            .collect::<Vec<_>>(),
+    )
+    .into_response()
+}
+
+/// GET /api/schedule-providers：已注册 schedule provider 列表。
+pub(super) async fn api_list_schedule_providers(State(st): State<AppState>) -> Response {
+    let ids = st.scheduler.schedule_provider_ids();
+    Json(
+        ids.into_iter()
+            .map(|provider_id| serde_json::json!({ "provider_id": provider_id }))
+            .collect::<Vec<_>>(),
+    )
+    .into_response()
+}
+
+// ---------- 定时任务 ----------
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SaveUserTaskReq {
+pub(super) struct SaveTaskReq {
     #[serde(default)]
     pub(super) id: Option<String>,
     pub(super) name: String,
     #[serde(alias = "app_context")]
     pub(super) app: AppContext,
-    pub(super) runner_id: String,
-    pub(super) entrypoint: String,
-    #[serde(default = "empty_payload")]
-    pub(super) payload: Value,
-    pub(super) schedule: ScheduleSpec,
+    pub(super) runner: RunnerSpecDto,
+    pub(super) schedule: TaskSchedule,
     #[serde(default)]
     pub(super) enabled: Option<bool>,
     #[serde(default)]
     pub(super) preset_id: Option<String>,
 }
 
-fn empty_payload() -> Value {
-    Value::Object(serde_json::Map::new())
-}
-
-/// 通用 schedule 校验：已注册 provider 必须接受该 spec（cron 表达式错误在
-/// 保存边界即 400）；未注册 kind 保存时放行，触发时由 TimerCore 明确挂起
-/// （既有语义：未来扩展允许先存任务、后装 provider）。
-fn validate_schedule(registry: &ScheduleRegistry, schedule: &ScheduleSpec) -> Result<(), ApiError> {
+/// 通用 schedule 校验：已注册 provider 必须接受该 config（cron 表达式错误在
+/// 保存边界即 400）；未注册 provider 保存时放行，触发时由 TimerCore 进入
+/// dependency_missing（既有语义：未来扩展允许先存任务、后装 provider）。
+fn validate_schedule(registry: &ScheduleRegistry, schedule: &TaskSchedule) -> Result<(), ApiError> {
     schedule
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     registry.probe(schedule).map_err(ApiError::bad_request)
 }
 
-fn build_user_task(
+pub(super) fn build_task(
     registry: &ScheduleRegistry,
     id: String,
-    req: SaveUserTaskReq,
-    existing: Option<TimerTask>,
-) -> Result<TimerTask, ApiError> {
+    req: SaveTaskReq,
+    existing: Option<Task>,
+) -> Result<Task, ApiError> {
     validate_text_field(&req.name, "任务名称", 255)?;
-    validate_text_field(&req.runner_id, "runner_id", 255)?;
-    validate_text_field(&req.entrypoint, "entrypoint", 1024)?;
+    validate_text_field(&req.runner.runner_id, "runner_id", 255)?;
+    validate_text_field(&req.runner.entrypoint, "entrypoint", 1024)?;
     if let Some(preset_id) = &req.preset_id {
         validate_text_field(preset_id, "preset_id", 255)?;
     }
@@ -559,13 +148,13 @@ fn build_user_task(
         .enabled
         .or_else(|| existing.as_ref().map(|task| task.enabled))
         .unwrap_or(true);
-    let mut task = TimerTask::new(
+    let mut task = Task::new(
         id,
         req.name,
         req.app,
-        req.runner_id,
-        req.entrypoint,
-        req.payload,
+        req.runner.runner_id,
+        req.runner.entrypoint,
+        req.runner.payload,
         req.schedule,
     )
     .map_err(|error| ApiError::bad_request(error.to_string()))?;
@@ -580,35 +169,32 @@ fn build_user_task(
     }
     task.enabled = enabled;
     task.state = if enabled {
-        TimerTaskState::Active
+        TaskState::Active
     } else {
-        TimerTaskState::Suspended
+        TaskState::Suspended
     };
     task.suspend_reason = (!enabled).then(|| "disabled".to_string());
     Ok(task)
 }
 
-pub(super) async fn api_list_user_tasks(State(st): State<AppState>) -> Response {
+pub(super) async fn api_list_tasks(State(st): State<AppState>) -> Response {
     match st.db.list_timer_tasks_async().await {
-        Ok(tasks) => Json(tasks.iter().map(timer_task_json).collect::<Vec<_>>()).into_response(),
+        Ok(tasks) => Json(tasks.iter().map(task_json).collect::<Vec<_>>()).into_response(),
         Err(error) => ApiError::internal(error.to_string()).into_response(),
     }
 }
 
-pub(super) async fn api_get_user_task(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+pub(super) async fn api_get_task(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     match st.db.get_timer_task_async(&id).await {
-        Ok(Some(task)) => Json(timer_task_json(&task)).into_response(),
+        Ok(Some(task)) => Json(task_json(&task)).into_response(),
         Ok(None) => ApiError::not_found("任务不存在").into_response(),
         Err(error) => ApiError::internal(error.to_string()).into_response(),
     }
 }
 
-pub(super) async fn api_save_user_task(
+pub(super) async fn api_save_task(
     State(st): State<AppState>,
-    Json(req): Json<SaveUserTaskReq>,
+    Json(req): Json<SaveTaskReq>,
 ) -> Response {
     let id = req
         .id
@@ -619,7 +205,7 @@ pub(super) async fn api_save_user_task(
         Err(error) => return ApiError::internal(error.to_string()).into_response(),
     };
     let is_new = existing.is_none();
-    let task = match build_user_task(st.scheduler.schedules().as_ref(), id, req, existing) {
+    let task = match build_task(st.scheduler.schedules().as_ref(), id, req, existing) {
         Ok(task) => task,
         Err(error) => return error.into_response(),
     };
@@ -632,22 +218,22 @@ pub(super) async fn api_save_user_task(
     } else {
         StatusCode::OK
     };
-    (status, Json(timer_task_json(&task))).into_response()
+    (status, Json(task_json(&task))).into_response()
 }
 
-pub(super) async fn api_update_user_task(
+pub(super) async fn api_update_task(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Json(mut req): Json<SaveUserTaskReq>,
+    Json(mut req): Json<SaveTaskReq>,
 ) -> Response {
     if req.id.as_deref().is_some_and(|body_id| body_id != id) {
         return ApiError::bad_request("路径任务 id 与请求体 id 不一致").into_response();
     }
     req.id = Some(id);
-    api_save_user_task(State(st), Json(req)).await
+    api_save_task(State(st), Json(req)).await
 }
 
-pub(super) async fn api_delete_user_task(
+pub(super) async fn api_delete_task(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
@@ -668,7 +254,7 @@ pub(super) async fn api_delete_user_task(
     }
 }
 
-pub(super) async fn api_suspend_user_task(
+pub(super) async fn api_suspend_task(
     State(st): State<AppState>,
     Path(id): Path<String>,
     body: axum::body::Bytes,
@@ -691,7 +277,7 @@ pub(super) async fn api_suspend_user_task(
     }
     match st.scheduler.suspend_task(&id, &reason).await {
         Ok(()) => match st.db.get_timer_task_async(&id).await {
-            Ok(Some(task)) => Json(timer_task_json(&task)).into_response(),
+            Ok(Some(task)) => Json(task_json(&task)).into_response(),
             Ok(None) => ApiError::not_found("任务不存在").into_response(),
             Err(error) => ApiError::internal(error.to_string()).into_response(),
         },
@@ -699,13 +285,13 @@ pub(super) async fn api_suspend_user_task(
     }
 }
 
-pub(super) async fn api_resume_user_task(
+pub(super) async fn api_resume_task(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
     match st.scheduler.resume_task(&id).await {
         Ok(()) => match st.db.get_timer_task_async(&id).await {
-            Ok(Some(task)) => Json(timer_task_json(&task)).into_response(),
+            Ok(Some(task)) => Json(task_json(&task)).into_response(),
             Ok(None) => ApiError::not_found("任务不存在").into_response(),
             Err(error) => ApiError::internal(error.to_string()).into_response(),
         },
@@ -716,13 +302,22 @@ pub(super) async fn api_resume_user_task(
     }
 }
 
-pub(super) async fn api_cancel_user_task(
+/// POST /api/tasks/:id/enable：启用调度（= resume：重算唤醒游标、清 reason）。
+pub(super) async fn api_enable_task(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
-    match st.scheduler.cancel_task(&id).await {
+    api_resume_task(State(st), Path(id)).await
+}
+
+/// POST /api/tasks/:id/disable：停用调度（挂起 + "disabled" 原因，任务保留）。
+pub(super) async fn api_disable_task(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match st.scheduler.suspend_task(&id, "disabled").await {
         Ok(()) => match st.db.get_timer_task_async(&id).await {
-            Ok(Some(task)) => Json(timer_task_json(&task)).into_response(),
+            Ok(Some(task)) => Json(task_json(&task)).into_response(),
             Ok(None) => ApiError::not_found("任务不存在").into_response(),
             Err(error) => ApiError::internal(error.to_string()).into_response(),
         },
@@ -730,7 +325,24 @@ pub(super) async fn api_cancel_user_task(
     }
 }
 
-pub(super) async fn api_run_user_task_now(
+pub(super) async fn api_cancel_task(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    match st.scheduler.cancel_task(&id).await {
+        Ok(()) => match st.db.get_timer_task_async(&id).await {
+            Ok(Some(task)) => Json(task_json(&task)).into_response(),
+            Ok(None) => ApiError::not_found("任务不存在").into_response(),
+            Err(error) => ApiError::internal(error.to_string()).into_response(),
+        },
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
+}
+
+/// 立即运行（RUN-002 契约）：202 {run_id} 提交即返回；设备冲突 409 device_busy；
+/// 运行依赖缺失（runner/schedule provider/脚本不存在）424 dependency_unavailable
+/// 且任务进入 dependency_missing 状态；停机 drain 中 503。
+pub(super) async fn api_run_task_now(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
@@ -745,30 +357,32 @@ pub(super) async fn api_run_user_task_now(
             Json(serde_json::json!({ "run_id": run_id })),
         )
             .into_response(),
-        Err(crate::timer_core::TimerRunnerError::Conflict(busy)) => {
+        Err(TimerRunnerError::Conflict(busy)) => {
             (StatusCode::CONFLICT, Json(busy.busy_payload())).into_response()
         }
-        Err(crate::timer_core::TimerRunnerError::ShuttingDown) => {
-            err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
+        Err(TimerRunnerError::ShuttingDown) => {
+            super::common::err_response(StatusCode::SERVICE_UNAVAILABLE, "shutting_down")
         }
-        Err(crate::timer_core::TimerRunnerError::DependencyMissing(message)) => (
+        Err(TimerRunnerError::DependencyMissing(message)) => (
             StatusCode::FAILED_DEPENDENCY,
             Json(serde_json::json!({
                 "code": "dependency_unavailable",
                 "message": message,
                 "task_id": task.id,
                 "runner_id": task.runner_id,
-                "state": "suspended"
+                "state": "dependency_missing"
             })),
         )
             .into_response(),
-        Err(crate::timer_core::TimerRunnerError::Invalid(message))
-        | Err(crate::timer_core::TimerRunnerError::Other(message))
-        | Err(crate::timer_core::TimerRunnerError::ParamStale { message, .. }) => {
+        Err(TimerRunnerError::Invalid(message))
+        | Err(TimerRunnerError::Other(message))
+        | Err(TimerRunnerError::ParamStale(message)) => {
             ApiError::bad_request(message).into_response()
         }
     }
 }
+
+// ---------- Task Preset API ----------
 
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct TaskPresetQuery {
@@ -808,11 +422,8 @@ pub(super) struct SaveTaskPresetReq {
     #[serde(alias = "content_package")]
     pub(super) app_package: String,
     pub(super) name: String,
-    pub(super) runner_id: String,
-    pub(super) entrypoint: String,
-    #[serde(default = "empty_payload")]
-    pub(super) payload: Value,
-    pub(super) schedule: ScheduleSpec,
+    pub(super) runner: RunnerSpecDto,
+    pub(super) schedule: TaskSchedule,
 }
 
 pub(super) async fn api_save_task_preset(
@@ -821,8 +432,8 @@ pub(super) async fn api_save_task_preset(
 ) -> Response {
     if let Err(error) = validate_text_field(&req.app_package, "app_package", 255)
         .and_then(|_| validate_text_field(&req.name, "任务预设名称", 255))
-        .and_then(|_| validate_text_field(&req.runner_id, "runner_id", 255))
-        .and_then(|_| validate_text_field(&req.entrypoint, "entrypoint", 1024))
+        .and_then(|_| validate_text_field(&req.runner.runner_id, "runner_id", 255))
+        .and_then(|_| validate_text_field(&req.runner.entrypoint, "entrypoint", 1024))
     {
         return error.into_response();
     }
@@ -841,9 +452,9 @@ pub(super) async fn api_save_task_preset(
         id,
         app_package: req.app_package,
         name: req.name,
-        runner_id: req.runner_id,
-        entrypoint: req.entrypoint,
-        payload: req.payload,
+        runner_id: req.runner.runner_id,
+        entrypoint: req.runner.entrypoint,
+        payload: req.runner.payload,
         schedule: req.schedule,
         created_at: previous
             .map(|preset| preset.created_at)
@@ -921,7 +532,7 @@ pub(super) async fn api_instantiate_task_preset(
             .into_response();
     }
     let enabled = req.enabled.unwrap_or(true);
-    let mut task = match TimerTask::new(
+    let mut task = match Task::new(
         req.id
             .unwrap_or_else(|| Uuid::new_v4().simple().to_string()),
         req.name.unwrap_or_else(|| preset.name.clone()),
@@ -937,14 +548,14 @@ pub(super) async fn api_instantiate_task_preset(
     task.preset_id = Some(preset.id);
     task.enabled = enabled;
     task.state = if enabled {
-        TimerTaskState::Active
+        TaskState::Active
     } else {
-        TimerTaskState::Suspended
+        TaskState::Suspended
     };
     task.suspend_reason = (!enabled).then(|| "disabled".to_string());
     if let Err(error) = st.db.upsert_timer_task_async(&task).await {
         return ApiError::internal(error.to_string()).into_response();
     }
     st.scheduler.notify_tasks_changed();
-    (StatusCode::CREATED, Json(timer_task_json(&task))).into_response()
+    (StatusCode::CREATED, Json(task_json(&task))).into_response()
 }

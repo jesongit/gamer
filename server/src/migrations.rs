@@ -3,8 +3,9 @@
 //! 与契约逐条对齐的规则：
 //! - `PRAGMA user_version` 是唯一权威版本标记；**不引入** `schema_migrations` 表，
 //!   不用文件名/旁路标记推断版本；
-//! - v1 是历史基线；当前目标为 v2，v1→v2 为 Timer Core 数据迁移，静态
-//!   注册于 [`MIGRATIONS`]，禁止运行期动态拼装；
+//! - v1 是历史基线；当前目标为 v3。v1→v2 为 Timer Core 数据迁移，v2→v3 为
+//!   Task 模型收口（P11.1：删 legacy tasks 表 + schedule JSON 改写为
+//!   provider/config），均静态注册于 [`MIGRATIONS`]，禁止运行期动态拼装；
 //! - `user_version=0`（无版本旧库）在进入本模块前即被 [`crate::store`] 明确拒绝
 //!   ——不存在 migration 0，本框架永不补齐/改写无版本库；
 //! - 每个迁移 v(n-1)→vn 在**单个事务**内完成 DDL + 数据修复 + `user_version`
@@ -21,7 +22,7 @@
 //! 取值变更必须与 release/contracts/schema-policy.md §3 取值表同步提交（§8）。
 //!
 //! 生产路径：[`crate::store`] 的 `apply_schema_migrations` 先跑 [`run_migrations`]
-//! 再做 `validate_schema_v2`。测试可用临时迁移表直接驱动 [`run_migrations`]，
+//! 再做 `validate_schema_v3`。测试可用临时迁移表直接驱动 [`run_migrations`]，
 //! 不触碰对外"无版本库拒绝"行为。
 
 use std::collections::HashSet;
@@ -31,9 +32,9 @@ use rusqlite::{Connection, Transaction};
 /// 本 binary 可打开并继续迁移的最低 user_version（v1 基线；0 永远拒绝）
 pub const MIN_READ_SCHEMA: i64 = 1;
 /// 可打开的最高 user_version；高于此值拒绝启动（schema-policy §3/§4 硬规则）
-pub const MAX_READ_SCHEMA: i64 = 2;
+pub const MAX_READ_SCHEMA: i64 = 3;
 /// 本 binary 迁移完成后的目标 schema 版本
-pub const TARGET_SCHEMA: i64 = 2;
+pub const TARGET_SCHEMA: i64 = 3;
 
 /// 契约 §3 冻结约束 `min_read ≤ target ≤ max_read` 编译期固化：取值漂移在
 /// 编译期即失败，不等运行期诊断
@@ -54,13 +55,22 @@ pub(crate) struct Migration {
     pub apply: MigrationFn,
 }
 
-/// 静态注册表：Timer Core 的首个持久化迁移。
-pub(crate) static MIGRATIONS: &[Migration] = &[Migration {
-    from: 1,
-    to: 2,
-    description: "add generic timer tasks and task presets",
-    apply: crate::store::migrate_v1_to_v2,
-}];
+/// 静态注册表：Timer Core 的首个持久化迁移 + P11.1 Task 模型收口。
+pub(crate) static MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: 1,
+        to: 2,
+        description: "add generic timer tasks and task presets",
+        apply: crate::store::migrate_v1_to_v2,
+    },
+    Migration {
+        from: 2,
+        to: 3,
+        description:
+            "unify task model: drop legacy tasks table, rewrite schedule to provider/config",
+        apply: crate::store::migrate_v2_to_v3,
+    },
+];
 
 /// 把 `current` 逐级迁移到目标版本。目标 = `migrations` 注册表覆盖到的最高
 /// 版本（生产路径注册表为空 → 即 [`TARGET_SCHEMA`]）；测试注入临时
@@ -370,7 +380,7 @@ mod tests {
 
     #[test]
     fn too_new_database_is_rejected_with_actual_version_and_range() {
-        for too_new in [3i64, 5, 99] {
+        for too_new in [4i64, 5, 99] {
             let mut conn = versioned_memory_db(too_new);
             let err = run_migrations(&mut conn, too_new, MIGRATIONS).unwrap_err();
             let msg = err.to_string();

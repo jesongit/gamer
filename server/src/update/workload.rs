@@ -105,9 +105,11 @@ impl WorkloadSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::AppContext;
     use crate::core::{ActivityLease, RunContext, RunRequest};
     use crate::run_manager::{RunExecutor, RunSource, RunState, StartRequest};
-    use crate::store::{Db, Store, Task};
+    use crate::store::{Db, Store};
+    use crate::timer_core::{Task, TaskSchedule};
     use crate::update::service::UpdateTxn;
     use futures_util::future::BoxFuture;
     use parking_lot::Mutex;
@@ -253,29 +255,26 @@ mod tests {
         let runs = Arc::new(RunManager::new(Arc::new(HangingExecutor)));
         let scheduler = Arc::new(Scheduler::new(db.clone(), scripts, runs.clone()));
 
-        let now = chrono::Local::now();
-        let enabled = Task {
-            id: "enabled".into(),
-            name: "Enabled cron".into(),
-            cron: "*/5 * * * *".into(),
-            script_id: "pkg/script.yaml".into(),
-            device_id: "device-1".into(),
-            enabled: true,
-            last_result: None,
-            last_run_at: None,
-            created_at: now.to_rfc3339(),
-            args_json: "{}".into(),
-            param_signature: "psig1|".into(),
-        };
-        let disabled = Task {
-            id: "disabled".into(),
-            name: "Disabled invalid cron".into(),
-            cron: "not-a-cron".into(),
-            enabled: false,
-            ..enabled.clone()
-        };
-        db.upsert_task(&enabled).unwrap();
-        db.upsert_task(&disabled).unwrap();
+        let app = AppContext::from_legacy_package("device-1", "pkg").unwrap();
+        let schedule =
+            TaskSchedule::new("cron", serde_json::json!({"expression": "*/5 * * * *"})).unwrap();
+        let enabled = Task::new(
+            "enabled",
+            "Enabled cron",
+            app.clone(),
+            "gamer.yaml",
+            "pkg/script.yaml",
+            serde_json::json!({}),
+            schedule,
+        )
+        .unwrap();
+        let mut disabled = enabled.clone();
+        disabled.id = "disabled".into();
+        disabled.enabled = false;
+        disabled.state = crate::timer_core::TaskState::Suspended;
+        disabled.suspend_reason = Some("disabled".into());
+        db.upsert_timer_task(&enabled).unwrap();
+        db.upsert_timer_task(&disabled).unwrap();
         // next_wakeup_in_secs 读 TimerCore 持久化唤醒游标（与调度循环睡眠同源，
         // 生产中保存任务后 notify 会立即驱动 run loop 补上）；测试无 loop，直接
         // 模拟"游标已计算"的状态：enabled 任务 60s 后触发。
@@ -286,7 +285,6 @@ mod tests {
         .await
         .unwrap();
 
-        let app = crate::core::AppContext::from_legacy_package("device-1", "pkg").unwrap();
         let request = RunRequest::for_app(
             app,
             "test.runner",
@@ -300,7 +298,7 @@ mod tests {
                     request,
                     source: RunSource::Scheduled,
                     task_id: Some("enabled".into()),
-                    scheduled_at: Some(now.timestamp()),
+                    scheduled_at: Some(chrono::Utc::now().timestamp()),
                     realtime_logs: false,
                 },
                 None,

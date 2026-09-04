@@ -12,13 +12,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::config::Config;
+use crate::core::AppContext;
 use crate::cron_extension;
 use crate::keymaps::{parse_keymap_content, serialize_keymap};
 use crate::matcher::{match_template, template_region_from_name, MatchRequest};
 use crate::script_v2::{parse_script_file, serialize_script, InMemoryResources};
-use crate::store::{Store, Task};
-use crate::timer_core::{ScheduleExtension, ScheduleRegistry};
-use crate::timer_yaml;
+use crate::store::Store;
+use crate::timer_core::{ScheduleExtension, ScheduleRegistry, Task, TaskSchedule};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures")
@@ -187,49 +187,48 @@ fn phase0_scheduler_and_task_fixture_are_compatible() {
     let task: Value = serde_json::from_slice(&read_fixture("tasks/phase0_daily.json"))
         .expect("任务 fixture 必须是合法 JSON");
     assert_eq!(task["enabled"], true);
-    assert_eq!(task["args"], serde_json::json!({}));
-    // fixture cron 合法性经通用 Registry 判定（已注册 provider 必须能解析）
+    assert_eq!(task["runner"]["payload"]["args"], serde_json::json!({}));
+    // fixture schedule 合法性经通用 Registry 判定（已注册 provider 必须能解析）
     let registry = ScheduleRegistry::new();
     cron_extension::register_builtin(&registry).expect("内置 Cron provider 必须可注册");
-    let probe = |expression: &str| {
-        registry.next_after(
-            &timer_yaml::legacy_schedule_spec(expression),
-            chrono::Utc::now(),
-        )
-    };
-    assert!(probe(task["cron"].as_str().unwrap()).is_ok());
-    assert!(probe("not a cron").is_err());
-    assert_eq!(
-        cron_extension::normalize_cron("*/15 * * * *"),
-        "0 */15 * * * * *"
-    );
+    let schedule = TaskSchedule::new(
+        task["schedule"]["provider_id"].as_str().unwrap(),
+        task["schedule"]["config"].clone(),
+    )
+    .expect("fixture schedule 必须可构造");
+    assert!(registry.next_after(&schedule, chrono::Utc::now()).is_ok());
 }
 
 #[test]
 fn phase0_task_and_logs_survive_store_reopen() {
-    let directory = tempfile::tempdir().expect("创建临时数据目录失败");
+    let directory = tempfile::tempdir().expect("创建 Phase 0 临时数据目录失败");
     let config = Config {
         data_dir: directory.path().to_path_buf(),
         ..Config::default()
     };
-    let task_fixture: Value =
-        serde_json::from_slice(&read_fixture("tasks/phase0_daily.json")).unwrap();
-    let task = Task {
-        id: task_fixture["id"].as_str().unwrap().to_string(),
-        name: task_fixture["name"].as_str().unwrap().to_string(),
-        cron: task_fixture["cron"].as_str().unwrap().to_string(),
-        script_id: task_fixture["script_id"].as_str().unwrap().to_string(),
-        device_id: task_fixture["device_id"].as_str().unwrap().to_string(),
-        enabled: task_fixture["enabled"].as_bool().unwrap(),
-        last_result: None,
-        last_run_at: None,
-        created_at: "2026-09-03T00:00:00Z".to_string(),
-        args_json: "{}".to_string(),
-        param_signature: "psig1|".to_string(),
-    };
+    let fixture: Value = serde_json::from_slice(&read_fixture("tasks/phase0_daily.json")).unwrap();
+    let schedule = TaskSchedule::new(
+        fixture["schedule"]["provider_id"].as_str().unwrap(),
+        fixture["schedule"]["config"].clone(),
+    )
+    .unwrap();
+    let task = Task::new(
+        fixture["id"].as_str().unwrap(),
+        fixture["name"].as_str().unwrap(),
+        AppContext::from_legacy_package(
+            fixture["app"]["device_id"].as_str().unwrap(),
+            fixture["app"]["android_package"].as_str().unwrap(),
+        )
+        .unwrap(),
+        fixture["runner"]["runner_id"].as_str().unwrap(),
+        fixture["runner"]["entrypoint"].as_str().unwrap(),
+        fixture["runner"]["payload"].clone(),
+        schedule,
+    )
+    .unwrap();
     {
         let store = Store::open(&config).expect("打开 Phase 0 临时数据库失败");
-        store.upsert_task(&task).expect("写入任务失败");
+        store.upsert_timer_task(&task).expect("写入任务失败");
         store
             .add_log(
                 "fixture-device",
@@ -241,10 +240,11 @@ fn phase0_task_and_logs_survive_store_reopen() {
     }
     {
         let reopened = Store::open(&config).expect("重启后重新打开数据库失败");
-        let tasks = reopened.list_tasks().expect("读取任务失败");
+        let tasks = reopened.list_timer_tasks().expect("读取任务失败");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, task.id);
-        assert_eq!(tasks[0].args_json, "{}");
+        assert_eq!(tasks[0].entrypoint, task.entrypoint);
+        assert_eq!(tasks[0].schedule.provider_id, "cron");
         let logs = reopened.list_logs(None, None, 10).expect("读取日志失败");
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].msg, "phase0 smoke");

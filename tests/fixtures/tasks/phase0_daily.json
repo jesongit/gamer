@@ -1,9 +1,23 @@
 {
   "id": "phase0-daily",
   "name": "Phase 0 daily smoke",
-  "cron": "0 */15 * * * * *",
-  "script_id": "phase0_smoke.yaml",
-  "device_id": "fixture-device",
-  "enabled": true,
-  "args": {}
+  "app": {
+    "device_id": "fixture-device",
+    "android_package": "phase0_smoke",
+    "content_package": "phase0_smoke"
+  },
+  "runner": {
+    "runner_id": "gamer.yaml",
+    "entrypoint": "phase0_smoke.yaml",
+    "payload": {
+      "args": {}
+    }
+  },
+  "schedule": {
+    "provider_id": "cron",
+    "config": {
+      "expression": "0 */15 * * * * *"
+    }
+  },
+  "enabled": true
 }
