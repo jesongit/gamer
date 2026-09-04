@@ -143,7 +143,7 @@ mod update_flow_tests {
         let started = Arc::new(AtomicUsize::new(0));
         let executor = Arc::new(BlockingExec { started });
         let runs = Arc::new(crate::run_manager::RunManager::new(executor));
-        let scheduler = Arc::new(Scheduler::new(db.clone(), scripts.clone(), runs.clone()));
+        let scheduler = Arc::new(Scheduler::new(db.clone()));
         let auth = Arc::new(auth::AuthState::new(
             test_credential("admin123"),
             Default::default(),

@@ -1612,4 +1612,149 @@ runtime = "^1.0"
             .await
             .is_err());
     }
+
+    /// 生命周期执行器桩：本测试只验证 runner 注册/注销与任务挂起/恢复，
+    /// 永不真正提交运行（run loop 未启动）。
+    struct UnreachableExecutor;
+
+    impl crate::run_manager::RunExecutor for UnreachableExecutor {
+        fn prepare<'a>(
+            &'a self,
+            _context: &'a crate::core::RunContext,
+            _request: &'a crate::core::RunRequest,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<()>> {
+            unreachable!("生命周期测试不应触发真实运行")
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _context: &'a crate::core::RunContext,
+            _request: &'a crate::core::RunRequest,
+            _realtime_logs: bool,
+            _stop: Arc<AtomicBool>,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
+            unreachable!("生命周期测试不应触发真实运行")
+        }
+
+        fn acquire(
+            &self,
+            _context: &crate::core::RunContext,
+        ) -> anyhow::Result<Box<dyn crate::core::ActivityLease>> {
+            unreachable!("生命周期测试不应触发真实运行")
+        }
+    }
+
+    /// P11.2 生命周期集成（ADR-13 验收，真实 wasm guest fixture 链路）：
+    /// 裸 Core 无 runner → 安装 fixture 包 → enable（不注册）→ start gamer.yaml
+    /// → runner 注册且 owner=扩展 id → 建 Task → stop：任务进 dependency_missing
+    /// 且数据保留 → 再 start：任务自动回 Active 且 next_wakeup 经 cron 重算。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_extension_lifecycle_binds_and_resumes_the_timer_runner() {
+        let data = tempfile::tempdir().expect("无法创建生命周期测试临时目录");
+        let cfg = crate::config::Config {
+            data_dir: data.path().to_path_buf(),
+            ..Default::default()
+        };
+        let db: crate::store::Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
+        let scripts = Arc::new(crate::scripts::ScriptStore::open(&cfg).unwrap());
+        let runs = Arc::new(crate::run_manager::RunManager::new(Arc::new(
+            UnreachableExecutor,
+        )));
+        let scheduler = Arc::new(crate::scheduler::Scheduler::new(db.clone()));
+        assert!(
+            scheduler.runners().is_empty(),
+            "裸 Core：扩展 start 之前没有任何 runner"
+        );
+
+        let registrar = Arc::new(crate::timer_yaml::YamlTimerRunnerRegistrar::new(
+            scheduler.clone(),
+            db.clone(),
+            runs.clone(),
+            scripts.clone(),
+        ));
+        let service = crate::extensions::ExtensionService::for_data_root(
+            data.path(),
+            CapabilityRegistry::default(),
+        )
+        .with_runner_registrar(registrar);
+
+        let mut archive = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
+            let options = SimpleFileOptions::default();
+            writer.start_file("manifest.toml", options).unwrap();
+            writer
+                .write_all(YAML_EXTENSION_MANIFEST_TOML.as_bytes())
+                .unwrap();
+            writer.start_file("plugin.wasm", options).unwrap();
+            writer.write_all(&fixture_component()).unwrap();
+            writer.finish().unwrap();
+        }
+        service.install(&archive).await.unwrap();
+        let id = crate::extensions::ExtensionId::parse(YAML_EXTENSION_ID).unwrap();
+        service.enable(&id).await.unwrap();
+        // enable 不注册 runner：Running 才是生命周期边界
+        assert!(scheduler.runners().is_empty(), "enable 不应注册 runner");
+        service.start(&id).await.unwrap();
+
+        let runners = scheduler.runners();
+        assert_eq!(runners.len(), 1);
+        assert_eq!(runners[0].runner_id, "gamer.yaml");
+        assert_eq!(runners[0].owner_extension_id, "gamer.yaml");
+
+        // 建 Task：Active + 未来唤醒游标 + 用户数据
+        let schedule = crate::timer_core::TaskSchedule::new(
+            "cron",
+            serde_json::json!({"expression": "0 8 * * *"}),
+        )
+        .unwrap();
+        let mut task = crate::timer_core::Task::new(
+            "task-lifecycle",
+            "Lifecycle",
+            AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+            "gamer.yaml",
+            "com.example.game/daily.yaml",
+            serde_json::json!({"args": {"lives": 3}}),
+            schedule,
+        )
+        .unwrap();
+        task.next_wakeup = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        db.upsert_timer_task_async(&task).await.unwrap();
+
+        // stop：runner 注销，Active 任务显式挂起，数据原样保留
+        service.stop(&id).await.unwrap();
+        assert!(scheduler.runners().is_empty(), "stop 后 runner 消失");
+        let suspended = db
+            .get_timer_task_async("task-lifecycle")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            suspended.state,
+            crate::timer_core::TaskState::DependencyMissing
+        );
+        assert_eq!(
+            suspended.suspend_reason.as_deref(),
+            Some("missing_dependency=gamer.yaml")
+        );
+        assert!(suspended.enabled, "enabled 用户原意保留");
+        assert_eq!(suspended.entrypoint, "com.example.game/daily.yaml");
+        assert_eq!(suspended.payload["args"]["lives"], 3, "payload 原样保留");
+        assert!(suspended.next_wakeup.is_none(), "挂起即清唤醒游标");
+
+        // 再 start：runner 重注册，任务自动回 Active，唤醒游标经 cron 重算
+        service.start(&id).await.unwrap();
+        let resumed = db
+            .get_timer_task_async("task-lifecycle")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.state, crate::timer_core::TaskState::Active);
+        assert!(resumed.suspend_reason.is_none());
+        let next = resumed.next_wakeup.expect("恢复必须重算唤醒游标");
+        assert!(
+            next > chrono::Utc::now(),
+            "重算后的游标是下一次 cron 触发（未来时刻），不是陈旧值"
+        );
+    }
 }

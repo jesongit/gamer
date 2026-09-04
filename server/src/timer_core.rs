@@ -3,8 +3,10 @@
 //! This module owns the timer lifecycle and persistence boundary.  A schedule
 //! is an opaque extension value and a runner is an injected implementation;
 //! consequently the core does not parse cron, load YAML, or resolve app
-//! resources.  The current YAML/cron path lives in `timer_yaml` and is kept as
-//! an adapter for the existing HTTP API.
+//! resources.  Runners arrive through [`TimerRunnerRegistry`] with an owner
+//! extension id (ADR-13) and leave when their owner's lifecycle says so; the
+//! legacy YAML adapter (`timer_yaml`) is just one owner-side registrar away
+//! from the extension lifecycle.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -474,11 +476,31 @@ pub trait TimerRunner: Send + Sync {
     async fn cancel(&self, run_id: &str) -> Result<(), TimerRunnerError>;
 }
 
+/// A runner registration entry (ADR-13): every runner is owned by the
+/// extension that registered it, so the owner's lifecycle transitions can
+/// unregister it again. Tasks survive an unregistration; the runner does not.
+#[derive(Clone)]
+pub struct RegisteredRunner {
+    pub runner_id: String,
+    pub owner_extension_id: String,
+    pub runner: Arc<dyn TimerRunner>,
+}
+
+impl std::fmt::Debug for RegisteredRunner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisteredRunner")
+            .field("runner_id", &self.runner_id)
+            .field("owner_extension_id", &self.owner_extension_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// In-process runner registry used by Timer Core. It is the extension-facing
-/// registration point: adding a runner does not change scheduling or task
-/// persistence, and a missing id is reported when the task is triggered.
+/// registration point (ADR-13): registrations carry an owner extension id,
+/// lifecycle transitions unregister by owner, and a missing id is reported
+/// when the task is triggered (`DependencyMissing`), never at save time.
 pub struct TimerRunnerRegistry {
-    runners: std::sync::RwLock<HashMap<String, Arc<dyn TimerRunner>>>,
+    runners: std::sync::RwLock<HashMap<String, RegisteredRunner>>,
 }
 
 impl Default for TimerRunnerRegistry {
@@ -494,19 +516,77 @@ impl TimerRunnerRegistry {
         }
     }
 
-    pub fn register(&self, runner: Arc<dyn TimerRunner>) -> anyhow::Result<()> {
-        let runner_id = runner.runner_id().trim();
-        anyhow::ensure!(!runner_id.is_empty(), "runner id must not be empty");
+    /// Register a runner on behalf of `owner_extension_id`. Re-registering the
+    /// same id from the same owner replaces in place (unclean restart seam);
+    /// a different owner claiming a taken id is rejected.
+    pub fn register_runner(
+        &self,
+        runner_id: impl Into<String>,
+        owner_extension_id: impl Into<String>,
+        runner: Arc<dyn TimerRunner>,
+    ) -> anyhow::Result<()> {
+        let runner_id = runner_id.into();
+        let owner_extension_id = owner_extension_id.into();
+        anyhow::ensure!(!runner_id.trim().is_empty(), "runner id must not be empty");
+        anyhow::ensure!(
+            !owner_extension_id.trim().is_empty(),
+            "runner owner extension id must not be empty"
+        );
         let mut runners = self
             .runners
             .write()
             .expect("timer runner registry poisoned");
-        anyhow::ensure!(
-            !runners.contains_key(runner_id),
-            "runner already registered: {runner_id}"
+        if let Some(existing) = runners.get(&runner_id) {
+            anyhow::ensure!(
+                existing.owner_extension_id == owner_extension_id,
+                "runner already registered by another extension: {} (owner {})",
+                runner_id,
+                existing.owner_extension_id
+            );
+        }
+        runners.insert(
+            runner_id.clone(),
+            RegisteredRunner {
+                runner_id,
+                owner_extension_id,
+                runner,
+            },
         );
-        runners.insert(runner_id.to_string(), runner);
         Ok(())
+    }
+
+    /// Remove a single runner registration. Errors when the id is unknown so
+    /// lifecycle callers notice double-unregister mistakes.
+    #[allow(
+        dead_code,
+        reason = "ADR-13 registry contract (§7.3): kept next to unregister_owner for single-runner lifecycle consumers; exercised by unit tests"
+    )]
+    pub fn unregister_runner(&self, runner_id: &str) -> anyhow::Result<()> {
+        let removed = self
+            .runners
+            .write()
+            .expect("timer runner registry poisoned")
+            .remove(runner_id);
+        anyhow::ensure!(removed.is_some(), "runner not registered: {runner_id}");
+        Ok(())
+    }
+
+    /// Remove every runner owned by `extension_id`; returns the removed runner
+    /// ids sorted. Idempotent: an owner without runners yields an empty list.
+    pub fn unregister_owner(&self, extension_id: &str) -> Vec<String> {
+        let mut runners = self
+            .runners
+            .write()
+            .expect("timer runner registry poisoned");
+        let owned = runners
+            .values()
+            .filter(|entry| entry.owner_extension_id == extension_id)
+            .map(|entry| entry.runner_id.clone())
+            .collect::<Vec<_>>();
+        for runner_id in &owned {
+            runners.remove(runner_id);
+        }
+        owned
     }
 
     pub fn contains(&self, runner_id: &str) -> bool {
@@ -516,17 +596,32 @@ impl TimerRunnerRegistry {
             .contains_key(runner_id)
     }
 
-    /// Registered runner ids, sorted for stable UI output (`GET /api/runners`).
-    pub fn list_runners(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self
+    /// Registration entry lookup including the owner, for boundary callers
+    /// that must display or audit who registered a runner.
+    #[allow(
+        dead_code,
+        reason = "ADR-13 registry contract (§7.3) owner lookup; exercised by unit tests until a boundary caller needs it"
+    )]
+    pub fn get_runner(&self, runner_id: &str) -> Option<RegisteredRunner> {
+        self.runners
+            .read()
+            .expect("timer runner registry poisoned")
+            .get(runner_id)
+            .cloned()
+    }
+
+    /// Registered runners with their owners, sorted by runner id for stable UI
+    /// output (`GET /api/runners`).
+    pub fn list_runners(&self) -> Vec<RegisteredRunner> {
+        let mut entries: Vec<RegisteredRunner> = self
             .runners
             .read()
             .expect("timer runner registry poisoned")
-            .keys()
+            .values()
             .cloned()
             .collect();
-        ids.sort();
-        ids
+        entries.sort_by(|left, right| left.runner_id.cmp(&right.runner_id));
+        entries
     }
 
     fn get(&self, runner_id: &str) -> Option<Arc<dyn TimerRunner>> {
@@ -534,7 +629,7 @@ impl TimerRunnerRegistry {
             .read()
             .expect("timer runner registry poisoned")
             .get(runner_id)
-            .cloned()
+            .map(|entry| entry.runner.clone())
     }
 }
 
@@ -572,7 +667,7 @@ impl TimerRunner for TimerRunnerRegistry {
             .read()
             .expect("timer runner registry poisoned")
             .values()
-            .cloned()
+            .map(|entry| entry.runner.clone())
             .collect::<Vec<_>>();
         let mut last_error = None;
         for runner in runners {
@@ -585,17 +680,6 @@ impl TimerRunner for TimerRunnerRegistry {
             TimerRunnerError::DependencyMissing(format!("runner unavailable for run: {run_id}"))
         }))
     }
-}
-
-/// Compatibility construction seam used by the existing three-argument
-/// `Scheduler::new(db, adapter, runs)` calls.  The scheduler only sees this
-/// generic factory, while the YAML adapter owns the legacy ScriptStore.
-pub trait TimerRunnerFactory: Send + 'static {
-    fn into_timer_runner(
-        self,
-        db: Db,
-        runs: Arc<crate::run_manager::RunManager>,
-    ) -> Arc<dyn TimerRunner>;
 }
 
 /// Timer Core service.  All state transitions are persisted before the next
@@ -1193,6 +1277,67 @@ impl TimerCore {
         Ok(matching.len())
     }
 
+    /// ADR-13 runner lifecycle: the owner extension went away, so its runner
+    /// disappeared.  Every still-Active task bound to `runner_id` enters
+    /// `DependencyMissing` (user `enabled` intent preserved, wakeup cursor
+    /// cleared, reason `missing_dependency=<runner_id>`).  Tasks in any other
+    /// state — manually suspended/disabled, cancelled, already missing — are
+    /// left untouched, and the task rows are never deleted.
+    pub async fn suspend_tasks_missing_runner(&self, runner_id: &str) -> anyhow::Result<usize> {
+        let suspended = self
+            .db
+            .suspend_active_timer_tasks_for_runner_async(runner_id)
+            .await?;
+        self.notify_changed();
+        Ok(suspended)
+    }
+
+    /// ADR-13 runner lifecycle: `runner_id` came back, so tasks that were
+    /// suspended *because this runner was missing* (and only those — the
+    /// store query matches the exact reason) return to `Active`.  The wakeup
+    /// cursor is recomputed through the schedule extension so a task does not
+    /// fire stale occurrences the moment its runner reappears.  Tasks whose
+    /// schedule is currently rejected keep their suspended state and will be
+    /// handled by the run loop / next registration.
+    pub async fn resume_tasks_missing_runner(
+        &self,
+        runner_id: &str,
+        schedules: &dyn ScheduleExtension,
+    ) -> anyhow::Result<usize> {
+        let tasks = self
+            .db
+            .list_timer_tasks_missing_runner_async(runner_id)
+            .await?;
+        let mut resumed = 0;
+        for task in tasks {
+            let next = match schedules.next_after(&task.schedule, self.clock.now()) {
+                Ok(next) => next,
+                Err(error) => {
+                    tracing::warn!(
+                        task = %task.id,
+                        runner = %runner_id,
+                        %error,
+                        "runner re-registered but schedule rejected task; task stays suspended"
+                    );
+                    continue;
+                }
+            };
+            if self
+                .db
+                .resume_timer_task_from_dependency_missing_async(
+                    &task.id,
+                    runner_id,
+                    next.map(|value| value.timestamp()),
+                )
+                .await?
+            {
+                resumed += 1;
+            }
+        }
+        self.notify_changed();
+        Ok(resumed)
+    }
+
     /// Next pending wakeup across schedulable tasks, read from the persisted
     /// per-task cursors that [`TimerCore::run_loop`] maintains.  Callers see
     /// exactly when the timer will next act because the loop sleeps on the
@@ -1611,10 +1756,18 @@ mod tests {
             submit_error: None,
         });
         let registry = Arc::new(TimerRunnerRegistry::new());
-        registry.register(first).unwrap();
-        registry.register(second.clone()).unwrap();
+        registry
+            .register_runner("fake.runner", "ext.a", first)
+            .unwrap();
+        registry
+            .register_runner("second.runner", "ext.b", second.clone())
+            .unwrap();
         assert_eq!(
-            registry.list_runners(),
+            registry
+                .list_runners()
+                .into_iter()
+                .map(|entry| entry.runner_id)
+                .collect::<Vec<_>>(),
             vec!["fake.runner".to_string(), "second.runner".to_string()]
         );
         TimerCore::new(db.clone())
@@ -1622,6 +1775,200 @@ mod tests {
             .await;
         assert_eq!(second.submissions.load(Ordering::SeqCst), 1);
         assert_eq!(db.scheduled_run_state("task-1", 9), "running");
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn runner_registrations_carry_an_owner_and_owner_unregister_is_idempotent() {
+        let registry = TimerRunnerRegistry::new();
+        let runner: Arc<dyn TimerRunner> = Arc::new(FakeRunner {
+            id: "fake.runner",
+            submissions: AtomicUsize::new(0),
+            cancellations: AtomicUsize::new(0),
+            complete_immediately: false,
+            submit_error: None,
+        });
+        assert!(registry.list_runners().is_empty(), "裸 Core 无注册 runner");
+
+        registry
+            .register_runner("fake.runner", "gamer.yaml", runner.clone())
+            .unwrap();
+        let listed = registry.list_runners();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].runner_id, "fake.runner");
+        assert_eq!(listed[0].owner_extension_id, "gamer.yaml");
+        assert!(registry.contains("fake.runner"));
+        assert!(registry.get_runner("fake.runner").is_some());
+        assert!(registry.get_runner("other.runner").is_none());
+
+        // 同 owner 重复注册 = 原地替换（不洁重启缝）；跨 owner 抢注被拒
+        registry
+            .register_runner("fake.runner", "gamer.yaml", runner.clone())
+            .unwrap();
+        assert!(registry
+            .register_runner("fake.runner", "other.ext", runner.clone())
+            .is_err());
+        assert_eq!(registry.list_runners().len(), 1);
+
+        // 空 id / 空 owner 拒绝
+        assert!(registry
+            .register_runner("  ", "owner", runner.clone())
+            .is_err());
+        assert!(registry.register_runner("some.runner", "", runner).is_err());
+
+        // unregister_owner 只摘自己的，幂等
+        let removed = registry.unregister_owner("gamer.yaml");
+        assert_eq!(removed, vec!["fake.runner".to_string()]);
+        assert!(registry.list_runners().is_empty());
+        assert!(registry.unregister_owner("gamer.yaml").is_empty());
+
+        // unregister_runner 对未知 id 明确报错
+        assert!(registry.unregister_runner("fake.runner").is_err());
+        registry
+            .register_runner(
+                "fake.runner",
+                "gamer.yaml",
+                Arc::new(FakeRunner {
+                    id: "fake.runner",
+                    submissions: AtomicUsize::new(0),
+                    cancellations: AtomicUsize::new(0),
+                    complete_immediately: false,
+                    submit_error: None,
+                }),
+            )
+            .unwrap();
+        registry.unregister_runner("fake.runner").unwrap();
+        assert!(!registry.contains("fake.runner"));
+    }
+
+    #[tokio::test]
+    async fn unregistering_a_runner_suspends_only_its_active_tasks() {
+        let (db, dir) = test_db("runner-unregister-suspend");
+        let mut active = test_task();
+        active.id = "active".into();
+        active.runner_id = "gamer.yaml".into();
+        active.next_wakeup = Some(Utc::now() + chrono::Duration::minutes(5));
+        let mut foreign = test_task();
+        foreign.id = "foreign".into();
+        foreign.runner_id = "other.runner".into();
+        let mut manual = test_task();
+        manual.id = "manual".into();
+        manual.state = TaskState::Suspended;
+        manual.enabled = false;
+        manual.suspend_reason = Some("disabled".into());
+        let mut already_missing = test_task();
+        already_missing.id = "already".into();
+        already_missing.state = TaskState::DependencyMissing;
+        already_missing.suspend_reason = Some("missing_dependency=gamer.yaml".into());
+        for task in [&active, &foreign, &manual, &already_missing] {
+            db.upsert_timer_task_async(task).await.unwrap();
+        }
+        let core = TimerCore::new(db.clone());
+        assert_eq!(
+            core.suspend_tasks_missing_runner("gamer.yaml")
+                .await
+                .unwrap(),
+            1,
+            "只有该 runner 名下的 Active 任务被挂起"
+        );
+
+        let suspended = db.get_timer_task_async("active").await.unwrap().unwrap();
+        assert_eq!(suspended.state, TaskState::DependencyMissing);
+        assert_eq!(
+            suspended.suspend_reason.as_deref(),
+            Some("missing_dependency=gamer.yaml")
+        );
+        assert!(suspended.enabled, "enabled 用户原意保留");
+        assert!(suspended.next_wakeup.is_none(), "唤醒游标清空");
+        assert_eq!(suspended.payload, active.payload, "任务数据原样保留");
+        // 其他状态的任务不受影响
+        assert_eq!(
+            db.get_timer_task_async("foreign")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            TaskState::Active
+        );
+        let manual_after = db.get_timer_task_async("manual").await.unwrap().unwrap();
+        assert_eq!(manual_after.state, TaskState::Suspended);
+        assert_eq!(manual_after.suspend_reason.as_deref(), Some("disabled"));
+        assert_eq!(
+            db.get_timer_task_async("already")
+                .await
+                .unwrap()
+                .unwrap()
+                .suspend_reason
+                .as_deref(),
+            Some("missing_dependency=gamer.yaml")
+        );
+        drop(core);
+        drop(db);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn registering_a_runner_resumes_only_its_exact_missing_dependency_tasks() {
+        let (db, dir) = test_db("runner-register-resume");
+        let mut missing = test_task();
+        missing.id = "missing".into();
+        missing.runner_id = "gamer.yaml".into();
+        missing.schedule = TaskSchedule::new("fixed", serde_json::json!({})).unwrap();
+        missing.state = TaskState::DependencyMissing;
+        missing.suspend_reason = Some("missing_dependency=gamer.yaml".into());
+        let mut other_reason = test_task();
+        other_reason.id = "other-reason".into();
+        other_reason.state = TaskState::DependencyMissing;
+        other_reason.suspend_reason = Some("missing_dependency=future.provider".into());
+        let mut manual = test_task();
+        manual.id = "manual".into();
+        manual.state = TaskState::Suspended;
+        manual.enabled = false;
+        manual.suspend_reason = Some("disabled".into());
+        let mut cancelled = test_task();
+        cancelled.id = "cancelled".into();
+        cancelled.state = TaskState::Cancelled;
+        cancelled.enabled = false;
+        for task in [&missing, &other_reason, &manual, &cancelled] {
+            db.upsert_timer_task_async(task).await.unwrap();
+        }
+        let core = TimerCore::new(db.clone());
+        assert_eq!(
+            core.resume_tasks_missing_runner("gamer.yaml", &FixedDelaySchedule)
+                .await
+                .unwrap(),
+            1,
+            "只恢复 missing_dependency 恰为该 runner 的任务"
+        );
+
+        let resumed = db.get_timer_task_async("missing").await.unwrap().unwrap();
+        assert_eq!(resumed.state, TaskState::Active);
+        assert!(resumed.suspend_reason.is_none());
+        assert!(resumed.enabled, "恢复不改 enabled 原意");
+        let wakeup = resumed.next_wakeup.expect("恢复时重算唤醒游标");
+        assert!(wakeup > Utc::now(), "游标是未来时刻，不是陈旧触发");
+        // 手动挂起/停用、其他依赖缺失、已取消任务都不误恢复
+        assert_eq!(
+            db.get_timer_task_async("other-reason")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            TaskState::DependencyMissing
+        );
+        let manual_after = db.get_timer_task_async("manual").await.unwrap().unwrap();
+        assert_eq!(manual_after.state, TaskState::Suspended);
+        assert_eq!(manual_after.suspend_reason.as_deref(), Some("disabled"));
+        assert_eq!(
+            db.get_timer_task_async("cancelled")
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            TaskState::Cancelled
+        );
+        drop(core);
         drop(db);
         std::fs::remove_dir_all(dir).unwrap();
     }

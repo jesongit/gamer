@@ -1391,6 +1391,75 @@ impl Store {
         .await
     }
 
+    /// ADR-13 runner lifecycle: the owner extension went away, so its runner
+    /// disappeared.  Only still-Active (schedulable) tasks of `runner_id`
+    /// enter `dependency_missing`; `enabled` keeps the user's intent, the
+    /// wakeup cursor is cleared and the reason records the missing runner.
+    pub async fn suspend_active_timer_tasks_for_runner_async(
+        &self,
+        runner_id: &str,
+    ) -> anyhow::Result<usize> {
+        let runner_id = runner_id.to_string();
+        let reason = format!("missing_dependency={runner_id}");
+        let updated_at = Utc::now().to_rfc3339();
+        self.request_async(move |conn| {
+            let changed = conn.execute(
+                "UPDATE timer_tasks SET state = 'dependency_missing', suspend_reason = ?2, next_wakeup = NULL, updated_at = ?3 WHERE runner_id = ?1 AND state = 'active' AND enabled = 1",
+                rusqlite::params![runner_id, reason, updated_at],
+            )?;
+            Ok(changed)
+        })
+        .await
+    }
+
+    /// Tasks currently in `dependency_missing` whose reason is exactly
+    /// `missing_dependency=<runner_id>` — the recovery set for ADR-13 runner
+    /// re-registration.  Manual suspends/disables (`suspended` state) and
+    /// tasks missing a *different* dependency never match.
+    pub async fn list_timer_tasks_missing_runner_async(
+        &self,
+        runner_id: &str,
+    ) -> anyhow::Result<Vec<Task>> {
+        let runner_id = runner_id.to_string();
+        let reason = format!("missing_dependency={runner_id}");
+        self.request_async(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "{TIMER_TASK_SELECT} WHERE runner_id = ?1 AND state = 'dependency_missing' AND suspend_reason = ?2 ORDER BY created_at"
+            ))?;
+            let mut rows = stmt.query(rusqlite::params![runner_id, reason])?;
+            let mut tasks = Vec::new();
+            while let Some(row) = rows.next()? {
+                tasks.push(Task::from_storage(timer_task_storage_from_row(row)?)?);
+            }
+            Ok(tasks)
+        })
+        .await
+    }
+
+    /// Guarded resume of one dependency-missing task: the row only moves back
+    /// to `active` (with a freshly computed wakeup cursor and a cleared
+    /// reason) while it is still in `dependency_missing` with the exact
+    /// `missing_dependency=<runner_id>` reason.  Returns whether the row was
+    /// actually resumed.
+    pub async fn resume_timer_task_from_dependency_missing_async(
+        &self,
+        id: &str,
+        runner_id: &str,
+        next_wakeup: Option<i64>,
+    ) -> anyhow::Result<bool> {
+        let id = id.to_string();
+        let reason = format!("missing_dependency={runner_id}");
+        let updated_at = Utc::now().to_rfc3339();
+        self.request_async(move |conn| {
+            let changed = conn.execute(
+                "UPDATE timer_tasks SET state = 'active', suspend_reason = NULL, next_wakeup = ?3, updated_at = ?4 WHERE id = ?1 AND state = 'dependency_missing' AND suspend_reason = ?2",
+                rusqlite::params![id, reason, next_wakeup, updated_at],
+            )?;
+            Ok(changed == 1)
+        })
+        .await
+    }
+
     pub async fn update_timer_task_result_async(
         &self,
         id: &str,

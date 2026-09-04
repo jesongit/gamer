@@ -9,6 +9,13 @@
 //! 约定 `payload = {args: <稀疏或全量参数>}`；旧数据里可能还带
 //! `param_signature`（有则继续做过期门禁），新保存路径不带签名——运行时按
 //! 脚本当前声明重绑参数（存活值保留、新参数取默认值、必填缺失报错）。
+//!
+//! P11.2（ADR-13）：runner 注册由扩展生命周期驱动。本文件另提供
+//! [`YamlTimerRunnerRegistrar`]——`TimerRunnerRegistrar` 钩子的 YAML 侧实现：
+//! gamer.yaml 扩展 start → 构造并注册 runner（owner=扩展 id），stop/disable/
+//! uninstall → 注销并挂起其名下任务。按扩展 id 特判 gamer.yaml 是本 Wave 的
+//! 过渡缝（钩子接口本身通用），Wave3 把 runner 构造移进扩展边界后本类型随
+//! YAML 栈一并迁移。
 
 use std::sync::Arc;
 
@@ -20,9 +27,7 @@ use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartErr
 use crate::scripts::ScriptStore;
 use crate::store::Db;
 use crate::task_params::{self, GateError};
-use crate::timer_core::{
-    TimerCompletion, TimerOutcome, TimerRun, TimerRunner, TimerRunnerError, TimerRunnerFactory,
-};
+use crate::timer_core::{TimerCompletion, TimerOutcome, TimerRun, TimerRunner, TimerRunnerError};
 
 pub(crate) struct YamlTimerRunner {
     db: Db,
@@ -33,12 +38,6 @@ pub(crate) struct YamlTimerRunner {
 impl YamlTimerRunner {
     fn new(db: Db, runs: Arc<RunManager>, scripts: Arc<ScriptStore>) -> Self {
         Self { db, runs, scripts }
-    }
-}
-
-impl TimerRunnerFactory for Arc<ScriptStore> {
-    fn into_timer_runner(self, db: Db, runs: Arc<RunManager>) -> Arc<dyn TimerRunner> {
-        Arc::new(YamlTimerRunner::new(db, runs, self))
     }
 }
 
@@ -216,4 +215,60 @@ fn yaml_finish_hook(
             outcome: timer_outcome,
         });
     })
+}
+
+/// P11.2 过渡缝（ADR-13）：ExtensionService 生命周期回调的 YAML 侧绑定。
+/// `TimerRunnerRegistrar` 钩子接口本身通用——任意扩展未来都能注册自己的
+/// runner；本实现只按扩展 id 特判 `gamer.yaml` 构造 runner（Wave3 把构造
+/// 移进 gamer.yaml 扩展边界），注销路径对任意 owner 通用（owner 名下没有
+/// runner 时为幂等 no-op）。
+pub(crate) struct YamlTimerRunnerRegistrar {
+    scheduler: Arc<crate::scheduler::Scheduler>,
+    db: Db,
+    runs: Arc<RunManager>,
+    scripts: Arc<ScriptStore>,
+}
+
+impl YamlTimerRunnerRegistrar {
+    pub(crate) fn new(
+        scheduler: Arc<crate::scheduler::Scheduler>,
+        db: Db,
+        runs: Arc<RunManager>,
+        scripts: Arc<ScriptStore>,
+    ) -> Self {
+        Self {
+            scheduler,
+            db,
+            runs,
+            scripts,
+        }
+    }
+}
+
+#[async_trait]
+impl crate::extensions::TimerRunnerRegistrar for YamlTimerRunnerRegistrar {
+    async fn extension_started(&self, extension_id: &str) -> anyhow::Result<()> {
+        if extension_id != crate::yaml_extension::YAML_EXTENSION_ID {
+            return Ok(());
+        }
+        let runner = Arc::new(YamlTimerRunner::new(
+            self.db.clone(),
+            self.runs.clone(),
+            self.scripts.clone(),
+        ));
+        self.scheduler
+            .register_extension_runner(
+                crate::yaml_extension::YAML_EXTENSION_ID,
+                extension_id,
+                runner,
+            )
+            .await
+    }
+
+    async fn extension_stopped(&self, extension_id: &str) -> anyhow::Result<()> {
+        self.scheduler
+            .unregister_extension_owner(extension_id)
+            .await
+            .map(|_| ())
+    }
 }

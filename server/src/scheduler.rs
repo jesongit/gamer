@@ -5,18 +5,19 @@
 //! small compatibility façade used by the existing REST/update callers.  The
 //! native Cron provider is installed through its registration seam; every
 //! later schedule computation goes through [`ScheduleRegistry`], so this
-//! composition never references concrete schedule types.
+//! composition never references concrete schedule types.  No runner is
+//! registered here (ADR-13): runners arrive through the extension lifecycle
+//! (`TimerRunnerRegistrar` → [`Scheduler::register_extension_runner`]) and
+//! disappear with their owning extension.
 
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use tracing::info;
 
-use crate::run_manager::RunManager;
 use crate::store::Db;
 use crate::timer_core::{
-    ScheduleExtension, ScheduleRegistry, TimerCore, TimerRunner, TimerRunnerFactory,
-    TimerRunnerRegistry,
+    RegisteredRunner, ScheduleRegistry, TimerCore, TimerRunner, TimerRunnerRegistry,
 };
 
 pub struct Scheduler {
@@ -26,12 +27,11 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub(crate) fn new<A: TimerRunnerFactory>(db: Db, adapter: A, runs: Arc<RunManager>) -> Self {
+    /// Bare-core composition: no runner is pre-registered.  Tasks targeting a
+    /// runner whose extension has not started (yet) are saved normally and
+    /// enter `DependencyMissing` at dispatch time (ADR-13).
+    pub(crate) fn new(db: Db) -> Self {
         let runners = Arc::new(TimerRunnerRegistry::new());
-        let runner = adapter.into_timer_runner(db.clone(), runs);
-        runners
-            .register(runner)
-            .expect("the built-in timer runner must have a non-empty unique id");
         let schedules = Arc::new(ScheduleRegistry::new());
         crate::cron_extension::register_builtin(&schedules)
             .expect("the built-in Cron schedule extension must register");
@@ -42,22 +42,43 @@ impl Scheduler {
         }
     }
 
-    /// Register an extension runner before or after the timer loop starts.
-    /// Duplicate ids are rejected without changing the active runner.
-    /// 扩展 runner/schedule 注册缝（Phase 9/10 预留）：当前内置 runner/Cron
-    /// 已在 new() 直接注册，公开包装由后续扩展消费者使用。
-    #[allow(dead_code)]
-    pub fn register_runner(&self, runner: Arc<dyn TimerRunner>) -> anyhow::Result<()> {
-        self.runners.register(runner)
+    /// ADR-13: register a runner on behalf of its owning extension and resume
+    /// the tasks that entered `DependencyMissing` because this runner was
+    /// missing (wakeup cursors recomputed through the schedule registry).
+    pub async fn register_extension_runner(
+        &self,
+        runner_id: impl Into<String>,
+        owner_extension_id: impl Into<String>,
+        runner: Arc<dyn TimerRunner>,
+    ) -> anyhow::Result<()> {
+        let runner_id = runner_id.into();
+        self.runners
+            .register_runner(&runner_id, owner_extension_id, runner)?;
+        let resumed = self
+            .core
+            .resume_tasks_missing_runner(&runner_id, self.schedules.as_ref())
+            .await?;
+        if resumed > 0 {
+            tracing::info!(runner = %runner_id, resumed, "runner registered; dependency-missing tasks resumed");
+        }
+        self.core.notify_changed();
+        Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn register_schedule(
+    /// ADR-13: unregister every runner owned by `extension_id` (idempotent)
+    /// and suspend the still-Active tasks bound to the removed runners into
+    /// `DependencyMissing`.  Returns the removed runner ids.
+    pub async fn unregister_extension_owner(
         &self,
-        kind: impl Into<String>,
-        extension: Arc<dyn ScheduleExtension>,
-    ) -> anyhow::Result<()> {
-        self.schedules.register(kind, extension)
+        owner_extension_id: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let removed = self.runners.unregister_owner(owner_extension_id);
+        for runner_id in &removed {
+            let suspended = self.core.suspend_tasks_missing_runner(runner_id).await?;
+            tracing::info!(runner = %runner_id, suspended, "runner unregistered; active tasks suspended as dependency-missing");
+        }
+        self.core.notify_changed();
+        Ok(removed)
     }
 
     /// Generic schedule registry access for boundary callers (API 校验/预览)
@@ -67,8 +88,9 @@ impl Scheduler {
         Arc::clone(&self.schedules)
     }
 
-    /// Registered runner ids（`GET /api/runners` 数据源），稳定排序。
-    pub fn runner_ids(&self) -> Vec<String> {
+    /// Registered runners with their owning extension (`GET /api/runners`
+    /// 数据源），按 runner_id 稳定排序。
+    pub fn runners(&self) -> Vec<RegisteredRunner> {
         self.runners.list_runners()
     }
 

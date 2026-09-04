@@ -438,7 +438,7 @@ mod contract_tests {
             db.clone(),
         ));
         let runs = Arc::new(crate::run_manager::RunManager::new(executor));
-        let scheduler = Arc::new(Scheduler::new(db.clone(), scripts.clone(), runs.clone()));
+        let scheduler = Arc::new(Scheduler::new(db.clone()));
         let auth = Arc::new(super::super::auth::AuthState::new(
             super::super::auth::parse_password_hash(
                 &super::super::auth::hash_password("admin123").unwrap(),
@@ -591,7 +591,7 @@ mod contract_tests {
             db.clone(),
         ));
         let runs = Arc::new(crate::run_manager::RunManager::new(executor));
-        let scheduler = Arc::new(Scheduler::new(db.clone(), scripts.clone(), runs.clone()));
+        let scheduler = Arc::new(Scheduler::new(db.clone()));
         let auth = Arc::new(super::super::auth::AuthState::new(
             super::super::auth::parse_password_hash(
                 &super::super::auth::hash_password("admin123").unwrap(),
