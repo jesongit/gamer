@@ -207,24 +207,18 @@ function searchTrail(
   return null
 }
 
-/** 容器展示名（plan §8.4 面包屑示例：主流程 / 匹配 test1 / 如果为真）。 */
+/** 容器展示名（面包屑示例：主流程 / 命中 reward / 如果为真）。 */
 export function containerLabel(parent: Step | null, containerKey: string, candidateIndex: number, rootFallback = ''): string {
   if (parent === null) return rootFallback || '主流程'
   switch (parent.kind) {
     case 'if':
+      return containerKey === 'then' ? '如果为真' : '如果为假'
     case 'find':
-    case 'func':
-      if (containerKey === 'then') return parent.kind === 'if' ? '如果为真' : parent.kind === 'find' ? '命中后' : '成功时'
-      return parent.kind === 'if' ? '如果为假' : parent.kind === 'find' ? '未命中' : '失败时'
-    case 'match': {
+      return containerKey === 'then' ? '命中后' : '超时未命中'
+    case 'match_first': {
       if (containerKey === 'else') return '都未命中'
       const cand = parent.candidates[candidateIndex]
       return cand ? `命中 ${cellDisplay(cand.template)}` : '候选'
-    }
-    case 'color': {
-      if (containerKey === 'else') return '颜色未命中'
-      const exp = parent.expect[candidateIndex]
-      return exp ? `颜色 ${cellDisplay(exp.color)}` : '候选'
     }
     case 'loop':
       return '循环体'
@@ -233,7 +227,7 @@ export function containerLabel(parent: Step | null, containerKey: string, candid
   }
 }
 
-/** Cell 展示形态（编辑器显示 $name，底层存类型化引用，plan §9）。 */
+/** Cell 展示形态（编辑器显示 $路径引用，底层存属性路径，plan §9）。 */
 export function cellDisplay(cell: Cell | null | undefined): string {
   if (!cell) return ''
   if (typeof cell.ref === 'string') return `$${cell.ref}`

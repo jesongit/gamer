@@ -1,8 +1,0 @@
-{
-  "id": "i09_empty_default",
-  "kind": "invalid",
-  "description": "空默认值：text:message:提示文本: 第四段为空（不等价于没有默认值；空字符串必须写成 \"\"）",
-  "errors": [
-    { "code": "param.default.empty", "step_path": "params[0]", "field": "default" }
-  ]
-}

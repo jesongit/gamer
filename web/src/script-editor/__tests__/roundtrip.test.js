@@ -13,46 +13,52 @@ import { setupScript } from './component_helpers'
  */
 
 const NESTED_YAML = [
+  'version: 3',
   'params:',
-  "  - 'bool:enable:是否启用:true'",
-  "  - 'bool:retry:允许重试:false'",
+  "  - 'boolean:enable:是否启用:true'",
+  "  - 'boolean:retry:允许重试:false'",
   'steps:',
   '  - loop:',
   '      times: 3',
   '      steps:',
-  '        - if: $retry',
-  '          then:',
-  '            - find: retry.png',
-  '              block:',
-  '                - popup.png',
-  '                - dialog.png',
-  '              verify: true',
-  '              then:',
-  '                - log: 清理障碍',
-  '                - tap: [0.5, 0.5]',
-  '          else:',
-  '            - log: 无障碍物',
-  '  - if: $enable',
-  '    then:',
-  '      - loop:',
-  '          steps:',
-  '            - wait: 1s',
-  '    else:',
-  '      - log: 已禁用',
+  '        - if:',
+  '            cond: $retry',
+  '            then:',
+  '              - find:',
+  '                  template: retry.png',
+  '                  timeout: 10s',
+  '                  save: hit',
+  '                  then:',
+  '                    - log: 清理障碍',
+  '                    - tap: [0.5, 0.5]',
+  '              - check:',
+  '                  template: home.png',
+  '                  timeout: 5s',
+  '            else:',
+  '              - log: 无障碍物',
+  '  - if:',
+  '      cond: $enable',
+  '      then:',
+  '        - loop:',
+  '            steps:',
+  '              - wait: 1s',
+  '      else:',
+  '        - log: 已禁用',
 ].join('\n')
 
 /** 直接构造的期望模型（编辑后的最终形态；不含 uuid）。 */
 function expectedModel() {
   return {
+    version: 3,
     params: [
-      { type: 'bool', name: 'enable', remark: '是否启用', default: true },
-      { type: 'bool', name: 'retry', remark: '允许重试', default: false },
+      { type: 'boolean', name: 'enable', remark: '是否启用', default: true, rawForm: true },
+      { type: 'boolean', name: 'retry', remark: '允许重试', default: false, rawForm: true },
     ],
-    config: null,
+    defaults: null,
     steps: [
       {
         kind: 'loop',
-        times: 5,
+        times: { lit: 5 },
         steps: [
           {
             kind: 'if',
@@ -61,25 +67,28 @@ function expectedModel() {
               {
                 kind: 'find',
                 template: { lit: 'relogin.png' },
-                block: [{ lit: 'popup.png' }, { lit: 'dialog.png' }],
-                verify: true,
-                timeout: null,
+                timeout: { lit: '10s' },
+                threshold: null,
+                region: null,
+                save: 'hit',
                 then: [
-                  { kind: 'log', message: { lit: '清理障碍' } },
+                  { kind: 'log', message: { lit: '清理障碍' }, level: null },
                   { kind: 'tap', at: { lit: [0.5, 0.5] } },
                 ],
                 else: [],
+                verify: null,
               },
+              { kind: 'check', template: { lit: 'home.png' }, timeout: { lit: '5s' }, threshold: null },
             ],
-            else: [{ kind: 'log', message: { lit: '无障碍物' } }],
+            else: [{ kind: 'log', message: { lit: '无障碍物' }, level: null }],
           },
         ],
       },
       {
         kind: 'if',
         cond: { ref: 'enable' },
-        then: [{ kind: 'loop', times: 0, steps: [{ kind: 'wait', duration: { lit: '1s' }, duration_max: null }] }],
-        else: [{ kind: 'log', message: { lit: '已禁用' } }],
+        then: [{ kind: 'loop', times: null, steps: [{ kind: 'wait', min: { lit: '1s' }, max: null }] }],
+        else: [{ kind: 'log', message: { lit: '已禁用' }, level: null }],
       },
       { kind: 'tap', at: { lit: [0.5, 0.8] } },
       { kind: 'tap', at: { lit: [0.5, 0.8] } },
@@ -96,7 +105,7 @@ describe('编辑往返一致性', () => {
     const { model, stack } = setupScript(NESTED_YAML)
 
     // 1. loop times 3 → 5
-    stack.apply({ type: 'update_step', path: ['steps', 0], fields: { times: 5 } }, '改次数')
+    stack.apply({ type: 'update_step', path: ['steps', 0], fields: { times: { lit: 5 } } }, '改次数')
     // 2. find 主模板改短名
     stack.apply({ type: 'update_step', path: ['steps', 0, 'steps', 0, 'then', 0], fields: { template: { lit: 'relogin.png' } } }, '改模板')
     // 3. 末尾插入 tap 并复制（一次事务 = 一条历史）
@@ -118,44 +127,46 @@ describe('编辑往返一致性', () => {
 
   it('untracked 直接构造模型 serialize → parse 后与其自身一致', () => {
     const direct = {
-      config: { interval: '500ms', threshold: 0.85, log_level: 'info' },
-      params: [{ type: 'text', name: 'msg', remark: '提示', default: 'hi' }],
+      version: 3,
+      defaults: { vision_threshold: 0.85, after_tap: '300ms', after_match: null, poll_interval: null },
+      params: [{ type: 'string', name: 'msg', remark: '提示', default: 'hi', rawForm: false }],
       steps: [
-        createStep('swipe', { from: lit([0.1, 0.9]), to: lit([0.9, 0.1]), time: lit('800ms') }),
-        createStep('match', {
+        createStep('swipe', { from: lit([0.1, 0.9]), to: lit([0.9, 0.1]), duration: lit('800ms') }),
+        createStep('match_first', {
           candidates: [
-            { template: lit('a.png'), click: true, steps: [] },
-            { template: lit('b.png'), click: true, steps: [makeStep('key')] },
-            { template: lit('c.png'), click: false, steps: [makeStep('log')] },
-            { template: lit('d.png'), click: false, steps: [] },
+            { template: lit('a.png'), threshold: 0.9, steps: [] },
+            { template: lit('b.png'), threshold: null, steps: [makeStep('key')] },
+            { template: lit('c.png'), threshold: null, steps: [makeStep('log')] },
           ],
           else: [makeStep('throw')],
-          timeout: lit('30s'),
         }),
-        createStep('color', {
-          at: lit([0.5, 0.5]),
-          expect: [
-            { color: lit('123456'), click: true, steps: [] },
-            { color: lit('ff8800'), click: false, steps: [makeStep('log')] },
-            { color: lit('00ff00'), click: false, steps: [] },
-          ],
+        createStep('find', {
+          template: lit('reward'),
+          timeout: lit('10s'),
+          threshold: 0.9,
+          region: null,
+          save: 'reward',
+          then: [createStep('tap', { at: { ref: 'reward.center' } })],
           else: [],
+          verify: { template: lit('home'), timeout: lit('5s') },
         }),
-        createStep('func', { target: 'common/login', args: { account: lit('a.png') }, then: [], else: [] }),
+        createStep('call', { target: 'function:common/login', with: { account: lit('a.png') }, save: null }),
+        createStep('wait', { min: lit('300ms'), max: lit('700ms') }),
       ],
     }
     const text = serialize(direct)
     const parsed = parseScript(text)
     expect(parsed.diagnostics).toEqual([])
     expect(strip(parsed.model)).toEqual(strip(direct))
-    // 候选级点击不变式：click: true ⇒ 映射形态，false ⇒ 列表形态
-    expect(text).toContain('a.png:\n        click: true\n')
-    expect(text).toContain("c.png:\n      - log: ''\n")
-    expect(text).toContain('d.png: []\n')
-    expect(text).toContain('00ff00: []\n')
+    // 规范形态断言：find 字段顺序、match_first 候选结构、call with 命名
+    expect(text).toContain('- find:')
+    expect(text.indexOf('save: reward')).toBeGreaterThan(-1)
+    expect(text).toContain('verify:')
+    expect(text).toContain('- template: a.png')
+    expect(text).toContain('with:')
   })
 
-  it('serialize(parse(fixture)) 幂等（契约的组件层旁证）', () => {
+  it('serialize(parse(fixture)) 幂等（组件层旁证）', () => {
     const once = serialize(parseScript(NESTED_YAML).model)
     const twice = serialize(parseScript(once).model)
     expect(twice).toBe(once)

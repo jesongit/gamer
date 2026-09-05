@@ -1,5 +1,5 @@
 /**
- * 命令栈（plan §8.2 / §8.4）：可视化编辑器的唯一写入口。
+ * 命令栈（编辑器唯一写入口）。
  *
  * - 每个命令在应用时记录逆操作，undo/redo 依赖对象引用保持不变（删除步骤原对象
  *   原样放回，uuid 天然稳定）；
@@ -10,11 +10,11 @@
 
 import {
   cloneStepWithNewUuids,
+  type DefaultsModel,
   type FunctionLibraryModel,
   type FunctionModel,
   type ParamDecl,
-  type ScriptConfig,
-  type ScriptModel,
+  type Program,
   type Step,
 } from './model'
 
@@ -25,7 +25,7 @@ export type PathSeg = string | number
 export type Path = PathSeg[]
 
 /** 路径终点的宿主对象类型。 */
-export type EditorModel = ScriptModel | FunctionLibraryModel
+export type EditorModel = Program | FunctionLibraryModel
 
 export function clonePath(path: Path): Path {
   return [...path]
@@ -44,8 +44,7 @@ function stepChildList(step: Step, key: string, candidateIndex = -1): Step[] | u
     case 'steps':
       return step.kind === 'loop' ? step.steps : undefined
     case 'candidates':
-      if (step.kind === 'match') return step.candidates[candidateIndex]?.steps
-      if (step.kind === 'color') return step.expect[candidateIndex]?.steps
+      if (step.kind === 'match_first') return step.candidates[candidateIndex]?.steps
       return undefined
     default:
       return undefined
@@ -56,7 +55,7 @@ function stepChildList(step: Step, key: string, candidateIndex = -1): Step[] | u
  * 解析路径到 Step[] 容器。路径语法（以键或 ('candidates', n) 对结尾）：
  * - ['steps']                                 脚本主流程
  * - ['steps', 0, 'then']                      steps[0].then
- * - ['steps', 0, 'candidates', 1]             steps[0] 的 match 候选 1 分支（或 color expect 1）
+ * - ['steps', 0, 'candidates', 1]             steps[0] 的 match_first 候选 1 分支
  * - ['functions', <名|序号>, 'steps']         函数库函数体
  * - ['functions', 'login', 'steps', 0, 'else'] 函数体内嵌套分支
  */
@@ -116,17 +115,15 @@ function resolveFunction(model: FunctionLibraryModel, seg: PathSeg): FunctionMod
 
 /**
  * 解析 params 命令目标宿主（持有 params 数组的对象）：
- * - path 缺省/空 = 文件级：脚本模型自身（函数库模型没有文件级 params → 报错）；
- * - ['functions', <函数名|序号>, 'params'] = 函数级：返回该函数记录（阶段 4）。
- * 返回宿主对象引用而非数组快照：redo/undo 经同一引用整体替换或就地增删，
- * Vue reactive 场景下宿主是代理，写入天然触发更新。
+ * - path 缺省/空 = 脚本文件级 params；
+ * - ['functions', <函数名|序号>, 'params'] = 函数级：返回该函数记录。
  */
 function resolveParamsHost(model: EditorModel, path?: Path): { params: ParamDecl[] } {
   if (!path || path.length === 0) {
     if (!('params' in model)) {
       throw new Error('函数库模型没有文件级 params；请用 [\'functions\', 函数名, \'params\'] 路径编辑具体函数')
     }
-    return model as ScriptModel
+    return model as Program
   }
   if ('functions' in model && path.length === 3 && path[0] === 'functions' && path[2] === 'params') {
     return resolveFunction(model, path[1])
@@ -138,9 +135,7 @@ function resolveParamsHost(model: EditorModel, path?: Path): { params: ParamDecl
 
 /**
  * 深度解包 Vue reactive 代理（duck-typed __v_raw，与 vue 的 toRaw 同一内部标记）。
- * UI 层会传 reactive(model) 进来，且组件常从代理对象展开构造新对象（{...proxy} 的字段值
- * 仍是嵌套代理）——structuredClone 无法克隆任何 Proxy（DataCloneError），快照/复制前
- * 必须递归解包。返回全新纯对象（快照语义，与 structuredClone 一致）。
+ * structuredClone 无法克隆任何 Proxy（DataCloneError），快照/复制前必须递归解包。
  */
 function unwrap<T>(value: T): T {
   if (value === null || typeof value !== 'object') return value
@@ -160,17 +155,18 @@ export type Command =
   | { type: 'move_step'; from: { path: Path; index: number }; to: { path: Path; index: number } }
   | { type: 'duplicate_step'; path: Path; index: number }
   | { type: 'update_step'; path: Path; fields: Record<string, unknown> }
-  /** params 命令：path 缺省 = 文件级（脚本）；['functions', <函数名|序号>, 'params'] = 函数级（阶段 4）。 */
+  /** params 命令：path 缺省 = 脚本文件级；['functions', <函数名|序号>, 'params'] = 函数级。 */
   | { type: 'set_params'; path?: Path; params: ParamDecl[] }
   | { type: 'insert_param'; path?: Path; index: number; decl: ParamDecl }
   | { type: 'remove_param'; path?: Path; index: number }
   | { type: 'update_param'; path?: Path; index: number; decl: ParamDecl }
-  | { type: 'set_config'; config: ScriptConfig | null }
+  /** Program 级 defaults（契约 §1/§4；null = 整体清除）。仅脚本模型。 */
+  | { type: 'set_defaults'; defaults: DefaultsModel | null }
   /** 函数库专用：文件尾追加空函数（重名拒绝；函数体 steps 初始为空列表）。 */
   | { type: 'insert_function'; name: string }
   /** 函数库专用：按名删除函数（至少保留一个；undo 原位恢复，函数对象引用不变保证 uuid 稳定）。 */
   | { type: 'remove_function'; name: string }
-  /** 函数库专用：函数改名（= 改 YAML 顶层键；空名/重名拒绝；引用它的 func 步骤不自动跟随）。 */
+  /** 函数库专用：函数改名（= 改 bare-map 顶层键；空名/重名拒绝；引用它的 call 步骤不自动跟随）。 */
   | { type: 'rename_function'; from: string; to: string }
 
 interface HistoryEntry {
@@ -482,18 +478,18 @@ export class CommandStack {
           },
         }
       }
-      case 'set_config': {
-        if (!('config' in this.model)) throw new Error('函数库模型没有文件级 config')
-        const m = this.model as ScriptModel
-        const oldConfig = m.config
-        const newConfig = command.config === null ? null : structuredClone(unwrap(command.config))
+      case 'set_defaults': {
+        if (!('defaults' in this.model)) throw new Error('函数库模型没有 Program 级 defaults')
+        const m = this.model as Program
+        const oldDefaults = m.defaults
+        const newDefaults = command.defaults === null ? null : structuredClone(unwrap(command.defaults))
         return {
           name,
           redo: () => {
-            m.config = newConfig
+            m.defaults = newDefaults
           },
           undo: () => {
-            m.config = oldConfig
+            m.defaults = oldDefaults
           },
         }
       }
@@ -559,7 +555,7 @@ export class CommandStack {
 export const paths = {
   steps: (): Path => ['steps'],
   functionSteps: (name: string): Path => ['functions', name, 'steps'],
-  /** 函数级 params 容器（阶段 4：params 命令带 path 时使用）。 */
+  /** 函数级 params 容器（params 命令带 path 时使用）。 */
   functionParams: (name: string): Path => ['functions', name, 'params'],
   child: (path: Path, key: string, index: number): Path => [...path, key, index],
   /** 校验路径（validation 字符串形态）与命令路径互转所需：['steps', 0, 'then', 1]。 */

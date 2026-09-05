@@ -1,5 +1,0 @@
-params:
-  - 'tmpl:logo:主模板'
-steps:
-  - check: logo.png
-  - check: $logo

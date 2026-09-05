@@ -1,9 +1,0 @@
-{
-  "id": "i10_branch_click_type",
-  "kind": "invalid",
-  "description": "候选级 click 非布尔字面量：match 候选与 color 候选各一处类型错误",
-  "errors": [
-    { "code": "step.field.type_mismatch", "step_path": "steps[0]", "field": "candidates[0].click" },
-    { "code": "step.field.type_mismatch", "step_path": "steps[1]", "field": "expect[0].click" }
-  ]
-}

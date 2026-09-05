@@ -1,36 +1,39 @@
 /**
- * YAML ↔ Model 双向转换（契约 §3 / §4）。
+ * YAML v3 ↔ Model 双向转换（契约：docs/plans/phase12_v3_dsl_contract.md §1-§4）。
  *
- * 解析：js-yaml 5 事件级 AST（eventsToAst），同时拿到标量的值与书写样式——
- * params 项「整条单引号」契约（§3.3 规则 2）在 plain-object load 下无法校验
- * （`'x:y'` 与 `x:y` 得到相同字符串），必须走样式感知的解析层。
+ * 解析：js-yaml plain load（CORE_SCHEMA）；空文档视为空映射（→ version.missing）。
+ * v3 无引号样式契约（v2 的 params 整条单引号规则已死），无需事件级 AST。
+ * 非 version: 3 一律拒绝（yaml.v3.version / version.missing），不误解析不 fallback
+ * （ADR-YAML-01）；v2 步骤名（func/match/color/str_app/cls_app 等）给出明确迁移诊断。
  *
- * 序列化：手写规范输出器。js-yaml dump 无法按节点控制缩进/引号样式，而规范形态
- * 是混合缩进（match 候选与候选分支为 indentless 序列，其余 +2）与混合引号
- * （params 整条单引号、text 双引号、纯数字色单引号），故逐节点自行排版；
- * 单个标量的「是否需要引号/如何引」复用 js-yaml dump 的判定（lineWidth=-1 禁折行）。
- *
- * 验收锚点：对每个合法 fixture，serialize(parse(fixture.yaml)) 与 fixture 原文逐字节一致。
+ * 序列化：手写确定性规范输出器（同 model 恒同输出），统一 +2 缩进、无紧凑形态；
+ * 验收锚点：decode(encode(model)) == model（结构相等）且 encode 语义稳定。
  */
 
-import { dump, parseEvents, eventsToAst, CORE_SCHEMA } from 'js-yaml'
+import { CORE_SCHEMA, dump, load } from 'js-yaml'
 import {
   allocateUuids,
+  isRefCell,
   type Cell,
+  type DefaultsModel,
   type FunctionLibraryModel,
   type FunctionModel,
   type ParamDecl,
-  type ParamType,
-  type ScriptConfig,
-  type ScriptModel,
+  type Program,
   type Step,
+  STEP_KINDS,
   type StepKind,
-  ACTION_KEYS,
-  PARAM_TYPES,
+  yamlKeyOf,
   newStepUuid,
 } from './model'
 import { CODES, diag, type Diagnostic } from './diagnostics'
-import { isColorLiteral, isCoordLit, isKnownKey, normalizeColor, parseParamLiteral, parseTimeMs, PARAM_NAME_RE } from './schema'
+import {
+  isCoordLit,
+  isRefPath,
+  parseParamLiteral,
+  parseTimeMs,
+  PARAM_NAME_RE,
+} from './schema'
 
 // ---------- 公共 API ----------
 
@@ -41,7 +44,7 @@ export interface ParseOptions {
 
 export interface ScriptParseResult {
   kind: 'script'
-  model: ScriptModel
+  model: Program
   diagnostics: Diagnostic[]
 }
 
@@ -53,30 +56,30 @@ export interface FunctionLibraryParseResult {
 
 export type ParseResult = ScriptParseResult | FunctionLibraryParseResult
 
-/** 解析可执行脚本（yaml/ 目录类型；目录即类型，不做内容推断）。 */
-export function parseScript(text: string, opts: ParseOptions = {}): ScriptParseResult {
-  const root = parseDocument(text)
+/** 解析可执行脚本（scripts/ 目录类型；version: 3 强制）。 */
+export function parseScript(text: string, _opts: ParseOptions = {}): ScriptParseResult {
   const diags: Diagnostic[] = []
+  const root = parseDocument(text, diags)
   if (root === null) {
     return {
       kind: 'script',
-      model: { params: [], config: null, steps: [] },
-      diagnostics: [diag(CODES.yamlSyntaxError, '', 'yaml', rootError(text) ?? 'YAML 解析失败')],
+      model: emptyProgram(),
+      diagnostics: [diag(CODES.yamlSyntax, '', 'yaml', `YAML 解析失败：${loadError ?? '文档为空'}`)],
     }
   }
   const model = parseScriptRoot(root, diags)
   return { kind: 'script', model: withUuids(model), diagnostics: diags }
 }
 
-/** 解析函数库（func/ 目录类型；顶层键 = 函数名，记录只允许 params/steps）。 */
+/** 解析函数库（functions/ 目录类型；顶层键 = 函数名，bare-map，无 version 键）。 */
 export function parseFunctionLibrary(text: string, opts: ParseOptions = {}): FunctionLibraryParseResult {
-  const root = parseDocument(text)
   const diags: Diagnostic[] = []
+  const root = parseDocument(text, diags)
   if (root === null) {
     return {
       kind: 'function_library',
       model: { file: opts.file ?? '', functions: [] },
-      diagnostics: [diag(CODES.yamlSyntaxError, '', 'yaml', rootError(text) ?? 'YAML 解析失败')],
+      diagnostics: [diag(CODES.yamlSyntax, '', 'yaml', `YAML 解析失败：${loadError ?? '文档为空'}`)],
     }
   }
   const model = parseFunctionRoot(root, opts.file ?? '', diags)
@@ -92,70 +95,124 @@ export function parseSource(
 }
 
 /** 规范序列化：按 model 形态自动分发（脚本 / 函数库）。输出以单个换行结尾。 */
-export function serialize(model: ScriptModel | FunctionLibraryModel): string {
+export function serialize(model: Program | FunctionLibraryModel): string {
   return 'functions' in model ? serializeFunctionLibrary(model) : serializeScript(model)
 }
 
-// ---------- 规范 YAML 输出器 ----------
+export function emptyProgram(): Program {
+  return { version: 3, params: [], defaults: null, steps: [] }
+}
 
-/** 参数声明原始串（规范形态，契约 §3.3 规则 7；前端 golden 测试同构）。 */
+// ---------- 参数声明原始串（字符串声明形态，契约 §1 双形态） ----------
+
+/** 参数声明原始串：'type:name:remark[:default]'（规范形态；序列化时整体单引号）。 */
 export function paramDeclToRawString(decl: ParamDecl): string {
   const base = `${decl.type}:${decl.name}:${decl.remark}`
   if (decl.default === null || decl.default === undefined) return base
-  let rawDefault: string
-  switch (decl.type) {
-    case 'bool':
-      rawDefault = decl.default ? 'true' : 'false'
-      break
-    case 'coord':
-      rawDefault = isCoordLit(decl.default) ? `[${fmtNum(decl.default[0])}, ${fmtNum(decl.default[1])}]` : 'null'
-      break
-    case 'text':
-      rawDefault = JSON.stringify(String(decl.default))
-      break
-    default:
-      rawDefault = String(decl.default)
-  }
-  return `${base}:${rawDefault}`
+  let tail: string
+  if (typeof decl.default === 'boolean') tail = decl.default ? 'true' : 'false'
+  else if (typeof decl.default === 'number') tail = fmtNum(decl.default)
+  else tail = /[\n\r]/.test(decl.default) ? JSON.stringify(decl.default) : decl.default
+  return `${base}:${tail}`
 }
+
+// ---------- 标量输出辅助 ----------
 
 function fmtNum(n: number): string {
-  return String(n)
+  return Number.isFinite(n) ? String(n) : 'null'
 }
 
-/**
- * 首选 plain 的字符串标量：交由 js-yaml dump 判定 plain 安全性（需要引号时按其
- * 默认单引号风格输出）；含换行的串退回双引号（避免块标量的多行排版）。
- */
+/** 首选 plain 的字符串标量：交由 js-yaml dump 判定 plain 安全性；含换行退回双引号。 */
 function plainScalar(s: string): string {
   if (/[\n\r]/.test(s)) return JSON.stringify(s)
   const out = dump(s, { lineWidth: -1 })
   return out.endsWith('\n') ? out.slice(0, -1) : out
 }
 
-/** 整条单引号（params 项；单引号样式仅需把 ' 翻倍转义）。 */
+/** 整条单引号（params 字符串声明形态；单引号样式仅需把 ' 翻倍转义）。 */
 function singleQuoted(s: string): string {
   return `'${s.replace(/'/g, "''")}'`
 }
 
-function serializeScript(model: ScriptModel): string {
+function fallbackScalar(v: unknown): string {
+  if (v === null || v === undefined) return 'null'
+  if (typeof v === 'string') return plainScalar(v)
+  if (typeof v === 'number') return fmtNum(v)
+  if (typeof v === 'boolean') return String(v)
+  // 复合字面量（expr/region 等保留值）：紧凑 JSON 即合法 YAML flow 形态
+  return JSON.stringify(v)
+}
+
+/** 步骤字段取值单元格行内渲染（lit 形态由字段类型约束）。 */
+function cellInline(cell: Cell | null | undefined, type: string): string {
+  if (cell === null || cell === undefined) return 'null'
+  if (isRefCell(cell)) return `$${cell.ref}`
+  const v = cell.lit
+  switch (type) {
+    case 'coord':
+      return isCoordLit(v) ? `[${fmtNum(v[0])}, ${fmtNum(v[1])}]` : fallbackScalar(v)
+    case 'bool':
+      return v === true ? 'true' : v === false ? 'false' : fallbackScalar(v)
+    case 'text':
+      return typeof v === 'string' ? JSON.stringify(v) : fallbackScalar(v)
+    case 'number':
+      return typeof v === 'number' ? fmtNum(v) : fallbackScalar(v)
+    default:
+      // tmpl / key / time / expr：字符串首选 plain（$ref 形态 plain 安全）
+      return fallbackScalar(v)
+  }
+}
+
+/** with/args 实参单元格：目标声明类型未知，按值形态选择渲染。 */
+function argCellInline(cell: Cell | null | undefined): string {
+  if (cell === null || cell === undefined) return 'null'
+  if (isRefCell(cell)) return `$${cell.ref}`
+  return fallbackScalar(cell.lit)
+}
+
+// ---------- 序列化：脚本 ----------
+
+function serializeScript(model: Program): string {
   const lines: string[] = []
+  lines.push('version: 3')
   if (model.params.length > 0) {
     lines.push('params:')
     for (const decl of model.params) {
-      lines.push(`  - ${singleQuoted(paramDeclToRawString(decl))}`)
+      if (decl.rawForm) {
+        lines.push(`  - ${singleQuoted(paramDeclToRawString(decl))}`)
+      } else {
+        lines.push(`  - name: ${plainScalar(decl.name)}`)
+        lines.push(`    type: ${plainScalar(decl.type)}`)
+        if (decl.default !== null && decl.default !== undefined) {
+          lines.push(`    default: ${fallbackScalar(decl.default)}`)
+        }
+        if (decl.remark !== '') {
+          lines.push(`    remark: ${plainScalar(decl.remark)}`)
+        }
+      }
     }
   }
-  if (model.config) {
-    lines.push('config:')
-    if (model.config.interval !== null && model.config.interval !== undefined) {
-      lines.push(`  interval: ${plainScalar(String(model.config.interval))}`)
+  if (model.defaults) {
+    const d = model.defaults
+    lines.push('defaults:')
+    const vision: string[] = []
+    if (d.vision_threshold !== null && d.vision_threshold !== undefined) {
+      vision.push(`    threshold: ${fmtNum(d.vision_threshold)}`)
     }
-    if (model.config.threshold !== null && model.config.threshold !== undefined) {
-      lines.push(`  threshold: ${fmtNum(model.config.threshold)}`)
+    if (vision.length > 0) {
+      lines.push('  vision:')
+      lines.push(...vision)
     }
-    if (model.config.log_level !== null && model.config.log_level !== undefined) {
-      lines.push(`  log_level: ${plainScalar(String(model.config.log_level))}`)
+    const timing: string[] = []
+    if (d.after_tap !== null && d.after_tap !== undefined) timing.push(`    after_tap: ${fallbackScalar(d.after_tap)}`)
+    if (d.after_match !== null && d.after_match !== undefined) timing.push(`    after_match: ${fallbackScalar(d.after_match)}`)
+    if (d.poll_interval !== null && d.poll_interval !== undefined) timing.push(`    poll_interval: ${fallbackScalar(d.poll_interval)}`)
+    if (timing.length > 0) {
+      lines.push('  timing:')
+      lines.push(...timing)
+    }
+    if (vision.length === 0 && timing.length === 0) {
+      lines.splice(lines.length - 1, 1, 'defaults: {}')
     }
   }
   if (model.steps.length === 0) {
@@ -167,6 +224,8 @@ function serializeScript(model: ScriptModel): string {
   return lines.join('\n') + '\n'
 }
 
+// ---------- 序列化：函数库 ----------
+
 function serializeFunctionLibrary(model: FunctionLibraryModel): string {
   const lines: string[] = []
   model.functions.forEach((fn, i) => {
@@ -175,7 +234,18 @@ function serializeFunctionLibrary(model: FunctionLibraryModel): string {
     if (fn.params.length > 0) {
       lines.push('  params:')
       for (const decl of fn.params) {
-        lines.push(`    - ${singleQuoted(paramDeclToRawString(decl))}`)
+        if (decl.rawForm) {
+          lines.push(`    - ${singleQuoted(paramDeclToRawString(decl))}`)
+        } else {
+          lines.push(`    - name: ${plainScalar(decl.name)}`)
+          lines.push(`      type: ${plainScalar(decl.type)}`)
+          if (decl.default !== null && decl.default !== undefined) {
+            lines.push(`      default: ${fallbackScalar(decl.default)}`)
+          }
+          if (decl.remark !== '') {
+            lines.push(`      remark: ${plainScalar(decl.remark)}`)
+          }
+        }
       }
     }
     if (fn.steps.length === 0) {
@@ -188,396 +258,267 @@ function serializeFunctionLibrary(model: FunctionLibraryModel): string {
   return lines.join('\n') + '\n'
 }
 
+// ---------- 序列化：步骤 ----------
+
 function emitStepSeq(steps: Step[], col: number, lines: string[]): void {
   for (const step of steps) emitStep(step, col, lines)
 }
 
-/** 分支列表：键在 col（内容列），列表项在 col+2；空列表省略。 */
+/** 分支列表：键在 col，列表项在 col+2；空列表省略键（loop.steps 等必需键另行处理）。 */
 function emitBranch(key: string, list: Step[], col: number, lines: string[]): void {
   if (list.length === 0) return
   lines.push(`${' '.repeat(col)}${key}:`)
   emitStepSeq(list, col + 2, lines)
 }
 
-function emitArgs(args: Record<string, Cell>, col: number, lines: string[]): void {
-  const names = Object.keys(args)
+function emitField(key: string, inline: string, col: number, lines: string[]): void {
+  lines.push(`${' '.repeat(col)}${key}: ${inline}`)
+}
+
+function emitWithMap(withArgs: Record<string, Cell>, col: number, lines: string[]): void {
+  const names = Object.keys(withArgs)
   if (names.length === 0) return
-  lines.push(`${' '.repeat(col)}args:`)
+  lines.push(`${' '.repeat(col)}with:`)
   for (const name of names) {
-    lines.push(`${' '.repeat(col + 2)}${plainScalar(name)}: ${argCellInline(args[name])}`)
+    lines.push(`${' '.repeat(col + 2)}${plainScalar(name)}: ${argCellInline(withArgs[name])}`)
   }
 }
 
 function emitStep(step: Step, col: number, lines: string[]): void {
-  const pad = ' '.repeat(col)
-  const head = `${pad}- `
-  const contentCol = col + 2
+  const head = `${' '.repeat(col)}- `
+  const F = col + 4 // 动作映射值内字段列
   switch (step.kind) {
-    case 'str_app':
-      lines.push(`${head}str_app`)
+    case 'app_start':
+      if (step.package === null) lines.push(`${head}app.start`)
+      else lines.push(`${head}app.start: ${cellInline(step.package, 'expr')}`)
       return
-    case 'cls_app':
-      lines.push(`${head}cls_app`)
+    case 'app_stop':
+      if (step.package === null) lines.push(`${head}app.stop`)
+      else lines.push(`${head}app.stop: ${cellInline(step.package, 'expr')}`)
       return
     case 'break':
       lines.push(`${head}break`)
       return
-    case 'throw':
-      if (step.message === null || step.message === undefined) {
-        lines.push(`${head}throw`)
-      } else {
-        lines.push(`${head}throw: ${plainScalar(String(step.message))}`)
-      }
-      return
     case 'tap':
       lines.push(`${head}tap: ${cellInline(step.at, 'coord')}`)
       return
+    case 'swipe':
+      lines.push(`${head}swipe:`)
+      emitField('from', cellInline(step.from, 'coord'), F, lines)
+      emitField('to', cellInline(step.to, 'coord'), F, lines)
+      emitField('duration', cellInline(step.duration, 'time'), F, lines)
+      return
     case 'key':
-      lines.push(`${head}key: ${cellInline(step.key, 'key')}`)
+      if (step.action === null || step.action === 'press') {
+        lines.push(`${head}key: ${cellInline(step.key, 'key')}`)
+      } else {
+        lines.push(`${head}key:`)
+        emitField('key', cellInline(step.key, 'key'), F, lines)
+        emitField('action', plainScalar(step.action), F, lines)
+      }
       return
     case 'text':
       lines.push(`${head}text: ${cellInline(step.value, 'text')}`)
       return
     case 'log':
-      lines.push(`${head}log: ${logCellInline(step.message)}`)
-      return
-    case 'return':
-      lines.push(`${head}return: ${cellInline(step.value, 'bool')}`)
+      if (step.level === null || step.level === '' || step.level === 'info') {
+        lines.push(`${head}log: ${logInline(step.message)}`)
+      } else {
+        lines.push(`${head}log:`)
+        emitField('level', plainScalar(step.level), F, lines)
+        emitField('message', logInline(step.message), F, lines)
+      }
       return
     case 'wait':
-      if (step.duration_max === null) {
-        lines.push(`${head}wait: ${cellInline(step.duration, 'time')}`)
+      if (step.max === null) {
+        lines.push(`${head}wait: ${cellInline(step.min, 'time')}`)
       } else {
-        lines.push(`${head}wait: [${cellInline(step.duration, 'time')}, ${cellInline(step.duration_max, 'time')}]`)
+        lines.push(`${head}wait:`)
+        emitField('min', cellInline(step.min, 'time'), F, lines)
+        emitField('max', cellInline(step.max, 'time'), F, lines)
       }
+      return
+    case 'set':
+      lines.push(`${head}set:`)
+      emitField('name', plainScalar(step.name), F, lines)
+      emitField('value', cellInline(step.value, 'expr'), F, lines)
       return
     case 'if':
-      lines.push(`${head}if: ${cellInline(step.cond, 'bool')}`)
-      emitBranch('then', step.then, contentCol, lines)
-      emitBranch('else', step.else, contentCol, lines)
+      lines.push(`${head}if:`)
+      emitField('cond', cellInline(step.cond, 'expr'), F, lines)
+      emitBranch('then', step.then, F, lines)
+      emitBranch('else', step.else, F, lines)
       return
-    case 'swipe':
-      lines.push(`${head}swipe:`)
-      lines.push(`${' '.repeat(contentCol + 2)}fm: ${cellInline(step.from, 'coord')}`)
-      lines.push(`${' '.repeat(contentCol + 2)}to: ${cellInline(step.to, 'coord')}`)
-      lines.push(`${' '.repeat(contentCol + 2)}time: ${cellInline(step.time, 'time')}`)
-      return
-    case 'find':
-      lines.push(`${head}find: ${cellInline(step.template, 'tmpl')}`)
-      if (step.block.length > 0) {
-        lines.push(`${' '.repeat(contentCol)}block:`)
-        for (const b of step.block) {
-          lines.push(`${' '.repeat(contentCol + 2)}- ${cellInline(b, 'tmpl')}`)
-        }
-      }
-      if (step.verify) lines.push(`${' '.repeat(contentCol)}verify: true`)
-      if (step.timeout !== null) {
-        lines.push(`${' '.repeat(contentCol)}timeout: ${cellInline(step.timeout, 'time')}`)
-      }
-      emitBranch('then', step.then, contentCol, lines)
-      emitBranch('else', step.else, contentCol, lines)
-      return
-    case 'match': {
-      lines.push(`${head}match:`)
-      // 紧凑缩进（契约 §4.1）：候选列表是 match 键下的无缩进序列（与键内容列同列）。
-      for (const cand of step.candidates) {
-        const candidateKey = cellInline(cand.template, 'tmpl')
-        if (!cand.click && cand.steps.length === 0) {
-          lines.push(`${' '.repeat(contentCol)}- ${candidateKey}: []`)
-          continue
-        }
-        lines.push(`${' '.repeat(contentCol)}- ${candidateKey}:`)
-        if (cand.click) {
-          // 命中点击候选 = 映射形态（契约 §4.1）；映射值不能与键同列，比候选键深两级。
-          lines.push(`${' '.repeat(contentCol + 4)}click: true`)
-          if (cand.steps.length > 0) {
-            lines.push(`${' '.repeat(contentCol + 4)}steps:`)
-            emitStepSeq(cand.steps, contentCol + 6, lines)
-          }
-        } else {
-          // 候选分支步骤 = 候选键的值序列，同样无缩进（项与键内容列同列）。
-          emitStepSeq(cand.steps, contentCol + 2, lines)
-        }
-      }
-      emitBranch('else', step.else, contentCol, lines)
-      if (step.timeout !== null) {
-        lines.push(`${' '.repeat(contentCol)}timeout: ${cellInline(step.timeout, 'time')}`)
-      }
-      return
-    }
-    case 'check':
-      lines.push(`${head}check: ${cellInline(step.template, 'tmpl')}`)
-      if (step.timeout !== null) {
-        lines.push(`${' '.repeat(contentCol)}timeout: ${cellInline(step.timeout, 'time')}`)
-      }
-      if (step.throw !== null && step.throw !== undefined) {
-        lines.push(`${' '.repeat(contentCol)}throw: ${plainScalar(step.throw)}`)
-      }
-      return
-    case 'color': {
-      lines.push(`${head}color:`)
-      const mapCol = contentCol + 2
-      lines.push(`${' '.repeat(mapCol)}at: ${cellInline(step.at, 'coord')}`)
-      if (step.expect.length > 0) {
-        lines.push(`${' '.repeat(mapCol)}expect:`)
-        for (const exp of step.expect) {
-          const candCol = mapCol + 2
-          const candidateKey = cellInline(exp.color, 'color')
-          if (!exp.click && exp.steps.length === 0) {
-            lines.push(`${' '.repeat(candCol)}- ${candidateKey}: []`)
-            continue
-          }
-          lines.push(`${' '.repeat(candCol)}- ${candidateKey}:`)
-          if (exp.click) {
-            // 命中点击候选 = 映射形态（契约 §4.2）；映射键比候选键深两级。
-            lines.push(`${' '.repeat(candCol + 4)}click: true`)
-            if (exp.steps.length > 0) {
-              lines.push(`${' '.repeat(candCol + 4)}steps:`)
-              emitStepSeq(exp.steps, candCol + 6, lines)
-            }
-          } else {
-            emitStepSeq(exp.steps, candCol + 2, lines)
-          }
-        }
-      }
-      // 规范形态（fixture 冻结）：color 的 else 写在步骤级，与 color 键同列（兄弟键）。
-      emitBranch('else', step.else, contentCol, lines)
-      return
-    }
     case 'loop':
       lines.push(`${head}loop:`)
-      if (step.times !== 0) {
-        lines.push(`${' '.repeat(contentCol + 2)}times: ${fmtNum(step.times)}`)
-      }
+      if (step.times !== null) emitField('times', cellInline(step.times, 'number'), F, lines)
       if (step.steps.length === 0) {
-        lines.push(`${' '.repeat(contentCol + 2)}steps: []`)
+        emitField('steps', '[]', F, lines)
       } else {
-        lines.push(`${' '.repeat(contentCol + 2)}steps:`)
-        emitStepSeq(step.steps, contentCol + 4, lines)
+        lines.push(`${' '.repeat(F)}steps:`)
+        emitStepSeq(step.steps, F + 2, lines)
       }
       return
     case 'call':
-      lines.push(`${head}call: ${plainScalar(step.target)}`)
-      emitArgs(step.args, contentCol, lines)
+      lines.push(`${head}call:`)
+      emitField('target', plainScalar(step.target), F, lines)
+      emitWithMap(step.with, F, lines)
+      if (step.save !== null) emitField('save', plainScalar(step.save), F, lines)
       return
-    case 'func':
-      lines.push(`${head}func: ${plainScalar(step.target)}`)
-      emitArgs(step.args, contentCol, lines)
-      emitBranch('then', step.then, contentCol, lines)
-      emitBranch('else', step.else, contentCol, lines)
+    case 'invoke':
+      lines.push(`${head}invoke:`)
+      emitField('capability', plainScalar(step.capability), F, lines)
+      emitWithMap(step.with, F, lines)
+      if (step.save !== null) emitField('save', plainScalar(step.save), F, lines)
       return
+    case 'return':
+      lines.push(`${head}return: ${cellInline(step.value, 'expr')}`)
+      return
+    case 'throw':
+      lines.push(`${head}throw: ${cellInline(step.message, 'expr')}`)
+      return
+    case 'find': {
+      lines.push(`${head}find:`)
+      emitField('template', cellInline(step.template, 'tmpl'), F, lines)
+      if (step.timeout !== null) emitField('timeout', cellInline(step.timeout, 'time'), F, lines)
+      if (step.threshold !== null) emitField('threshold', fmtNum(step.threshold), F, lines)
+      if (step.region !== null && step.region !== undefined) emitField('region', fallbackScalar(step.region), F, lines)
+      if (step.save !== null) emitField('save', plainScalar(step.save), F, lines)
+      emitBranch('then', step.then, F, lines)
+      emitBranch('else', step.else, F, lines)
+      if (step.verify) {
+        lines.push(`${' '.repeat(F)}verify:`)
+        emitField('template', cellInline(step.verify.template, 'tmpl'), F + 2, lines)
+        if (step.verify.timeout !== null) {
+          emitField('timeout', cellInline(step.verify.timeout, 'time'), F + 2, lines)
+        }
+      }
+      return
+    }
+    case 'match_first': {
+      lines.push(`${head}match_first:`)
+      lines.push(`${' '.repeat(F)}candidates:`)
+      for (const cand of step.candidates) {
+        lines.push(`${' '.repeat(F + 2)}- template: ${cellInline(cand.template, 'tmpl')}`)
+        if (cand.threshold !== null) {
+          lines.push(`${' '.repeat(F + 4)}threshold: ${fmtNum(cand.threshold)}`)
+        }
+        if (cand.steps.length > 0) {
+          lines.push(`${' '.repeat(F + 4)}steps:`)
+          emitStepSeq(cand.steps, F + 6, lines)
+        }
+      }
+      emitBranch('else', step.else, F, lines)
+      return
+    }
+    case 'check': {
+      lines.push(`${head}check:`)
+      emitField('template', cellInline(step.template, 'tmpl'), F, lines)
+      if (step.timeout !== null) emitField('timeout', cellInline(step.timeout, 'time'), F, lines)
+      if (step.threshold !== null) emitField('threshold', fmtNum(step.threshold), F, lines)
+      return
+    }
   }
 }
 
-/** log 消息：规范 YAML 首选 plain（区别于 text 的一律双引号，契约 §3.5）。 */
-function logCellInline(cell: Cell | null): string {
+/** log 消息：规范 YAML 首选 plain（区别于 text 的一律双引号）。 */
+function logInline(cell: Cell | null): string {
   if (cell === null || cell === undefined) return 'null'
-  if (typeof cell.ref === 'string') return `$${cell.ref}`
-  return typeof cell.lit === 'string' ? plainScalar(cell.lit) : fallbackScalar(cell.lit)
+  if (isRefCell(cell)) return `$${cell.ref}`
+  return fallbackScalar(cell.lit)
 }
 
-/** 步骤字段取值单元格行内渲染（lit 形态由字段类型约束）。 */
-function cellInline(cell: Cell | null, type: ParamType): string {
-  if (cell === null || cell === undefined) return 'null'
-  if (typeof cell.ref === 'string') return `$${cell.ref}`
-  let v = cell.lit
-  switch (type) {
-    case 'coord':
-      return isCoordLit(v) ? `[${fmtNum(v[0])}, ${fmtNum(v[1])}]` : fallbackScalar(v)
-    case 'bool':
-      return v === true ? 'true' : v === false ? 'false' : fallbackScalar(v)
-    case 'text':
-      return typeof v === 'string' ? JSON.stringify(v) : fallbackScalar(v)
-    default:
-      // tmpl / color / time / key：字符串首选 plain（纯数字色会被 dump 自动单引号化）。
-      if (type === 'color' && typeof v === 'string') v = normalizeColor(v)
-      if (typeof v === 'string') return plainScalar(v)
-      return fallbackScalar(v)
-  }
-}
+// ---------- 解析层 ----------
 
-/**
- * args 实参单元格：类型未知（取决于目标声明），字符串字面量按值形态选择引号——
- * time/key/color 形态的串首选 plain（parse 后仍是同一字符串，模型往返稳定）；
- * 其余（text/tmpl 等）双引号。布尔/数字/坐标按本体渲染。
- * 规范依据：fixture v09（text 实参双引号）与 v10（time 实参 plain）。
- */
-function argCellInline(cell: Cell | null): string {
-  if (cell === null || cell === undefined) return 'null'
-  if (typeof cell.ref === 'string') return `$${cell.ref}`
-  const v = cell.lit
-  if (isCoordLit(v)) return `[${fmtNum(v[0])}, ${fmtNum(v[1])}]`
-  if (v === true) return 'true'
-  if (v === false) return 'false'
-  if (typeof v === 'string') return argScalarRender(v)
-  if (typeof v === 'number') return fmtNum(v)
-  return 'null'
-}
+let loadError: string | null = null
 
-function argScalarRender(s: string): string {
-  if (parseTimeMs(s) !== null || isKnownKey(s) || isColorLiteral(s)) return plainScalar(s)
-  return JSON.stringify(s)
-}
-
-function fallbackScalar(v: unknown): string {
-  if (v === null || v === undefined) return 'null'
-  if (typeof v === 'string') return JSON.stringify(v)
-  if (typeof v === 'number' && Number.isFinite(v)) return fmtNum(v)
-  if (typeof v === 'boolean') return String(v)
-  return 'null'
-}
-
-// ---------- 解析层：js-yaml 事件 AST ----------
-
-interface YScalar {
-  kind: 'scalar'
-  tag: string
-  value: string
-  singleQuoted: boolean
-}
-interface YSeq {
-  kind: 'seq'
-  items: YNode[]
-}
-interface YMap {
-  kind: 'map'
-  entries: { key: YNode; value: YNode | null }[]
-}
-type YNode = YScalar | YSeq | YMap
-
-const TAG_PREFIX = 'tag:yaml.org,2002:'
-
-let parseError: string | null = null
-
-function parseDocument(text: string): YNode | null {
-  parseError = null
+/** plain load（CORE_SCHEMA）；空文档按空映射处理（脚本 → version.missing）。 */
+function parseDocument(text: string, diags: Diagnostic[]): Record<string, unknown> | { __seq: true } | null {
+  loadError = null
+  if (text.trim() === '') return {}
+  let doc: unknown
   try {
-    const events = [...parseEvents(text, {})]
-    const docs = eventsToAst(events, { source: text, schema: CORE_SCHEMA })
-    const contents = docs.length > 0 ? docs[0].contents : null
-    if (contents === null || contents === undefined) return mapNode([]) // 空文档按空映射处理
-    return fromJsYamlNode(contents)
+    doc = load(text, { schema: CORE_SCHEMA, json: true })
   } catch (e) {
-    parseError = e instanceof Error ? e.message : String(e)
+    loadError = e instanceof Error ? e.message : String(e)
     return null
   }
+  if (doc === null || doc === undefined) return {}
+  if (Array.isArray(doc)) return { __seq: true }
+  if (typeof doc !== 'object') return { __seq: true }
+  return doc as Record<string, unknown>
 }
 
-function rootError(text: string): string | null {
-  return parseError ?? (text.trim() === '' ? '空文档' : null)
+function isSeqSentinel(v: unknown): boolean {
+  return typeof v === 'object' && v !== null && (v as { __seq?: boolean }).__seq === true
 }
-
-function fromJsYamlNode(node: any): YNode {
-  switch (node.kind) {
-    case 'scalar':
-      return {
-        kind: 'scalar',
-        tag: typeof node.tag === 'string' ? node.tag : `${TAG_PREFIX}str`,
-        value: String(node.value ?? ''),
-        singleQuoted: node.style?.singleQuoted === true,
-      }
-    case 'sequence':
-      return { kind: 'seq', items: (node.items ?? []).map(fromJsYamlNode) }
-    case 'mapping':
-      return {
-        kind: 'map',
-        entries: (node.items ?? []).map((it: any) => ({ key: fromJsYamlNode(it.key), value: it.value ? fromJsYamlNode(it.value) : null })),
-      }
-    default:
-      // alias 等不在契约内的节点按空标量处理（引用/锚点不是规范形态的一部分）。
-      return { kind: 'scalar', tag: `${TAG_PREFIX}null`, value: '', singleQuoted: false }
-  }
-}
-
-function mapNode(entries: YMap['entries']): YMap {
-  return { kind: 'map', entries }
-}
-
-function isNullScalar(node: YNode | null): boolean {
-  return node !== null && node.kind === 'scalar' && node.tag === `${TAG_PREFIX}null`
-}
-
-function scalarValue(node: YNode): unknown {
-  if (node.kind !== 'scalar') return null
-  switch (node.tag) {
-    case `${TAG_PREFIX}bool`:
-      return node.value === 'true'
-    case `${TAG_PREFIX}int`:
-    case `${TAG_PREFIX}float`:
-      return toNumber(node.value)
-    case `${TAG_PREFIX}null`:
-      return null
-    default:
-      return node.value
-  }
-}
-
-function toNumber(raw: string): number {
-  const n = Number(raw)
-  return Number.isFinite(n) ? n : NaN
-}
-
-/** 步骤动作键集合（YAML 键与 kind 同名）。 */
-const ACTION_KEY_SET = new Set<string>(ACTION_KEYS)
 
 // ---------- 顶层解析 ----------
 
-function parseScriptRoot(root: YNode, diags: Diagnostic[]): ScriptModel {
-  if (root.kind !== 'map') {
-    diags.push(diag(CODES.scriptRootType, '', '', '脚本顶层必须是映射（params/config/steps）'))
-    return { params: [], config: null, steps: [] }
+const TOP_LEVEL_KEYS = new Set(['version', 'params', 'defaults', 'steps'])
+
+function parseScriptRoot(root: Record<string, unknown> | { __seq: true }, diags: Diagnostic[]): Program {
+  if (isSeqSentinel(root) || Array.isArray(root)) {
+    diags.push(diag(CODES.rootType, '', '', '脚本顶层必须是映射（version/params/defaults/steps）'))
+    return emptyProgram()
   }
-  const model: ScriptModel = { params: [], config: null, steps: [] }
+  const map = root as Record<string, unknown>
+  // version 强制（ADR-YAML-01）：缺失/非 3 直接拒绝，不解析其余内容（不误解析 v2）
+  if (!('version' in map)) {
+    diags.push(diag(CODES.versionMissing, 'version', 'version', 'v3 脚本必须声明 version: 3（旧版 v2 脚本不受支持，请手动升级）'))
+    return emptyProgram()
+  }
+  const version = map.version
+  if (typeof version !== 'number' || !Number.isInteger(version) || version !== 3) {
+    diags.push(diag(CODES.version, 'version', 'version', `当前只支持 version: 3，收到 ${JSON.stringify(version ?? null)}`))
+    return emptyProgram()
+  }
+  const model = emptyProgram()
   let hasSteps = false
-  for (const entry of root.entries) {
-    const key = entry.key.kind === 'scalar' ? entry.key.value : ''
-    const value = entry.value
+  for (const key of Object.keys(map)) {
+    if (!TOP_LEVEL_KEYS.has(key)) {
+      diags.push(diag(CODES.topLevelUnknownKey, '', key, `不支持顶层字段 ${JSON.stringify(key)}，只允许 version/params/defaults/steps`))
+      continue
+    }
     switch (key) {
       case 'params':
-        model.params = parseParamDecls(value, 'params', diags)
+        model.params = parseParamDecls(map.params, 'params', diags)
         break
-      case 'config':
-        model.config = parseConfig(value, diags)
+      case 'defaults':
+        model.defaults = parseDefaults(map.defaults, diags)
         break
       case 'steps':
         hasSteps = true
-        model.steps = parseStepsNode(value, 'steps', diags)
-        break
-      case '':
-        break
-      default:
-        diags.push(diag(CODES.scriptTopLevelUnknownKey, '', key, `未知顶层键 ${key}，只允许 params/config/steps`))
+        model.steps = parseStepsNode(map.steps, 'steps', diags)
         break
     }
   }
   if (!hasSteps) {
-    diags.push(diag(CODES.scriptRootType, '', 'steps', '脚本缺少必需的顶层 steps（可为空列表，不可省略）'))
+    diags.push(diag(CODES.stepsMissing, 'steps', 'steps', '脚本缺少必需的顶层 steps（可为空列表，不可省略）'))
   }
   return model
 }
 
-function parseFunctionRoot(root: YNode, file: string, diags: Diagnostic[]): FunctionLibraryModel {
+function parseFunctionRoot(root: Record<string, unknown> | { __seq: true }, file: string, diags: Diagnostic[]): FunctionLibraryModel {
   const functions: FunctionModel[] = []
-  if (root.kind !== 'map') {
-    diags.push(diag(CODES.scriptRootType, '', '', '函数库顶层必须是「函数名: 记录」映射'))
+  if (isSeqSentinel(root) || Array.isArray(root)) {
+    diags.push(diag(CODES.rootType, '', '', '函数库顶层必须是「函数名: 记录」映射'))
     return { file, functions }
   }
-  for (const entry of root.entries) {
-    const name = entry.key.kind === 'scalar' ? entry.key.value : ''
-    const basePath = name
-    if (entry.value === null || entry.value.kind !== 'map') {
-      diags.push(diag(CODES.funcRecordType, basePath, '', `函数 ${name} 的记录必须是映射（params/steps）`))
+  for (const [name, value] of Object.entries(root as Record<string, unknown>)) {
+    const v = value as Record<string, unknown> | null | undefined
+    if (v === null || v === undefined || typeof v !== 'object' || Array.isArray(v)) {
+      diags.push(diag(CODES.fieldType, name, '', `函数 ${name} 的记录必须是映射（params/steps）`))
       continue
     }
     const fn: FunctionModel = { name, params: [], steps: [] }
-    for (const rec of entry.value.entries) {
-      const key = rec.key.kind === 'scalar' ? rec.key.value : ''
+    for (const key of Object.keys(v)) {
       if (key === 'params') {
-        fn.params = parseParamDecls(rec.value, `${basePath}.params`, diags)
+        fn.params = parseParamDecls(v.params, `${name}.params`, diags)
       } else if (key === 'steps') {
-        fn.steps = parseStepsNode(rec.value, `${basePath}.steps`, diags)
+        fn.steps = parseStepsNode(v.steps, `${name}.steps`, diags)
       } else {
-        diags.push(diag(CODES.funcRecordUnknownKey, basePath, key, `函数 ${name} 记录只允许 params/steps，出现 ${key}`))
+        diags.push(diag(CODES.fieldUnknown, `${name}.${key}`, key, `函数 ${name} 记录只允许 params/steps，出现 ${key}`))
       }
     }
     functions.push(fn)
@@ -585,109 +526,148 @@ function parseFunctionRoot(root: YNode, file: string, diags: Diagnostic[]): Func
   return { file, functions }
 }
 
-function parseConfig(node: YNode | null, diags: Diagnostic[]): ScriptConfig | null {
-  if (node === null || isNullScalar(node)) return null
-  if (node.kind !== 'map') {
-    diags.push(diag(CODES.stepFieldTypeMismatch, 'config', '', 'config 必须是映射（interval/threshold/log_level）'))
+function parseDefaults(node: unknown, diags: Diagnostic[]): DefaultsModel | null {
+  if (node === null || node === undefined) return null
+  if (typeof node !== 'object' || Array.isArray(node)) {
+    diags.push(diag(CODES.defaultsType, 'defaults', 'defaults', 'defaults 必须是映射（vision/timing）'))
     return null
   }
-  const config: ScriptConfig = { interval: '500ms', threshold: 0.85, log_level: 'info' }
-  for (const entry of node.entries) {
-    const key = entry.key.kind === 'scalar' ? entry.key.value : ''
-    const raw = entry.value
-    switch (key) {
-      case 'interval':
-        if (raw !== null && raw.kind === 'scalar' && typeof scalarValue(raw) === 'string') {
-          config.interval = String(scalarValue(raw))
-        } else if (raw !== null && !isNullScalar(raw)) {
-          diags.push(diag(CODES.stepFieldTypeMismatch, 'config', 'interval', 'interval（轮询/点击后等待）必须是带单位时间串（如 500ms）'))
+  const model: DefaultsModel = {
+    vision_threshold: null,
+    after_tap: null,
+    after_match: null,
+    poll_interval: null,
+  }
+  const map = node as Record<string, unknown>
+  for (const key of Object.keys(map)) {
+    if (key === 'vision') {
+      const vision = map.vision
+      if (vision !== null && typeof vision === 'object' && !Array.isArray(vision)) {
+        for (const vk of Object.keys(vision as Record<string, unknown>)) {
+          if (vk !== 'threshold') {
+            diags.push(diag(CODES.defaultsUnknownKey, `defaults.vision.${vk}`, vk, `defaults.vision 不支持字段 ${vk}`))
+            continue
+          }
+          const t = (vision as Record<string, unknown>).threshold
+          if (typeof t === 'number' && Number.isFinite(t)) model.vision_threshold = t
+          else diags.push(diag(CODES.defaultsType, 'defaults.vision.threshold', 'threshold', 'threshold 必须是 0~1 的数字'))
         }
-        break
-      case 'threshold':
-        if (raw !== null && raw.kind === 'scalar' && typeof scalarValue(raw) === 'number') {
-          config.threshold = scalarValue(raw) as number
-        } else if (raw !== null && !isNullScalar(raw)) {
-          diags.push(diag(CODES.stepFieldTypeMismatch, 'config', 'threshold', 'threshold 必须是 0~1 的数字'))
+      } else if (vision !== null && vision !== undefined) {
+        diags.push(diag(CODES.defaultsType, 'defaults.vision', 'vision', 'defaults.vision 必须是映射'))
+      }
+    } else if (key === 'timing') {
+      const timing = map.timing
+      if (timing !== null && typeof timing === 'object' && !Array.isArray(timing)) {
+        for (const tk of Object.keys(timing as Record<string, unknown>)) {
+          if (tk !== 'after_tap' && tk !== 'after_match' && tk !== 'poll_interval') {
+            diags.push(diag(CODES.defaultsUnknownKey, `defaults.timing.${tk}`, tk, `defaults.timing 不支持字段 ${tk}`))
+            continue
+          }
+          const raw = (timing as Record<string, unknown>)[tk]
+          if (typeof raw === 'string' || typeof raw === 'number') {
+            model[tk as 'after_tap' | 'after_match' | 'poll_interval'] = raw
+          } else {
+            diags.push(diag(CODES.defaultsType, `defaults.timing.${tk}`, tk, 'timing 项必须是带单位时间串（如 300ms）'))
+          }
         }
-        break
-      case 'log_level':
-        if (raw !== null && raw.kind === 'scalar' && typeof scalarValue(raw) === 'string') {
-          config.log_level = String(scalarValue(raw)) as ScriptConfig['log_level']
-        } else if (raw !== null && !isNullScalar(raw)) {
-          diags.push(diag(CODES.stepFieldTypeMismatch, 'config', 'log_level', 'log_level 必须是 debug/info/warn/error'))
-        }
-        break
-      case '':
-        break
-      default:
-        diags.push(diag(CODES.stepFieldUnknown, 'config', key, `未知 config 键 ${key}，只允许 interval/threshold/log_level`))
-        break
+      } else if (timing !== null && timing !== undefined) {
+        diags.push(diag(CODES.defaultsType, 'defaults.timing', 'timing', 'defaults.timing 必须是映射'))
+      }
+    } else {
+      diags.push(diag(CODES.defaultsUnknownKey, `defaults.${key}`, key, `defaults 不支持字段 ${key}，只允许 vision/timing`))
     }
   }
-  return config
+  return model
 }
 
-// ---------- 参数声明解析（契约 §3.3） ----------
+// ---------- 参数声明解析（契约 §1：字符串 / 映射双形态） ----------
 
-function parseParamDecls(node: YNode | null, basePath: string, diags: Diagnostic[]): ParamDecl[] {
-  if (node === null || isNullScalar(node)) return []
-  if (node.kind !== 'seq') {
-    diags.push(diag(CODES.stepListType, basePath, '', 'params 必须是列表'))
+function parseParamDecls(node: unknown, basePath: string, diags: Diagnostic[]): ParamDecl[] {
+  if (node === null || node === undefined) return []
+  if (!Array.isArray(node)) {
+    diags.push(diag(CODES.paramsType, basePath, '', 'params 必须是列表'))
     return []
   }
   const decls: ParamDecl[] = []
   const seen = new Set<string>()
-  node.items.forEach((item, i) => {
+  node.forEach((item, i) => {
     const path = `${basePath}[${i}]`
-    if (item.kind !== 'scalar') {
-      diags.push(diag(CODES.paramDeclFormat, path, 'declaration', 'params 项必须是整条单引号标量（如 \'bool:enable:开关:true\'）'))
+    if (typeof item === 'string') {
+      const decl = parseRawParamDecl(item, path, diags)
+      if (decl) {
+        if (seen.has(decl.name)) duplicateDiag(diags, path, decl.name)
+        else seen.add(decl.name)
+        decls.push(decl)
+      }
       return
     }
-    if (!item.singleQuoted) {
-      diags.push(diag(CODES.paramDeclQuoteStyle, path, 'style', 'params 项必须整条单引号书写（无引号 plain 标量丢失样式，无法校验）'))
-    }
-    const raw = item.value
-    const parts = splitn(raw, ':', 4)
-    // 备注段允许为空（ParamEditor 新建行 remark=''；序列化端 paramDeclToRawString 同样可产出）,
-    // 只要求 类型/变量名 非空：'text:tag:'（无默认值）与 'text:tag::x'（空备注+默认值）均可回解析
-    if (parts.length < 3 || parts[0] === '' || parts[1] === '') {
-      diags.push(diag(CODES.paramDeclFormat, path, 'declaration', `参数声明应为 类型:变量名:备注[:默认值] 四段式，收到 ${JSON.stringify(raw)}`))
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      diags.push(diag(CODES.paramsInvalid, path, 'declaration', '参数声明必须是字符串（type:name:remark[:default]）或映射（name/type/default/remark）'))
       return
     }
-    const [type, name, remark, defaultTail] = parts
-    if (!PARAM_TYPES.includes(type as ParamType)) {
-      diags.push(diag(CODES.paramDeclFormat, path, 'declaration', `未知参数类型 ${type}（七类：tmpl/coord/color/time/key/text/bool）`))
-      return
+    const map = item as Record<string, unknown>
+    for (const key of Object.keys(map)) {
+      if (key !== 'name' && key !== 'type' && key !== 'default' && key !== 'remark') {
+        diags.push(diag(CODES.paramsUnknownKey, `${path}.${key}`, key, `不支持参数字段 ${key}（允许：name/type/default/remark）`))
+      }
     }
-    if (/[\n\r]/.test(raw)) {
-      diags.push(diag(CODES.paramDeclFormat, path, 'declaration', '参数声明不能包含换行'))
+    const name = typeof map.name === 'string' ? map.name : ''
+    if (name === '') {
+      diags.push(diag(CODES.paramsInvalid, `${path}.name`, 'name', '参数映射缺少非空 name 字符串'))
       return
     }
     if (!PARAM_NAME_RE.test(name)) {
-      diags.push(diag(CODES.paramDeclNameInvalid, path, 'name', `变量名 ${name} 不符合 [A-Za-z_][A-Za-z0-9_]*`))
+      diags.push(diag(CODES.paramsNameInvalid, `${path}.name`, 'name', `变量名 ${name} 不符合 [A-Za-z_][A-Za-z0-9_]*`))
       return
     }
     if (seen.has(name)) {
-      diags.push(diag(CODES.paramDeclNameDuplicate, path, 'name', `变量名 ${name} 在同一参数表内重复`))
+      duplicateDiag(diags, path, name)
       return
     }
     seen.add(name)
+    const type = typeof map.type === 'string' && map.type !== '' ? map.type : 'string'
+    const remark = typeof map.remark === 'string' ? map.remark : ''
     let defaultValue: ParamDecl['default'] = null
-    if (parts.length === 4) {
-      if (defaultTail === '') {
-        diags.push(diag(CODES.paramDefaultEmpty, path, 'default', '空默认值非法（不等价于没有默认值；空字符串须写 ""）'))
+    if (map.default !== null && map.default !== undefined) {
+      const v = map.default
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+        defaultValue = v
       } else {
-        const parsed = parseParamLiteral(type as ParamType, defaultTail)
-        if (parsed.ok) {
-          defaultValue = parsed.value ?? null
-        } else {
-          diags.push(diag(CODES.paramDefaultInvalid, path, 'default', parsed.reason ?? '默认值不能按声明类型解析'))
-        }
+        diags.push(diag(CODES.paramsDefaultInvalid, `${path}.default`, 'default', '默认值必须是标量（字符串/数字/布尔）'))
       }
     }
-    decls.push({ type: type as ParamType, name, remark, default: defaultValue })
+    decls.push({ type, name, remark, default: defaultValue, rawForm: false })
   })
   return decls
+}
+
+function duplicateDiag(diags: Diagnostic[], path: string, name: string): void {
+  diags.push(diag(CODES.paramsNameDuplicate, path, 'name', `变量名 ${name} 在同一参数表内重复`))
+}
+
+/** 字符串声明形态：'type:name[:remark[:default]]'（类型/变量名须非空；备注可为空）。 */
+function parseRawParamDecl(raw: string, path: string, diags: Diagnostic[]): ParamDecl | null {
+  const parts = splitn(raw, ':', 4)
+  if (parts.length < 3 || parts[0] === '' || parts[1] === '') {
+    diags.push(diag(CODES.paramsInvalid, path, 'declaration', `参数声明应为 类型:变量名:备注[:默认值] 四段式，收到 ${JSON.stringify(raw)}`))
+    return null
+  }
+  const [type, name, remark, defaultTail] = parts
+  if (/[\n\r]/.test(raw)) {
+    diags.push(diag(CODES.paramsInvalid, path, 'declaration', '参数声明不能包含换行'))
+    return null
+  }
+  if (!PARAM_NAME_RE.test(name)) {
+    diags.push(diag(CODES.paramsNameInvalid, path, 'name', `变量名 ${name} 不符合 [A-Za-z_][A-Za-z0-9_]*`))
+    return null
+  }
+  let defaultValue: ParamDecl['default'] = null
+  if (parts.length === 4) {
+    const parsed = parseParamLiteral(type, defaultTail)
+    if (parsed.ok) defaultValue = parsed.value ?? null
+    else diags.push(diag(CODES.paramsDefaultInvalid, path, 'default', parsed.reason ?? '默认值不能按声明类型解析'))
+  }
+  return { type, name, remark, default: defaultValue, rawForm: true }
 }
 
 function splitn(s: string, sep: string, maxParts: number): string[] {
@@ -705,525 +685,461 @@ function splitn(s: string, sep: string, maxParts: number): string[] {
 
 // ---------- 步骤解析 ----------
 
-function parseStepsNode(node: YNode | null, basePath: string, diags: Diagnostic[]): Step[] {
-  if (node === null || isNullScalar(node)) return []
-  if (node.kind !== 'seq') {
-    diags.push(diag(CODES.stepListType, basePath, '', '步骤必须是列表'))
+/** v2 步骤名 → v3 迁移提示（ADR-YAML-01/02/03：只诊断不解析）。 */
+const V2_ACTION_HINTS: Record<string, string> = {
+  str_app: 'v2 步骤 str_app 已移除，v3 使用 app.start',
+  cls_app: 'v2 步骤 cls_app 已移除，v3 使用 app.stop',
+  func: 'v2 步骤 func 已移除，v3 统一为 call（target 加 function: 前缀）',
+  match: 'v2 步骤 match 已移除，v3 使用 match_first（候选 steps 键）',
+  color: 'v2 步骤 color 已移除（v3 颜色分支暂无等价步骤）',
+  find_click: 'click 语法已全面移除（ADR-YAML-03）',
+}
+
+function parseStepsNode(node: unknown, basePath: string, diags: Diagnostic[]): Step[] {
+  if (node === null || node === undefined) return []
+  if (!Array.isArray(node)) {
+    diags.push(diag(CODES.stepsType, basePath, '', 'steps 必须是列表'))
     return []
   }
   const steps: Step[] = []
-  node.items.forEach((item, i) => {
+  node.forEach((item, i) => {
     const step = parseStepNode(item, `${basePath}[${i}]`, diags)
     if (step !== null) steps.push(step)
   })
   return steps
 }
 
-type RawCell =
-  | { t: 'ref'; name: string }
-  | { t: 'lit'; v: unknown }
-  | { t: 'seq'; items: RawCell[] }
-  | { t: 'none' }
-
-/** 值节点 → 原始单元格（`$name` 完整值引用；序列保留给 coord/等待区间使用）。 */
-function parseCellRaw(node: YNode | null): RawCell {
-  if (node === null) return { t: 'none' }
-  if (node.kind === 'scalar') {
-    if (isNullScalar(node)) return { t: 'none' }
-    if (node.tag === `${TAG_PREFIX}str`) {
-      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(node.value)
-      if (m) return { t: 'ref', name: m[1] }
-      return { t: 'lit', v: node.value }
+/** 值节点 → 表达式单元格：`$path` 属性路径引用；标量/复合值 → 字面量。 */
+function exprCell(v: unknown, path: string, field: string, diags: Diagnostic[]): Cell {
+  if (v === null || v === undefined) return { lit: null }
+  if (typeof v === 'string') {
+    if (v.startsWith('$')) {
+      const name = v.slice(1)
+      if (name !== '' && isRefPath(name)) return { ref: name }
+      diags.push(diag(CODES.refPathInvalid, path, field, `引用 ${v} 不是合法属性路径（形如 $user.level、$list[0]）`))
+      return { lit: v }
     }
-    return { t: 'lit', v: scalarValue(node) }
+    return { lit: v }
   }
-  if (node.kind === 'seq') {
-    return { t: 'seq', items: node.items.map(parseCellRaw) }
-  }
-  return { t: 'none' }
+  if (typeof v === 'number' || typeof v === 'boolean') return { lit: v }
+  // 复合字面量（数组/映射）：整体保留（内部 $ 引用按普通字符串处理）
+  return { lit: v }
 }
 
-const NONE_CELL: Cell = { lit: null }
-
-/** 必填单元格；缺失 → step.field.missing，占位 {lit:null}。 */
-function requireCell(raw: RawCell, path: string, field: string, diags: Diagnostic[]): Cell {
-  if (raw.t === 'ref') return { ref: raw.name }
-  if (raw.t === 'lit') return { lit: raw.v }
-  if (raw.t === 'seq') return { lit: seqLit(raw.items) }
-  diags.push(diag(CODES.stepFieldMissing, path, field, `缺少必需字段 ${field}`))
+/** 时间单元格：字符串（带单位）/ 非负数字（毫秒）/ $ref。 */
+function timeCell(v: unknown, path: string, field: string, diags: Diagnostic[]): Cell | null {
+  if (v === null || v === undefined) return null
+  if (typeof v === 'string') {
+    if (v.startsWith('$')) return exprCell(v, path, field, diags)
+    if (parseTimeMs(v) !== null) return { lit: v }
+    diags.push(diag(CODES.duration, `${path}.${field}`, field, `时间必须是如 100ms/2s/1m 的正值或 $引用，收到 ${JSON.stringify(v)}`))
+    return { lit: v }
+  }
+  if (typeof v === 'number') {
+    if (Number.isFinite(v) && v >= 0) return { lit: v }
+    diags.push(diag(CODES.duration, `${path}.${field}`, field, `时间毫秒数必须非负，收到 ${v}`))
+    return { lit: v }
+  }
+  diags.push(diag(CODES.duration, `${path}.${field}`, field, '时间必须是字符串或非负整数毫秒'))
   return { lit: null }
 }
 
-/** 可选单元格；缺失 → null（序列化时省略）。 */
-function optionalCell(raw: RawCell): Cell | null {
-  if (raw.t === 'ref') return { ref: raw.name }
-  if (raw.t === 'lit') return { lit: raw.v }
-  if (raw.t === 'seq') return { lit: seqLit(raw.items) }
-  return null
-}
-
-/** coord 单元格：[x, y] 数字序列；引用或（不合法的）其他值保留给校验层判错。 */
-function coordCell(raw: RawCell, path: string, field: string, diags: Diagnostic[]): Cell {
-  if (raw.t === 'ref') return { ref: raw.name }
-  if (raw.t === 'lit') return { lit: raw.v }
-  if (raw.t === 'seq') {
-    const pair = seqLit(raw.items)
-    if (pair !== null) return { lit: pair }
-    diags.push(diag(CODES.stepFieldTypeMismatch, path, field, `${field} 应为 [x, y] 坐标`))
+/** 坐标单元格：[x, y] 数字序列 / $ref；其余原样保留给校验层判错。 */
+function coordCell(v: unknown, path: string, field: string, diags: Diagnostic[]): Cell {
+  if (v === null || v === undefined) {
+    diags.push(diag(CODES.fieldMissing, path, field, `缺少必需字段 ${field}`))
     return { lit: null }
   }
-  diags.push(diag(CODES.stepFieldMissing, path, field, `缺少必需字段 ${field}`))
-  return { lit: null }
-}
-
-function seqLit(items: RawCell[]): unknown {
-  if (items.length === 2) {
-    const a = items[0]
-    const b = items[1]
-    if (a.t === 'lit' && b.t === 'lit' && typeof a.v === 'number' && typeof b.v === 'number') {
-      return [a.v, b.v]
-    }
+  if (Array.isArray(v)) {
+    if (isCoordLit(v)) return { lit: [v[0], v[1]] }
+    diags.push(diag(CODES.fieldType, `${path}.${field}`, field, `${field} 应为 [x, y] 坐标`))
+    return { lit: v }
   }
-  return null
+  return exprCell(v, path, field, diags)
 }
 
-/** wait 值：标量 = 固定等待；二元序列 = [最短, 最长] 随机区间。 */
-function parseWaitCells(
-  raw: RawCell,
-  path: string,
-  diags: Diagnostic[],
-): { duration: Cell; duration_max: Cell | null } {
-  if (raw.t === 'seq' && raw.items.length === 2) {
-    return { duration: requireCell(raw.items[0], path, 'duration', diags), duration_max: optionalCell(raw.items[1]) }
-  }
-  if (raw.t === 'seq') {
-    diags.push(diag(CODES.stepFieldTypeMismatch, path, 'duration', 'wait 随机区间应为 [最短, 最长] 两项'))
-    return { duration: { lit: null }, duration_max: null }
-  }
-  return { duration: requireCell(raw, path, 'duration', diags), duration_max: null }
+/** 可选单元格：缺失（null/undefined）返回 null。 */
+function optionalCell(v: unknown, path: string, field: string, diags: Diagnostic[]): Cell | null {
+  if (v === null || v === undefined) return null
+  return exprCell(v, path, field, diags)
 }
 
-/** 候选键位单元格（match 模板 / color 颜色）：$ref 或原始串字面量（数字色重新字符串化）。 */
-function candidateKeyCell(node: YNode | null): Cell {
-  if (node === null || node.kind !== 'scalar') return { lit: null }
-  if (node.tag === `${TAG_PREFIX}str`) {
-    const m = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(node.value)
-    if (m) return { ref: m[1] }
-    return { lit: node.value }
-  }
-  if (node.tag === `${TAG_PREFIX}null`) return { lit: '' }
-  // 纯数字色等被 schema 解析成数字的键：按原始串重新字符串化（契约 §4.2）。
-  return { lit: node.value }
+interface MapFields {
+  get(key: string): unknown
+  has(key: string): boolean
+  rejectUnknown(allowed: string[]): void
 }
 
-function entryKey(entry: { key: YNode; value: YNode | null }): string {
-  return entry.key.kind === 'scalar' ? entry.key.value : ''
-}
-
-function parseStepNode(node: YNode | null, path: string, diags: Diagnostic[]): Step | null {
-  if (node === null) return null
-  if (node.kind === 'scalar') {
-    if (node.value === 'str_app') return { uuid: newStepUuid(), kind: 'str_app' }
-    if (node.value === 'cls_app') return { uuid: newStepUuid(), kind: 'cls_app' }
-    if (node.value === 'break') return { uuid: newStepUuid(), kind: 'break' }
-    if (node.value === 'throw') return { uuid: newStepUuid(), kind: 'throw', message: null }
-    if (!isNullScalar(node)) {
-      diags.push(diag(CODES.stepUnknownAction, path, '', `未知动作 ${JSON.stringify(node.value)}`))
-    }
+function asMap(v: unknown, path: string, message: string, diags: Diagnostic[]): MapFields | null {
+  if (v === null || v === undefined || typeof v !== 'object' || Array.isArray(v)) {
+    diags.push(diag(CODES.stepShape, path, '', message))
     return null
   }
-  if (node.kind !== 'map') {
-    diags.push(diag(CODES.stepListType, path, '', '步骤项必须是标量动作或「动作键: 字段」映射'))
-    return null
-  }
-  // check 的 throw 是兄弟字段（未命中终止原因），与 throw 动作键同名词：
-  // 步骤内存在 check 键时把 throw 降级为字段，避免误判多动作键。
-  const hasCheck = node.entries.some((e) => entryKey(e) === 'check')
-  const actionEntries = node.entries.filter(
-    (e) => ACTION_KEY_SET.has(entryKey(e)) && !(hasCheck && entryKey(e) === 'throw'),
-  )
-  const fieldEntries = node.entries.filter(
-    (e) => !ACTION_KEY_SET.has(entryKey(e)) || (hasCheck && entryKey(e) === 'throw'),
-  )
-  if (actionEntries.length === 0) {
-    diags.push(diag(CODES.stepUnknownAction, path, '', '步骤缺少动作键'))
-    return null
-  }
-  if (actionEntries.length > 1) {
-    diags.push(diag(CODES.stepMultiAction, path, '', `一个步骤只允许一个动作键，收到 ${actionEntries.map(entryKey).join('、')}`))
-  }
-  const actionKey = entryKey(actionEntries[0]) as StepKind
-  const value = actionEntries[0].value
-  const fieldRaw = new Map<string, YNode | null>()
-  for (const e of fieldEntries) {
-    const k = entryKey(e)
-    if (k === '') continue
-    if (!isKnownField(actionKey, k)) {
-      diags.push(diag(CODES.stepFieldUnknown, path, k, `动作 ${actionKey} 不支持字段 ${k}`))
-      continue
-    }
-    fieldRaw.set(k, e.value)
-  }
-  return parseStepFields(actionKey, value, fieldRaw, path, diags)
-}
-
-function isKnownField(kind: StepKind, key: string): boolean {
-  switch (kind) {
-    case 'str_app':
-    case 'cls_app':
-    case 'wait':
-      return false
-    case 'tap':
-    case 'key':
-    case 'text':
-    case 'log':
-    case 'return':
-    case 'throw':
-    case 'break':
-      return false
-    case 'swipe':
-      return false // fm/to/time 由动作值映射携带
-    case 'find':
-      return ['block', 'verify', 'timeout', 'then', 'else'].includes(key)
-    case 'match':
-      return ['else', 'timeout'].includes(key)
-    case 'check':
-      return ['timeout', 'throw'].includes(key)
-    case 'color':
-      return ['else'].includes(key)
-    case 'if':
-      return ['then', 'else'].includes(key)
-    case 'loop':
-      return false // times/steps 由动作值映射携带
-    case 'call':
-      return ['args'].includes(key)
-    case 'func':
-      return ['args', 'then', 'else'].includes(key)
+  const map = v as Record<string, unknown>
+  return {
+    get: (key) => map[key],
+    has: (key) => key in map,
+    rejectUnknown(allowed: string[]): void {
+      for (const key of Object.keys(map)) {
+        if (!allowed.includes(key)) {
+          const hint = key === 'click' ? '（click 语法已全面移除，ADR-YAML-03：命中后动作写 then 步骤组）' : ''
+          diags.push(diag(CODES.fieldUnknown, `${path}.${key}`, key, `不支持字段 ${JSON.stringify(key)}${hint}`))
+        }
+      }
+    },
   }
 }
 
-function parseStepFields(
-  kind: StepKind,
-  value: YNode | null,
-  fields: Map<string, YNode | null>,
-  path: string,
-  diags: Diagnostic[],
-): Step | null {
+const ACTION_KEY_SET = new Set<string>(STEP_KINDS.map(yamlKeyOf))
+
+function parseStepNode(item: unknown, path: string, diags: Diagnostic[]): Step | null {
+  if (item === null || item === undefined) return null
+  // 裸标量动作：break / app.start / app.stop
+  if (typeof item === 'string') {
+    if (item === 'break') return { uuid: newStepUuid(), kind: 'break' }
+    if (item === 'app.start') return { uuid: newStepUuid(), kind: 'app_start', package: null }
+    if (item === 'app.stop') return { uuid: newStepUuid(), kind: 'app_stop', package: null }
+    diags.push(diag(CODES.stepUnknown, path, '', V2_ACTION_HINTS[item] ?? `未知动作 ${JSON.stringify(item)}`))
+    return null
+  }
+  if (typeof item !== 'object' || Array.isArray(item)) {
+    diags.push(diag(CODES.stepShape, path, '', '步骤必须是裸动作标量或「动作键: 字段」单键映射'))
+    return null
+  }
+  const map = item as Record<string, unknown>
+  const keys = Object.keys(map)
+  if (keys.length === 0) {
+    diags.push(diag(CODES.stepShape, path, '', '步骤缺少动作键'))
+    return null
+  }
+  if (keys.length > 1) {
+    diags.push(diag(CODES.stepShape, path, '', `每个步骤必须恰好包含一个动作键，收到 ${keys.join('、')}`))
+  }
+  const action = keys[0]
+  const value = map[action]
+  const valuePath = `${path}.${action}`
+  if (!ACTION_KEY_SET.has(action)) {
+    diags.push(diag(CODES.stepUnknown, path, '', V2_ACTION_HINTS[action] ?? `未知 v3 动作 ${JSON.stringify(action)}`))
+    return null
+  }
   const base = { uuid: newStepUuid() }
-  const branch = (key: string): Step[] => parseStepsNode(fields.get(key) ?? null, `${path}.${key}`, diags)
-  switch (kind) {
-    case 'str_app':
-      if (value !== null && !isNullScalar(value)) {
-        diags.push(diag(CODES.stepFieldTypeMismatch, path, '', 'str_app 只允许裸写，不能带值'))
+  const m = (v: unknown): MapFields | null => asMap(v, valuePath, `${action} 必须是映射`, diags)
+  const branch = (node: unknown, key: string): Step[] => parseStepsNode(node, `${valuePath}.${key}`, diags)
+  const strField = (v: unknown, field: string): string | null => {
+    if (v === null || v === undefined) return null
+    if (typeof v === 'string') return v // 空串保留（命名空间等由校验层给明确诊断）
+    diags.push(diag(CODES.fieldString, `${valuePath}.${field}`, field, `${field} 必须是字符串`))
+    return null
+  }
+  const numDiag = (v: unknown, field: string): number | null => {
+    if (v === null || v === undefined) return null
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+    diags.push(diag(CODES.number, `${valuePath}.${field}`, field, `${field} 必须是数字`))
+    return null
+  }
+  switch (action) {
+    case 'tap': {
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        const fm = m(value)
+        if (!fm) return { ...base, kind: 'tap', at: { lit: null } }
+        fm.rejectUnknown(['at', 'point'])
+        const point = fm.has('point') ? fm.get('point') : fm.get('at')
+        if (point === undefined || point === null) {
+          diags.push(diag(CODES.fieldMissing, `${valuePath}.at`, 'at', '缺少字段 at/point'))
+          return { ...base, kind: 'tap', at: { lit: null } }
+        }
+        return { ...base, kind: 'tap', at: coordCell(point, valuePath, 'at', diags) }
       }
-      return { ...base, kind: 'str_app' }
-    case 'cls_app':
-      if (value !== null && !isNullScalar(value)) {
-        diags.push(diag(CODES.stepFieldTypeMismatch, path, '', 'cls_app 只允许裸写，不能带值'))
-      }
-      return { ...base, kind: 'cls_app' }
-    case 'break':
-      if (value !== null) {
-        diags.push(diag(CODES.stepFieldTypeMismatch, path, '', 'break 只允许裸写，不能带值'))
-      }
-      return { ...base, kind: 'break' }
-    case 'throw': {
-      if (value === null || isNullScalar(value)) return { ...base, kind: 'throw', message: null }
-      if (value.kind === 'scalar') return { ...base, kind: 'throw', message: value.value }
-      diags.push(diag(CODES.stepFieldTypeMismatch, path, 'message', 'throw 的原因必须是标量'))
-      return { ...base, kind: 'throw', message: null }
+      return { ...base, kind: 'tap', at: coordCell(value, valuePath, 'at', diags) }
     }
-    case 'tap':
-      return { ...base, kind: 'tap', at: coordCell(parseCellRaw(value), path, 'at', diags) }
-    case 'key':
-      return { ...base, kind: 'key', key: requireCell(parseCellRaw(value), path, 'key', diags) }
-    case 'text':
-      return { ...base, kind: 'text', value: requireCell(parseCellRaw(value), path, 'value', diags) }
-    case 'log':
-      return { ...base, kind: 'log', message: requireCell(parseCellRaw(value), path, 'message', diags) }
-    case 'return':
-      return { ...base, kind: 'return', value: requireCell(parseCellRaw(value), path, 'value', diags) }
-    case 'wait': {
-      const { duration, duration_max } = parseWaitCells(parseCellRaw(value), path, diags)
-      return { ...base, kind: 'wait', duration, duration_max }
-    }
-    case 'if':
-      return {
-        ...base,
-        kind: 'if',
-        cond: requireCell(parseCellRaw(value), path, 'cond', diags),
-        then: branch('then'),
-        else: branch('else'),
-      }
     case 'swipe': {
-      const map = value !== null && value.kind === 'map' ? value : null
-      if (map === null) {
-        diags.push(diag(CODES.stepFieldMissing, path, 'fm', 'swipe 需要 fm/to/time 字段'))
-        return {
-          ...base,
-          kind: 'swipe',
-          from: { lit: null },
-          to: { lit: null },
-          time: { lit: null },
-        }
-      }
-      for (const e of map.entries) {
-        const k = entryKey(e)
-        if (k !== 'fm' && k !== 'to' && k !== 'time') {
-          diags.push(diag(CODES.stepFieldUnknown, path, k, `swipe 不支持字段 ${k}`))
-        }
-      }
-      const get = (k: string) => map.entries.find((e) => entryKey(e) === k)?.value ?? null
-      const toMissing = get('to') === null
-      if (get('fm') === null) diags.push(diag(CODES.stepFieldMissing, path, 'from', 'swipe 缺少 fm（起点坐标）'))
-      if (toMissing) diags.push(diag(CODES.stepFieldMissing, path, 'to', 'swipe 缺少 to（终点坐标）'))
-      const timeRaw = parseCellRaw(get('time'))
+      const fm = m(value)
+      if (!fm) return { ...base, kind: 'swipe', from: { lit: null }, to: { lit: null }, duration: { lit: null } }
+      fm.rejectUnknown(['from', 'to', 'duration', 'time'])
+      if (!fm.has('from')) diags.push(diag(CODES.fieldMissing, `${valuePath}.from`, 'from', 'swipe 缺少 from（起点坐标）'))
+      if (!fm.has('to')) diags.push(diag(CODES.fieldMissing, `${valuePath}.to`, 'to', 'swipe 缺少 to（终点坐标）'))
+      const durationRaw = fm.has('duration') ? fm.get('duration') : fm.get('time')
+      const duration = durationRaw === undefined || durationRaw === null
+        ? (diags.push(diag(CODES.fieldMissing, `${valuePath}.duration`, 'duration', 'swipe 缺少 duration')), { lit: null })
+        : timeCell(durationRaw, valuePath, 'duration', diags) ?? { lit: null }
       return {
         ...base,
         kind: 'swipe',
-        from: coordCell(parseCellRaw(get('fm')), path, 'from', diags),
-        to: coordCell(parseCellRaw(get('to')), path, 'to', diags),
-        time: timeRaw.t === 'none' ? { lit: null } : optionalCell(timeRaw) ?? { lit: null },
+        from: coordCell(fm.get('from') ?? null, valuePath, 'from', diags),
+        to: coordCell(fm.get('to') ?? null, valuePath, 'to', diags),
+        duration,
       }
     }
-    case 'find':
-      return {
-        ...base,
-        kind: 'find',
-        template: requireCell(parseCellRaw(value), path, 'template', diags),
-        block: parseTmplList(fields.get('block') ?? null, `${path}.block`, diags),
-        verify: parseBool(fields.get('verify') ?? null, path, 'verify', diags) ?? false,
-        timeout: optionalCell(parseCellRaw(fields.get('timeout') ?? null)),
-        then: branch('then'),
-        else: branch('else'),
-      }
-    case 'match': {
-      const step: Step = {
-        ...base,
-        kind: 'match',
-        candidates: [],
-        else: branch('else'),
-        timeout: optionalCell(parseCellRaw(fields.get('timeout') ?? null)),
-      }
-      parseMatchCandidates(value, path, step, diags)
-      return step
-    }
-    case 'check': {
-      const template = requireCell(parseCellRaw(value), path, 'template', diags)
-      const rawTimeout = optionalCell(parseCellRaw(fields.get('timeout') ?? null))
-      const timeout = rawTimeout && rawTimeout.ref === undefined && rawTimeout.lit === 0
-        ? { lit: '0ms' }
-        : rawTimeout
-      const throwNode = fields.get('throw') ?? null
-      if (throwNode !== null && !isNullScalar(throwNode) && throwNode.kind !== 'scalar') {
-        diags.push(diag(CODES.stepFieldTypeMismatch, path, 'throw', 'check 的 throw 必须是字符串标量'))
-      }
-      if (throwNode?.kind === 'scalar' && !isNullScalar(throwNode) && !throwNode.value.trim()) {
-        diags.push(diag(CODES.stepFieldTypeMismatch, path, 'throw', 'check 的 throw 必须是非空字符串'))
-      }
-      const throwMsg = throwNode !== null && throwNode.kind === 'scalar' && !isNullScalar(throwNode)
-        ? throwNode.value
-        : null
-      return { ...base, kind: 'check', template, timeout, throw: throwMsg }
-    }
-    case 'color': {
-      const map = value !== null && value.kind === 'map' ? value : null
-      if (map === null) {
-        diags.push(diag(CODES.stepFieldMissing, path, 'at', 'color 需要 at/expect 字段'))
-        return { ...base, kind: 'color', at: { lit: null }, expect: [], else: branch('else') }
-      }
-      const get = (k: string) => map.entries.find((e) => entryKey(e) === k)?.value ?? null
-      for (const e of map.entries) {
-        const k = entryKey(e)
-        if (k !== 'at' && k !== 'expect') {
-          diags.push(diag(CODES.stepFieldUnknown, path, k, `color 不支持字段 ${k}`))
+    case 'key': {
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        const fm = m(value)
+        if (!fm) return { ...base, kind: 'key', key: { lit: null }, action: null }
+        fm.rejectUnknown(['key', 'action'])
+        if (!fm.has('key')) diags.push(diag(CODES.fieldMissing, `${valuePath}.key`, 'key', '缺少字段 key'))
+        const rawAction = fm.get('action')
+        let actionValue: 'down' | 'up' | 'press' | null = null
+        if (rawAction !== undefined && rawAction !== null) {
+          if (rawAction === 'down' || rawAction === 'up' || rawAction === 'press') actionValue = rawAction
+          else diags.push(diag(CODES.fieldType, `${valuePath}.action`, 'action', 'action 只能是 down/up/press'))
         }
+        return { ...base, kind: 'key', key: exprCell(fm.get('key') ?? null, valuePath, 'key', diags), action: actionValue }
       }
+      return { ...base, kind: 'key', key: exprCell(value, valuePath, 'key', diags), action: null }
+    }
+    case 'text': {
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        const fm = m(value)
+        if (!fm) return { ...base, kind: 'text', value: { lit: null } }
+        fm.rejectUnknown(['value'])
+        if (!fm.has('value')) diags.push(diag(CODES.fieldMissing, `${valuePath}.value`, 'value', '缺少字段 value'))
+        return { ...base, kind: 'text', value: exprCell(fm.get('value') ?? null, valuePath, 'value', diags) }
+      }
+      return { ...base, kind: 'text', value: exprCell(value, valuePath, 'value', diags) }
+    }
+    case 'wait': {
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        const fm = m(value)
+        if (!fm) return { ...base, kind: 'wait', min: { lit: null }, max: null }
+        if (fm.has('min') || fm.has('max')) {
+          // 随机区间（契约 §4：min/max 同给）
+          fm.rejectUnknown(['min', 'max'])
+          if (!fm.has('min')) diags.push(diag(CODES.fieldMissing, `${valuePath}.min`, 'min', 'wait 随机区间需要 min/max 同给'))
+          if (!fm.has('max')) diags.push(diag(CODES.fieldMissing, `${valuePath}.max`, 'max', 'wait 随机区间需要 min/max 同给'))
+          return {
+            ...base,
+            kind: 'wait',
+            min: timeCell(fm.get('min') ?? null, valuePath, 'min', diags) ?? { lit: null },
+            max: timeCell(fm.get('max') ?? null, valuePath, 'max', diags),
+          }
+        }
+        fm.rejectUnknown(['duration', 'time'])
+        const raw = fm.has('duration') ? fm.get('duration') : fm.get('time')
+        if (raw === undefined || raw === null) {
+          diags.push(diag(CODES.fieldMissing, `${valuePath}.duration`, 'duration', 'wait 缺少 duration（或 min/max 随机区间）'))
+          return { ...base, kind: 'wait', min: { lit: null }, max: null }
+        }
+        return { ...base, kind: 'wait', min: timeCell(raw, valuePath, 'duration', diags) ?? { lit: null }, max: null }
+      }
+      return { ...base, kind: 'wait', min: timeCell(value, valuePath, 'duration', diags) ?? { lit: null }, max: null }
+    }
+    case 'log': {
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        const fm = m(value)
+        if (!fm) return { ...base, kind: 'log', message: { lit: null }, level: null }
+        fm.rejectUnknown(['level', 'message'])
+        if (!fm.has('message')) diags.push(diag(CODES.fieldMissing, `${valuePath}.message`, 'message', '缺少字段 message'))
+        const rawLevel = fm.get('level')
+        const level = rawLevel !== undefined && rawLevel !== null
+          ? (typeof rawLevel === 'string' && rawLevel.trim() !== '' ? rawLevel : (diags.push(diag(CODES.fieldString, `${valuePath}.level`, 'level', 'level 必须是非空字符串')), null))
+          : null
+        return { ...base, kind: 'log', message: exprCell(fm.get('message') ?? null, valuePath, 'message', diags), level }
+      }
+      return { ...base, kind: 'log', message: exprCell(value, valuePath, 'message', diags), level: null }
+    }
+    case 'set': {
+      const fm = m(value)
+      if (!fm) return { ...base, kind: 'set', name: '', value: { lit: null } }
+      if (fm.has('name')) {
+        fm.rejectUnknown(['name', 'value'])
+        const name = strField(fm.get('name'), 'name')
+        if (!fm.has('value')) diags.push(diag(CODES.fieldMissing, `${valuePath}.value`, 'value', 'set 缺少 value'))
+        return { ...base, kind: 'set', name: name ?? '', value: exprCell(fm.get('value') ?? null, valuePath, 'value', diags) }
+      }
+      const keys = Object.keys(value as Record<string, unknown>)
+      if (keys.length !== 1) {
+        diags.push(diag(CODES.stepShape, valuePath, '', 'set 使用 {name, value} 或单键映射'))
+        return { ...base, kind: 'set', name: keys[0] ?? '', value: { lit: null } }
+      }
+      const name = keys[0]
+      return { ...base, kind: 'set', name, value: exprCell((value as Record<string, unknown>)[name], valuePath, name, diags) }
+    }
+    case 'if': {
+      const fm = m(value)
+      if (!fm) return { ...base, kind: 'if', cond: { lit: null }, then: [], else: [] }
+      fm.rejectUnknown(['cond', 'then', 'else'])
+      if (!fm.has('cond')) diags.push(diag(CODES.fieldMissing, `${valuePath}.cond`, 'cond', 'if 缺少 cond'))
       return {
         ...base,
-        kind: 'color',
-        at: coordCell(parseCellRaw(get('at')), path, 'at', diags),
-        expect: parseColorExpect(get('expect'), path, `${path}.expect`, diags),
-        else: branch('else'),
+        kind: 'if',
+        cond: exprCell(fm.get('cond') ?? null, valuePath, 'cond', diags),
+        then: branch(fm.get('then'), 'then'),
+        else: branch(fm.get('else'), 'else'),
       }
     }
     case 'loop': {
-      const map = value !== null && value.kind === 'map' ? value : null
-      if (map === null) {
-        diags.push(diag(CODES.stepFieldMissing, path, 'steps', 'loop 需要 times/steps 字段'))
-        return { ...base, kind: 'loop', times: 0, steps: [] }
+      const fm = m(value)
+      if (!fm) return { ...base, kind: 'loop', times: null, steps: [] }
+      fm.rejectUnknown(['times', 'steps'])
+      const rawTimes = fm.get('times')
+      let times: Cell | null = null
+      if (rawTimes !== undefined && rawTimes !== null) {
+        if (typeof rawTimes === 'number' && Number.isFinite(rawTimes)) times = { lit: rawTimes }
+        else if (typeof rawTimes === 'string') times = exprCell(rawTimes, valuePath, 'times', diags)
+        else diags.push(diag(CODES.fieldType, `${valuePath}.times`, 'times', 'times 必须是数字或 $引用'))
       }
-      for (const e of map.entries) {
-        const k = entryKey(e)
-        if (k !== 'times' && k !== 'steps') {
-          diags.push(diag(CODES.stepFieldUnknown, path, k, `loop 不支持字段 ${k}`))
-        }
-      }
-      const get = (k: string) => map.entries.find((e) => entryKey(e) === k)?.value ?? null
-      const timesNode = get('times')
-      let times = 0
-      if (timesNode !== null) {
-        const v = timesNode.kind === 'scalar' && !isNullScalar(timesNode) ? scalarValue(timesNode) : null
-        if (typeof v === 'number') times = v
-        else diags.push(diag(CODES.stepFieldTypeMismatch, path, 'times', 'loop 的 times 必须是非负整数（省略或 0 = 无限）'))
-      }
-      const stepsNode = get('steps')
-      if (stepsNode === null) {
-        diags.push(diag(CODES.stepFieldMissing, path, 'steps', 'loop 缺少 steps 子流程'))
-      }
-      return { ...base, kind: 'loop', times, steps: parseStepsNode(stepsNode, `${path}.steps`, diags) }
+      if (!fm.has('steps')) diags.push(diag(CODES.fieldMissing, `${valuePath}.steps`, 'steps', 'loop 缺少 steps 子流程'))
+      return { ...base, kind: 'loop', times, steps: branch(fm.get('steps'), 'steps') }
     }
-    case 'call':
+    case 'break': {
+      if (value !== null && value !== undefined) {
+        diags.push(diag(CODES.stepShape, valuePath, '', 'break 只允许裸写，不能带值'))
+      }
+      return { ...base, kind: 'break' }
+    }
+    case 'call': {
+      const fm = m(value)
+      if (!fm) return { ...base, kind: 'call', target: '', with: {}, save: null }
+      fm.rejectUnknown(['target', 'with', 'args', 'save'])
       return {
         ...base,
         kind: 'call',
-        target: parseTargetScalar(value, path, diags),
-        args: parseArgs(fields.get('args') ?? null, path, diags),
+        target: strField(fm.get('target'), 'target') ?? '',
+        with: parseWithMap(fm, valuePath, diags),
+        save: strField(fm.get('save'), 'save'),
       }
-    case 'func':
+    }
+    case 'invoke': {
+      const fm = m(value)
+      if (!fm) return { ...base, kind: 'invoke', capability: '', with: {}, save: null }
+      fm.rejectUnknown(['capability', 'with', 'args', 'save'])
       return {
         ...base,
-        kind: 'func',
-        target: parseTargetScalar(value, path, diags),
-        args: parseArgs(fields.get('args') ?? null, path, diags),
-        then: branch('then'),
-        else: branch('else'),
+        kind: 'invoke',
+        capability: strField(fm.get('capability'), 'capability') ?? '',
+        with: parseWithMap(fm, valuePath, diags),
+        save: strField(fm.get('save'), 'save'),
       }
+    }
+    case 'return':
+      return { ...base, kind: 'return', value: exprCell(value, valuePath, 'value', diags) }
+    case 'throw': {
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        const fm = m(value)
+        if (!fm) return { ...base, kind: 'throw', message: { lit: null } }
+        fm.rejectUnknown(['message'])
+        if (!fm.has('message')) diags.push(diag(CODES.fieldMissing, `${valuePath}.message`, 'message', 'throw 缺少 message'))
+        return { ...base, kind: 'throw', message: exprCell(fm.get('message') ?? null, valuePath, 'message', diags) }
+      }
+      return { ...base, kind: 'throw', message: exprCell(value, valuePath, 'message', diags) }
+    }
+    case 'app.start':
+    case 'app.stop': {
+      const kind: StepKind = action === 'app.start' ? 'app_start' : 'app_stop'
+      if (value === null || value === undefined) return { ...base, kind, package: null }
+      if (typeof value === 'object' && !Array.isArray(value)) {
+        const fm = m(value)
+        if (!fm) return { ...base, kind, package: null }
+        fm.rejectUnknown(['package', 'app'])
+        const pkg = fm.has('package') ? fm.get('package') : fm.get('app')
+        if (pkg === undefined || pkg === null) return { ...base, kind, package: null }
+        return { ...base, kind, package: exprCell(pkg, valuePath, 'package', diags) }
+      }
+      return { ...base, kind, package: exprCell(value, valuePath, 'package', diags) }
+    }
+    case 'find': {
+      const fm = m(value)
+      if (!fm) return { ...base, kind: 'find', template: { lit: null }, timeout: null, threshold: null, region: null, save: null, then: [], else: [], verify: null }
+      fm.rejectUnknown(['template', 'timeout', 'threshold', 'region', 'save', 'then', 'else', 'verify'])
+      if (!fm.has('template')) diags.push(diag(CODES.fieldMissing, `${valuePath}.template`, 'template', 'find 缺少 template'))
+      let verify: { template: Cell; timeout: Cell | null } | null = null
+      const rawVerify = fm.get('verify')
+      if (rawVerify !== undefined && rawVerify !== null) {
+        const vm = asMap(rawVerify, `${valuePath}.verify`, 'verify 必须是映射', diags)
+        if (vm) {
+          vm.rejectUnknown(['template', 'timeout'])
+          if (!vm.has('template')) diags.push(diag(CODES.fieldMissing, `${valuePath}.verify.template`, 'template', 'verify 缺少 template'))
+          verify = {
+            template: exprCell(vm.get('template') ?? null, `${valuePath}.verify`, 'template', diags),
+            timeout: timeCell(vm.get('timeout') ?? null, `${valuePath}.verify`, 'timeout', diags),
+          }
+        }
+      }
+      const rawThreshold = fm.get('threshold')
+      const threshold = numDiag(rawThreshold, 'threshold')
+      return {
+        ...base,
+        kind: 'find',
+        template: exprCell(fm.get('template') ?? null, valuePath, 'template', diags),
+        timeout: timeCell(fm.get('timeout') ?? null, valuePath, 'timeout', diags),
+        threshold,
+        region: fm.has('region') ? fm.get('region') ?? null : null,
+        save: strField(fm.get('save'), 'save'),
+        then: branch(fm.get('then'), 'then'),
+        else: branch(fm.get('else'), 'else'),
+        verify,
+      }
+    }
+    case 'match_first': {
+      const fm = m(value)
+      if (!fm) return { ...base, kind: 'match_first', candidates: [], else: [] }
+      fm.rejectUnknown(['candidates', 'templates', 'else'])
+      const raw = fm.has('candidates') ? fm.get('candidates') : fm.get('templates')
+      const candidates: { template: Cell; threshold: number | null; steps: Step[] }[] = []
+      if (raw === undefined || raw === null) {
+        diags.push(diag(CODES.fieldMissing, valuePath, 'candidates', 'match_first 缺少 candidates'))
+      } else if (!Array.isArray(raw)) {
+        diags.push(diag(CODES.matchFirstType, `${valuePath}.candidates`, 'candidates', 'candidates 必须是列表'))
+      } else {
+        raw.forEach((item, i) => {
+          const candPath = `${valuePath}.candidates[${i}]`
+          if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+            const cm = asMap(item, candPath, '候选必须是映射', diags)
+            if (!cm) return
+            cm.rejectUnknown(['template', 'threshold', 'steps'])
+            if (!cm.has('template')) diags.push(diag(CODES.fieldMissing, `${candPath}.template`, 'template', '候选缺少 template'))
+            candidates.push({
+              template: exprCell(cm.get('template') ?? null, candPath, 'template', diags),
+              threshold: numDiag(cm.get('threshold'), 'threshold'),
+              steps: parseStepsNode(cm.get('steps'), `${candPath}.steps`, diags),
+            })
+          } else {
+            candidates.push({
+              template: exprCell(item, candPath, 'template', diags),
+              threshold: null,
+              steps: [],
+            })
+          }
+        })
+      }
+      return { ...base, kind: 'match_first', candidates, else: branch(fm.get('else'), 'else') }
+    }
+    case 'check': {
+      const fm = m(value)
+      if (!fm) return { ...base, kind: 'check', template: { lit: null }, timeout: null, threshold: null }
+      fm.rejectUnknown(['template', 'timeout', 'threshold'])
+      if (!fm.has('template')) diags.push(diag(CODES.fieldMissing, `${valuePath}.template`, 'template', 'check 缺少 template'))
+      return {
+        ...base,
+        kind: 'check',
+        template: exprCell(fm.get('template') ?? null, valuePath, 'template', diags),
+        timeout: timeCell(fm.get('timeout') ?? null, valuePath, 'timeout', diags),
+        threshold: numDiag(fm.get('threshold'), 'threshold'),
+      }
+    }
   }
-}
-
-function parseTargetScalar(node: YNode | null, path: string, diags: Diagnostic[]): string {
-  if (node !== null && node.kind === 'scalar' && !isNullScalar(node)) {
-    const v = scalarValue(node)
-    return typeof v === 'string' ? v : node.value
-  }
-  diags.push(diag(CODES.stepFieldTypeMismatch, path, 'target', '调用目标必须是字符串'))
-  return ''
-}
-
-function parseBool(node: YNode | null, path: string, field: string, diags: Diagnostic[]): boolean | null {
-  if (node === null || isNullScalar(node)) return null
-  if (node.kind === 'scalar' && node.tag === `${TAG_PREFIX}bool`) return node.value === 'true'
-  diags.push(diag(CODES.stepFieldTypeMismatch, path, field, `${field} 必须是布尔值`))
   return null
 }
 
-function parseTmplList(node: YNode | null, basePath: string, diags: Diagnostic[]): Cell[] {
-  if (node === null || isNullScalar(node)) return []
-  if (node.kind !== 'seq') {
-    diags.push(diag(CODES.stepListType, basePath, '', 'block 必须是模板列表'))
-    return []
-  }
-  return node.items.map((item) => optionalCell(parseCellRaw(item)) ?? { lit: null })
-}
-
-/** 候选值双形态（契约 §4.1/§4.2）：分支步骤列表（click=false，原形态），或
- *  `{click: true, steps: [...]}` 映射（steps 省略 = 空分支，命中即点）。
- *  诊断与错误码同服务端：step_path = 步骤路径，click 字段 = `<候选>[i].click`。 */
-function parseCandidateBranch(
-  value: YNode | null,
-  path: string,
-  candPrefix: string,
-  stepsPath: string,
-  diags: Diagnostic[],
-): { click: boolean; steps: Step[] } {
-  if (value !== null && value.kind === 'map') {
-    for (const e of value.entries) {
-      const k = entryKey(e)
-      if (k !== 'click' && k !== 'steps') {
-        diags.push(diag(CODES.stepFieldUnknown, path, k, `候选值不支持字段 ${k}（允许：click/steps）`))
-      }
+/** with/args 实参映射（args 为兼容别名，契约 §2；两者都在时合并，with 优先）。 */
+function parseWithMap(fm: MapFields, valuePath: string, diags: Diagnostic[]): Record<string, Cell> {
+  const out: Record<string, Cell> = {}
+  for (const key of ['args', 'with']) {
+    const raw = fm.get(key)
+    if (raw === undefined || raw === null) continue
+    if (typeof raw !== 'object' || Array.isArray(raw)) {
+      diags.push(diag(CODES.fieldType, `${valuePath}.${key}`, key, 'with/args 必须是映射（参数名: 取值）'))
+      continue
     }
-    const clickNode = value.entries.find((e) => entryKey(e) === 'click')?.value ?? null
-    const stepsNode = value.entries.find((e) => entryKey(e) === 'steps')?.value ?? null
-    return {
-      click: parseBool(clickNode, path, `${candPrefix}.click`, diags) ?? false,
-      steps: parseStepsNode(stepsNode, stepsPath, diags),
+    for (const [name, v] of Object.entries(raw as Record<string, unknown>)) {
+      out[name] = exprCell(v, `${valuePath}.${key}`, name, diags)
     }
   }
-  return { click: false, steps: parseStepsNode(value, stepsPath, diags) }
-}
-
-/** match 候选：每项是单键映射 `模板: [分支步骤]`；`else`/`timeout` 误入候选列表 → 恢复到兄弟键并报错（契约 §4.1）。 */
-function parseMatchCandidates(
-  node: YNode | null,
-  path: string,
-  step: Extract<Step, { kind: 'match' }>,
-  diags: Diagnostic[],
-): void {
-  if (node === null || isNullScalar(node)) return
-  if (node.kind !== 'seq') {
-    diags.push(diag(CODES.stepMatchCandidatesType, path, 'candidates', 'match 的候选必须是列表'))
-    return
-  }
-  node.items.forEach((item, i) => {
-    const candPath = `${path}.candidates[${i}]`
-    if (item === null || item.kind !== 'map') {
-      diags.push(diag(CODES.stepMatchCandidatesType, candPath, 'candidates', 'match 候选必须是单键映射（模板: 分支步骤）'))
-      return
-    }
-    const keys = item.entries.map(entryKey)
-    if (keys.includes('else') || keys.includes('timeout')) {
-      diags.push(diag(CODES.stepMatchElseInCandidates, path, 'candidates', 'else/timeout 必须是 match 步骤的兄弟键，不能写进候选列表'))
-      for (const e of item.entries) {
-        const k = entryKey(e)
-        if (k === 'else' && step.else.length === 0) step.else = parseStepsNode(e.value, `${path}.else`, diags)
-        if (k === 'timeout' && step.timeout === null) step.timeout = optionalCell(parseCellRaw(e.value))
-      }
-      return
-    }
-    if (item.entries.length !== 1) {
-      diags.push(diag(CODES.stepMatchCandidatesType, candPath, 'candidates', 'match 候选必须是单键映射（模板: 分支步骤）'))
-      return
-    }
-    const entry = item.entries[0]
-    step.candidates.push({
-      template: candidateKeyCell(entry.key),
-      ...parseCandidateBranch(entry.value, path, `candidates[${i}]`, `${candPath}.steps`, diags),
-    })
-  })
-}
-
-function parseColorExpect(node: YNode | null, path: string, basePath: string, diags: Diagnostic[]): { color: Cell; click: boolean; steps: Step[] }[] {
-  if (node === null || isNullScalar(node)) return []
-  if (node.kind !== 'seq') {
-    diags.push(diag(CODES.stepListType, basePath, '', 'expect 必须是有序候选列表（每项 单键映射 颜色: 分支步骤）'))
-    return []
-  }
-  const expect: { color: Cell; click: boolean; steps: Step[] }[] = []
-  node.items.forEach((item, i) => {
-    const candPath = `${basePath}[${i}]`
-    if (item === null || item.kind !== 'map' || item.entries.length !== 1) {
-      diags.push(diag(CODES.stepListType, candPath, 'expect', 'color 候选必须是单键映射（颜色: 分支步骤）'))
-      return
-    }
-    const entry = item.entries[0]
-    expect.push({
-      color: candidateKeyCell(entry.key),
-      ...parseCandidateBranch(entry.value, path, `expect[${i}]`, `${candPath}.steps`, diags),
-    })
-  })
-  return expect
-}
-
-function parseArgs(node: YNode | null, path: string, diags: Diagnostic[]): Record<string, Cell> {
-  if (node === null || isNullScalar(node)) return {}
-  if (node.kind !== 'map') {
-    diags.push(diag(CODES.stepFieldTypeMismatch, path, 'args', 'args 必须是具名映射（参数名: 取值）'))
-    return {}
-  }
-  const args: Record<string, Cell> = {}
-  for (const entry of node.entries) {
-    const name = entryKey(entry)
-    if (name === '') continue
-    args[name] = optionalCell(parseCellRaw(entry.value)) ?? { lit: null }
-  }
-  return args
+  return out
 }
 
 // ---------- uuid ----------
 
-function withUuids<T extends ScriptModel | FunctionLibraryModel>(model: T): T {
+function withUuids<T extends Program | FunctionLibraryModel>(model: T): T {
   if ('functions' in model) {
     for (const fn of model.functions) allocateUuids(fn.steps)
   } else {

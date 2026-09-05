@@ -16,15 +16,15 @@ import {
  * 选择与插入：uuid ↔ 路径互查、插入锚点、面包屑、start_index 映射。
  */
 
-const NESTED = `steps:
-  - match:
-    - test1.png:
-      - if: true
-        then:
-          - log: 深
-    else:
-      - log: 兜底
-    timeout: 30s
+const NESTED = `version: 3
+steps:
+  - match_first:
+      candidates:
+        - template: test1.png
+          steps:
+            - if: {cond: true, then: [{log: 深}]}
+      else:
+        - log: 兜底
 `
 
 describe('selection：uuid ↔ 路径互查', () => {
@@ -42,7 +42,7 @@ describe('selection：uuid ↔ 路径互查', () => {
     const loc2 = findStepLocation(model, deepLog.uuid)
     // 路径语法：候选分支容器 = [..., 'candidates', n]；候选内步骤再带自身下标段。
     expect(loc2.path).toEqual(['steps', 0, 'candidates', 0, 0, 'then', 0])
-    // step_path 字符串形态按契约 §5.2：candidates 段带 .steps（steps[2].candidates[1].steps[0]）。
+    // step_path 字符串形态（surface 稳定路径语法）：candidates 段带 .steps。
     expect(loc2.stepPath).toBe('steps[0].candidates[0].steps[0].then[0]')
     expect(loc2.containerPath).toEqual(['steps', 0, 'candidates', 0, 0, 'then'])
     expect(loc2.list).toBe(ifStep.then)
@@ -72,15 +72,14 @@ describe('selection：插入锚点', () => {
     expect(anchor4.index).toBe(1)
   })
 
-  it('函数库根容器', () => {
-    // 简单函数库模型由 codec 解析
-    const lib = parseScript('steps: []\n').model
+  it('脚本根容器', () => {
+    const lib = parseScript('version: 3\nsteps: []\n').model
     expect(rootContainerPath(lib)).toEqual(['steps'])
   })
 })
 
 describe('selection：面包屑', () => {
-  it('主流程 / 命中 test1 / 如果为真', () => {
+  it('主流程 / 命中 test1.png / 如果为真 / 都未命中', () => {
     const { model } = parseScript(NESTED)
     const ifStep = model.steps[0].candidates[0].steps[0]
     const deepLog = ifStep.then[0]
@@ -89,24 +88,28 @@ describe('selection：面包屑', () => {
     expect(crumbs[0].stepUuid).toBeNull()
     expect(crumbs[1].containerPath).toEqual(['steps', 0, 'candidates', 0])
     expect(crumbs[2].containerPath).toEqual(['steps', 0, 'candidates', 0, 0, 'then'])
+
+    // else 容器
+    const elseStep = model.steps[0].else[0]
+    expect(breadcrumb(model, elseStep.uuid).map((c) => c.label)).toEqual(['主流程', '都未命中'])
   })
 
-  it('color/loop/else 容器命名', () => {
-    const { model } = parseScript(`steps:
-  - color:
-      at: [0.5, 0.5]
-      expect:
-        - ff8800:
-          - log: 红
-    else:
-      - log: 兜
+  it('find/loop 容器命名', () => {
+    const { model } = parseScript(`version: 3
+steps:
+  - find:
+      template: a.png
+      then:
+        - log: 命中
+      else:
+        - log: 兜
   - loop:
       steps:
         - log: 体
 `)
-    const colorStep = model.steps[0]
-    const elseStep = colorStep.else[0]
-    expect(breadcrumb(model, elseStep.uuid).map((c) => c.label)).toEqual(['主流程', '颜色未命中'])
+    const findStep0 = model.steps[0]
+    expect(breadcrumb(model, findStep0.then[0].uuid).map((c) => c.label)).toEqual(['主流程', '命中后'])
+    expect(breadcrumb(model, findStep0.else[0].uuid).map((c) => c.label)).toEqual(['主流程', '超时未命中'])
     const loopStep = model.steps[1]
     expect(breadcrumb(model, loopStep.steps[0].uuid).map((c) => c.label)).toEqual(['主流程', '循环体'])
   })

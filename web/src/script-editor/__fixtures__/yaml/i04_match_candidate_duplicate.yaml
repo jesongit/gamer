@@ -1,6 +1,0 @@
-steps:
-  - match:
-    - dup.png:
-      - log: 第一候选
-    - dup.png:
-      - log: 第二候选

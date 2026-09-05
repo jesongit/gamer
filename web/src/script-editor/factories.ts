@@ -1,12 +1,11 @@
 /**
- * 步骤工厂与添加面板分组（plan §8.5）。
+ * 步骤工厂与添加面板分组（v3）。
  *
- * 旧文本片段生成路径已删除；手动添加全部调用这里的强类型工厂。
- * 面板按任务分组（应用/操作/识别/流程/复用/函数专用），
- * return 仅函数上下文可见。
+ * 手动添加全部走这里的强类型工厂；面板按任务分组
+ * （应用/操作/识别/流程/复用/函数专用），return 仅函数上下文可见。
  */
 
-import type { Cell, ParamType, Step, StepKind } from './model'
+import type { Cell, Step, StepKind } from './model'
 import { lit, newStepUuid } from './model'
 
 // ---------- 工厂 ----------
@@ -21,44 +20,41 @@ export function createStep(kind: StepKind, overrides: StepOverrides = {}): Step 
   return base
 }
 
-/** 复制上下文里的默认值：坐标取屏幕中心，时间 1s，布尔 true。 */
+/** 复制上下文里的默认值：坐标取屏幕中心，时间 1s。 */
 const CENTER: Cell = lit([0.5, 0.5])
 
 export const DEFAULT_FACTORIES: Record<StepKind, () => Step> = {
-  str_app: () => createStep('str_app'),
-  cls_app: () => createStep('cls_app'),
+  app_start: () => createStep('app_start', { package: null }),
+  app_stop: () => createStep('app_stop', { package: null }),
   tap: () => createStep('tap', { at: CENTER }),
-  swipe: () => createStep('swipe', { from: lit([0.3, 0.5]), to: lit([0.7, 0.5]), time: lit('500ms') }),
-  key: () => createStep('key', { key: lit('BACK') }),
+  swipe: () => createStep('swipe', { from: lit([0.3, 0.5]), to: lit([0.7, 0.5]), duration: lit('500ms') }),
+  key: () => createStep('key', { key: lit('BACK'), action: null }),
   text: () => createStep('text', { value: lit('') }),
-  log: () => createStep('log', { message: lit('') }),
-  wait: () => createStep('wait', { duration: lit('1s'), duration_max: null }),
+  log: () => createStep('log', { message: lit(''), level: null }),
+  wait: () => createStep('wait', { min: lit('1s'), max: null }),
+  set: () => createStep('set', { name: '', value: lit('') }),
+  if: () => createStep('if', { cond: lit(true), then: [], else: [] }),
+  loop: () => createStep('loop', { times: lit(3), steps: [] }),
+  break: () => createStep('break'),
+  call: () => createStep('call', { target: '', with: {}, save: null }),
+  invoke: () => createStep('invoke', { capability: '', with: {}, save: null }),
+  return: () => createStep('return', { value: lit(null) }),
+  throw: () => createStep('throw', { message: lit('') }),
   find: () => createStep('find', {
     template: lit(''),
-    block: [],
-    verify: false,
     timeout: null,
+    threshold: null,
+    region: null,
+    save: null,
     then: [],
     else: [],
+    verify: null,
   }),
-  match: () => createStep('match', {
-    candidates: [{ template: lit(''), click: false, steps: [] }],
-    else: [],
-    timeout: null,
-  }),
-  check: () => createStep('check', { template: lit(''), timeout: null, throw: null }),
-  color: () => createStep('color', {
-    at: CENTER,
-    expect: [{ color: lit(''), click: false, steps: [] }],
+  match_first: () => createStep('match_first', {
+    candidates: [{ template: lit(''), threshold: null, steps: [] }],
     else: [],
   }),
-  if: () => createStep('if', { cond: lit(true), then: [], else: [] }),
-  loop: () => createStep('loop', { times: 0, steps: [] }),
-  break: () => createStep('break'),
-  call: () => createStep('call', { target: '', args: {} }),
-  func: () => createStep('func', { target: '', args: {}, then: [], else: [] }),
-  throw: () => createStep('throw', { message: null }),
-  return: () => createStep('return', { value: lit(true) }),
+  check: () => createStep('check', { template: lit(''), timeout: null, threshold: null }),
 }
 
 /** 便捷入口：按 kind 创建默认步骤。 */
@@ -68,7 +64,7 @@ export function makeStep(kind: StepKind): Step {
   return factory()
 }
 
-// ---------- 添加面板分组（plan §8.5） ----------
+// ---------- 添加面板分组 ----------
 
 export type PanelGroupId = 'app' | 'action' | 'recognition' | 'flow' | 'reuse' | 'function'
 
@@ -84,8 +80,8 @@ export const PANEL_GROUPS: { id: PanelGroupId; label: string; entries: PanelEntr
     id: 'app',
     label: '应用',
     entries: [
-      { kind: 'str_app', label: '启动应用', group: 'app' },
-      { kind: 'cls_app', label: '关闭应用', group: 'app' },
+      { kind: 'app_start', label: '启动应用', group: 'app' },
+      { kind: 'app_stop', label: '关闭应用', group: 'app' },
     ],
   },
   {
@@ -103,19 +99,19 @@ export const PANEL_GROUPS: { id: PanelGroupId; label: string; entries: PanelEntr
     id: 'recognition',
     label: '识别',
     entries: [
-      { kind: 'find', label: '点击模板', group: 'recognition' },
-      { kind: 'match', label: '匹配模板', group: 'recognition' },
+      { kind: 'find', label: '等待模板', group: 'recognition' },
+      { kind: 'match_first', label: '多模板匹配', group: 'recognition' },
       { kind: 'check', label: '检查模板', group: 'recognition' },
-      { kind: 'color', label: '判断颜色', group: 'recognition' },
     ],
   },
   {
     id: 'flow',
     label: '流程',
     entries: [
-      { kind: 'if', label: '布尔判断', group: 'flow' },
+      { kind: 'if', label: '条件分支', group: 'flow' },
       { kind: 'loop', label: '循环', group: 'flow' },
       { kind: 'break', label: '跳出循环', group: 'flow' },
+      { kind: 'set', label: '设置变量', group: 'flow' },
       { kind: 'throw', label: '抛出错误', group: 'flow' },
       { kind: 'log', label: '记录日志', group: 'flow' },
     ],
@@ -124,15 +120,15 @@ export const PANEL_GROUPS: { id: PanelGroupId; label: string; entries: PanelEntr
     id: 'reuse',
     label: '复用',
     entries: [
-      { kind: 'call', label: '调用脚本', group: 'reuse' },
-      { kind: 'func', label: '调用函数', group: 'reuse' },
+      { kind: 'call', label: '调用脚本/函数', group: 'reuse' },
+      { kind: 'invoke', label: '调用能力', group: 'reuse' },
     ],
   },
   {
     id: 'function',
     label: '函数专用',
     entries: [
-      { kind: 'return', label: '返回布尔值', group: 'function' },
+      { kind: 'return', label: '返回值', group: 'function' },
     ],
   },
 ]
@@ -140,20 +136,4 @@ export const PANEL_GROUPS: { id: PanelGroupId; label: string; entries: PanelEntr
 /** 按编辑上下文取面板条目：脚本上下文隐藏「函数专用」（return 仅函数）。 */
 export function panelEntries(context: 'script' | 'function'): PanelEntry[] {
   return PANEL_GROUPS.flatMap((g) => g.entries).filter((e) => context === 'function' || e.group !== 'function')
-}
-
-/** 工厂参数类型速查（属性面板决定控件用）。 */
-export const KIND_PARAM_FIELD_TYPES: Partial<Record<StepKind, Record<string, ParamType>>> = {
-  tap: { at: 'coord' },
-  swipe: { from: 'coord', to: 'coord', time: 'time' },
-  key: { key: 'key' },
-  text: { value: 'text' },
-  log: { message: 'text' },
-  wait: { duration: 'time', duration_max: 'time' },
-  find: { template: 'tmpl', timeout: 'time' },
-  match: { timeout: 'time' },
-  check: { template: 'tmpl' },
-  color: { at: 'coord' },
-  if: { cond: 'bool' },
-  return: { value: 'bool' },
 }

@@ -1,174 +1,122 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { validateSource, validateScript, validateFunctionLibrary } from '../validation'
 import { parseFunctionLibrary, parseScript } from '../codec'
 import { makeStep } from '../factories'
 
 /**
- * 结构化校验：非法 fixture（i02~i09）必须被标出 expected.json 中的每一个
- * {code, step_path, field}；另覆盖 Model 层引用/上下文/绑定检查。
+ * 结构化客户端校验（v3）：引用路径/类型/范围/流程上下文/call 命名空间/defaults。
+ * 错误码 yaml.v3.* 与服务端对齐。
  */
 
-const here = path.dirname(fileURLToPath(import.meta.url))
-const yamlDir = path.join(here, '..', '__fixtures__', 'yaml')
-const jsonDir = path.join(here, '..', '__fixtures__', 'json')
-
-const INVALID_IDS = [
-  'i02_params_unquoted',
-  'i03_default_type_mismatch',
-  'i04_match_candidate_duplicate',
-  'i05_func_path_traversal',
-  'i06_call_cycle',
-  'i07_unknown_top_key',
-  'i08_else_in_candidates',
-  'i09_empty_default',
-  'i10_branch_click_type',
-]
-
-describe('validation：非法 fixture i02~i10 全部标出期望错误', () => {
-  for (const id of INVALID_IDS) {
-    it(`${id}`, () => {
-      const expected = JSON.parse(readFileSync(path.join(jsonDir, `${id}.expected.json`), 'utf8'))
-      const text = readFileSync(path.join(yamlDir, `${id}.yaml`), 'utf8')
-      const { diagnostics } = validateSource(text, 'script', { selfFile: `${id}.yaml` })
-      for (const exp of expected.errors) {
-        const hit = diagnostics.find((d) => d.code === exp.code && d.step_path === exp.step_path && d.field === exp.field)
-        expect(hit, `${id}: 期望错误 ${exp.code}@${exp.step_path}.${exp.field}；实际：${JSON.stringify(diagnostics.map((d) => [d.code, d.step_path, d.field]))}`).toBeDefined()
-      }
-    })
-  }
-
-  it('合法 fixture 无诊断（validateSource 与 parse 对齐）', () => {
-    for (const id of ['v01_minimal_script', 'v06_nested_if_loop', 'v08_color_branch']) {
-      const text = readFileSync(path.join(yamlDir, `${id}.yaml`), 'utf8')
-      const { diagnostics } = validateSource(text, 'script')
-      expect(diagnostics, id).toEqual([])
-    }
+describe('validation：字面量类型与范围', () => {
+  it('coord 超出 0~1 → yaml.v3.coord.range', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - tap: [1.5, 0.5]\n')
+    expect(validateScript(model)).toContainEqual(expect.objectContaining({
+      code: 'yaml.v3.coord.range', step_path: 'steps[0]', field: 'at',
+    }))
   })
 
-  it('check 可省略 throw；模板不存在仍报 resource.tmpl.not_found', () => {
-    const { model } = parseScript('steps:\n  - check: logo.png\n')
-    const diags = validateScript(model)
-    expect(diags.some((d) => d.field === 'throw')).toBe(false)
+  it('time 缺单位 → yaml.v3.duration；0ms 与裸毫秒数字合法', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - wait: soon\n')
+    expect(validateScript(model)).toContainEqual(expect.objectContaining({ code: 'yaml.v3.duration', field: 'min' }))
 
-    const created = parseScript('steps:\n  - check: logo.png\n    throw: 主界面未出现\n')
-    const diags2 = validateScript(created.model, { resolveTemplate: () => false })
-    expect(diags2).toContainEqual(expect.objectContaining({
-      code: 'resource.tmpl.not_found',
-      step_path: 'steps[0]',
-      field: 'template',
+    const ok = parseScript('version: 3\nsteps:\n  - wait: 0ms\n  - wait: 250\n')
+    expect(validateScript(ok.model)).toEqual([])
+  })
+
+  it('未知按键 → yaml.v3.field.type（按键枚举见 schema.KEY_ENUM）', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - key: LAUNCH_MISSILE\n')
+    expect(validateScript(model)).toContainEqual(expect.objectContaining({ code: 'yaml.v3.field.type', field: 'key' }))
+  })
+
+  it('threshold 超范围 → yaml.v3.threshold.range（find/check/候选）', () => {
+    const { model } = parseScript([
+      'version: 3',
+      'steps:',
+      '  - find: {template: a.png, threshold: 1.5}',
+      '  - check: {template: a.png, threshold: -0.1}',
+      '  - match_first:',
+      '      candidates:',
+      '        - template: a.png',
+      '          threshold: 2',
+    ].join('\n'))
+    const diags = validateScript(model)
+    expect(diags.filter((d) => d.code === 'yaml.v3.threshold.range')).toHaveLength(3)
+  })
+
+  it('find 非空模板必需（field.missing 由 parse 产出，此处校验空串）', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - find: {template: ""}\n')
+    expect(validateScript(model)).toContainEqual(expect.objectContaining({
+      code: 'yaml.v3.field.missing', step_path: 'steps[0]', field: 'template',
     }))
-    const ok = validateScript(created.model, { resolveTemplate: () => true })
-    expect(ok).toEqual([])
   })
 })
 
-describe('validation：引用与类型', () => {
-  it('$name 引用未声明参数 → param.ref.unknown', () => {
-    const { model } = parseScript('steps:\n  - tap: $nope\n')
-    const diags = validateScript(model)
-    expect(diags).toContainEqual(expect.objectContaining({
-      code: 'param.ref.unknown',
-      step_path: 'steps[0]',
-      field: 'at',
-    }))
-  })
-
-  it('引用类型与字段不符 → param.ref.type_mismatch', () => {
-    const { model } = parseScript(
-      "params:\n  - 'bool:enable:开关:true'\nsteps:\n  - tap: $enable\n",
-    )
-    const diags = validateScript(model)
-    expect(diags).toContainEqual(expect.objectContaining({
-      code: 'param.ref.type_mismatch',
-      step_path: 'steps[0]',
-      field: 'at',
-    }))
-  })
-
-  it('参数类型切换后，引用错误随之传播（编辑器改类型场景）', () => {
-    const { model } = parseScript(
-      "params:\n  - 'coord:pos:位置:[0.5, 0.5]'\nsteps:\n  - tap: $pos\n",
-    )
+describe('validation：引用路径', () => {
+  it('合法属性路径（$reward.center / $list[0]）不校验「已声明」（v3 动态上下文）', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - tap: $reward.center\n  - tap: $list[0]\n  - tap: $match.score\n')
     expect(validateScript(model)).toEqual([])
-    // 通过 update_param 把 coord 改成 bool（命令栈路径，见 commands.test）
-    model.params[0].type = 'bool'
-    const diags = validateScript(model)
-    expect(diags).toContainEqual(expect.objectContaining({
-      code: 'param.ref.type_mismatch',
-      step_path: 'steps[0]',
-      field: 'at',
-    }))
   })
 
-  it('coord 字面量超出 0~1 → step.coord.range', () => {
-    const { model } = parseScript('steps:\n  - tap: [1.5, 0.5]\n')
+  it('模型内非法引用路径 → yaml.v3.ref.path_invalid', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - tap: [0.5, 0.5]\n')
+    model.steps[0].at = { ref: '1bad.path' }
     expect(validateScript(model)).toContainEqual(expect.objectContaining({
-      code: 'step.coord.range',
-      step_path: 'steps[0]',
-      field: 'at',
+      code: 'yaml.v3.ref.path_invalid', field: 'at',
     }))
-  })
-
-  it('time 缺单位 → step.time.format；颜色非法 → step.color.format', () => {
-    const { model } = parseScript('steps:\n  - wait: 30\n')
-    expect(validateScript(model)).toContainEqual(expect.objectContaining({ code: 'step.time.format' }))
-
-    const { model: m2 } = parseScript("steps:\n  - color:\n      at: [0.1, 0.1]\n      expect:\n        - '12x456':\n          - log: a\n")
-    expect(validateScript(m2)).toContainEqual(expect.objectContaining({ code: 'step.color.format' }))
-  })
-
-  it('if 条件非布尔 → step.if.non_bool_cond', () => {
-    const { model } = parseScript('steps:\n  - if: yes\n    then: []\n')
-    const diags = validateScript(model)
-    expect(diags).toContainEqual(expect.objectContaining({ code: 'step.if.non_bool_cond', step_path: 'steps[0]' }))
-  })
-
-  it('未知按键 → step.field.type_mismatch（按键枚举见 schema.KEY_ENUM）', () => {
-    const { model } = parseScript('steps:\n  - key: LAUNCH_MISSILE\n')
-    expect(validateScript(model)).toContainEqual(expect.objectContaining({ code: 'step.field.type_mismatch', field: 'key' }))
   })
 })
 
 describe('validation：结构约束', () => {
-  it('loop 子流程为空 → step.loop.empty_steps', () => {
-    const { model } = parseScript('steps:\n  - loop:\n      times: 3\n      steps: []\n')
+  it('loop 子流程为空 → yaml.v3.flow.loop_empty_steps', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - loop: {times: 3, steps: []}\n')
     expect(validateScript(model)).toContainEqual(expect.objectContaining({
-      code: 'step.loop.empty_steps', step_path: 'steps[0]', field: 'steps',
+      code: 'yaml.v3.flow.loop_empty_steps', step_path: 'steps[0]', field: 'steps',
     }))
   })
 
   it('break 只能出现在 loop 子流程内', () => {
-    const outside = parseScript('steps:\n  - break\n')
+    const outside = parseScript('version: 3\nsteps:\n  - break\n')
     expect(validateScript(outside.model)).toContainEqual(expect.objectContaining({
-      code: 'step.break.outside_loop', step_path: 'steps[0]',
+      code: 'yaml.v3.flow.break_outside_loop', step_path: 'steps[0]',
     }))
 
-    const inside = parseScript('steps:\n  - loop:\n      steps:\n        - if: true\n          then:\n            - break\n')
+    const inside = parseScript([
+      'version: 3',
+      'steps:',
+      '  - loop:',
+      '      steps:',
+      '        - if: {cond: true, then: [{break}]}',
+    ].join('\n'))
     expect(validateScript(inside.model)).not.toContainEqual(expect.objectContaining({
-      code: 'step.break.outside_loop',
+      code: 'yaml.v3.flow.break_outside_loop',
     }))
   })
 
-  it('wait 随机区间起点大于终点 → step.wait.range_invalid', () => {
-    const { model } = parseScript('steps:\n  - wait: [3s, 1s]\n')
+  it('wait 随机区间起点大于终点 → yaml.v3.wait.range_invalid', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - wait: {min: 3s, max: 1s}\n')
     expect(validateScript(model)).toContainEqual(expect.objectContaining({
-      code: 'step.wait.range_invalid', step_path: 'steps[0]', field: 'duration_max',
+      code: 'yaml.v3.wait.range_invalid', step_path: 'steps[0]', field: 'max',
     }))
   })
 
-  it('return 出现在脚本 → step.return.in_script；函数库中合法', () => {
-    const { model } = parseScript('steps:\n  - return: true\n')
+  it('set 变量名必填', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - set: {name: "", value: 1}\n')
     expect(validateScript(model)).toContainEqual(expect.objectContaining({
-      code: 'step.return.in_script', step_path: 'steps[0]',
+      code: 'yaml.v3.field.string', step_path: 'steps[0]', field: 'name',
+    }))
+  })
+
+  it('return 出现在脚本 → yaml.v3.flow.return_in_script；函数库中合法', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - return: true\n')
+    expect(validateScript(model)).toContainEqual(expect.objectContaining({
+      code: 'yaml.v3.flow.return_in_script', step_path: 'steps[0]',
     }))
     const lib = { file: 'common', functions: [{ name: 'f', params: [], steps: [makeStep('return')] }] }
     expect(validateFunctionLibrary(lib)).toEqual([])
   })
 
-  it('嵌套超限 → step.nesting.depth（默认 32 层）', () => {
+  it('嵌套超限 → yaml.v3.flow.nesting_depth（默认 32 层）', () => {
     // 34 层嵌套 loop（直接构造模型，避免深层 YAML 缩进构造）
     let step = makeStep('log')
     for (let i = 0; i < 33; i++) {
@@ -176,87 +124,138 @@ describe('validation：结构约束', () => {
       loop.steps = [step]
       step = loop
     }
-    const model = { params: [], config: null, steps: [step] }
+    const model = { version: 3, params: [], defaults: null, steps: [step] }
     const diags = validateScript(model)
-    expect(diags.some((d) => d.code === 'step.nesting.depth')).toBe(true)
+    expect(diags.some((d) => d.code === 'yaml.v3.flow.nesting_depth')).toBe(true)
   })
 
-  it('变量名重复/非法 → param.decl.name_duplicate（parse 期诊断）', () => {
+  it('变量名重复/非法 → yaml.v3.params.name_duplicate（parse 期诊断）', () => {
     const { diagnostics } = validateSource(
-      "params:\n  - 'bool:a:开关:true'\n  - 'bool:a:再来一个:false'\nsteps: []\n",
+      "version: 3\nparams:\n  - 'bool:a:开关:true'\n  - 'bool:a:再来一个:false'\nsteps: []\n",
       'script',
     )
-    expect(diagnostics).toContainEqual(expect.objectContaining({ code: 'param.decl.name_duplicate', step_path: 'params[1]' }))
+    expect(diagnostics).toContainEqual(expect.objectContaining({ code: 'yaml.v3.params.name_duplicate', step_path: 'params[1]' }))
   })
 })
 
-describe('validation：resolver 接口（目标信息由调用方传入）', () => {
-  it('call：未知 args 键 / 必填缺失 / resolver 命中缺失目标', () => {
-    const { model } = parseScript(
-      "params:\n  - 'bool:enable:开关:true'\nsteps:\n  - call: sub.yaml\n    args:\n      enable: $enable\n      junk: 1\n",
-    )
+describe('validation：defaults 范围', () => {
+  it('threshold 超范围 / timing 非法时间串', () => {
+    const { model } = parseScript([
+      'version: 3',
+      'defaults:',
+      '  vision:',
+      '    threshold: 1.4',
+      '  timing:',
+      '    after_tap: 300',
+      'steps: []',
+    ].join('\n'))
+    const diags = validateScript(model)
+    expect(diags).toContainEqual(expect.objectContaining({ code: 'yaml.v3.threshold.range', step_path: 'defaults.vision.threshold' }))
+    // 裸数字 300 是合法毫秒 → 无 timing 错误
+    expect(diags.filter((d) => d.code === 'yaml.v3.duration')).toHaveLength(0)
+  })
+
+  it('timing 缺单位字符串报错', () => {
+    const { model } = parseScript('version: 3\ndefaults:\n  timing:\n    after_tap: soon\nsteps: []\n')
+    expect(validateScript(model)).toContainEqual(expect.objectContaining({
+      code: 'yaml.v3.duration', step_path: 'defaults.timing.after_tap',
+    }))
+  })
+})
+
+describe('validation：call 命名空间（契约 §2）', () => {
+  it('裸 target → yaml.v3.call.namespace', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - call: {target: sub_task}\n')
+    expect(validateScript(model)).toContainEqual(expect.objectContaining({
+      code: 'yaml.v3.call.namespace', step_path: 'steps[0]', field: 'target',
+    }))
+  })
+
+  it('function: 缺函数名段 → namespace；路径穿越 → path_traversal', () => {
+    const bad = parseScript('version: 3\nsteps:\n  - call: {target: "function:login"}\n')
+    expect(validateScript(bad.model)).toContainEqual(expect.objectContaining({ code: 'yaml.v3.call.namespace' }))
+
+    const trav = parseScript('version: 3\nsteps:\n  - call: {target: "script:../etc"}\n')
+    expect(validateScript(trav.model)).toContainEqual(expect.objectContaining({ code: 'yaml.v3.call.path_traversal' }))
+  })
+
+  it('script: 自环（selfScript 命中）→ yaml.v3.call.self_cycle', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - call: {target: "script:daily/login"}\n')
+    expect(validateScript(model, { selfScript: 'daily/login' })).toContainEqual(expect.objectContaining({
+      code: 'yaml.v3.call.self_cycle',
+    }))
+  })
+
+  it('with 绑定：未知键 / 必填缺失 / 目标不存在（resolver 由调用方传入）', () => {
+    const { model } = parseScript([
+      'version: 3',
+      'steps:',
+      '  - call:',
+      '      target: script:sub',
+      '      with:',
+      '        enable: true',
+      '        junk: 1',
+    ].join('\n'))
     const diags = validateScript(model, {
-      // 目标声明：enable（传入）+ other（必填未传）
-      resolveCall: (target) => (target === 'sub.yaml'
+      resolveCall: (target) => (target === 'script:sub'
         ? {
             params: [
-              { type: 'bool', name: 'enable', remark: '开关', default: null },
-              { type: 'text', name: 'other', remark: '其他', default: null },
+              { type: 'boolean', name: 'enable', remark: '开关', default: null },
+              { type: 'string', name: 'other', remark: '其他', default: null },
             ],
           }
         : null),
     })
-    expect(diags).toContainEqual(expect.objectContaining({ code: 'param.args.unknown', field: 'args' }))
-    expect(diags).toContainEqual(expect.objectContaining({ code: 'param.args.missing_required', field: 'args' }))
+    expect(diags).toContainEqual(expect.objectContaining({ code: 'yaml.v3.call.args_unknown', field: 'with' }))
+    expect(diags).toContainEqual(expect.objectContaining({ code: 'yaml.v3.call.args_missing_required', field: 'with' }))
 
-    // 目标不存在
     const diags2 = validateScript(model, { resolveCall: () => null })
-    expect(diags2).toContainEqual(expect.objectContaining({ code: 'resource.script.not_found' }))
+    expect(diags2).toContainEqual(expect.objectContaining({ code: 'yaml.v3.call.script_not_found' }))
   })
 
-  it('func：语法（缺 / 函数名）与 ref.func.missing_args', () => {
-    const { model } = parseScript('steps:\n  - func: login\n    args: {}\n')
-    const diags = validateScript(model, {
-      resolveFunction: () => ({ params: [{ type: 'bool', name: 'on', remark: '开', default: null }] }),
-    })
-    expect(diags).toContainEqual(expect.objectContaining({ code: 'ref.func.syntax' }))
+  it('function: 目标存在性走 resolveFunction', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - call: {target: "function:common/login"}\n')
+    const diags = validateScript(model, { resolveFunction: () => null })
+    expect(diags).toContainEqual(expect.objectContaining({ code: 'yaml.v3.call.function_not_found' }))
   })
 
-  it('未提供 resolver 时跳过目标绑定检查（本层只留接口）', () => {
-    const { model } = parseScript('steps:\n  - call: whatever.yaml\n    args: {}\n')
+  it('未提供 resolver 时跳过目标存在性检查', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - call: {target: "script:whatever"}\n')
     expect(validateScript(model)).toEqual([])
   })
 })
 
-describe('validation：参数声明保存前校验（备注段非空，与服务端 param.decl.format 同构）', () => {
-  it('备注段为空 → param.decl.format（codec 解析层宽容，校验层阻断保存）', () => {
-    // 解析层允许空备注（ParamEditor 新建行 remark='' 中间态）：无解析期诊断
-    const parsed = parseScript("params:\n  - 'text:tag:'\nsteps: []\n")
-    expect(parsed.diagnostics).toEqual([])
-    const diags = validateScript(parsed.model)
+describe('validation：模板存在性（resolver 可选）', () => {
+  it('模板不存在仍报 yaml.v3.resource.tmpl_not_found', () => {
+    const { model } = parseScript('version: 3\nsteps:\n  - check: {template: logo.png}\n')
+    const diags = validateScript(model, { resolveTemplate: () => false })
     expect(diags).toContainEqual(expect.objectContaining({
-      code: 'param.decl.format',
-      step_path: 'params[0]',
-      field: 'declaration',
+      code: 'yaml.v3.resource.tmpl_not_found', step_path: 'steps[0]', field: 'template',
     }))
-    expect(diags.find((d) => d.code === 'param.decl.format').message).toContain('备注不能为空')
+    expect(validateScript(model, { resolveTemplate: () => true })).toEqual([])
+  })
+})
+
+describe('validation：函数库', () => {
+  it('函数内 return 合法；call 上下文校验按函数路径', () => {
+    const { model } = parseFunctionLibrary([
+      'login:',
+      '  steps:',
+      '    - return: $ok',
+    ].join('\n'), { file: 'common' })
+    expect(validateFunctionLibrary(model)).toEqual([])
   })
 
-  it('空备注 + 默认值（第 4 段非空）同样被拦截', () => {
-    const { model } = parseScript("params:\n  - 'text:tag::vip'\nsteps: []\n")
-    expect(validateScript(model)).toContainEqual(expect.objectContaining({
-      code: 'param.decl.format',
-      step_path: 'params[0]',
-      field: 'declaration',
-    }))
-  })
-
-  it('函数库函数级参数空备注同样被拦截', () => {
-    const { model } = parseFunctionLibrary("login:\n  params:\n    - 'bool:dry:'\n  steps:\n    - return: true\n", { file: 'common' })
-    expect(validateFunctionLibrary(model)).toContainEqual(expect.objectContaining({
-      code: 'param.decl.format',
-      step_path: 'login.params[0]',
-      field: 'declaration',
-    }))
+  it('函数级参数名重复报 yaml.v3.params.name_duplicate', () => {
+    const { model, diagnostics } = parseFunctionLibrary([
+      'login:',
+      '  params:',
+      "    - 'bool:a:开:true'",
+      "    - name: a",
+      '      type: boolean',
+      '  steps:',
+      '    - return: true',
+    ].join('\n'), { file: 'common' })
+    expect(diagnostics).toContainEqual(expect.objectContaining({ code: 'yaml.v3.params.name_duplicate', step_path: 'login.params[1]' }))
   })
 })

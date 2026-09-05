@@ -1,21 +1,22 @@
 /**
- * 运行/测试/定时任务的参数表单共享工具（阶段 5，plan §12.1/§12.2/§12.3）。
+ * 运行/测试/定时任务的参数表单共享工具。
  *
  * 三类入口（Console 手动运行 / 函数测试 / TaskBoard 任务快照）共用：
- * - extractParams：从 YAML 源码提取 ParamDecl[]（codec 严格解析，不新建语法层）；
+ * - extractParams：从 YAML v3 源码提取 ParamDecl[]（canonical 类型规范化）；
  * - mapArgDiagnostics：服务端 400 invalid_args 诊断 → 表单字段定位（五元组同构）；
  * - describeResolvedArgs：202 resolved_args 摘要（「默认继承/显式覆盖」来源标注）；
  * - 覆盖建议缓存：最近一次显式输入存 localStorage（key 按脚本/函数文件 id），
- *   仅作显式覆盖建议预填，绝不遮蔽当前声明默认值（与 plan §12.1 一致）。
+ *   仅作显式覆盖建议预填，绝不遮蔽当前声明默认值。
  */
 import type { ParamDecl, ParamLiteral, ParamType } from './model'
 import { parseFunctionLibrary, parseScript } from './codec'
-import { checkCellLiteral } from './schema'
+import { checkCellLiteral, normalizeParamType } from './schema'
 
 // ---------- 提取 ----------
 
 /**
- * YAML 源码 → 参数声明列表。脚本取文件级 params；函数库取指定函数（缺省第一个）的 params。
+ * YAML v3 源码 → 参数声明列表（类型规范化为 canonical 五类，契约 §7）。
+ * 脚本取 Program.params；函数库取指定函数（缺省第一个）的 params。
  * 解析失败/无声明/函数不存在 → 空数组（调用方按「无参数直接运行」处理）。
  */
 export function extractParams(
@@ -28,19 +29,30 @@ export function extractParams(
       const model = parseFunctionLibrary(yamlText ?? '').model
       const fns = Array.isArray(model.functions) ? model.functions : []
       const fn = fnName ? fns.find((f) => f.name === fnName) : fns[0]
-      return fn && Array.isArray(fn.params) ? fn.params : []
+      return fn ? normalizeDecls(fn.params) : []
     }
     const model = parseScript(yamlText ?? '').model
-    return Array.isArray(model.params) ? model.params : []
+    return normalizeDecls(Array.isArray(model.params) ? model.params : [])
   } catch {
     return []
   }
 }
 
+/** rawForm 参数转映射形态（类型规范化；default 原样保留）。 */
+function normalizeDecls(decls: ParamDecl[]): ParamDecl[] {
+  return decls.map((d) => ({
+    type: normalizeParamType(d.type),
+    name: d.name,
+    remark: d.remark,
+    default: d.default,
+    rawForm: false,
+  }))
+}
+
 // ---------- 展示 ----------
 
 export const ARG_TYPE_LABELS: Record<ParamType, string> = {
-  tmpl: '模板', coord: '坐标', color: '颜色', time: '时间', key: '按键', text: '文本', bool: '布尔',
+  string: '文本', number: '数字', integer: '整数', boolean: '布尔', enum: '枚举',
 }
 
 /** 字面量 → 短展示串（默认值行 / 摘要 / 对比表共用）；undefined/null → '—'。 */
@@ -51,14 +63,14 @@ export function fmtLiteral(v: ParamLiteral | null | undefined): string {
   return String(v)
 }
 
-/** 表单值深拷贝（args 值均为 JSON 安全形态：字符串/布尔/[x,y]）。 */
+/** 表单值深拷贝（args 值均为 JSON 安全形态：字符串/数字/布尔/[x,y]）。 */
 export function cloneArg<T>(v: T): T {
   return JSON.parse(JSON.stringify(v ?? null))
 }
 
 /** 必填参数（无默认值）进入覆盖态时的控件初始字面量（与 CellEditor defaultLiteral 同口径）。 */
 export const ARG_DEFAULT_LITERALS: Record<ParamType, ParamLiteral> = {
-  tmpl: '', coord: [0.5, 0.5], color: 'ff8800', time: '1s', key: 'BACK', text: '', bool: true,
+  string: '', number: 0, integer: 0, boolean: true, enum: '',
 }
 
 // ---------- 服务端 400 invalid_args 诊断映射 ----------
@@ -178,7 +190,7 @@ export function saveRunArgsSuggestion(
   } catch { /* 配额/隐私模式失败静默（建议缓存非关键数据） */ }
 }
 
-// ---------- 客户端校验（与服务端同规则，schema.checkCellLiteral） ----------
+// ---------- 客户端校验（schema.checkCellLiteral 同规则） ----------
 
 export interface ArgFieldError {
   name: string

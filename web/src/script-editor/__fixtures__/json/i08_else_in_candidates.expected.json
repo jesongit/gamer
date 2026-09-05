@@ -1,8 +1,0 @@
-{
-  "id": "i08_else_in_candidates",
-  "kind": "invalid",
-  "description": "错误缩进：- else 写进了 match 候选列表（else/timeout 必须是 match 步骤的兄弟键）",
-  "errors": [
-    { "code": "step.match.else_in_candidates", "step_path": "steps[0]", "field": "candidates" }
-  ]
-}

@@ -11,7 +11,7 @@ import { stripUuids } from './helpers'
  */
 
 function scriptWithSteps(n) {
-  const { model } = parseScript('steps:\n' + Array.from({ length: n }, (_, i) => `  - log: 第${i}步\n`).join(''))
+  const { model } = parseScript('version: 3\nsteps:\n' + Array.from({ length: n }, (_, i) => `  - log: 第${i}步\n`).join(''))
   return model
 }
 
@@ -63,7 +63,7 @@ describe('commands：移动与复制', () => {
   })
 
   it('移动到自己的子树内被拒绝', () => {
-    const { model } = parseScript('steps:\n  - if: true\n    then:\n      - log: 内\n')
+    const { model } = parseScript('version: 3\nsteps:\n  - if: {cond: true, then: [{log: 内}]}\n')
     const stack = new CommandStack(model)
     const before = serialize(model)
     expect(stack.apply({
@@ -76,7 +76,7 @@ describe('commands：移动与复制', () => {
   })
 
   it('跨容器移动：顶层 → 分支内', () => {
-    const { model } = parseScript('steps:\n  - if: true\n    then:\n      - log: 内\n  - log: 外\n')
+    const { model } = parseScript('version: 3\nsteps:\n  - if: {cond: true, then: [{log: 内}]}\n  - log: 外\n')
     const stack = new CommandStack(model)
     const outer = model.steps[1]
     stack.apply({ type: 'move_step', from: { path: ['steps'], index: 1 }, to: { path: ['steps', 0, 'then'], index: 1 } })
@@ -113,25 +113,25 @@ describe('commands：改字段与参数命令', () => {
     expect(model.steps[0].message.lit).toBe('第0步')
   })
 
-  it('update_param 切换参数类型', () => {
-    const { model } = parseScript("params:\n  - 'coord:pos:位置:[0.5, 0.5]'\nsteps: []\n")
+  it('update_param 切换参数类型（rawForm 串保真）', () => {
+    const { model } = parseScript("version: 3\nparams:\n  - 'coord:pos:位置:[0.5, 0.5]'\nsteps: []\n")
     const stack = new CommandStack(model)
-    stack.apply({ type: 'update_param', index: 0, decl: { type: 'bool', name: 'pos', remark: '位置', default: null } })
-    expect(model.params[0].type).toBe('bool')
+    stack.apply({ type: 'update_param', index: 0, decl: { type: 'boolean', name: 'pos', remark: '位置', default: null, rawForm: false } })
+    expect(model.params[0].type).toBe('boolean')
     stack.undo()
     expect(model.params[0].type).toBe('coord')
     expect(serialize(model)).toContain("'coord:pos:位置:[0.5, 0.5]'")
   })
 
-  it('set_config / set_params', () => {
-    const { model } = parseScript('steps: []\n')
+  it('set_defaults / set_params', () => {
+    const { model } = parseScript('version: 3\nsteps: []\n')
     const stack = new CommandStack(model)
-    stack.apply({ type: 'set_config', config: { interval: '1s', threshold: 0.9, log_level: 'debug' } })
-    expect(model.config).toEqual({ interval: '1s', threshold: 0.9, log_level: 'debug' })
-    stack.apply({ type: 'set_params', params: [{ type: 'text', name: 'a', remark: 'A', default: null }] })
+    stack.apply({ type: 'set_defaults', defaults: { vision_threshold: 0.9, after_tap: '1s', after_match: null, poll_interval: null } })
+    expect(model.defaults).toEqual({ vision_threshold: 0.9, after_tap: '1s', after_match: null, poll_interval: null })
+    stack.apply({ type: 'set_params', params: [{ type: 'string', name: 'a', remark: 'A', default: null, rawForm: false }] })
     stack.undo()
     stack.undo()
-    expect(model.config).toBeNull()
+    expect(model.defaults).toBeNull()
     expect(model.params).toEqual([])
   })
 })
@@ -219,7 +219,7 @@ describe('commands：200 次 undo/redo 不丢步', () => {
 
 describe('commands：路径解析', () => {
   it('resolveStepList / resolveStep 支持脚本与函数库', () => {
-    const { model } = parseScript('steps:\n  - if: true\n    then:\n      - log: x\n')
+    const { model } = parseScript('version: 3\nsteps:\n  - if: {cond: true, then: [{log: x}]}\n')
     const thenList = resolveStepList(model, ['steps', 0, 'then'])
     expect(thenList).toHaveLength(1)
     expect(resolveStep(model, ['steps', 0, 'then', 0]).kind).toBe('log')
@@ -229,8 +229,8 @@ describe('commands：路径解析', () => {
     expect(fnSteps).toHaveLength(1)
     expect(resolveStep(lib, ['functions', 'login', 'steps', 0]).kind).toBe('return')
 
-    // match 候选分支
-    const { model: m2 } = parseScript('steps:\n  - match:\n    - a.png:\n      - log: 命中\n')
+    // match_first 候选分支
+    const { model: m2 } = parseScript('version: 3\nsteps:\n  - match_first:\n      candidates:\n        - template: a.png\n          steps:\n            - log: 命中\n')
     const candSteps = resolveStepList(m2, ['steps', 0, 'candidates', 0])
     expect(candSteps[0].kind).toBe('log')
   })
@@ -256,12 +256,12 @@ describe('commands：函数级 params（阶段 4 path 容器）', () => {
 
   it('insert/update/remove/set 携带 path 后命中目标函数，undo 还原', () => {
     const { model, stack, path } = setup()
-    expect(stack.apply({ type: 'insert_param', path, index: 1, decl: { type: 'text', name: 'tag', remark: '', default: null } }, '添加函数参数')).toBe(true)
+    expect(stack.apply({ type: 'insert_param', path, index: 1, decl: { type: 'string', name: 'tag', remark: '', default: null, rawForm: false } }, '添加函数参数')).toBe(true)
     expect(model.functions[0].params).toHaveLength(2)
     expect(model.functions[0].params[1].name).toBe('tag')
 
-    expect(stack.apply({ type: 'update_param', path, index: 1, decl: { type: 'num', name: 'count', remark: '', default: 3 } }, '编辑函数参数')).toBe(true)
-    expect(model.functions[0].params[1]).toMatchObject({ type: 'num', name: 'count', default: 3 })
+    expect(stack.apply({ type: 'update_param', path, index: 1, decl: { type: 'integer', name: 'count', remark: '', default: 3, rawForm: false } }, '编辑函数参数')).toBe(true)
+    expect(model.functions[0].params[1]).toMatchObject({ type: 'integer', name: 'count', default: 3 })
 
     expect(stack.apply({ type: 'remove_param', path, index: 1 }, '删除函数参数')).toBe(true)
     expect(model.functions[0].params).toHaveLength(1)
@@ -283,7 +283,7 @@ describe('commands：函数级 params（阶段 4 path 容器）', () => {
   it('路径指向不存在的函数在执行期抛错且不进历史', () => {
     const { stack } = setup()
     const bad = ['functions', 'nope', 'params']
-    expect(() => stack.apply({ type: 'insert_param', path: bad, index: 0, decl: { type: 'text', name: 'x', remark: '', default: null } }, '添加函数参数'))
+    expect(() => stack.apply({ type: 'insert_param', path: bad, index: 0, decl: { type: 'string', name: 'x', remark: '', default: null, rawForm: false } }, '添加函数参数'))
       .toThrow('函数不存在')
     expect(stack.canUndo).toBe(false)
   })
