@@ -1,5 +1,11 @@
 # YAML v2 / v3 能力奇偶对照报告（Phase 11 · B3 Phase B）
 
+> **Status: superseded** —— 本报告为 Phase 11 遗留对照，不再作为执行依据；现行计划见
+> `gamer_yaml_v3_finalization_v2_removal_plan.md`（Phase 12，已裁决删除 v2，见其
+> P12.9 / ADR-YAML-01）。文中"v3 缺口"（G1-G5 / R1-R5）均已在 Phase 12 按最终
+> 语义裁决收口（find then/else/verify、call 统一、defaults、预算、运行事件、
+> 参数 schema 桥），不代表待办。
+
 > 结论先行：**选 (c) —— v2 引擎暂留 gamer_yaml 扩展内部，删除 Core 可见的双格式分叉（保留单一 loader 入口），v3 补齐缺口后再切默认格式。**
 > 缺口共 **5 项语法/语义缺口（G1-G5）+ 5 项运行时策略差异（R1-R5）**（§3/§4），guest 与 surface 均需改动，
 > 不满足 (b) 的「缺口 ≤ 3 项且 guest 改动小」门槛。

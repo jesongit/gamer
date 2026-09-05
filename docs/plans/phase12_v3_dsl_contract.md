@@ -99,6 +99,12 @@ steps:
 - `Program.params` 是参数唯一来源；服务端提供按 entrypoint 取参数 schema 的 REST 能力（REST 形态由 T6 设计，约束：前端不得为取参数而解析 YAML）。
 - schema 需含 name/type/default/required/enum/description，足以渲染表单；v2 存量脚本走同一 descriptor 端点（服务端 v2 解析已存在）。
 - 参数类型集合：string / number / integer / boolean / enum（v2 ty 名映射到上述类型；执行期 TypedValue 行为不变）。
+  - **【已按实现修订（P12.12）】time 不映射为 number(ms)**：服务端实现为
+    `type: "string"` + `param_type: "time"` 透传（执行期 TypedValue 为
+    `Time(带单位时长串)`，要求 `300ms` / `2s` 一类的单位书写，见
+    `entrypoint_descriptor.rs schema_type`）；coord 以二元数值数组（`type:
+    "array"`）表达，`value` 为任意 JSON（`type: "any"`），声明类型原文一律经
+    `param_type` 透传供前端渲染 UI 形态。
 
 ## 8. 手动运行 start_index（T2 顺带）
 
