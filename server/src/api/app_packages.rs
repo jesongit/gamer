@@ -207,9 +207,7 @@ fn package_json_for(
 /// AppPackageError → 统一 ApiError（含机器码 `code`）。
 fn app_package_api_error(error: AppPackageError) -> ApiError {
     match &error {
-        AppPackageError::AlreadyInstalled { .. } | AppPackageError::PrimaryConflict { .. } => {
-            ApiError::conflict(error.to_string())
-        }
+        AppPackageError::PrimaryConflict { .. } => ApiError::conflict(error.to_string()),
         AppPackageError::NotInstalled { .. } | AppPackageError::NotActive(_) => {
             ApiError::not_found(error.to_string())
         }

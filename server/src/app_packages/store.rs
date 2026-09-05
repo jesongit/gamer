@@ -387,11 +387,13 @@ impl AppPackageStore {
         Ok(installed)
     }
 
-    /// Install one validated archive into a new version directory. Existing
-    /// versions are never overwritten, even when the incoming bytes differ.
-    /// The archive SHA-256 is computed here and persisted next to the
-    /// manifest (`install.json`); when `expected_sha256` is provided, a
-    /// mismatch aborts the install before anything is staged.
+    /// Install one validated archive into a version directory. Re-installing
+    /// the same `package_id + version` overwrites the existing directory
+    /// (stage-then-swap; plan §13.5's simple rule — no historical-version
+    /// migration); other installed versions are never touched. The archive
+    /// SHA-256 is computed here and persisted next to the manifest
+    /// (`install.json`); when `expected_sha256` is provided, a mismatch
+    /// aborts the install before anything is staged.
     pub(crate) fn install_archive(
         &self,
         archive: &[u8],
@@ -405,12 +407,6 @@ impl AppPackageStore {
             .app_packages_root()
             .join(manifest.id().as_str())
             .join(manifest.version().as_str());
-        if path_exists(&final_root)? {
-            return Err(AppPackageError::AlreadyInstalled {
-                package: manifest.id().to_string(),
-                version: manifest.version().to_string(),
-            });
-        }
 
         let staging_parent = self.app_packages_root().join(".staging");
         fs::create_dir_all(&staging_parent)?;
@@ -427,25 +423,35 @@ impl AppPackageStore {
             })?;
             atomic_write(&staging.join("install.json"), &meta_bytes)
                 .map_err(|error| AppPackageError::Io(std::io::Error::other(error.to_string())))?;
-            if path_exists(&final_root)? {
-                return Err(AppPackageError::AlreadyInstalled {
-                    package: manifest.id().to_string(),
-                    version: manifest.version().to_string(),
-                });
-            }
-            if let Some(parent) = final_root.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::rename(&staging, &final_root).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    AppPackageError::AlreadyInstalled {
-                        package: manifest.id().to_string(),
-                        version: manifest.version().to_string(),
-                    }
-                } else {
-                    AppPackageError::Io(error)
+            // Overwrite（同 id+version）：先整目录 rename 走既有版本（同卷
+            // rename 原子），staging 内容再就位；就位失败把旧目录移回，成功
+            // 后删除旧目录。首次安装则直接就位。
+            let retired = if path_exists(&final_root)? {
+                let retired = staging_parent.join(format!(
+                    "{}-{}-{}.retired",
+                    manifest.id(),
+                    manifest.version(),
+                    Uuid::new_v4().simple()
+                ));
+                fs::rename(&final_root, &retired)?;
+                Some(retired)
+            } else {
+                None
+            };
+            if let Err(error) = (|| -> std::io::Result<()> {
+                if let Some(parent) = final_root.parent() {
+                    fs::create_dir_all(parent)?;
                 }
-            })?;
+                fs::rename(&staging, &final_root)
+            })() {
+                if let Some(retired) = &retired {
+                    let _ = fs::rename(retired, &final_root);
+                }
+                return Err(AppPackageError::Io(error));
+            }
+            if let Some(retired) = &retired {
+                let _ = fs::remove_dir_all(retired);
+            }
             sync_directory(final_root.parent().expect("version directory has parent"))?;
             Ok(InstalledPackage {
                 manifest: manifest.clone(),
@@ -471,6 +477,14 @@ impl AppPackageStore {
         verify_expected_sha256(expected_sha256, &digest)?;
         let manifest = parse_manifest(&validate_and_read_manifest(archive)?)?;
         self.ensure_primary_available(&manifest)?;
+        // Overwrite 语义下重装不会新建目录：激活失败只回滚「本次新装」的版本，
+        // 不得连带删除重装前就存在的版本目录。
+        let created_new = !path_exists(
+            &self
+                .app_packages_root()
+                .join(manifest.id().as_str())
+                .join(manifest.version().as_str()),
+        )?;
         let installed = self.install_archive(archive, Some(&digest))?;
         if let Err(error) = self
             .activate(installed.manifest().id(), installed.manifest().version())
@@ -478,7 +492,10 @@ impl AppPackageStore {
         {
             // Roll the just-staged version back so an activation failure never
             // leaves an installed-but-never-activatable package behind.
-            let _ = self.remove_version(installed.manifest().id(), installed.manifest().version());
+            if created_new {
+                let _ =
+                    self.remove_version(installed.manifest().id(), installed.manifest().version());
+            }
             return Err(error);
         }
         Ok(installed)
@@ -594,8 +611,10 @@ impl AppPackageStore {
             .map_err(|error| AppPackageError::InvalidManifest(format!("install.json: {error}")))
     }
 
-    /// Remove one immutable version, then notify the single task lifecycle
-    /// hook if this was the last version of the App Package. The async API is
+    /// Remove one installed version (same-id+version reinstall in
+    /// [`Self::install_archive`] is the only overwrite path), then notify the
+    /// single task lifecycle hook if this was the last version of the App
+    /// Package. The async API is
     /// intentional: no caller can silently forget the Suspended transition.
     /// User overrides and unrelated data are deliberately outside this path
     /// and remain untouched. A removed active version drops out of the active
