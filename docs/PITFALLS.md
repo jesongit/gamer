@@ -220,3 +220,10 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **字节 kind 的 POST/GET 共用 templates 的 PNG 归一化管线**（`reencode_bytes` 不分 kind 一律 `reencode_template_png`），`kind=resources` 目前存不了任意字节文本，只能存 PNG；要"原样字节"得走 App Package 通道。守卫测试（§14.4）因此以 PNG 往返代替任意字节断言。
 - **`AuthState` 的会话 cookie 签名密钥按实例随机**：测试里重建 router（新 AuthState）后旧 cookie 全部 401，模拟"进程重启"必须重新 login 拿新会话，不能复用上一台 router 的 cookie。
 - **P11.9 源码扫描守卫用「文件+内容片段」行级白名单且双向校验**：只加单向过滤会留死条目——代码改掉后白名单永不命中也不报错，守卫静默失效；`assert_whitelist_alive` 强制每条白名单命中至少一行，条目腐烂即测试失败。
+
+## 2026-09-05（Phase 12 P12.4：Guest Execution Budget）
+
+- **wasmtime epoch_interruption(true) 后 store 缺省 deadline=0 即「已过期」**：任何 wasm 执行（含组件 instantiate）都会立即 trap，store 必须在 instantiate 前 `set_epoch_deadline` + 配好 `epoch_deadline_callback`，否则报「epoch deadline reached」而非业务错误。
+- **epoch deadline 回调的错误类型是 `wasmtime::Error` 不是 `anyhow::Error`**：wasmtime 48 把 anyhow fork 成自有 Error，回调签名写 `anyhow::Result<UpdateDeadline>` 编译报 E0271，用 `wasmtime::Error::msg` 构造。
+- **epoch 取消会抢先 capability 边界的 kind=cancelled**：stop 置位后若 capability 调用跨过 tick 边界（~10ms），guest 恢复执行的首个 epoch 检查点直接 trap，guest 内已就绪的 kind=cancelled 错误不再冒出——取消判定别只匹配 `kind=cancelled`，要接受 `CANCELLED`（两形态都是合法取消，ADR-YAML-04）。
+- **wasmtime Component 的 WIT import 签名变更 = 旧 guest 全灭**：`programs.resolve` 去掉 depth 参数后，旧版 gamer.yaml plugin.wasm（含 web/public/plugins 的官方 .gplugin）在新宿主上 instantiate 直接失败，升级后必须重打/重装插件（`tools/build-plugins.ps1`）。

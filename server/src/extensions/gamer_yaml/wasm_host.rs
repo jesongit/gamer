@@ -8,14 +8,15 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 use wasmtime::component::{Component, HasSelf, Linker};
-use wasmtime::{Engine, Store};
+use wasmtime::{Engine, Store, StoreContextMut, UpdateDeadline};
 
 use super::yaml_extension::{
     NativeYamlHost, YamlProgramResolver, YamlWasmRunRequest, YamlWasmRunResult, YamlWasmRuntime,
@@ -27,25 +28,124 @@ use crate::extensions::wit;
 /// Request/response Component runtime for YAML v3. Unlike the generic
 /// lifecycle runtime this invokes a supplied lowered program and does not
 /// compile the legacy Rust Engine into WASM.
+///
+/// P12.4（ADR-YAML-04）：Engine 开启 epoch interruption 作为取消兜底——guest
+/// 纯计算死循环不经过 capability 边界，stop 标志只能靠 epoch 检查点打断。
+/// epoch 仅服务取消，不做 host 超时强杀（预算语义全部由 guest 的
+/// ExecutionBudget 承载，见 tests/yaml-guest）。
 #[derive(Debug)]
 pub(crate) struct LazyYamlWasmtimeRuntime {
     engine: OnceLock<Engine>,
-    components: Mutex<HashMap<[u8; 32], Arc<Component>>>,
+    /// 与 engine 同生命周期创建的 epoch ticker（见 [`EpochTicker`]）。
+    ticker: OnceLock<Arc<EpochTicker>>,
+    components: AsyncMutex<HashMap<[u8; 32], Arc<Component>>>,
 }
 
 impl LazyYamlWasmtimeRuntime {
     pub(crate) fn new() -> Self {
         Self {
             engine: OnceLock::new(),
-            components: Mutex::new(HashMap::new()),
+            ticker: OnceLock::new(),
+            components: AsyncMutex::new(HashMap::new()),
         }
     }
 
     fn engine(&self) -> &Engine {
         self.engine.get_or_init(|| {
-            let config = wasmtime::Config::new();
-            Engine::new(&config).expect("Wasmtime engine config is valid")
+            let mut config = wasmtime::Config::new();
+            config.epoch_interruption(true);
+            let engine = Engine::new(&config).expect("Wasmtime engine config is valid");
+            let ticker = Arc::new(EpochTicker::new(engine.clone()));
+            self.ticker
+                .set(ticker)
+                .expect("epoch ticker only initialized once");
+            engine
         })
+    }
+
+    fn ticker(&self) -> &Arc<EpochTicker> {
+        self.engine();
+        self.ticker.get().expect("ticker created with engine")
+    }
+}
+
+/// epoch ticker：Engine 级全局单例线程（P12.4）。
+///
+/// `increment_epoch` 对该 Engine 的所有并发 store 生效，因此线程按 Engine
+/// 唯一、绝不每 run 一个。生命周期：
+///
+/// - 生产环境 `LazyYamlWasmtimeRuntime` 是进程单例（`yaml_runtime()`），
+///   ticker 线程随首个 run 按需拉起、空闲（无在飞 run）后自行退出，下次
+///   run 再拉起——不留常驻 100Hz 空转线程；
+/// - `enter` 先累加活动计数再在 `spawned` 锁内决定是否拉起线程，线程退出
+///   判定与拉起判定互斥于同一把锁并对 `active` 复查，不存在「有在飞 run
+///   但没有 ticker」的窗口；
+/// - 即使 ticker 意外缺失，guest 步预算（STEP_BUDGET_EXCEEDED）仍保证终止，
+///   只是取消延迟退化为「跑到预算耗尽」。
+///
+/// tick 周期 ~10ms：`cancelled` 置位后的下一个 epoch 检查点（≤ ~10ms）由
+/// store 侧 `epoch_deadline_callback` 转成 CANCELLED 错误。
+#[derive(Debug)]
+struct EpochTicker {
+    engine: Engine,
+    /// 在飞 wasm run 数；>0 时线程才推进 epoch。
+    active: AtomicUsize,
+    /// ticker 线程存活标记（与 `active` 的读写顺序见 `enter`/`thread_loop`）。
+    spawned: Mutex<bool>,
+}
+
+impl EpochTicker {
+    const TICK: Duration = Duration::from_millis(10);
+
+    fn new(engine: Engine) -> Self {
+        Self {
+            engine,
+            active: AtomicUsize::new(0),
+            spawned: Mutex::new(false),
+        }
+    }
+
+    /// run 入口：登记在飞计数并确保 ticker 存活。
+    fn enter(self: &Arc<Self>) {
+        self.active.fetch_add(1, Ordering::Relaxed);
+        let mut spawned = self.spawned.lock().unwrap();
+        if !*spawned {
+            *spawned = true;
+            let ticker = self.clone();
+            drop(spawned);
+            std::thread::Builder::new()
+                .name("yaml-wasm-epoch-ticker".into())
+                .spawn(move || ticker.thread_loop())
+                .expect("yaml epoch ticker 线程启动失败");
+        }
+    }
+
+    /// run 出口：回退在飞计数（经 [`TickerGuard`] 在 drop 时调用）。
+    fn leave(&self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn thread_loop(self: Arc<Self>) {
+        loop {
+            std::thread::sleep(Self::TICK);
+            let mut spawned = self.spawned.lock().unwrap();
+            if self.active.load(Ordering::Relaxed) == 0 {
+                // 空闲退出；下一次 enter 会重新拉起（判定同锁互斥）。
+                *spawned = false;
+                return;
+            }
+            drop(spawned);
+            self.engine.increment_epoch();
+        }
+    }
+}
+
+/// run 期间持有：drop 时回退 ticker 活动计数（含异常展开路径）。
+struct TickerGuard<'a>(&'a EpochTicker);
+
+impl Drop for TickerGuard<'_> {
+    fn drop(&mut self) {
+        self.0.leave();
     }
 }
 
@@ -101,12 +201,11 @@ impl wit::yaml::gamer::host::capability::Host for YamlHostState {
 }
 
 impl wit::yaml::gamer::host::programs::Host for YamlHostState {
-    fn resolve(&mut self, target: String, args_json: String, depth: u32) -> Result<String, String> {
+    fn resolve(&mut self, target: String, args_json: String) -> Result<String, String> {
         let resolver = self
             .yaml_programs
             .clone()
             .ok_or_else(|| "YAML call resolver 未配置".to_string())?;
-        super::yaml_extension::check_call_depth(depth).map_err(|error| error.to_string())?;
         let args = serde_json::from_str::<serde_json::Value>(&args_json)
             .map_err(|error| format!("call 参数不是 JSON: {error}"))?;
         let args = yaml_vnext::Value::from_json(args)
@@ -114,9 +213,9 @@ impl wit::yaml::gamer::host::programs::Host for YamlHostState {
         let yaml_vnext::Value::Map(args) = args else {
             return Err("call 参数必须是 map".to_string());
         };
-        let program = resolver
-            .resolve(&target, &args, depth)
-            .map_err(|error| error.to_string())?;
+        // 调用深度由 guest 本地 ExecutionBudget 计数（ADR-YAML-04），resolver
+        // 只负责按命名空间定位目标程序，不再做深度守卫。
+        let program = resolver.resolve(&target, &args).map_err(|error| error.to_string())?;
         serde_json::to_string(&program).map_err(|error| error.to_string())
     }
 }
@@ -172,6 +271,15 @@ fn yaml_capability_error(error: &anyhow::Error) -> wit::yaml::gamer::host::types
     yaml_error(kind, error.to_string())
 }
 
+/// 仅测试：锁定 capability 错误 → WIT host-error kind 的映射（epoch 取消
+/// 兜底与 capability 边界取消并行，见 ADR-YAML-04 与对应 e2e 测试注释）。
+#[cfg(test)]
+pub(crate) fn yaml_capability_error_for_test(
+    error: &anyhow::Error,
+) -> wit::yaml::gamer::host::types::HostError {
+    yaml_capability_error(error)
+}
+
 #[async_trait]
 impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
     async fn run(&self, request: YamlWasmRunRequest) -> Result<YamlWasmRunResult, anyhow::Error> {
@@ -195,11 +303,29 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
             .map_err(|error| anyhow::anyhow!("YAML WIT linker 初始化失败: {error}"))?;
         let state = YamlHostState::new(
             request.host,
-            request.stop,
+            request.stop.clone(),
             request.context,
             request.resolver,
         );
         let mut store = Store::new(self.engine(), state);
+        // epoch 取消兜底（P12.4 / ADR-YAML-04）：deadline 以 1 tick 为步进，
+        // 每次 tick 到点回调里复查 stop 标志——未取消则续期继续执行（全局
+        // epoch 推进对并发 run 一视同仁，续期保证非取消 run 不被打断），
+        // 已取消则以 CANCELLED 错误终止 guest。epoch 只服务取消，不做
+        // host 超时强杀。instantiate 可能执行组件 start 代码，deadline 与
+        // 回调必须在 instantiate 之前就位（epoch interruption 开启后 deadline
+        // 缺省为 0，会立即 trap）。
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(
+            |context: StoreContextMut<'_, YamlHostState>| -> wasmtime::Result<UpdateDeadline> {
+                if context.data().cancelled.load(Ordering::Relaxed) {
+                    return Err(wasmtime::Error::msg(
+                        "CANCELLED: 宿主取消（stop 标志已置位，epoch 中断）",
+                    ));
+                }
+                Ok(UpdateDeadline::Continue(1))
+            },
+        );
         let instance = wit::yaml::YamlExtensionHost::instantiate(&mut store, &component, &linker)
             .map_err(|error| anyhow::anyhow!("YAML 组件实例化失败: {error}"))?;
         let mut program = serde_json::to_value(&request.program)?;
@@ -215,11 +341,29 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
             }
         }
         let program = serde_json::to_string(&program)?;
-        let (result,) = instance
-            .gamer_host_automation()
-            .func_run()
-            .call(&mut store, (&program,))
-            .map_err(|error| anyhow::anyhow!("YAML guest 执行失败: {error}"))?;
+        // ticker 只在 wasm 执行窗口内推进 epoch（见 EpochTicker 生命周期）。
+        // RAII guard：call 异常展开时也要回退活动计数，避免 ticker 永不退出。
+        let ticker = self.ticker();
+        ticker.enter();
+        let call_result = {
+            let _guard = TickerGuard(&*ticker);
+            instance
+                .gamer_host_automation()
+                .func_run()
+                .call(&mut store, (&program,))
+        };
+        let (result,) = match call_result {
+            Ok(result) => result,
+            Err(error) => {
+                if request.stop.load(Ordering::Relaxed) {
+                    // epoch trap 取消：与 capability 边界的 Cancelled 同形，
+                    // 错误文本带机器可读码。
+                    anyhow::bail!("CANCELLED: guest 执行被宿主取消打断（epoch trap）");
+                }
+                // 非取消类 trap（栈溢出等）映射为运行失败，保留 trap 摘要。
+                anyhow::bail!("YAML guest 执行失败: {error:#}");
+            }
+        };
         let result = result.map_err(|error| anyhow::anyhow!("YAML guest 返回错误: {error}"))?;
         let result = serde_json::from_str::<serde_json::Value>(&result)
             .map_err(|error| anyhow::anyhow!("YAML guest 返回值不是 JSON: {error}"))?;

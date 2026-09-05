@@ -340,13 +340,9 @@ impl ScriptProgramResolver {
 }
 
 impl YamlProgramResolver for ScriptProgramResolver {
-    fn resolve(
-        &self,
-        target: &str,
-        _args: &BTreeMap<String, Value>,
-        depth: u32,
-    ) -> anyhow::Result<Program> {
-        crate::extensions::gamer_yaml::yaml_extension::check_call_depth(depth)?;
+    fn resolve(&self, target: &str, _args: &BTreeMap<String, Value>) -> anyhow::Result<Program> {
+        // P12.4（ADR-YAML-04）：调用深度由 guest 本地 ExecutionBudget 计数，
+        // resolver 只按命名空间定位目标程序，不再做深度守卫。
         let parsed = crate::extensions::gamer_yaml::yaml_vnext::split_call_target(target)
             .map_err(|diagnostics| {
                 anyhow::anyhow!(
@@ -473,10 +469,11 @@ mod tests {
         );
     }
 
-    /// ScriptProgramResolver 的 script:/function: 命名空间解析与深度守卫
-    /// （真实 ResourceStore + 分区目录）。
+    /// ScriptProgramResolver 的 script:/function: 命名空间解析
+    /// （真实 ResourceStore + 分区目录）。P12.4 起深度守卫归 guest 本地，
+    /// resolver 不再接收/校验 depth。
     #[test]
-    fn script_program_resolver_supports_namespaced_targets_and_depth_guard() {
+    fn script_program_resolver_supports_namespaced_targets() {
         let data = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config {
             data_dir: data.path().to_path_buf(),
@@ -507,49 +504,33 @@ mod tests {
         };
 
         // script: 分区内相对 id（.yaml 可省略，可含子目录）
-        let program = resolver
-            .resolve("script:sub/inner", &BTreeMap::new(), 1)
-            .unwrap();
+        let program = resolver.resolve("script:sub/inner", &BTreeMap::new()).unwrap();
         assert_eq!(program.steps.len(), 1);
         // function: 文件短路径/函数名
-        let program = resolver
-            .resolve("function:lib/fn1", &BTreeMap::new(), 1)
-            .unwrap();
+        let program = resolver.resolve("function:lib/fn1", &BTreeMap::new()).unwrap();
         assert_eq!(program.params.len(), 1);
         assert_eq!(program.steps.len(), 1);
 
         // 裸 target 拒绝（yaml.v3.call.namespace）
-        let error = resolver.resolve("helper", &BTreeMap::new(), 1).unwrap_err();
+        let error = resolver.resolve("helper", &BTreeMap::new()).unwrap_err();
         assert!(
             error.to_string().contains("yaml.v3.call.namespace"),
             "裸 target 必须报命名空间诊断: {error}"
         );
         // 穿越拒绝
         let error = resolver
-            .resolve("function:../evil/fn", &BTreeMap::new(), 1)
+            .resolve("function:../evil/fn", &BTreeMap::new())
             .unwrap_err();
         assert!(error.to_string().contains("yaml.v3.call.target"));
         // 不存在的目标
         let error = resolver
-            .resolve("script:nope/missing", &BTreeMap::new(), 1)
+            .resolve("script:nope/missing", &BTreeMap::new())
             .unwrap_err();
         assert!(error.to_string().contains("找不到 v3 call 目标"));
         let error = resolver
-            .resolve("function:lib/missing", &BTreeMap::new(), 1)
+            .resolve("function:lib/missing", &BTreeMap::new())
             .unwrap_err();
         assert!(error.to_string().contains("yaml.v3.function.not_found"));
-
-        // 递归深度守卫：depth 32 合法、33 报 CALL_DEPTH_EXCEEDED
-        resolver
-            .resolve("script:sub/inner", &BTreeMap::new(), 32)
-            .unwrap();
-        let error = resolver
-            .resolve("script:sub/inner", &BTreeMap::new(), 33)
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("CALL_DEPTH_EXCEEDED"),
-            "depth 33 必须报 CALL_DEPTH_EXCEEDED: {error}"
-        );
     }
 
     /// 分区内相对 id → 资源 id 的归一规则（不触碰磁盘）。

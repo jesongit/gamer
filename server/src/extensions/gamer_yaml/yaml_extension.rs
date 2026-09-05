@@ -102,21 +102,35 @@ mod manifest_sync_tests {
 
 const DEFAULT_SCREEN_WIDTH: u32 = 1000;
 const DEFAULT_SCREEN_HEIGHT: u32 = 1000;
-/// v3 原生参考解释器的步数护栏；生产链路走 WASM guest，仅测试消费。
-#[allow(dead_code)]
-const MAX_STEP_BUDGET: u64 = 100_000;
 
-/// v3 `call` 递归深度上限（ADR-YAML-02；P12.4 ExecutionBudget 落地前由
-/// resolver / WIT host 侧守卫临时承载，数值与正式预算一致）。
+/// v3 执行预算（ADR-YAML-04 / 契约 §5）：逻辑步与调用深度上限。
+///
+/// 生产链路由 WASM guest 本地计数（`server/tests/yaml-guest` 的
+/// ExecutionBudget，常量在此对齐），本模块的原生参考解释器（无 wasm 退化
+/// 路径 / 测试）实现同语义。步数按**逻辑步**计：顶层、loop 体每轮每个子步、
+/// if 分支体、call 目标程序体全计，loop 每轮迭代本身也计（空转体死循环同受
+/// 约束）；外层 loop 包裹不得绕过预算。
+pub(crate) const MAX_STEPS: u64 = 100_000;
+/// v3 `call` 递归深度上限（ADR-YAML-02 与 ADR-YAML-04 同值）。
 pub(crate) const MAX_CALL_DEPTH: u32 = 32;
 
-/// 深度守卫：guest 每进入一层 callable 深度 +1、返回 -1；`resolve` 的 `depth`
-/// 即被调方所在深度（顶层首个 call = 1）。超限统一报 `CALL_DEPTH_EXCEEDED`。
-/// 生产链路仅 wasm-runtime 的 programs::Host 调用；无该 feature 时仅测试消费。
+/// 深度守卫（原生参考解释器用）：guest 每进入一层 callable 深度 +1、返回
+/// -1，超过 [`MAX_CALL_DEPTH`] 立即终止。错误文本以机器可读码开头，经
+/// run_yaml_vnext → RunManager（RunRecord 错误信息 / 日志）原样透传。
+/// P12.4 起 WIT `programs.resolve` 不再透传 depth，resolver 侧临时守卫移除，
+/// 深度计数正式归 guest 本地（生产链路）与本解释器（无 wasm 路径）。
 #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
 pub(crate) fn check_call_depth(depth: u32) -> Result<()> {
     if depth > MAX_CALL_DEPTH {
-        bail!("CALL_DEPTH_EXCEEDED: call 深度 {depth} 超过上限 {MAX_CALL_DEPTH}");
+        bail!("CALL_DEPTH_EXCEEDED: depth={depth} max={MAX_CALL_DEPTH}");
+    }
+    Ok(())
+}
+
+/// 步预算守卫（原生参考解释器用）：`consumed` 为刚消耗的逻辑步计数。
+fn check_step_budget(consumed: u64) -> Result<()> {
+    if consumed > MAX_STEPS {
+        bail!("STEP_BUDGET_EXCEEDED: consumed={consumed} max={MAX_STEPS}");
     }
     Ok(())
 }
@@ -188,11 +202,11 @@ pub(crate) trait CapabilityInvoker: Send + Sync {
 /// enter `CapabilityRegistry`, so YAML source/resource semantics stay out of
 /// Core capabilities.
 ///
-/// `depth` 为被调方所在调用深度（guest 每进入一层 callable +1，见
-/// [`check_call_depth`]），由 WIT `programs.resolve` 从 guest 透传。
+/// P12.4（ADR-YAML-04）：`call` 深度由 guest 本地 ExecutionBudget 计数，
+/// resolver 只按命名空间定位目标程序，不再接收 depth、也不再做深度守卫。
 pub(crate) trait YamlProgramResolver: Send + Sync {
     #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
-    fn resolve(&self, target: &str, args: &BTreeMap<String, Value>, depth: u32) -> Result<Program>;
+    fn resolve(&self, target: &str, args: &BTreeMap<String, Value>) -> Result<Program>;
 }
 
 /// Native host adapter used by tests and by the no-WASM compatibility path.
@@ -687,10 +701,10 @@ impl Interpreter {
             if self.invoker.cancelled() {
                 bail!("运行已取消")
             }
+            // 每个逻辑步执行前计数：顶层、loop 体每轮子步、if 分支体、call
+            // 目标程序体全计（与 WASM guest ExecutionBudget 同语义）。
             self.steps += 1;
-            if self.steps > MAX_STEP_BUDGET {
-                bail!("yaml.v3.runtime.step_budget_exceeded")
-            }
+            check_step_budget(self.steps)?;
             let flow = self.run_step(step).await?;
             if !matches!(flow, Flow::Continue) {
                 return Ok(flow);
@@ -760,6 +774,10 @@ impl Interpreter {
                             break;
                         }
                     }
+                    // 每轮迭代本身也是逻辑步：空转体（body 无子步）的无 times
+                    // loop 同样受预算约束终止（与 guest 同语义）。
+                    self.steps += 1;
+                    check_step_budget(self.steps)?;
                     iteration += 1;
                     match self.run_steps(body).await? {
                         Flow::Continue => {}
@@ -1086,10 +1104,66 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
                         error.to_string().contains("CALL_DEPTH_EXCEEDED"),
                         "递归超限必须报 CALL_DEPTH_EXCEEDED: {error}"
                     );
+                    assert!(
+                        error.to_string().contains("max=32"),
+                        "深度错误必须带预算上限: {error}"
+                    );
                 })
             })
             .unwrap();
         handle.join().unwrap();
+    }
+
+    /// P12.4（ADR-YAML-04）：无 times 空转体 loop 必须被步预算终止，报
+    /// STEP_BUDGET_EXCEEDED（每轮迭代本身计一步，空 body 也受约束）。
+    #[tokio::test]
+    async fn native_interpreter_terminates_unbounded_empty_loop_with_step_budget() {
+        let program = load("version: 3\nsteps:\n  - loop:\n      steps: []\n").unwrap();
+        let error = Interpreter::new(Arc::new(FakeInvoker))
+            .run(&program)
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("STEP_BUDGET_EXCEEDED"),
+            "死循环必须报 STEP_BUDGET_EXCEEDED: {message}"
+        );
+        assert!(
+            message.contains("max=100000"),
+            "步数错误必须带预算上限: {message}"
+        );
+    }
+
+    /// P12.4（ADR-YAML-04）：步数按逻辑步计——顶层只有 1 个 loop 步，但循环
+    /// 体（内层 loop 每轮 + set 子步）全计，外层包裹不得绕过预算。
+    #[tokio::test]
+    async fn native_interpreter_counts_nested_loop_body_steps_against_budget() {
+        let program = load(
+            "version: 3\nsteps:\n  - loop:\n      steps:\n        - loop:\n            times: 60000\n            steps:\n              - set: {n: 1}\n",
+        )
+        .unwrap();
+        let error = Interpreter::new(Arc::new(FakeInvoker))
+            .run(&program)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("STEP_BUDGET_EXCEEDED"),
+            "嵌套子步必须计入预算: {error}"
+        );
+    }
+
+    /// P12.4：预算内的正常脚本不受影响（< 100_000 逻辑步正常完成）。
+    #[tokio::test]
+    async fn native_interpreter_runs_normal_scripts_within_budget() {
+        let program = load(
+            "version: 3\nsteps:\n  - loop:\n      times: 1000\n      steps:\n        - set: {n: 1}\n  - return: done\n",
+        )
+        .unwrap();
+        let result = Interpreter::new(Arc::new(FakeInvoker))
+            .run(&program)
+            .await
+            .unwrap();
+        assert_eq!(result.value, Value::String("done".into()));
     }
 
     #[tokio::test]
@@ -1257,12 +1331,7 @@ mod wasm_tests {
     struct FixtureResolver;
 
     impl YamlProgramResolver for FixtureResolver {
-        fn resolve(
-            &self,
-            target: &str,
-            _args: &BTreeMap<String, Value>,
-            _depth: u32,
-        ) -> Result<Program> {
+        fn resolve(&self, target: &str, _args: &BTreeMap<String, Value>) -> Result<Program> {
             if target != "script:helper" {
                 bail!("unknown fixture target: {target}");
             }
@@ -1535,6 +1604,10 @@ runtime = "^1.0"
             "permission denial lost its WIT kind: {denied:#}"
         );
 
+        // P12.4：取消是双机制（capability 边界 kind=cancelled 与 epoch trap
+        // CANCELLED 竞速，ADR-YAML-04），两者都是合法的取消形态——stop 先于
+        // 运行置位时，若 capability 路径在一个 tick 内完成则报 kind=cancelled，
+        // 否则 epoch trap 先打断报 CANCELLED。
         let cancelled_program = load(
         "version: 3\nsteps:\n  - invoke:\n      capability: runtime.sleep\n      with:\n        duration: 1000\n",
         )
@@ -1555,10 +1628,30 @@ runtime = "^1.0"
             })
             .await
             .unwrap_err();
+        let message = cancelled.to_string();
         assert!(
-            cancelled.to_string().contains("kind=cancelled"),
-            "cancellation lost its WIT kind: {cancelled:#}"
+            message.contains("kind=cancelled") || message.contains("CANCELLED"),
+            "cancellation must surface as a cancel-shaped error: {message}"
         );
+    }
+
+    /// WIT kind 保留属性（确定性单测）：capability 层取消错误必须映射为
+    /// host-error kind=cancelled、权限拒绝映射为 denied（epoch 取消兜底与此
+    /// 并行，见上一 e2e 注释）。
+    #[test]
+    fn capability_errors_map_to_wit_kinds() {
+        use crate::capabilities::CapabilityError;
+        use crate::extensions::wit::yaml::gamer::host::types::HostErrorKind;
+
+        let error = anyhow::Error::new(CapabilityError::Cancelled);
+        let mapped = super::super::wasm_host::yaml_capability_error_for_test(&error);
+        assert!(matches!(mapped.kind, HostErrorKind::Cancelled));
+
+        let denied = anyhow::Error::new(crate::extensions::ExtensionError::Permission(
+            crate::extensions::PermissionError::NotGranted("input.tap".into()),
+        ));
+        let mapped = super::super::wasm_host::yaml_capability_error_for_test(&denied);
+        assert!(matches!(mapped.kind, HostErrorKind::Denied));
     }
 
     /// Phase 10 验收（yaml 插件侧）：安装 → 启用 → 一个最小 `version: 3`
@@ -1780,20 +1873,14 @@ runtime = "^1.0"
 
     /// 内存版 `script:` / `function:` 命名空间 resolver（P12.2 e2e 用）：
     /// 与生产 ScriptProgramResolver 走同一 split_call_target / load_function
-    /// 前端，并同样执行深度守卫。
+    /// 前端（P12.4 起深度守卫归 guest，resolver 不再介入）。
     struct MemoryResolver {
         scripts: BTreeMap<String, String>,
         functions: BTreeMap<String, String>,
     }
 
     impl YamlProgramResolver for MemoryResolver {
-        fn resolve(
-            &self,
-            target: &str,
-            _args: &BTreeMap<String, Value>,
-            depth: u32,
-        ) -> Result<Program> {
-            super::check_call_depth(depth)?;
+        fn resolve(&self, target: &str, _args: &BTreeMap<String, Value>) -> Result<Program> {
             let parsed = crate::extensions::gamer_yaml::yaml_vnext::split_call_target(target)
                 .map_err(|diagnostics| anyhow!("call 目标无效: {diagnostics:?}"))?;
             match parsed {
@@ -1990,20 +2077,14 @@ log = "^1.0"
         assert_eq!(logs.logs.lock().unwrap().as_slice(), ["hi"]);
     }
 
-    /// P12.2 验收（e2e）：递归 call 超 32 层 → CALL_DEPTH_EXCEEDED
-    /// （宿主 resolver 侧守卫，guest 原样传播）。
+    /// P12.4 验收（e2e）：递归 call 超 32 层 → guest 本地 ExecutionBudget
+    /// 报 CALL_DEPTH_EXCEEDED（WIT 不再透传 depth，宿主 resolver 无深度守卫）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn yaml_component_rejects_recursion_beyond_call_depth_limit() {
         struct RecursiveResolver;
 
         impl YamlProgramResolver for RecursiveResolver {
-            fn resolve(
-                &self,
-                _target: &str,
-                _args: &BTreeMap<String, Value>,
-                depth: u32,
-            ) -> Result<Program> {
-                super::check_call_depth(depth)?;
+            fn resolve(&self, _target: &str, _args: &BTreeMap<String, Value>) -> Result<Program> {
                 load("version: 3\nsteps:\n  - call:\n      target: script:self\n")
                     .map_err(|diagnostics| anyhow!("fixture resolver: {diagnostics:?}"))
             }
@@ -2065,5 +2146,88 @@ log = "^1.0"
             .unwrap();
         assert_eq!(result.value, Value::String("done".into()));
         assert_eq!(logs.logs.lock().unwrap().as_slice(), ["second"]);
+    }
+
+    /// P12.4 验收（e2e，ADR-YAML-04）：无 times 空转体 loop → guest 步预算
+    /// 终止，报 STEP_BUDGET_EXCEEDED（确定性、非 trap/栈溢出）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_terminates_unbounded_loop_with_step_budget_exceeded() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let program = load("version: 3\nsteps:\n  - loop:\n      steps: []\n").unwrap();
+        let error = runtime
+            .run(run_request(
+                program,
+                None,
+                log_host(Arc::new(LogTrace {
+                    logs: Mutex::new(Vec::new()),
+                })),
+                None,
+            ))
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("STEP_BUDGET_EXCEEDED"),
+            "死循环必须以 STEP_BUDGET_EXCEEDED 终止: {message}"
+        );
+        assert!(
+            message.contains("consumed=") && message.contains("max=100000"),
+            "步数错误必须带 consumed/max: {message}"
+        );
+        assert!(
+            !message.contains("call stack exhausted"),
+            "预算终止不是栈溢出 trap: {message}"
+        );
+    }
+
+    /// P12.4 验收（e2e，ADR-YAML-04）：纯计算段（不经 capability 边界）被
+    /// epoch interruption 打断 → CANCELLED。
+    ///
+    /// 确定性设计：单个 `set` 步求值一个 30 万元素字面列表（guest 侧 serde
+    /// 解析 ~14MB program JSON + 列表求值，远超 100ms 纯 wasm 计算），预算
+    /// 不可能在计算完成前耗尽；stop 于 +50ms 置位，ticker 周期 10ms → 首个
+    /// epoch 检查点（≤ ~70ms）必然落在计算中途，由 epoch trap 终止。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_cancels_pure_compute_via_epoch_interruption() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        // 大字面列表：guest 解析 + 求值都是纯 wasm 计算，不产生逻辑步计数。
+        let program = crate::extensions::gamer_yaml::yaml_vnext::Program {
+            version: 3,
+            params: Vec::new(),
+            steps: vec![SmallStep::Set {
+                name: "big".into(),
+                value: Expr::List(vec![Expr::Literal(Value::Int(1)); 300_000]),
+            }],
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flip = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            stop_flip.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let error = runtime
+            .run(YamlWasmRunRequest {
+                wasm: fixture_component(),
+                program,
+                args: BTreeMap::new(),
+                resolver: None,
+                start_index: None,
+                host: log_host(Arc::new(LogTrace {
+                    logs: Mutex::new(Vec::new()),
+                })),
+                context: AppContext::for_test("device-1", "com.example.game").unwrap(),
+                stop,
+            })
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("CANCELLED"),
+            "纯计算段必须被 epoch 取消打断并报 CANCELLED: {message}"
+        );
+        assert!(
+            !message.contains("STEP_BUDGET_EXCEEDED") && !message.contains("CALL_DEPTH_EXCEEDED"),
+            "epoch 取消不应被误报为预算耗尽: {message}"
+        );
     }
 }

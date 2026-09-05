@@ -13,9 +13,13 @@ use gamer::host::{capability, programs};
 ///
 /// 顶层可选 `start_index`（契约 §8）：跳过其前的**顶层**步骤（「从此运行」；
 /// 嵌套分支 / 循环体不受影响——lower 后顶层小 AST 步与 surface 步 1:1 对应）。
-/// `depth` 为当前调用深度（顶层 = 0）：`call` 进入被调方前 +1 并经
-/// `programs.resolve(depth)` 透传给宿主做递归深度守卫（超限宿主回
-/// CALL_DEPTH_EXCEEDED，本 guest 原样向上传播）。
+///
+/// ExecutionBudget（ADR-YAML-04 / 契约 §5）：步数与调用深度由 guest 本地计数，
+/// 不经 WIT 透传给宿主。每个逻辑步执行前计数 +1（顶层、loop 体每轮每个子步、
+/// if 分支体、call 目标程序体全计，loop 每轮迭代本身也计——空转体死循环同受
+/// 约束）；call 进入被调方深度 +1、返回 -1。超限返回以机器可读码开头的错误
+/// 文本（`STEP_BUDGET_EXCEEDED` / `CALL_DEPTH_EXCEEDED`），该文本经宿主原样
+/// 进入 RunRecord 错误信息与运行日志。
 struct Fixture;
 
 impl Guest for Fixture {
@@ -42,7 +46,8 @@ impl Guest for Fixture {
                 all_steps.len()
             ));
         }
-        execute_steps(&all_steps[start_index..], &mut values, 0)?;
+        let mut budget = ExecutionBudget::default();
+        execute_steps(&all_steps[start_index..], &mut values, &mut budget)?;
         Ok(
             serde_json::to_string(&values.remove("__return").unwrap_or(serde_json::Value::Null))
                 .map_err(|error| error.to_string())?,
@@ -50,13 +55,67 @@ impl Guest for Fixture {
     }
 }
 
+/// 执行预算（ADR-YAML-04）。常量必须与宿主侧原生参考解释器
+/// （server/src/extensions/gamer_yaml/yaml_extension.rs 的 MAX_STEPS /
+/// MAX_CALL_DEPTH）保持一致；两处各自独立编译，无法共享代码。
+const MAX_STEPS: u64 = 100_000;
+const MAX_CALL_DEPTH: u32 = 32;
+
+struct ExecutionBudget {
+    steps: u64,
+    call_depth: u32,
+}
+
+impl Default for ExecutionBudget {
+    fn default() -> Self {
+        Self {
+            steps: 0,
+            call_depth: 0,
+        }
+    }
+}
+
+impl ExecutionBudget {
+    /// 每个逻辑步执行前调用：计数 +1，超限报结构化错误。
+    fn begin_step(&mut self) -> Result<(), String> {
+        self.steps += 1;
+        if self.steps > MAX_STEPS {
+            return Err(format!(
+                "STEP_BUDGET_EXCEEDED: consumed={} max={MAX_STEPS}",
+                self.steps
+            ));
+        }
+        Ok(())
+    }
+
+    /// call 进入被调方：深度 +1，超限立即终止。
+    fn enter_call(&mut self) -> Result<(), String> {
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            return Err(format!(
+                "CALL_DEPTH_EXCEEDED: depth={} max={MAX_CALL_DEPTH}",
+                self.call_depth
+            ));
+        }
+        Ok(())
+    }
+
+    /// call 返回：深度 -1（所有退出路径都必须配对调用）。
+    fn exit_call(&mut self) {
+        self.call_depth -= 1;
+    }
+}
+
 fn execute_steps(
     steps: &[serde_json::Value],
     values: &mut serde_json::Map<String, serde_json::Value>,
-    depth: u32,
+    budget: &mut ExecutionBudget,
 ) -> Result<Flow, String> {
     for step in steps {
-        match execute_step(step, values, depth)? {
+        // 每个逻辑步执行前计数：顶层、loop 体每轮子步、if 分支体、call 目标
+        // 程序体全计（ADR-YAML-04：外层 loop 包裹不得绕过预算）。
+        budget.begin_step()?;
+        match execute_step(step, values, budget)? {
             Flow::Continue => {}
             flow => return Ok(flow),
         }
@@ -67,7 +126,7 @@ fn execute_steps(
 fn execute_step(
     step: &serde_json::Value,
     values: &mut serde_json::Map<String, serde_json::Value>,
-    depth: u32,
+    budget: &mut ExecutionBudget,
 ) -> Result<Flow, String> {
     let op = step
         .get("op")
@@ -110,7 +169,7 @@ fn execute_step(
                     .and_then(serde_json::Value::as_array)
                     .ok_or_else(|| format!("if 缺少 {key}"))?,
                 values,
-                depth,
+                budget,
             )? {
                 Flow::Continue => Ok(Flow::Continue),
                 flow => Ok(flow),
@@ -147,8 +206,11 @@ fn execute_step(
                         break;
                     }
                 }
+                // 每轮迭代本身也是逻辑步：空转体（body 无子步）的无 times loop
+                // 同样受预算约束终止，而不是永不退出。
+                budget.begin_step()?;
                 count += 1;
-                match execute_steps(body, values, depth)? {
+                match execute_steps(body, values, budget)? {
                     Flow::Continue => {}
                     Flow::Break => break,
                     flow => return Ok(flow),
@@ -172,33 +234,38 @@ fn execute_step(
                 .get("target")
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "call 缺少 target".to_string())?;
-            let args = evaluate_map(step.get("args"), values)?;
-            let args_json = serde_json::to_string(&args).map_err(|error| error.to_string())?;
-            // 被调方深度 = 当前 + 1；超限由宿主 resolver 侧守卫拒绝。
-            let callee_json = programs::resolve(target, &args_json, depth + 1)
-                .map_err(|error| error)?;
-            let callee: serde_json::Value = serde_json::from_str(&callee_json)
-                .map_err(|error| format!("call 目标不是有效程序: {error}"))?;
-            let callee_steps = callee
-                .get("steps")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| "call 目标缺少 steps".to_string())?;
-            let mut child_values = args;
-            apply_defaults(&callee, &mut child_values);
-            match execute_steps(callee_steps, &mut child_values, depth + 1)? {
-                Flow::Continue | Flow::Return(_) => {
-                    if let Some(save) = step.get("save").and_then(serde_json::Value::as_str) {
-                        values.insert(
-                            save.to_string(),
-                            child_values
-                                .remove("__return")
-                                .unwrap_or(serde_json::Value::Null),
-                        );
+            // 深度本地计数：进入被调方 +1、返回 -1，所有退出路径都配对回退；
+            // 超限立即终止（ADR-YAML-04，不再经 WIT depth 透传宿主守卫）。
+            budget.enter_call()?;
+            let outcome = (|| -> Result<Flow, String> {
+                let args = evaluate_map(step.get("args"), values)?;
+                let args_json = serde_json::to_string(&args).map_err(|error| error.to_string())?;
+                let callee_json = programs::resolve(target, &args_json)?;
+                let callee: serde_json::Value = serde_json::from_str(&callee_json)
+                    .map_err(|error| format!("call 目标不是有效程序: {error}"))?;
+                let callee_steps = callee
+                    .get("steps")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| "call 目标缺少 steps".to_string())?;
+                let mut child_values = args;
+                apply_defaults(&callee, &mut child_values);
+                match execute_steps(callee_steps, &mut child_values, budget)? {
+                    Flow::Continue | Flow::Return(_) => {
+                        if let Some(save) = step.get("save").and_then(serde_json::Value::as_str) {
+                            values.insert(
+                                save.to_string(),
+                                child_values
+                                    .remove("__return")
+                                    .unwrap_or(serde_json::Value::Null),
+                            );
+                        }
+                        Ok(Flow::Continue)
                     }
-                    Ok(Flow::Continue)
+                    Flow::Break => Err("call 目标不能把 break 泄漏到调用方".to_string()),
                 }
-                Flow::Break => Err("call 目标不能把 break 泄漏到调用方".to_string()),
-            }
+            })();
+            budget.exit_call();
+            outcome
         }
         other => Err(format!("未知 small AST op: {other}")),
     }

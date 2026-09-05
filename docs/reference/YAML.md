@@ -530,9 +530,15 @@ canonical_default: bool→true/false；coord→[x,y]（逗号后无空格）；c
 - **返回值泛化**：`return` 可返回 null / bool / number / string / object /
   array 任意 JSON 值；`call` 的 `save` 存返回值整体，被调方无 `return` 即存
   null。删除「函数默认返回 bool」约束，`if` 条件按通用值语义判断。
-- **递归深度**上限 32 层，超限报 `CALL_DEPTH_EXCEEDED`（P12.4 ExecutionBudget
-  落地前由 resolver 侧守卫临时承载，guest 每进入一层 callable 经 WIT
-  `programs.resolve(depth)` 上报）。
+- **递归深度**上限 32 层，超限报 `CALL_DEPTH_EXCEEDED: depth=N max=32`
+  （P12.4 起 depth 由 guest 本地 ExecutionBudget 计数，WIT `programs.resolve`
+  不再透传 depth、宿主不做深度守卫）。
+- **执行预算**（ADR-YAML-04）：`max_steps = 100_000`（逻辑步：顶层、循环体
+  每轮每个子步、if 分支体、call 目标程序体全计，循环每轮迭代本身也计）、
+  `max_call_depth = 32`，由 guest 解释器本地计数；超限报
+  `STEP_BUDGET_EXCEEDED: consumed=N max=100000` / `CALL_DEPTH_EXCEEDED`，
+  错误码原样进入运行错误信息与日志。宿主侧 wasmtime epoch interruption
+  仅作取消兜底（用户停止可打断 guest 纯计算段），不做超时强杀。
 
 ### 11.3 手动运行 start_index（契约 §8）
 
