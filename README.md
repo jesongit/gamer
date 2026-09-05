@@ -10,12 +10,12 @@
 - ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网低延迟
 - 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先从 H.264 GOP 帧环按需调用 ffmpeg 解码最新帧；无 ffmpeg 时 fallback adb screencap）；固定夹具 benchmark 脚本已兼容 Windows PowerShell 5.1（parser=0），正式跨平台 p50/p95 报告仍在计划中
-- 📜 **YAML 自动化**：当前 v2 严格语法支持 find（找图等待+点击，block 障碍、verify 补点）/ color 颜色分支 / loop / func 自定义函数（具名参数 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait（语法见 [docs/reference/YAML.md](docs/reference/YAML.md)），由官方 `gamer.yaml` 扩展承载
+- 📜 **YAML 自动化**：YAML v3 唯一脚本方案（非 `version: 3` 一律诊断报错，无旧版兼容）——19 类步骤（app 启停 / tap / swipe / key / text / wait / log / set / if / loop / break / call / return / throw / find / match_first / check / invoke），call 统一 `script:` / `function:` 命名空间并泛化返回值，find 支持 then/else/verify/save 与 `$match` 上下文，defaults 统一视觉阈值与操作节奏，执行预算（max_steps=100k / max_call_depth=32）防脚本失控，运行事件（步骤高亮 / 命中标记）实时回传投屏页面（语法见 [docs/yaml-v3/](docs/yaml-v3/overview.md)），由官方 `gamer.yaml` 扩展承载
 - ⏰ **定时任务**：Task = 任意 ScheduleProvider + 任意 Runner，内置 `cron` 调度 provider + `gamer.yaml` 执行 runner；服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 🧩 **插件化架构**：Core 只含设备/任务/资源/扩展机制等稳定能力，YAML 自动化与按键映射由可安装扩展（`.gplugin`，签名校验 + 权限确认）提供，面板随扩展安装/卸载出现消失；应用资产走 App Package（`.gamerpkg`）安装
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
-> 当前仓库同时提供 v2 脚本基线、Windows x64 完整包的 launcher 入口（`doctor` / `status` / `repair` / `start` / `upgrade`）和 launcher 托管更新 API。本文只记录仓库中已有的入口；不把 GitHub Release、生产升级/回滚或真实设备 E2E 当作已完成的外部结果。Docker/直跑模式的更新仍由外部部署管理。
+> 当前仓库提供 Windows x64 完整包的 launcher 入口（`doctor` / `status` / `repair` / `start` / `upgrade`）和 launcher 托管更新 API。本文只记录仓库中已有的入口；不把 GitHub Release、生产升级/回滚或真实设备 E2E 当作已完成的外部结果。Docker/直跑模式的更新仍由外部部署管理。
 
 ## 架构
 
@@ -37,7 +37,7 @@
   客户端角色驱动：`adb push` → `adb reverse` 隧道 → `app_process` 启动 → 读视频 socket（H.264 帧 + PTS 头）/
   控制 socket（触控/按键/文本/剪贴板/启动应用）
 - **虚拟屏**：启动参数 `new_display=1920x1080/420`，scrcpy server 在设备上创建虚拟显示器；
-  连接不会自动启动应用，由 Console 启动按钮或脚本 `str_app` 显式启动到虚拟屏，**无需自己探测 display id**
+  连接不会自动启动应用，由 Console 启动按钮或脚本 `app.start` 显式启动到虚拟屏，**无需自己探测 display id**
 
 ## 目录结构
 
@@ -245,7 +245,7 @@ VITE_PROXY_TARGET=http://localhost:8443 pnpm dev
 **屏幕模式**：
 - `镜像主屏`：投物理屏幕，各设备分辨率不同
 - `虚拟屏`：统一分辨率（预设 1920x1080 / 1080x1920 / 1280x720，可自定义宽高+DPI），
-  需 Android 10+；连接只建立投屏会话，应用由 Console 启动按钮或脚本 `str_app` 显式启动
+  需 Android 10+；连接只建立投屏会话，应用由 Console 启动按钮或脚本 `app.start` 显式启动
 
 **WebRTC 网络**：服务端不内置 STUN/TURN，默认使用 host candidate 直连，适合同机或局域网。
 Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`、
@@ -253,7 +253,7 @@ Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`�
 
 ## YAML 脚本语法
 
-YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/reference/YAML.md](docs/reference/YAML.md)**。
+YAML 自动化脚本为 **v3 唯一版本**（`version: 3`，无旧版兼容与迁移工具），完整语法、参数说明和详细示例见 **[docs/yaml-v3/](docs/yaml-v3/overview.md)** 文档套件（program / params / steps / expressions / call / vision / timing / runtime / examples），单文件正文见 [docs/reference/YAML.md](docs/reference/YAML.md) §3。
 可执行脚本、函数库和模板按应用分区存放在 `data/<应用包名>/{scripts,functions,templates,keymaps,presets,resources}/`（REST 走通用资源 API `/api/apps/:app/resources/:kind`；Console 的模板/自动化面板由 `gamer.yaml` 扩展提供，框选/上传模板即用）。
 
 ## API 一览
@@ -301,7 +301,7 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/ref
 | WS | /ws/device/:id | WebRTC 信令（offer → answer） |
 
 执行以 `run_id` 标识一次运行实例。统一执行入口（`POST /api/runs`）、函数测试或“立即运行任务”采用异步返回：
-接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同 runner 并发控制同一设备。脚本/函数保存、运行和任务保存共用严格 loader（由 `gamer.yaml` 扩展承载），失败返回结构化诊断。
+接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同 runner 并发控制同一设备。脚本/函数保存、运行和任务保存共用 v3 校验（由 `gamer.yaml` 扩展承载），失败返回结构化诊断；非 `version: 3` 一律报 `yaml.v3.version` 诊断（unsupported yaml version），无旧版 fallback。
 
 ## 技术要点
 
