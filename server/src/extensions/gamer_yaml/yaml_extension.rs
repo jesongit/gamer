@@ -296,16 +296,13 @@ impl NativeYamlHost {
     /// vision 能力执行完成后的可视化旁路（P12.6）：`vision{template,found,score,center}`
     /// 结构事件 + 与 v2 引擎同形的 `hit`/`miss` 投屏标记事件（设备像素坐标，
     /// 未命中带本次搜索区域框）。只带模板名/分数/坐标，不携带帧数据。
-    async fn emit_vision_outcome(&self, template: &str, outcome: MatchOutcome, region: Option<&Value>) {
-        let region_px = match region {
-            Some(raw) => self.search_region(raw).ok(),
-            None => Some(crate::capabilities::SearchRegion::new(
-                0,
-                0,
-                self.screen.width,
-                self.screen.height,
-            )),
-        };
+    async fn emit_vision_outcome(
+        &self,
+        template: &str,
+        outcome: MatchOutcome,
+        region_px: Option<[u32; 4]>,
+    ) {
+        let region_px = region_px.unwrap_or([0, 0, self.screen.width, self.screen.height]);
         match outcome {
             MatchOutcome::Found(found) => {
                 let center = [
@@ -337,16 +334,14 @@ impl NativeYamlHost {
                     center: None,
                 })
                 .await;
-                if let Some(region) = region_px {
-                    self.emit_event(RuntimeEventKind::Miss {
-                        tpl: template.to_string(),
-                        x: region.x,
-                        y: region.y,
-                        w: region.width,
-                        h: region.height,
-                    })
-                    .await;
-                }
+                self.emit_event(RuntimeEventKind::Miss {
+                    tpl: template.to_string(),
+                    x: region_px[0],
+                    y: region_px[1],
+                    w: region_px[2],
+                    h: region_px[3],
+                })
+                .await;
             }
         }
     }
@@ -480,25 +475,30 @@ impl NativeYamlHost {
         }
     }
 
-    /// 本次搜索的 region 回显值（相对坐标 map；未给 region = 全帧）。
-    fn region_echo(args: &BTreeMap<String, Value>) -> Result<Value> {
-        match args.get("region") {
-            Some(raw) => {
-                let [x, y, width, height] = Self::relative_region(raw)?;
-                Ok(Value::Map(BTreeMap::from([
-                    ("x".to_string(), Value::Float(x)),
-                    ("y".to_string(), Value::Float(y)),
-                    ("width".to_string(), Value::Float(width)),
-                    ("height".to_string(), Value::Float(height)),
-                ])))
-            }
-            None => Ok(Value::Map(BTreeMap::from([
-                ("x".to_string(), Value::Float(0.0)),
-                ("y".to_string(), Value::Float(0.0)),
-                ("width".to_string(), Value::Float(1.0)),
-                ("height".to_string(), Value::Float(1.0)),
-            ]))),
-        }
+    /// 本次实际搜索区域的回显值（相对坐标 map）：由 effective 像素区域换算。
+    fn relative_region_echo(px: Option<[u32; 4]>, w: u32, h: u32) -> Value {
+        let (x, y, width, height) = match px {
+            Some([x, y, width, height]) => (x, y, width, height),
+            None => (0, 0, w, h),
+        };
+        Value::Map(BTreeMap::from([
+            ("x".to_string(), Value::Float(x as f64 / w as f64)),
+            ("y".to_string(), Value::Float(y as f64 / h as f64)),
+            ("width".to_string(), Value::Float(width as f64 / w as f64)),
+            ("height".to_string(), Value::Float(height as f64 / h as f64)),
+        ]))
+    }
+
+    /// 模板 handle → 解析后的实际文件名（`#` 后缀区域推断用；失败 = None 走全屏）。
+    async fn template_file_name(
+        &self,
+        handle: &crate::capabilities::ResourceHandle,
+    ) -> Option<String> {
+        self.registry
+            .resource()?
+            .resolved_file_name(*handle)
+            .await
+            .ok()
     }
 
     /// region 实参：相对坐标 map `{x, y, width, height}` 或四元数组，全部
@@ -727,12 +727,23 @@ impl CapabilityInvoker for NativeYamlHost {
                 let frame = self.capture().await?;
                 let template_name = Self::resource_name(Self::arg(&args, "template")?)?;
                 let template = self.template(Self::arg(&args, "template")?).await?;
+                let template_file = self.template_file_name(&template).await;
+                let explicit_px = args
+                    .get("region")
+                    .map(|value| self.search_region(value))
+                    .transpose()?
+                    .map(|region| [region.x, region.y, region.width, region.height]);
+                let effective_px = crate::matcher::effective_search_region(
+                    explicit_px,
+                    template_file.as_deref(),
+                    self.screen.width,
+                    self.screen.height,
+                );
                 let options = MatchOptions {
                     threshold: Self::threshold_option(&args)?,
-                    region: args
-                        .get("region")
-                        .map(|value| self.search_region(value))
-                        .transpose()?,
+                    region: effective_px.map(|[x, y, width, height]| {
+                        crate::capabilities::SearchRegion::new(x, y, width, height)
+                    }),
                     color_check: false,
                 };
                 let outcome = self
@@ -742,8 +753,9 @@ impl CapabilityInvoker for NativeYamlHost {
                     .match_template(frame, TemplateQuery::new(template, options))
                     .await
                     .map_err(anyhow::Error::new)?;
-                let region = Self::region_echo(&args)?;
-                self.emit_vision_outcome(&template_name, outcome.clone(), args.get("region"))
+                let region =
+                    Self::relative_region_echo(effective_px, self.screen.width, self.screen.height);
+                self.emit_vision_outcome(&template_name, outcome.clone(), effective_px)
                     .await;
                 Ok(Self::match_value(outcome, region))
             }
@@ -753,14 +765,24 @@ impl CapabilityInvoker for NativeYamlHost {
                     _ => bail!("templates 必须是列表"),
                 };
                 let thresholds = Self::thresholds_option(&args, templates.len())?;
+                let explicit_px = args
+                    .get("region")
+                    .map(|value| self.search_region(value))
+                    .transpose()?
+                    .map(|region| [region.x, region.y, region.width, region.height]);
                 let frame = self.capture().await?;
                 let mut request = MatchManyRequest::new(frame);
+                let mut template_files: Vec<Option<String>> = Vec::with_capacity(templates.len());
                 for (template, threshold) in templates.iter().zip(thresholds) {
                     let resource = self.template(template).await?;
+                    template_files.push(self.template_file_name(&resource).await);
                     request = request.with_template(TemplateQuery::new(
                         resource,
                         MatchOptions {
                             threshold,
+                            region: explicit_px.map(|[x, y, width, height]| {
+                                crate::capabilities::SearchRegion::new(x, y, width, height)
+                            }),
                             ..MatchOptions::default()
                         },
                     ));
@@ -772,17 +794,31 @@ impl CapabilityInvoker for NativeYamlHost {
                     .match_many(&request)
                     .await
                     .map_err(anyhow::Error::new)?;
-                let region = Self::region_echo(&args)?;
                 let mut matches = Vec::with_capacity(results.len());
-                for (template, result) in templates.iter().zip(&results) {
+                for (template, (result, template_file)) in
+                    templates.iter().zip(results.iter().zip(&template_files))
+                {
                     // 每个候选一条 vision 事件（match_first 候选全覆盖，同 v2 口径）
+                    let effective_px = crate::matcher::effective_search_region(
+                        explicit_px,
+                        template_file.as_deref(),
+                        self.screen.width,
+                        self.screen.height,
+                    );
                     self.emit_vision_outcome(
                         &Self::resource_name(template)?,
                         result.outcome.clone(),
-                        args.get("region"),
+                        effective_px,
                     )
                     .await;
-                    matches.push(Self::match_value(result.outcome.clone(), region.clone()));
+                    matches.push(Self::match_value(
+                        result.outcome.clone(),
+                        Self::relative_region_echo(
+                            effective_px,
+                            self.screen.width,
+                            self.screen.height,
+                        ),
+                    ));
                 }
                 let found = matches.iter().any(Value::truthy);
                 Ok(Value::Map(BTreeMap::from([
@@ -1526,6 +1562,16 @@ mod tests {
         async fn open(&self, resource: ResourceHandle) -> CapabilityResult<ResourceLease> {
             Ok(ResourceLease::new(resource, None))
         }
+
+        async fn resolved_file_name(&self, handle: ResourceHandle) -> CapabilityResult<String> {
+            Ok(self
+                .names
+                .lock()
+                .unwrap()
+                .get(&handle)
+                .cloned()
+                .unwrap_or_default())
+        }
     }
 
     #[async_trait]
@@ -1671,6 +1717,76 @@ mod tests {
             2,
         );
         assert_eq!(stub.seen()[1].1, None, "threshold 缺省省略字段 → MatchOptions::default 口径");
+    }
+
+    /// 模板 `#` 后缀区域推断（v2 迁移回归回归测试）：步骤未给 region 时，
+    /// 匹配与结果回显/事件都用文件名录制的区域；显式 region 仍最优先。
+    #[tokio::test]
+    async fn native_host_infers_search_region_from_template_name_suffix() {
+        let stub = VisionStub::new(&[]);
+        let host = NativeYamlHost::new(
+            all_permissions(vision_registry(&stub)),
+            AppContext::for_test("d1", "com.test.game").unwrap(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // 关闭登录#700_147_736_207 → 千分比矩形（1000x1000 参考屏 = 像素等值）
+        let value = host
+            .invoke(
+                "vision.match",
+                Value::Map(BTreeMap::from([(
+                    "template".into(),
+                    Value::String("关闭登录#700_147_736_207.png".into()),
+                )])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stub.seen(),
+            vec![(
+                "关闭登录#700_147_736_207.png".to_string(),
+                None,
+                Some([700, 147, 36, 60])
+            )],
+            "搜索区域按模板名后缀推断并传入 MatchOptions"
+        );
+        let map = into_map(value);
+        assert_eq!(map.get("found"), Some(&Value::Bool(false)));
+        let region = into_map(map.get("region").cloned().unwrap());
+        assert_eq!(region.get("x"), Some(&Value::Float(0.7)));
+        assert_eq!(region.get("y"), Some(&Value::Float(0.147)));
+        assert_eq!(region.get("width"), Some(&Value::Float(0.036)));
+        assert_eq!(region.get("height"), Some(&Value::Float(0.06)));
+
+        // 显式 region 优先于模板名后缀
+        host.invoke(
+            "vision.match",
+            Value::Map(BTreeMap::from([
+                (
+                    "template".into(),
+                    Value::String("关闭登录#700_147_736_207.png".into()),
+                ),
+                (
+                    "region".into(),
+                    Value::Map(BTreeMap::from([
+                        ("x".into(), Value::Float(0.0)),
+                        ("y".into(), Value::Float(0.0)),
+                        ("width".into(), Value::Float(0.1)),
+                        ("height".into(), Value::Float(0.1)),
+                    ])),
+                ),
+            ])),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stub.seen().last().unwrap().2,
+            Some([0, 0, 100, 100]),
+            "显式 region 优先"
+        );
     }
 
     fn all_permissions(registry: CapabilityRegistry) -> HostApi {

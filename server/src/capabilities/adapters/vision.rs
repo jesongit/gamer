@@ -19,21 +19,20 @@ impl VisionAdapter {
     }
 
     /// 搜索区域裁决：步骤显式 region 优先；未给时按模板实际文件名的 `#`
-    /// 后缀推断（`xx#l` 半区 / `xx#0_0_500_500` 千分比矩形，与 v2 引擎和
-    /// 匹配预览端点共用 `template_region_from_name`，区域语义不漂移）。
+    /// 后缀推断（`xx#l` 半区 / `xx#0_0_500_500` 千分比矩形）。统一走
+    /// `matcher::effective_search_region`，与运行事件回显/匹配预览不漂移。
     /// 都没有 → 全屏（None）。
     fn effective_region(
         explicit: Option<crate::capabilities::SearchRegion>,
         file_name: Option<String>,
         frame_dims: (u32, u32),
     ) -> Option<[u32; 4]> {
-        explicit
-            .map(|region| [region.x, region.y, region.width, region.height])
-            .or_else(|| {
-                file_name.and_then(|name| {
-                    crate::matcher::template_region_from_name(&name, frame_dims.0, frame_dims.1)
-                })
-            })
+        crate::matcher::effective_search_region(
+            explicit.map(|region| [region.x, region.y, region.width, region.height]),
+            file_name.as_deref(),
+            frame_dims.0,
+            frame_dims.1,
+        )
     }
 
     async fn request(

@@ -67,4 +67,7 @@ pub trait ResourceService: Send + Sync {
     async fn resolve(&self, id: &ResourceId) -> CapabilityResult<ResourceHandle>;
 
     async fn open(&self, resource: ResourceHandle) -> CapabilityResult<ResourceLease>;
+
+    /// 解析后的实际文件名（模板含 `#区域` 后缀，供搜索区域推断/回显）。
+    async fn resolved_file_name(&self, handle: ResourceHandle) -> CapabilityResult<String>;
 }

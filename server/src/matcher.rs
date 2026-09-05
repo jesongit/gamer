@@ -92,6 +92,18 @@ pub struct DecodedMatchRequest {
     pub color: bool,
 }
 
+/// 搜索区域裁决（vision 适配器、运行事件回显、匹配预览共用，避免语义漂移）：
+/// 步骤显式 region（像素）优先；未给时按模板实际文件名 `#` 后缀推断；
+/// 都没有 → `None`（全屏）。
+pub fn effective_search_region(
+    explicit_px: Option<[u32; 4]>,
+    template_file: Option<&str>,
+    w: u32,
+    h: u32,
+) -> Option<[u32; 4]> {
+    explicit_px.or_else(|| template_file.and_then(|name| template_region_from_name(name, w, h)))
+}
+
 /// 从模板实际文件名解析引擎使用的搜索区域。
 ///
 /// 模板没有 `#` 后缀时返回 `None`（全屏）；`#a` 也代表全屏。
@@ -1907,5 +1919,25 @@ mod tests {
             full_screen,
             gop.len(),
         );
+    }
+}
+
+#[cfg(test)]
+mod effective_region_tests {
+    use super::effective_search_region;
+
+    /// 共用裁决：显式像素区域优先，其次模板名后缀，最后全屏。
+    #[test]
+    fn effective_search_region_precedence() {
+        assert_eq!(
+            effective_search_region(Some([1, 2, 3, 4]), Some("a#u.png"), 1000, 1000),
+            Some([1, 2, 3, 4])
+        );
+        assert_eq!(
+            effective_search_region(None, Some("关闭登录#700_147_736_207.png"), 1000, 1000),
+            Some([700, 147, 36, 60])
+        );
+        assert_eq!(effective_search_region(None, Some("无后缀.png"), 1000, 1000), None);
+        assert_eq!(effective_search_region(None, None, 1000, 1000), None);
     }
 }

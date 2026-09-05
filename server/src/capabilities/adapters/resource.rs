@@ -131,4 +131,8 @@ impl ResourceService for ResourceAdapter {
         };
         Ok(ResourceLease::new(handle, Some(byte_len)))
     }
+
+    async fn resolved_file_name(&self, handle: ResourceHandle) -> CapabilityResult<String> {
+        ResourceAdapter::file_name(self, handle)
+    }
 }
