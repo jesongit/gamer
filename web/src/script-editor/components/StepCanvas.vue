@@ -168,7 +168,7 @@ const props = defineProps({
   selectedUuid: { type: String, default: null },
   context: { type: String as PropType<'script' | 'function'>, default: 'script' },
   resolveTarget: {
-    type: Function as PropType<((kind: 'call' | 'func', target: string) => { params: ParamDecl[] } | null) | undefined>,
+    type: Function as PropType<((target: string) => { params: ParamDecl[] } | null) | undefined>,
     default: undefined,
   },
   /** 模板短名候选（tmpl 控件 datalist）。 */

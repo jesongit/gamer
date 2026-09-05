@@ -92,7 +92,7 @@ const props = defineProps({
   context: { type: String as PropType<'script' | 'function'>, default: 'script' },
   params: { type: Array as PropType<ParamDecl[]>, default: () => [] },
   resolveTarget: {
-    type: Function as PropType<((kind: 'call' | 'func', target: string) => { params: ParamDecl[] } | null) | undefined>,
+    type: Function as PropType<((target: string) => { params: ParamDecl[] } | null) | undefined>,
     default: undefined,
   },
   templates: { type: Array as PropType<string[]>, default: () => [] },
