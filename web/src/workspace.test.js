@@ -117,7 +117,7 @@ describe('Frontend Plugin Workspace', () => {
     expect(registry.resolve('script')?.key).toBe('gamer.yaml:automation')
     expect(registry.resolve('keymap')?.key).toBe('gamer.keymap:keymaps')
     // getProps 从 workspace core context 提取对应上下文
-    expect(automation?.getProps?.({ scriptRunner: { kind: 'runner' } })).toEqual({ context: { kind: 'runner' } })
+    expect(automation?.getProps?.({ scriptRunner: { scripts: { kind: 'runner' } } })).toEqual({ context: { kind: 'runner' } })
 
     // 扩展停用 → 服务端贡献消失 → 面板从注册表移除（生命周期跟随）
     load.mockResolvedValueOnce({ ui_contributions: [] })

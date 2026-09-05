@@ -1,4 +1,3 @@
-import { defineComponent, h, onMounted } from 'vue'
 import KeymapPanel from '../components/console/KeymapPanel.vue'
 import ScriptRunner from '../components/console/ScriptRunner.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
@@ -16,38 +15,29 @@ export const CORE_PANEL_COMPONENTS = {
   keymaps: 'console.keymaps',
 } as const
 
-/** 函数库模式：与 console.scripts 共享 scriptRunner 上下文，挂载时默认切到「函数」。 */
-const ScriptRunnerFunctionsMode = defineComponent({
-  name: 'ConsoleFunctionsPanel',
-  props: { context: { type: Object, required: true } },
-  setup(props) {
-    onMounted(() => applyFunctionsMode(props.context as Record<string, unknown>))
-    return () => h(ScriptRunner, { context: props.context })
-  },
-})
-
-/** 把共享 scriptRunner 上下文的 runKind 切到函数库（幂等；测试可直接驱动）。 */
-export function applyFunctionsMode(context: Record<string, unknown> | null | undefined) {
-  const runKind = (context as { runKind?: { value?: unknown } } | null | undefined)?.runKind
-  if (runKind && typeof runKind === 'object' && 'value' in runKind) runKind.value = 'func'
-}
-
 const DESCRIPTORS: Record<string, CorePanelDescriptor> = {
   [CORE_PANEL_COMPONENTS.scripts]: {
     component: ScriptRunner,
     panelClass: 'script-tab',
     aliases: ['script'],
-    getProps: context => ({ context: context.scriptRunner }),
+    // 脚本/函数是同一运行器机制的两份面板作用域上下文（各自锁定资源类型与
+    // 编辑模式，互不串台）；context.scriptRunner 由壳装配为 {scripts, functions}。
+    getProps: context => {
+      const runner = context.scriptRunner as { scripts?: unknown } | undefined
+      return { context: runner?.scripts }
+    },
   },
   [CORE_PANEL_COMPONENTS.functions]: {
-    component: ScriptRunnerFunctionsMode,
+    component: ScriptRunner,
     panelClass: 'script-tab',
-    getProps: context => ({ context: context.scriptRunner }),
+    getProps: context => {
+      const runner = context.scriptRunner as { functions?: unknown } | undefined
+      return { context: runner?.functions }
+    },
   },
   [CORE_PANEL_COMPONENTS.templates]: {
     component: TemplateCapture,
     panelClass: 'tpl-tab',
-    aliases: ['tpl'],
     getProps: context => ({ context: context.templateCapture }),
   },
   [CORE_PANEL_COMPONENTS.keymaps]: {

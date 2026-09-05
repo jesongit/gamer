@@ -6,7 +6,6 @@ import ScriptRunner from './components/console/ScriptRunner.vue'
 import TemplateCapture from './components/console/TemplateCapture.vue'
 import {
   CORE_PANEL_COMPONENTS,
-  applyFunctionsMode,
   resolveCoreComponent,
 } from './workspace/core-component-registry'
 import { unknownCorePanel } from './workspace/contribution-manager'
@@ -17,8 +16,8 @@ describe('Console core panel component registry', () => {
     expect(scripts?.component).toBe(ScriptRunner)
     expect(scripts?.panelClass).toBe('script-tab')
     expect(scripts?.aliases).toContain('script')
-    expect(scripts?.getProps?.({ scriptRunner: { kind: 'runner' } })).toEqual({
-      context: { kind: 'runner' },
+    expect(scripts?.getProps?.({ scriptRunner: { scripts: { kind: 'script-panel' } } })).toEqual({
+      context: { kind: 'script-panel' },
     })
 
     const templates = resolveCoreComponent('console.templates')
@@ -35,6 +34,19 @@ describe('Console core panel component registry', () => {
     })
   })
 
+  it('functions panel binds its own runner scope (no shared runKind mutation)', () => {
+    const scripts = resolveCoreComponent(CORE_PANEL_COMPONENTS.scripts)
+    const functions = resolveCoreComponent(CORE_PANEL_COMPONENTS.functions)
+    // 两个面板是同一宿主组件 + 各自作用域上下文；不存在「挂载即改写共享 runKind」的副作用
+    expect(functions?.component).toBe(ScriptRunner)
+    expect(functions?.getProps?.({ scriptRunner: { functions: { kind: 'func-panel' } } })).toEqual({
+      context: { kind: 'func-panel' },
+    })
+    // scripts 面板上下文与 functions 面板上下文互不读取对方作用域
+    expect(scripts?.getProps?.({ scriptRunner: { functions: { kind: 'func-panel' } } }))
+      .toEqual({ context: undefined })
+  })
+
   it('returns null for unknown keys; placeholder descriptor never throws', () => {
     expect(resolveCoreComponent('future.widget')).toBeNull()
     expect(resolveCoreComponent('')).toBeNull()
@@ -45,22 +57,5 @@ describe('Console core panel component registry', () => {
     const app = createApp(host)
     expect(() => app.mount(document.createElement('div'))).not.toThrow()
     app.unmount()
-  })
-
-  it('functions panel shares the script runner context and defaults runKind to func on mount', () => {
-    const functions = resolveCoreComponent(CORE_PANEL_COMPONENTS.functions)
-    expect(functions?.component).not.toBe(ScriptRunner)
-    expect(functions?.getProps?.({ scriptRunner: { kind: 'runner' } })).toEqual({
-      context: { kind: 'runner' },
-    })
-
-    // 挂载副作用抽成纯函数：共享上下文的 runKind 切到 func（幂等）
-    const runKind = { value: 'script' }
-    applyFunctionsMode({ runKind })
-    expect(runKind.value).toBe('func')
-    applyFunctionsMode({ runKind })
-    expect(runKind.value).toBe('func')
-    expect(() => applyFunctionsMode(null)).not.toThrow()
-    expect(() => applyFunctionsMode({ runKind: 'not-a-ref' })).not.toThrow()
   })
 })

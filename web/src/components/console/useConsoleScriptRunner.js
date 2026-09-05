@@ -1,5 +1,6 @@
 import { computed, nextTick, onUnmounted, provide, reactive, ref, watch } from 'vue'
 import { api } from '../../api'
+import { runYamlFunction, runYamlScript } from '../../gamer-yaml-runner'
 import {
   applyRunRecord, beginCancel, findRun, pushRunConflict, resetStoreRunState,
   scriptsData, store, templatesData,
@@ -15,10 +16,20 @@ import { SE_TARGET_OPTIONS } from '../../script-editor/targets'
 import { startIndexOf } from '../../script-editor/selection'
 
 /**
- * 脚本页签：运行区（脚本/函数库选择、只读摘要、从此运行）、编辑外壳
+ * gamer.yaml 面板运行器（console.scripts / console.functions 两个扩展面板的
+ * 共享实现）：运行区（目标选择、只读摘要、从此运行）、编辑外壳
  * （useScriptEditorShell/rawEditor/fnLib）、call/func 目标参数解析、
- * 运行参数流程、运行日志与运行状态轮询。自 Console.vue 原样拆出，行为零变化。
+ * 运行参数流程、运行日志与运行状态轮询。
+ *
+ * 面板上下文按资源类型拆分为两份独立作用域（scriptPanel / functionsPanel）：
+ * 编辑模式、目标选择、删除确认等互不串台；编辑器外壳/函数库快照/日志与
+ * 运行轮询是同一设备的同一份机制，保持单例共享。
  */
+
+// 脚本列表加载（gamer.yaml 面板实现自持，Console 壳不再预拉业务资源）：
+// inflight 去重 + 共享 store（与任务表单贡献的懒加载互通——store 非空即跳过）。
+let scriptsInflight = null
+
 export function useConsoleScriptRunner({
   toast,
   activePkg,
@@ -27,12 +38,30 @@ export function useConsoleScriptRunner({
   tplShortName,
   loadData,
 }) {
-  const selScript = ref('')
-  // 脚本页签：运行/编辑模式
-  const scriptMode = ref('run')
+  // 面板作用域：每个面板锁定自己的资源类型与编辑模式
+  function createPanelScope(kind) {
+    return {
+      kind,
+      runKind: ref(kind),        // 锁定（面板类型即资源类型；模板分支沿用）
+      scriptMode: ref('run'),    // run | edit | raw（面板独立）
+    }
+  }
+  const scriptScope = createPanelScope('script')
+  const funcScope = createPanelScope('func')
+
+  async function refreshScripts() {
+    if (!scriptsInflight) {
+      scriptsInflight = api.listScripts()
+        .then(list => { scriptsData.value = Array.isArray(list) ? list : [] })
+        .finally(() => { scriptsInflight = null })
+    }
+    return scriptsInflight
+  }
+  refreshScripts().catch(() => { /* 拉取失败：面板内提示「（无脚本）」等空态 */ })
+
   // ---------- 共享脚本编辑器外壳（阶段 4） ----------
   // 模型/命令栈/dirty/保存/409 冲突/校验/跳转全部收敛在 useScriptEditorShell，
-  // Console 的 ScriptRunner 编辑态使用同一共享核心（script-editor/*）。
+  // 两个面板的编辑态共用同一外壳（任一时刻只有一个面板可见）。
   // resolvers 提供模板存在性校验（call/func 资源与 args 绑定检查需要目标参数表，客户端暂缺、由服务端权威校验）
   const scriptShell = useScriptEditorShell({
     api: createEditorShellApi(api),
@@ -46,27 +75,27 @@ export function useConsoleScriptRunner({
   const rawEditor = useRawYamlEditor({ api })
   // 函数库列表与 func 目标解析（func 步骤「打开函数定义」跳转用）
   const fnLib = useFunctionLibrary({ api })
-  // 运行区资源类型：脚本（scripts/）/ 函数（functions/）。函数模式经函数测试接口运行单个函数
-  const runKind = ref('script')
+  // 各面板目标选择（面板独立）
+  const selScript = ref('')
   const selFnFile = ref('')
   const scriptDeleteConfirmId = ref('')
-  /** 运行按钮可用性：脚本模式看脚本选择，函数模式看函数库文件选择 */
-  const canRunTarget = computed(() => (runKind.value === 'script' ? !!selScript.value : !!selFnFile.value))
-  // 函数文件默认选中第一个：切类型/切分区/列表刷新后当前选择失效时回退第一个（与脚本下拉同形）
-  watch([() => fnLib.list, runKind], () => {
-    if (runKind.value !== 'func') return
+  /** 运行按钮可用性：脚本面板看脚本选择，函数面板看函数库文件选择 */
+  const canRunTargetScript = computed(() => !!selScript.value)
+  const canRunTargetFunc = computed(() => !!selFnFile.value)
+  // 函数文件默认选中第一个：切分区/列表刷新后当前选择失效时回退第一个（与脚本下拉同形）
+  watch(() => fnLib.list, () => {
     if (!fnLib.list.some(f => f.id === selFnFile.value)) selFnFile.value = fnLib.list[0]?.id || ''
   }, { immediate: true })
   /** 运行区当前选择 id（脚本 id / 函数库文件 id）：编辑、删除按钮与摘要区共用 */
-  const selTargetId = computed(() => (runKind.value === 'script' ? selScript.value : selFnFile.value))
-  watch([selScript, runKind, activePkg], () => { scriptDeleteConfirmId.value = '' })
+  const selTargetIdScript = computed(() => selScript.value)
+  const selTargetIdFunc = computed(() => selFnFile.value)
+  watch([selScript, activePkg], () => { scriptDeleteConfirmId.value = '' })
   /**
-   * 函数模式：整个函数库文件的解析模型（全部函数）。摘要区逐函数分组渲染
+   * 函数面板：整个函数库文件的解析模型（全部函数）。摘要区逐函数分组渲染
    * （每组一个 ScriptSummary，steps 带稳定 uuid 供运行起点定位）。
    * parseFunctionFile 返回 {model, diagnostics} 包装。
    */
   const funcParsed = computed(() => {
-    if (runKind.value !== 'func') return null
     const f = fnLib.list.find(x => x.id === selFnFile.value)
     if (!f) return null
     try {
@@ -84,12 +113,11 @@ export function useConsoleScriptRunner({
     return model.functions.map(fn => ({ name: fn.name, model: { params: fn.params || [], steps: fn.steps || [] } }))
   })
   const funcSummaryError = computed(() => {
-    if (runKind.value !== 'func') return ''
     const f = fnLib.list.find(x => x.id === selFnFile.value)
     if (!f) return '请选择函数库文件'
     return funcParsed.value ? '' : '函数库解析失败（可能含旧语法），请进编辑态查看诊断'
   })
-  // 编辑态辅助 UI 开关
+  // 编辑态辅助 UI 开关（编辑视图共享外壳，开关随外壳共享）
   const showYaml = ref(false)
   /** 进入函数库编辑态时聚焦的函数名（摘要区逐函数「编辑」直达；空 = 默认第一个） */
   const editFocusFn = ref('')
@@ -151,7 +179,7 @@ export function useConsoleScriptRunner({
     if (!target) return null
     if (kind === 'func') return funcParamsFor(target)
     if (callParamsCache.has(target)) return callParamsCache.get(target)
-    // /api/scripts 列表已带 content；优先同步解析，保证已有 call 步骤首次渲染时
+    // 脚本列表已带 content；优先同步解析，保证已有 call 步骤首次渲染时
     // 就能按目标声明选择正确的 CellEditor 类型，不会先退化成 text。
     const script = scriptsData.value.find(x => x.package === activePkg.value && x.name === target)
     if (!script?.content) return null
@@ -253,68 +281,68 @@ export function useConsoleScriptRunner({
 
   /** 退出编辑（脏模型需确认丢弃）；若处于跳转栈中先返回上一资源。
    *  注意 shell 是 reactive 包装：ref/computed 属性访问即解包，不能再取 .value */
-  async function cancelEditScript() {
+  async function cancelEditScript(scope) {
     if (scriptShell.hasModel && scriptShell.dirty && !window.confirm('有未保存修改，确认放弃？')) return
     if (scriptShell.canJumpBack) {
       await jumpBack()
       return
     }
     scriptShell.reset()
-    scriptMode.value = 'run'
+    scope.scriptMode.value = 'run'
     showYaml.value = false
   }
 
-  /** 新建脚本：空 ScriptModel（保存时落盘到当前应用分区） */
+  /** 新建脚本：空 ScriptModel（保存时落盘到当前应用分区）——脚本面板专属 */
   function startNewScript() {
     if (!activePkg.value) return toast('请先在右侧选择包名', 'warn')
-    scriptMode.value = 'edit'
+    scriptScope.scriptMode.value = 'edit'
     showYaml.value = false
     scriptShell.newScript({ name: '新脚本.yml', pkg: activePkg.value })
   }
 
-  /** 编辑当前选择（运行区资源类型分发）：脚本 = 脚本编辑上下文；函数 = 函数库编辑上下文。
+  /** 编辑当前选择（按面板资源类型分发）：脚本 = 脚本编辑上下文；函数 = 函数库编辑上下文。
    *  fnName 指定进入时聚焦的函数（摘要区逐函数「编辑」按钮直达），编辑态函数名为静态展示 */
-  async function editCurrentTarget(fnName = '') {
-    if (runKind.value !== 'func') return editCurrentScript()
+  async function editCurrentTarget(scope, fnName = '') {
+    if (scope.kind !== 'func') return editCurrentScript()
     const f = fnLib.list.find(x => x.id === selFnFile.value)
     if (!f) return toast('请先选择函数库文件', 'error')
     editFocusFn.value = fnName || ''
-    scriptMode.value = 'edit'
+    scope.scriptMode.value = 'edit'
     showYaml.value = false
     try {
       await scriptShell.loadFunctionFile(f.id)
     } catch (e) {
       scriptShell.reset()
-      scriptMode.value = 'run'
+      scope.scriptMode.value = 'run'
       toast('函数库加载失败：' + e.message, 'error')
     }
   }
 
   /** 进入原文编辑态：直接读取资源原文，不经过前端 YAML codec，保存仍由服务端校验。 */
-  async function editRawCurrentTarget() {
-    const id = selTargetId.value
-    if (!id) return toast(runKind.value === 'func' ? '请先选择函数库文件' : '请先选择脚本', 'error')
-    scriptMode.value = 'raw'
+  async function editRawCurrentTarget(scope) {
+    const id = scope.kind === 'func' ? selFnFile.value : selScript.value
+    if (!id) return toast(scope.kind === 'func' ? '请先选择函数库文件' : '请先选择脚本', 'error')
+    scope.scriptMode.value = 'raw'
     try {
-      await rawEditor.load(runKind.value === 'func' ? 'function' : 'script', id)
+      await rawEditor.load(scope.kind === 'func' ? 'function' : 'script', id)
     } catch (e) {
       rawEditor.reset()
-      scriptMode.value = 'run'
+      scope.scriptMode.value = 'run'
       toast('原文加载失败：' + e.message, 'error')
     }
   }
 
   /** 原文保存成功后刷新对应资源列表，避免摘要、函数候选和参数缓存继续使用旧内容。 */
-  async function saveRawScript() {
+  async function saveRawScript(scope) {
     if (rawEditor.loading.value || rawEditor.saving.value) return
     const r = await rawEditor.save()
     if (r.ok) {
       clearCallParamsCache()
       fnParamsMemo.clear()
       if (rawEditor.kind.value === 'function') await fnLib.refresh(activePkg.value)
-      else await loadData()
+      else await refreshScripts()
       rawEditor.reset()
-      scriptMode.value = 'run'
+      scope.scriptMode.value = 'run'
       toast('原文已保存', 'success')
     } else if (r.reason === 'invalid') {
       toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
@@ -326,24 +354,24 @@ export function useConsoleScriptRunner({
   }
 
   /** 取消原文编辑：有修改时确认丢弃，回到资源运行视图。 */
-  function cancelRawScript() {
+  function cancelRawScript(scope) {
     rawEditor.reset()
-    scriptMode.value = 'run'
+    scope.scriptMode.value = 'run'
   }
 
-  /** 新建当前类型：脚本 = 新建脚本；函数 = 直接进入新函数库文件编辑态，文件名可在编辑器顶部修改 */
-  function startNewTarget() {
-    if (runKind.value !== 'func') return startNewScript()
+  /** 新建当前面板类型：脚本 = 新建脚本；函数 = 直接进入新函数库文件编辑态，文件名可在编辑器顶部修改 */
+  function startNewTarget(scope) {
+    if (scope.kind !== 'func') return startNewScript()
     if (!activePkg.value) return toast('请先在右侧选择包名', 'warn')
     editFocusFn.value = ''
-    scriptMode.value = 'edit'
+    scope.scriptMode.value = 'edit'
     showYaml.value = false
     scriptShell.newFunctionFile({ file: '新函数库', pkg: activePkg.value })
   }
 
-  /** 删除当前选择：脚本 / 函数库文件 */
-  async function deleteCurrentTarget() {
-    if (runKind.value !== 'func') return deleteCurrentScript()
+  /** 删除当前选择：脚本面板删脚本 / 函数面板删函数库文件 */
+  async function deleteCurrentTarget(scope) {
+    if (scope.kind !== 'func') return deleteCurrentScript()
     const f = fnLib.list.find(x => x.id === selFnFile.value)
     if (!f) return toast('请先选择函数库文件', 'error')
     if (!window.confirm(`删除函数库文件 ${f.file}？（引用它的 func 步骤将失效）`)) return
@@ -393,7 +421,7 @@ export function useConsoleScriptRunner({
     }
   }
 
-  /** 函数模式顶部「添加函数」：载入当前文件编辑态，在末尾插入空函数并选中它。 */
+  /** 函数面板顶部「添加函数」：载入当前文件编辑态，在末尾插入空函数并选中它。 */
   async function addFunctionToCurrentFile() {
     const f = fnLib.list.find(x => x.id === selFnFile.value)
     if (!f) return toast('请先选择函数库文件', 'warn')
@@ -403,7 +431,7 @@ export function useConsoleScriptRunner({
     const name = `func${i}`
 
     editFocusFn.value = ''
-    scriptMode.value = 'edit'
+    funcScope.scriptMode.value = 'edit'
     showYaml.value = false
     try {
       await scriptShell.loadFunctionFile(f.id)
@@ -412,7 +440,7 @@ export function useConsoleScriptRunner({
       editFocusFn.value = name
     } catch (e) {
       scriptShell.reset()
-      scriptMode.value = 'run'
+      funcScope.scriptMode.value = 'run'
       toast('添加函数失败：' + (e.message || e), 'error')
     }
   }
@@ -454,22 +482,22 @@ export function useConsoleScriptRunner({
     }, `函数 ${fnName} 已删除`)
   }
 
-  /** 运行模式：编辑当前选中的脚本（getScript 读取最新内容与版本短码） */
+  /** 运行模式：编辑当前选中的脚本（getScript 读取最新内容与版本短码）——脚本面板专属 */
   async function editCurrentScript() {
     const s = scripts.value.find(x => x.id === selScript.value)
     if (!s) return toast('请先选择脚本', 'error')
-    scriptMode.value = 'edit'
+    scriptScope.scriptMode.value = 'edit'
     showYaml.value = false
     try {
       await scriptShell.loadScript(s.id)
     } catch (e) {
       scriptShell.reset()
-      scriptMode.value = 'run'
+      scriptScope.scriptMode.value = 'run'
       toast('脚本加载失败：' + e.message, 'error')
     }
   }
 
-  /** 运行模式：删除当前选中的脚本 */
+  /** 运行模式：删除当前选中的脚本——脚本面板专属 */
   async function deleteCurrentScript() {
     const s = scripts.value.find(x => x.id === selScript.value)
     if (!s) return toast('请先选择脚本', 'error')
@@ -479,7 +507,7 @@ export function useConsoleScriptRunner({
     }
     try {
       await api.deleteScript(s.id)
-      await loadData()
+      await refreshScripts()
       clearCallParamsCache()
       if (selScript.value === s.id) selScript.value = ''
       scriptDeleteConfirmId.value = ''
@@ -494,14 +522,14 @@ export function useConsoleScriptRunner({
 
   /** 保存编辑中的脚本：shell.save() 序列化模型并携带 expected_version；
    *  校验失败 → 提示前 3 条诊断；409 version_conflict → shell.conflict 置位，SaveConflictModal 弹出。 */
-  async function saveEditScript() {
+  async function saveEditScript(scope) {
     if (!scriptShell.hasModel) return
     if (!String(scriptShell.name || '').trim()) return toast('请填写脚本名称', 'error')
     if (!scriptShell.pkg && !activePkg.value) return toast('请先选择应用分区', 'warn')
     const r = await scriptShell.save()
     if (r.ok) {
       clearCallParamsCache()
-      await afterScriptSaved(r.result)
+      await afterScriptSaved(scope, r.result)
     } else if (r.reason === 'invalid') {
       toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
     } else if (r.reason === 'conflict') {
@@ -514,22 +542,22 @@ export function useConsoleScriptRunner({
   // ---------- 自动保存（编辑区失焦即存）：600ms 防抖合并连续失焦；成功静默，
   // 校验不通过 / 版本冲突 / 失败 toast 提示（不弹冲突窗、不退出编辑态） ----------
   let autoSaveTimer = null
-  function autoSaveDebounced() {
-    if (scriptMode.value !== 'edit' || !scriptShell.hasModel) return
+  function autoSaveDebounced(scope) {
+    if (scope.scriptMode.value !== 'edit' || !scriptShell.hasModel) return
     if (autoSaveTimer) clearTimeout(autoSaveTimer)
-    autoSaveTimer = setTimeout(autoSave, 600)
+    autoSaveTimer = setTimeout(() => autoSave(scope), 600)
   }
-  async function autoSave() {
+  async function autoSave(scope) {
     autoSaveTimer = null
-    if (scriptMode.value !== 'edit' || !scriptShell.hasModel || !scriptShell.dirty || scriptShell.saving) return
+    if (scope.scriptMode.value !== 'edit' || !scriptShell.hasModel || !scriptShell.dirty || scriptShell.saving) return
     const wasNew = !scriptShell.resourceId
     const r = await scriptShell.save({ suppressConflict: true })
     if (r.ok) {
       clearCallParamsCache()
-      // 函数库落盘后刷新文件清单（call/func 下拉与运行区函数下拉共用）；
+      // 函数库落盘后刷新文件清单（func 下拉与运行区函数下拉共用）；
       // 新建脚本落盘后刷新脚本列表（call 目标下拉候选）
       if (scriptShell.kind === 'function_library') await fnLib.refresh(activePkg.value)
-      else if (wasNew) await loadData()
+      else if (wasNew) await refreshScripts()
       if (wasNew) selScript.value = scriptShell.resourceId // 首次落盘：运行区选择跟随
     } else if (r.reason === 'invalid') {
       toast('自动保存未通过：' + (r.diagnostics?.[0]?.message || '存在校验问题'), 'warn')
@@ -540,12 +568,11 @@ export function useConsoleScriptRunner({
     }
   }
 
-  /** 保存成功后置：刷新列表、选中保存后的资源（脚本/函数库文件）、退出编辑回到运行视图 */
-  async function afterScriptSaved(rep) {
-    await loadData()
+  /** 保存成功后置：刷新列表、选中保存后的资源（按外壳实际类型归位到对应面板的选择）、退出编辑回到运行视图 */
+  async function afterScriptSaved(scope, rep) {
+    await refreshScripts()
     if (rep?.id) {
       if (scriptShell.kind === 'function_library') {
-        runKind.value = 'func'
         selFnFile.value = rep.id
         await fnLib.refresh(activePkg.value)
       } else {
@@ -553,7 +580,7 @@ export function useConsoleScriptRunner({
       }
     }
     scriptShell.reset()
-    scriptMode.value = 'run'
+    scope.scriptMode.value = 'run'
     showYaml.value = false
     toast('脚本已保存', 'success')
   }
@@ -571,7 +598,10 @@ export function useConsoleScriptRunner({
   /** 409 冲突弹窗：强制覆盖（不带 expected_version 重存），成功后同保存收尾 */
   async function onConflictOverwrite() {
     const r = await scriptShell.overwrite()
-    if (r.ok) await afterScriptSaved(r.result)
+    if (r.ok) {
+      clearCallParamsCache()
+      await afterScriptSaved(scriptShell.kind === 'function_library' ? funcScope : scriptScope, r.result)
+    }
     else if (r.reason === 'error') toast('覆盖失败：' + (r.error?.message || r.error), 'error')
   }
 
@@ -632,8 +662,8 @@ export function useConsoleScriptRunner({
   })
 
   /** 摘要卡片「▶ 从此运行」：直接以该步骤为起点启动（不选中、不留驻，起点即发即用） */
-  function runFromStep(uuid) {
-    return runScript({ fromUuid: uuid })
+  function runFromStep(scope, uuid) {
+    return runScript(scope, { fromUuid: uuid })
   }
 
   // ---------- 结构化跳转（plan §10「调用文本链接预览」行：正则扫描源码 → 结构化引用） ----------
@@ -710,14 +740,14 @@ export function useConsoleScriptRunner({
     return !!rec && rec.state === 'stopping'
   })
 
-  /** 设备占用冲突（409 device_busy）：入队弹窗展示对方脚本/来源/本地化开始时间，
+  /** 设备占用冲突（409 device_busy）：入队弹窗展示对方目标/来源/本地化开始时间，
    *  提供「仍要查看日志」跳控制台对应设备；不打断本页其他功能 */
   function openRunConflict(d) {
     console.warn('[run] device busy (409)', d)
     pushRunConflict({ ...(d || {}), device_id: store.deviceId })
   }
 
-  // ---------- 运行参数流程（阶段 5）：脚本声明 params 时先弹参数表单，稀疏 args 提交 ----------
+  // ---------- 运行参数流程（阶段 5）：目标声明 params 时先弹参数表单，稀疏 args 提交 ----------
   // exec 完成 API 调用与 run_id 登记；flow 负责表单开关/400 诊断回填字段/覆盖建议缓存/摘要
   const runArgsFlow = useRunArgsFlow({
     exec: async ({ id, name, kind, fnName, startIndex, args }) => {
@@ -727,10 +757,10 @@ export function useConsoleScriptRunner({
       rawLogs = []
       liveLogs.value = []
       try {
-        // 函数模式（运行区资源类型=函数）：走函数测试接口运行单个函数
+        // 函数面板（运行目标=函数库文件）：走函数测试入口运行单个函数
         const rep = kind === 'function_library'
-          ? await api.runFunction(id, store.deviceId, { function: fnName || undefined, start_index: startIndex, args })
-          : await api.runScript(id, store.deviceId, startIndex, args)
+          ? await runYamlFunction(id, store.deviceId, { function: fnName || undefined, start_index: startIndex, args })
+          : await runYamlScript(id, store.deviceId, startIndex, args)
         // 当前运行响应固定含 run_id；启动即登记实例，后续查询只按该主键进行。
         applyRunRecord({ ...rep, device_id: store.deviceId, script_id: id, source: 'manual', display: name })
         return rep
@@ -759,14 +789,14 @@ export function useConsoleScriptRunner({
     }
   }
 
-  /** 运行/从此步骤运行入口：解析当前脚本 params → 无参数直接运行，有参数弹参数表单；
-   *  函数模式：按函数 params 弹表单，经函数测试接口运行所选函数（缺省 = 文件第一个函数）。
+  /** 运行/从此步骤运行入口：解析目标 params → 无参数直接运行，有参数弹参数表单；
+   *  函数面板：按函数 params 弹表单，经函数测试入口运行所选函数（缺省 = 文件第一个函数）。
    *  opts.fromUuid（从此运行）→ 脚本取顶层 steps 序号 / 函数定位目标函数与步序；
    *  顶部「运行」按钮不传 → 从头跑。守卫失败一律 toast 说明原因，不做静默 no-op */
-  async function runScript(opts = {}) {
+  async function runScript(scope, opts = {}) {
     if (startPending.value || store.running) return
     if (!store.deviceId) return toast('请先在上方选择设备再运行', 'warn')
-    if (runKind.value === 'func') {
+    if (scope.kind === 'func') {
       const f = fnLib.list.find(x => x.id === selFnFile.value)
       if (!f) return toast('请先选择函数库文件', 'warn')
       // 运行目标：从此运行落在某函数的某步 → 该函数从该步；顶部运行 → 第一个函数从头
@@ -854,22 +884,23 @@ export function useConsoleScriptRunner({
     if (!rep.active) return // {active:false}：无活动 run，保持空闲展示
     const rec = rep.run
     if (!rec?.run_id) return
-    const s = scripts.value.find(x => x.id === rec.script_id)
-    const baseName = rec.script_name || s?.name || rec.script_id
+    // 运行目标展示名：entrypoint 为主（runner 语义），script_id 为服务端保留的兼容展示字段
+    const target = rec.entrypoint || rec.script_id || ''
     const srcTag = sourceLabel(rec.source)
-    applyRunRecord({ ...rec, device_id: store.deviceId, display: srcTag ? `${baseName}（${srcTag}）` : baseName })
-    selScript.value = rec.script_id
-    scriptMode.value = 'run'
+    applyRunRecord({ ...rec, device_id: store.deviceId, display: srcTag ? `${target}（${srcTag}）` : target })
+    selScript.value = target
+    scriptScope.scriptMode.value = 'run'
     runStartTime = 0   // 不按开始时间过滤，恢复最近日志
     startLogPolling()
     startRunStatusPoll()
-    toast(`检测到 ${baseName}${srcTag ? `（${srcTag}）` : ''} 正在运行，已恢复状态`, 'info')
+    toast(`检测到 ${target}${srcTag ? `（${srcTag}）` : ''} 正在运行，已恢复状态`, 'info')
   }
 
-  /** 关页保护：有未保存修改时浏览器弹出确认 */
+  /** 关页保护：有未保存修改时浏览器弹出确认（任一面板的编辑/原文态都算） */
   function onBeforeUnload(e) {
-    if ((scriptMode.value === 'edit' && scriptShell.hasModel && scriptShell.dirty)
-      || (scriptMode.value === 'raw' && rawEditor.dirty.value)) {
+    const editing = (scope) => (scope.scriptMode.value === 'edit' && scriptShell.hasModel && scriptShell.dirty)
+      || (scope.scriptMode.value === 'raw' && rawEditor.dirty.value)
+    if (editing(scriptScope) || editing(funcScope)) {
       e.preventDefault()
       e.returnValue = ''
     }
@@ -880,46 +911,64 @@ export function useConsoleScriptRunner({
     stopRunStatusPoll()
   })
 
-  const scriptRunnerContext = {
-    scriptMode, selScript, activePkg, store, startPending, runScript, runStopping, stopScript,
-    scriptDeleteConfirmId,
-    // 运行区资源类型（脚本/函数）；Target 系列按类型分发编辑/新建/删除
-    runKind, selFnFile, canRunTarget, selTargetId, fnLib, autoSaveDebounced,
-    // 函数模式摘要：逐函数分组视图（每组一个 ScriptSummary）+ 解析失败文案
-    funcFnViews, funcSummaryError,
-    editCurrentTarget, editRawCurrentTarget, startNewTarget, deleteCurrentTarget, addFunctionToCurrentFile, renameEditingFunction, deleteFunction,
-    editCurrentScript, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
-    // 运行视图：只读摘要 + 运行起点 + call/func 结构化跳转（替代旧源码行点击/文本预览）
-    summaryModel, summaryError, runFromStep, openScriptTarget, resourcePreview, closeResourcePreview,
-    // 运行参数表单（阶段 5）：脚本声明 params 时点运行/从此运行弹出
-    runArgsFlow, onRunArgsSubmit,
-    // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调
-    shell: scriptShell, raw: rawEditor, saveEditScript, cancelEditScript, saveRawScript, cancelRawScript,
-    showYaml, templateNames, jumpBack,
-    // 函数编辑态聚焦的函数名（逐函数「编辑」直达；画布锁函数下拉为静态展示）
-    editFocusFn,
-    onConflictReload, onConflictOverwrite, onConflictDismiss,
-    // call/func 目标实参类型回显（同步缓存命中形态），ScriptRunner 经 ctx 传给画布
-    resolveTargetSync,
+  /** 面板作用域上下文：同一套共享机制 + 面板锁定的资源类型/编辑模式/选择。
+   *  经 workspace context 注入（core.scriptRunner.scripts / .functions），两个
+   *  扩展面板各自绑定一份，互不串台。 */
+  function buildPanelContext(scope) {
+    const isFunc = scope.kind === 'func'
+    return {
+      kind: scope.kind,
+      kindLocked: true,
+      runKind: scope.runKind,
+      scriptMode: scope.scriptMode,
+      activePkg, store, startPending, runStopping, stopScript,
+      scriptDeleteConfirmId,
+      // 运行区选择与可用性（按面板类型绑定）
+      selScript, selFnFile,
+      canRunTarget: isFunc ? canRunTargetFunc : canRunTargetScript,
+      selTargetId: isFunc ? selTargetIdFunc : selTargetIdScript,
+      fnLib, autoSaveDebounced: () => autoSaveDebounced(scope),
+      // 函数模式摘要：逐函数分组视图（每组一个 ScriptSummary）+ 解析失败文案
+      funcFnViews, funcSummaryError,
+      runScript: opts => runScript(scope, opts),
+      editCurrentTarget: (fnName = '') => editCurrentTarget(scope, fnName),
+      editRawCurrentTarget: () => editRawCurrentTarget(scope),
+      startNewTarget: () => startNewTarget(scope),
+      deleteCurrentTarget: () => deleteCurrentTarget(scope),
+      addFunctionToCurrentFile, renameEditingFunction, deleteFunction,
+      editCurrentScript, startNewScript, deleteCurrentScript, liveLogs, onLogBoxMounted,
+      // 运行视图：只读摘要 + 运行起点 + call/func 结构化跳转（替代旧源码行点击/文本预览）
+      summaryModel, summaryError,
+      runFromStep: uuid => runFromStep(scope, uuid),
+      openScriptTarget, resourcePreview, closeResourcePreview,
+      // 运行参数表单（阶段 5）：目标声明 params 时点运行/从此运行弹出
+      runArgsFlow, onRunArgsSubmit,
+      // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调
+      shell: scriptShell, raw: rawEditor,
+      saveEditScript: () => saveEditScript(scope),
+      cancelEditScript: () => cancelEditScript(scope),
+      saveRawScript: () => saveRawScript(scope),
+      cancelRawScript: () => cancelRawScript(scope),
+      showYaml, templateNames, jumpBack,
+      // 函数编辑态聚焦的函数名（逐函数「编辑」直达；画布锁函数下拉为静态展示）
+      editFocusFn,
+      onConflictReload, onConflictOverwrite, onConflictDismiss,
+      // call/func 目标实参类型回显（同步缓存命中形态），ScriptRunner 经 ctx 传给画布
+      resolveTargetSync,
+    }
   }
+  const scriptPanel = buildPanelContext(scriptScope)
+  const functionsPanel = buildPanelContext(funcScope)
 
   return {
+    // 共享机制（Console 壳接线：弹窗/轮询/钩子）
     scriptShell, rawEditor, fnLib,
-    scriptMode, selScript, selFnFile, runKind, scriptDeleteConfirmId,
-    canRunTarget, selTargetId, showYaml, editFocusFn, resourcePreview,
-    liveLogs, logBox, startPending, runStopping, runArgsFlow,
-    funcFnViews, funcSummaryError, summaryModel, summaryError,
+    liveLogs, startPending, runStopping, runArgsFlow, onRunArgsSubmit,
     startLogPolling, stopLogPolling, pushLog,
-    autoSaveDebounced,
     clearCallParamsCache, editorMatchThreshold,
-    cancelEditScript, startNewScript, editCurrentTarget, editRawCurrentTarget, saveRawScript, cancelRawScript,
-    startNewTarget, deleteCurrentTarget, addFunctionToCurrentFile, renameEditingFunction, deleteFunction,
-    editCurrentScript, deleteCurrentScript, saveEditScript,
-    onConflictReload, onConflictOverwrite, onConflictDismiss,
-    runFromStep, openScriptTarget, closeResourcePreview, jumpBack,
-    runScript, onRunArgsSubmit, stopScript,
-    startRunStatusPoll, stopRunStatusPoll, restoreRunState, onBeforeUnload, onLogBoxMounted,
-    resolveTargetSync,
-    scriptRunnerContext,
+    startRunStatusPoll, stopRunStatusPoll, restoreRunState, onBeforeUnload,
+    refreshScripts,
+    // 面板作用域上下文（扩展面板经 workspace context 消费）
+    scriptPanel, functionsPanel,
   }
 }

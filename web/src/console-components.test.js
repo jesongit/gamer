@@ -171,9 +171,12 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).not.toContain('gamer.keymap')
     expect(consoleSource).not.toContain('registerKeymapExtension')
     expect(consoleSource).not.toContain('registerYamlExtensionPanels')
-    // 默认面板 = 裸 Core 的任务页签
+    // 默认面板 = 裸 Core 的任务页签；旧六页签 panelTab 兼容字段已删除，
+    // 面板导航只由 activePanelKey + PanelRegistry（URL panel query）驱动
     expect(read('./workspace/registry.ts')).toContain("DEFAULT_PANEL_KEY = 'gamer.core:tasks'")
-    expect(consoleSource).toContain(`panelTab = ref('tasks')`)
+    expect(consoleSource).toContain('const activePanelKey = ref(DEFAULT_PANEL_KEY)')
+    expect(consoleSource).not.toContain('panelTab')
+    expect(consoleImpl).not.toContain('panelTab')
     // 分区下拉挂在工具条（func-pkg-row 仅存样式），面板挂载全部走 PluginWorkspace
     expect(template).not.toContain('<div class="func-pkg-row">')
     expect(consoleSource).toContain('class="panel-resizer"')

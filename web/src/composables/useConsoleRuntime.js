@@ -1,6 +1,15 @@
 import { ref } from 'vue'
 
-export function useConsoleRuntime({ api, devicesData, scriptsData, templatesData, toast, connect, deviceIdRef }) {
+/**
+ * Console 壳运行时编排：设备数据/扫描、日志轮询、重连计时器归属。
+ * 壳只认识设备与日志（ADR-11 Core 知识边界）——脚本/模板等业务资源不在此
+ * 预拉，由各自面板实现（useConsoleScriptRunner/useConsoleTemplates 等扩展
+ * 面板侧 composable）自行加载进共享 store。
+ *
+ * WebRTC 连接/重连语义统一在 useWebRtcLifecycle（含 taken_over 处理），
+ * 本模块只持有重连计时器/退避计数的复位与清理，不重复实现连接状态机。
+ */
+export function useConsoleRuntime({ api, devicesData, deviceIdRef }) {
   const scanning = ref(false)
   const logTimer = ref(null)
   const reconnectTimer = ref(null)
@@ -11,16 +20,6 @@ export function useConsoleRuntime({ api, devicesData, scriptsData, templatesData
       devicesData.value = await api.listDevices()
     } catch (e) {
       console.warn('load devices:', e.message)
-    }
-    try {
-      scriptsData.value = await api.listScripts()
-    } catch (e) {
-      console.warn('load scripts:', e.message)
-    }
-    try {
-      templatesData.value = await api.listTemplates()
-    } catch (e) {
-      console.warn('load templates:', e.message)
     }
   }
 
@@ -67,43 +66,6 @@ export function useConsoleRuntime({ api, devicesData, scriptsData, templatesData
     }
   }
 
-  function scheduleReconnect({ superseded, errorMsgRef }) {
-    if (reconnectTimer.value || !deviceIdRef.value) return false
-    if (superseded?.value) {
-      if (errorMsgRef) errorMsgRef.value = '连接已被其他页面接管'
-      return false
-    }
-    const delay = [3000, 6000, 12000][Math.min(reconnectAttempts.value, 2)]
-    reconnectAttempts.value++
-    toast(`连接已断开，${delay / 1000} 秒后自动重连…`, 'warn')
-    reconnectTimer.value = setTimeout(() => {
-      reconnectTimer.value = null
-      if (superseded?.value) {
-        if (errorMsgRef) errorMsgRef.value = '连接已被其他页面接管'
-        return
-      }
-      connect(false)
-    }, delay)
-    return true
-  }
-
-  function onChannelOpen({ connectedRef, connectingRef, videoConnectTsRef, audioMutedRef, sendControl }) {
-    connectedRef.value = true
-    connectingRef.value = false
-    reconnectAttempts.value = 0
-    videoConnectTsRef.value = Date.now()
-    sendControl({ type: 'audio', on: !audioMutedRef.value })
-    toast('WebRTC 连接建立', 'success')
-  }
-
-  function onChannelClose({ connectedRef, manualCloseRef, supersededRef }) {
-    connectedRef.value = false
-    if (!manualCloseRef.value && !supersededRef.value) {
-      scheduleReconnect({ superseded: supersededRef })
-    }
-    manualCloseRef.value = false
-  }
-
   function cleanup() {
     cancelReconnect()
     stopLogPolling()
@@ -121,9 +83,6 @@ export function useConsoleRuntime({ api, devicesData, scriptsData, templatesData
     startLogPolling,
     stopLogPolling,
     cancelReconnect,
-    scheduleReconnect,
-    onChannelOpen,
-    onChannelClose,
     cleanup,
   }
 }

@@ -1,4 +1,5 @@
 import { computed, ref } from 'vue'
+import { load as loadYaml } from 'js-yaml'
 import { api } from '../../api'
 
 /** 归一化 action 坐标点（数组或 {x,y}）→ {x,y}；非法返回 null */
@@ -44,11 +45,30 @@ export function useConsoleKeymap({
   const keymapOptions = computed(() => Array.isArray(keymaps.value) ? keymaps.value : [])
   let keymapLoadSerial = 0
 
+  /**
+   * keymap GET 返回通用资源条目 JSON（content 原文 + 注记 name/binding_count/valid，
+   * P11.6 后不再携带解析模型）；这里按需解析为输入控制器/可视化消费的
+   * {name, bindings} 模型。注记 valid=false（服务端 schema 校验失败）时抛出带
+   * 诊断的错误，避免把坏方案静默装进输入链路。
+   */
   function keymapModelFromResponse(rep) {
-    const candidate = rep?.model || rep?.keymap || rep?.data?.model || rep?.data || rep
-    return candidate && typeof candidate === 'object' && Array.isArray(candidate.bindings)
-      ? candidate
-      : null
+    if (!rep || typeof rep !== 'object') return null
+    if (rep.valid === false) {
+      const diagnostics = Array.isArray(rep.diagnostics) ? rep.diagnostics.join('；') : ''
+      throw new Error(`映射方案无效${diagnostics ? `：${diagnostics}` : ''}`)
+    }
+    let parsed
+    try {
+      parsed = loadYaml(String(rep.content ?? ''))
+    } catch {
+      return null
+    }
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.bindings)) return null
+    return {
+      version: 1,
+      name: parsed.name || rep.name || '',
+      bindings: parsed.bindings,
+    }
   }
 
   function resetKeymapSelection() {

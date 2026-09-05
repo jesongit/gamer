@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from './api'
+import { runYamlFunction, runYamlScript } from './gamer-yaml-runner'
 import { useRunArgsFlow } from './composables/useRunArgsFlow'
 import { readFileSync } from 'node:fs'
 
 /**
  * 阶段 5 运行参数链路（mock fetch）：
- * - api.runScript / api.runFunction 请求体断言（稀疏 args、start_index、URL 整体编码）；
+ * - runYamlScript / runYamlFunction 请求体断言（稀疏 args、start_index、URL 整体编码）；
  * - useRunArgsFlow 状态机：无参数直跑 / 有参数弹表单 / 400 invalid_args 回填字段 /
  *   409 交还宿主 / 覆盖建议缓存写入；
  * - Console 接线静态断言（视图含 WebRTC/设备依赖，按仓库惯例不整体挂载）。
@@ -38,12 +39,12 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('api.runScript / api.runFunction 请求体（P11.6 统一执行入口契约）', () => {
-  it('runScript：POST /api/runs {runner_id, entrypoint, device_id, payload}；空 args 不携带', async () => {
+describe('runYamlScript / runYamlFunction 请求体（gamer.yaml 经 api.run 统一执行入口）', () => {
+  it('runYamlScript：POST /api/runs {runner_id, entrypoint, device_id, payload}；空 args 不携带', async () => {
     const calls = stubFetch([
       { method: 'POST', url: '/api/runs', body: { run_id: 'r1', state: 'starting' } },
     ])
-    await api.runScript('com.demo/main.yaml', 'dev1', 2, { timeout: '10s', pos: [0.1, 0.2] })
+    await runYamlScript('com.demo/main.yaml', 'dev1', 2, { timeout: '10s', pos: [0.1, 0.2] })
     expect(calls[0]).toEqual({
       url: '/api/runs',
       method: 'POST',
@@ -54,15 +55,15 @@ describe('api.runScript / api.runFunction 请求体（P11.6 统一执行入口�
         payload: { start_index: 2, args: { timeout: '10s', pos: [0.1, 0.2] } },
       },
     })
-    await api.runScript('com.demo/main.yaml', 'dev1', 0, {})
+    await runYamlScript('com.demo/main.yaml', 'dev1', 0, {})
     expect(calls[1].body.payload).toEqual({}) // 稀疏空映射 → 省略
   })
 
-  it('runFunction：entrypoint = "<file id>#<函数名>"；payload = {start_index?, args?}', async () => {
+  it('runYamlFunction：entrypoint = "<file id>#<函数名>"；payload = {start_index?, args?}', async () => {
     const calls = stubFetch([
       { method: 'POST', url: '/api/runs', body: { run_id: 'r2', state: 'starting' } },
     ])
-    await api.runFunction('com.demo/common.yaml', 'dev1', {
+    await runYamlFunction('com.demo/common.yaml', 'dev1', {
       function: 'login', start_index: 1, args: { account: 'a.png' },
     })
     expect(calls[0].body).toEqual({
@@ -71,7 +72,7 @@ describe('api.runScript / api.runFunction 请求体（P11.6 统一执行入口�
       device_id: 'dev1',
       payload: { start_index: 1, args: { account: 'a.png' } },
     })
-    await api.runFunction('com.demo/common.yaml', 'dev2', {})
+    await runYamlFunction('com.demo/common.yaml', 'dev2', {})
     expect(calls[1].body).toEqual({
       runner_id: 'gamer.yaml',
       entrypoint: 'com.demo/common.yaml',
@@ -80,14 +81,24 @@ describe('api.runScript / api.runFunction 请求体（P11.6 统一执行入口�
     }) // function/start_index/args 全省略 → 文件第一个函数从头跑
   })
 
-  it('runScript 400 invalid_args：err.status/err.data.diagnostics 可取', async () => {
+  it('api.run 对 runner 无知；缺 runner_id/entrypoint 客户端即拒', async () => {
+    stubFetch([
+      { method: 'POST', url: '/api/runs', body: { run_id: 'r3', state: 'starting' } },
+    ])
+    await api.run({ runner_id: 'thirdparty.macro', entrypoint: 'macro://boot', device_id: 'dev9', payload: { steps: 3 } })
+    expect(true).toBe(true) // 未知 runner 原样透传不报错（Core 不认识具体 runner）
+    await expect(api.run({ runner_id: '', entrypoint: 'x' })).rejects.toMatchObject({ code: 'invalid_argument' })
+    await expect(api.run({ runner_id: 'a', entrypoint: '' })).rejects.toMatchObject({ code: 'invalid_argument' })
+  })
+
+  it('runYamlScript 400 invalid_args：err.status/err.data.diagnostics 可取', async () => {
     stubFetch([
       {
         method: 'POST', url: '/api/runs', status: 400,
         body: { error: 'invalid_args', diagnostics: [{ code: 'param.args.missing_required', message: '缺少 account', field: 'account' }] },
       },
     ])
-    const err = await api.runScript('x', 'dev1', 0, {}).then(() => null, e => e)
+    const err = await runYamlScript('x', 'dev1', 0, {}).then(() => null, e => e)
     expect(err.status).toBe(400)
     expect(err.data.error).toBe('invalid_args')
     expect(err.data.diagnostics[0].field).toBe('account')
@@ -222,7 +233,8 @@ describe('Console 运行参数接线', () => {
     expect(runnerSrc).toContain("import { useRunArgsFlow } from '../../composables/useRunArgsFlow'")
     expect(consoleSrc).toContain("import RunParamsModal from '../components/RunParamsModal.vue'")
     expect(consoleSrc).toContain('<RunParamsModal')
-    expect(runnerSrc).toContain('api.runScript(id, store.deviceId, startIndex, args)')
+    expect(runnerSrc).toContain('runYamlScript(id, store.deviceId, startIndex, args)')
+    expect(runnerSrc).toContain("import { runYamlFunction, runYamlScript } from '../../gamer-yaml-runner'")
     expect(runnerSrc).toContain('function onRunArgsSubmit(')
     expect(runnerSrc).toContain('runArgsFlow.confirm(args).catch(handleRunStartError)')
     expect(runnerSrc).toContain('function handleRunStartError(')

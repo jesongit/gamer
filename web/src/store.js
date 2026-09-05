@@ -1,16 +1,17 @@
 // 轻量全局状态（鉴权会话在 ./auth.js：Cookie 会话只存内存态，
 // 不再有 localStorage 伪 token；authed 判定以 session.username 为准）
 //
-// 运行实例模型（OPTIMIZATION_PLAN 阶段3 / RUN-003）：执行实例以 run_id 为主键——
+// 运行实例模型（RUN-003 / ADR-12）：执行实例以 run_id 为主键——
 // runRegistry.byId 正查 + activeByDevice 反查 + last 最近终态归档。
-// 纯语义工具（标签/时间/当前运行契约）见 ./runs.js。
+// RunRecord 是 runner 无关形状（runner_id + entrypoint + payload；script_id 为
+// 服务端保留的兼容展示字段）；纯语义工具（标签/时间/当前运行契约）见 ./runs.js。
 import { reactive, ref } from 'vue'
 import { isActiveRunState, isTerminalRunState } from './runs'
 
 export const store = reactive({
   deviceId: null,           // 当前控制的设备
-  running: false,           // 当前设备脚本运行状态（由 runRegistry 终态/活动迁移驱动）
-  runScript: null,          // 正在运行的脚本展示名（含 "函数()" 或来源后缀修饰）
+  running: false,           // 当前设备运行状态（由 runRegistry 终态/活动迁移驱动）
+  runScript: null,          // 正在运行的目标展示名（含 "函数()" 或来源后缀修饰）
   runId: null,              // 当前展示的执行实例，唯一运行主键
   runStep: '',              // 当前步骤描述
   runProgress: 0,           // 0-100
@@ -60,14 +61,14 @@ export function applyRunRecord(rec) {
   if (!rec || !rec.run_id || (!isTerminalRunState(rec.state) && !isActiveRunState(rec.state))) {
     return null
   }
-  // display 展示名（"名字 · 函数()"/来源后缀修饰）不属于服务端契约字段：
-  // 仅调用方显式传入时刷新，轮询增量不携带则保留旧值，避免把精心拼好的展示名覆盖回裸 script_id
+  // display 展示名（"目标 · 函数()"/来源后缀修饰）不属于服务端契约字段：
+  // 仅调用方显式传入时刷新，轮询增量不携带则保留旧值，避免把精心拼好的展示名
+  // 覆盖回裸 entrypoint
   const { display, ...data } = rec
   const prev = runRegistry.byId[rec.run_id] || {}
   if (isTerminalRunState(prev.state) && !isTerminalRunState(data.state)) return prev
   const merged = { ...prev, ...data, run_id: rec.run_id }
   if (display) merged.display = display
-  else if (!merged.display && data.script_name) merged.display = data.script_name
   runRegistry.byId[merged.run_id] = merged
   if (isTerminalRunState(merged.state)) {
     runRegistry.last = merged                    // 终态归档最近一条
@@ -95,7 +96,8 @@ export function beginCancel(runId) {
 }
 
 // 设备占用冲突提示队列（409 device_busy）：视图逐条弹窗展示，
-// 「仍要查看日志」跳控制台对应设备。元素形如 {device_id, script_id, source, started_at, run_id}
+// 「仍要查看日志」跳控制台对应设备。元素形如 {device_id, entrypoint,
+// script_id(服务端兼容字段), source, started_at, run_id}
 export const runConflicts = ref([])
 
 export function pushRunConflict(info) {
