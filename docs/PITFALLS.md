@@ -199,3 +199,6 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **`core::fs::safe_name`（safe_name/`sanitize_rel_segments`）拒绝 `#`，而模板文件名合法字符集恰恰含 `#`**（区域/颜色后缀）：字节资源名校验不能走通用分段校验，templates 必须用 `sanitize_template_name`（resources.rs `normalize_binary_name` 分.kind 处理），否则模板创建全 400。
 - **模板「同基名冲突」的基名要剥离区域后缀再比对**：新名 `login_btn#000_000_500_500.png` 与存量 `login_btn#100_200_300_400.png` 冲突——从 stem 里 `split('#')` 取首段做基名、再查「等于基名或以 `基名#` 开头」，拿完整 stem 当基名会漏判。
 - **` cargo test` 里 `unwrap_err()`/`unwrap()` 要求 Err/Ok 两侧实现 Debug**：给含 `Arc<dyn Trait>` 字段的 Store 手写行为时，trait 对象没有 Debug 会连累 `unwrap_err()` 编译失败；测试里用 `match` + `panic!` 替代。
+- **通用资源 API 后 keymap GET 单条返回的是资源条目 JSON（content 原文 + 注记 name/binding_count/valid），不再携带解析模型**：useConsoleKeymap 仍按旧 `rep.model/bindings` 形状取模型会恒报「服务端返回的映射结构无效」，工具条映射下拉与画面可视化全哑；解法：前端按 content YAML 自行解析（js-yaml load），注记 `valid:false` 时带诊断报错并清空选择，不把坏方案装进输入链路（keymap-runtime.test.js 锁定）。
+- **服务端 RunRecord 没有也不再有 `script_name` 字段**：`runner_id + entrypoint` 是唯一目标标识，`script_id` 只是服务端保留的兼容展示字段；前端展示名回退链写成 `rec.script_name || rec.script_id` 会静默拿到 undefined，恢复运行态/冲突弹窗统一用 `entrypoint || script_id`。
+- **`GET /api/logs` 行内的运行目标字段仍叫 `script_id`（schema v1 logs 表列名）**：Core 日志面板（gamer.core:logs）按「设备+运行目标」分组时直接把它当 opaque entrypoint 展示（`entrypoint || script_id` 兜底），不要为了映射显示名去预拉脚本列表——那会把业务资源知识带回 Core 壳。
