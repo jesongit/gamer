@@ -17,6 +17,36 @@ import { runConflicts, scriptsData, templatesData, devicesData, tasksData } from
 
 const read = (p) => readFileSync(join(process.cwd(), 'src', p), 'utf8')
 
+// 参数表单声明自 P12.3 起来自服务端 entrypoint schema API（不再取脚本内容解析）：
+// 与旧 SCRIPT_YAML 等价的 descriptor（bool:enable 默认 true + time:timeout 默认 30s）
+const ENTRYPOINT_DESCRIPTOR = {
+  runner_id: 'gamer.yaml',
+  entrypoint: 'com.demo/main.yml',
+  kind: 'script',
+  format: 'yaml-params-v1',
+  schema: {
+    type: 'object',
+    properties: {
+      enable: { type: 'boolean', default: true, param_type: 'bool' },
+      timeout: { type: 'string', default: '30s', description: '最长等待', param_type: 'time' },
+    },
+    required: [],
+  },
+  signature: 'psig1|bool,enable,0,true|time,timeout,0,30s',
+}
+
+// tmpl 参数 descriptor（模板候选下拉用例）
+const TMPL_DESCRIPTOR = {
+  kind: 'script',
+  format: 'yaml-params-v1',
+  schema: {
+    type: 'object',
+    properties: { account: { type: 'string', param_type: 'tmpl' } },
+    required: ['account'],
+  },
+  signature: 'psig1|tmpl,account,0,',
+}
+
 const SCRIPT_YAML = [
   'version: 3',
   'params:',
@@ -92,7 +122,7 @@ afterEach(() => {
 function baseRoutes() {
   return [
     { method: 'GET', url: '/api/apps/-/resources/scripts', body: SCRIPTS },
-    { method: 'GET', url: '/api/apps/-/resources/scripts/com.demo%2Fmain.yml', body: SCRIPTS[0] },
+    { method: 'GET', url: '/api/runners/gamer.yaml/entrypoint', body: ENTRYPOINT_DESCRIPTOR },
     { method: 'GET', url: '/api/apps/-/resources/templates', body: [
       { name: '账号155#392_519_526_932.png', pkg: 'com.demo' },
     ] },
@@ -312,7 +342,7 @@ describe('新建任务：贡献渲染 + cron 触发方式 + 保存 ADR-12 body',
     const routes = baseRoutes()
     const tmpl = { id: 'com.demo/main.yml', package: 'com.demo', name: 'main.yml', content: TMPL_SCRIPT_YAML }
     routes.find(r => r.url === '/api/apps/-/resources/scripts').body = [tmpl]
-    routes.find(r => r.url === '/api/apps/-/resources/scripts/com.demo%2Fmain.yml').body = tmpl
+    routes.find(r => r.url === '/api/runners/gamer.yaml/entrypoint').body = TMPL_DESCRIPTOR
     const { wrapper } = await mountView(routes)
     await openAdd(wrapper)
     await wrapper.find('.sp-name').setValue('com.demo/main.yml')
@@ -376,8 +406,8 @@ describe('编辑任务：payload.args 采用与保存形状', () => {
     routes.push({ method: 'PUT', url: '/api/tasks/t1', body: {} })
     const { wrapper, calls } = await mountView(routes)
     await openEdit(wrapper, 0)
-    // 表单按脚本 params 渲染（内容经 GET /api/scripts/:id 获取——贡献内部事务）
-    expect(calls.some(c => c.method === 'GET' && c.url === '/api/apps/-/resources/scripts/com.demo%2Fmain.yml')).toBe(true)
+    // 表单按 entrypoint schema 渲染（声明经 GET /api/runners/:runner_id/entrypoint——P12.3）
+    expect(calls.some(c => c.method === 'GET' && c.url.startsWith('/api/runners/gamer.yaml/entrypoint'))).toBe(true)
     const form = wrapper.find('[data-testid="params-form"]')
     expect(form.exists()).toBe(true)
     expect(form.findAll('.pf-row')).toHaveLength(2)
@@ -405,7 +435,6 @@ describe('编辑任务：payload.args 采用与保存形状', () => {
     const routes = baseRoutes()
     const second = { id: 'com.demo/other.yml', package: 'com.demo', name: 'other.yml', content: SCRIPT_YAML }
     routes.find(r => r.url === '/api/apps/-/resources/scripts').body = [...SCRIPTS, second]
-    routes.push({ method: 'GET', url: '/api/apps/-/resources/scripts/com.demo%2Fother.yml', body: second })
     routes.push({ method: 'PUT', url: '/api/tasks/t1', body: {} })
     const { wrapper, calls } = await mountView(routes)
     await openEdit(wrapper, 0)

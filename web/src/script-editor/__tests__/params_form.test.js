@@ -3,76 +3,38 @@ import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
 import ParamsForm from '../components/ParamsForm.vue'
 import {
-  describeResolvedArgs, extractParams, fmtLiteral, loadRunArgsSuggestion,
+  describeResolvedArgs, fmtLiteral, loadRunArgsSuggestion,
   mapArgDiagnostics, runArgsCacheKey, saveRunArgsSuggestion, validateArgsAgainstParams,
 } from '../params'
 
 /**
- * 阶段 5 参数表单（v3）：extractParams（脚本/函数库，类型规范化为 canonical 五类）、
- * 类型化控件渲染、三态（使用默认值不进 args / 显式覆盖进 args / 必填恒覆盖）、
- * 校验（schema.checkCellLiteral 同规则）、覆盖建议缓存只作覆盖态预填、
- * 400 诊断字段映射、resolved_args 摘要。
+ * 参数表单（v3 / P12.3）：类型化控件渲染、三态（使用默认值不进 args / 显式覆盖
+ * 进 args / 必填恒覆盖）、校验（schema.checkCellLiteral 同规则）、覆盖建议缓存
+ * 只作覆盖态预填、400 诊断字段映射、resolved_args 摘要。
+ * 参数声明自 P12.3 起来自服务端 entrypoint schema API（entrypointParams.ts 适配），
+ * 此处直接以 ParamDecl[] 夹具驱动（不再从 YAML 解析）。
  */
 
-const SCRIPT_YAML = [
-  'version: 3',
-  'params:',
-  "  - 'string:account:账号模板'",
-  "  - 'int:count:次数:3'",
-  '  - name: ratio',
-  '    type: number',
-  '    default: 0.5',
-  '  - name: flag',
-  '    type: boolean',
-  '    default: true',
-  "  - 'boolean:enable:开关:true'",
-  '  - name: mode',
-  '    type: string',
-  '    default: auto',
-  'steps:',
-  '  - tap: [0.5, 0.5]',
-].join('\n')
+const decl = (name, type, def = null, remark = '') => ({ type, name, remark, default: def, rawForm: false })
 
-const FN_YAML = [
-  'login:',
-  '  params:',
-  "    - 'string:account:账号:foo'",
-  "    - 'time:timeout:等待时间:30s'",
-  '  steps:',
-  '    - return: $account',
-  '',
-  'is_enabled:',
-  '  params:',
-  "    - 'boolean:enable:开关'",
-  '  steps:',
-  '    - return: $enable',
-].join('\n')
+// 账号必填 + 五类默认值字段（类型覆盖 canonical 与 v2 别名两种形态）
+const SCRIPT_DECLS = [
+  decl('account', 'string', null, '账号模板'),
+  decl('count', 'int', 3),
+  decl('ratio', 'number', 0.5),
+  decl('flag', 'bool', true),
+  decl('enable', 'boolean', true),
+  decl('mode', 'string', 'auto'),
+]
 
 function mountForm(props = {}) {
   return mount(ParamsForm, {
-    props: { params: extractParams(SCRIPT_YAML), ...props },
+    props: { params: SCRIPT_DECLS, ...props },
   })
 }
 
 const row = (wrapper, name) =>
   wrapper.findAll('.pf-row').find(r => r.text().includes(`$${name}`))
-
-describe('extractParams', () => {
-  it('脚本取文件级 params（type 保留声明原文）；函数库按函数名取（缺省第一个）；失败为空', () => {
-    const decls = extractParams(SCRIPT_YAML)
-    expect(decls.map(p => p.name)).toEqual(['account', 'count', 'ratio', 'flag', 'enable', 'mode'])
-    expect(decls.map(p => p.type)).toEqual(['string', 'int', 'number', 'boolean', 'boolean', 'string'])
-    expect(decls.map(p => p.default)).toEqual([null, 3, 0.5, true, true, 'auto'])
-    expect(extractParams(FN_YAML, 'function_library').map(p => p.name)).toEqual(['account', 'timeout'])
-    expect(extractParams(FN_YAML, 'function_library', 'is_enabled').map(p => p.name)).toEqual(['enable'])
-    expect(extractParams(FN_YAML, 'function_library', 'nope')).toEqual([])
-    expect(extractParams('- a: 1\n- b: 2', 'function_library')).toEqual([]) // 解析失败 → 空
-  })
-
-  it('v2 脚本（缺 version: 3）不解析出参数', () => {
-    expect(extractParams('params:\n  - \'text:a:备注\'\nsteps: []\n')).toEqual([])
-  })
-})
 
 describe('ParamsForm 三态', () => {
   it('canonical 类型控件渲染（number/boolean/text，复用 CellEditor）', async () => {
@@ -185,8 +147,7 @@ describe('覆盖建议缓存：只作覆盖态预填，不遮蔽当前声明默�
 })
 
 describe('mapArgDiagnostics / describeResolvedArgs / validateArgsAgainstParams', () => {
-  const decls = extractParams(SCRIPT_YAML)
-  const names = decls.map(p => p.name)
+  const names = SCRIPT_DECLS.map(p => p.name)
 
   it('field 命中参数名；step_path args.x 兜底；对不上进 other', () => {
     const m = mapArgDiagnostics([
@@ -202,7 +163,7 @@ describe('mapArgDiagnostics / describeResolvedArgs / validateArgsAgainstParams',
   })
 
   it('resolved_args 摘要带「覆盖/默认/必填」来源标注；无参数返回空；超长截断', () => {
-    const text = describeResolvedArgs(decls, { ratio: 0.1 }, {
+    const text = describeResolvedArgs(SCRIPT_DECLS, { ratio: 0.1 }, {
       account: 'a.png', count: 3, ratio: 0.1, flag: true, enable: true, mode: 'auto',
     })
     expect(text).toContain('ratio=0.1（覆盖）')
@@ -210,12 +171,12 @@ describe('mapArgDiagnostics / describeResolvedArgs / validateArgsAgainstParams',
     expect(text).toContain('account=a.png（必填）')
     expect(text.startsWith('运行参数：')).toBe(true)
     expect(describeResolvedArgs([], {}, {})).toBe('')
-    expect(describeResolvedArgs(decls, {}, null).length).toBeLessThanOrEqual(241)
+    expect(describeResolvedArgs(SCRIPT_DECLS, {}, null).length).toBeLessThanOrEqual(241)
   })
 
   it('validateArgsAgainstParams：类型不符报字段；未知参数不查', () => {
-    expect(validateArgsAgainstParams(decls, { account: 'a', count: 2 })).toEqual([])
-    expect(validateArgsAgainstParams(decls, { account: 'a', count: 2.5 }).map(e => e.name)).toEqual(['count'])
+    expect(validateArgsAgainstParams(SCRIPT_DECLS, { account: 'a', count: 2 })).toEqual([])
+    expect(validateArgsAgainstParams(SCRIPT_DECLS, { account: 'a', count: 2.5 }).map(e => e.name)).toEqual(['count'])
   })
 
   it('fmtLiteral 展示形态', () => {

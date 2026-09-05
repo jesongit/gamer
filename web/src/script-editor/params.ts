@@ -1,45 +1,16 @@
 /**
  * 运行/测试/定时任务的参数表单共享工具。
  *
- * 三类入口（Console 手动运行 / 函数测试 / TaskBoard 任务快照）共用：
- * - extractParams：从 YAML v3 源码提取 ParamDecl[]（canonical 类型规范化）；
+ * P12.3 起参数声明的唯一来源是服务端 entrypoint schema API（契约 §7，前端不为
+ * 取参数而解析 YAML）——schema → ParamDecl[] 的适配见 entrypointParams.ts。
+ * 本模块只承载表单侧共享逻辑：
  * - mapArgDiagnostics：服务端 400 invalid_args 诊断 → 表单字段定位（五元组同构）；
  * - describeResolvedArgs：202 resolved_args 摘要（「默认继承/显式覆盖」来源标注）；
  * - 覆盖建议缓存：最近一次显式输入存 localStorage（key 按脚本/函数文件 id），
  *   仅作显式覆盖建议预填，绝不遮蔽当前声明默认值。
  */
 import type { ParamDecl, ParamLiteral } from './model'
-import { parseFunctionLibrary, parseScript } from './codec'
 import { checkCellLiteral } from './schema'
-
-// ---------- 提取 ----------
-
-/**
- * YAML v3 源码 → 参数声明列表。脚本取 Program.params；函数库取指定函数（缺省第一个）的 params。
- * type 保留声明原文（v2 别名 ty 名如 int/tmpl 保真，控件与标签层各自映射）；
- * 规范五类映射经 schema.normalizeParamType（参数 schema API 接入时使用）。
- * 解析失败/无声明/函数不存在 → 空数组（调用方按「无参数直接运行」处理）。
- */
-export function extractParams(
-  yamlText: string,
-  kind: 'script' | 'function_library' = 'script',
-  fnName: string | null = null,
-): ParamDecl[] {
-  try {
-    if (kind === 'function_library') {
-      const model = parseFunctionLibrary(yamlText ?? '').model
-      const fns = Array.isArray(model.functions) ? model.functions : []
-      const fn = fnName ? fns.find((f) => f.name === fnName) : fns[0]
-      return fn && Array.isArray(fn.params) ? fn.params.map((d) => ({ ...d, rawForm: false })) : []
-    }
-    const model = parseScript(yamlText ?? '').model
-    return Array.isArray(model.params)
-      ? model.params.map((d) => ({ ...d, rawForm: false }))
-      : []
-  } catch {
-    return []
-  }
-}
 
 // ---------- 展示 ----------
 

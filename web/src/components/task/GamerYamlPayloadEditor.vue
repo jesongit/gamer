@@ -14,7 +14,7 @@
       />
     </div>
     <div v-else-if="loadFailed" class="gy-empty gy-err" data-testid="gy-load-failed">
-      脚本加载失败，无法渲染参数表单（任务仍可保存）。
+      参数声明加载失败{{ loadError ? `：${loadError}` : '' }}（任务仍可保存）。
     </div>
     <div v-else-if="paramsLoaded" class="gy-empty" data-testid="gy-no-params">该脚本未声明参数，可直接保存。</div>
     <div v-else-if="!entrypoint" class="gy-empty" data-testid="gy-pick-first">请先选择执行目标（脚本）。</div>
@@ -27,8 +27,10 @@
  * gamer.yaml runner 的 payload 编辑器（RunnerEditorContribution V1 首个实现）。
  *
  * 以下全是贡献内部事务，TaskBoard 不感知：
- * - 脚本内容经 api.getScript(entrypoint) 获取 → extractParams 解析参数声明 →
- *   ParamsForm 按声明渲染七类类型化控件（稀疏 args 三态：默认/覆盖/必填）；
+ * - 参数声明经服务端 entrypoint schema API（P12.3 契约 §7，前端不为取参数而解析
+ *   YAML）获取 → entrypointParams.schemaToParamDecls 适配 → ParamsForm 渲染
+ *   类型化控件（稀疏 args 三态：默认/覆盖/必填）；响应 signature（psig1）本期
+ *   仅透传不消费，供后续过期预检；
  * - tmpl 控件的模板短名候选来自 store.templatesData 按脚本分区过滤（自 TaskBoard 迁入）；
  * - store.scriptsData/templatesData 为空时自行拉取填充（ScriptPicker 是纯 store 消费者）；
  * - 切换执行目标后原 payload.args 不再适用：清空带入并整体替换 payload。
@@ -39,8 +41,10 @@ import { computed, ref, watch, onMounted } from 'vue'
 import type { PropType } from 'vue'
 import ParamsForm from '../../script-editor/components/ParamsForm.vue'
 import type { ParamDecl } from '../../script-editor/model'
-import { extractParams, cloneArg } from '../../script-editor/params'
+import { schemaToParamDecls } from '../../script-editor/entrypointParams'
+import { cloneArg } from '../../script-editor/params'
 import { api } from '../../api'
+import { GAMER_YAML_RUNNER_ID } from '../../gamer-yaml-runner'
 import { templatesData } from '../../store'
 import {
   ensureGamerYamlResources, scriptPackageOf, templateShortName,
@@ -58,6 +62,7 @@ const pfEl = ref<InstanceType<typeof ParamsForm> | null>(null)
 const params = ref<ParamDecl[]>([])
 const paramsLoaded = ref(false)
 const loadFailed = ref(false)
+const loadError = ref('')
 // 已采用的执行目标：仅在该目标上把 payload.args 带入表单一次；此后 entrypoint 变化即清空
 const adoptedEntrypoint = ref('')
 const initialArgs = ref<Record<string, unknown>>({})
@@ -76,21 +81,31 @@ async function loadScript(entrypoint: string): Promise<void> {
   const seq = ++loadSeq
   paramsLoaded.value = false
   loadFailed.value = false
+  loadError.value = ''
   params.value = []
   if (!entrypoint) return
   try {
-    const detail = await api.getScript(entrypoint)
+    const descriptor = await api.getEntrypointParams(GAMER_YAML_RUNNER_ID, entrypoint)
     if (seq !== loadSeq) return // 迟到响应：执行目标已再切换，丢弃
-    params.value = extractParams(String(detail?.content ?? ''))
+    params.value = schemaToParamDecls(descriptor?.schema)
     paramsLoaded.value = true
     if (!params.value.length) {
       // 无参数声明的脚本：快照 args 不再有意义，清空（与旧 TaskBoard 行为一致）
       emit('update:payload', { args: {} })
     }
-  } catch {
+  } catch (e) {
     if (seq !== loadSeq) return
     paramsLoaded.value = true
     loadFailed.value = true
+    // 结构化错误优先（404 不存在 / 400 invalid_script 诊断首条），其余退回原始消息
+    const err = e as {
+      data?: { error?: string; resource?: string; diagnostics?: Array<{ message?: string }> }
+      message?: string
+    }
+    const firstDiag = err.data?.diagnostics?.find((d) => typeof d?.message === 'string' && d.message)?.message ?? ''
+    loadError.value = firstDiag
+      || (err.data?.error === 'not_found' ? `脚本不存在：${err.data.resource || entrypoint}` : '')
+      || (typeof err.message === 'string' && err.message ? err.message : '未知错误')
   }
 }
 

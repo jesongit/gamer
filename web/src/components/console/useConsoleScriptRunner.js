@@ -1,6 +1,6 @@
 import { computed, nextTick, onUnmounted, provide, reactive, ref, watch } from 'vue'
 import { api } from '../../api'
-import { runYamlFunction, runYamlScript } from '../../gamer-yaml-runner'
+import { GAMER_YAML_RUNNER_ID, runYamlFunction, runYamlScript } from '../../gamer-yaml-runner'
 import {
   applyRunRecord, beginCancel, findRun, pushRunConflict, resetStoreRunState,
   scriptsData, store, templatesData,
@@ -806,10 +806,12 @@ export function useConsoleScriptRunner({
     }
   }
 
-  /** 运行/从此步骤运行入口：解析目标 params → 无参数直接运行，有参数弹参数表单；
-   *  函数面板：按函数 params 弹表单，经函数测试入口运行所选函数（缺省 = 文件第一个函数）。
+  /** 运行/从此步骤运行入口：经服务端 entrypoint schema API 取参数声明（P12.3，
+   *  前端不解析 YAML）→ 无参数直接运行，有参数弹参数表单；
+   *  函数面板：按函数 schema 弹表单，经函数测试入口运行所选函数（缺省 = 文件第一个函数）。
    *  opts.fromUuid（从此运行）→ 脚本取顶层 steps 序号 / 函数定位目标函数与步序；
-   *  顶部「运行」按钮不传 → 从头跑。守卫失败一律 toast 说明原因，不做静默 no-op */
+   *  顶部「运行」按钮不传 → 从头跑。守卫失败一律 toast 说明原因，不做静默 no-op；
+   *  schema 加载失败（404 不存在 / 400 无法解析）由 flow 抛结构化错误经 handleRunStartError 提示 */
   async function runScript(scope, opts = {}) {
     if (startPending.value || store.running) return
     if (!store.deviceId) return toast('请先在上方选择设备再运行', 'warn')
@@ -832,7 +834,8 @@ export function useConsoleScriptRunner({
           name: `${f.file} · ${fnName}()`,
           kind: 'function_library',
           fnName,
-          yaml: f.content ?? '',
+          runnerId: GAMER_YAML_RUNNER_ID,
+          entrypoint: `${f.id}#${fnName}`, // 与 runYamlFunction 的 entrypoint 拼装同形态
           startIndex,
           templates: templateNames.value,
           title: '函数参数',
@@ -854,7 +857,8 @@ export function useConsoleScriptRunner({
       await runArgsFlow.begin({
         id: s.id,
         name: s.name,
-        yaml: s.content ?? '',
+        runnerId: GAMER_YAML_RUNNER_ID,
+        entrypoint: s.id,
         startIndex,
         templates: templateNames.value,
         desc: `运行脚本 ${s.name}${startIndex ? `（从第 ${startIndex + 1} 步）` : ''}`,

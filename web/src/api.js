@@ -430,6 +430,18 @@ export const api = {
   // UI 支撑只读端点：已注册 runner / schedule provider（执行器与触发方式下拉）
   listRunners: () => req('GET', '/api/runners'),
   listScheduleProviders: () => req('GET', '/api/schedule-providers'),
+  // 参数 schema descriptor（P12.3 / 契约 §7）：前端不为取参数而解析 YAML——按
+  // runner + entrypoint 资源 id（"<pkg>/<脚本>.yaml" 或 "<pkg>/<文件>.yaml#<函数>"，
+  // 含 '/'/'#'，整体 encodeURIComponent）查询可渲染表单的参数 schema。
+  // 200 = {runner_id, entrypoint, kind, format, schema, signature}（schema→表单
+  // 声明的适配见 script-editor/entrypointParams.ts；signature 为 psig1 参数签名，
+  // 本期仅透传）。结构化错误原样上抛（ApiError.status/code/data）：
+  // 404 {error:"runner_not_found"} / 404 {error:"not_found",resource} /
+  // 400 {error:"invalid_script",diagnostics:[...]}
+  getEntrypointParams: (runnerId, entrypoint) => req(
+    'GET',
+    `/api/runners/${encodeURIComponent(requireId(runnerId, 'runner_id'))}/entrypoint?entrypoint=${encodeURIComponent(requireId(entrypoint, 'entrypoint'))}`,
+  ),
 
   // ---- App Package（游戏包）与本地编辑区（workspace）----
   // 已装游戏包列表：{packages:[{id,name,active_version(null=无激活),android_packages,versions:[...]}]}
