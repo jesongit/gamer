@@ -99,6 +99,70 @@ pub(super) async fn api_list_runners(State(st): State<AppState>) -> Response {
     .into_response()
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct EntrypointSchemaQuery {
+    pub(super) entrypoint: String,
+}
+
+/// GET /api/runners/:runner_id/entrypoint?entrypoint=<资源id>
+/// （P12.3 / 契约 §7 参数 schema API）：前端不为取参数而解析 YAML——按
+/// entrypoint 资源 id 查询参数 schema。响应 = `{runner_id, entrypoint, kind,
+/// format, schema, signature}`；runner 未注册 404 runner_not_found、资源缺失
+/// 404 not_found、资源解析失败 400 invalid_script（诊断透传）。
+pub(super) async fn api_runner_entrypoint_schema(
+    State(st): State<AppState>,
+    Path(runner_id): Path<String>,
+    Query(query): Query<EntrypointSchemaQuery>,
+) -> Response {
+    if let Err(err) = validate_text_field(&query.entrypoint, "entrypoint", 1024) {
+        return err.into_response();
+    }
+    match st.scheduler.describe_entrypoint(&runner_id, &query.entrypoint) {
+        Ok(payload) => {
+            let mut body = serde_json::json!({
+                "runner_id": runner_id,
+                "entrypoint": query.entrypoint,
+            });
+            if let (Some(base), Some(obj)) = (
+                payload.as_object(),
+                body.as_object_mut(),
+            ) {
+                for (key, value) in base {
+                    obj.insert(key.clone(), value.clone());
+                }
+            }
+            Json(body).into_response()
+        }
+        Err(crate::scheduler::EntrypointQueryError::UnknownRunner) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "runner_not_found",
+                "runner_id": runner_id,
+            })),
+        )
+            .into_response(),
+        Err(crate::scheduler::EntrypointQueryError::Describe(
+            crate::scheduler::EntrypointDescribeError::NotFound { resource },
+        )) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "not_found", "resource": resource })),
+        )
+            .into_response(),
+        Err(crate::scheduler::EntrypointQueryError::Describe(
+            crate::scheduler::EntrypointDescribeError::Invalid { diagnostics },
+        )) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_script",
+                "resource": query.entrypoint,
+                "diagnostics": diagnostics,
+            })),
+        )
+            .into_response(),
+    }
+}
+
 /// GET /api/schedule-providers：已注册 schedule provider 列表。
 pub(super) async fn api_list_schedule_providers(State(st): State<AppState>) -> Response {
     let ids = st.scheduler.schedule_provider_ids();

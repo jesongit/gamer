@@ -263,6 +263,10 @@ pub(crate) fn build_router_with_extensions(
         // UI 支撑只读端点：TaskBoard 的执行器 / 触发方式下拉数据源。
         .route("/api/runners", get(tasks::api_list_runners))
         .route(
+            "/api/runners/:runner_id/entrypoint",
+            get(tasks::api_runner_entrypoint_schema),
+        )
+        .route(
             "/api/schedule-providers",
             get(tasks::api_list_schedule_providers),
         )

@@ -10,7 +10,8 @@
 //! (`TimerRunnerRegistrar` → [`Scheduler::register_extension_runner`]) and
 //! disappear with their owning extension.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use tracing::info;
@@ -20,10 +21,39 @@ use crate::timer_core::{
     RegisteredRunner, ScheduleRegistry, TimerCore, TimerRunner, TimerRunnerRegistry,
 };
 
+/// Entrypoint 参数 schema 描述失败（P12.3 / 契约 §7）：资源缺失或解析失败
+/// （诊断透传给 API 边界映射 404 / 400）。
+#[derive(Debug, Clone)]
+pub enum EntrypointDescribeError {
+    /// entrypoint 指向的资源不存在。
+    NotFound { resource: String },
+    /// 资源存在但解析失败（结构化诊断数组，与保存期校验同源）。
+    Invalid { diagnostics: serde_json::Value },
+}
+
+/// Entrypoint 参数 schema 描述器（runner 私有能力）：由注册该 runner 的扩展
+/// 在 start 生命周期注入，随 runner 注销一并移除。Core 只按 runner_id 转发
+/// 查询并透传 JSON——资源语义（YAML/其他 DSL）全部留在扩展边界内。
+pub trait EntrypointDescriber: Send + Sync {
+    /// 返回 entrypoint（资源 id，如 `<分区>/<脚本>.yaml[#<函数>]`）的参数
+    /// schema 描述（契约 §7 JSON 形态）。
+    fn describe(&self, entrypoint: &str) -> Result<serde_json::Value, EntrypointDescribeError>;
+}
+
+/// [`Scheduler::describe_entrypoint`] 的查询失败：runner 未注册与描述失败分开
+/// （前者 404 runner_not_found，后者按 [`EntrypointDescribeError`] 映射）。
+#[derive(Debug, Clone)]
+pub enum EntrypointQueryError {
+    UnknownRunner,
+    Describe(EntrypointDescribeError),
+}
+
 pub struct Scheduler {
     core: Arc<TimerCore>,
     runners: Arc<TimerRunnerRegistry>,
     schedules: Arc<ScheduleRegistry>,
+    /// runner_id → (owner_extension_id, describer)；生命周期与 runner 注册同步。
+    describers: Mutex<HashMap<String, (String, Arc<dyn EntrypointDescriber>)>>,
 }
 
 impl Scheduler {
@@ -39,6 +69,7 @@ impl Scheduler {
             core: TimerCore::new(db),
             runners,
             schedules,
+            describers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -86,6 +117,11 @@ impl Scheduler {
         owner_extension_id: &str,
     ) -> anyhow::Result<Vec<String>> {
         let removed = self.runners.unregister_owner(owner_extension_id);
+        // entrypoint 描述器与 runner 同生命周期：owner 离场即整体移除
+        self.describers
+            .lock()
+            .expect("entrypoint describer registry lock poisoned")
+            .retain(|_, (owner, _)| owner != owner_extension_id);
         for runner_id in &removed {
             let suspended = self.core.suspend_tasks_missing_runner(runner_id).await?;
             tracing::info!(runner = %runner_id, suspended, "runner unregistered; active tasks suspended as dependency-missing");
@@ -117,6 +153,42 @@ impl Scheduler {
     /// 注册它的扩展（ADR-13）。
     pub fn runner_registry(&self) -> Arc<TimerRunnerRegistry> {
         Arc::clone(&self.runners)
+    }
+
+    /// P12.3（契约 §7）：注册 runner 名下的 entrypoint 参数 schema 描述器
+    /// （扩展 start 生命周期注入；同 runner_id 重复注册原地替换）。
+    pub fn register_entrypoint_describer(
+        &self,
+        runner_id: &str,
+        owner_extension_id: &str,
+        describer: Arc<dyn EntrypointDescriber>,
+    ) {
+        self.describers
+            .lock()
+            .expect("entrypoint describer registry lock poisoned")
+            .insert(
+                runner_id.to_string(),
+                (owner_extension_id.to_string(), describer),
+            );
+    }
+
+    /// 按 runner 查询 entrypoint 参数 schema：Core 不理解资源内容，描述器
+    /// 返回什么就透传什么（前端不为取参数而解析 YAML）。
+    pub fn describe_entrypoint(
+        &self,
+        runner_id: &str,
+        entrypoint: &str,
+    ) -> Result<serde_json::Value, EntrypointQueryError> {
+        let describer = self
+            .describers
+            .lock()
+            .expect("entrypoint describer registry lock poisoned")
+            .get(runner_id)
+            .map(|(_, describer)| Arc::clone(describer))
+            .ok_or(EntrypointQueryError::UnknownRunner)?;
+        describer
+            .describe(entrypoint)
+            .map_err(EntrypointQueryError::Describe)
     }
 
     pub async fn start(&self) {

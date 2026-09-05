@@ -35,6 +35,11 @@ use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartErr
 use crate::store::Db;
 use crate::timer_core::{TimerCompletion, TimerOutcome, TimerRun, TimerRunner, TimerRunnerError};
 
+// P12.3：entrypoint 参数 schema 描述（契约 §7）。本模块声明挂载（gamer_yaml
+// 的 mod.rs 属并行任务地盘），物理文件为 gamer_yaml/entrypoint_descriptor.rs。
+#[path = "entrypoint_descriptor.rs"]
+pub(crate) mod entrypoint_descriptor;
+
 pub(crate) struct YamlTimerRunner {
     db: Db,
     runs: Arc<RunManager>,
@@ -44,6 +49,16 @@ pub(crate) struct YamlTimerRunner {
 impl YamlTimerRunner {
     pub(crate) fn new(db: Db, runs: Arc<RunManager>, scripts: Arc<ResourceStore>) -> Self {
         Self { db, runs, scripts }
+    }
+
+    /// P12.3（契约 §7）：本 runner 名下 entrypoint 的参数 schema 描述器
+    /// （`GET /api/runners/:runner_id/entrypoint` 数据源；Core 经窄 trait 消费）。
+    pub(crate) fn entrypoint_describer(
+        &self,
+    ) -> Arc<dyn crate::scheduler::EntrypointDescriber> {
+        Arc::new(entrypoint_descriptor::StoreEntrypointDescriber::new(
+            self.scripts.clone(),
+        ))
     }
 }
 
@@ -260,17 +275,15 @@ impl YamlTimerRunner {
                 }
             }
         }
-        // 稀疏 args → 七类解析 + 默认值合并（blocking 池内做磁盘快照 + 严格解析）
+        // 稀疏 args → 按声明解析 + 默认值合并（blocking 池内做磁盘快照 + 严格
+        // 解析）。P12.3：version:3 脚本与 v2 兼容失败后的 v3 函数库在此分流，
+        // v3 参数绑定/缺必填校验与 v2 同口径（invalid_args 诊断）。
         let scripts = self.scripts.clone();
         let bound = {
             let target = target.clone();
             let args_owned = args.clone();
             tokio::task::spawn_blocking(move || {
-                crate::extensions::gamer_yaml::engine::resolve_entry_args(
-                    &scripts,
-                    &target,
-                    &args_owned,
-                )
+                task_params::resolve_manual_entry_args(&scripts, &target, &args_owned)
             })
             .await
             .map_err(|error| {
@@ -450,9 +463,16 @@ impl crate::extensions::TimerRunnerRegistrar for YamlTimerRunnerRegistrar {
             .register_extension_runner(
                 crate::extensions::gamer_yaml::yaml_extension::YAML_EXTENSION_ID,
                 extension_id,
-                runner,
+                runner.clone(),
             )
-            .await
+            .await?;
+        // P12.3：entrypoint 参数 schema 描述器与 runner 同生命周期注册/注销
+        self.scheduler.register_entrypoint_describer(
+            crate::extensions::gamer_yaml::yaml_extension::YAML_EXTENSION_ID,
+            extension_id,
+            runner.entrypoint_describer(),
+        );
+        Ok(())
     }
 
     async fn extension_stopped(&self, extension_id: &str) -> anyhow::Result<()> {

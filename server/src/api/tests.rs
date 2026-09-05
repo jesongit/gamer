@@ -173,19 +173,22 @@ mod sec_tests {
         let scheduler = Arc::new(Scheduler::new(db.clone()));
         // 与生产等价：gamer.yaml 扩展 Running 时注册其 timer runner（POST
         // /api/runs 手动分发与任务路径共用同一注册表）。测试装配直接同步注册。
+        let yaml_runner = Arc::new(
+            crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::new(
+                db.clone(),
+                runs.clone(),
+                scripts.clone(),
+            ),
+        );
         scheduler
-            .register_runner_for_tests(
-                "gamer.yaml",
-                "gamer.yaml",
-                Arc::new(
-                    crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::new(
-                        db.clone(),
-                        runs.clone(),
-                        scripts.clone(),
-                    ),
-                ),
-            )
+            .register_runner_for_tests("gamer.yaml", "gamer.yaml", yaml_runner.clone())
             .unwrap();
+        // P12.3：entrypoint 参数 schema 描述器（与生产 start 生命周期同构）
+        scheduler.register_entrypoint_describer(
+            "gamer.yaml",
+            "gamer.yaml",
+            yaml_runner.entrypoint_describer(),
+        );
         let auth = Arc::new(auth::AuthState::new(
             credential,
             auth_cfg,
@@ -432,6 +435,9 @@ mod sec_tests {
     }
     mod runs_tests {
         include!("tests/runs.rs");
+    }
+    mod entrypoint_schema_tests {
+        include!("tests/entrypoint_schema.rs");
     }
     mod system_tests {
         include!("tests/system.rs");
