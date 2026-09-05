@@ -69,7 +69,17 @@ export function normalizeSignature(value: unknown, fallback: PluginSignature['st
 }
 
 /** Build the signed Registry claim sent to the server-side install gate. */
-export function registryProofFor(entry?: RegistryPluginVersion): {
+/**
+ * Build the signed Registry claim sent to the server-side install gate.
+ *
+ * 两种签名形态（与 signer 产物对齐）：
+ * - `value`：signer 输出的完整 `base64(RegistryProof JSON)` 信封——原样透传
+ *   字符串即可（api.js 对 string 不再包装；服务端 `from_base64` 直接吃这个形态）。
+ * - 仅 `signature`（纯 64 字节签名 base64）：返回对象，由 api.js 序列化打包。
+ */
+export function registryProofFor(
+  entry?: RegistryPluginVersion,
+): string | {
   id: string
   version: string
   download_url: string
@@ -78,17 +88,18 @@ export function registryProofFor(entry?: RegistryPluginVersion): {
   signature: string
 } | null {
   const signature = normalizeSignature(entry?.signature)
-  const value = signature.value || signature.signature
-  if (!entry?.id || !entry.version || !entry.download_url || !entry.sha256 || !signature.key_id || !value) {
+  if (!entry?.id || !entry.version || !entry.download_url || !entry.sha256 || !signature.key_id) {
     return null
   }
+  if (signature.value) return signature.value
+  if (!signature.signature) return null
   return {
     id: entry.id,
     version: entry.version,
     download_url: entry.download_url,
     sha256: entry.sha256.toLowerCase(),
     key_id: signature.key_id,
-    signature: value,
+    signature: signature.signature,
   }
 }
 

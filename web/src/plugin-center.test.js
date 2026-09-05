@@ -87,15 +87,31 @@ describe('Phase 10 plugin center contracts', () => {
       download_url: 'https://registry.example/vision.gplugin', sha256: 'a'.repeat(64),
       signature: { status: 'valid', key_id: 'registry-1', value: 'signature-value' },
     }
+    // signer 信封形态：value 即 base64(RegistryProof JSON)，必须原样透传字符串
+    // （此前被包进对象再序列化造成双重 base64，服务端解码出 294 字节报错）
     const proof = registryProofFor(entry)
-    expect(proof).toMatchObject({ id: entry.id, version: entry.version, key_id: 'registry-1' })
+    expect(proof).toBe('signature-value')
     await api.inspectExtension(new Blob([new Uint8Array([1])]), {
       source: 'official', registryProof: proof, permissionConfirmed: true,
     })
     const headers = fetch.mock.calls[0][1].headers
     expect(headers['X-Gamer-Extension-Source']).toBe('official')
     expect(headers['X-Gamer-Permission-Confirm']).toBe('1')
-    expect(headers['X-Gamer-Registry-Proof']).toBeTruthy()
+    expect(headers['X-Gamer-Registry-Proof']).toBe('signature-value')
+  })
+
+  it('wraps plain-signature proofs into the object form for the server', async () => {
+    const entry = {
+      id: 'plain.sig', version: '2.0.0',
+      download_url: 'https://registry.example/plain.gplugin', sha256: 'B'.repeat(64),
+      signature: { status: 'valid', key_id: 'registry-1', signature: 'c2ln' },
+    }
+    const proof = registryProofFor(entry)
+    expect(proof).toEqual({
+      id: 'plain.sig', version: '2.0.0',
+      download_url: 'https://registry.example/plain.gplugin',
+      sha256: 'b'.repeat(64), key_id: 'registry-1', signature: 'c2ln',
+    })
   })
 
   it('computes permission additions and dependency failures deterministically', () => {

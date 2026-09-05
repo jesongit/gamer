@@ -29,7 +29,8 @@ export interface ParamDecl {
   type: string
   name: string
   remark: string
-  default: ParamLiteral | null
+  /** coord 参数的默认值为 [x, y] 元组（schema descriptor / 字面量表双形态）。 */
+  default: ParamLiteral | [number, number] | null
   rawForm: boolean
 }
 

@@ -112,6 +112,7 @@ export function paramDeclToRawString(decl: ParamDecl): string {
   let tail: string
   if (typeof decl.default === 'boolean') tail = decl.default ? 'true' : 'false'
   else if (typeof decl.default === 'number') tail = fmtNum(decl.default)
+  else if (Array.isArray(decl.default)) tail = `[${decl.default.map(fmtNum).join(', ')}]`
   else tail = /[\n\r]/.test(decl.default) ? JSON.stringify(decl.default) : decl.default
   return `${base}:${tail}`
 }
