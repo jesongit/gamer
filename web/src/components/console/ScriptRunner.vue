@@ -124,7 +124,7 @@
           :templates="ctx.templateNames"
           :show-add-button="ctx.shell.editorContext !== 'function'"
         />
-        <ConfigEditor v-if="ctx.shell.editorContext === 'script'" :model="ctx.shell.model" :stack="ctx.shell.stack" />
+        <DefaultsEditor v-if="ctx.shell.editorContext === 'script'" :model="ctx.shell.model" :stack="ctx.shell.stack" />
       </div>
       <StepCanvas
         ref="canvasEl"
@@ -173,7 +173,7 @@ import RunLogPanel from './RunLogPanel.vue'
 import ScriptSummary from './ScriptSummary.vue'
 import ResourcePreviewModal from './ResourcePreviewModal.vue'
 import SaveConflictModal from './SaveConflictModal.vue'
-import { StepCanvas, ParamEditor, ConfigEditor, YamlPreview } from '../../script-editor/components/index'
+import { StepCanvas, ParamEditor, DefaultsEditor, YamlPreview } from '../../script-editor/components/index'
 
 const props = defineProps({ context: { type: Object, required: true } })
 const ctx = reactive(props.context)

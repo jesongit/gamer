@@ -11,6 +11,8 @@
  * v3 服务端 parse_duration_ms 对齐（ms/s/m/h，0 合法）。
  */
 
+import type { ParamType } from './model'
+
 // ---------- 按键枚举 ----------
 
 /**

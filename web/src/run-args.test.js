@@ -108,6 +108,7 @@ describe('runYamlScript / runYamlFunction 请求体（gamer.yaml 经 api.run 统
 // ---- useRunArgsFlow 状态机 ----
 
 const SCRIPT_WITH_PARAMS = [
+  'version: 3',
   'params:',
   "  - 'tmpl:account:账号模板'",
   "  - 'time:timeout:最长等待:30s'",
@@ -115,7 +116,7 @@ const SCRIPT_WITH_PARAMS = [
   '  - log: hi',
 ].join('\n')
 
-const PLAIN_SCRIPT = 'steps:\n  - log: hi\n'
+const PLAIN_SCRIPT = 'version: 3\nsteps:\n  - log: hi\n'
 
 function memoryStorage() {
   const m = new Map()

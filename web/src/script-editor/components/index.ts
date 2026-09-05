@@ -11,7 +11,7 @@ export { default as StepCanvas } from './StepCanvas.vue'
 export { default as AddStepPanel } from './AddStepPanel.vue'
 export { default as ParamEditor } from './ParamEditor.vue'
 export { default as ParamsForm } from './ParamsForm.vue'
-export { default as ConfigEditor } from './ConfigEditor.vue'
+export { default as DefaultsEditor } from './DefaultsEditor.vue'
 export { default as ErrorSummary } from './ErrorSummary.vue'
 export { default as YamlPreview } from './YamlPreview.vue'
 

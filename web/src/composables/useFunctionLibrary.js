@@ -36,15 +36,19 @@ export function useFunctionLibrary({ api } = {}) {
   }
 
   /**
-   * func 步骤目标（`<文件短路径>/<函数名>`）→ 函数库文件 id。
+   * call 步骤目标（v3 `function:<文件短路径>/<函数名>`）→ 函数库文件 id。
    * 文件或函数名不存在返回 null（页面据此提示，不让用户跳进悬空目标）。
+   * 文件短路径可含目录，按最后一个 `/` 分割（ADR-YAML-02）。
    */
   function resolveTargetId(target) {
     const s = String(target || '')
-    const idx = s.indexOf('/')
-    if (idx <= 0 || idx === s.length - 1) return null
-    const file = s.slice(0, idx)
-    const fn = s.slice(idx + 1)
+    const prefix = 'function:'
+    if (!s.startsWith(prefix)) return null
+    const rest = s.slice(prefix.length)
+    const idx = rest.lastIndexOf('/')
+    if (idx <= 0 || idx === rest.length - 1) return null
+    const file = rest.slice(0, idx)
+    const fn = rest.slice(idx + 1)
     if (fn.includes('/')) return null
     const entry = findByFile(file)
     if (!entry || !Array.isArray(entry.functions) || !entry.functions.includes(fn)) return null

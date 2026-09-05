@@ -66,7 +66,7 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     try {
       const ctx = { ...(getContext ? getContext() : {}), context: editorContext.value }
       if (kind.value === 'script') {
-        if (name.value) ctx.selfFile = name.value
+        if (name.value) ctx.selfScript = name.value.replace(/\.(ya?ml)$/i, '')
         extra = validateScript(m, ctx)
       } else {
         extra = validateFunctionLibrary(m, ctx)
@@ -158,9 +158,9 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     }
   }
 
-  /** 新建脚本：空模型（config 缺省不启用，步骤为空列表），保存时落盘。 */
+  /** 新建脚本：v3 最小模型（version: 3 落盘 + 空 steps，params/defaults 缺省）。 */
   function newScript({ name: n = '新脚本.yml', pkg: p = '' } = {}) {
-    mountModel('script', { model: { params: [], config: null, steps: [] }, diagnostics: [] }, {
+    mountModel('script', { model: { version: 3, params: [], defaults: null, steps: [] }, diagnostics: [] }, {
       pkg: p,
       name: ensureYamlExt(n),
     })

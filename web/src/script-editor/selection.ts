@@ -13,7 +13,7 @@
 
 import type { EditorModel, Path } from './commands'
 import { resolveStepList } from './commands'
-import { childStepLists, type Cell, type ScriptModel, type Step } from './model'
+import { childStepLists, type Cell, type Program, type Step } from './model'
 
 // ---------- 路径互查 ----------
 
@@ -247,11 +247,11 @@ export function startIndexMap(model: EditorModel): StartIndexEntry[] {
   if ('functions' in model) {
     const entries: StartIndexEntry[] = []
     for (const fn of model.functions) {
-      fn.steps.forEach((step, i) => entries.push({ uuid: step.uuid, index: i }))
+      fn.steps.forEach((step: Step, i: number) => entries.push({ uuid: step.uuid, index: i }))
     }
     return entries
   }
-  return (model as ScriptModel).steps.map((step, i) => ({ uuid: step.uuid, index: i }))
+  return (model as Program).steps.map((step: Step, i: number) => ({ uuid: step.uuid, index: i }))
 }
 
 /** 单个 uuid 的 start_index；不在顶层返回 null（嵌套步骤首版不支持直接启动，plan §3）。 */

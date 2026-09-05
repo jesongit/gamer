@@ -13,7 +13,7 @@
     <div v-if="isFunctionLibrary && !functionPath" class="pe-hint warn">函数库没有文件级 params——请先在画布选择函数后按函数编辑参数</div>
 
     <template v-else-if="expanded">
-      <div v-if="rows.length === 0" class="pe-hint">暂无参数。脚本可不声明参数；声明后可在步骤与运行表单中引用 $名称。</div>
+      <div v-if="rows.length === 0" class="pe-hint">暂无参数。声明后可在步骤 $引用 与运行表单中使用。</div>
 
       <div v-for="(decl, i) in rows" :key="i" class="param-row" :class="{ 'row-error': rowErrors(decl, i).length }">
         <div class="row-main">
@@ -22,13 +22,14 @@
             @change="setType(i, ($event.target as HTMLSelectElement).value as ParamType)"
           >
             <option v-for="t in PARAM_TYPES" :key="t" :value="t">{{ TYPE_LABELS[t] }}</option>
+            <option v-if="!isCanonical(decl)" :value="decl.type">{{ decl.type }}（原文）</option>
           </select>
           <input
             class="cell-input" :value="decl.name" placeholder="变量名" aria-label="变量名"
             @change="setName(i, ($event.target as HTMLInputElement).value)"
           />
           <input
-            class="cell-input grow" :value="decl.remark" placeholder="备注（不能用半角冒号）" aria-label="备注"
+            class="cell-input grow" :value="decl.remark" placeholder="备注" aria-label="备注"
             @change="setRemark(i, ($event.target as HTMLInputElement).value)"
           />
           <label class="field-check" title="开启后调用/运行可省略此参数">
@@ -38,6 +39,10 @@
             />
             有默认值
           </label>
+          <button
+            type="button" class="mini-btn" :title="decl.rawForm ? '转为映射形态（name/type/default/remark）' : '转为字符串声明形态（type:name:remark[:default]）'"
+            @click="flipForm(i)"
+          >{{ decl.rawForm ? '串' : '映射' }}</button>
           <span class="row-actions">
             <button type="button" class="mini-btn" title="上移" :disabled="i === 0" @click="moveRow(i, -1)">↑</button>
             <button type="button" class="mini-btn" title="下移" :disabled="i >= rows.length - 1" @click="moveRow(i, 1)">↓</button>
@@ -47,7 +52,7 @@
         <div v-if="decl.default !== null" class="row-default">
           <span class="field-label">默认值</span>
           <CellEditor
-            :cell="lit(decl.default)" :type="decl.type" :allow-ref="false"
+            :cell="lit(decl.default)" :type="cellTypeOf(decl)" :allow-ref="false"
             :templates="templates"
             :label="`${decl.name} 默认值`" :error="defaultError(decl)"
             @change="(c) => setDefault(i, c)"
@@ -61,18 +66,20 @@
 
 <script setup lang="ts">
 /**
- * 参数编辑器（plan §9 params 行）：类型下拉 / 变量名 / 备注 / 有无默认值开关 /
- * 类型化默认值控件（复用 CellEditor 七类控件，禁止引用参数）/ 上下移排序。
+ * 参数编辑器（v3，Program.params 一等公民 / 函数级 params）：
+ * canonical 类型下拉（string/number/integer/boolean/enum）/ 变量名 / 备注 /
+ * 有无默认值开关 / 类型化默认值控件（复用 CellEditor，禁止引用）/
+ * 字符串 ⇄ 映射双形态切换（契约 §1） / 上下移排序。
  * 即时命名/重复/默认值校验提示；全部写操作经 CommandStack
  * （insert_param / update_param / remove_param / set_params）。
  *
- * 阶段 4：传 functionPath（['functions', 函数名, 'params']）时编辑函数级 params，
- * 命令携带 path 容器；缺省 = 脚本文件级（函数库模型未指明函数时仍显示提示）。
+ * 传 functionPath（['functions', 函数名, 'params']）时编辑函数级 params；
+ * 缺省 = 脚本文件级。
  */
 import { computed, ref, type PropType } from 'vue'
 import type { EditorModel, Path } from '../commands'
 import type { Diagnostic } from '../diagnostics'
-import { lit, PARAM_TYPES, type ParamDecl, type ParamType, type ScriptModel } from '../model'
+import { lit, PARAM_TYPES, type ParamDecl, type ParamType, type Program } from '../model'
 import { checkCellLiteral, PARAM_NAME_RE } from '../schema'
 import CellEditor from './CellEditor.vue'
 
@@ -90,14 +97,28 @@ const props = defineProps({
 })
 
 const TYPE_LABELS: Record<ParamType, string> = {
-  tmpl: '模板', coord: '坐标', color: '颜色', time: '时间', key: '按键', text: '文本', bool: '布尔',
+  string: '文本', number: '数字', integer: '整数', boolean: '布尔', enum: '枚举',
 }
 
 const DEFAULT_LITERALS: Record<ParamType, unknown> = {
-  tmpl: '', coord: [0.5, 0.5], color: 'ff8800', time: '1s', key: 'BACK', text: '', bool: true,
+  string: '', number: 0, integer: 0, boolean: true, enum: '',
 }
 
 const isFunctionLibrary = computed(() => 'functions' in props.model)
+
+function isCanonical(decl: ParamDecl): boolean {
+  return (PARAM_TYPES as readonly string[]).includes(decl.type)
+}
+
+/** 参数类型 → 默认值编辑用的 Cell 类型（映射到 CellEditor 控件口径）。 */
+function cellTypeOf(decl: ParamDecl): string {
+  switch (decl.type) {
+    case 'number': case 'integer': case 'float': case 'int': return 'number'
+    case 'boolean': case 'bool': return 'bool'
+    case 'string': case 'text': case 'enum': return 'text'
+    default: return 'text' // 历史别名（time/key/color/coord 等）按字符串编辑
+  }
+}
 
 /** 参数列表默认收起（头部摘要常驻），展开/收起由头部按钮切换。 */
 const expanded = ref(false)
@@ -108,10 +129,10 @@ const rows = computed<ParamDecl[]>(() => {
       .find((f) => f.name === fnName)
     return fn ? fn.params : []
   }
-  return isFunctionLibrary.value ? [] : (props.model as ScriptModel).params
+  return isFunctionLibrary.value ? [] : (props.model as Program).params
 })
 
-/** params 命令附加容器：函数级时携带 path（阶段 4 扩展），文件级缺省。 */
+/** params 命令附加容器：函数级时携带 path，文件级缺省。 */
 function paramCmd<T extends object>(cmd: T): T & { path?: Path } {
   return props.functionPath ? { ...cmd, path: props.functionPath } : cmd
 }
@@ -123,7 +144,7 @@ function updateParam(index: number, decl: ParamDecl): boolean {
 function addParam(): void {
   expanded.value = true
   props.stack.apply(
-    paramCmd({ type: 'insert_param', index: rows.value.length, decl: { type: 'text', name: '', remark: '', default: null } }),
+    paramCmd({ type: 'insert_param', index: rows.value.length, decl: { type: 'string', name: '', remark: '', default: null, rawForm: false } }),
     '添加参数',
   )
 }
@@ -145,12 +166,17 @@ function setRemark(i: number, raw: string): void {
 }
 function setType(i: number, type: ParamType): void {
   if (type === rows.value[i]!.type) return
-  // 类型切换：默认值按新类型不再合法，重置为无默认值（引用与调用实参由校验器报错传播）
-  updateParam(i, { ...rows.value[i]!, type, default: null })
+  // 类型切换：默认值按新类型不再合法，重置为无默认值
+  updateParam(i, { ...rows.value[i]!, type, default: null, rawForm: false })
+}
+/** 字符串 ⇄ 映射形态切换：字段不变，仅改序列化形态（rawForm 串按 type:name:remark[:default] 重排）。 */
+function flipForm(i: number): void {
+  const decl = rows.value[i]!
+  updateParam(i, { ...decl, rawForm: !decl.rawForm })
 }
 function toggleDefault(i: number, on: boolean): void {
   const decl = rows.value[i]!
-  updateParam(i, { ...decl, default: on ? (DEFAULT_LITERALS[decl.type] as ParamDecl['default']) : null })
+  updateParam(i, { ...decl, default: on ? (DEFAULT_LITERALS[isCanonical(decl) ? decl.type as ParamType : 'string'] as ParamDecl['default']) : null })
 }
 function setDefault(i: number, cell: { lit?: unknown; ref?: string }): void {
   updateParam(i, { ...rows.value[i]!, default: (cell.lit ?? null) as ParamDecl['default'] })
@@ -165,9 +191,6 @@ function rowErrors(decl: ParamDecl, i: number): string[] {
   const errs: string[] = []
   if (!PARAM_NAME_RE.test(decl.name)) {
     errs.push(`变量名 ${decl.name || '(空)'} 不符合 [A-Za-z_][A-Za-z0-9_]*`)
-  }
-  if (!decl.remark) {
-    errs.push('备注不能为空（服务端拒绝空备注声明）')
   }
   if (decl.name && rows.value.some((p, j) => j !== i && p.name === decl.name)) {
     errs.push(`变量名 ${decl.name} 重复`)

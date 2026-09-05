@@ -1,8 +1,8 @@
 /**
- * 卡片层共享元数据与定位辅助（plan §8.4 / §9）。
+ * 卡片层共享元数据与定位辅助（v3）。
  *
  * - KIND_META：19 类动作的中文名 + 单字图标（卡片左侧固定列）；
- * - stepSummary：卡片收起态自然语言摘要（§9 表「卡片摘要」列）；
+ * - stepSummary：卡片收起态自然语言摘要；
  * - breadcrumbForContainer / basePathOfContainer：容器路径 → 面包屑节点 / step_path 字符串基；
  * - parseStepPath / locateDiagnostic：诊断 step_path（如 steps[0].candidates[1].steps[0].then[0]）
  *   → 命令路径 → 目标卡片 uuid 与祖先链（ErrorSummary 点击定位用）。
@@ -11,7 +11,7 @@
 import type { Path } from '../commands'
 import { resolveStep } from '../commands'
 import type { Diagnostic } from '../diagnostics'
-import { isRefCell, type Cell, type ParamType, type Step, type StepKind } from '../model'
+import { isRefCell, type Cell, type Step, type StepKind } from '../model'
 import { containerLabel, type BreadcrumbNode } from '../selection'
 
 // ---------- 动作元数据 ----------
@@ -27,31 +27,31 @@ export interface KindMeta {
 }
 
 export const KIND_META: Record<StepKind, KindMeta> = {
-  str_app: { kind: 'str_app', label: '启动应用', icon: '启', hint: '启动当前应用（裸动作，无参数）' },
-  cls_app: { kind: 'cls_app', label: '关闭应用', icon: '关', hint: '关闭当前应用（裸动作，无参数）' },
-  tap: { kind: 'tap', label: '点击坐标', icon: '点', hint: '点击屏幕相对坐标（0~1）' },
-  swipe: { kind: 'swipe', label: '滑动', icon: '滑', hint: '从起点滑到终点，时长必须大于 0' },
-  key: { kind: 'key', label: '按键', icon: '键', hint: '发送单个按键（服务端按键枚举）' },
+  app_start: { kind: 'app_start', label: '启动应用', icon: '启', hint: '启动应用（缺省为设备当前配置的应用）' },
+  app_stop: { kind: 'app_stop', label: '关闭应用', icon: '关', hint: '关闭应用（缺省为设备当前配置的应用）' },
+  tap: { kind: 'tap', label: '点击坐标', icon: '点', hint: '点击屏幕相对坐标（0~1）或 $引用（如 $reward.center）' },
+  swipe: { kind: 'swipe', label: '滑动', icon: '滑', hint: '从起点滑到终点，时长必须带单位' },
+  key: { kind: 'key', label: '按键', icon: '键', hint: '发送单个按键（服务端按键枚举；action 可选 down/up/press）' },
   text: { kind: 'text', label: '输入文本', icon: '文', hint: '向设备输入文本' },
-  log: { kind: 'log', label: '记录日志', icon: '志', hint: '写一条运行日志' },
-  wait: { kind: 'wait', label: '等待', icon: '等', hint: '固定或随机区间等待，时间必须带单位' },
-  find: { kind: 'find', label: '点击模板', icon: '找', hint: '轮询等待模板出现并点击中心，点击后等待 interval；block 为依次绕过的障碍模板' },
-  match: { kind: 'match', label: '匹配模板', icon: '匹', hint: '按序检测候选模板，首个命中分支获胜；候选可勾选命中点击（点模板框中心后等待 interval）' },
-  check: { kind: 'check', label: '检查模板', icon: '检', hint: '在 timeout 内轮询匹配模板做界面断言（不点击）；未命中按 throw 文案结束运行' },
-  color: { kind: 'color', label: '判断颜色', icon: '色', hint: '按序判断单点颜色，首个命中分支获胜；候选可勾选命中点击（点取样点后等待 interval）' },
-  if: { kind: 'if', label: '布尔判断', icon: '判', hint: '布尔字面量或布尔参数的真假分支' },
-  loop: { kind: 'loop', label: '循环', icon: '循', hint: '按次数执行子流程；次数 0 表示无限循环' },
+  wait: { kind: 'wait', label: '等待', icon: '等', hint: '固定等待或 {min, max} 随机区间，时间须带单位' },
+  log: { kind: 'log', label: '记录日志', icon: '志', hint: '写一条运行日志（level 可选 debug/info/warn/error）' },
+  set: { kind: 'set', label: '设置变量', icon: '值', hint: '把表达式取值存入变量，供后续 $变量名 引用' },
+  if: { kind: 'if', label: '条件分支', icon: '判', hint: '按表达式真值走 then/else 分支（$flag、布尔字面量等）' },
+  loop: { kind: 'loop', label: '循环', icon: '循', hint: '按次数执行子流程；省略 times 表示无限循环（体内需有 break）' },
   break: { kind: 'break', label: '跳出循环', icon: '跳', hint: '跳出最近一层循环，仅能放在 loop 子流程内' },
-  call: { kind: 'call', label: '调用脚本', icon: '调', hint: '调用同分区 yaml/ 下的另一个脚本（具名 args）' },
-  func: { kind: 'func', label: '调用函数', icon: '函', hint: '调用同分区 func/ 的函数（具名 args，返回布尔走 then/else）' },
-  throw: { kind: 'throw', label: '抛出错误', icon: '抛', hint: '结束整个运行（含调用链），原因可空' },
-  return: { kind: 'return', label: '返回布尔值', icon: '返', hint: '仅函数体内合法；提前返回布尔值' },
+  call: { kind: 'call', label: '调用脚本/函数', icon: '调', hint: '调用可调用资源：script:<资源id> 或 function:<文件短路径>/<函数名>，with 传参、save 存返回值' },
+  invoke: { kind: 'invoke', label: '调用能力', icon: '能', hint: '调用宿主能力（如 vision.match / input.tap），with 传参、save 存结果' },
+  throw: { kind: 'throw', label: '抛出错误', icon: '抛', hint: '结束整个运行（含调用链），原因可为表达式' },
+  return: { kind: 'return', label: '返回值', icon: '返', hint: '仅函数体内合法；返回任意值供 call 的 save 接收' },
+  find: { kind: 'find', label: '等待模板', icon: '找', hint: '轮询等待模板出现；命中执行 then（配合 $match.center 或 save 引用），超时走 else；verify 可二次验证' },
+  match_first: { kind: 'match_first', label: '多模板匹配', icon: '匹', hint: '按序检测候选模板，首个命中候选执行自己的 steps；全未命中走 else' },
+  check: { kind: 'check', label: '检查模板', icon: '检', hint: '在 timeout 内轮询匹配模板做界面断言（不点击），超时抛错结束运行' },
 }
 
-// ---------- 摘要（§9 卡片摘要列） ----------
+// ---------- 摘要 ----------
 
-/** Cell 摘要：引用 → $名；坐标 → x, y；其余原值。 */
-export function cellShort(cell: Cell | null | undefined, type: ParamType): string {
+/** Cell 摘要：引用 → $路径；坐标 → x, y；其余原值。 */
+export function cellShort(cell: Cell | null | undefined, type: string): string {
   if (!cell) return ''
   if (isRefCell(cell)) return `$${cell.ref}`
   if (type === 'coord' && Array.isArray(cell.lit)) return `${cell.lit[0]}, ${cell.lit[1]}`
@@ -63,11 +63,11 @@ export function cellShort(cell: Cell | null | undefined, type: ParamType): strin
 /** 卡片收起态摘要；空占位字段按新建未完成态显示基础文案。 */
 export function stepSummary(step: Step): string {
   switch (step.kind) {
-    case 'str_app': return '启动当前应用'
-    case 'cls_app': return '关闭当前应用'
+    case 'app_start': return step.package ? `启动应用 ${cellShort(step.package, 'expr')}` : '启动当前应用'
+    case 'app_stop': return step.package ? `关闭应用 ${cellShort(step.package, 'expr')}` : '关闭当前应用'
     case 'tap': return `点击坐标 ${cellShort(step.at, 'coord') || '?, ?'}`
-    case 'swipe': return `从 ${cellShort(step.from, 'coord') || '?'} 滑到 ${cellShort(step.to, 'coord') || '?'} · ${cellShort(step.time, 'time') || '?'}`
-    case 'key': return `按键 ${cellShort(step.key, 'key') || '?'}`
+    case 'swipe': return `从 ${cellShort(step.from, 'coord') || '?'} 滑到 ${cellShort(step.to, 'coord') || '?'} · ${cellShort(step.duration, 'time') || '?'}`
+    case 'key': return `按键 ${cellShort(step.key, 'key') || '?'}${step.action && step.action !== 'press' ? `（${step.action}）` : ''}`
     case 'text': {
       const v = cellShort(step.value, 'text')
       return v ? `输入文本 ${v}` : '输入文本'
@@ -77,32 +77,29 @@ export function stepSummary(step: Step): string {
       return v ? `记录日志 ${v}` : '记录日志'
     }
     case 'wait': {
-      const base = cellShort(step.duration, 'time') || '?'
-      return step.duration_max ? `随机等待 ${base}～${cellShort(step.duration_max, 'time')}` : `等待 ${base}`
+      const base = cellShort(step.min, 'time') || '?'
+      return step.max ? `随机等待 ${base}～${cellShort(step.max, 'time')}` : `等待 ${base}`
     }
-    case 'find': return `等待并点击 ${cellShort(step.template, 'tmpl') || '（未选模板）'}`
-    case 'match': {
-      const clicks = step.candidates.filter((c) => c.click).length
-      return `按顺序匹配 ${step.candidates.length} 个模板${clicks > 0 ? ` · ${clicks} 处命中点击` : ''}`
-    }
-    case 'check': {
-      const t = cellShort(step.template, 'tmpl')
-      return `检查 ${t || '（未选模板）'}${step.throw ? `：未命中则 ${step.throw}` : ''}`
-    }
-    case 'color': {
-      const clicks = step.expect.filter((e) => e.click).length
-      return `在 ${cellShort(step.at, 'coord') || '?, ?'} 判断 ${step.expect.length} 种颜色${clicks > 0 ? ` · ${clicks} 处命中点击` : ''}`
-    }
+    case 'set': return `设置 ${step.name || '（未命名）'} = ${cellShort(step.value, 'expr') || '?'}`
     case 'if': {
       const c = step.cond
-      return `如果 ${isRefCell(c) ? c.ref : c.lit === true ? 'true' : 'false'}`
+      return `如果 ${isRefCell(c) ? `$${c.ref}` : String(c.lit ?? '?')}`
     }
-    case 'loop': return step.times === 0 ? '无限循环' : `循环 ${step.times} 次`
+    case 'loop': return step.times === null ? '无限循环' : `循环 ${cellShort(step.times, 'number')} 次`
     case 'break': return '跳出循环'
-    case 'call': return `调用脚本 ${step.target || '（未填目标）'}`
-    case 'func': return `调用函数 ${step.target || '（未填目标）'}`
-    case 'throw': return step.message ? `终止：${step.message}` : '终止'
-    case 'return': return `返回 ${cellShort(step.value, 'bool') || '?'}`
+    case 'call': return `调用 ${step.target || '（未填目标）'}`
+    case 'invoke': return `调用能力 ${step.capability || '（未填能力）'}`
+    case 'throw': return `终止：${cellShort(step.message, 'expr') || '（无原因）'}`
+    case 'return': return `返回 ${cellShort(step.value, 'expr') || '?'}`
+    case 'find': {
+      const t = cellShort(step.template, 'tmpl')
+      return `等待 ${t || '（未选模板）'} 并执行命中后步骤`
+    }
+    case 'match_first': return `按顺序匹配 ${step.candidates.length} 个模板（首个命中获胜）`
+    case 'check': {
+      const t = cellShort(step.template, 'tmpl')
+      return `检查 ${t || '（未选模板）'}`
+    }
   }
 }
 
@@ -138,7 +135,7 @@ export function basePathOfContainer(containerPath: Path): string {
   return out
 }
 
-/** 容器路径 → 面包屑节点链（含根层；无效路径返回根节点兜底）。 */
+/** 容器路径 → 面包屑节点链（含根层；无效路径返回已收集部分 + 根兜底）。 */
 export function breadcrumbForContainer(model: Parameters<typeof resolveStep>[0], containerPath: Path): BreadcrumbNode[] {
   const isFn = 'functions' in model
   const nodes: BreadcrumbNode[] = []
@@ -182,7 +179,7 @@ export function breadcrumbForContainer(model: Parameters<typeof resolveStep>[0],
 /**
  * validation/服务端 step_path 字符串 → 命令路径。
  * 支持：steps[0]、steps[0].then[1]、steps[0].candidates[1].steps[0]、login.steps[2]、login.params[1]。
- * params[N] / config / yaml 等非步骤路径返回 null；candidates 结尾返回容器路径（步骤定位需再 resolve）。
+ * params[N] / defaults / yaml 等非步骤路径返回 null；candidates 结尾返回容器路径（步骤定位需再 resolve）。
  */
 export function parseStepPath(stepPath: string): Path | null {
   if (!stepPath) return null

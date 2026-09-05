@@ -10,7 +10,7 @@ import { setupScript, setupFunctions } from './component_helpers'
  * 选择后经工厂 + CommandStack 插入到锚点。
  */
 
-const YAML = 'steps:\n  - log: a\n  - log: b\n  - log: c\n'
+const YAML = 'version: 3\nsteps:\n  - log: a\n  - log: b\n  - log: c\n'
 
 function mountPanel({ context = 'script', anchor = null } = {}) {
   const created = setupScript(YAML)
@@ -30,29 +30,29 @@ describe('AddStepPanel：分组菜单', () => {
 
   it('script 上下文隐藏 return（18 项）；function 上下文可见', () => {
     const { wrapper } = mountPanel({ context: 'script' })
-    expect(wrapper.text()).not.toContain('返回布尔值')
+    expect(wrapper.text()).not.toContain('返回值')
     expect(wrapper.find('select[aria-label="选择步骤类型"]').exists()).toBe(false)
     expect(wrapper.findAll('.step-menu-item')).toHaveLength(18)
     const fn = setupFunctions('login:\n  steps:\n    - log: x\n')
     const w2 = mount(AddStepPanel, {
       props: { context: 'function', stack: fn.stack, anchor: { containerPath: ['functions', 'login', 'steps'], index: 1 } },
     })
-    expect(w2.text()).toContain('返回布尔值')
+    expect(w2.text()).toContain('返回值')
     expect(w2.findAll('.step-menu-item')).toHaveLength(19)
   })
 
   it('点击步骤菜单项后立即插入', async () => {
     const { wrapper, model } = mountPanel()
-    await wrapper.find('button[data-kind="color"]').trigger('click')
-    expect(model.steps.at(-1).kind).toBe('color')
+    await wrapper.find('button[data-kind="set"]').trigger('click')
+    expect(model.steps.at(-1).kind).toBe('set')
   })
 })
 
 describe('AddStepPanel：插入位置（经工厂 + CommandStack）', () => {
   it('锚点 index=1 → 插到第 2 位 + undo 移除', async () => {
     const { wrapper, model, stack } = mountPanel({ anchor: { containerPath: ['steps'], index: 1 } })
-    await wrapper.find('button[data-kind="str_app"]').trigger('click')
-    expect(model.steps.map((s) => s.kind)).toEqual(['log', 'str_app', 'log', 'log'])
+    await wrapper.find('button[data-kind="app_start"]').trigger('click')
+    expect(model.steps.map((s) => s.kind)).toEqual(['log', 'app_start', 'log', 'log'])
     expect(wrapper.emitted('inserted')[0]).toEqual([model.steps[1].uuid])
     stack.undo()
     expect(model.steps).toHaveLength(3)
@@ -65,13 +65,13 @@ describe('AddStepPanel：插入位置（经工厂 + CommandStack）', () => {
     const wrapper = mount(AddStepPanel, {
       props: { context: 'script', stack: created.stack, anchor },
     })
-    await wrapper.find('button[data-kind="str_app"]').trigger('click')
-    expect(created.model.steps[2].kind).toBe('str_app')
+    await wrapper.find('button[data-kind="app_start"]').trigger('click')
+    expect(created.model.steps[2].kind).toBe('app_start')
   })
 
   it('锚点 = 末尾', async () => {
     const { wrapper, model } = mountPanel()
-    await wrapper.find('button[data-kind="str_app"]').trigger('click')
-    expect(model.steps[model.steps.length - 1].kind).toBe('str_app')
+    await wrapper.find('button[data-kind="app_start"]').trigger('click')
+    expect(model.steps[model.steps.length - 1].kind).toBe('app_start')
   })
 })

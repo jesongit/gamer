@@ -18,20 +18,23 @@ import { runConflicts, scriptsData, templatesData, devicesData, tasksData } from
 const read = (p) => readFileSync(join(process.cwd(), 'src', p), 'utf8')
 
 const SCRIPT_YAML = [
+  'version: 3',
   'params:',
   "  - 'bool:enable:开关:true'",
   "  - 'time:timeout:最长等待:30s'",
-  'config:',
-  '  interval: 500ms',
+  'defaults:',
+  '  vision:',
+  '    threshold: 0.85',
   'steps:',
   '  - log: hi',
 ].join('\n')
 
 const TMPL_SCRIPT_YAML = [
+  'version: 3',
   'params:',
   "  - 'tmpl:account:账号模板'",
   'steps:',
-  '  - find: $account',
+  '  - log: hi',
 ].join('\n')
 
 const SCRIPTS = [

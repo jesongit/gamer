@@ -34,7 +34,7 @@
       <div v-if="isActive(decl.name)" class="pf-editor">
         <CellEditor
           :cell="{ lit: values[decl.name] }"
-          :type="decl.type"
+          :type="cellType(decl.type)"
           :allow-ref="false"
           :label="decl.name"
           :templates="templates"
@@ -72,6 +72,20 @@ import {
   type ArgFieldError,
 } from '../params'
 import CellEditor from './CellEditor.vue'
+
+/** 参数类型 → CellEditor 控件类型（canonical 五类 + 历史别名）。 */
+function cellType(type: string): string {
+  switch (type) {
+    case 'number': case 'integer': case 'float': case 'int': return 'number'
+    case 'boolean': case 'bool': return 'bool'
+    case 'tmpl': return 'tmpl'
+    case 'key': return 'key'
+    case 'coord': return 'coord'
+    case 'color': return 'text'
+    case 'time': return 'time'
+    default: return 'text' // string/enum/text
+  }
+}
 
 const props = defineProps({
   params: { type: Array as PropType<ParamDecl[]>, required: true },
@@ -112,7 +126,7 @@ function rebuild(): void {
       active[decl.name] = true
       values[decl.name] = init !== undefined
         ? cloneArg(init)
-        : cloneArg(props.suggestions?.[decl.name] ?? ARG_DEFAULT_LITERALS[decl.type])
+        : cloneArg(props.suggestions?.[decl.name] ?? ARG_DEFAULT_LITERALS[decl.type] ?? '')
     }
   }
   emitChange()

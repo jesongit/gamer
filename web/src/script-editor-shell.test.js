@@ -12,12 +12,14 @@ import { stripUuids } from './script-editor/__tests__/helpers'
  * 重载/覆盖回调即本文件断言的 conflict/reload/overwrite 契约。
  */
 
-const SCRIPT_YAML = `steps:
+const SCRIPT_YAML = `version: 3
+steps:
   - log: 第一
   - tap: [0.5, 0.5]
-  - find: a.png
-    then:
-      - log: 命中
+  - find:
+      template: a.png
+      then:
+        - log: 命中
 `
 
 const FN_YAML = `login:
@@ -74,7 +76,7 @@ describe('useScriptEditorShell：保存 409 冲突（SaveConflictModal 契约）
   async function loadAndEdit(api) {
     const shell = useScriptEditorShell({ api })
     await shell.loadScript('com.demo/main.yaml')
-    shell.insertStep(createStep('wait', { duration: lit('2s') }), '插入等待')
+    shell.insertStep(createStep('wait', { min: lit('2s') }), '插入等待')
     expect(shell.dirty).toBe(true)
     return shell
   }
@@ -143,22 +145,23 @@ describe('useScriptEditorShell：函数库编辑（文件 → FunctionLibraryMod
 
     // 函数级 params：insert_param 携带 ['functions', 'login', 'params']
     const path = ['functions', 'login', 'params']
-    expect(shell.stack.apply({ type: 'insert_param', path, index: 1, decl: { type: 'text', name: 'tag', remark: '', default: null } }, '添加函数参数')).toBe(true)
+    expect(shell.stack.apply({ type: 'insert_param', path, index: 1, decl: { type: 'string', name: 'tag', remark: '', default: null, rawForm: false } }, '添加函数参数')).toBe(true)
     // 函数体插步
-    expect(shell.stack.apply({ type: 'insert_step', path: ['functions', 'login', 'steps'], index: 1, step: createStep('log', { message: lit('完成') }) }, '插入日志')).toBe(true)
+    expect(shell.stack.apply({ type: 'insert_step', path: ['functions', 'login', 'steps'], index: 1, step: createStep('log', { message: lit('完成'), level: null }) }, '插入日志')).toBe(true)
 
     const yaml = serialize(shell.model)
     const reparsed = parseFunctionLibrary(yaml, { file: 'common' })
     expect(reparsed.diagnostics).toEqual([])
     expect(stripUuids(JSON.parse(JSON.stringify(reparsed.model)))).toEqual(stripUuids(JSON.parse(JSON.stringify(shell.model))))
-    expect(yaml).toContain('text:tag:')
+    expect(yaml).toContain('name: tag')
+    expect(yaml).toContain('type: string')
   })
 
   it('函数库保存走 updateFunction（覆盖更新，带 expected_version）', async () => {
     const { api, calls } = makeApi({ fnConflict: false })
     const shell = useScriptEditorShell({ api })
     await shell.loadFunctionFile('com.demo/common.yaml')
-    shell.stack.apply({ type: 'insert_param', path: ['functions', 'login', 'params'], index: 0, decl: { type: 'bool', name: 'dry', remark: '干跑', default: false } }, '添加函数参数')
+    shell.stack.apply({ type: 'insert_param', path: ['functions', 'login', 'params'], index: 0, decl: { type: 'boolean', name: 'dry', remark: '干跑', default: false, rawForm: false } }, '添加函数参数')
     const r = await shell.save()
     expect(r.ok).toBe(true)
     expect(calls.updateFunction).toHaveLength(1)

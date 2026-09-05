@@ -135,34 +135,39 @@ export function useConsoleScriptRunner({
   // ---------- call/func 目标候选与参数解析（编辑态画布下拉 + args 自动生成，同独立脚本页） ----------
   // func 参数直接从 fnLib.list 的文件内容解析（按内容版本 memo）；call 拉脚本内容按 id 缓存。
 
-  const callScriptOptions = computed(() => {
+  // v3 call 目标 = 命名空间串（script:<资源id> / function:<文件短路径>/<函数名>），
+  // 候选与参数解析按 target 串寻址；正在编辑的脚本自身不进候选（自引用排除）。
+  const callTargets = computed(() => {
     if (!activePkg.value) return []
-    return scriptsData.value
+    const scriptOpts = scriptsData.value
       .filter(s => s.package === activePkg.value && !(s.id === scriptShell.resourceId && scriptShell.kind === 'script'))
-      .map(s => ({ target: s.name, label: String(s.name || '').replace(/\.(ya?ml)$/i, '') }))
-  })
-
-  /** func 候选文件：正在编辑的函数库文件以画布实时模型为准（未保存的新增/改名函数立即可选），
-   *  其余文件用磁盘顶层函数名清单（fnLib 列表快照）。 */
-  const funcFileOptions = computed(() => {
+      .map(s => {
+        const path = String(s.name || '').replace(/\.(ya?ml)$/i, '')
+        return { target: `script:${path}`, label: path }
+      })
     const live = scriptShell.kind === 'function_library' && scriptShell.hasModel && Array.isArray(scriptShell.model.functions)
       ? scriptShell.model.functions.map(f => f.name)
       : null
-    return fnLib.list.map(f => ({
-      file: f.file,
-      functions: live && f.id === scriptShell.resourceId ? live : (Array.isArray(f.functions) ? f.functions : []),
-    }))
+    const fnOpts = fnLib.list.flatMap(f => {
+      const names = live && f.id === scriptShell.resourceId ? live : (Array.isArray(f.functions) ? f.functions : [])
+      return names.map(n => ({ target: `function:${f.file}/${n}`, label: `${f.file}/${n}` }))
+    })
+    return [...scriptOpts, ...fnOpts]
   })
 
-  const callParamsCache = new Map() // call 目标（脚本名/脚本 id）→ ParamDecl[] | null
+  const callParamsCache = new Map() // call 目标（命名空间串/脚本 id）→ ParamDecl[] | null
   const fnParamsMemo = new Map() // `<file>@<内容版本>` → Map(函数名 → ParamDecl[])
 
+  /** target = 'function:<文件短路径>/<函数名>'（文件短路径可含目录，按最后一个 / 分割）。 */
   function funcParamsFor(target) {
     const s = String(target || '')
-    const i = s.indexOf('/')
-    if (i <= 0 || i === s.length - 1) return null
-    const file = s.slice(0, i)
-    const fn = s.slice(i + 1)
+    const prefix = 'function:'
+    if (!s.startsWith(prefix)) return null
+    const rest = s.slice(prefix.length)
+    const i = rest.lastIndexOf('/')
+    if (i <= 0 || i === rest.length - 1) return null
+    const file = rest.slice(0, i)
+    const fn = rest.slice(i + 1)
     const entry = fnLib.list.find(f => f.file === file)
     if (!entry || !entry.content) return null
     const memoKey = `${file}@${entry.version || entry.content.length}`
@@ -175,13 +180,15 @@ export function useConsoleScriptRunner({
     return byName.has(fn) ? byName.get(fn) : null
   }
 
-  function resolveTargetParamsSync(kind, target) {
-    if (!target) return null
-    if (kind === 'func') return funcParamsFor(target)
+  /** target = 'script:<资源id>'（分区相对路径去扩展名）。 */
+  function scriptParamsFor(target) {
+    if (!target.startsWith('script:')) return null
+    const path = target.slice('script:'.length)
     if (callParamsCache.has(target)) return callParamsCache.get(target)
     // 脚本列表已带 content；优先同步解析，保证已有 call 步骤首次渲染时
     // 就能按目标声明选择正确的 CellEditor 类型，不会先退化成 text。
-    const script = scriptsData.value.find(x => x.package === activePkg.value && x.name === target)
+    const script = scriptsData.value.find(x => x.package === activePkg.value
+      && String(x.name || '').replace(/\.(ya?ml)$/i, '') === path)
     if (!script?.content) return null
     try {
       const params = parseScript(script.content).model?.params || []
@@ -192,11 +199,18 @@ export function useConsoleScriptRunner({
     }
   }
 
-  async function resolveTargetParams(kind, target) {
+  function resolveTargetParamsSync(target) {
     if (!target) return null
-    if (kind === 'func') return funcParamsFor(target)
+    if (target.startsWith('function:')) return funcParamsFor(target)
+    return scriptParamsFor(target)
+  }
+
+  async function resolveTargetParams(target) {
+    if (!target || target.startsWith('function:')) return resolveTargetParamsSync(target)
     if (callParamsCache.has(target)) return callParamsCache.get(target)
-    const script = scriptsData.value.find(x => x.package === activePkg.value && x.name === target)
+    const path = target.slice('script:'.length)
+    const script = scriptsData.value.find(x => x.package === activePkg.value
+      && String(x.name || '').replace(/\.(ya?ml)$/i, '') === path)
     if (!script) return null
     try {
       const full = await api.getScript(script.id)
@@ -213,14 +227,13 @@ export function useConsoleScriptRunner({
   function clearCallParamsCache() {
     callParamsCache.clear()
   }
-  function resolveTargetSync(kind, target) {
-    const params = resolveTargetParamsSync(kind, target)
+  function resolveTargetSync(target) {
+    const params = resolveTargetParamsSync(target)
     return params ? { params } : null
   }
 
   provide(SE_TARGET_OPTIONS, reactive({
-    callScripts: callScriptOptions,
-    funcFiles: funcFileOptions,
+    targets: callTargets,
     resolveParams: resolveTargetParams,
     resolveParamsSync: resolveTargetParamsSync,
   }))
@@ -649,7 +662,9 @@ export function useConsoleScriptRunner({
     const s = scripts.value.find(x => x.id === selScript.value)
     if (!s) return null
     try {
-      return parseScript(s.content ?? '').model
+      // v2 脚本（缺 version: 3）带版本诊断 → 不给摘要（编辑器只读写 v3，提示升级）
+      const parsed = parseScript(s.content ?? '')
+      return parsed.diagnostics.length === 0 ? parsed.model : null
     } catch {
       return null
     }
@@ -668,12 +683,13 @@ export function useConsoleScriptRunner({
 
   // ---------- 结构化跳转（plan §10「调用文本链接预览」行：正则扫描源码 → 结构化引用） ----------
 
-  /** call 步骤目标（短名或含扩展名）→ 同分区脚本 id（缺扩展名自动补全，与引擎一致） */
+  /** call 步骤目标（v3 命名空间串）→ 同分区资源 id。script: 缺扩展名自动补全；function: 走 fnLib。 */
   function resolveCallTargetId(target) {
     const raw = String(target || '').trim()
-    if (!raw) return null
-    const names = [raw]
-    if (!/\.(ya?ml)$/i.test(raw)) names.push(`${raw}.yaml`, `${raw}.yml`)
+    if (raw.startsWith('function:')) return fnLib.resolveTargetId(raw)
+    if (!raw.startsWith('script:')) return null
+    const path = raw.slice('script:'.length)
+    const names = [`${path}.yaml`, `${path}.yml`, path]
     for (const n of names) {
       const hit = scripts.value.find(x => x.package === activePkg.value && x.name === n)
       if (hit) return hit.id
@@ -690,27 +706,28 @@ export function useConsoleScriptRunner({
     resourcePreview.error = ''
   }
 
-  /** 摘要 call/func 卡片「↗ 子脚本/函数」：只读弹窗展示目标的函数/步骤列表，
-   *  不切换当前资源，也不进入编辑器。func 目标 = `<文件短路径>/<函数名>`。 */
-  async function openScriptTarget({ kind, target }) {
-    const id = kind === 'call' ? resolveCallTargetId(target) : fnLib.resolveTargetId(target)
+  /** 摘要 call 卡片「↗ 子脚本/函数」：只读弹窗展示目标的函数/步骤列表，
+   *  不切换当前资源，也不进入编辑器。目标 namespace 决定资源类型。 */
+  async function openScriptTarget({ target }) {
+    const isFn = String(target || '').startsWith('function:')
+    const id = resolveCallTargetId(target)
     if (!id) return toast(`跳转目标不存在：${target}`, 'warn')
 
-    const entry = kind === 'call'
-      ? scripts.value.find(s => s.id === id)
-      : fnLib.list.find(f => f.id === id)
+    const entry = isFn
+      ? fnLib.list.find(f => f.id === id)
+      : scripts.value.find(s => s.id === id)
     if (!entry) return toast(`跳转目标不存在：${target}`, 'warn')
 
     resourcePreview.open = true
-    resourcePreview.kind = kind === 'call' ? 'script' : 'function_library'
-    resourcePreview.title = kind === 'call' ? `子脚本：${entry.name || target}` : `函数：${target}`
+    resourcePreview.kind = isFn ? 'function_library' : 'script'
+    resourcePreview.title = isFn ? `函数：${target}` : `子脚本：${entry.name || target}`
     resourcePreview.resource = entry.id || target
     resourcePreview.model = null
     resourcePreview.error = ''
     try {
-      const parsed = kind === 'call'
-        ? parseScript(entry.content ?? '')
-        : fnLib.parseFunctionFile(entry.content ?? '', entry.file || '')
+      const parsed = isFn
+        ? fnLib.parseFunctionFile(entry.content ?? '', entry.file || '')
+        : parseScript(entry.content ?? '')
       if (!parsed?.model) throw new Error('资源内容为空或无法解析')
       resourcePreview.model = parsed.model
       if (parsed.diagnostics?.length) {

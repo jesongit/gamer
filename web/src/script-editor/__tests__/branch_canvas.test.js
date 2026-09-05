@@ -13,31 +13,36 @@ import { expandCard, setupScript, setupFunctions } from './component_helpers'
  */
 
 const NESTED_YAML = [
+  'version: 3',
   'steps:',
   '  - log: top1',
-  '  - if: true',
-  '    then:',
-  '    - loop:',
-  '        times: 2',
-  '        steps:',
-  '        - log: inner',
-  '    else:',
-  '    - log: no',
+  '  - if:',
+  '      cond: true',
+  '      then:',
+  '        - loop:',
+  '            times: 2',
+  '            steps:',
+  '              - log: inner',
+  '      else:',
+  '        - log: no',
 ].join('\n')
 
 const DEEP_NESTED_YAML = [
+  'version: 3',
   'steps:',
-  '  - if: true',
-  '    then:',
-  '    - loop:',
-  '        times: 2',
-  '        steps:',
-  '        - if: true',
-  '          then:',
-  '          - loop:',
-  '              times: 2',
-  '              steps:',
-  '              - log: deep',
+  '  - if:',
+  '      cond: true',
+  '      then:',
+  '        - loop:',
+  '            times: 2',
+  '            steps:',
+  '              - if:',
+  '                  cond: true',
+  '                  then:',
+  '                    - loop:',
+  '                        times: 2',
+  '                        steps:',
+  '                          - log: deep',
 ].join('\n')
 
 function mountBranch({ yaml = NESTED_YAML, depth = 0, containerPath = ['steps'], basePath = 'steps', label = '主流程', expandedUuids = null } = {}) {
@@ -104,8 +109,8 @@ describe('BranchContainer：嵌套与专注分界', () => {
   })
 
   it('空流程占位 + 容器级添加按钮 emit add-here', async () => {
-    const { wrapper } = mountBranch({ yaml: 'steps:\n  - if: true\n    then: []\n    else: []' })
-    const created = setupScript('steps:\n  - if: true\n    then: []\n    else: []')
+    const { wrapper } = mountBranch({ yaml: 'version: 3\nsteps:\n  - if: {cond: true, then: [], else: []}' })
+    const created = setupScript('version: 3\nsteps:\n  - if: {cond: true, then: [], else: []}')
     const ifStep = created.model.steps[0]
     const w = mount(BranchContainer, {
       props: {
@@ -145,19 +150,19 @@ describe('StepCanvas：选中/锚点/添加', () => {
   })
 
   it('锚点提示：无选中 = 末尾；选中第 1 卡 = 第 1 步之后', async () => {
-    const { wrapper, model } = mountCanvas({ yaml: 'steps:\n  - log: a\n  - log: b\n' })
+    const { wrapper, model } = mountCanvas({ yaml: 'version: 3\nsteps:\n  - log: a\n  - log: b\n' })
     expect(wrapper.find('.anchor-hint').text()).toBe('下一条将插入：主流程 / 末尾')
     await wrapper.find(`[data-step-uuid="${model.steps[0].uuid}"]`).trigger('click')
     expect(wrapper.find('.anchor-hint').text()).toBe('下一条将插入：主流程 / 第 1 步之后')
   })
 
   it('添加入口：选中卡后插入新步骤并自动选中', async () => {
-    const { wrapper, model } = mountCanvas({ yaml: 'steps:\n  - log: a\n' })
+    const { wrapper, model } = mountCanvas({ yaml: 'version: 3\nsteps:\n  - log: a\n' })
     await wrapper.find(`[data-step-uuid="${model.steps[0].uuid}"]`).trigger('click')
     await wrapper.find('button.add-btn').trigger('click')
     expect(wrapper.find('.add-step-panel').exists()).toBe(true)
-    await wrapper.find('button[data-kind="str_app"]').trigger('click') // 启动应用
-    expect(model.steps.map((s) => s.kind)).toEqual(['log', 'str_app'])
+    await wrapper.find('button[data-kind="app_start"]').trigger('click') // 启动应用
+    expect(model.steps.map((s) => s.kind)).toEqual(['log', 'app_start'])
     expect(wrapper.emitted('select').at(-1)).toEqual([model.steps[1].uuid])
     expect(wrapper.find('.add-step-panel').exists()).toBe(false)
   })
@@ -309,10 +314,10 @@ describe('StepCanvas：专注视图与面包屑', () => {
 describe('StepCanvas：诊断定位联动（showErrorPanel）', () => {
   it('顶层步骤定位：展开 + 选中 + 瞬态高亮', async () => {
     const { wrapper, model } = mountCanvas({
-      yaml: 'steps:\n  - log: a\n  - tap: [2, 2]\n',
+      yaml: 'version: 3\nsteps:\n  - log: a\n  - tap: [2, 2]\n',
       props: {
         showErrorPanel: true,
-        diagnostics: [{ code: 'step.coord.range', step_path: 'steps[1]', field: 'at', message: '坐标超出 0~1' }],
+        diagnostics: [{ code: 'yaml.v3.coord.range', step_path: 'steps[1]', field: 'at', message: '坐标超出 0~1' }],
       },
     })
     const row = wrapper.findAll('.err-row').find((r) => r.text().includes('steps[1]'))
@@ -328,7 +333,7 @@ describe('StepCanvas：诊断定位联动（showErrorPanel）', () => {
       props: {
         showErrorPanel: true,
         // loop 循环体内的步骤（嵌套 2 层 → 需专注）
-        diagnostics: [{ code: 'step.field.missing', step_path: 'steps[1].then[0].steps[0]', field: '', message: 'x' }],
+        diagnostics: [{ code: 'yaml.v3.field.missing', step_path: 'steps[1].then[0].steps[0]', field: '', message: 'x' }],
       },
     })
     const row = wrapper.findAll('.err-row').find((r) => r.text().includes('then[0].steps[0]'))
@@ -384,7 +389,7 @@ describe('StepCanvas：函数库上下文', () => {
     expect(wrapper.find('button.fn-rename').text()).toBe('重命名') // 确认后回到下拉 + 重命名态
     // 添加步骤插入当前函数末尾
     await wrapper.find('button.add-btn').trigger('click')
-    await wrapper.find('button[data-kind="str_app"]').trigger('click')
+    await wrapper.find('button[data-kind="app_start"]').trigger('click')
     expect(created.model.functions[1].steps).toHaveLength(2)
     created.stack.undo() // 撤销插入步骤
     created.stack.undo() // 撤销改名
@@ -440,10 +445,10 @@ describe('StepCanvas：函数库上下文', () => {
   })
 
   it('reactive 模型下编辑 + undo/redo 正常（组件层接线形态）', async () => {
-    const created = setupScript('steps:\n  - log: a\n')
+    const created = setupScript('version: 3\nsteps:\n  - log: a\n')
     const wrapper = mount(StepCanvas, { props: { model: created.model, stack: created.stack } })
     await wrapper.find('button.add-btn').trigger('click')
-    await wrapper.find('button[data-kind="str_app"]').trigger('click')
+    await wrapper.find('button[data-kind="app_start"]').trigger('click')
     expect(created.model.steps).toHaveLength(2)
     created.stack.undo()
     expect(created.model.steps).toHaveLength(1)

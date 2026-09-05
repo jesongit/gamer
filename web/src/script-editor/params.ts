@@ -8,15 +8,16 @@
  * - 覆盖建议缓存：最近一次显式输入存 localStorage（key 按脚本/函数文件 id），
  *   仅作显式覆盖建议预填，绝不遮蔽当前声明默认值。
  */
-import type { ParamDecl, ParamLiteral, ParamType } from './model'
+import type { ParamDecl, ParamLiteral } from './model'
 import { parseFunctionLibrary, parseScript } from './codec'
-import { checkCellLiteral, normalizeParamType } from './schema'
+import { checkCellLiteral } from './schema'
 
 // ---------- 提取 ----------
 
 /**
- * YAML v3 源码 → 参数声明列表（类型规范化为 canonical 五类，契约 §7）。
- * 脚本取 Program.params；函数库取指定函数（缺省第一个）的 params。
+ * YAML v3 源码 → 参数声明列表。脚本取 Program.params；函数库取指定函数（缺省第一个）的 params。
+ * type 保留声明原文（v2 别名 ty 名如 int/tmpl 保真，控件与标签层各自映射）；
+ * 规范五类映射经 schema.normalizeParamType（参数 schema API 接入时使用）。
  * 解析失败/无声明/函数不存在 → 空数组（调用方按「无参数直接运行」处理）。
  */
 export function extractParams(
@@ -29,30 +30,25 @@ export function extractParams(
       const model = parseFunctionLibrary(yamlText ?? '').model
       const fns = Array.isArray(model.functions) ? model.functions : []
       const fn = fnName ? fns.find((f) => f.name === fnName) : fns[0]
-      return fn ? normalizeDecls(fn.params) : []
+      return fn && Array.isArray(fn.params) ? fn.params.map((d) => ({ ...d, rawForm: false })) : []
     }
     const model = parseScript(yamlText ?? '').model
-    return normalizeDecls(Array.isArray(model.params) ? model.params : [])
+    return Array.isArray(model.params)
+      ? model.params.map((d) => ({ ...d, rawForm: false }))
+      : []
   } catch {
     return []
   }
 }
 
-/** rawForm 参数转映射形态（类型规范化；default 原样保留）。 */
-function normalizeDecls(decls: ParamDecl[]): ParamDecl[] {
-  return decls.map((d) => ({
-    type: normalizeParamType(d.type),
-    name: d.name,
-    remark: d.remark,
-    default: d.default,
-    rawForm: false,
-  }))
-}
-
 // ---------- 展示 ----------
 
-export const ARG_TYPE_LABELS: Record<ParamType, string> = {
+export const ARG_TYPE_LABELS: Record<string, string> = {
+  // canonical 五类（契约 §7）
   string: '文本', number: '数字', integer: '整数', boolean: '布尔', enum: '枚举',
+  // v2 别名 ty 名（rawForm 声明保真展示）
+  text: '文本', tmpl: '模板', coord: '坐标', color: '颜色', time: '时间', key: '按键',
+  bool: '布尔', int: '整数', float: '数字',
 }
 
 /** 字面量 → 短展示串（默认值行 / 摘要 / 对比表共用）；undefined/null → '—'。 */
@@ -69,8 +65,10 @@ export function cloneArg<T>(v: T): T {
 }
 
 /** 必填参数（无默认值）进入覆盖态时的控件初始字面量（与 CellEditor defaultLiteral 同口径）。 */
-export const ARG_DEFAULT_LITERALS: Record<ParamType, ParamLiteral> = {
+export const ARG_DEFAULT_LITERALS: Record<string, ParamLiteral | [number, number]> = {
   string: '', number: 0, integer: 0, boolean: true, enum: '',
+  text: '', tmpl: '', coord: [0.5, 0.5], color: 'ff8800', time: '1s', key: 'BACK',
+  bool: true, int: 0, float: 0,
 }
 
 // ---------- 服务端 400 invalid_args 诊断映射 ----------

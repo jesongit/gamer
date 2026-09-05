@@ -27,7 +27,7 @@
         {{ ownErrors.length }}
       </span>
       <span class="head-actions">
-        <!-- 函数测试入口（阶段 5）：仅宿主开启 testFrom 时显示（函数库页签的函数体顶层卡片） -->
+        <!-- 函数测试入口：仅宿主开启 testFrom 时显示（函数库页签的函数体顶层卡片） -->
         <button
           v-if="testFrom" type="button" class="mini-btn test-from"
           title="从此步骤测试函数"
@@ -47,13 +47,27 @@
 
     <!-- 展开态：按类型的强类型控件（不提供任意键值编辑器） -->
     <div v-if="expanded" class="card-body" @click.stop>
-      <div v-if="step.kind === 'str_app' || step.kind === 'cls_app'" class="field-hint">{{ meta.hint }}</div>
+      <div v-if="step.kind === 'app_start' || step.kind === 'app_stop'" class="field-hint">{{ meta.hint }}</div>
+      <template v-if="step.kind === 'app_start' || step.kind === 'app_stop'">
+        <div class="field-row">
+          <label class="field-check">
+            <input type="checkbox" :checked="step.package !== null" @change="togglePackage(($event.target as HTMLInputElement).checked)" />
+            指定应用包名
+          </label>
+          <CellEditor
+            v-if="step.package" :cell="step.package" type="expr" :params="params"
+            label="应用包名" placeholder="com.example.app 或 $target" :error="fieldError('package')"
+            @change="(c) => updateCell('package', c)"
+          />
+        </div>
+      </template>
 
       <!-- tap -->
       <template v-else-if="step.kind === 'tap'">
         <div class="field-row">
           <span class="field-label">坐标</span>
           <CellEditor :cell="step.at" type="coord" :params="params" label="坐标" :error="fieldError('at')" @change="(c) => updateCell('at', c)" />
+          <span class="field-hint">可切「引用」填 $reward.center 等匹配结果坐标</span>
         </div>
       </template>
 
@@ -69,7 +83,7 @@
         </div>
         <div class="field-row">
           <span class="field-label">时长</span>
-          <CellEditor :cell="step.time" type="time" :params="params" label="时长" :error="fieldError('time')" @change="(c) => updateCell('time', c)" />
+          <CellEditor :cell="step.duration" type="time" :params="params" label="时长" :error="fieldError('duration')" @change="(c) => updateCell('duration', c)" />
         </div>
       </template>
 
@@ -78,6 +92,17 @@
         <div class="field-row">
           <span class="field-label">按键</span>
           <CellEditor :cell="step.key" type="key" :params="params" label="按键" :error="fieldError('key')" @change="(c) => updateCell('key', c)" />
+          <label class="field-check" title="press = 按下并抬起；down/up 用于长按场景">
+            方式
+            <select
+              class="cell-input target-select" :value="step.action ?? 'press'" aria-label="按键方式"
+              @change="setAction(($event.target as HTMLSelectElement).value)"
+            >
+              <option value="press">press</option>
+              <option value="down">down</option>
+              <option value="up">up</option>
+            </select>
+          </label>
         </div>
       </template>
 
@@ -94,6 +119,13 @@
         <div class="field-row">
           <span class="field-label">日志</span>
           <CellEditor :cell="step.message" type="text" :params="params" label="日志内容" multiline :error="fieldError('message')" @change="(c) => updateCell('message', c)" />
+          <select
+            v-if="step.level" class="cell-input target-select" :value="step.level" aria-label="日志级别"
+            @change="setLevel(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="lv in LOG_LEVELS" :key="lv" :value="lv">{{ lv }}</option>
+          </select>
+          <button v-else type="button" class="mini-btn" title="指定级别（缺省 info）" @click.stop="setLevel('info')">+ 级别</button>
         </div>
       </template>
 
@@ -101,14 +133,14 @@
       <template v-else-if="step.kind === 'wait'">
         <div class="field-row">
           <span class="field-label">时长</span>
-          <CellEditor :cell="step.duration" type="time" :params="params" label="时长" :error="fieldError('duration')" @change="(c) => updateCell('duration', c)" />
-          <label class="field-check" title="启用后等待 [时长, 上限] 内的随机值">
-            <input type="checkbox" :checked="step.duration_max !== null" @change="toggleRandom" />
+          <CellEditor :cell="step.min" type="time" :params="params" label="时长" :error="fieldError('min')" @change="(c) => updateCell('min', c)" />
+          <label class="field-check" title="启用后等待 min～max 内的随机值（{min, max}）">
+            <input type="checkbox" :checked="step.max !== null" @change="toggleRandom" />
             随机区间
           </label>
           <CellEditor
-            v-if="step.duration_max" :cell="step.duration_max" type="time" :params="params"
-            label="随机上限" :error="fieldError('duration_max')" @change="(c) => updateCell('duration_max', c)"
+            v-if="step.max" :cell="step.max" type="time" :params="params"
+            label="随机上限" :error="fieldError('max')" @change="(c) => updateCell('max', c)"
           />
         </div>
       </template>
@@ -116,20 +148,10 @@
       <!-- find -->
       <template v-else-if="step.kind === 'find'">
         <div class="field-row">
-          <span class="field-label">主模板</span>
-          <CellEditor :cell="step.template" type="tmpl" :params="params" :templates="templates" label="主模板" :error="fieldError('template')" @change="(c) => updateCell('template', c)" />
-          <label class="field-check" title="点击后等 interval；再重匹配，仍命中补一击">
-            <input type="checkbox" :checked="step.verify" @change="setVerify(($event.target as HTMLInputElement).checked)" />
-            二次确认
-          </label>
-        </div>
-        <div v-for="(b, bi) in step.block" :key="bi" class="field-row">
-          <span class="field-label">障碍 {{ bi + 1 }}</span>
-          <CellEditor :cell="b" type="tmpl" :params="params" :templates="templates" :label="`障碍${bi + 1}`" :error="fieldError(`block[${bi}]`)" @change="(c) => updateBlockAt(bi, c)" />
-          <button type="button" class="mini-btn" title="删除障碍" @click.stop="removeBlock(bi)">✕</button>
+          <span class="field-label">模板</span>
+          <CellEditor :cell="step.template" type="tmpl" :params="params" :templates="templates" label="模板" :error="fieldError('template')" @change="(c) => updateCell('template', c)" />
         </div>
         <div class="field-row">
-          <button type="button" class="mini-btn add" title="添加障碍" @click.stop="addBlock">+ 添加障碍</button>
           <label class="field-check" title="未勾选时引擎默认等待 30min">
             <input type="checkbox" :checked="step.timeout !== null" @change="toggleFindTimeout" />
             等待超时
@@ -139,7 +161,38 @@
             label="超时" :error="fieldError('timeout')" @change="(c) => updateCell('timeout', c)"
           />
           <span v-else class="field-hint" title="未勾选时引擎默认等待 30min">默认 30min</span>
+          <label class="field-check" title="本步匹配置信度覆盖 defaults.vision.threshold">
+            <input type="checkbox" :checked="step.threshold !== null" @change="toggleThreshold('threshold', $event)" />
+            匹配阈值
+          </label>
+          <input
+            v-if="step.threshold !== null" class="cell-input num" type="number" min="0" max="1" step="0.01"
+            :value="step.threshold" aria-label="匹配阈值"
+            @change="setThresholdNum('threshold', ($event.target as HTMLInputElement).value)"
+          />
         </div>
+        <div class="field-row">
+          <label class="field-check" title="把匹配结果 {found, score, center…} 存入变量，后续用 $名字.center 引用">
+            <input type="checkbox" :checked="step.save !== null" @change="toggleSave" />
+            保存结果
+          </label>
+          <input
+            v-if="step.save !== null" class="cell-input" :value="step.save ?? ''" placeholder="变量名，如 reward"
+            aria-label="保存变量名" @change="setSave(($event.target as HTMLInputElement).value)"
+          />
+          <label class="field-check" title="then 执行完后在超时内二次验证模板，失败按未命中处理">
+            <input type="checkbox" :checked="step.verify !== null" @change="toggleVerify" />
+            二次验证
+          </label>
+          <template v-if="step.verify">
+            <CellEditor :cell="step.verify.template" type="tmpl" :params="params" :templates="templates" label="验证模板" :error="fieldError('verify.template')" @change="(c) => updateVerify({ template: c })" />
+            <CellEditor
+              v-if="step.verify.timeout" :cell="step.verify.timeout" type="time" :params="params"
+              label="验证超时" :error="fieldError('verify.timeout')" @change="(c) => updateVerify({ timeout: c })"
+            />
+          </template>
+        </div>
+        <div class="field-hint">命中后用 $match.center 点击命中点；save 后可跨步用 $变量名.center</div>
         <BranchContainer
           :model="model" :stack="stack" :container-path="subPath('then')" :base-path="subBase('then')"
           label="命中后" :depth="depth + 1" :diagnostics="diagnostics" :selected-uuid="selectedUuid"
@@ -151,7 +204,7 @@
         />
         <BranchContainer
           :model="model" :stack="stack" :container-path="subPath('else')" :base-path="subBase('else')"
-          label="未命中" :depth="depth + 1" :diagnostics="diagnostics" :selected-uuid="selectedUuid"
+          label="超时未命中" :depth="depth + 1" :diagnostics="diagnostics" :selected-uuid="selectedUuid"
           :highlight-uuid="highlightUuid"
           :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
           :templates="templates"
@@ -160,21 +213,26 @@
         />
       </template>
 
-      <!-- match -->
-      <template v-else-if="step.kind === 'match'">
-        <div class="field-hint warn">按序首个命中分支获胜；候选可勾选「命中点击」，点中该模板框中心后等待 interval</div>
-        <div v-for="(cand, ci) in step.candidates" :key="ci" class="cand-block" :class="{ 'cell-error': !!fieldError(`candidates[${ci}].template`) || !!fieldError('candidates') }">
+      <!-- match_first -->
+      <template v-else-if="step.kind === 'match_first'">
+        <div class="field-hint warn">按序首个命中分支获胜；命中候选执行自己的步骤组（可用 $match.center）</div>
+        <div v-for="(cand, ci) in step.candidates" :key="ci" class="cand-block" :class="{ 'cell-error': !!fieldError(`candidates[${ci}].template`) }">
           <div class="field-row">
             <span class="field-label">候选 {{ ci + 1 }}</span>
             <CellEditor
               :cell="cand.template" type="tmpl" :params="params" :templates="templates"
-              :label="`候选${ci + 1}`" :error="fieldError(`candidates[${ci}].template`) || fieldError('candidates')"
+              :label="`候选${ci + 1}`" :error="fieldError(`candidates[${ci}].template`)"
               @change="(c) => updateCandidateTemplate(ci, c)"
             />
-            <label class="field-check" title="命中后点击该候选模板匹配框的中心，并等待 interval（find 的点击语义）">
-              <input type="checkbox" :checked="cand.click" :aria-label="`命中点击${ci + 1}`" @change="setCandClick(ci, ($event.target as HTMLInputElement).checked)" />
-              命中点击
+            <label class="field-check" title="本候选举信度覆盖默认阈值">
+              <input type="checkbox" :checked="cand.threshold !== null" @change="toggleCandThreshold(ci, $event)" />
+              阈值
             </label>
+            <input
+              v-if="cand.threshold !== null" class="cell-input num" type="number" min="0" max="1" step="0.01"
+              :value="cand.threshold" :aria-label="`候选${ci + 1}阈值`"
+              @change="setCandThreshold(ci, ($event.target as HTMLInputElement).value)"
+            />
             <button v-if="step.candidates.length > 1" type="button" class="mini-btn" title="删除候选" @click.stop="removeCandidate(ci)">✕</button>
           </div>
           <BranchContainer
@@ -189,15 +247,6 @@
         </div>
         <div class="field-row">
           <button type="button" class="mini-btn add" title="添加候选" @click.stop="addCandidate">+ 添加候选</button>
-          <label class="field-check" title="未配置超时时仅检测一轮：全未命中立即进「都未命中」分支">
-            <input type="checkbox" :checked="step.timeout !== null" @change="toggleMatchTimeout" />
-            轮询超时
-          </label>
-          <CellEditor
-            v-if="step.timeout" :cell="step.timeout" type="time" :params="params"
-            label="超时" :error="fieldError('timeout')" @change="(c) => updateCell('timeout', c)"
-          />
-          <span v-else class="field-hint" title="未配置超时时仅检测一轮：全未命中立即进「都未命中」分支">未配置仅检测一轮</span>
         </div>
         <BranchContainer
           :model="model" :stack="stack" :container-path="subPath('else')" :base-path="subBase('else')"
@@ -218,80 +267,49 @@
             :cell="step.template" type="tmpl" :params="params" :templates="templates"
             label="检查模板" :error="fieldError('template')" @change="(c) => updateCell('template', c)"
           />
-          <span class="field-hint warn">检测期间不点击；超时未命中结束运行</span>
+          <span class="field-hint warn">检测期间不点击；超时未命中抛错结束运行</span>
         </div>
         <div class="field-row">
-          <label class="field-check" title="未配置时默认检测 5s；timeout=0 时只检测首帧">
+          <label class="field-check" title="未配置时引擎默认检测 5s">
             <input type="checkbox" :checked="step.timeout !== null" @change="toggleCheckTimeout" />
             检测超时
           </label>
           <CellEditor
-            v-if="step.timeout" :cell="step.timeout" type="time" :params="params" :allow-zero-time="true"
+            v-if="step.timeout" :cell="step.timeout" type="time" :params="params"
             label="检测超时" :error="fieldError('timeout')" @change="(c) => updateCell('timeout', c)"
           />
           <span v-else class="field-hint" title="未配置时引擎默认检测 5s">默认 5s</span>
-        </div>
-        <div class="field-row">
-          <span class="field-label">未命中提示</span>
-            <input
-            class="cell-input grow" :value="step.throw ?? ''"
-            placeholder="可选，默认“模板名 模板不存在”" aria-label="未命中提示"
-            @change="setThrow(($event.target as HTMLInputElement).value)"
+          <label class="field-check" title="本步匹配置信度覆盖 defaults.vision.threshold">
+            <input type="checkbox" :checked="step.threshold !== null" @change="toggleThreshold('threshold', $event)" />
+            匹配阈值
+          </label>
+          <input
+            v-if="step.threshold !== null" class="cell-input num" type="number" min="0" max="1" step="0.01"
+            :value="step.threshold" aria-label="匹配阈值"
+            @change="setThresholdNum('threshold', ($event.target as HTMLInputElement).value)"
           />
         </div>
       </template>
 
-      <!-- color -->
-      <template v-else-if="step.kind === 'color'">
+      <!-- set -->
+      <template v-else-if="step.kind === 'set'">
         <div class="field-row">
-          <span class="field-label">坐标</span>
-          <CellEditor :cell="step.at" type="coord" :params="params" label="取色坐标" :error="fieldError('at')" @change="(c) => updateCell('at', c)" />
-          <span class="field-hint warn">按序首个命中分支获胜；候选可勾选「命中点击」，点击取样点后等待 interval</span>
-        </div>
-        <div v-for="(exp, ei) in step.expect" :key="ei" class="cand-block" :class="{ 'cell-error': !!fieldError(`expect[${ei}].color`) || !!fieldError('expect') }">
-          <div class="field-row">
-            <span class="field-label">颜色 {{ ei + 1 }}</span>
-            <CellEditor
-              :cell="exp.color" type="color" :params="params" :label="`颜色${ei + 1}`"
-              :error="fieldError(`expect[${ei}].color`) || fieldError('expect')"
-              @change="(c) => updateExpectColor(ei, c)"
-            />
-            <label class="field-check" title="命中后点击取色坐标的取样点，并等待 interval">
-              <input type="checkbox" :checked="exp.click" :aria-label="`命中点击${ei + 1}`" @change="setExpectClick(ei, ($event.target as HTMLInputElement).checked)" />
-              命中点击
-            </label>
-            <button v-if="step.expect.length > 1" type="button" class="mini-btn" title="删除颜色候选" @click.stop="removeExpect(ei)">✕</button>
-          </div>
-          <BranchContainer
-            :model="model" :stack="stack" :container-path="candPath(ei)" :base-path="candBase(ei)"
-            :label="candLabel(ei)" :depth="depth + 1" :diagnostics="diagnostics" :selected-uuid="selectedUuid"
-          :highlight-uuid="highlightUuid"
-            :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
-            :templates="templates"
-            @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-            @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
+          <span class="field-label">变量名</span>
+          <input
+            class="cell-input" :value="step.name" placeholder="变量名" aria-label="变量名"
+            @change="setName(($event.target as HTMLInputElement).value)"
           />
+          <span class="field-label">取值</span>
+          <CellEditor :cell="step.value" type="expr" :params="params" label="取值" :error="fieldError('value')" @change="(c) => updateCell('value', c)" />
         </div>
-        <div class="field-row">
-          <button type="button" class="mini-btn add" title="添加颜色候选" @click.stop="addExpect">+ 添加颜色候选</button>
-        </div>
-        <BranchContainer
-          :model="model" :stack="stack" :container-path="subPath('else')" :base-path="subBase('else')"
-          label="颜色未命中" :depth="depth + 1" :diagnostics="diagnostics" :selected-uuid="selectedUuid"
-          :highlight-uuid="highlightUuid"
-          :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
-          :templates="templates"
-          @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-          @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
-        />
       </template>
 
       <!-- if -->
       <template v-else-if="step.kind === 'if'">
         <div class="field-row">
           <span class="field-label">条件</span>
-          <CellEditor :cell="step.cond" type="bool" :params="params" label="条件" :error="fieldError('cond')" @change="(c) => updateCell('cond', c)" />
-          <span class="field-hint">只接受布尔字面量或布尔参数</span>
+          <CellEditor :cell="step.cond" type="expr" :params="params" label="条件" :error="fieldError('cond')" @change="(c) => updateCell('cond', c)" />
+          <span class="field-hint">布尔字面量、$flag 引用或任意表达式（按真值判断）</span>
         </div>
         <BranchContainer
           :model="model" :stack="stack" :container-path="subPath('then')" :base-path="subBase('then')"
@@ -316,12 +334,15 @@
       <!-- loop -->
       <template v-else-if="step.kind === 'loop'">
         <div class="field-row">
-          <span class="field-label">次数</span>
-          <input
-            class="cell-input num" type="number" min="0"
-            :value="step.times" aria-label="循环次数" @change="setTimes(($event.target as HTMLInputElement).value)"
-          />
-          <span v-if="step.times === 0" class="field-hint warn">0 = 无限循环——请确保体内有 break 或其他退出条件</span>
+          <label class="field-check" title="省略次数 = 无限循环">
+            <input type="checkbox" :checked="step.times === null" @change="toggleInfinite" />
+            无限循环
+          </label>
+          <template v-if="step.times !== null">
+            <span class="field-label">次数</span>
+            <CellEditor :cell="step.times" type="number" :params="params" label="次数" :error="fieldError('times')" @change="(c) => updateCell('times', c)" />
+          </template>
+          <span v-if="step.times === null" class="field-hint warn">无限循环——请确保体内有 break 或其他退出条件</span>
           <span v-if="fieldError('steps')" class="cell-err-msg">{{ fieldError('steps') }}</span>
         </div>
         <BranchContainer
@@ -335,87 +356,68 @@
         />
       </template>
 
-      <!-- call / func -->
-      <template v-else-if="step.kind === 'call' || step.kind === 'func'">
+      <!-- call / invoke -->
+      <template v-else-if="step.kind === 'call' || step.kind === 'invoke'">
         <div class="field-row">
-          <span class="field-label">{{ step.kind === 'call' ? '目标脚本' : '目标函数' }}</span>
-          <!-- func：文件 + 函数名两级下拉（候选由宿主注入；未注入回退自由输入） -->
-          <template v-if="step.kind === 'func' && targetOptions">
+          <span class="field-label">{{ step.kind === 'call' ? '目标' : '能力' }}</span>
+          <template v-if="step.kind === 'call' && targetOptions">
             <select
-              class="cell-input target-select" :value="fnFileSel" aria-label="函数库文件"
-              @change="onFnFileChange(($event.target as HTMLSelectElement).value)"
+              class="cell-input target-select" :value="step.target" aria-label="调用目标"
+              @change="applyTarget(($event.target as HTMLSelectElement).value)"
             >
-              <option value="">（选择文件）</option>
-              <option v-if="fnFileSel && !fnFiles.some((f) => f.file === fnFileSel)" :value="fnFileSel">{{ fnFileSel }}（已失效）</option>
-              <option v-for="f in fnFiles" :key="f.file" :value="f.file">{{ f.file }}</option>
-            </select>
-            <span class="field-sep">/</span>
-            <select
-              class="cell-input target-select" :value="fnNameSel" aria-label="函数名" :disabled="!fnFileSel"
-              @change="onFnNameChange(($event.target as HTMLSelectElement).value)"
-            >
-              <option value="">（选择函数）</option>
-              <option v-if="fnNameSel && !(curFnFile?.functions ?? []).includes(fnNameSel)" :value="fnNameSel">{{ fnNameSel }}（已失效）</option>
-              <option v-for="name in curFnFile?.functions ?? []" :key="name" :value="name">{{ name }}</option>
+              <option value="">（选择目标）</option>
+              <optgroup v-for="g in targetGroups" :key="g.id" :label="g.label">
+                <option v-for="o in g.options" :key="o.target" :value="o.target">{{ o.label || o.target }}</option>
+              </optgroup>
+              <option v-if="step.target && !allTargets.some((o) => o.target === step.target)" :value="step.target">{{ step.target }}（已失效）</option>
             </select>
           </template>
-          <!-- call：分区脚本下拉 -->
-          <select
-            v-else-if="step.kind === 'call' && targetOptions"
-            class="cell-input target-select" :value="step.target" aria-label="目标脚本"
-            @change="applyTarget(($event.target as HTMLSelectElement).value)"
-          >
-            <option value="">（选择脚本）</option>
-            <option v-if="step.target && !callScripts.some((o) => o.target === step.target)" :value="step.target">{{ step.target }}（已失效）</option>
-            <option v-for="o in callScripts" :key="o.target" :value="o.target">{{ o.label || o.target }}</option>
-          </select>
           <input
-            v-else
-            class="cell-input" :value="step.target"
-            :placeholder="step.kind === 'call' ? 'sub_task.yaml' : 'common/login'"
-            :aria-label="step.kind === 'call' ? '目标脚本' : '目标函数'"
+            v-else-if="step.kind === 'call'"
+            class="cell-input mono" :value="step.target"
+            placeholder="script:daily/login 或 function:common/login"
+            aria-label="调用目标"
             @input="setTarget(($event.target as HTMLInputElement).value)"
           />
-          <span v-if="fieldError('target')" class="cell-err-msg">{{ fieldError('target') }}</span>
+          <input
+            v-else
+            class="cell-input mono" :value="step.capability"
+            placeholder="能力名，如 vision.match"
+            aria-label="能力名"
+            @input="setCapability(($event.target as HTMLInputElement).value)"
+          />
+          <span v-if="fieldError(step.kind === 'call' ? 'target' : 'capability')" class="cell-err-msg">
+            {{ fieldError(step.kind === 'call' ? 'target' : 'capability') }}
+          </span>
         </div>
         <div class="field-row col">
-          <span class="field-label">参数 args</span>
-          <span v-if="targetOptions" class="field-hint">选定目标后按其声明自动生成（默认值已预填，必填项需补齐）；也可手动增删</span>
-          <span v-if="fieldError('args')" class="cell-err-msg">{{ fieldError('args') }}</span>
-          <div v-for="name in argNames" :key="name" class="arg-row">
+          <span class="field-label">参数 with</span>
+          <span v-if="targetOptions && step.kind === 'call'" class="field-hint">选定目标后按其声明自动生成（默认值已预填，必填项需补齐）；也可手动增删</span>
+          <span v-if="fieldError('with')" class="cell-err-msg">{{ fieldError('with') }}</span>
+          <div v-for="name in withNames" :key="name" class="arg-row">
             <input
               class="cell-input" :value="name" aria-label="参数名" placeholder="参数名"
               @change="renameArg(name, ($event.target as HTMLInputElement).value)"
             />
             <CellEditor
-              :cell="step.args[name]" :type="argType(name)" :params="params"
+              :cell="step.with[name]" :type="argType(name)" :params="params"
               :templates="templates"
-              :label="`args ${name}`" @change="(c) => updateArgValue(name, c)"
+              :label="`with ${name}`" @change="(c) => updateArgValue(name, c)"
             />
             <button type="button" class="mini-btn" title="删除实参" @click.stop="removeArg(name)">✕</button>
           </div>
           <button type="button" class="mini-btn add" title="添加实参" @click.stop="addArg">+ 添加实参</button>
         </div>
-        <template v-if="step.kind === 'func'">
-          <BranchContainer
-            :model="model" :stack="stack" :container-path="subPath('then')" :base-path="subBase('then')"
-            label="成功时" :depth="depth + 1" :diagnostics="diagnostics" :selected-uuid="selectedUuid"
-          :highlight-uuid="highlightUuid"
-            :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
-            :templates="templates"
-            @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-            @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
+        <div v-if="step.kind === 'call'" class="field-row">
+          <label class="field-check" title="把调用返回值整体存入变量（被调方无 return 则存 null）">
+            <input type="checkbox" :checked="step.save !== null" @change="toggleSave" />
+            保存返回值
+          </label>
+          <input
+            v-if="step.save !== null" class="cell-input" :value="step.save ?? ''" placeholder="变量名，如 result"
+            aria-label="保存返回值变量名" @change="setSave(($event.target as HTMLInputElement).value)"
           />
-          <BranchContainer
-            :model="model" :stack="stack" :container-path="subPath('else')" :base-path="subBase('else')"
-            label="失败时" :depth="depth + 1" :diagnostics="diagnostics" :selected-uuid="selectedUuid"
-          :highlight-uuid="highlightUuid"
-            :expanded-uuids="expandedUuids" :params="params" :context="context" :resolve-target="resolveTarget"
-            :templates="templates"
-            @select="(u) => emit('select', u)" @toggle-expand="(u) => emit('toggle-expand', u)"
-            @focus="(p) => emit('focus', p)" @add-here="(p, el) => emit('add-here', p, el)"
-          />
-        </template>
+        </div>
       </template>
 
       <!-- break -->
@@ -427,10 +429,7 @@
       <template v-else-if="step.kind === 'throw'">
         <div class="field-row">
           <span class="field-label">原因</span>
-          <input
-            class="cell-input grow" :value="step.message ?? ''" placeholder="可空"
-            aria-label="终止原因" @input="setMessage(($event.target as HTMLInputElement).value)"
-          />
+          <CellEditor :cell="step.message" type="expr" :params="params" label="终止原因" placeholder="原因文本或 $引用" :error="fieldError('message')" @change="(c) => updateCell('message', c)" />
           <span class="field-hint warn">会结束整个任务（含调用链）</span>
         </div>
       </template>
@@ -440,7 +439,7 @@
         <div v-if="context !== 'function'" class="field-hint warn">return 在脚本中非法——只能出现在函数库（functions/）的函数体内</div>
         <div class="field-row">
           <span class="field-label">返回值</span>
-          <CellEditor :cell="step.value" type="bool" :params="params" label="返回值" :error="fieldError('value')" @change="(c) => updateCell('value', c)" />
+          <CellEditor :cell="step.value" type="expr" :params="params" label="返回值" :error="fieldError('value')" @change="(c) => updateCell('value', c)" />
         </div>
       </template>
     </div>
@@ -449,11 +448,11 @@
 
 <script setup lang="ts">
 /**
- * 步骤卡片（plan §8.4 / §9）：19 类全覆盖。
- * - 收起态 = 自然语言摘要（kinds.stepSummary，§9 表文案）；
+ * 步骤卡片（v3）：19 类全覆盖。
+ * - 收起态 = 自然语言摘要（kinds.stepSummary）；
  * - 展开态 = 该类型强类型控件（无任意键值编辑器）；字段错误按 Diagnostic.field 标红定位；
  * - 左侧动作图标 + 中文名 + 序号 + 上移/下移/复制/删除（全部经 CommandStack）；
- * - find/match/color/if/loop/func 的分支子流程内嵌 BranchContainer（一层内嵌、更深专注）。
+ * - find/match_first/if/loop 的分支子流程内嵌 BranchContainer（一层内嵌、更深专注）。
  * 纯受控组件：所有写操作构造 Command 提交 stack，自身不改模型。
  */
 import { computed, inject, ref, watch, type PropType } from 'vue'
@@ -462,7 +461,7 @@ import { resolveStepList } from '../commands'
 import type { Diagnostic } from '../diagnostics'
 import { joinStepPath } from '../diagnostics'
 import { childContainerPath, containerLabel } from '../selection'
-import type { Cell, ParamDecl, Step, StepKind } from '../model'
+import type { Cell, CellType, ParamDecl, Step, StepKind } from '../model'
 import {
   postRemovalIndex,
   clearActiveStepDrag,
@@ -478,6 +477,8 @@ import BranchContainer from './BranchContainer.vue'
 
 /** 联合类型放宽：模板内按 kind 分支后访问各自字段；运行时由 v-if 保证形态。 */
 type AnyStep = Step & Record<string, any>
+
+const LOG_LEVELS = ['debug', 'info', 'warn', 'error']
 
 const props = defineProps({
   model: { type: Object as PropType<Parameters<typeof resolveStepList>[0]>, required: true },
@@ -499,7 +500,7 @@ const props = defineProps({
   context: { type: String as PropType<'script' | 'function'>, default: 'script' },
   params: { type: Array as PropType<ParamDecl[]>, default: () => [] },
   resolveTarget: {
-    type: Function as PropType<((kind: 'call' | 'func', target: string) => { params: ParamDecl[] } | null) | undefined>,
+    type: Function as PropType<((target: string) => { params: ParamDecl[] } | null) | undefined>,
     default: undefined,
   },
   templates: { type: Array as PropType<string[]>, default: () => [] },
@@ -632,7 +633,7 @@ function subBase(key: string): string {
 function candPath(ci: number): Path {
   return childContainerPath(props.containerPath, props.index, 'candidates', ci)
 }
-function candBase(ci: number): string {
+function candBase(ci: string | number): string {
   return `${stepPath.value}.candidates[${ci}].steps`
 }
 function candLabel(ci: number): string {
@@ -641,41 +642,62 @@ function candLabel(ci: number): string {
 
 // ---------- 各类型字段操作 ----------
 
+function togglePackage(on: boolean): void {
+  updateStep({ package: on ? { lit: '' } : null })
+}
+function setAction(v: string): void {
+  updateStep({ action: v === 'press' ? null : v })
+}
+function setLevel(v: string): void {
+  updateStep({ level: v === 'info' ? null : v })
+}
 function toggleRandom(e: Event): void {
   const on = (e.target as HTMLInputElement).checked
   if (on) {
-    const cur = s.value.duration
-    updateStep({ duration_max: cur && typeof cur.lit === 'string' ? { lit: cur.lit } : { lit: '1s' } })
+    const cur = s.value.min
+    updateStep({ max: cur && typeof cur.lit === 'string' ? { lit: cur.lit } : { lit: '1s' } })
   } else {
-    updateStep({ duration_max: null })
+    updateStep({ max: null })
   }
-}
-function setVerify(v: boolean): void {
-  updateStep({ verify: v })
-}
-function setThrow(v: string): void {
-  updateStep({ throw: v.trim() ? v : null })
-}
-function toggleCheckTimeout(e: Event): void {
-  updateStep({ timeout: (e.target as HTMLInputElement).checked ? { lit: '5s' } : null })
 }
 function toggleFindTimeout(e: Event): void {
   updateStep({ timeout: (e.target as HTMLInputElement).checked ? { lit: '30s' } : null })
 }
-function toggleMatchTimeout(e: Event): void {
-  updateStep({ timeout: (e.target as HTMLInputElement).checked ? { lit: '30s' } : null })
+function toggleCheckTimeout(e: Event): void {
+  updateStep({ timeout: (e.target as HTMLInputElement).checked ? { lit: '5s' } : null })
 }
-function updateBlockAt(i: number, cell: Cell): void {
-  updateStep({ block: s.value.block.map((c: Cell, j: number) => (j === i ? cell : c)) })
+function toggleThreshold(field: string, e: Event): void {
+  updateStep({ [field]: (e.target as HTMLInputElement).checked ? 0.85 : null })
 }
-function addBlock(): void {
-  updateStep({ block: [...s.value.block, { lit: '' }] })
+function setThresholdNum(field: string, raw: string): void {
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return
+  updateStep({ [field]: Math.min(1, Math.max(0, n)) })
 }
-function removeBlock(i: number): void {
-  updateStep({ block: s.value.block.filter((_: Cell, j: number) => j !== i) })
+function toggleSave(e: Event): void {
+  updateStep({ save: (e.target as HTMLInputElement).checked ? '' : null })
+}
+function setSave(v: string): void {
+  updateStep({ save: v.trim() ? v.trim() : null })
+}
+function toggleVerify(e: Event): void {
+  updateStep({ verify: (e.target as HTMLInputElement).checked ? { template: { lit: '' }, timeout: { lit: '5s' } } : null })
+}
+function updateVerify(fields: Record<string, unknown>): void {
+  const cur = (s.value.verify ?? { template: { lit: '' }, timeout: null }) as Record<string, unknown>
+  updateStep({ verify: { ...cur, ...fields } })
+}
+function setName(v: string): void {
+  updateStep({ name: v.trim() })
+}
+function setCapability(v: string): void {
+  updateStep({ capability: v })
+}
+function toggleInfinite(e: Event): void {
+  updateStep({ times: (e.target as HTMLInputElement).checked ? null : { lit: 3 } })
 }
 function addCandidate(): void {
-  updateStep({ candidates: [...s.value.candidates, { template: { lit: '' }, click: false, steps: [] }] })
+  updateStep({ candidates: [...s.value.candidates, { template: { lit: '' }, threshold: null, steps: [] }] })
 }
 function removeCandidate(i: number): void {
   updateStep({ candidates: s.value.candidates.filter((_: unknown, j: number) => j !== i) })
@@ -683,74 +705,39 @@ function removeCandidate(i: number): void {
 function updateCandidateTemplate(i: number, cell: Cell): void {
   updateStep({ candidates: s.value.candidates.map((c: unknown, j: number) => (j === i ? { ...(c as object), template: cell } : c)) })
 }
-function setCandClick(i: number, on: boolean): void {
-  updateStep({ candidates: s.value.candidates.map((c: unknown, j: number) => (j === i ? { ...(c as object), click: on } : c)) })
+function toggleCandThreshold(i: number, e: Event): void {
+  const on = (e.target as HTMLInputElement).checked
+  updateStep({ candidates: s.value.candidates.map((c: unknown, j: number) => (j === i ? { ...(c as object), threshold: on ? 0.85 : null } : c)) })
 }
-function addExpect(): void {
-  updateStep({ expect: [...s.value.expect, { color: { lit: '' }, click: false, steps: [] }] })
-}
-function removeExpect(i: number): void {
-  updateStep({ expect: s.value.expect.filter((_: unknown, j: number) => j !== i) })
-}
-function updateExpectColor(i: number, cell: Cell): void {
-  updateStep({ expect: s.value.expect.map((c: unknown, j: number) => (j === i ? { ...(c as object), color: cell } : c)) })
-}
-function setExpectClick(i: number, on: boolean): void {
-  updateStep({ expect: s.value.expect.map((c: unknown, j: number) => (j === i ? { ...(c as object), click: on } : c)) })
-}
-function setTimes(raw: string): void {
+function setCandThreshold(i: number, raw: string): void {
   const n = Number(raw)
-  updateStep({ times: Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0 })
+  if (!Number.isFinite(n)) return
+  updateStep({ candidates: s.value.candidates.map((c: unknown, j: number) => (j === i ? { ...(c as object), threshold: Math.min(1, Math.max(0, n)) } : c)) })
 }
 function setTarget(v: string): void {
-  updateStep({ target: v })
-}
-function setMessage(v: string): void {
-  updateStep({ message: v === '' ? null : v })
+  void applyTarget(v)
 }
 
-// ---------- call/func 目标下拉（宿主经 provide(SE_TARGET_OPTIONS) 注入候选与解析） ----------
+// ---------- call 目标下拉（宿主经 provide(SE_TARGET_OPTIONS) 注入候选与解析） ----------
 
 const targetOptions = inject<SeTargetOptions | null>(SE_TARGET_OPTIONS, null)
-const callScripts = computed(() => targetOptions?.callScripts ?? [])
-const fnFiles = computed(() => targetOptions?.funcFiles ?? [])
-
-/** func 两级下拉的本地选择态：target 外部变化（撤销/加载/跳转）时从 target 回同步。 */
-const fnFileSel = ref('')
-const fnNameSel = ref('')
-const curFnFile = computed(() => fnFiles.value.find((f) => f.file === fnFileSel.value) ?? null)
-
-function splitFnTarget(t: string): [string, string] {
-  const s = String(t || '')
-  const i = s.indexOf('/')
-  return i >= 0 ? [s.slice(0, i), s.slice(i + 1)] : [s, '']
-}
-watch(
-  () => String(s.value.target ?? ''),
-  (t) => {
-    const [file, fn] = splitFnTarget(t)
-    fnFileSel.value = file
-    fnNameSel.value = fn
-  },
-  { immediate: true },
-)
-
-function onFnFileChange(file: string): void {
-  fnFileSel.value = file
-  fnNameSel.value = '' // 换文件后原函数名视为失效，选中函数名才统一下发 target
-}
-function onFnNameChange(fn: string): void {
-  fnNameSel.value = fn
-  if (fnFileSel.value && fn) void applyTarget(`${fnFileSel.value}/${fn}`)
-}
+const allTargets = computed(() => targetOptions?.targets ?? [])
+const targetGroups = computed(() => {
+  const script = allTargets.value.filter((o) => o.target.startsWith('script:'))
+  const fn = allTargets.value.filter((o) => o.target.startsWith('function:'))
+  return [
+    { id: 'script', label: '脚本（script:）', options: script },
+    { id: 'function', label: '函数（function:）', options: fn },
+  ].filter((g) => g.options.length > 0)
+})
 
 /**
- * 下发目标；宿主注入了解析器时一并按目标声明重生成 args（默认值预填、必填补类型空值），
+ * 下发目标；宿主注入了解析器时一并按目标声明重生成 with（默认值预填、必填补类型空值），
  * 单条 update_step = 一次撤销。await 期间目标若又被改动则放弃（由最新一次变更接管）。
  */
 async function applyTarget(next: string): Promise<void> {
   if (!next) {
-    updateStep({ target: '', args: {} })
+    updateStep({ target: '', with: {} })
     return
   }
   if (!targetOptions) {
@@ -760,19 +747,19 @@ async function applyTarget(next: string): Promise<void> {
   const prev = String(s.value.target ?? '')
   let decls: ParamDecl[] | null = null
   try {
-    decls = await targetOptions.resolveParams(props.step.kind === 'call' ? 'call' : 'func', next)
+    decls = await targetOptions.resolveParams(next)
   } catch {
-    decls = null // 解析失败不阻塞改目标：args 保持原样（校验层兜底）
+    decls = null // 解析失败不阻塞改目标：with 保持原样（校验层兜底）
   }
   if (String(s.value.target ?? '') !== prev) return
   try {
-    updateStep(decls ? { target: next, args: argsFromDecls(decls) } : { target: next })
+    updateStep(decls ? { target: next, with: argsFromDecls(decls) } : { target: next })
   } catch {
     // await 期间步骤已被删除（resolveStep 抛错）——放弃本次下发
   }
 }
 
-/** 按目标声明生成完整 args：有默认值填默认值；必填填类型空值待用户补。 */
+/** 按目标声明生成完整 with：有默认值填默认值；必填填类型空值待用户补。 */
 function argsFromDecls(decls: ParamDecl[]): Record<string, Cell> {
   const out: Record<string, Cell> = {}
   for (const d of decls) {
@@ -780,51 +767,55 @@ function argsFromDecls(decls: ParamDecl[]): Record<string, Cell> {
   }
   return out
 }
-function emptyLitFor(type: ParamDecl['type']): unknown {
+function emptyLitFor(type: string): unknown {
   switch (type) {
-    case 'bool':
-      return false
-    case 'coord':
-      return [0.5, 0.5]
-    default:
-      return ''
+    case 'boolean': return false
+    case 'integer': case 'number': return 0
+    default: return ''
   }
 }
 
-// ---------- args（call/func） ----------
+// ---------- with（call/invoke） ----------
 
-const argNames = computed<string[]>(() => Object.keys(s.value.args ?? {}))
+const withNames = computed<string[]>(() => Object.keys(s.value.with ?? {}))
 
-function argType(name: string): ParamDecl['type'] {
-  const kind = props.step.kind === 'call' ? 'call' : 'func'
+function argType(name: string): CellType {
   const target = String(s.value.target ?? '')
-  // 宿主注入的同步缓存优先（call 实参类型需异步拉取后才有）；prop 解析器兜底
+  // 宿主注入的同步缓存优先（实参类型需异步拉取后才有）；prop 解析器兜底
   const decls = targetOptions?.resolveParamsSync
-    ? targetOptions.resolveParamsSync(kind, target)
-    : props.resolveTarget?.(kind, target)?.params
-  return decls?.find((d) => d.name === name)?.type ?? 'text'
+    ? targetOptions.resolveParamsSync(target)
+    : props.resolveTarget?.(target)?.params
+  const t = decls?.find((d) => d.name === name)?.type
+  switch (t) {
+    case 'boolean': case 'bool': return 'bool'
+    case 'integer': case 'number': case 'float': return 'number'
+    case 'tmpl': return 'tmpl'
+    case 'key': return 'key'
+    case 'coord': return 'coord'
+    default: return 'text'
+  }
 }
 function updateArgValue(name: string, cell: Cell): void {
-  updateStep({ args: { ...s.value.args, [name]: cell } })
+  updateStep({ with: { ...s.value.with, [name]: cell } })
 }
 function removeArg(name: string): void {
-  const next = { ...s.value.args }
+  const next = { ...s.value.with }
   delete next[name]
-  updateStep({ args: next })
+  updateStep({ with: next })
 }
 function renameArg(oldName: string, raw: string): void {
   const name = raw.trim()
   if (!name || name === oldName) return
-  if (name in s.value.args) return // 重复键直接忽略（校验层另有 args.unknown 提示）
+  if (name in s.value.with) return // 重复键直接忽略（校验层另有 args_unknown 提示）
   const next: Record<string, Cell> = {}
-  for (const [k, v] of Object.entries(s.value.args)) next[k === oldName ? name : k] = v as Cell
-  updateStep({ args: next })
+  for (const [k, v] of Object.entries(s.value.with)) next[k === oldName ? name : k] = v as Cell
+  updateStep({ with: next })
 }
 function addArg(): void {
-  const args = s.value.args ?? {}
+  const args = s.value.with ?? {}
   let i = 1
   while (`param${i}` in args) i++
-  updateStep({ args: { ...args, [`param${i}`]: { lit: '' } } })
+  updateStep({ with: { ...args, [`param${i}`]: { lit: '' } } })
 }
 </script>
 
@@ -925,4 +916,5 @@ function addArg(): void {
 .target-select:focus { outline: none; border-color: var(--accent); }
 .target-select option { background: var(--bg-1); color: var(--text-0); }
 .field-sep { color: var(--text-2); font-family: var(--mono); }
+.mono { font-family: var(--mono); }
 </style>
