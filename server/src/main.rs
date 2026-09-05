@@ -41,6 +41,10 @@ mod webrtc;
 #[cfg(test)]
 mod phase0_tests;
 
+// P11.9 架构守卫测试（ADR-11/ADR-13 边界 + 隔离集成）同样只在测试构建挂载。
+#[cfg(test)]
+mod architecture_guard_tests;
+
 use std::sync::Arc;
 use std::time::Duration;
 

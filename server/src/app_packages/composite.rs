@@ -5,11 +5,12 @@
 //! 高优先层遮蔽低优先层。三层都在本模块实现，调用方不再各自兜底。
 //!
 //! 覆盖范围：
-//! - 模板：`find`/`match` 匹配路径与 script_v2 校验可用性共用
-//!   （`ScriptStore::resolve_template_path` / `template_avail`）；
-//! - 按键映射：`KeymapStore::get` / `list` 可见全部三层方案；
-//! - 脚本/函数库：运行快照（engine/snapshot.rs）分别合并 `scripts/` 与
-//!   `functions/` 三层同名源码（对应分区 scripts/ + functions/ 语义）。
+//! - 模板：`find`/`match` 匹配路径与 gamer.yaml 扩展侧脚本校验的模板可用性
+//!   判定（`template_avail`）共用；
+//! - 按键映射：keymaps 的 `get` / `list` 经本层可见全部三层方案（扩展侧只读
+//!   消费）；
+//! - 脚本/函数库：运行快照（gamer.yaml engine/snapshot.rs）分别合并 `scripts/`
+//!   与 `functions/` 三层同名源码（对应分区 scripts/ + functions/ 语义）。
 //!
 //! 各层布局（目录即类型）：
 //! - EditableLocal = 本地编辑区，即 server 数据根下的分区目录
@@ -147,8 +148,8 @@ impl CompositeResolver {
         self.data_root.join("user-overrides").join(android.as_str())
     }
 
-    /// 本地编辑区分区根：`<data_root>/<pkg>/`。分区名走与 ScriptStore /
-    /// KeymapStore 相同的 [`crate::core::fs::safe_name`] 校验（分区名不必满足
+    /// 本地编辑区分区根：`<data_root>/<pkg>/`。分区名走与分区内资源目录名
+    /// 相同的 [`crate::core::fs::safe_name`] 校验（分区名不必满足
     /// Android 包名文法），非法名 = 该层为空。
     fn editable_partition(&self, pkg: &str) -> Option<PathBuf> {
         crate::core::fs::safe_name(pkg).map(|name| self.data_root.join(name))
