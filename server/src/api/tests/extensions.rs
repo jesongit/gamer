@@ -69,15 +69,13 @@ entry = "ui/index.html"
     .await;
     assert_eq!(installed.status(), StatusCode::CREATED);
     let installed_json = json_body(installed).await;
-    assert_eq!(installed_json["state"], "installed");
+    // 安装即用：桩 wasm 的 start 失败 → 自动降级 Enabled（last_error 可见）
+    assert_eq!(installed_json["state"], "enabled");
 
+    // Enabled（含安装即用降级）即发布 UI 贡献——iframe 面板随安装即可见
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
     assert_eq!(contributions.status(), StatusCode::OK);
-    assert!(json_body(contributions)
-        .await
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert_eq!(json_body(contributions).await[0]["panel_id"], "hello");
 
     let enabled = post_json(
         &test_app,
@@ -331,24 +329,9 @@ default = "abc"
     .await;
     assert_eq!(installed.status(), StatusCode::CREATED);
 
-    let enabled = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.panel/enable",
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(enabled.status(), StatusCode::OK);
-
-    let started = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.panel/start",
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(started.status(), StatusCode::OK);
-    assert_eq!(json_body(started).await["state"], "running");
+    // 安装即用（2026-09-05）：安装响应即 Running，无需再 enable/start。
+    let installed_json = json_body(installed).await;
+    assert_eq!(installed_json["state"], "running");
 
     let call = post_json(
         &test_app,
@@ -526,29 +509,15 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         )
         .await;
         assert_eq!(installed.status(), StatusCode::CREATED, "{id} 官方安装被拒绝");
-        assert_eq!(json_body(installed).await["state"], "installed");
-
-        let enabled = post_json(
-            &test_app,
-            &session,
-            &format!("/api/extensions/{id}/enable"),
-            serde_json::json!({}),
-        )
-        .await;
-        assert_eq!(enabled.status(), StatusCode::OK);
-        // keymap 是长驻实例（start 进入 Running）；yaml 是请求/响应型扩展
-        // （Enabled 即可被 run_yaml_vnext 使用，v3 运行验收在
-        // yaml_extension::installed_yaml_extension_runs_v3_program_end_to_end）。
-        if id == "gamer.keymap" {
-            let started = post_json(
-                &test_app,
-                &session,
-                &format!("/api/extensions/{id}/start"),
-                serde_json::json!({}),
-            )
-            .await;
-            assert_eq!(started.status(), StatusCode::OK, "{id} 启动失败");
-            assert_eq!(json_body(started).await["state"], "running");
+        // 安装即用（2026-09-05）：官方安装自动 enable → start。keymap 长驻实例
+        // 真实启动 → Running；gamer.yaml 为无实例模型（start 仅注册 timer
+        // runner），测试装配未接 registrar 走通用实例路径失败 → 降级 Enabled
+        // （生产 main.rs 接线 registrar 后即 Running）。
+        let state = json_body(installed).await["state"].clone();
+        if id == "gamer.yaml" {
+            assert_eq!(state, "enabled", "{id} 安装后应降级为 Enabled");
+        } else {
+            assert_eq!(state, "running", "{id} 安装后应为 Running");
         }
     }
 
@@ -568,6 +537,8 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
     for entry in &plugins {
         let id = entry["id"].as_str().unwrap();
         let version = entry["version"].as_str().unwrap();
+        // 卸载守卫拒绝 Running：keymap 已在运行需先 stop；yaml 已降级 Enabled
+        // 可直接删。
         if id == "gamer.keymap" {
             let stopped = post_json(
                 &test_app,
@@ -576,7 +547,7 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
                 serde_json::json!({}),
             )
             .await;
-            assert_eq!(stopped.status(), StatusCode::OK);
+            assert_eq!(stopped.status(), StatusCode::OK, "{id} 停止失败");
         }
         let removed = send(
             &test_app.app,
@@ -635,6 +606,8 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
     )
     .await;
     assert_eq!(second.status(), StatusCode::CREATED);
+    // 注：该插件 wasm 为桩字节，安装即用的自动 start 会失败并降级为 Enabled
+    // （activate 拒绝 Running，此状态下本就无碍）。
     let installed = send(
         &test_app.app,
         req(
@@ -669,7 +642,8 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
     let activated_json = json_body(activated).await;
     assert_eq!(activated_json["id"], "com.example.rollback");
     assert_eq!(activated_json["active_version"], "1.1.0");
-    assert_eq!(activated_json["state"], "installed");
+    // 激活保持生命周期状态（stop 后 = Enabled）
+    assert_eq!(activated_json["state"], "enabled");
 
     // Enabled 的插件切换后保持 Enabled（下次 start 用新版本）
     let enabled = post_json(

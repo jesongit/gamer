@@ -844,7 +844,7 @@ impl ExtensionService {
         Ok(manifest)
     }
 
-    fn snapshot_for(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
+    pub(crate) fn snapshot_for(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
         let states = self.store.read_state()?;
         let versions = self.versions_for(id)?;
         let record = state_for_versions(id, &versions, states.get(id).cloned())?;
@@ -909,7 +909,7 @@ impl ExtensionService {
 
     /// 直写生命周期状态（启动对账专用）：调用点都在启动期或随后即走持锁的
     /// `start`，不经 operation_lock。记录不存在时报 NotInstalled。
-    fn force_state(
+    pub(crate) fn force_state(
         &self,
         id: &ExtensionId,
         state: ExtensionState,

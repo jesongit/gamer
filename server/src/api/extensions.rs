@@ -55,7 +55,10 @@ pub(super) async fn api_install_extension(
         Err(response) => return response,
     };
     match st.extensions.install_with_context(&body, &context).await {
-        Ok(snapshot) => (StatusCode::CREATED, Json(snapshot_json(&snapshot))).into_response(),
+        Ok(snapshot) => {
+            let snapshot = auto_start_installed(&st.extensions, snapshot).await;
+            (StatusCode::CREATED, Json(snapshot_json(&snapshot))).into_response()
+        }
         Err(error) => extension_error(error),
     }
 }
@@ -326,6 +329,41 @@ async fn lifecycle(service: &ExtensionService, raw_id: &str, operation: Lifecycl
     match result {
         Ok(snapshot) => Json(snapshot_json(&snapshot)).into_response(),
         Err(error) => extension_error(error),
+    }
+}
+
+/// 安装即用（2026-09-05 产品裁决）：安装成功后自动 enable → start，让
+/// Runner 与 UI 面板随安装即生效，无需用户再手动「启动」。任一步失败不推翻
+/// 安装结果——扩展留在 Enabled/Failed 并带 last_error，可从插件中心手动处置。
+/// 已在 Running（同版本覆盖重装）时直接返回原快照。
+async fn auto_start_installed(
+    service: &ExtensionService,
+    snapshot: ExtensionSnapshot,
+) -> ExtensionSnapshot {
+    if snapshot.state() == crate::extensions::ExtensionState::Running {
+        return snapshot;
+    }
+    let id = snapshot.id().clone();
+    if let Err(error) = service.enable(&id).await {
+        tracing::warn!(extension = %id, %error, "install auto-start: enable failed");
+        return snapshot;
+    }
+    match service.start(&id).await {
+        Ok(started) => started,
+        Err(error) => {
+            // 降级为 Enabled（保留错误）而非 Failed：安装结果不被启动失败
+            // 推翻，扩展可从插件中心手动 start 重试（如缺依赖的瞬态失败）。
+            tracing::warn!(extension = %id, %error, "install auto-start: start failed");
+            let _ = service.force_state(
+                &id,
+                crate::extensions::ExtensionState::Enabled,
+                Some(error.to_string()),
+            );
+            match service.snapshot_for(&id) {
+                Ok(degraded) => degraded,
+                Err(_) => snapshot,
+            }
+        }
     }
 }
 

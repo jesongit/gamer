@@ -226,11 +226,6 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
         reason: "api 测试装配：与生产等价预注册 gamer.yaml runner（HTTP 集成夹具）",
     },
     Allow {
-        file: "api/tests/extensions.rs",
-        snippet: "run_yaml_vnext",
-        reason: "扩展 API 测试注释：指向 yaml 运行验收的整合入口",
-    },
-    Allow {
         file: "api/tests/update.rs",
         snippet: "YamlTimerRunner::new(",
         reason: "update API 测试装配：gamer.yaml runner 夹具",
@@ -928,7 +923,9 @@ fn gamer_yaml_archive() -> Vec<u8> {
     archive
 }
 
-async fn install_enable_start(app: &axum::Router, cookie: &str) {
+/// 安装即用（2026-09-05）：REST 安装自动 enable→start，响应即 Running——
+/// helper 只装并断言运行态，调用方需要停止时自行 stop。
+async fn install_yaml_running(app: &axum::Router, cookie: &str) {
     let response = send(
         app,
         request(
@@ -941,16 +938,7 @@ async fn install_enable_start(app: &axum::Router, cookie: &str) {
     .await;
     let status = response.status();
     assert_eq!(status, StatusCode::CREATED, "安装 gamer.yaml");
-    for action in ["enable", "start"] {
-        let (status, body) = post_json(
-            app,
-            cookie,
-            &format!("/api/extensions/{YAML_ID}/{action}"),
-            serde_json::json!({}),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{action}: {body}");
-    }
+    assert_eq!(body_json(response).await["state"], "running");
 }
 
 // ===========================================================================
@@ -979,23 +967,12 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
     )
     .await;
     assert_eq!(response.status(), StatusCode::CREATED, "安装 gamer.yaml");
-    assert_eq!(body_json(response).await["state"], "installed");
+    // 安装即用（2026-09-05）：install 自动 enable→start，响应即 Running。
+    assert_eq!(body_json(response).await["state"], "running");
 
     let list = get_json(&guard.app, &cookie, "/api/extensions").await;
     assert_eq!(list["extensions"].as_array().unwrap().len(), 1);
-    assert_eq!(list["extensions"][0]["state"], "installed");
-    assert!(
-        list["ui_contributions"].as_array().unwrap().is_empty(),
-        "install 不发布 UI"
-    );
-    assert!(
-        get_json(&guard.app, &cookie, "/api/runners")
-            .await
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "install 后 runner 注册表为空"
-    );
+    assert_eq!(list["extensions"][0]["state"], "running");
 
     let (status, created) = post_json(
         &guard.app,
@@ -1007,15 +984,8 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let task_id = created["id"].as_str().unwrap().to_string();
 
-    // ---- enable：UI contribution 出现，runner 仍不注册（enable ≠ start） ----
-    let (status, body) = post_json(
-        &guard.app,
-        &cookie,
-        &format!("/api/extensions/{YAML_ID}/enable"),
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    // ---- 安装即用（2026-09-05）：install 自动 enable→start → Running；
+    // UI contribution 与 runner 随安装即生效 ----
     let ui = get_json(&guard.app, &cookie, "/api/extensions/ui").await;
     let mut panels: Vec<String> = ui
         .as_array()
@@ -1027,31 +997,27 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
     assert_eq!(
         panels,
         vec!["automation", "functions", "templates"],
-        "gamer.yaml 的 core-runtime 面板随 enable 发布"
+        "gamer.yaml 的 core-runtime 面板随安装发布"
     );
-    assert!(
-        get_json(&guard.app, &cookie, "/api/runners")
-            .await
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "enable 不注册 runner（ADR-13：runner 随 start 生命周期）"
-    );
-
-    // ---- start：runner 注册（owner_extension_id 锁归属） ----
-    let (status, started) = post_json(
-        &guard.app,
-        &cookie,
-        &format!("/api/extensions/{YAML_ID}/start"),
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{started}");
-    assert_eq!(started["state"], "running");
     let runners = get_json(&guard.app, &cookie, "/api/runners").await;
     assert_eq!(runners.as_array().unwrap().len(), 1);
     assert_eq!(runners[0]["runner_id"], YAML_ID);
     assert_eq!(runners[0]["owner_extension_id"], YAML_ID);
+
+    let (status, created) = post_json(
+        &guard.app,
+        &cookie,
+        "/api/tasks",
+        task_body("Guard Daily", YAML_ID, "com.guard.app/daily.yaml"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let task_id = created["id"].as_str().unwrap().to_string();
+    let task = get_json(&guard.app, &cookie, &format!("/api/tasks/{task_id}")).await;
+    assert_eq!(
+        task["state"], "active",
+        "runner 在位 → 新建任务直接 Active"
+    );
 
     // ---- stop：runner 注销 → 任务转 dependency_missing 但保留；UI 仍在（enabled） ----
     let (status, body) = post_json(
@@ -1137,6 +1103,60 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
         serde_json::json!(format!("missing_dependency={YAML_ID}"))
     );
 
+    // ---- enable ≠ start（ADR-13 保留语义）：enable 只发布 UI，runner 不注册 ----
+    let (status, body) = post_json(
+        &guard.app,
+        &cookie,
+        &format!("/api/extensions/{YAML_ID}/enable"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        get_json(&guard.app, &cookie, "/api/extensions/ui")
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+        "enable 重新发布 UI 贡献"
+    );
+    assert!(
+        get_json(&guard.app, &cookie, "/api/runners")
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "enable 不注册 runner（ADR-13：runner 随 start 生命周期）"
+    );
+    let (status, started) = post_json(
+        &guard.app,
+        &cookie,
+        &format!("/api/extensions/{YAML_ID}/start"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{started}");
+    assert_eq!(started["state"], "running");
+    assert_eq!(
+        get_json(&guard.app, &cookie, "/api/runners")
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "start 注册 runner"
+    );
+    // uninstall 前置：卸载守卫拒绝 Running，先 stop
+    let (status, body) = post_json(
+        &guard.app,
+        &cookie,
+        &format!("/api/extensions/{YAML_ID}/stop"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
     // ---- uninstall：扩展、UI、runner 全清，任务（用户资产）保留 ----
     let response = send(
         &guard.app,
@@ -1165,7 +1185,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
 
     // ---- reconcile_startup 恢复路径：重装 → 启动 → 制造崩溃窗口（磁盘遗留
     //   Running）→「重启后的进程」对账 → runner 重注册 + 任务恢复 Active ----
-    install_enable_start(&guard.app, &cookie).await;
+    install_yaml_running(&guard.app, &cookie).await;
     let (status, body) = post_json(
         &guard.app,
         &cookie,
@@ -1450,7 +1470,7 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
     assert_eq!(tasks.as_array().unwrap().len(), 1, "任务保留，不删除");
 
     // 安装 gamer.yaml（占位 wasm 即可：无实例执行模型）+ 启动。
-    install_enable_start(&guard.app, &cookie).await;
+    install_yaml_running(&guard.app, &cookie).await;
 
     // 同一任务自动恢复 Active（无需人工 enable/resume）。
     let task = get_json(&guard.app, &cookie, &format!("/api/tasks/{task_id}")).await;
