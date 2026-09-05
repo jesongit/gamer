@@ -1,0 +1,19 @@
+version: 3
+params:
+  - 'int:count:次数:3'
+  - name: mode
+    type: string
+    default: auto
+    remark: 模式
+  - name: ratio
+    type: number
+    default: 0.5
+defaults:
+  vision:
+    threshold: 0.85
+  timing:
+    after_tap: 300ms
+    after_match: 200ms
+    poll_interval: 100ms
+steps:
+  - tap: [0.5, 0.5]

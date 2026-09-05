@@ -1,0 +1,27 @@
+version: 3
+steps:
+  - find:
+      template: reward
+      timeout: 10s
+      threshold: 0.9
+      region: {"left":0.1,"top":0.1,"right":0.9,"bottom":0.9}
+      save: reward
+      then:
+        - tap: $reward.center
+        - wait: 300ms
+      else:
+        - log: 未找到
+      verify:
+        template: home
+        timeout: 5s
+  - match_first:
+      candidates:
+        - template: a.png
+          threshold: 0.9
+          steps:
+            - tap: $match.center
+        - template: b.png
+          steps:
+            - log: b
+      else:
+        - log: 都没有

@@ -1,0 +1,13 @@
+login:
+  params:
+    - 'string:account:账号:foo'
+  steps:
+    - set:
+        name: ok
+        value: true
+    - return: $ok
+
+helper:
+  steps:
+    - log: hi
+    - return: 0

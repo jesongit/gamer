@@ -1,0 +1,55 @@
+version: 3
+steps:
+  - app.start
+  - app.stop: com.demo.game
+  - tap: [0.5, 0.5]
+  - tap: $reward.center
+  - swipe:
+      from: [0.3, 0.5]
+      to: [0.7, 0.5]
+      duration: 500ms
+  - key: BACK
+  - key:
+      key: VOL_UP
+      action: down
+  - text: "你好"
+  - wait: 300ms
+  - wait:
+      min: 300ms
+      max: 700ms
+  - log: 开始执行
+  - log:
+      level: warn
+      message: 注意
+  - set:
+      name: count
+      value: 3
+  - if:
+      cond: $flag
+      then:
+        - log: 是
+      else:
+        - log: 否
+  - loop:
+      times: 5
+      steps:
+        - log: 体
+  - loop:
+      steps:
+        - break
+  - call:
+      target: script:daily/login
+      with:
+        account: $user
+      save: result
+  - invoke:
+      capability: vision.match
+      with:
+        template: a.png
+      save: m
+  - return: $total
+  - throw: 终止
+  - check:
+      template: t.png
+      timeout: 5s
+      threshold: 0.85
