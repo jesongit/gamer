@@ -1,7 +1,10 @@
 //! Native YAML runner adapter for the generic RunManager boundary.
 //!
-//! This module is deliberately the only place that translates a legacy
-//! `RunTarget` and typed YAML arguments into `core::RunRequest` payload data.
+//! This module is deliberately the only place that translates a
+//! [`RunTarget`] and typed YAML arguments into `core::RunRequest` payload
+//! data, and the single v3 execution entry: scripts must be `version: 3`
+//! (`yaml_vnext::load`), functions resolve via `yaml_vnext::load_function`;
+//! anything else fails with an unsupported-version error — no fallback.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
@@ -15,17 +18,15 @@ use crate::core::{
     RunContext, RunPayload, RunRequest,
 };
 use crate::device::DeviceManager;
-use crate::extensions::gamer_yaml::script_v2::TypedValue;
+use crate::extensions::gamer_yaml::run_target::{RunSpec, RunTarget, TypedValue};
 use crate::extensions::gamer_yaml::yaml_extension::YamlProgramResolver;
-use crate::extensions::gamer_yaml::yaml_vnext::{Program, Value};
+use crate::extensions::gamer_yaml::yaml_vnext::{self, Program, Value};
 use crate::run_manager::{RunExecutor, RunSource, StartRequest};
 use crate::store::Db;
 
-use super::exec::{RunSpec, RunTarget, Runner};
-
 /// `TypedValue` intentionally only implements the public scalar JSON shape;
 /// the generic request needs a lossless private wire encoding so the adapter
-/// can reconstruct parameter types without teaching the legacy YAML model
+/// can reconstruct parameter types without teaching the YAML model
 /// about RunManager serialization.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -73,7 +74,7 @@ struct WireArg {
     value: WireTypedValue,
 }
 
-/// Build a generic request while preserving the old YAML target/args format
+/// Build a generic request while preserving the YAML target/args format
 /// inside the `gamer.yaml` payload.
 pub fn yaml_start_request(
     app: AppContext,
@@ -126,10 +127,9 @@ pub fn yaml_app_context(
     ))
 }
 
-/// Production executor: YAML decoding and engine execution stay at the
-/// execution boundary; RunManager only sees generic core values.
+/// Production executor: YAML decoding and v3 execution stay at the execution
+/// boundary; RunManager only sees generic core values.
 pub struct EngineExecutor {
-    runner: Arc<Runner>,
     devices: Arc<DeviceManager>,
     db: Db,
     /// Filled after RunManager construction because the native capability
@@ -137,10 +137,17 @@ pub struct EngineExecutor {
     yaml_vnext: Arc<std::sync::RwLock<Option<Arc<YamlVnextAdapter>>>>,
 }
 
+/// 非 `version: 3` 源的统一运行错误（无 fallback；版本门禁与
+/// `yaml_vnext` 保存期诊断同码 `yaml.v3.version`）。
+fn unsupported_version(resource: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "yaml.v3.version: 不支持的 YAML 版本（{resource}）——当前只支持 version: 3 脚本"
+    )
+}
+
 impl EngineExecutor {
-    pub fn new(runner: Arc<Runner>, devices: Arc<DeviceManager>, db: Db) -> Self {
+    pub fn new(devices: Arc<DeviceManager>, db: Db) -> Self {
         Self {
-            runner,
             devices,
             db,
             yaml_vnext: Arc::new(std::sync::RwLock::new(None)),
@@ -216,43 +223,18 @@ impl RunExecutor for EngineExecutor {
         &'a self,
         context: &'a RunContext,
         request: &'a RunRequest,
-        realtime_logs: bool,
+        _realtime_logs: bool,
         stop: Arc<AtomicBool>,
     ) -> BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
         Box::pin(async move {
-            let log_cb: Option<Arc<dyn Fn(String, String) + Send + Sync>> =
-                if realtime_logs && request.payload.as_value().is_object() {
-                    let db = self.db.clone();
-                    let device_id = context.device_id().to_string();
-                    let entrypoint = request.entrypoint.clone();
-                    Some(Arc::new(move |level, message| {
-                        let db = db.clone();
-                        let device_id = device_id.clone();
-                        let entrypoint = entrypoint.clone();
-                        tokio::spawn(async move {
-                            if let Err(error) = db
-                                .add_log_async(&device_id, &entrypoint, &level, &message)
-                                .await
-                            {
-                                tracing::warn!(%error, "runtime log write failed");
-                            }
-                        });
-                    }))
-                } else {
-                    None
-                };
             let spec = Self::decode(request, context)?;
             let adapter = self
                 .yaml_vnext
                 .read()
                 .expect("YAML vNext adapter lock poisoned")
-                .clone();
-            if let Some(adapter) = adapter {
-                if let Some(logs) = adapter.execute(&spec, stop.clone()).await? {
-                    return Ok(logs);
-                }
-            }
-            self.runner.run(&spec, stop, log_cb).await
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("YAML v3 运行适配器未装配"))?;
+            adapter.execute(&spec, stop).await
         })
     }
 
@@ -273,8 +255,7 @@ struct YamlVnextAdapter {
 
 /// 包内可调用资源（`scripts/` / `functions/` 分区）解析器：resolve 仅被
 /// wasm-runtime 的 YAML guest programs 通道调用，无该 feature 时字段不被读取。
-/// target 命名空间解析与穿越校验收口在
-/// [`crate::extensions::gamer_yaml::yaml_vnext::split_call_target`]。
+/// target 命名空间解析与穿越校验收口在 [`yaml_vnext::split_call_target`]。
 #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
 struct ScriptProgramResolver {
     scripts: Arc<crate::resources::ResourceStore>,
@@ -305,19 +286,11 @@ impl ScriptProgramResolver {
             .scripts
             .get_text(crate::resources::ResourceKind::Scripts, &target)?
             .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 目标: {target}"))?;
-        if !crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(&script.content) {
-            anyhow::bail!("call 目标不是 v3 脚本: {target}");
+        if !yaml_vnext::is_v3_source(&script.content) {
+            return Err(unsupported_version(&target));
         }
-        crate::extensions::gamer_yaml::yaml_vnext::load(&script.content).map_err(|diagnostics| {
-            anyhow::anyhow!(
-                "v3 call 目标无效: {}",
-                diagnostics
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("；")
-            )
-        })
+        yaml_vnext::load(&script.content)
+            .map_err(|diagnostics| v3_diagnostics_error("v3 call 目标无效", &diagnostics))
     }
 
     /// `function:<文件短路径>/<函数名>`：functions/ 分区定位文件 → v3 函数库
@@ -328,41 +301,32 @@ impl ScriptProgramResolver {
             .scripts
             .get_text(crate::resources::ResourceKind::Functions, &target)?
             .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 函数文件: {target}"))?;
-        crate::extensions::gamer_yaml::yaml_vnext::load_function(&entry.content, function).map_err(
-            |diagnostics| {
-                anyhow::anyhow!(
-                    "v3 函数无效: {}",
-                    diagnostics
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("；")
-                )
-            },
-        )
+        yaml_vnext::load_function(&entry.content, function)
+            .map_err(|diagnostics| v3_diagnostics_error("v3 函数无效", &diagnostics))
     }
+}
+
+fn v3_diagnostics_error(prefix: &str, diagnostics: &[yaml_vnext::Diagnostic]) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}: {}",
+        prefix,
+        diagnostics
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("；")
+    )
 }
 
 impl YamlProgramResolver for ScriptProgramResolver {
     fn resolve(&self, target: &str, _args: &BTreeMap<String, Value>) -> anyhow::Result<Program> {
         // P12.4（ADR-YAML-04）：调用深度由 guest 本地 ExecutionBudget 计数，
         // resolver 只按命名空间定位目标程序，不再做深度守卫。
-        let parsed = crate::extensions::gamer_yaml::yaml_vnext::split_call_target(target)
-            .map_err(|diagnostics| {
-                anyhow::anyhow!(
-                    "v3 call 目标无效: {}",
-                    diagnostics
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("；")
-                )
-            })?;
+        let parsed = yaml_vnext::split_call_target(target)
+            .map_err(|diagnostics| v3_diagnostics_error("v3 call 目标无效", &diagnostics))?;
         match parsed {
-            crate::extensions::gamer_yaml::yaml_vnext::CallTarget::Script(id) => {
-                self.resolve_script(&id)
-            }
-            crate::extensions::gamer_yaml::yaml_vnext::CallTarget::Function { file, function } => {
+            yaml_vnext::CallTarget::Script(id) => self.resolve_script(&id),
+            yaml_vnext::CallTarget::Function { file, function } => {
                 self.resolve_function(&file, &function)
             }
         }
@@ -387,42 +351,76 @@ fn yaml_args(args: &[(String, TypedValue)]) -> BTreeMap<String, Value> {
 }
 
 impl YamlVnextAdapter {
+    /// v3 唯一执行路径：脚本非 `version: 3`（含 v2 存量源）→ 统一版本错误，
+    /// 无任何 fallback。
     async fn execute(
         &self,
         spec: &RunSpec,
         stop: Arc<AtomicBool>,
-    ) -> anyhow::Result<Option<Vec<(String, String)>>> {
-        let RunTarget::Script {
-            script_id,
-            start_index,
-        } = &spec.target
-        else {
-            return Ok(None);
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let (program, package, start_index) = match &spec.target {
+            RunTarget::Script {
+                script_id,
+                start_index,
+            } => {
+                let scripts = self.scripts.clone();
+                let probe_id = script_id.clone();
+                let script = tokio::task::spawn_blocking(move || {
+                    scripts.get_text(crate::resources::ResourceKind::Scripts, &probe_id)
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!("读取 v3 脚本失败: {error}"))??;
+                let Some(script) = script else {
+                    anyhow::bail!("脚本不存在: {}", script_id);
+                };
+                if !yaml_vnext::is_v3_source(&script.content) {
+                    return Err(unsupported_version(&script_id));
+                }
+                let program = yaml_vnext::load(&script.content)
+                    .map_err(|diagnostics| v3_diagnostics_error("v3 脚本无效", &diagnostics))?;
+                (program, script.package, Some(*start_index))
+            }
+            RunTarget::Function {
+                pkg,
+                file,
+                function,
+                start_index,
+            } => {
+                let target = format!("{pkg}/{file}.yaml");
+                let scripts = self.scripts.clone();
+                let probe_target = target.clone();
+                let entry = tokio::task::spawn_blocking(move || {
+                    scripts.get_text(crate::resources::ResourceKind::Functions, &probe_target)
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!("读取 v3 函数库失败: {error}"))??;
+                let Some(entry) = entry else {
+                    anyhow::bail!("函数文件不存在: {target}");
+                };
+                // 函数库是 bare-map（无 version 键，v3-ness 由步语法承载）：
+                // 直接按 v3 严格解析，结构不符即报解析诊断。
+                let name = match function {
+                    Some(name) => name.clone(),
+                    None => {
+                        // 缺省 = 文件内第一个函数
+                        let library = yaml_vnext::parse_function_library(&entry.content)
+                            .map_err(|diagnostics| {
+                                v3_diagnostics_error("v3 函数库无效", &diagnostics)
+                            })?;
+                        library
+                            .first()
+                            .map(|decl| decl.name.clone())
+                            .ok_or_else(|| anyhow::anyhow!("函数文件 {target} 未定义任何函数"))?
+                    }
+                };
+                let program = yaml_vnext::load_function(&entry.content, &name)
+                    .map_err(|diagnostics| v3_diagnostics_error("v3 函数无效", &diagnostics))?;
+                (program, pkg.clone(), Some(*start_index))
+            }
         };
-        let scripts = self.scripts.clone();
-        let script_id = script_id.clone();
-        let script = tokio::task::spawn_blocking(move || {
-            scripts.get_text(crate::resources::ResourceKind::Scripts, &script_id)
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("读取 v3 脚本失败: {error}"))??;
-        let Some(script) = script else {
-            return Ok(None);
-        };
-        if !crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(&script.content) {
-            return Ok(None);
-        }
-        let program = crate::extensions::gamer_yaml::yaml_vnext::load(&script.content)
-            .map_err(|diagnostics| {
-                anyhow::anyhow!(diagnostics
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("；"))
-            })?;
         let resolver = Arc::new(ScriptProgramResolver {
             scripts: self.scripts.clone(),
-            package: script.package.clone(),
+            package,
         });
         let extensions = self
             .extensions
@@ -438,11 +436,11 @@ impl YamlVnextAdapter {
             yaml_args(&spec.args),
             Some(resolver),
             stop,
-            Some(*start_index),
+            start_index,
             self.sink.clone(),
         )
         .await
-        .map(|_| Some(Vec::new()))
+        .map(|_| Vec::new())
         .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 }
@@ -469,10 +467,7 @@ mod tests {
         .unwrap();
         assert_eq!(request.request.runner_id, "gamer.yaml");
         assert_eq!(request.request.entrypoint, "content/daily.yaml");
-        assert_eq!(
-            request.request.payload.as_value()["target"]["start_index"],
-            2
-        );
+        assert_eq!(request.request.payload.as_value()["target"]["start_index"], 2);
     }
 
     /// ScriptProgramResolver 的 script:/function: 命名空间解析
@@ -537,6 +532,38 @@ mod tests {
             .resolve("function:lib/missing", &BTreeMap::new())
             .unwrap_err();
         assert!(error.to_string().contains("yaml.v3.function.not_found"));
+    }
+
+    /// 非 `version: 3` 源：脚本与函数两条路径都必须落在统一版本错误
+    /// （v3-only 门禁，无 fallback）。
+    #[test]
+    fn resolver_rejects_non_v3_sources_with_version_error() {
+        let data = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: data.path().to_path_buf(),
+            ..Default::default()
+        };
+        let store = Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
+        store
+            .save_text(
+                crate::resources::ResourceKind::Scripts,
+                None,
+                "com.test.app",
+                "legacy.yaml",
+                "steps:\n  - log: v2 形态\n",
+            )
+            .unwrap();
+        let resolver = ScriptProgramResolver {
+            scripts: store,
+            package: "com.test.app".into(),
+        };
+        let error = resolver
+            .resolve("script:legacy", &BTreeMap::new())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("yaml.v3.version"),
+            "非 v3 脚本必须报版本错误: {error}"
+        );
     }
 
     /// 分区内相对 id → 资源 id 的归一规则（不触碰磁盘）。

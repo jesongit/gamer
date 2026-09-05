@@ -428,12 +428,7 @@ mod contract_tests {
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
-        let executor = Arc::new(crate::extensions::gamer_yaml::engine::EngineExecutor::new(
-            Arc::new(crate::extensions::gamer_yaml::engine::Runner::new(
-                devices.clone(),
-                Arc::new(crate::webrtc::ViewerEventSink::new(viewers.clone())),
-                scripts.clone(),
-            )),
+        let executor = Arc::new(crate::extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
             devices.clone(),
             db.clone(),
         ));
@@ -581,12 +576,7 @@ mod contract_tests {
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
-        let executor = Arc::new(crate::extensions::gamer_yaml::engine::EngineExecutor::new(
-            Arc::new(crate::extensions::gamer_yaml::engine::Runner::new(
-                devices.clone(),
-                Arc::new(crate::webrtc::ViewerEventSink::new(viewers.clone())),
-                scripts.clone(),
-            )),
+        let executor = Arc::new(crate::extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
             devices.clone(),
             db.clone(),
         ));

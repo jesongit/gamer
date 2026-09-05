@@ -1,9 +1,9 @@
 //! Entrypoint 参数 schema 描述（P12.3 / 契约 §7）。
 //!
 //! 前端约束是「不得为取参数而解析 YAML」：本模块按 entrypoint 资源 id 读取
-//! 分区资源并产出可渲染参数表单的 JSON schema——v2 七类与 v3（`version: 3`
-//! 顶层 / 函数库 bare-map）双格式走同一端点。资源缺失 → 结构化 not_found；
-//! 解析失败 / 未知参数类型 → 结构化 invalid（诊断与保存期同源）。本模块物理
+//! 分区资源并产出可渲染参数表单的 JSON schema——脚本（`version: 3` 顶层）与
+//! 函数库 bare-map 走同一端点。资源缺失 → 结构化 not_found；非 v3 源 / 解析
+//! 失败 / 未知参数类型 → 结构化 invalid（诊断与运行期绑定同源）。本模块物理
 //! 居于 gamer_yaml 扩展边界内（架构守卫：extensions 外禁现 yaml_vnext 引用），
 //! Core 侧经 `scheduler::EntrypointDescriber` 窄 trait 透传，不感知本模块。
 
@@ -11,11 +11,11 @@ use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
 
-use crate::extensions::gamer_yaml::engine::{load_entry_param_decls, RunTarget};
-use crate::extensions::gamer_yaml::script_v2::params::KEY_NAMES;
+use crate::extensions::gamer_yaml::error::ScriptError;
+use crate::extensions::gamer_yaml::params::KEY_NAMES;
 use crate::extensions::gamer_yaml::task_params::{
-    is_known_v3_type, normalize_v3_default_json, v3_decls_from_program, v3_param_signature,
-    V3ParamDecl,
+    is_known_v3_type, normalize_v3_default_json, probe_v3_function_decls, probe_v3_script_decls,
+    v3_param_signature, V3ParamDecl,
 };
 use crate::resources::{ResourceKind as RK, ResourceStore};
 
@@ -27,6 +27,12 @@ pub(crate) enum DescribeError {
 }
 
 impl DescribeError {
+    fn from_script_errors(diagnostics: &[ScriptError]) -> Self {
+        Self::Invalid {
+            diagnostics: serde_json::to_value(diagnostics).unwrap_or_default(),
+        }
+    }
+
     fn invalid_diagnostic(code: &str, message: impl Into<String>) -> Self {
         Self::Invalid {
             diagnostics: json!([{ "code": code, "message": message.into() }]),
@@ -77,8 +83,8 @@ pub(crate) fn describe_entrypoint(
 }
 
 fn describe_script(scripts: &ResourceStore, entrypoint: &str) -> Result<Value, DescribeError> {
-    let entry = match scripts.get_text(RK::Scripts, entrypoint) {
-        Ok(Some(entry)) => entry,
+    match scripts.get_text(RK::Scripts, entrypoint) {
+        Ok(Some(_)) => {}
         Ok(None) => {
             return Err(DescribeError::NotFound {
                 resource: entrypoint.to_string(),
@@ -90,26 +96,10 @@ fn describe_script(scripts: &ResourceStore, entrypoint: &str) -> Result<Value, D
                 format!("读取脚本失败: {error:#}"),
             ))
         }
-    };
-    if crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(&entry.content) {
-        let program = crate::extensions::gamer_yaml::yaml_vnext::load(&entry.content)
-            .map_err(|diagnostics| DescribeError::Invalid {
-                diagnostics: serde_json::to_value(&diagnostics).unwrap_or_default(),
-            })?;
-        let decls = v3_decls_from_program(&program);
-        return schema_payload("script", &decls);
     }
-    // v2 存量脚本：服务端 v2 解析（快照级 composite，包内脚本亦可描述）
-    let target = RunTarget::Script {
-        script_id: entrypoint.to_string(),
-        start_index: 0,
-    };
-    match load_entry_param_decls(scripts, &target) {
-        Ok((decls, _)) => v2_schema_payload("script", &decls),
-        Err(diagnostics) => Err(DescribeError::Invalid {
-            diagnostics: serde_json::to_value(&diagnostics).unwrap_or_default(),
-        }),
-    }
+    let decls = probe_v3_script_decls(scripts, entrypoint)
+        .map_err(|diagnostics| DescribeError::from_script_errors(&diagnostics))?;
+    schema_payload("script", &decls)
 }
 
 fn describe_function(
@@ -139,61 +129,9 @@ fn describe_function(
             ))
         }
     }
-    // v2 严格解析先行（保留 v2 口径的结构化诊断与七类强类型）
-    let target = RunTarget::Function {
-        pkg: pkg.to_string(),
-        file: file.to_string(),
-        function: Some(function.to_string()),
-        start_index: 0,
-    };
-    match load_entry_param_decls(scripts, &target) {
-        Ok((decls, _)) => v2_schema_payload("function", &decls),
-        Err(v2_diagnostics) => {
-            // v2 拒收（如 v3 扩展类型）→ 函数库 bare-map 宽松抽取目标函数 params
-            match crate::extensions::gamer_yaml::task_params::probe_v3_function_decls(
-                scripts,
-                pkg,
-                file,
-                Some(function),
-            ) {
-                Ok(Some(decls)) => schema_payload("function", &decls),
-                Ok(None) => Err(DescribeError::Invalid {
-                    diagnostics: serde_json::to_value(&v2_diagnostics).unwrap_or_default(),
-                }),
-                Err(extra) => {
-                    let mut all = v2_diagnostics;
-                    all.extend(extra);
-                    Err(DescribeError::Invalid {
-                        diagnostics: serde_json::to_value(&all).unwrap_or_default(),
-                    })
-                }
-            }
-        }
-    }
-}
-
-/// v2 声明（七类强类型）→ 契约 §7 载荷。
-fn v2_schema_payload(
-    kind: &str,
-    decls: &[crate::extensions::gamer_yaml::script_v2::ParamDecl],
-) -> Result<Value, DescribeError> {
-    let generic: Vec<V3ParamDecl> = decls
-        .iter()
-        .map(|decl| V3ParamDecl {
-            name: decl.name.clone(),
-            ty: decl.ty.as_str().to_string(),
-            remark: decl.remark.clone(),
-            default: decl
-                .default
-                .as_ref()
-                .map(|value| serde_json::to_value(value).unwrap_or(Value::Null)),
-        })
-        .collect();
-    Ok(schema_payload_with(
-        kind,
-        &generic,
-        crate::extensions::gamer_yaml::script_v2::model::param_signature(decls),
-    ))
+    let decls = probe_v3_function_decls(scripts, pkg, file, Some(function))
+        .map_err(|diagnostics| DescribeError::from_script_errors(&diagnostics))?;
+    schema_payload("function", &decls)
 }
 
 /// v3 声明 → 契约 §7 载荷（含当前 psig1 签名，前端可做过期预检）。
@@ -251,7 +189,7 @@ fn schema_payload_with(kind: &str, decls: &[V3ParamDecl], signature: String) -> 
             );
         }
         // 原始声明类型（time/coord 等 UI 形态由前端按此渲染；执行期 TypedValue
-        // 行为不变，见契约 §7「v2 ty 名映射到上述类型」）
+        // 行为不变，见契约 §7）
         property.insert(
             "param_type".into(),
             Value::String(decl.ty.trim().to_string()),
@@ -311,14 +249,8 @@ mod tests {
     }
 
     #[test]
-    fn describes_v2_and_v3_scripts_with_schema_and_signature() {
-        let (cfg, dir) = store_dir("dual");
-        write(
-            &cfg,
-            "scripts",
-            "v2.yaml",
-            "params:\n  - 'text:msg:消息:\"默认\"'\n  - 'bool:fast:快速'\nsteps:\n  - log: $msg\n",
-        );
+    fn describes_v3_scripts_with_schema_and_signature() {
+        let (cfg, dir) = store_dir("v3");
         write(
             &cfg,
             "scripts",
@@ -327,28 +259,14 @@ mod tests {
         );
         let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
 
-        let v2 = describe_entrypoint(&scripts, "com.test.app/v2.yaml").unwrap();
-        assert_eq!(v2["kind"], "script");
-        assert_eq!(v2["schema"]["type"], "object");
-        assert_eq!(v2["schema"]["properties"]["msg"]["type"], "string");
-        assert_eq!(v2["schema"]["properties"]["msg"]["default"], "默认");
-        assert_eq!(v2["schema"]["properties"]["msg"]["description"], "消息");
-        assert_eq!(v2["schema"]["properties"]["fast"]["type"], "boolean");
-        assert_eq!(
-            v2["schema"]["required"],
-            serde_json::json!(["fast"]),
-            "无默认值 = 必填"
-        );
-        assert!(v2["signature"]
-            .as_str()
-            .unwrap()
-            .starts_with("psig1|text,msg,0,"));
-        assert_eq!(v2["schema"]["properties"]["fast"]["param_type"], "bool");
-
         let v3 = describe_entrypoint(&scripts, "com.test.app/v3.yaml").unwrap();
         assert_eq!(v3["kind"], "script");
+        assert_eq!(v3["schema"]["type"], "object");
         assert_eq!(v3["schema"]["properties"]["count"]["type"], "integer");
         assert_eq!(v3["schema"]["properties"]["count"]["default"], 3);
+        assert_eq!(v3["schema"]["properties"]["msg"]["type"], "string");
+        assert_eq!(v3["schema"]["properties"]["msg"]["default"], "默认");
+        assert_eq!(v3["schema"]["properties"]["msg"]["description"], "消息");
         assert_eq!(v3["schema"]["properties"]["msg"]["param_type"], "text");
         assert_eq!(v3["schema"]["required"], serde_json::json!([]));
         assert_eq!(
@@ -386,7 +304,7 @@ mod tests {
             }
             other => panic!("expected not_found, got {:?}", other.is_ok()),
         }
-        // 函数名不存在 → invalid（v2 结构化诊断定位到函数名）
+        // 函数名不存在 → invalid（结构化诊断定位到函数名）
         match describe_entrypoint(&scripts, "com.test.app/lib.yaml#ghost") {
             Err(DescribeError::Invalid { diagnostics }) => {
                 let text = diagnostics.to_string();
@@ -404,6 +322,17 @@ mod tests {
                 assert!(diagnostics.to_string().contains("yaml.v3"));
             }
             other => panic!("expected invalid, got {:?}", other.is_ok()),
+        }
+        // 非 v3 存量脚本 → 版本门禁 invalid（v3-only，无 fallback）
+        write(&cfg, "scripts", "legacy.yaml", "params: []\nsteps: []\n");
+        match describe_entrypoint(&scripts, "com.test.app/legacy.yaml") {
+            Err(DescribeError::Invalid { diagnostics }) => {
+                assert!(
+                    diagnostics.to_string().contains("yaml.v3.version"),
+                    "非 v3 脚本必须报版本门禁: {diagnostics}"
+                );
+            }
+            other => panic!("expected version gate, got {:?}", other.is_ok()),
         }
         // 未知类型声明 → invalid（与运行期绑定同口径）
         write(

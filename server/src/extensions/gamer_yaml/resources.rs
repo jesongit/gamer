@@ -140,7 +140,23 @@ impl ResourceProvider for StoreView<'_> {
         &self,
         short_name: &str,
     ) -> crate::extensions::gamer_yaml::script_v2::validate::TemplateAvail {
-        super::engine::snapshot::template_avail(self.store, &self.pkg, short_name)
+        template_avail(self.store, &self.pkg, short_name)
+    }
+}
+
+/// 模板短名可用性（composite 三层，与 `resolve_template_path` 完全一致）：
+/// 唯一存在 / 缺失 / 同短名多个 `#` 后缀候选（歧义）。
+fn template_avail(
+    store: &ResourceStore,
+    pkg: &str,
+    short: &str,
+) -> crate::extensions::gamer_yaml::script_v2::validate::TemplateAvail {
+    use crate::app_packages::TemplateLookup;
+    use crate::extensions::gamer_yaml::script_v2::validate::TemplateAvail;
+    match store.composite().template(pkg, short) {
+        TemplateLookup::Found(_) => TemplateAvail::Found,
+        TemplateLookup::Ambiguous { .. } => TemplateAvail::Ambiguous,
+        TemplateLookup::NotFound => TemplateAvail::NotFound,
     }
 }
 

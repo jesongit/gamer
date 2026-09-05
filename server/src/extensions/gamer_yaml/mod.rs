@@ -2,14 +2,16 @@
 //!
 //! 本目录物理收编 YAML 自动化栈的全部内容语义：
 //!
-//! - [`script_v2`]：v2 严格 loader / 校验 / 参数 / 序列化 / AST（YAML parser + Script DSL）；
+//! - [`error`]：扩展侧 REST 结构化诊断载体（五元组）；
+//! - [`params`]：参数绑定共用的标量解析与校验；
+//! - [`run_target`]：运行请求描述（RunTarget / RunSpec / TypedValue wire）；
 //! - [`yaml_vnext`]：v3 纯数据前端（version:3 判别 + 小 AST wire 形态）；
-//! - [`yaml_extension`]：v3 原生参考解释器、capability invoker、保存/导入双格式
-//!   校验入口（`validate_compatible_script`）与 WASM runtime 契约 trait；
-//! - [`engine`]：v2 执行引擎（exec / snapshot / ports / runner_adapter）——非 v3
-//!   脚本落回 v2 exec，v3 经 [`run_yaml_vnext`] 交 WASM guest；
+//! - [`yaml_extension`]：v3 原生参考解释器、capability invoker、保存/导入
+//!   校验入口与 WASM runtime 契约 trait；
+//! - [`runner_adapter`]：v3-only 执行器（EngineExecutor）——非 `version: 3`
+//!   脚本统一报版本错误，无 fallback；
 //! - [`timer_yaml`]：Timer Core 的 gamer.yaml runner + 扩展生命周期注册器；
-//! - [`task_params`]：定时任务参数快照与 psig1 签名门禁；
+//! - [`task_params`]：定时任务参数快照与 psig1 签名门禁（v3 参数桥）；
 //! - [`wasm_host`]：YAML world 的 Wasmtime 宿主（feature = "wasm-runtime"）。
 //!
 //! 依赖方向（§16）：本模块 → Core（device / matcher / capabilities / timer_core /
@@ -17,15 +19,18 @@
 //! scheduler / webrtc / capabilities）不得 import 本目录内部符号，只能走 Core 定义的
 //! 窄 trait（`TimerRunner`、`ResourceKindHandler` 等）与本文件显式导出的门面。
 
-pub(crate) mod engine;
+pub(crate) mod error;
+pub(crate) mod params;
 pub(crate) mod resources;
+pub(crate) mod run_target;
+pub(crate) mod runner_adapter;
 pub(crate) mod script_v2;
 pub(crate) mod task_params;
 pub(crate) mod timer_yaml;
 pub(crate) mod yaml_extension;
 pub(crate) mod yaml_vnext;
 
-pub(crate) use engine::{yaml_app_context, yaml_start_request, EngineExecutor};
+pub(crate) use runner_adapter::{yaml_app_context, yaml_start_request, EngineExecutor};
 pub(crate) use resources::{register_resource_handlers, CompatibleYamlError, CompatibleYamlSource};
 pub(crate) use timer_yaml::{YamlTimerRunner, YamlTimerRunnerRegistrar};
 pub(crate) use yaml_extension::{

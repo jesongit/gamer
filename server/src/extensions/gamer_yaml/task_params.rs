@@ -1,22 +1,25 @@
-//! 定时任务参数快照与签名门禁（plan §12.3 / CONTRACT §4.3–4.5）。
+//! 定时任务参数快照与签名门禁（plan §12.3 / 契约 §4.3–4.5 / P12.3 参数桥）。
 //!
 //! 任务保存的是**完整类型化 args 快照**（七类 TypedValue 的 JSON 形态，与 run
 //! API args 同构）+ 保存时脚本的 psig1 参数签名。调度/立即运行前过本模块的门禁：
 //!
-//! - 脚本缺失 / 解析失败 → 明确失败（同口径，不空跑）；
+//! - 脚本缺失 / 非 `version: 3` / 解析失败 → 明确失败（同口径，不空跑）；
 //! - 签名不一致（脚本参数声明/默认值变化）→ 参数过期，明确失败，等待重新确认；
 //! - 门禁通过 → 快照整体作为 StartRequest.args 传入（快照是全量，天然不静默
 //!   继承新默认值）。
 //!
+//! 参数唯一来源是 v3 `Program.params`（YAML v2 已删除，无回落）。签名
+//! [`v3_param_signature`] 产出 psig1 wire 形态（等价声明逐字节稳定，存量任务
+//! 行的 stored 签名继续可比对）。
+//!
 //! 日志约束：运行链路只记录参数签名与参数名列表，**绝不记录参数值**（text
 //! 参数防泄露）；日志侧展示签名用 [`signature_short_code`] 短码。
 
-use crate::extensions::gamer_yaml::script_v2::model::param_signature;
-use crate::extensions::gamer_yaml::script_v2::params::{
-    fmt_num, is_valid_color, is_valid_key, merge_args, parse_json_arg, parse_time_ms,
-    unescape_double_quoted,
+use crate::extensions::gamer_yaml::error::{codes, diagnostics_from_vnext, ScriptError};
+use crate::extensions::gamer_yaml::params::{
+    coord_in_range, fmt_num, is_valid_color, is_valid_key, parse_time_ms, unescape_double_quoted,
 };
-use crate::extensions::gamer_yaml::script_v2::{ParamDecl, ScriptError, TypedValue};
+use crate::extensions::gamer_yaml::run_target::{BoundEntryArgs, RunTarget, TypedValue};
 use crate::resources::ResourceKind as RK;
 use crate::resources::ResourceStore;
 
@@ -72,32 +75,13 @@ impl GateError {
     }
 }
 
-/// 载入脚本当前参数声明并复算 psig1 签名。
-/// 脚本缺失 / 读取失败 / 严格解析失败分别映射到 [`GateError`]。
-pub fn probe_script_signature(
-    scripts: &ResourceStore,
-    script_id: &str,
-) -> Result<(Vec<ParamDecl>, String), GateError> {
-    match scripts.get_text(RK::Scripts, script_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => return Err(GateError::ScriptMissing),
-        Err(e) => {
-            return Err(GateError::ScriptInvalid(vec![ScriptError::new(
-                crate::extensions::gamer_yaml::script_v2::error::codes::YAML_SYNTAX_ERROR,
-                format!("读取脚本失败: {e:#}"),
-                script_id,
-            )]))
-        }
-    }
-    let target = crate::extensions::gamer_yaml::engine::RunTarget::Script {
-        script_id: script_id.to_string(),
-        start_index: 0,
-    };
-    let (decls, _label) =
-        crate::extensions::gamer_yaml::engine::load_entry_param_decls(scripts, &target)
-            .map_err(GateError::ScriptInvalid)?;
-    let signature = param_signature(&decls);
-    Ok((decls, signature))
+/// 读取失败 → 结构化诊断（统一口径）。
+fn read_failed(error: anyhow::Error, resource: &str) -> Vec<ScriptError> {
+    vec![ScriptError::new(
+        codes::YAML_SYNTAX_ERROR,
+        format!("读取脚本失败: {error:#}"),
+        resource,
+    )]
 }
 
 /// 完整任务门禁：载入脚本当前签名 →（旧数据带签名时）与存储签名比对 → 从
@@ -105,38 +89,21 @@ pub fn probe_script_signature(
 ///
 /// P11.1（ADR-12）：`stored_signature` 为 None（新 Task 模型保存的 payload
 /// 不携带 psig1 快照签名）时跳过过期门禁，按当前声明重绑参数。
-///
-/// P12.3：`version: 3` 源先于 v2 loader 分流——v2 loader 不认识 v3 顶层键集，
-/// 会把合法 v3 脚本拒成解析失败。v3 声明经 [`v3_param_signature`] 产出与 v2
-/// 同 wire 形态的 psig1（v2→v3 迁移后参数未变时旧 Task 行的 stored 签名继续
-/// 可比对），参数重绑走 [`rebind_v3_snapshot`]。
 pub fn gate_task(
     scripts: &ResourceStore,
     script_id: &str,
     args: &serde_json::Value,
     stored_signature: Option<&str>,
 ) -> Result<TaskArgs, GateError> {
-    if let Some(decls) =
-        probe_v3_script_decls(scripts, script_id).map_err(GateError::ScriptInvalid)?
-    {
-        let current = v3_param_signature(&decls);
-        if let Some(stored) = stored_signature {
-            if stored != current {
-                return Err(GateError::SignatureMismatch {
-                    stored: stored.to_string(),
-                    current,
-                });
-            }
+    match scripts.get_text(RK::Scripts, script_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => return Err(GateError::ScriptMissing),
+        Err(error) => {
+            return Err(GateError::ScriptInvalid(read_failed(error, script_id)))
         }
-        let overrides =
-            rebind_v3_snapshot(&decls, args, script_id).map_err(GateError::ScriptInvalid)?;
-        return Ok(TaskArgs {
-            signature: current,
-            names: decls.iter().map(|d| d.name.clone()).collect(),
-            overrides,
-        });
     }
-    let (decls, current) = probe_script_signature(scripts, script_id)?;
+    let decls = probe_v3_script_decls(scripts, script_id).map_err(GateError::ScriptInvalid)?;
+    let current = v3_param_signature(&decls);
     if let Some(stored) = stored_signature {
         if stored != current {
             return Err(GateError::SignatureMismatch {
@@ -145,63 +112,12 @@ pub fn gate_task(
             });
         }
     }
-    let overrides = rebind_snapshot(&decls, args, script_id).map_err(GateError::ScriptInvalid)?;
+    let overrides = rebind_v3_snapshot(&decls, args, script_id).map_err(GateError::ScriptInvalid)?;
     Ok(TaskArgs {
         signature: current,
         names: decls.iter().map(|d| d.name.clone()).collect(),
         overrides,
     })
-}
-
-/// 把已存 args 重新绑定到当前声明（YAML runner 运行传参共用）：
-/// - 仍存在的参数保留原值；
-/// - 新增参数取声明默认值；
-/// - 已删除的参数静默丢弃（签名门禁先行时正常路径不会出现）。
-///
-/// 绑定后缺失必填参数 → 结构化诊断（param.args.missing_required）。
-pub fn rebind_snapshot(
-    decls: &[ParamDecl],
-    args: &serde_json::Value,
-    resource: &str,
-) -> Result<Vec<(String, TypedValue)>, Vec<ScriptError>> {
-    use crate::extensions::gamer_yaml::script_v2::error::codes;
-    let stored: serde_json::Map<String, serde_json::Value> = match args.as_object() {
-        Some(map) => map.clone(),
-        _ => {
-            return Err(vec![ScriptError::new(
-                codes::PARAM_ARGS_TYPE_MISMATCH,
-                "任务参数快照必须是 JSON 对象",
-                resource,
-            )
-            .at("args", "args")])
-        }
-    };
-    let mut overrides = Vec::new();
-    let mut errors = Vec::new();
-    for decl in decls {
-        if let Some(value) = stored.get(&decl.name) {
-            if let Some(v) = parse_json_arg(decl.ty, value) {
-                overrides.push((decl.name.clone(), v));
-            } else {
-                errors.push(
-                    ScriptError::new(
-                        codes::PARAM_ARGS_TYPE_MISMATCH,
-                        format!("任务参数快照中的参数 {} 类型无效", decl.name),
-                        resource,
-                    )
-                    .at(format!("args.{}", decl.name), "args"),
-                );
-            }
-        }
-    }
-    match merge_args(decls, overrides, resource) {
-        Ok(bound) if errors.is_empty() => Ok(bound),
-        Ok(_) => Err(errors),
-        Err(mut diagnostics) => {
-            errors.append(&mut diagnostics);
-            Err(errors)
-        }
-    }
 }
 
 /// 签名短码（日志展示用）：FNV-1a 64 高 32 位的 8 位十六进制。签名串本身
@@ -219,31 +135,29 @@ pub fn signature_short_code(signature: &str) -> String {
 // v3 参数桥（P12.3 / 契约 §7）：version:3 源的参数声明、psig1 签名与绑定
 // ===========================================================================
 //
-// v3 顶层脚本经 `yaml_vnext::load` 取 `Program.params`；函数库 bare-map 无
-// version 键（v3-ness 由步语法承载，静态不可判别），先走 v2 严格解析、失败后
-// 宽松抽取目标函数的 params。v3 声明在本模块规范化为 [`V3ParamDecl`]：
-// - 签名：[`v3_param_signature`] 产出与 v2 `param_signature` 完全同 wire 形态
-//   的 `psig1|ty,name,required,canon`（等价声明逐字节一致，v2→v3 迁移不触发
-//   任务参数过期）；
-// - 绑定：显式实参按声明类型收纳为 v2 [`TypedValue`]（执行链 wire 即七类
-//   TypedValue）；数值类（int/number）暂以文本形态过线，见 `coerce_v3_arg`。
+// 脚本顶层经 `yaml_vnext::load` 取 `Program.params`；函数库 bare-map 无
+// version 键（v3-ness 由步语法承载），经 `yaml_vnext::parse_function_library`
+// 严格解析后取目标函数的 params。声明统一规范化为 [`V3ParamDecl`]：
+// - 签名：[`v3_param_signature`] 产出 `psig1|ty,name,required,canon` wire
+//   形态（等价声明逐字节一致，存量任务 stored 签名继续可比对）；
+// - 绑定：显式实参按声明类型收纳为 v3 执行链的七类 [`TypedValue`]
+//   （数值类暂以文本形态过线，见 `coerce_v3_arg`）。
 
-/// v3 参数声明（脚本 `Program.params` 与函数库宽松解析共用的规范化视图）。
+/// v3 参数声明（脚本 `Program.params` 与函数库解析共用的规范化视图）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct V3ParamDecl {
     pub name: String,
-    /// 类型名：v2 七类（tmpl/coord/color/time/key/text/bool）或 v3 扩展名
+    /// 类型名：七类（tmpl/coord/color/time/key/text/bool）或 v3 扩展名
     /// （string/template/boolean/int/integer/number/value）。
     pub ty: String,
-    /// 备注描述。v3 脚本/函数库声明自 P12.5 起透出 remark
-    /// （`yaml_vnext::ParamDecl.remark`）；函数库宽松解析一直保留。
+    /// 备注描述（透出到参数 schema description）。
     pub remark: String,
     /// JSON 形态默认值；None = 必填。字符串形态声明的默认值保持原串
     /// （与 `yaml_vnext::parse_params` 一致），消费侧按类型规整。
     pub default: Option<serde_json::Value>,
 }
 
-/// v3 声明可识别的类型全集（v2 七类 + v3 别名/扩展）。
+/// v3 声明可识别的类型全集（七类 + v3 别名/扩展）。
 const V3_KNOWN_TYPES: &[&str] = &[
     "tmpl", "template", "coord", "color", "time", "key", "text", "string", "bool", "boolean",
     "int", "integer", "number", "value",
@@ -296,173 +210,95 @@ fn v3_value_to_plain_json(value: &crate::extensions::gamer_yaml::yaml_vnext::Val
     }
 }
 
-/// 读取脚本并判定 v3；`Ok(None)` = 非 v3 源（调用方走 v2 路径）。
-/// 读取失败 / v3 解析失败 → 结构化诊断（v3 诊断保留 `yaml.v3.*` 码）。
+/// 读取脚本并解析 v3 参数声明。脚本缺失 → `resource.script.not_found`；
+/// 非 `version: 3` 源 → 版本门禁诊断（`yaml.v3.version`）；v3 解析失败 →
+/// 保留 `yaml.v3.*` 码的结构化诊断。
 pub(crate) fn probe_v3_script_decls(
     scripts: &ResourceStore,
     script_id: &str,
-) -> Result<Option<Vec<V3ParamDecl>>, Vec<ScriptError>> {
-    use crate::extensions::gamer_yaml::script_v2::error::codes;
+) -> Result<Vec<V3ParamDecl>, Vec<ScriptError>> {
     let entry = match scripts.get_text(RK::Scripts, script_id) {
         Ok(Some(entry)) => entry,
-        Ok(None) => return Ok(None),
-        Err(error) => {
+        Ok(None) => {
             return Err(vec![ScriptError::new(
-                codes::YAML_SYNTAX_ERROR,
-                format!("读取脚本失败: {error:#}"),
+                codes::RESOURCE_SCRIPT_NOT_FOUND,
+                format!("脚本 {script_id:?} 不存在"),
                 script_id,
             )])
         }
+        Err(error) => return Err(read_failed(error, script_id)),
     };
     if !crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(&entry.content) {
-        return Ok(None);
+        return Err(vec![ScriptError::new(
+            codes::VERSION_UNSUPPORTED,
+            "不支持的 YAML 版本——当前只支持 version: 3 脚本（YAML v2 已移除）",
+            script_id,
+        )]);
     }
-    let program = crate::extensions::gamer_yaml::yaml_vnext::load(&entry.content).map_err(
-        |diagnostics| {
-            diagnostics
-                .into_iter()
-                .map(|d| ScriptError::new(d.code, d.message, script_id).at(d.path, ""))
-                .collect::<Vec<_>>()
-        },
-    )?;
-    Ok(Some(v3_decls_from_program(&program)))
+    let program = crate::extensions::gamer_yaml::yaml_vnext::load(&entry.content)
+        .map_err(|diagnostics| diagnostics_from_vnext(&diagnostics, script_id))?;
+    Ok(v3_decls_from_program(&program))
 }
 
-/// v3 函数库宽松解析：v2 严格解析失败后的兜底（bare-map 无 version 键，无法
-/// 静态判别 v3-ness）。`Ok(Some(decls))` = 目标函数 params 已取得；`Ok(None)`
-/// = 文件缺失或裸 YAML/目标函数不可得（调用方回落 v2 诊断）。
-///
-/// 注意：v3 函数的**执行**（call `function:` 命名空间）归 call 统一任务；此处
-/// 只打通参数解析/描述/门禁，使 runner 边界先行可用。
+/// 解析 v3 函数库并取目标函数的参数声明。`function` 为 None 时取文件内
+/// 第一个函数（与入口/描述器语义一致）。文件缺失 → `resource.func.not_found`；
+/// 目标函数不存在 → 同码；库解析失败 → `yaml.v3.*` 结构化诊断。
 pub(crate) fn probe_v3_function_decls(
     scripts: &ResourceStore,
     pkg: &str,
     file: &str,
     function: Option<&str>,
-) -> Result<Option<Vec<V3ParamDecl>>, Vec<ScriptError>> {
-    use crate::extensions::gamer_yaml::script_v2::error::codes;
+) -> Result<Vec<V3ParamDecl>, Vec<ScriptError>> {
+    use crate::extensions::gamer_yaml::yaml_vnext;
     let rel = format!("{pkg}/{file}.yaml");
     let entry = match scripts.get_text(RK::Functions, &rel) {
         Ok(Some(entry)) => entry,
-        Ok(None) => return Ok(None),
-        Err(error) => {
-            return Err(vec![ScriptError::new(
-                codes::YAML_SYNTAX_ERROR,
-                format!("读取函数库失败: {error:#}"),
-                rel,
-            )])
-        }
-    };
-    let root: serde_yaml::Value = match serde_yaml::from_str(&entry.content) {
-        Ok(root) => root,
-        Err(_) => return Ok(None),
-    };
-    let Some(map) = root.as_mapping() else {
-        return Ok(None);
-    };
-    let target = match function {
-        Some(name) => serde_yaml::Value::String(name.trim().to_string()),
-        // 缺省 = 文件内第一个函数（与 v2 入口语义一致）
-        None => match map.iter().next() {
-            Some((key, _)) => key.clone(),
-            None => return Ok(None),
-        },
-    };
-    let Some(func) = map.get(&target).and_then(|value| value.as_mapping()) else {
-        // 显式函数名缺失（bare-map 可解析但无该键）→ 结构化 not_found，
-        // 与 v2 入口的 resource.func.not_found 同码
-        if let Some(name) = function {
+        Ok(None) => {
             return Err(vec![ScriptError::new(
                 codes::RESOURCE_FUNC_NOT_FOUND,
-                format!("函数 {file}/{name} 不存在（函数文件中无该函数名）"),
+                format!("函数文件 {rel} 不存在"),
                 file.to_string(),
-            )]);
+            )])
         }
-        return Ok(None);
+        Err(error) => return Err(read_failed(error, &rel)),
     };
-    let params = func.get(&serde_yaml::Value::from("params"));
-    let items: Vec<serde_yaml::Value> = match params {
-        None => Vec::new(),
-        Some(value) => match value.as_sequence() {
-            Some(items) => items.clone(),
-            None => {
-                return Err(vec![ScriptError::new(
-                    codes::PARAM_DECL_FORMAT,
-                    "params 必须是列表",
-                    rel,
-                )
-                .at("params", "params")])
-            }
-        },
+    let library = yaml_vnext::parse_function_library(&entry.content)
+        .map_err(|diagnostics| diagnostics_from_vnext(&diagnostics, file))?;
+    let declaration = match function {
+        Some(name) => library
+            .iter()
+            .find(|decl| decl.name == name.trim())
+            .ok_or_else(|| {
+                vec![ScriptError::new(
+                    codes::RESOURCE_FUNC_NOT_FOUND,
+                    format!("函数 {file}/{name} 不存在（函数文件中无该函数名）"),
+                    file.to_string(),
+                )]
+            })?,
+        // 缺省 = 文件内第一个函数
+        None => library.first().ok_or_else(|| {
+            vec![ScriptError::new(
+                codes::RESOURCE_FUNC_NOT_FOUND,
+                format!("函数文件 {file} 未定义任何函数"),
+                file.to_string(),
+            )]
+        })?,
     };
-    let mut decls = Vec::with_capacity(items.len());
-    for (index, item) in items.iter().enumerate() {
-        let path = format!("params[{index}]");
-        let invalid = |message: String| {
-            vec![ScriptError::new(codes::PARAM_DECL_FORMAT, message, &rel)
-                .at(path.clone(), "params")]
-        };
-        match item {
-            serde_yaml::Value::String(raw) => {
-                let mut parts = raw.splitn(4, ':');
-                let ty = parts.next().unwrap_or_default().trim();
-                let name = parts.next().unwrap_or_default().trim();
-                let remark = parts.next().unwrap_or_default().trim().to_string();
-                if ty.is_empty() || name.is_empty() {
-                    return Err(invalid("参数必须是 type:name[:remark[:default]]".into()));
-                }
-                decls.push(V3ParamDecl {
-                    name: name.to_string(),
-                    ty: ty.to_string(),
-                    remark,
-                    default: parts
-                        .next()
-                        .map(|value| serde_json::Value::String(value.to_string())),
-                });
-            }
-            serde_yaml::Value::Mapping(map) => {
-                let name = map
-                    .get(serde_yaml::Value::from("name"))
-                    .and_then(|value| value.as_str())
-                    .map(str::trim)
-                    .unwrap_or_default();
-                if name.is_empty() {
-                    return Err(invalid("映射参数缺少 name".into()));
-                }
-                let ty = map
-                    .get(serde_yaml::Value::from("type"))
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("value")
-                    .trim()
-                    .to_string();
-                let remark = map
-                    .get(serde_yaml::Value::from("remark"))
-                    .and_then(|value| value.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let default = match map.get(serde_yaml::Value::from("default")) {
-                    None | Some(serde_yaml::Value::Null) => None,
-                    Some(value) => Some(
-                        serde_json::to_value(value)
-                            .map_err(|_| invalid("参数默认值无法转为 JSON".into()))?,
-                    ),
-                };
-                decls.push(V3ParamDecl {
-                    name: name.to_string(),
-                    ty,
-                    remark,
-                    default,
-                });
-            }
-            _ => return Err(invalid("参数声明必须是字符串或映射".into())),
-        }
-    }
-    Ok(Some(decls))
+    Ok(declaration
+        .params
+        .iter()
+        .map(|decl| V3ParamDecl {
+            name: decl.name.clone(),
+            ty: decl.ty.trim().to_string(),
+            remark: decl.remark.clone().unwrap_or_default(),
+            default: decl.default.as_ref().map(v3_value_to_plain_json),
+        })
+        .collect())
 }
 
-/// v3 声明 → psig1 签名（与 v2 `param_signature` 同 wire 形态：
-/// `psig1|ty,name,required,canon|…`）。v2 七类等价声明逐字节一致——旧 Task 行
-/// 的 stored 签名对迁移到 v3 的脚本继续可比对；v3 扩展类型名原样入签。
+/// v3 声明 → psig1 签名（`psig1|ty,name,required,canon|…`）。等价声明
+/// 逐字节一致——存量 Task 行的 stored 签名对迁移后的脚本继续可比对；
+/// v3 扩展类型名原样入签。
 pub fn v3_param_signature(decls: &[V3ParamDecl]) -> String {
     let entries: Vec<String> = decls.iter().map(canonical_v3_entry).collect();
     format!("psig1|{}", entries.join("|"))
@@ -476,8 +312,8 @@ fn canonical_v3_entry(decl: &V3ParamDecl) -> String {
     format!("{},{},{},{}", decl.ty.trim(), decl.name, required, canon)
 }
 
-/// v3 默认值的规范串（对齐 v2 `canonical_default_value`：time 小写且 min→m、
-/// color 小写、key 大写、text 剥引号并转义分隔符、coord 去空白、数值最短形）。
+/// v3 默认值的规范串（time 小写且 min→m、color 小写、key 大写、text 剥引号
+/// 并转义分隔符、coord 去空白、数值最短形）。
 fn canonical_v3_default(ty: &str, value: &serde_json::Value) -> String {
     let ty = ty.trim();
     match value {
@@ -509,8 +345,8 @@ fn canonical_v3_string_default(ty: &str, raw: &str) -> String {
         "coord" => parse_coord_string(raw)
             .map(|[x, y]| format!("[{},{}]", fmt_num(x), fmt_num(y)))
             .unwrap_or_else(|| raw.to_string()),
-        // 字符串形态声明的 text 默认值带双引号包裹时先剥离反转义（与 v2
-        // parse_typed_default 对齐），再按 v2 规则转义签名分隔符。
+        // 字符串形态声明的 text 默认值带双引号包裹时先剥离反转义，再按规则
+        // 转义签名分隔符。
         "text" | "string" => strip_quoted_text(raw)
             .replace('\\', "\\\\")
             .replace(',', "\\,")
@@ -591,7 +427,6 @@ pub(crate) fn normalize_v3_default_json(ty: &str, value: &serde_json::Value) -> 
 /// 值取类型化值）。wire 补数值变体前，数值实参在 `$x` 用作 loop.times 等
 /// 强类型位置会退化为字符串。
 pub(crate) fn coerce_v3_arg(ty: &str, value: &serde_json::Value) -> Option<TypedValue> {
-    use crate::extensions::gamer_yaml::script_v2::params::coord_in_range;
     match ty.trim() {
         "text" | "string" => value.as_str().map(|s| TypedValue::Text(s.to_string())),
         "bool" | "boolean" => match value {
@@ -666,44 +501,33 @@ pub(crate) fn coerce_v3_arg(ty: &str, value: &serde_json::Value) -> Option<Typed
     }
 }
 
-/// 手动运行（POST /api/runs）入口参数解析：v3 脚本 / v2 兼容失败后的 v3 函数库
-/// 走 v3 绑定，其余保持 `engine::resolve_entry_args` 原路径（v2 行为零变化）。
+/// 手动运行（POST /api/runs）入口参数解析（v3-only）。
 ///
 /// 绑定即前置校验：未知键 / 类型不符 / 缺必填 → 结构化诊断（400 invalid_args）。
 pub fn resolve_manual_entry_args(
     scripts: &ResourceStore,
-    target: &crate::extensions::gamer_yaml::engine::RunTarget,
+    target: &RunTarget,
     args: &serde_json::Map<String, serde_json::Value>,
-) -> Result<crate::extensions::gamer_yaml::engine::BoundEntryArgs, Vec<ScriptError>> {
-    use crate::extensions::gamer_yaml::engine::{resolve_entry_args, RunTarget};
+) -> Result<BoundEntryArgs, Vec<ScriptError>> {
     match target {
         RunTarget::Script { script_id, .. } => {
-            // version:3 判别可靠：v2 loader 不认识 v3 顶层键集，v3 必在此分流
-            if let Some(decls) = probe_v3_script_decls(scripts, script_id)? {
-                return bind_v3_manual_args(&decls, args, script_id);
-            }
+            let decls = probe_v3_script_decls(scripts, script_id)?;
+            bind_v3_manual_args(&decls, args, script_id)
         }
-        RunTarget::Function { pkg, file, function, .. } => {
-            // bare-map 函数库无 version 键：v2 严格解析先行（含 v2 兼容子集），
-            // 文件级解析失败再试 v3 宽松抽取；参数级错误始终按 v2 诊断返回。
-            match crate::extensions::gamer_yaml::engine::load_entry_param_decls(scripts, target) {
-                Ok(_) => return resolve_entry_args(scripts, target, args),
-                Err(v2_errors) => {
-                    if let Some(decls) =
-                        probe_v3_function_decls(scripts, pkg, file, function.as_deref())?
-                    {
-                        let label = match function {
-                            Some(name) => format!("{file}/{name}"),
-                            None => file.clone(),
-                        };
-                        return bind_v3_manual_args(&decls, args, &label);
-                    }
-                    return Err(v2_errors);
-                }
-            }
+        RunTarget::Function {
+            pkg,
+            file,
+            function,
+            ..
+        } => {
+            let decls = probe_v3_function_decls(scripts, pkg, file, function.as_deref())?;
+            let label = match function {
+                Some(name) => format!("{file}/{name}"),
+                None => file.clone(),
+            };
+            bind_v3_manual_args(&decls, args, &label)
         }
     }
-    resolve_entry_args(scripts, target, args)
 }
 
 /// v3 手动运行绑定（严格）：未知键 / 类型不符 / 缺必填全部报错；覆盖只含
@@ -713,8 +537,7 @@ pub(crate) fn bind_v3_manual_args(
     decls: &[V3ParamDecl],
     args: &serde_json::Map<String, serde_json::Value>,
     resource: &str,
-) -> Result<crate::extensions::gamer_yaml::engine::BoundEntryArgs, Vec<ScriptError>> {
-    use crate::extensions::gamer_yaml::script_v2::error::codes;
+) -> Result<BoundEntryArgs, Vec<ScriptError>> {
     let mut errors = Vec::new();
     let mut overrides = Vec::new();
     let mut resolved = serde_json::Map::new();
@@ -782,7 +605,7 @@ pub(crate) fn bind_v3_manual_args(
         }
     }
     if errors.is_empty() {
-        Ok(crate::extensions::gamer_yaml::engine::BoundEntryArgs {
+        Ok(BoundEntryArgs {
             overrides,
             resolved: serde_json::Value::Object(resolved),
         })
@@ -791,14 +614,13 @@ pub(crate) fn bind_v3_manual_args(
     }
 }
 
-/// v3 任务快照重绑（宽松，对齐 [`rebind_snapshot`] 语义）：存活参数保留原值、
-/// 新增参数取声明默认值、已删参数静默丢弃；缺必填/类型不符报结构化诊断。
+/// v3 任务快照重绑（宽松）：存活参数保留原值、新增参数取声明默认值、已删
+/// 参数静默丢弃；缺必填/类型不符报结构化诊断。
 pub(crate) fn rebind_v3_snapshot(
     decls: &[V3ParamDecl],
     args: &serde_json::Value,
     resource: &str,
 ) -> Result<Vec<(String, TypedValue)>, Vec<ScriptError>> {
-    use crate::extensions::gamer_yaml::script_v2::error::codes;
     let stored: serde_json::Map<String, serde_json::Value> = match args.as_object() {
         Some(map) => map.clone(),
         None => {
@@ -863,11 +685,10 @@ pub(crate) fn rebind_v3_snapshot(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::extensions::gamer_yaml::script_v2::{
-        parse_script_file, validate::InMemoryResources,
-    };
 
-    const SCRIPT: &str = "\
+    /// v3 脚本（含默认值参数）供门禁/重绑路径使用。
+    const V3_SCRIPT: &str = "\
+version: 3
 params:
   - 'bool:enable:是否启用:true'
   - 'time:timeout:最长等待:30s'
@@ -877,8 +698,9 @@ steps:
   - log: 'ok'
 ";
 
-    /// v12 形态脚本（含必填参数）供必填缺失路径使用。
-    const SCRIPT_REQUIRED: &str = "\
+    /// 含必填参数的 v3 脚本供必填缺失路径使用。
+    const V3_SCRIPT_REQUIRED: &str = "\
+version: 3
 params:
   - 'text:secret:密文'
 steps:
@@ -902,11 +724,16 @@ steps:
         std::fs::write(dir.join(name), content).unwrap();
     }
 
-    fn parse(content: &str) -> Vec<ParamDecl> {
-        let provider = InMemoryResources::default();
-        parse_script_file(content, "test.yaml", &provider)
-            .unwrap_or_else(|e| panic!("fixture parse failed: {e:?}"))
-            .params
+    fn write_function(cfg: &Config, name: &str, content: &str) {
+        let dir = cfg.data_dir.join("com.test.app").join("functions");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(name), content).unwrap();
+    }
+
+    fn v3_script_decls_in_memory(source: &str) -> Vec<V3ParamDecl> {
+        let program = crate::extensions::gamer_yaml::yaml_vnext::load(source)
+            .unwrap_or_else(|e| panic!("fixture parse failed: {e:?}"));
+        v3_decls_from_program(&program)
     }
 
     #[test]
@@ -924,15 +751,15 @@ steps:
 
     #[test]
     fn rebind_keeps_surviving_values_and_defaults_new_params() {
-        let old_decls = parse(SCRIPT);
-        let old_snapshot = serde_json::json!({
+        let decls = v3_script_decls_in_memory(V3_SCRIPT);
+        let snapshot = serde_json::json!({
             "enable": false,
             "timeout": "1m",
             "message": "TOP-SECRET",
             "pos": [0.1, 0.2],
         });
         // 声明不变：全部保留原值
-        let bound = rebind_snapshot(&old_decls, &old_snapshot, "t").unwrap();
+        let bound = rebind_v3_snapshot(&decls, &snapshot, "t").unwrap();
         let map: std::collections::HashMap<String, TypedValue> = bound.into_iter().collect();
         assert_eq!(map["enable"], TypedValue::Bool(false));
         assert_eq!(map["timeout"], TypedValue::Time("1m".into()));
@@ -943,8 +770,9 @@ steps:
     #[test]
     fn rebind_fills_default_for_new_param_and_drops_removed() {
         // 新脚本删除了 timeout，新增带默认值的 color
-        let new_decls = parse(
+        let decls = v3_script_decls_in_memory(
             "\
+version: 3
 params:
   - 'bool:enable:是否启用:true'
   - 'text:message:提示文本:\"hello\"'
@@ -961,7 +789,7 @@ steps:
             "pos": [0.1, 0.2],
             "ghost": "已删参数",
         });
-        let bound = rebind_snapshot(&new_decls, &old_snapshot, "t").unwrap();
+        let bound = rebind_v3_snapshot(&decls, &old_snapshot, "t").unwrap();
         let map: std::collections::HashMap<String, TypedValue> = bound.into_iter().collect();
         assert_eq!(map["enable"], TypedValue::Bool(false), "存活参数保留原值");
         assert_eq!(map["message"], TypedValue::Text("keep".into()));
@@ -976,11 +804,11 @@ steps:
 
     #[test]
     fn rebind_missing_required_reports_structured_diagnostic() {
-        let decls = parse(SCRIPT_REQUIRED);
-        let err = rebind_snapshot(&decls, &serde_json::json!({}), "t").unwrap_err();
+        let decls = v3_script_decls_in_memory(V3_SCRIPT_REQUIRED);
+        let err = rebind_v3_snapshot(&decls, &serde_json::json!({}), "t").unwrap_err();
         assert!(
             err.iter()
-                .any(|e| e.code == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_MISSING_REQUIRED),
+                .any(|e| e.code == codes::PARAM_ARGS_MISSING_REQUIRED),
             "必填缺失必须有结构化诊断: {err:?}"
         );
     }
@@ -988,10 +816,10 @@ steps:
     #[tokio::test]
     async fn gate_task_passes_with_matching_signature_and_rebuilds_overrides() {
         let (cfg, dir) = script_dir("gate-ok");
-        write_script(&cfg, "daily.yaml", SCRIPT);
+        write_script(&cfg, "daily.yaml", V3_SCRIPT);
         let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
-        let (decls, signature) =
-            probe_script_signature(&scripts, "com.test.app/daily.yaml").unwrap();
+        let decls = probe_v3_script_decls(&scripts, "com.test.app/daily.yaml").unwrap();
+        let signature = v3_param_signature(&decls);
         // 快照 = 完整覆盖（含覆盖值），并带 psig1 签名做过期门禁
         let snapshot = serde_json::json!({
             "enable": false,
@@ -1022,9 +850,12 @@ steps:
     #[tokio::test]
     async fn gate_task_detects_stale_signature_and_rejects_invalid_snapshots() {
         let (cfg, dir) = script_dir("gate-stale");
-        write_script(&cfg, "daily.yaml", SCRIPT);
+        write_script(&cfg, "daily.yaml", V3_SCRIPT);
         let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
-        let (_, signature) = probe_script_signature(&scripts, "com.test.app/daily.yaml").unwrap();
+        let (_, signature) = {
+            let decls = probe_v3_script_decls(&scripts, "com.test.app/daily.yaml").unwrap();
+            ((), v3_param_signature(&decls))
+        };
         // 签名不一致 → 过期
         let stale = gate_task(
             &scripts,
@@ -1045,7 +876,7 @@ steps:
                 serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
             match gate_task(&scripts, "com.test.app/daily.yaml", &args, Some(&signature)) {
                 Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|diag| {
-                    diag.code == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_TYPE_MISMATCH
+                    diag.code == codes::PARAM_ARGS_TYPE_MISMATCH
                 })),
                 other => panic!("expected invalid snapshot, got {:?}", other.is_ok()),
             }
@@ -1067,43 +898,38 @@ steps:
     }
 
     #[tokio::test]
-    async fn gate_task_missing_and_broken_scripts_are_distinct_failures() {
+    async fn gate_task_missing_broken_and_v2_scripts_are_distinct_failures() {
         let (cfg, dir) = script_dir("gate-script");
-        write_script(
-            &cfg,
-            "broken.yaml",
-            "params:\n  - '不是合法声明'\nsteps: []\n",
-        );
+        write_script(&cfg, "broken.yaml", "version: 3\nparams: []\n");
+        // v2 形态存量脚本：明确版本错误（v3-only 门禁，无 fallback）
+        write_script(&cfg, "legacy.yaml", "params: []\nsteps: []\n");
         let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
-        match probe_script_signature(&scripts, "com.test.app/missing.yaml") {
-            Err(GateError::ScriptMissing) => {}
+        match probe_v3_script_decls(&scripts, "com.test.app/missing.yaml") {
+            Err(diags) => assert!(diags
+                .iter()
+                .any(|d| d.code == codes::RESOURCE_SCRIPT_NOT_FOUND)),
             other => panic!("expected missing, got {:?}", other.is_ok()),
         }
-        match probe_script_signature(&scripts, "com.test.app/broken.yaml") {
-            Err(GateError::ScriptInvalid(diags)) => assert!(!diags.is_empty()),
+        match probe_v3_script_decls(&scripts, "com.test.app/broken.yaml") {
+            Err(diags) => assert!(diags.iter().any(|d| d.code == "yaml.v3.steps.missing")),
             other => panic!("expected invalid, got {:?}", other.is_ok()),
+        }
+        match gate_task(&scripts, "com.test.app/legacy.yaml", &serde_json::json!({}), None) {
+            Err(GateError::ScriptInvalid(diags)) => assert!(
+                diags.iter().any(|d| d.code == codes::VERSION_UNSUPPORTED),
+                "v2 形态必须报版本门禁错误: {diags:?}"
+            ),
+            other => panic!("expected version gate, got {:?}", other.is_ok()),
         }
         drop(scripts);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     // ---------------------------------------------------------------------
-    // P12.3：v3 参数桥
+    // psig1 签名稳定性（存量任务行 wire 兼容）
     // ---------------------------------------------------------------------
 
-    /// v2/v3 同参双胞胎：v2 七类声明的规范形态，用于锁定 psig1 逐字节兼容。
-    const V2_TWIN: &str = "\
-params:
-  - 'bool:enable:是否启用:true'
-  - 'time:timeout:最长等待:30s'
-  - 'text:message:提示文本:\"hello\"'
-  - 'coord:pos:位置:[0.5, 0.5]'
-  - 'color:target:目标颜色:ABCDEF'
-  - 'tmpl:tpl:模板:reward'
-steps:
-  - log: 'ok'
-";
-
+    /// 七类声明的规范形态（签名 wire 逐字节锚定）。
     const V3_TWIN: &str = "\
 version: 3
 params:
@@ -1130,35 +956,14 @@ steps:
   - log: $secret
 ";
 
-    fn write_function(cfg: &Config, name: &str, content: &str) {
-        let dir = cfg.data_dir.join("com.test.app").join("functions");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(name), content).unwrap();
-    }
-
     #[test]
-    fn v3_signature_is_byte_identical_to_v2_for_equivalent_declarations() {
-        let v2_decls = parse(V2_TWIN);
-        let v3_decls = v3_script_decls_in_memory(V3_TWIN);
+    fn v3_signature_is_stable_and_byte_anchored() {
+        let decls = v3_script_decls_in_memory(V3_TWIN);
         assert_eq!(
-            param_signature(&v2_decls),
-            v3_param_signature(&v3_decls),
-            "v2→v3 迁移后参数未变时签名必须逐字节一致"
+            v3_param_signature(&decls),
+            "psig1|bool,enable,0,true|time,timeout,0,30s|text,message,0,hello|coord,pos,0,[0.5,0.5]|color,target,0,abcdef|tmpl,tpl,0,reward",
+            "psig1 wire 形态逐字节锚定（存量任务行兼容）"
         );
-        assert_eq!(
-            v3_param_signature(&v3_decls),
-            "psig1|bool,enable,0,true|time,timeout,0,30s|text,message,0,hello|coord,pos,0,[0.5,0.5]|color,target,0,abcdef|tmpl,tpl,0,reward"
-        );
-    }
-
-    fn v3_script_decls_in_memory(source: &str) -> Vec<V3ParamDecl> {
-        let program = crate::extensions::gamer_yaml::yaml_vnext::load(source)
-            .unwrap_or_else(|e| panic!("fixture parse failed: {e:?}"));
-        v3_decls_from_program(&program)
-    }
-
-    #[test]
-    fn v3_signature_is_stable_and_type_sensitive_for_v3_only_types() {
         let decls = v3_script_decls_in_memory(V3_MIXED);
         let signature = v3_param_signature(&decls);
         assert_eq!(signature, "psig1|int,count,0,3|string,mode,0,auto|text,secret,1,");
@@ -1194,7 +999,7 @@ steps:
         assert_eq!(map["count"], TypedValue::Text("7".into()));
         assert_eq!(map["mode"], TypedValue::Text("manual".into()));
         assert_eq!(map["secret"], TypedValue::Text("v".into()));
-        // v2 时代旧签名对 v3 脚本 → 过期（明确失败，不空跑）
+        // 旧签名对 v3 脚本 → 过期（明确失败，不空跑）
         match gate_task(
             &scripts,
             "com.test.app/v3daily.yaml",
@@ -1218,7 +1023,7 @@ steps:
         // 空快照：必填 secret 缺失（默认值参数不受影响）
         match gate_task(&scripts, "com.test.app/v3req.yaml", &serde_json::json!({}), None) {
             Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|d| d.code
-                == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_MISSING_REQUIRED)),
+                == codes::PARAM_ARGS_MISSING_REQUIRED)),
             other => panic!("expected missing required, got {:?}", other.is_ok()),
         }
         // 快照必须是 JSON 对象
@@ -1229,7 +1034,7 @@ steps:
             None,
         ) {
             Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|d| d.code
-                == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_TYPE_MISMATCH)),
+                == codes::PARAM_ARGS_TYPE_MISMATCH)),
             other => panic!("expected type mismatch, got {:?}", other.is_ok()),
         }
         // 类型不符：count 非数值
@@ -1240,7 +1045,7 @@ steps:
             None,
         ) {
             Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|d| d.code
-                == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_TYPE_MISMATCH)),
+                == codes::PARAM_ARGS_TYPE_MISMATCH)),
             other => panic!("expected type mismatch, got {:?}", other.is_ok()),
         }
         // v3 语法坏源：诊断保留 yaml.v3.* 码
@@ -1256,7 +1061,7 @@ steps:
     }
 
     #[test]
-    fn v3_function_bare_map_falls_back_when_v2_parse_rejects_types() {
+    fn v3_function_library_probe_resolves_target_function_params() {
         let (cfg, dir) = script_dir("v3-func");
         write_function(
             &cfg,
@@ -1264,10 +1069,8 @@ steps:
             "greet:\n  params:\n    - 'text:who:称呼:\"玩家\"'\n    - 'int:times:次数:2'\n  steps:\n    - log: $who\nfarewell:\n  steps:\n    - log: bye\n",
         );
         let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
-        // v2 严格解析拒收 int 声明 → v3 宽松兜底取得目标函数 params
         let decls = probe_v3_function_decls(&scripts, "com.test.app", "lib", Some("greet"))
-            .expect("probe ok")
-            .expect("int 声明使 v2 解析失败，必须回落 v3");
+            .expect("probe ok");
         assert_eq!(decls.len(), 2);
         assert_eq!(decls[0].name, "who");
         assert_eq!(
@@ -1275,7 +1078,7 @@ steps:
             Some(serde_json::Value::String("\"玩家\"".into()))
         );
         assert_eq!(decls[1].ty, "int");
-        // 手动绑定：显式 + 默认合并视图；缺必填（who 无默认？有）——用文件级诊断断言
+        // 手动绑定：显式 + 默认合并视图
         let mut args = serde_json::Map::new();
         args.insert("times".into(), serde_json::json!(3));
         let bound = bind_v3_manual_args(&decls, &args, "lib/greet").unwrap();
@@ -1286,12 +1089,16 @@ steps:
         );
         assert_eq!(bound.resolved["times"], serde_json::json!(3));
         assert_eq!(bound.overrides.len(), 1, "只显式实参进覆盖");
-        // 显式函数名缺失 → 结构化 not_found（与 v2 入口同码）
+        // 显式函数名缺失 → 结构化 not_found
         match probe_v3_function_decls(&scripts, "com.test.app", "lib", Some("nope")) {
-            Err(diags) => assert!(diags.iter().any(|d| d.code
-                == crate::extensions::gamer_yaml::script_v2::error::codes::RESOURCE_FUNC_NOT_FOUND)),
+            Err(diags) => assert!(diags
+                .iter()
+                .any(|d| d.code == codes::RESOURCE_FUNC_NOT_FOUND)),
             other => panic!("expected func not_found, got {:?}", other.is_ok()),
         }
+        // 缺省 = 第一个函数
+        let first = probe_v3_function_decls(&scripts, "com.test.app", "lib", None).unwrap();
+        assert_eq!(first[0].name, "who");
         drop(scripts);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1304,21 +1111,22 @@ steps:
         args.insert("ghost".into(), serde_json::json!(1));
         args.insert("secret".into(), serde_json::json!("v"));
         let err = bind_v3_manual_args(&decls, &args, "t").unwrap_err();
-        assert!(err
-            .iter()
-            .any(|e| e.code == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_UNKNOWN));
+        assert!(
+            err.iter()
+                .any(|e| e.code == codes::PARAM_ARGS_UNKNOWN)
+        );
         // 类型不符
         let mut args = serde_json::Map::new();
         args.insert("count".into(), serde_json::json!(true));
         args.insert("secret".into(), serde_json::json!("v"));
         let err = bind_v3_manual_args(&decls, &args, "t").unwrap_err();
-        assert!(err.iter().any(|e| e.code
-            == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_TYPE_MISMATCH
+        assert!(err.iter().any(|e| e.code == codes::PARAM_ARGS_TYPE_MISMATCH
             && e.step_path_str() == "args.count"));
         // 缺必填
         let args = serde_json::Map::new();
         let err = bind_v3_manual_args(&decls, &args, "t").unwrap_err();
-        assert!(err.iter().any(|e| e.code
-            == crate::extensions::gamer_yaml::script_v2::error::codes::PARAM_ARGS_MISSING_REQUIRED));
+        assert!(err
+            .iter()
+            .any(|e| e.code == codes::PARAM_ARGS_MISSING_REQUIRED));
     }
 }

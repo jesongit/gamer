@@ -378,7 +378,7 @@ mod update_flow_tests {
         let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
         // 建脚本并提交一个永不结束的 run
-        save_task_script(&t, &sid, "forever.yaml", "steps:\n  - log: 'loop'\n").await;
+        save_task_script(&t, &sid, "forever.yaml", "version: 3\nsteps:\n  - log: 'loop'\n").await;
         let resp = post_json(
             &t,
             &sid,
@@ -477,7 +477,7 @@ mod update_flow_tests {
             assert_eq!(resp.status(), StatusCode::OK, "{uri}");
         }
         // 业务写也照常（脚本创建）
-        save_task_script(&t, &sid, "during-update.yaml", "steps:\n  - log: 'x'\n").await;
+        save_task_script(&t, &sid, "during-update.yaml", "version: 3\nsteps:\n  - log: 'x'\n").await;
     }
 
     /// QA-006④：无候选（idle）install → 409 update_not_available（矩阵行）

@@ -236,11 +236,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     // 设备恢复：取消后可再次提交（脚本入口同样带 args）
     let body = serde_json::json!({
         "name": "runme.yaml",
-        "content": "params:
-  - 'text:msg:消息:\"默认\"'
-steps:
-  - log: $msg
-",
+        "content": "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\nsteps:\n  - log: $msg\n",
     });
     let resp = post_json(&t, &sid, "/api/apps/com.test.app/resources/scripts", body).await;
     assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);

@@ -2,10 +2,10 @@ use super::*;
 
 // ---------- P12.3：entrypoint 参数 schema API + v3 参数链（POST /api/runs）----------
 //
-// - GET /api/runners/:runner_id/entrypoint?entrypoint=<资源id>：v2/v3 双格式
-//   参数 schema（前端不为取参数而解析 YAML）。
-// - POST /api/runs：version:3 脚本手动运行从 runner 边界修通（v2 loader 会把
-//   合法 v3 顶层键集拒成解析失败）；缺必填/未知键/类型不符前置 400。
+// - GET /api/runners/:runner_id/entrypoint?entrypoint=<资源id>：v3 参数
+//   schema（前端不为取参数而解析 YAML）；非 version:3 源 → 版本门禁 invalid。
+// - POST /api/runs：手动运行参数绑定（缺必填/未知键/类型不符前置 400）；
+//   非 v3 存量源统一版本错误（P12.9 v3-only，无 fallback）。
 
 fn dispatch_body_for(entrypoint: &str, device_id: &str, payload: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -39,8 +39,7 @@ async fn save_resource(
     );
 }
 
-/// 直写分区目录（函数库保存期校验仍按 v2 严格解析，v3 扩展类型经 API 保存
-/// 被拒——descriptor/runner 边界已先行支持，保存侧放开归 call 统一任务）。
+/// 直写分区目录（绕过保存期校验，构造「盘上已有」的存量资源形态）。
 fn write_partition_file(t: &TestApp, kind_dir: &str, name: &str, content: &str) {
     let dir = t.dir.join("com.test.app").join(kind_dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -70,9 +69,9 @@ fn urlencode(raw: &str) -> String {
     out
 }
 
-/// v2/v3 双格式 schema + 结构化 not_found/invalid/未知 runner。
+/// v3 schema + 非 v3 源版本门禁 + 结构化 not_found/invalid/未知 runner。
 #[tokio::test]
-async fn entrypoint_schema_endpoint_serves_v2_and_v3_formats() {
+async fn entrypoint_schema_endpoint_serves_v3_and_gates_legacy_sources() {
     let t = build_app("ep-schema", test_credential("admin123"), Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
@@ -81,6 +80,7 @@ async fn entrypoint_schema_endpoint_serves_v2_and_v3_formats() {
         &sid,
         "scripts",
         "v2daily",
+        // v2 形态存量源：describe 必须版本门禁拒绝（v3-only，无 fallback）
         "params:\n  - 'text:msg:消息:\"默认\"'\n  - 'bool:fast:快速'\nsteps:\n  - log: $msg\n",
     )
     .await;
@@ -100,7 +100,7 @@ async fn entrypoint_schema_endpoint_serves_v2_and_v3_formats() {
         "version: 3\nparams:\n  - 'text:secret:密文'\nsteps:\n  - log: $secret\n",
     )
     .await;
-    // v3 函数库直写分区（保存期校验仍按 v2 严格解析，见 write_partition_file 注）
+    // v3 函数库直写分区（bare-map 无 version 键，见 write_partition_file 注）
     write_partition_file(
         &t,
         "functions",
@@ -108,18 +108,14 @@ async fn entrypoint_schema_endpoint_serves_v2_and_v3_formats() {
         "greet:\n  params:\n    - 'text:who:称呼:\"玩家\"'\n    - 'int:times:次数:2'\n  steps:\n    - log: $who\n",
     );
 
-    // v2 存量脚本走同一端点（服务端 v2 解析）
+    // 非 v3 存量脚本 → 版本门禁 invalid（yaml.v3.version，无 fallback）
     let (status, v2) = describe_entrypoint(&t, &sid, "com.test.app/v2daily.yaml").await;
-    assert_eq!(status, StatusCode::OK, "{v2}");
-    assert_eq!(v2["runner_id"], "gamer.yaml");
-    assert_eq!(v2["entrypoint"], "com.test.app/v2daily.yaml");
-    assert_eq!(v2["kind"], "script");
-    assert_eq!(v2["schema"]["properties"]["msg"]["type"], "string");
-    assert_eq!(v2["schema"]["properties"]["msg"]["default"], "默认");
-    assert_eq!(v2["schema"]["properties"]["msg"]["description"], "消息");
-    assert_eq!(v2["schema"]["properties"]["fast"]["type"], "boolean");
-    assert_eq!(v2["schema"]["required"], serde_json::json!(["fast"]));
-    assert!(v2["signature"].as_str().unwrap().starts_with("psig1|"));
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v2}");
+    assert_eq!(v2["error"], "invalid_script");
+    assert!(
+        v2["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "yaml.v3.version"),
+        "非 v3 源必须报版本门禁诊断: {v2}"
+    );
 
     // v3 脚本：int → integer、string 形态默认值规整、time 保留书写串
     let (status, v3) = describe_entrypoint(&t, &sid, "com.test.app/v3daily.yaml").await;
@@ -169,7 +165,7 @@ async fn entrypoint_schema_endpoint_serves_v2_and_v3_formats() {
 }
 
 /// POST /api/runs v3 脚本手动运行：无参（默认值）/显式传参 202 + resolved_args；
-/// 缺必填 / 未知键 / 类型不符前置 400 invalid_args；v2 路径回归不变。
+/// 缺必填 / 未知键 / 类型不符前置 400 invalid_args。
 #[tokio::test]
 async fn v3_manual_runs_flow_through_param_bridge() {
     let t = build_app("ep-v3run", test_credential("admin123"), Default::default());
@@ -191,7 +187,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
         "version: 3\nparams:\n  - 'text:secret:密文'\nsteps:\n  - log: $secret\n",
     )
     .await;
-    // v3 函数库直写分区（int 声明使 v2 解析失败 → v3 宽松兜底）
+    // v3 函数库直写分区（bare-map，运行参数从目标函数声明解析）
     write_partition_file(
         &t,
         "functions",
@@ -282,7 +278,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     assert!(j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"]
         == "param.args.type_mismatch"));
 
-    // v3 函数库 entrypoint（int 声明使 v2 解析失败 → v3 宽松兜底）
+    // v3 函数库 entrypoint（bare-map，函数运行参数从 v3 函数库声明解析）
     let resp = post_json(
         &t,
         &sid,
@@ -299,7 +295,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     assert_eq!(j["resolved_args"]["who"], "函数");
     assert_eq!(j["resolved_args"]["times"], 2);
 
-    // v2 存量脚本路径回归：同一入口语义不变
+    // 非 v3 存量脚本：运行提交即版本门禁 400（yaml.v3.version，无 fallback）
     save_resource(
         &t,
         &sid,
@@ -319,7 +315,11 @@ async fn v3_manual_runs_flow_through_param_bridge() {
         ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let j = json_body(resp).await;
-    assert_eq!(j["resolved_args"]["msg"], "v2 实参");
+    assert_eq!(j["error"], "invalid_args");
+    assert!(
+        j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "yaml.v3.version"),
+        "非 v3 脚本手动运行必须报版本门禁: {j}"
+    );
 }

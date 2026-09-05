@@ -321,13 +321,8 @@ impl RuntimeServices {
         let viewers: webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(device::DeviceManager::new(db.clone(), cfg.clone()));
-        let runner = Arc::new(extensions::gamer_yaml::engine::Runner::new(
-            devices.clone(),
-            Arc::new(webrtc::ViewerEventSink::new(viewers.clone())),
-            resources.clone(),
-        ));
-        let executor = Arc::new(extensions::gamer_yaml::engine::EngineExecutor::new(
-            runner,
+        // P12.9：v3-only 执行器——非 `version: 3` 脚本统一报版本错误，无 fallback
+        let executor = Arc::new(extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
             devices.clone(),
             db.clone(),
         ));
@@ -364,8 +359,8 @@ impl RuntimeServices {
         // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
         // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。
         install_drain(&drain_slot, &ctx);
-        // P12.6：v3 运行可视化事件走同一 viewer DataChannel（复用 ViewerEventSink，
-        // 实例独立不与 v2 引擎共享内部状态）；无 viewer 时事件自然丢弃。
+        // P12.6：v3 运行可视化事件走同一 viewer DataChannel（复用 ViewerEventSink）；
+        // 无 viewer 时事件自然丢弃。
         executor.attach_yaml_vnext(
             ctx.resources.clone(),
             ctx.extensions.clone(),

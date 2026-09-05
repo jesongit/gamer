@@ -17,14 +17,14 @@
 // 无头环境（无 adb / 无真机）：运行生命周期用 harness 假执行器
 // （build_app_with_executor + OkExecutor）驱动到终态，resolver 层语义不受
 // 影响——运行提交前的参数解析（202 响应的 resolved_args 探针，参数默认值
-// 即「参数化输出」）与引擎运行快照（RunSnapshot::capture）都走
+// 即「参数化输出」）与 composite 源码探针都走
 // EditableLocal > UserOverride > InstalledPackage 的 composite 缝，内容属于
 // 哪一层由此断言。
 //
 // 已知实现边界（按实际行为断言，不放宽语义）：统一执行入口 /api/runs 的
 // 脚本存在性前置校验只读本地编辑区（ResourceStore::get_text），纯包内脚本
-// 在本地删空后手动运行返回结构化 not_found；包内容来源改经引擎运行快照 +
-// composite 资源面（keymap GET/list、脚本保存期模板校验）断言。
+// 在本地删空后手动运行返回结构化 not_found；包内容来源改经 composite 源码
+// 探针 + composite 资源面（keymap/模板 GET/list）断言。
 use super::*;
 
 const ANDROID: &str = "com.test.game";
@@ -54,20 +54,21 @@ const FUNC_YAML_V2: &str = "greet:\n  params:\n    - 'text:who:称呼:\"caller-v
 /// 工作区任务预设：经导出/安装/激活发布为任务预设（id = pkg:<包>/<名>）。
 const PRESET_YAML: &str = "name: daily\nrunner_id: gamer.yaml\nentrypoint: run\npayload: {}\nschedule:\n  kind: cron\n  value:\n    expression: \"0 8 * * *\"\n";
 
-/// 脚本源码：参数默认值（banner）即「参数化输出」探针——它被写进 log 步骤并
-/// 传给 func 步骤；运行端点 202 响应的 resolved_args 暴露当前生效值，脚本
-/// 内容属哪一层（EditableLocal / InstalledPackage）由此可断言。
+/// 脚本源码（v3）：参数默认值（banner）即「参数化输出」探针——它被写进
+/// log 步骤并传给 call function: 步骤；运行端点 202 响应的 resolved_args
+/// 暴露当前生效值，脚本内容属哪一层（EditableLocal / InstalledPackage）
+/// 由此可断言。
 fn script_yaml(banner_default: &str) -> String {
     format!(
-        "params:\n  - 'text:banner:横幅:\"{banner_default}\"'\nsteps:\n  - log: $banner\n  - func: common/greet\n    args:\n      who: $banner\n"
+        "version: 3\nparams:\n  - 'text:banner:横幅:\"{banner_default}\"'\nsteps:\n  - log: $banner\n  - call:\n      target: function:common/greet\n      args:\n        who: $banner\n"
     )
 }
 
-/// 无 func 步骤的脚本源码（ §13.3/§13.5/任务链路不放函数库，保存校验的
-/// func 引用解析不会因引用悬空而 400）。
+/// 无 call 步骤的脚本源码（ §13.3/§13.5/任务链路不放函数库，运行提交不触碰
+/// 函数库内容）。
 fn plain_script_yaml(banner_default: &str) -> String {
     format!(
-        "params:\n  - 'text:banner:横幅:\"{banner_default}\"'\nsteps:\n  - log: $banner\n"
+        "version: 3\nparams:\n  - 'text:banner:横幅:\"{banner_default}\"'\nsteps:\n  - log: $banner\n"
     )
 }
 
@@ -475,23 +476,19 @@ async fn put_text_resource(t: &TestApp, sid: &str, uri: &str, content: String) {
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
 }
 
-/// 引擎运行快照（composite 三层合并）里的脚本源码——包内容来源的运行面探针。
+/// composite 三层合并后的脚本源码——包内容来源的运行面探针。
 fn composite_script_source(t: &TestApp, script_key: &str) -> Option<String> {
     let cfg = crate::config::Config {
         data_dir: t.dir.clone(),
         ..Default::default()
     };
     let store = crate::resources::ResourceStore::open(&cfg).unwrap();
-    let snapshot = crate::extensions::gamer_yaml::engine::snapshot::RunSnapshot::capture(&store, ANDROID)
-        .unwrap();
-    let app = crate::core::AppContext::new(
-        crate::core::DeviceId::new(DEVICE).unwrap(),
-        crate::core::AndroidPackageName::new(ANDROID).unwrap(),
-        Some(crate::core::AppPackageId::new(ANDROID).unwrap()),
-    );
-    let resources =
-        crate::extensions::gamer_yaml::engine::snapshot::RunResources::new(&snapshot, &store, app);
-    resources.as_provider().script_content(script_key)
+    store
+        .composite()
+        .script_sources(ANDROID)
+        .ok()?
+        .get(script_key)
+        .cloned()
 }
 
 /// 按来源包查询已发布的任务预设数量。
@@ -595,33 +592,29 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body = json_body(resp).await;
     assert_eq!(body["error"], "not_found", "{body}");
-    //   b) 引擎运行快照（composite：EditableLocal > UserOverride > InstalledPackage）
+    //   b) composite 源码探针（EditableLocal > UserOverride > InstalledPackage）
     //      必须取到包内脚本/函数内容——本地已删空，内容只能来自 InstalledPackage 层
     assert_eq!(
         composite_script_source(&test_app, "daily.yaml"),
         Some(script_yaml("editable-v1")),
-        "运行快照必须从 InstalledPackage 层解析出 1.0.0 脚本内容"
+        "composite 必须从 InstalledPackage 层解析出 1.0.0 脚本内容"
     );
     let cfg = crate::config::Config {
         data_dir: test_app.dir.clone(),
         ..Default::default()
     };
     let store = crate::resources::ResourceStore::open(&cfg).unwrap();
-    let snapshot = crate::extensions::gamer_yaml::engine::snapshot::RunSnapshot::capture(&store, ANDROID).unwrap();
-    let app = crate::core::AppContext::new(
-        crate::core::DeviceId::new(DEVICE).unwrap(),
-        crate::core::AndroidPackageName::new(ANDROID).unwrap(),
-        Some(crate::core::AppPackageId::new(ANDROID).unwrap()),
-    );
-    let resources = crate::extensions::gamer_yaml::engine::snapshot::RunResources::new(&snapshot, &store, app);
+    let functions = store.composite().function_sources(ANDROID).unwrap();
     assert_eq!(
-        resources.as_provider().function_file_content("common"),
-        Some(FUNC_YAML_V1.to_string()),
-        "运行快照必须从 InstalledPackage 层解析出 1.0.0 函数内容"
+        functions.get("common.yaml").map(String::as_str),
+        Some(FUNC_YAML_V1),
+        "composite 必须从 InstalledPackage 层解析出 1.0.0 函数内容"
     );
-    assert_eq!(
-        resources.as_provider().resolve_template("icon.png"),
-        crate::extensions::gamer_yaml::script_v2::validate::TemplateAvail::Found,
+    assert!(
+        matches!(
+            store.composite().template(ANDROID, "icon.png"),
+            crate::app_packages::TemplateLookup::Found(_)
+        ),
         "包内模板必须经 composite 解析可见"
     );
     //   c) 包内 keymap 经 composite 读面可见（GET/list 只读兜底）
@@ -836,7 +829,7 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
 // §13.3：composite 三层优先级（EditableLocal > UserOverride > InstalledPackage）
 // ---------------------------------------------------------------------------
 
-/// 同一脚本在三层并存时的生效层断言（引擎运行快照 = 引擎真实读路径）：
+/// 同一脚本在三层并存时的生效层断言（composite 解析缝 = 运行面真实读路径）：
 /// Editable 在场胜 Override；删 Editable 回落 Override；删 Override 回落
 /// Installed。UserOverride 没有 REST 面，经产品存储缝
 /// （AppPackageStore::write_user_override）构造。
@@ -1009,7 +1002,7 @@ async fn install_same_id_version_reinstall_overwrites_in_place() {
         "重装激活的预设重发布幂等"
     );
 
-    // 运行面确认：删本地后引擎快照吃到重装后的包内容
+    // 运行面确认：删本地后 composite 解析吃到重装后的包内容
     let resp = delete_json(&test_app, &sid, SCRIPT_URI).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(

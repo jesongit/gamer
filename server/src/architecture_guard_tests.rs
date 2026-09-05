@@ -243,11 +243,6 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
         reason: "api 测试装配：与生产等价预注册 gamer.yaml runner（HTTP 集成夹具）",
     },
     Allow {
-        file: "api/tests/app_packages_lifecycle.rs",
-        snippet: "script_v2::validate::TemplateAvail::Found",
-        reason: "app-packages 生命周期测试：模板可用性桩",
-    },
-    Allow {
         file: "api/tests/extensions.rs",
         snippet: "run_yaml_vnext",
         reason: "扩展 API 测试注释：指向 yaml 运行验收的整合入口",
@@ -510,13 +505,8 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
     },
     Allow {
         file: "main.rs",
-        snippet: "extensions::gamer_yaml::engine::Runner::new",
-        reason: "组合根：gamer.yaml 引擎 Runner 注入 RunManager 执行器",
-    },
-    Allow {
-        file: "main.rs",
-        snippet: "extensions::gamer_yaml::engine::EngineExecutor::new",
-        reason: "组合根：RunExecutor 适配器构造",
+        snippet: "extensions::gamer_yaml::runner_adapter::EngineExecutor::new",
+        reason: "组合根：v3-only RunExecutor 适配器构造（P12.9）",
     },
     Allow {
         file: "main.rs",
@@ -537,12 +527,7 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
     },
     Allow {
         file: "api/tests.rs",
-        snippet: "gamer_yaml::engine::EngineExecutor::new",
-        reason: "api 测试装配（生产等价执行器）",
-    },
-    Allow {
-        file: "api/tests.rs",
-        snippet: "gamer_yaml::engine::Runner::new",
+        snippet: "gamer_yaml::runner_adapter::EngineExecutor::new",
         reason: "api 测试装配（生产等价执行器）",
     },
     Allow {
@@ -557,47 +542,12 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
     },
     Allow {
         file: "api/update.rs",
-        snippet: "gamer_yaml::engine::EngineExecutor::new",
+        snippet: "gamer_yaml::runner_adapter::EngineExecutor::new",
         reason: "update API cfg(test) 装配（两处同形）",
     },
     Allow {
-        file: "api/update.rs",
-        snippet: "gamer_yaml::engine::Runner::new",
-        reason: "update API cfg(test) 装配（两处同形）",
-    },
-    Allow {
-        file: "api/tests/app_packages_edit.rs",
-        snippet: "gamer_yaml::engine::snapshot::RunSnapshot::capture",
-        reason: "编辑提取测试：构造运行快照夹具",
-    },
-    Allow {
-        file: "api/tests/app_packages_edit.rs",
-        snippet: "gamer_yaml::engine::snapshot::RunResources::new",
-        reason: "编辑提取测试：快照资源视图夹具",
-    },
-    Allow {
-        file: "api/tests/app_packages_lifecycle.rs",
-        snippet: "gamer_yaml::engine::snapshot::RunSnapshot::capture",
-        reason: "包生命周期测试：运行快照夹具",
-    },
-    Allow {
-        file: "api/tests/app_packages_lifecycle.rs",
-        snippet: "gamer_yaml::engine::snapshot::RunResources::new",
-        reason: "包生命周期测试：快照资源视图夹具",
-    },
-    Allow {
-        file: "api/tests/app_packages_lifecycle.rs",
-        snippet: "gamer_yaml::script_v2::validate::TemplateAvail::Found",
-        reason: "包生命周期测试：模板可用性桩",
-    },
-    Allow {
         file: "api/tests/extensions.rs",
-        snippet: "gamer_yaml::engine::EngineExecutor::new",
-        reason: "extensions API 测试装配（capability registry 检查）",
-    },
-    Allow {
-        file: "api/tests/extensions.rs",
-        snippet: "gamer_yaml::engine::Runner::new",
+        snippet: "gamer_yaml::runner_adapter::EngineExecutor::new",
         reason: "extensions API 测试装配（capability registry 检查）",
     },
     Allow {
@@ -727,13 +677,8 @@ fn build_app(core: &CoreDeps) -> GuardApp {
     // 与生产一致：注册扩展内容校验钩子（保存校验/注记）。
     crate::extensions::gamer_yaml::register_resource_handlers(&core.resources);
     crate::extensions::register_resource_handlers(&core.resources);
-    let runner = Arc::new(crate::extensions::gamer_yaml::engine::Runner::new(
-        core.devices.clone(),
-        Arc::new(crate::webrtc::ViewerEventSink::new(core.viewers.clone())),
-        core.resources.clone(),
-    ));
-    let executor = Arc::new(crate::extensions::gamer_yaml::engine::EngineExecutor::new(
-        runner,
+    // P12.9：v3-only 执行器（与生产组合根同构）
+    let executor = Arc::new(crate::extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
         core.devices.clone(),
         core.db.clone(),
     ));
@@ -1472,7 +1417,7 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
     assert!(!task["next_wakeup"].is_null());
 
     // 保存脚本资源后派发进入执行层：202 + run 记录（不再 424）。
-    let script = "steps:\n  - log: guard isolation\n";
+    let script = "version: 3\nsteps:\n  - log: guard isolation\n";
     let (status, saved) = post_json(
         &guard.app,
         &cookie,

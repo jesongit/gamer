@@ -262,25 +262,19 @@ async fn edit_makes_workspace_highest_priority_for_engine_snapshot() {
 
     // 编辑区脚本改动（包保持原样）
     let ws = test_app.dir.join(ANDROID);
-    std::fs::write(ws.join("scripts/daily.yaml"), b"steps: []\n# edited-local\n").unwrap();
+    std::fs::write(ws.join("scripts/daily.yaml"), b"version: 3\nsteps: []\n# edited-local\n").unwrap();
 
     let cfg = crate::config::Config {
         data_dir: test_app.dir.clone(),
         ..Default::default()
     };
     let store = crate::resources::ResourceStore::open(&cfg).unwrap();
-    let snapshot = crate::extensions::gamer_yaml::engine::snapshot::RunSnapshot::capture(&store, ANDROID).unwrap();
-    let app = crate::core::AppContext::new(
-        crate::core::DeviceId::new("device-1").unwrap(),
-        crate::core::AndroidPackageName::new(ANDROID).unwrap(),
-        None,
-    );
-    let resources = crate::extensions::gamer_yaml::engine::snapshot::RunResources::new(&snapshot, &store, app);
-    // as_provider() 返回 &dyn ResourceProvider，方法调用无需导入 trait
+    // composite 解析缝（本地编辑区 → override → 包）即运行面取源口径
+    let sources = store.composite().script_sources(ANDROID).unwrap();
     assert_eq!(
-        resources.as_provider().script_content("daily.yaml"),
-        Some("steps: []\n# edited-local\n".to_string()),
-        "运行快照必须取到编辑区版本"
+        sources.get("daily.yaml").map(String::as_str),
+        Some("version: 3\nsteps: []\n# edited-local\n"),
+        "运行解析必须取到编辑区版本"
     );
     // 包内字节不动（immutable）
     assert_eq!(

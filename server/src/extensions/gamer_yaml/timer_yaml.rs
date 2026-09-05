@@ -135,9 +135,9 @@ impl TimerRunner for YamlTimerRunner {
             signature_short = %task_params::signature_short_code(&task_args.signature),
             "YAML timer task parameters confirmed"
         );
-        let req = crate::extensions::gamer_yaml::engine::yaml_start_request(
+        let req = crate::extensions::gamer_yaml::yaml_start_request(
             request.app.clone(),
-            crate::extensions::gamer_yaml::engine::RunTarget::Script {
+            crate::extensions::gamer_yaml::run_target::RunTarget::Script {
                 script_id: payload.script_id.clone(),
                 start_index: 0,
             },
@@ -232,14 +232,14 @@ impl YamlTimerRunner {
                 .trim_end_matches(".yaml")
                 .trim_end_matches(".yml")
                 .to_string();
-            crate::extensions::gamer_yaml::engine::RunTarget::Function {
+            crate::extensions::gamer_yaml::run_target::RunTarget::Function {
                 pkg: pkg.to_string(),
                 file,
                 function: Some(payload.function.clone().unwrap_or_else(|| func.to_string())),
                 start_index: payload.start_index.unwrap_or(0),
             }
         } else {
-            crate::extensions::gamer_yaml::engine::RunTarget::Script {
+            crate::extensions::gamer_yaml::run_target::RunTarget::Script {
                 script_id: entrypoint.clone(),
                 start_index: payload.start_index.unwrap_or(0),
             }
@@ -247,7 +247,7 @@ impl YamlTimerRunner {
         // 存在性先行（与旧运行端点的 404 语义对齐，此处统一为结构化失败：
         // 手动运行无任务可挂起）
         match &target {
-            crate::extensions::gamer_yaml::engine::RunTarget::Script { script_id, .. } => {
+            crate::extensions::gamer_yaml::run_target::RunTarget::Script { script_id, .. } => {
                 let exists = self
                     .scripts
                     .get_text(RK::Scripts, script_id)
@@ -260,7 +260,7 @@ impl YamlTimerRunner {
                     ));
                 }
             }
-            crate::extensions::gamer_yaml::engine::RunTarget::Function { pkg, file, .. } => {
+            crate::extensions::gamer_yaml::run_target::RunTarget::Function { pkg, file, .. } => {
                 let rel = format!("{pkg}/{file}.yaml");
                 let exists = self
                     .scripts
