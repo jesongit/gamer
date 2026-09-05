@@ -252,3 +252,4 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 ## 2026-09-05（Phase 12 P12.11：验收收口）
 
 - **刚结束的 run 瞬时 GET 404（run_not_found）**：`RunManager::finalize` 先摘活动注册表再入档案（两次独立短锁，中间还夹一条 info! 日志），`get_run` 顺序查两处——202 派发后立刻 GET 无设备快败的 run 恰落在间隙会 404（测试负载下偶发，P12.11 基线实测复现）；测试侧对 run 查询一律轮询容忍 404/非终态（见 isolation 守卫测试），生产侧若要消除需把 finalize 的档案入列与注册表摘除收进同一临界区。
+- **全量 `cargo test` 偶现 tokio `is_entered` 线程 panic 打印**：P12 基线起偶见两条 `c.runtime.get().is_entered()` panic 输出（api/tests 大并发区段，线程内无 runtime 上下文调用了 Handle 依赖代码）；panic 被独立线程兜住，测试恒 0 failed / exit 0，属测试进程噪音非产品缺陷——判定回归以 `0 failed` 与退出码为准，排查以单模块复跑定位。
