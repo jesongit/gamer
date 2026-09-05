@@ -44,6 +44,20 @@ impl ResourceAdapter {
         std::fs::read(&path).map_err(|error| CapabilityError::Failed(error.to_string()))
     }
 
+    /// 解析后的实际文件名（模板含 `#区域` 后缀，供搜索区域推断）。
+    pub(crate) fn file_name(&self, handle: ResourceHandle) -> CapabilityResult<String> {
+        let path = self
+            .resources
+            .lock()
+            .map_err(|_| CapabilityError::Failed("resource state poisoned".into()))?
+            .get(&handle)
+            .map(|resource| resource.path.clone())
+            .ok_or_else(|| CapabilityError::NotFound("resource handle".into()))?;
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .ok_or_else(|| CapabilityError::NotFound("resource file name".into()))
+    }
+
     pub(crate) fn id(&self, handle: ResourceHandle) -> CapabilityResult<ResourceId> {
         self.resources
             .lock()
