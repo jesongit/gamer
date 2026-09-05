@@ -5,6 +5,9 @@
 > 本阶段不考虑旧配置、旧 API、旧数据目录、旧 UI、旧任务格式、旧插件行为的兼容性。
 >
 > 核心原则：**删除过渡层，保留最终架构。**
+>
+> 📍 **状态：已实施收口（2026-09-05，主链全部合入 main，门禁 server 629 / web 705 全绿）。**
+> checklist 回填与 DoD 对照见 §18/§23；执行波次与提交历史以 git log（`a853df2`..`417d732`）为准。
 
 ---
 
@@ -1773,97 +1776,100 @@ docs(v2): finalize phase 11 architecture
 
 # 18. 开发检查清单
 
+> 2026-09-05 收口回填：每条勾选项附证据（测试名 / 文件存在性 / grep 结果）；未勾项注明原因。
+> 证据复跑基线：server `cargo test` 629 passed / `--no-default-features` 609 passed；web 705 passed。
+
 ## Task
 
-- [ ] 新 Task Model
-- [ ] schedule.provider_id
-- [ ] schedule.config
-- [ ] runner.runner_id
-- [ ] runner.entrypoint
-- [ ] runner.payload
-- [ ] 删除 script_id
-- [ ] 删除 cron 顶层字段
-- [ ] `/api/user-tasks` 删除
-- [ ] `/api/tasks` 替换
-- [ ] TaskBoard 重写
+- [x] 新 Task Model（`timer_core.rs:101 pub struct Task`：id/name/app(AppContext)/schedule/runner/state/metadata 语义齐备）
+- [x] schedule.provider_id（`timer_core.rs:32`）
+- [x] schedule.config（`timer_core.rs:33`）
+- [x] runner.runner_id（`timer_core.rs:105`）
+- [x] runner.entrypoint（`timer_core.rs:106`；HTTP 层嵌套为 `runner:{runner_id,entrypoint,payload}`，`api/mod.rs` tasks 组）
+- [x] runner.payload（`timer_core.rs:107`）
+- [x] 删除 script_id（Task/TaskSpec 零 script_id；grep `server/src/timer_core.rs` 无命中，残留仅为 `run_manager.rs` RunRecord 展示字段——遗留项 b）
+- [x] 删除 cron 顶层字段（schedule JSON 统一 `{provider_id,config}`；`migrate_v2_to_v3` 归一存量列）
+- [x] `/api/user-tasks` 删除（`api/mod.rs` 路由表无该路径；提交 d0ce2ab）
+- [x] `/api/tasks` 替换（统一任务端点组 `api/mod.rs:247-262`：CRUD + run/suspend/resume/cancel/enable/disable）
+- [x] TaskBoard 重写（`web/src/components/TaskBoard.vue`：provider/runner 双下拉 + RunnerEditorContribution；提交 832d774/9405084）
 
 ## Runner
 
-- [ ] TimerRunnerRegistry
-- [ ] owner_extension_id
-- [ ] register
-- [ ] unregister
-- [ ] unregister_owner
-- [ ] missing dependency state
-- [ ] extension lifecycle integration
-- [ ] 删除 YamlTimerRunner Native 构造
+- [x] TimerRunnerRegistry（`timer_core.rs` TimerRunnerRegistry：register/unregister/get/lookup/contains）
+- [x] owner_extension_id（`RegisteredRunner.owner_extension_id`，异主抢注被拒）
+- [x] register（`register_runner`，同 owner 同 id 原地替换=unclean restart seam）
+- [x] unregister（`unregister_runner`，未知 id 报错防双重注销）
+- [x] unregister_owner（`unregister_owner`，幂等返回被摘 runner ids）
+- [x] missing dependency state（`TaskState::DependencyMissing`，任务保留且 enabled 原意不变）
+- [x] extension lifecycle integration（`extensions/service.rs` TimerRunnerRegistrar 钩子；测试 `lifecycle_hooks_register_runners_on_start_and_disable_running_stops_them`）
+- [x] 删除 YamlTimerRunner Native 构造（Core 模块零构造；registrar 由组合根 main.rs 经扩展边界接线，`Scheduler::new(db)` 裸核——ADR-13 组合根拥有注册表）
 
 ## YAML
 
-- [ ] parser 移出 Core
-- [ ] validator 移出 Core
-- [ ] AST / IR 移出 Core
-- [ ] 删除 script_v2
-- [ ] 删除 YAML v2 fallback
-- [ ] 删除 ScriptStore
-- [ ] functions 使用 ResourceResolver
-- [ ] scripts 使用 ResourceResolver
-- [ ] gamer.yaml 注册 Runner
+- [x] parser 移出 Core（`extensions/gamer_yaml/script_v2/loader.rs`；`server/src/script_v2` 已删）
+- [x] validator 移出 Core（`script_v2/validate.rs`）
+- [x] AST / IR 移出 Core（`script_v2/model.rs`）
+- [ ] 删除 script_v2 —— **未勾**：按奇偶报告结论 (c) 推迟（偏差①）。`server/src/script_v2` 物理移出 Core（守卫锁零残留），引擎本体暂留 `extensions/gamer_yaml/script_v2` 承载存量脚本/函数库，待 v3 缺口（G1-G5/R1-R5）清零后删除
+- [x] 删除 YAML v2 fallback（版本猜测/自动转换/双入口分叉已删，唯一入口 `validate_compatible_script`（`extensions/gamer_yaml/resources.rs`），非 v3 即 v2、不猜测不转换）
+- [x] 删除 ScriptStore（`server/src/scripts.rs` 已删；`resources.rs` 头注"ScriptStore / KeymapStore 消解后的内容无关资源层"）
+- [x] functions 使用 ResourceResolver（`ResourceStore` 六目录寻址，`get_text(Functions,…)`；函数测试经统一 `/api/runs`）
+- [x] scripts 使用 ResourceResolver（同上；`/api/apps/:app/resources/scripts`）
+- [x] gamer.yaml 注册 Runner（`extensions/gamer_yaml/timer_yaml.rs` YamlTimerRunner + YamlTimerRunnerRegistrar）
 
 ## Keymap
 
-- [ ] 删除 KeymapStore
-- [ ] 删除 Native Mapping Engine
-- [ ] 删除 Native Mapping fallback
-- [ ] 删除 Host Keymap Panel
-- [ ] gamer.keymap 自己贡献 UI
-- [ ] 无插件 passthrough 正常
+- [x] 删除 KeymapStore（`server/src/keymaps.rs` 已删；keymaps kind 经 ResourceStore composite，包内方案只读）
+- [x] 删除 Native Mapping Engine（提交 f126641：删除 KeymapRunner/InputGateway）
+- [x] 删除 Native Mapping fallback（`extensions/keymap/mod.rs` 头注"the native mapping engine has been removed"；无扩展运行时 → 直通 scrcpy）
+- [x] 删除 Host Keymap Panel（壳内零硬编码注册：提交 5e5e973；面板改由 gamer.keymap manifest `runtime="core"` + `component="console.keymaps"` 贡献，组件名解析表 `core-component-registry.ts` 为前端唯一知识）
+- [x] gamer.keymap 自己贡献 UI（`tools/plugins/gamer.keymap/manifest.toml` `[[ui.contributions]]`）
+- [x] 无插件 passthrough 正常（守卫 `architecture_guard_isolation_keymap_missing_extension_passes_input_through`）
 
 ## UI
 
-- [ ] Core 只保留任务
-- [ ] Core 只保留日志
-- [ ] Core 只保留设置
-- [ ] 插件 Panel 来自 Contribution
-- [ ] gamer.yaml 自动化
-- [ ] gamer.yaml 函数
-- [ ] gamer.yaml 模板
-- [ ] gamer.keymap 映射
-- [ ] 删除特殊 plugin id 判断
+- [x] Core 只保留任务（`workspace/core-contributions.ts` gamer.core:tasks）
+- [x] Core 只保留日志（gamer.core:logs）
+- [x] Core 只保留设置（gamer.core:settings）
+- [x] 插件 Panel 来自 Contribution（manifest ui.contributions 驱动，提交 1d33f3d；`GET /api/extensions` ui_contributions）
+- [x] gamer.yaml 自动化（manifest panel_id=automation → console.scripts）
+- [x] gamer.yaml 函数（panel_id=functions → console.functions）
+- [x] gamer.yaml 模板（panel_id=templates → console.templates）
+- [x] gamer.keymap 映射（panel_id=keymaps → console.keymaps）
+- [x] 删除特殊 plugin id 判断（`core-shell-boundary.test.js`："useConsoleWorkspacePanels 不做本地面板回退注册"、"runner 注册 id 唯一配置点在 gamer-yaml-runner.js"）
 
 ## API
 
-- [ ] Resource CRUD 泛化
-- [ ] Run API 泛化
-- [ ] 删除 script run API
-- [ ] 删除 function run API
-- [ ] 删除重复 Task API
-- [ ] 删除 Preset alias
+- [x] Resource CRUD 泛化（`/api/apps/:app/resources/:kind[/:id]`，`api/resources.rs`；expected_version/force 乐观并发）
+- [x] Run API 泛化（`POST /api/runs`，`api/runs.rs`，`{runner_id,entrypoint,payload,device_id}`）
+- [x] 删除 script run API（`api/mod.rs:238-239` 注释：原 `/api/scripts/:id/run` 删除，经 Runner 注册表分发）
+- [x] 删除 function run API（同上）
+- [x] 删除重复 Task API（legacy `/api/tasks`（script_id+cron）与 `/api/user-tasks` 收口为统一任务端点组）
+- [x] 删除 Preset alias（presets 只保留 `/api/task-presets`；`/api/tasks/presets` 已删）
 
 ## Legacy
 
-- [ ] 删除 file layout migration
-- [ ] 删除 package v1
-- [ ] 删除旧 Snapshot 主流程
-- [ ] 删除 legacy YAML
-- [ ] 删除 native keymap fallback
-- [ ] 删除旧测试
-- [ ] 删除兼容配置
+- [x] 删除 file layout migration（提交 48d986f：file_migration 死代码删除）
+- [x] 删除 package v1（`app_packages/manifest.rs`："缺少 format_version（当前仅支持 2）"，v1 直接不支持）
+- [x] 删除旧 Snapshot 主流程（web 无 Snapshot 面板/页面残留；grep 仅插件中心卸载备份语义）
+- [ ] 删除 legacy YAML —— **未勾**：同「删除 script_v2」（偏差①）。删除的是 fallback/版本分支与 Core 侧残留；v2 引擎本体在扩展内保留
+- [x] 删除 native keymap fallback（见 Keymap 节）
+- [x] 删除旧测试（提交 48d986f 旧行为测试残留清理；现存测试全部针对正式行为）
+- [x] 删除兼容配置（`config.rs` grep legacy/compat/fallback 零命中）
 
 ## E2E
 
-- [ ] Bare Core
-- [ ] Install gamer.yaml
-- [ ] Disable gamer.yaml
-- [ ] Re-enable gamer.yaml
-- [ ] Install gamer.keymap
-- [ ] Disable gamer.keymap
-- [ ] Task dependency missing
-- [ ] Task dependency recovery
-- [ ] Package export
-- [ ] Package install
-- [ ] Package edit
-- [ ] Package re-export
+- [x] Bare Core（守卫 `architecture_guard_bare_core_serves_full_base_api_with_zero_extensions`：零扩展启动全基线 REST）
+- [x] Install gamer.yaml（守卫 lifecycle 全链 install 步：只落盘、无 UI、无 runner）
+- [x] Disable gamer.yaml（lifecycle 全链：disable 运行中=自动 stop，runner/UI 一并摘除）
+- [x] Re-enable gamer.yaml（lifecycle 全链 start 再启：runner 重注册、任务自动恢复 Active；+ 隔离测试恢复分支）
+- [x] Install gamer.keymap（`extensions/keymap/mod.rs` `real_keymap_gplugin_invokes_wit_and_native_capabilities`、`real_keymap_guest_consumes_user_profile_yaml`）
+- [x] Disable gamer.keymap（直通分支由隔离测试覆盖（无运行时 → passthrough 不吞键）；disable 走同一 ExtensionService 状态机，无 keymap 专属 E2E）
+- [x] Task dependency missing（守卫 lifecycle：stop → 任务转 dependency_missing 且保留，日志 missing_dependency=gamer.yaml）
+- [x] Task dependency recovery（守卫 lifecycle：start 再启 → 任务自动恢复 Active）
+- [x] Package export（`app_package_full_lifecycle_workspace_export_install_edit_rerelease` 十四步主链，`api/tests/app_packages_lifecycle.rs:514`）
+- [x] Package install（同上；含同 id+version overwrite 重装分支）
+- [x] Package edit（同上：Installed→Editable 整体提取，六类资源/manifest/hash 对账）
+- [x] Package re-export（同上：编辑后再次导出复发布）
 
 ---
 
@@ -2148,3 +2154,83 @@ Game-specific Tools
 > 新功能主要通过 Extension SDK、Capability API、Resource API、Runner API 和 UI Contribution 完成。
 
 当达到这一点，V2 插件化重构才真正完成。
+
+---
+
+# 23. Phase 11 收口报告（2026-09-05）
+
+> 主链全部合入 main（收口提交 `417d732`）。门禁基线（收口当日复跑确认）：
+> server `cargo test` **629 passed**（7 ignored）/ `cargo test --no-default-features` **609 passed**；
+> web `pnpm test` **705 passed**（55 个测试文件）、`pnpm build` 通过。
+> 执行波次：F0/B1/B2/F1/B3/W4-A/W4-B/W5-A/W5-B（提交区间 `a853df2..417d732`）。
+
+## 23.1 §20 DoD 逐条对照
+
+### Core 边界
+
+| DoD 条目 | 结论 | 证据 |
+|---|---|---|
+| Core 不认识 YAML | ✅ | `server/src` 顶层无 YAML parser/AST/格式判别；script_v2/yaml_vnext/engine 仅存在于 `extensions/gamer_yaml/`；守卫 `architecture_guard_source_boundary_core_free_of_yaml_keymap_semantics`（67 条白名单双向校验，`assert_whitelist_alive` 防白名单腐化） |
+| Core 不认识 Script DSL / Function DSL | ✅ | `scripts.rs`、`api/{scripts,functions,templates,keymaps}.rs` 文件已删；脚本/函数内容校验经 `YamlScriptValidator` / `YamlFunctionValidator`（ResourceKindHandler 回调） |
+| Core 不认识 Keymap Rule | ✅ | keymap DSL 迁至 `extensions/keymap/dsl.rs`；依赖方向守卫 `architecture_guard_dependency_direction_core_never_paths_into_extension_internals` |
+| Core 不认识 gamer.yaml Runner 实现 | ✅ | `Scheduler::new(db)` 裸核不预置 Runner；执行经 `TimerRunnerRegistry` 抽象（main.rs 组合根接线 registrar，属装配点而非 Core 模块） |
+
+### Extension 边界
+
+| DoD 条目 | 结论 | 证据 |
+|---|---|---|
+| gamer.yaml 可独立启用 / 禁用 | ✅ | 守卫 `architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_tasks`：install→enable→start→stop→disable→uninstall 全链 HTTP 层走通 |
+| gamer.keymap 可独立启用 / 禁用 | ✅ | `real_keymap_gplugin_invokes_wit_and_native_capabilities`（安装 .gplugin → WIT 派发 → capability 动作）；禁用/缺失运行时 → `dispatch_keymap_input` 直通 |
+| UI 随 Extension 生命周期变化 | ✅ | UI 贡献随 enable 发布、disable/uninstall 摘除（lifecycle 守卫断言 `ui_contributions` 数量）；前端面板全 registry 驱动 |
+| Runner 随 Extension 生命周期变化 | ✅ | TimerRunnerRegistrar 钩子：start 注册 / stop 注销 / disable=自动 stop；lifecycle 守卫显式断言 "enable 不注册 runner（enable ≠ start）" |
+
+### Task
+
+| DoD 条目 | 结论 | 证据 |
+|---|---|---|
+| Task 与 YAML 无关 | ✅ | `Task` 结构（timer_core.rs:101）零 script_id/YAML 字段；保存契约 `deny_unknown_fields` |
+| Task 与 Cron 无关 | ✅ | 调度只是 `schedule={provider_id,config}` 不透明值；cron 是 provider_id=`cron` 的一个 provider（`cron_extension.rs`） |
+| Task = ScheduleProvider + Runner | ✅ | `/api/tasks` 嵌套 JSON（schedule + runner）；`GET /api/runners`、`GET /api/schedule-providers` 列注册项 |
+
+### Resource
+
+| DoD 条目 | 结论 | 证据 |
+|---|---|---|
+| Core 只管理 Resource | ✅ | `resources.rs` ResourceStore：内容无关六目录寻址 + composite（EditableLocal>UserOverride>InstalledPackage）+ expected_version 乐观并发 |
+| Extension 解释 Resource | ✅ | `ResourceKindHandler` 注册表：gamer_yaml 注册 scripts/functions 校验与模板 handler（含重命名引用改写）；keymap 方案语义在扩展侧 |
+
+### Compatibility
+
+| DoD 条目 | 结论 | 证据 |
+|---|---|---|
+| 无 Legacy Task | ✅ | legacy `tasks` 表 DROP（`migrate_v2_to_v3`）；`/api/user-tasks` 与 presets 别名已删 |
+| 无 YAML v2 | ⚠️ 偏差① | v2 引擎本体暂留 `gamer_yaml` 扩展内部（奇偶报告结论 c，缺口 G1-G5/R1-R5）；已删的是 fallback/版本猜测/Core 侧残留——Core 零格式感知 |
+| 无 Native Keymap fallback | ✅ | 提交 f126641 删除 KeymapRunner/InputGateway；无插件 = passthrough |
+| 无旧 App Package migration | ✅ | `format_version=1` 直接拒绝（"当前仅支持 2"）；无 layout v1 迁移代码（file_migration 已删） |
+| 无双 API | ✅ | 唯一入口：`/api/tasks`、`/api/task-presets`、`/api/runs`、`/api/apps/:app/resources`；scripts/functions/templates/keymaps 业务路由零残留 |
+
+### UI
+
+| DoD 条目 | 结论 | 证据 |
+|---|---|---|
+| 裸 Core = 任务\|日志\|设置\|+ | ✅ | `core-contributions.ts` 仅注册 `gamer.core:tasks/logs/settings`，`DEFAULT_PANEL_KEY='gamer.core:tasks'`；守卫 bare_core 测试 + `web/src/core-shell-boundary.test.js`（api.js 无业务 runner id、壳不做本地面板回退注册等断言） |
+| 其它功能全部由插件贡献 | ✅ | gamer.yaml：自动化/函数/模板；gamer.keymap：映射——manifest `runtime="core"` 宿主组件（组件键为扩展知识，`core-component-registry.ts` 为前端唯一解析表）；declarative/iframe 两档照常可用 |
+
+## 23.2 偏差清单（与计划原文的有意偏离）
+
+1. **v2/v3 单格式化推迟**（§8.4/§12.3 原目标"只保留 YAML vNext"）：奇偶报告结论 (c)——v3 缺 G1-G5/R1-R5（见 [phase11_v2_v3_parity_report.md](phase11_v2_v3_parity_report.md)），v2 引擎暂留 gamer_yaml 扩展内部（唯一入口 `validate_compatible_script`），Core 零格式感知，不构成架构债；v3 缺口补齐后删 v2。
+2. **同 id+version 安装 409→overwrite**（§13.5 授权）：App Package 同 package_id+version 重装按 overwrite 语义整体替换（stage-then-swap），是本阶段唯一对外行为修改；测试 `install_is_staged_and_same_version_reinstall_overwrites` 锁定。
+3. **enable ≠ start**：Runner 注册点在 start（进入 Running）而非 enable——enable 只发布 UI 贡献，start 才注册 Runner；`reconcile_startup` 只恢复遗留 Running 记录。计划 §7.4 的"禁用即注销"落地为 disable=自动 stop。
+4. **ADR 目录位置**：计划原文写 `docs/gamer_refactor_plan_v2/adr/`；随 docs 重组（reference/guides/plans/evidence 四子目录）实际落位 `docs/reference/adr/`（ADR-11~14 头部有位置说明）。
+
+## 23.3 遗留项清单
+
+- **a. v2/v3 单格式化**：v3 缺 G1-G5/R1-R5（见 [phase11_v2_v3_parity_report.md](phase11_v2_v3_parity_report.md)），补齐 guest 后删 v2 引擎。
+- **b. `RunRecord.script_id` 字段命名**：schema v1 日志列名的历史命名，现为展示字段（run_manager.rs："retained as the legacy display field for the existing HTTP contract"），守卫白名单锁定；更名属数据迁移另案。
+- **c. manifest 无 world/execution 声明字段**：gamer.yaml 的执行模型声明在 registrar（`timer_yaml.rs`）；加字段需同步 include_str! 锁与官方包重签。
+- **d. `/api/runs` 前置存在性校验只读本地编辑区**：`ResourceStore::get_text` 非 keymap kind 不走 composite，纯包内脚本经统一入口返回结构化 not_found（真实运行走运行快照 composite 链路，E2E 已如实断言）。
+- **e. resources 字节 kind（templates）上传共用 PNG 重编码管线**：任意原样字节需走 App Package 通道。
+- **f. 前端分区候选读 store 资源形状**（`/api/apps/-/resources/...` 全量过滤）：宜加通用分区发现端点。
+- **g. yaml 面板 composable 由壳无条件实例化**（`useConsoleScriptRunner` 等）：严格懒实例化待面板注册事件驱动。
+- **h. data_schema fixture 批次按 release 节奏同步**（schema-policy 契约 §3 v3 行已补：提交 8289c5d）。
+- **i. 升级注意**：升级后 Enabled-未-start 的 gamer.yaml 不自动注册 Runner（对账只恢复遗留 Running 记录），存量定时任务需手动 start 一次 gamer.yaml。

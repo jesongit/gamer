@@ -4,41 +4,47 @@
 >
 > **Native Core + Core Capability API + Frontend Plugin Workspace + WASM Extensions + App Packages**
 >
-> 📍 **实施状态（2026-09-04）：Phase 0–10 已全部实施完成，架构收尾已裁决。验收结论、已确认的架构决策与后续验证见文末「八、实施状态」。**
+> 📍 **实施状态（2026-09-05）：Phase 0–10 已全部实施完成；Phase 11 Breaking Architecture Cleanup 已实施收口（主链全部合入 main，门禁 server 629 / web 705 全绿）。验收结论、已确认的架构决策与后续验证见文末「八、实施状态」，Phase 11 收口报告见 [docs/plans/gamer_v2_phase11_breaking_architecture_cleanup_plan.md](../../gamer_v2_phase11_breaking_architecture_cleanup_plan.md) §23。**
 
 ---
 
 ## 1. 最终目标架构
 
+> 下图已按 Phase 11 收口后的最终架构更新（原过渡架构图中 "Native Core vs WASM Extensions" 的
+> 粗分界不再准确：cron 为 Native schedule provider，YAML/Keymap 为扩展边界内的业务实现）。
+
 ```text
 ┌────────────────────────────────────────────────────────────┐
-│                     Gamer Web Core                         │
+│                     Gamer Web Core (UI)                    │
 │                                                            │
 │  DeviceStage                    Extension Workspace        │
-│  WebRTC / scrcpy                Panel Registry             │
-│  Overlay / Region Pick          Core Panel / Plugin Panel  │
+│  WebRTC / scrcpy                Panel Registry（全 registry │
+│  Overlay / Region Pick          驱动；Core 仅 任务/日志/设置）│
 └───────────────┬──────────────────────────┬─────────────────┘
                 │                          │
                 │                    UI Bridge API
                 │                          │
 ┌───────────────▼──────────────────────────▼─────────────────┐
-│                    Gamer Server                            │
-│                                                          │
-│ Device / Frame / Vision / Input / Touch / Run / Timer    │
-│ Resource / AppPackage / Logging / Storage                │
-│                                                          │
-│                WASM Extension Host                        │
+│                    Gamer Server Core                       │
+│                                                            │
+│ Device Runtime（adb / scrcpy / Frame / webrtc / ffmpeg）    │
+│ Extension Runtime（Registry / WASM Host / Capability SDK）  │
+│ Resource System（ResourceStore：Editable>Override>Package） │
+│ App Package / RunManager / TimerCore（Task+RunnerRegistry） │
+│ Core UI：任务 / 日志 / 设置 / 插件管理                      │
 └───────────────────────┬──────────────────────────────────┘
-                        │
-                Host Capability API
                         │
            ┌────────────┴────────────┐
            ▼                         ▼
-     WASM Extensions             Native Core
-     YAML / Keymap / Cron        ADB / scrcpy
-     Macro / Workflow            WebRTC / ffmpeg
-                                NCC / SQLite
+     Extensions（业务）         Core Native 机制
+     gamer.yaml（YAML/Runner）  gamer.cron（Native provider）
+     gamer.keymap（映射）       ADB / scrcpy / WebRTC
+     Macro / Workflow（未来）   ffmpeg / NCC / SQLite
 ```
+
+业务功能全部由 Extension 提供（**Extension ≠ WASM**：gamer.cron 为 Native provider，
+gamer.yaml / gamer.keymap 的解析与执行在扩展边界内承载）；Core 不再认识
+YAML / script_id / Function DSL / keymap rule / YamlTimerRunner / ScriptStore / KeymapStore。
 
 应用相关数据单独存在：
 
@@ -46,6 +52,7 @@
 App Packages
 ├── templates/
 ├── scripts/
+├── functions/
 ├── keymaps/
 ├── presets/
 └── resources/
@@ -227,14 +234,14 @@ Keymap 作为首个真实 WASM 插件跑通后，应验证：
 | Phase 1 帧热路径 | ✅ 完成 | 帧载荷 `bytes::Bytes` 零拷贝共享（GOP snapshot 指针级共享）、`gop_bytes` 增量记账、ffmpeg 流式写、DB 调用侧 oneshot 异步化、通用文件能力抽至 `core/fs/` |
 | Phase 2 Core 解耦 | ✅ 完成 | AppContext / ResourceId / RunRequest 泛化、EventSink、ActivityLease（Viewer/Run/Capture）、RuntimeServices 组合根统一装配；router 只注册路由，后台任务全部在组合根启动 |
 | Phase 3 Capability 层 | ✅ 完成 | device / input / touch / frame / vision / resource / run / runtime / log 九域 service + registry + adapters；截图 PPM 直通（capability 链路无 PNG encode/decode 往返）、match_many 单帧解码复用、Matcher 不依赖模板 PathBuf |
-| Phase 4 App Package | ✅ 完成 | `.gamerpkg` 安装/激活/卸载 REST、一个 Android 包仅一个 active 内容包、每版本 SHA-256、包内 presets 自动发布为任务预设、复合解析（user-overrides → 包 → 旧分区兜底）、业务资源出库（默认发行零业务资源） |
+| Phase 4 App Package | ✅ 完成 | `.gamerpkg` 安装/激活/卸载 REST、一个 Android 包仅一个 active 内容包、每版本 SHA-256、包内 presets 自动发布为任务预设、复合解析（Phase 11 定序：EditableLocal 分区目录 → user-overrides → 包）、业务资源出库（默认发行零业务资源） |
 | Phase 5 前端工作区 | ✅ 完成 | PanelRegistry 动态页签、`?panel=` URL 状态、MessageChannel UI Bridge（`gamer-ui@1`）、sandbox iframe（无 allow-same-origin）、UI/Runtime 生命周期分离、lazy mount/keep_alive；Console.vue 4230 → 1355 行 |
 | Phase 6 WASM Host | ✅ 完成 | wasmtime component-model 进默认构建（lazy init，无插件零开销）、WIT 分域 `@1`、权限 allowlist（默认禁 filesystem/network/shell/process）、生命周期状态机 + 全套 REST + 版本回滚、`plugin.call` |
 | Phase 7 Keymap WASM | ✅ 完成 | InputEvent → WASM → DeviceAction 真链路、profile 数据通道（分区键位 YAML → guest，未映射键 pass-through 回落）、touch handle 归 Core、官方 keymap 插件产物；进程内 dispatch p95 3.7µs（护栏 100ms）；真机 E2E 延迟基准与 baseline 已补齐（Validation-01，见 8.3） |
 | Phase 8 YAML vNext | ✅ 完成 | v3 分层 DSL（Surface → Small AST → Host API）、`invoke` 逃生口、`func` 并入 `call`、`app.start/stop`、返回值泛化（含 handle）、v2/v3 兼容并存、官方 gamer.yaml 插件可安装可运行 |
 | Phase 9 Timer Core | ✅ 完成 | TimerCore 持久化/重启恢复/挂起恢复、`wait_terminal` 事件化（去 50ms 轮询）、任务预设与包安装卸载联动、缺 runner 明确依赖错误；Scheduler/API 经 `ScheduleRegistry` 与 Cron provider 解耦（ADR-01） |
 | Phase 10 插件中心 | ✅ 完成 | 市场/本地导入/URL 导入、ed25519 签名 + 内嵌信任锚、权限 diff 二次确认、版本回滚 UI、「卸载 / 卸载并删除数据」双语义、declarative/iframe/none 三档 UI（declarative Host 已实现） |
-| Phase 11 Breaking Architecture Cleanup | 🚧 实施中（2026-09-05 启动） | 删除过渡层、保留最终架构：Core/Extension 边界、泛化 Task、Runner 归插件、零兼容收口；计划见 [docs/plans/gamer_v2_phase11_breaking_architecture_cleanup_plan.md](../../gamer_v2_phase11_breaking_architecture_cleanup_plan.md)，ADR 见 `docs/reference/adr/`（ADR-11~14） |
+| Phase 11 Breaking Architecture Cleanup | ✅ 完成（2026-09-05 收口） | 删除过渡层、保留最终架构：Core/Extension 边界（守卫测试锁死）、泛化 Task（ADR-12）、Runner 归插件（ADR-13）、零兼容收口（ADR-14）；计划与收口报告见 [docs/plans/gamer_v2_phase11_breaking_architecture_cleanup_plan.md](../../gamer_v2_phase11_breaking_architecture_cleanup_plan.md)（§23 收口报告），ADR 见 `docs/reference/adr/`（ADR-11~14） |
 
 ### 8.2 Gate 结论
 
@@ -249,17 +256,17 @@ Keymap 作为首个真实 WASM 插件跑通后，应验证：
    Cron 保持 **Native Schedule Provider**，不迁移 WASM：cron 是标准、稳定、纯计算能力，无权限/沙箱诉求，跨 WASM 边界只有成本。收口后 Scheduler/API 对 `CronExtension` 的直接依赖清零——调度只经 `ScheduleRegistry`（provider 经 `cron_extension::register_builtin` 注册缝安装）；`next_enabled_trigger_in_secs()` 已删除，update 安装门禁与诊断改用 `TimerCore::next_wakeup_in()/next_wakeup_at()`（直接读持久化唤醒游标）；API 校验/预览统一走 `ScheduleRegistry.next_after/probe`；源码自检测试 `schedule_computation_is_locked_to_the_registry_abstraction` 把该边界锁进 CI。命名保持 `CronExtension`：Native 实现同样是 Extension（**Extension ≠ WASM**），改名零收益。
 2. **ADR-02 WASM Runtime State（ACCEPTED）**
    稳定运行态保持 `Installed / Disabled / Running / Failed` 四态，operation lock 已覆盖全部操作语义。`Starting / Stopping` 属 Operation State，不持久化为生命周期状态；未来 UI 需要展示"正在启动/停止"时，用独立 operation 对象表达（计划 6.4）。`Available` 表示插件存在于仓库/来源，属 Plugin Catalog 语义，不进入 Runtime State。不为计划补齐状态机复杂度。
-3. **ADR-03 Timer Runner（DEFERRED）**
-   `gamer.yaml` 为当前唯一 Runner，不为验证 `TimerRunnerRegistry` 抽象而虚构第二个 Runner。抽象保留（TimerCore 只依赖 `runner_id`，未来新增 Runner 不改 TimerCore）；待第一个真实第二 Runner 出现时，再补 `register/unregister/replace` 与 plugin ownership、插件卸载对既有 TimerTask 的依赖处理（计划 7.3/7.4 要点保留为届时清单）。
+3. **ADR-03 Timer Runner（SUPERSEDED by ADR-13）**
+   原决策（DEFERRED）："不为验证 `TimerRunnerRegistry` 抽象而虚构第二个 Runner，待第一个真实第二 Runner 出现时再补动态生命周期"。**Phase 11 已推翻**：Runner 生命周期立即落地并归 Extension 所有——`TimerRunnerRegistry` 带 `owner_extension_id`（register/unregister/unregister_owner），gamer.yaml 的 Runner 由扩展 start 经 registrar 钩子注册、disable/uninstall 注销，缺 Runner 任务落 `DependencyMissing` 不删；完整表述见 `docs/reference/adr/ADR-13-extension-owned-runner.md`。
 4. **Validation-01 Keymap E2E（DONE）**
    已建成真实链路基准 `phase0_android_keymap_e2e_latency_native_vs_wasm`（进程内 webrtc-rs DataChannel 客户端替代浏览器，ICE/DTLS/SCTP 全真实；**浏览器端 JS 开销未含**——按计划 8.3 将 Browser RTT 与 Server 内部阶段分开统计）与第一版 baseline：`benchmarks/results/keymap-e2e.json`（Redmi / Android 16 / USB，native+wasm 两轮共 620 事件，普通按键/长按/组合键/burst 四场景，只断言正确性不断言延迟数值）。关键结论：Server Internal Total P95 native 74µs vs WASM 102µs，**WASM 增量 ≈+28µs**；burst 热身后 wasm 执行 P50=2µs，无尾延迟退化。后续可按 baseline 设"WASM−Native P95 增量阈值"防止架构退化。
 
 ### 8.4 用户可感知变化（相对计划实施前）
 
-- **默认发行零业务资源**：业务模板/脚本/键位改经 App Package 安装；既有 `data/<pkg>/` 分区资产可用 `tools/export-app-package.ps1` 打包迁移，本地分区继续兜底生效
+- **默认发行零业务资源**：业务模板/脚本/键位改经 App Package 安装；既有 `data/<pkg>/` 分区资产用 Gamer 内置导出（`POST /api/app-packages/export`，Phase 11 起为 Rust PackageBuilder 链路）打包迁移，本地分区（EditableLocal）是一等资源源（解析优先级最高，非兜底）
 - **插件中心**（右侧页签「+」）：市场一键安装官方 keymap / YAML v3 插件，签名校验 + 权限确认，支持版本回滚与两种卸载语义；也支持本地 `.gplugin` 与 URL 导入
-- **键位映射可运行于 WASM 扩展**（默认构建已含；无扩展时自动回落原 native 链路，行为不变）
-- **YAML v3 脚本**：`app.start/stop`、`invoke` 能力逃生口、`call` 合并 `func`、返回值泛化；v2 脚本完全兼容无需迁移
+- **键位映射可运行于 WASM 扩展**（默认构建已含；Phase 11 起 native 映射引擎已删除——无扩展运行时输入直通 scrcpy passthrough，不再回落 native 映射链路）
+- **YAML v3 脚本**：`app.start/stop`、`invoke` 能力逃生口、`call` 合并 `func`、返回值泛化；v2 脚本完全兼容无需迁移（Phase 11 起 v2 引擎整体移入 `gamer.yaml` 扩展边界，Core 零格式感知；v2/v3 切默认格式的缺口清单见 `docs/plans/phase11_v2_v3_parity_report.md`）
 - **定时任务**：事件化触发（去轮询）、服务重启恢复、依赖缺失明确挂起、任务预设一键实例化
 - **性能**：帧零拷贝共享、截图直通解码（P95 340→307ms）、日志/任务写库异步化；基线数据见 `benchmarks/`
 
