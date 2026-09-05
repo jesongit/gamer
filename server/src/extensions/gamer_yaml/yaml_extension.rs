@@ -1018,7 +1018,7 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
             .build();
         let host = NativeYamlHost::new(
             all_permissions(registry),
-            AppContext::from_legacy_package("d1", "com.test.game").unwrap(),
+            AppContext::for_test("d1", "com.test.game").unwrap(),
             Arc::new(AtomicBool::new(false)),
         )
         .await
@@ -1391,7 +1391,7 @@ runtime = "^1.0"
                 args: BTreeMap::new(),
                 resolver: Some(Arc::new(FixtureResolver)),
                 host: host(trace.clone()),
-                context: AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+                context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(false)),
             })
             .await
@@ -1415,7 +1415,7 @@ runtime = "^1.0"
                 args: BTreeMap::new(),
                 resolver: None,
                 host: host_with_permissions(Arc::new(Trace::default()), &["device.read"]),
-                context: AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+                context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(false)),
             })
             .await
@@ -1434,7 +1434,7 @@ runtime = "^1.0"
                 args: BTreeMap::new(),
                 resolver: None,
                 host: host_with_permissions(Arc::new(Trace::default()), &["device.read"]),
-                context: AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+                context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(false)),
             })
             .await
@@ -1458,7 +1458,7 @@ runtime = "^1.0"
                     Arc::new(Trace::default()),
                     &["device.read", "runtime.sleep"],
                 ),
-                context: AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+                context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(true)),
             })
             .await
@@ -1509,7 +1509,7 @@ runtime = "^1.0"
         let value = super::super::run_yaml_vnext(
             &service,
             program,
-            AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+            AppContext::for_test("device-1", "com.example.game").unwrap(),
             BTreeMap::new(),
             None,
             Arc::new(AtomicBool::new(false)),
@@ -1528,7 +1528,7 @@ runtime = "^1.0"
         assert!(super::super::run_yaml_vnext(
             &service,
             program,
-            AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+            AppContext::for_test("device-1", "com.example.game").unwrap(),
             BTreeMap::new(),
             None,
             Arc::new(AtomicBool::new(false)),
@@ -1637,7 +1637,7 @@ runtime = "^1.0"
         let mut task = crate::timer_core::Task::new(
             "task-lifecycle",
             "Lifecycle",
-            AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+            AppContext::for_test("device-1", "com.example.game").unwrap(),
             "gamer.yaml",
             "com.example.game/daily.yaml",
             serde_json::json!({"args": {"lives": 3}}),

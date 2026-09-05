@@ -217,7 +217,7 @@ fn phase0_task_and_logs_survive_store_reopen() {
     let task = Task::new(
         fixture["id"].as_str().unwrap(),
         fixture["name"].as_str().unwrap(),
-        AppContext::from_legacy_package(
+        AppContext::for_test(
             fixture["app"]["device_id"].as_str().unwrap(),
             fixture["app"]["android_package"].as_str().unwrap(),
         )
@@ -1756,6 +1756,9 @@ mod android_bench {
         )
     }
 
+    // WASM 轮依赖 wasm-runtime feature 的 guest fixture；无 WASM 退出路径
+    // （--no-default-features）下整个测试不编译。
+    #[cfg(feature = "wasm-runtime")]
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "需要真实 Android 设备；设置 GAMER_PHASE0_ANDROID=1 后显式运行"]
     async fn phase0_android_keymap_e2e_latency_native_vs_wasm() {

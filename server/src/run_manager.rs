@@ -936,7 +936,7 @@ mod tests {
 
     fn req(device_id: &str, script_id: &str, source: RunSource) -> StartRequest {
         let package = script_id.split('/').next().unwrap_or("legacy");
-        let app = crate::core::AppContext::from_legacy_package(device_id, package).unwrap();
+        let app = crate::core::AppContext::for_test(device_id, package).unwrap();
         let request = RunRequest::for_app(
             app,
             "test.runner",
@@ -1332,7 +1332,7 @@ mod tests {
     async fn function_run_target_conflicts_and_cancels() {
         let fake = Arc::new(FakeExecutor::hanging());
         let mgr = Arc::new(RunManager::new(fake.clone()));
-        let app = crate::core::AppContext::from_legacy_package("d1", "com.test.app").unwrap();
+        let app = crate::core::AppContext::for_test("d1", "com.test.app").unwrap();
         let request = RunRequest::for_app(
             app,
             "gamer.yaml",

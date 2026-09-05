@@ -535,12 +535,9 @@ async fn api_create_binary_resource_inner(
         let store = st.resources.clone();
         let bytes = reencode_bytes(&body, &name)?;
         let orig_size = body.len();
-        let path = store
+        store
             .create_binary(rkind, &pkg, &name, &bytes)
             .map_err(|e| write_error(e, &format!("{pkg}/{name}")))?;
-        if rkind == ResourceKind::Templates {
-            matcher::invalidate_template_cache_path(&path);
-        }
         Ok(serde_json::json!({
             "ok": true,
             "name": name,
@@ -649,39 +646,32 @@ pub(super) async fn api_delete_resource(
         }
     }
     let full_id = id.clone();
-    let invalidated =
-        match run_blocking_api(move || -> Result<Vec<std::path::PathBuf>, ApiError> {
-            let store = st.resources.clone();
-            if kind.is_text() {
-                let exists = store
-                    .get_text(kind, &full_id)
-                    .map_err(|e| ApiError::internal(e.to_string()))?;
-                if exists.is_none() {
-                    return Err(ApiError::not_found("资源不存在"));
-                }
-                store
-                    .delete_text(kind, &full_id)
-                    .map(|_| Vec::new())
-                    .map_err(|e| write_error(e, &full_id))
-            } else {
-                let app_of = app.clone();
-                store
-                    .delete_binary(kind, &app, &id)
-                    .map(|path| vec![path])
-                    .map_err(|e| write_error(e, &format!("{app_of}/{id}")))
+    match run_blocking_api(move || -> Result<(), ApiError> {
+        let store = st.resources.clone();
+        if kind.is_text() {
+            let exists = store
+                .get_text(kind, &full_id)
+                .map_err(|e| ApiError::internal(e.to_string()))?;
+            if exists.is_none() {
+                return Err(ApiError::not_found("资源不存在"));
             }
-        })
-        .await
-        {
-            Ok(paths) => paths,
-            Err(e) => return e.into_response(),
-        };
-    for path in invalidated {
-        if kind == ResourceKind::Templates {
-            matcher::invalidate_template_cache_path(&path);
+            store
+                .delete_text(kind, &full_id)
+                .map(|_| ())
+                .map_err(|e| write_error(e, &full_id))
+        } else {
+            let app_of = app.clone();
+            store
+                .delete_binary(kind, &app, &id)
+                .map(|_| ())
+                .map_err(|e| write_error(e, &format!("{app_of}/{id}")))
         }
+    })
+    .await
+    {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => e.into_response(),
     }
-    Json(serde_json::json!({"ok": true})).into_response()
 }
 
 // ---------- 字节 kind（templates / resources） ----------
@@ -735,9 +725,6 @@ async fn api_put_binary_resource_inner(
         let Some(pkg) = resolve_app_filter(&app).ok().flatten() else {
             return ApiError::bad_request("重命名需要明确的应用分区").into_response();
         };
-        let dir = st.resources.kind_dir(&pkg, rkind);
-        let old_path = dir.join(&id);
-        let new_path = dir.join(&new_name);
         let new_name_for_response = new_name.clone();
         let renamed = run_blocking_api(move || -> Result<(), ApiError> {
             let store = st.resources.clone();
@@ -748,8 +735,6 @@ async fn api_put_binary_resource_inner(
         .await;
         match renamed {
             Ok(()) => {
-                matcher::invalidate_template_cache_path(&old_path);
-                matcher::invalidate_template_cache_path(&new_path);
                 Json(serde_json::json!({"ok": true, "name": new_name_for_response})).into_response()
             }
             Err(e) => e.into_response(),
@@ -770,12 +755,9 @@ async fn api_put_binary_resource_inner(
             let store = st.resources.clone();
             let bytes = reencode_bytes(&body, &name)?;
             let orig_size = body.len();
-            let path = store
+            store
                 .replace_binary(rkind, &pkg, &name, &bytes)
                 .map_err(|e| write_error(e, &format!("{pkg}/{name}")))?;
-            if rkind == ResourceKind::Templates {
-                matcher::invalidate_template_cache_path(&path);
-            }
             Ok(serde_json::json!({
                 "ok": true,
                 "name": name,

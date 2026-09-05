@@ -316,8 +316,8 @@ mod tests {
             (Method::POST, "/api/devices/scan", ""),
             // ordinary device write
             (Method::POST, "/api/devices", "{}"),
-            // script write is also a business mutation
-            (Method::POST, "/api/scripts", "{}"),
+            // ad-hoc run submission is also a business mutation
+            (Method::POST, "/api/runs", "{}"),
         ] {
             let response = app
                 .clone()

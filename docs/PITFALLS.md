@@ -104,7 +104,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **Node 与 Rust 对 manifest `schema_version` 类型判定不一致**：JS `1.0===1` 放行浮点写法，Rust serde 严格拒绝；launcher 取 fail closed 严格语义，Node 校验器用于发布门禁前需补该反例。
 - **clippy `doc_lazy_continuation`**：`//!` 文档行以 `+` 开头被当 doc 列表项，续行未缩进直接 `-D warnings` 失败；「A → B」式续行换措辞或缩进。
 - **Windows 相对路径拼接产生混合分隔符**：`PathBuf::join` 可得 `config\./data`，PathBuf 相等按组件归一，但 `to_string_lossy()` 后的字符串断言跨平台必挂；测试断言比 PathBuf 不比字符串。
-- **bin crate 里未接线的 `pub` 模块照样 dead_code**（`pub` 不豁免）：框架性「先交付后接线」模块（build_info/file_migration）需带理由注释的 `#![allow(dead_code)]`，接线时移除。
+- **bin crate 里未接线的 `pub` 模块照样 dead_code**（`pub` 不豁免）：框架性「先交付后接线」模块（build_info）需带理由注释的 `#![allow(dead_code)]`，接线时移除（file_migration 已随 P11.7 整体删除）。
 - **build.rs 声明任何 `rerun-if-*` 后 cargo 即关闭「包内文件变化重跑」默认**：git commit 探测必须显式 `rerun-if-changed` 跟踪 `.git/HEAD`+`.git/refs`，否则同分支新提交的 hash 陈旧。
 
 ## 2026-08-31（批次 2/发布链路实施期）
@@ -202,3 +202,10 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **通用资源 API 后 keymap GET 单条返回的是资源条目 JSON（content 原文 + 注记 name/binding_count/valid），不再携带解析模型**：useConsoleKeymap 仍按旧 `rep.model/bindings` 形状取模型会恒报「服务端返回的映射结构无效」，工具条映射下拉与画面可视化全哑；解法：前端按 content YAML 自行解析（js-yaml load），注记 `valid:false` 时带诊断报错并清空选择，不把坏方案装进输入链路（keymap-runtime.test.js 锁定）。
 - **服务端 RunRecord 没有也不再有 `script_name` 字段**：`runner_id + entrypoint` 是唯一目标标识，`script_id` 只是服务端保留的兼容展示字段；前端展示名回退链写成 `rec.script_name || rec.script_id` 会静默拿到 undefined，恢复运行态/冲突弹窗统一用 `entrypoint || script_id`。
 - **`GET /api/logs` 行内的运行目标字段仍叫 `script_id`（schema v1 logs 表列名）**：Core 日志面板（gamer.core:logs）按「设备+运行目标」分组时直接把它当 opaque entrypoint 展示（`entrypoint || script_id` 兜底），不要为了映射显示名去预拉脚本列表——那会把业务资源知识带回 Core 壳。
+
+## 2026-09-05（Phase 11 W4-A：Legacy 清扫 / 扩展启动对账）
+
+- **删路由后探针断言可能空转**：gate/update-gate 测试曾用已删除的 `/api/scripts/x/run` 探测「业务路由被闸拦截」，catch-all fallback 对任意路径都回 503，断言恒真、不再证明任何事；删端点时要同步全仓搜引用它的测试并把探针换成现役路由（本批改 `/api/runs`）。
+- **判定「生产无调用方」别用 `| head` 截断的 grep**：matcher 路径缓存子系统曾被误判为纯死代码，实为「消费端仍在（api/resources、app_packages/edit 的失效调用）+ 生产端早已不产出」的半死子系统；完整判定用 `grep -rn ... | awk -F: '{print $1}' | sort -u`，删子系统时生产者/消费者两端一起清。
+- **`#[ignore]` 的测试同样参与编译**：`cargo test --no-default-features` 因 phase0 keymap e2e 测试引用 `wasm-runtime` feature 门控符号而编译失败（测试体根本不会运行）；跨 feature 引用的测试必须自带 `#[cfg(feature = ...)]`。
+- **模板缓存按内容哈希（SHA-256）寻址后，写路径失效调用是纯冗余**：新内容天然新键，旧条目只会多占内存等 LRU 驱逐，不影响正确性；P11.7 已整体移除路径键/解析代数缓存与全部失效调用，后续不要再往 `invalidate_template_cache_*` 方向加代码（已不存在）。

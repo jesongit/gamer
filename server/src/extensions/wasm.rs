@@ -1044,7 +1044,7 @@ entry = "plugin.wasm"
         use crate::extensions::wit::gamer::host::context::Host as _;
 
         let app_context =
-            crate::core::AppContext::from_legacy_package("device-1", "com.example.game").unwrap();
+            crate::core::AppContext::for_test("device-1", "com.example.game").unwrap();
         let mut state = HostState::new(
             test_host(),
             Arc::new(AtomicBool::new(false)),

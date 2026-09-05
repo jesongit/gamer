@@ -1,34 +1,5 @@
 use super::*;
 
-#[tokio::test]
-async fn removed_script_stop_and_status_routes_return_not_found() {
-    let t = build_app(
-        "removed-run-routes",
-        test_credential("admin123"),
-        Default::default(),
-    );
-    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
-
-    for (method, uri) in [
-        ("POST", "/api/scripts/missing/run"),
-        ("GET", "/api/scripts/missing/status"),
-        ("POST", "/api/functions/nope/run"),
-    ] {
-        let resp = send(
-            &t.app,
-            req(
-                method,
-                uri,
-                None,
-                &[(header::COOKIE.to_string(), sid.clone())],
-                None,
-            ),
-        )
-        .await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {uri}");
-    }
-}
-
 // ---------- 统一执行入口（POST /api/runs，P11.6）----------
 //
 // 经 TimerRunnerRegistry 分发到 gamer.yaml runner（测试装配同步注册）；

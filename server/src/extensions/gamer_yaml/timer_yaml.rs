@@ -407,11 +407,11 @@ fn yaml_finish_hook(
     })
 }
 
-/// P11.2 过渡缝（ADR-13）：ExtensionService 生命周期回调的 YAML 侧绑定。
-/// `TimerRunnerRegistrar` 钩子接口本身通用——任意扩展未来都能注册自己的
-/// runner；本实现只按扩展 id 特判 `gamer.yaml` 构造 runner（Wave3 把构造
-/// 移进 gamer.yaml 扩展边界），注销路径对任意 owner 通用（owner 名下没有
-/// runner 时为幂等 no-op）。
+/// P11.2 / ADR-13：ExtensionService 生命周期回调的 YAML 侧绑定。扩展边界在
+/// 此自声明两件事：本扩展拥有的 runner 如何构造（`extension_started`），以及
+/// 本扩展的执行模型是按调用惰性实例化（`executes_without_instance`——`start`
+/// 只表示 runner 提供方在线，不启动常驻实例）。注销路径对任意 owner 通用
+/// （owner 名下没有 runner 时为幂等 no-op）。
 pub(crate) struct YamlTimerRunnerRegistrar {
     scheduler: Arc<crate::scheduler::Scheduler>,
     db: Db,
@@ -460,5 +460,9 @@ impl crate::extensions::TimerRunnerRegistrar for YamlTimerRunnerRegistrar {
             .unregister_extension_owner(extension_id)
             .await
             .map(|_| ())
+    }
+
+    fn executes_without_instance(&self, extension_id: &str) -> bool {
+        extension_id == crate::extensions::gamer_yaml::yaml_extension::YAML_EXTENSION_ID
     }
 }

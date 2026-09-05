@@ -420,7 +420,7 @@ fn route_validation_bounds_run_and_task_requests() {
     let task = SaveTaskReq {
         id: None,
         name: "daily".into(),
-        app: crate::core::AppContext::from_legacy_package("device-1", "com.example.game").unwrap(),
+        app: crate::core::AppContext::for_test("device-1", "com.example.game").unwrap(),
         runner: RunnerSpecDto {
             runner_id: "gamer.yaml".into(),
             entrypoint: "com.example.game/daily.yaml".into(),

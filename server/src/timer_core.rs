@@ -5,8 +5,8 @@
 //! consequently the core does not parse cron, load YAML, or resolve app
 //! resources.  Runners arrive through [`TimerRunnerRegistry`] with an owner
 //! extension id (ADR-13) and leave when their owner's lifecycle says so; the
-//! legacy YAML adapter (`timer_yaml`) is just one owner-side registrar away
-//! from the extension lifecycle.
+//! YAML extension's adapter (`timer_yaml`) is just one owner-side registrar
+//! away from the extension lifecycle.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1526,7 +1526,7 @@ mod tests {
         Task::new(
             "task-1",
             "Task",
-            AppContext::from_legacy_package("device-1", "com.example").unwrap(),
+            AppContext::for_test("device-1", "com.example").unwrap(),
             "fake.runner",
             "entry",
             serde_json::json!({"value": 1}),
@@ -1610,7 +1610,7 @@ mod tests {
 
     #[test]
     fn task_state_is_suspendable_without_losing_schedule() {
-        let app = AppContext::from_legacy_package("d1", "com.example.game").unwrap();
+        let app = AppContext::for_test("d1", "com.example.game").unwrap();
         let schedule =
             TaskSchedule::new("cron", serde_json::json!({"expression": "* * * * *"})).unwrap();
         let mut task = Task::new(

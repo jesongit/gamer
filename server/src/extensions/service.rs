@@ -24,17 +24,12 @@ use super::{
     InputEvent, InputResult, KeymapTraceContext, KeymapWasmInstanceHandle, KeymapWasmRuntime,
     KeymapWasmStartRequest, NoKeymapWasmRuntime, ScreenSize, KEYMAP_EXTENSION_ID,
 };
-/// gamer.yaml 的扩展 id。这是个路由层标识字符串（与 TimerRunner::runner_id
-/// 同层），不是对 YAML 扩展内部符号的依赖——本文件不 import gamer_yaml 模块。
-const INSTANCE_FREE_EXTENSION_ID: &str = "gamer.yaml";
 
 /// Extension lifecycle → Timer runner registry seam（ADR-13 / P11.2）。The
 /// service only knows *when* a lifecycle transition happened; the
-/// composition-root implementation owns the registry (the Scheduler) and any
-/// extension-id specific runner construction.  The interface is generic — any
-/// extension may register runners it owns; today only `gamer.yaml` does, and
-/// that special case lives behind this seam until Wave3 moves the runner into
-/// the extension boundary.  Optional so minimal assemblies (tests, gate
+/// composition-root implementation owns the registry (the Scheduler) and each
+/// extension boundary declares its own runner construction and execution
+/// model through this trait. Optional so minimal assemblies (tests, gate
 /// router) can run without a scheduler.
 #[async_trait]
 pub(crate) trait TimerRunnerRegistrar: Send + Sync {
@@ -47,6 +42,15 @@ pub(crate) trait TimerRunnerRegistrar: Send + Sync {
     /// every runner it owns; Active tasks bound to them enter
     /// `DependencyMissing` (tasks are kept, never deleted).
     async fn extension_stopped(&self, extension_id: &str) -> anyhow::Result<()>;
+
+    /// 该扩展是否采用「按调用执行、无常驻实例」模型：`start` 只表示「作为
+    /// runner 提供方在线」，不启动 extension-host 常驻实例；执行由按调用
+    /// 运行时在每次运行时惰性实例化（gamer.yaml 的 run_yaml_vnext）。默认
+    /// false = 常驻实例模型（start 启动实例并持有句柄）。执行模型由拥有该
+    /// 扩展 runner 构造的边界自行声明，本服务不按扩展 id 特判。
+    fn executes_without_instance(&self, _extension_id: &str) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -246,6 +250,15 @@ impl ExtensionService {
         self.runtime.is_available() || self.keymap_runtime.is_available()
     }
 
+    /// 是否按调用执行（无常驻实例）。组合根注册的 registrar 是唯一权威——
+    /// 它拥有各扩展 runner 的构造方式，因此也拥有该扩展执行模型的声明；
+    /// 未挂 registrar 的最小装配一律按常驻实例模型处理。
+    fn instance_free(&self, id: &ExtensionId) -> bool {
+        self.runner_registrar
+            .as_ref()
+            .is_some_and(|registrar| registrar.executes_without_instance(id.as_str()))
+    }
+
     /// Resolve the active-version guest bytes and host API for an extension
     /// that executes per-call instead of holding a resident instance. Generic
     /// mechanism: callers (extension boundaries such as gamer_yaml) supply
@@ -277,7 +290,7 @@ impl ExtensionService {
     }
 
     /// Dispatch an input envelope to the running keymap extension. A missing
-    /// or stopped keymap is a normal pass-through so the legacy control path
+    /// or stopped keymap is a normal pass-through so direct (unmapped) input
     /// remains available. `trace` is the optional Phase 6 E2E latency context
     /// (present only when the trace sink is installed or the env gate is on);
     /// it flows through to the runtime for stage stamping.
@@ -632,11 +645,10 @@ impl ExtensionService {
             self.host_api.clone(),
             active.manifest(),
         )?;
-        let handle = if id.as_str() == INSTANCE_FREE_EXTENSION_ID {
-            // 过渡缝（Wave3 随 YAML 栈迁移）：gamer.yaml 的执行模型是按调用
-            // 惰性实例化（run_yaml_vnext / LazyYamlWasmtimeRuntime），不实现
-            // extension-host 常驻实例 world。start 只表示"作为 timer runner
-            // 提供方在线"（ADR-13 注册缝），不启动实例。
+        let handle = if self.instance_free(id) {
+            // 无实例执行模型：start 只表示「作为 timer runner 提供方在线」
+            // （ADR-13 注册缝），不启动实例；执行由按调用运行时
+            // （guest_for_run）在每次运行时惰性实例化。
             None
         } else if id.as_str() == KEYMAP_EXTENSION_ID {
             match self
@@ -729,6 +741,53 @@ impl ExtensionService {
         self.unregister_extension_runners(id).await;
         self.refresh_ui_registry()?;
         self.snapshot_for(id)
+    }
+
+    /// P11.7 启动对账：进程重启后，持久化状态遗留 `Running` 的扩展既没有活
+    /// 实例也不在 Runner 注册表——其名下任务会一直 `DependencyMissing`，直到
+    /// 用户手动 start。对每条 Running 记录执行与 `start` 等价的恢复（实例
+    /// 启动 / runner 注册 / UI 贡献刷新）；恢复失败降级为 `Enabled` 并把失败
+    /// 原因记入 last_error，绝不阻塞服务启动。组合根在 Scheduler 启动前调用，
+    /// 使恢复出的 runner 立即可派发任务。幂等：无 Running 记录时为 no-op。
+    pub(crate) async fn reconcile_startup(&self) {
+        let running: Vec<ExtensionId> = match self.store.read_state() {
+            Ok(states) => states
+                .into_iter()
+                .filter(|(_, record)| record.state == ExtensionState::Running)
+                .map(|(id, _)| id)
+                .collect(),
+            Err(error) => {
+                tracing::warn!(%error, "extension startup reconcile skipped: state unreadable");
+                return;
+            }
+        };
+        for id in running {
+            // 重启即实例全灭：先把记录降为 Enabled（Running 只描述活实例），
+            // 再走与手动 start 完全相同的恢复路径。
+            if let Err(error) = self.force_state(&id, ExtensionState::Enabled, None) {
+                tracing::warn!(
+                    extension = %id,
+                    %error,
+                    "extension startup reconcile: cannot clear stale Running record"
+                );
+                continue;
+            }
+            match self.start(&id).await {
+                Ok(_) => {
+                    tracing::info!(extension = %id, "extension restored to Running at startup");
+                }
+                Err(error) => {
+                    // start 失败可能已把状态写成 Failed——统一降级 Enabled 并
+                    // 记录原因，服务启动不受影响。
+                    let _ = self.force_state(&id, ExtensionState::Enabled, Some(error.to_string()));
+                    tracing::warn!(
+                        extension = %id,
+                        %error,
+                        "extension startup restore failed; degraded to Enabled"
+                    );
+                }
+            }
+        }
     }
 
     pub(crate) async fn uninstall(
@@ -848,6 +907,23 @@ impl ExtensionService {
         Err(error)
     }
 
+    /// 直写生命周期状态（启动对账专用）：调用点都在启动期或随后即走持锁的
+    /// `start`，不经 operation_lock。记录不存在时报 NotInstalled。
+    fn force_state(
+        &self,
+        id: &ExtensionId,
+        state: ExtensionState,
+        last_error: Option<String>,
+    ) -> ExtensionResult<()> {
+        let mut states = self.store.read_state()?;
+        let Some(record) = states.get_mut(id) else {
+            return Err(ExtensionError::NotInstalled { id: id.to_string() });
+        };
+        record.state = state;
+        record.last_error = last_error;
+        self.store.write_state(&states)
+    }
+
     async fn stop_running_handle(&self, handle: RunningHandle) -> ExtensionResult<()> {
         match handle {
             RunningHandle::Generic(handle) => self.runtime.stop(handle).await,
@@ -858,10 +934,10 @@ impl ExtensionService {
     /// Stop the live instance (whichever world it runs in) and clear the
     /// running maps.  State persistence, runner hooks and UI refresh stay
     /// with the callers so `stop` (→ Enabled) and `disable` (→ Disabled)
-    /// keep their distinct end states.  Instance-free extensions (gamer.yaml
-    /// 的按调用惰性执行模型) simply have nothing to stop.
+    /// keep their distinct end states.  Instance-free extensions（按调用惰性
+    /// 执行模型）simply have nothing to stop.
     async fn stop_running_instance(&self, id: &ExtensionId) -> ExtensionResult<()> {
-        if id.as_str() == INSTANCE_FREE_EXTENSION_ID {
+        if self.instance_free(id) {
             return Ok(());
         }
         if id.as_str() == KEYMAP_EXTENSION_ID {
@@ -1061,4 +1137,250 @@ fn declarative_actions(manifest: &ExtensionManifest) -> Vec<String> {
         .filter_map(|field| field.action())
         .map(str::to_string)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    use zip::write::SimpleFileOptions;
+
+    use crate::config::Config;
+    use crate::core::AppContext;
+    use crate::resources::ResourceStore;
+    use crate::run_manager::RunManager;
+    use crate::scheduler::Scheduler;
+    use crate::store::{Db, Store};
+    use crate::timer_core::{Task, TaskSchedule, TaskState};
+
+    use super::super::gamer_yaml::{YAML_EXTENSION_ID, YAML_EXTENSION_MANIFEST_TOML};
+
+    struct UnreachableExecutor;
+
+    impl crate::run_manager::RunExecutor for UnreachableExecutor {
+        fn prepare<'a>(
+            &'a self,
+            _: &'a crate::core::RunContext,
+            _: &'a crate::core::RunRequest,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<()>> {
+            unreachable!("启动对账测试不应触发真实运行")
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _: &'a crate::core::RunContext,
+            _: &'a crate::core::RunRequest,
+            _: bool,
+            _: Arc<std::sync::atomic::AtomicBool>,
+        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
+            unreachable!("启动对账测试不应触发真实运行")
+        }
+
+        fn acquire(
+            &self,
+            _: &crate::core::RunContext,
+        ) -> anyhow::Result<Box<dyn crate::core::ActivityLease>> {
+            unreachable!("启动对账测试不应触发真实运行")
+        }
+    }
+
+    fn zip_archive(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut archive = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
+            let options = SimpleFileOptions::default();
+            for (name, bytes) in entries {
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(bytes).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        archive
+    }
+
+    /// gamer.yaml 安装包：无实例执行模型下 `start` 不读 guest 字节，占位
+    /// wasm 即可通过安装；真实 v3 运行验收在 gamer_yaml 的端到端测试。
+    fn gamer_yaml_archive() -> Vec<u8> {
+        zip_archive(&[
+            (
+                "manifest.toml",
+                YAML_EXTENSION_MANIFEST_TOML.as_bytes().to_vec(),
+            ),
+            ("plugin.wasm", b"\0asm\x01\0\0\0".to_vec()),
+        ])
+    }
+
+    fn snapshot_state(service: &ExtensionService, id: &ExtensionId) -> ExtensionState {
+        service
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|snapshot| snapshot.id() == id)
+            .expect("extension snapshot")
+            .state()
+    }
+
+    /// 复现崩溃窗口：不经生命周期直接把磁盘状态写成 Running（实例与 runner
+    /// 均已不存在——重启后遗留记录的精确形态）。
+    fn mark_running(service: &ExtensionService, id: &ExtensionId) {
+        let mut states = service.store().read_state().unwrap();
+        states.get_mut(id).unwrap().state = ExtensionState::Running;
+        service.store().write_state(&states).unwrap();
+    }
+
+    /// P11.7 启动对账（ADR-13 验收）：标记 Running → 重建服务 → reconcile
+    /// → runner 重注册、DependencyMissing 任务恢复 Active（唤醒游标经 cron
+    /// 重算，可被 Scheduler 派发）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reconcile_startup_restores_running_extension_and_resumes_tasks() {
+        let data = tempfile::tempdir().expect("无法创建启动对账测试临时目录");
+        let cfg = Config {
+            data_dir: data.path().to_path_buf(),
+            ..Default::default()
+        };
+        let db: Db = Arc::new(Store::open(&cfg).unwrap());
+        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
+
+        // ——「上一次进程」：真实生命周期跑到 Running，然后 stop 留下
+        //   DependencyMissing 任务，最后把磁盘状态写回 Running 模拟崩溃窗口。
+        let scheduler1 = Arc::new(Scheduler::new(db.clone()));
+        let registrar1 = Arc::new(super::super::gamer_yaml::YamlTimerRunnerRegistrar::new(
+            scheduler1.clone(),
+            db.clone(),
+            Arc::new(RunManager::new(Arc::new(UnreachableExecutor))),
+            scripts.clone(),
+        ));
+        let service1 = ExtensionService::for_data_root(
+            data.path(),
+            crate::capabilities::CapabilityRegistry::default(),
+        )
+        .with_runner_registrar(registrar1);
+        service1.install(&gamer_yaml_archive()).await.unwrap();
+        let id = ExtensionId::parse(YAML_EXTENSION_ID).unwrap();
+        service1.enable(&id).await.unwrap();
+        service1.start(&id).await.unwrap();
+
+        let schedule = TaskSchedule::new("cron", serde_json::json!({"expression": "0 8 * * *"}))
+            .expect("cron schedule");
+        let mut task = Task::new(
+            "task-reconcile",
+            "Reconcile",
+            AppContext::for_test("device-1", "com.example.game").unwrap(),
+            YAML_EXTENSION_ID,
+            "com.example.game/daily.yaml",
+            serde_json::json!({"args": {}}),
+            schedule,
+        )
+        .unwrap();
+        task.next_wakeup = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+        db.upsert_timer_task_async(&task).await.unwrap();
+
+        service1.stop(&id).await.unwrap();
+        let suspended = db
+            .get_timer_task_async("task-reconcile")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(suspended.state, TaskState::DependencyMissing);
+        mark_running(&service1, &id);
+        drop(service1);
+        drop(scheduler1);
+
+        // ——「重启后的进程」：裸 runner 注册表 + 遗留 Running 记录。
+        let scheduler2 = Arc::new(Scheduler::new(db.clone()));
+        assert!(scheduler2.runners().is_empty(), "重启后 runner 注册表为空");
+        let registrar2 = Arc::new(super::super::gamer_yaml::YamlTimerRunnerRegistrar::new(
+            scheduler2.clone(),
+            db.clone(),
+            Arc::new(RunManager::new(Arc::new(UnreachableExecutor))),
+            scripts.clone(),
+        ));
+        let service2 = ExtensionService::for_data_root(
+            data.path(),
+            crate::capabilities::CapabilityRegistry::default(),
+        )
+        .with_runner_registrar(registrar2);
+        assert_eq!(
+            snapshot_state(&service2, &id),
+            ExtensionState::Running,
+            "重启后遗留 Running 记录"
+        );
+
+        service2.reconcile_startup().await;
+
+        assert_eq!(
+            snapshot_state(&service2, &id),
+            ExtensionState::Running,
+            "对账后恢复 Running"
+        );
+        let runners = scheduler2.runners();
+        assert_eq!(runners.len(), 1, "对账后 runner 已重注册");
+        assert_eq!(runners[0].runner_id, YAML_EXTENSION_ID);
+        assert_eq!(runners[0].owner_extension_id, YAML_EXTENSION_ID);
+
+        let resumed = db
+            .get_timer_task_async("task-reconcile")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resumed.state,
+            TaskState::Active,
+            "dependency_missing 已恢复"
+        );
+        assert!(resumed.suspend_reason.is_none());
+        let next = resumed.next_wakeup.expect("恢复必须重算唤醒游标");
+        assert!(
+            next > chrono::Utc::now(),
+            "唤醒游标为未来 cron 时刻，可派发"
+        );
+    }
+
+    /// 启动对账降级路径：guest 启动失败（坏 wasm）→ 状态降级 Enabled 且
+    /// 记录原因，服务继续可用。
+    #[tokio::test]
+    async fn reconcile_startup_degrades_ungastartable_extension_to_enabled() {
+        let data = tempfile::tempdir().expect("无法创建降级路径测试临时目录");
+        let service = ExtensionService::for_data_root(
+            data.path(),
+            crate::capabilities::CapabilityRegistry::default(),
+        );
+
+        let archive = zip_archive(&[
+            (
+                "manifest.toml",
+                br#"manifest_version = 1
+id = "com.example.broken"
+version = "1.0.0"
+name = "Broken guest"
+entry = "plugin.wasm"
+"#
+                .to_vec(),
+            ),
+            // 合法 wasm 模块头、非 component：常驻实例模型下 start 必败。
+            ("plugin.wasm", b"\0asm\x01\0\0\0".to_vec()),
+        ]);
+        service.install(&archive).await.unwrap();
+        let id = ExtensionId::parse("com.example.broken").unwrap();
+        service.enable(&id).await.unwrap();
+        mark_running(&service, &id);
+
+        service.reconcile_startup().await;
+
+        let snapshot = service
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|snapshot| snapshot.id() == &id)
+            .unwrap();
+        assert_eq!(
+            snapshot.state(),
+            ExtensionState::Enabled,
+            "恢复失败必须降级 Enabled（不是 Failed/Running）"
+        );
+        assert!(snapshot.last_error().is_some(), "降级时记录失败原因");
+        // 服务继续可用：列表仍可读。
+        assert_eq!(service.list().unwrap().len(), 1);
+    }
 }

@@ -108,10 +108,8 @@ pub(crate) fn extract_to_workspace(
         // 3) 原子替换：既有受管理条目先备份，staging 条目再就位；失败整体回滚
         replace_managed_entries(data_root, &workspace, &staging)?;
 
-        // 4) 分区 templates/ 的进程内模板缓存整体失效（keymap/脚本源码无缓存：
-        //    KeymapStore 与运行快照均按需读盘，无需处理）
-        matcher::invalidate_template_cache_dir(&workspace.join("templates"));
-        // 替换已成功，目录 fsync 尽力而为（失败不回滚成功结果）
+        // 4) 替换已成功，目录 fsync 尽力而为（失败不回滚成功结果）
+        //（模板缓存按内容哈希寻址，整体替换无需失效；keymap/脚本源码按需读盘）
         let _ = sync_directory(&workspace);
 
         Ok(EditOutcome {
