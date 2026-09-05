@@ -342,7 +342,14 @@ fn yaml_args(args: &[(String, TypedValue)]) -> BTreeMap<String, Value> {
                 }
                 TypedValue::Coord(value) => Value::Coordinate(*value),
                 TypedValue::Color(value) => Value::Color(value.clone()),
-                TypedValue::Time(value) => Value::String(value.clone()),
+                // time 参数以 typed duration 过线，脚本内 `wait: $t` 等表达式
+                // 才能拿到 Duration；解析失败的畸形值保持字符串由运行期报错。
+                TypedValue::Time(value) => {
+                    match super::params::parse_time_ms(&value).filter(|ms| *ms >= 0.0) {
+                        Some(ms) => Value::Duration(ms as u64),
+                        None => Value::String(value.clone()),
+                    }
+                }
                 TypedValue::Bool(value) => Value::Bool(*value),
             };
             (name.clone(), value)
@@ -587,5 +594,20 @@ mod tests {
             resolver.resource_id("com.test.app/daily.yaml"),
             "com.test.app/daily.yaml"
         );
+    }
+
+    /// 实参 wire：time 参数必须是 typed Duration（脚本内 `wait: $t` 才能拿到
+    /// 时间值）；畸形时长保持字符串由运行期报错。
+    #[test]
+    fn yaml_args_maps_time_to_typed_duration() {
+        let args = vec![
+            ("ok".to_string(), TypedValue::Time("1s".into())),
+            ("bad".to_string(), TypedValue::Time("nope".into())),
+            ("flag".to_string(), TypedValue::Bool(true)),
+        ];
+        let wire = yaml_args(&args);
+        assert_eq!(wire["ok"], Value::Duration(1000));
+        assert_eq!(wire["bad"], Value::String("nope".into()));
+        assert_eq!(wire["flag"], Value::Bool(true));
     }
 }
