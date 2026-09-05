@@ -209,3 +209,8 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **判定「生产无调用方」别用 `| head` 截断的 grep**：matcher 路径缓存子系统曾被误判为纯死代码，实为「消费端仍在（api/resources、app_packages/edit 的失效调用）+ 生产端早已不产出」的半死子系统；完整判定用 `grep -rn ... | awk -F: '{print $1}' | sort -u`，删子系统时生产者/消费者两端一起清。
 - **`#[ignore]` 的测试同样参与编译**：`cargo test --no-default-features` 因 phase0 keymap e2e 测试引用 `wasm-runtime` feature 门控符号而编译失败（测试体根本不会运行）；跨 feature 引用的测试必须自带 `#[cfg(feature = ...)]`。
 - **模板缓存按内容哈希（SHA-256）寻址后，写路径失效调用是纯冗余**：新内容天然新键，旧条目只会多占内存等 LRU 驱逐，不影响正确性；P11.7 已整体移除路径键/解析代数缓存与全部失效调用，后续不要再往 `invalidate_template_cache_*` 方向加代码（已不存在）。
+
+## 2026-09-05（Phase 11 W5-B：App Package 生命周期 E2E）
+
+- **通用资源 API 的字节 kind（templates/resources）创建/替换统一走模板 PNG 重编码**：`api_create_binary_resource_inner` 与字节 PUT 替换对任意字节 kind 都先过 `reencode_bytes`（PNG 解码+重编码），`resources/` 分区经 REST 只能放 PNG 文件；非 PNG 附件只能落盘直写（导出/安装侧只查路径与大小、不校验内容类型），E2E 内容对账要以「创建后落盘字节」为准而非上传字节。
+- **包卸载挂起把任务 `enabled` 落成 0**：`TimerCore::on_app_package_uninstalled` → `suspend_timer_task_async` 直接 `state='suspended', enabled=0, next_wakeup=NULL`，与 dependency_missing（保留用户 enabled 意图、按 runner 精确恢复）语义不同；按「挂起不改 enabled」写的断言或恢复逻辑会翻车。
