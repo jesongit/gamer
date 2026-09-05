@@ -11,12 +11,18 @@ use crate::run_manager::{CancelOutcome, RunManager, RunSource, StartError, Start
 
 use super::ResourceAdapter;
 
+/// run.submit 能力提交的手动脚本运行固定路由到的自动化 runner id（当前由
+/// gamer.yaml 扩展经 ADR-13 注册缝提供）。这是 Core 侧的路由语义字符串——
+/// Core 不解读其内容、不依赖该扩展的任何符号；id 与扩展市场包 id 一致，
+/// 由 P11.9 守卫测试白名单约束。
+pub(crate) const AUTOMATION_RUNNER_ID: &str = "gamer.yaml";
+
 /// Native bridge from the small capability request to the generic RunManager.
 ///
 /// The WIT contract deliberately passes an opaque resource handle instead of a
 /// host path. The resource adapter resolves that handle back to its logical
 /// id, and this adapter translates the `scripts/<script>.yaml` convention into a
-/// generic `gamer.yaml` request. RunManager still owns mutual exclusion,
+/// generic automation-runner request. RunManager still owns mutual exclusion,
 /// cancellation, terminal state, and history.
 pub(crate) struct RunAdapter {
     manager: Arc<RunManager>,
@@ -67,10 +73,10 @@ impl RunAdapter {
         // 通用 runner 分发约定（P11.6）：runner_id = 自动化 runner 注册 id，
         // entrypoint = `<内容分区>/<脚本>`，payload 为 runner 私有不透明值
         // （缺省对象 = 默认目标从头跑）。目标/payload 语义由注册该 runner 的
-        // 扩展（gamer.yaml）解码，Core 只构造 generic RunRequest。
+        // 扩展解码，Core 只构造 generic RunRequest。
         let inner = crate::core::RunRequest::for_app(
             app,
-            "gamer.yaml",
+            AUTOMATION_RUNNER_ID,
             format!("{}/{}", resource.namespace(), script),
             RunPayload::new(serde_json::json!({})),
         )

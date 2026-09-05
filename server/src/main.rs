@@ -366,6 +366,10 @@ impl RuntimeServices {
         api::system::spawn_watchdog(ctx.devices.clone(), ctx.viewers.clone(), db.metrics());
         api::auth::spawn_sweeper(auth);
         ctx.devices.start().await?;
+        // P11.7 启动对账：恢复重启前遗留 Running 的扩展（实例 + runner 注册 +
+        // UI 贡献），必须在 Scheduler 启动前完成——恢复出的 runner 要立即可
+        // 派发任务；失败降级 Enabled，不阻塞启动。
+        ctx.extensions.reconcile_startup().await;
         ctx.scheduler.start().await;
         Ok(ctx)
     }
