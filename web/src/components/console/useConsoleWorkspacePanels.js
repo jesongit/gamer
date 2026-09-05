@@ -18,7 +18,6 @@ export function useConsoleWorkspacePanels({
   remoteKeymapRunning,
   keymap,
   connected,
-  panelTab,
   activePanelKey,
 }) {
   let extensionUiPollTimer = null
@@ -87,7 +86,6 @@ export function useConsoleWorkspacePanels({
     const selected = panelRegistry.resolve(requested) || panelRegistry.defaultPanel()
     const key = selected?.key || DEFAULT_PANEL_KEY
     activePanelKey.value = key
-    panelTab.value = selected?.panelId || 'tasks'
     if (replaceInvalid && requested !== key) {
       router.replace({ path: route.path, query: { ...route.query, panel: key } })
     }
@@ -98,7 +96,6 @@ export function useConsoleWorkspacePanels({
     if (!selected) return null
     if (activePanelKey.value === selected.key && String(routePanelValue() || '') === selected.key) return selected.key
     activePanelKey.value = selected.key
-    panelTab.value = selected.panelId
     const query = { ...route.query, panel: selected.key }
     return router[replace ? 'replace' : 'push']({ path: route.path, query }).then(() => selected.key)
   }

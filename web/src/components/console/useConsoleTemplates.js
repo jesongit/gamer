@@ -9,9 +9,9 @@ import {
 } from '../../console/geometry'
 
 /**
- * 模板页签：模板列表/模糊搜索、框选与二次裁切、放大镜、测试匹配、
- * 步骤编辑器取值工具（seCellTools：选点/取色/框选回填）与 bridge 框选。
- * 自 Console.vue 原样拆出，行为零变化。
+ * 模板面板（console.templates 扩展面板实现）：模板列表/模糊搜索、框选与二次裁切、
+ * 放大镜、测试匹配、步骤编辑器取值工具（seCellTools：选点/取色/框选回填）与 bridge 框选。
+ * 模板数据由本面板实现自加载进共享 store（壳不预拉业务资源，ADR-11 知识边界）。
  */
 export function useConsoleTemplates({
   toast,
@@ -24,10 +24,11 @@ export function useConsoleTemplates({
   current,
   // 来自设备管理 composable（模板页签顶部的分区行）
   pkgOptions,
-  loadData,
   // 来自脚本运行 composable（懒解析箭头，规避组合顺序）
   editorMatchThreshold,
   clearCallParamsCache,
+  refreshScripts,
+  refreshFnLib,
 }) {
   const picking = ref(false)
   let bridgeRegionResolve = null
@@ -458,6 +459,8 @@ export function useConsoleTemplates({
       return false
     }
   }
+  // 模板列表由本面板实现自加载（Console 壳不再预拉业务资源，ADR-11 知识边界）
+  refreshTemplatesData()
 
   async function finishCropSave(rep, shortName) {
     const refreshed = await refreshTemplatesData()
@@ -808,7 +811,8 @@ export function useConsoleTemplates({
       await api.renameTemplate(t.name, newName, activePkg.value)
       // 后端会同步改写当前分区 scripts/functions 中的模板引用；刷新脚本与函数缓存，
       // 让当前摘要、调用参数和后续编辑都立即看到新名称。
-      await loadData()
+      await refreshScripts?.()
+      await refreshFnLib?.(activePkg.value)
       clearCallParamsCache()
       toast(`模板已重命名为 ${newName}`, 'success')
     } catch (e) {
@@ -1042,6 +1046,7 @@ export function useConsoleTemplates({
     bridgeRegionSelected, finishBridgeRegionSelect, cancelBridgeRegionSelect,
     closeTplView,
     // 上下文对象
+    refreshTemplatesData,
     templateCaptureContext,
   }
 }

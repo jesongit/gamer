@@ -1,5 +1,6 @@
-<!-- 设备占用冲突（409 device_busy）提示弹窗（RUN-003 阶段3）：
-     逐条消费 store.runConflicts 队列，展示对方 script_id、来源中文标签、开始时间
+<!-- 设备占用冲突（409 device_busy）提示弹窗（RUN-003 / ADR-12）：
+     逐条消费 store.runConflicts 队列，展示对方运行目标（entrypoint 为主，
+     script_id 为服务端保留的兼容展示字段）、来源中文标签、开始时间
      （本地时区格式化），提供「仍要查看日志」跳控制台对应设备；
      关闭不打断当前页面其他功能。 -->
 <template>
@@ -11,7 +12,7 @@
       </div>
       <div class="modal-body">
         <div class="cf-row"><span class="cf-k">设备</span><span>{{ deviceName(cur.device_id) }}</span></div>
-        <div class="cf-row"><span class="cf-k">对方脚本</span><span class="mono">{{ cur.script_id || '未知' }}</span></div>
+        <div class="cf-row"><span class="cf-k">运行目标</span><span class="mono">{{ cur.entrypoint || cur.script_id || '未知' }}</span></div>
         <div class="cf-row"><span class="cf-k">来源</span><span><span class="tag run">{{ sourceLabel(cur.source) || '未知' }}</span></span></div>
         <div class="cf-row"><span class="cf-k">开始时间</span><span class="mono">{{ formatLocalTime(cur.started_at) || '未知' }}</span></div>
         <div class="cf-tip">一个设备同时只允许一个自动化执行实例，本次启动已被服务端拒绝（409）。可前往投屏控制台查看该设备的运行日志。</div>

@@ -1,4 +1,6 @@
-// 统一运行实例（RUN-003）前端语义工具：执行实例以 run_id 为主键，script_id 只标识脚本。
+// 统一运行实例（RUN-003 / ADR-12）前端语义工具：执行实例以 run_id 为主键，
+// 运行目标由 runner_id + entrypoint 标识（runner 私有寻址，前端不解释其语义；
+// script_id 为服务端保留的兼容展示字段）。
 // 纯函数模块（不依赖 Vue 响应性），供 store 与各视图复用，vitest 直测。
 // 当前后端契约：
 //   启动 POST run → 202 {run_id, state:"starting"}
@@ -41,15 +43,16 @@ export function formatLocalTime(iso) {
 }
 
 /**
- * 409 冲突体 → 用户可读文案。data: {error:'device_busy', run_id, script_id, source, started_at}
+ * 409 冲突体 → 用户可读文案。data: {error:'device_busy', run_id, entrypoint,
+ * script_id(兼容字段), source, started_at}
  * 缺字段宽容（各槽位回退"未知"），设备上下文由调用方补充。
  */
 export function describeConflict(data) {
   const d = data && typeof data === 'object' ? data : {}
-  const script = d.script_id || '未知脚本'
+  const target = d.entrypoint || d.script_id || '未知目标'
   const src = sourceLabel(d.source) || '未知来源'
   const t = d.started_at ? formatLocalTime(d.started_at) : '未知时间'
-  return `设备正被占用：${script} 正在运行（来源：${src} · 开始于 ${t}）`
+  return `设备正被占用：${target} 正在运行（来源：${src} · 开始于 ${t}）`
 }
 
 /** 是否设备占用冲突（契约：HTTP 409 + body.error === 'device_busy'） */

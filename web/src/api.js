@@ -3,12 +3,11 @@
 //
 // P11.6 通用资源 API：脚本/函数库/模板/按键映射统一走
 // `/api/apps/:app/resources[...]`（kind ∈ scripts|functions|templates|keymaps|...）；
-// 运行统一走 POST /api/runs（runner_id + entrypoint + payload）。方法名保持
-// 业务语义（listScripts/createTemplate…），URL 为通用形态。
+// 运行统一走 POST /api/runs（runner_id + entrypoint + payload，ADR-12/13：执行
+// 目标按 runner 分发）。本封装只提供 runner 无关的通用 run()；具体 runner 的
+// 包装（如 YAML 自动化 runner）归扩展前端侧（gamer-yaml-runner.js 等），Core API 层
+// 不认识任何 runner 注册 id。
 import { handleUnauthorized } from './auth'
-
-// gamer.yaml 自动化 runner 的注册 id（统一执行入口分发目标）
-const GAMER_YAML_RUNNER_ID = 'gamer.yaml'
 
 /** base64 → Uint8Array（模板原始字节上传用） */
 function base64ToBytes(dataB64) {
@@ -312,7 +311,7 @@ export const api = {
     )
     return readResult(r)
   },
-  // 重命名：JSON {name}；服务端经 gamer.yaml 钩子同步改写脚本/函数引用。
+  // 重命名：JSON {name}；服务端经扩展内容钩子同步改写脚本/函数引用。
   renameTemplate: (oldName, newName, pkg) =>
     req(
       'PUT',
@@ -336,7 +335,7 @@ export const api = {
   // 单脚本读取（含内容版本短码 version：编辑器 expected_version 冲突检测依据）
   getScript: (id) => req(
     'GET',
-    `/api/apps/-/resources/scripts/${encodeURIComponent(requireId(id, 'script_id'))}`,
+    `/api/apps/-/resources/scripts/${encodeURIComponent(requireId(id, '资源 id'))}`,
   ),
   // POST 只创建；PUT 只更新。更新缺版本时在客户端拒绝，force 必须显式为 true。
   createScript: ({ name, content, pkg } = {}) => req(
@@ -346,7 +345,7 @@ export const api = {
   ),
   updateScript: async (id, payload = {}) => req(
     'PUT',
-    `/api/apps/-/resources/scripts/${encodeURIComponent(requireId(id, 'script_id'))}`,
+    `/api/apps/-/resources/scripts/${encodeURIComponent(requireId(id, '资源 id'))}`,
     updateBody(payload, id),
   ),
   deleteScript: (id) => req(
@@ -355,7 +354,7 @@ export const api = {
   ),
   // 函数库（通用资源 API functions kind；id 形如 "<pkg>/<文件短路径>.yaml"，
   // 整体 encodeURIComponent。不进脚本列表/运行接口/任务选择器；GET 单文件含
-  // content/version/functions（顶层函数名清单，gamer.yaml 注记提供））
+  // content/version/functions（顶层函数名清单，扩展注记提供））
   listFunctions: (pkg) => req(
     'GET',
     `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/functions`,
@@ -372,7 +371,7 @@ export const api = {
   ),
   updateFunction: async (id, payload = {}) => req(
     'PUT',
-    `/api/apps/-/resources/functions/${encodeURIComponent(requireId(id, 'function_id'))}`,
+    `/api/apps/-/resources/functions/${encodeURIComponent(requireId(id, '资源 id'))}`,
     updateBody(payload, id),
   ),
   deleteFunction: (id) => req(
@@ -380,35 +379,19 @@ export const api = {
     `/api/apps/-/resources/functions/${encodeURIComponent(id)}`,
   ),
 
-  // 脚本运行（P11.6 统一执行入口）：POST /api/runs {runner_id, entrypoint,
-  // device_id, payload}——payload 为 runner 私有不透明值；gamer.yaml 约定
-  // {args, start_index}（args 为稀疏显式覆盖映射，省略的参数由服务端解析默认值）。
+  // 统一执行入口（P11.6 / ADR-12）：POST /api/runs {runner_id, entrypoint,
+  // device_id, payload}——runner_id 为 runner 注册 id（分发目标），entrypoint 为
+  // runner 私有寻址，payload 为 runner 私有不透明值；本方法对具体 runner 保持
+  // 无知（具体 runner 的包装见扩展前端侧 gamer-yaml-runner.js）。
   // 成功 202 {run_id, state, resolved_args}；参数诊断 400 {error:"invalid_args",
   // diagnostics:[...]}；设备占用 409 {error:"device_busy", ...}；运行依赖缺失
   //（runner 未注册）424 {code:"dependency_unavailable"}
-  runScript: async (id, deviceId, startIndex = 0, args) =>
+  run: async ({ runner_id, entrypoint, device_id, payload } = {}) =>
     requireRunResponse(await req('POST', '/api/runs', {
-      runner_id: GAMER_YAML_RUNNER_ID,
-      entrypoint: requireId(id, 'script_id'),
-      device_id: deviceId,
-      payload: {
-        ...(startIndex ? { start_index: startIndex } : {}),
-        ...(args && Object.keys(args).length ? { args } : {}),
-      },
-    })),
-  // 函数测试：entrypoint = "<pkg>/<文件短路径>.yaml[#函数名]"（function 缺省 =
-  // 文件第一个函数）；响应/错误语义与脚本运行相同
-  runFunction: async (id, deviceId, opts = {}) =>
-    requireRunResponse(await req('POST', '/api/runs', {
-      runner_id: GAMER_YAML_RUNNER_ID,
-      entrypoint: opts.function
-        ? `${requireId(id, 'function_id')}#${opts.function}`
-        : requireId(id, 'function_id'),
-      device_id: deviceId,
-      payload: {
-        ...(opts.start_index !== undefined ? { start_index: opts.start_index } : {}),
-        ...(opts.args && Object.keys(opts.args).length ? { args: opts.args } : {}),
-      },
+      runner_id: requireId(runner_id, 'runner_id'),
+      entrypoint: requireId(entrypoint, 'entrypoint'),
+      device_id: device_id,
+      payload: payload && typeof payload === 'object' ? payload : {},
     })),
   // 统一运行实例（run_id 主键）：单次查询 RunRecord / 按次取消（终态以查询为准）
   getRun: async (runId) => requireRunResponse(await req('GET', `/api/runs/${encodeURIComponent(requireId(runId, 'run_id'))}`)),

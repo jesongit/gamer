@@ -24,9 +24,9 @@
     <div class="card log-card">
       <div ref="streamEl" class="log-stream mono" @scroll="onScroll">
         <template v-for="(g, gi) in groups" :key="gi">
-          <!-- 分组头：连续同一「设备+脚本」的日志段共用一条分割线，区分不同脚本的运行 -->
+          <!-- 分组头：连续同一「设备+运行目标」的日志段共用一条分割线，区分不同运行 -->
           <div class="run-divider">
-            <span class="rd-script">{{ g.scriptLabel }}</span>
+            <span class="rd-script">{{ g.target }}</span>
             <span class="rd-dev">{{ g.deviceLabel }}</span>
             <span class="rd-time mono">{{ g.time }}</span>
             <span class="rd-line"></span>
@@ -51,19 +51,20 @@
 
 <script setup>
 /**
- * Console 右侧日志页签内容：
+ * Console 右侧日志页签内容（gamer.core:logs，Core 自有 UI）：
  * - 服务端 ORDER BY id DESC 返回，这里反转为时间正序展示，最新日志沉底；
- * - 运行分组：连续相同「设备+脚本」的日志归为一段，段首渲染分割线（脚本名 + 设备 + 起始时间），
- *   交替/并行运行产生的交叉段落各自带组头，仍可一眼区分来源；
+ * - 运行分组：按「设备 + 运行目标」连续段归组，段首渲染分割线（目标 id + 设备 +
+ *   起始时间）。运行目标是 runner 私有寻址（entrypoint；日志行沿用服务端
+ *   script_id 字段透传，Core 不解释其业务语义），交替/并行运行产生的交叉段落
+ *   各自带组头，仍可一眼区分来源；
  * - 用户上翻查看历史时自动刷新不强制滚底（贴近底部才跟随）。
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { devicesData, scriptsData, useToast } from '../store'
+import { devicesData, useToast } from '../store'
 import { api } from '../api'
 
 const toast = useToast()
 const devices = devicesData
-const scripts = scriptsData
 const logs = ref([])
 const fDevice = ref('')
 const fLevel = ref('')
@@ -74,26 +75,23 @@ let timer = null
 const LEVELS = { info: 'INFO', success: 'OK', warn: 'WARN', error: 'ERR' }
 function levelBadge(l) { return LEVELS[l] || l }
 function deviceName(id) { return devices.value.find(d => d.id === id)?.name || id }
-function scriptLabel(id) {
-  const s = scripts.value.find(s => s.id === id)
-  if (!s) return id
-  return s.package === 'default' ? s.name : `${s.package}/${s.name}`
-}
+/** 运行目标展示：entrypoint 为主，script_id 为服务端保留的兼容展示字段 */
+function runTarget(l) { return l.entrypoint || l.script_id || '—' }
 
-/** 时间正序 + 连续「设备+脚本」分段。 */
+/** 时间正序 + 连续「设备+运行目标」分段。 */
 const groups = computed(() => {
   const asc = [...logs.value].reverse()
   const out = []
   for (const l of asc) {
+    const target = runTarget(l)
     const last = out[out.length - 1]
-    if (last && last.deviceId === l.device_id && last.scriptId === l.script_id) {
+    if (last && last.deviceId === l.device_id && last.target === target) {
       last.entries.push(l)
     } else {
       out.push({
         deviceId: l.device_id,
-        scriptId: l.script_id,
+        target,
         deviceLabel: deviceName(l.device_id),
-        scriptLabel: scriptLabel(l.script_id),
         time: l.time,
         entries: [l],
       })
@@ -131,12 +129,9 @@ async function clear() {
 async function loadDevices() {
   try { devices.value = await api.listDevices() } catch (e) {}
 }
-async function loadScripts() {
-  try { scripts.value = await api.listScripts() } catch (e) {}
-}
 
 onMounted(() => {
-  loadDevices(); loadScripts(); load()
+  loadDevices(); load()
   timer = setInterval(() => { if (autoRefresh.value) load() }, 5000)
 })
 onUnmounted(() => { if (timer) clearInterval(timer) })
@@ -164,7 +159,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .log-line.success .lg-msg { color: var(--ok); }
 .lg-msg { color: var(--text-1); }
 
-/* 运行分组分割线：脚本名 + 设备 + 起始时间 + 延伸线 */
+/* 运行分组分割线：目标 id + 设备 + 起始时间 + 延伸线 */
 .run-divider {
   display: flex; align-items: center; gap: 8px;
   margin: 10px 0 4px; font-size: 12px;

@@ -28,15 +28,18 @@ export function parseAndroidPackages(text) {
 }
 
 /**
- * 依赖注入：toast(msg, type) / activePkg(ref) / loadData()（设备+脚本+模板）/ 
- * refreshFnLib(pkg)（函数库）/ refreshKeymaps(pkg)（按键映射）/ download(blob, filename)
- * / api。全部可替换以便测试；不传时用真实实现。
+ * 依赖注入：toast(msg, type) / activePkg(ref) / loadData()（设备）/ 
+ * refreshScripts()（脚本列表）/ refreshTemplates()（模板列表）/ refreshFnLib(pkg)（函数库）
+ * / refreshKeymaps(pkg)（按键映射）/ download(blob, filename) / api。
+ * 全部可替换以便测试；不传时用真实实现。
  */
 export function useWorkspacePackages({
   api = defaultApi,
   toast,
   activePkg,
   loadData,
+  refreshScripts,
+  refreshTemplates,
   refreshFnLib,
   refreshKeymaps,
   download,
@@ -48,6 +51,8 @@ export function useWorkspacePackages({
     const pkg = activePkg.value
     await Promise.all([
       Promise.resolve(loadData?.()).catch(() => {}),
+      Promise.resolve(refreshScripts?.()).catch(() => {}),
+      Promise.resolve(refreshTemplates?.()).catch(() => {}),
       Promise.resolve(refreshFnLib?.(pkg)).catch(() => {}),
       Promise.resolve(refreshKeymaps?.(pkg)).catch(() => {}),
     ])

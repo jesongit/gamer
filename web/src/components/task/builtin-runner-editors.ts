@@ -9,8 +9,9 @@ import { registerRunnerEditor } from './runner-editors'
 import ScriptPicker from '../ScriptPicker.vue'
 import GamerYamlPayloadEditor from './GamerYamlPayloadEditor.vue'
 import { ensureGamerYamlResources, gamerYamlEntrypointOptions } from './gamer-yaml-resources'
+import { GAMER_YAML_RUNNER_ID } from '../../gamer-yaml-runner'
 
-export const GAMER_YAML_RUNNER_ID = 'gamer.yaml'
+export { GAMER_YAML_RUNNER_ID }
 
 /** gamer.yaml 的 app 包名约定：entrypoint = "<android_package>/<脚本文件名>"。 */
 export function resolveGamerYamlAppPackages(entrypoint: string): RunnerAppPackages {

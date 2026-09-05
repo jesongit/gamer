@@ -228,8 +228,11 @@ function itemName(item) {
 }
 
 function serverVersion(item) {
+  // 内容版本短码（内容哈希字符串）；空值回退 1，超长截短便于表格展示
   const value = item && item.version
-  return value === undefined || value === null || value === '' ? 1 : value
+  if (value === undefined || value === null || value === '') return 1
+  const text = String(value)
+  return text.length > 8 ? text.slice(0, 8) : text
 }
 
 function sourceModel(item) {

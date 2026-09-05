@@ -278,12 +278,10 @@ const {
 } = useConsolePanelResize({ consoleEl })
 
 // ---------- 运行时数据加载/重连编排 ----------
+// 壳只拉设备；脚本/模板等业务资源由各自面板实现自加载（ADR-11 知识边界）
 const consoleRuntime = useConsoleRuntime({
   api,
   devicesData,
-  scriptsData,
-  templatesData,
-  toast,
   deviceIdRef: computed(() => store.deviceId),
 })
 
@@ -345,7 +343,7 @@ function syncKeymapPressed() {
   for (const code of codes || []) keymapPressed.add(code)
 }
 
-// ---------- 模板页签（列表/框选/二次裁切/放大镜/测试匹配/取值工具） ----------
+// ---------- 模板面板（列表/框选/二次裁切/放大镜/测试匹配/取值工具） ----------
 const {
   picking, selecting, selStart, selEnd, showHit, hitLabel, hitMiss, hitStyle, selStyle,
   testThreshold, testRegion, tplSearch, templates, templateNames,
@@ -360,7 +358,7 @@ const {
   tplShortName, tplRegionBadge, tplThumbUrl, testMatch,
   selectRegionForBridge, beginCellPick, cancelCellPick, finishCellPick, cellPick,
   bridgeRegionSelected, finishBridgeRegionSelect, cancelBridgeRegionSelect, closeTplView,
-  templateCaptureContext,
+  refreshTemplatesData, templateCaptureContext,
 } = useConsoleTemplates({
   toast,
   store,
@@ -371,10 +369,11 @@ const {
   videoWrap,
   current,
   pkgOptions,
-  loadData,
   // 脚本运行 composable 的能力经懒解析箭头注入（规避组合顺序）
   editorMatchThreshold: () => editorMatchThreshold(),
   clearCallParamsCache: () => clearCallParamsCache(),
+  refreshScripts: () => refreshScripts(),
+  refreshFnLib: pkg => fnLib.refresh(pkg),
 })
 
 // ---------- bridge overlay（sandbox UI 申请的画面叠加框） ----------
@@ -383,23 +382,16 @@ const { bridgeOverlayView, showBridgeOverlay, clearBridgeOverlay } = useConsoleB
   deviceRectStyle,
 })
 
-// ---------- 脚本运行/编辑（运行区、编辑外壳、运行参数流程、运行日志与轮询） ----------
+// ---------- YAML 自动化面板运行器（脚本/函数面板共享机制 + 各自作用域上下文） ----------
+// 壳只拿接线所需的共享机制与两份面板上下文；面板内部状态（编辑模式/选择）不进壳。
 const {
-  scriptShell, rawEditor, fnLib,
-  scriptMode, selScript, selFnFile, runKind, scriptDeleteConfirmId,
-  canRunTarget, selTargetId, showYaml, editFocusFn, resourcePreview,
-  liveLogs, startPending, runStopping, runArgsFlow,
-  funcFnViews, funcSummaryError, summaryModel, summaryError,
-  startLogPolling, stopLogPolling, pushLog, autoSaveDebounced,
+  fnLib, resourcePreview, closeResourcePreview,
+  runArgsFlow, onRunArgsSubmit,
+  startLogPolling, stopLogPolling,
   clearCallParamsCache, editorMatchThreshold,
-  cancelEditScript, startNewScript, editCurrentTarget, editRawCurrentTarget, saveRawScript, cancelRawScript,
-  startNewTarget, deleteCurrentTarget, addFunctionToCurrentFile, renameEditingFunction, deleteFunction,
-  editCurrentScript, deleteCurrentScript, saveEditScript,
-  onConflictReload, onConflictOverwrite, onConflictDismiss,
-  runFromStep, openScriptTarget, closeResourcePreview, jumpBack,
-  runScript, onRunArgsSubmit, stopScript,
-  startRunStatusPoll, restoreRunState, onBeforeUnload, onLogBoxMounted,
-  scriptRunnerContext,
+  startRunStatusPoll, restoreRunState, onBeforeUnload,
+  refreshScripts,
+  scriptPanel, functionsPanel,
 } = useConsoleScriptRunner({
   toast,
   activePkg,
@@ -435,13 +427,15 @@ watch(activePkg, pkg => {
 
 // ---------- 游戏包三入口（导入/导出/编辑）：逻辑在 composable，context 并入右侧上下文条 ----------
 // WorkspaceContextBar 只透传；导入/编辑替换当前分区资源后经注入的刷新回调全量重拉
-//（activePkg 未变，watch 不触发，必须显式刷新 fnLib/keymap）
+//（activePkg 未变，watch 不触发，必须显式刷新 fnLib/keymap/脚本/模板）
 const workspacePackages = useWorkspacePackages({
   toast,
   activePkg,
   loadData,
   refreshFnLib: pkg => fnLib.refresh(pkg),
   refreshKeymaps: pkg => loadKeymaps(pkg),
+  refreshScripts: () => refreshScripts(),
+  refreshTemplates: () => refreshTemplatesData(),
 })
 Object.assign(workspaceContextBarContext, workspacePackages.context)
 
@@ -466,9 +460,8 @@ const { startStats, stopStats, resetWatchdogs, resetBlackWatchdog } = useWebrtcS
 // （runtime = "core" + component 键）经 server-ui adapter 驱动出现/消失。
 const workspaceLifecycle = createWorkspaceLifecycle()
 const panelRegistry = createPanelRegistry({ defaultPanelKey: DEFAULT_PANEL_KEY })
-// Workspace 以稳定的 pluginId:panelId 作为 URL key；panelTab 保留为旧上下文
-// 的兼容字段，实际导航由 activePanelKey + PanelRegistry 负责。
-const panelTab = ref('tasks')
+// Workspace 以稳定的 pluginId:panelId 作为 URL key；实际导航由
+// activePanelKey + PanelRegistry 负责。
 const activePanelKey = ref(DEFAULT_PANEL_KEY)
 registerCoreContributions(panelRegistry, { activePkg })
 const serverUiAdapter = createServerUiContributionAdapter(panelRegistry, {
@@ -484,7 +477,6 @@ const {
   remoteKeymapRunning,
   keymap,
   connected,
-  panelTab,
   activePanelKey,
 })
 // keymap 输入控制器接线：与面板注册解耦——挂载即启用本地映射（旧注册 lifecycle
@@ -513,7 +505,8 @@ const workspaceContext = createWorkspaceContext({
   pluginCall: createPluginCallAdapter(api),
   core: {
     templateCapture: templateCaptureContext,
-    scriptRunner: scriptRunnerContext,
+    // YAML 自动化扩展的两个面板各自绑定一份作用域上下文（编辑模式/选择互不串台）
+    scriptRunner: { scripts: scriptPanel, functions: functionsPanel },
     keymap: keymapPanelContext,
     activePkg,
   },

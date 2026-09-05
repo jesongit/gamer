@@ -71,7 +71,7 @@ describe('当前运行查询与启动响应', () => {
 
   it('启动、查询和任务立即运行都要求服务端返回 run_id', async () => {
     fetch.mockResolvedValueOnce(res(202, { run_id: 'run-fast', state: 'starting', resolved_args: {} }))
-    await expect(api.runScript('p/fast.yaml', 'dev-1')).resolves.toMatchObject({ run_id: 'run-fast' })
+    await expect(api.run({ runner_id: 'test.runner', entrypoint: 'p/fast.yaml', device_id: 'dev-1' })).resolves.toMatchObject({ run_id: 'run-fast' })
 
     fetch.mockResolvedValueOnce(res(200, { run_id: 'run-fast', state: 'success' }))
     await expect(api.getRun('run-fast')).resolves.toMatchObject({ run_id: 'run-fast', state: 'success' })
@@ -80,7 +80,7 @@ describe('当前运行查询与启动响应', () => {
     await expect(api.runTaskNow('task-1')).resolves.toEqual({ run_id: 'task-run' })
 
     fetch.mockResolvedValueOnce(res(202, { ok: true }))
-    await expect(api.runScript('p/fast.yaml', 'dev-1')).rejects.toMatchObject({
+    await expect(api.run({ runner_id: 'test.runner', entrypoint: 'p/fast.yaml', device_id: 'dev-1' })).rejects.toMatchObject({
       code: 'invalid_response',
       status: 502,
       data: { ok: true },
