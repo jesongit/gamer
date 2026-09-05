@@ -233,7 +233,7 @@ mod tests {
             &app,
             HttpRequest::builder()
                 .method("POST")
-                .uri("/api/scripts/x/run")
+                .uri("/api/runs")
                 .body(Body::empty())
                 .unwrap(),
         )

@@ -2286,7 +2286,7 @@ mod tests {
             let spec = RunSpec {
                 context: crate::core::RunContext::new(
                     crate::core::RunId::generate(),
-                    crate::core::AppContext::from_legacy_package("dev", PKG).unwrap(),
+                    crate::core::AppContext::for_test("dev", PKG).unwrap(),
                 ),
                 target,
                 args: args.into_iter().map(|(n, v)| (n.to_string(), v)).collect(),
@@ -2302,7 +2302,7 @@ mod tests {
             let spec = RunSpec {
                 context: crate::core::RunContext::new(
                     crate::core::RunId::generate(),
-                    crate::core::AppContext::from_legacy_package("dev", PKG).unwrap(),
+                    crate::core::AppContext::for_test("dev", PKG).unwrap(),
                 ),
                 target,
                 args: args.into_iter().map(|(n, v)| (n.to_string(), v)).collect(),

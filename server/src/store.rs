@@ -2431,7 +2431,7 @@ PRAGMA user_version = 2;
     async fn task_preset_is_independent_from_user_timer_task() {
         let (cfg, dir) = temp_config("timer-preset");
         let store = Store::open(&cfg).unwrap();
-        let app = crate::core::AppContext::from_legacy_package("device-1", "com.example").unwrap();
+        let app = crate::core::AppContext::for_test("device-1", "com.example").unwrap();
         let schedule =
             crate::timer_core::TaskSchedule::new("opaque", serde_json::json!({"rule": "every"}))
                 .unwrap();
@@ -2497,7 +2497,7 @@ PRAGMA user_version = 2;
     async fn dependency_missing_state_persists_and_preserves_enabled() {
         let (cfg, dir) = temp_config("dependency-missing");
         let store = Store::open(&cfg).unwrap();
-        let app = crate::core::AppContext::from_legacy_package("device-1", "com.example").unwrap();
+        let app = crate::core::AppContext::for_test("device-1", "com.example").unwrap();
         let mut task = Task::new(
             "dm-task",
             "DM",

@@ -1892,7 +1892,7 @@ mod wasm_component_tests {
     }
 
     fn app_context() -> AppContext {
-        AppContext::from_legacy_package("device-1", "com.example.game").unwrap()
+        AppContext::for_test("device-1", "com.example.game").unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -23,7 +23,6 @@ mod cron_extension;
 mod deps_probe;
 mod device;
 mod extensions;
-mod file_migration;
 mod logging;
 mod maintenance;
 mod matcher;

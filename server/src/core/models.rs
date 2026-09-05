@@ -2,8 +2,7 @@
 //!
 //! This module intentionally contains data-only types. It does not resolve
 //! resources, access devices, or know about YAML, SQLite, WebRTC, or a host
-//! filesystem. Existing execution paths can adopt these types incrementally
-//! through the legacy constructors below.
+//! filesystem.
 
 #![allow(
     dead_code,
@@ -161,10 +160,11 @@ impl AppContext {
         }
     }
 
-    /// Compatibility adapter for the current `<pkg>/...` storage convention.
-    /// The old value was ambiguous, so this copies it into both typed
-    /// namespaces. New callers should use [`Self::new`].
-    pub fn from_legacy_package(
+    /// 测试装配助手：按当前 `<pkg>/...` 存储约定构造上下文（内容分区 =
+    /// Android 包名）。仅测试构建存在；生产调用方必须用 [`Self::new`] 显式
+    /// 给出两个命名空间的值。
+    #[cfg(test)]
+    pub fn for_test(
         device_id: impl Into<String>,
         package: impl Into<String>,
     ) -> Result<Self, ModelError> {
@@ -375,12 +375,12 @@ impl ResourceId {
         })
     }
 
-    /// Convert the current `<content-package>/<relative-resource>` key into
-    /// a logical id without constructing a host filesystem path.
-    pub fn from_legacy_key(key: &str) -> Result<Self, ModelError> {
+    /// Parse the canonical `<content-package>/<relative-resource>` composite
+    /// key into a logical id without constructing a host filesystem path.
+    pub fn from_composite_key(key: &str) -> Result<Self, ModelError> {
         let (package, logical_path) =
             key.split_once('/').ok_or(ModelError::InvalidLogicalPath {
-                reason: "legacy key must contain a package and resource path",
+                reason: "composite key must contain a package and resource path",
             })?;
         Self::new(AppPackageId::new(package)?, logical_path)
     }
@@ -397,8 +397,9 @@ impl ResourceId {
         self.revision.as_deref()
     }
 
-    /// Legacy display/storage key, retained only for old adapters.
-    pub fn legacy_key(&self) -> String {
+    /// Canonical `<content-package>/<relative-resource>` composite key
+    /// (entrypoint / 日志展示 / 存储统一使用该形态).
+    pub fn composite_key(&self) -> String {
         format!("{}/{}", self.app_package, self.logical_path)
     }
 }
@@ -407,7 +408,7 @@ impl fmt::Display for ResourceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.revision() {
             Some(revision) => write!(f, "{}@{revision}/{}", self.app_package, self.logical_path),
-            None => f.write_str(&self.legacy_key()),
+            None => f.write_str(&self.composite_key()),
         }
     }
 }
@@ -499,8 +500,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_package_adapter_preserves_old_single_package_behavior() {
-        let context = AppContext::from_legacy_package("device-1", "com.example.game").unwrap();
+    fn test_helper_maps_package_to_both_namespaces() {
+        let context = AppContext::for_test("device-1", "com.example.game").unwrap();
 
         assert_eq!(context.android_package.as_str(), "com.example.game");
         assert_eq!(
@@ -567,16 +568,16 @@ mod tests {
         assert_eq!(id.app_package().as_str(), "official.example");
         assert_eq!(id.logical_path(), "templates/status.png");
         assert_eq!(id.revision(), Some("1.2.0"));
-        assert_eq!(id.legacy_key(), "official.example/templates/status.png");
+        assert_eq!(id.composite_key(), "official.example/templates/status.png");
         assert_eq!(handle.id(), &id);
     }
 
     #[test]
-    fn resource_id_legacy_adapter_rejects_traversal_without_pathbuf() {
-        let id = ResourceId::from_legacy_key("official.example/templates/status.png").unwrap();
+    fn resource_id_composite_key_rejects_traversal_without_pathbuf() {
+        let id = ResourceId::from_composite_key("official.example/templates/status.png").unwrap();
         assert_eq!(id.logical_path(), "templates/status.png");
-        assert!(ResourceId::from_legacy_key("official.example/../secret.png").is_err());
-        assert!(ResourceId::from_legacy_key("official.example\\secret.png").is_err());
+        assert!(ResourceId::from_composite_key("official.example/../secret.png").is_err());
+        assert!(ResourceId::from_composite_key("official.example\\secret.png").is_err());
     }
 
     #[test]

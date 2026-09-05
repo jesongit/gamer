@@ -34,9 +34,6 @@ pub use viewer::{
     remove_and_teardown_viewer, teardown_viewer, ViewerDisconnectReason, ViewerHandle, ViewerMap,
     ViewerSession,
 };
-// 兼容导出：crate 内当前仅 viewer 模块内部调用，保留 webrtc::take_viewer 公开路径
-#[allow(unused_imports)]
-pub use viewer::take_viewer;
 
 use probe::{probe_encoder_blockiness, should_probe_encoder};
 

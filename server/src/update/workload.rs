@@ -254,7 +254,7 @@ mod tests {
         let runs = Arc::new(RunManager::new(Arc::new(HangingExecutor)));
         let scheduler = Arc::new(Scheduler::new(db.clone()));
 
-        let app = AppContext::from_legacy_package("device-1", "pkg").unwrap();
+        let app = AppContext::for_test("device-1", "pkg").unwrap();
         let schedule =
             TaskSchedule::new("cron", serde_json::json!({"expression": "*/5 * * * *"})).unwrap();
         let enabled = Task::new(
