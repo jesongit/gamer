@@ -44,7 +44,7 @@ fn export_preset_yaml(name: &str, expression: &str) -> Vec<u8> {
 fn seed_workspace(dir: &std::path::Path, android: &str) {
     let ws = dir.join(android);
     std::fs::create_dir_all(ws.join("scripts")).unwrap();
-    std::fs::write(ws.join("scripts/daily.yaml"), b"steps: []\n").unwrap();
+    std::fs::write(ws.join("scripts/daily.yaml"), b"version: 3\nsteps: []\n").unwrap();
     std::fs::create_dir_all(ws.join("functions")).unwrap();
     std::fs::write(ws.join("functions/common.yaml"), b"login:\n  steps: []\n").unwrap();
     std::fs::create_dir_all(ws.join("templates")).unwrap();

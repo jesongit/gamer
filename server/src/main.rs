@@ -39,7 +39,6 @@ mod webrtc;
 
 // Phase 0 兼容护栏只在测试构建挂载，不改变服务运行时模块图。
 #[cfg(test)]
-mod phase0_tests;
 
 // P11.9 架构守卫测试（ADR-11/ADR-13 边界 + 隔离集成）同样只在测试构建挂载。
 #[cfg(test)]

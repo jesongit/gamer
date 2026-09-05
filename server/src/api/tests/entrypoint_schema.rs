@@ -75,15 +75,14 @@ async fn entrypoint_schema_endpoint_serves_v3_and_gates_legacy_sources() {
     let t = build_app("ep-schema", test_credential("admin123"), Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
-    save_resource(
+    // v2 形态存量源直写分区（保存边界已拒收 v2，见 write_partition_file 注）：
+    // describe 必须版本门禁拒绝（v3-only，无 fallback）
+    write_partition_file(
         &t,
-        &sid,
         "scripts",
-        "v2daily",
-        // v2 形态存量源：describe 必须版本门禁拒绝（v3-only，无 fallback）
+        "v2daily.yaml",
         "params:\n  - 'text:msg:消息:\"默认\"'\n  - 'bool:fast:快速'\nsteps:\n  - log: $msg\n",
-    )
-    .await;
+    );
     save_resource(
         &t,
         &sid,
@@ -295,15 +294,13 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     assert_eq!(j["resolved_args"]["who"], "函数");
     assert_eq!(j["resolved_args"]["times"], 2);
 
-    // 非 v3 存量脚本：运行提交即版本门禁 400（yaml.v3.version，无 fallback）
-    save_resource(
+    // 非 v3 存量脚本（直写分区）：运行提交即版本门禁 400（yaml.v3.version，无 fallback）
+    write_partition_file(
         &t,
-        &sid,
         "scripts",
-        "v2run",
+        "v2run.yaml",
         "params:\n  - 'text:msg:消息:\"默认\"'\nsteps:\n  - log: $msg\n",
-    )
-    .await;
+    );
     let resp = post_json(
         &t,
         &sid,

@@ -1,4 +1,0 @@
-params:
-  - 'text:message:提示文本:'
-steps:
-  - log: 空默认值（不等价于没有默认值）

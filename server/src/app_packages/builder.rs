@@ -509,7 +509,7 @@ mod tests {
     fn seed_workspace(data_root: &Path) -> PathBuf {
         let ws = data_root.join("com.example.game");
         std::fs::create_dir_all(ws.join("scripts")).unwrap();
-        std::fs::write(ws.join("scripts/daily.yaml"), b"steps: []\n").unwrap();
+        std::fs::write(ws.join("scripts/daily.yaml"), b"version: 3\nsteps: []\n").unwrap();
         std::fs::create_dir_all(ws.join("functions")).unwrap();
         std::fs::write(ws.join("functions/common.yaml"), b"login:\n  steps: []\n").unwrap();
         std::fs::create_dir_all(ws.join("templates")).unwrap();
@@ -529,7 +529,7 @@ mod tests {
         std::fs::create_dir_all(ws.join("resources")).unwrap();
         std::fs::write(ws.join("resources/config.json"), b"{}").unwrap();
         // 隐藏文件不进包
-        std::fs::write(ws.join("scripts/.hidden.yaml"), b"steps: []\n").unwrap();
+        std::fs::write(ws.join("scripts/.hidden.yaml"), b"version: 3\nsteps: []\n").unwrap();
         ws
     }
 
@@ -704,34 +704,38 @@ mod tests {
         assert!(matches!(error, AppPackageError::PackageBuildFailed(_)));
     }
 
-    /// edit 提取 preflight 的目录自洽性：被校验目录（staging 快照）自身的
-    /// scripts/functions 内容优先参与 call/func 引用解析，本地编辑区为空时
-    /// 不得误报 resource.func.not_found；目录内部引用悬空仍必须报出。
+    /// edit 提取 preflight 的目录内容校验（v3-only，P12.9）：staging 快照中的
+    /// scripts/functions 逐文件过 v3 校验（本地编辑区为空也照常校验）；
+    /// 非 v3 存量源 / 坏 v3 内容必须报出，不得静默入包。跨文件 call 引用的
+    /// 存在性归运行期 resolver（ADR-YAML-02），preflight 不做引用解析。
     #[test]
-    fn validate_dir_resolves_cross_references_from_directory_itself() {
+    fn validate_dir_validates_staged_sources_as_v3_only() {
         let temp = TempDir::new().unwrap();
-        // 被校验目录（模拟 staging）：脚本引用同目录函数库，本地编辑区完全为空
+        // 被校验目录（模拟 staging）：合法 v3 脚本 + 函数库，本地编辑区为空
         let staging = temp.path().join("staging");
         std::fs::create_dir_all(staging.join("scripts")).unwrap();
         std::fs::write(
             staging.join("scripts/daily.yaml"),
-            b"steps:\n  - func: common/greet\n",
+            b"version: 3
+steps:
+  - log: ok
+",
         )
         .unwrap();
         std::fs::create_dir_all(staging.join("functions")).unwrap();
         std::fs::write(
             staging.join("functions/common.yaml"),
-            b"greet:\n  steps:\n    - return: true\n",
+            b"greet:
+  steps:
+    - return: true
+",
         )
         .unwrap();
         assert!(builder_with(temp.path()).validate_dir(&staging).is_ok());
 
-        // 目录内引用悬空（函数文件缺 greet）→ preflight 必须失败
-        std::fs::write(
-            staging.join("functions/common.yaml"),
-            b"other:\n  steps:\n    - return: true\n",
-        )
-        .unwrap();
+        // 非 v3 存量脚本（无 version 键）→ preflight 必须失败
+        std::fs::write(staging.join("scripts/legacy.yaml"), b"steps: []
+").unwrap();
         let error = builder_with(temp.path())
             .validate_dir(&staging)
             .unwrap_err();
@@ -739,8 +743,8 @@ mod tests {
             panic!("期望 PreflightFailed，实际 {error:?}");
         };
         assert!(
-            problems.contains("resource.func.not_found"),
-            "悬空 func 引用必须报 not_found: {problems}"
+            problems.contains("scripts/legacy.yaml"),
+            "非 v3 存量源必须报 preflight 问题: {problems}"
         );
     }
 }

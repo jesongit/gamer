@@ -367,7 +367,9 @@ impl ResourceStore {
         }
     }
 
-    /// composite 三层解析器（模板短名消歧 / keymaps 跨层 / 引擎快照）。
+    /// composite 三层解析器（模板短名消歧 / keymaps 跨层；生产链路内部直走
+    /// 字段，公开访问器当前仅测试探针消费）。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn composite(&self) -> &crate::app_packages::CompositeResolver {
         &self.composite
     }

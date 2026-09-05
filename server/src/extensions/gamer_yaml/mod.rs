@@ -24,14 +24,13 @@ pub(crate) mod params;
 pub(crate) mod resources;
 pub(crate) mod run_target;
 pub(crate) mod runner_adapter;
-pub(crate) mod script_v2;
 pub(crate) mod task_params;
 pub(crate) mod timer_yaml;
 pub(crate) mod yaml_extension;
 pub(crate) mod yaml_vnext;
 
 pub(crate) use runner_adapter::{yaml_app_context, yaml_start_request, EngineExecutor};
-pub(crate) use resources::{register_resource_handlers, CompatibleYamlError, CompatibleYamlSource};
+pub(crate) use resources::register_resource_handlers;
 pub(crate) use timer_yaml::{YamlTimerRunner, YamlTimerRunnerRegistrar};
 pub(crate) use yaml_extension::{
     YamlProgramResolver, YAML_EXTENSION_ID, YAML_EXTENSION_MANIFEST_TOML,

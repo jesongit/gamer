@@ -1,8 +1,8 @@
 //! YAML v3 的纯数据前端：Surface YAML -> small AST。
 //!
-//! 这个模块故意不依赖 `script_v2`、`engine`、`ScriptStore` 或任何设备实现。
-//! 它只负责把用户友好的 YAML 语法收敛成少量控制流节点和通用 capability
-//! invocation。执行在 `yaml_extension` 中完成，因而 Core 不需要认识 YAML。
+//! 这个模块故意不依赖任何设备实现或存储视图。它只负责把用户友好的 YAML 语法
+//! 收敛成少量控制流节点和通用 capability invocation。执行在 `yaml_extension`
+//! 中完成，因而 Core 不需要认识 YAML。
 
 use std::collections::BTreeMap;
 use std::fmt;

@@ -389,7 +389,7 @@ async fn functions_input_validation_and_missing_pkg() {
         ("match:\n  steps: []\n", "保留字"),
         ("1abc:\n  steps: []\n", "只允许 unicode 字母"),
         ("带 空 格:\n  steps: []\n", "只允许 unicode 字母"),
-        ("login: [unclosed", "YAML"),
+        ("login: [unclosed", "flow"),
         (
             "123:
   steps: []
@@ -490,7 +490,7 @@ async fn functions_never_leak_into_script_sources() {
         &t,
         &sid,
         "/api/apps/com.test.app/resources/scripts",
-        serde_json::json!({"name": "main.yaml", "content": "steps: []\n"}),
+        serde_json::json!({"name": "main.yaml", "content": "version: 3\nsteps: []\n"}),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -552,7 +552,7 @@ async fn scripts_get_version_and_save_expected_version_conflict() {
         &t,
         &sid,
         "/api/apps/com.test.app/resources/scripts",
-        serde_json::json!({"name": "main.yaml", "content": "steps:\n  - log: v1\n"}),
+        serde_json::json!({"name": "main.yaml", "content": "version: 3\nsteps:\n  - log: v1\n"}),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CREATED);
@@ -578,7 +578,7 @@ async fn scripts_get_version_and_save_expected_version_conflict() {
         &t,
         &sid,
         "/api/apps/com.test.app/resources/scripts",
-        serde_json::json!({"name": "main.yaml", "content": "steps: []\n"}),
+        serde_json::json!({"name": "main.yaml", "content": "version: 3\nsteps: []\n"}),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -590,7 +590,7 @@ async fn scripts_get_version_and_save_expected_version_conflict() {
         &t,
         &sid,
         "/api/apps/com.test.app/resources/scripts",
-        serde_json::json!({"name": "other.yaml", "content": "steps: []\n", "expected_version": v1}),
+        serde_json::json!({"name": "other.yaml", "content": "version: 3\nsteps: []\n", "expected_version": v1}),
     )
     .await;
     assert!(resp.status().is_client_error());

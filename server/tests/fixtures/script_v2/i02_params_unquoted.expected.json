@@ -1,8 +1,0 @@
-{
-  "id": "i02_params_unquoted",
-  "kind": "invalid",
-  "description": "params 项未加单引号：写成了无引号 plain 标量（内容虽能解析，但违反「整条单引号」契约，且样式丢失后无法与普通字符串区分）",
-  "errors": [
-    { "code": "param.decl.quote_style", "step_path": "params[0]", "field": "style" }
-  ]
-}

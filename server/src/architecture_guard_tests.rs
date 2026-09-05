@@ -29,6 +29,9 @@
 //!   `extensions/keymap/mod.rs` 的 `real_keymap_gplugin_invokes_wit_and_native_capabilities`
 //!   与 `real_keymap_guest_consumes_user_profile_yaml`（真实 fixture guest），
 //!   此处不重复造轮子。
+//! - §14.7 v3-Only Guard（P12.9）：全仓生产源码（含 extensions/）禁现
+//!   `script_v2` / `load_v2` / `CompatibleYaml` 标识符——YAML v2 已删除，
+//!   防止 parser/runtime/兼容分支以任何形式回流（计划 §16.1 先导）。
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -217,26 +220,6 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
         reason: "extensions/service.rs #[cfg(test)]：启动对账测试的 gamer.yaml registrar 夹具（两处同形）",
     },
     // —— 测试代码（#[cfg(test)] 模块/测试文件；夹具允许构造扩展类型） ——
-    Allow {
-        file: "phase0_tests.rs",
-        snippet: "use crate::extensions::gamer_yaml::script_v2::{",
-        reason: "Phase 0 夹具护栏（cfg(test)）：调用正式装载器校验仓库 fixtures",
-    },
-    Allow {
-        file: "phase0_tests.rs",
-        snippet: "parse_script_file, serialize_script, InMemoryResources,",
-        reason: "Phase 0 夹具护栏：use 续行",
-    },
-    Allow {
-        file: "phase0_tests.rs",
-        snippet: "parse_script_file(&source",
-        reason: "Phase 0 夹具护栏：fixture round-trip",
-    },
-    Allow {
-        file: "phase0_tests.rs",
-        snippet: "parse_script_file(&serialized",
-        reason: "Phase 0 夹具护栏：fixture 回读",
-    },
     Allow {
         file: "api/tests.rs",
         snippet: "YamlTimerRunner::new(",
@@ -521,11 +504,6 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
     },
     // —— cfg(test) 夹具（构造与生产等价的运行环境） ——
     Allow {
-        file: "phase0_tests.rs",
-        snippet: "use crate::extensions::gamer_yaml::script_v2::{",
-        reason: "Phase 0 夹具护栏：调用正式装载器",
-    },
-    Allow {
         file: "api/tests.rs",
         snippet: "gamer_yaml::runner_adapter::EngineExecutor::new",
         reason: "api 测试装配（生产等价执行器）",
@@ -602,6 +580,70 @@ fn architecture_guard_dependency_direction_core_never_paths_into_extension_inter
         "Core→Extension 依赖方向被破坏（{} 处）：\n{}",
         violations.len(),
         violations.join("\n")
+    );
+}
+
+// ===========================================================================
+// §14.7 v3-Only Guard（P12.9 / 计划 §16.1 先导）
+// ===========================================================================
+
+/// YAML v2 删除后的防回归禁符：生产源码任何位置（含 extensions/ 内容目录）
+/// 不得再出现 v2 parser / 兼容装载器的标识符。历史档案（ADR / 计划 /
+/// PITFALLS / docs）不在源码扫描范围；本守卫文件自身豁免（禁符清单即定义处）。
+const V3_ONLY_BANNED: &[&str] = &["script_v2", "load_v2", "CompatibleYaml"];
+
+/// §14.7：YAML v3 唯一正式方案——v2 标识符回流即退化（ADR-YAML-01）。
+#[test]
+fn architecture_guard_v3_only_bans_v2_identifiers_in_all_sources() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("读取目录 {} 失败: {e}", dir.display()))
+            .map(|entry| entry.expect("目录项可读").path())
+            .collect();
+        entries.sort();
+        for entry in entries {
+            if entry.is_dir() {
+                stack.push(entry);
+                continue;
+            }
+            if entry.extension().is_some_and(|ext| ext == "rs") {
+                files.push(entry);
+            }
+        }
+    }
+    let mut violations: Vec<String> = Vec::new();
+    for file in &files {
+        // 本守卫文件豁免：禁符清单即定义处（与 §14.1 的 SELF_FILE 豁免同理）。
+        if file.file_name().and_then(|n| n.to_str()) == Some(SELF_FILE) {
+            continue;
+        }
+        let text =
+            std::fs::read_to_string(file).unwrap_or_else(|e| panic!("读取 {} 失败: {e}", file.display()));
+        for (no, line) in text.lines().enumerate() {
+            for token in V3_ONLY_BANNED {
+                if line.contains(token) {
+                    violations.push(format!(
+                        "{}:{}: YAML v2 标识符 {:?} 回流（v2 已删除，ADR-YAML-01；如属历史注释请改写，禁止以代码/路径/类型形态出现）
+    {}",
+                        file.display(),
+                        no + 1,
+                        token,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "v3-only 守卫被破坏（{} 处）：
+{}",
+        violations.len(),
+        violations.join("
+")
     );
 }
 

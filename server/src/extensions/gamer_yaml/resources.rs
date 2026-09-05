@@ -1,33 +1,25 @@
-//! gamer.yaml 的资源内容钩子（P11.3 / P11.6）。
+//! gamer.yaml 的资源内容钩子（P11.3 / P11.6，v3-only）。
 //!
 //! Core [`crate::resources::ResourceStore`] 只懂目录类别 + 字节/文本 + 内容
 //! 版本短码 + 原子写；本模块把 YAML 内容语义挂回通用层：
 //!
-//! - [`YamlScriptValidator`]（scripts kind）：保存/更新前的 v2/v3 双格式校验
-//!   （v2 走严格 loader + call/func 引用视图，v3 走 yaml_vnext）；
-//! - [`YamlFunctionValidator`]（functions kind）：函数库文件严格校验 +
+//! - [`YamlScriptValidator`]（scripts kind）：保存/更新前的 v3 校验
+//!   （`version: 3` 判别 + surface 解析/lowering；非 v3 源报版本门禁诊断）；
+//! - [`YamlFunctionValidator`]（functions kind）：函数库 bare-map 严格校验 +
 //!   顶层函数名清单注记（`functions` 字段，列表/读取透传给前端）；
 //! - [`YamlTemplateHandler`]（templates kind）：重命名前同步改写分区脚本/
-//!   函数中的模板引用（严格 AST，不做全局文本替换，失败整体回滚）；
+//!   函数中的模板引用（v3 AST 改写，不做全局文本替换，失败整体回滚；
+//!   非 v3 存量源不可解析 → 跳过不阻塞重命名）；
 //! - [`YamlStagedValidator`]：App Package 导出/提取 preflight 的 staged 集合
-//!   校验（跨文件 call/func 引用以 staged 内容自身为最高优先视图）。
+//!   校验。
 //!
 //! 组合根引导期调用 [`register_resource_handlers`]；未注册时 Core 保存不做
 //! 内容校验（裸 Core 语义，§8.9 验收锚点）。
 
-use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::extensions::gamer_yaml::script_v2::error::codes;
-use crate::extensions::gamer_yaml::script_v2::validate::{
-    normalize_id, try_build_function_file, ResourceProvider,
-};
-use crate::extensions::gamer_yaml::script_v2::{
-    parse_function_file, parse_script_file, Cell, ParamDecl, ScriptError, Step, TypedValue,
-};
 use crate::extensions::gamer_yaml::yaml_vnext;
 use crate::resources::{
     ResourceKind, ResourceKindHandler, ResourceStore, SaveValidation, StagedResourceValidator,
@@ -43,238 +35,42 @@ pub fn register_resource_handlers(store: &ResourceStore) {
 }
 
 // ---------------------------------------------------------------------------
-// ResourceStore 视图：当前分区内容 + 待写覆盖（v2 严格 loader 引用解析）
+// 保存/更新校验（scripts / functions kind，v3-only）
 // ---------------------------------------------------------------------------
 
-/// 一个分区的 loader 资源视图，可叠加尚未落盘的脚本与函数库。
-pub struct StoreView<'a> {
-    store: &'a ResourceStore,
-    pkg: String,
-    script_overrides: HashMap<String, String>,
-    function_overrides: HashMap<String, String>,
+/// v3 脚本校验：`yaml_vnext::load`（version 门禁 + surface 解析 + lowering）。
+/// 非 `version: 3` 源（含 v2 存量形态）报 `yaml.v3.version` 诊断，无 fallback。
+fn validate_v3_script(source: &str) -> Result<(), serde_json::Value> {
+    yaml_vnext::load(source)
+        .map(|_| ())
+        .map_err(|diagnostics| serde_json::to_value(diagnostics).unwrap_or_default())
 }
 
-impl<'a> StoreView<'a> {
-    pub fn new(store: &'a ResourceStore, pkg: &str) -> Self {
-        Self {
-            store,
-            pkg: pkg.to_string(),
-            script_overrides: HashMap::new(),
-            function_overrides: HashMap::new(),
-        }
-    }
-
-    pub fn add_script(&mut self, resource: &str, content: &str) {
-        let key = normalize_id(resource.trim());
-        self.script_overrides.insert(key, content.to_string());
-    }
-
-    pub fn add_function(&mut self, file_short: &str, content: &str) {
-        let key = file_short
-            .trim()
-            .trim_end_matches(".yaml")
-            .trim_end_matches(".yml")
-            .to_string();
-        self.function_overrides.insert(key, content.to_string());
-    }
-
-    fn script_content_override(&self, resource: &str) -> Option<String> {
-        self.script_overrides
-            .get(&normalize_id(resource.trim()))
-            .cloned()
-    }
-
-    fn function_content_override(&self, file_short: &str) -> Option<String> {
-        let key = file_short
-            .trim()
-            .trim_end_matches(".yaml")
-            .trim_end_matches(".yml");
-        self.function_overrides.get(key).cloned()
-    }
-}
-
-impl ResourceProvider for StoreView<'_> {
-    fn script_exists(&self, resource_id: &str) -> bool {
-        self.script_content(resource_id).is_some()
-    }
-
-    fn script_content(&self, resource_id: &str) -> Option<String> {
-        if let Some(content) = self.script_content_override(resource_id) {
-            return Some(content);
-        }
-        let key = normalize_id(resource_id.trim());
-        let candidates = [key.clone(), format!("{key}.yaml"), format!("{key}.yml")];
-        candidates
-            .iter()
-            .find_map(|candidate| {
-                self.store
-                    .get_text(
-                        ResourceKind::Scripts,
-                        &format!("{}/{}", self.pkg, candidate),
-                    )
-                    .ok()
-                    .flatten()
-            })
-            .map(|script| script.content)
-    }
-
-    fn function_file_content(&self, file_short: &str) -> Option<String> {
-        if let Some(content) = self.function_content_override(file_short) {
-            return Some(content);
-        }
-        let rel = format!("{}.yaml", file_short.trim().trim_end_matches(".yaml"));
-        self.store
-            .get_text(ResourceKind::Functions, &format!("{}/{}", self.pkg, rel))
-            .ok()
-            .flatten()
-            .map(|file| file.content)
-    }
-
-    fn function_exists(&self, file_short: &str, function: &str) -> bool {
-        self.function_file_content(file_short)
-            .and_then(|content| try_build_function_file(&content))
-            .is_some_and(|file| file.find(function).is_some())
-    }
-
-    fn resolve_template(
-        &self,
-        short_name: &str,
-    ) -> crate::extensions::gamer_yaml::script_v2::validate::TemplateAvail {
-        template_avail(self.store, &self.pkg, short_name)
-    }
-}
-
-/// 模板短名可用性（composite 三层，与 `resolve_template_path` 完全一致）：
-/// 唯一存在 / 缺失 / 同短名多个 `#` 后缀候选（歧义）。
-fn template_avail(
-    store: &ResourceStore,
-    pkg: &str,
-    short: &str,
-) -> crate::extensions::gamer_yaml::script_v2::validate::TemplateAvail {
-    use crate::app_packages::TemplateLookup;
-    use crate::extensions::gamer_yaml::script_v2::validate::TemplateAvail;
-    match store.composite().template(pkg, short) {
-        TemplateLookup::Found(_) => TemplateAvail::Found,
-        TemplateLookup::Ambiguous { .. } => TemplateAvail::Ambiguous,
-        TemplateLookup::NotFound => TemplateAvail::NotFound,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 保存/更新校验（scripts / functions kind）
-// ---------------------------------------------------------------------------
-
-/// v2/v3 双格式校验结果（保存边界只用成败与诊断 JSON）。
-/// v2/v3 判别（载荷当前仅作判别保留；调用方未消费 AST 本体）。
-#[derive(Debug)]
-pub(crate) enum CompatibleYamlSource {
-    V2,
-    #[allow(dead_code)]
-    V3(yaml_vnext::Program),
-}
-
-#[derive(Debug)]
-pub(crate) enum CompatibleYamlError {
-    V2(Vec<ScriptError>),
-    V3(Vec<yaml_vnext::Diagnostic>),
-}
-
-impl CompatibleYamlError {
-    pub(crate) fn into_json(self) -> serde_json::Value {
-        match self {
-            Self::V2(diagnostics) => serde_json::to_value(diagnostics).unwrap_or_default(),
-            Self::V3(diagnostics) => serde_json::to_value(diagnostics).unwrap_or_default(),
-        }
-    }
-}
-
-/// 保存边界校验：无目录覆盖层，call/func 引用解析 = 本地编辑区视图 + 待写
-/// 文件自身。v2 与 v3 各自走独立 loader，不做版本猜测。
-pub(crate) fn validate_compatible_script(
-    store: &ResourceStore,
-    package: &str,
-    resource: &str,
-    source: &str,
-) -> Result<CompatibleYamlSource, CompatibleYamlError> {
-    let mut view = StoreView::new(store, package);
-    validate_compatible_script_in(resource, source, &mut view)
-}
-
-/// Same as [`validate_compatible_script`], but the caller supplies the v2
-/// reference view (call/func targets). PackageBuilder preflight over a staged
-/// directory snapshot pre-injects that directory's own scripts/functions so
-/// extraction into an empty workspace validates self-consistently; save
-/// boundaries pass a fresh view (equivalent to the plain variant).
-pub(crate) fn validate_compatible_script_in(
-    resource: &str,
-    source: &str,
-    view: &mut StoreView<'_>,
-) -> Result<CompatibleYamlSource, CompatibleYamlError> {
-    if yaml_vnext::is_v3_source(source) {
-        yaml_vnext::load(source)
-            .map(CompatibleYamlSource::V3)
-            .map_err(CompatibleYamlError::V3)
-    } else {
-        view.add_script(resource, source);
-        parse_script_file(source, resource, view)
-            .map(|_| CompatibleYamlSource::V2)
-            .map_err(CompatibleYamlError::V2)
-    }
-}
-
-/// scripts kind 校验器（v2/v3 双格式，与保存/导入链路同源）。
+/// scripts kind 校验器（v3-only，与运行链路同源）。
 struct YamlScriptValidator;
 
 impl ResourceKindHandler for YamlScriptValidator {
     fn validate_save(&self, req: SaveValidation<'_>) -> Result<(), serde_json::Value> {
-        match validate_compatible_script(req.store, req.app, req.id, req.content) {
-            Ok(_) => Ok(()),
-            Err(error) => Err(error.into_json()),
-        }
+        validate_v3_script(req.content)
     }
 }
 
-/// 函数库文件双形态验收（保存边界与导出/提取 preflight 共用）：
-/// 先试 v3 函数库解析（T6：v3 函数库文件此前无法通过保存 API），通过即合法；
-/// 失败回落 v2 严格 loader（v2 未删除前存量函数文件仍可保存）。双失败时：
-/// v3 诊断已进入结构/语义层（非 `yaml.v3.syntax` 纯语法错）→ 报 v3 诊断
-/// （前向格式），否则报 v2 诊断（存量 v2 文件的既有口径）。
+/// 函数库文件校验（v3 bare-map；保存边界与导出/提取 preflight 共用）。
 /// 校验含：函数名唯一（映射键承载）+ 合法字符集/非保留字、记录只允许
 /// params/steps、steps 合法 v3 语法（call 裸 target 在解析期报错，与运行前
 /// 一致）。
 pub(crate) fn validate_function_library_file(
-    store: &ResourceStore,
-    app: &str,
-    id: &str,
+    _store: &ResourceStore,
+    _app: &str,
+    _id: &str,
     content: &str,
 ) -> Result<(), serde_json::Value> {
-    let v3 = yaml_vnext::parse_function_library(content);
-    if v3.is_ok() {
-        return Ok(());
-    }
-    let mut view = StoreView::new(store, app);
-    let rel = id.trim().trim_end_matches(".yaml").trim_end_matches(".yml");
-    view.add_function(rel, content);
-    let v2 = parse_function_file(content, rel, &view);
-    if v2.is_ok() {
-        return Ok(());
-    }
-    // 双失败：v3 诊断进入结构/语义层（非纯语法错）→ 报 v3；否则报 v2 诊断
-    // （存量 v2 文件的既有口径）。
-    match v3 {
-        Err(diagnostics)
-            if diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code != "yaml.v3.syntax") =>
-        {
-            Err(serde_json::to_value(diagnostics).unwrap_or_default())
-        }
-        _ => Err(serde_json::to_value(v2.unwrap_err()).unwrap_or_default()),
-    }
+    yaml_vnext::parse_function_library(content)
+        .map(|_| ())
+        .map_err(|diagnostics| serde_json::to_value(diagnostics).unwrap_or_default())
 }
 
-/// functions kind 校验器：v3 / v2 双形态验收（见
-/// [`validate_function_library_file`]）+ 函数名清单注记（v2 优先、v3 回落）。
+/// functions kind 校验器：v3 bare-map 验收 + 函数名清单注记。
 struct YamlFunctionValidator;
 
 impl ResourceKindHandler for YamlFunctionValidator {
@@ -290,23 +86,13 @@ impl ResourceKindHandler for YamlFunctionValidator {
                 .trim_end_matches(".yaml")
                 .trim_end_matches(".yml")
                 .to_string();
-            // 函数名清单：v2 严格 loader 先行；v3 函数库回落 yaml_vnext
-            let functions = try_build_function_file(content)
-                .map(|file| {
-                    file.functions
-                        .iter()
-                        .map(|f| f.name.clone())
+            let functions = yaml_vnext::parse_function_library(content)
+                .ok()
+                .map(|library| {
+                    library
+                        .into_iter()
+                        .map(|decl| decl.name)
                         .collect::<Vec<_>>()
-                })
-                .or_else(|| {
-                    yaml_vnext::parse_function_library(content)
-                        .ok()
-                        .map(|library| {
-                            library
-                                .into_iter()
-                                .map(|decl| decl.name)
-                                .collect::<Vec<_>>()
-                        })
                 })
                 .unwrap_or_default();
             out.insert(id.clone(), json!({ "functions": functions, "file": short }));
@@ -351,209 +137,13 @@ fn template_short_name(name: &str) -> String {
     }
 }
 
-fn rename_template_value(
-    value: &mut TypedValue,
-    old_name: &str,
-    old_short: &str,
-    new_name: &str,
-    new_short: &str,
-) -> bool {
-    let TypedValue::Tmpl(current) = value else {
-        return false;
-    };
-    let replacement = if current == old_name {
-        Some(new_name)
-    } else if current == old_short {
-        Some(new_short)
-    } else {
-        None
-    };
-    let Some(replacement) = replacement else {
-        return false;
-    };
-    *current = replacement.to_string();
-    true
-}
-
-fn rename_template_cell(
-    cell: &mut Cell,
-    old_name: &str,
-    old_short: &str,
-    new_name: &str,
-    new_short: &str,
-) -> usize {
-    let Cell::Lit(value) = cell else {
-        return 0;
-    };
-    usize::from(rename_template_value(
-        value, old_name, old_short, new_name, new_short,
-    ))
-}
-
-fn rename_template_steps(
-    steps: &mut [Step],
-    old_name: &str,
-    old_short: &str,
-    new_name: &str,
-    new_short: &str,
-) -> usize {
-    let mut changed = 0;
-    for step in steps {
-        changed += match step {
-            Step::StrApp | Step::ClsApp | Step::Break | Step::Throw { .. } => 0,
-            Step::Tap { at } => rename_template_cell(at, old_name, old_short, new_name, new_short),
-            Step::Swipe { from, to, time } => {
-                rename_template_cell(from, old_name, old_short, new_name, new_short)
-                    + rename_template_cell(to, old_name, old_short, new_name, new_short)
-                    + rename_template_cell(time, old_name, old_short, new_name, new_short)
-            }
-            Step::Key { key } => {
-                rename_template_cell(key, old_name, old_short, new_name, new_short)
-            }
-            Step::Text { value } => {
-                rename_template_cell(value, old_name, old_short, new_name, new_short)
-            }
-            Step::Log { message } => {
-                rename_template_cell(message, old_name, old_short, new_name, new_short)
-            }
-            Step::Wait {
-                duration,
-                duration_max,
-            } => {
-                let mut n =
-                    rename_template_cell(duration, old_name, old_short, new_name, new_short);
-                if let Some(max) = duration_max {
-                    n += rename_template_cell(max, old_name, old_short, new_name, new_short);
-                }
-                n
-            }
-            Step::Find {
-                template,
-                block,
-                then,
-                r#else,
-                ..
-            } => {
-                let mut n =
-                    rename_template_cell(template, old_name, old_short, new_name, new_short);
-                for cell in block {
-                    n += rename_template_cell(cell, old_name, old_short, new_name, new_short);
-                }
-                n + rename_template_steps(then, old_name, old_short, new_name, new_short)
-                    + rename_template_steps(r#else, old_name, old_short, new_name, new_short)
-            }
-            Step::Match {
-                candidates, r#else, ..
-            } => {
-                let mut n = 0;
-                for candidate in candidates {
-                    n += rename_template_cell(
-                        &mut candidate.template,
-                        old_name,
-                        old_short,
-                        new_name,
-                        new_short,
-                    );
-                    n += rename_template_steps(
-                        &mut candidate.steps,
-                        old_name,
-                        old_short,
-                        new_name,
-                        new_short,
-                    );
-                }
-                n + rename_template_steps(r#else, old_name, old_short, new_name, new_short)
-            }
-            Step::Check {
-                template, timeout, ..
-            } => {
-                let mut n =
-                    rename_template_cell(template, old_name, old_short, new_name, new_short);
-                if let Some(timeout) = timeout {
-                    n += rename_template_cell(timeout, old_name, old_short, new_name, new_short);
-                }
-                n
-            }
-            Step::Color { at, expect, r#else } => {
-                let mut n = rename_template_cell(at, old_name, old_short, new_name, new_short);
-                for branch in expect {
-                    n += rename_template_cell(
-                        &mut branch.color,
-                        old_name,
-                        old_short,
-                        new_name,
-                        new_short,
-                    );
-                    n += rename_template_steps(
-                        &mut branch.steps,
-                        old_name,
-                        old_short,
-                        new_name,
-                        new_short,
-                    );
-                }
-                n + rename_template_steps(r#else, old_name, old_short, new_name, new_short)
-            }
-            Step::If { cond, then, r#else } => {
-                rename_template_cell(cond, old_name, old_short, new_name, new_short)
-                    + rename_template_steps(then, old_name, old_short, new_name, new_short)
-                    + rename_template_steps(r#else, old_name, old_short, new_name, new_short)
-            }
-            Step::Loop { steps, .. } => {
-                rename_template_steps(steps, old_name, old_short, new_name, new_short)
-            }
-            Step::Call { args, .. } => args
-                .iter_mut()
-                .map(|arg| {
-                    rename_template_cell(&mut arg.value, old_name, old_short, new_name, new_short)
-                })
-                .sum(),
-            Step::Func {
-                args, then, r#else, ..
-            } => {
-                let n: usize = args
-                    .iter_mut()
-                    .map(|arg| {
-                        rename_template_cell(
-                            &mut arg.value,
-                            old_name,
-                            old_short,
-                            new_name,
-                            new_short,
-                        )
-                    })
-                    .sum();
-                n + rename_template_steps(then, old_name, old_short, new_name, new_short)
-                    + rename_template_steps(r#else, old_name, old_short, new_name, new_short)
-            }
-            Step::Return { value } => {
-                rename_template_cell(value, old_name, old_short, new_name, new_short)
-            }
-        };
-    }
-    changed
-}
-
-fn rename_template_in_params(
-    params: &mut [ParamDecl],
-    old_name: &str,
-    old_short: &str,
-    new_name: &str,
-    new_short: &str,
-) -> usize {
-    params
-        .iter_mut()
-        .filter_map(|param| param.default.as_mut())
-        .map(|value| rename_template_value(value, old_name, old_short, new_name, new_short))
-        .map(usize::from)
-        .sum()
-}
-
 /// 重命名模板文件，并同步改写当前分区 scripts/ 与 functions/ 中的模板引用。
 ///
-/// 引用迁移走严格 AST，不做全局文本替换，避免误改日志/文本内容；同时处理
-/// 模板参数默认值、步骤字段、match/color 候选与 call/func 实参。所有资源先
-/// 解析并生成新内容，再开始落盘，写入失败时回滚已改写的资源。
+/// 引用迁移走 v3 AST 改写（[`yaml_vnext::rename_template_source`] /
+/// [`yaml_vnext::rename_template_in_function_library`]），不做全局文本替换，
+/// 避免误改日志/文本内容。非 v3 存量源（不可解析）跳过——它们本就无法运行，
+/// 不阻塞重命名；v3 源改写失败（语法损坏）则整体报错。所有资源先生成新内容，
+/// 再开始落盘，写入失败时回滚已改写的资源。
 fn rename_template_references(
     store: &ResourceStore,
     package: &str,
@@ -568,142 +158,51 @@ fn rename_template_references(
     let mut rewrites: Vec<(ResourceKind, String, String, String)> = Vec::new();
 
     for script in store.list_text(package, ResourceKind::Scripts)? {
-        if yaml_vnext::is_v3_source(&script.content) {
-            if let Some((rewritten, _changed)) = yaml_vnext::rename_template_source(
-                &script.content,
-                old_name,
-                &old_short,
-                new_name,
-                &new_short,
-            )
-            .map_err(|diagnostics| {
-                anyhow::anyhow!(
-                    "v3 脚本模板引用无法重写: {}",
-                    diagnostics
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("；")
-                )
-            })? {
-                rewrites.push((
-                    ResourceKind::Scripts,
-                    script.name.clone(),
-                    script.content.clone(),
-                    rewritten,
-                ));
-            }
-            continue;
-        }
-        let mut view = StoreView::new(store, package);
-        view.add_script(&script.name, &script.content);
-        let mut parsed =
-            parse_script_file(&script.content, &script.name, &view).map_err(|errors| {
-                anyhow::anyhow!(errors
+        let rewritten = yaml_vnext::rename_template_source(
+            &script.content,
+            old_name,
+            &old_short,
+            new_name,
+            &new_short,
+        )
+        .map_err(|diagnostics| {
+            anyhow::anyhow!(
+                "v3 脚本模板引用无法重写: {}",
+                diagnostics
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
-                    .join("；"))
-            })?;
-        let changed = rename_template_in_params(
-            &mut parsed.params,
-            old_name,
-            &old_short,
-            new_name,
-            &new_short,
-        ) + rename_template_steps(
-            &mut parsed.steps,
-            old_name,
-            &old_short,
-            new_name,
-            &new_short,
-        );
-        if changed > 0 {
+                    .join("；")
+            )
+        })?;
+        if let Some((content, _changed)) = rewritten {
             rewrites.push((
                 ResourceKind::Scripts,
                 script.name.clone(),
                 script.content.clone(),
-                crate::extensions::gamer_yaml::script_v2::serialize_script(&parsed),
+                content,
             ));
         }
     }
 
     for function in store.list_text(package, ResourceKind::Functions)? {
-        let mut view = StoreView::new(store, package);
-        let rel = function.name.trim().trim_end_matches(".yaml").to_string();
-        view.add_function(&rel, &function.content);
-        // v2 严格解析先行（保持既有改写行为）；v3 函数库（bare-map v3 步语法，
-        // v2 loader 无法解析）回落 yaml_vnext 改写。
-        let v3_library = match parse_function_file(&function.content, &rel, &view) {
-            Ok(_) => None,
-            Err(v2_errors) => {
-                if yaml_vnext::parse_function_library(&function.content).is_err() {
-                    return Err(anyhow::anyhow!(v2_errors
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("；")));
-                }
-                Some(yaml_vnext::rename_template_in_function_library(
-                    &function.content,
-                    old_name,
-                    &old_short,
-                    new_name,
-                    &new_short,
-                )
-                .map_err(|diagnostics| {
-                    anyhow::anyhow!(
-                        "v3 函数库模板引用无法重写: {}",
-                        diagnostics
-                            .iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join("；")
-                    )
-                })?)
-            }
-        };
-        if let Some(rewritten) = v3_library {
-            if let Some((content, _changed)) = rewritten {
-                rewrites.push((
-                    ResourceKind::Functions,
-                    function.name.clone(),
-                    function.content.clone(),
-                    content,
-                ));
-            }
-            continue;
-        }
-        let mut parsed = parse_function_file(&function.content, &rel, &view).map_err(|errors| {
-            anyhow::anyhow!(errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("；"))
-        })?;
-        let mut changed = 0;
-        for declaration in &mut parsed.functions {
-            changed += rename_template_in_params(
-                &mut declaration.params,
+        // 非 v3 存量函数库解析失败 → 跳过（与脚本侧 skip 语义一致）
+        let rewritten =
+            yaml_vnext::rename_template_in_function_library(
+                &function.content,
                 old_name,
                 &old_short,
                 new_name,
                 &new_short,
-            );
-            changed += rename_template_steps(
-                &mut declaration.steps,
-                old_name,
-                &old_short,
-                new_name,
-                &new_short,
-            );
-        }
-        if changed > 0 {
+            )
+            .ok()
+            .flatten();
+        if let Some((content, _changed)) = rewritten {
             rewrites.push((
                 ResourceKind::Functions,
                 function.name.clone(),
                 function.content.clone(),
-                crate::extensions::gamer_yaml::script_v2::serialize_function_file(&parsed),
+                content,
             ));
         }
     }
@@ -757,7 +256,7 @@ impl ResourceKindHandler for YamlTemplateHandler {
 }
 
 // ---------------------------------------------------------------------------
-// 包导出/提取 preflight：staged 集合校验（跨文件引用自洽）
+// 包导出/提取 preflight：staged 集合校验
 // ---------------------------------------------------------------------------
 
 struct YamlStagedValidator;
@@ -770,22 +269,13 @@ impl StagedResourceValidator for YamlStagedValidator {
         entries: &[(ResourceKind, String, String)],
     ) -> Vec<String> {
         let mut problems = Vec::new();
-        let mut view = StoreView::new(store, app);
-        for (kind, rel, content) in entries {
-            match kind {
-                ResourceKind::Scripts => view.add_script(rel, content),
-                ResourceKind::Functions => view.add_function(rel, content),
-                _ => {}
-            }
-        }
         for (kind, rel, content) in entries {
             let result = match kind {
-                ResourceKind::Scripts => validate_compatible_script_in(rel, content, &mut view)
-                    .map(|_| ())
-                    .map_err(|error| error.into_json()),
-                // 函数库：v3 / v2 双形态（与保存边界同源）
-                ResourceKind::Functions => validate_function_library_file(store, app, rel, content)
-                    .map_err(|diagnostics_json| diagnostics_json),
+                ResourceKind::Scripts => validate_v3_script(content),
+                // 函数库：v3 bare-map（与保存边界同源）
+                ResourceKind::Functions => {
+                    validate_function_library_file(store, app, rel, content)
+                }
                 _ => Ok(()),
             };
             if let Err(diagnostics) = result {
@@ -820,10 +310,10 @@ mod rename_tests {
         (ResourceStore::open(&cfg).unwrap(), dir)
     }
 
-    /// v2 脚本 + 函数库中的模板引用经严格 AST 同步改写；文本字面量不动。
+    /// v3 脚本 + 函数库中的模板引用经 AST 同步改写；文本字面量不动。
     #[test]
     fn rename_template_updates_script_and_function_references() {
-        let (store, dir) = temp_store("v2");
+        let (store, dir) = temp_store("v3");
         let templates = dir.join("com.test.app").join("templates");
         std::fs::create_dir_all(&templates).unwrap();
         atomic_write(&templates.join("old.png"), b"png").unwrap();
@@ -834,7 +324,7 @@ mod rename_tests {
                 None,
                 "com.test.app",
                 "main.yaml",
-                "steps:\n  - check: old.png\n    timeout: 0s\n  - log: old.png 文本不应改\n",
+                "version: 3\nsteps:\n  - find:\n      template: old.png\n      then:\n        - log: old.png 文本不应改\n",
             )
             .unwrap();
         store
@@ -843,7 +333,7 @@ mod rename_tests {
                 None,
                 "com.test.app",
                 "common.yaml",
-                "login:\n  steps:\n    - find: old.png\n",
+                "login:\n  steps:\n    - find:\n        template: old.png\n",
             )
             .unwrap();
 
@@ -854,17 +344,17 @@ mod rename_tests {
         assert!(!templates.join("old.png").exists());
         assert_eq!(std::fs::read(templates.join("new.png")).unwrap(), b"png");
         let script = std::fs::read_to_string(dir.join("com.test.app/scripts/main.yaml")).unwrap();
-        assert!(script.contains("check: new.png"));
+        assert!(script.contains("template: new.png"));
         assert!(script.contains("old.png 文本不应改"));
         let function =
             std::fs::read_to_string(dir.join("com.test.app/functions/common.yaml")).unwrap();
-        assert!(function.contains("find: new.png"));
+        assert!(function.contains("template: new.png"));
     }
 
-    /// v3 源面引用同样改写（yaml_vnext 路径），文本不误改。
+    /// v3 源面引用改写覆盖 find.then / match_first 候选，文本不误改。
     #[test]
     fn rename_template_updates_v3_surface_references_without_touching_text() {
-        let (store, dir) = temp_store("v3");
+        let (store, dir) = temp_store("surface");
         let templates = dir.join("com.test.app").join("templates");
         std::fs::create_dir_all(&templates).unwrap();
         atomic_write(&templates.join("old.png"), b"png").unwrap();
@@ -887,12 +377,43 @@ mod rename_tests {
         assert!(script.contains("old.png 文本不应改"));
     }
 
-    /// P12.5：函数库保存边界双形态验收（v3 函数库直存、存量 v2 回落、
-    /// 双失败按 v3 结构/语义诊断优先）。
+    /// 非 v3 存量源不可解析 → 跳过（不阻塞重命名）；v3 引用继续改写。
     #[test]
-    fn function_file_save_accepts_v3_and_v2_forms() {
+    fn rename_template_skips_unparsable_legacy_sources() {
+        let (store, dir) = temp_store("legacy");
+        let templates = dir.join("com.test.app").join("templates");
+        std::fs::create_dir_all(&templates).unwrap();
+        atomic_write(&templates.join("old.png"), b"png").unwrap();
+        // v2 形态存量脚本（legacy：保存边界已拒收，只可能来自历史盘上数据）
+        let scripts = dir.join("com.test.app").join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("legacy.yaml"), b"steps:\n  - check: old.png\n").unwrap();
+        store
+            .save_text(
+                ResourceKind::Scripts,
+                None,
+                "com.test.app",
+                "main.yaml",
+                "version: 3\nsteps:\n  - find:\n      template: old.png\n",
+            )
+            .unwrap();
+
+        assert_eq!(
+            rename_template_references(&store, "com.test.app", "old.png", "new.png").unwrap(),
+            1,
+            "只有 v3 脚本计入改写"
+        );
+        let script = std::fs::read_to_string(dir.join("com.test.app/scripts/main.yaml")).unwrap();
+        assert!(script.contains("template: new.png"));
+        let legacy = std::fs::read_to_string(scripts.join("legacy.yaml")).unwrap();
+        assert!(legacy.contains("old.png"), "不可解析的存量源保持原样");
+    }
+
+    /// 保存边界 v3-only：v3 直存、非 v3 源报版本门禁诊断（yaml.v3.version）。
+    #[test]
+    fn function_file_save_is_v3_only_with_version_gate() {
         let (store, _dir) = temp_store("dual");
-        // v3 bare-map 函数库（v2 严格 loader 拒收：v3 步语法 + version 键差异）
+        // v3 bare-map 函数库
         let v3_library = "领取奖励:\n  params:\n    - 'int:times:次数:2'\n  steps:\n    - log: $times\n    - if:\n        cond: $times > 0\n        then:\n          - log: ok\n";
         validate_function_library_file(&store, "com.test.app", "common.yaml", v3_library)
             .expect("v3 函数库必须通过保存校验");
@@ -904,14 +425,11 @@ mod rename_tests {
             v3_library,
         )
         .unwrap();
-        // 存量 v2 函数文件继续合法（v3 拒收 `- check: x` + 兄弟键 timeout 的
-        // v2 形态后回落 v2 严格 loader；模板引用须真实存在）
-        let templates = _dir.join("com.test.app").join("templates");
-        std::fs::create_dir_all(&templates).unwrap();
-        atomic_write(&templates.join("btn.png"), b"png").unwrap();
-        let v2_file = "login:\n  params: []\n  steps:\n    - check: btn.png\n      timeout: 0s\n";
-        validate_function_library_file(&store, "com.test.app", "legacy.yaml", v2_file).unwrap();
-        // 双失败：v3 诊断进入结构/语义层（非法 call 裸 target）→ 报 v3
+        // v2 形态存量函数文件 → 版本门禁拒绝（v3 解析对 `- find: x` 标量步报错，
+        // 但错误必须带 yaml.v3.* 码——存量文件不可再经 v2 loader 落盘）
+        let legacy = "login:\n  steps:\n    - find: old.png\n";
+        assert!(validate_function_library_file(&store, "com.test.app", "legacy.yaml", legacy).is_err());
+        // 双失败口径统一：坏 v3 → v3 诊断（非法 call 裸 target）
         let broken_v3 = "bad:\n  steps:\n    - call:\n        target: login\n";
         let diagnostics =
             validate_function_library_file(&store, "com.test.app", "broken.yaml", broken_v3)
@@ -919,16 +437,7 @@ mod rename_tests {
         let text = diagnostics.to_string();
         assert!(
             text.contains("yaml.v3.call") || text.contains("命名空间"),
-            "双失败且 v3 进入语义层必须报 v3 call 诊断: {text}"
-        );
-        // 双失败且 v3 停留在纯语法错 → 报 v2 诊断（存量口径）
-        let syntax_broken = "login: [unclosed\n";
-        let diagnostics =
-            validate_function_library_file(&store, "com.test.app", "v2bad.yaml", syntax_broken)
-                .unwrap_err();
-        assert!(
-            !diagnostics.to_string().contains("yaml.v3."),
-            "纯语法错应回落 v2 诊断: {diagnostics}"
+            "坏 v3 call 目标必须报 v3 诊断: {text}"
         );
     }
 }

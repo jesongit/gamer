@@ -1,7 +1,0 @@
-steps:
-  - func: ../outside/login
-    args: {}
-  - func: /abs/path/login
-    args: {}
-  - func: back\slash/login
-    args: {}

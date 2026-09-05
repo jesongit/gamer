@@ -47,7 +47,7 @@ async fn put_json(
 fn seed_workspace(dir: &std::path::Path, android: &str) {
     let ws = dir.join(android);
     std::fs::create_dir_all(ws.join("scripts")).unwrap();
-    std::fs::write(ws.join("scripts/daily.yaml"), b"steps: []\n").unwrap();
+    std::fs::write(ws.join("scripts/daily.yaml"), b"version: 3\nsteps: []\n").unwrap();
     std::fs::create_dir_all(ws.join("functions")).unwrap();
     std::fs::write(ws.join("functions/common.yaml"), b"login:\n  steps: []\n").unwrap();
     std::fs::create_dir_all(ws.join("templates")).unwrap();
@@ -189,8 +189,8 @@ async fn edit_round_trip_replaces_workspace_with_package_contents() {
 
     // 工作区漂移：改内容 + 多出脚本 + 未管理兄弟文件/目录
     let ws = test_app.dir.join(ANDROID);
-    std::fs::write(ws.join("scripts/daily.yaml"), b"steps: []\n# drifted\n").unwrap();
-    std::fs::write(ws.join("scripts/extra.yaml"), b"steps: []\n").unwrap();
+    std::fs::write(ws.join("scripts/daily.yaml"), b"version: 3\nsteps: []\n# drifted\n").unwrap();
+    std::fs::write(ws.join("scripts/extra.yaml"), b"version: 3\nsteps: []\n").unwrap();
     std::fs::write(ws.join("templates/icon.png"), b"drifted-not-png").unwrap();
     std::fs::write(ws.join("notes.txt"), b"sibling stays").unwrap();
     std::fs::create_dir_all(ws.join("extra_dir")).unwrap();
@@ -230,7 +230,7 @@ async fn edit_round_trip_replaces_workspace_with_package_contents() {
     // extra.yaml 被清除），未管理兄弟条目保留
     assert_eq!(
         std::fs::read(ws.join("scripts/daily.yaml")).unwrap(),
-        b"steps: []\n"
+        b"version: 3\nsteps: []\n"
     );
     assert!(!ws.join("scripts/extra.yaml").exists(), "包外脚本应被清除");
     assert_eq!(
@@ -280,7 +280,7 @@ async fn edit_makes_workspace_highest_priority_for_engine_snapshot() {
     assert_eq!(
         std::fs::read(test_app.dir.join("app-packages/official.demo/1.0.0/scripts/daily.yaml"))
             .unwrap(),
-        b"steps: []\n"
+        b"version: 3\nsteps: []\n"
     );
 }
 
@@ -311,7 +311,7 @@ async fn edit_preflight_failure_keeps_workspace_intact_and_cleans_staging() {
     // 既有工作区哨兵内容（编辑失败必须原样保留）
     let ws = test_app.dir.join(ANDROID);
     std::fs::create_dir_all(ws.join("scripts")).unwrap();
-    std::fs::write(ws.join("scripts/keep.yaml"), b"steps: []\n# sentinel\n").unwrap();
+    std::fs::write(ws.join("scripts/keep.yaml"), b"version: 3\nsteps: []\n# sentinel\n").unwrap();
     std::fs::write(ws.join("sibling.txt"), b"untouched").unwrap();
 
     let resp = post_json(&test_app, &session, EDIT_URI, edit_body(ANDROID)).await;
@@ -324,7 +324,7 @@ async fn edit_preflight_failure_keeps_workspace_intact_and_cleans_staging() {
     // 工作区原状：哨兵保留、包内坏脚本未被带入、package.toml 未被写入
     assert_eq!(
         std::fs::read(ws.join("scripts/keep.yaml")).unwrap(),
-        b"steps: []\n# sentinel\n"
+        b"version: 3\nsteps: []\n# sentinel\n"
     );
     assert_eq!(std::fs::read(ws.join("sibling.txt")).unwrap(), b"untouched");
     assert!(!ws.join("scripts/bad.yaml").exists());
@@ -411,7 +411,7 @@ async fn edit_multi_target_package_keeps_full_targets_and_revision() {
         &session,
         build_zip(vec![
             ("manifest.toml", manifest.to_vec()),
-            ("scripts/one.yaml", b"steps: []\n".to_vec()),
+            ("scripts/one.yaml", b"version: 3\nsteps: []\n".to_vec()),
             ("resources/blob.txt", b"blob".to_vec()),
         ]),
     )
@@ -443,7 +443,7 @@ async fn edit_multi_target_package_keeps_full_targets_and_revision() {
     assert_eq!(body["replaced"]["templates"], 0);
 
     let ws = test_app.dir.join("com.other.game");
-    assert_eq!(std::fs::read(ws.join("scripts/one.yaml")).unwrap(), b"steps: []\n");
+    assert_eq!(std::fs::read(ws.join("scripts/one.yaml")).unwrap(), b"version: 3\nsteps: []\n");
     // package.toml 字段全保留：revision/name/完整 targets 列表
     assert_eq!(
         std::fs::read_to_string(ws.join("package.toml")).unwrap(),

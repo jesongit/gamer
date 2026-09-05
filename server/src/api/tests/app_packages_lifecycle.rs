@@ -628,35 +628,42 @@ async fn app_package_full_lifecycle_workspace_export_install_edit_rerelease() {
     assert_eq!(list[0]["id"], "com.test.game/wasd.yaml");
     let resp = get_json(&test_app, &sid, KEYMAP_URI).await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
-    //   d) 包内模板经运行链路同源校验可见：引用包内模板的脚本保存成功，
-    //      引用不存在模板的脚本仍 400（证明正向不是恒真）
+    //   d) 保存边界 v3-only：引用包内模板的 v3 脚本保存成功；
+    //      非 v3 存量源报版本门禁 400（无 fallback）
     let resp = post_json(
         &test_app,
         &sid,
         "/api/apps/com.test.game/resources/scripts",
         serde_json::json!({
             "name": "probe-pkg-template.yaml",
-            "content": "steps:\n  - check: icon.png\n",
+            "content": "version: 3\nsteps:\n  - find:\n      template: icon.png\n      then:\n        - log: hit\n",
         }),
     )
     .await;
     assert_eq!(
         resp.status(),
         StatusCode::CREATED,
-        "引用包内模板的脚本必须保存成功: {:?}",
+        "引用包内模板的 v3 脚本必须保存成功: {:?}",
         json_body(resp).await
     );
+    // 保存边界 v3-only：非 v3 存量源（曾用于模板存在性校验的 v2 形态）→
+    // 版本门禁 400（模板可用性归运行期 composite 解析，见 vision.md）
     let resp = post_json(
         &test_app,
         &sid,
         "/api/apps/com.test.game/resources/scripts",
         serde_json::json!({
-            "name": "probe-missing-template.yaml",
-            "content": "steps:\n  - check: missing-tpl.png\n",
+            "name": "probe-legacy.yaml",
+            "content": "steps:\n  - check: icon.png\n",
         }),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let j = json_body(resp).await;
+    assert!(
+        j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"].as_str().unwrap_or_default().starts_with("yaml.v3.version")),
+        "非 v3 存量源保存必须报版本门禁: {j}"
+    );
     let resp = delete_json(&test_app, &sid, "/api/apps/com.test.game/resources/scripts/com.test.game%2Fprobe-pkg-template.yaml").await;
     assert_eq!(resp.status(), StatusCode::OK);
 
