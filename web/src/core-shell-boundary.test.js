@@ -92,10 +92,12 @@ describe('Core 通用模块', () => {
     expect(runs).toContain('d.entrypoint || d.script_id')
   })
 
-  it('useConsoleWorkspacePanels 不做本地面板回退注册', () => {
+  it('useConsoleWorkspacePanels 不做本地面板回退注册、不含任何扩展 id（keymap 运行态判定走配置点）', () => {
     const source = read('./components/console/useConsoleWorkspacePanels.js')
     expect(source).not.toContain('register')
-    expect(source).not.toContain('gamer.yaml')
+    for (const banned of EXTENSION_IDS) {
+      expect(source).not.toContain(banned)
+    }
   })
 })
 
@@ -107,5 +109,20 @@ describe('yaml 扩展前端侧契约点（归属正确性）', () => {
 
   it('面板作用域上下文成对装配（脚本/函数互不串台的壳侧证据）', () => {
     expect(read('./views/Console.vue')).toContain('scriptRunner: { scripts: scriptPanel, functions: functionsPanel }')
+  })
+})
+
+describe('keymap 扩展前端侧契约点（P12.10 收口）', () => {
+  it('扩展注册 id 唯一配置点在 gamer-keymap-extension.js（运行态判定随 id 同点收敛）', () => {
+    const source = read('./gamer-keymap-extension.js')
+    expect(source).toContain("export const GAMER_KEYMAP_EXTENSION_ID = 'gamer.keymap'")
+    expect(source).toContain('export function isRemoteKeymapRunning')
+  })
+
+  it('keymap 输入路由的运行态消费方不出现扩展 id 字面量', () => {
+    // 远端映射运行中 → 输入交 keymap 控制器，否则直通 scrcpy；壳只认布尔态
+    for (const file of ['./views/Console.vue', './keymap-control.js', './keyboard-control.js']) {
+      expect(read(file)).not.toContain('gamer.keymap')
+    }
   })
 })

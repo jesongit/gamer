@@ -156,5 +156,60 @@ describe('Frontend Plugin Workspace', () => {
     expect(registry.resolve('tasks')?.key).toBe('gamer.core:tasks')
     expect(registry.get('gamer.core:tasks')?.getProps?.({})).toEqual({ activePkg: 'com.demo' })
   })
+
+  it('P12.10：生命周期按 manifest 独立收放——仅停用 gamer.yaml 时 YAML 面板全消失、其余面板保留', async () => {
+    const registry = createPanelRegistry()
+    registerCoreContributions(registry)
+    const gamerYamlPanels = [
+      { plugin_id: 'gamer.yaml', panel_id: 'automation', title: '自动化', runtime: 'core', location: 'console.right', component: 'console.scripts' },
+      { plugin_id: 'gamer.yaml', panel_id: 'functions', title: '函数', runtime: 'core', location: 'console.right', component: 'console.functions' },
+      { plugin_id: 'gamer.yaml', panel_id: 'templates', title: '模板', runtime: 'core', location: 'console.right', component: 'console.templates' },
+    ]
+    const keymapPanel = { plugin_id: 'gamer.keymap', panel_id: 'keymaps', title: '映射', runtime: 'core', location: 'console.right', component: 'console.keymaps' }
+    const load = vi.fn()
+      .mockResolvedValueOnce({ ui_contributions: [...gamerYamlPanels, keymapPanel] })
+      // gamer.yaml 被 disable/uninstall：服务端 ui_contributions 里它的面板整体消失，
+      // keymap 扩展不受牵连（生命周期按 manifest 独立，refresh 原子替换全量注册）
+      .mockResolvedValueOnce({ ui_contributions: [keymapPanel] })
+    const adapter = createServerUiContributionAdapter(registry, { load })
+
+    await adapter.refresh()
+    expect(registry.getPanels().map(panel => panel.key)).toEqual([
+      'gamer.core:tasks', 'gamer.core:logs', 'gamer.core:settings',
+      'gamer.yaml:automation', 'gamer.yaml:functions', 'gamer.yaml:templates', 'gamer.keymap:keymaps',
+    ])
+
+    await adapter.refresh()
+    expect(registry.resolve('gamer.yaml:automation')).toBeNull()
+    expect(registry.resolve('gamer.yaml:functions')).toBeNull()
+    expect(registry.resolve('gamer.yaml:templates')).toBeNull()
+    // 旧 hash 别名随面板注销一并清理，不留悬垂入口
+    expect(registry.resolve('script')).toBeNull()
+    // 非 yaml 面板原样保留
+    expect(registry.resolve('gamer.keymap:keymaps')).not.toBeNull()
+    expect(registry.resolve('gamer.core:tasks')).not.toBeNull()
+    expect(registry.resolve('gamer.core:logs')).not.toBeNull()
+    expect(registry.resolve('gamer.core:settings')).not.toBeNull()
+    adapter.dispose()
+  })
+
+  it('P12.10：裸 Core（无任何扩展贡献）右侧只有 任务/日志/设置，默认面板可解析', async () => {
+    const registry = createPanelRegistry({ defaultPanelKey: DEFAULT_PANEL_KEY })
+    registerCoreContributions(registry)
+    const adapter = createServerUiContributionAdapter(registry, {
+      load: vi.fn().mockResolvedValue({ ui_contributions: [] }),
+    })
+
+    await adapter.refresh()
+    expect(registry.getPanels().map(panel => panel.key)).toEqual([
+      'gamer.core:tasks', 'gamer.core:logs', 'gamer.core:settings',
+    ])
+    expect(registry.defaultPanel()?.key).toBe('gamer.core:tasks')
+    // 裸 Core 注册表内没有任何扩展贡献（runtime=core 面板只随 manifest 进场）
+    for (const panel of registry.getPanels()) {
+      expect(panel.pluginId).toBe('gamer.core')
+    }
+    adapter.dispose()
+  })
 })
 

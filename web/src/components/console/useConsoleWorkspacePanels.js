@@ -1,14 +1,13 @@
 import { onUnmounted, watch } from 'vue'
 import { DEFAULT_PANEL_KEY } from '../../workspace/registry'
-
-/** 长驻 keymap 扩展 id：输入控制器只观察它的运行状态，与面板注册解耦。 */
-const KEYMAP_EXTENSION_ID = 'gamer.keymap'
+import { isRemoteKeymapRunning } from '../../gamer-keymap-extension'
 
 /**
  * Console 右侧 Workspace 接线：URL panel 同步（hash 路由 query）、
  * 服务端扩展 UI 贡献轮询、远端 keymap 运行态与手柄输入轮询。
  * 面板注册完全由服务端 ui_contributions 驱动（runtime=core 面板挂宿主组件），
- * 本模块不再做任何本地回退注册。
+ * 本模块不再做任何本地回退注册；keymap 扩展 id 知识收敛在
+ * gamer-keymap-extension.js（唯一前端配置点），此处只消费其运行态判定。
  */
 export function useConsoleWorkspacePanels({
   route,
@@ -27,8 +26,7 @@ export function useConsoleWorkspacePanels({
   async function refreshServerExtensions() {
     try {
       const response = await serverUiAdapter.refresh()
-      const keymapSnapshot = (response?.extensions || []).find(item => item?.id === KEYMAP_EXTENSION_ID)
-      remoteKeymapRunning.value = keymapSnapshot?.state === 'running'
+      remoteKeymapRunning.value = isRemoteKeymapRunning(response?.extensions)
     } catch (error) {
       // Extension discovery is additive; a transient failure must not tear down
       // the already mounted core panels or the currently active input route.

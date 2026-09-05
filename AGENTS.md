@@ -74,6 +74,7 @@ cd web && pnpm dev                      # 单起前端
 | `web/src/workspace/` | 前端壳骨架：registry（PanelRegistry + `DEFAULT_PANEL_KEY='gamer.core:tasks'`）、core-contributions.ts（Core 任务/日志/设置）、core-component-registry.ts（manifest `runtime="core"` 宿主组件解析表）、contribution-manager / lifecycle / PluginPanelHost / plugin-center |
 | `web/src/components/task/` | 通用任务表单支撑：runner-editors.ts（`RunnerEditorContribution` 契约注册表）、builtin-runner-editors.ts（gamer.yaml 执行目标+payload 编辑器）、gamer-yaml-resources.ts（分区候选经通用资源 API） |
 | `web/src/gamer-yaml-runner.js` | gamer.yaml runner 注册 id 唯一前端配置点 + `api.run` 包装（api.js 保持 runner 无知） |
+| `web/src/gamer-keymap-extension.js` | gamer.keymap 扩展 id 唯一前端配置点 + 远端映射运行态判定 `isRemoteKeymapRunning`（输入路由开关；壳/workspace 接线不含扩展 id 字面量） |
 | `web/src/script-editor/` | 可视化编辑器核心（model=唯一编辑源、codec=YAML↔Model、校验/诊断、命令栈撤销重做、components 步骤画布/卡片/参数表单；call/func 卡片目标为分区候选下拉（func=文件+函数名两级，targets.ts 注入契约），选定即按目标声明自动生成 args（默认值预填），新插入步骤自动展开）；契约见 docs/reference/SCRIPT_EDITOR_CONTRACT.md |
 | `web/src/views/Console.vue` | 投屏控制：WebRTC 前端（连接锁防双 PC / 坐标映射 / 框选模板）+ 设备列表管理（scan/连接/删除）+ registry 装配右侧面板；脚本运行模式：只读步骤摘要卡片（ScriptSummary），「▶ 从此运行」→ start_index 提交（顶层步骤序号；点击卡片选中已删，顶部「运行」恒从头跑），有 params 先弹参数表单（RunParamsModal，400 诊断回填、resolved_args 摘要进日志）；call/func 卡片可跳转目标资源 |
 | `web/src/components/console/` | Console 域组合式函数与面板实现：use{ConsolePanelResize,ConsoleDeviceManager,ConsoleTemplates,ConsoleBridgeOverlays,ConsoleScriptRunner,ConsoleKeymap,ConsoleWorkspacePanels}*.js、ScriptRunner.vue（脚本/函数双面板上下文）、TemplateCapture.vue、KeymapPanel.vue |
