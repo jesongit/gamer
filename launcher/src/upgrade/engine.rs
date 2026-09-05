@@ -8,7 +8,9 @@
 //!   回滚也失败 → manual_recovery_required 并停止自动重试（后续 upgrade 拒绝执行）。
 //! - 候选启动注入 GAMER_ACTIVATION_GATE=1 + GAMER_LAUNCHER_PIPE/GAMER_LAUNCHER_IPC_TOKEN；
 //!   candidate_ready = /health/ready 200 且 boot_id 与旧实例不同、app.version==目标
-//!   （GET /api/system/info 优先，非 200 回退 /health/ready body 字段）；
+//!   （GET /api/system/info 携带 state/admin-token 派生的 X-Admin-Token 走服务端
+//!   回环管理通道取真实字段；未获 200 才回退 /health/ready body 字段——该 body
+//!   无身份字段，降级即只验 readiness，不伪造校验通过）；
 //!   activating = POST /api/system/activate（X-Launcher-Token header）。
 
 use std::fs;
@@ -1465,7 +1467,13 @@ impl Engine {
         }
     }
 
-    /// boot_id / app.version 校验；info 非 200 时回退 /health/ready body 字段。
+    /// boot_id / app.version / data schema 校验（LCH-008）。/api/system/info 在
+    /// 受保护组，匿名 401（缺陷 #5，UPDATE_M2_EVIDENCE §E-6）：本探测统一附带
+    /// state/admin-token 派生的 X-Admin-Token——服务端「回环 + 常量时间比较」
+    /// 通过即放行（与 drain_old_server 的 X-Admin-Token 同源同语义），候选由本
+    /// 进程注入 GAMER_ADMIN_TOKEN，正常链路必然 200 → version/schema/boot_id
+    /// 真实比对并作为 commit 门禁。仍未 200 时按契约降级 /health/ready body
+    /// 字段（真实 server 该 body 无身份字段 → 只验 readiness，不伪造通过）。
     fn verify_candidate_identity(
         &self,
         addr: SocketAddr,
@@ -1473,34 +1481,58 @@ impl Engine {
         expected_version: &str,
         expected_schema: Option<u32>,
     ) -> Result<Option<String>, BusinessError> {
-        // 1) GET /api/system/info（登录保护 → 可能 401/重定向拒绝）
+        // 1) GET /api/system/info（受保护组；携带 X-Admin-Token 时由回环管理通道放行）
+        let admin_token = self
+            .opts
+            .admin_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        let mut headers: Vec<(&str, &str)> = Vec::new();
+        if let Some(token) = admin_token {
+            headers.push(("X-Admin-Token", token));
+        }
         let info = http_request(
             addr,
             "GET",
             "/api/system/info",
-            &[],
+            &headers,
             self.opts.probe.per_attempt_timeout,
         )
         .ok();
         let (version, boot, schema) = match info {
-            Some(resp) if resp.status == 200 => match resp.body_json() {
-                Some(body) => (
-                    // 结构化路径优先，防依赖字段里的同名键
-                    body.get("app")
-                        .and_then(|app| app.get("version"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .or_else(|| find_string_field(&body, &["app_version"])),
-                    body.get("startup")
-                        .and_then(|s| s.get("boot_id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                        .or_else(|| find_string_field(&body, &["boot_id", "bootId"])),
-                    find_schema(&body),
-                ),
-                None => (None, None, None),
-            },
+            Some(resp) if resp.status == 200 => {
+                let observed = match resp.body_json() {
+                    Some(body) => (
+                        // 结构化路径优先，防依赖字段里的同名键
+                        body.get("app")
+                            .and_then(|app| app.get("version"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| find_string_field(&body, &["app_version"])),
+                        body.get("startup")
+                            .and_then(|s| s.get("boot_id"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .or_else(|| find_string_field(&body, &["boot_id", "bootId"])),
+                        find_schema(&body),
+                    ),
+                    None => (None, None, None),
+                };
+                tracing::info!(
+                    version = ?observed.0,
+                    boot_id = ?observed.1,
+                    schema = ?observed.2,
+                    "候选身份已由 /api/system/info 观测（X-Admin-Token 回环管理通道）"
+                );
+                observed
+            }
             _ => {
+                if admin_token.is_some() {
+                    tracing::warn!(
+                        "携带 X-Admin-Token 仍未取得 /api/system/info 200，身份观测降级 /health/ready（version/schema/boot_id 校验可能被跳过，不伪造通过）"
+                    );
+                }
                 // 2) 回退 /health/ready body 字段（匿名；字段形态实测前尽力解析）
                 let resp = http_request(
                     addr,
@@ -1684,6 +1716,9 @@ mod tests {
 
     type TestResponder = Arc<dyn Fn(&str) -> (u16, String) + Send + Sync>;
 
+    /// 带原始请求文本的第二入参形态（X-Admin-Token 接线回归专用）。
+    type CapturingResponder = Arc<dyn Fn(&str, &str) -> (u16, String) + Send + Sync>;
+
     fn serve_for(millis: u64, responder: TestResponder) -> (SocketAddr, JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -1742,6 +1777,63 @@ mod tests {
             ),
             root,
         )
+    }
+
+    /// 捕获原始请求文本 + 按注册应答器响应（X-Admin-Token 接线回归专用）。
+    /// 返回的缓冲区收完整请求头（含头名值），供断言探针携带的鉴权头。
+    fn serve_capturing(
+        millis: u64,
+        responder: CapturingResponder,
+    ) -> (SocketAddr, Arc<Mutex<String>>, JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let captured = Arc::new(Mutex::new(String::new()));
+        let capture_handle = captured.clone();
+        let handle = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(millis);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = Vec::new();
+                        let mut buf = [0u8; 1024];
+                        loop {
+                            match stream.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    request.extend_from_slice(&buf[..n]);
+                                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let request = String::from_utf8_lossy(&request).to_string();
+                        let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+                        let (status, body) = responder(&path, &request);
+                        *capture_handle.lock().unwrap() = request;
+                        let reason = if status == 200 {
+                            "OK"
+                        } else if status == 503 {
+                            "Service Unavailable"
+                        } else {
+                            "Unauthorized"
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        (addr, captured, handle)
     }
 
     /// 缺陷 #1 回归台架：模拟真实 server `/api/shutdown` 的耦合语义——
@@ -1969,6 +2061,76 @@ mod tests {
             .verify_candidate_identity(addr, Some("old"), "2.0.0", Some(2))
             .expect("ready body 应可作为回退身份");
         assert_eq!(boot.as_deref(), Some("new"));
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// LCH-008 接线回归（缺陷 #5，UPDATE_M2_EVIDENCE §E-6）：身份探针必须携带
+    /// state/admin-token 派生的 X-Admin-Token，使受保护组 /api/system/info 返回
+    /// 200 → version/schema/boot_id 真实比对。mock 复刻真实 server 鉴权形态：
+    /// 头缺失或不匹配一律 401（ready 契约 body 无身份字段），只有令牌正确才给
+    /// 真实身份字段——断言 boot 取自 info 而非空回退，即证明鉴权探针真的执行。
+    #[test]
+    fn candidate_identity_probe_carries_admin_token_and_verifies_info_body() {
+        let (mut engine, root) = engine();
+        let token = "ab".repeat(32); // 与 state/admin-token 同形态（64 位小写 hex）
+        engine.opts.admin_token = Some(token.clone());
+        let info_body =
+            r#"{"app":{"version":"2.0.0"},"schema":{"db":2},"startup":{"boot_id":"boot-new"}}"#;
+        let expected_header = format!("X-Admin-Token: {token}");
+        let (addr, captured, server) = serve_capturing(1_000, {
+            let token = token.clone();
+            Arc::new(move |path, request| {
+                let authorized = request.contains(&format!("X-Admin-Token: {token}"));
+                match path {
+                    "/api/system/info" if authorized => (200, info_body.to_string()),
+                    "/api/system/info" => (401, r#"{"error":"unauthorized"}"#.to_string()),
+                    // 真实 server /health/ready 契约 body：只有 ready/checks，无身份字段
+                    _ => (200, r#"{"ready":true,"checks":{}}"#.to_string()),
+                }
+            })
+        });
+        let boot = engine
+            .verify_candidate_identity(addr, Some("old"), "2.0.0", Some(2))
+            .expect("携带正确 X-Admin-Token 的 info 200 应完成身份校验");
+        assert_eq!(
+            boot.as_deref(),
+            Some("boot-new"),
+            "boot_id 必须来自带令牌的 /api/system/info（空回退观测不到该值）"
+        );
+        let request = captured.lock().unwrap().clone();
+        assert!(
+            request.contains("GET /api/system/info"),
+            "探针应请求 /api/system/info: {request}"
+        );
+        assert!(
+            request.contains(&expected_header),
+            "身份探针必须携带 X-Admin-Token 头: {request}"
+        );
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 令牌被拒（模拟 admin 通道异常）→ 按契约降级 ready body；本 mock 的 ready
+    /// 无身份字段 → 空观测，不伪造校验通过（版本不符等门禁只是无从触发）。
+    #[test]
+    fn candidate_identity_degrades_to_ready_observation_when_token_rejected() {
+        let (mut engine, root) = engine();
+        engine.opts.admin_token = Some("wrong-token-value".to_string());
+        let (addr, server) = serve_for(
+            1_000,
+            Arc::new(|path| {
+                if path == "/api/system/info" {
+                    (401, r#"{"error":"unauthorized"}"#.to_string())
+                } else {
+                    (200, r#"{"ready":true,"checks":{}}"#.to_string())
+                }
+            }),
+        );
+        let boot = engine
+            .verify_candidate_identity(addr, Some("old"), "2.0.0", Some(2))
+            .expect("令牌被拒应按契约降级，而非报错");
+        assert_eq!(boot, None, "降级路径观测不到 boot_id");
         server.join().unwrap();
         let _ = fs::remove_dir_all(root);
     }
