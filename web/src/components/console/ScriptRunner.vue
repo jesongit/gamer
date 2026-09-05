@@ -29,6 +29,7 @@
       </template>
     </div>
     <RunLogPanel :context="ctx" :on-mounted="ctx.onLogBoxMounted" />
+    <RunEventsPanel :events="runEvents" />
     <!-- 摘要区独立滚动：panel-sec 是 overflow:hidden，内容超高（多函数分组/长脚本）必须在这里滚动 -->
     <div v-if="!ctx.store.running || ctx.runKind === 'func'" class="sum-wrap">
       <!-- 函数模式：逐函数分组摘要（每组=函数签名 + 该函数体顶层卡片 + 直达编辑按钮） -->
@@ -65,6 +66,8 @@
         v-else-if="ctx.selTargetId"
         :model="ctx.summaryModel"
         :error="ctx.summaryError"
+        :active-top="activeTop"
+        :error-top="errorTop"
         @run-from="ctx.runFromStep"
         @open-target="ctx.openScriptTarget"
       />
@@ -170,15 +173,23 @@
 import { computed, reactive, ref, watch } from 'vue'
 import ScriptPicker from '../ScriptPicker.vue'
 import RunLogPanel from './RunLogPanel.vue'
+import RunEventsPanel from './RunEventsPanel.vue'
 import ScriptSummary from './ScriptSummary.vue'
 import ResourcePreviewModal from './ResourcePreviewModal.vue'
 import SaveConflictModal from './SaveConflictModal.vue'
 import { StepCanvas, ParamEditor, DefaultsEditor, YamlPreview } from '../../script-editor/components/index'
+import { runEventTopIndex, useRunEvents } from './useRunEvents'
 
 const props = defineProps({ context: { type: Object, required: true } })
 const ctx = reactive(props.context)
 const canvasEl = ref(null)
 const paramEditorEl = ref(null)
+
+// 运行可视化（P12.6）：事件 feed 数据源（Console 壳分发的 se 运行事件）+
+// 当前/失败步骤的顶层卡片序号（嵌套路径映射其顶层祖先，如 steps[2].then[1] → 2）
+const runEvents = useRunEvents()
+const activeTop = computed(() => runEventTopIndex(runEvents.activePath))
+const errorTop = computed(() => runEventTopIndex(runEvents.errorPath))
 
 /** 当前编辑函数名（画布顶部下拉透出）→ 函数级 params 容器路径，ParamEditor 按 it 编辑。 */
 const fnParamsPath = computed(() => {

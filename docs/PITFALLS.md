@@ -231,3 +231,9 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 ## 2026-09-05（Phase 12 P12.5/P12.7：v3 defaults 与 find/match 收口）
 
 - **debug 构建下 wasmtime Component 编译可占数秒，会污染 e2e 墙钟断言**：对「等待时长落在区间」类断言，计时前先在同一 runtime 上空跑一次预热（复用已编译模块），否则 sleep 断言被 JIT 编译时间冲垮；或只断言下界。
+
+## 2026-09-05（Phase 12 P12.6：Runtime Visualization Events）
+
+- **仓库有两个同名异型 `DeviceId`**（`capabilities::device::DeviceId` 与 `core::models::DeviceId`）：`RuntimeEvent`/`EventSink` 只认 Core 形态，在 yaml_extension 里拿 struct 里 import 的 capabilities 版直接传会报 E0308；跨域传设备 id 给事件时显式写 `crate::core::DeviceId`。
+- **f32 分数经 serde_json 往返不是精确字面量**（0.92f32 → 0.9200000166893005）：断言 vision 事件 score 要按 f64 容差（1e-6）比较，`json!(0.92)` 全等比较必翻车。
+- **web 的 vitest 只收 `src/*.test.js` 与 `src/script-editor/**/*.test.js`**：新测试文件放 `src/components/console/` 等子目录会被 `pnpm test:run` **静默跳过**（显式指定文件名才会报 "No test files found"），新前端测试一律放 `src/` 根或改 vitest.config.js include。

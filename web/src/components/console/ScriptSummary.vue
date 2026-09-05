@@ -8,11 +8,14 @@
         v-for="(row, i) in topSteps"
         :key="row.uuid"
         class="sum-row"
+        :class="{ 'row-active': i === activeTop, 'row-error': i === errorTop }"
       >
         <span class="idx mono">{{ i + 1 }}</span>
         <span class="icon" :title="row.meta.hint">{{ row.meta.icon }}</span>
         <span class="label">{{ row.meta.label }}</span>
         <span class="summary mono">{{ row.summary }}</span>
+        <span v-if="i === activeTop" class="run-dot mono" title="当前运行步骤">▶ 运行中</span>
+        <span v-else-if="i === errorTop" class="run-dot mono fail" title="运行失败的步骤">✗ 失败</span>
         <span v-if="row.target && !readonly" class="row-ops">
           <button class="mini-btn link" type="button" :title="row.kind === 'call' ? '打开子脚本' : '打开函数定义'" @click.stop="emit('open-target', { kind: row.kind, target: row.target })">↗ {{ row.kind === 'call' ? '子脚本' : '函数' }}</button>
         </span>
@@ -40,6 +43,10 @@ const props = defineProps({
   readonly: { type: Boolean, default: false },
   /** 解析失败等摘要不可用原因（显示在空态，替代旧源码视图的报错入口）。 */
   error: { type: String, default: '' },
+  /** 运行高亮（P12.6）：当前执行中步骤的顶层卡片序号（嵌套路径取顶层祖先）。 */
+  activeTop: { type: Number, default: null },
+  /** 最近一次失败步骤的顶层卡片序号（step_end ok:false → 标红）。 */
+  errorTop: { type: Number, default: null },
 })
 
 const emit = defineEmits(['run-from', 'open-target'])
@@ -85,6 +92,10 @@ const headLabel = computed(() => {
   background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm);
   padding: 4px 8px;
 }
+.sum-row.row-active { border-color: var(--accent); background: rgba(56, 189, 248, .08); }
+.sum-row.row-error { border-color: var(--danger); background: rgba(248, 113, 113, .08); }
+.run-dot { flex: none; color: var(--accent); font-size: 11px; }
+.run-dot.fail { color: var(--danger); }
 .idx { color: var(--text-2); width: 18px; text-align: right; flex: none; }
 .icon {
   display: inline-flex; align-items: center; justify-content: center;

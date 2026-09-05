@@ -211,6 +211,7 @@ import { useConsolePanelResize } from '../components/console/useConsolePanelResi
 import { useConsoleDeviceManager } from '../components/console/useConsoleDeviceManager'
 import { useConsoleTemplates } from '../components/console/useConsoleTemplates'
 import { useConsoleBridgeOverlays } from '../components/console/useConsoleBridgeOverlays'
+import { pushRunEvent } from '../components/console/useRunEvents'
 import { useConsoleScriptRunner } from '../components/console/useConsoleScriptRunner'
 import { useConsoleKeymap } from '../components/console/useConsoleKeymap'
 import { useWebrtcStats } from '../components/console/useWebrtcStats'
@@ -823,11 +824,14 @@ let fxHitTimer = null
 /** 服务端→浏览器脚本可视化事件（{"type":"se","ev":"tap"|"swipe"|"hit"|"miss", ...}，设备像素坐标）：
  *  引擎执行 tap/swipe、模板匹配命中/未命中时推送到投屏画面
  *  （样式复用 alt 反馈/测试匹配命中框；miss 显示搜索区域，虚线红框）
- *  同一轮匹配的多个模板事件会互相顶替，显示的是最新一次 */
+ *  同一轮匹配的多个模板事件会互相顶替，显示的是最新一次。
+ *  运行结构事件（run/step/call/vision/budget，P12.6）经 pushRunEvent 分发给
+ *  运行事件 feed 与步骤高亮，不进投屏标记。 */
 function onControlMessage(e) {
   let msg
   try { msg = JSON.parse(e.data) } catch (err) { return }
   if (!msg || msg.type !== 'se') return
+  if (pushRunEvent(msg)) return
   if (msg.ev === 'tap') {
     scriptFx.tap.x = msg.x || 0
     scriptFx.tap.y = msg.y || 0
