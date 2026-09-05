@@ -47,6 +47,10 @@ impl Guest for Fixture {
             ));
         }
         let mut budget = ExecutionBudget::default();
+        // wait 随机区间（契约 §4，方案 (a)）：宿主注入的 run 级 nonce 作
+        // splitmix64 种子（算法与宿主侧 yaml_vnext::splitmix64 逐字一致，
+        // 测试向量锁定在两侧）。
+        budget.rng = program.get("nonce").and_then(serde_json::Value::as_u64).unwrap_or(0);
         execute_steps(&all_steps[start_index..], &mut values, &mut budget)?;
         Ok(
             serde_json::to_string(&values.remove("__return").unwrap_or(serde_json::Value::Null))
@@ -64,6 +68,8 @@ const MAX_CALL_DEPTH: u32 = 32;
 struct ExecutionBudget {
     steps: u64,
     call_depth: u32,
+    /// wait 随机区间的 splitmix64 状态（run nonce 播种，跨步骤连续推进）。
+    rng: u64,
 }
 
 impl Default for ExecutionBudget {
@@ -71,6 +77,7 @@ impl Default for ExecutionBudget {
         Self {
             steps: 0,
             call_depth: 0,
+            rng: 0,
         }
     }
 }
@@ -104,6 +111,18 @@ impl ExecutionBudget {
     fn exit_call(&mut self) {
         self.call_depth -= 1;
     }
+}
+
+/// wait 随机区间的 PRNG：splitmix64，与宿主侧
+/// `server/src/extensions/gamer_yaml/yaml_vnext.rs` 的 `splitmix64` 逐字一致
+///（测试向量锁定在两侧：seed=7 → 7191089600892374487, 309689372594955804,
+/// 16616101746815609346）。算法/常量改动必须两处同步。
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E3779B97F4A7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
 }
 
 fn execute_steps(
@@ -155,6 +174,30 @@ fn execute_step(
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| "set 缺少 name".to_string())?;
             values.insert(name.to_string(), evaluate(step.get("value"), values)?);
+            Ok(Flow::Continue)
+        }
+        // wait 随机区间（契约 §4）：[min, max] 内取随机时长后经 runtime.sleep
+        // 等待（取消语义与普通 sleep 一致）。
+        "wait_random" => {
+            let min = evaluate(step.get("min"), values)?
+                .get("value")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "wait min 必须是时间值".to_string())?;
+            let max = evaluate(step.get("max"), values)?
+                .get("value")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "wait max 必须是时间值".to_string())?;
+            let duration = if max > min {
+                min + splitmix64(&mut budget.rng) % (max - min + 1)
+            } else {
+                min
+            };
+            let sleep_args = serde_json::json!({
+                "duration": {"type": "duration", "value": duration}
+            });
+            let args_json =
+                serde_json::to_string(&sleep_args).map_err(|error| error.to_string())?;
+            capability::invoke("runtime.sleep", &args_json).map_err(format_host_error)?;
             Ok(Flow::Continue)
         }
         "if" => {

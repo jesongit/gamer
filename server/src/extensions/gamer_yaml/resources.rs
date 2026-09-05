@@ -218,21 +218,52 @@ impl ResourceKindHandler for YamlScriptValidator {
     }
 }
 
-/// functions kind 校验器：严格 loader（顶层键 = 函数名）+ 函数名清单注记。
+/// 函数库文件双形态验收（保存边界与导出/提取 preflight 共用）：
+/// 先试 v3 函数库解析（T6：v3 函数库文件此前无法通过保存 API），通过即合法；
+/// 失败回落 v2 严格 loader（v2 未删除前存量函数文件仍可保存）。双失败时：
+/// v3 诊断已进入结构/语义层（非 `yaml.v3.syntax` 纯语法错）→ 报 v3 诊断
+/// （前向格式），否则报 v2 诊断（存量 v2 文件的既有口径）。
+/// 校验含：函数名唯一（映射键承载）+ 合法字符集/非保留字、记录只允许
+/// params/steps、steps 合法 v3 语法（call 裸 target 在解析期报错，与运行前
+/// 一致）。
+pub(crate) fn validate_function_library_file(
+    store: &ResourceStore,
+    app: &str,
+    id: &str,
+    content: &str,
+) -> Result<(), serde_json::Value> {
+    let v3 = yaml_vnext::parse_function_library(content);
+    if v3.is_ok() {
+        return Ok(());
+    }
+    let mut view = StoreView::new(store, app);
+    let rel = id.trim().trim_end_matches(".yaml").trim_end_matches(".yml");
+    view.add_function(rel, content);
+    let v2 = parse_function_file(content, rel, &view);
+    if v2.is_ok() {
+        return Ok(());
+    }
+    // 双失败：v3 诊断进入结构/语义层（非纯语法错）→ 报 v3；否则报 v2 诊断
+    // （存量 v2 文件的既有口径）。
+    match v3 {
+        Err(diagnostics)
+            if diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code != "yaml.v3.syntax") =>
+        {
+            Err(serde_json::to_value(diagnostics).unwrap_or_default())
+        }
+        _ => Err(serde_json::to_value(v2.unwrap_err()).unwrap_or_default()),
+    }
+}
+
+/// functions kind 校验器：v3 / v2 双形态验收（见
+/// [`validate_function_library_file`]）+ 函数名清单注记（v2 优先、v3 回落）。
 struct YamlFunctionValidator;
 
 impl ResourceKindHandler for YamlFunctionValidator {
     fn validate_save(&self, req: SaveValidation<'_>) -> Result<(), serde_json::Value> {
-        let mut view = StoreView::new(req.store, req.app);
-        let rel = req
-            .id
-            .trim()
-            .trim_end_matches(".yaml")
-            .trim_end_matches(".yml");
-        view.add_function(rel, req.content);
-        parse_function_file(req.content, rel, &view)
-            .map(|_| ())
-            .map_err(|errors| serde_json::to_value(errors).unwrap_or_default())
+        validate_function_library_file(req.store, req.app, req.id, req.content)
     }
 
     fn annotate(&self, entries: &[(String, String)]) -> serde_json::Map<String, serde_json::Value> {
@@ -243,12 +274,23 @@ impl ResourceKindHandler for YamlFunctionValidator {
                 .trim_end_matches(".yaml")
                 .trim_end_matches(".yml")
                 .to_string();
+            // 函数名清单：v2 严格 loader 先行；v3 函数库回落 yaml_vnext
             let functions = try_build_function_file(content)
                 .map(|file| {
                     file.functions
                         .iter()
                         .map(|f| f.name.clone())
                         .collect::<Vec<_>>()
+                })
+                .or_else(|| {
+                    yaml_vnext::parse_function_library(content)
+                        .ok()
+                        .map(|library| {
+                            library
+                                .into_iter()
+                                .map(|decl| decl.name)
+                                .collect::<Vec<_>>()
+                        })
                 })
                 .unwrap_or_default();
             out.insert(id.clone(), json!({ "functions": functions, "file": short }));
@@ -574,6 +616,48 @@ fn rename_template_references(
         let mut view = StoreView::new(store, package);
         let rel = function.name.trim().trim_end_matches(".yaml").to_string();
         view.add_function(&rel, &function.content);
+        // v2 严格解析先行（保持既有改写行为）；v3 函数库（bare-map v3 步语法，
+        // v2 loader 无法解析）回落 yaml_vnext 改写。
+        let v3_library = match parse_function_file(&function.content, &rel, &view) {
+            Ok(_) => None,
+            Err(v2_errors) => {
+                if yaml_vnext::parse_function_library(&function.content).is_err() {
+                    return Err(anyhow::anyhow!(v2_errors
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("；")));
+                }
+                Some(yaml_vnext::rename_template_in_function_library(
+                    &function.content,
+                    old_name,
+                    &old_short,
+                    new_name,
+                    &new_short,
+                )
+                .map_err(|diagnostics| {
+                    anyhow::anyhow!(
+                        "v3 函数库模板引用无法重写: {}",
+                        diagnostics
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join("；")
+                    )
+                })?)
+            }
+        };
+        if let Some(rewritten) = v3_library {
+            if let Some((content, _changed)) = rewritten {
+                rewrites.push((
+                    ResourceKind::Functions,
+                    function.name.clone(),
+                    function.content.clone(),
+                    content,
+                ));
+            }
+            continue;
+        }
         let mut parsed = parse_function_file(&function.content, &rel, &view).map_err(|errors| {
             anyhow::anyhow!(errors
                 .iter()
@@ -683,9 +767,9 @@ impl StagedResourceValidator for YamlStagedValidator {
                 ResourceKind::Scripts => validate_compatible_script_in(rel, content, &mut view)
                     .map(|_| ())
                     .map_err(|error| error.into_json()),
-                ResourceKind::Functions => parse_function_file(content, rel, &view)
-                    .map(|_| ())
-                    .map_err(|errors| serde_json::to_value(errors).unwrap_or_default()),
+                // 函数库：v3 / v2 双形态（与保存边界同源）
+                ResourceKind::Functions => validate_function_library_file(store, app, rel, content)
+                    .map_err(|diagnostics_json| diagnostics_json),
                 _ => Ok(()),
             };
             if let Err(diagnostics) = result {
@@ -785,5 +869,50 @@ mod rename_tests {
         assert!(script.contains("template: new.png"));
         assert!(script.contains("- new.png"));
         assert!(script.contains("old.png 文本不应改"));
+    }
+
+    /// P12.5：函数库保存边界双形态验收（v3 函数库直存、存量 v2 回落、
+    /// 双失败按 v3 结构/语义诊断优先）。
+    #[test]
+    fn function_file_save_accepts_v3_and_v2_forms() {
+        let (store, _dir) = temp_store("dual");
+        // v3 bare-map 函数库（v2 严格 loader 拒收：v3 步语法 + version 键差异）
+        let v3_library = "领取奖励:\n  params:\n    - 'int:times:次数:2'\n  steps:\n    - log: $times\n    - if:\n        cond: $times > 0\n        then:\n          - log: ok\n";
+        validate_function_library_file(&store, "com.test.app", "common.yaml", v3_library)
+            .expect("v3 函数库必须通过保存校验");
+        // v3 嵌套文件短路径（functions allow_nested，function:<短路径>/<函数名>）
+        validate_function_library_file(
+            &store,
+            "com.test.app",
+            "sub/common.yaml",
+            v3_library,
+        )
+        .unwrap();
+        // 存量 v2 函数文件继续合法（v3 拒收 `- check: x` + 兄弟键 timeout 的
+        // v2 形态后回落 v2 严格 loader；模板引用须真实存在）
+        let templates = _dir.join("com.test.app").join("templates");
+        std::fs::create_dir_all(&templates).unwrap();
+        atomic_write(&templates.join("btn.png"), b"png").unwrap();
+        let v2_file = "login:\n  params: []\n  steps:\n    - check: btn.png\n      timeout: 0s\n";
+        validate_function_library_file(&store, "com.test.app", "legacy.yaml", v2_file).unwrap();
+        // 双失败：v3 诊断进入结构/语义层（非法 call 裸 target）→ 报 v3
+        let broken_v3 = "bad:\n  steps:\n    - call:\n        target: login\n";
+        let diagnostics =
+            validate_function_library_file(&store, "com.test.app", "broken.yaml", broken_v3)
+                .unwrap_err();
+        let text = diagnostics.to_string();
+        assert!(
+            text.contains("yaml.v3.call") || text.contains("命名空间"),
+            "双失败且 v3 进入语义层必须报 v3 call 诊断: {text}"
+        );
+        // 双失败且 v3 停留在纯语法错 → 报 v2 诊断（存量口径）
+        let syntax_broken = "login: [unclosed\n";
+        let diagnostics =
+            validate_function_library_file(&store, "com.test.app", "v2bad.yaml", syntax_broken)
+                .unwrap_err();
+        assert!(
+            !diagnostics.to_string().contains("yaml.v3."),
+            "纯语法错应回落 v2 诊断: {diagnostics}"
+        );
     }
 }

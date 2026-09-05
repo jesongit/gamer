@@ -235,8 +235,8 @@ pub struct V3ParamDecl {
     /// 类型名：v2 七类（tmpl/coord/color/time/key/text/bool）或 v3 扩展名
     /// （string/template/boolean/int/integer/number/value）。
     pub ty: String,
-    /// 备注描述。脚本顶层 v3 声明不携带（`yaml_vnext` 解析会丢弃 remark）；
-    /// 函数库宽松解析保留。
+    /// 备注描述。v3 脚本/函数库声明自 P12.5 起透出 remark
+    /// （`yaml_vnext::ParamDecl.remark`）；函数库宽松解析一直保留。
     pub remark: String,
     /// JSON 形态默认值；None = 必填。字符串形态声明的默认值保持原串
     /// （与 `yaml_vnext::parse_params` 一致），消费侧按类型规整。
@@ -263,7 +263,7 @@ pub(crate) fn v3_decls_from_program(
         .map(|decl| V3ParamDecl {
             name: decl.name.clone(),
             ty: decl.ty.trim().to_string(),
-            remark: String::new(),
+            remark: decl.remark.clone().unwrap_or_default(),
             default: decl.default.as_ref().map(v3_value_to_plain_json),
         })
         .collect()

@@ -74,7 +74,9 @@ impl ResourceKind {
             },
             Functions => KindRule {
                 exts: &["yaml"],
-                allow_nested: false,
+                // P12.5：放开嵌套目录（T2 遗留）——`function:common/lib/fn`
+                // 形态要求 functions/ 支持子目录文件（`<文件短路径>` 含 `/`）。
+                allow_nested: true,
                 list_via_composite: false,
                 get_via_composite: false,
                 same_base_conflict: false,
@@ -910,7 +912,7 @@ impl ResourceStore {
 }
 
 /// 规范化文本资源名：trim + 分段校验 + 缺扩展名补默认扩展名（save 与版本
-/// 冲突检测共用）。函数库（functions）存储扁平、严格 .yaml。
+/// 冲突检测共用）。函数库（functions）严格 .yaml、P12.5 起允许嵌套目录。
 pub fn normalize_rel_name(kind: ResourceKind, name_raw: &str) -> anyhow::Result<String> {
     let t = name_raw.trim();
     let rule = kind.rule();
@@ -1024,13 +1026,20 @@ mod tests {
                 .join("sub")
                 .join("inner.yaml")
         );
-        // functions 严格 .yaml 且扁平
+        // functions 严格 .yaml；P12.5 起允许嵌套目录（function:<文件短路径>/<函数名>）
         assert!(store
             .resolve_path("com.test.app", Functions, "a.yml")
             .is_err());
-        assert!(store
+        let p = store
             .resolve_path("com.test.app", Functions, "sub/a.yaml")
-            .is_err());
+            .unwrap();
+        assert_eq!(
+            p,
+            dir.join("com.test.app")
+                .join("functions")
+                .join("sub")
+                .join("a.yaml")
+        );
         // 跨目录不解析、不回退
         std::fs::create_dir_all(dir.join("com.test.app/functions")).unwrap();
         std::fs::write(dir.join("com.test.app/functions/common.yaml"), b"x").unwrap();

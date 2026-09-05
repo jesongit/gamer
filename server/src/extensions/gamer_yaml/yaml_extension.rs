@@ -365,7 +365,7 @@ impl NativeYamlHost {
             .map_err(anyhow::Error::new)
     }
 
-    fn match_value(outcome: MatchOutcome) -> Value {
+    fn match_value(outcome: MatchOutcome, region: Value) -> Value {
         match outcome {
             MatchOutcome::Found(found) => {
                 let center = [
@@ -380,12 +380,127 @@ impl NativeYamlHost {
                     ("height".to_string(), Value::Int(found.height as i64)),
                     ("score".to_string(), Value::Float(found.score as f64)),
                     ("center".to_string(), Value::Coordinate(center)),
+                    ("region".to_string(), region),
                 ]))
             }
             MatchOutcome::NotFound => {
-                Value::Map(BTreeMap::from([("found".to_string(), Value::Bool(false))]))
+                Value::Map(BTreeMap::from([
+                    ("found".to_string(), Value::Bool(false)),
+                    ("region".to_string(), region),
+                ]))
             }
         }
+    }
+
+    /// 本次搜索的 region 回显值（相对坐标 map；未给 region = 全帧）。
+    fn region_echo(args: &BTreeMap<String, Value>) -> Result<Value> {
+        match args.get("region") {
+            Some(raw) => {
+                let [x, y, width, height] = Self::relative_region(raw)?;
+                Ok(Value::Map(BTreeMap::from([
+                    ("x".to_string(), Value::Float(x)),
+                    ("y".to_string(), Value::Float(y)),
+                    ("width".to_string(), Value::Float(width)),
+                    ("height".to_string(), Value::Float(height)),
+                ])))
+            }
+            None => Ok(Value::Map(BTreeMap::from([
+                ("x".to_string(), Value::Float(0.0)),
+                ("y".to_string(), Value::Float(0.0)),
+                ("width".to_string(), Value::Float(1.0)),
+                ("height".to_string(), Value::Float(1.0)),
+            ]))),
+        }
+    }
+
+    /// region 实参：相对坐标 map `{x, y, width, height}` 或四元数组，全部
+    /// 0.0~1.0（与 v3 表面坐标约定一致）。
+    fn relative_region(value: &Value) -> Result<[f64; 4]> {
+        let numbers: Vec<f64> = match value {
+            Value::List(items) => items
+                .iter()
+                .map(|item| match item {
+                    Value::Float(f) => Ok(*f),
+                    Value::Int(i) => Ok(*i as f64),
+                    _ => bail!("region 数组元素必须是数值"),
+                })
+                .collect::<Result<_>>()?,
+            Value::Map(map) => ["x", "y", "width", "height"]
+                .iter()
+                .map(|key| match map.get(*key) {
+                    Some(Value::Float(f)) => Ok(*f),
+                    Some(Value::Int(i)) => Ok(*i as f64),
+                    _ => bail!("region 必须含数值字段 x/y/width/height"),
+                })
+                .collect::<Result<_>>()?,
+            _ => bail!("region 必须是 {{x, y, width, height}} 映射或四元数组"),
+        };
+        let [x, y, width, height] = numbers.try_into().map_err(|_| {
+            anyhow!("region 必须是 {{x, y, width, height}} 映射或四元数组")
+        })?;
+        for component in [x, y, width, height] {
+            if !(0.0..=1.0).contains(&component) {
+                bail!("region 分量必须在 0..1（相对坐标），得到 {component}");
+            }
+        }
+        Ok([x, y, width, height])
+    }
+
+    /// region 实参 → 像素 SearchRegion（按参考屏尺寸换算）。
+    fn search_region(&self, value: &Value) -> Result<crate::capabilities::SearchRegion> {
+        let [x, y, width, height] = Self::relative_region(value)?;
+        Ok(crate::capabilities::SearchRegion::new(
+            (x * self.screen.width as f64).round() as u32,
+            (y * self.screen.height as f64).round() as u32,
+            (width * self.screen.width as f64).round() as u32,
+            (height * self.screen.height as f64).round() as u32,
+        ))
+    }
+
+    /// threshold 实参：0.0~1.0 数值 → f32（MatchOptions.threshold）。
+    fn threshold_option(args: &BTreeMap<String, Value>) -> Result<Option<f32>> {
+        let Some(value) = args.get("threshold") else {
+            return Ok(None);
+        };
+        let raw = match value {
+            Value::Float(f) => *f,
+            Value::Int(i) => *i as f64,
+            Value::Null => return Ok(None),
+            _ => bail!("threshold 必须是 0~1 的数字"),
+        };
+        if !(0.0..=1.0).contains(&raw) {
+            bail!("threshold 必须在 0..1，得到 {raw}");
+        }
+        Ok(Some(raw as f32))
+    }
+
+    /// match_many 的 thresholds 实参（与 templates 平行的列表，缺项/Null =
+    /// 该模板用缺省阈值）——match_first 候选级 threshold 的承载形态。
+    fn thresholds_option(
+        args: &BTreeMap<String, Value>,
+        count: usize,
+    ) -> Result<Vec<Option<f32>>> {
+        let Some(Value::List(values)) = args.get("thresholds") else {
+            return Ok(vec![None; count]);
+        };
+        if values.len() != count {
+            bail!("thresholds 长度必须与 templates 一致");
+        }
+        values
+            .iter()
+            .map(|value| match value {
+                Value::Null => Ok(None),
+                Value::Float(f) => {
+                    if (0.0..=1.0).contains(f) {
+                        Ok(Some(*f as f32))
+                    } else {
+                        bail!("threshold 必须在 0..1，得到 {f}")
+                    }
+                }
+                Value::Int(i) => Ok(Some(*i as f32)),
+                _ => bail!("thresholds 必须是数值或 null 的列表"),
+            })
+            .collect()
     }
 
     fn color_value(red: u8, green: u8, blue: u8) -> Value {
@@ -510,26 +625,41 @@ impl CapabilityInvoker for NativeYamlHost {
             "vision.match" | "vision.match_template" => {
                 let frame = self.capture().await?;
                 let template = self.template(Self::arg(&args, "template")?).await?;
+                let options = MatchOptions {
+                    threshold: Self::threshold_option(&args)?,
+                    region: args
+                        .get("region")
+                        .map(|value| self.search_region(value))
+                        .transpose()?,
+                    color_check: false,
+                };
                 let outcome = self
                     .registry
                     .vision()
                     .ok_or_else(|| anyhow!("vision capability 未注册"))?
-                    .match_template(frame, TemplateQuery::new(template, MatchOptions::default()))
+                    .match_template(frame, TemplateQuery::new(template, options))
                     .await
                     .map_err(anyhow::Error::new)?;
-                Ok(Self::match_value(outcome))
+                let region = Self::region_echo(&args)?;
+                Ok(Self::match_value(outcome, region))
             }
             "vision.match_many" => {
                 let templates = match Self::arg(&args, "templates")? {
-                    Value::List(values) => values,
+                    Value::List(values) => values.clone(),
                     _ => bail!("templates 必须是列表"),
                 };
+                let thresholds = Self::thresholds_option(&args, templates.len())?;
                 let frame = self.capture().await?;
                 let mut request = MatchManyRequest::new(frame);
-                for template in templates {
+                for (template, threshold) in templates.iter().zip(thresholds) {
                     let resource = self.template(template).await?;
-                    request = request
-                        .with_template(TemplateQuery::new(resource, MatchOptions::default()));
+                    request = request.with_template(TemplateQuery::new(
+                        resource,
+                        MatchOptions {
+                            threshold,
+                            ..MatchOptions::default()
+                        },
+                    ));
                 }
                 let results = self
                     .registry
@@ -538,9 +668,10 @@ impl CapabilityInvoker for NativeYamlHost {
                     .match_many(&request)
                     .await
                     .map_err(anyhow::Error::new)?;
+                let region = Self::region_echo(&args)?;
                 let matches = results
                     .into_iter()
-                    .map(|result| Self::match_value(result.outcome))
+                    .map(|result| Self::match_value(result.outcome, region.clone()))
                     .collect::<Vec<_>>();
                 let found = matches.iter().any(Value::truthy);
                 Ok(Value::Map(BTreeMap::from([
@@ -652,6 +783,8 @@ pub(crate) struct Interpreter {
     logs: Vec<(String, String)>,
     steps: u64,
     call_depth: u32,
+    /// wait 随机区间的 PRNG 状态（run nonce 播种的 splitmix64，与 guest 同步）。
+    rng: u64,
 }
 
 #[allow(dead_code)]
@@ -664,6 +797,7 @@ impl Interpreter {
             logs: Vec::new(),
             steps: 0,
             call_depth: 0,
+            rng: 0,
         }
     }
 
@@ -678,6 +812,7 @@ impl Interpreter {
     }
 
     pub(crate) async fn run(mut self, program: &Program) -> Result<ExecutionResult> {
+        self.rng = program.nonce.unwrap_or(0);
         match self.run_steps(&program.steps).await? {
             Flow::Continue | Flow::Return(_) => Ok(ExecutionResult {
                 value: match self.run_steps_value() {
@@ -810,6 +945,35 @@ impl Interpreter {
                 self.values.insert(name.clone(), self.eval(value)?);
                 Ok(Flow::Continue)
             }
+            SmallStep::WaitRandom { min, max } => {
+                // 契约 §4 wait 随机区间：[min, max] 内按 nonce 播种的 splitmix64
+                // 取值（与 guest 解释器同一算法/常量，见 yaml_vnext::splitmix64
+                // 测试向量）；随后复用 runtime.sleep（取消可达）。
+                let min = self
+                    .eval(min)?
+                    .duration_ms()
+                    .ok_or_else(|| anyhow!("wait min 必须是时间值"))?;
+                let max = self
+                    .eval(max)?
+                    .duration_ms()
+                    .ok_or_else(|| anyhow!("wait max 必须是时间值"))?;
+                let duration = if max > min {
+                    min + crate::extensions::gamer_yaml::yaml_vnext::splitmix64(&mut self.rng)
+                        % (max - min + 1)
+                } else {
+                    min
+                };
+                self.invoker
+                    .invoke(
+                        "runtime.sleep",
+                        Value::Map(BTreeMap::from([(
+                            "duration".to_string(),
+                            Value::Duration(duration),
+                        )])),
+                    )
+                    .await?;
+                Ok(Flow::Continue)
+            }
         }
     }
 
@@ -830,12 +994,16 @@ impl Interpreter {
         let program = resolver.resolve(target).await?;
         let mut child = Interpreter::new(self.invoker.clone()).with_values(self.eval_map(args)?);
         // 子解释器继承当前调用深度，否则每层 call 的深度计数被重置、
-        // 深度守卫永远不触发（无界递归）。
+        // 深度守卫永远不触发（无界递归）；随机序列同理继承（wait 区间
+        // 在被调方与主程序共享同一 nonce 流）。
         child.call_depth = self.call_depth;
+        child.rng = self.rng;
         if let Some(resolver) = self.resolver.clone() {
             child = child.with_resolver(resolver);
         }
-        match child.run_steps(&program.steps).await? {
+        let outcome = child.run_steps(&program.steps).await;
+        self.rng = child.rng;
+        match outcome? {
             Flow::Return(value) => {
                 if let Some(save) = save {
                     self.values.insert(save.clone(), value);
@@ -947,15 +1115,26 @@ fn values_equal(left: &Value, right: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capabilities::{DeviceService, InputService};
+    use crate::capabilities::{
+        CapabilityResult, DeviceService, FrameHandle, FrameService, FrameSize, InputService,
+        MatchManyRequest, MatchManyResult, ResourceHandle, ResourceId, ResourceLease,
+        ResourceService, SearchRegion, TemplateQuery, VisionService,
+    };
     use crate::extensions::gamer_yaml::yaml_vnext::load;
+    use std::collections::{BTreeSet, HashMap};
     use std::io::Write;
     use tempfile::TempDir;
     use zip::write::SimpleFileOptions;
 
     #[derive(Default)]
-    struct Trace {
+    pub(crate) struct Trace {
         calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Trace {
+        pub(crate) fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
     }
 
     #[async_trait]
@@ -1040,6 +1219,220 @@ mod tests {
         }
     }
 
+    /// vision 链路桩：一个类型同时实现 Resource / Frame / Vision 三个能力，
+    /// 记录每次查询的（模板名, threshold, region）供断言；`hits` 集合内的
+    /// 模板名判命中。
+    pub(crate) struct VisionStub {
+        hits: BTreeSet<String>,
+        names: std::sync::Mutex<HashMap<ResourceHandle, String>>,
+        seen: std::sync::Mutex<Vec<(String, Option<f32>, Option<[u32; 4]>)>>,
+    }
+
+    impl VisionStub {
+        pub(crate) fn new(hits: &[&str]) -> Arc<Self> {
+            Arc::new(Self {
+                hits: hits.iter().map(|name| name.to_string()).collect(),
+                names: std::sync::Mutex::new(HashMap::new()),
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn name_of(&self, handle: ResourceHandle) -> String {
+            self.names
+                .lock()
+                .unwrap()
+                .get(&handle)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        pub(crate) fn seen(&self) -> Vec<(String, Option<f32>, Option<[u32; 4]>)> {
+            self.seen.lock().unwrap().clone()
+        }
+
+        fn record(&self, name: String, options: crate::capabilities::MatchOptions) {
+            self.seen.lock().unwrap().push((
+                name,
+                options.threshold,
+                options.region.map(|region| [region.x, region.y, region.width, region.height]),
+            ));
+        }
+
+        fn outcome(&self, name: String) -> MatchOutcome {
+            if self.hits.contains(&name) {
+                MatchOutcome::Found(crate::capabilities::MatchBox {
+                    x: 400,
+                    y: 200,
+                    width: 200,
+                    height: 100,
+                    score: 0.92,
+                })
+            } else {
+                MatchOutcome::NotFound
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ResourceService for VisionStub {
+        async fn resolve(&self, id: &ResourceId) -> CapabilityResult<ResourceHandle> {
+            let handle = ResourceHandle::new();
+            self.names.lock().unwrap().insert(
+                handle,
+                id.name().trim_start_matches("templates/").to_string(),
+            );
+            Ok(handle)
+        }
+
+        async fn open(&self, resource: ResourceHandle) -> CapabilityResult<ResourceLease> {
+            Ok(ResourceLease::new(resource, None))
+        }
+    }
+
+    #[async_trait]
+    impl FrameService for VisionStub {
+        async fn latest(
+            &self,
+            _device: &DeviceHandle,
+        ) -> CapabilityResult<Option<FrameHandle>> {
+            Ok(None)
+        }
+
+        async fn capture(&self, _device: &DeviceHandle) -> CapabilityResult<FrameHandle> {
+            Ok(FrameHandle::new())
+        }
+
+        async fn size(&self, _frame: FrameHandle) -> CapabilityResult<FrameSize> {
+            Ok(FrameSize::new(1000, 1000))
+        }
+    }
+
+    #[async_trait]
+    impl VisionService for VisionStub {
+        async fn match_template(
+            &self,
+            _frame: FrameHandle,
+            query: TemplateQuery,
+        ) -> CapabilityResult<MatchOutcome> {
+            let name = self.name_of(query.template());
+            self.record(name.clone(), query.options());
+            Ok(self.outcome(name))
+        }
+
+        async fn match_many(
+            &self,
+            request: &MatchManyRequest,
+        ) -> CapabilityResult<Vec<MatchManyResult>> {
+            Ok(request
+                .templates()
+                .iter()
+                .map(|query| {
+                    let name = self.name_of(query.template());
+                    self.record(name.clone(), query.options());
+                    MatchManyResult {
+                        template: query.template(),
+                        outcome: self.outcome(name),
+                    }
+                })
+                .collect())
+        }
+
+        async fn sample_color(
+            &self,
+            _frame: FrameHandle,
+            _point: FramePoint,
+        ) -> CapabilityResult<crate::capabilities::ColorSample> {
+            Ok(crate::capabilities::ColorSample {
+                red: 0,
+                green: 0,
+                blue: 0,
+            })
+        }
+    }
+
+    pub(crate) fn vision_registry(stub: &Arc<VisionStub>) -> CapabilityRegistry {
+        CapabilityRegistry::builder()
+            .with_device_service(Arc::new(Trace::default()) as Arc<dyn DeviceService>)
+            .with_frame_service(stub.clone() as Arc<dyn FrameService>)
+            .with_resource_service(stub.clone() as Arc<dyn ResourceService>)
+            .with_vision_service(stub.clone() as Arc<dyn VisionService>)
+            .build()
+    }
+
+    /// P12.7：threshold / region 实参注入 MatchOptions（TemplateQuery 链路），
+    /// 结果 map 携带 region 回显 + center 相对坐标（NativeYamlHost 直测）。
+    #[tokio::test]
+    async fn native_host_passes_threshold_and_region_into_match_options() {
+        let stub = VisionStub::new(&["reward"]);
+        let host = NativeYamlHost::new(
+            all_permissions(vision_registry(&stub)),
+            AppContext::for_test("d1", "com.test.game").unwrap(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+
+        // 命中 + threshold + region（相对 map 形态）
+        let value = host
+            .invoke(
+                "vision.match",
+                Value::Map(BTreeMap::from([
+                    ("template".into(), Value::String("reward".into())),
+                    ("threshold".into(), Value::Float(0.9)),
+                    (
+                        "region".into(),
+                        Value::Map(BTreeMap::from([
+                            ("x".into(), Value::Float(0.1)),
+                            ("y".into(), Value::Float(0.2)),
+                            ("width".into(), Value::Float(0.3)),
+                            ("height".into(), Value::Float(0.4)),
+                        ])),
+                    ),
+                ])),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            stub.seen(),
+            vec![("reward".to_string(), Some(0.9), Some([100, 200, 300, 400]))],
+            "threshold 填入 MatchOptions；region 相对值换算为像素"
+        );
+        let map = into_map(value);
+        assert_eq!(map.get("found"), Some(&Value::Bool(true)));
+        assert_eq!(
+            map.get("center"),
+            Some(&Value::Coordinate([0.5, 0.25])),
+            "center = 相对坐标（沿用现状）"
+        );
+        assert_eq!(
+            into_map(map.get("region").cloned().unwrap()).get("width"),
+            Some(&Value::Float(0.3)),
+            "结果 map 回显本次搜索 region"
+        );
+
+        // 未命中：region 缺省 = 全帧回显
+        let value = host
+            .invoke(
+                "vision.match",
+                Value::Map(BTreeMap::from([(
+                    "template".into(),
+                    Value::String("ghost".into()),
+                )])),
+            )
+            .await
+            .unwrap();
+        let map = into_map(value);
+        assert_eq!(map.get("found"), Some(&Value::Bool(false)));
+        let region = into_map(map.get("region").cloned().unwrap());
+        assert_eq!(region.get("x"), Some(&Value::Float(0.0)));
+        assert_eq!(region.get("width"), Some(&Value::Float(1.0)));
+        assert_eq!(
+            stub.seen().len(),
+            2,
+        );
+        assert_eq!(stub.seen()[1].1, None, "threshold 缺省省略字段 → MatchOptions::default 口径");
+    }
+
     fn all_permissions(registry: CapabilityRegistry) -> HostApi {
         let manifest = crate::extensions::parse_manifest(br#"manifest_version = 1
 id = "gamer.yaml"
@@ -1067,6 +1460,242 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
             .await
             .unwrap_err();
         assert!(error.to_string().contains("resolver"));
+    }
+
+    /// 可脚本化 invoker：vision.match / match_many 结果可配置，全部调用
+    /// （含 sleep 时长、threshold args）被记录供断言。
+    struct ScriptedInvoker {
+        match_found: bool,
+        many_hits: Vec<bool>,
+        calls: std::sync::Mutex<Vec<(String, Value)>>,
+    }
+
+    fn into_map(value: Value) -> BTreeMap<String, Value> {
+        match value {
+            Value::Map(map) => map,
+            _ => BTreeMap::new(),
+        }
+    }
+
+    impl ScriptedInvoker {
+        fn found(vision_found: bool) -> Self {
+            Self {
+                match_found: vision_found,
+                many_hits: Vec::new(),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn recorded(&self) -> Vec<(String, Value)> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn sleep_durations(&self) -> Vec<u64> {
+            self.recorded()
+                .into_iter()
+                .filter(|(capability, _)| capability == "runtime.sleep")
+                .filter_map(|(_, args)| {
+                    into_map(args).get("duration").cloned()
+                })
+                .filter_map(|value| value.duration_ms())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl CapabilityInvoker for ScriptedInvoker {
+        async fn invoke(&self, capability: &str, args: Value) -> Result<Value> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((capability.to_string(), args.clone()));
+            match capability {
+                "vision.match" => {
+                    let map = if self.match_found {
+                        Value::Map(BTreeMap::from([
+                            ("found".into(), Value::Bool(true)),
+                            ("score".into(), Value::Float(0.9)),
+                            ("center".into(), Value::Coordinate([0.5, 0.5])),
+                        ]))
+                    } else {
+                        Value::Map(BTreeMap::from([("found".into(), Value::Bool(false))]))
+                    };
+                    Ok(map)
+                }
+                "vision.match_many" => {
+                    let templates = match into_map(args).get("templates").cloned() {
+                        Some(Value::List(items)) => items,
+                        _ => bail!("templates 必须是列表"),
+                    };
+                    let matches = templates
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| {
+                            let found = self.many_hits.get(index).copied().unwrap_or(false);
+                            Value::Map(BTreeMap::from([
+                                ("found".into(), Value::Bool(found)),
+                                ("score".into(), Value::Float(0.88)),
+                                ("center".into(), Value::Coordinate([0.25, 0.75])),
+                            ]))
+                        })
+                        .collect();
+                    Ok(Value::Map(BTreeMap::from([
+                        ("found".into(), Value::Bool(self.many_hits.iter().any(|hit| *hit))),
+                        ("matches".into(), Value::List(matches)),
+                    ])))
+                }
+                _ => Ok(Value::Null),
+            }
+        }
+    }
+
+    /// P12.5（契约 §4）：wait 随机区间由 nonce 播种的 splitmix64 决定，
+    /// 经 runtime.sleep 等待（取消可达）。
+    #[tokio::test]
+    async fn native_interpreter_wait_random_is_nonce_seeded() {
+        let program = load(
+            "version: 3\nsteps:\n  - wait: {min: 100ms, max: 200ms}\n  - wait: {min: 1s, max: 1s}\n",
+        )
+        .unwrap();
+        let program = Program {
+            nonce: Some(7),
+            ..program
+        };
+        let invoker = Arc::new(ScriptedInvoker::found(false));
+        Interpreter::new(invoker.clone()).run(&program).await.unwrap();
+        let mut state = 7u64;
+        let expected_first =
+            100 + crate::extensions::gamer_yaml::yaml_vnext::splitmix64(&mut state) % 101;
+        assert_eq!(
+            invoker.sleep_durations(),
+            vec![expected_first, 1_000],
+            "随机区间取值必须 = min + splitmix64(nonce) % (max-min+1)；定值区间原样"
+        );
+    }
+
+    /// P12.7（ADR-YAML-03）：find 的 save / `$match` 块内上下文与块后复位。
+    #[tokio::test]
+    async fn native_interpreter_find_scopes_match_and_persists_save() {
+        let program = load(
+            "version: 3\nsteps:\n  - find:\n      template: reward\n      save: reward\n      then:\n        - log: hit\n      verify:\n        template: reward\n        timeout: 1s\n  - set: {leaked: $match}\n  - return: $reward.found\n",
+        )
+        .unwrap();
+        let invoker = Arc::new(ScriptedInvoker::found(true));
+        let result = Interpreter::new(invoker.clone())
+            .run(&program)
+            .await
+            .unwrap();
+        assert_eq!(result.value, Value::Bool(true), "save 变量跨步可用");
+        assert_eq!(
+            result.logs,
+            vec![("info".to_string(), "hit".to_string())],
+            "then 体内执行"
+        );
+        // `$match` 在块后被复位（不跨块泄漏），save 的命名变量不受影响
+        assert_eq!(
+            lookup_path(
+                &BTreeMap::from([("leaked".into(), Value::Null)]),
+                "leaked"
+            ),
+            Some(Value::Null)
+        );
+        let recorded = invoker.recorded();
+        let verify_calls = recorded
+            .iter()
+            .filter(|(capability, _)| capability == "vision.match")
+            .count();
+        assert!(
+            verify_calls >= 2,
+            "verify 在 then 之后二次验证模板: {verify_calls}"
+        );
+    }
+
+    /// P12.7 裁决：find 超时无 else → 抛 `FIND_TIMEOUT: <template>`。
+    #[tokio::test]
+    async fn native_interpreter_find_timeout_without_else_throws() {
+        let program = load(
+            "version: 3\nsteps:\n  - find:\n      template: ghost\n      timeout: 3s\n",
+        )
+        .unwrap();
+        let error = Interpreter::new(Arc::new(ScriptedInvoker::found(false)))
+            .run(&program)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("FIND_TIMEOUT: ghost"),
+            "超时无 else 必须抛 FIND_TIMEOUT: {error}"
+        );
+    }
+
+    /// P12.7：check 轮询至出现（未命中先 sleep(poll) 重试），threshold 经
+    /// args 注入 vision.match。
+    #[tokio::test]
+    async fn native_interpreter_check_polls_and_passes_threshold() {
+        let program = load(
+            "version: 3\nsteps:\n  - check:\n      template: ready\n      threshold: 0.95\n",
+        )
+        .unwrap();
+        let invoker = Arc::new(ScriptedInvoker::found(true));
+        Interpreter::new(invoker.clone()).run(&program).await.unwrap();
+        let recorded = invoker.recorded();
+        let (capability, args) = recorded
+            .iter()
+            .find(|(capability, _)| capability == "vision.match")
+            .expect("check 必须调用 vision.match");
+        assert_eq!(capability, "vision.match");
+        let map = into_map(args.clone());
+        assert_eq!(
+            map.get("threshold"),
+            Some(&Value::Float(0.95)),
+            "step threshold 注入 invoke args"
+        );
+        assert_eq!(
+            map.get("template"),
+            Some(&Value::String("ready".into()))
+        );
+    }
+
+    /// P12.7：match_first 首个命中候选执行自己的 steps，`$match` = 该候选
+    /// 结果；候选级 threshold 经 thresholds 平行列表传给 match_many。
+    #[tokio::test]
+    async fn native_interpreter_match_first_runs_first_hit_candidate_steps() {
+        let program = load(
+            "version: 3\nsteps:\n  - match_first:\n      candidates:\n        - template: a\n          threshold: 0.6\n          steps:\n            - log: cand-a\n        - template: b\n          steps:\n            - set: {m: $match}\n            - log: cand-b\n  - return: $m.center\n",
+        )
+        .unwrap();
+        let invoker = Arc::new(ScriptedInvoker {
+            match_found: false,
+            many_hits: vec![false, true],
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+        let result = Interpreter::new(invoker.clone())
+            .run(&program)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value,
+            Value::Coordinate([0.25, 0.75]),
+            "候选 steps 内 $match = 该候选结果"
+        );
+        assert_eq!(
+            result.logs,
+            vec![("info".to_string(), "cand-b".to_string())],
+            "只执行首个命中候选的 steps"
+        );
+        let many = invoker
+            .recorded()
+            .into_iter()
+            .find(|(capability, _)| capability == "vision.match_many")
+            .expect("match_first 必须调用 vision.match_many");
+        let args = into_map(many.1);
+        assert_eq!(
+            args.get("thresholds"),
+            Some(&Value::List(vec![
+                Value::Float(0.6),
+                Value::Null
+            ])),
+            "候选级 threshold 以平行列表传给 match_many"
+        );
     }
 
     /// 恒返回自递归程序的 resolver：递归 call 深度守卫测试用。
@@ -1277,7 +1906,10 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
 mod wasm_tests {
     use super::super::wasm_host::LazyYamlWasmtimeRuntime;
     use super::*;
-    use crate::capabilities::{CapabilityRegistry, CapabilityResult, LogRecord, LogService};
+    use crate::capabilities::{
+        CapabilityRegistry, CapabilityResult, FrameHandle, FrameService, LogRecord, LogService,
+        ResourceHandle, ResourceId, ResourceLease, ResourceService, VisionService,
+    };
     use crate::extensions::gamer_yaml::yaml_vnext::load;
     use crate::extensions::HostApiCatalog;
     use async_trait::async_trait;
@@ -2194,6 +2826,7 @@ log = "^1.0"
         let program = crate::extensions::gamer_yaml::yaml_vnext::Program {
             version: 3,
             params: Vec::new(),
+            nonce: None,
             steps: vec![SmallStep::Set {
                 name: "big".into(),
                 value: Expr::List(vec![Expr::Literal(Value::Int(1)); 300_000]),
@@ -2228,6 +2861,329 @@ log = "^1.0"
         assert!(
             !message.contains("STEP_BUDGET_EXCEEDED") && !message.contains("CALL_DEPTH_EXCEEDED"),
             "epoch 取消不应被误报为预算耗尽: {message}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    use super::tests::{Trace as InputTrace, VisionStub};
+    // P12.5 / P12.7 e2e（真实 Component guest + NativeYamlHost capability 链）
+    // -----------------------------------------------------------------------
+
+    /// e2e 宿主：device/input 走 Trace，vision/resource/frame 走 VisionStub，
+    /// log 走 LogTrace；权限覆盖 vision/timing 链路全部 capability。
+    fn vision_host(stub: &Arc<VisionStub>, input: Arc<InputTrace>, logs: Arc<LogTrace>) -> HostApi {
+        let manifest = crate::extensions::parse_manifest(
+            r#"manifest_version = 1
+id = "gamer.yaml"
+version = "3.0.0"
+name = "YAML vNext"
+entry = "plugin.wasm"
+permissions = ["device.read", "input.tap", "log.write", "vision.match", "resource.read", "runtime.sleep"]
+[host_api]
+device = "^1.0"
+input = "^1.0"
+vision = "^1.0"
+resource = "^1.0"
+runtime = "^1.0"
+log = "^1.0"
+"#
+            .as_bytes(),
+        )
+        .unwrap();
+        HostApi::for_manifest(
+            CapabilityRegistry::builder()
+                .with_device_service(input.clone() as Arc<dyn crate::capabilities::DeviceService>)
+                .with_input_service(input as Arc<dyn crate::capabilities::InputService>)
+                .with_frame_service(stub.clone() as Arc<dyn FrameService>)
+                .with_resource_service(stub.clone() as Arc<dyn ResourceService>)
+                .with_vision_service(stub.clone() as Arc<dyn VisionService>)
+                .with_log_service(logs as Arc<dyn LogService>)
+                .build(),
+            HostApiCatalog::default(),
+            &manifest,
+        )
+        .unwrap()
+    }
+
+    /// P12.7 e2e：threshold 三级优先经真实 guest → capability.invoke →
+    /// NativeYamlHost → TemplateQuery 注入（step 值 > defaults > 缺省省略）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_injects_resolved_threshold_into_vision_args() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let stub = VisionStub::new(&["a", "b"]);
+        let program = load(
+            "version: 3\ndefaults:\n  vision:\n    threshold: 0.7\nsteps:\n  - check:\n      template: a\n  - check:\n      template: b\n      threshold: 0.95\n",
+        )
+        .unwrap();
+        runtime
+            .run(run_request(
+                program,
+                None,
+                vision_host(
+                    &stub,
+                    Arc::new(InputTrace::default()),
+                    Arc::new(LogTrace {
+                        logs: Mutex::new(Vec::new()),
+                    }),
+                ),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            stub.seen(),
+            vec![
+                ("a".to_string(), Some(0.7), None),
+                ("b".to_string(), Some(0.95), None),
+            ],
+            "check(a) 用 defaults 0.7；check(b) 用 step 0.95"
+        );
+    }
+
+    /// P12.7 e2e：find 命中 → save → then（tap `$reward.center`）→ verify
+    /// 不命中抛 `VERIFY_FAILED: <template>`。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_find_then_tap_chain_and_verify_failure() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let stub = VisionStub::new(&["reward"]);
+        let input = Arc::new(InputTrace::default());
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        let program = load(
+            "version: 3\nsteps:\n  - find:\n      template: reward\n      timeout: 5s\n      save: reward\n      then:\n        - tap: {point: $reward.center}\n        - log: got\n      else:\n        - log: miss\n      verify:\n        template: home\n        timeout: 600ms\n",
+        )
+        .unwrap();
+        let error = runtime
+            .run(run_request(
+                program,
+                None,
+                vision_host(&stub, input.clone(), logs.clone()),
+                None,
+            ))
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("VERIFY_FAILED: home"),
+            "verify 不命中必须抛 VERIFY_FAILED: {message}"
+        );
+        assert_eq!(
+            input.calls(),
+            vec!["tap:500:250".to_string()],
+            "then 体内 tap $reward.center = 命中框中心相对坐标"
+        );
+        assert_eq!(
+            logs.logs.lock().unwrap().as_slice(),
+            ["got"],
+            "then 执行、else 不执行（未超时）"
+        );
+    }
+
+    /// P12.7 e2e：find 超时（无命中）→ 走 else，不抛错。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_find_timeout_runs_else_branch() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let stub = VisionStub::new(&[]);
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        let program = load(
+            "version: 3\nsteps:\n  - find:\n      template: ghost\n      timeout: 350ms\n      else:\n        - log: gone\n",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        runtime
+            .run(run_request(
+                program,
+                None,
+                vision_host(&stub, Arc::new(InputTrace::default()), logs.clone()),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["gone"]);
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(350),
+            "超时前不得提前走 else"
+        );
+    }
+
+    /// P12.7 e2e：match_first 首个命中候选执行自己的 steps，`$match` =
+    /// 该候选结果；候选级 threshold 以 thresholds 平行列表传入。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_match_first_runs_hit_candidate_steps() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let stub = VisionStub::new(&["b"]);
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        let program = load(
+            "version: 3\nsteps:\n  - match_first:\n      candidates:\n        - template: a\n          threshold: 0.6\n          steps:\n            - log: cand-a\n        - template: b\n          steps:\n            - log: cand-b\n            - set: {m: $match}\n  - return: $m.score\n",
+        )
+        .unwrap();
+        let result = runtime
+            .run(run_request(
+                program,
+                None,
+                vision_host(&stub, Arc::new(InputTrace::default()), logs.clone()),
+                None,
+            ))
+            .await
+            .unwrap();
+        // score 经 f32（MatchBox）往返，f64 比较用 1e-6 容差
+        assert!(
+            matches!(result.value, Value::Float(score) if (score - 0.92).abs() < 1e-6),
+            "候选 steps 内 $match = 该候选结果，得到 {:?}",
+            result.value
+        );
+        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["cand-b"]);
+        assert_eq!(
+            stub.seen()
+                .iter()
+                .map(|(name, threshold, _)| (name.clone(), *threshold))
+                .collect::<Vec<_>>(),
+            vec![("a".to_string(), Some(0.6)), ("b".to_string(), None)],
+            "候选级 threshold 经 thresholds 平行列表注入 match_many"
+        );
+    }
+
+    /// P12.5 e2e（契约 §4）：wait 随机区间实际落进 [min, max]（nonce 由
+    /// wasm_host 注入，guest splitmix64 取值，runtime.sleep 真实等待）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_wait_random_lands_within_range() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        // 先空跑一次预热（debug 构建 WASM 编译可占数秒，混入计时会让上界
+        // 断言失效）；同一 runtime 复用已编译模块后再计时。
+        let warmup = load("version: 3\nsteps:\n  - log: warm\n").unwrap();
+        runtime
+            .run(run_request(
+                warmup,
+                None,
+                vision_host(
+                    &VisionStub::new(&[]),
+                    Arc::new(InputTrace::default()),
+                    Arc::new(LogTrace {
+                        logs: Mutex::new(Vec::new()),
+                    }),
+                ),
+                None,
+            ))
+            .await
+            .unwrap();
+        let program = load(
+            "version: 3\nsteps:\n  - wait: {min: 200ms, max: 500ms}\n  - return: done\n",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let result = runtime
+            .run(run_request(
+                program,
+                None,
+                vision_host(
+                    &VisionStub::new(&[]),
+                    Arc::new(InputTrace::default()),
+                    Arc::new(LogTrace {
+                        logs: Mutex::new(Vec::new()),
+                    }),
+                ),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.value, Value::String("done".into()));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(200),
+            "随机等待不得低于下界: {elapsed:?}"
+        );
+        assert!(
+            elapsed <= std::time::Duration::from_millis(700),
+            "随机等待不得显著超出上界（+200ms 调度余量）: {elapsed:?}"
+        );
+    }
+
+    /// P12.5 e2e：timing defaults 经 lower 展开为显式 runtime.sleep —— tap 后
+    /// after_tap 兜底 300ms，defaults 覆盖后取覆盖值。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_timing_defaults_sleep_after_tap() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        // 内置兜底 300ms
+        let program = load("version: 3\nsteps:\n  - tap: [0.5, 0.5]\n").unwrap();
+        let start = std::time::Instant::now();
+        runtime
+            .run(run_request(
+                program,
+                None,
+                vision_host(
+                    &VisionStub::new(&[]),
+                    Arc::new(InputTrace::default()),
+                    logs.clone(),
+                ),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert!(start.elapsed() >= std::time::Duration::from_millis(280));
+
+        // defaults.timing.after_tap 覆盖
+        let program = load(
+            "version: 3\ndefaults:\n  timing:\n    after_tap: 60ms\nsteps:\n  - tap: [0.5, 0.5]\n",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        runtime
+            .run(run_request(
+                program,
+                None,
+                vision_host(
+                    &VisionStub::new(&[]),
+                    Arc::new(InputTrace::default()),
+                    logs.clone(),
+                ),
+                None,
+            ))
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= std::time::Duration::from_millis(60)
+                && elapsed <= std::time::Duration::from_millis(250),
+            "after_tap 覆盖值必须生效（60ms + 调度余量）: {elapsed:?}"
+        );
+    }
+
+    /// P12.7 e2e：save 变量跨步可用；`$match` 块后复位（不跨块泄漏）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_find_save_persists_and_match_is_scoped() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let stub = VisionStub::new(&["reward"]);
+        let program = load(
+            "version: 3\nsteps:\n  - find:\n      template: reward\n      save: reward\n  - set: {leak: $match}\n  - return: [$reward.found, $leak]\n",
+        )
+        .unwrap();
+        let result = runtime
+            .run(run_request(
+                program,
+                None,
+                vision_host(
+                    &stub,
+                    Arc::new(InputTrace::default()),
+                    Arc::new(LogTrace {
+                        logs: Mutex::new(Vec::new()),
+                    }),
+                ),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value,
+            Value::List(vec![Value::Bool(true), Value::Null]),
+            "save 的命名变量跨步可用；块外 $match 复位 null"
         );
     }
 }

@@ -499,15 +499,110 @@ canonical_default: bool→true/false；coord→[x,y]（逗号后无空格）；c
 
 ### 11.1 脚本与函数库
 
-- **脚本**（scripts/）顶层只允许 `version / params / steps`；缺失或非 3 的
+- **脚本**（scripts/）顶层只允许 `version / params / defaults / steps`；缺失或非 3 的
   `version` 报 `yaml.v3.version` / `yaml.v3.version.missing`。`params` 为参数
-  唯一来源，字符串 / 映射双形态沿用 §3 形态。
+  唯一来源，字符串 / 映射双形态沿用 §3 形态，`remark`（字符串第 3 段 / 映射
+  `remark` 键）随声明保留并透出到参数 schema 的 `description`
+  （不参与 `psig1` 签名，改备注不触发任务参数过期）。
 - **函数库**（functions/）为 bare-map `{<函数名>: {params, steps}}`，**无
   `version` 键**（目录即类型）；函数名由映射键承载（唯一），每个函数记录只允许
-  `params / steps`，`steps` 必需。结构非法报 `yaml.v3.function.*` 结构化诊断
+  `params / steps`，`steps` 必需；函数名 unicode 字母/数字/`_`（支持中文）、
+  不能以数字开头且不得撞动作键/结构键/`$match` 保留字
+  （`yaml.v3.function.name`）。结构非法报 `yaml.v3.function.*` 结构化诊断
   （`yaml.v3.function.file` / `.name` / `.unknown_key` / `.not_found`）。
+  保存边界接受 v3 / v2 双形态（v3 优先，失败回落 v2；v2 删除后收敛单形态），
+  允许嵌套目录（`function:<文件短路径>/<函数名>` 的短路径可含 `/`）。
 
-### 11.2 call —— 唯一可调用资源入口（ADR-YAML-02）
+### 11.1.1 defaults —— vision threshold 与 timing 兜底（契约 §4）
+
+```yaml
+version: 3
+defaults:                     # 可选
+  vision:
+    threshold: 0.80           # 模板匹配阈值兜底
+  timing:
+    after_tap: 300ms          # 每次 tap 后等待（内置 300ms）
+    after_match: 200ms        # 匹配命中后等待（内置 200ms）
+    poll_interval: 100ms      # find/check 轮询间隔（内置 100ms）
+steps:
+  - ...
+```
+
+- 只允许上述键，未知键 / 非法形态报 `yaml.v3.defaults.unknown_key` /
+  `yaml.v3.defaults.type` / `yaml.v3.defaults.range`；timing 值必须是带单位
+  时长字面量（`300ms`/`2s`）或非负整数毫秒，不接受 `$var`。
+- **threshold 三级优先**：step `threshold` > `defaults.vision.threshold` >
+  Runtime 内置 `0.80`；lower 期解析并注入 `vision.match` / `vision.match_many`
+  的 invoke args（缺省省略字段，由 Runtime 兜底）。
+- **timing 即语义**：tap 后 / 命中后等待与轮询间隔全部由脚本 defaults 显式
+  声明（缺省用内置值），lower 期展开为显式 `runtime.sleep`（可被「停止」取消），
+  不存在隐藏的全局 interval / judge_delay。
+- 函数库无 defaults 块（bare-map 结构），timing / threshold 走内置兜底。
+
+### 11.3 find / match_first / check 与 `$match` 上下文（ADR-YAML-03）
+
+```yaml
+- find:
+    template: reward
+    timeout: 10s          # 可选；缺省 30min（轮询 poll_interval 至命中）
+    threshold: 0.90       # 可选 step override（三级优先见 §11.1.1）
+    region: {x: 0.1, y: 0.2, width: 0.3, height: 0.4}   # 可选；相对坐标搜索区
+    save: reward          # 可选；命中结果固化到命名变量，跨后续步骤可用
+    then:                 # 命中后步骤组（唯一键名；体内 `$match` / `$reward` 可用）
+      - tap: {point: $reward.center}
+    else:                 # 可选；超时后步骤组（缺省抛 FIND_TIMEOUT: <template>）
+      - log: 未找到
+    verify:               # 可选；then 执行完后在 timeout 内二次验证
+      template: home
+      timeout: 5s         # 可选；缺省 30min
+```
+
+- **命中路径**：save 固化 → sleep(after_match) → `then` → `verify`（若设，
+  不命中抛 `VERIFY_FAILED: <template>`，不走 else）。
+- **超时路径**：有 `else` 走 `else`；无 `else` 抛 `FIND_TIMEOUT: <template>`。
+- **match 结果值**（save 存入 / `$match` 引用）：
+  `{found, score, x, y, width, height, center, region}`；坐标为相对值 0~1
+  （center 为命中框中心），`region` 回显本次搜索区域。未 save 时 `$match`
+  仅在对应 find/match_first 的 then/else/verify/steps 体内可见（块结束复位），
+  save 后跨步可用。
+
+```yaml
+- match_first:
+    candidates:
+      - template: reward
+        threshold: 0.9      # 可选候选级 threshold（三级优先同上）
+        steps:              # 候选命中后执行（唯一键名；体内 `$match` = 该候选结果）
+          - tap: {point: $match.center}
+      - template: close
+        steps:
+          - tap: {point: $match.center}
+    else: ...               # 全未命中走 else；缺 else 静默继续
+```
+
+- match_first 单帧 `vision.match_many`（候选级 threshold 经 `thresholds`
+  平行列表传入）、按书写顺序首个命中候选执行自己的 `steps`。
+- `- check: {template, timeout?, threshold?, throw?}`：轮询至出现（每轮
+  sleep(poll_interval)），命中 sleep(after_match) 后继续；超时按 `throw`
+  文案结束运行（缺省「check 未命中」）。
+- **wait 双形态**：`- wait: 300ms` 固定；`- wait: {min: 300ms, max: 700ms}`
+  随机区间（min/max 必须同给且 min ≤ max，run 级随机 nonce 播种 splitmix64
+  取值，经 `runtime.sleep` 等待、可被停止取消）。
+
+**已删除步骤/字段**（给迁移诊断 `yaml.v3.step.removed` / `yaml.v3.field.removed`）：
+`retry`（用 loop 表达）、`wait_for`（与 find 同义）、`click_when` /
+`find.click` / 候选 `click`（ADR-YAML-03 click 语法全面移除，用 then + 
+`tap: {point: $match.center}` 表达）、`color_branch`（用
+`invoke: vision.sample_color` + if 表达）、match_first 顶层 `then`
+（候选步骤归各自 `steps`）。
+
+### 11.4 v3 surface 步骤集（19 类）
+
+`app.start` / `app.stop` / `tap` / `swipe` / `key` / `text` / `wait` /
+`log` / `set` / `if` / `loop` / `break` / `call` / `return` / `throw` /
+`find` / `match_first` / `check` / `invoke`——与前端编辑器
+（`web/src/script-editor/model.ts` `STEP_KINDS`）一一对应。
+
+### 11.5 call —— 唯一可调用资源入口（ADR-YAML-02）
 
 ```yaml
 - call:
@@ -540,7 +635,7 @@ canonical_default: bool→true/false；coord→[x,y]（逗号后无空格）；c
   错误码原样进入运行错误信息与日志。宿主侧 wasmtime epoch interruption
   仅作取消兜底（用户停止可打断 guest 纯计算段），不做超时强杀。
 
-### 11.3 手动运行 start_index（契约 §8）
+### 11.6 手动运行 start_index（契约 §8）
 
 guest 解释器支持 program 顶层可选 `start_index`：跳过其前的**顶层**步骤
 （与 v2「从此运行」语义一致）；嵌套分支 / 循环体不受影响——lower 后的顶层小

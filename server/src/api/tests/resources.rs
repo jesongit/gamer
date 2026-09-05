@@ -422,7 +422,7 @@ async fn functions_input_validation_and_missing_pkg() {
             "{content}: {j}"
         );
     }
-    // 函数库存储扁平：子目录短路径拒绝
+    // P12.5：子目录短路径放开（function:common/lib/fn 形态）——嵌套保存 201 且可读回
     let body = serde_json::json!({"name": "sub/common", "content": FUNC_YAML});
     let resp = send(
         &t.app,
@@ -435,7 +435,19 @@ async fn functions_input_validation_and_missing_pkg() {
         ),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let resp = send(
+        &t.app,
+        req(
+            "GET",
+            "/api/apps/com.test.app/resources/functions/com.test.app%2Fsub%2Fcommon.yaml",
+            None,
+            &json_headers(sid.clone()),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // PUT / GET 不存在的函数文件 → 404
     for (method, uri, body) in [

@@ -247,6 +247,16 @@ fn yaml_error(
     }
 }
 
+/// 每 run 随机 nonce（wait 随机区间种子）：系统时钟纳秒 + 进程 id 混合。
+/// 只需 run 级不可预测性，不追求密码学强度。
+fn run_nonce() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos ^ ((std::process::id() as u64) << 32)
+}
+
 fn yaml_capability_error(error: &anyhow::Error) -> wit::yaml::gamer::host::types::HostError {
     use crate::capabilities::CapabilityError;
     use crate::extensions::error::ExtensionError;
@@ -331,6 +341,12 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
         let mut program = serde_json::to_value(&request.program)?;
         if let serde_json::Value::Object(ref mut program) = program {
             program.insert("args".to_string(), serde_json::to_value(request.args)?);
+            // wait 随机区间（契约 §4，方案 (a)）：每 run 注入 nonce 作 guest 内
+            // splitmix64 种子；不新增 WIT 能力（T3 刚稳定 ABI）。
+            program.insert(
+                "nonce".to_string(),
+                serde_json::Value::from(run_nonce()),
+            );
             // 手动运行「从此运行」：顶层可选 start_index，guest 只按顶层
             // surface 步序号跳步（契约 §8）；None = 从头执行（现状行为）。
             if let Some(start_index) = request.start_index {

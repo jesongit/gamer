@@ -227,3 +227,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **epoch deadline 回调的错误类型是 `wasmtime::Error` 不是 `anyhow::Error`**：wasmtime 48 把 anyhow fork 成自有 Error，回调签名写 `anyhow::Result<UpdateDeadline>` 编译报 E0271，用 `wasmtime::Error::msg` 构造。
 - **epoch 取消会抢先 capability 边界的 kind=cancelled**：stop 置位后若 capability 调用跨过 tick 边界（~10ms），guest 恢复执行的首个 epoch 检查点直接 trap，guest 内已就绪的 kind=cancelled 错误不再冒出——取消判定别只匹配 `kind=cancelled`，要接受 `CANCELLED`（两形态都是合法取消，ADR-YAML-04）。
 - **wasmtime Component 的 WIT import 签名变更 = 旧 guest 全灭**：`programs.resolve` 去掉 depth 参数后，旧版 gamer.yaml plugin.wasm（含 web/public/plugins 的官方 .gplugin）在新宿主上 instantiate 直接失败，升级后必须重打/重装插件（`tools/build-plugins.ps1`）。
+
+## 2026-09-05（Phase 12 P12.5/P12.7：v3 defaults 与 find/match 收口）
+
+- **debug 构建下 wasmtime Component 编译可占数秒，会污染 e2e 墙钟断言**：对「等待时长落在区间」类断言，计时前先在同一 runtime 上空跑一次预热（复用已编译模块），否则 sleep 断言被 JIT 编译时间冲垮；或只断言下界。
