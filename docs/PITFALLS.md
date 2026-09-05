@@ -237,3 +237,8 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **仓库有两个同名异型 `DeviceId`**（`capabilities::device::DeviceId` 与 `core::models::DeviceId`）：`RuntimeEvent`/`EventSink` 只认 Core 形态，在 yaml_extension 里拿 struct 里 import 的 capabilities 版直接传会报 E0308；跨域传设备 id 给事件时显式写 `crate::core::DeviceId`。
 - **f32 分数经 serde_json 往返不是精确字面量**（0.92f32 → 0.9200000166893005）：断言 vision 事件 score 要按 f64 容差（1e-6）比较，`json!(0.92)` 全等比较必翻车。
 - **web 的 vitest 只收 `src/*.test.js` 与 `src/script-editor/**/*.test.js`**：新测试文件放 `src/components/console/` 等子目录会被 `pnpm test:run` **静默跳过**（显式指定文件名才会报 "No test files found"），新前端测试一律放 `src/` 根或改 vitest.config.js include。
+
+## 2026-09-05（Phase 12 P12.8：yaml guest 正式化与官方包重打）
+
+- **.gplugin 不是字节可复现产物**：plugin-signer 打 zip 用当前时间做 entry mtime，同一份 guest 源码两次构建 sha256 不同——别用「sha 没变」判断没重打，registry.json 与 .gplugin 必须同批由 `tools/build-plugins.ps1` 生成（proof 绑定 sha256）。
+- **扩展 manifest 升版会打挂按版本卸载的测试**：guard 全链测试曾硬编码 `YAML_VERSION="3.0.0"`，升 3.1.0 后 DELETE `/api/extensions/:id/:version` 404；版本一律从 `YAML_EXTENSION_MANIFEST_TOML` 现场解析（`yaml_market_version()`），勿再硬编码。

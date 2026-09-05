@@ -1,6 +1,6 @@
 {
     "schema_version":  1,
-    "generated_at":  "2026-09-04T19:25:38Z",
+    "generated_at":  "2026-09-05T11:07:26Z",
     "host_api":  "1.0.0",
     "plugins":  [
                     {
@@ -10,13 +10,13 @@
                         "description":  "Application-specific keyboard, mouse, and gamepad mappings（WASM keymap 扩展，profile 数据通道见 keymap 存储）",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.keymap-1.0.0.gplugin",
-                        "sha256":  "d2e0f1a478976419a63d434e61b9894e09134c4dd709772673ddb1388da05a0b",
+                        "sha256":  "cd2ab3a7d514fe52dbf54379a6a97e6adc3345da85437a25bb741fe54e17b0ff",
                         "size":  99363,
                         "signature":  {
                                           "status":  "valid",
                                           "key_id":  "gamer-dev-1",
                                           "algorithm":  "ed25519",
-                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci5rZXltYXAtMS4wLjAuZ3BsdWdpbiIsImlkIjoiZ2FtZXIua2V5bWFwIiwia2V5X2lkIjoiZ2FtZXItZGV2LTEiLCJzaGEyNTYiOiJkMmUwZjFhNDc4OTc2NDE5YTYzZDQzNGU2MWI5ODk0ZTA5MTM0YzRkZDcwOTc3MjY3M2RkYjEzODhkYTA1YTBiIiwic2lnbmF0dXJlIjoialJNdWtFdUNmczFBZExkUXJrd3RaT29HNHlKRkJxcFErWHdRQkpPWmkxSGwvMUw1VGx3WklwUnhLT0gxUy9UZ0R0dW1kd1lOZ29CTS9zWCs0ZFcvQmc9PSIsInZlcnNpb24iOiIxLjAuMCJ9"
+                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci5rZXltYXAtMS4wLjAuZ3BsdWdpbiIsImlkIjoiZ2FtZXIua2V5bWFwIiwia2V5X2lkIjoiZ2FtZXItZGV2LTEiLCJzaGEyNTYiOiJjZDJhYjNhN2Q1MTRmZTUyZGJmNTQzNzlhNmE5N2U2YWRjMzM0NWRhODU0MzdhMjViYjc0MWZlNTRlMTdiMGZmIiwic2lnbmF0dXJlIjoiMHNjcWJJVjRZMklVcFQ4d0tBS3V0V3NIQ0ZMWjI3MmdTL2Y1c0RVS09YaUNEOGp5eTNOaUxyZG5TSXBWSi9Qb2cvWm9IeDZVUFg0VGRrc2xvSG5DQmc9PSIsInZlcnNpb24iOiIxLjAuMCJ9"
                                       },
                         "permissions":  [
                                             "input.tap",
@@ -41,18 +41,18 @@
                     },
                     {
                         "id":  "gamer.yaml",
-                        "version":  "3.0.0",
+                        "version":  "3.1.0",
                         "name":  "Gamer YAML vNext",
                         "description":  "Surface YAML v3 lowering and execution guest（version: 3 脚本经 YamlVnextAdapter 执行）",
                         "publisher":  "gamer.dev",
-                        "download_url":  "/plugins/gamer.yaml-3.0.0.gplugin",
-                        "sha256":  "322641d52ebe51d63bc14a0f2c7e2bf794e8886f5d7299bc34fb046b86ecba38",
-                        "size":  68221,
+                        "download_url":  "/plugins/gamer.yaml-3.1.0.gplugin",
+                        "sha256":  "86ff9f5e16b6bb4813424f6d6fe4ed3370d507369a75c4fa7349f008db472abe",
+                        "size":  72962,
                         "signature":  {
                                           "status":  "valid",
                                           "key_id":  "gamer-dev-1",
                                           "algorithm":  "ed25519",
-                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci55YW1sLTMuMC4wLmdwbHVnaW4iLCJpZCI6ImdhbWVyLnlhbWwiLCJrZXlfaWQiOiJnYW1lci1kZXYtMSIsInNoYTI1NiI6IjMyMjY0MWQ1MmViZTUxZDYzYmMxNGEwZjJjN2UyYmY3OTRlODg4NmY1ZDcyOTliYzM0ZmIwNDZiODZlY2JhMzgiLCJzaWduYXR1cmUiOiJhYzdqOURER284dENiVURnd21pcWJZeGZ4Q0EvTERyWGw1N1BEQ3hVbzFWY1pLSjFBZXVjTkJLa2pTQ094aTVaRG9hcitmUjVnSE9NTXFyZlJrQVZEQT09IiwidmVyc2lvbiI6IjMuMC4wIn0="
+                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci55YW1sLTMuMS4wLmdwbHVnaW4iLCJpZCI6ImdhbWVyLnlhbWwiLCJrZXlfaWQiOiJnYW1lci1kZXYtMSIsInNoYTI1NiI6Ijg2ZmY5ZjVlMTZiNmJiNDgxMzQyNGY2ZDZmZTRlZDMzNzBkNTA3MzY5YTc1YzRmYTczNDlmMDA4ZGI0NzJhYmUiLCJzaWduYXR1cmUiOiJ3c3pRWmdZRjFQOUQzcml5cDVrUlFsMXR3VTYzaGZuNVdLUkUrbGVXeUp0ci9WaGRpdXBsT1ZNTE5BWnQwSFh6UzlnbjhoQmxNRnR2Mi94NnRFVjlEUT09IiwidmVyc2lvbiI6IjMuMS4wIn0="
                                       },
                         "permissions":  [
                                             "device.read",

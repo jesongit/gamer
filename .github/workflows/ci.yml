@@ -61,7 +61,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          # 扩展 guest fixture（keymap/yaml/call）在 cargo test 时现场编译
+          # keymap/call 测试 fixture 在 cargo test 时现场编译；gamer.yaml 产品
+          # guest（server/guests/yaml-guest）另有下方显式构建关卡
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo registry / git / target
@@ -87,6 +88,16 @@ jobs:
       # （NoWasmRuntime 拒绝启动插件，wasmtime 依赖整体退出依赖图）。
       - name: cargo check --no-default-features (no-WASM exit path)
         run: cargo check --locked --no-default-features
+
+      # P12.8：gamer.yaml 产品 guest（server/guests/yaml-guest，独立 crate 不在
+      # workspace）显式构建验证：build wasm32 → componentize 封装 Component
+      # （encoder validate(true) 即校验）。后续 cargo test 的 runtime 测试消费
+      # 同一份源码现场构建（yaml_extension::yaml_guest_builds_wasm_module 等）。
+      - name: Build gamer.yaml guest (wasm32)
+        run: cargo build --locked --release --lib --target wasm32-unknown-unknown --manifest-path guests/yaml-guest/Cargo.toml --target-dir target/yaml-guest
+
+      - name: Validate gamer.yaml guest Component (componentize)
+        run: cargo run --locked --release --manifest-path guests/yaml-guest/Cargo.toml --bin componentize --target-dir target/yaml-guest -- target/yaml-guest/wasm32-unknown-unknown/release/gamer_yaml_guest.wasm target/yaml-guest/plugin.component.wasm
 
       - name: cargo test
         run: cargo test

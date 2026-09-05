@@ -61,6 +61,11 @@ if (-not $SkipRust) {
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo clippy -D warnings'; Exe = 'cargo'; ArgList = @('clippy', '--all-targets', '--all-features', '--', '-D', 'warnings'); Dir = $serverDir })
     # 无 WASM 退出路径防退化（与 ci.yml 同步）：default 已含 wasm-runtime
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo check --no-default-features'; Exe = 'cargo'; ArgList = @('check', '--locked', '--no-default-features'); Dir = $serverDir })
+    # P12.8 与 ci.yml 同步：gamer.yaml 产品 guest（server/guests/yaml-guest，独立
+    # crate）显式构建 + componentize 封装校验（encoder validate(true)）；cargo test
+    # 的 runtime 测试复用同一份源码现场构建（yaml_extension.rs guest 构建链）。
+    $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'guest: build gamer-yaml-guest (wasm32)'; Exe = 'cargo'; ArgList = @('build', '--locked', '--release', '--lib', '--target', 'wasm32-unknown-unknown', '--manifest-path', 'guests/yaml-guest/Cargo.toml', '--target-dir', 'target/yaml-guest'); Dir = $serverDir })
+    $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'guest: validate Component (componentize)'; Exe = 'cargo'; ArgList = @('run', '--locked', '--release', '--manifest-path', 'guests/yaml-guest/Cargo.toml', '--bin', 'componentize', '--target-dir', 'target/yaml-guest', '--', 'target/yaml-guest/wasm32-unknown-unknown/release/gamer_yaml_guest.wasm', 'target/yaml-guest/plugin.component.wasm'); Dir = $serverDir })
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo test';               Exe = 'cargo'; ArgList = @('test');                                                Dir = $serverDir })
     $gates.Add([pscustomobject]@{ Group = 'rust'; Name = 'cargo build --release';    Exe = 'cargo'; ArgList = @('build', '--release');                                  Dir = $serverDir })
 }
