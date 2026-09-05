@@ -416,6 +416,7 @@ function emitStep(step: Step, col: number, lines: string[]): void {
       emitField('template', cellInline(step.template, 'tmpl'), F, lines)
       if (step.timeout !== null) emitField('timeout', cellInline(step.timeout, 'time'), F, lines)
       if (step.threshold !== null) emitField('threshold', fmtNum(step.threshold), F, lines)
+      if (step.throw !== null) emitField('throw', logInline(step.throw), F, lines)
       return
     }
   }
@@ -1105,8 +1106,8 @@ function parseStepNode(item: unknown, path: string, diags: Diagnostic[]): Step |
     }
     case 'check': {
       const fm = m(value)
-      if (!fm) return { ...base, kind: 'check', template: { lit: null }, timeout: null, threshold: null }
-      fm.rejectUnknown(['template', 'timeout', 'threshold'])
+      if (!fm) return { ...base, kind: 'check', template: { lit: null }, timeout: null, threshold: null, throw: null }
+      fm.rejectUnknown(['template', 'timeout', 'threshold', 'throw'])
       if (!fm.has('template')) diags.push(diag(CODES.fieldMissing, `${valuePath}.template`, 'template', 'check 缺少 template'))
       return {
         ...base,
@@ -1114,6 +1115,7 @@ function parseStepNode(item: unknown, path: string, diags: Diagnostic[]): Step |
         template: exprCell(fm.get('template') ?? null, valuePath, 'template', diags),
         timeout: timeCell(fm.get('timeout') ?? null, valuePath, 'timeout', diags),
         threshold: numDiag(fm.get('threshold'), 'threshold'),
+        throw: fm.has('throw') ? exprCell(fm.get('throw') ?? null, valuePath, 'throw', diags) : null,
       }
     }
   }

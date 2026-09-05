@@ -288,6 +288,14 @@
             :value="step.threshold" aria-label="匹配阈值"
             @change="setThresholdNum('threshold', ($event.target as HTMLInputElement).value)"
           />
+          <label class="field-check" title="自定义超时未命中的抛错文案（缺省「check 未命中」）">
+            <input type="checkbox" :checked="step.throw !== null" @change="toggleCheckThrow" />
+            抛错文案
+          </label>
+          <CellEditor
+            v-if="step.throw" :cell="step.throw" type="text" :params="params"
+            label="抛错文案" :error="fieldError('throw')" @change="(c) => updateCell('throw', c)"
+          />
         </div>
       </template>
 
@@ -665,6 +673,9 @@ function toggleFindTimeout(e: Event): void {
 }
 function toggleCheckTimeout(e: Event): void {
   updateStep({ timeout: (e.target as HTMLInputElement).checked ? { lit: '5s' } : null })
+}
+function toggleCheckThrow(e: Event): void {
+  updateStep({ throw: (e.target as HTMLInputElement).checked ? { lit: '' } : null })
 }
 function toggleThreshold(field: string, e: Event): void {
   updateStep({ [field]: (e.target as HTMLInputElement).checked ? 0.85 : null })

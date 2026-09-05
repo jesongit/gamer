@@ -54,7 +54,7 @@ export const DEFAULT_FACTORIES: Record<StepKind, () => Step> = {
     candidates: [{ template: lit(''), threshold: null, steps: [] }],
     else: [],
   }),
-  check: () => createStep('check', { template: lit(''), timeout: null, threshold: null }),
+  check: () => createStep('check', { template: lit(''), timeout: null, threshold: null, throw: null }),
 }
 
 /** 便捷入口：按 kind 创建默认步骤。 */

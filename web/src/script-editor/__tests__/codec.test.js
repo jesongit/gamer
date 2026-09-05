@@ -241,7 +241,8 @@ describe('codec：字段级解码', () => {
   })
 
   it('缺失必需字段/未知字段给结构化诊断', () => {
-    const r = parseScript('version: 3\nsteps:\n  - find: {timeout: 5s}\n  - check: {template: t.png, throw: 已死}\n')
+    // check.throw 是服务端 v3 合法字段（自定义超时文案），未知字段用 bogus 锁定
+    const r = parseScript('version: 3\nsteps:\n  - find: {timeout: 5s}\n  - check: {template: t.png, throw: 已死}\n  - check: {template: t.png, bogus: 1}\n')
     const codes = r.diagnostics.map((d) => d.code)
     expect(codes).toContain('yaml.v3.field.missing')
     expect(codes).toContain('yaml.v3.field.unknown')
@@ -249,6 +250,6 @@ describe('codec：字段级解码', () => {
     expect(missing.step_path).toBe('steps[0].find.template')
     expect(missing.field).toBe('template')
     const unknown = r.diagnostics.find((d) => d.code === 'yaml.v3.field.unknown')
-    expect(unknown.step_path).toBe('steps[1].check.throw')
+    expect(unknown.step_path).toBe('steps[2].check.bogus')
   })
 })

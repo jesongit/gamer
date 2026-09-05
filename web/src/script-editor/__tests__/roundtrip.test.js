@@ -78,7 +78,7 @@ function expectedModel() {
                 else: [],
                 verify: null,
               },
-              { kind: 'check', template: { lit: 'home.png' }, timeout: { lit: '5s' }, threshold: null },
+              { kind: 'check', template: { lit: 'home.png' }, timeout: { lit: '5s' }, threshold: null, throw: null },
             ],
             else: [{ kind: 'log', message: { lit: '无障碍物' }, level: null }],
           },

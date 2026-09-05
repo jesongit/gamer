@@ -167,7 +167,7 @@ export type Step =
       verify: FindVerify | null
     }
     | { kind: 'match_first'; candidates: MatchFirstCandidate[]; else: Step[] }
-    | { kind: 'check'; template: Cell; timeout: Cell | null; threshold: number | null }
+    | { kind: 'check'; template: Cell; timeout: Cell | null; threshold: number | null; throw: Cell | null }
     | { kind: 'invoke'; capability: string; with: Record<string, Cell>; save: string | null }
   )
 
