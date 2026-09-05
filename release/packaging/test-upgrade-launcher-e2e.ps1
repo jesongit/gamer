@@ -1,5 +1,6 @@
-﻿# 批次 3 合流门 E2E（升级 + 回滚）：M1 基线(0.1.0) 真实升级到 M2 候选(0.2.0)，
-# 以及候选启动失败时的自动回滚（恢复 previous 程序 + 升级前数据快照）。
+﻿# 批次 3 合流门 E2E（升级 + 回滚）：M1 基线（版本取 server/Cargo.toml，随主树演进）
+# 真实升级到 M2 候选（-CandidateVersion，默认 0.2.0），以及候选启动失败时的自动回滚
+# （恢复 previous 程序 + 升级前数据快照）。
 #
 # 场景 A（upgrade）：解压 full ZIP（含中文+空格安装根）→ repair 离线首装（死代理
 #   断网等效）→ launcher start（IPC 托管）→ 登录 → POST /api/system/update/check|
@@ -10,6 +11,9 @@
 #   故障构建（保留 maintenance inspect 子命令，快照 schema 门禁可过）→ 升级在
 #   candidate 阶段失败 → 验证自动回滚：快照恢复 + current.json 切回 0.1.0 + 旧版
 #   重新 ready + 数据完整（升级前写入的设备仍在、候选期间零业务写入）+ journal 失败记录。
+# 场景 C（identity，LCH-008）：候选身份探针携带 X-Admin-Token 的真实进程回归——
+#   manifest 声明版本（候选补丁位 +1）与候选二进制真实版本不符 → /api/system/info
+#   （回环管理通道鉴权）观测到版本差异 → commit 前拒绝并自动回滚到基线。
 #
 # 与冻结契约的两个边界（详见 docs/evidence/UPDATE_M2_EVIDENCE.md）：
 # - manifest 内 artifact.url 契约强制 https（launcher model 与 JSON Schema 双重门禁），
@@ -30,7 +34,8 @@ param(
     # 工作区（安装根/产物/日志都在其下）
     [string]$WorkDir = 'D:\e2e-upgrade-tmp\m2e2e',
     # all = 构建+两场景；build = 只构建打包；upgrade / rollback = 单场景（要求产物已就绪）
-    [ValidateSet('all', 'build', 'upgrade', 'rollback')]
+    # identity = LCH-008 真实进程回归（候选身份校验 + 身份不符回滚负例）
+    [ValidateSet('all', 'build', 'upgrade', 'rollback', 'identity')]
     [string]$Scenario = 'all',
     # 跳过 cargo/pnpm/打包（复用工作区既有产物；两个场景仍会重建安装根）
     [switch]$SkipBuild,
@@ -39,6 +44,10 @@ param(
     # 场景 A / B 安装根的 server 端口（错峰：并行测试可能占用 8443）
     [int]$PortA = 18443,
     [int]$PortB = 18444,
+    # 场景 C（identity）安装根的 server 端口
+    [int]$PortC = 18445,
+    # 候选版本（须高于 server/Cargo.toml 的当前版本；strict upgrade 语义）
+    [string]$CandidateVersion = '0.2.0',
     # QA-005：可将安装根放到工作目录之外（例如 C:），以覆盖真实路径长度
     # 与跨盘 data 物理存储；未设置时保持原有 WorkDir/<中文+空格> 行为。
     [string]$InstallRootA = '',
@@ -51,6 +60,16 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
 if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
+
+# 基线版本权威源 = server/Cargo.toml [package].version（与 package-app.ps1 同规则）；
+# 身份不符负例版本 = 候选补丁位 +1（仅 manifest 声明，制品仍是真实候选二进制）。
+$script:BaselineVersion = ''
+foreach ($line in (Get-Content -LiteralPath (Join-Path $RepoRoot 'server\Cargo.toml'))) {
+    if ($line -match '^\s*version\s*=\s*"([^"]+)"') { $script:BaselineVersion = $Matches[1].Trim(); break }
+}
+if (-not $script:BaselineVersion) { throw '无法从 server/Cargo.toml 读取 [package].version' }
+$wrongParts = $CandidateVersion.Split('.')
+$script:WrongVersion = '{0}.{1}.{2}' -f $wrongParts[0], $wrongParts[1], ([int]$wrongParts[2] + 1)
 $script:Failures = New-Object System.Collections.Generic.List[string]
 $script:CleanupTargets = New-Object System.Collections.Generic.List[object]
 $script:Roots = New-Object System.Collections.Generic.List[string]
@@ -393,8 +412,8 @@ function Invoke-Scenario {
     # --install-root 参数、进程命令行匹配与 robocopy/robocopy 类原生工具。
     $longRootMode = $root.Length -gt 240
     $rootFs = if ($longRootMode) { ConvertTo-ExtendedPath $root } else { $root }
-    $manifestName = if ($CandidateMustFail) { '0.2.0-broken.json' } else { '0.2.0.json' }
-    $appZipName = if ($CandidateMustFail) { 'gamer-app-0.2.0-broken-windows-x64.zip' } else { 'gamer-app-0.2.0-windows-x64.zip' }
+    $manifestName = if ($CandidateMustFail) { "$CandidateVersion-broken.json" } else { "$CandidateVersion.json" }
+    $appZipName = if ($CandidateMustFail) { "gamer-app-$CandidateVersion-broken-windows-x64.zip" } else { "gamer-app-$CandidateVersion-windows-x64.zip" }
     # launcher exe 在 full ZIP 解压根（= 安装根）下；长路径场景从解压后的
     # 根中转复制到短路径 staging 再启动（见下方解压完成后的 staging 块）。
     # 复制源必须用 verbatim 形态（$rootFs）——PS 解析不了普通 >260 路径。
@@ -428,7 +447,7 @@ function Invoke-Scenario {
         }
     }
     if (-not $removed -and (Test-Path -LiteralPath $rootFs)) { throw "安装根删除失败（仍有进程占用）: $root" }
-    Expand-InstallZip -ZipPath (Join-Path $WorkDir 'dist-m1\GameBot-0.1.0-windows-x64-full.zip') -DestinationPath $root
+    Expand-InstallZip -ZipPath (Join-Path $WorkDir "dist-m1\GameBot-$BaselineVersion-windows-x64-full.zip") -DestinationPath $root
     Write-Ok "解压完成: $root"
 
     if ($longRootMode) {
@@ -464,7 +483,7 @@ function Invoke-Scenario {
     Write-Step "[$tag] repair 首装（死代理模拟断网，seeds 安装）"
     $repairOut = Join-Path $WorkDir "logs\$tag-repair.log"
     $rp = Start-E2EProcess -FilePath $launcherExe `
-        -ArgumentList @('--install-root', $root, '--keys-dir', (Join-Path $rootFs 'keys'), 'repair', '--manifest', (Join-Path $rootFs 'manifests\0.1.0.json')) `
+        -ArgumentList @('--install-root', $root, '--keys-dir', (Join-Path $rootFs 'keys'), 'repair', '--manifest', (Join-Path $rootFs "manifests\$BaselineVersion.json")) `
         -EnvMap @{ HTTP_PROXY = 'http://127.0.0.1:9'; HTTPS_PROXY = 'http://127.0.0.1:9'; ALL_PROXY = 'http://127.0.0.1:9' } `
         -WorkingDirectory $launcherCwd -StdoutLog $repairOut -StderrLog "$repairOut.err"
     $rp.WaitForExit(180000) | Out-Null
@@ -473,7 +492,7 @@ function Invoke-Scenario {
     Assert-True ($repairExit -eq 0) "repair 退出码 0（实际 $repairExit）"
     foreach ($line in (Get-Content -LiteralPath $repairOut -Encoding UTF8 -ErrorAction SilentlyContinue | Select-Object -Last 4)) { Write-Note $line }
     $current = Get-Content -LiteralPath (Join-Path $rootFs 'state\current.json') -Raw | ConvertFrom-Json
-    Assert-True ($current.current -eq '0.1.0' -and $null -eq $current.previous) "current.json 首装指针 current=0.1.0 previous=null"
+    Assert-True ($current.current -eq $BaselineVersion -and $null -eq $current.previous) "current.json 首装指针 current=$BaselineVersion previous=null"
 
     # 缓存种子：候选 app zip 进 cache/artifacts（seeds→cache→remote 的 cache 级命中）
     $artifactsDir = Join-Path $rootFs 'cache\artifacts'
@@ -513,7 +532,7 @@ function Invoke-Scenario {
 
     $info = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/system/info" -WebSession $sess -TimeoutSec 10
     $info | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $WorkDir "logs\$tag-info-before.json") -Encoding UTF8
-    Assert-True ($info.app.version -eq '0.1.0') "system/info app.version=0.1.0（实际 $($info.app.version)）"
+    Assert-True ($info.app.version -eq $BaselineVersion) "system/info app.version=$BaselineVersion（实际 $($info.app.version)）"
     Assert-True ($info.deployment.mode -eq 'launcher' -and $info.deployment.update_strategy -eq 'managed') "deployment mode=launcher / update_strategy=managed"
     Assert-True ($info.capabilities.check -and $info.capabilities.download -and $info.capabilities.install -and $info.capabilities.rollback) "capabilities check/download/install/rollback 全 true（IPC 已建立）"
 
@@ -565,7 +584,7 @@ function Invoke-Scenario {
     Start-Sleep -Seconds 1
     $orphanAlive = $false
     try { $orphanAlive = ((Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/health/ready" -TimeoutSec 3).StatusCode -eq 200) } catch { }
-    Assert-True $orphanAlive "孤儿 server（0.1.0）仍存活且 ready（CLI upgrade 将真实 drain 它）"
+    Assert-True $orphanAlive "孤儿 server（$BaselineVersion）仍存活且 ready（CLI upgrade 将真实 drain 它）"
 
     Write-Step "[$tag] launcher upgrade 接管（§6.6 全链路 + journal 50ms 轨迹）"
     $up = Invoke-UpgradeWithJournalTrace -LauncherExe $launcherExe -Root $rootFs `
@@ -597,19 +616,19 @@ function Invoke-Scenario {
 
     if (-not $CandidateMustFail) {
         Assert-True ($upgradeExit -eq 0) "launcher upgrade 退出码 0（实际 $upgradeExit）"
-        Assert-True ($pointer.current -eq '0.2.0') "current.json current=0.2.0（实际 $($pointer.current)）"
-        Assert-True ($pointer.previous -eq '0.1.0') "current.json previous=0.1.0（实际 $($pointer.previous)）"
+        Assert-True ($pointer.current -eq $CandidateVersion) "current.json current=$CandidateVersion（实际 $($pointer.current)）"
+        Assert-True ($pointer.previous -eq $BaselineVersion) "current.json previous=$BaselineVersion（实际 $($pointer.previous)）"
         Assert-True ($journal.state -eq 'idle') "journal 终态 idle（committed → cleaning → idle 复位）"
-        Assert-True ($info2.app.version -eq '0.2.0') "登录后 system/info app.version=0.2.0（实际 $($info2.app.version)）"
+        Assert-True ($info2.app.version -eq $CandidateVersion) "登录后 system/info app.version=$CandidateVersion（实际 $($info2.app.version)）"
         Assert-True ($devicesAfter.Contains("e2e-marker-$tag")) "升级后业务数据仍在（标记设备可查）"
     } else {
         Assert-True ($upgradeExit -eq 1) "launcher upgrade 退出码 1（FailedOldHealthy，实际 $upgradeExit）"
-        Assert-True ($pointer.current -eq '0.1.0') "current.json 回到 current=0.1.0（实际 $($pointer.current)）"
+        Assert-True ($pointer.current -eq $BaselineVersion) "current.json 回到 current=$BaselineVersion（实际 $($pointer.current)）"
         Assert-True ($null -eq $pointer.previous) "current.json previous=null（回滚到基线，previous 链正确）"
         Assert-True ($journal.state -eq 'idle' -and $journal.last_step -eq 'failed') "journal idle/failed（失败记录落盘；实际 $($journal.state)/$($journal.last_step)）"
         Assert-True ($null -ne $journal.error -and $journal.error.code -eq 'artifact_invalid') "journal.error.code=artifact_invalid（实际 $(if ($journal.error) { $journal.error.code } else { 'null' })）"
         if ($null -ne $journal.error) { Write-Note "journal.error.message: $($journal.error.message)" }
-        Assert-True ($info2.app.version -eq '0.1.0') "旧版本程序恢复：system/info app.version=0.1.0（实际 $($info2.app.version)）"
+        Assert-True ($info2.app.version -eq $BaselineVersion) "旧版本程序恢复：system/info app.version=$BaselineVersion（实际 $($info2.app.version)）"
         Assert-True ($devicesAfter.Contains("e2e-marker-$tag")) "升级前数据仍在（标记设备可查）"
         Set-Content -LiteralPath (Join-Path $WorkDir "logs\$tag-devices-before.txt") -Value $devicesBefore -Encoding UTF8
         Set-Content -LiteralPath (Join-Path $WorkDir "logs\$tag-devices-after.txt") -Value $devicesAfter -Encoding UTF8
@@ -625,7 +644,7 @@ function Invoke-Scenario {
         Assert-True ($qEntries.Count -gt 0) "quarantine/ 保留失败阶段数据（$($qEntries.Count) 项）"
         Write-Note "quarantine 条目: $($qEntries.Name -join ', ')"
         # switched 的确定性工件佐证（journal 轨迹 50ms 采样可能漏掉该快边）
-        Assert-True (Test-Path -LiteralPath (Join-Path $rootFs 'versions\0.2.0\gamer-server.exe')) "switched 工件：versions/0.2.0/ 已安装（候选确实换入过）"
+        Assert-True (Test-Path -LiteralPath (Join-Path $rootFs "versions\$CandidateVersion\gamer-server.exe")) "switched 工件：versions/$CandidateVersion/ 已安装（候选确实换入过）"
     }
 
     # journal 轨迹（15ms 轮询）：journal 状态机严格顺序推进，candidate_starting
@@ -644,6 +663,175 @@ function Invoke-Scenario {
     if ($CandidateMustFail) {
         Assert-True ($traceText.Contains('candidate_starting|rolling_back')) "journal 轨迹含 candidate_starting|rolling_back（回滚确实接管）"
     }
+
+    Stop-RootServers -Root $root
+    Write-Ok "[$tag] 场景完成"
+}
+
+# ---------------------------------------------------------------------------
+# 场景 C：LCH-008 候选身份校验真实进程回归（X-Admin-Token 接线 + 负例回滚）
+# ---------------------------------------------------------------------------
+function Invoke-IdentityScenario {
+    # 缺陷 #5（UPDATE_M2_EVIDENCE §E-6）收口回归：候选身份探针携带
+    # state/admin-token 派生的 X-Admin-Token → 受保护组 /api/system/info 返回
+    # 200 → version/schema/boot_id 真实比对。负例：manifest 声明版本
+    # （$WrongVersion = 候选补丁位 +1）与候选二进制真实版本（$CandidateVersion）
+    # 不符 → 引擎必须在 commit 前拒绝并完整回滚。
+    # 该负例同时是 (a) 的正证：/health/ready 回退 body 无版本字段，唯有带令牌
+    # 的 info 探测成功才可能观测到「版本不符」——若接线失效，升级会照常
+    # committed，本场景必然失败。
+    $tag = 'C-identity'
+    $port = $PortC
+    $root = Join-Path $WorkDir 'GameBot E2E 升级验证_C'
+    $script:Roots.Add($root) | Out-Null
+    $rootFs = $root
+    $launcherExe = Join-Path $rootFs 'gamer-launcher.exe'
+    $launcherCwd = $root
+    $adminPass = 'e2e-admin-pass'
+
+    foreach ($required in @(
+            (Join-Path $WorkDir "dist-m1\GameBot-$BaselineVersion-windows-x64-full.zip"),
+            (Join-Path $WorkDir "dist-m2\gamer-app-$CandidateVersion-windows-x64.zip"),
+            (Join-Path $WorkDir "manifests\$CandidateVersion.json"),
+            (Join-Path $WorkDir 'keys\dev-ed25519-1.private.pem'))) {
+        if (-not (Test-Path -LiteralPath $required)) {
+            throw "identity 场景缺少构建产物: $required（先以 -Scenario all/build 构建一次）"
+        }
+    }
+
+    Write-Step "[$tag] 解压 full ZIP → 安装根"
+    Stop-RootServers -Root $root
+    $waitDeadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $waitDeadline) {
+        $left = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+                (($_.Name -in @('gamer-server.exe', 'gamer-launcher.exe')) -and $_.CommandLine -like "*$Root*") -or
+                (($_.Name -eq 'adb.exe') -and $_.ExecutablePath -like "*$Root*")
+            })
+        if ($left.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    foreach ($attempt in @(1, 2, 3)) {
+        try {
+            if (Test-Path -LiteralPath $rootFs) { Remove-Item -LiteralPath $rootFs -Recurse -Force -ErrorAction Stop }
+            break
+        } catch {
+            Write-Note ("删除安装根重试 {0}: {1}" -f $attempt, $_.Exception.Message)
+            Stop-RootServers -Root $root
+            Start-Sleep -Seconds 2
+        }
+    }
+    Expand-InstallZip -ZipPath (Join-Path $WorkDir "dist-m1\GameBot-$BaselineVersion-windows-x64-full.zip") -DestinationPath $root
+    Write-Ok "解压完成: $root"
+
+    $cfgPath = Join-Path $rootFs 'config\config.toml'
+    (Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8) -replace '(?m)^port = 8443\r?$', "port = $port" |
+        Set-Content -LiteralPath $cfgPath -Encoding UTF8 -NoNewline
+
+    Write-Step "[$tag] repair 首装 + 缓存候选包"
+    $repairOut = Join-Path $WorkDir "logs\$tag-repair.log"
+    $rp = Start-E2EProcess -FilePath $launcherExe `
+        -ArgumentList @('--install-root', $root, '--keys-dir', (Join-Path $rootFs 'keys'), 'repair', '--manifest', (Join-Path $rootFs "manifests\$BaselineVersion.json")) `
+        -EnvMap @{ HTTP_PROXY = 'http://127.0.0.1:9'; HTTPS_PROXY = 'http://127.0.0.1:9'; ALL_PROXY = 'http://127.0.0.1:9' } `
+        -WorkingDirectory $launcherCwd -StdoutLog $repairOut -StderrLog "$repairOut.err"
+    $rp.WaitForExit(180000) | Out-Null
+    Save-ProcessOutput -Process $rp
+    $repairExit = if ($rp.HasExited) { $rp.ExitCode } else { -1 }
+    Assert-True ($repairExit -eq 0) "repair 退出码 0（实际 $repairExit）"
+    $artifactsDir = Join-Path $rootFs 'cache\artifacts'
+    New-Item -ItemType Directory -Path $artifactsDir -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $WorkDir "dist-m2\gamer-app-$CandidateVersion-windows-x64.zip") `
+        -Destination (Join-Path $artifactsDir "gamer-app-$CandidateVersion-windows-x64.zip") -Force
+    Write-Ok "cache/artifacts 已种子候选包 gamer-app-$CandidateVersion-windows-x64.zip"
+
+    Write-Step "[$tag] launcher start（IPC 托管；无 manifest 源 → 协调器空转）"
+    $startProc = Start-E2EProcess -FilePath $launcherExe `
+        -ArgumentList @('--install-root', $root, 'start') `
+        -EnvMap @{ GAMER_ADMIN_PASSWORD = $adminPass } `
+        -WorkingDirectory $launcherCwd -StdoutLog (Join-Path $WorkDir "logs\$tag-start.log") -StderrLog (Join-Path $WorkDir "logs\$tag-start.log.err")
+    $script:CleanupTargets.Add($startProc) | Out-Null
+    $ready = Wait-HttpReady -Port $port -TimeoutSec 120
+    Assert-True $ready "/health/ready 200（port $port）"
+    $sess = Invoke-Login -Port $port -Password $adminPass
+    Write-Ok 'POST /api/login 200'
+
+    # 业务数据标记（快照恢复完整性锚点）
+    $devBody = @{ name = "e2e-marker-$tag"; kind = '--'; addr = 'e2e://marker' } | ConvertTo-Json -Compress
+    $devResp = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/devices" -WebSession $sess -ContentType 'application/json' -Body $devBody -TimeoutSec 10
+    Assert-True ($devResp.ok -eq $true) "业务写入：创建标记设备 id=$($devResp.id)"
+
+    Write-Step "[$tag] 结束 start（孤儿 0.1.0 server 存活，供真实 drain / boot_id 锚定）"
+    Stop-E2EProcess -Process $startProc -Label 'launcher start' -NoTree
+    Start-Sleep -Seconds 1
+    $orphanAlive = $false
+    try { $orphanAlive = ((Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$port/health/ready" -TimeoutSec 3).StatusCode -eq 200) } catch { }
+    Assert-True $orphanAlive "孤儿 server（0.1.0）仍存活且 ready"
+
+    Write-Step "[$tag] 构造身份不符 manifest（声明 0.2.1，制品仍为真实 0.2.0 二进制）"
+    $wrongManifestPath = Join-Path $WorkDir 'manifests\0.2.1-wrongver.json'
+    $good = Get-Content -LiteralPath (Join-Path $WorkDir 'manifests\0.2.0.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $good.release.version = '0.2.1'
+    [System.IO.File]::WriteAllText($wrongManifestPath, ($good | ConvertTo-Json -Depth 12) + "`n", (New-Object System.Text.UTF8Encoding($false)))
+    $pack = Join-Path $RepoRoot 'release\packaging'
+    $r = Invoke-Native -FilePath 'node' -Arguments ('"{0}" sign "{1}" --key "{2}" --key-id dev-ed25519-1' -f (Join-Path $pack 'sign-manifest.mjs'), $wrongManifestPath, (Join-Path $WorkDir 'keys\dev-ed25519-1.private.pem')) -TailLines 1
+    if ($r.ExitCode -ne 0) { throw '身份不符 manifest 签名失败' }
+    $r = Invoke-Native -FilePath 'node' -Arguments ('"{0}" check "{1}" --keys-dir "{2}" --expect-current-version 0.1.0 --expect-channel stable' -f (Join-Path $RepoRoot 'release\contracts\validate-manifest.mjs'), $wrongManifestPath, (Join-Path $WorkDir 'keys')) -TailLines 2
+    foreach ($line in $r.Tail) { Write-Note $line }
+    if ($r.ExitCode -ne 0) { throw '身份不符 manifest 校验未通过' }
+    Write-Ok '0.2.1-wrongver manifest 签名 + 校验通过（0.2.1 > 0.1.0，候选二进制实际 0.2.0）'
+
+    Write-Step "[$tag] launcher upgrade（身份校验必须在 commit 前拒绝并回滚）"
+    $up = Invoke-UpgradeWithJournalTrace -LauncherExe $launcherExe -Root $rootFs `
+        -ManifestPath $wrongManifestPath `
+        -EnvMap @{ GAMER_ADMIN_PASSWORD = $adminPass } -TraceFile (Join-Path $WorkDir "logs\$tag-journal-trace.log") `
+        -WorkingDirectory $launcherCwd
+    $upgradeExit = $up.ExitCode
+    $traceText = Get-Content -LiteralPath $up.TraceFile -Encoding UTF8 -Raw
+    foreach ($line in (Get-Content -LiteralPath "$($up.TraceFile).stdout.log" -Encoding UTF8 -ErrorAction SilentlyContinue)) { Write-Note "upgrade stdout: $line" }
+    foreach ($line in (Get-Content -LiteralPath "$($up.TraceFile).stderr.log" -Encoding UTF8 -ErrorAction SilentlyContinue)) { Write-Note "upgrade stderr: $line" }
+
+    Write-Step "[$tag] 验收"
+    $restoredReady = Wait-HttpReady -Port $port -TimeoutSec 90
+    Assert-True $restoredReady "回滚后 /health/ready 200（port $port）"
+
+    $pointer = Get-Content -LiteralPath (Join-Path $rootFs 'state\current.json') -Raw | ConvertFrom-Json
+    $journal = Read-Journal -Root $rootFs
+
+    Assert-True ($upgradeExit -eq 1) "launcher upgrade 退出码 1（FailedOldHealthy，实际 $upgradeExit）"
+    Assert-True ($null -ne $journal.error -and $journal.error.code -eq 'artifact_invalid') "journal.error.code=artifact_invalid（实际 $(if ($journal.error) { $journal.error.code } else { 'null' })）"
+    Assert-True ($null -ne $journal.error -and $journal.error.message -like '*版本不符*') `
+        "身份门禁触发：journal.error.message 含「版本不符」（实际 $(if ($journal.error) { $journal.error.message } else { 'null' })）"
+    Assert-True ($null -ne $journal.error -and $journal.error.message -like '*0.2.1*') `
+        "期望版本 0.2.1 与观测版本进入同一诊断（实际 $(if ($journal.error) { $journal.error.message } else { 'null' })）"
+
+    # (a) 探针携带 token 的直接证据：身份观测日志落盘（logs/launcher.log 双写）
+    $launcherLog = Join-Path $rootFs 'logs\launcher.log'
+    $identityObserved = $false
+    if (Test-Path -LiteralPath $launcherLog) {
+        $identityObserved = @((Get-Content -LiteralPath $launcherLog -Encoding UTF8 -ErrorAction SilentlyContinue) -match '候选身份已由 /api/system/info 观测').Count -gt 0
+    }
+    Assert-True $identityObserved "launcher.log 含「候选身份已由 /api/system/info 观测」（X-Admin-Token 鉴权探针真实执行）"
+
+    Assert-True ($pointer.current -eq '0.1.0') "current.json 回到 current=0.1.0（实际 $($pointer.current)）"
+    Assert-True ($null -eq $pointer.previous) "current.json previous=null（回滚到基线）"
+    Assert-True ($journal.state -eq 'idle' -and $journal.last_step -eq 'failed') "journal idle/failed（实际 $($journal.state)/$($journal.last_step)）"
+
+    $sess2 = Invoke-Login -Port $port -Password $adminPass
+    $info2 = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/system/info" -WebSession $sess2 -TimeoutSec 10
+    Assert-True ($info2.app.version -eq '0.1.0') "旧版本程序恢复：system/info app.version=0.1.0（实际 $($info2.app.version)）"
+    $devs2 = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/devices" -WebSession $sess2 -TimeoutSec 10
+    $markerAlive = @($devs2 | Where-Object { $_.name -eq "e2e-marker-$tag" }).Count -gt 0
+    Assert-True $markerAlive "升级前数据仍在（标记设备可查）"
+
+    $qEntries = @(Get-ChildItem -LiteralPath (Join-Path $rootFs 'quarantine') -ErrorAction SilentlyContinue)
+    Assert-True ($qEntries.Count -gt 0) "quarantine/ 保留失败阶段数据（$($qEntries.Count) 项）"
+    Assert-True (Test-Path -LiteralPath (Join-Path $rootFs 'versions\0.2.1\gamer-server.exe')) "switched 工件：versions/0.2.1/ 已安装（候选确实换入过，回滚才有效力）"
+
+    if ($journal -and $journal.snapshot -and $journal.snapshot.id) {
+        $snap = Verify-Snapshot -Root $rootFs -UpdateId $journal.snapshot.id
+        Assert-True ($snap.Bad.Count -eq 0) "backups/$($journal.snapshot.id) 快照逐文件 sha256 复核全对（$($snap.Manifest.file_count) 文件）"
+    }
+    Assert-True ($traceText.Contains('candidate_starting|candidate_starting')) "journal 轨迹含 candidate_starting|candidate_starting"
+    Assert-True ($traceText.Contains('candidate_starting|rolling_back')) "journal 轨迹含 candidate_starting|rolling_back（回滚确实接管）"
 
     Stop-RootServers -Root $root
     Write-Ok "[$tag] 场景完成"
@@ -860,6 +1048,7 @@ foreach ($f in @('0.2.0.json.sig', '0.2.0-broken.json', '0.2.0-broken.json.sig')
 try {
     if ($Scenario -eq 'all' -or $Scenario -eq 'upgrade') { Invoke-Scenario -CandidateMustFail $false }
     if ($Scenario -eq 'all' -or $Scenario -eq 'rollback') { Invoke-Scenario -CandidateMustFail $true }
+    if ($Scenario -eq 'all' -or $Scenario -eq 'identity') { Invoke-IdentityScenario }
 } finally {
     Write-Step '清理（仅本 E2E 的进程与安装根内 server）'
     foreach ($p in $script:CleanupTargets) {
