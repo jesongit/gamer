@@ -231,7 +231,9 @@ pub(crate) struct NativeYamlHost {
     context: AppContext,
     device: DeviceHandle,
     runtime: Arc<dyn RuntimeService>,
-    screen: FrameSize,
+    /// 设备坐标系（相对坐标 ⇄ 像素）：capture 后以真实帧分辨率刷新——
+    /// 初始 1000×1000 仅为占位，任何匹配/触摸换算都必须发生在 capture 之后。
+    screen: std::sync::RwLock<FrameSize>,
     sink: Option<std::sync::Arc<dyn EventSink>>,
 }
 
@@ -259,7 +261,10 @@ impl NativeYamlHost {
             context,
             device,
             runtime: Arc::new(crate::capabilities::adapters::RuntimeAdapter::new(stop)),
-            screen: FrameSize::new(DEFAULT_SCREEN_WIDTH, DEFAULT_SCREEN_HEIGHT),
+            screen: std::sync::RwLock::new(FrameSize::new(
+                DEFAULT_SCREEN_WIDTH,
+                DEFAULT_SCREEN_HEIGHT,
+            )),
             sink,
         })
     }
@@ -302,12 +307,12 @@ impl NativeYamlHost {
         outcome: MatchOutcome,
         region_px: Option<[u32; 4]>,
     ) {
-        let region_px = region_px.unwrap_or([0, 0, self.screen.width, self.screen.height]);
+        let region_px = region_px.unwrap_or([0, 0, self.screen().width, self.screen().height]);
         match outcome {
             MatchOutcome::Found(found) => {
                 let center = [
-                    (found.x + found.width / 2) as f64 / self.screen.width as f64,
-                    (found.y + found.height / 2) as f64 / self.screen.height as f64,
+                    (found.x + found.width / 2) as f64 / self.screen().width as f64,
+                    (found.y + found.height / 2) as f64 / self.screen().height as f64,
                 ];
                 self.emit_event(RuntimeEventKind::Vision {
                     template: template.to_string(),
@@ -396,8 +401,8 @@ impl NativeYamlHost {
             bail!("point 坐标超出 0..1")
         }
         Ok(TouchPoint::new(
-            (x * self.screen.width as f64).round() as u32,
-            (y * self.screen.height as f64).round() as u32,
+            (x * self.screen().width as f64).round() as u32,
+            (y * self.screen().height as f64).round() as u32,
             1.0,
         ))
     }
@@ -440,20 +445,40 @@ impl NativeYamlHost {
     }
 
     async fn capture(&self) -> Result<crate::capabilities::FrameHandle> {
-        self.registry
+        let frame = self
+            .registry
             .frame()
             .ok_or_else(|| anyhow!("frame capability 未注册"))?
             .capture(&self.device)
             .await
-            .map_err(anyhow::Error::new)
+            .map_err(anyhow::Error::new)?;
+        self.refresh_screen(&frame).await;
+        Ok(frame)
     }
 
-    fn match_value(outcome: MatchOutcome, region: Value) -> Value {
+    /// 以最近一次截图的真实分辨率刷新坐标系（相对坐标 ⇄ 像素全靠它；
+    /// 失败保持上次值——尺寸查询是尽力而为，不阻塞匹配主链）。
+    async fn refresh_screen(&self, frame: &crate::capabilities::FrameHandle) {
+        let Some(frame_service) = self.registry.frame() else {
+            return;
+        };
+        if let Ok(size) = frame_service.size(*frame).await {
+            if size.width > 0 && size.height > 0 {
+                *self.screen.write().unwrap() = size;
+            }
+        }
+    }
+
+    fn screen(&self) -> FrameSize {
+        *self.screen.read().unwrap()
+    }
+
+    fn match_value(outcome: MatchOutcome, region: Value, screen: FrameSize) -> Value {
         match outcome {
             MatchOutcome::Found(found) => {
                 let center = [
-                    (found.x + found.width / 2) as f64 / DEFAULT_SCREEN_WIDTH as f64,
-                    (found.y + found.height / 2) as f64 / DEFAULT_SCREEN_HEIGHT as f64,
+                    (found.x + found.width / 2) as f64 / screen.width as f64,
+                    (found.y + found.height / 2) as f64 / screen.height as f64,
                 ];
                 Value::Map(BTreeMap::from([
                     ("found".to_string(), Value::Bool(true)),
@@ -538,10 +563,10 @@ impl NativeYamlHost {
     fn search_region(&self, value: &Value) -> Result<crate::capabilities::SearchRegion> {
         let [x, y, width, height] = Self::relative_region(value)?;
         Ok(crate::capabilities::SearchRegion::new(
-            (x * self.screen.width as f64).round() as u32,
-            (y * self.screen.height as f64).round() as u32,
-            (width * self.screen.width as f64).round() as u32,
-            (height * self.screen.height as f64).round() as u32,
+            (x * self.screen().width as f64).round() as u32,
+            (y * self.screen().height as f64).round() as u32,
+            (width * self.screen().width as f64).round() as u32,
+            (height * self.screen().height as f64).round() as u32,
         ))
     }
 
@@ -736,8 +761,8 @@ impl CapabilityInvoker for NativeYamlHost {
                 let effective_px = crate::matcher::effective_search_region(
                     explicit_px,
                     template_file.as_deref(),
-                    self.screen.width,
-                    self.screen.height,
+                    self.screen().width,
+                    self.screen().height,
                 );
                 let options = MatchOptions {
                     threshold: Self::threshold_option(&args)?,
@@ -754,10 +779,10 @@ impl CapabilityInvoker for NativeYamlHost {
                     .await
                     .map_err(anyhow::Error::new)?;
                 let region =
-                    Self::relative_region_echo(effective_px, self.screen.width, self.screen.height);
+                    Self::relative_region_echo(effective_px, self.screen().width, self.screen().height);
                 self.emit_vision_outcome(&template_name, outcome.clone(), effective_px)
                     .await;
-                Ok(Self::match_value(outcome, region))
+                Ok(Self::match_value(outcome, region, self.screen()))
             }
             "vision.match_many" => {
                 let templates = match Self::arg(&args, "templates")? {
@@ -802,8 +827,8 @@ impl CapabilityInvoker for NativeYamlHost {
                     let effective_px = crate::matcher::effective_search_region(
                         explicit_px,
                         template_file.as_deref(),
-                        self.screen.width,
-                        self.screen.height,
+                        self.screen().width,
+                        self.screen().height,
                     );
                     self.emit_vision_outcome(
                         &Self::resource_name(template)?,
@@ -815,9 +840,10 @@ impl CapabilityInvoker for NativeYamlHost {
                         result.outcome.clone(),
                         Self::relative_region_echo(
                             effective_px,
-                            self.screen.width,
-                            self.screen.height,
+                            self.screen().width,
+                            self.screen().height,
                         ),
+                        self.screen(),
                     ));
                 }
                 let found = matches.iter().any(Value::truthy);
@@ -1501,14 +1527,20 @@ mod tests {
         hits: BTreeSet<String>,
         names: std::sync::Mutex<HashMap<ResourceHandle, String>>,
         seen: std::sync::Mutex<Vec<(String, Option<f32>, Option<[u32; 4]>)>>,
+        frame_size: FrameSize,
     }
 
     impl VisionStub {
         pub(crate) fn new(hits: &[&str]) -> Arc<Self> {
+            Self::new_with_frame_size(hits, 1000, 1000)
+        }
+
+        pub(crate) fn new_with_frame_size(hits: &[&str], width: u32, height: u32) -> Arc<Self> {
             Arc::new(Self {
                 hits: hits.iter().map(|name| name.to_string()).collect(),
                 names: std::sync::Mutex::new(HashMap::new()),
                 seen: std::sync::Mutex::new(Vec::new()),
+                frame_size: FrameSize::new(width, height),
             })
         }
 
@@ -1588,7 +1620,7 @@ mod tests {
         }
 
         async fn size(&self, _frame: FrameHandle) -> CapabilityResult<FrameSize> {
-            Ok(FrameSize::new(1000, 1000))
+            Ok(self.frame_size)
         }
     }
 
@@ -1786,6 +1818,49 @@ mod tests {
             stub.seen().last().unwrap().2,
             Some([0, 0, 100, 100]),
             "显式 region 优先"
+        );
+    }
+
+    /// 坐标系必须跟随真实帧分辨率（回归：曾硬编码 1000×1000，导致脚本运行
+    /// 的 center/tap 与模板测试端点位置不一致）。
+    #[tokio::test]
+    async fn native_host_scales_coordinates_by_real_frame_size() {
+        let stub = VisionStub::new_with_frame_size(&["reward"], 2000, 1000);
+        let host = NativeYamlHost::new(
+            all_permissions(vision_registry(&stub)),
+            AppContext::for_test("d1", "com.test.game").unwrap(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let value = host
+            .invoke(
+                "vision.match",
+                Value::Map(BTreeMap::from([(
+                    "template".into(),
+                    Value::String("reward".into()),
+                )])),
+            )
+            .await
+            .unwrap();
+        let map = into_map(value);
+        // 桩命中框固定 (400,200,200,100)：center 像素 (500,250) ÷ 2000×1000
+        assert_eq!(
+            map.get("center"),
+            Some(&Value::Coordinate([0.25, 0.25])),
+            "center 按真实帧分辨率换算（旧实现 ÷1000 会得到 0.5,0.25）"
+        );
+
+        // 触摸点同样按真实分辨率换算：[0.5,0.5] → (1000,500)
+        let touch = host
+            .point(&Value::Coordinate([0.5, 0.5]))
+            .expect("触摸点换算");
+        assert_eq!(
+            (touch.x(), touch.y()),
+            (1000, 500),
+            "tap 像素坐标按真实帧分辨率换算"
         );
     }
 
