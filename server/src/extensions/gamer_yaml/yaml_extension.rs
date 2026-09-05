@@ -3145,6 +3145,77 @@ log = "^1.0"
         assert_eq!(logs.logs.lock().unwrap().as_slice(), ["hi"]);
     }
 
+    /// P12.11 验收（计划 §16.5，e2e，真实 Component guest）：正常嵌套链
+    /// A→B→C——call 逐层深入（call_start depth 1/2/3），C 的返回值经 B 的
+    /// `save`/`return` 传播回顶层，日志顺序证明执行链与回归路径完整。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_chains_nested_calls_three_levels_deep() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let sink = EventCollect::new();
+        let resolver = Arc::new(MemoryResolver {
+            scripts: BTreeMap::from([
+                (
+                    "com.test.app/a.yaml".to_string(),
+                    "version: 3\nsteps:\n  - log: a-enter\n  - call:\n      target: script:com.test.app/b.yaml\n      save: b\n  - log: a-exit\n  - return: $b.from_c\n"
+                        .to_string(),
+                ),
+                (
+                    "com.test.app/b.yaml".to_string(),
+                    "version: 3\nsteps:\n  - log: b-enter\n  - call:\n      target: script:com.test.app/c.yaml\n      save: c\n  - return: {from_c: $c}\n"
+                        .to_string(),
+                ),
+                (
+                    "com.test.app/c.yaml".to_string(),
+                    "version: 3\nsteps:\n  - log: c-enter\n  - return: 42\n".to_string(),
+                ),
+            ]),
+            functions: BTreeMap::new(),
+        });
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        let result = runtime
+            .run(run_request_with_sink(
+                load("version: 3\nsteps:\n  - call:\n      target: script:com.test.app/a.yaml\n      save: a\n  - return: $a\n")
+                    .unwrap(),
+                Some(resolver),
+                log_host(logs.clone()),
+                None,
+                Some(sink.clone()),
+            ))
+            .await
+            .unwrap();
+        // C 的返回值经 B（Map 包装）逐层传播回顶层
+        assert_eq!(result.value, Value::Int(42));
+        // 执行链顺序：a-enter → b-enter → c-enter → 回到 a-exit
+        assert_eq!(
+            logs.logs.lock().unwrap().as_slice(),
+            ["a-enter", "b-enter", "c-enter", "a-exit"]
+        );
+        // call 事件逐层递增深度
+        let calls = sink.of("call_start");
+        assert_eq!(
+            calls,
+            vec![
+                serde_json::json!({
+                    "ev": "call_start", "target": "script:com.test.app/a.yaml", "depth": 1
+                }),
+                serde_json::json!({
+                    "ev": "call_start", "target": "script:com.test.app/b.yaml", "depth": 2
+                }),
+                serde_json::json!({
+                    "ev": "call_start", "target": "script:com.test.app/c.yaml", "depth": 3
+                }),
+            ],
+            "嵌套 call 深度事件: {calls:?}"
+        );
+        let ends = sink.of("run_end");
+        assert_eq!(
+            ends.last(),
+            Some(&serde_json::json!({ "ev": "run_end", "ok": true }))
+        );
+    }
+
     /// P12.4 验收（e2e）：递归 call 超 32 层 → guest 本地 ExecutionBudget
     /// 报 CALL_DEPTH_EXCEEDED（WIT 不再透传 depth，宿主 resolver 无深度守卫）。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

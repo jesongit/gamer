@@ -205,6 +205,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let j = json_body(resp).await;
     assert!(j.get("run_id").and_then(|v| v.as_str()).is_some());
+    let mut dispatched_runs = vec![j["run_id"].as_str().unwrap().to_string()];
     assert_eq!(j["resolved_args"]["msg"], "默认");
     assert_eq!(j["resolved_args"]["fast"], false);
     assert_eq!(j["resolved_args"]["wait"], "2s");
@@ -224,6 +225,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let j = json_body(resp).await;
+    dispatched_runs.push(j["run_id"].as_str().unwrap().to_string());
     assert_eq!(j["resolved_args"]["msg"], "直跑");
     assert_eq!(j["resolved_args"]["fast"], true);
     assert_eq!(j["resolved_args"]["wait"], "3s");
@@ -291,6 +293,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let j = json_body(resp).await;
+    dispatched_runs.push(j["run_id"].as_str().unwrap().to_string());
     assert_eq!(j["resolved_args"]["who"], "函数");
     assert_eq!(j["resolved_args"]["times"], 2);
 
@@ -319,4 +322,26 @@ async fn v3_manual_runs_flow_through_param_bridge() {
         j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "yaml.v3.version"),
         "非 v3 脚本手动运行必须报版本门禁: {j}"
     );
+
+    // P12.11 偶发防御：本测试派发的 run 无设备可连，后台 prepare 立即失败；
+    // 终态收敛前测试若结束，完成钩子里的 tokio::spawn 可能撞上运行时关停窗口
+    // （tokio is_entered/shutdown 抖动）。逐个轮询到终态再收工（404 容忍重试：
+    // RunManager::finalize 摘注册表与入档案之间存在瞬时不可见间隙）。
+    for run_id in dispatched_runs {
+        for _ in 0..200 {
+            let resp = get_json(&t, &sid, &format!("/api/runs/{run_id}")).await;
+            let status = resp.status();
+            if status == StatusCode::NOT_FOUND {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
+            }
+            let run = json_body(resp).await;
+            let state = run["state"].as_str().unwrap_or_default();
+            if state != "starting" && state != "running" {
+                assert_eq!(state, "failed", "无设备 run 必须以失败收敛: {run}");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
 }

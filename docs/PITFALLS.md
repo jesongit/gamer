@@ -248,3 +248,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **v2 脚本删除后只报版本错误、且「看得见的失败点不止运行一处」**：非 `version: 3` 源在保存/导入/导出 preflight（400 invalid_yaml）、entrypoint 描述（400 invalid_script）、手动运行/任务门禁（版本诊断）统一报 `yaml.v3.version(.missing)`——排查旧脚本问题先看版本键，不要往参数/模板方向猜。
 - **模板引用改写对存量 v2 文件静默跳过**：模板重命名只改写可解析的 v3 源（`rename_template_source` 对非 v3 返回 None、函数库解析失败跳过），分区里有删不掉的 v2 存量文件时其模板引用不会跟随改名；v3 保存边界不再做模板存在性校验（归运行期 composite 解析与前端 `yaml.v3.resource.tmpl_not_found`）。
 - **手动/定时函数运行现与脚本同走 v3 guest**（原 v2 原生执行器路径已删）：`RunTarget::Function` 经 `yaml_vnext::load_function` 进 `run_yaml_vnext`，函数文件必须是合法 v3 bare-map；参数 wire 仍是七类 TypedValue，int/number 显式实参以文本形态过线（已知限制，见 task_params `coerce_v3_arg`）。
+
+## 2026-09-05（Phase 12 P12.11：验收收口）
+
+- **刚结束的 run 瞬时 GET 404（run_not_found）**：`RunManager::finalize` 先摘活动注册表再入档案（两次独立短锁，中间还夹一条 info! 日志），`get_run` 顺序查两处——202 派发后立刻 GET 无设备快败的 run 恰落在间隙会 404（测试负载下偶发，P12.11 基线实测复现）；测试侧对 run 查询一律轮询容忍 404/非终态（见 isolation 守卫测试），生产侧若要消除需把 finalize 的档案入列与注册表摘除收进同一临界区。

@@ -324,3 +324,295 @@ async fn runner_and_schedule_provider_lists_are_exposed() {
     // runner 已注册但入口脚本不存在：同口径进入依赖缺失，reason 为脚本不存在
     assert_eq!(task["suspend_reason"], "脚本不存在");
 }
+
+// ---------- P12.11（计划 §16.7）：Task params 全链 ----------
+//
+// Program.params → TaskBoard 保存（runner.payload.args）→ /api/tasks/:id/run
+// → gamer.yaml runner 门禁重绑 → 执行器收到绑定后的全量类型化覆盖。
+// 手动路径（POST /api/runs）的参数桥已有 entrypoint_schema 验收；本测试补
+// 「保存任务 → 运行 → payload 生效」的 api 级证据与非法 payload 的 400 门禁。
+
+/// 捕获 RunRequest payload 的执行器：prepare 恒成功，execute 记录 payload 后
+/// 立即成功结束（本测试只验证任务参数绑定，不执行真实脚本）。
+struct PayloadCaptureExecutor {
+    payloads: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+}
+
+impl crate::run_manager::RunExecutor for PayloadCaptureExecutor {
+    fn prepare<'a>(
+        &'a self,
+        _: &'a crate::core::RunContext,
+        _: &'a crate::core::RunRequest,
+    ) -> futures_util::future::BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _: &'a crate::core::RunContext,
+        request: &'a crate::core::RunRequest,
+        _realtime_logs: bool,
+        _stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> futures_util::future::BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
+        let payloads = self.payloads.clone();
+        let payload = request.payload.as_value().clone();
+        Box::pin(async move {
+            payloads.lock().unwrap().push(payload);
+            Ok(vec![("info".into(), "captured".into())])
+        })
+    }
+
+    fn acquire(
+        &self,
+        _: &crate::core::RunContext,
+    ) -> anyhow::Result<Box<dyn crate::core::ActivityLease>> {
+        Ok(Box::new(crate::core::NoopLease))
+    }
+}
+
+#[tokio::test]
+async fn task_run_binds_saved_payload_args_through_yaml_runner() {
+    let payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let t = build_app_with_executor(
+        "task-run-params",
+        test_credential("admin123"),
+        Default::default(),
+        Arc::new(PayloadCaptureExecutor {
+            payloads: payloads.clone(),
+        }),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+
+    // 1. 保存带参数声明的 v3 脚本（TaskBoard 参数表单的数据源 = entrypoint schema）
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/apps/com.example.game/resources/scripts",
+        serde_json::json!({
+            "name": "daily",
+            "content": "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - 'int:count:次数:3'\nsteps:\n  - log: $msg\n",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+
+    // 2. TaskBoard 保存任务：payload.args 携带用户填写的稀疏实参
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/tasks",
+        serde_json::json!({
+            "name": "Params Daily",
+            "app": {"device_id": "d1", "android_package": "com.example.game", "content_package": "com.example.game"},
+            "runner": {
+                "runner_id": YAML_RUNNER,
+                "entrypoint": "com.example.game/daily.yaml",
+                "payload": {"args": {"msg": "任务实参"}}
+            },
+            "schedule": {"provider_id": "cron", "config": {"expression": "0 8 * * *"}},
+            "enabled": true
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    let task_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+
+    // 3. 立即运行：202 + run_id（门禁在 runner 边界重绑参数后交 RunManager）
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{task_id}/run"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::ACCEPTED, "{:?}", json_body(resp).await);
+    let run_id = json_body(resp).await["run_id"].as_str().unwrap().to_string();
+
+    // 4. 执行器收到的 payload = 绑定后的全量覆盖（gamer.yaml 私有 wire：
+    //    {target, args: [{name, value: {type, value}}]}）；任务实参覆盖默认值，
+    //    未填参数取声明默认值（int 经 text wire 承载）。
+    let mut captured = None;
+    for _ in 0..200 {
+        {
+            let guard = payloads.lock().unwrap();
+            if let Some(payload) = guard.iter().find(|p| p["args"].as_array().is_some()) {
+                captured = Some(payload.clone());
+            }
+        }
+        if captured.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let payload = captured.expect("执行器必须收到任务运行 payload");
+    let args = payload["args"].as_array().unwrap();
+    let arg_value = |name: &str| {
+        args.iter()
+            .find(|a| a["name"] == serde_json::json!(name))
+            .map(|a| a["value"].clone())
+            .unwrap_or_else(|| panic!("绑定覆盖缺少参数 {name}: {args:?}"))
+    };
+    assert_eq!(
+        arg_value("msg"),
+        serde_json::json!({"type": "text", "value": "任务实参"}),
+        "任务实参覆盖默认值"
+    );
+    assert_eq!(
+        arg_value("count"),
+        serde_json::json!({"type": "text", "value": "3"}),
+        "任务未填参数取声明默认值"
+    );
+
+    // 5. run 记录关联任务并收敛 Success；任务侧 last_run_at 由完成回调落库
+    //    （轮询等待 = 后台完成链在测试运行时存活期内走完，不悬到关停窗口）。
+    let mut record = None;
+    for _ in 0..200 {
+        let resp = get_json(&t, &sid, &format!("/api/runs/{run_id}")).await;
+        let run = json_body(resp).await;
+        if run["state"] == "success" {
+            record = Some(run);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let run = record.expect("run 必须收敛 success");
+    assert_eq!(run["task_id"], task_id);
+    assert_eq!(run["runner_id"], YAML_RUNNER);
+    assert_eq!(run["entrypoint"], "com.example.game/daily.yaml");
+    let mut settled = false;
+    for _ in 0..200 {
+        let task = json_body(get_json(&t, &sid, &format!("/api/tasks/{task_id}")).await).await;
+        if !task["last_run_at"].is_null() {
+            assert_eq!(task["last_result"], "成功");
+            assert_eq!(task["state"], "active", "任务运行完成后保持 Active");
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(settled, "完成回调必须把任务结果落库");
+
+    // 6. 非法 payload 门禁（任务保存时 payload 不透明，运行时才校验）：
+    //    必填参数缺失 → 400 + 结构化诊断消息。
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/apps/com.example.game/resources/scripts",
+        serde_json::json!({
+            "name": "required",
+            "content": "version: 3\nparams:\n  - 'text:secret:密文'\nsteps:\n  - log: $secret\n",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/tasks",
+        serde_json::json!({
+            "name": "Missing Required",
+            "app": {"device_id": "d1", "android_package": "com.example.game", "content_package": "com.example.game"},
+            "runner": {
+                "runner_id": YAML_RUNNER,
+                "entrypoint": "com.example.game/required.yaml",
+                "payload": {"args": {}}
+            },
+            "schedule": {"provider_id": "cron", "config": {"expression": "0 9 * * *"}},
+            "enabled": true
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    let missing_id = json_body(resp).await["id"].as_str().unwrap().to_string();
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{missing_id}/run"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{:?}", json_body(resp).await);
+    let body = json_body(resp).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("必填参数 secret 未提供"),
+        "缺必填必须带结构化诊断: {body}"
+    );
+
+    // 7. 类型不符 → 400；带过期 param_signature 的旧数据 → 400 参数过期门禁。
+    let update_task = |args: serde_json::Value| {
+        serde_json::json!({
+            "id": missing_id,
+            "name": "Missing Required",
+            "app": {"device_id": "d1", "android_package": "com.example.game", "content_package": "com.example.game"},
+            "runner": {
+                "runner_id": YAML_RUNNER,
+                "entrypoint": "com.example.game/required.yaml",
+                "payload": args
+            },
+            "schedule": {"provider_id": "cron", "config": {"expression": "0 9 * * *"}},
+            "enabled": true
+        })
+    };
+    let resp = send(
+        &t.app,
+        req(
+            "PUT",
+            &format!("/api/tasks/{missing_id}"),
+            None,
+            &json_headers(sid.to_string()),
+            Some(update_task(serde_json::json!({"args": {"secret": 123}})).to_string()),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{missing_id}/run"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{:?}", json_body(resp).await);
+    let body = json_body(resp).await;
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("类型无效"),
+        "类型不符必须诊断: {body}"
+    );
+
+    let resp = send(
+        &t.app,
+        req(
+            "PUT",
+            &format!("/api/tasks/{missing_id}"),
+            None,
+            &json_headers(sid.to_string()),
+            Some(
+                update_task(serde_json::json!(
+                    {"args": {"secret": "ok"}, "param_signature": "psig1-stale"}
+                ))
+                .to_string(),
+            ),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+    let resp = post_json(
+        &t,
+        &sid,
+        &format!("/api/tasks/{missing_id}/run"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{:?}", json_body(resp).await);
+    let body = json_body(resp).await;
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains("任务参数过期"),
+        "过期签名必须走参数过期门禁: {body}"
+    );
+    // 门禁失败不落 run、任务不受牵连（保持 Active，等参数修好后可再跑）
+    let task = json_body(get_json(&t, &sid, &format!("/api/tasks/{missing_id}")).await).await;
+    assert_eq!(task["state"], "active");
+}

@@ -1477,12 +1477,49 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{dispatched}");
     let run_id = dispatched["run_id"].as_str().unwrap().to_string();
-    let run = get_json(&guard.app, &cookie, &format!("/api/runs/{run_id}")).await;
+
+    // P12.11 偶发修复：这里的 run 无设备可连，后台 prepare 立即失败并在
+    // RunManager::finalize 收敛终态；finalize 先摘注册表再入档案（两次独立
+    // 锁），GET 恰好落在间隙会瞬时 404（负载下偶发，T3/T10 各复现一次）。
+    // 轮询直到记录可见且到终态——既给 404 间隙留出重试，也保证后台失败链
+    // （完成钩子 + 终局日志落库）在本测试运行时存活期内走完，不悬到关停窗口。
+    let mut run = None;
+    for _ in 0..200 {
+        let response = send(
+            &guard.app,
+            request(
+                "GET",
+                &format!("/api/runs/{run_id}"),
+                &json_headers(&cookie),
+                None,
+            ),
+        )
+        .await;
+        if response.status() == StatusCode::NOT_FOUND {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            continue;
+        }
+        let value = body_json(response).await;
+        let state = value["state"].as_str().unwrap_or_default().to_string();
+        if state == "starting" || state == "running" {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            continue;
+        }
+        run = Some(value);
+        break;
+    }
+    let run = run.expect("派发的 run 必须可见并收敛到终态");
     assert_eq!(run["run_id"], run_id);
     assert_eq!(run["runner_id"], YAML_ID);
     assert_eq!(
         run["entrypoint"], "com.guard.app/daily.yaml",
         "run 记录携带任务入口"
+    );
+    assert_eq!(run["task_id"], task_id, "run 记录关联任务");
+    assert_eq!(run["state"], "failed", "无设备时 run 以失败收敛: {run}");
+    assert!(
+        run["error"].as_str().unwrap_or_default().contains("device not found"),
+        "失败原因必须是设备不存在: {run}"
     );
 }
 
