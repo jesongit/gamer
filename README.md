@@ -10,8 +10,9 @@
 - ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网低延迟
 - 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先从 H.264 GOP 帧环按需调用 ffmpeg 解码最新帧；无 ffmpeg 时 fallback adb screencap）；固定夹具 benchmark 脚本已兼容 Windows PowerShell 5.1（parser=0），正式跨平台 p50/p95 报告仍在计划中
-- 📜 **YAML 自动化**：当前 v2 严格语法支持 find（找图等待+点击，block 障碍、verify 补点）/ color 颜色分支 / loop / func 自定义函数（具名参数 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait（语法见 [docs/reference/YAML.md](docs/reference/YAML.md)）
-- ⏰ **定时任务**：cron 表达式，服务端 Docker 内 7×24 运行，浏览器关闭不影响
+- 📜 **YAML 自动化**：当前 v2 严格语法支持 find（找图等待+点击，block 障碍、verify 补点）/ color 颜色分支 / loop / func 自定义函数（具名参数 + return）/ tap / swipe / text / key / call / throw / str_app / cls_app / wait（语法见 [docs/reference/YAML.md](docs/reference/YAML.md)），由官方 `gamer.yaml` 扩展承载
+- ⏰ **定时任务**：Task = 任意 ScheduleProvider + 任意 Runner，内置 `cron` 调度 provider + `gamer.yaml` 执行 runner；服务端 Docker 内 7×24 运行，浏览器关闭不影响
+- 🧩 **插件化架构**：Core 只含设备/任务/资源/扩展机制等稳定能力，YAML 自动化与按键映射由可安装扩展（`.gplugin`，签名校验 + 权限确认）提供，面板随扩展安装/卸载出现消失；应用资产走 App Package（`.gamerpkg`）安装
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
 > 当前仓库同时提供 v2 脚本基线、Windows x64 完整包的 launcher 入口（`doctor` / `status` / `repair` / `start` / `upgrade`）和 launcher 托管更新 API。本文只记录仓库中已有的入口；不把 GitHub Release、生产升级/回滚或真实设备 E2E 当作已完成的外部结果。Docker/直跑模式的更新仍由外部部署管理。
@@ -24,9 +25,10 @@
 │ (Vue3 精简) │       WebSocket 信令 + HTTP REST API       │ (axum+webrtc-rs) │                        │ redroid/真机  │
 └────────────┘                                            └──────────────────┘                        └──────────────┘
                                                                     │
-                                                                    ├─ 自动化引擎：YAML 脚本解释器
+                                                                    ├─ 扩展机制：WASM/Native Extension + 能力位 SDK（YAML 自动化、按键映射由官方扩展提供）
+                                                                    ├─ 定时任务：Task = ScheduleProvider + Runner（内置 cron provider）
                                                                     ├─ 模板匹配：NCC + H.264 GOP 帧环（按需 ffmpeg 解码）
-                                                                    ├─ 定时任务：cron + tokio 调度
+                                                                    ├─ 资源系统：六目录分区存储 + App Package 复合解析
                                                                     ├─ 设备管理：adb 直连
                                                                     └─ 持久化：SQLite + 模板图片
 ```
@@ -41,26 +43,27 @@
 
 ```
 gamer/
-├── server/                 # Rust 服务端
+├── server/                     # Rust 服务端
 │   ├── src/
-│   │   ├── main.rs         # 入口
-│   │   ├── config.rs       # 配置（port / data_dir / adb / scrcpy-server / 阈值）
-│   │   ├── api/            # HTTP REST + WebSocket 信令
-│   │   ├── device/         # adb 封装 + scrcpy 会话 + ffmpeg 帧缓存
-│   │   ├── webrtc/         # WebRTC peer（H.264 推流 + DataChannel 控制）
-│   │   ├── script_v2/      # YAML v2 严格装载、校验、序列化
-│   │   ├── engine/         # YAML 脚本执行引擎与调度
-│   │   ├── device/         # adb/scrcpy 会话与帧缓存
-│   │   └── store.rs        # SQLite 持久化
-│   ├── data/               # 按应用分区的 scripts/functions/templates/keymaps/presets/resources 运行数据 + package.toml
+│   │   ├── main.rs             # 入口（组合根：装配 Core 与扩展）
+│   │   ├── config.rs           # 配置（port / data_dir / adb / scrcpy-server / 阈值）
+│   │   ├── api/                # HTTP REST + WebSocket 信令
+│   │   ├── device/             # adb 封装 + scrcpy 会话 + ffmpeg 帧缓存
+│   │   ├── webrtc/             # WebRTC peer（H.264 推流 + DataChannel 控制）
+│   │   ├── timer_core.rs       # Timer Core：Task = ScheduleProvider + Runner
+│   │   ├── resources.rs        # ResourceStore：内容无关六目录资源寻址
+│   │   ├── capabilities/       # Core 能力位 SDK（device/vision/input/...）
+│   │   ├── extensions/         # 扩展生命周期 + gamer_yaml / keymap 业务扩展
+│   │   └── store.rs            # SQLite 持久化（schema v3）
+│   ├── data/                   # 按应用分区的 scripts/functions/templates/keymaps/presets/resources 运行数据 + package.toml
 │   ├── assets/scrcpy-server.jar   # 官方 v3.3.3（仓库自带）
-│   └── Dockerfile          # 兼容保留：仅后端镜像（无前端页）
-├── web/                    # Vue3 + Vite 前端（精简版）
-├── launcher/               # Windows 完整包 launcher
-├── release/packaging/      # 依赖获取、构包、manifest 与签名脚本
-├── Dockerfile              # 推荐：一体化多阶段镜像（pnpm 前端 + Rust 服务端）
-├── docker-compose.yml      # server + redroid 一键拉起
-└── docs/reference/YAML.md            # YAML 自动化脚本语法（README 引用）
+│   └── Dockerfile              # 仅后端镜像（无前端页；一体化镜像用根 Dockerfile）
+├── web/                        # Vue3 + Vite 前端（Core 壳 + 插件面板）
+├── launcher/                   # Windows 完整包 launcher
+├── release/packaging/          # 依赖获取、构包、manifest 与签名脚本
+├── Dockerfile                  # 推荐：一体化多阶段镜像（pnpm 前端 + Rust 服务端）
+├── docker-compose.yml          # server + redroid 一键拉起
+└── docs/                       # reference（语法/契约/ADR）/ guides / plans / evidence
 ```
 
 ## 依赖清单（Windows / scoop 安装示例）
@@ -251,7 +254,7 @@ Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`�
 ## YAML 脚本语法
 
 YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/reference/YAML.md](docs/reference/YAML.md)**。
-可执行脚本、函数库和模板按应用分区存放在 `data/<应用包名>/{scripts,functions,templates}/`，按键映射在 `keymaps/`（web 端 Console 页框选/上传模板）。
+可执行脚本、函数库和模板按应用分区存放在 `data/<应用包名>/{scripts,functions,templates,keymaps,presets,resources}/`（REST 走通用资源 API `/api/apps/:app/resources/:kind`；Console 的模板/自动化面板由 `gamer.yaml` 扩展提供，框选/上传模板即用）。
 
 ## API 一览
 
@@ -273,17 +276,20 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/ref
 | POST | /api/devices/:id/connect | 连接设备 |
 | POST | /api/devices/:id/screenshot | 截图（PNG） |
 | POST | /api/devices/:id/control | 手动控制（tap/swipe/text/press/home/back/recents/start_app/rotate/clipboard） |
-| GET/POST | /api/templates | 模板列表 / 创建 |
-| PUT | /api/templates/:name/image | 替换已有模板图像 |
-| POST | /api/templates/:name/test | 测试匹配 |
-| GET/POST/PUT | /api/scripts | 脚本列表 / 创建 / 更新 |
-| POST | /api/scripts/:id/run | 运行脚本（异步 202） |
-| GET | /api/runs/:id | 查询运行 |
-| POST | /api/runs/:id/cancel | 取消运行 |
-| GET/POST/PUT | /api/functions | 函数库列表 / 创建 / 更新 |
-| POST | /api/functions/:id/run | 测试函数（异步 202） |
-| GET/POST | /api/tasks | 定时任务列表 / 保存 |
+| POST | /api/runs | 统一执行入口：`{runner_id, entrypoint, payload, device_id}`（异步 202 + run_id） |
+| GET | /api/runs/:run_id | 查询运行 |
+| POST | /api/runs/:run_id/cancel | 取消运行 |
+| GET | /api/runners | 已注册 Runner 列表（含所属扩展） |
+| GET | /api/schedule-providers | 已注册调度 provider 列表（内置 `cron`） |
+| GET/POST | /api/tasks | 定时任务列表 / 保存（`schedule{provider_id,config}` + `runner{runner_id,entrypoint,payload}`） |
 | POST | /api/tasks/:id/run | 立即执行 |
+| POST | /api/tasks/:id/suspend&#124;resume&#124;cancel&#124;enable&#124;disable | 任务状态操作 |
+| GET/POST/PUT/DELETE | /api/task-presets | 任务预设（App Package 内 `presets/` 安装时自动发布，一键实例化） |
+| GET/POST/PUT/DELETE | /api/apps/:app/resources/:kind[/:id] | 通用资源 CRUD（kind ∈ scripts/functions/templates/keymaps/presets/resources；`expected_version` 乐观并发，模板收 PNG 字节 body；`app` 传 `-` 由 id 自带分区） |
+| POST | /api/capabilities/vision/test | 模板匹配测试 |
+| GET | /api/extensions | 已装扩展列表（含 UI 贡献） |
+| POST | /api/extensions/:id/enable&#124;disable&#124;start&#124;stop&#124;activate&#124;update | 扩展生命周期操作（`DELETE /api/extensions/:id/:version` 卸载） |
+| POST | /api/extensions/:id/call | 调用扩展动作（declarative 按钮 / plugin.call） |
 | POST | /api/app-packages/install | 安装 .gamerpkg/zip 归档（可选 `X-Expected-Sha256` 校验头），安装即激活 |
 | GET | /api/app-packages | 已装 App Package 列表（版本、激活版本、SHA-256） |
 | DELETE | /api/app-packages/:id/:version | 卸载指定版本 |
@@ -294,8 +300,8 @@ YAML 自动化脚本的完整语法、参数说明和详细示例见 **[docs/ref
 | GET/DELETE | /api/logs | 运行日志 / 清空 |
 | WS | /ws/device/:id | WebRTC 信令（offer → answer） |
 
-脚本运行以 `run_id` 标识一次执行实例。启动脚本、函数测试或“立即运行任务”采用异步返回：
-接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同脚本并发控制同一设备。脚本/函数保存、运行和任务保存共用严格 v2 loader，失败返回结构化诊断。
+执行以 `run_id` 标识一次运行实例。统一执行入口（`POST /api/runs`）、函数测试或“立即运行任务”采用异步返回：
+接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同 runner 并发控制同一设备。脚本/函数保存、运行和任务保存共用严格 loader（由 `gamer.yaml` 扩展承载），失败返回结构化诊断。
 
 ## 技术要点
 

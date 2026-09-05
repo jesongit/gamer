@@ -10,7 +10,7 @@
 
 任何一条语法规则都必须在五方同时成立，五方互为镜像：
 
-1. **Rust AST** — `server/src/script_v2/` 的严格装载与校验目标，禁止在执行循环里按 `serde_yaml::Value` 猜动作；
+1. **Rust AST** — `server/src/extensions/gamer_yaml/script_v2/` 的严格装载与校验目标，禁止在执行循环里按 `serde_yaml::Value` 猜动作；
 2. **前端 Model** — 可视化编辑器唯一编辑源，golden JSON 即用该字段名书写；
 3. **规范 YAML** — 服务端持久化与导入导出格式，由 codec 统一序列化产出；
 4. **API JSON** — 保存/校验/运行/任务接口中模型与参数的 JSON 形态（与前端 Model 同构，见 §6）；
@@ -20,7 +20,7 @@
 
 **结论：采用 `saphyr-parser 0.0.12`（crates.io，YAML 1.2 事件级解析器），由服务端严格 loader 使用。**
 
-- 需求背景：params 每项必须是「整条单引号」标量（§3.3），而 `serde_yaml 0.9` 反序列化成 `Value` 后**书写样式彻底丢失**——`'bool:enable:x:true'`（单引号）与 `bool:enable:x:true`（无引号）得到完全相同的 `Value::String`，无法校验引号契约。这一点已用测试固化：`server/src/script_v2/fixtures_tests.rs::serde_yaml_loses_scalar_style`。
+- 需求背景：params 每项必须是「整条单引号」标量（§3.3），而 `serde_yaml 0.9` 反序列化成 `Value` 后**书写样式彻底丢失**——`'bool:enable:x:true'`（单引号）与 `bool:enable:x:true`（无引号）得到完全相同的 `Value::String`，无法校验引号契约。这一点已用测试固化：`server/src/extensions/gamer_yaml/script_v2/fixtures_tests.rs::serde_yaml_loses_scalar_style`。
 - 选 `saphyr-parser` 的理由：
 - 事件级 API：`Parser` 是 `Iterator<Item = Result<(Event, Span), ScanError>>`，`Event::Scalar(Cow<str>, ScalarStyle, anchor, tag)` 直接携带 `ScalarStyle::{Plain, SingleQuoted, DoubleQuoted, Literal, Folded}`，测试已验证单引号/无引号可区分；
   - 每个事件带 `Span`（行列区间），是错误定位到 `step_path`/`field` 乃至源码行列的基础；
@@ -28,7 +28,7 @@
   - 对 match 紧凑缩进（indentless sequence，§4.1）解析正确，golden 样例 v07/v11 已回归。
 - 备选 `yaml-rust2 0.12`：同为 YAML 1.2 且可取样式，但其高层 `YamlLoader` 同样丢样式、事件 API 无 Span、生态位是旧 yaml-rust 的延续维护，故不选。
 - 排除「serde_yaml + 源码正则预扫描」方案：对多行标量、注释、引号转义、嵌套结构的样式推断不可靠，且等于把解析做两遍；仅在“只需粗判、不要 span”的场景才值得。
-- 当前落点：`server/src/script_v2/` 提供 `parse_script_file()/parse_function_file()`，
+- 当前落点：`server/src/extensions/gamer_yaml/script_v2/` 提供 `parse_script_file()/parse_function_file()`，
   服务端 fixture、仓库示例数据和 API 保存/导入/运行均通过这条严格装载路径。
 
 ## 3. 五方字段对照表
@@ -37,13 +37,13 @@
 
 | 项 | 值 |
 |---|---|
-| 应用分区结构 | `data/<pkg>/yaml/`（可执行脚本）、`data/<pkg>/func/`（函数库）、`data/<pkg>/tmpl/`（灰度模板 PNG） |
+| 应用分区结构 | `data/<pkg>/scripts/`（可执行脚本）、`data/<pkg>/functions/`（函数库）、`data/<pkg>/templates/`（灰度模板 PNG）；另有 `keymaps/`、`presets/`、`resources/` 分区（语义归对应扩展/App Package） |
 | 脚本资源 ID | `<pkg>/<文件名>.yaml`（如 `daily/login.yaml`） |
-| 函数路径 | `<文件短路径>/<函数名>`（如 `common/login` = `func/common.yaml` 里的 `login`；函数文件多函数共存） |
-| 运行选择器 | 只有 `yaml/` 下的脚本可手动运行/立即运行/进入定时任务；`func/` 只能被 `func` 步骤调用或函数测试 API 使用 |
+| 函数路径 | `<文件短路径>/<函数名>`（如 `common/login` = `functions/common.yaml` 里的 `login`；函数文件多函数共存） |
+| 运行选择器 | 只有 `scripts/` 下的脚本可手动运行/立即运行/进入定时任务；`functions/` 只能被 `func` 步骤调用或函数测试 API 使用 |
 | 模板引用 | 短名（`account.png`）；磁盘名可带 `#` 搜索区域后缀；同扩展名短名必须唯一，歧义为资源错误 |
 | 跨分区 | 一律不解析、不回退；模板/函数/子脚本只在当前应用分区查找 |
-| 目录即类型 | 不做内容推断；`yaml/` 里必须有顶层 `steps`，`func/` 顶层键全是函数名 |
+| 目录即类型 | 不做内容推断；`scripts/` 里必须有顶层 `steps`，`functions/` 顶层键全是函数名 |
 
 ### 3.2 顶层结构与模型
 
@@ -93,8 +93,9 @@ login:
 顶层键白名单：脚本只允许 `params/config/steps`；函数记录只允许 `params/steps`。
 出现白名单之外的任何顶层键统一报 `script.top_level.unknown_key`，不生成迁移引导。
 
-**API JSON（当前实现）：** `POST /api/scripts` 与 `POST /api/functions` 创建资源，
-body 使用 `pkg/name/content`；已有资源用 `PUT` 更新，默认携带 `expected_version`，
+**API JSON（当前实现）：** `POST /api/apps/:app/resources/scripts` 与
+`POST /api/apps/:app/resources/functions` 创建资源，
+body 使用 `{name, content}`；已有资源用同路径 `PUT` 更新，默认携带 `expected_version`，
 `force:true` 才跳过版本比较。响应/错误由服务端返回资源版本或结构化诊断，读取接口返回
 当前规范 YAML 与版本信息。
 
@@ -226,19 +227,22 @@ YAML 形态（规范） ↔ Model 字段（`kind` 判别 + 以下字段）。所
 
 ### 4.4 RunTarget
 
-运行入口统一为二选一（函数不进 RunManager，走函数测试 API）：
+运行入口统一走 `POST /api/runs`（gamer.yaml runner；REST 层只有
+`{runner_id, entrypoint, payload, device_id}` 一个形态），runner 内部 lowering 为二选一：
 
 ```jsonc
 // 手动运行 / 从步骤运行 / 定时任务
+//   REST：entrypoint = "<pkg>/<name>.yaml"，payload = { start_index?, args? }
 { "type": "script",   "script_id": "<pkg>/<name>.yaml", "start_index": 0 }
 // 函数测试（Console「点函数名运行」/ 编辑器「测试函数」）
+//   REST：entrypoint = "<pkg>/<file>.yaml[#function]"
 { "type": "function", "pkg": "<分区>", "file": "common", "function": "login", "start_index": 0 }
 ```
 
 - `start_index`：主流程顶层步骤序号（从 0）；函数为函数体内顶层步骤序号；不支持任意深层嵌套步骤直接启动。
 - 运行前必须解析全部必填参数（后续步骤可能引用）；`args` 为稀疏映射（§4.3）。
-- 脚本运行使用 `POST /api/scripts/:id/run`，函数测试使用 `POST /api/functions/:id/run`；
-  两者都接受 `device_id/start_index?/args?`，异步成功返回 202 与 `run_id/resolved_args`。
+- 统一执行入口 `POST /api/runs` 接受 `device_id` 与 payload 内 `start_index?/args?`；
+  异步成功返回 202 与 `run_id/resolved_args`。
 
 ### 4.5 任务参数签名算法（psig1）
 
@@ -363,18 +367,18 @@ canonical_default（required=1 时为空串）：
 
 ## 6. API JSON 形态（当前实现）
 
-- **保存**：`POST /api/scripts`、`POST /api/functions` 创建（body 含 `pkg/name/content`）；`PUT` 更新已有资源，默认要求 `expected_version`，`force:true` 跳过版本比较。冲突返回 409。
+- **保存**：`POST /api/apps/:app/resources/scripts`、`.../functions` 创建（JSON body 含 `name/content`，app 段即分区）；`PUT` 更新已有资源，默认要求 `expected_version`，`force:true` 跳过版本比较。冲突返回 409。
 - **导入/读取**：脚本分区导入支持 preview 与 `confirm=1` 写入；读取返回当前规范 YAML 与版本。保存和导入均由服务端严格 loader 校验。
-- **运行**：`POST /api/scripts/:id/run` 与 `POST /api/functions/:id/run` 接受 `device_id/start_index?/args?`；成功异步返回 202 与 `run_id/resolved_args`，参数或 YAML 诊断为结构化错误。
+- **运行**：统一执行入口 `POST /api/runs`（`{runner_id, entrypoint, payload, device_id}`，函数测试 entrypoint 带 `[#函数名]`）；成功异步返回 202 与 `run_id/resolved_args`，参数或 YAML 诊断为结构化错误。
 - **定时任务**：任务持久化全量类型化 `args` 快照与 `param_signature`；任务保存、启用和立即运行复用严格 loader 与签名门禁。
-- **模板**：`POST /api/templates` 只创建，`PUT /api/templates/:name/image` 只替换既有图像；创建接口不覆盖已有模板。
+- **模板**：`POST /api/apps/:app/resources/templates` 只创建（PNG 原始字节 body + `?name=`），同路径 `PUT` 只更新既有模板（Content-Type `image/png` = 图像字节替换；JSON body = 重命名）；创建接口不覆盖已有模板。
 
 ## 7. fixture 体系
 
 - 逻辑 ID 体系、样例索引、golden/expected JSON 结构：见 `server/tests/fixtures/script_v2/README.md`。
 - 前端副本映射：`server/tests/fixtures/script_v2/<file>` ↔ `web/src/script-editor/__fixtures__/yaml|json/<file>`，逐字节一致由 `fixtures.test.js` 的漂移测试强制。
-- 服务端断言位于 `server/src/script_v2/fixtures_tests.rs`，直接调用严格 loader，并覆盖仓库
-  `server/data/<pkg>/{yaml,func,tmpl}` 示例；前端断言位于
+- 服务端断言位于 `server/src/extensions/gamer_yaml/script_v2/fixtures_tests.rs`，直接调用严格 loader，并覆盖仓库
+  `server/data/<pkg>/{scripts,functions,templates}` 示例；前端断言位于
   `web/src/script-editor/__fixtures__/fixtures.test.js`。
 - 修改任何契约必须同步本文档、`docs/reference/YAML.md`、双方 fixture 和双方测试；保存、导入、运行、
   函数测试、任务保存均不得绕过严格 loader。

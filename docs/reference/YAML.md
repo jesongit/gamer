@@ -5,7 +5,8 @@ YAML v2 严格语法；不提供旧格式兼容或自动迁移。规则来源：
 
 - 契约：`docs/reference/SCRIPT_EDITOR_CONTRACT.md`（与当前实现、fixture 同步）；
 - 可执行样例：`server/tests/fixtures/script_v2/`（本文所有示例与其同形态，装载由
-  `server/src/script_v2/`（装载/校验/序列化）+ `server/src/engine/`（执行）保证）；
+  `server/src/extensions/gamer_yaml/script_v2/`（装载/校验/序列化）+
+  `server/src/extensions/gamer_yaml/engine/`（执行，由 gamer.yaml 扩展承载）保证）；
 - 前端：可视化编辑器（`web/src/script-editor/`）以此为唯一编辑模型，保存时由服务端
   统一序列化为本文的「规范 YAML」。
 
@@ -395,8 +396,11 @@ steps:
 
 ### 7.1 手动运行 / 从步骤运行（Console）
 
+统一执行入口（Console 的 yaml 面板经 `runYamlScript` 包装调用）：
+
 ```
-POST /api/scripts/:id/run     body { device_id, start_index?, args? }
+POST /api/runs   body { runner_id: "gamer.yaml", entrypoint: "<pkg>/<文件名>.yaml",
+                       device_id, payload: { start_index?, args? } }
 → 202 { run_id, state, resolved_args }
 ```
 
@@ -411,21 +415,19 @@ POST /api/scripts/:id/run     body { device_id, start_index?, args? }
 
 ### 7.2 函数测试（编辑器 / Console）
 
-```
-POST /api/functions/:id/run   body { device_id, function?, start_index?, args? }
-```
-
-- `id` = `<pkg>/<文件短路径>.yaml`；`function` 缺省 = 文件第一个函数；
-  `start_index` = 函数体内顶层步骤序号；函数入口用 `config.toml` 默认 config
-  （函数库无文件级 config）。函数运行不占用脚本运行接口，RunRecord 以
-  `<pkg>/<file>.yaml[#函数]` 标识展示。
+同一 `POST /api/runs` 入口，`entrypoint` 带函数后缀：
+`<pkg>/<文件短路径>.yaml[#函数名]`（缺省后缀 = 文件第一个函数）；
+`start_index` = 函数体内顶层步骤序号；函数入口用 `config.toml` 默认 config
+（函数库无文件级 config）。RunRecord 以
+`<pkg>/<file>.yaml[#函数]` 标识展示。
 
 ### 7.3 定时任务：参数快照与签名门禁
 
 任务保存的是**完整类型化 args 快照**（每个声明参数都有值，与运行 API 的 args
 同构）+ 保存时的参数签名，两列随任务持久化：
 
-- 保存 `POST /api/tasks`（body 含 `script_id`、`cron`、`args` 稀疏覆盖）时，服务端
+- 保存 `POST /api/tasks`（body 含 `runner:{runner_id,entrypoint,payload}` 与
+  `schedule`；YAML 参数在 `runner.payload.args` 稀疏覆盖）时，服务端
   按脚本当前声明解析成全量快照并计算签名 `param_signature`；
 - **调度运行使用快照**，不回读声明默认值、不依赖浏览器在线；脚本默认值后续变化
   不影响已保存任务；
@@ -463,9 +465,12 @@ canonical_default: bool→true/false；coord→[x,y]（逗号后无空格）；c
   不符返回 `409 {code:"version_conflict"}`。
 - 保存、手动运行、函数测试和任务保存都使用同一严格 v2 loader；解析失败返回
   `code/message/resource/step_path/field` 结构化诊断，不按接口分别放宽格式。
-- 脚本/函数库创建使用 `POST`（同分区同名返回 409）；已有资源更新使用 `PUT`，
-  默认要求 `expected_version`，仅 `force:true` 跳过版本比较。模板上传是创建，
-  已有模板图像替换使用 `PUT /api/templates/:name/image`，不会由创建接口覆盖。
+- 脚本/函数库创建使用 `POST /api/apps/:app/resources/{scripts|functions}`
+  （JSON `{name, content}`，同分区同名返回 409）；已有资源更新使用同路径 `PUT`，
+  默认要求 `expected_version`，仅 `force:true` 跳过版本比较。模板上传是创建
+  （`POST /api/apps/:app/resources/templates`，PNG 原始字节 body + `?name=`），
+  已有模板图像替换用同路径 `PUT`（Content-Type `image/png` = 字节替换；JSON body = 重命名），
+  不会由创建接口覆盖。
 
 ## 10. 严格基线与不兼容边界
 
