@@ -214,3 +214,9 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 
 - **通用资源 API 的字节 kind（templates/resources）创建/替换统一走模板 PNG 重编码**：`api_create_binary_resource_inner` 与字节 PUT 替换对任意字节 kind 都先过 `reencode_bytes`（PNG 解码+重编码），`resources/` 分区经 REST 只能放 PNG 文件；非 PNG 附件只能落盘直写（导出/安装侧只查路径与大小、不校验内容类型），E2E 内容对账要以「创建后落盘字节」为准而非上传字节。
 - **包卸载挂起把任务 `enabled` 落成 0**：`TimerCore::on_app_package_uninstalled` → `suspend_timer_task_async` 直接 `state='suspended', enabled=0, next_wakeup=NULL`，与 dependency_missing（保留用户 enabled 意图、按 runner 精确恢复）语义不同；按「挂起不改 enabled」写的断言或恢复逻辑会翻车。
+## 2026-09-05（Phase 11 W5-A：P11.9 架构守卫测试）
+
+- **通用资源字节 kind 的 GET id 必须整体带分区前缀 `<pkg>/<文件名>`**（URL 里 %2F），`app` 路径段填 `-` 通配只是跳过前缀一致性校验、不会替你补分区名；裸文件名当 id 查必 404（`ResourceStore::get_binary` 按 `split_once('/')` 拆分区）。
+- **字节 kind 的 POST/GET 共用 templates 的 PNG 归一化管线**（`reencode_bytes` 不分 kind 一律 `reencode_template_png`），`kind=resources` 目前存不了任意字节文本，只能存 PNG；要"原样字节"得走 App Package 通道。守卫测试（§14.4）因此以 PNG 往返代替任意字节断言。
+- **`AuthState` 的会话 cookie 签名密钥按实例随机**：测试里重建 router（新 AuthState）后旧 cookie 全部 401，模拟"进程重启"必须重新 login 拿新会话，不能复用上一台 router 的 cookie。
+- **P11.9 源码扫描守卫用「文件+内容片段」行级白名单且双向校验**：只加单向过滤会留死条目——代码改掉后白名单永不命中也不报错，守卫静默失效；`assert_whitelist_alive` 强制每条白名单命中至少一行，条目腐烂即测试失败。

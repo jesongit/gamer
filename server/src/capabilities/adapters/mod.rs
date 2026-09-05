@@ -1,7 +1,7 @@
 //! Native implementations of the core capability contracts.
 //!
 //! These adapters are deliberately thin. They own the translation from logical
-//! handles to the existing DeviceManager, FrameCache, ScriptStore and DB
+//! handles to the existing DeviceManager, FrameCache, ResourceStore and DB
 //! implementations; no backend handle or host path leaves this module.
 
 mod device;
