@@ -26,9 +26,6 @@ pub(crate) enum AppPackageError {
     #[error("App Package 归档大小 {actual} 字节超过上限 {limit} 字节")]
     ArchiveTooLarge { actual: usize, limit: usize },
 
-    #[error("App Package 已安装: {package}@{version}")]
-    AlreadyInstalled { package: String, version: String },
-
     #[error("App Package 未安装: {package}@{version}")]
     NotInstalled { package: String, version: String },
 

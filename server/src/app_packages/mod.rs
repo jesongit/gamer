@@ -341,8 +341,11 @@ packages = ["com.example.game"]
         ));
     }
 
+    /// 安装 staging 落盘；同 id+version 重复安装按 overwrite 语义整体替换
+    /// （计划书 §13.5 简单规则，不做历史版本迁移），其他版本不受影响；
+    /// 摘要不匹配与坏归档仍在不落盘路径上拒绝。
     #[test]
-    fn install_is_immutable_and_staged() {
+    fn install_is_staged_and_same_version_reinstall_overwrites() {
         let temp = TempDir::new().unwrap();
         let store = AppPackageStore::new(temp.path());
         let manifest = package_manifest("official.xxx", "1.2.0", "com.example.game");
@@ -363,10 +366,48 @@ packages = ["com.example.game"]
             format!("{:x}", Sha256::digest(&package))
         });
         assert_eq!(store.list_installed().unwrap().len(), 1);
-        assert!(matches!(
-            store.install_archive(&package, None),
-            Err(AppPackageError::AlreadyInstalled { .. })
-        ));
+
+        // 同 id+version 重装（内容不同）→ overwrite：文件与新归档一致、
+        // install.json 摘要刷新、版本目录仍只有一个
+        let updated = archive(vec![
+            ("manifest.toml", &manifest),
+            ("templates/main.png", b"reinstalled-bytes"),
+            ("scripts/daily.yaml", b"steps: []\n"),
+        ]);
+        let reinstalled = store.install_archive(&updated, None).unwrap();
+        assert_eq!(
+            reinstalled.root(),
+            installed.root(),
+            "同版本重装必须落在同一版本目录"
+        );
+        assert_eq!(
+            std::fs::read(reinstalled.root().join("templates/main.png")).unwrap(),
+            b"reinstalled-bytes",
+            "旧版本目录内容必须被新归档整体替换"
+        );
+        let meta = store
+            .install_meta(
+                reinstalled.manifest().id(),
+                reinstalled.manifest().version(),
+            )
+            .unwrap()
+            .expect("install metadata refreshed");
+        assert_eq!(
+            meta.sha256,
+            {
+                use sha2::{Digest, Sha256};
+                format!("{:x}", Sha256::digest(&updated))
+            },
+            "install.json 必须记录重装归档的摘要"
+        );
+        assert_eq!(store.list_installed().unwrap().len(), 1);
+        assert!(!store
+            .data_root()
+            .join("app-packages/.staging")
+            .read_dir()
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false));
+
         let wrong_digest = store.install_archive(&package, Some(&"0".repeat(64)));
         assert!(matches!(
             wrong_digest,
