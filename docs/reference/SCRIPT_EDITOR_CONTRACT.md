@@ -1,6 +1,13 @@
 # 脚本 v2 语法契约
 
-> 状态：当前无兼容基线；改动本文档需同步 fixture 与双方测试。
+> **Status: superseded（历史档案）**——YAML v2 已于 Phase 12 P12.9 整体删除
+> （ADR-YAML-01）：script_v2 parser/runtime、golden fixtures 与双格式编辑器
+> 均不复存在，本文描述的契约随之失效，仅作历史档案保留。现行 v3 语法契约见
+> `docs/yaml-v3/`（steps/call/params/vision/timing/runtime）与
+> `docs/reference/YAML.md` §3；前端编辑器契约以 `web/src/script-editor/` 的
+> v3 model/codec 实现为准。
+
+> 原状态：当前无兼容基线；改动本文档需同步 fixture 与双方测试。
 > 依据：当前服务端严格 loader、编辑器 Model 与 YAML 文档的共同契约。
 > 可执行样例：`server/tests/fixtures/script_v2/`（索引见其 README.md），前端副本
 > `web/src/script-editor/__fixtures__/`（逐字节一致，一致性有测试守护）。

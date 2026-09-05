@@ -242,3 +242,9 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 
 - **.gplugin 不是字节可复现产物**：plugin-signer 打 zip 用当前时间做 entry mtime，同一份 guest 源码两次构建 sha256 不同——别用「sha 没变」判断没重打，registry.json 与 .gplugin 必须同批由 `tools/build-plugins.ps1` 生成（proof 绑定 sha256）。
 - **扩展 manifest 升版会打挂按版本卸载的测试**：guard 全链测试曾硬编码 `YAML_VERSION="3.0.0"`，升 3.1.0 后 DELETE `/api/extensions/:id/:version` 404；版本一律从 `YAML_EXTENSION_MANIFEST_TOML` 现场解析（`yaml_market_version()`），勿再硬编码。
+
+## 2026-09-05（Phase 12 P12.9：YAML v2 删除）
+
+- **v2 脚本删除后只报版本错误、且「看得见的失败点不止运行一处」**：非 `version: 3` 源在保存/导入/导出 preflight（400 invalid_yaml）、entrypoint 描述（400 invalid_script）、手动运行/任务门禁（版本诊断）统一报 `yaml.v3.version(.missing)`——排查旧脚本问题先看版本键，不要往参数/模板方向猜。
+- **模板引用改写对存量 v2 文件静默跳过**：模板重命名只改写可解析的 v3 源（`rename_template_source` 对非 v3 返回 None、函数库解析失败跳过），分区里有删不掉的 v2 存量文件时其模板引用不会跟随改名；v3 保存边界不再做模板存在性校验（归运行期 composite 解析与前端 `yaml.v3.resource.tmpl_not_found`）。
+- **手动/定时函数运行现与脚本同走 v3 guest**（原 v2 原生执行器路径已删）：`RunTarget::Function` 经 `yaml_vnext::load_function` 进 `run_yaml_vnext`，函数文件必须是合法 v3 bare-map；参数 wire 仍是七类 TypedValue，int/number 显式实参以文本形态过线（已知限制，见 task_params `coerce_v3_arg`）。

@@ -1,4 +1,4 @@
-//! Legacy YAML task adapter for Timer Core.
+//! gamer.yaml 的 Timer Core 任务适配器（v3-only）。
 //!
 //! This is the only timer-side module that knows the current ResourceStore,
 //! typed parameter snapshot, and `RunTarget::Script`.  It translates the
