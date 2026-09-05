@@ -209,3 +209,10 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **判定「生产无调用方」别用 `| head` 截断的 grep**：matcher 路径缓存子系统曾被误判为纯死代码，实为「消费端仍在（api/resources、app_packages/edit 的失效调用）+ 生产端早已不产出」的半死子系统；完整判定用 `grep -rn ... | awk -F: '{print $1}' | sort -u`，删子系统时生产者/消费者两端一起清。
 - **`#[ignore]` 的测试同样参与编译**：`cargo test --no-default-features` 因 phase0 keymap e2e 测试引用 `wasm-runtime` feature 门控符号而编译失败（测试体根本不会运行）；跨 feature 引用的测试必须自带 `#[cfg(feature = ...)]`。
 - **模板缓存按内容哈希（SHA-256）寻址后，写路径失效调用是纯冗余**：新内容天然新键，旧条目只会多占内存等 LRU 驱逐，不影响正确性；P11.7 已整体移除路径键/解析代数缓存与全部失效调用，后续不要再往 `invalidate_template_cache_*` 方向加代码（已不存在）。
+
+## 2026-09-05（Phase 11 W5-A：P11.9 架构守卫测试）
+
+- **通用资源字节 kind 的 GET id 必须整体带分区前缀 `<pkg>/<文件名>`**（URL 里 %2F），`app` 路径段填 `-` 通配只是跳过前缀一致性校验、不会替你补分区名；裸文件名当 id 查必 404（`ResourceStore::get_binary` 按 `split_once('/')` 拆分区）。
+- **字节 kind 的 POST/GET 共用 templates 的 PNG 归一化管线**（`reencode_bytes` 不分 kind 一律 `reencode_template_png`），`kind=resources` 目前存不了任意字节文本，只能存 PNG；要"原样字节"得走 App Package 通道。守卫测试（§14.4）因此以 PNG 往返代替任意字节断言。
+- **`AuthState` 的会话 cookie 签名密钥按实例随机**：测试里重建 router（新 AuthState）后旧 cookie 全部 401，模拟"进程重启"必须重新 login 拿新会话，不能复用上一台 router 的 cookie。
+- **P11.9 源码扫描守卫用「文件+内容片段」行级白名单且双向校验**：只加单向过滤会留死条目——代码改掉后白名单永不命中也不报错，守卫静默失效；`assert_whitelist_alive` 强制每条白名单命中至少一行，条目腐烂即测试失败。
