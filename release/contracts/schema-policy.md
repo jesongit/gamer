@@ -44,8 +44,9 @@
 
 | Release | min_read_schema | max_read_schema | target_schema | 说明 |
 |---|---|---|---|---|
-| v0.1.0（当前代码） | 1 | 1 | 1 | v1 唯一基线：=1 校验后开放；=0 / >1 拒绝 |
+| v0.1.0 | 1 | 1 | 1 | v1 唯一基线：=1 校验后开放；=0 / >1 拒绝 |
 | v0.2.0（假设示例） | 1 | 2 | 2 | 引入迁移 1→2；可从 v1 库升级；DB=2 正常打开；DB≥3 拒绝 |
+| v0.1.1+（schema v3 收口，当前代码） | 1 | 3 | 3 | 1→2 Timer Core 数据迁移（旧 tasks 表数据并入 timer_tasks，runner_id=gamer.yaml）；2→3 Task 模型收口（legacy tasks 表删除、schedule_json 改写 provider/config 形态）；可从 v1/v2 库逐级升级；DB≥4 拒绝 |
 
 manifest 对应：`release.data_schema` = `target_schema`；`release.rollback_floor` 语义见 §6。
 
