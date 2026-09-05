@@ -1,0 +1,18 @@
+# gamer.yaml 官方产品 guest（ADR-12/13 扩展生态）：WASM Component 解释执行
+# version: 3 脚本小 AST。由两端消费：
+#   - tools/build-plugins.ps1 打包签名 gamer.yaml-<ver>.gplugin（官方市场）
+#   - yaml_extension.rs 测试链路现场构建（server/target/yaml-guest）
+# 本 crate 独立于 server workspace，不随 server 编译；wit 路径相对本目录
+# （../../wit/gamer → server/wit/gamer），ABI 变更须重打官方插件包。
+[package]
+name = "gamer-yaml-guest"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+wit-bindgen = "0.57.1"
+wit-component = "0.254.0"

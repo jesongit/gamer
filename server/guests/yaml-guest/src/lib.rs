@@ -6,10 +6,10 @@ wit_bindgen::generate!({
 use exports::gamer::host::automation::Guest;
 use gamer::host::{capability, programs};
 
-/// A real Component guest fixture. The host sends the lowered small AST as
-/// JSON; the fixture interprets control flow and forwards primitive invocations
-/// through the WIT capability.invoke import. It intentionally has no WASI
-/// imports and no access to Gamer internals.
+/// gamer.yaml 官方产品 guest（与测试同源：yaml_extension.rs 测试链路现场构建
+/// 本 crate，官方市场包由 tools/build-plugins.ps1 打包同一份源码）。宿主下发
+/// lower 后的小 AST JSON；本 guest 解释控制流并经 WIT capability.invoke 转发
+/// 原语调用。刻意无 WASI import、不触达 Gamer 内部。
 ///
 /// 顶层可选 `start_index`（契约 §8）：跳过其前的**顶层**步骤（「从此运行」；
 /// 嵌套分支 / 循环体不受影响——lower 后顶层小 AST 步与 surface 步 1:1 对应）。
@@ -27,9 +27,9 @@ use gamer::host::{capability, programs};
 /// `call_start` / `budget`。发射是尽力而为——宿主无 sink 或拒绝时忽略返回值
 /// 继续执行；lower 展开物（timing sleep / 轮询体）不带 label（`op: step`
 /// 包装），天然静默。
-struct Fixture;
+struct YamlGuest;
 
-impl Guest for Fixture {
+impl Guest for YamlGuest {
     fn run(program_json: String) -> Result<String, String> {
         let program: serde_json::Value = serde_json::from_str(&program_json)
             .map_err(|error| format!("program JSON 无效: {error}"))?;
@@ -63,7 +63,7 @@ impl Guest for Fixture {
             execute_steps(&all_steps[start_index..], &mut values, &mut budget);
         match outcome {
             // 顶层 break 与既有语义一致（忽略，等价 Continue 收尾）
-            Ok(Flow::Continue | Flow::Return(_) | Flow::Break) => {
+            Ok(Flow::Continue | Flow::Return | Flow::Break) => {
                 emit_event(serde_json::json!({ "ev": "run_end", "ok": true }));
             }
             Err(error) => {
@@ -347,7 +347,7 @@ fn execute_step(
         "return" => {
             let value = evaluate(step.get("value"), values)?;
             values.insert("__return".to_string(), value.clone());
-            Ok(Flow::Return(value))
+            Ok(Flow::Return)
         }
         "throw" => Err(evaluate(step.get("message"), values)
             .ok()
@@ -380,7 +380,7 @@ fn execute_step(
                 let mut child_values = args;
                 apply_defaults(&callee, &mut child_values);
                 match execute_steps(callee_steps, &mut child_values, budget)? {
-                    Flow::Continue | Flow::Return(_) => {
+                    Flow::Continue | Flow::Return => {
                         if let Some(save) = step.get("save").and_then(serde_json::Value::as_str) {
                             values.insert(
                                 save.to_string(),
@@ -636,7 +636,7 @@ fn values_equal(left: &serde_json::Value, right: &serde_json::Value) -> bool {
 enum Flow {
     Continue,
     Break,
-    Return(serde_json::Value),
+    Return,
 }
 
-export!(Fixture);
+export!(YamlGuest);

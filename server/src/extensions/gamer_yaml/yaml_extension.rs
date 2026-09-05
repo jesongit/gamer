@@ -40,7 +40,7 @@ pub(crate) const EVENT_CAPABILITY: &str = "__event";
 #[allow(dead_code)]
 pub(crate) const YAML_EXTENSION_MANIFEST_TOML: &str = r#"manifest_version = 1
 id = "gamer.yaml"
-version = "3.0.0"
+version = "3.1.0"
 name = "Gamer YAML vNext"
 description = "Surface YAML v3 lowering and execution guest"
 entry = "plugin.wasm"
@@ -112,7 +112,7 @@ const DEFAULT_SCREEN_HEIGHT: u32 = 1000;
 
 /// v3 执行预算（ADR-YAML-04 / 契约 §5）：逻辑步与调用深度上限。
 ///
-/// 生产链路由 WASM guest 本地计数（`server/tests/yaml-guest` 的
+/// 生产链路由 WASM guest 本地计数（`server/guests/yaml-guest` 的
 /// ExecutionBudget，常量在此对齐），本模块的原生参考解释器（无 wasm 退化
 /// 路径 / 测试）实现同语义。步数按**逻辑步**计：顶层、loop 体每轮每个子步、
 /// if 分支体、call 目标程序体全计，loop 每轮迭代本身也计（空转体死循环同受
@@ -2402,31 +2402,31 @@ mod wasm_tests {
         }
     }
 
-    fn fixture_guest_dir() -> PathBuf {
+    fn guest_source_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
+            .join("guests")
             .join("yaml-guest")
     }
 
-    fn fixture_target_dir() -> PathBuf {
+    fn guest_target_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join("yaml-guest")
     }
 
-    fn fixture_module_path() -> PathBuf {
-        fixture_target_dir()
+    fn guest_module_path() -> PathBuf {
+        guest_target_dir()
             .join("wasm32-unknown-unknown")
             .join("release")
-            .join("gamer_yaml_fixture.wasm")
+            .join("gamer_yaml_guest.wasm")
     }
 
-    fn run_fixture_cargo(args: &[String]) -> Output {
+    fn run_guest_cargo(args: &[String]) -> Output {
         let (subcommand, rest) = args
             .split_first()
             .expect("yaml guest cargo 子进程缺少 subcommand");
-        let guest_dir = fixture_guest_dir();
-        let target_dir = fixture_target_dir();
+        let guest_dir = guest_source_dir();
+        let target_dir = guest_target_dir();
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
         let mut command = Command::new(cargo);
         command
@@ -2451,7 +2451,7 @@ mod wasm_tests {
         })
     }
 
-    fn assert_fixture_command(output: Output, stage: &str) {
+    fn assert_guest_command(output: Output, stage: &str) {
         if output.status.success() {
             return;
         }
@@ -2463,11 +2463,11 @@ mod wasm_tests {
         );
     }
 
-    fn fixture_module() -> Vec<u8> {
+    fn guest_module() -> Vec<u8> {
         static MODULE: OnceLock<Vec<u8>> = OnceLock::new();
         MODULE
             .get_or_init(|| {
-                let output = run_fixture_cargo(&[
+                let output = run_guest_cargo(&[
                     "build".into(),
                     "--locked".into(),
                     "--quiet".into(),
@@ -2476,8 +2476,8 @@ mod wasm_tests {
                     "--target".into(),
                     "wasm32-unknown-unknown".into(),
                 ]);
-                assert_fixture_command(output, "guest wasm 构建");
-                let path = fixture_module_path();
+                assert_guest_command(output, "guest wasm 构建");
+                let path = guest_module_path();
                 fs::read(&path).unwrap_or_else(|error| {
                     panic!("yaml guest wasm 不存在: {}: {error}", path.display())
                 })
@@ -2485,9 +2485,9 @@ mod wasm_tests {
             .clone()
     }
 
-    fn componentize_fixture(output_path: &Path) -> Vec<u8> {
-        let module_path = fixture_module_path();
-        let output = run_fixture_cargo(&[
+    fn componentize_guest(output_path: &Path) -> Vec<u8> {
+        let module_path = guest_module_path();
+        let output = run_guest_cargo(&[
             "run".into(),
             "--locked".into(),
             "--quiet".into(),
@@ -2498,7 +2498,7 @@ mod wasm_tests {
             module_path.to_string_lossy().into_owned(),
             output_path.to_string_lossy().into_owned(),
         ]);
-        assert_fixture_command(output, "WIT Component 封装");
+        assert_guest_command(output, "WIT Component 封装");
         fs::read(output_path).unwrap_or_else(|error| {
             panic!(
                 "yaml guest Component 输出不存在: {}: {error}",
@@ -2507,28 +2507,28 @@ mod wasm_tests {
         })
     }
 
-    fn fixture_component() -> Vec<u8> {
+    fn guest_component() -> Vec<u8> {
         static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
         COMPONENT
             .get_or_init(|| {
-                fixture_module();
+                guest_module();
                 let temp = tempfile::tempdir().expect("无法创建 YAML Component 临时目录");
-                componentize_fixture(&temp.path().join("yaml-guest.component.wasm"))
+                componentize_guest(&temp.path().join("yaml-guest.component.wasm"))
             })
             .clone()
     }
 
     #[test]
-    fn yaml_guest_fixture_builds_wasm_module() {
-        let module = fixture_module();
+    fn yaml_guest_builds_wasm_module() {
+        let module = guest_module();
         assert!(module.len() >= 8, "guest wasm 太短");
         assert_eq!(&module[..4], b"\0asm");
         assert_eq!(&module[4..8], [1, 0, 0, 0]);
     }
 
     #[test]
-    fn yaml_guest_fixture_componentizes_with_checked_in_wit() {
-        let component = fixture_component();
+    fn yaml_guest_componentizes_with_checked_in_wit() {
+        let component = guest_component();
         assert!(component.len() >= 8, "YAML Component 太短");
         assert_eq!(&component[..4], b"\0asm");
         assert_eq!(&component[4..8], [13, 0, 1, 0]);
@@ -2536,10 +2536,10 @@ mod wasm_tests {
 
     #[test]
     fn yaml_componentizer_releases_output_file_before_returning() {
-        fixture_module();
+        guest_module();
         let temp = tempfile::tempdir().expect("无法创建 YAML Component 生命周期临时目录");
         let output = temp.path().join("yaml-guest.component.wasm");
-        componentize_fixture(&output);
+        componentize_guest(&output);
         let moved = temp.path().join("yaml-guest.component.moved.wasm");
         fs::rename(&output, &moved).expect("Componentizer 返回后输出文件仍被占用");
         fs::remove_file(&moved).expect("无法删除已关闭的 Component 输出文件");
@@ -2593,7 +2593,7 @@ runtime = "^1.0"
         .unwrap();
         let result = runtime
             .run(YamlWasmRunRequest {
-                wasm: fixture_component(),
+                wasm: guest_component(),
                 program,
                 args: BTreeMap::new(),
                 resolver: Some(Arc::new(FixtureResolver)),
@@ -2619,7 +2619,7 @@ runtime = "^1.0"
         .unwrap();
         let result = runtime
             .run(YamlWasmRunRequest {
-                wasm: fixture_component(),
+                wasm: guest_component(),
                 program,
                 args: BTreeMap::new(),
                 resolver: None,
@@ -2640,7 +2640,7 @@ runtime = "^1.0"
         let denied_program = load("version: 3\nsteps:\n  - text: denied\n").unwrap();
         let denied = runtime
             .run(YamlWasmRunRequest {
-                wasm: fixture_component(),
+                wasm: guest_component(),
                 program: denied_program,
                 args: BTreeMap::new(),
                 resolver: None,
@@ -2667,7 +2667,7 @@ runtime = "^1.0"
         .unwrap();
         let cancelled = runtime
             .run(YamlWasmRunRequest {
-                wasm: fixture_component(),
+                wasm: guest_component(),
                 program: cancelled_program,
                 args: BTreeMap::new(),
                 resolver: None,
@@ -2734,7 +2734,7 @@ runtime = "^1.0"
                 .write_all(YAML_EXTENSION_MANIFEST_TOML.as_bytes())
                 .unwrap();
             writer.start_file("plugin.wasm", options).unwrap();
-            writer.write_all(&fixture_component()).unwrap();
+            writer.write_all(&guest_component()).unwrap();
             writer.finish().unwrap();
         }
         let installed = service.install(&archive).await.unwrap();
@@ -2856,7 +2856,7 @@ runtime = "^1.0"
                 .write_all(YAML_EXTENSION_MANIFEST_TOML.as_bytes())
                 .unwrap();
             writer.start_file("plugin.wasm", options).unwrap();
-            writer.write_all(&fixture_component()).unwrap();
+            writer.write_all(&guest_component()).unwrap();
             writer.finish().unwrap();
         }
         service.install(&archive).await.unwrap();
@@ -3008,7 +3008,7 @@ log = "^1.0"
         sink: Option<Arc<dyn crate::core::events::EventSink>>,
     ) -> YamlWasmRunRequest {
         YamlWasmRunRequest {
-            wasm: fixture_component(),
+            wasm: guest_component(),
             program,
             args: BTreeMap::new(),
             resolver,
@@ -3276,7 +3276,7 @@ log = "^1.0"
         });
         let error = runtime
             .run(YamlWasmRunRequest {
-                wasm: fixture_component(),
+                wasm: guest_component(),
                 program,
                 args: BTreeMap::new(),
                 resolver: None,

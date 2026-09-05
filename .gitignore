@@ -5,10 +5,10 @@ server/target-rc/
 # 并行任务/本地隔离构建目录（CARGO_TARGET_DIR 替代位，均为可重建生成物）
 server/target-b/
 server/target-d/
-# Phase 3 与 WASM guest fixture 的独立 Cargo 输出目录（均为可重建生成物）
+# Phase 3 与 WASM guest 的独立 Cargo 输出目录（均为可重建生成物）
 server/target-phase3/
+server/guests/yaml-guest/target/
 server/tests/keymap-guest/target/
-server/tests/yaml-guest/target/
 server/tests/call-guest/target/
 # 本机配置（真实路径/密码，不入库）；分发以 server/config.example.toml 为准
 server/config.toml

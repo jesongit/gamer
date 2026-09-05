@@ -22,7 +22,7 @@ const DEFAULT_FIND_TIMEOUT_MS: u64 = 30 * 60_000;
 
 /// splitmix64 —— wait 随机区间的 PRNG（方案 (a)：host 注入 run 级 nonce 进
 /// program JSON，guest 内本地 PRNG，无 WIT 变更）。guest 解释器
-/// `server/tests/yaml-guest/src/lib.rs` 有逐字拷贝；算法或常量改动必须两处
+/// `server/guests/yaml-guest/src/lib.rs` 有逐字拷贝；算法或常量改动必须两处
 /// 同步（`splitmix64_test_vectors` 锁定测试向量）。
 pub(crate) fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -2695,7 +2695,7 @@ mod tests {
 
     #[test]
     fn splitmix64_test_vectors() {
-        // 与 server/tests/yaml-guest/src/lib.rs 的逐字拷贝锁定同一向量：
+        // 与 server/guests/yaml-guest/src/lib.rs 的逐字拷贝锁定同一向量：
         // 宿主原生参考解释器与 WASM guest 必须产出相同随机序列。
         let mut state = 7u64;
         assert_eq!(super::splitmix64(&mut state), 7191089600892374487);

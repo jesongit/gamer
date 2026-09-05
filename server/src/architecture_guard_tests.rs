@@ -661,8 +661,17 @@ fn architecture_guard_dependency_direction_core_never_paths_into_extension_inter
 
 /// gamer.yaml 扩展 id（安装/生命周期路由参数）。
 const YAML_ID: &str = "gamer.yaml";
-/// gamer.yaml 市场包 manifest 版本（见 YAML_EXTENSION_MANIFEST_TOML）。
-const YAML_VERSION: &str = "3.0.0";
+/// gamer.yaml 市场包 manifest 版本：从 YAML_EXTENSION_MANIFEST_TOML 现场解析，
+/// 与 manifest 常量同源（硬编码曾在 3.1.0 升版时漂移导致按版本卸载 404）。
+fn yaml_market_version() -> String {
+    crate::extensions::parse_manifest(
+        crate::extensions::gamer_yaml::YAML_EXTENSION_MANIFEST_TOML.as_bytes(),
+    )
+    .expect("内嵌 gamer.yaml manifest 必须可解析")
+    .version()
+    .as_str()
+    .to_owned()
+}
 
 /// 生产形态 Core 依赖（目录生命周期归 CoreDeps：GuardApp 只是路由视图，同一
 /// CoreDeps 可先后装配多个「进程」——启动对账路径依赖这一点）。
@@ -1146,7 +1155,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
         &guard.app,
         request(
             "DELETE",
-            &format!("/api/extensions/{YAML_ID}/{YAML_VERSION}"),
+            &format!("/api/extensions/{YAML_ID}/{}", yaml_market_version()),
             &json_headers(&cookie),
             None,
         ),

@@ -34,7 +34,7 @@ use crate::extensions::wit;
 /// P12.4（ADR-YAML-04）：Engine 开启 epoch interruption 作为取消兜底——guest
 /// 纯计算死循环不经过 capability 边界，stop 标志只能靠 epoch 检查点打断。
 /// epoch 仅服务取消，不做 host 超时强杀（预算语义全部由 guest 的
-/// ExecutionBudget 承载，见 tests/yaml-guest）。
+/// ExecutionBudget 承载，见 guests/yaml-guest）。
 #[derive(Debug)]
 pub(crate) struct LazyYamlWasmtimeRuntime {
     engine: OnceLock<Engine>,

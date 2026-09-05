@@ -6,7 +6,8 @@
 .DESCRIPTION
     Phase 10 验收链路的打包端：
       1. 构建 tools/plugin-signer（签名/打包/proof 工具）。
-      2. 以 wasm32-unknown-unknown 编译 server/tests/keymap-guest 与 server/tests/yaml-guest，
+      2. 以 wasm32-unknown-unknown 编译 server/tests/keymap-guest（测试 fixture）与
+         server/guests/yaml-guest（gamer.yaml 官方产品 guest），
          经各自 componentize bin 封装为 WIT Component。
       3. 用 tools/plugin-signing/<key-id>.key（ed25519 私钥，hex）给 manifest.toml 签名，
          打包 .gplugin（zip：manifest.toml + plugin.wasm + ui + signature.sig），
@@ -114,7 +115,9 @@ function Build-Guest {
     return $component
 }
 $keymapComponent = Build-Guest 'keymap-guest' (Join-Path $ServerDir 'tests\keymap-guest') 'gamer_keymap_fixture.wasm'
-$yamlComponent = Build-Guest 'yaml-guest' (Join-Path $ServerDir 'tests\yaml-guest') 'gamer_yaml_fixture.wasm'
+# gamer.yaml 产品 guest：源码在 server/guests/yaml-guest（P12.8 迁出 tests 目录），
+# wasm 产物名随包更名 gamer_yaml_guest.wasm
+$yamlComponent = Build-Guest 'yaml-guest' (Join-Path $ServerDir 'guests\yaml-guest') 'gamer_yaml_guest.wasm'
 
 # ---- 4. 打包 .gplugin（manifest 源：tools/plugins/<id>/manifest.toml）----
 Write-Host "===[4/5] 打包并签名 .gplugin ===" -ForegroundColor Cyan

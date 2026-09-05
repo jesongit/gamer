@@ -1,6 +1,6 @@
 manifest_version = 1
 id = "gamer.yaml"
-version = "3.0.0"
+version = "3.1.0"
 name = "Gamer YAML vNext"
 description = "Surface YAML v3 lowering and execution guest"
 entry = "plugin.wasm"
