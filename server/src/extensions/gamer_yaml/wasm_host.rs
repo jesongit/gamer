@@ -20,8 +20,10 @@ use wasmtime::{Engine, Store, StoreContextMut, UpdateDeadline};
 
 use super::yaml_extension::{
     NativeYamlHost, YamlProgramResolver, YamlWasmRunRequest, YamlWasmRunResult, YamlWasmRuntime,
+    EVENT_CAPABILITY,
 };
 use super::yaml_vnext;
+use crate::core::events::{RuntimeEvent, RuntimeEventKind};
 use crate::extensions::host_api::HostApi;
 use crate::extensions::wit;
 
@@ -151,11 +153,15 @@ impl Drop for TickerGuard<'_> {
 
 /// The YAML world has a separate state type. This keeps its resolver and
 /// source-oriented call behavior out of the generic extension HostState.
+///
+/// `sink`（P12.6）：v3 运行事件汇——`__event` 私有 capability 拦截转发 +
+/// vision/input capability 的宿主侧补发（经 NativeYamlHost）都走它。
 struct YamlHostState {
     host: HostApi,
     cancelled: Arc<AtomicBool>,
     app_context: Option<crate::core::AppContext>,
     yaml_programs: Option<Arc<dyn YamlProgramResolver>>,
+    sink: Option<Arc<dyn crate::core::events::EventSink>>,
 }
 
 impl YamlHostState {
@@ -164,12 +170,51 @@ impl YamlHostState {
         cancelled: Arc<AtomicBool>,
         app_context: crate::core::AppContext,
         yaml_programs: Option<Arc<dyn YamlProgramResolver>>,
+        sink: Option<Arc<dyn crate::core::events::EventSink>>,
     ) -> Self {
         Self {
             host,
             cancelled,
             app_context: Some(app_context),
             yaml_programs,
+            sink,
+        }
+    }
+
+    /// `__event` 私有通道拦截（P12.6，方案 (a) 零 WIT 变更）：guest 把
+    /// `{"ev":...}` 事件 JSON 发到 `capability.invoke("__event", …)`，这里
+    /// **先于**权限校验/NativeYamlHost 解析成 [`RuntimeEventKind`]（serde
+    /// tag="ev" 白名单即事件词表），补 run 维度的 device 作用域后转发 sink。
+    /// 解析失败 / 无 sink / 发射失败一律静默——可视化事件不影响运行结果，
+    /// 也不要求扩展声明任何权限。
+    fn emit_run_event(
+        &mut self,
+        args_json: &str,
+    ) -> Result<String, wit::yaml::gamer::host::types::HostError> {
+        let sink = self.sink.clone();
+        let context = self.app_context.clone();
+        let args_json = args_json.to_string();
+        let future = async move {
+            let Some(sink) = sink else {
+                return Ok("null".to_string());
+            };
+            let context =
+                context.ok_or_else(|| anyhow::anyhow!("capability.invoke 需要 AppContext"))?;
+            // 非法事件静默丢弃（serde tag="ev" 解析即白名单校验）
+            let Ok(kind) = serde_json::from_str::<RuntimeEventKind>(&args_json) else {
+                return Ok("null".to_string());
+            };
+            sink.emit(RuntimeEvent::new(context.device_id.clone(), kind))
+                .await?;
+            Ok("null".to_string())
+        };
+        // 发射失败只记 debug：可视化事件不影响运行结果
+        match block_on_yaml(future) {
+            Ok(payload) => Ok(payload),
+            Err(error) => {
+                tracing::debug!(%error, "yaml run event emit failed");
+                Ok("null".to_string())
+            }
         }
     }
 }
@@ -185,15 +230,26 @@ impl wit::yaml::gamer::host::capability::Host for YamlHostState {
         capability: String,
         args_json: String,
     ) -> Result<String, wit::yaml::gamer::host::types::HostError> {
+        // P12.6 私有事件通道：不进 CapabilityRegistry、不做权限校验（方案 (a)）
+        if capability == EVENT_CAPABILITY {
+            return self.emit_run_event(&args_json);
+        }
         let host = self.host.clone();
         let context = self.app_context.clone();
         let cancelled = self.cancelled.clone();
+        let sink = self.sink.clone();
         let result = block_on_yaml(async move {
             let context =
                 context.ok_or_else(|| anyhow::anyhow!("capability.invoke 需要 AppContext"))?;
-            let value =
-                NativeYamlHost::invoke_json(host, context, cancelled, &capability, &args_json)
-                    .await?;
+            let value = NativeYamlHost::invoke_json(
+                host,
+                context,
+                cancelled,
+                sink,
+                &capability,
+                &args_json,
+            )
+            .await?;
             Ok::<_, anyhow::Error>(serde_json::to_string(&value)?)
         });
         result.map_err(|error| yaml_capability_error(&error))
@@ -316,6 +372,7 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
             request.stop.clone(),
             request.context,
             request.resolver,
+            request.sink.clone(),
         );
         let mut store = Store::new(self.engine(), state);
         // epoch 取消兜底（P12.4 / ADR-YAML-04）：deadline 以 1 tick 为步进，

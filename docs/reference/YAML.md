@@ -641,3 +641,48 @@ guest 解释器支持 program 顶层可选 `start_index`：跳过其前的**顶�
 （与 v2「从此运行」语义一致）；嵌套分支 / 循环体不受影响——lower 后的顶层小
 AST 步与 surface 步骤 1:1 对应，序号即顶层 surface 步序号。host 由运行请求
 （`YamlWasmRunRequest.start_index`）注入，缺省 `None` = 从头执行。
+
+### 11.7 运行可视化事件（P12.6 / ADR-YAML-03 wire 契约）
+
+v3 脚本运行时经 control DataChannel 反向推送运行结构事件（信封
+`{"type":"se","ev":...}`；引擎 emit → viewers 注册表 `control_dc`，手动运行与
+定时任务同样生效）。事件**不携带帧图像数据**；前端「运行事件 feed」与
+ScriptSummary 步骤高亮由这些事件驱动。
+
+**step 身份（path 语法）**：lower 阶段为每个 surface 步骤生成稳定路径挂在
+产出的小 AST 步上，语法与前端编辑器寻址一致：
+
+- 顶层：`steps[0]`、`steps[2]`；
+- if / find 分支：`steps[0].then[1]`、`steps[0].else[0]`；
+- loop 体：`steps[1].steps[3]`；
+- match_first：`steps[2].candidates[0].steps[1]`、超时分支 `steps[2].else[0]`。
+
+同一脚本重复运行、编辑无损往返后路径保持稳定。call 进入被调方后帧内事件的
+path 仍是该脚本的本地路径（`call_start` 事件宣告帧切换）。
+
+**事件 wire 表**（ev 名 × 载荷 × 发射点）：
+
+| 事件 | 载荷 | 发射点 |
+|---|---|---|
+| `run_start` | `{}` | 运行进入（guest / 原生解释器） |
+| `run_end` | `{ok, error?}` | 运行退出（ok=false 带 error 原文） |
+| `step_start` | `{path, desc}` | 进入 surface 步骤（desc = 中文摘要，如 `find 登录按钮`、`tap 0.5,0.3`、`call script:daily/login`、`wait 300ms`） |
+| `step_end` | `{path, ok, error?}` | surface 步骤完成 / 失败 |
+| `call_start` | `{target, depth}` | 进入 call 目标（depth = 本地调用深度） |
+| `vision` | `{template, found, score?, center?}` | 每次模板匹配后（宿主侧 vision 能力补发；center 为相对坐标） |
+| `budget` | `{kind}` | 预算终止：`STEP_BUDGET_EXCEEDED` / `CALL_DEPTH_EXCEEDED` / `CANCELLED`（先于 run_end 发出） |
+
+- **投屏标记兼容**：v2 引擎的 `tap` / `swipe` / `hit` / `miss` 事件（设备像素
+  坐标）在 v3 保留同形——宿主侧 input.tap / input.swipe / vision 匹配完成后
+  补发，前端 overlay 无需改动即可显示 v3 运行标记。
+- **发射通道（零 WIT 变更）**：guest 把事件 JSON 发到私有
+  `capability.invoke("__event", …)`，宿主先于权限校验拦截转发 EventSink；
+  `__event` 不进 CapabilityRegistry、不要求权限声明，解析失败静默丢弃——
+  可视化事件永不影响运行结果。
+- **静默展开物**：lower 展开的 timing sleep（after_tap / after_match /
+  poll_interval）与 find / check / match_first 轮询体不是 surface 步骤，
+  不产生 step 事件（vision 事件每次真实匹配仍会发出）。
+- **前端消费**：`web/src/components/console/useRunEvents.js`（分发 + feed
+  状态）→ `RunEventsPanel.vue`（运行事件 feed，budget / 失败行高亮）+
+  `ScriptSummary.vue`（按 path 高亮当前顶层卡片：嵌套路径映射其顶层祖先，
+  如 `steps[2].then[1]` → 第 3 张卡；失败标红；run_start / 新运行重置）。

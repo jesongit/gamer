@@ -20,6 +20,13 @@ use gamer::host::{capability, programs};
 /// 约束）；call 进入被调方深度 +1、返回 -1。超限返回以机器可读码开头的错误
 /// 文本（`STEP_BUDGET_EXCEEDED` / `CALL_DEPTH_EXCEEDED`），该文本经宿主原样
 /// 进入 RunRecord 错误信息与运行日志。
+///
+/// 运行可视化事件（P12.6 / 契约 §6 / ADR-YAML-03）：经私有
+/// `capability.invoke("__event", …)` 通道发射（宿主拦截转发 EventSink，不进
+/// 权限声明）：`run_start` / `run_end` / `step_start` / `step_end` /
+/// `call_start` / `budget`。发射是尽力而为——宿主无 sink 或拒绝时忽略返回值
+/// 继续执行；lower 展开物（timing sleep / 轮询体）不带 label（`op: step`
+/// 包装），天然静默。
 struct Fixture;
 
 impl Guest for Fixture {
@@ -46,16 +53,57 @@ impl Guest for Fixture {
                 all_steps.len()
             ));
         }
+        emit_event(serde_json::json!({ "ev": "run_start" }));
         let mut budget = ExecutionBudget::default();
         // wait 随机区间（契约 §4，方案 (a)）：宿主注入的 run 级 nonce 作
         // splitmix64 种子（算法与宿主侧 yaml_vnext::splitmix64 逐字一致，
         // 测试向量锁定在两侧）。
         budget.rng = program.get("nonce").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        execute_steps(&all_steps[start_index..], &mut values, &mut budget)?;
+        let outcome =
+            execute_steps(&all_steps[start_index..], &mut values, &mut budget);
+        match outcome {
+            // 顶层 break 与既有语义一致（忽略，等价 Continue 收尾）
+            Ok(Flow::Continue | Flow::Return(_) | Flow::Break) => {
+                emit_event(serde_json::json!({ "ev": "run_end", "ok": true }));
+            }
+            Err(error) => {
+                // 预算/取消错误在 run_end 之前先发 budget 终止原因（ADR-YAML-04
+                // 错误码：必须进 Run Event 可观察）
+                let kind = budget_kind(&error);
+                if let Some(kind) = kind {
+                    emit_event(serde_json::json!({ "ev": "budget", "kind": kind }));
+                }
+                emit_event(serde_json::json!({
+                    "ev": "run_end", "ok": false, "error": error
+                }));
+                return Err(error);
+            }
+        }
         Ok(
             serde_json::to_string(&values.remove("__return").unwrap_or(serde_json::Value::Null))
                 .map_err(|error| error.to_string())?,
         )
+    }
+}
+
+/// 运行事件发射（best-effort）：私有 `__event` capability，宿主拦截转发；
+/// 失败静默——可视化事件不影响运行结果。
+fn emit_event(event: serde_json::Value) {
+    if let Ok(args) = serde_json::to_string(&event) {
+        let _ = capability::invoke("__event", &args);
+    }
+}
+
+/// 预算/取消错误码 → budget 事件 kind（与 ADR-YAML-04 对应）。
+fn budget_kind(error: &str) -> Option<&'static str> {
+    if error.starts_with("STEP_BUDGET_EXCEEDED") {
+        Some("STEP_BUDGET_EXCEEDED")
+    } else if error.starts_with("CALL_DEPTH_EXCEEDED") {
+        Some("CALL_DEPTH_EXCEEDED")
+    } else if error.starts_with("CANCELLED") || error.contains("kind=cancelled") {
+        Some("CANCELLED")
+    } else {
+        None
     }
 }
 
@@ -152,6 +200,40 @@ fn execute_step(
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "small AST step 缺少 op".to_string())?;
     match op {
+        // P12.6 运行身份包装（lower 为每个 surface step 生成 label）：进入/
+        // 完成/失败发 step 事件；包装步就是原逻辑步（不再额外计预算）。
+        // 下层展开物（timing sleep / find 轮询体）无包装，天然静默。
+        "step" => {
+            let label = step.get("label").ok_or_else(|| "step 缺少 label".to_string())?;
+            let path = label
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "step label 缺少 path".to_string())?;
+            let desc = label
+                .get("desc")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            emit_event(serde_json::json!({
+                "ev": "step_start", "path": path, "desc": desc
+            }));
+            let inner = step
+                .get("step")
+                .ok_or_else(|| "step 缺少被包装节点".to_string())?;
+            match execute_step(inner, values, budget) {
+                Ok(flow) => {
+                    emit_event(serde_json::json!({
+                        "ev": "step_end", "path": path, "ok": true
+                    }));
+                    Ok(flow)
+                }
+                Err(error) => {
+                    emit_event(serde_json::json!({
+                        "ev": "step_end", "path": path, "ok": false, "error": error
+                    }));
+                    Err(error)
+                }
+            }
+        }
         "invoke" => {
             let capability_name = step
                 .get("capability")
@@ -280,6 +362,11 @@ fn execute_step(
             // 深度本地计数：进入被调方 +1、返回 -1，所有退出路径都配对回退；
             // 超限立即终止（ADR-YAML-04，不再经 WIT depth 透传宿主守卫）。
             budget.enter_call()?;
+            // P12.6：宣告进入被调方帧（depth = 本地计数；被调方内部 step 事件
+            // 的 path 保持 script-local 契约形态）
+            emit_event(serde_json::json!({
+                "ev": "call_start", "target": target, "depth": budget.call_depth
+            }));
             let outcome = (|| -> Result<Flow, String> {
                 let args = evaluate_map(step.get("args"), values)?;
                 let args_json = serde_json::to_string(&args).map_err(|error| error.to_string())?;

@@ -21,11 +21,18 @@ use crate::capabilities::{
     RuntimeService, SwipeGesture, TemplateQuery, TextInput, TouchPoint,
 };
 use crate::core::AppContext;
+use crate::core::events::{EventSink, RuntimeEvent, RuntimeEventKind};
 use crate::extensions::{HostApi, Permission};
 
 use crate::extensions::gamer_yaml::yaml_vnext::{Condition, Expr, Program, SmallStep, Value};
 
 pub(crate) const YAML_EXTENSION_ID: &str = "gamer.yaml";
+/// v3 运行可视化事件的私有 capability 通道名（P12.6 / ADR-YAML-03，方案 (a)：
+/// 零 WIT 变更）。guest 把结构事件 JSON 发到 `capability.invoke("__event", …)`，
+/// 宿主在 wasm_host 的 capability 入口**先于**权限校验拦截并转发
+/// [`EventSink`]，不进 [`crate::capabilities::CapabilityRegistry`]、不进扩展
+/// 权限声明。事件解析失败静默丢弃——可视化事件永不影响运行结果。
+pub(crate) const EVENT_CAPABILITY: &str = "__event";
 /// Reference manifest for the installable YAML guest. The server never embeds
 /// its WASM bytes; package installation supplies `plugin.wasm` independently.
 /// 仅测试引用：与 tools/plugins/gamer.yaml/manifest.toml 的同步护栏 +
@@ -155,6 +162,8 @@ pub(crate) struct YamlWasmRunRequest {
     pub(crate) host: HostApi,
     pub(crate) context: AppContext,
     pub(crate) stop: Arc<AtomicBool>,
+    /// 运行可视化事件汇（P12.6）：`None` = 静默（无 viewer / 测试裸装配）。
+    pub(crate) sink: Option<Arc<dyn EventSink>>,
 }
 
 #[derive(Debug)]
@@ -212,6 +221,10 @@ pub(crate) trait YamlProgramResolver: Send + Sync {
 /// Native host adapter used by tests and by the no-WASM compatibility path.
 /// It is an adapter, not a Core capability: the registry remains the only
 /// source of device/input/frame/vision functionality.
+///
+/// `sink`（P12.6）：可选运行事件汇——vision/input capability 执行完成后在此
+/// 补发 `vision` 与 `tap`/`swipe`/`hit`/`miss` 投屏标记事件（与 v2 引擎事件
+/// 同形），step/call/run 结构事件归解释器/guest 发射。
 pub(crate) struct NativeYamlHost {
     host: HostApi,
     registry: CapabilityRegistry,
@@ -219,6 +232,7 @@ pub(crate) struct NativeYamlHost {
     device: DeviceHandle,
     runtime: Arc<dyn RuntimeService>,
     screen: FrameSize,
+    sink: Option<std::sync::Arc<dyn EventSink>>,
 }
 
 impl NativeYamlHost {
@@ -229,6 +243,7 @@ impl NativeYamlHost {
         host: HostApi,
         context: AppContext,
         stop: Arc<AtomicBool>,
+        sink: Option<Arc<dyn EventSink>>,
     ) -> Result<Self> {
         let registry = host.registry().clone();
         let device_service = registry
@@ -245,6 +260,7 @@ impl NativeYamlHost {
             device,
             runtime: Arc::new(crate::capabilities::adapters::RuntimeAdapter::new(stop)),
             screen: FrameSize::new(DEFAULT_SCREEN_WIDTH, DEFAULT_SCREEN_HEIGHT),
+            sink,
         })
     }
 
@@ -253,14 +269,86 @@ impl NativeYamlHost {
         host: HostApi,
         context: AppContext,
         stop: Arc<AtomicBool>,
+        sink: Option<Arc<dyn EventSink>>,
         capability: &str,
         args_json: &str,
     ) -> Result<Value> {
         let args = serde_json::from_str::<serde_json::Value>(args_json)
             .map_err(|error| anyhow!("invoke args 不是合法 JSON: {error}"))?;
         let args = Value::from_json(args).map_err(|error| anyhow!("invoke args 无效: {error}"))?;
-        let host = Self::new(host, context, stop).await?;
+        let host = Self::new(host, context, stop, sink).await?;
         host.invoke(capability, args).await
+    }
+
+    /// 尽力而为的事件旁路：发射失败只记 debug，不影响能力执行结果。
+    async fn emit_event(&self, kind: RuntimeEventKind) {
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        if let Err(error) = sink
+            .emit(RuntimeEvent::new(self.context.device_id.clone(), kind))
+            .await
+        {
+            tracing::debug!(%error, "yaml runtime event emit failed");
+        }
+    }
+
+    /// vision 能力执行完成后的可视化旁路（P12.6）：`vision{template,found,score,center}`
+    /// 结构事件 + 与 v2 引擎同形的 `hit`/`miss` 投屏标记事件（设备像素坐标，
+    /// 未命中带本次搜索区域框）。只带模板名/分数/坐标，不携带帧数据。
+    async fn emit_vision_outcome(&self, template: &str, outcome: MatchOutcome, region: Option<&Value>) {
+        let region_px = match region {
+            Some(raw) => self.search_region(raw).ok(),
+            None => Some(crate::capabilities::SearchRegion::new(
+                0,
+                0,
+                self.screen.width,
+                self.screen.height,
+            )),
+        };
+        match outcome {
+            MatchOutcome::Found(found) => {
+                let center = [
+                    (found.x + found.width / 2) as f64 / self.screen.width as f64,
+                    (found.y + found.height / 2) as f64 / self.screen.height as f64,
+                ];
+                self.emit_event(RuntimeEventKind::Vision {
+                    template: template.to_string(),
+                    found: true,
+                    score: Some(found.score),
+                    center: Some(center),
+                })
+                .await;
+                self.emit_event(RuntimeEventKind::Hit {
+                    tpl: template.to_string(),
+                    x: found.x,
+                    y: found.y,
+                    w: found.width,
+                    h: found.height,
+                    score: found.score,
+                })
+                .await;
+            }
+            MatchOutcome::NotFound => {
+                self.emit_event(RuntimeEventKind::Vision {
+                    template: template.to_string(),
+                    found: false,
+                    score: None,
+                    center: None,
+                })
+                .await;
+                if let Some(region) = region_px {
+                    self.emit_event(RuntimeEventKind::Miss {
+                        tpl: template.to_string(),
+                        x: region.x,
+                        y: region.y,
+                        w: region.width,
+                        h: region.height,
+                    })
+                    .await;
+                }
+            }
+        }
     }
 
     fn authorize(&self, capability: &str) -> Result<()> {
@@ -556,6 +644,12 @@ impl CapabilityInvoker for NativeYamlHost {
                     .tap(&self.device, point)
                     .await
                     .map_err(anyhow::Error::new)?;
+                // P12.6：与 v2 引擎同形的投屏标记事件（像素坐标）
+                self.emit_event(RuntimeEventKind::Tap {
+                    x: point.x(),
+                    y: point.y(),
+                })
+                .await;
                 Ok(Value::Null)
             }
             "input.swipe" => {
@@ -573,6 +667,13 @@ impl CapabilityInvoker for NativeYamlHost {
                     )
                     .await
                     .map_err(anyhow::Error::new)?;
+                self.emit_event(RuntimeEventKind::Swipe {
+                    x1: from.x(),
+                    y1: from.y(),
+                    x2: to.x(),
+                    y2: to.y(),
+                })
+                .await;
                 Ok(Value::Null)
             }
             "input.key" => {
@@ -624,6 +725,7 @@ impl CapabilityInvoker for NativeYamlHost {
             }),
             "vision.match" | "vision.match_template" => {
                 let frame = self.capture().await?;
+                let template_name = Self::resource_name(Self::arg(&args, "template")?)?;
                 let template = self.template(Self::arg(&args, "template")?).await?;
                 let options = MatchOptions {
                     threshold: Self::threshold_option(&args)?,
@@ -641,6 +743,8 @@ impl CapabilityInvoker for NativeYamlHost {
                     .await
                     .map_err(anyhow::Error::new)?;
                 let region = Self::region_echo(&args)?;
+                self.emit_vision_outcome(&template_name, outcome.clone(), args.get("region"))
+                    .await;
                 Ok(Self::match_value(outcome, region))
             }
             "vision.match_many" => {
@@ -669,10 +773,17 @@ impl CapabilityInvoker for NativeYamlHost {
                     .await
                     .map_err(anyhow::Error::new)?;
                 let region = Self::region_echo(&args)?;
-                let matches = results
-                    .into_iter()
-                    .map(|result| Self::match_value(result.outcome, region.clone()))
-                    .collect::<Vec<_>>();
+                let mut matches = Vec::with_capacity(results.len());
+                for (template, result) in templates.iter().zip(&results) {
+                    // 每个候选一条 vision 事件（match_first 候选全覆盖，同 v2 口径）
+                    self.emit_vision_outcome(
+                        &Self::resource_name(template)?,
+                        result.outcome.clone(),
+                        args.get("region"),
+                    )
+                    .await;
+                    matches.push(Self::match_value(result.outcome.clone(), region.clone()));
+                }
                 let found = matches.iter().any(Value::truthy);
                 Ok(Value::Map(BTreeMap::from([
                     ("found".to_string(), Value::Bool(found)),
@@ -775,6 +886,10 @@ enum Flow {
 }
 
 /// v3 原生参考解释器（见 ProgramResolver 注）。
+///
+/// P12.6：`events`（sink + device）装配后与 WASM guest 同步发射运行结构事件
+/// （run_start/run_end/step_start/step_end/call_start/budget）；未装配则零开销
+/// 静默。发射失败不解释为运行错误。
 #[allow(dead_code)]
 pub(crate) struct Interpreter {
     invoker: Arc<dyn CapabilityInvoker>,
@@ -785,6 +900,10 @@ pub(crate) struct Interpreter {
     call_depth: u32,
     /// wait 随机区间的 PRNG 状态（run nonce 播种的 splitmix64，与 guest 同步）。
     rng: u64,
+    event_sink: Option<Arc<dyn EventSink>>,
+    /// RuntimeEvent 的设备作用域用 Core 侧 DeviceId（与 capabilities 的
+    /// DeviceId 同名异型，事件 wire 只认 Core 形态）。
+    event_device: Option<crate::core::DeviceId>,
 }
 
 #[allow(dead_code)]
@@ -798,6 +917,8 @@ impl Interpreter {
             steps: 0,
             call_depth: 0,
             rng: 0,
+            event_sink: None,
+            event_device: None,
         }
     }
 
@@ -811,18 +932,88 @@ impl Interpreter {
         self
     }
 
+    /// 装配运行事件旁路（测试断言 / 无 wasm 退化路径的可视化）。
+    #[allow(dead_code)]
+    pub(crate) fn with_events(
+        mut self,
+        sink: Arc<dyn EventSink>,
+        device: crate::core::DeviceId,
+    ) -> Self {
+        self.event_sink = Some(sink);
+        self.event_device = Some(device);
+        self
+    }
+
+    async fn emit_event(&self, kind: RuntimeEventKind) {
+        let (Some(sink), Some(device)) = (&self.event_sink, &self.event_device) else {
+            return;
+        };
+        if let Err(error) = sink.emit(RuntimeEvent::new(device.clone(), kind)).await {
+            tracing::debug!(%error, "yaml native interpreter event emit failed");
+        }
+    }
+
+    /// 预算/取消类错误 → `budget{kind}` 事件 kind（与 ADR-YAML-04 错误码对应）。
+    fn budget_kind(error: &anyhow::Error) -> Option<&'static str> {
+        let text = error.to_string();
+        if text.starts_with("STEP_BUDGET_EXCEEDED") {
+            Some("STEP_BUDGET_EXCEEDED")
+        } else if text.starts_with("CALL_DEPTH_EXCEEDED") {
+            Some("CALL_DEPTH_EXCEEDED")
+        } else if text.starts_with("CANCELLED") {
+            Some("CANCELLED")
+        } else {
+            None
+        }
+    }
+
     pub(crate) async fn run(mut self, program: &Program) -> Result<ExecutionResult> {
         self.rng = program.nonce.unwrap_or(0);
-        match self.run_steps(&program.steps).await? {
-            Flow::Continue | Flow::Return(_) => Ok(ExecutionResult {
-                value: match self.run_steps_value() {
-                    Some(value) => value,
-                    None => Value::Null,
-                },
-                logs: self.logs,
-            }),
-            Flow::Break => bail!("yaml.v3.runtime.break_outside_loop"),
-            Flow::Throw(message) => bail!("{message}"),
+        self.emit_event(RuntimeEventKind::RunStart).await;
+        match self.run_steps(&program.steps).await {
+            Ok(Flow::Continue | Flow::Return(_)) => {
+                self.emit_event(RuntimeEventKind::RunEnd { ok: true, error: None })
+                    .await;
+                Ok(ExecutionResult {
+                    value: match self.run_steps_value() {
+                        Some(value) => value,
+                        None => Value::Null,
+                    },
+                    logs: self.logs,
+                })
+            }
+            Ok(Flow::Break) => {
+                let error = anyhow!("yaml.v3.runtime.break_outside_loop");
+                self.emit_event(RuntimeEventKind::RunEnd {
+                    ok: false,
+                    error: Some(error.to_string()),
+                })
+                .await;
+                Err(error)
+            }
+            Ok(Flow::Throw(message)) => {
+                self.emit_event(RuntimeEventKind::RunEnd {
+                    ok: false,
+                    error: Some(message.clone()),
+                })
+                .await;
+                bail!("{message}")
+            }
+            Err(error) => {
+                // 预算/取消错误在 run_end 之前先发 budget 终止原因
+                if let Some(kind) = Self::budget_kind(&error) {
+                    self.emit_event(RuntimeEventKind::Budget {
+                        kind: kind.to_string(),
+                    })
+                    .await;
+                }
+                self.emit_event(RuntimeEventKind::RunEnd {
+                    ok: false,
+                    error: Some(error.to_string()),
+                })
+                .await;
+                Err(error)
+            }
         }
     }
 
@@ -834,7 +1025,8 @@ impl Interpreter {
     async fn run_steps(&mut self, steps: &[SmallStep]) -> Result<Flow> {
         for step in steps {
             if self.invoker.cancelled() {
-                bail!("运行已取消")
+                // 机器可读 CANCELLED 前缀：run() 据此发 budget{kind:"CANCELLED"}
+                bail!("CANCELLED: 运行已取消")
             }
             // 每个逻辑步执行前计数：顶层、loop 体每轮子步、if 分支体、call
             // 目标程序体全计（与 WASM guest ExecutionBudget 同语义）。
@@ -851,6 +1043,44 @@ impl Interpreter {
     #[async_recursion]
     async fn run_step(&mut self, step: &SmallStep) -> Result<Flow> {
         match step {
+            // P12.6 运行身份包装（lower 为每个 surface step 生成）：进入/完成/
+            // 失败发 step 事件；包装步就是原逻辑步，不额外计预算。throw 以
+            // Flow::Throw 流转（guest 侧为 Err），此处同记 ok:false。
+            SmallStep::Step { label, step } => {
+                self.emit_event(RuntimeEventKind::StepStart {
+                    path: label.path.clone(),
+                    desc: label.desc.clone(),
+                })
+                .await;
+                let outcome = self.run_step(step).await;
+                match &outcome {
+                    Ok(Flow::Throw(message)) => {
+                        self.emit_event(RuntimeEventKind::StepEnd {
+                            path: label.path.clone(),
+                            ok: false,
+                            error: Some(message.clone()),
+                        })
+                        .await;
+                    }
+                    Ok(_) => {
+                        self.emit_event(RuntimeEventKind::StepEnd {
+                            path: label.path.clone(),
+                            ok: true,
+                            error: None,
+                        })
+                        .await;
+                    }
+                    Err(error) => {
+                        self.emit_event(RuntimeEventKind::StepEnd {
+                            path: label.path.clone(),
+                            ok: false,
+                            error: Some(error.to_string()),
+                        })
+                        .await;
+                    }
+                }
+                outcome
+            }
             SmallStep::Invoke {
                 capability,
                 args,
@@ -925,6 +1155,11 @@ impl Interpreter {
             SmallStep::Break => Ok(Flow::Break),
             SmallStep::Call { target, args, save } => {
                 self.call_depth += 1;
+                self.emit_event(RuntimeEventKind::CallStart {
+                    target: target.clone(),
+                    depth: self.call_depth,
+                })
+                .await;
                 let outcome = self.run_call(target, args, save).await;
                 self.call_depth -= 1;
                 outcome
@@ -998,6 +1233,10 @@ impl Interpreter {
         // 在被调方与主程序共享同一 nonce 流）。
         child.call_depth = self.call_depth;
         child.rng = self.rng;
+        // P12.6：被调方帧的 step/call 事件经同一 sink 续传（call_start 已
+        // 宣告帧切换，路径保持 script-local 契约形态）。
+        child.event_sink = self.event_sink.clone();
+        child.event_device = self.event_device.clone();
         if let Some(resolver) = self.resolver.clone() {
             child = child.with_resolver(resolver);
         }
@@ -1368,6 +1607,7 @@ mod tests {
             all_permissions(vision_registry(&stub)),
             AppContext::for_test("d1", "com.test.game").unwrap(),
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .await
         .unwrap();
@@ -1806,6 +2046,7 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
             all_permissions(registry),
             AppContext::for_test("d1", "com.test.game").unwrap(),
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .await
         .unwrap();
@@ -1899,6 +2140,183 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
             .await
             .unwrap());
         assert!(service.ui_contributions().unwrap().is_empty());
+    }
+
+    // ------------------------- P12.6 运行可视化事件 -------------------------
+
+    /// 测试收集器：按序记录 RuntimeEvent 的 EventSink 桩（原生解释器直发与
+    /// WASM guest `__event` 拦截两路共用）。
+    #[derive(Default)]
+    pub(crate) struct EventCollect {
+        events: std::sync::Mutex<Vec<RuntimeEvent>>,
+    }
+
+    impl EventCollect {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        /// 事件 kind 的 wire JSON 序列（断言用）。
+        pub(crate) fn kinds(&self) -> Vec<serde_json::Value> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| serde_json::to_value(&event.kind).unwrap())
+                .collect()
+        }
+
+        /// 只取某个 ev 名的事件。
+        pub(crate) fn of(&self, ev: &str) -> Vec<serde_json::Value> {
+            self.kinds()
+                .into_iter()
+                .filter(|kind| kind["ev"] == serde_json::json!(ev))
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl crate::core::events::EventSink for EventCollect {
+        fn emit(
+            &self,
+            event: RuntimeEvent,
+        ) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+            self.events.lock().unwrap().push(event);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// 原生参考解释器（无 wasm 退化路径）的事件序列：run_start → step 对
+    /// （path/desc）→ call_start（callee 帧内 step 事件续传）→ throw 失败
+    /// step_end(ok:false) + run_end(ok:false)。
+    #[tokio::test]
+    async fn native_interpreter_emits_run_event_sequence() {
+        struct StaticResolver;
+        #[async_trait]
+        impl ProgramResolver for StaticResolver {
+            async fn resolve(&self, target: &str) -> Result<Program> {
+                if target != "script:helper" {
+                    bail!("unknown fixture target: {target}");
+                }
+                load("version: 3\nsteps:\n  - log: in-helper\n")
+                    .map_err(|diagnostics| anyhow!("{diagnostics:?}"))
+            }
+        }
+        let sink = EventCollect::new();
+        let program = load(
+            "version: 3\nsteps:\n  - log: start\n  - set: {x: 1}\n  - call:\n      target: script:helper\n  - throw: boom\n",
+        )
+        .unwrap();
+        let error = Interpreter::new(Arc::new(FakeInvoker))
+            .with_resolver(Arc::new(StaticResolver))
+            .with_events(sink.clone(), crate::core::DeviceId::new("d1").unwrap())
+            .run(&program)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("boom"));
+
+        // 全序列（严格保序）：call 帧内的被调方 step 事件 path 保持 script-local
+        let kinds = sink.kinds();
+        let shape: Vec<&str> = kinds
+            .iter()
+            .map(|kind| kind["ev"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                "run_start",
+                "step_start",
+                "step_end",
+                "step_start",
+                "step_end",
+                "step_start",
+                "call_start",
+                "step_start",
+                "step_end",
+                "step_end",
+                "step_start",
+                "step_end",
+                "run_end",
+            ],
+            "事件序列: {kinds:?}"
+        );
+        assert_eq!(kinds[0], serde_json::json!({ "ev": "run_start" }));
+        assert_eq!(
+            kinds[1],
+            serde_json::json!({
+                "ev": "step_start", "path": "steps[0]", "desc": "log start"
+            })
+        );
+        assert_eq!(
+            kinds[6],
+            serde_json::json!({
+                "ev": "call_start", "target": "script:helper", "depth": 1
+            })
+        );
+        // callee 帧（depth=1）内的 log 步：path 为被调方本地 steps[0]
+        assert_eq!(
+            kinds[7],
+            serde_json::json!({
+                "ev": "step_start", "path": "steps[0]", "desc": "log in-helper"
+            })
+        );
+        assert_eq!(
+            kinds[10],
+            serde_json::json!({
+                "ev": "step_start", "path": "steps[3]", "desc": "throw boom"
+            })
+        );
+        assert_eq!(
+            kinds[11],
+            serde_json::json!({
+                "ev": "step_end", "path": "steps[3]", "ok": false, "error": "boom"
+            })
+        );
+        assert_eq!(
+            kinds[12],
+            serde_json::json!({
+                "ev": "run_end", "ok": false, "error": "boom"
+            })
+        );
+    }
+
+    /// 原生解释器预算事件：空转体死循环以 STEP_BUDGET_EXCEEDED 终止 →
+    /// `budget{kind}` 先于 run_end(ok:false) 发出。
+    #[tokio::test]
+    async fn native_interpreter_emits_budget_event_on_step_budget_exceeded() {
+        let sink = EventCollect::new();
+        let program = load("version: 3\nsteps:\n  - loop:\n      steps: []\n").unwrap();
+        let error = Interpreter::new(Arc::new(FakeInvoker))
+            .with_events(sink.clone(), crate::core::DeviceId::new("d1").unwrap())
+            .run(&program)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("STEP_BUDGET_EXCEEDED"));
+        let kinds = sink.kinds();
+        assert_eq!(kinds[0], serde_json::json!({ "ev": "run_start" }));
+        // loop 是带 label 的 surface step：进入有 step_start，终止有失败 step_end
+        assert_eq!(
+            kinds[1]["ev"], "step_start",
+            "事件序列: {kinds:?}"
+        );
+        assert!(kinds.contains(&serde_json::json!({
+            "ev": "budget", "kind": "STEP_BUDGET_EXCEEDED"
+        })));
+        let budget_index = kinds
+            .iter()
+            .position(|kind| kind["ev"] == "budget")
+            .unwrap();
+        let run_end = kinds.last().unwrap();
+        assert_eq!(run_end["ev"], "run_end");
+        assert_eq!(run_end["ok"], serde_json::json!(false));
+        assert!(
+            run_end["error"].as_str().unwrap().contains("STEP_BUDGET_EXCEEDED"),
+            "run_end 携带预算错误: {run_end}"
+        );
+        assert!(
+            budget_index < kinds.len() - 1,
+            "budget 事件必须先于 run_end"
+        );
     }
 }
 
@@ -2183,6 +2601,7 @@ runtime = "^1.0"
                 host: host(trace.clone()),
                 context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(false)),
+                sink: None,
             })
             .await
             .unwrap();
@@ -2208,6 +2627,7 @@ runtime = "^1.0"
                 host: host_with_permissions(Arc::new(Trace::default()), &["device.read"]),
                 context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(false)),
+                sink: None,
             })
             .await
             .unwrap();
@@ -2228,6 +2648,7 @@ runtime = "^1.0"
                 host: host_with_permissions(Arc::new(Trace::default()), &["device.read"]),
                 context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(false)),
+                sink: None,
             })
             .await
             .unwrap_err();
@@ -2257,6 +2678,7 @@ runtime = "^1.0"
                 ),
                 context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(true)),
+                sink: None,
             })
             .await
             .unwrap_err();
@@ -2331,6 +2753,7 @@ runtime = "^1.0"
             None,
             Arc::new(AtomicBool::new(false)),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2350,6 +2773,7 @@ runtime = "^1.0"
             BTreeMap::new(),
             None,
             Arc::new(AtomicBool::new(false)),
+            None,
             None,
         )
         .await
@@ -2572,6 +2996,17 @@ log = "^1.0"
         host: HostApi,
         start_index: Option<usize>,
     ) -> YamlWasmRunRequest {
+        run_request_with_sink(program, resolver, host, start_index, None)
+    }
+
+    /// P12.6 e2e 用：带运行事件汇的请求（sink = 测试收集器）。
+    fn run_request_with_sink(
+        program: Program,
+        resolver: Option<Arc<dyn YamlProgramResolver>>,
+        host: HostApi,
+        start_index: Option<usize>,
+        sink: Option<Arc<dyn crate::core::events::EventSink>>,
+    ) -> YamlWasmRunRequest {
         YamlWasmRunRequest {
             wasm: fixture_component(),
             program,
@@ -2581,6 +3016,7 @@ log = "^1.0"
             host,
             context: AppContext::for_test("device-1", "com.example.game").unwrap(),
             stop: Arc::new(AtomicBool::new(false)),
+            sink,
         }
     }
 
@@ -2850,6 +3286,7 @@ log = "^1.0"
                 })),
                 context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop,
+                sink: None,
             })
             .await
             .unwrap_err();
@@ -2865,7 +3302,7 @@ log = "^1.0"
     }
 
     // -----------------------------------------------------------------------
-    use super::tests::{Trace as InputTrace, VisionStub};
+    use super::tests::{EventCollect, Trace as InputTrace, VisionStub};
     // P12.5 / P12.7 e2e（真实 Component guest + NativeYamlHost capability 链）
     // -----------------------------------------------------------------------
 
@@ -3185,5 +3622,232 @@ log = "^1.0"
             Value::List(vec![Value::Bool(true), Value::Null]),
             "save 的命名变量跨步可用；块外 $match 复位 null"
         );
+    }
+
+    // ------------------- P12.6 e2e：运行可视化事件（真实 Component） -------------------
+
+    /// P12.6 e2e（契约 §6 / ADR-YAML-03）：真实 guest 的完整事件序列——
+    /// run_start → step_start/step_end（path + desc）→ vision/hit（宿主侧
+    /// vision capability 补发）→ call_start（被调方帧内 step 续传）→
+    /// run_end(ok:true)；预算内 sleep（after_tap/after_match）静默。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_emits_run_event_sequence() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let sink = EventCollect::new();
+        let resolver = Arc::new(MemoryResolver {
+            scripts: BTreeMap::from([(
+                "com.test.app/helper.yaml".to_string(),
+                "version: 3\nsteps:\n  - log: helper-done\n".to_string(),
+            )]),
+            functions: BTreeMap::new(),
+        });
+        let program = load(
+            "version: 3\ndefaults:\n  timing:\n    after_tap: 1ms\n    after_match: 1ms\nsteps:\n  - log: start\n  - find:\n      template: reward\n      timeout: 2s\n      save: reward\n      then:\n        - tap: {point: $reward.center}\n  - call:\n      target: script:com.test.app/helper.yaml\n",
+        )
+        .unwrap();
+        let stub = VisionStub::new(&["reward"]);
+        runtime
+            .run(run_request_with_sink(
+                program,
+                Some(resolver),
+                vision_host(&stub, Arc::new(InputTrace::default()), Arc::new(LogTrace {
+                    logs: Mutex::new(Vec::new()),
+                })),
+                None,
+                Some(sink.clone()),
+            ))
+            .await
+            .unwrap();
+
+        let kinds = sink.kinds();
+        let shape: Vec<&str> = kinds
+            .iter()
+            .map(|kind| kind["ev"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                "run_start",
+                "step_start",
+                "step_end",
+                "step_start",
+                "vision",
+                "hit",
+                "step_start",
+                "tap",
+                "step_end",
+                "step_end",
+                "step_start",
+                "call_start",
+                "step_start",
+                "step_end",
+                "step_end",
+                "run_end",
+            ],
+            "事件序列: {kinds:?}"
+        );
+        assert_eq!(kinds[0], serde_json::json!({ "ev": "run_start" }));
+        assert_eq!(
+            kinds[1],
+            serde_json::json!({
+                "ev": "step_start", "path": "steps[0]", "desc": "log start"
+            })
+        );
+        assert_eq!(
+            kinds[2],
+            serde_json::json!({ "ev": "step_end", "path": "steps[0]", "ok": true })
+        );
+        assert_eq!(
+            kinds[3],
+            serde_json::json!({
+                "ev": "step_start", "path": "steps[1]", "desc": "find reward"
+            })
+        );
+        assert_eq!(
+            kinds[4]["ev"], "vision",
+            "vision 事件带模板名/分数/相对中心: {:?}",
+            kinds[4]
+        );
+        assert_eq!(kinds[4]["template"], "reward");
+        assert_eq!(kinds[4]["found"], serde_json::json!(true));
+        assert_eq!(kinds[4]["center"], serde_json::json!([0.5, 0.25]));
+        let score = kinds[4]["score"].as_f64().unwrap();
+        assert!(
+            (score - 0.92).abs() < 1e-6,
+            "vision 分数经 f32 往返: {score}"
+        );
+        assert_eq!(
+            kinds[5]["ev"], "hit",
+            "宿主补发 v2 同形 hit 投屏标记: {:?}",
+            kinds[5]
+        );
+        assert_eq!(
+            kinds[6],
+            serde_json::json!({
+                "ev": "step_start", "path": "steps[1].then[0]", "desc": "tap $reward.center"
+            })
+        );
+        assert_eq!(
+            kinds[7],
+            serde_json::json!({ "ev": "tap", "x": 500, "y": 250 }),
+            "宿主补发 v2 同形 tap 投屏标记（像素坐标）: {:?}",
+            kinds[7]
+        );
+        assert_eq!(
+            kinds[10],
+            serde_json::json!({
+                "ev": "step_start", "path": "steps[2]", "desc": "call script:com.test.app/helper.yaml"
+            })
+        );
+        assert_eq!(
+            kinds[11],
+            serde_json::json!({
+                "ev": "call_start", "target": "script:com.test.app/helper.yaml", "depth": 1
+            })
+        );
+        // 被调方帧内 step 事件 path 保持 script-local（call_start 已宣告帧切换）
+        assert_eq!(
+            kinds[12],
+            serde_json::json!({
+                "ev": "step_start", "path": "steps[0]", "desc": "log helper-done"
+            })
+        );
+        assert_eq!(
+            kinds[15],
+            serde_json::json!({ "ev": "run_end", "ok": true })
+        );
+        // 事件不带 run 之外的大对象（无帧数据）
+        assert!(
+            serde_json::to_string(&kinds).unwrap().len() < 4096,
+            "事件载荷必须保持轻量"
+        );
+    }
+
+    /// P12.6 e2e：失败脚本（throw）→ step_end(ok:false,error) + run_end(ok:false)。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_emits_failure_events_on_throw() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let sink = EventCollect::new();
+        let program = load("version: 3\nsteps:\n  - throw: boom\n").unwrap();
+        let error = runtime
+            .run(run_request_with_sink(
+                program,
+                None,
+                log_host(Arc::new(LogTrace {
+                    logs: Mutex::new(Vec::new()),
+                })),
+                None,
+                Some(sink.clone()),
+            ))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("boom"));
+        let kinds = sink.kinds();
+        assert_eq!(
+            kinds,
+            vec![
+                serde_json::json!({ "ev": "run_start" }),
+                serde_json::json!({
+                    "ev": "step_start", "path": "steps[0]", "desc": "throw boom"
+                }),
+                serde_json::json!({
+                    "ev": "step_end", "path": "steps[0]", "ok": false, "error": "boom"
+                }),
+                serde_json::json!({
+                    "ev": "run_end", "ok": false, "error": "boom"
+                }),
+            ],
+            "失败事件序列: {kinds:?}"
+        );
+    }
+
+    /// P12.6 e2e（ADR-YAML-04）：预算终止 → `budget{kind:STEP_BUDGET_EXCEEDED}`
+    /// 先于 run_end(ok:false) 发出（loop 是带 label 的 surface step，进入有
+    /// step_start；轮询/迭代内部静默）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_emits_budget_event_on_step_budget_exceeded() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let sink = EventCollect::new();
+        let program = load("version: 3\nsteps:\n  - loop:\n      steps: []\n").unwrap();
+        let error = runtime
+            .run(run_request_with_sink(
+                program,
+                None,
+                log_host(Arc::new(LogTrace {
+                    logs: Mutex::new(Vec::new()),
+                })),
+                None,
+                Some(sink.clone()),
+            ))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("STEP_BUDGET_EXCEEDED"));
+        let kinds = sink.kinds();
+        assert_eq!(
+            kinds[0],
+            serde_json::json!({ "ev": "run_start" }),
+            "事件序列: {kinds:?}"
+        );
+        assert_eq!(kinds[1]["ev"], "step_start");
+        assert_eq!(kinds[1]["path"], "steps[0]");
+        assert!(
+            kinds.contains(&serde_json::json!({
+                "ev": "budget", "kind": "STEP_BUDGET_EXCEEDED"
+            })),
+            "必须发出 budget 事件: {kinds:?}"
+        );
+        let budget_index = kinds
+            .iter()
+            .position(|kind| kind["ev"] == "budget")
+            .unwrap();
+        assert_eq!(kinds.last().unwrap()["ev"], "run_end");
+        assert_eq!(kinds.last().unwrap()["ok"], serde_json::json!(false));
+        assert!(
+            kinds.last().unwrap()["error"]
+                .as_str()
+                .unwrap()
+                .contains("STEP_BUDGET_EXCEEDED")
+        );
+        assert!(budget_index + 1 < kinds.len(), "budget 先于 run_end");
     }
 }

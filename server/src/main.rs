@@ -364,7 +364,13 @@ impl RuntimeServices {
         // 与常规路径一致：在任何设备扫描/保活启动前接入统一 drain，避免
         // activation 后初始化窗口收到 SIGTERM 时漏掉已创建的运行依赖。
         install_drain(&drain_slot, &ctx);
-        executor.attach_yaml_vnext(ctx.resources.clone(), ctx.extensions.clone());
+        // P12.6：v3 运行可视化事件走同一 viewer DataChannel（复用 ViewerEventSink，
+        // 实例独立不与 v2 引擎共享内部状态）；无 viewer 时事件自然丢弃。
+        executor.attach_yaml_vnext(
+            ctx.resources.clone(),
+            ctx.extensions.clone(),
+            Some(Arc::new(webrtc::ViewerEventSink::new(ctx.viewers.clone()))),
+        );
         // 后台生命周期统一在组合根启动：视频静默看门狗（devices/viewers/metrics
         // 三依赖）+ 会话过期清扫（小时级）。路由组装（api::build_router_*）只注册路由。
         api::system::spawn_watchdog(ctx.devices.clone(), ctx.viewers.clone(), db.metrics());

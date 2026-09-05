@@ -750,7 +750,7 @@ fn build_app(core: &CoreDeps) -> GuardApp {
         ExtensionService::for_data_root(core.cfg.data_dir.clone(), capabilities)
             .with_runner_registrar(registrar),
     );
-    executor.attach_yaml_vnext(core.resources.clone(), extensions.clone());
+    executor.attach_yaml_vnext(core.resources.clone(), extensions.clone(), None);
     let auth = Arc::new(crate::api::auth::AuthState::new(
         test_credential(),
         Default::default(),

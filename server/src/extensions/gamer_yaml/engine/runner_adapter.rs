@@ -151,6 +151,7 @@ impl EngineExecutor {
         &self,
         scripts: Arc<crate::resources::ResourceStore>,
         extensions: Arc<crate::extensions::ExtensionService>,
+        sink: Option<Arc<dyn crate::core::events::EventSink>>,
     ) {
         *self
             .yaml_vnext
@@ -158,6 +159,7 @@ impl EngineExecutor {
             .expect("YAML vNext adapter lock poisoned") = Some(Arc::new(YamlVnextAdapter {
             scripts,
             extensions: Arc::downgrade(&extensions),
+            sink,
         }));
     }
 
@@ -265,6 +267,8 @@ impl RunExecutor for EngineExecutor {
 struct YamlVnextAdapter {
     scripts: Arc<crate::resources::ResourceStore>,
     extensions: Weak<crate::extensions::ExtensionService>,
+    /// v3 运行可视化事件汇（P12.6）：viewer 的 DataChannel 旁路；None = 静默。
+    sink: Option<Arc<dyn crate::core::events::EventSink>>,
 }
 
 /// 包内可调用资源（`scripts/` / `functions/` 分区）解析器：resolve 仅被
@@ -426,6 +430,7 @@ impl YamlVnextAdapter {
             .ok_or_else(|| anyhow::anyhow!("YAML 扩展服务已关闭"))?;
         // 「从此运行」start_index 经 YamlWasmRunRequest 注入 program JSON，
         // 由 guest 按顶层 surface 步序号跳步（契约 §8），不再预切片。
+        // P12.6：运行事件汇随请求下发（viewer DataChannel 旁路）。
         crate::extensions::gamer_yaml::run_yaml_vnext(
             &extensions,
             program,
@@ -434,6 +439,7 @@ impl YamlVnextAdapter {
             Some(resolver),
             stop,
             Some(*start_index),
+            self.sink.clone(),
         )
         .await
         .map(|_| Some(Vec::new()))

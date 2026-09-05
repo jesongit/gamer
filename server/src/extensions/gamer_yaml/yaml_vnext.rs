@@ -185,12 +185,30 @@ impl Condition {
     }
 }
 
+/// surface step 的运行身份（P12.6 / ADR-YAML-03）：lower 期为每个 surface step
+/// 生成稳定 path（`steps[0].then[1]`，与前端编辑器 commands 寻址同语法）与中文
+/// desc（kind + 关键参数摘要）。挂在被标注步产出的 [`SmallStep::Step`] 包装上，
+/// guest / 原生解释器据此发 `step_start` / `step_end` 事件；lower 展开物
+/// （timing sleep、find/check 轮询体）不带 label，天然静默。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StepLabel {
+    pub path: String,
+    pub desc: String,
+}
+
 /// The only nodes allowed after lowering. Actions are represented by the
 /// generic `invoke` node; this is the important boundary that keeps YAML
 /// policy out of Core capabilities.
+///
+/// [`SmallStep::Step`] 是 P12.6 的运行身份包装：不改变预算语义（包装步就是原
+/// 逻辑步，不额外计数），仅携带 [`StepLabel`] 供解释器发事件。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum SmallStep {
+    Step {
+        label: StepLabel,
+        step: Box<SmallStep>,
+    },
     Invoke {
         capability: String,
         args: BTreeMap<String, Expr>,
@@ -592,7 +610,7 @@ pub fn load_function(source: &str, function: &str) -> Result<Program, Vec<Diagno
     Ok(Program {
         version: YAML_V3,
         params: decl.params.clone(),
-        steps: lowerer.steps(&decl.steps)?,
+        steps: lowerer.steps(&decl.steps, "steps")?,
         nonce: None,
     })
 }
@@ -1316,7 +1334,7 @@ fn parse_match_first(value: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<D
 
 pub fn lower(surface: &SurfaceProgram) -> Result<Program, Vec<Diagnostic>> {
     let mut lowerer = Lowerer::with_defaults(&surface.defaults);
-    let steps = lowerer.steps(&surface.steps)?;
+    let steps = lowerer.steps(&surface.steps, "steps")?;
     Ok(Program {
         version: YAML_V3,
         params: surface.params.clone(),
@@ -1702,11 +1720,21 @@ impl Lowerer {
         }
     }
 
-    fn steps(&mut self, steps: &[SurfaceStep]) -> Result<Vec<SmallStep>, Vec<Diagnostic>> {
-        steps.iter().map(|step| self.step(step)).collect()
+    fn steps(&mut self, steps: &[SurfaceStep], base: &str) -> Result<Vec<SmallStep>, Vec<Diagnostic>> {
+        steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                // P12.6：每个 surface step 的稳定路径在 lower 期生成（`steps[0]`、
+                // `steps[2].then[1]`……），挂在它产出的唯一小 AST 步包装上。
+                let path = format!("{base}[{index}]");
+                let inner = self.step(step, &path)?;
+                Ok(labeled(&path, surface_desc(step), inner))
+            })
+            .collect()
     }
 
-    fn step(&mut self, step: &SurfaceStep) -> Result<SmallStep, Vec<Diagnostic>> {
+    fn step(&mut self, step: &SurfaceStep, path: &str) -> Result<SmallStep, Vec<Diagnostic>> {
         Ok(match step {
             SurfaceStep::Tap { at } => {
                 // tap 后 sleep(after_tap)（契约 §4；容器保持顶层 1:1）
@@ -1769,12 +1797,12 @@ impl Lowerer {
                 else_steps,
             } => SmallStep::If {
                 cond: Condition::truthy(cond.clone()),
-                then_steps: self.steps(then_steps)?,
-                else_steps: self.steps(else_steps)?,
+                then_steps: self.steps(then_steps, &format!("{path}.then"))?,
+                else_steps: self.steps(else_steps, &format!("{path}.else"))?,
             },
             SurfaceStep::Loop { times, steps } => SmallStep::Loop {
                 times: times.clone(),
-                body: self.steps(steps)?,
+                body: self.steps(steps, &format!("{path}.steps"))?,
             },
             SurfaceStep::Break => SmallStep::Break,
             SurfaceStep::Call { target, args, save } => SmallStep::Call {
@@ -1810,6 +1838,7 @@ impl Lowerer {
                 then_steps,
                 else_steps,
                 verify.as_ref(),
+                path,
             )?,
             SurfaceStep::Check {
                 template,
@@ -1825,7 +1854,7 @@ impl Lowerer {
             SurfaceStep::MatchFirst {
                 candidates,
                 else_steps,
-            } => self.match_first(candidates, else_steps)?,
+            } => self.match_first(candidates, else_steps, path)?,
         })
     }
 
@@ -1844,6 +1873,7 @@ impl Lowerer {
         then_steps: &[SurfaceStep],
         else_steps: &[SurfaceStep],
         verify: Option<&FindVerifySurface>,
+        path: &str,
     ) -> Result<SmallStep, Vec<Diagnostic>> {
         let found = self.temp("found");
         let mut match_args = map([("template", template.clone())]);
@@ -1861,7 +1891,7 @@ impl Lowerer {
             });
         }
         hit.extend(self.sleep(self.after_match_ms));
-        hit.extend(self.steps(then_steps)?);
+        hit.extend(self.steps(then_steps, &format!("{path}.then"))?);
         if let Some(verify) = verify {
             hit.extend(self.verify(verify, threshold)?);
         }
@@ -1898,7 +1928,7 @@ impl Lowerer {
                 ))),
             }]
         } else {
-            self.steps(else_steps)?
+            self.steps(else_steps, &format!("{path}.else"))?
         };
         steps.push(SmallStep::If {
             cond: Condition::Equals {
@@ -2030,6 +2060,7 @@ impl Lowerer {
         &mut self,
         candidates: &[MatchCandidateSurface],
         else_steps: &[SurfaceStep],
+        path: &str,
     ) -> Result<SmallStep, Vec<Diagnostic>> {
         let result = self.temp("match_many");
         let templates = Expr::List(candidates.iter().map(|c| c.template.clone()).collect());
@@ -2044,14 +2075,19 @@ impl Lowerer {
         {
             args.insert("thresholds".to_string(), Expr::List(thresholds));
         }
-        let mut branches = self.steps(else_steps)?;
+        let mut branches = self.steps(else_steps, &format!("{path}.else"))?;
         for (index, candidate) in candidates.iter().enumerate().rev() {
             let mut branch = vec![SmallStep::Set {
                 name: "match".to_string(),
                 value: Expr::reference(format!("{result}.matches[{index}]")),
             }];
             branch.extend(self.sleep(self.after_match_ms));
-            branch.extend(self.steps(&candidate.steps)?);
+            branch.extend(
+                self.steps(
+                    &candidate.steps,
+                    &format!("{path}.candidates[{index}].steps"),
+                )?,
+            );
             branches = vec![SmallStep::If {
                 cond: Condition::truthy(Expr::reference(format!(
                     "{result}.matches[{index}].found"
@@ -2074,6 +2110,97 @@ impl Lowerer {
             value: lit(Value::Null),
         });
         Ok(self.container(steps))
+    }
+}
+
+/// 给 surface step 产出的小 AST 步套运行身份包装（P12.6）。包装不改变预算
+/// 语义：解释器把包装步视为原逻辑步，不额外计数。
+fn labeled(path: &str, desc: String, step: SmallStep) -> SmallStep {
+    SmallStep::Step {
+        label: StepLabel {
+            path: path.to_string(),
+            desc,
+        },
+        step: Box::new(step),
+    }
+}
+
+/// surface step 的中文可读摘要（desc）：kind 关键字 + 关键参数，如
+/// `find 登录按钮`、`tap 0.5,0.3`、`call script:daily/login`、`wait 300ms`。
+/// 只取表达式摘要（字面量原样、`$var` 引用原样），不做求值。
+fn surface_desc(step: &SurfaceStep) -> String {
+    match step {
+        SurfaceStep::Tap { at } => format!("tap {}", expr_desc(at)),
+        SurfaceStep::Swipe { from, to, .. } => {
+            format!("swipe {} → {}", expr_desc(from), expr_desc(to))
+        }
+        SurfaceStep::Key { key, action } => {
+            if action == "press" {
+                format!("key {}", expr_desc(key))
+            } else {
+                format!("key {} {action}", expr_desc(key))
+            }
+        }
+        SurfaceStep::Text { value } => format!("text {}", expr_desc(value)),
+        SurfaceStep::Wait { duration, max } => match max {
+            Some(max) => format!("wait {}~{}", expr_desc(duration), expr_desc(max)),
+            None => format!("wait {}", expr_desc(duration)),
+        },
+        SurfaceStep::If { cond, .. } => format!("if {}", expr_desc(cond)),
+        SurfaceStep::Loop { times, .. } => match times {
+            Some(times) => format!("loop {} 次", expr_desc(times)),
+            None => "loop".to_string(),
+        },
+        SurfaceStep::Break => "break".to_string(),
+        SurfaceStep::Call { target, .. } => format!("call {target}"),
+        SurfaceStep::Return { .. } => "return".to_string(),
+        SurfaceStep::Throw { message } => format!("throw {}", expr_desc(message)),
+        SurfaceStep::Set { name, .. } => format!("set {name}"),
+        SurfaceStep::Invoke { capability, .. } => format!("invoke {capability}"),
+        SurfaceStep::Log { message, .. } => format!("log {}", expr_desc(message)),
+        SurfaceStep::AppStart { package } => match package {
+            Some(package) => format!("app.start {}", expr_desc(package)),
+            None => "app.start".to_string(),
+        },
+        SurfaceStep::AppStop { package } => match package {
+            Some(package) => format!("app.stop {}", expr_desc(package)),
+            None => "app.stop".to_string(),
+        },
+        SurfaceStep::Find { template, .. } => format!("find {}", expr_desc(template)),
+        SurfaceStep::Check { template, .. } => format!("check {}", expr_desc(template)),
+        SurfaceStep::MatchFirst { candidates, .. } => {
+            format!("match_first {} 选 1", candidates.len())
+        }
+    }
+}
+
+/// 表达式摘要：字面量紧凑渲染、`$var` 引用带前缀、容器退化为占位。
+fn expr_desc(expr: &Expr) -> String {
+    match expr {
+        Expr::Literal(value) => match value {
+            Value::Null => "null".to_string(),
+            Value::Bool(value) => value.to_string(),
+            Value::Int(value) => value.to_string(),
+            Value::Float(value) => format!("{value}"),
+            Value::String(value) | Value::Color(value) => value.clone(),
+            Value::Duration(ms) => duration_desc(*ms),
+            Value::Coordinate([x, y]) => format!("{x},{y}"),
+            Value::List(_) => "[…]".to_string(),
+            Value::Map(_) => "{…}".to_string(),
+            Value::Handle { .. } => "<handle>".to_string(),
+        },
+        Expr::Ref(name) => format!("${name}"),
+        Expr::List(_) => "[…]".to_string(),
+        Expr::Map(_) => "{…}".to_string(),
+    }
+}
+
+/// 时长摘要：整秒用 `2s`，其余毫秒（契约示例 `wait 300ms` 形态）。
+fn duration_desc(ms: u64) -> String {
+    if ms != 0 && ms % 1000 == 0 {
+        format!("{}s", ms / 1000)
+    } else {
+        format!("{ms}ms")
     }
 }
 
@@ -2383,6 +2510,83 @@ mod tests {
         assert_eq!(error[0].code, "yaml.v3.version.missing");
         let error = load("version: 3\nextra: true\nsteps: []\n").unwrap_err();
         assert_eq!(error[0].code, "yaml.v3.top_level.unknown_key");
+    }
+
+    /// P12.6：lower 为每个 surface step 生成稳定 path + 中文 desc（与前端
+    /// 寻址同语法）；timing/轮询展开物不带 label（运行时天然静默）。
+    #[test]
+    fn lower_labels_surface_steps_with_stable_paths_and_desc() {
+        let program = load(
+            "version: 3\nsteps:\n  - log: start\n  - tap: [0.5, 0.3]\n  - find:\n      template: 登录按钮\n      timeout: 2s\n      then:\n        - wait: 300ms\n  - call:\n      target: script:daily/login\n",
+        )
+        .unwrap();
+        let mut labels = Vec::new();
+        fn collect(step: &SmallStep, labels: &mut Vec<(String, String, bool)>) {
+            if let SmallStep::Step { label, step } = step {
+                labels.push((label.path.clone(), label.desc.clone(), true));
+                collect(step, labels);
+                return;
+            }
+            match step {
+                SmallStep::If {
+                    then_steps,
+                    else_steps,
+                    ..
+                } => {
+                    for s in then_steps {
+                        collect(s, labels);
+                    }
+                    for s in else_steps {
+                        collect(s, labels);
+                    }
+                }
+                SmallStep::Loop { body, .. } => {
+                    for s in body {
+                        collect(s, labels);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for step in &program.steps {
+            collect(step, &mut labels);
+        }
+        assert_eq!(
+            labels,
+            vec![
+                ("steps[0]".to_string(), "log start".to_string(), true),
+                ("steps[1]".to_string(), "tap 0.5,0.3".to_string(), true),
+                (
+                    "steps[2]".to_string(),
+                    "find 登录按钮".to_string(),
+                    true
+                ),
+                (
+                    "steps[2].then[0]".to_string(),
+                    "wait 300ms".to_string(),
+                    true
+                ),
+                (
+                    "steps[3]".to_string(),
+                    "call script:daily/login".to_string(),
+                    true
+                ),
+            ],
+            "surface step 路径与 desc 摘要"
+        );
+        // tap 的 after_tap sleep 是 lower 展开物：无 label 包装
+        let tap_container = &program.steps[1];
+        let SmallStep::Step { step: inner, .. } = tap_container else {
+            panic!("tap 顶层必须是 Step 包装");
+        };
+        let SmallStep::If { then_steps, .. } = inner.as_ref() else {
+            panic!("tap 容器形态保持");
+        };
+        assert_eq!(then_steps.len(), 2, "invoke tap + after_tap sleep");
+        assert!(
+            matches!(&then_steps[1], SmallStep::Invoke { capability, .. } if capability == "runtime.sleep"),
+            "展开物保持裸 invoke（无 label）"
+        );
     }
 
     #[test]
@@ -2712,7 +2916,13 @@ mod tests {
             }
         );
         let lowered = lower(&surface).unwrap();
-        assert!(matches!(&lowered.steps[1], SmallStep::Call { target, .. } if target == "function:common/login/is_logged_in"));
+        // P12.6：顶层小 AST 步是 Step 运行身份包装（path 指回 surface 步）
+        assert!(matches!(
+            &lowered.steps[1],
+            SmallStep::Step { label, step }
+                if label.path == "steps[1]"
+                    && matches!(step.as_ref(), SmallStep::Call { target, .. } if target == "function:common/login/is_logged_in")
+        ));
     }
 
     #[test]
