@@ -10,6 +10,9 @@ YAML v2 严格语法；不提供旧格式兼容或自动迁移。规则来源：
 - 前端：可视化编辑器（`web/src/script-editor/`）以此为唯一编辑模型，保存时由服务端
   统一序列化为本文的「规范 YAML」。
 
+> **YAML v3**（Phase 12 起，ADR-YAML-01：唯一正式方案）语法见本文末尾
+> [§11 YAML v3](#11-yaml-v3phase-12-语法契约)；本节其余部分描述 v2。
+
 ## 1. 目录与资源边界
 
 脚本、函数库、模板按**应用分区**（设备配置的 pkg，即应用包名）存放，目录即类型：
@@ -483,3 +486,57 @@ canonical_default: bool→true/false；coord→[x,y]（逗号后无空格）；c
 - 参数和引用使用当前具名形式（`$name`）；调用使用 `call` 或
   `func: <文件短路径>/<函数名>`，其他结构不属于输入契约。
 - 模板短名解析只接受当前分区内唯一文件，创建与图像替换遵循 §9 的独立 API 契约。
+
+## 11. YAML v3（Phase 12 语法契约）
+
+> v3 是唯一正式方案（ADR-YAML-01）：脚本必须声明 `version: 3`，非 3 一律报
+> `unsupported yaml version`，无 v2 兼容 / 无 fallback / 无迁移工具。本节是 v3
+> 语法契约的实现同步；权威裁决见 `docs/reference/adr/ADR-YAML-01~04`，契约原文
+> 见 `docs/plans/phase12_v3_dsl_contract.md`。实现在
+> `server/src/extensions/gamer_yaml/yaml_vnext.rs`（纯数据前端）+ WASM guest
+> 小 AST 解释器；本节未覆盖的步骤语法（find / match / check / retry 等）沿用
+> §5 的语义并按 v3 步法重设计，随 T45 收口后补写。
+
+### 11.1 脚本与函数库
+
+- **脚本**（scripts/）顶层只允许 `version / params / steps`；缺失或非 3 的
+  `version` 报 `yaml.v3.version` / `yaml.v3.version.missing`。`params` 为参数
+  唯一来源，字符串 / 映射双形态沿用 §3 形态。
+- **函数库**（functions/）为 bare-map `{<函数名>: {params, steps}}`，**无
+  `version` 键**（目录即类型）；函数名由映射键承载（唯一），每个函数记录只允许
+  `params / steps`，`steps` 必需。结构非法报 `yaml.v3.function.*` 结构化诊断
+  （`yaml.v3.function.file` / `.name` / `.unknown_key` / `.not_found`）。
+
+### 11.2 call —— 唯一可调用资源入口（ADR-YAML-02）
+
+```yaml
+- call:
+    target: script:daily/login        # 或 function:工具/月卡领取
+    with:                             # 参数名 → 表达式；`args` 为兼容别名
+      account: $user
+    save: result                      # 可选；返回值整体存入；无 return → null
+```
+
+- **命名空间仅 `script:` / `function:`**；裸 target / 未知前缀在解析期报
+  `yaml.v3.call.namespace`（错误信息含 target 原文与合法形态示例）。
+- `script:<资源id>`：分区内 `scripts/` 相对路径，`.yaml` 后缀可省略
+  （`script:daily/login` → `scripts/daily/login.yaml`）。
+- `function:<文件短路径>/<函数名>`：文件短路径按**最后一个 `/`** 分割、可含目录
+  （`function:common/login/is_logged_in` = `functions/common/login.yaml` 里的
+  `is_logged_in`）；拒绝 `..` / 绝对路径 / 反斜杠 / 空段——穿越报
+  `yaml.v3.call.target`，路径形态报 `yaml.v3.call.function_path`。
+- 函数与脚本只经 Core ResourceStore（composite 三层）解析，本地编辑区与包内
+  资源对 `call` 透明；跨分区一律不解析。
+- **返回值泛化**：`return` 可返回 null / bool / number / string / object /
+  array 任意 JSON 值；`call` 的 `save` 存返回值整体，被调方无 `return` 即存
+  null。删除「函数默认返回 bool」约束，`if` 条件按通用值语义判断。
+- **递归深度**上限 32 层，超限报 `CALL_DEPTH_EXCEEDED`（P12.4 ExecutionBudget
+  落地前由 resolver 侧守卫临时承载，guest 每进入一层 callable 经 WIT
+  `programs.resolve(depth)` 上报）。
+
+### 11.3 手动运行 start_index（契约 §8）
+
+guest 解释器支持 program 顶层可选 `start_index`：跳过其前的**顶层**步骤
+（与 v2「从此运行」语义一致）；嵌套分支 / 循环体不受影响——lower 后的顶层小
+AST 步与 surface 步骤 1:1 对应，序号即顶层 surface 步序号。host 由运行请求
+（`YamlWasmRunRequest.start_index`）注入，缺省 `None` = 从头执行。

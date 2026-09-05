@@ -138,8 +138,11 @@ interface automation {
 
 /// YAML extension-only program lookup used by the small AST `call` node. It
 /// is intentionally not part of the generic Core capability catalog.
+///
+/// `depth` is the callee's call depth (guest counts +1 per entered callable);
+/// the host enforces the recursion limit and fails with CALL_DEPTH_EXCEEDED.
 interface programs {
-  resolve: func(target: string, args-json: string) -> result<string, string>;
+  resolve: func(target: string, args-json: string, depth: u32) -> result<string, string>;
 }
 
 world yaml-extension-host {

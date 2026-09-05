@@ -10,6 +10,12 @@ use gamer::host::{capability, programs};
 /// JSON; the fixture interprets control flow and forwards primitive invocations
 /// through the WIT capability.invoke import. It intentionally has no WASI
 /// imports and no access to Gamer internals.
+///
+/// 顶层可选 `start_index`（契约 §8）：跳过其前的**顶层**步骤（「从此运行」；
+/// 嵌套分支 / 循环体不受影响——lower 后顶层小 AST 步与 surface 步 1:1 对应）。
+/// `depth` 为当前调用深度（顶层 = 0）：`call` 进入被调方前 +1 并经
+/// `programs.resolve(depth)` 透传给宿主做递归深度守卫（超限宿主回
+/// CALL_DEPTH_EXCEEDED，本 guest 原样向上传播）。
 struct Fixture;
 
 impl Guest for Fixture {
@@ -22,13 +28,21 @@ impl Guest for Fixture {
             .cloned()
             .unwrap_or_default();
         apply_defaults(&program, &mut values);
-        execute_steps(
-            program
-                .get("steps")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| "program 缺少 steps".to_string())?,
-            &mut values,
-        )?;
+        let all_steps = program
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "program 缺少 steps".to_string())?;
+        let start_index = program
+            .get("start_index")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0) as usize;
+        if start_index > all_steps.len() {
+            return Err(format!(
+                "start_index {start_index} 超过顶层步数 {}",
+                all_steps.len()
+            ));
+        }
+        execute_steps(&all_steps[start_index..], &mut values, 0)?;
         Ok(
             serde_json::to_string(&values.remove("__return").unwrap_or(serde_json::Value::Null))
                 .map_err(|error| error.to_string())?,
@@ -39,9 +53,10 @@ impl Guest for Fixture {
 fn execute_steps(
     steps: &[serde_json::Value],
     values: &mut serde_json::Map<String, serde_json::Value>,
+    depth: u32,
 ) -> Result<Flow, String> {
     for step in steps {
-        match execute_step(step, values)? {
+        match execute_step(step, values, depth)? {
             Flow::Continue => {}
             flow => return Ok(flow),
         }
@@ -52,6 +67,7 @@ fn execute_steps(
 fn execute_step(
     step: &serde_json::Value,
     values: &mut serde_json::Map<String, serde_json::Value>,
+    depth: u32,
 ) -> Result<Flow, String> {
     let op = step
         .get("op")
@@ -94,6 +110,7 @@ fn execute_step(
                     .and_then(serde_json::Value::as_array)
                     .ok_or_else(|| format!("if 缺少 {key}"))?,
                 values,
+                depth,
             )? {
                 Flow::Continue => Ok(Flow::Continue),
                 flow => Ok(flow),
@@ -131,7 +148,7 @@ fn execute_step(
                     }
                 }
                 count += 1;
-                match execute_steps(body, values)? {
+                match execute_steps(body, values, depth)? {
                     Flow::Continue => {}
                     Flow::Break => break,
                     flow => return Ok(flow),
@@ -157,7 +174,9 @@ fn execute_step(
                 .ok_or_else(|| "call 缺少 target".to_string())?;
             let args = evaluate_map(step.get("args"), values)?;
             let args_json = serde_json::to_string(&args).map_err(|error| error.to_string())?;
-            let callee_json = programs::resolve(target, &args_json).map_err(|error| error)?;
+            // 被调方深度 = 当前 + 1；超限由宿主 resolver 侧守卫拒绝。
+            let callee_json = programs::resolve(target, &args_json, depth + 1)
+                .map_err(|error| error)?;
             let callee: serde_json::Value = serde_json::from_str(&callee_json)
                 .map_err(|error| format!("call 目标不是有效程序: {error}"))?;
             let callee_steps = callee
@@ -166,7 +185,7 @@ fn execute_step(
                 .ok_or_else(|| "call 目标缺少 steps".to_string())?;
             let mut child_values = args;
             apply_defaults(&callee, &mut child_values);
-            match execute_steps(callee_steps, &mut child_values)? {
+            match execute_steps(callee_steps, &mut child_values, depth + 1)? {
                 Flow::Continue | Flow::Return(_) => {
                     if let Some(save) = step.get("save").and_then(serde_json::Value::as_str) {
                         values.insert(

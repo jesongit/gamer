@@ -53,6 +53,11 @@ pub(crate) fn yaml_runtime() -> std::sync::Arc<dyn yaml_extension::YamlWasmRunti
 /// guest. Extension → Core direction only: the guest bytes and host API come
 /// from the generic [`crate::extensions::ExtensionService`] lookup; the YAML
 /// runtime itself lives behind this boundary.
+///
+/// `start_index`（契约 §8）：顶层可选「从此运行」步序号，经
+/// [`yaml_extension::YamlWasmRunRequest`] 透传给 guest 注入 program JSON；
+/// `None` = 从头执行。
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_yaml_vnext(
     service: &crate::extensions::ExtensionService,
     program: yaml_vnext::Program,
@@ -60,6 +65,7 @@ pub(crate) async fn run_yaml_vnext(
     args: std::collections::BTreeMap<String, yaml_vnext::Value>,
     resolver: Option<std::sync::Arc<dyn YamlProgramResolver>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    start_index: Option<usize>,
 ) -> Result<yaml_vnext::Value, crate::extensions::ExtensionError> {
     use crate::extensions::ExtensionId;
     let id = ExtensionId::parse(YAML_EXTENSION_ID).expect("built-in YAML extension id is valid");
@@ -70,6 +76,7 @@ pub(crate) async fn run_yaml_vnext(
             program,
             args,
             resolver,
+            start_index,
             host,
             context,
             stop,

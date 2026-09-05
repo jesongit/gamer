@@ -106,6 +106,21 @@ const DEFAULT_SCREEN_HEIGHT: u32 = 1000;
 #[allow(dead_code)]
 const MAX_STEP_BUDGET: u64 = 100_000;
 
+/// v3 `call` 递归深度上限（ADR-YAML-02；P12.4 ExecutionBudget 落地前由
+/// resolver / WIT host 侧守卫临时承载，数值与正式预算一致）。
+pub(crate) const MAX_CALL_DEPTH: u32 = 32;
+
+/// 深度守卫：guest 每进入一层 callable 深度 +1、返回 -1；`resolve` 的 `depth`
+/// 即被调方所在深度（顶层首个 call = 1）。超限统一报 `CALL_DEPTH_EXCEEDED`。
+/// 生产链路仅 wasm-runtime 的 programs::Host 调用；无该 feature 时仅测试消费。
+#[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
+pub(crate) fn check_call_depth(depth: u32) -> Result<()> {
+    if depth > MAX_CALL_DEPTH {
+        bail!("CALL_DEPTH_EXCEEDED: call 深度 {depth} 超过上限 {MAX_CALL_DEPTH}");
+    }
+    Ok(())
+}
+
 /// Request passed to the real YAML Component runtime. The program is already
 /// lowered by the extension front-end; the guest only interprets the small
 /// wire AST and calls capability.invoke.
@@ -119,6 +134,10 @@ pub(crate) struct YamlWasmRunRequest {
     pub(crate) program: Program,
     pub(crate) args: BTreeMap<String, Value>,
     pub(crate) resolver: Option<Arc<dyn YamlProgramResolver>>,
+    /// 手动运行「从此运行」：跳过的顶层 surface 步序号（契约 §8）。
+    /// `None` = 从头执行；guest 只按顶层步序号跳，嵌套分支/循环体不受影响。
+    #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
+    pub(crate) start_index: Option<usize>,
     pub(crate) host: HostApi,
     pub(crate) context: AppContext,
     pub(crate) stop: Arc<AtomicBool>,
@@ -168,9 +187,12 @@ pub(crate) trait CapabilityInvoker: Send + Sync {
 /// YAML extension-only lookup for the small AST `call` node. This does not
 /// enter `CapabilityRegistry`, so YAML source/resource semantics stay out of
 /// Core capabilities.
+///
+/// `depth` 为被调方所在调用深度（guest 每进入一层 callable +1，见
+/// [`check_call_depth`]），由 WIT `programs.resolve` 从 guest 透传。
 pub(crate) trait YamlProgramResolver: Send + Sync {
     #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
-    fn resolve(&self, target: &str, args: &BTreeMap<String, Value>) -> Result<Program>;
+    fn resolve(&self, target: &str, args: &BTreeMap<String, Value>, depth: u32) -> Result<Program>;
 }
 
 /// Native host adapter used by tests and by the no-WASM compatibility path.
@@ -615,6 +637,7 @@ pub(crate) struct Interpreter {
     values: BTreeMap<String, Value>,
     logs: Vec<(String, String)>,
     steps: u64,
+    call_depth: u32,
 }
 
 #[allow(dead_code)]
@@ -626,6 +649,7 @@ impl Interpreter {
             values: BTreeMap::new(),
             logs: Vec::new(),
             steps: 0,
+            call_depth: 0,
         }
     }
 
@@ -747,32 +771,10 @@ impl Interpreter {
             }
             SmallStep::Break => Ok(Flow::Break),
             SmallStep::Call { target, args, save } => {
-                let resolver = self
-                    .resolver
-                    .clone()
-                    .ok_or_else(|| anyhow!("call resolver 未配置"))?;
-                let program = resolver.resolve(target).await?;
-                let mut child =
-                    Interpreter::new(self.invoker.clone()).with_values(self.eval_map(args)?);
-                if let Some(resolver) = self.resolver.clone() {
-                    child = child.with_resolver(resolver);
-                }
-                match child.run_steps(&program.steps).await? {
-                    Flow::Return(value) => {
-                        if let Some(save) = save {
-                            self.values.insert(save.clone(), value);
-                        }
-                        Ok(Flow::Continue)
-                    }
-                    Flow::Continue => {
-                        if let Some(save) = save {
-                            self.values.insert(save.clone(), Value::Null);
-                        }
-                        Ok(Flow::Continue)
-                    }
-                    Flow::Break => bail!("call 返回了 loop break"),
-                    Flow::Throw(message) => Ok(Flow::Throw(message)),
-                }
+                self.call_depth += 1;
+                let outcome = self.run_call(target, args, save).await;
+                self.call_depth -= 1;
+                outcome
             }
             SmallStep::Return { value } => {
                 let value = self.eval(value)?;
@@ -790,6 +792,46 @@ impl Interpreter {
                 self.values.insert(name.clone(), self.eval(value)?);
                 Ok(Flow::Continue)
             }
+        }
+    }
+
+    /// `call` 执行体：入口时 `call_depth` 已 +1，此处统一做深度守卫；
+    /// 有 `return` → 存返回值，无 `return` → 存 null（ADR-YAML-02 返回值泛化）。
+    #[async_recursion]
+    async fn run_call(
+        &mut self,
+        target: &str,
+        args: &BTreeMap<String, Expr>,
+        save: &Option<String>,
+    ) -> Result<Flow> {
+        check_call_depth(self.call_depth)?;
+        let resolver = self
+            .resolver
+            .clone()
+            .ok_or_else(|| anyhow!("call resolver 未配置"))?;
+        let program = resolver.resolve(target).await?;
+        let mut child = Interpreter::new(self.invoker.clone()).with_values(self.eval_map(args)?);
+        // 子解释器继承当前调用深度，否则每层 call 的深度计数被重置、
+        // 深度守卫永远不触发（无界递归）。
+        child.call_depth = self.call_depth;
+        if let Some(resolver) = self.resolver.clone() {
+            child = child.with_resolver(resolver);
+        }
+        match child.run_steps(&program.steps).await? {
+            Flow::Return(value) => {
+                if let Some(save) = save {
+                    self.values.insert(save.clone(), value);
+                }
+                Ok(Flow::Continue)
+            }
+            Flow::Continue => {
+                if let Some(save) = save {
+                    self.values.insert(save.clone(), Value::Null);
+                }
+                Ok(Flow::Continue)
+            }
+            Flow::Break => bail!("call 返回了 loop break"),
+            Flow::Throw(message) => Ok(Flow::Throw(message)),
         }
     }
 
@@ -998,7 +1040,7 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
 
     #[tokio::test]
     async fn interpreter_executes_control_flow_and_general_return_values() {
-        let program = load("version: 3\nsteps:\n  - set: {ready: true}\n  - if:\n      cond: $ready\n      then:\n        - call:\n            target: missing\n            save: answer\n      else: []\n").unwrap();
+        let program = load("version: 3\nsteps:\n  - set: {ready: true}\n  - if:\n      cond: $ready\n      then:\n        - call:\n            target: script:missing\n            save: answer\n      else: []\n").unwrap();
         // The call is intentionally not entered in this test; a missing
         // resolver is a useful guard that proves the AST does not silently
         // execute arbitrary host code.
@@ -1007,6 +1049,47 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
             .await
             .unwrap_err();
         assert!(error.to_string().contains("resolver"));
+    }
+
+    /// 恒返回自递归程序的 resolver：递归 call 深度守卫测试用。
+    struct SelfResolver;
+
+    #[async_trait]
+    impl ProgramResolver for SelfResolver {
+        async fn resolve(&self, _target: &str) -> Result<Program> {
+            load("version: 3\nsteps:\n  - call:\n      target: script:self\n")
+                .map_err(|diagnostics| anyhow!("fixture resolver: {diagnostics:?}"))
+        }
+    }
+
+    #[test]
+    fn native_interpreter_enforces_call_depth_limit() {
+        // 原生参考解释器的 async_recursion 调用链每层叠 3 个 boxed future 的
+        // poll 帧，Windows 测试线程默认 1 MiB 栈容不下 33 层；放大栈执行。
+        let handle = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    let program =
+                        load("version: 3\nsteps:\n  - call:\n      target: script:self\n")
+                            .unwrap();
+                    let error = Interpreter::new(Arc::new(FakeInvoker))
+                        .with_resolver(Arc::new(SelfResolver))
+                        .run(&program)
+                        .await
+                        .unwrap_err();
+                    assert!(
+                        error.to_string().contains("CALL_DEPTH_EXCEEDED"),
+                        "递归超限必须报 CALL_DEPTH_EXCEEDED: {error}"
+                    );
+                })
+            })
+            .unwrap();
+        handle.join().unwrap();
     }
 
     #[tokio::test]
@@ -1174,8 +1257,13 @@ mod wasm_tests {
     struct FixtureResolver;
 
     impl YamlProgramResolver for FixtureResolver {
-        fn resolve(&self, target: &str, _args: &BTreeMap<String, Value>) -> Result<Program> {
-            if target != "helper" {
+        fn resolve(
+            &self,
+            target: &str,
+            _args: &BTreeMap<String, Value>,
+            _depth: u32,
+        ) -> Result<Program> {
+            if target != "script:helper" {
                 bail!("unknown fixture target: {target}");
             }
             load("version: 3\nsteps:\n  - return: from-call\n")
@@ -1381,7 +1469,7 @@ runtime = "^1.0"
         let trace = Arc::new(Trace::default());
         let runtime = LazyYamlWasmtimeRuntime::new();
         let program = load(
-            "version: 3\nsteps:\n  - call:\n      target: helper\n      save: answer\n  - text: from-real-wasm\n  - return: $answer\n",
+            "version: 3\nsteps:\n  - call:\n      target: script:helper\n      save: answer\n  - text: from-real-wasm\n  - return: $answer\n",
         )
         .unwrap();
         let result = runtime
@@ -1390,6 +1478,7 @@ runtime = "^1.0"
                 program,
                 args: BTreeMap::new(),
                 resolver: Some(Arc::new(FixtureResolver)),
+                start_index: None,
                 host: host(trace.clone()),
                 context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(false)),
@@ -1414,6 +1503,7 @@ runtime = "^1.0"
                 program,
                 args: BTreeMap::new(),
                 resolver: None,
+                start_index: None,
                 host: host_with_permissions(Arc::new(Trace::default()), &["device.read"]),
                 context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(false)),
@@ -1433,6 +1523,7 @@ runtime = "^1.0"
                 program: denied_program,
                 args: BTreeMap::new(),
                 resolver: None,
+                start_index: None,
                 host: host_with_permissions(Arc::new(Trace::default()), &["device.read"]),
                 context: AppContext::for_test("device-1", "com.example.game").unwrap(),
                 stop: Arc::new(AtomicBool::new(false)),
@@ -1454,6 +1545,7 @@ runtime = "^1.0"
                 program: cancelled_program,
                 args: BTreeMap::new(),
                 resolver: None,
+                start_index: None,
                 host: host_with_permissions(
                     Arc::new(Trace::default()),
                     &["device.read", "runtime.sleep"],
@@ -1513,6 +1605,7 @@ runtime = "^1.0"
             BTreeMap::new(),
             None,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .await
         .unwrap();
@@ -1532,6 +1625,7 @@ runtime = "^1.0"
             BTreeMap::new(),
             None,
             Arc::new(AtomicBool::new(false)),
+            None,
         )
         .await
         .is_err());
@@ -1680,7 +1774,296 @@ runtime = "^1.0"
         let next = resumed.next_wakeup.expect("恢复必须重算唤醒游标");
         assert!(
             next > chrono::Utc::now(),
-            "重算后的游标是下一次 cron 触发（未来时刻），不是陈旧值"
+            "重算后的唤醒游标是下一次 cron 触发（未来时刻），不是陈旧值"
         );
+    }
+
+    /// 内存版 `script:` / `function:` 命名空间 resolver（P12.2 e2e 用）：
+    /// 与生产 ScriptProgramResolver 走同一 split_call_target / load_function
+    /// 前端，并同样执行深度守卫。
+    struct MemoryResolver {
+        scripts: BTreeMap<String, String>,
+        functions: BTreeMap<String, String>,
+    }
+
+    impl YamlProgramResolver for MemoryResolver {
+        fn resolve(
+            &self,
+            target: &str,
+            _args: &BTreeMap<String, Value>,
+            depth: u32,
+        ) -> Result<Program> {
+            super::check_call_depth(depth)?;
+            let parsed = crate::extensions::gamer_yaml::yaml_vnext::split_call_target(target)
+                .map_err(|diagnostics| anyhow!("call 目标无效: {diagnostics:?}"))?;
+            match parsed {
+                crate::extensions::gamer_yaml::yaml_vnext::CallTarget::Script(id) => {
+                    let source = self
+                        .scripts
+                        .get(&id)
+                        .ok_or_else(|| anyhow!("找不到脚本 {id}"))?;
+                    load(source).map_err(|diagnostics| anyhow!("{diagnostics:?}"))
+                }
+                crate::extensions::gamer_yaml::yaml_vnext::CallTarget::Function {
+                    file,
+                    function,
+                } => {
+                    let source = self
+                        .functions
+                        .get(&file)
+                        .ok_or_else(|| anyhow!("找不到函数文件 {file}"))?;
+                    crate::extensions::gamer_yaml::yaml_vnext::load_function(source, &function)
+                        .map_err(|diagnostics| anyhow!("{diagnostics:?}"))
+                }
+            }
+        }
+    }
+
+    fn log_host(logs: Arc<LogTrace>) -> HostApi {
+        let manifest = crate::extensions::parse_manifest(
+            r#"manifest_version = 1
+id = "gamer.yaml"
+version = "3.0.0"
+name = "YAML vNext"
+entry = "plugin.wasm"
+permissions = ["device.read", "log.write"]
+[host_api]
+device = "^1.0"
+log = "^1.0"
+"#
+            .as_bytes(),
+        )
+        .unwrap();
+        HostApi::for_manifest(
+            CapabilityRegistry::builder()
+                .with_device_service(
+                    Arc::new(Trace::default()) as Arc<dyn crate::capabilities::DeviceService>
+                )
+                .with_log_service(logs as Arc<dyn LogService>)
+                .build(),
+            HostApiCatalog::default(),
+            &manifest,
+        )
+        .unwrap()
+    }
+
+    fn run_request(
+        program: Program,
+        resolver: Option<Arc<dyn YamlProgramResolver>>,
+        host: HostApi,
+        start_index: Option<usize>,
+    ) -> YamlWasmRunRequest {
+        YamlWasmRunRequest {
+            wasm: fixture_component(),
+            program,
+            args: BTreeMap::new(),
+            resolver,
+            start_index,
+            host,
+            context: AppContext::for_test("device-1", "com.example.game").unwrap(),
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// P12.2 验收（e2e，真实 Component guest）：`call` `function:` 命名空间
+    /// → v3 函数库装载 → object / array 返回值泛化，`save` + `$r.ok` /
+    /// `$arr` 分支正确。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_calls_functions_with_generalized_returns() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let functions = BTreeMap::from([(
+            // 注意：两元素数字数组会被 v3 表达式定型为 Coordinate，故 items
+            // 用三元素数组承载「object 内嵌 array」示例。
+            "lib".to_string(),
+            "fn1:\n  params:\n    - name: flag\n      type: bool\n      default: false\n  steps:\n    - if: {cond: $flag, then: [{return: {ok: true, items: [1, 2, 3]}}]}\n    - return: {ok: false, items: []}\nfn2:\n  steps:\n    - return: [7, 8, 9]\n"
+                .to_string(),
+        )]);
+        let resolver = Arc::new(MemoryResolver {
+            scripts: BTreeMap::new(),
+            functions,
+        });
+
+        // object 返回 + `$r.ok` 分支
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        let program = load(
+            "version: 3\nsteps:\n  - call:\n      target: function:lib/fn1\n      with: {flag: true}\n      save: r\n  - if:\n      cond: $r.ok\n      then:\n        - log: branch-ok\n  - return: $r\n",
+        )
+        .unwrap();
+        let result = runtime
+            .run(run_request(
+                program,
+                Some(resolver.clone()),
+                log_host(logs.clone()),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value,
+            Value::Map(BTreeMap::from([
+                (
+                    "items".to_string(),
+                    Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+                ),
+                ("ok".to_string(), Value::Bool(true)),
+            ]))
+        );
+        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["branch-ok"]);
+
+        // array 返回 + `$arr` truthy 分支
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        let program = load(
+            "version: 3\nsteps:\n  - call:\n      target: function:lib/fn2\n      save: arr\n  - if:\n      cond: $arr\n      then:\n        - log: arr-nonempty\n  - return: $arr\n",
+        )
+        .unwrap();
+        let result = runtime
+            .run(run_request(
+                program,
+                Some(resolver),
+                log_host(logs.clone()),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.value,
+            Value::List(vec![Value::Int(7), Value::Int(8), Value::Int(9)])
+        );
+        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["arr-nonempty"]);
+    }
+
+    /// P12.2 验收（e2e）：`call` `script:` 命名空间带参数；未传参走声明
+    /// 默认值兜底。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_calls_scripts_with_args() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let resolver = Arc::new(MemoryResolver {
+            scripts: BTreeMap::from([(
+                "com.test.app/other.yaml".to_string(),
+                "version: 3\nparams:\n  - name: greeting\n    type: string\n    default: hi\nsteps:\n  - log: $greeting\n  - return: {echo: $greeting}\n"
+                    .to_string(),
+            )]),
+            functions: BTreeMap::new(),
+        });
+
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        let program = load(
+            "version: 3\nsteps:\n  - call:\n      target: script:com.test.app/other.yaml\n      with: {greeting: \"你好\"}\n      save: out\n  - return: $out.echo\n",
+        )
+        .unwrap();
+        let result = runtime
+            .run(run_request(
+                program,
+                Some(resolver.clone()),
+                log_host(logs.clone()),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.value, Value::String("你好".into()));
+        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["你好"]);
+
+        // 未传参 → 声明默认值兜底
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        let program = load(
+            "version: 3\nsteps:\n  - call:\n      target: script:com.test.app/other.yaml\n      save: out\n  - return: $out.echo\n",
+        )
+        .unwrap();
+        let result = runtime
+            .run(run_request(
+                program,
+                Some(resolver),
+                log_host(logs.clone()),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.value, Value::String("hi".into()));
+        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["hi"]);
+    }
+
+    /// P12.2 验收（e2e）：递归 call 超 32 层 → CALL_DEPTH_EXCEEDED
+    /// （宿主 resolver 侧守卫，guest 原样传播）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_rejects_recursion_beyond_call_depth_limit() {
+        struct RecursiveResolver;
+
+        impl YamlProgramResolver for RecursiveResolver {
+            fn resolve(
+                &self,
+                _target: &str,
+                _args: &BTreeMap<String, Value>,
+                depth: u32,
+            ) -> Result<Program> {
+                super::check_call_depth(depth)?;
+                load("version: 3\nsteps:\n  - call:\n      target: script:self\n")
+                    .map_err(|diagnostics| anyhow!("fixture resolver: {diagnostics:?}"))
+            }
+        }
+
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let program = load("version: 3\nsteps:\n  - call:\n      target: script:self\n").unwrap();
+        let error = runtime
+            .run(run_request(
+                program,
+                Some(Arc::new(RecursiveResolver)),
+                log_host(Arc::new(LogTrace {
+                    logs: Mutex::new(Vec::new()),
+                })),
+                None,
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("CALL_DEPTH_EXCEEDED"),
+            "递归超限必须报 CALL_DEPTH_EXCEEDED: {error:#}"
+        );
+    }
+
+    /// P12.2 验收（e2e，契约 §8）：program 顶层可选 `start_index` 只跳顶层
+    /// 步骤；缺省 = 从头执行。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn yaml_component_honors_top_level_start_index() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let source = "version: 3\nsteps:\n  - log: first\n  - log: second\n  - return: done\n";
+
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        let result = runtime
+            .run(run_request(
+                load(source).unwrap(),
+                None,
+                log_host(logs.clone()),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.value, Value::String("done".into()));
+        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["first", "second"]);
+
+        let logs = Arc::new(LogTrace {
+            logs: Mutex::new(Vec::new()),
+        });
+        // start_index = 1：跳过顶层第 0 步（log first），只跑 log second + return。
+        let result = runtime
+            .run(run_request(
+                load(source).unwrap(),
+                None,
+                log_host(logs.clone()),
+                Some(1),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.value, Value::String("done".into()));
+        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["second"]);
     }
 }

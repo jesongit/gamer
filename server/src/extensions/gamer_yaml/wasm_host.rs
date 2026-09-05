@@ -101,11 +101,12 @@ impl wit::yaml::gamer::host::capability::Host for YamlHostState {
 }
 
 impl wit::yaml::gamer::host::programs::Host for YamlHostState {
-    fn resolve(&mut self, target: String, args_json: String) -> Result<String, String> {
+    fn resolve(&mut self, target: String, args_json: String, depth: u32) -> Result<String, String> {
         let resolver = self
             .yaml_programs
             .clone()
             .ok_or_else(|| "YAML call resolver 未配置".to_string())?;
+        super::yaml_extension::check_call_depth(depth).map_err(|error| error.to_string())?;
         let args = serde_json::from_str::<serde_json::Value>(&args_json)
             .map_err(|error| format!("call 参数不是 JSON: {error}"))?;
         let args = yaml_vnext::Value::from_json(args)
@@ -114,7 +115,7 @@ impl wit::yaml::gamer::host::programs::Host for YamlHostState {
             return Err("call 参数必须是 map".to_string());
         };
         let program = resolver
-            .resolve(&target, &args)
+            .resolve(&target, &args, depth)
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&program).map_err(|error| error.to_string())
     }
@@ -204,6 +205,14 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
         let mut program = serde_json::to_value(&request.program)?;
         if let serde_json::Value::Object(ref mut program) = program {
             program.insert("args".to_string(), serde_json::to_value(request.args)?);
+            // 手动运行「从此运行」：顶层可选 start_index，guest 只按顶层
+            // surface 步序号跳步（契约 §8）；None = 从头执行（现状行为）。
+            if let Some(start_index) = request.start_index {
+                program.insert(
+                    "start_index".to_string(),
+                    serde_json::Value::from(start_index),
+                );
+            }
         }
         let program = serde_json::to_string(&program)?;
         let (result,) = instance

@@ -267,26 +267,36 @@ struct YamlVnextAdapter {
     extensions: Weak<crate::extensions::ExtensionService>,
 }
 
-/// 包内脚本（`scripts/`）解析器：resolve 仅被 wasm-runtime 的 YAML guest
-/// programs 通道调用，无该 feature 时字段不被读取。
+/// 包内可调用资源（`scripts/` / `functions/` 分区）解析器：resolve 仅被
+/// wasm-runtime 的 YAML guest programs 通道调用，无该 feature 时字段不被读取。
+/// target 命名空间解析与穿越校验收口在
+/// [`crate::extensions::gamer_yaml::yaml_vnext::split_call_target`]。
 #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
 struct ScriptProgramResolver {
     scripts: Arc<crate::resources::ResourceStore>,
     package: String,
 }
 
-impl YamlProgramResolver for ScriptProgramResolver {
-    fn resolve(&self, target: &str, _args: &BTreeMap<String, Value>) -> anyhow::Result<Program> {
-        let target = target.trim();
-        let target = if target.contains('/') {
-            target.to_string()
-        } else if target.to_ascii_lowercase().ends_with(".yaml")
-            || target.to_ascii_lowercase().ends_with(".yml")
-        {
-            format!("{}/{}", self.package, target)
+impl ScriptProgramResolver {
+    /// 分区内相对 id → 资源 id：`.yaml` 后缀与 `<pkg>/` 前缀都可省略
+    /// （`daily/login` → `<pkg>/daily/login.yaml`）。
+    fn resource_id(&self, id: &str) -> String {
+        let id = id.trim();
+        let lower = id.to_ascii_lowercase();
+        let with_ext = if lower.ends_with(".yaml") || lower.ends_with(".yml") {
+            id.to_string()
         } else {
-            format!("{}/{}.yaml", self.package, target)
+            format!("{id}.yaml")
         };
+        if with_ext.starts_with(&format!("{}/", self.package)) {
+            with_ext
+        } else {
+            format!("{}/{}", self.package, with_ext)
+        }
+    }
+
+    fn resolve_script(&self, id: &str) -> anyhow::Result<Program> {
+        let target = self.resource_id(id);
         let script = self
             .scripts
             .get_text(crate::resources::ResourceKind::Scripts, &target)?
@@ -304,6 +314,58 @@ impl YamlProgramResolver for ScriptProgramResolver {
                     .join("；")
             )
         })
+    }
+
+    /// `function:<文件短路径>/<函数名>`：functions/ 分区定位文件 → v3 函数库
+    /// 解析 → 取目标函数 `{params, steps}` 组装 Program（ADR-YAML-02）。
+    fn resolve_function(&self, file: &str, function: &str) -> anyhow::Result<Program> {
+        let target = self.resource_id(file);
+        let entry = self
+            .scripts
+            .get_text(crate::resources::ResourceKind::Functions, &target)?
+            .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 函数文件: {target}"))?;
+        crate::extensions::gamer_yaml::yaml_vnext::load_function(&entry.content, function).map_err(
+            |diagnostics| {
+                anyhow::anyhow!(
+                    "v3 函数无效: {}",
+                    diagnostics
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("；")
+                )
+            },
+        )
+    }
+}
+
+impl YamlProgramResolver for ScriptProgramResolver {
+    fn resolve(
+        &self,
+        target: &str,
+        _args: &BTreeMap<String, Value>,
+        depth: u32,
+    ) -> anyhow::Result<Program> {
+        crate::extensions::gamer_yaml::yaml_extension::check_call_depth(depth)?;
+        let parsed = crate::extensions::gamer_yaml::yaml_vnext::split_call_target(target)
+            .map_err(|diagnostics| {
+                anyhow::anyhow!(
+                    "v3 call 目标无效: {}",
+                    diagnostics
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("；")
+                )
+            })?;
+        match parsed {
+            crate::extensions::gamer_yaml::yaml_vnext::CallTarget::Script(id) => {
+                self.resolve_script(&id)
+            }
+            crate::extensions::gamer_yaml::yaml_vnext::CallTarget::Function { file, function } => {
+                self.resolve_function(&file, &function)
+            }
+        }
     }
 }
 
@@ -350,7 +412,7 @@ impl YamlVnextAdapter {
         if !crate::extensions::gamer_yaml::yaml_vnext::is_v3_source(&script.content) {
             return Ok(None);
         }
-        let mut program = crate::extensions::gamer_yaml::yaml_vnext::load(&script.content)
+        let program = crate::extensions::gamer_yaml::yaml_vnext::load(&script.content)
             .map_err(|diagnostics| {
                 anyhow::anyhow!(diagnostics
                     .iter()
@@ -358,16 +420,6 @@ impl YamlVnextAdapter {
                     .collect::<Vec<_>>()
                     .join("；"))
             })?;
-        if *start_index > program.steps.len() {
-            anyhow::bail!(
-                "start_index {} 超过 v3 脚本步数 {}",
-                start_index,
-                program.steps.len()
-            );
-        }
-        if *start_index != 0 {
-            program.steps = program.steps.into_iter().skip(*start_index).collect();
-        }
         let resolver = Arc::new(ScriptProgramResolver {
             scripts: self.scripts.clone(),
             package: script.package.clone(),
@@ -376,6 +428,8 @@ impl YamlVnextAdapter {
             .extensions
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("YAML 扩展服务已关闭"))?;
+        // 「从此运行」start_index 经 YamlWasmRunRequest 注入 program JSON，
+        // 由 guest 按顶层 surface 步序号跳步（契约 §8），不再预切片。
         crate::extensions::gamer_yaml::run_yaml_vnext(
             &extensions,
             program,
@@ -383,6 +437,7 @@ impl YamlVnextAdapter {
             yaml_args(&spec.args),
             Some(resolver),
             stop,
+            Some(*start_index),
         )
         .await
         .map(|_| Some(Vec::new()))
@@ -415,6 +470,108 @@ mod tests {
         assert_eq!(
             request.request.payload.as_value()["target"]["start_index"],
             2
+        );
+    }
+
+    /// ScriptProgramResolver 的 script:/function: 命名空间解析与深度守卫
+    /// （真实 ResourceStore + 分区目录）。
+    #[test]
+    fn script_program_resolver_supports_namespaced_targets_and_depth_guard() {
+        let data = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: data.path().to_path_buf(),
+            ..Default::default()
+        };
+        let store = Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
+        store
+            .save_text(
+                crate::resources::ResourceKind::Scripts,
+                None,
+                "com.test.app",
+                "sub/inner.yaml",
+                "version: 3\nsteps:\n  - log: inner\n",
+            )
+            .unwrap();
+        store
+            .save_text(
+                crate::resources::ResourceKind::Functions,
+                None,
+                "com.test.app",
+                "lib.yaml",
+                "fn1:\n  params:\n    - name: n\n      type: number\n      default: 1\n  steps:\n    - return: $n\n",
+            )
+            .unwrap();
+        let resolver = ScriptProgramResolver {
+            scripts: store,
+            package: "com.test.app".into(),
+        };
+
+        // script: 分区内相对 id（.yaml 可省略，可含子目录）
+        let program = resolver
+            .resolve("script:sub/inner", &BTreeMap::new(), 1)
+            .unwrap();
+        assert_eq!(program.steps.len(), 1);
+        // function: 文件短路径/函数名
+        let program = resolver
+            .resolve("function:lib/fn1", &BTreeMap::new(), 1)
+            .unwrap();
+        assert_eq!(program.params.len(), 1);
+        assert_eq!(program.steps.len(), 1);
+
+        // 裸 target 拒绝（yaml.v3.call.namespace）
+        let error = resolver.resolve("helper", &BTreeMap::new(), 1).unwrap_err();
+        assert!(
+            error.to_string().contains("yaml.v3.call.namespace"),
+            "裸 target 必须报命名空间诊断: {error}"
+        );
+        // 穿越拒绝
+        let error = resolver
+            .resolve("function:../evil/fn", &BTreeMap::new(), 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("yaml.v3.call.target"));
+        // 不存在的目标
+        let error = resolver
+            .resolve("script:nope/missing", &BTreeMap::new(), 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("找不到 v3 call 目标"));
+        let error = resolver
+            .resolve("function:lib/missing", &BTreeMap::new(), 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("yaml.v3.function.not_found"));
+
+        // 递归深度守卫：depth 32 合法、33 报 CALL_DEPTH_EXCEEDED
+        resolver
+            .resolve("script:sub/inner", &BTreeMap::new(), 32)
+            .unwrap();
+        let error = resolver
+            .resolve("script:sub/inner", &BTreeMap::new(), 33)
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("CALL_DEPTH_EXCEEDED"),
+            "depth 33 必须报 CALL_DEPTH_EXCEEDED: {error}"
+        );
+    }
+
+    /// 分区内相对 id → 资源 id 的归一规则（不触碰磁盘）。
+    #[test]
+    fn resolver_resource_id_normalization() {
+        let data = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: data.path().to_path_buf(),
+            ..Default::default()
+        };
+        let resolver = ScriptProgramResolver {
+            scripts: Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap()),
+            package: "com.test.app".into(),
+        };
+        assert_eq!(
+            resolver.resource_id("daily/login"),
+            "com.test.app/daily/login.yaml"
+        );
+        assert_eq!(resolver.resource_id("daily.yaml"), "com.test.app/daily.yaml");
+        assert_eq!(
+            resolver.resource_id("com.test.app/daily.yaml"),
+            "com.test.app/daily.yaml"
         );
     }
 }

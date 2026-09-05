@@ -117,10 +117,12 @@ impl Value {
                 }
             }
             serde_json::Value::String(value) => Self::String(value),
+            // 数组元素优先按 typed wire 形态还原（guest 小 AST 解释器的容器
+            // 不加 wrap、元素是 typed 形态，见 yaml-guest evaluate）。
             serde_json::Value::Array(values) => Self::List(
                 values
                     .into_iter()
-                    .map(Self::from_plain_json)
+                    .map(Self::from_json)
                     .collect::<Result<_, _>>()?,
             ),
             serde_json::Value::Object(values) => Self::Map(
@@ -350,6 +352,167 @@ impl fmt::Display for Diagnostic {
 pub fn load(source: &str) -> Result<Program, Vec<Diagnostic>> {
     let surface = parse_surface(source)?;
     lower(&surface)
+}
+
+/// `call` 目标的显式命名空间（契约 §2 / ADR-YAML-02）。
+#[derive(Clone, Debug, PartialEq)]
+pub enum CallTarget {
+    /// `script:<资源 id>`：分区内 `scripts/` 相对路径，`.yaml` 后缀可省略。
+    Script(String),
+    /// `function:<文件短路径>/<函数名>`：文件短路径按最后一个 `/` 分割、可含目录。
+    Function {
+        file: String,
+        function: String,
+    },
+}
+
+const CALL_NAMESPACE_HINT: &str =
+    "call target 必须带命名空间前缀：script:<脚本id> 或 function:<文件短路径>/<函数名>（如 script:daily/login、function:工具/月卡领取）";
+
+/// 解析 `call` target 命名空间并做穿越校验。
+///
+/// 裸 target 与未知前缀在解析期拒绝（错误码 `yaml.v3.call.namespace`，错误信息
+/// 含 target 原文与合法形态示例）；`function:` 路径形态错误为
+/// `yaml.v3.call.function_path`，穿越（`..`/绝对路径/反斜杠/空段）为
+/// `yaml.v3.call.target`。语法同 v2 `split_func_path` 的穿越校验并推广到
+/// `script:` id。
+pub fn split_call_target(target: &str) -> Result<CallTarget, Vec<Diagnostic>> {
+    let trimmed = target.trim();
+    if let Some(rest) = trimmed.strip_prefix("script:") {
+        let id = rest.trim();
+        if id.is_empty() {
+            return Err(vec![Diagnostic::new(
+                "yaml.v3.call.namespace",
+                "target",
+                format!("script: 后缺少脚本资源 id；{CALL_NAMESPACE_HINT}（原文 {target:?}）"),
+            )]);
+        }
+        reject_resource_traversal(id)?;
+        Ok(CallTarget::Script(id.to_string()))
+    } else if let Some(rest) = trimmed.strip_prefix("function:") {
+        let rest = rest.trim();
+        reject_resource_traversal(rest)?;
+        let Some((file, function)) = rest.rsplit_once('/') else {
+            return Err(vec![Diagnostic::new(
+                "yaml.v3.call.function_path",
+                "target",
+                format!(
+                    "function: 目标 {target:?} 必须是 <文件短路径>/<函数名>（如 function:工具/月卡领取）"
+                ),
+            )]);
+        };
+        if file.is_empty() || function.is_empty() {
+            return Err(vec![Diagnostic::new(
+                "yaml.v3.call.function_path",
+                "target",
+                format!("function: 目标 {target:?} 的文件短路径与函数名均不能为空"),
+            )]);
+        }
+        Ok(CallTarget::Function {
+            file: file.to_string(),
+            function: function.to_string(),
+        })
+    } else {
+        Err(vec![Diagnostic::new(
+            "yaml.v3.call.namespace",
+            "target",
+            format!("裸 call target {target:?} 不再接受；{CALL_NAMESPACE_HINT}"),
+        )])
+    }
+}
+
+/// 资源路径穿越校验：拒绝反斜杠、绝对路径、空段与 `..` 段。
+fn reject_resource_traversal(path: &str) -> Result<(), Vec<Diagnostic>> {
+    if path.contains('\\')
+        || path.starts_with('/')
+        || path.split('/').any(|segment| segment.is_empty() || segment == "..")
+    {
+        return Err(vec![Diagnostic::new(
+            "yaml.v3.call.target",
+            "target",
+            format!("call 资源路径 {path:?} 含 ..、绝对路径、反斜杠或空段"),
+        )]);
+    }
+    Ok(())
+}
+
+/// v3 函数库（functions/ 资源）：bare-map `{<函数名>: {params, steps}}`。
+#[derive(Clone, Debug, PartialEq)]
+pub struct FunctionDecl {
+    pub name: String,
+    pub params: Vec<ParamDecl>,
+    pub steps: Vec<SurfaceStep>,
+}
+
+/// 解析 v3 函数库文件：顶层键全部是函数名（无 `version` 键，目录即类型），
+/// 每个函数记录只允许 `params` / `steps`，`steps` 必需。函数名由映射键承载
+/// （唯一），结构非法给 `yaml.v3.function.*` 结构化诊断。
+pub fn parse_function_library(source: &str) -> Result<Vec<FunctionDecl>, Vec<Diagnostic>> {
+    let root: YamlValue = serde_yaml::from_str(source)
+        .map_err(|error| vec![Diagnostic::new("yaml.v3.syntax", "", error.to_string())])?;
+    let map = as_map(&root, "", "函数库必须是 {函数名: {params, steps}} 映射")?;
+    if map.is_empty() {
+        return Err(vec![Diagnostic::new(
+            "yaml.v3.function.file",
+            "",
+            "函数库必须至少声明一个函数",
+        )]);
+    }
+    let mut functions = Vec::with_capacity(map.len());
+    for (key, value) in map {
+        let name = key.as_str().unwrap_or_default().trim().to_string();
+        if name.is_empty() {
+            return Err(vec![Diagnostic::new(
+                "yaml.v3.function.name",
+                "",
+                "函数名必须是非空字符串",
+            )]);
+        }
+        let def = as_map(value, &name, "函数定义必须是映射")?;
+        for key in def.keys() {
+            let key = key.as_str().unwrap_or_default();
+            if !matches!(key, "params" | "steps") {
+                return Err(vec![Diagnostic::new(
+                    "yaml.v3.function.unknown_key",
+                    format!("{name}.{key}"),
+                    format!("不支持函数字段 {key:?}"),
+                )]);
+            }
+        }
+        let params = def
+            .get("params")
+            .map(parse_params)
+            .transpose()?
+            .unwrap_or_default();
+        let steps = required_steps(def, "steps", &name)?;
+        functions.push(FunctionDecl {
+            name,
+            params,
+            steps,
+        });
+    }
+    Ok(functions)
+}
+
+/// 从函数库源码装载指定函数并 lower 成可执行 Program（version 固定 3）。
+pub fn load_function(source: &str, function: &str) -> Result<Program, Vec<Diagnostic>> {
+    let library = parse_function_library(source)?;
+    let decl = library
+        .iter()
+        .find(|decl| decl.name == function)
+        .ok_or_else(|| {
+            vec![Diagnostic::new(
+                "yaml.v3.function.not_found",
+                function,
+                format!("函数库中不存在函数 {function:?}"),
+            )]
+        })?;
+    let mut lowerer = Lowerer { serial: 0 };
+    Ok(Program {
+        version: YAML_V3,
+        params: decl.params.clone(),
+        steps: lowerer.steps(&decl.steps)?,
+    })
 }
 
 /// Identify a v3 source before invoking the legacy loader. A syntactically
@@ -621,8 +784,15 @@ fn parse_step(value: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnost
         "call" => {
             let map = as_map(value, &value_path, "call 必须是映射")?;
             reject_unknown(map, &["target", "args", "with", "save"], &value_path)?;
+            let target = required_string(map, "target", &value_path)?;
+            split_call_target(&target).map_err(|mut diagnostics| {
+                for diagnostic in &mut diagnostics {
+                    diagnostic.path = format!("{value_path}.target");
+                }
+                diagnostics
+            })?;
             Ok(SurfaceStep::Call {
-                target: required_string(map, "target", &value_path)?,
+                target,
                 args: args_map(map, &value_path)?,
                 save: optional_string(map, "save", &value_path)?,
             })
@@ -1835,7 +2005,7 @@ mod tests {
     #[test]
     fn v3_surface_covers_control_and_dynamic_nodes() {
         let program = load(
-            "version: 3\nsteps:\n  - set: {ready: true}\n  - if:\n      cond: $ready\n      then:\n        - loop:\n            times: 2\n            steps:\n              - break\n      else: []\n  - call:\n      target: helper\n      with: {arg: 1}\n      save: result\n  - invoke:\n      capability: plugin.value\n      with: {value: $result}\n      save: output\n  - throw: failed\n  - return: $output\n",
+            "version: 3\nsteps:\n  - set: {ready: true}\n  - if:\n      cond: $ready\n      then:\n        - loop:\n            times: 2\n            steps:\n              - break\n      else: []\n  - call:\n      target: script:helper\n      with: {arg: 1}\n      save: result\n  - invoke:\n      capability: plugin.value\n      with: {value: $result}\n      save: output\n  - throw: failed\n  - return: $output\n",
         )
         .unwrap();
         let json = serde_json::to_string(&program).unwrap();
@@ -1857,5 +2027,146 @@ mod tests {
         .unwrap();
         let json = serde_json::to_string(&program).unwrap();
         assert!(json.contains("\"type\":\"color\""));
+    }
+
+    #[test]
+    fn bare_call_targets_are_rejected_with_namespace_diagnostic() {
+        let error = load("version: 3\nsteps:\n  - call:\n      target: helper\n").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.call.namespace");
+        assert!(error[0].message.contains("helper"), "诊断必须含 target 原文");
+        assert!(error[0].message.contains("script:"));
+        assert!(error[0].message.contains("function:"));
+        let error = load("version: 3\nsteps:\n  - call:\n      target: plugin:value\n").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.call.namespace");
+        let error = load("version: 3\nsteps:\n  - call:\n      target: \"script:\"\n").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.call.namespace");
+    }
+
+    #[test]
+    fn namespaced_call_targets_parse_and_keep_args_alias() {
+        let surface = parse_surface(
+            "version: 3\nsteps:\n  - call:\n      target: script:daily/login\n      args: {account: $user}\n      save: result\n  - call:\n      target: function:common/login/is_logged_in\n      with: {flag: true}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            surface.steps[0],
+            SurfaceStep::Call {
+                target: "script:daily/login".into(),
+                args: BTreeMap::from([("account".into(), Expr::reference("user"))]),
+                save: Some("result".into()),
+            }
+        );
+        assert_eq!(
+            surface.steps[1],
+            SurfaceStep::Call {
+                target: "function:common/login/is_logged_in".into(),
+                args: BTreeMap::from([("flag".into(), lit(Value::Bool(true)))]),
+                save: None,
+            }
+        );
+        let lowered = lower(&surface).unwrap();
+        assert!(matches!(&lowered.steps[1], SmallStep::Call { target, .. } if target == "function:common/login/is_logged_in"));
+    }
+
+    #[test]
+    fn function_call_paths_reject_traversal_and_bad_shapes() {
+        let cases = [
+            ("function:../evil/fn", "yaml.v3.call.target"),
+            ("function:a/b/../../../fn", "yaml.v3.call.target"),
+            ("function:a\\b/fn", "yaml.v3.call.target"),
+            ("function:/abs/fn", "yaml.v3.call.target"),
+            ("function:a//fn", "yaml.v3.call.target"),
+            ("function:file/", "yaml.v3.call.target"), // 尾随 / = 空段
+            ("function:noslash", "yaml.v3.call.function_path"),
+        ];
+        for (target, code) in cases {
+            let source = format!("version: 3\nsteps:\n  - call:\n      target: {target:?}\n");
+            let error = load(&source).unwrap_err();
+            assert_eq!(error[0].code, code, "target {target:?}");
+        }
+        // script id 同样拒绝穿越
+        let error = load("version: 3\nsteps:\n  - call:\n      target: script:../x\n").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.call.target");
+    }
+
+    #[test]
+    fn function_library_parses_bare_map_and_lowers_named_function() {
+        let source = "fn1:\n  params:\n    - name: flag\n      type: bool\n      default: false\n  steps:\n    - if:\n        cond: $flag\n        then:\n          - return: {ok: true}\n    - return: {ok: false}\nfn2:\n  steps:\n    - return: [1, 2, 3]\n";
+        let library = parse_function_library(source).unwrap();
+        assert_eq!(
+            library.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["fn1", "fn2"]
+        );
+        let program = load_function(source, "fn2").unwrap();
+        assert_eq!(program.version, YAML_V3);
+        assert!(program.params.is_empty());
+        assert_eq!(program.steps.len(), 1);
+        let program = load_function(source, "fn1").unwrap();
+        assert_eq!(program.params.len(), 1);
+        let error = load_function(source, "missing").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.function.not_found");
+    }
+
+    #[test]
+    fn function_library_rejects_invalid_structures() {
+        // 空文件（解析为 Null，顶层不是映射）与语法错误
+        let error = parse_function_library("").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.type");
+        let error = parse_function_library("fn: [unclosed\n").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.syntax");
+        let error = parse_function_library("{}").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.function.file");
+        // 顶层不是映射
+        let error = parse_function_library("- a\n- b\n").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.type");
+        // 函数定义必须是映射（version 键会被当作函数名，标量值非法）
+        let error = parse_function_library("version: 3\n").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.type");
+        // steps 缺失
+        let error = parse_function_library("fn:\n  params: []\n").unwrap_err();
+        assert_eq!(
+            error[0].code, "yaml.v3.field.missing",
+            "path={}", error[0].path
+        );
+        assert_eq!(error[0].path, "fn.steps");
+        // 未知字段
+        let error = parse_function_library("fn:\n  steps: []\n  extra: 1\n").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.function.unknown_key");
+        // steps 非列表
+        let error = parse_function_library("fn:\n  steps: 3\n").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.steps.type");
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    /// 返回值泛化（ADR-YAML-02）：guest 解释器的容器不加 typed wrap、元素是
+    /// typed 形态，`Value::from_json` 必须递归还原嵌套容器里的 typed 值。
+    #[test]
+    fn from_json_rehydrates_typed_leaves_inside_raw_containers() {
+        let guest_return = serde_json::json!({
+            "ok": {"type": "bool", "value": true},
+            "items": [{"type": "int", "value": 1}, {"type": "int", "value": 2}],
+        });
+        assert_eq!(
+            Value::from_json(guest_return).unwrap(),
+            Value::Map(BTreeMap::from([
+                (
+                    "items".to_string(),
+                    Value::List(vec![Value::Int(1), Value::Int(2)])
+                ),
+                ("ok".to_string(), Value::Bool(true)),
+            ]))
+        );
+        assert_eq!(
+            Value::from_json(serde_json::json!([
+                {"type": "int", "value": 7},
+                {"type": "string", "value": "s"},
+            ]))
+            .unwrap(),
+            Value::List(vec![Value::Int(7), Value::String("s".into())])
+        );
     }
 }
