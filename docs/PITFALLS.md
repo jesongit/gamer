@@ -262,3 +262,10 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **数据根已切 `data/packages/<package-id>/`，旧 `data/<android 包名>/` 六目录不再被读写**：包 id/plugin id 严格 `[a-z0-9][a-z0-9._-]*`（禁 `.`/`..`/大写/分隔符），Android 包名（允许大写）**不能**再当资源分区名用——设备 `pkg` 字段只作 Android 运行目标，设备→Package 运行上下文映射归 T2a；旧数据无自动迁移，按目录手工搬进 `packages/<pkg>/plugins/<plugin>/` 即可。
 - **`GET .../resources/<子目录>` 是按文件读取（404），不是列表**：递归列表端点是 `GET /api/packages/:pkg/plugins/:plugin/resources`，子目录限定用 `?prefix=`；同理 PUT 文本资源**不再自动补 `.yaml` 扩展名**（Core 内容无关，路径即所写），带裸名写入会得到无扩展名文件。
 - **包归档（.gamerpkg）顶层只允许 `package.toml`/`shared/`/`plugins/<plugin-id>/`**：manifest 从 `manifest.toml` 换成 `package.toml` 且**必须是首个条目**（打包器显式写入，collect 时跳过它防 zip 重复条目——曾因目录扫描把 package.toml 再收一遍导致自检 Duplicate filename）；导入默认 409 附已存摘要，`?overwrite=true` 原子替换（旧目录先挪 .staging 再换入，无半安装态）。
+
+## 2026-09-06（Package 模型 + 前端架构全链收口）
+
+- **旧分区迁移到 packages 布局时 package-id 必须小写化**：`validate_scope_id` 只收 `[a-z0-9][a-z0-9._-]*`（拒大写），Android 原名含大写（如 `com.miHoYo.hkrpg`）不能直接当目录名——Package id 落成 `com.mihoyo.hkrpg`，Android 原名写进 package.toml 的 `[targets.android].packages` 做兼容声明；两命名空间严格分离、不互相推导（权威注释 `core/models.rs` AppContext 上方）。
+- **模板上传与归档导入的内容校验口径不同**：资源 PUT 经 gamer.yaml 字节钩子强制灰度归一化（解码+重编码，非法 PNG 直接 400），而 .gamerpkg 导入只做布局/manifest/路径安全校验、**不经过插件内容校验**——包内模板以导出侧字节为准，别假设导入后与上传管线同源。
+- **脚本资源 id 首段现在是 Package id**：可为纯自定 id（如 `official.hsr.daily`）与 Android 包名完全不同名，按 Android 包名拼脚本 id / entrypoint 会 404（结构化 not_found）；id 形态 `<package-id>/<automations 内相对路径>.yaml`（`automations/` 前缀由 gamer.yaml 内部映射，id 中不写）。
+- **并行 agent 共享工作区开发时 git add 必须按文件所有权清单**：各自只 stage 自己地盘的文件，禁改文件被他人改坏时等对方自愈、不要抢修（多双手同改一个文件会产生叠加损坏；本波真实发生过 usePackageContext.js 语法错误由属主 agent 自愈、旁路 agent 抢修反而冲突）。
