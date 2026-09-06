@@ -45,7 +45,7 @@ function makeDeps(apiOverrides = {}) {
       ...apiOverrides,
     },
     toast: vi.fn(),
-    activePkg: ref('com.demo'),
+    packageId: ref('com.demo'),
     keyboardMode: ref('game'),
     keymap: { releaseAll: vi.fn(), setEnabled: vi.fn(), handleInputEvent: vi.fn(), handleKeyDown: vi.fn(), handleKeyUp: vi.fn(), getPressedCodes: () => [] },
     keymapPressed: new Set(),

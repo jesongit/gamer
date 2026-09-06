@@ -147,14 +147,14 @@ describe('Frontend Plugin Workspace', () => {
 
   it('bare core contributions (tasks/logs/settings) register through the same contract with gamer.core:tasks as default', () => {
     const registry = createPanelRegistry()
-    registerCoreContributions(registry, { activePkg: { value: 'com.demo' } })
+    registerCoreContributions(registry, { packageId: { value: 'com.demo' } })
 
     expect(registry.getPanels().map(panel => panel.key)).toEqual([
       'gamer.core:tasks', 'gamer.core:logs', 'gamer.core:settings',
     ])
     expect(registry.defaultPanel()?.key).toBe(DEFAULT_PANEL_KEY)
     expect(registry.resolve('tasks')?.key).toBe('gamer.core:tasks')
-    expect(registry.get('gamer.core:tasks')?.getProps?.({})).toEqual({ activePkg: 'com.demo' })
+    expect(registry.get('gamer.core:tasks')?.getProps?.({})).toEqual({ packageId: 'com.demo' })
   })
 
   it('P12.10：生命周期按 manifest 独立收放——仅停用 gamer.yaml 时 YAML 面板全消失、其余面板保留', async () => {

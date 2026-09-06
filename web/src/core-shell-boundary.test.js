@@ -48,7 +48,8 @@ describe('workspace 注册层（PanelRegistry 驱动，壳不解释面板实现�
     './workspace/PluginWorkspace.vue',
     './workspace/CorePanelHost.vue',
     './workspace/WorkspaceTabs.vue',
-    './workspace/WorkspaceContextBar.vue',
+    './workspace/PackageContextBar.vue',
+    './workspace/MarketView.vue',
   ]
   for (const file of files) {
     const source = read(file)
@@ -102,8 +103,13 @@ describe('Core 通用模块', () => {
 })
 
 describe('yaml 扩展前端侧契约点（归属正确性）', () => {
-  it('runner 注册 id 唯一配置点在 gamer-yaml-runner.js；api.runScript/runFunction 包装已迁出', () => {
-    expect(read('./gamer-yaml-runner.js')).toContain("export const GAMER_YAML_RUNNER_ID = 'gamer.yaml'")
+  it('runner 注册 id 唯一配置点在 gamer-yaml-runner.js（字面量下沉 gamer-plugin-ids.js）；api.runScript/runFunction 包装已迁出', () => {
+    // V3 Package 化后：id 字面量唯一归宿是 gamer-plugin-ids.js（api.js 资源寻址
+    // 与扩展契约点共用），gamer-yaml-runner.js 经其导出维持 runner id 配置点角色
+    expect(read('./gamer-plugin-ids.js')).toContain("export const GAMER_YAML_PLUGIN_ID = 'gamer.yaml'")
+    const runner = read('./gamer-yaml-runner.js')
+    expect(runner).toContain('import { GAMER_YAML_PLUGIN_ID }')
+    expect(runner).toContain('export const GAMER_YAML_RUNNER_ID = GAMER_YAML_PLUGIN_ID')
     expect(() => read('./workspace/yaml-extension.ts')).toThrow()
   })
 
@@ -113,9 +119,11 @@ describe('yaml 扩展前端侧契约点（归属正确性）', () => {
 })
 
 describe('keymap 扩展前端侧契约点（P12.10 收口）', () => {
-  it('扩展注册 id 唯一配置点在 gamer-keymap-extension.js（运行态判定随 id 同点收敛）', () => {
+  it('扩展注册 id 唯一配置点在 gamer-keymap-extension.js（字面量下沉 gamer-plugin-ids.js，运行态判定随 id 同点收敛）', () => {
+    expect(read('./gamer-plugin-ids.js')).toContain("export const KEYMAP_PLUGIN_ID = 'gamer.keymap'")
     const source = read('./gamer-keymap-extension.js')
-    expect(source).toContain("export const GAMER_KEYMAP_EXTENSION_ID = 'gamer.keymap'")
+    expect(source).toContain('import { KEYMAP_PLUGIN_ID }')
+    expect(source).toContain('export const GAMER_KEYMAP_EXTENSION_ID = KEYMAP_PLUGIN_ID')
     expect(source).toContain('export function isRemoteKeymapRunning')
   })
 
