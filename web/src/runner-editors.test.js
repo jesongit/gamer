@@ -12,7 +12,7 @@ import { scriptsData, templatesData } from './store'
 
 function stubFetch(routes) {
   vi.stubGlobal('fetch', vi.fn(async (url) => {
-    const hit = routes.find((r) => String(url).split('?')[0] === r.url)
+    const hit = routes.find((r) => String(url) === r.url || String(url).split('?')[0] === r.url)
     if (!hit) throw new Error(`unexpected fetch: ${url}`)
     return {
       ok: true, status: 200,
@@ -83,24 +83,24 @@ describe('gamer.yaml 内置贡献', () => {
     unregister()
   })
 
-  it('entrypointEditorProps：ctx.androidPackage 锁定分区；autoPick=false 纯受控', () => {
+  it('entrypointEditorProps：ctx.packageId 锁定当前 Package；autoPick=false 纯受控', () => {
     const unregister = registerGamerYamlRunnerEditor()
     const contrib = getRunnerEditor(GAMER_YAML_RUNNER_ID)
-    expect(contrib.entrypointEditorProps({ androidPackage: 'com.demo', deviceId: 'd1' }))
+    expect(contrib.entrypointEditorProps({ packageId: 'com.demo', deviceId: 'd1' }))
       .toEqual({ package: 'com.demo', lockPackage: true, autoPick: false })
-    expect(contrib.entrypointEditorProps({ androidPackage: null, deviceId: '' }))
+    expect(contrib.entrypointEditorProps({ packageId: null, deviceId: '' }))
       .toEqual({ package: '', lockPackage: false, autoPick: false })
     unregister()
   })
 
   it('entrypoints(ctx)：拉取脚本进 store 后返回候选（value=脚本 id）', async () => {
     stubFetch([
-      { url: '/api/apps/-/resources/scripts', body: [{ id: 'com.demo/main.yml', package: 'com.demo', name: 'main.yml', content: 'steps: []' }] },
-      { url: '/api/apps/-/resources/templates', body: [] },
+      { url: '/api/packages/com.demo/plugins/gamer.yaml/resources?prefix=automations', body: { resources: [{ package: 'com.demo', path: 'automations/main.yml', content: 'steps: []', version: 'v1', updated_at: '', size: 1 }] } },
+      { url: '/api/packages/com.demo/plugins/gamer.yaml/resources?prefix=templates', body: { resources: [] } },
     ])
     const unregister = registerGamerYamlRunnerEditor()
     const contrib = getRunnerEditor(GAMER_YAML_RUNNER_ID)
-    const opts = await contrib.entrypoints({ androidPackage: null, deviceId: '' })
+    const opts = await contrib.entrypoints({ packageId: 'com.demo', deviceId: '' })
     expect(opts).toEqual([{ value: 'com.demo/main.yml', label: 'main.yml' }])
     expect(scriptsData.value.map((s) => s.id)).toEqual(['com.demo/main.yml'])
     expect(templatesData.value).toEqual([])

@@ -202,7 +202,7 @@ import { registerBuiltinRunnerEditors } from './task/builtin-runner-editors'
 
 const props = defineProps({
   // Console 传入当前包名后，任务执行目标选择器锁定该分区；独立挂载时保留自选分区行为。
-  activePkg: { type: String, default: null },
+  packageId: { type: String, default: null },
 })
 
 const CRON_PROVIDER_ID = 'cron'
@@ -241,7 +241,7 @@ const unregisterEditors = registerBuiltinRunnerEditors()
 
 const currentContrib = computed(() => getRunnerEditor(form.runnerId))
 const runnerKnownToServer = computed(() => runners.value.some((r) => r.runner_id === form.runnerId))
-const editorCtx = computed(() => ({ androidPackage: props.activePkg ?? null, deviceId: form.device_id }))
+const editorCtx = computed(() => ({ packageId: props.packageId ?? null, deviceId: form.device_id }))
 const entrypointEditorProps = computed(() => currentContrib.value?.entrypointEditorProps?.(editorCtx.value) ?? {})
 
 const payloadEditorEl = ref(null)

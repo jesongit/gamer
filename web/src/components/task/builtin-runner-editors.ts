@@ -21,7 +21,7 @@ export function resolveGamerYamlAppPackages(entrypoint: string): RunnerAppPackag
 
 /**
  * 注册内置贡献；返回反注册函数（测试用）。
- * - entrypointEditor 复用 ScriptPicker（纯 store 消费）；Console 挂载时经 ctx.androidPackage
+ * - entrypointEditor 复用 ScriptPicker（纯 store 消费）；Console 挂载时经 ctx.packageId
  *   锁定当前分区，独立挂载保留双下拉自选分区行为；
  * - entrypoints() 为异步枚举口径（保障 store 就绪后给候选），供通用下拉/测试使用。
  */
@@ -30,13 +30,13 @@ export function registerGamerYamlRunnerEditor(): () => void {
     runnerId: GAMER_YAML_RUNNER_ID,
     title: 'YAML 脚本',
     entrypoints: async (ctx: RunnerEditorContext) => {
-      await ensureGamerYamlResources()
+      await ensureGamerYamlResources(ctx?.packageId ?? null)
       return gamerYamlEntrypointOptions(ctx)
     },
     entrypointEditor: ScriptPicker,
     entrypointEditorProps: (ctx: RunnerEditorContext) => ({
-      package: ctx.androidPackage ?? '',
-      lockPackage: ctx.androidPackage !== null && ctx.androidPackage !== undefined,
+      package: ctx.packageId ?? '',
+      lockPackage: ctx.packageId !== null && ctx.packageId !== undefined,
       // 纯受控：脚本列表经贡献懒加载（晚于选择器挂载到达），不得自动改写外部已选目标
       autoPick: false,
     }),

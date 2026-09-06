@@ -22,8 +22,8 @@ import type { Component } from 'vue'
 
 /** TaskBoard 提供给贡献的编辑上下文（表单当前选择；贡献只读，不得反向写入）。 */
 export interface RunnerEditorContext {
-  /** 任务应用分区（android_package）；独立挂载未锁定分区时为 null */
-  androidPackage: string | null
+  /** 数据上下文 = 当前 Package id（plan §39 命名口径；不再借用 Android 包名）。 */
+  packageId: string | null
   /** 表单当前设备 id（可能为空串） */
   deviceId: string
 }

@@ -95,7 +95,7 @@ function stubFetch(routes) {
     const method = opt.method || 'GET'
     const body = opt.body ? JSON.parse(opt.body) : null
     calls.push({ url: String(url), method, body })
-    const hit = routes.find(r => method === r.method && String(url).split('?')[0] === r.url)
+    const hit = routes.find(r => method === r.method && (String(url) === r.url || String(url).split('?')[0] === r.url))
     if (!hit) throw new Error(`unexpected fetch: ${method} ${url}`)
     const status = hit.status || 200
     return {
@@ -121,13 +121,13 @@ afterEach(() => {
 
 function baseRoutes() {
   return [
-    { method: 'GET', url: '/api/apps/-/resources/scripts', body: SCRIPTS },
+    { method: 'GET', url: '/api/packages/com.demo/plugins/gamer.yaml/resources?prefix=automations',
+      body: { resources: SCRIPTS.map(x => ({ package: x.package, path: `automations/${x.name}`, content: x.content || '', version: 'v1', updated_at: '', size: 1 })) } },
     { method: 'GET', url: '/api/runners/gamer.yaml/entrypoint', body: ENTRYPOINT_DESCRIPTOR },
-    { method: 'GET', url: '/api/apps/-/resources/templates', body: [
-      { name: '账号155#392_519_526_932.png', pkg: 'com.demo' },
-    ] },
+    { method: 'GET', url: '/api/packages/com.demo/plugins/gamer.yaml/resources?prefix=templates',
+      body: { resources: [{ package: 'com.demo', path: 'templates/账号155#392_519_526_932.png', version: 'v1', updated_at: '', size: 1 }] } },
     { method: 'GET', url: '/api/devices', body: [
-      { id: 'dev1', name: '设备一' }, { id: 'dev2', name: '设备二' },
+      { id: 'dev1', name: '设备一', pkg: 'com.demo' }, { id: 'dev2', name: '设备二', pkg: 'com.demo' },
     ] },
     { method: 'GET', url: '/api/runners', body: [
       { runner_id: 'gamer.yaml' },
@@ -142,6 +142,7 @@ function baseRoutes() {
 async function mountView(routes) {
   const calls = stubFetch(routes)
   const wrapper = mount(TaskBoard, {
+    props: { packageId: 'com.demo' },
     global: { stubs: { RunConflictModal: true, transition: true } },
     attachTo: document.body,
   })
@@ -341,7 +342,9 @@ describe('新建任务：贡献渲染 + cron 触发方式 + 保存 ADR-12 body',
   it('tmpl 参数的模板候选 = 脚本分区模板短名（候选逻辑自 TaskBoard 迁入贡献）', async () => {
     const routes = baseRoutes()
     const tmpl = { id: 'com.demo/main.yml', package: 'com.demo', name: 'main.yml', content: TMPL_SCRIPT_YAML }
-    routes.find(r => r.url === '/api/apps/-/resources/scripts').body = [tmpl]
+    routes.find(r => r.url.includes('prefix=automations')).body = {
+      resources: [{ package: 'com.demo', path: `automations/${tmpl.name}`, content: tmpl.content, version: 'v1', updated_at: '', size: 1 }],
+    }
     routes.find(r => r.url === '/api/runners/gamer.yaml/entrypoint').body = TMPL_DESCRIPTOR
     const { wrapper } = await mountView(routes)
     await openAdd(wrapper)
@@ -434,7 +437,9 @@ describe('编辑任务：payload.args 采用与保存形状', () => {
   it('切换执行目标后原 payload 不再适用：保存时 args 清空', async () => {
     const routes = baseRoutes()
     const second = { id: 'com.demo/other.yml', package: 'com.demo', name: 'other.yml', content: SCRIPT_YAML }
-    routes.find(r => r.url === '/api/apps/-/resources/scripts').body = [...SCRIPTS, second]
+    routes.find(r => r.url.includes('prefix=automations')).body = {
+      resources: [...SCRIPTS, second].map(x => ({ package: x.package, path: `automations/${x.name}`, content: x.content || '', version: 'v1', updated_at: '', size: 1 })),
+    }
     routes.push({ method: 'PUT', url: '/api/tasks/t1', body: {} })
     const { wrapper, calls } = await mountView(routes)
     await openEdit(wrapper, 0)

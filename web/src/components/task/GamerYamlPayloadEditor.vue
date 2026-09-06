@@ -54,7 +54,7 @@ import type { RunnerEditorContext, RunnerEditorIssue } from './runner-editors'
 const props = defineProps({
   entrypoint: { type: String, default: '' },
   payload: { type: Object as PropType<Record<string, unknown>>, default: () => ({}) },
-  ctx: { type: Object as PropType<RunnerEditorContext>, default: () => ({ androidPackage: null, deviceId: '' }) },
+  ctx: { type: Object as PropType<RunnerEditorContext>, default: () => ({ packageId: null, deviceId: '' }) },
 })
 const emit = defineEmits(['update:payload'])
 
@@ -135,7 +135,7 @@ onMounted(() => {
   // 编辑既有任务：payload.args 整体带入覆盖态（resolve 语义：本次采用=payload 值）
   const adopted = props.payload?.args
   initialArgs.value = adopted && typeof adopted === 'object' ? cloneArg(adopted) : {}
-  void ensureGamerYamlResources()
+  void ensureGamerYamlResources(props.ctx?.packageId)
   loadScript(props.entrypoint)
 })
 </script>

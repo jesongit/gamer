@@ -17,11 +17,11 @@ export function templateShortName(name: string): string {
 }
 
 let scriptsInflight: Promise<void> | null = null
-async function ensureScripts(): Promise<void> {
+async function ensureScripts(packageId: string): Promise<void> {
   if (scriptsData.value.length) return
   if (!scriptsInflight) {
     scriptsInflight = api
-      .listScripts()
+      .listScripts(packageId)
       .then((list) => { scriptsData.value = Array.isArray(list) ? list : [] })
       .catch(() => { /* 拉取失败：ScriptPicker 显示「（无脚本）」，任务保存被必填校验阻断 */ })
       .finally(() => { scriptsInflight = null })
@@ -30,11 +30,11 @@ async function ensureScripts(): Promise<void> {
 }
 
 let templatesInflight: Promise<void> | null = null
-async function ensureTemplates(): Promise<void> {
+async function ensureTemplates(packageId: string): Promise<void> {
   if (templatesData.value.length) return
   if (!templatesInflight) {
     templatesInflight = api
-      .listTemplates()
+      .listTemplates(packageId)
       .then((list) => { templatesData.value = Array.isArray(list) ? list : [] })
       .catch(() => { /* 拉取失败：tmpl 参数无候选（可手输短名），不阻断保存 */ })
       .finally(() => { templatesInflight = null })
@@ -42,15 +42,22 @@ async function ensureTemplates(): Promise<void> {
   await templatesInflight
 }
 
-/** 幂等保障脚本 + 模板候选进 store（payload 编辑器挂载与 entrypoints 枚举共用）。 */
-export function ensureGamerYamlResources(): Promise<void> {
-  return Promise.all([ensureScripts(), ensureTemplates()]).then(() => undefined)
+/** 幂等保障脚本 + 模板候选进 store（payload 编辑器挂载与 entrypoints 枚举共用；
+ * 数据上下文 = 调用方传入的当前 Package id，plan §39）。 */
+export function ensureGamerYamlResources(packageId: string | null | undefined): Promise<void> {
+  const pkg = String(packageId || '')
+  return Promise.all([ensureScripts(pkg), ensureTemplates(pkg)]).then(() => undefined)
 }
 
 /** 当前脚本分区（store 列表命中优先，回退 entrypoint 分区前缀约定）。 */
 export function scriptPackageOf(entrypoint: string): string {
   const s = scriptsData.value.find((x) => x.id === entrypoint)
   return s?.package || String(entrypoint || '').split('/')[0] || ''
+}
+
+/** 脚本条目的 Package id（资源 id 首段；Package 上下文，§39 命名口径）。 */
+export function scriptPackageIdOf(entrypoint: string): string {
+  return scriptPackageOf(entrypoint)
 }
 
 /** 执行目标候选 = 当前 store 快照（调用前应 ensureGamerYamlResources）。 */
