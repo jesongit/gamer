@@ -216,6 +216,10 @@ pub(crate) fn build_router_with_extensions(
             post(packages::api_duplicate_package),
         )
         .route(
+            "/api/packages/:pkg/compatibility",
+            get(packages::api_package_compatibility),
+        )
+        .route(
             "/api/packages/:pkg/plugins/:plugin/resources",
             get(packages::api_list_plugin_resources),
         )

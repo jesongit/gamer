@@ -206,13 +206,18 @@ pub(super) async fn api_get_package(
     State(st): State<AppState>,
     Path(pkg): Path<String>,
 ) -> Response {
+    let extensions = st.extensions.clone();
     match run_blocking_api(move || -> Result<Value, ApiError> {
         let store = store_of(&st);
         let manifest = store.manifest(&pkg).map_err(not_found_or_internal)?;
         let stats = store.stats(&pkg).map_err(not_found_or_internal)?;
+        let installed = extensions
+            .list()
+            .map_err(|e| internal(anyhow::anyhow!(e.to_string())))?;
         Ok(json!({
             "package": manifest_json(&manifest),
             "stats": serde_json::to_value(&stats).unwrap_or_default(),
+            "plugin_states": plugin_states_json(&manifest, &stats, &installed),
         }))
     })
     .await
@@ -220,6 +225,86 @@ pub(super) async fn api_get_package(
         Ok(value) => Json(value).into_response(),
         Err(e) => e.into_response(),
     }
+}
+
+/// GET /api/packages/:pkg/compatibility?android_package=<pkg> — Android Target
+/// 兼容性检查（plan §17，warning 语义：不兼容仅提示，不禁止使用）。
+/// 0 个声明 target = 通用包恒兼容。
+pub(super) async fn api_package_compatibility(
+    State(st): State<AppState>,
+    Path(pkg): Path<String>,
+    Query(q): Query<CompatibilityQuery>,
+) -> Response {
+    match run_blocking_api(move || -> Result<Value, ApiError> {
+        let manifest = store_of(&st).manifest(&pkg).map_err(not_found_or_internal)?;
+        let compatible = manifest.android_targets.is_empty()
+            || manifest.android_targets.contains(&q.android_package);
+        Ok(json!({
+            "android_package": q.android_package,
+            "compatible": compatible,
+            "android_targets": manifest.android_targets,
+        }))
+    })
+    .await
+    {
+        Ok(value) => Json(value).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CompatibilityQuery {
+    android_package: String,
+}
+
+/// Plugin Dependency 状态（plan §18）：对照扩展注册表，给出每个声明依赖的
+/// 可用性；包内存在但 manifest 未声明的插件目录 = `unknown`（dormant 数据
+/// 保留语义，只提示不处置）。
+///
+/// 状态词表：`available`（已安装且 Enabled/Running）| `disabled`（已安装但
+/// 未启用/启动失败）| `missing_required` | `missing_optional`（未安装）|
+/// `unknown`（盘上存在未声明目录）。
+fn plugin_states_json(
+    manifest: &crate::resources::PackageManifest,
+    stats: &crate::resources::PackageStats,
+    installed: &[crate::extensions::ExtensionSnapshot],
+) -> Value {
+    let state_of = |plugin: &str| {
+        installed
+            .iter()
+            .find(|e| e.id().as_str() == plugin)
+            .map(|e| e.state())
+    };
+    let mut entries: Vec<Value> = manifest
+        .plugins
+        .iter()
+        .map(|(plugin, dep)| {
+            let state = match state_of(plugin) {
+                Some(crate::extensions::ExtensionState::Enabled)
+                | Some(crate::extensions::ExtensionState::Running) => "available",
+                Some(_) => "disabled",
+                None => {
+                    if dep.required {
+                        "missing_required"
+                    } else {
+                        "missing_optional"
+                    }
+                }
+            };
+            json!({ "plugin": plugin, "required": dep.required, "state": state })
+        })
+        .collect();
+    // 盘上存在但未声明 = unknown（数据保留，不解释）
+    for plugin in &stats.plugins {
+        if !manifest.plugins.contains_key(&plugin.plugin) {
+            entries.push(json!({
+                "plugin": plugin.plugin,
+                "required": Value::Null,
+                "state": "unknown",
+            }));
+        }
+    }
+    Value::Array(entries)
 }
 
 /// PUT /api/packages/:pkg — 元数据编辑；缺省字段沿用当前值；id 不可变。
