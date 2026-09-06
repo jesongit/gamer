@@ -13,8 +13,9 @@
 YAML v3 是 **gamer.yaml 扩展**拥有的自动化脚本 DSL：Parser、Runtime（WASM
 guest）、函数库、编辑器语义与本文档全部归 gamer_yaml 扩展所有。**Core 不认识
 YAML**——Core 只提供 Capability（device/vision/input/runtime/log/resource）、
-Resource 六目录寻址、Task/Run/调度与扩展生命周期（ADR-11~14）。YAML 是完整、
-可安装、可卸载的官方 Extension，不是 Core 的内建 DSL。
+PackageStore 资源三元组寻址（Package id × plugin id × path）、Task/Run/调度与
+扩展生命周期（ADR-11~14）。YAML 是完整、可安装、可卸载的官方 Extension，不是
+Core 的内建 DSL。
 
 - **version: 3 是唯一接受的版本**：非 3（缺失 / `version: 2` / 其他值）一律报
   `unsupported yaml version`，无 fallback、无自动升级、无迁移工具
@@ -46,7 +47,7 @@ Gamer Core（设备 / 输入 / 视觉 / 日志 / 资源）
 
 | 动作键 | 类别 | 一句话语义 | 详见 |
 |---|---|---|---|
-| `app.start` | 应用 | 冷启动应用（自动加 `+` 前缀），缺省当前分区包名 | [steps.md](steps.md) |
+| `app.start` | 应用 | 冷启动应用（自动加 `+` 前缀），缺省设备配置的 Android 应用包名（Runtime Context 的 App 层） | [steps.md](steps.md) |
 | `app.stop` | 应用 | 停止应用 | [steps.md](steps.md) |
 | `tap` | 输入 | 点相对坐标（tap 后等待 `after_tap`） | [steps.md](steps.md) |
 | `swipe` | 输入 | 滑动（from/to/duration） | [steps.md](steps.md) |

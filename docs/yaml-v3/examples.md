@@ -88,7 +88,7 @@ steps:
 ## 4. call 函数 + 返回值 + if
 
 ```yaml
-# scripts/主任务.yaml
+# automations/主任务.yaml
 version: 3
 params:
   - 'text:account:账号:"玩家一号"'

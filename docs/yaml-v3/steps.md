@@ -71,7 +71,7 @@
 ### app.start / app.stop
 
 ```yaml
-- app.start                    # 当前分区包名
+- app.start                    # 缺省设备配置的 Android 应用包名
 - app.start: com.example.game  # 标量 / {package: ...} / {app: ...} 均可
 - app.stop: com.example.game
 ```

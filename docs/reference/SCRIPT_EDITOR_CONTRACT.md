@@ -5,7 +5,11 @@
 > 均不复存在，本文描述的契约随之失效，仅作历史档案保留。现行 v3 语法契约见
 > `docs/yaml-v3/`（steps/call/params/vision/timing/runtime）与
 > `docs/reference/YAML.md` §3；前端编辑器契约以 `web/src/script-editor/` 的
-> v3 model/codec 实现为准。
+> v3 model/codec 实现为准。本文出现的资源布局 / 资源 id 形态与 API 路径
+> （`data/<pkg>/scripts/`、`/api/apps/:app/resources/...` 等）同为历史形态：
+> 2026-09 起数据一级作用域为 Package（`data/packages/<package-id>/plugins/
+> <plugin>/`，脚本目录 `automations/`，资源 API `/api/packages/:pkg/plugins/
+> :plugin/resources`），Installed/Editable 双层模型已删除。
 
 > 原状态：当前无兼容基线；改动本文档需同步 fixture 与双方测试。
 > 依据：当前服务端严格 loader、编辑器 Model 与 YAML 文档的共同契约。

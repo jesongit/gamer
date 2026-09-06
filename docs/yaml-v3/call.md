@@ -29,8 +29,10 @@
 `yaml.v3.call.namespace`，错误信息含 target 原文与合法形态示例
 （`script:<脚本id>` / `function:<文件短路径>/<函数名>`）。
 
-- **`script:<资源id>`**：分区内 `scripts/` 相对路径，`.yaml` 后缀可省略。
-  `script:daily/login` → `scripts/daily/login.yaml`。被调脚本必须是 v3
+- **`script:<资源id>`**：当前 Package 内 `automations/` 相对路径，`.yaml` 后缀可
+  省略。`script:daily/login` →
+  `plugins/gamer.yaml/automations/daily/login.yaml`（资源 id 首段 = Package id，
+  `automations/` 前缀由 gamer.yaml 内部映射、id 中不写）。被调脚本必须是 v3
   （`version: 3`）。
 - **`function:<文件短路径>/<函数名>`**：文件短路径按**最后一个 `/`** 分割、
   可含目录。`function:common/login/is_logged_in` =
@@ -49,17 +51,16 @@
 ```text
 target
   ↓ parse namespace（script: / function:）
-ResourceResolver（Core ResourceStore composite：EditableLocal → UserOverride → InstalledPackage）
-  ↓ load resource（脚本走 scripts/、函数走 functions/ 各自寻址，仅当前分区）
+ResourceResolver（Core PackageStore，当前 Package 的 gamer.yaml 插件数据根）
+  ↓ load resource（脚本走 automations/、函数走 functions/ 各自寻址，仅当前 Package）
 v3 parse + lower
   ↓ 参数绑定（进入被调方变量空间）
 execute（guest 内）
 ```
 
-- 脚本与函数只经 ResourceResolver 解析，**不新增旁路文件读取**；本地编辑区
-  资源与 App Package 内资源对 `call` 透明（包内函数可被本地脚本调用，反之亦
-  然）。
-- 跨分区一律不解析。
+- 脚本与函数只经 ResourceResolver 解析，**不新增旁路文件读取**；call 目标只在
+  当前 Package 的插件数据根内寻址。
+- 跨 Package 一律不解析。
 
 ## 4. 实参绑定与返回值
 

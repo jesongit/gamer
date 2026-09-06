@@ -12,7 +12,7 @@
 
 ```text
 gamer.yaml Runner（扩展 start 注册；手动运行走 POST /api/runs 同链）
-  ↓ 读取脚本（ResourceStore composite）
+  ↓ 读取脚本（PackageStore 三元组：package_id + gamer.yaml + automations/<rel>）
 parse_surface（surface YAML → SurfaceProgram；诊断 yaml.v3.*）
   ↓ lower（yaml_vnext::load）
 小 AST Program + 每步 StepLabel{path, desc}

@@ -15,34 +15,42 @@ GameBot 自动化脚本只支持 **YAML v3**（`version: 3`，ADR-YAML-01：唯�
 
 ## 1. 目录与资源边界
 
-脚本、函数库、模板按**应用分区**（设备配置的 pkg，即应用包名）存放，目录即类型：
+脚本、函数库、模板按 **Package**（数据一级作用域，Package ID）存放，插件目录
+语义归 gamer.yaml 扩展定义（Core 只认 `packages/<package-id>/plugins/<plugin-id>/`）：
 
 ```
-data/<pkg>/
-├── scripts/     # 可运行脚本（.yaml/.yml，顶层必须有 steps）
-├── functions/   # 函数库（严格 .yaml，顶层键全是函数名）
-├── templates/   # 模板图片（默认 8-bit 灰度 PNG，文件名可带 # 搜索区/#1 颜色后缀）
-├── keymaps/     # 按键映射方案（WASM keymap 扩展 profile 数据源）
-├── presets/     # App Package 发布的任务预设
-└── resources/   # 包附带的其他资源
+data/packages/<package-id>/
+├── package.toml                      # manifest（id/name/version/author/targets/plugins 依赖）
+├── shared/                           # 跨插件保留区（gamer.yaml 不写）
+└── plugins/
+    ├── gamer.yaml/
+    │   ├── automations/              # 可运行脚本（.yaml/.yml，顶层必须有 steps）
+    │   ├── functions/                # 函数库（严格 .yaml，顶层键全是函数名）
+    │   ├── templates/                # 模板图片（默认 8-bit 灰度 PNG，文件名可带 # 搜索区/#1 颜色后缀）
+    │   └── presets/                  # 包内任务预设（导入/创建时发布为任务预设）
+    └── gamer.keymap/
+        └── mappings/                 # 按键映射方案（WASM keymap 扩展 profile 数据源）
 ```
 
-- **解析优先级**：同名资源按 **EditableLocal（分区目录）→ UserOverride →
-  active App Package** 三层解析，高层覆盖低层；本地分区目录即本地编辑区
-  （可执行脚本只能位于 `data/<pkg>/scripts/`，函数库 `functions/`，
-  模板 `templates/`）。
-- **脚本资源 ID** = `<pkg>/<文件名>.yaml`（如 `daily/login.yaml`，可含子目录）。
-  含 `/`，前端拼 URL 必须整体 `encodeURIComponent`。
+- **单一数据层**：Package 即本地编辑区（可读/可写/可运行/可导入导出），无
+  Installed/Editable 双层模型——资源按三元组 `(package_id, plugin_id, path)`
+  直接寻址（Core PackageStore）。
+- **脚本资源 ID** = `<package-id>/<文件名>.yaml`（如 `daily/login.yaml`，可含
+  子目录；该相对路径落在 `plugins/gamer.yaml/automations/` 下，`automations/`
+  前缀由 gamer.yaml 内部映射，id 中不写）。含 `/`，前端拼 URL 必须整体
+  `encodeURIComponent`。**首段是 Package id**（`[a-z0-9][a-z0-9._-]*`，可与
+  Android 包名不同名；按 Android 包名拼脚本 id 会 404）。
 - **函数路径** = `<文件短路径>/<函数名>`（如 `common/login` = `functions/common.yaml`
   里的 `login`；一个函数库文件可定义多个函数）。
-- **运行边界**：只有 `scripts/` 下的脚本可手动运行 / 立即运行 / 进入定时任务；
+- **运行边界**：只有 `automations/` 下的脚本可手动运行 / 立即运行 / 进入定时任务；
   `functions/` 只能经 `call`（`function:<文件短路径>/<函数名>`）调用或走函数测试
   API，不进脚本列表与任务选择器。
-- **不做内容推断**：`scripts/` 里必须声明 `version: 3` 且有顶层 `steps`；
+- **不做内容推断**：`automations/` 里必须声明 `version: 3` 且有顶层 `steps`；
   `functions/` 为 bare-map（顶层键全是函数名，无 version 键）。
   放错目录按该目录的类型校验，报错即拒。
-- **跨分区一律不解析、不回退**：模板 / 函数 / 子脚本只在当前应用分区查找，
-  没有 default 兜底；其他目录布局不属于当前资源，也不会被读取或迁移。
+- **跨 Package 一律不解析、不回退**：模板 / 函数 / 子脚本只在当前 Package 的
+  gamer.yaml 插件数据根内查找，没有 default 兜底；其他目录布局不属于当前资源，
+  也不会被读取或迁移。
 - **模板引用写短名**（如 `account.png`）。磁盘文件名可带 `#` **搜索区后缀**
   （后缀在扩展名前，如 `xx#l.png`）：
   - 半区码：`a`=全屏、`u`/`d`/`l`/`r`=上/下/左/右半、`ul`/`ur`/`dl`/`dr`=四角；
@@ -83,7 +91,7 @@ Phase 12（P12.9）整体删除，本文旧版 §2–§10 的 v2 语法描述随
 
 ### 3.1 脚本与函数库
 
-- **脚本**（scripts/）顶层只允许 `version / params / defaults / steps`；缺失或非 3 的
+- **脚本**（automations/）顶层只允许 `version / params / defaults / steps`；缺失或非 3 的
   `version` 报 `yaml.v3.version` / `yaml.v3.version.missing`。`params` 为参数
   唯一来源，字符串 / 映射双形态（见 `docs/yaml-v3/params.md`），`remark`（字符串第 3 段 / 映射
   `remark` 键）随声明保留并透出到参数 schema 的 `description`
@@ -198,14 +206,14 @@ steps:
 
 - **命名空间仅 `script:` / `function:`**；裸 target / 未知前缀在解析期报
   `yaml.v3.call.namespace`（错误信息含 target 原文与合法形态示例）。
-- `script:<资源id>`：分区内 `scripts/` 相对路径，`.yaml` 后缀可省略
-  （`script:daily/login` → `scripts/daily/login.yaml`）。
+- `script:<资源id>`：当前 Package 内 `automations/` 相对路径，`.yaml` 后缀可省略
+  （`script:daily/login` → `plugins/gamer.yaml/automations/daily/login.yaml`）。
 - `function:<文件短路径>/<函数名>`：文件短路径按**最后一个 `/`** 分割、可含目录
   （`function:common/login/is_logged_in` = `functions/common/login.yaml` 里的
   `is_logged_in`）；拒绝 `..` / 绝对路径 / 反斜杠 / 空段——穿越报
   `yaml.v3.call.target`，路径形态报 `yaml.v3.call.function_path`。
-- 函数与脚本只经 Core ResourceStore（composite 三层）解析，本地编辑区与包内
-  资源对 `call` 透明；跨分区一律不解析。
+- 函数与脚本只经 Core PackageStore（当前 Package 的插件数据根）解析，call 目标
+  不做旁路文件读取；跨 Package 一律不解析。
 - **返回值泛化**：`return` 可返回 null / bool / number / string / object /
   array 任意 JSON 值；`call` 的 `save` 存返回值整体，被调方无 `return` 即存
   null。删除「函数默认返回 bool」约束，`if` 条件按通用值语义判断。

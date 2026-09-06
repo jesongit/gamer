@@ -11,7 +11,7 @@
 
 ```yaml
 - find:
-    template: reward          # 必填；模板名（分区唯一短名）
+    template: reward          # 必填；模板名（当前 Package 内唯一短名）
     timeout: 10s              # 可选；缺省 30min（1800s）
     threshold: 0.90           # 可选；step 级 override（三级优先见 §4）
     region: {x: 0.1, y: 0.2, width: 0.3, height: 0.4}   # 可选；相对坐标搜索区
