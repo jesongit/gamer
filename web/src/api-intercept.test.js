@@ -57,9 +57,11 @@ describe('api 层统一 401 拦截', () => {
     expect(localStorage.getItem('gb_device_id')).toBe('dev-1')
   })
 
-  it('登录成功路径不受影响：GET /api/apps/-/resources/scripts 照常解析 JSON', async () => {
-    fetch.mockResolvedValueOnce(res(200, [{ id: 'a/b.yaml' }]))
-    await expect(api.listScripts()).resolves.toEqual([{ id: 'a/b.yaml' }])
+  it('登录成功路径不受影响：GET 包插件资源列表照常解析 JSON', async () => {
+    fetch.mockResolvedValueOnce(res(200, { resources: [{ package: 'a', path: 'automations/b.yaml', content: '' }] }))
+    await expect(api.listScripts('a')).resolves.toEqual([
+      { id: 'a/b.yaml', package: 'a', name: 'b.yaml', version: undefined, updated_at: undefined, size: undefined },
+    ])
     expect(location.hash).toBe('#/console')
   })
 

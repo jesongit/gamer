@@ -8,8 +8,10 @@
 // 注意：本模块不承载任何面板注册——映射面板由扩展 manifest（runtime = "core"
 // + component = "console.keymaps"）经 core-component-registry 驱动。
 
+import { KEYMAP_PLUGIN_ID } from './gamer-plugin-ids'
+
 /** gamer.keymap 扩展的注册 id（服务端 extensions 列表 / 生命周期动作目标）。 */
-export const GAMER_KEYMAP_EXTENSION_ID = 'gamer.keymap'
+export const GAMER_KEYMAP_EXTENSION_ID = KEYMAP_PLUGIN_ID
 
 /**
  * 扩展列表快照（GET /api/extensions 的 extensions 数组）→ gamer.keymap 是否

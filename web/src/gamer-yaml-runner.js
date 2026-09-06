@@ -6,9 +6,10 @@
 // （components/task/builtin-runner-editors.ts）、Console 的 yaml 面板实现
 // （components/console/useConsoleScriptRunner.js）同属 yaml 扩展前端侧。
 import { api } from './api'
+import { GAMER_YAML_PLUGIN_ID } from './gamer-plugin-ids'
 
 /** gamer.yaml runner 的注册 id（后端 YamlTimerRunner / run 分发目标）。 */
-export const GAMER_YAML_RUNNER_ID = 'gamer.yaml'
+export const GAMER_YAML_RUNNER_ID = GAMER_YAML_PLUGIN_ID
 
 /**
  * 运行一个 yaml 脚本：entrypoint = "<pkg>/<name>.yaml"（含 '/'，整体编码由

@@ -8,6 +8,10 @@
 // 包装（如 YAML 自动化 runner）归扩展前端侧（gamer-yaml-runner.js 等），Core API 层
 // 不认识任何 runner 注册 id。
 import { handleUnauthorized } from './auth'
+import {
+  GAMER_YAML_PLUGIN_ID, KEYMAP_PLUGIN_ID,
+  AUTOMATION_DIR, FUNCTION_DIR, TEMPLATE_DIR, KEYMAP_DIR,
+} from './gamer-plugin-ids'
 
 /** base64 → Uint8Array（模板原始字节上传用） */
 function base64ToBytes(dataB64) {
@@ -104,6 +108,33 @@ function keymapId(value, pkg) {
   return id.includes('/') ? id : `${requireId(pkg, 'pkg')}/${id}`
 }
 
+/** Package 插件资源 URL（plan §12-§14：寻址 = (package, plugin, path) 三元组） */
+function pkgResUrl(packageId, plugin, path = '') {
+  let url = `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}/plugins/${encodeURIComponent(plugin)}/resources`
+  if (path) url += `/${encodeURIComponent(path)}`
+  return url
+}
+
+/** 资源 id "<package-id>/<文件路径>" → [packageId, 文件路径]（首段 = Package id） */
+function splitResourceId(id) {
+  const s = requireId(id, '资源 id')
+  const i = s.indexOf('/')
+  if (i <= 0 || i === s.length - 1) {
+    throw new ApiError({
+      status: 0,
+      code: 'invalid_argument',
+      message: '资源 id 必须形如 <package-id>/<文件路径>',
+      data: { field: 'id' },
+    })
+  }
+  return [s.slice(0, i), s.slice(i + 1)]
+}
+
+/** 资源 id 的文件路径段 → 插件内完整路径（目录由插件语义补全） */
+function pluginPath(dir, file) {
+  return `${dir}/${requireId(file, '文件路径')}`
+}
+
 /** Content-Disposition: attachment; filename="<id>-<version>.gamerpkg" → 文件名（解析不出返回空串） */
 function filenameFromDisposition(value) {
   const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(String(value || ''))
@@ -114,6 +145,11 @@ function requireDeviceRunResponse(rep) {
   if (rep && rep.active === false) return rep
   if (rep && rep.active === true && rep.run && typeof rep.run === 'object' && rep.run.run_id) return rep
   throw invalidResponse('服务端设备运行响应不符合当前契约', rep)
+}
+
+/** 创建即落盘（无版本门禁；目标已存在由服务端 409） */
+function createBody(content) {
+  return { content }
 }
 
 function updateBody({ content, name, expected_version, force } = {}, resource) {
@@ -261,123 +297,194 @@ export const api = {
   listApps: (id) => req('GET', `/api/devices/${id}/apps`),
   listAppsByAddr: (addr) => req('GET', `/api/apps?addr=${encodeURIComponent(addr)}`),
 
-  // 按键映射（通用资源 API keymaps kind；资源 id = "<pkg>/<方案名>.yaml"）
-  listKeymaps: (pkg) => req('GET', `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/keymaps`),
-  getKeymap: (name, pkg) => req(
-    'GET',
-    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
-  ),
-  createKeymap: ({ pkg, name, content } = {}) => req(
+  // ---- Package（plan §7-§11：Package = 配置数据上下文，独立 Package ID）----
+  listPackages: () => req('GET', '/api/packages'),
+  createPackage: (p) => req('POST', '/api/packages', p),
+  getPackage: (packageId) => req('GET', `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}`),
+  // 元数据编辑（部分字段；条件更新 expected_revision 或 force:true）
+  updatePackage: async (packageId, patch = {}) => req('PUT', `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}`, patch),
+  deletePackage: (packageId) => req('DELETE', `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}`),
+  duplicatePackage: (packageId, newId) => req(
     'POST',
-    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/keymaps`,
-    { name, content },
+    `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}/duplicate`,
+    { new_id: requireId(newId, 'new_id') },
   ),
-  updateKeymap: async (name, pkg, payload = {}) => req(
-    'PUT',
-    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
-    updateBody(payload, keymapId(name, pkg)),
+  // targets 兼容性（plan §17，warning 语义：不兼容仅提示不禁止）
+  packageCompatibility: (packageId, androidPackage) => req(
+    'GET',
+    `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}/compatibility?android_package=${encodeURIComponent(requireId(androidPackage, 'android_package'))}`,
   ),
-  deleteKeymap: (name, pkg) => req(
-    'DELETE',
-    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/keymaps/${encodeURIComponent(keymapId(name, pkg))}`,
+  // 导入 .gamerpkg 原始字节（Content-Type: application/zip）；expectedSha256 →
+  // X-Expected-Sha256；overwrite=true 原子替换已存在包（409 = 已存在且未确认覆盖）
+  importPackageArchive: async (bytes, { expectedSha256, overwrite = false } = {}) => {
+    const headers = { 'Content-Type': 'application/zip' }
+    if (expectedSha256) headers['X-Expected-Sha256'] = String(expectedSha256)
+    const r = await response(
+      'POST', `/api/packages/import${overwrite ? '?overwrite=true' : ''}`, bytes,
+      { rawBody: true, headers },
+    )
+    return readResult(r)
+  },
+  // 导出当前 Package 为 .gamerpkg：200 二进制 + Content-Disposition 文件名 + X-Content-Sha256
+  exportPackageArchive: async (packageId) => {
+    const r = await req('POST', `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}/export`, {})
+    const blob = await r.blob()
+    return {
+      blob,
+      filename: filenameFromDisposition(r.headers.get('content-disposition')),
+      sha256: r.headers.get('x-content-sha256') || '',
+    }
+  },
+
+  // ---- 插件资源通用原语（plan §12-§14；文本 JSON / 字节原始流）----
+  listPluginResources: (packageId, plugin, prefix = '') =>
+    req('GET', pkgResUrl(packageId, plugin) + (prefix ? `?prefix=${encodeURIComponent(prefix)}` : '')),
+  getPluginResource: (packageId, plugin, path) => req('GET', pkgResUrl(packageId, plugin, path)),
+  putPluginResourceText: (packageId, plugin, path, { content, expected_version, force } = {}) =>
+    req('PUT', pkgResUrl(packageId, plugin, path), updateBody({ content, expected_version, force }, path)),
+  putPluginResourceBytes: async (packageId, plugin, path, bytes, { expectedVersion, force = false } = {}) => {
+    const headers = { 'Content-Type': 'application/octet-stream' }
+    if (expectedVersion) headers['X-Expected-Version'] = String(expectedVersion)
+    if (force) headers['X-Force'] = 'true'
+    const r = await response('PUT', pkgResUrl(packageId, plugin, path), bytes, { rawBody: true, headers })
+    return readResult(r)
+  },
+  deletePluginResource: (packageId, plugin, path) => req('DELETE', pkgResUrl(packageId, plugin, path)),
+  renamePluginResource: (packageId, plugin, path, newPath) => req(
+    'POST',
+    `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}/plugins/${encodeURIComponent(plugin)}/rename`,
+    { path: requireId(path, 'path'), new_path: requireId(newPath, 'new_path') },
   ),
 
-  // 模板（通用资源 API templates kind；pkg 缺省 = "-" 跨分区通配）
-  listTemplates: (pkg) => req(
-    'GET',
-    `/api/apps/${pkg ? encodeURIComponent(pkg) : '-'}/resources/templates`,
-  ),
+  // ---- 扩展资源兼容封装（id 字面量唯一归宿 = gamer-plugin-ids.js；资源 id 契约
+  // "<package-id>/<文件路径>" 不变，仅首段语义从 Android 包名切换为 Package id，
+  // 目录段由插件语义补全；runner 包装仍归 gamer-yaml-runner.js）----
+  // 按键映射（映射插件 mappings/ 目录）
+  listKeymaps: async (packageId) => {
+    const rep = await api.listPluginResources(packageId, KEYMAP_PLUGIN_ID, KEYMAP_DIR)
+    return (rep?.resources || []).map(r => {
+      const file = r.path.slice(KEYMAP_DIR.length + 1)
+      return { id: `${r.package}/${file}`, name: file, file, version: r.version, package: r.package }
+    })
+  },
+  getKeymap: async (name, packageId) => {
+    const [, file] = splitResourceId(keymapId(name, packageId))
+    const entry = await api.getPluginResource(packageId, KEYMAP_PLUGIN_ID, pluginPath(KEYMAP_DIR, file))
+    return { ...entry, name: file, file }
+  },
+  createKeymap: ({ pkg, name, content } = {}) =>
+    req('PUT', pkgResUrl(pkg, KEYMAP_PLUGIN_ID, pluginPath(KEYMAP_DIR, requireId(name, 'name'))), createBody(content)),
+  updateKeymap: async (name, pkg, payload = {}) => {
+    const [, file] = splitResourceId(keymapId(name, pkg))
+    return api.putPluginResourceText(pkg, KEYMAP_PLUGIN_ID, pluginPath(KEYMAP_DIR, file), payload)
+  },
+  deleteKeymap: (name, pkg) => {
+    const [, file] = splitResourceId(keymapId(name, pkg))
+    return api.deletePluginResource(pkg, KEYMAP_PLUGIN_ID, pluginPath(KEYMAP_DIR, file))
+  },
+
+  // 模板（自动化插件 templates/ 目录；上传字节经服务端钩子做 8-bit 灰度归一化）
+  listTemplates: async (packageId) => {
+    const rep = await api.listPluginResources(packageId, GAMER_YAML_PLUGIN_ID, TEMPLATE_DIR)
+    return (rep?.resources || []).map(r => ({
+      name: r.path.slice(TEMPLATE_DIR.length + 1),
+      pkg: r.package,
+      version: r.version,
+      updated_at: r.updated_at,
+      size: r.size,
+    }))
+  },
   // 客户端组合完整文件名（短名 + #区域后缀 + #1 颜色标记），原始字节上传；
-  // 灰度重编码由服务端按文件名 #1 标记决定。
-  createTemplate: async (shortName, dataB64, pkg, region, preserveColor = false) => {
-    const app = encodeURIComponent(requireId(pkg, 'pkg'))
+  // 灰度归一化由服务端字节钩子统一执行。
+  createTemplate: async (shortName, dataB64, packageId, region, preserveColor = false) => {
     const name = composeTemplateName(shortName, region, preserveColor)
-    const r = await response(
-      'POST',
-      `/api/apps/${app}/resources/templates?name=${encodeURIComponent(name)}`,
-      base64ToBytes(dataB64),
-      { rawBody: true, headers: { 'Content-Type': 'image/png' } },
+    return api.putPluginResourceBytes(
+      requireId(packageId, 'package_id'), GAMER_YAML_PLUGIN_ID,
+      pluginPath(TEMPLATE_DIR, name), base64ToBytes(dataB64), { force: true },
     )
-    return readResult(r)
   },
-  // 图片替换：名称/分区来自 URL，body 只有原始图片字节。
-  replaceTemplateImage: async (name, dataB64, pkg) => {
-    const app = encodeURIComponent(requireId(pkg, 'pkg'))
-    const r = await response(
-      'PUT',
-      `/api/apps/${app}/resources/templates/${encodeURIComponent(name)}`,
-      base64ToBytes(dataB64),
-      { rawBody: true, headers: { 'Content-Type': 'image/png' } },
-    )
-    return readResult(r)
-  },
-  // 重命名：JSON {name}；服务端经扩展内容钩子同步改写脚本/函数引用。
-  renameTemplate: (oldName, newName, pkg) =>
-    req(
-      'PUT',
-      `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/templates/${encodeURIComponent(oldName)}`,
-      { name: newName },
+  // 图片替换：模板名来自调用方，body 只有原始图片字节。
+  replaceTemplateImage: async (name, dataB64, packageId) =>
+    api.putPluginResourceBytes(
+      requireId(packageId, 'package_id'), GAMER_YAML_PLUGIN_ID,
+      pluginPath(TEMPLATE_DIR, requireId(name, 'name')), base64ToBytes(dataB64), { force: true },
     ),
-  deleteTemplate: (name, pkg) =>
-    req(
-      'DELETE',
-      `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/templates/${encodeURIComponent(name)}`,
+  // 重命名：服务端经扩展 before_rename 钩子同步改写脚本/函数引用（v3 AST）。
+  renameTemplate: (oldName, newName, packageId) =>
+    api.renamePluginResource(
+      packageId, GAMER_YAML_PLUGIN_ID,
+      pluginPath(TEMPLATE_DIR, requireId(oldName, 'name')),
+      pluginPath(TEMPLATE_DIR, requireId(newName, 'new_name')),
     ),
-  // 模板匹配测试 = vision 能力位语义
-  testTemplate: (name, deviceId, threshold, region, pkg) =>
-    req('POST', '/api/capabilities/vision/test', { device_id: deviceId, threshold, region, pkg, name }),
-  // 模板缩略图/预览 URL（<img :src> 用；pkg 必填）
-  tplImageUrl: (name, pkg) => `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/templates/${encodeURIComponent(name)}`,
+  deleteTemplate: (name, packageId) =>
+    api.deletePluginResource(packageId, GAMER_YAML_PLUGIN_ID, pluginPath(TEMPLATE_DIR, requireId(name, 'name'))),
+  // 模板匹配测试 = vision 能力位语义（pkg = Package id，plugin 必填）
+  testTemplate: (name, deviceId, threshold, region, packageId) =>
+    req('POST', '/api/capabilities/vision/test', {
+      device_id: deviceId, threshold, region,
+      pkg: requireId(packageId, 'package_id'), plugin: GAMER_YAML_PLUGIN_ID, name,
+    }),
+  // 模板缩略图/预览 URL（<img :src> 用；GET 二进制返回原始 PNG）
+  tplImageUrl: (name, packageId) => pkgResUrl(requireId(packageId, 'package_id'), GAMER_YAML_PLUGIN_ID, pluginPath(TEMPLATE_DIR, name)),
 
-  // 脚本（通用资源 API scripts kind；id 形如 "<pkg>/<name>.yaml"，含 '/'，
-  // 拼 URL 必须整体 encodeURIComponent；app 段传 "-" 由 id 自带分区）
-  listScripts: () => req('GET', '/api/apps/-/resources/scripts'),
+  // 脚本（自动化插件 automations/ 目录；id 形如 "<package-id>/<name>.yaml"，含 '/'，
+  // 拼 URL 必须整体 encodeURIComponent）
+  listScripts: async (packageId) => {
+    const rep = await api.listPluginResources(packageId, GAMER_YAML_PLUGIN_ID, AUTOMATION_DIR)
+    return (rep?.resources || []).map(r => ({
+      id: `${r.package}/${r.path.slice(AUTOMATION_DIR.length + 1)}`,
+      package: r.package,
+      name: r.path.slice(AUTOMATION_DIR.length + 1),
+      version: r.version,
+      updated_at: r.updated_at,
+      size: r.size,
+    }))
+  },
   // 单脚本读取（含内容版本短码 version：编辑器 expected_version 冲突检测依据）
-  getScript: (id) => req(
-    'GET',
-    `/api/apps/-/resources/scripts/${encodeURIComponent(requireId(id, '资源 id'))}`,
-  ),
-  // POST 只创建；PUT 只更新。更新缺版本时在客户端拒绝，force 必须显式为 true。
-  createScript: ({ name, content, pkg } = {}) => req(
-    'POST',
-    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/scripts`,
-    { name, content },
-  ),
-  updateScript: async (id, payload = {}) => req(
-    'PUT',
-    `/api/apps/-/resources/scripts/${encodeURIComponent(requireId(id, '资源 id'))}`,
-    updateBody(payload, id),
-  ),
-  deleteScript: (id) => req(
-    'DELETE',
-    `/api/apps/-/resources/scripts/${encodeURIComponent(id)}`,
-  ),
-  // 函数库（通用资源 API functions kind；id 形如 "<pkg>/<文件短路径>.yaml"，
-  // 整体 encodeURIComponent。不进脚本列表/运行接口/任务选择器；GET 单文件含
+  getScript: (id) => {
+    const [pkg, file] = splitResourceId(id)
+    return api.getPluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file))
+  },
+  // PUT 创建或更新（创建冲突 409；更新缺版本时在客户端拒绝，force 必须显式为 true）
+  createScript: ({ name, content, pkg } = {}) =>
+    req('PUT', pkgResUrl(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, requireId(name, 'name'))), createBody(content)),
+  updateScript: async (id, payload = {}) => {
+    const [pkg, file] = splitResourceId(id)
+    return api.putPluginResourceText(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file), payload)
+  },
+  deleteScript: (id) => {
+    const [pkg, file] = splitResourceId(id)
+    return api.deletePluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file))
+  },
+  // 函数库（自动化插件 functions/ 目录；id 形如 "<package-id>/<文件短路径>.yaml"，
+  // 文件短路径可含目录。不进脚本列表/运行接口/任务选择器；GET 单文件含
   // content/version/functions（顶层函数名清单，扩展注记提供））
-  listFunctions: (pkg) => req(
-    'GET',
-    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/functions`,
-  ),
-  getFunction: (id) => req(
-    'GET',
-    `/api/apps/-/resources/functions/${encodeURIComponent(id)}`,
-  ),
-  // POST 只创建；PUT 只更新/重命名，更新缺版本时在客户端拒绝。
-  createFunction: ({ pkg, name, content } = {}) => req(
-    'POST',
-    `/api/apps/${encodeURIComponent(requireId(pkg, 'pkg'))}/resources/functions`,
-    { name, content },
-  ),
-  updateFunction: async (id, payload = {}) => req(
-    'PUT',
-    `/api/apps/-/resources/functions/${encodeURIComponent(requireId(id, '资源 id'))}`,
-    updateBody(payload, id),
-  ),
-  deleteFunction: (id) => req(
-    'DELETE',
-    `/api/apps/-/resources/functions/${encodeURIComponent(id)}`,
-  ),
+  listFunctions: async (packageId) => {
+    const rep = await api.listPluginResources(packageId, GAMER_YAML_PLUGIN_ID, FUNCTION_DIR)
+    return (rep?.resources || []).map(r => {
+      const file = r.path.slice(FUNCTION_DIR.length + 1)
+      return {
+        id: `${r.package}/${file}`, pkg: r.package, file,
+        content: r.content, version: r.version, functions: r.meta?.functions || [],
+        updated_at: r.updated_at,
+      }
+    })
+  },
+  getFunction: (id) => {
+    const [pkg, file] = splitResourceId(id)
+    return api.getPluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(FUNCTION_DIR, file))
+  },
+  // PUT 创建或更新/重命名，更新缺版本时在客户端拒绝。
+  createFunction: ({ pkg, name, content } = {}) =>
+    req('PUT', pkgResUrl(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(FUNCTION_DIR, requireId(name, 'name'))), createBody(content)),
+  updateFunction: async (id, payload = {}) => {
+    const [pkg, file] = splitResourceId(id)
+    return api.putPluginResourceText(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(FUNCTION_DIR, file), payload)
+  },
+  deleteFunction: (id) => {
+    const [pkg, file] = splitResourceId(id)
+    return api.deletePluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(FUNCTION_DIR, file))
+  },
 
   // 统一执行入口（P11.6 / ADR-12）：POST /api/runs {runner_id, entrypoint,
   // device_id, payload}——runner_id 为 runner 注册 id（分发目标），entrypoint 为
@@ -441,52 +548,6 @@ export const api = {
   getEntrypointParams: (runnerId, entrypoint) => req(
     'GET',
     `/api/runners/${encodeURIComponent(requireId(runnerId, 'runner_id'))}/entrypoint?entrypoint=${encodeURIComponent(requireId(entrypoint, 'entrypoint'))}`,
-  ),
-
-  // ---- App Package（游戏包）与本地编辑区（workspace）----
-  // 已装游戏包列表：{packages:[{id,name,active_version(null=无激活),android_packages,versions:[...]}]}
-  listAppPackages: () => req('GET', '/api/app-packages'),
-  // 安装 .gamerpkg 归档原始字节（Content-Type: application/zip）；expectedSha256 提供时
-  // 带 X-Expected-Sha256 校验头（不匹配 400）。成功 201 返回包 JSON；409 = 同 id+version
-  // 已安装或 primary 冲突（同一安卓应用已有激活内容包），错误体 {error} 文本区分
-  installAppPackage: async (bytes, expectedSha256) => {
-    const headers = { 'Content-Type': 'application/zip' }
-    if (expectedSha256) headers['X-Expected-Sha256'] = String(expectedSha256)
-    const r = await response('POST', '/api/app-packages/install', bytes, { rawBody: true, headers })
-    return readResult(r)
-  },
-  // 本地编辑区导出为 .gamerpkg：200 二进制 + Content-Disposition 文件名 + X-Content-Sha256；
-  // 404 = 工作区没有 package.toml（先 PUT workspace 初始化）；400 {code:"preflight_failed"}
-  // 错误体 error 为逐行问题列表
-  exportAppPackage: async (androidPackage) => {
-    const r = await req('POST', '/api/app-packages/export', {
-      android_package: requireId(androidPackage, 'android_package'),
-    })
-    const blob = await r.blob()
-    return {
-      blob,
-      filename: filenameFromDisposition(r.headers.get('content-disposition')),
-      sha256: r.headers.get('x-content-sha256') || '',
-    }
-  },
-  // 把已安装的某版本游戏包导入到指定安卓应用的本地编辑区（替换现场资源）；
-  // 400 = target 不在该包 android.packages 或提取后校验失败，404 = 包/版本不存在
-  editAppPackage: (id, version, androidPackage) => req(
-    'POST',
-    `/api/app-packages/${encodeURIComponent(requireId(id, 'package_id'))}/${encodeURIComponent(requireId(version, 'package_version'))}/edit`,
-    { android_package: requireId(androidPackage, 'android_package') },
-  ),
-  // 本地编辑区（data/<android 包名>/）元数据（package.toml；null = 未初始化）+ 六目录资源统计
-  getWorkspace: (androidPackage) => req(
-    'GET',
-    `/api/workspace/${encodeURIComponent(requireId(androidPackage, 'android_package'))}`,
-  ),
-  // 保存工作区元数据（服务端 deny_unknown_fields：只发 id?/version/name?/android_packages；
-  // name 为空串时整个省略——服务端拒绝空名称）
-  saveWorkspace: (androidPackage, payload = {}) => req(
-    'PUT',
-    `/api/workspace/${encodeURIComponent(requireId(androidPackage, 'android_package'))}`,
-    payload,
   ),
 
   // 日志
