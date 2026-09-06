@@ -34,7 +34,9 @@ pub enum RunTarget {
 }
 
 impl RunTarget {
-    /// 运行分区（应用包名）：模板/脚本/函数解析域，也是 str_app/cls_app 包名。
+    /// 运行目标所属 Package id（资源解析域：模板/脚本/函数定位与 call 目标
+    /// 归属）。与 Android 包名（app.start/兼容目标，AppContext.android_package）
+    /// 是两个命名空间，不互相推导。
     pub fn pkg(&self) -> &str {
         match self {
             RunTarget::Script { script_id, .. } => script_id.split('/').next().unwrap_or_default(),

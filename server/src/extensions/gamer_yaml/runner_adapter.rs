@@ -110,23 +110,6 @@ pub fn yaml_start_request(
     })
 }
 
-/// Construct the current YAML app scope.  A configured Android package is
-/// preferred; falling back to the content package keeps old device rows and
-/// tests runnable during the migration.
-pub fn yaml_app_context(
-    device_id: impl Into<String>,
-    android_package: Option<String>,
-    content_package: impl Into<String>,
-) -> anyhow::Result<AppContext> {
-    let content_package = content_package.into();
-    let android_package = android_package.unwrap_or_else(|| content_package.clone());
-    Ok(AppContext::new(
-        DeviceId::new(device_id)?,
-        AndroidPackageName::new(android_package)?,
-        Some(AppPackageId::new(content_package)?),
-    ))
-}
-
 /// Production executor: YAML decoding and v3 execution stay at the execution
 /// boundary; RunManager only sees generic core values.
 pub struct EngineExecutor {
@@ -454,11 +437,17 @@ mod tests {
 
     #[test]
     fn yaml_adapter_keeps_runner_and_target_outside_manager() {
-        let app = yaml_app_context("d1", Some("com.example.game".into()), "content").unwrap();
+        // 两个命名空间显式分离：Android 包名（app.start/兼容目标）与 Package id
+        // （资源解析域）各自给值，不存在互相兜底。
+        let app = AppContext::new(
+            DeviceId::new("d1").unwrap(),
+            AndroidPackageName::new("com.example.game").unwrap(),
+            Some(AppPackageId::new("official.hsr.daily").unwrap()),
+        );
         let request = yaml_start_request(
             app,
             RunTarget::Script {
-                script_id: "content/daily.yaml".into(),
+                script_id: "official.hsr.daily/daily.yaml".into(),
                 start_index: 2,
             },
             RunSource::Manual,
@@ -469,7 +458,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(request.request.runner_id, "gamer.yaml");
-        assert_eq!(request.request.entrypoint, "content/daily.yaml");
+        assert_eq!(request.request.entrypoint, "official.hsr.daily/daily.yaml");
         assert_eq!(request.request.payload.as_value()["target"]["start_index"], 2);
     }
 

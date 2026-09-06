@@ -24,6 +24,7 @@ mod extensions_management;
 pub(crate) mod gate;
 mod logs;
 mod packages;
+mod packages_rename;
 mod runs;
 pub(crate) mod system;
 mod tasks;
@@ -222,6 +223,12 @@ pub(crate) fn build_router_with_extensions(
             "/api/packages/:pkg/plugins/:plugin/resources/*path",
             get(packages::api_get_plugin_resource)
                 .delete(packages::api_delete_plugin_resource),
+        )
+        // 模板/资源重命名：经插件 ResourceHandler::before_rename 钩子（gamer.yaml
+        // 的模板引用 v3 AST 同步改写）后原子移动（资源 CRUD 面不承载该组合语义）
+        .route(
+            "/api/packages/:pkg/plugins/:plugin/rename",
+            post(packages_rename::api_rename_plugin_resource),
         )
         // Vision 能力位（模板匹配测试 = vision 语义，Core 合法）
         .route(

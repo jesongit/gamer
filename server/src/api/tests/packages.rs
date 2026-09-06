@@ -591,3 +591,240 @@ async fn package_presets_publish_on_import_and_duplicate() {
         .count();
     assert_eq!(user_count, 1, "复制发布幂等：{presets}");
 }
+
+/// 模板重命名集成链（REST 全栈）：上传模板（PUT 字节）→ 保存引用它的 v3 脚本
+/// → POST rename（ResourceHandler::before_rename 钩子改写引用 + 原子移动文件）
+/// → 脚本引用已自动改写 → 新模板字节可被 NCC 匹配命中（matcher 语义不变）。
+#[tokio::test]
+async fn template_upload_rename_rewrites_references_and_still_matches() {
+    let t = build_app(
+        "tplrename",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    create_package(
+        &t,
+        &sid,
+        serde_json::json!({"id": "official.tpl", "plugins": {"gamer.yaml": true}}),
+    )
+    .await;
+
+    // ---- 1. 上传模板：字节 PUT（8x8 灰度 PNG）----
+    let png = valid_png();
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "PUT",
+            &resource_url("official.tpl", "gamer.yaml", "templates/reward.png"),
+            None,
+            &[
+                (axum::http::header::COOKIE.to_string(), sid.clone()),
+                (
+                    axum::http::header::CONTENT_TYPE.to_string(),
+                    "application/octet-stream".into(),
+                ),
+            ],
+            png.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
+
+    // ---- 2. 保存引用该模板的 v3 脚本与函数库 ----
+    let script = "version: 3\nsteps:\n  - find:\n      template: reward.png\n      then:\n        - tap: {point: [0.5, 0.5]}\n";
+    let resp = put_package_text(
+        &t,
+        &sid,
+        "official.tpl",
+        "gamer.yaml",
+        "scripts/daily.yaml",
+        script,
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
+
+    // ---- 3. 重命名模板：REST → 钩子改写引用 → 文件原子移动 ----
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/packages/official.tpl/plugins/gamer.yaml/rename",
+        serde_json::json!({
+            "path": "templates/reward.png",
+            "new_path": "templates/bonus.png",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
+    let renamed = json_body(resp).await;
+    assert_eq!(renamed["ok"], true);
+    assert_eq!(renamed["path"], "templates/bonus.png");
+
+    // 文件已移动：新名可读、旧名 404
+    let resp = get_json(
+        &t,
+        &sid,
+        &resource_url("official.tpl", "gamer.yaml", "templates/bonus.png"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = send(
+        &t.app,
+        req(
+            "GET",
+            &resource_url("official.tpl", "gamer.yaml", "templates/reward.png"),
+            None,
+            &json_headers(sid.clone()),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // ---- 4. 脚本引用已自动改写（AST 级：日志文本不误改）----
+    let resp = get_json(
+        &t,
+        &sid,
+        &resource_url("official.tpl", "gamer.yaml", "scripts/daily.yaml"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let content = json_body(resp).await["content"].as_str().unwrap().to_string();
+    assert!(content.contains("template: bonus.png"), "引用已改写: {content}");
+    assert!(!content.contains("reward.png"), "旧引用不残留: {content}");
+
+    // 错误语义：同名重命名 400（名称未变化）；目标已存在 409
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/packages/official.tpl/plugins/gamer.yaml/rename",
+        serde_json::json!({"path": "templates/bonus.png", "new_path": "templates/bonus.png"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "PUT",
+            &resource_url("official.tpl", "gamer.yaml", "templates/other.png"),
+            None,
+            &[
+                (axum::http::header::COOKIE.to_string(), sid.clone()),
+                (
+                    axum::http::header::CONTENT_TYPE.to_string(),
+                    "application/octet-stream".into(),
+                ),
+            ],
+            png.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/packages/official.tpl/plugins/gamer.yaml/rename",
+        serde_json::json!({"path": "templates/other.png", "new_path": "templates/bonus.png"}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // ---- 5. 匹配命中：重命名后的模板字节经 matcher 命中合成屏幕 ----
+    // 屏幕 = 白底 64x48，把模板图案贴到 (8, 16)（与上传内容逐字节同源的
+    // 解码图，NCC 必命中）；先核实区域外不含同图案，避免平凡命中。
+    let template = image::load_from_memory(&png).unwrap().to_luma8();
+    let (tw, th) = template.dimensions();
+    let mut screen = image::GrayImage::from_pixel(64, 48, image::Luma([255]));
+    for y in 0..th {
+        for x in 0..tw {
+            screen.put_pixel(8 + x, 16 + y, *template.get_pixel(x, y));
+        }
+    }
+    let mut screen_png = Vec::new();
+    image::DynamicImage::ImageLuma8(screen)
+        .write_to(
+            &mut std::io::Cursor::new(&mut screen_png),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    let renamed_bytes = t
+        .dir
+        .join("packages/official.tpl/plugins/gamer.yaml/templates/bonus.png");
+    let template_png = std::fs::read(&renamed_bytes).unwrap();
+    let matched = crate::matcher::match_template(&crate::matcher::MatchRequest {
+        screen_png,
+        template_png,
+        threshold: Some(0.9),
+        region: None,
+        color: false,
+    })
+    .unwrap();
+    let hit = matched.expect("重命名后的模板必须命中");
+    assert_eq!((hit.x, hit.y), (8, 16), "命中位置 = 贴图位置: {hit:?}");
+    assert!(hit.score >= 0.99, "同源图案满分命中: {hit:?}");
+}
+
+/// Vision 匹配测试端点寻址显式化：plugin 必填（Core 不预设/不猜测业务插件
+/// id），缺省 400；显式给出后按 (pkg, plugin, name) 三元组解析模板。
+#[tokio::test]
+async fn vision_test_requires_explicit_plugin() {
+    let t = build_app(
+        "visionplugin",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    create_package(
+        &t,
+        &sid,
+        serde_json::json!({"id": "official.vision", "plugins": {"gamer.yaml": true}}),
+    )
+    .await;
+    // 单插件包也不允许省略 plugin（旧「唯一插件目录兜底」猜测已删）：
+    // 字段缺失在反序列化边界即 422，空串由端点补 400
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/capabilities/vision/test",
+        serde_json::json!({
+            "device_id": "d1",
+            "pkg": "official.vision",
+            "name": "reward.png",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/capabilities/vision/test",
+        serde_json::json!({
+            "device_id": "d1",
+            "pkg": "official.vision",
+            "plugin": "  ",
+            "name": "reward.png",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let j = json_body(resp).await;
+    assert!(
+        j["error"].as_str().unwrap().contains("plugin"),
+        "空 plugin 必须 400 并指向该字段: {j}"
+    );
+
+    // 显式 plugin：进入模板解析（模板不存在 → 404，而非插件猜测错误）
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/capabilities/vision/test",
+        serde_json::json!({
+            "device_id": "d1",
+            "pkg": "official.vision",
+            "plugin": "gamer.yaml",
+            "name": "ghost.png",
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{}", json_body(resp).await);
+}

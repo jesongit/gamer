@@ -34,8 +34,8 @@ pub(super) struct DispatchRunReq {
     pub(super) device_id: String,
     #[serde(default)]
     pub(super) payload: Option<serde_json::Value>,
-    /// 资源解析域 Package（T2a 收口运行上下文）；缺省取 entrypoint 首段
-    /// （`<content_package>/<path>` 约定）。
+    /// 资源解析域 Package id；缺省取 entrypoint 首段（`<package-id>/<名>`
+    /// 约定）。与 Android 包名是两个命名空间，不互相推导。
     #[serde(default)]
     pub(super) content_package: Option<String>,
 }
@@ -59,7 +59,8 @@ pub(super) async fn api_dispatch_run(
             return ApiError::bad_request("payload 必须是对象").into_response();
         }
     }
-    // 内容分区：显式 content_package 优先，缺省按 entrypoint 首段约定解析
+    // Package 上下文（资源解析域）：显式 content_package 优先，缺省按
+    // entrypoint 首段约定解析
     let content_package = match &req.content_package {
         Some(pkg) => pkg.clone(),
         None => req
@@ -71,15 +72,31 @@ pub(super) async fn api_dispatch_run(
     };
     let Ok(content) = AppPackageId::new(&content_package) else {
         return ApiError::bad_request(format!(
-            "内容分区非法（只允许字母数字 . _ -）: {content_package}"
+            "Package id 非法（只允许字母数字 . _ -）: {content_package}"
         ))
         .into_response();
     };
-    let android_package = st
-        .devices
-        .snapshot(&req.device_id)
-        .and_then(|(device, _, _)| device.pkg)
-        .unwrap_or_else(|| content_package.clone());
+    // Android 包上下文（app.start/app.stop 的缺省目标）只来自设备配置的
+    // pkg，绝不回退到 Package id——两个命名空间严格分离（plan §2.1/§16）。
+    // 设备不存在 / 未配置 pkg 时明确拒绝，而不是让 app.start 在运行期拿一个
+    // 语义错乱的包名失败。
+    let Some((device, _, _)) = st.devices.snapshot(&req.device_id) else {
+        return ApiError::not_found(format!("设备不存在: {}（运行目标必须先登记设备）", req.device_id))
+            .into_response();
+    };
+    let android_package = device
+        .pkg
+        .as_deref()
+        .map(str::trim)
+        .filter(|pkg| !pkg.is_empty())
+        .map(str::to_string);
+    let Some(android_package) = android_package else {
+        return ApiError::bad_request(format!(
+            "设备 {} 未配置 Android 应用包名（pkg）：app.start 的缺省目标来自设备配置，与资源 Package 相互独立",
+            req.device_id
+        ))
+        .into_response();
+    };
     let device_id = match DeviceId::new(&req.device_id) {
         Ok(id) => id,
         Err(error) => return ApiError::bad_request(error.to_string()).into_response(),

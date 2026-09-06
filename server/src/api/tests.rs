@@ -69,8 +69,29 @@ mod sec_tests {
 
     struct TestApp {
         app: Router,
+        /// 设备管理器句柄：测试用 `seed_device` 直注设备行（POST /api/devices
+        /// 的 id 由服务端生成，测试需要固定 device_id 时走这里）。
+        devices: Arc<DeviceManager>,
         #[allow(dead_code)]
         dir: std::path::PathBuf,
+    }
+
+    /// 直注一台设备（id 由调用方指定；pkg 缺省给一个合法 Android 包名——
+    /// POST /api/runs 的 Android 上下文严格取设备配置，不再回退 Package id）。
+    async fn seed_device(t: &TestApp, id: &str, pkg: &str) {
+        let device = Device {
+            id: id.to_string(),
+            name: id.to_string(),
+            kind: "wifi".into(),
+            addr: "127.0.0.1:5555".into(),
+            screen_mode: ScreenMode::Mirror,
+            vd_res: None,
+            vd_dpi: None,
+            pkg: (!pkg.is_empty()).then(|| pkg.to_string()),
+            fps: None,
+            created_at: "2026-01-01 00:00:00".into(),
+        };
+        t.devices.upsert_device(&device).await.unwrap();
     }
 
     fn tmp_dir(tag: &str) -> std::path::PathBuf {
@@ -210,7 +231,7 @@ mod sec_tests {
         let dir = cfg.data_dir.clone();
         let app = build_router(
             db,
-            devices,
+            devices.clone(),
             runs,
             scheduler,
             cfg,
@@ -220,7 +241,11 @@ mod sec_tests {
             auth.clone(),
             update,
         );
-        TestApp { app, dir }
+        TestApp {
+            app,
+            devices,
+            dir,
+        }
     }
 
     fn req(

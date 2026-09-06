@@ -187,6 +187,12 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     let t = build_app("ep-v3run", test_credential("admin123"), Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
+    // 运行目标设备（POST /api/runs 的 Android 上下文严格取设备 pkg）。
+    // d7 未用（沿用原用例的设备编号）；多设备 = 规避设备级单活动运行互斥。
+    for id in ["d1", "d2", "d3", "d4", "d5", "d6", "d8"] {
+        seed_device(&t, id, "com.example.game").await;
+    }
+
     save_resource(
         &t,
         &sid,

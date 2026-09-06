@@ -121,6 +121,8 @@ mod update_flow_tests {
     struct UpdateRig {
         app: Router,
         db: Db,
+        /// 设备管理器句柄：async 测试用 `upsert_device` 播种固定 id 设备。
+        devices: Arc<DeviceManager>,
         runs: Arc<crate::run_manager::RunManager>,
         controller: Arc<MockController>,
         viewers: FakeViewers,
@@ -193,9 +195,11 @@ mod update_flow_tests {
             db.clone(),
         ));
 
+        // 运行目标设备（Android 上下文 = 设备 pkg；POST /api/runs 不再回退
+        // Package id 当 Android 包名）——句柄留在 rig 上，由 async 测试播种
         let app = build_router(
             db.clone(),
-            devices,
+            devices.clone(),
             runs.clone(),
             scheduler,
             cfg,
@@ -208,6 +212,7 @@ mod update_flow_tests {
         UpdateRig {
             app,
             db,
+            devices,
             runs,
             controller,
             viewers: fake_viewers,
@@ -385,6 +390,24 @@ mod update_flow_tests {
     async fn active_run_blocks_install_without_interruption() {
         let t = build_update_rig("active-run");
         let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+
+        // 运行目标设备（Android 上下文 = 设备 pkg；POST /api/runs 不再回退
+        // Package id 当 Android 包名）
+        t.devices
+            .upsert_device(&Device {
+                id: "dev-1".into(),
+                name: "dev-1".into(),
+                kind: "wifi".into(),
+                addr: "127.0.0.1:5555".into(),
+                screen_mode: ScreenMode::Mirror,
+                vd_res: None,
+                vd_dpi: None,
+                pkg: Some("com.example.game".into()),
+                fps: None,
+                created_at: "2026-01-01 00:00:00".into(),
+            })
+            .await
+            .unwrap();
 
         // 建脚本并提交一个永不结束的 run
         save_task_script(&t, &sid, "forever.yaml", "version: 3\nsteps:\n  - log: 'loop'\n").await;

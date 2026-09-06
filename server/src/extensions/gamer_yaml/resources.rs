@@ -14,9 +14,9 @@
 //! 组合根引导期调用 [`register_resource_handlers`]；未注册时 Core 保存不做
 //! 内容校验（裸 Core 语义，§8.9 验收锚点）。
 //!
-//! T2a 备注：脚本/函数资源寻址仍以 `<package>/<rel>` 字符串 id 承载（任务
-//! entrypoint wire 不变），经 [`script_entry`] / [`function_entry`] 机械映射到
-//! 新存储；Package 运行上下文迁移由 T2a 收口。
+//! 资源 id 形态（全扩展统一）：`<package-id>/<名>`（首段 = Package id，目录
+//! 由本模块按资源类别补全——脚本/函数寻址不含目录段，模板显式带
+//! `templates/`）；REST 侧资源路径 = 插件目录内相对路径（含目录段）。
 
 use std::sync::Arc;
 
@@ -144,13 +144,15 @@ impl ResourceHandler for YamlResourceHandler {
         old_path: &str,
         new_path: &str,
     ) -> anyhow::Result<()> {
-        // 模板重命名 → 同步改写当前包 scripts/ 与 functions/ 中的模板引用；
-        // 非模板路径不处理
+        // 模板重命名 → 仅同步改写当前包 scripts/ 与 functions/ 中的模板引用；
+        // 模板文件本身的移动由 PackageStore::rename_resource 在钩子之后原子执行。
+        // 非模板路径不处理。
         let _ = plugin;
-        if old_path.starts_with("templates/") && new_path.starts_with("templates/") {
-            let old_name = old_path.strip_prefix("templates/").unwrap_or(old_path);
-            let new_name = new_path.strip_prefix("templates/").unwrap_or(new_path);
-            rename_template_references(store, package, old_name, new_name).map(|_| ())?;
+        if let (Some(old_name), Some(new_name)) = (
+            old_path.strip_prefix("templates/"),
+            new_path.strip_prefix("templates/"),
+        ) {
+            rewrite_template_references(store, package, old_name, new_name)?;
         }
         Ok(())
     }
@@ -192,23 +194,20 @@ fn template_short_name(name: &str) -> String {
     }
 }
 
-/// 重命名模板文件，并同步改写当前包 scripts/ 与 functions/ 中的模板引用。
+/// 重命名模板前，同步改写当前包 scripts/ 与 functions/ 中的模板引用（仅引用，
+/// 模板文件本身由调用方 [`PackageStore::rename_resource`] 移动）。
 ///
 /// 引用迁移走 v3 AST 改写（[`yaml_vnext::rename_template_source`] /
 /// [`yaml_vnext::rename_template_in_function_library`]），不做全局文本替换，
 /// 避免误改日志/文本内容。非 v3 存量源（不可解析）跳过——它们本就无法运行，
 /// 不阻塞重命名；v3 源改写失败（语法损坏）则整体报错。所有资源先生成新内容，
 /// 再开始落盘，写入失败时回滚已改写的资源。
-fn rename_template_references(
+fn rewrite_template_references(
     store: &PackageStore,
     package: &str,
     old_name: &str,
     new_name: &str,
 ) -> anyhow::Result<usize> {
-    let old_path = format!("templates/{old_name}");
-    let template_bytes = store
-        .read_binary(package, YAML_EXTENSION_ID, &old_path)?
-        .ok_or_else(|| anyhow::anyhow!("模板不存在: {old_path}"))?;
     let old_short = template_short_name(old_name);
     let new_short = template_short_name(new_name);
     // (path, 原内容, 新内容)
@@ -260,7 +259,8 @@ fn rename_template_references(
         }
     }
 
-    // 先写全部引用改写（失败回滚），最后写新模板 + 删旧模板（失败回滚）
+    // 先写全部引用改写（任一失败回滚已写内容——模板文件此时未动，调用方
+    // rename_resource 的 fs::rename 尚未发生）
     let mut written: Vec<(String, String)> = Vec::new();
     for (path, original, content) in &rewrites {
         if let Err(error) =
@@ -272,28 +272,6 @@ fn rename_template_references(
             return Err(error);
         }
         written.push((path.clone(), original.clone()));
-    }
-
-    let new_path = format!("templates/{new_name}");
-    if let Err(error) = store.write_binary(
-        package,
-        YAML_EXTENSION_ID,
-        &new_path,
-        &template_bytes,
-        None,
-        false,
-    ) {
-        for (path, original) in written.iter().rev() {
-            let _ = store.write_text_unchecked(package, YAML_EXTENSION_ID, path, original);
-        }
-        return Err(error);
-    }
-    if let Err(error) = store.delete_resource(package, YAML_EXTENSION_ID, &old_path) {
-        let _ = store.delete_resource(package, YAML_EXTENSION_ID, &new_path);
-        for (path, original) in written.iter().rev() {
-            let _ = store.write_text_unchecked(package, YAML_EXTENSION_ID, path, original);
-        }
-        return Err(error);
     }
     Ok(rewrites.len())
 }
@@ -321,6 +299,9 @@ mod rename_tests {
                 ..Default::default()
             })
             .unwrap();
+        // 与生产组合根一致：注册 gamer.yaml 的内容钩子（rename_resource 经
+        // handler.before_rename 改写模板引用）
+        store.register_handler(YAML_EXTENSION_ID, Arc::new(YamlResourceHandler));
         (store, dir)
     }
 
@@ -329,6 +310,7 @@ mod rename_tests {
     }
 
     /// v3 脚本 + 函数库中的模板引用经 AST 同步改写；文本字面量不动。
+    /// 文件移动由 PackageStore::rename_resource 完成（钩子只改引用）。
     #[test]
     fn rename_template_updates_script_and_function_references() {
         let (store, dir) = temp_store("v3");
@@ -357,11 +339,15 @@ mod rename_tests {
             )
             .unwrap();
 
-        assert_eq!(
-            rename_template_references(&store, "com.test.app", "old.png", "new.png").unwrap(),
-            2
-        );
-        assert!(!templates.join("old.png").exists());
+        store
+            .rename_resource(
+                "com.test.app",
+                YAML_EXTENSION_ID,
+                "templates/old.png",
+                "templates/new.png",
+            )
+            .unwrap();
+        assert!(!templates.join("old.png").exists(), "rename_resource 负责移动模板文件");
         assert_eq!(std::fs::read(templates.join("new.png")).unwrap(), b"png");
         let script =
             std::fs::read_to_string(plugin_root(&dir).join("scripts/main.yaml")).unwrap();
@@ -390,9 +376,14 @@ mod rename_tests {
             )
             .unwrap();
 
-        let renamed =
-            rename_template_references(&store, "com.test.app", "old.png", "new.png").unwrap();
-        assert_eq!(renamed, 1);
+        store
+            .rename_resource(
+                "com.test.app",
+                YAML_EXTENSION_ID,
+                "templates/old.png",
+                "templates/new.png",
+            )
+            .unwrap();
         let script =
             std::fs::read_to_string(plugin_root(&dir).join("scripts/main.yaml")).unwrap();
         assert!(script.contains("template: new.png"));
@@ -422,16 +413,57 @@ mod rename_tests {
             )
             .unwrap();
 
-        assert_eq!(
-            rename_template_references(&store, "com.test.app", "old.png", "new.png").unwrap(),
-            1,
-            "只有 v3 脚本计入改写"
-        );
+        store
+            .rename_resource(
+                "com.test.app",
+                YAML_EXTENSION_ID,
+                "templates/old.png",
+                "templates/new.png",
+            )
+            .unwrap();
         let script =
             std::fs::read_to_string(plugin_root(&dir).join("scripts/main.yaml")).unwrap();
         assert!(script.contains("template: new.png"));
         let legacy = std::fs::read_to_string(scripts.join("legacy.yaml")).unwrap();
         assert!(legacy.contains("old.png"), "不可解析的存量源保持原样");
+    }
+
+    /// 引用改写整体原子性：v3 源改写失败（语法损坏）→ 整体重命名失败且不动文件。
+    #[test]
+    fn rename_template_fails_atomically_when_v3_rewrite_breaks() {
+        let (store, dir) = temp_store("atomic-rename");
+        let templates = plugin_root(&dir).join("templates");
+        std::fs::create_dir_all(&templates).unwrap();
+        std::fs::write(templates.join("old.png"), b"png").unwrap();
+        // 坏 v3 源（模板引用可改写但整体解析失败）→ rename_resource 报错，
+        // 模板文件保持原名原位
+        store
+            .write_text(
+                "com.test.app",
+                YAML_EXTENSION_ID,
+                "scripts/broken.yaml",
+                "version: 3\nsteps:\n  - find:\n      template: old.png\n",
+                None,
+                false,
+            )
+            .unwrap();
+        let broken = plugin_root(&dir).join("scripts/broken.yaml");
+        // 落盘后把它改成语法损坏的 v3 源（绕过保存校验，模拟历史盘上数据）
+        std::fs::write(&broken, b"version: 3\nsteps:\n  - find:\n").unwrap();
+
+        assert!(
+            store
+                .rename_resource(
+                    "com.test.app",
+                    YAML_EXTENSION_ID,
+                    "templates/old.png",
+                    "templates/new.png",
+                )
+                .is_err(),
+            "v3 源改写失败必须整体失败"
+        );
+        assert!(templates.join("old.png").exists(), "失败时模板文件不动");
+        assert!(!templates.join("new.png").exists());
     }
 
     /// 保存边界 v3-only：v3 直存、非 v3 源报版本门禁诊断（yaml.v3.version）。

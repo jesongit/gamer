@@ -29,7 +29,7 @@ pub(crate) mod timer_yaml;
 pub(crate) mod yaml_extension;
 pub(crate) mod yaml_vnext;
 
-pub(crate) use runner_adapter::{yaml_app_context, yaml_start_request, EngineExecutor};
+pub(crate) use runner_adapter::{yaml_start_request, EngineExecutor};
 pub(crate) use resources::register_resource_handlers;
 pub(crate) use timer_yaml::{YamlTimerRunner, YamlTimerRunnerRegistrar};
 pub(crate) use yaml_extension::{

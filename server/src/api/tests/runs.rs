@@ -72,6 +72,8 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
         Default::default(),
         executor,
     );
+    // 运行目标设备（Android 上下文 = 设备 pkg，不再回退 Package id）
+    seed_device(&t, "d1", "com.example.game").await;
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     // 建函数库（带参数声明）
@@ -287,6 +289,7 @@ async fn dispatch_without_registered_runner_reports_dependency_missing() {
         test_credential("admin123"),
         Default::default(),
     );
+    seed_device(&t, "d1", "com.example.game").await;
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
     // build_app 已注册 gamer.yaml；用未知 runner_id 断言依赖缺失分发语义
     let resp = post_json(
@@ -304,4 +307,59 @@ async fn dispatch_without_registered_runner_reports_dependency_missing() {
     assert_eq!(resp.status(), StatusCode::FAILED_DEPENDENCY);
     let j = json_body(resp).await;
     assert_eq!(j["code"], "dependency_unavailable");
+}
+
+/// 运行上下文严格分离（plan §2.1/§16）：Android 包上下文只来自设备配置的
+/// pkg——设备缺失 404、设备未配置 pkg 400，Package id 不再被借作 Android
+/// 包名兜底。
+#[tokio::test]
+async fn dispatch_requires_device_with_configured_android_package() {
+    let t = build_app(
+        "dispatch-strict",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+
+    // 设备不存在 → 404（运行目标必须先登记设备）
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/runs",
+        dispatch_body("com.test.app/a.yaml", serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(json_body(resp).await["error"]
+        .as_str()
+        .unwrap()
+        .contains("设备不存在"));
+
+    // 设备存在但未配置 pkg → 400（不再回退 Package id 当 Android 包名）
+    seed_device(&t, "d1", "").await;
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/runs",
+        dispatch_body("com.test.app/a.yaml", serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let j = json_body(resp).await;
+    assert!(
+        j["error"].as_str().unwrap().contains("Android"),
+        "错误需指向设备缺 Android 包名配置: {j}"
+    );
+
+    // 配置 pkg 后同一请求通过前置校验（进入 runner 分发：脚本缺失 → 结构化 not_found）
+    seed_device(&t, "d1", "com.example.game").await;
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/runs",
+        dispatch_body("com.test.app/a.yaml", serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(resp).await["error"], "not_found", "前置校验已过，缺脚本");
 }
