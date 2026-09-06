@@ -17,13 +17,12 @@ export function useConsoleTemplates({
   toast,
   store,
   templatesData,
-  activePkg,
+  packageId,
   connected,
   videoElement,
   videoWrap,
   current,
   // 来自设备管理 composable（模板页签顶部的分区行）
-  pkgOptions,
   // 来自脚本运行 composable（懒解析箭头，规避组合顺序）
   editorMatchThreshold,
   clearCallParamsCache,
@@ -76,11 +75,11 @@ export function useConsoleTemplates({
     return s
   }
 
-  // 模板列表：当前应用分区过滤（templatesData 为跨分区全量，条目带 pkg 字段）；
+  // 模板列表：当前 Package 过滤（templatesData 全量快照，条目 pkg 字段 = Package id）；
   // 有搜索词时三口径并列匹配（全名/短名子串 + 中文名拼音首字母），任一命中即展示，
   // 排序按最早命中位置（拼音命中加偏移恒排文字命中之后），同级按修改时间倒序；无搜索词按修改时间倒序
   const templates = computed(() => {
-    let list = templatesData.value.filter(t => t.pkg === activePkg.value)
+    let list = templatesData.value.filter(t => t.pkg === packageId.value)
     const q = tplSearch.value.trim().toLowerCase()
     if (q) {
       // 首字母串不含中文，查询词含中文时跳过该口径（必然无交集）
@@ -104,7 +103,7 @@ export function useConsoleTemplates({
 
   // 模板短名候选（画布 tmpl 控件 datalist）
   const templateNames = computed(() =>
-    templatesData.value.filter(t => t.pkg === activePkg.value).map(t => tplShortName(t.name)))
+    templatesData.value.filter(t => t.pkg === packageId.value).map(t => tplShortName(t.name)))
 
   const selStyle = computed(() => ({
     left: Math.min(selStart.x, selEnd.x) + 'px',
@@ -422,7 +421,7 @@ export function useConsoleTemplates({
   function cropUploadPayload() {
     const raw = crop.name.trim()
     if (!raw) { toast('请输入模板名称', 'warn'); return null }
-    if (!activePkg.value) { toast('请先选择应用分区', 'warn'); return null }
+    if (!packageId.value) { toast('请先在右上选择 Package', 'warn'); return null }
     const name = raw.toLowerCase().endsWith('.png') ? raw : raw + '.png'
     const shortName = name.replace(/#[^#]+\.png$/i, '.png')
     const region = [
@@ -431,12 +430,12 @@ export function useConsoleTemplates({
       (crop.originX + crop.baseW) / crop.imgW,
       (crop.originY + crop.baseH) / crop.imgH,
     ]
-    return { shortName, dataB64: crop.preview.split(',')[1], region, pkg: activePkg.value, preserveColor: crop.preserveColor }
+    return { shortName, dataB64: crop.preview.split(',')[1], region, pkg: packageId.value, preserveColor: crop.preserveColor }
   }
 
   function findCropConflict(shortName) {
     const wanted = tplShortName(shortName).toLowerCase()
-    return templatesData.value.find(t => t.pkg === activePkg.value && tplShortName(t.name).toLowerCase() === wanted) || null
+    return templatesData.value.find(t => t.pkg === packageId.value && tplShortName(t.name).toLowerCase() === wanted) || null
   }
 
   function showCropConflict(shortName, existing) {
@@ -453,7 +452,7 @@ export function useConsoleTemplates({
 
   async function refreshTemplatesData() {
     try {
-      templatesData.value = await api.listTemplates()
+      templatesData.value = await api.listTemplates(packageId.value)
       return true
     } catch {
       return false
@@ -490,7 +489,7 @@ export function useConsoleTemplates({
       // 列表可能在本页打开后被其他页面更新；把服务端 409 也转成同一对比态。
       if (e?.status === 409) {
         try {
-          templatesData.value = await api.listTemplates()
+          templatesData.value = await api.listTemplates(packageId.value)
           const current = findCropConflict(payload.shortName)
           if (current) { showCropConflict(payload.shortName, current); return }
         } catch { /* 刷新失败时保留原错误提示 */ }
@@ -596,7 +595,7 @@ export function useConsoleTemplates({
     }
   }
 
-  function tplThumbUrl(name) { return api.tplImageUrl(name, activePkg.value) }
+  function tplThumbUrl(name) { return api.tplImageUrl(name, packageId.value) }
 
   /** 模板列表：行空白区点击 → 查看大图（缩略图/文件名单元格有各自的交互） */
   function onTplRowClick(e, t) {
@@ -612,8 +611,8 @@ export function useConsoleTemplates({
 
   // ---------- 画布模板下拉悬停缩略图（CellEditor inject；短名 → 当前分区图片 URL） ----------
   provide('tplPreviewUrl', (short) => {
-    const full = templatesData.value.find(t => t.pkg === activePkg.value && tplShortName(t.name) === short)?.name
-    return api.tplImageUrl(full || short, activePkg.value)
+    const full = templatesData.value.find(t => t.pkg === packageId.value && tplShortName(t.name) === short)?.name
+    return api.tplImageUrl(full || short, packageId.value)
   })
 
   // ---------- 步骤编辑器取值工具（CellEditor inject('seCellTools')）：投屏选点/选色/框选 ----------
@@ -806,13 +805,13 @@ export function useConsoleTemplates({
     const newName = /\.(png|jpe?g)$/i.test(raw) ? raw : raw + '.png'
     renaming.value = null
     if (newName === t.name) return
-    if (templatesData.value.some(x => x.pkg === activePkg.value && x.name === newName)) return toast(`已存在同名模板：${newName}`, 'warn')
+    if (templatesData.value.some(x => x.pkg === packageId.value && x.name === newName)) return toast(`已存在同名模板：${newName}`, 'warn')
     try {
-      await api.renameTemplate(t.name, newName, activePkg.value)
+      await api.renameTemplate(t.name, newName, packageId.value)
       // 后端会同步改写当前分区 scripts/functions 中的模板引用；刷新脚本与函数缓存，
       // 让当前摘要、调用参数和后续编辑都立即看到新名称。
       await refreshScripts?.()
-      await refreshFnLib?.(activePkg.value)
+      await refreshFnLib?.(packageId.value)
       clearCallParamsCache()
       toast(`模板已重命名为 ${newName}`, 'success')
     } catch (e) {
@@ -830,8 +829,8 @@ export function useConsoleTemplates({
   async function onTplDeleteClick(t) {
     confirmDelTpl.value = null
     try {
-      await api.deleteTemplate(t.name, activePkg.value)
-      templatesData.value = await api.listTemplates()
+      await api.deleteTemplate(t.name, packageId.value)
+      templatesData.value = await api.listTemplates(packageId.value)
       if (viewTpl.value === t.name) viewTpl.value = null
       toast('模板已删除', 'success')
     } catch (e) {
@@ -850,8 +849,8 @@ export function useConsoleTemplates({
       : file.name.replace(/\.[^.]+$/, '') + '.png'
     try {
       const b64 = await fileToBase64(file)
-      const rep = await api.createTemplate(name, b64, activePkg.value)
-      templatesData.value = await api.listTemplates()
+      const rep = await api.createTemplate(name, b64, packageId.value)
+      templatesData.value = await api.listTemplates(packageId.value)
       toast(`模板已新建${tplSizeHint(rep)}`, 'success')
     } catch (err) {
       toast('新建失败：' + err.message, 'error')
@@ -863,8 +862,8 @@ export function useConsoleTemplates({
     if (!t || !file) return
     try {
       const b64 = await fileToBase64(file)
-      await api.replaceTemplateImage(t.name, b64, t.pkg || activePkg.value)
-      templatesData.value = await api.listTemplates()
+      await api.replaceTemplateImage(t.name, b64, t.pkg || packageId.value)
+      templatesData.value = await api.listTemplates(packageId.value)
       toast(`模板 ${t.name} 图片已替换`, 'success')
     } catch (err) {
       toast('替换失败：' + err.message, 'error')
@@ -970,7 +969,7 @@ export function useConsoleTemplates({
       // 从实际模板文件名解析 #区域（短名也由服务端统一消歧）。
       const region = stepSemantics ? undefined : templateRegionPixels(name)
       const threshold = stepSemantics ? editorMatchThreshold() : (Number(testThreshold.value) || 0.8)
-      const r = await api.testTemplate(name, store.deviceId, threshold, region, activePkg.value)
+      const r = await api.testTemplate(name, store.deviceId, threshold, region, packageId.value)
       if (r.hit) {
         hit.x = r.x; hit.y = r.y; hit.w = r.width; hit.h = r.height
         hitLabel.value = `${name} ${r.score.toFixed(2)}`
@@ -1017,7 +1016,7 @@ export function useConsoleTemplates({
   })
 
   const templateCaptureContext = {
-    activePkg, pkgOptions, crop, testThreshold, testRegion, tplSearch,
+    packageId, crop, testThreshold, testRegion, tplSearch,
     picking, connected, togglePick, templates, confirmDelTpl, renaming, onTplRowClick, onTplThumbClick,
     tplThumbUrl, onTplNameClick, setRenameInputEl, renameVal, confirmRename, cancelRename, startRename,
     onTplDeleteClick, onTplMatchClick, onTplUpload, tplShortName, tplRegionBadge, cropSize, cropZoomPct,

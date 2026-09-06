@@ -1,5 +1,5 @@
 <template>
-  <div v-if="!ctx.activePkg" class="pkg-empty">
+  <div v-if="!ctx.packageId" class="pkg-empty">
     暂无应用分区：请先在右侧包名下拉中选择包名（模板与脚本按应用包名分区存储）
   </div>
   <template v-else>

@@ -32,7 +32,7 @@ let scriptsInflight = null
 
 export function useConsoleScriptRunner({
   toast,
-  activePkg,
+  packageId,
   consoleRuntime,
   templateNames,
   tplShortName,
@@ -51,7 +51,7 @@ export function useConsoleScriptRunner({
 
   async function refreshScripts() {
     if (!scriptsInflight) {
-      scriptsInflight = api.listScripts()
+      scriptsInflight = api.listScripts(packageId.value)
         .then(list => { scriptsData.value = Array.isArray(list) ? list : [] })
         .finally(() => { scriptsInflight = null })
     }
@@ -67,7 +67,7 @@ export function useConsoleScriptRunner({
     api: createEditorShellApi(api),
     getContext: () => ({
       resolveTemplate: (n) => {
-        const list = templatesData.value.filter(t => t.pkg === activePkg.value)
+        const list = templatesData.value.filter(t => t.pkg === packageId.value)
         return list.some(t => t.name === n || tplShortName(t.name) === n)
       },
     }),
@@ -89,7 +89,7 @@ export function useConsoleScriptRunner({
   /** 运行区当前选择 id（脚本 id / 函数库文件 id）：编辑、删除按钮与摘要区共用 */
   const selTargetIdScript = computed(() => selScript.value)
   const selTargetIdFunc = computed(() => selFnFile.value)
-  watch([selScript, activePkg], () => { scriptDeleteConfirmId.value = '' })
+  watch([selScript, packageId], () => { scriptDeleteConfirmId.value = '' })
   /**
    * 函数面板：整个函数库文件的解析模型（全部函数）。摘要区逐函数分组渲染
    * （每组一个 ScriptSummary，steps 带稳定 uuid 供运行起点定位）。
@@ -138,9 +138,9 @@ export function useConsoleScriptRunner({
   // v3 call 目标 = 命名空间串（script:<资源id> / function:<文件短路径>/<函数名>），
   // 候选与参数解析按 target 串寻址；正在编辑的脚本自身不进候选（自引用排除）。
   const callTargets = computed(() => {
-    if (!activePkg.value) return []
+    if (!packageId.value) return []
     const scriptOpts = scriptsData.value
-      .filter(s => s.package === activePkg.value && !(s.id === scriptShell.resourceId && scriptShell.kind === 'script'))
+      .filter(s => s.package === packageId.value && !(s.id === scriptShell.resourceId && scriptShell.kind === 'script'))
       .map(s => {
         const path = String(s.name || '').replace(/\.(ya?ml)$/i, '')
         return { target: `script:${path}`, label: path }
@@ -187,7 +187,7 @@ export function useConsoleScriptRunner({
     if (callParamsCache.has(target)) return callParamsCache.get(target)
     // 脚本列表已带 content；优先同步解析，保证已有 call 步骤首次渲染时
     // 就能按目标声明选择正确的 CellEditor 类型，不会先退化成 text。
-    const script = scriptsData.value.find(x => x.package === activePkg.value
+    const script = scriptsData.value.find(x => x.package === packageId.value
       && String(x.name || '').replace(/\.(ya?ml)$/i, '') === path)
     if (!script?.content) return null
     try {
@@ -209,7 +209,7 @@ export function useConsoleScriptRunner({
     if (!target || target.startsWith('function:')) return resolveTargetParamsSync(target)
     if (callParamsCache.has(target)) return callParamsCache.get(target)
     const path = target.slice('script:'.length)
-    const script = scriptsData.value.find(x => x.package === activePkg.value
+    const script = scriptsData.value.find(x => x.package === packageId.value
       && String(x.name || '').replace(/\.(ya?ml)$/i, '') === path)
     if (!script) return null
     try {
@@ -305,12 +305,12 @@ export function useConsoleScriptRunner({
     showYaml.value = false
   }
 
-  /** 新建脚本：空 ScriptModel（保存时落盘到当前应用分区）——脚本面板专属 */
+  /** 新建脚本：空 ScriptModel（保存时落盘到当前 Package）——脚本面板专属 */
   function startNewScript() {
-    if (!activePkg.value) return toast('请先在右侧选择包名', 'warn')
+    if (!packageId.value) return toast('请先在右上选择 Package', 'warn')
     scriptScope.scriptMode.value = 'edit'
     showYaml.value = false
-    scriptShell.newScript({ name: '新脚本.yml', pkg: activePkg.value })
+    scriptShell.newScript({ name: '新脚本.yml', pkg: packageId.value })
   }
 
   /** 编辑当前选择（按面板资源类型分发）：脚本 = 脚本编辑上下文；函数 = 函数库编辑上下文。
@@ -352,7 +352,7 @@ export function useConsoleScriptRunner({
     if (r.ok) {
       clearCallParamsCache()
       fnParamsMemo.clear()
-      if (rawEditor.kind.value === 'function') await fnLib.refresh(activePkg.value)
+      if (rawEditor.kind.value === 'function') await fnLib.refresh(packageId.value)
       else await refreshScripts()
       rawEditor.reset()
       scope.scriptMode.value = 'run'
@@ -375,11 +375,11 @@ export function useConsoleScriptRunner({
   /** 新建当前面板类型：脚本 = 新建脚本；函数 = 直接进入新函数库文件编辑态，文件名可在编辑器顶部修改 */
   function startNewTarget(scope) {
     if (scope.kind !== 'func') return startNewScript()
-    if (!activePkg.value) return toast('请先在右侧选择包名', 'warn')
+    if (!packageId.value) return toast('请先在右上选择 Package', 'warn')
     editFocusFn.value = ''
     scope.scriptMode.value = 'edit'
     showYaml.value = false
-    scriptShell.newFunctionFile({ file: '新函数库', pkg: activePkg.value })
+    scriptShell.newFunctionFile({ file: '新函数库', pkg: packageId.value })
   }
 
   /** 删除当前选择：脚本面板删脚本 / 函数面板删函数库文件 */
@@ -390,7 +390,7 @@ export function useConsoleScriptRunner({
     if (!window.confirm(`删除函数库文件 ${f.file}？（引用它的 func 步骤将失效）`)) return
     try {
       await api.deleteFunction(f.id)
-      await fnLib.refresh(activePkg.value)
+      await fnLib.refresh(packageId.value)
       if (selFnFile.value === f.id) selFnFile.value = ''
       toast('函数库文件已删除', 'success')
     } catch (e) {
@@ -423,7 +423,7 @@ export function useConsoleScriptRunner({
         content: serialize(parsed.model),
         expected_version: f.version,
       })
-      await fnLib.refresh(activePkg.value)
+      await fnLib.refresh(packageId.value)
       fnParamsMemo.clear()
       clearCallParamsCache()
       toast(successMessage, 'success')
@@ -538,7 +538,7 @@ export function useConsoleScriptRunner({
   async function saveEditScript(scope) {
     if (!scriptShell.hasModel) return
     if (!String(scriptShell.name || '').trim()) return toast('请填写脚本名称', 'error')
-    if (!scriptShell.pkg && !activePkg.value) return toast('请先选择应用分区', 'warn')
+    if (!scriptShell.pkg && !packageId.value) return toast('请先在右上选择 Package', 'warn')
     const r = await scriptShell.save()
     if (r.ok) {
       clearCallParamsCache()
@@ -569,7 +569,7 @@ export function useConsoleScriptRunner({
       clearCallParamsCache()
       // 函数库落盘后刷新文件清单（func 下拉与运行区函数下拉共用）；
       // 新建脚本落盘后刷新脚本列表（call 目标下拉候选）
-      if (scriptShell.kind === 'function_library') await fnLib.refresh(activePkg.value)
+      if (scriptShell.kind === 'function_library') await fnLib.refresh(packageId.value)
       else if (wasNew) await refreshScripts()
       if (wasNew) selScript.value = scriptShell.resourceId // 首次落盘：运行区选择跟随
     } else if (r.reason === 'invalid') {
@@ -587,7 +587,7 @@ export function useConsoleScriptRunner({
     if (rep?.id) {
       if (scriptShell.kind === 'function_library') {
         selFnFile.value = rep.id
-        await fnLib.refresh(activePkg.value)
+        await fnLib.refresh(packageId.value)
       } else {
         selScript.value = rep.id
       }
@@ -691,7 +691,7 @@ export function useConsoleScriptRunner({
     const path = raw.slice('script:'.length)
     const names = [`${path}.yaml`, `${path}.yml`, path]
     for (const n of names) {
-      const hit = scripts.value.find(x => x.package === activePkg.value && x.name === n)
+      const hit = scripts.value.find(x => x.package === packageId.value && x.name === n)
       if (hit) return hit.id
     }
     return null
@@ -942,7 +942,7 @@ export function useConsoleScriptRunner({
       kindLocked: true,
       runKind: scope.runKind,
       scriptMode: scope.scriptMode,
-      activePkg, store, startPending, runStopping, stopScript,
+      packageId, store, startPending, runStopping, stopScript,
       scriptDeleteConfirmId,
       // 运行区选择与可用性（按面板类型绑定）
       selScript, selFnFile,

@@ -75,12 +75,23 @@ export function useConsoleWorkspacePanels({
     serverUiAdapter.dispose()
   })
 
+  // 主导航虚拟视图（plan §29/§30：市场 / 插件），不经 PanelRegistry
+  const VIRTUAL_PANEL_KEYS = new Set(['market', 'plugins'])
+
+  function isVirtualPanelKey(value) {
+    return VIRTUAL_PANEL_KEYS.has(String(value || '').trim())
+  }
+
   function routePanelValue(value = route.query.panel) {
     return Array.isArray(value) ? value[0] : value
   }
 
   function syncPanelFromRoute({ replaceInvalid = true } = {}) {
     const requested = String(routePanelValue() || '')
+    if (isVirtualPanelKey(requested)) {
+      activePanelKey.value = requested
+      return
+    }
     const selected = panelRegistry.resolve(requested) || panelRegistry.defaultPanel()
     const key = selected?.key || DEFAULT_PANEL_KEY
     activePanelKey.value = key
@@ -90,7 +101,14 @@ export function useConsoleWorkspacePanels({
   }
 
   function openPanel(panel, { replace = false } = {}) {
-    const selected = panelRegistry.resolve(panel) || panelRegistry.defaultPanel()
+    const requested = typeof panel === 'string' ? panel.trim() : panel
+    if (isVirtualPanelKey(requested)) {
+      if (activePanelKey.value === requested && String(routePanelValue() || '') === requested) return requested
+      activePanelKey.value = requested
+      const query = { ...route.query, panel: requested }
+      return router[replace ? 'replace' : 'push']({ path: route.path, query }).then(() => requested)
+    }
+    const selected = panelRegistry.resolve(requested) || panelRegistry.defaultPanel()
     if (!selected) return null
     if (activePanelKey.value === selected.key && String(routePanelValue() || '') === selected.key) return selected.key
     activePanelKey.value = selected.key

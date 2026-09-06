@@ -3,7 +3,7 @@
     <div class="auto-run">
       <!-- 资源类型随面板锁定（console.scripts=脚本 / console.functions=函数），
            不再提供面板内切换；ctx.runKind 为锁定的面板类型 -->
-      <ScriptPicker v-if="ctx.runKind === 'script'" v-model="ctx.selScript" :package="ctx.activePkg" :lock-package="true" />
+      <ScriptPicker v-if="ctx.runKind === 'script'" v-model="ctx.selScript" :package="ctx.packageId" :lock-package="true" />
       <select v-else v-model="ctx.selFnFile" class="select mono fn-file" title="函数库文件（data/<应用分区>/functions/）">
         <option value="" disabled>选择函数库文件…</option>
         <option v-for="f in ctx.fnLib.list" :key="f.id" :value="f.id">{{ f.file }}</option>

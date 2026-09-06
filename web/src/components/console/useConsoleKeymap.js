@@ -23,7 +23,7 @@ function normalizedPoint(value) {
 export function useConsoleKeymap({
   api,
   toast,
-  activePkg,
+  packageId,
   keyboardMode,
   // 键盘/映射控制器与按压集合（Console 持有）
   keymap,
@@ -108,10 +108,10 @@ export function useConsoleKeymap({
         (candidate.id || candidate.file || candidate.name) === activeKeymapName.value)
       activeKeymapDisplayName.value = selected?.name || selected?.file || activeKeymapName.value || ''
     }
-    if (!activeKeymapName.value || !activePkg.value) return
+    if (!activeKeymapName.value || !packageId.value) return
     keymapLoading.value = true
     try {
-      const rep = await api.getKeymap(activeKeymapName.value, activePkg.value)
+      const rep = await api.getKeymap(activeKeymapName.value, packageId.value)
       const model = keymapModelFromResponse(rep)
       if (!model) throw new Error('服务端返回的映射结构无效')
       activeKeymapModel.value = model
@@ -215,8 +215,8 @@ export function useConsoleKeymap({
   const keymapPanelContext = {
     api,
     toast,
-    pkg: activePkg,
-    activePkg,
+    pkg: packageId,
+    packageId,
     keymaps,
     keymapOptions,
     selectedName: activeKeymapDisplayName,
@@ -228,15 +228,15 @@ export function useConsoleKeymap({
     keymapLoading,
     error: keymapError,
     keymapError,
-    refresh: () => loadKeymaps(activePkg.value),
-    onRefresh: () => loadKeymaps(activePkg.value),
+    refresh: () => loadKeymaps(packageId.value),
+    onRefresh: () => loadKeymaps(packageId.value),
     select: onKeymapChange,
     onSelect: onKeymapChange,
     onSave: onKeymapSave,
     onRequestPoint: () => pickCoord(),
     onDelete: onKeymapDelete,
     onSaved: async (item) => {
-      await loadKeymaps(activePkg.value)
+      await loadKeymaps(packageId.value)
       const name = item?.name || item?.keymap?.name
       if (name) {
         activeKeymapName.value = name
@@ -245,7 +245,7 @@ export function useConsoleKeymap({
     },
     onDeleted: (name) => {
       if (!name || name === activeKeymapName.value) resetKeymapSelection()
-      return loadKeymaps(activePkg.value)
+      return loadKeymaps(packageId.value)
     },
   }
 
