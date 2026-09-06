@@ -1,8 +1,9 @@
 // 当前后端 API 封装（Rust 服务端）。
 // 所有受保护请求遇到 401 都交给 Cookie 会话层处理；资源与运行接口不保留旧契约降级。
 //
-// P11.6 通用资源 API：脚本/函数库/模板/按键映射统一走
-// `/api/apps/:app/resources[...]`（kind ∈ scripts|functions|templates|keymaps|...）；
+// V3 Package 化：脚本/函数库/模板/按键映射统一走
+// `/api/packages/:pkg/plugins/:plugin/resources[...]`（plan §12-§14，寻址 =
+// (package_id, plugin_id, path) 三元组；目录语义归插件定义）；
 // 运行统一走 POST /api/runs（runner_id + entrypoint + payload，ADR-12/13：执行
 // 目标按 runner 分发）。本封装只提供 runner 无关的通用 run()；具体 runner 的
 // 包装（如 YAML 自动化 runner）归扩展前端侧（gamer-yaml-runner.js 等），Core API 层

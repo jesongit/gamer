@@ -265,7 +265,7 @@ function publicModel(value) {
   }
 }
 
-const pkg = computed(() => String(read('pkg', read('activePkg', '')) || ''))
+const pkg = computed(() => String(read('pkg', read('packageId', '')) || ''))
 const keymaps = computed(() => {
   const value = read('keymaps', [])
   return Array.isArray(value) ? value : []
