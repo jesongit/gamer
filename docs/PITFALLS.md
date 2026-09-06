@@ -256,3 +256,9 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **v3 宿主曾丢失模板 `#区域` 后缀语义（v2 迁移回归）**：v2 引擎按模板实际文件名 `#` 后缀（`xx#u/d/l/r…` 半区、`xx#0_0_500_500` 千分比矩形、`#1` 彩色标记）限定搜索区域；v3 NativeYamlHost 只透传步骤显式 region，短名解析到带后缀文件后全屏搜索 → 误匹配/点错位。修复：VisionAdapter 在步骤未给 region 时用 `matcher::template_region_from_name(解析后文件名)` 兜底（与匹配预览端点同源）；显式 region 优先。
 - **安装即用改变了扩展安装响应状态**：REST 安装现在自动 enable→start（失败降级 Enabled+last_error，不回 201 Failed）。断言安装后 `state=="installed"` 的测试/脚本需改为 `running`（或降级 `enabled`）；test 装配未接 timer registrar 时 gamer.yaml 的 start 会走通用实例路径失败降级——生产 main.rs 已接线，不受影响。
 - **v3 宿主坐标系曾硬编码 1000×1000（迁移回归 #2）**：NativeYamlHost 的 `screen` 初始化后从不刷新，center/tap/region 全按 1000×1000 换算，而模板测试端点用真实 `session.video_size()`——非 1000×1000 设备上脚本运行与测试预览位置必然不一致。修复：每次 `capture` 后经 `FrameService::size` 刷新 `screen`（RwLock），匹配/回显/触摸全跟随真实帧分辨率。
+
+## 2026-09-06（Package 一级作用域切换：后端根基重构）
+
+- **数据根已切 `data/packages/<package-id>/`，旧 `data/<android 包名>/` 六目录不再被读写**：包 id/plugin id 严格 `[a-z0-9][a-z0-9._-]*`（禁 `.`/`..`/大写/分隔符），Android 包名（允许大写）**不能**再当资源分区名用——设备 `pkg` 字段只作 Android 运行目标，设备→Package 运行上下文映射归 T2a；旧数据无自动迁移，按目录手工搬进 `packages/<pkg>/plugins/<plugin>/` 即可。
+- **`GET .../resources/<子目录>` 是按文件读取（404），不是列表**：递归列表端点是 `GET /api/packages/:pkg/plugins/:plugin/resources`，子目录限定用 `?prefix=`；同理 PUT 文本资源**不再自动补 `.yaml` 扩展名**（Core 内容无关，路径即所写），带裸名写入会得到无扩展名文件。
+- **包归档（.gamerpkg）顶层只允许 `package.toml`/`shared/`/`plugins/<plugin-id>/`**：manifest 从 `manifest.toml` 换成 `package.toml` 且**必须是首个条目**（打包器显式写入，collect 时跳过它防 zip 重复条目——曾因目录扫描把 package.toml 再收一遍导致自检 Duplicate filename）；导入默认 409 附已存摘要，`?overwrite=true` 原子替换（旧目录先挪 .staging 再换入，无半安装态）。
