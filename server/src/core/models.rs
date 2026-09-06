@@ -160,9 +160,9 @@ impl AppContext {
         }
     }
 
-    /// 测试装配助手：按当前 `<pkg>/...` 存储约定构造上下文（内容分区 =
-    /// Android 包名）。仅测试构建存在；生产调用方必须用 [`Self::new`] 显式
-    /// 给出两个命名空间的值。
+    /// 测试装配助手：以同一个字符串填充两个命名空间（android_package =
+    /// 运行目标、content_package = Package 数据上下文）。仅测试构建存在；
+    /// 生产调用方必须用 [`Self::new`] 显式给出两个命名空间的值。
     #[cfg(test)]
     pub fn for_test(
         device_id: impl Into<String>,

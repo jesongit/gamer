@@ -435,4 +435,7 @@ mod sec_tests {
     mod packages_tests {
         include!("tests/packages.rs");
     }
+    mod packages_dormant_tests {
+        include!("tests/packages_dormant.rs");
+    }
 }

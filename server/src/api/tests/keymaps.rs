@@ -46,7 +46,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
         &t.app,
         req(
             "PUT",
-            &format!("{pkg_base}/keymaps/combat.yaml", pkg_base = pkg_base("com.test.app")),
+            &format!("{pkg_base}/mappings/combat.yaml", pkg_base = pkg_base("com.test.app")),
             None,
             &json_headers(sid.clone()),
             Some(serde_json::json!({"content": KEYMAP_V1}).to_string()),
@@ -57,7 +57,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     let created = json_body(resp).await;
     assert_eq!(created["package"], "com.test.app");
     assert_eq!(created["plugin"], "gamer.keymap");
-    assert_eq!(created["path"], "keymaps/combat.yaml");
+    assert_eq!(created["path"], "mappings/combat.yaml");
     assert_eq!(created["name"], "战斗方案");
     assert_eq!(created["binding_count"], 2);
     assert_eq!(created["text"], true);
@@ -65,7 +65,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     assert_eq!(v1.len(), 12);
     assert!(t
         .dir
-        .join("packages/com.test.app/plugins/gamer.keymap/keymaps/combat.yaml")
+        .join("packages/com.test.app/plugins/gamer.keymap/mappings/combat.yaml")
         .is_file());
 
     // 已存在文件：无 expected_version → 409 version_required
@@ -73,7 +73,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
         &t.app,
         req(
             "PUT",
-            &format!("{}/keymaps/combat.yaml", pkg_base("com.test.app")),
+            &format!("{}/mappings/combat.yaml", pkg_base("com.test.app")),
             None,
             &json_headers(sid.clone()),
             Some(serde_json::json!({"content": KEYMAP_V1}).to_string()),
@@ -91,7 +91,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
         &t.app,
         req(
             "PUT",
-            &format!("{}/keymaps/combat.yaml", pkg_base("com.test.app")),
+            &format!("{}/mappings/combat.yaml", pkg_base("com.test.app")),
             None,
             &json_headers(sid.clone()),
             Some(
@@ -115,7 +115,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
         &t.app,
         req(
             "PUT",
-            &format!("{}/keymaps/combat.yaml", pkg_base("com.test.app")),
+            &format!("{}/mappings/combat.yaml", pkg_base("com.test.app")),
             None,
             &json_headers(sid.clone()),
             Some(
@@ -137,7 +137,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
         &t.app,
         req(
             "PUT",
-            &format!("{}/keymaps/combat.yaml", pkg_base("com.test.app")),
+            &format!("{}/mappings/combat.yaml", pkg_base("com.test.app")),
             None,
             &json_headers(sid.clone()),
             Some(
@@ -156,7 +156,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     let resp = get_json(
         &t,
         &sid,
-        &format!("{}?prefix=keymaps", pkg_base("com.test.app")),
+        &format!("{}?prefix=mappings", pkg_base("com.test.app")),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -170,7 +170,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     let resp = get_json(
         &t,
         &sid,
-        &format!("{}/keymaps/combat.yaml", pkg_base("com.test.app")),
+        &format!("{}/mappings/combat.yaml", pkg_base("com.test.app")),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -182,7 +182,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     let resp = get_json(
         &t,
         &sid,
-        &format!("{}?prefix=keymaps", pkg_base("com.other.app")),
+        &format!("{}?prefix=mappings", pkg_base("com.other.app")),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -193,7 +193,7 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
         &t.app,
         req(
             "DELETE",
-            &format!("{}/keymaps/combat.yaml", pkg_base("com.test.app")),
+            &format!("{}/mappings/combat.yaml", pkg_base("com.test.app")),
             None,
             &json_headers(sid.clone()),
             None,
@@ -204,13 +204,13 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     let resp = get_json(
         &t,
         &sid,
-        &format!("{}/keymaps/combat.yaml", pkg_base("com.test.app")),
+        &format!("{}/mappings/combat.yaml", pkg_base("com.test.app")),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-/// 存储层直接探针：PackageStore.read_text 命中 `plugins/gamer.keymap/keymaps/`
+/// 存储层直接探针：PackageStore.read_text 命中 `plugins/gamer.keymap/mappings/`
 /// 下的方案文件（路径 = 包数据根的新布局）。
 #[tokio::test]
 async fn keymap_store_read_text_probe() {
@@ -232,7 +232,7 @@ async fn keymap_store_read_text_probe() {
         &t.app,
         req(
             "PUT",
-            &format!("{}/keymaps/combat.yaml", pkg_base("com.test.app")),
+            &format!("{}/mappings/combat.yaml", pkg_base("com.test.app")),
             None,
             &json_headers(sid.clone()),
             Some(serde_json::json!({"content": KEYMAP_V1}).to_string()),
@@ -247,7 +247,7 @@ async fn keymap_store_read_text_probe() {
     })
     .unwrap();
     let hit = store
-        .read_text("com.test.app", "gamer.keymap", "keymaps/combat.yaml")
+        .read_text("com.test.app", "gamer.keymap", "mappings/combat.yaml")
         .unwrap();
     assert!(hit.is_some());
 }
@@ -304,7 +304,7 @@ async fn keymaps_reject_invalid_yaml_fields_coordinates_and_duplicates() {
             &t.app,
             req(
                 "PUT",
-                &format!("{}/keymaps/bad.yaml", pkg_base("com.test.app")),
+                &format!("{}/mappings/bad.yaml", pkg_base("com.test.app")),
                 None,
                 &json_headers(sid.clone()),
                 Some(serde_json::json!({"content": content}).to_string()),
@@ -322,6 +322,6 @@ async fn keymaps_reject_invalid_yaml_fields_coordinates_and_duplicates() {
     }
     assert!(!t
         .dir
-        .join("packages/com.test.app/plugins/gamer.keymap/keymaps/bad.yaml")
+        .join("packages/com.test.app/plugins/gamer.keymap/mappings/bad.yaml")
         .exists());
 }

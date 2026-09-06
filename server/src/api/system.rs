@@ -22,7 +22,8 @@ use super::{ApiError, AppState};
 use crate::deps_probe::{self, Mode, Snapshot};
 use crate::device::DeviceManager;
 
-/// 文件布局 schema 基线（schema-policy §5：`data/<pkg>/{scripts,functions,templates,keymaps}` = v1）。
+/// 文件布局 schema 基线（schema-policy §5：`packages/<pkg>/{package.toml,shared,plugins}` = v1；
+/// 插件子目录内部布局语义归各插件，Core 不感知）。
 /// DB schema 取值走 `migrations::TARGET_SCHEMA`（DATA-003 常量），不在此重复。
 const FILE_SCHEMA_VERSION: i64 = 1;
 

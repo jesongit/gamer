@@ -111,23 +111,27 @@ pub(super) async fn api_start_extension(
     let profile = match request.profile.as_deref() {
         None => None,
         Some(name) => {
-            // keymap profile 数据通道：分区取自 start 请求的 AppContext，
-            // 方案 YAML 从通用资源存储（data/<pkg>/keymaps）原样读出交给 guest。
+            // keymap profile 数据通道：数据上下文取 start 请求 AppContext 的
+            // package_id（content_package；android_package 只承担运行目标语义），
+            // 方案 YAML 从通用资源存储
+            // （packages/<package-id>/plugins/gamer.keymap/mappings）原样读出
+            // 交给 guest。
             if id != crate::extensions::KEYMAP_EXTENSION_ID {
                 return ApiError::bad_request("仅 keymap 插件支持 profile 启动参数")
                     .into_response();
             }
-            let partition = request
+            let package_id = request
                 .app_context
                 .as_ref()
-                .map(|context| context.android_package.as_str().to_string());
-            let Some(partition) = partition.filter(|value| !value.trim().is_empty()) else {
+                .and_then(|context| context.content_package.as_ref())
+                .map(|package| package.as_str().to_string());
+            let Some(package_id) = package_id else {
                 return ApiError::bad_request(
-                    "keymap profile 启动必须携带 app_context.android_package 指定分区",
+                    "keymap profile 启动必须携带 app_context.content_package（Package ID）指定数据上下文",
                 )
                 .into_response();
             };
-            match crate::extensions::load_user_profile(&st.packages, &partition, name) {
+            match crate::extensions::load_user_profile(&st.packages, &package_id, name) {
                 Ok(content) => Some(content),
                 Err(error) => return extension_error(error),
             }
@@ -308,7 +312,8 @@ enum Lifecycle {
 struct StartExtensionRequest {
     #[serde(default)]
     app_context: Option<crate::core::AppContext>,
-    /// keymap 专用：当前分区内的映射方案名；缺省 = guest 内置默认规则。
+    /// keymap 专用：当前 Package 数据上下文（app_context.content_package）
+    /// `mappings/` 内的映射方案名；缺省 = guest 内置默认规则。
     #[serde(default)]
     profile: Option<String>,
 }

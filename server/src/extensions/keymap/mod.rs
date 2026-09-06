@@ -675,7 +675,7 @@ entry = "ui/index.html"
 /// Start request for the keymap-specific Component world. It intentionally
 /// lives beside the keymap adapter rather than extending the generic Phase 6
 /// extension Host contract. `profile` carries the raw user-selected keymap
-/// YAML for the current partition (None = guest built-in defaults, which is
+/// YAML for the package data context (None = guest built-in defaults, which is
 /// full pass-through for keys the defaults do not map).
 #[derive(Clone)]
 pub(crate) struct KeymapWasmStartRequest {
@@ -1372,7 +1372,7 @@ mod keymap_wasmtime {
 #[cfg(feature = "wasm-runtime")]
 pub(crate) use keymap_wasmtime::LazyKeymapWasmRuntime;
 
-/// 从本地 Package 的 gamer.keymap 插件数据根解析 `keymaps/<file>` 资源。
+/// 从本地 Package 的 gamer.keymap 插件数据根解析 `mappings/<file>` 资源。
 /// 插件数据隔离由 [`crate::resources::PackageStore`] 的路径校验保证——只能
 /// 读本插件 `plugins/gamer.keymap/` 前缀内的文件，不回退任何其他来源。
 #[derive(Clone)]
@@ -1410,11 +1410,11 @@ fn to_runtime(error: impl std::fmt::Display) -> ExtensionError {
 }
 
 /// Load the raw YAML content of a user-selected keymap profile from the
-/// existing per-partition storage (`data/<pkg>/keymaps/<name>.yaml`). The
-/// content is handed to the keymap guest verbatim; the store already validated
-/// the schema (`version/name/bindings`) when the file was written and
-/// normalizes the scheme name, and a missing scheme is a start-time error
-/// rather than a silent pass-through.
+/// package data context (`packages/<package-id>/plugins/gamer.keymap/mappings/
+/// <name>.yaml`). The content is handed to the keymap guest verbatim; the
+/// store already validated the schema (`version/name/bindings`) when the file
+/// was written and normalizes the scheme name, and a missing scheme is a
+/// start-time error rather than a silent pass-through.
 /// gamer.keymap 的资源内容钩子（组合根引导期注册；P11.3）：
 /// keymaps kind 的保存期 schema 校验 + 列表注记（显示名 / binding 数 /
 /// 有效性 / 诊断）。未注册时 Core 保存不做内容校验（裸 Core 语义）。
@@ -1425,9 +1425,9 @@ pub fn register_resource_handlers(store: &crate::resources::PackageStore) {
     );
 }
 
-/// gamer.keymap 插件数据根内的方案路径布局（`keymaps/<方案文件>`；目录语义
+/// gamer.keymap 插件数据根内的方案路径布局（`mappings/<方案文件>`；目录语义
 /// 归插件定义，Core 只保证路径安全）。
-pub(crate) const KEYMAP_PROFILE_PREFIX: &str = "keymaps/";
+pub(crate) const KEYMAP_PROFILE_PREFIX: &str = "mappings/";
 
 struct KeymapResourceHandler;
 
@@ -1651,7 +1651,7 @@ mod tests {
     }
 
     #[test]
-    fn user_profile_loader_reads_partition_yaml_verbatim() {
+    fn user_profile_loader_reads_package_yaml_verbatim() {
         let temp = TempDir::new().unwrap();
         let cfg = crate::config::Config {
             data_dir: temp.path().to_path_buf(),
@@ -1670,7 +1670,7 @@ mod tests {
             .write_text(
                 "com.example.game",
                 KEYMAP_EXTENSION_ID,
-                "keymaps/测试方案.yaml",
+                "mappings/测试方案.yaml",
                 &content,
                 None,
                 false,
@@ -1721,7 +1721,7 @@ mod tests {
             .write_text(
                 "official.game",
                 KEYMAP_EXTENSION_ID,
-                "keymaps/default.yaml",
+                "mappings/default.yaml",
                 "version: 1\nname: package\nbindings: []\n",
                 None,
                 false,
