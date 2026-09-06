@@ -395,35 +395,34 @@ pub(crate) fn migrate(data_dir: &Path) -> serde_json::Value {
     }
 }
 
-/// 文件布局 v1 符合性（诊断用，宽松口径）：数据目录存在，且每个应用分区
-/// 子目录内的子目录名都落在 {scripts, functions, templates, keymaps, presets,
-/// resources} 白名单内。数据目录不存在 → null；散落文件（gamer.db 等）不计违规。
+/// 文件布局符合性（诊断用，宽松口径）：Package 数据根
+/// `<data>/packages/<package-id>/` 下的每个包目录只允许 `package.toml` 文件
+/// 与 `shared/`、`plugins/` 目录（插件子目录 id 合法性交由运行期校验）。
+/// `packages/` 根不存在 → null（尚无包数据）；散落文件（gamer.db 等）不计违规。
 fn file_layout_v1_ok(data_dir: &Path) -> serde_json::Value {
-    const RESOURCE_DIRS: [&str; 6] = [
-        "scripts",
-        "functions",
-        "templates",
-        "keymaps",
-        "presets",
-        "resources",
-    ];
-    if !data_dir.is_dir() {
+    const PACKAGE_ROOT: &str = "packages";
+    let packages = data_dir.join(PACKAGE_ROOT);
+    if !packages.is_dir() {
         return serde_json::Value::Null;
     }
-    let Ok(entries) = std::fs::read_dir(data_dir) else {
+    let Ok(entries) = std::fs::read_dir(&packages) else {
         return serde_json::Value::Null;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
-            continue;
+            continue; // 散落文件（.staging 之外的历史残留）宽松放行
         }
-        let Ok(sub) = std::fs::read_dir(&path) else {
+        let Ok(pkg_entries) = std::fs::read_dir(&path) else {
             continue;
         };
-        for item in sub.flatten() {
-            let name = item.file_name().to_string_lossy().to_string();
-            if item.path().is_dir() && !RESOURCE_DIRS.contains(&name.as_str()) {
+        for pkg_entry in pkg_entries.flatten() {
+            let name = pkg_entry.file_name().to_string_lossy().to_string();
+            let allowed = match pkg_entry.path().is_dir() {
+                true => name == "shared" || name == "plugins",
+                false => name == "package.toml",
+            };
+            if !allowed {
                 return serde_json::Value::Bool(false);
             }
         }
@@ -604,16 +603,17 @@ mod tests {
     #[test]
     fn file_layout_check_flags_foreign_subdirs_only() {
         let dir = temp_dir("layout");
-        // 空目录 + db 文件：合规
+        // 无 packages/ 根 → null（尚无包数据）
         std::fs::write(crate::store::db_path(&dir), b"x").unwrap();
+        assert_eq!(file_layout_v1_ok(&dir), serde_json::Value::Null);
+        // 合规包目录：package.toml + shared/ + plugins/<plugin>/
+        let pkg = dir.join("packages").join("com.example.game");
+        std::fs::create_dir_all(pkg.join("shared")).unwrap();
+        std::fs::create_dir_all(pkg.join("plugins").join("gamer.yaml").join("scripts")).unwrap();
+        std::fs::write(pkg.join("package.toml"), b"id = \"com.example.game\"
+").unwrap();
         assert_eq!(file_layout_v1_ok(&dir), serde_json::Value::Bool(true));
-        // 合规分区
-        let pkg = dir.join("com.example.game");
-        std::fs::create_dir_all(pkg.join("scripts")).unwrap();
-        std::fs::create_dir_all(pkg.join("functions")).unwrap();
-        std::fs::create_dir_all(pkg.join("templates")).unwrap();
-        assert_eq!(file_layout_v1_ok(&dir), serde_json::Value::Bool(true));
-        // 分区内出现白名单外子目录 → 违规
+        // 包内出现白名单外子目录 → 违规
         std::fs::create_dir_all(pkg.join("old_scripts")).unwrap();
         assert_eq!(file_layout_v1_ok(&dir), serde_json::Value::Bool(false));
         // 数据目录不存在 → null
