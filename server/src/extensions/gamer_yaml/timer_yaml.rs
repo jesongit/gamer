@@ -1,6 +1,6 @@
 //! gamer.yaml 的 Timer Core 任务适配器（v3-only）。
 //!
-//! This is the only timer-side module that knows the current ResourceStore,
+//! This is the only timer-side module that knows the current PackageStore,
 //! typed parameter snapshot, and `RunTarget::Script`.  It translates the
 //! generic Task payload into the existing RunManager request so YAML runs
 //! scheduled through the unified task API remain compatible.
@@ -29,8 +29,8 @@ use serde_json::Value;
 
 use crate::core::RunRequest;
 use crate::extensions::gamer_yaml::task_params::{self, GateError};
-use crate::resources::ResourceKind as RK;
-use crate::resources::ResourceStore;
+use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
+use crate::resources::PackageStore;
 use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartError};
 use crate::store::Db;
 use crate::timer_core::{TimerCompletion, TimerOutcome, TimerRun, TimerRunner, TimerRunnerError};
@@ -43,11 +43,11 @@ pub(crate) mod entrypoint_descriptor;
 pub(crate) struct YamlTimerRunner {
     db: Db,
     runs: Arc<RunManager>,
-    scripts: Arc<ResourceStore>,
+    scripts: Arc<PackageStore>,
 }
 
 impl YamlTimerRunner {
-    pub(crate) fn new(db: Db, runs: Arc<RunManager>, scripts: Arc<ResourceStore>) -> Self {
+    pub(crate) fn new(db: Db, runs: Arc<RunManager>, scripts: Arc<PackageStore>) -> Self {
         Self { db, runs, scripts }
     }
 
@@ -248,9 +248,7 @@ impl YamlTimerRunner {
         // 手动运行无任务可挂起）
         match &target {
             crate::extensions::gamer_yaml::run_target::RunTarget::Script { script_id, .. } => {
-                let exists = self
-                    .scripts
-                    .get_text(RK::Scripts, script_id)
+                let exists = script_entry(&self.scripts, script_id)
                     .map_err(|error| invalid_detail(error.to_string(), serde_json::json!([])))?
                     .is_some();
                 if !exists {
@@ -262,9 +260,7 @@ impl YamlTimerRunner {
             }
             crate::extensions::gamer_yaml::run_target::RunTarget::Function { pkg, file, .. } => {
                 let rel = format!("{pkg}/{file}.yaml");
-                let exists = self
-                    .scripts
-                    .get_text(RK::Functions, &rel)
+                let exists = function_entry(&self.scripts, &rel)
                     .map_err(|error| invalid_detail(error.to_string(), serde_json::json!([])))?
                     .is_some();
                 if !exists {
@@ -429,7 +425,7 @@ pub(crate) struct YamlTimerRunnerRegistrar {
     scheduler: Arc<crate::scheduler::Scheduler>,
     db: Db,
     runs: Arc<RunManager>,
-    scripts: Arc<ResourceStore>,
+    scripts: Arc<PackageStore>,
 }
 
 impl YamlTimerRunnerRegistrar {
@@ -437,7 +433,7 @@ impl YamlTimerRunnerRegistrar {
         scheduler: Arc<crate::scheduler::Scheduler>,
         db: Db,
         runs: Arc<RunManager>,
-        scripts: Arc<ResourceStore>,
+        scripts: Arc<PackageStore>,
     ) -> Self {
         Self {
             scheduler,

@@ -1,261 +1,363 @@
-//! Core 通用资源存储（P11.3 / P11.6 / ADR-11）。
+//! Package 本地包存储（Package Resource 模型，plan §2-§15）。
 //!
-//! ScriptStore / KeymapStore 消解后的内容无关资源层：六目录寻址
-//! （`data/<pkg>/{scripts,functions,templates,keymaps,presets,resources}/`，
-//! 目录即类型、跨目录不解析不回退）+ composite 三层解析
-//! （EditableLocal → UserOverride → InstalledPackage，复用
-//! `app_packages::CompositeResolver`）+ 内容版本短码 + 原子写。
+//! 数据一级作用域 = **Package ID**（不再是 Android 包名分区）。数据根
+//! `<data>/packages/<package-id>/`：
 //!
-//! 本层只懂「目录类别 + 字节/文本 + 内容版本短码 + 原子写」；**内容语义
-//! （YAML 解析/校验、模板引用重写、方案元数据注记）经
-//! [`ResourceKindHandler`] 注册表回调给扩展**（参照 B2 TimerRunnerRegistrar
-//! 的注入模式，gamer_yaml / gamer.keymap 在组合根注册）。未注册 handler 的
-//! kind 保存不做内容校验——裸 Core 也可启动并存取资源字节（§8.9 验收）。
+//! ```text
+//! packages/<package-id>/
+//! ├── package.toml          # manifest（id/name/version/author/targets/plugins 依赖）
+//! ├── shared/               # 跨插件保留区（本波只随包导出，无插件写入口）
+//! └── plugins/<plugin-id>/  # 插件数据（内部子目录语义归插件定义，Core 不解释）
+//! ```
 //!
-//! id 形态与旧存储一致：`<pkg>/<相对路径>`（含 `/`，HTTP 层必须整体
-//! encodeURIComponent）。
+//! package-id / plugin-id 都是单路径段（`[a-z0-9][a-z0-9._-]*`，禁 `.`/`..`/
+//! 路径分隔符），严格校验 + path traversal 防护。资源寻址 =
+//! [`PackageResource`]`(package_id, plugin_id, path)`，文本/字节统一存取；
+//! 乐观并发：资源级内容版本短码（`PUT` 必须带 `expected_version` 或显式
+//! `force`）+ 包级 `revision` 计数（元数据编辑条件）。
+//!
+//! **插件数据隔离**：资源 API 把插件限制在自己的 `plugins/<plugin-id>/` 前缀
+//! 内——不能读写其他插件目录、不能写 shared/。Core 不解释插件目录内部结构；
+//! 保存期内容校验/列表注记经 [`ResourceHandler`] 注册表回调给扩展（按
+//! plugin-id 注册；未注册 = 裸 Core 语义，不做内容校验）。
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 
-use serde::Serializer;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::config::Config;
-use crate::core::fs::{
-    atomic_write, content_version, is_windows_reserved_name, safe_name as sanitize_part,
-};
+use crate::core::fs::{atomic_write, content_version, is_windows_reserved_name};
 
-/// 六个资源目录类别（plan §11.2：Core 知道分类，不懂内容语义）。
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum ResourceKind {
-    Scripts,
-    Functions,
-    Templates,
-    Keymaps,
-    Presets,
-    Resources,
+/// 文本资源内容上限（与归档侧 YAML 上限同源）。
+pub const TEXT_RESOURCE_MAX_BYTES: usize =
+    crate::core::fs::archive_validation::IMPORT_MAX_YAML_BYTES;
+
+// ---------------------------------------------------------------------------
+// 标识与路径校验（package-id / plugin-id / 资源相对路径）
+// ---------------------------------------------------------------------------
+
+/// package-id / plugin-id 最大长度（单路径段，留足可读性）。
+pub const MAX_SCOPE_ID_LEN: usize = 100;
+
+/// 单路径段语法：`[a-z0-9][a-z0-9._-]*`；禁止 `.` / `..` / 纯点 / 路径分隔符。
+/// package-id 与 plugin-id 共用同一规则。
+pub fn validate_scope_id(kind: &str, value: &str) -> anyhow::Result<()> {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() || first.is_ascii_digit() => {}
+        _ => anyhow::bail!("{kind} 必须以小写字母或数字开头: {value:?}"),
+    }
+    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_'))
+    {
+        anyhow::bail!(
+            "{kind} 只允许小写字母、数字与 . _ -（禁止路径分隔符与大写）: {value:?}"
+        );
+    }
+    if value == "." || value == ".." || value.matches('.').count() == value.len() {
+        anyhow::bail!("{kind} 不能是纯点: {value:?}");
+    }
+    if value.len() > MAX_SCOPE_ID_LEN {
+        anyhow::bail!("{kind} 超过 {MAX_SCOPE_ID_LEN} 字节: {value:?}");
+    }
+    if is_windows_reserved_name(value) {
+        anyhow::bail!("{kind} 不能是 Windows 保留名: {value:?}");
+    }
+    Ok(())
 }
 
-pub use ResourceKind::*;
-
-impl ResourceKind {
-    pub const ALL: [ResourceKind; 6] = [Scripts, Functions, Templates, Keymaps, Presets, Resources];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Scripts => "scripts",
-            Functions => "functions",
-            Templates => "templates",
-            Keymaps => "keymaps",
-            Presets => "presets",
-            Resources => "resources",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|k| k.as_str() == value)
-    }
-
-    /// 文本 kind（YAML 等 UTF-8 资源）；Templates / Resources 为字节 kind。
-    pub fn is_text(self) -> bool {
-        matches!(self, Scripts | Functions | Keymaps | Presets)
-    }
-
-    fn rule(self) -> KindRule {
-        match self {
-            Scripts => KindRule {
-                exts: &["yaml", "yml"],
-                allow_nested: true,
-                list_via_composite: false,
-                get_via_composite: false,
-                same_base_conflict: false,
-            },
-            Functions => KindRule {
-                exts: &["yaml"],
-                // P12.5：放开嵌套目录（T2 遗留）——`function:common/lib/fn`
-                // 形态要求 functions/ 支持子目录文件（`<文件短路径>` 含 `/`）。
-                allow_nested: true,
-                list_via_composite: false,
-                get_via_composite: false,
-                same_base_conflict: false,
-            },
-            Keymaps => KindRule {
-                exts: &["yaml", "yml"],
-                allow_nested: false,
-                list_via_composite: true,
-                get_via_composite: true,
-                same_base_conflict: false,
-            },
-            Presets => KindRule {
-                exts: &["yaml", "yml"],
-                allow_nested: false,
-                list_via_composite: false,
-                get_via_composite: false,
-                same_base_conflict: false,
-            },
-            Templates | Resources => KindRule {
-                exts: &[],
-                allow_nested: false,
-                list_via_composite: false,
-                get_via_composite: false,
-                same_base_conflict: self == Templates,
-            },
-        }
-    }
+/// 快速判定（同 [`validate_scope_id`] 规则）。
+pub fn is_valid_scope_id(value: &str) -> bool {
+    validate_scope_id("id", value).is_ok()
 }
 
-struct KindRule {
-    /// 文本 kind 允许的扩展名（小写，不含点）；字节 kind 为空。
-    exts: &'static [&'static str],
-    allow_nested: bool,
-    /// 列表是否合并 override / 包层（keymaps 语义：下层方案可见）。
-    list_via_composite: bool,
-    /// 读取是否经 composite 三层（keymaps：本地无副本时读 override/包层）。
-    get_via_composite: bool,
-    /// 创建时同基名冲突检查（templates §11.7：短名引用靠基名 + `#` 后缀唯一
-    /// 候选消歧，放行第二个同基名文件会制造歧义）。
-    same_base_conflict: bool,
-}
-
-/// 相对短路径分段校验（资源路径 resolver 共用）：拒绝空串、反斜杠、空段、
-/// `.`、`..`、前导点与非法字符（逐段过 [`sanitize_part`]，含 Windows 保留名）；
-/// 绝对路径（`/x`、`C:x`）被空段/非法字符规则覆盖。
-pub fn sanitize_rel_segments(rel: &str) -> anyhow::Result<Vec<String>> {
+/// 资源路径分段校验：拒绝空串、反斜杠、空段、`.`、`..`、前导点与 Windows
+/// 保留名；允许 `#` 与空格（插件命名惯例，如模板 `#区域` 后缀）——Core 只把
+/// 它们当普通文件名字符，不解释语义。绝对路径（`/x`、`C:x`）被空段/非法
+/// 字符规则覆盖。
+pub fn sanitize_rel_path(rel: &str) -> anyhow::Result<Vec<String>> {
     if rel.contains('\\') {
-        anyhow::bail!("路径不允许反斜杠: {rel:?}");
+        anyhow::bail!("资源路径不允许反斜杠: {rel:?}");
     }
     if rel.is_empty() {
-        anyhow::bail!("路径不能为空");
+        anyhow::bail!("资源路径不能为空");
     }
     rel.split('/')
-        .map(|seg| {
-            sanitize_part(seg).ok_or_else(|| {
-                anyhow::anyhow!("路径段非法: {seg:?}（拒绝空段 / . / .. / 非法字符）")
-            })
-        })
+        .map(|seg| sanitize_segment(seg).ok_or_else(|| anyhow::anyhow!("资源路径段非法: {seg:?}（拒绝空段 / . / .. / 前导点 / Windows 保留名）")))
         .collect()
 }
 
-/// 校验模板文件名：允许 unicode 字母数字与 `. - _ #`（模板名可带 # 区域后缀
-/// 与 #1 颜色标记）、空格；拒绝空串、前导/尾随点与 Windows 保留名。
-pub fn sanitize_template_name(s: &str) -> Option<String> {
-    let t = s.trim();
-    if t.is_empty()
-        || t == "."
-        || t == ".."
-        || t.starts_with('.')
-        || t.ends_with('.')
-        || is_windows_reserved_name(t)
+fn sanitize_segment(seg: &str) -> Option<String> {
+    if seg.is_empty()
+        || seg == "."
+        || seg == ".."
+        || seg.starts_with('.')
+        || seg.ends_with('.')
+        || is_windows_reserved_name(seg)
     {
         return None;
     }
-    if t.chars()
-        .any(|c| !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '#' | ' ')))
-    {
+    if seg.chars().any(|c| {
+        !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '#' | ' '))
+    }) {
         return None;
     }
-    Some(t.to_string())
+    Some(seg.to_string())
 }
 
 // ---------------------------------------------------------------------------
-// 保存期内容校验 / 注记 / 重命名钩子（扩展注册；Core 不懂内容语义）
+// package.toml manifest
 // ---------------------------------------------------------------------------
 
-/// 保存期内容校验请求。`store` 供实现方构建「当前分区视图 + 待写覆盖」
-/// （call/func 引用解析与运行时同源）。
-pub struct SaveValidation<'a> {
-    pub app: &'a str,
-    pub kind: ResourceKind,
-    /// 目标资源相对路径（含扩展名，相对 kind 目录）。
-    pub id: &'a str,
-    pub content: &'a str,
-    pub store: &'a ResourceStore,
+/// `[plugins."<plugin-id>"]` 依赖声明（允许声明当前未安装的插件）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginDependency {
+    pub required: bool,
 }
 
-/// 单 kind 资源的内容钩子。扩展在组合根注册（gamer_yaml → scripts/functions/
-/// templates；gamer.keymap → keymaps）；未注册 = 该 kind 无内容校验/注记。
-pub trait ResourceKindHandler: Send + Sync {
-    /// 保存前内容校验；Err = 结构化诊断 JSON（HTTP 400 透传，格式由扩展定）。
-    fn validate_save(&self, _req: SaveValidation<'_>) -> Result<(), Value> {
-        Ok(())
-    }
+/// Package manifest（package.toml 的解析形态）。`revision` 是 Core 管理的
+/// 元数据编辑计数（乐观并发条件），每次 manifest 写入自增。
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackageManifest {
+    pub id: String,
+    pub name: Option<String>,
+    pub version: String,
+    pub author: Option<String>,
+    /// Android 兼容目标（0 个 = 通用包，允许多个）。仅作运行目标声明，
+    /// 不参与任何资源寻址。
+    pub android_targets: Vec<String>,
+    pub plugins: BTreeMap<String, PluginDependency>,
+    pub revision: u64,
+}
 
-    /// 列表/读取注记：entries = (id, content)；返回 id → 顶层附加字段
-    /// （如函数名清单、方案显示名/binding 数）。Core 只做透明合并。
-    fn annotate(&self, _entries: &[(String, String)]) -> serde_json::Map<String, Value> {
-        Default::default()
-    }
+/// 新建/编辑 manifest 的输入（`version` 缺省 "0.1.0"）。
+#[derive(Clone, Debug, Default)]
+pub struct PackageInput {
+    pub id: String,
+    pub name: Option<String>,
+    pub version: Option<String>,
+    pub author: Option<String>,
+    pub android_targets: Vec<String>,
+    pub plugins: BTreeMap<String, bool>,
+}
 
-    /// 字节 kind 重命名前钩子（templates：同步改写分区脚本/函数中的模板
-    /// 引用；实现方保证失败时不动任何文件）。
-    fn before_rename(
-        &self,
-        _store: &ResourceStore,
-        _app: &str,
-        _old: &str,
-        _new: &str,
-    ) -> anyhow::Result<()> {
-        Ok(())
+impl PackageInput {
+    fn into_manifest(self, revision: u64) -> anyhow::Result<PackageManifest> {
+        validate_scope_id("package id", &self.id)?;
+        if let Some(name) = &self.name {
+            let name = name.trim();
+            anyhow::ensure!(!name.is_empty(), "name 不能为空");
+            anyhow::ensure!(name.len() <= 200, "name 超过 200 字节");
+        }
+        let version = self
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("0.1.0")
+            .to_string();
+        anyhow::ensure!(
+            !version.chars().any(|c| c.is_control() || matches!(c, '/' | '\\')),
+            "version 含非法字符: {version:?}"
+        );
+        anyhow::ensure!(version.len() <= 64, "version 超过 64 字节");
+        if let Some(author) = &self.author {
+            let author = author.trim();
+            anyhow::ensure!(!author.is_empty(), "author 不能为空");
+            anyhow::ensure!(author.len() <= 200, "author 超过 200 字节");
+        }
+        let mut targets = Vec::new();
+        for target in &self.android_targets {
+            let target = target.trim();
+            validate_android_target(target)?;
+            if !targets.iter().any(|existing| existing == target) {
+                targets.push(target.to_string());
+            }
+        }
+        let mut plugins = BTreeMap::new();
+        for (plugin, required) in &self.plugins {
+            validate_scope_id("plugin id", plugin)?;
+            plugins.insert(plugin.clone(), PluginDependency { required: *required });
+        }
+        Ok(PackageManifest {
+            id: self.id,
+            name: self.name.map(|n| n.trim().to_string()),
+            version,
+            author: self.author.map(|a| a.trim().to_string()),
+            android_targets: targets,
+            plugins,
+            revision,
+        })
     }
 }
 
-/// 包构建/提取 preflight 的「staged 集合」校验（跨文件 call/func 引用视图以
-/// staged 内容自身为最高优先）。扩展（gamer_yaml）在组合根注册；未注册时
-/// staged YAML 不做内容校验。
-pub trait StagedResourceValidator: Send + Sync {
-    /// entries = (kind, kind 内相对路径, 文本内容)；返回问题行列表。
-    fn validate_staged(
-        &self,
-        store: &ResourceStore,
-        app: &str,
-        entries: &[(ResourceKind, String, String)],
-    ) -> Vec<String>;
+/// Android 兼容目标轻校验：非空、无分隔符/控制字符（Android 包名允许大写，
+/// 与 package-id 的严格小写规则刻意不同——它只是运行目标字符串）。
+fn validate_android_target(value: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!value.is_empty(), "Android 目标包名不能为空");
+    anyhow::ensure!(
+        value.len() <= 200,
+        "Android 目标包名超过 200 字节: {value:?}"
+    );
+    anyhow::ensure!(
+        !value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\')),
+        "Android 目标包名含非法字符: {value:?}"
+    );
+    Ok(())
 }
 
-/// 一个资源条目（文本 kind）。手写 Serialize：基础字段在前、注记字段
-/// （meta）随后覆盖同名字段（如 keymap 显示名 `name`）。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestToml {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    author: Option<String>,
+    #[serde(default)]
+    revision: Option<u64>,
+    #[serde(default)]
+    targets: Option<TargetsToml>,
+    #[serde(default, rename = "plugins")]
+    plugin_deps: BTreeMap<String, PluginDepToml>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetsToml {
+    #[serde(default)]
+    android: Option<AndroidTargetsToml>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AndroidTargetsToml {
+    #[serde(default)]
+    packages: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginDepToml {
+    required: bool,
+}
+
+use serde::Deserialize;
+
+/// 严格解析 package.toml（未知字段 / 类型错配 / id 非法一律报错）。
+pub fn parse_package_toml(bytes: &[u8]) -> anyhow::Result<PackageManifest> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| anyhow::anyhow!("package.toml 必须是 UTF-8: {e}"))?;
+    let raw: ManifestToml =
+        toml::from_str(text).map_err(|e| anyhow::anyhow!("package.toml 解析失败: {e}"))?;
+    let input = PackageInput {
+        id: raw.id,
+        name: raw.name,
+        version: raw.version,
+        author: raw.author,
+        android_targets: raw.targets.and_then(|t| t.android).map(|a| a.packages).unwrap_or_default(),
+        plugins: raw
+            .plugin_deps
+            .into_iter()
+            .map(|(plugin, dep)| (plugin, dep.required))
+            .collect(),
+    };
+    input.into_manifest(raw.revision.unwrap_or(1))
+}
+
+/// 序列化为 package.toml 文本（固定字段顺序，可复现打包依赖此稳定性）。
+pub fn serialize_package_toml(manifest: &PackageManifest) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("id = {}\n", toml_quote(&manifest.id)));
+    if let Some(name) = &manifest.name {
+        out.push_str(&format!("name = {}\n", toml_quote(name)));
+    }
+    out.push_str(&format!("version = {}\n", toml_quote(&manifest.version)));
+    if let Some(author) = &manifest.author {
+        out.push_str(&format!("author = {}\n", toml_quote(author)));
+    }
+    out.push_str(&format!("revision = {}\n", manifest.revision));
+    if !manifest.android_targets.is_empty() {
+        out.push_str("\n[targets.android]\npackages = [");
+        out.push_str(
+            &manifest
+                .android_targets
+                .iter()
+                .map(|t| toml_quote(t))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        out.push_str("]\n");
+    }
+    for (plugin, dep) in &manifest.plugins {
+        out.push_str(&format!(
+            "\n[plugins.{}]\nrequired = {}\n",
+            toml_quote(plugin),
+            dep.required
+        ));
+    }
+    out
+}
+
+fn toml_quote(value: &str) -> String {
+    // 基本字符串：转义反斜杠与双引号（控制字符已被上游校验拒绝）
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+// ---------------------------------------------------------------------------
+// 资源条目
+// ---------------------------------------------------------------------------
+
+/// 文本资源条目。
 #[derive(Debug, Clone)]
 pub struct ResourceEntry {
-    /// `<pkg>/<rel>`（rel 含扩展名）。
-    pub id: String,
     pub package: String,
-    /// rel 路径（含扩展名；文件短路径去扩展名见 [`ResourceEntry::file`]）。
-    pub name: String,
+    pub plugin: String,
+    /// 相对 `plugins/<plugin>/` 的路径（含扩展名）。
+    pub path: String,
     pub content: String,
     pub updated_at: String,
-    /// 字节 kind 的文件大小（文本 kind 为 content 字节数）。
     pub size: u64,
-    /// 文件修改时间（unix 秒；模板列表排序沿用）。
     pub mtime: u64,
     /// 注记字段（handler.annotate；序列化时展开进顶层）。
     pub meta: serde_json::Map<String, Value>,
 }
 
 impl ResourceEntry {
-    /// 内容版本短码（内容哈希）——GET 返回、保存 expected_version 冲突检测依据。
+    /// 内容版本短码（内容哈希）——GET 返回、PUT expected_version 冲突检测依据。
     pub fn version(&self) -> String {
         content_version(&self.content)
     }
 }
 
-impl serde::Serialize for ResourceEntry {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+impl Serialize for ResourceEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
-        let file_short = self.name.strip_suffix(".yaml").unwrap_or(&self.name);
-        let count = 10 + self.meta.len();
-        let mut ser = serializer.serialize_map(Some(count))?;
-        ser.serialize_entry("id", &self.id)?;
+        let mut ser = serializer.serialize_map(Some(9 + self.meta.len()))?;
         ser.serialize_entry("package", &self.package)?;
-        ser.serialize_entry("pkg", &self.package)?;
-        ser.serialize_entry("name", &self.name)?;
-        ser.serialize_entry("file", file_short)?;
+        ser.serialize_entry("plugin", &self.plugin)?;
+        ser.serialize_entry("path", &self.path)?;
         ser.serialize_entry("content", &self.content)?;
         ser.serialize_entry("version", &self.version())?;
         ser.serialize_entry("updated_at", &self.updated_at)?;
         ser.serialize_entry("size", &self.size)?;
         ser.serialize_entry("mtime", &self.mtime)?;
+        ser.serialize_entry("text", &true)?;
         for (key, value) in &self.meta {
             ser.serialize_entry(key, value)?;
         }
@@ -263,19 +365,28 @@ impl serde::Serialize for ResourceEntry {
     }
 }
 
-/// 字节资源条目（templates / resources kind 的列表项；读取返回原始字节）。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct BinaryEntry {
-    pub id: String,
+/// 列表条目（递归列表统一形态：文本条目带 content/version，字节条目只有
+/// 元数据；`text` 标记区分）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ListEntry {
     pub package: String,
-    pub pkg: String,
-    pub name: String,
+    pub plugin: String,
+    pub path: String,
     pub size: u64,
     pub mtime: u64,
     pub updated_at: String,
+    pub text: bool,
+    /// 文本条目的内容（UTF-8 且 ≤ [`TEXT_RESOURCE_MAX_BYTES`]）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    /// 文本条目的内容版本短码。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(flatten)]
+    pub meta: serde_json::Map<String, Value>,
 }
 
-fn fmt_mtime(p: &std::path::Path) -> String {
+fn fmt_mtime(p: &Path) -> String {
     std::fs::metadata(p)
         .and_then(|m| m.modified())
         .map(|t| {
@@ -285,7 +396,7 @@ fn fmt_mtime(p: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
-fn mtime_secs(p: &std::path::Path) -> u64 {
+fn mtime_secs(p: &Path) -> u64 {
     std::fs::metadata(p)
         .and_then(|m| m.modified())
         .ok()
@@ -294,705 +405,783 @@ fn mtime_secs(p: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// 结构化诊断 JSON 的通用展示格式（`code: message (step_path)` 分号连接；
-/// 非对象条目原样字符串化）。包构建/提取 preflight 与日志侧共用。
-pub fn format_diagnostics_value(value: &Value) -> String {
-    match value {
-        Value::Array(items) => items
-            .iter()
-            .map(format_diagnostics_value)
-            .collect::<Vec<_>>()
-            .join("; "),
-        Value::Object(map) => {
-            let code = map.get("code").and_then(|v| v.as_str()).unwrap_or("");
-            let message = map
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or_else(|| map.get("error").and_then(|v| v.as_str()).unwrap_or(""));
-            let step_path = map
-                .get("step_path")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            if code.is_empty() {
-                message.to_string()
-            } else {
-                format!("{code}: {message} ({step_path})")
-            }
-        }
-        other => other.to_string(),
+fn bytes_version(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut version = String::with_capacity(12);
+    for byte in digest.iter().take(6) {
+        version.push_str(&format!("{byte:02x}"));
+    }
+    version
+}
+
+// ---------------------------------------------------------------------------
+// 内容钩子（按 plugin-id 注册；Core 不懂内容语义）
+// ---------------------------------------------------------------------------
+
+/// 保存期内容校验请求。`store` 供实现方构建「当前包视图 + 待写覆盖」。
+pub struct SaveValidation<'a> {
+    pub package: &'a str,
+    pub plugin: &'a str,
+    /// 目标资源相对路径（相对 `plugins/<plugin>/`，含扩展名）。
+    pub path: &'a str,
+    pub content: &'a str,
+    pub store: &'a PackageStore,
+}
+
+/// 单插件资源内容钩子。扩展在组合根注册（gamer.yaml / gamer.keymap）；
+/// 未注册 = 该插件资源保存不做内容校验（裸 Core 语义）。
+pub trait ResourceHandler: Send + Sync {
+    /// 保存前内容校验；Err = 结构化诊断 JSON（HTTP 400 透传，格式由扩展定）。
+    fn validate_save(&self, _req: SaveValidation<'_>) -> Result<(), Value> {
+        Ok(())
+    }
+
+    /// 列表/读取注记：entries = (path, content)；返回 path → 顶层附加字段。
+    /// Core 只做透明合并。
+    fn annotate(&self, _entries: &[(String, String)]) -> serde_json::Map<String, Value> {
+        Default::default()
+    }
+
+    /// 重命名前钩子（如模板引用同步改写；实现方保证失败时不动任何文件）。
+    /// T2a 备注：与 [`PackageStore::rename_resource`] 同为模板重命名迁移缝。
+    #[allow(dead_code)]
+    fn before_rename(
+        &self,
+        _store: &PackageStore,
+        _package: &str,
+        _plugin: &str,
+        _old_path: &str,
+        _new_path: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
-/// Core 通用资源存储。见模块级文档。
-pub struct ResourceStore {
-    /// 数据根目录（data/），一级子目录 = 应用分区（内含六资源目录）
-    root: PathBuf,
-    /// Composite 资源解析缝（EditableLocal → user-overrides → active App
-    /// Package）。模板解析与 keymaps 读取经此寻址；本地编辑区即 `root` 下
-    /// 的分区目录。
-    composite: crate::app_packages::CompositeResolver,
-    handlers: std::sync::RwLock<BTreeMap<ResourceKind, Arc<dyn ResourceKindHandler>>>,
-    staged: std::sync::RwLock<Option<Arc<dyn StagedResourceValidator>>>,
+// ---------------------------------------------------------------------------
+// PackageStore
+// ---------------------------------------------------------------------------
+
+/// 包统计（`GET /api/packages/:pkg`）。
+#[derive(Debug, Serialize)]
+pub struct PackageStats {
+    pub files: u64,
+    pub bytes: u64,
+    pub plugins: Vec<PluginStats>,
 }
 
-impl ResourceStore {
+/// 单插件目录统计。
+#[derive(Debug, Serialize)]
+pub struct PluginStats {
+    pub plugin: String,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+/// 包不存在（HTTP 404 语义）。
+#[derive(Debug, thiserror::Error)]
+#[error("Package 不存在: {0}")]
+pub struct PackageNotFound(pub String);
+
+/// Core Package 本地包存储。见模块级文档。
+pub struct PackageStore {
+    /// 数据根（`<data>/packages`），一级子目录 = package-id。
+    root: PathBuf,
+    handlers: std::sync::RwLock<BTreeMap<String, std::sync::Arc<dyn ResourceHandler>>>,
+}
+
+impl PackageStore {
     pub fn open(cfg: &Config) -> anyhow::Result<Self> {
+        let root = cfg.data_dir.join("packages");
+        if cfg.data_dir.exists() && !root.starts_with(&cfg.data_dir) {
+            anyhow::bail!("packages 数据根解析异常: {}", root.display());
+        }
+        std::fs::create_dir_all(&root)?;
         let store = Self {
-            root: cfg.data_dir.clone(),
-            composite: crate::app_packages::CompositeResolver::new(cfg.data_dir.clone()),
+            root,
             handlers: std::sync::RwLock::new(BTreeMap::new()),
-            staged: std::sync::RwLock::new(None),
         };
-        store.reject_legacy_layout()?;
+        store.reject_foreign_layout()?;
         Ok(store)
     }
 
-    /// data **根级**的 scripts/ 与 templates/ 目录属于更早的单层布局（分区机制
-    /// 引入之前），与分区内的同名子目录（data/<pkg>/scripts/）无关。启动时只
-    /// 报错并要求重建/清理开发数据，绝不自动移动或改写其中的文件。
-    fn reject_legacy_layout(&self) -> anyhow::Result<()> {
-        let legacy = [self.root.join("scripts"), self.root.join("templates")];
-        let found: Vec<String> = legacy
-            .iter()
-            .filter(|path| path.exists())
-            .map(|path| path.display().to_string())
-            .collect();
-        if found.is_empty() {
-            Ok(())
-        } else {
+    /// 数据根下不允许出现文件形态的 `packages` 条目之外的保留名（防误把
+    /// 旧布局文件当包目录）。目录名不合法的子目录在列表时被跳过。
+    fn reject_foreign_layout(&self) -> anyhow::Result<()> {
+        if self.root.is_file() {
             anyhow::bail!(
-                "检测到已废弃的数据根级目录布局：{}（旧单层布局，不是分区内目录）；请备份后删除旧目录并重建开发数据",
-                found.join(", ")
-            )
+                "packages 数据根被文件占用: {}（请备份后移除该文件）",
+                self.root.display()
+            );
+        }
+        Ok(())
+    }
+
+    // ---------- 目录解析 ----------
+
+    /// 包目录（package-id 严格校验，非法 id 直接报错而非映射哨兵——所有
+    /// 调用方都应显式处理非法输入）。
+    pub fn package_dir(&self, pkg: &str) -> anyhow::Result<PathBuf> {
+        validate_scope_id("package id", pkg)?;
+        Ok(self.root.join(pkg))
+    }
+
+    /// 插件数据目录 `plugins/<plugin-id>/`（package/plugin 双重校验）。
+    pub fn plugin_dir(&self, pkg: &str, plugin: &str) -> anyhow::Result<PathBuf> {
+        validate_scope_id("plugin id", plugin)?;
+        Ok(self.package_dir(pkg)?.join("plugins").join(plugin))
+    }
+
+    /// 资源磁盘路径：`plugins/<plugin>/<path>`（逐段校验防穿越）。
+    pub fn resource_path(&self, pkg: &str, plugin: &str, path: &str) -> anyhow::Result<PathBuf> {
+        let segs = sanitize_rel_path(path)?;
+        let mut p = self.plugin_dir(pkg, plugin)?;
+        for seg in &segs {
+            p.push(seg);
+        }
+        Ok(p)
+    }
+
+    // ---------- 包生命周期 ----------
+
+    /// 新建包：写 package.toml + 建 shared/、plugins/ 目录。已存在 → 报错。
+    pub fn create_package(&self, input: PackageInput) -> anyhow::Result<PackageManifest> {
+        let manifest = input.into_manifest(1)?;
+        let dir = self.package_dir(&manifest.id)?;
+        anyhow::ensure!(
+            !dir.exists(),
+            "Package 已存在: {}",
+            manifest.id
+        );
+        std::fs::create_dir_all(dir.join("shared"))?;
+        std::fs::create_dir_all(dir.join("plugins"))?;
+        atomic_write(&dir.join("package.toml"), serialize_package_toml(&manifest).as_bytes())?;
+        Ok(manifest)
+    }
+
+    /// 磁盘上全部包（按 id 字典序）。目录名不合法或缺 package.toml 的条目
+    /// 跳过（不炸整个列表）。
+    pub fn list_packages(&self) -> anyhow::Result<Vec<PackageManifest>> {
+        let mut out = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&self.root) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !is_valid_scope_id(&name) || !entry.path().is_dir() {
+                    continue;
+                }
+                if let Some(manifest) = self.try_manifest(&name)? {
+                    out.push(manifest);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    /// 读取 manifest；包不存在 → `PackageNotFound`。
+    pub fn manifest(&self, pkg: &str) -> anyhow::Result<PackageManifest> {
+        self.try_manifest(pkg)?
+            .ok_or_else(|| anyhow::Error::new(PackageNotFound(pkg.to_string())))
+    }
+
+    /// 读取 manifest；缺文件/解析失败 → None（列表容错语义）。
+    pub fn try_manifest(&self, pkg: &str) -> anyhow::Result<Option<PackageManifest>> {
+        let path = self.package_dir(pkg)?.join("package.toml");
+        if !path.is_file() {
+            return Ok(None);
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => match parse_package_toml(&bytes) {
+                Ok(manifest) => {
+                    if manifest.id != pkg {
+                        tracing::warn!(package = pkg, "package.toml id 与目录名不一致，跳过");
+                        return Ok(None);
+                    }
+                    Ok(Some(manifest))
+                }
+                Err(error) => {
+                    tracing::warn!(package = pkg, %error, "package.toml 解析失败，跳过");
+                    Ok(None)
+                }
+            },
+            Err(error) => {
+                tracing::warn!(package = pkg, %error, "package.toml 读取失败，跳过");
+                Ok(None)
+            }
         }
     }
 
-    /// composite 三层解析器（模板短名消歧 / keymaps 跨层；生产链路内部直走
-    /// 字段，公开访问器当前仅测试探针消费）。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn composite(&self) -> &crate::app_packages::CompositeResolver {
-        &self.composite
+    /// 编辑 manifest 元数据。`expected_revision` 条件更新（None + !force =
+    /// 要求提供）；成功后 revision 自增。id 不可变（必须与路径一致）。
+    pub fn update_manifest(
+        &self,
+        pkg: &str,
+        input: PackageInput,
+        expected_revision: Option<u64>,
+        force: bool,
+    ) -> anyhow::Result<PackageManifest> {
+        anyhow::ensure!(
+            input.id == pkg,
+            "package id 不可变（{} ≠ 路径 {}）",
+            input.id,
+            pkg
+        );
+        let current = self.manifest(pkg)?;
+        if !force {
+            match expected_revision {
+                None => anyhow::bail!(
+                    "更新 manifest 必须提供 expected_revision，或显式 force:true"
+                ),
+                Some(expected) if expected != current.revision => anyhow::bail!(
+                    "manifest 已被其他页面修改（expected {expected} ≠ 当前 {}），请重新加载",
+                    current.revision
+                ),
+                Some(_) => {}
+            }
+        }
+        let manifest = input.into_manifest(current.revision + 1)?;
+        let path = self.package_dir(pkg)?.join("package.toml");
+        atomic_write(&path, serialize_package_toml(&manifest).as_bytes())?;
+        Ok(manifest)
     }
 
-    /// 注册 kind 的内容钩子（组合根引导期调用；同 kind 重复注册 = 替换）。
-    pub fn register_handler(&self, kind: ResourceKind, handler: Arc<dyn ResourceKindHandler>) {
+    /// 删除包（整目录递归删除）。返回是否发生了删除。
+    pub fn delete_package(&self, pkg: &str) -> anyhow::Result<bool> {
+        let dir = self.package_dir(pkg)?;
+        if !dir.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_dir_all(&dir)
+            .map_err(|e| anyhow::anyhow!("删除 Package 失败: {} ({})", e, dir.display()))?;
+        Ok(true)
+    }
+
+    /// 复制包为新包（深拷贝 shared/ + plugins/；manifest 换 id、revision 归 1）。
+    pub fn duplicate_package(&self, src: &str, new_id: &str) -> anyhow::Result<PackageManifest> {
+        validate_scope_id("package id", new_id)?;
+        let source = self.manifest(src)?;
+        let target_dir = self.package_dir(new_id)?;
+        anyhow::ensure!(!target_dir.exists(), "Package 已存在: {new_id}");
+        let manifest = PackageManifest {
+            id: new_id.to_string(),
+            revision: 1,
+            ..source
+        };
+        copy_dir_contents(&self.package_dir(src)?, &target_dir)?;
+        atomic_write(
+            &target_dir.join("package.toml"),
+            serialize_package_toml(&manifest).as_bytes(),
+        )?;
+        Ok(manifest)
+    }
+
+    /// 包统计（总文件/字节 + 每插件目录统计）。
+    pub fn stats(&self, pkg: &str) -> anyhow::Result<PackageStats> {
+        let dir = self.package_dir(pkg)?;
+        anyhow::ensure!(
+            dir.is_dir(),
+            "Package 不存在: {pkg}"
+        );
+        let mut stats = PackageStats {
+            files: 0,
+            bytes: 0,
+            plugins: Vec::new(),
+        };
+        let plugins_dir = dir.join("plugins");
+        if let Ok(rd) = std::fs::read_dir(&plugins_dir) {
+            for entry in rd.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !is_valid_scope_id(&name) || !entry.path().is_dir() {
+                    continue;
+                }
+                let (files, bytes) = dir_totals(&entry.path());
+                stats.plugins.push(PluginStats {
+                    plugin: name,
+                    files,
+                    bytes,
+                });
+            }
+        }
+        stats.plugins.sort_by(|a, b| a.plugin.cmp(&b.plugin));
+        let (files, bytes) = dir_totals(&dir);
+        stats.files = files;
+        stats.bytes = bytes;
+        Ok(stats)
+    }
+
+    // ---------- 资源：文本 ----------
+
+    /// 读取文本资源；不存在/路径非法 → None。
+    pub fn read_text(
+        &self,
+        pkg: &str,
+        plugin: &str,
+        path: &str,
+    ) -> anyhow::Result<Option<ResourceEntry>> {
+        let Ok(disk) = self.resource_path(pkg, plugin, path) else {
+            return Ok(None);
+        };
+        if !disk.is_file() {
+            return Ok(None);
+        }
+        match std::fs::read_to_string(&disk) {
+            Ok(content) => Ok(Some(ResourceEntry {
+                package: pkg.to_string(),
+                plugin: plugin.to_string(),
+                path: normalize_written_path(path)?,
+                updated_at: fmt_mtime(&disk),
+                size: content.len() as u64,
+                mtime: mtime_secs(&disk),
+                content,
+                meta: serde_json::Map::new(),
+            })),
+            // 非 UTF-8 = 非文本资源，按不存在语义返回（调用方读 binary）
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// 写文本资源（创建或条件更新）。已存在时必须 `force` 或 `expected_version`
+    /// 与当前内容版本一致；目标父目录自动创建。
+    pub fn write_text(
+        &self,
+        pkg: &str,
+        plugin: &str,
+        path: &str,
+        content: &str,
+        expected_version: Option<&str>,
+        force: bool,
+    ) -> anyhow::Result<ResourceEntry> {
+        let normalized = normalize_written_path(path)?;
+        let disk = self.resource_path(pkg, plugin, &normalized)?;
+        if disk.is_file() {
+            if !force {
+                let current = std::fs::read_to_string(&disk)
+                    .map(|c| content_version(&c))
+                    .unwrap_or_default();
+                match expected_version {
+                    None => anyhow::bail!(
+                        "version_required: 更新资源必须提供 expected_version，或显式 force:true"
+                    ),
+                    Some(expected) if expected != current => anyhow::bail!(
+                        "version_conflict: 资源已被其他页面修改（expected {expected} ≠ 当前 {current}），请重新加载后再保存"
+                    ),
+                    Some(_) => {}
+                }
+            }
+        } else if expected_version.is_some() && !force {
+            anyhow::bail!("version_conflict: 资源不存在，不能带 expected_version 创建");
+        }
+        atomic_write(&disk, content.as_bytes())?;
+        Ok(ResourceEntry {
+            package: pkg.to_string(),
+            plugin: plugin.to_string(),
+            path: normalized,
+            updated_at: fmt_mtime(&disk),
+            size: content.len() as u64,
+            mtime: mtime_secs(&disk),
+            content: content.to_string(),
+            meta: serde_json::Map::new(),
+        })
+    }
+
+    /// 直接覆盖写文本资源（不经版本门禁；导入/引用改写等受控场景使用——
+    /// 调用方负责回滚）。
+    pub fn write_text_unchecked(
+        &self,
+        pkg: &str,
+        plugin: &str,
+        path: &str,
+        content: &str,
+    ) -> anyhow::Result<()> {
+        let disk = self.resource_path(pkg, plugin, path)?;
+        atomic_write(&disk, content.as_bytes())
+    }
+
+    // ---------- 资源：字节 ----------
+
+    /// 读取字节资源；不存在/路径非法 → None。
+    pub fn read_binary(
+        &self,
+        pkg: &str,
+        plugin: &str,
+        path: &str,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let Ok(disk) = self.resource_path(pkg, plugin, path) else {
+            return Ok(None);
+        };
+        if !disk.is_file() {
+            return Ok(None);
+        }
+        Ok(std::fs::read(&disk).ok())
+    }
+
+    /// 写字节资源（创建或条件更新；语义同 [`PackageStore::write_text`]，
+    /// 版本 = 字节内容哈希）。
+    pub fn write_binary(
+        &self,
+        pkg: &str,
+        plugin: &str,
+        path: &str,
+        bytes: &[u8],
+        expected_version: Option<&str>,
+        force: bool,
+    ) -> anyhow::Result<ListEntry> {
+        let normalized = normalize_written_path(path)?;
+        let disk = self.resource_path(pkg, plugin, &normalized)?;
+        if disk.is_file() {
+            if !force {
+                let current = std::fs::read(&disk)
+                    .map(|b| bytes_version(&b))
+                    .unwrap_or_default();
+                match expected_version {
+                    None => anyhow::bail!(
+                        "version_required: 更新资源必须提供 expected_version，或显式 force:true"
+                    ),
+                    Some(expected) if expected != current => anyhow::bail!(
+                        "version_conflict: 资源已被其他页面修改（expected {expected} ≠ 当前 {current}），请重新加载后再保存"
+                    ),
+                    Some(_) => {}
+                }
+            }
+        } else if expected_version.is_some() && !force {
+            anyhow::bail!("version_conflict: 资源不存在，不能带 expected_version 创建");
+        }
+        atomic_write(&disk, bytes)?;
+        Ok(ListEntry {
+            package: pkg.to_string(),
+            plugin: plugin.to_string(),
+            path: normalized,
+            size: bytes.len() as u64,
+            mtime: mtime_secs(&disk),
+            updated_at: fmt_mtime(&disk),
+            text: false,
+            content: None,
+            version: Some(bytes_version(bytes)),
+            meta: serde_json::Map::new(),
+        })
+    }
+
+    /// 删除资源文件（不存在 → 报错）；返回被删磁盘路径。删除后向上清理
+    /// 空目录（不超过插件目录本身）。
+    pub fn delete_resource(&self, pkg: &str, plugin: &str, path: &str) -> anyhow::Result<PathBuf> {
+        let disk = self.resource_path(pkg, plugin, path)?;
+        if !disk.is_file() {
+            anyhow::bail!("资源不存在: {pkg}/{plugin}/{path}");
+        }
+        std::fs::remove_file(&disk)
+            .map_err(|e| anyhow::anyhow!("删除失败: {} ({})", e, disk.display()))?;
+        let plugin_root = self.plugin_dir(pkg, plugin)?;
+        let mut parent = disk.parent();
+        while let Some(dir) = parent {
+            if dir == plugin_root || !dir.starts_with(&plugin_root) {
+                break;
+            }
+            if std::fs::remove_dir(dir).is_err() {
+                break; // 非空即停
+            }
+            parent = dir.parent();
+        }
+        Ok(disk)
+    }
+
+    /// 重命名/移动资源（同插件内）。先经 handler.before_rename 钩子（如模板
+    /// 引用改写），钩子失败则不动文件。T2a 备注：模板重命名 REST 面随六目录
+    /// API 退役，本方法与钩子是为模板引用改写语义保留的迁移缝。
+    // T2a 迁移缝：REST 面暂缺，测试经下方 rename 用例覆盖钩子语义
+    #[allow(dead_code)]
+    pub fn rename_resource(
+        &self,
+        pkg: &str,
+        plugin: &str,
+        old_path: &str,
+        new_path: &str,
+    ) -> anyhow::Result<()> {
+        let old_normalized = normalize_written_path(old_path)?;
+        let new_normalized = normalize_written_path(new_path)?;
+        if old_normalized == new_normalized {
+            anyhow::bail!("名称未变化");
+        }
+        let old_disk = self.resource_path(pkg, plugin, &old_normalized)?;
+        let new_disk = self.resource_path(pkg, plugin, &new_normalized)?;
+        if !old_disk.is_file() {
+            anyhow::bail!("资源不存在: {pkg}/{plugin}/{old_normalized}");
+        }
+        anyhow::ensure!(!new_disk.exists(), "资源已存在: {pkg}/{plugin}/{new_normalized}");
+        if let Some(handler) = self.handler(plugin) {
+            handler.before_rename(self, pkg, plugin, &old_normalized, &new_normalized)?;
+        }
+        if let Some(parent) = new_disk.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&old_disk, &new_disk)
+            .map_err(|e| anyhow::anyhow!("重命名失败: {e}"))?;
+        Ok(())
+    }
+
+    // ---------- 资源：列表 ----------
+
+    /// 递归列出插件目录（`prefix` 可选限定子目录，空串 = 全部）。文本探测：
+    /// UTF-8 可解码且 ≤ [`TEXT_RESOURCE_MAX_BYTES`]；文本条目合并 handler 注记。
+    /// 按 path 字典序。
+    pub fn list(
+        &self,
+        pkg: &str,
+        plugin: &str,
+        prefix: &str,
+    ) -> anyhow::Result<Vec<ListEntry>> {
+        let plugin_root = self.plugin_dir(pkg, plugin)?;
+        let root = if prefix.trim().is_empty() {
+            plugin_root.clone()
+        } else {
+            self.resource_path(pkg, plugin, prefix.trim_end_matches('/'))?
+        };
+        let mut out = Vec::new();
+        if root.is_dir() {
+            // path 恒相对插件目录（PackageResource path 空间），与 prefix 无关
+            Self::collect(&root, &plugin_root, pkg, plugin, &mut out);
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        // 文本条目注记透明合并
+        if let Some(handler) = self.handler(plugin) {
+            let pairs: Vec<(String, String)> = out
+                .iter()
+                .filter_map(|e| e.content.clone().map(|c| (e.path.clone(), c)))
+                .collect();
+            let meta = handler.annotate(&pairs);
+            for entry in out.iter_mut() {
+                if let Some(value) = meta.get(&entry.path) {
+                    entry.meta = value.as_object().cloned().unwrap_or_default();
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn collect(dir: &Path, root: &Path, pkg: &str, plugin: &str, out: &mut Vec<ListEntry>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let name = match entry.file_name().into_string() {
+                Ok(name) => name,
+                Err(_) => continue,
+            };
+            if name.starts_with('.') {
+                continue; // 隐藏文件 / 临时文件不进列表
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                Self::collect(&path, root, pkg, plugin, out);
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            let rel = match path.strip_prefix(root) {
+                Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+                Err(_) => continue,
+            };
+            let meta = entry.metadata().ok();
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let (content, version) = if size <= TEXT_RESOURCE_MAX_BYTES as u64 {
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => {
+                        let version = content_version(&text);
+                        (Some(text), Some(version))
+                    }
+                    Err(_) => (None, None),
+                }
+            } else {
+                (None, None)
+            };
+            out.push(ListEntry {
+                package: pkg.to_string(),
+                plugin: plugin.to_string(),
+                path: rel,
+                size,
+                mtime: mtime_secs(&path),
+                updated_at: fmt_mtime(&path),
+                text: content.is_some(),
+                content,
+                version,
+                meta: serde_json::Map::new(),
+            });
+        }
+    }
+
+    /// 文本条目注记合并：entries 内容按 path → meta 透明并入条目顶层（单条
+    /// 读取路径复用列表注记语义）。
+    pub fn annotate_text(&self, plugin: &str, entries: &mut [ResourceEntry]) {
+        let Some(handler) = self.handler(plugin) else {
+            return;
+        };
+        let pairs: Vec<(String, String)> = entries
+            .iter()
+            .map(|entry| (entry.path.clone(), entry.content.clone()))
+            .collect();
+        let meta = handler.annotate(&pairs);
+        for entry in entries.iter_mut() {
+            if let Some(value) = meta.get(&entry.path) {
+                entry.meta = value.as_object().cloned().unwrap_or_default();
+            }
+        }
+    }
+
+    // ---------- 模板短名消歧（vision 链路机械迁移；`#` 后缀命名约定） ----------
+
+    /// 精确路径优先；否则按「基名 + `#` 后缀 + 同扩展名」在同目录内唯一匹配
+    /// （模板短名引用约定：`icon.png` → `icon#1_2_3_4.png`）。零候选/多候选
+    /// 均报错。Core 只做文件名消歧，不解释模板内容语义。
+    pub fn resolve_short_path(
+        &self,
+        pkg: &str,
+        plugin: &str,
+        path: &str,
+    ) -> anyhow::Result<PathBuf> {
+        let disk = self.resource_path(pkg, plugin, path)?;
+        if disk.is_file() {
+            return Ok(disk);
+        }
+        let dir = disk
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("资源路径没有父目录: {path}"))?
+            .to_path_buf();
+        let name = disk
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("资源路径文件名无效: {path}"))?;
+        let Some((base, ext)) = name.rsplit_once('.') else {
+            anyhow::bail!("资源不存在: {pkg}/{plugin}/{path}");
+        };
+        let prefix = format!("{}#", base.to_ascii_lowercase());
+        let dotted = format!(".{}", ext.to_ascii_lowercase());
+        let mut candidates: Vec<String> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|candidate| {
+                let lower = candidate.to_ascii_lowercase();
+                lower.starts_with(&prefix) && lower.ends_with(&dotted)
+            })
+            .collect();
+        candidates.sort();
+        match candidates.len() {
+            1 => Ok(dir.join(&candidates[0])),
+            0 => anyhow::bail!("资源不存在: {pkg}/{plugin}/{path}"),
+            _ => anyhow::bail!(
+                "资源 {path} 匹配到多个候选：{}，请用完整文件名指定",
+                candidates.join("、")
+            ),
+        }
+    }
+
+    // ---------- 钩子注册 ----------
+
+    /// 注册插件的内容钩子（组合根引导期调用；同插件重复注册 = 替换）。
+    pub fn register_handler(&self, plugin: &str, handler: std::sync::Arc<dyn ResourceHandler>) {
         self.handlers
             .write()
             .expect("resource handler registry poisoned")
-            .insert(kind, handler);
+            .insert(plugin.to_string(), handler);
     }
 
-    pub fn set_staged_validator(&self, validator: Arc<dyn StagedResourceValidator>) {
-        *self.staged.write().expect("staged validator slot poisoned") = Some(validator);
+    fn handler(&self, plugin: &str) -> Option<std::sync::Arc<dyn ResourceHandler>> {
+        self.handlers
+            .read()
+            .expect("resource handler registry poisoned")
+            .get(plugin)
+            .cloned()
     }
 
     /// 保存前内容校验：分发到已注册 handler；未注册 = 通过（裸 Core 语义）。
     pub fn validate_save(&self, req: SaveValidation<'_>) -> Result<(), Value> {
-        let handler = self
-            .handlers
-            .read()
-            .expect("resource handler registry poisoned")
-            .get(&req.kind)
-            .cloned();
+        let handler = self.handler(req.plugin);
         match handler {
             Some(handler) => handler.validate_save(req),
             None => Ok(()),
         }
     }
 
-    /// 单条资源内容校验（经 kind handler；未注册 = 通过）。包构建/提取
-    /// preflight 对无跨文件引用语义的 kind（keymaps 等）逐条回调。
-    pub fn validate_content(
-        &self,
-        kind: ResourceKind,
-        app: &str,
-        id: &str,
-        content: &str,
-    ) -> Result<(), Value> {
-        let handler = self.handler(kind);
-        match handler {
-            Some(handler) => handler.validate_save(SaveValidation {
-                app,
-                kind,
-                id,
-                content,
-                store: self,
-            }),
-            None => Ok(()),
-        }
-    }
-
-    /// staged 集合校验（包导出/提取 preflight）；未注册 = 无问题。
-    pub fn validate_staged(
-        &self,
-        app: &str,
-        entries: &[(ResourceKind, String, String)],
-    ) -> Vec<String> {
-        let validator = self
-            .staged
-            .read()
-            .expect("staged validator slot poisoned")
-            .clone();
-        match validator {
-            Some(validator) => validator.validate_staged(self, app, entries),
-            None => Vec::new(),
-        }
-    }
-
-    fn handler(&self, kind: ResourceKind) -> Option<Arc<dyn ResourceKindHandler>> {
-        self.handlers
-            .read()
-            .expect("resource handler registry poisoned")
-            .get(&kind)
-            .cloned()
-    }
-
-    // ---------- 目录与分区 ----------
-
-    /// kind 目录（分区 `<pkg>/` 下的六目录之一）。非法分区名映射到不可枚举
-    /// 的哨兵目录，避免任何调用方意外逃出 root。
-    pub fn kind_dir(&self, pkg: &str, kind: ResourceKind) -> PathBuf {
-        self.partition_dir(pkg).join(kind.as_str())
-    }
-
-    fn partition_dir(&self, pkg: &str) -> PathBuf {
-        sanitize_part(pkg)
-            .map(|pkg| self.root.join(pkg))
-            .unwrap_or_else(|| self.root.join(".gamer-invalid-partition"))
-    }
-
-    /// 磁盘上全部分区名（存在六资源目录之一的一级目录，字典序）。不把
-    /// package.toml 之类标志文件计入：以资源子目录为准可避免杂散文件在
-    /// 分区列表里制造幻影分区。
-    pub fn partitions(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(&self.root) {
-            for d in rd.flatten() {
-                let p = d.path();
-                let Some(name) = sanitize_part(&d.file_name().to_string_lossy()) else {
-                    continue;
-                };
-                if p.is_dir()
-                    && ResourceKind::ALL
-                        .iter()
-                        .any(|kind| p.join(kind.as_str()).is_dir())
-                {
-                    out.push(name);
-                }
-            }
-        }
-        out.sort();
-        out
-    }
-
-    /// 分区六目录都空时删掉分区目录（避免残留空目录被当成有效分区）。
-    pub fn cleanup_partition(&self, pkg: &str) {
-        for kind in ResourceKind::ALL {
-            let _ = std::fs::remove_dir(self.kind_dir(pkg, kind)); // 非空时失败，忽略
-        }
-        let _ = std::fs::remove_dir(self.partition_dir(pkg));
-    }
-
-    // ---------- 路径解析（目录即类型，互不回退、不做内容推断） ----------
-
-    /// 文本/字节资源相对路径 → 分区 kind 目录内的磁盘路径。拒绝扩展名错配、
-    /// 越层嵌套（kind 规则）与非法分段；不回退。
-    pub fn resolve_path(
-        &self,
-        pkg: &str,
-        kind: ResourceKind,
-        rel: &str,
-    ) -> anyhow::Result<PathBuf> {
-        let package = sanitize_part(pkg)
-            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {pkg}"))?;
-        let segs = sanitize_rel_segments(rel)?;
-        let rule = kind.rule();
-        if !rule.allow_nested && segs.len() > 1 {
-            anyhow::bail!("{} 资源不支持子目录路径: {rel}", kind.as_str());
-        }
-        if !rule.exts.is_empty() {
-            let last = segs.last().expect("分段结果非空");
-            let low = last.to_lowercase();
-            if !low.contains('.') || !rule.exts.iter().any(|e| low.ends_with(&format!(".{e}"))) {
-                anyhow::bail!(
-                    "{} 资源必须是 .{} 且位于分区 {} 目录: {rel}",
-                    kind.as_str(),
-                    rule.exts.join("/."),
-                    kind.as_str()
-                );
-            }
-        }
-        let mut p = self.kind_dir(&package, kind);
-        for s in &segs {
-            p.push(s);
-        }
-        Ok(p)
-    }
-
-    /// 模板短名/完整名 → **现存**文件路径。composite 三层统一顺序：本地编辑区
-    /// → user override → active App Package，逐层解析。精确名优先；否则按
-    /// 「基名 + `#` 后缀 + 同扩展名」唯一匹配；零候选/多候选均报错。
-    pub fn resolve_template_path(&self, pkg: &str, short: &str) -> anyhow::Result<PathBuf> {
-        match self.composite.template(pkg, short) {
-            crate::app_packages::TemplateLookup::Found(hit) => Ok(hit.path),
-            crate::app_packages::TemplateLookup::Ambiguous { name, candidates } => anyhow::bail!(
-                "模板 {name} 匹配到多个候选：{}，请用完整文件名指定",
-                candidates.join("、")
-            ),
-            crate::app_packages::TemplateLookup::NotFound => anyhow::bail!(
-                "模板 {short} 不存在 (path={})",
-                self.kind_dir(pkg, Templates).display()
-            ),
-        }
-    }
-
-    // ---------- 文本 kind：CRUD ----------
-
-    fn load_text_at(
-        &self,
-        pkg: &str,
-        _kind: ResourceKind,
-        rel: &str,
-        path: &std::path::Path,
-    ) -> Option<ResourceEntry> {
-        let content = std::fs::read_to_string(path).ok()?;
-        Some(ResourceEntry {
-            id: format!("{pkg}/{rel}"),
-            package: pkg.to_string(),
-            name: rel.to_string(),
-            updated_at: fmt_mtime(path),
-            size: content.len() as u64,
-            mtime: mtime_secs(path),
-            content,
-            meta: serde_json::Map::new(),
-        })
-    }
-
-    /// 列出**一个分区**的文本资源（本地编辑区；keymaps 另合并 override/包层，
-    /// 同名以本地优先）。返回按 updated_at 倒序。
-    pub fn list_text(&self, pkg: &str, kind: ResourceKind) -> anyhow::Result<Vec<ResourceEntry>> {
-        let package = sanitize_part(pkg)
-            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {pkg}"))?;
-        let rule = kind.rule();
-        let mut out: Vec<ResourceEntry> = Vec::new();
-        let dir = self.kind_dir(&package, kind);
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            for f in rd.flatten() {
-                let name = f.file_name().to_string_lossy().to_string();
-                let low = name.to_lowercase();
-                if !f.path().is_file()
-                    || !rule
-                        .exts
-                        .iter()
-                        .any(|ext| low.ends_with(&format!(".{ext}")))
-                {
-                    continue;
-                }
-                if let Some(entry) = self.load_text_at(&package, kind, &name, &f.path()) {
-                    out.push(entry);
-                }
-            }
-        }
-        if rule.list_via_composite {
-            // 追加 override/包内置方案：分区（本地编辑区）已列出的文件名不重复
-            // 展示——composite.keymap_names 为三层并集，本地副本优先可编辑，
-            // 下层方案的元数据以其文件为准。
-            let listed: std::collections::HashSet<String> = out
-                .iter()
-                .map(|entry| entry.name.to_ascii_lowercase())
-                .collect();
-            for name in self.composite.keymap_names(&package) {
-                if listed.contains(&name.to_ascii_lowercase()) {
-                    continue;
-                }
-                let Some(path) = self.composite.keymap(&package, &name).map(|hit| hit.path) else {
-                    continue;
-                };
-                if let Some(entry) = self.load_text_at(&package, kind, &name, &path) {
-                    out.push(entry);
-                }
-            }
-        }
-        out.sort_by(|a, b| {
-            b.updated_at
-                .cmp(&a.updated_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        Ok(out)
-    }
-
-    /// 读取单个文本资源（id = `<pkg>/<rel>`）。keymaps 经 composite 三层；
-    /// 其余 kind 只读本地编辑区。非法 id / 不存在 → None。
-    pub fn get_text(&self, kind: ResourceKind, id: &str) -> anyhow::Result<Option<ResourceEntry>> {
-        let Some((pkg, rel)) = id.split_once('/') else {
-            return Ok(None);
-        };
-        if kind.rule().get_via_composite {
-            let name = rel.trim();
-            match self.composite.keymap(pkg, name) {
-                Some(hit) => {
-                    // composite 命中下层时磁盘文件名可能大小写不同，用请求名
-                    return Ok(self.load_text_at(pkg, kind, name, &hit.path));
-                }
-                None => return Ok(None),
-            }
-        }
-        // 非法路径（穿越/扩展名错配等）与文件不存在同样返回 None
-        let Ok(path) = self.resolve_path(pkg, kind, rel) else {
-            return Ok(None);
-        };
-        if !path.is_file() {
-            return Ok(None);
-        }
-        Ok(self.load_text_at(pkg, kind, rel, &path))
-    }
-
-    /// 保存前冲突检测：目标资源当前内容版本（不存在 → None）。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn text_version(
-        &self,
-        kind: ResourceKind,
-        pkg: &str,
-        name: &str,
-    ) -> anyhow::Result<Option<String>> {
-        let rel = normalize_rel_name(kind, name)?;
-        Ok(self
-            .get_text(kind, &format!("{pkg}/{rel}"))?
-            .map(|entry| entry.version()))
-    }
-
-    /// 保存文本资源到指定分区。`old_id` 存在 = 更新/同分区重命名（源必须
-    /// 存在、目标不得与他文件冲突）；None = 创建（目标已存在 → 报错）。
-    /// 不做内容校验——调用方先过 [`ResourceStore::validate_save`]。
-    pub fn save_text(
-        &self,
-        kind: ResourceKind,
-        old_id: Option<&str>,
-        pkg: &str,
-        name: &str,
-        content: &str,
-    ) -> anyhow::Result<ResourceEntry> {
-        let package = sanitize_part(pkg)
-            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {}", pkg))?;
-        let name = normalize_rel_name(kind, name)?;
-        let dir = self.kind_dir(&package, kind);
-        let path = dir.join(&name);
-        if let Some(old_id) = old_id {
-            let Some((old_pkg, old_rel)) = old_id.split_once('/') else {
-                anyhow::bail!("非法资源 id: {old_id}");
-            };
-            let old_rel = normalize_rel_name(kind, old_rel)?;
-            if old_pkg != package {
-                anyhow::bail!("资源更新不得跨分区移动: {old_id:?} -> {package}/{name}");
-            }
-            let old_path = self.resolve_path(old_pkg, kind, &old_rel)?;
-            if !old_path.is_file() {
-                anyhow::bail!("资源不存在: {old_id}");
-            }
-            if old_path != path && path.exists() {
-                anyhow::bail!("资源已存在: {}/{}", package, name);
-            }
-        } else if path.exists() {
-            anyhow::bail!("资源已存在: {}/{}", package, name);
-        }
-        std::fs::create_dir_all(&dir)?;
-        atomic_write(&path, content.as_bytes())?;
-        if let Some(old_id) = old_id {
-            let (old_pkg, old_rel) = old_id.split_once('/').expect("上面已校验");
-            let old_rel = normalize_rel_name(kind, old_rel)?;
-            let new_id = format!("{package}/{name}");
-            let old_full = format!("{old_pkg}/{old_rel}");
-            if old_full != new_id {
-                let old_path = self.resolve_path(old_pkg, kind, &old_rel)?;
-                if old_path != path && old_path.is_file() {
-                    if let Err(err) = std::fs::remove_file(&old_path) {
-                        let _ = std::fs::remove_file(&path);
-                        return Err(err.into());
-                    }
-                    self.cleanup_partition(old_pkg);
-                }
-            }
-        }
-        Ok(ResourceEntry {
-            id: format!("{package}/{name}"),
-            package,
-            name,
-            updated_at: fmt_mtime(&path),
-            size: content.len() as u64,
-            mtime: mtime_secs(&path),
-            content: content.to_string(),
-            meta: serde_json::Map::new(),
-        })
-    }
-
-    /// 直接覆盖写分区文本资源（不经校验/版本门禁；扩展内部引用重写等受控
-    /// 场景使用——调用方负责回滚）。
-    pub fn write_text_direct(
-        &self,
-        kind: ResourceKind,
-        pkg: &str,
-        rel: &str,
-        content: &str,
-    ) -> anyhow::Result<()> {
-        let path = self.resolve_path(pkg, kind, rel)?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        atomic_write(&path, content.as_bytes())
-    }
-
-    /// 删除文本资源（id = `<pkg>/<rel>`；不存在 → 报错）。
-    pub fn delete_text(&self, kind: ResourceKind, id: &str) -> anyhow::Result<()> {
-        let Some((pkg, rel)) = id.split_once('/') else {
-            anyhow::bail!("非法资源 id: {id}");
-        };
-        let path = self
-            .resolve_path(pkg, kind, rel)
-            .map_err(|_| anyhow::anyhow!("非法资源 id: {id}"))?;
-        std::fs::remove_file(&path)
-            .map_err(|e| anyhow::anyhow!("删除失败: {} ({})", e, path.display()))?;
-        self.cleanup_partition(pkg);
-        Ok(())
-    }
-
-    // ---------- 字节 kind（templates / resources）：CRUD ----------
-
-    /// 列出一个分区的字节资源（本地编辑区；非隐藏文件）。
-    pub fn list_binary(&self, pkg: &str, kind: ResourceKind) -> anyhow::Result<Vec<BinaryEntry>> {
-        let package = sanitize_part(pkg)
-            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {pkg}"))?;
-        let mut out = Vec::new();
-        let dir = self.kind_dir(&package, kind);
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for e in entries.flatten() {
-                let name = e.file_name().to_string_lossy().to_string();
-                if e.path().is_file() && !name.starts_with('.') {
-                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                    out.push(BinaryEntry {
-                        id: format!("{package}/{name}"),
-                        package: package.clone(),
-                        pkg: package.clone(),
-                        mtime: mtime_secs(&e.path()),
-                        updated_at: fmt_mtime(&e.path()),
-                        size,
-                        name,
-                    });
-                }
-            }
-        }
-        out.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.id.cmp(&b.id)));
-        Ok(out)
-    }
-
-    /// 读取字节资源（本地编辑区；不存在 → None）。
-    pub fn get_binary(&self, kind: ResourceKind, id: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        let Some((pkg, rel)) = id.split_once('/') else {
-            return Ok(None);
-        };
-        let Ok(path) = self.resolve_path(pkg, kind, rel) else {
-            return Ok(None);
-        };
-        if !path.is_file() {
-            return Ok(None);
-        }
-        Ok(std::fs::read(&path).ok())
-    }
-
-    /// 创建字节资源。templates kind 施加同基名冲突检查（§11.7）。
-    pub fn create_binary(
-        &self,
-        kind: ResourceKind,
-        pkg: &str,
-        name: &str,
-        bytes: &[u8],
-    ) -> anyhow::Result<PathBuf> {
-        let package = sanitize_part(pkg)
-            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {pkg}"))?;
-        let name = normalize_binary_name(kind, name)?;
-        let dir = self.kind_dir(&package, kind);
-        let path = dir.join(&name);
-        if kind.rule().same_base_conflict && same_base_conflict(&dir, &name) {
-            anyhow::bail!("同名资源已存在（基名冲突，不会覆盖）: {}/{}", package, name);
-        }
-        if path.exists() {
-            anyhow::bail!("资源已存在: {}/{}", package, name);
-        }
-        std::fs::create_dir_all(&dir)?;
-        atomic_write(&path, bytes)?;
-        Ok(path)
-    }
-
-    /// 覆盖已有字节资源（不存在 → 报错）；返回磁盘路径。
-    pub fn replace_binary(
-        &self,
-        kind: ResourceKind,
-        pkg: &str,
-        name: &str,
-        bytes: &[u8],
-    ) -> anyhow::Result<PathBuf> {
-        let package = sanitize_part(pkg)
-            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {pkg}"))?;
-        let name = normalize_binary_name(kind, name)?;
-        let dir = self.kind_dir(&package, kind);
-        let path = dir.join(&name);
-        if !path.is_file() {
-            anyhow::bail!("资源不存在: {}/{}", package, name);
-        }
-        atomic_write(&path, bytes)?;
-        Ok(path)
-    }
-
-    /// 字节资源重命名（同分区内）。templates kind 先经 before_rename 钩子
-    /// （模板引用重写），钩子失败则不动文件。
-    pub fn rename_binary(
-        &self,
-        kind: ResourceKind,
-        pkg: &str,
-        old_name: &str,
-        new_name: &str,
-    ) -> anyhow::Result<()> {
-        let package = sanitize_part(pkg)
-            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {pkg}"))?;
-        let old_name = normalize_binary_name(kind, old_name)?;
-        let new_name = normalize_binary_name(kind, new_name)?;
-        if old_name == new_name {
-            anyhow::bail!("名称未变化");
-        }
-        let dir = self.kind_dir(&package, kind);
-        let old_path = dir.join(&old_name);
-        let new_path = dir.join(&new_name);
-        if !old_path.is_file() {
-            anyhow::bail!("资源不存在: {package}/{old_name}");
-        }
-        if new_path.exists() {
-            anyhow::bail!("资源已存在: {package}/{new_name}");
-        }
-        if let Some(handler) = self.handler(kind) {
-            handler.before_rename(self, &package, &old_name, &new_name)?;
-        }
-        std::fs::rename(&old_path, &new_path).map_err(|e| anyhow::anyhow!("重命名失败: {e}"))?;
-        self.cleanup_partition(&package);
-        Ok(())
-    }
-
-    /// 删除字节资源（不存在 → 报错）；返回被删的磁盘路径（缓存失效用）。
-    pub fn delete_binary(
-        &self,
-        kind: ResourceKind,
-        pkg: &str,
-        name: &str,
-    ) -> anyhow::Result<PathBuf> {
-        let package = sanitize_part(pkg)
-            .ok_or_else(|| anyhow::anyhow!("应用包名非法（只允许字母数字 . _ -）: {pkg}"))?;
-        let name = normalize_binary_name(kind, name)?;
-        let path = self.kind_dir(&package, kind).join(&name);
-        std::fs::remove_file(&path)
-            .map_err(|e| anyhow::anyhow!("删除失败: {} ({})", e, path.display()))?;
-        self.cleanup_partition(&package);
-        Ok(path)
-    }
-
-    // ---------- 注记 ----------
-
-    /// 列表注记合并：entries 内容按 id → meta 透明并入条目顶层。
-    pub fn annotate(&self, kind: ResourceKind, app: &str, entries: &mut [ResourceEntry]) {
-        let Some(handler) = self.handler(kind) else {
-            return;
-        };
-        let pairs: Vec<(String, String)> = entries
-            .iter()
-            .map(|entry| (entry.name.clone(), entry.content.clone()))
-            .collect();
-        let meta = handler.annotate(&pairs);
-        for entry in entries.iter_mut() {
-            if let Some(value) = meta.get(&entry.name) {
-                entry.meta = value.as_object().cloned().unwrap_or_default();
-            }
-        }
-        let _ = app;
+    /// 归档目录安全提取后的 staging 根（导入流程专用；Core 管理的临时目录）。
+    pub(crate) fn staging_root(&self) -> PathBuf {
+        self.root.join(".staging")
     }
 }
 
-/// 规范化文本资源名：trim + 分段校验 + 缺扩展名补默认扩展名（save 与版本
-/// 冲突检测共用）。函数库（functions）严格 .yaml、P12.5 起允许嵌套目录。
-pub fn normalize_rel_name(kind: ResourceKind, name_raw: &str) -> anyhow::Result<String> {
-    let t = name_raw.trim();
-    let rule = kind.rule();
-    let segs = sanitize_rel_segments(t)?;
-    if !rule.allow_nested && segs.len() > 1 {
-        anyhow::bail!("{} 资源不支持子目录路径: {name_raw}", kind.as_str());
+/// 导入/复制共用的目录深拷贝（跳过隐藏文件；保留相对结构）。
+pub(crate) fn copy_dir_contents(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)?.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') {
+            continue;
+        }
+        let target = dst.join(entry.file_name());
+        let path = entry.path();
+        if path.is_dir() {
+            copy_dir_contents(&path, &target)?;
+        } else if path.is_file() {
+            std::fs::copy(&path, &target)?;
+        }
     }
-    let mut last = segs.last().expect("分段结果非空").clone();
-    let low = last.to_lowercase();
-    let has_ext = rule
-        .exts
-        .iter()
-        .any(|ext| low.ends_with(&format!(".{ext}")));
-    if !has_ext {
-        let default_ext = rule.exts.first().copied().unwrap_or("yaml");
-        last = format!("{last}.{default_ext}");
-    }
-    if rule.allow_nested {
-        let mut segs = segs;
-        *segs.last_mut().expect("非空") = last;
-        Ok(segs.join("/"))
-    } else {
-        Ok(last)
-    }
+    Ok(())
 }
 
-/// 字节资源名规范化：trim + 单文件名校验。模板名合法字符集含 `#`（区域/
-/// 颜色后缀），不能用 [`sanitize_rel_segments`]（其 safe_name 拒绝 `#`），
-/// 走 [`sanitize_template_name`]；其余字节 kind 保持 safe_name 口径。
-fn normalize_binary_name(kind: ResourceKind, name_raw: &str) -> anyhow::Result<String> {
-    let t = name_raw.trim();
-    if t.is_empty() || t.contains('/') || t.contains('\\') {
-        anyhow::bail!("{} 资源名非法（单文件名）: {name_raw}", kind.as_str());
-    }
-    if kind == Templates {
-        sanitize_template_name(t)
-            .map(|_| t.to_string())
-            .ok_or_else(|| anyhow::anyhow!("模板名非法: {name_raw}"))
-    } else {
-        sanitize_part(t)
-            .map(|_| t.to_string())
-            .ok_or_else(|| anyhow::anyhow!("{} 资源名非法: {name_raw}", kind.as_str()))
-    }
-}
-
-/// templates §11.7：分区内存在同基名文件（任意扩展名，含 `#` 后缀变体，
-/// 大小写不敏感对齐 Windows FS）即冲突。
-fn same_base_conflict(dir: &std::path::Path, name: &str) -> bool {
-    let Some((stem, _)) = name.rsplit_once('.') else {
-        return dir.join(name).exists();
-    };
-    // 基名 = 去区域后缀（短名引用按「基名 + # 后缀唯一候选」消歧，第二个
-    // 同基名文件——无论区域后缀如何——都会制造歧义）
-    let base = stem.split('#').next().unwrap_or(stem).to_ascii_lowercase();
-    let prefix = format!("{base}#");
-    std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .any(|n| match n.rsplit_once('.') {
-            Some((stem, _)) => {
-                let stem = stem.to_ascii_lowercase();
-                stem == base || stem.starts_with(&prefix)
+/// 目录资源统计（排除隐藏文件与 package.toml——manifest 是包身份元数据，
+/// 不是插件资源）。
+fn dir_totals(dir: &Path) -> (u64, u64) {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "package.toml" {
+                continue;
             }
-            None => false,
-        })
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                files += 1;
+                bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    (files, bytes)
+}
+
+/// 写入路径规范化：trim + 分段校验（不补扩展名——Core 内容无关，扩展名
+/// 语义归插件）。
+fn normalize_written_path(path: &str) -> anyhow::Result<String> {
+    let segs = sanitize_rel_path(path.trim())?;
+    Ok(segs.join("/"))
+}
+
+// ---------------------------------------------------------------------------
+// 导入导出归档工具（从旧 app_packages archive/builder 收编的 zip 安全逻辑）
+// ---------------------------------------------------------------------------
+
+/// 归档上限（对齐 archive_validation 预算）。
+pub mod archive_limits {
+    /// 单文件上限。
+    pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
+    pub const MANIFEST_NAME: &str = "package.toml";
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Barrier};
-    use std::thread;
+    use std::sync::Arc;
 
-    fn temp_store(tag: &str) -> (ResourceStore, std::path::PathBuf) {
+    fn temp_store(tag: &str) -> (PackageStore, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "gamer-restest-{tag}-{}-{}",
+            "gamer-pkgstore-{tag}-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         ));
@@ -1002,193 +1191,340 @@ mod tests {
             data_dir: dir.clone(),
             ..Default::default()
         };
-        (ResourceStore::open(&cfg).unwrap(), dir)
+        (PackageStore::open(&cfg).unwrap(), dir)
     }
 
-    // ---------- 目录即类型 + 路径安全（原 scripts.rs resolver 契约） ----------
+    fn input(id: &str) -> PackageInput {
+        PackageInput {
+            id: id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    // ---------- id / 路径校验 ----------
 
     #[test]
-    fn resolve_path_accepts_only_kind_files_under_partition() {
-        let (store, dir) = temp_store("resolve");
-        let p = store
-            .resolve_path("com.test.app", Scripts, "main.yaml")
-            .unwrap();
-        assert_eq!(
-            p,
-            dir.join("com.test.app").join("scripts").join("main.yaml")
-        );
-        // 嵌套短路径（scripts 允许子目录）
-        let p = store
-            .resolve_path("com.test.app", Scripts, "sub/inner.yaml")
-            .unwrap();
-        assert_eq!(
-            p,
-            dir.join("com.test.app")
-                .join("scripts")
-                .join("sub")
-                .join("inner.yaml")
-        );
-        // functions 严格 .yaml；P12.5 起允许嵌套目录（function:<文件短路径>/<函数名>）
-        assert!(store
-            .resolve_path("com.test.app", Functions, "a.yml")
-            .is_err());
-        let p = store
-            .resolve_path("com.test.app", Functions, "sub/a.yaml")
-            .unwrap();
-        assert_eq!(
-            p,
-            dir.join("com.test.app")
-                .join("functions")
-                .join("sub")
-                .join("a.yaml")
-        );
-        // 跨目录不解析、不回退
-        std::fs::create_dir_all(dir.join("com.test.app/functions")).unwrap();
-        std::fs::write(dir.join("com.test.app/functions/common.yaml"), b"x").unwrap();
-        assert!(!store
-            .resolve_path("com.test.app", Scripts, "common.yaml")
-            .unwrap()
-            .is_file());
+    fn scope_id_validation_is_strict() {
+        for ok in ["a", "gamer.yaml", "gamer.keymap", "official.hsr.daily", "9lives", "a-b_c.d"] {
+            assert!(is_valid_scope_id(ok), "{ok:?} 应合法");
+        }
+        for bad in [
+            "", ".", "..", "...", ".hidden", "A.upper", "has space", "a/b", "a\\b", "-lead",
+            "con", "aux.yaml",
+        ] {
+            assert!(!is_valid_scope_id(bad), "{bad:?} 必须被拒绝");
+        }
+        let long = format!("a{}", "b".repeat(MAX_SCOPE_ID_LEN));
+        assert!(!is_valid_scope_id(&long));
     }
 
     #[test]
-    fn resolve_path_rejects_traversal_and_bad_segments() {
-        let (store, _dir) = temp_store("traversal");
+    fn rel_path_rejects_traversal_and_bad_segments() {
         let bad = [
             "",
-            "/abs.yaml",
+            "/abs",
             "..",
-            "../escape.yaml",
-            "a/../../b.yaml",
-            "a//b.yaml",
-            ".hidden.yaml",
-            "a\\b.yaml",
-            "main.png",
-            "C:/x.yaml",
+            "../escape",
+            "a/../../b",
+            "a//b",
+            ".hidden",
+            "a\\b",
+            "C:/x",
         ];
         for rel in bad {
-            assert!(
-                store.resolve_path("com.test.app", Scripts, rel).is_err(),
-                "{rel:?} 必须被拒绝"
-            );
+            assert!(sanitize_rel_path(rel).is_err(), "{rel:?} 必须被拒绝");
         }
-        assert!(store.resolve_path("../escape", Scripts, "a.yaml").is_err());
-    }
-
-    // ---------- 文本资源 CRUD + 乐观并发版本 ----------
-
-    #[test]
-    fn text_crud_roundtrip_with_version_and_rename() {
-        let (store, dir) = temp_store("crud");
-        let entry = store
-            .save_text(Scripts, None, "com.test.app", "main.yaml", "steps: []\n")
-            .unwrap();
-        assert_eq!(entry.id, "com.test.app/main.yaml");
-        assert_eq!(entry.version().len(), 12);
-        // 创建后同名再创建 → 冲突
-        assert!(store
-            .save_text(Scripts, None, "com.test.app", "main.yaml", "x")
-            .is_err());
-        // 重命名（更新路径）
-        store
-            .save_text(
-                Scripts,
-                Some("com.test.app/main.yaml"),
-                "com.test.app",
-                "renamed.yaml",
-                "steps: []\n",
-            )
-            .unwrap();
-        assert!(!dir.join("com.test.app/scripts/main.yaml").exists());
-        assert!(store
-            .get_text(Scripts, "com.test.app/renamed.yaml")
-            .unwrap()
-            .is_some());
-        // 版本门禁数据源：text_version
-        let v = store
-            .text_version(Scripts, "com.test.app", "renamed.yaml")
-            .unwrap();
-        assert!(v.is_some());
-        // 删除后不可见
-        store
-            .delete_text(Scripts, "com.test.app/renamed.yaml")
-            .unwrap();
-        assert!(store
-            .get_text(Scripts, "com.test.app/renamed.yaml")
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn partitions_detected_by_resource_dirs_and_cleaned_up_when_empty() {
-        let (store, dir) = temp_store("partitions");
-        store
-            .save_text(Scripts, None, "com.a", "main.yaml", "steps: []\n")
-            .unwrap();
-        store
-            .save_text(Functions, None, "com.b", "common.yaml", "a:\n  steps: []\n")
-            .unwrap();
-        std::fs::create_dir_all(dir.join("com.c")).unwrap(); // 无资源目录 = 非分区
-        let parts = store.partitions();
-        assert_eq!(parts, vec!["com.a", "com.b"]);
-        store.delete_text(Scripts, "com.a/main.yaml").unwrap();
-        assert!(!dir.join("com.a").exists(), "删空后分区目录应被清理");
-    }
-
-    // ---------- 原子写并发（原 scripts.rs 契约迁移） ----------
-
-    #[test]
-    fn atomic_write_concurrent_writers_replace_with_whole_files_only() {
-        let (_store, dir) = temp_store("atomic");
-        let path = dir.join("com.test.app").join("scripts").join("main.yaml");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        atomic_write(&path, b"seed\n").unwrap();
-        let barrier = Arc::new(Barrier::new(2));
-        let mut handles = Vec::new();
-        for payload in [b"alpha\nalpha\n".to_vec(), b"beta\nbeta\nbeta\n".to_vec()] {
-            let barrier = barrier.clone();
-            let path = path.clone();
-            handles.push(thread::spawn(move || {
-                barrier.wait();
-                atomic_write(&path, &payload).unwrap();
-                payload
-            }));
-        }
-        let mut seen = Vec::new();
-        for handle in handles {
-            seen.push(handle.join().unwrap());
-        }
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            seen.iter().any(|p| *p == content.as_bytes()),
-            "并发写入后内容应完整来自某个写者"
+        // `#` 与空格是合法文件名字符（模板命名惯例）
+        assert_eq!(
+            sanitize_rel_path("templates/icon#001_002.png").unwrap(),
+            vec!["templates".to_string(), "icon#001_002.png".to_string()]
         );
     }
 
+    // ---------- manifest 解析/序列化 ----------
+
     #[test]
-    fn store_open_fails_fast_on_legacy_layout() {
-        let dir = std::env::temp_dir().join(format!(
-            "gamer-legacy-layout-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        std::fs::create_dir_all(dir.join("scripts/com.test.app")).unwrap();
-        std::fs::write(dir.join("scripts/com.test.app/main.yaml"), "steps: []\n").unwrap();
-        let cfg = Config {
-            data_dir: dir.clone(),
-            ..Default::default()
-        };
-        let err = match ResourceStore::open(&cfg) {
-            Err(err) => err,
-            Ok(_) => panic!("旧布局必须 fail-fast"),
-        };
-        assert!(err.to_string().contains("已废弃的数据根级目录布局"));
-        std::fs::remove_dir_all(dir).unwrap();
+    fn manifest_roundtrip_with_defaults_and_plugins() {
+        let text = r#"
+id = "official.hsr.daily"
+name = "星穹铁道日常"
+version = "1.2.0"
+
+[targets.android]
+packages = ["com.miHoYo.hkrpg", "com.HoYoverse.hkrpgoversea"]
+
+[plugins."gamer.yaml"]
+required = true
+
+[plugins."gamer.keymap"]
+required = false
+"#;
+        let manifest = parse_package_toml(text.as_bytes()).unwrap();
+        assert_eq!(manifest.id, "official.hsr.daily");
+        assert_eq!(manifest.version, "1.2.0");
+        assert_eq!(manifest.revision, 1);
+        assert_eq!(manifest.android_targets.len(), 2);
+        assert_eq!(manifest.plugins.len(), 2);
+        assert!(manifest.plugins["gamer.yaml"].required);
+        assert!(!manifest.plugins["gamer.keymap"].required);
+
+        // 序列化 → 再解析往返一致
+        let reparsed = parse_package_toml(serialize_package_toml(&manifest).as_bytes()).unwrap();
+        assert_eq!(manifest, reparsed);
+
+        // 缺省：version → 0.1.0，revision → 1
+        let minimal = parse_package_toml(b"id = \"a.b\"").unwrap();
+        assert_eq!(minimal.version, "0.1.0");
+        assert_eq!(minimal.android_targets, Vec::<String>::new());
     }
 
-    // ---------- 验收锚点 §8.9：裸 Core 无 validator 可存内容；注册后生效 ----------
+    #[test]
+    fn manifest_strictly_rejects_unknown_fields_and_bad_ids() {
+        let unknown = b"id = \"a.b\"\nwhat = 1\n";
+        assert!(parse_package_toml(unknown).is_err());
+        let bad_id = b"id = \"Bad/Id\"\n";
+        assert!(parse_package_toml(bad_id).is_err());
+        let empty = b"";
+        assert!(parse_package_toml(empty).is_err());
+        // 重复 android 目标去重
+        let dup = b"id = \"a.b\"\n[targets.android]\npackages = [\"com.x\", \"com.x\"]\n";
+        let manifest = parse_package_toml(dup).unwrap();
+        assert_eq!(manifest.android_targets, vec!["com.x".to_string()]);
+    }
 
-    struct RejectingValidator;
-    impl ResourceKindHandler for RejectingValidator {
+    // ---------- 包生命周期 ----------
+
+    #[test]
+    fn package_lifecycle_create_list_duplicate_delete() {
+        let (store, dir) = temp_store("lifecycle");
+        let mut plugins = BTreeMap::new();
+        plugins.insert("gamer.yaml".to_string(), true);
+        let manifest = store
+            .create_package(PackageInput {
+                id: "official.demo".into(),
+                name: Some("演示".into()),
+                version: Some("1.0.0".into()),
+                android_targets: vec!["com.example.game".into()],
+                plugins,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(manifest.revision, 1);
+        assert!(dir.join("packages/official.demo/package.toml").is_file());
+        assert!(dir.join("packages/official.demo/shared").is_dir());
+        assert!(dir.join("packages/official.demo/plugins").is_dir());
+
+        // 重复创建 → 报错
+        assert!(store.create_package(input("official.demo")).is_err());
+
+        // 写一个插件资源后统计
+        store
+            .write_text(
+                "official.demo",
+                "gamer.yaml",
+                "scripts/daily.yaml",
+                "version: 3\nsteps: []\n",
+                None,
+                false,
+            )
+            .unwrap();
+        let stats = store.stats("official.demo").unwrap();
+        assert_eq!(stats.files, 1);
+        assert_eq!(stats.plugins.len(), 1);
+        assert_eq!(stats.plugins[0].plugin, "gamer.yaml");
+
+        // 复制为新包：资源随拷、manifest 换 id、revision 归 1
+        let copy = store.duplicate_package("official.demo", "user.demo").unwrap();
+        assert_eq!(copy.id, "user.demo");
+        assert_eq!(copy.revision, 1);
+        assert_eq!(copy.name.as_deref(), Some("演示"));
+        let copied = store
+            .read_text("user.demo", "gamer.yaml", "scripts/daily.yaml")
+            .unwrap()
+            .unwrap();
+        assert!(copied.content.contains("version: 3"));
+
+        // 列表字典序
+        let ids: Vec<String> = store.list_packages().unwrap().iter().map(|m| m.id.clone()).collect();
+        assert_eq!(ids, vec!["official.demo", "user.demo"]);
+
+        // 删除
+        assert!(store.delete_package("user.demo").unwrap());
+        assert!(!store.delete_package("user.demo").unwrap());
+        assert!(!dir.join("packages/user.demo").exists());
+    }
+
+    #[test]
+    fn manifest_update_is_revision_gated() {
+        let (store, _dir) = temp_store("revision");
+        store.create_package(input("a.b")).unwrap();
+        // 无 expected_revision 且不 force → 拒绝
+        assert!(store.update_manifest("a.b", input("a.b"), None, false).is_err());
+        // 错误 revision → 拒绝
+        assert!(store
+            .update_manifest("a.b", input("a.b"), Some(99), false)
+            .is_err());
+        // 正确 revision → 通过并自增
+        let updated = store
+            .update_manifest(
+                "a.b",
+                PackageInput {
+                    id: "a.b".into(),
+                    name: Some("renamed".into()),
+                    ..Default::default()
+                },
+                Some(1),
+                false,
+            )
+            .unwrap();
+        assert_eq!(updated.revision, 2);
+        assert_eq!(updated.name.as_deref(), Some("renamed"));
+        // force 跳过门禁
+        let forced = store.update_manifest("a.b", input("a.b"), None, true).unwrap();
+        assert_eq!(forced.revision, 3);
+        // id 不可变
+        assert!(store.update_manifest("a.b", input("c.d"), Some(3), false).is_err());
+    }
+
+    // ---------- 资源 CRUD + 乐观并发 + 插件隔离 ----------
+
+    #[test]
+    fn resource_crud_roundtrip_with_version_gate() {
+        let (store, dir) = temp_store("crud");
+        store.create_package(input("a.b")).unwrap();
+        let entry = store
+            .write_text("a.b", "gamer.yaml", "scripts/main.yaml", "steps: []\n", None, false)
+            .unwrap();
+        assert_eq!(entry.path, "scripts/main.yaml");
+        assert_eq!(entry.version().len(), 12);
+
+        // 嵌套路径
+        store
+            .write_text("a.b", "gamer.yaml", "scripts/sub/inner.yaml", "x: 1\n", None, false)
+            .unwrap();
+
+        // 创建后无门禁再写 → version_required；带错版本 → version_conflict
+        let err = store
+            .write_text("a.b", "gamer.yaml", "scripts/main.yaml", "x", None, false)
+            .unwrap_err();
+        assert!(err.to_string().contains("version_required"), "{err}");
+        let err = store
+            .write_text("a.b", "gamer.yaml", "scripts/main.yaml", "x", Some("bad"), false)
+            .unwrap_err();
+        assert!(err.to_string().contains("version_conflict"), "{err}");
+        // 带对版本 → 通过
+        let version = entry.version();
+        store
+            .write_text("a.b", "gamer.yaml", "scripts/main.yaml", "steps: []\n", Some(&version), false)
+            .unwrap();
+        // force 跳过门禁
+        store
+            .write_text("a.b", "gamer.yaml", "scripts/main.yaml", "steps: []\n", None, true)
+            .unwrap();
+
+        // 读取
+        let read = store
+            .read_text("a.b", "gamer.yaml", "scripts/main.yaml")
+            .unwrap()
+            .unwrap();
+        assert!(read.content.starts_with("steps:"));
+        assert!(store.read_text("a.b", "gamer.yaml", "scripts/missing.yaml").unwrap().is_none());
+        assert!(store.read_text("a.b", "gamer.yaml", "../escape").unwrap().is_none());
+
+        // 字节资源 + 条件更新
+        let raw = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00];
+        let written = store
+            .write_binary("a.b", "gamer.yaml", "templates/icon.png", &raw, None, false)
+            .unwrap();
+        assert_eq!(written.size, 9);
+        assert_eq!(
+            store.read_binary("a.b", "gamer.yaml", "templates/icon.png").unwrap(),
+            Some(raw.to_vec())
+        );
+        assert!(store
+            .write_binary("a.b", "gamer.yaml", "templates/icon.png", b"x", None, false)
+            .is_err());
+
+        // 列表（递归 + 文本探测）
+        let list = store.list("a.b", "gamer.yaml", "").unwrap();
+        let paths: Vec<String> = list.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "scripts/main.yaml".to_string(),
+                "scripts/sub/inner.yaml".to_string(),
+                "templates/icon.png".to_string()
+            ]
+        );
+        assert!(list[0].text);
+        assert!(list[0].version.is_some());
+        assert!(!list[2].text);
+        assert!(list[2].content.is_none());
+
+        // 子目录前缀列表
+        let sub = store.list("a.b", "gamer.yaml", "scripts/sub").unwrap();
+        assert_eq!(sub.len(), 1);
+
+        // 删除 + 空目录清理
+        store
+            .delete_resource("a.b", "gamer.yaml", "scripts/sub/inner.yaml")
+            .unwrap();
+        assert!(!dir.join("packages/a.b/plugins/gamer.yaml/scripts/sub").exists());
+        assert!(store
+            .delete_resource("a.b", "gamer.yaml", "scripts/sub/inner.yaml")
+            .is_err());
+    }
+
+    #[test]
+    fn resources_are_confined_to_own_plugin_directory() {
+        let (store, _dir) = temp_store("isolation");
+        store.create_package(input("a.b")).unwrap();
+        // 任意穿越尝试（含逃向 shared/ 与其他插件目录）都落到校验失败
+        for evil in ["../../shared/evil", "../other-plugin/x", "/abs", "a/../.."] {
+            assert!(store.resource_path("a.b", "gamer.yaml", evil).is_err(), "{evil:?}");
+        }
+        // 非法 plugin id 直接拒绝
+        assert!(store.plugin_dir("a.b", "../other").is_err());
+        assert!(store.plugin_dir("../escape", "gamer.yaml").is_err());
+    }
+
+    #[test]
+    fn short_path_disambiguation_matches_unique_hash_suffix() {
+        let (store, _dir) = temp_store("shortname");
+        store.create_package(input("a.b")).unwrap();
+        store
+            .write_binary("a.b", "gamer.yaml", "templates/icon#1_2_3_4.png", b"png", None, false)
+            .unwrap();
+        // 短名 → 唯一 # 候选
+        let hit = store
+            .resolve_short_path("a.b", "gamer.yaml", "templates/icon.png")
+            .unwrap();
+        assert_eq!(
+            hit.file_name().unwrap().to_string_lossy(),
+            "icon#1_2_3_4.png"
+        );
+        // 精确名优先
+        store
+            .write_binary("a.b", "gamer.yaml", "templates/full.png", b"png", None, false)
+            .unwrap();
+        let hit = store
+            .resolve_short_path("a.b", "gamer.yaml", "templates/full.png")
+            .unwrap();
+        assert_eq!(hit.file_name().unwrap().to_string_lossy(), "full.png");
+        // 零候选
+        assert!(store
+            .resolve_short_path("a.b", "gamer.yaml", "templates/missing.png")
+            .is_err());
+        // 扩展名不参与跨类匹配
+        assert!(store
+            .resolve_short_path("a.b", "gamer.yaml", "scripts/icon.yaml")
+            .is_err());
+    }
+
+    // ---------- 验收锚点：裸 Core 无 handler 可存内容；注册后生效 ----------
+
+    struct RejectingHandler;
+    impl ResourceHandler for RejectingHandler {
         fn validate_save(&self, _req: SaveValidation<'_>) -> Result<(), Value> {
             Err(serde_json::json!([
                 { "code": "yaml.bad", "message": "坏内容", "step_path": "" }
@@ -1196,120 +1532,70 @@ mod tests {
         }
         fn annotate(&self, entries: &[(String, String)]) -> serde_json::Map<String, Value> {
             let mut out = serde_json::Map::new();
-            for (id, content) in entries {
-                out.insert(id.clone(), serde_json::json!({ "len": content.len() }));
+            for (path, content) in entries {
+                out.insert(path.clone(), serde_json::json!({ "len": content.len() }));
             }
             out
         }
     }
 
     #[test]
-    fn bare_core_saves_without_validator_and_hook_registers_change_behavior() {
+    fn bare_core_saves_without_handler_and_hook_registration_changes_behavior() {
         let (store, _dir) = temp_store("barecore");
-        // 未注册 handler：保存不做内容校验（裸 Core 语义，§8.9）
+        store.create_package(input("a.b")).unwrap();
+        // 未注册 handler：保存不做内容校验（裸 Core 语义）
         store
-            .save_text(Scripts, None, "com.test.app", "a.yaml", "不是 YAML 的内容")
+            .write_text("a.b", "gamer.yaml", "scripts/a.yaml", "不是 YAML 的内容", None, false)
             .unwrap();
         // 注册后：同样内容被拒绝，诊断 JSON 原样透传
-        store.register_handler(Scripts, Arc::new(RejectingValidator));
+        store.register_handler("gamer.yaml", Arc::new(RejectingHandler));
         let err = store
             .validate_save(SaveValidation {
-                app: "com.test.app",
-                kind: Scripts,
-                id: "b.yaml",
+                package: "a.b",
+                plugin: "gamer.yaml",
+                path: "scripts/b.yaml",
                 content: "随便",
                 store: &store,
             })
             .unwrap_err();
         assert_eq!(err[0]["code"], "yaml.bad");
-        // 注记透明合并
-        let mut entries = vec![store
-            .get_text(Scripts, "com.test.app/a.yaml")
-            .unwrap()
-            .unwrap()];
-        store.annotate(Scripts, "com.test.app", &mut entries);
-        assert_eq!(entries[0].meta["len"], entries[0].content.len());
+        // 注记透明合并（列表）
+        let list = store.list("a.b", "gamer.yaml", "").unwrap();
+        assert_eq!(list[0].meta["len"], list[0].content.as_ref().unwrap().len());
     }
 
-    #[test]
-    fn templates_same_base_conflict_and_rename_hook() {
-        use std::sync::Mutex;
+    // ---------- 原子写并发 ----------
 
-        struct RenameHook(Mutex<Vec<(String, String)>>);
-        impl ResourceKindHandler for RenameHook {
-            fn before_rename(
-                &self,
-                _store: &ResourceStore,
-                app: &str,
-                old: &str,
-                new: &str,
-            ) -> anyhow::Result<()> {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .push((format!("{app}/{old}"), new.to_string()));
-                Ok(())
-            }
+    #[test]
+    fn concurrent_writers_produce_whole_files_only() {
+        let (store, _dir) = temp_store("atomic");
+        store.create_package(input("a.b")).unwrap();
+        let path = "scripts/main.yaml";
+        store.write_text("a.b", "gamer.yaml", path, "seed\n", None, true).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        let store = Arc::new(store);
+        for payload in ["alpha\nalpha\n".to_string(), "beta\nbeta\nbeta\n".to_string()] {
+            let barrier = barrier.clone();
+            let store = store.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.write_text("a.b", "gamer.yaml", path, &payload, None, true).unwrap();
+                payload
+            }));
         }
-
-        let (store, dir) = temp_store("templates");
-        let bytes = b"png";
-        store
-            .create_binary(Templates, "com.test.app", "icon#001_002_003_004.png", bytes)
-            .unwrap();
-        // 同基名（不同区域后缀）→ 冲突，不覆盖
-        let err = store
-            .create_binary(Templates, "com.test.app", "icon#005_006_007_008.png", bytes)
-            .unwrap_err();
-        assert!(err.to_string().contains("已存在"));
-        // 不同基名 → 可创建
-        store
-            .create_binary(Templates, "com.test.app", "other.png", bytes)
-            .unwrap();
-
-        let hook = Arc::new(RenameHook(Mutex::new(Vec::new())));
-        store.register_handler(Templates, hook.clone());
-        store
-            .rename_binary(Templates, "com.test.app", "other.png", "renamed.png")
-            .unwrap();
-        assert_eq!(hook.0.lock().unwrap().len(), 1);
-        assert!(dir.join("com.test.app/templates/renamed.png").is_file());
-        assert!(!dir.join("com.test.app/templates/other.png").is_file());
-    }
-
-    #[test]
-    fn keymaps_list_merges_composite_layers_and_local_wins() {
-        let (store, dir) = temp_store("keymapcomposite");
-        store
-            .save_text(
-                Keymaps,
-                None,
-                "com.test.app",
-                "wasd.yaml",
-                "version: 1\nname: 本地\nbindings: []\n",
-            )
-            .unwrap();
-        // override 层
-        let override_root = dir
-            .join("user-overrides")
-            .join("com.test.app")
-            .join("keymaps");
-        std::fs::create_dir_all(&override_root).unwrap();
-        std::fs::write(
-            override_root.join("combat.yaml"),
-            "version: 1
-name: 覆盖
-bindings: []
-"
-            .as_bytes(),
-        )
-        .unwrap();
-        let list = store.list_text("com.test.app", Keymaps).unwrap();
-        let names: Vec<String> = list.iter().map(|e| e.name.clone()).collect();
-        assert!(names.contains(&"wasd.yaml".to_string()));
+        let mut seen = Vec::new();
+        for handle in handles {
+            seen.push(handle.join().unwrap());
+        }
+        let content = store
+            .read_text("a.b", "gamer.yaml", path)
+            .unwrap()
+            .unwrap()
+            .content;
         assert!(
-            names.contains(&"combat.yaml".to_string()),
-            "override 层方案必须并入列表"
+            seen.iter().any(|p| *p == content),
+            "并发写入后内容应完整来自某个写者"
         );
     }
 }

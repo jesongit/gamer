@@ -58,8 +58,8 @@ async fn unauthenticated_high_risk_endpoints_are_all_401() {
         ("POST", "/api/shutdown"),
         ("POST", "/api/devices/missing/control"),
         ("POST", "/api/runs"),
-        ("DELETE", "/api/apps/com.test.app/resources/templates/missing"),
-        ("POST", "/api/app-packages/install"),
+        ("DELETE", "/api/packages/com.test.app/plugins/gamer.yaml/resources/templates/missing"),
+        ("POST", "/api/packages/import"),
     ];
     for (method, uri) in cases {
         let resp = send(&t.app, req(method, uri, None, &[], None)).await;
@@ -591,10 +591,10 @@ async fn cross_origin_high_risk_endpoints_are_all_403_after_authentication() {
             "/api/runs",
             Some(r#"{"runner_id":"gamer.yaml","entrypoint":"com.test.app/missing.yaml","device_id":"d1"}"#),
         ),
-        ("DELETE", "/api/apps/com.test.app/resources/templates/missing", None),
+        ("DELETE", "/api/packages/com.test.app/plugins/gamer.yaml/resources/templates/missing", None),
         (
             "POST",
-            "/api/app-packages/install",
+            "/api/packages/import",
             Some("not-a-zip"),
         ),
     ];

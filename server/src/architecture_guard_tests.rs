@@ -45,7 +45,7 @@ use zip::write::SimpleFileOptions;
 use crate::config::Config;
 use crate::device::DeviceManager;
 use crate::extensions::{ExtensionService, InputEvent, InputResult, ScreenSize};
-use crate::resources::ResourceStore;
+use crate::resources::PackageStore;
 use crate::scheduler::Scheduler;
 use crate::store::Db;
 
@@ -184,7 +184,7 @@ const BOUNDARY_WORDS: &[&str] = &["parse_script", "parse_function_file"];
 
 /// §14.1 已知合法残留（行级）：见各条 reason。纯陈旧引用（把已删类型当现役
 /// 实现来描述）不进白名单——已随本守卫一并改写（capabilities/adapters/mod.rs、
-/// app_packages/composite.rs）。
+/// 六目录模型时代的历史形态已随 Package 新模型移除）。
 const BOUNDARY_ALLOWS: &[Allow] = &[
     // —— 生产：组合根（main.rs）是全仓唯一允许点名扩展类型的装配点 ——
     Allow {
@@ -196,17 +196,6 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
         file: "main.rs",
         snippet: "executor.attach_yaml_vnext(",
         reason: "组合根：v3 适配器装配（EngineExecutor 门面方法，v3 脚本运行必需）",
-    },
-    // —— 生产：历史命名注释（「消解后」框架，陈述迁移事实） ——
-    Allow {
-        file: "resources.rs",
-        snippet: "//! ScriptStore / KeymapStore 消解后的内容无关资源层",
-        reason: "历史注释：说明本层是两 Store 消解后的替代物",
-    },
-    Allow {
-        file: "api/mod.rs",
-        snippet: "P11.3：ScriptStore/KeymapStore 消解后的 Core 侧唯一资源层",
-        reason: "历史注释：AppState.resources 字段文档",
     },
     // —— 扩展机制文件（extensions/service.rs，非 gamer_yaml 目录）——
     Allow {
@@ -528,11 +517,6 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
         snippet: "gamer_yaml::timer_yaml::YamlTimerRunner::new",
         reason: "update API 测试装配：gamer.yaml runner 夹具",
     },
-    Allow {
-        file: "app_packages/builder.rs",
-        snippet: "gamer_yaml::register_resource_handlers",
-        reason: "PackageBuilder cfg(test)：与生产一致的资源内容钩子",
-    },
 ];
 
 /// §14.2：Core 模块（含 capabilities SDK 侧）不得路径依赖扩展内部；
@@ -666,7 +650,7 @@ struct CoreDeps {
     dir: PathBuf,
     cfg: Config,
     db: Db,
-    resources: Arc<ResourceStore>,
+    packages: Arc<PackageStore>,
     devices: Arc<DeviceManager>,
     viewers: crate::webrtc::ViewerMap,
 }
@@ -690,7 +674,7 @@ fn build_core(tag: &str) -> CoreDeps {
         ..Default::default()
     };
     let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-    let resources = Arc::new(ResourceStore::open(&cfg).unwrap());
+    let packages = Arc::new(PackageStore::open(&cfg).unwrap());
     let viewers: crate::webrtc::ViewerMap =
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
@@ -698,7 +682,7 @@ fn build_core(tag: &str) -> CoreDeps {
         dir,
         cfg,
         db,
-        resources,
+        packages,
         devices,
         viewers,
     }
@@ -712,8 +696,8 @@ struct GuardApp {
 /// 与生产组合根 `RuntimeServices::start` 同构的 HTTP 装配。
 fn build_app(core: &CoreDeps) -> GuardApp {
     // 与生产一致：注册扩展内容校验钩子（保存校验/注记）。
-    crate::extensions::gamer_yaml::register_resource_handlers(&core.resources);
-    crate::extensions::register_resource_handlers(&core.resources);
+    crate::extensions::gamer_yaml::register_resource_handlers(&core.packages);
+    crate::extensions::register_resource_handlers(&core.packages);
     // P12.9：v3-only 执行器（与生产组合根同构）
     let executor = Arc::new(crate::extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
         core.devices.clone(),
@@ -725,7 +709,7 @@ fn build_app(core: &CoreDeps) -> GuardApp {
     let scheduler = Arc::new(Scheduler::new(core.db.clone()));
     let capabilities = crate::capabilities::adapters::build_registry(
         core.devices.clone(),
-        core.resources.clone(),
+        core.packages.clone(),
         core.db.clone(),
         runs.clone(),
     );
@@ -734,14 +718,14 @@ fn build_app(core: &CoreDeps) -> GuardApp {
             scheduler.clone(),
             core.db.clone(),
             runs.clone(),
-            core.resources.clone(),
+            core.packages.clone(),
         ),
     );
     let extensions = Arc::new(
         ExtensionService::for_data_root(core.cfg.data_dir.clone(), capabilities)
             .with_runner_registrar(registrar),
     );
-    executor.attach_yaml_vnext(core.resources.clone(), extensions.clone(), None);
+    executor.attach_yaml_vnext(core.packages.clone(), extensions.clone(), None);
     let auth = Arc::new(crate::api::auth::AuthState::new(
         test_credential(),
         Default::default(),
@@ -769,7 +753,7 @@ fn build_app(core: &CoreDeps) -> GuardApp {
         scheduler,
         core.cfg.clone(),
         core.viewers.clone(),
-        core.resources.clone(),
+        core.packages.clone(),
         shutdown,
         auth,
         update,
@@ -982,7 +966,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
-    let task_id = created["id"].as_str().unwrap().to_string();
+    let _task_id = created["id"].as_str().unwrap().to_string();
 
     // ---- 安装即用（2026-09-05）：install 自动 enable→start → Running；
     // UI contribution 与 runner 随安装即生效 ----
@@ -1347,31 +1331,50 @@ async fn architecture_guard_bare_core_serves_full_base_api_with_zero_extensions(
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    // 通用资源：文本 kind（presets，无内容钩子 = 裸 Core 不校验）JSON 创建 + 内容往返。
-    let preset_content = "version: 1\nname: guard-bare-preset\n";
-    let (status, saved) = post_json(
+    // 通用资源存取走 Package API：建包 → 写文本预设 → 读回（裸 Core 无内容
+    // 钩子 = 不做内容校验）。
+    let (status, created) = post_json(
         &guard.app,
         &cookie,
-        "/api/apps/com.guard.app/resources/presets",
-        serde_json::json!({"name": "bare", "content": preset_content}),
+        "/api/packages",
+        serde_json::json!({"id": "guard.pkg"}),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let preset_content = "version: 1
+name: guard-bare-preset
+";
+    let response = send(
+        &guard.app,
+        request(
+            "PUT",
+            "/api/packages/guard.pkg/plugins/test.plugin/resources/presets/bare.yaml",
+            &json_headers(&cookie),
+            Some(
+                serde_json::json!({"content": preset_content})
+                    .to_string()
+                    .into_bytes(),
+            ),
+        ),
+    )
+    .await;
+    let status = response.status();
+    let saved = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
     let preset = get_json(
         &guard.app,
         &cookie,
-        "/api/apps/com.guard.app/resources/presets/com.guard.app%2Fbare.yaml",
+        "/api/packages/guard.pkg/plugins/test.plugin/resources/presets/bare.yaml",
     )
     .await;
     assert_eq!(preset["content"], preset_content);
 
-    // 字节 kind：PNG 模板创建 + 跨分区通配（app = "-"）读回（字节 kind 走
-    // templates 的归一化存储，读回可解码为同尺寸图片）。
+    // 字节资源：PNG 直写（原始字节 body）→ 读回可解码为同尺寸图片。
     let response = send(
         &guard.app,
         request(
-            "POST",
-            "/api/apps/com.guard.app/resources/templates?name=guard_bare.png",
+            "PUT",
+            "/api/packages/guard.pkg/plugins/test.plugin/resources/templates/guard_bare.png",
             &[
                 (header::COOKIE.to_string(), cookie.clone()),
                 (header::CONTENT_TYPE.to_string(), "image/png".into()),
@@ -1381,13 +1384,12 @@ async fn architecture_guard_bare_core_serves_full_base_api_with_zero_extensions(
     )
     .await;
     let status = response.status();
-    assert_eq!(status, StatusCode::CREATED, "{}", body_json(response).await);
+    assert_eq!(status, StatusCode::OK, "{}", body_json(response).await);
     let response = send(
         &guard.app,
         request(
             "GET",
-            // 字节 kind 的 id 是 "<pkg>/<文件名>"；app = "-" 为跨分区通配。
-            "/api/apps/-/resources/templates/com.guard.app%2Fguard_bare.png",
+            "/api/packages/guard.pkg/plugins/test.plugin/resources/templates/guard_bare.png",
             &json_headers(&cookie),
             None,
         ),
@@ -1397,7 +1399,7 @@ async fn architecture_guard_bare_core_serves_full_base_api_with_zero_extensions(
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    let decoded = image::load_from_memory(&bytes).expect("字节 kind 读回必须是合法图片");
+    let decoded = image::load_from_memory(&bytes).expect("字节资源读回必须是合法图片");
     assert_eq!(
         (decoded.width(), decoded.height()),
         (8, 8),
@@ -1478,16 +1480,33 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
     assert!(task["suspend_reason"].is_null());
     assert!(!task["next_wakeup"].is_null());
 
-    // 保存脚本资源后派发进入执行层：202 + run 记录（不再 424）。
-    let script = "version: 3\nsteps:\n  - log: guard isolation\n";
-    let (status, saved) = post_json(
+    // 保存脚本资源（Package API；gamer.yaml 扩展钩子已注册 = v3 校验生效，
+    // 内容为 v3 直接通过）后派发进入执行层：202 + run 记录（不再 424）。
+    let script = "version: 3
+steps:
+  - log: guard isolation
+";
+    let (status, created) = post_json(
         &guard.app,
         &cookie,
-        "/api/apps/com.guard.app/resources/scripts",
-        serde_json::json!({"name": "daily", "content": script}),
+        "/api/packages",
+        serde_json::json!({"id": "com.guard.app"}),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let response = send(
+        &guard.app,
+        request(
+            "PUT",
+            "/api/packages/com.guard.app/plugins/gamer.yaml/resources/scripts/daily.yaml",
+            &json_headers(&cookie),
+            Some(serde_json::json!({"content": script}).to_string().into_bytes()),
+        ),
+    )
+    .await;
+    let status = response.status();
+    let saved = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
     let (status, dispatched) = post_json(
         &guard.app,
         &cookie,

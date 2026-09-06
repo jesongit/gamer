@@ -223,10 +223,6 @@ impl Scheduler {
             .await
     }
 
-    pub async fn on_app_package_uninstalled(&self, package: &str) -> anyhow::Result<usize> {
-        self.core.on_app_package_uninstalled(package).await
-    }
-
     /// 下次唤醒时间查询（诊断/编排预读用；调度循环自身不经过它）。
     #[allow(dead_code)]
     pub fn next_wakeup_at(&self) -> Option<DateTime<Utc>> {

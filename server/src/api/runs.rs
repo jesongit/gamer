@@ -34,7 +34,7 @@ pub(super) struct DispatchRunReq {
     pub(super) device_id: String,
     #[serde(default)]
     pub(super) payload: Option<serde_json::Value>,
-    /// 内容分区（runner 资源解析域）；缺省取 entrypoint 首段
+    /// 资源解析域 Package（T2a 收口运行上下文）；缺省取 entrypoint 首段
     /// （`<content_package>/<path>` 约定）。
     #[serde(default)]
     pub(super) content_package: Option<String>,

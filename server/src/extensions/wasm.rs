@@ -117,6 +117,9 @@ mod wasmtime_runtime {
     /// map to native opaque capability handles; no host path crosses WIT.
     pub(crate) struct HostState {
         host: HostApi,
+        /// 调用方扩展 id：插件资源隔离的 plugin 维度来源（资源解析恒被限制
+        /// 在 `packages/<pkg>/plugins/<本扩展 id>/` 前缀内）。
+        extension_id: ExtensionId,
         cancelled: Arc<AtomicBool>,
         runtime: Arc<dyn RuntimeService>,
         app_context: Option<crate::core::AppContext>,
@@ -131,6 +134,7 @@ mod wasmtime_runtime {
     impl HostState {
         pub(crate) fn new(
             host: HostApi,
+            extension_id: ExtensionId,
             cancelled: Arc<AtomicBool>,
             app_context: Option<crate::core::AppContext>,
         ) -> Self {
@@ -139,6 +143,7 @@ mod wasmtime_runtime {
             );
             Self {
                 host,
+                extension_id,
                 cancelled,
                 runtime,
                 app_context,
@@ -471,8 +476,19 @@ mod wasmtime_runtime {
             let service = self.host.registry().resource().ok_or_else(|| {
                 Self::error(WitErrorKind::Unavailable, "resource capability 未注册")
             })?;
+            // 插件数据隔离（plan §14）：plugin 维度由宿主注入调用方自身扩展 id，
+            // guest 无法寻址其他插件的 `plugins/<plugin>/` 前缀。
             let resource = service
-                .resolve(&ResourceId::new(namespace, name))
+                .resolve(
+                    &ResourceId::new(namespace, self.extension_id.as_str(), name).map_err(
+                        |e| {
+                            Self::error(
+                                wit::gamer::host::types::HostErrorKind::InvalidRequest,
+                                e.to_string(),
+                            )
+                        },
+                    )?,
+                )
                 .await
                 .map_err(Self::capability_error)?;
             let token = self.issue();
@@ -713,7 +729,12 @@ mod wasmtime_runtime {
 
             let cancelled = Arc::new(AtomicBool::new(false));
             let completed = Arc::new(AtomicBool::new(false));
-            let state = HostState::new(request.host, cancelled.clone(), request.app_context);
+            let state = HostState::new(
+                request.host,
+                request.id.clone(),
+                cancelled.clone(),
+                request.app_context,
+            );
             let engine = self.engine().clone();
             let completed_for_task = completed.clone();
             let (commands_tx, mut commands_rx) = mpsc::channel::<RuntimeCommand>(16);
@@ -1030,7 +1051,12 @@ entry = "plugin.wasm"
         use super::wasmtime_runtime::HostState;
         use crate::extensions::wit::gamer::host::device::Host as _;
 
-        let mut state = HostState::new(test_host(), Arc::new(AtomicBool::new(false)), None);
+        let mut state = HostState::new(
+            test_host(),
+            ExtensionId::parse("com.example.entry").unwrap(),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
         let error = state.resolve("device-1".to_string()).await.unwrap_err();
         assert_eq!(
             error.kind,
@@ -1047,6 +1073,7 @@ entry = "plugin.wasm"
             crate::core::AppContext::for_test("device-1", "com.example.game").unwrap();
         let mut state = HostState::new(
             test_host(),
+            ExtensionId::parse("com.example.entry").unwrap(),
             Arc::new(AtomicBool::new(false)),
             Some(app_context),
         );

@@ -15,9 +15,9 @@
 //! - [`wasm_host`]：YAML world 的 Wasmtime 宿主（feature = "wasm-runtime"）。
 //!
 //! 依赖方向（§16）：本模块 → Core（device / matcher / capabilities / timer_core /
-//! run_manager / app_packages composite）单向；Core 侧（api / store / timer_core /
+//! run_manager）单向；Core 侧（api / store / timer_core /
 //! scheduler / webrtc / capabilities）不得 import 本目录内部符号，只能走 Core 定义的
-//! 窄 trait（`TimerRunner`、`ResourceKindHandler` 等）与本文件显式导出的门面。
+//! 窄 trait（`TimerRunner`、`ResourceHandler` 等）与本文件显式导出的门面。
 
 pub(crate) mod error;
 pub(crate) mod params;

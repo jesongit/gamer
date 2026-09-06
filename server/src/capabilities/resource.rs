@@ -3,30 +3,7 @@ use uuid::Uuid;
 
 use super::CapabilityResult;
 
-/// Logical resource identity. `name` is an application-level name, not a host
-/// filesystem path.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub struct ResourceId {
-    namespace: String,
-    name: String,
-}
-
-impl ResourceId {
-    pub fn new(namespace: impl Into<String>, name: impl Into<String>) -> Self {
-        Self {
-            namespace: namespace.into(),
-            name: name.into(),
-        }
-    }
-
-    pub fn namespace(&self) -> &str {
-        &self.namespace
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-}
+pub(crate) use crate::core::ResourceId;
 
 /// Opaque resource capability token.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -61,7 +38,9 @@ impl ResourceLease {
 }
 
 /// Logical resource resolution/open boundary. No `PathBuf` or storage handle is
-/// exposed to callers.
+/// exposed to callers. [`ResourceId`] = Package Resource 三元组
+/// `(package, plugin, path)`；实现方必须把插件限制在自己的
+/// `packages/<package>/plugins/<plugin>/` 前缀内。
 #[async_trait]
 pub trait ResourceService: Send + Sync {
     async fn resolve(&self, id: &ResourceId) -> CapabilityResult<ResourceHandle>;

@@ -437,8 +437,10 @@ impl NativeYamlHost {
             .ok_or_else(|| anyhow!("resource capability 未注册"))?
             .resolve(&ResourceId::new(
                 package.as_str().to_string(),
+                YAML_EXTENSION_ID,
                 format!("templates/{name}"),
-            ))
+            )
+            .map_err(anyhow::Error::new)?)
             .await
             .map_err(anyhow::Error::new)?;
         Ok(resource)
@@ -1586,7 +1588,7 @@ mod tests {
             let handle = ResourceHandle::new();
             self.names.lock().unwrap().insert(
                 handle,
-                id.name().trim_start_matches("templates/").to_string(),
+                id.path().trim_start_matches("templates/").to_string(),
             );
             Ok(handle)
         }
@@ -3014,7 +3016,7 @@ runtime = "^1.0"
             ..Default::default()
         };
         let db: crate::store::Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
+        let scripts = Arc::new(crate::resources::PackageStore::open(&cfg).unwrap());
         let runs = Arc::new(crate::run_manager::RunManager::new(Arc::new(
             UnreachableExecutor,
         )));

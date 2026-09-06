@@ -1,7 +1,7 @@
 //! Native implementations of the core capability contracts.
 //!
 //! These adapters are deliberately thin. They own the translation from logical
-//! handles to the existing DeviceManager, FrameCache, ResourceStore and DB
+//! handles to the existing DeviceManager, FrameCache, PackageStore and DB
 //! implementations; no backend handle or host path leaves this module.
 
 mod device;
@@ -27,7 +27,7 @@ pub(crate) use vision::VisionAdapter;
 use std::sync::Arc;
 
 use crate::device::DeviceManager;
-use crate::resources::ResourceStore;
+use crate::resources::PackageStore;
 use crate::run_manager::RunManager;
 use crate::store::Db;
 
@@ -37,7 +37,7 @@ use super::CapabilityRegistry;
 /// intentionally created per run because its cancellation token is per run.
 pub(crate) fn build_registry(
     devices: Arc<DeviceManager>,
-    resources: Arc<ResourceStore>,
+    resources: Arc<PackageStore>,
     db: Db,
     runs: Arc<RunManager>,
 ) -> CapabilityRegistry {
@@ -70,18 +70,19 @@ mod tests {
 
     use super::*;
     use crate::capabilities::{
+        ResourceId,
         CapabilityError, DeviceHandle, DeviceId, FramePoint, FrameService, LogLevel, LogRecord,
         LogService, MatchManyRequest, MatchOptions, MatchOutcome, ResourceHandle, ResourceService,
         RunRequest, RunService, RuntimeService, TemplateQuery, VisionService,
     };
 
-    fn template_store() -> (tempfile::TempDir, Arc<ResourceStore>) {
+    fn template_store() -> (tempfile::TempDir, Arc<PackageStore>) {
         let dir = tempfile::tempdir().unwrap();
         let cfg = crate::config::Config {
             data_dir: dir.path().to_path_buf(),
             ..Default::default()
         };
-        let store = Arc::new(ResourceStore::open(&cfg).unwrap());
+        let store = Arc::new(PackageStore::open(&cfg).unwrap());
         (dir, store)
     }
 
@@ -96,16 +97,27 @@ mod tests {
         bytes
     }
 
+    /// 建包 + 写一个资源文件（adapter 测试夹具；plugin id 用中性测试插件）。
+    fn seed_template(store: &PackageStore, pkg: &str, plugin: &str, path: &str, bytes: &[u8]) {
+        store
+            .create_package(crate::resources::PackageInput {
+                id: pkg.to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .write_binary(pkg, plugin, path, bytes, None, false)
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn resource_adapter_resolves_and_opens_logical_template() {
         let (_dir, store) = template_store();
-        let template_dir =
-            store.kind_dir("com.test.game", crate::resources::ResourceKind::Templates);
-        std::fs::create_dir_all(&template_dir).unwrap();
-        std::fs::write(template_dir.join("icon.png"), b"template").unwrap();
+        seed_template(&store, "com.test.game", "test.plugin", "templates/icon.png", b"template");
 
         let adapter = ResourceAdapter::new(store);
-        let id = super::super::ResourceId::new("com.test.game", "icon.png");
+        let id =
+            ResourceId::new("com.test.game", "test.plugin", "templates/icon.png").unwrap();
         let handle = adapter.resolve(&id).await.unwrap();
         assert_eq!(adapter.resolve(&id).await.unwrap(), handle);
         let lease = adapter.open(handle).await.unwrap();
@@ -134,10 +146,7 @@ mod tests {
                 template.put_pixel(x, y, *screen.get_pixel(11 + x, 7 + y));
             }
         }
-        let template_dir =
-            store.kind_dir("com.test.game", crate::resources::ResourceKind::Templates);
-        std::fs::create_dir_all(&template_dir).unwrap();
-        std::fs::write(template_dir.join("icon.png"), png(&template)).unwrap();
+        seed_template(&store, "com.test.game", "test.plugin", "templates/icon.png", &png(&template));
 
         let frames = Arc::new(FrameStore::new());
         let frame = frames
@@ -145,7 +154,11 @@ mod tests {
             .unwrap();
         let resources = Arc::new(ResourceAdapter::new(store));
         let resource = resources
-            .resolve(&super::super::ResourceId::new("com.test.game", "icon.png"))
+            .resolve(&ResourceId::new(
+                "com.test.game",
+                "test.plugin",
+                "templates/icon.png",
+            ).unwrap())
             .await
             .unwrap();
         let vision = VisionAdapter::new(frames, resources);
@@ -252,15 +265,14 @@ mod tests {
     #[tokio::test]
     async fn run_adapter_submits_to_run_manager_and_reports_terminal_state() {
         let (_dir, store) = template_store();
-        let script_dir = store.kind_dir("com.test.game", crate::resources::ResourceKind::Scripts);
-        std::fs::create_dir_all(&script_dir).unwrap();
-        std::fs::write(script_dir.join("daily.yaml"), b"steps: []\n").unwrap();
+        seed_template(&store, "com.test.game", "gamer.yaml", "scripts/daily.yaml", b"steps: []\n");
         let resources = Arc::new(ResourceAdapter::new(store));
         let entry = resources
-            .resolve(&super::super::ResourceId::new(
+            .resolve(&ResourceId::new(
                 "com.test.game",
+                "gamer.yaml",
                 "scripts/daily.yaml",
-            ))
+            ).unwrap())
             .await
             .unwrap();
         let manager = Arc::new(crate::run_manager::RunManager::new(Arc::new(

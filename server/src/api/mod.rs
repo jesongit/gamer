@@ -15,7 +15,6 @@
 //!   扩展包归档 ≤20MiB；App Package 安装 ≤100MiB（对齐解压总量预算）。
 //!   CORS 层已整体移除（vite 代理同源不受影响）。
 
-mod app_packages;
 pub mod auth;
 mod common;
 mod devices;
@@ -24,7 +23,7 @@ mod extensions;
 mod extensions_management;
 pub(crate) mod gate;
 mod logs;
-mod resources;
+mod packages;
 mod runs;
 pub(crate) mod system;
 mod tasks;
@@ -47,7 +46,7 @@ use tower_http::services::ServeDir;
 
 use crate::config::Config;
 use crate::device::DeviceManager;
-use crate::resources::ResourceStore;
+use crate::resources::PackageStore;
 use crate::scheduler::Scheduler;
 use crate::store::Db;
 
@@ -66,9 +65,9 @@ pub struct AppState {
     /// 统一运行管理（阶段 3 RUN-001）：手动/调度共用 run_id 注册表与设备级互斥
     pub runs: Arc<crate::run_manager::RunManager>,
     pub cfg: Config,
-    /// 通用资源存储（六目录 + composite 三层 + 扩展注册的内容钩子；
-    /// P11.3：ScriptStore/KeymapStore 消解后的 Core 侧唯一资源层）
-    pub resources: Arc<ResourceStore>,
+    /// Package 本地包存储（数据一级作用域 = Package ID；插件资源按
+    /// `(package, plugin, path)` 寻址并隔离在 `plugins/<plugin>/` 前缀内）
+    pub packages: Arc<PackageStore>,
     /// 每设备的活跃 viewer 注册表。
     pub viewers: crate::webrtc::ViewerMap,
     /// 统一停机协调器（OPS-001）：/api/shutdown 经它触发 drain，
@@ -80,9 +79,6 @@ pub struct AppState {
     pub update: Arc<crate::update::service::UpdateService>,
     /// 已安装扩展与其 Host/UI 生命周期。
     pub extensions: Arc<crate::extensions::ExtensionService>,
-    /// Immutable App Package storage. Its unload path is wired to the Timer
-    /// task-suspension hook at the composition root.
-    pub app_packages: Arc<crate::app_packages::AppPackageStore>,
 }
 
 /// 测试专用兼容入口：自建 capabilities registry / ExtensionService / AppState
@@ -99,14 +95,14 @@ pub fn build_router(
     scheduler: Arc<Scheduler>,
     cfg: Config,
     viewers: crate::webrtc::ViewerMap,
-    resources: Arc<ResourceStore>,
+    packages: Arc<PackageStore>,
     shutdown: Arc<crate::shutdown::ShutdownCoordinator>,
     auth: Arc<auth::AuthState>,
     update: Arc<crate::update::service::UpdateService>,
 ) -> Router {
     let capabilities = crate::capabilities::adapters::build_registry(
         devices.clone(),
-        resources.clone(),
+        packages.clone(),
         db.clone(),
         runs.clone(),
     );
@@ -115,7 +111,7 @@ pub fn build_router(
         capabilities,
     ));
     build_router_with_extensions(
-        db, devices, runs, scheduler, cfg, viewers, resources, shutdown, auth, update, extensions,
+        db, devices, runs, scheduler, cfg, viewers, packages, shutdown, auth, update, extensions,
     )
 }
 
@@ -130,39 +126,26 @@ pub(crate) fn build_router_with_extensions(
     scheduler: Arc<Scheduler>,
     cfg: Config,
     viewers: crate::webrtc::ViewerMap,
-    resources: Arc<ResourceStore>,
+    packages: Arc<PackageStore>,
     shutdown: Arc<crate::shutdown::ShutdownCoordinator>,
     auth: Arc<auth::AuthState>,
     update: Arc<crate::update::service::UpdateService>,
     extensions: Arc<crate::extensions::ExtensionService>,
 ) -> Router {
     let metrics = db.metrics();
-    // 预设发布用 Timer Core 门面：publish_package_presets 只写 task_presets
-    // 行，不触碰调度循环（Scheduler 内核另持有一个已 start 的实例，字段私有；
-    // 该未 start 门面与其共享同一 Db，预设发布与调度互不可见对方的通知通道）。
-    let preset_timer = crate::timer_core::TimerCore::new(db.clone());
     let state = AppState {
         db,
         metrics,
         devices,
-        scheduler: scheduler.clone(),
+        scheduler,
         runs,
         cfg: cfg.clone(),
-        resources,
+        packages,
         viewers,
         shutdown,
         auth,
         update,
         extensions,
-        app_packages: Arc::new(crate::app_packages::AppPackageStore::with_hooks(
-            cfg.data_dir.clone(),
-            Arc::new(crate::app_packages::SchedulerTaskSuspendedHook::new(
-                scheduler.clone(),
-            )),
-            Arc::new(crate::app_packages::TimerPresetPublishHook::new(
-                preset_timer,
-            )),
-        )),
     };
 
     // ---- 公开豁免组：登录三端点自身实现契约语义；health/metrics 探针匿名；
@@ -215,20 +198,30 @@ pub(crate) fn build_router_with_extensions(
         )
         .route("/api/devices/:id/screenshot", post(devices::api_screenshot))
         .route("/api/devices/:id/control", post(devices::api_control))
-        // Generic Resource API（P11.6 / §11.2）：scripts/functions/templates/
-        // keymaps/presets/resources 六类别统一；内容校验经扩展注册的
-        // ResourceKindHandler 回调（gamer.yaml / gamer.keymap）。
+        // Package API（plan §2-§15 / §23）：包生命周期 + 插件资源（隔离在
+        // plugins/<plugin>/ 前缀内；内容校验经扩展注册的 ResourceHandler）。
         .route(
-            "/api/apps/:app/resources",
-            get(resources::api_list_all_resources),
+            "/api/packages",
+            get(packages::api_list_packages).post(packages::api_create_package),
         )
         .route(
-            "/api/apps/:app/resources/:kind",
-            get(resources::api_list_kind_resources),
+            "/api/packages/:pkg",
+            get(packages::api_get_package)
+                .put(packages::api_update_package)
+                .delete(packages::api_delete_package),
         )
         .route(
-            "/api/apps/:app/resources/:kind/*id",
-            get(resources::api_get_resource).delete(resources::api_delete_resource),
+            "/api/packages/:pkg/duplicate",
+            post(packages::api_duplicate_package),
+        )
+        .route(
+            "/api/packages/:pkg/plugins/:plugin/resources",
+            get(packages::api_list_plugin_resources),
+        )
+        .route(
+            "/api/packages/:pkg/plugins/:plugin/resources/*path",
+            get(packages::api_get_plugin_resource)
+                .delete(packages::api_delete_plugin_resource),
         )
         // Vision 能力位（模板匹配测试 = vision 语义，Core 合法）
         .route(
@@ -289,30 +282,6 @@ pub(crate) fn build_router_with_extensions(
             get(logs::api_list_logs).delete(logs::api_clear_logs),
         )
         .route("/api/system/info", get(system::api_system_info))
-        .route(
-            "/api/app-packages",
-            get(app_packages::api_list_app_packages),
-        )
-        .route(
-            "/api/app-packages/export",
-            post(app_packages::api_export_app_package),
-        )
-        .route(
-            "/api/app-packages/:id/activate",
-            post(app_packages::api_activate_app_package),
-        )
-        .route(
-            "/api/app-packages/:id/:version",
-            delete(app_packages::api_uninstall_app_package),
-        )
-        .route(
-            "/api/app-packages/:id/:version/edit",
-            post(app_packages::api_edit_app_package),
-        )
-        .route(
-            "/api/workspace/:android_package",
-            get(app_packages::api_get_workspace).put(app_packages::api_put_workspace),
-        )
         .route("/api/system/update", get(update::api_get_update))
         .route("/api/system/update/check", post(update::api_update_check))
         .route(
@@ -348,18 +317,13 @@ pub(crate) fn build_router_with_extensions(
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_JSON));
 
-    // ---- 受保护组（≤16MiB）：资源创建（POST）与更新/替换/重命名（PUT）。
-    //      文本 kind 收 JSON、字节 kind 收原始字节（模板按 Content-Type 区分
-    //      字节替换与重命名）。统一注册在本组以获得上传体限额；文本内容另有
-    //      1MiB 校验兜底。GET/DELETE 在 protected_json 组（小响应、无 body）。
+    // ---- 受保护组（≤16MiB）：包资源创建/替换（PUT，文本 JSON 或原始字节）。
+    //      统一注册在本组以获得上传体限额；文本内容另有 1MiB 校验兜底。
+    //      GET/DELETE 在 protected_json 组（小响应、无 body）。
     let protected_upload: Router<()> = Router::new()
         .route(
-            "/api/apps/:app/resources/:kind",
-            post(resources::api_create_resource),
-        )
-        .route(
-            "/api/apps/:app/resources/:kind/*id",
-            put(resources::api_update_resource),
+            "/api/packages/:pkg/plugins/:plugin/resources/*path",
+            put(packages::api_put_plugin_resource),
         )
         .with_state(state.clone())
         .route_layer(axmw::from_fn_with_state(
@@ -368,13 +332,11 @@ pub(crate) fn build_router_with_extensions(
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_UPLOAD));
 
-    // ---- 受保护组（App Package 安装，body 上限对齐包归档解压总量预算）：
-    //      归档侧另有 entries/解压总量/单文件/manifest 硬限（archive_validation）。
+    // ---- 受保护组（Package 导入/导出，body 上限对齐包归档解压总量预算）：
+    //      归档侧另有 entries/解压总量/单文件/manifest 硬限（package_archive）。
     let protected_import: Router<()> = Router::new()
-        .route(
-            "/api/app-packages/install",
-            post(app_packages::api_install_app_package),
-        )
+        .route("/api/packages/import", post(packages::api_import_package))
+        .route("/api/packages/:pkg/export", post(packages::api_export_package))
         .with_state(state.clone())
         .route_layer(axmw::from_fn_with_state(
             state.auth.clone(),

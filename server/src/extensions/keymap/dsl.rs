@@ -1,9 +1,9 @@
 //! gamer.keymap 扩展的 YAML DSL：schema 解析 / 结构化诊断 / 规范序列化。
 //!
 //! 自 Core `keymaps.rs` 迁入扩展边界（P11.3 / ADR-11：Core 不拥有 Keymap
-//! rule）。Core 只经 `crate::resources::ResourceStore` 存取方案字节/文本；
+//! rule）。Core 只经 `crate::resources::PackageStore` 存取方案字节/文本；
 //! 内容语义（`parse_keymap_content` / `serialize_keymap`）与保存期校验、
-//! 列表注记（显示名 / binding 数）由本扩展经 `ResourceKindHandler` 注册。
+//! 列表注记（显示名 / binding 数）由本扩展经 `ResourceHandler` 注册。
 
 use std::collections::HashSet;
 

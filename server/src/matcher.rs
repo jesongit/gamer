@@ -816,6 +816,9 @@ fn rgb_hue_saturation([r, g, b]: [u8; 3]) -> (f32, f32) {
 /// 资源防护（阶段 2 SEC-004）：解码前字节数预检 + image crate 解码限额
 /// （单边尺寸/总分配）+ 解码后像素总量复核——三层挡"像素炸弹"
 /// （小体积声明超大分辨率，数十倍放大内存占用）。超限报清晰 4xx 文案。
+/// T2a 备注：模板上传链路（Package 插件资源 PUT）的 PNG 归一化入口在六目录
+/// REST 退役后暂无生产调用方；重接模板上传语义时恢复调用（匹配语义不变）。
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn reencode_template_png(bytes: &[u8], grayscale_only: bool) -> anyhow::Result<Vec<u8>> {
     let img = decode_image_limited(bytes, TEMPLATE_MAX_INPUT_BYTES, "图片")?;
     let normalized = if grayscale_only {

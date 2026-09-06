@@ -127,7 +127,7 @@ pub(super) async fn api_start_extension(
                 )
                 .into_response();
             };
-            match crate::extensions::load_user_profile(&st.resources, &partition, name) {
+            match crate::extensions::load_user_profile(&st.packages, &partition, name) {
                 Ok(content) => Some(content),
                 Err(error) => return extension_error(error),
             }

@@ -20,8 +20,8 @@ use crate::extensions::gamer_yaml::params::{
     coord_in_range, fmt_num, is_valid_color, is_valid_key, parse_time_ms, unescape_double_quoted,
 };
 use crate::extensions::gamer_yaml::run_target::{BoundEntryArgs, RunTarget, TypedValue};
-use crate::resources::ResourceKind as RK;
-use crate::resources::ResourceStore;
+use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
+use crate::resources::PackageStore;
 
 /// 签名门禁失败的机器可读原因（依赖缺失/参数过期的细分信号）。
 pub const REASON_SIGNATURE_MISMATCH: &str = "signature_mismatch";
@@ -90,12 +90,12 @@ fn read_failed(error: anyhow::Error, resource: &str) -> Vec<ScriptError> {
 /// P11.1（ADR-12）：`stored_signature` 为 None（新 Task 模型保存的 payload
 /// 不携带 psig1 快照签名）时跳过过期门禁，按当前声明重绑参数。
 pub fn gate_task(
-    scripts: &ResourceStore,
+    scripts: &PackageStore,
     script_id: &str,
     args: &serde_json::Value,
     stored_signature: Option<&str>,
 ) -> Result<TaskArgs, GateError> {
-    match scripts.get_text(RK::Scripts, script_id) {
+    match script_entry(scripts, script_id) {
         Ok(Some(_)) => {}
         Ok(None) => return Err(GateError::ScriptMissing),
         Err(error) => {
@@ -214,10 +214,10 @@ fn v3_value_to_plain_json(value: &crate::extensions::gamer_yaml::yaml_vnext::Val
 /// 非 `version: 3` 源 → 版本门禁诊断（`yaml.v3.version`）；v3 解析失败 →
 /// 保留 `yaml.v3.*` 码的结构化诊断。
 pub(crate) fn probe_v3_script_decls(
-    scripts: &ResourceStore,
+    scripts: &PackageStore,
     script_id: &str,
 ) -> Result<Vec<V3ParamDecl>, Vec<ScriptError>> {
-    let entry = match scripts.get_text(RK::Scripts, script_id) {
+    let entry = match script_entry(scripts, script_id) {
         Ok(Some(entry)) => entry,
         Ok(None) => {
             return Err(vec![ScriptError::new(
@@ -244,14 +244,14 @@ pub(crate) fn probe_v3_script_decls(
 /// 第一个函数（与入口/描述器语义一致）。文件缺失 → `resource.func.not_found`；
 /// 目标函数不存在 → 同码；库解析失败 → `yaml.v3.*` 结构化诊断。
 pub(crate) fn probe_v3_function_decls(
-    scripts: &ResourceStore,
+    scripts: &PackageStore,
     pkg: &str,
     file: &str,
     function: Option<&str>,
 ) -> Result<Vec<V3ParamDecl>, Vec<ScriptError>> {
     use crate::extensions::gamer_yaml::yaml_vnext;
     let rel = format!("{pkg}/{file}.yaml");
-    let entry = match scripts.get_text(RK::Functions, &rel) {
+    let entry = match function_entry(scripts, &rel) {
         Ok(Some(entry)) => entry,
         Ok(None) => {
             return Err(vec![ScriptError::new(
@@ -505,7 +505,7 @@ pub(crate) fn coerce_v3_arg(ty: &str, value: &serde_json::Value) -> Option<Typed
 ///
 /// 绑定即前置校验：未知键 / 类型不符 / 缺必填 → 结构化诊断（400 invalid_args）。
 pub fn resolve_manual_entry_args(
-    scripts: &ResourceStore,
+    scripts: &PackageStore,
     target: &RunTarget,
     args: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<BoundEntryArgs, Vec<ScriptError>> {
@@ -719,13 +719,17 @@ steps:
     }
 
     fn write_script(cfg: &Config, name: &str, content: &str) {
-        let dir = cfg.data_dir.join("com.test.app").join("scripts");
+        let dir = cfg.data_dir
+            .join("packages/com.test.app/plugins/gamer.yaml")
+            .join("scripts");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), content).unwrap();
     }
 
     fn write_function(cfg: &Config, name: &str, content: &str) {
-        let dir = cfg.data_dir.join("com.test.app").join("functions");
+        let dir = cfg.data_dir
+            .join("packages/com.test.app/plugins/gamer.yaml")
+            .join("functions");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), content).unwrap();
     }
@@ -817,7 +821,7 @@ steps:
     async fn gate_task_passes_with_matching_signature_and_rebuilds_overrides() {
         let (cfg, dir) = script_dir("gate-ok");
         write_script(&cfg, "daily.yaml", V3_SCRIPT);
-        let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = std::sync::Arc::new(PackageStore::open(&cfg).unwrap());
         let decls = probe_v3_script_decls(&scripts, "com.test.app/daily.yaml").unwrap();
         let signature = v3_param_signature(&decls);
         // 快照 = 完整覆盖（含覆盖值），并带 psig1 签名做过期门禁
@@ -851,7 +855,7 @@ steps:
     async fn gate_task_detects_stale_signature_and_rejects_invalid_snapshots() {
         let (cfg, dir) = script_dir("gate-stale");
         write_script(&cfg, "daily.yaml", V3_SCRIPT);
-        let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = std::sync::Arc::new(PackageStore::open(&cfg).unwrap());
         let (_, signature) = {
             let decls = probe_v3_script_decls(&scripts, "com.test.app/daily.yaml").unwrap();
             ((), v3_param_signature(&decls))
@@ -903,7 +907,7 @@ steps:
         write_script(&cfg, "broken.yaml", "version: 3\nparams: []\n");
         // v2 形态存量脚本：明确版本错误（v3-only 门禁，无 fallback）
         write_script(&cfg, "legacy.yaml", "params: []\nsteps: []\n");
-        let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = std::sync::Arc::new(PackageStore::open(&cfg).unwrap());
         match probe_v3_script_decls(&scripts, "com.test.app/missing.yaml") {
             Err(diags) => assert!(diags
                 .iter()
@@ -980,7 +984,7 @@ steps:
     async fn gate_task_v3_accepts_matching_signature_and_rebinds_snapshot() {
         let (cfg, dir) = script_dir("gate-v3");
         write_script(&cfg, "v3daily.yaml", V3_MIXED);
-        let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = std::sync::Arc::new(PackageStore::open(&cfg).unwrap());
         // 无 stored 签名：按当前声明重绑（新 Task 模型保存路径）
         let first = gate_task(
             &scripts,
@@ -1019,7 +1023,7 @@ steps:
     async fn gate_task_v3_missing_required_and_bad_types_are_structured() {
         let (cfg, dir) = script_dir("gate-v3-strict");
         write_script(&cfg, "v3req.yaml", V3_MIXED);
-        let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = std::sync::Arc::new(PackageStore::open(&cfg).unwrap());
         // 空快照：必填 secret 缺失（默认值参数不受影响）
         match gate_task(&scripts, "com.test.app/v3req.yaml", &serde_json::json!({}), None) {
             Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|d| d.code
@@ -1068,7 +1072,7 @@ steps:
             "lib.yaml",
             "greet:\n  params:\n    - 'text:who:称呼:\"玩家\"'\n    - 'int:times:次数:2'\n  steps:\n    - log: $who\nfarewell:\n  steps:\n    - log: bye\n",
         );
-        let scripts = std::sync::Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = std::sync::Arc::new(PackageStore::open(&cfg).unwrap());
         let decls = probe_v3_function_decls(&scripts, "com.test.app", "lib", Some("greet"))
             .expect("probe ok");
         assert_eq!(decls.len(), 2);

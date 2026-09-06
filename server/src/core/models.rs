@@ -326,11 +326,14 @@ fn validate_request_field(field: &'static str, value: &str) -> Result<(), ModelE
 
 /// Logical resource identity. This is deliberately not a `PathBuf`: the
 /// resolver that comes in a later phase owns host-path mapping.
+///
+/// Package Resource 寻址三元组：`(package_id, plugin_id, path)`。`path` 相对
+/// `packages/<package-id>/plugins/<plugin-id>/`；插件被 Core 限制在该前缀内。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ResourceId {
-    app_package: AppPackageId,
-    logical_path: String,
-    revision: Option<String>,
+    package: String,
+    plugin: String,
+    path: String,
 }
 
 impl<'de> Deserialize<'de> for ResourceId {
@@ -340,77 +343,105 @@ impl<'de> Deserialize<'de> for ResourceId {
     {
         #[derive(Deserialize)]
         struct ResourceIdFields {
-            app_package: AppPackageId,
-            logical_path: String,
-            revision: Option<String>,
+            package: String,
+            plugin: String,
+            path: String,
         }
 
         let fields = ResourceIdFields::deserialize(deserializer)?;
-        Self::with_revision(fields.app_package, fields.revision, fields.logical_path)
-            .map_err(serde::de::Error::custom)
+        Self::new(fields.package, fields.plugin, fields.path).map_err(serde::de::Error::custom)
     }
 }
 
 impl ResourceId {
     pub fn new(
-        app_package: AppPackageId,
-        logical_path: impl Into<String>,
+        package: impl Into<String>,
+        plugin: impl Into<String>,
+        path: impl Into<String>,
     ) -> Result<Self, ModelError> {
-        Self::with_revision(app_package, None::<String>, logical_path)
-    }
-
-    pub fn with_revision(
-        app_package: AppPackageId,
-        revision: Option<String>,
-        logical_path: impl Into<String>,
-    ) -> Result<Self, ModelError> {
-        let logical_path = validate_logical_path(&logical_path.into())?;
-        let revision = revision
-            .map(|value| validate_identifier("resource revision", &value))
-            .transpose()?;
+        let package = package.into();
+        let plugin = plugin.into();
+        let path = validate_logical_path(&path.into())?;
+        validate_scope_identifier("resource package", &package)?;
+        validate_scope_identifier("resource plugin", &plugin)?;
         Ok(Self {
-            app_package,
-            logical_path,
-            revision,
+            package,
+            plugin,
+            path,
         })
     }
 
-    /// Parse the canonical `<content-package>/<relative-resource>` composite
+    /// Parse the canonical `<package>/<plugin>/<relative-resource>` composite
     /// key into a logical id without constructing a host filesystem path.
     pub fn from_composite_key(key: &str) -> Result<Self, ModelError> {
-        let (package, logical_path) =
-            key.split_once('/').ok_or(ModelError::InvalidLogicalPath {
-                reason: "composite key must contain a package and resource path",
-            })?;
-        Self::new(AppPackageId::new(package)?, logical_path)
+        let mut parts = key.splitn(3, '/');
+        let package = parts.next().unwrap_or_default();
+        let plugin = parts.next().unwrap_or_default();
+        let path = parts.next().unwrap_or_default();
+        if plugin.is_empty() || path.is_empty() {
+            return Err(ModelError::InvalidLogicalPath {
+                reason: "composite key must contain a package, plugin and resource path",
+            });
+        }
+        Self::new(package, plugin, path)
     }
 
-    pub fn app_package(&self) -> &AppPackageId {
-        &self.app_package
+    pub fn package(&self) -> &str {
+        &self.package
     }
 
-    pub fn logical_path(&self) -> &str {
-        &self.logical_path
+    pub fn plugin(&self) -> &str {
+        &self.plugin
     }
 
-    pub fn revision(&self) -> Option<&str> {
-        self.revision.as_deref()
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
-    /// Canonical `<content-package>/<relative-resource>` composite key
-    /// (entrypoint / 日志展示 / 存储统一使用该形态).
+    /// Canonical `<package>/<plugin>/<relative-resource>` composite key
+    /// (日志展示 / 存储统一使用该形态).
     pub fn composite_key(&self) -> String {
-        format!("{}/{}", self.app_package, self.logical_path)
+        format!("{}/{}/{}", self.package, self.plugin, self.path)
     }
 }
 
 impl fmt::Display for ResourceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.revision() {
-            Some(revision) => write!(f, "{}@{revision}/{}", self.app_package, self.logical_path),
-            None => f.write_str(&self.composite_key()),
+        f.write_str(&self.composite_key())
+    }
+}
+
+/// package-id / plugin-id 语法（与 `crate::resources::validate_scope_id` 同规
+/// 则的本地实现——Core 契约层不反向依赖存储层）：`[a-z0-9][a-z0-9._-]*`，
+/// 禁 `.` / `..` / 纯点。
+fn validate_scope_identifier(kind: &'static str, value: &str) -> Result<(), ModelError> {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() || first.is_ascii_digit() => {}
+        _ => {
+            return Err(ModelError::InvalidLogicalPath {
+                reason: "package/plugin must start with a lowercase letter or digit",
+            })
         }
     }
+    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err(ModelError::InvalidLogicalPath {
+            reason: "package/plugin may only contain lowercase letters, digits and . _ -",
+        });
+    }
+    if value == "." || value == ".." || value.matches('.').count() == value.len() {
+        return Err(ModelError::InvalidLogicalPath {
+            reason: "package/plugin must not be a bare dot sequence",
+        });
+    }
+    if value.len() > 100 {
+        return Err(ModelError::InvalidLogicalPath {
+            reason: "package/plugin too long",
+        });
+    }
+    let _ = kind;
+    Ok(())
 }
 
 fn validate_logical_path(path: &str) -> Result<String, ModelError> {
@@ -443,32 +474,6 @@ fn validate_logical_path(path: &str) -> Result<String, ModelError> {
         });
     }
     Ok(path.to_owned())
-}
-
-/// A resolver-owned capability to a logical resource. It intentionally
-/// exposes the resource identity but no host path or file handle.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ResourceHandle(ResourceId);
-
-impl ResourceHandle {
-    pub fn new(id: ResourceId) -> Self {
-        Self(id)
-    }
-
-    pub fn id(&self) -> &ResourceId {
-        &self.0
-    }
-
-    pub fn into_id(self) -> ResourceId {
-        self.0
-    }
-}
-
-impl From<ResourceId> for ResourceHandle {
-    fn from(id: ResourceId) -> Self {
-        Self::new(id)
-    }
 }
 
 #[cfg(test)]
@@ -556,28 +561,32 @@ mod tests {
     }
 
     #[test]
-    fn resource_id_is_logical_and_handle_does_not_expose_a_host_path() {
-        let id = ResourceId::with_revision(
-            AppPackageId::new("official.example").unwrap(),
-            Some("1.2.0".to_string()),
+    fn resource_id_is_logical_and_plugin_scoped() {
+        let id = ResourceId::new(
+            "official.example",
+            "gamer.yaml",
             "templates/status.png",
         )
         .unwrap();
-        let handle = ResourceHandle::from(id.clone());
 
-        assert_eq!(id.app_package().as_str(), "official.example");
-        assert_eq!(id.logical_path(), "templates/status.png");
-        assert_eq!(id.revision(), Some("1.2.0"));
-        assert_eq!(id.composite_key(), "official.example/templates/status.png");
-        assert_eq!(handle.id(), &id);
+        assert_eq!(id.package(), "official.example");
+        assert_eq!(id.plugin(), "gamer.yaml");
+        assert_eq!(id.path(), "templates/status.png");
+        assert_eq!(
+            id.composite_key(),
+            "official.example/gamer.yaml/templates/status.png"
+        );
     }
 
     #[test]
     fn resource_id_composite_key_rejects_traversal_without_pathbuf() {
-        let id = ResourceId::from_composite_key("official.example/templates/status.png").unwrap();
-        assert_eq!(id.logical_path(), "templates/status.png");
+        let id = ResourceId::from_composite_key("official.example/gamer.yaml/templates/status.png")
+            .unwrap();
+        assert_eq!(id.path(), "templates/status.png");
         assert!(ResourceId::from_composite_key("official.example/../secret.png").is_err());
         assert!(ResourceId::from_composite_key("official.example\\secret.png").is_err());
+        // 插件维度必填：两段式旧形态不再合法
+        assert!(ResourceId::from_composite_key("official.example/only-path.png").is_err());
     }
 
     #[test]
@@ -585,6 +594,8 @@ mod tests {
         assert!(DeviceId::new(" ").is_err());
         assert!(AppPackageId::new("official/example").is_err());
         assert!(AndroidPackageName::new("com.example\n.game").is_err());
-        assert!(ResourceId::new(AppPackageId::new("official.example").unwrap(), "").is_err());
+        assert!(ResourceId::new("official.example", "gamer.yaml", "").is_err());
+        // 插件维度同样走严格 id 语法（隔离前缀不可被构造出来）
+        assert!(ResourceId::new("official.example", "..", "x").is_err());
     }
 }

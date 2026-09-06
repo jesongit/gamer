@@ -17,7 +17,8 @@ use crate::extensions::gamer_yaml::task_params::{
     is_known_v3_type, normalize_v3_default_json, probe_v3_function_decls, probe_v3_script_decls,
     v3_param_signature, V3ParamDecl,
 };
-use crate::resources::{ResourceKind as RK, ResourceStore};
+use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
+use crate::resources::PackageStore;
 
 /// 描述失败（经 `scheduler::EntrypointDescribeError` 透传到 API 边界）。
 #[derive(Debug, Clone)]
@@ -42,11 +43,11 @@ impl DescribeError {
 
 /// [`crate::scheduler::EntrypointDescriber`] 的 gamer.yaml 实现（资源存储视图）。
 pub(crate) struct StoreEntrypointDescriber {
-    scripts: Arc<ResourceStore>,
+    scripts: Arc<PackageStore>,
 }
 
 impl StoreEntrypointDescriber {
-    pub(crate) fn new(scripts: Arc<ResourceStore>) -> Self {
+    pub(crate) fn new(scripts: Arc<PackageStore>) -> Self {
         Self { scripts }
     }
 }
@@ -71,7 +72,7 @@ impl crate::scheduler::EntrypointDescriber for StoreEntrypointDescriber {
 /// `<pkg>/<文件>.yaml#<函数名>`（函数库内函数）。返回契约 §7 内层载荷
 /// `{kind, format, schema, signature}`（API 层补 runner_id/entrypoint 外壳）。
 pub(crate) fn describe_entrypoint(
-    scripts: &ResourceStore,
+    scripts: &PackageStore,
     entrypoint: &str,
 ) -> Result<Value, DescribeError> {
     let entrypoint = entrypoint.trim();
@@ -82,8 +83,8 @@ pub(crate) fn describe_entrypoint(
     }
 }
 
-fn describe_script(scripts: &ResourceStore, entrypoint: &str) -> Result<Value, DescribeError> {
-    match scripts.get_text(RK::Scripts, entrypoint) {
+fn describe_script(scripts: &PackageStore, entrypoint: &str) -> Result<Value, DescribeError> {
+    match script_entry(scripts, entrypoint) {
         Ok(Some(_)) => {}
         Ok(None) => {
             return Err(DescribeError::NotFound {
@@ -103,7 +104,7 @@ fn describe_script(scripts: &ResourceStore, entrypoint: &str) -> Result<Value, D
 }
 
 fn describe_function(
-    scripts: &ResourceStore,
+    scripts: &PackageStore,
     base: &str,
     function: &str,
     entrypoint: &str,
@@ -119,7 +120,7 @@ fn describe_function(
         .trim_end_matches(".yaml")
         .trim_end_matches(".yml");
     let rel = format!("{pkg}/{file}.yaml");
-    match scripts.get_text(RK::Functions, &rel) {
+    match function_entry(scripts, &rel) {
         Ok(Some(_)) => {}
         Ok(None) => return Err(DescribeError::NotFound { resource: rel }),
         Err(error) => {
@@ -243,7 +244,9 @@ mod tests {
     }
 
     fn write(cfg: &Config, kind_dir: &str, name: &str, content: &str) {
-        let dir = cfg.data_dir.join("com.test.app").join(kind_dir);
+        let dir = cfg.data_dir
+            .join("packages/com.test.app/plugins/gamer.yaml")
+            .join(kind_dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), content).unwrap();
     }
@@ -257,7 +260,7 @@ mod tests {
             "v3.yaml",
             "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - name: count\n    type: int\n    default: 3\nsteps:\n  - log: $msg\n",
         );
-        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = Arc::new(PackageStore::open(&cfg).unwrap());
 
         let v3 = describe_entrypoint(&scripts, "com.test.app/v3.yaml").unwrap();
         assert_eq!(v3["kind"], "script");
@@ -286,7 +289,7 @@ mod tests {
             "lib.yaml",
             "greet:\n  params:\n    - 'text:who:称呼:\"玩家\"'\n    - 'int:times:次数:2'\n  steps:\n    - log: $who\nfarewell:\n  steps:\n    - log: bye\n",
         );
-        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = Arc::new(PackageStore::open(&cfg).unwrap());
 
         let greet = describe_entrypoint(&scripts, "com.test.app/lib.yaml#greet").unwrap();
         assert_eq!(greet["kind"], "function");
@@ -367,7 +370,7 @@ mod tests {
             "v3.yaml",
             "version: 3\nsteps:\n  - log: ok\n",
         );
-        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = Arc::new(PackageStore::open(&cfg).unwrap());
         let describer = StoreEntrypointDescriber::new(scripts);
         let ok = describer.describe("com.test.app/v3.yaml").unwrap();
         assert_eq!(ok["kind"], "script");

@@ -85,8 +85,10 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     - log: $who
 ",
     });
-    let resp = post_json(&t, &sid, "/api/apps/com.test.app/resources/functions", body).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    let name = body["name"].as_str().unwrap().to_string();
+    let content = body["content"].as_str().unwrap().to_string();
+    let resp = put_package_text(&t, &sid, "com.test.app", "gamer.yaml", &format!("functions/{name}.yaml"), &content).await;
+    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
 
     // 未知函数文件 → 结构化 not_found（runner 边界判定，400 透传）
     let resp = post_json(
@@ -238,8 +240,10 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
         "name": "runme.yaml",
         "content": "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\nsteps:\n  - log: $msg\n",
     });
-    let resp = post_json(&t, &sid, "/api/apps/com.test.app/resources/scripts", body).await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "{:?}", json_body(resp).await);
+    let name = body["name"].as_str().unwrap().to_string();
+    let content = body["content"].as_str().unwrap().to_string();
+    let resp = put_package_text(&t, &sid, "com.test.app", "gamer.yaml", &format!("scripts/{name}"), &content).await;
+    assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let resp = post_json(
         &t,
         &sid,

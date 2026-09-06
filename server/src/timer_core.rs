@@ -269,11 +269,11 @@ pub struct PackagePreset {
     pub schedule: TaskSchedule,
 }
 
-/// Deterministic publish id for a package-provided preset. Re-installing or
-/// re-activating the same package + preset name therefore updates in place
-/// instead of duplicating a row.
-pub fn package_preset_id(app_package: &AppPackageId, name: &str) -> String {
-    format!("pkg:{}/{}", app_package.as_str(), name.trim())
+/// Deterministic publish id for a package-provided preset:
+/// `<package-id>:<名>`. Re-importing / overwriting the same package + preset
+/// name therefore updates in place instead of duplicating a row.
+pub fn package_preset_id(package_id: &str, name: &str) -> String {
+    format!("{}:{}", package_id, name.trim())
 }
 
 /// System wall clock boundary.  Tests can inject a deterministic clock.
@@ -1286,8 +1286,9 @@ impl TimerCore {
         Ok(())
     }
 
-    /// App Package lifecycle hook.  It intentionally changes state only; the
-    /// persisted user schedule remains available for a later resume.
+    /// Package deletion hook (legacy App Package uninstall semantics).  It
+    /// intentionally changes state only; the persisted user schedule remains
+    /// available for a later resume.
     pub async fn on_app_package_uninstalled(&self, package: &str) -> anyhow::Result<usize> {
         // Enumerate first so a repeated uninstall notification is a no-op and
         // cancelled tasks are not accidentally changed into suspended tasks.
@@ -1402,18 +1403,18 @@ impl TimerCore {
     }
 
     /// Publish (upsert) package-provided task presets. Ids are deterministic
-    /// per source package + preset name, so repeated activation of the same or
-    /// a newer package version updates rows in place and never duplicates.
-    /// Preset rows are independent of `Task`: uninstalling a package
+    /// per source package + preset name (`<package-id>:<名>`), so repeated
+    /// import / overwrite of the same package updates rows in place and never
+    /// duplicates. Preset rows are independent of `Task`: deleting a package
     /// suspends user tasks but deliberately keeps preset records.
     pub async fn publish_package_presets(
         &self,
-        app_package: &AppPackageId,
+        package_id: &str,
         presets: &[PackagePreset],
     ) -> anyhow::Result<usize> {
         let mut published = 0;
         for preset in presets {
-            let id = package_preset_id(app_package, &preset.name);
+            let id = package_preset_id(package_id, &preset.name);
             // Preserve the original created_at across re-publication so the
             // listing order stays stable across package reinstalls.
             let created_at = self
@@ -1424,7 +1425,7 @@ impl TimerCore {
                 .unwrap_or_else(Utc::now);
             let task_preset = TaskPreset {
                 id,
-                app_package: app_package.as_str().to_string(),
+                app_package: package_id.to_string(),
                 name: preset.name.clone(),
                 runner_id: preset.runner_id.clone(),
                 entrypoint: preset.entrypoint.clone(),
@@ -2189,7 +2190,7 @@ mod tests {
     async fn package_preset_publish_is_deterministic_and_idempotent() {
         let (db, dir) = test_db("package-presets");
         let core = TimerCore::new(db.clone());
-        let package = AppPackageId::new("official.example").unwrap();
+        let package = "official.example";
         let schedule =
             TaskSchedule::new("cron", serde_json::json!({"expression": "0 8 * * *"})).unwrap();
         let preset = PackagePreset {
@@ -2201,22 +2202,22 @@ mod tests {
         };
 
         let published = core
-            .publish_package_presets(&package, std::slice::from_ref(&preset))
+            .publish_package_presets(package, std::slice::from_ref(&preset))
             .await
             .unwrap();
         assert_eq!(published, 1);
         // Same source package + name → in-place update, never a second row.
-        core.publish_package_presets(&package, std::slice::from_ref(&preset))
+        core.publish_package_presets(package, std::slice::from_ref(&preset))
             .await
             .unwrap();
         let presets = core.package_presets("official.example").await.unwrap();
         assert_eq!(presets.len(), 1);
-        assert_eq!(presets[0].id, package_preset_id(&package, "每日领取"));
+        assert_eq!(presets[0].id, package_preset_id(package, "每日领取"));
         assert_eq!(presets[0].schedule, schedule);
-        assert_ne!(presets[0].id, package_preset_id(&package, "other"));
+        assert_ne!(presets[0].id, package_preset_id(package, "other"));
         // A different source package never collides.
-        let other = AppPackageId::new("official.other").unwrap();
-        core.publish_package_presets(&other, std::slice::from_ref(&preset))
+        let other = "official.other";
+        core.publish_package_presets(other, std::slice::from_ref(&preset))
             .await
             .unwrap();
         assert_eq!(

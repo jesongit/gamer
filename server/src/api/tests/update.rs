@@ -53,19 +53,28 @@ mod update_flow_tests {
     }
 
     async fn save_task_script(t: &UpdateRig, sid: &str, name: &str, content: &str) {
-        let resp = post_json(
-            t,
-            sid,
-            "/api/apps/com.test.app/resources/scripts",
-            serde_json::json!({
-                "name": name,
-                "content": content,
-            }),
-        )
-        .await;
+        // 建包（幂等；已存在 409 忽略）
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri("/api/packages")
+            .header(axum::http::header::COOKIE, sid)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"id":"com.test.app"}"#))
+            .unwrap();
+        let _ = t.app.clone().oneshot(request).await.unwrap();
+        // PUT 文本资源（force = 夹具直写语义）
+        let body = serde_json::json!({ "content": content, "force": true }).to_string();
+        let request = HttpRequest::builder()
+            .method("PUT")
+            .uri(&format!("/api/packages/com.test.app/plugins/gamer.yaml/resources/scripts/{name}"))
+            .header(axum::http::header::COOKIE, sid)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = t.app.clone().oneshot(request).await.unwrap();
         let status = resp.status();
         let response_body = json_body(resp).await;
-        assert_eq!(status, StatusCode::CREATED, "{response_body}");
+        assert_eq!(status, StatusCode::OK, "{response_body}");
     }
 
     /// 可注入 viewer 数的 workload 提供者（QA-006 viewer 维度）
@@ -135,7 +144,7 @@ mod update_flow_tests {
             ..Default::default()
         };
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
+        let scripts = Arc::new(crate::resources::PackageStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
@@ -453,6 +462,11 @@ mod update_flow_tests {
     async fn update_transaction_does_not_block_normal_business() {
         let t = build_update_rig("txn-business");
         let sid = sid_of(&t).await;
+        // 预建包：资源列表语义 = 包必须存在（dormant 插件目录为空列表）
+        save_task_script(&t, &sid, "pre-update.yaml", "version: 3
+steps:
+  - log: 'pre'
+").await;
         t.controller.set_status(staged_status("upd-busy"));
         let _release = t.controller.hold_prepare();
 
@@ -470,7 +484,7 @@ mod update_flow_tests {
         for uri in [
             "/api/devices",
             "/api/tasks",
-            "/api/apps/com.test.app/resources/scripts",
+            "/api/packages/com.test.app/plugins/gamer.yaml/resources",
             "/api/system/info",
         ] {
             let resp = get_json(&t, &sid, uri).await;

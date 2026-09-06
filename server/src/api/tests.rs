@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::device::DeviceManager;
-use crate::matcher;
-use crate::resources::ResourceStore;
+use crate::resources::PackageStore;
 use crate::scheduler::Scheduler;
 use crate::store::{Db, Device, ScreenMode};
 use axum::body::Body;
@@ -14,12 +13,10 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Router;
 
-use super::common::{BODY_LIMIT_JSON, BODY_LIMIT_PACKAGE_INSTALL};
 use super::devices::{
     parse_ctl, session_affecting_change, validate_device_req, ControlReq, CreateDeviceReq,
 };
 use super::logs::clamp_log_limit;
-use super::resources::{compose_region_suffix, validate_short_name, validate_template_name};
 use super::tasks::{build_task, RunnerSpecDto, SaveTaskReq};
 use super::{auth, build_router, ApiError};
 use crate::timer_core::{ScheduleRegistry, TaskSchedule};
@@ -108,7 +105,7 @@ mod sec_tests {
             ..Default::default()
         };
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = Arc::new(PackageStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
@@ -143,7 +140,7 @@ mod sec_tests {
             ..Default::default()
         };
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = Arc::new(PackageStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
@@ -158,7 +155,7 @@ mod sec_tests {
         db: Db,
         devices: Arc<DeviceManager>,
         cfg: Config,
-        scripts: Arc<ResourceStore>,
+        scripts: Arc<PackageStore>,
         viewers: crate::webrtc::ViewerMap,
         credential: auth::Credential,
         auth_cfg: crate::config::AuthConfig,
@@ -312,35 +309,6 @@ mod sec_tests {
         buf
     }
 
-    fn pixel_bomb_png(width: u32, height: u32) -> Vec<u8> {
-        fn crc32(data: &[u8]) -> u32 {
-            let mut crc: u32 = 0xFFFF_FFFF;
-            for &b in data {
-                crc ^= b as u32;
-                for _ in 0..8 {
-                    let mask = (crc & 1).wrapping_neg();
-                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-                }
-            }
-            !crc
-        }
-        let mut out = vec![137, 80, 78, 71, 13, 10, 26, 10];
-        let ihdr = [
-            13u32.to_be_bytes().as_slice(),
-            b"IHDR".as_slice(),
-            &width.to_be_bytes()[..],
-            &height.to_be_bytes()[..],
-            &[8u8, 0, 0, 0, 0],
-        ]
-        .concat();
-        out.extend_from_slice(&ihdr);
-        out.extend_from_slice(&crc32(&ihdr[4..]).to_be_bytes());
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(b"IEND");
-        out.extend_from_slice(&crc32(b"IEND").to_be_bytes());
-        out
-    }
-
     async fn send_json_login(app: &Router, remote: Option<&str>, body: &str) -> HttpResponse<Body> {
         send(
             app,
@@ -377,19 +345,40 @@ mod sec_tests {
         ]
     }
 
-    fn valid_template_png() -> Vec<u8> {
-        let mut img = image::GrayImage::new(8, 8);
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            p.0[0] = if (x + y) % 2 == 0 { 32 } else { 224 };
+    /// Package API 资源直写夹具：建包（幂等）+ PUT 文本资源（force = 夹具
+    /// 语义直写，等价旧「绕过保存期校验」的盘上形态）。
+    async fn put_package_text(
+        t: &TestApp,
+        sid: &str,
+        pkg: &str,
+        plugin: &str,
+        path: &str,
+        content: &str,
+    ) -> HttpResponse<Body> {
+        let _ = post_json(t, sid, "/api/packages", serde_json::json!({ "id": pkg })).await;
+        send(
+            &t.app,
+            req(
+                "PUT",
+                &format!("/api/packages/{pkg}/plugins/{plugin}/resources/{path}"),
+                None,
+                &json_headers(sid.to_string()),
+                Some(
+                    serde_json::json!({ "content": content, "force": true }).to_string(),
+                ),
+            ),
+        )
+        .await
+    }
+
+    /// 模板文件名规则锁定（原 api/resources.rs 校验器随六目录模型退役；
+    /// 规则本体收口到 PackageStore 资源路径校验）。
+    fn validate_template_name(name: &str) -> Result<String, ()> {
+        let segs = crate::resources::sanitize_rel_path(name).map_err(|_| ())?;
+        if segs.len() != 1 || name.len() > 255 {
+            return Err(());
         }
-        let mut bytes = Vec::new();
-        image::DynamicImage::ImageLuma8(img)
-            .write_to(
-                &mut std::io::Cursor::new(&mut bytes),
-                image::ImageFormat::Png,
-            )
-            .unwrap();
-        bytes
+        Ok(name.to_string())
     }
 
     async fn post_json(
@@ -422,9 +411,6 @@ mod sec_tests {
     mod auth_tests {
         include!("tests/auth.rs");
     }
-    mod resources_tests {
-        include!("tests/resources.rs");
-    }
     mod keymaps_tests {
         include!("tests/keymaps.rs");
     }
@@ -446,16 +432,7 @@ mod sec_tests {
     mod extensions_tests {
         include!("tests/extensions.rs");
     }
-    mod app_packages_tests {
-        include!("tests/app_packages.rs");
-    }
-    mod app_packages_export_tests {
-        include!("tests/app_packages_export.rs");
-    }
-    mod app_packages_edit_tests {
-        include!("tests/app_packages_edit.rs");
-    }
-    mod app_packages_lifecycle_tests {
-        include!("tests/app_packages_lifecycle.rs");
+    mod packages_tests {
+        include!("tests/packages.rs");
     }
 }

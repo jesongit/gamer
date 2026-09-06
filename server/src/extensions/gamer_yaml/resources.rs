@@ -1,41 +1,75 @@
 //! gamer.yaml 的资源内容钩子（P11.3 / P11.6，v3-only）。
 //!
-//! Core [`crate::resources::ResourceStore`] 只懂目录类别 + 字节/文本 + 内容
-//! 版本短码 + 原子写；本模块把 YAML 内容语义挂回通用层：
+//! Core [`crate::resources::PackageStore`] 只懂 PackageResource 三元组 +
+//! 字节/文本 + 内容版本短码 + 原子写；本模块把 YAML 内容语义挂回通用层
+//! （gamer.yaml 的插件数据根 = `packages/<pkg>/plugins/gamer.yaml/`，内部
+//! 子目录布局 scripts/ functions/ templates/ 归插件定义）：
 //!
-//! - [`YamlScriptValidator`]（scripts kind）：保存/更新前的 v3 校验
-//!   （`version: 3` 判别 + surface 解析/lowering；非 v3 源报版本门禁诊断）；
-//! - [`YamlFunctionValidator`]（functions kind）：函数库 bare-map 严格校验 +
-//!   顶层函数名清单注记（`functions` 字段，列表/读取透传给前端）；
-//! - [`YamlTemplateHandler`]（templates kind）：重命名前同步改写分区脚本/
-//!   函数中的模板引用（v3 AST 改写，不做全局文本替换，失败整体回滚；
-//!   非 v3 存量源不可解析 → 跳过不阻塞重命名）；
-//! - [`YamlStagedValidator`]：App Package 导出/提取 preflight 的 staged 集合
-//!   校验。
+//! - [`YamlResourceHandler`]（按 plugin-id 注册）：保存/更新前的 v3 校验
+//!   （`scripts/` → `version: 3` 判别 + surface 解析/lowering，非 v3 源报版本
+//!   门禁诊断；`functions/` → 函数库 bare-map 严格校验）+ 函数名清单注记 +
+//!   模板重命名前的引用同步改写（v3 AST 改写，失败整体回滚；非 v3 存量源
+//!   跳过不阻塞重命名）。
 //!
 //! 组合根引导期调用 [`register_resource_handlers`]；未注册时 Core 保存不做
 //! 内容校验（裸 Core 语义，§8.9 验收锚点）。
+//!
+//! T2a 备注：脚本/函数资源寻址仍以 `<package>/<rel>` 字符串 id 承载（任务
+//! entrypoint wire 不变），经 [`script_entry`] / [`function_entry`] 机械映射到
+//! 新存储；Package 运行上下文迁移由 T2a 收口。
 
 use std::sync::Arc;
 
 use serde_json::json;
 
+use crate::extensions::gamer_yaml::yaml_extension::YAML_EXTENSION_ID;
 use crate::extensions::gamer_yaml::yaml_vnext;
 use crate::resources::{
-    ResourceKind, ResourceKindHandler, ResourceStore, SaveValidation, StagedResourceValidator,
-    Templates,
+    PackageStore, ResourceEntry, ResourceHandler, SaveValidation,
 };
 
-/// 注册 gamer.yaml 的全部资源内容钩子（组合根引导期调用）。
-pub fn register_resource_handlers(store: &ResourceStore) {
-    store.register_handler(ResourceKind::Scripts, Arc::new(YamlScriptValidator));
-    store.register_handler(ResourceKind::Functions, Arc::new(YamlFunctionValidator));
-    store.register_handler(Templates, Arc::new(YamlTemplateHandler));
-    store.set_staged_validator(Arc::new(YamlStagedValidator));
+/// 注册 gamer.yaml 的资源内容钩子（组合根引导期调用）。
+pub fn register_resource_handlers(store: &PackageStore) {
+    store.register_handler(YAML_EXTENSION_ID, Arc::new(YamlResourceHandler));
 }
 
 // ---------------------------------------------------------------------------
-// 保存/更新校验（scripts / functions kind，v3-only）
+// 读取助手：`<pkg>/<rel>` 资源 id → scripts/ / functions/ 插件路径
+//（runner_adapter / task_params / entrypoint_descriptor / timer_yaml 共用）
+// ---------------------------------------------------------------------------
+
+/// 拆分 `<pkg>/<rel>` 形态的资源 id（首段 = package id）。
+fn split_resource_id(id: &str) -> Option<(String, String)> {
+    let (pkg, rel) = id.split_once('/')?;
+    Some((pkg.trim().to_string(), rel.trim().to_string()))
+}
+
+/// 脚本资源读取（`scripts/<rel>`）。
+pub(crate) fn script_entry(
+    store: &PackageStore,
+    id: &str,
+) -> anyhow::Result<Option<ResourceEntry>> {
+    match split_resource_id(id) {
+        Some((pkg, rel)) => store.read_text(&pkg, YAML_EXTENSION_ID, &format!("scripts/{rel}")),
+        None => Ok(None),
+    }
+}
+
+/// 函数库文件读取（`functions/<rel>`）。
+pub(crate) fn function_entry(
+    store: &PackageStore,
+    id: &str,
+) -> anyhow::Result<Option<ResourceEntry>> {
+    match split_resource_id(id) {
+        Some((pkg, rel)) => {
+            store.read_text(&pkg, YAML_EXTENSION_ID, &format!("functions/{rel}"))
+        }
+        None => Ok(None),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 保存/更新校验（scripts / functions 路径前缀，v3-only）
 // ---------------------------------------------------------------------------
 
 /// v3 脚本校验：`yaml_vnext::load`（version 门禁 + surface 解析 + lowering）。
@@ -46,23 +80,14 @@ fn validate_v3_script(source: &str) -> Result<(), serde_json::Value> {
         .map_err(|diagnostics| serde_json::to_value(diagnostics).unwrap_or_default())
 }
 
-/// scripts kind 校验器（v3-only，与运行链路同源）。
-struct YamlScriptValidator;
-
-impl ResourceKindHandler for YamlScriptValidator {
-    fn validate_save(&self, req: SaveValidation<'_>) -> Result<(), serde_json::Value> {
-        validate_v3_script(req.content)
-    }
-}
-
-/// 函数库文件校验（v3 bare-map；保存边界与导出/提取 preflight 共用）。
+/// 函数库文件校验（v3 bare-map；保存边界与 preflight 共用）。
 /// 校验含：函数名唯一（映射键承载）+ 合法字符集/非保留字、记录只允许
 /// params/steps、steps 合法 v3 语法（call 裸 target 在解析期报错，与运行前
 /// 一致）。
 pub(crate) fn validate_function_library_file(
-    _store: &ResourceStore,
-    _app: &str,
-    _id: &str,
+    _store: &PackageStore,
+    _package: &str,
+    _path: &str,
     content: &str,
 ) -> Result<(), serde_json::Value> {
     yaml_vnext::parse_function_library(content)
@@ -70,18 +95,29 @@ pub(crate) fn validate_function_library_file(
         .map_err(|diagnostics| serde_json::to_value(diagnostics).unwrap_or_default())
 }
 
-/// functions kind 校验器：v3 bare-map 验收 + 函数名清单注记。
-struct YamlFunctionValidator;
+/// gamer.yaml 插件资源的统一内容钩子：按路径前缀分发到 v3 校验器。
+struct YamlResourceHandler;
 
-impl ResourceKindHandler for YamlFunctionValidator {
+impl ResourceHandler for YamlResourceHandler {
     fn validate_save(&self, req: SaveValidation<'_>) -> Result<(), serde_json::Value> {
-        validate_function_library_file(req.store, req.app, req.id, req.content)
+        if let Some(_rel) = req.path.strip_prefix("scripts/") {
+            return validate_v3_script(req.content);
+        }
+        if let Some(_rel) = req.path.strip_prefix("functions/") {
+            return validate_function_library_file(req.store, req.package, req.path, req.content);
+        }
+        // templates/ 等其余路径不做内容校验（字节内容由运行链路解码校验）
+        Ok(())
     }
 
     fn annotate(&self, entries: &[(String, String)]) -> serde_json::Map<String, serde_json::Value> {
+        // 只注记函数库文件（函数名清单 + 文件短路径）
         let mut out = serde_json::Map::new();
-        for (id, content) in entries {
-            let short = id
+        for (path, content) in entries {
+            let Some(rel) = path.strip_prefix("functions/") else {
+                continue;
+            };
+            let short = rel
                 .trim()
                 .trim_end_matches(".yaml")
                 .trim_end_matches(".yml")
@@ -95,14 +131,33 @@ impl ResourceKindHandler for YamlFunctionValidator {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            out.insert(id.clone(), json!({ "functions": functions, "file": short }));
+            out.insert(path.clone(), json!({ "functions": functions, "file": short }));
         }
         out
+    }
+
+    fn before_rename(
+        &self,
+        store: &PackageStore,
+        package: &str,
+        plugin: &str,
+        old_path: &str,
+        new_path: &str,
+    ) -> anyhow::Result<()> {
+        // 模板重命名 → 同步改写当前包 scripts/ 与 functions/ 中的模板引用；
+        // 非模板路径不处理
+        let _ = plugin;
+        if old_path.starts_with("templates/") && new_path.starts_with("templates/") {
+            let old_name = old_path.strip_prefix("templates/").unwrap_or(old_path);
+            let new_name = new_path.strip_prefix("templates/").unwrap_or(new_path);
+            rename_template_references(store, package, old_name, new_name).map(|_| ())?;
+        }
+        Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// templates kind：重命名前改写分区脚本/函数中的模板引用
+// templates 重命名：改写包内脚本/函数中的模板引用
 // ---------------------------------------------------------------------------
 
 /// 与前端模板短名规则保持一致：去掉颜色标记 `#1` 和搜索区域 `#...`，
@@ -137,7 +192,7 @@ fn template_short_name(name: &str) -> String {
     }
 }
 
-/// 重命名模板文件，并同步改写当前分区 scripts/ 与 functions/ 中的模板引用。
+/// 重命名模板文件，并同步改写当前包 scripts/ 与 functions/ 中的模板引用。
 ///
 /// 引用迁移走 v3 AST 改写（[`yaml_vnext::rename_template_source`] /
 /// [`yaml_vnext::rename_template_in_function_library`]），不做全局文本替换，
@@ -145,21 +200,26 @@ fn template_short_name(name: &str) -> String {
 /// 不阻塞重命名；v3 源改写失败（语法损坏）则整体报错。所有资源先生成新内容，
 /// 再开始落盘，写入失败时回滚已改写的资源。
 fn rename_template_references(
-    store: &ResourceStore,
+    store: &PackageStore,
     package: &str,
     old_name: &str,
     new_name: &str,
 ) -> anyhow::Result<usize> {
-    let old_path = store.kind_dir(package, Templates).join(old_name);
-    let template_bytes = std::fs::read(&old_path)?;
+    let old_path = format!("templates/{old_name}");
+    let template_bytes = store
+        .read_binary(package, YAML_EXTENSION_ID, &old_path)?
+        .ok_or_else(|| anyhow::anyhow!("模板不存在: {old_path}"))?;
     let old_short = template_short_name(old_name);
     let new_short = template_short_name(new_name);
-    // (kind, rel, 原内容, 新内容)
-    let mut rewrites: Vec<(ResourceKind, String, String, String)> = Vec::new();
+    // (path, 原内容, 新内容)
+    let mut rewrites: Vec<(String, String, String)> = Vec::new();
 
-    for script in store.list_text(package, ResourceKind::Scripts)? {
+    for script in store.list(package, YAML_EXTENSION_ID, "scripts")? {
+        let Some(content) = script.content.as_deref() else {
+            continue; // 非 UTF-8 附件不参与引用改写
+        };
         let rewritten = yaml_vnext::rename_template_source(
-            &script.content,
+            content,
             old_name,
             &old_short,
             new_name,
@@ -176,20 +236,18 @@ fn rename_template_references(
             )
         })?;
         if let Some((content, _changed)) = rewritten {
-            rewrites.push((
-                ResourceKind::Scripts,
-                script.name.clone(),
-                script.content.clone(),
-                content,
-            ));
+            rewrites.push((script.path.clone(), script.content.clone().unwrap(), content));
         }
     }
 
-    for function in store.list_text(package, ResourceKind::Functions)? {
+    for function in store.list(package, YAML_EXTENSION_ID, "functions")? {
+        let Some(content) = function.content.as_deref() else {
+            continue;
+        };
         // 非 v3 存量函数库解析失败 → 跳过（与脚本侧 skip 语义一致）
         let rewritten =
             yaml_vnext::rename_template_in_function_library(
-                &function.content,
+                content,
                 old_name,
                 &old_short,
                 new_name,
@@ -198,104 +256,53 @@ fn rename_template_references(
             .ok()
             .flatten();
         if let Some((content, _changed)) = rewritten {
-            rewrites.push((
-                ResourceKind::Functions,
-                function.name.clone(),
-                function.content.clone(),
-                content,
-            ));
+            rewrites.push((function.path.clone(), function.content.clone().unwrap(), content));
         }
     }
 
     // 先写全部引用改写（失败回滚），最后写新模板 + 删旧模板（失败回滚）
-    let mut written: Vec<(ResourceKind, String, String)> = Vec::new();
-    for (kind, rel, original, content) in &rewrites {
-        if let Err(error) = store.write_text_direct(*kind, package, rel, content) {
-            for (kind, rel, original) in written.iter().rev() {
-                let _ = store.write_text_direct(*kind, package, rel, original);
+    let mut written: Vec<(String, String)> = Vec::new();
+    for (path, original, content) in &rewrites {
+        if let Err(error) =
+            store.write_text_unchecked(package, YAML_EXTENSION_ID, path, content)
+        {
+            for (path, original) in written.iter().rev() {
+                let _ = store.write_text_unchecked(package, YAML_EXTENSION_ID, path, original);
             }
             return Err(error);
         }
-        written.push((*kind, rel.clone(), original.clone()));
+        written.push((path.clone(), original.clone()));
     }
 
-    let new_path = store.kind_dir(package, Templates).join(new_name);
-    let dir = store.kind_dir(package, Templates);
-    if let Some(parent) = new_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if let Err(error) = crate::core::fs::atomic_write(&new_path, &template_bytes) {
-        for (kind, rel, original) in written.iter().rev() {
-            let _ = store.write_text_direct(*kind, package, rel, original);
+    let new_path = format!("templates/{new_name}");
+    if let Err(error) = store.write_binary(
+        package,
+        YAML_EXTENSION_ID,
+        &new_path,
+        &template_bytes,
+        None,
+        false,
+    ) {
+        for (path, original) in written.iter().rev() {
+            let _ = store.write_text_unchecked(package, YAML_EXTENSION_ID, path, original);
         }
         return Err(error);
     }
-    if let Err(error) = std::fs::remove_file(&old_path) {
-        let _ = std::fs::remove_file(&new_path);
-        for (kind, rel, original) in written.iter().rev() {
-            let _ = store.write_text_direct(*kind, package, rel, original);
+    if let Err(error) = store.delete_resource(package, YAML_EXTENSION_ID, &old_path) {
+        let _ = store.delete_resource(package, YAML_EXTENSION_ID, &new_path);
+        for (path, original) in written.iter().rev() {
+            let _ = store.write_text_unchecked(package, YAML_EXTENSION_ID, path, original);
         }
-        return Err(error.into());
+        return Err(error);
     }
-    let _ = dir;
     Ok(rewrites.len())
-}
-
-struct YamlTemplateHandler;
-
-impl ResourceKindHandler for YamlTemplateHandler {
-    fn before_rename(
-        &self,
-        store: &ResourceStore,
-        app: &str,
-        old: &str,
-        new: &str,
-    ) -> anyhow::Result<()> {
-        rename_template_references(store, app, old, new).map(|_| ())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 包导出/提取 preflight：staged 集合校验
-// ---------------------------------------------------------------------------
-
-struct YamlStagedValidator;
-
-impl StagedResourceValidator for YamlStagedValidator {
-    fn validate_staged(
-        &self,
-        store: &ResourceStore,
-        app: &str,
-        entries: &[(ResourceKind, String, String)],
-    ) -> Vec<String> {
-        let mut problems = Vec::new();
-        for (kind, rel, content) in entries {
-            let result = match kind {
-                ResourceKind::Scripts => validate_v3_script(content),
-                // 函数库：v3 bare-map（与保存边界同源）
-                ResourceKind::Functions => {
-                    validate_function_library_file(store, app, rel, content)
-                }
-                _ => Ok(()),
-            };
-            if let Err(diagnostics) = result {
-                problems.push(format!(
-                    "{}/{rel}: {}",
-                    kind.as_str(),
-                    crate::resources::format_diagnostics_value(&diagnostics)
-                ));
-            }
-        }
-        problems
-    }
 }
 
 #[cfg(test)]
 mod rename_tests {
     use super::*;
-    use crate::core::fs::atomic_write;
 
-    fn temp_store(tag: &str) -> (ResourceStore, std::path::PathBuf) {
+    fn temp_store(tag: &str) -> (PackageStore, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "gamer-yamlrename-{tag}-{}-{}",
             std::process::id(),
@@ -307,33 +314,46 @@ mod rename_tests {
             data_dir: dir.clone(),
             ..Default::default()
         };
-        (ResourceStore::open(&cfg).unwrap(), dir)
+        let store = PackageStore::open(&cfg).unwrap();
+        store
+            .create_package(crate::resources::PackageInput {
+                id: "com.test.app".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        (store, dir)
+    }
+
+    fn plugin_root(dir: &std::path::Path) -> std::path::PathBuf {
+        dir.join("packages/com.test.app/plugins/gamer.yaml")
     }
 
     /// v3 脚本 + 函数库中的模板引用经 AST 同步改写；文本字面量不动。
     #[test]
     fn rename_template_updates_script_and_function_references() {
         let (store, dir) = temp_store("v3");
-        let templates = dir.join("com.test.app").join("templates");
+        let templates = plugin_root(&dir).join("templates");
         std::fs::create_dir_all(&templates).unwrap();
-        atomic_write(&templates.join("old.png"), b"png").unwrap();
+        std::fs::write(templates.join("old.png"), b"png").unwrap();
 
         store
-            .save_text(
-                ResourceKind::Scripts,
-                None,
+            .write_text(
                 "com.test.app",
-                "main.yaml",
+                YAML_EXTENSION_ID,
+                "scripts/main.yaml",
                 "version: 3\nsteps:\n  - find:\n      template: old.png\n      then:\n        - log: old.png 文本不应改\n",
+                None,
+                false,
             )
             .unwrap();
         store
-            .save_text(
-                ResourceKind::Functions,
-                None,
+            .write_text(
                 "com.test.app",
-                "common.yaml",
+                YAML_EXTENSION_ID,
+                "functions/common.yaml",
                 "login:\n  steps:\n    - find:\n        template: old.png\n",
+                None,
+                false,
             )
             .unwrap();
 
@@ -343,11 +363,12 @@ mod rename_tests {
         );
         assert!(!templates.join("old.png").exists());
         assert_eq!(std::fs::read(templates.join("new.png")).unwrap(), b"png");
-        let script = std::fs::read_to_string(dir.join("com.test.app/scripts/main.yaml")).unwrap();
+        let script =
+            std::fs::read_to_string(plugin_root(&dir).join("scripts/main.yaml")).unwrap();
         assert!(script.contains("template: new.png"));
         assert!(script.contains("old.png 文本不应改"));
         let function =
-            std::fs::read_to_string(dir.join("com.test.app/functions/common.yaml")).unwrap();
+            std::fs::read_to_string(plugin_root(&dir).join("functions/common.yaml")).unwrap();
         assert!(function.contains("template: new.png"));
     }
 
@@ -355,23 +376,25 @@ mod rename_tests {
     #[test]
     fn rename_template_updates_v3_surface_references_without_touching_text() {
         let (store, dir) = temp_store("surface");
-        let templates = dir.join("com.test.app").join("templates");
+        let templates = plugin_root(&dir).join("templates");
         std::fs::create_dir_all(&templates).unwrap();
-        atomic_write(&templates.join("old.png"), b"png").unwrap();
+        std::fs::write(templates.join("old.png"), b"png").unwrap();
         store
-            .save_text(
-                ResourceKind::Scripts,
-                None,
+            .write_text(
                 "com.test.app",
-                "main.yaml",
+                YAML_EXTENSION_ID,
+                "scripts/main.yaml",
                 "version: 3\nsteps:\n  - find:\n      template: old.png\n      then:\n        - log: old.png 文本不应改\n  - match_first:\n      candidates: [old.png]\n",
+                None,
+                false,
             )
             .unwrap();
 
         let renamed =
             rename_template_references(&store, "com.test.app", "old.png", "new.png").unwrap();
         assert_eq!(renamed, 1);
-        let script = std::fs::read_to_string(dir.join("com.test.app/scripts/main.yaml")).unwrap();
+        let script =
+            std::fs::read_to_string(plugin_root(&dir).join("scripts/main.yaml")).unwrap();
         assert!(script.contains("template: new.png"));
         assert!(script.contains("- new.png"));
         assert!(script.contains("old.png 文本不应改"));
@@ -381,20 +404,21 @@ mod rename_tests {
     #[test]
     fn rename_template_skips_unparsable_legacy_sources() {
         let (store, dir) = temp_store("legacy");
-        let templates = dir.join("com.test.app").join("templates");
+        let templates = plugin_root(&dir).join("templates");
         std::fs::create_dir_all(&templates).unwrap();
-        atomic_write(&templates.join("old.png"), b"png").unwrap();
+        std::fs::write(templates.join("old.png"), b"png").unwrap();
         // v2 形态存量脚本（legacy：保存边界已拒收，只可能来自历史盘上数据）
-        let scripts = dir.join("com.test.app").join("scripts");
+        let scripts = plugin_root(&dir).join("scripts");
         std::fs::create_dir_all(&scripts).unwrap();
         std::fs::write(scripts.join("legacy.yaml"), b"steps:\n  - check: old.png\n").unwrap();
         store
-            .save_text(
-                ResourceKind::Scripts,
-                None,
+            .write_text(
                 "com.test.app",
-                "main.yaml",
+                YAML_EXTENSION_ID,
+                "scripts/main.yaml",
                 "version: 3\nsteps:\n  - find:\n      template: old.png\n",
+                None,
+                false,
             )
             .unwrap();
 
@@ -403,7 +427,8 @@ mod rename_tests {
             1,
             "只有 v3 脚本计入改写"
         );
-        let script = std::fs::read_to_string(dir.join("com.test.app/scripts/main.yaml")).unwrap();
+        let script =
+            std::fs::read_to_string(plugin_root(&dir).join("scripts/main.yaml")).unwrap();
         assert!(script.contains("template: new.png"));
         let legacy = std::fs::read_to_string(scripts.join("legacy.yaml")).unwrap();
         assert!(legacy.contains("old.png"), "不可解析的存量源保持原样");
@@ -415,29 +440,84 @@ mod rename_tests {
         let (store, _dir) = temp_store("dual");
         // v3 bare-map 函数库
         let v3_library = "领取奖励:\n  params:\n    - 'int:times:次数:2'\n  steps:\n    - log: $times\n    - if:\n        cond: $times > 0\n        then:\n          - log: ok\n";
-        validate_function_library_file(&store, "com.test.app", "common.yaml", v3_library)
+        validate_function_library_file(&store, "com.test.app", "functions/common.yaml", v3_library)
             .expect("v3 函数库必须通过保存校验");
-        // v3 嵌套文件短路径（functions allow_nested，function:<短路径>/<函数名>）
+        // v3 嵌套文件短路径（functions 允许子目录，function:<短路径>/<函数名>）
         validate_function_library_file(
             &store,
             "com.test.app",
-            "sub/common.yaml",
+            "functions/sub/common.yaml",
             v3_library,
         )
         .unwrap();
         // v2 形态存量函数文件 → 版本门禁拒绝（v3 解析对 `- find: x` 标量步报错，
         // 但错误必须带 yaml.v3.* 码——存量文件不可再经 v2 loader 落盘）
         let legacy = "login:\n  steps:\n    - find: old.png\n";
-        assert!(validate_function_library_file(&store, "com.test.app", "legacy.yaml", legacy).is_err());
+        assert!(validate_function_library_file(&store, "com.test.app", "functions/legacy.yaml", legacy).is_err());
         // 双失败口径统一：坏 v3 → v3 诊断（非法 call 裸 target）
         let broken_v3 = "bad:\n  steps:\n    - call:\n        target: login\n";
         let diagnostics =
-            validate_function_library_file(&store, "com.test.app", "broken.yaml", broken_v3)
+            validate_function_library_file(&store, "com.test.app", "functions/broken.yaml", broken_v3)
                 .unwrap_err();
         let text = diagnostics.to_string();
         assert!(
             text.contains("yaml.v3.call") || text.contains("命名空间"),
             "坏 v3 call 目标必须报 v3 诊断: {text}"
         );
+    }
+
+    /// 保存钩子路径分发：scripts/ 走脚本校验，functions/ 走函数库校验，
+    /// 其余路径（templates 等）放行。
+    #[test]
+    fn handler_validates_by_path_prefix() {
+        let (store, _dir) = temp_store("dispatch");
+        store.register_handler(YAML_EXTENSION_ID, Arc::new(YamlResourceHandler));
+        // 脚本：v3 通过
+        store
+            .validate_save(SaveValidation {
+                package: "com.test.app",
+                plugin: YAML_EXTENSION_ID,
+                path: "scripts/daily.yaml",
+                content: "version: 3\nsteps:\n  - log: ok\n",
+                store: &store,
+            })
+            .expect("v3 脚本必须通过");
+        // 脚本：非 v3 → 版本门禁诊断
+        let err = store
+            .validate_save(SaveValidation {
+                package: "com.test.app",
+                plugin: YAML_EXTENSION_ID,
+                path: "scripts/daily.yaml",
+                content: "steps: []\n",
+                store: &store,
+            })
+            .unwrap_err();
+        assert_eq!(err[0]["code"], "yaml.v3.version.missing");
+        // templates 路径不做校验
+        store
+            .validate_save(SaveValidation {
+                package: "com.test.app",
+                plugin: YAML_EXTENSION_ID,
+                path: "templates/x.png",
+                content: "随便什么",
+                store: &store,
+            })
+            .expect("非 YAML 路径放行");
+        // 函数名清单注记
+        let meta = store.list("com.test.app", YAML_EXTENSION_ID, "").unwrap();
+        assert!(meta.is_empty());
+        store
+            .write_text(
+                "com.test.app",
+                YAML_EXTENSION_ID,
+                "functions/lib.yaml",
+                "greet:\n  steps:\n    - return: true\n",
+                None,
+                false,
+            )
+            .unwrap();
+        let list = store.list("com.test.app", YAML_EXTENSION_ID, "functions").unwrap();
+        assert_eq!(list[0].meta["functions"][0], "greet");
+        assert_eq!(list[0].meta["file"], "lib");
     }
 }

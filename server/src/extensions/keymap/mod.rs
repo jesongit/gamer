@@ -13,10 +13,6 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::app_packages::{
-    parse_android_package_name, parse_app_package_id, AppPackageStore, InstalledVersion,
-    ResourcePath,
-};
 use crate::capabilities::{
     CapabilityRegistry, DeviceHandle, KeyAction, KeyCode, KeyInput, SwipeGesture, TextInput,
     TouchHandle, TouchPoint,
@@ -1376,52 +1372,35 @@ mod keymap_wasmtime {
 #[cfg(feature = "wasm-runtime")]
 pub(crate) use keymap_wasmtime::LazyKeymapWasmRuntime;
 
-/// Resolve an application-specific `keymaps/<file>` resource from an App
-/// Package.  App Package data is immutable and user overrides are selected by
-/// the existing resolver; this adapter never falls back to another package.
-#[derive(Clone, Debug)]
-pub struct AppPackageKeymapSource {
-    store: AppPackageStore,
+/// 从本地 Package 的 gamer.keymap 插件数据根解析 `keymaps/<file>` 资源。
+/// 插件数据隔离由 [`crate::resources::PackageStore`] 的路径校验保证——只能
+/// 读本插件 `plugins/gamer.keymap/` 前缀内的文件，不回退任何其他来源。
+#[derive(Clone)]
+pub struct PackageKeymapSource {
+    store: std::sync::Arc<crate::resources::PackageStore>,
 }
 
-impl AppPackageKeymapSource {
-    pub fn new(store: AppPackageStore) -> Self {
+impl PackageKeymapSource {
+    pub fn new(store: std::sync::Arc<crate::resources::PackageStore>) -> Self {
         Self { store }
     }
 
-    pub fn load(
-        &self,
-        android_package: &str,
-        app_package: &str,
-        version: &str,
-        file: &str,
-    ) -> ExtensionResult<Keymap> {
-        let android_package = parse_android_package_name(android_package).map_err(to_runtime)?;
-        let app_package = parse_app_package_id(app_package).map_err(to_runtime)?;
-        let version = InstalledVersion::parse(version).map_err(to_runtime)?;
+    pub fn load(&self, package: &str, file: &str) -> ExtensionResult<Keymap> {
         if file.is_empty()
             || file.contains(['/', '\\'])
             || !(file.ends_with(".yaml") || file.ends_with(".yml"))
         {
             return Err(ExtensionError::Runtime(format!(
-                "keymap 文件名必须是当前 App Package 的 YAML 短名: {file}"
+                "keymap 文件名必须是当前 Package 的 YAML 短名: {file}"
             )));
         }
-        let path = ResourcePath::parse(&format!("keymaps/{file}")).map_err(to_runtime)?;
-        let Some(resource) = self
+        let path = format!("{KEYMAP_PROFILE_PREFIX}{file}");
+        let entry = self
             .store
-            .resolver()
-            .resolve_path(&android_package, app_package, version, path)
+            .read_text(package, KEYMAP_EXTENSION_ID, &path)
             .map_err(to_runtime)?
-        else {
-            return Err(ExtensionError::Runtime(format!(
-                "App Package keymap 不存在: {file}"
-            )));
-        };
-        let bytes = resource.read_bytes().map_err(to_runtime)?;
-        let content = std::str::from_utf8(&bytes)
-            .map_err(|error| ExtensionError::Runtime(format!("keymap YAML 不是 UTF-8: {error}")))?;
-        parse_keymap_content(content, &format!("keymaps/{file}"))
+            .ok_or_else(|| ExtensionError::Runtime(format!("keymap 文件不存在: {path}")))?;
+        parse_keymap_content(&entry.content, &path)
             .map_err(|diagnostics| ExtensionError::Runtime(format_diagnostics(&diagnostics)))
     }
 }
@@ -1439,22 +1418,25 @@ fn to_runtime(error: impl std::fmt::Display) -> ExtensionError {
 /// gamer.keymap 的资源内容钩子（组合根引导期注册；P11.3）：
 /// keymaps kind 的保存期 schema 校验 + 列表注记（显示名 / binding 数 /
 /// 有效性 / 诊断）。未注册时 Core 保存不做内容校验（裸 Core 语义）。
-pub fn register_resource_handlers(store: &crate::resources::ResourceStore) {
+pub fn register_resource_handlers(store: &crate::resources::PackageStore) {
     store.register_handler(
-        crate::resources::ResourceKind::Keymaps,
+        KEYMAP_EXTENSION_ID,
         std::sync::Arc::new(KeymapResourceHandler),
     );
 }
 
+/// gamer.keymap 插件数据根内的方案路径布局（`keymaps/<方案文件>`；目录语义
+/// 归插件定义，Core 只保证路径安全）。
+pub(crate) const KEYMAP_PROFILE_PREFIX: &str = "keymaps/";
+
 struct KeymapResourceHandler;
 
-impl crate::resources::ResourceKindHandler for KeymapResourceHandler {
+impl crate::resources::ResourceHandler for KeymapResourceHandler {
     fn validate_save(
         &self,
         req: crate::resources::SaveValidation<'_>,
     ) -> Result<(), serde_json::Value> {
-        let resource = format!("{}/{}", req.app, req.id);
-        parse_keymap_content(req.content, &resource)
+        parse_keymap_content(req.content, req.path)
             .map(|_| ())
             .map_err(|diagnostics| serde_json::json!(diagnostics))
     }
@@ -1490,8 +1472,8 @@ impl crate::resources::ResourceKindHandler for KeymapResourceHandler {
 }
 
 pub fn load_user_profile(
-    store: &crate::resources::ResourceStore,
-    partition: &str,
+    store: &crate::resources::PackageStore,
+    package: &str,
     name: &str,
 ) -> ExtensionResult<String> {
     // 方案名兼容裸名（缺扩展名自动补 .yaml），与旧 KeymapStore 归一化语义一致
@@ -1501,11 +1483,11 @@ pub fn load_user_profile(
         }
         _ => format!("{name}.yaml"),
     };
-    let id = format!("{partition}/{file_name}");
+    let path = format!("{KEYMAP_PROFILE_PREFIX}{file_name}");
     let file = store
-        .get_text(crate::resources::ResourceKind::Keymaps, &id)
+        .read_text(package, KEYMAP_EXTENSION_ID, &path)
         .map_err(to_runtime)?
-        .ok_or_else(|| ExtensionError::Runtime(format!("keymap 方案不存在: {id}")))?;
+        .ok_or_else(|| ExtensionError::Runtime(format!("keymap 方案不存在: {path}")))?;
     Ok(file.content)
 }
 
@@ -1610,11 +1592,9 @@ pub(crate) fn android_keycode(code: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
-    use zip::write::SimpleFileOptions;
 
     use super::dsl::{KeymapAction, KeymapBinding};
     use super::*;
-    use crate::app_packages::AppPackageStore;
 
     fn keymap(bindings: &[(&str, KeymapAction)]) -> Keymap {
         Keymap {
@@ -1677,16 +1657,23 @@ mod tests {
             data_dir: temp.path().to_path_buf(),
             ..Default::default()
         };
-        let store = crate::resources::ResourceStore::open(&cfg).unwrap();
+        let store = crate::resources::PackageStore::open(&cfg).unwrap();
+        store
+            .create_package(crate::resources::PackageInput {
+                id: "com.example.game".into(),
+                ..Default::default()
+            })
+            .unwrap();
         let content =
             serialize_keymap(&keymap(&[("KeyW", KeymapAction::Hold { at: [0.1, 0.9] })])).unwrap();
         store
-            .save_text(
-                crate::resources::ResourceKind::Keymaps,
-                None,
+            .write_text(
                 "com.example.game",
-                "测试方案.yaml",
+                KEYMAP_EXTENSION_ID,
+                "keymaps/测试方案.yaml",
                 &content,
+                None,
+                false,
             )
             .unwrap();
         let profile = load_user_profile(&store, "com.example.game", "测试方案").unwrap();
@@ -1717,30 +1704,35 @@ mod tests {
     }
 
     #[test]
-    fn app_package_keymap_source_reads_only_the_selected_package() {
+    fn package_keymap_source_reads_only_requested_file() {
         let temp = TempDir::new().unwrap();
-        let store = AppPackageStore::new(temp.path());
-        let manifest = b"format_version = 2\nid = \"official.game\"\nversion = \"1.0.0\"\n[android]\npackages = [\"com.game\"]\n";
-        let keymap = b"version: 1\nname: package\nbindings: []\n";
-        let mut bytes = Vec::new();
-        {
-            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut bytes));
-            let options = SimpleFileOptions::default();
-            writer.start_file("manifest.toml", options).unwrap();
-            std::io::Write::write_all(&mut writer, manifest).unwrap();
-            writer.start_file("keymaps/default.yaml", options).unwrap();
-            std::io::Write::write_all(&mut writer, keymap).unwrap();
-            writer.finish().unwrap();
-        }
-        store.install_archive(&bytes, None).unwrap();
-        let source = AppPackageKeymapSource::new(store);
-        let loaded = source
-            .load("com.game", "official.game", "1.0.0", "default.yaml")
+        let cfg = crate::config::Config {
+            data_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let store = std::sync::Arc::new(crate::resources::PackageStore::open(&cfg).unwrap());
+        store
+            .create_package(crate::resources::PackageInput {
+                id: "official.game".into(),
+                ..Default::default()
+            })
             .unwrap();
+        store
+            .write_text(
+                "official.game",
+                KEYMAP_EXTENSION_ID,
+                "keymaps/default.yaml",
+                "version: 1\nname: package\nbindings: []\n",
+                None,
+                false,
+            )
+            .unwrap();
+        let source = PackageKeymapSource::new(store);
+        let loaded = source.load("official.game", "default.yaml").unwrap();
         assert_eq!(loaded.name, "package");
-        assert!(source
-            .load("com.other", "official.game", "1.0.0", "default.yaml")
-            .is_err());
+        // 缺失文件报错；穿越路径不是合法短名或不存在
+        assert!(source.load("official.game", "missing.yaml").is_err());
+        assert!(source.load("official.game", "../gamer.yaml/x.yaml").is_err());
     }
 }
 

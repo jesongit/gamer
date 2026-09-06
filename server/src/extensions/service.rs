@@ -1148,7 +1148,7 @@ mod tests {
 
     use crate::config::Config;
     use crate::core::AppContext;
-    use crate::resources::ResourceStore;
+    use crate::resources::PackageStore;
     use crate::run_manager::RunManager;
     use crate::scheduler::Scheduler;
     use crate::store::{Db, Store};
@@ -1240,7 +1240,7 @@ mod tests {
             ..Default::default()
         };
         let db: Db = Arc::new(Store::open(&cfg).unwrap());
-        let scripts = Arc::new(ResourceStore::open(&cfg).unwrap());
+        let scripts = Arc::new(PackageStore::open(&cfg).unwrap());
 
         // ——「上一次进程」：真实生命周期跑到 Running，然后 stop 留下
         //   DependencyMissing 任务，最后把磁盘状态写回 Running 模拟崩溃窗口。

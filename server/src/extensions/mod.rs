@@ -35,7 +35,7 @@ pub(crate) use error::{ExtensionError, ExtensionResult, PermissionError};
 pub(crate) use host_api::{HostApi, HostApiCatalog, HostApiDomain, HOST_API_VERSION};
 pub(crate) use keymap::{
     android_keycode, decode_input_event, emit_keymap_trace, keymap_trace_active, load_user_profile,
-    now_epoch_us, real_wasm_host_status, register_resource_handlers, AppPackageKeymapSource,
+    now_epoch_us, real_wasm_host_status, register_resource_handlers, PackageKeymapSource,
     CapabilityDeviceActionExecutor, DeviceAction, DeviceActionExecutor, InputEvent, InputResult,
     KeymapContributionRegistry, KeymapPanelContribution, KeymapTraceContext, KeymapTracePath,
     KeymapTraceRecord, NormalizedPoint, ScreenSize, INPUT_PROTOCOL_VERSION, KEYMAP_EXTENSION_ID,

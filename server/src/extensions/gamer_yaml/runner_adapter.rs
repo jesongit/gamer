@@ -156,7 +156,7 @@ impl EngineExecutor {
 
     pub fn attach_yaml_vnext(
         &self,
-        scripts: Arc<crate::resources::ResourceStore>,
+        scripts: Arc<crate::resources::PackageStore>,
         extensions: Arc<crate::extensions::ExtensionService>,
         sink: Option<Arc<dyn crate::core::events::EventSink>>,
     ) {
@@ -247,7 +247,7 @@ impl RunExecutor for EngineExecutor {
 }
 
 struct YamlVnextAdapter {
-    scripts: Arc<crate::resources::ResourceStore>,
+    scripts: Arc<crate::resources::PackageStore>,
     extensions: Weak<crate::extensions::ExtensionService>,
     /// v3 运行可视化事件汇（P12.6）：viewer 的 DataChannel 旁路；None = 静默。
     sink: Option<Arc<dyn crate::core::events::EventSink>>,
@@ -258,7 +258,7 @@ struct YamlVnextAdapter {
 /// target 命名空间解析与穿越校验收口在 [`yaml_vnext::split_call_target`]。
 #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
 struct ScriptProgramResolver {
-    scripts: Arc<crate::resources::ResourceStore>,
+    scripts: Arc<crate::resources::PackageStore>,
     package: String,
 }
 
@@ -282,9 +282,7 @@ impl ScriptProgramResolver {
 
     fn resolve_script(&self, id: &str) -> anyhow::Result<Program> {
         let target = self.resource_id(id);
-        let script = self
-            .scripts
-            .get_text(crate::resources::ResourceKind::Scripts, &target)?
+        let script = crate::extensions::gamer_yaml::resources::script_entry(&self.scripts, &target)?
             .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 目标: {target}"))?;
         if !yaml_vnext::is_v3_source(&script.content) {
             return Err(unsupported_version(&target));
@@ -297,9 +295,7 @@ impl ScriptProgramResolver {
     /// 解析 → 取目标函数 `{params, steps}` 组装 Program（ADR-YAML-02）。
     fn resolve_function(&self, file: &str, function: &str) -> anyhow::Result<Program> {
         let target = self.resource_id(file);
-        let entry = self
-            .scripts
-            .get_text(crate::resources::ResourceKind::Functions, &target)?
+        let entry = crate::extensions::gamer_yaml::resources::function_entry(&self.scripts, &target)?
             .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 函数文件: {target}"))?;
         yaml_vnext::load_function(&entry.content, function)
             .map_err(|diagnostics| v3_diagnostics_error("v3 函数无效", &diagnostics))
@@ -373,7 +369,7 @@ impl YamlVnextAdapter {
                 let scripts = self.scripts.clone();
                 let probe_id = script_id.clone();
                 let script = tokio::task::spawn_blocking(move || {
-                    scripts.get_text(crate::resources::ResourceKind::Scripts, &probe_id)
+                    crate::extensions::gamer_yaml::resources::script_entry(&scripts, &probe_id)
                 })
                 .await
                 .map_err(|error| anyhow::anyhow!("读取 v3 脚本失败: {error}"))??;
@@ -397,7 +393,7 @@ impl YamlVnextAdapter {
                 let scripts = self.scripts.clone();
                 let probe_target = target.clone();
                 let entry = tokio::task::spawn_blocking(move || {
-                    scripts.get_text(crate::resources::ResourceKind::Functions, &probe_target)
+                    crate::extensions::gamer_yaml::resources::function_entry(&scripts, &probe_target)
                 })
                 .await
                 .map_err(|error| anyhow::anyhow!("读取 v3 函数库失败: {error}"))??;
@@ -478,7 +474,7 @@ mod tests {
     }
 
     /// ScriptProgramResolver 的 script:/function: 命名空间解析
-    /// （真实 ResourceStore + 分区目录）。P12.4 起深度守卫归 guest 本地，
+    /// （真实 PackageStore + 包插件目录）。P12.4 起深度守卫归 guest 本地，
     /// resolver 不再接收/校验 depth。
     #[test]
     fn script_program_resolver_supports_namespaced_targets() {
@@ -487,23 +483,31 @@ mod tests {
             data_dir: data.path().to_path_buf(),
             ..Default::default()
         };
-        let store = Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
+        let store = Arc::new(crate::resources::PackageStore::open(&cfg).unwrap());
         store
-            .save_text(
-                crate::resources::ResourceKind::Scripts,
-                None,
+            .create_package(crate::resources::PackageInput {
+                id: "com.test.app".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .write_text(
                 "com.test.app",
-                "sub/inner.yaml",
+                "gamer.yaml",
+                "scripts/sub/inner.yaml",
                 "version: 3\nsteps:\n  - log: inner\n",
+                None,
+                false,
             )
             .unwrap();
         store
-            .save_text(
-                crate::resources::ResourceKind::Functions,
-                None,
+            .write_text(
                 "com.test.app",
-                "lib.yaml",
+                "gamer.yaml",
+                "functions/lib.yaml",
                 "fn1:\n  params:\n    - name: n\n      type: number\n      default: 1\n  steps:\n    - return: $n\n",
+                None,
+                false,
             )
             .unwrap();
         let resolver = ScriptProgramResolver {
@@ -550,14 +554,21 @@ mod tests {
             data_dir: data.path().to_path_buf(),
             ..Default::default()
         };
-        let store = Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap());
+        let store = Arc::new(crate::resources::PackageStore::open(&cfg).unwrap());
         store
-            .save_text(
-                crate::resources::ResourceKind::Scripts,
-                None,
+            .create_package(crate::resources::PackageInput {
+                id: "com.test.app".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .write_text(
                 "com.test.app",
-                "legacy.yaml",
+                "gamer.yaml",
+                "scripts/legacy.yaml",
                 "steps:\n  - log: v2 形态\n",
+                None,
+                false,
             )
             .unwrap();
         let resolver = ScriptProgramResolver {
@@ -582,7 +593,7 @@ mod tests {
             ..Default::default()
         };
         let resolver = ScriptProgramResolver {
-            scripts: Arc::new(crate::resources::ResourceStore::open(&cfg).unwrap()),
+            scripts: Arc::new(crate::resources::PackageStore::open(&cfg).unwrap()),
             package: "com.test.app".into(),
         };
         assert_eq!(

@@ -4,8 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::resources::ResourceKind;
-use crate::resources::ResourceStore;
+use crate::resources::PackageStore;
 
 use super::super::{
     CapabilityError, CapabilityResult, ResourceHandle, ResourceId, ResourceLease, ResourceService,
@@ -16,16 +15,19 @@ struct ResolvedResource {
     path: PathBuf,
 }
 
-/// Logical template resource adapter. `PathBuf` is retained only in this module
-/// and is never placed in a capability request or response.
+/// Package Resource 适配器：把 [`ResourceId`]`(package, plugin, path)` 三元组
+/// 解析到 [`PackageStore`] 的磁盘路径。`PathBuf` 只留在本模块内，绝不进入
+/// capability 请求/响应。解析强制限定在 `packages/<package>/plugins/<plugin>/`
+/// 前缀内（插件数据隔离由 PackageStore 的路径校验保证）；模板 `#` 后缀短名
+/// 消歧为文件名约定（精确名优先，否则同扩展名唯一候选）。
 pub(crate) struct ResourceAdapter {
-    store: Arc<ResourceStore>,
+    store: Arc<PackageStore>,
     resources: Mutex<HashMap<ResourceHandle, ResolvedResource>>,
     by_id: Mutex<HashMap<ResourceId, ResourceHandle>>,
 }
 
 impl ResourceAdapter {
-    pub(crate) fn new(store: Arc<ResourceStore>) -> Self {
+    pub(crate) fn new(store: Arc<PackageStore>) -> Self {
         Self {
             store,
             resources: Mutex::new(HashMap::new()),
@@ -71,22 +73,12 @@ impl ResourceAdapter {
 #[async_trait]
 impl ResourceService for ResourceAdapter {
     async fn resolve(&self, id: &ResourceId) -> CapabilityResult<ResourceHandle> {
-        let path = if let Some(logical_name) = id.name().strip_prefix("scripts/") {
-            self.store
-                .resolve_path(id.namespace(), ResourceKind::Scripts, logical_name)
-                .map_err(|error| CapabilityError::NotFound(error.to_string()))?
-        } else {
-            let logical_name = id.name().strip_prefix("templates/").unwrap_or(id.name());
-            self.store
-                .resolve_template_path(id.namespace(), logical_name)
-                .map_err(|error| CapabilityError::NotFound(error.to_string()))?
-        };
+        let path = self
+            .store
+            .resolve_short_path(id.package(), id.plugin(), id.path())
+            .map_err(|error| CapabilityError::NotFound(error.to_string()))?;
         if !path.is_file() {
-            return Err(CapabilityError::NotFound(format!(
-                "resource {}/{}",
-                id.namespace(),
-                id.name()
-            )));
+            return Err(CapabilityError::NotFound(id.composite_key()));
         }
         let handle = ResourceHandle::new();
         let mut resources = self

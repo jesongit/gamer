@@ -50,7 +50,14 @@ impl RunAdapter {
 
     fn request_for(&self, request: RunRequest) -> CapabilityResult<StartRequest> {
         let resource = self.resources.id(request.entry())?;
-        let script = resource.name().strip_prefix("scripts/").ok_or_else(|| {
+        // entry 资源必须落在自动化插件自己的 scripts/ 前缀内（插件数据隔离：
+        // plugin 维度由 ResourceId 显式承载，不匹配即拒绝）
+        if resource.plugin() != AUTOMATION_RUNNER_ID {
+            return Err(CapabilityError::InvalidRequest(format!(
+                "run.submit entry 必须指向 {AUTOMATION_RUNNER_ID} 插件的脚本资源"
+            )));
+        }
+        let script = resource.path().strip_prefix("scripts/").ok_or_else(|| {
             CapabilityError::InvalidRequest(
                 "run.submit entry 必须是 scripts/<script>.yaml 逻辑资源".into(),
             )
@@ -60,24 +67,23 @@ impl RunAdapter {
                 "run.submit entry 必须指向 .yaml 脚本".into(),
             ));
         }
-        let package = AppPackageId::new(resource.namespace())
-            .map_err(|error| CapabilityError::InvalidRequest(error.to_string()))?;
-        let android = AndroidPackageName::new(resource.namespace())
+        let android = AndroidPackageName::new(resource.package())
             .map_err(|error| CapabilityError::InvalidRequest(error.to_string()))?;
         let app = AppContext::new(
             DeviceId::new(request.device().id().as_str())
                 .map_err(|error| CapabilityError::InvalidRequest(error.to_string()))?,
             android,
-            Some(package),
+            Some(AppPackageId::new(resource.package())
+                .map_err(|error| CapabilityError::InvalidRequest(error.to_string()))?),
         );
         // 通用 runner 分发约定（P11.6）：runner_id = 自动化 runner 注册 id，
-        // entrypoint = `<内容分区>/<脚本>`，payload 为 runner 私有不透明值
+        // entrypoint = `<package>/<脚本>`，payload 为 runner 私有不透明值
         // （缺省对象 = 默认目标从头跑）。目标/payload 语义由注册该 runner 的
         // 扩展解码，Core 只构造 generic RunRequest。
         let inner = crate::core::RunRequest::for_app(
             app,
             AUTOMATION_RUNNER_ID,
-            format!("{}/{}", resource.namespace(), script),
+            format!("{}/{}", resource.package(), script),
             RunPayload::new(serde_json::json!({})),
         )
         .map_err(|error| CapabilityError::InvalidRequest(error.to_string()))?;

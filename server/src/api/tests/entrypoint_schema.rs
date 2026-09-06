@@ -23,17 +23,31 @@ async fn save_resource(
     name: &str,
     content: &str,
 ) {
-    let body = serde_json::json!({ "name": name, "content": content });
-    let resp = post_json(
+    // 建包（幂等：已存在即 409，忽略）
+    let _ = post_json(
         t,
         sid,
-        &format!("/api/apps/com.test.app/resources/{kind}"),
-        body,
+        "/api/packages",
+        serde_json::json!({ "id": "com.test.app" }),
+    )
+    .await;
+    // Package API：PUT 创建/更新（force 跳过版本门禁，夹具语义 = 直写）
+    let resp = send(
+        &t.app,
+        req(
+            "PUT",
+            &format!("/api/packages/com.test.app/plugins/gamer.yaml/resources/{kind}/{name}.yaml"),
+            None,
+            &json_headers(sid.to_string()),
+            Some(
+                serde_json::json!({ "content": content, "force": true }).to_string(),
+            ),
+        ),
     )
     .await;
     assert_eq!(
         resp.status(),
-        StatusCode::CREATED,
+        StatusCode::OK,
         "保存 {kind}/{name} 失败: {:?}",
         json_body(resp).await
     );
@@ -41,7 +55,10 @@ async fn save_resource(
 
 /// 直写分区目录（绕过保存期校验，构造「盘上已有」的存量资源形态）。
 fn write_partition_file(t: &TestApp, kind_dir: &str, name: &str, content: &str) {
-    let dir = t.dir.join("com.test.app").join(kind_dir);
+    // 直写包插件目录（新布局 packages/<pkg>/plugins/gamer.yaml/<kind>）
+    let dir = t.dir
+        .join("packages/com.test.app/plugins/gamer.yaml")
+        .join(kind_dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(name), content).unwrap();
 }

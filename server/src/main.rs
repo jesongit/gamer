@@ -14,7 +14,6 @@
 //!   路由并置 startup.stage=ready（/health/ready 翻转 200）。
 
 mod api;
-mod app_packages;
 mod build_info;
 pub(crate) mod capabilities;
 mod config;
@@ -28,6 +27,7 @@ mod maintenance;
 mod matcher;
 mod metrics;
 mod migrations;
+mod package_archive;
 mod resources;
 mod run_manager;
 mod scheduler;
@@ -38,6 +38,8 @@ mod update;
 mod webrtc;
 
 // Phase 0 兼容护栏只在测试构建挂载，不改变服务运行时模块图。
+#[cfg(test)]
+
 #[cfg(test)]
 
 // P11.9 架构守卫测试（ADR-11/ADR-13 边界 + 隔离集成）同样只在测试构建挂载。
@@ -263,7 +265,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// 运行时上下文：闸内路径激活后与常规路径共用的完整业务依赖集合
 struct RuntimeServices {
-    resources: Arc<resources::ResourceStore>,
+    packages: Arc<resources::PackageStore>,
     viewers: webrtc::ViewerMap,
     devices: Arc<device::DeviceManager>,
     runs: Arc<run_manager::RunManager>,
@@ -290,7 +292,7 @@ impl RuntimeServices {
             self.scheduler.clone(),
             cfg,
             self.viewers.clone(),
-            self.resources.clone(),
+            self.packages.clone(),
             shutdown,
             auth,
             update,
@@ -311,12 +313,12 @@ impl RuntimeServices {
         auth: Arc<api::auth::AuthState>,
         drain_slot: DrainSlot,
     ) -> anyhow::Result<Self> {
-        let resources = Arc::new(resources::ResourceStore::open(cfg)?);
-        // P11.3：扩展内容钩子注册（组合根引导期）——gamer.yaml 的脚本/函数/
-        // 模板校验与 gamer.keymap 的方案校验。裸 Core（不注册）时保存不做
-        // 内容校验（§8.9 验收锚点）。
-        extensions::gamer_yaml::register_resource_handlers(&resources);
-        extensions::register_resource_handlers(&resources);
+        let packages = Arc::new(resources::PackageStore::open(cfg)?);
+        // 扩展内容钩子注册（组合根引导期）——gamer.yaml 的脚本/函数/模板
+        // 校验与 gamer.keymap 的方案校验。裸 Core（不注册）时保存不做内容
+        // 校验（§8.9 验收锚点）。
+        extensions::gamer_yaml::register_resource_handlers(&packages);
+        extensions::register_resource_handlers(&packages);
         let viewers: webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(device::DeviceManager::new(db.clone(), cfg.clone()));
@@ -331,7 +333,7 @@ impl RuntimeServices {
         let scheduler = Arc::new(scheduler::Scheduler::new(db.clone()));
         let capabilities = capabilities::adapters::build_registry(
             devices.clone(),
-            resources.clone(),
+            packages.clone(),
             db.clone(),
             runs.clone(),
         );
@@ -340,7 +342,7 @@ impl RuntimeServices {
                 scheduler.clone(),
                 db.clone(),
                 runs.clone(),
-                resources.clone(),
+                packages.clone(),
             ),
         );
         let extensions = Arc::new(
@@ -348,7 +350,7 @@ impl RuntimeServices {
                 .with_runner_registrar(runner_registrar),
         );
         let ctx = Self {
-            resources,
+            packages,
             viewers,
             devices,
             runs,
@@ -361,7 +363,7 @@ impl RuntimeServices {
         // P12.6：v3 运行可视化事件走同一 viewer DataChannel（复用 ViewerEventSink）；
         // 无 viewer 时事件自然丢弃。
         executor.attach_yaml_vnext(
-            ctx.resources.clone(),
+            ctx.packages.clone(),
             ctx.extensions.clone(),
             Some(Arc::new(webrtc::ViewerEventSink::new(ctx.viewers.clone()))),
         );
