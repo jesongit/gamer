@@ -17,12 +17,9 @@ export function useConsoleDeviceManager({
   toast,
   store,
   devicesData,
-  scriptsData,
-  templatesData,
   consoleRuntime,
   connected,
   errorMsg,
-  activePkg,
   appHintDismissed,
   loadData,
   connect,
@@ -61,18 +58,16 @@ export function useConsoleDeviceManager({
   const appLoading = ref(false)
 
   const devices = computed(() => devicesData.value)
-  const scripts = computed(() => scriptsData.value)
   const current = computed(() => devices.value.find(d => d.id === store.deviceId) || null)
   const currentName = computed(() => current.value?.name || '未选择设备')
 
-  /** 应用包名下拉选项：旧设备记录包名 ∪ 已安装应用 ∪ 脚本分区 ∪ 模板分区（字典序） */
+  /** 应用包名下拉选项（Android 运行目标语义，仅设备设置弹窗用）：
+   *  设备配置包名 ∪ 已安装应用（字典序）。Package（数据上下文）与本下拉无关。 */
   const pkgOptions = computed(() => {
     const set = new Set()
     const dp = (current.value?.pkg || '').trim()
     if (dp) set.add(dp)
     for (const a of appList.value) if (a.pkg) set.add(a.pkg)
-    for (const s of scripts.value) if (s.package) set.add(s.package)
-    for (const t of templatesData.value) if (t.pkg) set.add(t.pkg)
     return [...set].sort((a, b) => a.localeCompare(b))
   })
 
@@ -80,15 +75,20 @@ export function useConsoleDeviceManager({
     appList.value.filter(a => a && a.pkg).map(a => [a.pkg, a.label || a.pkg])
   ))
 
+  /** 当前 Android 应用展示名（plan §27：当前应用归左侧设备/投屏区域）：
+   *  设备配置包名 + 已读应用列表里的软件名；未读取过列表时仅显示包名，
+   *  未配置包名时给明确占位（与启动按钮 title 同口径）。 */
+  const currentAndroidAppLabel = computed(() => {
+    const pkg = (current.value?.pkg || '').trim()
+    if (!pkg) return '未配置应用包名'
+    const label = appLabelByPkg.value.get(pkg)
+    return label && label !== pkg ? `${label} · ${pkg}` : pkg
+  })
+
   function packageOptionLabel(pkg) {
     const label = appLabelByPkg.value.get(pkg)
     return label && label !== pkg ? `${label} · ${pkg}` : pkg
   }
-
-  watch(pkgOptions, list => {
-    if (!activePkg.value) activePkg.value = list[0] || ''
-    else if (!list.includes(activePkg.value)) activePkg.value = list[0] || ''
-  })
 
   /** 接入方式展示（新增时可选，编辑时只读徽章） */
   function kindInfo(k) {
@@ -111,8 +111,9 @@ export function useConsoleDeviceManager({
     appList.value = cached?.list || []
   }
 
-  /** 把设备记录载入表单（编辑模式）；syncPkg 仅在切换设备/初始化时恢复默认包名。 */
-  function loadForm(d, { syncPkg = false } = {}) {
+  /** 把设备记录载入表单（编辑模式）。设备与 Package 是两个独立上下文，
+   *  切换设备不再改写 currentPackageId（plan §38）。 */
+  function loadForm(d) {
     mode.value = 'edit'
     form.name = d.name || ''
     form.kind = d.kind || 'redroid'
@@ -122,7 +123,6 @@ export function useConsoleDeviceManager({
     form.vd_dpi = d.vd_dpi || 0
     form.fps = d.fps || 30
     restoreAppCache(d.id)
-    if (syncPkg) activePkg.value = (d.pkg || '').trim()
   }
 
   /** 表单相对已保存配置是否有未保存修改 */
@@ -186,7 +186,7 @@ export function useConsoleDeviceManager({
     consoleRuntime.reconnectAttempts.value = 0
     errorMsg.value = ''
     const d = current.value
-    if (d) loadForm(d, { syncPkg: true })
+    if (d) loadForm(d)
     else { mode.value = 'edit'; appList.value = [] }
   }
 
@@ -215,7 +215,7 @@ export function useConsoleDeviceManager({
       // 仅编辑模式重新载入表单（不覆盖进行中的"新增"表单）
       if (d && mode.value === 'edit') {
         // 刷新同一设备时保留用户手动切换的当前包名；仅在扫描导致设备选择改变时恢复该设备旧配置。
-        loadForm(d, { syncPkg: previousDeviceId !== store.deviceId })
+        loadForm(d)
       }
       else if (!d) { mode.value = 'edit'; appList.value = [] }
       toast(r.added > 0 ? `扫描到 ${r.added} 台新设备，已自动添加` : '已刷新设备状态', 'success')
@@ -302,7 +302,7 @@ export function useConsoleDeviceManager({
       }
       store.deviceId = r.id
       const nd = devices.value.find(x => x.id === r.id)
-      if (nd) loadForm(nd, { syncPkg: true })
+      if (nd) loadForm(nd)
       settingsOpen.value = false
       toast('设备已添加，点击连接开始投屏', 'success')
     } catch (e) {
@@ -323,7 +323,7 @@ export function useConsoleDeviceManager({
       devicesData.value = devices.value.filter(x => x.id !== d.id)
       if (devices.value.length) {
         store.deviceId = devices.value[0].id
-        loadForm(devices.value[0], { syncPkg: true })
+        loadForm(devices.value[0])
       } else {
         store.deviceId = null
         mode.value = 'edit'
@@ -345,10 +345,15 @@ export function useConsoleDeviceManager({
     toast('已断开投屏（设备会话保留）', 'info')
   }
 
-  /** 从设备读取已安装应用（scrcpy list_apps，带真实软件名），合并到右侧包名下拉。 */
-  async function loadApps() {
+  /** 从设备读取已安装应用（scrcpy list_apps，带真实软件名），合并到右侧包名下拉。
+   *  silent=true 供连接成功后的后台预取（工具条当前应用徽章 + 设置弹包包名候选）：
+   *  失败静默不打扰投屏主流程。 */
+  async function loadApps({ silent = false } = {}) {
     if (appLoading.value) return
-    if (!store.deviceId) return toast('请先选择设备', 'warn')
+    if (!store.deviceId) {
+      if (!silent) toast('请先选择设备', 'warn')
+      return
+    }
     const key = appCacheKey()
     const cached = appCache.get(key)
     // 5 分钟内直接用缓存，应用列表不是经常变
@@ -363,7 +368,7 @@ export function useConsoleDeviceManager({
       appCache.set(key, { list: appList.value, ts: Date.now() })
     } catch (e) {
       appList.value = []
-      toast('读取应用失败：' + e.message, 'error')
+      if (!silent) toast('读取应用失败：' + e.message, 'error')
     } finally {
       appLoading.value = false
     }
@@ -448,11 +453,14 @@ export function useConsoleDeviceManager({
 
   function launchGame() {
     if (!connected.value) return toast('请先连接设备', 'error')
-    if (!activePkg.value) return toast('请先在右侧选择包名', 'warn')
-    sendControl({ type: 'start_app', app: activePkg.value })
+    // Android 运行目标 = 设备配置的应用包名（plan §27：启动应用属设备/投屏区域，
+    // 与 Package 数据上下文无关）
+    const androidPkg = (current.value?.pkg || '').trim()
+    if (!androidPkg) return toast('当前设备未配置应用包名（设备设置中填写）', 'warn')
+    sendControl({ type: 'start_app', app: androidPkg })
     if (store.deviceId) appStartedDevices.add(store.deviceId)
     appHintDismissed.value = true
-    toast(`正在启动 ${activePkg.value}…`, 'info')
+    toast(`正在启动 ${androidPkg}…`, 'info')
   }
 
   // 设备选择持久化：刷新后自动恢复选中设备（运行态/画面恢复的前提）
@@ -464,14 +472,12 @@ export function useConsoleDeviceManager({
     settingsOpen, mode, form, types, vdPresets, fpsPresets, formDirty,
     configApplying, saveSettings, cancelSettings, current, connected, kindInfo, screenSummary,
   }
-  const workspaceContextBarContext = {
-    activePkg, pkgOptions, current, appLoading, loadApps, packageOptionLabel,
-  }
 
   return {
     // 设备与设置弹窗
     vdPresets, fpsPresets, types, mode, form, scanning, configApplying,
     appList, appLoading, devices, current, currentName, pkgOptions, packageOptionLabel,
+    appLabelByPkg, currentAndroidAppLabel,
     kindInfo, screenSummary, formDirty, settingsOpen,
     loadForm,
     startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
@@ -480,6 +486,6 @@ export function useConsoleDeviceManager({
     key, toolbarMoreOpen, toolbarMoreButton, toolbarMoreStyle,
     closeToolbarMore, toggleToolbarMore, shot, rotate, clipboard, launchGame,
     // 上下文对象
-    deviceSettingsContext, workspaceContextBarContext,
+    deviceSettingsContext,
   }
 }

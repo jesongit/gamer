@@ -41,7 +41,15 @@
               @click.stop="toggleToolbarMore"
             >更多 ▾</button>
           </div>
-          <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (activePkg || '未选择包名')">🚀 启动应用</button>
+          <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '设备未配置应用包名')">🚀 启动应用</button>
+          <!-- plan §27 停止应用：服务端 DataChannel 控制消息与 REST /control 词表
+               均未暴露 stop_app（能力仅扩展层可用），前端无可达路径，置灰待后端支持 -->
+          <button
+            class="btn btn-sm"
+            disabled
+            title="停止应用暂不可用：服务端控制消息词表（DataChannel / REST control）尚无 stop_app，该能力目前仅扩展层可用，待服务端暴露后启用"
+          >⏹ 停止应用</button>
+          <span class="tb-app" :title="'当前 Android 应用：' + currentAndroidAppLabel">📱 {{ currentAndroidAppLabel }}</span>
           <button class="btn btn-sm" @click="clipboard">📋 粘贴</button>
           <button
             class="btn btn-sm keyboard-mode-btn"
@@ -52,7 +60,7 @@
           <select
             v-model="activeKeymapName"
             class="select mono keymap-select"
-            :disabled="!activePkg || keymapLoading"
+            :disabled="!currentPackageId || keymapLoading"
             title="游戏模式下选择当前按键映射；文本模式保留选择但不生效"
             @change="onKeymapChange"
           >
@@ -139,7 +147,7 @@
     ></div>
     <!-- 右：动态 Extension Workspace；二次裁切弹窗仍挂在面板层级，任何页签可见。 -->
     <aside class="panel" :style="{ width: `${panelWidth}px` }">
-      <WorkspaceContextBar :context="workspaceContextBarContext" />
+      <PackageContextBar :context="packageContext" />
       <PluginWorkspace
         :registry="panelRegistry"
         :active-panel="activePanelKey"
@@ -191,7 +199,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { store, devicesData, scriptsData, templatesData, useToast, appStartedDevices } from '../store'
 import { api } from '../api'
 import DeviceStage from '../workspace/DeviceStage.vue'
-import WorkspaceContextBar from '../workspace/WorkspaceContextBar.vue'
+import PackageContextBar from '../workspace/PackageContextBar.vue'
 import PluginWorkspace from '../workspace/PluginWorkspace.vue'
 import { createPanelRegistry, DEFAULT_PANEL_KEY } from '../workspace/registry'
 import { createWorkspaceContext, PANEL_REGISTRY_KEY, WORKSPACE_CONTEXT_KEY } from '../workspace/context'
@@ -204,7 +212,8 @@ import RunConflictModal from '../components/RunConflictModal.vue'
 import RunParamsModal from '../components/RunParamsModal.vue'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
 import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
-import { useWorkspacePackages } from '../composables/useWorkspacePackages'
+import { usePackageContext } from '../composables/usePackageContext'
+import { loadPackages, currentPackageId } from '../package-store'
 import { createKeyboardController, shouldIgnoreKeyboardTarget } from '../keyboard-control'
 import { buildTouchPhase, createKeymapController } from '../keymap-control'
 import { useConsolePanelResize } from '../components/console/useConsolePanelResize'
@@ -242,9 +251,9 @@ const videoElement = ref(null)
 const keyboardFocused = ref(false)
 const keyboardMode = ref('game')
 const keymapPressed = reactive(new Set())
-// 当前包名：右侧下拉是唯一选择入口；模板、脚本、函数库和启动/匹配等后续操作都使用它。
-// 初始值仍可从旧设备记录的 pkg 恢复，兼容已有配置；切换 activePkg 不会启动应用。
-const activePkg = ref('')
+// 当前 Package id（§38/§39）：由 package-store 统一管理，右侧 Package 栏选择；
+// 模板/脚本/函数库/映射等数据面板全部消费该上下文。Android 应用（运行目标）与
+// 其无关——启动/停止应用使用设备配置的 pkg（useConsoleDeviceManager）。
 // 远端 keymap 扩展运行中：鼠标/滚轮/手柄输入改经 keymap 控制器（workspace 轮询写、输入层读）
 const remoteKeymapRunning = ref(false)
 // 传输统计看门狗所需的时间戳（连接生命周期的一部分，留在本壳）
@@ -292,14 +301,15 @@ async function loadData() {
 
 // ---------- 设备管理（工具条设备控件 + 设置弹窗 + 工具条快捷动作） ----------
 const {
-  devices, current, currentName, pkgOptions,
+  devices, current, currentName,
   mode, form, scanning, configApplying, settingsOpen,
   kindInfo, screenSummary, formDirty,
   startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
   saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
+  currentAndroidAppLabel,
   key, toolbarMoreOpen, toolbarMoreButton, toolbarMoreStyle,
   closeToolbarMore, toggleToolbarMore, shot, rotate, clipboard, launchGame,
-  deviceSettingsContext, workspaceContextBarContext,
+  deviceSettingsContext,
 } = useConsoleDeviceManager({
   toast,
   store,
@@ -309,7 +319,6 @@ const {
   consoleRuntime,
   connected,
   errorMsg,
-  activePkg,
   appHintDismissed,
   loadData,
   connect,
@@ -364,12 +373,11 @@ const {
   toast,
   store,
   templatesData,
-  activePkg,
+  packageId: currentPackageId,
   connected,
   videoElement,
   videoWrap,
   current,
-  pkgOptions,
   // 脚本运行 composable 的能力经懒解析箭头注入（规避组合顺序）
   editorMatchThreshold: () => editorMatchThreshold(),
   clearCallParamsCache: () => clearCallParamsCache(),
@@ -395,7 +403,7 @@ const {
   scriptPanel, functionsPanel,
 } = useConsoleScriptRunner({
   toast,
-  activePkg,
+  packageId: currentPackageId,
   consoleRuntime,
   templateNames,
   tplShortName,
@@ -411,7 +419,7 @@ const {
 } = useConsoleKeymap({
   api,
   toast,
-  activePkg,
+  packageId: currentPackageId,
   keyboardMode,
   keymap,
   keymapPressed,
@@ -421,24 +429,26 @@ const {
   pickCoord: () => beginCellPick('coord'),
 })
 
-watch(activePkg, pkg => {
+watch(currentPackageId, pkg => {
   fnLib.refresh(pkg)
   loadKeymaps(pkg)
 })
 
-// ---------- 游戏包三入口（导入/导出/编辑）：逻辑在 composable，context 并入右侧上下文条 ----------
-// WorkspaceContextBar 只透传；导入/编辑替换当前分区资源后经注入的刷新回调全量重拉
-//（activePkg 未变，watch 不触发，必须显式刷新 fnLib/keymap/脚本/模板）
-const workspacePackages = useWorkspacePackages({
+// ---------- Package 上下文条（§28 导入/导出/新建/复制/删除） ----------
+// 包切换/导入会整体替换资源现场，经 refreshAll 全量重拉（脚本/模板/函数库/映射）
+const packageContext = usePackageContext({
   toast,
-  activePkg,
-  loadData,
-  refreshFnLib: pkg => fnLib.refresh(pkg),
-  refreshKeymaps: pkg => loadKeymaps(pkg),
-  refreshScripts: () => refreshScripts(),
-  refreshTemplates: () => refreshTemplatesData(),
+  refreshAll: async () => {
+    const pkg = currentPackageId.value
+    await Promise.all([
+      Promise.resolve(loadData?.()).catch(() => {}),
+      Promise.resolve(refreshScripts?.()).catch(() => {}),
+      Promise.resolve(refreshTemplatesData?.()).catch(() => {}),
+      Promise.resolve(fnLib.refresh(pkg)).catch(() => {}),
+      Promise.resolve(loadKeymaps(pkg)).catch(() => {}),
+    ])
+  },
 })
-Object.assign(workspaceContextBarContext, workspacePackages.context)
 
 // ---------- 传输统计与画面自愈看门狗 ----------
 const { startStats, stopStats, resetWatchdogs, resetBlackWatchdog } = useWebrtcStats({
@@ -464,7 +474,7 @@ const panelRegistry = createPanelRegistry({ defaultPanelKey: DEFAULT_PANEL_KEY }
 // Workspace 以稳定的 pluginId:panelId 作为 URL key；实际导航由
 // activePanelKey + PanelRegistry 负责。
 const activePanelKey = ref(DEFAULT_PANEL_KEY)
-registerCoreContributions(panelRegistry, { activePkg })
+registerCoreContributions(panelRegistry, { packageId: currentPackageId })
 const serverUiAdapter = createServerUiContributionAdapter(panelRegistry, {
   load: () => api.listExtensions(),
 })
@@ -491,7 +501,7 @@ watch(remoteKeymapRunning, running => {
 const workspaceContext = createWorkspaceContext({
   device: current,
   deviceId: computed(() => store.deviceId),
-  activePackage: activePkg,
+  activePackage: currentPackageId,
   connected,
   stage: {
     selectRegion: selectRegionForBridge,
@@ -509,7 +519,7 @@ const workspaceContext = createWorkspaceContext({
     // YAML 自动化扩展的两个面板各自绑定一份作用域上下文（编辑模式/选择互不串台）
     scriptRunner: { scripts: scriptPanel, functions: functionsPanel },
     keymap: keymapPanelContext,
-    activePkg,
+    packageId: currentPackageId,
   },
 })
 const deviceStageBridge = workspaceContext.stage
@@ -545,6 +555,9 @@ const webrtcLifecycle = useWebRtcLifecycle({
     // 连接成功（手动/自动重连/接管同路径）即拉一次设备列表：下拉里的
     // 「在线/离线」标签随建链更新，不再停留「离线」等用户手动刷新
     refreshDeviceStatus()
+    // 后台预取已装应用（§27 读取应用）：工具条「当前应用」徽章显示软件名、
+    // 设备设置弹窗的包名候选随连结合；静默失败不打扰投屏（5 分钟缓存）
+    loadApps({ silent: true })
   },
   onDisconnect() {
     keymap.releaseAll()
@@ -1020,6 +1033,7 @@ onMounted(async () => {
   // 首次进入仅选中第一台设备，等待用户点连接（不主动建会话，尊重空闲低功耗）
   const spaPreselected = !!store.deviceId
   await loadData()
+  loadPackages().catch(() => {})
   await refreshServerExtensions()
   startExtensionPolling()
   if (!store.deviceId) {
@@ -1027,7 +1041,7 @@ onMounted(async () => {
     store.deviceId = (saved && devices.value.find(d => d.id === saved)) ? saved : (devices.value[0]?.id || null)
   }
   const d = current.value
-  if (d) loadForm(d, { syncPkg: true })
+  if (d) loadForm(d)
   else { mode.value = 'edit'; store.deviceId = null }
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('beforeunload', onBeforeUnload)
@@ -1118,6 +1132,11 @@ onUnmounted(() => {
 .tb-more-wrap { position: relative; display: inline-flex; }
 .keymap-select { flex: 0 1 150px; min-width: 104px; max-width: 180px; padding: 4px 6px; font-size: 12px; }
 .keyboard-mode-btn.active { color: var(--accent-2); }
+/* 当前 Android 应用徽章（§27：当前应用 = 设备配置包名 + 已读应用列表软件名） */
+.tb-app {
+  flex-shrink: 0; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--text-2); cursor: default;
+}
 .tb-more-mask { position: fixed; inset: 0; z-index: 20; }
 .tb-more-dropdown {
   display: flex; flex-direction: column; min-width: 168px; padding: 4px; gap: 2px;

@@ -70,6 +70,31 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar.lastIndexOf('class="tb-sep"')).toBe(sep)
   })
 
+  it('§27 Android 应用控制收在左侧设备工具条：启动读设备包名，停止置灰待后端 stop_app，徽章显示当前应用', () => {
+    // 启动应用：设备配置的应用包名（launchGame），与 Package 数据上下文无关
+    expect(consoleImpl).toContain("sendControl({ type: 'start_app', app: androidPkg })")
+    // 停止应用：服务端控制消息词表（DataChannel webrtc/mod.rs + REST /control
+    // parse_ctl）均无 stop_app——能力仅扩展层可用，前端无可达路径，置灰 + title 说明
+    const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('ConsoleVideoStage'))
+    const launchIdx = toolbar.indexOf('🚀 启动应用')
+    const stopIdx = toolbar.indexOf('⏹ 停止应用')
+    const badgeIdx = toolbar.indexOf('📱 {{ currentAndroidAppLabel }}')
+    expect(launchIdx).toBeGreaterThan(-1)
+    expect(stopIdx).toBeGreaterThan(launchIdx)
+    expect(badgeIdx).toBeGreaterThan(stopIdx)
+    expect(toolbar).toContain('stop_app')
+    // 停止按钮置灰：开标签内含 disabled + 解释性 title
+    const stopBtnOpen = toolbar.slice(toolbar.lastIndexOf('<button', stopIdx), stopIdx)
+    expect(stopBtnOpen).toContain('disabled')
+    expect(stopBtnOpen).toContain('title=')
+    // 当前应用徽章 = 设备配置 pkg + 已读应用列表软件名（appLabelByPkg）
+    expect(consoleImpl).toContain('const currentAndroidAppLabel = computed(')
+    expect(consoleImpl).toContain('appLabelByPkg.value.get(pkg)')
+    // 连接成功后台静默预取应用列表（徽章软件名 + 设置弹包包名候选），失败不打扰投屏
+    expect(consoleSource).toContain('loadApps({ silent: true })')
+    expect(consoleImpl).toContain('async function loadApps({ silent = false } = {})')
+  })
+
   it('子组件保留关键交互入口和挂载回调契约', () => {
     const settings = read('./components/console/DeviceSettingsModal.vue')
     const virtualFields = read('./components/console/DeviceVirtualFields.vue')
@@ -83,12 +108,13 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(settings).toContain('ConsoleDeviceSummary')
     expect(virtualFields).not.toContain('读取应用')
     expect(virtualFields).not.toContain('ctx.form.pkg')
-    // 分区下拉挂在 WorkspaceContextBar（右侧上下文条），不再由壳内注释性代码承载
-    const contextBar = read('./workspace/WorkspaceContextBar.vue')
-    expect(contextBar).toContain('v-model="ctx.activePkg"')
-    expect(contextBar).toContain('@click="ctx.loadApps"')
-    expect(consoleImpl).toContain("sendControl({ type: 'start_app', app: activePkg.value })")
-    expect(consoleSource).not.toContain('currentPkg')
+    // Package 下拉挂在 PackageContextBar（右侧上下文条，plan §28）；Android 启动
+    // 目标取设备配置 pkg（§27），与 Package 数据上下文分命名空间
+    const contextBar = read('./workspace/PackageContextBar.vue')
+    expect(contextBar).toContain(":value=\"ctx.currentId || ''\"")
+    expect(contextBar).toContain('@change="ctx.onPackageChange"')
+    expect(consoleImpl).toContain("(current?.pkg || '设备未配置应用包名')")
+    expect(consoleSource).not.toContain("sendControl({ type: 'start_app', app: activePkg")
     // 二次裁切弹窗独立成 TemplateCropModal：挂在面板层级（任何页签下框选可见，不切页签）
     const cropModal = read('./components/console/TemplateCropModal.vue')
     expect(cropModal).toContain('props.onCropMounted({ canvas: cropCanvas.value, section: cropSec.value })')
@@ -191,8 +217,8 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(read('./workspace/core-component-registry.ts')).toContain('console.keymaps')
     expect(template).toContain('v-model="activeKeymapName"')
     expect(template).toContain('无映射')
-    expect(consoleImpl).toContain('api.listKeymaps(pkg)')
-    expect(consoleImpl).toContain('api.getKeymap(activeKeymapName.value, activePkg.value)')
+    expect(consoleImpl).toContain('loadKeymaps(packageId.value)')
+    expect(consoleImpl).toContain('api.getKeymap(activeKeymapName.value, packageId.value)')
     expect(consoleImpl).toContain("onRequestPoint: () => pickCoord()")
     expect(consoleImpl).toContain("pickCoord: () => beginCellPick('coord')")
     expect(keymap).toContain('expected_version')
@@ -266,7 +292,7 @@ describe('Console 视觉组件拆分静态回归', () => {
 
   it('函数库新建直接进入编辑态；参数入口位于步骤入口之前', () => {
     const runner = read('./components/console/ScriptRunner.vue')
-    expect(consoleImpl).toContain("scriptShell.newFunctionFile({ file: '新函数库', pkg: activePkg.value })")
+    expect(consoleImpl).toContain("scriptShell.newFunctionFile({ file: '新函数库', pkg: packageId.value })")
     expect(consoleImpl).not.toContain("window.prompt('函数库文件短名'")
     expect(runner).toContain(':autofocus="ctx.shell.kind === \'function_library\'"')
     const toolbar = runner.slice(runner.indexOf('class="function-edit-toolbar"'))
@@ -306,36 +332,38 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(capture).toContain('ctx.replaceTemplateImage(target, file)')
   })
 
-  it('游戏包三入口（导入/导出/编辑）落在 WorkspaceContextBar，逻辑收敛在 useWorkspacePackages', () => {
-    const bar = read('./workspace/WorkspaceContextBar.vue')
-    expect(bar).toContain('title="导入 Gamer 游戏包"')
-    expect(bar).toContain('title="导出当前编辑区为 .gamerpkg"')
-    expect(bar).toContain('title="编辑已安装的游戏包"')
-    // 导出/编辑依赖当前分区；导入不受限。三个按钮同一行，仅透传 composable 动作
-    expect(bar).toContain(':disabled="!ctx.activePkg || ctx.busy"')
-    expect(bar).toContain('@click="ctx.openExport"')
-    expect(bar).toContain('@click="ctx.openEdit"')
-    expect(bar).toContain('accept=".gamerpkg"')
+  it('Package 上下文条（导入/导出/新建/复制/删除）落在 PackageContextBar，逻辑收敛在 usePackageContext', () => {
+    const bar = read('./workspace/PackageContextBar.vue')
+    expect(bar).toContain('title="导入 .gamerpkg 为本地 Package"')
+    expect(bar).toContain('title="导出当前 Package 为 .gamerpkg"')
+    expect(bar).toContain('title="新建空 Package"')
+    expect(bar).toContain('title="复制当前 Package 为新包（保留自己的修改）"')
+    expect(bar).toContain('title="删除当前 Package（数据不可恢复）"')
+    expect(bar).toContain('accept=".gamerpkg,.zip"')
     expect(bar).toContain('@change="ctx.onImportPicked"')
-    // 三个弹窗同域挂载；旧分区 zip 快照入口不回潮（.gamerpkg 是唯一归档形态）
-    expect(bar).toContain('<PackageMetaModal')
-    expect(bar).toContain('<PackageExportModal')
-    expect(bar).toContain('<PackageEditModal')
-    expect(bar).not.toContain('exportPartition')
-    expect(bar).not.toContain('onImportFile')
+    // 覆盖导入确认（§9）/新建复制表单/删除确认三弹窗同域挂载
+    expect(bar).toContain('ctx.overwriteModal.open')
+    expect(bar).toContain('ctx.formModal.open')
+    expect(bar).toContain('ctx.deleteModal.open')
+    expect(bar).toContain('覆盖该 Package 当前数据')
 
-    const composable = read('./composables/useWorkspacePackages.js')
-    expect(composable).toContain('api.listAppPackages')
-    expect(composable).toContain('api.installAppPackage')
-    expect(composable).toContain('api.exportAppPackage')
-    expect(composable).toContain('api.editAppPackage')
-    expect(composable).toContain('api.getWorkspace')
-    expect(composable).toContain('api.saveWorkspace')
-    // 资源替换后必须全量刷新（函数库 + 按键映射 + Console 基础数据）
-    expect(composable).toContain('refreshFnLib')
-    expect(composable).toContain('refreshKeymaps')
+    const composable = read('./composables/usePackageContext.js')
+    expect(composable).toContain('api.importPackageArchive')
+    expect(composable).toContain('api.exportPackageArchive')
+    expect(composable).toContain('api.createPackage')
+    expect(composable).toContain('api.duplicatePackage')
+    expect(composable).toContain('api.deletePackage')
+    expect(composable).toContain('refreshPackages({ api })')
+    // 旧 Installed/Editable 双层 API 不回潮
+    expect(composable).not.toContain('installAppPackage')
+    expect(composable).not.toContain('editAppPackage')
+    expect(composable).not.toContain('api.getWorkspace')
 
-    expect(consoleSource).toContain("import { useWorkspacePackages } from '../composables/useWorkspacePackages'")
-    expect(consoleSource).toContain('Object.assign(workspaceContextBarContext, workspacePackages.context)')
+    // Console 装配：包切换/导入后全量重拉（脚本/模板/函数库/映射/基础数据）
+    expect(consoleSource).toContain('refreshAll: async () => {')
+    expect(consoleSource).toContain('refreshTemplatesData?.()')
+    expect(consoleSource).toContain('loadKeymaps(pkg)')
+    expect(consoleSource).toContain("import { usePackageContext } from '../composables/usePackageContext'")
+    expect(consoleSource).toContain("import { loadPackages, currentPackageId } from '../package-store'")
   })
 })

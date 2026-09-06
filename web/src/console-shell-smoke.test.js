@@ -56,6 +56,10 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       expect(wrapper.text()).toContain('选择设备…')
       expect(wrapper.text()).toContain('🔌 连接')
       expect(wrapper.text()).toContain('启动应用')
+      // §27：停止应用按钮常驻工具条（服务端控制词表暂无 stop_app，置灰态由
+      // console-components 静态回归锁定）；当前应用徽章未配置包名时显示占位
+      expect(wrapper.text()).toContain('停止应用')
+      expect(wrapper.text()).toContain('未配置应用包名')
       // DeviceStage 绑定来自各拆分模块：渲染后必须拿到结构化值（而非 undefined）
       const stage = wrapper.findComponent(ConsoleVideoStage)
       expect(stage.exists()).toBe(true)
@@ -86,5 +90,83 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
     // setup/template 引用错误会以 Vue warn 形式出现（解析失败的绑定等）
     const fatal = warnings.filter(text => text.includes('is not defined') || text.includes('Properties that start with $'))
     expect(fatal).toEqual([])
+  })
+})
+
+describe('Market 页挂载冒烟（T5b：插件已装清单 + Package 远端源）', () => {
+  it('registry.json 无 packages 段（现网形态）可完整挂载：两大市场区块就绪，远端源显示空态', async () => {
+    const { default: MarketView } = await import('./workspace/MarketView.vue')
+    const { flushPromises } = await import('@vue/test-utils')
+    // stub 静态 registry.json：现网形态只有 plugins 段、无 packages 段
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('registry.json')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ schema_version: 1, plugins: [] }),
+        }
+      }
+      return originalFetch(url)
+    }
+    const wrapper = mount(MarketView)
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('插件市场')
+      expect(wrapper.text()).toContain('Package 市场')
+      expect(wrapper.text()).toContain('打开插件市场')
+      // api stub 返回空集：已装插件/已装包均为空态提示
+      expect(wrapper.text()).toContain('尚未安装任何插件')
+      expect(wrapper.text()).toContain('尚未安装任何 Package')
+      // registry.json 无 packages 段 = 「远端源暂无 Package」，不抛错不阻塞页面
+      expect(wrapper.text()).toContain('远端源暂无 Package')
+    } finally {
+      globalThis.fetch = originalFetch
+      wrapper.unmount()
+    }
+  })
+
+  it('远端源含 packages 段：按 §21 字段渲染卡片并给出安装入口', async () => {
+    const { default: MarketView } = await import('./workspace/MarketView.vue')
+    const { flushPromises } = await import('@vue/test-utils')
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('registry.json')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({
+            schema_version: 1,
+            plugins: [],
+            packages: [{
+              id: 'official.hsr.daily',
+              name: '星铁日常包',
+              version: '1.2.0',
+              download_url: '/packages/official.hsr.daily-1.2.0.gamerpkg',
+              android_targets: ['com.MiHoYo.hkrpg'],
+              required_plugins: ['gamer.yaml'],
+              author: 'gamer.dev',
+            }],
+          }),
+        }
+      }
+      return originalFetch(url)
+    }
+    const wrapper = mount(MarketView)
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('星铁日常包')
+      expect(wrapper.text()).toContain('official.hsr.daily')
+      expect(wrapper.text()).toContain('v1.2.0')
+      expect(wrapper.text()).toContain('com.MiHoYo.hkrpg')
+      expect(wrapper.text()).toContain('gamer.yaml')
+      expect(wrapper.text()).toContain('gamer.dev')
+      expect(wrapper.text()).toContain('安装')
+    } finally {
+      globalThis.fetch = originalFetch
+      wrapper.unmount()
+    }
   })
 })
