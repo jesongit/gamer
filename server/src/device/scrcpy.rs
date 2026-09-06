@@ -669,6 +669,23 @@ impl ScrcpySession {
         self.app_pidof(&pkg).await.is_some()
     }
 
+    /// 停止应用（`am force-stop`；与 capability 层 stop_app 同语义）：仅接受
+    /// 无前缀的安全包名（`+`/`?` 启动前缀无停止语义，显式拒绝）
+    pub async fn stop_app(self: &Arc<Self>, name: &str) -> anyhow::Result<()> {
+        if name.starts_with('+') || name.starts_with('?') || !super::adb::is_safe_pkg(name) {
+            anyhow::bail!("stop_app 需要无前缀的合法包名");
+        }
+        self.adb
+            .shell(
+                &self.device.addr,
+                &format!("am force-stop {name}"),
+                Duration::from_secs(8),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("force-stop 失败: {error}"))
+    }
+
     /// 应用是否已启动（建会话探测或 start_app 置位）
     pub fn app_started(&self) -> bool {
         self.app_started.load(std::sync::atomic::Ordering::Relaxed)

@@ -56,8 +56,8 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       expect(wrapper.text()).toContain('选择设备…')
       expect(wrapper.text()).toContain('🔌 连接')
       expect(wrapper.text()).toContain('启动应用')
-      // §27：停止应用按钮常驻工具条（服务端控制词表暂无 stop_app，置灰态由
-      // console-components 静态回归锁定）；当前应用徽章未配置包名时显示占位
+      // §27：停止应用按钮常驻工具条（stop_app 已暴露，console-components
+      // 静态回归锁定）；当前应用徽章未配置包名时显示占位
       expect(wrapper.text()).toContain('停止应用')
       expect(wrapper.text()).toContain('未配置应用包名')
       // DeviceStage 绑定来自各拆分模块：渲染后必须拿到结构化值（而非 undefined）

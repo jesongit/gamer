@@ -42,13 +42,9 @@
             >更多 ▾</button>
           </div>
           <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '设备未配置应用包名')">🚀 启动应用</button>
-          <!-- plan §27 停止应用：服务端 DataChannel 控制消息与 REST /control 词表
-               均未暴露 stop_app（能力仅扩展层可用），前端无可达路径，置灰待后端支持 -->
-          <button
-            class="btn btn-sm"
-            disabled
-            title="停止应用暂不可用：服务端控制消息词表（DataChannel / REST control）尚无 stop_app，该能力目前仅扩展层可用，待服务端暴露后启用"
-          >⏹ 停止应用</button>
+          <!-- plan §27 停止应用：与启动同为设备区 Android 运行目标操作，
+               DataChannel/REST 均走设备配置 pkg（am force-stop） -->
+          <button class="btn btn-sm" @click="stopGame" :title="'停止：' + (current?.pkg || '设备未配置应用包名')">⏹ 停止应用</button>
           <span class="tb-app" :title="'当前 Android 应用：' + currentAndroidAppLabel">📱 {{ currentAndroidAppLabel }}</span>
           <button class="btn btn-sm" @click="clipboard">📋 粘贴</button>
           <button
@@ -308,7 +304,7 @@ const {
   saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
   currentAndroidAppLabel,
   key, toolbarMoreOpen, toolbarMoreButton, toolbarMoreStyle,
-  closeToolbarMore, toggleToolbarMore, shot, rotate, clipboard, launchGame,
+  closeToolbarMore, toggleToolbarMore, shot, rotate, clipboard, launchGame, stopGame,
   deviceSettingsContext,
 } = useConsoleDeviceManager({
   toast,

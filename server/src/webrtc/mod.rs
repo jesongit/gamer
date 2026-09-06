@@ -1102,7 +1102,7 @@ fn verify_rtp_rebuild(frame: &VideoFrame, payloads: &[Bytes]) {
 }
 
 /// DataChannel 控制消息协议（JSON）
-/// { "type": "tap"|"swipe"|"key"|"touch"|"press"|"text"|"scroll"|"clipboard"|"start_app"|"rotate"|"back", ... }
+/// { "type": "tap"|"swipe"|"key"|"touch"|"press"|"text"|"scroll"|"clipboard"|"start_app"|"stop_app"|"rotate"|"back", ... }
 /// viewer 级消息：{"type":"reset_video"}（请求 IDR）、{"type":"audio","on":bool}（音频转发开关）
 pub(crate) enum ControlCommand {
     Data(Vec<u8>),
@@ -1378,6 +1378,10 @@ pub(crate) async fn handle_control_msg(
         "start_app" => {
             let name = msg["app"].as_str().unwrap_or("");
             session.start_app(name).await?;
+        }
+        "stop_app" => {
+            let name = msg["app"].as_str().unwrap_or("");
+            session.stop_app(name).await?;
         }
         "rotate" => {
             session.rotate_device().await?;

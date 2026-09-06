@@ -509,6 +509,7 @@ pub(super) enum Ctl<'a> {
     Back,
     Recents,
     StartApp(&'a str),
+    StopApp(&'a str),
     Rotate,
     Clipboard(&'a str),
 }
@@ -580,6 +581,22 @@ pub(super) fn parse_ctl(req: &ControlReq) -> Result<Ctl<'_>, ApiError> {
             }
             Ok(Ctl::StartApp(app))
         }
+        "stop_app" => {
+            let app = req
+                .app
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .ok_or_else(|| ApiError::bad_request("app 包名不能为空"))?;
+            if app.len() > 255 {
+                return Err(ApiError::bad_request("app 包名超过 255 字节"));
+            }
+            // 停止无启动前缀语义：仅接受无前缀的安全包名（与 capability 层同口径）
+            if !crate::device::adb::is_safe_pkg(app) {
+                return Err(ApiError::bad_request("包名非法（只允许字母数字 . _）"));
+            }
+            Ok(Ctl::StopApp(app))
+        }
         "rotate" => Ok(Ctl::Rotate),
         "clipboard" => {
             let text = req
@@ -621,6 +638,7 @@ pub(super) async fn api_control(
         Ctl::Back => session.press_key(4).await,
         Ctl::Recents => session.press_key(187).await,
         Ctl::StartApp(app) => session.start_app(app).await,
+        Ctl::StopApp(app) => session.stop_app(app).await,
         Ctl::Rotate => session.rotate_device().await,
         Ctl::Clipboard(text) => session.set_clipboard(text, false).await,
     };

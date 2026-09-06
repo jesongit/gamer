@@ -70,11 +70,12 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar.lastIndexOf('class="tb-sep"')).toBe(sep)
   })
 
-  it('§27 Android 应用控制收在左侧设备工具条：启动读设备包名，停止置灰待后端 stop_app，徽章显示当前应用', () => {
+  it('§27 Android 应用控制收在左侧设备工具条：启动/停止走设备包名，徽章显示当前应用', () => {
     // 启动应用：设备配置的应用包名（launchGame），与 Package 数据上下文无关
     expect(consoleImpl).toContain("sendControl({ type: 'start_app', app: androidPkg })")
-    // 停止应用：服务端控制消息词表（DataChannel webrtc/mod.rs + REST /control
-    // parse_ctl）均无 stop_app——能力仅扩展层可用，前端无可达路径，置灰 + title 说明
+    // 停止应用：DataChannel webrtc/mod.rs 与 REST parse_ctl 均已暴露 stop_app
+    //（am force-stop，仅无前缀安全包名），与启动同为设备区 Android 运行目标操作
+    expect(consoleImpl).toContain("sendControl({ type: 'stop_app', app: androidPkg })")
     const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('ConsoleVideoStage'))
     const launchIdx = toolbar.indexOf('🚀 启动应用')
     const stopIdx = toolbar.indexOf('⏹ 停止应用')
@@ -82,11 +83,10 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(launchIdx).toBeGreaterThan(-1)
     expect(stopIdx).toBeGreaterThan(launchIdx)
     expect(badgeIdx).toBeGreaterThan(stopIdx)
-    expect(toolbar).toContain('stop_app')
-    // 停止按钮置灰：开标签内含 disabled + 解释性 title
+    // 停止按钮可用（非置灰）：无 disabled，含点击回调（stop_app 字面量断言在上方 impl）
     const stopBtnOpen = toolbar.slice(toolbar.lastIndexOf('<button', stopIdx), stopIdx)
-    expect(stopBtnOpen).toContain('disabled')
-    expect(stopBtnOpen).toContain('title=')
+    expect(stopBtnOpen).not.toContain('disabled')
+    expect(stopBtnOpen).toContain('@click="stopGame"')
     // 当前应用徽章 = 设备配置 pkg + 已读应用列表软件名（appLabelByPkg）
     expect(consoleImpl).toContain('const currentAndroidAppLabel = computed(')
     expect(consoleImpl).toContain('appLabelByPkg.value.get(pkg)')

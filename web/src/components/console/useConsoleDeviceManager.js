@@ -463,6 +463,15 @@ export function useConsoleDeviceManager({
     toast(`正在启动 ${androidPkg}…`, 'info')
   }
 
+  /** 停止应用（plan §27）：am force-stop 设备配置的 Android 包名 */
+  function stopGame() {
+    if (!connected.value) return toast('请先连接设备', 'error')
+    const androidPkg = (current.value?.pkg || '').trim()
+    if (!androidPkg) return toast('当前设备未配置应用包名（设备设置中填写）', 'warn')
+    sendControl({ type: 'stop_app', app: androidPkg })
+    toast(`正在停止 ${androidPkg}…`, 'info')
+  }
+
   // 设备选择持久化：刷新后自动恢复选中设备（运行态/画面恢复的前提）
   watch(() => store.deviceId, id => {
     if (id) localStorage.setItem('gb_device_id', id)
@@ -484,7 +493,7 @@ export function useConsoleDeviceManager({
     saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
     // 工具条快捷动作与菜单
     key, toolbarMoreOpen, toolbarMoreButton, toolbarMoreStyle,
-    closeToolbarMore, toggleToolbarMore, shot, rotate, clipboard, launchGame,
+    closeToolbarMore, toggleToolbarMore, shot, rotate, clipboard, launchGame, stopGame,
     // 上下文对象
     deviceSettingsContext,
   }
