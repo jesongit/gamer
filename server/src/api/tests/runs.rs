@@ -244,7 +244,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     });
     let name = body["name"].as_str().unwrap().to_string();
     let content = body["content"].as_str().unwrap().to_string();
-    let resp = put_package_text(&t, &sid, "com.test.app", "gamer.yaml", &format!("scripts/{name}"), &content).await;
+    let resp = put_package_text(&t, &sid, "com.test.app", "gamer.yaml", &format!("automations/{name}"), &content).await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let resp = post_json(
         &t,

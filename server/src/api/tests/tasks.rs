@@ -384,7 +384,7 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     // 1. 保存带参数声明的 v3 脚本（TaskBoard 参数表单的数据源 = entrypoint schema）
-    let resp = put_package_text(&t, &sid, "com.example.game", "gamer.yaml", "scripts/daily.yaml", "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - 'int:count:次数:3'\nsteps:\n  - log: $msg\n").await;
+    let resp = put_package_text(&t, &sid, "com.example.game", "gamer.yaml", "automations/daily.yaml", "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - 'int:count:次数:3'\nsteps:\n  - log: $msg\n").await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
 
     // 2. TaskBoard 保存任务：payload.args 携带用户填写的稀疏实参
@@ -485,7 +485,7 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
 
     // 6. 非法 payload 门禁（任务保存时 payload 不透明，运行时才校验）：
     //    必填参数缺失 → 400 + 结构化诊断消息。
-    let resp = put_package_text(&t, &sid, "com.example.game", "gamer.yaml", "scripts/required.yaml", "version: 3\nparams:\n  - 'text:secret:密文'\nsteps:\n  - log: $secret\n").await;
+    let resp = put_package_text(&t, &sid, "com.example.game", "gamer.yaml", "automations/required.yaml", "version: 3\nparams:\n  - 'text:secret:密文'\nsteps:\n  - log: $secret\n").await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let resp = post_json(
         &t,

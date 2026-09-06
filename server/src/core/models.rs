@@ -138,8 +138,34 @@ string_id!(
 pub type AndroidPackageId = AndroidPackageName;
 pub type ContentPackageId = AppPackageId;
 
+/// Runtime Context 四层语义（plan §16 权威定义；本类型承载前三层，第四层见下）：
+///
+/// 1. **Device Context = `device_id`**——运行目标设备。设备登记
+///    （DeviceManager）决定 scrcpy 会话、触控/帧链路；`AppContext` 只携带其
+///    稳定 id，不携带连接态。
+/// 2. **App Context = `android_package`**——纯运行目标：Android 侧已安装的
+///    应用包名，`app.start`/`app.stop` 等生命周期操作的缺省目标。权威来源 =
+///    设备登记配置的 `pkg`（`DeviceManager::snapshot`），不回退、不从
+///    Package id 推导——两个命名空间严格分离。
+/// 3. **Package Context = `content_package`**——数据上下文：资源解析域
+///    （`packages/<package-id>/plugins/<plugin>/`）的 Package id，模板/脚本/
+///    函数寻址全部落在该域；可缺省（无资源语义的运行）。
+/// 4. **Plugin Context = 调用方扩展 id**——刻意不进 `AppContext`：调用方
+///    扩展身份由扩展宿主实例承载（`extensions::service` 按 extension id
+///    启动 host，能力调用经 host 授权），guest 无法伪造。资源三元组
+///    [`ResourceId`] 的 plugin 段、`ResourceHandler` 的 plugin 参数、
+///    `TimerRunnerRegistry` 的 `owner_extension_id` 均以宿主侧身份为权威。
+///
+/// 不变量：`android_package` 与 `content_package` 是两个独立命名空间
+/// （Android 安装域 vs 内容寻址域），任何生产代码路径不得互相推导或兜底；
+/// 值可以相等（例如设备 pkg 与数据包同名），但那只是巧合而非约定。
+///
 /// A device plus the Android application and optional content package in
 /// scope for an operation.
+///
+/// Runtime Context 前三层的承载体（Device/App/Package；四层语义与不变量见
+/// 下方模块级权威注释）。字段名即语义，不改名——`wire`（REST/序列化）已按
+/// 该形状定型（plan §16 收口结论）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppContext {
     pub device_id: DeviceId,

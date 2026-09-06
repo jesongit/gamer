@@ -236,7 +236,7 @@ struct YamlVnextAdapter {
     sink: Option<Arc<dyn crate::core::events::EventSink>>,
 }
 
-/// 包内可调用资源（`scripts/` / `functions/` 分区）解析器：resolve 仅被
+/// 包内可调用资源（`automations/` / `functions/` 分区）解析器：resolve 仅被
 /// wasm-runtime 的 YAML guest programs 通道调用，无该 feature 时字段不被读取。
 /// target 命名空间解析与穿越校验收口在 [`yaml_vnext::split_call_target`]。
 #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
@@ -483,7 +483,7 @@ mod tests {
             .write_text(
                 "com.test.app",
                 "gamer.yaml",
-                "scripts/sub/inner.yaml",
+                "automations/sub/inner.yaml",
                 "version: 3\nsteps:\n  - log: inner\n",
                 None,
                 false,
@@ -554,7 +554,7 @@ mod tests {
             .write_text(
                 "com.test.app",
                 "gamer.yaml",
-                "scripts/legacy.yaml",
+                "automations/legacy.yaml",
                 "steps:\n  - log: v2 形态\n",
                 None,
                 false,

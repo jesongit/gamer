@@ -1498,7 +1498,7 @@ steps:
         &guard.app,
         request(
             "PUT",
-            "/api/packages/com.guard.app/plugins/gamer.yaml/resources/scripts/daily.yaml",
+            "/api/packages/com.guard.app/plugins/gamer.yaml/resources/automations/daily.yaml",
             &json_headers(&cookie),
             Some(serde_json::json!({"content": script}).to_string().into_bytes()),
         ),

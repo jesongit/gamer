@@ -721,7 +721,7 @@ steps:
     fn write_script(cfg: &Config, name: &str, content: &str) {
         let dir = cfg.data_dir
             .join("packages/com.test.app/plugins/gamer.yaml")
-            .join("scripts");
+            .join("automations");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(name), content).unwrap();
     }

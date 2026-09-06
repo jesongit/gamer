@@ -414,7 +414,7 @@ pub fn load(source: &str) -> Result<Program, Vec<Diagnostic>> {
 /// `call` 目标的显式命名空间（契约 §2 / ADR-YAML-02）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum CallTarget {
-    /// `script:<资源 id>`：分区内 `scripts/` 相对路径，`.yaml` 后缀可省略。
+    /// `script:<资源 id>`：分区内 `automations/` 相对路径，`.yaml` 后缀可省略。
     Script(String),
     /// `function:<文件短路径>/<函数名>`：文件短路径按最后一个 `/` 分割、可含目录。
     Function {

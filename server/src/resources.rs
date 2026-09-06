@@ -429,12 +429,38 @@ pub struct SaveValidation<'a> {
     pub store: &'a PackageStore,
 }
 
+/// 字节资源保存期内容校验请求（REST 字节 PUT 路径；归档导入不经过）。
+/// 字段形状与 [`SaveValidation`] 对称——完整上下文交给 handler，个别字段
+/// 暂无读取方（扩展后续按需消费）。
+#[allow(
+    dead_code,
+    reason = "request shape mirrors SaveValidation; fields are consumed by handlers as needed"
+)]
+pub struct SaveBinaryValidation<'a> {
+    pub package: &'a str,
+    pub plugin: &'a str,
+    /// 目标资源相对路径（相对 `plugins/<plugin>/`，含扩展名）。
+    pub path: &'a str,
+    pub bytes: &'a [u8],
+    pub store: &'a PackageStore,
+}
+
 /// 单插件资源内容钩子。扩展在组合根注册（gamer.yaml / gamer.keymap）；
 /// 未注册 = 该插件资源保存不做内容校验（裸 Core 语义）。
 pub trait ResourceHandler: Send + Sync {
     /// 保存前内容校验；Err = 结构化诊断 JSON（HTTP 400 透传，格式由扩展定）。
     fn validate_save(&self, _req: SaveValidation<'_>) -> Result<(), Value> {
         Ok(())
+    }
+
+    /// 字节资源保存前钩子：校验 + 可选内容归一化。返回 `Cow::Borrowed` =
+    /// 原样落盘，`Cow::Owned` = 归一化后的落盘内容；Err = 结构化诊断 JSON
+    /// （HTTP 400 透传）。默认透传（裸 Core 语义）。
+    fn validate_save_binary<'a>(
+        &self,
+        _req: SaveBinaryValidation<'a>,
+    ) -> Result<std::borrow::Cow<'a, [u8]>, Value> {
+        Ok(std::borrow::Cow::Borrowed(_req.bytes))
     }
 
     /// 列表/读取注记：entries = (path, content)；返回 path → 顶层附加字段。
@@ -1103,6 +1129,22 @@ impl PackageStore {
         }
     }
 
+    /// 字节资源保存前钩子分发：返回落盘内容（hook 可归一化）；未注册
+    /// handler = 原样透传（裸 Core 语义）。实现侧 Cow 归一化在此收口为
+    /// owned 字节，借用不逃出本调用。
+    pub fn validate_save_binary(
+        &self,
+        req: SaveBinaryValidation<'_>,
+    ) -> Result<Vec<u8>, Value> {
+        let handler = self.handler(req.plugin);
+        match handler {
+            Some(handler) => handler
+                .validate_save_binary(req)
+                .map(|cow| cow.into_owned()),
+            None => Ok(req.bytes.to_vec()),
+        }
+    }
+
     /// 归档目录安全提取后的 staging 根（导入流程专用；Core 管理的临时目录）。
     pub(crate) fn staging_root(&self) -> PathBuf {
         self.root.join(".staging")
@@ -1322,7 +1364,7 @@ required = false
             .write_text(
                 "official.demo",
                 "gamer.yaml",
-                "scripts/daily.yaml",
+                "automations/daily.yaml",
                 "version: 3\nsteps: []\n",
                 None,
                 false,
@@ -1339,7 +1381,7 @@ required = false
         assert_eq!(copy.revision, 1);
         assert_eq!(copy.name.as_deref(), Some("演示"));
         let copied = store
-            .read_text("user.demo", "gamer.yaml", "scripts/daily.yaml")
+            .read_text("user.demo", "gamer.yaml", "automations/daily.yaml")
             .unwrap()
             .unwrap();
         assert!(copied.content.contains("version: 3"));
@@ -1393,42 +1435,42 @@ required = false
         let (store, dir) = temp_store("crud");
         store.create_package(input("a.b")).unwrap();
         let entry = store
-            .write_text("a.b", "gamer.yaml", "scripts/main.yaml", "steps: []\n", None, false)
+            .write_text("a.b", "gamer.yaml", "automations/main.yaml", "steps: []\n", None, false)
             .unwrap();
-        assert_eq!(entry.path, "scripts/main.yaml");
+        assert_eq!(entry.path, "automations/main.yaml");
         assert_eq!(entry.version().len(), 12);
 
         // 嵌套路径
         store
-            .write_text("a.b", "gamer.yaml", "scripts/sub/inner.yaml", "x: 1\n", None, false)
+            .write_text("a.b", "gamer.yaml", "automations/sub/inner.yaml", "x: 1\n", None, false)
             .unwrap();
 
         // 创建后无门禁再写 → version_required；带错版本 → version_conflict
         let err = store
-            .write_text("a.b", "gamer.yaml", "scripts/main.yaml", "x", None, false)
+            .write_text("a.b", "gamer.yaml", "automations/main.yaml", "x", None, false)
             .unwrap_err();
         assert!(err.to_string().contains("version_required"), "{err}");
         let err = store
-            .write_text("a.b", "gamer.yaml", "scripts/main.yaml", "x", Some("bad"), false)
+            .write_text("a.b", "gamer.yaml", "automations/main.yaml", "x", Some("bad"), false)
             .unwrap_err();
         assert!(err.to_string().contains("version_conflict"), "{err}");
         // 带对版本 → 通过
         let version = entry.version();
         store
-            .write_text("a.b", "gamer.yaml", "scripts/main.yaml", "steps: []\n", Some(&version), false)
+            .write_text("a.b", "gamer.yaml", "automations/main.yaml", "steps: []\n", Some(&version), false)
             .unwrap();
         // force 跳过门禁
         store
-            .write_text("a.b", "gamer.yaml", "scripts/main.yaml", "steps: []\n", None, true)
+            .write_text("a.b", "gamer.yaml", "automations/main.yaml", "steps: []\n", None, true)
             .unwrap();
 
         // 读取
         let read = store
-            .read_text("a.b", "gamer.yaml", "scripts/main.yaml")
+            .read_text("a.b", "gamer.yaml", "automations/main.yaml")
             .unwrap()
             .unwrap();
         assert!(read.content.starts_with("steps:"));
-        assert!(store.read_text("a.b", "gamer.yaml", "scripts/missing.yaml").unwrap().is_none());
+        assert!(store.read_text("a.b", "gamer.yaml", "automations/missing.yaml").unwrap().is_none());
         assert!(store.read_text("a.b", "gamer.yaml", "../escape").unwrap().is_none());
 
         // 字节资源 + 条件更新
@@ -1451,8 +1493,8 @@ required = false
         assert_eq!(
             paths,
             vec![
-                "scripts/main.yaml".to_string(),
-                "scripts/sub/inner.yaml".to_string(),
+                "automations/main.yaml".to_string(),
+                "automations/sub/inner.yaml".to_string(),
                 "templates/icon.png".to_string()
             ]
         );
@@ -1462,16 +1504,16 @@ required = false
         assert!(list[2].content.is_none());
 
         // 子目录前缀列表
-        let sub = store.list("a.b", "gamer.yaml", "scripts/sub").unwrap();
+        let sub = store.list("a.b", "gamer.yaml", "automations/sub").unwrap();
         assert_eq!(sub.len(), 1);
 
         // 删除 + 空目录清理
         store
-            .delete_resource("a.b", "gamer.yaml", "scripts/sub/inner.yaml")
+            .delete_resource("a.b", "gamer.yaml", "automations/sub/inner.yaml")
             .unwrap();
-        assert!(!dir.join("packages/a.b/plugins/gamer.yaml/scripts/sub").exists());
+        assert!(!dir.join("packages/a.b/plugins/gamer.yaml/automations/sub").exists());
         assert!(store
-            .delete_resource("a.b", "gamer.yaml", "scripts/sub/inner.yaml")
+            .delete_resource("a.b", "gamer.yaml", "automations/sub/inner.yaml")
             .is_err());
     }
 
@@ -1517,7 +1559,7 @@ required = false
             .is_err());
         // 扩展名不参与跨类匹配
         assert!(store
-            .resolve_short_path("a.b", "gamer.yaml", "scripts/icon.yaml")
+            .resolve_short_path("a.b", "gamer.yaml", "automations/icon.yaml")
             .is_err());
     }
 
@@ -1545,7 +1587,7 @@ required = false
         store.create_package(input("a.b")).unwrap();
         // 未注册 handler：保存不做内容校验（裸 Core 语义）
         store
-            .write_text("a.b", "gamer.yaml", "scripts/a.yaml", "不是 YAML 的内容", None, false)
+            .write_text("a.b", "gamer.yaml", "automations/a.yaml", "不是 YAML 的内容", None, false)
             .unwrap();
         // 注册后：同样内容被拒绝，诊断 JSON 原样透传
         store.register_handler("gamer.yaml", Arc::new(RejectingHandler));
@@ -1553,7 +1595,7 @@ required = false
             .validate_save(SaveValidation {
                 package: "a.b",
                 plugin: "gamer.yaml",
-                path: "scripts/b.yaml",
+                path: "automations/b.yaml",
                 content: "随便",
                 store: &store,
             })
@@ -1570,7 +1612,7 @@ required = false
     fn concurrent_writers_produce_whole_files_only() {
         let (store, _dir) = temp_store("atomic");
         store.create_package(input("a.b")).unwrap();
-        let path = "scripts/main.yaml";
+        let path = "automations/main.yaml";
         store.write_text("a.b", "gamer.yaml", path, "seed\n", None, true).unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let mut handles = Vec::new();
@@ -1594,7 +1636,7 @@ required = false
             .unwrap()
             .content;
         assert!(
-            seen.iter().any(|p| *p == content),
+            seen.contains(&content),
             "并发写入后内容应完整来自某个写者"
         );
     }

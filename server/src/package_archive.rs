@@ -539,14 +539,14 @@ mod tests {
         let (store, _dir) = temp_store();
         let package = archive(vec![
             ("package.toml", manifest_bytes("official.demo").as_slice()),
-            ("plugins/gamer.yaml/scripts/daily.yaml", b"version: 3\nsteps: []\n"),
+            ("plugins/gamer.yaml/automations/daily.yaml", b"version: 3\nsteps: []\n"),
             ("shared/notes.txt", b"shared bytes"),
         ]);
         let staging = store.staging_root().join("t1");
         let manifest = extract_archive(&package, &staging).unwrap();
         assert_eq!(manifest.id, "official.demo");
         assert!(staging.join("package.toml").is_file());
-        assert!(staging.join("plugins/gamer.yaml/scripts/daily.yaml").is_file());
+        assert!(staging.join("plugins/gamer.yaml/automations/daily.yaml").is_file());
         assert!(staging.join("shared/notes.txt").is_file());
 
         // 原子安装：staging → packages/official.demo（再导入走替换路径）
@@ -564,7 +564,7 @@ mod tests {
                 store
                     .package_dir("official.demo")
                     .unwrap()
-                    .join("plugins/gamer.yaml/scripts/daily.yaml")
+                    .join("plugins/gamer.yaml/automations/daily.yaml")
             )
             .unwrap(),
             b"version: 3\nsteps: []\n"

@@ -23,8 +23,10 @@
 //!
 //! 插件数据隔离：资源路径恒被限制在
 //! `packages/<pkg>/plugins/<plugin>/` 前缀内；shared/ 只随包导出，无插件
-//! 写入口。导入/复制后自动发布包内 `plugins/*/presets/*.yaml` 为任务预设
-//! （发布 id `<package-id>:<名>`，幂等）。
+//! 写入口。文本与字节 PUT 都经过扩展内容钩子（`ResourceHandler`：文本 v3
+//! 校验 / 字节模板灰度归一化），未注册 handler = 裸 Core 透传；归档导入
+//! （import）不经过内容校验。导入/复制后自动发布包内
+//! `plugins/*/presets/*.yaml` 为任务预设（发布 id `<package-id>:<名>`，幂等）。
 
 
 use std::sync::Arc;
@@ -498,10 +500,41 @@ pub(super) async fn api_put_plugin_resource(
             .and_then(|v| v.to_str().ok())
             .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
             .unwrap_or(false);
+        // 保存前字节钩子（校验 + 可选归一化）：诊断 JSON 与文本路径同一 400
+        // 形状。归档导入（POST /api/packages/import）不经过内容校验——包整体
+        // 替换语义，内容以导出侧校验为准。
+        let validation = {
+            let st = st.clone();
+            let (pkg, plugin) = validate_ctx;
+            let path = path.clone();
+            let bytes = body.clone();
+            tokio::task::spawn_blocking(move || {
+                let store = store_of(&st);
+                store.validate_save_binary(crate::resources::SaveBinaryValidation {
+                    package: &pkg,
+                    plugin: &plugin,
+                    path: &path,
+                    bytes: &bytes,
+                    store: &store,
+                })
+            })
+            .await
+            .unwrap_or_else(|e| Err(Value::String(format!("validation worker failed: {e}"))))
+        };
+        let bytes = match validation {
+            Ok(bytes) => bytes,
+            Err(diagnostics) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "invalid_content", "diagnostics": diagnostics })),
+                )
+                    .into_response()
+            }
+        };
         let result = run_blocking_api(move || -> Result<Value, ApiError> {
             let store = store_of(&st);
             let entry = store
-                .write_binary(&pkg, &plugin, &path, &body, expected.as_deref(), force)
+                .write_binary(&pkg, &plugin, &path, &bytes, expected.as_deref(), force)
                 .map_err(write_error)?;
             let mut value = serde_json::to_value(&entry).unwrap_or_default();
             if let Some(obj) = value.as_object_mut() {
@@ -757,7 +790,7 @@ pub(super) fn publish_package_presets(
                 .map(|f| f.path())
                 .filter(|p| {
                     p.is_file()
-                        && p.file_name().and_then(|n| n.to_str()).map_or(false, |n| {
+                        && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
                             let lower = n.to_ascii_lowercase();
                             !n.starts_with('.')
                                 && (lower.ends_with(".yaml") || lower.ends_with(".yml"))
@@ -849,9 +882,9 @@ fn store_error(e: anyhow::Error) -> ApiError {
 
 #[allow(clippy::result_large_err)]
 fn not_found_or_internal(e: anyhow::Error) -> ApiError {
-    if e.downcast_ref::<crate::resources::PackageNotFound>().is_some() {
-        ApiError::not_found(e.to_string())
-    } else if e.to_string().contains("不存在") {
+    let is_missing = e.downcast_ref::<crate::resources::PackageNotFound>().is_some()
+        || e.to_string().contains("不存在");
+    if is_missing {
         ApiError::not_found(e.to_string())
     } else {
         internal(e)
@@ -876,9 +909,7 @@ fn archive_error(e: ArchiveError) -> ApiError {
 #[allow(clippy::result_large_err)]
 fn write_error(e: anyhow::Error) -> ApiError {
     let message = e.to_string();
-    if message.contains("version_conflict") {
-        ApiError::conflict(message)
-    } else if message.contains("version_required") {
+    if message.contains("version_conflict") || message.contains("version_required") {
         ApiError::conflict(message)
     } else if message.contains("不存在") {
         ApiError::not_found(message)

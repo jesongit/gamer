@@ -96,14 +96,14 @@ async fn entrypoint_schema_endpoint_serves_v3_and_gates_legacy_sources() {
     // describe 必须版本门禁拒绝（v3-only，无 fallback）
     write_partition_file(
         &t,
-        "scripts",
+        "automations",
         "v2daily.yaml",
         "params:\n  - 'text:msg:消息:\"默认\"'\n  - 'bool:fast:快速'\nsteps:\n  - log: $msg\n",
     );
     save_resource(
         &t,
         &sid,
-        "scripts",
+        "automations",
         "v3daily",
         "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - 'time:wait:等待:2s'\n  - name: count\n    type: int\n    default: 3\nsteps:\n  - log: $msg\n",
     )
@@ -111,7 +111,7 @@ async fn entrypoint_schema_endpoint_serves_v3_and_gates_legacy_sources() {
     save_resource(
         &t,
         &sid,
-        "scripts",
+        "automations",
         "v3req",
         "version: 3\nparams:\n  - 'text:secret:密文'\nsteps:\n  - log: $secret\n",
     )
@@ -162,7 +162,7 @@ async fn entrypoint_schema_endpoint_serves_v3_and_gates_legacy_sources() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
     assert_eq!(missing["error"], "not_found");
     // 解析失败 → 400 invalid_script（直写坏源：保存期校验本就会拒绝它）
-    write_partition_file(&t, "scripts", "broken.yaml", "version: 3\nparams: []\n");
+    write_partition_file(&t, "automations", "broken.yaml", "version: 3\nparams: []\n");
     let (status, broken) = describe_entrypoint(&t, &sid, "com.test.app/broken.yaml").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{broken}");
     assert_eq!(broken["error"], "invalid_script");
@@ -196,7 +196,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     save_resource(
         &t,
         &sid,
-        "scripts",
+        "automations",
         "v3opt",
         "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - 'bool:fast:快速:false'\n  - 'time:wait:等待:2s'\n  - name: count\n    type: int\n    default: 3\nsteps:\n  - log: $msg\n",
     )
@@ -204,7 +204,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     save_resource(
         &t,
         &sid,
-        "scripts",
+        "automations",
         "v3req",
         "version: 3\nparams:\n  - 'text:secret:密文'\nsteps:\n  - log: $secret\n",
     )
@@ -323,7 +323,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     // 非 v3 存量脚本（直写分区）：运行提交即版本门禁 400（yaml.v3.version，无 fallback）
     write_partition_file(
         &t,
-        "scripts",
+        "automations",
         "v2run.yaml",
         "params:\n  - 'text:msg:消息:\"默认\"'\nsteps:\n  - log: $msg\n",
     );

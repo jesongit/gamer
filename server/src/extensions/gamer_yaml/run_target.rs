@@ -17,7 +17,7 @@ use crate::core::RunContext;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunTarget {
-    /// 可执行脚本（scripts/）。`start_index` = 顶层步骤序号（0=从头）。
+    /// 可执行脚本（automations/）。`start_index` = 顶层步骤序号（0=从头）。
     Script {
         script_id: String,
         start_index: usize,

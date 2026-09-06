@@ -87,7 +87,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
         &t.app,
         req(
             "PUT",
-            &resource_url("official.demo", "gamer.yaml", "scripts/daily.yaml"),
+            &resource_url("official.demo", "gamer.yaml", "automations/daily.yaml"),
             None,
             &json_headers(sid.clone()),
             Some(serde_json::json!({"content": script}).to_string()),
@@ -96,7 +96,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
     let written = json_body(resp).await;
-    assert_eq!(written["path"], "scripts/daily.yaml");
+    assert_eq!(written["path"], "automations/daily.yaml");
     assert_eq!(written["version"].as_str().unwrap().len(), 12);
     let v1 = written["version"].as_str().unwrap().to_string();
 
@@ -121,7 +121,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.demo", "gamer.yaml", "scripts/daily.yaml"),
+        &resource_url("official.demo", "gamer.yaml", "automations/daily.yaml"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -146,7 +146,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
         &t.app,
         req(
             "PUT",
-            &resource_url("official.demo", "gamer.yaml", "scripts/daily.yaml"),
+            &resource_url("official.demo", "gamer.yaml", "automations/daily.yaml"),
             None,
             &json_headers(sid.clone()),
             Some(
@@ -174,7 +174,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
         .collect();
     assert_eq!(
         paths,
-        vec!["scripts/daily.yaml".to_string(), "templates/icon.png".to_string()]
+        vec!["automations/daily.yaml".to_string(), "templates/icon.png".to_string()]
     );
 
     // ---- GET 包详情（manifest + 统计）----
@@ -200,7 +200,7 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("user.demo", "gamer.yaml", "scripts/daily.yaml"),
+        &resource_url("user.demo", "gamer.yaml", "automations/daily.yaml"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -289,7 +289,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
         &t.app,
         req(
             "PUT",
-            &resource_url("official.imp", "gamer.yaml", "scripts/first.yaml"),
+            &resource_url("official.imp", "gamer.yaml", "automations/first.yaml"),
             None,
             &json_headers(sid.clone()),
             Some(serde_json::json!({"content": "version: 3\nsteps:\n  - log: v1\n"}).to_string()),
@@ -347,7 +347,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
         &t.app,
         req(
             "PUT",
-            &resource_url("official.imp", "gamer.yaml", "scripts/first.yaml"),
+            &resource_url("official.imp", "gamer.yaml", "automations/first.yaml"),
             None,
             &json_headers(sid.clone()),
             Some(
@@ -397,7 +397,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.imp", "gamer.yaml", "scripts/first.yaml"),
+        &resource_url("official.imp", "gamer.yaml", "automations/first.yaml"),
     )
     .await;
     assert!(json_body(resp).await["content"]
@@ -431,7 +431,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.imp", "gamer.yaml", "scripts/first.yaml"),
+        &resource_url("official.imp", "gamer.yaml", "automations/first.yaml"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -638,7 +638,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
         &sid,
         "official.tpl",
         "gamer.yaml",
-        "scripts/daily.yaml",
+        "automations/daily.yaml",
         script,
     )
     .await;
@@ -685,7 +685,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
     let resp = get_json(
         &t,
         &sid,
-        &resource_url("official.tpl", "gamer.yaml", "scripts/daily.yaml"),
+        &resource_url("official.tpl", "gamer.yaml", "automations/daily.yaml"),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -827,4 +827,142 @@ async fn vision_test_requires_explicit_plugin() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{}", json_body(resp).await);
+}
+
+/// A2 字节钩子（REST PUT 面）：templates/ 上传彩色 PNG → 落盘 8-bit 灰度
+/// 归一化（读回验证）；垃圾字节 → 400 结构化诊断；非模板路径字节透传。
+#[tokio::test]
+async fn template_upload_binary_hook_normalizes_and_rejects_garbage() {
+    let t = build_app(
+        "tplhook",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+    let resp = create_package(
+        &t,
+        &sid,
+        serde_json::json!({"id": "official.tpl", "plugins": {"gamer.yaml": true}}),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "{}", json_body(resp).await);
+
+    // 彩色（RGBA 非）灰度 PNG 夹具：R/G/B 通道取值不同，归一化后必然变色
+    let mut color = image::RgbaImage::new(4, 3);
+    for (x, _y, pixel) in color.enumerate_pixels_mut() {
+        *pixel = image::Rgba([if x % 2 == 0 { 10 } else { 240 }, 90, 160, 255]);
+    }
+    let mut color_bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(color)
+        .write_to(
+            &mut std::io::Cursor::new(&mut color_bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "PUT",
+            &resource_url("official.tpl", "gamer.yaml", "templates/icon.png"),
+            None,
+            &[
+                (axum::http::header::CONTENT_TYPE.to_string(), "image/png".into()),
+                (axum::http::header::COOKIE.to_string(), sid.clone()),
+            ],
+            color_bytes.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
+    let written = json_body(resp).await;
+    assert_eq!(written["path"], "templates/icon.png");
+    let stored_version = written["version"].as_str().unwrap().to_string();
+
+    // 读回：必须是 8-bit 灰度 PNG（归一化结果），且版本 = 归一化内容哈希
+    let resp = get_json(
+        &t,
+        &sid,
+        &resource_url("official.tpl", "gamer.yaml", "templates/icon.png"),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024).await.unwrap();
+    let decoded = image::load_from_memory(&bytes).expect("落盘必须是合法 PNG");
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::L8,
+        "templates/ 上传必须归一化为 8-bit 灰度"
+    );
+    assert_ne!(
+        bytes.as_ref(),
+        color_bytes.as_slice(),
+        "彩色输入必须被重编码，不得原样落盘"
+    );
+
+    // 二次 PUT 版本门禁基于归一化内容：带归一化内容的 expected 版本可通过
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "PUT",
+            &resource_url("official.tpl", "gamer.yaml", "templates/icon.png"),
+            None,
+            &[
+                (axum::http::header::CONTENT_TYPE.to_string(), "image/png".into()),
+                (axum::http::header::COOKIE.to_string(), sid.clone()),
+                ("x-expected-version".to_string(), stored_version.clone()),
+            ],
+            color_bytes,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
+
+    // 垃圾字节 → 400 结构化诊断（与文本保存校验同形状）
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "PUT",
+            &resource_url("official.tpl", "gamer.yaml", "templates/broken.png"),
+            None,
+            &[
+                (axum::http::header::CONTENT_TYPE.to_string(), "application/octet-stream".into()),
+                (axum::http::header::COOKIE.to_string(), sid.clone()),
+            ],
+            b"definitely not an image".to_vec(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{}", json_body(resp).await);
+    let err = json_body(resp).await;
+    assert_eq!(err["error"], "invalid_content");
+    assert_eq!(err["diagnostics"][0]["code"], "template.png.invalid", "{err}");
+    assert_eq!(err["diagnostics"][0]["path"], "templates/broken.png");
+
+    // 非模板路径字节透传（裸字节区不解释内容）。夹具必须非 UTF-8：
+    // 合法 UTF-8 的小文件走文本读取面（GET 返回 JSON entry），测不到字节流
+    let payload: Vec<u8> = vec![0xFF, 0xFE, b'n', b'o', b't', b' ', b'a', b' ', b'p', b'n', b'g'];
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "PUT",
+            &resource_url("official.tpl", "gamer.yaml", "assets/blob.bin"),
+            None,
+            &[
+                (axum::http::header::CONTENT_TYPE.to_string(), "application/octet-stream".into()),
+                (axum::http::header::COOKIE.to_string(), sid.clone()),
+            ],
+            payload.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
+    let resp = get_json(
+        &t,
+        &sid,
+        &resource_url("official.tpl", "gamer.yaml", "assets/blob.bin"),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(bytes.as_ref(), payload.as_slice());
 }

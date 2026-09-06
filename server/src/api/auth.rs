@@ -17,7 +17,7 @@
 //! 防护形态标注——高风险接口（均有专项测试覆盖）：
 //!   shutdown / 设备控制 / 脚本运行·停止 / 模板删除 / ZIP 导入
 //! 全部位于受保护分组：未登录 401；shutdown 另有回环 token 快捷通道；
-//! ZIP 导入另有资源硬限（见 scripts.rs import）。
+//! ZIP 导入另有资源硬限（见 package_archive.rs 归档校验）。
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;

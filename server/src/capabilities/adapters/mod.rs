@@ -46,7 +46,7 @@ pub(crate) fn build_registry(
     let input = Arc::new(InputAdapter::new(device.clone(), touch.clone()));
     let frame_store = Arc::new(FrameStore::new());
     let resource = Arc::new(ResourceAdapter::new(resources));
-    let frame = Arc::new(FrameAdapter::new(devices, frame_store.clone()));
+    let frame = Arc::new(FrameAdapter::new(devices.clone(), frame_store.clone()));
     let vision = Arc::new(VisionAdapter::new(frame_store, resource.clone()));
 
     CapabilityRegistry::builder()
@@ -56,7 +56,11 @@ pub(crate) fn build_registry(
         .with_frame_service(frame)
         .with_vision_service(vision)
         .with_resource_service(resource.clone())
-        .with_run_service(Arc::new(RunAdapter::new(runs, resource.clone())))
+        .with_run_service(Arc::new(RunAdapter::new(
+            runs,
+            resource.clone(),
+            devices,
+        )))
         .with_log(LogAdapter::new(db))
         .build()
 }
@@ -264,21 +268,44 @@ mod tests {
 
     #[tokio::test]
     async fn run_adapter_submits_to_run_manager_and_reports_terminal_state() {
-        let (_dir, store) = template_store();
-        seed_template(&store, "com.test.game", "gamer.yaml", "scripts/daily.yaml", b"steps: []\n");
+        let (dir, store) = template_store();
+        seed_template(&store, "com.test.game", "gamer.yaml", "automations/daily.yaml", b"steps: []\n");
         let resources = Arc::new(ResourceAdapter::new(store));
         let entry = resources
             .resolve(&ResourceId::new(
                 "com.test.game",
                 "gamer.yaml",
-                "scripts/daily.yaml",
+                "automations/daily.yaml",
             ).unwrap())
             .await
             .unwrap();
         let manager = Arc::new(crate::run_manager::RunManager::new(Arc::new(
             SuccessfulExecutor,
         )));
-        let adapter = RunAdapter::new(manager.clone(), resources);
+        // Device/App 上下文取设备登记配置（plan §16）：设备 d1 必须已登记且
+        // 配置 pkg；与 entry 的 Package id（com.test.game）同名仅是夹具巧合。
+        let cfg = crate::config::Config {
+            data_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let db: crate::store::Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
+        let devices = Arc::new(crate::device::DeviceManager::new(db, cfg));
+        devices
+            .upsert_device(&crate::store::Device {
+                id: "d1".into(),
+                name: "d1".into(),
+                kind: "usb".into(),
+                addr: String::new(),
+                screen_mode: crate::store::ScreenMode::Mirror,
+                vd_res: None,
+                vd_dpi: None,
+                pkg: Some("com.test.game".into()),
+                fps: None,
+                created_at: "2026-01-01 00:00:00".into(),
+            })
+            .await
+            .unwrap();
+        let adapter = RunAdapter::new(manager.clone(), resources, devices);
         let request = RunRequest::new(DeviceHandle::new(DeviceId::new("d1")), entry);
         let handle = adapter.submit(request).await.unwrap();
         assert!(matches!(

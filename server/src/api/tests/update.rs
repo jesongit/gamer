@@ -66,7 +66,7 @@ mod update_flow_tests {
         let body = serde_json::json!({ "content": content, "force": true }).to_string();
         let request = HttpRequest::builder()
             .method("PUT")
-            .uri(&format!("/api/packages/com.test.app/plugins/gamer.yaml/resources/scripts/{name}"))
+            .uri(&format!("/api/packages/com.test.app/plugins/gamer.yaml/resources/automations/{name}"))
             .header(axum::http::header::COOKIE, sid)
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(Body::from(body))

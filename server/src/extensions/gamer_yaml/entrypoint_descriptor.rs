@@ -256,7 +256,7 @@ mod tests {
         let (cfg, dir) = store_dir("v3");
         write(
             &cfg,
-            "scripts",
+            "automations",
             "v3.yaml",
             "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - name: count\n    type: int\n    default: 3\nsteps:\n  - log: $msg\n",
         );
@@ -319,7 +319,7 @@ mod tests {
             other => panic!("expected invalid, got {:?}", other.is_ok()),
         }
         // v3 脚本解析失败 → 结构化 invalid（yaml.v3.* 诊断）
-        write(&cfg, "scripts", "bad.yaml", "version: 3\nparams: []\n");
+        write(&cfg, "automations", "bad.yaml", "version: 3\nparams: []\n");
         match describe_entrypoint(&scripts, "com.test.app/bad.yaml") {
             Err(DescribeError::Invalid { diagnostics }) => {
                 assert!(diagnostics.to_string().contains("yaml.v3"));
@@ -327,7 +327,7 @@ mod tests {
             other => panic!("expected invalid, got {:?}", other.is_ok()),
         }
         // 非 v3 存量脚本 → 版本门禁 invalid（v3-only，无 fallback）
-        write(&cfg, "scripts", "legacy.yaml", "params: []\nsteps: []\n");
+        write(&cfg, "automations", "legacy.yaml", "params: []\nsteps: []\n");
         match describe_entrypoint(&scripts, "com.test.app/legacy.yaml") {
             Err(DescribeError::Invalid { diagnostics }) => {
                 assert!(
@@ -366,7 +366,7 @@ mod tests {
         let (cfg, dir) = store_dir("trait");
         write(
             &cfg,
-            "scripts",
+            "automations",
             "v3.yaml",
             "version: 3\nsteps:\n  - log: ok\n",
         );
