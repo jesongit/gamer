@@ -48,51 +48,68 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).not.toContain('recording')
   })
 
-  it('设备选择/连接/设置/删除与投屏控制合并在同一工具条行', () => {
+  it('工具条两组布局：设备区（连接/刷新/更多）| 应用区（应用/读取/启动/游戏模式/功能）', () => {
     const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('ConsoleVideoStage'))
     expect(toolbar).toContain('v-model="store.deviceId"')
     expect(toolbar).toContain('flushAndConnect')
     expect(toolbar).toContain('refreshDevices')
-    expect(toolbar).toContain('startAdd')
-    expect(toolbar).toContain('openSettings')
-    expect(toolbar).toContain('removeDevice')
-    expect(toolbar).toContain('⚙️ 设置')
     expect(toolbar).toContain('更多 ▾')
-    expect(toolbar).toContain('toolbarMoreOpen')
-    expect(toolbar).toContain('🔄 旋转')
-    expect(toolbar).toContain("key('APP_SWITCH')")
+    expect(toolbar).toContain('功能 ▾')
+    expect(toolbar).toContain("toggleToolbarMenu('device'")
+    expect(toolbar).toContain("toggleToolbarMenu('actions'")
     expect((toolbar.match(/class="tb-row/g) || [])).toHaveLength(1)
-
-    // 删除与截图之间有分割线；启动应用与粘贴之间不再有分割线。
+    // 设备「更多」下拉：新增/设置/删除；投屏「功能」下拉：按键与画面辅助动作
+    const teleport = toolbar.slice(toolbar.indexOf('<Teleport'))
+    const deviceMenu = teleport.slice(teleport.indexOf(`v-if="toolbarMenuOpen === 'device'"`), teleport.indexOf(`v-if="toolbarMenuOpen === 'actions'"`))
+    expect(deviceMenu).toContain('startAdd')
+    expect(deviceMenu).toContain('openSettings')
+    expect(deviceMenu).toContain('removeDevice')
+    expect(deviceMenu).toContain('⚙️ 设备设置')
+    const actionsMenu = teleport.slice(teleport.indexOf(`v-if="toolbarMenuOpen === 'actions'"`))
+    expect(actionsMenu).toContain('clipboard()')
+    expect(actionsMenu).toContain('shot()')
+    expect(actionsMenu).toContain("key('HOME')")
+    expect(actionsMenu).toContain("key('BACK')")
+    expect(actionsMenu).toContain('🔄 旋转')
+    expect(actionsMenu).toContain("key('APP_SWITCH')")
+    expect(actionsMenu).toContain("key('VOL_UP')")
+    expect(actionsMenu).toContain("key('VOL_DOWN')")
+    expect(actionsMenu).toContain('toggleAudio()')
+    // 两组之间有唯一分割线：设备「更多」之后、应用区（应用下拉）之前
     const sep = toolbar.indexOf('class="tb-sep"')
-    expect(sep).toBeGreaterThan(toolbar.indexOf('removeDevice'))
-    expect(sep).toBeLessThan(toolbar.indexOf('>📷 截图</button>'))
+    expect(sep).toBeGreaterThan(toolbar.indexOf('更多 ▾'))
+    expect(sep).toBeLessThan(toolbar.indexOf('tb-app-select'))
     expect(toolbar.lastIndexOf('class="tb-sep"')).toBe(sep)
   })
 
-  it('§27 Android 应用控制收在左侧设备工具条：启动/停止走设备包名，徽章显示当前应用', () => {
+  it('§27 Android 应用控制收在左侧设备工具条：应用下拉选目标（选中即存配置），启动走设备包名', () => {
     // 启动应用：设备配置的应用包名（launchGame），与 Package 数据上下文无关
     expect(consoleImpl).toContain("sendControl({ type: 'start_app', app: androidPkg })")
     // 停止应用：DataChannel webrtc/mod.rs 与 REST parse_ctl 均已暴露 stop_app
-    //（am force-stop，仅无前缀安全包名），与启动同为设备区 Android 运行目标操作
+    //（am force-stop，仅无前缀安全包名），收进「功能」下拉，与启动同为设备区操作
     expect(consoleImpl).toContain("sendControl({ type: 'stop_app', app: androidPkg })")
     const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('ConsoleVideoStage'))
-    const launchIdx = toolbar.indexOf('🚀 启动应用')
+    const launchIdx = toolbar.indexOf('🚀 启动')
     const stopIdx = toolbar.indexOf('⏹ 停止应用')
-    const badgeIdx = toolbar.indexOf('📱 {{ currentAndroidAppLabel }}')
     expect(launchIdx).toBeGreaterThan(-1)
     expect(stopIdx).toBeGreaterThan(launchIdx)
-    expect(badgeIdx).toBeGreaterThan(stopIdx)
-    // 停止按钮可用（非置灰）：无 disabled，含点击回调（stop_app 字面量断言在上方 impl）
+    // 应用下拉 = Android 运行目标唯一配置入口（设备设置弹窗不再编辑 pkg）：
+    // 选中即 PUT 保存为设备配置包名（服务端不拆会话），启动/脚本共用
+    const appSelect = toolbar.slice(toolbar.indexOf('tb-app-select'), toolbar.indexOf('📖 读取'))
+    expect(appSelect).toContain(`:value="current?.pkg || ''"`)
+    expect(appSelect).toContain('@change="onAppSelect"')
+    expect(consoleImpl).toContain('async function onAppSelect')
+    expect(consoleImpl).toContain('appLabelByPkg.value.get(pkg)')
+    // 「读取」按钮：强制刷新应用列表缓存（5 分钟 TTL）；连接成功后台静默预取不打扰投屏
+    expect(toolbar).toContain('loadApps({ force: true })')
+    expect(consoleImpl).toContain('async function loadApps({ silent = false, force = false } = {})')
+    expect(consoleSource).toContain('loadApps({ silent: true })')
+    // 「功能」下拉里的停止应用可用（非置灰）且带确认回调
     const stopBtnOpen = toolbar.slice(toolbar.lastIndexOf('<button', stopIdx), stopIdx)
     expect(stopBtnOpen).not.toContain('disabled')
-    expect(stopBtnOpen).toContain('@click="stopGame"')
-    // 当前应用徽章 = 设备配置 pkg + 已读应用列表软件名（appLabelByPkg）
-    expect(consoleImpl).toContain('const currentAndroidAppLabel = computed(')
-    expect(consoleImpl).toContain('appLabelByPkg.value.get(pkg)')
-    // 连接成功后台静默预取应用列表（徽章软件名 + 设置弹包包名候选），失败不打扰投屏
-    expect(consoleSource).toContain('loadApps({ silent: true })')
-    expect(consoleImpl).toContain('async function loadApps({ silent = false } = {})')
+    expect(stopBtnOpen).toContain('stopGame()')
+    // 静音开关必须有定义（曾出现模板引用未定义 toggleAudio 的回归）
+    expect(consoleSource).toContain('function toggleAudio()')
   })
 
   it('子组件保留关键交互入口和挂载回调契约', () => {
@@ -113,7 +130,7 @@ describe('Console 视觉组件拆分静态回归', () => {
     const contextBar = read('./workspace/PackageContextBar.vue')
     expect(contextBar).toContain(":value=\"ctx.currentId || ''\"")
     expect(contextBar).toContain('@change="ctx.onPackageChange"')
-    expect(consoleImpl).toContain("(current?.pkg || '设备未配置应用包名')")
+    expect(consoleImpl).toContain("(current?.pkg || '未选择应用')")
     expect(consoleSource).not.toContain("sendControl({ type: 'start_app', app: activePkg")
     // 二次裁切弹窗独立成 TemplateCropModal：挂在面板层级（任何页签下框选可见，不切页签）
     const cropModal = read('./components/console/TemplateCropModal.vue')

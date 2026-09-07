@@ -14,39 +14,44 @@
       @keyup="onStageKeyUp"
       @click="onStageClick"
     >
-      <!-- 顶部工具条：设备管理与常用投屏控制合并为一行，次要控制收进「更多」 -->
+      <!-- 顶部工具条：设备管理 + 应用控制两组；次要动作收进「更多 / 功能」下拉 -->
       <div ref="toolbarEl" class="toolbar" data-keyboard-ignore="true" @click="onToolbarClick">
         <div class="tb-row">
-          <select v-model="store.deviceId" class="select mono tb-dev-select" @change="onDeviceSelect">
+          <select v-model="store.deviceId" class="select mono tb-dev-select" aria-label="设备列表" @change="onDeviceSelect">
             <option value="">选择设备…</option>
             <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
           </select>
           <button v-if="!connected" class="btn btn-sm btn-primary" :disabled="!store.deviceId || connecting" @click="flushAndConnect">{{ connecting ? '连接中…' : '🔌 连接' }}</button>
           <button v-else class="btn btn-sm" @click="disconnect">⏹ 断开</button>
           <button class="btn btn-sm" :disabled="scanning" @click="refreshDevices">🔄 刷新</button>
-          <button class="btn btn-sm" @click="startAdd">＋ 新增</button>
-          <button class="btn btn-sm" :disabled="!current" @click="openSettings">⚙️ 设置</button>
-          <button class="btn btn-sm btn-danger" :disabled="!current" @click="removeDevice">🗑 删除</button>
-          <div class="tb-sep"></div>
-          <button class="btn btn-sm" @click="shot">📷 截图</button>
-          <button class="btn btn-sm" @click="key('HOME')">🏠 Home</button>
-          <button class="btn btn-sm" @click="key('BACK')">⬅ 返回</button>
           <div class="tb-more-wrap">
             <button
-              ref="toolbarMoreButton"
               class="btn btn-sm"
-              :class="{ active: toolbarMoreOpen }"
+              :class="{ active: toolbarMenuOpen === 'device' }"
               aria-haspopup="menu"
-              :aria-expanded="toolbarMoreOpen"
-              @click.stop="toggleToolbarMore"
+              :aria-expanded="toolbarMenuOpen === 'device'"
+              title="新增 / 设置 / 删除设备"
+              @click.stop="toggleToolbarMenu('device', $event)"
             >更多 ▾</button>
           </div>
-          <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '设备未配置应用包名')">🚀 启动应用</button>
-          <!-- plan §27 停止应用：与启动同为设备区 Android 运行目标操作，
+          <div class="tb-sep"></div>
+          <!-- 应用下拉（Android 运行目标）：选中即保存为设备配置包名，启动/脚本共用；
+               选项 = 设备配置包名 ∪ 已安装应用（「读取」拉取），Package 数据上下文与此无关 -->
+          <select
+            class="select mono tb-app-select"
+            :value="current?.pkg || ''"
+            :disabled="!current || appSelectSaving"
+            aria-label="应用（Android 运行目标）"
+            title="当前应用目标；选中即保存为设备配置，启动按钮与脚本共用"
+            @change="onAppSelect"
+          >
+            <option value="" :disabled="pkgOptions.length > 0">未选择应用</option>
+            <option v-for="p in pkgOptions" :key="p" :value="p">{{ packageOptionLabel(p) }}</option>
+          </select>
+          <button class="btn btn-sm" :disabled="!store.deviceId || appLoading" :title="appLoading ? '正在读取已安装应用…' : '读取设备已安装应用列表（填充应用下拉，强制刷新缓存）'" @click="loadApps({ force: true })">{{ appLoading ? '读取中…' : '📖 读取' }}</button>
+          <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '未选择应用')">🚀 启动</button>
+          <!-- plan §27 停止应用收进「功能」菜单：与启动同为设备区 Android 运行目标操作，
                DataChannel/REST 均走设备配置 pkg（am force-stop） -->
-          <button class="btn btn-sm" @click="stopGame" :title="'停止：' + (current?.pkg || '设备未配置应用包名')">⏹ 停止应用</button>
-          <span class="tb-app" :title="'当前 Android 应用：' + currentAndroidAppLabel">📱 {{ currentAndroidAppLabel }}</span>
-          <button class="btn btn-sm" @click="clipboard">📋 粘贴</button>
           <button
             class="btn btn-sm keyboard-mode-btn"
             :class="{ active: keyboardMode === 'text' }"
@@ -63,18 +68,39 @@
             <option value="">无映射</option>
             <option v-for="item in keymapOptions" :key="item.id || item.file || item.name" :value="item.id || item.file || item.name">{{ item.name || item.file || item.id }}</option>
           </select>
+          <div class="tb-more-wrap">
+            <button
+              class="btn btn-sm"
+              :class="{ active: toolbarMenuOpen === 'actions' }"
+              aria-haspopup="menu"
+              :aria-expanded="toolbarMenuOpen === 'actions'"
+              title="粘贴 / 截图 / 按键 / 停止应用等"
+              @click.stop="toggleToolbarMenu('actions', $event)"
+            >功能 ▾</button>
+          </div>
         </div>
       </div>
 
       <!-- 菜单脱离横向滚动行挂到 body，避免窄窗口下被工具条裁掉 -->
       <Teleport to="body">
-        <span v-if="toolbarMoreOpen" class="tb-more-mask" @click.stop="closeToolbarMore"></span>
-        <div v-if="toolbarMoreOpen" class="tb-more-dropdown tb-more-dropdown-fixed" :style="toolbarMoreStyle" role="menu">
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMore(); rotate()">🔄 旋转</button>
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMore(); key('APP_SWITCH')">🪟 最近</button>
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMore(); key('VOL_UP')">🔊＋ 音量加</button>
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMore(); key('VOL_DOWN')">🔊－ 音量减</button>
-          <button class="tb-more-item" role="menuitem" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'" @click="closeToolbarMore(); toggleAudio()">{{ audioMuted ? '🔊 取消静音' : '🔇 静音' }}</button>
+        <span v-if="toolbarMenuOpen" class="tb-more-mask" @click.stop="closeToolbarMenu"></span>
+        <div v-if="toolbarMenuOpen === 'device'" class="tb-more-dropdown tb-more-dropdown-sm tb-more-dropdown-fixed" :style="toolbarMenuStyle" role="menu">
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); startAdd()">＋ 新增设备</button>
+          <button class="tb-more-item" role="menuitem" :disabled="!current" @click="closeToolbarMenu(); openSettings()">⚙️ 设备设置</button>
+          <button class="tb-more-item tb-more-item-danger" role="menuitem" :disabled="!current" @click="closeToolbarMenu(); removeDevice()">🗑 删除设备</button>
+        </div>
+        <div v-if="toolbarMenuOpen === 'actions'" class="tb-more-dropdown tb-more-dropdown-fixed" :style="toolbarMenuStyle" role="menu">
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); clipboard()">📋 粘贴</button>
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); shot()">📷 截图</button>
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); key('HOME')">🏠 Home</button>
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); key('BACK')">⬅ 返回</button>
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); rotate()">🔄 旋转</button>
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); key('APP_SWITCH')">🪟 最近</button>
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_UP')">🔊＋ 音量加</button>
+          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); key('VOL_DOWN')">🔊－ 音量减</button>
+          <button class="tb-more-item" role="menuitem" :title="audioMuted ? '取消静音（听游戏声音）' : '静音'" @click="closeToolbarMenu(); toggleAudio()">{{ audioMuted ? '🔊 取消静音' : '🔇 静音' }}</button>
+          <div class="tb-more-sep"></div>
+          <button class="tb-more-item tb-more-item-danger" role="menuitem" @click="closeToolbarMenu(); stopGame()">⏹ 停止应用</button>
         </div>
       </Teleport>
 
@@ -302,9 +328,9 @@ const {
   kindInfo, screenSummary, formDirty,
   startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
   saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
-  currentAndroidAppLabel,
-  key, toolbarMoreOpen, toolbarMoreButton, toolbarMoreStyle,
-  closeToolbarMore, toggleToolbarMore, shot, rotate, clipboard, launchGame, stopGame,
+  appSelectSaving, onAppSelect, appLoading, pkgOptions, packageOptionLabel,
+  key, toolbarMenuOpen, toolbarMenuStyle,
+  closeToolbarMenu, toggleToolbarMenu, shot, rotate, clipboard, launchGame, stopGame,
   deviceSettingsContext,
 } = useConsoleDeviceManager({
   toast,
@@ -763,6 +789,14 @@ function toggleKeyboardMode() {
   nextTick(() => stageFocusEl.value?.focus())
 }
 
+/** 静音开关（「功能」菜单）：只切本地播放，音频轨仍在传输；
+ *  与 onChannelOpen 建链时的 audio 消息同词表 */
+function toggleAudio() {
+  audioMuted.value = !audioMuted.value
+  sendControl({ type: 'audio', on: !audioMuted.value })
+  toast(audioMuted.value ? '已静音' : '已取消静音', 'info')
+}
+
 watch(keyboardMode, mode => {
   if (mode === 'text') {
     keymap.releaseAll()
@@ -789,7 +823,7 @@ function isGlobalEscapeConsumed(e) {
   if (e?.code !== 'Escape' && e?.key !== 'Escape') return false
   return !!(
     cellPick.mode
-    || toolbarMoreOpen.value
+    || toolbarMenuOpen.value
     || settingsOpen.value
     || viewTpl.value
     || resourcePreview.open
@@ -804,8 +838,8 @@ function onGlobalKeydown(e) {
     // bridge 框选被 Esc 取消
   } else if (cellPick.mode) {
     cancelCellPick()
-  } else if (toolbarMoreOpen.value) {
-    closeToolbarMore()
+  } else if (toolbarMenuOpen.value) {
+    closeToolbarMenu()
   } else if (settingsOpen.value) {
     cancelSettings()
   } else if (viewTpl.value) {
@@ -1128,17 +1162,15 @@ onUnmounted(() => {
 .tb-more-wrap { position: relative; display: inline-flex; }
 .keymap-select { flex: 0 1 150px; min-width: 104px; max-width: 180px; padding: 4px 6px; font-size: 12px; }
 .keyboard-mode-btn.active { color: var(--accent-2); }
-/* 当前 Android 应用徽章（§27：当前应用 = 设备配置包名 + 已读应用列表软件名） */
-.tb-app {
-  flex-shrink: 0; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 11px; color: var(--text-2); cursor: default;
-}
+/* 工具条应用下拉（Android 运行目标）：选中即保存为设备配置包名 */
+.tb-app-select { flex: 0 1 auto; min-width: 150px; max-width: 240px; padding: 4px 6px; font-size: 12px; }
 .tb-more-mask { position: fixed; inset: 0; z-index: 20; }
 .tb-more-dropdown {
   display: flex; flex-direction: column; min-width: 168px; padding: 4px; gap: 2px;
   background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
   box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
 }
+.tb-more-dropdown-sm { min-width: 128px; }
 .tb-more-dropdown-fixed { position: fixed; z-index: 30; }
 .tb-more-item {
   display: flex; align-items: center; gap: 6px; text-align: left; white-space: nowrap;
@@ -1146,6 +1178,9 @@ onUnmounted(() => {
   color: var(--text-0); font-size: 12px; cursor: pointer;
 }
 .tb-more-item:hover { background: var(--bg-3); }
+.tb-more-item:disabled { color: var(--text-2); opacity: .5; cursor: not-allowed; background: none; }
+.tb-more-item-danger:hover { color: var(--danger); }
+.tb-more-sep { height: 1px; margin: 3px 6px; background: var(--border); }
 .btn.active { border-color: var(--accent-2); color: var(--accent-2); }
 
 /* ===== 左右分区与右侧面板 ===== */

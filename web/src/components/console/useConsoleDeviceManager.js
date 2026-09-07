@@ -1,4 +1,4 @@
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { api } from '../../api'
 import { appStartedDevices } from '../../store'
 import { formatScreenSummary } from '../../console/device-summary'
@@ -10,8 +10,8 @@ const APP_CACHE_TTL = 5 * 60 * 1000
 /**
  * 设备管理（工具条设备控件 + 设置弹窗；原右侧设备页签已收编）：
  * 设备 CRUD/扫描/连接动作、已安装应用列表、应用分区下拉候选，
- * 以及工具条「更多」菜单与快捷投屏动作。
- * 自 Console.vue 原样拆出，行为零变化。
+ * 工具条「应用」下拉（选中即保存为设备配置包名），
+ * 以及工具条「更多/功能」两个下拉菜单与快捷投屏动作。
  */
 export function useConsoleDeviceManager({
   toast,
@@ -61,7 +61,7 @@ export function useConsoleDeviceManager({
   const current = computed(() => devices.value.find(d => d.id === store.deviceId) || null)
   const currentName = computed(() => current.value?.name || '未选择设备')
 
-  /** 应用包名下拉选项（Android 运行目标语义，仅设备设置弹窗用）：
+  /** 应用包名下拉选项（Android 运行目标语义，工具条「应用」下拉用）：
    *  设备配置包名 ∪ 已安装应用（字典序）。Package（数据上下文）与本下拉无关。 */
   const pkgOptions = computed(() => {
     const set = new Set()
@@ -74,16 +74,6 @@ export function useConsoleDeviceManager({
   const appLabelByPkg = computed(() => new Map(
     appList.value.filter(a => a && a.pkg).map(a => [a.pkg, a.label || a.pkg])
   ))
-
-  /** 当前 Android 应用展示名（plan §27：当前应用归左侧设备/投屏区域）：
-   *  设备配置包名 + 已读应用列表里的软件名；未读取过列表时仅显示包名，
-   *  未配置包名时给明确占位（与启动按钮 title 同口径）。 */
-  const currentAndroidAppLabel = computed(() => {
-    const pkg = (current.value?.pkg || '').trim()
-    if (!pkg) return '未配置应用包名'
-    const label = appLabelByPkg.value.get(pkg)
-    return label && label !== pkg ? `${label} · ${pkg}` : pkg
-  })
 
   function packageOptionLabel(pkg) {
     const label = appLabelByPkg.value.get(pkg)
@@ -345,20 +335,21 @@ export function useConsoleDeviceManager({
     toast('已断开投屏（设备会话保留）', 'info')
   }
 
-  /** 从设备读取已安装应用（scrcpy list_apps，带真实软件名），合并到右侧包名下拉。
-   *  silent=true 供连接成功后的后台预取（工具条当前应用徽章 + 设置弹包包名候选）：
-   *  失败静默不打扰投屏主流程。 */
-  async function loadApps({ silent = false } = {}) {
+  /** 从设备读取已安装应用（scrcpy list_apps，带真实软件名），填充工具条「应用」下拉。
+   *  silent=true 供连接成功后的后台预取（应用下拉候选 + 设置弹窗摘要）：
+   *  失败静默不打扰投屏主流程。force=true 供手动「读取」绕过 5 分钟缓存强制重读。 */
+  async function loadApps({ silent = false, force = false } = {}) {
     if (appLoading.value) return
     if (!store.deviceId) {
       if (!silent) toast('请先选择设备', 'warn')
       return
     }
     const key = appCacheKey()
-    const cached = appCache.get(key)
-    // 5 分钟内直接用缓存，应用列表不是经常变
+    const cached = force ? null : appCache.get(key)
+    // 5 分钟内直接用缓存，应用列表不是经常变（手动读取可强制刷新）
     if (cached && Date.now() - cached.ts < APP_CACHE_TTL) {
       appList.value = cached.list
+      if (force) toast('应用列表已是最新', 'info')
       return
     }
     appLoading.value = true
@@ -374,6 +365,43 @@ export function useConsoleDeviceManager({
     }
   }
 
+  // ---------- 工具条「应用」下拉：选中即保存为设备配置包名 ----------
+
+  const appSelectSaving = ref(false)
+
+  /** 应用下拉选中 → PUT 保存为设备配置的应用包名（Android 运行目标）。
+   *  设备设置弹窗已不编辑包名，工具条应用下拉是唯一配置入口；启动按钮与
+   *  脚本/定时任务共用水/devices 同一 pkg。pkg 不属投屏会话参数，服务端保持
+   *  会话不断线（api_update_device 仅投屏参数变更才踢 viewer 拆会话）。 */
+  async function onAppSelect(e) {
+    const pkg = (e?.target?.value || '').trim()
+    const d = current.value
+    if (!d || !pkg || pkg === (d.pkg || '').trim() || appSelectSaving.value) return
+    appSelectSaving.value = true
+    try {
+      // PUT 是全量替换（vd_res/vd_dpi 直接覆盖、name 必填）：必须带已保存配置
+      // 整包提交，只改 pkg 字段，避免把未提交字段清空
+      await api.updateDevice(d.id, {
+        name: d.name,
+        kind: d.kind,
+        addr: d.addr || '',
+        screen_mode: d.screen_mode || 'virtual',
+        vd_res: d.screen_mode === 'virtual' ? (d.vd_res || null) : null,
+        vd_dpi: d.screen_mode === 'virtual' ? (d.vd_dpi || 0) : null,
+        pkg,
+        fps: d.fps || 30,
+      })
+      await loadData()
+      toast(`应用目标已切换：${packageOptionLabel(pkg)}`, 'success')
+    } catch (err) {
+      // 失败回显旧包名（select 的 :value 绑定不会自动改写用户已选中的 DOM 值）
+      if (e?.target) e.target.value = (d.pkg || '').trim()
+      toast('切换应用失败：' + err.message, 'error')
+    } finally {
+      appSelectSaving.value = false
+    }
+  }
+
   // ---------- 工具条快捷动作与「更多」菜单 ----------
 
   function key(k) {
@@ -382,21 +410,21 @@ export function useConsoleDeviceManager({
     sendControl({ type: 'press', keycode: codes[k] || 0 })
   }
 
-  const toolbarMoreOpen = ref(false)
-  const toolbarMoreButton = ref(null)
-  const toolbarMoreStyle = reactive({ top: '0px', left: '0px' })
+  // 工具条下拉菜单：设备「更多」与投屏「功能」共用一套开合/定位状态。
+  // toolbarMenuOpen 记录当前展开的菜单名（'' = 全关）；定位取触发按钮自身，
+  // 菜单经 Teleport 挂 body，窄窗口下不被工具条横向滚动行裁掉
+  const toolbarMenuOpen = ref('')
+  const toolbarMenuStyle = reactive({ top: '0px', left: '0px' })
 
-  function closeToolbarMore() { toolbarMoreOpen.value = false }
-  function positionToolbarMore() {
-    const rect = toolbarMoreButton.value?.getBoundingClientRect()
+  function closeToolbarMenu() { toolbarMenuOpen.value = '' }
+  function toggleToolbarMenu(name, e) {
+    toolbarMenuOpen.value = toolbarMenuOpen.value === name ? '' : name
+    if (!toolbarMenuOpen.value) return
+    const rect = e?.currentTarget?.getBoundingClientRect()
     if (!rect) return
     const menuWidth = 168
-    toolbarMoreStyle.top = `${Math.round(rect.bottom + 4)}px`
-    toolbarMoreStyle.left = `${Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8)))}px`
-  }
-  function toggleToolbarMore() {
-    toolbarMoreOpen.value = !toolbarMoreOpen.value
-    if (toolbarMoreOpen.value) nextTick(positionToolbarMore)
+    toolbarMenuStyle.top = `${Math.round(rect.bottom + 4)}px`
+    toolbarMenuStyle.left = `${Math.round(Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8)))}px`
   }
 
   function shot() {
@@ -456,7 +484,7 @@ export function useConsoleDeviceManager({
     // Android 运行目标 = 设备配置的应用包名（plan §27：启动应用属设备/投屏区域，
     // 与 Package 数据上下文无关）
     const androidPkg = (current.value?.pkg || '').trim()
-    if (!androidPkg) return toast('当前设备未配置应用包名（设备设置中填写）', 'warn')
+    if (!androidPkg) return toast('未配置应用，请先在工具条「应用」下拉选择', 'warn')
     sendControl({ type: 'start_app', app: androidPkg })
     if (store.deviceId) appStartedDevices.add(store.deviceId)
     appHintDismissed.value = true
@@ -467,7 +495,7 @@ export function useConsoleDeviceManager({
   function stopGame() {
     if (!connected.value) return toast('请先连接设备', 'error')
     const androidPkg = (current.value?.pkg || '').trim()
-    if (!androidPkg) return toast('当前设备未配置应用包名（设备设置中填写）', 'warn')
+    if (!androidPkg) return toast('未配置应用，请先在工具条「应用」下拉选择', 'warn')
     sendControl({ type: 'stop_app', app: androidPkg })
     toast(`正在停止 ${androidPkg}…`, 'info')
   }
@@ -486,14 +514,14 @@ export function useConsoleDeviceManager({
     // 设备与设置弹窗
     vdPresets, fpsPresets, types, mode, form, scanning, configApplying,
     appList, appLoading, devices, current, currentName, pkgOptions, packageOptionLabel,
-    appLabelByPkg, currentAndroidAppLabel,
     kindInfo, screenSummary, formDirty, settingsOpen,
     loadForm,
     startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
     saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
-    // 工具条快捷动作与菜单
-    key, toolbarMoreOpen, toolbarMoreButton, toolbarMoreStyle,
-    closeToolbarMore, toggleToolbarMore, shot, rotate, clipboard, launchGame, stopGame,
+    appSelectSaving, onAppSelect,
+    // 工具条快捷动作与下拉菜单（更多/功能）
+    key, toolbarMenuOpen, toolbarMenuStyle,
+    closeToolbarMenu, toggleToolbarMenu, shot, rotate, clipboard, launchGame, stopGame,
     // 上下文对象
     deviceSettingsContext,
   }

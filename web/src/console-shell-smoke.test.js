@@ -55,11 +55,14 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       expect(wrapper.exists()).toBe(true)
       expect(wrapper.text()).toContain('选择设备…')
       expect(wrapper.text()).toContain('🔌 连接')
-      expect(wrapper.text()).toContain('启动应用')
-      // §27：停止应用按钮常驻工具条（stop_app 已暴露，console-components
-      // 静态回归锁定）；当前应用徽章未配置包名时显示占位
-      expect(wrapper.text()).toContain('停止应用')
-      expect(wrapper.text()).toContain('未配置应用包名')
+      // 工具条两组布局：应用区 = 应用下拉（未配置时占位「未选择应用」）+ 读取 + 启动；
+      // 停止应用/粘贴/按键等收进「更多 / 功能」下拉（Teleport 在此已 stub，
+      // 菜单内容不渲染，只断言两个触发按钮），菜单结构由 console-components 静态回归锁定
+      expect(wrapper.text()).toContain('更多 ▾')
+      expect(wrapper.text()).toContain('未选择应用')
+      expect(wrapper.text()).toContain('📖 读取')
+      expect(wrapper.text()).toContain('🚀 启动')
+      expect(wrapper.text()).toContain('功能 ▾')
       // DeviceStage 绑定来自各拆分模块：渲染后必须拿到结构化值（而非 undefined）
       const stage = wrapper.findComponent(ConsoleVideoStage)
       expect(stage.exists()).toBe(true)
