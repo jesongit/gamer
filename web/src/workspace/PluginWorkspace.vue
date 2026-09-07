@@ -1,10 +1,12 @@
 <template>
   <div class="plugin-workspace">
-    <!-- 主导航（plan §29）：任务 | 日志 | 市场 | 插件 | 设置。插件贡献的 Panel
-         不再直接占据主导航（§40），收在「插件」二级（§31-§32）。 -->
+    <!-- 主导航（plan §29）：任务 | 日志 | 市场▾ | 插件▾ | 设置。市场/插件为下拉
+         二级菜单：市场分插件市场/配置市场两分区，插件列出已启用插件贡献的面板；
+         插件 Panel 不再占据主导航（§40）。 -->
     <WorkspaceTabs
       :panels="topTabs"
       :active-panel="activeTop"
+      :active-child="activeChild"
       @select="selectTop"
       @open-plugin-center="centerOpen = true"
     />
@@ -25,8 +27,8 @@
     </div>
 
     <div class="workspace-panel-slot">
-      <!-- 市场（§30）：插件市场 + Package 市场 -->
-      <MarketView v-if="activeTop === 'market'" @extensions-changed="emit('extensions-changed')" />
+      <!-- 市场（§30）：下拉二级菜单选分区（插件市场/配置市场），一次只渲染所选分区 -->
+      <MarketView v-if="activeTop === 'market'" :section="marketSection" @extensions-changed="emit('extensions-changed')" />
       <!-- 插件列表（§31）：当前已注册贡献的插件 -->
       <div v-else-if="activeTop === 'plugins'" class="plugin-picker">
         <div v-if="!pluginGroups.length" class="workspace-empty">
@@ -98,19 +100,35 @@ const emit = defineEmits(['select', 'fallback', 'extensions-changed'])
 const lifecycle = props.lifecycle || createWorkspaceLifecycle()
 const allPanels = computed(() => props.registry.getPanels())
 
-// 主导航五项（§29）：core 三面板 + 市场/插件两个虚拟视图
+// 主导航五项（§29）：core 三面板 + 市场/插件两个虚拟视图。
+// 市场/插件收成下拉二级菜单：市场 = 插件市场/配置市场两分区；插件 = 已启用
+// 插件贡献的面板清单（hint 标插件 id），没有业务面板时退化为普通页签
+// （点进插件列表空态）。子项 key：市场分区用 `market:<section>`（selectTop
+// 拦截翻译，不进路由），插件面板即真实 panel key（路由 hash 同步不变）。
+const MARKET_CHILDREN = [
+  { key: 'market:plugin', title: '插件市场' },
+  { key: 'market:package', title: '配置市场' },
+]
 const topTabs = computed(() => {
   const tabs = []
   for (const key of ['gamer.core:tasks', 'gamer.core:logs']) {
     const panel = allPanels.value.find(p => p.key === key)
     if (panel) tabs.push(panel)
   }
-  tabs.push({ key: 'market', title: '市场', icon: '🛒' })
-  tabs.push({ key: 'plugins', title: '插件', icon: '🧩' })
+  tabs.push({ key: 'market', title: '市场', icon: '🛒', children: MARKET_CHILDREN })
+  const pluginChildren = pluginGroups.value.flatMap(group =>
+    group.panels.map(panel => ({ key: panel.key, title: panel.title, hint: group.pluginId })),
+  )
+  tabs.push(pluginChildren.length
+    ? { key: 'plugins', title: '插件', icon: '🧩', children: pluginChildren }
+    : { key: 'plugins', title: '插件', icon: '🧩' })
   const settings = allPanels.value.find(p => p.key === 'gamer.core:settings')
   if (settings) tabs.push(settings)
   return tabs
 })
+
+/** 市场当前分区（下拉选择决定；panel=market 的 URL 不带分区，默认插件市场）。 */
+const marketSection = ref('plugin')
 
 /** 业务插件面板按 pluginId 分组（gamer.core 除外）。 */
 const pluginGroups = computed(() => {
@@ -148,8 +166,22 @@ const coreContext = computed(() => props.context.core || {})
 const uiBridge = computed(() => props.context.uiBridge || props.context.bridge)
 const centerOpen = ref(false)
 
-function selectTop(key) { emit('select', key) }
+function selectTop(key) {
+  // 市场下拉子项（market:<section>）翻译成 market 视图 + 分区状态，不进路由
+  if (key === 'market:plugin' || key === 'market:package') {
+    marketSection.value = key.slice('market:'.length)
+    emit('select', 'market')
+    return
+  }
+  emit('select', key)
+}
 function selectPanel(key) { emit('select', key) }
+
+/** 下拉菜单项高亮：市场跟随所选分区，插件跟随当前业务面板 key。 */
+const activeChild = computed(() => {
+  if (activeTop.value === 'market') return `market:${marketSection.value}`
+  return props.activePanel
+})
 
 watch(selected, (panel, previous) => {
   if (previous?.key) lifecycle.ui.close(previous.key)

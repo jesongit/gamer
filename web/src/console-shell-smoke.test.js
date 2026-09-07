@@ -83,6 +83,13 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       for (const gone of ['模板', '脚本', '映射']) {
         expect(tabTexts.some(text => text.includes(gone))).toBe(false)
       }
+      // 主导航「市场」为下拉二级菜单：点页签弹菜单（插件市场/配置市场），
+      // 裸 Core 无业务插件，「插件」退化为普通页签不弹菜单
+      const marketTab = wrapper.findAll('.workspace-tab').find(tab => tab.text().includes('市场'))
+      await marketTab.trigger('click')
+      const menuTexts = wrapper.findAll('.workspace-dd-item').map(item => item.text())
+      expect(menuTexts.some(text => text.includes('插件市场'))).toBe(true)
+      expect(menuTexts.some(text => text.includes('配置市场'))).toBe(true)
       // 默认面板 = gamer.core:tasks（裸 Core 兜底）
       expect(wrapper.text()).toContain('新建任务')
     } finally {
@@ -96,8 +103,8 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
   })
 })
 
-describe('Market 页挂载冒烟（T5b：插件已装清单 + Package 远端源）', () => {
-  it('registry.json 无 packages 段（现网形态）可完整挂载：两大市场区块就绪，远端源显示空态', async () => {
+describe('Market 页挂载冒烟（T5b：分区渲染 插件市场/配置市场 + Package 远端源）', () => {
+  it('插件市场分区（默认）：已装插件清单空态 + 插件中心入口', async () => {
     const { default: MarketView } = await import('./workspace/MarketView.vue')
     const { flushPromises } = await import('@vue/test-utils')
     // stub 静态 registry.json：现网形态只有 plugins 段、无 packages 段
@@ -117,10 +124,37 @@ describe('Market 页挂载冒烟（T5b：插件已装清单 + Package 远端源�
     try {
       await flushPromises()
       expect(wrapper.text()).toContain('插件市场')
-      expect(wrapper.text()).toContain('配置市场')
       expect(wrapper.text()).toContain('打开插件市场')
-      // api stub 返回空集：已装插件/已装包均为空态提示
+      // api stub 返回空集：已装插件为空态提示
       expect(wrapper.text()).toContain('尚未安装任何插件')
+      // 下拉二级菜单分区渲染：默认只出插件市场，不渲染配置市场区块
+      expect(wrapper.text()).not.toContain('配置市场')
+    } finally {
+      globalThis.fetch = originalFetch
+      wrapper.unmount()
+    }
+  })
+
+  it('配置市场分区：registry.json 无 packages 段（现网形态）显示空态不抛错', async () => {
+    const { default: MarketView } = await import('./workspace/MarketView.vue')
+    const { flushPromises } = await import('@vue/test-utils')
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('registry.json')) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get: () => 'application/json' },
+          json: async () => ({ schema_version: 1, plugins: [] }),
+        }
+      }
+      return originalFetch(url)
+    }
+    const wrapper = mount(MarketView, { props: { section: 'package' } })
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('配置市场')
+      // api stub 返回空集：已装配置为空态提示
       expect(wrapper.text()).toContain('尚未安装任何配置')
       // registry.json 无 packages 段 = 「远端源暂无配置」，不抛错不阻塞页面
       expect(wrapper.text()).toContain('远端源暂无配置')
@@ -130,7 +164,7 @@ describe('Market 页挂载冒烟（T5b：插件已装清单 + Package 远端源�
     }
   })
 
-  it('远端源含 packages 段：按 §21 字段渲染卡片并给出安装入口', async () => {
+  it('配置市场分区：远端源含 packages 段时按 §21 字段渲染卡片并给出安装入口', async () => {
     const { default: MarketView } = await import('./workspace/MarketView.vue')
     const { flushPromises } = await import('@vue/test-utils')
     const originalFetch = globalThis.fetch
@@ -157,7 +191,7 @@ describe('Market 页挂载冒烟（T5b：插件已装清单 + Package 远端源�
       }
       return originalFetch(url)
     }
-    const wrapper = mount(MarketView)
+    const wrapper = mount(MarketView, { props: { section: 'package' } })
     try {
       await flushPromises()
       expect(wrapper.text()).toContain('星铁日常包')

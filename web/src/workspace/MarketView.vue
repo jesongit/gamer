@@ -1,8 +1,9 @@
 <template>
   <div class="market-view">
     <!-- 插件市场（plan §20）：搜索/安装/升级/卸载/能力查看全部由插件中心承载，
-         本页保留入口与已装插件清单（只读概览，管理动作不在此重复） -->
-    <section class="market-section">
+         本页保留入口与已装插件清单（只读概览，管理动作不在此重复）。
+         主导航「市场」为下拉二级菜单，section 决定渲染哪个分区。 -->
+    <section v-if="section === 'plugin'" class="market-section">
       <div class="market-section-head">
         <div>
           <h3>插件市场</h3>
@@ -27,7 +28,7 @@
 
     <!-- Package 市场（plan §21）：远端源（registry.json packages 段）+ 本地已装清单；
          本地文件导入仍走右侧 Package 栏「导入」 -->
-    <section class="market-section">
+    <section v-else-if="section === 'package'" class="market-section">
       <div class="market-section-head">
         <div>
           <h3>配置市场</h3>
@@ -94,6 +95,10 @@ import { useToast } from '../store'
 import { loadPackages, packageStore, refreshPackages } from '../package-store'
 
 const emit = defineEmits(['extensions-changed'])
+// section：'plugin' = 插件市场 / 'package' = 配置市场（主导航「市场」下拉二级菜单选定）
+defineProps({
+  section: { type: String, default: 'plugin' },
+})
 const toast = useToast()
 const centerOpen = ref(false)
 const packages = computed(() => packageStore.packages)
