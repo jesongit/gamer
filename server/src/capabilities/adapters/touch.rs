@@ -53,17 +53,29 @@ impl TouchAdapter {
         action: u8,
         point: TouchPoint,
     ) -> CapabilityResult<()> {
-        self.device
-            .session(&state.device)?
-            .inject_touch(
-                action,
-                state.pointer_id,
-                point.x() as f32,
-                point.y() as f32,
-                point.pressure(),
-            )
-            .await
-            .map_err(|error| CapabilityError::Failed(error.to_string()))
+        // 录制输入观察（合同 §2.1）：能力层触控（keymap/runner/plugin 来源）
+        // 经此进入设备发送路径；source 标注为扩展能力输入（"plugin"），精确
+        // 归属可用 `recording::with_input_source` 在调用方覆盖。
+        crate::recording::with_input_source("plugin", async {
+            let session = match self.device.session(&state.device) {
+                Ok(session) => session,
+                Err(error) => return Err(error),
+            };
+            match session
+                .inject_touch(
+                    action,
+                    state.pointer_id,
+                    point.x() as f32,
+                    point.y() as f32,
+                    point.pressure(),
+                )
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(error) => Err(CapabilityError::Failed(error.to_string())),
+            }
+        })
+        .await
     }
 }
 

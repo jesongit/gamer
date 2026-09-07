@@ -653,7 +653,13 @@ impl DeviceManager {
     }
 
     pub async fn disconnect_device_with_reason(&self, id: &str, reason: DeviceDisconnectReason) {
-        if matches!(reason, DeviceDisconnectReason::Managed) && self.activity.has_active(id) {
+        if matches!(reason, DeviceDisconnectReason::Managed)
+            && (self.activity.has_active(id)
+                // 录制会话 = 设备活跃消费者：非 force 拆除不打断录制
+                || crate::recording::service(&self.cfg)
+                    .active_for_device(id)
+                    .is_some())
+        {
             warn!(device = %id, "active device consumer, skip disconnect (use force to override)");
             return;
         }
@@ -682,6 +688,13 @@ impl DeviceManager {
             rt.frame_cache = None;
             rt.status = DeviceStatus::Offline;
         }
+        // 设备会话边界（录制合同 §2）：会话拆除 → 活动录制安全收尾为
+        // interrupted（同步文件收口，毫秒级；不回传错误、不影响实时链路）。
+        // 看门狗确死/空闲低功耗/管理动作/停机全部经此收口。
+        crate::recording::service(&self.cfg).on_device_session_boundary(
+            id,
+            crate::recording::SegmentReason::Disconnect,
+        );
         // 注意：scrcpy server 端 cleanup=true，socket 关闭即清理
         // 恢复虚拟屏会话的设备侧改写（freezer/媒体音量；无标记则零操作）。
         // 上面的写锁 guard 已随块结束释放（guard 不能跨 await 存活，Send 约束）
@@ -824,7 +837,12 @@ impl DeviceManager {
                     self.idle.lock().unwrap().remove(&id);
                     continue;
                 }
-                let active = self.has_active_consumers(&id);
+                // 录制会话 = 活跃消费者：录制期间不做空闲低功耗（不拆虚拟屏、
+                // 不关镜像屏），否则录制会话会被空闲循环打断
+                let active = self.has_active_consumers(&id)
+                    || crate::recording::service(&self.cfg)
+                        .active_for_device(&id)
+                        .is_some();
                 if active {
                     // 锁内改状态、锁外做异步动作（guard 不能跨 await 存活）
                     let (slept, wake_expired) = {

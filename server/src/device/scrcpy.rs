@@ -409,6 +409,9 @@ impl ScrcpySession {
             }
             s2.connected
                 .store(false, std::sync::atomic::Ordering::SeqCst);
+            // 设备会话边界（合同 §2）：视频流退出 → 活动录制立即安全收尾为
+            // interrupted（幂等；随后 device 层 disconnect 边界命中终态直返）
+            crate::recording::on_video_stream_ended(&s2.device.id);
         });
 
         // 9.5 音频读取循环（后台任务）：解析 OPUS 帧 → audio channel 转发给 viewer。
@@ -492,7 +495,12 @@ impl ScrcpySession {
         let x = (x.max(0.0).min(w as f32 - 1.0)) as u32;
         let y = (y.max(0.0).min(h as f32 - 1.0)) as u32;
         let buf = encode_touch_packet(action, pointer_id, x, y, w, h, pressure);
-        self.send_control(&buf).await
+        self.send_control(&buf).await?;
+        // 统一输入观察（录制合同 §2.1）：所有来源（REST/投屏 DataChannel 直发、
+        // keymap、runner、插件能力层）的触控都经此进入设备发送路径；已被接受
+        // 的注入按 pointer 压缩为语义 tap/swipe 记录。无活动录制会话时直通。
+        crate::recording::observe_touch(&self.device.id, action, pointer_id, x, y);
+        Ok(())
     }
 
     /// 单击（DOWN+UP）
@@ -537,7 +545,10 @@ impl ScrcpySession {
         buf[2..6].copy_from_slice(&keycode.to_be_bytes());
         buf[6..10].copy_from_slice(&repeat.to_be_bytes());
         buf[10..14].copy_from_slice(&meta.to_be_bytes());
-        self.send_control(&buf).await
+        self.send_control(&buf).await?;
+        // 统一输入观察：key down/up 在观察侧按 keycode 配对为一次 key 事件
+        crate::recording::observe_key(&self.device.id, action, keycode);
+        Ok(())
     }
 
     /// 按键（按下+释放），如 HOME=3, BACK=4, APP_SWITCH=187
@@ -555,7 +566,10 @@ impl ScrcpySession {
         buf.push(1); // TYPE_INJECT_TEXT
         buf.extend_from_slice(&(len as u32).to_be_bytes());
         buf.extend_from_slice(&bytes[..len]);
-        self.send_control(&buf).await
+        self.send_control(&buf).await?;
+        // 统一输入观察：默认脱敏（只记长度，不留明文）
+        crate::recording::observe_text(&self.device.id, text);
+        Ok(())
     }
 
     /// 滚轮（scroll_x/y 为像素值，会被 /16 归一化）

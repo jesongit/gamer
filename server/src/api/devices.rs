@@ -629,19 +629,26 @@ pub(super) async fn api_control(
     let Some(session) = st.devices.session(&id) else {
         return err_response(StatusCode::CONFLICT, "设备未连接");
     };
-    let result = match ctl {
-        Ctl::Tap(x, y) => session.tap(x, y).await,
-        Ctl::Swipe(x1, y1, x2, y2, duration_ms) => session.swipe(x1, y1, x2, y2, duration_ms).await,
-        Ctl::Text(text) => session.inject_text(text).await,
-        Ctl::Press(kc) => session.press_key(kc).await,
-        Ctl::Home => session.press_key(3).await,
-        Ctl::Back => session.press_key(4).await,
-        Ctl::Recents => session.press_key(187).await,
-        Ctl::StartApp(app) => session.start_app(app).await,
-        Ctl::StopApp(app) => session.stop_app(app).await,
-        Ctl::Rotate => session.rotate_device().await,
-        Ctl::Clipboard(text) => session.set_clipboard(text, false).await,
-    };
+    // 录制输入观察（合同 §2.1）：REST 控制入口的来源标注为 manual；观察本体
+    // 在 scrcpy 注入原语内（已被接受的输入进入设备发送路径后记录）。
+    let result = crate::recording::with_input_source("manual", async {
+        match ctl {
+            Ctl::Tap(x, y) => session.tap(x, y).await,
+            Ctl::Swipe(x1, y1, x2, y2, duration_ms) => {
+                session.swipe(x1, y1, x2, y2, duration_ms).await
+            }
+            Ctl::Text(text) => session.inject_text(text).await,
+            Ctl::Press(kc) => session.press_key(kc).await,
+            Ctl::Home => session.press_key(3).await,
+            Ctl::Back => session.press_key(4).await,
+            Ctl::Recents => session.press_key(187).await,
+            Ctl::StartApp(app) => session.start_app(app).await,
+            Ctl::StopApp(app) => session.stop_app(app).await,
+            Ctl::Rotate => session.rotate_device().await,
+            Ctl::Clipboard(text) => session.set_clipboard(text, false).await,
+        }
+    })
+    .await;
     match result {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => ApiError::bad_gateway(e.to_string()).into_response(),
