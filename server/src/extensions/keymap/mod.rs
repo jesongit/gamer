@@ -38,9 +38,9 @@ pub const INPUT_PROTOCOL_VERSION: &str = "gamer-input@1";
 /// the manifest here makes the extension's requested surface reviewable and
 /// gives package builders one source of truth for the panel contribution.
 pub const KEYMAP_EXTENSION_MANIFEST_TOML: &str = r#"
-manifest_version = 1
+manifest_version = 2
 id = "gamer.keymap"
-version = "1.0.0"
+version = "1.0.1"
 name = "键盘映射"
 description = "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键"
 entry = "plugin.wasm"
@@ -49,6 +49,10 @@ permissions = ["input.tap", "input.swipe", "input.key", "touch"]
 [host_api]
 input = "^1.0"
 touch = "^1.0"
+
+# 独立 WASM guest：真实 plugin.wasm，常驻实例模型（start 持有实例）。
+[execution]
+kind = "wasm"
 
 [[ui.contributions]]
 # runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端
@@ -625,7 +629,7 @@ pub(crate) fn package_guest_fixture_gplugin(component: &[u8], permissions: &[&st
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            r#"manifest_version = 1
+            r#"manifest_version = 2
 id = "gamer.keymap"
 version = "1.0.0"
 name = "Keymap"
@@ -636,6 +640,9 @@ permissions = [{joined}]
 [host_api]
 input = "^1.0"
 touch = "^1.0"
+
+[execution]
+kind = "wasm"
 
 [[ui.contributions]]
 panel_id = "keymaps"
@@ -1732,7 +1739,9 @@ mod tests {
         assert_eq!(loaded.name, "package");
         // 缺失文件报错；穿越路径不是合法短名或不存在
         assert!(source.load("official.game", "missing.yaml").is_err());
-        assert!(source.load("official.game", "../gamer.yaml/x.yaml").is_err());
+        assert!(source
+            .load("official.game", "../gamer.yaml/x.yaml")
+            .is_err());
     }
 }
 
@@ -1909,6 +1918,14 @@ mod wasm_component_tests {
         let id = ExtensionId::parse(KEYMAP_EXTENSION_ID).unwrap();
         let enabled = service.enable(&id).await.unwrap();
         assert_eq!(enabled.state(), ExtensionState::Enabled);
+        // Phase 1 语义收紧：Enabled 不再出现面板——UI 贡献仅 Running 可见。
+        assert!(service.ui_contributions().unwrap().is_empty());
+
+        let running = service
+            .start_with_context(&id, Some(app_context()), None)
+            .await
+            .unwrap();
+        assert_eq!(running.state(), ExtensionState::Running);
         let contributions = service.ui_contributions().unwrap();
         assert_eq!(contributions.len(), 1);
         assert_eq!(contributions[0].panel_id, KEYMAP_PANEL_ID);
@@ -1919,12 +1936,6 @@ mod wasm_component_tests {
                 .0,
             include_bytes!("../../../tests/keymap-guest/ui/index.html")
         );
-
-        let running = service
-            .start_with_context(&id, Some(app_context()), None)
-            .await
-            .unwrap();
-        assert_eq!(running.state(), ExtensionState::Running);
         let device = device();
         let screen = ScreenSize::new(1000, 500);
 
@@ -2023,14 +2034,18 @@ mod wasm_component_tests {
         );
 
         // Stop must clean a live WASM-owned contact before the component task
-        // is dropped; the UI contribution remains available while enabled.
+        // is dropped; the UI contribution is revoked once left Running
+        // （Phase 1：仅 Running 可见）.
         service
             .dispatch_keymap_input(device, screen, InputEvent::key_down("KeyW"), None)
             .await
             .unwrap();
         let stopped = service.stop(&id).await.unwrap();
         assert_eq!(stopped.state(), ExtensionState::Enabled);
-        assert_eq!(service.ui_contributions().unwrap().len(), 1);
+        assert!(
+            service.ui_contributions().unwrap().is_empty(),
+            "stop 后 UI 贡献撤销"
+        );
         assert!(
             trace
                 .snapshot()

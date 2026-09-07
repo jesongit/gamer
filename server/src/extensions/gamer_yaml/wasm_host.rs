@@ -271,7 +271,9 @@ impl wit::yaml::gamer::host::programs::Host for YamlHostState {
         };
         // 调用深度由 guest 本地 ExecutionBudget 计数（ADR-YAML-04），resolver
         // 只负责按命名空间定位目标程序，不再做深度守卫。
-        let program = resolver.resolve(&target, &args).map_err(|error| error.to_string())?;
+        let program = resolver
+            .resolve(&target, &args)
+            .map_err(|error| error.to_string())?;
         serde_json::to_string(&program).map_err(|error| error.to_string())
     }
 }
@@ -400,10 +402,7 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
             program.insert("args".to_string(), serde_json::to_value(request.args)?);
             // wait 随机区间（契约 §4，方案 (a)）：每 run 注入 nonce 作 guest 内
             // splitmix64 种子；不新增 WIT 能力（T3 刚稳定 ABI）。
-            program.insert(
-                "nonce".to_string(),
-                serde_json::Value::from(run_nonce()),
-            );
+            program.insert("nonce".to_string(), serde_json::Value::from(run_nonce()));
             // 手动运行「从此运行」：顶层可选 start_index，guest 只按顶层
             // surface 步序号跳步（契约 §8）；None = 从头执行（现状行为）。
             if let Some(start_index) = request.start_index {
@@ -419,7 +418,7 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
         let ticker = self.ticker();
         ticker.enter();
         let call_result = {
-            let _guard = TickerGuard(&*ticker);
+            let _guard = TickerGuard(ticker);
             instance
                 .gamer_host_automation()
                 .func_run()

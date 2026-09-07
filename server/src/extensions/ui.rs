@@ -97,7 +97,7 @@ mod tests {
     use crate::extensions::parse_manifest;
 
     fn manifest_with_declarative_ui() -> ExtensionManifest {
-        let manifest = "manifest_version = 1\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\n\
+        let manifest = "manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\n\
              [ui]\n[[ui.contributions]]\npanel_id = \"settings\"\ntitle = \"设置\"\nruntime = \"declarative\"\ndescription = \"说明\"\n\
              [[ui.contributions.fields]]\ntype = \"boolean\"\nname = \"enabled\"\nlabel = \"启用\"\ndefault = true\n".to_string();
         parse_manifest(manifest.as_bytes()).unwrap()
@@ -129,7 +129,7 @@ mod tests {
     fn iframe_contributions_keep_schema_absent() {
         let registry = UiContributionRegistry::default();
         let manifest = parse_manifest(
-            b"manifest_version = 1\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\n\
+            b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\n\
               [ui]\n[[ui.contributions]]\npanel_id = \"panel\"\ntitle = \"P\"\nruntime = \"iframe\"\nentry = \"ui/index.html\"\n",
         )
         .unwrap();
@@ -139,7 +139,7 @@ mod tests {
 
     #[test]
     fn core_contributions_pass_component_through_to_json() {
-        let manifest_text = "manifest_version = 1\nid = \"gamer.yaml\"\nversion = \"3.0.0\"\nname = \"Gamer YAML vNext\"\nentry = \"plugin.wasm\"\n\
+        let manifest_text = "manifest_version = 2\nid = \"gamer.yaml\"\nversion = \"3.0.0\"\nname = \"Gamer YAML vNext\"\nentry = \"plugin.wasm\"\n\
               [ui]\n[[ui.contributions]]\npanel_id = \"automation\"\ntitle = \"自动化\"\nruntime = \"core\"\ncomponent = \"console.scripts\"\nrequires_device = true\n";
         let registry = UiContributionRegistry::default();
         let manifest = parse_manifest(manifest_text.as_bytes()).unwrap();

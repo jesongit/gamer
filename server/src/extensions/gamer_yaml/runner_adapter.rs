@@ -123,9 +123,7 @@ pub struct EngineExecutor {
 /// 非 `version: 3` 源的统一运行错误（无 fallback；版本门禁与
 /// `yaml_vnext` 保存期诊断同码 `yaml.v3.version`）。
 fn unsupported_version(resource: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "yaml.v3.version: 不支持的 YAML 版本（{resource}）——当前只支持 version: 3 脚本"
-    )
+    anyhow::anyhow!("yaml.v3.version: 不支持的 YAML 版本（{resource}）——当前只支持 version: 3 脚本")
 }
 
 impl EngineExecutor {
@@ -265,8 +263,9 @@ impl ScriptProgramResolver {
 
     fn resolve_script(&self, id: &str) -> anyhow::Result<Program> {
         let target = self.resource_id(id);
-        let script = crate::extensions::gamer_yaml::resources::script_entry(&self.scripts, &target)?
-            .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 目标: {target}"))?;
+        let script =
+            crate::extensions::gamer_yaml::resources::script_entry(&self.scripts, &target)?
+                .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 目标: {target}"))?;
         if !yaml_vnext::is_v3_source(&script.content) {
             return Err(unsupported_version(&target));
         }
@@ -278,8 +277,9 @@ impl ScriptProgramResolver {
     /// 解析 → 取目标函数 `{params, steps}` 组装 Program（ADR-YAML-02）。
     fn resolve_function(&self, file: &str, function: &str) -> anyhow::Result<Program> {
         let target = self.resource_id(file);
-        let entry = crate::extensions::gamer_yaml::resources::function_entry(&self.scripts, &target)?
-            .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 函数文件: {target}"))?;
+        let entry =
+            crate::extensions::gamer_yaml::resources::function_entry(&self.scripts, &target)?
+                .ok_or_else(|| anyhow::anyhow!("找不到 v3 call 函数文件: {target}"))?;
         yaml_vnext::load_function(&entry.content, function)
             .map_err(|diagnostics| v3_diagnostics_error("v3 函数无效", &diagnostics))
     }
@@ -324,7 +324,7 @@ fn yaml_args(args: &[(String, TypedValue)]) -> BTreeMap<String, Value> {
                 // time 参数以 typed duration 过线，脚本内 `wait: $t` 等表达式
                 // 才能拿到 Duration；解析失败的畸形值保持字符串由运行期报错。
                 TypedValue::Time(value) => {
-                    match super::params::parse_time_ms(&value).filter(|ms| *ms >= 0.0) {
+                    match super::params::parse_time_ms(value).filter(|ms| *ms >= 0.0) {
                         Some(ms) => Value::Duration(ms as u64),
                         None => Value::String(value.clone()),
                     }
@@ -360,7 +360,7 @@ impl YamlVnextAdapter {
                     anyhow::bail!("脚本不存在: {}", script_id);
                 };
                 if !yaml_vnext::is_v3_source(&script.content) {
-                    return Err(unsupported_version(&script_id));
+                    return Err(unsupported_version(script_id));
                 }
                 let program = yaml_vnext::load(&script.content)
                     .map_err(|diagnostics| v3_diagnostics_error("v3 脚本无效", &diagnostics))?;
@@ -376,7 +376,10 @@ impl YamlVnextAdapter {
                 let scripts = self.scripts.clone();
                 let probe_target = target.clone();
                 let entry = tokio::task::spawn_blocking(move || {
-                    crate::extensions::gamer_yaml::resources::function_entry(&scripts, &probe_target)
+                    crate::extensions::gamer_yaml::resources::function_entry(
+                        &scripts,
+                        &probe_target,
+                    )
                 })
                 .await
                 .map_err(|error| anyhow::anyhow!("读取 v3 函数库失败: {error}"))??;
@@ -389,10 +392,9 @@ impl YamlVnextAdapter {
                     Some(name) => name.clone(),
                     None => {
                         // 缺省 = 文件内第一个函数
-                        let library = yaml_vnext::parse_function_library(&entry.content)
-                            .map_err(|diagnostics| {
-                                v3_diagnostics_error("v3 函数库无效", &diagnostics)
-                            })?;
+                        let library = yaml_vnext::parse_function_library(&entry.content).map_err(
+                            |diagnostics| v3_diagnostics_error("v3 函数库无效", &diagnostics),
+                        )?;
                         library
                             .first()
                             .map(|decl| decl.name.clone())
@@ -459,7 +461,10 @@ mod tests {
         .unwrap();
         assert_eq!(request.request.runner_id, "gamer.yaml");
         assert_eq!(request.request.entrypoint, "official.hsr.daily/daily.yaml");
-        assert_eq!(request.request.payload.as_value()["target"]["start_index"], 2);
+        assert_eq!(
+            request.request.payload.as_value()["target"]["start_index"],
+            2
+        );
     }
 
     /// ScriptProgramResolver 的 script:/function: 命名空间解析
@@ -505,10 +510,14 @@ mod tests {
         };
 
         // script: 分区内相对 id（.yaml 可省略，可含子目录）
-        let program = resolver.resolve("script:sub/inner", &BTreeMap::new()).unwrap();
+        let program = resolver
+            .resolve("script:sub/inner", &BTreeMap::new())
+            .unwrap();
         assert_eq!(program.steps.len(), 1);
         // function: 文件短路径/函数名
-        let program = resolver.resolve("function:lib/fn1", &BTreeMap::new()).unwrap();
+        let program = resolver
+            .resolve("function:lib/fn1", &BTreeMap::new())
+            .unwrap();
         assert_eq!(program.params.len(), 1);
         assert_eq!(program.steps.len(), 1);
 
@@ -589,7 +598,10 @@ mod tests {
             resolver.resource_id("daily/login"),
             "com.test.app/daily/login.yaml"
         );
-        assert_eq!(resolver.resource_id("daily.yaml"), "com.test.app/daily.yaml");
+        assert_eq!(
+            resolver.resource_id("daily.yaml"),
+            "com.test.app/daily.yaml"
+        );
         assert_eq!(
             resolver.resource_id("com.test.app/daily.yaml"),
             "com.test.app/daily.yaml"

@@ -192,8 +192,8 @@ fn map_event(event: &InputEventRecord) -> Result<(Vec<String>, u64), String> {
             ))
         }
         "swipe" => {
-            let (x, y, x2, y2) = payload_swipe(&event.payload)
-                .ok_or("swipe 事件 payload 缺少数值 x/y/x2/y2")?;
+            let (x, y, x2, y2) =
+                payload_swipe(&event.payload).ok_or("swipe 事件 payload 缺少数值 x/y/x2/y2")?;
             let (fx, fy) = relative_pair(x, y, event)?;
             let (tx, ty) = relative_pair(x2, y2, event)?;
             Ok((
@@ -213,8 +213,8 @@ fn map_event(event: &InputEventRecord) -> Result<(Vec<String>, u64), String> {
             ))
         }
         "key" => {
-            let code = payload_number(&event.payload, "code")
-                .ok_or("key 事件 payload 缺少数值 code")?;
+            let code =
+                payload_number(&event.payload, "code").ok_or("key 事件 payload 缺少数值 code")?;
             Ok((
                 vec![format!(
                     "  - key: {} # {} key",
@@ -237,7 +237,10 @@ fn map_event(event: &InputEventRecord) -> Result<(Vec<String>, u64), String> {
             ))
         }
         // V1 脱敏无内容：文本输入无法还原为 text 步骤，进诊断不猜测。
-        "text" => Err("文本输入在录制中默认脱敏（只记录长度），无法还原 text 步骤；请在草稿中手动补充".to_string()),
+        "text" => Err(
+            "文本输入在录制中默认脱敏（只记录长度），无法还原 text 步骤；请在草稿中手动补充"
+                .to_string(),
+        ),
         other => Err(format!(
             "无法映射的事件类型 {other:?}（录制词表：tap/swipe/key/text/wait）"
         )),
@@ -325,12 +328,7 @@ mod tests {
     use crate::recording::DisplaySize;
     use serde_json::json;
 
-    fn event(
-        id: &str,
-        kind: &str,
-        timeline_us: u64,
-        payload: Value,
-    ) -> InputEventRecord {
+    fn event(id: &str, kind: &str, timeline_us: u64, payload: Value) -> InputEventRecord {
         InputEventRecord {
             schema_version: 1,
             event_id: id.to_string(),
@@ -435,7 +433,11 @@ mod tests {
         assert_eq!(diagnostics[0].0, "evt-2");
         assert!(diagnostics[0].1.contains("脱敏"), "{}", diagnostics[0].1);
         assert_eq!(diagnostics[1].0, "evt-3");
-        assert!(diagnostics[1].1.contains("无法映射"), "{}", diagnostics[1].1);
+        assert!(
+            diagnostics[1].1.contains("无法映射"),
+            "{}",
+            diagnostics[1].1
+        );
         assert_eq!(diagnostics[2].0, "evt-4");
         assert_eq!(diagnostics[3].0, "evt-5");
         assert_eq!(diagnostics[4].0, "evt-6");
@@ -454,7 +456,10 @@ mod tests {
     #[test]
     fn zero_display_size_is_reported_not_guessed() {
         let mut broken = event("evt-1", "tap", 0, json!({"x": 10, "y": 10}));
-        broken.display_size = DisplaySize { width: 0, height: 0 };
+        broken.display_size = DisplaySize {
+            width: 0,
+            height: 0,
+        };
         let result = build_draft("rec-test", None, &[broken]);
         assert_eq!(
             result["yaml"].as_str().unwrap(),
@@ -474,10 +479,7 @@ mod tests {
         ];
         // 缺省 = 全部
         let all = build_draft("rec-test", None, &events);
-        assert_eq!(
-            all["yaml"].as_str().unwrap().matches(" - tap:").count(),
-            3
-        );
+        assert_eq!(all["yaml"].as_str().unwrap().matches(" - tap:").count(), 3);
         // 重排：b → a；缺失 id 进诊断
         let reordered = build_draft(
             "rec-test",
@@ -504,7 +506,11 @@ mod tests {
         let empty: Vec<String> = Vec::new();
         let all_again = build_draft("rec-test", Some(&empty), &events);
         assert_eq!(
-            all_again["yaml"].as_str().unwrap().matches(" - tap:").count(),
+            all_again["yaml"]
+                .as_str()
+                .unwrap()
+                .matches(" - tap:")
+                .count(),
             3
         );
     }
@@ -558,26 +564,38 @@ mod tests {
         let data_dir = std::env::temp_dir();
         let values = json!({"recording_id": "whatever"});
         // 其他扩展 id / 其他动作 → None（交回通用 call 路径）
-        assert!(native_call_action("gamer.video", AUTOMATION_CREATE_DRAFT, &values, &data_dir).is_none());
+        assert!(
+            native_call_action("gamer.video", AUTOMATION_CREATE_DRAFT, &values, &data_dir)
+                .is_none()
+        );
         assert!(
             native_call_action(YAML_EXTENSION_ID, "other.action", &values, &data_dir).is_none()
         );
         // 本扩展本动作 → Some（进入 create_draft；该 recording 不存在 →
         // CallRejected；注意进程级录制服务单例被首个测试定根，此处不断言
         // 具体根目录，只断言错误语义）
-        let result = native_call_action(YAML_EXTENSION_ID, AUTOMATION_CREATE_DRAFT, &values, &data_dir)
-            .expect("gamer.yaml automation.create_draft 必须由本缝应答");
+        let result = native_call_action(
+            YAML_EXTENSION_ID,
+            AUTOMATION_CREATE_DRAFT,
+            &values,
+            &data_dir,
+        )
+        .expect("gamer.yaml automation.create_draft 必须由本缝应答");
         let error = result.unwrap_err().to_string();
         assert!(
             error.contains("读取录制事件失败") || error.contains("recording"),
             "{error}"
         );
         // 缺 recording_id → CallRejected（先于任何 IO）
-        let missing =
-            native_call_action(YAML_EXTENSION_ID, AUTOMATION_CREATE_DRAFT, &json!({}), &data_dir)
-                .unwrap()
-                .unwrap_err()
-                .to_string();
+        let missing = native_call_action(
+            YAML_EXTENSION_ID,
+            AUTOMATION_CREATE_DRAFT,
+            &json!({}),
+            &data_dir,
+        )
+        .unwrap()
+        .unwrap_err()
+        .to_string();
         assert!(missing.contains("recording_id"), "{missing}");
         // 未知顶层字段 → CallRejected（deny_unknown_fields）
         let extra = native_call_action(

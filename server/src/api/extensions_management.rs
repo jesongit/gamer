@@ -10,9 +10,14 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
-use crate::extensions::{ExtensionError, ExtensionInstallContext, RegistryProof};
+use crate::extensions::{ExtensionError, ExtensionInstallContext};
 
 use super::{ApiError, AppState};
+
+/// 与包级导入 `x-expected-sha256` 同名同义（可选）：请求声明的归档
+/// SHA-256（hex），服务端在安装前核对，不匹配拒绝（Phase 1 免签名后的
+/// 下载完整性兜底）。
+const EXPECTED_SHA256_HEADER: &str = "x-expected-sha256";
 
 pub(super) async fn api_extension_management(State(st): State<AppState>) -> Response {
     let extensions = match st.extensions.list() {
@@ -54,9 +59,9 @@ pub(super) async fn api_extension_management(State(st): State<AppState>) -> Resp
                     .map(|(domain, requirement)| (domain.to_string(), requirement.to_string()))
                     .collect::<std::collections::BTreeMap<_, _>>(),
                 "permissions": snapshot.manifest().permissions().names(),
+                "execution": snapshot.manifest().execution(),
                 "ui": snapshot.manifest().ui().iter().map(ui_json).collect::<Vec<_>>(),
                 "source": "local",
-                "signature": snapshot.signature(),
                 "dependent": {
                     "app_packages": dependents.iter()
                         .filter_map(|item| item.get("app_package"))
@@ -138,7 +143,9 @@ pub(super) async fn api_inspect_extension(
         "archive_sha256": inspection.archive_sha256(),
         "source": if context.official { "official" } else { "local" },
         "publisher": null,
-        "signature": inspection.signature(),
+        // Phase 1 免签名：不再有 signature 字段；执行类型与 advisory 宿主
+        // 版本要求（execution.host_version）透传前端展示。
+        "execution": manifest.execution(),
         "permissions": requested_permissions,
         "permission_diff": inspection.permission_diff(),
         "host_api": manifest.host_api().iter()
@@ -151,7 +158,8 @@ pub(super) async fn api_inspect_extension(
 }
 
 /// Parse the management boundary once so inspect, install, and update share
-/// exactly the same official-source and confirmation semantics.
+/// exactly the same official-source, integrity-pin, and confirmation
+/// semantics. 签名/Registry proof 已退役：`official` 只作来源标注。
 /// axum `Response` 体量超过 clippy result_large_err 阈值；错误即响应，
 /// 箱化不改变语义只增分配。
 #[allow(clippy::result_large_err)]
@@ -160,16 +168,24 @@ pub(super) fn install_context(headers: &HeaderMap) -> Result<ExtensionInstallCon
         .get("x-gamer-extension-source")
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.eq_ignore_ascii_case("official"));
-    let registry_proof = match headers.get("x-gamer-registry-proof") {
+    let expected_sha256 = match headers.get(EXPECTED_SHA256_HEADER) {
         Some(value) => {
             let value = match value.to_str() {
-                Ok(value) => value,
-                Err(error) => return Err(ApiError::bad_request(error.to_string()).into_response()),
+                Ok(value) => value.trim().to_ascii_lowercase(),
+                Err(error) => {
+                    return Err(ApiError::bad_request(format!(
+                        "{EXPECTED_SHA256_HEADER} 头无效: {error}"
+                    ))
+                    .into_response())
+                }
             };
-            match RegistryProof::from_base64(value) {
-                Ok(proof) => Some(proof),
-                Err(error) => return Err(extension_error(error)),
+            if !(value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())) {
+                return Err(ApiError::bad_request(format!(
+                    "{EXPECTED_SHA256_HEADER} 必须是 64 位 hex SHA-256"
+                ))
+                .into_response());
             }
+            Some(value)
         }
         None => None,
     };
@@ -179,8 +195,8 @@ pub(super) fn install_context(headers: &HeaderMap) -> Result<ExtensionInstallCon
         .is_some_and(|value| matches!(value, "1" | "true" | "yes"));
     Ok(ExtensionInstallContext {
         official,
-        registry_proof,
         permission_confirmed,
+        expected_sha256,
     })
 }
 
@@ -207,10 +223,9 @@ fn extension_error(error: ExtensionError) -> Response {
         ExtensionError::AlreadyInstalled { .. } | ExtensionError::InvalidTransition { .. } => {
             ApiError::conflict(error.to_string())
         }
-        ExtensionError::RegistryProofRequired
-        | ExtensionError::PermissionConfirmationRequired(_) => {
-            ApiError::conflict(error.to_string())
-        }
+        ExtensionError::PermissionConfirmationRequired(_)
+        | ExtensionError::HostFeatureUnavailable(_) => ApiError::conflict(error.to_string()),
+        ExtensionError::ArchiveSha256Mismatch { .. } => ApiError::bad_request(error.to_string()),
         ExtensionError::RuntimeUnavailable(_) => ApiError::service_unavailable(error.to_string()),
         ExtensionError::Io(_)
         | ExtensionError::Json(_)

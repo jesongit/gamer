@@ -417,10 +417,7 @@ pub enum CallTarget {
     /// `script:<资源 id>`：分区内 `automations/` 相对路径，`.yaml` 后缀可省略。
     Script(String),
     /// `function:<文件短路径>/<函数名>`：文件短路径按最后一个 `/` 分割、可含目录。
-    Function {
-        file: String,
-        function: String,
-    },
+    Function { file: String, function: String },
 }
 
 const CALL_NAMESPACE_HINT: &str =
@@ -482,7 +479,9 @@ pub fn split_call_target(target: &str) -> Result<CallTarget, Vec<Diagnostic>> {
 fn reject_resource_traversal(path: &str) -> Result<(), Vec<Diagnostic>> {
     if path.contains('\\')
         || path.starts_with('/')
-        || path.split('/').any(|segment| segment.is_empty() || segment == "..")
+        || path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "..")
     {
         return Err(vec![Diagnostic::new(
             "yaml.v3.call.target",
@@ -506,10 +505,44 @@ pub struct FunctionDecl {
 /// `function:<文件短路径>/<函数名>` 调用，名字与步骤键或上下文变量重叠会
 /// 造成不可读的遮蔽。
 const RESERVED_FUNCTION_NAMES: &[&str] = &[
-    "log", "key", "text", "tap", "swipe", "find", "match", "match_first", "check", "color",
-    "loop", "break", "call", "throw", "set", "invoke", "str_app", "cls_app", "wait", "return",
-    "then", "else", "steps", "times", "block", "verify", "timeout", "config", "func", "params",
-    "args", "expect", "candidates", "click", "if", "until", "version", "defaults",
+    "log",
+    "key",
+    "text",
+    "tap",
+    "swipe",
+    "find",
+    "match",
+    "match_first",
+    "check",
+    "color",
+    "loop",
+    "break",
+    "call",
+    "throw",
+    "set",
+    "invoke",
+    "str_app",
+    "cls_app",
+    "wait",
+    "return",
+    "then",
+    "else",
+    "steps",
+    "times",
+    "block",
+    "verify",
+    "timeout",
+    "config",
+    "func",
+    "params",
+    "args",
+    "expect",
+    "candidates",
+    "click",
+    "if",
+    "until",
+    "version",
+    "defaults",
 ];
 
 /// 函数名规则：unicode 字母/下划线开头，后续字母/数字/下划线（支持中文），
@@ -517,9 +550,7 @@ const RESERVED_FUNCTION_NAMES: &[&str] = &[
 fn valid_function_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
-        Some(c) if c.is_alphabetic() || c == '_' => {
-            chars.all(|c| c.is_alphanumeric() || c == '_')
-        }
+        Some(c) if c.is_alphabetic() || c == '_' => chars.all(|c| c.is_alphanumeric() || c == '_'),
         _ => false,
     }
 }
@@ -552,7 +583,9 @@ pub fn parse_function_library(source: &str) -> Result<Vec<FunctionDecl>, Vec<Dia
             return Err(vec![Diagnostic::new(
                 "yaml.v3.function.name",
                 name,
-                format!("函数名 {name} 只允许 unicode 字母/数字/下划线（支持中文），且不能以数字开头"),
+                format!(
+                    "函数名 {name} 只允许 unicode 字母/数字/下划线（支持中文），且不能以数字开头"
+                ),
             )]);
         }
         let def = as_map(value, name, "函数定义必须是映射")?;
@@ -745,10 +778,8 @@ fn parse_defaults(value: &YamlValue) -> Result<SurfaceDefaults, Vec<Diagnostic>>
                             ),
                         )]);
                     }
-                    let ms = duration_ms_literal(
-                        timing.get(tkey).expect("map key has value"),
-                        &path,
-                    )?;
+                    let ms =
+                        duration_ms_literal(timing.get(tkey).expect("map key has value"), &path)?;
                     match tkey {
                         "after_tap" => out.after_tap_ms = Some(ms),
                         "after_match" => out.after_match_ms = Some(ms),
@@ -1141,7 +1172,11 @@ fn parse_step(value: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnost
         "find" => parse_find(value, &value_path),
         "check" => {
             let map = as_map(value, &value_path, "check 必须是映射")?;
-            reject_unknown(map, &["template", "timeout", "threshold", "throw"], &value_path)?;
+            reject_unknown(
+                map,
+                &["template", "timeout", "threshold", "throw"],
+                &value_path,
+            )?;
             Ok(SurfaceStep::Check {
                 template: field_expr(map, "template", &value_path)?,
                 timeout: map
@@ -1175,17 +1210,13 @@ fn parse_step(value: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnost
 /// 已删除步骤/字段（ADR-YAML-03 click 语法移除 + 契约 §3 收口）的迁移提示。
 fn removed_step_message(action: &str) -> String {
     match action {
-        "click_when" => format!(
-            "click_when 已删除（ADR-YAML-03 click 语法全面移除）：用 find 的 then 分支 + tap: {{point: $match.center}} 表达"
-        ),
+        "click_when" => "click_when 已删除（ADR-YAML-03 click 语法全面移除）：用 find 的 then 分支 + tap: {point: $match.center} 表达".to_string(),
         "wait_for" => "wait_for 已删除：与 find 同义，用 find 表达（then 为命中分支、else 为超时分支）".to_string(),
         "retry" => "retry 已删除：用 loop 表达（loop: {times: N, steps: [...]}）".to_string(),
         "color_branch" => {
             "color_branch 已删除：用 invoke（capability: vision.sample_color）+ if 按 $<变量>.hex 分支表达".to_string()
         }
-        "click" => format!(
-            "find.click 已删除（ADR-YAML-03）：命中后动作用 then 分支 + tap: {{point: $match.center}} 表达"
-        ),
+        "click" => "find.click 已删除（ADR-YAML-03）：命中后动作用 then 分支 + tap: {point: $match.center} 表达".to_string(),
         other => format!("步骤 {other:?} 已删除"),
     }
 }
@@ -1193,8 +1224,7 @@ fn removed_step_message(action: &str) -> String {
 /// wait 随机区间：字面时长可比较时校验 min ≤ max（引用留待运行期，区间
 /// 退化为 min）。与前端 `checkWaitRange` 同口径。
 fn check_wait_range(min: &Expr, max: &Expr, path: &str) -> Result<(), Vec<Diagnostic>> {
-    if let (Expr::Literal(Value::Duration(min)), Expr::Literal(Value::Duration(max))) = (min, max)
-    {
+    if let (Expr::Literal(Value::Duration(min)), Expr::Literal(Value::Duration(max))) = (min, max) {
         if min > max {
             return Err(vec![Diagnostic::new(
                 "yaml.v3.wait.range",
@@ -1720,7 +1750,11 @@ impl Lowerer {
         }
     }
 
-    fn steps(&mut self, steps: &[SurfaceStep], base: &str) -> Result<Vec<SmallStep>, Vec<Diagnostic>> {
+    fn steps(
+        &mut self,
+        steps: &[SurfaceStep],
+        base: &str,
+    ) -> Result<Vec<SmallStep>, Vec<Diagnostic>> {
         steps
             .iter()
             .enumerate()
@@ -1762,9 +1796,10 @@ impl Lowerer {
             SurfaceStep::Text { value } => {
                 invoke("input.text", map([("value", value.clone())]), None)
             }
-            SurfaceStep::Wait { duration, max: None } => {
-                invoke("runtime.sleep", map([("duration", duration.clone())]), None)
-            }
+            SurfaceStep::Wait {
+                duration,
+                max: None,
+            } => invoke("runtime.sleep", map([("duration", duration.clone())]), None),
             SurfaceStep::Wait {
                 duration: min,
                 max: Some(max),
@@ -1914,9 +1949,9 @@ impl Lowerer {
                 value: lit(Value::Bool(false)),
             },
             SmallStep::Loop {
-                times: self.poll_times(Some(timeout.unwrap_or_else(|| {
-                    lit(Value::Duration(DEFAULT_FIND_TIMEOUT_MS))
-                }))),
+                times: self.poll_times(Some(
+                    timeout.unwrap_or_else(|| lit(Value::Duration(DEFAULT_FIND_TIMEOUT_MS))),
+                )),
                 body,
             },
         ];
@@ -1979,9 +2014,12 @@ impl Lowerer {
                 value: lit(Value::Bool(false)),
             },
             SmallStep::Loop {
-                times: self.poll_times(Some(verify.timeout.clone().unwrap_or_else(|| {
-                    lit(Value::Duration(DEFAULT_FIND_TIMEOUT_MS))
-                }))),
+                times: self.poll_times(Some(
+                    verify
+                        .timeout
+                        .clone()
+                        .unwrap_or_else(|| lit(Value::Duration(DEFAULT_FIND_TIMEOUT_MS))),
+                )),
                 body,
             },
             SmallStep::If {
@@ -2082,12 +2120,10 @@ impl Lowerer {
                 value: Expr::reference(format!("{result}.matches[{index}]")),
             }];
             branch.extend(self.sleep(self.after_match_ms));
-            branch.extend(
-                self.steps(
-                    &candidate.steps,
-                    &format!("{path}.candidates[{index}].steps"),
-                )?,
-            );
+            branch.extend(self.steps(
+                &candidate.steps,
+                &format!("{path}.candidates[{index}].steps"),
+            )?);
             branches = vec![SmallStep::If {
                 cond: Condition::truthy(Expr::reference(format!(
                     "{result}.matches[{index}].found"
@@ -2197,7 +2233,7 @@ fn expr_desc(expr: &Expr) -> String {
 
 /// 时长摘要：整秒用 `2s`，其余毫秒（契约示例 `wait 300ms` 形态）。
 fn duration_desc(ms: u64) -> String {
-    if ms != 0 && ms % 1000 == 0 {
+    if ms != 0 && ms.is_multiple_of(1000) {
         format!("{}s", ms / 1000)
     } else {
         format!("{ms}ms")
@@ -2556,11 +2592,7 @@ mod tests {
             vec![
                 ("steps[0]".to_string(), "log start".to_string(), true),
                 ("steps[1]".to_string(), "tap 0.5,0.3".to_string(), true),
-                (
-                    "steps[2]".to_string(),
-                    "find 登录按钮".to_string(),
-                    true
-                ),
+                ("steps[2]".to_string(), "find 登录按钮".to_string(), true),
                 (
                     "steps[2].then[0]".to_string(),
                     "wait 300ms".to_string(),
@@ -2674,10 +2706,8 @@ mod tests {
             assert!(error[0].message.contains(fragment));
         }
         // find.click 字段与 match 候选 click：专属迁移提示
-        let error = load(
-            "version: 3\nsteps:\n  - find:\n      template: x\n      click: true\n",
-        )
-        .unwrap_err();
+        let error = load("version: 3\nsteps:\n  - find:\n      template: x\n      click: true\n")
+            .unwrap_err();
         assert_eq!(error[0].code, "yaml.v3.field.removed");
         assert!(error[0].message.contains("$match.center"));
         let error = load(
@@ -2719,14 +2749,14 @@ mod tests {
         let error =
             load("version: 3\ndefaults:\n  vision:\n    contrast: 1\nsteps: []\n").unwrap_err();
         assert_eq!(error[0].code, "yaml.v3.defaults.unknown_key");
-        let error =
-            load("version: 3\ndefaults:\n  timing:\n    judge_delay: 5ms\nsteps: []\n").unwrap_err();
-        assert_eq!(error[0].code, "yaml.v3.defaults.unknown_key");
-        let error = load("version: 3\ndefaults:\n  vision:\n    threshold: 1.5\nsteps: []\n")
+        let error = load("version: 3\ndefaults:\n  timing:\n    judge_delay: 5ms\nsteps: []\n")
             .unwrap_err();
-        assert_eq!(error[0].code, "yaml.v3.defaults.range");
+        assert_eq!(error[0].code, "yaml.v3.defaults.unknown_key");
         let error =
-            load("version: 3\ndefaults:\n  timing:\n    after_tap: $wait\nsteps: []\n").unwrap_err();
+            load("version: 3\ndefaults:\n  vision:\n    threshold: 1.5\nsteps: []\n").unwrap_err();
+        assert_eq!(error[0].code, "yaml.v3.defaults.range");
+        let error = load("version: 3\ndefaults:\n  timing:\n    after_tap: $wait\nsteps: []\n")
+            .unwrap_err();
         assert_eq!(error[0].code, "yaml.v3.defaults.type");
         // 顶层白名单收口：defaults 之外的未知顶层键仍拒绝
         let error = load("version: 3\ndefaults: {}\nsteps: []\nextra: 1\n").unwrap_err();
@@ -2741,7 +2771,9 @@ mod tests {
         )
         .unwrap();
         let json = serde_json::to_string(&program).unwrap();
-        assert!(json.contains("\"threshold\":{\"expr\":\"literal\",\"value\":{\"type\":\"float\",\"value\":0.95}}"));
+        assert!(json.contains(
+            "\"threshold\":{\"expr\":\"literal\",\"value\":{\"type\":\"float\",\"value\":0.95}}"
+        ));
 
         // defaults 兜底
         let program = load(
@@ -2791,8 +2823,7 @@ mod tests {
         let error = load("version: 3\nsteps:\n  - wait: {min: 700ms, max: 300ms}\n").unwrap_err();
         assert_eq!(error[0].code, "yaml.v3.wait.range");
         // 混用 duration/min 拒绝
-        let error =
-            load("version: 3\nsteps:\n  - wait: {duration: 1s, min: 100ms}\n").unwrap_err();
+        let error = load("version: 3\nsteps:\n  - wait: {duration: 1s, min: 100ms}\n").unwrap_err();
         assert_eq!(error[0].code, "yaml.v3.field.unknown");
     }
 
@@ -2820,7 +2851,10 @@ mod tests {
         .unwrap();
         let json = serde_json::to_string(&program).unwrap();
         assert!(json.contains("\"type\":\"duration\",\"value\":250"));
-        assert!(json.contains("\"type\":\"duration\",\"value\":200"), "命中后 after_match=200ms 兜底");
+        assert!(
+            json.contains("\"type\":\"duration\",\"value\":200"),
+            "命中后 after_match=200ms 兜底"
+        );
         // timeout 10s / 250ms = 40 次迭代
         assert!(json.contains("\"type\":\"int\",\"value\":40"));
 
@@ -2848,7 +2882,9 @@ mod tests {
 
     #[test]
     fn find_timeout_without_else_throws_find_timeout() {
-        let program = load("version: 3\nsteps:\n  - find:\n      template: ghost\n      timeout: 2s\n").unwrap();
+        let program =
+            load("version: 3\nsteps:\n  - find:\n      template: ghost\n      timeout: 2s\n")
+                .unwrap();
         let json = serde_json::to_string(&program).unwrap();
         assert!(json.contains("FIND_TIMEOUT: ghost"));
         // 有 else 则走 else 不抛
@@ -2873,10 +2909,9 @@ mod tests {
             parse_surface("version: 3\nparams:\n  - 'text:msg::\"x\"'\nsteps: []\n").unwrap();
         assert_eq!(surface.params[0].remark, None);
         // 库函数解析同样透出
-        let library = parse_function_library(
-            "fn:\n  params:\n    - 'int:times:次数:2'\n  steps: []\n",
-        )
-        .unwrap();
+        let library =
+            parse_function_library("fn:\n  params:\n    - 'int:times:次数:2'\n  steps: []\n")
+                .unwrap();
         assert_eq!(library[0].params[0].remark.as_deref(), Some("次数"));
     }
 
@@ -2884,10 +2919,14 @@ mod tests {
     fn bare_call_targets_are_rejected_with_namespace_diagnostic() {
         let error = load("version: 3\nsteps:\n  - call:\n      target: helper\n").unwrap_err();
         assert_eq!(error[0].code, "yaml.v3.call.namespace");
-        assert!(error[0].message.contains("helper"), "诊断必须含 target 原文");
+        assert!(
+            error[0].message.contains("helper"),
+            "诊断必须含 target 原文"
+        );
         assert!(error[0].message.contains("script:"));
         assert!(error[0].message.contains("function:"));
-        let error = load("version: 3\nsteps:\n  - call:\n      target: plugin:value\n").unwrap_err();
+        let error =
+            load("version: 3\nsteps:\n  - call:\n      target: plugin:value\n").unwrap_err();
         assert_eq!(error[0].code, "yaml.v3.call.namespace");
         let error = load("version: 3\nsteps:\n  - call:\n      target: \"script:\"\n").unwrap_err();
         assert_eq!(error[0].code, "yaml.v3.call.namespace");
@@ -2983,7 +3022,8 @@ mod tests {
         let error = parse_function_library("fn:\n  params: []\n").unwrap_err();
         assert_eq!(
             error[0].code, "yaml.v3.field.missing",
-            "path={}", error[0].path
+            "path={}",
+            error[0].path
         );
         assert_eq!(error[0].path, "fn.steps");
         // 未知字段
@@ -3003,8 +3043,7 @@ mod tests {
         assert_eq!(error[0].code, "yaml.v3.function.name");
         // 保留字（动作键 / 结构键 / $match）
         for reserved in ["tap", "find", "match", "then", "defaults"] {
-            let error =
-                parse_function_library(&format!("{reserved}:\n  steps: []\n")).unwrap_err();
+            let error = parse_function_library(&format!("{reserved}:\n  steps: []\n")).unwrap_err();
             assert_eq!(error[0].code, "yaml.v3.function.name", "name={reserved}");
             assert!(error[0].message.contains("保留字"), "name={reserved}");
         }
@@ -3012,8 +3051,7 @@ mod tests {
         let error = parse_function_library("3:\n  steps: []\n").unwrap_err();
         assert_eq!(error[0].code, "yaml.v3.function.name");
         // 中文函数名合法；同名键后者覆盖语义被唯一性承载（映射键本身唯一）
-        let library =
-            parse_function_library("领取奖励:\n  steps:\n    - log: ok\n").unwrap();
+        let library = parse_function_library("领取奖励:\n  steps:\n    - log: ok\n").unwrap();
         assert_eq!(library[0].name, "领取奖励");
     }
 }

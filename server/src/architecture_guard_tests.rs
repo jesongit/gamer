@@ -599,8 +599,8 @@ fn architecture_guard_v3_only_bans_v2_identifiers_in_all_sources() {
         if file.file_name().and_then(|n| n.to_str()) == Some(SELF_FILE) {
             continue;
         }
-        let text =
-            std::fs::read_to_string(file).unwrap_or_else(|e| panic!("读取 {} 失败: {e}", file.display()));
+        let text = std::fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", file.display()));
         for (no, line) in text.lines().enumerate() {
             for token in V3_ONLY_BANNED {
                 if line.contains(token) {
@@ -621,8 +621,10 @@ fn architecture_guard_v3_only_bans_v2_identifiers_in_all_sources() {
         "v3-only 守卫被破坏（{} 处）：
 {}",
         violations.len(),
-        violations.join("
-")
+        violations.join(
+            "
+"
+        )
     );
 }
 
@@ -699,10 +701,12 @@ fn build_app(core: &CoreDeps) -> GuardApp {
     crate::extensions::gamer_yaml::register_resource_handlers(&core.packages);
     crate::extensions::register_resource_handlers(&core.packages);
     // P12.9：v3-only 执行器（与生产组合根同构）
-    let executor = Arc::new(crate::extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
-        core.devices.clone(),
-        core.db.clone(),
-    ));
+    let executor = Arc::new(
+        crate::extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
+            core.devices.clone(),
+            core.db.clone(),
+        ),
+    );
     let runs = Arc::new(crate::run_manager::RunManager::new(executor.clone()));
     // ADR-13：裸 Core 组合——Scheduler 不预置任何 runner；gamer.yaml 的定时
     // runner 由扩展 start 生命周期经 registrar 钩子注册。
@@ -998,12 +1002,10 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let task_id = created["id"].as_str().unwrap().to_string();
     let task = get_json(&guard.app, &cookie, &format!("/api/tasks/{task_id}")).await;
-    assert_eq!(
-        task["state"], "active",
-        "runner 在位 → 新建任务直接 Active"
-    );
+    assert_eq!(task["state"], "active", "runner 在位 → 新建任务直接 Active");
 
-    // ---- stop：runner 注销 → 任务转 dependency_missing 但保留；UI 仍在（enabled） ----
+    // ---- stop：runner 注销 → 任务转 dependency_missing 但保留；
+    //      UI 贡献随 stop 撤销（Phase 1：仅 Running 可见） ----
     let (status, body) = post_json(
         &guard.app,
         &cookie,
@@ -1027,14 +1029,13 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
         serde_json::json!(format!("missing_dependency={YAML_ID}")),
         "ADR-13：runner 缺失 → 任务挂起且记录缺失依赖"
     );
-    assert_eq!(
+    assert!(
         get_json(&guard.app, &cookie, "/api/extensions/ui")
             .await
             .as_array()
             .unwrap()
-            .len(),
-        3,
-        "stop 只摘 runner；enabled 状态下 UI 贡献保留"
+            .is_empty(),
+        "stop 撤销 UI 贡献（仅 Running 可见）"
     );
 
     // ---- start 再启：runner 重注册 → 任务自动恢复 Active（无需人工 enable） ----
@@ -1087,7 +1088,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
         serde_json::json!(format!("missing_dependency={YAML_ID}"))
     );
 
-    // ---- enable ≠ start（ADR-13 保留语义）：enable 只发布 UI，runner 不注册 ----
+    // ---- enable ≠ start（ADR-13 保留语义）：enable 不发布 UI，runner 仍不注册 ----
     let (status, body) = post_json(
         &guard.app,
         &cookie,
@@ -1096,14 +1097,13 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(
+    assert!(
         get_json(&guard.app, &cookie, "/api/extensions/ui")
             .await
             .as_array()
             .unwrap()
-            .len(),
-        3,
-        "enable 重新发布 UI 贡献"
+            .is_empty(),
+        "enable ≠ start：Enabled 不发布 UI 贡献（仅 Running 可见）"
     );
     assert!(
         get_json(&guard.app, &cookie, "/api/runners")
@@ -1130,6 +1130,15 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
             .len(),
         1,
         "start 注册 runner"
+    );
+    assert_eq!(
+        get_json(&guard.app, &cookie, "/api/extensions/ui")
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        3,
+        "start → Running 重新发布 UI 贡献"
     );
     // uninstall 前置：卸载守卫拒绝 Running，先 stop
     let (status, body) = post_json(
@@ -1500,7 +1509,11 @@ steps:
             "PUT",
             "/api/packages/com.guard.app/plugins/gamer.yaml/resources/automations/daily.yaml",
             &json_headers(&cookie),
-            Some(serde_json::json!({"content": script}).to_string().into_bytes()),
+            Some(
+                serde_json::json!({"content": script})
+                    .to_string()
+                    .into_bytes(),
+            ),
         ),
     )
     .await;
@@ -1557,7 +1570,10 @@ steps:
     assert_eq!(run["task_id"], task_id, "run 记录关联任务");
     assert_eq!(run["state"], "failed", "无设备时 run 以失败收敛: {run}");
     assert!(
-        run["error"].as_str().unwrap_or_default().contains("device not found"),
+        run["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("device not found"),
         "失败原因必须是设备不存在: {run}"
     );
 }

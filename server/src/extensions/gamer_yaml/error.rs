@@ -134,8 +134,12 @@ mod tests {
     /// 五元组 wire 形态锁定（前端 400 诊断回填契约）。
     #[test]
     fn serializes_to_contract_wire_shape() {
-        let error = ScriptError::new("param.args.missing_required", "必填参数 x 未提供", "a/b.yaml")
-            .at("args", "args");
+        let error = ScriptError::new(
+            "param.args.missing_required",
+            "必填参数 x 未提供",
+            "a/b.yaml",
+        )
+        .at("args", "args");
         let json = serde_json::to_value(&error).unwrap();
         assert_eq!(json["code"], "param.args.missing_required");
         assert_eq!(json["step_path"], "args");

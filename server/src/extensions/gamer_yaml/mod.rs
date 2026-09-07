@@ -31,8 +31,8 @@ pub(crate) mod video_draft;
 pub(crate) mod yaml_extension;
 pub(crate) mod yaml_vnext;
 
-pub(crate) use runner_adapter::{yaml_start_request, EngineExecutor};
 pub(crate) use resources::register_resource_handlers;
+pub(crate) use runner_adapter::{yaml_start_request, EngineExecutor};
 pub(crate) use timer_yaml::{YamlTimerRunner, YamlTimerRunnerRegistrar};
 pub(crate) use video_draft::native_call_action;
 pub(crate) use yaml_extension::{

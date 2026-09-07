@@ -156,10 +156,7 @@ mod tests {
         let json = serde_json::to_value(&function).unwrap();
         assert_eq!(json["type"], "function");
         assert_eq!(json["function"], "greet");
-        assert_eq!(
-            serde_json::from_value::<RunTarget>(json).unwrap(),
-            function
-        );
+        assert_eq!(serde_json::from_value::<RunTarget>(json).unwrap(), function);
         assert_eq!(function.label(), "com.a/lib.yaml#greet");
         assert_eq!(script.label(), "com.a/daily.yaml");
     }

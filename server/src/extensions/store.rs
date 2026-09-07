@@ -11,7 +11,7 @@ use crate::core::fs::atomic_write;
 
 use super::archive::{extract_archive, inspect_archive};
 use super::error::{ExtensionError, ExtensionResult};
-use super::manifest::{parse_manifest, ExtensionManifest, MANIFEST_FILE_NAME};
+use super::manifest::{parse_manifest_installed, ExtensionManifest, MANIFEST_FILE_NAME};
 use super::model::{ExtensionId, ExtensionPath, ExtensionRecord, ExtensionVersion};
 
 #[derive(Clone, Debug)]
@@ -29,12 +29,23 @@ impl InstalledExtension {
         &self.root
     }
 
-    pub(crate) fn wasm_path(&self) -> PathBuf {
-        self.root.join(self.manifest.entry().as_str())
+    /// WASM entry 路径；builtin 扩展没有（返回 None）。
+    pub(crate) fn wasm_path(&self) -> Option<PathBuf> {
+        self.manifest
+            .entry()
+            .map(|entry| self.root.join(entry.as_str()))
     }
 
+    /// 读取 guest 字节。builtin 扩展没有 guest 字节可读（组合根的
+    /// instance_free/guest_for_run 语义保证不会对 builtin 调用到这里）。
     pub(crate) fn read_wasm(&self) -> ExtensionResult<Vec<u8>> {
-        Ok(fs::read(self.wasm_path())?)
+        let path = self.wasm_path().ok_or_else(|| {
+            ExtensionError::InvalidManifest(format!(
+                "builtin 扩展 {} 没有 WASM entry",
+                self.manifest.id()
+            ))
+        })?;
+        Ok(fs::read(path)?)
     }
 
     pub(crate) fn read_file(&self, path: &ExtensionPath) -> ExtensionResult<Vec<u8>> {
@@ -100,17 +111,22 @@ impl ExtensionStore {
                         "缺少 manifest.toml: {id}@{version}"
                     )));
                 }
-                let manifest = parse_manifest(&fs::read(manifest_path)?)?;
+                // 读端容忍：存量安装可能是 v1 manifest（旧服务端安装），快照
+                // 路径不因 manifest_version 升级而拒绝列出（安装/更新才强校验 v2）。
+                let manifest = parse_manifest_installed(&fs::read(manifest_path)?)?;
                 if manifest.id() != &id || manifest.version() != &version {
                     return Err(ExtensionError::InvalidManifest(format!(
                         "目录与 manifest 不一致: {id}@{version}"
                     )));
                 }
-                if !is_regular_file(&version_entry.path().join(manifest.entry().as_str()))? {
-                    return Err(ExtensionError::InvalidArchive(format!(
-                        "WASM entry 不存在: {id}@{version}/{}",
-                        manifest.entry()
-                    )));
+                // entry 存在性只对 wasm 执行类型有意义；builtin 无 guest 字节。
+                if let Some(entry) = manifest.entry() {
+                    if !is_regular_file(&version_entry.path().join(entry.as_str()))? {
+                        return Err(ExtensionError::InvalidArchive(format!(
+                            "WASM entry 不存在: {id}@{version}/{}",
+                            entry
+                        )));
+                    }
                 }
                 installed.push(InstalledExtension {
                     manifest,

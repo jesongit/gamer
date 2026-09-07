@@ -24,12 +24,10 @@ pub(crate) enum ExtensionError {
     InvalidManifest(String),
     #[error("插件归档无效: {0}")]
     InvalidArchive(String),
-    #[error("插件签名无效: {0}")]
-    InvalidSignature(String),
-    #[error("官方 Registry 证明无效: {0}")]
-    InvalidRegistryProof(String),
-    #[error("官方 Registry 安装必须提供签名证明")]
-    RegistryProofRequired,
+    #[error("宿主归档 sha256 校验失败: 期望 {expected}，实际 {actual}")]
+    ArchiveSha256Mismatch { expected: String, actual: String },
+    #[error("host_feature_unavailable: 宿主未注册内置扩展实现 {0}（需要升级 Gamer 宿主）")]
+    HostFeatureUnavailable(String),
     #[error("插件权限变更需要用户确认: {0}")]
     PermissionConfirmationRequired(String),
     #[error("插件归档大小 {actual} 字节超过上限 {limit} 字节")]

@@ -1,13 +1,15 @@
-manifest_version = 1
+manifest_version = 2
 id = "gamer.video"
 version = "1.0.0"
 name = "视频工作台"
 description = "视频工作台：媒体素材库、设备录制与操作草稿生成"
-entry = "plugin.wasm"
 permissions = ["media.read", "media.import", "media.record", "media.write", "media.events.read"]
 
-# Native 机制扩展：无 [host_api] 声明（不携带 guest、不经 WIT 消费 Host API；
-# 媒体/录制能力由 Core 进程内服务承载）。
+# builtin（宿主预置）执行类型：无 guest 字节、无常驻实例；执行体在宿主
+# extensions/builtin.rs 注册表内（builtin_id 必须已注册才能安装）。
+[execution]
+kind = "builtin"
+builtin_id = "gamer.video"
 
 [[ui.contributions]]
 # runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端

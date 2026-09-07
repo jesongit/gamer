@@ -20,8 +20,8 @@ use crate::capabilities::{
     KeyInput, LogLevel, LogRecord, MatchManyRequest, MatchOptions, MatchOutcome, ResourceId,
     RuntimeService, SwipeGesture, TemplateQuery, TextInput, TouchPoint,
 };
-use crate::core::AppContext;
 use crate::core::events::{EventSink, RuntimeEvent, RuntimeEventKind};
+use crate::core::AppContext;
 use crate::extensions::{HostApi, Permission};
 
 use crate::extensions::gamer_yaml::yaml_vnext::{Condition, Expr, Program, SmallStep, Value};
@@ -38,9 +38,9 @@ pub(crate) const EVENT_CAPABILITY: &str = "__event";
 /// 仅测试引用：与 tools/plugins/gamer.yaml/manifest.toml 的同步护栏 +
 /// 安装/卸载面板测试以此为打包 manifest 源。
 #[allow(dead_code)]
-pub(crate) const YAML_EXTENSION_MANIFEST_TOML: &str = r#"manifest_version = 1
+pub(crate) const YAML_EXTENSION_MANIFEST_TOML: &str = r#"manifest_version = 2
 id = "gamer.yaml"
-version = "3.1.0"
+version = "3.1.1"
 name = "自动化"
 description = "自动化：YAML v3 脚本、函数库与模板的制作与运行"
 entry = "plugin.wasm"
@@ -53,6 +53,10 @@ input = "^1.0"
 resource = "^1.0"
 runtime = "^1.0"
 log = "^1.0"
+
+# 独立 WASM guest：真实 plugin.wasm，按调用惰性实例化（无实例执行模型）。
+[execution]
+kind = "wasm"
 
 # runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端
 # core-component-registry 解释（console.scripts = 自动化编辑器、
@@ -435,12 +439,14 @@ impl NativeYamlHost {
             .registry
             .resource()
             .ok_or_else(|| anyhow!("resource capability 未注册"))?
-            .resolve(&ResourceId::new(
-                package.as_str().to_string(),
-                YAML_EXTENSION_ID,
-                format!("templates/{name}"),
+            .resolve(
+                &ResourceId::new(
+                    package.as_str().to_string(),
+                    YAML_EXTENSION_ID,
+                    format!("templates/{name}"),
+                )
+                .map_err(anyhow::Error::new)?,
             )
-            .map_err(anyhow::Error::new)?)
             .await
             .map_err(anyhow::Error::new)?;
         Ok(resource)
@@ -493,12 +499,10 @@ impl NativeYamlHost {
                     ("region".to_string(), region),
                 ]))
             }
-            MatchOutcome::NotFound => {
-                Value::Map(BTreeMap::from([
-                    ("found".to_string(), Value::Bool(false)),
-                    ("region".to_string(), region),
-                ]))
-            }
+            MatchOutcome::NotFound => Value::Map(BTreeMap::from([
+                ("found".to_string(), Value::Bool(false)),
+                ("region".to_string(), region),
+            ])),
         }
     }
 
@@ -550,9 +554,9 @@ impl NativeYamlHost {
                 .collect::<Result<_>>()?,
             _ => bail!("region 必须是 {{x, y, width, height}} 映射或四元数组"),
         };
-        let [x, y, width, height] = numbers.try_into().map_err(|_| {
-            anyhow!("region 必须是 {{x, y, width, height}} 映射或四元数组")
-        })?;
+        let [x, y, width, height] = numbers
+            .try_into()
+            .map_err(|_| anyhow!("region 必须是 {{x, y, width, height}} 映射或四元数组"))?;
         for component in [x, y, width, height] {
             if !(0.0..=1.0).contains(&component) {
                 bail!("region 分量必须在 0..1（相对坐标），得到 {component}");
@@ -591,10 +595,7 @@ impl NativeYamlHost {
 
     /// match_many 的 thresholds 实参（与 templates 平行的列表，缺项/Null =
     /// 该模板用缺省阈值）——match_first 候选级 threshold 的承载形态。
-    fn thresholds_option(
-        args: &BTreeMap<String, Value>,
-        count: usize,
-    ) -> Result<Vec<Option<f32>>> {
+    fn thresholds_option(args: &BTreeMap<String, Value>, count: usize) -> Result<Vec<Option<f32>>> {
         let Some(Value::List(values)) = args.get("thresholds") else {
             return Ok(vec![None; count]);
         };
@@ -780,9 +781,12 @@ impl CapabilityInvoker for NativeYamlHost {
                     .match_template(frame, TemplateQuery::new(template, options))
                     .await
                     .map_err(anyhow::Error::new)?;
-                let region =
-                    Self::relative_region_echo(effective_px, self.screen().width, self.screen().height);
-                self.emit_vision_outcome(&template_name, outcome.clone(), effective_px)
+                let region = Self::relative_region_echo(
+                    effective_px,
+                    self.screen().width,
+                    self.screen().height,
+                );
+                self.emit_vision_outcome(&template_name, outcome, effective_px)
                     .await;
                 Ok(Self::match_value(outcome, region, self.screen()))
             }
@@ -834,12 +838,12 @@ impl CapabilityInvoker for NativeYamlHost {
                     );
                     self.emit_vision_outcome(
                         &Self::resource_name(template)?,
-                        result.outcome.clone(),
+                        result.outcome,
                         effective_px,
                     )
                     .await;
                     matches.push(Self::match_value(
-                        result.outcome.clone(),
+                        result.outcome,
                         Self::relative_region_echo(
                             effective_px,
                             self.screen().width,
@@ -1036,8 +1040,11 @@ impl Interpreter {
         self.emit_event(RuntimeEventKind::RunStart).await;
         match self.run_steps(&program.steps).await {
             Ok(Flow::Continue | Flow::Return(_)) => {
-                self.emit_event(RuntimeEventKind::RunEnd { ok: true, error: None })
-                    .await;
+                self.emit_event(RuntimeEventKind::RunEnd {
+                    ok: true,
+                    error: None,
+                })
+                .await;
                 Ok(ExecutionResult {
                     value: match self.run_steps_value() {
                         Some(value) => value,
@@ -1525,10 +1532,12 @@ mod tests {
     /// vision 链路桩：一个类型同时实现 Resource / Frame / Vision 三个能力，
     /// 记录每次查询的（模板名, threshold, region）供断言；`hits` 集合内的
     /// 模板名判命中。
+    type SeenQuery = (String, Option<f32>, Option<[u32; 4]>);
+
     pub(crate) struct VisionStub {
         hits: BTreeSet<String>,
         names: std::sync::Mutex<HashMap<ResourceHandle, String>>,
-        seen: std::sync::Mutex<Vec<(String, Option<f32>, Option<[u32; 4]>)>>,
+        seen: std::sync::Mutex<Vec<SeenQuery>>,
         frame_size: FrameSize,
     }
 
@@ -1563,7 +1572,9 @@ mod tests {
             self.seen.lock().unwrap().push((
                 name,
                 options.threshold,
-                options.region.map(|region| [region.x, region.y, region.width, region.height]),
+                options
+                    .region
+                    .map(|region| [region.x, region.y, region.width, region.height]),
             ));
         }
 
@@ -1610,10 +1621,7 @@ mod tests {
 
     #[async_trait]
     impl FrameService for VisionStub {
-        async fn latest(
-            &self,
-            _device: &DeviceHandle,
-        ) -> CapabilityResult<Option<FrameHandle>> {
+        async fn latest(&self, _device: &DeviceHandle) -> CapabilityResult<Option<FrameHandle>> {
             Ok(None)
         }
 
@@ -1746,11 +1754,12 @@ mod tests {
         let region = into_map(map.get("region").cloned().unwrap());
         assert_eq!(region.get("x"), Some(&Value::Float(0.0)));
         assert_eq!(region.get("width"), Some(&Value::Float(1.0)));
+        assert_eq!(stub.seen().len(), 2,);
         assert_eq!(
-            stub.seen().len(),
-            2,
+            stub.seen()[1].1,
+            None,
+            "threshold 缺省省略字段 → MatchOptions::default 口径"
         );
-        assert_eq!(stub.seen()[1].1, None, "threshold 缺省省略字段 → MatchOptions::default 口径");
     }
 
     /// 模板 `#` 后缀区域推断（v2 迁移回归回归测试）：步骤未给 region 时，
@@ -1867,7 +1876,7 @@ mod tests {
     }
 
     fn all_permissions(registry: CapabilityRegistry) -> HostApi {
-        let manifest = crate::extensions::parse_manifest(br#"manifest_version = 1
+        let manifest = crate::extensions::parse_manifest(br#"manifest_version = 2
 id = "gamer.yaml"
 version = "3.0.0"
 name = "YAML vNext"
@@ -1927,9 +1936,7 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
             self.recorded()
                 .into_iter()
                 .filter(|(capability, _)| capability == "runtime.sleep")
-                .filter_map(|(_, args)| {
-                    into_map(args).get("duration").cloned()
-                })
+                .filter_map(|(_, args)| into_map(args).get("duration").cloned())
                 .filter_map(|value| value.duration_ms())
                 .collect()
         }
@@ -1973,7 +1980,10 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
                         })
                         .collect();
                     Ok(Value::Map(BTreeMap::from([
-                        ("found".into(), Value::Bool(self.many_hits.iter().any(|hit| *hit))),
+                        (
+                            "found".into(),
+                            Value::Bool(self.many_hits.iter().any(|hit| *hit)),
+                        ),
                         ("matches".into(), Value::List(matches)),
                     ])))
                 }
@@ -1995,7 +2005,10 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
             ..program
         };
         let invoker = Arc::new(ScriptedInvoker::found(false));
-        Interpreter::new(invoker.clone()).run(&program).await.unwrap();
+        Interpreter::new(invoker.clone())
+            .run(&program)
+            .await
+            .unwrap();
         let mut state = 7u64;
         let expected_first =
             100 + crate::extensions::gamer_yaml::yaml_vnext::splitmix64(&mut state) % 101;
@@ -2026,10 +2039,7 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
         );
         // `$match` 在块后被复位（不跨块泄漏），save 的命名变量不受影响
         assert_eq!(
-            lookup_path(
-                &BTreeMap::from([("leaked".into(), Value::Null)]),
-                "leaked"
-            ),
+            lookup_path(&BTreeMap::from([("leaked".into(), Value::Null)]), "leaked"),
             Some(Value::Null)
         );
         let recorded = invoker.recorded();
@@ -2046,10 +2056,9 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
     /// P12.7 裁决：find 超时无 else → 抛 `FIND_TIMEOUT: <template>`。
     #[tokio::test]
     async fn native_interpreter_find_timeout_without_else_throws() {
-        let program = load(
-            "version: 3\nsteps:\n  - find:\n      template: ghost\n      timeout: 3s\n",
-        )
-        .unwrap();
+        let program =
+            load("version: 3\nsteps:\n  - find:\n      template: ghost\n      timeout: 3s\n")
+                .unwrap();
         let error = Interpreter::new(Arc::new(ScriptedInvoker::found(false)))
             .run(&program)
             .await
@@ -2064,12 +2073,14 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
     /// args 注入 vision.match。
     #[tokio::test]
     async fn native_interpreter_check_polls_and_passes_threshold() {
-        let program = load(
-            "version: 3\nsteps:\n  - check:\n      template: ready\n      threshold: 0.95\n",
-        )
-        .unwrap();
+        let program =
+            load("version: 3\nsteps:\n  - check:\n      template: ready\n      threshold: 0.95\n")
+                .unwrap();
         let invoker = Arc::new(ScriptedInvoker::found(true));
-        Interpreter::new(invoker.clone()).run(&program).await.unwrap();
+        Interpreter::new(invoker.clone())
+            .run(&program)
+            .await
+            .unwrap();
         let recorded = invoker.recorded();
         let (capability, args) = recorded
             .iter()
@@ -2082,10 +2093,7 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
             Some(&Value::Float(0.95)),
             "step threshold 注入 invoke args"
         );
-        assert_eq!(
-            map.get("template"),
-            Some(&Value::String("ready".into()))
-        );
+        assert_eq!(map.get("template"), Some(&Value::String("ready".into())));
     }
 
     /// P12.7：match_first 首个命中候选执行自己的 steps，`$match` = 该候选
@@ -2123,10 +2131,7 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
         let args = into_map(many.1);
         assert_eq!(
             args.get("thresholds"),
-            Some(&Value::List(vec![
-                Value::Float(0.6),
-                Value::Null
-            ])),
+            Some(&Value::List(vec![Value::Float(0.6), Value::Null])),
             "候选级 threshold 以平行列表传给 match_many"
         );
     }
@@ -2155,8 +2160,7 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
                     .unwrap();
                 runtime.block_on(async {
                     let program =
-                        load("version: 3\nsteps:\n  - call:\n      target: script:self\n")
-                            .unwrap();
+                        load("version: 3\nsteps:\n  - call:\n      target: script:self\n").unwrap();
                     let error = Interpreter::new(Arc::new(FakeInvoker))
                         .with_resolver(Arc::new(SelfResolver))
                         .run(&program)
@@ -2312,6 +2316,16 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
         }
         let installed = service.install(&archive).await.unwrap();
         service.enable(installed.id()).await.unwrap();
+        // Phase 1 语义收紧：Enabled 不再出现面板——面板仅 Running 可见。
+        assert!(service.ui_contributions().unwrap().is_empty());
+        // 本装配未接 registrar（gamer.yaml 的无实例模型无从声明），直写
+        // state.json 模拟 Running：生产组合根里 start 即进入 Running。
+        {
+            let mut states = service.store().read_state().unwrap();
+            states.get_mut(installed.id()).unwrap().state =
+                crate::extensions::ExtensionState::Running;
+            service.store().write_state(&states).unwrap();
+        }
         let panels = service.ui_contributions().unwrap();
         assert_eq!(panels.len(), 3);
         let component_of = |panel_id: &str| {
@@ -2327,6 +2341,14 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
         assert!(panels
             .iter()
             .all(|panel| panel.runtime == crate::extensions::UiRuntime::Core));
+        // 离开 Running（stop 语义）→ 面板撤销。
+        {
+            let mut states = service.store().read_state().unwrap();
+            states.get_mut(installed.id()).unwrap().state =
+                crate::extensions::ExtensionState::Enabled;
+            service.store().write_state(&states).unwrap();
+        }
+        assert!(service.ui_contributions().unwrap().is_empty());
         service.disable(installed.id()).await.unwrap();
         assert!(service
             .uninstall(installed.id(), installed.active_version())
@@ -2488,10 +2510,7 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
         let kinds = sink.kinds();
         assert_eq!(kinds[0], serde_json::json!({ "ev": "run_start" }));
         // loop 是带 label 的 surface step：进入有 step_start，终止有失败 step_end
-        assert_eq!(
-            kinds[1]["ev"], "step_start",
-            "事件序列: {kinds:?}"
-        );
+        assert_eq!(kinds[1]["ev"], "step_start", "事件序列: {kinds:?}");
         assert!(kinds.contains(&serde_json::json!({
             "ev": "budget", "kind": "STEP_BUDGET_EXCEEDED"
         })));
@@ -2503,7 +2522,10 @@ permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.k
         assert_eq!(run_end["ev"], "run_end");
         assert_eq!(run_end["ok"], serde_json::json!(false));
         assert!(
-            run_end["error"].as_str().unwrap().contains("STEP_BUDGET_EXCEEDED"),
+            run_end["error"]
+                .as_str()
+                .unwrap()
+                .contains("STEP_BUDGET_EXCEEDED"),
             "run_end 携带预算错误: {run_end}"
         );
         assert!(
@@ -2746,7 +2768,7 @@ mod wasm_tests {
             .join(", ");
         let manifest = crate::extensions::parse_manifest(
             format!(
-                r#"manifest_version = 1
+                r#"manifest_version = 2
 id = "gamer.yaml"
 version = "3.0.0"
 name = "YAML vNext"
@@ -3157,7 +3179,7 @@ runtime = "^1.0"
 
     fn log_host(logs: Arc<LogTrace>) -> HostApi {
         let manifest = crate::extensions::parse_manifest(
-            r#"manifest_version = 1
+            r#"manifest_version = 2
 id = "gamer.yaml"
 version = "3.0.0"
 name = "YAML vNext"
@@ -3574,7 +3596,7 @@ log = "^1.0"
     /// log 走 LogTrace；权限覆盖 vision/timing 链路全部 capability。
     fn vision_host(stub: &Arc<VisionStub>, input: Arc<InputTrace>, logs: Arc<LogTrace>) -> HostApi {
         let manifest = crate::extensions::parse_manifest(
-            r#"manifest_version = 1
+            r#"manifest_version = 2
 id = "gamer.yaml"
 version = "3.0.0"
 name = "YAML vNext"
@@ -3772,10 +3794,9 @@ log = "^1.0"
             ))
             .await
             .unwrap();
-        let program = load(
-            "version: 3\nsteps:\n  - wait: {min: 200ms, max: 500ms}\n  - return: done\n",
-        )
-        .unwrap();
+        let program =
+            load("version: 3\nsteps:\n  - wait: {min: 200ms, max: 500ms}\n  - return: done\n")
+                .unwrap();
         let start = std::time::Instant::now();
         let result = runtime
             .run(run_request(
@@ -3914,9 +3935,13 @@ log = "^1.0"
             .run(run_request_with_sink(
                 program,
                 Some(resolver),
-                vision_host(&stub, Arc::new(InputTrace::default()), Arc::new(LogTrace {
-                    logs: Mutex::new(Vec::new()),
-                })),
+                vision_host(
+                    &stub,
+                    Arc::new(InputTrace::default()),
+                    Arc::new(LogTrace {
+                        logs: Mutex::new(Vec::new()),
+                    }),
+                ),
                 None,
                 Some(sink.clone()),
             ))
@@ -4106,12 +4131,10 @@ log = "^1.0"
             .unwrap();
         assert_eq!(kinds.last().unwrap()["ev"], "run_end");
         assert_eq!(kinds.last().unwrap()["ok"], serde_json::json!(false));
-        assert!(
-            kinds.last().unwrap()["error"]
-                .as_str()
-                .unwrap()
-                .contains("STEP_BUDGET_EXCEEDED")
-        );
+        assert!(kinds.last().unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .contains("STEP_BUDGET_EXCEEDED"));
         assert!(budget_index + 1 < kinds.len(), "budget 先于 run_end");
     }
 }

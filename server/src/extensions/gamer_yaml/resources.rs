@@ -51,9 +51,7 @@ pub(crate) fn script_entry(
     id: &str,
 ) -> anyhow::Result<Option<ResourceEntry>> {
     match split_resource_id(id) {
-        Some((pkg, rel)) => {
-            store.read_text(&pkg, YAML_EXTENSION_ID, &format!("automations/{rel}"))
-        }
+        Some((pkg, rel)) => store.read_text(&pkg, YAML_EXTENSION_ID, &format!("automations/{rel}")),
         None => Ok(None),
     }
 }
@@ -64,9 +62,7 @@ pub(crate) fn function_entry(
     id: &str,
 ) -> anyhow::Result<Option<ResourceEntry>> {
     match split_resource_id(id) {
-        Some((pkg, rel)) => {
-            store.read_text(&pkg, YAML_EXTENSION_ID, &format!("functions/{rel}"))
-        }
+        Some((pkg, rel)) => store.read_text(&pkg, YAML_EXTENSION_ID, &format!("functions/{rel}")),
         None => Ok(None),
     }
 }
@@ -156,7 +152,10 @@ impl ResourceHandler for YamlResourceHandler {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            out.insert(path.clone(), json!({ "functions": functions, "file": short }));
+            out.insert(
+                path.clone(),
+                json!({ "functions": functions, "file": short }),
+            );
         }
         out
     }
@@ -242,25 +241,24 @@ fn rewrite_template_references(
         let Some(content) = script.content.as_deref() else {
             continue; // 非 UTF-8 附件不参与引用改写
         };
-        let rewritten = yaml_vnext::rename_template_source(
-            content,
-            old_name,
-            &old_short,
-            new_name,
-            &new_short,
-        )
-        .map_err(|diagnostics| {
-            anyhow::anyhow!(
-                "v3 脚本模板引用无法重写: {}",
-                diagnostics
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("；")
-            )
-        })?;
+        let rewritten =
+            yaml_vnext::rename_template_source(content, old_name, &old_short, new_name, &new_short)
+                .map_err(|diagnostics| {
+                    anyhow::anyhow!(
+                        "v3 脚本模板引用无法重写: {}",
+                        diagnostics
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join("；")
+                    )
+                })?;
         if let Some((content, _changed)) = rewritten {
-            rewrites.push((script.path.clone(), script.content.clone().unwrap(), content));
+            rewrites.push((
+                script.path.clone(),
+                script.content.clone().unwrap(),
+                content,
+            ));
         }
     }
 
@@ -269,18 +267,17 @@ fn rewrite_template_references(
             continue;
         };
         // 非 v3 存量函数库解析失败 → 跳过（与脚本侧 skip 语义一致）
-        let rewritten =
-            yaml_vnext::rename_template_in_function_library(
-                content,
-                old_name,
-                &old_short,
-                new_name,
-                &new_short,
-            )
-            .ok()
-            .flatten();
+        let rewritten = yaml_vnext::rename_template_in_function_library(
+            content, old_name, &old_short, new_name, &new_short,
+        )
+        .ok()
+        .flatten();
         if let Some((content, _changed)) = rewritten {
-            rewrites.push((function.path.clone(), function.content.clone().unwrap(), content));
+            rewrites.push((
+                function.path.clone(),
+                function.content.clone().unwrap(),
+                content,
+            ));
         }
     }
 
@@ -288,9 +285,7 @@ fn rewrite_template_references(
     // rename_resource 的 fs::rename 尚未发生）
     let mut written: Vec<(String, String)> = Vec::new();
     for (path, original, content) in &rewrites {
-        if let Err(error) =
-            store.write_text_unchecked(package, YAML_EXTENSION_ID, path, content)
-        {
+        if let Err(error) = store.write_text_unchecked(package, YAML_EXTENSION_ID, path, content) {
             for (path, original) in written.iter().rev() {
                 let _ = store.write_text_unchecked(package, YAML_EXTENSION_ID, path, original);
             }
@@ -372,7 +367,10 @@ mod rename_tests {
                 "templates/new.png",
             )
             .unwrap();
-        assert!(!templates.join("old.png").exists(), "rename_resource 负责移动模板文件");
+        assert!(
+            !templates.join("old.png").exists(),
+            "rename_resource 负责移动模板文件"
+        );
         assert_eq!(std::fs::read(templates.join("new.png")).unwrap(), b"png");
         let script =
             std::fs::read_to_string(plugin_root(&dir).join("automations/main.yaml")).unwrap();
@@ -453,8 +451,7 @@ mod rename_tests {
         let script =
             std::fs::read_to_string(plugin_root(&dir).join("automations/main.yaml")).unwrap();
         assert!(script.contains("template: new.png"));
-        let legacy =
-            std::fs::read_to_string(automations.join("legacy.yaml")).unwrap();
+        let legacy = std::fs::read_to_string(automations.join("legacy.yaml")).unwrap();
         assert!(legacy.contains("old.png"), "不可解析的存量源保持原样");
     }
 
@@ -515,12 +512,22 @@ mod rename_tests {
         // v2 形态存量函数文件 → 版本门禁拒绝（v3 解析对 `- find: x` 标量步报错，
         // 但错误必须带 yaml.v3.* 码——存量文件不可再经 v2 loader 落盘）
         let legacy = "login:\n  steps:\n    - find: old.png\n";
-        assert!(validate_function_library_file(&store, "com.test.app", "functions/legacy.yaml", legacy).is_err());
+        assert!(validate_function_library_file(
+            &store,
+            "com.test.app",
+            "functions/legacy.yaml",
+            legacy
+        )
+        .is_err());
         // 双失败口径统一：坏 v3 → v3 诊断（非法 call 裸 target）
         let broken_v3 = "bad:\n  steps:\n    - call:\n        target: login\n";
-        let diagnostics =
-            validate_function_library_file(&store, "com.test.app", "functions/broken.yaml", broken_v3)
-                .unwrap_err();
+        let diagnostics = validate_function_library_file(
+            &store,
+            "com.test.app",
+            "functions/broken.yaml",
+            broken_v3,
+        )
+        .unwrap_err();
         let text = diagnostics.to_string();
         assert!(
             text.contains("yaml.v3.call") || text.contains("命名空间"),
@@ -578,7 +585,9 @@ mod rename_tests {
                 false,
             )
             .unwrap();
-        let list = store.list("com.test.app", YAML_EXTENSION_ID, "functions").unwrap();
+        let list = store
+            .list("com.test.app", YAML_EXTENSION_ID, "functions")
+            .unwrap();
         assert_eq!(list[0].meta["functions"][0], "greet");
         assert_eq!(list[0].meta["file"], "lib");
     }

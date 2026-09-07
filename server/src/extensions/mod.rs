@@ -15,6 +15,7 @@
 )]
 
 mod archive;
+mod builtin;
 mod error;
 
 /// gamer.yaml 扩展（YAML 栈边界）：见 gamer_yaml/mod.rs。
@@ -25,24 +26,24 @@ mod manifest;
 mod model;
 mod permissions;
 mod service;
-mod signature;
 mod store;
 mod ui;
-/// gamer.video Native 扩展（视频工作台，实施合同 §5）：manifest 常量 +
-/// Native 生命周期判定；无 guest、无 Runner。
+/// gamer.video builtin 扩展（视频工作台，实施合同 §5）：manifest 常量 +
+/// 内置注册表条目；无 guest、无 Runner（执行体是宿主进程内服务）。
 pub(crate) mod video;
 mod wasm;
 mod wit;
 
+pub(crate) use builtin::{builtin_extension, is_builtin_extension, BUILTIN_EXTENSIONS};
 pub(crate) use error::{ExtensionError, ExtensionResult, PermissionError};
 pub(crate) use host_api::{HostApi, HostApiCatalog, HostApiDomain, HOST_API_VERSION};
 pub(crate) use keymap::{
     android_keycode, decode_input_event, emit_keymap_trace, keymap_trace_active, load_user_profile,
-    now_epoch_us, real_wasm_host_status, register_resource_handlers, PackageKeymapSource,
+    now_epoch_us, real_wasm_host_status, register_resource_handlers,
     CapabilityDeviceActionExecutor, DeviceAction, DeviceActionExecutor, InputEvent, InputResult,
     KeymapContributionRegistry, KeymapPanelContribution, KeymapTraceContext, KeymapTracePath,
-    KeymapTraceRecord, NormalizedPoint, ScreenSize, INPUT_PROTOCOL_VERSION, KEYMAP_EXTENSION_ID,
-    KEYMAP_EXTENSION_MANIFEST_TOML, KEYMAP_PANEL_ID, KEYMAP_WASM_ABI_VERSION,
+    KeymapTraceRecord, NormalizedPoint, PackageKeymapSource, ScreenSize, INPUT_PROTOCOL_VERSION,
+    KEYMAP_EXTENSION_ID, KEYMAP_EXTENSION_MANIFEST_TOML, KEYMAP_PANEL_ID, KEYMAP_WASM_ABI_VERSION,
 };
 #[cfg(all(test, feature = "wasm-runtime"))]
 pub(crate) use keymap::{build_guest_fixture_component, package_guest_fixture_gplugin};
@@ -54,8 +55,8 @@ pub(crate) use keymap::{
 pub(crate) use keymap::{parse_keymap_content, serialize_keymap};
 
 pub(crate) use manifest::{
-    parse_manifest, ExtensionManifest, HostApiRequirements, UiContribution, UiRuntime,
-    MANIFEST_FILE_NAME, MANIFEST_VERSION,
+    parse_manifest, parse_manifest_installed, ExecutionKind, ExecutionSpec, ExtensionManifest,
+    HostApiRequirements, UiContribution, UiRuntime, MANIFEST_FILE_NAME, MANIFEST_VERSION,
 };
 pub(crate) use model::{
     ExtensionId, ExtensionPath, ExtensionRecord, ExtensionState, ExtensionVersion,
@@ -65,12 +66,9 @@ pub(crate) use service::{
     ExtensionInspection, ExtensionInstallContext, ExtensionService, ExtensionSnapshot,
     PermissionDiff, TimerRunnerRegistrar,
 };
-pub(crate) use signature::{
-    RegistryProof, SignatureInfo, SignatureStatus, SignatureVerifier, TrustStore,
-};
 pub(crate) use store::{ExtensionStore, InstalledExtension};
 pub(crate) use ui::{RegisteredUiContribution, UiContributionRegistry};
-pub(crate) use video::{is_native_extension, VIDEO_EXTENSION_ID};
+pub(crate) use video::VIDEO_EXTENSION_ID;
 pub(crate) use wasm::{NoWasmRuntime, WasmInstanceHandle, WasmRuntime, WasmStartRequest};
 
 /// Native 扩展 call 动作分发缝（视频工作台实施合同 §5）：`POST
@@ -117,7 +115,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "manifest_version = 1\nid = \"{id}\"\nversion = \"{version}\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\npermissions = [{permissions}]\n[host_api]\ndevice = \"{host_api}\"\n"
+            "manifest_version = 2\nid = \"{id}\"\nversion = \"{version}\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\npermissions = [{permissions}]\n[host_api]\ndevice = \"{host_api}\"\n"
         )
         .into_bytes()
     }
@@ -272,7 +270,7 @@ mod tests {
             )),
             Err(ExtensionError::Permission(PermissionError::Forbidden(_)))
         ));
-        let unknown = b"manifest_version = 1\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\nextra = true\n";
+        let unknown = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\nextra = true\n";
         assert!(matches!(
             parse_manifest(unknown),
             Err(ExtensionError::InvalidManifest(_))
@@ -416,8 +414,9 @@ mod tests {
         assert_eq!(service.list().unwrap()[0].state(), ExtensionState::Enabled);
     }
 
+    /// Phase 1 免签名语义：官方来源不再要求 proof/签名；权限增量确认保留。
     #[tokio::test]
-    async fn install_rejects_new_permissions_and_official_source_without_proof() {
+    async fn install_rejects_new_permissions_but_official_source_needs_no_proof() {
         let temp = TempDir::new().unwrap();
         let service = ExtensionService::new(
             ExtensionStore::new(temp.path()),
@@ -435,15 +434,30 @@ mod tests {
             Err(ExtensionError::PermissionConfirmationRequired(_))
         ));
         assert!(service.list().unwrap().is_empty());
-        assert!(matches!(
-            service.inspect_with_context(
+        // official 来源无 proof：inspect 正常通过（签名门禁已整体退役）
+        let inspected = service
+            .inspect_with_context(
                 &archive,
                 &ExtensionInstallContext {
                     official: true,
                     ..Default::default()
-                }
-            ),
-            Err(ExtensionError::RegistryProofRequired)
+                },
+            )
+            .unwrap();
+        assert_eq!(inspected.manifest().id().as_str(), "com.example.extension");
+        // 完整性钉：期望 sha256 不匹配 → 结构化拒绝
+        let mismatched = service
+            .inspect_with_context(
+                &archive,
+                &ExtensionInstallContext {
+                    expected_sha256: Some("0".repeat(64)),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            mismatched,
+            ExtensionError::ArchiveSha256Mismatch { .. }
         ));
     }
 
@@ -503,11 +517,14 @@ mod tests {
         ));
     }
 
+    /// UI 贡献只在 Running 可见（Phase 1 语义收紧）：Enabled 不再出现面板、
+    /// 不再服务 ui 资产；stop/disable/uninstall 全部撤销贡献。
     #[tokio::test]
-    async fn ui_contributions_appear_after_install_and_are_removed_after_uninstall() {
+    async fn ui_contributions_appear_only_while_running_and_are_removed_after_uninstall() {
         let temp = TempDir::new().unwrap();
-        let service = ExtensionService::with_default_runtime(
+        let service = ExtensionService::new(
             ExtensionStore::new(temp.path()),
+            Arc::new(CountingRuntime::default()),
             CapabilityRegistry::default(),
         );
         let manifest = format!(
@@ -519,17 +536,30 @@ mod tests {
             .await
             .unwrap();
         assert!(service.ui_contributions().unwrap().is_empty());
+        // enable ≠ 可见：Enabled 只是「已启用」，面板与 ui 资产都不可用
         service.enable(installed.id()).await.unwrap();
+        assert!(service.ui_contributions().unwrap().is_empty());
+        let path = ExtensionPath::parse("ui/index.html").unwrap();
+        assert!(service.read_ui_file(installed.id(), &path).is_err());
+
+        // start → Running：贡献出现，ui 资产可读
+        service.start(installed.id()).await.unwrap();
         let contributions = service.ui_contributions().unwrap();
         assert_eq!(contributions.len(), 1);
         assert_eq!(contributions[0].panel_id, "hello");
         assert_eq!(contributions[0].version.as_str(), "1.0.0");
-
-        let path = ExtensionPath::parse("ui/index.html").unwrap();
         assert_eq!(
             service.read_ui_file(installed.id(), &path).unwrap().0,
             b"<!doctype html>"
         );
+
+        // stop → Enabled：贡献撤销（不再保留半启用可见态）
+        service.stop(installed.id()).await.unwrap();
+        assert!(service.ui_contributions().unwrap().is_empty());
+
+        // start → disable：一并撤销
+        service.start(installed.id()).await.unwrap();
+        assert_eq!(service.ui_contributions().unwrap().len(), 1);
         service.disable(installed.id()).await.unwrap();
         assert!(service.ui_contributions().unwrap().is_empty());
         assert!(service

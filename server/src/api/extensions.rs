@@ -386,10 +386,11 @@ fn snapshot_json(snapshot: &ExtensionSnapshot) -> serde_json::Value {
         "installed_versions": snapshot.installed_versions(),
         "name": manifest.name(),
         "description": manifest.description(),
-        "entry": manifest.entry().as_str(),
+        // builtin 扩展没有 WASM entry（null）；执行类型见 execution。
+        "entry": manifest.entry().map(|entry| entry.as_str()),
+        "execution": manifest.execution(),
         "state": snapshot.state(),
         "last_error": snapshot.last_error(),
-        "signature": snapshot.signature(),
         "host_api": host_api,
         "permissions": manifest.permissions().names(),
         "ui": manifest.ui().iter().map(ui_json).collect::<Vec<_>>(),
@@ -439,10 +440,9 @@ fn extension_error(error: ExtensionError) -> Response {
         ExtensionError::AlreadyInstalled { .. } | ExtensionError::InvalidTransition { .. } => {
             ApiError::conflict(error.to_string())
         }
-        ExtensionError::RegistryProofRequired
-        | ExtensionError::PermissionConfirmationRequired(_) => {
-            ApiError::conflict(error.to_string())
-        }
+        ExtensionError::PermissionConfirmationRequired(_)
+        | ExtensionError::HostFeatureUnavailable(_) => ApiError::conflict(error.to_string()),
+        ExtensionError::ArchiveSha256Mismatch { .. } => ApiError::bad_request(error.to_string()),
         ExtensionError::RuntimeUnavailable(_) => ApiError::service_unavailable(error.to_string()),
         ExtensionError::CallRejected(_) => ApiError::bad_request(error.to_string()),
         ExtensionError::Io(_)

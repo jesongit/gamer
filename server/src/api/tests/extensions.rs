@@ -1,5 +1,15 @@
 use super::*;
 
+/// 把扩展生命周期状态直写 state.json（模拟 guest 成功启动后的 Running——
+/// 桩 wasm 走不到 Running，但 UI 注册表按 store 状态刷新，语义等价）。
+fn mark_extension_state(test_app: &TestApp, id: &str, state: &str) {
+    let state_path = test_app.dir.join("extensions").join("state.json");
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    document["plugins"][id]["state"] = serde_json::json!(state);
+    std::fs::write(&state_path, document.to_string()).unwrap();
+}
+
 #[tokio::test]
 async fn extension_rest_lifecycle_registers_and_cleans_ui_contributions() {
     let test_app = build_app(
@@ -11,7 +21,7 @@ async fn extension_rest_lifecycle_registers_and_cleans_ui_contributions() {
     assert_eq!(login_response.status(), StatusCode::OK);
     let session = first_cookie_pair(&cookie_of(&login_response));
 
-    let manifest = br#"manifest_version = 1
+    let manifest = br#"manifest_version = 2
 id = "com.example.extension"
 version = "1.0.0"
 name = "Hello extension"
@@ -44,7 +54,9 @@ entry = "ui/index.html"
     let inspected_json = json_body(inspected).await;
     assert_eq!(inspected_json["id"], "com.example.extension");
     assert_eq!(inspected_json["version"], "1.0.0");
-    assert_eq!(inspected_json["signature"]["status"], "unsigned");
+    // Phase 1 免签名：无 signature 字段；execution.kind 透传。
+    assert!(inspected_json.get("signature").is_none());
+    assert_eq!(inspected_json["execution"]["kind"], "wasm");
     assert_eq!(
         inspected_json["permission_diff"]["added"],
         serde_json::json!([])
@@ -72,10 +84,13 @@ entry = "ui/index.html"
     // 安装即用：桩 wasm 的 start 失败 → 自动降级 Enabled（last_error 可见）
     assert_eq!(installed_json["state"], "enabled");
 
-    // Enabled（含安装即用降级）即发布 UI 贡献——iframe 面板随安装即可见
+    // Phase 1 语义收紧：Enabled 不再出现面板——UI 贡献仅 Running 可见
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
-    assert_eq!(contributions.status(), StatusCode::OK);
-    assert_eq!(json_body(contributions).await[0]["panel_id"], "hello");
+    assert!(json_body(contributions)
+        .await
+        .as_array()
+        .unwrap()
+        .is_empty());
 
     let enabled = post_json(
         &test_app,
@@ -86,9 +101,25 @@ entry = "ui/index.html"
     .await;
     assert_eq!(enabled.status(), StatusCode::OK);
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
+    assert!(json_body(contributions)
+        .await
+        .as_array()
+        .unwrap()
+        .is_empty());
+    // Enabled 也不再服务 ui 资产
+    let asset = get_json(
+        &test_app,
+        &session,
+        "/api/extensions/com.example.extension/ui/index.html",
+    )
+    .await;
+    assert_eq!(asset.status(), StatusCode::NOT_FOUND);
+
+    // Running（模拟 guest 成功启动）：贡献出现、资产可读
+    mark_extension_state(&test_app, "com.example.extension", "running");
+    let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
     let contributions_json = json_body(contributions).await;
     assert_eq!(contributions_json[0]["panel_id"], "hello");
-
     let asset = get_json(
         &test_app,
         &session,
@@ -101,14 +132,8 @@ entry = "ui/index.html"
         "<h1>hello</h1>"
     );
 
-    let disabled = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.extension/disable",
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(disabled.status(), StatusCode::OK);
+    // 回到非 Running：贡献与资产一并撤销
+    mark_extension_state(&test_app, "com.example.extension", "disabled");
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
     assert!(json_body(contributions)
         .await
@@ -123,36 +148,6 @@ entry = "ui/index.html"
     .await;
     assert_eq!(asset.status(), StatusCode::NOT_FOUND);
 
-    let enabled = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.extension/enable",
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(enabled.status(), StatusCode::OK);
-    let start = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.extension/start",
-        serde_json::json!({}),
-    )
-    .await;
-    let expected_start_status = if cfg!(feature = "wasm-runtime") {
-        StatusCode::INTERNAL_SERVER_ERROR
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
-    };
-    assert_eq!(start.status(), expected_start_status);
-
-    let disabled = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.extension/disable",
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(disabled.status(), StatusCode::OK);
     std::fs::create_dir_all(test_app.dir.join("extension-data/com.example.extension")).unwrap();
     std::fs::write(
         test_app
@@ -183,9 +178,9 @@ entry = "ui/index.html"
         .exists());
 }
 
-/// runtime = "core" 的 UI 贡献 REST 契约：安装 → enable → `ui_contributions`
-/// 原样透传 component（服务端不做组件名白名单）→ disable 后不再发布
-/// （非 Enabled|Running 不进面板注册表）。
+/// runtime = "core" 的 UI 贡献 REST 契约：component 原样透传（服务端不做
+/// 组件名白名单）；贡献仅 Running 可见——install/enable 不出现面板，
+/// start（Running）才发布，离开 Running 即撤销。
 #[tokio::test]
 async fn core_runtime_contributions_publish_component_and_follow_enabled_state() {
     let test_app = build_app(
@@ -196,7 +191,7 @@ async fn core_runtime_contributions_publish_component_and_follow_enabled_state()
     let login_response = login(&test_app.app).await;
     let session = first_cookie_pair(&cookie_of(&login_response));
 
-    let manifest = r#"manifest_version = 1
+    let manifest = r#"manifest_version = 2
 id = "com.example.coreui"
 version = "1.0.0"
 name = "Core UI extension"
@@ -238,6 +233,22 @@ component = "console.scripts"
     .await;
     assert_eq!(enabled.status(), StatusCode::OK);
 
+    // Phase 1 语义收紧：Enabled 不再发布面板
+    let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
+    let panels = json_body(contributions).await;
+    assert!(panels.as_array().unwrap().is_empty());
+
+    // 列表视图仍透传 manifest 的 ui 元数据（component 等，供管理界面检查）。
+    let list = get_json(&test_app, &session, "/api/extensions").await;
+    let list_json = json_body(list).await;
+    assert_eq!(list_json["extensions"][0]["ui"][0]["runtime"], "core");
+    assert_eq!(
+        list_json["extensions"][0]["ui"][0]["component"],
+        "console.scripts"
+    );
+
+    // Running：面板出现且 component 原样透传。
+    mark_extension_state(&test_app, "com.example.coreui", "running");
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
     let panels = json_body(contributions).await;
     let panels = panels.as_array().unwrap();
@@ -248,23 +259,8 @@ component = "console.scripts"
     assert_eq!(panels[0]["requires_device"], true);
     assert!(panels[0]["entry"].is_null());
 
-    // 列表视图的 snapshot.ui 同样透传 component。
-    let list = get_json(&test_app, &session, "/api/extensions").await;
-    let list_json = json_body(list).await;
-    assert_eq!(list_json["extensions"][0]["ui"][0]["runtime"], "core");
-    assert_eq!(
-        list_json["extensions"][0]["ui"][0]["component"],
-        "console.scripts"
-    );
-
-    let disabled = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.coreui/disable",
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(disabled.status(), StatusCode::OK);
+    // 离开 Running：贡献撤销。
+    mark_extension_state(&test_app, "com.example.coreui", "disabled");
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
     assert!(json_body(contributions)
         .await
@@ -287,7 +283,7 @@ async fn declarative_plugin_call_roundtrip_through_rest() {
     let login_response = login(&test_app.app).await;
     let session = first_cookie_pair(&cookie_of(&login_response));
 
-    let manifest = r#"manifest_version = 1
+    let manifest = r#"manifest_version = 2
 id = "com.example.panel"
 version = "1.0.0"
 name = "Panel extension"
@@ -406,16 +402,24 @@ fn call_guest_component() -> Vec<u8> {
                     .args(args)
                     .arg("--target-dir")
                     .arg(&target_dir);
-                let output = command.output().unwrap_or_else(|error| {
-                    panic!("无法启动 call guest cargo 子进程: {error}")
-                });
+                let output = command
+                    .output()
+                    .unwrap_or_else(|error| panic!("无法启动 call guest cargo 子进程: {error}"));
                 assert!(
                     output.status.success(),
                     "call guest 构建失败: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
             };
-            run(&["build", "--locked", "--quiet", "--release", "--lib", "--target", "wasm32-unknown-unknown"]);
+            run(&[
+                "build",
+                "--locked",
+                "--quiet",
+                "--release",
+                "--lib",
+                "--target",
+                "wasm32-unknown-unknown",
+            ]);
             let module = target_dir
                 .join("wasm32-unknown-unknown")
                 .join("release")
@@ -450,10 +454,13 @@ fn call_guest_component() -> Vec<u8> {
 }
 
 /// Phase 10 验收（官方市场端到端，使用提交进仓库的真实产物）：
-/// 市场列表（web/public/registry.json）可见两个官方插件 → 产物 .gplugin 的
-/// sha256 与 registry 一致 → 带 Registry proof 的官方安装（服务端验签：manifest
-/// 签名走内嵌 dev 信任锚、proof 绑定 id/version/url/sha256）→ 权限确认 →
-/// 启动 → UI 贡献出现 → 停止 → 卸载。
+/// 市场列表（web/public/registry.json）可见官方插件 → 产物 .gplugin 的
+/// sha256 与 registry 一致 → 官方安装**无签名无 proof**（Phase 1：服务端
+/// 只做 manifest/Host API 校验与权限确认；`x-expected-sha256` 完整性钉可选）
+/// → 安装即用 → UI 贡献出现 → 停止 → 卸载。
+///
+/// registry 读端兼容：schema v1（含 signature 字段，忽略）与 v2（含
+/// execution，无 signature）均可。
 #[cfg(feature = "wasm-runtime")]
 #[tokio::test]
 async fn official_plugin_market_end_to_end_with_committed_artifacts() {
@@ -470,7 +477,10 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         .iter()
         .map(|entry| entry["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, ["gamer.keymap", "gamer.yaml"]);
+    assert!(
+        ids.contains(&"gamer.keymap") && ids.contains(&"gamer.yaml"),
+        "官方市场至少包含 keymap 与 yaml，得到 {ids:?}"
+    );
 
     let test_app = build_app(
         "extensions-market",
@@ -484,7 +494,6 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         let id = entry["id"].as_str().unwrap();
         let download_url = entry["download_url"].as_str().unwrap();
         let sha256 = entry["sha256"].as_str().unwrap();
-        let proof = entry["signature"]["value"].as_str().unwrap();
 
         // 市场产物可下载且哈希一致（web-dist 托管后即为同源 URL）。
         let artifact_path = repo_root
@@ -495,12 +504,12 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         let digest = format!("{:x}", sha2::Sha256::digest(&artifact));
         assert_eq!(digest, sha256, "{id} 产物 sha256 与 registry 不一致");
 
-        // 官方安装：proof + 权限确认（服务端验证 manifest 签名与 proof 绑定）。
+        // 官方安装：来源标注 + 权限确认 + 期望 sha256 完整性钉（无 proof）。
         let headers = vec![
             (header::COOKIE.to_string(), session.clone()),
             (header::CONTENT_TYPE.to_string(), "application/zip".into()),
             ("x-gamer-extension-source".to_string(), "official".into()),
-            ("x-gamer-registry-proof".to_string(), proof.to_string()),
+            ("x-expected-sha256".to_string(), sha256.to_string()),
             ("x-gamer-permission-confirm".to_string(), "1".into()),
         ];
         let installed = send(
@@ -508,7 +517,11 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
             req_bytes("POST", "/api/extensions", None, &headers, artifact),
         )
         .await;
-        assert_eq!(installed.status(), StatusCode::CREATED, "{id} 官方安装被拒绝");
+        assert_eq!(
+            installed.status(),
+            StatusCode::CREATED,
+            "{id} 官方安装被拒绝"
+        );
         // 安装即用（2026-09-05）：官方安装自动 enable → start。keymap 长驻实例
         // 真实启动 → Running；gamer.yaml 为无实例模型（start 仅注册 timer
         // runner），测试装配未接 registrar 走通用实例路径失败 → 降级 Enabled
@@ -521,7 +534,8 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         }
     }
 
-    // UI 贡献出现：keymaps + automation + functions。
+    // UI 贡献出现（仅 Running）：keymaps + automation/functions（yaml 降级
+    // Enabled 不再出现面板——Phase 1 语义收紧）。
     let ui = get_json(&test_app, &session, "/api/extensions/ui").await;
     let ui_json = json_body(ui).await;
     let panels: Vec<String> = ui_json
@@ -530,16 +544,24 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         .iter()
         .map(|panel| panel["panel_id"].as_str().unwrap().to_string())
         .collect();
-    assert!(panels.contains(&"keymaps".to_string()));
-    assert!(panels.contains(&"automation".to_string()));
-    assert!(panels.contains(&"functions".to_string()));
+    assert!(
+        panels.contains(&"keymaps".to_string()),
+        "panels = {panels:?}"
+    );
+    assert!(
+        !panels
+            .iter()
+            .any(|panel| panel == "automation" || panel == "functions"),
+        "Enabled 降级的 gamer.yaml 不应出现面板：{panels:?}"
+    );
 
-    for entry in &plugins {
-        let id = entry["id"].as_str().unwrap();
-        let version = entry["version"].as_str().unwrap();
-        // 卸载守卫拒绝 Running：keymap 已在运行需先 stop；yaml 已降级 Enabled
-        // 可直接删。
-        if id == "gamer.keymap" {
+    // 卸载守卫拒绝 Running：先停掉所有 Running 扩展再逐个卸载。
+    let list = get_json(&test_app, &session, "/api/extensions").await;
+    let list = json_body(list).await;
+    for snapshot in list["extensions"].as_array().unwrap() {
+        let id = snapshot["id"].as_str().unwrap();
+        let version = snapshot["active_version"].as_str().unwrap().to_string();
+        if snapshot["state"] == "running" {
             let stopped = post_json(
                 &test_app,
                 &session,
@@ -580,7 +602,7 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
 
     let manifest = |version: &str| -> String {
         format!(
-            "manifest_version = 1\nid = \"com.example.rollback\"\nversion = \"{version}\"\nname = \"Rollback extension\"\nentry = \"plugin.wasm\"\n\n[[ui.contributions]]\npanel_id = \"rollback\"\ntitle = \"Rollback\"\nruntime = \"iframe\"\nentry = \"ui/index.html\"\n"
+            "manifest_version = 2\nid = \"com.example.rollback\"\nversion = \"{version}\"\nname = \"Rollback extension\"\nentry = \"plugin.wasm\"\n\n[[ui.contributions]]\npanel_id = \"rollback\"\ntitle = \"Rollback\"\nruntime = \"iframe\"\nentry = \"ui/index.html\"\n"
         )
     };
     let archive = |version: &str, content: &str| -> Vec<u8> {
@@ -594,7 +616,13 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
     let base = zip_headers(session.clone());
     let first = send(
         &test_app.app,
-        req_bytes("POST", "/api/extensions", None, &base, archive("1.0.0", "v1 bytes")),
+        req_bytes(
+            "POST",
+            "/api/extensions",
+            None,
+            &base,
+            archive("1.0.0", "v1 bytes"),
+        ),
     )
     .await;
     assert_eq!(first.status(), StatusCode::CREATED);
@@ -602,7 +630,13 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
     // 第二个版本并排安装，不自动激活
     let second = send(
         &test_app.app,
-        req_bytes("POST", "/api/extensions", None, &base, archive("1.1.0", "v2 bytes")),
+        req_bytes(
+            "POST",
+            "/api/extensions",
+            None,
+            &base,
+            archive("1.1.0", "v2 bytes"),
+        ),
     )
     .await;
     assert_eq!(second.status(), StatusCode::CREATED);
@@ -628,7 +662,10 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
         .unwrap()
         .clone();
     assert_eq!(rollback["active_version"], "1.0.0");
-    assert_eq!(rollback["installed_versions"], serde_json::json!(["1.0.0", "1.1.0"]));
+    assert_eq!(
+        rollback["installed_versions"],
+        serde_json::json!(["1.0.0", "1.1.0"])
+    );
 
     // 切换 active_version：200 + 约定契约体
     let activated = post_json(
@@ -655,7 +692,10 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
     .await;
     assert_eq!(enabled.status(), StatusCode::OK);
 
-    // start/UI 链路使用新 active 版本：ui 资产来自 1.1.0 的文件
+    // start/UI 链路使用新 active 版本：ui 资产来自 1.1.0 的文件。
+    // 桩 wasm 走不到 Running，直写 state.json 模拟 Running（UI 资产仅在
+    // Running 服务——Phase 1 语义收紧）。
+    mark_extension_state(&test_app, "com.example.rollback", "running");
     let asset = get_json(
         &test_app,
         &session,
@@ -667,6 +707,8 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
         axum::body::to_bytes(asset.into_body(), 1024).await.unwrap(),
         "v2 bytes"
     );
+    // activate 拒绝 Running：先回到 Enabled 再切换
+    mark_extension_state(&test_app, "com.example.rollback", "enabled");
 
     let back = post_json(
         &test_app,
@@ -681,6 +723,7 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
     assert_eq!(back_json["active_version"], "1.0.0");
 
     // 回滚后 ui 资产同样回到 1.0.0 的文件（start 链路同理取 active manifest）
+    mark_extension_state(&test_app, "com.example.rollback", "running");
     let asset = get_json(
         &test_app,
         &session,
@@ -692,6 +735,7 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
         axum::body::to_bytes(asset.into_body(), 1024).await.unwrap(),
         "v1 bytes"
     );
+    mark_extension_state(&test_app, "com.example.rollback", "enabled");
 
     // 未安装版本 → 404
     let missing = post_json(
@@ -789,23 +833,21 @@ async fn baseline_control_and_capabilities_work_without_installed_extensions() {
     };
     let db: crate::store::Db = std::sync::Arc::new(crate::store::Store::open(&cfg).unwrap());
     let scripts = std::sync::Arc::new(crate::resources::PackageStore::open(&cfg).unwrap());
-    let devices = std::sync::Arc::new(crate::device::DeviceManager::new(
-        db.clone(),
-        cfg.clone(),
-    ));
-    let runs = std::sync::Arc::new(crate::run_manager::RunManager::new(
-        std::sync::Arc::new(crate::extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
+    let devices = std::sync::Arc::new(crate::device::DeviceManager::new(db.clone(), cfg.clone()));
+    let runs = std::sync::Arc::new(crate::run_manager::RunManager::new(std::sync::Arc::new(
+        crate::extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
             devices.clone(),
             db.clone(),
-        )),
-    ));
-    let registry = crate::capabilities::adapters::build_registry(
-        devices, scripts, db, runs,
-    );
+        ),
+    )));
+    let registry = crate::capabilities::adapters::build_registry(devices, scripts, db, runs);
     assert!(registry.device().is_some(), "device capability 必须可用");
     assert!(registry.input().is_some(), "input capability 必须可用");
     assert!(registry.frame().is_some(), "frame capability 必须可用");
     assert!(registry.vision().is_some(), "vision capability 必须可用");
-    assert!(registry.resource().is_some(), "resource capability 必须可用");
+    assert!(
+        registry.resource().is_some(),
+        "resource capability 必须可用"
+    );
     assert!(registry.log().is_some(), "log capability 必须可用");
 }

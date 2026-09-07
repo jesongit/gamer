@@ -28,8 +28,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::core::RunRequest;
-use crate::extensions::gamer_yaml::task_params::{self, GateError};
 use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
+use crate::extensions::gamer_yaml::task_params::{self, GateError};
 use crate::resources::PackageStore;
 use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartError};
 use crate::store::Db;
@@ -53,9 +53,7 @@ impl YamlTimerRunner {
 
     /// P12.3（契约 §7）：本 runner 名下 entrypoint 的参数 schema 描述器
     /// （`GET /api/runners/:runner_id/entrypoint` 数据源；Core 经窄 trait 消费）。
-    pub(crate) fn entrypoint_describer(
-        &self,
-    ) -> Arc<dyn crate::scheduler::EntrypointDescriber> {
+    pub(crate) fn entrypoint_describer(&self) -> Arc<dyn crate::scheduler::EntrypointDescriber> {
         Arc::new(entrypoint_descriptor::StoreEntrypointDescriber::new(
             self.scripts.clone(),
         ))
@@ -258,7 +256,9 @@ impl YamlTimerRunner {
                     ));
                 }
             }
-            crate::extensions::gamer_yaml::run_target::RunTarget::Function { pkg, file, .. } => {
+            crate::extensions::gamer_yaml::run_target::RunTarget::Function {
+                pkg, file, ..
+            } => {
                 let rel = format!("{pkg}/{file}.yaml");
                 let exists = function_entry(&self.scripts, &rel)
                     .map_err(|error| invalid_detail(error.to_string(), serde_json::json!([])))?

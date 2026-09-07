@@ -12,7 +12,9 @@ use crate::core::fs::archive_validation::{
 };
 
 use super::error::{ExtensionError, ExtensionResult};
-use super::manifest::{parse_manifest, ExtensionManifest, MANIFEST_FILE_NAME};
+use super::manifest::{
+    parse_manifest, ExecutionKind, ExtensionManifest, CONVENTIONAL_WASM_ENTRY, MANIFEST_FILE_NAME,
+};
 use super::model::ExtensionPath;
 
 const MAX_EXTENSION_FILE_BYTES: usize = 10 * 1024 * 1024;
@@ -31,32 +33,51 @@ struct ArchiveEntry {
 pub(crate) fn inspect_archive(bytes: &[u8]) -> ExtensionResult<ExtensionManifest> {
     let (entries, manifest_bytes) = scan_archive(bytes)?;
     let manifest = parse_manifest(&manifest_bytes)?;
-    let entry = manifest.entry().as_str();
-    let entry_info = entries.iter().find(|candidate| candidate.name == entry);
-    let Some(entry_info) = entry_info else {
-        return Err(ExtensionError::InvalidArchive(format!(
-            "manifest entry 不存在: {entry}"
-        )));
-    };
-    if entry_info.is_dir {
-        return Err(ExtensionError::InvalidArchive(format!(
-            "manifest entry 不能是目录: {entry}"
-        )));
-    }
-    if entry_info.declared_size < 4 {
-        return Err(ExtensionError::InvalidArchive(format!(
-            "WASM entry 太小: {entry}"
-        )));
-    }
+    match manifest.execution().kind() {
+        ExecutionKind::Wasm => {
+            let entry = manifest
+                .entry()
+                .expect("wasm manifest has a validated entry")
+                .as_str();
+            let entry_info = entries.iter().find(|candidate| candidate.name == entry);
+            let Some(entry_info) = entry_info else {
+                return Err(ExtensionError::InvalidArchive(format!(
+                    "manifest entry 不存在: {entry}"
+                )));
+            };
+            if entry_info.is_dir {
+                return Err(ExtensionError::InvalidArchive(format!(
+                    "manifest entry 不能是目录: {entry}"
+                )));
+            }
+            if entry_info.declared_size < 4 {
+                return Err(ExtensionError::InvalidArchive(format!(
+                    "WASM entry 太小: {entry}"
+                )));
+            }
 
-    let mut archive = ZipArchive::new(Cursor::new(bytes))?;
-    let mut wasm = archive.by_name(entry)?;
-    let mut magic = [0u8; 4];
-    wasm.read_exact(&mut magic)?;
-    if magic != *b"\0asm" {
-        return Err(ExtensionError::InvalidArchive(format!(
-            "entry 不是 WASM 二进制: {entry}"
-        )));
+            let mut archive = ZipArchive::new(Cursor::new(bytes))?;
+            let mut wasm = archive.by_name(entry)?;
+            let mut magic = [0u8; 4];
+            wasm.read_exact(&mut magic)?;
+            if magic != *b"\0asm" {
+                return Err(ExtensionError::InvalidArchive(format!(
+                    "entry 不是 WASM 二进制: {entry}"
+                )));
+            }
+        }
+        ExecutionKind::Builtin => {
+            // builtin 包不携带 guest 字节；发现约定 WASM entry 名即拒绝，
+            // 防止把执行类型改成 builtin 绕过普通 guest 校验（计划 §5.2）。
+            if entries
+                .iter()
+                .any(|candidate| !candidate.is_dir && candidate.name == CONVENTIONAL_WASM_ENTRY)
+            {
+                return Err(ExtensionError::InvalidArchive(format!(
+                    "builtin 包不得携带 {CONVENTIONAL_WASM_ENTRY}（防伪装执行类型）"
+                )));
+            }
+        }
     }
     for contribution in manifest.ui() {
         let Some(entry) = contribution.entry() else {

@@ -1,6 +1,6 @@
-manifest_version = 1
+manifest_version = 2
 id = "gamer.yaml"
-version = "3.1.0"
+version = "3.1.1"
 name = "自动化"
 description = "自动化：YAML v3 脚本、函数库与模板的制作与运行"
 entry = "plugin.wasm"
@@ -13,6 +13,10 @@ input = "^1.0"
 resource = "^1.0"
 runtime = "^1.0"
 log = "^1.0"
+
+# 独立 WASM guest：真实 plugin.wasm，按调用惰性实例化（无实例执行模型）。
+[execution]
+kind = "wasm"
 
 # runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端
 # core-component-registry 解释（console.scripts = 自动化编辑器、

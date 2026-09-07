@@ -16,7 +16,6 @@ use super::error::{ExtensionError, ExtensionResult};
 use super::host_api::{HostApi, HostApiCatalog};
 use super::manifest::ExtensionManifest;
 use super::model::{ExtensionId, ExtensionRecord, ExtensionState, ExtensionVersion};
-use super::signature::{RegistryProof, SignatureInfo, SignatureStatus, SignatureVerifier};
 use super::store::{ExtensionStore, InstalledExtension};
 use super::ui::{RegisteredUiContribution, UiContributionRegistry};
 use super::wasm::{WasmInstanceHandle, WasmRuntime, WasmStartRequest};
@@ -60,7 +59,6 @@ pub(crate) struct ExtensionSnapshot {
     installed_versions: Vec<ExtensionVersion>,
     state: ExtensionState,
     last_error: Option<String>,
-    signature: SignatureInfo,
 }
 
 /// Management-only result for the pre-install inspection step. Keeping this
@@ -70,7 +68,6 @@ pub(crate) struct ExtensionSnapshot {
 pub(crate) struct ExtensionInspection {
     manifest: ExtensionManifest,
     archive_sha256: String,
-    signature: SignatureInfo,
     permission_diff: PermissionDiff,
 }
 
@@ -81,14 +78,16 @@ pub(crate) struct PermissionDiff {
     pub(crate) unchanged: Vec<String>,
 }
 
-/// Trust and confirmation metadata supplied by the management boundary. The
-/// browser may request an inspection without confirmation; install/update
-/// re-checks both fields while holding the lifecycle lock.
+/// Install-source metadata supplied by the management boundary. The browser
+/// may request an inspection without confirmation; install/update re-checks
+/// confirmation (and the optional expected-sha256 integrity pin) while holding
+/// the lifecycle lock. 签名/Registry proof 已随 Phase 1 免签名策略整体退役。
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ExtensionInstallContext {
     pub(crate) official: bool,
-    pub(crate) registry_proof: Option<RegistryProof>,
     pub(crate) permission_confirmed: bool,
+    /// 可选完整性钉：请求声明的归档 SHA-256（如市场条目），不匹配拒绝安装。
+    pub(crate) expected_sha256: Option<String>,
 }
 
 impl ExtensionInspection {
@@ -98,10 +97,6 @@ impl ExtensionInspection {
 
     pub(crate) fn archive_sha256(&self) -> &str {
         &self.archive_sha256
-    }
-
-    pub(crate) fn signature(&self) -> &SignatureInfo {
-        &self.signature
     }
 
     pub(crate) fn permission_diff(&self) -> &PermissionDiff {
@@ -133,10 +128,6 @@ impl ExtensionSnapshot {
     pub(crate) fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
-
-    pub(crate) fn signature(&self) -> &SignatureInfo {
-        &self.signature
-    }
 }
 
 pub(crate) struct ExtensionService {
@@ -145,7 +136,6 @@ pub(crate) struct ExtensionService {
     keymap_runtime: Arc<dyn KeymapWasmRuntime>,
     capabilities: CapabilityRegistry,
     host_api: HostApiCatalog,
-    signature: SignatureVerifier,
     operation_lock: Mutex<()>,
     running: std::sync::Mutex<HashMap<ExtensionId, WasmInstanceHandle>>,
     keymap_running: std::sync::Mutex<HashMap<ExtensionId, KeymapWasmInstanceHandle>>,
@@ -159,13 +149,7 @@ impl ExtensionService {
         runtime: Arc<dyn WasmRuntime>,
         capabilities: CapabilityRegistry,
     ) -> Self {
-        Self::with_keymap_runtime_and_signature(
-            store,
-            runtime,
-            Arc::new(NoKeymapWasmRuntime),
-            capabilities,
-            SignatureVerifier::default(),
-        )
+        Self::with_keymap_runtime(store, runtime, Arc::new(NoKeymapWasmRuntime), capabilities)
     }
 
     pub(crate) fn with_keymap_runtime(
@@ -174,29 +158,12 @@ impl ExtensionService {
         keymap_runtime: Arc<dyn KeymapWasmRuntime>,
         capabilities: CapabilityRegistry,
     ) -> Self {
-        Self::with_keymap_runtime_and_signature(
-            store,
-            runtime,
-            keymap_runtime,
-            capabilities,
-            SignatureVerifier::default(),
-        )
-    }
-
-    fn with_keymap_runtime_and_signature(
-        store: ExtensionStore,
-        runtime: Arc<dyn WasmRuntime>,
-        keymap_runtime: Arc<dyn KeymapWasmRuntime>,
-        capabilities: CapabilityRegistry,
-        signature: SignatureVerifier,
-    ) -> Self {
         Self {
             store,
             runtime,
             keymap_runtime,
             capabilities,
             host_api: HostApiCatalog::default(),
-            signature,
             operation_lock: Mutex::new(()),
             running: std::sync::Mutex::new(HashMap::new()),
             keymap_running: std::sync::Mutex::new(HashMap::new()),
@@ -236,13 +203,11 @@ impl ExtensionService {
             Arc::new(super::keymap::LazyKeymapWasmRuntime::new());
         #[cfg(not(feature = "wasm-runtime"))]
         let keymap_runtime: Arc<dyn KeymapWasmRuntime> = Arc::new(NoKeymapWasmRuntime);
-        let signature = SignatureVerifier::from_data_root(data_root.as_ref());
-        Self::with_keymap_runtime_and_signature(
+        Self::with_keymap_runtime(
             ExtensionStore::new(data_root),
             runtime,
             keymap_runtime,
             capabilities,
-            signature,
         )
     }
 
@@ -252,11 +217,12 @@ impl ExtensionService {
 
     /// 是否按调用执行（无常驻实例）。组合根注册的 registrar 是唯一权威——
     /// 它拥有各扩展 runner 的构造方式，因此也拥有该扩展执行模型的声明；
-    /// 未挂 registrar 的最小装配一律按常驻实例模型处理。Native 机制扩展
-    /// （`gamer.video`，无 guest/无 Runner）的「按调用执行」由本层直接声明：
-    /// start 只表示进入 Running 以点亮 UI 贡献与 call 通路。
+    /// 未挂 registrar 的最小装配一律按常驻实例模型处理。builtin（宿主预置）
+    /// 扩展（`gamer.video`，无 guest/无 Runner）的「按调用执行」由静态注册表
+    /// （`builtin::is_builtin_extension`）声明：start 只表示进入 Running 以
+    /// 点亮 UI 贡献与 call 通路。
     fn instance_free(&self, id: &ExtensionId) -> bool {
-        super::video::is_native_extension(id)
+        super::builtin::is_builtin_extension(id)
             || self
                 .runner_registrar
                 .as_ref()
@@ -379,7 +345,9 @@ impl ExtensionService {
     }
 
     /// Validate an archive without staging it. The management UI uses this
-    /// as the confirmation boundary for source, signature, and permissions.
+    /// as the confirmation boundary for source, integrity, and permissions.
+    /// Phase 1 免签名：官方与本地安装统一无签名，来源只作展示标注；
+    /// 下载完整性由可选 `expected_sha256`（`x-expected-sha256` 头）钉住。
     pub(crate) fn inspect(&self, archive: &[u8]) -> ExtensionResult<ExtensionInspection> {
         self.inspect_with_context(archive, &ExtensionInstallContext::default())
     }
@@ -390,29 +358,20 @@ impl ExtensionService {
         context: &ExtensionInstallContext,
     ) -> ExtensionResult<ExtensionInspection> {
         let manifest = self.inspect_compatible(archive)?;
-        if context.official && context.registry_proof.is_none() {
-            return Err(ExtensionError::RegistryProofRequired);
-        }
-        let signature = self.signature.verify_archive(archive)?;
-        if context.official && signature.status != SignatureStatus::Valid {
-            return Err(ExtensionError::InvalidSignature(
-                "官方插件必须带有可验证的 manifest.toml Ed25519 签名".into(),
-            ));
-        }
-        if let Some(proof) = context.registry_proof.as_ref() {
-            self.signature.verify_registry_proof(
-                proof,
-                manifest.id(),
-                manifest.version(),
-                archive,
-            )?;
-        }
         let archive_sha256 = format!("{:x}", Sha256::digest(archive));
+        if let Some(expected) = context.expected_sha256.as_deref() {
+            let expected = expected.trim().to_ascii_lowercase();
+            if expected != archive_sha256 {
+                return Err(ExtensionError::ArchiveSha256Mismatch {
+                    expected,
+                    actual: archive_sha256,
+                });
+            }
+        }
         let permission_diff = self.permission_diff_for(&manifest)?;
         Ok(ExtensionInspection {
             manifest,
             archive_sha256,
-            signature,
             permission_diff,
         })
     }
@@ -461,7 +420,7 @@ impl ExtensionService {
         let mut snapshots = Vec::with_capacity(by_id.len());
         for (id, versions) in by_id {
             let record = state_for_versions(&id, &versions, states.get(&id).cloned())?;
-            snapshots.push(snapshot_from_versions(versions, record, &self.signature)?);
+            snapshots.push(snapshot_from_versions(versions, record)?);
         }
         if let Some(id) = states
             .keys()
@@ -857,6 +816,15 @@ impl ExtensionService {
     fn inspect_compatible(&self, archive: &[u8]) -> ExtensionResult<ExtensionManifest> {
         let manifest = inspect_archive(archive)?;
         self.host_api.validate(&manifest)?;
+        // builtin 执行类型必须在宿主注册表中已注册（下载包不能自行扩展注册
+        // 表，也不能借 builtin 伪装绕过 WASM guest 校验——计划 §5.2）。
+        if let Some(builtin_id) = manifest.execution().builtin_id() {
+            if super::builtin::builtin_extension(builtin_id).is_none() {
+                return Err(ExtensionError::HostFeatureUnavailable(
+                    builtin_id.to_string(),
+                ));
+            }
+        }
         Ok(manifest)
     }
 
@@ -864,7 +832,7 @@ impl ExtensionService {
         let states = self.store.read_state()?;
         let versions = self.versions_for(id)?;
         let record = state_for_versions(id, &versions, states.get(id).cloned())?;
-        snapshot_from_versions(versions, record, &self.signature)
+        snapshot_from_versions(versions, record)
     }
 
     fn versions_for(&self, id: &ExtensionId) -> ExtensionResult<Vec<InstalledExtension>> {
@@ -889,14 +857,11 @@ impl ExtensionService {
         self.ui.clear();
         for (id, versions) in by_id {
             let record = state_for_versions(&id, &versions, states.get(&id).cloned())?;
-            // A disabled or merely installed package must not remain visible
-            // to the dynamic panel registry. Stopping a running extension
-            // transitions back to Enabled, so its declarative UI remains
-            // available while its WASM entrypoint is not executing.
-            if matches!(
-                record.state,
-                ExtensionState::Enabled | ExtensionState::Running
-            ) {
+            // UI 贡献只在 Running 可见（Phase 1 语义收紧）：Enabled 表示「已
+            // 启用但没有活实例/runner」，面板与 ui 资产随 stop/disable 一并
+            // 撤销，start 才重新发布。避免「看起来在跑、点进去没有能力」的
+            // 半启用态。
+            if record.state == ExtensionState::Running {
                 self.ui
                     .register(active_version(&versions, &record)?.manifest());
             }
@@ -1069,13 +1034,8 @@ fn active_version<'a>(
 fn snapshot_from_versions(
     versions: Vec<InstalledExtension>,
     record: ExtensionRecord,
-    signature: &SignatureVerifier,
 ) -> ExtensionResult<ExtensionSnapshot> {
     let active = active_version(&versions, &record)?;
-    let signature_info = signature.verify_installed(
-        active.root(),
-        &active.root().join(super::manifest::MANIFEST_FILE_NAME),
-    );
     Ok(ExtensionSnapshot {
         manifest: active.manifest().clone(),
         active_version: active.manifest().version().clone(),
@@ -1085,7 +1045,6 @@ fn snapshot_from_versions(
             .collect(),
         state: record.state,
         last_error: record.last_error,
-        signature: signature_info,
     })
 }
 
@@ -1366,7 +1325,7 @@ mod tests {
         let archive = zip_archive(&[
             (
                 "manifest.toml",
-                br#"manifest_version = 1
+                br#"manifest_version = 2
 id = "com.example.broken"
 version = "1.0.0"
 name = "Broken guest"

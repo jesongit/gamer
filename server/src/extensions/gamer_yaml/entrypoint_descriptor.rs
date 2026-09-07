@@ -13,11 +13,11 @@ use serde_json::{json, Map, Value};
 
 use crate::extensions::gamer_yaml::error::ScriptError;
 use crate::extensions::gamer_yaml::params::KEY_NAMES;
+use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
 use crate::extensions::gamer_yaml::task_params::{
     is_known_v3_type, normalize_v3_default_json, probe_v3_function_decls, probe_v3_script_decls,
     v3_param_signature, V3ParamDecl,
 };
-use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
 use crate::resources::PackageStore;
 
 /// 描述失败（经 `scheduler::EntrypointDescribeError` 透传到 API 边界）。
@@ -112,7 +112,9 @@ fn describe_function(
     let Some((pkg, file)) = base.split_once('/') else {
         return Err(DescribeError::invalid_diagnostic(
             "entrypoint.invalid",
-            format!("函数 entrypoint 缺少分区前缀：{entrypoint:?}（应为 <分区>/<文件>.yaml#<函数>）"),
+            format!(
+                "函数 entrypoint 缺少分区前缀：{entrypoint:?}（应为 <分区>/<文件>.yaml#<函数>）"
+            ),
         ));
     };
     let file = file
@@ -244,7 +246,8 @@ mod tests {
     }
 
     fn write(cfg: &Config, kind_dir: &str, name: &str, content: &str) {
-        let dir = cfg.data_dir
+        let dir = cfg
+            .data_dir
             .join("packages/com.test.app/plugins/gamer.yaml")
             .join(kind_dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -327,7 +330,12 @@ mod tests {
             other => panic!("expected invalid, got {:?}", other.is_ok()),
         }
         // 非 v3 存量脚本 → 版本门禁 invalid（v3-only，无 fallback）
-        write(&cfg, "automations", "legacy.yaml", "params: []\nsteps: []\n");
+        write(
+            &cfg,
+            "automations",
+            "legacy.yaml",
+            "params: []\nsteps: []\n",
+        );
         match describe_entrypoint(&scripts, "com.test.app/legacy.yaml") {
             Err(DescribeError::Invalid { diagnostics }) => {
                 assert!(

@@ -1,6 +1,6 @@
-manifest_version = 1
+manifest_version = 2
 id = "gamer.keymap"
-version = "1.0.0"
+version = "1.0.1"
 name = "键盘映射"
 description = "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键"
 entry = "plugin.wasm"
@@ -9,6 +9,10 @@ permissions = ["input.tap", "input.swipe", "input.key", "touch"]
 [host_api]
 input = "^1.0"
 touch = "^1.0"
+
+# 独立 WASM guest：真实 plugin.wasm，常驻实例模型（start 持有实例）。
+[execution]
+kind = "wasm"
 
 [[ui.contributions]]
 # runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端

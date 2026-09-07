@@ -480,14 +480,12 @@ mod wasmtime_runtime {
             // guest 无法寻址其他插件的 `plugins/<plugin>/` 前缀。
             let resource = service
                 .resolve(
-                    &ResourceId::new(namespace, self.extension_id.as_str(), name).map_err(
-                        |e| {
-                            Self::error(
-                                wit::gamer::host::types::HostErrorKind::InvalidRequest,
-                                e.to_string(),
-                            )
-                        },
-                    )?,
+                    &ResourceId::new(namespace, self.extension_id.as_str(), name).map_err(|e| {
+                        Self::error(
+                            wit::gamer::host::types::HostErrorKind::InvalidRequest,
+                            e.to_string(),
+                        )
+                    })?,
                 )
                 .await
                 .map_err(Self::capability_error)?;
@@ -981,7 +979,7 @@ mod tests {
 
     fn test_host() -> HostApi {
         let manifest = parse_manifest(
-            br#"manifest_version = 1
+            br#"manifest_version = 2
 id = "com.example.entry"
 version = "1.0.0"
 name = "Entry test"

@@ -10,8 +10,50 @@ use super::host_api::{HostApiDomain, HostApiRequirement};
 use super::model::{validate_display_name, ExtensionId, ExtensionPath, ExtensionVersion};
 use super::permissions::PermissionSet;
 
-pub(crate) const MANIFEST_VERSION: u32 = 1;
+pub(crate) const MANIFEST_VERSION: u32 = 2;
+/// 存量安装目录仍可能持有 v1 manifest（旧版本服务端安装的包）。读端（快照/
+/// 列表）容忍 v1（等价 wasm 执行类型），安装/更新端只接受 v2。
+pub(crate) const MANIFEST_VERSION_LEGACY: u32 = 1;
 pub(crate) const MANIFEST_FILE_NAME: &str = "manifest.toml";
+/// 约定俗成的 WASM entry 名。builtin 包不得携带该文件（防伪装执行类型）。
+pub(crate) const CONVENTIONAL_WASM_ENTRY: &str = "plugin.wasm";
+
+/// 后端执行类型（manifest v2 `[execution]`）。与 `ui.contributions.runtime`
+/// （界面渲染类型）严格分离：wasm/builtin 插件都可以带任意 runtime 的 UI。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ExecutionKind {
+    /// 携带真实 guest 字节（`entry` 必填，`\0asm` magic 校验）。
+    Wasm,
+    /// 宿主预置实现（无 guest、无常驻实例）；`builtin_id` 必须在服务端
+    /// BuiltinExtensionDescriptor 注册表中已注册。
+    Builtin,
+}
+
+/// `[execution]` 表的解析结果。`host_version` 是 advisory 兼容性声明
+/// （如 ">=0.6.0"），随 inspect/snapshot 透传前端展示，服务端暂不做硬门禁。
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub(crate) struct ExecutionSpec {
+    kind: ExecutionKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    builtin_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_version: Option<String>,
+}
+
+impl ExecutionSpec {
+    pub(crate) fn kind(&self) -> ExecutionKind {
+        self.kind
+    }
+
+    pub(crate) fn builtin_id(&self) -> Option<&str> {
+        self.builtin_id.as_deref()
+    }
+
+    pub(crate) fn host_version(&self) -> Option<&str> {
+        self.host_version.as_deref()
+    }
+}
 
 /// Parsed, immutable metadata for one installed extension version.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,7 +63,9 @@ pub(crate) struct ExtensionManifest {
     version: ExtensionVersion,
     name: String,
     description: Option<String>,
-    entry: ExtensionPath,
+    /// WASM entry；仅 `execution.kind = "wasm"` 时存在。
+    entry: Option<ExtensionPath>,
+    execution: ExecutionSpec,
     host_api: HostApiRequirements,
     permissions: PermissionSet,
     ui: Vec<UiContribution>,
@@ -48,8 +92,12 @@ impl ExtensionManifest {
         self.description.as_deref()
     }
 
-    pub(crate) fn entry(&self) -> &ExtensionPath {
-        &self.entry
+    pub(crate) fn entry(&self) -> Option<&ExtensionPath> {
+        self.entry.as_ref()
+    }
+
+    pub(crate) fn execution(&self) -> &ExecutionSpec {
+        &self.execution
     }
 
     pub(crate) fn host_api(&self) -> &HostApiRequirements {
@@ -341,13 +389,30 @@ struct RawManifest {
     name: String,
     #[serde(default)]
     description: Option<String>,
-    entry: String,
+    /// WASM entry；仅 wasm 执行类型必填（builtin 必须缺省）。
+    #[serde(default)]
+    entry: Option<String>,
+    #[serde(default)]
+    execution: Option<RawExecution>,
     #[serde(default)]
     host_api: RawHostApiRequirements,
     #[serde(default)]
     permissions: Vec<String>,
     #[serde(default)]
     ui: RawUi,
+}
+
+/// manifest v2 `[execution]` 表（可选；缺省按 `kind = "wasm"` 处理）。
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawExecution {
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    builtin_id: Option<String>,
+    /// advisory 兼容性声明（如 ">=0.6.0"）；服务端透传展示，不做硬门禁。
+    #[serde(default)]
+    host_version: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -439,6 +504,8 @@ struct RawHostApiRequirements {
     runtime: Option<String>,
     #[serde(default)]
     log: Option<String>,
+    #[serde(default)]
+    media: Option<String>,
 }
 
 impl RawHostApiRequirements {
@@ -452,6 +519,7 @@ impl RawHostApiRequirements {
             (HostApiDomain::Run, self.run),
             (HostApiDomain::Runtime, self.runtime),
             (HostApiDomain::Log, self.log),
+            (HostApiDomain::Media, self.media),
         ];
         let mut requirements = BTreeMap::new();
         for (domain, raw) in values {
@@ -468,14 +536,34 @@ impl RawHostApiRequirements {
     }
 }
 
+/// 严格解析（安装/更新/inspect 路径）：只接受当前 `MANIFEST_VERSION`（v2）。
 pub(crate) fn parse_manifest(bytes: &[u8]) -> ExtensionResult<ExtensionManifest> {
+    parse_manifest_with_versions(bytes, &[MANIFEST_VERSION])
+}
+
+/// 读端容忍解析（已安装版本目录扫描）：额外接受 v1 存量 manifest（等价 wasm
+/// 执行类型）。快照路径不因 manifest_version 升级而拒绝列出旧安装。
+pub(crate) fn parse_manifest_installed(bytes: &[u8]) -> ExtensionResult<ExtensionManifest> {
+    parse_manifest_with_versions(bytes, &[MANIFEST_VERSION, MANIFEST_VERSION_LEGACY])
+}
+
+fn parse_manifest_with_versions(
+    bytes: &[u8],
+    accepted_versions: &[u32],
+) -> ExtensionResult<ExtensionManifest> {
     let text = std::str::from_utf8(bytes)
         .map_err(|error| ExtensionError::InvalidManifest(format!("必须是 UTF-8: {error}")))?;
     let raw: RawManifest =
         toml::from_str(text).map_err(|error| ExtensionError::InvalidManifest(error.to_string()))?;
-    if raw.manifest_version != MANIFEST_VERSION {
+    if !accepted_versions.contains(&raw.manifest_version) {
+        if raw.manifest_version < MANIFEST_VERSION {
+            return Err(ExtensionError::InvalidManifest(format!(
+                "manifest_version={} 已不受支持，请升级插件包到 manifest_version={MANIFEST_VERSION}",
+                raw.manifest_version
+            )));
+        }
         return Err(ExtensionError::InvalidManifest(format!(
-            "manifest_version={} 不受支持，当前仅支持 {}",
+            "manifest_version={} 不受支持，当前仅支持 {}（需要升级 Gamer 宿主）",
             raw.manifest_version, MANIFEST_VERSION
         )));
     }
@@ -494,17 +582,7 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> ExtensionResult<ExtensionManifest>
         }
         None => None,
     };
-    let entry = ExtensionPath::parse(&raw.entry)?;
-    if !entry.as_str().to_ascii_lowercase().ends_with(".wasm") {
-        return Err(ExtensionError::InvalidManifest(
-            "entry 必须指向 .wasm 文件".to_string(),
-        ));
-    }
-    if entry.as_str() == MANIFEST_FILE_NAME {
-        return Err(ExtensionError::InvalidManifest(
-            "entry 不能指向 manifest.toml".to_string(),
-        ));
-    }
+    let (execution, entry) = build_execution(raw.execution.as_ref(), raw.entry.as_deref())?;
     let host_api = raw.host_api.into_requirements()?;
     let permissions = PermissionSet::parse(raw.permissions)?;
     let ui = raw
@@ -521,10 +599,113 @@ pub(crate) fn parse_manifest(bytes: &[u8]) -> ExtensionResult<ExtensionManifest>
         name,
         description,
         entry,
+        execution,
         host_api,
         permissions,
         ui,
     })
+}
+
+/// `[execution]`（可缺省）+ 顶层 `entry` → （执行类型规约, 已校验的 WASM entry）。
+///
+/// - 缺省 / `kind = "wasm"`：`entry` 必填、必须 `.wasm` 后缀且不指向 manifest。
+/// - `kind = "builtin"`：`entry` 必须缺省；`builtin_id` 必填（id 语法校验，
+///   注册存在性由服务层在安装时校验——manifest 层不认识注册表）。
+fn build_execution(
+    raw: Option<&RawExecution>,
+    entry: Option<&str>,
+) -> ExtensionResult<(ExecutionSpec, Option<ExtensionPath>)> {
+    let parse_entry = |entry: &str| -> ExtensionResult<ExtensionPath> {
+        let entry = ExtensionPath::parse(entry)?;
+        if !entry.as_str().to_ascii_lowercase().ends_with(".wasm") {
+            return Err(ExtensionError::InvalidManifest(
+                "entry 必须指向 .wasm 文件".to_string(),
+            ));
+        }
+        if entry.as_str() == MANIFEST_FILE_NAME {
+            return Err(ExtensionError::InvalidManifest(
+                "entry 不能指向 manifest.toml".to_string(),
+            ));
+        }
+        Ok(entry)
+    };
+    let host_version = match raw.and_then(|raw| raw.host_version.as_deref()) {
+        None => None,
+        Some(value) => {
+            if value.chars().any(char::is_control) {
+                return Err(ExtensionError::InvalidManifest(
+                    "execution.host_version 不能包含控制字符".to_string(),
+                ));
+            }
+            let value = value.trim();
+            if value.len() > 128 {
+                return Err(ExtensionError::InvalidManifest(
+                    "execution.host_version 超过 128 字符上限".to_string(),
+                ));
+            }
+            (!value.is_empty()).then(|| value.to_string())
+        }
+    };
+    let kind = match raw.and_then(|raw| raw.kind.as_deref()) {
+        None | Some("wasm") => {
+            let entry_text = entry.ok_or_else(|| {
+                ExtensionError::InvalidManifest(
+                    "wasm 执行类型需要 entry（指向包内 .wasm 文件）".to_string(),
+                )
+            })?;
+            let parsed_entry = parse_entry(entry_text)?;
+            if let Some(raw) = raw {
+                if raw.builtin_id.is_some() {
+                    return Err(ExtensionError::InvalidManifest(
+                        "wasm 执行类型不能声明 builtin_id".to_string(),
+                    ));
+                }
+            }
+            (
+                ExecutionSpec {
+                    kind: ExecutionKind::Wasm,
+                    builtin_id: None,
+                    host_version,
+                },
+                Some(parsed_entry),
+            )
+        }
+        Some("builtin") => {
+            if entry.is_some() {
+                return Err(ExtensionError::InvalidManifest(
+                    "builtin 执行类型的 entry 必须缺省（宿主预置实现不携带 guest 字节）"
+                        .to_string(),
+                ));
+            }
+            let builtin_id = raw
+                .and_then(|raw| raw.builtin_id.as_deref())
+                .ok_or_else(|| {
+                    ExtensionError::InvalidManifest(
+                        "builtin 执行类型需要 builtin_id（宿主注册表中的实现 id）".to_string(),
+                    )
+                })?;
+            let builtin_id = ExtensionId::parse(builtin_id)
+                .map_err(|error| {
+                    ExtensionError::InvalidManifest(format!("builtin_id 无效: {error}"))
+                })?
+                .as_str()
+                .to_string();
+            (
+                ExecutionSpec {
+                    kind: ExecutionKind::Builtin,
+                    builtin_id: Some(builtin_id),
+                    host_version,
+                },
+                None,
+            )
+        }
+        Some(other) => {
+            return Err(ExtensionError::InvalidManifest(format!(
+                "execution.kind 不受支持: {other}"
+            )));
+        }
+    };
+    Ok(kind)
 }
 
 fn parse_ui_contribution(raw: RawUiContribution) -> ExtensionResult<UiContribution> {
@@ -902,9 +1083,94 @@ mod tests {
 
     fn manifest_with_ui(ui: &str) -> Vec<u8> {
         format!(
-            "manifest_version = 1\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\n{ui}"
+            "manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"Test extension\"\nentry = \"plugin.wasm\"\n{ui}"
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn execution_defaults_to_wasm_and_requires_entry() {
+        let manifest = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n";
+        let parsed = parse_manifest(manifest).unwrap();
+        assert_eq!(parsed.manifest_version(), MANIFEST_VERSION);
+        assert_eq!(parsed.execution().kind(), ExecutionKind::Wasm);
+        assert!(parsed.execution().builtin_id().is_none());
+        assert_eq!(
+            parsed.entry().map(|entry| entry.as_str()),
+            Some("plugin.wasm")
+        );
+
+        // 缺 entry（且无 [execution]）= 缺省 wasm 却没有 guest 字节 → 拒绝
+        let missing = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\n";
+        assert!(parse_manifest(missing).is_err());
+    }
+
+    #[test]
+    fn builtin_execution_requires_builtin_id_and_rejects_entry() {
+        let base = |body: &str| -> Vec<u8> { body.as_bytes().to_vec() };
+        let valid = base(
+            "manifest_version = 2\nid = \"gamer.video\"\nversion = \"1.0.0\"\nname = \"V\"\n\
+             [execution]\nkind = \"builtin\"\nbuiltin_id = \"gamer.video\"\n",
+        );
+        let parsed = parse_manifest(&valid).unwrap();
+        assert_eq!(parsed.execution().kind(), ExecutionKind::Builtin);
+        assert_eq!(parsed.execution().builtin_id(), Some("gamer.video"));
+        assert!(parsed.entry().is_none());
+
+        // 缺 builtin_id
+        let no_id = base(
+            "manifest_version = 2\nid = \"gamer.video\"\nversion = \"1.0.0\"\nname = \"V\"\n\
+             [execution]\nkind = \"builtin\"\n",
+        );
+        assert!(parse_manifest(&no_id).is_err());
+        // builtin 带 entry（伪装 guest）
+        let with_entry = base(
+            "manifest_version = 2\nid = \"gamer.video\"\nversion = \"1.0.0\"\nname = \"V\"\nentry = \"plugin.wasm\"\n\
+             [execution]\nkind = \"builtin\"\nbuiltin_id = \"gamer.video\"\n",
+        );
+        assert!(parse_manifest(&with_entry).is_err());
+        // wasm 声明 builtin_id（伪装内置）
+        let wasm_with_builtin = base(
+            "manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n\
+             [execution]\nkind = \"wasm\"\nbuiltin_id = \"gamer.video\"\n",
+        );
+        assert!(parse_manifest(&wasm_with_builtin).is_err());
+        // 未知 kind
+        let unknown_kind = base(
+            "manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n\
+             [execution]\nkind = \"native\"\n",
+        );
+        assert!(parse_manifest(&unknown_kind).is_err());
+    }
+
+    #[test]
+    fn host_version_is_advisory_passthrough_and_media_host_api_domain_parses() {
+        let manifest = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n\
+             [execution]\nkind = \"wasm\"\nhost_version = \">=0.1.1\"\n\
+             [host_api]\nmedia = \"^1.0\"\n";
+        let parsed = parse_manifest(manifest).unwrap();
+        assert_eq!(parsed.execution().host_version(), Some(">=0.1.1"));
+        assert!(parsed.host_api().get(HostApiDomain::Media).is_some());
+
+        // 无效域版本要求仍然拒绝（media 与其他域同语义）
+        let bad = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n\
+             [host_api]\nmedia = \"not-a-version\"\n";
+        assert!(parse_manifest(bad).is_err());
+    }
+
+    #[test]
+    fn manifest_v1_is_rejected_by_strict_parse_and_accepted_by_installed_parse() {
+        let legacy = b"manifest_version = 1\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n";
+        assert!(parse_manifest(legacy).is_err());
+        let installed = parse_manifest_installed(legacy).unwrap();
+        assert_eq!(installed.manifest_version(), MANIFEST_VERSION_LEGACY);
+        assert_eq!(installed.execution().kind(), ExecutionKind::Wasm);
+
+        // 未来版本两端都拒绝（提示升级宿主）
+        let future =
+            b"manifest_version = 3\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n";
+        assert!(parse_manifest(future).is_err());
+        assert!(parse_manifest_installed(future).is_err());
     }
 
     fn parse_ui(ui: &str) -> ExtensionResult<UiContribution> {

@@ -19,8 +19,8 @@ use crate::extensions::gamer_yaml::error::{codes, diagnostics_from_vnext, Script
 use crate::extensions::gamer_yaml::params::{
     coord_in_range, fmt_num, is_valid_color, is_valid_key, parse_time_ms, unescape_double_quoted,
 };
-use crate::extensions::gamer_yaml::run_target::{BoundEntryArgs, RunTarget, TypedValue};
 use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
+use crate::extensions::gamer_yaml::run_target::{BoundEntryArgs, RunTarget, TypedValue};
 use crate::resources::PackageStore;
 
 /// 签名门禁失败的机器可读原因（依赖缺失/参数过期的细分信号）。
@@ -98,9 +98,7 @@ pub fn gate_task(
     match script_entry(scripts, script_id) {
         Ok(Some(_)) => {}
         Ok(None) => return Err(GateError::ScriptMissing),
-        Err(error) => {
-            return Err(GateError::ScriptInvalid(read_failed(error, script_id)))
-        }
+        Err(error) => return Err(GateError::ScriptInvalid(read_failed(error, script_id))),
     }
     let decls = probe_v3_script_decls(scripts, script_id).map_err(GateError::ScriptInvalid)?;
     let current = v3_param_signature(&decls);
@@ -112,7 +110,8 @@ pub fn gate_task(
             });
         }
     }
-    let overrides = rebind_v3_snapshot(&decls, args, script_id).map_err(GateError::ScriptInvalid)?;
+    let overrides =
+        rebind_v3_snapshot(&decls, args, script_id).map_err(GateError::ScriptInvalid)?;
     Ok(TaskArgs {
         signature: current,
         names: decls.iter().map(|d| d.name.clone()).collect(),
@@ -185,7 +184,9 @@ pub(crate) fn v3_decls_from_program(
 
 /// `yaml_vnext::Value` → 无标签 JSON（serde 序列化是 `{"type","value"}` wire
 /// 形态，签名/绑定/表单默认值都消费普通 JSON）。
-fn v3_value_to_plain_json(value: &crate::extensions::gamer_yaml::yaml_vnext::Value) -> serde_json::Value {
+fn v3_value_to_plain_json(
+    value: &crate::extensions::gamer_yaml::yaml_vnext::Value,
+) -> serde_json::Value {
     use crate::extensions::gamer_yaml::yaml_vnext::Value as V;
     match value {
         V::Null => serde_json::Value::Null,
@@ -408,10 +409,7 @@ pub(crate) fn normalize_v3_default_json(ty: &str, value: &serde_json::Value) -> 
                 .unwrap_or_else(|| value.clone()),
             "coord" => parse_coord_string(raw)
                 .map(|[x, y]| {
-                    serde_json::Value::Array(vec![
-                        serde_json::json!(x),
-                        serde_json::json!(y),
-                    ])
+                    serde_json::Value::Array(vec![serde_json::json!(x), serde_json::json!(y)])
                 })
                 .unwrap_or_else(|| value.clone()),
             _ => value.clone(),
@@ -719,7 +717,8 @@ steps:
     }
 
     fn write_script(cfg: &Config, name: &str, content: &str) {
-        let dir = cfg.data_dir
+        let dir = cfg
+            .data_dir
             .join("packages/com.test.app/plugins/gamer.yaml")
             .join("automations");
         std::fs::create_dir_all(&dir).unwrap();
@@ -727,7 +726,8 @@ steps:
     }
 
     fn write_function(cfg: &Config, name: &str, content: &str) {
-        let dir = cfg.data_dir
+        let dir = cfg
+            .data_dir
             .join("packages/com.test.app/plugins/gamer.yaml")
             .join("functions");
         std::fs::create_dir_all(&dir).unwrap();
@@ -879,9 +879,9 @@ steps:
             let args: serde_json::Value =
                 serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
             match gate_task(&scripts, "com.test.app/daily.yaml", &args, Some(&signature)) {
-                Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|diag| {
-                    diag.code == codes::PARAM_ARGS_TYPE_MISMATCH
-                })),
+                Err(GateError::ScriptInvalid(diags)) => assert!(diags
+                    .iter()
+                    .any(|diag| { diag.code == codes::PARAM_ARGS_TYPE_MISMATCH })),
                 other => panic!("expected invalid snapshot, got {:?}", other.is_ok()),
             }
         }
@@ -918,7 +918,12 @@ steps:
             Err(diags) => assert!(diags.iter().any(|d| d.code == "yaml.v3.steps.missing")),
             other => panic!("expected invalid, got {:?}", other.is_ok()),
         }
-        match gate_task(&scripts, "com.test.app/legacy.yaml", &serde_json::json!({}), None) {
+        match gate_task(
+            &scripts,
+            "com.test.app/legacy.yaml",
+            &serde_json::json!({}),
+            None,
+        ) {
             Err(GateError::ScriptInvalid(diags)) => assert!(
                 diags.iter().any(|d| d.code == codes::VERSION_UNSUPPORTED),
                 "v2 形态必须报版本门禁错误: {diags:?}"
@@ -970,14 +975,20 @@ steps:
         );
         let decls = v3_script_decls_in_memory(V3_MIXED);
         let signature = v3_param_signature(&decls);
-        assert_eq!(signature, "psig1|int,count,0,3|string,mode,0,auto|text,secret,1,");
+        assert_eq!(
+            signature,
+            "psig1|int,count,0,3|string,mode,0,auto|text,secret,1,"
+        );
         // 类型/默认值变化必须改变签名（过期门禁的判定基础）
         let changed = v3_script_decls_in_memory(
             "version: 3\nparams:\n  - 'int:count:次数:4'\n  - name: mode\n    type: string\n    default: auto\n  - 'text:secret:密文'\nsteps:\n  - log: ok\n",
         );
         assert_ne!(signature, v3_param_signature(&changed));
         // 映射形态的 v3 声明经 roundtrip 保持稳定
-        assert_eq!(signature, v3_param_signature(&v3_script_decls_in_memory(V3_MIXED)));
+        assert_eq!(
+            signature,
+            v3_param_signature(&v3_script_decls_in_memory(V3_MIXED))
+        );
     }
 
     #[tokio::test]
@@ -995,8 +1006,13 @@ steps:
         .unwrap();
         // 带 psig1 的旧快照走签名门禁：一致 → 通过；不一致 → 409 语义
         let snapshot = serde_json::json!({"count": 7, "mode": "manual", "secret": "v"});
-        let gate = gate_task(&scripts, "com.test.app/v3daily.yaml", &snapshot, Some(&first.signature))
-            .unwrap_or_else(|e| panic!("matching signature must pass: {e:?}"));
+        let gate = gate_task(
+            &scripts,
+            "com.test.app/v3daily.yaml",
+            &snapshot,
+            Some(&first.signature),
+        )
+        .unwrap_or_else(|e| panic!("matching signature must pass: {e:?}"));
         assert_eq!(first.signature, gate.signature);
         let map: std::collections::HashMap<String, TypedValue> =
             gate.overrides.into_iter().collect();
@@ -1025,9 +1041,15 @@ steps:
         write_script(&cfg, "v3req.yaml", V3_MIXED);
         let scripts = std::sync::Arc::new(PackageStore::open(&cfg).unwrap());
         // 空快照：必填 secret 缺失（默认值参数不受影响）
-        match gate_task(&scripts, "com.test.app/v3req.yaml", &serde_json::json!({}), None) {
-            Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|d| d.code
-                == codes::PARAM_ARGS_MISSING_REQUIRED)),
+        match gate_task(
+            &scripts,
+            "com.test.app/v3req.yaml",
+            &serde_json::json!({}),
+            None,
+        ) {
+            Err(GateError::ScriptInvalid(diags)) => assert!(diags
+                .iter()
+                .any(|d| d.code == codes::PARAM_ARGS_MISSING_REQUIRED)),
             other => panic!("expected missing required, got {:?}", other.is_ok()),
         }
         // 快照必须是 JSON 对象
@@ -1037,8 +1059,9 @@ steps:
             &serde_json::Value::Null,
             None,
         ) {
-            Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|d| d.code
-                == codes::PARAM_ARGS_TYPE_MISMATCH)),
+            Err(GateError::ScriptInvalid(diags)) => assert!(diags
+                .iter()
+                .any(|d| d.code == codes::PARAM_ARGS_TYPE_MISMATCH)),
             other => panic!("expected type mismatch, got {:?}", other.is_ok()),
         }
         // 类型不符：count 非数值
@@ -1048,13 +1071,19 @@ steps:
             &serde_json::json!({"count": "abc", "secret": "v"}),
             None,
         ) {
-            Err(GateError::ScriptInvalid(diags)) => assert!(diags.iter().any(|d| d.code
-                == codes::PARAM_ARGS_TYPE_MISMATCH)),
+            Err(GateError::ScriptInvalid(diags)) => assert!(diags
+                .iter()
+                .any(|d| d.code == codes::PARAM_ARGS_TYPE_MISMATCH)),
             other => panic!("expected type mismatch, got {:?}", other.is_ok()),
         }
         // v3 语法坏源：诊断保留 yaml.v3.* 码
         write_script(&cfg, "v3broken.yaml", "version: 3\nparams: []\n");
-        match gate_task(&scripts, "com.test.app/v3broken.yaml", &serde_json::json!({}), None) {
+        match gate_task(
+            &scripts,
+            "com.test.app/v3broken.yaml",
+            &serde_json::json!({}),
+            None,
+        ) {
             Err(GateError::ScriptInvalid(diags)) => {
                 assert!(diags.iter().any(|d| d.code == "yaml.v3.steps.missing"))
             }
@@ -1115,17 +1144,15 @@ steps:
         args.insert("ghost".into(), serde_json::json!(1));
         args.insert("secret".into(), serde_json::json!("v"));
         let err = bind_v3_manual_args(&decls, &args, "t").unwrap_err();
-        assert!(
-            err.iter()
-                .any(|e| e.code == codes::PARAM_ARGS_UNKNOWN)
-        );
+        assert!(err.iter().any(|e| e.code == codes::PARAM_ARGS_UNKNOWN));
         // 类型不符
         let mut args = serde_json::Map::new();
         args.insert("count".into(), serde_json::json!(true));
         args.insert("secret".into(), serde_json::json!("v"));
         let err = bind_v3_manual_args(&decls, &args, "t").unwrap_err();
-        assert!(err.iter().any(|e| e.code == codes::PARAM_ARGS_TYPE_MISMATCH
-            && e.step_path_str() == "args.count"));
+        assert!(err.iter().any(
+            |e| e.code == codes::PARAM_ARGS_TYPE_MISMATCH && e.step_path_str() == "args.count"
+        ));
         // 缺必填
         let args = serde_json::Map::new();
         let err = bind_v3_manual_args(&decls, &args, "t").unwrap_err();
