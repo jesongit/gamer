@@ -286,3 +286,5 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **promise 型 API 的参数校验必须发生在 async 函数体内**：箭头函数体里同步调 `requireId` 类校验会在调用点同步 throw，`await expect().rejects` 捕不到、测试假绿或假红。
 - **`<img>` 同 src 重复赋值不会重新触发 load**：busy 态由 img 事件驱动时，同 URL 重复点击要显式 no-op、切换素材/清空要显式复位，否则 busy 卡死。
 - **YAML v3 `key` 步骤只接受字符串 keycode**（命名键或数字字符串如 `key: "1234"`）：整数形态运行时报「key 必须是按键名字符串」——草稿生成与手写脚本同源注意（词表见 `yaml_extension.rs::key_code`）。
+- **内存墙的假错还有「元数据失效」形态，别误判成工具链/target 损坏去 `cargo clean`**：`only metadata stub found for rlib dependency core/object`、`cannot resolve a prelude import`、`cannot find Option/Ok/Some`（shlex/syn 等无辜 crate 报 core 相关错）与 ICE 同根源——并发 rustc 撞提交内存（commit）上限，挂掉的进程留下半截 rmeta 连累下游，每轮崩点不同、看似随机；本机曾因此误清健康的 target 增量缓存。处理同上：`CARGO_PROFILE_DEV_DEBUG=0` + 降 `-j` 重跑，cargo 增量渐进恢复；判据是单独 `rustc` 编译小文件全绿、`cargo check` 全新最小项目也绿。
+- **cmd 里 `set X=0 && 下一条` 会把尾随空格赋进变量**：`CARGO_PROFILE_DEV_DEBUG=0 `（带空格）让 cargo 直接报 `error in environment variable ... could not load config key profile.dev.debug` 假失败（与构建无关）；写作 `set "X=0"` 引号形式。
