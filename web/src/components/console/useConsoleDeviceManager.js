@@ -500,6 +500,40 @@ export function useConsoleDeviceManager({
     toast(`正在停止 ${androidPkg}…`, 'info')
   }
 
+  // ---------- 「更多」菜单：安装本地 APK ----------
+
+  const apkInstalling = ref(false)
+
+  /** 安装本地 APK：文件选择器挑 .apk → 原始字节直传服务端（服务端 adb install -r）。
+   *  大包上传 + 安装耗时较长，期间 apkInstalling 置位防重复；安装会改变应用列表，
+   *  成功后失效该设备的应用列表缓存（下次「读取」强制重拉）。 */
+  function installApk() {
+    const d = current.value
+    if (!d) return toast('请先选择设备', 'warn')
+    if (apkInstalling.value) return
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = '.apk,application/vnd.android.package-archive'
+    input.onchange = async () => {
+      const file = input.files && input.files[0]
+      input.value = ''
+      if (!file) return
+      if (!/\.apk$/i.test(file.name)) return toast('请选择 .apk 安装包', 'warn')
+      apkInstalling.value = true
+      toast(`正在安装 ${file.name}（上传 + 安装，大包需等待）…`, 'info')
+      try {
+        await api.installApk(d.id, file)
+        appCache.delete(appCacheKey())
+        toast(`已安装 ${file.name}，「读取」可刷新应用列表`, 'success')
+      } catch (e) {
+        toast('安装失败：' + e.message, 'error')
+      } finally {
+        apkInstalling.value = false
+      }
+    }
+    input.click()
+  }
+
   // 设备选择持久化：刷新后自动恢复选中设备（运行态/画面恢复的前提）
   watch(() => store.deviceId, id => {
     if (id) localStorage.setItem('gb_device_id', id)
@@ -522,6 +556,7 @@ export function useConsoleDeviceManager({
     // 工具条快捷动作与下拉菜单（更多/功能）
     key, toolbarMenuOpen, toolbarMenuStyle,
     closeToolbarMenu, toggleToolbarMenu, shot, rotate, clipboard, launchGame, stopGame,
+    apkInstalling, installApk,
     // 上下文对象
     deviceSettingsContext,
   }

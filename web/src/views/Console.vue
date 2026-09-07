@@ -30,7 +30,7 @@
               :class="{ active: toolbarMenuOpen === 'device' }"
               aria-haspopup="menu"
               :aria-expanded="toolbarMenuOpen === 'device'"
-              title="新增 / 设置 / 删除设备"
+              title="新增 / 设置 / 安装应用 / 删除设备"
               @click.stop="toggleToolbarMenu('device', $event)"
             >更多 ▾</button>
           </div>
@@ -104,6 +104,7 @@
         <div v-if="toolbarMenuOpen === 'device'" class="tb-more-dropdown tb-more-dropdown-sm tb-more-dropdown-fixed" :style="toolbarMenuStyle" role="menu">
           <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); startAdd()">＋ 新增设备</button>
           <button class="tb-more-item" role="menuitem" :disabled="!current" @click="closeToolbarMenu(); openSettings()">⚙️ 设备设置</button>
+          <button class="tb-more-item" role="menuitem" :disabled="!current || apkInstalling" :title="apkInstalling ? '正在上传并安装 APK…' : '选择本地 .apk 安装包安装到当前设备'" @click="closeToolbarMenu(); installApk()">📦 安装应用</button>
           <button class="tb-more-item tb-more-item-danger" role="menuitem" :disabled="!current" @click="closeToolbarMenu(); removeDevice()">🗑 删除设备</button>
         </div>
         <div v-if="toolbarMenuOpen === 'actions'" class="tb-more-dropdown tb-more-dropdown-fixed" :style="toolbarMenuStyle" role="menu">
@@ -351,6 +352,7 @@ const {
   appSelectSaving, onAppSelect, appLoading, pkgOptions, packageOptionLabel,
   key, toolbarMenuOpen, toolbarMenuStyle,
   closeToolbarMenu, toggleToolbarMenu, shot, rotate, clipboard, launchGame, stopGame,
+  apkInstalling, installApk,
   deviceSettingsContext,
 } = useConsoleDeviceManager({
   toast,

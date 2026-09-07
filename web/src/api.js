@@ -297,6 +297,17 @@ export const api = {
   control: (id, cmd) => req('POST', `/api/devices/${id}/control`, cmd),
   listApps: (id) => req('GET', `/api/devices/${id}/apps`),
   listAppsByAddr: (addr) => req('GET', `/api/apps?addr=${encodeURIComponent(addr)}`),
+  // 安装本地 APK：raw 字节直传（服务端组限额 1GiB，临时文件后 adb install -r）；
+  // filename 供服务端做扩展名校验与日志
+  installApk: async (id, file) => {
+    const r = await response(
+      'POST',
+      `/api/devices/${encodeURIComponent(requireId(id, 'device_id'))}/install-apk?filename=${encodeURIComponent(file.name)}`,
+      file,
+      { rawBody: true, headers: { 'Content-Type': 'application/vnd.android.package-archive' } },
+    )
+    return readResult(r)
+  },
 
   // ---- 媒体库（视频工作台 V1，实施合同 §1；素材寻址一律 media id）----
   // 列表：{"media":[MediaMetadata]}（创建时间倒序）→ 解包数组

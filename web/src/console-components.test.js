@@ -64,11 +64,13 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar).toContain("toggleToolbarMenu('device'")
     expect(toolbar).toContain("toggleToolbarMenu('actions'")
     expect((toolbar.match(/class="tb-row/g) || [])).toHaveLength(1)
-    // 设备「更多」下拉：新增/设置/删除；投屏「功能」下拉：按键与画面辅助动作
+    // 设备「更多」下拉：新增/设置/安装应用（本地 APK）/删除；投屏「功能」下拉：按键与画面辅助动作
     const teleport = toolbar.slice(toolbar.indexOf('<Teleport'))
     const deviceMenu = teleport.slice(teleport.indexOf(`v-if="toolbarMenuOpen === 'device'"`), teleport.indexOf(`v-if="toolbarMenuOpen === 'actions'"`))
     expect(deviceMenu).toContain('startAdd')
     expect(deviceMenu).toContain('openSettings')
+    expect(deviceMenu).toContain('installApk()')
+    expect(deviceMenu).toContain('📦 安装应用')
     expect(deviceMenu).toContain('removeDevice')
     expect(deviceMenu).toContain('⚙️ 设备设置')
     const actionsMenu = teleport.slice(teleport.indexOf(`v-if="toolbarMenuOpen === 'actions'"`))
@@ -94,6 +96,9 @@ describe('Console 视觉组件拆分静态回归', () => {
     // 停止应用：DataChannel webrtc/mod.rs 与 REST parse_ctl 均已暴露 stop_app
     //（am force-stop，仅无前缀安全包名），收进「功能」下拉，与启动同为设备区操作
     expect(consoleImpl).toContain("sendControl({ type: 'stop_app', app: androidPkg })")
+    // 安装应用（更多菜单）：文件选择器挑 .apk → api.installApk 直传服务端 adb install
+    expect(consoleImpl).toContain('async function loadApps({ silent = false, force = false } = {})')
+    expect(consoleImpl).toContain('api.installApk(d.id, file)')
     const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('ConsoleVideoStage'))
     const launchIdx = toolbar.indexOf('🚀 启动')
     const stopIdx = toolbar.indexOf('⏹ 停止应用')
