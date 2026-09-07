@@ -127,7 +127,7 @@ pub(super) async fn api_start_extension(
                 .map(|package| package.as_str().to_string());
             let Some(package_id) = package_id else {
                 return ApiError::bad_request(
-                    "keymap profile 启动必须携带 app_context.content_package（Package ID）指定数据上下文",
+                    "keymap profile 启动必须携带 app_context.content_package（配置 ID）指定数据上下文",
                 )
                 .into_response();
             };

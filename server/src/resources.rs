@@ -506,7 +506,7 @@ pub struct PluginStats {
 
 /// 包不存在（HTTP 404 语义）。
 #[derive(Debug, thiserror::Error)]
-#[error("Package 不存在: {0}")]
+#[error("配置不存在: {0}")]
 pub struct PackageNotFound(pub String);
 
 /// Core Package 本地包存储。见模块级文档。
@@ -576,7 +576,7 @@ impl PackageStore {
         let dir = self.package_dir(&manifest.id)?;
         anyhow::ensure!(
             !dir.exists(),
-            "Package 已存在: {}",
+            "配置已存在: {}",
             manifest.id
         );
         std::fs::create_dir_all(dir.join("shared"))?;
@@ -678,7 +678,7 @@ impl PackageStore {
             return Ok(false);
         }
         std::fs::remove_dir_all(&dir)
-            .map_err(|e| anyhow::anyhow!("删除 Package 失败: {} ({})", e, dir.display()))?;
+            .map_err(|e| anyhow::anyhow!("删除配置失败: {} ({})", e, dir.display()))?;
         Ok(true)
     }
 
@@ -687,7 +687,7 @@ impl PackageStore {
         validate_scope_id("package id", new_id)?;
         let source = self.manifest(src)?;
         let target_dir = self.package_dir(new_id)?;
-        anyhow::ensure!(!target_dir.exists(), "Package 已存在: {new_id}");
+        anyhow::ensure!(!target_dir.exists(), "配置已存在: {new_id}");
         let manifest = PackageManifest {
             id: new_id.to_string(),
             revision: 1,
@@ -706,7 +706,7 @@ impl PackageStore {
         let dir = self.package_dir(pkg)?;
         anyhow::ensure!(
             dir.is_dir(),
-            "Package 不存在: {pkg}"
+            "配置不存在: {pkg}"
         );
         let mut stats = PackageStats {
             files: 0,

@@ -1391,7 +1391,7 @@ impl PackageKeymapSource {
             || !(file.ends_with(".yaml") || file.ends_with(".yml"))
         {
             return Err(ExtensionError::Runtime(format!(
-                "keymap 文件名必须是当前 Package 的 YAML 短名: {file}"
+                "keymap 文件名必须是当前配置的 YAML 短名: {file}"
             )));
         }
         let path = format!("{KEYMAP_PROFILE_PREFIX}{file}");

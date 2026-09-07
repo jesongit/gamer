@@ -72,7 +72,7 @@ pub(super) async fn api_dispatch_run(
     };
     let Ok(content) = AppPackageId::new(&content_package) else {
         return ApiError::bad_request(format!(
-            "Package id 非法（只允许字母数字 . _ -）: {content_package}"
+            "配置 id 非法（只允许字母数字 . _ -）: {content_package}"
         ))
         .into_response();
     };
@@ -92,7 +92,7 @@ pub(super) async fn api_dispatch_run(
         .map(str::to_string);
     let Some(android_package) = android_package else {
         return ApiError::bad_request(format!(
-            "设备 {} 未配置 Android 应用包名（pkg）：app.start 的缺省目标来自设备配置，与资源 Package 相互独立",
+            "设备 {} 未配置 Android 应用包名（pkg）：app.start 的缺省目标来自设备配置，与资源所属配置相互独立",
             req.device_id
         ))
         .into_response();

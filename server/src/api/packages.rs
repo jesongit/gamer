@@ -358,7 +358,7 @@ pub(super) async fn api_delete_package(
     .await;
     match deleted {
         Ok(true) => {}
-        Ok(false) => return ApiError::not_found(format!("Package 不存在: {pkg}")).into_response(),
+        Ok(false) => return ApiError::not_found(format!("配置不存在: {pkg}")).into_response(),
         Err(e) => return e.into_response(),
     }
     // 旧 App Package 卸载语义的延续：删除包后，绑定该包的任务挂起（幂等、
@@ -668,7 +668,7 @@ pub(super) async fn api_import_package(
     body: Bytes,
 ) -> Response {
     if body.is_empty() {
-        return ApiError::bad_request("Package 归档不能为空").into_response();
+        return ApiError::bad_request("配置归档不能为空").into_response();
     }
     let overwrite = raw
         .as_deref()
@@ -724,7 +724,7 @@ pub(super) async fn api_import_package(
                 return Ok(ImportOutcome::Conflict(json!({
                     "error": "package_exists",
                     "message": format!(
-                        "Package 已存在: {}。继续导入将覆盖该 Package 当前数据（含直接修改或新增的内容），确认后带 ?overwrite=true 重试",
+                        "配置已存在: {}。继续导入将覆盖该配置当前数据（含直接修改或新增的内容），确认后带 ?overwrite=true 重试",
                         manifest.id
                     ),
                     "existing": existing,
@@ -736,17 +736,17 @@ pub(super) async fn api_import_package(
                 .join(uuid::Uuid::new_v4().simple().to_string());
             if let Err(error) = std::fs::rename(&final_dir, &trash) {
                 let _ = std::fs::remove_dir_all(&staging);
-                return Err(ApiError::internal(format!("Package 替换失败: {error}")));
+                return Err(ApiError::internal(format!("配置替换失败: {error}")));
             }
             if let Err(error) = std::fs::rename(&staging, &final_dir) {
                 let _ = std::fs::rename(&trash, &final_dir);
                 let _ = std::fs::remove_dir_all(&staging);
-                return Err(ApiError::internal(format!("Package 替换失败: {error}")));
+                return Err(ApiError::internal(format!("配置替换失败: {error}")));
             }
             let _ = std::fs::remove_dir_all(&trash);
         } else if let Err(error) = std::fs::rename(&staging, &final_dir) {
             let _ = std::fs::remove_dir_all(&staging);
-            return Err(ApiError::internal(format!("Package 安装失败: {error}")));
+            return Err(ApiError::internal(format!("配置安装失败: {error}")));
         }
         // 4) 发布包内预设（plugins/*/presets/*.yaml，幂等）
         publish_package_presets(&store, st.db.clone(), &manifest.id).map_err(internal)?;
@@ -998,9 +998,7 @@ fn write_error(e: anyhow::Error) -> ApiError {
         ApiError::conflict(message)
     } else if message.contains("不存在") {
         ApiError::not_found(message)
-    } else if message.contains("已存在")
-        || message.contains("Package 已存在")
-    {
+    } else if message.contains("已存在") {
         ApiError::conflict(message)
     } else if message.contains("非法")
         || message.contains("不能")

@@ -40,7 +40,7 @@ pub enum ArchiveError {
     Invalid(String),
     #[error("package.toml 非法: {0}")]
     Manifest(String),
-    #[error("Package 不存在: {0}")]
+    #[error("配置不存在: {0}")]
     NotFound(String),
     #[error("IO 错误: {0}")]
     Io(#[from] io::Error),

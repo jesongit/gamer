@@ -35,7 +35,7 @@ pub(super) async fn api_vision_test_template(
 ) -> Response {
     let pkg = req.pkg.trim().to_string();
     if pkg.is_empty() {
-        return ApiError::bad_request("pkg 非法（Package id 不能为空）").into_response();
+        return ApiError::bad_request("pkg 非法（配置 id 不能为空）").into_response();
     }
     let plugin = req.plugin.trim().to_string();
     if plugin.is_empty() {

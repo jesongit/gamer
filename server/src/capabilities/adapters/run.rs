@@ -95,7 +95,7 @@ impl RunAdapter {
             .filter(|pkg| !pkg.is_empty())
             .ok_or_else(|| {
                 CapabilityError::InvalidRequest(format!(
-                    "设备 {device_id_str} 未配置 Android 应用包名（pkg）：app.start 的缺省目标来自设备配置，与资源 Package 相互独立"
+                    "设备 {device_id_str} 未配置 Android 应用包名（pkg）：app.start 的缺省目标来自设备配置，与资源所属配置相互独立"
                 ))
             })?;
         let android = AndroidPackageName::new(pkg)
