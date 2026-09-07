@@ -1,5 +1,11 @@
+# gamer.keymap 官方产品 guest（ADR-12/13 扩展生态）：映射引擎全在 guest，
+# host 只做授权、能力执行与 profile 通道。由两端消费：
+#   - tools/build-plugins.ps1 打包 gamer.keymap-<ver>.gplugin（官方市场）
+#   - keymap/mod.rs 测试链路现场构建（install/start/dispatch 真实组件验收）
+# 本 crate 独立于 server workspace，不随 server 编译；wit 路径相对本目录
+# （../../wit/keymap → server/wit/keymap），ABI 变更须重打官方插件包。
 [package]
-name = "gamer-keymap-fixture"
+name = "gamer-keymap-guest"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,6 +15,6 @@ crate-type = ["cdylib"]
 [dependencies]
 wit-bindgen = "0.57.1"
 wit-component = "0.254.0"
-# profile 消费：keymap YAML（schema 同 data/<pkg>/keymap）在 guest 内解析
+# profile 消费：keymap YAML（schema 同 mappings/*.yaml）在 guest 内解析
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

@@ -33,6 +33,21 @@ pub const KEYMAP_PANEL_ID: &str = "keymaps";
 pub const KEYMAP_WASM_ABI_VERSION: &str = "gamer-keymap@1";
 pub const INPUT_PROTOCOL_VERSION: &str = "gamer-input@1";
 
+/// 该 id 是否归 keymap 扩展边界（独立 keymap WIT world + 常驻实例运行时）。
+/// `ExtensionService` 的运行时选择与实例表路由只调本判定，不再持有插件 id
+/// 字面量（Phase 4 §7.1 归属收口；与 `builtin::is_builtin_extension` 同构——
+/// 扩展 id 的知识归扩展模块自身，机制层只问通用谓词）。
+pub(crate) fn is_keymap_extension(id: &ExtensionId) -> bool {
+    id.as_str() == KEYMAP_EXTENSION_ID
+}
+
+/// gamer.keymap 的 [`ExtensionId`]（dispatch 热路径复用，进程级缓存）。
+pub(crate) fn keymap_extension_id() -> ExtensionId {
+    static ID: std::sync::OnceLock<ExtensionId> = std::sync::OnceLock::new();
+    ID.get_or_init(|| ExtensionId::parse(KEYMAP_EXTENSION_ID).expect("built-in keymap id"))
+        .clone()
+}
+
 /// Canonical manifest for the first shipped keymap extension.  The package
 /// still has to be installed through the normal `.gplugin` service; keeping
 /// the manifest here makes the extension's requested surface reviewable and
@@ -446,6 +461,22 @@ impl DeviceActionExecutor for CapabilityDeviceActionExecutor {
         device: &DeviceHandle,
         action: &DeviceAction,
     ) -> ExtensionResult<Option<TouchHandle>> {
+        // 录制输入来源标注（合同 §2.1 / Phase 9 矩阵）：keymap 经能力适配器
+        // 注入的输入标记为 "keymap"，不再落适配器缺省 "plugin"。scope 盖住
+        // 整次动作（task-local 同任务传播到 input/touch 适配器的观察点）。
+        crate::capabilities::adapters::with_caller_input_source("keymap", async {
+            self.execute_scoped(device, action).await
+        })
+        .await
+    }
+}
+
+impl CapabilityDeviceActionExecutor {
+    async fn execute_scoped(
+        &self,
+        device: &DeviceHandle,
+        action: &DeviceAction,
+    ) -> ExtensionResult<Option<TouchHandle>> {
         match action {
             DeviceAction::Tap { point } => {
                 let service = self
@@ -565,11 +596,12 @@ pub fn real_wasm_host_status() -> &'static str {
     "keymap WIT component entrypoint is executable; actions remain capability-gated"
 }
 
-/// 构建 keymap guest fixture 组件（`tests/keymap-guest`，wasm32 target 经
-/// wit-component 编码）。WASM 组件测试与 Phase 6 真机 E2E 基准共用。
-/// 仅测试构建可用（wit-component 是 dev-dependency）；内部显式清除
-/// `CARGO_TARGET_DIR`，guest 产物固定落在 `tests/keymap-guest/target/`，
-/// 避免外层基准目录设置导致读取落空。
+/// 构建官方 keymap 产品 guest 组件（`guests/keymap-guest`，wasm32 target 经
+/// wit-component 编码）。guest 是 gamer.keymap 的正式产品源码（Phase 4 自
+/// tests/ 迁出转正）；测试侧经本入口现场构建做真实组件验收（与官方打包
+/// `tools/build-plugins.ps1` 同源）。仅测试构建可用（wit-component 是
+/// dev-dependency）；内部显式清除 `CARGO_TARGET_DIR`，guest 产物固定落在
+/// `guests/keymap-guest/target/`，避免外层基准目录设置导致读取落空。
 #[cfg(all(test, feature = "wasm-runtime"))]
 pub(crate) fn build_guest_fixture_component() -> Vec<u8> {
     use std::fs;
@@ -581,7 +613,7 @@ pub(crate) fn build_guest_fixture_component() -> Vec<u8> {
     COMPONENT
         .get_or_init(|| {
             let server_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            let guest_dir = server_dir.join("tests").join("keymap-guest");
+            let guest_dir = server_dir.join("guests").join("keymap-guest");
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
             let status = Command::new(cargo)
                 .current_dir(&guest_dir)
@@ -594,16 +626,16 @@ pub(crate) fn build_guest_fixture_component() -> Vec<u8> {
                     "wasm32-unknown-unknown",
                 ])
                 .status()
-                .expect("无法构建 keymap guest fixture");
-            assert!(status.success(), "keymap guest fixture 构建失败");
+                .expect("无法构建 keymap guest");
+            assert!(status.success(), "keymap guest 构建失败");
             let module = fs::read(
                 guest_dir
                     .join("target")
                     .join("wasm32-unknown-unknown")
                     .join("release")
-                    .join("gamer_keymap_fixture.wasm"),
+                    .join("gamer_keymap_guest.wasm"),
             )
-            .expect("keymap guest fixture wasm 不存在");
+            .expect("keymap guest wasm 不存在");
             wit_component::ComponentEncoder::default()
                 .module(&module)
                 .expect("keymap guest module 不是合法 WIT module")
@@ -673,7 +705,7 @@ entry = "ui/index.html"
         .start_file("ui/index.html", options)
         .expect("ui entry");
     archive
-        .write_all(include_bytes!("../../../tests/keymap-guest/ui/index.html"))
+        .write_all(include_bytes!("../../../guests/keymap-guest/ui/index.html"))
         .expect("ui bytes");
     archive.finish().expect("finish gplugin");
     bytes
@@ -1657,6 +1689,88 @@ mod tests {
         assert!(decode_input_event(br#"{"type":"pointer","pointer_id":3}"#).is_err());
     }
 
+    /// Phase 4 §7.1：service.rs 的运行时选择/实例表路由只经本边界的
+    /// `is_keymap_extension` 判定，机制层不再持有插件 id 字面量
+    /// （与 `builtin::is_builtin_extension` 同构）。
+    #[test]
+    fn runtime_routing_predicate_is_owned_by_the_keymap_boundary() {
+        let keymap = keymap_extension_id();
+        assert_eq!(keymap.as_str(), KEYMAP_EXTENSION_ID);
+        assert!(is_keymap_extension(&keymap));
+        assert!(is_keymap_extension(
+            &ExtensionId::parse(KEYMAP_EXTENSION_ID).unwrap()
+        ));
+        assert!(!is_keymap_extension(
+            &ExtensionId::parse("com.example.other").unwrap()
+        ));
+    }
+
+    /// Phase 9 测试矩阵（录制合同 §2.1）：keymap 执行器把能力输入调用 scope
+    /// 在 "keymap" 来源下——适配器侧录制观察读到的 caller 来源是 keymap，
+    /// 不再落缺省 "plugin"。
+    #[tokio::test]
+    async fn executor_scopes_capability_input_source_as_keymap() {
+        use std::sync::{Arc, Mutex};
+
+        struct Probe(Arc<Mutex<Option<&'static str>>>);
+
+        #[async_trait]
+        impl crate::capabilities::InputService for Probe {
+            async fn tap(
+                &self,
+                _device: &DeviceHandle,
+                _point: TouchPoint,
+            ) -> Result<(), crate::capabilities::CapabilityError> {
+                *self.0.lock().unwrap() = crate::capabilities::adapters::caller_input_source();
+                Ok(())
+            }
+
+            async fn swipe(
+                &self,
+                _device: &DeviceHandle,
+                _gesture: SwipeGesture,
+            ) -> Result<(), crate::capabilities::CapabilityError> {
+                Ok(())
+            }
+
+            async fn key(
+                &self,
+                _device: &DeviceHandle,
+                _input: KeyInput,
+            ) -> Result<(), crate::capabilities::CapabilityError> {
+                Ok(())
+            }
+
+            async fn text(
+                &self,
+                _device: &DeviceHandle,
+                _input: TextInput,
+            ) -> Result<(), crate::capabilities::CapabilityError> {
+                Ok(())
+            }
+        }
+
+        let observed = Arc::new(Mutex::new(None));
+        let registry = CapabilityRegistry::builder()
+            .with_input_service(Arc::new(Probe(observed.clone())) as _)
+            .build();
+        let executor = CapabilityDeviceActionExecutor::new(registry);
+        executor
+            .execute(
+                &DeviceHandle::new(crate::capabilities::DeviceId::new("d1")),
+                &DeviceAction::Tap {
+                    point: TouchPoint::new(10, 20, 1.0),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            *observed.lock().unwrap(),
+            Some("keymap"),
+            "keymap 执行器内的能力输入必须携带 keymap 来源"
+        );
+    }
+
     #[test]
     fn user_profile_loader_reads_package_yaml_verbatim() {
         let temp = TempDir::new().unwrap();
@@ -1934,7 +2048,7 @@ mod wasm_component_tests {
                 .read_ui_file(&id, &ExtensionPath::parse("ui/index.html").unwrap())
                 .unwrap()
                 .0,
-            include_bytes!("../../../tests/keymap-guest/ui/index.html")
+            include_bytes!("../../../guests/keymap-guest/ui/index.html")
         );
         let device = device();
         let screen = ScreenSize::new(1000, 500);

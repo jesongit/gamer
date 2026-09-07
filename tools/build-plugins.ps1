@@ -11,7 +11,7 @@
          kind = wasm | builtin），经 signer inspect 解析元数据——id/version/
          name/description/publisher/permissions/host_api/ui 全部以 manifest 为
          唯一权威源，本脚本不再维护第二份。
-      3. wasm 包构建对应 guest Component（keymap 源 server/tests/keymap-guest、
+      3. wasm 包构建对应 guest Component（keymap 源 server/guests/keymap-guest、
          yaml 源 server/guests/yaml-guest）；builtin 包（gamer.video）无 guest、
          只打 manifest，不携带任何占位 WASM。
       4. signer pack 出 .gplugin（zip：manifest.toml + plugin.wasm + 附加文件，
@@ -73,9 +73,8 @@ $TargetRoot = Join-Path $ServerDir 'target\plugin-build'
 $SignerExe = Join-Path $TargetRoot 'release\gamer-plugin-signer.exe'
 
 # guest 构建配方（源码位置与 wasm 产物名；版本/元数据一律来自 manifest.toml）。
-# keymap guest 本轮仍在 server/tests/keymap-guest（Phase 4 才迁移正式目录）。
 $GuestRecipes = @{
-    'gamer.keymap' = @{ Dir = Join-Path $ServerDir 'tests\keymap-guest'; Lib = 'gamer_keymap_fixture.wasm' }
+    'gamer.keymap' = @{ Dir = Join-Path $ServerDir 'guests\keymap-guest'; Lib = 'gamer_keymap_guest.wasm' }
     'gamer.yaml'   = @{ Dir = Join-Path $ServerDir 'guests\yaml-guest';  Lib = 'gamer_yaml_guest.wasm' }
 }
 

@@ -1,4 +1,8 @@
-//! Keymap WASM fixture guest (gamer.keymap plugin.wasm).
+//! gamer.keymap 官方产品 guest（`plugin.wasm`，Phase 4 自 tests/ 迁出转正）。
+//!
+//! 正式归属：`server/guests/keymap-guest`（与 `guests/yaml-guest` 同级）；由
+//! `tools/build-plugins.ps1` 打包为官方 `gamer.keymap-<ver>.gplugin`，测试侧
+//! 经 `keymap/mod.rs::build_guest_fixture_component` 现场构建同一份源码验收。
 //!
 //! Profile 通道（gamer-keymap@1）：`start(profile)` 携带 host 从 Package 数据
 //! 上下文解析出的 keymap YAML 原文（与
@@ -321,9 +325,9 @@ fn builtin_actions(event: &InputEvent) -> Vec<DeviceAction> {
     }
 }
 
-struct Fixture;
+struct KeymapGuest;
 
-impl Guest for Fixture {
+impl Guest for KeymapGuest {
     fn start(profile: Option<String>) -> Result<(), String> {
         let mut guest_state = state()
             .lock()
@@ -432,4 +436,4 @@ impl Guest for Fixture {
     }
 }
 
-export!(Fixture);
+export!(KeymapGuest);

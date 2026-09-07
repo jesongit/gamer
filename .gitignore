@@ -8,7 +8,7 @@ server/target-d/
 # Phase 3 与 WASM guest 的独立 Cargo 输出目录（均为可重建生成物）
 server/target-phase3/
 server/guests/yaml-guest/target/
-server/tests/keymap-guest/target/
+server/guests/keymap-guest/target/
 server/tests/call-guest/target/
 # 本机配置（真实路径/密码，不入库）；分发以 server/config.example.toml 为准
 server/config.toml

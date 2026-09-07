@@ -21,7 +21,7 @@ use super::ui::{RegisteredUiContribution, UiContributionRegistry};
 use super::wasm::{WasmInstanceHandle, WasmRuntime, WasmStartRequest};
 use super::{
     InputEvent, InputResult, KeymapTraceContext, KeymapWasmInstanceHandle, KeymapWasmRuntime,
-    KeymapWasmStartRequest, NoKeymapWasmRuntime, ScreenSize, KEYMAP_EXTENSION_ID,
+    KeymapWasmStartRequest, NoKeymapWasmRuntime, ScreenSize,
 };
 
 /// Extension lifecycle → Timer runner registry seam（ADR-13 / P11.2）。The
@@ -275,7 +275,7 @@ impl ExtensionService {
             .keymap_running
             .lock()
             .expect("keymap running map poisoned")
-            .get(&ExtensionId::parse(KEYMAP_EXTENSION_ID).expect("built-in keymap id"))
+            .get(&super::keymap::keymap_extension_id())
             .copied();
         let Some(instance) = instance else {
             return Ok(InputResult::pass());
@@ -625,7 +625,11 @@ impl ExtensionService {
             // （ADR-13 注册缝），不启动实例；执行由按调用运行时
             // （guest_for_run）在每次运行时惰性实例化。
             None
-        } else if id.as_str() == KEYMAP_EXTENSION_ID {
+        } else if super::keymap::is_keymap_extension(id) {
+            // keymap 独立 WIT world（keymap-host）：运行时归属 keymap 扩展
+            // 边界（is_keymap_extension 判定在 keymap/mod.rs，Phase 4 §7.1
+            // 收口——机制层不持有插件 id 字面量），start 持有常驻实例并把
+            // profile 原文交给 guest。
             match self
                 .keymap_runtime
                 .start(KeymapWasmStartRequest {
@@ -921,7 +925,7 @@ impl ExtensionService {
         if self.instance_free(id) {
             return Ok(());
         }
-        if id.as_str() == KEYMAP_EXTENSION_ID {
+        if super::keymap::is_keymap_extension(id) {
             let handle = self
                 .keymap_running
                 .lock()
