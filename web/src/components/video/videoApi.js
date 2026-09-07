@@ -8,6 +8,7 @@
 // 集成者后续可决定是否把本封装收编进 api.js。
 
 import { handleUnauthorized } from '../../auth'
+import { GAMER_VIDEO_PLUGIN_ID, VIDEO_PROJECT_DIR } from '../../gamer-plugin-ids'
 
 /** 视频工作台 API 的稳定错误形态：调用方按 status / code / data 判断。 */
 function makeError(status, code, message, data = null, cause) {
@@ -81,6 +82,16 @@ export function ptsFromTime(seconds) {
   return Math.round(t * 1e6)
 }
 
+/** 项目资源 URL（GET/PUT/DELETE 同形；不发请求）。 */
+function projectUrlOf(packageId, projectId) {
+  const pkg = encodeURIComponent(requireId(packageId, 'package_id'))
+  const path = `${VIDEO_PROJECT_DIR}/${requireId(projectId, 'project_id')}.json`
+  return `/api/packages/${pkg}/plugins/${encodeURIComponent(GAMER_VIDEO_PLUGIN_ID)}/resources/${path
+    .split('/')
+    .map(segment => encodeURIComponent(segment))
+    .join('/')}`
+}
+
 export const videoApi = {
   // ---- 媒体（合同 §1）----
 
@@ -148,6 +159,47 @@ export const videoApi = {
     'GET',
     `/api/media/${encodeURIComponent(requireId(id, 'media_id'))}/frames/${Math.max(0, Math.round(Number(index) || 0))}`,
   ),
+
+  // ---- 项目（Phase 6：Package 资源 API 承载，plugins/gamer.video/projects/<id>.json）----
+  // 文本 JSON + 乐观并发 expected_version（Core 不解释内容；409/400 诊断原样上抛）。
+
+  /** GET /api/packages/:pkg/plugins/gamer.video/resources?prefix=projects/ → 资源条目数组。 */
+  listProjectEntries: async (packageId) => {
+    const pkg = encodeURIComponent(requireId(packageId, 'package_id'))
+    const base = `/api/packages/${pkg}/plugins/${encodeURIComponent(GAMER_VIDEO_PLUGIN_ID)}/resources`
+    const rep = await request('GET', `${base}?prefix=${encodeURIComponent(`${VIDEO_PROJECT_DIR}/`)}`)
+    return Array.isArray(rep?.resources) ? rep.resources : []
+  },
+
+  /** 项目资源 URL（GET/PUT/DELETE 同形；不发请求）。 */
+  projectUrl: projectUrlOf,
+
+  /** GET 项目 → 资源条目 `{content, version, path, updated_at, ...}`（含注记字段）。 */
+  getProject: async (packageId, projectId) => request('GET', projectUrlOf(packageId, projectId)),
+
+  /** PUT 项目：content 文本 + expected_version 乐观并发（force 显式跳过）。 */
+  putProject: async (packageId, projectId, content, { expectedVersion, force } = {}) => request(
+    'PUT',
+    projectUrlOf(packageId, projectId),
+    {
+      content: requireId(content, 'content'),
+      expected_version: expectedVersion || undefined,
+      force: force === true || undefined,
+    },
+  ),
+
+  /** DELETE 项目 → 204 → null。 */
+  deleteProject: async (packageId, projectId) => request('DELETE', projectUrlOf(packageId, projectId)),
+
+  /** POST rename：项目重命名（资源原子移动；body `{path, new_path}`）。 */
+  renameProject: async (packageId, projectId, newProjectId) => {
+    const pkg = encodeURIComponent(requireId(packageId, 'package_id'))
+    const base = `/api/packages/${pkg}/plugins/${encodeURIComponent(GAMER_VIDEO_PLUGIN_ID)}/rename`
+    return request('POST', base, {
+      path: `${VIDEO_PROJECT_DIR}/${requireId(projectId, 'project_id')}.json`,
+      new_path: `${VIDEO_PROJECT_DIR}/${requireId(newProjectId, 'new_project_id')}.json`,
+    })
+  },
 
   // ---- 录制（合同 §2）----
 

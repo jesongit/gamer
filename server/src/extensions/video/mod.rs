@@ -18,6 +18,12 @@
 //! 录制草稿生成由 gamer.yaml 的 call 动作（`automation.create_draft`）承担，
 //! 本扩展只持有 manifest 与生命周期归属。媒体/录制能力由 Core 进程级服务
 //! （`crate::media` / `crate::recording`）承载，插件不直接持有句柄。
+//!
+//! 制作业务（Phase 6）：Video Project（项目/标记/校准）归本扩展所有——
+//! schema 与保存期校验在 [`project`]，数据存 Package 资源
+//! `plugins/gamer.video/projects/<id>.json`（Core 只寻址不解释）。
+
+pub(crate) mod project;
 
 /// builtin 扩展 id（唯一归属本模块；无 guest、无 Runner、无 start 参数）。
 pub(crate) const VIDEO_EXTENSION_ID: &str = "gamer.video";

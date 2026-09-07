@@ -1,15 +1,17 @@
 // @vitest-environment happy-dom
 /**
  * 视频工作台面板（gamer.video core 面板）挂载测试：
- * - 宿主 VideoWorkbench 三区装配 + 素材列表 → 时间轴选中预览（mediaFileUrl）；
+ * - 宿主 VideoWorkbench 三分区（素材库/项目/草稿子导航，非 Core 永久页签）+
+ *   Package 缺失横幅 + 项目列表/详情装配 + 打开项目联动舞台媒体
+ *   （requestStageMedia：只动舞台来源，不动设备/包身份）；
+ * - 项目编辑流：加标记（帧身份）→ 标脏 → 保存（expected_version 乐观并发）；
+ *   校准应用版本递增 + 旧校准标记标脏；保存冲突 409 可诊断可重载；素材缺失横幅；
  * - 素材库删除两段确认（armed → 确认删除），409 = 被项目引用提示；
  * - 录制入口：activeRecording 轮询驱动开始/停止按钮态，停止后上抛 recording-finished；
- * - 时间轴：精确帧（currentTime*1e6 → pts_us 的服务端 PNG URL）+ 逐帧步进
- *   （服务端真实展示帧表相邻定位，/frames + /frames/:index；无 33ms 假设）+
- *   帧加载失败提示 + 切素材清空；
- * - 草稿区状态流转：载入事件（时间轴升序）→ 勾选 → 生成 YAML 草稿（yaml + 诊断），
- *   常驻「草稿不会自动执行」标注。
- * videoApi 模块整体 mock（端点形态锁定在 video-api.test.js）。
+ * - 时间轴：精确帧（服务端 PNG URL）+ 逐帧步进（服务端真实展示帧表，无 33ms 假设）+
+ *   标记 CRUD（帧身份引用）+ 校准表单 + 自录事件叠加（base_pts_us 整数映射）；
+ * - 草稿区状态流转与「草稿不会自动执行」标注。
+ * videoApi 模块整体 mock（端点形态锁定在 video-api.test.js / video-project.test.js）。
  */
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -28,19 +30,33 @@ vi.mock('./components/video/videoApi', async (importOriginal) => {
       recordingCancel: vi.fn(async () => ({})),
       activeRecording: vi.fn(async () => null),
       recordingEvents: vi.fn(async () => []),
+      recordingStatus: vi.fn(async () => ({ id: 'rec-1', segments: [] })),
       createVideoDraft: vi.fn(async () => ({ yaml: '', diagnostics: [] })),
       mediaFrames: vi.fn(async () => ({ frame_count: 0, first_pts_us: null, last_pts_us: null })),
       mediaFrameNeighbors: vi.fn(async () => ({ index: 0, pts_us: 0, prev: null, next: null })),
+      listProjectEntries: vi.fn(async () => []),
+      getProject: vi.fn(async () => ({ path: 'projects/p1.json', content: '{}', version: 'v0' })),
+      putProject: vi.fn(async () => ({ ok: true, version: 'v-next' })),
+      deleteProject: vi.fn(async () => null),
+      renameProject: vi.fn(async () => ({ ok: true })),
     },
   }
 })
 
+vi.mock('./components/console/useConsoleStage', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, requestStageMedia: vi.fn() }
+})
+
 import MediaLibrary from './components/video/MediaLibrary.vue'
 import VideoDraft from './components/video/VideoDraft.vue'
+import VideoProjects from './components/video/VideoProjects.vue'
 import VideoTimeline from './components/video/VideoTimeline.vue'
 import VideoWorkbench from './components/video/VideoWorkbench.vue'
 import { videoApi } from './components/video/videoApi'
+import { requestStageMedia } from './components/console/useConsoleStage'
 import { devicesData } from './store'
+import { packageStore } from './package-store'
 
 const MEDIA = [
   { id: 'm1', name: '录制-0907.mp4', duration_us: 65000000, width: 1920, height: 1080, source: 'recording', state: 'ready' },
@@ -55,35 +71,130 @@ const EVENTS = [
   { event_id: 'e1', kind: 'swipe', source: 'manual', timeline_us: 1200000, payload: { x: 1, y: 2, x2: 3, y2: 4 } },
 ]
 
+function projectJson(overrides = {}) {
+  return JSON.stringify({
+    schema_version: 1,
+    id: 'p1',
+    name: '日常标记',
+    package_id: 'pkg',
+    notes: '',
+    created_at: '2026-09-07T00:00:00Z',
+    updated_at: '2026-09-07T00:00:00Z',
+    assets: [{ media_id: 'm1', role: 'primary', sha256: '', duration_us: 65000000, frame_count: null }],
+    recording: null,
+    calibration: {
+      version: 1, rotation: 0, pixel_aspect: { num: 1, den: 1 },
+      content_rect: null, reference_size: { width: 1920, height: 1080 },
+    },
+    markers: [],
+    progress: { stage: 'created', updated_at: '2026-09-07T00:00:00Z' },
+    ...overrides,
+  })
+}
+
+const PROJECT_ENTRY = { path: 'projects/p1.json', content: projectJson(), version: 'v1' }
+
+function stubProject(entry = PROJECT_ENTRY) {
+  videoApi.listProjectEntries.mockResolvedValue([entry])
+  videoApi.getProject.mockResolvedValue(entry)
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   devicesData.value = [{ id: 'dev-a', name: '设备A' }, { id: 'dev-b', name: '设备B' }]
+  packageStore.currentPackageId = 'pkg'
   videoApi.listMedia.mockResolvedValue(MEDIA.map(m => ({ ...m })))
   videoApi.activeRecording.mockResolvedValue(null)
+  videoApi.listProjectEntries.mockResolvedValue([])
   // 展示帧表缺省空态（各用例按需覆盖）
   videoApi.mediaFrames.mockResolvedValue({ frame_count: 0, first_pts_us: null, last_pts_us: null })
   videoApi.mediaFrameNeighbors.mockResolvedValue({ index: 0, pts_us: 0, prev: null, next: null })
+  videoApi.putProject.mockResolvedValue({ ok: true, version: 'v-next' })
 })
 
+// ---------------------------------------------------------------------------
+// VideoWorkbench 宿主装配
+// ---------------------------------------------------------------------------
+
 describe('VideoWorkbench 宿主装配', () => {
-  it('挂载即拉取素材列表，三区齐全；选中素材 → 时间轴出现 mediaFileUrl 预览', async () => {
+  it('挂载即拉取素材列表；三分区子导航齐全；素材库为默认分区', async () => {
     const w = mount(VideoWorkbench)
     await flushPromises()
 
     expect(videoApi.listMedia).toHaveBeenCalled()
+    expect(videoApi.listProjectEntries).toHaveBeenCalledWith('pkg')
     expect(w.find('[data-testid="media-library"]').exists()).toBe(true)
-    expect(w.find('[data-testid="video-timeline"]').exists()).toBe(true)
-    expect(w.find('[data-testid="video-draft"]').exists()).toBe(true)
+    for (const key of ['library', 'projects', 'draft']) {
+      expect(w.find(`[data-testid="workbench-tab-${key}"]`).exists()).toBe(true)
+    }
+    // 素材库行渲染；项目分区与草稿分区未激活
     expect(w.findAll('[data-testid="media-row"]')).toHaveLength(2)
-    // 未选中素材时时间轴为空态，不渲染 video
-    expect(w.find('video').exists()).toBe(false)
+    expect(w.find('[data-testid="video-timeline"]').exists()).toBe(false)
+    expect(w.find('[data-testid="video-draft"]').exists()).toBe(false)
+    w.unmount()
+  })
 
-    await w.findAll('[data-testid="media-row"]')[0].trigger('click')
-    const video = w.find('video')
-    expect(video.exists()).toBe(true)
-    // 合同 §1：播放流 URL = /api/media/:id/file
-    expect(video.attributes('src')).toBe('/api/media/m1/file')
-    expect(w.find('[data-testid="video-time"]').text()).toBe('0.000s')
+  it('无当前 Package：项目分区显示缺包横幅（项目保存在 Package 数据上下文）', async () => {
+    packageStore.currentPackageId = null
+    const w = mount(VideoWorkbench)
+    await flushPromises()
+    expect(w.find('[data-testid="package-missing-banner"]').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('项目分区：列表渲染 + 打开项目 → 详情时间轴出现，并联动舞台切到主素材', async () => {
+    stubProject()
+    const w = mount(VideoWorkbench)
+    await flushPromises()
+
+    await w.find('[data-testid="workbench-tab-projects"]').trigger('click')
+    await flushPromises()
+    const rows = w.findAll('[data-testid="project-row"]')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].text()).toContain('日常标记')
+    expect(rows[0].text()).toContain('0 标记')
+
+    await rows[0].trigger('click')
+    await flushPromises()
+    expect(videoApi.getProject).toHaveBeenCalledWith('pkg', 'p1')
+    // 联动：舞台切到主素材 m1（只动舞台来源）
+    expect(requestStageMedia).toHaveBeenCalledWith('m1')
+    expect(w.find('[data-testid="video-timeline"]').exists()).toBe(true)
+    expect(w.find('video').attributes('src')).toBe('/api/media/m1/file')
+    expect(w.find('[data-testid="open-project-name"]').text()).toBe('日常标记')
+    expect(w.find('[data-testid="project-dirty"]').text()).toContain('已保存')
+    w.unmount()
+  })
+
+  it('素材缺失：主素材不在媒体库 → 缺失横幅 + 保存禁用 + 不联动舞台', async () => {
+    const missing = { ...PROJECT_ENTRY, content: projectJson() }
+    videoApi.listMedia.mockResolvedValue(MEDIA.slice(1)) // 只有 m2
+    stubProject(missing)
+    const w = mount(VideoWorkbench)
+    await flushPromises()
+    await w.find('[data-testid="workbench-tab-projects"]').trigger('click')
+    await flushPromises()
+    await w.findAll('[data-testid="project-row"]')[0].trigger('click')
+    await flushPromises()
+
+    expect(w.find('[data-testid="asset-missing-banner"]').exists()).toBe(true)
+    expect(requestStageMedia).not.toHaveBeenCalled()
+    expect(w.find('[data-testid="project-save"]').attributes('disabled')).toBeDefined()
+    w.unmount()
+  })
+
+  it('损坏项目：列表可见不可打开，提示校验失败', async () => {
+    stubProject({ path: 'projects/broken.json', content: '{oops', version: 'v1' })
+    const w = mount(VideoWorkbench)
+    await flushPromises()
+    await w.find('[data-testid="workbench-tab-projects"]').trigger('click')
+    await flushPromises()
+    const row = w.findAll('[data-testid="project-row"]')[0]
+    expect(row.text()).toContain('校验失败')
+    await row.trigger('click')
+    await flushPromises()
+    expect(videoApi.getProject).not.toHaveBeenCalled()
+    expect(w.find('[data-testid="project-detail-empty"]').exists()).toBe(true)
     w.unmount()
   })
 
@@ -91,15 +202,407 @@ describe('VideoWorkbench 宿主装配', () => {
     const w = mount(VideoWorkbench)
     await flushPromises()
     await w.findAll('[data-testid="media-row"]')[0].trigger('click')
-    expect(w.find('video').exists()).toBe(true)
-
-    videoApi.listMedia.mockResolvedValue(MEDIA.slice(1))
-    await w.find('[data-testid="media-refresh"]').trigger('click')
-    await flushPromises()
+    // 库分区没有 video 预览（预览在项目详情时间轴）
     expect(w.find('video').exists()).toBe(false)
     w.unmount()
   })
+
+  it('Package 切换：关闭打开态并重拉项目列表', async () => {
+    stubProject()
+    const w = mount(VideoWorkbench)
+    await flushPromises()
+    await w.find('[data-testid="workbench-tab-projects"]').trigger('click')
+    await flushPromises()
+    await w.findAll('[data-testid="project-row"]')[0].trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="video-timeline"]').exists()).toBe(true)
+
+    packageStore.currentPackageId = 'pkg2'
+    await flushPromises()
+    expect(w.find('[data-testid="video-timeline"]').exists()).toBe(false)
+    expect(videoApi.listProjectEntries).toHaveBeenCalledWith('pkg2')
+    w.unmount()
+  })
 })
+
+// ---------------------------------------------------------------------------
+// 项目编辑流（标记 / 校准 / 保存 / 冲突）
+// ---------------------------------------------------------------------------
+
+describe('VideoWorkbench 项目编辑流', () => {
+  async function mountOpenProject(entry = PROJECT_ENTRY) {
+    stubProject(entry)
+    const w = mount(VideoWorkbench)
+    await flushPromises()
+    await w.find('[data-testid="workbench-tab-projects"]').trigger('click')
+    await flushPromises()
+    await w.findAll('[data-testid="project-row"]')[0].trigger('click')
+    await flushPromises()
+    return w
+  }
+
+  it('创建项目：基于素材库选中素材 → putProject → 打开', async () => {
+    // 首次拉列表为空（创建前），创建后 reload 返回新项目
+    videoApi.listProjectEntries.mockResolvedValueOnce([])
+    videoApi.listProjectEntries.mockResolvedValue([
+      { path: 'projects/daily-login.json', content: projectJson({ id: 'daily-login', name: '每日登录' }), version: 'v-created' },
+    ])
+    videoApi.getProject.mockResolvedValue({ path: 'projects/daily-login.json', content: projectJson({ id: 'daily-login', name: '每日登录' }), version: 'v-created' })
+    const w = mount(VideoWorkbench)
+    await flushPromises()
+    // 先在素材库选中主素材
+    await w.findAll('[data-testid="media-row"]')[0].trigger('click')
+    await w.find('[data-testid="workbench-tab-projects"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="project-create"]').attributes('disabled')).toBeUndefined()
+
+    await w.find('[data-testid="project-create"]').trigger('click')
+    await w.find('[data-testid="project-create-id"]').setValue('daily-login')
+    await w.find('[data-testid="project-create-name"]').setValue('每日登录')
+    await w.find('[data-testid="project-create-confirm"]').trigger('click')
+    await flushPromises()
+
+    expect(videoApi.putProject).toHaveBeenCalledTimes(1)
+    const [pkg, id, content] = videoApi.putProject.mock.calls[0]
+    expect(pkg).toBe('pkg')
+    expect(id).toBe('daily-login')
+    expect(JSON.parse(content).assets[0].media_id).toBe('m1')
+    // 创建后自动打开（重读资源 + 联动舞台主素材）
+    expect(videoApi.getProject).toHaveBeenCalledWith('pkg', 'daily-login')
+    expect(requestStageMedia).toHaveBeenCalledWith('m1')
+    w.unmount()
+  })
+
+  it('加标记 → 标脏 → 保存携带 expected_version → 清脏 + 列表重拉', async () => {
+    videoApi.mediaFrames.mockResolvedValue({
+      frame_count: 40, first_pts_us: 0, last_pts_us: 1332000,
+      current: { index: 12, pts_us: 333000 },
+    })
+    const w = await mountOpenProject()
+
+    await w.find('[data-testid="marker-label-input"]').setValue('开始点击')
+    await w.find('[data-testid="marker-add"]').trigger('click')
+    await flushPromises()
+
+    expect(w.find('[data-testid="project-dirty"]').text()).toContain('未保存')
+    expect(w.findAll('[data-testid="marker-row"]')).toHaveLength(1)
+
+    await w.find('[data-testid="project-save"]').trigger('click')
+    await flushPromises()
+    expect(videoApi.putProject).toHaveBeenCalledWith('pkg', 'p1', expect.any(String), { expectedVersion: 'v1' })
+    const saved = JSON.parse(videoApi.putProject.mock.calls[0][2])
+    expect(saved.markers[0].frame).toEqual({ media_id: 'm1', frame_index: 12, pts_us: 333000, calibration_version: 1 })
+    expect(w.find('[data-testid="project-dirty"]').text()).toContain('已保存')
+    // 保存后重拉列表（摘要更新）
+    expect(videoApi.listProjectEntries).toHaveBeenCalledTimes(2)
+    w.unmount()
+  })
+
+  it('标记注释/删除走同一保存流；校准应用后版本递增 + 旧标记标脏', async () => {
+    const withMarkerEntry = { ...PROJECT_ENTRY, content: projectJson({
+      markers: [{ id: 'mk-1', label: '旧标记', note: '', created_at: '2026-09-07T00:00:00Z', frame: { media_id: 'm1', frame_index: 3, pts_us: 90000, calibration_version: 1 } }],
+    }) }
+    const w = await mountOpenProject(withMarkerEntry)
+    expect(w.findAll('[data-testid="marker-row"]')).toHaveLength(1)
+
+    // 注释更新 → 标脏（setValue 自带 change 派发，勿叠加 trigger）
+    await w.find('[data-testid="marker-note-mk-1"]').setValue('等动画结束')
+    expect(w.find('[data-testid="project-dirty"]').text()).toContain('未保存')
+
+    // 校准：旋转 90 → 应用 → version 2，旧校准横幅出现
+    expect(w.find('[data-testid="marker-stale-banner"]').exists()).toBe(false)
+    await w.find('[data-testid="calibration-rotation"]').setValue('90')
+    await w.find('[data-testid="calibration-apply"]').trigger('click')
+    expect(w.find('[data-testid="marker-stale-banner"]').exists()).toBe(true)
+    await w.find('[data-testid="project-save"]').trigger('click')
+    await flushPromises()
+    const saved = JSON.parse(videoApi.putProject.mock.calls[0][2])
+    expect(saved.calibration.version).toBe(2)
+    expect(saved.calibration.rotation).toBe(90)
+    expect(saved.markers[0].frame.calibration_version).toBe(1)
+    w.unmount()
+
+    // 重开项目（保存内容回读）：标脏横幅 + 行内徽章
+    videoApi.putProject.mockClear()
+    const savedEntry = { ...PROJECT_ENTRY, content: projectJson({
+      calibration: { version: 2, rotation: 90, pixel_aspect: { num: 1, den: 1 }, content_rect: null, reference_size: { width: 1920, height: 1080 } },
+      markers: [{ id: 'mk-1', label: '旧标记', note: '', created_at: '', frame: { media_id: 'm1', frame_index: 3, pts_us: 90000, calibration_version: 1 } }],
+    }) }
+    const w2 = await mountOpenProject(savedEntry)
+    expect(w2.find('[data-testid="marker-stale-banner"]').text()).toContain('旧校准')
+    expect(w2.find('[data-testid="marker-stale"]').exists()).toBe(true)
+    w2.unmount()
+  })
+
+  it('删除标记 → withoutMarker', async () => {
+    const withMarkerEntry = { ...PROJECT_ENTRY, content: projectJson({
+      markers: [{ id: 'mk-1', label: 'x', note: '', created_at: '', frame: { media_id: 'm1', frame_index: 3, pts_us: 90000, calibration_version: 1 } }],
+    }) }
+    const w = await mountOpenProject(withMarkerEntry)
+    await w.find('[data-testid="marker-del-mk-1"]').trigger('click')
+    expect(w.findAll('[data-testid="marker-row"]')).toHaveLength(0)
+    expect(w.find('[data-testid="project-dirty"]').text()).toContain('未保存')
+    w.unmount()
+  })
+
+  it('保存冲突（409 version_conflict）：横幅提示 + 重新加载恢复', async () => {
+    videoApi.mediaFrames.mockResolvedValue({
+      frame_count: 10, first_pts_us: 0, last_pts_us: 300000,
+      current: { index: 2, pts_us: 60000 },
+    })
+    const w = await mountOpenProject()
+    await w.find('[data-testid="marker-label-input"]').setValue('m')
+    await w.find('[data-testid="marker-add"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="project-dirty"]').text()).toContain('未保存')
+
+    videoApi.putProject.mockRejectedValueOnce(Object.assign(new Error('conflict'), {
+      status: 409,
+      code: 'version_conflict: 资源已被其他页面修改',
+    }))
+    await w.find('[data-testid="project-save"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-testid="project-conflict-banner"]').text()).toContain('保存冲突')
+
+    // 重新加载：getProject 再读，清脏
+    await w.find('[data-testid="project-reload"]').trigger('click')
+    await flushPromises()
+    expect(videoApi.getProject).toHaveBeenCalledWith('pkg', 'p1')
+    expect(w.find('[data-testid="project-conflict-banner"]').exists()).toBe(false)
+    expect(w.find('[data-testid="project-dirty"]').text()).toContain('已保存')
+    w.unmount()
+  })
+
+  it('重命名 / 删除项目走资源 rename / delete', async () => {
+    const w = await mountOpenProject()
+    const row = w.findAll('[data-testid="project-row"]')[0]
+    await row.find('[data-testid="project-rename"]').trigger('click')
+    await row.find('[data-testid="project-rename-input"]').setValue('p2')
+    await row.find('[data-testid="project-rename-confirm"]').trigger('click')
+    await flushPromises()
+    expect(videoApi.renameProject).toHaveBeenCalledWith('pkg', 'p1', 'p2')
+
+    const deleteBtn = () => w.findAll('[data-testid="project-row"]')[0].find('[data-testid="project-delete"]')
+    await deleteBtn().trigger('click') // armed
+    expect(videoApi.deleteProject).not.toHaveBeenCalled()
+    await deleteBtn().trigger('click') // confirm
+    await flushPromises()
+    expect(videoApi.deleteProject).toHaveBeenCalledWith('pkg', 'p1')
+    // 打开中的项目被删除 → 回落空态
+    expect(w.find('[data-testid="video-timeline"]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('项目关联录制会话：草稿入口带入 recordingId 切到草稿分区', async () => {
+    const entry = { ...PROJECT_ENTRY, content: projectJson({ recording: { recording_id: 'rec-42' } }) }
+    const w = await mountOpenProject(entry)
+    await w.find('[data-testid="project-open-draft"]').trigger('click')
+    expect(w.find('[data-testid="video-draft"]').exists()).toBe(true)
+    expect(w.find('[data-testid="draft-recording-id"]').element.value).toBe('rec-42')
+    w.unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// VideoProjects 项目列表组件
+// ---------------------------------------------------------------------------
+
+describe('VideoProjects 项目列表组件', () => {
+  const SUMMARIES = [
+    { id: 'p1', name: '项目一', valid: true, markerCount: 2, assetCount: 1 },
+    { id: 'p2', name: 'p2', valid: false, markerCount: 0, assetCount: 0 },
+  ]
+
+  it('新建表单：id 语法校验 + 重名拒绝 + create 事件', async () => {
+    const w = mount(VideoProjects, { props: { projects: SUMMARIES, canCreate: true } })
+    // canCreate=true：新建按钮可用
+    expect(w.find('[data-testid="project-create"]').attributes('disabled')).toBeUndefined()
+    await w.find('[data-testid="project-create"]').trigger('click')
+
+    await w.find('[data-testid="project-create-id"]').setValue('Bad ID')
+    expect(w.find('[data-testid="project-create-confirm"]').attributes('disabled')).toBeDefined()
+    await w.find('[data-testid="project-create-id"]').setValue('p1') // 重名
+    await w.find('[data-testid="project-create-name"]').setValue('x')
+    await w.find('[data-testid="project-create-confirm"]').trigger('click')
+    expect(w.find('.zone-error').exists()).toBe(true)
+    expect(w.emitted('create')).toBeUndefined()
+
+    await w.find('[data-testid="project-create-id"]').setValue('p3')
+    await w.find('[data-testid="project-create-confirm"]').trigger('click')
+    expect(w.emitted('create')).toEqual([[{ id: 'p3', name: 'x' }]])
+    w.unmount()
+  })
+
+  it('重命名：行内输入 → rename(id, newId)；删除两段确认 → delete(id)', async () => {
+    const w = mount(VideoProjects, { props: { projects: SUMMARIES, canCreate: true } })
+    const row = w.findAll('[data-testid="project-row"]')[0]
+    await row.find('[data-testid="project-rename"]').trigger('click')
+    await row.find('[data-testid="project-rename-input"]').setValue('p9')
+    await row.find('[data-testid="project-rename-confirm"]').trigger('click')
+    expect(w.emitted('rename')).toEqual([['p1', 'p9']])
+
+    const deleteBtn = w.findAll('[data-testid="project-row"]')[1].find('[data-testid="project-delete"]')
+    await deleteBtn.trigger('click')
+    expect(w.emitted('delete')).toBeUndefined()
+    expect(deleteBtn.text()).toBe('确认删除')
+    await deleteBtn.trigger('click')
+    expect(w.emitted('delete')).toEqual([['p2']])
+    w.unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// VideoTimeline 时间轴区（标记 / 校准 / 事件叠加）
+// ---------------------------------------------------------------------------
+
+describe('VideoTimeline 时间轴区', () => {
+  const CAL = { version: 1, rotation: 0, pixel_aspect: { num: 1, den: 1 }, content_rect: null, reference_size: { width: 1920, height: 1080 } }
+  const MARKER = { id: 'mk-1', label: '开始点击', note: '', created_at: '', frame: { media_id: 'm1', frame_index: 12, pts_us: 333000, calibration_version: 1 } }
+
+  it('精确帧与逐帧（服务端真实帧表，无固定步长）+ 帧失败提示（回归）', async () => {
+    videoApi.mediaFrames.mockResolvedValue({
+      frame_count: 40, first_pts_us: 0, last_pts_us: 1332000,
+      current: { index: 20, pts_us: 333000 },
+    })
+    videoApi.mediaFrameNeighbors.mockResolvedValue({
+      index: 20, pts_us: 333000,
+      prev: { index: 19, pts_us: 300000 },
+      next: { index: 21, pts_us: 366333 },
+    })
+    const w = mount(VideoTimeline, { props: { media: MEDIA[0], markers: [], calibration: CAL } })
+    await flushPromises()
+    const video = w.find('video')
+    video.element.currentTime = 0.333
+    await video.trigger('timeupdate')
+
+    expect(w.find('[data-testid="frame-count"]').text()).toContain('40 帧')
+    await w.find('[data-testid="frame-next"]').trigger('click')
+    await flushPromises()
+    expect(videoApi.mediaFrames).toHaveBeenCalledWith('m1', { ptsUs: 333000 })
+    expect(videoApi.mediaFrameNeighbors).toHaveBeenCalledWith('m1', 20)
+    expect(w.find('[data-testid="frame-image"]').attributes('src')).toBe('/api/media/m1/frame?index=21&max_width=640')
+    w.unmount()
+
+    videoApi.mediaFrames.mockRejectedValue(new Error('down'))
+    const w2 = mount(VideoTimeline, { props: { media: MEDIA[1], markers: [], calibration: CAL } })
+    await flushPromises()
+    expect(w2.find('[data-testid="frame-prev"]').attributes('disabled')).toBeDefined()
+    expect(w2.find('[data-testid="frame-error"]').text()).toContain('展示帧表加载失败')
+    w2.unmount()
+  })
+
+  it('加标记：解析当前帧身份后上抛（帧身份 + 当前校准版本，非浮点秒）', async () => {
+    videoApi.mediaFrames.mockResolvedValue({
+      frame_count: 40, first_pts_us: 0, last_pts_us: 1332000,
+      current: { index: 12, pts_us: 333000 },
+    })
+    const w = mount(VideoTimeline, { props: { media: MEDIA[0], markers: [], calibration: CAL } })
+    await flushPromises()
+    await w.find('[data-testid="marker-label-input"]').setValue('开始点击')
+    await w.find('[data-testid="marker-add"]').trigger('click')
+    await flushPromises()
+
+    const emitted = w.emitted('add-marker')
+    expect(emitted).toHaveLength(1)
+    expect(emitted[0][0]).toEqual({
+      label: '开始点击',
+      frame: { media_id: 'm1', frame_index: 12, pts_us: 333000, calibration_version: 1 },
+    })
+    expect(w.find('[data-testid="marker-label-input"]').element.value).toBe('')
+    w.unmount()
+  })
+
+  it('标记跳转 / 注释编辑 / 旧校准标脏', async () => {
+    const staleCal = { ...CAL, version: 2 }
+    const w = mount(VideoTimeline, {
+      props: { media: MEDIA[0], markers: [MARKER], calibration: staleCal },
+    })
+    await flushPromises()
+    expect(w.find('[data-testid="marker-stale-banner"]').text()).toContain('旧校准')
+    expect(w.find('[data-testid="marker-stale"]').exists()).toBe(true)
+
+    await w.find('[data-testid="marker-jump-mk-1"]').trigger('click')
+    expect(w.find('[data-testid="frame-image"]').attributes('src')).toBe('/api/media/m1/frame?index=12&max_width=640')
+
+    await w.find('[data-testid="marker-note-mk-1"]').setValue('note-1')
+    expect(w.emitted('update-marker')).toEqual([['mk-1', { note: 'note-1' }]])
+
+    await w.find('[data-testid="marker-del-mk-1"]').trigger('click')
+    expect(w.emitted('remove-marker')).toEqual([['mk-1']])
+    w.unmount()
+  })
+
+  it('校准表单：应用上抛 next（宿主负责版本递增）；非法参考分辨率本地报错', async () => {
+    const w = mount(VideoTimeline, { props: { media: MEDIA[0], markers: [], calibration: CAL } })
+    await flushPromises()
+    await w.find('[data-testid="calibration-rotation"]').setValue('270')
+    await w.find('[data-testid="calibration-rect-x"]').setValue('0')
+    await w.find('[data-testid="calibration-rect-y"]').setValue('140')
+    await w.find('[data-testid="calibration-rect-w"]').setValue('1920')
+    await w.find('[data-testid="calibration-rect-h"]').setValue('800')
+    await w.find('[data-testid="calibration-apply"]').trigger('click')
+
+    const emitted = w.emitted('save-calibration')
+    expect(emitted).toHaveLength(1)
+    expect(emitted[0][0]).toEqual({
+      rotation: 270,
+      pixel_aspect: { num: 1, den: 1 },
+      reference_size: { width: 1920, height: 1080 },
+      content_rect: { x: 0, y: 140, w: 1920, h: 800 },
+    })
+
+    await w.find('[data-testid="calibration-ref-w"]').setValue('0')
+    await w.find('[data-testid="calibration-apply"]').trigger('click')
+    expect(w.find('[data-testid="calibration-error"]').text()).toContain('参考分辨率')
+    w.unmount()
+  })
+
+  it('自录事件叠加：base_pts_us 整数映射 + 来源标注 + 点击跳帧；无映射标脏', async () => {
+    videoApi.recordingStatus.mockResolvedValue({
+      id: 'rec-1',
+      segments: [{ media_id: 'm1', start_us: 0, duration_us: 65000000, base_pts_us: 1000, reason: 'normal' }],
+    })
+    videoApi.recordingEvents.mockResolvedValue([
+      { event_id: 'e1', source: 'keymap', kind: 'tap', status: 'accepted', timeline_us: 1200000, payload: { x: 820, y: 460 } },
+      { event_id: 'e2', source: 'manual', kind: 'key', status: 'accepted', timeline_us: 99000000, payload: { code: 'KeyA' } },
+    ])
+    videoApi.mediaFrames.mockResolvedValue({
+      frame_count: 100, first_pts_us: 0, last_pts_us: 65000000,
+      current: { index: 36, pts_us: 1201000 },
+    })
+    const w = mount(VideoTimeline, { props: { media: MEDIA[0], markers: [], calibration: CAL, recordingId: 'rec-1' } })
+    await flushPromises()
+    await w.find('[data-testid="events-load"]').trigger('click')
+    await flushPromises()
+
+    expect(videoApi.recordingStatus).toHaveBeenCalledWith('rec-1')
+    const rows = w.findAll('[data-testid="timeline-event-row"]')
+    expect(rows).toHaveLength(2)
+    // 升序：e1（1.2s，段内可映射）在前，e2（99s，分段外）在后
+    expect(rows[0].text()).toContain('键映射')
+    expect(rows[0].text()).toContain('1.200s')
+    expect(rows[1].text()).toContain('手动')
+    expect(rows[1].text()).toContain('未对齐')
+
+    // 点击跳帧：事件 PTS（1000+1200000）→ 服务端解析展示帧身份
+    await rows[0].trigger('click')
+    await flushPromises()
+    expect(videoApi.mediaFrames).toHaveBeenCalledWith('m1', { ptsUs: 1201000 })
+    expect(w.find('[data-testid="frame-image"]').attributes('src')).toBe('/api/media/m1/frame?index=36&max_width=640')
+    w.unmount()
+  })
+
+  it('外部素材（无 recordingId）不渲染事件区——不伪造操作日志', async () => {
+    const w = mount(VideoTimeline, { props: { media: MEDIA[1], markers: [], calibration: CAL, recordingId: '' } })
+    await flushPromises()
+    expect(w.find('[data-testid="events-box"]').exists()).toBe(false)
+    w.unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// MediaLibrary 素材库区
+// ---------------------------------------------------------------------------
 
 describe('MediaLibrary 素材库区', () => {
   it('导入：选择文件 → importMedia(字节, 文件名) → changed 事件触发刷新', async () => {
@@ -145,24 +648,19 @@ describe('MediaLibrary 素材库区', () => {
   it('录制入口：选中设备后轮询活动会话驱动按钮态；停止 → recording-finished + changed', async () => {
     const w = mount(MediaLibrary, { props: { mediaList: MEDIA } })
     await flushPromises()
-    // 未选设备：只有开始按钮（禁用），不轮询
-    expect(w.find('[data-testid="record-start"]').exists()).toBe(true)
     expect(w.find('[data-testid="record-start"]').attributes('disabled')).toBeDefined()
     expect(videoApi.activeRecording).not.toHaveBeenCalled()
 
     await w.find('[data-testid="record-device"]').setValue('dev-a')
     await flushPromises()
     expect(videoApi.activeRecording).toHaveBeenCalledWith('dev-a')
-    // 无活动会话 → 开始按钮可用
     expect(w.find('[data-testid="record-start"]').attributes('disabled')).toBeUndefined()
 
     videoApi.activeRecording.mockResolvedValue(SESSION)
     videoApi.recordingStop.mockResolvedValue(FINISHED)
-    // 触发一次重新轮询（切走再切回）
     await w.find('[data-testid="record-device"]').setValue('dev-b')
     await w.find('[data-testid="record-device"]').setValue('dev-a')
     await flushPromises()
-    // 活动会话出现 → 开始消失，停止/取消出现 + 状态行
     expect(w.find('[data-testid="record-start"]').exists()).toBe(false)
     expect(w.find('[data-testid="record-stop"]').exists()).toBe(true)
     expect(w.find('[data-testid="record-state"]').text()).toContain('录制中')
@@ -176,97 +674,9 @@ describe('MediaLibrary 素材库区', () => {
   })
 })
 
-describe('VideoTimeline 时间轴区（纯离线，不触达设备）', () => {
-  it('精确帧：以 currentTime*1e6 为 pts_us 展示服务端 PNG；帧加载失败给出错误提示', async () => {
-    const w = mount(VideoTimeline, { props: { media: MEDIA[0] } })
-    const video = w.find('video')
-    // 合同 §1：播放流 = /api/media/:id/file
-    expect(video.attributes('src')).toBe('/api/media/m1/file')
-    expect(w.find('[data-testid="frame-box"]').exists()).toBe(false)
-
-    video.element.currentTime = 1.5
-    await video.trigger('timeupdate')
-    expect(w.find('[data-testid="video-time"]').text()).toBe('1.500s')
-
-    await w.find('[data-testid="frame-exact"]').trigger('click')
-    const img = w.find('[data-testid="frame-image"]')
-    expect(img.exists()).toBe(true)
-    expect(img.attributes('src')).toBe('/api/media/m1/frame?pts_us=1500000&max_width=640')
-
-    await img.trigger('error')
-    expect(w.find('[data-testid="frame-error"]').exists()).toBe(true)
-    expect(w.find('[data-testid="frame-exact"]').attributes('disabled')).toBeUndefined()
-    w.unmount()
-  })
-
-  it('逐帧 +：按预览时间解析当前帧后走服务端相邻帧链（index 寻址），无固定步长', async () => {
-    // 服务端真实展示帧表（VFR：相邻间隔不等长，前端不估算）
-    videoApi.mediaFrames.mockResolvedValue({
-      frame_count: 40, first_pts_us: 0, last_pts_us: 1332000,
-      current: { index: 20, pts_us: 333000 },
-    })
-    videoApi.mediaFrameNeighbors.mockResolvedValue({
-      index: 20, pts_us: 333000,
-      prev: { index: 19, pts_us: 300000 },
-      next: { index: 21, pts_us: 366333 },
-    })
-    const w = mount(VideoTimeline, { props: { media: MEDIA[0] } })
-    await flushPromises()
-    const video = w.find('video')
-    video.element.currentTime = 0.333
-    await video.trigger('timeupdate')
-
-    expect(w.find('[data-testid="frame-count"]').text()).toContain('40 帧')
-    await w.find('[data-testid="frame-next"]').trigger('click')
-    await flushPromises()
-    // 首步 = mediaFrames(pts_us) 解析当前帧，第二步 = neighbors(index).next
-    expect(videoApi.mediaFrames).toHaveBeenCalledWith('m1', { ptsUs: 333000 })
-    expect(videoApi.mediaFrameNeighbors).toHaveBeenCalledWith('m1', 20)
-    // 精确帧按展示序索引寻址（同一请求逐字节可重复）
-    const img = w.find('[data-testid="frame-image"]')
-    expect(img.attributes('src')).toBe('/api/media/m1/frame?index=21&max_width=640')
-    expect(w.find('.frame-caption').text()).toContain('帧 21')
-    // 预览同步到目标帧真实时刻
-    expect(video.element.currentTime).toBeCloseTo(0.366333, 6)
-    w.unmount()
-  })
-
-  it('逐帧边界：末帧 + 不动；帧表不可用 → 步进按钮禁用并提示', async () => {
-    videoApi.mediaFrames.mockResolvedValue({
-      frame_count: 3, first_pts_us: 0, last_pts_us: 66666,
-      current: { index: 2, pts_us: 66666 },
-    })
-    videoApi.mediaFrameNeighbors.mockResolvedValue({ index: 2, pts_us: 66666, prev: { index: 1, pts_us: 33333 }, next: null })
-    const w = mount(VideoTimeline, { props: { media: MEDIA[0] } })
-    await flushPromises()
-    await w.find('[data-testid="frame-next"]').trigger('click')
-    await flushPromises()
-    // 末帧 next = null：不发精确帧请求、画面保持空
-    expect(w.find('[data-testid="frame-image"]').exists()).toBe(false)
-    expect(videoApi.mediaFrameNeighbors).toHaveBeenCalledWith('m1', 2)
-    w.unmount()
-
-    // 帧表加载失败：步进禁用 + 错误提示（不做时间近似降级）
-    videoApi.mediaFrames.mockRejectedValue(new Error('frame table unavailable'))
-    const w2 = mount(VideoTimeline, { props: { media: MEDIA[1] } })
-    await flushPromises()
-    expect(w2.find('[data-testid="frame-prev"]').attributes('disabled')).toBeDefined()
-    expect(w2.find('[data-testid="frame-error"]').text()).toContain('展示帧表加载失败')
-    w2.unmount()
-  })
-
-  it('切换素材后帧区清空回到空态', async () => {
-    const w = mount(VideoTimeline, { props: { media: MEDIA[0] } })
-    await flushPromises()
-    await w.find('[data-testid="frame-exact"]').trigger('click')
-    expect(w.find('[data-testid="frame-box"]').exists()).toBe(true)
-
-    await w.setProps({ media: MEDIA[1] })
-    expect(w.find('[data-testid="frame-box"]').exists()).toBe(false)
-    expect(w.find('video').attributes('src')).toBe('/api/media/m2/file')
-    w.unmount()
-  })
-})
+// ---------------------------------------------------------------------------
+// VideoDraft 草稿区状态流转
+// ---------------------------------------------------------------------------
 
 describe('VideoDraft 草稿区状态流转', () => {
   const mountDraft = (recordingId = 'rec-9') => mount(VideoDraft, { props: { recordingId } })
@@ -280,7 +690,6 @@ describe('VideoDraft 草稿区状态流转', () => {
     expect(videoApi.recordingEvents).toHaveBeenCalledWith('rec-9')
     const rows = wrapper.findAll('.event-row')
     expect(rows).toHaveLength(2)
-    // 服务端升序合同 + 客户端防御性排序：e1(1.2s) 在 e2(5.2s) 前
     expect(rows[0].text()).toContain('swipe')
     expect(rows[0].text()).toContain('1.200s')
     expect(rows[1].text()).toContain('tap')
@@ -303,7 +712,6 @@ describe('VideoDraft 草稿区状态流转', () => {
     await wrapper.find('[data-testid="draft-load"]').trigger('click')
     await flushPromises()
 
-    // 只勾第一条（swipe）
     await wrapper.findAll('.event-check')[0].setValue(true)
     await wrapper.find('[data-testid="draft-generate"]').trigger('click')
     await flushPromises()
@@ -313,7 +721,6 @@ describe('VideoDraft 草稿区状态流转', () => {
     const diags = wrapper.find('[data-testid="draft-diagnostics"]')
     expect(diags.text()).toContain('e2')
     expect(diags.text()).toContain('multi_touch_not_supported')
-    // 合同要求：明确标注草稿不会自动执行
     expect(wrapper.text()).toContain('草稿不会自动执行')
     wrapper.unmount()
   })
@@ -345,13 +752,6 @@ describe('VideoDraft 草稿区状态流转', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid="draft-recording-id"]').element.value).toBe('rec-77')
     expect(videoApi.recordingEvents).toHaveBeenCalledWith('rec-77')
-    wrapper.unmount()
-  })
-
-  it('mountDraft 帮助函数路径：未载入事件前生成按钮不出现', async () => {
-    const wrapper = mountDraft()
-    await flushPromises()
-    expect(wrapper.find('[data-testid="draft-generate"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })

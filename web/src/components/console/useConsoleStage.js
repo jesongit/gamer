@@ -1,6 +1,22 @@
-import { computed, onUnmounted, reactive, ref, shallowRef } from 'vue'
+import { computed, onUnmounted, reactive, ref, shallowRef, watch } from 'vue'
 import { api } from '../../api'
 import { videoApi } from '../video/videoApi'
+
+/**
+ * 舞台媒体切换请求（Phase 6 项目联动，计划 §9.3）：右侧视频工作台面板「打开
+ * 项目」时请求左侧舞台切到该项目主媒体。模块级单例 + 序号去重；useConsoleStage
+ * 内部 watch 消费——媒体切换只动舞台来源状态，**不改变** deviceId /
+ * androidPackageName / currentPackageId（四 Context 命名纪律，plan §39）。
+ */
+export const stageMediaRequest = reactive({ seq: 0, mediaId: '' })
+
+/** 请求舞台切到指定媒体（供视频工作台面板调用）。 */
+export function requestStageMedia(mediaId) {
+  const id = String(mediaId || '')
+  if (!id) return
+  stageMediaRequest.seq += 1
+  stageMediaRequest.mediaId = id
+}
 
 /**
  * 统一舞台来源 StageSource（视频工作台 V1，实施合同 §6 / 计划 §4.2）：
@@ -425,6 +441,15 @@ export function useConsoleStage({
     activeSession.value = null
     void pollActiveSession()
   }
+
+  // 项目面板联动（Phase 6）：消费 stageMediaRequest（最新一条生效）。
+  // loadMedia 内部已完成 kind 切换 + generation 递增；设备/包身份不受影响。
+  watch(() => stageMediaRequest.seq, () => {
+    const id = stageMediaRequest.mediaId
+    if (!id) return
+    if (kind.value === 'media' && mediaMeta.value?.id === id) return
+    void loadMedia(id)
+  })
 
   // 按钮态轮询：挂载即启动（录制属服务端权威，与浏览器/WebRTC 连接态无关）
   void pollActiveSession()

@@ -318,6 +318,7 @@ impl RuntimeServices {
         // 校验与 gamer.keymap 的方案校验。裸 Core（不注册）时保存不做内容
         // 校验（§8.9 验收锚点）。
         extensions::gamer_yaml::register_resource_handlers(&packages);
+        extensions::video::project::register_resource_handlers(&packages);
         extensions::register_resource_handlers(&packages);
         let viewers: webrtc::ViewerMap =
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
