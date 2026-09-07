@@ -24,6 +24,11 @@ pub(crate) enum Permission {
     RunControl,
     RuntimeSleep,
     LogWrite,
+    MediaRead,
+    MediaImport,
+    MediaRecord,
+    MediaWrite,
+    MediaEventsRead,
 }
 
 impl Permission {
@@ -44,6 +49,11 @@ impl Permission {
             "run.control" => Ok(Self::RunControl),
             "runtime.sleep" => Ok(Self::RuntimeSleep),
             "log.write" => Ok(Self::LogWrite),
+            "media.read" => Ok(Self::MediaRead),
+            "media.import" => Ok(Self::MediaImport),
+            "media.record" => Ok(Self::MediaRecord),
+            "media.write" => Ok(Self::MediaWrite),
+            "media.events.read" => Ok(Self::MediaEventsRead),
             forbidden
                 if forbidden == "filesystem"
                     || forbidden.starts_with("filesystem.")
@@ -78,6 +88,11 @@ impl Permission {
             Self::RunControl => "run.control",
             Self::RuntimeSleep => "runtime.sleep",
             Self::LogWrite => "log.write",
+            Self::MediaRead => "media.read",
+            Self::MediaImport => "media.import",
+            Self::MediaRecord => "media.record",
+            Self::MediaWrite => "media.write",
+            Self::MediaEventsRead => "media.events.read",
         }
     }
 
@@ -93,6 +108,11 @@ impl Permission {
             Self::RunSubmit | Self::RunControl => HostApiDomain::Run,
             Self::RuntimeSleep => HostApiDomain::Runtime,
             Self::LogWrite => HostApiDomain::Log,
+            Self::MediaRead
+            | Self::MediaImport
+            | Self::MediaRecord
+            | Self::MediaWrite
+            | Self::MediaEventsRead => HostApiDomain::Media,
         }
     }
 }
