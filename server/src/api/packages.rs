@@ -41,7 +41,8 @@ use serde_json::{json, Value};
 use super::common::run_blocking_api;
 use super::{ApiError, AppState};
 use crate::package_archive::{
-    self, export_package, extract_archive, validate_and_read_manifest, ArchiveError,
+    self, export_package, extract_archive, media_file_entry, parse_media_index,
+    validate_and_read_manifest, ArchiveError, MediaIndex,
 };
 use crate::resources::{is_valid_scope_id, PackageInput, PackageStore};
 
@@ -202,6 +203,7 @@ pub(super) async fn api_get_package(
     Path(pkg): Path<String>,
 ) -> Response {
     let extensions = st.extensions.clone();
+    let cfg = st.cfg.clone();
     match run_blocking_api(move || -> Result<Value, ApiError> {
         let store = store_of(&st);
         let manifest = store.manifest(&pkg).map_err(not_found_or_internal)?;
@@ -209,10 +211,31 @@ pub(super) async fn api_get_package(
         let installed = extensions
             .list()
             .map_err(|e| internal(anyhow::anyhow!(e.to_string())))?;
+        // 媒体引用登记（Phase 8 §11.1 查询面）：导出确认弹窗与详情展示消费；
+        // 媒体库不可用不阻断详情（entries 为空）。
+        let (media_refs, media_total_bytes) =
+            match crate::media::service(&cfg).refs_for_package(&pkg) {
+                Ok(entries) => {
+                    // 总大小按素材内容去重（同一素材被多个引用条目共享时只计一次）
+                    let mut seen = std::collections::HashSet::new();
+                    let total_bytes = entries
+                        .iter()
+                        .filter(|e| seen.insert(e.media.sha256.clone()))
+                        .map(|e| e.media.size)
+                        .sum();
+                    (entries, total_bytes)
+                }
+                Err(error) => {
+                    tracing::warn!(package = %pkg, %error, "查询媒体引用失败");
+                    (Vec::new(), 0)
+                }
+            };
         Ok(json!({
             "package": manifest_json(&manifest),
             "stats": serde_json::to_value(&stats).unwrap_or_default(),
             "plugin_states": plugin_states_json(&manifest, &stats, &installed),
+            "media_refs": media_refs_json(&media_refs),
+            "media_total_bytes": media_total_bytes,
         }))
     })
     .await
@@ -220,6 +243,26 @@ pub(super) async fn api_get_package(
         Ok(value) => Json(value).into_response(),
         Err(e) => e.into_response(),
     }
+}
+
+/// 媒体引用条目 JSON（去重：同一素材被同插件多引用时按 (id,plugin,kind) 展示）。
+fn media_refs_json(entries: &[crate::media::PackageMediaEntry]) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    entries
+        .iter()
+        .filter(|e| seen.insert((e.media.id.0.clone(), e.plugin_id.clone(), e.kind.clone())))
+        .map(|e| {
+            json!({
+                "id": e.media.id.0,
+                "name": e.media.name,
+                "sha256": e.media.sha256,
+                "size": e.media.size,
+                "plugin_id": e.plugin_id,
+                "kind": e.kind,
+                "state": e.media.state,
+            })
+        })
+        .collect()
 }
 
 /// GET /api/packages/:pkg/compatibility?android_package=<pkg> — Android Target
@@ -358,6 +401,19 @@ pub(super) async fn api_delete_package(
         Ok(false) => return ApiError::not_found(format!("配置不存在: {pkg}")).into_response(),
         Err(e) => return e.into_response(),
     }
+    // Phase 8 §11.1 引用生命周期：包删除后其项目文件已不存在，解除该包名下
+    // 的全部媒体引用（否则残留引用永久阻塞素材删除）。best effort + 日志。
+    let cfg_for_refs = st.cfg.clone();
+    let pkg_for_refs = pkg.clone();
+    if let Err(error) = run_blocking_api(move || -> Result<usize, ApiError> {
+        crate::media::service(&cfg_for_refs)
+            .release_package(&pkg_for_refs)
+            .map_err(internal)
+    })
+    .await
+    {
+        tracing::warn!(package = %pkg, "解除包媒体引用失败: {error:?}");
+    }
     // 旧 App Package 卸载语义的延续：删除包后，绑定该包的任务挂起（幂等、
     // 不删任务行）；预设记录保留。失败不阻塞删除结果（best effort + 日志）。
     if let Err(error) = crate::timer_core::TimerCore::new(st.db.clone())
@@ -376,12 +432,41 @@ pub(super) async fn api_duplicate_package(
     Json(req): Json<DuplicateReq>,
 ) -> Response {
     let new_id = req.new_id.trim().to_string();
+    let cfg = st.cfg.clone();
     match run_blocking_api(move || -> Result<Value, ApiError> {
         let store = store_of(&st);
         let manifest = store
             .duplicate_package(&pkg, &new_id)
             .map_err(store_error)?;
         publish_package_presets(&store, st.db.clone(), &manifest.id).map_err(internal)?;
+        // Phase 8 §11.1：副本与源包共享同一媒体库素材——为副本登记引用
+        // （best effort；媒体库不可用不阻断复制结果）。
+        let media = crate::media::service(&cfg);
+        match media.refs_for_package(&pkg) {
+            Ok(entries) => {
+                let mut seen = std::collections::HashSet::new();
+                for entry in entries {
+                    let r = crate::media::MediaRef {
+                        package_id: new_id.clone(),
+                        plugin_id: entry.plugin_id.clone(),
+                        kind: entry.kind.clone(),
+                    };
+                    if !seen.insert((
+                        entry.media.id.0.clone(),
+                        r.plugin_id.clone(),
+                        r.kind.clone(),
+                    )) {
+                        continue;
+                    }
+                    if let Err(error) = media.add_ref(&entry.media.id, r) {
+                        tracing::warn!(media = %entry.media.id.0, %error, "副本媒体引用登记失败");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(package = %pkg, %error, "副本媒体引用查询失败");
+            }
+        }
         Ok(manifest_json(&manifest))
     })
     .await
@@ -665,6 +750,12 @@ pub(super) async fn api_delete_plugin_resource(
 // ---------- 导入 / 导出 ----------
 
 /// POST /api/packages/import — zip/.gamerpkg 字节 body。
+///
+/// 含媒体包（Phase 8 §11.1）：`media/index.json` + `media/files/<sha256>`
+/// 先校验路径/大小/哈希/逻辑 id，素材经暂存目录安全落盘后原子提交到媒体库
+/// （元数据随索引恢复，不重跑 ffprobe）；任一素材失败 → 回滚本次新建素材并
+/// 拒绝整个导入（不留半成品）。不含素材的索引条目按 sha256 自动重挂已有
+/// 素材引用，匹配不到 → 保留缺失状态（索引随包落盘，待重新关联）。
 pub(super) async fn api_import_package(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -691,8 +782,9 @@ pub(super) async fn api_import_package(
             .into_response();
         }
     }
-    // 解压 → 验证 manifest → 验证 id → 原子安装/替换（照 plan §8）。
+    // 解压 → 验证 manifest → 验证 id → 恢复媒体 → 原子安装/替换（照 plan §8）。
     // Ok = 完成；Err(StructuredConflict) = 已存在且未带 overwrite 的结构化 409。
+    let cfg = st.cfg.clone();
     let staged = run_blocking_api(move || -> Result<ImportOutcome, ApiError> {
         let store = store_of(&st);
         // 1) 解压前先行归档安全校验（limits/中央目录/manifest 可解析）
@@ -707,16 +799,29 @@ pub(super) async fn api_import_package(
                 let _ = std::fs::remove_dir_all(&staging);
             })
             .map_err(archive_error)?;
-        // 3) 目标存在性 → 409 / 原子替换
+        // 3) 媒体恢复（失败 → 函数内部回滚新建素材 + 调用方清 staging，
+        //    导入整体拒绝）
+        let media = crate::media::service(&cfg);
+        let (media_summary, created_media) = match import_package_media(&media, &staging, &manifest.id)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(ApiError::bad_request(format!("媒体素材恢复失败: {error}")));
+            }
+        };
+        // 4) 目标存在性 → 409 / 原子替换
         let final_dir = match store.package_dir(&manifest.id) {
             Ok(dir) => dir,
             Err(error) => {
+                rollback_created_media(&media, &created_media, &manifest.id);
                 let _ = std::fs::remove_dir_all(&staging);
                 return Err(ApiError::bad_request(error.to_string()));
             }
         };
         if final_dir.exists() {
             if !overwrite {
+                rollback_created_media(&media, &created_media, &manifest.id);
                 let _ = std::fs::remove_dir_all(&staging);
                 // 结构化 409：附已存包 manifest 摘要（覆盖确认提示由前端组装）
                 let existing = store
@@ -739,25 +844,37 @@ pub(super) async fn api_import_package(
                 .staging_root()
                 .join(uuid::Uuid::new_v4().simple().to_string());
             if let Err(error) = std::fs::rename(&final_dir, &trash) {
+                rollback_created_media(&media, &created_media, &manifest.id);
                 let _ = std::fs::remove_dir_all(&staging);
                 return Err(ApiError::internal(format!("配置替换失败: {error}")));
             }
             if let Err(error) = std::fs::rename(&staging, &final_dir) {
                 let _ = std::fs::rename(&trash, &final_dir);
+                rollback_created_media(&media, &created_media, &manifest.id);
                 let _ = std::fs::remove_dir_all(&staging);
                 return Err(ApiError::internal(format!("配置替换失败: {error}")));
             }
             let _ = std::fs::remove_dir_all(&trash);
         } else if let Err(error) = std::fs::rename(&staging, &final_dir) {
+            rollback_created_media(&media, &created_media, &manifest.id);
             let _ = std::fs::remove_dir_all(&staging);
             return Err(ApiError::internal(format!("配置安装失败: {error}")));
         }
-        // 4) 发布包内预设（plugins/*/presets/*.yaml，幂等）
-        publish_package_presets(&store, st.db.clone(), &manifest.id).map_err(internal)?;
+        // 5) 发布包内预设（plugins/*/presets/*.yaml，幂等）；失败即整体失败
+        //    （避免半套预设静默生效），回滚本次新建素材。
+        if let Err(error) = publish_package_presets(&store, st.db.clone(), &manifest.id) {
+            rollback_created_media(&media, &created_media, &manifest.id);
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(internal(error));
+        }
         let stored = store.manifest(&manifest.id).map_err(not_found_or_internal)?;
+        let mut manifest = manifest_json(&stored);
+        if let Some(obj) = manifest.as_object_mut() {
+            obj.insert("media".into(), media_summary);
+        }
         Ok(ImportOutcome::Done {
             overwritten: overwrite,
-            manifest: manifest_json(&stored),
+            manifest,
         })
     })
     .await;
@@ -778,13 +895,153 @@ pub(super) async fn api_import_package(
     }
 }
 
-/// POST /api/packages/:pkg/export — .gamerpkg 字节流。
+/// 媒体导入摘要（响应 `media` 字段）。
+fn media_summary_json(summary: &MediaImportSummary) -> Value {
+    json!({
+        "total": summary.total,
+        "imported": summary.imported,
+        "reused": summary.reused,
+        "reattached": summary.reattached,
+        "missing": summary.missing,
+    })
+}
+
+#[derive(Default)]
+struct MediaImportSummary {
+    total: usize,
+    imported: usize,
+    reused: usize,
+    reattached: usize,
+    missing: usize,
+}
+
+/// 从 staging 恢复归档媒体（Phase 8 §11.1）。返回摘要 + 本次新建的媒体 id
+/// （供调用方在包安装等后续步骤失败时回滚）。无媒体索引的归档 = 空摘要。
+/// 内部任何一步失败：先回滚本次新建的素材再返回 Err（不留半成品）。
+fn import_package_media(
+    media: &crate::media::MediaService,
+    staging: &std::path::Path,
+    package_id: &str,
+) -> anyhow::Result<(Value, Vec<crate::media::MediaId>)> {
+    let index_path = staging.join("media").join("index.json");
+    if !index_path.is_file() {
+        return Ok((
+            media_summary_json(&MediaImportSummary::default()),
+            Vec::new(),
+        ));
+    }
+    let bytes = std::fs::read(&index_path)?;
+    let index: MediaIndex = parse_media_index(&bytes)?;
+    let mut created: Vec<crate::media::MediaId> = Vec::new();
+    let restore = (|| -> anyhow::Result<MediaImportSummary> {
+        // 覆盖导入语义：包数据整体替换，旧引用先全量解除，再按新索引重新
+        // 登记（全新安装时为幂等 no-op）。
+        let _ = media.release_package(package_id);
+
+        let mut summary = MediaImportSummary {
+            total: index.entries.len(),
+            ..Default::default()
+        };
+        for entry in &index.entries {
+            let register_ref = crate::media::MediaRef {
+                package_id: package_id.to_string(),
+                plugin_id: entry.plugin_id.trim().to_string(),
+                kind: entry.kind.trim().to_string(),
+            };
+            let file = staging.join(media_file_entry(&entry.sha256));
+            let present = file.is_file();
+            if entry.included != present {
+                anyhow::bail!(
+                    "素材 {} 的 included={} 与归档字节存在性不一致（{}）",
+                    entry.id,
+                    entry.included,
+                    media_file_entry(&entry.sha256)
+                );
+            }
+            if entry.included {
+                let bytes = std::fs::read(&file)?;
+                let outcome = media.restore_media(
+                    crate::media::RestoreMedia {
+                        id: crate::media::MediaId(entry.id.clone()),
+                        name: entry.name.trim().to_string(),
+                        sha256: entry.sha256.to_ascii_lowercase(),
+                        size: entry.size,
+                        probe: entry.probe.clone(),
+                    },
+                    &bytes,
+                    register_ref,
+                )?;
+                match outcome {
+                    crate::media::RestoreOutcome::Imported(meta) => {
+                        summary.imported += 1;
+                        created.push(meta.id);
+                    }
+                    crate::media::RestoreOutcome::Reused(_) => summary.reused += 1,
+                    crate::media::RestoreOutcome::Collided(meta) => {
+                        summary.imported += 1;
+                        created.push(meta.id);
+                    }
+                }
+            } else if media.reattach_ref(
+                &crate::media::MediaId(entry.id.clone()),
+                &entry.sha256,
+                register_ref,
+            )? {
+                summary.reattached += 1;
+            } else {
+                // 缺失状态保留：索引已随包落盘（packages/<pkg>/media/index.json），
+                // 用户后续可重新关联（再导入含素材包或手动登记引用）。
+                summary.missing += 1;
+            }
+        }
+        Ok(summary)
+    })();
+    match restore {
+        Ok(summary) => Ok((media_summary_json(&summary), created)),
+        Err(error) => {
+            rollback_created_media(media, &created, package_id);
+            Err(error)
+        }
+    }
+}
+
+/// 回滚本次导入新建的素材（解除本包登记的引用后删除；复用/重挂的素材不动）。
+fn rollback_created_media(
+    media: &crate::media::MediaService,
+    created: &[crate::media::MediaId],
+    package_id: &str,
+) {
+    for id in created {
+        let _ = (|| -> anyhow::Result<()> {
+            let meta = media.get(id)?;
+            let remaining: Vec<crate::media::MediaRef> = meta
+                .refs
+                .iter()
+                .filter(|r| r.package_id != package_id)
+                .cloned()
+                .collect();
+            media.set_refs(id, &remaining)?;
+            media.delete(id)
+        })();
+    }
+}
+
+/// POST /api/packages/:pkg/export?include_media=true — .gamerpkg 字节流。
+/// 默认不含原始素材字节（仅 `media/index.json` 引用登记）；`include_media=true`
+/// 追加 `media/files/<sha256>` 素材（大小上限与归档总量预算一致）。
 pub(super) async fn api_export_package(
     State(st): State<AppState>,
     Path(pkg): Path<String>,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
 ) -> Response {
+    let include_media = raw
+        .as_deref()
+        .map(|q| q.split('&').any(|pair| pair == "include_media=true"))
+        .unwrap_or(false);
+    let cfg = st.cfg.clone();
     let built = run_blocking_api(move || -> Result<package_archive::BuiltPackage, ApiError> {
-        export_package(&store_of(&st), &pkg).map_err(archive_error)
+        let media = crate::media::service(&cfg);
+        export_package(&store_of(&st), &pkg, Some(&media), include_media).map_err(archive_error)
     })
     .await;
     match built {

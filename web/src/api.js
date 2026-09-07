@@ -407,9 +407,15 @@ export const api = {
     )
     return readResult(r)
   },
-  // 导出当前 Package 为 .gamerpkg：200 二进制 + Content-Disposition 文件名 + X-Content-Sha256
-  exportPackageArchive: async (packageId) => {
-    const r = await req('POST', `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}/export`, {})
+  // 导出当前 Package 为 .gamerpkg：200 二进制 + Content-Disposition 文件名 + X-Content-Sha256。
+  // includeMedia=true → ?include_media=true（归档追加 media/files/<sha256> 素材字节；
+  // 默认只带 media/index.json 引用登记，不含原始大视频）
+  exportPackageArchive: async (packageId, { includeMedia = false } = {}) => {
+    const r = await req(
+      'POST',
+      `/api/packages/${encodeURIComponent(requireId(packageId, 'package_id'))}/export${includeMedia ? '?include_media=true' : ''}`,
+      {},
+    )
     const blob = await r.blob()
     return {
       blob,

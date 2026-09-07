@@ -51,12 +51,72 @@ pub enum MediaState {
 }
 
 /// 业务侧引用（Package 内插件项目对素材的逻辑引用；删除被引用素材须拒绝）。
+///
+/// 引用生命周期（Phase 8 §11.1 契约，写入方对接说明见
+/// `docs/evidence/phase8_package_media_lifecycle.md`）：
+/// - 登记：`POST /api/media/:id/refs`（全量替换）或服务层 [`MediaService::add_ref`]
+///   （幂等单条）；视频项目保存/素材关联时登记
+///   `{package_id: <包 id>, plugin_id: <插件 id>, kind: "project"}`。
+/// - 解除：项目删除/素材取消关联时全量替换或 [`MediaService::remove_ref`]。
+/// - Package 删除钩子：服务端自动 [`MediaService::release_package`]（引用的
+///   项目文件已随包删除，残留引用会永久阻塞素材删除）。
+/// - 删除保护：refs 非空 → 结构化 `Referenced`（409 `media_referenced`）；
+///   引用清空后素材可经既有 `DELETE /api/media/:id` 回收（GC = 显式解除 +
+///   既有删除，无后台扫描）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaRef {
     pub package_id: String,
     pub plugin_id: String,
     /// 引用用途（如 `project`），Core 不解释。
     pub kind: String,
+}
+
+/// Package 关联媒体条目（[`MediaService::refs_for_package`] 的展开形态；
+/// 导出预览/详情展示与归档媒体索引的来源）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PackageMediaEntry {
+    pub media: MediaMetadata,
+    pub plugin_id: String,
+    pub kind: String,
+}
+
+/// 归档导入的媒体恢复请求（package_archive 的媒体索引经校验后传入；
+/// 元数据随索引恢复，不重跑 ffprobe）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RestoreMedia {
+    /// 逻辑媒体 id（尽量原样保留，使包内项目引用导入即有效）。
+    pub id: MediaId,
+    pub name: String,
+    /// 内容身份（64 位 hex，小写比较）。
+    pub sha256: String,
+    pub size: u64,
+    /// 导出侧探测元数据；缺省 = 未知（container/codec 空、宽高 0）。
+    pub probe: Option<MediaProbeMeta>,
+}
+
+/// 归档携带的媒体探测元数据（导出时取自库内 metadata；导入时原样恢复）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaProbeMeta {
+    pub container: String,
+    pub codec: String,
+    pub width: u32,
+    pub height: u32,
+    #[serde(default)]
+    pub rotation: u16,
+    #[serde(default)]
+    pub duration_us: Option<u64>,
+}
+
+/// [`MediaService::restore_media`] 的结果。
+#[derive(Debug, Clone, PartialEq)]
+pub enum RestoreOutcome {
+    /// 新建媒体（占用给定逻辑 id）。
+    Imported(MediaMetadata),
+    /// 同 id 同内容已存在：仅补登记引用（幂等）。
+    Reused(MediaMetadata),
+    /// 逻辑 id 被不同内容占用：以新随机 id 导入（包内按旧 id 的引用需要
+    /// 用户重新关联——sha256 相同才能走 [`RestoreOutcome::Reused`]）。
+    Collided(MediaMetadata),
 }
 
 /// 媒体元数据（`metadata.json` 形态即 wire 形态）。
@@ -680,16 +740,7 @@ impl MediaService {
     pub fn set_refs(&self, id: &MediaId, refs: &[MediaRef]) -> anyhow::Result<()> {
         Self::validate_id(id)?;
         for r in refs {
-            crate::resources::validate_scope_id("refs.package_id", &r.package_id)
-                .map_err(|e| MediaError::invalid(format!("refs.package_id 非法: {e}")))?;
-            crate::resources::validate_scope_id("refs.plugin_id", &r.plugin_id)
-                .map_err(|e| MediaError::invalid(format!("refs.plugin_id 非法: {e}")))?;
-            let kind = r.kind.trim();
-            if kind.is_empty() || kind.len() > 64 || kind.chars().any(char::is_control) {
-                return Err(MediaError::invalid(
-                    "refs.kind 非法（1..=64 字节且不含控制字符）",
-                ));
-            }
+            validate_ref(r)?;
         }
         let _io = self.io_lock.lock();
         let dir = self.media_dir(id);
@@ -705,6 +756,264 @@ impl MediaService {
         write_metadata(&dir, &meta)
     }
 
+    /// 幂等登记一条业务引用（服务层写入方 API；REST 全量替换端点之外的
+    /// 增量形态，避免读-改-写竞态）。已存在同三元组 → no-op。
+    pub fn add_ref(&self, id: &MediaId, add: MediaRef) -> anyhow::Result<MediaMetadata> {
+        Self::validate_id(id)?;
+        validate_ref(&add)?;
+        let add = normalize_ref(add);
+        let _io = self.io_lock.lock();
+        let dir = self.media_dir(id);
+        let mut meta = read_metadata(&dir)?;
+        if !meta.refs.contains(&add) {
+            meta.refs.push(add);
+            write_metadata(&dir, &meta)?;
+        }
+        Ok(meta)
+    }
+
+    /// 幂等解除一条业务引用（三元组精确匹配）。不存在 → no-op。
+    /// 服务端内部当前仅测试消费；契约面归业务写入方（视频项目解除关联、
+    /// REST `POST /api/media/:id/refs` 全量替换之外的增量形态）。
+    #[allow(dead_code, reason = "引用解除契约：业务写入方按需消费")]
+    pub fn remove_ref(&self, id: &MediaId, target: &MediaRef) -> anyhow::Result<MediaMetadata> {
+        Self::validate_id(id)?;
+        validate_ref(target)?;
+        let target = normalize_ref(target.clone());
+        let _io = self.io_lock.lock();
+        let dir = self.media_dir(id);
+        let mut meta = read_metadata(&dir)?;
+        meta.refs.retain(|r| *r != target);
+        write_metadata(&dir, &meta)?;
+        Ok(meta)
+    }
+
+    /// Package 删除钩子：解除某 Package 名下的全部媒体引用（引用的项目文件
+    /// 已随包删除；残留引用会永久阻塞素材删除）。返回被改写的素材数。
+    pub fn release_package(&self, package_id: &str) -> anyhow::Result<usize> {
+        crate::resources::validate_scope_id("package id", package_id)
+            .map_err(|e| MediaError::invalid(format!("package id 非法: {e}")))?;
+        let package_id = package_id.trim();
+        let mut touched = 0usize;
+        let _io = self.io_lock.lock();
+        for meta in self.list_unlocked()? {
+            let before = meta.refs.len();
+            let remaining: Vec<MediaRef> = meta
+                .refs
+                .iter()
+                .filter(|r| r.package_id != package_id)
+                .cloned()
+                .collect();
+            if remaining.len() != before {
+                write_metadata(
+                    &self.media_dir(&meta.id),
+                    &MediaMetadata {
+                        refs: remaining,
+                        ..meta
+                    },
+                )?;
+                touched += 1;
+            }
+        }
+        Ok(touched)
+    }
+
+    /// 查询某 Package 名下的全部媒体引用（展开为 媒体×引用 条目；导出预览
+    /// 与归档媒体索引的来源）。
+    pub fn refs_for_package(&self, package_id: &str) -> anyhow::Result<Vec<PackageMediaEntry>> {
+        crate::resources::validate_scope_id("package id", package_id)
+            .map_err(|e| MediaError::invalid(format!("package id 非法: {e}")))?;
+        let package_id = package_id.trim();
+        let mut out = Vec::new();
+        for meta in self.list_unlocked()? {
+            for r in &meta.refs {
+                if r.package_id == package_id {
+                    out.push(PackageMediaEntry {
+                        media: meta.clone(),
+                        plugin_id: r.plugin_id.clone(),
+                        kind: r.kind.clone(),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 无字节导入的引用重挂（重新关联）：按逻辑 id + 内容 sha 在库中找到
+    /// 匹配素材则幂等登记引用并返回 true；找不到或内容不一致 → 保留缺失
+    /// 状态并返回 false（包内 media/index.json 记录引用，待用户重新关联）。
+    pub fn reattach_ref(
+        &self,
+        id: &MediaId,
+        sha256: &str,
+        register_ref: MediaRef,
+    ) -> anyhow::Result<bool> {
+        Self::validate_id(id)?;
+        if !is_sha256_hex(sha256) {
+            return Err(MediaError::invalid("媒体 sha256 必须是 64 位 hex"));
+        }
+        validate_ref(&register_ref)?;
+        let register_ref = normalize_ref(register_ref);
+        let _io = self.io_lock.lock();
+        let dir = self.media_dir(id);
+        let Ok(mut meta) = read_metadata(&dir) else {
+            return Ok(false);
+        };
+        if !meta.sha256.eq_ignore_ascii_case(sha256) {
+            return Ok(false);
+        }
+        if !meta.refs.contains(&register_ref) {
+            meta.refs.push(register_ref);
+            write_metadata(&dir, &meta)?;
+        }
+        Ok(true)
+    }
+
+    /// 归档媒体恢复（导入含媒体包；字节已由归档层做过大小/哈希核对，此处
+    /// 落盘前复核）：文件先写入暂存目录再原子改名提交，失败全量清理。
+    /// 元数据随 [`RestoreMedia`] 恢复（不重跑 ffprobe）。
+    ///
+    /// - 库中无该 id → 新建（`Imported`）；
+    /// - 同 id 同内容 → 仅补登记引用（`Reused`，幂等）；
+    /// - 同 id 不同内容 → 以新随机 id 导入（`Collided`，旧 id 引用需重关联）。
+    pub fn restore_media(
+        &self,
+        request: RestoreMedia,
+        bytes: &[u8],
+        register_ref: MediaRef,
+    ) -> anyhow::Result<RestoreOutcome> {
+        Self::validate_id(&request.id)?;
+        let name = sanitize_import_name(&request.name)?;
+        if !is_sha256_hex(&request.sha256) {
+            return Err(MediaError::invalid("媒体 sha256 必须是 64 位 hex"));
+        }
+        if request.size != bytes.len() as u64 {
+            return Err(MediaError::invalid(format!(
+                "媒体大小不一致（索引声明 {}，实际 {}）",
+                request.size,
+                bytes.len()
+            )));
+        }
+        let actual = sha256_hex(bytes);
+        if !actual.eq_ignore_ascii_case(&request.sha256) {
+            return Err(MediaError::invalid(format!(
+                "媒体内容哈希不一致（索引声明 {}，实际 {actual}）",
+                request.sha256
+            )));
+        }
+        validate_ref(&register_ref)?;
+        let register_ref = normalize_ref(register_ref);
+
+        let _io = self.io_lock.lock();
+        let dir = self.media_dir(&request.id);
+        if dir.exists() {
+            let meta = read_metadata(&dir)?;
+            if meta.sha256.eq_ignore_ascii_case(&request.sha256) {
+                let mut meta = meta;
+                if !meta.refs.contains(&register_ref) {
+                    meta.refs.push(register_ref);
+                    write_metadata(&dir, &meta)?;
+                }
+                return Ok(RestoreOutcome::Reused(meta));
+            }
+            // 逻辑 id 被不同内容占用：换新 id 导入
+            return self
+                .commit_restored(
+                    MediaId(uuid::Uuid::new_v4().simple().to_string()),
+                    name,
+                    bytes,
+                    request.probe.as_ref(),
+                    register_ref,
+                )
+                .map(RestoreOutcome::Collided);
+        }
+        self.commit_restored(
+            request.id,
+            name,
+            bytes,
+            request.probe.as_ref(),
+            register_ref,
+        )
+        .map(RestoreOutcome::Imported)
+    }
+
+    /// 恢复提交：暂存目录写齐 original + metadata.json 后整体改名（失败
+    /// 全量清理，不留半成品）。
+    fn commit_restored(
+        &self,
+        id: MediaId,
+        name: String,
+        bytes: &[u8],
+        probe: Option<&MediaProbeMeta>,
+        register_ref: MediaRef,
+    ) -> anyhow::Result<MediaMetadata> {
+        let staging = self.data_root.join(format!("{STAGING_PREFIX}{}", id.0));
+        fs::create_dir_all(&staging).map_err(|e| {
+            anyhow::Error::new(e).context(format!("创建导入暂存目录失败: {}", staging.display()))
+        })?;
+        let result = (|| -> anyhow::Result<MediaMetadata> {
+            let fallback = MediaProbeMeta {
+                container: String::new(),
+                codec: "unknown".into(),
+                width: 0,
+                height: 0,
+                rotation: 0,
+                duration_us: None,
+            };
+            let probe = probe.unwrap_or(&fallback);
+            let meta = MediaMetadata {
+                id: id.clone(),
+                name,
+                sha256: sha256_hex(bytes),
+                size: bytes.len() as u64,
+                duration_us: probe.duration_us,
+                container: probe.container.clone(),
+                codec: probe.codec.clone(),
+                width: probe.width,
+                height: probe.height,
+                rotation: probe.rotation,
+                source: MediaSource::Import,
+                state: MediaState::Ready,
+                created_at: now_rfc3339(),
+                refs: vec![register_ref],
+            };
+            fs::write(staging.join(original_file_name(&meta.name)), bytes)
+                .map_err(|e| anyhow::Error::new(e).context("写入导入文件失败"))?;
+            write_metadata(&staging, &meta)?;
+            fs::rename(&staging, self.media_dir(&id))
+                .map_err(|e| anyhow::Error::new(e).context("提交媒体目录失败（id 冲突？）"))?;
+            Ok(meta)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
+    }
+
+    /// list() 的已持锁变体（refs_for_package/release_package 复用；调用方
+    /// 必须已持有 io_lock）。
+    fn list_unlocked(&self) -> anyhow::Result<Vec<MediaMetadata>> {
+        let mut items = Vec::new();
+        let entries = match fs::read_dir(&self.data_root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(items),
+            Err(e) => return Err(anyhow::Error::new(e).context("读取媒体目录失败")),
+        };
+        for entry in entries.flatten() {
+            let dir_name = entry.file_name();
+            let Some(dir_name) = dir_name.to_str() else {
+                continue;
+            };
+            if dir_name.starts_with('.') || !entry.path().is_dir() {
+                continue;
+            }
+            if let Ok(meta) = read_metadata(&entry.path()) {
+                items.push(meta);
+            }
+        }
+        Ok(items)
+    }
+
     // ---------- 内部实现 ----------
 
     fn media_dir(&self, id: &MediaId) -> PathBuf {
@@ -714,16 +1023,10 @@ impl MediaService {
     /// media id 语法校验（路径安全）：非空、长度受限、仅字母数字与 `-_`、
     /// 不以点开头（暂存目录前缀隔离）。
     fn validate_id(id: &MediaId) -> anyhow::Result<()> {
-        let v = id.0.as_str();
-        let ok = !v.is_empty()
-            && v.len() <= MAX_MEDIA_ID_BYTES
-            && !v.starts_with('.')
-            && v.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
-        if ok {
+        if is_valid_media_id(&id.0) {
             Ok(())
         } else {
-            Err(MediaError::invalid(format!("media id 非法: {v:?}")))
+            Err(MediaError::invalid(format!("media id 非法: {:?}", id.0)))
         }
     }
 
@@ -903,6 +1206,52 @@ pub fn service(cfg: &Config) -> Arc<MediaService> {
 }
 
 // ---------- 纯函数助手（单测覆盖） ----------
+
+/// 引用三元组校验（service 层各引用入口共用）。
+fn validate_ref(r: &MediaRef) -> anyhow::Result<()> {
+    crate::resources::validate_scope_id("refs.package_id", &r.package_id)
+        .map_err(|e| MediaError::invalid(format!("refs.package_id 非法: {e}")))?;
+    crate::resources::validate_scope_id("refs.plugin_id", &r.plugin_id)
+        .map_err(|e| MediaError::invalid(format!("refs.plugin_id 非法: {e}")))?;
+    let kind = r.kind.trim();
+    if kind.is_empty() || kind.len() > 64 || kind.chars().any(char::is_control) {
+        return Err(MediaError::invalid(
+            "refs.kind 非法（1..=64 字节且不含控制字符）",
+        ));
+    }
+    Ok(())
+}
+
+/// 引用三元组规整（trim 后入库；比较与去重基于规整形态）。
+fn normalize_ref(mut r: MediaRef) -> MediaRef {
+    r.package_id = r.package_id.trim().to_string();
+    r.plugin_id = r.plugin_id.trim().to_string();
+    r.kind = r.kind.trim().to_string();
+    r
+}
+
+/// media id 语法（公开形态，供归档层媒体索引校验复用——语法权威在本模块）。
+pub fn is_valid_media_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_MEDIA_ID_BYTES
+        && !id.starts_with('.')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+/// 64 位 hex SHA-256 形态校验。
+pub fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// 测试与归档夹具专用：按 wire 形态直接写 metadata.json（生产写入一律走
+/// 服务方法，导入恢复路径用 [`MediaService::restore_media`]）。
+#[cfg(test)]
+#[doc(hidden)]
+pub fn write_metadata_for_test(dir: &Path, meta: &MediaMetadata) -> anyhow::Result<()> {
+    write_metadata(dir, meta)
+}
 
 /// metadata.json 原子写：tmp + rename（同卷原子替换，读侧要么旧要么新）。
 fn write_metadata(dir: &Path, meta: &MediaMetadata) -> anyhow::Result<()> {
@@ -1371,6 +1720,219 @@ mod tests {
                 .kind(),
             MediaErrorKind::NotFound
         );
+    }
+
+    fn project_ref(pkg: &str) -> MediaRef {
+        MediaRef {
+            package_id: pkg.into(),
+            plugin_id: "gamer.video".into(),
+            kind: "project".into(),
+        }
+    }
+
+    // ---------- 引用登记/解除/查询闭环（Phase 8 §11.1 写入方契约） ----------
+
+    #[test]
+    fn add_remove_ref_is_idempotent_and_release_package_clears_only_that_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_media_dir(root, "aaa1", "2026-09-07T01:00:00.000000Z", vec![]);
+        seed_media_dir(root, "aaa2", "2026-09-07T02:00:00.000000Z", vec![]);
+        let svc = test_service(root);
+        let id = MediaId("aaa1".into());
+
+        // 登记：幂等（重复 add 不产生重复条目）
+        svc.add_ref(&id, project_ref("pkg.a")).unwrap();
+        svc.add_ref(&id, project_ref("pkg.a")).unwrap();
+        svc.add_ref(&id, project_ref("pkg.b")).unwrap();
+        let meta = svc.get(&id).unwrap();
+        assert_eq!(meta.refs.len(), 2);
+        assert!(meta.refs.contains(&project_ref("pkg.a")));
+        assert!(meta.refs.contains(&project_ref("pkg.b")));
+
+        // 删除保护仍生效
+        assert_eq!(
+            svc.delete(&id)
+                .unwrap_err()
+                .downcast_ref::<MediaError>()
+                .unwrap()
+                .kind(),
+            MediaErrorKind::Referenced
+        );
+
+        // 解除：精确匹配 + 幂等（解除不存在的引用 = no-op）
+        let meta = svc.remove_ref(&id, &project_ref("pkg.a")).unwrap();
+        assert_eq!(meta.refs.len(), 1);
+        let meta = svc.remove_ref(&id, &project_ref("pkg.a")).unwrap();
+        assert_eq!(meta.refs.len(), 1);
+
+        // refs_for_package 查询：只展开目标包的引用
+        svc.add_ref(&MediaId("aaa2".into()), project_ref("pkg.b"))
+            .unwrap();
+        let entries = svc.refs_for_package("pkg.b").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| e.kind == "project"));
+        assert!(svc.refs_for_package("pkg.a").unwrap().is_empty());
+        // 非法包 id → Invalid
+        assert_eq!(
+            svc.refs_for_package("../evil")
+                .unwrap_err()
+                .downcast_ref::<MediaError>()
+                .unwrap()
+                .kind(),
+            MediaErrorKind::Invalid
+        );
+
+        // release_package：只清目标包的引用，其他包引用保留
+        let touched = svc.release_package("pkg.b").unwrap();
+        assert_eq!(touched, 2);
+        assert_eq!(svc.get(&id).unwrap().refs.len(), 0);
+        assert_eq!(svc.get(&MediaId("aaa2".into())).unwrap().refs.len(), 0);
+        assert_eq!(svc.release_package("pkg.b").unwrap(), 0, "幂等");
+
+        // 引用清空后素材可删除（GC = 显式解除 + 既有删除）
+        svc.delete(&id).unwrap();
+        assert!(!root.join("aaa1").exists());
+    }
+
+    #[test]
+    fn restore_media_imports_reuses_and_collides() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let svc = test_service(root);
+
+        let request = RestoreMedia {
+            id: MediaId("clip01".into()),
+            name: "clip.mp4".into(),
+            sha256: sha256_hex(b"video-bytes"),
+            size: 11,
+            probe: Some(MediaProbeMeta {
+                container: "mp4".into(),
+                codec: "h264".into(),
+                width: 320,
+                height: 240,
+                rotation: 90,
+                duration_us: Some(1_000_000),
+            }),
+        };
+
+        // 新建：id 保留 + 探测元数据恢复 + 引用登记 + state Ready
+        let outcome = svc
+            .restore_media(request.clone(), b"video-bytes", project_ref("pkg.a"))
+            .unwrap();
+        let meta = match outcome {
+            RestoreOutcome::Imported(meta) => meta,
+            other => panic!("expected Imported, got {other:?}"),
+        };
+        assert_eq!(meta.id.0, "clip01");
+        assert_eq!(meta.sha256, request.sha256);
+        assert_eq!(meta.width, 320);
+        assert_eq!(meta.rotation, 90);
+        assert_eq!(meta.container, "mp4");
+        assert_eq!(meta.state, MediaState::Ready);
+        assert_eq!(meta.refs, vec![project_ref("pkg.a")]);
+        assert!(root.join("clip01/original.mp4").is_file());
+
+        // 同 id 同内容：Reused，只补引用（幂等）
+        let outcome = svc
+            .restore_media(request.clone(), b"video-bytes", project_ref("pkg.b"))
+            .unwrap();
+        match outcome {
+            RestoreOutcome::Reused(meta) => {
+                assert_eq!(meta.refs.len(), 2);
+            }
+            other => panic!("expected Reused, got {other:?}"),
+        }
+
+        // 同 id 不同内容：换新 id 导入（Collided）
+        let other = RestoreMedia {
+            sha256: sha256_hex(b"other"),
+            size: 5,
+            ..request.clone()
+        };
+        let outcome = svc
+            .restore_media(other, b"other", project_ref("pkg.a"))
+            .unwrap();
+        match outcome {
+            RestoreOutcome::Collided(meta) => {
+                assert_ne!(meta.id.0, "clip01");
+                assert_eq!(meta.refs, vec![project_ref("pkg.a")]);
+            }
+            other => panic!("expected Collided, got {other:?}"),
+        }
+        assert!(root.join("clip01").is_dir(), "原 id 素材不动");
+
+        // 大小/哈希不符在落盘前拒绝，不留暂存
+        let bad = RestoreMedia { size: 3, ..request };
+        let err = svc
+            .restore_media(bad, b"video-bytes", project_ref("pkg.a"))
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<MediaError>().unwrap().kind(),
+            MediaErrorKind::Invalid
+        );
+        let leftovers = fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+            .count();
+        assert_eq!(leftovers, 0, "不留暂存半成品");
+    }
+
+    #[test]
+    fn reattach_ref_matches_by_id_and_sha_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_media_dir(root, "aaa1", "2026-09-07T01:00:00.000000Z", vec![]);
+        let svc = test_service(root);
+        let id = MediaId("aaa1".into());
+
+        // id 存在但 sha 不一致 → 不重挂（缺失状态保留）
+        assert!(!svc
+            .reattach_ref(&id, &"a".repeat(64), project_ref("pkg.a"))
+            .unwrap());
+        assert!(svc.get(&id).unwrap().refs.is_empty());
+
+        // seed 的 sha256 是 "ab"——非法 hex 拒绝
+        assert_eq!(
+            svc.reattach_ref(&id, "nothex", project_ref("pkg.a"))
+                .unwrap_err()
+                .downcast_ref::<MediaError>()
+                .unwrap()
+                .kind(),
+            MediaErrorKind::Invalid
+        );
+
+        // id + sha 都匹配 → 幂等登记
+        let sha = sha256_hex(b"x"); // 任意合法 hex；reattach 只比对形态与一致性
+        seed_media_dir(root, "aaa2", "2026-09-07T02:00:00.000000Z", vec![]);
+        let mut meta = svc.get(&MediaId("aaa2".into())).unwrap();
+        meta.sha256 = sha.clone();
+        write_metadata(&root.join("aaa2"), &meta).unwrap();
+        assert!(svc
+            .reattach_ref(&MediaId("aaa2".into()), &sha, project_ref("pkg.a"))
+            .unwrap());
+        assert!(svc
+            .reattach_ref(&MediaId("aaa2".into()), &sha, project_ref("pkg.a"))
+            .unwrap());
+        assert_eq!(svc.get(&MediaId("aaa2".into())).unwrap().refs.len(), 1);
+
+        // id 不存在 → false
+        assert!(!svc
+            .reattach_ref(&MediaId("ghost".into()), &sha, project_ref("pkg.a"))
+            .unwrap());
+    }
+
+    #[test]
+    fn media_id_shape_helper_matches_validate_id() {
+        assert!(is_valid_media_id("0123456789abcdef"));
+        assert!(is_valid_media_id("clip-01_x"));
+        // 语法白名单只限字符集/长度/点前缀；大小写不在此约束内（实际 media id
+        // 恒为 uuid simple 小写 hex，但校验语义与既有 validate_id 一致）
+        assert!(is_valid_media_id("BadId"));
+        for bad in ["", "../x", "a/b", ".hidden", "a b"] {
+            assert!(!is_valid_media_id(bad), "{bad:?} must be rejected");
+        }
     }
 
     // ---------- file_path / id 校验 ----------

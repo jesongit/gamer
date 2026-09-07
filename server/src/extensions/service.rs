@@ -69,6 +69,17 @@ pub(crate) struct ExtensionInspection {
     manifest: ExtensionManifest,
     archive_sha256: String,
     permission_diff: PermissionDiff,
+    /// 执行形态变化（Phase 8 §11.2）：同 id 已装版本与 incoming 的
+    /// `[execution].kind` 不同时给出（wasm→builtin 官方迁移放行但必须提示；
+    /// builtin→wasm 降级直接拒绝，见 `execution_policy_check`）。
+    execution_change: Option<ExecutionChange>,
+}
+
+/// 执行形态变化（管理面提示载荷；`from`/`to` 随 inspect 响应透传前端）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ExecutionChange {
+    pub(crate) from: super::manifest::ExecutionKind,
+    pub(crate) to: super::manifest::ExecutionKind,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -101,6 +112,10 @@ impl ExtensionInspection {
 
     pub(crate) fn permission_diff(&self) -> &PermissionDiff {
         &self.permission_diff
+    }
+
+    pub(crate) fn execution_change(&self) -> Option<&ExecutionChange> {
+        self.execution_change.as_ref()
     }
 }
 
@@ -368,11 +383,16 @@ impl ExtensionService {
                 });
             }
         }
-        let permission_diff = self.permission_diff_for(&manifest)?;
+        let installed = self.list()?;
+        // Phase 8 §11.2：builtin id 归属/执行形态策略（install/update/inspect
+        // 三入口共用同一判定），并暴露 wasm↔builtin 形态变化供确认弹窗提示。
+        let execution_change = execution_policy_check(&manifest, &installed)?;
+        let permission_diff = permission_diff_for(&manifest, &installed);
         Ok(ExtensionInspection {
             manifest,
             archive_sha256,
             permission_diff,
+            execution_change,
         })
     }
 
@@ -1053,32 +1073,97 @@ fn snapshot_from_versions(
 }
 
 impl ExtensionService {
-    fn permission_diff_for(&self, manifest: &ExtensionManifest) -> ExtensionResult<PermissionDiff> {
-        let current = self
-            .list()?
-            .into_iter()
-            .find(|snapshot| snapshot.id() == manifest.id())
-            .map(|snapshot| snapshot.manifest().permissions().names())
-            .unwrap_or_default();
-        let requested = manifest.permissions().names();
-        Ok(PermissionDiff {
-            added: requested
-                .iter()
-                .filter(|permission| !current.contains(permission))
-                .map(|permission| (*permission).to_string())
-                .collect(),
-            removed: current
-                .iter()
-                .filter(|permission| !requested.contains(permission))
-                .map(|permission| (*permission).to_string())
-                .collect(),
-            unchanged: requested
-                .iter()
-                .filter(|permission| current.contains(permission))
-                .map(|permission| (*permission).to_string())
-                .collect(),
-        })
+    pub(crate) fn permission_diff_for(
+        &self,
+        manifest: &ExtensionManifest,
+    ) -> ExtensionResult<PermissionDiff> {
+        Ok(permission_diff_for(manifest, &self.list()?))
     }
+}
+
+/// 权限增量对照（与已安装 active 版本的权限集比较）。
+fn permission_diff_for(
+    manifest: &ExtensionManifest,
+    installed: &[ExtensionSnapshot],
+) -> PermissionDiff {
+    let current = installed
+        .iter()
+        .find(|snapshot| snapshot.id() == manifest.id())
+        .map(|snapshot| snapshot.manifest().permissions().names())
+        .unwrap_or_default();
+    let requested = manifest.permissions().names();
+    PermissionDiff {
+        added: requested
+            .iter()
+            .filter(|permission| !current.contains(permission))
+            .map(|permission| (*permission).to_string())
+            .collect(),
+        removed: current
+            .iter()
+            .filter(|permission| !requested.contains(permission))
+            .map(|permission| (*permission).to_string())
+            .collect(),
+        unchanged: requested
+            .iter()
+            .filter(|permission| current.contains(permission))
+            .map(|permission| (*permission).to_string())
+            .collect(),
+    }
+}
+
+/// Phase 8 §11.2 执行形态与 builtin id 归属策略（install/update/inspect 三
+/// 入口共用）：
+///
+/// 1. **wasm 包不得占用宿主内置扩展 id**（官方 builtin 归宿主所有——全新
+///    安装是「借官方 id 分发未知实现」，已装 builtin 再装 wasm 是「降级为
+///    未知实现」，都拒绝）；官方迁移路径 wasm→builtin 放行。
+/// 2. **builtin 包的插件 id 必须与注册实现 id 一致**（实现即扩展，不允许
+///    别名包借用宿主实现）。
+/// 3. 同 id 形态变化（wasm→builtin 放行路径）在 inspection 中显式暴露
+///    （`execution_change`），供确认弹窗明确提示。
+fn execution_policy_check(
+    manifest: &ExtensionManifest,
+    installed: &[ExtensionSnapshot],
+) -> ExtensionResult<Option<ExecutionChange>> {
+    let incoming = manifest.execution().kind();
+    if incoming == super::manifest::ExecutionKind::Builtin {
+        let declared = manifest
+            .execution()
+            .builtin_id()
+            .expect("manifest 校验保证 builtin 必带 builtin_id");
+        if manifest.id().as_str() != declared {
+            return Err(ExtensionError::InvalidManifest(format!(
+                "builtin 扩展的插件 id（{}）必须与宿主注册实现 id（{declared}）一致",
+                manifest.id()
+            )));
+        }
+    }
+    if incoming == super::manifest::ExecutionKind::Wasm
+        && super::builtin::is_builtin_extension(manifest.id())
+    {
+        let message = match installed
+            .iter()
+            .find(|snapshot| snapshot.id() == manifest.id())
+            .map(|snapshot| snapshot.manifest().execution().kind())
+        {
+            Some(super::manifest::ExecutionKind::Builtin) => format!(
+                "宿主内置插件 {} 不得更新为 wasm 包重新实现（builtin 归宿主所有，host_feature_unavailable 风险）",
+                manifest.id()
+            ),
+            _ => format!(
+                "插件 id {} 是宿主内置扩展（builtin），本地 wasm 包不得占用该 id；请更换插件 id",
+                manifest.id()
+            ),
+        };
+        return Err(ExtensionError::InvalidManifest(message));
+    }
+    let current = installed
+        .iter()
+        .find(|snapshot| snapshot.id() == manifest.id())
+        .map(|snapshot| snapshot.manifest().execution().kind());
+    Ok(current
+        .filter(|current| *current != incoming)
+        .map(|from| ExecutionChange { from, to: incoming }))
 }
 
 fn ensure_permission_confirmation(
@@ -1361,5 +1446,206 @@ entry = "plugin.wasm"
         assert!(snapshot.last_error().is_some(), "降级时记录失败原因");
         // 服务继续可用：列表仍可读。
         assert_eq!(service.list().unwrap().len(), 1);
+    }
+
+    // ---------- Phase 8 §11.2 插件更新语义 ----------
+
+    const VALID_WASM: &[u8] = b"\0asm\x01\0\0\0";
+
+    fn wasm_manifest_bytes(id: &str, version: &str) -> Vec<u8> {
+        format!(
+            "manifest_version = 2\nid = \"{id}\"\nversion = \"{version}\"\nname = \"W\"\nentry = \"plugin.wasm\"\n"
+        )
+        .into_bytes()
+    }
+
+    fn builtin_manifest_bytes(id: &str, version: &str, builtin_id: &str) -> Vec<u8> {
+        format!(
+            "manifest_version = 2\nid = \"{id}\"\nversion = \"{version}\"\nname = \"B\"\n[execution]\nkind = \"builtin\"\nbuiltin_id = \"{builtin_id}\"\n"
+        )
+        .into_bytes()
+    }
+
+    /// wasm 安装包（manifest + 占位 guest 字节；安装路径要求 magic 校验）。
+    fn wasm_archive(id: &str, version: &str) -> Vec<u8> {
+        zip_of(&[
+            ("manifest.toml", wasm_manifest_bytes(id, version)),
+            ("plugin.wasm", VALID_WASM.to_vec()),
+        ])
+    }
+
+    fn zip_of(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        zip_archive(
+            &entries
+                .iter()
+                .map(|(name, bytes)| (*name, bytes.clone()))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// 本地 wasm 包不得占用宿主内置扩展 id（全新安装即拒绝——防借官方 id
+    /// 分发未知实现；计划 §11.2「未知 ID 不得提升为官方内置」的 wasm 侧）。
+    #[tokio::test]
+    async fn wasm_package_cannot_usurp_builtin_id_on_fresh_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ExtensionService::for_data_root(
+            temp.path(),
+            crate::capabilities::CapabilityRegistry::default(),
+        );
+        let archive = wasm_archive(super::super::video::VIDEO_EXTENSION_ID, "1.0.0");
+        let error = service.install(&archive).await.unwrap_err();
+        assert!(
+            matches!(error, ExtensionError::InvalidManifest(ref m) if m.contains("内置")),
+            "usurp 必须以 InvalidManifest 拒绝，得到 {error:?}"
+        );
+        assert!(service.list().unwrap().is_empty(), "被拒安装不得留状态");
+    }
+
+    /// builtin 包的插件 id 必须与注册实现一致（不允许别名包借用宿主实现）。
+    #[tokio::test]
+    async fn builtin_package_id_must_match_registered_builtin_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ExtensionService::for_data_root(
+            temp.path(),
+            crate::capabilities::CapabilityRegistry::default(),
+        );
+        let archive = zip_of(&[(
+            "manifest.toml",
+            builtin_manifest_bytes("com.other.alias", "1.0.0", "gamer.video"),
+        )]);
+        let error = service.install(&archive).await.unwrap_err();
+        assert!(
+            matches!(error, ExtensionError::InvalidManifest(ref m) if m.contains("一致")),
+            "别名 builtin 包必须拒绝，得到 {error:?}"
+        );
+    }
+
+    /// 官方迁移路径 wasm→builtin 放行，且 inspect 显式暴露 execution_change
+    /// （明确提示）；builtin→wasm「降级」一律拒绝。
+    #[tokio::test]
+    async fn execution_change_wasm_to_builtin_is_surfaced_and_downgrade_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ExtensionService::for_data_root(
+            temp.path(),
+            crate::capabilities::CapabilityRegistry::default(),
+        );
+        let id = ExtensionId::parse(super::super::video::VIDEO_EXTENSION_ID).unwrap();
+
+        // 种一个「旧形态」wasm 版本（绕过服务层策略直接落盘——模拟 Phase 2
+        // 之前遗留安装），再走官方 builtin 更新。
+        let legacy = wasm_archive(super::super::video::VIDEO_EXTENSION_ID, "0.9.0");
+        service.store().install_archive(&legacy).unwrap();
+        let mut states = service.store().read_state().unwrap();
+        states.insert(
+            id.clone(),
+            ExtensionRecord::new(id.clone(), ExtensionVersion::parse("0.9.0").unwrap()),
+        );
+        service.store().write_state(&states).unwrap();
+
+        let builtin_update = zip_of(&[(
+            "manifest.toml",
+            builtin_manifest_bytes("gamer.video", "1.0.0", "gamer.video"),
+        )]);
+        let inspected = service
+            .inspect(&builtin_update)
+            .unwrap_or_else(|e| panic!("wasm→builtin 迁移 inspect 必须放行: {e}"));
+        let change = inspected.execution_change().expect("必须暴露形态变化");
+        assert_eq!(
+            format!("{:?}", change.from),
+            "Wasm",
+            "from 必须是旧形态 wasm"
+        );
+        assert_eq!(format!("{:?}", change.to), "Builtin");
+
+        let updated = service.update(&builtin_update).await.unwrap();
+        assert_eq!(updated.active_version().as_str(), "1.0.0");
+
+        // builtin→wasm 降级：拒绝（builtin 归宿主所有，不得被 wasm 重实现）
+        let downgrade = wasm_archive("gamer.video", "1.1.0");
+        let error = service.update(&downgrade).await.unwrap_err();
+        assert!(
+            matches!(error, ExtensionError::InvalidManifest(ref m) if m.contains("内置")),
+            "降级 wasm 必须拒绝，得到 {error:?}"
+        );
+        assert_eq!(
+            service
+                .snapshot_for(&id)
+                .unwrap()
+                .active_version()
+                .as_str()
+                .to_string(),
+            "1.0.0",
+            "被拒更新不得改动 active_version"
+        );
+    }
+
+    /// 失败更新不破坏已安装可用版本：坏归档 → 拒绝，旧版本仍 active 可用。
+    #[tokio::test]
+    async fn failed_update_keeps_previous_version_active() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ExtensionService::for_data_root(
+            temp.path(),
+            crate::capabilities::CapabilityRegistry::default(),
+        );
+        let id = ExtensionId::parse("com.example.update").unwrap();
+        service
+            .install(&wasm_archive("com.example.update", "1.0.0"))
+            .await
+            .unwrap();
+        service.enable(&id).await.unwrap();
+
+        // 坏归档（非 zip 字节）
+        assert!(service.update(b"not-a-zip").await.is_err());
+        // 未安装 id 的归档 → update 侧 NotInstalled（新 id 不允许借 update 落地）
+        let mismatched = wasm_archive("com.example.other", "2.0.0");
+        assert!(service.update(&mismatched).await.is_err());
+
+        let snapshot = service.snapshot_for(&id).unwrap();
+        assert_eq!(snapshot.active_version().as_str(), "1.0.0");
+        assert_eq!(snapshot.installed_versions().len(), 1, "不留失败半版本");
+        assert_eq!(snapshot.state(), ExtensionState::Enabled);
+    }
+
+    /// 同版本重复 update → AlreadyInstalled（版本目录不可变语义），active
+    /// 版本保持不变；回滚走 activate_version 指针切换。
+    #[tokio::test]
+    async fn same_version_update_conflicts_and_activate_switches_back() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ExtensionService::for_data_root(
+            temp.path(),
+            crate::capabilities::CapabilityRegistry::default(),
+        );
+        let id = ExtensionId::parse("com.example.rollback").unwrap();
+        service
+            .install(&wasm_archive("com.example.rollback", "1.0.0"))
+            .await
+            .unwrap();
+        // 1.0.0 → 2.0.0：update 切 active
+        service
+            .update(&wasm_archive("com.example.rollback", "2.0.0"))
+            .await
+            .unwrap();
+        service.enable(&id).await.unwrap();
+
+        // 同版本 update → AlreadyInstalled（1.0.0 已在盘，目录不可变）
+        let error = service
+            .update(&wasm_archive("com.example.rollback", "1.0.0"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ExtensionError::AlreadyInstalled { .. }));
+        assert_eq!(
+            service.snapshot_for(&id).unwrap().active_version().as_str(),
+            "2.0.0",
+            "被拒 update 不切 active_version"
+        );
+
+        // 显式回滚：activate_version 切回 1.0.0（不复制不删除）
+        let rolled = service
+            .activate_version(&id, &ExtensionVersion::parse("1.0.0").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(rolled.active_version().as_str(), "1.0.0");
+        assert_eq!(rolled.state(), ExtensionState::Enabled);
+        assert_eq!(rolled.installed_versions().len(), 2, "两个版本都保留");
     }
 }

@@ -292,3 +292,9 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **PS 5.1 读 UTF-8 无 BOM 的 .ps1 会按 ANSI 解析**：中文字符串/注释里的多字节序列可能恰好解码出引号类字符，脚本直接 ParserError（报错位置与真实语法无关）——含中文的 .ps1 必须保存为 UTF-8 **带 BOM**（`tools/build-plugins.ps1` 即踩此坑；Write 工具默认无 BOM）。
 - **PS 5.1 对 `[pscustomobject]` 赋不存在的属性直接抛错**（`在此对象上找不到属性"X"`）：不能先建对象再 `$o.NewProp = ...` 补属性，所有属性要在 `[pscustomobject]@{}` 字面量里一次声明（占位 `$null` 即可）。
 - **Git Bash 里 `sed -i`/`perl -pi` 的模式含 `\n`（反斜杠+字母）会静默不替换**：MSYS 运行时对命令行参数做路径/转义改写，`\n` 到达工具时已被折叠成别的形态，匹配不中却退出码为 0（rust 源码里形如 `manifest_version = 1\nid = ...` 的 Rust 字符串字面量整行替换两次落空）——此类「源码字面量批量改写」用 Edit/Write 工具按唯一锚点改，或改完立即 grep 复核替换是否真的发生。
+
+## 2026-09-07（Phase 8：Package 媒体分发）
+
+- **`MediaMetadata.refs` 为空时 JSON 里字段整体缺席**（`skip_serializing_if = "Vec::is_empty"`）：断言/前端读 `meta["refs"]` 会拿到 undefined 而非 `[]`，要用可选取值兜底；同理 `probe` 缺省也省略。
+- **.gamerpkg 布局白名单已扩展 `media/**`（受控：仅 `media/index.json` 与 `media/files/<64hex>`）**：旧版本服务端导入含 media/ 的新归档会 400「顶层条目不在白名单内」——跨版本分发包先确认两端服务端都升到 Phase 8；旧归档（无 media/）不受影响。
+- **归档媒体恢复不重跑 ffprobe**（元数据随 `media/index.json` 的 `probe` 原样恢复）：手造媒体索引测试别假设导入后有真实探测值；索引缺 probe 时导入侧按 `codec="unknown"`、宽高 0 兜底。

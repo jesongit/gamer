@@ -117,15 +117,55 @@ describe('usePackageContext（plan §28：导入/导出/新建/复制/删除）'
     expect(refreshAll).toHaveBeenCalledTimes(1)
   })
 
-  it('导出：下载 blob + 文件名（无响应头文件名时回退 <id>.gamerpkg）', async () => {
+  it('导出（无媒体引用）：直接下载 blob + 文件名（无响应头文件名时回退 <id>.gamerpkg）', async () => {
     const { api, toast, download } = setup()
+    api.getPackage.mockResolvedValue({ media_refs: [], media_total_bytes: 0 })
     api.exportPackageArchive.mockResolvedValue({
       blob: new Blob(['archive']), filename: '', sha256: 'b'.repeat(64),
     })
     const ctx = usePackageContext({ api, toast, download })
     await ctx.exportPackage()
-    expect(api.exportPackageArchive).toHaveBeenCalledWith('com.demo')
+    expect(api.exportPackageArchive).toHaveBeenCalledWith('com.demo', { includeMedia: false })
     expect(download).toHaveBeenCalledWith(expect.any(Blob), 'com.demo.gamerpkg')
+    expect(ctx.exportModal.open).toBe(false)
+  })
+
+  it('导出（有媒体引用）：弹确认框；确认后按勾选带 includeMedia 导出', async () => {
+    const { api, toast, download } = setup()
+    api.getPackage.mockResolvedValue({
+      media_refs: [
+        { id: 'clip01', name: 'clip.mp4', size: 2048, plugin_id: 'gamer.video', kind: 'project', state: 'ready' },
+      ],
+      media_total_bytes: 2048,
+    })
+    api.exportPackageArchive.mockResolvedValue({
+      blob: new Blob(['archive']), filename: 'com.demo-1.0.0.gamerpkg', sha256: 'b'.repeat(64),
+    })
+    const ctx = usePackageContext({ api, toast, download })
+    await ctx.exportPackage()
+    // 有引用素材：不直接导出，弹确认框并列出素材与大小
+    expect(api.exportPackageArchive).not.toHaveBeenCalled()
+    expect(ctx.exportModal.open).toBe(true)
+    expect(ctx.exportModal.entries).toHaveLength(1)
+    expect(ctx.exportModal.totalBytes).toBe(2048)
+    expect(ctx.exportModal.includeMedia).toBe(false)
+
+    // 默认（仅引用）导出
+    await ctx.confirmExport()
+    expect(api.exportPackageArchive).toHaveBeenCalledWith('com.demo', { includeMedia: false })
+    expect(download).toHaveBeenCalledWith(expect.any(Blob), 'com.demo-1.0.0.gamerpkg')
+    expect(ctx.exportModal.open).toBe(false)
+
+    // 勾选「包含媒体素材」再导出 → includeMedia=true
+    await ctx.exportPackage()
+    expect(ctx.exportModal.open).toBe(true)
+    ctx.exportModal.includeMedia = true
+    await ctx.confirmExport()
+    expect(api.exportPackageArchive).toHaveBeenLastCalledWith('com.demo', { includeMedia: true })
+    // 素材查询失败不阻塞导出（退化为直接导出）
+    api.getPackage.mockRejectedValue(new Error('query failed'))
+    await ctx.exportPackage()
+    expect(api.exportPackageArchive).toHaveBeenCalledTimes(3)
   })
 
   it('新建：非法 id 客户端拒绝；合法 id 走 createPackage 并选中', async () => {

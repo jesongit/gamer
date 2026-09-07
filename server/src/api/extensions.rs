@@ -115,8 +115,13 @@ pub(super) async fn api_start_extension(
             // package_id（content_package；android_package 只承担运行目标语义），
             // 方案 YAML 从通用资源存储
             // （packages/<package-id>/plugins/gamer.keymap/mappings）原样读出
-            // 交给 guest。
-            if id != crate::extensions::KEYMAP_EXTENSION_ID {
+            // 交给 guest。门禁按扩展边界谓词判定（Phase 4 审计遗留 #5 收口：
+            // api 层不再持有插件 id 字面量比较——id 知识收敛在 keymap 边界）。
+            let extension_id = match ExtensionId::parse(&id) {
+                Ok(id) => id,
+                Err(error) => return extension_error(error),
+            };
+            if !crate::extensions::is_keymap_extension(&extension_id) {
                 return ApiError::bad_request("仅 keymap 插件支持 profile 启动参数")
                     .into_response();
             }

@@ -240,6 +240,16 @@ describe('Package 生命周期 API（plan §7-§11）', () => {
     expect(rep.blob).toBe(blob)
     expect(rep.filename).toBe('pkg.demo-1.0.0.gamerpkg')
     expect(rep.sha256).toBe('b'.repeat(64))
+
+    // Phase 8 §11.1：includeMedia=true → ?include_media=true（携带素材字节）
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      blob: async () => blob,
+      headers: { get: () => null },
+    })
+    await api.exportPackageArchive('pkg.demo', { includeMedia: true })
+    expect(fetch.mock.calls[1][0]).toBe('/api/packages/pkg.demo/export?include_media=true')
   })
 })
 

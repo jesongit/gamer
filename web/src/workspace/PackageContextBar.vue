@@ -90,6 +90,38 @@
     </div>
   </div>
 
+  <!-- 导出确认（存在被引用素材时；plan §11.1：默认不含原始大视频，
+       勾选后 ?include_media=true 携带素材字节，列出大小 + 隐私提示） -->
+  <div v-if="ctx.exportModal.open" class="modal-mask" @click.self="ctx.closeExport">
+    <div class="modal">
+      <h3>导出配置</h3>
+      <p class="overwrite-warning">
+        配置 <b class="mono">{{ ctx.exportModal.packageId }}</b> 引用了
+        {{ ctx.exportModal.entries.length }} 项媒体素材。默认导出<b>不含原始素材</b>
+        （归档仅记录引用，接收端显示素材缺失）；勾选后归档将携带素材文件。
+      </p>
+      <ul class="media-list">
+        <li v-for="entry in ctx.exportModal.entries" :key="entry.id + entry.plugin_id + entry.kind" class="media-item">
+          <span class="mono media-name">{{ entry.name || entry.id }}</span>
+          <span class="media-meta">{{ formatBytes(entry.size) }} · {{ entry.plugin_id }} · {{ entry.kind }}</span>
+        </li>
+      </ul>
+      <p class="media-total">素材合计：<b>{{ formatBytes(ctx.exportModal.totalBytes) }}</b></p>
+      <p class="privacy-note">⚠ 媒体素材为原始录屏画面，可能包含账号界面等敏感信息；分享前请确认接收方与用途。</p>
+      <label class="include-media">
+        <input v-model="ctx.exportModal.includeMedia" type="checkbox" />
+        包含媒体素材（{{ formatBytes(ctx.exportModal.totalBytes) }}）
+      </label>
+      <p v-if="ctx.exportModal.error" class="form-error">{{ ctx.exportModal.error }}</p>
+      <div class="modal-actions">
+        <button class="btn" @click="ctx.closeExport">取消</button>
+        <button class="btn btn-primary" :disabled="ctx.exportModal.submitting" @click="ctx.confirmExport">
+          {{ ctx.exportModal.submitting ? '导出中…' : (ctx.exportModal.includeMedia ? '导出（含素材）' : '导出（仅引用）') }}
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Package 详情弹窗（plan §18/§21/§37 + §17）：依赖五态 / stats / 元数据编辑 / 兼容性 -->
   <PackageDetailModal
     v-if="ctx.detailModal.open"
@@ -107,7 +139,7 @@
  */
 import { computed, reactive, ref } from 'vue'
 import { useToast, devicesData } from '../store'
-import { usePackageContext } from '../composables/usePackageContext'
+import { usePackageContext, formatBytes } from '../composables/usePackageContext'
 import PackageDetailModal from './PackageDetailModal.vue'
 
 const props = defineProps({ context: { type: Object, default: null } })
@@ -142,6 +174,13 @@ const androidCandidates = computed(() => {
 .form-error { margin:0; color:var(--danger, #f87171); font-size:12px; }
 .modal-actions { display:flex; justify-content:flex-end; gap:8px; }
 .overwrite-warning { margin:0; font-size:13px; line-height:1.5; }
+.media-list { margin:0; padding:0; list-style:none; max-height:180px; overflow:auto; display:flex; flex-direction:column; gap:4px; }
+.media-item { display:flex; justify-content:space-between; gap:8px; font-size:12px; }
+.media-name { word-break:break-all; }
+.media-meta { color:var(--text-2); white-space:nowrap; }
+.media-total { margin:0; font-size:12px; }
+.privacy-note { margin:0; font-size:12px; line-height:1.5; color:var(--warn, #fbbf24); border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); border-radius:6px; padding:8px 10px; }
+.include-media { display:flex; align-items:center; gap:6px; font-size:13px; }
 .missing-required-warning { margin:0; font-size:12px; line-height:1.5; color:var(--warn, #fbbf24); border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); border-radius:6px; padding:8px 10px; }
 .summary { margin:0; display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:12px; }
 .summary dt { color:var(--text-2); }

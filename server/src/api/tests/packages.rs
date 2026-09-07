@@ -966,3 +966,143 @@ async fn template_upload_binary_hook_normalizes_and_rejects_garbage() {
     let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     assert_eq!(bytes.as_ref(), payload.as_slice());
 }
+
+// ---------- Phase 8 §11.1：Package 导入的媒体分发（media/ 白名单受控目录） ----------
+
+/// 含媒体归档导入：素材先校验（大小/哈希/逻辑 id）再原子恢复（响应 `media`
+/// 摘要），media/index.json 随包落盘保留引用；不含字节的引用条目按 sha256
+/// 自动重挂；删除包后引用解除（素材删除保护随之失效，可回收）。
+#[tokio::test]
+async fn package_import_with_media_restores_bytes_and_releases_refs_on_delete() {
+    let t = build_app(
+        "pkgmedia",
+        test_credential("admin123"),
+        Default::default(),
+    );
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+
+    let clip = b"clip-bytes";
+    let sha = crate::package_archive::sha256_hex(clip);
+    let file_entry = format!("media/files/{sha}");
+    let index_json = |included: bool| {
+        serde_json::json!({
+            "schema_version": 1,
+            "entries": [{
+                "id": "clipmedia01",
+                "name": "clip.mp4",
+                "sha256": sha,
+                "size": clip.len(),
+                "plugin_id": "gamer.video",
+                "kind": "project",
+                "included": included,
+            }],
+        })
+        .to_string()
+        .into_bytes()
+    };
+    let package_toml = br#"id = "official.media.demo"
+version = "1.0.0"
+"#;
+
+    // —— 含素材导入：201，media 摘要 imported=1 ——
+    let archive = craft_zip(vec![
+        ("package.toml", package_toml.to_vec()),
+        ("media/index.json", index_json(true)),
+        (file_entry.as_str(), clip.to_vec()),
+    ]);
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            "/api/packages/import",
+            None,
+            &[
+                (axum::http::header::CONTENT_TYPE.to_string(), "application/zip".into()),
+                (axum::http::header::COOKIE.to_string(), sid.clone()),
+            ],
+            archive,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::CREATED, "{}", json_body(resp).await);
+    let created = json_body(resp).await;
+    assert_eq!(created["id"], "official.media.demo");
+    assert_eq!(created["media"]["imported"], 1);
+    assert_eq!(created["media"]["total"], 1);
+
+    // 索引随包落盘（引用与缺失状态保留在包内）
+    assert!(t.dir.join("packages/official.media.demo/media/index.json").is_file());
+
+    // 媒体库可查：逻辑 id 保留 + 引用登记 + probe 元数据缺失时按未知兜底
+    let resp = get_json(&t, &sid, "/api/media/clipmedia01").await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
+    let meta = json_body(resp).await;
+    assert_eq!(meta["sha256"], sha.as_str());
+    assert_eq!(meta["size"], clip.len() as u64);
+    assert_eq!(meta["refs"][0]["package_id"], "official.media.demo");
+    assert_eq!(meta["refs"][0]["plugin_id"], "gamer.video");
+
+    // —— 覆盖导入「仅引用」版（included=false、无字节）→ 引用重挂 ——
+    let refs_only = craft_zip(vec![
+        ("package.toml", package_toml.to_vec()),
+        ("media/index.json", index_json(false)),
+    ]);
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            "/api/packages/import?overwrite=true",
+            None,
+            &[
+                (axum::http::header::CONTENT_TYPE.to_string(), "application/zip".into()),
+                (axum::http::header::COOKIE.to_string(), sid.clone()),
+            ],
+            refs_only,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
+    let overwritten = json_body(resp).await;
+    assert_eq!(overwritten["media"]["reattached"], 1, "同 id 同 sha 自动重挂");
+
+    // —— included 标记与字节存在性不一致 → 整体拒绝且不落半成品 ——
+    let inconsistent = craft_zip(vec![
+        ("package.toml", package_toml.to_vec()),
+        ("media/index.json", index_json(true)), // 声明含字节但归档没带
+    ]);
+    let resp = send(
+        &t.app,
+        req_bytes(
+            "POST",
+            "/api/packages/import?overwrite=true",
+            None,
+            &[
+                (axum::http::header::CONTENT_TYPE.to_string(), "application/zip".into()),
+                (axum::http::header::COOKIE.to_string(), sid.clone()),
+            ],
+            inconsistent,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{}", json_body(resp).await);
+
+    // —— 删除包 → 引用解除（best effort 钩子），素材本身保留 ——
+    let resp = send(
+        &t.app,
+        req(
+            "DELETE",
+            &pkg_url("official.media.demo"),
+            None,
+            &json_headers(sid.clone()),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = get_json(&t, &sid, "/api/media/clipmedia01").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let meta = json_body(resp).await;
+    // refs 为空时序列化省略字段（skip_serializing_if）
+    let refs_left = meta.get("refs").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+    assert_eq!(refs_left, 0, "包删除后引用必须解除");
+}
