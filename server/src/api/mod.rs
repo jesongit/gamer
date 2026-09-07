@@ -360,14 +360,27 @@ pub(crate) fn build_router_with_extensions(
     // ---- 受保护组（视频工作台 V1）：媒体导入/播放/精确帧 + 录制控制。
     //      合同：docs/plans/gamer_video_workbench_contracts.md；大字节上传
     //      （视频导入）与普通 JSON 共用同一认证语义，限额见 common 常量。
-    let protected_media: Router<()> = media::router()
-        .with_state(state.clone())
+    let protected_media: Router<()> = media::router()        .with_state(state.clone())
         .route_layer(axmw::from_fn_with_state(
             state.auth.clone(),
             auth::auth_guard,
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_MEDIA_IMPORT));
     let protected_recording: Router<()> = recording::router()
+        .with_state(state.clone())
+        .route_layer(axmw::from_fn_with_state(
+            state.auth.clone(),
+            auth::auth_guard,
+        ))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_MEDIA_IMPORT));
+
+    // ---- 受保护组（本地 APK 安装）：APK raw 字节直传 → 临时文件 → adb install。
+    //      游戏 base APK 体积大，16MiB/100MiB 组都不够，限额对齐媒体导入（1GiB）。
+    let protected_apk: Router<()> = Router::new()
+        .route(
+            "/api/devices/:id/install-apk",
+            post(devices::api_install_apk),
+        )
         .with_state(state.clone())
         .route_layer(axmw::from_fn_with_state(
             state.auth.clone(),
@@ -449,6 +462,7 @@ pub(crate) fn build_router_with_extensions(
         .merge(protected_import)
         .merge(protected_media)
         .merge(protected_recording)
+        .merge(protected_apk)
         .merge(protected_extensions)
         .layer(axmw::from_fn(auth::inject_ip_key))
 }

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -427,6 +427,82 @@ fn pretty_app_label(pkg: &str) -> String {
         .join(" ")
 }
 
+// ---------- 安装本地 APK ----------
+
+/// APK 直传请求的纯输入校验：文件名必须是 .apk（只用于扩展名校验与日志，
+/// 不参与路径拼接——服务端临时文件名自生成）；字节非空且带 zip 魔数。
+pub(super) fn validate_apk_upload(filename: &str, body: &[u8]) -> Result<(), ApiError> {
+    validate_text_field(filename, "文件名", 255)?;
+    if filename.contains('/') || filename.contains('\\') || !filename.to_ascii_lowercase().ends_with(".apk") {
+        return Err(ApiError::bad_request("只支持 .apk 安装包"));
+    }
+    if body.len() < 4 || !body.starts_with(b"PK") {
+        return Err(ApiError::bad_request("文件内容不是有效的 APK（zip）包"));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub(super) struct InstallApkQuery {
+    filename: String,
+}
+
+/// 安装本地 APK 到设备（raw body 直传 → 服务端临时文件 → `adb install -r`）。
+/// 大包上传 + 安装耗时较长（组限额对齐媒体导入 1GiB；安装超时 300s），
+/// 前端安装期间禁用入口并提示等待。serial 解析与建连链路同口径（resolve_serial）。
+pub(super) async fn api_install_apk(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<InstallApkQuery>,
+    body: Bytes,
+) -> Response {
+    let device = match st.db.get_device_async(&id).await {
+        Ok(Some(device)) => device,
+        Ok(None) => return ApiError::not_found("设备不存在").into_response(),
+        Err(err) => return ApiError::internal(err.to_string()).into_response(),
+    };
+    if let Err(err) = validate_apk_upload(q.filename.trim(), &body) {
+        return err.into_response();
+    }
+    let configured = if device.addr.is_empty() {
+        "usb".to_string()
+    } else {
+        device.addr.clone()
+    };
+    let serial = st
+        .devices
+        .adb
+        .resolve_serial(&configured, &device.name)
+        .await;
+    if serial.trim().is_empty() {
+        return err_response(StatusCode::BAD_REQUEST, "设备未接入 adb，无法安装");
+    }
+    // adb install 只收本地路径：先落临时文件，结束后无论成败删除
+    let temp = std::env::temp_dir().join(format!("gamer-apk-{}.apk", Uuid::new_v4().simple()));
+    let install = match tokio::fs::write(&temp, &body).await {
+        Ok(_) => {
+            let r = st
+                .devices
+                .adb
+                .install_apk(&serial, &temp.to_string_lossy())
+                .await;
+            let _ = tokio::fs::remove_file(&temp).await;
+            r
+        }
+        Err(e) => Err(anyhow::anyhow!("APK 暂存失败: {e}")),
+    };
+    match install {
+        Ok(_) => {
+            info!(device = %id, serial = %serial, filename = %q.filename.trim(), bytes = body.len(), "APK installed");
+            Json(serde_json::json!({"ok": true})).into_response()
+        }
+        Err(e) => {
+            warn!(device = %id, serial = %serial, "APK install failed: {}", e);
+            err_response(StatusCode::BAD_GATEWAY, &format!("安装失败: {}", e))
+        }
+    }
+}
+
 pub(super) async fn api_connect_device(
     State(st): State<AppState>,
     Path(id): Path<String>,
@@ -652,5 +728,25 @@ pub(super) async fn api_control(
     match result {
         Ok(_) => Json(serde_json::json!({"ok": true})).into_response(),
         Err(e) => ApiError::bad_gateway(e.to_string()).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_apk_upload;
+
+    #[test]
+    fn apk_upload_rejects_non_apk_and_bad_payload() {
+        let zip = b"PK\x03\x04apk-bytes";
+        assert!(validate_apk_upload("game.apk", zip).is_ok());
+        assert!(validate_apk_upload("GAME.APK", zip).is_ok());
+        // 扩展名 / 路径分隔 / 空名
+        for bad in ["game.exe", "game", "a/b.apk", "a\\b.apk", "", "  "] {
+            assert!(validate_apk_upload(bad, zip).is_err(), "应拒绝文件名 {bad:?}");
+        }
+        // 内容：空 body / 非 zip 魔数
+        assert!(validate_apk_upload("game.apk", b"").is_err());
+        assert!(validate_apk_upload("game.apk", b"MZfake").is_err());
+        assert!(validate_apk_upload("game.apk", b"PK").is_err());
     }
 }

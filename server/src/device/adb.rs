@@ -208,6 +208,22 @@ impl Adb {
         self.run(&["-s", serial, "shell", cmd], timeout).await
     }
 
+    /// 安装本地 APK（`adb install -r`，覆盖安装保留数据）。
+    /// adb install 的失败详情走 stdout（退出码非 0 但 stdout 非空时 run() 视为
+    /// 成功返回），因此以输出含 "Success" 为准，否则带原始输出报错。
+    pub async fn install_apk(&self, serial: &str, apk_path: &str) -> anyhow::Result<String> {
+        let out = self
+            .run(
+                &["-s", serial, "install", "-r", apk_path],
+                Duration::from_secs(300),
+            )
+            .await?;
+        if !out.contains("Success") {
+            anyhow::bail!("adb install 失败: {}", out.trim());
+        }
+        Ok(out)
+    }
+
     /// 后台执行 shell 命令，stdout/stderr 逐行转发到 tracing 日志
     pub fn shell_logged(&self, serial: &str, cmd: &str, tag: &str) {
         let bin = self.bin.clone();
