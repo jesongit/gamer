@@ -593,7 +593,7 @@ Phase 0  基线核对
 | 6 Video Project/时间轴 | DONE | `d44a959`（projects/*.json 资源 + 标记帧身份 + 校准四级坐标变换 + 工作台三分区重组） |
 | 7 模板/离线测试/草稿闭环 | DONE | `db4d481`（`gamer_yaml/actions.rs` 动作清单唯一声明 + TemplateStudio 定帧建模板 + 草稿可编辑工作流 + `tools/e2e_phase7_offline.sh`） |
 | 8 Package 分发/更新/数据生命周期 | DONE | `58f5f27`（归档 `media/**` 白名单 + include_media 导出 + 媒体引用闭环 + 更新执行类型语义 + keymap profile 门禁去 id 比较） |
-| 9 统一验收/文档/清理 | DONE（2026-09-08） | 本节 + `docs/evidence/phase9_final_acceptance.md` + ADR-15 + AGENTS/README 收口 + api.js registryProof 死代码清理；门禁证据见验收报告 |
+| 9 统一验收/文档/清理 | DONE（2026-09-08） | 本节 + `docs/evidence/phase9_final_acceptance.md` + ADR-15 + AGENTS/README 收口 + api.js registryProof 死代码清理；门禁证据见验收报告；浏览器实机冒烟由集成者完成（`60eeac8`：三插件市场/免签安装/面板出现全链 PASS，发现并修复业务面板激活回归与 uiType 标签，`docs/evidence/phase9_browser_smoke.md`） |
 
 ### 15.2 与计划的偏差汇总（自各阶段 evidence 提炼）
 
@@ -613,7 +613,7 @@ Phase 0  基线核对
 ### 15.3 NOT_VERIFIED 清单（截至 Phase 9）
 
 - 真机 adb 场景：录制→草稿→真机显式运行全流程、start_app/投屏联动、多 viewer、看门狗交互（无设备环境）。
-- 浏览器实机点检：市场安装全链手动冒烟、视频工作台 UI 人工走查（自动化测试覆盖逻辑层；**由集成者另行执行**）。
+- ~~浏览器实机点检：市场安装全链手动冒烟、视频工作台 UI 人工走查~~（已完成：`docs/evidence/phase9_browser_smoke.md`，冒烟发现并修复业务面板激活回归；多页面互斥实机走查仍待真机环境）。
 - 真实 GitHub Release 发布与下载链路：仅交付本地产物 + `sha256sums.txt`（可上传），未执行真实发布。
 - 性能基线（§12.2）：录制开关开销、精确帧延迟、并发解码、CPU/内存、磁盘占用、长录基线——均未建立量化数据。
 - Docker/直跑平台矩阵与真实双机 .gamerpkg 媒体分发人工链路。
