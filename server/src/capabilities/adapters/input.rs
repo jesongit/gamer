@@ -58,9 +58,10 @@ impl InputService for InputAdapter {
 
     async fn key(&self, device: &DeviceHandle, input: KeyInput) -> CapabilityResult<()> {
         let session = self.device.session(device)?;
-        // 录制输入观察（合同 §2.1）：能力层按键（keymap/runner/plugin 来源）
-        // 的 source 标注；观察本体在 scrcpy 注入原语内。
-        let result = crate::recording::with_input_source("plugin", async {
+        // 录制输入观察（合同 §2.1）：能力层按键的 source 标注——调用方
+        // scope 优先（keymap/runner），缺省 "plugin"；观察本体在 scrcpy
+        // 注入原语内。
+        let result = super::with_capability_input_source(async {
             match input.action() {
                 KeyAction::Down => session.inject_keycode(0, input.code().value(), 0, 0).await,
                 KeyAction::Up => session.inject_keycode(1, input.code().value(), 0, 0).await,
@@ -73,7 +74,7 @@ impl InputService for InputAdapter {
 
     async fn text(&self, device: &DeviceHandle, input: TextInput) -> CapabilityResult<()> {
         let session = self.device.session(device)?;
-        let result = crate::recording::with_input_source("plugin", async {
+        let result = super::with_capability_input_source(async {
             session.inject_text(input.as_str()).await
         })
         .await;

@@ -286,7 +286,14 @@ impl NativeYamlHost {
             .map_err(|error| anyhow!("invoke args 不是合法 JSON: {error}"))?;
         let args = Value::from_json(args).map_err(|error| anyhow!("invoke args 无效: {error}"))?;
         let host = Self::new(host, context, stop, sink).await?;
-        host.invoke(capability, args).await
+        // 录制输入来源标注（合同 §2.1 / Phase 9 矩阵）：capability.invoke
+        // 后端是 guest 实例线程内（wasm_host 的 block_on_yaml 派生线程）执行
+        // 点，外层 runner_adapter 的 task-local scope 不跨线程——在此线程内
+        // 把 YAML runner 注入的输入（tap/swipe/key/text）标为 "runner"。
+        crate::capabilities::adapters::with_caller_input_source("runner", async {
+            host.invoke(capability, args).await
+        })
+        .await
     }
 
     /// 尽力而为的事件旁路：发射失败只记 debug，不影响能力执行结果。

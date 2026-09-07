@@ -53,10 +53,11 @@ impl TouchAdapter {
         action: u8,
         point: TouchPoint,
     ) -> CapabilityResult<()> {
-        // 录制输入观察（合同 §2.1）：能力层触控（keymap/runner/plugin 来源）
-        // 经此进入设备发送路径；source 标注为扩展能力输入（"plugin"），精确
-        // 归属可用 `recording::with_input_source` 在调用方覆盖。
-        crate::recording::with_input_source("plugin", async {
+        // 录制输入观察（合同 §2.1）：能力层触控经此进入设备发送路径；
+        // source 标注调用方 scope 优先（keymap/runner），缺省 "plugin"
+        // （扩展能力输入的历史缺省语义），精确归属由调用方
+        // `with_caller_input_source` 声明。
+        super::with_capability_input_source(async {
             let session = match self.device.session(&state.device) {
                 Ok(session) => session,
                 Err(error) => return Err(error),

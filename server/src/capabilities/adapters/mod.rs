@@ -33,6 +33,43 @@ use crate::store::Db;
 
 use super::CapabilityRegistry;
 
+// ---------------------------------------------------------------------------
+// 输入来源标注（录制合同 §2.1：manual | keymap | runner | plugin）
+// ---------------------------------------------------------------------------
+
+tokio::task_local! {
+    /// 调用方在**同任务内**声明的能力输入来源。能力适配器（input/touch）
+    /// 落到录制观察时优先采用；未 scope 的调用方（通用 wasm 插件宿主）保持
+    /// 适配器缺省 "plugin"，REST/投屏直发路径仍由 api 层标注 "manual"。
+    ///
+    /// 注意 task-local 不能跨线程/跨 `tokio::spawn`：经独立实例线程进入
+    /// 能力层的调用方（如 YAML guest 经 `block_on_yaml` 派生线程）必须在
+    /// 线程内的调用点自行 scope（见 gamer_yaml `invoke_json`）。
+    static CALLER_INPUT_SOURCE: &'static str;
+}
+
+/// 在调用方来源语义下执行一段能力调用（keymap/runner 等）。
+pub(crate) async fn with_caller_input_source<R>(
+    source: &'static str,
+    fut: impl std::future::Future<Output = R>,
+) -> R {
+    CALLER_INPUT_SOURCE.scope(source, fut).await
+}
+
+/// 当前任务声明的调用方来源；无 scope = None（适配器用各自缺省标注）。
+pub(crate) fn caller_input_source() -> Option<&'static str> {
+    CALLER_INPUT_SOURCE.try_with(|s| *s).ok()
+}
+
+/// 能力适配器统一的录制输入来源：调用方 scope 优先，缺省 "plugin"
+/// （扩展能力输入的历史缺省语义，向后兼容）。
+pub(crate) async fn with_capability_input_source<R>(
+    fut: impl std::future::Future<Output = R>,
+) -> R {
+    let source = caller_input_source().unwrap_or("plugin");
+    crate::recording::with_input_source(source, fut).await
+}
+
 /// Assemble the native services that have stable process lifetime. Runtime is
 /// intentionally created per run because its cancellation token is per run.
 pub(crate) fn build_registry(
@@ -74,6 +111,32 @@ mod tests {
         LogService, MatchManyRequest, MatchOptions, MatchOutcome, ResourceHandle, ResourceId,
         ResourceService, RunRequest, RunService, RuntimeService, TemplateQuery, VisionService,
     };
+
+    /// 录制输入来源标注（合同 §2.1）：调用方 scope 的缺省与覆盖语义。
+    /// 无 scope = None（适配器落缺省 "plugin"）；scope 内最内层生效。
+    #[tokio::test]
+    async fn capability_input_source_defaults_to_none_and_honors_scope() {
+        let unscoped = with_capability_input_source(async { caller_input_source() }).await;
+        assert_eq!(unscoped, None, "无调用方 scope 必须落适配器缺省 plugin");
+
+        let scoped = with_caller_input_source(
+            "keymap",
+            with_capability_input_source(async { caller_input_source() }),
+        )
+        .await;
+        assert_eq!(scoped, Some("keymap"));
+
+        // 嵌套 scope 以最内层为准（与 recording::with_input_source 同语义）。
+        let nested = with_caller_input_source(
+            "keymap",
+            with_caller_input_source("runner", async { caller_input_source() }),
+        )
+        .await;
+        assert_eq!(nested, Some("runner"));
+
+        // scope 外不残留。
+        assert_eq!(caller_input_source(), None);
+    }
 
     fn template_store() -> (tempfile::TempDir, Arc<PackageStore>) {
         let dir = tempfile::tempdir().unwrap();

@@ -215,7 +215,15 @@ impl RunExecutor for EngineExecutor {
                 .expect("YAML vNext adapter lock poisoned")
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("YAML v3 运行适配器未装配"))?;
-            adapter.execute(&spec, stop).await
+            // 录制输入来源标注（合同 §2.1 / Phase 9 矩阵）：gamer.yaml runner
+            // 经能力适配器注入的输入标记为 "runner"。同任务路径（native 解释
+            // 器/准备段）由此 scope 覆盖；guest 实例线程经 block_on_yaml 派生
+            // 线程，task-local 不跨线程，由 `NativeYamlHost::invoke_json`
+            // （capability.invoke 后端）在线程内再标注（见 yaml_extension.rs）。
+            crate::capabilities::adapters::with_caller_input_source("runner", async {
+                adapter.execute(&spec, stop).await
+            })
+            .await
         })
     }
 
