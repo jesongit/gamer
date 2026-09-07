@@ -114,13 +114,13 @@ describe('Market 页挂载冒烟（T5b：插件已装清单 + Package 远端源�
     try {
       await flushPromises()
       expect(wrapper.text()).toContain('插件市场')
-      expect(wrapper.text()).toContain('Package 市场')
+      expect(wrapper.text()).toContain('配置市场')
       expect(wrapper.text()).toContain('打开插件市场')
       // api stub 返回空集：已装插件/已装包均为空态提示
       expect(wrapper.text()).toContain('尚未安装任何插件')
-      expect(wrapper.text()).toContain('尚未安装任何 Package')
-      // registry.json 无 packages 段 = 「远端源暂无 Package」，不抛错不阻塞页面
-      expect(wrapper.text()).toContain('远端源暂无 Package')
+      expect(wrapper.text()).toContain('尚未安装任何配置')
+      // registry.json 无 packages 段 = 「远端源暂无配置」，不抛错不阻塞页面
+      expect(wrapper.text()).toContain('远端源暂无配置')
     } finally {
       globalThis.fetch = originalFetch
       wrapper.unmount()

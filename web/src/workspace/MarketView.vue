@@ -30,8 +30,8 @@
     <section class="market-section">
       <div class="market-section-head">
         <div>
-          <h3>Package 市场</h3>
-          <p>远端源来自静态 registry.json 的 packages 段；安装 = 下载归档并导入本地 Package。</p>
+          <h3>配置市场</h3>
+          <p>远端源来自静态 registry.json 的 packages 段；安装 = 下载归档并导入本地配置。</p>
         </div>
         <button class="btn btn-sm" :disabled="remoteLoading" @click="loadRemoteRegistry">刷新远端源</button>
       </div>
@@ -39,7 +39,7 @@
       <div class="market-subhead">远端源</div>
       <p v-if="remoteLoading" class="market-hint">正在读取远端源…</p>
       <p v-else-if="remoteError" class="market-error">远端源读取失败：{{ remoteError }}</p>
-      <p v-else-if="!remotePackages.length" class="market-hint">远端源暂无 Package。</p>
+      <p v-else-if="!remotePackages.length" class="market-hint">远端源暂无配置。</p>
       <div v-else class="market-remote-list">
         <article v-for="entry in remotePackages" :key="entry.id" class="market-remote-card">
           <div class="market-remote-main">
@@ -75,7 +75,7 @@
           <span class="market-pkg-ver mono">v{{ p.version }}</span>
         </div>
       </div>
-      <p v-else class="market-hint">尚未安装任何 Package。</p>
+      <p v-else class="market-hint">尚未安装任何配置。</p>
     </section>
     <PluginCenter :open="centerOpen" @close="centerOpen = false" @changed="emit('extensions-changed')" />
   </div>
@@ -197,10 +197,10 @@ async function installRemotePackage(entry) {
       if (e?.status !== 409) throw e
       const existing = e?.data?.existing
       const detail = existing?.version ? `（当前 v${existing.version}）` : ''
-      if (!window.confirm(`Package ${entry.id} 已存在${detail}，覆盖安装将替换该包全部数据（含本地修改），继续？`)) return
+      if (!window.confirm(`配置 ${entry.id} 已存在${detail}，覆盖安装将替换该配置全部数据（含本地修改），继续？`)) return
       await api.importPackageArchive(bytes, { expectedSha256, overwrite: true })
     }
-    toast(`Package 已安装：${entry.id}@${entry.version || '?'}`, 'success')
+    toast(`配置已安装：${entry.id}@${entry.version || '?'}`, 'success')
     await refreshPackages()
   } catch (e) {
     toast(`安装失败：${e?.message || '请重试'}`, 'error')

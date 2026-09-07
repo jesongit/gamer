@@ -1,7 +1,7 @@
 <template>
   <div v-if="ctx.detailModal.open" class="modal-mask" @click.self="ctx.closeDetail">
     <div class="modal modal-wide">
-      <h3>Package 详情<template v-if="ctx.detailModal.packageId"> · <span class="mono">{{ ctx.detailModal.packageId }}</span></template></h3>
+      <h3>配置详情<template v-if="ctx.detailModal.packageId"> · <span class="mono">{{ ctx.detailModal.packageId }}</span></template></h3>
 
       <p v-if="ctx.detailModal.loading" class="detail-hint">加载中…</p>
       <template v-else-if="ctx.detailModal.error">
@@ -28,7 +28,7 @@
             <input v-model="ctx.detailModal.form.author" class="input" />
           </label>
           <label class="field">
-            <span>Android 兼容目标（逗号分隔，留空 = 通用包）</span>
+            <span>Android 兼容目标（逗号分隔，留空 = 通用配置）</span>
             <input v-model="ctx.detailModal.form.androidPackagesText" class="input mono" spellcheck="false" />
           </label>
           <div class="field">
@@ -97,12 +97,12 @@
               @click="runCompat"
             >{{ ctx.detailModal.compat.checking ? '检查中…' : '检查' }}</button>
           </div>
-          <p v-if="!targets.length" class="compat-info">通用包，兼容所有应用</p>
+          <p v-if="!targets.length" class="compat-info">通用配置，兼容所有应用</p>
           <p v-if="compatResult && compatResult.compatible" class="compat-ok">
-            ✔ {{ compatResult.android_package }} 在 Package 声明的兼容列表中
+            ✔ {{ compatResult.android_package }} 在配置声明的兼容列表中
           </p>
           <p v-if="compatResult && !compatResult.compatible" class="compat-warning">
-            ⚠ 该应用不在 Package 声明的兼容列表中（仍可继续运行）
+            ⚠ 该应用不在配置声明的兼容列表中（仍可继续运行）
           </p>
           <p v-if="ctx.detailModal.compat.error" class="form-error">{{ ctx.detailModal.compat.error }}</p>
         </div>

@@ -128,7 +128,7 @@ export function usePackageContext({
         expectedSha256: overwriteModal.sha256, overwrite: true,
       })
       overwriteModal.open = false
-      toast(`Package 已覆盖导入：${overwriteModal.summary.id}`, 'success')
+      toast(`配置已覆盖导入：${overwriteModal.summary.id}`, 'success')
       await refreshPackages({ api })
       if (overwriteModal.summary.id) selectPackage(overwriteModal.summary.id)
       await Promise.resolve(refreshAll?.()).catch(() => {})
@@ -147,7 +147,7 @@ export function usePackageContext({
       const sha256 = await sha256Hex(bytes)
       try {
         const rep = await api.importPackageArchive(bytes, { expectedSha256: sha256 })
-        toast(`Package 已导入：${rep?.id || '?'}@${rep?.version || '?'}`, 'success')
+        toast(`配置已导入：${rep?.id || '?'}@${rep?.version || '?'}`, 'success')
         await refreshPackages({ api })
         if (rep?.id) selectPackage(rep.id)
         await Promise.resolve(refreshAll?.()).catch(() => {})
@@ -242,7 +242,7 @@ export function usePackageContext({
     const name = formModal.form.name.trim()
     const androidPackages = parseAndroidPackages(formModal.form.androidPackagesText)
     if (!isValidPackageId(id)) {
-      formModal.error = 'Package ID 非法：小写字母/数字开头，仅含小写字母、数字、点、下划线、连字符'
+      formModal.error = '配置 ID 非法：小写字母/数字开头，仅含小写字母、数字、点、下划线、连字符'
       return
     }
     formModal.submitting = true
@@ -254,7 +254,7 @@ export function usePackageContext({
           ...(name ? { name } : {}),
           targets: { android: { packages: androidPackages } },
         })
-        toast(`Package 已创建：${id}`, 'success')
+        toast(`配置已创建：${id}`, 'success')
       } else {
         await api.duplicatePackage(currentId.value, id)
         toast(`已复制为 ${id}`, 'success')
@@ -293,7 +293,7 @@ export function usePackageContext({
     try {
       await api.deletePackage(deleteModal.target.id)
       deleteModal.open = false
-      toast(`Package 已删除：${deleteModal.target.id}`, 'success')
+      toast(`配置已删除：${deleteModal.target.id}`, 'success')
       await refreshPackages({ api })
       await Promise.resolve(refreshAll?.()).catch(() => {})
     } catch (e) {
@@ -347,7 +347,7 @@ export function usePackageContext({
     try {
       detailModal.detail = normalizeDetail(await api.getPackage(detailModal.packageId))
     } catch (e) {
-      detailModal.error = e?.message || '加载 Package 详情失败'
+      detailModal.error = e?.message || '加载配置详情失败'
     } finally {
       detailModal.loading = false
     }
@@ -436,7 +436,7 @@ export function usePackageContext({
         package: normalizeDetail({ package: updated }).package,
       }
       detailModal.editing = false
-      toast(`Package 元数据已保存：${detailModal.packageId}`, 'success')
+      toast(`配置元数据已保存：${detailModal.packageId}`, 'success')
       await refreshPackages({ api })
     } catch (e) {
       if (e?.status === 409 && !force) {

@@ -307,7 +307,7 @@ export function useConsoleScriptRunner({
 
   /** 新建脚本：空 ScriptModel（保存时落盘到当前 Package）——脚本面板专属 */
   function startNewScript() {
-    if (!packageId.value) return toast('请先在右上选择 Package', 'warn')
+    if (!packageId.value) return toast('请先在右上选择配置', 'warn')
     scriptScope.scriptMode.value = 'edit'
     showYaml.value = false
     scriptShell.newScript({ name: '新脚本.yml', pkg: packageId.value })
@@ -375,7 +375,7 @@ export function useConsoleScriptRunner({
   /** 新建当前面板类型：脚本 = 新建脚本；函数 = 直接进入新函数库文件编辑态，文件名可在编辑器顶部修改 */
   function startNewTarget(scope) {
     if (scope.kind !== 'func') return startNewScript()
-    if (!packageId.value) return toast('请先在右上选择 Package', 'warn')
+    if (!packageId.value) return toast('请先在右上选择配置', 'warn')
     editFocusFn.value = ''
     scope.scriptMode.value = 'edit'
     showYaml.value = false
@@ -538,7 +538,7 @@ export function useConsoleScriptRunner({
   async function saveEditScript(scope) {
     if (!scriptShell.hasModel) return
     if (!String(scriptShell.name || '').trim()) return toast('请填写脚本名称', 'error')
-    if (!scriptShell.pkg && !packageId.value) return toast('请先在右上选择 Package', 'warn')
+    if (!scriptShell.pkg && !packageId.value) return toast('请先在右上选择配置', 'warn')
     const r = await scriptShell.save()
     if (r.ok) {
       clearCallParamsCache()

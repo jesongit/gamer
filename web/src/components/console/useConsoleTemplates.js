@@ -421,7 +421,7 @@ export function useConsoleTemplates({
   function cropUploadPayload() {
     const raw = crop.name.trim()
     if (!raw) { toast('请输入模板名称', 'warn'); return null }
-    if (!packageId.value) { toast('请先在右上选择 Package', 'warn'); return null }
+    if (!packageId.value) { toast('请先在右上选择配置', 'warn'); return null }
     const name = raw.toLowerCase().endsWith('.png') ? raw : raw + '.png'
     const shortName = name.replace(/#[^#]+\.png$/i, '.png')
     const region = [

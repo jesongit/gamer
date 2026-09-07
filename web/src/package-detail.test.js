@@ -141,13 +141,13 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
     expect(text).toContain('10 个文件 / 1.0 KB') // 插件级统计
   })
 
-  it('0 targets 显示通用包提示；兼容性检查不兼容 → 黄条 warning（不禁止）', async () => {
+  it('0 targets 显示通用配置提示；兼容性检查不兼容 → 黄条 warning（不禁止）', async () => {
     const { api } = setup()
     api.getPackage.mockResolvedValue(detailRep({ package: { ...detailRep().package, targets: { android: { packages: [] } } } }))
     const ctx = await makeCtx(api)
     const wrapper = await mountModal(ctx)
 
-    expect(wrapper.text()).toContain('通用包，兼容所有应用')
+    expect(wrapper.text()).toContain('通用配置，兼容所有应用')
 
     api.packageCompatibility.mockResolvedValueOnce({
       android_package: 'com.other.app', compatible: false, android_targets: [],
@@ -157,7 +157,7 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
     await flushPromises()
 
     expect(api.packageCompatibility).toHaveBeenCalledWith('com.demo', 'com.other.app')
-    expect(wrapper.find('.compat-warning').text()).toContain('该应用不在 Package 声明的兼容列表中（仍可继续运行）')
+    expect(wrapper.find('.compat-warning').text()).toContain('该应用不在配置声明的兼容列表中（仍可继续运行）')
 
     api.packageCompatibility.mockResolvedValueOnce({
       android_package: 'com.miHoYo.hkrpg', compatible: true, android_targets: ['com.miHoYo.hkrpg'],
@@ -165,7 +165,7 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
     await wrapper.find('input[list="pkg-compat-candidates"]').setValue('com.miHoYo.hkrpg')
     await wrapper.findAll('button').find(b => b.text() === '检查').trigger('click')
     await flushPromises()
-    expect(wrapper.find('.compat-ok').text()).toContain('在 Package 声明的兼容列表中')
+    expect(wrapper.find('.compat-ok').text()).toContain('在配置声明的兼容列表中')
   })
 
   it('编辑保存：PUT 带 expected_revision + targets/plugins，成功后退出编辑态并 refreshPackages', async () => {
@@ -268,10 +268,10 @@ describe('PackageDetailModal（plan §18/§21/§37 + §17）', () => {
     expect(ctx.detailModal.editing).toBe(false)
     expect(api.updatePackage).not.toHaveBeenCalled()
 
-    api.getPackage.mockRejectedValueOnce(apiError(404, { message: 'Package 不存在' }))
+    api.getPackage.mockRejectedValueOnce(apiError(404, { message: '配置不存在' }))
     await ctx.openDetail()
     await flushPromises()
-    expect(ctx.detailModal.error).toContain('Package 不存在')
+    expect(ctx.detailModal.error).toContain('配置不存在')
     api.getPackage.mockResolvedValueOnce(detailRep())
     await ctx.reloadDetail()
     await flushPromises()
@@ -361,7 +361,7 @@ describe('导入覆盖弹窗 Required Plugin 缺失提示（plan §36）', () =>
     await flushPromises()
     expect(api.getPackage).toHaveBeenCalledWith('com.demo')
     expect(wrapper.findComponent(PackageDetailModal).exists()).toBe(true)
-    expect(wrapper.text()).toContain('Package 详情')
+    expect(wrapper.text()).toContain('配置详情')
 
     // 无当前包 → 按钮禁用
     selectPackage(null)

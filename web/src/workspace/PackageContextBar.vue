@@ -1,21 +1,21 @@
 <template>
   <div class="func-pkg-row package-context-bar">
-    <span class="pkg-bar-label" title="Package：配置数据上下文（plan §28）">📦 Package</span>
+    <span class="pkg-bar-label" title="配置：数据上下文（plan §28）">📦 配置</span>
     <select
       :value="ctx.currentId || ''"
       class="select mono func-pkg"
-      title="当前 Package：右侧所有非全局功能的统一数据上下文"
+      title="当前配置：右侧所有非全局功能的统一数据上下文"
       @change="ctx.onPackageChange"
     >
-      <option v-if="!ctx.pkgOptions.length" value="">（暂无 Package）</option>
+      <option v-if="!ctx.pkgOptions.length" value="">（暂无配置）</option>
       <option v-for="id in ctx.pkgOptions" :key="id" :value="id">{{ ctx.optionLabel(id) }}</option>
     </select>
-    <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="查看 Package 详情 / 依赖状态 / 编辑元数据（plan §18/§37）" @click="ctx.openDetail()">ℹ️ 详情</button>
-    <button class="btn btn-sm" :disabled="ctx.busy" title="导入 .gamerpkg 为本地 Package" @click="ctx.pickImportFile(fileInput)">导入</button>
-    <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="导出当前 Package 为 .gamerpkg" @click="ctx.exportPackage">导出</button>
-    <button class="btn btn-sm" :disabled="ctx.busy" title="新建空 Package" @click="ctx.openCreate">新建</button>
-    <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="复制当前 Package 为新包（保留自己的修改）" @click="ctx.openDuplicate">复制</button>
-    <button class="btn btn-sm btn-danger" :disabled="!ctx.currentId || ctx.busy" title="删除当前 Package（数据不可恢复）" @click="ctx.openDelete">🗑</button>
+    <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="查看配置详情 / 依赖状态 / 编辑元数据（plan §18/§37）" @click="ctx.openDetail()">ℹ️ 详情</button>
+    <button class="btn btn-sm" :disabled="ctx.busy" title="导入 .gamerpkg 为本地配置" @click="ctx.pickImportFile(fileInput)">导入</button>
+    <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="导出当前配置为 .gamerpkg" @click="ctx.exportPackage">导出</button>
+    <button class="btn btn-sm" :disabled="ctx.busy" title="新建空配置" @click="ctx.openCreate">新建</button>
+    <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="复制当前配置为新配置（保留自己的修改）" @click="ctx.openDuplicate">复制</button>
+    <button class="btn btn-sm btn-danger" :disabled="!ctx.currentId || ctx.busy" title="删除当前配置（数据不可恢复）" @click="ctx.openDelete">🗑</button>
     <!-- .gamerpkg 归档选择：change 后清空 value 支持重选同文件 -->
     <input ref="fileInput" class="pkg-import-input" type="file" accept=".gamerpkg,.zip" @change="ctx.onImportPicked" />
   </div>
@@ -23,9 +23,9 @@
   <!-- 新建 / 复制弹窗（共用表单） -->
   <div v-if="ctx.formModal.open" class="modal-mask" @click.self="ctx.closeForm">
     <div class="modal">
-      <h3>{{ ctx.formModal.mode === 'create' ? '新建 Package' : '复制 Package' }}</h3>
+      <h3>{{ ctx.formModal.mode === 'create' ? '新建配置' : '复制配置' }}</h3>
       <label class="field">
-        <span>Package ID（小写字母/数字开头，含 . _ -）</span>
+        <span>配置 ID（小写字母/数字开头，含 . _ -）</span>
         <input v-model="ctx.formModal.form.id" class="input mono" placeholder="如 user.hsr.daily" spellcheck="false" />
       </label>
       <label class="field">
@@ -37,7 +37,7 @@
         <input v-model="ctx.formModal.form.version" class="input mono" />
       </label>
       <label class="field">
-        <span>Android 兼容目标（逗号分隔，可留空 = 通用包）</span>
+        <span>Android 兼容目标（逗号分隔，可留空 = 通用配置）</span>
         <input v-model="ctx.formModal.form.androidPackagesText" class="input mono" placeholder="com.miHoYo.hkrpg, com.HoYoverse.hkrpgoversea" spellcheck="false" />
       </label>
       <p v-if="ctx.formModal.error" class="form-error">{{ ctx.formModal.error }}</p>
@@ -53,13 +53,13 @@
   <!-- 覆盖导入确认（plan §9：明示整体替换，避免半安装状态由服务端原子替换保证） -->
   <div v-if="ctx.overwriteModal.open" class="modal-mask" @click.self="ctx.closeOverwrite">
     <div class="modal">
-      <h3>Package 已存在</h3>
-      <p class="overwrite-warning">继续导入将<b>覆盖该 Package 当前数据</b>，包括用户直接修改或新增的内容。</p>
+      <h3>配置已存在</h3>
+      <p class="overwrite-warning">继续导入将<b>覆盖该配置当前数据</b>，包括用户直接修改或新增的内容。</p>
       <dl class="summary">
         <dt>ID</dt><dd class="mono">{{ ctx.overwriteModal.summary.id }}</dd>
         <dt>名称</dt><dd>{{ ctx.overwriteModal.summary.name || '—' }}</dd>
         <dt>版本</dt><dd class="mono">{{ ctx.overwriteModal.summary.version || '—' }}</dd>
-        <dt>兼容目标</dt><dd class="mono">{{ ctx.overwriteModal.summary.androidTargets.join(', ') || '通用包' }}</dd>
+        <dt>兼容目标</dt><dd class="mono">{{ ctx.overwriteModal.summary.androidTargets.join(', ') || '通用配置' }}</dd>
       </dl>
       <!-- plan §36：缺 Required Plugin 只黄条提示，允许继续导入（安装插件后自动恢复） -->
       <div v-if="ctx.overwriteModal.missingRequired.length" class="missing-required-warning" role="alert">
@@ -78,7 +78,7 @@
   <!-- 删除确认 -->
   <div v-if="ctx.deleteModal.open" class="modal-mask" @click.self="ctx.closeDelete">
     <div class="modal">
-      <h3>删除 Package</h3>
+      <h3>删除配置</h3>
       <p>将删除 <b class="mono">{{ ctx.deleteModal.target?.id }}</b> 的全部数据（含插件数据与 shared/），绑定任务将被挂起（不删除）。此操作不可恢复。</p>
       <p v-if="ctx.deleteModal.error" class="form-error">{{ ctx.deleteModal.error }}</p>
       <div class="modal-actions">

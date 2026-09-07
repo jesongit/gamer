@@ -334,18 +334,18 @@ describe('Console 视觉组件拆分静态回归', () => {
 
   it('Package 上下文条（导入/导出/新建/复制/删除）落在 PackageContextBar，逻辑收敛在 usePackageContext', () => {
     const bar = read('./workspace/PackageContextBar.vue')
-    expect(bar).toContain('title="导入 .gamerpkg 为本地 Package"')
-    expect(bar).toContain('title="导出当前 Package 为 .gamerpkg"')
-    expect(bar).toContain('title="新建空 Package"')
-    expect(bar).toContain('title="复制当前 Package 为新包（保留自己的修改）"')
-    expect(bar).toContain('title="删除当前 Package（数据不可恢复）"')
+    expect(bar).toContain('title="导入 .gamerpkg 为本地配置"')
+    expect(bar).toContain('title="导出当前配置为 .gamerpkg"')
+    expect(bar).toContain('title="新建空配置"')
+    expect(bar).toContain('title="复制当前配置为新配置（保留自己的修改）"')
+    expect(bar).toContain('title="删除当前配置（数据不可恢复）"')
     expect(bar).toContain('accept=".gamerpkg,.zip"')
     expect(bar).toContain('@change="ctx.onImportPicked"')
     // 覆盖导入确认（§9）/新建复制表单/删除确认三弹窗同域挂载
     expect(bar).toContain('ctx.overwriteModal.open')
     expect(bar).toContain('ctx.formModal.open')
     expect(bar).toContain('ctx.deleteModal.open')
-    expect(bar).toContain('覆盖该 Package 当前数据')
+    expect(bar).toContain('覆盖该配置当前数据')
 
     const composable = read('./composables/usePackageContext.js')
     expect(composable).toContain('api.importPackageArchive')
