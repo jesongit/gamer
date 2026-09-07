@@ -269,3 +269,8 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **模板上传与归档导入的内容校验口径不同**：资源 PUT 经 gamer.yaml 字节钩子强制灰度归一化（解码+重编码，非法 PNG 直接 400），而 .gamerpkg 导入只做布局/manifest/路径安全校验、**不经过插件内容校验**——包内模板以导出侧字节为准，别假设导入后与上传管线同源。
 - **脚本资源 id 首段现在是 Package id**：可为纯自定 id（如 `official.hsr.daily`）与 Android 包名完全不同名，按 Android 包名拼脚本 id / entrypoint 会 404（结构化 not_found）；id 形态 `<package-id>/<automations 内相对路径>.yaml`（`automations/` 前缀由 gamer.yaml 内部映射，id 中不写）。
 - **并行 agent 共享工作区开发时 git add 必须按文件所有权清单**：各自只 stage 自己地盘的文件，禁改文件被他人改坏时等对方自愈、不要抢修（多双手同改一个文件会产生叠加损坏；本波真实发生过 usePackageContext.js 语法错误由属主 agent 自愈、旁路 agent 抢修反而冲突）。
+
+## 2026-09-07（界面术语 Package→配置 + 本机构建环境）
+
+- **rustc 内存不足不止报分配失败，还会随机崩在不同 crate 的 ICE（`STATUS_STACK_BUFFER_OVERRUN`）**：本机 32G 内存单独跑全量 `cargo test` 也连续三轮各崩在一个不同依赖（curve25519-dalek 数百条假 trait 错误 / wit-parser / regalloc2 / webrtc-util），根因是编译 wasmtime 时 `rustc-LLVM ERROR: out of memory`——别当成代码问题排查；解法 = 关依赖 debuginfo + 降并行 `CARGO_PROFILE_DEV_DEBUG=0 cargo test -j 2`（wasmtime 单 crate debug 编译即数 GB），与「与前端构建并行时内存分配失败」同根源但单独跑也会触发。
+- **本机缺 `wasm32-unknown-unknown` target 时 32 个 WASM guest 测试全数失败，属预期环境缺口**：yaml-guest/keymap guest/declarative 插件 roundtrip 等在测试内现场 cargo 构建 guest，报 E0463 `can't find crate for core/std … target may not be installed`；`rustup target add wasm32-unknown-unknown` 即愈，不装则判定回归只看其余 529 项（CI 有官方 guest wasm32 构建关卡兜底）。
