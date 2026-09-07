@@ -696,6 +696,10 @@ mod wasmtime_runtime {
 
         fn engine(&self) -> &Engine {
             self.engine.get_or_init(|| {
+                // wasmtime 48：async 由 cargo feature `async`（已启用）保证，
+                // `Config::async_support` 已废弃为 no-op，无需（也不应）调用。
+                // async import 在实例化时把 store 置 async_required（不可逆），
+                // 因此所有 guest 入口都必须走 async 变体（见 wit.rs 注释）。
                 let config = wasmtime::Config::new();
                 Engine::new(&config).expect("Wasmtime engine config is valid")
             })
@@ -759,7 +763,10 @@ mod wasmtime_runtime {
                     // wasmtime async fiber 的 Enter guard 在线程/runtime 收尾
                     // 阶段有跨上下文断言（Windows GNU 已知问题，见
                     // docs/PITFALLS.md）：实例线程私有资源，捕获隔离即可，
-                    // store/instance 会随 unwind 正常清理。
+                    // store/instance 会随 unwind 正常清理。catch_unwind 覆盖
+                    // block_on 全程（entry/call/命令循环 + runtime drop）——
+                    // fiber 内 panic 只损失当前实例（线程退出，调用方经
+                    // channel 关闭得到 RuntimeUnavailable），绝不带崩进程。
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         runtime.block_on(async move {
                             let mut store = Store::new(&engine, state);
@@ -779,9 +786,16 @@ mod wasmtime_runtime {
                                     return;
                                 }
                             };
-                            match instance.gamer_host_extension().call_run(&mut store) {
+                            // async import 链接后 store 恒为 async_required，
+                            // 入口必须是 async 变体（同步 call_run 会 trap
+                            // "store configuration requires that *_async
+                            // functions are used instead"——2026-09 缺陷）。
+                            match instance.gamer_host_extension().call_run(&mut store).await {
                                 Ok(()) => tracing::debug!("WASM extension entrypoint returned"),
                                 Err(error) => {
+                                    // entry trap 只损失本实例：实例继续留在
+                                    // 命令循环上（call 会再报同一 trap），
+                                    // 进程与生命周期状态机不受影响。
                                     tracing::error!(error = %error, "WASM extension entrypoint trapped")
                                 }
                             }
@@ -796,6 +810,7 @@ mod wasmtime_runtime {
                                         let result = instance
                                             .gamer_host_extension()
                                             .call_call(&mut store, &action, &values_json)
+                                            .await
                                             .map_err(|error| {
                                                 ExtensionError::Runtime(format!(
                                                     "插件 call trap: {error}"
@@ -841,8 +856,16 @@ mod wasmtime_runtime {
                     Ok(handle)
                 }
                 Ok(Err(error)) => {
+                    // 实例化失败 + 线程 join 给出 panic 载荷：只在日志收敛，
+                    // 不 resume_unwind——把实例线程的 panic 再抛到调用方线程
+                    // 对恢复无益且可能形成 double-panic abort（trap 收敛
+                    // 防护：单实例失败绝不带崩进程）。
                     if let Err(join_error) = task.join() {
-                        std::panic::resume_unwind(join_error);
+                        tracing::error!(
+                            extension = %request.id,
+                            "wasm instance 线程在实例化失败后 panic（已隔离）"
+                        );
+                        drop(join_error);
                     }
                     Err(ExtensionError::Runtime(format!("组件实例化失败: {error}")))
                 }
@@ -1079,5 +1102,131 @@ entry = "plugin.wasm"
         assert_eq!(context.device_id.as_deref(), Some("device-1"));
         assert_eq!(context.android_package.as_deref(), Some("com.example.game"));
         assert_eq!(context.content_package.as_deref(), Some("com.example.game"));
+    }
+
+    /// 现场构建带 host import 的最小 guest 组件（`tests/import-guest`，
+    /// wit-bindgen 生成 + wit-component 编码；与 call-guest 同一工程法）。
+    /// 产物落在 `target/import-guest/`（首次冷构建约 1 分钟，之后增量）。
+    fn import_guest_component() -> Vec<u8> {
+        use std::path::PathBuf;
+        use std::process::Command;
+        use std::sync::OnceLock;
+
+        static COMPONENT: OnceLock<Vec<u8>> = OnceLock::new();
+        COMPONENT
+            .get_or_init(|| {
+                let server_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+                let guest_dir = server_dir.join("tests").join("import-guest");
+                let target_dir = server_dir.join("target").join("import-guest");
+                let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+                let run = |args: &[&str]| {
+                    let mut command = Command::new(&cargo);
+                    command
+                        .current_dir(&guest_dir)
+                        .args(args)
+                        .arg("--target-dir")
+                        .arg(&target_dir);
+                    let output = command.output().unwrap_or_else(|error| {
+                        panic!("无法启动 import guest cargo 子进程: {error}")
+                    });
+                    assert!(
+                        output.status.success(),
+                        "import guest 构建失败: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                };
+                run(&[
+                    "build",
+                    "--locked",
+                    "--quiet",
+                    "--release",
+                    "--lib",
+                    "--target",
+                    "wasm32-unknown-unknown",
+                ]);
+                let module = target_dir
+                    .join("wasm32-unknown-unknown")
+                    .join("release")
+                    .join("gamer_import_fixture.wasm");
+                let component = target_dir.join("plugin.component.wasm");
+                // core module → WASM Component（fixture 自带 componentize bin）。
+                let mut command = Command::new(&cargo);
+                command
+                    .current_dir(&guest_dir)
+                    .args(["run", "--quiet", "--release", "--bin", "componentize", "--"])
+                    .arg(&module)
+                    .arg(&component)
+                    .arg("--target-dir")
+                    .arg(&target_dir);
+                let output = command
+                    .output()
+                    .expect("无法启动 import guest componentize");
+                assert!(
+                    output.status.success(),
+                    "import guest componentize 失败: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                std::fs::read(&component).expect("import guest component 不存在")
+            })
+            .clone()
+    }
+
+    /// 回归（2026-09 缺陷）：带 host import 的真实 guest 全链不 trap。缺陷
+    /// 形态是 wit.rs 只对 imports 声明 async——链接期 store 被置
+    /// async_required 后同步 call_run 即 trap，随后实例线程 fiber 收尾
+    /// panic → 进程 abort（零 import 的 WAT/call-guest fixture 不触发链接期
+    /// 标记，故漏检）。验收：start 成功、entry 完成、call 经 host import
+    /// （context.get）往返 AppContext、stop 干净收尾——任一环节失败或线程
+    /// abort 都会让本测试（及进程）垮掉。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guest_with_host_imports_starts_calls_and_stops_without_trap() {
+        use WasmRuntime as _;
+
+        let manifest = parse_manifest(
+            br#"manifest_version = 2
+id = "com.example.import"
+version = "1.0.0"
+name = "Import test"
+entry = "plugin.wasm"
+permissions = ["log.write"]
+"#,
+        )
+        .unwrap();
+        let runtime = LazyWasmtimeRuntime::new();
+        let handle = runtime
+            .start(WasmStartRequest {
+                id: ExtensionId::parse("com.example.import").unwrap(),
+                version: ExtensionVersion::parse("1.0.0").unwrap(),
+                wasm: import_guest_component(),
+                host: HostApi::for_manifest(
+                    CapabilityRegistry::default(),
+                    HostApiCatalog::default(),
+                    &manifest,
+                )
+                .unwrap(),
+                app_context: Some(
+                    crate::core::AppContext::for_test("device-import", "com.example.game").unwrap(),
+                ),
+            })
+            .await
+            .expect("带 import 的插件必须能 start（async 入口修复回归）");
+
+        while !runtime.entry_completed(handle).await {
+            tokio::task::yield_now().await;
+        }
+
+        // call 经 guest 的 host import（context.get）回读 AppContext：证明
+        // async import 链接后在 fiber 入口内真实往返，而非仅链接通过。
+        let result = runtime.call(handle, "ping", "{}").await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(json["action"], "ping");
+        assert_eq!(json["context"]["device_id"], "device-import");
+        assert_eq!(json["context"]["android_package"], "com.example.game");
+
+        runtime.stop(handle).await.unwrap();
+        assert!(matches!(
+            runtime.call(handle, "ping", "{}").await,
+            Err(crate::extensions::ExtensionError::RuntimeUnavailable(_))
+        ));
     }
 }
