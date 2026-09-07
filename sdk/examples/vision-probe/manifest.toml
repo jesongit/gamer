@@ -1,0 +1,70 @@
+# 设备/视觉能力示例（manifest v2）。
+# 与 hello 示例的唯一结构性差别：声明了 device/vision/input 权限与对应
+# host_api 域——权限声明必须先于真实调用存在，否则宿主在 capability 边界
+# 返回 kind=denied（对照 hello 的 probe_denied 动作）。
+manifest_version = 2
+id = "com.example.visionprobe"
+version = "1.0.0"
+name = "视觉探针示例"
+description = "声明 device/vision/input 权限并真实调用受控 Host API：resolve 设备 → capture 一帧 → 采样颜色；tap 默认 dry-run，不触达真机"
+
+entry = "plugin.wasm"
+
+# 权限闭集内申请：device.read（resolve）、vision.match（capture/匹配）、
+# vision.color（取色）、input.tap（点击注入）。
+permissions = ["device.read", "vision.match", "vision.color", "input.tap"]
+
+[host_api]
+device = "^1.0"
+vision = "^1.0"
+input = "^1.0"
+
+[execution]
+kind = "wasm"
+
+[[ui.contributions]]
+panel_id = "vision-probe"
+title = "视觉探针"
+icon = "🔍"
+order = 91
+location = "console.right"
+runtime = "declarative"
+requires_device = true
+preferred_width = 380
+description = "只读探针：resolve → capture → sample-color；tap 需要 confirm_tap 才真实注入。"
+
+[[ui.contributions.fields]]
+type = "text"
+name = "device_id"
+label = "设备 ID"
+placeholder = "设备管理列表里的 id"
+
+[[ui.contributions.fields]]
+type = "number"
+name = "x"
+label = "采样/点击 X（物理像素）"
+default = 100
+
+[[ui.contributions.fields]]
+type = "number"
+name = "y"
+label = "采样/点击 Y（物理像素）"
+default = 100
+
+[[ui.contributions.fields]]
+type = "button"
+label = "capture + sample-color（只读）"
+action = "probe"
+description = "解析设备 → 抓一帧 → 读取 (x,y) 像素颜色，不注入任何输入"
+
+[[ui.contributions.fields]]
+type = "boolean"
+name = "confirm_tap"
+label = "真的注入点击（默认关）"
+default = false
+
+[[ui.contributions.fields]]
+type = "button"
+label = "tap（默认 dry-run）"
+action = "tap"
+description = "未勾选 confirm_tap 时只回显将要执行的点击"

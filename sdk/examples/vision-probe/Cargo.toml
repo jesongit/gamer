@@ -1,0 +1,15 @@
+# 设备/视觉能力示例插件 guest（gamer:host/extension@1.0.0 world）。
+# 独立 crate：不进任何 workspace，仓库外复制本目录即可单独构建。
+[package]
+name = "vision-probe-plugin-guest"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+wit-bindgen = "0.57.1"
+# 仅供 src/bin/componentize.rs（宿主侧运行）使用：core module → Component
+wit-component = "0.254.0"

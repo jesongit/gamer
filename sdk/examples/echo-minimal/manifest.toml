@@ -1,0 +1,52 @@
+# echo-minimal（manifest v2）：零 import、零权限的最小可运行插件。
+# 无 permissions、无 [host_api]——manifest 不声明即不申请，宿主按最小权限装配。
+manifest_version = 2
+id = "com.example.echo"
+version = "1.0.0"
+name = "Echo 最小示例"
+description = "零 import 最小插件：declarative 面板回显与 guest 计算，全生命周期可在当前宿主基线完整运行"
+
+entry = "plugin.wasm"
+
+# permissions 缺省 = 空集合。权限是闭集、显式申请制，缺省即无任何能力。
+
+[execution]
+kind = "wasm"
+
+[[ui.contributions]]
+panel_id = "echo"
+title = "Echo 示例"
+icon = "🔁"
+order = 89
+location = "console.right"
+runtime = "declarative"
+preferred_width = 340
+description = "零 import 最小插件：回显表单值 / guest 内求和。"
+
+[[ui.contributions.fields]]
+type = "text"
+name = "text"
+label = "要回显的文本"
+default = "hello"
+
+[[ui.contributions.fields]]
+type = "button"
+label = "回显"
+action = "echo"
+
+[[ui.contributions.fields]]
+type = "number"
+name = "a"
+label = "A"
+default = 1
+
+[[ui.contributions.fields]]
+type = "number"
+name = "b"
+label = "B"
+default = 2
+
+[[ui.contributions.fields]]
+type = "button"
+label = "求和（guest 内计算）"
+action = "sum"

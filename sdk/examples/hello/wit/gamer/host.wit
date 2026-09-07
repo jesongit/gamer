@@ -1,0 +1,182 @@
+package gamer:host@1.0.0;
+
+/// Shared opaque handles and errors. Handles are owned by the host and are
+/// never host filesystem paths or transport pointer IDs.
+interface types {
+  type device-handle = u64;
+  type frame-handle = u64;
+  type resource-handle = u64;
+  type run-handle = u64;
+  type touch-handle = u64;
+
+  enum host-error-kind {
+    denied,
+    unavailable,
+    invalid-request,
+    not-found,
+    cancelled,
+    failed,
+  }
+
+  record host-error {
+    kind: host-error-kind,
+    message: string,
+  }
+}
+
+/// Host API domain: device. Version is the package/domain contract version.
+interface device {
+  use types.{device-handle, host-error};
+  resolve: func(id: string) -> result<device-handle, host-error>;
+  start-app: func(device: device-handle, app: string) -> result<_, host-error>;
+  stop-app: func(device: device-handle, app: string) -> result<_, host-error>;
+}
+
+/// Host API domain: vision.
+interface vision {
+  use types.{device-handle, frame-handle, resource-handle, host-error};
+  record point { x: u32, y: u32 }
+  record match-box { x: u32, y: u32, width: u32, height: u32, score: f32 }
+  variant match-outcome { found(match-box), not-found }
+  match-template: func(frame: frame-handle, template: resource-handle)
+    -> result<match-outcome, host-error>;
+  capture: func(device: device-handle) -> result<frame-handle, host-error>;
+  sample-color: func(frame: frame-handle, point: point) -> result<tuple<u8, u8, u8>, host-error>;
+}
+
+/// Host API domain: input.
+interface input {
+  use types.{device-handle, host-error};
+  record point { x: u32, y: u32 }
+  tap: func(device: device-handle, point: point) -> result<_, host-error>;
+  swipe: func(device: device-handle, start: point, end: point, duration-ms: u64)
+    -> result<_, host-error>;
+  key: func(device: device-handle, code: u32, action: string) -> result<_, host-error>;
+  text: func(device: device-handle, value: string) -> result<_, host-error>;
+}
+
+/// Host API domain: touch.
+interface touch {
+  use types.{device-handle, touch-handle, host-error};
+  record point { x: u32, y: u32, pressure: f32 }
+  begin: func(device: device-handle, point: point) -> result<touch-handle, host-error>;
+  move: func(touch: touch-handle, point: point) -> result<_, host-error>;
+  end: func(touch: touch-handle) -> result<_, host-error>;
+}
+
+/// Host API domain: resource. Resource names are logical identifiers, never
+/// paths supplied to the host filesystem.
+interface resources {
+  use types.{resource-handle, host-error};
+  resolve: func(namespace: string, name: string) -> result<resource-handle, host-error>;
+  open: func(handle: resource-handle) -> result<u64, host-error>;
+}
+
+/// Host API domain: run.
+interface run {
+  use types.{device-handle, resource-handle, run-handle, host-error};
+  submit: func(device: device-handle, entry: resource-handle) -> result<run-handle, host-error>;
+  cancel: func(run: run-handle) -> result<_, host-error>;
+  status: func(run: run-handle) -> result<string, host-error>;
+}
+
+/// Host API domain: runtime.
+interface runtime {
+  use types.{host-error};
+  sleep: func(milliseconds: u64) -> result<_, host-error>;
+  cancelled: func() -> bool;
+}
+
+/// Host API domain: log.
+interface log {
+  use types.{device-handle, run-handle, host-error};
+  write: func(level: string, message: string, device: option<device-handle>, run: option<run-handle>)
+    -> result<_, host-error>;
+}
+
+/// Host API domain: media. Media/recording ids are opaque logical identifiers;
+/// handles never expose host filesystem paths. V1 authority is the Rust facade
+/// (`host_api::MediaDomain`, Core 进程级机制域，不经 CapabilityRegistry 注册)；
+/// 本 interface 先契约化形态、未挂进 world extension-host——待出现 WASM 消费者
+/// 再接线，避免宿主 linker 预先承担全部 world import。
+interface media {
+  use types.{frame-handle, host-error};
+  import-media: func(name: string, bytes: list<u8>) -> result<string, host-error>;
+  get: func(media-id: string) -> result<string, host-error>;
+  list-media: func() -> result<string, host-error>;
+  open-frame: func(media-id: string, pts-us: option<u64>, index: option<u32>)
+    -> result<frame-handle, host-error>;
+  record-start: func(device: string) -> result<string, host-error>;
+  record-stop: func(recording-id: string) -> result<string, host-error>;
+  record-cancel: func(recording-id: string) -> result<string, host-error>;
+  record-status: func(recording-id: string) -> result<string, host-error>;
+  events: func(recording-id: string) -> result<string, host-error>;
+  release: func(handle: frame-handle) -> result<_, host-error>;
+}
+
+/// Generic, versioned capability escape hatch. The JSON wire is intentionally
+/// owned by the extension boundary rather than Core: capability names still
+/// resolve only to registered Core services and permissions are checked by the
+/// host before dispatch.
+interface capability {
+  use types.{host-error};
+  invoke: func(capability: string, args-json: string) -> result<string, host-error>;
+}
+
+/// The immutable application scope supplied to an extension invocation.
+interface context {
+  record app-context {
+    device-id: option<string>,
+    android-package: option<string>,
+    content-package: option<string>,
+  }
+  get: func() -> app-context;
+}
+
+world extension-host {
+  import device;
+  import vision;
+  import input;
+  import touch;
+  import resources;
+  import run;
+  import runtime;
+  import log;
+  import context;
+
+  /// The required extension entrypoint. The host invokes it after all imports
+  /// have been linked and the component has been instantiated.
+  export extension;
+}
+
+/// YAML v3 has a request/response entrypoint because the source is supplied by
+/// the app package at run time. It is separate from the long-lived generic
+/// extension lifecycle world, while sharing the same capability import.
+interface automation {
+  run: func(program-json: string) -> result<string, string>;
+}
+
+/// YAML extension-only program lookup used by the small AST `call` node. It
+/// is intentionally not part of the generic Core capability catalog.
+///
+/// Call depth is enforced by the guest's local ExecutionBudget
+/// (ADR-YAML-04); the host never sees depth and only resolves the target.
+interface programs {
+  resolve: func(target: string, args-json: string) -> result<string, string>;
+}
+
+world yaml-extension-host {
+  import capability;
+  import programs;
+  export automation;
+}
+
+interface extension {
+  run: func();
+
+  /// Declarative UI backend entrypoint. `action` must be one of the buttons
+  /// declared in the manifest's declarative UI schema (the host enforces this
+  /// before dispatch); `values-json` is the collected form payload. The guest
+  /// returns a JSON string result.
+  call: func(action: string, values-json: string) -> result<string, string>;
+}

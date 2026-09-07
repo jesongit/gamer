@@ -1,0 +1,16 @@
+# echo-minimal：零依赖零权限的最小可运行插件。
+# 无 permissions、无 [host_api]、无 UI 资产——manifest 本身就是全部配置面。
+# 适合作为「纯 declarative 面板 + 轻量 guest 计算」类插件的起点。
+[package]
+name = "echo-minimal-plugin-guest"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = "1"
+wit-bindgen = "0.57.1"
+# 仅供 src/bin/componentize.rs（宿主侧运行）使用：core module → Component
+wit-component = "0.254.0"

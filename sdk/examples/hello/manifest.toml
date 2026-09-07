@@ -1,0 +1,73 @@
+# Hello 插件（manifest v2）：最小第三方示例。
+# 字段语义与约束见 docs/guides/plugin-dev.md；本文件可直接复制改 id/version 起步。
+manifest_version = 2
+id = "com.example.hello"
+version = "1.0.0"
+name = "Hello 示例"
+description = "最小第三方插件：declarative 面板 + call 命令 + Package 私有数据检查 + 插件日志 + 运行上下文读取"
+
+# 真实 WASM guest：entry 必须指向包内实际存在的 .wasm 文件（安装时校验 \0asm magic）。
+entry = "plugin.wasm"
+
+# 权限是闭集（19 项）：这里只申请本插件真正用到的两项。
+permissions = ["resource.read", "log.write"]
+
+# 声明用到的 Host API 域版本要求（不声明 = 该域链接仍可用，但建议显式声明，
+# 让旧宿主在安装期就给出结构化 host_api 不兼容错误而不是运行期失败）。
+[host_api]
+resource = "^1.0"
+log = "^1.0"
+
+# 独立 WASM 插件：kind = "wasm" + 真实 entry（builtin 是宿主预置实现专用，
+# 第三方不得也不可用它冒充——builtin_id 必须在服务端注册表中已注册）。
+[execution]
+kind = "wasm"
+
+# declarative 面板：宿主原生渲染表单；按钮点击经 POST /api/extensions/:id/call
+# 把表单值发给 guest 的 call(action, values-json) 导出。
+[[ui.contributions]]
+panel_id = "hello"
+title = "Hello 示例"
+icon = "👋"
+order = 90
+location = "console.right"
+runtime = "declarative"
+preferred_width = 360
+description = "最小插件示例：表单值经 plugin.call 发给插件后端（guest）。"
+
+[[ui.contributions.fields]]
+type = "text"
+name = "message"
+label = "问候语"
+placeholder = "输入任意文本"
+default = "你好，Gamer"
+
+[[ui.contributions.fields]]
+type = "select"
+name = "level"
+label = "日志级别"
+default = "info"
+[[ui.contributions.fields.options]]
+value = "debug"
+[[ui.contributions.fields.options]]
+value = "info"
+[[ui.contributions.fields.options]]
+value = "warn"
+
+[[ui.contributions.fields]]
+type = "button"
+label = "问候（写日志并回显）"
+action = "greet"
+description = "把表单内容写进插件日志并原样回显"
+
+[[ui.contributions.fields]]
+type = "button"
+label = "检查私有数据 data/state.json"
+action = "check_resource"
+description = "在当前 Package 的 plugins/com.example.hello/ 前缀内解析 data/state.json（存在则回字节长度）"
+
+[[ui.contributions.fields]]
+type = "button"
+label = "权限自检（预期 denied）"
+action = "probe_denied"
+description = "尝试 device.resolve：本插件未声明 device.read，宿主必须在 capability 边界拒绝"
