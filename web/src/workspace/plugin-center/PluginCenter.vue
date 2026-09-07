@@ -245,7 +245,10 @@ function canInstallMarket(entry) {
 function uiType(entry) {
   const contributions = entry.ui?.contributions
   if (!Array.isArray(contributions) || !contributions.length) return 'none'
-  return contributions.some(item => item && item.runtime === 'iframe') ? 'iframe' : 'declarative'
+  // runtime 三档如实展示（core=宿主预置组件）；未知值退化为 declarative
+  if (contributions.some(item => item && item.runtime === 'core')) return 'core（宿主组件）'
+  if (contributions.some(item => item && item.runtime === 'iframe')) return 'iframe'
+  return 'declarative'
 }
 function dependencyNames(entry) { return dependencyRefsFor(entry).map(item => item.name || item.id) }
 function dependencyItems(plugin) { return dependencyRefsFor(plugin) }

@@ -5,7 +5,7 @@
          插件 Panel 不再占据主导航（§40）。 -->
     <WorkspaceTabs
       :panels="topTabs"
-      :active-panel="activeTop"
+      :active-panel="activeTab"
       :active-child="activeChild"
       @select="selectTop"
       @open-plugin-center="centerOpen = true"
@@ -145,15 +145,23 @@ const pluginGroups = computed(() => {
 
 const activeTop = computed(() => {
   if (props.activePanel === 'market' || props.activePanel === 'plugins') return props.activePanel
-  if (props.activePanel.startsWith('gamer.core:')) return props.activePanel
+  // 其余 key（gamer.core:* 与业务面板 gamer.<plugin>:<panel>）原样透传：
+  // selected 按它解析面板组件，页签高亮经 activeTab 映射回所在主导航页签。
+  return props.activePanel
+})
+
+/** WorkspaceTabs 的高亮 key：业务面板挂靠「插件」页签，其余原样。 */
+const activeTab = computed(() => {
+  if (activeTop.value === 'market' || activeTop.value === 'plugins') return activeTop.value
+  if (props.activePanel.startsWith('gamer.core:')) return activeTop.value
   return 'plugins'
 })
 
 /** 当前处于某插件二级导航时的分组（业务面板 key 命中）。 */
 const activePluginGroup = computed(() => {
-  if (activeTop.value !== 'plugins') return null
+  if (activeTop.value === 'market' || activeTop.value === 'plugins') return null
   const key = props.activePanel
-  if (!key || key === 'plugins') return null
+  if (!key || key.startsWith('gamer.core:')) return null
   return pluginGroups.value.find(g => g.panels.some(p => p.key === key)) || null
 })
 
