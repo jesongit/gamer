@@ -4,7 +4,7 @@
  * 的 URL / 方法 / body / 查询参数与错误形态（带 status 的 Error）。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { FRAME_STEP_SECONDS, ptsFromTime, videoApi } from './components/video/videoApi'
+import { ptsFromTime, videoApi } from './components/video/videoApi'
 
 /** 够用的 Response 桩：request() 只读 ok/status/headers(content-type)/json。 */
 function jsonResponse(status, body, contentType = 'application/json') {
@@ -148,12 +148,39 @@ describe('videoApi 草稿（合同 §5 call 通路）与工具函数', () => {
     await expect(videoApi.listMedia()).rejects.toMatchObject({ status: 0, code: 'network_error' })
   })
 
-  it('ptsFromTime：秒 → 微秒取整；非有限数/负值 → 0；逐帧步进 33ms', () => {
+  it('mediaFrames：GET /api/media/:id/frames（可选 pts_us → current 解析）', async () => {
+    const info = { frame_count: 40, first_pts_us: 0, last_pts_us: 1332000 }
+    fetchStub.mockResolvedValue(jsonResponse(200, info))
+    await expect(videoApi.mediaFrames('m1')).resolves.toEqual(info)
+    expect(fetchStub.mock.calls[0][0]).toBe('/api/media/m1/frames')
+
+    fetchStub.mockResolvedValue(jsonResponse(200, { ...info, current: { index: 15, pts_us: 500000 } }))
+    await expect(videoApi.mediaFrames('m1', { ptsUs: 499999.4 })).resolves.toMatchObject({ current: { index: 15 } })
+    expect(fetchStub.mock.calls[1][0]).toBe('/api/media/m1/frames?pts_us=499999')
+  })
+
+  it('mediaFrameNeighbors：GET /api/media/:id/frames/:index；越界 404 原样上抛', async () => {
+    fetchStub.mockResolvedValue(jsonResponse(200, {
+      index: 5, pts_us: 166666, prev: { index: 4, pts_us: 133333 }, next: { index: 6, pts_us: 199999 },
+    }))
+    await expect(videoApi.mediaFrameNeighbors('m1', 5)).resolves.toMatchObject({ index: 5, prev: { index: 4 } })
+    expect(fetchStub.mock.calls[0][0]).toBe('/api/media/m1/frames/5')
+
+    fetchStub.mockResolvedValue(jsonResponse(404, { error: 'frame_not_found' }))
+    await expect(videoApi.mediaFrameNeighbors('m1', 999)).rejects.toMatchObject({
+      status: 404, code: 'frame_not_found',
+    })
+    // 非法索引归一为 0（客户端防御），不发非法 URL
+    fetchStub.mockResolvedValue(jsonResponse(200, { index: 0, prev: null, next: null }))
+    await expect(videoApi.mediaFrameNeighbors('m1', Number.NaN)).resolves.toMatchObject({ index: 0 })
+    expect(fetchStub.mock.calls[2][0]).toBe('/api/media/m1/frames/0')
+  })
+
+  it('ptsFromTime：秒 → 微秒取整；非有限数/负值 → 0（仅预览粗定位，无步长假设）', () => {
     expect(ptsFromTime(0.5)).toBe(500000)
     expect(ptsFromTime(1.2345678)).toBe(1234568)
     expect(ptsFromTime(-3)).toBe(0)
     expect(ptsFromTime(Number.NaN)).toBe(0)
-    expect(FRAME_STEP_SECONDS).toBeCloseTo(0.033, 6)
   })
 
   it('空 id/名称参数在客户端即拒绝：async 方法走 rejected promise（不发请求、非同步 throw）', async () => {

@@ -4,8 +4,9 @@
  * - 宿主 VideoWorkbench 三区装配 + 素材列表 → 时间轴选中预览（mediaFileUrl）；
  * - 素材库删除两段确认（armed → 确认删除），409 = 被项目引用提示；
  * - 录制入口：activeRecording 轮询驱动开始/停止按钮态，停止后上抛 recording-finished；
- * - 时间轴：精确帧（currentTime*1e6 → pts_us 的服务端 PNG URL）+ 逐帧 ±33ms 步进
- *   （seeked 后自动取帧）+ 帧加载失败提示 + 切素材清空；
+ * - 时间轴：精确帧（currentTime*1e6 → pts_us 的服务端 PNG URL）+ 逐帧步进
+ *   （服务端真实展示帧表相邻定位，/frames + /frames/:index；无 33ms 假设）+
+ *   帧加载失败提示 + 切素材清空；
  * - 草稿区状态流转：载入事件（时间轴升序）→ 勾选 → 生成 YAML 草稿（yaml + 诊断），
  *   常驻「草稿不会自动执行」标注。
  * videoApi 模块整体 mock（端点形态锁定在 video-api.test.js）。
@@ -28,6 +29,8 @@ vi.mock('./components/video/videoApi', async (importOriginal) => {
       activeRecording: vi.fn(async () => null),
       recordingEvents: vi.fn(async () => []),
       createVideoDraft: vi.fn(async () => ({ yaml: '', diagnostics: [] })),
+      mediaFrames: vi.fn(async () => ({ frame_count: 0, first_pts_us: null, last_pts_us: null })),
+      mediaFrameNeighbors: vi.fn(async () => ({ index: 0, pts_us: 0, prev: null, next: null })),
     },
   }
 })
@@ -57,6 +60,9 @@ beforeEach(() => {
   devicesData.value = [{ id: 'dev-a', name: '设备A' }, { id: 'dev-b', name: '设备B' }]
   videoApi.listMedia.mockResolvedValue(MEDIA.map(m => ({ ...m })))
   videoApi.activeRecording.mockResolvedValue(null)
+  // 展示帧表缺省空态（各用例按需覆盖）
+  videoApi.mediaFrames.mockResolvedValue({ frame_count: 0, first_pts_us: null, last_pts_us: null })
+  videoApi.mediaFrameNeighbors.mockResolvedValue({ index: 0, pts_us: 0, prev: null, next: null })
 })
 
 describe('VideoWorkbench 宿主装配', () => {
@@ -193,24 +199,65 @@ describe('VideoTimeline 时间轴区（纯离线，不触达设备）', () => {
     w.unmount()
   })
 
-  it('逐帧 +：预览步进 33ms，seeked 后按新时间自动取精确帧', async () => {
+  it('逐帧 +：按预览时间解析当前帧后走服务端相邻帧链（index 寻址），无固定步长', async () => {
+    // 服务端真实展示帧表（VFR：相邻间隔不等长，前端不估算）
+    videoApi.mediaFrames.mockResolvedValue({
+      frame_count: 40, first_pts_us: 0, last_pts_us: 1332000,
+      current: { index: 20, pts_us: 333000 },
+    })
+    videoApi.mediaFrameNeighbors.mockResolvedValue({
+      index: 20, pts_us: 333000,
+      prev: { index: 19, pts_us: 300000 },
+      next: { index: 21, pts_us: 366333 },
+    })
     const w = mount(VideoTimeline, { props: { media: MEDIA[0] } })
+    await flushPromises()
     const video = w.find('video')
-    video.element.currentTime = 2
+    video.element.currentTime = 0.333
     await video.trigger('timeupdate')
 
+    expect(w.find('[data-testid="frame-count"]').text()).toContain('40 帧')
     await w.find('[data-testid="frame-next"]').trigger('click')
-    expect(video.element.currentTime).toBeCloseTo(2.033, 6)
-    // happy-dom 不自动派发 seeked；对应真实浏览器 seek 完成后自动取帧
-    await video.trigger('seeked')
+    await flushPromises()
+    // 首步 = mediaFrames(pts_us) 解析当前帧，第二步 = neighbors(index).next
+    expect(videoApi.mediaFrames).toHaveBeenCalledWith('m1', { ptsUs: 333000 })
+    expect(videoApi.mediaFrameNeighbors).toHaveBeenCalledWith('m1', 20)
+    // 精确帧按展示序索引寻址（同一请求逐字节可重复）
     const img = w.find('[data-testid="frame-image"]')
-    expect(img.exists()).toBe(true)
-    expect(img.attributes('src')).toBe('/api/media/m1/frame?pts_us=2033000&max_width=640')
+    expect(img.attributes('src')).toBe('/api/media/m1/frame?index=21&max_width=640')
+    expect(w.find('.frame-caption').text()).toContain('帧 21')
+    // 预览同步到目标帧真实时刻
+    expect(video.element.currentTime).toBeCloseTo(0.366333, 6)
     w.unmount()
+  })
+
+  it('逐帧边界：末帧 + 不动；帧表不可用 → 步进按钮禁用并提示', async () => {
+    videoApi.mediaFrames.mockResolvedValue({
+      frame_count: 3, first_pts_us: 0, last_pts_us: 66666,
+      current: { index: 2, pts_us: 66666 },
+    })
+    videoApi.mediaFrameNeighbors.mockResolvedValue({ index: 2, pts_us: 66666, prev: { index: 1, pts_us: 33333 }, next: null })
+    const w = mount(VideoTimeline, { props: { media: MEDIA[0] } })
+    await flushPromises()
+    await w.find('[data-testid="frame-next"]').trigger('click')
+    await flushPromises()
+    // 末帧 next = null：不发精确帧请求、画面保持空
+    expect(w.find('[data-testid="frame-image"]').exists()).toBe(false)
+    expect(videoApi.mediaFrameNeighbors).toHaveBeenCalledWith('m1', 2)
+    w.unmount()
+
+    // 帧表加载失败：步进禁用 + 错误提示（不做时间近似降级）
+    videoApi.mediaFrames.mockRejectedValue(new Error('frame table unavailable'))
+    const w2 = mount(VideoTimeline, { props: { media: MEDIA[1] } })
+    await flushPromises()
+    expect(w2.find('[data-testid="frame-prev"]').attributes('disabled')).toBeDefined()
+    expect(w2.find('[data-testid="frame-error"]').text()).toContain('展示帧表加载失败')
+    w2.unmount()
   })
 
   it('切换素材后帧区清空回到空态', async () => {
     const w = mount(VideoTimeline, { props: { media: MEDIA[0] } })
+    await flushPromises()
     await w.find('[data-testid="frame-exact"]').trigger('click')
     expect(w.find('[data-testid="frame-box"]').exists()).toBe(true)
 

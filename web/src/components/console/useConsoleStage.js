@@ -1,5 +1,6 @@
 import { computed, onUnmounted, reactive, ref, shallowRef } from 'vue'
 import { api } from '../../api'
+import { videoApi } from '../video/videoApi'
 
 /**
  * 统一舞台来源 StageSource（视频工作台 V1，实施合同 §6 / 计划 §4.2）：
@@ -12,15 +13,14 @@ import { api } from '../../api'
  * canDeviceInput 只是前端 UI 提示，真正的输入授权仍在服务端。
  *
  * 指定帧：媒体模式播放器定位（浏览器 currentTime）仅用于预览；制作模板等需要
- * 精确帧的场景经 `captureFrame()` 走服务端 `mediaFrameUrl` PNG（可重复、不依赖
- * seek 后的旧画面，计划 §4.3/§6.1）。结果携带 generation，来源切换后过期不应用。
+ * 精确帧的场景经 `captureFrame()` 走服务端确定帧 PNG（按展示序索引寻址，可
+ * 重复、不依赖 seek 后的旧画面，计划 §4.3/§6.1；Phase 5 起帧身份 = 服务端
+ * 真实展示帧表，前端无固定步长假设）。结果携带 generation，来源切换后过期不应用。
  *
  * 来源切换不改变真实设备连接、不停止运行中的任务；切回实时时由 Console 侧
  * watch(kind) 清理指针/键盘焦点/旧来源叠加层（见 Console.vue）。
  */
 
-/** 逐帧步进（预览定位用；精确帧由服务端按 pts 解码，不按固定帧率估算存储） */
-export const FRAME_STEP_SECONDS = 0.033
 /** 媒体控制条倍速档位 */
 export const STAGE_RATE_OPTIONS = [0.25, 0.5, 1, 2, 4]
 const ACTIVE_POLL_MS = 5000
@@ -74,6 +74,10 @@ export function useConsoleStage({
   const durationSec = ref(0)
   const playbackRate = ref(1)
   const frameReady = ref(false)
+  /** 当前锁定帧身份 {index, pts_us}（服务端展示帧表；null = 按预览时间解析） */
+  const stageFrame = ref(null)
+  /** programmaticSeek：stepFrames 引发的 seek 不清帧身份（用户手动 seek 才清） */
+  let programmaticSeek = false
 
   // ---------- 录制按钮态（activeRecording 轮询驱动；start/stop 经 REST） ----------
   const activeSession = ref(null)
@@ -108,14 +112,17 @@ export function useConsoleStage({
 
   const mediaSrc = computed(() => (kind.value === 'media' && mediaMeta.value ? api.mediaFileUrl(mediaMeta.value.id) : ''))
 
-  /** 指定帧选择器：媒体模式且画面就绪时给出当前帧（pts 取预览时间；精确帧由
-   *  服务端按 pts 解码保证可重复，浏览器 currentTime 只作预览定位） */
+  /** 指定帧选择器：媒体模式且画面就绪时给出当前帧。帧身份优先取服务端展示帧
+   *  表锁定的 {index, pts_us}；未锁定时 pts 取预览时间（粗定位，index 未知）——
+   *  精确帧由服务端按 pts/索引解码保证可重复，浏览器 currentTime 只作预览定位。 */
   const frameAt = computed(() => {
     if (kind.value !== 'media' || !mediaMeta.value || !frameReady.value) return null
     return {
       mediaId: mediaMeta.value.id,
-      ptsUs: Math.max(0, Math.round(currentTimeSec.value * 1e6)),
-      index: null,
+      ptsUs: stageFrame.value
+        ? stageFrame.value.pts_us
+        : Math.max(0, Math.round(currentTimeSec.value * 1e6)),
+      index: stageFrame.value ? stageFrame.value.index : null,
     }
   })
 
@@ -162,6 +169,7 @@ export function useConsoleStage({
     currentTimeSec.value = 0
     durationSec.value = Number(meta.duration_us || 0) / 1e6
     frameReady.value = (mediaVideoEl.value?.videoWidth || 0) > 0
+    stageFrame.value = null
     return true
   }
 
@@ -208,13 +216,22 @@ export function useConsoleStage({
     const syncPlay = () => { playing.value = true }
     const syncPause = () => { playing.value = false }
     const syncRate = () => { playbackRate.value = el.playbackRate || 1 }
+    // seeked：stepFrames 的程序性 seek 保持帧身份；用户手动 seek 使其失效
+    const syncSeeked = () => {
+      syncTime()
+      if (programmaticSeek) {
+        programmaticSeek = false
+        return
+      }
+      stageFrame.value = null
+    }
     const onError = () => {
       frameReady.value = false
       playing.value = false
       toast?.('视频加载失败：素材可能暂不受支持', 'error')
     }
     const pairs = [
-      ['timeupdate', syncTime], ['seeked', syncTime],
+      ['timeupdate', syncTime], ['seeked', syncSeeked],
       ['loadedmetadata', syncMeta], ['resize', syncMeta],
       ['play', syncPlay], ['pause', syncPause], ['ratechange', syncRate],
       ['error', onError],
@@ -249,18 +266,41 @@ export function useConsoleStage({
     }
   }
 
-  /** 逐帧 ±n（预览 seek；自动暂停。精确帧经 frameAt/captureFrame 走服务端） */
-  function stepFrames(n) {
+  /** 逐帧 ±n（Phase 5）：服务端真实展示帧表相邻定位（prev/next），无固定步长
+   *  假设。首步按预览时间解析当前帧，之后沿相邻帧链走；自动暂停，预览 seek 到
+   *  目标帧时刻（程序性 seek 不清帧身份）。帧表不可用时提示并保持现状。 */
+  async function stepFrames(n) {
     const el = mediaVideoEl.value
-    if (kind.value !== 'media' || !el) return
+    if (kind.value !== 'media' || !el || !mediaMeta.value) return
     const count = Math.round(Number(n) || 0)
     if (!count) return
-    const dur = Number.isFinite(el.duration) ? el.duration : durationSec.value
-    const max = Math.max(0, (dur || 0) - 0.001)
-    const next = Math.min(max, Math.max(0, (Number(el.currentTime) || 0) + count * FRAME_STEP_SECONDS))
-    if (!el.paused) el.pause?.()
-    try { el.currentTime = next } catch { /* 元数据未就绪时静默 */ }
-    currentTimeSec.value = next
+    const dir = count > 0 ? 1 : -1
+    const id = mediaMeta.value.id
+    try {
+      let position = stageFrame.value
+      if (!position) {
+        const meta = await videoApi.mediaFrames(id, {
+          ptsUs: Math.max(0, Math.round(currentTimeSec.value * 1e6)),
+        })
+        position = meta?.current || null
+      }
+      if (!position) return // 空素材（0 帧）
+      let target = position
+      for (let i = 0; i < Math.abs(count); i++) {
+        const neighbors = await videoApi.mediaFrameNeighbors(id, target.index)
+        const nextTarget = dir < 0 ? neighbors?.prev : neighbors?.next
+        if (!nextTarget) break // 首/末帧边界
+        target = nextTarget
+      }
+      if (target === position) return
+      stageFrame.value = target
+      if (!el.paused) el.pause?.()
+      programmaticSeek = true
+      try { el.currentTime = target.pts_us / 1e6 } catch { /* 元数据未就绪时静默 */ }
+      currentTimeSec.value = target.pts_us / 1e6
+    } catch (e) {
+      toast?.('逐帧定位失败：' + (e?.message || e), 'warn')
+    }
   }
 
   function setRate(rate) {
@@ -290,7 +330,11 @@ export function useConsoleStage({
     const frame = frameAt.value
     const meta = mediaMeta.value
     if (!frame || !meta) return null
-    const url = api.mediaFrameUrl(meta.id, { ptsUs: frame.ptsUs })
+    // 帧身份已知（stageFrame 锁定）→ 按展示序索引寻址（字节级可重复）；
+    // 未锁定 → 按预览 pts 粗定位（服务端解析为首个 pts ≥ 目标的展示帧）
+    const url = frame.index !== null && frame.index !== undefined
+      ? api.mediaFrameUrl(meta.id, { index: frame.index })
+      : api.mediaFrameUrl(meta.id, { ptsUs: frame.ptsUs })
     let img = null
     try { img = await loadImage(url) } catch { img = null }
     if (!img || !img.naturalWidth) return null
@@ -299,7 +343,10 @@ export function useConsoleStage({
       width: img.naturalWidth,
       height: img.naturalHeight,
       generation: generation.value,
-      label: `视频帧 @ ${formatStageClock(frame.ptsUs / 1e6)}`,
+      // 帧身份随裁切底图走：label 携带展示序索引与真实 PTS（可追溯）
+      label: frame.index !== null && frame.index !== undefined
+        ? `视频帧 #${frame.index} @ ${formatStageClock(frame.ptsUs / 1e6)}`
+        : `视频帧 @ ${formatStageClock(frame.ptsUs / 1e6)}`,
     }
   }
 

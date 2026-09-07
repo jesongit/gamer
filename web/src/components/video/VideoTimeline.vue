@@ -22,9 +22,24 @@
       <div class="time-row">
         <span class="mono time-readout" data-testid="video-time">{{ currentTime.toFixed(3) }}s</span>
         <span class="mono time-total">/ {{ totalSeconds.toFixed(3) }}s</span>
+        <span v-if="framesMeta" class="mono frame-count" data-testid="frame-count">{{ framesMeta.frame_count }} 帧</span>
         <span class="time-actions">
-          <button class="mini-btn" type="button" data-testid="frame-prev" title="后退一帧（约 33ms）后取精确帧" @click="stepFrame(-1)">− 帧</button>
-          <button class="mini-btn" type="button" data-testid="frame-next" title="前进一帧（约 33ms）后取精确帧" @click="stepFrame(1)">+ 帧</button>
+          <button
+            class="mini-btn"
+            type="button"
+            data-testid="frame-prev"
+            title="上一展示帧（服务端真实帧表定位）"
+            :disabled="!framesMeta || stepBusy"
+            @click="stepFrame(-1)"
+          >− 帧</button>
+          <button
+            class="mini-btn"
+            type="button"
+            data-testid="frame-next"
+            title="下一展示帧（服务端真实帧表定位）"
+            :disabled="!framesMeta || stepBusy"
+            @click="stepFrame(1)"
+          >+ 帧</button>
           <button
             class="mini-btn"
             type="button"
@@ -57,8 +72,10 @@
 // 时间轴区：纯只读离线预览（不触达设备）。浏览器 <video> 只做流畅预览，
 // 精确帧一律取服务端确定帧端点（同一请求逐字节可重复）——
 // 计划 §4.3：媒体播放器定位与精确帧提取分离，避免 seek 后拿到旧画面。
+// 逐帧 ±（Phase 5）：走服务端真实展示帧表（/frames/:index 相邻帧，VFR/B 帧
+// 展示序由服务端归一），前端没有任何固定步长（33ms）假设。
 import { computed, ref, watch } from 'vue'
-import { FRAME_STEP_SECONDS, ptsFromTime, videoApi } from './videoApi'
+import { ptsFromTime, videoApi } from './videoApi'
 
 const props = defineProps({
   media: { type: Object, default: null },
@@ -70,9 +87,11 @@ const frameUrl = ref('')
 const frameCaption = ref('')
 const frameBusy = ref(false)
 const frameError = ref('')
-// 逐帧步进：seek 完成后再取精确帧（seeked 未触发时用兜底定时器取当前时间）
-let pendingStep = 0
-let stepFallbackTimer = null
+// 真实展示帧表元信息（帧总数；加载失败 → 逐帧按钮禁用，不做时间近似降级）
+const framesMeta = ref(null)
+// 当前锁定帧身份 {index, pts_us}（null = 未锁定，按预览时间重新解析）
+const currentFrame = ref(null)
+const stepBusy = ref(false)
 
 const fileUrl = computed(() => (props.media ? videoApi.mediaFileUrl(props.media.id) : ''))
 const totalSeconds = computed(() => {
@@ -83,10 +102,22 @@ const totalSeconds = computed(() => {
 watch(() => props.media?.id, () => {
   currentTime.value = 0
   clearFrame()
-  pendingStep = 0
-  if (stepFallbackTimer) clearTimeout(stepFallbackTimer)
-  stepFallbackTimer = null
-})
+  framesMeta.value = null
+  currentFrame.value = null
+  stepBusy.value = false
+  void loadFramesMeta()
+}, { immediate: true })
+
+async function loadFramesMeta() {
+  const id = props.media?.id
+  if (!id) return
+  try {
+    framesMeta.value = await videoApi.mediaFrames(id)
+  } catch (e) {
+    framesMeta.value = null
+    frameError.value = '展示帧表加载失败：逐帧步进不可用（' + (e?.message || e) + '）'
+  }
+}
 
 function clearFrame() {
   frameUrl.value = ''
@@ -112,19 +143,29 @@ function onFrameError() {
 }
 
 function onSeeked() {
-  if (stepFallbackTimer) {
-    clearTimeout(stepFallbackTimer)
-    stepFallbackTimer = null
-  }
   const t = Number(videoEl.value?.currentTime)
   if (Number.isFinite(t)) currentTime.value = t
-  if (pendingStep !== 0) {
-    pendingStep = 0
-    grabExactFrame()
+}
+
+/** 把帧身份渲染到精确帧区：按展示序索引寻址（同一请求逐字节可重复），
+ *  并把预览 <video> seek 到该帧时刻保持两者同步。 */
+function showFrameByIndex(position) {
+  if (!props.media) return
+  const nextUrl = videoApi.mediaFrameUrl(props.media.id, { index: position.index, maxWidth: 640 })
+  frameError.value = ''
+  currentFrame.value = position
+  if (nextUrl === frameUrl.value) return
+  frameBusy.value = true
+  frameUrl.value = nextUrl
+  frameCaption.value = `帧 ${position.index} · pts_us=${position.pts_us}（t=${(position.pts_us / 1e6).toFixed(3)}s）`
+  const el = videoEl.value
+  if (el) {
+    try { el.currentTime = position.pts_us / 1e6 } catch { /* 元数据未就绪时静默 */ }
   }
 }
 
-/** 取当前预览时间的精确帧；ptsUs 传入时直接按该值请求（同一请求逐字节可重复）。 */
+/** 取当前预览时间的精确帧；ptsUs 传入时直接按该值请求（同一请求逐字节可重复）。
+ *  时间寻址的帧身份由服务端解析（首个 pts ≥ 目标的展示帧），本地不估算。 */
 function grabExactFrame(ptsUs) {
   if (!props.media || frameBusy.value) return
   const pts = Number.isFinite(Number(ptsUs)) ? Math.max(0, Math.round(Number(ptsUs))) : ptsFromTime(currentTime.value)
@@ -136,30 +177,36 @@ function grabExactFrame(ptsUs) {
   frameBusy.value = true
   frameUrl.value = nextUrl
   frameCaption.value = `pts_us=${pts}（t=${(pts / 1e6).toFixed(3)}s）`
+  // 时间寻址结果的身份（解析后帧）未知：清锁，下一次逐帧按当前时间重新解析
+  currentFrame.value = null
 }
 
-/** 逐帧 ± ：预览近似步进（±33ms）→ seek 完成（或兜底超时）后取服务端精确帧。 */
-function stepFrame(direction) {
-  const el = videoEl.value
-  if (!props.media || !el) return
-  const from = Number.isFinite(Number(el.currentTime)) ? Number(el.currentTime) : currentTime.value
-  const to = Math.min(Math.max(from + direction * FRAME_STEP_SECONDS, 0), totalSeconds.value || Number.MAX_VALUE)
-  pendingStep = direction
-  frameError.value = ''
+/** 逐帧 ±：服务端真实展示帧表相邻定位（prev/next），不按固定时长估算。
+ *  首步先按预览时间解析当前帧，之后沿相邻帧链走；边界（首/末帧）为 no-op。 */
+async function stepFrame(direction) {
+  if (!props.media || !framesMeta.value || stepBusy.value) return
+  const id = props.media.id
+  stepBusy.value = true
   try {
-    el.currentTime = to
-  } catch (e) {
-    // 元数据未加载等场景无法 seek：退化为按当前显示时间取帧
-    pendingStep = 0
-  }
-  if (stepFallbackTimer) clearTimeout(stepFallbackTimer)
-  stepFallbackTimer = setTimeout(() => {
-    stepFallbackTimer = null
-    if (pendingStep !== 0) {
-      pendingStep = 0
-      grabExactFrame(ptsFromTime(currentTime.value))
+    let position = currentFrame.value
+    if (!position) {
+      const meta = await videoApi.mediaFrames(id, { ptsUs: ptsFromTime(currentTime.value) })
+      position = meta?.current || null
+      framesMeta.value = meta || framesMeta.value
     }
-  }, 800)
+    if (!position) {
+      // 空素材（0 帧）：无相邻可言
+      return
+    }
+    const neighbors = await videoApi.mediaFrameNeighbors(id, position.index)
+    const target = direction < 0 ? neighbors?.prev : neighbors?.next
+    if (!target) return // 首/末帧边界：不动
+    showFrameByIndex(target)
+  } catch (e) {
+    frameError.value = '逐帧定位失败：' + (e?.message || e)
+  } finally {
+    stepBusy.value = false
+  }
 }
 </script>
 
@@ -183,4 +230,5 @@ function stepFrame(direction) {
 .frame-hint { color: var(--text-2); font-size: 10px; line-height: 1.5; }
 .zone-error { padding: 5px 7px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); background: rgba(248,113,113,.08); color: var(--danger); font-size: 11px; line-height: 1.5; }
 .mono { font-family: var(--mono); }
+.frame-count { color: var(--text-2); font-size: 11px; }
 </style>

@@ -38,7 +38,7 @@ vi.mock('./api', async (importOriginal) => {
 })
 
 import { api } from './api'
-import { useConsoleStage, formatStageClock, FRAME_STEP_SECONDS } from './components/console/useConsoleStage'
+import { useConsoleStage, formatStageClock } from './components/console/useConsoleStage'
 import { useConsoleTemplates } from './components/console/useConsoleTemplates'
 
 const { api: realApi } = await vi.importActual('./api')
@@ -314,30 +314,71 @@ describe('useConsoleStage：媒体播放控制与指定帧', () => {
     wrapper.unmount()
   })
 
-  it('逐帧步进：自动暂停、±0.033s、钳位在 [0, duration)', async () => {
+  it('逐帧步进：服务端真实展示帧表相邻定位（首步解析 → 锁定后沿相邻链走）', async () => {
     const { ctl, wrapper, el } = await mountInMedia()
-    el.paused = false
-    ctl.stepFrames(-1)
-    expect(el.paused).toBe(true)
-    expect(el.currentTime).toBe(0) // 0 - 0.033 → 钳到 0
     el.currentTime = 0.5
-    ctl.stepFrames(-1)
-    expect(el.currentTime).toBeCloseTo(0.5 - FRAME_STEP_SECONDS, 6)
-    // 大步进钳到 duration - 0.001
-    el.currentTime = 9.999
-    ctl.stepFrames(1)
-    expect(el.currentTime).toBe(9.999)
-    el.currentTime = 9.999
-    ctl.stepFrames(100)
-    expect(el.currentTime).toBe(9.999)
-    // 向下钳到 0
-    el.currentTime = 0.001
-    ctl.stepFrames(-100)
-    expect(el.currentTime).toBe(0)
+    el.emit('timeupdate')
+    // 首步：mediaFrames(pts_us) 解析当前帧 + neighbors(index) 取相邻
+    fetch.mockResolvedValueOnce(jsonRes(200, {
+      frame_count: 30, first_pts_us: 0, last_pts_us: 966666,
+      current: { index: 15, pts_us: 500000 },
+    }))
+    fetch.mockResolvedValueOnce(jsonRes(200, {
+      index: 15, pts_us: 500000,
+      prev: { index: 14, pts_us: 466666 }, next: { index: 16, pts_us: 533333 },
+    }))
+    el.paused = false
+    await ctl.view.stepFrames(-1)
+    expect(el.paused).toBe(true, '逐帧步进自动暂停')
+    expect(el.currentTime).toBeCloseTo(0.466666, 9)
+    expect(fetch.mock.calls[0][0]).toBe('/api/media/m1/frames?pts_us=500000')
+    expect(fetch.mock.calls[1][0]).toBe('/api/media/m1/frames/15')
+    // 锁定帧身份后 frameAt 携带展示序索引
+    expect(ctl.frameAt()).toEqual({ mediaId: 'm1', ptsUs: 466666, index: 14 })
+
+    // 第二步不再解析（帧身份已锁定），直接沿相邻链走
+    fetch.mockResolvedValueOnce(jsonRes(200, {
+      index: 14, pts_us: 466666,
+      prev: { index: 13, pts_us: 433333 }, next: { index: 15, pts_us: 500000 },
+    }))
+    await ctl.view.stepFrames(-1)
+    expect(el.currentTime).toBeCloseTo(0.433333, 9)
+    expect(fetch.mock.calls[2][0]).toBe('/api/media/m1/frames/14')
+
+    // 浏览器 seek 完成（程序性 seek 消费标记，帧身份保持）；用户手动 seek → 身份失效
+    el.emit('seeked')
+    expect(ctl.frameAt().index).toBe(13)
+    el.currentTime = 5
+    el.emit('seeked')
+    expect(ctl.frameAt().index).toBeNull()
+    expect(ctl.frameAt().ptsUs).toBe(5000000)
+
+    // 末帧边界：next = null 不动（无帧可取、不发精确帧请求）
+    fetch.mockResolvedValueOnce(jsonRes(200, {
+      frame_count: 30, first_pts_us: 0, last_pts_us: 966666,
+      current: { index: 29, pts_us: 966666 },
+    }))
+    fetch.mockResolvedValueOnce(jsonRes(200, {
+      index: 29, pts_us: 966666, prev: { index: 28, pts_us: 933333 }, next: null,
+    }))
+    const callsBefore = fetch.mock.calls.length
+    await ctl.view.stepFrames(1)
+    expect(el.currentTime).toBe(5)
+    expect(fetch.mock.calls.length).toBe(callsBefore + 2)
     wrapper.unmount()
   })
 
-  it('captureFrame：live = 现有实时视频元素；media = 服务端确定帧 PNG（mediaFrameUrl 按 ptsUs）', async () => {
+  it('帧表不可用：stepFrames 提示且不改预览位置（不做时间近似降级）', async () => {
+    const { ctl, wrapper, el } = await mountInMedia()
+    el.currentTime = 1
+    el.emit('timeupdate')
+    fetch.mockResolvedValueOnce(jsonRes(500, { error: 'internal' }))
+    await ctl.view.stepFrames(1)
+    expect(el.currentTime).toBe(1)
+    wrapper.unmount()
+  })
+
+  it('captureFrame：live = 现有实时视频元素；media = 服务端确定帧 PNG（未锁定按 ptsUs，锁定后按展示序索引）', async () => {
     const liveEl = { videoWidth: 1920, videoHeight: 1080 }
     const { ctl, wrapper } = mountStage({ liveVideo: liveEl })
     const liveFrame = await ctl.captureFrame()
@@ -359,6 +400,29 @@ describe('useConsoleStage：媒体播放控制与指定帧', () => {
     expect(frame).toMatchObject({ width: 640, height: 360, label: '视频帧 @ 00:02.0' })
     expect(typeof frame.generation).toBe('number')
     w2.unmount()
+
+    // 帧身份锁定后（逐帧步进过）：captureFrame 按展示序索引寻址，label 携带帧号
+    const media3 = await mountInMedia({
+      loadImage: async (url) => {
+        expect(url).toBe('/api/media/m1/frame?index=14')
+        return { naturalWidth: 640, naturalHeight: 360 }
+      },
+    })
+    const { ctl: ctl3, wrapper: w3, el: el3 } = media3
+    el3.currentTime = 0.5
+    el3.emit('timeupdate')
+    fetch.mockResolvedValueOnce(jsonRes(200, {
+      frame_count: 30, first_pts_us: 0, last_pts_us: 966666,
+      current: { index: 15, pts_us: 500000 },
+    }))
+    fetch.mockResolvedValueOnce(jsonRes(200, {
+      index: 15, pts_us: 500000,
+      prev: { index: 14, pts_us: 466666 }, next: { index: 16, pts_us: 533333 },
+    }))
+    await ctl3.view.stepFrames(-1)
+    const frame3 = await ctl3.captureFrame()
+    expect(frame3).toMatchObject({ width: 640, height: 360, label: '视频帧 #14 @ 00:00.5' })
+    w3.unmount()
   })
 
   it('录制按钮态：activeRecording 轮询驱动；开始需实时已连接；停止后打开新素材', async () => {

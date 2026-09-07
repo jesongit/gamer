@@ -297,3 +297,67 @@ impl MediaDomain<'_> {
 /// Keep the public requirement type behind the manifest API while still
 /// allowing focused tests and future generated WIT adapters to inspect it.
 pub(crate) type HostApiRequirement = VersionReq;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// media 域版本化暴露（Phase 5 收口回归）：catalog 九域含 media 且带版本；
+    /// 权限闭集逐项校验；media 是 Core 进程级机制域——无适配器注册也必须
+    /// available（目录里有权限名 ≠ guest 能消费，但目录缺失 = 校验无从谈起）。
+    #[test]
+    fn media_domain_is_versioned_and_gated_by_permissions() {
+        assert_eq!(HostApiDomain::ALL.len(), 9);
+        assert!(HostApiDomain::ALL.contains(&HostApiDomain::Media));
+        assert_eq!(
+            HostApiCatalog::default()
+                .version(HostApiDomain::Media)
+                .map(|v| v.to_string()),
+            Some(HOST_API_VERSION.to_string())
+        );
+
+        // 有 media.read 权限的 manifest：catalog 校验通过、media 域可用、
+        // 未授予的 media.write 被权限门拒绝
+        let granted = crate::extensions::manifest::parse_manifest(
+            b"manifest_version = 2\nid = \"com.example.vid\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\npermissions = [\"media.read\"]\n",
+        )
+        .expect("minimal media manifest must parse");
+        let api = HostApi::for_manifest(
+            CapabilityRegistry::default(),
+            HostApiCatalog::default(),
+            &granted,
+        )
+        .expect("media requirement must validate against catalog");
+        assert!(
+            api.domain_available(HostApiDomain::Media),
+            "media 是 Core 进程级机制域，恒可装配"
+        );
+        assert!(api.authorize(Permission::MediaRead).is_ok());
+        assert!(matches!(
+            api.authorize(Permission::MediaWrite),
+            Err(ExtensionError::Permission(_))
+        ));
+
+        // facade 语义闭包：read 放行到 MediaService（404 语义透传 MediaError），
+        // write 未授权在权限门被拒（摸不到服务）
+        let dir = tempfile::tempdir().unwrap();
+        let media =
+            crate::media::MediaService::open(dir.path().join("media"), "ffmpeg".into()).unwrap();
+        let err = api
+            .media()
+            .get(&media, &crate::media::MediaId("ghost".into()))
+            .unwrap_err();
+        assert!(
+            err.downcast_ref::<crate::media::MediaError>().is_some(),
+            "read 已授权：错误必须来自 MediaService 而非权限门"
+        );
+        let err = api
+            .media()
+            .release(&media, &crate::media::MediaId("ghost".into()))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("media.write"),
+            "未授权必须拒绝且点名缺失权限: {err}"
+        );
+    }
+}

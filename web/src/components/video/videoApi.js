@@ -72,15 +72,14 @@ async function request(method, path, body, { raw = false, contentType } = {}) {
   return resp
 }
 
-/** 预览播放时间（秒）→ 服务端精确帧 pts_us（合同 §1 frame 端点参数；负值截为 0）。 */
+/** 预览播放时间（秒）→ 服务端精确帧 pts_us（合同 §1 frame 端点参数；负值截为 0）。
+ *  只用于「按当前预览位置取帧」的粗定位；精确帧身份（展示序索引 ↔ PTS）以
+ *  服务端 `/frames` 端点为准，前端不做任何固定步长/帧率估算。 */
 export function ptsFromTime(seconds) {
   const t = Number(seconds)
   if (!Number.isFinite(t) || t <= 0) return 0
   return Math.round(t * 1e6)
 }
-
-/** 逐帧步进近似值（秒）：预览端按 ±33ms seek 后再取服务端精确帧（合同 §6 D2 落点）。 */
-export const FRAME_STEP_SECONDS = 0.033
 
 export const videoApi = {
   // ---- 媒体（合同 §1）----
@@ -125,6 +124,30 @@ export const videoApi = {
     const qs = query.toString()
     return `/api/media/${encodeURIComponent(requireId(id, 'media_id'))}/frame${qs ? `?${qs}` : ''}`
   },
+
+  /**
+   * 展示帧元信息（Phase 5）：GET /api/media/:id/frames
+   * → `{media_id, frame_count, first_pts_us, last_pts_us, current?}`；
+   * ptsUs 给出时返回「首个 pts ≥ 目标」的展示帧解析（`current:{index,pts_us}`）。
+   */
+  mediaFrames: async (id, { ptsUs } = {}) => {
+    const base = `/api/media/${encodeURIComponent(requireId(id, 'media_id'))}/frames`
+    const query = new URLSearchParams()
+    if (ptsUs !== undefined && ptsUs !== null) query.set('pts_us', String(Math.max(0, Math.round(Number(ptsUs)))))
+    const qs = query.toString()
+    return request('GET', qs ? `${base}?${qs}` : base)
+  },
+
+  /**
+   * 指定展示帧及相邻帧（Phase 5）：GET /api/media/:id/frames/:index
+   * → `{index, pts_us, prev:{index,pts_us}|null, next:{index,pts_us}|null}`；
+   * 越界 404 `frame_not_found` 原样上抛。逐帧步进的唯一权威实现（VFR/B 帧
+   * 展示序由服务端归一，前端无 33ms 假设）。
+   */
+  mediaFrameNeighbors: async (id, index) => request(
+    'GET',
+    `/api/media/${encodeURIComponent(requireId(id, 'media_id'))}/frames/${Math.max(0, Math.round(Number(index) || 0))}`,
+  ),
 
   // ---- 录制（合同 §2）----
 

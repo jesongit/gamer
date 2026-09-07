@@ -13,6 +13,7 @@
 //! 所有外部进程调用都带超时并同步执行——调用方（REST/host facade）负责放入
 //! blocking 池（`api::common::run_blocking_api`）。
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -93,6 +94,81 @@ pub struct FrameRequest {
     pub max_width: Option<u32>,
 }
 
+/// 帧位置（Phase 5 真实展示帧映射）：展示序索引 + 该帧真实 PTS（微秒）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FramePosition {
+    pub index: u32,
+    pub pts_us: u64,
+}
+
+/// 展示帧表：**真实展示帧索引 ↔ PTS 映射**（`frames.json` 缓存）。
+///
+/// 生成 = ffprobe 包级扫描（只 demux 不解码，`-select_streams v:0
+/// -show_entries packet=pts_time`）后**按 PTS 升序稳定排序**：
+/// - VFR：逐包真实 PTS，无任何固定帧率假设；
+/// - B 帧展示顺序：包序是解码序，排序后即展示序（与 ffmpeg 解码器输出序
+///   一致，已用 B 帧样本逐帧验证 `select=eq(n,k)` ≡ 第 k 小 PTS 帧）；
+/// - 时间基准：ffprobe `pts_time`（秒）→ 四舍五入微秒，整数微秒是唯一
+///   对外时间单位。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrameTable {
+    pub schema_version: u32,
+    /// 展示序（PTS 升序、稳定）PTS 列表；下标即展示帧索引。
+    pub pts_us: Vec<u64>,
+    /// RFC3339（生成时间，诊断用）。
+    pub generated_at: String,
+}
+
+/// 展示帧元信息（`GET /api/media/:id/frames` 响应体）。
+#[derive(Debug, Clone, Serialize)]
+pub struct FramesInfo {
+    pub frame_count: u64,
+    pub first_pts_us: Option<u64>,
+    pub last_pts_us: Option<u64>,
+    /// `pts_us` 查询给出时的解析结果：首个 pts ≥ 目标的展示帧。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<FramePosition>,
+}
+
+/// 指定展示帧及其相邻帧（`GET /api/media/:id/frames/:index` 响应体）。
+#[derive(Debug, Clone, Serialize)]
+pub struct FrameNeighbors {
+    #[serde(flatten)]
+    pub position: FramePosition,
+    pub prev: Option<FramePosition>,
+    pub next: Option<FramePosition>,
+}
+
+/// 帧身份描述符（Phase 5 最小闭环）：不可变值对象，与提取 PNG 一同返回。
+/// 来源 = media id + 素材内容 sha256（原文件不可变即内容代次标记）；
+/// 定位 = 展示序帧索引 + 真实 PTS；几何 = 原始（oriented）尺寸 + 工作尺寸
+/// （max_width 缩放后）+ 展示旋转元数据。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FrameDescriptor {
+    pub media_id: MediaId,
+    /// 展示序帧索引。
+    pub index: u32,
+    /// 该帧真实 PTS（微秒，媒体时钟域）。
+    pub pts_us: u64,
+    /// 原始尺寸（oriented，与探测元数据同口径）。
+    pub width: u32,
+    pub height: u32,
+    /// 工作尺寸（max_width 缩放后的实际 PNG 像素）。
+    pub work_width: u32,
+    pub work_height: u32,
+    /// 展示旋转元数据（0/90/180/270；PNG 已经 autorotate）。
+    pub rotation: u16,
+    /// 素材内容身份（sha256；不可变代次标记，原文件不可变故恒定）。
+    pub media_sha256: String,
+}
+
+/// 精确帧提取产物：PNG 字节 + 帧身份。
+#[derive(Debug, Clone)]
+pub struct FrameExtraction {
+    pub png: Vec<u8>,
+    pub descriptor: FrameDescriptor,
+}
+
 /// 结构化媒体错误分类（REST 层映射：404/409/415/400）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MediaErrorKind {
@@ -100,6 +176,9 @@ pub(crate) enum MediaErrorKind {
     Referenced,
     Unsupported,
     Invalid,
+    /// 帧身份不存在（展示序索引越界）；与 Invalid 的「参数不落在媒体可表达
+    /// 范围」区分：索引是明确可枚举空间，越界 = 404 语义。
+    FrameNotFound,
 }
 
 /// 结构化媒体错误：kind 供 REST 层映射合同机器码
@@ -143,6 +222,10 @@ impl MediaError {
     pub(crate) fn invalid(message: impl Into<String>) -> anyhow::Error {
         anyhow::Error::new(Self::new(MediaErrorKind::Invalid, message))
     }
+
+    pub(crate) fn frame_not_found(message: impl Into<String>) -> anyhow::Error {
+        anyhow::Error::new(Self::new(MediaErrorKind::FrameNotFound, message))
+    }
 }
 
 impl std::fmt::Display for MediaError {
@@ -154,6 +237,11 @@ impl std::fmt::Display for MediaError {
 impl std::error::Error for MediaError {}
 
 const METADATA_FILE: &str = "metadata.json";
+/// 展示帧表缓存（生成一次持久化；损坏/缺失自动重建）。
+const FRAMES_FILE: &str = "frames.json";
+const FRAMES_SCHEMA_VERSION: u32 = 1;
+/// 帧表条目上限（防御：~2M 帧 ≈ 16h@60fps、内存 ~16MB；超出按 Unsupported）。
+const MAX_FRAME_TABLE_ENTRIES: usize = 2_000_000;
 /// 导入暂存目录前缀（点前缀：list/删除永不可见，media id 语法也拒绝点开头）。
 const STAGING_PREFIX: &str = ".import-";
 const ORIGINAL_STEM: &str = "original";
@@ -172,6 +260,10 @@ pub struct MediaService {
     ffmpeg_path: String,
     /// metadata.json 读写的进程内串行化（写走 tmp+rename 原子替换）。
     io_lock: Mutex<()>,
+    /// 展示帧表并发生成的去重标记（同素材同时只有一个 ffprobe 扫描在跑，
+    /// 其余等待后复用结果；标记释放后 Condvar 唤醒）。
+    frame_gen: Mutex<HashSet<String>>,
+    frame_gen_cv: Condvar,
 }
 
 impl MediaService {
@@ -180,6 +272,8 @@ impl MediaService {
             data_root,
             ffmpeg_path,
             io_lock: Mutex::new(()),
+            frame_gen: Mutex::new(HashSet::new()),
+            frame_gen_cv: Condvar::new(),
         })
     }
 
@@ -339,15 +433,247 @@ impl MediaService {
 
     /// 精确帧提取为 PNG 字节（服务端解码为唯一精确帧来源；同一请求可重复）。
     pub fn extract_frame_png(&self, id: &MediaId, req: &FrameRequest) -> anyhow::Result<Vec<u8>> {
+        self.extract_frame(id, req).map(|e| e.png)
+    }
+
+    /// 精确帧提取（含帧身份，Phase 5）：PNG + [`FrameDescriptor`]。
+    ///
+    /// 帧身份来自**真实展示帧表**（[`MediaService::frame_table`]，首次访问经
+    /// ffprobe 包级扫描生成并缓存）：`pts_us` 解析为「首个 pts ≥ 目标」的展示
+    /// 帧（与 ffmpeg `-ss` 精确 seek 的输出帧一致），`index` 按展示序直接寻址
+    /// （VFR/B 帧展示顺序都被映射归一，无固定帧率假设）。
+    pub fn extract_frame(
+        &self,
+        id: &MediaId,
+        req: &FrameRequest,
+    ) -> anyhow::Result<FrameExtraction> {
         Self::validate_frame_request(req)?;
-        self.get(id)?;
+        let meta = self.get(id)?;
         let path = self.file_path(id)?;
         if self.ffmpeg_path.trim().is_empty() {
             return Err(MediaError::unsupported(
                 "ffmpeg 未配置（config.toml ffmpeg_path）",
             ));
         }
-        self.ffmpeg_extract(&path, req)
+        let table = self.frame_table(id)?;
+        let index = Self::resolve_frame_index(&table, req)?;
+        let png = self.ffmpeg_extract(&path, req)?;
+        // 工作尺寸取 PNG 头实测值（权威）；头不可读时按未缩放兜底
+        let (work_width, work_height) = png_dimensions(&png).unwrap_or((meta.width, meta.height));
+        Ok(FrameExtraction {
+            descriptor: FrameDescriptor {
+                media_id: id.clone(),
+                index,
+                pts_us: table.pts_us[index as usize],
+                width: meta.width,
+                height: meta.height,
+                work_width,
+                work_height,
+                rotation: meta.rotation,
+                media_sha256: meta.sha256,
+            },
+            png,
+        })
+    }
+
+    /// 展示序索引解析：`pts_us` → 首个 pts ≥ 目标的帧（越界 = 参数非法 400）；
+    /// `index` → 越界 = 结构化 FrameNotFound（404，不空跑 ffmpeg）。
+    fn resolve_frame_index(table: &FrameTable, req: &FrameRequest) -> anyhow::Result<u32> {
+        if let Some(pts_us) = req.pts_us {
+            let idx = table.pts_us.partition_point(|&p| p < pts_us);
+            return if idx < table.pts_us.len() {
+                Ok(idx as u32)
+            } else {
+                Err(MediaError::invalid(format!(
+                    "pts_us={pts_us} 超出媒体范围（末帧 pts_us={:?}）",
+                    table.pts_us.last()
+                )))
+            };
+        }
+        let index = req
+            .index
+            .expect("validate_frame_request 保证 pts/index 其一");
+        if index as usize >= table.pts_us.len() {
+            return Err(MediaError::frame_not_found(format!(
+                "帧索引 {index} 超出范围（共 {} 帧）",
+                table.pts_us.len()
+            )));
+        }
+        Ok(index)
+    }
+
+    /// 展示帧元信息：帧总数/首末 PTS；`at_pts` 给出时附「首个 pts ≥ at_pts」
+    /// 的解析位置（预览时间 → 帧身份的服务端权威换算）。
+    pub fn frames_info(&self, id: &MediaId, at_pts: Option<u64>) -> anyhow::Result<FramesInfo> {
+        Self::validate_id(id)?;
+        self.get(id)?;
+        let table = self.frame_table(id)?;
+        let current = at_pts.and_then(|pts| {
+            let idx = table.pts_us.partition_point(|&p| p < pts);
+            (idx < table.pts_us.len()).then(|| FramePosition {
+                index: idx as u32,
+                pts_us: table.pts_us[idx],
+            })
+        });
+        Ok(FramesInfo {
+            frame_count: table.pts_us.len() as u64,
+            first_pts_us: table.pts_us.first().copied(),
+            last_pts_us: table.pts_us.last().copied(),
+            current,
+        })
+    }
+
+    /// 指定展示帧及其相邻帧（prev/next；首/尾边界为 None）——逐帧步进的
+    /// 服务端权威实现，替代任何固定步长估算。
+    pub fn frame_neighbors(&self, id: &MediaId, index: u32) -> anyhow::Result<FrameNeighbors> {
+        Self::validate_id(id)?;
+        self.get(id)?;
+        let table = self.frame_table(id)?;
+        let len = table.pts_us.len();
+        if index as usize >= len {
+            return Err(MediaError::frame_not_found(format!(
+                "帧索引 {index} 超出范围（共 {len} 帧）"
+            )));
+        }
+        let at = |i: usize| FramePosition {
+            index: i as u32,
+            pts_us: table.pts_us[i],
+        };
+        Ok(FrameNeighbors {
+            position: at(index as usize),
+            prev: (index > 0).then(|| at(index as usize - 1)),
+            next: ((index as usize + 1) < len).then(|| at(index as usize + 1)),
+        })
+    }
+
+    /// 真实展示帧表（缓存优先；缺失/损坏时经 ffprobe 包级扫描重建）。
+    /// 同素材并发生成去重：一个扫描在跑，其余等待后直接读缓存。
+    fn frame_table(&self, id: &MediaId) -> anyhow::Result<Arc<FrameTable>> {
+        let dir = self.media_dir(id);
+        if let Some(table) = Self::load_frame_table(&dir)? {
+            return Ok(Arc::new(table));
+        }
+        let token = id.0.clone();
+        let mut guard = self.frame_gen.lock();
+        loop {
+            if guard.insert(token.clone()) {
+                break; // 本线程负责生成
+            }
+            self.frame_gen_cv.wait(&mut guard);
+        }
+        drop(guard);
+        let result = (|| {
+            // 双检：等待期间他人可能已写入
+            if let Some(table) = Self::load_frame_table(&dir)? {
+                return anyhow::Ok(table);
+            }
+            if self.ffmpeg_path.trim().is_empty() {
+                return Err(MediaError::unsupported(
+                    "ffmpeg 未配置（config.toml ffmpeg_path）",
+                ));
+            }
+            let path = self.file_path(id)?;
+            let table = self.generate_frame_table(&path)?;
+            self.store_frame_table(&dir, &table)?;
+            anyhow::Ok(table)
+        })();
+        let mut guard = self.frame_gen.lock();
+        guard.remove(&token);
+        drop(guard);
+        self.frame_gen_cv.notify_all();
+        result.map(Arc::new)
+    }
+
+    fn load_frame_table(dir: &Path) -> anyhow::Result<Option<FrameTable>> {
+        match fs::read(dir.join(FRAMES_FILE)) {
+            Ok(bytes) => match serde_json::from_slice::<FrameTable>(&bytes) {
+                Ok(table)
+                    if table.schema_version == FRAMES_SCHEMA_VERSION
+                        && !table.pts_us.is_empty() =>
+                {
+                    Ok(Some(table))
+                }
+                Ok(_) => {
+                    tracing::warn!(dir = %dir.display(), "frames.json 版本不识别，重建展示帧表");
+                    Ok(None)
+                }
+                Err(e) => {
+                    tracing::warn!(dir = %dir.display(), err = %e, "frames.json 损坏，重建展示帧表");
+                    Ok(None)
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(anyhow::Error::new(e).context("读取 frames.json 失败")),
+        }
+    }
+
+    fn store_frame_table(&self, dir: &Path, table: &FrameTable) -> anyhow::Result<()> {
+        let path = dir.join(FRAMES_FILE);
+        let tmp = dir.join(format!("{FRAMES_FILE}.tmp"));
+        let payload = serde_json::to_vec(table)?;
+        let _io = self.io_lock.lock();
+        fs::write(&tmp, payload)
+            .map_err(|e| anyhow::Error::new(e).context("写入 frames.json 失败"))?;
+        fs::rename(&tmp, &path)
+            .map_err(|e| anyhow::Error::new(e).context("替换 frames.json 失败"))?;
+        Ok(())
+    }
+
+    /// ffprobe 包级扫描生成展示帧表：只 demux 不解码（比逐帧解码快一个量级），
+    /// `pts_time`（秒）→ 微秒后按 PTS 升序**稳定排序**得到展示序。
+    fn generate_frame_table(&self, path: &Path) -> anyhow::Result<FrameTable> {
+        let ffprobe = self.ffprobe_exec();
+        let mut cmd = Command::new(&ffprobe);
+        cmd.args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time",
+            "-show_packets",
+        ])
+        .arg(path);
+        let output = match run_with_timeout(&ffprobe, &mut cmd, TOOL_TIMEOUT) {
+            Ok(output) => output,
+            Err(err) => {
+                return Err(MediaError::unsupported(format!(
+                    "ffprobe 不可用（{ffprobe}）: {err:#}"
+                )));
+            }
+        };
+        if !output.status.success() {
+            return Err(MediaError::unsupported(format!(
+                "ffprobe 读取帧时间轴失败: {}",
+                stderr_tail(&output.stderr)
+            )));
+        }
+        let parsed: PacketsJson = serde_json::from_slice(&output.stdout)
+            .map_err(|e| MediaError::unsupported(format!("ffprobe 包输出解析失败: {e}")))?;
+        let mut pts_us: Vec<u64> = parsed
+            .packets
+            .iter()
+            .filter_map(|p| p.pts_time.as_deref())
+            .filter_map(parse_pts_seconds_us)
+            .collect();
+        if pts_us.is_empty() {
+            return Err(MediaError::unsupported("未找到视频帧时间轴（无视频帧）"));
+        }
+        if pts_us.len() > MAX_FRAME_TABLE_ENTRIES {
+            return Err(MediaError::unsupported(format!(
+                "帧数 {} 超出支持上限 {MAX_FRAME_TABLE_ENTRIES}",
+                pts_us.len()
+            )));
+        }
+        // 稳定排序：等 PTS 时保持包序；B 帧解码序 → 展示序由此归一
+        pts_us.sort();
+        Ok(FrameTable {
+            schema_version: FRAMES_SCHEMA_VERSION,
+            pts_us,
+            generated_at: now_rfc3339(),
+        })
     }
 
     /// 声明/解除业务引用（写回 metadata.json；删除保护依据）。
@@ -753,6 +1079,38 @@ fn parse_duration_us(seconds: &str) -> Option<u64> {
         return None;
     }
     Some((seconds * 1_000_000.0).round() as u64)
+}
+
+/// ffprobe 包级 JSON（帧表扫描只取 pts_time；`-select_streams v:0` 已过滤视频轨）。
+#[derive(Debug, Deserialize)]
+struct PacketsJson {
+    #[serde(default)]
+    packets: Vec<PacketPts>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PacketPts {
+    #[serde(default, rename = "pts_time")]
+    pts_time: Option<String>,
+}
+
+/// ffprobe `pts_time`（秒字符串）→ 微秒（≥0，四舍五入；解析失败 = None；
+/// 首帧 0 合法，与 `parse_duration_us` 的正数约束区分）。
+fn parse_pts_seconds_us(seconds: &str) -> Option<u64> {
+    let seconds: f64 = seconds.trim().parse().ok()?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+    Some((seconds * 1_000_000.0).round() as u64)
+}
+
+/// PNG 头尺寸读取（只解码头，不解像素；失败 = None）。
+fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(std::io::Cursor::new(png))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1281,6 +1639,466 @@ mod tests {
         assert_eq!(
             err.downcast_ref::<MediaError>().unwrap().kind(),
             MediaErrorKind::Unsupported
+        );
+    }
+
+    // ---------- 真实展示帧 PTS/索引映射（Phase 5；本机有 ffmpeg/ffprobe 才有意义） ----------
+
+    fn ff_tools_available() -> bool {
+        let probe = |prog: &str| {
+            Command::new(prog)
+                .arg("-version")
+                .stdin(Stdio::null())
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        probe("ffmpeg") && probe("ffprobe")
+    }
+
+    /// 合成小视频 fixture（测试内生成到临时目录，git 不放大文件）。
+    fn gen_lavfi_clip(dir: &Path, name: &str, input: &str, extra: &[&str]) -> PathBuf {
+        let out = dir.join(name);
+        let mut cmd = Command::new("ffmpeg");
+        cmd.args(["-y", "-v", "error", "-f", "lavfi", "-i", input]);
+        for arg in extra {
+            cmd.arg(arg);
+        }
+        cmd.arg(&out);
+        let output = cmd.output().expect("生成测试视频失败（本机需 ffmpeg）");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        out
+    }
+
+    fn real_ffmpeg_service(root: &Path) -> MediaService {
+        MediaService::open(root.to_path_buf(), "ffmpeg".into()).unwrap()
+    }
+
+    #[test]
+    fn pts_time_parsing_accepts_zero_and_rejects_garbage() {
+        assert_eq!(parse_pts_seconds_us("0.000000"), Some(0));
+        assert_eq!(parse_pts_seconds_us("0.033333"), Some(33_333));
+        assert_eq!(parse_pts_seconds_us(" 1.5 "), Some(1_500_000));
+        assert_eq!(parse_pts_seconds_us("N/A"), None);
+        assert_eq!(parse_pts_seconds_us("-0.5"), None);
+        assert_eq!(parse_pts_seconds_us("abc"), None);
+    }
+
+    #[test]
+    fn resolve_frame_index_maps_pts_to_first_frame_at_or_after() {
+        let table = FrameTable {
+            schema_version: 1,
+            pts_us: vec![0, 33_333, 66_666, 100_000],
+            generated_at: String::new(),
+        };
+        let at = |p, i| FrameRequest {
+            pts_us: p,
+            index: i,
+            max_width: None,
+        };
+        assert_eq!(
+            MediaService::resolve_frame_index(&table, &at(Some(0), None)).unwrap(),
+            0
+        );
+        // 目标落在两帧之间 → 首个 pts ≥ 目标的帧
+        assert_eq!(
+            MediaService::resolve_frame_index(&table, &at(Some(1), None)).unwrap(),
+            1
+        );
+        assert_eq!(
+            MediaService::resolve_frame_index(&table, &at(Some(33_333), None)).unwrap(),
+            1
+        );
+        assert_eq!(
+            MediaService::resolve_frame_index(&table, &at(Some(99_999), None)).unwrap(),
+            3
+        );
+        assert_eq!(
+            MediaService::resolve_frame_index(&table, &at(Some(100_000), None)).unwrap(),
+            3
+        );
+        assert_eq!(
+            MediaService::resolve_frame_index(&table, &at(Some(100_001), None))
+                .unwrap_err()
+                .downcast_ref::<MediaError>()
+                .unwrap()
+                .kind(),
+            MediaErrorKind::Invalid
+        );
+        assert_eq!(
+            MediaService::resolve_frame_index(&table, &at(None, Some(4)))
+                .unwrap_err()
+                .downcast_ref::<MediaError>()
+                .unwrap()
+                .kind(),
+            MediaErrorKind::FrameNotFound
+        );
+    }
+
+    /// CFR 样本（24/30/60fps）：帧数 = 标称帧数，相邻帧可重复定位、边界与
+    /// 越界语义明确、帧表持久化（消灭 33ms 固定步进假设的地基）。
+    #[test]
+    fn display_frame_table_counts_and_neighbors_across_fps() {
+        if !ff_tools_available() {
+            eprintln!("跳过：本机无 ffmpeg/ffprobe");
+            return;
+        }
+        for (rate, expected) in [(24u32, 24u64), (30, 30), (60, 60)] {
+            let src = tempfile::tempdir().unwrap();
+            let clip = gen_lavfi_clip(
+                src.path(),
+                "clip.mp4",
+                &format!("testsrc=duration=1:size=64x64:rate={rate}"),
+                &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+            );
+            let bytes = fs::read(&clip).unwrap();
+            let root = tempfile::tempdir().unwrap();
+            let svc = real_ffmpeg_service(root.path());
+            let meta = svc.import_bytes("clip.mp4", &bytes).unwrap();
+
+            let info = svc.frames_info(&meta.id, None).unwrap();
+            assert_eq!(info.frame_count, expected, "rate={rate}");
+            assert_eq!(info.first_pts_us, Some(0));
+            assert!(info.last_pts_us.unwrap() > 0);
+
+            let mid = (expected / 2) as u32;
+            let n1 = svc.frame_neighbors(&meta.id, mid).unwrap();
+            let n2 = svc.frame_neighbors(&meta.id, mid).unwrap();
+            assert_eq!(n1.position, n2.position, "相邻帧查询可重复");
+            if let (Some(prev), Some(next)) = (n1.prev, n1.next) {
+                assert!(
+                    prev.pts_us < n1.position.pts_us && n1.position.pts_us < next.pts_us,
+                    "相邻 PTS 必须严格递增"
+                );
+                assert_eq!(prev.index + 2, next.index);
+            }
+            assert!(svc.frame_neighbors(&meta.id, 0).unwrap().prev.is_none());
+            assert!(svc
+                .frame_neighbors(&meta.id, expected as u32 - 1)
+                .unwrap()
+                .next
+                .is_none());
+            assert_eq!(
+                svc.frame_neighbors(&meta.id, expected as u32)
+                    .unwrap_err()
+                    .downcast_ref::<MediaError>()
+                    .unwrap()
+                    .kind(),
+                MediaErrorKind::FrameNotFound
+            );
+            // 预览时间 → 帧解析（服务端权威换算；pts=1 落在首帧(0)之后 → 取首个
+            // pts ≥ 1 的展示帧 = 索引 1）
+            let with_pos = svc.frames_info(&meta.id, Some(1)).unwrap();
+            assert_eq!(with_pos.current.map(|c| c.index), Some(1));
+            // frames.json 已缓存
+            assert!(root.path().join(&meta.id.0).join("frames.json").is_file());
+        }
+    }
+
+    /// VFR + B 帧样本：展示序索引 ↔ PTS 映射无帧率假设（不等间隔），index
+    /// 寻址与 pts 寻址得到同一帧（B 帧解码序 → 展示序被 PTS 排序归一），
+    /// 同请求逐字节可重复。
+    #[test]
+    fn vfr_bframe_display_index_matches_pts_and_extraction_is_deterministic() {
+        if !ff_tools_available() {
+            eprintln!("跳过：本机无 ffmpeg/ffprobe");
+            return;
+        }
+        let src = tempfile::tempdir().unwrap();
+        let a = gen_lavfi_clip(
+            src.path(),
+            "a.mp4",
+            "testsrc=duration=1:size=64x64:rate=10",
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        );
+        let b = gen_lavfi_clip(
+            src.path(),
+            "b.mp4",
+            "testsrc=duration=1:size=64x64:rate=30",
+            &["-c:v", "libx264", "-bf", "2", "-pix_fmt", "yuv420p"],
+        );
+        let vfr = src.path().join("vfr.mp4");
+        let out = Command::new("ffmpeg")
+            .args(["-y", "-v", "error", "-i"])
+            .arg(&a)
+            .arg("-i")
+            .arg(&b)
+            .args([
+                "-filter_complex",
+                "[0:v][1:v]concat=n=2:v=1",
+                "-c:v",
+                "libx264",
+                "-bf",
+                "2",
+                "-fps_mode",
+                "passthrough",
+                "-enc_time_base",
+                "1:1000000",
+            ])
+            .arg(&vfr)
+            .output()
+            .expect("生成 VFR 样本失败");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let bytes = fs::read(&vfr).unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        let svc = real_ffmpeg_service(root.path());
+        let meta = svc.import_bytes("vfr.mp4", &bytes).unwrap();
+        let info = svc.frames_info(&meta.id, None).unwrap();
+        assert_eq!(info.frame_count, 40, "10 帧 10fps + 30 帧 30fps");
+
+        let table_bytes = fs::read(root.path().join(&meta.id.0).join("frames.json")).unwrap();
+        let table: FrameTable = serde_json::from_slice(&table_bytes).unwrap();
+        assert_eq!(table.pts_us.len(), 40);
+        assert!(
+            table.pts_us.windows(2).all(|w| w[0] < w[1]),
+            "展示序 PTS 必须严格递增"
+        );
+        let step_10fps = table.pts_us[1] - table.pts_us[0];
+        let step_30fps = table.pts_us[11] - table.pts_us[10];
+        assert_ne!(
+            step_10fps, step_30fps,
+            "VFR 样本必须非等间隔（~100ms vs ~33ms）"
+        );
+
+        for k in [0usize, 13, 21, 39] {
+            let by_index = svc
+                .extract_frame(
+                    &meta.id,
+                    &FrameRequest {
+                        index: Some(k as u32),
+                        pts_us: None,
+                        max_width: None,
+                    },
+                )
+                .unwrap();
+            let by_pts = svc
+                .extract_frame(
+                    &meta.id,
+                    &FrameRequest {
+                        pts_us: Some(table.pts_us[k]),
+                        index: None,
+                        max_width: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                by_index.png, by_pts.png,
+                "帧 {k}：index 与 pts 寻址必须同一帧"
+            );
+            assert_eq!(by_index.descriptor.index, k as u32);
+            assert_eq!(by_index.descriptor.pts_us, table.pts_us[k]);
+            let again = svc
+                .extract_frame(
+                    &meta.id,
+                    &FrameRequest {
+                        index: Some(k as u32),
+                        pts_us: None,
+                        max_width: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(by_index.png, again.png, "同请求逐字节可重复");
+        }
+        // 预览时间 → 帧解析
+        let resolved = svc.frames_info(&meta.id, Some(table.pts_us[15])).unwrap();
+        assert_eq!(
+            resolved.current,
+            Some(FramePosition {
+                index: 15,
+                pts_us: table.pts_us[15]
+            })
+        );
+    }
+
+    /// 帧身份（FrameDescriptor）：来源/索引/PTS/原始与工作尺寸/旋转/sha 齐全；
+    /// 工作尺寸 = 实际 PNG 像素（max_width 缩放生效时小于原始）。
+    #[test]
+    fn frame_descriptor_carries_identity_and_work_size() {
+        if !ff_tools_available() {
+            eprintln!("跳过：本机无 ffmpeg/ffprobe");
+            return;
+        }
+        let src = tempfile::tempdir().unwrap();
+        let clip = gen_lavfi_clip(
+            src.path(),
+            "clip.mp4",
+            "testsrc=duration=1:size=320x240:rate=30",
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        );
+        let bytes = fs::read(&clip).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let svc = real_ffmpeg_service(root.path());
+        let meta = svc.import_bytes("clip.mp4", &bytes).unwrap();
+
+        let scaled = svc
+            .extract_frame(
+                &meta.id,
+                &FrameRequest {
+                    pts_us: Some(0),
+                    index: None,
+                    max_width: Some(100),
+                },
+            )
+            .unwrap();
+        assert_eq!(scaled.descriptor.media_id, meta.id);
+        assert_eq!(scaled.descriptor.index, 0);
+        assert_eq!(scaled.descriptor.width, 320);
+        assert_eq!(scaled.descriptor.height, 240);
+        assert_eq!(scaled.descriptor.rotation, 0);
+        assert_eq!(scaled.descriptor.media_sha256, meta.sha256);
+        assert_eq!(
+            (scaled.descriptor.work_width, scaled.descriptor.work_height),
+            png_dimensions(&scaled.png).unwrap()
+        );
+        assert!(scaled.descriptor.work_width <= 100);
+
+        let full = svc
+            .extract_frame(
+                &meta.id,
+                &FrameRequest {
+                    pts_us: Some(0),
+                    index: None,
+                    max_width: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            (full.descriptor.work_width, full.descriptor.work_height),
+            (320, 240)
+        );
+    }
+
+    /// 帧身份越界：结构化 FrameNotFound（不空跑 ffmpeg）；pts 超范围 = Invalid；
+    /// 旧的 PNG 入口同语义（向后兼容）。
+    #[test]
+    fn out_of_range_frame_identity_is_structured_error() {
+        if !ff_tools_available() {
+            eprintln!("跳过：本机无 ffmpeg/ffprobe");
+            return;
+        }
+        let src = tempfile::tempdir().unwrap();
+        let clip = gen_lavfi_clip(
+            src.path(),
+            "clip.mp4",
+            "testsrc=duration=1:size=64x64:rate=10",
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        );
+        let bytes = fs::read(&clip).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let svc = real_ffmpeg_service(root.path());
+        let meta = svc.import_bytes("clip.mp4", &bytes).unwrap();
+
+        for index in [Some(10u32), Some(u32::MAX)] {
+            let err = svc
+                .extract_frame(
+                    &meta.id,
+                    &FrameRequest {
+                        pts_us: None,
+                        index,
+                        max_width: None,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(
+                err.downcast_ref::<MediaError>().unwrap().kind(),
+                MediaErrorKind::FrameNotFound
+            );
+        }
+        let err = svc
+            .extract_frame(
+                &meta.id,
+                &FrameRequest {
+                    pts_us: Some(60_000_000),
+                    index: None,
+                    max_width: None,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<MediaError>().unwrap().kind(),
+            MediaErrorKind::Invalid
+        );
+    }
+
+    /// frames.json 损坏（半写/外来篡改）→ 自动重建，帧数一致。
+    #[test]
+    fn corrupt_frames_json_is_rebuilt_with_same_mapping() {
+        if !ff_tools_available() {
+            eprintln!("跳过：本机无 ffmpeg/ffprobe");
+            return;
+        }
+        let src = tempfile::tempdir().unwrap();
+        let clip = gen_lavfi_clip(
+            src.path(),
+            "clip.mp4",
+            "testsrc=duration=1:size=64x64:rate=30",
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        );
+        let bytes = fs::read(&clip).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let svc = real_ffmpeg_service(root.path());
+        let meta = svc.import_bytes("clip.mp4", &bytes).unwrap();
+
+        let first = svc.frames_info(&meta.id, None).unwrap();
+        let cache = root.path().join(&meta.id.0).join("frames.json");
+        fs::write(&cache, b"{corrupt").unwrap();
+        let second = svc.frames_info(&meta.id, None).unwrap();
+        assert_eq!(first.frame_count, second.frame_count);
+        assert_eq!(first.first_pts_us, second.first_pts_us);
+    }
+
+    /// 并发首访：同素材并发生成去重（一个 ffprobe 扫描，其余等待复用），
+    /// 全部调用成功且映射一致。
+    #[test]
+    fn concurrent_frame_table_generation_is_consistent() {
+        if !ff_tools_available() {
+            eprintln!("跳过：本机无 ffmpeg/ffprobe");
+            return;
+        }
+        let src = tempfile::tempdir().unwrap();
+        let clip = gen_lavfi_clip(
+            src.path(),
+            "clip.mp4",
+            "testsrc=duration=1:size=64x64:rate=30",
+            &["-c:v", "libx264", "-pix_fmt", "yuv420p"],
+        );
+        let bytes = fs::read(&clip).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let svc = Arc::new(real_ffmpeg_service(root.path()));
+        let meta = svc.import_bytes("clip.mp4", &bytes).unwrap();
+
+        let mut handles = Vec::new();
+        let root_path = root.path().to_path_buf();
+        for i in 0..4 {
+            let svc = svc.clone();
+            let id = meta.id.clone();
+            let cache_dir = root_path.clone();
+            handles.push(std::thread::spawn(move || {
+                if i % 2 == 0 {
+                    svc.frames_info(&id, None).unwrap().frame_count
+                } else {
+                    // frames.json 可能尚未生成（等待同伴完成）——用 neighbors 探测
+                    let _ = std::fs::read(cache_dir.join(&id.0).join("frames.json"));
+                    u64::from(svc.frame_neighbors(&id, 0).unwrap().position.index)
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            svc.frames_info(&meta.id, None).unwrap().frame_count,
+            30,
+            "并发后帧表一致"
         );
     }
 }

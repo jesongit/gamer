@@ -76,7 +76,23 @@ pub struct SegmentMeta {
     /// 会话时间轴起点/时长（微秒，单调时钟域）。
     pub start_us: u64,
     pub duration_us: u64,
+    /// 段首帧原始媒体 PTS（微秒）。**事件时间轴 ↔ 媒体 PTS 的整数映射基准**：
+    /// `media_pts_us = timeline_us - start_us + base_pts_us`（会话单调钟与
+    /// 媒体时钟同刻度对齐，整数微秒、不混用浏览器时间）。
+    #[serde(default)]
+    pub base_pts_us: u64,
     pub reason: SegmentReason,
+}
+
+impl SegmentMeta {
+    /// 会话时间轴时刻（微秒，事件 `timeline_us` 同域）→ 段内媒体 PTS。
+    /// 时刻早于段起点时截断为段首帧 PTS（saturating）。
+    /// 当前消费方：草稿生成/时间轴 UI 读 session.json 后换算（下一阶段接线）；
+    /// 本阶段由录制测试锁定语义。
+    #[allow(dead_code)]
+    pub fn media_pts_for_timeline(&self, timeline_us: u64) -> u64 {
+        self.base_pts_us + timeline_us.saturating_sub(self.start_us)
+    }
 }
 
 /// 录制会话元数据（`recording/session.json` 形态即 wire 形态）。
@@ -548,6 +564,8 @@ impl SessionShared {
                     start_us: seg.start_us,
                     // 单调时钟域时长（事件时间轴同域；素材自身时长在其 metadata）
                     duration_us: st.elapsed_us().saturating_sub(seg.start_us),
+                    // 段首帧原始媒体 PTS：事件 timeline_us ↔ 媒体 PTS 的整数映射基准
+                    base_pts_us: seg.base_pts,
                     reason,
                 });
                 debug_segment_closed(&self.id.0, &media_id.0, &summary, seg.frames);
@@ -1463,11 +1481,56 @@ mod tests {
         assert_eq!(meta.segments[0].reason, SegmentReason::CodecChange);
         assert_eq!(meta.segments[1].reason, SegmentReason::Normal);
         assert_ne!(meta.segments[0].media_id, meta.segments[1].media_id);
+        // 段首帧原始 PTS 进入 meta（事件↔媒体 PTS 映射基准）
+        assert_eq!(meta.segments[0].base_pts_us, 1_000);
+        assert_eq!(meta.segments[1].base_pts_us, 5_000);
         for seg in &meta.segments {
             assert_eq!(media_state(&root, &seg.media_id.0), MediaState::Ready);
         }
         // 两段时间轴不重叠
         assert!(meta.segments[1].start_us >= meta.segments[0].start_us);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// 事件时间轴（服务端单调钟）↔ 媒体 PTS 的整数映射：`base_pts_us` 记录段首
+    /// 帧原始 PTS，`media_pts_for_timeline` 把事件落回视频帧时刻，全程整数微秒、
+    /// 不混用浏览器时间。
+    #[test]
+    fn event_timeline_maps_to_media_pts_via_segment_base_pts() {
+        let root = temp_root("ptsmap");
+        let shared = test_session(&root, "dev-1");
+        shared.feed_frame(config_frame());
+        // 段首帧 PTS = 1_000_000（≠ 0，验证映射带基准平移）
+        shared.feed_frame(idr_frame(1_000_000));
+        shared.feed_frame(p_frame(1_033_333));
+        // 一次 tap（timeline_us = DOWN 时刻，会话单调钟域）
+        shared.on_touch(TOUCH_DOWN, 7, 500, 400);
+        shared.on_touch(TOUCH_UP, 7, 502, 401);
+        let meta = shared.finalize_stop();
+
+        assert_eq!(meta.segments.len(), 1);
+        let seg = &meta.segments[0];
+        assert_eq!(seg.base_pts_us, 1_000_000, "段首帧原始 PTS 进 meta");
+        let events = shared.read_events();
+        assert_eq!(events.len(), 1);
+        let evt = &events[0];
+        assert!(
+            evt.timeline_us >= seg.start_us && evt.timeline_us <= seg.start_us + seg.duration_us,
+            "事件时刻必须落在其分段区间内"
+        );
+        // 整数映射：事件媒体 PTS ≥ 段首帧 PTS，且 ≤ 段末帧 PTS（+段时长容差）
+        let media_pts = seg.media_pts_for_timeline(evt.timeline_us);
+        assert!(
+            media_pts >= seg.base_pts_us && media_pts <= seg.base_pts_us + seg.duration_us + 1,
+            "映射出的媒体 PTS {media_pts} 应落在段帧区间 [{}, {}]",
+            seg.base_pts_us,
+            seg.base_pts_us + seg.duration_us
+        );
+        // 早于段起点的事件时刻截断为段首帧 PTS
+        assert_eq!(
+            seg.media_pts_for_timeline(seg.start_us - 10),
+            seg.base_pts_us
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

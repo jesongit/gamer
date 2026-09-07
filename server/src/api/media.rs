@@ -36,7 +36,11 @@ use crate::media::{
 /// - `POST /api/media/import?name=<filename>`（raw bytes → 201 metadata）
 /// - `GET  /api/media`（列表）/ `GET|DELETE /api/media/:id`
 /// - `GET  /api/media/:id/file`（Range 播放流）
-/// - `GET  /api/media/:id/frame?pts_us=|index=&max_width=`（PNG 确定帧）
+/// - `GET  /api/media/:id/frame?pts_us=|index=&max_width=`（PNG 确定帧 +
+///   `X-Frame-Index`/`X-Frame-Pts-Us` 帧身份响应头）
+/// - `GET  /api/media/:id/frames[?pts_us=]`（展示帧元信息：帧总数/首末 PTS/
+///   可选「首个 pts ≥ 目标」解析）
+/// - `GET  /api/media/:id/frames/:index`（指定展示帧 + prev/next 相邻帧）
 /// - `POST /api/media/:id/refs`（引用登记/解除）
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -48,6 +52,11 @@ pub(super) fn router() -> Router<AppState> {
         )
         .route("/api/media/:id/file", get(api_media_file))
         .route("/api/media/:id/frame", get(api_media_frame))
+        .route("/api/media/:id/frames", get(api_media_frames_info))
+        .route(
+            "/api/media/:id/frames/:index",
+            get(api_media_frame_neighbors),
+        )
         .route("/api/media/:id/refs", post(api_media_refs))
 }
 
@@ -61,6 +70,7 @@ pub(super) fn map_media_err(err: anyhow::Error) -> ApiError {
             MediaErrorKind::Unsupported => {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, "media_unsupported")
             }
+            MediaErrorKind::FrameNotFound => (StatusCode::NOT_FOUND, "frame_not_found"),
             MediaErrorKind::Invalid => return ApiError::bad_request(me.message().to_owned()),
         };
         tracing::warn!(code, detail = %me, "media api error");
@@ -336,23 +346,82 @@ async fn api_media_frame(
         Err(err) => return err.into_response(),
     };
     let svc = media_service(&st.cfg);
-    match run_blocking_api(move || {
-        svc.extract_frame_png(&MediaId(id), &req)
-            .map_err(map_media_err)
-    })
-    .await
+    match run_blocking_api(move || svc.extract_frame(&MediaId(id), &req).map_err(map_media_err))
+        .await
     {
-        Ok(png) => {
-            // 帧内容按 (media, pts/index, max_width) 确定：允许中间缓存
-            let mut resp = (StatusCode::OK, png).into_response();
+        Ok(extraction) => {
+            // 帧内容按 (media, pts/index, max_width) 确定：允许中间缓存；
+            // 帧身份（展示序索引/真实 PTS）经响应头回传（Phase 5 最小闭环：
+            // 调用方拿到的是「解析后的帧」而非「请求的近似位置」）
+            let mut resp = (StatusCode::OK, extraction.png).into_response();
             let headers = resp.headers_mut();
             headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
             headers.insert(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("public, max-age=3600"),
             );
+            if let Ok(v) = HeaderValue::from_str(&extraction.descriptor.index.to_string()) {
+                headers.insert("x-frame-index", v);
+            }
+            if let Ok(v) = HeaderValue::from_str(&extraction.descriptor.pts_us.to_string()) {
+                headers.insert("x-frame-pts-us", v);
+            }
             resp
         }
+        Err(err) => err.into_response(),
+    }
+}
+
+// ---------- GET /api/media/:id/frames[?pts_us=]（展示帧元信息） ----------
+
+#[derive(Deserialize)]
+struct FramesInfoQuery {
+    pts_us: Option<String>,
+}
+
+async fn api_media_frames_info(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<FramesInfoQuery>,
+) -> Response {
+    let at_pts = match q.pts_us.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                return ApiError::bad_request("pts_us 必须是非负整数（微秒）").into_response();
+            }
+        },
+        None => None,
+    };
+    let svc = media_service(&st.cfg);
+    match run_blocking_api(move || svc.frames_info(&MediaId(id), at_pts).map_err(map_media_err))
+        .await
+    {
+        Ok(info) => Json(info).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+// ---------- GET /api/media/:id/frames/:index（指定帧 + 相邻帧） ----------
+
+async fn api_media_frame_neighbors(
+    State(st): State<AppState>,
+    Path((id, index)): Path<(String, String)>,
+) -> Response {
+    let index = match index.trim().parse::<u32>() {
+        Ok(v) => v,
+        Err(_) => {
+            return ApiError::bad_request("index 必须是非负整数（展示序帧索引）").into_response();
+        }
+    };
+    let svc = media_service(&st.cfg);
+    match run_blocking_api(move || {
+        svc.frame_neighbors(&MediaId(id), index)
+            .map_err(map_media_err)
+    })
+    .await
+    {
+        Ok(neighbors) => Json(neighbors).into_response(),
         Err(err) => err.into_response(),
     }
 }
