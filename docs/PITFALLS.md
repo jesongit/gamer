@@ -274,3 +274,15 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 
 - **rustc 内存不足不止报分配失败，还会随机崩在不同 crate 的 ICE（`STATUS_STACK_BUFFER_OVERRUN`）**：本机 32G 内存单独跑全量 `cargo test` 也连续三轮各崩在一个不同依赖（curve25519-dalek 数百条假 trait 错误 / wit-parser / regalloc2 / webrtc-util），根因是编译 wasmtime 时 `rustc-LLVM ERROR: out of memory`——别当成代码问题排查；解法 = 关依赖 debuginfo + 降并行 `CARGO_PROFILE_DEV_DEBUG=0 cargo test -j 2`（wasmtime 单 crate debug 编译即数 GB），与「与前端构建并行时内存分配失败」同根源但单独跑也会触发。
 - **本机缺 `wasm32-unknown-unknown` target 时 32 个 WASM guest 测试全数失败，属预期环境缺口**：yaml-guest/keymap guest/declarative 插件 roundtrip 等在测试内现场 cargo 构建 guest，报 E0463 `can't find crate for core/std … target may not be installed`；`rustup target add wasm32-unknown-unknown` 即愈，不装则判定回归只看其余 529 项（CI 有官方 guest wasm32 构建关卡兜底）。
+
+## 2026-09-07（视频工作台并行开发）
+
+- **WIT 函数名不得用保留字**：interface 里写 `list: func()` 直接解析失败（`expected type, resource or func, found keyword list`）——`list`/`use`/`type` 等都是 WIT keyword，命名加 `-media` 类后缀；`host.wit` 与 `HostApiDomain::ALL` 是同一契约两半（测试锁死），加域必须同步，但**新 interface 先定义、别急着挂 world extension-host**（宿主 linker 会要求提供全部 world import）。
+- **raw Annex-B h264 没有 PTS，`ffmpeg -c copy` remux 会按假设帧率（25fps）伪造容器时间戳**：需要事件↔画面对齐只能自带 muxer 保留原始 PTS（`recording/mp4.rs`）；手写 MP4 两坑：avcC 记录必须带 box 头、dref 必须包在 dinf 里。
+- **ffmpeg 8/9 已移除 `-vsync` 选项**：抽帧用 `select` 过滤 + `-frames:v 1` 即可，写 `-vsync 0` 直接报 Unrecognized option。
+- **PowerShell 5.1 管道 `cargo … 2>&1 | Select-Object` 会把 stderr 包成 ErrorRecord**：包装脚本退出码可能为 1 而 cargo 实际成功——判断结果看输出尾行（`Finished`/`test result: ok.`），勿信 `$LASTEXITCODE`。
+- **Vue `ref()` 对对象值做深度代理**：把 `<video>` 等 DOM 元素存进 ref 后取回的是 proxy ≠ 原元素（`instanceof`/原生 API 判定全失效），存 DOM 用 `shallowRef`。
+- **happy-dom 两个媒体测试坑**：`canvas.getContext('2d')` 返回 null（裁切类测试需桩 createElement）；不派发 `seeked`/`timeupdate`（时间轴测试手动 trigger 并预置 `element.currentTime`）。
+- **promise 型 API 的参数校验必须发生在 async 函数体内**：箭头函数体里同步调 `requireId` 类校验会在调用点同步 throw，`await expect().rejects` 捕不到、测试假绿或假红。
+- **`<img>` 同 src 重复赋值不会重新触发 load**：busy 态由 img 事件驱动时，同 URL 重复点击要显式 no-op、切换素材/清空要显式复位，否则 busy 卡死。
+- **YAML v3 `key` 步骤只接受字符串 keycode**（命名键或数字字符串如 `key: "1234"`）：整数形态运行时报「key 必须是按键名字符串」——草稿生成与手写脚本同源注意（词表见 `yaml_extension.rs::key_code`）。
