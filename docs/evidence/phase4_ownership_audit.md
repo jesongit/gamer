@@ -103,10 +103,12 @@
 
 ## 5. 遗留问题与「后续做」清单
 
-1. **§2 #4**：`extensions/mod.rs::native_call_action` 硬编码 gamer.yaml 分发 → 升级为扩展自注册的 native action 描述符表（牵 extensions/mod.rs + 守卫测试，跨任务文件）。
-2. **§2 #5**：`api/extensions.rs` L119 的 keymap profile 门禁 id 比较 → 改按执行世界/manifest 声明判定（api 层）。
-3. **keymap `android_keycode` 双份词表**（host `keymap/mod.rs` 与 guest 精简版已漂移：host 多出 PageUp/Home/End 等、guest 多 Home=3/Back=4 语义差异——guest 走 profile 校验路径、host 走动作执行路径，当前无冲突但应收敛为单一来源或生成共享）。
-4. **`guests/keymap-guest/ui/index.html`**：遗留 iframe UI 资产，官方包不携带，仅测试使用；后续可删除并把 `read_ui_file` 服务路径测试改用内联 HTML。
-5. **前端 core 面板（自动化/函数/模板/映射/视频工作台）独立分发**：runtime=core 宿主组件仍随宿主前端发布；独立 UI 资产化归 Phase 3 SDK / Phase 7 联动轮次（计划 §7.1「对能独立交付的业务和 UI 逐步改为插件包携带」）。
-6. **`build_guest_fixture_component`/`package_guest_fixture_gplugin` 命名**：函数名仍带 "fixture"（历史 API，被 api tests 按名消费，改名需动 `api/tests/*`）；语义已注释澄清（构建的是产品 guest 源码）。
-7. 并行任务在途的 `media/mod.rs` 编译错（`MediaErrorKind::FrameNotFound` E0004）非本任务范围，集成者合流后须全量复跑。
+> **Phase 9 复核（2026-09-08）**：逐项回查当前工作树后更新状态如下——
+
+1. ~~§2 #4：`extensions/mod.rs::native_call_action` 硬编码 gamer.yaml 分发 → 升级为扩展自注册的 native action 描述符表~~ **已闭环（方案改为公开动作清单）**：Phase 7 以 `gamer_yaml/actions.rs` 版本化动作清单为唯一声明点（`template.create_from_frame` / `vision.test_template` / `automation.create_draft` / `automation.save_draft` / `automation.open_editor`），清单↔分发双向锁测试（`catalog_and_dispatch_are_bidirectionally_locked`）；`extensions/mod.rs::native_call_action`（现 L83-89）只剩一行转发，归属判定仍在 gamer_yaml 自身，通用描述符表不再需要。
+2. ~~§2 #5：`api/extensions.rs` 的 keymap profile 门禁 id 比较~~ **已闭环**：Phase 8 遗留 #5 落地——`api/extensions.rs`（现 L124）改用边界谓词 `is_keymap_extension`，api 层无 `KEYMAP_EXTENSION_ID` 字面量比较。
+3. **keymap `android_keycode` 双份词表——仍有效**：host `keymap/mod.rs`（L1541 附近）与 guest `guests/keymap-guest/src/lib.rs`（L191 附近）精简版仍双份维护（已知漂移不变），待收敛为单一来源或生成共享。
+4. **`guests/keymap-guest/ui/index.html` 遗留 iframe UI 资产——仍存在**：官方包不携带，仅测试 `read_ui_file` 服务路径使用；后续可删除并改内联 HTML。
+5. **前端 core 面板独立分发——仍有效**：自动化/函数/模板/映射/视频工作台仍为 runtime=core 宿主组件随宿主前端发布，独立 UI 资产化留后续轮次。
+6. **`build_guest_fixture_component`/`package_guest_fixture_gplugin` 命名——仍有效**：函数保留（语义注释已澄清），api tests 经 `extensions/mod.rs` re-export 按名消费，改名需动 `api/tests/*`。
+7. ~~并行任务在途的 `media/mod.rs` 编译错~~ **早已合流解决**（7b85745 入库），全量测试已复绿（Phase 9：658 passed / 0 failed）。

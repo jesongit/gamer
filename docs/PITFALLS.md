@@ -240,7 +240,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 
 ## 2026-09-05（Phase 12 P12.8：yaml guest 正式化与官方包重打）
 
-- **.gplugin 不是字节可复现产物**：plugin-signer 打 zip 用当前时间做 entry mtime，同一份 guest 源码两次构建 sha256 不同——别用「sha 没变」判断没重打，registry.json 与 .gplugin 必须同批由 `tools/build-plugins.ps1` 生成（proof 绑定 sha256）。
+- **.gplugin 不是字节可复现产物**：plugin-signer 打 zip 用当前时间做 entry mtime，同一份 guest 源码两次构建 sha256 不同——别用「sha 没变」判断没重打，registry.json 与 .gplugin 必须同批由 `tools/build-plugins.ps1` 生成（registry 条目 sha256 绑定包文件；2026-09-08 起免签名，无 proof）。
 - **扩展 manifest 升版会打挂按版本卸载的测试**：guard 全链测试曾硬编码 `YAML_VERSION="3.0.0"`，升 3.1.0 后 DELETE `/api/extensions/:id/:version` 404；版本一律从 `YAML_EXTENSION_MANIFEST_TOML` 现场解析（`yaml_market_version()`），勿再硬编码。
 
 ## 2026-09-05（Phase 12 P12.9：YAML v2 删除）

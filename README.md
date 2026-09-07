@@ -12,7 +12,8 @@
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先从 H.264 GOP 帧环按需调用 ffmpeg 解码最新帧；无 ffmpeg 时 fallback adb screencap）；固定夹具 benchmark 脚本已兼容 Windows PowerShell 5.1（parser=0），正式跨平台 p50/p95 报告仍在计划中
 - 📜 **YAML 自动化**：YAML v3 唯一脚本方案（非 `version: 3` 一律诊断报错，无旧版兼容）——19 类步骤（app 启停 / tap / swipe / key / text / wait / log / set / if / loop / break / call / return / throw / find / match_first / check / invoke），call 统一 `script:` / `function:` 命名空间并泛化返回值，find 支持 then/else/verify/save 与 `$match` 上下文，defaults 统一视觉阈值与操作节奏，执行预算（max_steps=100k / max_call_depth=32）防脚本失控，运行事件（步骤高亮 / 命中标记）实时回传投屏页面（语法见 [docs/yaml-v3/](docs/yaml-v3/overview.md)），由官方 `gamer.yaml` 扩展承载
 - ⏰ **定时任务**：Task = 任意 ScheduleProvider + 任意 Runner，内置 `cron` 调度 provider + `gamer.yaml` 执行 runner；服务端 Docker 内 7×24 运行，浏览器关闭不影响
-- 🧩 **插件化架构**：Core 只含设备/任务/资源/扩展机制等稳定能力，YAML 自动化与按键映射由可安装扩展（`.gplugin`，签名校验 + 权限确认）提供，面板随扩展安装/卸载出现消失；应用资产走 App Package（`.gamerpkg`）安装
+- 🧩 **插件化架构**：Core 只含设备/任务/资源/扩展机制等稳定能力，YAML 自动化、按键映射与视频工作台由可安装扩展（`.gplugin`，**免签名安装**——来源标注 + 权限确认 + 官方 sha256 完整性校验）提供，面板随扩展启动/停止出现消失；内置插件市场（官方 registry + 本地/URL 导入），用户可用 [sdk/](sdk/README.md) 开发自己的 WASM 插件；配置资产走 Package（`.gamerpkg`）导入导出
+- 🎬 **视频工作台**：录制或导入视频 → 素材库 → Video Project（标记/校准）→ 精确逐帧（ffprobe 展示序帧表，VFR/B 帧归一）→ 定帧框选建模板 + 离线匹配 → 操作事件生成 YAML v3 草稿保存到自动化（全程不触达设备，由官方 `gamer.video` 扩展承载）
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
 > 当前仓库提供 Windows x64 完整包的 launcher 入口（`doctor` / `status` / `repair` / `start` / `upgrade`）和 launcher 托管更新 API。本文只记录仓库中已有的入口；不把 GitHub Release、生产升级/回滚或真实设备 E2E 当作已完成的外部结果。Docker/直跑模式的更新仍由外部部署管理。
@@ -25,12 +26,12 @@
 │ (Vue3 精简) │       WebSocket 信令 + HTTP REST API       │ (axum+webrtc-rs) │                        │ redroid/真机  │
 └────────────┘                                            └──────────────────┘                        └──────────────┘
                                                                     │
-                                                                    ├─ 扩展机制：WASM/Native Extension + 能力位 SDK（YAML 自动化、按键映射由官方扩展提供）
+                                                                    ├─ 扩展机制：WASM/Native Extension + 能力位 SDK（YAML 自动化、按键映射、视频工作台由官方扩展提供）
                                                                     ├─ 定时任务：Task = ScheduleProvider + Runner（内置 cron provider）
                                                                     ├─ 模板匹配：NCC + H.264 GOP 帧环（按需 ffmpeg 解码）
-                                                                    ├─ 资源系统：六目录分区存储 + App Package 复合解析
+                                                                    ├─ 资源系统：Package 三元组寻址（packages/<package-id>/plugins/<plugin-id>/）+ 媒体库
                                                                     ├─ 设备管理：adb 直连
-                                                                    └─ 持久化：SQLite + 模板图片
+                                                                    └─ 持久化：SQLite + Package 文件存储
 ```
 
 - **scrcpy-server**：官方开源 jar（锁定 v3.3.3，`server/assets/scrcpy-server.jar`），服务端以 scrcpy
@@ -51,15 +52,19 @@ gamer/
 │   │   ├── device/             # adb 封装 + scrcpy 会话 + ffmpeg 帧缓存
 │   │   ├── webrtc/             # WebRTC peer（H.264 推流 + DataChannel 控制）
 │   │   ├── timer_core.rs       # Timer Core：Task = ScheduleProvider + Runner
-│   │   ├── resources.rs        # ResourceStore：内容无关六目录资源寻址
+│   │   ├── resources.rs        # PackageStore：内容无关 Package 三元组资源寻址
+│   │   ├── media/              # Core 媒体库（导入/探测/精确帧/播放/引用保护）
+│   │   ├── recording/          # Core 录制（scrcpy 帧订阅 + 输入事件 + MP4 封装）
 │   │   ├── capabilities/       # Core 能力位 SDK（device/vision/input/...）
-│   │   ├── extensions/         # 扩展生命周期 + gamer_yaml / keymap 业务扩展
+│   │   ├── extensions/         # 扩展生命周期 + gamer_yaml / keymap / video 业务扩展
 │   │   └── store.rs            # SQLite 持久化（schema v3）
-│   ├── data/                   # 按应用分区的 scripts/functions/templates/keymaps/presets/resources 运行数据 + package.toml
+│   ├── guests/                 # 官方 WASM guest（yaml-guest / keymap-guest）
+│   ├── data/                   # packages/<package-id>/ 运行数据（package.toml + shared/ + plugins/<plugin>/），gitignore
 │   ├── assets/scrcpy-server.jar   # 官方 v3.3.3（仓库自带）
 │   └── Dockerfile              # 仅后端镜像（无前端页；一体化镜像用根 Dockerfile）
 ├── web/                        # Vue3 + Vite 前端（Core 壳 + 插件面板）
 ├── launcher/                   # Windows 完整包 launcher
+├── sdk/                        # 第三方插件 SDK 与示例（免签名开发→打包→安装）
 ├── release/packaging/          # 依赖获取、构包、manifest 与签名脚本
 ├── Dockerfile                  # 推荐：一体化多阶段镜像（pnpm 前端 + Rust 服务端）
 ├── docker-compose.yml          # server + redroid 一键拉起
@@ -191,8 +196,8 @@ docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d
 
   | 内容 | 性质 | 来源 |
   |---|---|---|
-  | `<应用包名>/{scripts,functions,templates,keymaps,presets,resources}/` + `<应用包名>/package.toml` | 业务分区资源与工作区元数据 | 使用中自动创建（gitignore，零业务资源随仓库分发） |
-  | `app-packages/` `user-overrides/` | 已装 App Package / 用户覆盖 | 安装与使用中生成（gitignore） |
+  | `packages/<package-id>/{package.toml,shared/,plugins/<plugin-id>/}` | 业务分区资源与 Package 元数据（插件目录语义归插件：automations/functions/templates/mappings/projects） | 使用中自动创建（gitignore，零业务资源随仓库分发） |
+  | `media/` `extensions/` | 媒体素材库与已装插件 | 导入/录制与插件安装时生成（gitignore） |
   | `gamer.db` | 运行期持久化 | 首次启动自动生成（gitignore） |
   | 其他临时文件 | 运行期产物 | 自动创建（gitignore） |
 
@@ -254,7 +259,7 @@ Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`�
 ## YAML 脚本语法
 
 YAML 自动化脚本为 **v3 唯一版本**（`version: 3`，无旧版兼容与迁移工具），完整语法、参数说明和详细示例见 **[docs/yaml-v3/](docs/yaml-v3/overview.md)** 文档套件（program / params / steps / expressions / call / vision / timing / runtime / examples），单文件正文见 [docs/reference/YAML.md](docs/reference/YAML.md) §3。
-可执行脚本、函数库和模板按应用分区存放在 `data/<应用包名>/{scripts,functions,templates,keymaps,presets,resources}/`（REST 走通用资源 API `/api/apps/:app/resources/:kind`；Console 的模板/自动化面板由 `gamer.yaml` 扩展提供，框选/上传模板即用）。
+可执行脚本、函数库和模板按 Package 存放在 `data/packages/<package-id>/plugins/gamer.yaml/{automations,functions,templates}/`（REST 走通用 Package 资源 API `/api/packages/:pkg/plugins/gamer.yaml/resources[/*path]`；Console 的模板/自动化面板由 `gamer.yaml` 扩展提供，框选/上传模板即用）。
 
 ## API 一览
 
@@ -284,19 +289,20 @@ YAML 自动化脚本为 **v3 唯一版本**（`version: 3`，无旧版兼容与�
 | GET/POST | /api/tasks | 定时任务列表 / 保存（`schedule{provider_id,config}` + `runner{runner_id,entrypoint,payload}`） |
 | POST | /api/tasks/:id/run | 立即执行 |
 | POST | /api/tasks/:id/suspend&#124;resume&#124;cancel&#124;enable&#124;disable | 任务状态操作 |
-| GET/POST/PUT/DELETE | /api/task-presets | 任务预设（App Package 内 `presets/` 安装时自动发布，一键实例化） |
-| GET/POST/PUT/DELETE | /api/apps/:app/resources/:kind[/:id] | 通用资源 CRUD（kind ∈ scripts/functions/templates/keymaps/presets/resources；`expected_version` 乐观并发，模板收 PNG 字节 body；`app` 传 `-` 由 id 自带分区） |
-| POST | /api/capabilities/vision/test | 模板匹配测试 |
-| GET | /api/extensions | 已装扩展列表（含 UI 贡献） |
+| GET/POST | /api/task-presets | 任务预设（Package 内 `plugins/*/presets/` 导入时自动发布，一键实例化） |
+| GET/POST/PUT/DELETE | /api/packages[/:pkg] | Package（配置数据上下文）列表/创建/详情/更新/复制/删除/兼容性 |
+| POST | /api/packages/import | 导入 .gamerpkg/zip（可选 `X-Expected-Sha256` 校验头；已存在 409，`?overwrite=true` 原子替换） |
+| POST | /api/packages/:pkg/export | 导出 .gamerpkg（默认仅媒体引用登记，`?include_media=true` 附素材字节） |
+| GET/POST/PUT/DELETE | /api/packages/:pkg/plugins/:plugin/resources[/*path] | 插件资源三元组 CRUD（文本 JSON / templates PNG 字节；`expected_version` 乐观并发；插件隔离在自己目录内） |
+| POST | /api/capabilities/vision/test | 模板匹配测试（设备截图或 `media_id+pts_us/frame_index` 离线帧，二者互斥） |
+| GET/POST | /api/media[/:id] | 媒体库：导入/列表/详情/删除（被 Package 引用时 409）/引用登记 |
+| GET | /api/media/:id/frames[/:index] | 展示序帧表与按帧索引取帧（`X-Frame-Index`/`X-Frame-Pts-Us` 帧身份头） |
+| POST | /api/recording/start&#124;stop&#124;cancel | 设备录制（服务端权威，浏览器断开不中断；stop/cancel 幂等） |
+| GET | /api/extensions | 已装扩展列表（含 UI 贡献与执行类型 wasm/builtin） |
+| POST | /api/extensions/inspect | 安装前检视（来源标注/权限增量/执行形态；可选 `x-expected-sha256`） |
+| POST | /api/extensions | 安装扩展（免签名；官方来源仅标注，权限确认头必需；安装即启用启动） |
 | POST | /api/extensions/:id/enable&#124;disable&#124;start&#124;stop&#124;activate&#124;update | 扩展生命周期操作（`DELETE /api/extensions/:id/:version` 卸载） |
-| POST | /api/extensions/:id/call | 调用扩展动作（declarative 按钮 / plugin.call） |
-| POST | /api/app-packages/install | 安装 .gamerpkg/zip 归档（可选 `X-Expected-Sha256` 校验头），安装即激活 |
-| GET | /api/app-packages | 已装 App Package 列表（版本、激活版本、SHA-256） |
-| DELETE | /api/app-packages/:id/:version | 卸载指定版本 |
-| POST | /api/app-packages/:id/activate | 激活指定版本 |
-| POST | /api/app-packages/export | 本地编辑区导出为 .gamerpkg（body `{android_package}`） |
-| POST | /api/app-packages/:id/:version/edit | 已装包整体提取到本地编辑区 |
-| GET/PUT | /api/workspace/:android_package | 工作区元数据（package.toml）与六目录资源统计 |
+| POST | /api/extensions/:id/call | 调用扩展动作（declarative 按钮 / plugin.call / native 动作） |
 | GET/DELETE | /api/logs | 运行日志 / 清空 |
 | WS | /ws/device/:id | WebRTC 信令（offer → answer） |
 

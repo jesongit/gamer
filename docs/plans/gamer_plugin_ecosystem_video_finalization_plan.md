@@ -575,3 +575,47 @@ Phase 0  基线核对
 ### 原计划的重要约束
 
 原计划明确不伪造设备、不自动回放一次性操作、不要求所有视频达到 1080p、不恢复旧架构，并要求每阶段保留实际证据。本轮计划只是将插件分发和架构边界的新增决策合并进来，同时继续完成原计划中尚未形成闭环的内容，不以实施合同的简化 V1 范围替代最终产品目标。
+
+---
+
+## 15. 执行状态（2026-09-07，Phase 9 收口回写）
+
+### 15.1 各 Phase 完成状态与关键提交
+
+| Phase | 状态 | 关键提交（main） |
+| --- | --- | --- |
+| 0 基线核对 | DONE | `c4d4bf8`（计划入库 + 基线审计，8 处计划假设偏差修正，`docs/evidence/plugin_ecosystem_phase0_baseline.md`） |
+| 1 免签名 + 市场修复 | DONE | `a925251`（服务端：signature.rs 全删 + `x-expected-sha256`）、`3dac760`（构建链去签 + registry v2 + video 首入市）、`9b6ea9c`（前端免签安装与执行形态展示）、`eae786c`（dev keypair 残留删除） |
+| 2 执行类型/注册表/Bridge | DONE | `a925251`（manifest v2 `[execution]` + `extensions/builtin.rs` 注册表 + UI 贡献仅 Running + host_api 第 9 域 media） |
+| 3 第三方 SDK | DONE | `fdffc75`（sdk/ 三示例 + plugin-dev.md + PLUGIN_API.md）、`6dbc5f1`（缺口1 修复：通用插件带 import 的 async 运行时 trap + 崩溃循环） |
+| 4 官方插件归属收口 | DONE | `4a7439c`（keymap guest 转正 `server/guests/keymap-guest` + 机制层 id 特判收敛边界谓词 + 归属审计）、`92cf82c`（缺口2 修复：录事件来源标注 task-local scope） |
+| 5 媒体/录制收口 | DONE | `7b85745`（展示序帧表 PTS/索引映射 + `/api/media/:id/frames*` + 录制 base_pts_us 时间轴映射 + 前端消灭 33ms 步进）；媒体库/录制本体 V1 在计划前已入库（`f859a7e`/`a1b04c7`） |
+| 6 Video Project/时间轴 | DONE | `d44a959`（projects/*.json 资源 + 标记帧身份 + 校准四级坐标变换 + 工作台三分区重组） |
+| 7 模板/离线测试/草稿闭环 | DONE | `db4d481`（`gamer_yaml/actions.rs` 动作清单唯一声明 + TemplateStudio 定帧建模板 + 草稿可编辑工作流 + `tools/e2e_phase7_offline.sh`） |
+| 8 Package 分发/更新/数据生命周期 | DONE | `58f5f27`（归档 `media/**` 白名单 + include_media 导出 + 媒体引用闭环 + 更新执行类型语义 + keymap profile 门禁去 id 比较） |
+| 9 统一验收/文档/清理 | DONE（2026-09-08） | 本节 + `docs/evidence/phase9_final_acceptance.md` + ADR-15 + AGENTS/README 收口 + api.js registryProof 死代码清理；门禁证据见验收报告 |
+
+### 15.2 与计划的偏差汇总（自各阶段 evidence 提炼）
+
+1. **前端是第二道签名门禁**（Phase 0 偏差1）：计划只点名服务端；实际 `installPolicy`/`canInstallMarket` 在浏览器侧也阻断，Phase 1 前后端同步拆除。
+2. **签名元数据在版本目录文件（signature.sig）而非已安装记录**（偏差2）：state.json 无签名字段，删 verifier 后旧文件死数据静默忽略，零迁移。
+3. **`native_call_action` 特判的是 gamer.yaml 而非 gamer.video**（偏差3）：通用跨插件 RPC 注册表未做，Phase 7 以 `actions.rs` 公开动作清单（版本化唯一声明 + 清单↔分发双向锁测试）代替，覆盖 `template.create_from_frame`/`vision.test_template`/`automation.create_draft`/`automation.save_draft`/`automation.open_editor` 五动作。
+4. **registry 元数据单源化**（偏差4）：build-plugins.ps1 硬编码条目元数据 → signer `inspect --meta-out` 以 manifest.toml 为唯一权威源。
+5. **UI 贡献语义裁决**（偏差6）：Enabled|Running 可见 → **仅 Running**（stop 即撤面板，Enabled 不再出现半启用面板）。
+6. **keymap guest 迁移**：`server/tests/keymap-guest` → `server/guests/keymap-guest`（Phase 4，wasm 代码段逐字节等价、仅符号改名）。
+7. **TemplateStudio 视频域自实现**（Phase 7 偏差1）：TemplateCropModal 与 useConsoleTemplates 裁切子系统深耦合，不直接复用；语义等价（定帧冻结 + generation 校验 + 绝不保存时重抓）。
+8. **host_api 第 9 域 media 补声明入口**（偏差5）：`[host_api] media` 键随 manifest v2 落地。
+9. **视频包发布链重建**（偏差7）：plugin-signer pack 与签名解耦（`--key` 非必填、builtin 包零占位 WASM、`inspect --meta-out`、`verify` 自检），archive/store 的 entry=WASM 假设按执行类型分支。
+10. **通用插件运行时两缺陷**（Phase 3 缺口）：带 host import 的插件 start/call 全链 trap + 进程 abort 崩溃循环（`6dbc5f1` exports default:async + catch_unwind 收敛）；录事件来源恒标 plugin（`92cf82c` task-local 调用方 scope）。
+11. **`media_refs`/`media_total_bytes` 走 `GET /api/packages/:pkg` 详情响应**，未拆独立端点（api/mod.rs 路由一次定型）；详情变重可后续拆。
+12. **sha256/大小为安装完整性主锚**：计划设想的「无签名但保留更强来源证明」未做替代实现，仅 `x-expected-sha256` 可选钉 + registry 条目 sha256（前端官方下载强制）。
+
+### 15.3 NOT_VERIFIED 清单（截至 Phase 9）
+
+- 真机 adb 场景：录制→草稿→真机显式运行全流程、start_app/投屏联动、多 viewer、看门狗交互（无设备环境）。
+- 浏览器实机点检：市场安装全链手动冒烟、视频工作台 UI 人工走查（自动化测试覆盖逻辑层；**由集成者另行执行**）。
+- 真实 GitHub Release 发布与下载链路：仅交付本地产物 + `sha256sums.txt`（可上传），未执行真实发布。
+- 性能基线（§12.2）：录制开关开销、精确帧延迟、并发解码、CPU/内存、磁盘占用、长录基线——均未建立量化数据。
+- Docker/直跑平台矩阵与真实双机 .gamerpkg 媒体分发人工链路。
+- 多指/旋转/黑边素材上的模板制作人工体验（机制有坐标/校准测试覆盖）。
+- `cargo test --release` 与 Linux（CI ubuntu）平台的本地复跑（本机为 Windows；CI 有等效工作流）。

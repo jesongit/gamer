@@ -495,3 +495,21 @@ Core HTTP API 可以提供媒体上传、Range 播放、元数据、精确帧、
 - [ConsoleVideoStage.vue](https://github.com/jesongit/gamer/blob/main/web/src/components/console/ConsoleVideoStage.vue)
 - [TemplateCropModal.vue](https://github.com/jesongit/gamer/blob/main/web/src/components/console/TemplateCropModal.vue)
 - [scrcpy 官方录制说明](https://github.com/Genymobile/scrcpy/blob/master/doc/recording.md)
+
+---
+
+## 13. 最终状态（2026-09-08 回写；证据：docs/evidence/ 各 phase 报告与 docs/evidence/phase9_final_acceptance.md）
+
+本计划与《插件生态简化与视频工作台收尾开发计划》（gamer_plugin_ecosystem_video_finalization_plan.md）合并执行；视频域的 Phase 编号对应关系：本计划 Phase 0-2 ≈ 收尾计划 Phase 5，Phase 3-4 ≈ 收尾计划 Phase 6-7，Phase 5 ≈ 收尾计划 Phase 8，Phase 6 ≈ 收尾计划 Phase 9。逐项状态如下（不改动前文 checkbox 原貌）：
+
+| 计划阶段 | 状态 | 说明（含范围调整） |
+| --- | --- | --- |
+| Phase 0 基线核对与契约设计 | 完成 | 实施合同 `docs/plans/gamer_video_workbench_contracts.md`（2d99821，钉死所有权矩阵/REST/TS 形态）；所有权偏离（api.js 的 exportPackageArchive 传输缝）在 Phase 8 报告记录。范围调整：未新增独立 ADR，职责边界由既有 ADR-11~14 + 架构守卫测试承载 |
+| Phase 1 Core 媒体库与离线帧 | 完成 | f859a7e + 7b85745。范围调整：元数据 = `data/media/<id>/metadata.json` 为源、**不落 SQLite**；「按需工作副本任务/帧租约」未做——原始素材不可变，校准/标记走项目元数据（零转码）；导入失败无半成品（临时目录→探测→原子提交，测试锁定） |
+| Phase 2 Core 录制与操作事件 | 完成（机制）；真机链路 NOT_VERIFIED | a1b04c7 + 92cf82c。按需订阅/等 IDR/分段（断连·编码变化·磁盘压力）/设备独占/重复停止幂等/浏览器断开不中断均有单测；InputObserver 在 `inject_*` 收敛点，operation_id 去重、text 脱敏、来源标注 manual/keymap/runner/plugin；`SegmentMeta.base_pts_us` 实现事件时间轴↔媒体 PTS 整数映射。**真实设备上的录制全流程未实测** |
+| Phase 3 统一舞台与工作台插件 | 完成 | fcdb395 + 0d4e8c4 + dcbfc37 + db4d481。StageSource live/media 双来源、generation 过期防护、媒体模式舞台输入路由统一拒绝、切回实时不恢复旧输入状态（测试锁定）；素材库/时间轴（服务端帧表逐帧，无固定步进假设）/草稿三区+项目区。gamer.video 以 **builtin 执行类型**发布（a925251/58f5f27），免签名安装、卸载后面板消失（UI 贡献仅 Running）、Package 数据保留（dormant 锁定）。范围调整：「工作副本预览」未做；「多浏览器来源独立」未逐项人工验证（NOT_VERIFIED） |
+| Phase 4 模板制作与 YAML 草稿集成 | 完成 | db4d481。模板裁切全面改指定帧工作（媒体=服务端确定帧 + generation 校验，绝不保存时重抓）；`gamer.yaml` 公开动作清单（`gamer_yaml/actions.rs` 版本化唯一声明）：定帧建模板（帧身份+校准元数据上行）/离线测试（复用 vision/test，media_id+pts_us/frame_index）/草稿生成/保存/打开编辑器。范围调整：TemplateStudio 为视频域自实现组件（TemplateCropModal 与裁切子系统深耦合，语义等价不直接复用）；「草稿备注→视频时间点」反向链接未做（正向链接已实现） |
+| Phase 5 Package 分发、可靠性与平台兼容 | 完成（分发）；兼容矩阵/性能基线 NOT_VERIFIED | 58f5f27。默认导出仅媒体引用登记、`?include_media=true` 附素材（90MiB/条 100MiB 预算，逐字节可复现）；媒体引用闭环（登记/解除/包删除 release/duplicate 登记/409 保护/覆盖导入重挂/含素材导入三态 Imported·Reused·Collided）；dormant/覆盖/复制/卸载重装有 REST 测试。**H.264 兼容样本矩阵（720p~4K/竖屏/黑边/旋转实测样本）、FFmpeg 平台发现矩阵、资源占用与长录性能基线未建立**（机制层：VFR/B 帧归一、2M 帧上界、解码并发去重有单测） |
+| Phase 6 端到端验收与收尾 | 完成（无设备 E2E）；真实设备完整流程 NOT_VERIFIED | 无设备 E2E（`tools/e2e_phase7_offline.sh`）GREEN：造视频→导入→帧身份→建模板→离线匹配命中→草稿生成/保存→yaml stop 后动作 409、vision 不受影响；统一验收与文档收口由收尾计划 Phase 9 完成（`docs/evidence/phase9_final_acceptance.md`）。**「模拟操作夹具 + 真实设备录制样本」的完整人工制作流程由集成者在真机环境另行执行** |
+
+关键测试矩阵（§10）中未验证项与剩余问题统一登记在 `docs/evidence/phase9_final_acceptance.md` 的 NOT_VERIFIED 清单与遗留问题表（P1/P2），此处不重复。

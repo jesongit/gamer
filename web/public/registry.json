@@ -1,6 +1,6 @@
 {
     "schema_version":  2,
-    "generated_at":  "2026-09-07T16:51:59Z",
+    "generated_at":  "2026-09-07T19:35:23Z",
     "host_api":  "1.0.0",
     "plugins":  [
                     {
@@ -10,7 +10,7 @@
                         "description":  "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.keymap-1.0.1.gplugin",
-                        "sha256":  "aa5fc1395c3035b22990bc7c18c7a44a683eca540504eba69ba5ee098bcfe5e1",
+                        "sha256":  "f9f998afe1749bdfd543ba99c1524f13831bb34af032985389774b49361a776c",
                         "size":  99230,
                         "permissions":  [
                                             "input.tap",
@@ -48,7 +48,7 @@
                         "description":  "视频工作台：媒体素材库、设备录制与操作草稿生成",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.video-1.0.0.gplugin",
-                        "sha256":  "22086e9ae3ec958e80d15ceec40521a65c347c563c04f103751317d80fa0fda3",
+                        "sha256":  "94d48d7aa418945529b41bb2c8561fb5d262f1a62f2482cca19b5e92f8eef85b",
                         "size":  692,
                         "permissions":  [
                                             "media.read",
@@ -86,7 +86,7 @@
                         "description":  "自动化：YAML v3 脚本、函数库与模板的制作与运行",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.yaml-3.1.1.gplugin",
-                        "sha256":  "692cdae68b96ddb09d65669a1b11e63a4303ce46a2ec1813cfd44c6d2d12e4ee",
+                        "sha256":  "c5369e1b6b0c74048a4895d8a541f3cd9c45f06bd2fd61af88273200d92b613f",
                         "size":  72818,
                         "permissions":  [
                                             "device.read",

@@ -204,21 +204,10 @@ async function req(method, path, body) {
   return readResult(await response(method, path, body))
 }
 
-function base64Utf8(value) {
-  const bytes = new TextEncoder().encode(value)
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary)
-}
-
 function extensionUploadOptions(options = {}) {
   const headers = { 'Content-Type': 'application/zip' }
+  // 免签名安装（Phase 1 收尾）：来源仅作服务端记录，无 proof 头；权限确认仍是唯一安装门禁
   if (options.source === 'official') headers['X-Gamer-Extension-Source'] = 'official'
-  if (options.registryProof) {
-    headers['X-Gamer-Registry-Proof'] = typeof options.registryProof === 'string'
-      ? options.registryProof
-      : base64Utf8(JSON.stringify(options.registryProof))
-  }
   if (options.permissionConfirmed === true) headers['X-Gamer-Permission-Confirm'] = '1'
   return { rawBody: true, headers }
 }
@@ -230,7 +219,7 @@ export const api = {
   listExtensions: () => req('GET', '/api/extensions'),
   listExtensionUi: () => req('GET', '/api/extensions/ui'),
   // Phase 10 插件管理：归档始终以 application/zip 上传，服务端重新验证
-  // 来源、Registry proof、包签名与权限确认；URL 不会作为 iframe 来源传入。
+  // 来源标注与权限确认（免签名，完整性行可选 x-expected-sha256）。
   getExtensionManagement: () => req('GET', '/api/extensions/management'),
   inspectExtension: async (file, options = {}) => {
     const r = await response(
