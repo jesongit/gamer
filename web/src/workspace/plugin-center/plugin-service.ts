@@ -2,9 +2,9 @@ import type {
   ExtensionManagementResponse,
   InstalledPluginSnapshot,
   PluginDependencyRef,
+  PluginExecution,
   PluginInstallSource,
   PluginPermissionSet,
-  PluginSignature,
   PluginSource,
   RegistryPluginVersion,
 } from './types'
@@ -14,7 +14,6 @@ type PluginSourceMetadata = Record<string, {
   kind?: PluginSource
   label?: string
   publisher?: string
-  signature?: PluginSignature
 }>
 
 export function readPluginSourceMetadata(storage: Storage | undefined = globalThis.localStorage): PluginSourceMetadata {
@@ -38,7 +37,6 @@ export function rememberPluginSource(
       kind: source.kind,
       ...(source.label ? { label: source.label } : {}),
       ...(source.publisher ? { publisher: source.publisher } : {}),
-      ...(source.signature ? { signature: source.signature } : {}),
     },
   }
   try { globalThis.localStorage?.setItem(SOURCE_METADATA_KEY, JSON.stringify(next)) } catch { /* 隐私模式下仅保留本次页面状态 */ }
@@ -55,62 +53,29 @@ export function permissionDiff(before: string[] = [], after: string[] = []): Plu
   }
 }
 
-export function normalizeSignature(value: unknown, fallback: PluginSignature['status'] = 'unknown'): PluginSignature {
-  if (!value || typeof value !== 'object') return { status: fallback }
-  const item = value as Record<string, unknown>
-  return {
-    status: String(item.status || fallback),
-    ...(item.key_id ? { key_id: String(item.key_id) } : {}),
-    ...(item.algorithm ? { algorithm: String(item.algorithm) } : {}),
-    ...(item.verified_at ? { verified_at: String(item.verified_at) } : {}),
-    ...(item.value ? { value: String(item.value) } : {}),
-    ...(item.signature ? { signature: String(item.signature) } : {}),
-  }
-}
-
-/** Build the signed Registry claim sent to the server-side install gate. */
 /**
- * Build the signed Registry claim sent to the server-side install gate.
- *
- * 两种签名形态（与 signer 产物对齐）：
- * - `value`：signer 输出的完整 `base64(RegistryProof JSON)` 信封——原样透传
- *   字符串即可（api.js 对 string 不再包装；服务端 `from_base64` 直接吃这个形态）。
- * - 仅 `signature`（纯 64 字节签名 base64）：返回对象，由 api.js 序列化打包。
+ * 执行形态归一：显式 builtin 才按宿主预置处理；缺失/v1 条目/未知值一律 wasm
+ * （与 registry-client 读端容错一致）。
  */
-export function registryProofFor(
-  entry?: RegistryPluginVersion,
-): string | {
-  id: string
-  version: string
-  download_url: string
-  sha256: string
-  key_id: string
-  signature: string
-} | null {
-  const signature = normalizeSignature(entry?.signature)
-  if (!entry?.id || !entry.version || !entry.download_url || !entry.sha256 || !signature.key_id) {
-    return null
-  }
-  if (signature.value) return signature.value
-  if (!signature.signature) return null
+export function normalizeExecution(value: unknown): PluginExecution {
+  const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const kind = String(raw.kind || '').trim().toLowerCase()
+  const hostVersion = String(raw.host_version || '').trim()
   return {
-    id: entry.id,
-    version: entry.version,
-    download_url: entry.download_url,
-    sha256: entry.sha256.toLowerCase(),
-    key_id: signature.key_id,
-    signature: signature.signature,
+    kind: kind === 'builtin' ? 'builtin' : 'wasm',
+    ...(hostVersion ? { host_version: hostVersion } : {}),
   }
 }
 
-export function signatureLabel(signature: unknown): string {
-  switch (normalizeSignature(signature).status) {
-    case 'valid': return '已签名 · 已验证'
-    case 'unverified': return '已签名 · 未验证'
-    case 'unsigned': return '未签名'
-    case 'invalid': return '签名无效'
-    default: return '签名状态未知'
-  }
+export function executionLabel(value: unknown): string {
+  return normalizeExecution(value).kind === 'builtin'
+    ? '宿主预置（需要 Gamer 宿主支持）'
+    : 'WASM 插件'
+}
+
+/** 宿主版本要求展示文案；缺失返回空串（UI 不显示该行）。 */
+export function hostVersionLabel(value: unknown): string {
+  return normalizeExecution(value).host_version || ''
 }
 
 export function sourceLabel(source: PluginSource = 'unknown'): string {
@@ -191,27 +156,66 @@ export function mergeManagementResponse(
       ...item,
       source: item.source && item.source !== 'unknown' ? item.source : remembered.kind || market?.source || 'unknown',
       publisher: item.publisher || remembered.publisher || market?.publisher,
-      signature: item.signature?.status && item.signature.status !== 'unknown'
-        ? item.signature
-        : remembered.signature || market?.signature || { status: 'unknown' },
+      execution: item.execution || market?.execution,
       dependencies: item.dependencies?.length ? item.dependencies : dependencyRefsFor(market),
       dependent,
     }
   })
 }
 
-export function installPolicy(source: PluginInstallSource, signature: unknown = source.signature) {
-  const normalized = normalizeSignature(signature, source.kind === 'local' || source.kind === 'url' ? 'unsigned' : 'unknown')
+/**
+ * 安装策略（Phase 1 无强制签名单一模型）：任何来源都允许安装，签名/proof 不再
+ * 参与门禁；完整性与兼容性由 SHA-256、manifest 校验、权限确认与服务端宿主注册表
+ * 分别承担。非官方来源仅产生「请确认来源与权限」的提示性警告。
+ */
+export function installPolicy(source: PluginInstallSource) {
   const official = source.kind === 'official'
   return {
-    allowed: !(official && normalized.status !== 'valid'),
-    requiresWarning: normalized.status !== 'valid' || source.kind !== 'official',
-    signature: normalized,
-    warning: official && normalized.status !== 'valid'
-      ? '官方插件签名未通过验证，已阻止安装。'
-      : normalized.status !== 'valid'
-        ? '来源未知或未签名。安装前请确认插件发布者与请求权限。'
-        : '',
+    allowed: true,
+    requiresWarning: !official,
+    warning: official ? '' : '来源非官方市场。安装前请确认插件发布者与请求权限。',
+  }
+}
+
+/**
+ * 安装/下载链路错误分型（计划 §4.3）：把机器错误码翻成可理解、可行动的人话提示；
+ * 未识别的错误原样透传服务端 message。哈希错误明确「不污染已装版本」；
+ * host_feature_unavailable 明确指向「升级 Gamer」而不是可反复重试的无意义报错。
+ */
+export function installErrorText(errorValue: unknown): string {
+  const error = errorValue as { code?: unknown; status?: unknown; message?: unknown; name?: unknown } | null
+  const message = String(error?.message || '')
+  // registry-client 抛出的 RegistryError 文案已面向用户（含插件 id/版本与行动指引），直接采用
+  if (error?.name === 'RegistryError' && message) return message
+  const code = String(error?.code || '')
+  switch (code) {
+    case 'registry_network_error':
+    case 'registry_http_error':
+      return '插件市场暂时不可用，请检查网络后刷新重试。'
+    case 'download_network_error':
+      return '插件下载失败：网络错误或超时，请检查网络后重试。'
+    case 'download_not_found':
+      return '插件安装包在发布源不存在（404），该版本可能已下架。'
+    case 'download_http_error':
+      return `插件下载失败（HTTP ${String(error?.status ?? '')}），请稍后重试。`
+    case 'hash_mismatch':
+      return '下载文件与索引不一致（SHA-256 校验失败）：已拒绝安装，不污染已装版本。'
+    case 'missing_hash':
+      return '该市场条目缺少固定版本 SHA-256，无法校验完整性，已阻止下载。'
+    case 'archive_too_large':
+    case 'empty_archive':
+      return '插件归档无效或超过 20 MiB 限制，已拒绝安装。'
+    case 'invalid_registry':
+    case 'unsupported_registry':
+      return '插件市场索引无效或不受支持：请更新 Gamer 后重试。'
+    case 'host_feature_unavailable':
+      return '该插件需要更新的 Gamer 宿主支持：请升级 Gamer 到新版本后再安装，重试当前版本不会成功。'
+    case 'permission_confirmation_required':
+      return '插件权限变更需要先在安装确认框中勾选确认。'
+    case 'already_installed':
+      return '该版本已安装，无需重复安装。'
+    default:
+      return String(error?.message || errorValue || '操作失败')
   }
 }
 

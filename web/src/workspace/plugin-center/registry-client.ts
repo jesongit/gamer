@@ -1,6 +1,9 @@
-import type { PluginRegistryDocument, RegistryPluginVersion } from './types'
+import type { PluginExecution, PluginRegistryDocument, RegistryPluginVersion } from './types'
 
-export const REGISTRY_SCHEMA_VERSION = 1
+/** 当前产出侧 schema（Phase 1 起为 2：条目带 execution、无 signature）。 */
+export const REGISTRY_SCHEMA_VERSION = 2
+/** 读端容忍的历史 schema：v1 条目无 execution 视为 wasm、有 signature 忽略。 */
+const SUPPORTED_REGISTRY_SCHEMA_VERSIONS = [1, 2]
 export const DEFAULT_REGISTRY_URL = '/registry.json'
 export const MAX_PLUGIN_ARCHIVE_BYTES = 20 * 1024 * 1024
 
@@ -22,16 +25,14 @@ function text(value: unknown, field: string, required = true): string {
   return output
 }
 
-function normaliseSignature(value: unknown) {
-  if (!value || typeof value !== 'object') return undefined
-  const signature = value as Record<string, unknown>
+function normaliseExecution(value: unknown): PluginExecution {
+  const raw = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const kind = String(raw.kind || '').trim().toLowerCase()
+  const hostVersion = String(raw.host_version || '').trim()
   return {
-    status: text(signature.status, 'signature.status'),
-    ...(signature.key_id ? { key_id: String(signature.key_id) } : {}),
-    ...(signature.algorithm ? { algorithm: String(signature.algorithm) } : {}),
-    ...(signature.verified_at ? { verified_at: String(signature.verified_at) } : {}),
-    ...(signature.value ? { value: String(signature.value) } : {}),
-    ...(signature.signature ? { signature: String(signature.signature) } : {}),
+    // v1 条目/缺失字段一律按 wasm 处理；builtin 必须显式声明。
+    kind: kind === 'builtin' ? 'builtin' : 'wasm',
+    ...(hostVersion ? { host_version: hostVersion } : {}),
   }
 }
 
@@ -39,7 +40,7 @@ export function normalizeRegistry(input: unknown): PluginRegistryDocument {
   if (!input || typeof input !== 'object') throw new RegistryError('invalid_registry', 'registry 必须是 JSON 对象')
   const raw = input as Record<string, unknown>
   const schemaVersion = Number(raw.schema_version ?? raw.version ?? 0)
-  if (schemaVersion !== REGISTRY_SCHEMA_VERSION) {
+  if (!SUPPORTED_REGISTRY_SCHEMA_VERSIONS.includes(schemaVersion)) {
     throw new RegistryError('unsupported_registry', `registry schema_version=${schemaVersion} 不受支持`)
   }
   const rawPlugins = Array.isArray(raw.plugins) ? raw.plugins : Array.isArray(raw.extensions) ? raw.extensions : null
@@ -69,7 +70,8 @@ export function normalizeRegistry(input: unknown): PluginRegistryDocument {
       download_url: downloadUrl,
       ...(value.sha256 ? { sha256: String(value.sha256).toLowerCase() } : {}),
       ...(value.size !== undefined ? { size: Number(value.size) } : {}),
-      ...(normaliseSignature(value.signature) ? { signature: normaliseSignature(value.signature) } : {}),
+      // signature 字段（v1 遗留）存在则忽略：安装完整性只依赖 sha256。
+      execution: normaliseExecution(value.execution),
       ...(Array.isArray(value.permissions) ? { permissions: value.permissions.map(String) } : {}),
       ...(value.host_api && typeof value.host_api === 'object' ? { host_api: value.host_api as Record<string, string> } : {}),
       ...(Array.isArray(value.dependencies) ? { dependencies: value.dependencies as never } : {}),
@@ -79,7 +81,7 @@ export function normalizeRegistry(input: unknown): PluginRegistryDocument {
     }
   })
   return {
-    schema_version: REGISTRY_SCHEMA_VERSION,
+    schema_version: schemaVersion,
     ...(raw.generated_at ? { generated_at: String(raw.generated_at) } : {}),
     ...(raw.host_api ? { host_api: String(raw.host_api) } : {}),
     plugins,
@@ -163,13 +165,19 @@ export async function downloadFixedVersion(
   const fetchImpl = options.fetchImpl || globalThis.fetch
   let response: Response
   try { response = await fetchImpl(entry.download_url, { headers: { Accept: 'application/octet-stream' } }) } catch (error) {
-    throw new RegistryError('download_network_error', `插件下载失败：${String((error as Error)?.message || error)}`)
+    throw new RegistryError('download_network_error', `插件下载失败：网络错误或超时（${String((error as Error)?.message || error)}）`)
   }
-  if (!response.ok) throw new RegistryError('download_http_error', `插件下载返回 HTTP ${response.status}`)
+  if (!response.ok) {
+    if (response.status === 404) {
+      throw new RegistryError('download_not_found', `插件 ${entry.id}@${entry.version} 的安装包在发布源不存在（404），该版本可能已下架`)
+    }
+    throw new RegistryError('download_http_error', `插件下载返回 HTTP ${response.status}`)
+  }
   const bytes = await archiveBytes(response)
   const digest = await sha256Hex(bytes)
   if (options.verifyHash !== false && entry.sha256 && digest.toLowerCase() !== entry.sha256.toLowerCase()) {
-    throw new RegistryError('hash_mismatch', `插件 ${entry.id}@${entry.version} SHA-256 校验失败`)
+    // 哈希只证明「文件与索引一致」，不证明发布者身份；不一致即拒装且不影响已装版本。
+    throw new RegistryError('hash_mismatch', `插件 ${entry.id}@${entry.version} 文件与索引不一致（SHA-256 校验失败）：已拒绝安装，不污染已装版本`)
   }
   return { bytes, sha256: digest, file: new Blob([toOwnedBuffer(bytes)], { type: 'application/zip' }) }
 }

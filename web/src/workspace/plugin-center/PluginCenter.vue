@@ -32,12 +32,14 @@
                 <div class="plugin-title-row">
                   <h3>{{ entry.name }}</h3>
                   <span class="tag info">{{ entry.version }}</span>
-                  <span v-if="entry.signature" class="tag" :class="signatureClass(entry.signature)">{{ signatureLabel(entry.signature) }}</span>
+                  <span class="tag" :class="entry.execution?.kind === 'builtin' ? 'warn' : ''">{{ executionLabel(entry.execution) }}</span>
+                  <span v-if="installedVersion(entry.id)" class="tag ok">已安装 v{{ installedVersion(entry.id) }}</span>
                 </div>
                 <div class="plugin-meta"><code>{{ entry.id }}</code><span>{{ entry.publisher || '发布者未声明' }}</span></div>
                 <p class="plugin-description">{{ entry.description || '暂无描述。' }}</p>
                 <div class="plugin-facts">
                   <span>来源：官方市场</span>
+                  <span v-if="hostVersionLabel(entry.execution)">宿主版本要求：{{ hostVersionLabel(entry.execution) }}</span>
                   <span>权限：{{ (entry.permissions || []).length ? entry.permissions.join('、') : '无' }}</span>
                   <span>UI：{{ uiType(entry) }}</span>
                 </div>
@@ -49,7 +51,7 @@
                 <button class="btn btn-sm btn-primary" type="button" :disabled="busy || !canInstallMarket(entry)" @click="installMarket(entry)">
                   {{ installedVersion(entry.id) ? '更新' : '安装' }}
                 </button>
-                <span v-if="!canInstallMarket(entry)" class="action-hint">{{ entry.sha256 ? '签名未验证' : '缺少固定 hash' }}</span>
+                <span v-if="!canInstallMarket(entry)" class="action-hint">缺少固定 SHA-256，无法安全下载</span>
               </div>
             </article>
           </template>
@@ -69,7 +71,7 @@
                 </div>
                 <div class="plugin-meta"><code>{{ plugin.id }}</code><span>来源：{{ sourceLabel(plugin.source) }}</span><span>{{ plugin.publisher || '发布者未知' }}</span></div>
                 <div class="plugin-facts">
-                  <span>签名：{{ signatureLabel(plugin.signature) }}</span>
+                  <span>执行形态：{{ executionLabel(plugin.execution) }}</span>
                   <span>权限：{{ (plugin.permissions || []).length ? plugin.permissions.join('、') : '无' }}</span>
                   <span>已保留版本：{{ (plugin.installed_versions || []).join('、') || '无' }}</span>
                 </div>
@@ -110,7 +112,7 @@
           <template v-else-if="tab === 'local'">
             <div class="import-pane">
               <h3>本地导入</h3>
-              <p>选择 <code>.gplugin</code> 文件。未签名包允许继续，但会显著标记来源未知、发布者未知和请求权限。</p>
+              <p>选择 <code>.gplugin</code> 文件。本地导入不要求签名；安装前会展示插件 ID、执行形态、权限与来源供确认。</p>
               <label class="file-picker btn btn-primary">
                 选择 .gplugin
                 <input ref="fileInput" type="file" accept=".gplugin,.zip,application/zip" @change="onLocalFile" />
@@ -127,7 +129,7 @@
                 <input v-model.trim="url" class="input" type="url" placeholder="https://example.com/plugin.gplugin" @keyup.enter="onUrlImport" />
                 <button class="btn btn-primary" type="button" :disabled="busy || !url" @click="onUrlImport">下载并安装</button>
               </div>
-              <div class="plugin-alert warning">URL 导入通常没有官方签名，请在确认框中核对发布者、权限与来源。</div>
+              <div class="plugin-alert warning">URL 导入来源不属于官方市场，请在确认框中核对发布者、权限与来源。</div>
             </div>
           </template>
         </div>
@@ -140,7 +142,24 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api'
 import { compareVersions, downloadDirectUrl, downloadFixedVersion, fetchRegistry, findRegistryPlugin } from './registry-client'
-import { activateVersionErrorText, activateVersionPrompt, dependencyRefsFor, dependencyStatus, installPolicy, installSummary, lifecyclePrompt, mergeManagementResponse, readPluginSourceMetadata, rememberPluginSource, registryProofFor, signatureLabel, sourceLabel as sourceText, uninstallPrompt } from './plugin-service'
+import {
+  activateVersionErrorText,
+  activateVersionPrompt,
+  dependencyRefsFor,
+  dependencyStatus,
+  executionLabel,
+  hostVersionLabel,
+  installErrorText,
+  installPolicy,
+  installSummary,
+  lifecyclePrompt,
+  mergeManagementResponse,
+  normalizeExecution,
+  readPluginSourceMetadata,
+  rememberPluginSource,
+  sourceLabel as sourceText,
+  uninstallPrompt,
+} from './plugin-service'
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -218,8 +237,9 @@ function marketUpdate(plugin) {
   return entry
 }
 function canInstallMarket(entry) {
-  return !!registryProofFor(entry)
-    && installPolicy({ kind: 'official', signature: entry.signature, registryEntry: entry }).allowed
+  // 官方固定版本下载强制 SHA-256（registry-client downloadFixedVersion 门禁）；
+  // 签名/proof 不再参与安装决策，builtin 包同样走下载校验 + 服务端宿主注册表门禁。
+  return !!entry?.sha256
 }
 function uiType(entry) {
   const contributions = entry.ui?.contributions
@@ -235,10 +255,6 @@ function dependencyState(plugin) {
 function dependentItems(plugin) {
   const dependent = plugin.dependent || {}
   return [...(dependent.app_packages || []), ...(dependent.tasks || []), ...(dependent.workflows || [])]
-}
-function signatureClass(value) {
-  const status = value?.status
-  return status === 'valid' ? 'ok' : status === 'invalid' ? 'err' : 'warn'
 }
 function stateClass(state) { return state === 'running' ? 'run' : state === 'enabled' ? 'ok' : state === 'failed' ? 'err' : 'warn' }
 function stateLabel(state) { return ({ installed: '已安装', enabled: '已启用', running: '运行中', disabled: '已停用', failed: '失败' })[state] || state || '未知' }
@@ -259,16 +275,23 @@ async function inspectAndConfirm(file, source, current, providedInspection = nul
   }
   const requestedPermissions = inspection.permissions || entry?.permissions || []
   const summary = installSummary(source, current, requestedPermissions)
-  const policy = installPolicy(source, source.signature || inspection.signature)
-  if (!policy.allowed) throw new Error(policy.warning)
+  const policy = installPolicy(source)
+  // 执行形态以服务端 inspect 结果为准（包内真实 manifest），registry 条目兜底；
+  // host_version 缺失不展示。普通用户界面不出现密钥/签名/proof 概念。
+  const execution = normalizeExecution(inspection.execution || source.execution || entry?.execution)
+  const hostVersion = execution.host_version || ''
   const title = current ? '确认更新插件' : '确认安装插件'
   const details = [
-    `${title}：${inspection.name || inspection.id}@${inspection.version}`,
-    `来源：${sourceLabel(source.kind)}${source.publisher ? `；发布者：${source.publisher}` : '；发布者未知'}`,
-    `签名：${signatureLabel(policy.signature)}`,
+    `${title}：${inspection.name || inspection.id}`,
+    `ID：${inspection.id}`,
+    `版本：${inspection.version}`,
+    `来源：${sourceLabel(source.kind)}${source.publisher ? `；发布者：${source.publisher}` : ''}`,
+    `执行形态：${executionLabel(execution)}`,
+    ...(hostVersion ? [`宿主版本要求：${hostVersion}`] : []),
+    `权限：${requestedPermissions.length ? requestedPermissions.join('、') : '无'}`,
     formatPermissionDiff(summary.diff),
   ]
-  if (source.kind !== 'official' || summary.diff.added.length || policy.requiresWarning) {
+  if (policy.requiresWarning || summary.diff.added.length) {
     details.push('请确认来源与权限后继续。')
   }
   if (!globalThis.confirm(details.join('\n'))) return null
@@ -276,9 +299,8 @@ async function inspectAndConfirm(file, source, current, providedInspection = nul
 }
 
 async function installArchive(file, source, current) {
-  const uploadOptions = source.kind === 'official'
-    ? { source: 'official', registryProof: registryProofFor(source.registryEntry) }
-    : {}
+  // official 来源只用于服务端来源记录（审计/更新判断），不再触发签名/proof 门禁。
+  const uploadOptions = source.kind === 'official' ? { source: 'official' } : {}
   const inspection = await props.apiClient.inspectExtension(file, uploadOptions)
   const existing = current || installedPlugin(inspection.id)
   const result = await inspectAndConfirm(file, source, existing, inspection)
@@ -292,15 +314,16 @@ async function installArchive(file, source, current) {
   if (!existing || existing.state !== 'disabled') {
     if (snapshot?.state === 'installed') await props.apiClient.enableExtension(snapshot.id || result.inspection.id)
   }
-  notice.value = `${result.inspection.name || result.inspection.id}@${result.inspection.version} 已${existing ? '更新' : '安装'}。`
   emit('changed')
   await refresh()
+  // notice 放在 refresh 之后：refresh 内部 clearMessages 会清掉先行的提示（同 activateVersion）
+  notice.value = `${result.inspection.name || result.inspection.id}@${result.inspection.version} 已${existing ? '更新' : '安装'}。`
   return true
 }
 
 async function installMarket(entry, current = installedPlugin(entry.id)) {
   if (!canInstallMarket(entry)) {
-    error.value = '官方插件必须具备已验证签名，当前版本已阻止安装。'
+    error.value = '该市场条目缺少固定版本 SHA-256，无法校验完整性，已阻止下载。'
     return
   }
   busy.value = true
@@ -308,9 +331,9 @@ async function installMarket(entry, current = installedPlugin(entry.id)) {
   try {
     const downloaded = await downloadFixedVersion(entry)
     await installArchive(downloaded.file, {
-      kind: 'official', label: '官方市场', publisher: entry.publisher, signature: entry.signature, registryEntry: entry,
+      kind: 'official', label: '官方市场', publisher: entry.publisher, execution: entry.execution, registryEntry: entry,
     }, current)
-  } catch (errorValue) { error.value = messageFor(errorValue) } finally { busy.value = false }
+  } catch (errorValue) { error.value = installErrorText(errorValue) } finally { busy.value = false }
 }
 
 async function onLocalFile(event) {
@@ -320,8 +343,8 @@ async function onLocalFile(event) {
   busy.value = true
   clearMessages()
   try {
-    await installArchive(file, { kind: 'local', label: '本地文件', signature: { status: 'unsigned' } }, installedPlugin(''))
-  } catch (errorValue) { error.value = messageFor(errorValue) } finally {
+    await installArchive(file, { kind: 'local', label: '本地文件' }, installedPlugin(''))
+  } catch (errorValue) { error.value = installErrorText(errorValue) } finally {
     busy.value = false
     event.target.value = ''
   }
@@ -332,9 +355,9 @@ async function onUrlImport() {
   clearMessages()
   try {
     const downloaded = await downloadDirectUrl(url.value)
-    await installArchive(downloaded.file, { kind: 'url', label: url.value, signature: { status: 'unsigned' } }, undefined)
+    await installArchive(downloaded.file, { kind: 'url', label: url.value }, undefined)
     url.value = ''
-  } catch (errorValue) { error.value = messageFor(errorValue) } finally { busy.value = false }
+  } catch (errorValue) { error.value = installErrorText(errorValue) } finally { busy.value = false }
 }
 
 async function runAction(action, plugin) {

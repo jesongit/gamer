@@ -1,14 +1,13 @@
 export type PluginSource = 'official' | 'local' | 'url' | 'unknown'
-export type SignatureStatus = 'valid' | 'unsigned' | 'invalid' | 'unknown' | 'unverified'
 
-export interface PluginSignature {
-  status: SignatureStatus | string
-  key_id?: string
-  algorithm?: string
-  verified_at?: string
-  /** Detached Ed25519 value for official Registry proof or package metadata. */
-  value?: string
-  signature?: string
+/**
+ * 后端执行类型（Phase 1 契约）：kind = "wasm"（受控 WASM guest）| "builtin"（宿主预置实现）。
+ * registry v1 条目/缺失字段按 wasm 处理；builtin 需要宿主注册表支持（服务端 host_feature_unavailable 门禁）。
+ */
+export interface PluginExecution {
+  kind: 'wasm' | 'builtin'
+  /** 宿主版本要求（如 ">=1.3.0"）；缺失表示无额外要求，UI 不展示。 */
+  host_version?: string
 }
 
 export interface PluginPermissionSet {
@@ -35,7 +34,7 @@ export interface RegistryPluginVersion {
   download_url: string
   sha256?: string
   size?: number
-  signature?: PluginSignature
+  execution: PluginExecution
   permissions?: string[]
   host_api?: Record<string, string> | string
   dependencies?: PluginDependencyRef[]
@@ -65,7 +64,7 @@ export interface InstalledPluginSnapshot {
   ui?: Array<Record<string, unknown>>
   source?: PluginSource
   publisher?: string
-  signature?: PluginSignature
+  execution?: PluginExecution
   dependencies?: PluginDependencyRef[]
   dependent?: {
     app_packages?: PluginDependencyRef[]
@@ -90,7 +89,7 @@ export interface PluginInspection {
   archive_sha256?: string
   source?: PluginSource
   publisher?: string
-  signature?: PluginSignature
+  execution?: PluginExecution
   permissions?: string[]
   host_api?: Record<string, string>
   ui?: Array<Record<string, unknown>>
@@ -102,6 +101,6 @@ export interface PluginInstallSource {
   kind: Exclude<PluginSource, 'unknown'>
   label?: string
   publisher?: string
-  signature?: PluginSignature
+  execution?: PluginExecution
   registryEntry?: RegistryPluginVersion
 }

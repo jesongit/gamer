@@ -20,6 +20,7 @@
           <span class="market-ext-name">{{ ext.name || ext.id }}</span>
           <span class="mono">{{ ext.id }}</span>
           <span class="mono">v{{ ext.active_version || ext.version || '?' }}</span>
+          <span class="market-state" :class="ext.execution?.kind === 'builtin' ? 'warn' : ''">{{ extExecutionLabel(ext) }}</span>
           <span class="market-state" :class="extStateClass(ext.state)">{{ extStateLabel(ext.state) }}</span>
         </div>
       </div>
@@ -131,6 +132,13 @@ const EXT_STATES = {
 }
 function extStateLabel(state) { return EXT_STATES[state]?.label || state || '未知' }
 function extStateClass(state) { return EXT_STATES[state]?.cls || '' }
+// 执行形态（Phase 1 契约）：服务端 snapshot 带 execution 时如实展示（builtin =
+// 宿主预置，需要 Gamer 宿主支持）；缺失（旧快照）按 WASM 展示，不阻塞列表。
+function extExecutionLabel(ext) {
+  return ext.execution?.kind === 'builtin'
+    ? (ext.execution?.host_version ? `宿主预置 · ${ext.execution.host_version}` : '宿主预置')
+    : 'WASM 插件'
+}
 
 // ---------- 远端 Package 源（registry.json 相对路径裸 fetch；禁改 registry.json 本身） ----------
 const REMOTE_REGISTRY_URL = 'registry.json'
