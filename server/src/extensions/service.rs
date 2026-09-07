@@ -252,11 +252,15 @@ impl ExtensionService {
 
     /// 是否按调用执行（无常驻实例）。组合根注册的 registrar 是唯一权威——
     /// 它拥有各扩展 runner 的构造方式，因此也拥有该扩展执行模型的声明；
-    /// 未挂 registrar 的最小装配一律按常驻实例模型处理。
+    /// 未挂 registrar 的最小装配一律按常驻实例模型处理。Native 机制扩展
+    /// （`gamer.video`，无 guest/无 Runner）的「按调用执行」由本层直接声明：
+    /// start 只表示进入 Running 以点亮 UI 贡献与 call 通路。
     fn instance_free(&self, id: &ExtensionId) -> bool {
-        self.runner_registrar
-            .as_ref()
-            .is_some_and(|registrar| registrar.executes_without_instance(id.as_str()))
+        super::video::is_native_extension(id)
+            || self
+                .runner_registrar
+                .as_ref()
+                .is_some_and(|registrar| registrar.executes_without_instance(id.as_str()))
     }
 
     /// Resolve the active-version guest bytes and host API for an extension
@@ -330,6 +334,18 @@ impl ExtensionService {
     ) -> ExtensionResult<serde_json::Value> {
         if action.trim().is_empty() {
             return Err(ExtensionError::CallRejected("action 不能为空".into()));
+        }
+        // Native 扩展动作（视频工作台实施合同 §5）：动作由扩展边界原生实现时
+        // （gamer.yaml `automation.create_draft`），不经 declarative 按钮集合与
+        // 常驻实例；Running 状态要求与通用路径一致。生命周期锁只护状态查询，
+        // 原生动作本体在锁外执行。
+        if let Some(native) = super::native_call_action(id, action, &values, self.store.data_root())
+        {
+            let snapshot = self.snapshot_for(id)?;
+            if snapshot.state() != ExtensionState::Running {
+                return Err(invalid_transition(id, "call", snapshot.state()));
+            }
+            return native;
         }
         let (handle, runtime) = {
             let snapshot = self.snapshot_for(id)?;

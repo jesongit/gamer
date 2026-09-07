@@ -28,6 +28,9 @@ mod service;
 mod signature;
 mod store;
 mod ui;
+/// gamer.video Native 扩展（视频工作台，实施合同 §5）：manifest 常量 +
+/// Native 生命周期判定；无 guest、无 Runner。
+pub(crate) mod video;
 mod wasm;
 mod wit;
 
@@ -67,7 +70,25 @@ pub(crate) use signature::{
 };
 pub(crate) use store::{ExtensionStore, InstalledExtension};
 pub(crate) use ui::{RegisteredUiContribution, UiContributionRegistry};
+pub(crate) use video::{is_native_extension, VIDEO_EXTENSION_ID};
 pub(crate) use wasm::{NoWasmRuntime, WasmInstanceHandle, WasmRuntime, WasmStartRequest};
+
+/// Native 扩展 call 动作分发缝（视频工作台实施合同 §5）：`POST
+/// /api/extensions/:id/call` 的动作若由某个扩展边界**原生实现**（按调用执行
+/// 模型，无常驻实例、无 declarative 按钮集合），在此分发；返回 `None` 表示
+/// 该 id/action 没有原生动作，调用方走通用 declarative/常驻实例路径。
+///
+/// `data_dir` = 应用数据目录（与组合根 `for_data_root` 同源），供原生动作
+/// 装配进程级 Core 服务单例（如 `crate::recording::service`）。状态校验
+/// （必须 Running）由调用方（`service.rs::call_extension`）统一执行。
+pub(crate) fn native_call_action(
+    id: &ExtensionId,
+    action: &str,
+    values: &serde_json::Value,
+    data_dir: &std::path::Path,
+) -> Option<ExtensionResult<serde_json::Value>> {
+    gamer_yaml::native_call_action(id.as_str(), action, values, data_dir)
+}
 
 #[cfg(feature = "wasm-runtime")]
 pub(crate) use keymap::LazyKeymapWasmRuntime;

@@ -1,0 +1,23 @@
+manifest_version = 1
+id = "gamer.video"
+version = "1.0.0"
+name = "Video Workbench"
+description = "Media library, device recording, and draft requests for the video workbench"
+entry = "plugin.wasm"
+permissions = ["media.read", "media.import", "media.record", "media.write", "media.events.read"]
+
+# Native 机制扩展：无 [host_api] 声明（不携带 guest、不经 WIT 消费 Host API；
+# 媒体/录制能力由 Core 进程内服务承载）。
+
+[[ui.contributions]]
+# runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端
+# core-component-registry 解释（VideoWorkbench = 视频工作台面板）。
+panel_id = "video"
+title = "视频"
+icon = "🎬"
+order = 28
+location = "console.right"
+runtime = "core"
+requires_device = false
+preferred_width = 440
+component = "VideoWorkbench"

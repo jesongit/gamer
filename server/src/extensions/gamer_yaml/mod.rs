@@ -12,6 +12,7 @@
 //!   脚本统一报版本错误，无 fallback；
 //! - [`timer_yaml`]：Timer Core 的 gamer.yaml runner + 扩展生命周期注册器；
 //! - [`task_params`]：定时任务参数快照与 psig1 签名门禁（v3 参数桥）；
+//! - [`video_draft`]：视频工作台草稿动作（`automation.create_draft`，合同 §5）；
 //! - [`wasm_host`]：YAML world 的 Wasmtime 宿主（feature = "wasm-runtime"）。
 //!
 //! 依赖方向（§16）：本模块 → Core（device / matcher / capabilities / timer_core /
@@ -26,12 +27,14 @@ pub(crate) mod run_target;
 pub(crate) mod runner_adapter;
 pub(crate) mod task_params;
 pub(crate) mod timer_yaml;
+pub(crate) mod video_draft;
 pub(crate) mod yaml_extension;
 pub(crate) mod yaml_vnext;
 
 pub(crate) use runner_adapter::{yaml_start_request, EngineExecutor};
 pub(crate) use resources::register_resource_handlers;
 pub(crate) use timer_yaml::{YamlTimerRunner, YamlTimerRunnerRegistrar};
+pub(crate) use video_draft::native_call_action;
 pub(crate) use yaml_extension::{
     YamlProgramResolver, YAML_EXTENSION_ID, YAML_EXTENSION_MANIFEST_TOML,
 };
