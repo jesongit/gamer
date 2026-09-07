@@ -37,8 +37,8 @@ pub(crate) fn is_native_extension(id: &crate::extensions::ExtensionId) -> bool {
 pub const VIDEO_EXTENSION_MANIFEST_TOML: &str = r#"manifest_version = 1
 id = "gamer.video"
 version = "1.0.0"
-name = "Video Workbench"
-description = "Media library, device recording, and draft requests for the video workbench"
+name = "视频工作台"
+description = "视频工作台：媒体素材库、设备录制与操作草稿生成"
 entry = "plugin.wasm"
 permissions = ["media.read", "media.import", "media.record", "media.write", "media.events.read"]
 

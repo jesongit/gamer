@@ -33,7 +33,7 @@ const REGISTRY_CLAIM_MAGIC: &str = "gamebot-gplugin-registry-entry-1";
 /// `<data>/plugin-trust`）覆盖该锚，换用独立发布 keypair。
 const BUNDLED_DEV_KEY_ID: &str = "gamer-dev-1";
 const BUNDLED_DEV_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAH+vZStb7t9CVlPFoXgZJxJCTSNRHuGfIZWW8sOyuXCY=
+MCowBQYDK2VwAyEApDiX5xlZiMIeWINicxJ8jbIZJQrjlRogsS3vRzqUgiQ=
 -----END PUBLIC KEY-----
 ";
 

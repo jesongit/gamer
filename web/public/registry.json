@@ -1,22 +1,22 @@
 {
     "schema_version":  1,
-    "generated_at":  "2026-09-05T11:07:26Z",
+    "generated_at":  "2026-09-07T06:13:37Z",
     "host_api":  "1.0.0",
     "plugins":  [
                     {
                         "id":  "gamer.keymap",
                         "version":  "1.0.0",
-                        "name":  "Keymap",
-                        "description":  "Application-specific keyboard, mouse, and gamepad mappings（WASM keymap 扩展，profile 数据通道见 keymap 存储）",
+                        "name":  "键盘映射",
+                        "description":  "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键（WASM keymap 扩展，profile 数据通道见 keymap 存储）",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.keymap-1.0.0.gplugin",
-                        "sha256":  "cd2ab3a7d514fe52dbf54379a6a97e6adc3345da85437a25bb741fe54e17b0ff",
-                        "size":  99363,
+                        "sha256":  "df6f07d970f05789c193b721f87c921f0b67bd9440b3595e99c4717acd66930c",
+                        "size":  99383,
                         "signature":  {
                                           "status":  "valid",
                                           "key_id":  "gamer-dev-1",
                                           "algorithm":  "ed25519",
-                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci5rZXltYXAtMS4wLjAuZ3BsdWdpbiIsImlkIjoiZ2FtZXIua2V5bWFwIiwia2V5X2lkIjoiZ2FtZXItZGV2LTEiLCJzaGEyNTYiOiJjZDJhYjNhN2Q1MTRmZTUyZGJmNTQzNzlhNmE5N2U2YWRjMzM0NWRhODU0MzdhMjViYjc0MWZlNTRlMTdiMGZmIiwic2lnbmF0dXJlIjoiMHNjcWJJVjRZMklVcFQ4d0tBS3V0V3NIQ0ZMWjI3MmdTL2Y1c0RVS09YaUNEOGp5eTNOaUxyZG5TSXBWSi9Qb2cvWm9IeDZVUFg0VGRrc2xvSG5DQmc9PSIsInZlcnNpb24iOiIxLjAuMCJ9"
+                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci5rZXltYXAtMS4wLjAuZ3BsdWdpbiIsImlkIjoiZ2FtZXIua2V5bWFwIiwia2V5X2lkIjoiZ2FtZXItZGV2LTEiLCJzaGEyNTYiOiJkZjZmMDdkOTcwZjA1Nzg5YzE5M2I3MjFmODdjOTIxZjBiNjdiZDk0NDBiMzU5NWU5OWM0NzE3YWNkNjY5MzBjIiwic2lnbmF0dXJlIjoiTWVSNXZNaDNucWxDa0x5QlB0U1FHMHNZaVNSNllnSjE4SVp6T1lKdUdxNk1NTDhCUU10TDkxVHVNL0d1MlJaUmNMdm9BaHJhbUtaTlphRUFMLzUzQ2c9PSIsInZlcnNpb24iOiIxLjAuMCJ9"
                                       },
                         "permissions":  [
                                             "input.tap",
@@ -42,17 +42,17 @@
                     {
                         "id":  "gamer.yaml",
                         "version":  "3.1.0",
-                        "name":  "Gamer YAML vNext",
-                        "description":  "Surface YAML v3 lowering and execution guest（version: 3 脚本经 YamlVnextAdapter 执行）",
+                        "name":  "自动化",
+                        "description":  "自动化：YAML v3 脚本、函数库与模板的制作与运行（version: 3 脚本经 YamlVnextAdapter 执行）",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.yaml-3.1.0.gplugin",
-                        "sha256":  "86ff9f5e16b6bb4813424f6d6fe4ed3370d507369a75c4fa7349f008db472abe",
-                        "size":  72962,
+                        "sha256":  "83b3416e233fe560718349fce2d7cc6d31b30aeb7c20324ce865ce3ab81db52e",
+                        "size":  72727,
                         "signature":  {
                                           "status":  "valid",
                                           "key_id":  "gamer-dev-1",
                                           "algorithm":  "ed25519",
-                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci55YW1sLTMuMS4wLmdwbHVnaW4iLCJpZCI6ImdhbWVyLnlhbWwiLCJrZXlfaWQiOiJnYW1lci1kZXYtMSIsInNoYTI1NiI6Ijg2ZmY5ZjVlMTZiNmJiNDgxMzQyNGY2ZDZmZTRlZDMzNzBkNTA3MzY5YTc1YzRmYTczNDlmMDA4ZGI0NzJhYmUiLCJzaWduYXR1cmUiOiJ3c3pRWmdZRjFQOUQzcml5cDVrUlFsMXR3VTYzaGZuNVdLUkUrbGVXeUp0ci9WaGRpdXBsT1ZNTE5BWnQwSFh6UzlnbjhoQmxNRnR2Mi94NnRFVjlEUT09IiwidmVyc2lvbiI6IjMuMS4wIn0="
+                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci55YW1sLTMuMS4wLmdwbHVnaW4iLCJpZCI6ImdhbWVyLnlhbWwiLCJrZXlfaWQiOiJnYW1lci1kZXYtMSIsInNoYTI1NiI6IjgzYjM0MTZlMjMzZmU1NjA3MTgzNDlmY2UyZDdjYzZkMzFiMzBhZWI3YzIwMzI0Y2U4NjVjZTNhYjgxZGI1MmUiLCJzaWduYXR1cmUiOiIvMCtBZ0wxY1RyQmVOdXBnZ2lzZjJ3bTZ2THprMEhpVHkrUzZ1WVZIVVBoVE9OWTJMU01zeERyQnd1cEdqZnNFRlhBeDZ2WnQ0S1RYbnVLTjRTbE5BZz09IiwidmVyc2lvbiI6IjMuMS4wIn0="
                                       },
                         "permissions":  [
                                             "device.read",

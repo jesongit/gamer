@@ -186,8 +186,8 @@ foreach ($result in $results) {
     if ($result.Id -eq 'gamer.keymap') {
         $entries += [ordered]@{
             id = $result.Id; version = $result.Version
-            name = 'Keymap'
-            description = 'Application-specific keyboard, mouse, and gamepad mappings（WASM keymap 扩展，profile 数据通道见 keymap 存储）'
+            name = '键盘映射'
+            description = '按键映射：键盘、鼠标、手柄动作映射为设备触控与按键（WASM keymap 扩展，profile 数据通道见 keymap 存储）'
             publisher = 'gamer.dev'
             download_url = $result.DownloadUrl
             sha256 = $result.Sha256
@@ -201,8 +201,8 @@ foreach ($result in $results) {
     else {
         $entries += [ordered]@{
             id = $result.Id; version = $result.Version
-            name = 'Gamer YAML vNext'
-            description = 'Surface YAML v3 lowering and execution guest（version: 3 脚本经 YamlVnextAdapter 执行）'
+            name = '自动化'
+            description = '自动化：YAML v3 脚本、函数库与模板的制作与运行（version: 3 脚本经 YamlVnextAdapter 执行）'
             publisher = 'gamer.dev'
             download_url = $result.DownloadUrl
             sha256 = $result.Sha256
