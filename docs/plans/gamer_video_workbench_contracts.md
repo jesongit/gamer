@@ -109,12 +109,25 @@ data/media/<media-id>/
   `media.write`/`media.events.read`）、`extensions/service.rs` 注册（启动即 Running，
   无 Runner）、`extensions/mod.rs` 模块声明。
 - `tools/plugins/gamer.video/manifest.toml` 与 server 侧常量**逐字同步**。
-- gamer.yaml 侧新增 call 动作（经现有 `POST /api/extensions/:id/call` 通路，
-  不新增 REST 路由）：
-  `action="automation.create_draft"`，`values={"recording_id":"...","event_ids":["..."]?}`
-  → `{"yaml":"<v3 草稿>","diagnostics":[{event_id,reason}]}`。tap/swipe/key/text→
-  对应 v3 步骤，间隔→建议 sleep；无法映射（多指/未知）→ diagnostics，不丢弃不猜测。
-  草稿只是文本返回，不落盘、不执行。
+- gamer.yaml 侧 call 动作（经现有 `POST /api/extensions/:id/call` 通路，
+  不新增 REST 路由）。Phase 7（最终化计划 §10.1）起收敛为 `gamer_yaml/actions.rs`
+  的**版本化公开动作清单**（清单 ↔ 实现测试双向锁死；gamer.video 只经此缝调用，
+  禁止直写 gamer.yaml 私有目录/解析 YAML）：
+  - `automation.create_draft` v1：`values={"recording_id","event_ids"?,"comments"?:{event_id:注释}}`
+    → `{"yaml","diagnostics":[{event_id,reason}],"source":{recording_id,events:[…]}}`。
+    tap/swipe/key/wait→对应 v3 步骤（注释渲染为步骤上方注释行），间隔→建议 wait；
+    无法映射（text 脱敏/未知）→ diagnostics，不丢弃不猜测；`source` 为草稿回查信息。
+    草稿只是文本返回，不落盘、不执行。
+  - `automation.save_draft` v1（Phase 7 §10.3）：`values={"package_id","name","yaml","overwrite"?}`
+    → `{id:"<pkg>/<name>.yaml",path,package_id}`；保存边界走 v3 校验钩子，重名需 overwrite。
+  - `template.create_from_frame` v1（Phase 7 §10.2）：`values={"package_id","name","png_base64",
+    "region":[x1,y1,x2,y2 相对],"frame":{media_id,frame_index?,pts_us},"calibration":{version,…}}`
+    → `{name,short_name,path,size,region,frame,calibration}`；命名规则/灰度归一化/短名冲突
+    检测全在 gamer.yaml 服务端（资源字节钩子同路径）。
+  - `vision.test_template` v1：**复用 Core REST** `POST /api/capabilities/vision/test`
+    （media_id+pts_us/frame_index 离线寻址，不重复实现）。
+  - `automation.open_editor` v1：纯前端契约（保存成功后切 `gamer.yaml:automation`
+    面板并载入编辑器，经 automationEditorBridge），无服务端往返。
 
 ## 6. 前端合同（C 舞台 / D2 面板）
 
@@ -123,8 +136,9 @@ data/media/<media-id>/
   `mediaFileUrl(id)`、`mediaFrameUrl(id,{ptsUs,index,maxWidth})`、
   `recordingStart(deviceId)`、`recordingStop(id)`、`recordingCancel(id)`、
   `recordingStatus(id)`、`activeRecording(deviceId)`、`recordingEvents(id)`、
-  `createVideoDraft(recordingId,eventIds)`（→ POST `/api/extensions/gamer.yaml/call`
-  action=`automation.create_draft`）。
+  `createVideoDraft(recordingId,eventIds,comments?)`（→ POST `/api/extensions/gamer.yaml/call`
+  action=`automation.create_draft`）。Phase 7 起新增 `saveDraft/createTemplateFromFrame/
+  visionTestTemplate/setMediaRefs`（components/video/videoApi.js，动作清单缝与媒体引用同步）。
 - `StageSource`（C 实现，计划 §4.2 原样）：`kind:'live'|'media'`、`sourceId`、
   `generation`（来源切换/校准变化递增）、`displaySize/referenceSize`、`canDeviceInput`、
   `frameAt?{mediaId,ptsUs,index}`。媒体模式下舞台产生的设备输入在输入路由统一拒绝。

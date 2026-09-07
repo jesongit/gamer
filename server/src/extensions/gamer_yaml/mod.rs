@@ -20,6 +20,7 @@
 //! scheduler / webrtc / capabilities）不得 import 本目录内部符号，只能走 Core 定义的
 //! 窄 trait（`TimerRunner`、`ResourceHandler` 等）与本文件显式导出的门面。
 
+pub(crate) mod actions;
 pub(crate) mod error;
 pub(crate) mod params;
 pub(crate) mod resources;
@@ -31,10 +32,14 @@ pub(crate) mod video_draft;
 pub(crate) mod yaml_extension;
 pub(crate) mod yaml_vnext;
 
+/// native_call_action 缝的分发入口在 [`actions`]（§10.1 版本化公开动作清单：
+/// 草稿生成/保存、模板帧上创建；清单 ↔ 实现由测试双向锁死）。
+pub(crate) use actions::native_call_action;
 pub(crate) use resources::register_resource_handlers;
 pub(crate) use runner_adapter::{yaml_start_request, EngineExecutor};
 pub(crate) use timer_yaml::{YamlTimerRunner, YamlTimerRunnerRegistrar};
-pub(crate) use video_draft::native_call_action;
+#[cfg(test)]
+pub(crate) use video_draft::build_draft;
 pub(crate) use yaml_extension::{
     YamlProgramResolver, YAML_EXTENSION_ID, YAML_EXTENSION_MANIFEST_TOML,
 };

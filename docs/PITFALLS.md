@@ -298,3 +298,11 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **`MediaMetadata.refs` 为空时 JSON 里字段整体缺席**（`skip_serializing_if = "Vec::is_empty"`）：断言/前端读 `meta["refs"]` 会拿到 undefined 而非 `[]`，要用可选取值兜底；同理 `probe` 缺省也省略。
 - **.gamerpkg 布局白名单已扩展 `media/**`（受控：仅 `media/index.json` 与 `media/files/<64hex>`）**：旧版本服务端导入含 media/ 的新归档会 400「顶层条目不在白名单内」——跨版本分发包先确认两端服务端都升到 Phase 8；旧归档（无 media/）不受影响。
 - **归档媒体恢复不重跑 ffprobe**（元数据随 `media/index.json` 的 `probe` 原样恢复）：手造媒体索引测试别假设导入后有真实探测值；索引缺 probe 时导入侧按 `codec="unknown"`、宽高 0 兜底。
+
+## 2026-09-07（Phase 7：模板制作/离线测试/草稿闭环）
+
+- **native call 动作响应无 `data` 信封**（`POST /api/extensions/gamer.yaml/call` 的 native 分支顶层即结果 JSON）：前端按有无 `data` 两形态兜底（videoApi），E2E/脚本断言别假设 `{data:{...}}`。
+- **NCC 拒绝纯色模板且搜索区需 ≥ 模板+1px**：`template is uniform color`、`template larger than screen`——E2E/测试造模板必须带结构纹理，且别让模板文件名 `#区域` 恰等于模板大小（至少留 1px 余量或显式传全帧 region）。
+- **Windows Python 打不开 Git Bash 的 `/tmp/...` 路径**：混用 bash 工具与 python 处理临时文件时，目录用 `cygpath -m "$(mktemp -d)"`（C:/ 风格两边通吃）。
+- **heredoc 写入含转义字节的脚本文件**：外层 python 的字符串字面量会把 `\xNN` 形态解释成真实字节落盘，bash 再喂给 python 就成非法源码——生成脚本里的控制字节用 `bytes([...])`/`chr()` 构造，别用反斜杠转义。
+- **官方 .gplugin 安装请求头**：`X-Gamer-Extension-Source: official` + `X-Gamer-Permission-Confirm: true`（缺后者有权限声明的插件装不上，报权限确认缺失）。

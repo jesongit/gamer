@@ -147,6 +147,7 @@ import {
   activateVersionPrompt,
   dependencyRefsFor,
   dependencyStatus,
+  executionChangeDetail,
   executionLabel,
   hostVersionLabel,
   installErrorText,
@@ -280,6 +281,10 @@ async function inspectAndConfirm(file, source, current, providedInspection = nul
   // host_version 缺失不展示。普通用户界面不出现密钥/签名/proof 概念。
   const execution = normalizeExecution(inspection.execution || source.execution || entry?.execution)
   const hostVersion = execution.host_version || ''
+  // Phase 8 遗留（D2）：wasm↔builtin 等执行形态变化必须明确提示——形态决定
+  // 插件的执行方式与信任边界（宿主预置 vs guest WASM），更新前由用户确认。
+  // 文案唯一实现在 plugin-service.executionChangeDetail（可单测）。
+  const executionChangeLine = executionChangeDetail(inspection.execution_change)
   const title = current ? '确认更新插件' : '确认安装插件'
   const details = [
     `${title}：${inspection.name || inspection.id}`,
@@ -287,6 +292,7 @@ async function inspectAndConfirm(file, source, current, providedInspection = nul
     `版本：${inspection.version}`,
     `来源：${sourceLabel(source.kind)}${source.publisher ? `；发布者：${source.publisher}` : ''}`,
     `执行形态：${executionLabel(execution)}`,
+    ...(executionChangeLine ? [executionChangeLine] : []),
     ...(hostVersion ? [`宿主版本要求：${hostVersion}`] : []),
     `权限：${requestedPermissions.length ? requestedPermissions.join('、') : '无'}`,
     formatPermissionDiff(summary.diff),

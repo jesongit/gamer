@@ -246,6 +246,13 @@ export function withCalibration(project, calibration) {
   })
 }
 
+/** 项目引用的 media id 去重集合（Phase 8 契约：项目保存时用于媒体引用同步）。 */
+export function projectMediaIds(project) {
+  return [...new Set((Array.isArray(project?.assets) ? project.assets : [])
+    .map(asset => String(asset?.media_id || ''))
+    .filter(Boolean))]
+}
+
 /**
  * 素材引用状态（对媒体库列表现算）：
  * `{primary, ready, missingAssets:[media_id]}`。缺失 ≠ 打不开——项目可打开并

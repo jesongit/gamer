@@ -61,6 +61,17 @@
           @load="onFrameLoad"
           @error="onFrameError"
         />
+        <div class="frame-actions">
+          <button
+            class="mini-btn"
+            type="button"
+            :disabled="!yamlReady"
+            :title="yamlReady ? '在当前确定帧上框选创建模板并离线测试' : '需要「自动化」插件（gamer.yaml）处于运行状态'"
+            data-testid="frame-to-template"
+            @click="emitCreateTemplate"
+          >✂️ 帧上做模板</button>
+          <span v-if="!yamlReady" class="frame-dep-hint">需自动化插件运行中</span>
+        </div>
         <div class="frame-caption mono">{{ frameCaption }}</div>
       </div>
       <div class="frame-hint">预览进度（浏览器解码）与服务端精确帧可能有小偏差，制作模板请以精确帧图为准。</div>
@@ -193,9 +204,11 @@ const props = defineProps({
   calibration: { type: Object, default: null },
   /** 项目关联的录制会话 id（外部素材为空 → 不显示事件区）。 */
   recordingId: { type: String, default: '' },
+  /** gamer.yaml 是否 Running（§10.1 依赖门禁：模板制作入口禁用态）。 */
+  yamlReady: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['add-marker', 'remove-marker', 'update-marker', 'save-calibration'])
+const emit = defineEmits(['add-marker', 'remove-marker', 'update-marker', 'save-calibration', 'create-template'])
 
 const videoEl = ref(null)
 const currentTime = ref(0)
@@ -443,6 +456,29 @@ async function addMarkerAtCurrentFrame() {
   }
 }
 
+/** 正向入口（§10.2）：把当前确定帧身份交给模板工作台（缺身份时先按预览时间
+ *  解析；解析失败提示，不猜测帧身份）。 */
+async function emitCreateTemplate() {
+  if (!props.media) return
+  let position = currentFrame.value
+  if (!position) {
+    try {
+      const meta = await videoApi.mediaFrames(props.media.id, { ptsUs: ptsFromTime(currentTime.value) })
+      position = meta?.current || null
+      framesMeta.value = meta || framesMeta.value
+    } catch (e) {
+      frameError.value = '帧解析失败：' + (e?.message || e)
+      return
+    }
+  }
+  if (!position) {
+    frameError.value = '当前没有可用于制作模板的展示帧'
+    return
+  }
+  showFrameByIndex(position)
+  emit('create-template', { mediaId: props.media.id, frameIndex: position.index, ptsUs: position.pts_us })
+}
+
 function isStale(marker) {
   return Number(marker?.frame?.calibration_version) !== Number(props.calibration?.version)
 }
@@ -522,6 +558,8 @@ function fmtUs(us) {
 .mini-btn.danger:hover { border-color: var(--danger); color: var(--danger); }
 .frame-box { display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-0); }
 .frame-shot { max-width: 100%; max-height: 200px; object-fit: contain; align-self: center; image-rendering: pixelated; }
+.frame-actions { display: flex; align-items: center; gap: 6px; justify-content: center; }
+.frame-dep-hint { color: var(--warn); font-size: 10px; }
 .frame-caption { color: var(--text-2); font-size: 10px; text-align: center; }
 .frame-hint { color: var(--text-2); font-size: 10px; line-height: 1.5; }
 .zone-error { padding: 5px 7px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); background: rgba(248,113,113,.08); color: var(--danger); font-size: 11px; line-height: 1.5; }

@@ -194,3 +194,94 @@ describe('videoApi 草稿（合同 §5 call 通路）与工具函数', () => {
     expect(fetchStub).not.toHaveBeenCalled()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Phase 7 §10.1/§10.3：gamer.yaml 动作清单缝 + vision 离线测试 + 媒体引用同步
+// ---------------------------------------------------------------------------
+
+describe('videoApi 动作清单缝（gamer.yaml call）', () => {
+  it('createVideoDraft → POST /api/extensions/gamer.yaml/call（action + values，comments 可选）', async () => {
+    fetchStub.mockResolvedValue(jsonResponse(200, { data: { yaml: 'version: 3', diagnostics: [] } }))
+    await videoApi.createVideoDraft('rec-1', ['b', 'a'], { b: '注释' })
+    const [url, options] = fetchStub.mock.calls[0]
+    expect(url).toBe('/api/extensions/gamer.yaml/call')
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(options.body)).toEqual({
+      action: 'automation.create_draft',
+      values: { recording_id: 'rec-1', event_ids: ['b', 'a'], comments: { b: '注释' } },
+    })
+  })
+
+  it('createVideoDraft 解包 data 信封', async () => {
+    fetchStub.mockResolvedValue(jsonResponse(200, { data: { yaml: 'y', diagnostics: [], source: { recording_id: 'r' } } }))
+    const result = await videoApi.createVideoDraft('rec-1', [])
+    expect(result).toEqual({ yaml: 'y', diagnostics: [], source: { recording_id: 'r' } })
+  })
+
+  it('saveDraft → automation.save_draft（package_id/name/yaml/overwrite）', async () => {
+    fetchStub.mockResolvedValue(jsonResponse(200, { data: { id: 'pkg/d.yaml', path: 'automations/d.yaml' } }))
+    const result = await videoApi.saveDraft({ packageId: 'pkg', name: 'd', yaml: 'version: 3', overwrite: true })
+    expect(result.id).toBe('pkg/d.yaml')
+    expect(JSON.parse(fetchStub.mock.calls[0][1].body)).toEqual({
+      action: 'automation.save_draft',
+      values: { package_id: 'pkg', name: 'd', yaml: 'version: 3', overwrite: true },
+    })
+  })
+
+  it('createTemplateFromFrame → template.create_from_frame（帧身份 + 校准元数据随 values 下发）', async () => {
+    fetchStub.mockResolvedValue(jsonResponse(200, { data: { name: 'n#000_000_500_500.png', short_name: 'n.png' } }))
+    const result = await videoApi.createTemplateFromFrame({
+      packageId: 'pkg', name: 'n', pngBase64: 'QUJD', region: [0, 0, 0.5, 0.5],
+      preserveColor: true, overwrite: false,
+      frame: { media_id: 'm1', frame_index: 5, pts_us: 1000 },
+      calibration: { version: 2, reference_size: [1280, 720], rotation: 0 },
+    })
+    expect(result.short_name).toBe('n.png')
+    expect(JSON.parse(fetchStub.mock.calls[0][1].body)).toEqual({
+      action: 'template.create_from_frame',
+      values: {
+        package_id: 'pkg', name: 'n', png_base64: 'QUJD', region: [0, 0, 0.5, 0.5],
+        preserve_color: true, overwrite: false,
+        frame: { media_id: 'm1', frame_index: 5, pts_us: 1000 },
+        calibration: { version: 2, reference_size: [1280, 720], rotation: 0 },
+      },
+    })
+  })
+
+  it('visionTestTemplate → POST /api/capabilities/vision/test（离线 media_id + 帧身份；region 像素整型化）', async () => {
+    fetchStub.mockResolvedValue(jsonResponse(200, { hit: true, score: 0.9, frame: { frame_index: 5 } }))
+    await videoApi.visionTestTemplate({
+      packageId: 'pkg', name: 'tpl', threshold: 0.85, region: [10.4, 0, 100.6, 50],
+      frame: { mediaId: 'm1', frameIndex: 5 },
+    })
+    const [url, options] = fetchStub.mock.calls[0]
+    expect(url).toBe('/api/capabilities/vision/test')
+    expect(JSON.parse(options.body)).toEqual({
+      pkg: 'pkg', plugin: 'gamer.yaml', name: 'tpl', threshold: 0.85,
+      region: [10, 0, 101, 50], media_id: 'm1', frame_index: 5,
+    })
+  })
+
+  it('visionTestTemplate：frameIndex 缺省时按 pts_us 寻址；无 frame 不带离线字段', async () => {
+    fetchStub.mockResolvedValue(jsonResponse(200, { hit: false }))
+    await videoApi.visionTestTemplate({ packageId: 'pkg', name: 't', frame: { mediaId: 'm1', ptsUs: 42 } })
+    expect(JSON.parse(fetchStub.mock.calls[0][1].body)).toEqual({
+      pkg: 'pkg', plugin: 'gamer.yaml', name: 't', media_id: 'm1', pts_us: 42,
+    })
+    await videoApi.visionTestTemplate({ packageId: 'pkg', name: 't' })
+    expect(JSON.parse(fetchStub.mock.calls[1][1].body)).toEqual({ pkg: 'pkg', plugin: 'gamer.yaml', name: 't' })
+  })
+
+  it('setMediaRefs → POST /api/media/:id/refs（全量替换 body）', async () => {
+    fetchStub.mockResolvedValue(jsonResponse(200, { id: 'm1', refs: [] }))
+    await videoApi.setMediaRefs('m1', [
+      { packageId: 'pkg', pluginId: 'gamer.video', kind: 'project' },
+    ])
+    const [url, options] = fetchStub.mock.calls[0]
+    expect(url).toBe('/api/media/m1/refs')
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(options.body)).toEqual({
+      refs: [{ package_id: 'pkg', plugin_id: 'gamer.video', kind: 'project' }],
+    })
+  })
+})

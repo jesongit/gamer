@@ -32,6 +32,11 @@ vi.mock('./components/video/videoApi', async (importOriginal) => {
       recordingEvents: vi.fn(async () => []),
       recordingStatus: vi.fn(async () => ({ id: 'rec-1', segments: [] })),
       createVideoDraft: vi.fn(async () => ({ yaml: '', diagnostics: [] })),
+      saveDraft: vi.fn(async () => ({ id: 'pkg/draft-1.yaml', path: 'automations/draft-1.yaml', package_id: 'pkg' })),
+      createTemplateFromFrame: vi.fn(async () => ({ name: 'tpl.png', short_name: 'tpl.png' })),
+      visionTestTemplate: vi.fn(async () => ({ hit: true, score: 0.9 })),
+      getMedia: vi.fn(async () => ({ id: 'm1', refs: [] })),
+      setMediaRefs: vi.fn(async () => ({})),
       mediaFrames: vi.fn(async () => ({ frame_count: 0, first_pts_us: null, last_pts_us: null })),
       mediaFrameNeighbors: vi.fn(async () => ({ index: 0, pts_us: 0, prev: null, next: null })),
       listProjectEntries: vi.fn(async () => []),
@@ -47,6 +52,12 @@ vi.mock('./components/console/useConsoleStage', async (importOriginal) => {
   const actual = await importOriginal()
   return { ...actual, requestStageMedia: vi.fn() }
 })
+
+// VideoDraft 保存成功后的 automation.open_editor 导航（router.push 可观察）
+const routerPush = vi.fn(async () => {})
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: routerPush, currentRoute: { value: { query: {} } } }),
+}))
 
 import MediaLibrary from './components/video/MediaLibrary.vue'
 import VideoDraft from './components/video/VideoDraft.vue'
@@ -641,7 +652,7 @@ describe('MediaLibrary 素材库区', () => {
     await btn2().trigger('click')
     await btn2().trigger('click')
     await flushPromises()
-    expect(w2.find('[data-testid="media-error"]').text()).toContain('被项目引用')
+    expect(w2.find('[data-testid="media-error"]').text()).toContain('被视频项目引用')
     w2.unmount()
   })
 
@@ -675,11 +686,12 @@ describe('MediaLibrary 素材库区', () => {
 })
 
 // ---------------------------------------------------------------------------
-// VideoDraft 草稿区状态流转
+// VideoDraft 草稿区状态流转（Phase 7 §10.3 可编辑工作流）
 // ---------------------------------------------------------------------------
 
-describe('VideoDraft 草稿区状态流转', () => {
-  const mountDraft = (recordingId = 'rec-9') => mount(VideoDraft, { props: { recordingId } })
+describe('VideoDraft 草稿区状态流转（Phase 7 可编辑工作流）', () => {
+  const mountDraft = (recordingId = 'rec-9', yamlReady = true) =>
+    mount(VideoDraft, { props: { recordingId, packageId: 'pkg', yamlReady } })
 
   it('载入事件：时间轴升序渲染 kind/时间/来源；全选/清空驱动已选数', async () => {
     const wrapper = mountDraft()
@@ -702,26 +714,94 @@ describe('VideoDraft 草稿区状态流转', () => {
     wrapper.unmount()
   })
 
-  it('勾选 → 生成 YAML 草稿：createVideoDraft(recordingId, 选中 ids)，展示 yaml 与诊断，常驻不执行标注', async () => {
+  it('yaml 依赖门禁（§10.1）：未 Running 时生成禁用 + 依赖横幅，注释/重排仍可见', async () => {
+    const wrapper = mountDraft('rec-9', false)
+    videoApi.recordingEvents.mockResolvedValue(EVENTS)
+    await wrapper.find('[data-testid="draft-load"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="draft-dep-banner"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="draft-generate"]').attributes('disabled')).toBeDefined()
+    await wrapper.find('[data-testid="draft-select-all"]').trigger('click')
+    expect(wrapper.find('[data-testid="draft-generate"]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('勾选+注释 → 生成：createVideoDraft(recordingId, 顺序 ids, comments)，展示 yaml/诊断/回查 source', async () => {
     const wrapper = mountDraft()
     videoApi.recordingEvents.mockResolvedValue(EVENTS)
     videoApi.createVideoDraft.mockResolvedValue({
       yaml: 'version: 3\nsteps:\n  - tap: [100, 200]',
       diagnostics: [{ event_id: 'e2', reason: 'multi_touch_not_supported' }],
+      source: { recording_id: 'rec-9', events: [
+        { event_id: 'e1', kind: 'swipe', timeline_us: 1200000, selected: true, mapped: true },
+        { event_id: 'e2', kind: 'tap', timeline_us: 5200000, selected: true, mapped: false },
+      ] },
     })
     await wrapper.find('[data-testid="draft-load"]').trigger('click')
     await flushPromises()
 
-    await wrapper.findAll('.event-check')[0].setValue(true)
+    await wrapper.find('[data-testid="draft-event-check-e1"]').setValue(true)
+    await wrapper.find('[data-testid="draft-event-comment-e1"]').setValue('打开背包')
     await wrapper.find('[data-testid="draft-generate"]').trigger('click')
     await flushPromises()
 
-    expect(videoApi.createVideoDraft).toHaveBeenCalledWith('rec-9', ['e1'])
+    expect(videoApi.createVideoDraft).toHaveBeenCalledWith('rec-9', ['e1'], { e1: '打开背包' })
     expect(wrapper.find('[data-testid="draft-yaml"]').text()).toContain('tap: [100, 200]')
     const diags = wrapper.find('[data-testid="draft-diagnostics"]')
     expect(diags.text()).toContain('e2')
     expect(diags.text()).toContain('multi_touch_not_supported')
+    expect(wrapper.find('[data-testid="draft-source-line"]').text()).toContain('rec-9')
     expect(wrapper.text()).toContain('草稿不会自动执行')
+    wrapper.unmount()
+  })
+
+  it('重排（↑↓）改变生成顺序；保存草稿 → automation.save_draft + open_editor 导航', async () => {
+    const wrapper = mountDraft()
+    videoApi.recordingEvents.mockResolvedValue(EVENTS)
+    videoApi.createVideoDraft.mockResolvedValue({
+      yaml: 'version: 3\nsteps:\n  - log: ok', diagnostics: [],
+      source: { recording_id: 'rec-9', events: [] },
+    })
+    videoApi.saveDraft.mockResolvedValue({ id: 'pkg/my-draft.yaml', path: 'automations/my-draft.yaml', package_id: 'pkg' })
+    await wrapper.find('[data-testid="draft-load"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.find('[data-testid="draft-event-check-e2"]').setValue(true)
+    await wrapper.find('[data-testid="draft-event-check-e1"]').setValue(true)
+    // 选中顺序 = 勾选顺序（e2, e1）；e1 上移 → e1, e2
+    await wrapper.find('[data-testid="draft-event-up-e1"]').trigger('click')
+
+    await wrapper.find('[data-testid="draft-generate"]').trigger('click')
+    await flushPromises()
+    expect(videoApi.createVideoDraft).toHaveBeenCalledWith('rec-9', ['e1', 'e2'], {})
+
+    await wrapper.find('[data-testid="draft-save-name"]').setValue('my-draft')
+    await wrapper.find('[data-testid="draft-save"]').trigger('click')
+    await flushPromises()
+    expect(videoApi.saveDraft).toHaveBeenCalledWith({
+      packageId: 'pkg', name: 'my-draft', yaml: 'version: 3\nsteps:\n  - log: ok', overwrite: false,
+    })
+    // automation.open_editor（前端契约）：路由切到自动化面板
+    expect(routerPush).toHaveBeenCalledWith(expect.objectContaining({
+      query: expect.objectContaining({ panel: 'gamer.yaml:automation' }),
+    }))
+    wrapper.unmount()
+  })
+
+  it('保存重名冲突给出可理解提示（overwrite 引导）', async () => {
+    const wrapper = mountDraft()
+    videoApi.recordingEvents.mockResolvedValue(EVENTS)
+    videoApi.createVideoDraft.mockResolvedValue({ yaml: 'version: 3\nsteps: []', diagnostics: [], source: null })
+    videoApi.saveDraft.mockRejectedValue(new Error('自动化脚本已存在: pkg/d.yaml（确认覆盖请带 overwrite:true）'))
+    await wrapper.find('[data-testid="draft-load"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="draft-select-all"]').trigger('click')
+    await wrapper.find('[data-testid="draft-generate"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="draft-save-name"]').setValue('d')
+    await wrapper.find('[data-testid="draft-save"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="draft-error"]').text()).toContain('覆盖同名')
     wrapper.unmount()
   })
 
@@ -746,12 +826,75 @@ describe('VideoDraft 草稿区状态流转', () => {
   })
 
   it('录制完成后宿主带入会话 id：recordingId prop 变化自动载入事件', async () => {
-    const wrapper = mount(VideoDraft, { props: { recordingId: '' } })
+    const wrapper = mount(VideoDraft, { props: { recordingId: '', packageId: 'pkg', yamlReady: true } })
     videoApi.recordingEvents.mockResolvedValue(EVENTS)
     await wrapper.setProps({ recordingId: 'rec-77' })
     await flushPromises()
     expect(wrapper.find('[data-testid="draft-recording-id"]').element.value).toBe('rec-77')
     expect(videoApi.recordingEvents).toHaveBeenCalledWith('rec-77')
     wrapper.unmount()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Phase 8 遗留 #2：项目保存/删除 → 媒体引用全量替换同步（契约 §2.1）
+// ---------------------------------------------------------------------------
+
+describe('项目保存 → 媒体引用同步（遗留 #2）', () => {
+  const MARKER = (mediaId = 'm1') => ({ id: 'mk-1', label: '旧标记', note: '', created_at: '', frame: { media_id: mediaId, frame_index: 3, pts_us: 90000, calibration_version: 1 } })
+
+  async function mountOpenDirtyProject(content) {
+    const entry = { ...PROJECT_ENTRY, content }
+    stubProject(entry)
+    const w = mount(VideoWorkbench)
+    await flushPromises()
+    await w.find('[data-testid="workbench-tab-projects"]').trigger('click')
+    await flushPromises()
+    await w.findAll('[data-testid="project-row"]')[0].trigger('click')
+    await flushPromises()
+    // 改标记注释 → 标脏（保存按钮才可用）
+    await w.find('[data-testid="marker-note-mk-1"]').setValue('备注')
+    return w
+  }
+
+  it('保存时向引用媒体登记 gamer.video/project 引用（全量替换端点）', async () => {
+    videoApi.getMedia.mockResolvedValue({ id: 'm1', refs: [] })
+    const w = await mountOpenDirtyProject(projectJson({ markers: [MARKER()] }))
+    await w.find('[data-testid="project-save"]').trigger('click')
+    await flushPromises()
+    expect(videoApi.setMediaRefs).toHaveBeenCalledWith('m1', [
+      { package_id: 'pkg', plugin_id: 'gamer.video', kind: 'project' },
+    ])
+    w.unmount()
+  })
+
+  it('重复保存幂等：引用已登记且未变化时不重复写 refs', async () => {
+    videoApi.getMedia.mockResolvedValue({ id: 'm1', refs: [
+      { package_id: 'pkg', plugin_id: 'gamer.video', kind: 'project' },
+    ] })
+    const w = await mountOpenDirtyProject(projectJson({ markers: [MARKER()] }))
+    await w.find('[data-testid="project-save"]').trigger('click')
+    await flushPromises()
+    expect(videoApi.setMediaRefs).not.toHaveBeenCalled()
+    w.unmount()
+  })
+
+  it('删除项目：解除其素材引用；素材已删除（404）静默跳过', async () => {
+    videoApi.getMedia.mockRejectedValue(Object.assign(new Error('gone'), { status: 404 }))
+    stubProject(PROJECT_ENTRY)
+    const w = mount(VideoWorkbench)
+    await flushPromises()
+    await w.find('[data-testid="workbench-tab-projects"]').trigger('click')
+    await flushPromises()
+    videoApi.deleteProject.mockResolvedValue(null)
+    const deleteBtn = () => w.findAll('[data-testid="project-row"]')[0].find('[data-testid="project-delete"]')
+    await deleteBtn().trigger('click') // armed
+    await deleteBtn().trigger('click') // confirm
+    await flushPromises()
+    expect(videoApi.deleteProject).toHaveBeenCalledWith('pkg', 'p1')
+    // 404 静默：不产生 refs 写入，也不弹错误横幅
+    expect(videoApi.setMediaRefs).not.toHaveBeenCalled()
+    expect(w.find('[data-testid="project-conflict-banner"]').exists()).toBe(false)
+    w.unmount()
   })
 })

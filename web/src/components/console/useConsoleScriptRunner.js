@@ -11,6 +11,7 @@ import { useRawYamlEditor } from '../../composables/useRawYamlEditor'
 import { useFunctionLibrary } from '../../composables/useFunctionLibrary'
 import { useRunArgsFlow } from '../../composables/useRunArgsFlow'
 import { createEditorShellApi } from './current-api-adapters'
+import { automationEditorRequest } from './automationEditorBridge'
 import { parseScript, parseFunctionLibrary, serialize } from '../../script-editor/codec'
 import { SE_TARGET_OPTIONS } from '../../script-editor/targets'
 import { startIndexOf } from '../../script-editor/selection'
@@ -509,6 +510,26 @@ export function useConsoleScriptRunner({
       toast('脚本加载失败：' + e.message, 'error')
     }
   }
+
+  // ---------- automation.open_editor 消费端（Phase 7 §10.3） ----------
+  // 视频工作台草稿保存成功后经 automationEditorBridge 请求打开/定位编辑器：
+  // 刷新脚本列表 → 选中目标脚本 → 进入编辑态。只动选择/编辑模式，不改四 Context。
+  // 面板切换由发起方（VideoDraft）经路由 query 完成，此处不重复导航。
+  watch(() => automationEditorRequest.seq, () => {
+    const scriptId = automationEditorRequest.scriptId
+    if (!scriptId) return
+    void (async () => {
+      try {
+        await refreshScripts()
+      } catch { /* 列表刷新失败时下方查找仍可能命中旧缓存 */ }
+      if (!scripts.value.some(x => x.id === scriptId)) {
+        toast(`未找到已保存的草稿脚本：${scriptId}`, 'warn')
+        return
+      }
+      selScript.value = scriptId
+      await editCurrentScript()
+    })()
+  })
 
   /** 运行模式：删除当前选中的脚本——脚本面板专属 */
   async function deleteCurrentScript() {

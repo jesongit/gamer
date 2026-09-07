@@ -229,7 +229,7 @@ async function remove(media) {
     await videoApi.deleteMedia(media.id)
     emit('changed')
   } catch (e) {
-    error.value = e?.status === 409 ? '素材被项目引用，无法删除' : describe(e, '删除失败')
+    error.value = e?.status === 409 ? '素材被视频项目引用，无法删除（先在项目中移除该素材或删除项目后重试）' : describe(e, '删除失败')
   }
 }
 

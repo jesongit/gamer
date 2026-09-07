@@ -21,3 +21,10 @@ export const TEMPLATE_DIR = 'templates'
 export const KEYMAP_DIR = 'mappings'
 /** gamer.video 插件内项目目录（Video Project schema 归插件定义，Core 不解释）。 */
 export const VIDEO_PROJECT_DIR = 'projects'
+
+/**
+ * gamer.yaml 自动化面板的 PanelRegistry key（Phase 7 草稿「打开编辑器」导航
+ * 契约动作 automation.open_editor 的落点）。panel_id 'automation' 由服务端
+ * gamer.yaml manifest 声明，此 key 仅作跨面板导航目标使用。
+ */
+export const GAMER_YAML_AUTOMATION_PANEL_KEY = `${GAMER_YAML_PLUGIN_ID}:automation`

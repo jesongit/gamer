@@ -8,6 +8,7 @@ import {
 } from './workspace/plugin-center/registry-client'
 import {
   dependencyStatus,
+  executionChangeDetail,
   executionLabel,
   hostVersionLabel,
   installErrorText,
@@ -224,5 +225,20 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
     expect(result).toMatchObject({ active_version: '2.9.0', state: 'enabled' })
     // requireId 在进入 fetch 前同步拒绝空版本
     expect(() => api.activateExtension('gamer.yaml', '')).toThrow('extension_version 不能为空')
+  })
+})
+
+// Phase 8 遗留（D2）：inspect 的 execution_change:{from,to} 必须在确认弹窗明确提示。
+describe('executionChangeDetail（wasm↔builtin 形态变化提示）', () => {
+  it('wasm → builtin 迁移给出警示行', () => {
+    expect(executionChangeDetail({ from: 'wasm', to: 'builtin' })).toContain('执行形态变化：wasm → builtin')
+    expect(executionChangeDetail({ from: 'builtin', to: 'wasm' })).toContain('builtin → wasm')
+  })
+
+  it('无变化/缺失/空字段不加行', () => {
+    expect(executionChangeDetail({ from: 'wasm', to: 'wasm' })).toBe('')
+    expect(executionChangeDetail(null)).toBe('')
+    expect(executionChangeDetail(undefined)).toBe('')
+    expect(executionChangeDetail({})).toBe('')
   })
 })

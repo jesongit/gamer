@@ -187,8 +187,9 @@ impl ResourceHandler for YamlResourceHandler {
 // ---------------------------------------------------------------------------
 
 /// 与前端模板短名规则保持一致：去掉颜色标记 `#1` 和搜索区域 `#...`，
-/// 保留扩展名。脚本通常引用短名，重命名模板时需要同时迁移这种引用。
-fn template_short_name(name: &str) -> String {
+/// 保留扩展名。脚本通常引用短名，重命名模板时需要同时迁移这种引用；
+/// Phase 7 起同规则的消费者还有 actions.rs（模板动作的短名冲突检测）。
+pub(crate) fn template_short_name(name: &str) -> String {
     let mut value = name.to_string();
     let lower = value.to_ascii_lowercase();
     for extension in [".jpeg", ".jpg", ".png"] {

@@ -78,18 +78,32 @@
           :markers="openProject.markers"
           :calibration="openProject.calibration"
           :recording-id="openProject.recording?.recording_id || ''"
+          :yaml-ready="yamlReady"
           @add-marker="onAddMarker"
           @remove-marker="onRemoveMarker"
           @update-marker="onUpdateMarker"
           @save-calibration="onSaveCalibration"
+          @create-template="openTemplateStudio"
         />
       </template>
       <div v-else class="zone-empty" data-testid="project-detail-empty">选择一个项目进行制作（打开项目会联动左侧画面来源）</div>
     </template>
 
     <template v-else>
-      <VideoDraft v-model:recording-id="recordingId" />
+      <VideoDraft v-model:recording-id="recordingId" :package-id="packageId" :yaml-ready="yamlReady" />
     </template>
+
+    <!-- 模板工作台弹窗（§10.2：确定帧 → 模板创建/离线测试；经 gamer.yaml 动作清单缝） -->
+    <TemplateStudio
+      :open="!!studio"
+      :media="studio?.media || null"
+      :frame="studio?.frame || null"
+      :calibration="openProject?.calibration || null"
+      :package-id="packageId"
+      :yaml-ready="yamlReady"
+      @close="studio = null"
+      @saved="onStudioSaved"
+    />
   </section>
 </template>
 
@@ -101,15 +115,20 @@
 //   不改 deviceId/androidPackageName/currentPackageId 四 Context）；
 // - 状态 UI：缺 Package / 素材缺失 / 保存冲突（version_conflict 可重载）。
 // 面板自取数据（videoApi），纯离线制作，不发送任何设备输入。
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import MediaLibrary from './MediaLibrary.vue'
+import TemplateStudio from './TemplateStudio.vue'
 import VideoDraft from './VideoDraft.vue'
 import VideoProjects from './VideoProjects.vue'
 import VideoTimeline from './VideoTimeline.vue'
 import { requestStageMedia } from '../console/useConsoleStage'
+import { api } from '../../api'
+import { templatesData } from '../../store'
 import { packageStore } from '../../package-store'
+import { GAMER_VIDEO_PLUGIN_ID } from '../../gamer-plugin-ids'
 import { videoApi } from './videoApi'
-import { assetStatus, newProject, parseProject, projectIdFromPath, serializeProject, validateProject, withCalibration, withMarker, withoutMarker, withMarkerText } from './videoProject'
+import { useYamlCapability } from './yamlCapability'
+import { assetStatus, newProject, parseProject, projectMediaIds, projectIdFromPath, serializeProject, validateProject, withCalibration, withMarker, withoutMarker, withMarkerText } from './videoProject'
 
 const TABS = [
   { key: 'library', label: '素材库' },
@@ -133,9 +152,33 @@ const projectSummaries = ref([]) // [{id, name, valid, markerCount, assetCount, 
 const openId = ref('')
 const openProject = ref(null) // 已解析项目对象（编辑中的本地工作副本）
 const projectVersion = ref('') // 打开/最近保存时的资源 version 短码（乐观并发）
+const loadedMediaIds = ref([]) // 打开（或最近保存）时服务端内容的媒体引用快照（引用同步的 before 基准）
 const projectDirty = ref(false)
 const saving = ref(false)
 const staleSaveError = ref('')
+
+// ---------- gamer.yaml 依赖门禁（§10.1）+ 模板工作台（§10.2） ----------
+// gamer.yaml 未 Running：模板创建/离线测试/草稿生成保存禁用并提示依赖；
+// 视频导入/录制/播放/标记/项目/校准不受影响。
+const { ready: yamlReady, start: startYamlWatch, stop: stopYamlWatch } = useYamlCapability()
+const studio = ref(null) // {media, frame:{frameIndex, ptsUs}}
+
+function openTemplateStudio(frame) {
+  if (!primaryMedia.value || !yamlReady.value) return
+  studio.value = {
+    media: primaryMedia.value,
+    frame: { frameIndex: frame?.frameIndex ?? null, ptsUs: frame?.ptsUs ?? null },
+  }
+}
+
+async function onStudioSaved(result) {
+  // 模板已落当前 Package 的 gamer.yaml templates/：刷新共享模板缓存（Console
+  // 模板页签/编辑器下拉共用 templatesData，与 useConsoleTemplates 同一 store）。
+  try {
+    templatesData.value = await api.listTemplates(packageId.value)
+  } catch { /* 缓存刷新失败不影响保存结果 */ }
+  void result
+}
 
 const openAsset = computed(() => (openProject.value
   ? (openProject.value.assets || []).find(asset => asset.role === 'primary') || null
@@ -192,6 +235,7 @@ async function loadProjects() {
             valid: true,
             markerCount: project.markers.length,
             assetCount: project.assets.length,
+            mediaIds: projectMediaIds(project),
             entry,
           }
         } catch (error) {
@@ -215,6 +259,7 @@ function closeOpenProject() {
   openId.value = ''
   openProject.value = null
   projectVersion.value = ''
+  loadedMediaIds.value = []
   projectDirty.value = false
   staleSaveError.value = ''
 }
@@ -234,6 +279,7 @@ async function openProjectById(id) {
     openId.value = id
     openProject.value = project
     projectVersion.value = entry.version
+    loadedMediaIds.value = projectMediaIds(project)
     projectDirty.value = false
     // 联动左侧舞台（主素材存在时）；只动舞台来源，不动设备/包身份
     if (assetStatus(project, mediaList.value).primary) {
@@ -264,6 +310,8 @@ async function createProject({ id, name }) {
   saving.value = true
   try {
     await videoApi.putProject(packageId.value, id, serializeProject(project))
+    // 新项目的素材引用随创建登记（Phase 8 契约 §2.1）
+    await syncProjectMediaRefs([], projectMediaIds(project))
     await loadProjects()
     await openProjectById(id)
   } catch (error) {
@@ -291,10 +339,15 @@ async function renameProject(id, newId) {
 
 async function deleteProject(id) {
   if (!packageId.value) return
+  // 删除前记下被删项目引用的素材：删除后解除其 gamer.video/project 引用
+  //（全量替换语义：按剩余项目并集重算，不再被引用的素材解除删除保护）
+  const summary = projectSummaries.value.find(item => item.id === id)
+  const before = [...(summary?.mediaIds || [])]
   try {
     await videoApi.deleteProject(packageId.value, id)
     if (openId.value === id) closeOpenProject()
     await loadProjects()
+    if (before.length) await syncProjectMediaRefs(before, [])
   } catch (error) {
     staleSaveError.value = describe(error, '项目删除失败')
   }
@@ -304,6 +357,7 @@ async function saveProject() {
   if (!openProject.value || !packageId.value || saving.value) return
   saving.value = true
   staleSaveError.value = ''
+  let before = [...loadedMediaIds.value]
   try {
     const content = serializeProject(openProject.value)
     const entry = await videoApi.putProject(packageId.value, openProject.value.id, content, {
@@ -311,6 +365,11 @@ async function saveProject() {
     })
     projectVersion.value = entry.version
     projectDirty.value = false
+    // Phase 8 契约 §2.1：项目保存 → 媒体引用登记/解除（全量替换同步；
+    // before = 打开时的引用快照，外部改动/素材移除也能被本次同步纠正）
+    const after = projectMediaIds(openProject.value)
+    loadedMediaIds.value = [...after]
+    await syncProjectMediaRefs(before, after)
     await loadProjects()
   } catch (error) {
     staleSaveError.value = isVersionConflict(error)
@@ -318,6 +377,39 @@ async function saveProject() {
       : describe(error, '项目保存失败')
   } finally {
     saving.value = false
+  }
+}
+
+/**
+ * 媒体引用全量替换同步（Phase 8 契约 §2.1）：对「本次保存前后引用的媒体」
+ * 逐一按当前 Package 内**全部项目**的引用并集重算 gamer.video/project 引用，
+ * 经 POST /api/media/:id/refs 全量替换（其余包/插件条目保留，多项目共享同一
+ * 素材时不互踩）。素材已删除（404）静默跳过；失败不阻断项目保存（引用同步
+ * 是可重放的声明式操作，下次保存自动补齐）。
+ */
+async function syncProjectMediaRefs(beforeIds, afterIds) {
+  if (!packageId.value) return
+  const affected = [...new Set([...(beforeIds || []), ...(afterIds || [])])]
+  if (!affected.length) return
+  const referencedByPackage = new Set(projectSummaries.value.flatMap(summary => summary.mediaIds || []))
+  for (const mediaId of affected) {
+    try {
+      const meta = await videoApi.getMedia(mediaId)
+      const existing = Array.isArray(meta?.refs) ? meta.refs : []
+      const kept = existing.filter(entry => !(
+        entry.plugin_id === GAMER_VIDEO_PLUGIN_ID && entry.kind === 'project' && entry.package_id === packageId.value
+      ))
+      const next = referencedByPackage.has(mediaId)
+        ? [...kept, { package_id: packageId.value, plugin_id: GAMER_VIDEO_PLUGIN_ID, kind: 'project' }]
+        : kept
+      const same = next.length === existing.length && next.every(entry => existing.some(other =>
+        other.package_id === entry.package_id && other.plugin_id === entry.plugin_id && other.kind === entry.kind))
+      if (!same) await videoApi.setMediaRefs(mediaId, next)
+    } catch (e) {
+      if (e?.status !== 404) {
+        staleSaveError.value = `媒体引用同步失败（${mediaId}）：${e?.message || e}（项目数据已保存，可重新保存以重试同步）`
+      }
+    }
   }
 }
 
@@ -371,6 +463,11 @@ function describe(error, fallback) {
 onMounted(() => {
   void refresh()
   void loadProjects()
+  startYamlWatch()
+})
+
+onUnmounted(() => {
+  stopYamlWatch()
 })
 
 // Package 切换（§38 Package-aware UI 自动联动）：项目属数据上下文，切换后

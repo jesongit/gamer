@@ -23,11 +23,12 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use super::yaml_extension::YAML_EXTENSION_ID;
 use crate::extensions::{ExtensionError, ExtensionResult};
 use crate::recording::InputEventRecord;
 
 /// gamer.yaml 的视频草稿生成动作名（合同 §5 钉死；前端 api.js 同词表）。
+/// Phase 7 起动作分发收口在 [`super::actions`] 的版本化公开动作清单，
+/// 本模块只保留草稿动作本体（清单内 Native 动作的实现）。
 pub(crate) const AUTOMATION_CREATE_DRAFT: &str = "automation.create_draft";
 
 /// 建议等待的最小间隔（毫秒）：低于该值的事件间隔不生成 wait 步骤。
@@ -35,34 +36,24 @@ const SUGGESTED_WAIT_MIN_MS: u64 = 500;
 /// 录制未记录滑动时长的建议值（毫秒）。
 const SUGGESTED_SWIPE_DURATION_MS: u64 = 300;
 
-/// Native call 动作分发缝（`extensions/mod.rs::native_call_action` 的 YAML
-/// 侧实现）：只应答本扩展的 `automation.create_draft`，其余 id/action 返回
-/// `None` 交回通用 declarative/常驻实例路径。
-pub(crate) fn native_call_action(
-    extension_id: &str,
-    action: &str,
-    values: &Value,
-    data_dir: &Path,
-) -> Option<ExtensionResult<Value>> {
-    if extension_id != YAML_EXTENSION_ID || action != AUTOMATION_CREATE_DRAFT {
-        return None;
-    }
-    Some(create_draft(values, data_dir))
-}
-
-/// call 入参（合同 §5）：`{"recording_id":"...","event_ids":["..."]?}`。
+/// call 入参（合同 §5 + Phase 7 §10.3 扩展）：
+/// `{"recording_id":"...","event_ids":["..."]?,"comments":{"<event_id>":"注释"}?}`。
+/// `comments`（§10.3 事件注释）：按事件 id 提供的注释文本会作为该步骤上方的
+/// YAML 注释行渲染（未知 id 的注释忽略——草稿只渲染已选事件）。
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DraftRequest {
     recording_id: String,
     #[serde(default)]
     event_ids: Option<Vec<String>>,
+    #[serde(default)]
+    comments: Option<std::collections::BTreeMap<String, String>>,
 }
 
-fn create_draft(values: &Value, data_dir: &Path) -> ExtensionResult<Value> {
+pub(crate) fn create_draft(values: &Value, data_dir: &Path) -> ExtensionResult<Value> {
     let request: DraftRequest = serde_json::from_value(values.clone()).map_err(|error| {
         ExtensionError::CallRejected(format!(
-            "automation.create_draft 入参无效（需要 recording_id + 可选 event_ids）: {error}"
+            "automation.create_draft 入参无效（需要 recording_id + 可选 event_ids/comments）: {error}"
         ))
     })?;
     let recording_id = request.recording_id.trim();
@@ -75,6 +66,7 @@ fn create_draft(values: &Value, data_dir: &Path) -> ExtensionResult<Value> {
     Ok(build_draft(
         recording_id,
         request.event_ids.as_deref(),
+        request.comments.as_ref(),
         &events,
     ))
 }
@@ -96,13 +88,18 @@ fn load_events(data_dir: &Path, recording_id: &str) -> ExtensionResult<Vec<Input
 }
 
 /// 纯函数草稿装配（load 之后的全部逻辑；测试直供事件夹具）。
+///
+/// Phase 7（§10.3）：`comments` = 事件 id → 注释文本（渲染为该步骤上方注释行）；
+/// 响应新增 `source` 回查信息（录制会话 id + 选中事件的 kind/时间轴/映射结果），
+/// 调用方（视频工作台草稿 JSON）据此保留「事件来源/时间/视频帧引用」。
 pub(crate) fn build_draft(
     recording_id: &str,
     event_ids: Option<&[String]>,
+    comments: Option<&std::collections::BTreeMap<String, String>>,
     events: &[InputEventRecord],
 ) -> Value {
     let (selected, selection_diagnostics) = select_events(event_ids, events);
-    let (step_lines, mapping_diagnostics) = render_steps(&selected);
+    let (step_lines, mapping_diagnostics) = render_steps(&selected, comments);
     let mut document = vec![
         "version: 3".to_string(),
         format!("# 草稿：由录制会话 {recording_id} 的操作事件生成（gamer.yaml automation.create_draft）。"),
@@ -116,10 +113,36 @@ pub(crate) fn build_draft(
     });
     document.extend(step_lines);
     let mut diagnostics = selection_diagnostics;
-    diagnostics.extend(mapping_diagnostics);
+    diagnostics.extend(mapping_diagnostics.clone());
+    // 回查信息：选中事件的来源/时间轴/映射结果（调用方写进草稿 JSON，供从
+    // 草稿回跳录像帧；事件 → 视频帧的对齐由调用方经分段 base_pts_us 完成）。
+    let selected_ids: std::collections::HashSet<&str> = selected
+        .iter()
+        .map(|event| event.event_id.as_str())
+        .collect();
+    let source_events: Vec<Value> = events
+        .iter()
+        .map(|event| {
+            json!({
+                "event_id": event.event_id,
+                "kind": event.kind,
+                "timeline_us": event.timeline_us,
+                "time_domain": event.time_domain,
+                "source": event.source,
+                "selected": selected_ids.contains(event.event_id.as_str()),
+                "mapped": mapping_diagnostics
+                    .iter()
+                    .all(|d| d["event_id"].as_str() != Some(event.event_id.as_str())),
+            })
+        })
+        .collect();
     json!({
         "yaml": document.join("\n") + "\n",
         "diagnostics": diagnostics,
+        "source": {
+            "recording_id": recording_id,
+            "events": source_events,
+        },
     })
 }
 
@@ -150,8 +173,13 @@ fn select_events<'a>(
     (selected, diagnostics)
 }
 
-/// 事件 → 步骤行（含建议间隔）；第二返回值为逐事件诊断。
-fn render_steps(events: &[&InputEventRecord]) -> (Vec<String>, Vec<Value>) {
+/// 事件 → 步骤行（含建议间隔与事件注释）；第二返回值为逐事件诊断。
+/// 注释（§10.3）：`comments` 给出该事件的注释文本时，在事件步骤（或其建议
+/// 等待）上方渲染 `# 注释` 行；换行压成空格防注释逃逸。
+fn render_steps(
+    events: &[&InputEventRecord],
+    comments: Option<&std::collections::BTreeMap<String, String>>,
+) -> (Vec<String>, Vec<Value>) {
     let mut lines = Vec::new();
     let mut diagnostics = Vec::new();
     // 上一个已映射事件的「结束时刻」（V1 事件只有起始时间轴；wait 用
@@ -163,6 +191,13 @@ fn render_steps(events: &[&InputEventRecord]) -> (Vec<String>, Vec<Value>) {
                 if let Some(gap) = suggested_wait(prev_end_us, event.timeline_us) {
                     lines.push(format!("  # 建议等待 {gap}ms（事件间隔推导）"));
                     lines.push(format!("  - wait: {gap}ms # 建议值"));
+                }
+                if let Some(comment) = comments
+                    .and_then(|map| map.get(&event.event_id))
+                    .map(|text| text.replace(['\r', '\n'], " "))
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    lines.push(format!("  # {comment}"));
                 }
                 lines.append(&mut step_lines);
                 prev_end_us = Some(end_us);
@@ -325,6 +360,8 @@ fn key_token(code: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extensions::gamer_yaml::actions::native_call_action;
+    use crate::extensions::gamer_yaml::YAML_EXTENSION_ID;
     use crate::recording::DisplaySize;
     use serde_json::json;
 
@@ -383,7 +420,7 @@ mod tests {
                 json!({"duration_us": 1_500_000}),
             ),
         ];
-        let result = build_draft("rec-test", None, &events);
+        let result = build_draft("rec-test", None, None, &events);
         assert!(diagnostics_of(&result).is_empty(), "{result}");
         let yaml = result["yaml"].as_str().unwrap();
         // 生成物必须通过 v3 parse + lowering（自证；否则草稿不可保存/运行）。
@@ -427,7 +464,7 @@ mod tests {
             event("evt-5", "swipe", 800_000, json!({"x": 1, "y": 2})),
             event("evt-6", "key", 900_000, json!({})),
         ];
-        let result = build_draft("rec-test", None, &events);
+        let result = build_draft("rec-test", None, None, &events);
         let diagnostics = diagnostics_of(&result);
         assert_eq!(diagnostics.len(), 5, "{result}");
         assert_eq!(diagnostics[0].0, "evt-2");
@@ -460,7 +497,7 @@ mod tests {
             width: 0,
             height: 0,
         };
-        let result = build_draft("rec-test", None, &[broken]);
+        let result = build_draft("rec-test", None, None, &[broken]);
         assert_eq!(
             result["yaml"].as_str().unwrap(),
             "version: 3\n# 草稿：由录制会话 rec-test 的操作事件生成（gamer.yaml automation.create_draft）。\n# 等待与滑动时长均为建议值；运行前需人工补充模板判断、状态等待、分支与异常恢复，\n# 再保存到当前 Package 的 automations/。草稿只返回文本，不会被自动执行。\nsteps: []\n"
@@ -478,7 +515,7 @@ mod tests {
             event("evt-c", "tap", 1_200_000, json!({"x": 384, "y": 216})),
         ];
         // 缺省 = 全部
-        let all = build_draft("rec-test", None, &events);
+        let all = build_draft("rec-test", None, None, &events);
         assert_eq!(all["yaml"].as_str().unwrap().matches(" - tap:").count(), 3);
         // 重排：b → a；缺失 id 进诊断
         let reordered = build_draft(
@@ -488,6 +525,7 @@ mod tests {
                 "evt-a".to_string(),
                 "evt-x".to_string(),
             ]),
+            None,
             &events,
         );
         let yaml = reordered["yaml"].as_str().unwrap();
@@ -504,7 +542,7 @@ mod tests {
         assert!(diagnostics[0].1.contains("不存在"), "{}", diagnostics[0].1);
         // 显式空表 = 全部事件
         let empty: Vec<String> = Vec::new();
-        let all_again = build_draft("rec-test", Some(&empty), &events);
+        let all_again = build_draft("rec-test", Some(&empty), None, &events);
         assert_eq!(
             all_again["yaml"]
                 .as_str()
@@ -532,6 +570,7 @@ mod tests {
         let result = build_draft(
             "rec-test",
             Some(&["evt-a".into(), "evt-b".into(), "evt-c".into()]),
+            None,
             &events,
         );
         let yaml = result["yaml"].as_str().unwrap();
@@ -550,7 +589,7 @@ mod tests {
             event("evt-b", "tap", 499_000, json!({"x": 20, "y": 20})),
             event("evt-c", "tap", 500_000, json!({"x": 30, "y": 30})),
         ];
-        let result = build_draft("rec-test", None, &events);
+        let result = build_draft("rec-test", None, None, &events);
         let yaml = result["yaml"].as_str().unwrap();
         super::super::yaml_vnext::load(yaml).unwrap();
         assert_eq!(yaml.matches("# 建议值").count(), 0, "{yaml}");
@@ -558,7 +597,7 @@ mod tests {
     }
 
     /// 分发缝只应答本扩展的 automation.create_draft；入参校验失败 →
-    /// CallRejected（REST 400 语义）。
+    /// CallRejected（REST 400 语义）。分发入口在 actions.rs（§10.1 清单）。
     #[test]
     fn native_call_action_gates_by_extension_and_action() {
         let data_dir = std::env::temp_dir();
@@ -608,5 +647,75 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(extra.contains("入参无效"), "{extra}");
+    }
+
+    /// Phase 7 §10.3：事件注释渲染为步骤上方注释行（换行压平防注释逃逸）；
+    /// 未知 id 的注释忽略；生成物仍通过 v3 parse。
+    #[test]
+    fn event_comments_render_above_steps_and_pass_v3_parse() {
+        let events = vec![
+            event("evt-a", "tap", 0, json!({"x": 10, "y": 10})),
+            event("evt-b", "tap", 100_000, json!({"x": 20, "y": 20})),
+            event("evt-c", "tap", 200_000, json!({"x": 30, "y": 30})),
+        ];
+        let mut comments = std::collections::BTreeMap::new();
+        comments.insert(
+            "evt-b".to_string(),
+            "打开背包后
+点第一格"
+                .to_string(),
+        );
+        comments.insert("evt-ghost".to_string(), "不该出现".to_string());
+        let result = build_draft("rec-test", None, Some(&comments), &events);
+        let yaml = result["yaml"].as_str().unwrap();
+        super::super::yaml_vnext::load(yaml).expect("带注释草稿必须通过 v3 parse");
+        assert!(
+            yaml.contains(
+                "  # 打开背包后 点第一格
+  - tap: [0.0104, 0.0185] # evt-b tap"
+            ),
+            "{yaml}"
+        );
+        assert!(!yaml.contains("不该出现"), "未知 id 的注释必须忽略: {yaml}");
+        // 空白注释不渲染
+        let mut blank = std::collections::BTreeMap::new();
+        blank.insert("evt-a".to_string(), "   ".to_string());
+        let clean = build_draft("rec-test", None, Some(&blank), &events);
+        assert!(
+            !clean["yaml"].as_str().unwrap().contains("  #   "),
+            "{clean}"
+        );
+    }
+
+    /// Phase 7 §10.3：source 回查信息 = 录制会话 id + 全部事件的 kind/时间轴/
+    /// 来源/选中/映射标记；选中且映射成功的事件 selected=true、mapped=true。
+    #[test]
+    fn source_block_records_provenance_for_backtrace() {
+        let events = vec![
+            event("evt-ok", "tap", 1_000, json!({"x": 5, "y": 5})),
+            event("evt-text", "text", 2_000, json!({"length": 3})),
+        ];
+        let result = build_draft(
+            "rec-77",
+            Some(&["evt-ok".to_string(), "evt-text".to_string()]),
+            None,
+            &events,
+        );
+        let source = &result["source"];
+        assert_eq!(source["recording_id"], "rec-77");
+        let rows = source["events"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["event_id"], "evt-ok");
+        assert_eq!(rows[0]["timeline_us"], 1_000);
+        assert_eq!(rows[0]["kind"], "tap");
+        assert_eq!(rows[0]["time_domain"], "recording");
+        assert_eq!(rows[0]["selected"], true);
+        assert_eq!(rows[0]["mapped"], true);
+        assert_eq!(rows[1]["selected"], true);
+        assert_eq!(rows[1]["mapped"], false, "text 进诊断 → mapped=false");
+        // 未选事件：selected=false 但仍在回查表（草稿 JSON 可回查全部来源）
+        let partial = build_draft("rec-77", Some(&["evt-ok".to_string()]), None, &events);
+        let rows = partial["source"]["events"].as_array().unwrap();
+        assert_eq!(rows[1]["selected"], false);
     }
 }

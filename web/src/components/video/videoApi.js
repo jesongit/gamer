@@ -8,7 +8,7 @@
 // 集成者后续可决定是否把本封装收编进 api.js。
 
 import { handleUnauthorized } from '../../auth'
-import { GAMER_VIDEO_PLUGIN_ID, VIDEO_PROJECT_DIR } from '../../gamer-plugin-ids'
+import { GAMER_VIDEO_PLUGIN_ID, GAMER_YAML_PLUGIN_ID, VIDEO_PROJECT_DIR } from '../../gamer-plugin-ids'
 
 /** 视频工作台 API 的稳定错误形态：调用方按 status / code / data 判断。 */
 function makeError(status, code, message, data = null, cause) {
@@ -90,6 +90,23 @@ function projectUrlOf(packageId, projectId) {
     .split('/')
     .map(segment => encodeURIComponent(segment))
     .join('/')}`
+}
+
+/**
+ * gamer.yaml 公开动作清单缝（Phase 7 §10.1）：视频侧对 YAML 栈的一切制作能力
+ * 调用只经 POST /api/extensions/gamer.yaml/call（动作由 gamer.yaml 集中声明并
+ * 分发），**禁止**直接写 gamer.yaml 私有目录或解析 YAML。返回 guest 结果的
+ * `data` 信封（未包信封时按原结果兜底）。
+ */
+async function callGamerYamlAction(action, values) {
+  const result = await request(
+    'POST',
+    `/api/extensions/${encodeURIComponent(GAMER_YAML_PLUGIN_ID)}/call`,
+    { action, values },
+  )
+  return (result && typeof result === 'object' && result.data && typeof result.data === 'object')
+    ? result.data
+    : result
 }
 
 export const videoApi = {
@@ -239,25 +256,96 @@ export const videoApi = {
   },
 
   /**
-   * 生成 YAML 草稿（合同 §5）：走既有扩展调用通路 POST /api/extensions/gamer.yaml/call，
-   * action = automation.create_draft；返回数据取 guest 结果的 `data` 字段
-   * `{yaml, diagnostics:[{event_id,reason}]}`（结果未包 data 信封时按原结果兜底）。
-   * 草稿只是文本返回：不落盘、不执行。
+   * 生成 YAML 草稿（合同 §5 + Phase 7 §10.3）：走动作清单缝
+   * POST /api/extensions/gamer.yaml/call，action = automation.create_draft；
+   * `comments` = 事件 id → 注释文本（服务端渲染为步骤上方注释行）。
+   * 返回数据取 guest 结果的 `data` 字段
+   * `{yaml, diagnostics:[{event_id,reason}], source:{recording_id,events}}`
+   * （结果未包 data 信封时按原结果兜底）。草稿只是文本返回：不落盘、不执行。
    */
-  createVideoDraft: async (recordingId, eventIds) => {
-    const result = await request(
-      'POST',
-      '/api/extensions/gamer.yaml/call',
-      {
-        action: 'automation.create_draft',
-        values: {
-          recording_id: requireId(recordingId, 'recording_id'),
-          event_ids: (Array.isArray(eventIds) ? eventIds : []).map(id => String(id)),
-        },
-      },
-    )
-    return (result && typeof result === 'object' && result.data && typeof result.data === 'object')
-      ? result.data
-      : result
+  createVideoDraft: async (recordingId, eventIds, comments = null) => {
+    const values = {
+      recording_id: requireId(recordingId, 'recording_id'),
+      event_ids: (Array.isArray(eventIds) ? eventIds : []).map(id => String(id)),
+    }
+    if (comments && typeof comments === 'object') {
+      values.comments = Object.fromEntries(
+        Object.entries(comments).map(([id, text]) => [String(id), String(text ?? '')]),
+      )
+    }
+    return callGamerYamlAction('automation.create_draft', values)
   },
+
+  /**
+   * 保存草稿为 automations 脚本（Phase 7 §10.3，动作清单 automation.save_draft）：
+   * 服务端 v3 保存钩子校验（非 v3 结构化拒绝）+ 重名需 overwrite。
+   * 返回 `{id:"<pkg>/<name>.yaml", path, package_id}`。
+   */
+  saveDraft: async ({ packageId, name, yaml, overwrite = false }) => callGamerYamlAction(
+    'automation.save_draft',
+    {
+      package_id: requireId(packageId, 'package_id'),
+      name: requireId(name, 'name'),
+      yaml: String(yaml ?? ''),
+      overwrite: overwrite === true,
+    },
+  ),
+
+  /**
+   * 从确定帧创建模板（Phase 7 §10.2，动作清单 template.create_from_frame）：
+   * 帧上裁剪 PNG（base64）+ 相对区域交给 gamer.yaml（服务端命名规则 + 灰度
+   * 归一化 + 短名冲突检测），并携带帧身份与校准元数据（来源追溯）。
+   * 返回 `{name, short_name, path, size, region, frame, calibration}`。
+   */
+  createTemplateFromFrame: async ({
+    packageId, name, pngBase64, region, preserveColor = false, overwrite = false, frame, calibration,
+  }) => callGamerYamlAction('template.create_from_frame', {
+    package_id: requireId(packageId, 'package_id'),
+    name: requireId(name, 'name'),
+    png_base64: requireId(pngBase64, 'png_base64'),
+    region: region.map(v => Number(v)),
+    preserve_color: preserveColor === true,
+    overwrite: overwrite === true,
+    frame,
+    calibration,
+  }),
+
+  /**
+   * 模板离线匹配测试（动作清单 vision.test_template = 复用 Core REST）：
+   * media 模式给 `frame {mediaId, frameIndex?, ptsUs?}`（与 device 互斥；
+   * 响应附帧身份 `frame` 字段）。region 为帧像素 [x,y,w,h]（可空 = 按模板名
+   * 规则解析）。绝不触达设备/ADB。
+   */
+  visionTestTemplate: async ({ packageId, name, threshold, region = null, frame }) => {
+    const body = {
+      pkg: requireId(packageId, 'package_id'),
+      plugin: GAMER_YAML_PLUGIN_ID,
+      name: requireId(name, 'name'),
+    }
+    if (threshold !== undefined && threshold !== null && Number.isFinite(Number(threshold))) {
+      body.threshold = Number(threshold)
+    }
+    if (Array.isArray(region) && region.length === 4) body.region = region.map(v => Math.max(0, Math.round(Number(v))))
+    if (frame?.mediaId) {
+      body.media_id = String(frame.mediaId)
+      if (frame.frameIndex !== undefined && frame.frameIndex !== null) body.frame_index = Math.max(0, Math.round(Number(frame.frameIndex)))
+      else if (frame.ptsUs !== undefined && frame.ptsUs !== null) body.pts_us = Math.max(0, Math.round(Number(frame.ptsUs)))
+    }
+    const result = await request('POST', '/api/capabilities/vision/test', body)
+    return result
+  },
+
+  /**
+   * 媒体引用全量替换（Phase 8 契约 §2.1，项目保存/素材移除时同步）：
+   * POST /api/media/:id/refs，body `{refs:[{package_id, plugin_id, kind}]}`。
+   */
+  setMediaRefs: async (id, refs) => request(
+    'POST',
+    `/api/media/${encodeURIComponent(requireId(id, 'media_id'))}/refs`,
+    { refs: (Array.isArray(refs) ? refs : []).map(entry => ({
+      package_id: requireId(entry.packageId, 'package_id'),
+      plugin_id: requireId(entry.pluginId, 'plugin_id'),
+      kind: requireId(entry.kind, 'kind'),
+    })) },
+  ),
 }

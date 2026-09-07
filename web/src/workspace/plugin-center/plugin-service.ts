@@ -67,6 +67,18 @@ export function normalizeExecution(value: unknown): PluginExecution {
   }
 }
 
+/**
+ * 执行形态变化提示行（Phase 8 §11.2 / Phase 4 遗留 D2）：inspect 响应携带
+ * `execution_change:{from,to}`（wasm↔builtin 迁移）时给出明确警示；无变化或
+ * 字段缺失返回空串（UI 不加行）。
+ */
+export function executionChangeDetail(change: { from?: unknown; to?: unknown } | null | undefined): string {
+  const from = String(change?.from ?? '').trim()
+  const to = String(change?.to ?? '').trim()
+  if (!from || !to || from === to) return ''
+  return `⚠️ 执行形态变化：${from} → ${to}（更新将改变插件的执行方式，请确认宿主支持目标形态）`
+}
+
 export function executionLabel(value: unknown): string {
   return normalizeExecution(value).kind === 'builtin'
     ? '宿主预置（需要 Gamer 宿主支持）'
