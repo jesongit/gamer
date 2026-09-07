@@ -1,23 +1,17 @@
 {
-    "schema_version":  1,
-    "generated_at":  "2026-09-07T06:13:37Z",
+    "schema_version":  2,
+    "generated_at":  "2026-09-07T14:07:43Z",
     "host_api":  "1.0.0",
     "plugins":  [
                     {
                         "id":  "gamer.keymap",
-                        "version":  "1.0.0",
+                        "version":  "1.0.1",
                         "name":  "键盘映射",
-                        "description":  "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键（WASM keymap 扩展，profile 数据通道见 keymap 存储）",
+                        "description":  "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
                         "publisher":  "gamer.dev",
-                        "download_url":  "/plugins/gamer.keymap-1.0.0.gplugin",
-                        "sha256":  "df6f07d970f05789c193b721f87c921f0b67bd9440b3595e99c4717acd66930c",
-                        "size":  99383,
-                        "signature":  {
-                                          "status":  "valid",
-                                          "key_id":  "gamer-dev-1",
-                                          "algorithm":  "ed25519",
-                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci5rZXltYXAtMS4wLjAuZ3BsdWdpbiIsImlkIjoiZ2FtZXIua2V5bWFwIiwia2V5X2lkIjoiZ2FtZXItZGV2LTEiLCJzaGEyNTYiOiJkZjZmMDdkOTcwZjA1Nzg5YzE5M2I3MjFmODdjOTIxZjBiNjdiZDk0NDBiMzU5NWU5OWM0NzE3YWNkNjY5MzBjIiwic2lnbmF0dXJlIjoiTWVSNXZNaDNucWxDa0x5QlB0U1FHMHNZaVNSNllnSjE4SVp6T1lKdUdxNk1NTDhCUU10TDkxVHVNL0d1MlJaUmNMdm9BaHJhbUtaTlphRUFMLzUzQ2c9PSIsInZlcnNpb24iOiIxLjAuMCJ9"
-                                      },
+                        "download_url":  "/plugins/gamer.keymap-1.0.1.gplugin",
+                        "sha256":  "1b2b14787f0c0edb0ee25337a47c65a615f4e90a187c7cee2dc9002ee703f356",
+                        "size":  99232,
                         "permissions":  [
                                             "input.tap",
                                             "input.swipe",
@@ -31,29 +25,69 @@
                         "ui":  {
                                    "contributions":  [
                                                          {
+                                                             "component":  "console.keymaps",
+                                                             "icon":  "⌨",
+                                                             "location":  "console.right",
+                                                             "order":  30,
                                                              "panel_id":  "keymaps",
-                                                             "title":  "映射",
+                                                             "preferred_width":  360,
+                                                             "requires_device":  true,
                                                              "runtime":  "core",
-                                                             "component":  "console.keymaps"
+                                                             "title":  "映射"
                                                          }
                                                      ]
-                               }
+                               },
+                        "execution":  {
+                                          "kind":  "wasm"
+                                      }
+                    },
+                    {
+                        "id":  "gamer.video",
+                        "version":  "1.0.0",
+                        "name":  "视频工作台",
+                        "description":  "视频工作台：媒体素材库、设备录制与操作草稿生成",
+                        "publisher":  "gamer.dev",
+                        "download_url":  "/plugins/gamer.video-1.0.0.gplugin",
+                        "sha256":  "c1329601d91a0522e68040ab373c4c495a26f7c6dd8b9069fc6f0ceafb95110e",
+                        "size":  692,
+                        "permissions":  [
+                                            "media.read",
+                                            "media.import",
+                                            "media.record",
+                                            "media.write",
+                                            "media.events.read"
+                                        ],
+                        "host_api":  {
+
+                                     },
+                        "ui":  {
+                                   "contributions":  [
+                                                         {
+                                                             "component":  "VideoWorkbench",
+                                                             "icon":  "🎬",
+                                                             "location":  "console.right",
+                                                             "order":  28,
+                                                             "panel_id":  "video",
+                                                             "preferred_width":  440,
+                                                             "requires_device":  false,
+                                                             "runtime":  "core",
+                                                             "title":  "视频"
+                                                         }
+                                                     ]
+                               },
+                        "execution":  {
+                                          "kind":  "builtin"
+                                      }
                     },
                     {
                         "id":  "gamer.yaml",
-                        "version":  "3.1.0",
+                        "version":  "3.1.1",
                         "name":  "自动化",
-                        "description":  "自动化：YAML v3 脚本、函数库与模板的制作与运行（version: 3 脚本经 YamlVnextAdapter 执行）",
+                        "description":  "自动化：YAML v3 脚本、函数库与模板的制作与运行",
                         "publisher":  "gamer.dev",
-                        "download_url":  "/plugins/gamer.yaml-3.1.0.gplugin",
-                        "sha256":  "83b3416e233fe560718349fce2d7cc6d31b30aeb7c20324ce865ce3ab81db52e",
-                        "size":  72727,
-                        "signature":  {
-                                          "status":  "valid",
-                                          "key_id":  "gamer-dev-1",
-                                          "algorithm":  "ed25519",
-                                          "value":  "eyJkb3dubG9hZF91cmwiOiIvcGx1Z2lucy9nYW1lci55YW1sLTMuMS4wLmdwbHVnaW4iLCJpZCI6ImdhbWVyLnlhbWwiLCJrZXlfaWQiOiJnYW1lci1kZXYtMSIsInNoYTI1NiI6IjgzYjM0MTZlMjMzZmU1NjA3MTgzNDlmY2UyZDdjYzZkMzFiMzBhZWI3YzIwMzI0Y2U4NjVjZTNhYjgxZGI1MmUiLCJzaWduYXR1cmUiOiIvMCtBZ0wxY1RyQmVOdXBnZ2lzZjJ3bTZ2THprMEhpVHkrUzZ1WVZIVVBoVE9OWTJMU01zeERyQnd1cEdqZnNFRlhBeDZ2WnQ0S1RYbnVLTjRTbE5BZz09IiwidmVyc2lvbiI6IjMuMS4wIn0="
-                                      },
+                        "download_url":  "/plugins/gamer.yaml-3.1.1.gplugin",
+                        "sha256":  "a47b713f959d564cd3d96a85c50a4f8cd158a261315661c7b14ae079a94975e1",
+                        "size":  72818,
                         "permissions":  [
                                             "device.read",
                                             "device.app",
@@ -69,34 +103,52 @@
                                         ],
                         "host_api":  {
                                          "device":  "^1.0",
-                                         "vision":  "^1.0",
                                          "input":  "^1.0",
+                                         "log":  "^1.0",
                                          "resource":  "^1.0",
                                          "runtime":  "^1.0",
-                                         "log":  "^1.0"
+                                         "vision":  "^1.0"
                                      },
                         "ui":  {
                                    "contributions":  [
                                                          {
+                                                             "component":  "console.scripts",
+                                                             "icon":  "⚙️",
+                                                             "location":  "console.right",
+                                                             "order":  25,
                                                              "panel_id":  "automation",
-                                                             "title":  "自动化",
+                                                             "preferred_width":  440,
+                                                             "requires_device":  true,
                                                              "runtime":  "core",
-                                                             "component":  "console.scripts"
+                                                             "title":  "自动化"
                                                          },
                                                          {
+                                                             "component":  "console.functions",
+                                                             "icon":  "ƒ",
+                                                             "location":  "console.right",
+                                                             "order":  30,
                                                              "panel_id":  "functions",
-                                                             "title":  "函数",
+                                                             "preferred_width":  440,
+                                                             "requires_device":  false,
                                                              "runtime":  "core",
-                                                             "component":  "console.functions"
+                                                             "title":  "函数"
                                                          },
                                                          {
+                                                             "component":  "console.templates",
+                                                             "icon":  "🖼️",
+                                                             "location":  "console.right",
+                                                             "order":  35,
                                                              "panel_id":  "templates",
-                                                             "title":  "模板",
+                                                             "preferred_width":  440,
+                                                             "requires_device":  true,
                                                              "runtime":  "core",
-                                                             "component":  "console.templates"
+                                                             "title":  "模板"
                                                          }
                                                      ]
-                               }
+                               },
+                        "execution":  {
+                                          "kind":  "wasm"
+                                      }
                     }
                 ]
 }

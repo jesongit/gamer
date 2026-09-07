@@ -1,14 +1,16 @@
 [package]
 name = "gamer-plugin-signer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Dev 插件市场签名工具：生成 ed25519 keypair、打包 .gplugin（manifest+签名）、产出 Registry proof。仅本地市场用。"
+description = "官方插件打包工具：pack（无签名 .gplugin）/ inspect（manifest 元数据）/ verify（归档自检）。keygen/sign 仅作 legacy 保留，默认构建链不调用。"
 
 [dependencies]
-ed25519-dalek = "2"
 sha2 = "0.10"
-base64 = "0.22"
 zip = "2"
 serde_json = "1"
-# keygen 的 OS 随机源（与主仓 rand 版本对齐，复用编译缓存）
+# manifest.toml 解析（manifest v2：[execution] kind=wasm|builtin + 元数据收敛的唯一权威源）
+toml = "0.8"
+# legacy sign/keygen 子命令（默认链不调用）：
+ed25519-dalek = "2"
+base64 = "0.22"
 rand = "0.8"
