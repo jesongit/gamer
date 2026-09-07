@@ -4,6 +4,7 @@ import { createApp, defineComponent, h } from 'vue'
 import KeymapPanel from './components/console/KeymapPanel.vue'
 import ScriptRunner from './components/console/ScriptRunner.vue'
 import TemplateCapture from './components/console/TemplateCapture.vue'
+import VideoWorkbench from './components/video/VideoWorkbench.vue'
 import {
   CORE_PANEL_COMPONENTS,
   resolveCoreComponent,
@@ -45,6 +46,16 @@ describe('Console core panel component registry', () => {
     // scripts 面板上下文与 functions 面板上下文互不读取对方作用域
     expect(scripts?.getProps?.({ scriptRunner: { functions: { kind: 'func-panel' } } }))
       .toEqual({ context: undefined })
+  })
+
+  it('maps gamer.video manifest component key VideoWorkbench (self-contained, no context injection)', () => {
+    // 合同 §5：gamer.video manifest `component = "VideoWorkbench"`（宿主组件名字面量）
+    expect(CORE_PANEL_COMPONENTS.video).toBe('VideoWorkbench')
+    const video = resolveCoreComponent('VideoWorkbench')
+    expect(video?.component).toBe(VideoWorkbench)
+    expect(video?.panelClass).toBe('video-tab')
+    // 面板自取数据（videoApi 直调媒体/录制 REST），不需要宿主 context 提取
+    expect(video?.getProps).toBeUndefined()
   })
 
   it('returns null for unknown keys; placeholder descriptor never throws', () => {

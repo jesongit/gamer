@@ -1,6 +1,7 @@
 import KeymapPanel from '../components/console/KeymapPanel.vue'
 import ScriptRunner from '../components/console/ScriptRunner.vue'
 import TemplateCapture from '../components/console/TemplateCapture.vue'
+import VideoWorkbench from '../components/video/VideoWorkbench.vue'
 import type { CorePanelDescriptor } from './contribution-manager'
 
 /**
@@ -13,6 +14,7 @@ export const CORE_PANEL_COMPONENTS = {
   functions: 'console.functions',
   templates: 'console.templates',
   keymaps: 'console.keymaps',
+  video: 'VideoWorkbench',
 } as const
 
 const DESCRIPTORS: Record<string, CorePanelDescriptor> = {
@@ -45,6 +47,12 @@ const DESCRIPTORS: Record<string, CorePanelDescriptor> = {
     panelClass: 'extra-tab',
     aliases: ['keymap'],
     getProps: context => ({ context: context.keymap }),
+  },
+  // 视频工作台（gamer.video）：面板自取数据（components/video/videoApi.js 直调
+  // 媒体/录制 REST），不需要宿主 context 注入。
+  [CORE_PANEL_COMPONENTS.video]: {
+    component: VideoWorkbench,
+    panelClass: 'video-tab',
   },
 }
 
