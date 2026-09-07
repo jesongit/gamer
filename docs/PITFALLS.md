@@ -288,3 +288,7 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **YAML v3 `key` 步骤只接受字符串 keycode**（命名键或数字字符串如 `key: "1234"`）：整数形态运行时报「key 必须是按键名字符串」——草稿生成与手写脚本同源注意（词表见 `yaml_extension.rs::key_code`）。
 - **内存墙的假错还有「元数据失效」形态，别误判成工具链/target 损坏去 `cargo clean`**：`only metadata stub found for rlib dependency core/object`、`cannot resolve a prelude import`、`cannot find Option/Ok/Some`（shlex/syn 等无辜 crate 报 core 相关错）与 ICE 同根源——并发 rustc 撞提交内存（commit）上限，挂掉的进程留下半截 rmeta 连累下游，每轮崩点不同、看似随机；本机曾因此误清健康的 target 增量缓存。处理同上：`CARGO_PROFILE_DEV_DEBUG=0` + 降 `-j` 重跑，cargo 增量渐进恢复；判据是单独 `rustc` 编译小文件全绿、`cargo check` 全新最小项目也绿。
 - **cmd 里 `set X=0 && 下一条` 会把尾随空格赋进变量**：`CARGO_PROFILE_DEV_DEBUG=0 `（带空格）让 cargo 直接报 `error in environment variable ... could not load config key profile.dev.debug` 假失败（与构建无关）；写作 `set "X=0"` 引号形式。
+- **PluginCenter 操作成功提示（notice）会被紧随的 `refresh()` 清掉**：`refresh()` 开头 `clearMessages()`，notice 在 refresh 之前赋值等于白写（安装提示曾这样闪没）——统一「先 `await refresh()` 再赋 notice」（activateVersion 与 installArchive 均按此序）。
+- **PS 5.1 读 UTF-8 无 BOM 的 .ps1 会按 ANSI 解析**：中文字符串/注释里的多字节序列可能恰好解码出引号类字符，脚本直接 ParserError（报错位置与真实语法无关）——含中文的 .ps1 必须保存为 UTF-8 **带 BOM**（`tools/build-plugins.ps1` 即踩此坑；Write 工具默认无 BOM）。
+- **PS 5.1 对 `[pscustomobject]` 赋不存在的属性直接抛错**（`在此对象上找不到属性"X"`）：不能先建对象再 `$o.NewProp = ...` 补属性，所有属性要在 `[pscustomobject]@{}` 字面量里一次声明（占位 `$null` 即可）。
+- **Git Bash 里 `sed -i`/`perl -pi` 的模式含 `\n`（反斜杠+字母）会静默不替换**：MSYS 运行时对命令行参数做路径/转义改写，`\n` 到达工具时已被折叠成别的形态，匹配不中却退出码为 0（rust 源码里形如 `manifest_version = 1\nid = ...` 的 Rust 字符串字面量整行替换两次落空）——此类「源码字面量批量改写」用 Edit/Write 工具按唯一锚点改，或改完立即 grep 复核替换是否真的发生。
