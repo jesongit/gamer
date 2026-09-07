@@ -1940,7 +1940,10 @@ mod effective_region_tests {
             effective_search_region(None, Some("关闭登录#700_147_736_207.png"), 1000, 1000),
             Some([700, 147, 36, 60])
         );
-        assert_eq!(effective_search_region(None, Some("无后缀.png"), 1000, 1000), None);
+        assert_eq!(
+            effective_search_region(None, Some("无后缀.png"), 1000, 1000),
+            None
+        );
         assert_eq!(effective_search_region(None, None, 1000, 1000), None);
     }
 }

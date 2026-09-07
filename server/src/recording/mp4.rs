@@ -108,7 +108,12 @@ impl H264Mp4Writer {
 
     /// 写入一个访问单元（Annex-B，一帧一样本），pts 为段内相对时间（µs）。
     /// 返回写入 mdat 的字节数（纯参数集包返回 0）。
-    pub fn write_annexb_sample(&mut self, au: &[u8], pts_us: u64, keyframe: bool) -> io::Result<usize> {
+    pub fn write_annexb_sample(
+        &mut self,
+        au: &[u8],
+        pts_us: u64,
+        keyframe: bool,
+    ) -> io::Result<usize> {
         let mut avcc = Vec::with_capacity(au.len() + 16);
         for nal in split_annexb(au) {
             match nal_type(nal) {
@@ -170,7 +175,9 @@ impl H264Mp4Writer {
             return Err(io::Error::other("muxer already finished"));
         }
         if !self.has_config() {
-            return Err(io::Error::other("missing SPS/PPS (no decodable start point)"));
+            return Err(io::Error::other(
+                "missing SPS/PPS (no decodable start point)",
+            ));
         }
         if self.samples == 0 {
             return Err(io::Error::other("no samples written"));
@@ -333,10 +340,10 @@ impl H264Mp4Writer {
         mdia.extend(box_bytes(b"hdlr", &hdlr));
         mdia.extend(box_bytes(b"minf", &minf));
 
-        let trak = box_bytes(b"trak", &push_all(
-            box_bytes(b"tkhd", &tkhd),
-            &box_bytes(b"mdia", &mdia),
-        ));
+        let trak = box_bytes(
+            b"trak",
+            &push_all(box_bytes(b"tkhd", &tkhd), &box_bytes(b"mdia", &mdia)),
+        );
         box_bytes(b"moov", &push_all(box_bytes(b"mvhd", &mvhd), &trak))
     }
 
@@ -400,7 +407,12 @@ pub(crate) fn au_contains_param_set(au: &[u8]) -> bool {
 // ---------- box 构造 ----------
 
 fn full_header(version: u8, flags: u32) -> Vec<u8> {
-    vec![version, (flags >> 16) as u8, (flags >> 8) as u8, flags as u8]
+    vec![
+        version,
+        (flags >> 16) as u8,
+        (flags >> 8) as u8,
+        flags as u8,
+    ]
 }
 
 fn push_all(mut base: Vec<u8>, extra: &[u8]) -> Vec<u8> {
@@ -478,7 +490,10 @@ mod tests {
         let mut i = 0usize;
         while i + 8 <= buf.len() {
             let size = u32::from_be_bytes(buf[i..i + 4].try_into().unwrap()) as usize;
-            assert!(size >= 8 && i + size <= buf.len(), "bad box size {size} at {i}");
+            assert!(
+                size >= 8 && i + size <= buf.len(),
+                "bad box size {size} at {i}"
+            );
             let kind = String::from_utf8_lossy(&buf[i + 4..i + 8]).to_string();
             out.push((kind, (i + 8, i + size)));
             i += size;
@@ -571,7 +586,11 @@ mod tests {
         let (moov_s, moov_e) = top[2].1;
         let moov = walk_nested(&file, (moov_s, moov_e));
         let find_in = |boxes: &[(String, (usize, usize))], k: &str| {
-            boxes.iter().find(|(name, _)| name == k).unwrap_or_else(|| panic!("missing {k}")).1
+            boxes
+                .iter()
+                .find(|(name, _)| name == k)
+                .unwrap_or_else(|| panic!("missing {k}"))
+                .1
         };
         let trak = find_in(&moov, "trak");
         let trak_boxes = walk_nested(&file, trak);
@@ -585,7 +604,11 @@ mod tests {
         // stsz：count=5，sum(sizes) == mdat payload 长度
         let stsz_r = find_in(&stbl_boxes, "stsz");
         let stsz = &file[stsz_r.0..stsz_r.1];
-        assert_eq!(u32::from_be_bytes(stsz[4..8].try_into().unwrap()), 0, "sample_size=0");
+        assert_eq!(
+            u32::from_be_bytes(stsz[4..8].try_into().unwrap()),
+            0,
+            "sample_size=0"
+        );
         let count = u32::from_be_bytes(stsz[8..12].try_into().unwrap());
         assert_eq!(count, 5);
         let mut total = 0u64;
@@ -594,7 +617,8 @@ mod tests {
         }
         assert_eq!(total, mdat.len() as u64, "样本表与 mdat 一致");
         // mdat 占位 size 回填 = payload + 8
-        let mdat_size = u32::from_be_bytes(file[top[1].1.0 - 8..top[1].1.0 - 4].try_into().unwrap());
+        let mdat_size =
+            u32::from_be_bytes(file[top[1].1 .0 - 8..top[1].1 .0 - 4].try_into().unwrap());
         assert_eq!(mdat_size as u64, mdat.len() as u64 + 8);
 
         // stts：0/33333/33334/33333/33333
@@ -656,7 +680,10 @@ mod tests {
         );
         let avcc = &file[avcc_start + 8..avcc_start + avcc_size];
         let needle = [0xE1u8, 0, sps.len() as u8];
-        let pos = avcc.windows(needle.len()).position(|w| w == needle).expect("avcC SPS 长度前缀");
+        let pos = avcc
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("avcC SPS 长度前缀");
         assert_eq!(&avcc[pos + 3..pos + 3 + sps.len()], &sps[..]);
 
         // 样本无损（AVCC 化 = 去参数集 + 4 字节长度前缀）：
@@ -668,7 +695,11 @@ mod tests {
         expect.extend(idr);
         expect.extend((sei.len() as u32).to_be_bytes());
         expect.extend(&sei);
-        assert_eq!(&mdat[..expect.len()], &expect[..], "首样本 = IDR + SEI（参数集剥离）");
+        assert_eq!(
+            &mdat[..expect.len()],
+            &expect[..],
+            "首样本 = IDR + SEI（参数集剥离）"
+        );
 
         std::fs::remove_dir_all(dir).ok();
     }
@@ -686,7 +717,8 @@ mod tests {
         assert!(w.finish().is_err(), "无样本不允许收口");
 
         let mut w = H264Mp4Writer::create(&path, 64, 64).unwrap();
-        w.write_annexb_sample(&annexb(&[&nal(5, &[1])]), 0, true).unwrap();
+        w.write_annexb_sample(&annexb(&[&nal(5, &[1])]), 0, true)
+            .unwrap();
         assert!(w.finish().is_err(), "无参数集不允许收口");
         std::fs::remove_dir_all(dir).ok();
     }
@@ -706,10 +738,24 @@ mod tests {
         let out = dir.join("out.mp4");
         let gen = std::process::Command::new("ffmpeg")
             .args([
-                "-y", "-loglevel", "error", "-f", "lavfi",
-                "-i", "testsrc=duration=2:size=128x96:rate=10",
-                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-                "-x264-params", "keyint=10", "-f", "h264", raw.to_str().unwrap(),
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=2:size=128x96:rate=10",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                "keyint=10",
+                "-f",
+                "h264",
+                raw.to_str().unwrap(),
             ])
             .status()
             .expect("ffmpeg 可用");
@@ -752,9 +798,16 @@ mod tests {
 
         let probe = std::process::Command::new("ffprobe")
             .args([
-                "-v", "error", "-select_streams", "v:0", "-show_streams",
-                "-show_entries", "stream=nb_frames,duration,codec_name,width,height",
-                "-of", "json", out.to_str().unwrap(),
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_streams",
+                "-show_entries",
+                "stream=nb_frames,duration,codec_name,width,height",
+                "-of",
+                "json",
+                out.to_str().unwrap(),
             ])
             .output()
             .expect("ffprobe 可用");

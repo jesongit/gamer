@@ -48,12 +48,14 @@ pub enum EntrypointQueryError {
     Describe(EntrypointDescribeError),
 }
 
+/// runner_id → (owner_extension_id, describer)；生命周期与 runner 注册同步。
+type DescriberEntry = (String, Arc<dyn EntrypointDescriber>);
+
 pub struct Scheduler {
     core: Arc<TimerCore>,
     runners: Arc<TimerRunnerRegistry>,
     schedules: Arc<ScheduleRegistry>,
-    /// runner_id → (owner_extension_id, describer)；生命周期与 runner 注册同步。
-    describers: Mutex<HashMap<String, (String, Arc<dyn EntrypointDescriber>)>>,
+    describers: Mutex<HashMap<String, DescriberEntry>>,
 }
 
 impl Scheduler {

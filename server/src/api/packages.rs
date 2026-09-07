@@ -28,7 +28,6 @@
 //! （import）不经过内容校验。导入/复制后自动发布包内
 //! `plugins/*/presets/*.yaml` 为任务预设（发布 id `<package-id>:<名>`，幂等）。
 
-
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -42,7 +41,7 @@ use serde_json::{json, Value};
 use super::common::run_blocking_api;
 use super::{ApiError, AppState};
 use crate::package_archive::{
-    self, extract_archive, export_package, validate_and_read_manifest, ArchiveError,
+    self, export_package, extract_archive, validate_and_read_manifest, ArchiveError,
 };
 use crate::resources::{is_valid_scope_id, PackageInput, PackageStore};
 
@@ -184,11 +183,7 @@ pub(super) async fn api_create_package(
             name: req.name,
             version: req.version,
             author: req.author,
-            android_targets: req
-                .targets
-                .android
-                .map(|a| a.packages)
-                .unwrap_or_default(),
+            android_targets: req.targets.android.map(|a| a.packages).unwrap_or_default(),
             plugins: req.plugins,
         };
         let manifest = store.create_package(input).map_err(store_error)?;
@@ -236,7 +231,9 @@ pub(super) async fn api_package_compatibility(
     Query(q): Query<CompatibilityQuery>,
 ) -> Response {
     match run_blocking_api(move || -> Result<Value, ApiError> {
-        let manifest = store_of(&st).manifest(&pkg).map_err(not_found_or_internal)?;
+        let manifest = store_of(&st)
+            .manifest(&pkg)
+            .map_err(not_found_or_internal)?;
         let compatible = manifest.android_targets.is_empty()
             || manifest.android_targets.contains(&q.android_package);
         Ok(json!({
@@ -384,8 +381,7 @@ pub(super) async fn api_duplicate_package(
         let manifest = store
             .duplicate_package(&pkg, &new_id)
             .map_err(store_error)?;
-        publish_package_presets(&store, st.db.clone(), &manifest.id)
-            .map_err(internal)?;
+        publish_package_presets(&store, st.db.clone(), &manifest.id).map_err(internal)?;
         Ok(manifest_json(&manifest))
     })
     .await
@@ -472,7 +468,13 @@ pub(super) async fn api_get_plugin_resource(
     .await;
     match read_binary {
         Ok(Some(bytes)) => {
-            let mime = match mime_path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+            let mime = match mime_path
+                .rsplit('.')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .as_str()
+            {
                 "jpg" | "jpeg" => "image/jpeg",
                 "txt" | "json" | "toml" => "text/plain; charset=utf-8",
                 _ => "application/octet-stream",
@@ -513,8 +515,10 @@ pub(super) async fn api_put_plugin_resource(
         .unwrap_or(false);
     if is_json {
         let Ok(req) = serde_json::from_slice::<PutTextResourceReq>(&body) else {
-            return ApiError::bad_request("请求体必须是 JSON 对象 {content, expected_version?, force?}")
-                .into_response();
+            return ApiError::bad_request(
+                "请求体必须是 JSON 对象 {content, expected_version?, force?}",
+            )
+            .into_response();
         };
         if req.content.len() > super::common::TEXT_RESOURCE_MAX_BYTES {
             return ApiError::bad_request("资源内容超过 1 MiB").into_response();
@@ -811,7 +815,10 @@ pub(super) async fn api_export_package(
 
 /// 解析一个包内预设 YAML（`name/runner_id/entrypoint/payload/schedule`，
 /// schedule 以 `{kind, value}` 声明）。包安装侧与导入侧同一解析器。
-fn parse_package_preset(bytes: &[u8], source: &str) -> anyhow::Result<crate::timer_core::PackagePreset> {
+fn parse_package_preset(
+    bytes: &[u8],
+    source: &str,
+) -> anyhow::Result<crate::timer_core::PackagePreset> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct RawPreset {
@@ -824,8 +831,8 @@ fn parse_package_preset(bytes: &[u8], source: &str) -> anyhow::Result<crate::tim
     }
     let text = std::str::from_utf8(bytes)
         .map_err(|error| anyhow::anyhow!("{source}: 必须是 UTF-8 ({error})"))?;
-    let raw: RawPreset = serde_yaml::from_str(text)
-        .map_err(|error| anyhow::anyhow!("{source}: {error}"))?;
+    let raw: RawPreset =
+        serde_yaml::from_str(text).map_err(|error| anyhow::anyhow!("{source}: {error}"))?;
     for (field, value) in [
         ("name", raw.name.as_str()),
         ("runner_id", raw.runner_id.as_str()),
@@ -917,10 +924,10 @@ fn expected_sha256_of(headers: &HeaderMap) -> Result<Option<String>, Response> {
     let value = match value.to_str() {
         Ok(value) => value.trim().to_string(),
         Err(error) => {
-            return Err(ApiError::bad_request(format!(
-                "{EXPECTED_SHA256_HEADER} 头无效: {error}"
-            ))
-            .into_response())
+            return Err(
+                ApiError::bad_request(format!("{EXPECTED_SHA256_HEADER} 头无效: {error}"))
+                    .into_response(),
+            )
         }
     };
     if !(value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())) {
@@ -941,7 +948,9 @@ fn internal(e: anyhow::Error) -> ApiError {
 #[allow(clippy::result_large_err)]
 fn store_error(e: anyhow::Error) -> ApiError {
     let message = e.to_string();
-    if e.downcast_ref::<crate::resources::PackageNotFound>().is_some() {
+    if e.downcast_ref::<crate::resources::PackageNotFound>()
+        .is_some()
+    {
         ApiError::not_found(message)
     } else if message.contains("已被其他页面修改")
         || message.contains("expected_revision")
@@ -967,7 +976,9 @@ fn store_error(e: anyhow::Error) -> ApiError {
 
 #[allow(clippy::result_large_err)]
 fn not_found_or_internal(e: anyhow::Error) -> ApiError {
-    let is_missing = e.downcast_ref::<crate::resources::PackageNotFound>().is_some()
+    let is_missing = e
+        .downcast_ref::<crate::resources::PackageNotFound>()
+        .is_some()
         || e.to_string().contains("不存在");
     if is_missing {
         ApiError::not_found(e.to_string())
@@ -980,13 +991,10 @@ fn not_found_or_internal(e: anyhow::Error) -> ApiError {
 fn archive_error(e: ArchiveError) -> ApiError {
     match &e {
         ArchiveError::NotFound(_) => ApiError::not_found(e.to_string()),
-        ArchiveError::Io(_) | ArchiveError::Zip(_) => {
-            internal(anyhow::anyhow!(e.to_string()))
+        ArchiveError::Io(_) | ArchiveError::Zip(_) => internal(anyhow::anyhow!(e.to_string())),
+        ArchiveError::ArchiveTooLarge { .. } => {
+            ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, e.to_string())
         }
-        ArchiveError::ArchiveTooLarge { .. } => ApiError::new(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            e.to_string(),
-        ),
         _ => ApiError::bad_request(e.to_string()),
     }
 }

@@ -131,10 +131,12 @@ mod sec_tests {
             Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let devices = Arc::new(DeviceManager::new(db.clone(), cfg.clone()));
         // 生产执行器装配（v3-only；设备离线时 prepare 即失败，正好覆盖"连接失败锁释放"路径）
-        let executor = Arc::new(crate::extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
-            devices.clone(),
-            db.clone(),
-        ));
+        let executor = Arc::new(
+            crate::extensions::gamer_yaml::runner_adapter::EngineExecutor::new(
+                devices.clone(),
+                db.clone(),
+            ),
+        );
         assemble_app(
             db, devices, cfg, scripts, viewers, credential, auth_cfg, executor,
         )
@@ -241,11 +243,7 @@ mod sec_tests {
             auth.clone(),
             update,
         );
-        TestApp {
-            app,
-            devices,
-            dir,
-        }
+        TestApp { app, devices, dir }
     }
 
     fn req(
@@ -388,9 +386,7 @@ mod sec_tests {
                 &format!("/api/packages/{pkg}/plugins/{plugin}/resources/{path}"),
                 None,
                 &json_headers(sid.to_string()),
-                Some(
-                    serde_json::json!({ "content": content, "force": true }).to_string(),
-                ),
+                Some(serde_json::json!({ "content": content, "force": true }).to_string()),
             ),
         )
         .await

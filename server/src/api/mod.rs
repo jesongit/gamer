@@ -227,8 +227,7 @@ pub(crate) fn build_router_with_extensions(
         )
         .route(
             "/api/packages/:pkg/plugins/:plugin/resources/*path",
-            get(packages::api_get_plugin_resource)
-                .delete(packages::api_delete_plugin_resource),
+            get(packages::api_get_plugin_resource).delete(packages::api_delete_plugin_resource),
         )
         // 模板/资源重命名：经插件 ResourceHandler::before_rename 钩子（gamer.yaml
         // 的模板引用 v3 AST 同步改写）后原子移动（资源 CRUD 面不承载该组合语义）
@@ -349,7 +348,10 @@ pub(crate) fn build_router_with_extensions(
     //      归档侧另有 entries/解压总量/单文件/manifest 硬限（package_archive）。
     let protected_import: Router<()> = Router::new()
         .route("/api/packages/import", post(packages::api_import_package))
-        .route("/api/packages/:pkg/export", post(packages::api_export_package))
+        .route(
+            "/api/packages/:pkg/export",
+            post(packages::api_export_package),
+        )
         .with_state(state.clone())
         .route_layer(axmw::from_fn_with_state(
             state.auth.clone(),
@@ -360,7 +362,8 @@ pub(crate) fn build_router_with_extensions(
     // ---- 受保护组（视频工作台 V1）：媒体导入/播放/精确帧 + 录制控制。
     //      合同：docs/plans/gamer_video_workbench_contracts.md；大字节上传
     //      （视频导入）与普通 JSON 共用同一认证语义，限额见 common 常量。
-    let protected_media: Router<()> = media::router()        .with_state(state.clone())
+    let protected_media: Router<()> = media::router()
+        .with_state(state.clone())
         .route_layer(axmw::from_fn_with_state(
             state.auth.clone(),
             auth::auth_guard,

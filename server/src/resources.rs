@@ -51,9 +51,7 @@ pub fn validate_scope_id(kind: &str, value: &str) -> anyhow::Result<()> {
     }
     if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_'))
     {
-        anyhow::bail!(
-            "{kind} 只允许小写字母、数字与 . _ -（禁止路径分隔符与大写）: {value:?}"
-        );
+        anyhow::bail!("{kind} 只允许小写字母、数字与 . _ -（禁止路径分隔符与大写）: {value:?}");
     }
     if value == "." || value == ".." || value.matches('.').count() == value.len() {
         anyhow::bail!("{kind} 不能是纯点: {value:?}");
@@ -84,7 +82,13 @@ pub fn sanitize_rel_path(rel: &str) -> anyhow::Result<Vec<String>> {
         anyhow::bail!("资源路径不能为空");
     }
     rel.split('/')
-        .map(|seg| sanitize_segment(seg).ok_or_else(|| anyhow::anyhow!("资源路径段非法: {seg:?}（拒绝空段 / . / .. / 前导点 / Windows 保留名）")))
+        .map(|seg| {
+            sanitize_segment(seg).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "资源路径段非法: {seg:?}（拒绝空段 / . / .. / 前导点 / Windows 保留名）"
+                )
+            })
+        })
         .collect()
 }
 
@@ -98,9 +102,10 @@ fn sanitize_segment(seg: &str) -> Option<String> {
     {
         return None;
     }
-    if seg.chars().any(|c| {
-        !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '#' | ' '))
-    }) {
+    if seg
+        .chars()
+        .any(|c| !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '#' | ' ')))
+    {
         return None;
     }
     Some(seg.to_string())
@@ -158,7 +163,9 @@ impl PackageInput {
             .unwrap_or("0.1.0")
             .to_string();
         anyhow::ensure!(
-            !version.chars().any(|c| c.is_control() || matches!(c, '/' | '\\')),
+            !version
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '/' | '\\')),
             "version 含非法字符: {version:?}"
         );
         anyhow::ensure!(version.len() <= 64, "version 超过 64 字节");
@@ -178,7 +185,12 @@ impl PackageInput {
         let mut plugins = BTreeMap::new();
         for (plugin, required) in &self.plugins {
             validate_scope_id("plugin id", plugin)?;
-            plugins.insert(plugin.clone(), PluginDependency { required: *required });
+            plugins.insert(
+                plugin.clone(),
+                PluginDependency {
+                    required: *required,
+                },
+            );
         }
         Ok(PackageManifest {
             id: self.id,
@@ -260,7 +272,11 @@ pub fn parse_package_toml(bytes: &[u8]) -> anyhow::Result<PackageManifest> {
         name: raw.name,
         version: raw.version,
         author: raw.author,
-        android_targets: raw.targets.and_then(|t| t.android).map(|a| a.packages).unwrap_or_default(),
+        android_targets: raw
+            .targets
+            .and_then(|t| t.android)
+            .map(|a| a.packages)
+            .unwrap_or_default(),
         plugins: raw
             .plugin_deps
             .into_iter()
@@ -574,14 +590,13 @@ impl PackageStore {
     pub fn create_package(&self, input: PackageInput) -> anyhow::Result<PackageManifest> {
         let manifest = input.into_manifest(1)?;
         let dir = self.package_dir(&manifest.id)?;
-        anyhow::ensure!(
-            !dir.exists(),
-            "配置已存在: {}",
-            manifest.id
-        );
+        anyhow::ensure!(!dir.exists(), "配置已存在: {}", manifest.id);
         std::fs::create_dir_all(dir.join("shared"))?;
         std::fs::create_dir_all(dir.join("plugins"))?;
-        atomic_write(&dir.join("package.toml"), serialize_package_toml(&manifest).as_bytes())?;
+        atomic_write(
+            &dir.join("package.toml"),
+            serialize_package_toml(&manifest).as_bytes(),
+        )?;
         Ok(manifest)
     }
 
@@ -655,9 +670,9 @@ impl PackageStore {
         let current = self.manifest(pkg)?;
         if !force {
             match expected_revision {
-                None => anyhow::bail!(
-                    "更新 manifest 必须提供 expected_revision，或显式 force:true"
-                ),
+                None => {
+                    anyhow::bail!("更新 manifest 必须提供 expected_revision，或显式 force:true")
+                }
                 Some(expected) if expected != current.revision => anyhow::bail!(
                     "manifest 已被其他页面修改（expected {expected} ≠ 当前 {}），请重新加载",
                     current.revision
@@ -704,10 +719,7 @@ impl PackageStore {
     /// 包统计（总文件/字节 + 每插件目录统计）。
     pub fn stats(&self, pkg: &str) -> anyhow::Result<PackageStats> {
         let dir = self.package_dir(pkg)?;
-        anyhow::ensure!(
-            dir.is_dir(),
-            "配置不存在: {pkg}"
-        );
+        anyhow::ensure!(dir.is_dir(), "配置不存在: {pkg}");
         let mut stats = PackageStats {
             files: 0,
             bytes: 0,
@@ -932,15 +944,17 @@ impl PackageStore {
         if !old_disk.is_file() {
             anyhow::bail!("资源不存在: {pkg}/{plugin}/{old_normalized}");
         }
-        anyhow::ensure!(!new_disk.exists(), "资源已存在: {pkg}/{plugin}/{new_normalized}");
+        anyhow::ensure!(
+            !new_disk.exists(),
+            "资源已存在: {pkg}/{plugin}/{new_normalized}"
+        );
         if let Some(handler) = self.handler(plugin) {
             handler.before_rename(self, pkg, plugin, &old_normalized, &new_normalized)?;
         }
         if let Some(parent) = new_disk.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::rename(&old_disk, &new_disk)
-            .map_err(|e| anyhow::anyhow!("重命名失败: {e}"))?;
+        std::fs::rename(&old_disk, &new_disk).map_err(|e| anyhow::anyhow!("重命名失败: {e}"))?;
         Ok(())
     }
 
@@ -949,12 +963,7 @@ impl PackageStore {
     /// 递归列出插件目录（`prefix` 可选限定子目录，空串 = 全部）。文本探测：
     /// UTF-8 可解码且 ≤ [`TEXT_RESOURCE_MAX_BYTES`]；文本条目合并 handler 注记。
     /// 按 path 字典序。
-    pub fn list(
-        &self,
-        pkg: &str,
-        plugin: &str,
-        prefix: &str,
-    ) -> anyhow::Result<Vec<ListEntry>> {
+    pub fn list(&self, pkg: &str, plugin: &str, prefix: &str) -> anyhow::Result<Vec<ListEntry>> {
         let plugin_root = self.plugin_dir(pkg, plugin)?;
         let root = if prefix.trim().is_empty() {
             plugin_root.clone()
@@ -1132,10 +1141,7 @@ impl PackageStore {
     /// 字节资源保存前钩子分发：返回落盘内容（hook 可归一化）；未注册
     /// handler = 原样透传（裸 Core 语义）。实现侧 Cow 归一化在此收口为
     /// owned 字节，借用不逃出本调用。
-    pub fn validate_save_binary(
-        &self,
-        req: SaveBinaryValidation<'_>,
-    ) -> Result<Vec<u8>, Value> {
+    pub fn validate_save_binary(&self, req: SaveBinaryValidation<'_>) -> Result<Vec<u8>, Value> {
         let handler = self.handler(req.plugin);
         match handler {
             Some(handler) => handler
@@ -1247,12 +1253,29 @@ mod tests {
 
     #[test]
     fn scope_id_validation_is_strict() {
-        for ok in ["a", "gamer.yaml", "gamer.keymap", "official.hsr.daily", "9lives", "a-b_c.d"] {
+        for ok in [
+            "a",
+            "gamer.yaml",
+            "gamer.keymap",
+            "official.hsr.daily",
+            "9lives",
+            "a-b_c.d",
+        ] {
             assert!(is_valid_scope_id(ok), "{ok:?} 应合法");
         }
         for bad in [
-            "", ".", "..", "...", ".hidden", "A.upper", "has space", "a/b", "a\\b", "-lead",
-            "con", "aux.yaml",
+            "",
+            ".",
+            "..",
+            "...",
+            ".hidden",
+            "A.upper",
+            "has space",
+            "a/b",
+            "a\\b",
+            "-lead",
+            "con",
+            "aux.yaml",
         ] {
             assert!(!is_valid_scope_id(bad), "{bad:?} 必须被拒绝");
         }
@@ -1376,7 +1399,9 @@ required = false
         assert_eq!(stats.plugins[0].plugin, "gamer.yaml");
 
         // 复制为新包：资源随拷、manifest 换 id、revision 归 1
-        let copy = store.duplicate_package("official.demo", "user.demo").unwrap();
+        let copy = store
+            .duplicate_package("official.demo", "user.demo")
+            .unwrap();
         assert_eq!(copy.id, "user.demo");
         assert_eq!(copy.revision, 1);
         assert_eq!(copy.name.as_deref(), Some("演示"));
@@ -1387,7 +1412,12 @@ required = false
         assert!(copied.content.contains("version: 3"));
 
         // 列表字典序
-        let ids: Vec<String> = store.list_packages().unwrap().iter().map(|m| m.id.clone()).collect();
+        let ids: Vec<String> = store
+            .list_packages()
+            .unwrap()
+            .iter()
+            .map(|m| m.id.clone())
+            .collect();
         assert_eq!(ids, vec!["official.demo", "user.demo"]);
 
         // 删除
@@ -1401,7 +1431,9 @@ required = false
         let (store, _dir) = temp_store("revision");
         store.create_package(input("a.b")).unwrap();
         // 无 expected_revision 且不 force → 拒绝
-        assert!(store.update_manifest("a.b", input("a.b"), None, false).is_err());
+        assert!(store
+            .update_manifest("a.b", input("a.b"), None, false)
+            .is_err());
         // 错误 revision → 拒绝
         assert!(store
             .update_manifest("a.b", input("a.b"), Some(99), false)
@@ -1422,10 +1454,14 @@ required = false
         assert_eq!(updated.revision, 2);
         assert_eq!(updated.name.as_deref(), Some("renamed"));
         // force 跳过门禁
-        let forced = store.update_manifest("a.b", input("a.b"), None, true).unwrap();
+        let forced = store
+            .update_manifest("a.b", input("a.b"), None, true)
+            .unwrap();
         assert_eq!(forced.revision, 3);
         // id 不可变
-        assert!(store.update_manifest("a.b", input("c.d"), Some(3), false).is_err());
+        assert!(store
+            .update_manifest("a.b", input("c.d"), Some(3), false)
+            .is_err());
     }
 
     // ---------- 资源 CRUD + 乐观并发 + 插件隔离 ----------
@@ -1435,33 +1471,75 @@ required = false
         let (store, dir) = temp_store("crud");
         store.create_package(input("a.b")).unwrap();
         let entry = store
-            .write_text("a.b", "gamer.yaml", "automations/main.yaml", "steps: []\n", None, false)
+            .write_text(
+                "a.b",
+                "gamer.yaml",
+                "automations/main.yaml",
+                "steps: []\n",
+                None,
+                false,
+            )
             .unwrap();
         assert_eq!(entry.path, "automations/main.yaml");
         assert_eq!(entry.version().len(), 12);
 
         // 嵌套路径
         store
-            .write_text("a.b", "gamer.yaml", "automations/sub/inner.yaml", "x: 1\n", None, false)
+            .write_text(
+                "a.b",
+                "gamer.yaml",
+                "automations/sub/inner.yaml",
+                "x: 1\n",
+                None,
+                false,
+            )
             .unwrap();
 
         // 创建后无门禁再写 → version_required；带错版本 → version_conflict
         let err = store
-            .write_text("a.b", "gamer.yaml", "automations/main.yaml", "x", None, false)
+            .write_text(
+                "a.b",
+                "gamer.yaml",
+                "automations/main.yaml",
+                "x",
+                None,
+                false,
+            )
             .unwrap_err();
         assert!(err.to_string().contains("version_required"), "{err}");
         let err = store
-            .write_text("a.b", "gamer.yaml", "automations/main.yaml", "x", Some("bad"), false)
+            .write_text(
+                "a.b",
+                "gamer.yaml",
+                "automations/main.yaml",
+                "x",
+                Some("bad"),
+                false,
+            )
             .unwrap_err();
         assert!(err.to_string().contains("version_conflict"), "{err}");
         // 带对版本 → 通过
         let version = entry.version();
         store
-            .write_text("a.b", "gamer.yaml", "automations/main.yaml", "steps: []\n", Some(&version), false)
+            .write_text(
+                "a.b",
+                "gamer.yaml",
+                "automations/main.yaml",
+                "steps: []\n",
+                Some(&version),
+                false,
+            )
             .unwrap();
         // force 跳过门禁
         store
-            .write_text("a.b", "gamer.yaml", "automations/main.yaml", "steps: []\n", None, true)
+            .write_text(
+                "a.b",
+                "gamer.yaml",
+                "automations/main.yaml",
+                "steps: []\n",
+                None,
+                true,
+            )
             .unwrap();
 
         // 读取
@@ -1470,8 +1548,14 @@ required = false
             .unwrap()
             .unwrap();
         assert!(read.content.starts_with("steps:"));
-        assert!(store.read_text("a.b", "gamer.yaml", "automations/missing.yaml").unwrap().is_none());
-        assert!(store.read_text("a.b", "gamer.yaml", "../escape").unwrap().is_none());
+        assert!(store
+            .read_text("a.b", "gamer.yaml", "automations/missing.yaml")
+            .unwrap()
+            .is_none());
+        assert!(store
+            .read_text("a.b", "gamer.yaml", "../escape")
+            .unwrap()
+            .is_none());
 
         // 字节资源 + 条件更新
         let raw = [0x89u8, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00];
@@ -1480,7 +1564,9 @@ required = false
             .unwrap();
         assert_eq!(written.size, 9);
         assert_eq!(
-            store.read_binary("a.b", "gamer.yaml", "templates/icon.png").unwrap(),
+            store
+                .read_binary("a.b", "gamer.yaml", "templates/icon.png")
+                .unwrap(),
             Some(raw.to_vec())
         );
         assert!(store
@@ -1511,7 +1597,9 @@ required = false
         store
             .delete_resource("a.b", "gamer.yaml", "automations/sub/inner.yaml")
             .unwrap();
-        assert!(!dir.join("packages/a.b/plugins/gamer.yaml/automations/sub").exists());
+        assert!(!dir
+            .join("packages/a.b/plugins/gamer.yaml/automations/sub")
+            .exists());
         assert!(store
             .delete_resource("a.b", "gamer.yaml", "automations/sub/inner.yaml")
             .is_err());
@@ -1523,7 +1611,10 @@ required = false
         store.create_package(input("a.b")).unwrap();
         // 任意穿越尝试（含逃向 shared/ 与其他插件目录）都落到校验失败
         for evil in ["../../shared/evil", "../other-plugin/x", "/abs", "a/../.."] {
-            assert!(store.resource_path("a.b", "gamer.yaml", evil).is_err(), "{evil:?}");
+            assert!(
+                store.resource_path("a.b", "gamer.yaml", evil).is_err(),
+                "{evil:?}"
+            );
         }
         // 非法 plugin id 直接拒绝
         assert!(store.plugin_dir("a.b", "../other").is_err());
@@ -1535,7 +1626,14 @@ required = false
         let (store, _dir) = temp_store("shortname");
         store.create_package(input("a.b")).unwrap();
         store
-            .write_binary("a.b", "gamer.yaml", "templates/icon#1_2_3_4.png", b"png", None, false)
+            .write_binary(
+                "a.b",
+                "gamer.yaml",
+                "templates/icon#1_2_3_4.png",
+                b"png",
+                None,
+                false,
+            )
             .unwrap();
         // 短名 → 唯一 # 候选
         let hit = store
@@ -1547,7 +1645,14 @@ required = false
         );
         // 精确名优先
         store
-            .write_binary("a.b", "gamer.yaml", "templates/full.png", b"png", None, false)
+            .write_binary(
+                "a.b",
+                "gamer.yaml",
+                "templates/full.png",
+                b"png",
+                None,
+                false,
+            )
             .unwrap();
         let hit = store
             .resolve_short_path("a.b", "gamer.yaml", "templates/full.png")
@@ -1587,7 +1692,14 @@ required = false
         store.create_package(input("a.b")).unwrap();
         // 未注册 handler：保存不做内容校验（裸 Core 语义）
         store
-            .write_text("a.b", "gamer.yaml", "automations/a.yaml", "不是 YAML 的内容", None, false)
+            .write_text(
+                "a.b",
+                "gamer.yaml",
+                "automations/a.yaml",
+                "不是 YAML 的内容",
+                None,
+                false,
+            )
             .unwrap();
         // 注册后：同样内容被拒绝，诊断 JSON 原样透传
         store.register_handler("gamer.yaml", Arc::new(RejectingHandler));
@@ -1613,16 +1725,23 @@ required = false
         let (store, _dir) = temp_store("atomic");
         store.create_package(input("a.b")).unwrap();
         let path = "automations/main.yaml";
-        store.write_text("a.b", "gamer.yaml", path, "seed\n", None, true).unwrap();
+        store
+            .write_text("a.b", "gamer.yaml", path, "seed\n", None, true)
+            .unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let mut handles = Vec::new();
         let store = Arc::new(store);
-        for payload in ["alpha\nalpha\n".to_string(), "beta\nbeta\nbeta\n".to_string()] {
+        for payload in [
+            "alpha\nalpha\n".to_string(),
+            "beta\nbeta\nbeta\n".to_string(),
+        ] {
             let barrier = barrier.clone();
             let store = store.clone();
             handles.push(std::thread::spawn(move || {
                 barrier.wait();
-                store.write_text("a.b", "gamer.yaml", path, &payload, None, true).unwrap();
+                store
+                    .write_text("a.b", "gamer.yaml", path, &payload, None, true)
+                    .unwrap();
                 payload
             }));
         }
@@ -1635,9 +1754,6 @@ required = false
             .unwrap()
             .unwrap()
             .content;
-        assert!(
-            seen.contains(&content),
-            "并发写入后内容应完整来自某个写者"
-        );
+        assert!(seen.contains(&content), "并发写入后内容应完整来自某个写者");
     }
 }

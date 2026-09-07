@@ -150,12 +150,20 @@ mod tests {
     fn effective_region_prefers_explicit_then_template_name_suffix() {
         let explicit = Some(crate::capabilities::SearchRegion::new(1, 2, 3, 4));
         assert_eq!(
-            VisionAdapter::effective_region(explicit, Some("probe#0_500_500_999.png".into()), (1000, 1000)),
+            VisionAdapter::effective_region(
+                explicit,
+                Some("probe#0_500_500_999.png".into()),
+                (1000, 1000)
+            ),
             Some([1, 2, 3, 4])
         );
         // 千分比矩形：0.5~0.75 × 0.25~0.5 → 像素 500,250,250,250
         assert_eq!(
-            VisionAdapter::effective_region(None, Some("probe#500_250_750_500.png".into()), (1000, 1000)),
+            VisionAdapter::effective_region(
+                None,
+                Some("probe#500_250_750_500.png".into()),
+                (1000, 1000)
+            ),
             Some([500, 250, 250, 250])
         );
         // 半区字母与 `#1` 彩色标记
@@ -164,9 +172,18 @@ mod tests {
             Some([0, 400, 1000, 400])
         );
         // 无后缀 / `#a` = 全屏
-        assert_eq!(VisionAdapter::effective_region(None, Some("probe.png".into()), (1000, 1000)), None);
-        assert_eq!(VisionAdapter::effective_region(None, Some("probe#a.png".into()), (1000, 1000)), None);
+        assert_eq!(
+            VisionAdapter::effective_region(None, Some("probe.png".into()), (1000, 1000)),
+            None
+        );
+        assert_eq!(
+            VisionAdapter::effective_region(None, Some("probe#a.png".into()), (1000, 1000)),
+            None
+        );
         // 文件名拿不到（不可能路径兜底）→ 全屏
-        assert_eq!(VisionAdapter::effective_region(None, None, (1000, 1000)), None);
+        assert_eq!(
+            VisionAdapter::effective_region(None, None, (1000, 1000)),
+            None
+        );
     }
 }

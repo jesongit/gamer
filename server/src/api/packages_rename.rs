@@ -94,7 +94,9 @@ fn rename_error(e: anyhow::Error) -> ApiError {
 
 #[allow(clippy::result_large_err)]
 fn not_found_or_internal(e: anyhow::Error) -> ApiError {
-    if e.downcast_ref::<crate::resources::PackageNotFound>().is_some() {
+    if e.downcast_ref::<crate::resources::PackageNotFound>()
+        .is_some()
+    {
         return ApiError::not_found(e.to_string());
     }
     if e.to_string().contains("不存在") {

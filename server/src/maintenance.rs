@@ -609,9 +609,14 @@ mod tests {
         // 合规包目录：package.toml + shared/ + plugins/<plugin>/
         let pkg = dir.join("packages").join("com.example.game");
         std::fs::create_dir_all(pkg.join("shared")).unwrap();
-        std::fs::create_dir_all(pkg.join("plugins").join("gamer.yaml").join("automations")).unwrap();
-        std::fs::write(pkg.join("package.toml"), b"id = \"com.example.game\"
-").unwrap();
+        std::fs::create_dir_all(pkg.join("plugins").join("gamer.yaml").join("automations"))
+            .unwrap();
+        std::fs::write(
+            pkg.join("package.toml"),
+            b"id = \"com.example.game\"
+",
+        )
+        .unwrap();
         assert_eq!(file_layout_v1_ok(&dir), serde_json::Value::Bool(true));
         // 包内出现白名单外子目录 → 违规
         std::fs::create_dir_all(pkg.join("old_scripts")).unwrap();

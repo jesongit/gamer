@@ -68,7 +68,9 @@ pub fn validate_and_read_manifest(bytes: &[u8]) -> Result<Vec<u8>, ArchiveError>
     }
     let declared_total = entries
         .iter()
-        .try_fold(0u64, |total, entry| total.checked_add(entry.uncompressed_size))
+        .try_fold(0u64, |total, entry| {
+            total.checked_add(entry.uncompressed_size)
+        })
         .ok_or_else(|| ArchiveError::Invalid("解压总大小溢出".to_string()))?;
     if declared_total > IMPORT_MAX_TOTAL_BYTES as u64 {
         return Err(ArchiveError::Invalid(format!(
@@ -92,9 +94,7 @@ pub fn validate_and_read_manifest(bytes: &[u8]) -> Result<Vec<u8>, ArchiveError>
         }
         if entry.name() == archive_limits::MANIFEST_NAME {
             if entry.is_dir() {
-                return Err(ArchiveError::Invalid(
-                    "package.toml 必须是文件".to_string(),
-                ));
+                return Err(ArchiveError::Invalid("package.toml 必须是文件".to_string()));
             }
             let size = usize::try_from(entry.size())
                 .map_err(|_| ArchiveError::Invalid("package.toml 大小溢出".to_string()))?;
@@ -105,14 +105,11 @@ pub fn validate_and_read_manifest(bytes: &[u8]) -> Result<Vec<u8>, ArchiveError>
             }
             let mut content = Vec::with_capacity(size);
             entry.read_to_end(&mut content)?;
-            parse_package_toml(&content)
-                .map_err(|e| ArchiveError::Manifest(e.to_string()))?;
+            parse_package_toml(&content).map_err(|e| ArchiveError::Manifest(e.to_string()))?;
             manifest = Some(content);
         }
     }
-    manifest.ok_or_else(|| {
-        ArchiveError::Invalid("归档根目录缺少 package.toml".to_string())
-    })
+    manifest.ok_or_else(|| ArchiveError::Invalid("归档根目录缺少 package.toml".to_string()))
 }
 
 /// 解压归档到 staging 目录（目录安全已在中央目录解析期完成；entry 名 →
@@ -185,7 +182,11 @@ pub fn extract_archive(bytes: &[u8], staging: &Path) -> Result<PackageManifest, 
 
 /// 顶层布局白名单：package.toml / shared/** / plugins/<plugin-id>/**。
 fn archive_relative_path(name: &str, is_dir: bool) -> Result<Vec<String>, ArchiveError> {
-    let normalized = if is_dir { name.trim_end_matches('/') } else { name };
+    let normalized = if is_dir {
+        name.trim_end_matches('/')
+    } else {
+        name
+    };
     if normalized == archive_limits::MANIFEST_NAME {
         return Ok(vec![normalized.to_string()]);
     }
@@ -223,7 +224,9 @@ fn archive_relative_path(name: &str, is_dir: bool) -> Result<Vec<String>, Archiv
 }
 
 fn append_relative_path(root: &Path, relative: &[String]) -> PathBuf {
-    relative.iter().fold(root.to_path_buf(), |path, part| path.join(part))
+    relative
+        .iter()
+        .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
 fn parse_central_directory(bytes: &[u8]) -> Result<Vec<CentralEntry>, ArchiveError> {
@@ -290,9 +293,7 @@ fn parse_central_directory(bytes: &[u8]) -> Result<Vec<CentralEntry>, ArchiveErr
             || normalized.starts_with('/')
             || normalized.contains(':')
         {
-            return Err(ArchiveError::Invalid(format!(
-                "归档路径非法: {name:?}"
-            )));
+            return Err(ArchiveError::Invalid(format!("归档路径非法: {name:?}")));
         }
         if !seen.insert(normalized.to_string()) {
             return Err(ArchiveError::Invalid(format!(
@@ -302,9 +303,7 @@ fn parse_central_directory(bytes: &[u8]) -> Result<Vec<CentralEntry>, ArchiveErr
         // 顶层布局白名单在中央目录解析期统一执行（validate 与 extract 同一语义）
         let is_dir_entry = name.ends_with('/');
         archive_relative_path(normalized, is_dir_entry)?;
-        entries.push(CentralEntry {
-            uncompressed_size,
-        });
+        entries.push(CentralEntry { uncompressed_size });
         cursor = header_end;
     }
     if cursor != central_end {
@@ -482,8 +481,8 @@ fn build_archive(
 /// 身份；返回归档 SHA-256。
 fn verify_archive(archive: &[u8], expected_id: &str) -> Result<String, ArchiveError> {
     let manifest_bytes = validate_and_read_manifest(archive)?;
-    let parsed = parse_package_toml(&manifest_bytes)
-        .map_err(|e| ArchiveError::Manifest(e.to_string()))?;
+    let parsed =
+        parse_package_toml(&manifest_bytes).map_err(|e| ArchiveError::Manifest(e.to_string()))?;
     if parsed.id != expected_id {
         return Err(ArchiveError::Invalid(format!(
             "自检失败：归档 manifest 身份（{}）与目标包（{expected_id}）不一致",
@@ -539,14 +538,19 @@ mod tests {
         let (store, _dir) = temp_store();
         let package = archive(vec![
             ("package.toml", manifest_bytes("official.demo").as_slice()),
-            ("plugins/gamer.yaml/automations/daily.yaml", b"version: 3\nsteps: []\n"),
+            (
+                "plugins/gamer.yaml/automations/daily.yaml",
+                b"version: 3\nsteps: []\n",
+            ),
             ("shared/notes.txt", b"shared bytes"),
         ]);
         let staging = store.staging_root().join("t1");
         let manifest = extract_archive(&package, &staging).unwrap();
         assert_eq!(manifest.id, "official.demo");
         assert!(staging.join("package.toml").is_file());
-        assert!(staging.join("plugins/gamer.yaml/automations/daily.yaml").is_file());
+        assert!(staging
+            .join("plugins/gamer.yaml/automations/daily.yaml")
+            .is_file());
         assert!(staging.join("shared/notes.txt").is_file());
 
         // 原子安装：staging → packages/official.demo（再导入走替换路径）

@@ -27,7 +27,9 @@ use tokio::io::{AsyncRead, AsyncSeekExt, ReadBuf, SeekFrom};
 
 use super::common::run_blocking_api;
 use super::{ApiError, AppState};
-use crate::media::{service as media_service, FrameRequest, MediaError, MediaErrorKind, MediaId, MediaRef};
+use crate::media::{
+    service as media_service, FrameRequest, MediaError, MediaErrorKind, MediaId, MediaRef,
+};
 
 /// 媒体路由组（挂进受保护组；导入大字节限额由组层统一设定）。
 /// 合同端点：
@@ -261,9 +263,7 @@ async fn api_media_file(
                 .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
             return resp;
         }
-        RangeReply::Full => {
-            (StatusCode::OK, 0, size.saturating_sub(1))
-        }
+        RangeReply::Full => (StatusCode::OK, 0, size.saturating_sub(1)),
         RangeReply::Slice(start, end) => {
             if let Err(e) = file.seek(SeekFrom::Start(start)).await {
                 return ApiError::internal(format!("定位播放起点失败: {e}")).into_response();
@@ -300,9 +300,11 @@ fn parse_frame_query(q: &HashMap<String, String>) -> Result<FrameRequest, ApiErr
         let value = value.trim();
         match key.as_str() {
             "pts_us" if !value.is_empty() => {
-                req.pts_us = Some(value.parse().map_err(|_| {
-                    ApiError::bad_request("pts_us 必须是非负整数（微秒）")
-                })?);
+                req.pts_us = Some(
+                    value
+                        .parse()
+                        .map_err(|_| ApiError::bad_request("pts_us 必须是非负整数（微秒）"))?,
+                );
             }
             "index" if !value.is_empty() => {
                 req.index = Some(
@@ -334,17 +336,17 @@ async fn api_media_frame(
         Err(err) => return err.into_response(),
     };
     let svc = media_service(&st.cfg);
-    match run_blocking_api(move || svc.extract_frame_png(&MediaId(id), &req).map_err(map_media_err))
-        .await
+    match run_blocking_api(move || {
+        svc.extract_frame_png(&MediaId(id), &req)
+            .map_err(map_media_err)
+    })
+    .await
     {
         Ok(png) => {
             // 帧内容按 (media, pts/index, max_width) 确定：允许中间缓存
             let mut resp = (StatusCode::OK, png).into_response();
             let headers = resp.headers_mut();
-            headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("image/png"),
-            );
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/png"));
             headers.insert(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("public, max-age=3600"),

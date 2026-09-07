@@ -259,7 +259,11 @@ impl EventLog {
         if self.file.is_none() || self.lines >= EVENTS_FILE_MAX_LINES {
             self.file_seq += 1;
             let path = self.dir.join(format!("events-{:04}.jsonl", self.file_seq));
-            match std::fs::File::options().create(true).append(true).open(&path) {
+            match std::fs::File::options()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 Ok(f) => {
                     self.file = Some(f);
                     self.lines = 0;
@@ -393,8 +397,7 @@ impl SessionShared {
             if !frame.is_keyframe {
                 return;
             }
-            let has_config =
-                st.pending_config.is_some() || mp4::au_contains_param_set(&frame.data);
+            let has_config = st.pending_config.is_some() || mp4::au_contains_param_set(&frame.data);
             if !has_config {
                 return;
             }
@@ -433,7 +436,8 @@ impl SessionShared {
         let write_result = {
             let seg = st.current.as_mut().expect("segment open");
             let rel_pts = frame.pts_us.saturating_sub(seg.base_pts);
-            seg.writer.write_annexb_sample(&frame.data, rel_pts, frame.is_keyframe)
+            seg.writer
+                .write_annexb_sample(&frame.data, rel_pts, frame.is_keyframe)
         };
         match write_result {
             Ok(n) => {
@@ -488,7 +492,8 @@ impl SessionShared {
         let media = MediaId(uuid::Uuid::new_v4().simple().to_string());
         let dir = self.inner.data_root.join(&media.0);
         std::fs::create_dir_all(&dir)?;
-        let mut writer = mp4::H264Mp4Writer::create(&dir.join("original.mp4"), st.width, st.height)?;
+        let mut writer =
+            mp4::H264Mp4Writer::create(&dir.join("original.mp4"), st.width, st.height)?;
         if let Some(cfg) = st.pending_config.take() {
             writer.set_config(&cfg);
         }
@@ -596,7 +601,12 @@ impl SessionShared {
 
     fn finalize_stop(&self) -> RecordingSessionMeta {
         let mut st = self.state.lock();
-        self.finalize_with(&mut st, RecordingState::Completed, SegmentReason::Normal, None)
+        self.finalize_with(
+            &mut st,
+            RecordingState::Completed,
+            SegmentReason::Normal,
+            None,
+        )
     }
 
     fn finalize_cancel(&self) -> RecordingSessionMeta {
@@ -644,10 +654,7 @@ impl SessionShared {
             }
             TOUCH_UP => {
                 if let Some(g) = st.touch.remove(&pointer_id) {
-                    let drift = g
-                        .x0
-                        .abs_diff(g.last_x)
-                        .max(g.y0.abs_diff(g.last_y));
+                    let drift = g.x0.abs_diff(g.last_x).max(g.y0.abs_diff(g.last_y));
                     let (kind, payload) = if drift <= TAP_MAX_DRIFT {
                         ("tap", json!({ "x": g.x0, "y": g.y0 }))
                     } else {
@@ -683,10 +690,22 @@ impl SessionShared {
                     return; // 自动重复的 down 不重开手势（保持首个 down 时刻）
                 }
                 let operation_id = st.next_op();
-                st.keys.insert(code, KeyPending { down_us: now_us, operation_id });
+                st.keys.insert(
+                    code,
+                    KeyPending {
+                        down_us: now_us,
+                        operation_id,
+                    },
+                );
             }
             KEY_UP => match st.keys.remove(&code) {
-                Some(p) => st.emit(&self.id.0, "key", json!({ "code": code }), p.down_us, p.operation_id),
+                Some(p) => st.emit(
+                    &self.id.0,
+                    "key",
+                    json!({ "code": code }),
+                    p.down_us,
+                    p.operation_id,
+                ),
                 None => {
                     let op = st.next_op();
                     st.emit(&self.id.0, "key", json!({ "code": code }), now_us, op);
@@ -972,10 +991,12 @@ impl RecordingService {
         }
         self.load_from_disk(id)
             .map(|(meta, _)| meta)
-            .ok_or_else(|| anyhow::Error::from(RecordingFailure::new(
-                FailureKind::NotFound,
-                "recording_not_found",
-            )))
+            .ok_or_else(|| {
+                anyhow::Error::from(RecordingFailure::new(
+                    FailureKind::NotFound,
+                    "recording_not_found",
+                ))
+            })
     }
 
     /// 该设备当前活动会话（无则 None；前端轮询/录制按钮态）。
@@ -992,10 +1013,12 @@ impl RecordingService {
         }
         self.load_from_disk(id)
             .map(|(_, dir)| read_events_dir(&dir))
-            .ok_or_else(|| anyhow::Error::from(RecordingFailure::new(
-                FailureKind::NotFound,
-                "recording_not_found",
-            )))
+            .ok_or_else(|| {
+                anyhow::Error::from(RecordingFailure::new(
+                    FailureKind::NotFound,
+                    "recording_not_found",
+                ))
+            })
     }
 
     /// 设备会话确死回调（看门狗/断连）：当前会话安全收尾为分段/中断，
@@ -1190,7 +1213,8 @@ fn disk_free_bytes(path: &Path) -> Option<u64> {
         let mut free: u64 = 0;
         let mut total: u64 = 0;
         let mut total_free: u64 = 0;
-        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, &mut total_free) };
+        let ok =
+            unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, &mut total_free) };
         (ok != 0).then_some(free)
     }
     #[cfg(not(windows))]
@@ -1199,12 +1223,7 @@ fn disk_free_bytes(path: &Path) -> Option<u64> {
     }
 }
 
-fn debug_segment_closed(
-    recording: &str,
-    media: &str,
-    summary: &mp4::MuxSummary,
-    frames: u64,
-) {
+fn debug_segment_closed(recording: &str, media: &str, summary: &mp4::MuxSummary, frames: u64) {
     info!(
         recording,
         media,
@@ -1320,7 +1339,10 @@ mod tests {
 
     fn config_frame() -> VideoFrame {
         frame(
-            annexb(&[&nal(7, &[0x67, 0x64, 0x00, 0x1f, 0xac]), &nal(8, &[0x68, 0xeb, 0xec])]),
+            annexb(&[
+                &nal(7, &[0x67, 0x64, 0x00, 0x1f, 0xac]),
+                &nal(8, &[0x68, 0xeb, 0xec]),
+            ]),
             0,
             true,
             false,
@@ -1385,7 +1407,11 @@ mod tests {
         assert_eq!(meta.state, RecordingState::Cancelled);
         assert_eq!(meta.segments.len(), 1, "已落盘部分保留");
         let media = &meta.segments[0].media_id.0;
-        assert_eq!(media_state(&root, media), MediaState::Ready, "取消素材可查看");
+        assert_eq!(
+            media_state(&root, media),
+            MediaState::Ready,
+            "取消素材可查看"
+        );
         // 幂等
         assert_eq!(shared.finalize_cancel(), meta);
         std::fs::remove_dir_all(root).ok();
@@ -1420,7 +1446,10 @@ mod tests {
         shared.feed_frame(p_frame(33_333));
         // 段 2：参数集 B（编码参数变化）+ 新 IDR
         let config_b = frame(
-            annexb(&[&nal(7, &[0x67, 0x64, 0x00, 0x20, 0xac]), &nal(8, &[0x68, 0xeb, 0xec])]),
+            annexb(&[
+                &nal(7, &[0x67, 0x64, 0x00, 0x20, 0xac]),
+                &nal(8, &[0x68, 0xeb, 0xec]),
+            ]),
             0,
             true,
             false,
@@ -1482,7 +1511,13 @@ mod tests {
         assert_eq!(events[0].status, "accepted");
         assert_eq!(events[0].schema_version, 1);
         assert_eq!(events[0].session_id, shared.id.0);
-        assert_eq!(events[0].display_size, DisplaySize { width: 1920, height: 1080 });
+        assert_eq!(
+            events[0].display_size,
+            DisplaySize {
+                width: 1920,
+                height: 1080
+            }
+        );
         assert_eq!(events[1].kind, "swipe");
         assert_eq!(
             events[1].payload,
@@ -1521,7 +1556,9 @@ mod tests {
         );
         let serialized = serde_json::to_string(&events[1]).unwrap();
         assert!(
-            !serialized.contains("hunter2") && !serialized.contains("SECRET") && !serialized.contains("超级密码"),
+            !serialized.contains("hunter2")
+                && !serialized.contains("SECRET")
+                && !serialized.contains("超级密码"),
             "事件流不得包含明文: {serialized}"
         );
         assert_eq!(events[2].kind, "key");

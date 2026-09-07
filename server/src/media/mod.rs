@@ -201,10 +201,7 @@ impl MediaService {
         // 任何一步失败 → 全量清理，不留下半成品。
         let staging = self.data_root.join(format!("{STAGING_PREFIX}{}", id.0));
         fs::create_dir_all(&staging).map_err(|e| {
-            anyhow::Error::new(e).context(format!(
-                "创建导入暂存目录失败: {}",
-                staging.display()
-            ))
+            anyhow::Error::new(e).context(format!("创建导入暂存目录失败: {}", staging.display()))
         })?;
         match self.commit_import(&staging, &id, &display_name, bytes) {
             Ok(meta) => Ok(meta),
@@ -334,9 +331,10 @@ impl MediaService {
             })
             .collect();
         candidates.sort();
-        candidates.into_iter().next().ok_or_else(|| {
-            MediaError::not_found(format!("{} 文件缺失", ORIGINAL_STEM))
-        })
+        candidates
+            .into_iter()
+            .next()
+            .ok_or_else(|| MediaError::not_found(format!("{} 文件缺失", ORIGINAL_STEM)))
     }
 
     /// 精确帧提取为 PNG 字节（服务端解码为唯一精确帧来源；同一请求可重复）。
@@ -432,8 +430,15 @@ impl MediaService {
         }
         let ffprobe = self.ffprobe_exec();
         let mut cmd = Command::new(&ffprobe);
-        cmd.args(["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams"])
-            .arg(file);
+        cmd.args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+        ])
+        .arg(file);
         let output = match run_with_timeout(&ffprobe, &mut cmd, TOOL_TIMEOUT) {
             Ok(output) => output,
             Err(err) => {
@@ -448,9 +453,8 @@ impl MediaService {
                 "ffprobe 无法识别该文件: {tail}"
             )));
         }
-        let parsed: ProbeJson = serde_json::from_slice(&output.stdout).map_err(|e| {
-            MediaError::unsupported(format!("ffprobe 输出解析失败: {e}"))
-        })?;
+        let parsed: ProbeJson = serde_json::from_slice(&output.stdout)
+            .map_err(|e| MediaError::unsupported(format!("ffprobe 输出解析失败: {e}")))?;
         let stream = parsed
             .streams
             .iter()
@@ -463,10 +467,7 @@ impl MediaService {
             return Err(MediaError::unsupported("视频轨分辨率为 0"));
         }
         let rotation = normalize_rotation_deg(
-            stream
-                .side_data_list
-                .iter()
-                .find_map(|d| d.rotation),
+            stream.side_data_list.iter().find_map(|d| d.rotation),
             stream.tags.as_ref().and_then(|t| t.rotate.as_deref()),
         );
         // 展示语义：metadata 宽高 = 旋转后（oriented）尺寸，与抽帧 PNG
@@ -484,7 +485,10 @@ impl MediaService {
             .and_then(parse_duration_us);
         Ok(ProbeOutcome {
             container: derive_container(
-                parsed.format.as_ref().and_then(|f| f.format_name.as_deref()),
+                parsed
+                    .format
+                    .as_ref()
+                    .and_then(|f| f.format_name.as_deref()),
             ),
             codec: stream
                 .codec_name
@@ -525,7 +529,15 @@ impl MediaService {
         }
         // 不用 -vsync（ffmpeg 8/9 已移除；本仓现有 ffmpeg 调用先例同样不用）：
         // select 直通 + `-frames:v 1` 已保证恰好一个输出帧
-        cmd.args(["-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1"]);
+        cmd.args([
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "pipe:1",
+        ]);
         let output = run_with_timeout("ffmpeg", &mut cmd, TOOL_TIMEOUT)
             .map_err(|e| anyhow::anyhow!("ffmpeg 抽帧失败: {e:#}"))?;
         if !output.status.success() || output.stdout.is_empty() {
@@ -770,11 +782,7 @@ fn stderr_tail(stderr: &[u8]) -> String {
 /// 同步执行外部工具 + 超时击杀：stdout/stderr 由读线程排空（避免管道写满
 /// 死锁），主循环 `try_wait` 轮询至退出或超时（超时 → kill + 收割）。
 /// 仅限 blocking 池内调用（REST handler 经 `run_blocking_api`）。
-fn run_with_timeout(
-    program: &str,
-    cmd: &mut Command,
-    timeout: Duration,
-) -> anyhow::Result<Output> {
+fn run_with_timeout(program: &str, cmd: &mut Command, timeout: Duration) -> anyhow::Result<Output> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1022,9 +1030,7 @@ mod tests {
         );
         // 绝不泄漏绝对路径之外的目录成分（文件名限定 original.*）
         assert!(path.starts_with(root));
-        let err = svc
-            .file_path(&MediaId("ghost".into()))
-            .unwrap_err();
+        let err = svc.file_path(&MediaId("ghost".into())).unwrap_err();
         assert_eq!(
             err.downcast_ref::<MediaError>().unwrap().kind(),
             MediaErrorKind::NotFound
@@ -1149,14 +1155,26 @@ mod tests {
         let clip = dir.path().join("clip.mp4");
         let gen = std::process::Command::new("ffmpeg")
             .args([
-                "-y", "-v", "error", "-f", "lavfi",
-                "-i", "testsrc=duration=1:size=320x240:rate=10",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=1:size=320x240:rate=10",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
             ])
             .arg(&clip)
             .output()
             .expect("生成测试视频失败（本机需 ffmpeg）");
-        assert!(gen.status.success(), "{}", String::from_utf8_lossy(&gen.stderr));
+        assert!(
+            gen.status.success(),
+            "{}",
+            String::from_utf8_lossy(&gen.stderr)
+        );
         let bytes = fs::read(&clip).unwrap();
 
         let root = tempfile::tempdir().unwrap();
@@ -1173,34 +1191,74 @@ mod tests {
 
         // pts 首帧 + 可重复（同一请求逐字节一致）
         let first = svc
-            .extract_frame_png(&meta.id, &FrameRequest { pts_us: Some(0), index: None, max_width: None })
+            .extract_frame_png(
+                &meta.id,
+                &FrameRequest {
+                    pts_us: Some(0),
+                    index: None,
+                    max_width: None,
+                },
+            )
             .unwrap();
         assert_eq!(&first[..8], b"\x89PNG\r\n\x1a\n");
         let again = svc
-            .extract_frame_png(&meta.id, &FrameRequest { pts_us: Some(0), index: None, max_width: None })
+            .extract_frame_png(
+                &meta.id,
+                &FrameRequest {
+                    pts_us: Some(0),
+                    index: None,
+                    max_width: None,
+                },
+            )
             .unwrap();
         assert_eq!(first, again, "同一请求必须逐字节可重复");
 
         // 帧索引路径
         let by_index = svc
-            .extract_frame_png(&meta.id, &FrameRequest { pts_us: None, index: Some(5), max_width: None })
+            .extract_frame_png(
+                &meta.id,
+                &FrameRequest {
+                    pts_us: None,
+                    index: Some(5),
+                    max_width: None,
+                },
+            )
             .unwrap();
         assert_eq!(&by_index[..8], b"\x89PNG\r\n\x1a\n");
 
         // max_width 等比缩放
         let scaled = svc
-            .extract_frame_png(&meta.id, &FrameRequest { pts_us: Some(0), index: None, max_width: Some(100) })
+            .extract_frame_png(
+                &meta.id,
+                &FrameRequest {
+                    pts_us: Some(0),
+                    index: None,
+                    max_width: Some(100),
+                },
+            )
             .unwrap();
         let image = image::load_from_memory(&scaled).unwrap();
-        assert!(image.width() <= 100 && image.height() < 240, "scaled {}x{}", image.width(), image.height());
+        assert!(
+            image.width() <= 100 && image.height() < 240,
+            "scaled {}x{}",
+            image.width(),
+            image.height()
+        );
 
         // 帧越界 → Invalid（400 语义）
         assert_eq!(
-            svc.extract_frame_png(&meta.id, &FrameRequest { pts_us: Some(60_000_000), index: None, max_width: None })
-                .unwrap_err()
-                .downcast_ref::<MediaError>()
-                .unwrap()
-                .kind(),
+            svc.extract_frame_png(
+                &meta.id,
+                &FrameRequest {
+                    pts_us: Some(60_000_000),
+                    index: None,
+                    max_width: None
+                }
+            )
+            .unwrap_err()
+            .downcast_ref::<MediaError>()
+            .unwrap()
+            .kind(),
             MediaErrorKind::Invalid
         );
 
@@ -1217,7 +1275,9 @@ mod tests {
     fn probe_rejects_non_media_bytes_as_unsupported() {
         let root = tempfile::tempdir().unwrap();
         let svc = MediaService::open(root.path().to_path_buf(), "ffmpeg".into()).unwrap();
-        let err = svc.import_bytes("readme.txt", b"hello world, not a video").unwrap_err();
+        let err = svc
+            .import_bytes("readme.txt", b"hello world, not a video")
+            .unwrap_err();
         assert_eq!(
             err.downcast_ref::<MediaError>().unwrap().kind(),
             MediaErrorKind::Unsupported

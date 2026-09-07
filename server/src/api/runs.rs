@@ -81,8 +81,11 @@ pub(super) async fn api_dispatch_run(
     // 设备不存在 / 未配置 pkg 时明确拒绝，而不是让 app.start 在运行期拿一个
     // 语义错乱的包名失败。
     let Some((device, _, _)) = st.devices.snapshot(&req.device_id) else {
-        return ApiError::not_found(format!("设备不存在: {}（运行目标必须先登记设备）", req.device_id))
-            .into_response();
+        return ApiError::not_found(format!(
+            "设备不存在: {}（运行目标必须先登记设备）",
+            req.device_id
+        ))
+        .into_response();
     };
     let android_package = device
         .pkg

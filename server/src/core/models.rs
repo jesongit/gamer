@@ -588,12 +588,7 @@ mod tests {
 
     #[test]
     fn resource_id_is_logical_and_plugin_scoped() {
-        let id = ResourceId::new(
-            "official.example",
-            "gamer.yaml",
-            "templates/status.png",
-        )
-        .unwrap();
+        let id = ResourceId::new("official.example", "gamer.yaml", "templates/status.png").unwrap();
 
         assert_eq!(id.package(), "official.example");
         assert_eq!(id.plugin(), "gamer.yaml");

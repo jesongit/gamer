@@ -118,16 +118,16 @@ pub(super) async fn api_runner_entrypoint_schema(
     if let Err(err) = validate_text_field(&query.entrypoint, "entrypoint", 1024) {
         return err.into_response();
     }
-    match st.scheduler.describe_entrypoint(&runner_id, &query.entrypoint) {
+    match st
+        .scheduler
+        .describe_entrypoint(&runner_id, &query.entrypoint)
+    {
         Ok(payload) => {
             let mut body = serde_json::json!({
                 "runner_id": runner_id,
                 "entrypoint": query.entrypoint,
             });
-            if let (Some(base), Some(obj)) = (
-                payload.as_object(),
-                body.as_object_mut(),
-            ) {
+            if let (Some(base), Some(obj)) = (payload.as_object(), body.as_object_mut()) {
                 for (key, value) in base {
                     obj.insert(key.clone(), value.clone());
                 }

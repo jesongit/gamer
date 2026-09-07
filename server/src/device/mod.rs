@@ -691,10 +691,8 @@ impl DeviceManager {
         // 设备会话边界（录制合同 §2）：会话拆除 → 活动录制安全收尾为
         // interrupted（同步文件收口，毫秒级；不回传错误、不影响实时链路）。
         // 看门狗确死/空闲低功耗/管理动作/停机全部经此收口。
-        crate::recording::service(&self.cfg).on_device_session_boundary(
-            id,
-            crate::recording::SegmentReason::Disconnect,
-        );
+        crate::recording::service(&self.cfg)
+            .on_device_session_boundary(id, crate::recording::SegmentReason::Disconnect);
         // 注意：scrcpy server 端 cleanup=true，socket 关闭即清理
         // 恢复虚拟屏会话的设备侧改写（freezer/媒体音量；无标记则零操作）。
         // 上面的写锁 guard 已随块结束释放（guard 不能跨 await 存活，Send 约束）

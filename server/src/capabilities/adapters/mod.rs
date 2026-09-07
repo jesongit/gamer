@@ -56,11 +56,7 @@ pub(crate) fn build_registry(
         .with_frame_service(frame)
         .with_vision_service(vision)
         .with_resource_service(resource.clone())
-        .with_run_service(Arc::new(RunAdapter::new(
-            runs,
-            resource.clone(),
-            devices,
-        )))
+        .with_run_service(Arc::new(RunAdapter::new(runs, resource.clone(), devices)))
         .with_log(LogAdapter::new(db))
         .build()
 }
@@ -74,10 +70,9 @@ mod tests {
 
     use super::*;
     use crate::capabilities::{
-        ResourceId,
         CapabilityError, DeviceHandle, DeviceId, FramePoint, FrameService, LogLevel, LogRecord,
-        LogService, MatchManyRequest, MatchOptions, MatchOutcome, ResourceHandle, ResourceService,
-        RunRequest, RunService, RuntimeService, TemplateQuery, VisionService,
+        LogService, MatchManyRequest, MatchOptions, MatchOutcome, ResourceHandle, ResourceId,
+        ResourceService, RunRequest, RunService, RuntimeService, TemplateQuery, VisionService,
     };
 
     fn template_store() -> (tempfile::TempDir, Arc<PackageStore>) {
@@ -117,11 +112,16 @@ mod tests {
     #[tokio::test]
     async fn resource_adapter_resolves_and_opens_logical_template() {
         let (_dir, store) = template_store();
-        seed_template(&store, "com.test.game", "test.plugin", "templates/icon.png", b"template");
+        seed_template(
+            &store,
+            "com.test.game",
+            "test.plugin",
+            "templates/icon.png",
+            b"template",
+        );
 
         let adapter = ResourceAdapter::new(store);
-        let id =
-            ResourceId::new("com.test.game", "test.plugin", "templates/icon.png").unwrap();
+        let id = ResourceId::new("com.test.game", "test.plugin", "templates/icon.png").unwrap();
         let handle = adapter.resolve(&id).await.unwrap();
         assert_eq!(adapter.resolve(&id).await.unwrap(), handle);
         let lease = adapter.open(handle).await.unwrap();
@@ -150,7 +150,13 @@ mod tests {
                 template.put_pixel(x, y, *screen.get_pixel(11 + x, 7 + y));
             }
         }
-        seed_template(&store, "com.test.game", "test.plugin", "templates/icon.png", &png(&template));
+        seed_template(
+            &store,
+            "com.test.game",
+            "test.plugin",
+            "templates/icon.png",
+            &png(&template),
+        );
 
         let frames = Arc::new(FrameStore::new());
         let frame = frames
@@ -158,11 +164,9 @@ mod tests {
             .unwrap();
         let resources = Arc::new(ResourceAdapter::new(store));
         let resource = resources
-            .resolve(&ResourceId::new(
-                "com.test.game",
-                "test.plugin",
-                "templates/icon.png",
-            ).unwrap())
+            .resolve(
+                &ResourceId::new("com.test.game", "test.plugin", "templates/icon.png").unwrap(),
+            )
             .await
             .unwrap();
         let vision = VisionAdapter::new(frames, resources);
@@ -269,14 +273,18 @@ mod tests {
     #[tokio::test]
     async fn run_adapter_submits_to_run_manager_and_reports_terminal_state() {
         let (dir, store) = template_store();
-        seed_template(&store, "com.test.game", "gamer.yaml", "automations/daily.yaml", b"steps: []\n");
+        seed_template(
+            &store,
+            "com.test.game",
+            "gamer.yaml",
+            "automations/daily.yaml",
+            b"steps: []\n",
+        );
         let resources = Arc::new(ResourceAdapter::new(store));
         let entry = resources
-            .resolve(&ResourceId::new(
-                "com.test.game",
-                "gamer.yaml",
-                "automations/daily.yaml",
-            ).unwrap())
+            .resolve(
+                &ResourceId::new("com.test.game", "gamer.yaml", "automations/daily.yaml").unwrap(),
+            )
             .await
             .unwrap();
         let manager = Arc::new(crate::run_manager::RunManager::new(Arc::new(

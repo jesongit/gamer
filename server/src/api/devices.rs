@@ -433,7 +433,10 @@ fn pretty_app_label(pkg: &str) -> String {
 /// 不参与路径拼接——服务端临时文件名自生成）；字节非空且带 zip 魔数。
 pub(super) fn validate_apk_upload(filename: &str, body: &[u8]) -> Result<(), ApiError> {
     validate_text_field(filename, "文件名", 255)?;
-    if filename.contains('/') || filename.contains('\\') || !filename.to_ascii_lowercase().ends_with(".apk") {
+    if filename.contains('/')
+        || filename.contains('\\')
+        || !filename.to_ascii_lowercase().ends_with(".apk")
+    {
         return Err(ApiError::bad_request("只支持 .apk 安装包"));
     }
     if body.len() < 4 || !body.starts_with(b"PK") {
@@ -742,7 +745,10 @@ mod tests {
         assert!(validate_apk_upload("GAME.APK", zip).is_ok());
         // 扩展名 / 路径分隔 / 空名
         for bad in ["game.exe", "game", "a/b.apk", "a\\b.apk", "", "  "] {
-            assert!(validate_apk_upload(bad, zip).is_err(), "应拒绝文件名 {bad:?}");
+            assert!(
+                validate_apk_upload(bad, zip).is_err(),
+                "应拒绝文件名 {bad:?}"
+            );
         }
         // 内容：空 body / 非 zip 魔数
         assert!(validate_apk_upload("game.apk", b"").is_err());
