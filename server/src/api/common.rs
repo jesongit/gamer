@@ -18,6 +18,8 @@ pub(super) const BODY_LIMIT_ZIP_IMPORT: usize = 20 * 1024 * 1024;
 /// （archive_validation::IMPORT_MAX_TOTAL_BYTES = 100MiB）
 pub(super) const BODY_LIMIT_PACKAGE_INSTALL: usize =
     crate::core::fs::archive_validation::IMPORT_MAX_TOTAL_BYTES;
+/// 视频工作台媒体导入请求体上限（原视频字节直传；实施合同可调）
+pub(super) const BODY_LIMIT_MEDIA_IMPORT: usize = 1024 * 1024 * 1024;
 /// 公开豁免组请求体上限
 pub(super) const BODY_LIMIT_PUBLIC: usize = 64 * 1024;
 /// 文本资源（脚本/函数库/映射方案/预设）内容上限（与归档侧 YAML 上限同源）

@@ -23,8 +23,10 @@ mod extensions;
 mod extensions_management;
 pub(crate) mod gate;
 mod logs;
+mod media;
 mod packages;
 mod packages_rename;
+mod recording;
 mod runs;
 pub(crate) mod system;
 mod tasks;
@@ -52,8 +54,8 @@ use crate::scheduler::Scheduler;
 use crate::store::Db;
 
 use common::{
-    BODY_LIMIT_JSON, BODY_LIMIT_PACKAGE_INSTALL, BODY_LIMIT_PUBLIC, BODY_LIMIT_UPLOAD,
-    BODY_LIMIT_ZIP_IMPORT,
+    BODY_LIMIT_JSON, BODY_LIMIT_MEDIA_IMPORT, BODY_LIMIT_PACKAGE_INSTALL, BODY_LIMIT_PUBLIC,
+    BODY_LIMIT_UPLOAD, BODY_LIMIT_ZIP_IMPORT,
 };
 
 #[derive(Clone)]
@@ -355,6 +357,24 @@ pub(crate) fn build_router_with_extensions(
         ))
         .layer(DefaultBodyLimit::max(BODY_LIMIT_PACKAGE_INSTALL));
 
+    // ---- 受保护组（视频工作台 V1）：媒体导入/播放/精确帧 + 录制控制。
+    //      合同：docs/plans/gamer_video_workbench_contracts.md；大字节上传
+    //      （视频导入）与普通 JSON 共用同一认证语义，限额见 common 常量。
+    let protected_media: Router<()> = media::router()
+        .with_state(state.clone())
+        .route_layer(axmw::from_fn_with_state(
+            state.auth.clone(),
+            auth::auth_guard,
+        ))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_MEDIA_IMPORT));
+    let protected_recording: Router<()> = recording::router()
+        .with_state(state.clone())
+        .route_layer(axmw::from_fn_with_state(
+            state.auth.clone(),
+            auth::auth_guard,
+        ))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT_MEDIA_IMPORT));
+
     // ---- 受保护的扩展包组：归档安装/更新与 UI iframe 静态资源。
     // 生命周期接口留在普通 JSON 组以复用同一认证与错误语义。
     let protected_extensions: Router<()> = Router::new()
@@ -427,6 +447,8 @@ pub(crate) fn build_router_with_extensions(
         .merge(protected_json)
         .merge(protected_upload)
         .merge(protected_import)
+        .merge(protected_media)
+        .merge(protected_recording)
         .merge(protected_extensions)
         .layer(axmw::from_fn(auth::inject_ip_key))
 }
