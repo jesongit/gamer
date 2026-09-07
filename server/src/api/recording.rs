@@ -14,9 +14,7 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use super::{ApiError, AppState};
-use crate::recording::{
-    service, FailureKind, RecordingFailure, RecordingId, RecordingStartReq,
-};
+use crate::recording::{service, FailureKind, RecordingFailure, RecordingId, RecordingStartReq};
 
 /// 录制路由组（挂进受保护组）。
 /// 合同端点：
@@ -53,10 +51,7 @@ fn map_failure(err: anyhow::Error) -> Response {
 }
 
 /// `POST /api/recording/start`：202 + 会话元数据（服务端权威异步起录）。
-async fn api_start(
-    State(st): State<AppState>,
-    Json(req): Json<RecordingStartReq>,
-) -> Response {
+async fn api_start(State(st): State<AppState>, Json(req): Json<RecordingStartReq>) -> Response {
     match service(&st.cfg).start(&st.devices, &req) {
         Ok(meta) => (StatusCode::ACCEPTED, Json(meta)).into_response(),
         Err(err) => map_failure(err),
@@ -92,7 +87,11 @@ async fn api_active(
     State(st): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(device_id) = q.get("device_id").map(|s| s.trim()).filter(|d| !d.is_empty()) else {
+    let Some(device_id) = q
+        .get("device_id")
+        .map(|s| s.trim())
+        .filter(|d| !d.is_empty())
+    else {
         return ApiError::bad_request("缺少 device_id 查询参数").into_response();
     };
     match service(&st.cfg).active_for_device(device_id) {
