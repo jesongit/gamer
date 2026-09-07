@@ -11,7 +11,7 @@
 | 模块 | 可写（独占） | 只读 |
 | --- | --- | --- |
 | A 媒体服务 | `server/src/media/**`、`api/media.rs`、`api/vision.rs`、`capabilities/frame.rs`、`capabilities/vision.rs`、`capabilities/adapters/{vision,frame,mod}.rs`、`extensions/host_api.rs`、`extensions/permissions.rs` | 其余全部 |
-| B 录制服务 | `server/src/recording/**`、`api/recording.rs`、`device/{scrcpy,mod,frames}.rs`、`api/devices.rs`、`capabilities/{input,touch}.rs`、`capabilities/adapters/{input,touch,run}.rs` | 其余全部 |
+| B 录制服务 | `server/src/recording/**`、`api/recording.rs`、`device/{scrcpy,mod,frames}.rs`、`api/devices.rs`、`capabilities/{input,touch}.rs`、`capabilities/adapters/{input,touch,run}.rs`（`adapters/mod.rs` 归 A；B 若必须改 → 不改，报告集成者） | 其余全部 |
 | C 舞台前端 | `web/src/components/console/{ConsoleVideoStage,TemplateCropModal,TemplateCapture}.vue`、`web/src/components/console/useConsoleTemplates.js`、Console 舞台相关新组合式 `web/src/components/console/useConsoleStage*.js`、`web/src/views/Console.vue`、`web/src/api.js` | 其余全部 |
 | D1 视频扩展+YAML 草稿 | `server/src/extensions/video/**`、`extensions/mod.rs`、`extensions/service.rs`、`extensions/gamer_yaml/**`、`tools/plugins/gamer.video/manifest.toml` | 其余全部 |
 | D2 视频面板前端 | `web/src/components/video/**`、`web/src/workspace/core-component-registry.ts`、相关新测试 | 其余全部 |
@@ -96,7 +96,9 @@ data/media/<media-id>/
 ## 4. 跨模块消费点（钉死）
 
 - D1 草稿生成消费：`crate::recording::{RecordingService::events, InputEventRecord}`（骨架签名）。
-- D2 面板消费 REST（§1/§2）与 D1 的 call 动作（§5）。
+- D2 消费 REST 的封装：优先调用 `web/src/api.js` 合同方法（C 实现中）；为解除
+  并行时序耦合，D2 可在本目录内自建 `components/video/videoApi.js`（fetch 直调
+  §1/§2 合同端点，同源 cookie 鉴权默认携带），集成者统一决定是否收编进 api.js。
 - C 舞台消费 §1/§2 REST；TemplateCropModal 接收**指定帧**（离线=媒体帧 PNG URL，
   在线=现有截图路径），保存裁切仍走现有模板 PUT 管线。
 
