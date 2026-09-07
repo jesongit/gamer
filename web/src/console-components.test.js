@@ -44,8 +44,14 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(template).not.toContain('class="dev-pick"')
     expect(template).not.toContain('class="script-tpl"')
     expect(template).not.toContain('class="script-run"')
-    expect(consoleSource).not.toContain('录制')
-    expect(consoleSource).not.toContain('recording')
+    // 统一舞台来源（视频工作台 V1，Phase 3）：实时/视频切换与设备画面录制按钮态
+    // 属舞台域接线（收敛在 useConsoleStage / ConsoleVideoStage）；设备管理域
+    // （useConsoleDeviceManager）不得携带媒体/录制逻辑
+    expect(consoleSource).toContain('useConsoleStage({')
+    expect(consoleSource).toContain('toggleStageRecording')
+    const deviceManager = read('./components/console/useConsoleDeviceManager.js')
+    expect(deviceManager).not.toContain('录制')
+    expect(deviceManager).not.toContain('recording')
   })
 
   it('工具条两组布局：设备区（连接/刷新/更多）| 应用区（应用/读取/启动/游戏模式/功能）', () => {

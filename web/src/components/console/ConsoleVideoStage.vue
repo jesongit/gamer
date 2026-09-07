@@ -4,7 +4,9 @@
     class="video-wrap"
     :class="{ 'keyboard-active': props.keyboardFocused }"
   >
+    <!-- 实时来源（WebRTC）：媒体模式下仅隐藏显示，流与设备会话保持不动（来源切换不拆连接） -->
     <video
+      v-show="!(stage && stage.kind === 'media')"
       ref="videoElement"
       autoplay
       playsinline
@@ -17,6 +19,46 @@
       @contextmenu.prevent
       @mouseleave="props.onVideoMouseLeave"
     ></video>
+
+    <!-- 视频来源（离线只读）：mediaFileUrl 播放流；输入事件复用舞台处理器，
+         设备输入在路由处按 kind 门禁拒绝，框选/放大镜照常工作 -->
+    <video
+      v-if="stage && stage.kind === 'media' && stage.mediaSrc"
+      :key="stage.mediaId"
+      ref="mediaVideoElement"
+      :src="stage.mediaSrc"
+      preload="auto"
+      playsinline
+      class="video-stream media-stream"
+      @mousedown="props.onMouseDown"
+      @mousemove="props.onMouseMove"
+      @mouseup="props.onMouseUp"
+      @wheel.prevent="props.onWheel"
+      @contextmenu.prevent
+      @mouseleave="props.onVideoMouseLeave"
+    ></video>
+
+    <!-- 视频来源顶部条：素材切换 + 返回实时（来源切换属各自 viewer 状态） -->
+    <div v-if="stage && stage.kind === 'media'" class="media-topbar" data-keyboard-ignore="true">
+      <span class="media-mode-badge">🎞 视频来源</span>
+      <select class="media-pick mono" :value="stage.mediaId" aria-label="选择素材" @change="stage.onMediaPick($event.target.value)">
+        <option value="" disabled>{{ stage.mediaOptions.length ? '选择素材…' : '媒体库为空' }}</option>
+        <option v-for="m in stage.mediaOptions" :key="m.id" :value="m.id">{{ m.name }}</option>
+      </select>
+      <span v-if="stage.mediaName" class="media-meta mono" :title="stage.mediaName + (stage.mediaSizeLabel ? ' · ' + stage.mediaSizeLabel : '')">{{ stage.mediaName }}<template v-if="stage.mediaSizeLabel"> · {{ stage.mediaSizeLabel }}</template></span>
+      <button class="media-live-btn" @click="stage.backToLive()">⏻ 返回实时</button>
+    </div>
+
+    <!-- 视频来源控制条：播放/暂停 · 逐帧± · 倍速 · 时间（只读展示，不连设备不触 ADB） -->
+    <div v-if="stage && stage.kind === 'media' && stage.mediaSrc" class="media-controls" data-keyboard-ignore="true">
+      <button class="mc-btn" :title="stage.playing ? '暂停' : '播放'" @click="stage.togglePlay()">{{ stage.playing ? '⏸' : '▶' }}</button>
+      <button class="mc-btn" title="上一帧" @click="stage.stepFrames(-1)">⏮</button>
+      <button class="mc-btn" title="下一帧" @click="stage.stepFrames(1)">⏭</button>
+      <select class="mc-rate mono" :value="stage.rate" title="倍速" aria-label="播放倍速" @change="stage.setRate($event.target.value)">
+        <option v-for="r in stage.rateOptions" :key="r" :value="r">{{ r }}×</option>
+      </select>
+      <span class="mc-time mono">{{ stage.timeText }} / {{ stage.durationText }}</span>
+    </div>
 
     <!-- 找图命中框演示（模板测试） -->
     <div v-if="props.showHit" class="hit-box" :class="{ 'hit-miss': props.hitMiss }" :style="props.hitStyle">
@@ -73,7 +115,8 @@
       <span class="loupe-tag">{{ props.loupe.zoom }}×</span>
     </div>
 
-    <div class="v-overlay" v-if="!props.connected">
+    <!-- 实时连接覆盖层：视频来源模式不需要设备连接，不显示 -->
+    <div class="v-overlay" v-if="!props.connected && !(stage && stage.kind === 'media')">
       <div class="v-connecting" v-if="props.connecting">
         <span class="dot run"></span> 正在建立 WebRTC 连接…
       </div>
@@ -84,7 +127,15 @@
       </div>
     </div>
 
-    <div class="v-stats" v-if="props.connected">
+    <!-- 视频来源空态：媒体库为空/未选素材（无设备也可用，不触发 ADB） -->
+    <div class="v-overlay" v-if="stage && stage.kind === 'media' && !stage.mediaSrc">
+      <div>
+        <div class="v-empty-icon">🎞</div>
+        <div class="v-empty-text">媒体库为空：可在右侧视频工作台导入素材，或连接设备后点击工具条「⏺ 录制」</div>
+      </div>
+    </div>
+
+    <div class="v-stats" v-if="props.connected && !(stage && stage.kind === 'media')">
       <span class="st">{{ props.fps }} fps</span>
       <span class="st">延迟 {{ props.delay }}ms</span>
       <span class="st">{{ props.res }}</span>
@@ -101,7 +152,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 
 const props = defineProps({
   connected: { type: Boolean, default: false },
@@ -109,6 +160,9 @@ const props = defineProps({
   errorMsg: { type: String, default: '' },
   currentName: { type: String, default: '' },
   audioMuted: { type: Boolean, default: true },
+  // 统一舞台来源（useConsoleStage view）：kind/mediaId/mediaSrc/mediaOptions/
+  // playing/timeText/... 与动作（togglePlay/stepFrames/setRate/onMediaPick/backToLive）
+  stage: { type: Object, default: null },
   fps: { type: [Number, String], default: 0 },
   delay: { type: [Number, String], default: 0 },
   res: { type: String, default: '—' },
@@ -137,10 +191,15 @@ const props = defineProps({
   fullscreen: { type: Function, required: true },
 })
 
-const emit = defineEmits(['video-mounted', 'wrap-mounted', 'loupe-mounted'])
+const emit = defineEmits(['video-mounted', 'wrap-mounted', 'loupe-mounted', 'media-video-mounted'])
 const videoWrap = ref(null)
 const videoElement = ref(null)
 const loupeCanvas = ref(null)
+const mediaVideoElement = ref(null)
+
+// 媒体 <video> 元素交给壳（useConsoleStage 挂播放监听/驱动控制条）：
+// v-if 挂载与 :key 换素材重建都会触发本 watcher（卸载时上抛 null 解绑）
+watch(mediaVideoElement, el => { emit('media-video-mounted', el) })
 
 onMounted(() => {
   emit('video-mounted', videoElement.value)
@@ -164,6 +223,40 @@ onMounted(() => {
 }
 
 .video-stream { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; user-select: none; }
+
+/* ===== 视频来源（离线只读）===== */
+.media-stream { cursor: crosshair; }
+.media-topbar {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 9;
+  display: flex; align-items: center; gap: 8px; max-width: calc(100% - 24px);
+  padding: 4px 8px; background: rgba(8,10,16,.78); backdrop-filter: blur(2px);
+  border: 1px solid rgba(251,191,36,.35); border-radius: 20px;
+}
+.media-mode-badge { font-size: 11px; color: #fde68a; white-space: nowrap; }
+.media-pick { max-width: 200px; padding: 2px 6px; font-size: 11px; }
+.media-meta {
+  font-size: 11px; color: var(--text-1); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 260px;
+}
+.media-live-btn {
+  padding: 3px 10px; font-size: 11px; white-space: nowrap; cursor: pointer;
+  background: rgba(34,211,165,.14); color: var(--accent);
+  border: 1px solid rgba(34,211,165,.5); border-radius: 14px;
+}
+.media-live-btn:hover { background: rgba(34,211,165,.26); }
+.media-controls {
+  position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 9;
+  display: flex; align-items: center; gap: 6px; padding: 5px 10px;
+  background: rgba(8,10,16,.78); backdrop-filter: blur(2px);
+  border: 1px solid rgba(255,255,255,.1); border-radius: 20px;
+}
+.mc-btn {
+  width: 28px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: none; color: var(--text-1); font-size: 13px; cursor: pointer; border-radius: 6px;
+}
+.mc-btn:hover { color: var(--accent); background: rgba(34,211,165,.12); }
+.mc-rate { padding: 2px 4px; font-size: 11px; }
+.mc-time { font-size: 11px; color: var(--text-1); min-width: 110px; text-align: center; }
 
 .hit-box {
   position: absolute; border: 2px solid var(--accent);

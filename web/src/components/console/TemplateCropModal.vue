@@ -5,7 +5,7 @@
     <div class="modal crop-modal" ref="cropSec">
       <div class="modal-head">
         <span class="title">{{ ctx.crop.conflict ? '⚠️ 模板短名冲突' : '✂️ 二次裁切' }}</span>
-        <span v-if="!ctx.crop.conflict" class="mono crop-meta">{{ ctx.cropSize }} · {{ ctx.cropZoomPct }}</span>
+        <span v-if="!ctx.crop.conflict" class="mono crop-meta">{{ ctx.crop.sourceLabel ? ctx.crop.sourceLabel + ' · ' : '' }}{{ ctx.cropSize }} · {{ ctx.cropZoomPct }}</span>
         <button class="btn btn-ghost btn-sm" @click="ctx.cancelCrop">✕</button>
       </div>
       <div v-if="ctx.crop.conflict" class="modal-body crop-conflict-body">

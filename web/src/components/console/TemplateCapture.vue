@@ -19,7 +19,7 @@
           <option value="dr">dr · 右下</option>
         </select>
         <input v-model="ctx.tplSearch" class="input input-sm mono tpl-search" placeholder="🔍 模糊/拼音首字母搜索…" />
-        <button class="btn btn-sm" :class="{ active: ctx.picking }" :disabled="!ctx.connected" @click="ctx.togglePick">✂️ 框选</button>
+        <button class="btn btn-sm" :class="{ active: ctx.picking }" :disabled="!ctx.stageReady" title="在当前舞台画面上框选（实时投屏或视频来源均可）" @click="ctx.togglePick">✂️ 框选</button>
         <button class="btn btn-sm" @click="tplUpload.click()">⬆️ 新建</button>
         <input ref="tplUpload" type="file" accept="image/png,image/jpeg" hidden @change="ctx.onTplUpload" />
         <input ref="tplReplaceUpload" type="file" accept="image/png,image/jpeg" hidden @change="onReplaceUpload" />

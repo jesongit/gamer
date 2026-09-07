@@ -78,6 +78,23 @@
               @click.stop="toggleToolbarMenu('actions', $event)"
             >功能 ▾</button>
           </div>
+          <div class="tb-sep tb-stage-sep"></div>
+          <!-- 统一舞台来源（视频工作台 V1）：实时/视频切换 + 设备画面录制按钮态
+               （activeRecording 轮询驱动，录制服务端执行）；视频来源为只读，
+               舞台产生的设备输入在输入路由处统一拒绝 -->
+          <button
+            class="btn btn-sm stage-source-btn"
+            :class="{ active: stageView.kind === 'media' }"
+            :title="stageView.kind === 'media' ? '当前为视频来源（只读），点击返回实时投屏' : '切换到视频来源（离线查看媒体库素材，不连接设备）'"
+            @click="toggleStageKind"
+          >{{ stageView.kind === 'media' ? '🎞 视频中' : '🎬 视频' }}</button>
+          <button
+            class="btn btn-sm stage-record-btn"
+            :class="{ recording: stageView.recordingActive }"
+            :disabled="stageView.recordingBusy"
+            :title="stageView.recordingActive ? '停止并保存当前录制（服务端执行）' : '录制当前设备画面与操作事件（服务端执行，浏览器可关闭）'"
+            @click="toggleStageRecording"
+          >{{ stageView.recordingActive ? '⏹ 停止录制' : '⏺ 录制' }}</button>
         </div>
       </div>
 
@@ -129,6 +146,7 @@
         :fx-swipe-style="fxSwipeStyle"
         :fx-hit-style="fxHitStyle"
         :loupe="loupe"
+        :stage="stageCtl.view"
         :on-mouse-down="onMouseDown"
         :on-mouse-move="onMouseMove"
         :on-mouse-up="onMouseUp"
@@ -140,6 +158,7 @@
         @video-mounted="onVideoMounted"
         @wrap-mounted="onVideoWrapMounted"
         @loupe-mounted="onLoupeMounted"
+        @media-video-mounted="onStageMediaVideoMounted"
       />
 
       <!-- 未启动应用提示：连接不再自动启动应用，画面停在桌面/黑屏时容易被误以为卡住。
@@ -240,6 +259,7 @@ import { createKeyboardController, shouldIgnoreKeyboardTarget } from '../keyboar
 import { buildTouchPhase, createKeymapController } from '../keymap-control'
 import { useConsolePanelResize } from '../components/console/useConsolePanelResize'
 import { useConsoleDeviceManager } from '../components/console/useConsoleDeviceManager'
+import { useConsoleStage } from '../components/console/useConsoleStage'
 import { useConsoleTemplates } from '../components/console/useConsoleTemplates'
 import { useConsoleBridgeOverlays } from '../components/console/useConsoleBridgeOverlays'
 import { pushRunEvent } from '../components/console/useRunEvents'
@@ -375,6 +395,30 @@ function syncKeymapPressed() {
   for (const code of codes || []) keymapPressed.add(code)
 }
 
+// ---------- 统一舞台来源 StageSource（视频工作台 V1）----------
+// 实时/视频来源切换、媒体控制、指定帧捕获与设备输入门禁收敛在 useConsoleStage；
+// 壳只接线：工具条按钮态、门禁调用（sendControl/键盘/鼠标路由）与来源切换清理。
+const stageCtl = useConsoleStage({
+  toast,
+  deviceId: computed(() => store.deviceId),
+  connected,
+  liveVideoEl: () => videoElement.value,
+})
+const stageView = stageCtl.view
+watch(() => store.deviceId, () => stageCtl.onDeviceChanged())
+
+/** 工具条舞台按钮：来源切换 + 录制开始/停止（按钮态经 activeRecording 轮询驱动） */
+function toggleStageKind() {
+  stageView.toggleKind()
+}
+function toggleStageRecording() {
+  stageView.toggleRecording()
+}
+/** 媒体 <video> 元素挂载/更换（含卸载传 null）：交给舞台组合式挂播放监听 */
+function onStageMediaVideoMounted(el) {
+  stageCtl.attachMediaVideo(el)
+}
+
 // ---------- 模板面板（列表/框选/二次裁切/放大镜/测试匹配/取值工具） ----------
 const {
   picking, selecting, selStart, selEnd, showHit, hitLabel, hitMiss, hitStyle, selStyle,
@@ -400,6 +444,8 @@ const {
   videoElement,
   videoWrap,
   current,
+  // 舞台桥：框选/裁切工作在当前舞台来源上（live=现有视频帧；media=服务端指定帧 PNG）
+  stage: stageCtl.templateBridge,
   // 脚本运行 composable 的能力经懒解析箭头注入（规避组合顺序）
   editorMatchThreshold: () => editorMatchThreshold(),
   clearCallParamsCache: () => clearCallParamsCache(),
@@ -676,6 +722,8 @@ const REST_FALLBACK_CONTROL_TYPES = new Set([
 /** 键盘是有状态的 DOWN/UP 流，只允许走 DataChannel；不能复用 sendControl 的
  * REST fallback，否则通道断开时一次 keydown 会被错误降级为不兼容的 press。 */
 function sendKeyboardControl(obj) {
+  // 安全红线：视频来源（媒体模式）为离线只读，舞台产生的键盘/按键映射输入一律拒绝
+  if (!stageCtl.guardDeviceInput(obj)) return false
   const channel = webrtcLifecycle.getControlChannel() || controlChannel
   if (channel && channel.readyState === 'open') {
     channel.send(JSON.stringify(obj))
@@ -690,6 +738,9 @@ function sendKeyboardControl(obj) {
 }
 
 function sendControl(obj) {
+  // 安全红线：视频来源（媒体模式）为离线只读——鼠标触控/滚轮/按键/启停应用等
+  // 舞台产生的设备输入在统一输入路由处拒绝（含 REST fallback 之前的全部路径）
+  if (!stageCtl.guardDeviceInput(obj)) return false
   // 拖动/滚轮类输入打标（画面停滞看门狗用）：这类操作预期画面变化，
   // 若随后渲染指纹持续冻结则流已病态（见 startStats 处注释）
   if ((obj.type === 'touch' && obj.action === 'move') || obj.type === 'scroll' || obj.type === 'swipe') {
@@ -738,7 +789,8 @@ let mediaStream = null
 // ---------- 键盘焦点区域与工具条 ----------
 
 function onStageFocusIn(e) {
-  if (!connected.value || shouldIgnoreKeyboardTarget(e?.target)) return
+  // 视频来源模式不捕获键盘焦点（键盘/按键映射属设备输入，媒体模式拒绝）
+  if (!connected.value || !stageCtl.view.canDeviceInput || shouldIgnoreKeyboardTarget(e?.target)) return
   keyboardFocused.value = true
 }
 
@@ -752,7 +804,7 @@ function onStageFocusOut(e) {
 }
 
 function onStageKeyDown(e) {
-  if (!connected.value || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
+  if (!connected.value || !stageCtl.view.canDeviceInput || picking.value || selecting.value || cellPick.mode || isGlobalEscapeConsumed(e)) return
   if (keyboardMode.value === 'game') {
     const mapped = keymap.handleKeyDown(e)
     syncKeymapPressed()
@@ -763,7 +815,7 @@ function onStageKeyDown(e) {
 }
 
 function onStageKeyUp(e) {
-  if (!connected.value) return
+  if (!connected.value || !stageCtl.view.canDeviceInput) return
   const mapped = keymap.handleKeyUp(e)
   syncKeymapPressed()
   if (mapped?.handled || mapped === true) return
@@ -955,7 +1007,8 @@ function onMouseDown(e) {
     finishCellPick(e)
     return
   }
-  if (picking.value && connected.value) {
+  // 框选：实时（已连接）与视频来源（画面就绪）均可工作，坐标随舞台来源
+  if (picking.value && stageCtl.view.stageReady) {
     const rect = videoWrap.value.getBoundingClientRect()
     selStart.x = e.clientX - rect.left
     selStart.y = e.clientY - rect.top
@@ -963,7 +1016,8 @@ function onMouseDown(e) {
     selecting.value = true
     return
   }
-  if (!connected.value) return
+  // 设备输入（触控/按键映射）：视频来源为只读，统一拒绝（触控终不发）
+  if (!connected.value || !stageCtl.view.canDeviceInput) return
   cancelPendingMove()
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
   if (remoteKeymapRunning.value) {
@@ -992,7 +1046,7 @@ function onMouseMove(e) {
     updateLoupe(e.clientX, e.clientY, toDeviceCoord(e.clientX, e.clientY), 2.5, [])
     return
   }
-  if (remoteKeymapRunning.value && connected.value) {
+  if (remoteKeymapRunning.value && connected.value && stageCtl.view.canDeviceInput) {
     const { x, y } = toDeviceCoord(e.clientX, e.clientY)
     keymap.handleInputEvent({
       type: 'mousemove', x, y, movementX: e.movementX, movementY: e.movementY,
@@ -1020,7 +1074,7 @@ function onMouseUp(e) {
     if (rect.w >= 8 && rect.h >= 8) openCrop(rect)
     else toast('框选区域太小，请重新框选', 'warn')
     return
-  }  if (remoteKeymapRunning.value && connected.value) {
+  }  if (remoteKeymapRunning.value && connected.value && stageCtl.view.canDeviceInput) {
     const { x, y } = toDeviceCoord(e.clientX, e.clientY)
     keymap.handleInputEvent({ type: 'mouseup', button: e.button, x, y }, 'up', e)
     return
@@ -1038,7 +1092,8 @@ function onVideoMouseLeave() {
 }
 
 function onWheel(e) {
-  if (!connected.value) return
+  // 滚轮 = 设备输入：视频来源（媒体模式）为只读，统一拒绝
+  if (!connected.value || !stageCtl.view.canDeviceInput) return
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
   if (remoteKeymapRunning.value) {
     keymap.handleInputEvent({
@@ -1048,6 +1103,24 @@ function onWheel(e) {
   }
   sendControl({ type: 'scroll', x, y, scroll_x: e.deltaX, scroll_y: e.deltaY })
 }
+
+// ---------- 舞台来源切换清理（合同 §4.2）----------
+// 切换实时/视频时：绝不自动恢复按键按下状态，清指针（拖拽/待发 move）、键盘焦点
+// （keymap/keyboard 残留按下全部释放）、框选进行态与旧来源的叠加层标记
+watch(() => stageCtl.view.kind, () => {
+  cancelPendingMove()
+  touchState.active = false
+  keymap.releaseAll()
+  syncKeymapPressed()
+  keyboard.releaseAll()
+  keyboardFocused.value = false
+  picking.value = false
+  selecting.value = false
+  hideLoupe()
+  scriptFx.tap.show = false
+  scriptFx.swipe.show = false
+  scriptFx.hit.show = false
+})
 
 function fullscreen() {
   if (videoWrap.value?.requestFullscreen) videoWrap.value.requestFullscreen()
@@ -1182,6 +1255,8 @@ onUnmounted(() => {
 .tb-more-item-danger:hover { color: var(--danger); }
 .tb-more-sep { height: 1px; margin: 3px 6px; background: var(--border); }
 .btn.active { border-color: var(--accent-2); color: var(--accent-2); }
+/* 舞台工具条按钮：录制进行中红色高亮 */
+.stage-record-btn.recording { color: var(--danger); border-color: var(--danger); }
 
 /* ===== 左右分区与右侧面板 ===== */
 .console.is-panel-resizing,

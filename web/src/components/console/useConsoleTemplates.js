@@ -22,6 +22,10 @@ export function useConsoleTemplates({
   videoElement,
   videoWrap,
   current,
+  // 统一舞台来源桥（useConsoleStage.templateBridge，可选）：框选/裁切/放大镜工作在
+  // 当前舞台画面上——live = 现有视频帧；media = 服务端指定帧 PNG（绝不在保存时
+  // 重抓最新设备画面）。未注入时保持旧行为（仅实时画面）。
+  stage = null,
   // 来自设备管理 composable（模板页签顶部的分区行）
   // 来自脚本运行 composable（懒解析箭头，规避组合顺序）
   editorMatchThreshold,
@@ -50,7 +54,7 @@ export function useConsoleTemplates({
   const renameVal = ref('')    // 重命名输入框内容
   let renameInputEl = null     // 重命名输入框元素（自动聚焦/全选）
   // 二次裁切（右侧面板）
-  const crop = reactive({ active: false, imgW: 0, imgH: 0, baseW: 0, baseH: 0, originX: 0, originY: 0, rect: { x: 0, y: 0, w: 0, h: 0 }, preview: '', name: '', zoom: 1, preserveColor: false, conflict: null })
+  const crop = reactive({ active: false, imgW: 0, imgH: 0, baseW: 0, baseH: 0, originX: 0, originY: 0, rect: { x: 0, y: 0, w: 0, h: 0 }, preview: '', name: '', zoom: 1, preserveColor: false, conflict: null, sourceLabel: '' })
   const cropCanvas = ref(null)
   const cropSec = ref(null)
   // 二次裁切底图：框选时冻结的初始画面，拖动时只动遮罩框
@@ -64,6 +68,10 @@ export function useConsoleTemplates({
   const tplSearch = ref('')
   // 模板名拼音首字母缓存（非汉字字符原样保留）：「日常遗器.png」→ "rcyq.png"，供搜索匹配
   const tplPyCache = new Map()
+
+  // 舞台活动画面元素：live = WebRTC video；media = 媒体 <video>（坐标参考随之切换）。
+  // 未注入舞台桥时回落实时视频元素（行为与旧实现一致）。
+  const surface = () => stage?.surfaceEl?.() || videoElement.value
 
   function tplPinyinInitials(name) {
     let s = tplPyCache.get(name)
@@ -117,8 +125,9 @@ export function useConsoleTemplates({
     if (!vw) return {}
     const rect = vw.getBoundingClientRect()
     const vw_ = rect.width, vh = rect.height
-    const sw = videoElement.value?.videoWidth || 1920
-    const sh = videoElement.value?.videoHeight || 1080
+    const el = surface()
+    const sw = el?.videoWidth || 1920
+    const sh = el?.videoHeight || 1080
     const ratio = Math.min(vw_ / sw, vh / sh)
     const w = hit.w * ratio, h = hit.h * ratio
     const x = (hit.x * ratio) + (vw_ - sw * ratio) / 2
@@ -131,28 +140,30 @@ export function useConsoleTemplates({
     const vw = videoWrap.value
     if (!vw) return {}
     const rect = vw.getBoundingClientRect()
-    return mapDeviceRectStyle(x, y, w, h, rect, videoElement.value?.videoWidth, videoElement.value?.videoHeight)
+    const el = surface()
+    return mapDeviceRectStyle(x, y, w, h, rect, el?.videoWidth, el?.videoHeight)
   }
 
-  /** 鼠标坐标 → 设备坐标（object-fit: contain 换算） */
+  /** 鼠标坐标 → 设备坐标（object-fit: contain 换算；随舞台来源切换参考尺寸） */
   function toDeviceCoord(clientX, clientY) {
-    const video = videoElement.value
-    const rect = video.getBoundingClientRect()
-    return mapToDeviceCoord(clientX, clientY, rect, video.videoWidth, video.videoHeight)
+    const el = surface()
+    const rect = el.getBoundingClientRect()
+    return mapToDeviceCoord(clientX, clientY, rect, el.videoWidth, el.videoHeight)
   }
 
   // ---------- 框选保存模板 ----------
 
   /** 框选矩形（容器 CSS 坐标）→ 设备像素坐标，自动裁剪 letterbox 黑边并夹取到画面内 */
   function selToDeviceRect() {
-    const video = videoElement.value
+    const el = surface()
     const rect = videoWrap.value.getBoundingClientRect()
-    return selectionToDeviceRect(selStart, selEnd, rect, video?.videoWidth, video?.videoHeight)
+    return selectionToDeviceRect(selStart, selEnd, rect, el?.videoWidth, el?.videoHeight)
   }
 
   /** 生成默认模板名：随机名字#x1_y1_x2_y2（相对坐标 0~1，×1000 存 3 位整数，如 0.123→123，不带 .png 后缀） */
   function defaultTplName(rect) {
-    return defaultTemplateName(rect, videoElement.value?.videoWidth, videoElement.value?.videoHeight)
+    const el = surface()
+    return defaultTemplateName(rect, el?.videoWidth, el?.videoHeight)
   }
 
   // ---------- 二次裁切 ----------
@@ -161,25 +172,22 @@ export function useConsoleTemplates({
   /** 当前显示缩放（100% = 自适应适配），滚轮调整 */
   const cropZoomPct = computed(() => `${Math.round(crop.zoom * 100)}%`)
 
-  /** 框选完成后打开右侧裁切区 */
-  function openCrop(rect) {
-    confirmDelTpl.value = null
-    crop.conflict = null
-    const video = videoElement.value
-    if (!video?.videoWidth) return toast('无法截取画面，请稍后重试', 'error')
-    crop.imgW = video.videoWidth
-    crop.imgH = video.videoHeight
+  /** 冻结裁切底图（指定帧）：二次裁切时底图不动，只动遮罩框；保存管线
+   *  （PUT 模板资源）只消费这份冻结底图，绝不重抓任何画面源 */
+  function freezeCropBase(source, imgW, imgH, label, rect) {
+    crop.imgW = imgW
+    crop.imgH = imgH
+    crop.sourceLabel = label || ''
     crop.originX = Math.round(rect.x)
     crop.originY = Math.round(rect.y)
     crop.baseW = Math.round(rect.w)
     crop.baseH = Math.round(rect.h)
     crop.zoom = 1
     crop.preserveColor = false
-    // 冻结初始框选画面，二次裁切时底图不动，只动遮罩框
     cropBaseCanvas = document.createElement('canvas')
     cropBaseCanvas.width = crop.baseW
     cropBaseCanvas.height = crop.baseH
-    cropBaseCanvas.getContext('2d').drawImage(video, crop.originX, crop.originY, crop.baseW, crop.baseH, 0, 0, crop.baseW, crop.baseH)
+    cropBaseCanvas.getContext('2d').drawImage(source, crop.originX, crop.originY, crop.baseW, crop.baseH, 0, 0, crop.baseW, crop.baseH)
     crop.rect = { x: 0, y: 0, w: crop.baseW, h: crop.baseH }
     crop.name = defaultTplName(rect)
     crop.active = true
@@ -188,6 +196,36 @@ export function useConsoleTemplates({
       refreshCropPreview()
       cropSec.value?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     })
+  }
+
+  /** 框选完成后打开右侧裁切区：底图 = 当前舞台来源的「指定帧」——
+   *  live = 现有视频元素当前画面（既有截图路径，同步冻结不变）；media = 服务端
+   *  确定帧 PNG（stage.captureFrame）。异步取帧后校验 generation，来源已切换的
+   *  过期结果不应用（不得偷偷画到新画面上）。 */
+  async function openCrop(rect) {
+    confirmDelTpl.value = null
+    crop.conflict = null
+    crop.sourceLabel = ''
+    if (stage && stage.kind?.() === 'live') {
+      const video = stage.surfaceEl?.() || videoElement.value
+      if (!video?.videoWidth) return toast('无法截取画面，请稍后重试', 'error')
+      freezeCropBase(video, video.videoWidth, video.videoHeight, '实时画面当前帧', rect)
+      return
+    }
+    if (stage?.captureFrame) {
+      const genBefore = stage.generation()
+      const frame = await stage.captureFrame()
+      if (!frame) return toast('无法获取画面帧，请稍后重试', 'error')
+      if (stage.generation() !== genBefore || frame.generation !== genBefore) {
+        return toast('画面来源已切换，请重新框选', 'warn')
+      }
+      freezeCropBase(frame.source, frame.width, frame.height, frame.label, rect)
+      return
+    }
+    // 未注入舞台桥（旧调用方兼容）：实时视频元素
+    const video = videoElement.value
+    if (!video?.videoWidth) return toast('无法截取画面，请稍后重试', 'error')
+    freezeCropBase(video, video.videoWidth, video.videoHeight, '实时画面当前帧', rect)
   }
 
   function cancelCrop() {
@@ -540,9 +578,9 @@ export function useConsoleTemplates({
 
   // ---------- 放大预览镜 ----------
 
-  /** 以光标为中心放大当前视频帧：devPt 为放大中心（设备像素），rects 为要叠加显示的选区（设备像素坐标） */
+  /** 以光标为中心放大当前画面帧：devPt 为放大中心（设备像素），rects 为要叠加显示的选区（设备像素坐标） */
   function updateLoupe(clientX, clientY, devPt, zoom, rects) {
-    const video = videoElement.value
+    const video = surface()
     const canvas = loupeCanvas.value
     if (!video?.videoWidth || !canvas) return
     const c = devPt
@@ -585,7 +623,14 @@ export function useConsoleTemplates({
 
   function togglePick() {
     confirmDelTpl.value = null
-    if (!connected.value) return toast('请先连接设备', 'error')
+    // 框选随舞台来源工作：实时需已连接；视频来源需画面就绪（离线可框选）
+    if (stage) {
+      if (!stage.ready()) {
+        return toast(stage.kind() === 'media' ? '请先在视频来源中选择并加载素材' : '请先连接设备', 'error')
+      }
+    } else if (!connected.value) {
+      return toast('请先连接设备', 'error')
+    }
     picking.value = !picking.value
     if (!picking.value) {
       hideLoupe()
@@ -682,9 +727,9 @@ export function useConsoleTemplates({
     hideLoupe()
   }
 
-  /** 从当前视频帧采样设备像素颜色 → 6 位 hex（画面不可用返回 null） */
+  /** 从当前舞台画面帧采样设备像素颜色 → 6 位 hex（画面不可用返回 null） */
   function samplePixelHex(devX, devY) {
-    const v = videoElement.value
+    const v = surface()
     if (!v?.videoWidth) return null
     const c = document.createElement('canvas')
     c.width = 1
@@ -697,7 +742,7 @@ export function useConsoleTemplates({
 
   /** 视频画面点击 → 结束取点模式：coord 回相对坐标，color 回采样 hex */
   function finishCellPick(e) {
-    const v = videoElement.value
+    const v = surface()
     const pt = toDeviceCoord(e.clientX, e.clientY)
     const mode = cellPick.mode
     cellPick.mode = null
@@ -943,9 +988,11 @@ export function useConsoleTemplates({
   /** 测试匹配的搜索区域：下拉框手动选择优先，否则按模板名自动识别
    *  （#x1_y1_x2_y2 → 对应矩形区域；#l/#r/... → 对应半区；无 → 全屏） */
   function templateRegionPixels(name) {
-    // 实际视频尺寸优先：虚拟屏分辨率/方向会被游戏改变，设备配置里的 width/height 可能过期
-    const vw = videoElement.value?.videoWidth || current.value?.width || 1920
-    const vh = videoElement.value?.videoHeight || current.value?.height || 1080
+    // 实际舞台画面尺寸优先：虚拟屏分辨率/方向会被游戏改变，设备配置里的
+    // width/height 可能过期（随舞台来源切换：live = 视频，media = 媒体画面）
+    const el = surface()
+    const vw = el?.videoWidth || current.value?.width || 1920
+    const vh = el?.videoHeight || current.value?.height || 1080
     if (testRegion.value) return regionCodePixels(testRegion.value, vw, vh)
     const nums = parseTplRegion(name)
     if (nums) {
@@ -980,8 +1027,9 @@ export function useConsoleTemplates({
         toast(`匹配成功：${name} 置信度 ${r.score.toFixed(2)}`, 'success')
       } else {
         // 未命中也画框：显示本次搜索区域（与引擎 miss 可视化同语义，便于发现区域配错）
-        const vw2 = videoElement.value?.videoWidth || current.value?.width || 1920
-        const vh2 = videoElement.value?.videoHeight || current.value?.height || 1080
+        const el = surface()
+        const vw2 = el?.videoWidth || current.value?.width || 1920
+        const vh2 = el?.videoHeight || current.value?.height || 1080
         const [rx, ry, rw2, rh2] = region || r.region || [0, 0, vw2, vh2]
         hit.x = rx; hit.y = ry; hit.w = rw2; hit.h = rh2
         hitLabel.value = `${name} 未命中`
@@ -1015,9 +1063,12 @@ export function useConsoleTemplates({
     cancelCellPick()
   })
 
+  // 框选按钮可用性随舞台来源：实时已连接 或 视频来源画面就绪（离线可框选/裁切）
+  const stageReady = computed(() => (stage ? stage.ready() : !!connected.value))
+
   const templateCaptureContext = {
     packageId, crop, testThreshold, testRegion, tplSearch,
-    picking, connected, togglePick, templates, confirmDelTpl, renaming, onTplRowClick, onTplThumbClick,
+    picking, connected, stageReady, togglePick, templates, confirmDelTpl, renaming, onTplRowClick, onTplThumbClick,
     tplThumbUrl, onTplNameClick, setRenameInputEl, renameVal, confirmRename, cancelRename, startRename,
     onTplDeleteClick, onTplMatchClick, onTplUpload, tplShortName, tplRegionBadge, cropSize, cropZoomPct,
     cropMouseDown, cropMouseMove, cropMouseUp, cropMouseLeave, cropWheel, saveTemplate, overwriteTemplate, backToCrop, cancelCrop,
@@ -1027,7 +1078,7 @@ export function useConsoleTemplates({
   return {
     // 状态
     picking, selecting, selStart, selEnd, showHit, hitLabel, hitMiss, hitStyle, selStyle,
-    testThreshold, testRegion, tplSearch, templates, templateNames,
+    testThreshold, testRegion, tplSearch, templates, templateNames, stageReady,
     viewTpl, confirmDelTpl, renaming, renameVal, crop, cropSize, cropZoomPct, saving,
     loupe, loupeCanvas, cellPick,
     // 视图挂载

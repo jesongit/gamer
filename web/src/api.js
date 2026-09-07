@@ -298,6 +298,76 @@ export const api = {
   listApps: (id) => req('GET', `/api/devices/${id}/apps`),
   listAppsByAddr: (addr) => req('GET', `/api/apps?addr=${encodeURIComponent(addr)}`),
 
+  // ---- 媒体库（视频工作台 V1，实施合同 §1；素材寻址一律 media id）----
+  // 列表：{"media":[MediaMetadata]}（创建时间倒序）→ 解包数组
+  listMedia: async () => {
+    const rep = await req('GET', '/api/media')
+    return Array.isArray(rep?.media) ? rep.media : []
+  },
+  getMedia: (id) => req('GET', `/api/media/${encodeURIComponent(requireId(id, 'media_id'))}`),
+  // 导入原始字节（application/octet-stream，服务端组限额 1GiB）→ 201 MediaMetadata
+  importMedia: async (bytes, name) => {
+    const r = await response(
+      'POST',
+      `/api/media/import?name=${encodeURIComponent(requireId(name, 'name'))}`,
+      bytes,
+      { rawBody: true, headers: { 'Content-Type': 'application/octet-stream' } },
+    )
+    return readResult(r)
+  },
+  // 删除素材（仍被引用 → 409 {"error":"media_referenced"}）
+  deleteMedia: (id) => req('DELETE', `/api/media/${encodeURIComponent(requireId(id, 'media_id'))}`),
+  // 播放 / 精确帧 URL（只拼 URL 不发请求；<video> 播放用 file，确定帧用 frame PNG）
+  mediaFileUrl: (id) => `/api/media/${encodeURIComponent(requireId(id, 'media_id'))}/file`,
+  // frame 查询参数 = pts_us|index|max_width（pts_us 与 index 同时给出时 pts_us 优先；
+  // 微秒取整，非法值归 0；同一请求服务端逐字节可重复）
+  mediaFrameUrl: (id, { ptsUs, index, maxWidth } = {}) => {
+    const p = new URLSearchParams()
+    if (ptsUs !== undefined && ptsUs !== null) p.set('pts_us', String(Math.max(0, Math.round(Number(ptsUs) || 0))))
+    if (index !== undefined && index !== null) p.set('index', String(Math.max(0, Math.round(Number(index) || 0))))
+    if (maxWidth !== undefined && maxWidth !== null) p.set('max_width', String(Math.max(1, Math.round(Number(maxWidth) || 1))))
+    const q = p.toString()
+    const base = `/api/media/${encodeURIComponent(requireId(id, 'media_id'))}/frame`
+    return q ? `${base}?${q}` : base
+  },
+
+  // ---- 录制（实施合同 §2；服务端权威：浏览器断开不中断，stop/cancel 幂等）----
+  recordingStart: (deviceId) => req('POST', '/api/recording/start', { device_id: requireId(deviceId, 'device_id') }),
+  recordingStop: (id) => req('POST', `/api/recording/${encodeURIComponent(requireId(id, 'recording_id'))}/stop`),
+  recordingCancel: (id) => req('POST', `/api/recording/${encodeURIComponent(requireId(id, 'recording_id'))}/cancel`),
+  recordingStatus: (id) => req('GET', `/api/recording/${encodeURIComponent(requireId(id, 'recording_id'))}`),
+  // 设备当前活动会话：404（无活动会话，轮询常态）→ null 不抛错
+  activeRecording: async (deviceId) => {
+    try {
+      return await req('GET', `/api/recording/active?device_id=${encodeURIComponent(requireId(deviceId, 'device_id'))}`)
+    } catch (e) {
+      if (e?.status === 404) return null
+      throw e
+    }
+  },
+  // 操作事件：{schema_version, events:[InputEventRecord]}（时间轴升序）→ 解包数组
+  recordingEvents: async (id) => {
+    const rep = await req('GET', `/api/recording/${encodeURIComponent(requireId(id, 'recording_id'))}/events`)
+    return Array.isArray(rep?.events) ? rep.events : []
+  },
+  // YAML v3 草稿生成：经现有扩展 call 通路（扩展 id 字面量唯一归宿 =
+  // gamer-plugin-ids.js，本文件不出现 id 字面量）。返回 {yaml, diagnostics}；
+  // 兼容 {ok, data} 信封形态。
+  createVideoDraft: async (recordingId, eventIds) => {
+    const rep = await req(
+      'POST',
+      `/api/extensions/${encodeURIComponent(GAMER_YAML_PLUGIN_ID)}/call`,
+      {
+        action: 'automation.create_draft',
+        values: {
+          recording_id: requireId(recordingId, 'recording_id'),
+          event_ids: Array.isArray(eventIds) ? eventIds : [],
+        },
+      },
+    )
+    return rep && typeof rep === 'object' && rep.data && typeof rep.data === 'object' ? rep.data : rep
+  },
+
   // ---- Package（plan §7-§11：Package = 配置数据上下文，独立 Package ID）----
   listPackages: () => req('GET', '/api/packages'),
   createPackage: (p) => req('POST', '/api/packages', p),
