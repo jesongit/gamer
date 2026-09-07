@@ -94,6 +94,26 @@ interface log {
     -> result<_, host-error>;
 }
 
+/// Host API domain: media. Media/recording ids are opaque logical identifiers;
+/// handles never expose host filesystem paths. V1 authority is the Rust facade
+/// (`host_api::MediaDomain`, Core 进程级机制域，不经 CapabilityRegistry 注册)；
+/// 本 interface 先契约化形态、未挂进 world extension-host——待出现 WASM 消费者
+/// 再接线，避免宿主 linker 预先承担全部 world import。
+interface media {
+  use types.{frame-handle, host-error};
+  import-media: func(name: string, bytes: list<u8>) -> result<string, host-error>;
+  get: func(media-id: string) -> result<string, host-error>;
+  list-media: func() -> result<string, host-error>;
+  open-frame: func(media-id: string, pts-us: option<u64>, index: option<u32>)
+    -> result<frame-handle, host-error>;
+  record-start: func(device: string) -> result<string, host-error>;
+  record-stop: func(recording-id: string) -> result<string, host-error>;
+  record-cancel: func(recording-id: string) -> result<string, host-error>;
+  record-status: func(recording-id: string) -> result<string, host-error>;
+  events: func(recording-id: string) -> result<string, host-error>;
+  release: func(handle: frame-handle) -> result<_, host-error>;
+}
+
 /// Generic, versioned capability escape hatch. The JSON wire is intentionally
 /// owned by the extension boundary rather than Core: capability names still
 /// resolve only to registered Core services and permissions are checked by the
