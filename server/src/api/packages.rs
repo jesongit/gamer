@@ -267,7 +267,8 @@ fn media_refs_json(entries: &[crate::media::PackageMediaEntry]) -> Vec<Value> {
 
 /// GET /api/packages/:pkg/compatibility?android_package=<pkg> — Android Target
 /// 兼容性检查（plan §17，warning 语义：不兼容仅提示，不禁止使用）。
-/// 0 个声明 target = 通用包恒兼容。
+/// 匹配语义见 [`crate::resources::android_targets_match`]：空声明或 `*` =
+/// 通用包恒兼容。
 pub(super) async fn api_package_compatibility(
     State(st): State<AppState>,
     Path(pkg): Path<String>,
@@ -277,8 +278,8 @@ pub(super) async fn api_package_compatibility(
         let manifest = store_of(&st)
             .manifest(&pkg)
             .map_err(not_found_or_internal)?;
-        let compatible = manifest.android_targets.is_empty()
-            || manifest.android_targets.contains(&q.android_package);
+        let compatible =
+            crate::resources::android_targets_match(&manifest.android_targets, &q.android_package);
         Ok(json!({
             "android_package": q.android_package,
             "compatible": compatible,

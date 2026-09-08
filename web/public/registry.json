@@ -1,6 +1,6 @@
 {
     "schema_version":  2,
-    "generated_at":  "2026-09-07T19:35:23Z",
+    "generated_at":  "2026-09-08T07:08:39Z",
     "host_api":  "1.0.0",
     "plugins":  [
                     {
@@ -10,8 +10,8 @@
                         "description":  "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.keymap-1.0.1.gplugin",
-                        "sha256":  "f9f998afe1749bdfd543ba99c1524f13831bb34af032985389774b49361a776c",
-                        "size":  99230,
+                        "sha256":  "e4920b9771575ca6b9cf8464352852da8c78b313cf003561c49843c05a7ef893",
+                        "size":  99328,
                         "permissions":  [
                                             "input.tap",
                                             "input.swipe",
@@ -48,8 +48,8 @@
                         "description":  "视频工作台：媒体素材库、设备录制与操作草稿生成",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.video-1.0.0.gplugin",
-                        "sha256":  "94d48d7aa418945529b41bb2c8561fb5d262f1a62f2482cca19b5e92f8eef85b",
-                        "size":  692,
+                        "sha256":  "9cd8e96ee17c2072d7021f7cab9085ef05c193244cef82dbd00668d6be9b46b9",
+                        "size":  820,
                         "permissions":  [
                                             "media.read",
                                             "media.import",
@@ -86,8 +86,8 @@
                         "description":  "自动化：YAML v3 脚本、函数库与模板的制作与运行",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.yaml-3.1.1.gplugin",
-                        "sha256":  "c5369e1b6b0c74048a4895d8a541f3cd9c45f06bd2fd61af88273200d92b613f",
-                        "size":  72818,
+                        "sha256":  "e05617ccf78639f7a03d2ded44252566af0f07ac14be8077539c5dac0b23e730",
+                        "size":  72719,
                         "permissions":  [
                                             "device.read",
                                             "device.app",

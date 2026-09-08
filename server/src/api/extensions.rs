@@ -394,12 +394,25 @@ fn snapshot_json(snapshot: &ExtensionSnapshot) -> serde_json::Value {
         // builtin 扩展没有 WASM entry（null）；执行类型见 execution。
         "entry": manifest.entry().map(|entry| entry.as_str()),
         "execution": manifest.execution(),
+        "targets": android_targets_json(manifest),
         "state": snapshot.state(),
         "last_error": snapshot.last_error(),
         "host_api": host_api,
         "permissions": manifest.permissions().names(),
         "ui": manifest.ui().iter().map(ui_json).collect::<Vec<_>>(),
     })
+}
+
+/// 插件 Android Targets JSON（快照与 pre-install inspect 共用）：空声明归一为
+/// `*` 呈现，与「缺省 = 通用」语义一致，前端按当前设备应用过滤插件入口。
+pub(super) fn android_targets_json(
+    manifest: &crate::extensions::ExtensionManifest,
+) -> serde_json::Value {
+    let mut packages = manifest.android_targets().to_vec();
+    if packages.is_empty() {
+        packages.push("*".to_string());
+    }
+    serde_json::json!({ "android": { "packages": packages } })
 }
 
 fn ui_json(contribution: &crate::extensions::UiContribution) -> serde_json::Value {

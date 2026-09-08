@@ -131,6 +131,7 @@ canonical ABI**，`log::write` 这类 import 直接调用即可。
 | `entry` | string | wasm ✅ | 包内 `.wasm` 路径（惯例 `plugin.wasm`）；安装时校验存在 + `\0asm` magic。**builtin 执行类型必须缺省** |
 | `permissions` | [string] | — | 权限闭集 19 项（见 §5）；缺省 = 无权限。写 `filesystem.*`/`network`/`shell`/`process`/`device.shell` 直接拒绝 |
 | `[host_api]` | table | — | 声明用到的 Host API 域版本要求：`device`/`vision`/`input`/`touch`/`resource`/`run`/`runtime`/`log`/`media`，值是 SemVer range（如 `"^1.0"`）；宿主当前全域 `1.0.0`，不满足 → 安装期结构化报错 |
+| `[targets.android].packages` | [string] | — | 支持的 Android 应用包名列表；`*` = 通用（全部应用），**缺省/空声明等价 `*`**。仅作运行目标声明，宿主不做硬门禁：Console 壳按当前设备应用过滤插件入口（`*` 恒显示，具体包名需命中）。与 package.toml 的 `[targets.android]` 同形 |
 | `[[ui.contributions]]` | array | — | 面板贡献，见下 |
 
 `[execution]`（执行类型 = 后端形态；**与 `ui.contributions.runtime` 界面渲染类型是两回事**）：

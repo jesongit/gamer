@@ -146,6 +146,7 @@ pub(super) async fn api_inspect_extension(
         // Phase 1 免签名：不再有 signature 字段；执行类型与 advisory 宿主
         // 版本要求（execution.host_version）透传前端展示。
         "execution": manifest.execution(),
+        "targets": super::extensions::android_targets_json(manifest),
         // Phase 8 §11.2：执行形态变化（wasm↔builtin）显式暴露，确认弹窗
         // 必须提示（builtin→wasm 已在服务端拒绝，这里只会出现 wasm→builtin）。
         "execution_change": inspection.execution_change().map(|change| {

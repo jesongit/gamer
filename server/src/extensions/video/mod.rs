@@ -43,6 +43,11 @@ name = "视频工作台"
 description = "视频工作台：媒体素材库、设备录制与操作草稿生成"
 permissions = ["media.read", "media.import", "media.record", "media.write", "media.events.read"]
 
+# 支持的 Android 应用（`*` = 通用；缺省/空同 `*`）。宿主不做硬门禁，
+# Console 壳按当前设备应用过滤插件入口。
+[targets.android]
+packages = ["*"]
+
 # builtin（宿主预置）执行类型：无 guest 字节、无常驻实例；执行体在宿主
 # extensions/builtin.rs 注册表内（builtin_id 必须已注册才能安装）。
 [execution]

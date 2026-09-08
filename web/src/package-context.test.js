@@ -204,6 +204,22 @@ describe('usePackageContext（plan §28：导入/导出/新建/复制/删除）'
     })
   })
 
+  it('新建表单默认 Android Targets = *（通用配置、零插件依赖）', async () => {
+    const { api, toast } = setup()
+    api.createPackage.mockResolvedValue({ id: 'user.new' })
+    api.listPackages.mockResolvedValue({ packages: [{ id: 'user.new', name: '', version: '0.1.0' }] })
+    const ctx = usePackageContext({ api, toast })
+    ctx.openCreate()
+    expect(ctx.formModal.form.androidPackagesText).toBe('*')
+    ctx.formModal.form.id = 'user.new'
+    ctx.formModal.form.name = ''
+    await ctx.submitForm()
+    expect(api.createPackage).toHaveBeenCalledWith({
+      id: 'user.new', version: '1.0.0',
+      targets: { android: { packages: ['*'] } },
+    })
+  })
+
   it('复制：duplicatePackage(new_id) 后选中新包', async () => {
     const { api, toast, refreshAll } = setup()
     api.duplicatePackage.mockResolvedValue({ id: 'user.demo.copy' })

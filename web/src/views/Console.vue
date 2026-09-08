@@ -194,6 +194,8 @@
         :registry="panelRegistry"
         :active-panel="activePanelKey"
         :plugin-names="pluginNames"
+        :plugin-targets="pluginTargets"
+        :android-package-name="currentApplication?.pkg || ''"
         :context="workspaceContext"
         :lifecycle="workspaceLifecycle"
         @select="openPanel"
@@ -549,6 +551,9 @@ const panelRegistry = createPanelRegistry({ defaultPanelKey: DEFAULT_PANEL_KEY }
 const activePanelKey = ref(DEFAULT_PANEL_KEY)
 // 插件显示名（pluginId → name，来自扩展快照）：插件下拉菜单展示插件名而非面板清单
 const pluginNames = ref({})
+// 插件 Android Targets（pluginId → packages，来自扩展快照；空声明服务端归一 ['*']）：
+// 插件下拉按当前设备应用过滤（* 通用恒显，具体包名需命中）
+const pluginTargets = ref({})
 registerCoreContributions(panelRegistry, { packageId: currentPackageId })
 const serverUiAdapter = createServerUiContributionAdapter(panelRegistry, {
   load: () => api.listExtensions(),
@@ -565,6 +570,7 @@ const {
   connected,
   activePanelKey,
   pluginNames,
+  pluginTargets,
 })
 // keymap 输入控制器接线：与面板注册解耦——挂载即启用本地映射（旧注册 lifecycle
 // 的 start 语义），远端停止时释放残留按键（stop 语义）；远端模式本身只看

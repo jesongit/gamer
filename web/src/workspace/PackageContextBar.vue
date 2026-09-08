@@ -37,8 +37,8 @@
         <input v-model="ctx.formModal.form.version" class="input mono" />
       </label>
       <label class="field">
-        <span>Android 兼容目标（逗号分隔，可留空 = 通用配置）</span>
-        <input v-model="ctx.formModal.form.androidPackagesText" class="input mono" placeholder="com.miHoYo.hkrpg, com.HoYoverse.hkrpgoversea" spellcheck="false" />
+        <span>Android 兼容目标（逗号分隔；`*` 或留空 = 通用配置）</span>
+        <input v-model="ctx.formModal.form.androidPackagesText" class="input mono" placeholder="* 或 com.miHoYo.hkrpg, com.HoYoverse.hkrpgoversea" spellcheck="false" />
       </label>
       <p v-if="ctx.formModal.error" class="form-error">{{ ctx.formModal.error }}</p>
       <div class="modal-actions">

@@ -57,8 +57,13 @@ async function mountWorkspace(activePanel, extraProps = {}) {
   return wrapper
 }
 
-/** 点开主导航「插件」下拉，返回菜单项按钮列表。 */
+/** 点开主导航「插件」下拉，返回菜单项按钮列表（重复调用会先收起已开的菜单）。 */
 async function openPluginMenu(wrapper) {
+  const mask = wrapper.find('.workspace-dd-mask')
+  if (mask.exists()) {
+    await mask.trigger('click')
+    await nextTick()
+  }
   const pluginTab = wrapper.findAll('.workspace-tab').find(node => node.text().includes('插件'))
   expect(pluginTab).toBeTruthy()
   await pluginTab.trigger('click')
@@ -143,6 +148,51 @@ describe('PluginWorkspace 业务面板激活（下拉二级菜单回归）', () 
     expect(wrapper.find('.plugin-picker').exists()).toBe(false)
     expect(wrapper.text()).toContain('TASKS_OK')
     expect(wrapper.find('.plugin-subnav-tabs').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+// 插件 Android Targets（manifest [targets.android].packages，服务端把空声明
+// 归一为 ['*']）：声明 `*`（或未声明）的插件恒显示；声明具体应用的插件只在
+// 当前设备应用命中时出现在插件下拉，不命中（含未选择应用）直接不显示。
+describe('PluginWorkspace 插件下拉按当前应用过滤（Android Targets）', () => {
+  const TARGETS = {
+    'gamer.video': ['*'],
+    'gamer.yaml': ['com.miHoYo.hkrpg'],
+  }
+
+  it('通用（*）插件恒显示；具体目标插件当前应用命中才显示', async () => {
+    const wrapper = await mountWorkspace('gamer.core:tasks', {
+      pluginTargets: TARGETS,
+      androidPackageName: 'com.miHoYo.hkrpg',
+    })
+    let items = await openPluginMenu(wrapper)
+    expect(items.map(node => node.find('.workspace-dd-item-title').text()))
+      .toEqual(['视频工作台', '自动化'])
+    // 切换到不匹配的应用：仅 * 插件留在下拉
+    await wrapper.setProps({ androidPackageName: 'com.other.game' })
+    items = await openPluginMenu(wrapper)
+    expect(items.map(node => node.find('.workspace-dd-item-title').text()))
+      .toEqual(['视频工作台'])
+    wrapper.unmount()
+  })
+
+  it('未选择应用：仅通用（*）插件显示，具体目标插件不出现', async () => {
+    const wrapper = await mountWorkspace('gamer.core:tasks', {
+      pluginTargets: TARGETS,
+      androidPackageName: '',
+    })
+    const items = await openPluginMenu(wrapper)
+    expect(items.map(node => node.find('.workspace-dd-item-title').text()))
+      .toEqual(['视频工作台'])
+    wrapper.unmount()
+  })
+
+  it('targets 数据未到达（未声明）：不误隐藏插件（fail-open）', async () => {
+    const wrapper = await mountWorkspace('gamer.core:tasks')
+    const items = await openPluginMenu(wrapper)
+    expect(items.map(node => node.find('.workspace-dd-item-title').text()))
+      .toEqual(['视频工作台', '自动化'])
     wrapper.unmount()
   })
 })

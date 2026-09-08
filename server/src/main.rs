@@ -314,6 +314,16 @@ impl RuntimeServices {
         drain_slot: DrainSlot,
     ) -> anyhow::Result<Self> {
         let packages = Arc::new(resources::PackageStore::open(cfg)?);
+        // 全新安装开箱即用：包存储为空时播种「默认配置」包（targets=`*`、
+        // 零插件依赖）。播种失败（如残留损坏的 default 目录）只告警不阻断启动。
+        match packages.ensure_default_package() {
+            Ok(true) => tracing::info!(
+                "已播种默认配置包 `{}`（Android Targets = *，零插件依赖）",
+                resources::DEFAULT_PACKAGE_ID
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(%error, "默认配置包播种失败（忽略）"),
+        }
         // 扩展内容钩子注册（组合根引导期）——gamer.yaml 的脚本/函数/模板
         // 校验与 gamer.keymap 的方案校验。裸 Core（不注册）时保存不做内容
         // 校验（§8.9 验收锚点）。

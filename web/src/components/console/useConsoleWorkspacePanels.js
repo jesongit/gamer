@@ -20,6 +20,9 @@ export function useConsoleWorkspacePanels({
   activePanelKey,
   // 可选：{pluginId → 显示名} ref，由扩展快照（GET /api/extensions 的 name）喂给导航下拉
   pluginNames,
+  // 可选：{pluginId → Android Targets 数组} ref（扩展快照 targets.android.packages，
+  // 服务端把空声明归一为 ['*']），喂给导航下拉按当前应用过滤
+  pluginTargets,
 }) {
   let extensionUiPollTimer = null
   let gamepadPollTimer = null
@@ -36,6 +39,15 @@ export function useConsoleWorkspacePanels({
           if (id) next[id] = String(item?.name || '').trim() || id
         }
         pluginNames.value = next
+      }
+      if (pluginTargets) {
+        const next = {}
+        for (const item of Array.isArray(response?.extensions) ? response.extensions : []) {
+          const id = String(item?.id || '').trim()
+          const packages = item?.targets?.android?.packages
+          if (id && Array.isArray(packages)) next[id] = packages.map(pkg => String(pkg))
+        }
+        pluginTargets.value = next
       }
     } catch (error) {
       // Extension discovery is additive; a transient failure must not tear down

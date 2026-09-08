@@ -91,6 +91,10 @@ const props = defineProps({
   activePanel: { type: String, default: '' },
   // {pluginId → 显示名}（扩展快照 name），插件下拉/插件列表用插件名而非 id
   pluginNames: { type: Object, default: () => ({}) },
+  // {pluginId → Android Targets 数组}（扩展快照 targets.android.packages）
+  pluginTargets: { type: Object, default: () => ({}) },
+  // 当前设备的 Android 应用包名（运行目标）；空 = 未选择应用
+  androidPackageName: { type: String, default: '' },
   context: { type: Object, default: () => ({}) },
   lifecycle: { type: Object, default: null },
 })
@@ -131,6 +135,18 @@ const topTabs = computed(() => {
 /** 市场当前分区（下拉选择决定；panel=market 的 URL 不带分区，默认插件市场）。 */
 const marketSection = ref('plugin')
 
+/**
+ * 插件 Android Targets 匹配（manifest `[targets.android].packages`）：
+ * 未声明/空 = 通用（`*` 语义）恒显示；声明含 `*` 恒显示；其余需当前设备
+ * 应用包名精确命中——不命中（含未选择应用）则插件入口直接不出现在下拉。
+ */
+function pluginSupportsApp(pluginId) {
+  const list = props.pluginTargets?.[pluginId]
+  if (!Array.isArray(list) || !list.length || list.includes('*')) return true
+  const app = String(props.androidPackageName || '').trim()
+  return app !== '' && list.includes(app)
+}
+
 /** 业务插件面板按 pluginId 分组（gamer.core 除外），附插件显示名。 */
 const pluginGroups = computed(() => {
   void props.pluginNames
@@ -141,6 +157,7 @@ const pluginGroups = computed(() => {
     groups.get(panel.pluginId).push(panel)
   }
   return [...groups.entries()]
+    .filter(([pluginId]) => pluginSupportsApp(pluginId))
     .map(([pluginId, panels]) => ({
       pluginId,
       pluginName: String(props.pluginNames?.[pluginId] || '').trim() || pluginId,

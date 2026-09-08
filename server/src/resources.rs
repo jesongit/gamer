@@ -205,8 +205,9 @@ impl PackageInput {
 }
 
 /// Android 兼容目标轻校验：非空、无分隔符/控制字符（Android 包名允许大写，
-/// 与 package-id 的严格小写规则刻意不同——它只是运行目标字符串）。
-fn validate_android_target(value: &str) -> anyhow::Result<()> {
+/// 与 package-id 的严格小写规则刻意不同——它只是运行目标字符串）。`*` 是
+/// 合法目标值，表示通用（全部应用）。
+pub(crate) fn validate_android_target(value: &str) -> anyhow::Result<()> {
     anyhow::ensure!(!value.is_empty(), "Android 目标包名不能为空");
     anyhow::ensure!(
         value.len() <= 200,
@@ -219,6 +220,17 @@ fn validate_android_target(value: &str) -> anyhow::Result<()> {
         "Android 目标包名含非法字符: {value:?}"
     );
     Ok(())
+}
+
+/// Android Target 匹配语义（package.toml 与插件 manifest 的
+/// `[targets.android].packages` 共用）：空声明 = 通用（恒命中），`*` = 通用
+/// （恒命中），其余按 Android 包名精确比较（区分大小写）。
+pub fn android_targets_match(targets: &[String], android_package: &str) -> bool {
+    if targets.is_empty() {
+        return true;
+    }
+    let app = android_package.trim();
+    targets.iter().any(|target| target == "*" || target == app)
 }
 
 #[derive(Debug, Deserialize)]
@@ -525,6 +537,10 @@ pub struct PluginStats {
 #[error("配置不存在: {0}")]
 pub struct PackageNotFound(pub String);
 
+/// 默认配置包 id（包存储为空时由 [`PackageStore::ensure_default_package`]
+/// 播种；Android Targets = `*`、零插件依赖）。
+pub const DEFAULT_PACKAGE_ID: &str = "default";
+
 /// Core Package 本地包存储。见模块级文档。
 pub struct PackageStore {
     /// 数据根（`<data>/packages`），一级子目录 = package-id。
@@ -598,6 +614,23 @@ impl PackageStore {
             serialize_package_toml(&manifest).as_bytes(),
         )?;
         Ok(manifest)
+    }
+
+    /// 包存储为空时播种「默认配置」包：Android Targets = `*`（通用）、零插件
+    /// 依赖，保证全新安装开箱即用。已有任何包（含与默认包无关的损坏条目）则
+    /// 不播种；`default` 目录存在但缺 package.toml（损坏）时创建失败，错误交
+    /// 调用方记日志——不阻断启动。返回是否实际播种。
+    pub fn ensure_default_package(&self) -> anyhow::Result<bool> {
+        if !self.list_packages()?.is_empty() {
+            return Ok(false);
+        }
+        self.create_package(PackageInput {
+            id: DEFAULT_PACKAGE_ID.to_string(),
+            name: Some("默认配置".to_string()),
+            android_targets: vec!["*".to_string()],
+            ..PackageInput::default()
+        })?;
+        Ok(true)
     }
 
     /// 磁盘上全部包（按 id 字典序）。目录名不合法或缺 package.toml 的条目
@@ -1360,6 +1393,57 @@ required = false
         let dup = b"id = \"a.b\"\n[targets.android]\npackages = [\"com.x\", \"com.x\"]\n";
         let manifest = parse_package_toml(dup).unwrap();
         assert_eq!(manifest.android_targets, vec!["com.x".to_string()]);
+    }
+
+    #[test]
+    fn wildcard_is_a_valid_android_target_value() {
+        validate_android_target("*").unwrap();
+        validate_android_target(" com.example.Game ").unwrap();
+    }
+
+    #[test]
+    fn android_targets_match_supports_wildcard_and_empty() {
+        // 空 = 通用恒命中；`*` = 通用恒命中
+        assert!(android_targets_match(&[], "com.any.app"));
+        assert!(android_targets_match(&["*".to_string()], "com.any.app"));
+        // 精确命中（区分大小写：Android 包名允许大写）
+        let specific = vec!["com.example.Game".to_string(), "com.other".to_string()];
+        assert!(android_targets_match(&specific, "com.example.Game"));
+        assert!(!android_targets_match(&specific, "com.example.game"));
+        assert!(!android_targets_match(&specific, "com.miss"));
+        // `*` 混排恒命中
+        let mixed = vec!["com.a".to_string(), "*".to_string()];
+        assert!(android_targets_match(&mixed, "whatever"));
+    }
+
+    #[test]
+    fn default_package_seeds_only_into_empty_store() {
+        let (store, dir) = temp_store("default-seed");
+        assert!(store.list_packages().unwrap().is_empty());
+        // 空存储播种：targets = *、零插件依赖
+        assert!(store.ensure_default_package().unwrap());
+        let manifest = store.manifest(DEFAULT_PACKAGE_ID).unwrap();
+        assert_eq!(manifest.android_targets, vec!["*".to_string()]);
+        assert!(manifest.plugins.is_empty());
+        assert_eq!(manifest.name.as_deref(), Some("默认配置"));
+        assert_eq!(manifest.version, "0.1.0");
+        assert!(dir.join("packages/default/package.toml").is_file());
+
+        // 已有任意包（含删除默认包后剩余的）都不再播种
+        assert!(!store.ensure_default_package().unwrap());
+        store
+            .create_package(input("official.demo"))
+            .unwrap();
+        store.delete_package(DEFAULT_PACKAGE_ID).unwrap();
+        assert!(!store.ensure_default_package().unwrap());
+
+        // 存储重新清空 → 再次播种；损坏的 default 目录（缺 package.toml）使
+        // 播种报错而非静默通过（调用方记 warn 不阻断启动）
+        store.delete_package("official.demo").unwrap();
+        assert!(store.ensure_default_package().unwrap());
+        std::fs::remove_dir_all(dir.join("packages/default")).unwrap();
+        std::fs::create_dir_all(dir.join("packages/default")).unwrap();
+        assert!(store.ensure_default_package().is_err());
     }
 
     // ---------- 包生命周期 ----------

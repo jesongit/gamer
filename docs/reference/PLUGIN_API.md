@@ -91,6 +91,11 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 
 - `id` 语法：ASCII `[A-Za-z0-9._-]`、不以 `.` 开头/结尾、非 Windows 保留名、
   ≤128B；插件 id 与 Android 包名、Package id 是三个无关命名空间，不互相推导。
+- `[targets.android].packages`（可缺省）：插件支持的 Android 应用声明，
+  `*` = 通用（全部应用）；**缺省/空声明等价 `*`**。与 package.toml 的
+  `[targets.android]` 同形，仅作运行目标声明、宿主不做硬门禁——Console
+  壳按当前设备应用过滤插件入口（不命中不显示，`*` 恒显示），快照与
+  inspect 响应把空声明归一为 `["*"]` 透传。
 - `entry`：`.wasm` 后缀、不得指向 `manifest.toml`；zip 内必须存在且 ≥4 字节、
   `\0asm` magic。builtin（`[execution] kind="builtin"` + `builtin_id`）必须
   **没有** `entry`，且包内不得携带 `plugin.wasm`（防伪装执行类型）。
@@ -132,7 +137,7 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 | `POST /api/extensions/:id/enable|disable|start|stop` | 生命周期（start 可带 `{app_context:{device_id, android_package, content_package}}` 指定运行上下文；keymap 另支持 `profile`） |
 | `POST /api/extensions/:id/call` | `{action, values}` → declarative 按钮白名单 → 常驻实例 `call`；返回 JSON |
 | `DELETE /api/extensions/:id/:version` | 卸载（Running 拒绝；最后一版才清状态；不删 Package 数据） |
-| `GET /api/extensions` | 列表 + `runtime_available` + UI 贡献注册表 |
+| `GET /api/extensions` | 列表 + `runtime_available` + UI 贡献注册表 + 各插件 `targets.android`（空声明归一 `["*"]`） |
 | `GET /api/extensions/management` | 管理视图（执行形态/权限/宿主 API/依赖任务） |
 | `GET /api/extensions/ui` 、`GET /api/extensions/:id/ui/*path` | UI 贡献注册表 / iframe 资产 |
 | `GET|POST /api/packages/:pkg/plugins/:plugin/resources[/*path]`、`PUT|DELETE …/*path`、`POST …/rename` | Package 插件资源（文本 JSON 乐观并发 / 模板 PNG 字节）；第三方插件数据读写通道 |

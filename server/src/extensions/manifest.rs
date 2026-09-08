@@ -68,6 +68,10 @@ pub(crate) struct ExtensionManifest {
     execution: ExecutionSpec,
     host_api: HostApiRequirements,
     permissions: PermissionSet,
+    /// Android 应用支持声明（`[targets.android].packages`）。缺省/空 = 通用
+    /// （等价 `*`）；`*` = 全部应用；其余按 Android 包名精确匹配。仅作运行
+    /// 目标声明，宿主不做硬门禁（前端按当前设备应用过滤插件入口）。
+    targets: Vec<String>,
     ui: Vec<UiContribution>,
 }
 
@@ -106,6 +110,11 @@ impl ExtensionManifest {
 
     pub(crate) fn permissions(&self) -> &PermissionSet {
         &self.permissions
+    }
+
+    /// Android 应用支持声明（`targets.android.packages`，缺省/空 = 通用）。
+    pub(crate) fn android_targets(&self) -> &[String] {
+        &self.targets
     }
 
     pub(crate) fn ui(&self) -> &[UiContribution] {
@@ -398,8 +407,26 @@ struct RawManifest {
     host_api: RawHostApiRequirements,
     #[serde(default)]
     permissions: Vec<String>,
+    /// Android 应用支持声明（可缺省 = 通用）；结构与 package.toml 的
+    /// `[targets.android]` 一致。
+    #[serde(default)]
+    targets: Option<RawTargets>,
     #[serde(default)]
     ui: RawUi,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTargets {
+    #[serde(default)]
+    android: Option<RawAndroidTargets>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAndroidTargets {
+    #[serde(default)]
+    packages: Vec<String>,
 }
 
 /// manifest v2 `[execution]` 表（可选；缺省按 `kind = "wasm"` 处理）。
@@ -585,6 +612,12 @@ fn parse_manifest_with_versions(
     let (execution, entry) = build_execution(raw.execution.as_ref(), raw.entry.as_deref())?;
     let host_api = raw.host_api.into_requirements()?;
     let permissions = PermissionSet::parse(raw.permissions)?;
+    let targets = parse_android_targets(
+        raw.targets
+            .and_then(|targets| targets.android)
+            .map(|android| android.packages)
+            .unwrap_or_default(),
+    )?;
     let ui = raw
         .ui
         .contributions
@@ -602,8 +635,25 @@ fn parse_manifest_with_versions(
         execution,
         host_api,
         permissions,
+        targets,
         ui,
     })
+}
+
+/// `[targets.android].packages` 归一化：trim + 轻校验（复用 Package 侧规则，
+/// `*` = 通用）+ 保序去重。缺省/空 = 通用，无需显式 `*`。
+fn parse_android_targets(packages: Vec<String>) -> ExtensionResult<Vec<String>> {
+    let mut targets: Vec<String> = Vec::new();
+    for value in packages {
+        let value = value.trim();
+        crate::resources::validate_android_target(value).map_err(|error| {
+            ExtensionError::InvalidManifest(format!("targets.android.packages 无效: {error}"))
+        })?;
+        if !targets.iter().any(|existing| existing == value) {
+            targets.push(value.to_string());
+        }
+    }
+    Ok(targets)
 }
 
 /// `[execution]`（可缺省）+ 顶层 `entry` → （执行类型规约, 已校验的 WASM entry）。
@@ -1156,6 +1206,36 @@ mod tests {
         let bad = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n\
              [host_api]\nmedia = \"not-a-version\"\n";
         assert!(parse_manifest(bad).is_err());
+    }
+
+    #[test]
+    fn android_targets_default_to_universal_and_support_wildcard() {
+        // 缺省 [targets] = 通用（空列表，`*` 语义；存量安装manifest 无此段照常解析）
+        let default = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n";
+        assert!(parse_manifest(default).unwrap().android_targets().is_empty());
+
+        // 显式声明：trim + 保序去重 + `*` = 通用合法值
+        let explicit = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n\
+             [targets.android]\npackages = [\"com.example.Game\", \"*\", \" com.other \", \"com.example.Game\"]\n";
+        let parsed = parse_manifest(explicit).unwrap();
+        assert_eq!(
+            parsed.android_targets(),
+            &[
+                "com.example.Game".to_string(),
+                "*".to_string(),
+                "com.other".to_string(),
+            ]
+        );
+
+        // 非法目标（空串）拒绝
+        let bad = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n\
+             [targets.android]\npackages = [\"\"]\n";
+        assert!(parse_manifest(bad).is_err());
+
+        // 未知 targets 子字段拒绝（deny_unknown_fields，与 package.toml 同形）
+        let unknown = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n\
+             [targets.windows]\npackages = [\"x\"]\n";
+        assert!(parse_manifest(unknown).is_err());
     }
 
     #[test]

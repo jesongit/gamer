@@ -297,7 +297,9 @@ export function usePackageContext({
 
   function openCreate() {
     formModal.mode = 'create'
-    formModal.form = { id: '', name: '', version: '1.0.0', androidPackagesText: '' }
+    // 默认 Android Targets = `*`（通用配置、零插件依赖）；需要绑定具体应用时
+    // 改填包名或用「填入当前应用」。
+    formModal.form = { id: '', name: '', version: '1.0.0', androidPackagesText: '*' }
     formModal.error = ''
     formModal.open = true
   }
