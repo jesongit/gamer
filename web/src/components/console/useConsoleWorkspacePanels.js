@@ -18,6 +18,8 @@ export function useConsoleWorkspacePanels({
   keymap,
   connected,
   activePanelKey,
+  // 可选：{pluginId → 显示名} ref，由扩展快照（GET /api/extensions 的 name）喂给导航下拉
+  pluginNames,
 }) {
   let extensionUiPollTimer = null
   let gamepadPollTimer = null
@@ -27,6 +29,14 @@ export function useConsoleWorkspacePanels({
     try {
       const response = await serverUiAdapter.refresh()
       remoteKeymapRunning.value = isRemoteKeymapRunning(response?.extensions)
+      if (pluginNames) {
+        const next = {}
+        for (const item of Array.isArray(response?.extensions) ? response.extensions : []) {
+          const id = String(item?.id || '').trim()
+          if (id) next[id] = String(item?.name || '').trim() || id
+        }
+        pluginNames.value = next
+      }
     } catch (error) {
       // Extension discovery is additive; a transient failure must not tear down
       // the already mounted core panels or the currently active input route.

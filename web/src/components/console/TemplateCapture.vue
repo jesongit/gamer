@@ -20,8 +20,8 @@
         </select>
         <input v-model="ctx.tplSearch" class="input input-sm mono tpl-search" placeholder="🔍 模糊/拼音首字母搜索…" />
         <button class="btn btn-sm" :class="{ active: ctx.picking }" :disabled="!ctx.stageReady" title="在当前舞台画面上框选（实时投屏或视频来源均可）" @click="ctx.togglePick">✂️ 框选</button>
-        <button class="btn btn-sm" @click="tplUpload.click()">⬆️ 新建</button>
-        <input ref="tplUpload" type="file" accept="image/png,image/jpeg" hidden @change="ctx.onTplUpload" />
+        <button class="btn btn-sm" @click="tplUpload.click()" title="选择图片或多选；zip 压缩包自动解压导入（已存在同名跳过）">⬆️ 上传</button>
+        <input ref="tplUpload" type="file" accept="image/png,image/jpeg,image/webp,image/bmp,image/gif,.zip" multiple hidden @change="ctx.onTplUpload" />
         <input ref="tplReplaceUpload" type="file" accept="image/png,image/jpeg" hidden @change="onReplaceUpload" />
       </div>
 
@@ -72,7 +72,7 @@
               </span>
             </span>
           </div>
-          <div v-if="!ctx.templates.length" class="tpl-empty">{{ ctx.tplSearch.trim() ? '没有匹配的模板' : '暂无模板，点击「框选」或「新建」创建' }}</div>
+          <div v-if="!ctx.templates.length" class="tpl-empty">{{ ctx.tplSearch.trim() ? '没有匹配的模板' : '暂无模板，点击「框选」截取画面或「上传」导入图片/压缩包' }}</div>
         </div>
       </div>
     </div>

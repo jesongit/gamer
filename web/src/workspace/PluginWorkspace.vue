@@ -1,7 +1,7 @@
 <template>
   <div class="plugin-workspace">
     <!-- 主导航（plan §29）：任务 | 日志 | 市场▾ | 插件▾ | 设置。市场/插件为下拉
-         二级菜单：市场分插件市场/配置市场两分区，插件列出已启用插件贡献的面板；
+         二级菜单：市场分插件市场/配置市场两分区，插件下拉列出已启用插件（显示名）；
          插件 Panel 不再占据主导航（§40）。 -->
     <WorkspaceTabs
       :panels="topTabs"
@@ -10,20 +10,17 @@
       @select="selectTop"
       @open-plugin-center="centerOpen = true"
     />
-    <!-- 插件二级导航：选中插件后展示其贡献的 Panel（§32） -->
-    <div v-if="activePluginGroup" class="plugin-subnav">
-      <button type="button" class="plugin-back" title="返回插件列表" @click="selectTop('plugins')">← 插件</button>
-      <span class="plugin-subnav-title">{{ activePluginGroup.pluginId }}</span>
-      <div class="plugin-subnav-tabs">
-        <button
-          v-for="panel in activePluginGroup.panels"
-          :key="panel.key"
-          type="button"
-          class="workspace-subtab"
-          :class="{ active: panel.key === activePanel }"
-          @click="selectPanel(panel.key)"
-        >{{ panel.title }}</button>
-      </div>
+    <!-- 插件功能子页签：选中插件后以其贡献的 Panel 平铺一排页签（样式对齐主导航）；
+         单面板插件直接渲染面板本体，不显示该行 -->
+    <div v-if="activePluginGroup && activePluginGroup.panels.length > 1" class="plugin-subnav-tabs">
+      <button
+        v-for="panel in activePluginGroup.panels"
+        :key="panel.key"
+        type="button"
+        class="workspace-subtab"
+        :class="{ active: panel.key === activePanel }"
+        @click="selectPanel(panel.key)"
+      >{{ panel.title }}</button>
     </div>
 
     <div class="workspace-panel-slot">
@@ -39,10 +36,10 @@
           :key="group.pluginId"
           type="button"
           class="plugin-card"
-          @click="selectPanel(group.panels[0].key)"
+          @click="selectPlugin(group.pluginId)"
         >
-          <span class="plugin-card-title">{{ group.pluginId }}</span>
-          <span class="plugin-card-panels">{{ group.panels.map(p => p.title).join(' · ') }}</span>
+          <span class="plugin-card-title">{{ group.pluginName }}</span>
+          <span class="plugin-card-panels">{{ group.pluginId }} · {{ group.panels.map(p => p.title).join(' · ') }}</span>
         </button>
       </div>
       <!-- 面板渲染（Core 自有 + 扩展贡献同机制） -->
@@ -92,6 +89,8 @@ import { createWorkspaceLifecycle } from './lifecycle'
 const props = defineProps({
   registry: { type: Object, required: true },
   activePanel: { type: String, default: '' },
+  // {pluginId → 显示名}（扩展快照 name），插件下拉/插件列表用插件名而非 id
+  pluginNames: { type: Object, default: () => ({}) },
   context: { type: Object, default: () => ({}) },
   lifecycle: { type: Object, default: null },
 })
@@ -101,10 +100,10 @@ const lifecycle = props.lifecycle || createWorkspaceLifecycle()
 const allPanels = computed(() => props.registry.getPanels())
 
 // 主导航五项（§29）：core 三面板 + 市场/插件两个虚拟视图。
-// 市场/插件收成下拉二级菜单：市场 = 插件市场/配置市场两分区；插件 = 已启用
-// 插件贡献的面板清单（hint 标插件 id），没有业务面板时退化为普通页签
-// （点进插件列表空态）。子项 key：市场分区用 `market:<section>`（selectTop
-// 拦截翻译，不进路由），插件面板即真实 panel key（路由 hash 同步不变）。
+// 市场收成下拉二级菜单：插件市场/配置市场两分区；插件下拉列出已启用插件本体
+// （显示名，hint 标其功能清单），选中插件后由主导航下一行的功能子页签承接
+// （单面板插件无子页签行，面板直接渲染）。子项 key：市场分区用 `market:<section>`、
+// 插件用 `plugin:<pluginId>`（均为 selectTop 拦截翻译的 UI key，不进路由）。
 const MARKET_CHILDREN = [
   { key: 'market:plugin', title: '插件市场' },
   { key: 'market:package', title: '配置市场' },
@@ -116,9 +115,11 @@ const topTabs = computed(() => {
     if (panel) tabs.push(panel)
   }
   tabs.push({ key: 'market', title: '市场', icon: '🛒', children: MARKET_CHILDREN })
-  const pluginChildren = pluginGroups.value.flatMap(group =>
-    group.panels.map(panel => ({ key: panel.key, title: panel.title, hint: group.pluginId })),
-  )
+  const pluginChildren = pluginGroups.value.map(group => ({
+    key: `plugin:${group.pluginId}`,
+    title: group.pluginName,
+    hint: group.panels.map(panel => panel.title).join(' · '),
+  }))
   tabs.push(pluginChildren.length
     ? { key: 'plugins', title: '插件', icon: '🧩', children: pluginChildren }
     : { key: 'plugins', title: '插件', icon: '🧩' })
@@ -130,8 +131,9 @@ const topTabs = computed(() => {
 /** 市场当前分区（下拉选择决定；panel=market 的 URL 不带分区，默认插件市场）。 */
 const marketSection = ref('plugin')
 
-/** 业务插件面板按 pluginId 分组（gamer.core 除外）。 */
+/** 业务插件面板按 pluginId 分组（gamer.core 除外），附插件显示名。 */
 const pluginGroups = computed(() => {
+  void props.pluginNames
   const groups = new Map()
   for (const panel of allPanels.value) {
     if (panel.pluginId === 'gamer.core') continue
@@ -139,7 +141,11 @@ const pluginGroups = computed(() => {
     groups.get(panel.pluginId).push(panel)
   }
   return [...groups.entries()]
-    .map(([pluginId, panels]) => ({ pluginId, panels }))
+    .map(([pluginId, panels]) => ({
+      pluginId,
+      pluginName: String(props.pluginNames?.[pluginId] || '').trim() || pluginId,
+      panels,
+    }))
     .sort((a, b) => a.pluginId.localeCompare(b.pluginId))
 })
 
@@ -181,13 +187,36 @@ function selectTop(key) {
     emit('select', 'market')
     return
   }
+  // 插件下拉子项（plugin:<pluginId>）翻译成该插件的目标面板（真实 panel key 进路由）
+  if (key.startsWith('plugin:')) {
+    selectPlugin(key.slice('plugin:'.length))
+    return
+  }
   emit('select', key)
 }
 function selectPanel(key) { emit('select', key) }
 
-/** 下拉菜单项高亮：市场跟随所选分区，插件跟随当前业务面板 key。 */
+/** 每插件最后访问的面板：再次从下拉选中该插件时回到它，而不是永远跳第一个。 */
+const lastPanelByPlugin = new Map()
+watch(() => props.activePanel, key => {
+  const group = pluginGroups.value.find(g => g.panels.some(p => p.key === key))
+  if (group) lastPanelByPlugin.set(group.pluginId, key)
+}, { immediate: true })
+
+/** 选中插件：保持当前面板 → 上次访问的面板 → 第一个面板。 */
+function selectPlugin(pluginId) {
+  const group = pluginGroups.value.find(g => g.pluginId === pluginId)
+  if (!group) return
+  const target = group.panels.find(p => p.key === props.activePanel)
+    || group.panels.find(p => p.key === lastPanelByPlugin.get(pluginId))
+    || group.panels[0]
+  if (target) emit('select', target.key)
+}
+
+/** 下拉菜单项高亮：市场跟随所选分区，插件跟随当前业务面板所属插件。 */
 const activeChild = computed(() => {
   if (activeTop.value === 'market') return `market:${marketSection.value}`
+  if (activePluginGroup.value) return `plugin:${activePluginGroup.value.pluginId}`
   return props.activePanel
 })
 
@@ -206,13 +235,12 @@ onUnmounted(() => {
 
 <style scoped>
 .plugin-workspace { flex:1; min-height:0; display:flex; flex-direction:column; gap:10px; overflow:hidden; }
-.plugin-subnav { display:flex; align-items:center; gap:8px; flex-shrink:0; }
-.plugin-back { border:1px solid var(--border); background:var(--bg-2); color:var(--text-1); border-radius:var(--radius-sm); padding:4px 10px; font-size:12px; cursor:pointer; }
-.plugin-back:hover { color:var(--text-0); background:var(--bg-3); }
-.plugin-subnav-title { font-size:12px; font-weight:600; color:var(--text-2); }
-.plugin-subnav-tabs { display:flex; gap:4px; overflow-x:auto; }
-.workspace-subtab { border:1px solid var(--border); background:transparent; color:var(--text-1); border-radius:var(--radius-sm); padding:4px 12px; font-size:12px; cursor:pointer; white-space:nowrap; }
-.workspace-subtab.active { color:var(--accent); background:rgba(34,211,165,.14); font-weight:600; border-color:rgba(34,211,165,.4); }
+/* 插件功能子页签条：样式对齐主导航（WorkspaceTabs）的整条页签框 */
+.plugin-subnav-tabs { display:flex; flex-shrink:0; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg-2); overflow-x:auto; }
+.workspace-subtab { flex:1; min-width:0; padding:7px 3px; border:0; border-left:1px solid var(--border); background:transparent; color:var(--text-1); font-size:12px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.workspace-subtab:first-child { border-left:0; }
+.workspace-subtab:hover { color:var(--text-0); background:var(--bg-3); }
+.workspace-subtab.active { color:var(--accent); background:rgba(34,211,165,.14); font-weight:600; }
 .workspace-panel-slot { flex:1; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
 .workspace-empty { flex:1; display:flex; align-items:center; justify-content:center; color:var(--text-2); border:1px solid var(--border); border-radius:var(--radius); padding:0 16px; text-align:center; }
 .plugin-picker { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:4px; }

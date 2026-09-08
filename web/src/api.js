@@ -486,6 +486,13 @@ export const api = {
       requireId(packageId, 'package_id'), GAMER_YAML_PLUGIN_ID,
       pluginPath(TEMPLATE_DIR, requireId(name, 'name')), base64ToBytes(dataB64), { force: true },
     ),
+  // 批量导入上传原始字节建模板（名字已由调用方按模板名规则清洗），
+  // 灰度归一化仍由服务端字节钩子统一执行。
+  importTemplateBytes: (name, bytes, packageId) =>
+    api.putPluginResourceBytes(
+      requireId(packageId, 'package_id'), GAMER_YAML_PLUGIN_ID,
+      pluginPath(TEMPLATE_DIR, requireId(name, 'name')), bytes, { force: true },
+    ),
   // 重命名：服务端经扩展 before_rename 钩子同步改写脚本/函数引用（v3 AST）。
   renameTemplate: (oldName, newName, packageId) =>
     api.renamePluginResource(

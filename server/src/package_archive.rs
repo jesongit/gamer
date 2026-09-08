@@ -852,6 +852,122 @@ mod tests {
         assert_eq!(again.id, "official.demo");
     }
 
+    // 中文资源名（templates/登录.png 等）在归档里的往返：写入侧是 UTF-8 字节 +
+    // UTF-8 标志（zip crate 对非 ASCII 名自动置位），解析侧中央目录强制合法
+    // UTF-8，两端同标准 → 中文名包导出/导入/自检全链无损。
+    #[test]
+    fn chinese_entry_names_survive_export_import_roundtrip() {
+        let (store, _dir) = temp_store();
+        let package = archive(vec![
+            ("package.toml", manifest_bytes("official.demo").as_slice()),
+            (
+                "plugins/gamer.yaml/templates/登录.png",
+                b"\x89PNG fake bytes",
+            ),
+            (
+                "plugins/gamer.yaml/automations/日常任务.yaml",
+                b"version: 3\nsteps: []\n",
+            ),
+        ]);
+        let staging = store.staging_root().join("zh1");
+        extract_archive(&package, &staging).unwrap();
+        assert!(staging.join("plugins/gamer.yaml/templates/登录.png").is_file());
+
+        let final_dir = store.package_dir("official.demo").unwrap();
+        std::fs::rename(&staging, &final_dir).unwrap();
+
+        // 导出（内含自检重走中央目录解析）→ 再导入：中文名原样往返
+        let exported = export_package(&store, "official.demo", None, false).unwrap();
+        let staging2 = store.staging_root().join("zh2");
+        extract_archive(&exported.archive, &staging2).unwrap();
+        assert!(staging2
+            .join("plugins/gamer.yaml/templates/登录.png")
+            .is_file());
+        assert!(staging2
+            .join("plugins/gamer.yaml/automations/日常任务.yaml")
+            .is_file());
+    }
+
+    /// 手工打包 stored 条目（显式控制文件名字节与标志位，zip crate 造不出无
+    /// 标志的非 ASCII 名），返回 (归档字节, 中央目录起始偏移)。
+    fn raw_zip(entries: Vec<(Vec<u8>, &[u8])>) -> Vec<u8> {
+        let mut locals = Vec::new();
+        let mut centrals = Vec::new();
+        let mut offset = 0usize;
+        let count = entries.len();
+        for (name, data) in entries {
+            let mut local = Vec::new();
+            local.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            local.extend_from_slice(&20u16.to_le_bytes());
+            local.extend_from_slice(&0u16.to_le_bytes()); // 无 UTF-8 标志
+            local.extend_from_slice(&0u16.to_le_bytes()); // stored
+            local.extend_from_slice(&0u32.to_le_bytes()); // time+date
+            local.extend_from_slice(&0u32.to_le_bytes()); // crc
+            local.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            local.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            local.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            local.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            local.extend_from_slice(&name);
+            local.extend_from_slice(data);
+
+            let mut central = Vec::new();
+            central.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            central.extend_from_slice(&20u16.to_le_bytes()); // version made
+            central.extend_from_slice(&20u16.to_le_bytes());
+            central.extend_from_slice(&0u16.to_le_bytes()); // 无 UTF-8 标志
+            central.extend_from_slice(&0u16.to_le_bytes()); // stored
+            central.extend_from_slice(&0u32.to_le_bytes()); // time+date
+            central.extend_from_slice(&0u32.to_le_bytes()); // crc
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&[0u8; 12]); // extra/comment/disk/attrs（含外部属性 4 字节）
+            central.extend_from_slice(&(offset as u32).to_le_bytes());
+            central.extend_from_slice(&name);
+
+            offset += local.len();
+            locals.extend_from_slice(&local);
+            centrals.extend_from_slice(&central);
+        }
+        let mut out = locals;
+        let central_offset = out.len() as u32;
+        out.extend_from_slice(&centrals);
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // disk
+        out.extend_from_slice(&0u16.to_le_bytes()); // central disk
+        out.extend_from_slice(&(count as u16).to_le_bytes());
+        out.extend_from_slice(&(count as u16).to_le_bytes());
+        out.extend_from_slice(&(centrals.len() as u32).to_le_bytes());
+        out.extend_from_slice(&central_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        out
+    }
+
+    /// GBK 文件名归档（中文 Windows 外部工具重打包形态）必须整包拒绝：
+    /// 中央目录强制合法 UTF-8，绝不解出乱码名资源落盘（fail-closed）。
+    #[test]
+    fn gbk_named_archive_is_rejected() {
+        // "登录" 的 GBK（CP936）字节：B5 C7 C2 BC
+        let gbk_name = b"plugins/gamer.yaml/templates/\xB5\xC7\xC2\xBC.png".to_vec();
+        let bytes = raw_zip(vec![
+            (b"package.toml".to_vec(), manifest_bytes("official.demo").as_slice()),
+            (gbk_name, b"png"),
+        ]);
+        let err = validate_and_read_manifest(&bytes).unwrap_err();
+        assert!(
+            err.to_string().contains("UTF-8"),
+            "必须以「归档路径必须是 UTF-8」拒绝: {err}"
+        );
+        let staging = std::env::temp_dir().join(format!(
+            "gamer-archive-gbk-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        assert!(extract_archive(&bytes, &staging).is_err());
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
     #[test]
     fn archive_rejects_traversal_duplicates_whitelist_and_limits() {
         let oversized = vec![0u8; IMPORT_MAX_ARCHIVE_BYTES + 1];

@@ -42,6 +42,7 @@
       </label>
       <p v-if="ctx.formModal.error" class="form-error">{{ ctx.formModal.error }}</p>
       <div class="modal-actions">
+        <button v-if="ctx.formModal.mode === 'create'" class="btn" :disabled="ctx.formModal.submitting" @click="ctx.fillCurrentApp">填入当前应用</button>
         <button class="btn" @click="ctx.closeForm">取消</button>
         <button class="btn btn-primary" :disabled="ctx.formModal.submitting" @click="ctx.submitForm">
           {{ ctx.formModal.submitting ? '保存中…' : '保存' }}

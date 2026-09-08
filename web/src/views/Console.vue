@@ -193,6 +193,7 @@
       <PluginWorkspace
         :registry="panelRegistry"
         :active-panel="activePanelKey"
+        :plugin-names="pluginNames"
         :context="workspaceContext"
         :lifecycle="workspaceLifecycle"
         @select="openPanel"
@@ -344,7 +345,7 @@ async function loadData() {
 
 // ---------- 设备管理（工具条设备控件 + 设置弹窗 + 工具条快捷动作） ----------
 const {
-  devices, current, currentName,
+  devices, current, currentName, currentApplication,
   mode, form, scanning, configApplying, settingsOpen,
   kindInfo, screenSummary, formDirty,
   startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
@@ -508,6 +509,8 @@ watch(currentPackageId, pkg => {
 // 包切换/导入会整体替换资源现场，经 refreshAll 全量重拉（脚本/模板/函数库/映射）
 const packageContext = usePackageContext({
   toast,
+  currentApp: currentApplication,
+  loadCurrentApps: () => loadApps({ silent: true }),
   refreshAll: async () => {
     const pkg = currentPackageId.value
     await Promise.all([
@@ -544,6 +547,8 @@ const panelRegistry = createPanelRegistry({ defaultPanelKey: DEFAULT_PANEL_KEY }
 // Workspace 以稳定的 pluginId:panelId 作为 URL key；实际导航由
 // activePanelKey + PanelRegistry 负责。
 const activePanelKey = ref(DEFAULT_PANEL_KEY)
+// 插件显示名（pluginId → name，来自扩展快照）：插件下拉菜单展示插件名而非面板清单
+const pluginNames = ref({})
 registerCoreContributions(panelRegistry, { packageId: currentPackageId })
 const serverUiAdapter = createServerUiContributionAdapter(panelRegistry, {
   load: () => api.listExtensions(),
@@ -559,6 +564,7 @@ const {
   keymap,
   connected,
   activePanelKey,
+  pluginNames,
 })
 // keymap 输入控制器接线：与面板注册解耦——挂载即启用本地映射（旧注册 lifecycle
 // 的 start 语义），远端停止时释放残留按键（stop 语义）；远端模式本身只看

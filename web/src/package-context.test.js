@@ -189,6 +189,21 @@ describe('usePackageContext（plan §28：导入/导出/新建/复制/删除）'
     expect(refreshAll).toHaveBeenCalledTimes(1)
   })
 
+  it('新建配置可填入当前应用：ID 自动小写，兼容目标保留包名，名称使用应用名', async () => {
+    const { api, toast } = setup()
+    const ctx = usePackageContext({
+      api, toast,
+      currentApp: { value: { pkg: 'com.example.Game', label: '示例游戏' } },
+    })
+    ctx.openCreate()
+    await ctx.fillCurrentApp()
+    expect(ctx.formModal.form).toMatchObject({
+      id: 'com.example.game',
+      name: '示例游戏',
+      androidPackagesText: 'com.example.Game',
+    })
+  })
+
   it('复制：duplicatePackage(new_id) 后选中新包', async () => {
     const { api, toast, refreshAll } = setup()
     api.duplicatePackage.mockResolvedValue({ id: 'user.demo.copy' })

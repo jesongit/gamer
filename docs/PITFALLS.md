@@ -306,3 +306,8 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **Windows Python 打不开 Git Bash 的 `/tmp/...` 路径**：混用 bash 工具与 python 处理临时文件时，目录用 `cygpath -m "$(mktemp -d)"`（C:/ 风格两边通吃）。
 - **heredoc 写入含转义字节的脚本文件**：外层 python 的字符串字面量会把 `\xNN` 形态解释成真实字节落盘，bash 再喂给 python 就成非法源码——生成脚本里的控制字节用 `bytes([...])`/`chr()` 构造，别用反斜杠转义。
 - **官方 .gplugin 安装请求头**：`X-Gamer-Extension-Source: official` + `X-Gamer-Permission-Confirm: true`（缺后者有权限声明的插件装不上，报权限确认缺失）。
+
+## 2026-09-08（模板 zip 上传中文文件名）
+
+- **上传带中文文件名的 zip 模板包逐张报「资源路径段非法」400**：中文 Windows 资源管理器/WinRAR 打的 zip 文件名字节是 GBK 且不带 UTF-8 标志（bit 11），fflate 对无标志名按 Latin-1 解码出乱码（`»`/`½`/C1 控制符），服务端 `sanitize_segment` 只放行 Unicode 字母数字与 `. _ - #` 空格。规避：前端解压前按中央目录标志位解码（`template-upload.js` readZipEntryNames，无标志 GBK fatal 严格解码、失败退 Latin-1、zip64 整体退 fflate 原行为），fflate 自产/7-Zip/macOS 包（有标志）不受影响。
+- **用外部工具（WinRAR 等）改 .gamerpkg 会导不回来**：服务端中央目录解析强制条目名合法 UTF-8（GBK 字节直接整包拒绝「归档路径必须是 UTF-8」，fail-closed 不落乱码资源），服务端自产包写的是 UTF-8 名 + UTF-8 标志，闭环无损；要改包内容请走 Console 界面或解包后用服务端重打包，别用压缩软件原地改。

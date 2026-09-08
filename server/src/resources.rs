@@ -1304,6 +1304,11 @@ mod tests {
             sanitize_rel_path("templates/icon#001_002.png").unwrap(),
             vec!["templates".to_string(), "icon#001_002.png".to_string()]
         );
+        // 中文文件名合法（Unicode 字母数字）；GBK 包文件名被 Latin-1 误读出的
+        // 乱码（»/½ 等符号与 C1 控制符）必须拒绝——前端上传前先按 GBK 修正
+        assert!(sanitize_rel_path("templates/登录.png").is_ok());
+        let mojibake = "templates/ç\u{99}»å½\u{95}.png";
+        assert!(sanitize_rel_path(mojibake).is_err(), "{mojibake:?} 必须被拒绝");
     }
 
     // ---------- manifest 解析/序列化 ----------

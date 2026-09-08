@@ -1,6 +1,7 @@
 import { computed, nextTick, onUnmounted, provide, reactive, ref } from 'vue'
 import { pinyin } from 'pinyin-pro'
 import { api } from '../../api'
+import { collectTemplateEntries, planTemplateImports } from '../../console/template-upload'
 import {
   defaultTemplateName,
   deviceRectStyle as mapDeviceRectStyle,
@@ -883,23 +884,61 @@ export function useConsoleTemplates({
     }
   }
 
-  /** 模板列表：上传图片模板 */
+  /** 批量大小上限提示（与 template-upload.js 同口径） */
+  function tplBatchHint(n) {
+    return n > 6 ? `（${n} 张）` : ''
+  }
+
+  /**
+   * 模板上传导入：多选图片或图片压缩包（zip 浏览器端解压，压缩包本身不上传、
+   * 服务端不落临时文件）。逐张走模板字节 PUT（服务端钩子统一 8-bit 灰度归一化）；
+   * 与库内同名跳过不覆盖（覆盖走模板行「替换」），zip 内同名自动消歧。
+   * 结束汇总：导入 N / 跳过 M / 失败 K。
+   */
   async function onTplUpload(e) {
     confirmDelTpl.value = null
-    const file = e.target.files[0]
+    const files = [...(e.target.files || [])]
     e.target.value = ''
-    if (!file) return
-    const name = /\.png$/i.test(file.name)
-      ? file.name
-      : file.name.replace(/\.[^.]+$/, '') + '.png'
+    if (!files.length) return
+    if (!packageId.value) { toast('请先在右上选择配置', 'warn'); return }
+    let planned = []
     try {
-      const b64 = await fileToBase64(file)
-      const rep = await api.createTemplate(name, b64, packageId.value)
-      templatesData.value = await api.listTemplates(packageId.value)
-      toast(`模板已新建${tplSizeHint(rep)}`, 'success')
+      let entries = []
+      for (const file of files) {
+        entries = entries.concat(await collectTemplateEntries(file))
+      }
+      planned = planTemplateImports(entries, templatesData.value.filter(t => t.pkg === packageId.value).map(t => t.name))
     } catch (err) {
-      toast('新建失败：' + err.message, 'error')
+      toast('导入失败：' + err.message, 'error')
+      return
     }
+    const imports = planned.filter(p => p.action === 'import')
+    const skipped = planned.filter(p => p.action === 'skip')
+    let ok = 0
+    const failed = []
+    for (const item of imports) {
+      try {
+        await api.importTemplateBytes(item.name, item.bytes, packageId.value)
+        // 逐张入库后立刻登记，后续同批同名冲突判定与列表展示即时可见
+        templatesData.value = templatesData.value.concat({
+          name: item.name, pkg: packageId.value, version: null, updated_at: '', size: item.bytes.length,
+        })
+        ok++
+      } catch (err) {
+        failed.push(`${item.source}：${err.message}`)
+      }
+    }
+    if (ok) {
+      const refreshed = await refreshTemplatesData()
+      if (!refreshed) toast('模板列表刷新失败，请手动刷新', 'warn')
+    }
+    const parts = []
+    if (ok) parts.push(`导入 ${ok} 张${tplBatchHint(ok)}`)
+    if (skipped.length) parts.push(`跳过 ${skipped.length} 张（已存在同名）`)
+    if (failed.length) parts.push(`失败 ${failed.length} 张`)
+    const level = failed.length ? 'warn' : 'success'
+    toast(parts.join('，') || '没有可导入的文件', level)
+    for (const line of failed.slice(0, 3)) toast(line, 'error')
   }
 
   /** 替换已有模板图片：名称/分区来自当前模板，图片替换使用独立当前端点。 */

@@ -75,6 +75,14 @@ export function useConsoleDeviceManager({
     appList.value.filter(a => a && a.pkg).map(a => [a.pkg, a.label || a.pkg])
   ))
 
+  /** 当前设备配置的 Android 应用；label 来自已读取的应用列表。 */
+  const currentApplication = computed(() => {
+    const pkg = String(current.value?.pkg || '').trim()
+    if (!pkg) return null
+    const app = appList.value.find(item => item?.pkg === pkg)
+    return { pkg, label: String(app?.label || '').trim() }
+  })
+
   function packageOptionLabel(pkg) {
     const label = appLabelByPkg.value.get(pkg)
     return label && label !== pkg ? `${label} · ${pkg}` : pkg
@@ -547,7 +555,7 @@ export function useConsoleDeviceManager({
   return {
     // 设备与设置弹窗
     vdPresets, fpsPresets, types, mode, form, scanning, configApplying,
-    appList, appLoading, devices, current, currentName, pkgOptions, packageOptionLabel,
+    appList, appLoading, currentApplication, devices, current, currentName, pkgOptions, packageOptionLabel,
     kindInfo, screenSummary, formDirty, settingsOpen,
     loadForm,
     startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,

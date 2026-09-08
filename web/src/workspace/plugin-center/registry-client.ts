@@ -145,7 +145,12 @@ async function archiveBytes(response: Response): Promise<Uint8Array> {
 
 export async function sha256Hex(bytes: ArrayBuffer | Uint8Array): Promise<string> {
   const subtle = globalThis.crypto?.subtle
-  if (!subtle) throw new RegistryError('crypto_unavailable', '当前浏览器不支持 SHA-256 校验')
+  if (!subtle) {
+    const hint = globalThis.isSecureContext === false
+      ? '当前页面非 HTTPS/localhost 安全上下文，浏览器已禁用 WebCrypto，请改用 http://localhost 访问'
+      : '当前浏览器不支持 WebCrypto SHA-256 校验'
+    throw new RegistryError('crypto_unavailable', hint)
+  }
   const input = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
   const owned = new ArrayBuffer(input.byteLength)
   new Uint8Array(owned).set(input)

@@ -307,22 +307,38 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleImpl).toContain('cellCaptureResolve')
     const captureFn = consoleImpl.slice(consoleImpl.indexOf('captureTemplate: () => {'))
     expect(captureFn.slice(0, captureFn.indexOf('\n  },'))).not.toContain('panelTab')
-    // 函数模式：无总「编辑」按钮，摘要区逐函数「编辑」直达 + 签名展示；编辑态画布锁函数切换
+    // 函数模式：无总「编辑」按钮，摘要区逐函数「编辑」直达 + 分类徽标 + 签名展示；编辑态画布锁函数切换
     const runner = read('./components/console/ScriptRunner.vue')
     expect(runner).toContain(`v-if="ctx.runKind === 'script'"`)
-    expect(runner).toContain('ctx.editCurrentTarget(view.name)')
+    expect(runner).toContain('ctx.editFunction(view)')
     expect(runner).toContain('function fnSignature(')
     expect(runner).toContain(':initial-fn="ctx.editFocusFn"')
     expect(runner).toContain(`:lock-fn="ctx.shell.kind === 'function_library'"`)
     expect(runner).toContain('class="fn-delete-btn"')
+    expect(runner).toContain('class="fn-cat"')
     expect(runner).not.toContain('fn-more')
   })
 
-  it('函数库新建直接进入编辑态；参数入口位于步骤入口之前', () => {
+  it('函数面板函数个体化：列表平铺全部函数 + 模糊搜索；新建直进编辑态（分类+函数名双输入框）', () => {
     const runner = read('./components/console/ScriptRunner.vue')
-    expect(consoleImpl).toContain("scriptShell.newFunctionFile({ file: '新函数库', pkg: packageId.value })")
-    expect(consoleImpl).not.toContain("window.prompt('函数库文件短名'")
-    expect(runner).toContain(':autofocus="ctx.shell.kind === \'function_library\'"')
+    // 顶部无分类下拉/弹窗：模糊搜索框（名称/分类/拼音首字母）过滤函数列表
+    expect(runner).toContain('v-model="ctx.fnSearch"')
+    expect(runner).toContain('搜索函数（名称/分类/拼音首字母）')
+    expect(runner).not.toContain('选择分类')
+    expect(runner).not.toContain('NewFunctionDialog')
+    expect(runner).not.toContain('新建文件')
+    expect(runner).not.toContain('删除文件')
+    expect(runner).not.toContain('addFunctionToCurrentFile')
+    // 摘要区跨分类平铺全部函数（每个函数一组，带分类徽标 + 运行/编辑/原文/删除）
+    expect(runner).toContain('ctx.filteredFnViews')
+    expect(runner).toContain('ctx.runFunction({ fileId: view.fileId, fnName: view.name })')
+    expect(runner).toContain('ctx.editFunction(view)')
+    expect(runner).toContain('ctx.runFromFunctionStep(view, uuid)')
+    // 新建函数直接进入编辑态（无弹窗确认）；编辑态顶部 = 分类输入框 + 函数名输入框
+    expect(consoleImpl).toContain("scriptShell.newFunctionFile({ file: '', pkg: packageId.value, functionName: 'func1' })")
+    expect(consoleImpl).toContain('请填写分类')
+    expect(runner).toContain('class="function-edit-category input mono"')
+    expect(runner).toContain(':disabled="!!ctx.shell.resourceId"')
     const toolbar = runner.slice(runner.indexOf('class="function-edit-toolbar"'))
     expect(toolbar.indexOf('＋ 添加参数')).toBeLessThan(toolbar.indexOf('＋ 添加步骤'))
     expect(runner).toContain(':show-add-button="ctx.shell.editorContext !== \'function\'"')

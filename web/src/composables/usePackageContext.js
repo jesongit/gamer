@@ -24,6 +24,8 @@ export function isValidPackageId(value) {
 /**
  * 依赖注入：toast / confirmDialog(message)→boolean / refreshAll()（包切换或
  * 导入后重拉资源面板）/ download(blob, filename) / api。均可替换以便测试。
+ * currentApp 提供当前设备的 Android 应用包名与显示名；loadCurrentApps 用于在
+ * 显示名尚未读取时补读应用列表。
  */
 export function usePackageContext({
   api = defaultApi,
@@ -31,6 +33,8 @@ export function usePackageContext({
   confirmDialog = message => window.confirm(message),
   refreshAll,
   download,
+  currentApp,
+  loadCurrentApps,
 } = {}) {
   const busy = ref(false)
 
@@ -255,6 +259,41 @@ export function usePackageContext({
     open: false, mode: 'create', submitting: false, error: '',
     form: { id: '', name: '', version: '1.0.0', androidPackagesText: '' },
   })
+
+  function unwrap(value) {
+    if (typeof value === 'function') return value()
+    if (value && typeof value === 'object' && 'value' in value) return value.value
+    return value
+  }
+
+  function currentAppSnapshot() {
+    const value = unwrap(currentApp)
+    if (typeof value === 'string') return { pkg: value, label: '' }
+    return value && typeof value === 'object' ? value : null
+  }
+
+  /** 将当前设备的 Android 应用填入新建配置表单。 */
+  async function fillCurrentApp() {
+    let app = currentAppSnapshot()
+    let packageName = String(app?.pkg || app?.package_name || app?.packageName || '').trim()
+    if (!packageName) {
+      toast('当前没有可用的应用包名，请先在左侧应用下拉中选择', 'warn')
+      return false
+    }
+
+    // 连接后通常已有缓存；名称缺失时补读一次，取得 API 返回的真实 label。
+    if (!String(app?.label || app?.name || '').trim() && typeof loadCurrentApps === 'function') {
+      try { await loadCurrentApps() } catch { /* 名称读取失败时仍可使用包名填充 */ }
+      app = currentAppSnapshot()
+      packageName = String(app?.pkg || app?.package_name || app?.packageName || packageName).trim()
+    }
+
+    formModal.form.id = normalizePackageId(packageName)
+    formModal.form.androidPackagesText = packageName
+    formModal.form.name = String(app?.label || app?.name || packageName).trim()
+    formModal.error = ''
+    return true
+  }
 
   function openCreate() {
     formModal.mode = 'create'
@@ -541,7 +580,7 @@ export function usePackageContext({
     loadPackages, refreshPackages,
     pickImportFile, onImportPicked, importPackage,
     exportPackage, exportModal, confirmExport, closeExport,
-    formModal, openCreate, openDuplicate, submitForm, closeForm,
+    formModal, openCreate, openDuplicate, fillCurrentApp, submitForm, closeForm,
     overwriteModal, confirmOverwrite, closeOverwrite,
     deleteModal, openDelete, confirmDelete, closeDelete,
     detailModal, openDetail, closeDetail, reloadDetail,

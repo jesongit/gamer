@@ -166,11 +166,12 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     })
   }
 
-  /** 新建函数库文件：预置一个空函数（顶层键 = 函数名），画布切换/编辑后保存。 */
-  function newFunctionFile({ file, pkg: p = '' } = {}) {
+  /** 新建函数库（分类）：预置一个空函数（顶层键 = 函数名），画布切换/编辑后保存。
+   *  functionName 指定首函数名（「新建函数」弹窗带入，缺省 func1）。 */
+  function newFunctionFile({ file, pkg: p = '', functionName = '' } = {}) {
     const short = String(file || '').replace(/\.yaml$/i, '')
     mountModel('function_library', {
-      model: { file: short, functions: [{ name: 'func1', params: [], steps: [] }] },
+      model: { file: short, functions: [{ name: functionName || 'func1', params: [], steps: [] }] },
       diagnostics: [],
     }, { pkg: p, name: short })
   }
@@ -201,6 +202,9 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
         name.value = rep.name ?? name.value
         version.value = rep.version ?? null
       } else {
+        // 新建未落盘且分类为空 → 保存无意义（落盘名 = <分类>.yaml），按 empty 静默跳过
+        // （自动保存不提示 empty；手动保存由调用方先行校验提示）
+        if (!resourceId.value && !String(name.value || '').trim()) return { ok: false, reason: 'empty' }
         rep = resourceId.value
           ? await api.updateFunction(resourceId.value, { content: yaml, ...(expected ? { expected_version: expected } : {}) })
           : await api.saveFunction({ pkg: pkg.value, name: name.value, content: yaml })
