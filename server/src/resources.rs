@@ -1341,7 +1341,10 @@ mod tests {
         // 乱码（»/½ 等符号与 C1 控制符）必须拒绝——前端上传前先按 GBK 修正
         assert!(sanitize_rel_path("templates/登录.png").is_ok());
         let mojibake = "templates/ç\u{99}»å½\u{95}.png";
-        assert!(sanitize_rel_path(mojibake).is_err(), "{mojibake:?} 必须被拒绝");
+        assert!(
+            sanitize_rel_path(mojibake).is_err(),
+            "{mojibake:?} 必须被拒绝"
+        );
     }
 
     // ---------- manifest 解析/序列化 ----------
@@ -1431,9 +1434,7 @@ required = false
 
         // 已有任意包（含删除默认包后剩余的）都不再播种
         assert!(!store.ensure_default_package().unwrap());
-        store
-            .create_package(input("official.demo"))
-            .unwrap();
+        store.create_package(input("official.demo")).unwrap();
         store.delete_package(DEFAULT_PACKAGE_ID).unwrap();
         assert!(!store.ensure_default_package().unwrap());
 

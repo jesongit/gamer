@@ -74,3 +74,6 @@ wat = "1"
 wit-component = "0.254.0"
 # router 集成测试用 oneshot 驱动（tower ServiceExt）
 tower = { version = "0.4", features = ["util"] }
+# V1 权威解释器：仅测试原生编译（生产执行走 WASM guest，同一份源码；
+# 计划 Phase 2：不为测试另写参考解释器）
+yaml-interp = { path = "guests/yaml-interp" }

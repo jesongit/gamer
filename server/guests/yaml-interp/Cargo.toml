@@ -1,0 +1,9 @@
+[package]
+name = "yaml-interp"
+version = "0.1.0"
+edition = "2021"
+description = "Gamer YAML V1 权威解释器：被 wasm guest 与宿主测试共同消费的唯一执行实现"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

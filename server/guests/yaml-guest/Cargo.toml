@@ -1,9 +1,11 @@
 # gamer.yaml 官方产品 guest（ADR-12/13 扩展生态）：WASM Component 解释执行
-# version: 3 脚本小 AST。由两端消费：
-#   - tools/build-plugins.ps1 打包签名 gamer.yaml-<ver>.gplugin（官方市场）
+# YAML V1 程序。由两端消费：
+#   - tools/build-plugins.ps1 打包免签名 gamer.yaml-<ver>.gplugin（官方市场）
 #   - yaml_extension.rs 测试链路现场构建（server/target/yaml-guest）
 # 本 crate 独立于 server workspace，不随 server 编译；wit 路径相对本目录
 # （../../wit/gamer → server/wit/gamer），ABI 变更须重打官方插件包。
+# 解释器本体在 yaml-interp（与 server 测试共享同一份源码，计划 Phase 2），
+# 本 crate 只是 WIT 胶水。
 [package]
 name = "gamer-yaml-guest"
 version = "0.1.0"
@@ -16,3 +18,4 @@ crate-type = ["cdylib"]
 serde_json = "1"
 wit-bindgen = "0.57.1"
 wit-component = "0.254.0"
+yaml-interp = { path = "../yaml-interp" }

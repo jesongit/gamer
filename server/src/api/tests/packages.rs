@@ -81,8 +81,8 @@ async fn package_crud_duplicate_export_delete_smoke_chain() {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
     }
 
-    // ---- 写资源：文本（JSON body）+ 字节（raw body）---- 
-    let script = "version: 3\nsteps:\n  - log: ok\n";
+    // ---- 写资源：文本（JSON body）+ 字节（raw body）----
+    let script = "run:\n  - log: ok\n";
     let resp = send(
         &t.app,
         req(
@@ -292,7 +292,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
             &resource_url("official.imp", "gamer.yaml", "automations/first.yaml"),
             None,
             &json_headers(sid.clone()),
-            Some(serde_json::json!({"content": "version: 3\nsteps:\n  - log: v1\n"}).to_string()),
+            Some(serde_json::json!({"content": "run:\n  - log: v1\n"}).to_string()),
         ),
     )
     .await;
@@ -352,7 +352,7 @@ async fn package_import_conflicts_then_atomic_overwrite() {
             &json_headers(sid.clone()),
             Some(
                 serde_json::json!({
-                    "content": "version: 3\nsteps:\n  - log: v2\n",
+                    "content": "run:\n  - log: v2\n",
                     "force": true,
                 })
                 .to_string(),
@@ -631,8 +631,9 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK, "{}", json_body(resp).await);
 
-    // ---- 2. 保存引用该模板的 v3 脚本与函数库 ----
-    let script = "version: 3\nsteps:\n  - find:\n      template: reward.png\n      then:\n        - tap: {point: [0.5, 0.5]}\n";
+    // ---- 2. 保存引用该模板的 V1 脚本与函数库 ----
+    let script =
+        "run:\n  - find:\n      template: reward.png\n      region: [0, 0, 1, 1]\n    as: hit\n";
     let resp = put_package_text(
         &t,
         &sid,
@@ -681,7 +682,7 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
     .await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    // ---- 4. 脚本引用已自动改写（AST 级：日志文本不误改）----
+    // ---- 4. 脚本引用已自动改写（AST 级：短名规则与前端一致）----
     let resp = get_json(
         &t,
         &sid,
@@ -690,8 +691,8 @@ async fn template_upload_rename_rewrites_references_and_still_matches() {
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let content = json_body(resp).await["content"].as_str().unwrap().to_string();
-    assert!(content.contains("template: bonus.png"), "引用已改写: {content}");
-    assert!(!content.contains("reward.png"), "旧引用不残留: {content}");
+    assert!(content.contains("template: bonus"), "引用已改写为短名: {content}");
+    assert!(!content.contains("reward"), "旧引用不残留: {content}");
 
     // 错误语义：同名重命名 400（名称未变化）；目标已存在 409
     let resp = post_json(

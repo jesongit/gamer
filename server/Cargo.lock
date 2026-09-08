@@ -1122,6 +1122,7 @@ dependencies = [
  "webrtc",
  "windows-sys 0.59.0",
  "wit-component",
+ "yaml-interp",
  "zip",
 ]
 
@@ -4106,6 +4107,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "388c44dc09d76f1536602ead6d325eb532f5c122f17782bd57fb47baeeb767e2"
 dependencies = [
  "lzma-sys",
+]
+
+[[package]]
+name = "yaml-interp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

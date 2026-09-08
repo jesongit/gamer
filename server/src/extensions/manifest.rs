@@ -1212,7 +1212,10 @@ mod tests {
     fn android_targets_default_to_universal_and_support_wildcard() {
         // 缺省 [targets] = 通用（空列表，`*` 语义；存量安装manifest 无此段照常解析）
         let default = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n";
-        assert!(parse_manifest(default).unwrap().android_targets().is_empty());
+        assert!(parse_manifest(default)
+            .unwrap()
+            .android_targets()
+            .is_empty());
 
         // 显式声明：trim + 保序去重 + `*` = 通用合法值
         let explicit = b"manifest_version = 2\nid = \"com.example.extension\"\nversion = \"1.0.0\"\nname = \"T\"\nentry = \"plugin.wasm\"\n\

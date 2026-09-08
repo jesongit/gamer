@@ -158,14 +158,6 @@ fn dispatch_error_response(error: TimerRunnerError) -> Response {
             })),
         )
             .into_response(),
-        TimerRunnerError::ParamStale(message) => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "code": "signature_mismatch",
-                "message": message,
-            })),
-        )
-            .into_response(),
         TimerRunnerError::InvalidDetail { message, detail } => (
             StatusCode::BAD_REQUEST,
             Json(match detail {

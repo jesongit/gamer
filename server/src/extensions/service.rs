@@ -44,7 +44,7 @@ pub(crate) trait TimerRunnerRegistrar: Send + Sync {
 
     /// 该扩展是否采用「按调用执行、无常驻实例」模型：`start` 只表示「作为
     /// runner 提供方在线」，不启动 extension-host 常驻实例；执行由按调用
-    /// 运行时在每次运行时惰性实例化（gamer.yaml 的 run_yaml_vnext）。默认
+    /// 运行时在每次运行时惰性实例化（gamer.yaml 的 run_yaml_program）。默认
     /// false = 常驻实例模型（start 启动实例并持有句柄）。执行模型由拥有该
     /// 扩展 runner 构造的边界自行声明，本服务不按扩展 id 特判。
     fn executes_without_instance(&self, _extension_id: &str) -> bool {

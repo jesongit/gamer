@@ -2,21 +2,21 @@
 //!
 //! `action = "automation.create_draft"`（经现有 `POST /api/extensions/:id/call`
 //! 通路，不新增 REST 路由）：把录制会话的操作事件（`crate::recording`
-//! 的 [`crate::recording::InputEventRecord`]）映射为 **YAML v3 草稿文本**。
+//! 的 [`crate::recording::InputEventRecord`]）映射为 **YAML V1 草稿文本**。
 //!
-//! 映射口径（V1）：
+//! 映射口径（V1 语法）：
 //! - `tap` → `- tap: [相对坐标]`（device-display 像素按事件自带 `display_size`
 //!   归一为 0~1，4 位小数）；`swipe` → `from/to + duration`（录制不记录滑动
 //!   时长 → 建议值 300ms 并注释标注）；`key` → 命名键或数字字符串（词表见
-//!   `yaml_extension.rs::key_code`，保持同步）；`wait` → `wait`（录制等待）。
-//! - `text` **不映射**（V1 脱敏只记录长度，无内容可还原）→ 进诊断；未知
+//!   `yaml_extension.rs::key_code`，保持同步）；`wait` → `sleep`（录制等待）。
+//! - `text` **不映射**（录制脱敏只记录长度，无内容可还原）→ 进诊断；未知
 //!   kind / payload 损坏 / display_size 损坏 → 进诊断。**不丢弃、不猜测**
 //!   （计划 §5.4）。
-//! - 相邻动作间隔 → 建议性 `wait` 步骤（标注建议值；≥500ms 才生成，更小的
+//! - 相邻动作间隔 → 建议性 `sleep` 步骤（标注建议值；≥500ms 才生成，更小的
 //!   间隔是人类操作节奏，逐条生成只会污染草稿）。
 //!
 //! 草稿只是文本返回（`{"yaml", "diagnostics"}`），**不落盘、不执行、不建
-//! 任务**；生成物必须通过 [`super::yaml_vnext`] 的 parse（下方测试自证）。
+//! 任务**；生成物必须通过 [`super::syntax`] 的 parse（下方测试自证）。
 //! 录制数据绝不自动创建定时任务 / 启动 Runner（合同 §5）。
 
 use std::path::Path;
@@ -101,15 +101,14 @@ pub(crate) fn build_draft(
     let (selected, selection_diagnostics) = select_events(event_ids, events);
     let (step_lines, mapping_diagnostics) = render_steps(&selected, comments);
     let mut document = vec![
-        "version: 3".to_string(),
         format!("# 草稿：由录制会话 {recording_id} 的操作事件生成（gamer.yaml automation.create_draft）。"),
         "# 等待与滑动时长均为建议值；运行前需人工补充模板判断、状态等待、分支与异常恢复，".to_string(),
         "# 再保存到当前 Package 的 automations/。草稿只返回文本，不会被自动执行。".to_string(),
     ];
     document.push(if step_lines.is_empty() {
-        "steps: []".to_string()
+        "run: []".to_string()
     } else {
-        "steps:".to_string()
+        "run:".to_string()
     });
     document.extend(step_lines);
     let mut diagnostics = selection_diagnostics;
@@ -190,7 +189,7 @@ fn render_steps(
             Ok((mut step_lines, end_us)) => {
                 if let Some(gap) = suggested_wait(prev_end_us, event.timeline_us) {
                     lines.push(format!("  # 建议等待 {gap}ms（事件间隔推导）"));
-                    lines.push(format!("  - wait: {gap}ms # 建议值"));
+                    lines.push(format!("  - sleep: {gap}ms # 建议值"));
                 }
                 if let Some(comment) = comments
                     .and_then(|map| map.get(&event.event_id))
@@ -265,7 +264,7 @@ fn map_event(event: &InputEventRecord) -> Result<(Vec<String>, u64), String> {
             let ms = round_ms(duration_us);
             Ok((
                 vec![format!(
-                    "  - wait: {ms}ms # {} 建议等待（录制等待）",
+                    "  - sleep: {ms}ms # {} 建议等待（录制等待）",
                     event.event_id
                 )],
                 event.timeline_us.saturating_add(duration_us),
@@ -400,9 +399,9 @@ mod tests {
     }
 
     /// 全词表夹具：tap →（1.2s 间隔）swipe → key（命名）→ key（未命名码）
-    /// → wait。生成物必须通过 v3 parse + lowering，且映射/建议值正确。
+    /// → wait。生成物必须通过 V1 parse，且映射/建议值正确。
     #[test]
-    fn draft_maps_tap_swipe_key_and_passes_v3_parse() {
+    fn draft_maps_tap_swipe_key_and_passes_v1_parse() {
         let events = vec![
             event("evt-1", "tap", 1_000_000, json!({"x": 820, "y": 460})),
             event(
@@ -423,16 +422,16 @@ mod tests {
         let result = build_draft("rec-test", None, None, &events);
         assert!(diagnostics_of(&result).is_empty(), "{result}");
         let yaml = result["yaml"].as_str().unwrap();
-        // 生成物必须通过 v3 parse + lowering（自证；否则草稿不可保存/运行）。
-        super::super::yaml_vnext::load(yaml).expect("草稿必须通过 v3 parse");
-        assert!(yaml.starts_with("version: 3\n"), "{yaml}");
+        // 生成物必须通过 V1 parse（自证；否则草稿不可保存/运行）。
+        crate::extensions::gamer_yaml::syntax::parse_script(yaml).expect("草稿必须通过 V1 parse");
+        assert!(yaml.starts_with("# 草稿："), "{yaml}");
         assert!(
             yaml.contains("- tap: [0.4271, 0.4259] # evt-1 tap"),
             "{yaml}"
         );
         // tap → swipe 间隔 1.2s → 建议等待
         assert!(yaml.contains("# 建议等待 1200ms（事件间隔推导）"), "{yaml}");
-        assert!(yaml.contains("  - wait: 1200ms # 建议值"), "{yaml}");
+        assert!(yaml.contains("  - sleep: 1200ms # 建议值"), "{yaml}");
         // swipe：相对坐标 + 建议时长
         assert!(yaml.contains("  - swipe: # evt-2 swipe"), "{yaml}");
         assert!(yaml.contains("      from: [0.0521, 0.7407]"), "{yaml}");
@@ -444,12 +443,12 @@ mod tests {
         // 命名键 / 未命名 Android keycode（数字字符串）
         assert!(yaml.contains("  - key: HOME # evt-3 key"), "{yaml}");
         assert!(yaml.contains("  - key: \"1234\" # evt-4 key"), "{yaml}");
-        // 录制等待事件 → wait（建议值口径）
+        // 录制等待事件 → sleep（建议值口径）
         assert!(
-            yaml.contains("  - wait: 1500ms # evt-5 建议等待（录制等待）"),
+            yaml.contains("  - sleep: 1500ms # evt-5 建议等待（录制等待）"),
             "{yaml}"
         );
-        assert_eq!(yaml.matches("- wait:").count(), 2, "{yaml}");
+        assert_eq!(yaml.matches("- sleep:").count(), 2, "{yaml}");
     }
 
     /// text（脱敏）/ 未知 kind / 损坏 payload → 全部进诊断，不丢弃不猜测；
@@ -481,7 +480,7 @@ mod tests {
         // 唯一成功映射的 tap 仍在；evt-1 → evt-4 之间的间隔按最后一个**已
         // 映射**事件（evt-1）计算，未映射事件不产生步骤也不推时间轴。
         let yaml = result["yaml"].as_str().unwrap();
-        super::super::yaml_vnext::load(yaml).unwrap();
+        crate::extensions::gamer_yaml::syntax::parse_script(yaml).unwrap();
         assert!(yaml.contains("- tap: [0.5, 0.5] # evt-1 tap"), "{yaml}");
         assert!(!yaml.contains(" - text"), "text 不产生步骤: {yaml}");
         assert!(!yaml.contains(" - pinch"), "未知 kind 不产生步骤: {yaml}");
@@ -500,7 +499,7 @@ mod tests {
         let result = build_draft("rec-test", None, None, &[broken]);
         assert_eq!(
             result["yaml"].as_str().unwrap(),
-            "version: 3\n# 草稿：由录制会话 rec-test 的操作事件生成（gamer.yaml automation.create_draft）。\n# 等待与滑动时长均为建议值；运行前需人工补充模板判断、状态等待、分支与异常恢复，\n# 再保存到当前 Package 的 automations/。草稿只返回文本，不会被自动执行。\nsteps: []\n"
+            "# 草稿：由录制会话 rec-test 的操作事件生成（gamer.yaml automation.create_draft）。\n# 等待与滑动时长均为建议值；运行前需人工补充模板判断、状态等待、分支与异常恢复，\n# 再保存到当前 Package 的 automations/。草稿只返回文本，不会被自动执行。\nrun: []\n"
         );
         assert_eq!(diagnostics_of(&result).len(), 1);
     }
@@ -529,7 +528,7 @@ mod tests {
             &events,
         );
         let yaml = reordered["yaml"].as_str().unwrap();
-        super::super::yaml_vnext::load(yaml).unwrap();
+        crate::extensions::gamer_yaml::syntax::parse_script(yaml).unwrap();
         let first_tap = yaml.find("- tap: [").unwrap();
         assert!(
             yaml[first_tap..].contains("evt-b tap"),
@@ -574,7 +573,7 @@ mod tests {
             &events,
         );
         let yaml = result["yaml"].as_str().unwrap();
-        super::super::yaml_vnext::load(yaml).unwrap();
+        crate::extensions::gamer_yaml::syntax::parse_script(yaml).unwrap();
         assert!(yaml.contains("- tap: [0, 0] # evt-a tap"), "{yaml}");
         // 越界坐标钳制到 1（录像观察点不会产生，草稿侧防御性处理）
         assert!(yaml.contains("- tap: [1, 1] # evt-b tap"), "{yaml}");
@@ -591,7 +590,7 @@ mod tests {
         ];
         let result = build_draft("rec-test", None, None, &events);
         let yaml = result["yaml"].as_str().unwrap();
-        super::super::yaml_vnext::load(yaml).unwrap();
+        crate::extensions::gamer_yaml::syntax::parse_script(yaml).unwrap();
         assert_eq!(yaml.matches("# 建议值").count(), 0, "{yaml}");
         assert_eq!(yaml.matches(" - tap:").count(), 3, "{yaml}");
     }
@@ -668,7 +667,8 @@ mod tests {
         comments.insert("evt-ghost".to_string(), "不该出现".to_string());
         let result = build_draft("rec-test", None, Some(&comments), &events);
         let yaml = result["yaml"].as_str().unwrap();
-        super::super::yaml_vnext::load(yaml).expect("带注释草稿必须通过 v3 parse");
+        crate::extensions::gamer_yaml::syntax::parse_script(yaml)
+            .expect("带注释草稿必须通过 V1 parse");
         assert!(
             yaml.contains(
                 "  # 打开背包后 点第一格

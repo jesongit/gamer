@@ -1,10 +1,11 @@
 //! YAML world 的 Wasmtime 宿主（`feature = "wasm-runtime"`）。
 //!
-//! 自 gamer_yaml 扩展边界导出（P11.3）：guest 的 capability.invoke 经
-//! [`yaml_extension::NativeYamlHost`] 落到 Core capability registry，
-//! programs.resolve 走调用方注入的 [`YamlProgramResolver`]。通用扩展 world
-//! 的宿主仍在 `crate::extensions::wasm`，YAML 专用状态与 runtime 不进入
-//! Core 扩展机制模块。
+//! guest 的两个私有通道都落在扩展边界：
+//! - `capability.invoke("__event", …)`：运行结构事件 → [`EventSink`]；
+//! - `capability.invoke("__fn", …)`：原生函数派发 → [`NativeYamlHost`]。
+//!
+//! 通用扩展 world 的宿主仍在 `crate::extensions::wasm`，YAML 专用状态与
+//! runtime 不进入 Core 扩展机制模块。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -19,22 +20,20 @@ use wasmtime::component::{Component, HasSelf, Linker};
 use wasmtime::{Engine, Store, StoreContextMut, UpdateDeadline};
 
 use super::yaml_extension::{
-    NativeYamlHost, YamlProgramResolver, YamlWasmRunRequest, YamlWasmRunResult, YamlWasmRuntime,
-    EVENT_CAPABILITY,
+    NativeYamlHost, YamlWasmRunRequest, YamlWasmRunResult, YamlWasmRuntime, EVENT_CAPABILITY,
+    FN_CAPABILITY,
 };
-use super::yaml_vnext;
 use crate::core::events::{RuntimeEvent, RuntimeEventKind};
 use crate::extensions::host_api::HostApi;
 use crate::extensions::wit;
 
-/// Request/response Component runtime for YAML v3. Unlike the generic
+/// Request/response Component runtime for YAML V1. Unlike the generic
 /// lifecycle runtime this invokes a supplied lowered program and does not
-/// compile the legacy Rust Engine into WASM.
+/// compile the interpreter source into the host process.
 ///
-/// P12.4（ADR-YAML-04）：Engine 开启 epoch interruption 作为取消兜底——guest
-/// 纯计算死循环不经过 capability 边界，stop 标志只能靠 epoch 检查点打断。
-/// epoch 仅服务取消，不做 host 超时强杀（预算语义全部由 guest 的
-/// ExecutionBudget 承载，见 guests/yaml-guest）。
+/// （ADR-YAML-04）Engine 开启 epoch interruption 作为取消兜底——guest 纯计算
+/// 死循环不经过 capability 边界，stop 标志只能靠 epoch 检查点打断。epoch 仅
+/// 服务取消，不做 host 超时强杀（步预算语义由 yaml-interp 的执行预算承载）。
 #[derive(Debug)]
 pub(crate) struct LazyYamlWasmtimeRuntime {
     engine: OnceLock<Engine>,
@@ -71,22 +70,12 @@ impl LazyYamlWasmtimeRuntime {
     }
 }
 
-/// epoch ticker：Engine 级全局单例线程（P12.4）。
+/// epoch ticker：Engine 级全局单例线程。
 ///
 /// `increment_epoch` 对该 Engine 的所有并发 store 生效，因此线程按 Engine
-/// 唯一、绝不每 run 一个。生命周期：
-///
-/// - 生产环境 `LazyYamlWasmtimeRuntime` 是进程单例（`yaml_runtime()`），
-///   ticker 线程随首个 run 按需拉起、空闲（无在飞 run）后自行退出，下次
-///   run 再拉起——不留常驻 100Hz 空转线程；
-/// - `enter` 先累加活动计数再在 `spawned` 锁内决定是否拉起线程，线程退出
-///   判定与拉起判定互斥于同一把锁并对 `active` 复查，不存在「有在飞 run
-///   但没有 ticker」的窗口；
-/// - 即使 ticker 意外缺失，guest 步预算（STEP_BUDGET_EXCEEDED）仍保证终止，
-///   只是取消延迟退化为「跑到预算耗尽」。
-///
-/// tick 周期 ~10ms：`cancelled` 置位后的下一个 epoch 检查点（≤ ~10ms）由
-/// store 侧 `epoch_deadline_callback` 转成 CANCELLED 错误。
+/// 唯一、绝不每 run 一个。生命周期：生产环境 runtime 是进程单例，ticker 线程
+/// 随首个 run 按需拉起、空闲后自行退出；即使 ticker 意外缺失，解释器步预算
+/// 仍保证终止，只是取消延迟退化为「跑到预算耗尽」。tick 周期 ~10ms。
 #[derive(Debug)]
 struct EpochTicker {
     engine: Engine,
@@ -151,16 +140,12 @@ impl Drop for TickerGuard<'_> {
     }
 }
 
-/// The YAML world has a separate state type. This keeps its resolver and
-/// source-oriented call behavior out of the generic extension HostState.
-///
-/// `sink`（P12.6）：v3 运行事件汇——`__event` 私有 capability 拦截转发 +
-/// vision/input capability 的宿主侧补发（经 NativeYamlHost）都走它。
+/// The YAML world has a separate state type. This keeps its function-dispatch
+/// behavior out of the generic extension HostState.
 struct YamlHostState {
     host: HostApi,
     cancelled: Arc<AtomicBool>,
     app_context: Option<crate::core::AppContext>,
-    yaml_programs: Option<Arc<dyn YamlProgramResolver>>,
     sink: Option<Arc<dyn crate::core::events::EventSink>>,
 }
 
@@ -169,24 +154,20 @@ impl YamlHostState {
         host: HostApi,
         cancelled: Arc<AtomicBool>,
         app_context: crate::core::AppContext,
-        yaml_programs: Option<Arc<dyn YamlProgramResolver>>,
         sink: Option<Arc<dyn crate::core::events::EventSink>>,
     ) -> Self {
         Self {
             host,
             cancelled,
             app_context: Some(app_context),
-            yaml_programs,
             sink,
         }
     }
 
-    /// `__event` 私有通道拦截（P12.6，方案 (a) 零 WIT 变更）：guest 把
-    /// `{"ev":...}` 事件 JSON 发到 `capability.invoke("__event", …)`，这里
-    /// **先于**权限校验/NativeYamlHost 解析成 [`RuntimeEventKind`]（serde
-    /// tag="ev" 白名单即事件词表），补 run 维度的 device 作用域后转发 sink。
-    /// 解析失败 / 无 sink / 发射失败一律静默——可视化事件不影响运行结果，
-    /// 也不要求扩展声明任何权限。
+    /// `__event` 私有通道拦截：guest 把 `{"ev":...}` 事件 JSON 发到
+    /// `capability.invoke("__event", …)`，这里**先于**权限校验解析成
+    /// [`RuntimeEventKind`]（serde tag="ev" 白名单即事件词表），补 run 维度的
+    /// device 作用域后转发 sink。解析失败 / 无 sink / 发射失败一律静默。
     fn emit_run_event(
         &mut self,
         args_json: &str,
@@ -230,51 +211,50 @@ impl wit::yaml::gamer::host::capability::Host for YamlHostState {
         capability: String,
         args_json: String,
     ) -> Result<String, wit::yaml::gamer::host::types::HostError> {
-        // P12.6 私有事件通道：不进 CapabilityRegistry、不做权限校验（方案 (a)）
+        // 私有事件通道：不进 CapabilityRegistry、不做权限校验
         if capability == EVENT_CAPABILITY {
             return self.emit_run_event(&args_json);
         }
-        let host = self.host.clone();
-        let context = self.app_context.clone();
-        let cancelled = self.cancelled.clone();
-        let sink = self.sink.clone();
-        let result = block_on_yaml(async move {
-            let context =
-                context.ok_or_else(|| anyhow::anyhow!("capability.invoke 需要 AppContext"))?;
-            let value = NativeYamlHost::invoke_json(
-                host,
-                context,
-                cancelled,
-                sink,
-                &capability,
-                &args_json,
-            )
-            .await?;
-            Ok::<_, anyhow::Error>(serde_json::to_string(&value)?)
-        });
-        result.map_err(|error| yaml_capability_error(&error))
-    }
-}
-
-impl wit::yaml::gamer::host::programs::Host for YamlHostState {
-    fn resolve(&mut self, target: String, args_json: String) -> Result<String, String> {
-        let resolver = self
-            .yaml_programs
-            .clone()
-            .ok_or_else(|| "YAML call resolver 未配置".to_string())?;
-        let args = serde_json::from_str::<serde_json::Value>(&args_json)
-            .map_err(|error| format!("call 参数不是 JSON: {error}"))?;
-        let args = yaml_vnext::Value::from_json(args)
-            .map_err(|error| format!("call 参数无效: {error}"))?;
-        let yaml_vnext::Value::Map(args) = args else {
-            return Err("call 参数必须是 map".to_string());
-        };
-        // 调用深度由 guest 本地 ExecutionBudget 计数（ADR-YAML-04），resolver
-        // 只负责按命名空间定位目标程序，不再做深度守卫。
-        let program = resolver
-            .resolve(&target, &args)
-            .map_err(|error| error.to_string())?;
-        serde_json::to_string(&program).map_err(|error| error.to_string())
+        // 原生函数派发通道：Schema 校验与权限检查在 NativeYamlHost 内完成。
+        if capability == FN_CAPABILITY {
+            let host = self.host.clone();
+            let context = self.app_context.clone();
+            let cancelled = self.cancelled.clone();
+            let sink = self.sink.clone();
+            let result = block_on_yaml(async move {
+                let context =
+                    context.ok_or_else(|| anyhow::anyhow!("capability.invoke 需要 AppContext"))?;
+                let (name, args) = serde_json::from_str::<serde_json::Value>(&args_json)
+                    .map_err(|error| anyhow::anyhow!("__fn 参数不是合法 JSON: {error}"))
+                    .and_then(|value| {
+                        let name = value
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .ok_or_else(|| anyhow::anyhow!("__fn 缺少 name"))?
+                            .to_string();
+                        let args = value
+                            .get("args")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        Ok((name, args))
+                    })?;
+                let value = NativeYamlHost::call_function_json(
+                    host,
+                    context,
+                    cancelled,
+                    sink,
+                    &name,
+                    &serde_json::to_string(&args)?,
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(serde_json::to_string(&value)?)
+            });
+            return result.map_err(|error| yaml_capability_error(&error));
+        }
+        Err(yaml_error(
+            wit::yaml::gamer::host::types::HostErrorKind::InvalidRequest,
+            format!("未知 capability 通道: {capability}"),
+        ))
     }
 }
 
@@ -303,16 +283,6 @@ fn yaml_error(
         kind,
         message: message.into(),
     }
-}
-
-/// 每 run 随机 nonce（wait 随机区间种子）：系统时钟纳秒 + 进程 id 混合。
-/// 只需 run 级不可预测性，不追求密码学强度。
-fn run_nonce() -> u64 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0);
-    nanos ^ ((std::process::id() as u64) << 32)
 }
 
 fn yaml_capability_error(error: &anyhow::Error) -> wit::yaml::gamer::host::types::HostError {
@@ -373,17 +343,12 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
             request.host,
             request.stop.clone(),
             request.context,
-            request.resolver,
             request.sink.clone(),
         );
         let mut store = Store::new(self.engine(), state);
-        // epoch 取消兜底（P12.4 / ADR-YAML-04）：deadline 以 1 tick 为步进，
-        // 每次 tick 到点回调里复查 stop 标志——未取消则续期继续执行（全局
-        // epoch 推进对并发 run 一视同仁，续期保证非取消 run 不被打断），
-        // 已取消则以 CANCELLED 错误终止 guest。epoch 只服务取消，不做
-        // host 超时强杀。instantiate 可能执行组件 start 代码，deadline 与
-        // 回调必须在 instantiate 之前就位（epoch interruption 开启后 deadline
-        // 缺省为 0，会立即 trap）。
+        // epoch 取消兜底（ADR-YAML-04）：deadline 以 1 tick 为步进，每次 tick
+        // 到点回调里复查 stop 标志——未取消则续期继续执行，已取消则以
+        // CANCELLED 错误终止 guest。deadline 必须在 instantiate 之前就位。
         store.set_epoch_deadline(1);
         store.epoch_deadline_callback(
             |context: StoreContextMut<'_, YamlHostState>| -> wasmtime::Result<UpdateDeadline> {
@@ -397,22 +362,7 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
         );
         let instance = wit::yaml::YamlExtensionHost::instantiate(&mut store, &component, &linker)
             .map_err(|error| anyhow::anyhow!("YAML 组件实例化失败: {error}"))?;
-        let mut program = serde_json::to_value(&request.program)?;
-        if let serde_json::Value::Object(ref mut program) = program {
-            program.insert("args".to_string(), serde_json::to_value(request.args)?);
-            // wait 随机区间（契约 §4，方案 (a)）：每 run 注入 nonce 作 guest 内
-            // splitmix64 种子；不新增 WIT 能力（T3 刚稳定 ABI）。
-            program.insert("nonce".to_string(), serde_json::Value::from(run_nonce()));
-            // 手动运行「从此运行」：顶层可选 start_index，guest 只按顶层
-            // surface 步序号跳步（契约 §8）；None = 从头执行（现状行为）。
-            if let Some(start_index) = request.start_index {
-                program.insert(
-                    "start_index".to_string(),
-                    serde_json::Value::from(start_index),
-                );
-            }
-        }
-        let program = serde_json::to_string(&program)?;
+        let program = serde_json::to_string(&request.program)?;
         // ticker 只在 wasm 执行窗口内推进 epoch（见 EpochTicker 生命周期）。
         // RAII guard：call 异常展开时也要回退活动计数，避免 ticker 永不退出。
         let ticker = self.ticker();
@@ -437,10 +387,8 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
             }
         };
         let result = result.map_err(|error| anyhow::anyhow!("YAML guest 返回错误: {error}"))?;
-        let result = serde_json::from_str::<serde_json::Value>(&result)
+        let value = serde_json::from_str::<serde_json::Value>(&result)
             .map_err(|error| anyhow::anyhow!("YAML guest 返回值不是 JSON: {error}"))?;
-        let value = yaml_vnext::Value::from_json(result)
-            .map_err(|error| anyhow::anyhow!("YAML guest 返回值无效: {error}"))?;
         Ok(YamlWasmRunResult { value })
     }
 

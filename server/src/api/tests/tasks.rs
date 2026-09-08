@@ -383,8 +383,8 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
     );
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
-    // 1. 保存带参数声明的 v3 脚本（TaskBoard 参数表单的数据源 = entrypoint schema）
-    let resp = put_package_text(&t, &sid, "com.example.game", "gamer.yaml", "automations/daily.yaml", "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - 'int:count:次数:3'\nsteps:\n  - log: $msg\n").await;
+    // 1. 保存带参数声明的 V1 脚本（TaskBoard 参数表单的数据源 = entrypoint schema）
+    let resp = put_package_text(&t, &sid, "com.example.game", "gamer.yaml", "automations/daily.yaml", "params:\n  msg:\n    type: string\n    default: \"默认\"\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n").await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
 
     // 2. TaskBoard 保存任务：payload.args 携带用户填写的稀疏实参
@@ -419,14 +419,14 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
     assert_eq!(resp.status(), StatusCode::ACCEPTED, "{:?}", json_body(resp).await);
     let run_id = json_body(resp).await["run_id"].as_str().unwrap().to_string();
 
-    // 4. 执行器收到的 payload = 绑定后的全量覆盖（gamer.yaml 私有 wire：
-    //    {target, args: [{name, value: {type, value}}]}）；任务实参覆盖默认值，
-    //    未填参数取声明默认值（int 经 text wire 承载）。
+    // 4. 执行器收到的 payload = 绑定后的全量参数对象（gamer.yaml 私有 wire：
+    //    {target, args: <对象>, strict_args: false}）；任务实参覆盖默认值，
+    //    未填参数取声明默认值。
     let mut captured = None;
     for _ in 0..200 {
         {
             let guard = payloads.lock().unwrap();
-            if let Some(payload) = guard.iter().find(|p| p["args"].as_array().is_some()) {
+            if let Some(payload) = guard.iter().find(|p| p["args"].as_object().is_some()) {
                 captured = Some(payload.clone());
             }
         }
@@ -436,23 +436,18 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let payload = captured.expect("执行器必须收到任务运行 payload");
-    let args = payload["args"].as_array().unwrap();
-    let arg_value = |name: &str| {
-        args.iter()
-            .find(|a| a["name"] == serde_json::json!(name))
-            .map(|a| a["value"].clone())
-            .unwrap_or_else(|| panic!("绑定覆盖缺少参数 {name}: {args:?}"))
-    };
+    let args = payload["args"].as_object().unwrap();
     assert_eq!(
-        arg_value("msg"),
-        serde_json::json!({"type": "text", "value": "任务实参"}),
-        "任务实参覆盖默认值"
+        args.get("msg"),
+        Some(&serde_json::json!("任务实参")),
+        "任务实参覆盖默认值: {args:?}"
     );
     assert_eq!(
-        arg_value("count"),
-        serde_json::json!({"type": "text", "value": "3"}),
-        "任务未填参数取声明默认值"
+        args.get("count"),
+        Some(&serde_json::json!(3)),
+        "任务未填参数取声明默认值: {args:?}"
     );
+    assert_eq!(payload["strict_args"], false, "任务路径宽松重绑");
 
     // 5. run 记录关联任务并收敛 Success；任务侧 last_run_at 由完成回调落库
     //    （轮询等待 = 后台完成链在测试运行时存活期内走完，不悬到关停窗口）。
@@ -485,7 +480,7 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
 
     // 6. 非法 payload 门禁（任务保存时 payload 不透明，运行时才校验）：
     //    必填参数缺失 → 400 + 结构化诊断消息。
-    let resp = put_package_text(&t, &sid, "com.example.game", "gamer.yaml", "automations/required.yaml", "version: 3\nparams:\n  - 'text:secret:密文'\nsteps:\n  - log: $secret\n").await;
+    let resp = put_package_text(&t, &sid, "com.example.game", "gamer.yaml", "automations/required.yaml", "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n").await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
     let resp = post_json(
         &t,
@@ -523,7 +518,8 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
         "缺必填必须带结构化诊断: {body}"
     );
 
-    // 7. 类型不符 → 400；带过期 param_signature 的旧数据 → 400 参数过期门禁。
+    // 7. 类型不符 → 400；含已删除参数的陈旧快照 → 宽松丢弃（V1 无签名门禁，
+    //    按当前声明重绑：存活值保留、未知键丢弃）。
     let update_task = |args: serde_json::Value| {
         serde_json::json!({
             "id": missing_id,
@@ -560,7 +556,7 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{:?}", json_body(resp).await);
     let body = json_body(resp).await;
     assert!(
-        body["error"].as_str().unwrap_or_default().contains("类型无效"),
+        body["error"].as_str().unwrap_or_default().contains("类型 string 不符"),
         "类型不符必须诊断: {body}"
     );
 
@@ -573,7 +569,7 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
             &json_headers(sid.to_string()),
             Some(
                 update_task(serde_json::json!(
-                    {"args": {"secret": "ok"}, "param_signature": "psig1-stale"}
+                    {"args": {"secret": "ok", "ghost": "陈旧键"}}
                 ))
                 .to_string(),
             ),
@@ -588,13 +584,8 @@ async fn task_run_binds_saved_payload_args_through_yaml_runner() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{:?}", json_body(resp).await);
-    let body = json_body(resp).await;
-    assert!(
-        body["error"].as_str().unwrap_or_default().contains("任务参数过期"),
-        "过期签名必须走参数过期门禁: {body}"
-    );
-    // 门禁失败不落 run、任务不受牵连（保持 Active，等参数修好后可再跑）
+    assert_eq!(resp.status(), StatusCode::ACCEPTED, "{:?}", json_body(resp).await);
+    // 陈旧键被宽松丢弃、存活值保留，任务不受牵连（保持 Active）
     let task = json_body(get_json(&t, &sid, &format!("/api/tasks/{missing_id}")).await).await;
     assert_eq!(task["state"], "active");
 }

@@ -2,7 +2,7 @@ manifest_version = 2
 id = "gamer.yaml"
 version = "3.1.1"
 name = "自动化"
-description = "自动化：YAML v3 脚本、函数库与模板的制作与运行"
+description = "自动化：YAML V1 脚本、函数库与模板的制作与运行"
 entry = "plugin.wasm"
 permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.key", "input.text", "vision.match", "vision.color", "resource.read", "runtime.sleep", "log.write"]
 

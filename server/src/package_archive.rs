@@ -871,7 +871,9 @@ mod tests {
         ]);
         let staging = store.staging_root().join("zh1");
         extract_archive(&package, &staging).unwrap();
-        assert!(staging.join("plugins/gamer.yaml/templates/登录.png").is_file());
+        assert!(staging
+            .join("plugins/gamer.yaml/templates/登录.png")
+            .is_file());
 
         let final_dir = store.package_dir("official.demo").unwrap();
         std::fs::rename(&staging, &final_dir).unwrap();
@@ -950,7 +952,10 @@ mod tests {
         // "登录" 的 GBK（CP936）字节：B5 C7 C2 BC
         let gbk_name = b"plugins/gamer.yaml/templates/\xB5\xC7\xC2\xBC.png".to_vec();
         let bytes = raw_zip(vec![
-            (b"package.toml".to_vec(), manifest_bytes("official.demo").as_slice()),
+            (
+                b"package.toml".to_vec(),
+                manifest_bytes("official.demo").as_slice(),
+            ),
             (gbk_name, b"png"),
         ]);
         let err = validate_and_read_manifest(&bytes).unwrap_err();
@@ -958,10 +963,8 @@ mod tests {
             err.to_string().contains("UTF-8"),
             "必须以「归档路径必须是 UTF-8」拒绝: {err}"
         );
-        let staging = std::env::temp_dir().join(format!(
-            "gamer-archive-gbk-test-{}",
-            std::process::id()
-        ));
+        let staging =
+            std::env::temp_dir().join(format!("gamer-archive-gbk-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging).unwrap();
         assert!(extract_archive(&bytes, &staging).is_err());

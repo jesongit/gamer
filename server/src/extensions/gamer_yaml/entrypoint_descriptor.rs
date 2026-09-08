@@ -1,34 +1,31 @@
-//! Entrypoint 参数 schema 描述（P12.3 / 契约 §7）。
+//! Entrypoint 参数 schema 描述（V1，契约 §7 形态保留）。
 //!
-//! 前端约束是「不得为取参数而解析 YAML」：本模块按 entrypoint 资源 id 读取
-//! 分区资源并产出可渲染参数表单的 JSON schema——脚本（`version: 3` 顶层）与
-//! 函数库 bare-map 走同一端点。资源缺失 → 结构化 not_found；非 v3 源 / 解析
-//! 失败 / 未知参数类型 → 结构化 invalid（诊断与运行期绑定同源）。本模块物理
-//! 居于 gamer_yaml 扩展边界内（架构守卫：extensions 外禁现 yaml_vnext 引用），
-//! Core 侧经 `scheduler::EntrypointDescriber` 窄 trait 透传，不感知本模块。
+//! `GET /api/runners/:runner_id/entrypoint` 的 gamer.yaml 数据源：
+//! entrypoint = `<pkg>/<脚本>.yaml`（脚本）或
+//! `<pkg>/<文件短路径>.yaml#<函数名>`（函数，缺省函数名 = 文件第一个）。
+//! 内层载荷 `{kind, format:"yaml-params-v1", schema}`——schema 即 V1
+//! `params` 声明（名称/类型/必填/默认值/说明），前端据此渲染参数表单，
+//! 不解析 YAML。旧 v3 的 psig1 签名字段已删除。
 
 use std::sync::Arc;
 
-use serde_json::{json, Map, Value};
+use serde_json::Value;
 
-use crate::extensions::gamer_yaml::error::ScriptError;
-use crate::extensions::gamer_yaml::params::KEY_NAMES;
 use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
-use crate::extensions::gamer_yaml::task_params::{
-    is_known_v3_type, normalize_v3_default_json, probe_v3_function_decls, probe_v3_script_decls,
-    v3_param_signature, V3ParamDecl,
-};
+use crate::extensions::gamer_yaml::syntax::{parse_function_library, parse_script};
+use crate::extensions::gamer_yaml::task_params::decls_schema_json;
 use crate::resources::PackageStore;
 
-/// 描述失败（经 `scheduler::EntrypointDescribeError` 透传到 API 边界）。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum DescribeError {
     NotFound { resource: String },
     Invalid { diagnostics: Value },
 }
 
 impl DescribeError {
-    fn from_script_errors(diagnostics: &[ScriptError]) -> Self {
+    fn from_script_errors(
+        diagnostics: &[crate::extensions::gamer_yaml::error::ScriptError],
+    ) -> Self {
         Self::Invalid {
             diagnostics: serde_json::to_value(diagnostics).unwrap_or_default(),
         }
@@ -36,7 +33,9 @@ impl DescribeError {
 
     fn invalid_diagnostic(code: &str, message: impl Into<String>) -> Self {
         Self::Invalid {
-            diagnostics: json!([{ "code": code, "message": message.into() }]),
+            diagnostics: serde_json::json!([
+                { "code": code, "message": message.into(), "resource": "", "step_path": "", "field": "" }
+            ]),
         }
     }
 }
@@ -70,7 +69,7 @@ impl crate::scheduler::EntrypointDescriber for StoreEntrypointDescriber {
 
 /// 描述一个 entrypoint：`<pkg>/<脚本>.yaml`（脚本）或
 /// `<pkg>/<文件>.yaml#<函数名>`（函数库内函数）。返回契约 §7 内层载荷
-/// `{kind, format, schema, signature}`（API 层补 runner_id/entrypoint 外壳）。
+/// `{kind, format, schema}`（API 层补 runner_id/entrypoint 外壳）。
 pub(crate) fn describe_entrypoint(
     scripts: &PackageStore,
     entrypoint: &str,
@@ -84,8 +83,8 @@ pub(crate) fn describe_entrypoint(
 }
 
 fn describe_script(scripts: &PackageStore, entrypoint: &str) -> Result<Value, DescribeError> {
-    match script_entry(scripts, entrypoint) {
-        Ok(Some(_)) => {}
+    let content = match script_entry(scripts, entrypoint) {
+        Ok(Some(entry)) => entry.content,
         Ok(None) => {
             return Err(DescribeError::NotFound {
                 resource: entrypoint.to_string(),
@@ -97,146 +96,98 @@ fn describe_script(scripts: &PackageStore, entrypoint: &str) -> Result<Value, De
                 format!("读取脚本失败: {error:#}"),
             ))
         }
-    }
-    let decls = probe_v3_script_decls(scripts, entrypoint)
-        .map_err(|diagnostics| DescribeError::from_script_errors(&diagnostics))?;
-    schema_payload("script", &decls)
+    };
+    let script = parse_script(&content).map_err(|diagnostics| DescribeError::Invalid {
+        diagnostics: serde_json::to_value(&diagnostics).unwrap_or_default(),
+    })?;
+    Ok(schema_payload("script", &decls_schema_json(&script.params)))
 }
 
 fn describe_function(
     scripts: &PackageStore,
     base: &str,
-    function: &str,
+    func: &str,
     entrypoint: &str,
 ) -> Result<Value, DescribeError> {
-    let Some((pkg, file)) = base.split_once('/') else {
-        return Err(DescribeError::invalid_diagnostic(
-            "entrypoint.invalid",
-            format!(
-                "函数 entrypoint 缺少分区前缀：{entrypoint:?}（应为 <分区>/<文件>.yaml#<函数>）"
-            ),
-        ));
-    };
-    let file = file
-        .trim()
-        .trim_end_matches(".yaml")
-        .trim_end_matches(".yml");
-    let rel = format!("{pkg}/{file}.yaml");
-    match function_entry(scripts, &rel) {
-        Ok(Some(_)) => {}
-        Ok(None) => return Err(DescribeError::NotFound { resource: rel }),
+    let target = normalize_file_target(base);
+    let content = match function_entry(scripts, &target) {
+        Ok(Some(entry)) => entry.content,
+        Ok(None) => {
+            return Err(DescribeError::NotFound {
+                resource: target.clone(),
+            })
+        }
         Err(error) => {
             return Err(DescribeError::invalid_diagnostic(
                 "yaml.read_failed",
-                format!("读取函数库失败: {error:#}"),
+                format!("读取函数文件失败: {error:#}"),
             ))
         }
-    }
-    let decls = probe_v3_function_decls(scripts, pkg, file, Some(function))
-        .map_err(|diagnostics| DescribeError::from_script_errors(&diagnostics))?;
-    schema_payload("function", &decls)
+    };
+    let library =
+        parse_function_library(&content).map_err(|diagnostics| DescribeError::Invalid {
+            diagnostics: serde_json::to_value(&diagnostics).unwrap_or_default(),
+        })?;
+    let name = if func.is_empty() {
+        library
+            .first()
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| {
+                DescribeError::invalid_diagnostic(
+                    "resource.func.not_found",
+                    format!("函数文件 {target} 未定义任何函数"),
+                )
+            })?
+    } else {
+        func.to_string()
+    };
+    let decls = library
+        .iter()
+        .find(|(entry, _)| entry == &name)
+        .map(|(_, def)| decls_schema_json(&def.params))
+        .ok_or_else(|| {
+            DescribeError::from_script_errors(&[
+                crate::extensions::gamer_yaml::error::ScriptError::new(
+                    "resource.func.not_found",
+                    format!("函数 {name} 不在文件 {target} 中"),
+                    entrypoint,
+                ),
+            ])
+        })?;
+    Ok(schema_payload("function", &decls))
 }
 
-/// v3 声明 → 契约 §7 载荷（含当前 psig1 签名，前端可做过期预检）。
-/// 未知类型声明 → invalid（schema 拒绝渲染未知形态；与运行期绑定同口径）。
-fn schema_payload(kind: &str, decls: &[V3ParamDecl]) -> Result<Value, DescribeError> {
-    for decl in decls {
-        if !is_known_v3_type(&decl.ty) {
-            return Err(DescribeError::invalid_diagnostic(
-                "param.decl.format",
-                format!(
-                    "参数 {} 声明了未知类型 {:?}（可用：tmpl/coord/color/time/key/text/bool/string/int/number/value）",
-                    decl.name, decl.ty
-                ),
-            ));
-        }
+/// `<pkg>/<文件>.yaml[.yml]` 短路径归一（后缀可省略）。
+fn normalize_file_target(base: &str) -> String {
+    let lower = base.to_ascii_lowercase();
+    if lower.ends_with(".yaml") || lower.ends_with(".yml") {
+        base.to_string()
+    } else {
+        format!("{base}.yaml")
     }
-    Ok(schema_payload_with(kind, decls, v3_param_signature(decls)))
 }
 
-fn schema_payload_with(kind: &str, decls: &[V3ParamDecl], signature: String) -> Value {
-    let mut properties = Map::new();
-    let mut required = Vec::new();
-    for decl in decls {
-        let mut property = Map::new();
-        property.insert(
-            "type".into(),
-            Value::String(schema_type(&decl.ty).to_string()),
-        );
-        if decl.ty.trim() == "coord" {
-            property.insert(
-                "items".into(),
-                json!({ "type": "number", "minItems": 2, "maxItems": 2 }),
-            );
-        }
-        if let Some(default) = &decl.default {
-            property.insert(
-                "default".into(),
-                normalize_v3_default_json(&decl.ty, default),
-            );
-        } else {
-            required.push(Value::String(decl.name.clone()));
-        }
-        if !decl.remark.is_empty() {
-            property.insert("description".into(), Value::String(decl.remark.clone()));
-        }
-        if decl.ty.trim() == "key" {
-            property.insert(
-                "enum".into(),
-                Value::Array(
-                    KEY_NAMES
-                        .iter()
-                        .map(|name| Value::String((*name).to_string()))
-                        .collect(),
-                ),
-            );
-        }
-        // 原始声明类型（time/coord 等 UI 形态由前端按此渲染；执行期 TypedValue
-        // 行为不变，见契约 §7）
-        property.insert(
-            "param_type".into(),
-            Value::String(decl.ty.trim().to_string()),
-        );
-        properties.insert(decl.name.clone(), Value::Object(property));
-    }
-    json!({
+fn schema_payload(kind: &str, schema: &Value) -> Value {
+    serde_json::json!({
         "kind": kind,
         "format": "yaml-params-v1",
-        "schema": {
-            "type": "object",
-            "properties": Value::Object(properties),
-            "required": required,
-        },
-        "signature": signature,
+        "schema": schema,
     })
-}
-
-/// 声明类型 → JSON Schema 类型（契约 §7 参数类型集合：string/number/integer/
-/// boolean/enum；coord 以二元数值数组表达，value 为任意 JSON）。
-fn schema_type(ty: &str) -> &'static str {
-    match ty.trim() {
-        "bool" | "boolean" => "boolean",
-        "int" | "integer" => "integer",
-        "number" => "number",
-        "coord" => "array",
-        "value" => "any",
-        // text/string/tmpl/color/time/key 均按字符串渲染（time 取值带单位书写，
-        // 如 30s/500ms——执行期解析要求单位串，故不映射为 number）
-        _ => "string",
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::scheduler::EntrypointDescriber as _;
+    use crate::extensions::gamer_yaml::YAML_EXTENSION_ID;
 
     fn store_dir(tag: &str) -> (Config, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "gamer-entrypoint-desc-{tag}-{}",
-            uuid::Uuid::new_v4()
+            "gamer-epdesc-{tag}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
         ));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = Config {
             data_dir: dir.clone(),
@@ -246,148 +197,85 @@ mod tests {
     }
 
     fn write(cfg: &Config, kind_dir: &str, name: &str, content: &str) {
-        let dir = cfg
-            .data_dir
-            .join("packages/com.test.app/plugins/gamer.yaml")
-            .join(kind_dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(name), content).unwrap();
+        let store = PackageStore::open(cfg).unwrap();
+        let pkg = "com.test.app";
+        let _ = store.create_package(crate::resources::PackageInput {
+            id: pkg.into(),
+            ..Default::default()
+        });
+        store
+            .write_text(
+                pkg,
+                YAML_EXTENSION_ID,
+                &format!("{kind_dir}/{name}"),
+                content,
+                None,
+                false,
+            )
+            .unwrap();
     }
 
     #[test]
-    fn describes_v3_scripts_with_schema_and_signature() {
-        let (cfg, dir) = store_dir("v3");
+    fn describes_v1_scripts_with_schema() {
+        let (cfg, _dir) = store_dir("script");
         write(
             &cfg,
             "automations",
-            "v3.yaml",
-            "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - name: count\n    type: int\n    default: 3\nsteps:\n  - log: $msg\n",
+            "daily.yaml",
+            "params:\n  retry:\n    type: integer\n    default: 3\n    desc: 重试次数\nrun:\n  - log: hi\n",
         );
-        let scripts = Arc::new(PackageStore::open(&cfg).unwrap());
+        let store = PackageStore::open(&cfg).unwrap();
+        let payload = describe_entrypoint(&store, "com.test.app/daily.yaml").unwrap();
+        assert_eq!(payload["kind"], "script");
+        assert_eq!(payload["format"], "yaml-params-v1");
+        assert_eq!(payload["schema"][0]["name"], "retry");
+        assert_eq!(payload["schema"][0]["type"], "integer");
+        assert_eq!(payload["schema"][0]["default"], 3);
+        assert_eq!(payload["schema"][0]["desc"], "重试次数");
+        assert!(payload.get("signature").is_none(), "V1 无签名字段");
 
-        let v3 = describe_entrypoint(&scripts, "com.test.app/v3.yaml").unwrap();
-        assert_eq!(v3["kind"], "script");
-        assert_eq!(v3["schema"]["type"], "object");
-        assert_eq!(v3["schema"]["properties"]["count"]["type"], "integer");
-        assert_eq!(v3["schema"]["properties"]["count"]["default"], 3);
-        assert_eq!(v3["schema"]["properties"]["msg"]["type"], "string");
-        assert_eq!(v3["schema"]["properties"]["msg"]["default"], "默认");
-        assert_eq!(v3["schema"]["properties"]["msg"]["description"], "消息");
-        assert_eq!(v3["schema"]["properties"]["msg"]["param_type"], "text");
-        assert_eq!(v3["schema"]["required"], serde_json::json!([]));
-        assert_eq!(
-            v3["signature"].as_str().unwrap(),
-            "psig1|text,msg,0,默认|int,count,0,3"
-        );
-        drop(scripts);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn describes_v3_function_library_entrypoint_and_reports_missing_invalid() {
-        let (cfg, dir) = store_dir("func");
-        write(
-            &cfg,
-            "functions",
-            "lib.yaml",
-            "greet:\n  params:\n    - 'text:who:称呼:\"玩家\"'\n    - 'int:times:次数:2'\n  steps:\n    - log: $who\nfarewell:\n  steps:\n    - log: bye\n",
-        );
-        let scripts = Arc::new(PackageStore::open(&cfg).unwrap());
-
-        let greet = describe_entrypoint(&scripts, "com.test.app/lib.yaml#greet").unwrap();
-        assert_eq!(greet["kind"], "function");
-        assert_eq!(greet["schema"]["properties"]["times"]["type"], "integer");
-        assert_eq!(greet["schema"]["properties"]["who"]["default"], "玩家");
-        assert_eq!(
-            greet["schema"]["required"],
-            serde_json::json!([]),
-            "字符串形态声明带默认值 → 非必填"
-        );
-        // 资源缺失 → 结构化 not_found
-        match describe_entrypoint(&scripts, "com.test.app/nope.yaml#greet") {
-            Err(DescribeError::NotFound { resource }) => {
-                assert_eq!(resource, "com.test.app/nope.yaml")
-            }
-            other => panic!("expected not_found, got {:?}", other.is_ok()),
-        }
-        // 函数名不存在 → invalid（结构化诊断定位到函数名）
-        match describe_entrypoint(&scripts, "com.test.app/lib.yaml#ghost") {
-            Err(DescribeError::Invalid { diagnostics }) => {
-                let text = diagnostics.to_string();
-                assert!(
-                    text.contains("ghost") || text.contains("不存在"),
-                    "诊断需定位缺失函数: {text}"
-                );
-            }
-            other => panic!("expected invalid, got {:?}", other.is_ok()),
-        }
-        // v3 脚本解析失败 → 结构化 invalid（yaml.v3.* 诊断）
-        write(&cfg, "automations", "bad.yaml", "version: 3\nparams: []\n");
-        match describe_entrypoint(&scripts, "com.test.app/bad.yaml") {
-            Err(DescribeError::Invalid { diagnostics }) => {
-                assert!(diagnostics.to_string().contains("yaml.v3"));
-            }
-            other => panic!("expected invalid, got {:?}", other.is_ok()),
-        }
-        // 非 v3 存量脚本 → 版本门禁 invalid（v3-only，无 fallback）
+        // 旧 v3 源 → 结构化 invalid 诊断（不再有 fallback）
         write(
             &cfg,
             "automations",
             "legacy.yaml",
-            "params: []\nsteps: []\n",
+            "version: 3\nsteps: []\n",
         );
-        match describe_entrypoint(&scripts, "com.test.app/legacy.yaml") {
-            Err(DescribeError::Invalid { diagnostics }) => {
+        let error = describe_entrypoint(&store, "com.test.app/legacy.yaml").unwrap_err();
+        match error {
+            DescribeError::Invalid { diagnostics } => {
                 assert!(
-                    diagnostics.to_string().contains("yaml.v3.version"),
-                    "非 v3 脚本必须报版本门禁: {diagnostics}"
+                    diagnostics.to_string().contains("yaml.version.removed"),
+                    "{diagnostics}"
                 );
             }
-            other => panic!("expected version gate, got {:?}", other.is_ok()),
+            other => panic!("期望 Invalid，得到 {other:?}"),
         }
-        // 未知类型声明 → invalid（与运行期绑定同口径）
-        write(
-            &cfg,
-            "functions",
-            "odd.yaml",
-            "f:\n  params:\n    - 'flavor:x:备注:1'\n  steps:\n    - log: ok\n",
-        );
-        match describe_entrypoint(&scripts, "com.test.app/odd.yaml#f") {
-            Err(DescribeError::Invalid { diagnostics }) => {
-                assert!(diagnostics.to_string().contains("flavor"));
-            }
-            other => panic!("expected invalid, got {:?}", other.is_ok()),
-        }
-        // 缺分区前缀的函数 entrypoint → invalid
-        match describe_entrypoint(&scripts, "lib.yaml#greet") {
-            Err(DescribeError::Invalid { diagnostics }) => {
-                assert!(diagnostics.to_string().contains("分区前缀"));
-            }
-            other => panic!("expected invalid, got {:?}", other.is_ok()),
-        }
-        drop(scripts);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn describer_impl_maps_errors_for_the_core_trait() {
-        let (cfg, dir) = store_dir("trait");
+    fn describes_function_entrypoint_and_reports_missing() {
+        let (cfg, _dir) = store_dir("func");
         write(
             &cfg,
-            "automations",
-            "v3.yaml",
-            "version: 3\nsteps:\n  - log: ok\n",
+            "functions",
+            "common.yaml",
+            "functions:\n  claim:\n    params:\n      timeout:\n        type: duration\n        default: 5s\n    run:\n      - log: hi\n",
         );
-        let scripts = Arc::new(PackageStore::open(&cfg).unwrap());
-        let describer = StoreEntrypointDescriber::new(scripts);
-        let ok = describer.describe("com.test.app/v3.yaml").unwrap();
-        assert_eq!(ok["kind"], "script");
-        assert_eq!(ok["format"], "yaml-params-v1");
-        match describer.describe("com.test.app/missing.yaml") {
-            Err(crate::scheduler::EntrypointDescribeError::NotFound { .. }) => {}
-            other => panic!("expected NotFound, got {:?}", other.is_ok()),
-        }
-        drop(describer);
-        std::fs::remove_dir_all(dir).unwrap();
+        let store = PackageStore::open(&cfg).unwrap();
+        let payload = describe_entrypoint(&store, "com.test.app/common.yaml#claim").unwrap();
+        assert_eq!(payload["kind"], "function");
+        assert_eq!(payload["schema"][0]["type"], "duration");
+
+        // 缺省函数名 = 文件第一个
+        let payload = describe_entrypoint(&store, "com.test.app/common.yaml#").unwrap();
+        assert_eq!(payload["kind"], "function");
+
+        // 目标函数不存在
+        let error = describe_entrypoint(&store, "com.test.app/common.yaml#missing").unwrap_err();
+        assert!(matches!(error, DescribeError::Invalid { .. }));
+        // 文件不存在
+        let error = describe_entrypoint(&store, "com.test.app/none.yaml#a").unwrap_err();
+        assert!(matches!(error, DescribeError::NotFound { .. }));
     }
 }

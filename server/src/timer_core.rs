@@ -410,8 +410,6 @@ pub enum TimerRunnerError {
         message: String,
         detail: serde_json::Value,
     },
-    /// 脚本参数声明已变化（psig1 签名不一致）：message 面向用户。
-    ParamStale(String),
     Conflict(Box<RunRecord>),
     ShuttingDown,
     #[allow(
@@ -427,7 +425,6 @@ impl std::fmt::Display for TimerRunnerError {
             Self::DependencyMissing(message) => write!(f, "dependency unavailable: {message}"),
             Self::Invalid(message) => f.write_str(message),
             Self::InvalidDetail { message, .. } => f.write_str(message),
-            Self::ParamStale(message) => f.write_str(message),
             Self::Conflict(record) => write!(f, "device busy: {}", record.run_id),
             Self::ShuttingDown => f.write_str("server is shutting down"),
             Self::Other(message) => f.write_str(message),
@@ -1056,8 +1053,7 @@ impl TimerCore {
             }
             TimerRunnerError::InvalidDetail { message, .. }
             | TimerRunnerError::Invalid(message)
-            | TimerRunnerError::Other(message)
-            | TimerRunnerError::ParamStale(message) => {
+            | TimerRunnerError::Other(message) => {
                 self.db
                     .metrics()
                     .record_scheduler_event(SchedulerEvent::Failed);

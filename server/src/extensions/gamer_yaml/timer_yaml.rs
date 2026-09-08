@@ -1,26 +1,20 @@
-//! gamer.yaml 的 Timer Core 任务适配器（v3-only）。
+//! gamer.yaml 的 Timer Core 任务适配器（V1）。
 //!
-//! This is the only timer-side module that knows the current PackageStore,
-//! typed parameter snapshot, and `RunTarget::Script`.  It translates the
-//! generic Task payload into the existing RunManager request so YAML runs
-//! scheduled through the unified task API remain compatible.
+//! This is the only timer-side module that knows the current PackageStore
+//! and `RunTarget::Script`.  It translates the generic Task payload into the
+//! existing RunManager request so YAML runs scheduled through the unified
+//! task API remain compatible.
 //!
 //! P11.1（ADR-12）：Task 的 `runner.payload` 是 runner 私有不透明值。本 runner
-//! 约定 `payload = {args: <稀疏或全量参数>}`；旧数据里可能还带
-//! `param_signature`（有则继续做过期门禁），新保存路径不带签名——运行时按
-//! 脚本当前声明重绑参数（存活值保留、新参数取默认值、必填缺失报错）。
+//! 约定 `payload = {args: <稀疏参数覆盖>}`；运行时按脚本当前 Schema 在执行
+//! 边界绑定（存活值保留、新参数取默认值、必填缺失报错）——旧 v3 的 psig1
+//! 参数签名门禁已随 V1 简化删除。
 //!
 //! P11.6（POST /api/runs 统一执行入口）：手动/函数测试运行经同一 runner。
 //! `task_id` 为空 = 手动 ad-hoc 运行：`entrypoint` = `<pkg>/<脚本>.yaml` 或
-//! `<pkg>/<文件短路径>.yaml#<函数名>`，payload = `{args?, start_index?,
-//! function?}`（稀疏参数按声明解析并合并默认值，诊断 → `InvalidDetail`）。
+//! `<pkg>/<文件短路径>.yaml#<函数名>`，payload = `{args?, start_index?}`。
 //!
-//! P11.2（ADR-13）：runner 注册由扩展生命周期驱动。本文件另提供
-//! [`YamlTimerRunnerRegistrar`]——`TimerRunnerRegistrar` 钩子的 YAML 侧实现：
-//! gamer.yaml 扩展 start → 构造并注册 runner（owner=扩展 id），stop/disable/
-//! uninstall → 注销并挂起其名下任务。按扩展 id 特判 gamer.yaml 是本 Wave 的
-//! 过渡缝（钩子接口本身通用），Wave3 把 runner 构造移进扩展边界后本类型随
-//! YAML 栈一并迁移。
+//! P11.2（ADR-13）：runner 注册由扩展生命周期驱动（[`YamlTimerRunnerRegistrar`]）。
 
 use std::sync::Arc;
 
@@ -29,14 +23,14 @@ use serde_json::Value;
 
 use crate::core::RunRequest;
 use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
-use crate::extensions::gamer_yaml::task_params::{self, GateError};
+use crate::extensions::gamer_yaml::YAML_EXTENSION_ID;
 use crate::resources::PackageStore;
 use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartError};
 use crate::store::Db;
 use crate::timer_core::{TimerCompletion, TimerOutcome, TimerRun, TimerRunner, TimerRunnerError};
 
-// P12.3：entrypoint 参数 schema 描述（契约 §7）。本模块声明挂载（gamer_yaml
-// 的 mod.rs 属并行任务地盘），物理文件为 gamer_yaml/entrypoint_descriptor.rs。
+// P12.3：entrypoint 参数 schema 描述（契约 §7）。本模块声明挂载，
+// 物理文件为 gamer_yaml/entrypoint_descriptor.rs。
 #[path = "entrypoint_descriptor.rs"]
 pub(crate) mod entrypoint_descriptor;
 
@@ -60,12 +54,10 @@ impl YamlTimerRunner {
     }
 }
 
-/// YAML runner 的不透明 payload 视图：`{args, param_signature?}`。
+/// YAML runner 的不透明 payload 视图：`{args?}`（稀疏原始覆盖）。
 struct YamlPayload {
     script_id: String,
-    args: Value,
-    /// 旧数据携带的 psig1 快照签名；新保存路径为 None（不做过期门禁）。
-    param_signature: Option<String>,
+    args: serde_json::Map<String, Value>,
 }
 
 /// Translate the generic RunRequest into the YAML runner payload view only at
@@ -76,18 +68,23 @@ fn payload_from_request(request: &RunRequest) -> Result<YamlPayload, String> {
         .as_value()
         .as_object()
         .ok_or_else(|| "YAML runner payload must be an object".to_string())?;
-    let args = payload
-        .get("args")
-        .cloned()
-        .ok_or_else(|| "YAML runner payload misses args".to_string())?;
+    let args = payload.get("args").cloned().unwrap_or(Value::Null);
     Ok(YamlPayload {
         script_id: request.entrypoint.clone(),
-        args,
-        param_signature: payload
-            .get("param_signature")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        args: args.as_object().cloned().unwrap_or_default(),
     })
+}
+
+fn script_exists(scripts: &PackageStore, script_id: &str) -> Result<bool, String> {
+    script_entry(scripts, script_id)
+        .map(|entry| entry.is_some())
+        .map_err(|error| error.to_string())
+}
+
+fn function_file_exists(scripts: &PackageStore, target: &str) -> Result<bool, String> {
+    function_entry(scripts, target)
+        .map(|entry| entry.is_some())
+        .map_err(|error| error.to_string())
 }
 
 #[async_trait]
@@ -107,30 +104,67 @@ impl TimerRunner for YamlTimerRunner {
             return self.submit_manual(request, on_complete).await;
         }
         let payload = payload_from_request(&request).map_err(TimerRunnerError::Invalid)?;
-        let task_args = match task_params::gate_task(
-            &self.scripts,
-            &payload.script_id,
-            &payload.args,
-            payload.param_signature.as_deref(),
-        ) {
-            Ok(args) => args,
-            Err(error) => {
+        // 存在性先行：脚本缺失 → 依赖缺失（任务保留 enabled 原意）。
+        // 参数按当前 Schema 宽松重绑（计划 Phase 4.2）：存活值保留、新增参数
+        // 取默认值、被删参数丢弃、必填缺失/类型不符结构化报错（psig1 签名
+        // 门禁已随 V1 删除）。
+        match script_exists(&self.scripts, &payload.script_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(TimerRunnerError::DependencyMissing("脚本不存在".into()));
+            }
+            Err(error) => return Err(TimerRunnerError::Invalid(error)),
+        }
+        let scripts = self.scripts.clone();
+        let script_id = payload.script_id.clone();
+        let args_owned = payload.args.clone();
+        let bound = tokio::task::spawn_blocking(move || {
+            let content = script_entry(&scripts, &script_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "脚本不存在".to_string())?
+                .content;
+            let script = crate::extensions::gamer_yaml::syntax::parse_script(&content).map_err(
+                |diagnostics| {
+                    diagnostics
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("；")
+                },
+            )?;
+            crate::extensions::gamer_yaml::task_params::bind_entry_args(
+                &script_id,
+                &script.params,
+                &args_owned,
+                false,
+            )
+            .map(|bound| bound.resolved)
+            .map_err(|errors| {
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("；")
+            })
+        })
+        .await
+        .map_err(|error| TimerRunnerError::Invalid(format!("参数解析任务失败: {error}")))?;
+        let resolved = match bound {
+            Ok(resolved) => resolved,
+            Err(message) => {
                 tracing::warn!(
                     task = %task_id,
                     script = %payload.script_id,
-                    reason = %error.reason(),
-                    detail = %error.message(),
+                    detail = %message,
                     "YAML timer runner rejected task parameters"
                 );
-                return Err(map_gate_error(error));
+                return Err(TimerRunnerError::Invalid(message));
             }
         };
         tracing::info!(
             task = %task_id,
             script = %payload.script_id,
-            params = %task_args.names.join(","),
-            signature = %task_args.signature,
-            signature_short = %task_params::signature_short_code(&task_args.signature),
+            params = %resolved.keys().cloned().collect::<Vec<_>>().join(","),
             "YAML timer task parameters confirmed"
         );
         let req = crate::extensions::gamer_yaml::yaml_start_request(
@@ -146,7 +180,7 @@ impl TimerRunner for YamlTimerRunner {
             },
             Some(task_id.to_string()),
             scheduled_at,
-            task_args.overrides,
+            resolved,
             false,
         )
         .map_err(|error| TimerRunnerError::Invalid(error.to_string()))?;
@@ -190,6 +224,13 @@ fn invalid_detail(message: impl Into<String>, detail: serde_json::Value) -> Time
         message: message.into(),
         detail,
     }
+}
+
+/// 手动路径早期绑定失败（存在性 / 脚本解析 / 参数绑定三类，400 语义分流）。
+enum EarlyBindError {
+    NotFound(String),
+    Parse(Vec<crate::extensions::gamer_yaml::syntax::Diagnostic>),
+    Bind(Vec<crate::extensions::gamer_yaml::error::ScriptError>),
 }
 
 impl YamlTimerRunner {
@@ -242,58 +283,106 @@ impl YamlTimerRunner {
                 start_index: payload.start_index.unwrap_or(0),
             }
         };
-        // 存在性先行（与旧运行端点的 404 语义对齐，此处统一为结构化失败：
-        // 手动运行无任务可挂起）
-        match &target {
-            crate::extensions::gamer_yaml::run_target::RunTarget::Script { script_id, .. } => {
-                let exists = script_entry(&self.scripts, script_id)
-                    .map_err(|error| invalid_detail(error.to_string(), serde_json::json!([])))?
-                    .is_some();
-                if !exists {
-                    return Err(invalid_detail(
-                        "脚本不存在",
-                        serde_json::json!({ "error": "not_found", "resource": script_id }),
-                    ));
-                }
-            }
-            crate::extensions::gamer_yaml::run_target::RunTarget::Function {
-                pkg, file, ..
-            } => {
-                let rel = format!("{pkg}/{file}.yaml");
-                let exists = function_entry(&self.scripts, &rel)
-                    .map_err(|error| invalid_detail(error.to_string(), serde_json::json!([])))?
-                    .is_some();
-                if !exists {
-                    return Err(invalid_detail(
-                        "函数文件不存在",
-                        serde_json::json!({ "error": "not_found", "resource": rel }),
-                    ));
-                }
-            }
-        }
-        // 稀疏 args → 按声明解析 + 默认值合并（blocking 池内做磁盘快照 + 严格
-        // 解析）。P12.3：version:3 脚本与 v2 兼容失败后的 v3 函数库在此分流，
-        // v3 参数绑定/缺必填校验与 v2 同口径（invalid_args 诊断）。
+        // 存在性先行（与运行端点的 404 语义对齐，统一为结构化失败：
+        // 手动运行无任务可挂起）+ 早期严格绑定（缺必填/未知键/类型不符在
+        // 提交时即 400 invalid_args；resolved_args 供 202 响应展示）。
         let scripts = self.scripts.clone();
-        let bound = {
-            let target = target.clone();
-            let args_owned = args.clone();
-            tokio::task::spawn_blocking(move || {
-                task_params::resolve_manual_entry_args(&scripts, &target, &args_owned)
-            })
-            .await
-            .map_err(|error| {
-                invalid_detail(format!("参数解析任务失败: {error}"), serde_json::json!([]))
-            })?
-            .map_err(|diagnostics| {
-                invalid_detail(
+        let target_for_bind = target.clone();
+        let args_owned = args.clone();
+        let bound = tokio::task::spawn_blocking(move || {
+            use crate::extensions::gamer_yaml::run_target::RunTarget as T;
+            match &target_for_bind {
+                T::Script { script_id, .. } => {
+                    let content = script_entry(&scripts, script_id)
+                        .map_err(|error| EarlyBindError::NotFound(error.to_string()))?
+                        .ok_or_else(|| EarlyBindError::NotFound("脚本不存在".into()))?
+                        .content;
+                    let script = crate::extensions::gamer_yaml::syntax::parse_script(&content)
+                        .map_err(EarlyBindError::Parse)?;
+                    crate::extensions::gamer_yaml::task_params::bind_entry_args(
+                        script_id,
+                        &script.params,
+                        &args_owned,
+                        true,
+                    )
+                    .map(|bound| bound.resolved)
+                    .map_err(EarlyBindError::Bind)
+                }
+                T::Function {
+                    pkg,
+                    file,
+                    function,
+                    ..
+                } => {
+                    let target_id = format!("{pkg}/{file}.yaml");
+                    let content = function_entry(&scripts, &target_id)
+                        .map_err(|error| EarlyBindError::NotFound(error.to_string()))?
+                        .ok_or_else(|| EarlyBindError::NotFound("函数文件不存在".into()))?
+                        .content;
+                    let library =
+                        crate::extensions::gamer_yaml::syntax::parse_function_library(&content)
+                            .map_err(EarlyBindError::Parse)?;
+                    let name = match function {
+                        Some(name) => name.clone(),
+                        None => library
+                            .first()
+                            .map(|(name, _)| name.clone())
+                            .ok_or_else(|| {
+                                EarlyBindError::NotFound(format!(
+                                    "函数文件 {target_id} 未定义任何函数"
+                                ))
+                            })?,
+                    };
+                    let def = library
+                        .iter()
+                        .find(|(entry, _)| entry == &name)
+                        .map(|(_, def)| def)
+                        .ok_or_else(|| {
+                            EarlyBindError::NotFound(format!("函数 {name} 不在文件 {target_id} 中"))
+                        })?;
+                    crate::extensions::gamer_yaml::task_params::bind_entry_args(
+                        &format!("{target_id}#{name}"),
+                        &def.params,
+                        &args_owned,
+                        true,
+                    )
+                    .map(|bound| bound.resolved)
+                    .map_err(EarlyBindError::Bind)
+                }
+            }
+        })
+        .await;
+        let bound: Result<serde_json::Map<String, Value>, EarlyBindError> = match bound {
+            Ok(inner) => inner,
+            Err(error) => Err(EarlyBindError::NotFound(format!(
+                "参数解析任务失败: {error}"
+            ))),
+        };
+        let resolved = match bound {
+            Ok(resolved) => resolved,
+            Err(EarlyBindError::NotFound(message)) => {
+                return Err(invalid_detail(
+                    message,
+                    serde_json::json!({ "error": "not_found" }),
+                ));
+            }
+            Err(EarlyBindError::Parse(diagnostics)) => {
+                let text = diagnostics
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("；");
+                return Err(invalid_detail(
+                    text,
+                    serde_json::json!({ "error": "invalid_script", "diagnostics": diagnostics }),
+                ));
+            }
+            Err(EarlyBindError::Bind(diagnostics)) => {
+                return Err(invalid_detail(
                     "参数解析失败",
-                    serde_json::json!({
-                        "error": "invalid_args",
-                        "diagnostics": diagnostics,
-                    }),
-                )
-            })?
+                    serde_json::json!({ "error": "invalid_args", "diagnostics": diagnostics }),
+                ));
+            }
         };
         let start_request = crate::extensions::gamer_yaml::yaml_start_request(
             app,
@@ -301,7 +390,7 @@ impl YamlTimerRunner {
             RunSource::Manual,
             None,
             None,
-            bound.overrides,
+            resolved.clone(),
             true,
         )
         .map_err(|error| invalid_detail(error.to_string(), serde_json::json!([])))?;
@@ -323,9 +412,11 @@ impl YamlTimerRunner {
             .runs
             .submit(start_request, Some(hook))
             .map_err(map_start_error)?;
+        // resolved_args = 默认值 ∪ 已校验覆盖（提交边界按当前 Schema 绑定；
+        // 执行边界重绑结果一致——同一次运行的声明/覆盖已冻结在请求里）。
         Ok(TimerRun {
             run_id: record.run_id,
-            detail: Some(serde_json::json!({ "resolved_args": bound.resolved })),
+            detail: Some(serde_json::json!({ "resolved_args": Value::Object(resolved) })),
         })
     }
 }
@@ -350,22 +441,6 @@ fn write_manual_terminal_log(
             .add_log_async(&device_id, &script_id, level, &message)
             .await;
     });
-}
-
-fn map_gate_error(error: GateError) -> TimerRunnerError {
-    match error {
-        GateError::ScriptMissing => TimerRunnerError::DependencyMissing("脚本不存在".into()),
-        GateError::ScriptInvalid(diagnostics) => {
-            TimerRunnerError::Invalid(GateError::ScriptInvalid(diagnostics).message())
-        }
-        GateError::SignatureMismatch { stored, current } => TimerRunnerError::ParamStale(
-            GateError::SignatureMismatch {
-                stored: stored.clone(),
-                current: current.clone(),
-            }
-            .message(),
-        ),
-    }
 }
 
 fn map_start_error(error: StartError) -> TimerRunnerError {
@@ -447,7 +522,7 @@ impl YamlTimerRunnerRegistrar {
 #[async_trait]
 impl crate::extensions::TimerRunnerRegistrar for YamlTimerRunnerRegistrar {
     async fn extension_started(&self, extension_id: &str) -> anyhow::Result<()> {
-        if extension_id != crate::extensions::gamer_yaml::yaml_extension::YAML_EXTENSION_ID {
+        if extension_id != YAML_EXTENSION_ID {
             return Ok(());
         }
         let runner = Arc::new(YamlTimerRunner::new(
@@ -456,15 +531,11 @@ impl crate::extensions::TimerRunnerRegistrar for YamlTimerRunnerRegistrar {
             self.scripts.clone(),
         ));
         self.scheduler
-            .register_extension_runner(
-                crate::extensions::gamer_yaml::yaml_extension::YAML_EXTENSION_ID,
-                extension_id,
-                runner.clone(),
-            )
+            .register_extension_runner(YAML_EXTENSION_ID, extension_id, runner.clone())
             .await?;
         // P12.3：entrypoint 参数 schema 描述器与 runner 同生命周期注册/注销
         self.scheduler.register_entrypoint_describer(
-            crate::extensions::gamer_yaml::yaml_extension::YAML_EXTENSION_ID,
+            YAML_EXTENSION_ID,
             extension_id,
             runner.entrypoint_describer(),
         );
@@ -479,6 +550,6 @@ impl crate::extensions::TimerRunnerRegistrar for YamlTimerRunnerRegistrar {
     }
 
     fn executes_without_instance(&self, extension_id: &str) -> bool {
-        extension_id == crate::extensions::gamer_yaml::yaml_extension::YAML_EXTENSION_ID
+        extension_id == YAML_EXTENSION_ID
     }
 }

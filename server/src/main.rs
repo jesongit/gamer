@@ -373,7 +373,7 @@ impl RuntimeServices {
         install_drain(&drain_slot, &ctx);
         // P12.6：v3 运行可视化事件走同一 viewer DataChannel（复用 ViewerEventSink）；
         // 无 viewer 时事件自然丢弃。
-        executor.attach_yaml_vnext(
+        executor.attach_yaml_runner(
             ctx.packages.clone(),
             ctx.extensions.clone(),
             Some(Arc::new(webrtc::ViewerEventSink::new(ctx.viewers.clone()))),

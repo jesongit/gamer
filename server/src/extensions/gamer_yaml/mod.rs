@@ -1,48 +1,46 @@
-//! `gamer.yaml` 扩展边界（P11.3 / ADR-11 / ADR-14）。
+//! `gamer.yaml` 扩展边界（ADR-11 / ADR-14 / V1 简化计划）。
 //!
 //! 本目录物理收编 YAML 自动化栈的全部内容语义：
 //!
 //! - [`error`]：扩展侧 REST 结构化诊断载体（五元组）；
-//! - [`params`]：参数绑定共用的标量解析与校验；
-//! - [`run_target`]：运行请求描述（RunTarget / RunSpec / TypedValue wire）；
-//! - [`yaml_vnext`]：v3 纯数据前端（version:3 判别 + 小 AST wire 形态）；
-//! - [`yaml_extension`]：v3 原生参考解释器、capability invoker、保存/导入
-//!   校验入口与 WASM runtime 契约 trait；
-//! - [`runner_adapter`]：v3-only 执行器（EngineExecutor）——非 `version: 3`
-//!   脚本统一报版本错误，无 fallback；
+//! - [`syntax`]：V1 纯数据前端（surface 解析/校验 + wire 降线 + 模板引用
+//!   改写 + 确定性序列化）；
+//! - [`native_funcs`]：原生（插件）函数注册表（Schema 唯一声明点）；
+//! - [`yaml_extension`]：原生函数宿主（`__fn` 后端）、WASM runtime 契约与
+//!   官方 manifest 常量；
+//! - [`runner_adapter`]：V1 执行器（EngineExecutor）——运行前组合函数注册表
+//!   （原生 + 当前 Package）并绑定参数；
 //! - [`timer_yaml`]：Timer Core 的 gamer.yaml runner + 扩展生命周期注册器；
-//! - [`task_params`]：定时任务参数快照与 psig1 签名门禁（v3 参数桥）；
-//! - [`video_draft`]：视频工作台草稿动作（`automation.create_draft`，合同 §5）；
+//! - [`task_params`]：任务/手动运行参数绑定（按当前 Schema 重绑，无签名门禁）；
+//! - [`video_draft`]：视频工作台草稿动作（`automation.create_draft`）；
 //! - [`wasm_host`]：YAML world 的 Wasmtime 宿主（feature = "wasm-runtime"）。
 //!
-//! 依赖方向（§16）：本模块 → Core（device / matcher / capabilities / timer_core /
-//! run_manager）单向；Core 侧（api / store / timer_core /
-//! scheduler / webrtc / capabilities）不得 import 本目录内部符号，只能走 Core 定义的
+//! 执行权威在 `yaml-interp` crate（WASM guest 与 server 测试同源；计划
+//! Phase 2：只维护一份解释器）。
+//!
+//! 依赖方向：本模块 → Core（device / matcher / capabilities / timer_core /
+//! run_manager）单向；Core 侧不得 import 本目录内部符号，只能走 Core 定义的
 //! 窄 trait（`TimerRunner`、`ResourceHandler` 等）与本文件显式导出的门面。
 
 pub(crate) mod actions;
 pub(crate) mod error;
-pub(crate) mod params;
+pub(crate) mod native_funcs;
 pub(crate) mod resources;
 pub(crate) mod run_target;
 pub(crate) mod runner_adapter;
+pub(crate) mod syntax;
 pub(crate) mod task_params;
 pub(crate) mod timer_yaml;
 pub(crate) mod video_draft;
 pub(crate) mod yaml_extension;
-pub(crate) mod yaml_vnext;
 
-/// native_call_action 缝的分发入口在 [`actions`]（§10.1 版本化公开动作清单：
+/// native_call_action 缝的分发入口在 [`actions`]（版本化公开动作清单：
 /// 草稿生成/保存、模板帧上创建；清单 ↔ 实现由测试双向锁死）。
 pub(crate) use actions::native_call_action;
 pub(crate) use resources::register_resource_handlers;
 pub(crate) use runner_adapter::{yaml_start_request, EngineExecutor};
 pub(crate) use timer_yaml::{YamlTimerRunner, YamlTimerRunnerRegistrar};
-#[cfg(test)]
-pub(crate) use video_draft::build_draft;
-pub(crate) use yaml_extension::{
-    YamlProgramResolver, YAML_EXTENSION_ID, YAML_EXTENSION_MANIFEST_TOML,
-};
+pub(crate) use yaml_extension::{YAML_EXTENSION_ID, YAML_EXTENSION_MANIFEST_TOML};
 
 /// gamer.yaml 的进程级 WASM runtime（feature 选择 Lazy / No 实现）。
 pub(crate) fn yaml_runtime() -> std::sync::Arc<dyn yaml_extension::YamlWasmRuntime> {
@@ -61,27 +59,20 @@ pub(crate) fn yaml_runtime() -> std::sync::Arc<dyn yaml_extension::YamlWasmRunti
     }
 }
 
-/// Execute a lowered YAML v3 program in the installed `gamer.yaml` Component
+/// Execute a lowered YAML V1 program in the installed `gamer.yaml` Component
 /// guest. Extension → Core direction only: the guest bytes and host API come
 /// from the generic [`crate::extensions::ExtensionService`] lookup; the YAML
 /// runtime itself lives behind this boundary.
 ///
-/// `start_index`（契约 §8）：顶层可选「从此运行」步序号，经
-/// [`yaml_extension::YamlWasmRunRequest`] 透传给 guest 注入 program JSON；
-/// `None` = 从头执行。
-/// `sink`（P12.6）：运行可视化事件汇（`__event` 私有通道拦截 + 宿主侧
-/// vision/input 补发）；`None` = 静默。
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_yaml_vnext(
+/// `program` = [`syntax::build_program`] 产出的 wire JSON（含冻结函数表与
+/// 绑定参数）；`sink` = 运行可视化事件汇（`None` = 静默）。
+pub(crate) async fn run_yaml_program(
     service: &crate::extensions::ExtensionService,
-    program: yaml_vnext::Program,
+    program: serde_json::Value,
     context: crate::core::AppContext,
-    args: std::collections::BTreeMap<String, yaml_vnext::Value>,
-    resolver: Option<std::sync::Arc<dyn YamlProgramResolver>>,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    start_index: Option<usize>,
     sink: Option<std::sync::Arc<dyn crate::core::events::EventSink>>,
-) -> Result<yaml_vnext::Value, crate::extensions::ExtensionError> {
+) -> Result<serde_json::Value, crate::extensions::ExtensionError> {
     use crate::extensions::ExtensionId;
     let id = ExtensionId::parse(YAML_EXTENSION_ID).expect("built-in YAML extension id is valid");
     let (wasm, host) = service.guest_for_run(&id).await?;
@@ -89,9 +80,6 @@ pub(crate) async fn run_yaml_vnext(
         .run(yaml_extension::YamlWasmRunRequest {
             wasm,
             program,
-            args,
-            resolver,
-            start_index,
             host,
             context,
             stop,

@@ -76,15 +76,20 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     seed_device(&t, "d1", "com.example.game").await;
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
-    // 建函数库（带参数声明）
+    // 建函数库（V1 functions: 包装 + 参数声明）
     let body = serde_json::json!({
         "name": "common",
-        "content": "login:
-  params:
-    - 'text:who:称呼:\"玩家\"'
-    - 'bool:fast:快速:false'
-  steps:
-    - log: $who
+        "content": "functions:
+  login:
+    params:
+      who:
+        type: string
+        default: \"玩家\"
+      fast:
+        type: boolean
+        default: false
+    run:
+      - log: $who
 ",
     });
     let name = body["name"].as_str().unwrap().to_string();
@@ -240,7 +245,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     // 设备恢复：取消后可再次提交（脚本入口同样带 args）
     let body = serde_json::json!({
         "name": "runme.yaml",
-        "content": "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\nsteps:\n  - log: $msg\n",
+        "content": "params:\n  msg:\n    type: string\n    default: \"默认\"\nrun:\n  - log: $msg\n",
     });
     let name = body["name"].as_str().unwrap().to_string();
     let content = body["content"].as_str().unwrap().to_string();

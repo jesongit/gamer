@@ -1,38 +1,42 @@
-//! YAML v3 extension boundary.
+//! gamer.yaml 扩展边界（ADR-11/14，V1）。
 //!
-//! The interpreter here is intentionally small. It owns control flow and
-//! lowering policy, while every device/frame/vision/runtime operation goes
-//! through an existing Core capability. The WASM implementation uses the same
-//! `CapabilityInvoker` contract through the generic WIT `capability.invoke`
-//! escape hatch.
+//! YAML 执行权威在 `yaml-interp` crate（WASM guest 与 server 测试同源，计划
+//! Phase 2）。本模块职责：
+//!
+//! - 原生函数宿主（[`NativeYamlHost`]）：解释器 `__fn` 通道的后端——按
+//!   [`native_funcs`] 注册表做 Schema 校验、权限检查与 Core capability 组合
+//!   （tap/swipe/find/... 首版函数，计划 Phase 3.5）；
+//! - WASM runtime 契约（[`YamlWasmRuntime`] / `NoYamlWasmRuntime`）与每 run
+//!   请求/结果形态；
+//! - 官方插件 manifest 参考常量（与 tools/plugins 打包源锁同步）。
+//!
+//! 依赖方向：本模块 → Core（capabilities / device / matcher）单向；Core 不得
+//! import 本目录符号（架构守卫测试锁定）。
 
-use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
-use async_recursion::async_recursion;
 use async_trait::async_trait;
+use serde_json::{json, Map as JsonMap, Value};
 
 use crate::capabilities::{
-    AppId, CapabilityRegistry, DeviceHandle, DeviceId, FramePoint, FrameSize, KeyAction, KeyCode,
-    KeyInput, LogLevel, LogRecord, MatchManyRequest, MatchOptions, MatchOutcome, ResourceId,
-    RuntimeService, SwipeGesture, TemplateQuery, TextInput, TouchPoint,
+    AppId, CapabilityRegistry, DeviceHandle, FramePoint, FrameSize, KeyAction, KeyCode, KeyInput,
+    LogLevel, LogRecord, MatchOptions, MatchOutcome, ResourceId, RuntimeService, SearchRegion,
+    SwipeGesture, TemplateQuery, TextInput, TouchPoint,
 };
 use crate::core::events::{EventSink, RuntimeEvent, RuntimeEventKind};
 use crate::core::AppContext;
+use crate::extensions::gamer_yaml::native_funcs::{native_function, ParamSchema};
+use crate::extensions::gamer_yaml::syntax::{parse_duration_ms, point_components, ParamType};
 use crate::extensions::{HostApi, Permission};
 
-use crate::extensions::gamer_yaml::yaml_vnext::{Condition, Expr, Program, SmallStep, Value};
-
 pub(crate) const YAML_EXTENSION_ID: &str = "gamer.yaml";
-/// v3 运行可视化事件的私有 capability 通道名（P12.6 / ADR-YAML-03，方案 (a)：
-/// 零 WIT 变更）。guest 把结构事件 JSON 发到 `capability.invoke("__event", …)`，
-/// 宿主在 wasm_host 的 capability 入口**先于**权限校验拦截并转发
-/// [`EventSink`]，不进 [`crate::capabilities::CapabilityRegistry`]、不进扩展
-/// 权限声明。事件解析失败静默丢弃——可视化事件永不影响运行结果。
+/// 运行结构事件私有通道（guest → sink，先于权限校验拦截）。
 pub(crate) const EVENT_CAPABILITY: &str = "__event";
+/// 原生函数派发私有通道（guest → [`NativeYamlHost`]）。
+pub(crate) const FN_CAPABILITY: &str = "__fn";
 /// Reference manifest for the installable YAML guest. The server never embeds
 /// its WASM bytes; package installation supplies `plugin.wasm` independently.
 /// 仅测试引用：与 tools/plugins/gamer.yaml/manifest.toml 的同步护栏 +
@@ -42,9 +46,14 @@ pub(crate) const YAML_EXTENSION_MANIFEST_TOML: &str = r#"manifest_version = 2
 id = "gamer.yaml"
 version = "3.1.1"
 name = "自动化"
-description = "自动化：YAML v3 脚本、函数库与模板的制作与运行"
+description = "自动化：YAML V1 脚本、函数库与模板的制作与运行"
 entry = "plugin.wasm"
 permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.key", "input.text", "vision.match", "vision.color", "resource.read", "runtime.sleep", "log.write"]
+
+# 支持的 Android 应用（`*` = 通用；缺省/空同 `*`）。宿主不做硬门禁，
+# Console 壳按当前设备应用过滤插件入口。
+[targets.android]
+packages = ["*"]
 
 [host_api]
 device = "^1.0"
@@ -114,59 +123,27 @@ mod manifest_sync_tests {
 const DEFAULT_SCREEN_WIDTH: u32 = 1000;
 const DEFAULT_SCREEN_HEIGHT: u32 = 1000;
 
-/// v3 执行预算（ADR-YAML-04 / 契约 §5）：逻辑步与调用深度上限。
-///
-/// 生产链路由 WASM guest 本地计数（`server/guests/yaml-guest` 的
-/// ExecutionBudget，常量在此对齐），本模块的原生参考解释器（无 wasm 退化
-/// 路径 / 测试）实现同语义。步数按**逻辑步**计：顶层、loop 体每轮每个子步、
-/// if 分支体、call 目标程序体全计，loop 每轮迭代本身也计（空转体死循环同受
-/// 约束）；外层 loop 包裹不得绕过预算。
-pub(crate) const MAX_STEPS: u64 = 100_000;
-/// v3 `call` 递归深度上限（ADR-YAML-02 与 ADR-YAML-04 同值）。
-pub(crate) const MAX_CALL_DEPTH: u32 = 32;
+/// find/tap_template 轮询间隔下限（防止 0 间隔打爆设备）。
+const MIN_POLL_INTERVAL_MS: u64 = 50;
+/// 单次 sleep 上限（与 v3 一致）。
+const MAX_SLEEP_MS: u64 = 3_600_000;
+/// tap_template 命中后的固结等待（原 v3 after_tap 兜底，内置进函数语义）。
+const AFTER_TAP_MS: u64 = 300;
 
-/// 深度守卫（原生参考解释器用）：guest 每进入一层 callable 深度 +1、返回
-/// -1，超过 [`MAX_CALL_DEPTH`] 立即终止。错误文本以机器可读码开头，经
-/// run_yaml_vnext → RunManager（RunRecord 错误信息 / 日志）原样透传。
-/// P12.4 起 WIT `programs.resolve` 不再透传 depth，resolver 侧临时守卫移除，
-/// 深度计数正式归 guest 本地（生产链路）与本解释器（无 wasm 路径）。
-#[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
-pub(crate) fn check_call_depth(depth: u32) -> Result<()> {
-    if depth > MAX_CALL_DEPTH {
-        bail!("CALL_DEPTH_EXCEEDED: depth={depth} max={MAX_CALL_DEPTH}");
-    }
-    Ok(())
-}
+// ---------------------------------------------------------------------------
+// WASM runtime 契约
+// ---------------------------------------------------------------------------
 
-/// 步预算守卫（原生参考解释器用）：`consumed` 为刚消耗的逻辑步计数。
-fn check_step_budget(consumed: u64) -> Result<()> {
-    if consumed > MAX_STEPS {
-        bail!("STEP_BUDGET_EXCEEDED: consumed={consumed} max={MAX_STEPS}");
-    }
-    Ok(())
-}
-
-/// Request passed to the real YAML Component runtime. The program is already
-/// lowered by the extension front-end; the guest only interprets the small
-/// wire AST and calls capability.invoke.
-/// WASM guest 执行请求。字段仅由 wasm-runtime feature 的
-/// `LazyYamlWasmtimeRuntime` 消费；无该 feature 时（NoYamlWasmRuntime 只回错）
-/// 字段不会被读取，故按 feature 条件豁免 dead_code。
-#[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
-#[derive(Clone)]
+/// 一次 YAML 运行的请求：`program` 是宿主 lowering 产出的解释器 wire JSON
+/// （含冻结的 Package 函数表、绑定参数与可选 start_index）。
 pub(crate) struct YamlWasmRunRequest {
     pub(crate) wasm: Vec<u8>,
-    pub(crate) program: Program,
-    pub(crate) args: BTreeMap<String, Value>,
-    pub(crate) resolver: Option<Arc<dyn YamlProgramResolver>>,
-    /// 手动运行「从此运行」：跳过的顶层 surface 步序号（契约 §8）。
-    /// `None` = 从头执行；guest 只按顶层步序号跳，嵌套分支/循环体不受影响。
-    #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
-    pub(crate) start_index: Option<usize>,
+    pub(crate) program: Value,
     pub(crate) host: HostApi,
     pub(crate) context: AppContext,
     pub(crate) stop: Arc<AtomicBool>,
-    /// 运行可视化事件汇（P12.6）：`None` = 静默（无 viewer / 测试裸装配）。
+    /// 运行可视化事件汇（`__event` 私有通道拦截 + 宿主侧 vision/input 补发）；
+    /// `None` = 静默。
     pub(crate) sink: Option<Arc<dyn EventSink>>,
 }
 
@@ -196,55 +173,154 @@ impl YamlWasmRuntime for NoYamlWasmRuntime {
     }
 }
 
-/// Dynamic capability boundary used by the small AST. This is deliberately a
-/// generic operation; the trait has no YAML types and can be reused by another
-/// extension that speaks the same JSON-safe Value protocol.
-#[async_trait]
-pub(crate) trait CapabilityInvoker: Send + Sync {
-    async fn invoke(&self, capability: &str, args: Value) -> Result<Value>;
+// ---------------------------------------------------------------------------
+// 原生函数宿主
+// ---------------------------------------------------------------------------
 
-    /// 取消查询属于 invoker 契约的一部分（原生解释器消费；WASM 链路经
-    /// YamlHostState.cancelled 传递，生产构建中无直接调用方）。
-    #[allow(dead_code)]
-    fn cancelled(&self) -> bool {
-        false
-    }
-}
-
-/// YAML extension-only lookup for the small AST `call` node. This does not
-/// enter `CapabilityRegistry`, so YAML source/resource semantics stay out of
-/// Core capabilities.
+/// 原生函数执行宿主：`__fn` 通道后端。每个 run 创建一个实例（持有设备句柄
+/// 与坐标系），解释器的函数调用经 wasm_host 转发到这里。
 ///
-/// P12.4（ADR-YAML-04）：`call` 深度由 guest 本地 ExecutionBudget 计数，
-/// resolver 只按命名空间定位目标程序，不再接收 depth、也不再做深度守卫。
-pub(crate) trait YamlProgramResolver: Send + Sync {
-    #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
-    fn resolve(&self, target: &str, args: &BTreeMap<String, Value>) -> Result<Program>;
-}
-
-/// Native host adapter used by tests and by the no-WASM compatibility path.
-/// It is an adapter, not a Core capability: the registry remains the only
-/// source of device/input/frame/vision functionality.
-///
-/// `sink`（P12.6）：可选运行事件汇——vision/input capability 执行完成后在此
-/// 补发 `vision` 与 `tap`/`swipe`/`hit`/`miss` 投屏标记事件（与 v2 引擎事件
-/// 同形），step/call/run 结构事件归解释器/guest 发射。
+/// 权限：每个函数声明所需权限，派发前逐项 `HostApi::authorize`——函数调用
+/// 不能绕过插件权限（计划 Phase 3.2）。
 pub(crate) struct NativeYamlHost {
     host: HostApi,
     registry: CapabilityRegistry,
     context: AppContext,
     device: DeviceHandle,
     runtime: Arc<dyn RuntimeService>,
-    /// 设备坐标系（相对坐标 ⇄ 像素）：capture 后以真实帧分辨率刷新——
-    /// 初始 1000×1000 仅为占位，任何匹配/触摸换算都必须发生在 capture 之后。
-    screen: std::sync::RwLock<FrameSize>,
-    sink: Option<std::sync::Arc<dyn EventSink>>,
+    /// 设备坐标系（相对坐标 ⇄ 像素）：capture 后以真实帧分辨率刷新。
+    screen: RwLock<FrameSize>,
+    sink: Option<Arc<dyn EventSink>>,
+}
+
+/// 按函数 Schema 校验/规整后的参数视图。
+struct BoundArgs {
+    values: JsonMap<String, Value>,
+}
+
+impl BoundArgs {
+    fn point(&self, name: &str) -> Result<[f64; 2]> {
+        point_components(
+            self.values
+                .get(name)
+                .ok_or_else(|| anyhow!("缺少参数 {name}"))?,
+        )
+        .ok_or_else(|| anyhow!("参数 {name} 不是合法 point（0..1 相对坐标）"))
+    }
+
+    fn duration_ms(&self, name: &str) -> Result<u64> {
+        let value = self
+            .values
+            .get(name)
+            .ok_or_else(|| anyhow!("缺少参数 {name}"))?;
+        let ms = match value {
+            Value::Number(number) => number.as_f64(),
+            Value::String(text) => parse_duration_ms(text),
+            _ => None,
+        };
+        ms.map(|value| value.round().max(0.0) as u64)
+            .ok_or_else(|| anyhow!("参数 {name} 不是合法 duration"))
+    }
+
+    fn string(&self, name: &str) -> Result<String> {
+        self.values
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("参数 {name} 必须是字符串"))
+    }
+
+    fn opt_string(&self, name: &str) -> Result<Option<String>> {
+        match self.values.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(text)) => Ok(Some(text.clone())),
+            Some(other) => Err(anyhow!("参数 {name} 必须是字符串，得到 {other}")),
+        }
+    }
+
+    fn number(&self, name: &str) -> Result<Option<f64>> {
+        match self.values.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Number(number)) => number
+                .as_f64()
+                .map(Some)
+                .ok_or_else(|| anyhow!("参数 {name} 非有限数字")),
+            Some(other) => Err(anyhow!("参数 {name} 必须是数字，得到 {other}")),
+        }
+    }
+
+    fn region(&self, name: &str) -> Result<Option<[f64; 4]>> {
+        let Some(value) = self.values.get(name) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let items = value
+            .as_array()
+            .ok_or_else(|| anyhow!("region 必须是 [x, y, w, h] 相对坐标数组"))?;
+        if items.len() != 4 {
+            bail!("region 必须是四元数组 [x, y, w, h]");
+        }
+        let mut out = [0f64; 4];
+        for (index, item) in items.iter().enumerate() {
+            let component = item
+                .as_f64()
+                .ok_or_else(|| anyhow!("region 分量必须是数字"))?;
+            if !(0.0..=1.0).contains(&component) {
+                bail!("region 分量必须在 0..1（相对坐标），得到 {component}");
+            }
+            out[index] = component;
+        }
+        Ok(Some(out))
+    }
+}
+
+/// 数值比较：JSON 数字统一按 f64 比较（整型/浮点互通）。
+fn numeric_pair(a: &Value, b: &Value) -> Option<(f64, f64)> {
+    Some((a.as_f64()?, b.as_f64()?))
+}
+
+fn json_equals(a: &Value, b: &Value) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a, b) {
+        (Value::Number(_), Value::Number(_)) => a.as_f64() == b.as_f64(),
+        _ => false,
+    }
+}
+
+fn message_to_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
 }
 
 impl NativeYamlHost {
-    /// `new`/`invoke_json` 是 WASM guest 的 capability.invoke 后端
-    /// （wasm.rs 的 YamlHostState 调用）；无 wasm-runtime feature 时仅测试使用。
+    /// WASM guest 的 `__fn` 后端入口（wasm_host 调用）；无 wasm-runtime
+    /// feature 时仅测试使用。
     #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
+    pub(crate) async fn call_function_json(
+        host: HostApi,
+        context: AppContext,
+        stop: Arc<AtomicBool>,
+        sink: Option<Arc<dyn EventSink>>,
+        name: &str,
+        args_json: &str,
+    ) -> Result<Value> {
+        let args: Value = serde_json::from_str(args_json)
+            .map_err(|error| anyhow!("函数 {name} 参数不是合法 JSON: {error}"))?;
+        let host = Self::new(host, context, stop, sink).await?;
+        // 录制输入来源标注：guest 实例线程内执行点（task-local 不跨线程），
+        // 在此线程内把 YAML runner 注入的输入标为 "runner"。
+        crate::capabilities::adapters::with_caller_input_source("runner", async {
+            host.call_function(name, args).await
+        })
+        .await
+    }
+
     pub(crate) async fn new(
         host: HostApi,
         context: AppContext,
@@ -256,7 +332,9 @@ impl NativeYamlHost {
             .device()
             .ok_or_else(|| anyhow!("device capability 未注册"))?;
         let device = device_service
-            .resolve(&DeviceId::new(context.device_id.as_str()))
+            .resolve(&crate::capabilities::DeviceId::new(
+                context.device_id.as_str(),
+            ))
             .await
             .map_err(anyhow::Error::new)?;
         Ok(Self {
@@ -265,35 +343,517 @@ impl NativeYamlHost {
             context,
             device,
             runtime: Arc::new(crate::capabilities::adapters::RuntimeAdapter::new(stop)),
-            screen: std::sync::RwLock::new(FrameSize::new(
-                DEFAULT_SCREEN_WIDTH,
-                DEFAULT_SCREEN_HEIGHT,
-            )),
+            screen: RwLock::new(FrameSize::new(DEFAULT_SCREEN_WIDTH, DEFAULT_SCREEN_HEIGHT)),
             sink,
         })
     }
 
-    #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
-    pub(crate) async fn invoke_json(
-        host: HostApi,
-        context: AppContext,
-        stop: Arc<AtomicBool>,
-        sink: Option<Arc<dyn EventSink>>,
-        capability: &str,
-        args_json: &str,
-    ) -> Result<Value> {
-        let args = serde_json::from_str::<serde_json::Value>(args_json)
-            .map_err(|error| anyhow!("invoke args 不是合法 JSON: {error}"))?;
-        let args = Value::from_json(args).map_err(|error| anyhow!("invoke args 无效: {error}"))?;
-        let host = Self::new(host, context, stop, sink).await?;
-        // 录制输入来源标注（合同 §2.1 / Phase 9 矩阵）：capability.invoke
-        // 后端是 guest 实例线程内（wasm_host 的 block_on_yaml 派生线程）执行
-        // 点，外层 runner_adapter 的 task-local scope 不跨线程——在此线程内
-        // 把 YAML runner 注入的输入（tap/swipe/key/text）标为 "runner"。
-        crate::capabilities::adapters::with_caller_input_source("runner", async {
-            host.invoke(capability, args).await
+    /// 函数派发：查注册表 → 权限 → Schema 绑定 → handler。
+    pub(crate) async fn call_function(&self, name: &str, args: Value) -> Result<Value> {
+        let Some(func) = native_function(name) else {
+            bail!("未知函数: {name}");
+        };
+        for permission in func.permissions {
+            self.host
+                .authorize(*permission)
+                .map_err(anyhow::Error::new)?;
+        }
+        let bound = self.bind_args(&func.params, args)?;
+        match name {
+            "tap" => self.tap(&bound).await,
+            "swipe" => self.swipe(&bound).await,
+            "key" => self.key(&bound).await,
+            "input_text" => self.input_text(&bound).await,
+            "launch" => self.launch(&bound).await,
+            "stop_app" => self.stop_app(&bound).await,
+            "sleep" => self.sleep(&bound).await,
+            "log" => self.log(&bound).await,
+            "find" => self.find(&bound).await,
+            "wait_find" => self.wait_find(&bound).await,
+            "tap_template" => self.tap_template(&bound).await,
+            "wait_disappear" => self.wait_disappear(&bound).await,
+            "eq" => self.compare(&bound, CompareOp::Eq),
+            "ne" => self.compare(&bound, CompareOp::Ne),
+            "gt" => self.compare(&bound, CompareOp::Gt),
+            "ge" => self.compare(&bound, CompareOp::Ge),
+            "lt" => self.compare(&bound, CompareOp::Lt),
+            "le" => self.compare(&bound, CompareOp::Le),
+            other => bail!("函数 {other} 未实现"),
+        }
+    }
+
+    /// Schema 绑定：未知参数 / 缺必填 / 类型不符均结构化报错。
+    /// 非对象实参 = 位置简写（计划 §1.3，如 `- tap: [0.5, 0.8]`、
+    /// `- log: 未进入主页`），绑定到第一个参数。
+    fn bind_args(&self, schema: &[ParamSchema], args: Value) -> Result<BoundArgs> {
+        let args = match args {
+            Value::Null => JsonMap::new(),
+            Value::Object(map) => map,
+            other => {
+                let Some(param) = schema.first() else {
+                    bail!("函数参数必须是命名参数对象，得到 {other}");
+                };
+                check_schema_type(param, &other)?;
+                let mut values = JsonMap::new();
+                values.insert(param.name.to_string(), other);
+                return Ok(BoundArgs { values });
+            }
+        };
+        let mut values = JsonMap::new();
+        for param in schema {
+            match args.get(param.name) {
+                Some(Value::Null) | None => {
+                    if let Some(default) = &param.default {
+                        values.insert(param.name.to_string(), default.clone());
+                    } else if param.required {
+                        bail!("缺少必填参数 {}", param.name);
+                    }
+                }
+                Some(value) => {
+                    check_schema_type(param, value)?;
+                    values.insert(param.name.to_string(), value.clone());
+                }
+            }
+        }
+        for name in args.keys() {
+            if !schema.iter().any(|param| param.name == name) {
+                bail!("未知参数 {name}");
+            }
+        }
+        Ok(BoundArgs { values })
+    }
+
+    // -- handlers ----------------------------------------------------------
+
+    async fn tap(&self, args: &BoundArgs) -> Result<Value> {
+        let point = self.touch_point(args.point("position")?)?;
+        self.registry
+            .input()
+            .ok_or_else(|| anyhow!("input capability 未注册"))?
+            .tap(&self.device, point)
+            .await
+            .map_err(anyhow::Error::new)?;
+        self.emit_event(RuntimeEventKind::Tap {
+            x: point.x(),
+            y: point.y(),
         })
-        .await
+        .await;
+        Ok(Value::Null)
+    }
+
+    async fn swipe(&self, args: &BoundArgs) -> Result<Value> {
+        let from = self.touch_point(args.point("from")?)?;
+        let to = self.touch_point(args.point("to")?)?;
+        let duration = args.duration_ms("duration")?;
+        self.registry
+            .input()
+            .ok_or_else(|| anyhow!("input capability 未注册"))?
+            .swipe(
+                &self.device,
+                SwipeGesture::new(from, to, Duration::from_millis(duration)),
+            )
+            .await
+            .map_err(anyhow::Error::new)?;
+        self.emit_event(RuntimeEventKind::Swipe {
+            x1: from.x(),
+            y1: from.y(),
+            x2: to.x(),
+            y2: to.y(),
+        })
+        .await;
+        Ok(Value::Null)
+    }
+
+    async fn key(&self, args: &BoundArgs) -> Result<Value> {
+        let key = args.string("key")?;
+        let code = key_code(&Value::String(key))?;
+        let action = match args.opt_string("action")?.unwrap_or_else(|| "press".into()) {
+            value if value == "down" => KeyAction::Down,
+            value if value == "up" => KeyAction::Up,
+            value if value == "press" => KeyAction::Press,
+            other => bail!("未知 key action: {other}"),
+        };
+        self.registry
+            .input()
+            .ok_or_else(|| anyhow!("input capability 未注册"))?
+            .key(&self.device, KeyInput::new(KeyCode::new(code), action))
+            .await
+            .map_err(anyhow::Error::new)?;
+        Ok(Value::Null)
+    }
+
+    async fn input_text(&self, args: &BoundArgs) -> Result<Value> {
+        let text = args.string("text")?;
+        self.registry
+            .input()
+            .ok_or_else(|| anyhow!("input capability 未注册"))?
+            .text(&self.device, TextInput::new(&text))
+            .await
+            .map_err(anyhow::Error::new)?;
+        Ok(Value::Null)
+    }
+
+    async fn launch(&self, args: &BoundArgs) -> Result<Value> {
+        let package = self.package(args)?;
+        self.registry
+            .device()
+            .ok_or_else(|| anyhow!("device capability 未注册"))?
+            .start_app(&self.device, &AppId::new(format!("+{package}")))
+            .await
+            .map_err(anyhow::Error::new)?;
+        Ok(Value::Null)
+    }
+
+    async fn stop_app(&self, args: &BoundArgs) -> Result<Value> {
+        let package = self.package(args)?;
+        self.registry
+            .device()
+            .ok_or_else(|| anyhow!("device capability 未注册"))?
+            .stop_app(&self.device, &AppId::new(package))
+            .await
+            .map_err(anyhow::Error::new)?;
+        Ok(Value::Null)
+    }
+
+    async fn sleep(&self, args: &BoundArgs) -> Result<Value> {
+        let duration = args.duration_ms("duration")?.min(MAX_SLEEP_MS);
+        self.runtime
+            .sleep(Duration::from_millis(duration))
+            .await
+            .map_err(anyhow::Error::new)?;
+        Ok(Value::Null)
+    }
+
+    async fn log(&self, args: &BoundArgs) -> Result<Value> {
+        let level = match args.opt_string("level")?.unwrap_or_else(|| "info".into()) {
+            value if value == "trace" => LogLevel::Trace,
+            value if value == "debug" => LogLevel::Debug,
+            value if value == "info" => LogLevel::Info,
+            value if value == "warn" || value == "warning" => LogLevel::Warn,
+            value if value == "error" => LogLevel::Error,
+            other => bail!("未知 log level: {other}"),
+        };
+        let message = args
+            .values
+            .get("message")
+            .map(message_to_text)
+            .ok_or_else(|| anyhow!("缺少必填参数 message"))?;
+        self.registry
+            .log()
+            .ok_or_else(|| anyhow!("log capability 未注册"))?
+            .write(LogRecord::new(level, &message))
+            .map_err(anyhow::Error::new)?;
+        Ok(Value::Null)
+    }
+
+    /// find：timeout=0 单次尝试；>0 轮询到命中或超时（未命中返回 null）。
+    async fn find(&self, args: &BoundArgs) -> Result<Value> {
+        let timeout = args.duration_ms("timeout")?;
+        Ok(self
+            .poll_match(args, timeout, "find")
+            .await?
+            .unwrap_or(Value::Null))
+    }
+
+    async fn wait_find(&self, args: &BoundArgs) -> Result<Value> {
+        let timeout = args.duration_ms("timeout")?;
+        Ok(self
+            .poll_match(args, timeout, "wait_find")
+            .await?
+            .unwrap_or(Value::Null))
+    }
+
+    async fn tap_template(&self, args: &BoundArgs) -> Result<Value> {
+        let timeout = args.duration_ms("timeout")?;
+        let Some(matched) = self.poll_match(args, timeout, "tap_template").await? else {
+            return Ok(Value::Null);
+        };
+        let Some(center) = matched.get("center").and_then(point_components) else {
+            bail!("tap_template 匹配结果缺少 center");
+        };
+        let point = self.touch_point(center)?;
+        self.registry
+            .input()
+            .ok_or_else(|| anyhow!("input capability 未注册"))?
+            .tap(&self.device, point)
+            .await
+            .map_err(anyhow::Error::new)?;
+        self.emit_event(RuntimeEventKind::Tap {
+            x: point.x(),
+            y: point.y(),
+        })
+        .await;
+        // 命中点击后的固结等待：取消可达。
+        self.runtime
+            .sleep(Duration::from_millis(AFTER_TAP_MS))
+            .await
+            .map_err(anyhow::Error::new)?;
+        Ok(matched)
+    }
+
+    async fn wait_disappear(&self, args: &BoundArgs) -> Result<Value> {
+        let timeout = args.duration_ms("timeout")?;
+        let interval = args.duration_ms("interval")?.max(MIN_POLL_INTERVAL_MS);
+        let started = Instant::now();
+        loop {
+            let outcome = self.match_once(args).await?;
+            let found = matches!(outcome, MatchOutcome::Found(_));
+            if !found {
+                return Ok(Value::Bool(true));
+            }
+            if started.elapsed().as_millis() as u64 >= timeout {
+                return Ok(Value::Bool(false));
+            }
+            self.runtime
+                .sleep(Duration::from_millis(interval.min(MAX_SLEEP_MS)))
+                .await
+                .map_err(anyhow::Error::new)?;
+        }
+    }
+
+    fn compare(&self, args: &BoundArgs, op: CompareOp) -> Result<Value> {
+        let a = args
+            .values
+            .get("a")
+            .cloned()
+            .ok_or_else(|| anyhow!("缺少必填参数 a"))?;
+        let b = args
+            .values
+            .get("b")
+            .cloned()
+            .ok_or_else(|| anyhow!("缺少必填参数 b"))?;
+        let result = match op {
+            CompareOp::Eq => json_equals(&a, &b),
+            CompareOp::Ne => !json_equals(&a, &b),
+            CompareOp::Gt => numeric_pair(&a, &b).is_some_and(|(a, b)| a > b),
+            CompareOp::Ge => numeric_pair(&a, &b).is_some_and(|(a, b)| a >= b),
+            CompareOp::Lt => numeric_pair(&a, &b).is_some_and(|(a, b)| a < b),
+            CompareOp::Le => numeric_pair(&a, &b).is_some_and(|(a, b)| a <= b),
+        };
+        Ok(Value::Bool(result))
+    }
+
+    // -- 视觉轮询 -----------------------------------------------------------
+
+    /// 单次截图匹配（不发事件）。
+    async fn match_once(&self, args: &BoundArgs) -> Result<MatchOutcome> {
+        let template_name = args.string("template")?;
+        let template = self.template(&template_name).await?;
+        let threshold = args.number("threshold")?;
+        let explicit_px = args
+            .region("region")?
+            .map(|region| self.pixel_region(region));
+        let frame = self.capture().await?;
+        let template_file = self.template_file_name(&template).await;
+        let effective_px = crate::matcher::effective_search_region(
+            explicit_px,
+            template_file.as_deref(),
+            self.screen().width,
+            self.screen().height,
+        );
+        let options = MatchOptions {
+            threshold: threshold.map(|value| value as f32),
+            region: effective_px
+                .map(|[x, y, width, height]| SearchRegion::new(x, y, width, height)),
+            color_check: false,
+        };
+        let outcome = self
+            .registry
+            .vision()
+            .ok_or_else(|| anyhow!("vision capability 未注册"))?
+            .match_template(frame, TemplateQuery::new(template, options))
+            .await
+            .map_err(anyhow::Error::new)?;
+        let _ = template_name;
+        Ok(outcome)
+    }
+
+    /// find/wait_find/tap_template 共用轮询：每次尝试发 vision/hit/miss
+    /// 事件（与旧 v3 find 逐次尝试同口径）；未命中返回 None。
+    async fn poll_match(
+        &self,
+        args: &BoundArgs,
+        timeout_ms: u64,
+        _fn_name: &str,
+    ) -> Result<Option<Value>> {
+        let interval = args.duration_ms("interval")?.max(MIN_POLL_INTERVAL_MS);
+        let template_name = args.string("template")?;
+        let threshold = args.number("threshold")?;
+        let explicit_px = args
+            .region("region")?
+            .map(|region| self.pixel_region(region));
+        let started = Instant::now();
+        loop {
+            let template = self.template(&template_name).await?;
+            let template_file = self.template_file_name(&template).await;
+            let frame = self.capture().await?;
+            let effective_px = crate::matcher::effective_search_region(
+                explicit_px,
+                template_file.as_deref(),
+                self.screen().width,
+                self.screen().height,
+            );
+            let options = MatchOptions {
+                threshold: threshold.map(|value| value as f32),
+                region: effective_px
+                    .map(|[x, y, width, height]| SearchRegion::new(x, y, width, height)),
+                color_check: false,
+            };
+            let outcome = self
+                .registry
+                .vision()
+                .ok_or_else(|| anyhow!("vision capability 未注册"))?
+                .match_template(frame, TemplateQuery::new(template, options))
+                .await
+                .map_err(anyhow::Error::new)?;
+            let region =
+                Self::relative_region_echo(effective_px, self.screen().width, self.screen().height);
+            self.emit_vision_outcome(&template_name, outcome, effective_px)
+                .await;
+            if let MatchOutcome::Found(_) = outcome {
+                return Ok(Some(Self::match_value(outcome, region, self.screen())));
+            }
+            if started.elapsed().as_millis() as u64 >= timeout_ms {
+                return Ok(None);
+            }
+            self.runtime
+                .sleep(Duration::from_millis(interval.min(MAX_SLEEP_MS)))
+                .await
+                .map_err(anyhow::Error::new)?;
+        }
+    }
+
+    // -- 共用辅助 -----------------------------------------------------------
+
+    fn package(&self, args: &BoundArgs) -> Result<String> {
+        match args.opt_string("package")? {
+            Some(value) if !value.trim().is_empty() => Ok(value),
+            _ => Ok(self.context.android_package.as_str().to_string()),
+        }
+    }
+
+    fn touch_point(&self, relative: [f64; 2]) -> Result<TouchPoint> {
+        let [x, y] = relative;
+        if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+            bail!("point 坐标超出 0..1");
+        }
+        Ok(TouchPoint::new(
+            (x * self.screen().width as f64).round() as u32,
+            (y * self.screen().height as f64).round() as u32,
+            1.0,
+        ))
+    }
+
+    fn pixel_region(&self, relative: [f64; 4]) -> [u32; 4] {
+        let [x, y, width, height] = relative;
+        let screen = self.screen();
+        [
+            (x * screen.width as f64).round() as u32,
+            (y * screen.height as f64).round() as u32,
+            (width * screen.width as f64).round() as u32,
+            (height * screen.height as f64).round() as u32,
+        ]
+    }
+
+    async fn template(&self, name: &str) -> Result<crate::capabilities::ResourceHandle> {
+        self.host
+            .authorize(Permission::ResourceRead)
+            .map_err(anyhow::Error::new)?;
+        let package = self
+            .context
+            .content_package
+            .as_ref()
+            .ok_or_else(|| anyhow!("当前上下文没有 content package"))?;
+        let resource = self
+            .registry
+            .resource()
+            .ok_or_else(|| anyhow!("resource capability 未注册"))?
+            .resolve(
+                &ResourceId::new(
+                    package.as_str().to_string(),
+                    YAML_EXTENSION_ID,
+                    format!("templates/{name}"),
+                )
+                .map_err(anyhow::Error::new)?,
+            )
+            .await
+            .map_err(anyhow::Error::new)?;
+        Ok(resource)
+    }
+
+    async fn capture(&self) -> Result<crate::capabilities::FrameHandle> {
+        let frame = self
+            .registry
+            .frame()
+            .ok_or_else(|| anyhow!("frame capability 未注册"))?
+            .capture(&self.device)
+            .await
+            .map_err(anyhow::Error::new)?;
+        self.refresh_screen(&frame).await;
+        Ok(frame)
+    }
+
+    /// 以最近一次截图的真实分辨率刷新坐标系（失败保持上次值）。
+    async fn refresh_screen(&self, frame: &crate::capabilities::FrameHandle) {
+        let Some(frame_service) = self.registry.frame() else {
+            return;
+        };
+        if let Ok(size) = frame_service.size(*frame).await {
+            if size.width > 0 && size.height > 0 {
+                *self.screen.write().unwrap() = size;
+            }
+        }
+    }
+
+    fn screen(&self) -> FrameSize {
+        *self.screen.read().unwrap()
+    }
+
+    /// 模板 handle → 解析后的实际文件名（`#` 后缀区域推断用；失败 = None）。
+    async fn template_file_name(
+        &self,
+        handle: &crate::capabilities::ResourceHandle,
+    ) -> Option<String> {
+        self.registry
+            .resource()?
+            .resolved_file_name(*handle)
+            .await
+            .ok()
+    }
+
+    fn match_value(outcome: MatchOutcome, region: Value, screen: FrameSize) -> Value {
+        match outcome {
+            MatchOutcome::Found(found) => {
+                let center = [
+                    (found.x + found.width / 2) as f64 / screen.width as f64,
+                    (found.y + found.height / 2) as f64 / screen.height as f64,
+                ];
+                json!({
+                    "x": found.x,
+                    "y": found.y,
+                    "width": found.width,
+                    "height": found.height,
+                    "score": found.score,
+                    "center": { "x": center[0], "y": center[1] },
+                    "region": region,
+                })
+            }
+            MatchOutcome::NotFound => Value::Null,
+        }
+    }
+
+    /// 本次实际搜索区域的回显值（相对坐标 map）。
+    fn relative_region_echo(px: Option<[u32; 4]>, w: u32, h: u32) -> Value {
+        let (x, y, width, height) = match px {
+            Some([x, y, width, height]) => (x, y, width, height),
+            None => (0, 0, w, h),
+        };
+        json!({
+            "x": x as f64 / w as f64,
+            "y": y as f64 / h as f64,
+            "width": width as f64 / w as f64,
+            "height": height as f64 / h as f64,
+        })
     }
 
     /// 尽力而为的事件旁路：发射失败只记 debug，不影响能力执行结果。
@@ -309,9 +869,7 @@ impl NativeYamlHost {
         }
     }
 
-    /// vision 能力执行完成后的可视化旁路（P12.6）：`vision{template,found,score,center}`
-    /// 结构事件 + 与 v2 引擎同形的 `hit`/`miss` 投屏标记事件（设备像素坐标，
-    /// 未命中带本次搜索区域框）。只带模板名/分数/坐标，不携带帧数据。
+    /// vision 结果可视化旁路：`vision` 结构事件 + `hit`/`miss` 投屏标记。
     async fn emit_vision_outcome(
         &self,
         template: &str,
@@ -361,563 +919,58 @@ impl NativeYamlHost {
             }
         }
     }
-
-    fn authorize(&self, capability: &str) -> Result<()> {
-        let permission = match capability {
-            "device.resolve" => Permission::DeviceRead,
-            "app.start" | "app.stop" | "device.start_app" | "device.stop_app" => {
-                Permission::DeviceApp
-            }
-            "input.tap" => Permission::InputTap,
-            "input.swipe" => Permission::InputSwipe,
-            "input.key" => Permission::InputKey,
-            "input.text" => Permission::InputText,
-            "vision.match" | "vision.match_template" | "vision.match_many" | "frame.capture" => {
-                Permission::VisionMatch
-            }
-            "vision.sample_color" => Permission::VisionColor,
-            "runtime.sleep" => Permission::RuntimeSleep,
-            "log.write" => Permission::LogWrite,
-            other => bail!("未知 capability: {other}"),
-        };
-        self.host.authorize(permission).map_err(anyhow::Error::new)
-    }
-
-    fn args_map(args: Value) -> Result<BTreeMap<String, Value>> {
-        match args {
-            Value::Map(args) => Ok(args),
-            Value::Null => Ok(BTreeMap::new()),
-            _ => bail!("capability 参数必须是 record/map"),
-        }
-    }
-
-    fn arg<'a>(args: &'a BTreeMap<String, Value>, name: &str) -> Result<&'a Value> {
-        args.get(name)
-            .ok_or_else(|| anyhow!("缺少 capability 参数 {name}"))
-    }
-
-    fn package(&self, args: &BTreeMap<String, Value>) -> Result<String> {
-        match args.get("package").or_else(|| args.get("app")) {
-            Some(Value::String(value)) if !value.trim().is_empty() => Ok(value.clone()),
-            Some(Value::Null) | None => Ok(self.context.android_package.as_str().to_string()),
-            Some(value) => bail!("package 必须是字符串，得到 {value:?}"),
-        }
-    }
-
-    fn point(&self, value: &Value) -> Result<TouchPoint> {
-        let Value::Coordinate([x, y]) = value else {
-            bail!("point 必须是 [0..1, 0..1] 坐标")
-        };
-        if !(0.0..=1.0).contains(x) || !(0.0..=1.0).contains(y) {
-            bail!("point 坐标超出 0..1")
-        }
-        Ok(TouchPoint::new(
-            (x * self.screen().width as f64).round() as u32,
-            (y * self.screen().height as f64).round() as u32,
-            1.0,
-        ))
-    }
-
-    fn frame_point(&self, value: &Value) -> Result<FramePoint> {
-        let point = self.point(value)?;
-        Ok(FramePoint::new(point.x(), point.y()))
-    }
-
-    fn resource_name(value: &Value) -> Result<String> {
-        match value {
-            Value::String(value) | Value::Color(value) if !value.trim().is_empty() => {
-                Ok(value.trim_start_matches("templates/").to_string())
-            }
-            _ => bail!("template 必须是非空字符串"),
-        }
-    }
-
-    async fn template(&self, value: &Value) -> Result<crate::capabilities::ResourceHandle> {
-        self.host
-            .authorize(Permission::ResourceRead)
-            .map_err(anyhow::Error::new)?;
-        let name = Self::resource_name(value)?;
-        let package = self
-            .context
-            .content_package
-            .as_ref()
-            .ok_or_else(|| anyhow!("当前上下文没有 content package"))?;
-        let resource = self
-            .registry
-            .resource()
-            .ok_or_else(|| anyhow!("resource capability 未注册"))?
-            .resolve(
-                &ResourceId::new(
-                    package.as_str().to_string(),
-                    YAML_EXTENSION_ID,
-                    format!("templates/{name}"),
-                )
-                .map_err(anyhow::Error::new)?,
-            )
-            .await
-            .map_err(anyhow::Error::new)?;
-        Ok(resource)
-    }
-
-    async fn capture(&self) -> Result<crate::capabilities::FrameHandle> {
-        let frame = self
-            .registry
-            .frame()
-            .ok_or_else(|| anyhow!("frame capability 未注册"))?
-            .capture(&self.device)
-            .await
-            .map_err(anyhow::Error::new)?;
-        self.refresh_screen(&frame).await;
-        Ok(frame)
-    }
-
-    /// 以最近一次截图的真实分辨率刷新坐标系（相对坐标 ⇄ 像素全靠它；
-    /// 失败保持上次值——尺寸查询是尽力而为，不阻塞匹配主链）。
-    async fn refresh_screen(&self, frame: &crate::capabilities::FrameHandle) {
-        let Some(frame_service) = self.registry.frame() else {
-            return;
-        };
-        if let Ok(size) = frame_service.size(*frame).await {
-            if size.width > 0 && size.height > 0 {
-                *self.screen.write().unwrap() = size;
-            }
-        }
-    }
-
-    fn screen(&self) -> FrameSize {
-        *self.screen.read().unwrap()
-    }
-
-    fn match_value(outcome: MatchOutcome, region: Value, screen: FrameSize) -> Value {
-        match outcome {
-            MatchOutcome::Found(found) => {
-                let center = [
-                    (found.x + found.width / 2) as f64 / screen.width as f64,
-                    (found.y + found.height / 2) as f64 / screen.height as f64,
-                ];
-                Value::Map(BTreeMap::from([
-                    ("found".to_string(), Value::Bool(true)),
-                    ("x".to_string(), Value::Int(found.x as i64)),
-                    ("y".to_string(), Value::Int(found.y as i64)),
-                    ("width".to_string(), Value::Int(found.width as i64)),
-                    ("height".to_string(), Value::Int(found.height as i64)),
-                    ("score".to_string(), Value::Float(found.score as f64)),
-                    ("center".to_string(), Value::Coordinate(center)),
-                    ("region".to_string(), region),
-                ]))
-            }
-            MatchOutcome::NotFound => Value::Map(BTreeMap::from([
-                ("found".to_string(), Value::Bool(false)),
-                ("region".to_string(), region),
-            ])),
-        }
-    }
-
-    /// 本次实际搜索区域的回显值（相对坐标 map）：由 effective 像素区域换算。
-    fn relative_region_echo(px: Option<[u32; 4]>, w: u32, h: u32) -> Value {
-        let (x, y, width, height) = match px {
-            Some([x, y, width, height]) => (x, y, width, height),
-            None => (0, 0, w, h),
-        };
-        Value::Map(BTreeMap::from([
-            ("x".to_string(), Value::Float(x as f64 / w as f64)),
-            ("y".to_string(), Value::Float(y as f64 / h as f64)),
-            ("width".to_string(), Value::Float(width as f64 / w as f64)),
-            ("height".to_string(), Value::Float(height as f64 / h as f64)),
-        ]))
-    }
-
-    /// 模板 handle → 解析后的实际文件名（`#` 后缀区域推断用；失败 = None 走全屏）。
-    async fn template_file_name(
-        &self,
-        handle: &crate::capabilities::ResourceHandle,
-    ) -> Option<String> {
-        self.registry
-            .resource()?
-            .resolved_file_name(*handle)
-            .await
-            .ok()
-    }
-
-    /// region 实参：相对坐标 map `{x, y, width, height}` 或四元数组，全部
-    /// 0.0~1.0（与 v3 表面坐标约定一致）。
-    fn relative_region(value: &Value) -> Result<[f64; 4]> {
-        let numbers: Vec<f64> = match value {
-            Value::List(items) => items
-                .iter()
-                .map(|item| match item {
-                    Value::Float(f) => Ok(*f),
-                    Value::Int(i) => Ok(*i as f64),
-                    _ => bail!("region 数组元素必须是数值"),
-                })
-                .collect::<Result<_>>()?,
-            Value::Map(map) => ["x", "y", "width", "height"]
-                .iter()
-                .map(|key| match map.get(*key) {
-                    Some(Value::Float(f)) => Ok(*f),
-                    Some(Value::Int(i)) => Ok(*i as f64),
-                    _ => bail!("region 必须含数值字段 x/y/width/height"),
-                })
-                .collect::<Result<_>>()?,
-            _ => bail!("region 必须是 {{x, y, width, height}} 映射或四元数组"),
-        };
-        let [x, y, width, height] = numbers
-            .try_into()
-            .map_err(|_| anyhow!("region 必须是 {{x, y, width, height}} 映射或四元数组"))?;
-        for component in [x, y, width, height] {
-            if !(0.0..=1.0).contains(&component) {
-                bail!("region 分量必须在 0..1（相对坐标），得到 {component}");
-            }
-        }
-        Ok([x, y, width, height])
-    }
-
-    /// region 实参 → 像素 SearchRegion（按参考屏尺寸换算）。
-    fn search_region(&self, value: &Value) -> Result<crate::capabilities::SearchRegion> {
-        let [x, y, width, height] = Self::relative_region(value)?;
-        Ok(crate::capabilities::SearchRegion::new(
-            (x * self.screen().width as f64).round() as u32,
-            (y * self.screen().height as f64).round() as u32,
-            (width * self.screen().width as f64).round() as u32,
-            (height * self.screen().height as f64).round() as u32,
-        ))
-    }
-
-    /// threshold 实参：0.0~1.0 数值 → f32（MatchOptions.threshold）。
-    fn threshold_option(args: &BTreeMap<String, Value>) -> Result<Option<f32>> {
-        let Some(value) = args.get("threshold") else {
-            return Ok(None);
-        };
-        let raw = match value {
-            Value::Float(f) => *f,
-            Value::Int(i) => *i as f64,
-            Value::Null => return Ok(None),
-            _ => bail!("threshold 必须是 0~1 的数字"),
-        };
-        if !(0.0..=1.0).contains(&raw) {
-            bail!("threshold 必须在 0..1，得到 {raw}");
-        }
-        Ok(Some(raw as f32))
-    }
-
-    /// match_many 的 thresholds 实参（与 templates 平行的列表，缺项/Null =
-    /// 该模板用缺省阈值）——match_first 候选级 threshold 的承载形态。
-    fn thresholds_option(args: &BTreeMap<String, Value>, count: usize) -> Result<Vec<Option<f32>>> {
-        let Some(Value::List(values)) = args.get("thresholds") else {
-            return Ok(vec![None; count]);
-        };
-        if values.len() != count {
-            bail!("thresholds 长度必须与 templates 一致");
-        }
-        values
-            .iter()
-            .map(|value| match value {
-                Value::Null => Ok(None),
-                Value::Float(f) => {
-                    if (0.0..=1.0).contains(f) {
-                        Ok(Some(*f as f32))
-                    } else {
-                        bail!("threshold 必须在 0..1，得到 {f}")
-                    }
-                }
-                Value::Int(i) => Ok(Some(*i as f32)),
-                _ => bail!("thresholds 必须是数值或 null 的列表"),
-            })
-            .collect()
-    }
-
-    fn color_value(red: u8, green: u8, blue: u8) -> Value {
-        Value::Map(BTreeMap::from([
-            ("red".to_string(), Value::Int(red as i64)),
-            ("green".to_string(), Value::Int(green as i64)),
-            ("blue".to_string(), Value::Int(blue as i64)),
-            (
-                "hex".to_string(),
-                Value::Color(format!("{red:02x}{green:02x}{blue:02x}")),
-            ),
-        ]))
-    }
 }
 
-#[async_trait]
-impl CapabilityInvoker for NativeYamlHost {
-    async fn invoke(&self, capability: &str, args: Value) -> Result<Value> {
-        self.authorize(capability)?;
-        let args = Self::args_map(args)?;
-        match capability {
-            "device.resolve" => Ok(Value::Handle {
-                kind: "device".to_string(),
-                id: 1,
-            }),
-            "app.start" | "device.start_app" => {
-                self.registry
-                    .device()
-                    .ok_or_else(|| anyhow!("device capability 未注册"))?
-                    .start_app(
-                        &self.device,
-                        &AppId::new(format!("+{}", self.package(&args)?)),
-                    )
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                Ok(Value::Null)
-            }
-            "app.stop" | "device.stop_app" => {
-                self.registry
-                    .device()
-                    .ok_or_else(|| anyhow!("device capability 未注册"))?
-                    .stop_app(&self.device, &AppId::new(self.package(&args)?))
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                Ok(Value::Null)
-            }
-            "input.tap" => {
-                let point =
-                    self.point(Self::arg(&args, "point").or_else(|_| Self::arg(&args, "at"))?)?;
-                self.registry
-                    .input()
-                    .ok_or_else(|| anyhow!("input capability 未注册"))?
-                    .tap(&self.device, point)
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                // P12.6：与 v2 引擎同形的投屏标记事件（像素坐标）
-                self.emit_event(RuntimeEventKind::Tap {
-                    x: point.x(),
-                    y: point.y(),
-                })
-                .await;
-                Ok(Value::Null)
-            }
-            "input.swipe" => {
-                let from = self.point(Self::arg(&args, "from")?)?;
-                let to = self.point(Self::arg(&args, "to")?)?;
-                let duration = Self::arg(&args, "duration")?
-                    .duration_ms()
-                    .ok_or_else(|| anyhow!("duration 必须是时间值"))?;
-                self.registry
-                    .input()
-                    .ok_or_else(|| anyhow!("input capability 未注册"))?
-                    .swipe(
-                        &self.device,
-                        SwipeGesture::new(from, to, Duration::from_millis(duration)),
-                    )
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                self.emit_event(RuntimeEventKind::Swipe {
-                    x1: from.x(),
-                    y1: from.y(),
-                    x2: to.x(),
-                    y2: to.y(),
-                })
-                .await;
-                Ok(Value::Null)
-            }
-            "input.key" => {
-                let key = Self::arg(&args, "key")?;
-                let code = key_code(key)?;
-                let action = match args
-                    .get("action")
-                    .and_then(Value::as_string)
-                    .unwrap_or("press")
-                {
-                    "down" => KeyAction::Down,
-                    "up" => KeyAction::Up,
-                    "press" => KeyAction::Press,
-                    other => bail!("未知 key action: {other}"),
-                };
-                self.registry
-                    .input()
-                    .ok_or_else(|| anyhow!("input capability 未注册"))?
-                    .key(&self.device, KeyInput::new(KeyCode::new(code), action))
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                Ok(Value::Null)
-            }
-            "input.text" => {
-                let value = Self::arg(&args, "value")?
-                    .as_string()
-                    .ok_or_else(|| anyhow!("text value 必须是字符串"))?;
-                self.registry
-                    .input()
-                    .ok_or_else(|| anyhow!("input capability 未注册"))?
-                    .text(&self.device, TextInput::new(value))
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                Ok(Value::Null)
-            }
-            "runtime.sleep" => {
-                let duration = Self::arg(&args, "duration")?
-                    .duration_ms()
-                    .ok_or_else(|| anyhow!("duration 必须是时间值"))?;
-                self.runtime
-                    .sleep(Duration::from_millis(duration.min(3_600_000)))
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                Ok(Value::Null)
-            }
-            "frame.capture" => Ok(Value::Handle {
-                kind: "frame".to_string(),
-                id: 1,
-            }),
-            "vision.match" | "vision.match_template" => {
-                let frame = self.capture().await?;
-                let template_name = Self::resource_name(Self::arg(&args, "template")?)?;
-                let template = self.template(Self::arg(&args, "template")?).await?;
-                let template_file = self.template_file_name(&template).await;
-                let explicit_px = args
-                    .get("region")
-                    .map(|value| self.search_region(value))
-                    .transpose()?
-                    .map(|region| [region.x, region.y, region.width, region.height]);
-                let effective_px = crate::matcher::effective_search_region(
-                    explicit_px,
-                    template_file.as_deref(),
-                    self.screen().width,
-                    self.screen().height,
-                );
-                let options = MatchOptions {
-                    threshold: Self::threshold_option(&args)?,
-                    region: effective_px.map(|[x, y, width, height]| {
-                        crate::capabilities::SearchRegion::new(x, y, width, height)
-                    }),
-                    color_check: false,
-                };
-                let outcome = self
-                    .registry
-                    .vision()
-                    .ok_or_else(|| anyhow!("vision capability 未注册"))?
-                    .match_template(frame, TemplateQuery::new(template, options))
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                let region = Self::relative_region_echo(
-                    effective_px,
-                    self.screen().width,
-                    self.screen().height,
-                );
-                self.emit_vision_outcome(&template_name, outcome, effective_px)
-                    .await;
-                Ok(Self::match_value(outcome, region, self.screen()))
-            }
-            "vision.match_many" => {
-                let templates = match Self::arg(&args, "templates")? {
-                    Value::List(values) => values.clone(),
-                    _ => bail!("templates 必须是列表"),
-                };
-                let thresholds = Self::thresholds_option(&args, templates.len())?;
-                let explicit_px = args
-                    .get("region")
-                    .map(|value| self.search_region(value))
-                    .transpose()?
-                    .map(|region| [region.x, region.y, region.width, region.height]);
-                let frame = self.capture().await?;
-                let mut request = MatchManyRequest::new(frame);
-                let mut template_files: Vec<Option<String>> = Vec::with_capacity(templates.len());
-                for (template, threshold) in templates.iter().zip(thresholds) {
-                    let resource = self.template(template).await?;
-                    template_files.push(self.template_file_name(&resource).await);
-                    request = request.with_template(TemplateQuery::new(
-                        resource,
-                        MatchOptions {
-                            threshold,
-                            region: explicit_px.map(|[x, y, width, height]| {
-                                crate::capabilities::SearchRegion::new(x, y, width, height)
-                            }),
-                            ..MatchOptions::default()
-                        },
-                    ));
-                }
-                let results = self
-                    .registry
-                    .vision()
-                    .ok_or_else(|| anyhow!("vision capability 未注册"))?
-                    .match_many(&request)
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                let mut matches = Vec::with_capacity(results.len());
-                for (template, (result, template_file)) in
-                    templates.iter().zip(results.iter().zip(&template_files))
-                {
-                    // 每个候选一条 vision 事件（match_first 候选全覆盖，同 v2 口径）
-                    let effective_px = crate::matcher::effective_search_region(
-                        explicit_px,
-                        template_file.as_deref(),
-                        self.screen().width,
-                        self.screen().height,
-                    );
-                    self.emit_vision_outcome(
-                        &Self::resource_name(template)?,
-                        result.outcome,
-                        effective_px,
-                    )
-                    .await;
-                    matches.push(Self::match_value(
-                        result.outcome,
-                        Self::relative_region_echo(
-                            effective_px,
-                            self.screen().width,
-                            self.screen().height,
-                        ),
-                        self.screen(),
-                    ));
-                }
-                let found = matches.iter().any(Value::truthy);
-                Ok(Value::Map(BTreeMap::from([
-                    ("found".to_string(), Value::Bool(found)),
-                    ("matches".to_string(), Value::List(matches)),
-                ])))
-            }
-            "vision.sample_color" => {
-                let frame = self.capture().await?;
-                let point = self
-                    .frame_point(Self::arg(&args, "point").or_else(|_| Self::arg(&args, "at"))?)?;
-                let color = self
-                    .registry
-                    .vision()
-                    .ok_or_else(|| anyhow!("vision capability 未注册"))?
-                    .sample_color(frame, point)
-                    .await
-                    .map_err(anyhow::Error::new)?;
-                Ok(Self::color_value(color.red, color.green, color.blue))
-            }
-            "log.write" => {
-                let level = match args
-                    .get("level")
-                    .and_then(Value::as_string)
-                    .unwrap_or("info")
-                {
-                    "trace" => LogLevel::Trace,
-                    "debug" => LogLevel::Debug,
-                    "info" => LogLevel::Info,
-                    "warn" | "warning" => LogLevel::Warn,
-                    "error" => LogLevel::Error,
-                    other => bail!("未知 log level: {other}"),
-                };
-                let message = Self::arg(&args, "message")?
-                    .as_string()
-                    .ok_or_else(|| anyhow!("log message 必须是字符串"))?;
-                self.registry
-                    .log()
-                    .ok_or_else(|| anyhow!("log capability 未注册"))?
-                    .write(LogRecord::new(level, message))
-                    .map_err(anyhow::Error::new)?;
-                Ok(Value::Null)
-            }
-            other => bail!("未知 capability: {other}"),
-        }
-    }
+#[derive(Clone, Copy)]
+enum CompareOp {
+    Eq,
+    Ne,
+    Gt,
+    Ge,
+    Lt,
+    Le,
+}
 
-    fn cancelled(&self) -> bool {
-        self.runtime.cancelled()
+/// Schema 类型检查（绑定；值为规整前原文）。
+fn check_schema_type(param: &ParamSchema, value: &Value) -> Result<()> {
+    let ok = |condition: bool| {
+        if condition {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "参数 {} 与类型 {} 不符，得到 {value}",
+                param.name,
+                param.ty.canonical()
+            ))
+        }
+    };
+    match param.ty {
+        ParamType::Any => Ok(()),
+        ParamType::Boolean => ok(value.is_boolean()),
+        ParamType::Integer => ok(value.is_i64() || value.is_u64()),
+        ParamType::Number => ok(value.is_number()),
+        ParamType::String | ParamType::Template | ParamType::Key => {
+            ok(value.as_str().is_some_and(|text| !text.trim().is_empty()))
+        }
+        ParamType::List => ok(value.is_array()),
+        ParamType::Object => ok(value.is_object()),
+        ParamType::Duration => ok(match value {
+            Value::Number(number) => number.as_f64().is_some_and(|ms| ms >= 0.0),
+            Value::String(text) => parse_duration_ms(text).is_some(),
+            _ => false,
+        }),
+        ParamType::Point => ok(point_components(value).is_some()),
     }
 }
 
 fn key_code(value: &Value) -> Result<u32> {
-    let value = value
-        .as_string()
+    let text = value
+        .as_str()
         .ok_or_else(|| anyhow!("key 必须是按键名字符串或数字字符串"))?;
-    if let Ok(code) = value.parse::<u32>() {
+    if let Ok(code) = text.parse::<u32>() {
         return Ok(code);
     }
-    Ok(match value.to_ascii_uppercase().as_str() {
+    Ok(match text.to_ascii_uppercase().as_str() {
         "HOME" => 3,
         "BACK" => 4,
         "MENU" => 82,
@@ -933,1641 +986,33 @@ fn key_code(value: &Value) -> Result<u32> {
     })
 }
 
-/// Optional provider for `call`; a resolver can load a target from an app
-/// package without changing the AST or the host capability contract.
-/// v3 原生参考解释器（下方 Interpreter/ExecutionResult/Flow）：生产执行走
-/// WASM guest（LazyYamlWasmtimeRuntime），本块仅由单元测试消费。
-#[allow(dead_code)]
-#[async_trait]
-pub(crate) trait ProgramResolver: Send + Sync {
-    async fn resolve(&self, target: &str) -> Result<Program>;
-}
-
-/// v3 原生参考解释器专用（见 ProgramResolver 注）。
-#[allow(dead_code)]
-#[derive(Debug)]
-pub(crate) struct ExecutionResult {
-    pub value: Value,
-    pub logs: Vec<(String, String)>,
-}
-
-/// v3 原生参考解释器专用（见 ProgramResolver 注）。
-#[allow(dead_code)]
-enum Flow {
-    Continue,
-    Break,
-    Return(Value),
-    Throw(String),
-}
-
-/// v3 原生参考解释器（见 ProgramResolver 注）。
-///
-/// P12.6：`events`（sink + device）装配后与 WASM guest 同步发射运行结构事件
-/// （run_start/run_end/step_start/step_end/call_start/budget）；未装配则零开销
-/// 静默。发射失败不解释为运行错误。
-#[allow(dead_code)]
-pub(crate) struct Interpreter {
-    invoker: Arc<dyn CapabilityInvoker>,
-    resolver: Option<Arc<dyn ProgramResolver>>,
-    values: BTreeMap<String, Value>,
-    logs: Vec<(String, String)>,
-    steps: u64,
-    call_depth: u32,
-    /// wait 随机区间的 PRNG 状态（run nonce 播种的 splitmix64，与 guest 同步）。
-    rng: u64,
-    event_sink: Option<Arc<dyn EventSink>>,
-    /// RuntimeEvent 的设备作用域用 Core 侧 DeviceId（与 capabilities 的
-    /// DeviceId 同名异型，事件 wire 只认 Core 形态）。
-    event_device: Option<crate::core::DeviceId>,
-}
-
-#[allow(dead_code)]
-impl Interpreter {
-    pub(crate) fn new(invoker: Arc<dyn CapabilityInvoker>) -> Self {
-        Self {
-            invoker,
-            resolver: None,
-            values: BTreeMap::new(),
-            logs: Vec::new(),
-            steps: 0,
-            call_depth: 0,
-            rng: 0,
-            event_sink: None,
-            event_device: None,
-        }
-    }
-
-    pub(crate) fn with_resolver(mut self, resolver: Arc<dyn ProgramResolver>) -> Self {
-        self.resolver = Some(resolver);
-        self
-    }
-
-    pub(crate) fn with_values(mut self, values: BTreeMap<String, Value>) -> Self {
-        self.values = values;
-        self
-    }
-
-    /// 装配运行事件旁路（测试断言 / 无 wasm 退化路径的可视化）。
-    #[allow(dead_code)]
-    pub(crate) fn with_events(
-        mut self,
-        sink: Arc<dyn EventSink>,
-        device: crate::core::DeviceId,
-    ) -> Self {
-        self.event_sink = Some(sink);
-        self.event_device = Some(device);
-        self
-    }
-
-    async fn emit_event(&self, kind: RuntimeEventKind) {
-        let (Some(sink), Some(device)) = (&self.event_sink, &self.event_device) else {
-            return;
-        };
-        if let Err(error) = sink.emit(RuntimeEvent::new(device.clone(), kind)).await {
-            tracing::debug!(%error, "yaml native interpreter event emit failed");
-        }
-    }
-
-    /// 预算/取消类错误 → `budget{kind}` 事件 kind（与 ADR-YAML-04 错误码对应）。
-    fn budget_kind(error: &anyhow::Error) -> Option<&'static str> {
-        let text = error.to_string();
-        if text.starts_with("STEP_BUDGET_EXCEEDED") {
-            Some("STEP_BUDGET_EXCEEDED")
-        } else if text.starts_with("CALL_DEPTH_EXCEEDED") {
-            Some("CALL_DEPTH_EXCEEDED")
-        } else if text.starts_with("CANCELLED") {
-            Some("CANCELLED")
-        } else {
-            None
-        }
-    }
-
-    pub(crate) async fn run(mut self, program: &Program) -> Result<ExecutionResult> {
-        self.rng = program.nonce.unwrap_or(0);
-        self.emit_event(RuntimeEventKind::RunStart).await;
-        match self.run_steps(&program.steps).await {
-            Ok(Flow::Continue | Flow::Return(_)) => {
-                self.emit_event(RuntimeEventKind::RunEnd {
-                    ok: true,
-                    error: None,
-                })
-                .await;
-                Ok(ExecutionResult {
-                    value: match self.run_steps_value() {
-                        Some(value) => value,
-                        None => Value::Null,
-                    },
-                    logs: self.logs,
-                })
-            }
-            Ok(Flow::Break) => {
-                let error = anyhow!("yaml.v3.runtime.break_outside_loop");
-                self.emit_event(RuntimeEventKind::RunEnd {
-                    ok: false,
-                    error: Some(error.to_string()),
-                })
-                .await;
-                Err(error)
-            }
-            Ok(Flow::Throw(message)) => {
-                self.emit_event(RuntimeEventKind::RunEnd {
-                    ok: false,
-                    error: Some(message.clone()),
-                })
-                .await;
-                bail!("{message}")
-            }
-            Err(error) => {
-                // 预算/取消错误在 run_end 之前先发 budget 终止原因
-                if let Some(kind) = Self::budget_kind(&error) {
-                    self.emit_event(RuntimeEventKind::Budget {
-                        kind: kind.to_string(),
-                    })
-                    .await;
-                }
-                self.emit_event(RuntimeEventKind::RunEnd {
-                    ok: false,
-                    error: Some(error.to_string()),
-                })
-                .await;
-                Err(error)
-            }
-        }
-    }
-
-    fn run_steps_value(&self) -> Option<Value> {
-        self.values.get("__yaml_return").cloned()
-    }
-
-    #[async_recursion]
-    async fn run_steps(&mut self, steps: &[SmallStep]) -> Result<Flow> {
-        for step in steps {
-            if self.invoker.cancelled() {
-                // 机器可读 CANCELLED 前缀：run() 据此发 budget{kind:"CANCELLED"}
-                bail!("CANCELLED: 运行已取消")
-            }
-            // 每个逻辑步执行前计数：顶层、loop 体每轮子步、if 分支体、call
-            // 目标程序体全计（与 WASM guest ExecutionBudget 同语义）。
-            self.steps += 1;
-            check_step_budget(self.steps)?;
-            let flow = self.run_step(step).await?;
-            if !matches!(flow, Flow::Continue) {
-                return Ok(flow);
-            }
-        }
-        Ok(Flow::Continue)
-    }
-
-    #[async_recursion]
-    async fn run_step(&mut self, step: &SmallStep) -> Result<Flow> {
-        match step {
-            // P12.6 运行身份包装（lower 为每个 surface step 生成）：进入/完成/
-            // 失败发 step 事件；包装步就是原逻辑步，不额外计预算。throw 以
-            // Flow::Throw 流转（guest 侧为 Err），此处同记 ok:false。
-            SmallStep::Step { label, step } => {
-                self.emit_event(RuntimeEventKind::StepStart {
-                    path: label.path.clone(),
-                    desc: label.desc.clone(),
-                })
-                .await;
-                let outcome = self.run_step(step).await;
-                match &outcome {
-                    Ok(Flow::Throw(message)) => {
-                        self.emit_event(RuntimeEventKind::StepEnd {
-                            path: label.path.clone(),
-                            ok: false,
-                            error: Some(message.clone()),
-                        })
-                        .await;
-                    }
-                    Ok(_) => {
-                        self.emit_event(RuntimeEventKind::StepEnd {
-                            path: label.path.clone(),
-                            ok: true,
-                            error: None,
-                        })
-                        .await;
-                    }
-                    Err(error) => {
-                        self.emit_event(RuntimeEventKind::StepEnd {
-                            path: label.path.clone(),
-                            ok: false,
-                            error: Some(error.to_string()),
-                        })
-                        .await;
-                    }
-                }
-                outcome
-            }
-            SmallStep::Invoke {
-                capability,
-                args,
-                save,
-            } => {
-                let evaluated_args = self.eval_map(args)?;
-                let value = self
-                    .invoker
-                    .invoke(capability, Value::Map(evaluated_args.clone()))
-                    .await?;
-                if let Some(save) = save {
-                    self.values.insert(save.clone(), value);
-                }
-                if capability == "log.write" {
-                    // The actual persistence is handled by the invoker. This
-                    // local copy is only the generic RunExecutor result.
-                    let level = evaluated_args
-                        .get("level")
-                        .and_then(Value::as_string)
-                        .unwrap_or("info")
-                        .to_string();
-                    if let Some(message) = evaluated_args.get("message").and_then(Value::as_string)
-                    {
-                        self.logs.push((level, message.to_string()));
-                    }
-                }
-                Ok(Flow::Continue)
-            }
-            SmallStep::If {
-                cond,
-                then_steps,
-                else_steps,
-            } => {
-                if self.eval_condition(cond)? {
-                    self.run_steps(then_steps).await
-                } else {
-                    self.run_steps(else_steps).await
-                }
-            }
-            SmallStep::Loop { times, body } => {
-                let count = times.as_ref().map(|value| self.eval(value)).transpose()?;
-                let limit = count
-                    .as_ref()
-                    .and_then(Value::duration_ms)
-                    .map(|ms| (ms / 100).max(1));
-                let limit = limit.or_else(|| {
-                    count.as_ref().and_then(|value| match value {
-                        Value::Int(value) if *value >= 0 => Some(*value as u64),
-                        _ => None,
-                    })
-                });
-                let mut iteration = 0u64;
-                loop {
-                    if let Some(limit) = limit {
-                        if iteration >= limit {
-                            break;
-                        }
-                    }
-                    // 每轮迭代本身也是逻辑步：空转体（body 无子步）的无 times
-                    // loop 同样受预算约束终止（与 guest 同语义）。
-                    self.steps += 1;
-                    check_step_budget(self.steps)?;
-                    iteration += 1;
-                    match self.run_steps(body).await? {
-                        Flow::Continue => {}
-                        Flow::Break => break,
-                        flow => return Ok(flow),
-                    }
-                }
-                Ok(Flow::Continue)
-            }
-            SmallStep::Break => Ok(Flow::Break),
-            SmallStep::Call { target, args, save } => {
-                self.call_depth += 1;
-                self.emit_event(RuntimeEventKind::CallStart {
-                    target: target.clone(),
-                    depth: self.call_depth,
-                })
-                .await;
-                let outcome = self.run_call(target, args, save).await;
-                self.call_depth -= 1;
-                outcome
-            }
-            SmallStep::Return { value } => {
-                let value = self.eval(value)?;
-                self.values
-                    .insert("__yaml_return".to_string(), value.clone());
-                Ok(Flow::Return(value))
-            }
-            SmallStep::Throw { message } => Ok(Flow::Throw(
-                self.eval(message)?
-                    .as_string()
-                    .unwrap_or("脚本 throw")
-                    .to_string(),
-            )),
-            SmallStep::Set { name, value } => {
-                self.values.insert(name.clone(), self.eval(value)?);
-                Ok(Flow::Continue)
-            }
-            SmallStep::WaitRandom { min, max } => {
-                // 契约 §4 wait 随机区间：[min, max] 内按 nonce 播种的 splitmix64
-                // 取值（与 guest 解释器同一算法/常量，见 yaml_vnext::splitmix64
-                // 测试向量）；随后复用 runtime.sleep（取消可达）。
-                let min = self
-                    .eval(min)?
-                    .duration_ms()
-                    .ok_or_else(|| anyhow!("wait min 必须是时间值"))?;
-                let max = self
-                    .eval(max)?
-                    .duration_ms()
-                    .ok_or_else(|| anyhow!("wait max 必须是时间值"))?;
-                let duration = if max > min {
-                    min + crate::extensions::gamer_yaml::yaml_vnext::splitmix64(&mut self.rng)
-                        % (max - min + 1)
-                } else {
-                    min
-                };
-                self.invoker
-                    .invoke(
-                        "runtime.sleep",
-                        Value::Map(BTreeMap::from([(
-                            "duration".to_string(),
-                            Value::Duration(duration),
-                        )])),
-                    )
-                    .await?;
-                Ok(Flow::Continue)
-            }
-        }
-    }
-
-    /// `call` 执行体：入口时 `call_depth` 已 +1，此处统一做深度守卫；
-    /// 有 `return` → 存返回值，无 `return` → 存 null（ADR-YAML-02 返回值泛化）。
-    #[async_recursion]
-    async fn run_call(
-        &mut self,
-        target: &str,
-        args: &BTreeMap<String, Expr>,
-        save: &Option<String>,
-    ) -> Result<Flow> {
-        check_call_depth(self.call_depth)?;
-        let resolver = self
-            .resolver
-            .clone()
-            .ok_or_else(|| anyhow!("call resolver 未配置"))?;
-        let program = resolver.resolve(target).await?;
-        let mut child = Interpreter::new(self.invoker.clone()).with_values(self.eval_map(args)?);
-        // 子解释器继承当前调用深度，否则每层 call 的深度计数被重置、
-        // 深度守卫永远不触发（无界递归）；随机序列同理继承（wait 区间
-        // 在被调方与主程序共享同一 nonce 流）。
-        child.call_depth = self.call_depth;
-        child.rng = self.rng;
-        // P12.6：被调方帧的 step/call 事件经同一 sink 续传（call_start 已
-        // 宣告帧切换，路径保持 script-local 契约形态）。
-        child.event_sink = self.event_sink.clone();
-        child.event_device = self.event_device.clone();
-        if let Some(resolver) = self.resolver.clone() {
-            child = child.with_resolver(resolver);
-        }
-        let outcome = child.run_steps(&program.steps).await;
-        self.rng = child.rng;
-        match outcome? {
-            Flow::Return(value) => {
-                if let Some(save) = save {
-                    self.values.insert(save.clone(), value);
-                }
-                Ok(Flow::Continue)
-            }
-            Flow::Continue => {
-                if let Some(save) = save {
-                    self.values.insert(save.clone(), Value::Null);
-                }
-                Ok(Flow::Continue)
-            }
-            Flow::Break => bail!("call 返回了 loop break"),
-            Flow::Throw(message) => Ok(Flow::Throw(message)),
-        }
-    }
-
-    fn eval_map(&self, values: &BTreeMap<String, Expr>) -> Result<BTreeMap<String, Value>> {
-        values
-            .iter()
-            .map(|(key, value)| Ok((key.clone(), self.eval(value)?)))
-            .collect()
-    }
-
-    fn eval(&self, expr: &Expr) -> Result<Value> {
-        match expr {
-            Expr::Literal(value) => Ok(value.clone()),
-            Expr::Ref(name) => {
-                lookup_path(&self.values, name).ok_or_else(|| anyhow!("未定义变量 ${name}"))
-            }
-            Expr::List(values) => Ok(Value::List(
-                values
-                    .iter()
-                    .map(|value| self.eval(value))
-                    .collect::<Result<_, _>>()?,
-            )),
-            Expr::Map(values) => Ok(Value::Map(self.eval_map(values)?)),
-        }
-    }
-
-    fn eval_condition(&self, condition: &Condition) -> Result<bool> {
-        Ok(match condition {
-            Condition::Truthy { value } => self.eval(value)?.truthy(),
-            Condition::Equals { left, right } => {
-                values_equal(&self.eval(left)?, &self.eval(right)?)
-            }
-            Condition::Not { value } => !self.eval_condition(value)?,
-        })
-    }
-}
-
-/// v3 原生参考解释器的表达式求值辅助（仅测试链路消费）。
-#[allow(dead_code)]
-fn lookup_path(values: &BTreeMap<String, Value>, path: &str) -> Option<Value> {
-    let mut segments = path.split('.');
-    let mut current = values.get(segments.next()?)?.clone();
-    for segment in segments {
-        let (name, indices) = parse_segment(segment);
-        if !name.is_empty() {
-            current = match current {
-                Value::Map(map) => map.get(name).cloned()?,
-                _ => return None,
-            };
-        }
-        for index in indices {
-            current = match current {
-                Value::List(list) => list.get(index).cloned()?,
-                _ => return None,
-            };
-        }
-    }
-    Some(current)
-}
-
-/// v3 原生参考解释器的表达式求值辅助（仅测试链路消费）。
-#[allow(dead_code)]
-fn parse_segment(segment: &str) -> (&str, Vec<usize>) {
-    let name = segment.split('[').next().unwrap_or(segment);
-    let mut indices = Vec::new();
-    let mut rest = segment.strip_prefix(name).unwrap_or_default();
-    while let Some(value) = rest.strip_prefix('[') {
-        let Some(end) = value.find(']') else { break };
-        if let Ok(index) = value[..end].parse() {
-            indices.push(index);
-        }
-        rest = &value[end + 1..];
-    }
-    (name, indices)
-}
-
-/// v3 原生参考解释器的表达式求值辅助（仅测试链路消费）。
-#[allow(dead_code)]
-fn values_equal(left: &Value, right: &Value) -> bool {
-    if left == right {
-        return true;
-    }
-    match (left, right) {
-        (Value::Color(left), Value::Map(right)) | (Value::Map(right), Value::Color(left)) => right
-            .get("hex")
-            .and_then(Value::as_string)
-            .is_some_and(|value| value.eq_ignore_ascii_case(left.trim_start_matches('#'))),
-        (Value::Int(left), Value::Float(right)) | (Value::Float(right), Value::Int(left)) => {
-            (*left as f64) == *right
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::capabilities::{
-        CapabilityResult, DeviceService, FrameHandle, FrameService, FrameSize, InputService,
+        CapabilityResult, ColorSample, FrameHandle, FrameService, LogRecord, LogService,
         MatchManyRequest, MatchManyResult, ResourceHandle, ResourceId, ResourceLease,
-        ResourceService, SearchRegion, TemplateQuery, VisionService,
+        ResourceService, VisionService,
     };
-    use crate::extensions::gamer_yaml::yaml_vnext::load;
-    use std::collections::{BTreeSet, HashMap};
-    use std::io::Write;
-    use tempfile::TempDir;
-    use zip::write::SimpleFileOptions;
-
-    #[derive(Default)]
-    pub(crate) struct Trace {
-        calls: std::sync::Mutex<Vec<String>>,
-    }
-
-    impl Trace {
-        pub(crate) fn calls(&self) -> Vec<String> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    #[async_trait]
-    impl DeviceService for Trace {
-        async fn resolve(
-            &self,
-            id: &DeviceId,
-        ) -> crate::capabilities::CapabilityResult<DeviceHandle> {
-            Ok(DeviceHandle::new(id.clone()))
-        }
-        async fn start_app(
-            &self,
-            _: &DeviceHandle,
-            app: &AppId,
-        ) -> crate::capabilities::CapabilityResult<()> {
-            self.calls.lock().unwrap().push(format!("start:{app:?}"));
-            Ok(())
-        }
-        async fn stop_app(
-            &self,
-            _: &DeviceHandle,
-            app: &AppId,
-        ) -> crate::capabilities::CapabilityResult<()> {
-            self.calls.lock().unwrap().push(format!("stop:{app:?}"));
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl InputService for Trace {
-        async fn tap(
-            &self,
-            _: &DeviceHandle,
-            point: TouchPoint,
-        ) -> crate::capabilities::CapabilityResult<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("tap:{}:{}", point.x(), point.y()));
-            Ok(())
-        }
-        async fn swipe(
-            &self,
-            _: &DeviceHandle,
-            _: SwipeGesture,
-        ) -> crate::capabilities::CapabilityResult<()> {
-            self.calls.lock().unwrap().push("swipe".into());
-            Ok(())
-        }
-        async fn key(
-            &self,
-            _: &DeviceHandle,
-            _: KeyInput,
-        ) -> crate::capabilities::CapabilityResult<()> {
-            self.calls.lock().unwrap().push("key".into());
-            Ok(())
-        }
-        async fn text(
-            &self,
-            _: &DeviceHandle,
-            input: TextInput,
-        ) -> crate::capabilities::CapabilityResult<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("text:{}", input.as_str()));
-            Ok(())
-        }
-    }
-
-    struct FakeInvoker;
-    #[async_trait]
-    impl CapabilityInvoker for FakeInvoker {
-        async fn invoke(&self, capability: &str, args: Value) -> Result<Value> {
-            if capability == "vision.match" {
-                return Ok(Value::Map(BTreeMap::from([
-                    ("found".into(), Value::Bool(true)),
-                    ("center".into(), Value::Coordinate([0.5, 0.5])),
-                ])));
-            }
-            Ok(args)
-        }
-    }
-
-    /// vision 链路桩：一个类型同时实现 Resource / Frame / Vision 三个能力，
-    /// 记录每次查询的（模板名, threshold, region）供断言；`hits` 集合内的
-    /// 模板名判命中。
-    type SeenQuery = (String, Option<f32>, Option<[u32; 4]>);
-
-    pub(crate) struct VisionStub {
-        hits: BTreeSet<String>,
-        names: std::sync::Mutex<HashMap<ResourceHandle, String>>,
-        seen: std::sync::Mutex<Vec<SeenQuery>>,
-        frame_size: FrameSize,
-    }
-
-    impl VisionStub {
-        pub(crate) fn new(hits: &[&str]) -> Arc<Self> {
-            Self::new_with_frame_size(hits, 1000, 1000)
-        }
-
-        pub(crate) fn new_with_frame_size(hits: &[&str], width: u32, height: u32) -> Arc<Self> {
-            Arc::new(Self {
-                hits: hits.iter().map(|name| name.to_string()).collect(),
-                names: std::sync::Mutex::new(HashMap::new()),
-                seen: std::sync::Mutex::new(Vec::new()),
-                frame_size: FrameSize::new(width, height),
-            })
-        }
-
-        fn name_of(&self, handle: ResourceHandle) -> String {
-            self.names
-                .lock()
-                .unwrap()
-                .get(&handle)
-                .cloned()
-                .unwrap_or_default()
-        }
-
-        pub(crate) fn seen(&self) -> Vec<(String, Option<f32>, Option<[u32; 4]>)> {
-            self.seen.lock().unwrap().clone()
-        }
-
-        fn record(&self, name: String, options: crate::capabilities::MatchOptions) {
-            self.seen.lock().unwrap().push((
-                name,
-                options.threshold,
-                options
-                    .region
-                    .map(|region| [region.x, region.y, region.width, region.height]),
-            ));
-        }
-
-        fn outcome(&self, name: String) -> MatchOutcome {
-            if self.hits.contains(&name) {
-                MatchOutcome::Found(crate::capabilities::MatchBox {
-                    x: 400,
-                    y: 200,
-                    width: 200,
-                    height: 100,
-                    score: 0.92,
-                })
-            } else {
-                MatchOutcome::NotFound
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ResourceService for VisionStub {
-        async fn resolve(&self, id: &ResourceId) -> CapabilityResult<ResourceHandle> {
-            let handle = ResourceHandle::new();
-            self.names.lock().unwrap().insert(
-                handle,
-                id.path().trim_start_matches("templates/").to_string(),
-            );
-            Ok(handle)
-        }
-
-        async fn open(&self, resource: ResourceHandle) -> CapabilityResult<ResourceLease> {
-            Ok(ResourceLease::new(resource, None))
-        }
-
-        async fn resolved_file_name(&self, handle: ResourceHandle) -> CapabilityResult<String> {
-            Ok(self
-                .names
-                .lock()
-                .unwrap()
-                .get(&handle)
-                .cloned()
-                .unwrap_or_default())
-        }
-    }
-
-    #[async_trait]
-    impl FrameService for VisionStub {
-        async fn latest(&self, _device: &DeviceHandle) -> CapabilityResult<Option<FrameHandle>> {
-            Ok(None)
-        }
-
-        async fn capture(&self, _device: &DeviceHandle) -> CapabilityResult<FrameHandle> {
-            Ok(FrameHandle::new())
-        }
-
-        async fn size(&self, _frame: FrameHandle) -> CapabilityResult<FrameSize> {
-            Ok(self.frame_size)
-        }
-    }
-
-    #[async_trait]
-    impl VisionService for VisionStub {
-        async fn match_template(
-            &self,
-            _frame: FrameHandle,
-            query: TemplateQuery,
-        ) -> CapabilityResult<MatchOutcome> {
-            let name = self.name_of(query.template());
-            self.record(name.clone(), query.options());
-            Ok(self.outcome(name))
-        }
-
-        async fn match_many(
-            &self,
-            request: &MatchManyRequest,
-        ) -> CapabilityResult<Vec<MatchManyResult>> {
-            Ok(request
-                .templates()
-                .iter()
-                .map(|query| {
-                    let name = self.name_of(query.template());
-                    self.record(name.clone(), query.options());
-                    MatchManyResult {
-                        template: query.template(),
-                        outcome: self.outcome(name),
-                    }
-                })
-                .collect())
-        }
-
-        async fn sample_color(
-            &self,
-            _frame: FrameHandle,
-            _point: FramePoint,
-        ) -> CapabilityResult<crate::capabilities::ColorSample> {
-            Ok(crate::capabilities::ColorSample {
-                red: 0,
-                green: 0,
-                blue: 0,
-            })
-        }
-    }
-
-    pub(crate) fn vision_registry(stub: &Arc<VisionStub>) -> CapabilityRegistry {
-        CapabilityRegistry::builder()
-            .with_device_service(Arc::new(Trace::default()) as Arc<dyn DeviceService>)
-            .with_frame_service(stub.clone() as Arc<dyn FrameService>)
-            .with_resource_service(stub.clone() as Arc<dyn ResourceService>)
-            .with_vision_service(stub.clone() as Arc<dyn VisionService>)
-            .build()
-    }
-
-    /// P12.7：threshold / region 实参注入 MatchOptions（TemplateQuery 链路），
-    /// 结果 map 携带 region 回显 + center 相对坐标（NativeYamlHost 直测）。
-    #[tokio::test]
-    async fn native_host_passes_threshold_and_region_into_match_options() {
-        let stub = VisionStub::new(&["reward"]);
-        let host = NativeYamlHost::new(
-            all_permissions(vision_registry(&stub)),
-            AppContext::for_test("d1", "com.test.game").unwrap(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-        )
-        .await
-        .unwrap();
-
-        // 命中 + threshold + region（相对 map 形态）
-        let value = host
-            .invoke(
-                "vision.match",
-                Value::Map(BTreeMap::from([
-                    ("template".into(), Value::String("reward".into())),
-                    ("threshold".into(), Value::Float(0.9)),
-                    (
-                        "region".into(),
-                        Value::Map(BTreeMap::from([
-                            ("x".into(), Value::Float(0.1)),
-                            ("y".into(), Value::Float(0.2)),
-                            ("width".into(), Value::Float(0.3)),
-                            ("height".into(), Value::Float(0.4)),
-                        ])),
-                    ),
-                ])),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            stub.seen(),
-            vec![("reward".to_string(), Some(0.9), Some([100, 200, 300, 400]))],
-            "threshold 填入 MatchOptions；region 相对值换算为像素"
-        );
-        let map = into_map(value);
-        assert_eq!(map.get("found"), Some(&Value::Bool(true)));
-        assert_eq!(
-            map.get("center"),
-            Some(&Value::Coordinate([0.5, 0.25])),
-            "center = 相对坐标（沿用现状）"
-        );
-        assert_eq!(
-            into_map(map.get("region").cloned().unwrap()).get("width"),
-            Some(&Value::Float(0.3)),
-            "结果 map 回显本次搜索 region"
-        );
-
-        // 未命中：region 缺省 = 全帧回显
-        let value = host
-            .invoke(
-                "vision.match",
-                Value::Map(BTreeMap::from([(
-                    "template".into(),
-                    Value::String("ghost".into()),
-                )])),
-            )
-            .await
-            .unwrap();
-        let map = into_map(value);
-        assert_eq!(map.get("found"), Some(&Value::Bool(false)));
-        let region = into_map(map.get("region").cloned().unwrap());
-        assert_eq!(region.get("x"), Some(&Value::Float(0.0)));
-        assert_eq!(region.get("width"), Some(&Value::Float(1.0)));
-        assert_eq!(stub.seen().len(), 2,);
-        assert_eq!(
-            stub.seen()[1].1,
-            None,
-            "threshold 缺省省略字段 → MatchOptions::default 口径"
-        );
-    }
-
-    /// 模板 `#` 后缀区域推断（v2 迁移回归回归测试）：步骤未给 region 时，
-    /// 匹配与结果回显/事件都用文件名录制的区域；显式 region 仍最优先。
-    #[tokio::test]
-    async fn native_host_infers_search_region_from_template_name_suffix() {
-        let stub = VisionStub::new(&[]);
-        let host = NativeYamlHost::new(
-            all_permissions(vision_registry(&stub)),
-            AppContext::for_test("d1", "com.test.game").unwrap(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-        )
-        .await
-        .unwrap();
-
-        // 关闭登录#700_147_736_207 → 千分比矩形（1000x1000 参考屏 = 像素等值）
-        let value = host
-            .invoke(
-                "vision.match",
-                Value::Map(BTreeMap::from([(
-                    "template".into(),
-                    Value::String("关闭登录#700_147_736_207.png".into()),
-                )])),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            stub.seen(),
-            vec![(
-                "关闭登录#700_147_736_207.png".to_string(),
-                None,
-                Some([700, 147, 36, 60])
-            )],
-            "搜索区域按模板名后缀推断并传入 MatchOptions"
-        );
-        let map = into_map(value);
-        assert_eq!(map.get("found"), Some(&Value::Bool(false)));
-        let region = into_map(map.get("region").cloned().unwrap());
-        assert_eq!(region.get("x"), Some(&Value::Float(0.7)));
-        assert_eq!(region.get("y"), Some(&Value::Float(0.147)));
-        assert_eq!(region.get("width"), Some(&Value::Float(0.036)));
-        assert_eq!(region.get("height"), Some(&Value::Float(0.06)));
-
-        // 显式 region 优先于模板名后缀
-        host.invoke(
-            "vision.match",
-            Value::Map(BTreeMap::from([
-                (
-                    "template".into(),
-                    Value::String("关闭登录#700_147_736_207.png".into()),
-                ),
-                (
-                    "region".into(),
-                    Value::Map(BTreeMap::from([
-                        ("x".into(), Value::Float(0.0)),
-                        ("y".into(), Value::Float(0.0)),
-                        ("width".into(), Value::Float(0.1)),
-                        ("height".into(), Value::Float(0.1)),
-                    ])),
-                ),
-            ])),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            stub.seen().last().unwrap().2,
-            Some([0, 0, 100, 100]),
-            "显式 region 优先"
-        );
-    }
-
-    /// 坐标系必须跟随真实帧分辨率（回归：曾硬编码 1000×1000，导致脚本运行
-    /// 的 center/tap 与模板测试端点位置不一致）。
-    #[tokio::test]
-    async fn native_host_scales_coordinates_by_real_frame_size() {
-        let stub = VisionStub::new_with_frame_size(&["reward"], 2000, 1000);
-        let host = NativeYamlHost::new(
-            all_permissions(vision_registry(&stub)),
-            AppContext::for_test("d1", "com.test.game").unwrap(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-        )
-        .await
-        .unwrap();
-
-        let value = host
-            .invoke(
-                "vision.match",
-                Value::Map(BTreeMap::from([(
-                    "template".into(),
-                    Value::String("reward".into()),
-                )])),
-            )
-            .await
-            .unwrap();
-        let map = into_map(value);
-        // 桩命中框固定 (400,200,200,100)：center 像素 (500,250) ÷ 2000×1000
-        assert_eq!(
-            map.get("center"),
-            Some(&Value::Coordinate([0.25, 0.25])),
-            "center 按真实帧分辨率换算（旧实现 ÷1000 会得到 0.5,0.25）"
-        );
-
-        // 触摸点同样按真实分辨率换算：[0.5,0.5] → (1000,500)
-        let touch = host
-            .point(&Value::Coordinate([0.5, 0.5]))
-            .expect("触摸点换算");
-        assert_eq!(
-            (touch.x(), touch.y()),
-            (1000, 500),
-            "tap 像素坐标按真实帧分辨率换算"
-        );
-    }
-
-    fn all_permissions(registry: CapabilityRegistry) -> HostApi {
-        let manifest = crate::extensions::parse_manifest(br#"manifest_version = 2
-id = "gamer.yaml"
-version = "3.0.0"
-name = "YAML vNext"
-entry = "plugin.wasm"
-permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.key", "input.text", "vision.match", "vision.color", "resource.read", "runtime.sleep", "log.write"]
-"#).unwrap();
-        HostApi::for_manifest(
-            registry,
-            crate::extensions::HostApiCatalog::default(),
-            &manifest,
-        )
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn interpreter_executes_control_flow_and_general_return_values() {
-        let program = load("version: 3\nsteps:\n  - set: {ready: true}\n  - if:\n      cond: $ready\n      then:\n        - call:\n            target: script:missing\n            save: answer\n      else: []\n").unwrap();
-        // The call is intentionally not entered in this test; a missing
-        // resolver is a useful guard that proves the AST does not silently
-        // execute arbitrary host code.
-        let error = Interpreter::new(Arc::new(FakeInvoker))
-            .run(&program)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("resolver"));
-    }
-
-    /// 可脚本化 invoker：vision.match / match_many 结果可配置，全部调用
-    /// （含 sleep 时长、threshold args）被记录供断言。
-    struct ScriptedInvoker {
-        match_found: bool,
-        many_hits: Vec<bool>,
-        calls: std::sync::Mutex<Vec<(String, Value)>>,
-    }
-
-    fn into_map(value: Value) -> BTreeMap<String, Value> {
-        match value {
-            Value::Map(map) => map,
-            _ => BTreeMap::new(),
-        }
-    }
-
-    impl ScriptedInvoker {
-        fn found(vision_found: bool) -> Self {
-            Self {
-                match_found: vision_found,
-                many_hits: Vec::new(),
-                calls: std::sync::Mutex::new(Vec::new()),
-            }
-        }
-
-        fn recorded(&self) -> Vec<(String, Value)> {
-            self.calls.lock().unwrap().clone()
-        }
-
-        fn sleep_durations(&self) -> Vec<u64> {
-            self.recorded()
-                .into_iter()
-                .filter(|(capability, _)| capability == "runtime.sleep")
-                .filter_map(|(_, args)| into_map(args).get("duration").cloned())
-                .filter_map(|value| value.duration_ms())
-                .collect()
-        }
-    }
-
-    #[async_trait]
-    impl CapabilityInvoker for ScriptedInvoker {
-        async fn invoke(&self, capability: &str, args: Value) -> Result<Value> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((capability.to_string(), args.clone()));
-            match capability {
-                "vision.match" => {
-                    let map = if self.match_found {
-                        Value::Map(BTreeMap::from([
-                            ("found".into(), Value::Bool(true)),
-                            ("score".into(), Value::Float(0.9)),
-                            ("center".into(), Value::Coordinate([0.5, 0.5])),
-                        ]))
-                    } else {
-                        Value::Map(BTreeMap::from([("found".into(), Value::Bool(false))]))
-                    };
-                    Ok(map)
-                }
-                "vision.match_many" => {
-                    let templates = match into_map(args).get("templates").cloned() {
-                        Some(Value::List(items)) => items,
-                        _ => bail!("templates 必须是列表"),
-                    };
-                    let matches = templates
-                        .iter()
-                        .enumerate()
-                        .map(|(index, _)| {
-                            let found = self.many_hits.get(index).copied().unwrap_or(false);
-                            Value::Map(BTreeMap::from([
-                                ("found".into(), Value::Bool(found)),
-                                ("score".into(), Value::Float(0.88)),
-                                ("center".into(), Value::Coordinate([0.25, 0.75])),
-                            ]))
-                        })
-                        .collect();
-                    Ok(Value::Map(BTreeMap::from([
-                        (
-                            "found".into(),
-                            Value::Bool(self.many_hits.iter().any(|hit| *hit)),
-                        ),
-                        ("matches".into(), Value::List(matches)),
-                    ])))
-                }
-                _ => Ok(Value::Null),
-            }
-        }
-    }
-
-    /// P12.5（契约 §4）：wait 随机区间由 nonce 播种的 splitmix64 决定，
-    /// 经 runtime.sleep 等待（取消可达）。
-    #[tokio::test]
-    async fn native_interpreter_wait_random_is_nonce_seeded() {
-        let program = load(
-            "version: 3\nsteps:\n  - wait: {min: 100ms, max: 200ms}\n  - wait: {min: 1s, max: 1s}\n",
-        )
-        .unwrap();
-        let program = Program {
-            nonce: Some(7),
-            ..program
-        };
-        let invoker = Arc::new(ScriptedInvoker::found(false));
-        Interpreter::new(invoker.clone())
-            .run(&program)
-            .await
-            .unwrap();
-        let mut state = 7u64;
-        let expected_first =
-            100 + crate::extensions::gamer_yaml::yaml_vnext::splitmix64(&mut state) % 101;
-        assert_eq!(
-            invoker.sleep_durations(),
-            vec![expected_first, 1_000],
-            "随机区间取值必须 = min + splitmix64(nonce) % (max-min+1)；定值区间原样"
-        );
-    }
-
-    /// P12.7（ADR-YAML-03）：find 的 save / `$match` 块内上下文与块后复位。
-    #[tokio::test]
-    async fn native_interpreter_find_scopes_match_and_persists_save() {
-        let program = load(
-            "version: 3\nsteps:\n  - find:\n      template: reward\n      save: reward\n      then:\n        - log: hit\n      verify:\n        template: reward\n        timeout: 1s\n  - set: {leaked: $match}\n  - return: $reward.found\n",
-        )
-        .unwrap();
-        let invoker = Arc::new(ScriptedInvoker::found(true));
-        let result = Interpreter::new(invoker.clone())
-            .run(&program)
-            .await
-            .unwrap();
-        assert_eq!(result.value, Value::Bool(true), "save 变量跨步可用");
-        assert_eq!(
-            result.logs,
-            vec![("info".to_string(), "hit".to_string())],
-            "then 体内执行"
-        );
-        // `$match` 在块后被复位（不跨块泄漏），save 的命名变量不受影响
-        assert_eq!(
-            lookup_path(&BTreeMap::from([("leaked".into(), Value::Null)]), "leaked"),
-            Some(Value::Null)
-        );
-        let recorded = invoker.recorded();
-        let verify_calls = recorded
-            .iter()
-            .filter(|(capability, _)| capability == "vision.match")
-            .count();
-        assert!(
-            verify_calls >= 2,
-            "verify 在 then 之后二次验证模板: {verify_calls}"
-        );
-    }
-
-    /// P12.7 裁决：find 超时无 else → 抛 `FIND_TIMEOUT: <template>`。
-    #[tokio::test]
-    async fn native_interpreter_find_timeout_without_else_throws() {
-        let program =
-            load("version: 3\nsteps:\n  - find:\n      template: ghost\n      timeout: 3s\n")
-                .unwrap();
-        let error = Interpreter::new(Arc::new(ScriptedInvoker::found(false)))
-            .run(&program)
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("FIND_TIMEOUT: ghost"),
-            "超时无 else 必须抛 FIND_TIMEOUT: {error}"
-        );
-    }
-
-    /// P12.7：check 轮询至出现（未命中先 sleep(poll) 重试），threshold 经
-    /// args 注入 vision.match。
-    #[tokio::test]
-    async fn native_interpreter_check_polls_and_passes_threshold() {
-        let program =
-            load("version: 3\nsteps:\n  - check:\n      template: ready\n      threshold: 0.95\n")
-                .unwrap();
-        let invoker = Arc::new(ScriptedInvoker::found(true));
-        Interpreter::new(invoker.clone())
-            .run(&program)
-            .await
-            .unwrap();
-        let recorded = invoker.recorded();
-        let (capability, args) = recorded
-            .iter()
-            .find(|(capability, _)| capability == "vision.match")
-            .expect("check 必须调用 vision.match");
-        assert_eq!(capability, "vision.match");
-        let map = into_map(args.clone());
-        assert_eq!(
-            map.get("threshold"),
-            Some(&Value::Float(0.95)),
-            "step threshold 注入 invoke args"
-        );
-        assert_eq!(map.get("template"), Some(&Value::String("ready".into())));
-    }
-
-    /// P12.7：match_first 首个命中候选执行自己的 steps，`$match` = 该候选
-    /// 结果；候选级 threshold 经 thresholds 平行列表传给 match_many。
-    #[tokio::test]
-    async fn native_interpreter_match_first_runs_first_hit_candidate_steps() {
-        let program = load(
-            "version: 3\nsteps:\n  - match_first:\n      candidates:\n        - template: a\n          threshold: 0.6\n          steps:\n            - log: cand-a\n        - template: b\n          steps:\n            - set: {m: $match}\n            - log: cand-b\n  - return: $m.center\n",
-        )
-        .unwrap();
-        let invoker = Arc::new(ScriptedInvoker {
-            match_found: false,
-            many_hits: vec![false, true],
-            calls: std::sync::Mutex::new(Vec::new()),
-        });
-        let result = Interpreter::new(invoker.clone())
-            .run(&program)
-            .await
-            .unwrap();
-        assert_eq!(
-            result.value,
-            Value::Coordinate([0.25, 0.75]),
-            "候选 steps 内 $match = 该候选结果"
-        );
-        assert_eq!(
-            result.logs,
-            vec![("info".to_string(), "cand-b".to_string())],
-            "只执行首个命中候选的 steps"
-        );
-        let many = invoker
-            .recorded()
-            .into_iter()
-            .find(|(capability, _)| capability == "vision.match_many")
-            .expect("match_first 必须调用 vision.match_many");
-        let args = into_map(many.1);
-        assert_eq!(
-            args.get("thresholds"),
-            Some(&Value::List(vec![Value::Float(0.6), Value::Null])),
-            "候选级 threshold 以平行列表传给 match_many"
-        );
-    }
-
-    /// 恒返回自递归程序的 resolver：递归 call 深度守卫测试用。
-    struct SelfResolver;
-
-    #[async_trait]
-    impl ProgramResolver for SelfResolver {
-        async fn resolve(&self, _target: &str) -> Result<Program> {
-            load("version: 3\nsteps:\n  - call:\n      target: script:self\n")
-                .map_err(|diagnostics| anyhow!("fixture resolver: {diagnostics:?}"))
-        }
-    }
-
-    #[test]
-    fn native_interpreter_enforces_call_depth_limit() {
-        // 原生参考解释器的 async_recursion 调用链每层叠 3 个 boxed future 的
-        // poll 帧，Windows 测试线程默认 1 MiB 栈容不下 33 层；放大栈执行。
-        let handle = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                runtime.block_on(async {
-                    let program =
-                        load("version: 3\nsteps:\n  - call:\n      target: script:self\n").unwrap();
-                    let error = Interpreter::new(Arc::new(FakeInvoker))
-                        .with_resolver(Arc::new(SelfResolver))
-                        .run(&program)
-                        .await
-                        .unwrap_err();
-                    assert!(
-                        error.to_string().contains("CALL_DEPTH_EXCEEDED"),
-                        "递归超限必须报 CALL_DEPTH_EXCEEDED: {error}"
-                    );
-                    assert!(
-                        error.to_string().contains("max=32"),
-                        "深度错误必须带预算上限: {error}"
-                    );
-                })
-            })
-            .unwrap();
-        handle.join().unwrap();
-    }
-
-    /// P12.4（ADR-YAML-04）：无 times 空转体 loop 必须被步预算终止，报
-    /// STEP_BUDGET_EXCEEDED（每轮迭代本身计一步，空 body 也受约束）。
-    #[tokio::test]
-    async fn native_interpreter_terminates_unbounded_empty_loop_with_step_budget() {
-        let program = load("version: 3\nsteps:\n  - loop:\n      steps: []\n").unwrap();
-        let error = Interpreter::new(Arc::new(FakeInvoker))
-            .run(&program)
-            .await
-            .unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("STEP_BUDGET_EXCEEDED"),
-            "死循环必须报 STEP_BUDGET_EXCEEDED: {message}"
-        );
-        assert!(
-            message.contains("max=100000"),
-            "步数错误必须带预算上限: {message}"
-        );
-    }
-
-    /// P12.4（ADR-YAML-04）：步数按逻辑步计——顶层只有 1 个 loop 步，但循环
-    /// 体（内层 loop 每轮 + set 子步）全计，外层包裹不得绕过预算。
-    #[tokio::test]
-    async fn native_interpreter_counts_nested_loop_body_steps_against_budget() {
-        let program = load(
-            "version: 3\nsteps:\n  - loop:\n      steps:\n        - loop:\n            times: 60000\n            steps:\n              - set: {n: 1}\n",
-        )
-        .unwrap();
-        let error = Interpreter::new(Arc::new(FakeInvoker))
-            .run(&program)
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("STEP_BUDGET_EXCEEDED"),
-            "嵌套子步必须计入预算: {error}"
-        );
-    }
-
-    /// P12.4：预算内的正常脚本不受影响（< 100_000 逻辑步正常完成）。
-    #[tokio::test]
-    async fn native_interpreter_runs_normal_scripts_within_budget() {
-        let program = load(
-            "version: 3\nsteps:\n  - loop:\n      times: 1000\n      steps:\n        - set: {n: 1}\n  - return: done\n",
-        )
-        .unwrap();
-        let result = Interpreter::new(Arc::new(FakeInvoker))
-            .run(&program)
-            .await
-            .unwrap();
-        assert_eq!(result.value, Value::String("done".into()));
-    }
-
-    #[tokio::test]
-    async fn native_host_routes_primitive_actions_to_capability_registry() {
-        let trace = Arc::new(Trace::default());
-        let registry = CapabilityRegistry::builder()
-            .with_device_service(trace.clone() as Arc<dyn DeviceService>)
-            .with_input_service(trace.clone() as Arc<dyn InputService>)
-            .build();
-        let host = NativeYamlHost::new(
-            all_permissions(registry),
-            AppContext::for_test("d1", "com.test.game").unwrap(),
-            Arc::new(AtomicBool::new(false)),
-            None,
-        )
-        .await
-        .unwrap();
-        host.invoke(
-            "input.tap",
-            Value::Map(BTreeMap::from([(
-                "point".into(),
-                Value::Coordinate([0.5, 0.25]),
-            )])),
-        )
-        .await
-        .unwrap();
-        host.invoke(
-            "input.text",
-            Value::Map(BTreeMap::from([(
-                "value".into(),
-                Value::String("hello".into()),
-            )])),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            trace.calls.lock().unwrap().as_slice(),
-            ["tap:500:250", "text:hello"]
-        );
-    }
-
-    #[test]
-    fn color_record_compares_with_color_literal() {
-        let left = NativeYamlHost::color_value(255, 0, 0);
-        assert!(values_equal(&left, &Value::Color("ff0000".into())));
-    }
-
-    #[test]
-    fn path_lookup_supports_match_many_indexed_results() {
-        let values = BTreeMap::from([(
-            "result".into(),
-            Value::Map(BTreeMap::from([(
-                "matches".into(),
-                Value::List(vec![
-                    Value::Map(BTreeMap::from([("found".into(), Value::Bool(false))])),
-                    Value::Map(BTreeMap::from([("found".into(), Value::Bool(true))])),
-                ]),
-            )])),
-        )]);
-        assert_eq!(
-            lookup_path(&values, "result.matches[1].found"),
-            Some(Value::Bool(true))
-        );
-    }
-
-    #[tokio::test]
-    async fn yaml_manifest_panels_are_removed_after_uninstall() {
-        let temp = TempDir::new().unwrap();
-        let service = crate::extensions::ExtensionService::with_default_runtime(
-            crate::extensions::ExtensionStore::new(temp.path()),
-            CapabilityRegistry::default(),
-        );
-        let mut archive = Vec::new();
-        {
-            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
-            let options = SimpleFileOptions::default();
-            writer.start_file("manifest.toml", options).unwrap();
-            writer
-                .write_all(YAML_EXTENSION_MANIFEST_TOML.as_bytes())
-                .unwrap();
-            writer.start_file("plugin.wasm", options).unwrap();
-            writer.write_all(b"\0asm\x01\0\0\0").unwrap();
-            writer.finish().unwrap();
-        }
-        let installed = service.install(&archive).await.unwrap();
-        service.enable(installed.id()).await.unwrap();
-        // Phase 1 语义收紧：Enabled 不再出现面板——面板仅 Running 可见。
-        assert!(service.ui_contributions().unwrap().is_empty());
-        // 本装配未接 registrar（gamer.yaml 的无实例模型无从声明），直写
-        // state.json 模拟 Running：生产组合根里 start 即进入 Running。
-        {
-            let mut states = service.store().read_state().unwrap();
-            states.get_mut(installed.id()).unwrap().state =
-                crate::extensions::ExtensionState::Running;
-            service.store().write_state(&states).unwrap();
-        }
-        let panels = service.ui_contributions().unwrap();
-        assert_eq!(panels.len(), 3);
-        let component_of = |panel_id: &str| {
-            panels
-                .iter()
-                .find(|panel| panel.panel_id == panel_id)
-                .map(|panel| panel.component.clone().unwrap_or_default())
-                .unwrap_or_default()
-        };
-        assert_eq!(component_of("automation"), "console.scripts");
-        assert_eq!(component_of("functions"), "console.functions");
-        assert_eq!(component_of("templates"), "console.templates");
-        assert!(panels
-            .iter()
-            .all(|panel| panel.runtime == crate::extensions::UiRuntime::Core));
-        // 离开 Running（stop 语义）→ 面板撤销。
-        {
-            let mut states = service.store().read_state().unwrap();
-            states.get_mut(installed.id()).unwrap().state =
-                crate::extensions::ExtensionState::Enabled;
-            service.store().write_state(&states).unwrap();
-        }
-        assert!(service.ui_contributions().unwrap().is_empty());
-        service.disable(installed.id()).await.unwrap();
-        assert!(service
-            .uninstall(installed.id(), installed.active_version())
-            .await
-            .unwrap());
-        assert!(service.ui_contributions().unwrap().is_empty());
-    }
-
-    // ------------------------- P12.6 运行可视化事件 -------------------------
-
-    /// 测试收集器：按序记录 RuntimeEvent 的 EventSink 桩（原生解释器直发与
-    /// WASM guest `__event` 拦截两路共用）。
-    #[derive(Default)]
-    pub(crate) struct EventCollect {
-        events: std::sync::Mutex<Vec<RuntimeEvent>>,
-    }
-
-    impl EventCollect {
-        pub(crate) fn new() -> Arc<Self> {
-            Arc::new(Self::default())
-        }
-
-        /// 事件 kind 的 wire JSON 序列（断言用）。
-        pub(crate) fn kinds(&self) -> Vec<serde_json::Value> {
-            self.events
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|event| serde_json::to_value(&event.kind).unwrap())
-                .collect()
-        }
-
-        /// 只取某个 ev 名的事件。
-        pub(crate) fn of(&self, ev: &str) -> Vec<serde_json::Value> {
-            self.kinds()
-                .into_iter()
-                .filter(|kind| kind["ev"] == serde_json::json!(ev))
-                .collect()
-        }
-    }
-
-    #[async_trait]
-    impl crate::core::events::EventSink for EventCollect {
-        fn emit(
-            &self,
-            event: RuntimeEvent,
-        ) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
-            self.events.lock().unwrap().push(event);
-            Box::pin(async { Ok(()) })
-        }
-    }
-
-    /// 原生参考解释器（无 wasm 退化路径）的事件序列：run_start → step 对
-    /// （path/desc）→ call_start（callee 帧内 step 事件续传）→ throw 失败
-    /// step_end(ok:false) + run_end(ok:false)。
-    #[tokio::test]
-    async fn native_interpreter_emits_run_event_sequence() {
-        struct StaticResolver;
-        #[async_trait]
-        impl ProgramResolver for StaticResolver {
-            async fn resolve(&self, target: &str) -> Result<Program> {
-                if target != "script:helper" {
-                    bail!("unknown fixture target: {target}");
-                }
-                load("version: 3\nsteps:\n  - log: in-helper\n")
-                    .map_err(|diagnostics| anyhow!("{diagnostics:?}"))
-            }
-        }
-        let sink = EventCollect::new();
-        let program = load(
-            "version: 3\nsteps:\n  - log: start\n  - set: {x: 1}\n  - call:\n      target: script:helper\n  - throw: boom\n",
-        )
-        .unwrap();
-        let error = Interpreter::new(Arc::new(FakeInvoker))
-            .with_resolver(Arc::new(StaticResolver))
-            .with_events(sink.clone(), crate::core::DeviceId::new("d1").unwrap())
-            .run(&program)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("boom"));
-
-        // 全序列（严格保序）：call 帧内的被调方 step 事件 path 保持 script-local
-        let kinds = sink.kinds();
-        let shape: Vec<&str> = kinds
-            .iter()
-            .map(|kind| kind["ev"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            shape,
-            vec![
-                "run_start",
-                "step_start",
-                "step_end",
-                "step_start",
-                "step_end",
-                "step_start",
-                "call_start",
-                "step_start",
-                "step_end",
-                "step_end",
-                "step_start",
-                "step_end",
-                "run_end",
-            ],
-            "事件序列: {kinds:?}"
-        );
-        assert_eq!(kinds[0], serde_json::json!({ "ev": "run_start" }));
-        assert_eq!(
-            kinds[1],
-            serde_json::json!({
-                "ev": "step_start", "path": "steps[0]", "desc": "log start"
-            })
-        );
-        assert_eq!(
-            kinds[6],
-            serde_json::json!({
-                "ev": "call_start", "target": "script:helper", "depth": 1
-            })
-        );
-        // callee 帧（depth=1）内的 log 步：path 为被调方本地 steps[0]
-        assert_eq!(
-            kinds[7],
-            serde_json::json!({
-                "ev": "step_start", "path": "steps[0]", "desc": "log in-helper"
-            })
-        );
-        assert_eq!(
-            kinds[10],
-            serde_json::json!({
-                "ev": "step_start", "path": "steps[3]", "desc": "throw boom"
-            })
-        );
-        assert_eq!(
-            kinds[11],
-            serde_json::json!({
-                "ev": "step_end", "path": "steps[3]", "ok": false, "error": "boom"
-            })
-        );
-        assert_eq!(
-            kinds[12],
-            serde_json::json!({
-                "ev": "run_end", "ok": false, "error": "boom"
-            })
-        );
-    }
-
-    /// 原生解释器预算事件：空转体死循环以 STEP_BUDGET_EXCEEDED 终止 →
-    /// `budget{kind}` 先于 run_end(ok:false) 发出。
-    #[tokio::test]
-    async fn native_interpreter_emits_budget_event_on_step_budget_exceeded() {
-        let sink = EventCollect::new();
-        let program = load("version: 3\nsteps:\n  - loop:\n      steps: []\n").unwrap();
-        let error = Interpreter::new(Arc::new(FakeInvoker))
-            .with_events(sink.clone(), crate::core::DeviceId::new("d1").unwrap())
-            .run(&program)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("STEP_BUDGET_EXCEEDED"));
-        let kinds = sink.kinds();
-        assert_eq!(kinds[0], serde_json::json!({ "ev": "run_start" }));
-        // loop 是带 label 的 surface step：进入有 step_start，终止有失败 step_end
-        assert_eq!(kinds[1]["ev"], "step_start", "事件序列: {kinds:?}");
-        assert!(kinds.contains(&serde_json::json!({
-            "ev": "budget", "kind": "STEP_BUDGET_EXCEEDED"
-        })));
-        let budget_index = kinds
-            .iter()
-            .position(|kind| kind["ev"] == "budget")
-            .unwrap();
-        let run_end = kinds.last().unwrap();
-        assert_eq!(run_end["ev"], "run_end");
-        assert_eq!(run_end["ok"], serde_json::json!(false));
-        assert!(
-            run_end["error"]
-                .as_str()
-                .unwrap()
-                .contains("STEP_BUDGET_EXCEEDED"),
-            "run_end 携带预算错误: {run_end}"
-        );
-        assert!(
-            budget_index < kinds.len() - 1,
-            "budget 事件必须先于 run_end"
-        );
-    }
-}
-
-#[cfg(all(test, feature = "wasm-runtime"))]
-mod wasm_tests {
-    use super::super::wasm_host::LazyYamlWasmtimeRuntime;
-    use super::*;
-    use crate::capabilities::{
-        CapabilityRegistry, CapabilityResult, FrameHandle, FrameService, LogRecord, LogService,
-        ResourceHandle, ResourceId, ResourceLease, ResourceService, VisionService,
-    };
-    use crate::extensions::gamer_yaml::yaml_vnext::load;
     use crate::extensions::HostApiCatalog;
     use async_trait::async_trait;
-    use std::fs;
-    use std::io::Write as _;
-    use std::path::{Path, PathBuf};
-    use std::process::{Command, Output};
-    use std::sync::{Arc, Mutex, OnceLock};
-    use zip::write::SimpleFileOptions;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
 
+    /// device+input 记录桩。
     #[derive(Default)]
-    struct Trace {
-        text: Mutex<Vec<String>>,
+    pub(crate) struct Trace {
+        pub(crate) text: Mutex<Vec<String>>,
+        pub(crate) taps: Mutex<Vec<[u32; 2]>>,
     }
 
     #[async_trait]
     impl crate::capabilities::DeviceService for Trace {
-        async fn resolve(&self, id: &DeviceId) -> CapabilityResult<DeviceHandle> {
+        async fn resolve(
+            &self,
+            id: &crate::capabilities::DeviceId,
+        ) -> CapabilityResult<DeviceHandle> {
             Ok(DeviceHandle::new(id.clone()))
         }
 
@@ -2582,7 +1027,8 @@ mod wasm_tests {
 
     #[async_trait]
     impl crate::capabilities::InputService for Trace {
-        async fn tap(&self, _: &DeviceHandle, _: TouchPoint) -> CapabilityResult<()> {
+        async fn tap(&self, _: &DeviceHandle, point: TouchPoint) -> CapabilityResult<()> {
+            self.taps.lock().unwrap().push([point.x(), point.y()]);
             Ok(())
         }
 
@@ -2600,29 +1046,383 @@ mod wasm_tests {
         }
     }
 
-    struct FixtureResolver;
-
-    impl YamlProgramResolver for FixtureResolver {
-        fn resolve(&self, target: &str, _args: &BTreeMap<String, Value>) -> Result<Program> {
-            if target != "script:helper" {
-                bail!("unknown fixture target: {target}");
-            }
-            load("version: 3\nsteps:\n  - return: from-call\n")
-                .map_err(|diagnostics| anyhow!("fixture resolver: {diagnostics:?}"))
-        }
+    pub(crate) struct LogTrace {
+        logs: Mutex<Vec<(String, String)>>,
     }
 
-    /// 捕获 log.write 的 Trace 服务（v3 端到端用）。
-    struct LogTrace {
-        logs: Mutex<Vec<String>>,
+    impl LogTrace {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                logs: Mutex::new(Vec::new()),
+            })
+        }
+
+        pub(crate) fn messages(&self) -> Vec<String> {
+            self.logs
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, message)| message.clone())
+                .collect()
+        }
     }
 
     impl LogService for LogTrace {
         fn write(&self, record: LogRecord) -> CapabilityResult<()> {
-            self.logs.lock().unwrap().push(record.message().to_string());
+            self.logs.lock().unwrap().push((
+                format!("{:?}", record.level()),
+                record.message().to_string(),
+            ));
             Ok(())
         }
     }
+
+    /// frame+vision+resource 桩：按队列逐次返回匹配结果（缺省 NotFound）。
+    pub(crate) struct VisionStub {
+        pub(crate) size: FrameSize,
+        pub(crate) outcomes: Mutex<VecDeque<MatchOutcome>>,
+        pub(crate) match_calls: AtomicU64,
+    }
+
+    impl VisionStub {
+        pub(crate) fn new(size: FrameSize) -> Arc<Self> {
+            Arc::new(Self {
+                size,
+                outcomes: Mutex::new(VecDeque::new()),
+                match_calls: AtomicU64::new(0),
+            })
+        }
+
+        pub(crate) fn push_outcome(&self, outcome: MatchOutcome) {
+            self.outcomes.lock().unwrap().push_back(outcome);
+        }
+    }
+
+    #[async_trait]
+    impl FrameService for VisionStub {
+        async fn latest(&self, _device: &DeviceHandle) -> CapabilityResult<Option<FrameHandle>> {
+            Ok(Some(FrameHandle::new()))
+        }
+
+        async fn capture(&self, _device: &DeviceHandle) -> CapabilityResult<FrameHandle> {
+            Ok(FrameHandle::new())
+        }
+
+        async fn size(&self, _frame: FrameHandle) -> CapabilityResult<FrameSize> {
+            Ok(self.size)
+        }
+    }
+
+    fn stub_outcome() -> MatchOutcome {
+        MatchOutcome::Found(crate::capabilities::MatchBox {
+            x: 10,
+            y: 20,
+            width: 200,
+            height: 100,
+            score: 0.93,
+        })
+    }
+
+    #[async_trait]
+    impl VisionService for VisionStub {
+        async fn match_template(
+            &self,
+            _frame: FrameHandle,
+            _template: TemplateQuery,
+        ) -> CapabilityResult<MatchOutcome> {
+            self.match_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(self
+                .outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(MatchOutcome::NotFound))
+        }
+
+        async fn match_many(
+            &self,
+            request: &MatchManyRequest,
+        ) -> CapabilityResult<Vec<MatchManyResult>> {
+            Ok(request
+                .templates()
+                .iter()
+                .map(|query| MatchManyResult {
+                    template: query.template(),
+                    outcome: MatchOutcome::NotFound,
+                })
+                .collect())
+        }
+
+        async fn sample_color(
+            &self,
+            _frame: FrameHandle,
+            _point: FramePoint,
+        ) -> CapabilityResult<ColorSample> {
+            Ok(ColorSample {
+                red: 1,
+                green: 2,
+                blue: 3,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ResourceService for VisionStub {
+        async fn resolve(&self, _id: &ResourceId) -> CapabilityResult<ResourceHandle> {
+            Ok(ResourceHandle::new())
+        }
+
+        async fn open(&self, resource: ResourceHandle) -> CapabilityResult<ResourceLease> {
+            Ok(ResourceLease::new(resource, Some(0)))
+        }
+
+        async fn resolved_file_name(&self, _handle: ResourceHandle) -> CapabilityResult<String> {
+            Ok("template.png".to_string())
+        }
+    }
+
+    pub(crate) struct EventCollect {
+        events: Mutex<Vec<Value>>,
+    }
+
+    impl EventCollect {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                events: Mutex::new(Vec::new()),
+            })
+        }
+
+        pub(crate) fn of(&self, ev: &str) -> Vec<Value> {
+            self.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| event["ev"] == ev)
+                .cloned()
+                .collect()
+        }
+    }
+
+    /// Core EventSink 适配：RuntimeEvent → `{"ev":…}` JSON（与 wasm_host 的
+    /// `__event` 通道出参同形，测试断言词表一致）。
+    impl crate::core::events::EventSink for EventCollect {
+        fn emit(
+            &self,
+            event: crate::core::events::RuntimeEvent,
+        ) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
+            let payload = serde_json::to_value(event.kind).unwrap_or(Value::Null);
+            self.events.lock().unwrap().push(payload);
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
+    fn vision_host(
+        trace: Arc<Trace>,
+        stub: &Arc<VisionStub>,
+        logs: Arc<LogTrace>,
+        permissions: &[&str],
+    ) -> HostApi {
+        let permissions = permissions
+            .iter()
+            .map(|permission| format!("\"{permission}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest = crate::extensions::parse_manifest(
+            format!(
+                r#"manifest_version = 2
+id = "gamer.yaml"
+version = "3.0.0"
+name = "自动化"
+entry = "plugin.wasm"
+permissions = [{permissions}]
+[host_api]
+device = "^1.0"
+vision = "^1.0"
+input = "^1.0"
+resource = "^1.0"
+runtime = "^1.0"
+log = "^1.0"
+"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        HostApi::for_manifest(
+            CapabilityRegistry::builder()
+                .with_device_service(trace.clone() as Arc<dyn crate::capabilities::DeviceService>)
+                .with_input_service(trace as Arc<dyn crate::capabilities::InputService>)
+                .with_frame_service(stub.clone() as Arc<dyn FrameService>)
+                .with_vision_service(stub.clone() as Arc<dyn VisionService>)
+                .with_resource_service(stub.clone() as Arc<dyn ResourceService>)
+                .with_log_service(logs as Arc<dyn LogService>)
+                .build(),
+            HostApiCatalog::default(),
+            &manifest,
+        )
+        .unwrap()
+    }
+
+    fn test_context() -> AppContext {
+        AppContext::for_test("device-1", "com.example.game").unwrap()
+    }
+
+    fn call(name: &str, args: Value, host: &HostApi) -> Result<Value> {
+        let sink: Option<Arc<dyn EventSink>> = None;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let host_impl = NativeYamlHost::new(
+                host.clone(),
+                test_context(),
+                Arc::new(AtomicBool::new(false)),
+                sink,
+            )
+            .await
+            .unwrap();
+            host_impl.call_function(name, args).await
+        })
+    }
+
+    #[test]
+    fn comparisons_and_pure_functions_work() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        let host = vision_host(
+            trace,
+            &stub,
+            LogTrace::new(),
+            &["vision.match", "resource.read"],
+        );
+        assert_eq!(
+            call("eq", json!({"a": 1, "b": 1.0}), &host).unwrap(),
+            Value::Bool(true),
+            "整型/浮点数字相等"
+        );
+        assert_eq!(
+            call("gt", json!({"a": 3, "b": 2}), &host).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            call("ne", json!({"a": "x", "b": "y"}), &host).unwrap(),
+            Value::Bool(true)
+        );
+        let error = call("gt", json!({"a": "x", "b": 2}), &host).unwrap_err();
+        assert!(error.to_string().contains("number"), "{error}");
+    }
+
+    #[test]
+    fn schema_binding_rejects_unknown_missing_and_mistyped_args() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        let host = vision_host(trace, &stub, LogTrace::new(), &["input.tap"]);
+        let error = call("tap", json!({}), &host).unwrap_err();
+        assert!(error.to_string().contains("position"), "{error}");
+        let error = call("tap", json!({"position": [0.5, 0.5], "nope": 1}), &host).unwrap_err();
+        assert!(error.to_string().contains("未知参数 nope"), "{error}");
+        let error = call("tap", json!({"position": [0.5, 5.0]}), &host).unwrap_err();
+        assert!(error.to_string().contains("point"), "{error}");
+    }
+
+    #[test]
+    fn permission_denial_surfaces_denied_error() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        let host = vision_host(trace, &stub, LogTrace::new(), &["device.read"]);
+        let error = call("tap", json!({"position": [0.5, 0.5]}), &host).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("denied") || text.contains("权限"), "{text}");
+    }
+
+    #[test]
+    fn find_returns_match_then_null_and_tap_template_clicks_center() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        stub.push_outcome(stub_outcome());
+        let host = vision_host(
+            trace.clone(),
+            &stub,
+            LogTrace::new(),
+            &["vision.match", "resource.read", "input.tap"],
+        );
+        let matched = call("find", json!({"template": "home", "timeout": "0ms"}), &host).unwrap();
+        assert_eq!(matched["center"]["x"], 0.11, "中心 = (10+100)/1000");
+        assert_eq!(matched["center"]["y"], 0.07, "中心 = (20+50)/1000");
+        assert!(
+            matched["score"].as_f64().unwrap() > 0.9,
+            "score = {}（f32 经 wire 放大）",
+            matched["score"]
+        );
+
+        let miss = call("find", json!({"template": "home", "timeout": "0ms"}), &host).unwrap();
+        assert_eq!(miss, Value::Null);
+
+        stub.push_outcome(stub_outcome());
+        let matched = call(
+            "tap_template",
+            json!({"template": "home", "timeout": "0ms"}),
+            &host,
+        )
+        .unwrap();
+        assert_eq!(matched["center"]["x"], 0.11);
+        let taps = trace.taps.lock().unwrap();
+        assert_eq!(taps.len(), 1);
+        assert_eq!(taps[0], [110, 70], "点击像素坐标 = center×屏");
+
+        let disappeared = call(
+            "wait_disappear",
+            json!({"template": "home", "timeout": "100ms", "interval": "50ms"}),
+            &host,
+        )
+        .unwrap();
+        assert_eq!(disappeared, Value::Bool(true));
+    }
+
+    #[test]
+    fn log_function_writes_and_stringifies_non_text() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        let logs = LogTrace::new();
+        let host = vision_host(trace, &stub, logs.clone(), &["log.write"]);
+        call("log", json!({"message": "文本"}), &host).unwrap();
+        call("log", json!({"message": {"k": 1}}), &host).unwrap();
+        assert_eq!(
+            logs.messages(),
+            vec!["文本".to_string(), "{\"k\":1}".to_string()]
+        );
+    }
+
+    #[test]
+    fn input_text_and_launch_flow_through_capabilities() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        let host = vision_host(
+            trace.clone(),
+            &stub,
+            LogTrace::new(),
+            &["input.text", "device.app", "device.read"],
+        );
+        call("input_text", json!({"text": "你好"}), &host).unwrap();
+        assert_eq!(trace.text.lock().unwrap().as_slice(), ["你好"]);
+        call("launch", json!({}), &host).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "wasm-runtime"))]
+mod wasm_tests {
+    use super::super::wasm_host::LazyYamlWasmtimeRuntime;
+    use super::tests;
+    use super::*;
+    use crate::extensions::gamer_yaml::syntax::{
+        build_program, parse_function_library, parse_script,
+    };
+    use std::fs;
+    use std::io::Write as _;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+    use std::sync::OnceLock;
+    use zip::write::SimpleFileOptions;
 
     fn guest_source_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2656,9 +1456,7 @@ mod wasm_tests {
             .arg(subcommand)
             .arg("--manifest-path")
             .arg(guest_dir.join("Cargo.toml"))
-            // Do not inherit the server's target directory. In particular,
-            // CARGO_TARGET_DIR is often set by CI and must not redirect the
-            // nested wasm build into the host test's files.
+            // 不继承 server 的 target 目录（CI 常设 CARGO_TARGET_DIR）。
             .arg("--target-dir")
             .arg(&target_dir);
         for arg in rest {
@@ -2767,7 +1565,14 @@ mod wasm_tests {
         fs::remove_file(&moved).expect("无法删除已关闭的 Component 输出文件");
     }
 
-    fn host_with_permissions(trace: Arc<Trace>, permissions: &[&str]) -> HostApi {
+    /// V1 源 → wire 程序（无 Package 函数）。
+    fn wire(source: &str) -> Value {
+        let script = parse_script(source).unwrap();
+        let library = parse_function_library("functions: {}\n").unwrap();
+        build_program(&script, &library, Default::default(), 0)
+    }
+
+    fn host_with_permissions(trace: Arc<tests::Trace>, permissions: &[&str]) -> HostApi {
         let permissions = permissions
             .iter()
             .map(|permission| format!("\"{permission}\""))
@@ -2778,7 +1583,7 @@ mod wasm_tests {
                 r#"manifest_version = 2
 id = "gamer.yaml"
 version = "3.0.0"
-name = "YAML vNext"
+name = "自动化"
 entry = "plugin.wasm"
 permissions = [{permissions}]
 [host_api]
@@ -2795,83 +1600,82 @@ runtime = "^1.0"
                 .with_device_service(trace.clone() as Arc<dyn crate::capabilities::DeviceService>)
                 .with_input_service(trace as Arc<dyn crate::capabilities::InputService>)
                 .build(),
-            HostApiCatalog::default(),
+            crate::extensions::HostApiCatalog::default(),
             &manifest,
         )
         .unwrap()
     }
 
-    fn host(trace: Arc<Trace>) -> HostApi {
-        host_with_permissions(trace, &["device.read", "input.text"])
+    fn run_request(
+        program: Value,
+        host: HostApi,
+        stop: Arc<AtomicBool>,
+        sink: Option<Arc<dyn EventSink>>,
+    ) -> YamlWasmRunRequest {
+        YamlWasmRunRequest {
+            wasm: guest_component(),
+            program,
+            host,
+            context: AppContext::for_test("device-1", "com.example.game").unwrap(),
+            stop,
+            sink,
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn real_yaml_component_invokes_wit_and_native_capability() {
-        let trace = Arc::new(Trace::default());
+    async fn real_yaml_component_runs_v1_program_with_native_functions() {
+        let trace = Arc::new(tests::Trace::default());
         let runtime = LazyYamlWasmtimeRuntime::new();
-        let program = load(
-            "version: 3\nsteps:\n  - call:\n      target: script:helper\n      save: answer\n  - text: from-real-wasm\n  - return: $answer\n",
-        )
-        .unwrap();
+        let program = wire("run:\n  - input_text: from-real-wasm\n  - return: done\n");
         let result = runtime
-            .run(YamlWasmRunRequest {
-                wasm: guest_component(),
+            .run(run_request(
                 program,
-                args: BTreeMap::new(),
-                resolver: Some(Arc::new(FixtureResolver)),
-                start_index: None,
-                host: host(trace.clone()),
-                context: AppContext::for_test("device-1", "com.example.game").unwrap(),
-                stop: Arc::new(AtomicBool::new(false)),
-                sink: None,
-            })
+                host_with_permissions(trace.clone(), &["device.read", "input.text"]),
+                Arc::new(AtomicBool::new(false)),
+                None,
+            ))
             .await
             .unwrap();
-        assert_eq!(result.value, Value::String("from-call".into()));
+        assert_eq!(result.value, Value::String("done".into()));
         assert_eq!(trace.text.lock().unwrap().as_slice(), ["from-real-wasm"]);
         assert!(runtime.is_available());
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_sync_wit_call_is_safe_on_multithread_tokio() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn yaml_component_runs_package_function_from_frozen_table() {
+        let trace = Arc::new(tests::Trace::default());
         let runtime = LazyYamlWasmtimeRuntime::new();
-        let program = load(
-            "version: 3\nsteps:\n  - invoke:\n      capability: device.resolve\n      with:\n        id: device-1\n  - return: from-multithread\n",
+        let script =
+            parse_script("run:\n  - greet:\n      who: V1\n    as: out\n  - return: $out\n")
+                .unwrap();
+        let library = parse_function_library(
+            "functions:\n  greet:\n    params:\n      who:\n        type: string\n        default: world\n    run:\n      - input_text: $who\n      - return: $who\n",
         )
         .unwrap();
+        let program = build_program(&script, &library, Default::default(), 0);
         let result = runtime
-            .run(YamlWasmRunRequest {
-                wasm: guest_component(),
+            .run(run_request(
                 program,
-                args: BTreeMap::new(),
-                resolver: None,
-                start_index: None,
-                host: host_with_permissions(Arc::new(Trace::default()), &["device.read"]),
-                context: AppContext::for_test("device-1", "com.example.game").unwrap(),
-                stop: Arc::new(AtomicBool::new(false)),
-                sink: None,
-            })
+                host_with_permissions(trace.clone(), &["device.read", "input.text"]),
+                Arc::new(AtomicBool::new(false)),
+                None,
+            ))
             .await
             .unwrap();
-        assert_eq!(result.value, Value::String("from-multithread".into()));
+        assert_eq!(result.value, Value::String("V1".into()));
+        assert_eq!(trace.text.lock().unwrap().as_slice(), ["V1"]);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn yaml_component_preserves_permission_and_cancellation_kinds() {
         let runtime = LazyYamlWasmtimeRuntime::new();
-        let denied_program = load("version: 3\nsteps:\n  - text: denied\n").unwrap();
         let denied = runtime
-            .run(YamlWasmRunRequest {
-                wasm: guest_component(),
-                program: denied_program,
-                args: BTreeMap::new(),
-                resolver: None,
-                start_index: None,
-                host: host_with_permissions(Arc::new(Trace::default()), &["device.read"]),
-                context: AppContext::for_test("device-1", "com.example.game").unwrap(),
-                stop: Arc::new(AtomicBool::new(false)),
-                sink: None,
-            })
+            .run(run_request(
+                wire("run:\n  - input_text: denied\n"),
+                host_with_permissions(Arc::new(tests::Trace::default()), &["device.read"]),
+                Arc::new(AtomicBool::new(false)),
+                None,
+            ))
             .await
             .unwrap_err();
         assert!(
@@ -2879,29 +1683,17 @@ runtime = "^1.0"
             "permission denial lost its WIT kind: {denied:#}"
         );
 
-        // P12.4：取消是双机制（capability 边界 kind=cancelled 与 epoch trap
-        // CANCELLED 竞速，ADR-YAML-04），两者都是合法的取消形态——stop 先于
-        // 运行置位时，若 capability 路径在一个 tick 内完成则报 kind=cancelled，
-        // 否则 epoch trap 先打断报 CANCELLED。
-        let cancelled_program = load(
-        "version: 3\nsteps:\n  - invoke:\n      capability: runtime.sleep\n      with:\n        duration: 1000\n",
-        )
-        .unwrap();
+        // stop 先于运行置位：sleep 函数的 runtime.sleep 报 kind=cancelled。
         let cancelled = runtime
-            .run(YamlWasmRunRequest {
-                wasm: guest_component(),
-                program: cancelled_program,
-                args: BTreeMap::new(),
-                resolver: None,
-                start_index: None,
-                host: host_with_permissions(
-                    Arc::new(Trace::default()),
+            .run(run_request(
+                wire("run:\n  - sleep: 1s\n"),
+                host_with_permissions(
+                    Arc::new(tests::Trace::default()),
                     &["device.read", "runtime.sleep"],
                 ),
-                context: AppContext::for_test("device-1", "com.example.game").unwrap(),
-                stop: Arc::new(AtomicBool::new(true)),
-                sink: None,
-            })
+                Arc::new(AtomicBool::new(true)),
+                None,
+            ))
             .await
             .unwrap_err();
         let message = cancelled.to_string();
@@ -2911,39 +1703,92 @@ runtime = "^1.0"
         );
     }
 
-    /// WIT kind 保留属性（确定性单测）：capability 层取消错误必须映射为
-    /// host-error kind=cancelled、权限拒绝映射为 denied（epoch 取消兜底与此
-    /// 并行，见上一 e2e 注释）。
-    #[test]
-    fn capability_errors_map_to_wit_kinds() {
-        use crate::capabilities::CapabilityError;
-        use crate::extensions::wit::yaml::gamer::host::types::HostErrorKind;
+    #[tokio::test(flavor = "current_thread")]
+    async fn yaml_component_emits_run_events_and_budget_code() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let sink = tests::EventCollect::new();
+        let trace = Arc::new(tests::Trace::default());
+        let program =
+            wire("run:\n  - input_text: one\n  - repeat: 2\n    do:\n      - input_text: tick\n");
+        let _ = runtime
+            .run(run_request(
+                program,
+                host_with_permissions(trace, &["device.read", "input.text"]),
+                Arc::new(AtomicBool::new(false)),
+                Some(sink.clone()),
+            ))
+            .await
+            .unwrap();
+        let paths: Vec<String> = sink
+            .of("step_start")
+            .iter()
+            .filter_map(|event| event["path"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["run[0]", "run[1]", "run[1].do[0]", "run[1].do[0]"]
+        );
+        let ends = sink.of("run_end");
+        assert_eq!(
+            ends.last().map(|event| event["ok"].clone()),
+            Some(Value::Bool(true))
+        );
 
-        let error = anyhow::Error::new(CapabilityError::Cancelled);
-        let mapped = super::super::wasm_host::yaml_capability_error_for_test(&error);
-        assert!(matches!(mapped.kind, HostErrorKind::Cancelled));
-
-        let denied = anyhow::Error::new(crate::extensions::ExtensionError::Permission(
-            crate::extensions::PermissionError::NotGranted("input.tap".into()),
-        ));
-        let mapped = super::super::wasm_host::yaml_capability_error_for_test(&denied);
-        assert!(matches!(mapped.kind, HostErrorKind::Denied));
+        // 巨大次数空转 repeat → STEP_BUDGET_EXCEEDED + budget 事件
+        let sink = tests::EventCollect::new();
+        let trace = Arc::new(tests::Trace::default());
+        let error = runtime
+            .run(run_request(
+                wire("run:\n  - repeat: 4294967295\n    do: []\n"),
+                host_with_permissions(trace, &["device.read"]),
+                Arc::new(AtomicBool::new(false)),
+                Some(sink.clone()),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("STEP_BUDGET_EXCEEDED"),
+            "{error:#}"
+        );
+        assert!(sink
+            .of("budget")
+            .iter()
+            .any(|event| event["kind"] == "STEP_BUDGET_EXCEEDED"));
     }
 
-    /// Phase 10 验收（yaml 插件侧）：安装 → 启用 → 一个最小 `version: 3`
-    /// 脚本（log 级别）经 ExtensionService::run_yaml_vnext 用真实 Component
-    /// guest 跑通；卸载后同一脚本明确失败。
+    #[tokio::test(flavor = "current_thread")]
+    async fn yaml_component_honors_top_level_start_index() {
+        let runtime = LazyYamlWasmtimeRuntime::new();
+        let trace = Arc::new(tests::Trace::default());
+        let script =
+            parse_script("run:\n  - input_text: first\n  - input_text: second\n  - return: done\n")
+                .unwrap();
+        let library = parse_function_library("functions: {}\n").unwrap();
+        let program = build_program(&script, &library, Default::default(), 1);
+        let result = runtime
+            .run(run_request(
+                program,
+                host_with_permissions(trace.clone(), &["device.read", "input.text"]),
+                Arc::new(AtomicBool::new(false)),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.value, Value::String("done".into()));
+        assert_eq!(trace.text.lock().unwrap().as_slice(), ["second"]);
+    }
+
+    /// 生命周期 e2e：安装 → 启用 → V1 脚本经 run_yaml_program 全链跑通；卸载
+    /// 后同脚本明确失败。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn installed_yaml_extension_runs_v3_program_end_to_end() {
+    async fn installed_yaml_extension_runs_v1_program_end_to_end() {
         let temp = tempfile::tempdir().expect("无法创建 yaml 扩展临时目录");
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
+        let logs = tests::LogTrace::new();
         let registry = CapabilityRegistry::builder()
             .with_device_service(
-                Arc::new(Trace::default()) as Arc<dyn crate::capabilities::DeviceService>
+                Arc::new(tests::Trace::default()) as Arc<dyn crate::capabilities::DeviceService>
             )
-            .with_log_service(logs.clone() as Arc<dyn LogService>)
+            .with_log_service(logs.clone() as Arc<dyn crate::capabilities::LogService>)
             .build();
         let service = crate::extensions::ExtensionService::for_data_root(temp.path(), registry);
 
@@ -2963,1185 +1808,31 @@ runtime = "^1.0"
         let id = crate::extensions::ExtensionId::parse(YAML_EXTENSION_ID).unwrap();
         service.enable(&id).await.unwrap();
 
-        let program = load(
-            "version: 3\nsteps:\n  - invoke:\n      capability: log.write\n      with:\n        level: info\n        message: from-v3-e2e\n  - set: {done: true}\n  - return: $done\n",
-        )
-        .unwrap();
-        let value = super::super::run_yaml_vnext(
+        let value = super::super::run_yaml_program(
             &service,
-            program,
+            wire("run:\n  - log: from-v1-e2e\n  - return: true\n"),
             AppContext::for_test("device-1", "com.example.game").unwrap(),
-            BTreeMap::new(),
-            None,
             Arc::new(AtomicBool::new(false)),
-            None,
             None,
         )
         .await
         .unwrap();
         assert_eq!(value, Value::Bool(true));
-        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["from-v3-e2e"]);
+        assert_eq!(logs.messages(), vec!["from-v1-e2e".to_string()]);
 
         service.disable(&id).await.unwrap();
         assert!(service
             .uninstall(&id, installed.active_version())
             .await
             .unwrap());
-        let program = load("version: 3\nsteps:\n  - set: {done: true}\n").unwrap();
-        assert!(super::super::run_yaml_vnext(
+        assert!(super::super::run_yaml_program(
             &service,
-            program,
+            wire("run: []\n"),
             AppContext::for_test("device-1", "com.example.game").unwrap(),
-            BTreeMap::new(),
-            None,
             Arc::new(AtomicBool::new(false)),
-            None,
             None,
         )
         .await
         .is_err());
-    }
-
-    /// 生命周期执行器桩：本测试只验证 runner 注册/注销与任务挂起/恢复，
-    /// 永不真正提交运行（run loop 未启动）。
-    struct UnreachableExecutor;
-
-    impl crate::run_manager::RunExecutor for UnreachableExecutor {
-        fn prepare<'a>(
-            &'a self,
-            _context: &'a crate::core::RunContext,
-            _request: &'a crate::core::RunRequest,
-        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<()>> {
-            unreachable!("生命周期测试不应触发真实运行")
-        }
-
-        fn execute<'a>(
-            &'a self,
-            _context: &'a crate::core::RunContext,
-            _request: &'a crate::core::RunRequest,
-            _realtime_logs: bool,
-            _stop: Arc<AtomicBool>,
-        ) -> futures_util::future::BoxFuture<'a, anyhow::Result<Vec<(String, String)>>> {
-            unreachable!("生命周期测试不应触发真实运行")
-        }
-
-        fn acquire(
-            &self,
-            _context: &crate::core::RunContext,
-        ) -> anyhow::Result<Box<dyn crate::core::ActivityLease>> {
-            unreachable!("生命周期测试不应触发真实运行")
-        }
-    }
-
-    /// P11.2 生命周期集成（ADR-13 验收，真实 wasm guest fixture 链路）：
-    /// 裸 Core 无 runner → 安装 fixture 包 → enable（不注册）→ start gamer.yaml
-    /// → runner 注册且 owner=扩展 id → 建 Task → stop：任务进 dependency_missing
-    /// 且数据保留 → 再 start：任务自动回 Active 且 next_wakeup 经 cron 重算。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_extension_lifecycle_binds_and_resumes_the_timer_runner() {
-        let data = tempfile::tempdir().expect("无法创建生命周期测试临时目录");
-        let cfg = crate::config::Config {
-            data_dir: data.path().to_path_buf(),
-            ..Default::default()
-        };
-        let db: crate::store::Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
-        let scripts = Arc::new(crate::resources::PackageStore::open(&cfg).unwrap());
-        let runs = Arc::new(crate::run_manager::RunManager::new(Arc::new(
-            UnreachableExecutor,
-        )));
-        let scheduler = Arc::new(crate::scheduler::Scheduler::new(db.clone()));
-        assert!(
-            scheduler.runners().is_empty(),
-            "裸 Core：扩展 start 之前没有任何 runner"
-        );
-
-        let registrar = Arc::new(
-            crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunnerRegistrar::new(
-                scheduler.clone(),
-                db.clone(),
-                runs.clone(),
-                scripts.clone(),
-            ),
-        );
-        let service = crate::extensions::ExtensionService::for_data_root(
-            data.path(),
-            CapabilityRegistry::default(),
-        )
-        .with_runner_registrar(registrar);
-
-        let mut archive = Vec::new();
-        {
-            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
-            let options = SimpleFileOptions::default();
-            writer.start_file("manifest.toml", options).unwrap();
-            writer
-                .write_all(YAML_EXTENSION_MANIFEST_TOML.as_bytes())
-                .unwrap();
-            writer.start_file("plugin.wasm", options).unwrap();
-            writer.write_all(&guest_component()).unwrap();
-            writer.finish().unwrap();
-        }
-        service.install(&archive).await.unwrap();
-        let id = crate::extensions::ExtensionId::parse(YAML_EXTENSION_ID).unwrap();
-        service.enable(&id).await.unwrap();
-        // enable 不注册 runner：Running 才是生命周期边界
-        assert!(scheduler.runners().is_empty(), "enable 不应注册 runner");
-        service.start(&id).await.unwrap();
-
-        let runners = scheduler.runners();
-        assert_eq!(runners.len(), 1);
-        assert_eq!(runners[0].runner_id, "gamer.yaml");
-        assert_eq!(runners[0].owner_extension_id, "gamer.yaml");
-
-        // 建 Task：Active + 未来唤醒游标 + 用户数据
-        let schedule = crate::timer_core::TaskSchedule::new(
-            "cron",
-            serde_json::json!({"expression": "0 8 * * *"}),
-        )
-        .unwrap();
-        let mut task = crate::timer_core::Task::new(
-            "task-lifecycle",
-            "Lifecycle",
-            AppContext::for_test("device-1", "com.example.game").unwrap(),
-            "gamer.yaml",
-            "com.example.game/daily.yaml",
-            serde_json::json!({"args": {"lives": 3}}),
-            schedule,
-        )
-        .unwrap();
-        task.next_wakeup = Some(chrono::Utc::now() + chrono::Duration::hours(1));
-        db.upsert_timer_task_async(&task).await.unwrap();
-
-        // stop：runner 注销，Active 任务显式挂起，数据原样保留
-        service.stop(&id).await.unwrap();
-        assert!(scheduler.runners().is_empty(), "stop 后 runner 消失");
-        let suspended = db
-            .get_timer_task_async("task-lifecycle")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            suspended.state,
-            crate::timer_core::TaskState::DependencyMissing
-        );
-        assert_eq!(
-            suspended.suspend_reason.as_deref(),
-            Some("missing_dependency=gamer.yaml")
-        );
-        assert!(suspended.enabled, "enabled 用户原意保留");
-        assert_eq!(suspended.entrypoint, "com.example.game/daily.yaml");
-        assert_eq!(suspended.payload["args"]["lives"], 3, "payload 原样保留");
-        assert!(suspended.next_wakeup.is_none(), "挂起即清唤醒游标");
-
-        // 再 start：runner 重注册，任务自动回 Active，唤醒游标经 cron 重算
-        service.start(&id).await.unwrap();
-        let resumed = db
-            .get_timer_task_async("task-lifecycle")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(resumed.state, crate::timer_core::TaskState::Active);
-        assert!(resumed.suspend_reason.is_none());
-        let next = resumed.next_wakeup.expect("恢复必须重算唤醒游标");
-        assert!(
-            next > chrono::Utc::now(),
-            "重算后的唤醒游标是下一次 cron 触发（未来时刻），不是陈旧值"
-        );
-    }
-
-    /// 内存版 `script:` / `function:` 命名空间 resolver（P12.2 e2e 用）：
-    /// 与生产 ScriptProgramResolver 走同一 split_call_target / load_function
-    /// 前端（P12.4 起深度守卫归 guest，resolver 不再介入）。
-    struct MemoryResolver {
-        scripts: BTreeMap<String, String>,
-        functions: BTreeMap<String, String>,
-    }
-
-    impl YamlProgramResolver for MemoryResolver {
-        fn resolve(&self, target: &str, _args: &BTreeMap<String, Value>) -> Result<Program> {
-            let parsed = crate::extensions::gamer_yaml::yaml_vnext::split_call_target(target)
-                .map_err(|diagnostics| anyhow!("call 目标无效: {diagnostics:?}"))?;
-            match parsed {
-                crate::extensions::gamer_yaml::yaml_vnext::CallTarget::Script(id) => {
-                    let source = self
-                        .scripts
-                        .get(&id)
-                        .ok_or_else(|| anyhow!("找不到脚本 {id}"))?;
-                    load(source).map_err(|diagnostics| anyhow!("{diagnostics:?}"))
-                }
-                crate::extensions::gamer_yaml::yaml_vnext::CallTarget::Function {
-                    file,
-                    function,
-                } => {
-                    let source = self
-                        .functions
-                        .get(&file)
-                        .ok_or_else(|| anyhow!("找不到函数文件 {file}"))?;
-                    crate::extensions::gamer_yaml::yaml_vnext::load_function(source, &function)
-                        .map_err(|diagnostics| anyhow!("{diagnostics:?}"))
-                }
-            }
-        }
-    }
-
-    fn log_host(logs: Arc<LogTrace>) -> HostApi {
-        let manifest = crate::extensions::parse_manifest(
-            r#"manifest_version = 2
-id = "gamer.yaml"
-version = "3.0.0"
-name = "YAML vNext"
-entry = "plugin.wasm"
-permissions = ["device.read", "log.write"]
-[host_api]
-device = "^1.0"
-log = "^1.0"
-"#
-            .as_bytes(),
-        )
-        .unwrap();
-        HostApi::for_manifest(
-            CapabilityRegistry::builder()
-                .with_device_service(
-                    Arc::new(Trace::default()) as Arc<dyn crate::capabilities::DeviceService>
-                )
-                .with_log_service(logs as Arc<dyn LogService>)
-                .build(),
-            HostApiCatalog::default(),
-            &manifest,
-        )
-        .unwrap()
-    }
-
-    fn run_request(
-        program: Program,
-        resolver: Option<Arc<dyn YamlProgramResolver>>,
-        host: HostApi,
-        start_index: Option<usize>,
-    ) -> YamlWasmRunRequest {
-        run_request_with_sink(program, resolver, host, start_index, None)
-    }
-
-    /// P12.6 e2e 用：带运行事件汇的请求（sink = 测试收集器）。
-    fn run_request_with_sink(
-        program: Program,
-        resolver: Option<Arc<dyn YamlProgramResolver>>,
-        host: HostApi,
-        start_index: Option<usize>,
-        sink: Option<Arc<dyn crate::core::events::EventSink>>,
-    ) -> YamlWasmRunRequest {
-        YamlWasmRunRequest {
-            wasm: guest_component(),
-            program,
-            args: BTreeMap::new(),
-            resolver,
-            start_index,
-            host,
-            context: AppContext::for_test("device-1", "com.example.game").unwrap(),
-            stop: Arc::new(AtomicBool::new(false)),
-            sink,
-        }
-    }
-
-    /// P12.2 验收（e2e，真实 Component guest）：`call` `function:` 命名空间
-    /// → v3 函数库装载 → object / array 返回值泛化，`save` + `$r.ok` /
-    /// `$arr` 分支正确。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_calls_functions_with_generalized_returns() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let functions = BTreeMap::from([(
-            // 注意：两元素数字数组会被 v3 表达式定型为 Coordinate，故 items
-            // 用三元素数组承载「object 内嵌 array」示例。
-            "lib".to_string(),
-            "fn1:\n  params:\n    - name: flag\n      type: bool\n      default: false\n  steps:\n    - if: {cond: $flag, then: [{return: {ok: true, items: [1, 2, 3]}}]}\n    - return: {ok: false, items: []}\nfn2:\n  steps:\n    - return: [7, 8, 9]\n"
-                .to_string(),
-        )]);
-        let resolver = Arc::new(MemoryResolver {
-            scripts: BTreeMap::new(),
-            functions,
-        });
-
-        // object 返回 + `$r.ok` 分支
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        let program = load(
-            "version: 3\nsteps:\n  - call:\n      target: function:lib/fn1\n      with: {flag: true}\n      save: r\n  - if:\n      cond: $r.ok\n      then:\n        - log: branch-ok\n  - return: $r\n",
-        )
-        .unwrap();
-        let result = runtime
-            .run(run_request(
-                program,
-                Some(resolver.clone()),
-                log_host(logs.clone()),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            result.value,
-            Value::Map(BTreeMap::from([
-                (
-                    "items".to_string(),
-                    Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
-                ),
-                ("ok".to_string(), Value::Bool(true)),
-            ]))
-        );
-        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["branch-ok"]);
-
-        // array 返回 + `$arr` truthy 分支
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        let program = load(
-            "version: 3\nsteps:\n  - call:\n      target: function:lib/fn2\n      save: arr\n  - if:\n      cond: $arr\n      then:\n        - log: arr-nonempty\n  - return: $arr\n",
-        )
-        .unwrap();
-        let result = runtime
-            .run(run_request(
-                program,
-                Some(resolver),
-                log_host(logs.clone()),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            result.value,
-            Value::List(vec![Value::Int(7), Value::Int(8), Value::Int(9)])
-        );
-        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["arr-nonempty"]);
-    }
-
-    /// P12.2 验收（e2e）：`call` `script:` 命名空间带参数；未传参走声明
-    /// 默认值兜底。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_calls_scripts_with_args() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let resolver = Arc::new(MemoryResolver {
-            scripts: BTreeMap::from([(
-                "com.test.app/other.yaml".to_string(),
-                "version: 3\nparams:\n  - name: greeting\n    type: string\n    default: hi\nsteps:\n  - log: $greeting\n  - return: {echo: $greeting}\n"
-                    .to_string(),
-            )]),
-            functions: BTreeMap::new(),
-        });
-
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        let program = load(
-            "version: 3\nsteps:\n  - call:\n      target: script:com.test.app/other.yaml\n      with: {greeting: \"你好\"}\n      save: out\n  - return: $out.echo\n",
-        )
-        .unwrap();
-        let result = runtime
-            .run(run_request(
-                program,
-                Some(resolver.clone()),
-                log_host(logs.clone()),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(result.value, Value::String("你好".into()));
-        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["你好"]);
-
-        // 未传参 → 声明默认值兜底
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        let program = load(
-            "version: 3\nsteps:\n  - call:\n      target: script:com.test.app/other.yaml\n      save: out\n  - return: $out.echo\n",
-        )
-        .unwrap();
-        let result = runtime
-            .run(run_request(
-                program,
-                Some(resolver),
-                log_host(logs.clone()),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(result.value, Value::String("hi".into()));
-        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["hi"]);
-    }
-
-    /// P12.11 验收（计划 §16.5，e2e，真实 Component guest）：正常嵌套链
-    /// A→B→C——call 逐层深入（call_start depth 1/2/3），C 的返回值经 B 的
-    /// `save`/`return` 传播回顶层，日志顺序证明执行链与回归路径完整。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_chains_nested_calls_three_levels_deep() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let sink = EventCollect::new();
-        let resolver = Arc::new(MemoryResolver {
-            scripts: BTreeMap::from([
-                (
-                    "com.test.app/a.yaml".to_string(),
-                    "version: 3\nsteps:\n  - log: a-enter\n  - call:\n      target: script:com.test.app/b.yaml\n      save: b\n  - log: a-exit\n  - return: $b.from_c\n"
-                        .to_string(),
-                ),
-                (
-                    "com.test.app/b.yaml".to_string(),
-                    "version: 3\nsteps:\n  - log: b-enter\n  - call:\n      target: script:com.test.app/c.yaml\n      save: c\n  - return: {from_c: $c}\n"
-                        .to_string(),
-                ),
-                (
-                    "com.test.app/c.yaml".to_string(),
-                    "version: 3\nsteps:\n  - log: c-enter\n  - return: 42\n".to_string(),
-                ),
-            ]),
-            functions: BTreeMap::new(),
-        });
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        let result = runtime
-            .run(run_request_with_sink(
-                load("version: 3\nsteps:\n  - call:\n      target: script:com.test.app/a.yaml\n      save: a\n  - return: $a\n")
-                    .unwrap(),
-                Some(resolver),
-                log_host(logs.clone()),
-                None,
-                Some(sink.clone()),
-            ))
-            .await
-            .unwrap();
-        // C 的返回值经 B（Map 包装）逐层传播回顶层
-        assert_eq!(result.value, Value::Int(42));
-        // 执行链顺序：a-enter → b-enter → c-enter → 回到 a-exit
-        assert_eq!(
-            logs.logs.lock().unwrap().as_slice(),
-            ["a-enter", "b-enter", "c-enter", "a-exit"]
-        );
-        // call 事件逐层递增深度
-        let calls = sink.of("call_start");
-        assert_eq!(
-            calls,
-            vec![
-                serde_json::json!({
-                    "ev": "call_start", "target": "script:com.test.app/a.yaml", "depth": 1
-                }),
-                serde_json::json!({
-                    "ev": "call_start", "target": "script:com.test.app/b.yaml", "depth": 2
-                }),
-                serde_json::json!({
-                    "ev": "call_start", "target": "script:com.test.app/c.yaml", "depth": 3
-                }),
-            ],
-            "嵌套 call 深度事件: {calls:?}"
-        );
-        let ends = sink.of("run_end");
-        assert_eq!(
-            ends.last(),
-            Some(&serde_json::json!({ "ev": "run_end", "ok": true }))
-        );
-    }
-
-    /// P12.4 验收（e2e）：递归 call 超 32 层 → guest 本地 ExecutionBudget
-    /// 报 CALL_DEPTH_EXCEEDED（WIT 不再透传 depth，宿主 resolver 无深度守卫）。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_rejects_recursion_beyond_call_depth_limit() {
-        struct RecursiveResolver;
-
-        impl YamlProgramResolver for RecursiveResolver {
-            fn resolve(&self, _target: &str, _args: &BTreeMap<String, Value>) -> Result<Program> {
-                load("version: 3\nsteps:\n  - call:\n      target: script:self\n")
-                    .map_err(|diagnostics| anyhow!("fixture resolver: {diagnostics:?}"))
-            }
-        }
-
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let program = load("version: 3\nsteps:\n  - call:\n      target: script:self\n").unwrap();
-        let error = runtime
-            .run(run_request(
-                program,
-                Some(Arc::new(RecursiveResolver)),
-                log_host(Arc::new(LogTrace {
-                    logs: Mutex::new(Vec::new()),
-                })),
-                None,
-            ))
-            .await
-            .unwrap_err();
-        assert!(
-            error.to_string().contains("CALL_DEPTH_EXCEEDED"),
-            "递归超限必须报 CALL_DEPTH_EXCEEDED: {error:#}"
-        );
-    }
-
-    /// P12.2 验收（e2e，契约 §8）：program 顶层可选 `start_index` 只跳顶层
-    /// 步骤；缺省 = 从头执行。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_honors_top_level_start_index() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let source = "version: 3\nsteps:\n  - log: first\n  - log: second\n  - return: done\n";
-
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        let result = runtime
-            .run(run_request(
-                load(source).unwrap(),
-                None,
-                log_host(logs.clone()),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(result.value, Value::String("done".into()));
-        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["first", "second"]);
-
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        // start_index = 1：跳过顶层第 0 步（log first），只跑 log second + return。
-        let result = runtime
-            .run(run_request(
-                load(source).unwrap(),
-                None,
-                log_host(logs.clone()),
-                Some(1),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(result.value, Value::String("done".into()));
-        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["second"]);
-    }
-
-    /// P12.4 验收（e2e，ADR-YAML-04）：无 times 空转体 loop → guest 步预算
-    /// 终止，报 STEP_BUDGET_EXCEEDED（确定性、非 trap/栈溢出）。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_terminates_unbounded_loop_with_step_budget_exceeded() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let program = load("version: 3\nsteps:\n  - loop:\n      steps: []\n").unwrap();
-        let error = runtime
-            .run(run_request(
-                program,
-                None,
-                log_host(Arc::new(LogTrace {
-                    logs: Mutex::new(Vec::new()),
-                })),
-                None,
-            ))
-            .await
-            .unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("STEP_BUDGET_EXCEEDED"),
-            "死循环必须以 STEP_BUDGET_EXCEEDED 终止: {message}"
-        );
-        assert!(
-            message.contains("consumed=") && message.contains("max=100000"),
-            "步数错误必须带 consumed/max: {message}"
-        );
-        assert!(
-            !message.contains("call stack exhausted"),
-            "预算终止不是栈溢出 trap: {message}"
-        );
-    }
-
-    /// P12.4 验收（e2e，ADR-YAML-04）：纯计算段（不经 capability 边界）被
-    /// epoch interruption 打断 → CANCELLED。
-    ///
-    /// 确定性设计：单个 `set` 步求值一个 30 万元素字面列表（guest 侧 serde
-    /// 解析 ~14MB program JSON + 列表求值，远超 100ms 纯 wasm 计算），预算
-    /// 不可能在计算完成前耗尽；stop 于 +50ms 置位，ticker 周期 10ms → 首个
-    /// epoch 检查点（≤ ~70ms）必然落在计算中途，由 epoch trap 终止。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_cancels_pure_compute_via_epoch_interruption() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        // 大字面列表：guest 解析 + 求值都是纯 wasm 计算，不产生逻辑步计数。
-        let program = crate::extensions::gamer_yaml::yaml_vnext::Program {
-            version: 3,
-            params: Vec::new(),
-            nonce: None,
-            steps: vec![SmallStep::Set {
-                name: "big".into(),
-                value: Expr::List(vec![Expr::Literal(Value::Int(1)); 300_000]),
-            }],
-        };
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_flip = stop.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            stop_flip.store(true, std::sync::atomic::Ordering::SeqCst);
-        });
-        let error = runtime
-            .run(YamlWasmRunRequest {
-                wasm: guest_component(),
-                program,
-                args: BTreeMap::new(),
-                resolver: None,
-                start_index: None,
-                host: log_host(Arc::new(LogTrace {
-                    logs: Mutex::new(Vec::new()),
-                })),
-                context: AppContext::for_test("device-1", "com.example.game").unwrap(),
-                stop,
-                sink: None,
-            })
-            .await
-            .unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("CANCELLED"),
-            "纯计算段必须被 epoch 取消打断并报 CANCELLED: {message}"
-        );
-        assert!(
-            !message.contains("STEP_BUDGET_EXCEEDED") && !message.contains("CALL_DEPTH_EXCEEDED"),
-            "epoch 取消不应被误报为预算耗尽: {message}"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    use super::tests::{EventCollect, Trace as InputTrace, VisionStub};
-    // P12.5 / P12.7 e2e（真实 Component guest + NativeYamlHost capability 链）
-    // -----------------------------------------------------------------------
-
-    /// e2e 宿主：device/input 走 Trace，vision/resource/frame 走 VisionStub，
-    /// log 走 LogTrace；权限覆盖 vision/timing 链路全部 capability。
-    fn vision_host(stub: &Arc<VisionStub>, input: Arc<InputTrace>, logs: Arc<LogTrace>) -> HostApi {
-        let manifest = crate::extensions::parse_manifest(
-            r#"manifest_version = 2
-id = "gamer.yaml"
-version = "3.0.0"
-name = "YAML vNext"
-entry = "plugin.wasm"
-permissions = ["device.read", "input.tap", "log.write", "vision.match", "resource.read", "runtime.sleep"]
-[host_api]
-device = "^1.0"
-input = "^1.0"
-vision = "^1.0"
-resource = "^1.0"
-runtime = "^1.0"
-log = "^1.0"
-"#
-            .as_bytes(),
-        )
-        .unwrap();
-        HostApi::for_manifest(
-            CapabilityRegistry::builder()
-                .with_device_service(input.clone() as Arc<dyn crate::capabilities::DeviceService>)
-                .with_input_service(input as Arc<dyn crate::capabilities::InputService>)
-                .with_frame_service(stub.clone() as Arc<dyn FrameService>)
-                .with_resource_service(stub.clone() as Arc<dyn ResourceService>)
-                .with_vision_service(stub.clone() as Arc<dyn VisionService>)
-                .with_log_service(logs as Arc<dyn LogService>)
-                .build(),
-            HostApiCatalog::default(),
-            &manifest,
-        )
-        .unwrap()
-    }
-
-    /// P12.7 e2e：threshold 三级优先经真实 guest → capability.invoke →
-    /// NativeYamlHost → TemplateQuery 注入（step 值 > defaults > 缺省省略）。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_injects_resolved_threshold_into_vision_args() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let stub = VisionStub::new(&["a", "b"]);
-        let program = load(
-            "version: 3\ndefaults:\n  vision:\n    threshold: 0.7\nsteps:\n  - check:\n      template: a\n  - check:\n      template: b\n      threshold: 0.95\n",
-        )
-        .unwrap();
-        runtime
-            .run(run_request(
-                program,
-                None,
-                vision_host(
-                    &stub,
-                    Arc::new(InputTrace::default()),
-                    Arc::new(LogTrace {
-                        logs: Mutex::new(Vec::new()),
-                    }),
-                ),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            stub.seen(),
-            vec![
-                ("a".to_string(), Some(0.7), None),
-                ("b".to_string(), Some(0.95), None),
-            ],
-            "check(a) 用 defaults 0.7；check(b) 用 step 0.95"
-        );
-    }
-
-    /// P12.7 e2e：find 命中 → save → then（tap `$reward.center`）→ verify
-    /// 不命中抛 `VERIFY_FAILED: <template>`。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_find_then_tap_chain_and_verify_failure() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let stub = VisionStub::new(&["reward"]);
-        let input = Arc::new(InputTrace::default());
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        let program = load(
-            "version: 3\nsteps:\n  - find:\n      template: reward\n      timeout: 5s\n      save: reward\n      then:\n        - tap: {point: $reward.center}\n        - log: got\n      else:\n        - log: miss\n      verify:\n        template: home\n        timeout: 600ms\n",
-        )
-        .unwrap();
-        let error = runtime
-            .run(run_request(
-                program,
-                None,
-                vision_host(&stub, input.clone(), logs.clone()),
-                None,
-            ))
-            .await
-            .unwrap_err();
-        let message = error.to_string();
-        assert!(
-            message.contains("VERIFY_FAILED: home"),
-            "verify 不命中必须抛 VERIFY_FAILED: {message}"
-        );
-        assert_eq!(
-            input.calls(),
-            vec!["tap:500:250".to_string()],
-            "then 体内 tap $reward.center = 命中框中心相对坐标"
-        );
-        assert_eq!(
-            logs.logs.lock().unwrap().as_slice(),
-            ["got"],
-            "then 执行、else 不执行（未超时）"
-        );
-    }
-
-    /// P12.7 e2e：find 超时（无命中）→ 走 else，不抛错。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_find_timeout_runs_else_branch() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let stub = VisionStub::new(&[]);
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        let program = load(
-            "version: 3\nsteps:\n  - find:\n      template: ghost\n      timeout: 350ms\n      else:\n        - log: gone\n",
-        )
-        .unwrap();
-        let start = std::time::Instant::now();
-        runtime
-            .run(run_request(
-                program,
-                None,
-                vision_host(&stub, Arc::new(InputTrace::default()), logs.clone()),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["gone"]);
-        assert!(
-            start.elapsed() >= std::time::Duration::from_millis(350),
-            "超时前不得提前走 else"
-        );
-    }
-
-    /// P12.7 e2e：match_first 首个命中候选执行自己的 steps，`$match` =
-    /// 该候选结果；候选级 threshold 以 thresholds 平行列表传入。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_match_first_runs_hit_candidate_steps() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let stub = VisionStub::new(&["b"]);
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        let program = load(
-            "version: 3\nsteps:\n  - match_first:\n      candidates:\n        - template: a\n          threshold: 0.6\n          steps:\n            - log: cand-a\n        - template: b\n          steps:\n            - log: cand-b\n            - set: {m: $match}\n  - return: $m.score\n",
-        )
-        .unwrap();
-        let result = runtime
-            .run(run_request(
-                program,
-                None,
-                vision_host(&stub, Arc::new(InputTrace::default()), logs.clone()),
-                None,
-            ))
-            .await
-            .unwrap();
-        // score 经 f32（MatchBox）往返，f64 比较用 1e-6 容差
-        assert!(
-            matches!(result.value, Value::Float(score) if (score - 0.92).abs() < 1e-6),
-            "候选 steps 内 $match = 该候选结果，得到 {:?}",
-            result.value
-        );
-        assert_eq!(logs.logs.lock().unwrap().as_slice(), ["cand-b"]);
-        assert_eq!(
-            stub.seen()
-                .iter()
-                .map(|(name, threshold, _)| (name.clone(), *threshold))
-                .collect::<Vec<_>>(),
-            vec![("a".to_string(), Some(0.6)), ("b".to_string(), None)],
-            "候选级 threshold 经 thresholds 平行列表注入 match_many"
-        );
-    }
-
-    /// P12.5 e2e（契约 §4）：wait 随机区间实际落进 [min, max]（nonce 由
-    /// wasm_host 注入，guest splitmix64 取值，runtime.sleep 真实等待）。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_wait_random_lands_within_range() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        // 先空跑一次预热（debug 构建 WASM 编译可占数秒，混入计时会让上界
-        // 断言失效）；同一 runtime 复用已编译模块后再计时。
-        let warmup = load("version: 3\nsteps:\n  - log: warm\n").unwrap();
-        runtime
-            .run(run_request(
-                warmup,
-                None,
-                vision_host(
-                    &VisionStub::new(&[]),
-                    Arc::new(InputTrace::default()),
-                    Arc::new(LogTrace {
-                        logs: Mutex::new(Vec::new()),
-                    }),
-                ),
-                None,
-            ))
-            .await
-            .unwrap();
-        let program =
-            load("version: 3\nsteps:\n  - wait: {min: 200ms, max: 500ms}\n  - return: done\n")
-                .unwrap();
-        let start = std::time::Instant::now();
-        let result = runtime
-            .run(run_request(
-                program,
-                None,
-                vision_host(
-                    &VisionStub::new(&[]),
-                    Arc::new(InputTrace::default()),
-                    Arc::new(LogTrace {
-                        logs: Mutex::new(Vec::new()),
-                    }),
-                ),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(result.value, Value::String("done".into()));
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed >= std::time::Duration::from_millis(200),
-            "随机等待不得低于下界: {elapsed:?}"
-        );
-        assert!(
-            elapsed <= std::time::Duration::from_millis(700),
-            "随机等待不得显著超出上界（+200ms 调度余量）: {elapsed:?}"
-        );
-    }
-
-    /// P12.5 e2e：timing defaults 经 lower 展开为显式 runtime.sleep —— tap 后
-    /// after_tap 兜底 300ms，defaults 覆盖后取覆盖值。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_timing_defaults_sleep_after_tap() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let logs = Arc::new(LogTrace {
-            logs: Mutex::new(Vec::new()),
-        });
-        // 内置兜底 300ms
-        let program = load("version: 3\nsteps:\n  - tap: [0.5, 0.5]\n").unwrap();
-        let start = std::time::Instant::now();
-        runtime
-            .run(run_request(
-                program,
-                None,
-                vision_host(
-                    &VisionStub::new(&[]),
-                    Arc::new(InputTrace::default()),
-                    logs.clone(),
-                ),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert!(start.elapsed() >= std::time::Duration::from_millis(280));
-
-        // defaults.timing.after_tap 覆盖
-        let program = load(
-            "version: 3\ndefaults:\n  timing:\n    after_tap: 60ms\nsteps:\n  - tap: [0.5, 0.5]\n",
-        )
-        .unwrap();
-        let start = std::time::Instant::now();
-        runtime
-            .run(run_request(
-                program,
-                None,
-                vision_host(
-                    &VisionStub::new(&[]),
-                    Arc::new(InputTrace::default()),
-                    logs.clone(),
-                ),
-                None,
-            ))
-            .await
-            .unwrap();
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed >= std::time::Duration::from_millis(60)
-                && elapsed <= std::time::Duration::from_millis(250),
-            "after_tap 覆盖值必须生效（60ms + 调度余量）: {elapsed:?}"
-        );
-    }
-
-    /// P12.7 e2e：save 变量跨步可用；`$match` 块后复位（不跨块泄漏）。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_find_save_persists_and_match_is_scoped() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let stub = VisionStub::new(&["reward"]);
-        let program = load(
-            "version: 3\nsteps:\n  - find:\n      template: reward\n      save: reward\n  - set: {leak: $match}\n  - return: [$reward.found, $leak]\n",
-        )
-        .unwrap();
-        let result = runtime
-            .run(run_request(
-                program,
-                None,
-                vision_host(
-                    &stub,
-                    Arc::new(InputTrace::default()),
-                    Arc::new(LogTrace {
-                        logs: Mutex::new(Vec::new()),
-                    }),
-                ),
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            result.value,
-            Value::List(vec![Value::Bool(true), Value::Null]),
-            "save 的命名变量跨步可用；块外 $match 复位 null"
-        );
-    }
-
-    // ------------------- P12.6 e2e：运行可视化事件（真实 Component） -------------------
-
-    /// P12.6 e2e（契约 §6 / ADR-YAML-03）：真实 guest 的完整事件序列——
-    /// run_start → step_start/step_end（path + desc）→ vision/hit（宿主侧
-    /// vision capability 补发）→ call_start（被调方帧内 step 续传）→
-    /// run_end(ok:true)；预算内 sleep（after_tap/after_match）静默。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_emits_run_event_sequence() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let sink = EventCollect::new();
-        let resolver = Arc::new(MemoryResolver {
-            scripts: BTreeMap::from([(
-                "com.test.app/helper.yaml".to_string(),
-                "version: 3\nsteps:\n  - log: helper-done\n".to_string(),
-            )]),
-            functions: BTreeMap::new(),
-        });
-        let program = load(
-            "version: 3\ndefaults:\n  timing:\n    after_tap: 1ms\n    after_match: 1ms\nsteps:\n  - log: start\n  - find:\n      template: reward\n      timeout: 2s\n      save: reward\n      then:\n        - tap: {point: $reward.center}\n  - call:\n      target: script:com.test.app/helper.yaml\n",
-        )
-        .unwrap();
-        let stub = VisionStub::new(&["reward"]);
-        runtime
-            .run(run_request_with_sink(
-                program,
-                Some(resolver),
-                vision_host(
-                    &stub,
-                    Arc::new(InputTrace::default()),
-                    Arc::new(LogTrace {
-                        logs: Mutex::new(Vec::new()),
-                    }),
-                ),
-                None,
-                Some(sink.clone()),
-            ))
-            .await
-            .unwrap();
-
-        let kinds = sink.kinds();
-        let shape: Vec<&str> = kinds
-            .iter()
-            .map(|kind| kind["ev"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            shape,
-            vec![
-                "run_start",
-                "step_start",
-                "step_end",
-                "step_start",
-                "vision",
-                "hit",
-                "step_start",
-                "tap",
-                "step_end",
-                "step_end",
-                "step_start",
-                "call_start",
-                "step_start",
-                "step_end",
-                "step_end",
-                "run_end",
-            ],
-            "事件序列: {kinds:?}"
-        );
-        assert_eq!(kinds[0], serde_json::json!({ "ev": "run_start" }));
-        assert_eq!(
-            kinds[1],
-            serde_json::json!({
-                "ev": "step_start", "path": "steps[0]", "desc": "log start"
-            })
-        );
-        assert_eq!(
-            kinds[2],
-            serde_json::json!({ "ev": "step_end", "path": "steps[0]", "ok": true })
-        );
-        assert_eq!(
-            kinds[3],
-            serde_json::json!({
-                "ev": "step_start", "path": "steps[1]", "desc": "find reward"
-            })
-        );
-        assert_eq!(
-            kinds[4]["ev"], "vision",
-            "vision 事件带模板名/分数/相对中心: {:?}",
-            kinds[4]
-        );
-        assert_eq!(kinds[4]["template"], "reward");
-        assert_eq!(kinds[4]["found"], serde_json::json!(true));
-        assert_eq!(kinds[4]["center"], serde_json::json!([0.5, 0.25]));
-        let score = kinds[4]["score"].as_f64().unwrap();
-        assert!(
-            (score - 0.92).abs() < 1e-6,
-            "vision 分数经 f32 往返: {score}"
-        );
-        assert_eq!(
-            kinds[5]["ev"], "hit",
-            "宿主补发 v2 同形 hit 投屏标记: {:?}",
-            kinds[5]
-        );
-        assert_eq!(
-            kinds[6],
-            serde_json::json!({
-                "ev": "step_start", "path": "steps[1].then[0]", "desc": "tap $reward.center"
-            })
-        );
-        assert_eq!(
-            kinds[7],
-            serde_json::json!({ "ev": "tap", "x": 500, "y": 250 }),
-            "宿主补发 v2 同形 tap 投屏标记（像素坐标）: {:?}",
-            kinds[7]
-        );
-        assert_eq!(
-            kinds[10],
-            serde_json::json!({
-                "ev": "step_start", "path": "steps[2]", "desc": "call script:com.test.app/helper.yaml"
-            })
-        );
-        assert_eq!(
-            kinds[11],
-            serde_json::json!({
-                "ev": "call_start", "target": "script:com.test.app/helper.yaml", "depth": 1
-            })
-        );
-        // 被调方帧内 step 事件 path 保持 script-local（call_start 已宣告帧切换）
-        assert_eq!(
-            kinds[12],
-            serde_json::json!({
-                "ev": "step_start", "path": "steps[0]", "desc": "log helper-done"
-            })
-        );
-        assert_eq!(
-            kinds[15],
-            serde_json::json!({ "ev": "run_end", "ok": true })
-        );
-        // 事件不带 run 之外的大对象（无帧数据）
-        assert!(
-            serde_json::to_string(&kinds).unwrap().len() < 4096,
-            "事件载荷必须保持轻量"
-        );
-    }
-
-    /// P12.6 e2e：失败脚本（throw）→ step_end(ok:false,error) + run_end(ok:false)。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_emits_failure_events_on_throw() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let sink = EventCollect::new();
-        let program = load("version: 3\nsteps:\n  - throw: boom\n").unwrap();
-        let error = runtime
-            .run(run_request_with_sink(
-                program,
-                None,
-                log_host(Arc::new(LogTrace {
-                    logs: Mutex::new(Vec::new()),
-                })),
-                None,
-                Some(sink.clone()),
-            ))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("boom"));
-        let kinds = sink.kinds();
-        assert_eq!(
-            kinds,
-            vec![
-                serde_json::json!({ "ev": "run_start" }),
-                serde_json::json!({
-                    "ev": "step_start", "path": "steps[0]", "desc": "throw boom"
-                }),
-                serde_json::json!({
-                    "ev": "step_end", "path": "steps[0]", "ok": false, "error": "boom"
-                }),
-                serde_json::json!({
-                    "ev": "run_end", "ok": false, "error": "boom"
-                }),
-            ],
-            "失败事件序列: {kinds:?}"
-        );
-    }
-
-    /// P12.6 e2e（ADR-YAML-04）：预算终止 → `budget{kind:STEP_BUDGET_EXCEEDED}`
-    /// 先于 run_end(ok:false) 发出（loop 是带 label 的 surface step，进入有
-    /// step_start；轮询/迭代内部静默）。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn yaml_component_emits_budget_event_on_step_budget_exceeded() {
-        let runtime = LazyYamlWasmtimeRuntime::new();
-        let sink = EventCollect::new();
-        let program = load("version: 3\nsteps:\n  - loop:\n      steps: []\n").unwrap();
-        let error = runtime
-            .run(run_request_with_sink(
-                program,
-                None,
-                log_host(Arc::new(LogTrace {
-                    logs: Mutex::new(Vec::new()),
-                })),
-                None,
-                Some(sink.clone()),
-            ))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("STEP_BUDGET_EXCEEDED"));
-        let kinds = sink.kinds();
-        assert_eq!(
-            kinds[0],
-            serde_json::json!({ "ev": "run_start" }),
-            "事件序列: {kinds:?}"
-        );
-        assert_eq!(kinds[1]["ev"], "step_start");
-        assert_eq!(kinds[1]["path"], "steps[0]");
-        assert!(
-            kinds.contains(&serde_json::json!({
-                "ev": "budget", "kind": "STEP_BUDGET_EXCEEDED"
-            })),
-            "必须发出 budget 事件: {kinds:?}"
-        );
-        let budget_index = kinds
-            .iter()
-            .position(|kind| kind["ev"] == "budget")
-            .unwrap();
-        assert_eq!(kinds.last().unwrap()["ev"], "run_end");
-        assert_eq!(kinds.last().unwrap()["ok"], serde_json::json!(false));
-        assert!(kinds.last().unwrap()["error"]
-            .as_str()
-            .unwrap()
-            .contains("STEP_BUDGET_EXCEEDED"));
-        assert!(budget_index + 1 < kinds.len(), "budget 先于 run_end");
     }
 }

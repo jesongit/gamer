@@ -228,8 +228,8 @@ struct SaveDraftRequest {
     overwrite: bool,
 }
 
-/// `automation.save_draft`：草稿文本 → `automations/<name>.yaml`（v3 保存钩子
-/// 强制校验；非 v3 结构化拒绝）。`overwrite=false` 且目标已存在 → 名字冲突。
+/// `automation.save_draft`：草稿文本 → `automations/<name>.yaml`（V1 保存钩子
+/// 强制校验；非法结构结构化拒绝）。`overwrite=false` 且目标已存在 → 名字冲突。
 fn save_draft(values: &Value, data_dir: &Path) -> ExtensionResult<Value> {
     let request: SaveDraftRequest = serde_json::from_value(values.clone()).map_err(|error| {
         rejected(format!(
@@ -251,7 +251,7 @@ fn save_draft(values: &Value, data_dir: &Path) -> ExtensionResult<Value> {
     let rel = validate_relative_name(&with_ext, "name")?;
     let path = format!("automations/{rel}");
     let store = store_for(data_dir)?;
-    // 保存边界 v3 校验（与 REST PUT 同一钩子）；诊断原样回传（结构化数组）。
+    // 保存边界 V1 校验（与 REST PUT 同一钩子）；诊断原样回传（结构化数组）。
     store
         .validate_save(SaveValidation {
             package: &package_id,
@@ -262,7 +262,7 @@ fn save_draft(values: &Value, data_dir: &Path) -> ExtensionResult<Value> {
         })
         .map_err(|diagnostics| {
             rejected(format!(
-                "草稿未通过 YAML v3 校验: {}",
+                "草稿未通过 YAML V1 校验: {}",
                 serde_json::to_string(&diagnostics).unwrap_or_default()
             ))
         })?;
@@ -845,12 +845,12 @@ mod tests {
         );
     }
 
-    /// save_draft：v3 直存、非 v3 拒绝、重名需 overwrite、覆盖成功、id 组装。
+    /// save_draft：V1 直存、非法结构拒绝、重名需 overwrite、覆盖成功、id 组装。
     #[test]
-    fn save_draft_validates_v3_and_enforces_name_conflict() {
+    fn save_draft_validates_v1_and_enforces_name_conflict() {
         let (_store, dir) = temp_store("draft-ok");
-        let v3 = "version: 3\nsteps:\n  - log: 草稿\n";
-        let values = json!({ "package_id": "draft-ok", "name": "daily", "yaml": v3 });
+        let v1 = "run:\n  - log: 草稿\n";
+        let values = json!({ "package_id": "draft-ok", "name": "daily", "yaml": v1 });
         let result = native_call_action(
             YAML_EXTENSION_ID,
             AUTOMATION_SAVE_DRAFT,
@@ -867,7 +867,7 @@ mod tests {
         let on_disk = dir
             .path()
             .join("packages/draft-ok/plugins/gamer.yaml/automations/daily.yaml");
-        assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), v3);
+        assert_eq!(std::fs::read_to_string(&on_disk).unwrap(), v1);
 
         // 重名：无 overwrite 拒绝；带 overwrite 覆盖
         let error = native_call_action(
@@ -881,7 +881,7 @@ mod tests {
         assert!(error.to_string().contains("已存在"), "{error}");
         let mut overwrite = values.clone();
         overwrite["overwrite"] = json!(true);
-        overwrite["yaml"] = json!("version: 3\nsteps:\n  - log: v2\n");
+        overwrite["yaml"] = json!("run:\n  - log: 第二版\n");
         native_call_action(
             YAML_EXTENSION_ID,
             AUTOMATION_SAVE_DRAFT,
@@ -890,12 +890,14 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(std::fs::read_to_string(&on_disk).unwrap().contains("v2"));
+        assert!(std::fs::read_to_string(&on_disk)
+            .unwrap()
+            .contains("第二版"));
 
-        // 非 v3 → v3 版本门禁诊断
+        // 旧 v3 源 → 版本迁移诊断
         let mut legacy = values.clone();
         legacy["name"] = json!("legacy");
-        legacy["yaml"] = json!("steps: []\n");
+        legacy["yaml"] = json!("version: 3\nsteps: []\n");
         let error = native_call_action(
             YAML_EXTENSION_ID,
             AUTOMATION_SAVE_DRAFT,
@@ -904,7 +906,10 @@ mod tests {
         )
         .unwrap()
         .unwrap_err();
-        assert!(error.to_string().contains("yaml.v3.version"), "{error}");
+        assert!(
+            error.to_string().contains("yaml.version.removed"),
+            "{error}"
+        );
 
         // 非法路径段
         let mut evil = values.clone();
@@ -917,7 +922,7 @@ mod tests {
         let error = native_call_action(
             YAML_EXTENSION_ID,
             AUTOMATION_SAVE_DRAFT,
-            &json!({ "name": "x", "yaml": v3 }),
+            &json!({ "name": "x", "yaml": v1 }),
             dir.path(),
         )
         .unwrap()

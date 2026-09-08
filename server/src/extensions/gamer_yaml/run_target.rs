@@ -1,11 +1,13 @@
 //! 运行请求描述（runner 私有 wire，非 DSL 语义）。
 //!
-//! [`RunTarget`] / [`RunSpec`] / [`TypedValue`] / [`BoundEntryArgs`] 描述
-//! 「跑什么、带什么参数」：手动运行、函数测试与定时任务共用同一形态。
-//! 序列化形状是 RunManager payload 的持久化 wire（存量任务行的
-//! `payload.target` / `WireTypedValue` args 依赖它），字段与判别值保持稳定。
+//! [`RunTarget`] / [`RunSpec`] 描述「跑什么、带什么参数」：手动运行、函数
+//! 测试与定时任务共用同一形态。序列化形状是 RunManager payload 的持久化
+//! wire（任务行的 `payload.target` 依赖它）。V1 起参数覆盖为原始 JSON 对象
+//! （类型绑定统一在执行边界按当前 Schema 完成，旧 v3 七类 TypedValue wire
+//! 已删除——开发阶段不兼容旧任务快照）。
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value};
 
 use crate::core::RunContext;
 
@@ -34,13 +36,22 @@ pub enum RunTarget {
 }
 
 impl RunTarget {
-    /// 运行目标所属 Package id（资源解析域：模板/脚本/函数定位与 call 目标
-    /// 归属）。与 Android 包名（app.start/兼容目标，AppContext.android_package）
+    /// 运行目标所属 Package id（资源解析域：模板/脚本/函数定位与调用归属）。
+    /// 与 Android 包名（launch/stop_app 缺省目标，AppContext.android_package）
     /// 是两个命名空间，不互相推导。
     pub fn pkg(&self) -> &str {
         match self {
             RunTarget::Script { script_id, .. } => script_id.split('/').next().unwrap_or_default(),
             RunTarget::Function { pkg, .. } => pkg,
+        }
+    }
+
+    /// 「从此运行」的顶层步序号。
+    pub fn start_index(&self) -> usize {
+        match self {
+            RunTarget::Script { start_index, .. } | RunTarget::Function { start_index, .. } => {
+                *start_index
+            }
         }
     }
 
@@ -99,36 +110,11 @@ impl Serialize for RunTarget {
 pub struct RunSpec {
     pub context: RunContext,
     pub target: RunTarget,
-    /// 稀疏类型化参数覆盖（入口绑定产出；缺省参数由 v3 guest 按声明默认值取值）。
-    pub args: Vec<(String, TypedValue)>,
-}
-
-/// 类型化参数值（七类 wire）：任务参数快照与手动运行实参的统一形态。
-#[derive(Debug, Clone, PartialEq)]
-pub enum TypedValue {
-    /// 模板短名（如 `account.png`）。
-    Tmpl(String),
-    /// 0~1 相对坐标 [x, y]。
-    Coord([f64; 2]),
-    /// 6 位十六进制颜色（无 #，保留书写大小写；比较时统一小写）。
-    Color(String),
-    /// 时间书写串（带单位，>0，如 "800ms"；数值保持书写形式）。
-    Time(String),
-    /// 按键名（如 "ESC"）。
-    Key(String),
-    /// 文本。
-    Text(String),
-    Bool(bool),
-}
-
-/// 稀疏 JSON args 的解析与绑定结果：
-/// - `overrides`：稀疏类型化覆盖（进 [`RunSpec`]，运行开始时按当前声明重绑定）；
-/// - `resolved`：声明默认值 → 覆盖 合并后的全量绑定视图（API 响应
-///   `resolved_args`，展示本次运行实际生效的参数值）。
-#[derive(Debug, Clone)]
-pub struct BoundEntryArgs {
-    pub overrides: Vec<(String, TypedValue)>,
-    pub resolved: serde_json::Value,
+    /// 稀疏原始参数覆盖（执行边界按当前 Schema 绑定）。
+    pub args: JsonMap<String, Value>,
+    /// 未知实参处理：true（手动运行）报 `param.args.unknown`；false（任务
+    /// 快照重绑）静默丢弃——存活值保留、新参数取默认值（计划 Phase 4.2）。
+    pub strict_args: bool,
 }
 
 #[cfg(test)]
@@ -146,6 +132,7 @@ mod tests {
         assert_eq!(json["type"], "script");
         assert_eq!(json["start_index"], 2);
         assert_eq!(serde_json::from_value::<RunTarget>(json).unwrap(), script);
+        assert_eq!(script.start_index(), 2);
 
         let function = RunTarget::Function {
             pkg: "com.a".into(),
@@ -158,6 +145,7 @@ mod tests {
         assert_eq!(json["function"], "greet");
         assert_eq!(serde_json::from_value::<RunTarget>(json).unwrap(), function);
         assert_eq!(function.label(), "com.a/lib.yaml#greet");
+        assert_eq!(function.start_index(), 0);
         assert_eq!(script.label(), "com.a/daily.yaml");
     }
 }

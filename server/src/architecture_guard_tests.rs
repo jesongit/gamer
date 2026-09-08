@@ -194,13 +194,13 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
     },
     Allow {
         file: "main.rs",
-        snippet: "executor.attach_yaml_vnext(",
+        snippet: "executor.attach_yaml_runner(",
         reason: "组合根：v3 适配器装配（EngineExecutor 门面方法，v3 脚本运行必需）",
     },
     // —— 扩展机制文件（extensions/service.rs，非 gamer_yaml 目录）——
     Allow {
         file: "extensions/service.rs",
-        snippet: "gamer.yaml 的 run_yaml_vnext",
+        snippet: "gamer.yaml 的 run_yaml_program",
         reason: "扩展机制 doc 注释：instance_free 模型举例（门面函数名）",
     },
     Allow {
@@ -729,7 +729,7 @@ fn build_app(core: &CoreDeps) -> GuardApp {
         ExtensionService::for_data_root(core.cfg.data_dir.clone(), capabilities)
             .with_runner_registrar(registrar),
     );
-    executor.attach_yaml_vnext(core.packages.clone(), extensions.clone(), None);
+    executor.attach_yaml_runner(core.packages.clone(), extensions.clone(), None);
     let auth = Arc::new(crate::api::auth::AuthState::new(
         test_credential(),
         Default::default(),
@@ -1489,10 +1489,9 @@ async fn architecture_guard_isolation_yaml_task_survives_extension_absence_and_r
     assert!(task["suspend_reason"].is_null());
     assert!(!task["next_wakeup"].is_null());
 
-    // 保存脚本资源（Package API；gamer.yaml 扩展钩子已注册 = v3 校验生效，
-    // 内容为 v3 直接通过）后派发进入执行层：202 + run 记录（不再 424）。
-    let script = "version: 3
-steps:
+    // 保存脚本资源（Package API；gamer.yaml 扩展钩子已注册 = V1 校验生效，
+    // 内容为 V1 直接通过）后派发进入执行层：202 + run 记录（不再 424）。
+    let script = "run:
   - log: guard isolation
 ";
     let (status, created) = post_json(

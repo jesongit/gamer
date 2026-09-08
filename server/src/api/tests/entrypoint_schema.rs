@@ -1,11 +1,12 @@
 use super::*;
 
-// ---------- P12.3：entrypoint 参数 schema API + v3 参数链（POST /api/runs）----------
+// ---------- P12.3：entrypoint 参数 schema API + V1 参数链（POST /api/runs）----------
 //
-// - GET /api/runners/:runner_id/entrypoint?entrypoint=<资源id>：v3 参数
-//   schema（前端不为取参数而解析 YAML）；非 version:3 源 → 版本门禁 invalid。
+// - GET /api/runners/:runner_id/entrypoint?entrypoint=<资源id>：V1 params
+//   schema（`schema` = 参数声明数组：name/type/required/default/desc；前端
+//   不为取参数而解析 YAML）；旧 v3 源（version 字段）→ yaml.version.removed。
 // - POST /api/runs：手动运行参数绑定（缺必填/未知键/类型不符前置 400）；
-//   非 v3 存量源统一版本错误（P12.9 v3-only，无 fallback）。
+//   旧 v3 存量源提交即版本迁移错误（无 fallback）。
 
 fn dispatch_body_for(entrypoint: &str, device_id: &str, payload: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
@@ -86,75 +87,80 @@ fn urlencode(raw: &str) -> String {
     out
 }
 
-/// v3 schema + 非 v3 源版本门禁 + 结构化 not_found/invalid/未知 runner。
+/// V1 schema（参数声明数组）+ 旧 v3 源版本迁移诊断 + not_found/invalid/未知 runner。
 #[tokio::test]
-async fn entrypoint_schema_endpoint_serves_v3_and_gates_legacy_sources() {
+async fn entrypoint_schema_endpoint_serves_v1_and_rejects_legacy_sources() {
     let t = build_app("ep-schema", test_credential("admin123"), Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
-    // v2 形态存量源直写分区（保存边界已拒收 v2，见 write_partition_file 注）：
-    // describe 必须版本门禁拒绝（v3-only，无 fallback）
+    // 显式带 version 的旧 v3 源直写分区（保存边界已拒收，见 write_partition_file 注）：
+    // describe 必须报 yaml.version.removed（V1 无 version 字段，无 fallback）
     write_partition_file(
         &t,
         "automations",
-        "v2daily.yaml",
-        "params:\n  - 'text:msg:消息:\"默认\"'\n  - 'bool:fast:快速'\nsteps:\n  - log: $msg\n",
+        "v3daily.yaml",
+        "version: 3\nparams:\n  - 'text:msg:消息'\nsteps:\n  - log: $msg\n",
     );
     save_resource(
         &t,
         &sid,
         "automations",
-        "v3daily",
-        "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - 'time:wait:等待:2s'\n  - name: count\n    type: int\n    default: 3\nsteps:\n  - log: $msg\n",
+        "v1daily",
+        "params:\n  msg:\n    type: string\n    default: \"默认\"\n    desc: 消息\n  wait:\n    type: duration\n    default: 2s\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n",
     )
     .await;
     save_resource(
         &t,
         &sid,
         "automations",
-        "v3req",
-        "version: 3\nparams:\n  - 'text:secret:密文'\nsteps:\n  - log: $secret\n",
+        "v1req",
+        "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
     )
     .await;
-    // v3 函数库直写分区（bare-map 无 version 键，见 write_partition_file 注）
+    // V1 函数库直写分区
     write_partition_file(
         &t,
         "functions",
         "lib.yaml",
-        "greet:\n  params:\n    - 'text:who:称呼:\"玩家\"'\n    - 'int:times:次数:2'\n  steps:\n    - log: $who\n",
+        "functions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
     );
 
-    // 非 v3 存量脚本 → 版本门禁 invalid（yaml.v3.version，无 fallback）
-    let (status, v2) = describe_entrypoint(&t, &sid, "com.test.app/v2daily.yaml").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{v2}");
-    assert_eq!(v2["error"], "invalid_script");
-    assert!(
-        v2["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "yaml.v3.version"),
-        "非 v3 源必须报版本门禁诊断: {v2}"
-    );
-
-    // v3 脚本：int → integer、string 形态默认值规整、time 保留书写串
+    // 旧 v3 源 → 版本迁移 invalid（yaml.version.removed，无 fallback）
     let (status, v3) = describe_entrypoint(&t, &sid, "com.test.app/v3daily.yaml").await;
-    assert_eq!(status, StatusCode::OK, "{v3}");
-    assert_eq!(v3["schema"]["properties"]["count"]["type"], "integer");
-    assert_eq!(v3["schema"]["properties"]["count"]["default"], 3);
-    assert_eq!(v3["schema"]["properties"]["msg"]["default"], "默认");
-    assert_eq!(v3["schema"]["properties"]["wait"]["type"], "string");
-    assert_eq!(v3["schema"]["properties"]["wait"]["param_type"], "time");
-    assert_eq!(v3["schema"]["properties"]["wait"]["default"], "2s");
-    assert_eq!(v3["schema"]["required"], serde_json::json!([]));
-    assert!(v3["signature"].as_str().unwrap().starts_with("psig1|"));
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v3}");
+    assert_eq!(v3["error"], "invalid_script");
+    assert!(
+        v3["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "yaml.version.removed"),
+        "旧 v3 源必须报版本迁移诊断: {v3}"
+    );
 
-    // v3 必填参数出现在 required
-    let (status, v3req) = describe_entrypoint(&t, &sid, "com.test.app/v3req.yaml").await;
-    assert_eq!(status, StatusCode::OK, "{v3req}");
-    assert_eq!(v3req["schema"]["required"], serde_json::json!(["secret"]));
+    // V1 脚本：参数声明数组（name/type/required/default/desc）
+    let (status, v1) = describe_entrypoint(&t, &sid, "com.test.app/v1daily.yaml").await;
+    assert_eq!(status, StatusCode::OK, "{v1}");
+    assert_eq!(v1["kind"], "script");
+    assert_eq!(v1["format"], "yaml-params-v1");
+    let schema = v1["schema"].as_array().unwrap();
+    assert_eq!(schema.len(), 3);
+    assert_eq!(schema[0]["name"], "msg");
+    assert_eq!(schema[0]["type"], "string");
+    assert_eq!(schema[0]["default"], "默认");
+    assert_eq!(schema[0]["desc"], "消息");
+    assert_eq!(schema[1]["type"], "duration");
+    assert_eq!(schema[1]["default"], "2s");
+    assert_eq!(schema[2]["name"], "count");
+    assert_eq!(schema[2]["type"], "integer");
+    assert!(v1.get("signature").is_none(), "V1 无签名字段");
 
-    // v3 函数库 entrypoint（bare-map，无 version 键）
+    // 必填参数 required: true
+    let (status, v1req) = describe_entrypoint(&t, &sid, "com.test.app/v1req.yaml").await;
+    assert_eq!(status, StatusCode::OK, "{v1req}");
+    assert_eq!(v1req["schema"][0]["required"], serde_json::json!(true));
+
+    // V1 函数库 entrypoint（functions: 包装）
     let (status, greet) = describe_entrypoint(&t, &sid, "com.test.app/lib.yaml#greet").await;
     assert_eq!(status, StatusCode::OK, "{greet}");
     assert_eq!(greet["kind"], "function");
-    assert_eq!(greet["schema"]["properties"]["times"]["type"], "integer");
+    assert_eq!(greet["schema"][1]["type"], "integer");
 
     // 资源缺失 → 结构化 not_found；解析失败 → 400 invalid_script；
     // 未知 runner → 404 runner_not_found
@@ -162,7 +168,7 @@ async fn entrypoint_schema_endpoint_serves_v3_and_gates_legacy_sources() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
     assert_eq!(missing["error"], "not_found");
     // 解析失败 → 400 invalid_script（直写坏源：保存期校验本就会拒绝它）
-    write_partition_file(&t, "automations", "broken.yaml", "version: 3\nparams: []\n");
+    write_partition_file(&t, "automations", "broken.yaml", "run:\n  - if: $x\n");
     let (status, broken) = describe_entrypoint(&t, &sid, "com.test.app/broken.yaml").await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{broken}");
     assert_eq!(broken["error"], "invalid_script");
@@ -172,7 +178,7 @@ async fn entrypoint_schema_endpoint_serves_v3_and_gates_legacy_sources() {
         &sid,
         &format!(
             "/api/runners/no.such%2Frunner/entrypoint?entrypoint={}",
-            urlencode("com.test.app/v3daily.yaml")
+            urlencode("com.test.app/v1daily.yaml")
         ),
     )
     .await;
@@ -180,15 +186,15 @@ async fn entrypoint_schema_endpoint_serves_v3_and_gates_legacy_sources() {
     assert_eq!(json_body(resp).await["error"], "runner_not_found");
 }
 
-/// POST /api/runs v3 脚本手动运行：无参（默认值）/显式传参 202 + resolved_args；
+/// POST /api/runs V1 脚本手动运行：无参（默认值）/显式传参 202 + resolved_args；
 /// 缺必填 / 未知键 / 类型不符前置 400 invalid_args。
 #[tokio::test]
-async fn v3_manual_runs_flow_through_param_bridge() {
-    let t = build_app("ep-v3run", test_credential("admin123"), Default::default());
+async fn v1_manual_runs_flow_through_param_binding() {
+    let t = build_app("ep-v1run", test_credential("admin123"), Default::default());
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
     // 运行目标设备（POST /api/runs 的 Android 上下文严格取设备 pkg）。
-    // d7 未用（沿用原用例的设备编号）；多设备 = 规避设备级单活动运行互斥。
+    // 多设备 = 规避设备级单活动运行互斥。
     for id in ["d1", "d2", "d3", "d4", "d5", "d6", "d8"] {
         seed_device(&t, id, "com.example.game").await;
     }
@@ -197,24 +203,24 @@ async fn v3_manual_runs_flow_through_param_bridge() {
         &t,
         &sid,
         "automations",
-        "v3opt",
-        "version: 3\nparams:\n  - 'text:msg:消息:\"默认\"'\n  - 'bool:fast:快速:false'\n  - 'time:wait:等待:2s'\n  - name: count\n    type: int\n    default: 3\nsteps:\n  - log: $msg\n",
+        "v1opt",
+        "params:\n  msg:\n    type: string\n    default: \"默认\"\n  fast:\n    type: boolean\n    default: false\n  wait:\n    type: duration\n    default: 2s\n  count:\n    type: integer\n    default: 3\nrun:\n  - log: $msg\n",
     )
     .await;
     save_resource(
         &t,
         &sid,
         "automations",
-        "v3req",
-        "version: 3\nparams:\n  - 'text:secret:密文'\nsteps:\n  - log: $secret\n",
+        "v1req",
+        "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
     )
     .await;
-    // v3 函数库直写分区（bare-map，运行参数从目标函数声明解析）
+    // V1 函数库直写分区（函数运行参数从目标函数声明解析）
     write_partition_file(
         &t,
         "functions",
         "lib.yaml",
-        "greet:\n  params:\n    - 'text:who:称呼:\"玩家\"'\n    - 'int:times:次数:2'\n  steps:\n    - log: $who\n",
+        "functions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
     );
 
     // 无参运行：202 + resolved_args 为默认值合并视图
@@ -222,7 +228,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
         &t,
         &sid,
         "/api/runs",
-        dispatch_body_for("com.test.app/v3opt.yaml", "d1", serde_json::json!({})),
+        dispatch_body_for("com.test.app/v1opt.yaml", "d1", serde_json::json!({})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
@@ -240,7 +246,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
         &sid,
         "/api/runs",
         dispatch_body_for(
-            "com.test.app/v3opt.yaml",
+            "com.test.app/v1opt.yaml",
             "d2",
             serde_json::json!({"args": {"msg": "直跑", "fast": true, "wait": "3s"}}),
         ),
@@ -259,7 +265,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
         &t,
         &sid,
         "/api/runs",
-        dispatch_body_for("com.test.app/v3req.yaml", "d3", serde_json::json!({})),
+        dispatch_body_for("com.test.app/v1req.yaml", "d3", serde_json::json!({})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -274,7 +280,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
         &sid,
         "/api/runs",
         dispatch_body_for(
-            "com.test.app/v3req.yaml",
+            "com.test.app/v1req.yaml",
             "d4",
             serde_json::json!({"args": {"secret": "v", "ghost": 1}}),
         ),
@@ -291,7 +297,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
         &sid,
         "/api/runs",
         dispatch_body_for(
-            "com.test.app/v3req.yaml",
+            "com.test.app/v1req.yaml",
             "d5",
             serde_json::json!({"args": {"secret": 123}}),
         ),
@@ -302,7 +308,7 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     assert!(j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"]
         == "param.args.type_mismatch"));
 
-    // v3 函数库 entrypoint（bare-map，函数运行参数从 v3 函数库声明解析）
+    // V1 函数库 entrypoint（函数运行参数从函数声明解析）
     let resp = post_json(
         &t,
         &sid,
@@ -320,36 +326,35 @@ async fn v3_manual_runs_flow_through_param_bridge() {
     assert_eq!(j["resolved_args"]["who"], "函数");
     assert_eq!(j["resolved_args"]["times"], 2);
 
-    // 非 v3 存量脚本（直写分区）：运行提交即版本门禁 400（yaml.v3.version，无 fallback）
+    // 旧 v3 存量脚本（直写分区）：运行提交即版本迁移 400（无 fallback）
     write_partition_file(
         &t,
         "automations",
-        "v2run.yaml",
-        "params:\n  - 'text:msg:消息:\"默认\"'\nsteps:\n  - log: $msg\n",
+        "v3run.yaml",
+        "version: 3\nparams:\n  - 'text:msg:消息'\nsteps:\n  - log: $msg\n",
     );
     let resp = post_json(
         &t,
         &sid,
         "/api/runs",
         dispatch_body_for(
-            "com.test.app/v2run.yaml",
+            "com.test.app/v3run.yaml",
             "d8",
-            serde_json::json!({"args": {"msg": "v2 实参"}}),
+            serde_json::json!({"args": {"msg": "v3 实参"}}),
         ),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let j = json_body(resp).await;
-    assert_eq!(j["error"], "invalid_args");
+    assert_eq!(j["error"], "invalid_script");
     assert!(
-        j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "yaml.v3.version"),
-        "非 v3 脚本手动运行必须报版本门禁: {j}"
+        j["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "yaml.version.removed"),
+        "旧 v3 脚本手动运行必须报版本迁移诊断: {j}"
     );
 
-    // P12.11 偶发防御：本测试派发的 run 无设备可连，后台 prepare 立即失败；
-    // 终态收敛前测试若结束，完成钩子里的 tokio::spawn 可能撞上运行时关停窗口
-    // （tokio is_entered/shutdown 抖动）。逐个轮询到终态再收工（404 容忍重试：
-    // RunManager::finalize 摘注册表与入档案之间存在瞬时不可见间隙）。
+    // 偶发防御：本测试派发的 run 无设备可连，后台 prepare 立即失败；
+    // 逐个轮询到终态再收工（404 容忍重试：RunManager::finalize 摘注册表与
+    // 入档案之间存在瞬时不可见间隙）。
     for run_id in dispatched_runs {
         for _ in 0..200 {
             let resp = get_json(&t, &sid, &format!("/api/runs/{run_id}")).await;
