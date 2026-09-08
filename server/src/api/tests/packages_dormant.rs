@@ -207,16 +207,17 @@ async fn installed_keymap_plugin_starts_directly_on_dormant_data() {
     assert_eq!(installed.status(), StatusCode::CREATED, "{}", json_body(installed).await);
     assert_eq!(json_body(installed).await["state"], "running");
 
-    // 安装即用已 Running：先停回 Enabled，再以 dormant 数据上下文启动
-    let stopped = post_json(&t, &sid, "/api/extensions/gamer.keymap/stop", serde_json::json!({})).await;
+    // 安装即用已 Running：disable（运行中自动 stop → Disabled），再以 dormant
+    // 数据上下文 enable（enable = 启用 + 携带 profile 启动）
+    let stopped = post_json(&t, &sid, "/api/extensions/gamer.keymap/disable", serde_json::json!({})).await;
     assert_eq!(stopped.status(), StatusCode::OK);
 
     // 已有 dormant 数据直接可用：package_id 数据上下文 + 方案名 → Running。
-    // 若导入/后续路径清理过 mappings/，此 start 会因「keymap 方案不存在」失败。
+    // 若导入/后续路径清理过 mappings/，此 enable 会因「keymap 方案不存在」失败。
     let started = post_json(
         &t,
         &sid,
-        "/api/extensions/gamer.keymap/start",
+        "/api/extensions/gamer.keymap/enable",
         serde_json::json!({
             "app_context": {
                 "device_id": "device-1",
@@ -229,14 +230,14 @@ async fn installed_keymap_plugin_starts_directly_on_dormant_data() {
     .await;
     assert_eq!(started.status(), StatusCode::OK, "{}", json_body(started).await);
     assert_eq!(json_body(started).await["state"], "running");
-    let stopped = post_json(&t, &sid, "/api/extensions/gamer.keymap/stop", serde_json::json!({})).await;
+    let stopped = post_json(&t, &sid, "/api/extensions/gamer.keymap/disable", serde_json::json!({})).await;
     assert_eq!(stopped.status(), StatusCode::OK);
 
     // 数据上下文缺失 → 400（android_package 不再承担数据分区语义）
     let missing_context = post_json(
         &t,
         &sid,
-        "/api/extensions/gamer.keymap/start",
+        "/api/extensions/gamer.keymap/enable",
         serde_json::json!({
             "app_context": {
                 "device_id": "device-1",
@@ -257,7 +258,7 @@ async fn installed_keymap_plugin_starts_directly_on_dormant_data() {
     let no_scheme = post_json(
         &t,
         &sid,
-        "/api/extensions/gamer.keymap/start",
+        "/api/extensions/gamer.keymap/enable",
         serde_json::json!({
             "app_context": {
                 "device_id": "device-1",

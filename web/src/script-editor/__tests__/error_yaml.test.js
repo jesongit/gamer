@@ -11,16 +11,16 @@ import { setupScript } from './component_helpers'
  */
 
 const DIAGS = [
-  { code: 'yaml.v3.coord.range', step_path: 'steps[1]', field: 'at', message: '坐标超出 0~1' },
-  { code: 'yaml.v3.resource.tmpl_not_found', step_path: 'steps[0]', field: 'template', message: '模板 a.png 不存在' },
+  { code: 'yaml.field.type', step_path: 'run[1]', field: 'times', message: 'repeat 次数必须是零或正整数' },
+  { code: 'yaml.resource.tmpl_not_found', step_path: 'run[0]', field: 'template', message: '模板 a.png 不存在' },
 ]
 
 describe('ErrorSummary', () => {
   it('渲染 code + step_path + message', () => {
     const wrapper = mount(ErrorSummary, { props: { diagnostics: DIAGS } })
-    expect(wrapper.text()).toContain('yaml.v3.coord.range')
-    expect(wrapper.text()).toContain('steps[1]')
-    expect(wrapper.text()).toContain('坐标超出 0~1')
+    expect(wrapper.text()).toContain('yaml.field.type')
+    expect(wrapper.text()).toContain('run[1]')
+    expect(wrapper.text()).toContain('repeat 次数必须是零或正整数')
     expect(wrapper.text()).toContain('校验结果（2）')
   })
 
@@ -37,63 +37,60 @@ describe('ErrorSummary', () => {
   })
 
   it('接受服务端结构化错误（resource 字段透传）', () => {
-    const serverDiag = { code: 'yaml.v3.call.args_missing_required', message: '必填参数 x 未出现在 with 中', resource: 'sub.yaml', step_path: 'steps[2]', field: 'with' }
+    const serverDiag = { code: 'param.args.missing_required', message: '必填参数 x 未提供', resource: 'sub.yaml', step_path: 'args', field: 'x' }
     const wrapper = mount(ErrorSummary, { props: { diagnostics: [serverDiag] } })
-    expect(wrapper.text()).toContain('yaml.v3.call.args_missing_required')
-    expect(wrapper.text()).toContain('steps[2]')
+    expect(wrapper.text()).toContain('param.args.missing_required')
+    expect(wrapper.text()).toContain('必填参数 x 未提供')
   })
 })
 
 describe('YamlPreview', () => {
   it('展示 codec.serialize 输出（只读 pre）', () => {
     const created = setupScript([
-      'version: 3',
       'params:',
-      "  - 'boolean:enable:开关:true'",
-      'defaults:',
-      '  vision:',
-      '    threshold: 0.85',
-      'steps:',
-      '  - if:',
-      '      cond: $enable',
-      '      then:',
-      '        - tap: [0.5, 0.5]',
+      '  enable:',
+      '    type: boolean',
+      '    default: true',
+      'run:',
+      '  - if: $enable',
+      '    then:',
+      '      - tap: [0.5, 0.5]',
     ].join('\n'))
     const wrapper = mount(YamlPreview, { props: { model: created.model } })
     const pre = wrapper.find('.yaml-pre')
     expect(pre.exists()).toBe(true)
-    expect(pre.text()).toContain('steps:')
-    expect(pre.text()).toContain('cond: $enable')
+    expect(pre.text()).toContain('run:')
+    expect(pre.text()).toContain('if: $enable')
     expect(pre.text()).toContain('tap: [0.5, 0.5]')
-    expect(pre.text()).toContain('threshold: 0.85')
+    expect(pre.text()).toContain('default: true')
     // 无任何输入控件（不可编辑）
     expect(wrapper.find('textarea').exists()).toBe(false)
     expect(wrapper.find('input').exists()).toBe(false)
   })
 
   it('模型变化时预览跟随（serialize 响应式）', async () => {
-    const created = setupScript('version: 3\nsteps:\n  - log: a\n')
+    const created = setupScript('run:\n  - log: a\n')
     const wrapper = mount(YamlPreview, { props: { model: created.model } })
     expect(wrapper.text()).not.toContain('tap')
     created.stack.apply({
       type: 'insert_step',
-      path: ['steps'],
+      path: ['run'],
       index: 1,
-      step: { uuid: 'yaml-preview-test-uuid', kind: 'tap', at: { lit: [0.1, 0.2] } },
+      step: { uuid: 'yaml-preview-test-uuid', kind: 'call', fn: 'tap', args: { kind: 'value', cell: { lit: [0.1, 0.2] } }, as: null },
     })
     await wrapper.vm.$nextTick()
     expect(wrapper.text()).toContain('tap: [0.1, 0.2]')
   })
 
   it('复制按钮可点击（无剪贴板环境走降级不抛错）', async () => {
-    const created = setupScript('version: 3\nsteps:\n  - log: a\n')
+    const created = setupScript('run:\n  - log: a\n')
     const wrapper = mount(YamlPreview, { props: { model: created.model } })
     await wrapper.findAll('button')[0].trigger('click')
     expect(wrapper.text()).toContain('已复制')
   })
 
   it('下载按钮（stub URL.createObjectURL）', async () => {
-    const created = setupScript('version: 3\nsteps:\n  - log: a\n')
+    const created = setupScript('run:\n  - log: a\n')
     const objUrl = 'blob:mock'
     const createObjectURL = vi.fn(() => objUrl)
     const revokeObjectURL = vi.fn()
@@ -106,7 +103,7 @@ describe('YamlPreview', () => {
   })
 
   it('关闭按钮 emit close', async () => {
-    const created = setupScript('version: 3\nsteps:\n  - log: a\n')
+    const created = setupScript('run:\n  - log: a\n')
     const wrapper = mount(YamlPreview, { props: { model: created.model } })
     await wrapper.findAll('button')[2].trigger('click')
     expect(wrapper.emitted('close')).toHaveLength(1)

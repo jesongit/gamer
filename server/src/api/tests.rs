@@ -204,6 +204,12 @@ mod sec_tests {
             "gamer.yaml",
             yaml_runner.entrypoint_describer(),
         );
+        // V1：原生函数目录描述器（与生产 start 生命周期同构）
+        scheduler.register_functions_describer(
+            "gamer.yaml",
+            "gamer.yaml",
+            crate::extensions::gamer_yaml::timer_yaml::YamlTimerRunner::functions_describer(),
+        );
         let auth = Arc::new(auth::AuthState::new(
             credential,
             auth_cfg,

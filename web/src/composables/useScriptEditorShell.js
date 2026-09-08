@@ -158,20 +158,23 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     }
   }
 
-  /** 新建脚本：v3 最小模型（version: 3 落盘 + 空 steps，params/defaults 缺省）。 */
+  /** 新建脚本：V1 最小模型（空 run，name/params/vars 缺省）。 */
   function newScript({ name: n = '新脚本.yml', pkg: p = '' } = {}) {
-    mountModel('script', { model: { version: 3, params: [], defaults: null, steps: [] }, diagnostics: [] }, {
+    mountModel('script', { model: { name: null, params: [], vars: {}, run: [] }, diagnostics: [] }, {
       pkg: p,
       name: ensureYamlExt(n),
     })
   }
 
-  /** 新建函数库（分类）：预置一个空函数（顶层键 = 函数名），画布切换/编辑后保存。
+  /** 新建函数库（分类）：预置一个空函数（functions: 包装），画布切换/编辑后保存。
    *  functionName 指定首函数名（「新建函数」弹窗带入，缺省 func1）。 */
   function newFunctionFile({ file, pkg: p = '', functionName = '' } = {}) {
     const short = String(file || '').replace(/\.yaml$/i, '')
     mountModel('function_library', {
-      model: { file: short, functions: [{ name: functionName || 'func1', params: [], steps: [] }] },
+      model: {
+        file: short,
+        functions: [{ name: functionName || 'func1', description: '', params: [], vars: {}, returns: null, run: [] }],
+      },
       diagnostics: [],
     }, { pkg: p, name: short })
   }

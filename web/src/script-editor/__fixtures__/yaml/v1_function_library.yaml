@@ -1,0 +1,20 @@
+functions:
+  claim_daily:
+    description: 领取每日奖励
+    params:
+      timeout:
+        type: duration
+        default: 5s
+    vars:
+      tag: local
+    returns:
+      type: boolean
+    run:
+      - tap_template:
+          template: daily_button
+          timeout: $timeout
+      - return: true
+  greet:
+    run:
+      - log: hi
+      - return: 42

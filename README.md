@@ -10,10 +10,10 @@
 - ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网低延迟
 - 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先从 H.264 GOP 帧环按需调用 ffmpeg 解码最新帧；无 ffmpeg 时 fallback adb screencap）；固定夹具 benchmark 脚本已兼容 Windows PowerShell 5.1（parser=0），正式跨平台 p50/p95 报告仍在计划中
-- 📜 **YAML 自动化**：YAML v3 唯一脚本方案（非 `version: 3` 一律诊断报错，无旧版兼容）——19 类步骤（app 启停 / tap / swipe / key / text / wait / log / set / if / loop / break / call / return / throw / find / match_first / check / invoke），call 统一 `script:` / `function:` 命名空间并泛化返回值，find 支持 then/else/verify/save 与 `$match` 上下文，defaults 统一视觉阈值与操作节奏，执行预算（max_steps=100k / max_call_depth=32）防脚本失控，运行事件（步骤高亮 / 命中标记）实时回传投屏页面（语法见 [docs/yaml-v3/](docs/yaml-v3/overview.md)），由官方 `gamer.yaml` 扩展承载
+- 📜 **YAML 自动化**：**YAML V1** 唯一脚本方案（Gamer V1 简化收敛；旧 v3/v2 语法一律诊断报错，无兼容分支）——**YAML 只描述流程，一切操作皆函数调用**：步骤只有函数调用 / `if` / `repeat` / `return` 四类，表达式只有字面量与 `$name.field` 引用；函数只有两种来源（插件原生函数 + 当前 Package `functions/` 函数库，同名冲突即拒绝），首版原生函数 tap/swipe/key/input_text/launch/stop_app/sleep/log/find/wait_find/tap_template/wait_disappear/eq…le；执行预算（步数 100k / 调用深度 32）防脚本失控，运行事件（步骤高亮 / 命中标记）实时回传投屏页面（语法见 [docs/reference/YAML.md](docs/reference/YAML.md)），由官方 `gamer.yaml` 扩展承载（唯一权威解释器 `yaml-interp` 与 WASM guest 同源）
 - ⏰ **定时任务**：Task = 任意 ScheduleProvider + 任意 Runner，内置 `cron` 调度 provider + `gamer.yaml` 执行 runner；服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 🧩 **插件化架构**：Core 只含设备/任务/资源/扩展机制等稳定能力，YAML 自动化、按键映射与视频工作台由可安装扩展（`.gplugin`，**免签名安装**——来源标注 + 权限确认 + 官方 sha256 完整性校验）提供，面板随扩展启动/停止出现消失；内置插件市场（官方 registry + 本地/URL 导入），用户可用 [sdk/](sdk/README.md) 开发自己的 WASM 插件；配置资产走 Package（`.gamerpkg`）导入导出
-- 🎬 **视频工作台**：录制或导入视频 → 素材库 → Video Project（标记/校准）→ 精确逐帧（ffprobe 展示序帧表，VFR/B 帧归一）→ 定帧框选建模板 + 离线匹配 → 操作事件生成 YAML v3 草稿保存到自动化（全程不触达设备，由官方 `gamer.video` 扩展承载）
+- 🎬 **视频工作台**：录制或导入视频 → 素材库 → Video Project（标记/校准）→ 精确逐帧（ffprobe 展示序帧表，VFR/B 帧归一）→ 定帧框选建模板 + 离线匹配 → 操作事件生成 YAML V1 草稿保存到自动化（全程不触达设备，由官方 `gamer.video` 扩展承载）
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
 > 当前仓库提供 Windows x64 完整包的 launcher 入口（`doctor` / `status` / `repair` / `start` / `upgrade`）和 launcher 托管更新 API。本文只记录仓库中已有的入口；不把 GitHub Release、生产升级/回滚或真实设备 E2E 当作已完成的外部结果。Docker/直跑模式的更新仍由外部部署管理。
@@ -258,8 +258,9 @@ Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`�
 
 ## YAML 脚本语法
 
-YAML 自动化脚本为 **v3 唯一版本**（`version: 3`，无旧版兼容与迁移工具），完整语法、参数说明和详细示例见 **[docs/yaml-v3/](docs/yaml-v3/overview.md)** 文档套件（program / params / steps / expressions / call / vision / timing / runtime / examples），单文件正文见 [docs/reference/YAML.md](docs/reference/YAML.md) §3。
-可执行脚本、函数库和模板按 Package 存放在 `data/packages/<package-id>/plugins/gamer.yaml/{automations,functions,templates}/`（REST 走通用 Package 资源 API `/api/packages/:pkg/plugins/gamer.yaml/resources[/*path]`；Console 的模板/自动化面板由 `gamer.yaml` 扩展提供，框选/上传模板即用）。
+YAML 自动化脚本为 **V1 唯一版本**（无 `version` 字段，旧 v3/v2 语法无兼容与迁移工具），完整语法与示例见 **[docs/reference/YAML.md](docs/reference/YAML.md)**。
+核心模型：步骤 = 函数调用 / `if` / `repeat` / `return`；表达式 = 字面量 / `$name.field`；函数 = 插件原生函数 + 当前 Package `functions/` 函数库（两种来源同名即冲突）；执行预算与取消机制保留。
+可执行脚本、函数库和模板按 Package 存放在 `data/packages/<package-id>/plugins/gamer.yaml/{automations,functions,templates}/`（REST 走通用 Package 资源 API `/api/packages/:pkg/plugins/gamer.yaml/resources[/*path]`；Console 的模板/自动化面板由 `gamer.yaml` 扩展提供，框选/上传模板即用；原生函数目录见 `GET /api/runners/gamer.yaml/functions`）。
 
 ## API 一览
 
@@ -307,7 +308,7 @@ YAML 自动化脚本为 **v3 唯一版本**（`version: 3`，无旧版兼容与�
 | WS | /ws/device/:id | WebRTC 信令（offer → answer） |
 
 执行以 `run_id` 标识一次运行实例。统一执行入口（`POST /api/runs`）、函数测试或“立即运行任务”采用异步返回：
-接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同 runner 并发控制同一设备。脚本/函数保存、运行和任务保存共用 v3 校验（由 `gamer.yaml` 扩展承载），失败返回结构化诊断；非 `version: 3` 一律报 `yaml.v3.version` 诊断（unsupported yaml version），无旧版 fallback。
+接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同 runner 并发控制同一设备。脚本/函数保存、运行和任务保存共用 V1 校验（由 `gamer.yaml` 扩展承载），失败返回结构化诊断；旧 `version: 3` 源一律报 `yaml.version.removed` 迁移诊断，无旧版 fallback。
 
 ## 技术要点
 

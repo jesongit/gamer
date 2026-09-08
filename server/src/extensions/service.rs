@@ -567,6 +567,10 @@ impl ExtensionService {
         self.snapshot_for(id)
     }
 
+    /// 低层状态转移：Installed/Disabled/Failed → Enabled（不启动实例、不注册
+    /// runner）。公开 REST 的「启用」走 [`Self::enable_and_start`]；本方法保留
+    /// 给 reconcile 与测试作生命周期原语（计划 Phase 5：内部保留 start/stop
+    /// 实现方法）。
     pub(crate) async fn enable(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
         let _guard = self.operation_lock.lock().await;
         let mut states = self.store.read_state()?;
@@ -584,6 +588,41 @@ impl ExtensionService {
         self.store.write_state(&states)?;
         self.refresh_ui_registry()?;
         self.snapshot_for(id)
+    }
+
+    /// 用户「启用」（V1 计划 Phase 5）：用户操作只有 安装/启用/禁用/更新/卸载——
+    /// enable 即表达「我要它工作」，落 Enabled 后**直接启动**（enable → start
+    /// 一体化，幂等：Running 时直接返回现状）；启动失败降级 Failed + last_error，
+    /// 保留启用意图可重试。`app_context` / `keymap_profile` 与原 start 数据
+    /// 通道同形（keymap 专用 profile）。
+    pub(crate) async fn enable_and_start(
+        &self,
+        id: &ExtensionId,
+        app_context: Option<crate::core::AppContext>,
+        keymap_profile: Option<String>,
+    ) -> ExtensionResult<ExtensionSnapshot> {
+        {
+            let _guard = self.operation_lock.lock().await;
+            let mut states = self.store.read_state()?;
+            let versions = self.versions_for(id)?;
+            let mut record = state_for_versions(id, &versions, states.get(id).cloned())?;
+            match record.state {
+                ExtensionState::Running => {
+                    // 已在运行：启用意图已满足，直接返回现状（幂等）
+                    return self.snapshot_for(id);
+                }
+                ExtensionState::Installed | ExtensionState::Disabled | ExtensionState::Failed => {
+                    record.state = ExtensionState::Enabled;
+                    record.last_error = None;
+                }
+                ExtensionState::Enabled => {}
+            }
+            states.insert(id.clone(), record);
+            self.store.write_state(&states)?;
+            self.refresh_ui_registry()?;
+        }
+        self.start_with_context(id, app_context, keymap_profile)
+            .await
     }
 
     /// Disable an extension.  A Running instance is stopped first (ADR-13

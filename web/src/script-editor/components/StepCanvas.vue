@@ -101,7 +101,6 @@
     <div v-if="panelOpen" class="add-dropdown-wrap" @click.stop>
       <AddStepPanel
         :style="addMenuStyle"
-        :context="context"
         :stack="stack"
         :anchor="anchor"
         :target-label="anchorLabel"
@@ -122,8 +121,6 @@
       :highlight-uuid="highlightUuid"
       :expanded-uuids="expandedUuids"
       :params="cellParams"
-      :context="context"
-      :resolve-target="resolveTarget"
       :templates="templates"
       :test-from="testFromActive"
       @select="onSelect"
@@ -154,7 +151,7 @@ import { resolveStepList } from '../commands'
 import { breadcrumb, defaultAnchor, rootContainerPath } from '../selection'
 import type { BreadcrumbNode } from '../selection'
 import type { Diagnostic } from '../diagnostics'
-import type { ParamDecl, ScriptModel } from '../model'
+import type { ParamDecl, Program } from '../model'
 import { containerNesting, basePathOfContainer, breadcrumbForContainer, locateDiagnostic } from './kinds'
 import BranchContainer from './BranchContainer.vue'
 import AddStepPanel from './AddStepPanel.vue'
@@ -164,20 +161,15 @@ const props = defineProps({
   model: { type: Object as PropType<EditorModel>, required: true },
   stack: { type: Object as PropType<{ apply: (c: unknown, n?: string) => boolean }>, required: true },
   diagnostics: { type: Array as PropType<Diagnostic[]>, default: () => [] },
-  /** 受控选中（阶段 4 页面用）；不传则画布内部持有。 */
+  /** 受控选中（页面用）；不传则画布内部持有。 */
   selectedUuid: { type: String, default: null },
-  context: { type: String as PropType<'script' | 'function'>, default: 'script' },
-  resolveTarget: {
-    type: Function as PropType<((target: string) => { params: ParamDecl[] } | null) | undefined>,
-    default: undefined,
-  },
   /** 模板短名候选（tmpl 控件 datalist）。 */
   templates: { type: Array as PropType<string[]>, default: () => [] },
   /** 渲染 ErrorSummary 并接管定位联动。 */
   showErrorPanel: { type: Boolean, default: false },
   /** CellEditor 的参数引用列表；缺省时按模型自动取（脚本 = 文件级，函数库 = 当前函数）。 */
   params: { type: Array as PropType<ParamDecl[]>, default: null as unknown as ParamDecl[] },
-  /** 开启「从此步骤测试函数」入口（阶段 5）：仅函数库页签 + 当前容器为函数体根时生效。 */
+  /** 开启「从此步骤测试函数」入口：仅函数库页签 + 当前容器为函数体根时生效。 */
   testFrom: { type: Boolean, default: false },
   /** 进入时聚焦的函数名（Console 摘要区逐函数「编辑」/ func 跳转直达）；空或不存在回退默认。 */
   initialFn: { type: String, default: '' },
@@ -222,10 +214,10 @@ const focusHistory = ref<Path[]>([])
 
 /** 根路径必须是当前编辑函数的函数体，而不是函数库中的第一个函数。 */
 const rootPath = computed<Path>(() => {
-  if (!isFunction.value) return ['steps']
+  if (!isFunction.value) return ['run']
   const currentFn = String(currentContainer.value[1] ?? '')
   const name = fnNames.value.includes(currentFn) ? currentFn : (fnNames.value[0] ?? '')
-  return ['functions', name, 'steps']
+  return ['functions', name, 'run']
 })
 
 function samePath(a: Path, b: Path): boolean {
@@ -239,7 +231,7 @@ watch(
     // 外壳指定进入函数：命中则画布直接落在该函数体（Model 复位与聚焦一次完成）
     const want = props.initialFn
     if (want && isFunction.value && fnNames.value.includes(want)) {
-      currentContainer.value = ['functions', want, 'steps']
+      currentContainer.value = ['functions', want, 'run']
     }
     focusPath.value = null
     focusHistory.value = []
@@ -252,7 +244,7 @@ watch(
 function sanitize(path: Path | null | undefined): Path {
   if (path) {
     if (path[0] === 'functions' && isFunction.value && fnNames.value.includes(String(path[1]))) return path
-    if (path[0] === 'steps' && !isFunction.value) return path
+    if (path[0] === 'run' && !isFunction.value) return path
   }
   return rootPath.value
 }
@@ -262,7 +254,7 @@ const activeFnName = computed(() => (isFunction.value ? String(activeContainer.v
 // 测试入口仅出现在函数体根容器（专注视图进入深层分支后隐藏——start_index 只映射函数体顶层）
 const testFromActive = computed(() =>
   props.testFrom && isFunction.value
-  && activeContainer.value.length === 3 && activeContainer.value[2] === 'steps')
+  && activeContainer.value.length === 3 && activeContainer.value[2] === 'run')
 const activeLabel = computed(() => {
   const nodes = breadcrumbForContainer(props.model, activeContainer.value)
   return nodes.length ? nodes[nodes.length - 1]!.label : '主流程'
@@ -321,7 +313,7 @@ function goBack(): void {
 function switchFn(name: string): void {
   focusPath.value = null
   focusHistory.value = []
-  currentContainer.value = ['functions', name, 'steps']
+  currentContainer.value = ['functions', name, 'run']
   innerSelected.value = null
   emit('select', null)
 }
@@ -356,7 +348,7 @@ function confirmRename(): void {
   if (props.stack.apply({ type: 'rename_function', from: current, to }, `重命名函数 ${current} → ${to}`)) {
     focusPath.value = null
     focusHistory.value = []
-    currentContainer.value = ['functions', to, 'steps']
+    currentContainer.value = ['functions', to, 'run']
     innerSelected.value = null
     emit('select', null)
   }
@@ -372,7 +364,7 @@ function addFunction(): void {
   if (props.stack.apply({ type: 'insert_function', name }, `新增函数 ${name}`)) {
     focusPath.value = null
     focusHistory.value = []
-    currentContainer.value = ['functions', name, 'steps']
+    currentContainer.value = ['functions', name, 'run']
     innerSelected.value = null
     emit('select', null)
   }
@@ -382,7 +374,7 @@ function addFunction(): void {
 function removeActiveFn(): void {
   if (!isFunction.value || fnNames.value.length <= 1) return
   const name = activeFnName.value
-  if (!name || !window.confirm(`删除函数 ${name}？（其 params 与 steps 一并移除，可撤销）`)) return
+  if (!name || !window.confirm(`删除函数 ${name}？（其 params 与 run 一并移除，可撤销）`)) return
   if (props.stack.apply({ type: 'remove_function', name }, `删除函数 ${name}`)) {
     focusPath.value = null
     focusHistory.value = []
@@ -669,7 +661,7 @@ const cellParams = computed<ParamDecl[]>(() => {
     const fn = fns.find((f) => f.name === activeFnName.value)
     return fn ? fn.params : []
   }
-  return (props.model as ScriptModel).params
+  return (props.model as Program).params
 })
 
 const rootEl = ref<HTMLElement | null>(null)

@@ -232,9 +232,7 @@ async fn plugin_states_track_installed_extension_lifecycle() {
         .unwrap();
     assert_eq!(entry["state"], "available");
 
-    // stop（Running → Enabled）仍 available；disable（→ Disabled）→ disabled
-    let stopped = post_json(&t, &sid, "/api/extensions/gamer.keymap/stop", serde_json::json!({})).await;
-    assert_eq!(stopped.status(), StatusCode::OK);
+    // disable（运行中自动 stop → Disabled）→ 插件状态 disabled
     let disabled = post_json(&t, &sid, "/api/extensions/gamer.keymap/disable", serde_json::json!({})).await;
     assert_eq!(disabled.status(), StatusCode::OK);
     let detail = get_json(&t, &sid, "/api/packages/official.hsr.daily").await;

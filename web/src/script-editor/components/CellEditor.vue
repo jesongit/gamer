@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="cell-editor" :class="{ 'cell-error': !!(error || selfError), 'is-ref': isRef }" :title="error || selfError || undefined">
     <div v-if="allowRef" class="cell-mode" role="group" aria-label="取值方式">
       <button
@@ -191,12 +191,12 @@ function nextListId(): number {
 import { computed, inject, ref } from 'vue'
 import type { PropType } from 'vue'
 import { pinyin } from 'pinyin-pro'
-import { isRefCell, type Cell, type CellType, type ParamDecl } from '../model'
-import { checkCellLiteral, isRefPath, KEY_ENUM, TIME_UNITS } from '../schema'
+import { isRefCell, type Cell, type ParamDecl } from '../model'
+import { checkLiteral, isRefPath, KEY_ENUM, TIME_UNITS } from '../schema'
 
 const props = defineProps({
   cell: { type: Object as PropType<Cell>, required: true },
-  type: { type: String as PropType<CellType>, required: true },
+  type: { type: String, required: true },
   /** 可引用的参数声明（引用联想；v3 不按类型过滤）。 */
   params: { type: Array as PropType<ParamDecl[]>, default: () => [] },
   /** 默认值编辑等场景禁止切引用。 */
@@ -270,7 +270,7 @@ const selfError = computed(() => {
   if (isRef.value) {
     return isRefPath(props.cell.ref) ? '' : `引用 $${props.cell.ref} 不是合法属性路径`
   }
-  return checkCellLiteral(props.type, props.cell.lit)?.message ?? ''
+  return checkLiteral(props.type, props.cell.lit)?.message ?? ''
 })
 
 // ---- tmpl 自定义下拉（悬停行内预览缩略图，缩略图 URL 由页面外壳 provide('tplPreviewUrl') 注入） ----

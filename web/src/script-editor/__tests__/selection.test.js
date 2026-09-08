@@ -1,135 +1,61 @@
 import { describe, expect, it } from 'vitest'
-import { parseScript } from '../codec'
-import {
-  findStepLocation,
-  findStep,
-  stepPathOf,
-  defaultAnchor,
-  breadcrumb,
-  startIndexMap,
-  startIndexOf,
-  rootContainerPath,
-  pathToString,
-} from '../selection'
+import { parseFunctionLibrary, parseScript } from '../codec'
+import { allocateUuids } from '../model'
+import { breadcrumb, defaultAnchor, findStepLocation, rootContainerPath, startIndexMap, startIndexOf, containerLabel, cellDisplay } from '../selection'
 
-/**
- * 选择与插入：uuid ↔ 路径互查、插入锚点、面包屑、start_index 映射。
- */
-
-const NESTED = `version: 3
-steps:
-  - match_first:
-      candidates:
-        - template: test1.png
-          steps:
-            - if: {cond: true, then: [{log: 深}]}
-      else:
-        - log: 兜底
-`
-
-describe('selection：uuid ↔ 路径互查', () => {
-  it('顶层与深层嵌套都能定位，step_path 与 validation 字符串形态一致', () => {
-    const { model } = parseScript(NESTED)
-    const matchStep = model.steps[0]
-    const ifStep = matchStep.candidates[0].steps[0]
-    const deepLog = ifStep.then[0]
-
-    const loc1 = findStepLocation(model, matchStep.uuid)
-    expect(loc1.path).toEqual(['steps', 0])
-    expect(loc1.stepPath).toBe('steps[0]')
-    expect(loc1.containerPath).toEqual(['steps'])
-
-    const loc2 = findStepLocation(model, deepLog.uuid)
-    // 路径语法：候选分支容器 = [..., 'candidates', n]；候选内步骤再带自身下标段。
-    expect(loc2.path).toEqual(['steps', 0, 'candidates', 0, 0, 'then', 0])
-    // step_path 字符串形态（surface 稳定路径语法）：candidates 段带 .steps。
-    expect(loc2.stepPath).toBe('steps[0].candidates[0].steps[0].then[0]')
-    expect(loc2.containerPath).toEqual(['steps', 0, 'candidates', 0, 0, 'then'])
-    expect(loc2.list).toBe(ifStep.then)
-
-    expect(findStep(model, deepLog.uuid)).toBe(deepLog)
-    expect(stepPathOf(model, deepLog.uuid)).toBe('steps[0].candidates[0].steps[0].then[0]')
-    expect(stepPathOf(model, '不存在')).toBeNull()
-  })
-})
-
-describe('selection：插入锚点', () => {
-  it('选中步骤 → 同容器其后；未选中 → 当前容器末尾', () => {
-    const { model } = parseScript(NESTED)
-    const matchStep = model.steps[0]
-    const anchor1 = defaultAnchor(model, matchStep.uuid)
-    expect(anchor1).toEqual({ containerPath: ['steps'], index: 1 })
-
-    const anchor2 = defaultAnchor(model, null)
-    expect(anchor2).toEqual({ containerPath: ['steps'], index: 1 })
-
-    const ifStep = matchStep.candidates[0].steps[0]
-    const anchor3 = defaultAnchor(model, ifStep.uuid)
-    expect(anchor3).toEqual({ containerPath: ['steps', 0, 'candidates', 0], index: 1 })
-
-    // 显式当前容器（面包屑切到分支内）
-    const anchor4 = defaultAnchor(model, null, ['steps', 0, 'candidates', 0])
-    expect(anchor4.index).toBe(1)
+describe('V1 selection / paths', () => {
+  it('rootContainerPath: script run vs function body', () => {
+    const script = parseScript('run: []\n').model
+    expect(rootContainerPath(script)).toEqual(['run'])
+    const lib = parseFunctionLibrary('functions:\n  a:\n    run: []\n').model
+    expect(rootContainerPath(lib)).toEqual(['functions', 'a', 'run'])
   })
 
-  it('脚本根容器', () => {
-    const lib = parseScript('version: 3\nsteps: []\n').model
-    expect(rootContainerPath(lib)).toEqual(['steps'])
-  })
-})
-
-describe('selection：面包屑', () => {
-  it('主流程 / 命中 test1.png / 如果为真 / 都未命中', () => {
-    const { model } = parseScript(NESTED)
-    const ifStep = model.steps[0].candidates[0].steps[0]
-    const deepLog = ifStep.then[0]
-    const crumbs = breadcrumb(model, deepLog.uuid)
-    expect(crumbs.map((c) => c.label)).toEqual(['主流程', '命中 test1.png', '如果为真'])
-    expect(crumbs[0].stepUuid).toBeNull()
-    expect(crumbs[1].containerPath).toEqual(['steps', 0, 'candidates', 0])
-    expect(crumbs[2].containerPath).toEqual(['steps', 0, 'candidates', 0, 0, 'then'])
-
-    // else 容器
-    const elseStep = model.steps[0].else[0]
-    expect(breadcrumb(model, elseStep.uuid).map((c) => c.label)).toEqual(['主流程', '都未命中'])
+  it('findStepLocation returns run-based step_path', () => {
+    const model = parseScript('run:\n  - if: $x\n    then:\n      - log: yes\n').model
+    allocateUuids(model.run)
+    const ifLoc = findStepLocation(model, model.run[0].uuid)
+    expect(ifLoc.stepPath).toBe('run[0]')
+    const logLoc = findStepLocation(model, model.run[0].then[0].uuid)
+    expect(logLoc.stepPath).toBe('run[0].then[0]')
   })
 
-  it('find/loop 容器命名', () => {
-    const { model } = parseScript(`version: 3
-steps:
-  - find:
-      template: a.png
-      then:
-        - log: 命中
-      else:
-        - log: 兜
-  - loop:
-      steps:
-        - log: 体
-`)
-    const findStep0 = model.steps[0]
-    expect(breadcrumb(model, findStep0.then[0].uuid).map((c) => c.label)).toEqual(['主流程', '命中后'])
-    expect(breadcrumb(model, findStep0.else[0].uuid).map((c) => c.label)).toEqual(['主流程', '超时未命中'])
-    const loopStep = model.steps[1]
-    expect(breadcrumb(model, loopStep.steps[0].uuid).map((c) => c.label)).toEqual(['主流程', '循环体'])
+  it('breadcrumb labels use V1 container names', () => {
+    const model = parseScript('run:\n  - if: $x\n    then:\n      - repeat: 2\n        do:\n          - log: t\n').model
+    allocateUuids(model.run)
+    const logUuid = model.run[0].then[0].body[0].uuid
+    const nodes = breadcrumb(model, logUuid)
+    expect(nodes.map((n) => n.label)).toEqual(['主流程', '如果为真', '循环体'])
   })
-})
 
-describe('selection：start_index 映射', () => {
-  it('顶层步骤 → 0 基序号；嵌套步骤不在映射内', () => {
-    const { model } = parseScript(NESTED)
-    const map = startIndexMap(model)
-    expect(map).toEqual([{ uuid: model.steps[0].uuid, index: 0 }])
-    expect(startIndexOf(model, model.steps[0].uuid)).toBe(0)
-    const ifStep = model.steps[0].candidates[0].steps[0]
-    expect(startIndexOf(model, ifStep.uuid)).toBeNull()
+  it('containerLabel V1 set', () => {
+    const model = parseScript('run:\n  - repeat: 1\n    do: []\n').model
+    allocateUuids(model.run)
+    expect(containerLabel(model.run[0], 'body')).toBe('循环体')
+    expect(containerLabel(null, '', '主流程')).toBe('主流程')
   })
-})
 
-describe('selection：路径展示', () => {
-  it('pathToString', () => {
-    expect(pathToString(['steps'])).toBe('steps')
-    expect(pathToString(['steps', 0, 'then', 1])).toBe('steps[0].then[1]')
-    expect(pathToString(['functions', 'login', 'steps', 2])).toBe('functions.login.steps[2]')
+  it('defaultAnchor uses selection then container end', () => {
+    const model = parseScript('run:\n  - log: a\n  - log: b\n').model
+    allocateUuids(model.run)
+    const anchor = defaultAnchor(model, model.run[0].uuid)
+    expect(anchor).toEqual({ containerPath: ['run'], index: 1 })
+    const end = defaultAnchor(model, null)
+    expect(end.index).toBe(2)
+  })
+
+  it('startIndexMap covers script top-level and function bodies', () => {
+    const script = parseScript('run:\n  - log: a\n  - log: b\n').model
+    allocateUuids(script.run)
+    expect(startIndexOf(script, script.run[1].uuid)).toBe(1)
+    const lib = parseFunctionLibrary('functions:\n  f:\n    run:\n      - log: x\n').model
+    allocateUuids(lib.functions[0].run)
+    expect(startIndexOf(lib, lib.functions[0].run[0].uuid)).toBe(0)
+    expect(startIndexMap(lib)).toHaveLength(1)
+  })
+
+  it('cellDisplay shows $refs and arrays', () => {
+    expect(cellDisplay({ ref: 'home.center' })).toBe('$home.center')
+    expect(cellDisplay({ lit: [0.5, 0.5] })).toBe('[0.5, 0.5]')
   })
 })

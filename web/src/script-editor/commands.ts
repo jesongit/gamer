@@ -5,12 +5,11 @@
  *   原样放回，uuid 天然稳定）；
  * - 支持事务合并：begin→多次 apply→commit，一次事务 = 一条历史 = 一次 undo；
  *   abort 回滚本事务已应用的部分且不进历史；
- * - 命令路径用数组寻址（如 ['steps', 0, 'then', 1]），函数库支持 ['functions', 'login', 'steps', 0]。
+ * - 命令路径用数组寻址（如 ['run', 0, 'then', 1]），函数库支持 ['functions', 'login', 'run', 0]。
  */
 
 import {
   cloneStepWithNewUuids,
-  type DefaultsModel,
   type FunctionLibraryModel,
   type FunctionModel,
   type ParamDecl,
@@ -20,7 +19,7 @@ import {
 
 // ---------- 路径与文档 ----------
 
-/** 路径段：对象键（'steps'/'then'/'functions'/函数名）或数组下标。 */
+/** 路径段：对象键（'run'/'then'/'functions'/函数名）或数组下标。 */
 export type PathSeg = string | number
 export type Path = PathSeg[]
 
@@ -31,54 +30,39 @@ export function clonePath(path: Path): Path {
   return [...path]
 }
 
-/**
- * 步骤子列表键 → 对应数组；不存在的键返回 undefined。
- * 'candidates' 与候选下标成对出现（['…', 'candidates', n]），由 resolveStepList 特判。
- */
-function stepChildList(step: Step, key: string, candidateIndex = -1): Step[] | undefined {
+/** 步骤子列表键 → 对应数组；不存在的键返回 undefined。 */
+function stepChildList(step: Step, key: string): Step[] | undefined {
   switch (key) {
     case 'then':
-      return 'then' in step ? (step as { then: Step[] }).then : undefined
+      return step.kind === 'if' ? step.then : undefined
     case 'else':
-      return 'else' in step ? (step as { else: Step[] }).else : undefined
-    case 'steps':
-      return step.kind === 'loop' ? step.steps : undefined
-    case 'candidates':
-      if (step.kind === 'match_first') return step.candidates[candidateIndex]?.steps
-      return undefined
+      return step.kind === 'if' ? step.else : undefined
+    case 'body':
+      return step.kind === 'repeat' ? step.body : undefined
     default:
       return undefined
   }
 }
 
 /**
- * 解析路径到 Step[] 容器。路径语法（以键或 ('candidates', n) 对结尾）：
- * - ['steps']                                 脚本主流程
- * - ['steps', 0, 'then']                      steps[0].then
- * - ['steps', 0, 'candidates', 1]             steps[0] 的 match_first 候选 1 分支
- * - ['functions', <名|序号>, 'steps']         函数库函数体
- * - ['functions', 'login', 'steps', 0, 'else'] 函数体内嵌套分支
+ * 解析路径到 Step[] 容器。路径语法（以键结尾）：
+ * - ['run']                                   脚本主流程
+ * - ['run', 0, 'then']                        run[0].then
+ * - ['functions', <名|序号>, 'run']           函数库函数体
+ * - ['functions', 'login', 'run', 0, 'else']  函数体内嵌套分支
  */
 export function resolveStepList(model: EditorModel, path: Path): Step[] {
   if (path.length === 0) throw new Error('路径为空')
   const last = path[path.length - 1]
   if (typeof last === 'number') {
-    // ('candidates', n) 形态：倒数第二段必须是 'candidates'
-    if (path.length >= 2 && path[path.length - 2] === 'candidates') {
-      const step = resolveStep(model, path.slice(0, -2))
-      const child = stepChildList(step, 'candidates', last)
-      if (!child) throw new Error(`步骤 ${step.kind} 没有候选分支 ${last}`)
-      return child
-    }
     throw new Error(`路径以数字结尾指向步骤而非列表：${path.map(String).join('.')}`)
   }
-  // 以键结尾
   if (path.length === 1) {
-    if (last === 'steps' && 'steps' in model) return model.steps
+    if (last === 'run' && 'run' in model) return model.run
     throw new Error(`路径首段非法：${String(last)}`)
   }
-  if (last === 'steps' && path.length === 3 && path[0] === 'functions' && 'functions' in model) {
-    return resolveFunction(model, path[1]).steps
+  if (last === 'run' && path.length === 3 && path[0] === 'functions' && 'functions' in model) {
+    return resolveFunction(model, path[1]).run
   }
   const step = resolveStep(model, path.slice(0, -1))
   const child = stepChildList(step, last)
@@ -86,15 +70,12 @@ export function resolveStepList(model: EditorModel, path: Path): Step[] {
   return child
 }
 
-/** 解析路径到单个步骤（路径以数字下标结尾，且倒数第二段不是 'candidates'）。 */
+/** 解析路径到单个步骤（路径以数字下标结尾）。 */
 export function resolveStep(model: EditorModel, path: Path): Step {
   if (path.length === 0) throw new Error('路径为空')
   const index = path[path.length - 1]
   if (typeof index !== 'number') {
     throw new Error(`步骤路径必须以数字下标结尾：${path.map(String).join('.')}`)
-  }
-  if (path.length >= 2 && path[path.length - 2] === 'candidates') {
-    throw new Error(`['candidates', n] 结尾的路径是容器而非步骤：${path.map(String).join('.')}`)
   }
   const list = resolveStepList(model, path.slice(0, -1))
   const step = list[index]
@@ -160,13 +141,13 @@ export type Command =
   | { type: 'insert_param'; path?: Path; index: number; decl: ParamDecl }
   | { type: 'remove_param'; path?: Path; index: number }
   | { type: 'update_param'; path?: Path; index: number; decl: ParamDecl }
-  /** Program 级 defaults（契约 §1/§4；null = 整体清除）。仅脚本模型。 */
-  | { type: 'set_defaults'; defaults: DefaultsModel | null }
-  /** 函数库专用：文件尾追加空函数（重名拒绝；函数体 steps 初始为空列表）。 */
+  /** Program 级 vars 整体替换（字面量表）。仅脚本模型。 */
+  | { type: 'set_vars'; vars: Record<string, unknown> }
+  /** 函数库专用：文件尾追加空函数（重名拒绝；函数体 run 初始为空列表）。 */
   | { type: 'insert_function'; name: string }
   /** 函数库专用：按名删除函数（至少保留一个；undo 原位恢复，函数对象引用不变保证 uuid 稳定）。 */
   | { type: 'remove_function'; name: string }
-  /** 函数库专用：函数改名（= 改 bare-map 顶层键；空名/重名拒绝；引用它的 call 步骤不自动跟随）。 */
+  /** 函数库专用：函数改名（空名/重名拒绝；引用它的调用步骤不自动跟随）。 */
   | { type: 'rename_function'; from: string; to: string }
 
 interface HistoryEntry {
@@ -186,7 +167,7 @@ function isDescendantPath(ancestor: Path, descendant: Path): boolean {
 
 /**
  * 源步骤删除后，目标容器路径中位于同一宿主列表、且排在源步骤后的祖先下标会左移一位。
- * 例如从 steps[0] 拖到 steps[1].then，删除源步骤后目标路径变为 steps[0].then。
+ * 例如从 run[0] 拖到 run[1].then，删除源步骤后目标路径变为 run[0].then。
  */
 function pathAfterRemoval(targetPath: Path, sourcePath: Path, sourceIndex: number): Path {
   const result = clonePath(targetPath)
@@ -366,8 +347,6 @@ export class CommandStack {
         const from = { path: clonePath(command.from.path), index: command.from.index }
         const to = { path: clonePath(command.to.path), index: command.to.index }
         // to.index 语义：源元素删除后目标列表中的插入下标（post-removal）。
-        // redo 后元素实际位于 min(to.index, 目标列表长度)；undo 按该位置取回并放回 from.index。
-        // 源步骤删除可能让目标容器路径中的祖先下标左移，需在两次方向上使用同一条修正路径。
         const toPathAfterRemoval = pathAfterRemoval(to.path, from.path, from.index)
         const moveForward = (): void => {
           const fl = resolveStepList(this.model, from.path)
@@ -478,18 +457,18 @@ export class CommandStack {
           },
         }
       }
-      case 'set_defaults': {
-        if (!('defaults' in this.model)) throw new Error('函数库模型没有 Program 级 defaults')
+      case 'set_vars': {
+        if (!('vars' in this.model)) throw new Error('函数库模型没有 Program 级 vars')
         const m = this.model as Program
-        const oldDefaults = m.defaults
-        const newDefaults = command.defaults === null ? null : structuredClone(unwrap(command.defaults))
+        const oldVars = m.vars
+        const newVars = structuredClone(unwrap(command.vars)) as Record<string, unknown>
         return {
           name,
           redo: () => {
-            m.defaults = newDefaults
+            m.vars = newVars
           },
           undo: () => {
-            m.defaults = oldDefaults
+            m.vars = oldVars
           },
         }
       }
@@ -498,7 +477,14 @@ export class CommandStack {
         const m = this.model as FunctionLibraryModel
         if (m.functions.some((f) => f.name === command.name)) return null
         // 空函数对象引用保持不变：undo 移除后 redo 原样放回，步骤 uuid 天然稳定
-        const fn: FunctionModel = { name: command.name, params: [], steps: [] }
+        const fn: FunctionModel = {
+          name: command.name,
+          description: '',
+          params: [],
+          vars: {},
+          returns: null,
+          run: [],
+        }
         return {
           name,
           redo: () => {
@@ -553,11 +539,11 @@ export class CommandStack {
 // ---------- 便捷路径构造 ----------
 
 export const paths = {
-  steps: (): Path => ['steps'],
-  functionSteps: (name: string): Path => ['functions', name, 'steps'],
+  run: (): Path => ['run'],
+  functionRun: (name: string): Path => ['functions', name, 'run'],
   /** 函数级 params 容器（params 命令带 path 时使用）。 */
   functionParams: (name: string): Path => ['functions', name, 'params'],
   child: (path: Path, key: string, index: number): Path => [...path, key, index],
-  /** 校验路径（validation 字符串形态）与命令路径互转所需：['steps', 0, 'then', 1]。 */
+  /** 校验路径（validation 字符串形态）与命令路径互转所需：['run', 0, 'then', 1]。 */
   join: (...segs: PathSeg[]): Path => segs,
 }

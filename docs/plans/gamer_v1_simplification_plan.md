@@ -1,11 +1,11 @@
 # Gamer V1 简化与自动化插件重构开发计划
 
-> 状态：规划完成，待实施
+> 状态：**已实施完成（Phase 0-7，2026-09-09；执行状态见文末「9. 执行状态」）**
 > 基线：`main`，提交 `0c5be8ecbf0bd6a9fd8742ef2b9251516cd6a81d`（2026-09-08）
 > 原则：开发阶段允许破坏性修改，不兼容旧 YAML、旧配置和旧 API；不为假设需求增加抽象。
 > 目标：在保留现有可用功能的前提下，收敛 Core、重设计 YAML、统一函数来源、简化插件生命周期，并完成现有功能收尾。
 
-> 本文是执行计划，不代表实现已经完成。当前仓库仍以 YAML v3 代码和测试为主；除本文件外，本轮规划不修改实现代码、README 或 AGENTS.md。
+> 本文原为执行计划；**现已全量实施**，实际改动、提交与门禁结果见文末「9. 执行状态」。
 
 ## 0. 执行版规划结论
 
@@ -996,3 +996,34 @@ Gamer V1 达到以下状态即可认为本轮收敛完成：
 * 所有已完成项有测试依据，环境受限项明确标记未验证。
 
 **本轮完成后停止继续架构重构，优先使用 Gamer 开发真实自动化脚本和插件，再根据实际使用中的问题决定下一步需求。**
+
+---
+
+# 9. 执行状态（2026-09-09 收尾）
+
+## 9.1 交付与提交
+
+| 阶段 | 状态 | 关键改动（实际文件） | 提交 |
+| --- | --- | --- | --- |
+| Phase 0 | DONE | 本计划落盘 docs/plans/；README/AGENTS 架构说明对齐 V1 | 随本次提交 |
+| Phase 1+2 | DONE | 新增 `server/guests/yaml-interp/`（V1 唯一权威解释器：run=函数调用/if/repeat/return、`$name.field`、函数表运行期冻结、步预算 100k/深度 32、13 项单测）；`yaml-guest` 瘦身为 WIT 胶水并去掉 `programs` 接口；宿主 `syntax.rs`（解析/校验/降线/模板引用改写/确定性序列化）替代 `yaml_vnext.rs`（已删）；旧 v3 原生参考解释器（Interpreter/小 AST/nonce/splitmix64）全删 | `4e08d56` |
+| Phase 3 | DONE | `native_funcs.rs` 原生函数注册表（17 函数，Schema+权限唯一声明点）；`runner_adapter.rs::compose_function_library` 组合 原生+当前 Package 全部 functions/*.yaml（同名冲突 `yaml.fn.conflict` 拒绝、不跨包）；`GET /api/runners/:id/functions` 原生函数目录 API | `4e08d56` + 本次 |
+| Phase 4 | DONE | 前端 `web/src/script-editor/` 全量重写 V1（model 4 类步骤/Cell/CallArgs、codec 与服务端语义对齐、validation、factories、commands（`run` 寻址 + set_vars）、StepCard/StepCanvas/AddStepPanel/BranchContainer/ParamEditor/ParamsForm、entrypointParams 适配声明数组、函数面板接原生函数目录、function-list 伪模型 `run`）；`video_draft.rs` 产出 V1 草稿；`run_target.rs` args 收敛为原始 JSON 覆盖（任务宽松重绑/手动严格绑定，202 保留 resolved_args） | `4e08d56` + 本次 |
+| Phase 5 | DONE | `POST /api/extensions/:id/enable` = 启用意图 + 直接启动（幂等，可选 keymap profile/AppContext body）；删除 /start /stop /activate 三个细粒度端点（内部保留 start/stop 原语供 reconcile/测试）；前端 PluginCenter 收敛为 启用/停用/更新/卸载，历史版本仅展示；守卫 §14.3 全链改写 | 本次提交 |
+| Phase 6 | DONE | docs/reference/YAML.md 重写为 V1 唯一权威；docs/yaml-v3/ 删除；SCRIPT_EDITOR_CONTRACT.md 标记历史并指向 V1；README/AGENTS 对齐；SDK 三示例 wit 快照与 server/wit 同步（programs 删除）；官方插件重打包（gamer.yaml@3.1.1 V1 guest，registry.json/sha256sums 同步） | 本次提交 |
+| Phase 7 | DONE | 后端 607 测试全绿（含真实 WASM guest e2e）；cargo fmt/clippy -D warnings/check --no-default-features 通过；前端 709 测试全绿（65 文件）+ pnpm build 通过 | 门禁记录 |
+
+## 9.2 已删除（真实收敛，非并存）
+
+- `server/src/extensions/gamer_yaml/yaml_vnext.rs`（v3 纯数据前端/小 AST/splitmix64/nonce）、`params.rs`（标量助手）、原生参考解释器（yaml_extension.rs Interpreter/CapabilityInvoker/YamlProgramResolver）——生产与测试共用 yaml-interp，无第二份解释器
+- psig1 参数签名门禁（task_params 重写为按当前 Schema 绑定）；`TimerRunnerError::ParamStale`；七类 TypedValue/`BoundEntryArgs` wire（args = 原始 JSON）
+- WIT `programs` 接口（函数表改为运行期冻结嵌入）；前端 DefaultsEditor、`version: 3` 编解码、19 类步骤模型、`script:`/`function:` call 命名空间
+- REST `/api/extensions/:id/start|stop|activate`；前端 启动/停止/切换版本 按钮
+- docs/yaml-v3/ 文档套件（V1 语法收敛在 docs/reference/YAML.md）
+
+## 9.3 NOT_VERIFIED（环境受限，不以单测代替）
+
+- 真机 adb 链路全流程（连接/投屏/输入/模板匹配实际效果）
+- Windows 完整包、Docker 镜像、GitHub Release 与 launcher 升级链路
+- 性能基线（解释器吞吐/投屏延迟）与平台矩阵
+- 旧 v3 脚本存量数据的实际迁移（设计上不兼容，需人工按新语法重写）

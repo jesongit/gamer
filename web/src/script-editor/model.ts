@@ -1,60 +1,56 @@
 /**
- * 脚本可视化编辑器 Model（YAML v3，Phase 12 P12.1 重写）。
+ * 脚本可视化编辑器 Model（YAML V1，Gamer V1 简化计划 Phase 1/4）。
  *
- * 语法契约：docs/plans/phase12_v3_dsl_contract.md（§1-§6）；语义裁决见
- * docs/reference/adr/ADR-YAML-01~04。编辑器只读写 v3：
- * - Program = {version: 3, params, defaults, steps}；函数库 = bare-map {名: {params, steps}}
- *   的 Model 包装（functions 数组保序，codec 负责与 YAML 映射互转）；
- * - Step 为 19 类判别联合，分支子流程一律 Step[]；每个步骤带浏览器内临时 uuid
- *   （选中/拖动/撤销/错误定位），**不写入 YAML**；
- * - Cell 是字段级取值单元格：{lit: 类型化字面量} 或 {ref: 属性路径}
- *   （ref 不含前导 $，如 'reward.center'、'list[0]'，ADR-YAML-03 match 上下文）。
+ * 语法契约：docs/plans/gamer_v1_simplification_plan.md §Phase 1；与宿主侧
+ * `server/src/extensions/gamer_yaml/syntax.rs` 语义对齐（解析/校验/序列化
+ * 双端一致）。V1 只描述流程，所有实际操作都是函数调用：
+ * - Program = {name?, params?, vars?, run}；无 version 字段；
+ * - Step 为 4 类判别联合：函数调用（fn: args + as）/ if / repeat / return；
+ *   tap、find、sleep 等不是语法关键字，而是函数；
+ * - 函数文件 = {functions: {名: {description?, params?, vars?, returns?, run}}}；
+ * - Cell 是字段级取值：{lit: 字面量} 或 {ref: 变量路径}（ref 不含 $，如
+ *   'home.center'；V1 只支持点号字段访问，无索引）；
+ * - 函数调用参数 = 无参 | 位置值（Cell）| 命名参数映射（值均为 Cell）；
+ *   每个步骤带浏览器内临时 uuid（选中/拖动/撤销/错误定位），不写入 YAML。
  */
 
-// ---------- 参数声明（契约 §1 / §7） ----------
+// ---------- 参数声明（函数 Schema：类型/必填/默认值/说明） ----------
 
-/** v3 规范参数类型（服务端 schema 五类；v2 ty 名由服务端映射到这五类）。 */
-export const PARAM_TYPES = ['string', 'number', 'integer', 'boolean', 'enum'] as const
+/** V1 参数类型（与服务端 ParamType 对齐；别名在解析层归一）。 */
+export const PARAM_TYPES = [
+  'any', 'boolean', 'integer', 'number', 'string', 'list', 'object',
+  'duration', 'point', 'template', 'key',
+] as const
 export type ParamType = (typeof PARAM_TYPES)[number]
 
-/** 参数默认值字面量：标量（字符串/数字/布尔）。 */
-export type ParamLiteral = string | number | boolean
-
-/**
- * 参数声明。type 保留声明原文（rawForm 的串可以是 int/text 等 v2 ty 名，
- * 序列化按原文保真）；default === null 表示必填（map 形态无 default 键）。
- * rawForm = true 时该声明以整条字符串形态序列化：'type:name:remark[:default]'。
- */
+/** 参数声明（V1 全部为映射形态，rawForm 已随 v3 字符串声明删除）。 */
 export interface ParamDecl {
-  type: string
   name: string
-  remark: string
-  /** coord 参数的默认值为 [x, y] 元组（schema descriptor / 字面量表双形态）。 */
-  default: ParamLiteral | [number, number] | null
-  rawForm: boolean
+  type: ParamType
+  required: boolean
+  /** default === null 表示未声明默认值（配合 required 表达必填）。 */
+  default: unknown | null
+  desc: string
 }
 
-/** Program 级 defaults（契约 §1/§4，T45）：threshold step 值 > defaults > Runtime 兜底。 */
-export interface DefaultsModel {
-  vision_threshold: number | null
-  after_tap: string | number | null
-  after_match: string | number | null
-  poll_interval: string | number | null
-}
-
-/** 可执行脚本（scripts/ 资源）。version 恒为 3（codec 保证）。 */
+/** 可执行脚本（automations/ 资源）。 */
 export interface Program {
-  version: 3
+  name: string | null
   params: ParamDecl[]
-  defaults: DefaultsModel | null
-  steps: Step[]
+  /** vars：字面量表（不做引用解析；键序 = 声明序）。 */
+  vars: Record<string, unknown>
+  run: Step[]
 }
 
-/** 函数库内单个函数（bare-map 的一项）。 */
+/** 函数库内单个函数。 */
 export interface FunctionModel {
   name: string
+  description: string
   params: ParamDecl[]
-  steps: Step[]
+  vars: Record<string, unknown>
+  /** returns 声明（文档/提示用途，V1 不做运行时校验；原样保留防丢数据）。 */
+  returns: unknown | null
+  run: Step[]
 }
 
 export interface FunctionLibraryModel {
@@ -69,8 +65,8 @@ export interface FunctionLibraryModel {
 export type CoordLit = [number, number]
 
 /**
- * 字段级取值：lit 的具体形态由所属字段类型约束；ref 为属性路径
- * （`$` 后原文，如 'reward.center' / 'match.score' / 'list[0]'）。
+ * 字段级取值：lit 的具体形态由所属字段类型约束；ref 为变量路径
+ * （`$` 后原文，如 'home.center'；仅点号段，段为小写标识符）。
  */
 export type Cell = { lit: unknown; ref?: undefined } | { ref: string; lit?: undefined }
 
@@ -84,54 +80,22 @@ export function isRefCell(cell: Cell | null | undefined): cell is { ref: string 
   return cell !== null && cell !== undefined && typeof (cell as Cell).ref === 'string'
 }
 
-/** 步骤字段类型（CellEditor 控件选择与字面量校验的依据）。 */
-export const CELL_TYPES = ['tmpl', 'coord', 'time', 'key', 'text', 'bool', 'expr', 'number'] as const
-export type CellType = (typeof CELL_TYPES)[number]
+// ---------- 函数调用参数形态 ----------
 
-// ---------- 步骤（19 类，契约 §1-§4） ----------
+/** 函数调用实参：无参（{}）/ 位置值（标量/数组/引用）/ 命名参数映射。 */
+export type CallArgs =
+  | { kind: 'none' }
+  | { kind: 'value'; cell: Cell }
+  | { kind: 'map'; entries: Record<string, Cell> }
 
-/** 步骤 kind（编辑器内部标识）。YAML 动作键经 yamlKeyOf 互转（app.start 等点号键）。 */
-export const STEP_KINDS = [
-  'app_start', 'app_stop', 'tap', 'swipe', 'key', 'text', 'wait',
-  'log', 'set', 'if', 'loop', 'break', 'call', 'return', 'throw',
-  'find', 'match_first', 'check', 'invoke',
-] as const
-
-export type StepKind = (typeof STEP_KINDS)[number]
-
-const YAML_KEYS: Record<StepKind, string> = {
-  app_start: 'app.start',
-  app_stop: 'app.stop',
-  tap: 'tap', swipe: 'swipe', key: 'key', text: 'text', wait: 'wait',
-  log: 'log', set: 'set', if: 'if', loop: 'loop', break: 'break',
-  call: 'call', return: 'return', throw: 'throw',
-  find: 'find', match_first: 'match_first', check: 'check', invoke: 'invoke',
+export function emptyArgs(): CallArgs {
+  return { kind: 'none' }
 }
 
-/** kind → YAML 动作键（app_start ↔ 'app.start'）。 */
-export function yamlKeyOf(kind: StepKind): string {
-  return YAML_KEYS[kind]
-}
+// ---------- 步骤（4 类） ----------
 
-/** YAML 动作键全集（解析与序列化共用）。 */
-export const ACTION_KEYS: readonly string[] = STEP_KINDS.map((k) => YAML_KEYS[k])
-
-export function isStepKind(v: unknown): v is StepKind {
-  return typeof v === 'string' && (STEP_KINDS as readonly string[]).includes(v)
-}
-
-/** find 二次验证（ADR-YAML-03：then 执行完后在 timeout 内二次验证模板）。 */
-export interface FindVerify {
-  template: Cell
-  timeout: Cell | null
-}
-
-/** match_first 候选：单模板（+ 可选 threshold）→ 命中后步骤组（首个命中获胜）。 */
-export interface MatchFirstCandidate {
-  template: Cell
-  threshold: number | null
-  steps: Step[]
-}
+/** 控制流关键字（不能作为函数名/变量名）。 */
+export const RESERVED_WORDS = ['if', 'repeat', 'return'] as const
 
 /** uuid：浏览器内分配的稳定临时 ID，仅用于编辑态定位，绝不序列化进 YAML。 */
 interface StepUuid {
@@ -141,35 +105,10 @@ interface StepUuid {
 export type Step =
   & StepUuid
   & (
-    | { kind: 'app_start'; package: Cell | null }
-    | { kind: 'app_stop'; package: Cell | null }
-    | { kind: 'tap'; at: Cell }
-    | { kind: 'swipe'; from: Cell; to: Cell; duration: Cell }
-    | { kind: 'key'; key: Cell; action: 'down' | 'up' | 'press' | null }
-    | { kind: 'text'; value: Cell }
-    | { kind: 'wait'; min: Cell; max: Cell | null }
-    | { kind: 'log'; message: Cell; level: string | null }
-    | { kind: 'set'; name: string; value: Cell }
+    | { kind: 'call'; fn: string; args: CallArgs; as: string | null }
     | { kind: 'if'; cond: Cell; then: Step[]; else: Step[] }
-    | { kind: 'loop'; times: Cell | null; steps: Step[] }
-    | { kind: 'break' }
-    | { kind: 'call'; target: string; with: Record<string, Cell>; save: string | null }
+    | { kind: 'repeat'; times: Cell; body: Step[] }
     | { kind: 'return'; value: Cell }
-    | { kind: 'throw'; message: Cell }
-    | {
-      kind: 'find'
-      template: Cell
-      timeout: Cell | null
-      threshold: number | null
-      region: unknown | null
-      save: string | null
-      then: Step[]
-      else: Step[]
-      verify: FindVerify | null
-    }
-    | { kind: 'match_first'; candidates: MatchFirstCandidate[]; else: Step[] }
-    | { kind: 'check'; template: Cell; timeout: Cell | null; threshold: number | null; throw: Cell | null }
-    | { kind: 'invoke'; capability: string; with: Record<string, Cell>; save: string | null }
   )
 
 // ---------- uuid 分配与步骤树工具 ----------
@@ -214,18 +153,12 @@ function reassignUuids(step: Step): void {
 export function childStepLists(step: Step): { key: string; index: number; list: Step[] }[] {
   switch (step.kind) {
     case 'if':
-    case 'find':
       return [
         { key: 'then', index: -1, list: step.then },
         { key: 'else', index: -1, list: step.else },
       ]
-    case 'match_first':
-      return [
-        ...step.candidates.map((c, i) => ({ key: 'candidates', index: i, list: c.steps })),
-        { key: 'else', index: -1, list: step.else },
-      ]
-    case 'loop':
-      return [{ key: 'steps', index: -1, list: step.steps }]
+    case 'repeat':
+      return [{ key: 'body', index: -1, list: step.body }]
     default:
       return []
   }
@@ -251,4 +184,52 @@ export function countSteps(steps: Step[]): number {
     n += 1
   })
   return n
+}
+
+// ---------- 引用收集（校验/提示用） ----------
+
+/** Cell 树内引用到的全部顶层变量名。 */
+export function collectCellRefs(cell: Cell | null | undefined, out: Set<string>): void {
+  if (isRefCell(cell)) {
+    const head = cell.ref.split('.')[0] ?? ''
+    if (head !== '') out.add(head)
+  }
+}
+
+/** 收集一个步骤（含子步）调用的函数名与引用的变量名。 */
+export function collectStepUsage(
+  step: Step,
+  calls: Set<string>,
+  refs: Set<string>,
+): void {
+  switch (step.kind) {
+    case 'call': {
+      calls.add(step.fn)
+      switch (step.args.kind) {
+        case 'value':
+          collectCellRefs(step.args.cell, refs)
+          break
+        case 'map':
+          for (const cell of Object.values(step.args.entries)) collectCellRefs(cell, refs)
+          break
+        default:
+          break
+      }
+      break
+    }
+    case 'if': {
+      collectCellRefs(step.cond, refs)
+      for (const child of step.then) collectStepUsage(child, calls, refs)
+      for (const child of step.else) collectStepUsage(child, calls, refs)
+      break
+    }
+    case 'repeat': {
+      collectCellRefs(step.times, refs)
+      for (const child of step.body) collectStepUsage(child, calls, refs)
+      break
+    }
+    case 'return':
+      collectCellRefs(step.value, refs)
+      break
+  }
 }

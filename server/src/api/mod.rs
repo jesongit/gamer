@@ -272,6 +272,10 @@ pub(crate) fn build_router_with_extensions(
             get(tasks::api_runner_entrypoint_schema),
         )
         .route(
+            "/api/runners/:runner_id/functions",
+            get(tasks::api_runner_functions),
+        )
+        .route(
             "/api/schedule-providers",
             get(tasks::api_list_schedule_providers),
         )
@@ -425,18 +429,6 @@ pub(crate) fn build_router_with_extensions(
         .route(
             "/api/extensions/:id/disable",
             post(extensions::api_disable_extension),
-        )
-        .route(
-            "/api/extensions/:id/activate",
-            post(extensions::api_activate_extension),
-        )
-        .route(
-            "/api/extensions/:id/start",
-            post(extensions::api_start_extension),
-        )
-        .route(
-            "/api/extensions/:id/stop",
-            post(extensions::api_stop_extension),
         )
         .route(
             "/api/extensions/:id/call",

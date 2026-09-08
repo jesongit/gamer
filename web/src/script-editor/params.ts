@@ -9,23 +9,21 @@
  * - 覆盖建议缓存：最近一次显式输入存 localStorage（key 按脚本/函数文件 id），
  *   仅作显式覆盖建议预填，绝不遮蔽当前声明默认值。
  */
-import type { ParamDecl, ParamLiteral } from './model'
-import { checkCellLiteral } from './schema'
+import type { ParamDecl } from './model'
+import { checkLiteral } from './schema'
 
 // ---------- 展示 ----------
 
 export const ARG_TYPE_LABELS: Record<string, string> = {
-  // canonical 五类（契约 §7）
-  string: '文本', number: '数字', integer: '整数', boolean: '布尔', enum: '枚举',
-  // v2 别名 ty 名（rawForm 声明保真展示）
-  text: '文本', tmpl: '模板', coord: '坐标', color: '颜色', time: '时间', key: '按键',
-  bool: '布尔', int: '整数', float: '数字',
+  any: '任意', string: '文本', number: '数字', integer: '整数', boolean: '布尔',
+  list: '列表', object: '对象', duration: '时长', point: '坐标', template: '模板', key: '按键',
 }
 
 /** 字面量 → 短展示串（默认值行 / 摘要 / 对比表共用）；undefined/null → '—'。 */
-export function fmtLiteral(v: ParamLiteral | null | undefined): string {
+export function fmtLiteral(v: unknown | null | undefined): string {
   if (v === null || v === undefined) return '—'
   if (Array.isArray(v)) return `[${v[0]}, ${v[1]}]`
+  if (typeof v === 'object') return JSON.stringify(v)
   if (typeof v === 'boolean') return v ? 'true' : 'false'
   return String(v)
 }
@@ -36,10 +34,9 @@ export function cloneArg<T>(v: T): T {
 }
 
 /** 必填参数（无默认值）进入覆盖态时的控件初始字面量（与 CellEditor defaultLiteral 同口径）。 */
-export const ARG_DEFAULT_LITERALS: Record<string, ParamLiteral | [number, number]> = {
-  string: '', number: 0, integer: 0, boolean: true, enum: '',
-  text: '', tmpl: '', coord: [0.5, 0.5], color: 'ff8800', time: '1s', key: 'BACK',
-  bool: true, int: 0, float: 0,
+export const ARG_DEFAULT_LITERALS: Record<string, unknown> = {
+  any: '', string: '', number: 0, integer: 0, boolean: true,
+  list: [], object: {}, duration: '1s', point: [0.5, 0.5], template: '', key: 'BACK',
 }
 
 // ---------- 服务端 400 invalid_args 诊断映射 ----------
@@ -106,7 +103,7 @@ export function describeResolvedArgs(
         ? (args as Record<string, unknown>)[p.name]
         : p.default
     const source = overridden ? '覆盖' : p.default !== null ? '默认' : '必填'
-    return `${p.name}=${fmtLiteral(value as ParamLiteral)}（${source}）`
+    return `${p.name}=${fmtLiteral(value)}（${source}）`
   })
   let text = `运行参数：${parts.join('；')}`
   if (text.length > 240) text = `${text.slice(0, 240)}…`
@@ -168,7 +165,7 @@ export interface ArgFieldError {
 
 /**
  * 稀疏 args → 按声明校验：缺必填（default === null 且未提供）→ missing；
- * 提供值类型不合规 → checkCellLiteral 的错误码/文案。未知参数名此处不查（表单只产已知名）。
+ * 提供值类型不合规 → checkLiteral 的错误码/文案。未知参数名此处不查（表单只产已知名）。
  */
 export function validateArgsAgainstParams(
   params: ParamDecl[],
@@ -181,7 +178,7 @@ export function validateArgsAgainstParams(
       if (p.default === null) errs.push({ name: p.name, message: `必填参数 $${p.name} 缺失` })
       continue
     }
-    const err = checkCellLiteral(p.type, (args as Record<string, unknown>)[p.name])
+    const err = checkLiteral(p.type, (args as Record<string, unknown>)[p.name])
     if (err) errs.push({ name: p.name, message: err.message })
   }
   return errs

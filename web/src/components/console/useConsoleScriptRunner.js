@@ -114,100 +114,82 @@ export function useConsoleScriptRunner({
   })
   const scripts = computed(() => scriptsData.value)
 
-  // ---------- call/func 目标候选与参数解析（编辑态画布下拉 + args 自动生成，同独立脚本页） ----------
-  // func 参数直接从 fnLib.list 的文件内容解析（按内容版本 memo）；call 拉脚本内容按 id 缓存。
+  // ---------- 函数调用候选与参数解析（V1：函数即名字，无命名空间前缀） ----------
+  // 候选 = 原生插件函数目录（GET /api/runners/gamer.yaml/functions）+ 当前 Package
+  // 函数（fnLib.list + 正在编辑文件的实时函数名）；参数从函数文件内容解析（按内容版本 memo）。
 
-  // v3 call 目标 = 命名空间串（script:<资源id> / function:<文件短路径>/<函数名>），
-  // 候选与参数解析按 target 串寻址；正在编辑的脚本自身不进候选（自引用排除）。
+  const nativeFunctions = ref([]) // [{name, description, source, params, returns}]
+  const nativeFunctionsLoaded = ref(false)
+
+  async function loadNativeFunctions() {
+    if (nativeFunctionsLoaded.value) return
+    nativeFunctionsLoaded.value = true
+    try {
+      const rep = await api.getRunnerFunctions(GAMER_YAML_RUNNER_ID)
+      nativeFunctions.value = Array.isArray(rep?.functions) ? rep.functions : []
+    } catch {
+      nativeFunctions.value = [] // 目录不可用（runner 未注册等）时退化为仅 Package 函数
+    }
+  }
+  void loadNativeFunctions()
+
   const callTargets = computed(() => {
-    if (!packageId.value) return []
-    const scriptOpts = scriptsData.value
-      .filter(s => s.package === packageId.value && !(s.id === scriptShell.resourceId && scriptShell.kind === 'script'))
-      .map(s => {
-        const path = String(s.name || '').replace(/\.(ya?ml)$/i, '')
-        return { target: `script:${path}`, label: path }
-      })
+    const nativeOpts = nativeFunctions.value.map(f => ({
+      target: f.name,
+      label: f.name,
+      group: 'plugin',
+      hint: f.description || '',
+    }))
     const live = scriptShell.kind === 'function_library' && scriptShell.hasModel && Array.isArray(scriptShell.model.functions)
       ? scriptShell.model.functions.map(f => f.name)
       : null
     const fnOpts = fnLib.list.flatMap(f => {
       const names = live && f.id === scriptShell.resourceId ? live : (Array.isArray(f.functions) ? f.functions : [])
-      return names.map(n => ({ target: `function:${f.file}/${n}`, label: `${f.file}/${n}` }))
+      return names.map(n => ({ target: n, label: n, group: 'package' }))
     })
-    return [...scriptOpts, ...fnOpts]
+    // 同名冲突不静默：Package 函数与原生函数同名时服务端拒绝运行，此处去重提示
+    const seen = new Set(nativeOpts.map(o => o.target))
+    return [...nativeOpts, ...fnOpts.filter(o => (seen.has(o.target) ? false : true))]
   })
 
-  const callParamsCache = new Map() // call 目标（命名空间串/脚本 id）→ ParamDecl[] | null
   const fnParamsMemo = new Map() // `<file>@<内容版本>` → Map(函数名 → ParamDecl[])
 
-  /** target = 'function:<文件短路径>/<函数名>'（文件短路径可含目录，按最后一个 / 分割）。 */
+  /** target = 函数名：原生目录直查，Package 函数按文件内容解析。 */
   function funcParamsFor(target) {
-    const s = String(target || '')
-    const prefix = 'function:'
-    if (!s.startsWith(prefix)) return null
-    const rest = s.slice(prefix.length)
-    const i = rest.lastIndexOf('/')
-    if (i <= 0 || i === rest.length - 1) return null
-    const file = rest.slice(0, i)
-    const fn = rest.slice(i + 1)
-    const entry = fnLib.list.find(f => f.file === file)
-    if (!entry || !entry.content) return null
-    const memoKey = `${file}@${entry.version || entry.content.length}`
+    const name = String(target || '')
+    if (!name) return null
+    const native = nativeFunctions.value.find(f => f.name === name)
+    if (native) return native.params || []
+    for (const entry of fnLib.list) {
+      if (!entry.content) continue
+      const byName = fnParamsByName(entry)
+      if (byName.has(name)) return byName.get(name)
+    }
+    return null
+  }
+
+  function fnParamsByName(entry) {
+    const memoKey = `${entry.file}@${entry.version || (entry.content || '').length}`
     let byName = fnParamsMemo.get(memoKey)
     if (!byName) {
-      const parsed = parseFunctionLibrary(entry.content, { file })
+      const parsed = parseFunctionLibrary(entry.content ?? '', { file: entry.file || '' })
       byName = new Map((parsed.model?.functions || []).map(f => [f.name, f.params || []]))
       fnParamsMemo.set(memoKey, byName)
     }
-    return byName.has(fn) ? byName.get(fn) : null
-  }
-
-  /** target = 'script:<资源id>'（分区相对路径去扩展名）。 */
-  function scriptParamsFor(target) {
-    if (!target.startsWith('script:')) return null
-    const path = target.slice('script:'.length)
-    if (callParamsCache.has(target)) return callParamsCache.get(target)
-    // 脚本列表已带 content；优先同步解析，保证已有 call 步骤首次渲染时
-    // 就能按目标声明选择正确的 CellEditor 类型，不会先退化成 text。
-    const script = scriptsData.value.find(x => x.package === packageId.value
-      && String(x.name || '').replace(/\.(ya?ml)$/i, '') === path)
-    if (!script?.content) return null
-    try {
-      const params = parseScript(script.content).model?.params || []
-      callParamsCache.set(target, params)
-      return params
-    } catch {
-      return null
-    }
+    return byName
   }
 
   function resolveTargetParamsSync(target) {
     if (!target) return null
-    if (target.startsWith('function:')) return funcParamsFor(target)
-    return scriptParamsFor(target)
+    return funcParamsFor(target)
   }
 
   async function resolveTargetParams(target) {
-    if (!target || target.startsWith('function:')) return resolveTargetParamsSync(target)
-    if (callParamsCache.has(target)) return callParamsCache.get(target)
-    const path = target.slice('script:'.length)
-    const script = scriptsData.value.find(x => x.package === packageId.value
-      && String(x.name || '').replace(/\.(ya?ml)$/i, '') === path)
-    if (!script) return null
-    try {
-      const full = await api.getScript(script.id)
-      const parsed = parseScript(full.content ?? '')
-      const params = parsed.model?.params || []
-      callParamsCache.set(target, params)
-      callParamsCache.set(script.id, params)
-      return params
-    } catch {
-      return null
-    }
+    return resolveTargetParamsSync(target)
   }
 
   function clearCallParamsCache() {
-    callParamsCache.clear()
+    fnParamsMemo.clear()
   }
   function resolveTargetSync(target) {
     const params = resolveTargetParamsSync(target)
@@ -644,7 +626,7 @@ export function useConsoleScriptRunner({
     const s = scripts.value.find(x => x.id === selScript.value)
     if (!s) return null
     try {
-      // v2 脚本（缺 version: 3）带版本诊断 → 不给摘要（编辑器只读写 v3，提示升级）
+      // 旧 v3 脚本（带 version 字段）带迁移诊断 → 不给摘要（编辑器只读写 V1，提示重写）
       const parsed = parseScript(s.content ?? '')
       return parsed.diagnostics.length === 0 ? parsed.model : null
     } catch {
@@ -665,24 +647,18 @@ export function useConsoleScriptRunner({
 
   /** 摘要卡片「▶ 从此运行」（函数组）：在该函数视图内定位顶层步序后直发 */
   function runFromFunctionStep(view, uuid) {
-    const startIndex = view?.model ? (view.model.steps.findIndex(s => s.uuid === uuid)) : -1
+    const startIndex = view?.model ? (view.model.run.findIndex(s => s.uuid === uuid)) : -1
     return runFunction({ fileId: view.fileId, fnName: view.name, startIndex: startIndex >= 0 ? startIndex : 0 })
   }
 
-  // ---------- 结构化跳转（plan §10「调用文本链接预览」行：正则扫描源码 → 结构化引用） ----------
+  // ---------- 结构化跳转（V1：call = 函数名；跳到定义该函数的文件） ----------
 
-  /** call 步骤目标（v3 命名空间串）→ 同分区资源 id。script: 缺扩展名自动补全；function: 走 fnLib。 */
-  function resolveCallTargetId(target) {
-    const raw = String(target || '').trim()
-    if (raw.startsWith('function:')) return fnLib.resolveTargetId(raw)
-    if (!raw.startsWith('script:')) return null
-    const path = raw.slice('script:'.length)
-    const names = [`${path}.yaml`, `${path}.yml`, path]
-    for (const n of names) {
-      const hit = scripts.value.find(x => x.package === packageId.value && x.name === n)
-      if (hit) return hit.id
-    }
-    return null
+  /** 函数名 → 定义它的函数文件 id（原生函数无文件，返回 null）。 */
+  function resolveCallTargetId(fnName) {
+    const name = String(fnName || '').trim()
+    if (!name) return null
+    const hit = fnLib.list.find(f => Array.isArray(f.functions) && f.functions.includes(name))
+    return hit?.id ?? null
   }
 
   function closeResourcePreview() {
@@ -694,28 +670,28 @@ export function useConsoleScriptRunner({
     resourcePreview.error = ''
   }
 
-  /** 摘要 call 卡片「↗ 子脚本/函数」：只读弹窗展示目标的函数/步骤列表，
-   *  不切换当前资源，也不进入编辑器。目标 namespace 决定资源类型。 */
+  /** 摘要 call 卡片「↗ 函数」：只读弹窗展示定义该函数的文件内容，
+   *  不切换当前资源，也不进入编辑器。原生插件函数无文件可跳（提示来源）。 */
   async function openScriptTarget({ target }) {
-    const isFn = String(target || '').startsWith('function:')
-    const id = resolveCallTargetId(target)
-    if (!id) return toast(`跳转目标不存在：${target}`, 'warn')
+    const fnName = String(target || '').trim()
+    if (!fnName) return
+    if (nativeFunctions.value.some(f => f.name === fnName)) {
+      return toast(`函数 ${fnName} 来自 gamer.yaml 插件（原生函数，随插件提供）`, 'info')
+    }
+    const id = resolveCallTargetId(fnName)
+    if (!id) return toast(`函数 ${fnName} 不在当前配置包中`, 'warn')
 
-    const entry = isFn
-      ? fnLib.list.find(f => f.id === id)
-      : scripts.value.find(s => s.id === id)
-    if (!entry) return toast(`跳转目标不存在：${target}`, 'warn')
+    const entry = fnLib.list.find(f => f.id === id)
+    if (!entry) return toast(`函数 ${fnName} 定义文件不存在`, 'warn')
 
     resourcePreview.open = true
-    resourcePreview.kind = isFn ? 'function_library' : 'script'
-    resourcePreview.title = isFn ? `函数：${target}` : `子脚本：${entry.name || target}`
-    resourcePreview.resource = entry.id || target
+    resourcePreview.kind = 'function_library'
+    resourcePreview.title = `函数：${fnName}（${entry.file || ''}）`
+    resourcePreview.resource = entry.id
     resourcePreview.model = null
     resourcePreview.error = ''
     try {
-      const parsed = isFn
-        ? fnLib.parseFunctionFile(entry.content ?? '', entry.file || '')
-        : parseScript(entry.content ?? '')
+      const parsed = fnLib.parseFunctionFile(entry.content ?? '', entry.file || '')
       if (!parsed?.model) throw new Error('资源内容为空或无法解析')
       resourcePreview.model = parsed.model
       if (parsed.diagnostics?.length) {

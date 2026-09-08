@@ -1,0 +1,19 @@
+params:
+  msg:
+    type: string
+    default: "默认"
+    desc: 消息
+  wait:
+    type: duration
+    default: 2s
+  count:
+    type: integer
+    default: 3
+    required: true
+run:
+  - log: $msg
+  - sleep: $wait
+  - repeat: $count
+    do:
+      - log: tick
+  - return: $count

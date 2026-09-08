@@ -75,12 +75,11 @@
                   <span>权限：{{ (plugin.permissions || []).length ? plugin.permissions.join('、') : '无' }}</span>
                   <span>已保留版本：{{ (plugin.installed_versions || []).join('、') || '无' }}</span>
                 </div>
-                <!-- 版本切换（旧版本即回滚入口）：active 版本不可选，切换需插件非 Running（服务端 409 门禁） -->
+                <!-- V1 生命周期收敛：历史版本仅展示（回退 = 卸载后重装旧版本归档） -->
                 <div v-if="switchableVersions(plugin).length" class="version-switch-line">
                   <span class="version-switch-label">历史版本：</span>
                   <span v-for="version in switchableVersions(plugin)" :key="version" class="version-switch-item">
                     <code>{{ version }}</code>
-                    <button class="btn btn-sm" type="button" :disabled="busy" @click="activateVersion(plugin, version)">切换到此版本</button>
                   </span>
                 </div>
                 <div v-if="plugin.last_error" class="dependency-line danger-text">失败：{{ plugin.last_error }}</div>
@@ -98,10 +97,9 @@
                 </div>
               </div>
               <div class="plugin-card-actions installed-actions">
-                <button v-if="plugin.state === 'installed' || plugin.state === 'disabled' || plugin.state === 'failed'" class="btn btn-sm" type="button" :disabled="busy" @click="runAction('enable', plugin)">启用</button>
-                <button v-if="plugin.state === 'enabled'" class="btn btn-sm" type="button" :disabled="busy" @click="runAction('start', plugin)">启动</button>
-                <button v-if="plugin.state === 'running'" class="btn btn-sm" type="button" :disabled="busy" @click="runAction('stop', plugin)">停止</button>
-                <button v-if="plugin.state === 'enabled'" class="btn btn-sm" type="button" :disabled="busy" @click="runAction('disable', plugin)">停用</button>
+                <!-- V1 用户操作收敛：安装（自动启用）/ 启用 / 停用 / 更新 / 卸载 -->
+                <button v-if="plugin.state !== 'running'" class="btn btn-sm" type="button" :disabled="busy" @click="runAction('enable', plugin)">启用</button>
+                <button v-if="plugin.state === 'running'" class="btn btn-sm" type="button" :disabled="busy" @click="runAction('disable', plugin)">停用</button>
                 <button v-if="marketUpdate(plugin)" class="btn btn-sm btn-primary" type="button" :disabled="busy || !canInstallMarket(marketUpdate(plugin))" @click="installMarket(marketUpdate(plugin), plugin)">更新到 {{ marketUpdate(plugin).version }}</button>
                 <button class="btn btn-sm btn-danger" type="button" :disabled="busy" @click="uninstall(plugin, false)">卸载</button>
                 <button class="btn btn-sm btn-danger" type="button" :disabled="busy" @click="uninstall(plugin, true)">删除数据并卸载</button>
@@ -374,9 +372,9 @@ async function runAction(action, plugin) {
   busy.value = true
   clearMessages()
   try {
-    const method = { enable: 'enableExtension', disable: 'disableExtension', start: 'startExtension', stop: 'stopExtension' }[action]
+    const method = { enable: 'enableExtension', disable: 'disableExtension' }[action]
     await props.apiClient[method](plugin.id)
-    notice.value = `${plugin.name || plugin.id}：${action === 'enable' ? '已启用' : action === 'disable' ? '已停用' : action === 'start' ? '已启动' : '已停止'}。`
+    notice.value = `${plugin.name || plugin.id}：${action === 'enable' ? '已启用' : '已停用'}。`
     emit('changed')
     await refresh()
   } catch (errorValue) { error.value = messageFor(errorValue) } finally { busy.value = false }
@@ -388,28 +386,11 @@ function switchableVersions(plugin) {
   return (plugin.installed_versions || []).filter(version => version && version !== active)
 }
 
-/** 切换活动版本（旧版本即回滚入口）：409（Running）/404（版本未安装）由 activateVersionErrorText 转友好提示。 */
-async function activateVersion(plugin, version) {
-  if (!globalThis.confirm(activateVersionPrompt(plugin, version))) return
-  busy.value = true
-  clearMessages()
-  try {
-    const result = await props.apiClient.activateExtension(plugin.id, version)
-    emit('changed')
-    await refresh()
-    // notice 放在 refresh 之后：refresh 内部 clearMessages 会清掉先行的提示
-    notice.value = `${plugin.name || plugin.id} 已切换到 ${result?.active_version || version}。`
-  } catch (errorValue) {
-    error.value = activateVersionErrorText(errorValue)
-  } finally { busy.value = false }
-}
-
 async function uninstall(plugin, deleteData) {
   if (!globalThis.confirm(uninstallPrompt(plugin, deleteData))) return
   busy.value = true
   clearMessages()
   try {
-    if (plugin.state === 'running') await props.apiClient.stopExtension(plugin.id)
     await props.apiClient.uninstallExtension(plugin.id, plugin.active_version || plugin.version, { deleteData })
     notice.value = deleteData ? '插件及其用户数据已删除。' : '插件已卸载，用户数据已保留。'
     emit('changed')

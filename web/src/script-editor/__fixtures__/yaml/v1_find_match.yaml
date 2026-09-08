@@ -1,0 +1,13 @@
+run:
+  - find:
+      template: login_button
+    as: button
+  - if: $button
+    then:
+      - tap: $button.center
+  - wait_find:
+      template: home
+      timeout: 10s
+      region: [0.1, 0.1, 0.8, 0.8]
+    as: panel
+  - return: $panel.center

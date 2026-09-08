@@ -108,28 +108,22 @@ describe('runYamlScript / runYamlFunction 请求体（gamer.yaml 经 api.run 统
 
 // ---- useRunArgsFlow 状态机（P12.3：参数声明经服务端 entrypoint schema API 获取） ----
 
-// 契约 §7 descriptor：account（tmpl，必填）+ timeout（time，默认 30s，带说明）
+// V1 descriptor：account（template，必填）+ timeout（duration，默认 30s，带说明）
 const DESCRIPTOR_WITH_PARAMS = {
   runner_id: 'gamer.yaml',
   entrypoint: 'com.demo/main.yaml',
   kind: 'script',
   format: 'yaml-params-v1',
-  schema: {
-    type: 'object',
-    properties: {
-      account: { type: 'string', param_type: 'tmpl' },
-      timeout: { type: 'string', default: '30s', description: '最长等待', param_type: 'time' },
-    },
-    required: ['account'],
-  },
-  signature: 'psig1|tmpl,account,0,|time,timeout,0,30s',
+  schema: [
+    { name: 'account', type: 'template', required: true, default: null, desc: '' },
+    { name: 'timeout', type: 'duration', required: false, default: '30s', desc: '最长等待' },
+  ],
 }
 
 const EMPTY_DESCRIPTOR = {
   kind: 'script',
   format: 'yaml-params-v1',
-  schema: { type: 'object', properties: {}, required: [] },
-  signature: 'psig1|',
+  schema: [],
 }
 
 const BEGIN_OPTS = { id: 's1', runnerId: 'gamer.yaml', entrypoint: 'com.demo/main.yaml' }
@@ -155,8 +149,8 @@ describe('useRunArgsFlow', () => {
     expect(r).toEqual({ form: true })
     expect(calls[0].url).toBe('/api/runners/gamer.yaml/entrypoint?entrypoint=com.demo%2Fmain.yaml')
     expect(flow.modal.params.map(p => [p.name, p.type, p.default])).toEqual([
-      ['account', 'tmpl', null],
-      ['timeout', 'time', '30s'],
+      ['account', 'template', null],
+      ['timeout', 'duration', '30s'],
     ])
   })
 

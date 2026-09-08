@@ -40,6 +40,12 @@ pub trait EntrypointDescriber: Send + Sync {
     fn describe(&self, entrypoint: &str) -> Result<serde_json::Value, EntrypointDescribeError>;
 }
 
+/// Runner 可调用函数目录描述器（runner 私有能力）：列出该 runner 执行环境
+/// 提供的内置函数（名称/描述/参数 schema/返回）。Core 不解释目录内容。
+pub trait RunnerFunctionsDescriber: Send + Sync {
+    fn list_functions(&self) -> serde_json::Value;
+}
+
 /// [`Scheduler::describe_entrypoint`] 的查询失败：runner 未注册与描述失败分开
 /// （前者 404 runner_not_found，后者按 [`EntrypointDescribeError`] 映射）。
 #[derive(Debug, Clone)]
@@ -50,12 +56,15 @@ pub enum EntrypointQueryError {
 
 /// runner_id → (owner_extension_id, describer)；生命周期与 runner 注册同步。
 type DescriberEntry = (String, Arc<dyn EntrypointDescriber>);
+/// runner_id → (owner_extension_id, 函数目录描述器)。
+type FunctionsDescriberEntry = (String, Arc<dyn RunnerFunctionsDescriber>);
 
 pub struct Scheduler {
     core: Arc<TimerCore>,
     runners: Arc<TimerRunnerRegistry>,
     schedules: Arc<ScheduleRegistry>,
     describers: Mutex<HashMap<String, DescriberEntry>>,
+    functions_describers: Mutex<HashMap<String, FunctionsDescriberEntry>>,
 }
 
 impl Scheduler {
@@ -72,6 +81,7 @@ impl Scheduler {
             runners,
             schedules,
             describers: Mutex::new(HashMap::new()),
+            functions_describers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -119,10 +129,14 @@ impl Scheduler {
         owner_extension_id: &str,
     ) -> anyhow::Result<Vec<String>> {
         let removed = self.runners.unregister_owner(owner_extension_id);
-        // entrypoint 描述器与 runner 同生命周期：owner 离场即整体移除
+        // entrypoint/函数目录描述器与 runner 同生命周期：owner 离场即整体移除
         self.describers
             .lock()
             .expect("entrypoint describer registry lock poisoned")
+            .retain(|_, (owner, _)| owner != owner_extension_id);
+        self.functions_describers
+            .lock()
+            .expect("functions describer registry lock poisoned")
             .retain(|_, (owner, _)| owner != owner_extension_id);
         for runner_id in &removed {
             let suspended = self.core.suspend_tasks_missing_runner(runner_id).await?;
@@ -191,6 +205,38 @@ impl Scheduler {
         describer
             .describe(entrypoint)
             .map_err(EntrypointQueryError::Describe)
+    }
+
+    /// 注册 runner 的函数目录描述器（与 entrypoint 描述器同生命周期语义）。
+    pub fn register_functions_describer(
+        &self,
+        runner_id: &str,
+        owner_extension_id: &str,
+        describer: Arc<dyn RunnerFunctionsDescriber>,
+    ) {
+        self.functions_describers
+            .lock()
+            .expect("functions describer registry lock poisoned")
+            .insert(
+                runner_id.to_string(),
+                (owner_extension_id.to_string(), describer),
+            );
+    }
+
+    /// 按 runner 查询函数目录：Core 不理解目录内容，描述器返回什么就透传
+    /// 什么（runner 未注册 → UnknownRunner → 404）。
+    pub fn describe_functions(
+        &self,
+        runner_id: &str,
+    ) -> Result<serde_json::Value, EntrypointQueryError> {
+        let describer = self
+            .functions_describers
+            .lock()
+            .expect("functions describer registry lock poisoned")
+            .get(runner_id)
+            .map(|(_, describer)| Arc::clone(describer))
+            .ok_or(EntrypointQueryError::UnknownRunner)?;
+        Ok(describer.list_functions())
     }
 
     pub async fn start(&self) {

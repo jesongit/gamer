@@ -1,14 +1,13 @@
 /**
- * 选择与插入（plan §8.2 / §8.4）：
+ * 选择与插入（V1）：
  * - 步骤 uuid ↔ 路径互查（选中、错误定位到卡片）；
  * - 插入锚点（当前容器 + 位置）：选中卡片之后、未选中时当前流程末尾；
- * - 面包屑：主流程 / 命中 test1 / 如果为真 …；
- * - 顶层步骤 → 引擎 start_index 映射（UUID 不进 YAML，运行仍按顶层序号，plan §8.2）。
+ * - 面包屑：主流程 / 命中 fn / 如果为真 / 循环体 …；
+ * - 顶层步骤 → 引擎 start_index 映射（UUID 不进 YAML，运行仍按顶层序号）。
  *
  * 路径语法（与 commands.ts 的 resolveStepList/resolveStep 一致）：
- * - 步骤路径以数字结尾：['steps', 0, 'then', 1]、['functions', 'login', 'steps', 2]；
- * - 容器路径以键（或 ('candidates', n) 对）结尾：
- *   ['steps']、['steps', 0, 'then']、['steps', 0, 'candidates', 1]、['functions', 'login', 'steps']。
+ * - 步骤路径以数字结尾：['run', 0, 'then', 1]、['functions', 'login', 'run', 2]；
+ * - 容器路径以键结尾：['run']、['run', 0, 'then']、['functions', 'login', 'run']。
  */
 
 import type { EditorModel, Path } from './commands'
@@ -27,7 +26,7 @@ export interface StepLocation {
   index: number
   /** 宿主容器路径（= path 去掉末位下标）。 */
   containerPath: Path
-  /** validation 字符串形态的 step_path（如 steps[0].then[1]、login.steps[2]）。 */
+  /** validation 字符串形态的 step_path（如 run[0].then[1]、login.run[2]）。 */
   stepPath: string
 }
 
@@ -36,11 +35,11 @@ export function findStepLocation(model: EditorModel, uuid: string): StepLocation
   const roots: { list: Step[]; containerPath: Path; base: string }[] =
     'functions' in model
       ? model.functions.map((fn) => ({
-          list: fn.steps,
-          containerPath: ['functions', fn.name, 'steps'] as Path,
-          base: `${fn.name}.steps`,
+          list: fn.run,
+          containerPath: ['functions', fn.name, 'run'] as Path,
+          base: `${fn.name}.run`,
         }))
-      : [{ list: model.steps, containerPath: ['steps'] as Path, base: 'steps' }]
+      : [{ list: model.run, containerPath: ['run'] as Path, base: 'run' }]
   for (const root of roots) {
     const found = searchList(root.list, root.containerPath, root.base, uuid)
     if (found) return found
@@ -55,10 +54,8 @@ function searchList(list: Step[], containerPath: Path, base: string, uuid: strin
       return { step, path: [...containerPath, i], list, index: i, containerPath, stepPath: `${base}[${i}]` }
     }
     for (const child of childStepLists(step)) {
-      const childContainer = childContainerPath(containerPath, i, child.key, child.index)
-      const childBase = child.key === 'candidates'
-        ? `${base}[${i}].${child.key}[${child.index}].steps`
-        : `${base}[${i}].${child.key}`
+      const childContainer = childContainerPath(containerPath, i, child.key)
+      const childBase = `${base}[${i}].${child.key}`
       const found = searchList(child.list, childContainer, childBase, uuid)
       if (found) return found
     }
@@ -67,10 +64,8 @@ function searchList(list: Step[], containerPath: Path, base: string, uuid: strin
 }
 
 /** 步骤子容器的路径延续段。 */
-export function childContainerPath(containerPath: Path, stepIndex: number, key: string, candidateIndex: number): Path {
-  return key === 'candidates'
-    ? [...containerPath, stepIndex, 'candidates', candidateIndex]
-    : [...containerPath, stepIndex, key]
+export function childContainerPath(containerPath: Path, stepIndex: number, key: string): Path {
+  return [...containerPath, stepIndex, key]
 }
 
 /** 按 uuid 取步骤（找不到返回 null）。 */
@@ -110,13 +105,13 @@ export function defaultAnchor(
   return { containerPath, index: list.length }
 }
 
-/** 根容器路径：脚本 = ['steps']；函数库 = 第一个函数（无函数时为空名占位）。 */
+/** 根容器路径：脚本 = ['run']；函数库 = 第一个函数（无函数时为空名占位）。 */
 export function rootContainerPath(model: EditorModel): Path {
   if ('functions' in model) {
     const fn = model.functions[0]
-    return ['functions', fn ? fn.name : '', 'steps']
+    return ['functions', fn ? fn.name : '', 'run']
   }
-  return ['steps']
+  return ['run']
 }
 
 // ---------- 面包屑 ----------
@@ -130,27 +125,18 @@ export interface BreadcrumbNode {
   stepUuid: string | null
 }
 
-interface TrailEntry {
-  parent: Step | null
-  containerKey: string
-  candidateIndex: number
-  containerPath: Path
-  /** 容器当前末步 uuid（面包屑节点提示用）。 */
-  lastUuid: string | null
-}
-
 /** 步骤的祖先容器链（含根层）。返回 [] = uuid 不存在。 */
 export function breadcrumb(model: EditorModel, uuid: string): BreadcrumbNode[] {
   const roots: { list: Step[]; containerPath: Path; label: string }[] =
     'functions' in model
       ? model.functions.map((fn) => ({
-          list: fn.steps,
-          containerPath: ['functions', fn.name, 'steps'] as Path,
+          list: fn.run,
+          containerPath: ['functions', fn.name, 'run'] as Path,
           label: fn.name || '(未命名函数)',
         }))
-      : [{ list: model.steps, containerPath: ['steps'] as Path, label: '主流程' }]
+      : [{ list: model.run, containerPath: ['run'] as Path, label: '主流程' }]
   for (const root of roots) {
-    const trail = searchTrail(root.list, root.containerPath, null, '', -1, uuid)
+    const trail = searchTrail(root.list, root.containerPath, null, '', uuid)
     if (trail === null) continue
     // trail[0] 是目标步骤自身所在容器的入口……链条每项代表「一个步骤 + 它所在的容器」；
     // 面包屑节点 = 根容器 + 从第 2 项起每项的容器（由其父步骤 + 键命名）。
@@ -160,7 +146,7 @@ export function breadcrumb(model: EditorModel, uuid: string): BreadcrumbNode[] {
     for (let i = 1; i < trail.length; i++) {
       const entry = trail[i]
       nodes.push({
-        label: containerLabel(entry.parent, entry.containerKey, entry.candidateIndex, root.label),
+        label: containerLabel(entry.parent, entry.containerKey, root.label),
         containerPath: entry.containerPath,
         stepUuid: entry.lastUuid,
       })
@@ -170,13 +156,20 @@ export function breadcrumb(model: EditorModel, uuid: string): BreadcrumbNode[] {
   return []
 }
 
+interface TrailEntry {
+  parent: Step | null
+  containerKey: string
+  containerPath: Path
+  /** 容器当前末步 uuid（面包屑节点提示用）。 */
+  lastUuid: string | null
+}
+
 /** 递归收集「从根容器到 uuid 所在容器」的链。 */
 function searchTrail(
   list: Step[],
   containerPath: Path,
   parent: Step | null,
   containerKey: string,
-  candidateIndex: number,
   uuid: string,
 ): TrailEntry[] | null {
   for (let i = 0; i < list.length; i++) {
@@ -185,19 +178,17 @@ function searchTrail(
       return [{
         parent,
         containerKey,
-        candidateIndex,
         containerPath,
         lastUuid: step.uuid,
       }]
     }
     for (const child of childStepLists(step)) {
-      const childContainer = childContainerPath(containerPath, i, child.key, child.index)
-      const found = searchTrail(child.list, childContainer, step, child.key, child.index, uuid)
+      const childContainer = childContainerPath(containerPath, i, child.key)
+      const found = searchTrail(child.list, childContainer, step, child.key, uuid)
       if (found !== null) {
         return [{
           parent,
           containerKey,
-          candidateIndex,
           containerPath,
           lastUuid: step.uuid,
         }, ...found]
@@ -207,20 +198,13 @@ function searchTrail(
   return null
 }
 
-/** 容器展示名（面包屑示例：主流程 / 命中 reward / 如果为真）。 */
-export function containerLabel(parent: Step | null, containerKey: string, candidateIndex: number, rootFallback = ''): string {
+/** 容器展示名（面包屑示例：主流程 / 如果为真 / 循环体）。 */
+export function containerLabel(parent: Step | null, containerKey: string, rootFallback = ''): string {
   if (parent === null) return rootFallback || '主流程'
   switch (parent.kind) {
     case 'if':
       return containerKey === 'then' ? '如果为真' : '如果为假'
-    case 'find':
-      return containerKey === 'then' ? '命中后' : '超时未命中'
-    case 'match_first': {
-      if (containerKey === 'else') return '都未命中'
-      const cand = parent.candidates[candidateIndex]
-      return cand ? `命中 ${cellDisplay(cand.template)}` : '候选'
-    }
-    case 'loop':
+    case 'repeat':
       return '循环体'
     default:
       return containerKey
@@ -247,11 +231,11 @@ export function startIndexMap(model: EditorModel): StartIndexEntry[] {
   if ('functions' in model) {
     const entries: StartIndexEntry[] = []
     for (const fn of model.functions) {
-      fn.steps.forEach((step: Step, i: number) => entries.push({ uuid: step.uuid, index: i }))
+      fn.run.forEach((step: Step, i: number) => entries.push({ uuid: step.uuid, index: i }))
     }
     return entries
   }
-  return (model as Program).steps.map((step: Step, i: number) => ({ uuid: step.uuid, index: i }))
+  return (model as Program).run.map((step: Step, i: number) => ({ uuid: step.uuid, index: i }))
 }
 
 /** 单个 uuid 的 start_index；不在顶层返回 null（嵌套步骤首版不支持直接启动，plan §3）。 */

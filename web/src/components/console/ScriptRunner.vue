@@ -137,17 +137,14 @@
           :templates="ctx.templateNames"
           :show-add-button="ctx.shell.editorContext !== 'function'"
         />
-        <DefaultsEditor v-if="ctx.shell.editorContext === 'script'" :model="ctx.shell.model" :stack="ctx.shell.stack" />
       </div>
       <StepCanvas
         ref="canvasEl"
         :model="ctx.shell.model"
         :stack="ctx.shell.stack"
         :diagnostics="ctx.shell.diagnostics"
-        :context="ctx.shell.editorContext"
         :templates="ctx.templateNames"
         :selected-uuid="ctx.shell.selectedUuid"
-        :resolve-target="ctx.resolveTargetSync"
         :initial-fn="ctx.editFocusFn"
         :lock-fn="ctx.shell.kind === 'function_library'"
         :hide-function-toolbar="ctx.shell.kind === 'function_library'"
@@ -188,7 +185,7 @@ import RunEventsPanel from './RunEventsPanel.vue'
 import ScriptSummary from './ScriptSummary.vue'
 import ResourcePreviewModal from './ResourcePreviewModal.vue'
 import SaveConflictModal from './SaveConflictModal.vue'
-import { StepCanvas, ParamEditor, DefaultsEditor, YamlPreview } from '../../script-editor/components/index'
+import { StepCanvas, ParamEditor, YamlPreview } from '../../script-editor/components/index'
 import { runEventTopIndex, useRunEvents } from './useRunEvents'
 
 const props = defineProps({ context: { type: Object, required: true } })

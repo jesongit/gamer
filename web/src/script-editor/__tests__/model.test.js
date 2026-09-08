@@ -1,227 +1,206 @@
 import { describe, expect, it } from 'vitest'
-import {
-  allocateUuids,
-  childStepLists,
-  cloneStepWithNewUuids,
-  countSteps,
-  isRefCell,
-  lit,
-  ref,
-  yamlKeyOf,
-  STEP_KINDS,
-  ACTION_KEYS,
-} from '../model'
 import { parseScript, serialize } from '../codec'
-import { stripUuids } from './helpers'
+import { allocateUuids, cloneStepWithNewUuids, childStepLists, countSteps, walkSteps, newStepUuid } from '../model'
 
-/**
- * Model（v3）：Program 结构、Cell 双形态、19 类 Step 判别联合、子流程枚举、uuid 语义。
- */
-
-const MINIMAL = 'version: 3\nsteps: []\n'
-
-describe('model：Program 结构', () => {
-  it('最小脚本：version 3 + 空 steps，defaults 缺省为 null', () => {
-    const { model } = parseScript(MINIMAL)
-    expect(model.version).toBe(3)
-    expect(model.params).toEqual([])
-    expect(model.defaults).toBeNull()
-    expect(model.steps).toEqual([])
-    expect(serialize(model)).toBe(MINIMAL)
+describe('V1 model / parse basics', () => {
+  it('parses the plan example: name/params/vars/run', () => {
+    const { model, diagnostics } = parseScript(
+      'name: 每日签到\nparams:\n  retry:\n    type: integer\n    default: 3\nvars:\n  timeout: 15s\nrun:\n  - launch: com.example.game\n',
+    )
+    expect(diagnostics).toEqual([])
+    expect(model.name).toBe('每日签到')
+    expect(model.params).toEqual([
+      { name: 'retry', type: 'integer', required: false, default: 3, desc: '' },
+    ])
+    expect(model.vars).toEqual({ timeout: '15s' })
+    expect(model.run).toHaveLength(1)
+    expect(model.run[0]).toMatchObject({ kind: 'call', fn: 'launch' })
+    expect(model.run[0].args).toMatchObject({ kind: 'value', cell: { lit: 'com.example.game' } })
   })
 
-  it('defaults 三组字段可解码', () => {
-    const { model, diagnostics } = parseScript([
-      'version: 3',
-      'defaults:',
-      '  vision:',
-      '    threshold: 0.8',
-      '  timing:',
-      '    after_tap: 300ms',
-      '    after_match: 200ms',
-      '    poll_interval: 100ms',
-      'steps: []',
-    ].join('\n'))
+  it('rejects version field with migration diagnostic', () => {
+    const { model, diagnostics } = parseScript('version: 3\nsteps: []\n')
+    expect(model.run).toEqual([])
+    expect(diagnostics).toHaveLength(1)
+    expect(diagnostics[0].code).toBe('yaml.version.removed')
+  })
+
+  it('rejects unknown top-level keys (old steps/defaults)', () => {
+    const { diagnostics } = parseScript('steps: []\ndefaults: {}\n')
+    expect(diagnostics.some((d) => d.code === 'yaml.top.unknown')).toBe(true)
+    expect(diagnostics.some((d) => d.field === 'steps' || d.field === 'defaults')).toBe(true)
+  })
+
+  it('missing run reports diagnostic', () => {
+    const { diagnostics } = parseScript('name: x\n')
+    expect(diagnostics.some((d) => d.code === 'yaml.run.missing')).toBe(true)
+  })
+
+  it('parses shorthand args, named args, refs, $$ escape and as', () => {
+    const { model, diagnostics } = parseScript(
+      [
+        'run:',
+        '  - tap: [0.5, 0.8]',
+        '  - find: login_button',
+        '    as: button',
+        '  - tap: $button.center',
+        '  - log: $$price',
+        '  - sleep:',
+        '  - claim_daily: {}',
+      ].join('\n'),
+    )
     expect(diagnostics).toEqual([])
-    expect(model.defaults).toEqual({
-      vision_threshold: 0.8,
-      after_tap: '300ms',
-      after_match: '200ms',
-      poll_interval: '100ms',
+    expect(model.run[0].args).toEqual({ kind: 'value', cell: { lit: [0.5, 0.8] } })
+    expect(model.run[1].args).toEqual({ kind: 'value', cell: { lit: 'login_button' } })
+    expect(model.run[1].as).toBe('button')
+    expect(model.run[2].args).toEqual({ kind: 'value', cell: { ref: 'button.center' } })
+    // $$price → 字面量 $price
+    expect(model.run[3].args).toEqual({ kind: 'value', cell: { lit: '$price' } })
+    // sleep:（null）= 无参；claim_daily: {} = 空命名参数（运行语义同无参）
+    expect(model.run[4].args).toEqual({ kind: 'none' })
+    expect(model.run[5].args).toEqual({ kind: 'map', entries: {} })
+  })
+
+  it('parses named-args maps with refs as leaves', () => {
+    const { model } = parseScript(
+      'run:\n  - wait_find:\n      template: home\n      timeout: $timeout\n      region: [0, 0, 1, 1]\n',
+    )
+    expect(model.run[0].args).toEqual({
+      kind: 'map',
+      entries: {
+        template: { lit: 'home' },
+        timeout: { ref: 'timeout' },
+        region: { lit: [0, 0, 1, 1] },
+      },
     })
   })
 
-  it('参数声明双形态：rawForm 与 map 形态并存', () => {
-    const { model, diagnostics } = parseScript([
-      'version: 3',
-      'params:',
-      "  - 'int:count:次数:3'",
-      '  - name: mode',
-      '    type: string',
-      '    default: auto',
-      '  - name: flag',
-      '    type: boolean',
-      '    default: true',
-      '    remark: 开关',
-      'steps: []',
-    ].join('\n'))
+  it('parses if/repeat/return control flow', () => {
+    const { model, diagnostics } = parseScript(
+      'vars:\n  flag: true\nrun:\n  - repeat: 2\n    do:\n      - log: tick\n  - if: $flag\n    then:\n      - return: done\n    else:\n      - log: no\n',
+    )
     expect(diagnostics).toEqual([])
-    expect(model.params).toHaveLength(3)
-    expect(model.params[0]).toMatchObject({ type: 'int', name: 'count', remark: '次数', default: 3, rawForm: true })
-    expect(model.params[1]).toMatchObject({ type: 'string', name: 'mode', default: 'auto', rawForm: false })
-    expect(model.params[2]).toMatchObject({ type: 'boolean', name: 'flag', default: true, remark: '开关' })
+    expect(model.run[0].kind).toBe('repeat')
+    expect(model.run[0].times).toEqual({ lit: 2 })
+    expect(model.run[0].body).toHaveLength(1)
+    expect(model.run[1].kind).toBe('if')
+    expect(model.run[1].then[0]).toMatchObject({ kind: 'return' })
+    expect(model.run[1].else[0]).toMatchObject({ kind: 'call', fn: 'log' })
   })
-})
 
-describe('model：Step 键与 kind 集合', () => {
-  it('19 类 kind，ACTION_KEYS 含点号键', () => {
-    expect(STEP_KINDS).toHaveLength(19)
-    expect(ACTION_KEYS).toContain('app.start')
-    expect(ACTION_KEYS).toContain('app.stop')
-    expect(yamlKeyOf('app_start')).toBe('app.start')
-    expect(yamlKeyOf('match_first')).toBe('match_first')
-    expect(yamlKeyOf('tap')).toBe('tap')
+  it('reports structural diagnostics', () => {
+    expect(parseScript('run:\n  - tap: [0.1]\n    repeat: 2\n    do: []\n').diagnostics[0].code).toBe('yaml.step.multi')
+    expect(parseScript('run:\n  - as: x\n').diagnostics[0].code).toBe('yaml.step.missing')
+    expect(parseScript('run:\n  - if: $x\n').diagnostics[0].code).toBe('yaml.if.then')
+    expect(parseScript('run:\n  - repeat: 3\n').diagnostics[0].code).toBe('yaml.repeat.do')
+    expect(parseScript('run:\n  - repeat: -1\n    do: []\n').diagnostics[0].code).toBe('yaml.repeat.times')
+    expect(parseScript('run:\n  - Tap: [0.1, 0.1]\n').diagnostics[0].code).toBe('yaml.name.invalid')
+    expect(parseScript('run:\n  - tap: $Foo Bar\n').diagnostics[0].code).toBe('yaml.expr.invalid')
+    expect(parseScript('run:\n  - if: $x\n    as: y\n    then: []\n').diagnostics[0].code).toBe('yaml.as.invalid')
   })
-})
 
-describe('model：Cell', () => {
-  it('lit / ref 双形态与判别（ref 支持属性路径）', () => {
-    expect(isRefCell(lit(1))).toBe(false)
-    expect(isRefCell(ref('reward.center'))).toBe(true)
-    const c = ref('reward.center')
-    expect(c.ref).toBe('reward.center')
-    expect(c.lit).toBeUndefined()
-  })
-})
-
-describe('model：Step 联合与子流程枚举', () => {
-  it('19 类动作均可解码为对应 kind', () => {
-    const { model, diagnostics } = parseScript([
-      'version: 3',
-      'steps:',
-      '  - app.start',
-      '  - app.stop: com.x',
-      '  - tap: [0.5, 0.5]',
-      '  - swipe: {from: [0.1, 0.1], to: [0.2, 0.2], duration: 500ms}',
-      '  - key: BACK',
-      '  - text: "hi"',
-      '  - wait: 1s',
-      '  - log: hello',
-      '  - set: {name: a, value: 1}',
-      '  - if: {cond: $flag, then: [], else: []}',
-      '  - loop: {times: 3, steps: []}',
-      '  - break',
-      '  - call: {target: script:x}',
-      '  - invoke: {capability: vision.match}',
-      '  - return: null',
-      '  - throw: boom',
-      '  - find: {template: t.png}',
-      '  - match_first: {candidates: [{template: a.png}]}',
-      '  - check: {template: t.png}',
-    ].join('\n'))
-    expect(diagnostics).toEqual([])
-    expect(model.steps.map((s) => s.kind)).toEqual([
-      'app_start', 'app_stop', 'tap', 'swipe', 'key', 'text', 'wait', 'log', 'set',
-      'if', 'loop', 'break', 'call', 'invoke', 'return', 'throw', 'find', 'match_first', 'check',
+  it('params declare type/required/default/desc', () => {
+    const { model } = parseScript(
+      'params:\n  msg:\n    type: string\n    default: "默认"\n    desc: 消息\n  secret:\n    type: string\n    required: true\nrun: []\n',
+    )
+    expect(model.params).toEqual([
+      { name: 'msg', type: 'string', required: false, default: '默认', desc: '消息' },
+      { name: 'secret', type: 'string', required: true, default: null, desc: '' },
     ])
-    expect(countSteps(model.steps)).toBe(19)
   })
 
-  it('childStepLists：if/find/match_first/loop 的分支容器', () => {
-    const { model } = parseScript([
-      'version: 3',
-      'steps:',
-      '  - if: {cond: true, then: [{log: a}], else: [{log: b}]}',
-      '  - find:',
-      '      template: t.png',
-      '      then:',
-      '        - log: hit',
-      '      else:',
-      '        - log: miss',
-      '  - match_first:',
-      '      candidates:',
-      '        - template: a.png',
-      '          steps:',
-      '            - log: c1',
-      '        - template: b.png',
-      '          steps:',
-      '            - log: c2',
-      '      else:',
-      '        - log: none',
-      '  - loop: {times: 2, steps: [{log: body}]}',
-    ].join('\n'))
-    const [iff, find, mf, loop] = model.steps
-    expect(childStepLists(iff).map((c) => c.key)).toEqual(['then', 'else'])
-    expect(childStepLists(find).map((c) => c.key)).toEqual(['then', 'else'])
-    const mfLists = childStepLists(mf)
-    expect(mfLists.map((c) => `${c.key}:${c.index}`)).toEqual(['candidates:0', 'candidates:1', 'else:-1'])
-    expect(mfLists[0].list[0].message.lit).toBe('c1')
-    expect(childStepLists(loop).map((c) => c.key)).toEqual(['steps'])
-    // 叶子步骤无子流程
-    expect(childStepLists(find.then[0])).toEqual([])
-  })
-
-  it('find 完整字段（threshold/region/save/verify）与 $reward.center 属性引用解码', () => {
-    const { model, diagnostics } = parseScript([
-      'version: 3',
-      'steps:',
-      '  - find:',
-      '      template: reward',
-      '      timeout: 10s',
-      '      threshold: 0.9',
-      '      region: {left: 0.1, top: 0.1, right: 0.9, bottom: 0.9}',
-      '      save: reward',
-      '      then:',
-      '        - tap: $reward.center',
-      '      else:',
-      '        - log: 未找到',
-      '      verify:',
-      '        template: home',
-      '        timeout: 5s',
-    ].join('\n'))
-    expect(diagnostics).toEqual([])
-    const find = model.steps[0]
-    expect(find.kind).toBe('find')
-    expect(find.template).toMatchObject({ lit: 'reward' })
-    expect(find.timeout).toMatchObject({ lit: '10s' })
-    expect(find.threshold).toBe(0.9)
-    expect(find.save).toBe('reward')
-    expect(find.verify).toMatchObject({ template: { lit: 'home' }, timeout: { lit: '5s' } })
-    expect(isRefCell(find.then[0].at)).toBe(true)
-    expect(find.then[0].at.ref).toBe('reward.center')
+  it('vars conflict with params is diagnostic', () => {
+    const { diagnostics } = parseScript('params:\n  a:\n    type: string\nvars:\n  a: x\nrun: []\n')
+    expect(diagnostics.some((d) => d.code === 'yaml.vars.conflict')).toBe(true)
   })
 })
 
-describe('model：UUID 语义', () => {
-  it('parse 为每步分配 uuid，重解析重新分配（UUID 不进 YAML）', () => {
-    const first = parseScript('version: 3\nsteps:\n  - log: a\n  - log: b\n')
-    const uuids1 = first.model.steps.map((s) => s.uuid)
-    expect(uuids1).toHaveLength(2)
-    expect(new Set(uuids1).size).toBe(2)
-    expect(serialize(first.model)).not.toMatch(/[u]uid/)
-    const second = parseScript(serialize(first.model))
-    const uuids2 = second.model.steps.map((s) => s.uuid)
-    expect(uuids2).not.toEqual(uuids1) // 新一轮编辑会话重新分配
-    expect(stripUuids(second.model)).toEqual(stripUuids(first.model))
+describe('V1 serialize roundtrip', () => {
+  it('empty run serializes to run: []', () => {
+    expect(serialize(parseScript('run: []\n').model)).toBe('run: []\n')
   })
 
-  it('嵌套分支内的步骤同样有 uuid', () => {
-    const { model } = parseScript('version: 3\nsteps:\n  - if: {cond: true, then: [{log: x}]}\n')
-    const ifStep = model.steps[0]
-    expect(typeof ifStep.uuid).toBe('string')
-    expect(typeof ifStep.then[0].uuid).toBe('string')
-    expect(ifStep.uuid).not.toBe(ifStep.then[0].uuid)
+  it('script serialize is deterministic and reparses equal', () => {
+    const text = [
+      'name: 每日签到',
+      'params:',
+      '  retry:',
+      '    type: integer',
+      '    default: 3',
+      'vars:',
+      '  timeout: 15s',
+      'run:',
+      '  - launch: com.example.game',
+      '  - wait_find:',
+      '      template: home',
+      '      timeout: $timeout',
+      '    as: home',
+      '  - if: $home',
+      '    then:',
+      '      - claim_daily: {}',
+      '    else:',
+      '      - log: 未进入主页',
+      '  - return: true',
+      '',
+    ].join('\n')
+    const first = serialize(parseScript(text).model)
+    expect(first).toBe(text)
+    expect(serialize(parseScript(first).model)).toBe(first)
   })
 
-  it('allocateUuids 只补缺失；cloneStepWithNewUuids 副本 uuid 全新', () => {
-    const { model } = parseScript('version: 3\nsteps:\n  - if: {cond: true, then: [{log: x}]}\n')
-    const step = model.steps[0]
-    const before = step.uuid
-    allocateUuids(model.steps)
-    expect(step.uuid).toBe(before) // 已有保持
-    const copy = cloneStepWithNewUuids(step)
-    expect(copy.uuid).not.toBe(before)
-    expect(copy.then[0].uuid).not.toBe(step.then[0].uuid)
-    expect(stripUuids(copy)).toEqual(stripUuids(step))
+  it('call args forms roundtrip', () => {
+    const text = [
+      'run:',
+      '  - tap: [0.5, 0.8]',
+      '  - find: login',
+      '    as: hit',
+      '  - wait_find:',
+      '      template: home',
+      '      timeout: $t',
+      '  - claim: {}',
+      '',
+    ].join('\n')
+    const model = parseScript(text).model
+    expect(model.run[1].as).toBe('hit')
+    expect(serialize(model)).toBe(text.replace('[0.5, 0.8]', '[0.5, 0.8]'))
+  })
+})
+
+describe('uuid / tree utilities (V1 shapes)', () => {
+  const { model } = parseScript(
+    'run:\n  - if: $flag\n    then:\n      - log: yes\n    else: []\n  - repeat: 2\n    do:\n      - log: t\n',
+  )
+
+  it('allocateUuids fills all steps including branches', () => {
+    const steps = model.run
+    allocateUuids(steps)
+    walkSteps(steps, (step) => {
+      expect(typeof step.uuid).toBe('string')
+      expect(step.uuid.length).toBeGreaterThan(0)
+    })
+  })
+
+  it('childStepLists exposes then/else/body', () => {
+    const [ifStep, repeatStep] = model.run
+    const ifChildren = childStepLists(ifStep).map((c) => c.key)
+    expect(ifChildren).toEqual(['then', 'else'])
+    expect(childStepLists(repeatStep).map((c) => c.key)).toEqual(['body'])
+  })
+
+  it('countSteps counts branches', () => {
+    allocateUuids(model.run)
+    expect(countSteps(model.run)).toBe(4)
+  })
+
+  it('cloneStepWithNewUuids reassigns all uuids', () => {
+    allocateUuids(model.run)
+    const clone = cloneStepWithNewUuids(model.run[0])
+    walkSteps([clone], (step) => {
+      expect(step.uuid).not.toBe(model.run[0].uuid)
+    })
+  })
+
+  it('newStepUuid is unique', () => {
+    expect(newStepUuid()).not.toBe(newStepUuid())
   })
 })

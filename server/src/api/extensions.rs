@@ -81,21 +81,10 @@ pub(super) async fn api_update_extension(
     }
 }
 
+/// 用户「启用」（V1 计划 Phase 5）：enable = 启用意图 + 直接启动（幂等，
+/// Running 时返回现状）。可选 body 携带 keymap profile / AppContext 数据
+/// 通道（与已删除的 /start 同形）。
 pub(super) async fn api_enable_extension(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
-    lifecycle(&st.extensions, &id, Lifecycle::Enable).await
-}
-
-pub(super) async fn api_disable_extension(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
-    lifecycle(&st.extensions, &id, Lifecycle::Disable).await
-}
-
-pub(super) async fn api_start_extension(
     State(st): State<AppState>,
     Path(id): Path<String>,
     body: Bytes,
@@ -111,12 +100,9 @@ pub(super) async fn api_start_extension(
     let profile = match request.profile.as_deref() {
         None => None,
         Some(name) => {
-            // keymap profile 数据通道：数据上下文取 start 请求 AppContext 的
-            // package_id（content_package；android_package 只承担运行目标语义），
-            // 方案 YAML 从通用资源存储
-            // （packages/<package-id>/plugins/gamer.keymap/mappings）原样读出
-            // 交给 guest。门禁按扩展边界谓词判定（Phase 4 审计遗留 #5 收口：
-            // api 层不再持有插件 id 字面量比较——id 知识收敛在 keymap 边界）。
+            // keymap profile 数据通道：数据上下文取请求 AppContext 的
+            // package_id（content_package），方案 YAML 从通用资源存储原样读出
+            // 交给 guest。门禁按扩展边界谓词判定（id 知识收敛在 keymap 边界）。
             let extension_id = match ExtensionId::parse(&id) {
                 Ok(id) => id,
                 Err(error) => return extension_error(error),
@@ -145,54 +131,16 @@ pub(super) async fn api_start_extension(
     lifecycle(
         &st.extensions,
         &id,
-        Lifecycle::Start(request.app_context, profile),
+        Lifecycle::Enable(request.app_context, profile),
     )
     .await
 }
 
-/// 版本回滚/前滚：切换 active_version 指针（不复制不删除文件）。与前端约定
-/// 契约：成功 200 返回 `{"id","active_version","state"}`；版本未安装 404；
-/// 插件 Running 时 409（要求先 stop）。此前 Enabled 的插件保持 Enabled，
-/// 下一次 start 用新版本。
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ActivateExtensionRequest {
-    version: String,
-}
-
-pub(super) async fn api_activate_extension(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-    Json(body): Json<ActivateExtensionRequest>,
-) -> Response {
-    let extension_id = match ExtensionId::parse(&id) {
-        Ok(id) => id,
-        Err(error) => return extension_error(error),
-    };
-    let version = match ExtensionVersion::parse(&body.version) {
-        Ok(version) => version,
-        Err(error) => return extension_error(error),
-    };
-    match st
-        .extensions
-        .activate_version(&extension_id, &version)
-        .await
-    {
-        Ok(snapshot) => Json(serde_json::json!({
-            "id": snapshot.id().to_string(),
-            "active_version": snapshot.active_version().to_string(),
-            "state": snapshot.state(),
-        }))
-        .into_response(),
-        Err(error) => extension_error(error),
-    }
-}
-
-pub(super) async fn api_stop_extension(
+pub(super) async fn api_disable_extension(
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
-    lifecycle(&st.extensions, &id, Lifecycle::Stop).await
+    lifecycle(&st.extensions, &id, Lifecycle::Disable).await
 }
 
 /// Declarative 面板最后一公里：`plugin.call` 的服务端入口。插件必须处于
@@ -306,10 +254,9 @@ pub(super) async fn api_get_extension_ui_asset(
 
 #[derive(Clone)]
 enum Lifecycle {
-    Enable,
+    /// 启用 = 启用意图 + 直接启动（V1 用户操作收敛；携带可选 start 数据通道）。
+    Enable(Option<crate::core::AppContext>, Option<String>),
     Disable,
-    Start(Option<crate::core::AppContext>, Option<String>),
-    Stop,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -329,12 +276,10 @@ async fn lifecycle(service: &ExtensionService, raw_id: &str, operation: Lifecycl
         Err(error) => return extension_error(error),
     };
     let result = match operation {
-        Lifecycle::Enable => service.enable(&id).await,
-        Lifecycle::Disable => service.disable(&id).await,
-        Lifecycle::Start(app_context, profile) => {
-            service.start_with_context(&id, app_context, profile).await
+        Lifecycle::Enable(app_context, profile) => {
+            service.enable_and_start(&id, app_context, profile).await
         }
-        Lifecycle::Stop => service.stop(&id).await,
+        Lifecycle::Disable => service.disable(&id).await,
     };
     match result {
         Ok(snapshot) => Json(snapshot_json(&snapshot)).into_response(),

@@ -1,6 +1,6 @@
 {
     "schema_version":  2,
-    "generated_at":  "2026-09-08T07:08:39Z",
+    "generated_at":  "2026-09-08T20:38:32Z",
     "host_api":  "1.0.0",
     "plugins":  [
                     {
@@ -10,7 +10,7 @@
                         "description":  "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.keymap-1.0.1.gplugin",
-                        "sha256":  "e4920b9771575ca6b9cf8464352852da8c78b313cf003561c49843c05a7ef893",
+                        "sha256":  "8b2cd1ba64d39fd19c00db3a1e2d74c4d3da28bfa99ea7928fe6d2db38d0be5f",
                         "size":  99328,
                         "permissions":  [
                                             "input.tap",
@@ -48,7 +48,7 @@
                         "description":  "视频工作台：媒体素材库、设备录制与操作草稿生成",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.video-1.0.0.gplugin",
-                        "sha256":  "9cd8e96ee17c2072d7021f7cab9085ef05c193244cef82dbd00668d6be9b46b9",
+                        "sha256":  "115b98b6cceed7d229f76b0c11dc6e5654219564e26ac4b57ac2c1c976b6e9d5",
                         "size":  820,
                         "permissions":  [
                                             "media.read",
@@ -83,11 +83,11 @@
                         "id":  "gamer.yaml",
                         "version":  "3.1.1",
                         "name":  "自动化",
-                        "description":  "自动化：YAML v3 脚本、函数库与模板的制作与运行",
+                        "description":  "自动化：YAML V1 脚本、函数库与模板的制作与运行",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.yaml-3.1.1.gplugin",
-                        "sha256":  "e05617ccf78639f7a03d2ded44252566af0f07ac14be8077539c5dac0b23e730",
-                        "size":  72719,
+                        "sha256":  "2c5e27a30a4d0b4659c4d8aef1a2a5aaa7b07644c7ac71ce218158732e453f2c",
+                        "size":  140418,
                         "permissions":  [
                                             "device.read",
                                             "device.app",

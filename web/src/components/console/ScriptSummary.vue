@@ -53,13 +53,13 @@ const emit = defineEmits(['run-from', 'open-target'])
 
 const topSteps = computed(() => {
   const m = props.model
-  if (!m || !Array.isArray(m.steps)) return []
-  return m.steps.map((step) => ({
+  if (!m || !Array.isArray(m.run)) return []
+  return m.run.map((step) => ({
     uuid: step.uuid,
     kind: step.kind,
     meta: KIND_META[step.kind] || { icon: '?', label: step.kind, hint: '' },
     summary: stepSummary(step),
-    target: step.kind === 'call' || step.kind === 'func' ? step.target : '',
+    target: step.kind === 'call' ? step.fn : '',
   }))
 })
 
@@ -69,9 +69,6 @@ const headLabel = computed(() => {
   const parts = []
   if (Array.isArray(m.params) && m.params.length) {
     parts.push(`参数 ${m.params.length} 个`)
-  }
-  if (m.config) {
-    parts.push(`点击后/轮询 ${m.config.interval}`, `阈值 ${m.config.threshold}`, String(m.config.log_level))
   }
   parts.push(`步骤 ${topSteps.value.length} 个`)
   return parts.join(' · ')

@@ -53,7 +53,7 @@ const RETURN_NULL: &str = "null";
 const RETURN_MATCH: &str = "match?";
 const RETURN_BOOL: &str = "boolean";
 
-fn native_functions() -> &'static [NativeFunction] {
+pub(crate) fn native_functions() -> &'static [NativeFunction] {
     static FUNCTIONS: std::sync::LazyLock<Vec<NativeFunction>> = std::sync::LazyLock::new(|| {
         vec![
             NativeFunction {

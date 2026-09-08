@@ -87,6 +87,34 @@ fn urlencode(raw: &str) -> String {
     out
 }
 
+/// GET /api/runners/:runner_id/functions：原生函数目录（插件函数 Schema 唯一
+/// 前端数据源）；未知 runner → 404 runner_not_found。
+#[tokio::test]
+async fn runner_functions_endpoint_serves_native_catalog() {
+    let t = build_app("fn-catalog", test_credential("admin123"), Default::default());
+    let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
+
+    let resp = get_json(&t, &sid, "/api/runners/gamer.yaml/functions").await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let j = json_body(resp).await;
+    assert_eq!(j["runner_id"], "gamer.yaml");
+    let functions = j["functions"].as_array().expect("functions 必须是数组");
+    assert!(!functions.is_empty());
+    let tap = functions
+        .iter()
+        .find(|f| f["name"] == "tap")
+        .expect("tap 必须在目录中");
+    assert_eq!(tap["source"], "plugin");
+    assert_eq!(tap["params"][0]["name"], "position");
+    assert_eq!(tap["params"][0]["type"], "point");
+    let wait_find = functions.iter().find(|f| f["name"] == "wait_find").unwrap();
+    assert_eq!(wait_find["params"][2]["default"], "30s");
+
+    let resp = get_json(&t, &sid, "/api/runners/no.such/functions").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json_body(resp).await["error"], "runner_not_found");
+}
+
 /// V1 schema（参数声明数组）+ 旧 v3 源版本迁移诊断 + not_found/invalid/未知 runner。
 #[tokio::test]
 async fn entrypoint_schema_endpoint_serves_v1_and_rejects_legacy_sources() {

@@ -1,22 +1,22 @@
-# YAML 脚本语法（v3 唯一正式方案）
+# YAML 脚本语法（V1 唯一正式方案）
 
-GameBot 自动化脚本只支持 **YAML v3**（`version: 3`，ADR-YAML-01：唯一正式方案）。
-非 3 的版本声明（含缺失与历史 v2 形态）在保存 / 描述 / 运行三条路径统一报
-`unsupported yaml version`（`yaml.v3.version` / `yaml.v3.version.missing`），
-**无兼容分支、无 fallback、无迁移工具**。
+GameBot 自动化脚本只支持 **YAML V1**（Gamer V1 简化计划 Phase 1；无 `version`
+字段——出现 `version:` 直接报 `yaml.version.removed` 迁移诊断，旧 v3/v2 脚本
+**无兼容分支、无 fallback、无迁移工具**）。
 
-- 专题文档套件：`docs/yaml-v3/`（overview / program / params / steps / call /
-  expressions / vision / timing / runtime / examples，逐主题给出全部语法与被移除
-  v2 语法的迁移对照）；
-- 权威裁决：`docs/reference/adr/ADR-YAML-01~04`；
-- 实现：`server/src/extensions/gamer_yaml/yaml_vnext.rs`（纯数据前端：Surface
-  YAML → small AST）+ `yaml_extension.rs` / WASM guest 解释器；前端可视化编辑器
-  （`web/src/script-editor/`）与 Runtime 共用同一 v3 surface DSL。
+核心原则：**YAML 只描述流程，所有实际操作都是函数调用**。解释器只认识
+函数调用 / `if` / `repeat` / `return` 四类步骤；`tap`、`find`、`sleep` 等
+都不是语法关键字，而是函数。
 
-## 1. 目录与资源边界
+- 权威实现：`server/guests/yaml-interp/`（唯一解释器，WASM guest 与宿主测试
+  同源）+ `server/src/extensions/gamer_yaml/syntax.rs`（解析/校验/降线）+
+  `native_funcs.rs`（原生函数注册表）；前端可视化编辑器（`web/src/script-editor/`）
+  与 Runtime 共用同一 V1 surface DSL；
+- 旧 v3 语法文档（docs/yaml-v3/）已删除，历史实现见 git 历史。
 
-脚本、函数库、模板按 **Package**（数据一级作用域，Package ID）存放，插件目录
-语义归 gamer.yaml 扩展定义（Core 只认 `packages/<package-id>/plugins/<plugin-id>/`）：
+## 1. 目录与函数来源
+
+脚本、函数库、模板按 **Package**（数据一级作用域）存放：
 
 ```
 data/packages/<package-id>/
@@ -24,257 +24,155 @@ data/packages/<package-id>/
 ├── shared/                           # 跨插件保留区（gamer.yaml 不写）
 └── plugins/
     ├── gamer.yaml/
-    │   ├── automations/              # 可运行脚本（.yaml/.yml，顶层必须有 steps）
-    │   ├── functions/                # 函数库（严格 .yaml，顶层键全是函数名）
-    │   ├── templates/                # 模板图片（默认 8-bit 灰度 PNG，文件名可带 # 搜索区/#1 颜色后缀）
-    │   └── presets/                  # 包内任务预设（导入/创建时发布为任务预设）
-    └── gamer.keymap/
-        └── mappings/                 # 按键映射方案（WASM keymap 扩展 profile 数据源）
+    │   ├── automations/              # 可运行脚本（.yaml/.yml）
+    │   ├── functions/                # 函数库（functions: 包装，见 §4）
+    │   └── templates/                # 模板图片（8-bit 灰度 PNG）
+    └── <其他插件>/                    # dormant 数据原样保留，Core 不解释
 ```
 
-- **单一数据层**：Package 即本地编辑区（可读/可写/可运行/可导入导出），无
-  Installed/Editable 双层模型——资源按三元组 `(package_id, plugin_id, path)`
-  直接寻址（Core PackageStore）。
-- **脚本资源 ID** = `<package-id>/<文件名>.yaml`（如 `daily/login.yaml`，可含
-  子目录；该相对路径落在 `plugins/gamer.yaml/automations/` 下，`automations/`
-  前缀由 gamer.yaml 内部映射，id 中不写）。含 `/`，前端拼 URL 必须整体
-  `encodeURIComponent`。**首段是 Package id**（`[a-z0-9][a-z0-9._-]*`，可与
-  Android 包名不同名；按 Android 包名拼脚本 id 会 404）。
-- **函数路径** = `<文件短路径>/<函数名>`（如 `common/login` = `functions/common.yaml`
-  里的 `login`；一个函数库文件可定义多个函数）。
-- **运行边界**：只有 `automations/` 下的脚本可手动运行 / 立即运行 / 进入定时任务；
-  `functions/` 只能经 `call`（`function:<文件短路径>/<函数名>`）调用或走函数测试
-  API，不进脚本列表与任务选择器。
-- **不做内容推断**：`automations/` 里必须声明 `version: 3` 且有顶层 `steps`；
-  `functions/` 为 bare-map（顶层键全是函数名，无 version 键）。
-  放错目录按该目录的类型校验，报错即拒。
-- **跨 Package 一律不解析、不回退**：模板 / 函数 / 子脚本只在当前 Package 的
-  gamer.yaml 插件数据根内查找，没有 default 兜底；其他目录布局不属于当前资源，
-  也不会被读取或迁移。
-- **模板引用写短名**（如 `account.png`）。磁盘文件名可带 `#` **搜索区后缀**
-  （后缀在扩展名前，如 `xx#l.png`）：
-  - 半区码：`a`=全屏、`u`/`d`/`l`/`r`=上/下/左/右半、`ul`/`ur`/`dl`/`dr`=四角；
-  - 数字坐标：`xx#x1_y1_x2_y2`，四段各为相对坐标 ×1000 的整数（如
-    `xx#0_0_500_500` = 左上 1/4 区域），需 x2>x1、y2>y1。
-  - 颜色标记：末尾再加 `#1`（如 `xx#0_0_500_500#1.png`）表示保留颜色，
-    并在灰度 NCC 命中后复核颜色；不带 `#1` 的旧格式均按灰度匹配，脚本 YAML 无需颜色参数。
-  脚本写 `xx.png` 而磁盘存在 `xx#l.png` 时按「基名 + `#` 后缀 + 同扩展名」唯一
-  匹配；零候选报不存在、多候选报歧义（`resource.tmpl.ambiguous`），不猜测。
+**函数只有两种来源**（计划 Phase 3）：
 
-## 2. YAML v2（历史档案，已删除）
+1. **插件函数**：`gamer.yaml` 原生注册表（`native_funcs.rs`，Schema 唯一声明点），
+   随插件安装/启用变化；受插件权限约束；
+2. **当前 Package 函数**：`functions/<分类>.yaml`（用户可编辑），解释器本地执行。
 
-YAML v2（严格 loader / 19 类步骤 AST / 原生执行器 / 双格式兼容入口）已于
-Phase 12（P12.9）整体删除，本文旧版 §2–§10 的 v2 语法描述随之退役；规则档案见
-`ADR-YAML-01` 与 git 历史。开发者须知：
+运行前组合为唯一函数名注册表：同名冲突（原生 vs Package、跨文件重复）一律拒绝；
+不跨 Package 查找；运行开始时冻结全部函数定义。目录首版清单：
 
-- 存量 v2 脚本**不可运行也不可再保存**：非 `version: 3` 源在保存 / entrypoint
-  描述 / 手动运行 / 定时任务门禁 / call resolver 全部统一报
-  `yaml.v3.version`（`version` 缺失报 `yaml.v3.version.missing`），不误诊为
-  其他结构错误，也没有任何 fallback 路径；
-- 常用迁移对照（详见 `docs/yaml-v3/steps.md` §10）：`func` 步骤 →
-  `call` + `function:<文件短路径>/<函数名>`；`match` → `match_first`（候选
-  `steps`）；`color` → `invoke: vision.sample_color` + `if`；`str_app` /
-  `cls_app` → `app.start` / `app.stop`；脚本级 `config:` → `defaults`
-  （vision/timing）；参数声明串（`类型:名:备注[:默认]`）与 psig1 签名 wire
-  形态保持不变，等价声明的存量任务签名继续可比对；
-- `server/tests/fixtures/script_v2/` golden 夹具与 `phase0_tests.rs` 夹具护栏
-  随 v2 一并删除。
-
-## 3. YAML v3 语法契约（唯一正式方案）
-
-> v3 是唯一正式方案（ADR-YAML-01）：脚本必须声明 `version: 3`，非 3 一律报
-> `unsupported yaml version`，无 v2 兼容 / 无 fallback / 无迁移工具。本节是 v3
-> 语法契约的实现同步；权威裁决见 `docs/reference/adr/ADR-YAML-01~04`，契约原文
-> 见 `docs/plans/phase12_v3_dsl_contract.md`。实现在
-> `server/src/extensions/gamer_yaml/yaml_vnext.rs`（纯数据前端）+ WASM guest
-> 小 AST 解释器；全部 19 类 surface 步骤的逐条语法见 `docs/yaml-v3/steps.md`。
-
-### 3.1 脚本与函数库
-
-- **脚本**（automations/）顶层只允许 `version / params / defaults / steps`；缺失或非 3 的
-  `version` 报 `yaml.v3.version` / `yaml.v3.version.missing`。`params` 为参数
-  唯一来源，字符串 / 映射双形态（见 `docs/yaml-v3/params.md`），`remark`（字符串第 3 段 / 映射
-  `remark` 键）随声明保留并透出到参数 schema 的 `description`
-  （不参与 `psig1` 签名，改备注不触发任务参数过期）。
-- **函数库**（functions/）为 bare-map `{<函数名>: {params, steps}}`，**无
-  `version` 键**（目录即类型）；函数名由映射键承载（唯一），每个函数记录只允许
-  `params / steps`，`steps` 必需；函数名 unicode 字母/数字/`_`（支持中文）、
-  不能以数字开头且不得撞动作键/结构键/`$match` 保留字
-  （`yaml.v3.function.name`）。结构非法报 `yaml.v3.function.*` 结构化诊断
-  （`yaml.v3.function.file` / `.name` / `.unknown_key` / `.not_found`）。
-  保存边界只接受 v3 bare-map 单形态（P12.9 起），允许嵌套目录
-  （`function:<文件短路径>/<函数名>` 的短路径可含 `/`）。
-
-### 3.1.1 defaults —— vision threshold 与 timing 兜底（契约 §4）
-
-```yaml
-version: 3
-defaults:                     # 可选
-  vision:
-    threshold: 0.80           # 模板匹配阈值兜底
-  timing:
-    after_tap: 300ms          # 每次 tap 后等待（内置 300ms）
-    after_match: 200ms        # 匹配命中后等待（内置 200ms）
-    poll_interval: 100ms      # find/check 轮询间隔（内置 100ms）
-steps:
-  - ...
+```text
+原子：tap / swipe / key / input_text / launch / stop_app / sleep / log / find
+便利：wait_find / tap_template / wait_disappear
+比较：eq / ne / gt / ge / lt / le
 ```
 
-- 只允许上述键，未知键 / 非法形态报 `yaml.v3.defaults.unknown_key` /
-  `yaml.v3.defaults.type` / `yaml.v3.defaults.range`；timing 值必须是带单位
-  时长字面量（`300ms`/`2s`）或非负整数毫秒，不接受 `$var`。
-- **threshold 三级优先**：step `threshold` > `defaults.vision.threshold` >
-  Runtime 内置 `0.80`；lower 期解析并注入 `vision.match` / `vision.match_many`
-  的 invoke args（缺省省略字段，由 Runtime 兜底）。
-- **timing 即语义**：tap 后 / 命中后等待与轮询间隔全部由脚本 defaults 显式
-  声明（缺省用内置值），lower 期展开为显式 `runtime.sleep`（可被「停止」取消），
-  不存在隐藏的全局 interval / judge_delay。
-- 函数库无 defaults 块（bare-map 结构），timing / threshold 走内置兜底。
+`GET /api/runners/gamer.yaml/functions` 返回原生函数目录（Schema 唯一前端来源）。
 
-### 3.3 find / match_first / check 与 `$match` 上下文（ADR-YAML-03）
+## 2. 脚本格式
 
 ```yaml
-- find:
-    template: reward
-    timeout: 10s          # 可选；缺省 30min（轮询 poll_interval 至命中）
-    threshold: 0.90       # 可选 step override（三级优先见 §3.1.1）
-    region: {x: 0.1, y: 0.2, width: 0.3, height: 0.4}   # 可选；相对坐标搜索区
-    save: reward          # 可选；命中结果固化到命名变量，跨后续步骤可用
-    then:                 # 命中后步骤组（唯一键名；体内 `$match` / `$reward` 可用）
-      - tap: {point: $reward.center}
-    else:                 # 可选；超时后步骤组（缺省抛 FIND_TIMEOUT: <template>）
-      - log: 未找到
-    verify:               # 可选；then 执行完后在 timeout 内二次验证
+name: 每日签到            # 可选
+
+params:                   # 可选：运行参数 Schema（类型/必填/默认值/说明）
+  retry:
+    type: integer
+    default: 3
+    desc: 重试次数
+  secret:
+    type: string
+    required: true
+
+vars:                     # 可选：字面量表（不做引用解析）
+  timeout: 15s
+
+run:                      # 必有（可为空列表）：执行入口
+  - launch: com.example.game
+  - wait_find:
       template: home
-      timeout: 5s         # 可选；缺省 30min
+      timeout: $timeout
+    as: home
+  - if: $home
+    then:
+      - claim_daily: {}
+    else:
+      - log: 未进入主页
+  - return: true
 ```
 
-- **命中路径**：save 固化 → sleep(after_match) → `then` → `verify`（若设，
-  不命中抛 `VERIFY_FAILED: <template>`，不走 else）。
-- **超时路径**：有 `else` 走 `else`；无 `else` 抛 `FIND_TIMEOUT: <template>`。
-- **match 结果值**（save 存入 / `$match` 引用）：
-  `{found, score, x, y, width, height, center, region}`；坐标为相对值 0~1
-  （center 为命中框中心），`region` 回显本次搜索区域。未 save 时 `$match`
-  仅在对应 find/match_first 的 then/else/verify/steps 体内可见（块结束复位），
-  save 后跨步可用。
+参数类型：`any / boolean / integer / number / string / list / object /
+duration / point / template / key`（别名 bool/int/float/text 解析期归一）。
+默认值按类型校验（`yaml.param.default.invalid`）。
+
+## 3. 步骤与表达式
+
+**一个步骤 = 恰好一个动作键**（函数名或 `if/repeat/return`）+ 可选 `as`；
+`then/else/do` 是 if/repeat 的结构键。
 
 ```yaml
-- match_first:
-    candidates:
-      - template: reward
-        threshold: 0.9      # 可选候选级 threshold（三级优先同上）
-        steps:              # 候选命中后执行（唯一键名；体内 `$match` = 该候选结果）
-          - tap: {point: $match.center}
-      - template: close
-        steps:
-          - tap: {point: $match.center}
-    else: ...               # 全未命中走 else；缺 else 静默继续
+run:
+  - tap: [0.5, 0.8]              # 位置值简写（标量/数组 → 第一个参数）
+  - find: login_button           # 同上
+    as: button                   # as = 返回值赋给变量
+  - tap: $button.center          # $name.field 引用（仅点号字段，无索引）
+  - swipe:
+      from: [0.5, 0.8]
+      to: [0.5, 0.2]
+      duration: 500ms
+  - key: HOME
+  - input_text: 你好
+  - sleep: 1s                    # duration：带单位串或毫秒数；0 合法
+  - log: 未进入主页               # 非字符串值自动转 JSON 文本
+  - log:
+      message: 带级别
+      level: warn
+  - launch: com.example.game     # 缺省包名 = 设备配置的应用（冷启动）
+  - stop_app: {}
+  - repeat: $retry               # 固定次数（非负整数或整数引用）
+    do:
+      - tap: [0.5, 0.5]
+  - return: $button              # 返回值（脚本顶层返回即运行结果）
 ```
 
-- match_first 单帧 `vision.match_many`（候选级 threshold 经 `thresholds`
-  平行列表传入）、按书写顺序首个命中候选执行自己的 `steps`。
-- `- check: {template, timeout?, threshold?, throw?}`：轮询至出现（每轮
-  sleep(poll_interval)），命中 sleep(after_match) 后继续；超时按 `throw`
-  文案结束运行（缺省「check 未命中」）。
-- **wait 双形态**：`- wait: 300ms` 固定；`- wait: {min: 300ms, max: 700ms}`
-  随机区间（min/max 必须同给且 min ≤ max，run 级随机 nonce 播种 splitmix64
-  取值，经 `runtime.sleep` 等待、可被停止取消）。
+- 无参函数允许 `{}`、空映射或 `sleep:`（null）；
+- `if` 条件：`false`/`null` 为假，非空结果为真（无数字/字符串隐式转换；
+  比较用 `eq/gt` 等函数）；
+- 函数调用独立局部作用域：参数显式传入，`as` 接收返回值；
+- `find`/`wait_find` 未命中返回 `null`（不是错误）；`find` timeout 缺省 0
+  （单次尝试），`wait_find` 缺省 30s（轮询）。
 
-**已删除步骤/字段**（给迁移诊断 `yaml.v3.step.removed` / `yaml.v3.field.removed`）：
-`retry`（用 loop 表达）、`wait_for`（与 find 同义）、`click_when` /
-`find.click` / 候选 `click`（ADR-YAML-03 click 语法全面移除，用 then + 
-`tap: {point: $match.center}` 表达）、`color_branch`（用
-`invoke: vision.sample_color` + if 表达）、match_first 顶层 `then`
-（候选步骤归各自 `steps`）。
+**表达式只有两种**：字面量、`$name.field` 引用。字符串以 `$` 开头是引用；
+字面量 `$` 用 `$$` 转义。无算术、无插值、无 eval、无动态索引。
 
-### 3.4 v3 surface 步骤集（19 类）
+诊断码命名空间 `yaml.*`（解析/结构）与 `param.args.*`（绑定）；旧 v3 源在
+解析层直接报 `yaml.version.removed`，其余旧形态报 `yaml.top.unknown`——
+**不接受旧语法**。
 
-`app.start` / `app.stop` / `tap` / `swipe` / `key` / `text` / `wait` /
-`log` / `set` / `if` / `loop` / `break` / `call` / `return` / `throw` /
-`find` / `match_first` / `check` / `invoke`——与前端编辑器
-（`web/src/script-editor/model.ts` `STEP_KINDS`）一一对应。
-
-### 3.5 call —— 唯一可调用资源入口（ADR-YAML-02）
+## 4. 函数库文件（当前 Package 函数）
 
 ```yaml
-- call:
-    target: script:daily/login        # 或 function:工具/月卡领取
-    with:                             # 参数名 → 表达式；`args` 为兼容别名
-      account: $user
-    save: result                      # 可选；返回值整体存入；无 return → null
+functions:                        # 顶层必须有 functions: 包装
+  claim_daily:
+    description: 领取每日奖励      # 可选说明
+    params:
+      timeout:
+        type: duration
+        default: 5s
+    vars:                         # 可选：函数内字面量
+      tag: local
+    returns:                      # 可选：仅文档/提示，不做运行时校验
+      type: boolean
+    run:                          # 必有
+      - tap_template:
+          template: daily_button
+          timeout: $timeout
+      - return: true
 ```
 
-- **命名空间仅 `script:` / `function:`**；裸 target / 未知前缀在解析期报
-  `yaml.v3.call.namespace`（错误信息含 target 原文与合法形态示例）。
-- `script:<资源id>`：当前 Package 内 `automations/` 相对路径，`.yaml` 后缀可省略
-  （`script:daily/login` → `plugins/gamer.yaml/automations/daily/login.yaml`）。
-- `function:<文件短路径>/<函数名>`：文件短路径按**最后一个 `/`** 分割、可含目录
-  （`function:common/login/is_logged_in` = `functions/common/login.yaml` 里的
-  `is_logged_in`）；拒绝 `..` / 绝对路径 / 反斜杠 / 空段——穿越报
-  `yaml.v3.call.target`，路径形态报 `yaml.v3.call.function_path`。
-- 函数与脚本只经 Core PackageStore（当前 Package 的插件数据根）解析，call 目标
-  不做旁路文件读取；跨 Package 一律不解析。
-- **返回值泛化**：`return` 可返回 null / bool / number / string / object /
-  array 任意 JSON 值；`call` 的 `save` 存返回值整体，被调方无 `return` 即存
-  null。删除「函数默认返回 bool」约束，`if` 条件按通用值语义判断。
-- **递归深度**上限 32 层，超限报 `CALL_DEPTH_EXCEEDED: depth=N max=32`
-  （P12.4 起 depth 由 guest 本地 ExecutionBudget 计数，WIT `programs.resolve`
-  不再透传 depth、宿主不做深度守卫）。
-- **执行预算**（ADR-YAML-04）：`max_steps = 100_000`（逻辑步：顶层、循环体
-  每轮每个子步、if 分支体、call 目标程序体全计，循环每轮迭代本身也计）、
-  `max_call_depth = 32`，由 guest 解释器本地计数；超限报
-  `STEP_BUDGET_EXCEEDED: consumed=N max=100000` / `CALL_DEPTH_EXCEEDED`，
-  错误码原样进入运行错误信息与日志。宿主侧 wasmtime epoch interruption
-  仅作取消兜底（用户停止可打断 guest 纯计算段），不做超时强杀。
+脚本直接调用（两种来源语法一致）：
 
-### 3.6 手动运行 start_index（契约 §8）
+```yaml
+run:
+  - claim_daily:
+      timeout: 10s
+    as: success
+```
 
-guest 解释器支持 program 顶层可选 `start_index`：跳过其前的**顶层**步骤
-（与 v2「从此运行」语义一致）；嵌套分支 / 循环体不受影响——lower 后的顶层小
-AST 步与 surface 步骤 1:1 对应，序号即顶层 surface 步序号。host 由运行请求
-（`YamlWasmRunRequest.start_index`）注入，缺省 `None` = 从头执行。
+- 函数名 = 小写标识符 `[a-z_][a-z0-9_]*`，保留字 `if/repeat/return` 不可用；
+- 分类文件只是存储与编辑分组，不是 namespace；同一文件内函数名唯一，
+  跨文件/与原生函数同名直接报冲突（`yaml.fn.conflict`）；
+- 脚本文件不再内嵌局部函数库；可复用函数一律存 `functions/`。
 
-### 3.7 运行可视化事件（P12.6 / ADR-YAML-03 wire 契约）
+## 5. 错误处理与预算
 
-v3 脚本运行时经 control DataChannel 反向推送运行结构事件（信封
-`{"type":"se","ev":...}`；引擎 emit → viewers 注册表 `control_dc`，手动运行与
-定时任务同样生效）。事件**不携带帧图像数据**；前端「运行事件 feed」与
-ScriptSummary 步骤高亮由这些事件驱动。
+无 try/catch/throw/on_error。业务未命中（find 未找到）返回 `null`；参数错误、
+资源不存在、设备断开、权限不足属于执行错误，终止当前 Run 并给结构化错误。
 
-**step 身份（path 语法）**：lower 阶段为每个 surface 步骤生成稳定路径挂在
-产出的小 AST 步上，语法与前端编辑器寻址一致：
+保留宿主安全机制（计划 §1.6）：取消（stop 标志 + epoch 兜底）、步预算
+`STEP_BUDGET_EXCEEDED`（上限 100,000 逻辑步）、调用深度
+`CALL_DEPTH_EXCEEDED`（上限 32，Package 函数本地解释递归）。
 
-- 顶层：`steps[0]`、`steps[2]`；
-- if / find 分支：`steps[0].then[1]`、`steps[0].else[0]`；
-- loop 体：`steps[1].steps[3]`；
-- match_first：`steps[2].candidates[0].steps[1]`、超时分支 `steps[2].else[0]`。
+## 6. 模板引用与重命名
 
-同一脚本重复运行、编辑无损往返后路径保持稳定。call 进入被调方后帧内事件的
-path 仍是该脚本的本地路径（`call_start` 事件宣告帧切换）。
-
-**事件 wire 表**（ev 名 × 载荷 × 发射点）：
-
-| 事件 | 载荷 | 发射点 |
-|---|---|---|
-| `run_start` | `{}` | 运行进入（guest / 原生解释器） |
-| `run_end` | `{ok, error?}` | 运行退出（ok=false 带 error 原文） |
-| `step_start` | `{path, desc}` | 进入 surface 步骤（desc = 中文摘要，如 `find 登录按钮`、`tap 0.5,0.3`、`call script:daily/login`、`wait 300ms`） |
-| `step_end` | `{path, ok, error?}` | surface 步骤完成 / 失败 |
-| `call_start` | `{target, depth}` | 进入 call 目标（depth = 本地调用深度） |
-| `vision` | `{template, found, score?, center?}` | 每次模板匹配后（宿主侧 vision 能力补发；center 为相对坐标） |
-| `budget` | `{kind}` | 预算终止：`STEP_BUDGET_EXCEEDED` / `CALL_DEPTH_EXCEEDED` / `CANCELLED`（先于 run_end 发出） |
-
-- **投屏标记兼容**：v2 引擎的 `tap` / `swipe` / `hit` / `miss` 事件（设备像素
-  坐标）在 v3 保留同形——宿主侧 input.tap / input.swipe / vision 匹配完成后
-  补发，前端 overlay 无需改动即可显示 v3 运行标记。
-- **发射通道（零 WIT 变更）**：guest 把事件 JSON 发到私有
-  `capability.invoke("__event", …)`，宿主先于权限校验拦截转发 EventSink；
-  `__event` 不进 CapabilityRegistry、不要求权限声明，解析失败静默丢弃——
-  可视化事件永不影响运行结果。
-- **静默展开物**：lower 展开的 timing sleep（after_tap / after_match /
-  poll_interval）与 find / check / match_first 轮询体不是 surface 步骤，
-  不产生 step 事件（vision 事件每次真实匹配仍会发出）。
-- **前端消费**：`web/src/components/console/useRunEvents.js`（分发 + feed
-  状态）→ `RunEventsPanel.vue`（运行事件 feed，budget / 失败行高亮）+
-  `ScriptSummary.vue`（按 path 高亮当前顶层卡片：嵌套路径映射其顶层祖先，
-  如 `steps[2].then[1]` → 第 3 张卡；失败标红；run_start / 新运行重置）。
+脚本/函数中 `find / wait_find / tap_template / wait_disappear` 的
+`template` 实参用模板短名；模板重命名经 AST 同步改写（`yaml.resource.*`，
+文本字面量不误改）。V1 起模板引用改写收敛为上述四个函数 + 任意调用步骤的
+`template` 键。

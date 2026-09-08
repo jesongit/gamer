@@ -163,6 +163,35 @@ pub(super) async fn api_runner_entrypoint_schema(
     }
 }
 
+/// GET /api/runners/:runner_id/functions：runner 可调用函数目录（V1 计划
+/// Phase 3/4——插件函数 Schema 的唯一前端数据源，前端不硬编码函数清单）。
+/// 响应 = `{runner_id, functions: [...]}`；runner 未注册 404 runner_not_found。
+pub(super) async fn api_runner_functions(
+    State(st): State<AppState>,
+    Path(runner_id): Path<String>,
+) -> Response {
+    match st.scheduler.describe_functions(&runner_id) {
+        Ok(functions) => Json(serde_json::json!({
+            "runner_id": runner_id,
+            "functions": functions,
+        }))
+        .into_response(),
+        Err(crate::scheduler::EntrypointQueryError::UnknownRunner) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "runner_not_found",
+                "runner_id": runner_id,
+            })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "describe_failed" })),
+        )
+            .into_response(),
+    }
+}
+
 /// GET /api/schedule-providers：已注册 schedule provider 列表。
 pub(super) async fn api_list_schedule_providers(State(st): State<AppState>) -> Response {
     let ids = st.scheduler.schedule_provider_ids();

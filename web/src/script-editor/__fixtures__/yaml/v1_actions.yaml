@@ -1,0 +1,50 @@
+run:
+  - launch: com.example.game
+  - stop_app: {}
+  - tap: [0.5, 0.8]
+  - swipe:
+      from: [0.5, 0.8]
+      to: [0.5, 0.2]
+      duration: 500ms
+  - key: BACK
+  - key:
+      key: VOL_UP
+      action: down
+  - input_text: 你好
+  - sleep: 1s
+  - log: 未进入主页
+  - log:
+      message: 带级别
+      level: warn
+  - find:
+      template: login_button
+      threshold: 0.85
+      timeout: 3s
+      region: [0, 0, 1, 0.5]
+    as: button
+  - tap: $button.center
+  - wait_find:
+      template: home
+      timeout: 30s
+    as: home
+  - tap_template:
+      template: claim_button
+      timeout: 5s
+  - wait_disappear:
+      template: loading
+      timeout: 10s
+    as: gone
+  - repeat: 3
+    do:
+      - tap: [0.5, 0.5]
+      - sleep: 1s
+  - eq:
+      a: $gone
+      b: true
+    as: same
+  - if: $same
+    then:
+      - log: 相等
+    else:
+      - log: 不相等
+  - return: $same

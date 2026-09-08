@@ -215,6 +215,11 @@ const BOUNDARY_ALLOWS: &[Allow] = &[
         reason: "api 测试装配：与生产等价预注册 gamer.yaml runner（HTTP 集成夹具）",
     },
     Allow {
+        file: "api/tests.rs",
+        snippet: "YamlTimerRunner::functions_describer(),",
+        reason: "api 测试装配：gamer.yaml 原生函数目录描述器（与生产 start 生命周期同构）",
+    },
+    Allow {
         file: "api/tests/update.rs",
         snippet: "YamlTimerRunner::new(",
         reason: "update API 测试装配：gamer.yaml runner 夹具",
@@ -496,6 +501,11 @@ const DEPENDENCY_ALLOWS: &[Allow] = &[
         file: "api/tests.rs",
         snippet: "gamer_yaml::timer_yaml::YamlTimerRunner::new",
         reason: "api 测试装配：预注册 gamer.yaml runner",
+    },
+    Allow {
+        file: "api/tests.rs",
+        snippet: "gamer_yaml::timer_yaml::YamlTimerRunner::functions_describer",
+        reason: "api 测试装配：gamer.yaml 原生函数目录描述器（与生产 start 生命周期同构）",
     },
     Allow {
         file: "api/tests.rs",
@@ -1004,58 +1014,9 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
     let task = get_json(&guard.app, &cookie, &format!("/api/tasks/{task_id}")).await;
     assert_eq!(task["state"], "active", "runner 在位 → 新建任务直接 Active");
 
-    // ---- stop：runner 注销 → 任务转 dependency_missing 但保留；
-    //      UI 贡献随 stop 撤销（Phase 1：仅 Running 可见） ----
-    let (status, body) = post_json(
-        &guard.app,
-        &cookie,
-        &format!("/api/extensions/{YAML_ID}/stop"),
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(
-        get_json(&guard.app, &cookie, "/api/runners")
-            .await
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "stop 注销扩展拥有的 runner"
-    );
-    let task = get_json(&guard.app, &cookie, &format!("/api/tasks/{task_id}")).await;
-    assert_eq!(task["state"], "dependency_missing");
-    assert_eq!(
-        task["suspend_reason"],
-        serde_json::json!(format!("missing_dependency={YAML_ID}")),
-        "ADR-13：runner 缺失 → 任务挂起且记录缺失依赖"
-    );
-    assert!(
-        get_json(&guard.app, &cookie, "/api/extensions/ui")
-            .await
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "stop 撤销 UI 贡献（仅 Running 可见）"
-    );
-
-    // ---- start 再启：runner 重注册 → 任务自动恢复 Active（无需人工 enable） ----
-    let (status, body) = post_json(
-        &guard.app,
-        &cookie,
-        &format!("/api/extensions/{YAML_ID}/start"),
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let task = get_json(&guard.app, &cookie, &format!("/api/tasks/{task_id}")).await;
-    assert_eq!(
-        task["state"], "active",
-        "runner 重注册自动恢复 dependency_missing 任务"
-    );
-    assert!(task["suspend_reason"].is_null());
-    assert!(!task["next_wakeup"].is_null(), "恢复必须重算唤醒游标");
-
-    // ---- disable 运行中 = 自动 stop（ADR-13 disable 语义）：runner/UI 一并摘除 ----
+    // ---- disable：runner 注销 → 任务转 dependency_missing 但保留；
+    //      UI 贡献随 disable 撤销（V1：用户操作只有 enable/disable，disable
+    //      运行中 = 自动 stop，ADR-13 disable 语义） ----
     let (status, disabled) = post_json(
         &guard.app,
         &cookie,
@@ -1071,7 +1032,14 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
             .as_array()
             .unwrap()
             .is_empty(),
-        "disable 运行中必须先 stop（注销 runner）"
+        "disable 注销扩展拥有的 runner（运行中自动 stop）"
+    );
+    let task = get_json(&guard.app, &cookie, &format!("/api/tasks/{task_id}")).await;
+    assert_eq!(task["state"], "dependency_missing");
+    assert_eq!(
+        task["suspend_reason"],
+        serde_json::json!(format!("missing_dependency={YAML_ID}")),
+        "ADR-13：runner 缺失 → 任务挂起且记录缺失依赖"
     );
     assert!(
         get_json(&guard.app, &cookie, "/api/extensions/ui")
@@ -1079,49 +1047,27 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
             .as_array()
             .unwrap()
             .is_empty(),
-        "disable 摘除 UI 贡献"
-    );
-    let task = get_json(&guard.app, &cookie, &format!("/api/tasks/{task_id}")).await;
-    assert_eq!(task["state"], "dependency_missing");
-    assert_eq!(
-        task["suspend_reason"],
-        serde_json::json!(format!("missing_dependency={YAML_ID}"))
+        "disable 撤销 UI 贡献（仅 Running 可见）"
     );
 
-    // ---- enable ≠ start（ADR-13 保留语义）：enable 不发布 UI，runner 仍不注册 ----
-    let (status, body) = post_json(
+    // ---- enable（V1：enable = 启用意图 + 直接启动）：runner 重注册 →
+    //      任务自动恢复 Active，UI 贡献重新发布 ----
+    let (status, enabled) = post_json(
         &guard.app,
         &cookie,
         &format!("/api/extensions/{YAML_ID}/enable"),
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(
-        get_json(&guard.app, &cookie, "/api/extensions/ui")
-            .await
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "enable ≠ start：Enabled 不发布 UI 贡献（仅 Running 可见）"
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+    assert_eq!(enabled["state"], "running");
+    let task = get_json(&guard.app, &cookie, &format!("/api/tasks/{task_id}")).await;
+    assert_eq!(
+        task["state"], "active",
+        "runner 重注册自动恢复 dependency_missing 任务"
     );
-    assert!(
-        get_json(&guard.app, &cookie, "/api/runners")
-            .await
-            .as_array()
-            .unwrap()
-            .is_empty(),
-        "enable 不注册 runner（ADR-13：runner 随 start 生命周期）"
-    );
-    let (status, started) = post_json(
-        &guard.app,
-        &cookie,
-        &format!("/api/extensions/{YAML_ID}/start"),
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{started}");
-    assert_eq!(started["state"], "running");
+    assert!(task["suspend_reason"].is_null());
+    assert!(!task["next_wakeup"].is_null(), "恢复必须重算唤醒游标");
     assert_eq!(
         get_json(&guard.app, &cookie, "/api/runners")
             .await
@@ -1129,7 +1075,7 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
             .unwrap()
             .len(),
         1,
-        "start 注册 runner"
+        "enable 注册 runner（enable → start 一体化）"
     );
     assert_eq!(
         get_json(&guard.app, &cookie, "/api/extensions/ui")
@@ -1138,17 +1084,72 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
             .unwrap()
             .len(),
         3,
-        "start → Running 重新发布 UI 贡献"
+        "enable → Running 重新发布 UI 贡献"
     );
-    // uninstall 前置：卸载守卫拒绝 Running，先 stop
-    let (status, body) = post_json(
+    // 已删除的细粒度端点：start/stop/activate 不再存在（V1 用户操作收敛）
+    let response = send(
+        &guard.app,
+        request(
+            "POST",
+            &format!("/api/extensions/{YAML_ID}/start"),
+            &json_headers(&cookie),
+            Some(serde_json::json!({}).to_string().into_bytes()),
+        ),
+    )
+    .await;
+    assert!(
+        response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::METHOD_NOT_ALLOWED,
+        "V1 移除 /start（enable 即启动），得到 {}",
+        response.status()
+    );
+    let response = send(
+        &guard.app,
+        request(
+            "POST",
+            &format!("/api/extensions/{YAML_ID}/stop"),
+            &json_headers(&cookie),
+            Some(serde_json::json!({}).to_string().into_bytes()),
+        ),
+    )
+    .await;
+    assert!(
+        response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::METHOD_NOT_ALLOWED,
+        "V1 移除 /stop（disable 即停止），得到 {}",
+        response.status()
+    );
+    let response = send(
+        &guard.app,
+        request(
+            "POST",
+            &format!("/api/extensions/{YAML_ID}/activate"),
+            &json_headers(&cookie),
+            Some(
+                serde_json::json!({"version": "0.0.1"})
+                    .to_string()
+                    .into_bytes(),
+            ),
+        ),
+    )
+    .await;
+    assert!(
+        response.status() == StatusCode::NOT_FOUND
+            || response.status() == StatusCode::METHOD_NOT_ALLOWED,
+        "V1 移除 /activate（版本回退走重装/更新），得到 {}",
+        response.status()
+    );
+
+    // ---- disable（卸载前置：卸载守卫拒绝 Running，先 disable） ----
+    let (status, disabled) = post_json(
         &guard.app,
         &cookie,
-        &format!("/api/extensions/{YAML_ID}/stop"),
+        &format!("/api/extensions/{YAML_ID}/disable"),
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(status, StatusCode::OK, "{disabled}");
+    assert_eq!(disabled["state"], "disabled");
 
     // ---- uninstall：扩展、UI、runner 全清，任务（用户资产）保留 ----
     let response = send(
@@ -1176,17 +1177,17 @@ async fn architecture_guard_lifecycle_extension_full_chain_binds_ui_runner_and_t
         "卸载插件不删除用户任务（ADR-13：任务配置是资产）"
     );
 
-    // ---- reconcile_startup 恢复路径：重装 → 启动 → 制造崩溃窗口（磁盘遗留
+    // ---- reconcile_startup 恢复路径：重装 → 制造崩溃窗口（磁盘遗留
     //   Running）→「重启后的进程」对账 → runner 重注册 + 任务恢复 Active ----
     install_yaml_running(&guard.app, &cookie).await;
-    let (status, body) = post_json(
+    let (status, disabled) = post_json(
         &guard.app,
         &cookie,
-        &format!("/api/extensions/{YAML_ID}/stop"),
+        &format!("/api/extensions/{YAML_ID}/disable"),
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(status, StatusCode::OK, "{disabled}");
     // 崩溃窗口：不经生命周期把磁盘状态改写为 Running（实例与 runner 均不存在）。
     {
         let store = guard.extensions.store();

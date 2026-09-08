@@ -243,22 +243,15 @@ export const api = {
     )
     return readResult(r)
   },
+  // V1 生命周期：启用 = 启用意图 + 直接启动（幂等）；停用 = 运行中自动停止。
+  // start/stop/activate 细粒度端点已随 V1 收敛删除。
   enableExtension: (id) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/enable`, {}),
   disableExtension: (id) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/disable`, {}),
-  startExtension: (id, app_context) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/start`, app_context ? { app_context } : {}),
-  stopExtension: (id) => req('POST', `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/stop`, {}),
   // declarative 面板 plugin.call：action 必须在插件 manifest 的声明按钮集合内（服务端校验）
   callExtension: (id, action, values = {}) => req(
     'POST',
     `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/call`,
     { action, values },
-  ),
-  // 版本切换（含回滚）：把已安装的某个版本设为活动版本；插件 Running 时服务端 409，
-  // 版本未安装 404，成功返回 { id, active_version, state }
-  activateExtension: (id, version) => req(
-    'POST',
-    `/api/extensions/${encodeURIComponent(requireId(id, 'extension_id'))}/activate`,
-    { version: requireId(version, 'extension_version') },
   ),
   uninstallExtension: (id, version, { deleteData = false } = {}) => req(
     'DELETE',
@@ -621,17 +614,24 @@ export const api = {
   // UI 支撑只读端点：已注册 runner / schedule provider（执行器与触发方式下拉）
   listRunners: () => req('GET', '/api/runners'),
   listScheduleProviders: () => req('GET', '/api/schedule-providers'),
-  // 参数 schema descriptor（P12.3 / 契约 §7）：前端不为取参数而解析 YAML——按
+  // 参数 schema descriptor（V1）：前端不为取参数而解析 YAML——按
   // runner + entrypoint 资源 id（"<pkg>/<脚本>.yaml" 或 "<pkg>/<文件>.yaml#<函数>"，
   // 含 '/'/'#'，整体 encodeURIComponent）查询可渲染表单的参数 schema。
-  // 200 = {runner_id, entrypoint, kind, format, schema, signature}（schema→表单
-  // 声明的适配见 script-editor/entrypointParams.ts；signature 为 psig1 参数签名，
-  // 本期仅透传）。结构化错误原样上抛（ApiError.status/code/data）：
+  // 200 = {runner_id, entrypoint, kind, format:"yaml-params-v1", schema}
+  // （schema = 参数声明数组，适配见 script-editor/entrypointParams.ts）。
+  // 结构化错误原样上抛（ApiError.status/code/data）：
   // 404 {error:"runner_not_found"} / 404 {error:"not_found",resource} /
   // 400 {error:"invalid_script",diagnostics:[...]}
   getEntrypointParams: (runnerId, entrypoint) => req(
     'GET',
     `/api/runners/${encodeURIComponent(requireId(runnerId, 'runner_id'))}/entrypoint?entrypoint=${encodeURIComponent(requireId(entrypoint, 'entrypoint'))}`,
+  ),
+  // runner 可调用函数目录（V1）：插件函数 Schema 的唯一前端数据源。
+  // 200 = {runner_id, functions:[{name,description,source,params,returns}]}；
+  // 404 {error:"runner_not_found"}。
+  getRunnerFunctions: (runnerId) => req(
+    'GET',
+    `/api/runners/${encodeURIComponent(requireId(runnerId, 'runner_id'))}/functions`,
   ),
 
   // 日志

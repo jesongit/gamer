@@ -17,34 +17,26 @@ import { runConflicts, scriptsData, templatesData, devicesData, tasksData } from
 
 const read = (p) => readFileSync(join(process.cwd(), 'src', p), 'utf8')
 
-// 参数表单声明自 P12.3 起来自服务端 entrypoint schema API（不再取脚本内容解析）：
-// 与旧 SCRIPT_YAML 等价的 descriptor（bool:enable 默认 true + time:timeout 默认 30s）
+// 参数表单声明自 V1 起来自服务端 entrypoint schema API（参数声明数组形态）：
+// enable（boolean 默认 true）+ timeout（duration 默认 30s，带说明）
 const ENTRYPOINT_DESCRIPTOR = {
   runner_id: 'gamer.yaml',
   entrypoint: 'com.demo/main.yml',
   kind: 'script',
   format: 'yaml-params-v1',
-  schema: {
-    type: 'object',
-    properties: {
-      enable: { type: 'boolean', default: true, param_type: 'bool' },
-      timeout: { type: 'string', default: '30s', description: '最长等待', param_type: 'time' },
-    },
-    required: [],
-  },
-  signature: 'psig1|bool,enable,0,true|time,timeout,0,30s',
+  schema: [
+    { name: 'enable', type: 'boolean', required: false, default: true, desc: '' },
+    { name: 'timeout', type: 'duration', required: false, default: '30s', desc: '最长等待' },
+  ],
 }
 
-// tmpl 参数 descriptor（模板候选下拉用例）
+// template 参数 descriptor（模板候选下拉用例）
 const TMPL_DESCRIPTOR = {
   kind: 'script',
   format: 'yaml-params-v1',
-  schema: {
-    type: 'object',
-    properties: { account: { type: 'string', param_type: 'tmpl' } },
-    required: ['account'],
-  },
-  signature: 'psig1|tmpl,account,0,',
+  schema: [
+    { name: 'account', type: 'template', required: true, default: null, desc: '账号模板' },
+  ],
 }
 
 const SCRIPT_YAML = [

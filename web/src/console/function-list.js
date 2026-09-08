@@ -23,7 +23,7 @@ export function createPinyinInitials() {
 
 /**
  * 函数库文件列表 → 全部函数视图列表 [{fileId, category, name, model}]。
- * model = 该函数的伪脚本模型（params + steps），供 ScriptSummary 渲染与运行起点定位。
+ * model = 该函数的伪脚本模型（params + run），供 ScriptSummary 渲染与运行起点定位。
  */
 export function buildFunctionViews(files, parseFunctionFile) {
   const views = []
@@ -41,7 +41,7 @@ export function buildFunctionViews(files, parseFunctionFile) {
         fileId: file.id,
         category: file.file || '',
         name: fn.name,
-        model: { params: fn.params || [], steps: fn.steps || [] },
+        model: { params: fn.params || [], run: fn.run || [] },
       })
     }
   }

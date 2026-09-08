@@ -1,32 +1,35 @@
 import { describe, expect, it, vi } from 'vitest'
 import { useScriptEditorShell } from './composables/useScriptEditorShell'
 import { parseFunctionLibrary, serialize } from './script-editor/codec'
-import { createStep } from './script-editor/factories'
+import { createCall, createControl } from './script-editor/factories'
 import { lit } from './script-editor/model'
 import { stripUuids } from './script-editor/__tests__/helpers'
 
 /**
- * 编辑器外壳（阶段 4）：加载 → 编辑（命令栈）→ dirty → 保存（expected_version）→
+ * 编辑器外壳（V1）：加载 → 编辑（命令栈）→ dirty → 保存（expected_version）→
  * 409 version_conflict 冲突状态 → 重载/覆盖；运行起点映射；函数库编辑往返。
  * 页面（Console / ScriptRunner）只消费 shell 状态，SaveConflictModal 的打开与
  * 重载/覆盖回调即本文件断言的 conflict/reload/overwrite 契约。
  */
 
-const SCRIPT_YAML = `version: 3
-steps:
+const SCRIPT_YAML = `run:
   - log: 第一
   - tap: [0.5, 0.5]
-  - find:
+  - wait_find:
       template: a.png
-      then:
-        - log: 命中
+      timeout: 5s
+    as: hit
 `
 
-const FN_YAML = `login:
-  params:
-    - 'tmpl:account:账号模板:account.png'
-  steps:
-    - return: true
+const FN_YAML = `functions:
+  login:
+    params:
+      account:
+        type: template
+        default: account.png
+        desc: 账号模板
+    run:
+      - return: true
 `
 
 /** 可变磁盘 + 可编程保存：expected_version 不符 → 409 {code:"version_conflict"}。 */
@@ -64,10 +67,18 @@ describe('useScriptEditorShell：从步骤运行映射（uuid → start_index）
     const { api } = makeApi()
     const shell = useScriptEditorShell({ api })
     await shell.loadScript('com.demo/main.yaml')
-    const steps = shell.model.steps
+    const steps = shell.model.run
     expect(shell.runStartIndexOf(steps[0].uuid)).toBe(0)
     expect(shell.runStartIndexOf(steps[1].uuid)).toBe(1)
-    expect(shell.runStartIndexOf(steps[2].then[0].uuid)).toBeNull()
+    // 嵌套（as 值使用的模板步在顶层；此处造一个嵌套分支验证 null）
+    shell.stack.apply({
+      type: 'insert_step',
+      path: ['run'],
+      index: 0,
+      step: { ...createControl('if'), cond: lit(true), then: [createCall('log', { kind: 'value', cell: { lit: 'x' } })], else: [] },
+    })
+    const nestedIf = shell.model.run[0]
+    expect(shell.runStartIndexOf(nestedIf.then[0].uuid)).toBeNull()
     expect(shell.runStartIndexOf('no-such-uuid')).toBeNull()
   })
 })
@@ -76,7 +87,7 @@ describe('useScriptEditorShell：保存 409 冲突（SaveConflictModal 契约）
   async function loadAndEdit(api) {
     const shell = useScriptEditorShell({ api })
     await shell.loadScript('com.demo/main.yaml')
-    shell.insertStep(createStep('wait', { min: lit('2s') }), '插入等待')
+    shell.insertStep(createCall('sleep', { kind: 'value', cell: { lit: '2s' } }), '插入等待')
     expect(shell.dirty).toBe(true)
     return shell
   }
@@ -98,7 +109,7 @@ describe('useScriptEditorShell：保存 409 冲突（SaveConflictModal 契约）
     expect(r.ok).toBe(true)
     expect(shell.conflict).toBeNull()
     expect(shell.dirty).toBe(false)
-    expect(shell.model.steps).toHaveLength(3)
+    expect(shell.model.run).toHaveLength(3)
     expect(shell.version).toBe('v1')
   })
 
@@ -145,15 +156,15 @@ describe('useScriptEditorShell：函数库编辑（文件 → FunctionLibraryMod
 
     // 函数级 params：insert_param 携带 ['functions', 'login', 'params']
     const path = ['functions', 'login', 'params']
-    expect(shell.stack.apply({ type: 'insert_param', path, index: 1, decl: { type: 'string', name: 'tag', remark: '', default: null, rawForm: false } }, '添加函数参数')).toBe(true)
+    expect(shell.stack.apply({ type: 'insert_param', path, index: 1, decl: { name: 'tag', type: 'string', required: false, default: null, desc: '' } }, '添加函数参数')).toBe(true)
     // 函数体插步
-    expect(shell.stack.apply({ type: 'insert_step', path: ['functions', 'login', 'steps'], index: 1, step: createStep('log', { message: lit('完成'), level: null }) }, '插入日志')).toBe(true)
+    expect(shell.stack.apply({ type: 'insert_step', path: ['functions', 'login', 'run'], index: 1, step: createCall('log', { kind: 'value', cell: { lit: '完成' } }) }, '插入日志')).toBe(true)
 
     const yaml = serialize(shell.model)
     const reparsed = parseFunctionLibrary(yaml, { file: 'common' })
     expect(reparsed.diagnostics).toEqual([])
     expect(stripUuids(JSON.parse(JSON.stringify(reparsed.model)))).toEqual(stripUuids(JSON.parse(JSON.stringify(shell.model))))
-    expect(yaml).toContain('name: tag')
+    expect(yaml).toContain('tag:')
     expect(yaml).toContain('type: string')
   })
 
@@ -161,7 +172,7 @@ describe('useScriptEditorShell：函数库编辑（文件 → FunctionLibraryMod
     const { api, calls } = makeApi({ fnConflict: false })
     const shell = useScriptEditorShell({ api })
     await shell.loadFunctionFile('com.demo/common.yaml')
-    shell.stack.apply({ type: 'insert_param', path: ['functions', 'login', 'params'], index: 0, decl: { type: 'boolean', name: 'dry', remark: '干跑', default: false, rawForm: false } }, '添加函数参数')
+    shell.stack.apply({ type: 'insert_param', path: ['functions', 'login', 'params'], index: 0, decl: { name: 'dry', type: 'boolean', required: false, default: false, desc: '干跑' } }, '添加函数参数')
     const r = await shell.save()
     expect(r.ok).toBe(true)
     expect(calls.updateFunction).toHaveLength(1)
@@ -170,12 +181,12 @@ describe('useScriptEditorShell：函数库编辑（文件 → FunctionLibraryMod
   })
 })
 
-describe('useScriptEditorShell：跳转栈（call/func 结构化跳转）', () => {
+describe('useScriptEditorShell：跳转栈（call 结构化跳转）', () => {
   it('jumpToScript 压栈当前资源，jumpBack 恢复并还原选中', async () => {
     const { api } = makeApi()
     const shell = useScriptEditorShell({ api })
     await shell.loadScript('com.demo/main.yaml')
-    shell.select(shell.model.steps[1].uuid)
+    shell.select(shell.model.run[1].uuid)
 
     await shell.jumpToScript('com.demo/sub.yaml')
     expect(shell.canJumpBack).toBe(true)

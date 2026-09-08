@@ -15,14 +15,14 @@ import {
  * 此处直接以 ParamDecl[] 夹具驱动（不再从 YAML 解析）。
  */
 
-const decl = (name, type, def = null, remark = '') => ({ type, name, remark, default: def, rawForm: false })
+const decl = (name, type, def = null, desc = '', required = false) => ({ type, name, required, default: def, desc })
 
-// 账号必填 + 五类默认值字段（类型覆盖 canonical 与 v2 别名两种形态）
+// 账号必填 + 默认值字段（V1 类型表；别名 int/bool 由 adapter 归一，不在此出现）
 const SCRIPT_DECLS = [
-  decl('account', 'string', null, '账号模板'),
-  decl('count', 'int', 3),
+  decl('account', 'string', null, '账号模板', true),
+  decl('count', 'integer', 3),
   decl('ratio', 'number', 0.5),
-  decl('flag', 'bool', true),
+  decl('flag', 'boolean', true),
   decl('enable', 'boolean', true),
   decl('mode', 'string', 'auto'),
 ]
@@ -57,11 +57,13 @@ describe('ParamsForm 三态', () => {
     expect(form.vm.getArgs()).toEqual({ account: '' }) // 必填恒在；默认值字段省略
   })
 
-  it('必填字段恒为覆盖态（初始类型空值，服务端校验必填）', () => {
+  it('必填字段恒为覆盖态；空值客户端校验即报', () => {
     const w = mountForm()
     const form = w.findComponent(ParamsForm)
     expect(form.vm.getArgs().account).toBe('')
-    expect(form.vm.validate()).toEqual([]) // 空字符串对 string 型合法（必填性由服务端判定）
+    const errs = form.vm.validate()
+    expect(errs.map((e) => e.name)).toEqual(['account'])
+    expect(errs[0].message).toContain('必填')
   })
 
   it('勾选「覆盖」进 args（预填当前声明默认值），取消勾选移出 args', async () => {
@@ -81,7 +83,7 @@ describe('ParamsForm 三态', () => {
   })
 
   it('客户端类型校验：integer 收到小数报字段错误', async () => {
-    const w = mountForm({ initialArgs: { count: 2.5 } })
+    const w = mountForm({ initialArgs: { account: 'a', count: 2.5 } })
     const form = w.findComponent(ParamsForm)
     const errs = form.vm.validate()
     expect(errs.map(e => e.name)).toEqual(['count'])
@@ -151,9 +153,9 @@ describe('mapArgDiagnostics / describeResolvedArgs / validateArgsAgainstParams',
 
   it('field 命中参数名；step_path args.x 兜底；对不上进 other', () => {
     const m = mapArgDiagnostics([
-      { code: 'yaml.v3.call.args_type_mismatch', message: 'count 应为整数', field: 'count' },
-      { code: 'yaml.v3.call.args_missing_required', message: '缺少必填参数 account', step_path: 'args.account' },
-      { code: 'yaml.v3.call.args_unknown', message: '未知参数 ghost', field: 'ghost', step_path: 'args.ghost' },
+      { code: 'param.args.type_mismatch', message: 'count 应为整数', field: 'count' },
+      { code: 'param.args.missing_required', message: '缺少必填参数 account', step_path: 'args.account' },
+      { code: 'param.args.unknown', message: '未知参数 ghost', field: 'ghost', step_path: 'args.ghost' },
     ], names)
     expect(m.byName).toEqual({
       count: ['count 应为整数'],

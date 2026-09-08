@@ -149,25 +149,17 @@ world extension-host {
   export extension;
 }
 
-/// YAML v3 has a request/response entrypoint because the source is supplied by
+/// YAML V1 has a request/response entrypoint because the source is supplied by
 /// the app package at run time. It is separate from the long-lived generic
 /// extension lifecycle world, while sharing the same capability import.
+/// Package function definitions are frozen into the program at run start; the
+/// guest dispatches plugin functions through capability.invoke("__fn", …).
 interface automation {
   run: func(program-json: string) -> result<string, string>;
 }
 
-/// YAML extension-only program lookup used by the small AST `call` node. It
-/// is intentionally not part of the generic Core capability catalog.
-///
-/// Call depth is enforced by the guest's local ExecutionBudget
-/// (ADR-YAML-04); the host never sees depth and only resolves the target.
-interface programs {
-  resolve: func(target: string, args-json: string) -> result<string, string>;
-}
-
 world yaml-extension-host {
   import capability;
-  import programs;
   export automation;
 }
 

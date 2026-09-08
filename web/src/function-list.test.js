@@ -11,7 +11,7 @@ function fakeParse(content, file) {
   const entry = files.find(f => f.file === file)
   return {
     model: {
-      functions: (entry?.functions || []).map(name => ({ name, params: [], steps: [{ uuid: `${file}-${name}` }] })),
+      functions: (entry?.functions || []).map(name => ({ name, params: [], run: [{ uuid: `${file}-${name}` }] })),
     },
   }
 }
@@ -21,7 +21,7 @@ describe('buildFunctionViews：跨分类平铺全部函数', () => {
     const views = buildFunctionViews(files, fakeParse)
     expect(views.map(v => `${v.category}/${v.name}`)).toEqual(['login/登录', 'login/logout', '日常/领取奖励'])
     expect(views[0].fileId).toBe('pkg/functions/login.yaml')
-    expect(views[0].model.steps[0].uuid).toBe('login-登录')
+    expect(views[0].model.run[0].uuid).toBe('login-登录')
   })
 
   it('解析失败的文件跳过，不炸整个列表', () => {

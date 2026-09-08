@@ -11,7 +11,7 @@
       <div class="pf-head">
         <span class="pf-type">{{ ARG_TYPE_LABELS[decl.type] }}</span>
         <span class="pf-name mono">${{ decl.name }}</span>
-        <span v-if="decl.remark" class="pf-remark" :title="decl.remark">{{ decl.remark }}</span>
+        <span v-if="decl.desc" class="pf-remark" :title="decl.desc">{{ decl.desc }}</span>
         <span class="pf-spacer"></span>
         <!-- 三态之一「使用默认值」：始终显示当前声明默认值（缓存建议不遮蔽），不进 args -->
         <span
@@ -66,24 +66,24 @@
  */
 import { reactive, watch, type PropType } from 'vue'
 import type { ParamDecl } from '../model'
-import { checkCellLiteral } from '../schema'
+import { checkLiteral } from '../schema'
 import {
   ARG_DEFAULT_LITERALS, ARG_TYPE_LABELS, cloneArg, fmtLiteral,
   type ArgFieldError,
 } from '../params'
 import CellEditor from './CellEditor.vue'
 
-/** 参数类型 → CellEditor 控件类型（canonical 五类 + 历史别名）。 */
+/** V1 参数类型 → CellEditor 控件类型。 */
 function cellType(type: string): string {
   switch (type) {
-    case 'number': case 'integer': case 'float': case 'int': return 'number'
-    case 'boolean': case 'bool': return 'bool'
-    case 'tmpl': return 'tmpl'
+    case 'number': case 'integer': return 'number'
+    case 'boolean': return 'bool'
+    case 'template': return 'tmpl'
     case 'key': return 'key'
-    case 'coord': return 'coord'
-    case 'color': return 'text'
-    case 'time': return 'time'
-    default: return 'text' // string/enum/text
+    case 'point': return 'coord'
+    case 'duration': return 'time'
+    case 'list': case 'object': return 'expr'
+    default: return 'text' // string/any
   }
 }
 
@@ -189,7 +189,10 @@ function validate(): ArgFieldError[] {
 }
 
 function check(decl: ParamDecl): string {
-  const err = checkCellLiteral(decl.type, values[decl.name])
+  if (decl.required && (values[decl.name] === '' || values[decl.name] === null || values[decl.name] === undefined)) {
+    return `必填参数 ${decl.name} 不能为空`
+  }
+  const err = checkLiteral(decl.type, values[decl.name])
   return err ? err.message : ''
 }
 

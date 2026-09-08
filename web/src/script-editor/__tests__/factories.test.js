@@ -1,68 +1,39 @@
 import { describe, expect, it } from 'vitest'
-import { makeStep, createStep, panelEntries, PANEL_GROUPS, DEFAULT_FACTORIES } from '../factories'
-import { parseScript, serialize } from '../codec'
-import { stripUuids } from './helpers'
-import { STEP_KINDS } from '../model'
+import { createCall, createControl, argsFromSchema, makeCall, CONTROL_ENTRIES } from '../factories'
 
-/**
- * 工厂与添加面板：19 类步骤工厂创建 + 序列化往返；面板分组、return 仅函数上下文。
- */
-
-describe('factories：19 类工厂创建 + 序列化往返', () => {
-  for (const kind of STEP_KINDS) {
-    it(`${kind}`, () => {
-      const step = makeStep(kind)
-      expect(step.kind).toBe(kind)
-      expect(typeof step.uuid).toBe('string')
-      // 包一层最小脚本做 codec 往返（return 仅函数上下文合法，但序列化/解析不区分上下文）
-      const model = {
-        version: 3,
-        params: [],
-        defaults: null,
-        steps: [step],
-      }
-      const yaml = serialize(model)
-      const reparsed = parseScript(yaml)
-      expect(reparsed.diagnostics, `${kind} 序列化产物应可回解析：\n${yaml}`).toEqual([])
-      expect(stripUuids(reparsed.model.steps[0])).toEqual(stripUuids(step))
-      // 二次序列化逐字节稳定
-      expect(serialize(reparsed.model)).toBe(yaml)
+describe('V1 factories', () => {
+  it('createCall builds a call step with args and as', () => {
+    const step = createCall('tap', { kind: 'value', cell: { lit: [0.5, 0.5] } }, 'hit')
+    expect(step).toMatchObject({
+      kind: 'call', fn: 'tap', as: 'hit',
+      args: { kind: 'value', cell: { lit: [0.5, 0.5] } },
     })
-  }
-
-  it('overrides 生效', () => {
-    const step = createStep('tap', { at: { lit: [0.1, 0.2] } })
-    expect(step.at.lit).toEqual([0.1, 0.2])
-    const step2 = createStep('throw', { message: { lit: '原因' } })
-    expect(step2.message.lit).toBe('原因')
+    expect(typeof step.uuid).toBe('string')
   })
 
-  it('全部 19 类都在工厂表里', () => {
-    expect(Object.keys(DEFAULT_FACTORIES).sort()).toEqual([...STEP_KINDS].sort())
-  })
-})
-
-describe('factories：添加面板分组', () => {
-  it('六个分组：应用/操作/识别/流程/复用/函数专用', () => {
-    expect(PANEL_GROUPS.map((g) => g.id)).toEqual(['app', 'action', 'recognition', 'flow', 'reuse', 'function'])
-    expect(PANEL_GROUPS.map((g) => g.label)).toEqual(['应用', '操作', '识别', '流程', '复用', '函数专用'])
+  it('createControl covers if/repeat/return', () => {
+    const ifStep = createControl('if')
+    expect(ifStep).toMatchObject({ kind: 'if', cond: { lit: true }, then: [], else: [] })
+    const repeatStep = createControl('repeat')
+    expect(repeatStep).toMatchObject({ kind: 'repeat', times: { lit: 3 }, body: [] })
+    const returnStep = createControl('return')
+    expect(returnStep).toMatchObject({ kind: 'return', value: { lit: null } })
   })
 
-  it('分组条目覆盖全部 19 类且不重复（无 v2 残留 kind）', () => {
-    const kinds = PANEL_GROUPS.flatMap((g) => g.entries.map((e) => e.kind))
-    expect(kinds.sort()).toEqual([...STEP_KINDS].sort())
-    expect(new Set(kinds).size).toBe(19)
-    expect(kinds).not.toContain('func')
-    expect(kinds).not.toContain('match')
-    expect(kinds).not.toContain('color')
+  it('argsFromSchema prefills defaults and skips empty', () => {
+    const args = argsFromSchema([
+      { name: 'template', type: 'template', required: true, default: null },
+      { name: 'threshold', type: 'number', required: false, default: 0.8 },
+    ])
+    expect(args).toEqual({ kind: 'map', entries: { threshold: { lit: 0.8 } } })
+    expect(argsFromSchema([])).toEqual({ kind: 'none' })
   })
 
-  it('return 仅函数上下文可见', () => {
-    const scriptKinds = panelEntries('script').map((e) => e.kind)
-    const functionKinds = panelEntries('function').map((e) => e.kind)
-    expect(scriptKinds).not.toContain('return')
-    expect(functionKinds).toContain('return')
-    expect(scriptKinds).toHaveLength(18)
-    expect(functionKinds).toHaveLength(19)
+  it('makeCall is the no-schema fallback', () => {
+    expect(makeCall('sleep')).toMatchObject({ kind: 'call', fn: 'sleep', args: { kind: 'none' }, as: null })
+  })
+
+  it('CONTROL_ENTRIES covers the three control kinds', () => {
+    expect(CONTROL_ENTRIES.map((e) => e.kind)).toEqual(['if', 'repeat', 'return'])
   })
 })

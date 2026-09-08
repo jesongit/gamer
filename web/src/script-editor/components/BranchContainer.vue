@@ -34,8 +34,6 @@
           :highlight-uuid="highlightUuid"
           :expanded-uuids="expandedUuids"
           :params="params"
-          :context="context"
-          :resolve-target="resolveTarget"
           :templates="templates"
           :test-from="testFrom"
           @select="(u) => emit('select', u)"
@@ -81,7 +79,7 @@ const props = defineProps({
   stack: { type: Object as PropType<{ apply: (c: unknown, n?: string) => boolean }>, required: true },
   /** 容器路径（resolveStepList 合法输入）。 */
   containerPath: { type: Array as PropType<Path>, required: true },
-  /** step_path 字符串基（诊断定位，如 steps[0].then）。 */
+  /** step_path 字符串基（诊断定位，如 run[0].then）。 */
   basePath: { type: String, required: true },
   label: { type: String, required: true },
   depth: { type: Number, default: 0 },
@@ -89,12 +87,7 @@ const props = defineProps({
   selectedUuid: { type: String, default: null },
   highlightUuid: { type: String, default: null },
   expandedUuids: { type: Object as PropType<Set<string> | null>, default: null },
-  context: { type: String as PropType<'script' | 'function'>, default: 'script' },
   params: { type: Array as PropType<ParamDecl[]>, default: () => [] },
-  resolveTarget: {
-    type: Function as PropType<((target: string) => { params: ParamDecl[] } | null) | undefined>,
-    default: undefined,
-  },
   templates: { type: Array as PropType<string[]>, default: () => [] },
   /** 透传「从此步骤测试函数」入口开关（宿主仅在函数体根容器开启）。 */
   testFrom: { type: Boolean, default: false },

@@ -1,0 +1,19 @@
+name: 每日签到
+params:
+  retry:
+    type: integer
+    default: 3
+vars:
+  timeout: 15s
+run:
+  - launch: com.example.game
+  - wait_find:
+      template: home
+      timeout: $timeout
+    as: home
+  - if: $home
+    then:
+      - claim_daily: {}
+    else:
+      - log: 未进入主页
+  - return: true

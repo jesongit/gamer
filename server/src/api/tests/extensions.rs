@@ -99,14 +99,25 @@ entry = "ui/index.html"
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(enabled.status(), StatusCode::OK);
+    // V1 生命周期收敛：enable = 启用意图 + 直接启动。桩 wasm 无法真正实例化
+    // → 启动失败降级 Failed + last_error（保留启用意图可重试），HTTP 层映射 500。
+    assert_eq!(enabled.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let list = get_json(&test_app, &session, "/api/extensions").await;
+    let list_json = json_body(list).await;
+    assert_eq!(list_json["extensions"][0]["state"], "failed");
+    assert!(
+        list_json["extensions"][0]["last_error"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty()),
+        "启动失败必须带 last_error: {list_json}"
+    );
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
     assert!(json_body(contributions)
         .await
         .as_array()
         .unwrap()
         .is_empty());
-    // Enabled 也不再服务 ui 资产
+    // Failed 也不服务 ui 资产
     let asset = get_json(
         &test_app,
         &session,
@@ -231,9 +242,10 @@ component = "console.scripts"
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(enabled.status(), StatusCode::OK);
+    // V1：enable = 启用 + 直接启动；桩 wasm 启动失败 → 500 + Failed（可重试）。
+    assert_eq!(enabled.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
-    // Phase 1 语义收紧：Enabled 不再发布面板
+    // Failed 不发布面板
     let contributions = get_json(&test_app, &session, "/api/extensions/ui").await;
     let panels = json_body(contributions).await;
     assert!(panels.as_array().unwrap().is_empty());
@@ -351,22 +363,23 @@ default = "abc"
     .await;
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
 
-    let stopped = post_json(
+    // V1 生命周期收敛：disable = 停止（运行中自动 stop）→ call 冲突。
+    let disabled = post_json(
         &test_app,
         &session,
-        "/api/extensions/com.example.panel/stop",
+        "/api/extensions/com.example.panel/disable",
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(stopped.status(), StatusCode::OK);
-    let after_stop = post_json(
+    assert_eq!(disabled.status(), StatusCode::OK);
+    let after_disable = post_json(
         &test_app,
         &session,
         "/api/extensions/com.example.panel/call",
         serde_json::json!({ "action": "refresh", "values": {} }),
     )
     .await;
-    assert_eq!(after_stop.status(), StatusCode::CONFLICT);
+    assert_eq!(after_disable.status(), StatusCode::CONFLICT);
 
     let removed = send(
         &test_app.app,
@@ -555,21 +568,21 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
         "Enabled 降级的 gamer.yaml 不应出现面板：{panels:?}"
     );
 
-    // 卸载守卫拒绝 Running：先停掉所有 Running 扩展再逐个卸载。
+    // 卸载守卫拒绝 Running：先 disable（运行中自动 stop）再逐个卸载。
     let list = get_json(&test_app, &session, "/api/extensions").await;
     let list = json_body(list).await;
     for snapshot in list["extensions"].as_array().unwrap() {
         let id = snapshot["id"].as_str().unwrap();
         let version = snapshot["active_version"].as_str().unwrap().to_string();
         if snapshot["state"] == "running" {
-            let stopped = post_json(
+            let disabled = post_json(
                 &test_app,
                 &session,
-                &format!("/api/extensions/{id}/stop"),
+                &format!("/api/extensions/{id}/disable"),
                 serde_json::json!({}),
             )
             .await;
-            assert_eq!(stopped.status(), StatusCode::OK, "{id} 停止失败");
+            assert_eq!(disabled.status(), StatusCode::OK, "{id} 停用失败");
         }
         let removed = send(
             &test_app.app,
@@ -586,12 +599,11 @@ async fn official_plugin_market_end_to_end_with_committed_artifacts() {
     }
 }
 
-/// 版本回滚 API（POST /api/extensions/:id/activate）契约：
-/// 切换 active_version 指针返回 `{"id","active_version","state"}`；
-/// 未安装版本 404；Running 409；切换后 start 链路（active manifest/UI 资产）
-/// 使用新版本。
+/// V1 生命周期收敛（计划 Phase 5）：细粒度 start/stop/activate 端点已删除——
+/// 用户操作只有 安装/启用/禁用/更新/卸载；版本并存仍可安装（同名更新换
+/// active_version），回退经卸载后重装旧版本归档。
 #[tokio::test]
-async fn extension_activate_switches_version_404_missing_and_409_running() {
+async fn extension_activate_start_stop_endpoints_are_removed() {
     let test_app = build_app(
         "extension-activate",
         test_credential("admin123"),
@@ -600,188 +612,61 @@ async fn extension_activate_switches_version_404_missing_and_409_running() {
     let login_response = login(&test_app.app).await;
     let session = first_cookie_pair(&cookie_of(&login_response));
 
-    let manifest = |version: &str| -> String {
-        format!(
-            "manifest_version = 2\nid = \"com.example.rollback\"\nversion = \"{version}\"\nname = \"Rollback extension\"\nentry = \"plugin.wasm\"\n\n[[ui.contributions]]\npanel_id = \"rollback\"\ntitle = \"Rollback\"\nruntime = \"iframe\"\nentry = \"ui/index.html\"\n"
-        )
-    };
-    let archive = |version: &str, content: &str| -> Vec<u8> {
-        craft_zip(vec![
-            ("manifest.toml", manifest(version).into_bytes()),
-            ("plugin.wasm", b"\0asm\x01\0\0\0".to_vec()),
-            ("ui/index.html", content.as_bytes().to_vec()),
-        ])
-    };
+    let manifest = r#"manifest_version = 2
+id = "com.example.rollback"
+version = "1.0.0"
+name = "Rollback extension"
+entry = "plugin.wasm"
 
-    let base = zip_headers(session.clone());
-    let first = send(
-        &test_app.app,
-        req_bytes(
-            "POST",
-            "/api/extensions",
-            None,
-            &base,
-            archive("1.0.0", "v1 bytes"),
-        ),
-    )
-    .await;
-    assert_eq!(first.status(), StatusCode::CREATED);
-
-    // 第二个版本并排安装，不自动激活
-    let second = send(
-        &test_app.app,
-        req_bytes(
-            "POST",
-            "/api/extensions",
-            None,
-            &base,
-            archive("1.1.0", "v2 bytes"),
-        ),
-    )
-    .await;
-    assert_eq!(second.status(), StatusCode::CREATED);
-    // 注：该插件 wasm 为桩字节，安装即用的自动 start 会失败并降级为 Enabled
-    // （activate 拒绝 Running，此状态下本就无碍）。
+[[ui.contributions]]
+panel_id = "rollback"
+title = "Rollback"
+runtime = "iframe"
+entry = "ui/index.html"
+"#
+    .as_bytes();
+    let archive = craft_zip(vec![
+        ("manifest.toml", manifest.to_vec()),
+        ("plugin.wasm", b"\0asm\x01\0\0\0".to_vec()),
+        ("ui/index.html", b"v1 bytes".to_vec()),
+    ]);
     let installed = send(
         &test_app.app,
-        req(
-            "GET",
+        req_bytes(
+            "POST",
             "/api/extensions",
             None,
-            &json_headers(session.clone()),
-            None,
+            &zip_headers(session.clone()),
+            archive,
         ),
     )
     .await;
-    let installed_json = json_body(installed).await;
-    let rollback = installed_json["extensions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["id"] == "com.example.rollback")
-        .unwrap()
-        .clone();
-    assert_eq!(rollback["active_version"], "1.0.0");
-    assert_eq!(
-        rollback["installed_versions"],
-        serde_json::json!(["1.0.0", "1.1.0"])
-    );
+    assert_eq!(installed.status(), StatusCode::CREATED);
 
-    // 切换 active_version：200 + 约定契约体
-    let activated = post_json(
-        &test_app,
-        &session,
+    // 三个细粒度端点一律 404（路由不存在）
+    for uri in [
+        "/api/extensions/com.example.rollback/start",
+        "/api/extensions/com.example.rollback/stop",
         "/api/extensions/com.example.rollback/activate",
-        serde_json::json!({"version": "1.1.0"}),
-    )
-    .await;
-    assert_eq!(activated.status(), StatusCode::OK);
-    let activated_json = json_body(activated).await;
-    assert_eq!(activated_json["id"], "com.example.rollback");
-    assert_eq!(activated_json["active_version"], "1.1.0");
-    // 激活保持生命周期状态（stop 后 = Enabled）
-    assert_eq!(activated_json["state"], "enabled");
-
-    // Enabled 的插件切换后保持 Enabled（下次 start 用新版本）
-    let enabled = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.rollback/enable",
-        serde_json::json!({}),
-    )
-    .await;
-    assert_eq!(enabled.status(), StatusCode::OK);
-
-    // start/UI 链路使用新 active 版本：ui 资产来自 1.1.0 的文件。
-    // 桩 wasm 走不到 Running，直写 state.json 模拟 Running（UI 资产仅在
-    // Running 服务——Phase 1 语义收紧）。
-    mark_extension_state(&test_app, "com.example.rollback", "running");
-    let asset = get_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.rollback/ui/index.html",
-    )
-    .await;
-    assert_eq!(asset.status(), StatusCode::OK);
-    assert_eq!(
-        axum::body::to_bytes(asset.into_body(), 1024).await.unwrap(),
-        "v2 bytes"
-    );
-    // activate 拒绝 Running：先回到 Enabled 再切换
-    mark_extension_state(&test_app, "com.example.rollback", "enabled");
-
-    let back = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.rollback/activate",
-        serde_json::json!({"version": "1.0.0"}),
-    )
-    .await;
-    assert_eq!(back.status(), StatusCode::OK);
-    let back_json = json_body(back).await;
-    assert_eq!(back_json["state"], "enabled");
-    assert_eq!(back_json["active_version"], "1.0.0");
-
-    // 回滚后 ui 资产同样回到 1.0.0 的文件（start 链路同理取 active manifest）
-    mark_extension_state(&test_app, "com.example.rollback", "running");
-    let asset = get_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.rollback/ui/index.html",
-    )
-    .await;
-    assert_eq!(asset.status(), StatusCode::OK);
-    assert_eq!(
-        axum::body::to_bytes(asset.into_body(), 1024).await.unwrap(),
-        "v1 bytes"
-    );
-    mark_extension_state(&test_app, "com.example.rollback", "enabled");
-
-    // 未安装版本 → 404
-    let missing = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.rollback/activate",
-        serde_json::json!({"version": "9.9.9"}),
-    )
-    .await;
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-
-    // 非法版本串 → 400
-    let malformed = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.rollback/activate",
-        serde_json::json!({"version": "not-a-version"}),
-    )
-    .await;
-    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
-
-    // Running → 409（直接落 state.json 模拟运行中：激活只读生命周期状态）
-    let state_path = test_app.dir.join("extensions").join("state.json");
-    std::fs::write(
-        &state_path,
-        serde_json::json!({
-            "plugins": {
-                "com.example.rollback": {
-                    "id": "com.example.rollback",
-                    "active_version": "1.0.0",
-                    "state": "running",
-                    "last_error": null
-                }
-            }
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let conflict = post_json(
-        &test_app,
-        &session,
-        "/api/extensions/com.example.rollback/activate",
-        serde_json::json!({"version": "1.1.0"}),
-    )
-    .await;
-    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    ] {
+        let response = send(
+            &test_app.app,
+            req(
+                "POST",
+                uri,
+                None,
+                &json_headers(session.clone()),
+                Some(serde_json::json!({"version": "1.0.0"}).to_string()),
+            ),
+        )
+        .await;
+        assert!(
+            response.status() == StatusCode::NOT_FOUND
+                || response.status() == StatusCode::METHOD_NOT_ALLOWED,
+            "{uri} 应已删除（404/405），得到 {}",
+            response.status()
+        );
+    }
 }
 
 /// Phase 4/8 验收：无任何已安装扩展（含 gamer.yaml）时，基础设备控制 REST 与

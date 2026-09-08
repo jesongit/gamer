@@ -52,6 +52,23 @@ impl YamlTimerRunner {
             self.scripts.clone(),
         ))
     }
+
+    /// V1（计划 Phase 3/4）：本 runner 的原生函数目录描述器
+    /// （`GET /api/runners/:runner_id/functions` 数据源——插件函数 Schema 的
+    /// 唯一前端来源）。
+    pub(crate) fn functions_describer() -> Arc<dyn crate::scheduler::RunnerFunctionsDescriber> {
+        Arc::new(NativeFunctionsDescriber)
+    }
+}
+
+/// 原生函数目录：`native_funcs` 注册表 → descriptor JSON 数组。
+struct NativeFunctionsDescriber;
+
+impl crate::scheduler::RunnerFunctionsDescriber for NativeFunctionsDescriber {
+    fn list_functions(&self) -> serde_json::Value {
+        use crate::extensions::gamer_yaml::native_funcs::{native_functions, native_schema_json};
+        serde_json::Value::Array(native_functions().iter().map(native_schema_json).collect())
+    }
 }
 
 /// YAML runner 的不透明 payload 视图：`{args?}`（稀疏原始覆盖）。
@@ -538,6 +555,12 @@ impl crate::extensions::TimerRunnerRegistrar for YamlTimerRunnerRegistrar {
             YAML_EXTENSION_ID,
             extension_id,
             runner.entrypoint_describer(),
+        );
+        // V1：原生函数目录描述器（同生命周期）
+        self.scheduler.register_functions_describer(
+            YAML_EXTENSION_ID,
+            extension_id,
+            YamlTimerRunner::functions_describer(),
         );
         Ok(())
     }

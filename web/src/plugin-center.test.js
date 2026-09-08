@@ -217,14 +217,16 @@ describe('Phase 1 plugin center contracts（免签名市场）', () => {
     expect(uninstallPrompt({ id: 'gamer.yaml', version: '3.1.1', state: 'enabled' }, true)).toMatch(/删除该插件的用户数据/)
   })
 
-  it('activate posts the target version to the activate endpoint（回滚走同一契约）', async () => {
-    fetch.mockResolvedValueOnce(jsonResponse(200, { id: 'gamer.yaml', active_version: '2.9.0', state: 'enabled' }))
-    const result = await api.activateExtension('gamer.yaml', '2.9.0')
-    expect(fetch.mock.calls[0][0]).toBe('/api/extensions/gamer.yaml/activate')
-    expect(fetch.mock.calls[0][1]).toMatchObject({ method: 'POST', body: JSON.stringify({ version: '2.9.0' }) })
-    expect(result).toMatchObject({ active_version: '2.9.0', state: 'enabled' })
-    // requireId 在进入 fetch 前同步拒绝空版本
-    expect(() => api.activateExtension('gamer.yaml', '')).toThrow('extension_version 不能为空')
+  it('enable/disable hit the collapsed lifecycle endpoints（V1：enable 即启动）', async () => {
+    fetch
+      .mockResolvedValueOnce(jsonResponse(200, { id: 'gamer.yaml', state: 'running' }))
+      .mockResolvedValueOnce(jsonResponse(200, { id: 'gamer.yaml', state: 'disabled' }))
+    const enabled = await api.enableExtension('gamer.yaml')
+    expect(fetch.mock.calls[0][0]).toBe('/api/extensions/gamer.yaml/enable')
+    expect(enabled).toMatchObject({ state: 'running' })
+    const disabled = await api.disableExtension('gamer.yaml')
+    expect(fetch.mock.calls[1][0]).toBe('/api/extensions/gamer.yaml/disable')
+    expect(disabled).toMatchObject({ state: 'disabled' })
   })
 })
 
