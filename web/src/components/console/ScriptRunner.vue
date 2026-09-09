@@ -4,8 +4,8 @@
       <!-- 资源类型随面板锁定（console.scripts=脚本 / console.functions=函数），
            不再提供面板内切换；ctx.runKind 为锁定的面板类型 -->
       <ScriptPicker v-if="ctx.runKind === 'script'" v-model="ctx.selScript" :package="ctx.packageId" :lock-package="true" />
-      <!-- 函数面板无「选中分类」态：模糊搜索过滤平铺的函数列表（名称/分类/拼音首字母） -->
-      <input v-else v-model="ctx.fnSearch" class="input mono fn-search" placeholder="🔍 搜索函数（名称/分类/拼音首字母）" />
+      <!-- 函数面板无「选中文件」态：模糊搜索过滤平铺的函数列表（名称/来源/拼音首字母） -->
+      <input v-else v-model="ctx.fnSearch" class="input mono fn-search" placeholder="🔍 搜索函数（名称/来源/拼音首字母）" />
     </div>
     <div class="run-actions">
       <template v-if="ctx.runKind === 'func'">
@@ -27,27 +27,28 @@
     <RunEventsPanel :events="runEvents" />
     <!-- 摘要区独立滚动：panel-sec 是 overflow:hidden，内容超高（多函数分组/长脚本）必须在这里滚动 -->
     <div v-if="!ctx.store.running || ctx.runKind === 'func'" class="sum-wrap">
-      <!-- 函数模式：全部函数以个体为单位平铺（跨分类，搜索过滤），
-           每组 = 分类·函数签名 + 该函数体顶层卡片 + 运行/编辑/原文/删除 -->
+      <!-- 函数模式：全部函数以个体为单位平铺（统一命名空间，搜索过滤），
+           每组 = 来源徽标（默认库/手动拆分文件）· 函数签名 + 该函数体顶层卡片
+           + 运行/编辑/原文/删除（编辑类操作仅默认库 _function.yaml 开放） -->
       <template v-if="ctx.runKind === 'func'">
         <template v-if="ctx.filteredFnViews.length">
           <div v-for="view in ctx.filteredFnViews" :key="`${view.fileId}/${view.name}`" class="fn-sum">
             <div class="fn-sum-head mono">
-              <span class="fn-cat">{{ view.category }}</span>
+              <span class="fn-cat" :class="{ default: fnIsDefault(view) }" :title="fnSourceTitle(view)">{{ fnSourceLabel(view) }}</span>
               <span class="fn-sig" :title="fnSignature(view)">{{ fnSignature(view) }}</span>
               <span class="fn-actions">
                 <button
                   v-if="!ctx.store.running || !isRunningFunction(view)"
-                  type="button" class="fn-run-btn" :disabled="ctx.store.running || !ctx.store.deviceId || ctx.startPending"
-                  :title="`运行函数 ${view.name}`" @click="ctx.runFunction({ fileId: view.fileId, fnName: view.name })"
+                  type="button" class="fn-run-btn" :disabled="ctx.store.running || !ctx.store.deviceId || ctx.startPending || !ctx.packageId"
+                  :title="`运行函数 ${view.name}`" @click="ctx.runFunction({ fnName: view.name })"
                 >{{ ctx.startPending ? '提交中…' : '▶ 运行' }}</button>
                 <button
                   v-else type="button" class="fn-run-btn danger" :disabled="ctx.runStopping"
                   title="停止当前函数" @click="ctx.stopScript"
                 >{{ ctx.runStopping ? '停止中…' : '■ 停止' }}</button>
-                <button type="button" class="fn-edit-btn" :disabled="ctx.store.running" :title="`编辑函数 ${view.name}`" @click="ctx.editFunction(view)">编辑</button>
-                <button type="button" class="fn-edit-btn" :disabled="ctx.store.running" :title="`原文编辑 ${view.category} 分类`" @click="ctx.editRawCurrentTarget(view)">原文</button>
-                <button type="button" class="fn-delete-btn" :disabled="ctx.store.running" :title="`删除函数 ${view.name}`" @click="deleteFn(view)">删除</button>
+                <button type="button" class="fn-edit-btn" :disabled="ctx.store.running || !fnIsDefault(view)" :title="fnIsDefault(view) ? `编辑函数 ${view.name}` : '手动拆分函数库只读，编辑请整理进默认 _function.yaml'" @click="ctx.editFunction(view)">编辑</button>
+                <button type="button" class="fn-edit-btn" :disabled="ctx.store.running || !fnIsDefault(view)" :title="fnIsDefault(view) ? '原文编辑 _function.yaml' : '手动拆分函数库只读'" @click="ctx.editRawCurrentTarget(view)">原文</button>
+                <button type="button" class="fn-delete-btn" :disabled="ctx.store.running || !fnIsDefault(view)" :title="fnIsDefault(view) ? `删除函数 ${view.name}` : '手动拆分函数库只读'" @click="deleteFn(view)">删除</button>
               </span>
             </div>
             <ScriptSummary
@@ -102,16 +103,9 @@
     </div>
     <button v-if="ctx.shell.canJumpBack" class="btn btn-sm jump-back" @click="ctx.jumpBack()">← 返回 {{ ctx.shell.jumpBackLabel }}</button>
     <div v-if="ctx.shell.kind === 'function_library'" class="function-edit-toolbar">
-      <!-- 分类 = 存储文件名（<分类>.yaml）：新建时必填可编辑；已有函数的分类不可改
-           （改名会破坏 call 目标寻址），只读展示 -->
-      <input
-        v-model="ctx.shell.name"
-        class="function-edit-category input mono"
-        :disabled="!!ctx.shell.resourceId"
-        :title="ctx.shell.resourceId ? `分类 ${ctx.shell.name}（已有函数的分类不可修改）` : '分类（必填，同类函数存放在同一文件）'"
-        placeholder="分类"
-        @keydown.enter.prevent="ctx.saveEditScript"
-      />
+      <!-- 默认函数库：文件固定为 automations/_function.yaml（简化计划 Phase 1），
+           无分类/文件名编辑概念；顶部只展示函数名输入框 -->
+      <span class="function-edit-file mono" title="Package 默认函数库（固定路径 automations/_function.yaml）">ƒ {{ ctx.shell.name || '_function.yaml' }}</span>
       <input
         v-model="functionNameDraft"
         class="function-edit-name input mono"
@@ -246,17 +240,31 @@ async function deleteFn(view) {
   await ctx.deleteFunction(view)
 }
 
-/** 当前运行中的函数（运行展示名 = `分类 · 函数名()`）；跨分类同名不会误标。 */
+/** 当前运行中的函数（运行展示名 = `函数名()`；统一命名空间按名展示）。 */
 function isRunningFunction(view) {
-  return ctx.store.running && String(ctx.store.runScript || '').endsWith(`· ${view.category} · ${view.name}()`)
+  return ctx.store.running && String(ctx.store.runScript || '') === `${view.name}()`
+}
+
+/** 函数来源徽标：默认库 = 「默认」，手动拆分文件 = 文件短名（只读）。 */
+function fnIsDefault(view) {
+  const file = String(view?.category || '')
+  return file === '_function'
+}
+function fnSourceLabel(view) {
+  return fnIsDefault(view) ? '默认' : (view?.category || '默认')
+}
+function fnSourceTitle(view) {
+  return fnIsDefault(view)
+    ? 'Package 默认函数库 automations/_function.yaml（可编辑）'
+    : `手动拆分函数库 automations/${view.category}.yaml（只读，可运行）`
 }
 
 </script>
 
 <style scoped>
-.script-run{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.auto-run{display:flex;flex-wrap:nowrap;gap:8px}.auto-run .spicker{width:auto;flex:1 1 auto;min-width:0}.auto-run .select{flex:1;min-width:0}.auto-run .fn-file{flex:1 1 auto;min-width:0}.auto-run .fn-search{flex:1 1 auto;min-width:0}.sum-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:8px}.sum-wrap .script-summary{flex:none}.sum-wrap .script-view-empty{flex:none;min-height:160px}.fn-sum{display:flex;flex-direction:column;gap:4px}.fn-sum-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--accent);padding:2px 2px 0}.fn-cat{flex:none;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--text-2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;background:var(--bg-2)}.fn-sig{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fn-actions{display:flex;align-items:center;gap:4px;flex:none}.fn-edit-btn,.fn-delete-btn{flex:none;font-size:11px;padding:2px 8px;border:1px solid var(--border);background:var(--bg-2);color:var(--text-1);border-radius:var(--radius-sm);cursor:pointer}.fn-edit-btn:hover{color:var(--accent);border-color:var(--accent)}.fn-delete-btn{color:var(--danger)}.fn-delete-btn:hover:not(:disabled){color:var(--danger);border-color:var(--danger)}.run-actions{display:flex;gap:8px}.run-actions .btn{flex:1}.run-actions .more-wrap{position:relative;flex:1}.run-actions .more-wrap .btn{width:100%}.more-mask{position:fixed;inset:0;z-index:20}.more-dropdown{position:absolute;right:0;top:calc(100% + 4px);z-index:30;display:flex;flex-direction:column;min-width:120px;padding:4px;gap:2px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 8px 24px rgba(0,0,0,.4)}.more-item{display:flex;align-items:center;gap:6px;text-align:left;white-space:nowrap;padding:6px 10px;border:none;background:none;border-radius:var(--radius-sm);color:var(--text-0);font-size:12px;cursor:pointer}.more-item:hover{background:var(--bg-3)}.more-item:disabled{color:var(--text-2);opacity:.5;cursor:not-allowed}.more-item.danger:hover{color:var(--danger)}.script-view-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:12px;background:var(--bg-0);border:1px dashed var(--border);border-radius:var(--radius-sm)}.script-edit{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.edit-name-row{display:flex}.edit-name-row .input{flex:1;min-width:0;width:100%}.edit-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.edit-actions .btn{flex:1;justify-content:center;min-width:0}.edit-actions .btn.active{border-color:var(--accent-2);color:var(--accent-2);background:rgba(56,189,248,.08)}.dirty-badge{flex:none;font-size:11px;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px}.function-edit-toolbar{display:flex;align-items:center;gap:8px;min-height:30px}
-.function-edit-category{flex:0 1 200px;min-width:0;font-size:13px}
-.function-edit-category:disabled{color:var(--accent);opacity:.75;border-style:dashed}
+.script-run{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.auto-run{display:flex;flex-wrap:nowrap;gap:8px}.auto-run .spicker{width:auto;flex:1 1 auto;min-width:0}.auto-run .select{flex:1;min-width:0}.auto-run .fn-file{flex:1 1 auto;min-width:0}.auto-run .fn-search{flex:1 1 auto;min-width:0}.sum-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:8px}.sum-wrap .script-summary{flex:none}.sum-wrap .script-view-empty{flex:none;min-height:160px}.fn-sum{display:flex;flex-direction:column;gap:4px}.fn-sum-head{display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--accent);padding:2px 2px 0}.fn-cat{flex:none;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:var(--text-2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;background:var(--bg-2)}
+.fn-cat.default{color:var(--accent);border-color:var(--accent)}.fn-sig{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fn-actions{display:flex;align-items:center;gap:4px;flex:none}.fn-edit-btn,.fn-delete-btn{flex:none;font-size:11px;padding:2px 8px;border:1px solid var(--border);background:var(--bg-2);color:var(--text-1);border-radius:var(--radius-sm);cursor:pointer}.fn-edit-btn:hover{color:var(--accent);border-color:var(--accent)}.fn-delete-btn{color:var(--danger)}.fn-delete-btn:hover:not(:disabled){color:var(--danger);border-color:var(--danger)}.run-actions{display:flex;gap:8px}.run-actions .btn{flex:1}.run-actions .more-wrap{position:relative;flex:1}.run-actions .more-wrap .btn{width:100%}.more-mask{position:fixed;inset:0;z-index:20}.more-dropdown{position:absolute;right:0;top:calc(100% + 4px);z-index:30;display:flex;flex-direction:column;min-width:120px;padding:4px;gap:2px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 8px 24px rgba(0,0,0,.4)}.more-item{display:flex;align-items:center;gap:6px;text-align:left;white-space:nowrap;padding:6px 10px;border:none;background:none;border-radius:var(--radius-sm);color:var(--text-0);font-size:12px;cursor:pointer}.more-item:hover{background:var(--bg-3)}.more-item:disabled{color:var(--text-2);opacity:.5;cursor:not-allowed}.more-item.danger:hover{color:var(--danger)}.script-view-empty{flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-2);font-size:12px;background:var(--bg-0);border:1px dashed var(--border);border-radius:var(--radius-sm)}.script-edit{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.edit-name-row{display:flex}.edit-name-row .input{flex:1;min-width:0;width:100%}.edit-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.edit-actions .btn{flex:1;justify-content:center;min-width:0}.edit-actions .btn.active{border-color:var(--accent-2);color:var(--accent-2);background:rgba(56,189,248,.08)}.dirty-badge{flex:none;font-size:11px;color:var(--warn);border:1px solid var(--warn);border-radius:4px;padding:1px 6px}.function-edit-toolbar{display:flex;align-items:center;gap:8px;min-height:30px}
+.function-edit-file{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--accent);border:1px dashed var(--border);border-radius:4px;padding:4px 10px}
 .function-edit-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;color:var(--accent)}.function-edit-toolbar .btn{flex:none}.jump-back{flex:none;align-self:flex-start}.canvas-wrap{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;position:relative}.canvas-wrap :deep(.se-canvas){flex:none}.extras{display:flex;flex-direction:column;flex:none;margin-bottom:8px}.mono{font-family:var(--mono);font-size:11px;color:var(--text-1)}
 .raw-edit{flex:6;display:flex;flex-direction:column;gap:10px;min-height:0}.raw-actions{display:flex;gap:8px;flex:none}.raw-actions .btn{flex:1;justify-content:center}.raw-editor{flex:1;min-height:240px;width:100%;box-sizing:border-box;resize:none;padding:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-0);color:var(--text-0);line-height:1.5;tab-size:2;outline:none}.raw-editor:focus{border-color:var(--accent)}
 .fn-sum { gap: 5px; }

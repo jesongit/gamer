@@ -24,20 +24,40 @@ data/packages/<package-id>/
 ├── shared/                           # 跨插件保留区（gamer.yaml 不写）
 └── plugins/
     ├── gamer.yaml/
-    │   ├── automations/              # 可运行脚本（.yaml/.yml）
-    │   ├── functions/                # 函数库（functions: 包装，见 §4）
+    │   ├── automations/              # 自动化脚本 + 函数库（按文件名前缀识别，见 §4）
+    │   │   ├── daily.yaml            # 自动化（普通 .yaml）
+    │   │   └── _function.yaml        # Package 默认函数库（functions: 包装）
     │   └── templates/                # 模板图片（8-bit 灰度 PNG）
     └── <其他插件>/                    # dormant 数据原样保留，Core 不解释
 ```
 
-**函数只有两种来源**（计划 Phase 3）：
+**文件识别规则**（简化计划：识别只用于资源发现，不加 `kind` 字段；目录与
+文件名不产生函数命名空间）：
+
+```text
+automations/ 内文件名以 _function 开头且以 .yaml 结尾 → 函数库（functions: 包装）
+automations/ 内其他 .yaml                            → 自动化脚本
+```
+
+旧 `functions/` 专属目录已删除（保存钩子报 `yaml.functions.dir.removed`，
+无兼容层、无自动迁移）。
+
+**函数只有两种来源**：
 
 1. **插件函数**：`gamer.yaml` 原生注册表（`native_funcs.rs`，Schema 唯一声明点），
-   随插件安装/启用变化；受插件权限约束；
-2. **当前 Package 函数**：`functions/<分类>.yaml`（用户可编辑），解释器本地执行。
+   随插件安装/启用变化；受插件权限约束；其中 `tap / swipe / key / input_text /
+   launch / stop_app / sleep / log / find` 是 Core 能力的基础包装，
+   `wait_find / tap_template / wait_disappear` 是插件便利函数（复用 find/sleep
+   组合，不复制视觉算法），`eq..le` 是纯数据函数；
+2. **当前 Package 函数**：`automations/_function*.yaml`（用户可编辑，默认只有
+   `_function.yaml` 一个文件；手动拆分的 `_function_battle.yaml` 等同样参与
+   加载），解释器本地执行。
 
-运行前组合为唯一函数名注册表：同名冲突（原生 vs Package、跨文件重复）一律拒绝；
-不跨 Package 查找；运行开始时冻结全部函数定义。目录首版清单：
+运行前组合为唯一函数名注册表：同名冲突（原生 vs Package、跨文件重复）一律
+拒绝，文件顺序不决定胜者；不跨 Package 查找；运行开始时冻结全部函数定义。
+**统一命名空间：调用名 = 函数名**，移动/重命名函数库文件不改变调用名。
+函数目标寻址 = `<package-id>#<函数名>`（函数测试运行、参数 schema 查询）。
+首版原生函数清单：
 
 ```text
 原子：tap / swipe / key / input_text / launch / stop_app / sleep / log / find
@@ -46,6 +66,8 @@ data/packages/<package-id>/
 ```
 
 `GET /api/runners/gamer.yaml/functions` 返回原生函数目录（Schema 唯一前端来源）。
+前端「函数」页面只编辑默认 `_function.yaml`；额外拆分文件正常加载但不提供
+专门编辑入口。
 
 ## 2. 脚本格式
 
@@ -116,8 +138,10 @@ run:
 - `if` 条件：`false`/`null` 为假，非空结果为真（无数字/字符串隐式转换；
   比较用 `eq/gt` 等函数）；
 - 函数调用独立局部作用域：参数显式传入，`as` 接收返回值；
-- `find`/`wait_find` 未命中返回 `null`（不是错误）；`find` timeout 缺省 0
-  （单次尝试），`wait_find` 缺省 30s（轮询）。
+- `find`/`wait_find` 未命中返回 `null`（不是错误）。`find` 是**单次模板匹配**
+  （无 timeout/interval 参数）；等待轮询用 `wait_find`（timeout 缺省 30s，
+  interval 缺省 100ms，轮询直到命中或超时）；`tap_template` = 轮询找到后点击
+  命中中心并固结 300ms；`wait_disappear` 轮询直到模板消失（超时返回 false）。
 
 **表达式只有两种**：字面量、`$name.field` 引用。字符串以 `$` 开头是引用；
 字面量 `$` 用 `$$` 转义。无算术、无插值、无 eval、无动态索引。
@@ -127,6 +151,11 @@ run:
 **不接受旧语法**。
 
 ## 4. 函数库文件（当前 Package 函数）
+
+存储位置 = `automations/` 内文件名以 `_function` 开头的 `.yaml` 文件（默认库
+`_function.yaml`；手动拆分可加 `_function_battle.yaml` 等，第一版只识别小写
+`_function` 前缀 + `.yaml` 后缀，不接受 `.yml`）。文件内容继续使用
+`functions:` 包装，**不新增 `kind` 字段**：
 
 ```yaml
 functions:                        # 顶层必须有 functions: 包装
@@ -157,9 +186,12 @@ run:
 ```
 
 - 函数名 = 小写标识符 `[a-z_][a-z0-9_]*`，保留字 `if/repeat/return` 不可用；
-- 分类文件只是存储与编辑分组，不是 namespace；同一文件内函数名唯一，
-  跨文件/与原生函数同名直接报冲突（`yaml.fn.conflict`）；
-- 脚本文件不再内嵌局部函数库；可复用函数一律存 `functions/`。
+- **统一命名空间**：文件名与目录只是存储组织，不进入调用名（`_function_battle.yaml`
+  里的 `attack` 调用仍写 `attack`）；同一文件内函数名唯一，跨文件/与原生函数
+  同名直接报冲突（`yaml.fn.conflict`），文件顺序不决定胜者；
+- 一个函数库文件可定义多个函数；函数库文件不进入自动化运行列表与定时任务
+  选择器（函数测试运行 = `POST /api/runs`，entrypoint `<pkg>#<函数名>`）；
+- 脚本文件不再内嵌局部函数库；可复用函数一律存 `_function*.yaml`。
 
 ## 5. 错误处理与预算
 

@@ -107,6 +107,27 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
   `GET /api/extensions/:id/ui/*path` 提供，不挂宿主 origin 之外的域）；
   `core` 是宿主预置组件专用（component 键由前端 core-component-registry
   解释，第三方无可挂载组件）。
+- `[[dependencies]]`（可缺省，简化计划 Phase 3）：插件依赖声明
+  `{id, version?, required?}`——`version` 为 SemVer range（缺省 `*`），
+  `required` 缺省 `true`（可选依赖必须显式 `required = false`）。语义：
+  **必需依赖 = 启动门禁**（缺失/版本不兼容/未启用 → enable 的 start 阶段
+  结构化拒绝，扩展保留 Enabled + last_error，处置后可重试；必需依赖循环
+  拒绝启动）；**可选依赖 = 能力降级提示**（缺失不阻止启动，消费方按能力
+  发现接口自行降级相关功能入口）。不做自动下载/自动启用/级联停用：停用或
+  卸载被运行中插件必需依赖的插件会被拒绝（提示先停用依赖方）。依赖声明
+  **不授予任何权限**，与 package.toml `[plugins]`（Package 依赖）是两个
+  不同层面的概念。
+
+## 2.1 能力发现与跨插件调用（简化计划 Phase 4）
+
+- `GET /api/extensions/:id/capabilities` → `{id, state, running,
+  actions:[{action, version, surface, summary}]}`：目标插件对外公开的动作
+  集合 = declarative 按钮集合（surface `declarative`）∪ 原生公开动作清单
+  （gamer.yaml 的 `template.create_from_frame` 等，surface `native/rest/
+  frontend`）。其他插件/前端在调用前据此查询——**动作存在 ≠ 可调用**，
+  分发时仍须目标 Running + 公开集合门禁 + 权限/上下文校验。
+- 跨插件调用统一走 `POST /api/extensions/:id/call`（目标必须 Running），
+  不为每一组插件增加专用 ID 分支；不做分布式 RPC/服务发现/消息总线。
 
 ## 3. 权限闭集（19 项，默认拒绝）
 
@@ -132,12 +153,12 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 | --- | --- |
 | `POST /api/extensions/inspect` | 安装预览：id/版本/执行形态/权限与增量/host_api/UI/sha256/是否已装；支持 `x-expected-sha256` 完整性钉 |
 | `POST /api/extensions` | 安装（zip 字节）；自动 enable→start（启动失败降级 Enabled + last_error）；权限增量需确认头 |
-| `POST /api/extensions/:id/update` | 装新版本并激活（Running 拒绝） |
-| `POST /api/extensions/:id/activate` | `{version}` 切换激活版本 |
-| `POST /api/extensions/:id/enable|disable|start|stop` | 生命周期（start 可带 `{app_context:{device_id, android_package, content_package}}` 指定运行上下文；keymap 另支持 `profile`） |
-| `POST /api/extensions/:id/call` | `{action, values}` → declarative 按钮白名单 → 常驻实例 `call`；返回 JSON |
-| `DELETE /api/extensions/:id/:version` | 卸载（Running 拒绝；最后一版才清状态；不删 Package 数据） |
-| `GET /api/extensions` | 列表 + `runtime_available` + UI 贡献注册表 + 各插件 `targets.android`（空声明归一 `["*"]`） |
+| `POST /api/extensions/:id/update` | 装新版本并激活（Running 拒绝）；版本回退 = 卸载后重装旧归档（历史版本仅展示） |
+| `POST /api/extensions/:id/enable|disable` | 用户生命周期（V1 收敛：enable = 启用意图 + 直接启动，幂等；可带 `{app_context}`，keymap 另支持 `profile`；disable 运行中自动 stop；`/start` `/stop` `/activate` 细粒度端点已删除，内部保留原语） |
+| `POST /api/extensions/:id/call` | `{action, values}` → 公开动作集合门禁（declarative 按钮白名单 ∪ 原生动作清单）→ 常驻实例 `call` / 原生实现；返回 JSON |
+| `GET /api/extensions/:id/capabilities` | 能力发现：`{id, state, running, actions}` 公开动作清单（跨插件调用前查询，简化计划 Phase 4） |
+| `DELETE /api/extensions/:id/:version` | 卸载（Running 拒绝；被运行中插件必需依赖引用时拒绝；最后一版才清状态；不删 Package 数据） |
+| `GET /api/extensions` | 列表 + `runtime_available` + UI 贡献注册表 + 各插件 `targets.android`（空声明归一 `["*"]`）+ 依赖实时状态 `dependencies[{id,version_req,required,installed,version,state,satisfied,note}]` |
 | `GET /api/extensions/management` | 管理视图（执行形态/权限/宿主 API/依赖任务） |
 | `GET /api/extensions/ui` 、`GET /api/extensions/:id/ui/*path` | UI 贡献注册表 / iframe 资产 |
 | `GET|POST /api/packages/:pkg/plugins/:plugin/resources[/*path]`、`PUT|DELETE …/*path`、`POST …/rename` | Package 插件资源（文本 JSON 乐观并发 / 模板 PNG 字节）；第三方插件数据读写通道 |

@@ -1,6 +1,8 @@
-// 函数库（data/<pkg>/functions/）外壳辅助：文件列表、目标解析、FunctionLibraryModel 解析
-// 与函数级 params 扩展命令（阶段 4：commands set_params/insert_param/update_param/
-// remove_param 支持 ['functions', 函数名, 'params'] 容器路径）。
+// 函数库外壳辅助（简化计划 Phase 1：Package 函数库 = automations/ 内
+// `_function*.yaml`，默认只有 `_function.yaml`；统一命名空间，函数名即调用名，
+// 目录与文件名不影响调用）：文件列表、FunctionLibraryModel 解析与函数级
+// params 扩展命令（commands set_params/insert_param/update_param/remove_param
+// 支持 ['functions', 函数名, 'params'] 容器路径）。
 import { reactive, ref } from 'vue'
 import { paths } from '../script-editor/commands'
 import { parseFunctionLibrary } from '../script-editor/codec'
@@ -8,9 +10,8 @@ import { parseFunctionLibrary } from '../script-editor/codec'
 export function useFunctionLibrary({ api } = {}) {
   const list = ref([]) // FunctionFile 列表：{id, pkg, file, content, version, functions[], updated_at}
   const loading = ref(false)
-  const activeFileId = ref(null) // 当前打开/选中的函数库文件 id
 
-  /** 拉取分区函数库文件列表（pkg 必填；失败置空不抛出，页面按无函数库处理）。 */
+  /** 拉取函数库文件列表（pkg 必填；失败置空不抛出，页面按无函数库处理）。 */
   async function refresh(pkg) {
     if (!pkg) {
       list.value = []
@@ -28,35 +29,12 @@ export function useFunctionLibrary({ api } = {}) {
 
   function clear() {
     list.value = []
-    activeFileId.value = null
   }
 
-  function findByFile(file) {
-    return list.value.find((f) => f.file === file) || null
-  }
-
-  /**
-   * call 步骤目标（v3 `function:<文件短路径>/<函数名>`）→ 函数库文件 id。
-   * 文件或函数名不存在返回 null（页面据此提示，不让用户跳进悬空目标）。
-   * 文件短路径可含目录，按最后一个 `/` 分割（ADR-YAML-02）。
-   */
-  function resolveTargetId(target) {
-    const s = String(target || '')
-    const prefix = 'function:'
-    if (!s.startsWith(prefix)) return null
-    const rest = s.slice(prefix.length)
-    const idx = rest.lastIndexOf('/')
-    if (idx <= 0 || idx === rest.length - 1) return null
-    const file = rest.slice(0, idx)
-    const fn = rest.slice(idx + 1)
-    if (fn.includes('/')) return null
-    const entry = findByFile(file)
-    if (!entry || !Array.isArray(entry.functions) || !entry.functions.includes(fn)) return null
-    return entry.id
-  }
-
-  function selectFile(id) {
-    activeFileId.value = id
+  /** 函数名 → 定义它的函数库文件（统一命名空间；找不到返回 null）。 */
+  function findByName(name) {
+    const key = String(name || '')
+    return list.value.find((f) => Array.isArray(f.functions) && f.functions.includes(key)) || null
   }
 
   /** 函数库文件内容 → FunctionLibraryModel（shell.loadFunctionFile 的同步解析形态）。 */
@@ -83,8 +61,8 @@ export function useFunctionLibrary({ api } = {}) {
   }
 
   return reactive({
-    list, loading, activeFileId,
-    refresh, clear, findByFile, resolveTargetId, selectFile, parseFunctionFile,
+    list, loading,
+    refresh, clear, findByName, parseFunctionFile,
     setFunctionParams, insertFunctionParam, updateFunctionParam, removeFunctionParam,
   })
 }

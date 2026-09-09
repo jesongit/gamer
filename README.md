@@ -10,7 +10,7 @@
 - ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网低延迟
 - 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先从 H.264 GOP 帧环按需调用 ffmpeg 解码最新帧；无 ffmpeg 时 fallback adb screencap）；固定夹具 benchmark 脚本已兼容 Windows PowerShell 5.1（parser=0），正式跨平台 p50/p95 报告仍在计划中
-- 📜 **YAML 自动化**：**YAML V1** 唯一脚本方案（Gamer V1 简化收敛；旧 v3/v2 语法一律诊断报错，无兼容分支）——**YAML 只描述流程，一切操作皆函数调用**：步骤只有函数调用 / `if` / `repeat` / `return` 四类，表达式只有字面量与 `$name.field` 引用；函数只有两种来源（插件原生函数 + 当前 Package `functions/` 函数库，同名冲突即拒绝），首版原生函数 tap/swipe/key/input_text/launch/stop_app/sleep/log/find/wait_find/tap_template/wait_disappear/eq…le；执行预算（步数 100k / 调用深度 32）防脚本失控，运行事件（步骤高亮 / 命中标记）实时回传投屏页面（语法见 [docs/reference/YAML.md](docs/reference/YAML.md)），由官方 `gamer.yaml` 扩展承载（唯一权威解释器 `yaml-interp` 与 WASM guest 同源）
+- 📜 **YAML 自动化**：**YAML V1** 唯一脚本方案（Gamer V1 简化收敛；旧 v3/v2 语法一律诊断报错，无兼容分支）——**YAML 只描述流程，一切操作皆函数调用**：步骤只有函数调用 / `if` / `repeat` / `return` 四类，表达式只有字面量与 `$name.field` 引用；函数只有两种来源（插件原生函数 + 当前 Package `automations/_function*.yaml` 函数库，默认只有 `_function.yaml` 一个文件，统一命名空间调用名 = 函数名，同名冲突即拒绝），首版原生函数 tap/swipe/key/input_text/launch/stop_app/sleep/log/find/wait_find/tap_template/wait_disappear/eq…le（`find` 单次匹配，等待轮询用 `wait_find`）；执行预算（步数 100k / 调用深度 32）防脚本失控，运行事件（步骤高亮 / 命中标记）实时回传投屏页面（语法见 [docs/reference/YAML.md](docs/reference/YAML.md)），由官方 `gamer.yaml` 扩展承载（唯一权威解释器 `yaml-interp` 与 WASM guest 同源）
 - ⏰ **定时任务**：Task = 任意 ScheduleProvider + 任意 Runner，内置 `cron` 调度 provider + `gamer.yaml` 执行 runner；服务端 Docker 内 7×24 运行，浏览器关闭不影响
 - 🧩 **插件化架构**：Core 只含设备/任务/资源/扩展机制等稳定能力，YAML 自动化、按键映射与视频工作台由可安装扩展（`.gplugin`，**免签名安装**——来源标注 + 权限确认 + 官方 sha256 完整性校验）提供，面板随扩展启动/停止出现消失；内置插件市场（官方 registry + 本地/URL 导入），用户可用 [sdk/](sdk/README.md) 开发自己的 WASM 插件；配置资产走 Package（`.gamerpkg`）导入导出
 - 🎬 **视频工作台**：录制或导入视频 → 素材库 → Video Project（标记/校准）→ 精确逐帧（ffprobe 展示序帧表，VFR/B 帧归一）→ 定帧框选建模板 + 离线匹配 → 操作事件生成 YAML V1 草稿保存到自动化（全程不触达设备，由官方 `gamer.video` 扩展承载）
@@ -196,7 +196,7 @@ docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d
 
   | 内容 | 性质 | 来源 |
   |---|---|---|
-  | `packages/<package-id>/{package.toml,shared/,plugins/<plugin-id>/}` | 业务分区资源与 Package 元数据（插件目录语义归插件：automations/functions/templates/mappings/projects） | 使用中自动创建（gitignore，零业务资源随仓库分发） |
+  | `packages/<package-id>/{package.toml,shared/,plugins/<plugin-id>/}` | 业务分区资源与 Package 元数据（插件目录语义归插件：automations（含 `_function*.yaml` 函数库）/templates/mappings/projects） | 使用中自动创建（gitignore，零业务资源随仓库分发） |
   | `media/` `extensions/` | 媒体素材库与已装插件 | 导入/录制与插件安装时生成（gitignore） |
   | `gamer.db` | 运行期持久化 | 首次启动自动生成（gitignore） |
   | 其他临时文件 | 运行期产物 | 自动创建（gitignore） |
@@ -259,8 +259,8 @@ Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`�
 ## YAML 脚本语法
 
 YAML 自动化脚本为 **V1 唯一版本**（无 `version` 字段，旧 v3/v2 语法无兼容与迁移工具），完整语法与示例见 **[docs/reference/YAML.md](docs/reference/YAML.md)**。
-核心模型：步骤 = 函数调用 / `if` / `repeat` / `return`；表达式 = 字面量 / `$name.field`；函数 = 插件原生函数 + 当前 Package `functions/` 函数库（两种来源同名即冲突）；执行预算与取消机制保留。
-可执行脚本、函数库和模板按 Package 存放在 `data/packages/<package-id>/plugins/gamer.yaml/{automations,functions,templates}/`（REST 走通用 Package 资源 API `/api/packages/:pkg/plugins/gamer.yaml/resources[/*path]`；Console 的模板/自动化面板由 `gamer.yaml` 扩展提供，框选/上传模板即用；原生函数目录见 `GET /api/runners/gamer.yaml/functions`）。
+核心模型：步骤 = 函数调用 / `if` / `repeat` / `return`；表达式 = 字面量 / `$name.field`；函数 = 插件原生函数 + 当前 Package `automations/_function*.yaml` 函数库（两种来源同名即冲突；统一命名空间，调用名 = 函数名）；执行预算与取消机制保留。
+可执行脚本、函数库和模板按 Package 存放在 `data/packages/<package-id>/plugins/gamer.yaml/{automations,templates}/`（函数库与自动化共用 `automations/`，文件名 `_function` 前缀 + `.yaml` 后缀 = 函数库，默认库 `_function.yaml`；REST 走通用 Package 资源 API `/api/packages/:pkg/plugins/gamer.yaml/resources[/*path]`；Console 的模板/自动化面板由 `gamer.yaml` 扩展提供，框选/上传模板即用；原生函数目录见 `GET /api/runners/gamer.yaml/functions`）。
 
 ## API 一览
 

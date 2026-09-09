@@ -109,7 +109,29 @@ async function callGamerYamlAction(action, values) {
     : result
 }
 
+/**
+ * 能力发现（简化计划 Phase 4/5）：GET /api/extensions/gamer.yaml/capabilities
+ * → `{id, state, running, actions:[{action, version, surface, summary}]}`；
+ * 404（未安装）→ `{id, running:false, actions:[]}` 兜底（调用方按不可用降级，
+ * 不误报错误）。调用方据此决定 YAML 相关制作入口是否展示。
+ */
+async function gamerYamlCapabilities() {
+  try {
+    return await request('GET', `/api/extensions/${encodeURIComponent(GAMER_YAML_PLUGIN_ID)}/capabilities`)
+  } catch (error) {
+    if (error?.status === 404) {
+      return { id: GAMER_YAML_PLUGIN_ID, state: null, running: false, actions: [] }
+    }
+    throw error
+  }
+}
+
 export const videoApi = {
+  // ---- 能力发现（简化计划 Phase 4/5）----
+
+  /** gamer.yaml 公开动作清单与运行状态（YAML 制作入口可用性判定）。 */
+  gamerYamlCapabilities,
+
   // ---- 媒体（合同 §1）----
 
   /** GET /api/media → `{"media":[MediaMetadata]}`（创建时间倒序）；便捷返回数组。 */

@@ -87,10 +87,13 @@
                   依赖：{{ dependencyItems(plugin).map(item => item.name || item.id).join('、') }}
                 </div>
                 <div v-if="dependencyState(plugin).missing.length" class="dependency-line danger-text">
-                  缺少扩展依赖：{{ dependencyState(plugin).missing.map(item => item.id).join('、') }}
+                  缺少必需依赖：{{ dependencyState(plugin).missing.map(item => item.id).join('、') }}（请在插件中心安装并启用后重试）
                 </div>
                 <div v-if="dependencyState(plugin).disabled.length" class="dependency-line warn-text">
-                  依赖未启用：{{ dependencyState(plugin).disabled.map(item => item.id + '（' + item.state + '）').join('、') }}
+                  必需依赖未启用：{{ dependencyState(plugin).disabled.map(item => item.id + '（' + item.state + '）').join('、') }}
+                </div>
+                <div v-for="dep in optionalDependencyNotes(plugin)" :key="`opt-${dep.id}`" class="dependency-line warn-text">
+                  可选依赖 {{ dep.id }}{{ dep.note ? `（${dep.note}）` : '' }}：相关功能入口已降级
                 </div>
                 <div v-if="dependentItems(plugin).length" class="dependency-line warn-text">
                   正被使用：{{ dependentItems(plugin).map(item => `${item.name || item.id}${item.state ? `（${item.state}）` : ''}`).join('、') }}
@@ -250,9 +253,22 @@ function uiType(entry) {
 }
 function dependencyNames(entry) { return dependencyRefsFor(entry).map(item => item.name || item.id) }
 function dependencyItems(plugin) { return dependencyRefsFor(plugin) }
+/** 依赖满足状态（简化计划 Phase 3）：优先用快照携带的服务端实时依赖状态
+ *  （含 required/satisfied），旧形态快照回退本地推导。只对必需依赖报缺失/未启用。 */
 function dependencyState(plugin) {
+  const serverDeps = Array.isArray(plugin.dependencies) ? plugin.dependencies : []
+  if (serverDeps.length) {
+    const missing = serverDeps.filter(dep => dep.required && !dep.installed).map(dep => ({ id: dep.id, state: dep.version_req || '' }))
+    const disabled = serverDeps.filter(dep => dep.required && dep.installed && !dep.satisfied).map(dep => ({ id: dep.id, state: dep.state || '未启用' }))
+    return { ok: missing.length === 0 && disabled.length === 0, missing, disabled }
+  }
   const extensionDependencies = dependencyItems(plugin).filter(item => item.kind === 'extension' || !item.kind)
   return dependencyStatus(extensionDependencies, installed.value)
+}
+/** 可选依赖未满足的降级提示（基础功能不受影响；对应功能入口由消费方隐藏）。 */
+function optionalDependencyNotes(plugin) {
+  const serverDeps = Array.isArray(plugin.dependencies) ? plugin.dependencies : []
+  return serverDeps.filter(dep => !dep.required && !dep.satisfied)
 }
 function dependentItems(plugin) {
   const dependent = plugin.dependent || {}

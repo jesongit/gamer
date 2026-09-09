@@ -93,6 +93,12 @@ GameBot 开发/运行中踩过的坑记录（环境、构建、部署、已知�
 - **改了 Rust 代码但行为没生效：`gamer.ps1 start/restart` 不带 `-Build` 跑的是预构建 release 二进制**（2026-08-31 实证）：Start-Backend 只在二进制不存在或显式 `-Build` 时才 `cargo build --release`，改源码后直接 restart 会继续跑旧逻辑（案例：函数名 unicode 校验已放宽，线上仍报旧文案 `[A-Za-z_][A-Za-z0-9_]*`）。规避：改 Rust 后用 `.\gamer.ps1 restart -BackendOnly -Build`（或先 cargo build --release 再 restart）；前端无此问题（vite dev HMR / web-dist 由 `npm run build` 产出）。
 - **当前工作树执行 `pnpm build` 会因 `MainLayout.vue` 导入 `runs.js` 未导出的 `isMissingEndpointError` 而失败**（2026-08-31）：前端运行实现未合流导致导出契约不一致，恢复对应导出/合流前端改动后再验收；本轮文档与 fixture 支线不改业务实现。
 
+## 2026-09-09（函数体系与插件依赖简化）
+
+- **Package 函数库从 `functions/<分类>.yaml` 迁到 `automations/_function*.yaml`（破坏性，无兼容层）**：保存钩子对 functions/ 路径直接报 `yaml.functions.dir.removed`；存量开发数据手动迁移——把旧 `plugins/gamer.yaml/functions/*.yaml` 内容（`functions:` 包装）并入 `automations/_function.yaml`（同名函数合并会冲突报错，先改名）；调用名 = 函数名与文件无关，模板引用改写不受影响。
+- **函数运行寻址从 `<pkg>/<文件短路径>.yaml#<函数名>` 收敛为 `<pkg>#<函数名>`**：RunTarget::Function 删 file 段、ManualPayload 删 function 字段；前端 `runYamlFunction` 第一参传 Package id；带路径段的函数 entrypoint 一律 400 invalid_payload。
+- **`find` 不再承担轮询语义**（timeout/interval 已从 Schema 删除，传了报「未知参数 timeout」）：等待轮询用 wait_find；find/wait_find/tap_template 共用 `match_once` 单一匹配实现，不会分叉出两套匹配逻辑。
+
 ## 2026-08-31（自动升级批次 0/1 实施期）
 
 - **无 BOM 的 UTF-8 `.ps1` 含中文会被 Windows PowerShell 5.1 按 GBK 解析报语法错**：5.1 无 BOM 时按系统代码页读脚本；本批新增 release/packaging、tools 脚本统一写带 BOM 的 UTF-8（修复方式同 gamer.ps1 条目）。

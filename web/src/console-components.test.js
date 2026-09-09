@@ -319,29 +319,32 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(runner).not.toContain('fn-more')
   })
 
-  it('函数面板函数个体化：列表平铺全部函数 + 模糊搜索；新建直进编辑态（分类+函数名双输入框）', () => {
+  it('函数面板函数个体化：列表平铺全部函数 + 模糊搜索；新建直进默认 _function.yaml 编辑态', () => {
     const runner = read('./components/console/ScriptRunner.vue')
-    // 顶部无分类下拉/弹窗：模糊搜索框（名称/分类/拼音首字母）过滤函数列表
+    // 顶部无分类下拉/弹窗：模糊搜索框（名称/来源/拼音首字母）过滤函数列表
     expect(runner).toContain('v-model="ctx.fnSearch"')
-    expect(runner).toContain('搜索函数（名称/分类/拼音首字母）')
     expect(runner).not.toContain('选择分类')
     expect(runner).not.toContain('NewFunctionDialog')
     expect(runner).not.toContain('新建文件')
     expect(runner).not.toContain('删除文件')
     expect(runner).not.toContain('addFunctionToCurrentFile')
-    // 摘要区跨分类平铺全部函数（每个函数一组，带分类徽标 + 运行/编辑/原文/删除）
+    // 摘要区跨文件平铺全部函数（每个函数一组，带来源徽标 + 运行/编辑/原文/删除；
+    // 编辑类操作仅默认函数库开放，手动拆分 _function*.yaml 只读）
     expect(runner).toContain('ctx.filteredFnViews')
-    expect(runner).toContain('ctx.runFunction({ fileId: view.fileId, fnName: view.name })')
+    expect(runner).toContain('ctx.runFunction({ fnName: view.name })')
     expect(runner).toContain('ctx.editFunction(view)')
     expect(runner).toContain('ctx.runFromFunctionStep(view, uuid)')
-    // 新建函数直接进入编辑态（无弹窗确认）；编辑态顶部 = 分类输入框 + 函数名输入框
-    expect(consoleImpl).toContain("scriptShell.newFunctionFile({ file: '', pkg: packageId.value, functionName: 'func1' })")
-    expect(consoleImpl).toContain('请填写分类')
-    expect(runner).toContain('class="function-edit-category input mono"')
-    expect(runner).toContain(':disabled="!!ctx.shell.resourceId"')
+    expect(runner).toContain('function fnIsDefault(')
+    // 编辑态固定默认函数库：无分类输入框，文件名只读展示 + 函数名输入框
+    expect(runner).not.toContain('function-edit-category')
+    expect(runner).toContain('function-edit-file')
     const toolbar = runner.slice(runner.indexOf('class="function-edit-toolbar"'))
     expect(toolbar.indexOf('＋ 添加参数')).toBeLessThan(toolbar.indexOf('＋ 添加步骤'))
     expect(runner).toContain(':show-add-button="ctx.shell.editorContext !== \'function\'"')
+    // useConsoleScriptRunner：新建函数 = 固定默认库文件 + 按名运行（<pkg>#<函数名>）
+    expect(consoleImpl).toContain("scriptShell.newFunctionFile({ file: FUNCTION_LIBRARY_DEFAULT, pkg: packageId.value, functionName: 'func1' })")
+    expect(consoleImpl).toContain("type: 'insert_function', name")
+    expect(consoleImpl).toContain('entrypoint: `${packageId.value}#${fnName}`')
   })
 
   it('模板字段的匹配预览复用宿主步骤语义且只走匹配接口', () => {

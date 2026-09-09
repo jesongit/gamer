@@ -60,26 +60,22 @@ describe('runYamlScript / runYamlFunction 请求体（gamer.yaml 经 api.run 统
     expect(calls[1].body.payload).toEqual({}) // 稀疏空映射 → 省略
   })
 
-  it('runYamlFunction：entrypoint = "<file id>#<函数名>"；payload = {start_index?, args?}', async () => {
+  it('runYamlFunction：entrypoint = "<pkg>#<函数名>"；payload = {start_index?, args?}', async () => {
     const calls = stubFetch([
       { method: 'POST', url: '/api/runs', body: { run_id: 'r2', state: 'starting' } },
     ])
-    await runYamlFunction('com.demo/common.yaml', 'dev1', {
+    await runYamlFunction('com.demo', 'dev1', {
       function: 'login', start_index: 1, args: { account: 'a.png' },
     })
     expect(calls[0].body).toEqual({
       runner_id: 'gamer.yaml',
-      entrypoint: 'com.demo/common.yaml#login',
+      entrypoint: 'com.demo#login',
       device_id: 'dev1',
       payload: { start_index: 1, args: { account: 'a.png' } },
     })
-    await runYamlFunction('com.demo/common.yaml', 'dev2', {})
-    expect(calls[1].body).toEqual({
-      runner_id: 'gamer.yaml',
-      entrypoint: 'com.demo/common.yaml',
-      device_id: 'dev2',
-      payload: {},
-    }) // function/start_index/args 全省略 → 文件第一个函数从头跑
+    // 缺函数名 → 客户端直接拒（统一命名空间按名寻址，无「文件第一个函数」缺省）
+    await expect(runYamlFunction('com.demo', 'dev2', {})).rejects.toThrow('函数名')
+    expect(calls[1]).toBeUndefined()
   })
 
   it('api.run 对 runner 无知；缺 runner_id/entrypoint 客户端即拒', async () => {
@@ -345,10 +341,10 @@ describe('Console 运行参数接线', () => {
 
   it('P12.3：begin 改传 {runnerId, entrypoint}（schema 经服务端获取，不再传 yaml 源码）', () => {
     expect(runnerSrc).not.toMatch(/begin\(\{[^}]*yaml:/s)
-    // 脚本：entrypoint = 脚本资源 id；函数：与 runYamlFunction 拼装同形态（<file>#<函数名>）
+    // 脚本：entrypoint = 脚本资源 id；函数：统一命名空间按名寻址（<pkg>#<函数名>）
     expect(runnerSrc).toContain('runnerId: GAMER_YAML_RUNNER_ID')
     expect(runnerSrc).toContain('entrypoint: s.id')
-    expect(runnerSrc).toContain("entrypoint: `${f.id}#${fnName}`")
+    expect(runnerSrc).toContain('entrypoint: `${packageId.value}#${fnName}`')
   })
 
   it('api.js：提供 runner 无关的 entrypoint schema 读取（URL 整体编码）', () => {

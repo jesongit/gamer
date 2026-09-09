@@ -15,8 +15,19 @@ export const GAMER_VIDEO_PLUGIN_ID = 'gamer.video'
 
 /** gamer.yaml 插件内目录（plan §3：目录语义归插件定义，Core 不解释）。 */
 export const AUTOMATION_DIR = 'automations'
-export const FUNCTION_DIR = 'functions'
 export const TEMPLATE_DIR = 'templates'
+/**
+ * 默认函数库文件（简化计划 Phase 1）：每个 Package 的 YAML 插件默认只有一个
+ * 用户函数库文件，前端「函数」页面只编辑它；`_function` 前缀 + `.yaml` 后缀的
+ * 文件（automations/ 内）均识别为函数库（isFunctionLibraryFile），供手动拆分。
+ * 旧 `functions/` 专属目录已删除。
+ */
+export const FUNCTION_LIBRARY_DEFAULT = '_function.yaml'
+/** 函数库文件识别（与后端 resources::is_function_library_path 同规则）。 */
+export function isFunctionLibraryFile(path) {
+  const name = String(path || '').split('/').pop() || ''
+  return name.startsWith('_function') && name.endsWith('.yaml')
+}
 /** gamer.keymap 插件内目录。 */
 export const KEYMAP_DIR = 'mappings'
 /** gamer.video 插件内项目目录（Video Project schema 归插件定义，Core 不解释）。 */

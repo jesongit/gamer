@@ -132,6 +132,7 @@ canonical ABI**，`log::write` 这类 import 直接调用即可。
 | `permissions` | [string] | — | 权限闭集 19 项（见 §5）；缺省 = 无权限。写 `filesystem.*`/`network`/`shell`/`process`/`device.shell` 直接拒绝 |
 | `[host_api]` | table | — | 声明用到的 Host API 域版本要求：`device`/`vision`/`input`/`touch`/`resource`/`run`/`runtime`/`log`/`media`，值是 SemVer range（如 `"^1.0"`）；宿主当前全域 `1.0.0`，不满足 → 安装期结构化报错 |
 | `[targets.android].packages` | [string] | — | 支持的 Android 应用包名列表；`*` = 通用（全部应用），**缺省/空声明等价 `*`**。仅作运行目标声明，宿主不做硬门禁：Console 壳按当前设备应用过滤插件入口（`*` 恒显示，具体包名需命中）。与 package.toml 的 `[targets.android]` 同形 |
+| `[[dependencies]]` | array | — | 插件依赖声明（简化计划 Phase 3）：`id`（目标插件 id，禁自引用/重复）+ `version`（SemVer range，缺省 `*`）+ `required`（缺省 `true`，可选依赖必须显式 `false`）。**必需依赖 = 启动门禁**（缺失/版本不兼容/未启用 → enable 拒绝启动并保留错误；必需依赖循环拒绝启动）；**可选依赖 = 能力降级提示**（缺失不阻止启动，你的基础功能必须可独立工作）。不自动下载/自动启用；依赖声明不授予任何权限。与 package.toml `[plugins]`（Package 依赖）是两个概念。调用其他插件能力走 `GET /api/extensions/:id/capabilities` 能力发现 + `POST /api/extensions/:id/call`（参考 gamer.video 对 gamer.yaml 的可选依赖：缺 YAML 时视频基础功能不受影响，仅模板创建/草稿生成入口降级） |
 | `[[ui.contributions]]` | array | — | 面板贡献，见下 |
 
 `[execution]`（执行类型 = 后端形态；**与 `ui.contributions.runtime` 界面渲染类型是两回事**）：

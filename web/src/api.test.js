@@ -90,22 +90,22 @@ describe('Package 插件资源 API surface（plan §12-§14）', () => {
     expect(bodyOf(1)).toEqual({ content: 'steps: []\n', expected_version: 'v1' })
   })
 
-  it('函数创建与更新共用 PUT；缺版本不发请求，force:true 才跳过版本门禁', async () => {
-    fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/common.yaml', version: 'v1' }))
-    await api.createFunction({ pkg: 'com.demo', name: 'common', content: 'login:\n  steps: []\n' })
-    expect(fetch.mock.calls[0][0]).toBe('/api/packages/com.demo/plugins/gamer.yaml/resources/functions%2Fcommon')
+  it('函数库创建与更新共用 PUT（automations/ 前缀识别）；缺版本不发请求，force:true 才跳过版本门禁', async () => {
+    fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/_function.yaml', version: 'v1' }))
+    await api.createFunction({ pkg: 'com.demo', name: '_function.yaml', content: 'functions:\n  login:\n    run: []\n' })
+    expect(fetch.mock.calls[0][0]).toBe('/api/packages/com.demo/plugins/gamer.yaml/resources/automations%2F_function.yaml')
     expect(fetch.mock.calls[0][1].method).toBe('PUT')
-    expect(bodyOf()).toEqual({ content: 'login:\n  steps: []\n' })
+    expect(bodyOf()).toEqual({ content: 'functions:\n  login:\n    run: []\n' })
 
-    await expect(api.updateFunction('com.demo/common.yaml', { content: 'login:\n  steps: []\n' }))
+    await expect(api.updateFunction('com.demo/_function.yaml', { content: 'functions:\n  login:\n    run: []\n' }))
       .rejects.toMatchObject({ status: 409, code: 'version_required' })
     expect(fetch).toHaveBeenCalledTimes(1)
 
-    fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/common.yaml', version: 'v3' }))
-    await api.updateFunction('com.demo/common.yaml', { content: 'login:\n  steps: []\n', force: true })
-    expect(fetch.mock.calls[1][0]).toBe('/api/packages/com.demo/plugins/gamer.yaml/resources/functions%2Fcommon.yaml')
+    fetch.mockResolvedValueOnce(jsonRes(200, { id: 'com.demo/_function.yaml', version: 'v3' }))
+    await api.updateFunction('com.demo/_function.yaml', { content: 'functions:\n  login:\n    run: []\n', force: true })
+    expect(fetch.mock.calls[1][0]).toBe('/api/packages/com.demo/plugins/gamer.yaml/resources/automations%2F_function.yaml')
     expect(fetch.mock.calls[1][1].method).toBe('PUT')
-    expect(bodyOf(1)).toEqual({ content: 'login:\n  steps: []\n', force: true })
+    expect(bodyOf(1)).toEqual({ content: 'functions:\n  login:\n    run: []\n', force: true })
   })
 
   it('模板创建与图片替换：原始字节 PUT 到 templates/，客户端组合完整文件名', async () => {

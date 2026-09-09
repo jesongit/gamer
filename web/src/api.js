@@ -11,7 +11,7 @@
 import { handleUnauthorized } from './auth'
 import {
   GAMER_YAML_PLUGIN_ID, KEYMAP_PLUGIN_ID,
-  AUTOMATION_DIR, FUNCTION_DIR, TEMPLATE_DIR, KEYMAP_DIR,
+  AUTOMATION_DIR, TEMPLATE_DIR, KEYMAP_DIR, isFunctionLibraryFile,
 } from './gamer-plugin-ids'
 
 /** base64 → Uint8Array（模板原始字节上传用） */
@@ -505,17 +505,19 @@ export const api = {
   tplImageUrl: (name, packageId) => pkgResUrl(requireId(packageId, 'package_id'), GAMER_YAML_PLUGIN_ID, pluginPath(TEMPLATE_DIR, name)),
 
   // 脚本（自动化插件 automations/ 目录；id 形如 "<package-id>/<name>.yaml"，含 '/'，
-  // 拼 URL 必须整体 encodeURIComponent）
+  // 拼 URL 必须整体 encodeURIComponent。`_function*.yaml` 是函数库，不进脚本列表）
   listScripts: async (packageId) => {
     const rep = await api.listPluginResources(packageId, GAMER_YAML_PLUGIN_ID, AUTOMATION_DIR)
-    return (rep?.resources || []).map(r => ({
-      id: `${r.package}/${r.path.slice(AUTOMATION_DIR.length + 1)}`,
-      package: r.package,
-      name: r.path.slice(AUTOMATION_DIR.length + 1),
-      version: r.version,
-      updated_at: r.updated_at,
-      size: r.size,
-    }))
+    return (rep?.resources || [])
+      .map(r => ({
+        id: `${r.package}/${r.path.slice(AUTOMATION_DIR.length + 1)}`,
+        package: r.package,
+        name: r.path.slice(AUTOMATION_DIR.length + 1),
+        version: r.version,
+        updated_at: r.updated_at,
+        size: r.size,
+      }))
+      .filter(s => !isFunctionLibraryFile(s.name))
   },
   // 单脚本读取（含内容版本短码 version：编辑器 expected_version 冲突检测依据）
   getScript: (id) => {
@@ -533,34 +535,38 @@ export const api = {
     const [pkg, file] = splitResourceId(id)
     return api.deletePluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file))
   },
-  // 函数库（自动化插件 functions/ 目录；id 形如 "<package-id>/<文件短路径>.yaml"，
-  // 文件短路径可含目录。不进脚本列表/运行接口/任务选择器；GET 单文件含
-  // content/version/functions（顶层函数名清单，扩展注记提供））
+  // 函数库（简化计划 Phase 1：automations/ 内 `_function*.yaml`，默认只有
+  // `_function.yaml` 一个文件；旧 functions/ 目录已删除。id 形如
+  // "<package-id>/_function.yaml"，getFunction/updateFunction/deleteFunction
+  // 的 URL 在 AUTOMATION_DIR 下拼装。GET 单文件含 content/version/functions
+  // （顶层函数名清单，扩展注记提供））
   listFunctions: async (packageId) => {
-    const rep = await api.listPluginResources(packageId, GAMER_YAML_PLUGIN_ID, FUNCTION_DIR)
-    return (rep?.resources || []).map(r => {
-      const file = r.path.slice(FUNCTION_DIR.length + 1)
-      return {
-        id: `${r.package}/${file}`, pkg: r.package, file,
-        content: r.content, version: r.version, functions: r.meta?.functions || [],
-        updated_at: r.updated_at,
-      }
-    })
+    const rep = await api.listPluginResources(packageId, GAMER_YAML_PLUGIN_ID, AUTOMATION_DIR)
+    return (rep?.resources || [])
+      .map(r => {
+        const file = r.path.slice(AUTOMATION_DIR.length + 1)
+        return {
+          id: `${r.package}/${file}`, pkg: r.package, file,
+          content: r.content, version: r.version, functions: r.meta?.functions || [],
+          updated_at: r.updated_at,
+        }
+      })
+      .filter(f => isFunctionLibraryFile(f.file))
   },
   getFunction: (id) => {
     const [pkg, file] = splitResourceId(id)
-    return api.getPluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(FUNCTION_DIR, file))
+    return api.getPluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file))
   },
-  // PUT 创建或更新/重命名，更新缺版本时在客户端拒绝。
+  // PUT 创建或更新，更新缺版本时在客户端拒绝。
   createFunction: ({ pkg, name, content } = {}) =>
-    req('PUT', pkgResUrl(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(FUNCTION_DIR, requireId(name, 'name'))), createBody(content)),
+    req('PUT', pkgResUrl(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, requireId(name, 'name'))), createBody(content)),
   updateFunction: async (id, payload = {}) => {
     const [pkg, file] = splitResourceId(id)
-    return api.putPluginResourceText(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(FUNCTION_DIR, file), payload)
+    return api.putPluginResourceText(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file), payload)
   },
   deleteFunction: (id) => {
     const [pkg, file] = splitResourceId(id)
-    return api.deletePluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(FUNCTION_DIR, file))
+    return api.deletePluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file))
   },
 
   // 统一执行入口（P11.6 / ADR-12）：POST /api/runs {runner_id, entrypoint,

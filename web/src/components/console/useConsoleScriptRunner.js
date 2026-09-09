@@ -1,6 +1,7 @@
 import { computed, nextTick, onUnmounted, provide, reactive, ref, watch } from 'vue'
 import { api } from '../../api'
 import { GAMER_YAML_RUNNER_ID, runYamlFunction, runYamlScript } from '../../gamer-yaml-runner'
+import { FUNCTION_LIBRARY_DEFAULT } from '../../gamer-plugin-ids'
 import {
   applyRunRecord, beginCancel, findRun, pushRunConflict, resetStoreRunState,
   scriptsData, store, templatesData,
@@ -77,8 +78,9 @@ export function useConsoleScriptRunner({
   const rawEditor = useRawYamlEditor({ api })
   // 函数库列表与 func 目标解析（func 步骤「打开函数定义」跳转用）
   const fnLib = useFunctionLibrary({ api })
-  // 各面板目标选择（面板独立）。函数面板无「选中分类」态：函数以个体为单位
-  // 平铺展示（buildFunctionViews），运行/编辑/删除都按函数视图寻址。
+  /** 各面板目标选择（面板独立）。函数面板无「选中文件」态：函数以个体为单位
+   *  平铺展示（buildFunctionViews），运行按 `<pkg>#<名>` 寻址，编辑只对默认
+   *  函数库 `_function.yaml` 开放（手动拆分文件只读展示）。 */
   const selScript = ref('')
   const scriptDeleteConfirmId = ref('')
   /** 运行按钮可用性：脚本面板看脚本选择 */
@@ -86,11 +88,19 @@ export function useConsoleScriptRunner({
   /** 运行区当前选择 id（脚本 id）：编辑、删除按钮与摘要区共用 */
   const selTargetIdScript = computed(() => selScript.value)
   watch([selScript, packageId], () => { scriptDeleteConfirmId.value = '' })
+  /** 默认函数库文件 id（`<pkg>/_function.yaml`）。 */
+  const defaultFnFileId = computed(() =>
+    packageId.value ? `${packageId.value}/${FUNCTION_LIBRARY_DEFAULT}` : '')
+  /** 函数是否属于默认函数库（只有默认库可编辑）。 */
+  function isInDefaultLibrary(view) {
+    return !!view?.fileId && view.fileId === defaultFnFileId.value
+  }
   /**
-   * 函数面板：全部函数以个体为单位平铺（跨分类，每个函数一个视图）。
+   * 函数面板：全部函数以个体为单位平铺（跨文件，每个函数一个视图）。
    * 每个视图 = {fileId, category, name, model(params+steps)}，摘要区逐函数
    * 渲染一组（签名 + 步骤卡片 + 运行/编辑/删除）；fnSearch 模糊过滤
-   * （名称/分类/「分类/名」子串 + 中文拼音首字母，function-list.js）。
+   * （名称/来源文件/拼音首字母，function-list.js）。手动拆分的
+   * `_function*.yaml` 同样加载展示，但只读（编辑入口仅默认库）。
    */
   const funcFnViews = computed(() => buildFunctionViews(fnLib.list, (content, file) => {
     const parsed = fnLib.parseFunctionFile(content, file)
@@ -277,11 +287,15 @@ export function useConsoleScriptRunner({
     scriptShell.newScript({ name: '新脚本.yml', pkg: packageId.value })
   }
 
-  /** 编辑某个函数（摘要组「编辑」直达）：载入其所在分类文件并聚焦该函数。
-   *  view = 函数视图（function-list.js），编辑态画布锁定单函数。 */
+  /** 编辑某个函数（摘要组「编辑」直达）：载入默认函数库并聚焦该函数。
+   *  view = 函数视图（function-list.js），编辑态画布锁定单函数。
+   *  手动拆分的 `_function*.yaml` 只读——不提供编辑入口（Phase 1 §3.3）。 */
   async function editFunction(view) {
+    if (!isInDefaultLibrary(view)) {
+      return toast(`函数 ${view.name} 在手动拆分的函数库 ${view.category || ''} 中，仅供查看；编辑请整理进默认 _function.yaml`, 'warn')
+    }
     const f = fnLib.list.find(x => x.id === view?.fileId)
-    if (!f) return toast('函数所在分类不存在，请刷新列表', 'error')
+    if (!f) return toast('函数所在函数库不存在，请刷新列表', 'error')
     editFocusFn.value = view.name || ''
     funcScope.scriptMode.value = 'edit'
     showYaml.value = false
@@ -290,7 +304,7 @@ export function useConsoleScriptRunner({
     } catch (e) {
       scriptShell.reset()
       funcScope.scriptMode.value = 'run'
-      toast('分类加载失败：' + e.message, 'error')
+      toast('函数库加载失败：' + e.message, 'error')
     }
   }
 
@@ -301,10 +315,13 @@ export function useConsoleScriptRunner({
   }
 
   /** 进入原文编辑态：直接读取资源原文，不经过前端 YAML codec，保存仍由服务端校验。
-   *  函数面板按函数视图进入其所在分类文件；脚本面板编辑当前脚本。 */
+   *  函数面板仅默认函数库可原文编辑；脚本面板编辑当前脚本。 */
   async function editRawCurrentTarget(scope, view = null) {
     const id = scope.kind === 'func' ? view?.fileId : selScript.value
     if (!id) return toast(scope.kind === 'func' ? '请先选择函数' : '请先选择脚本', 'error')
+    if (scope.kind === 'func' && !isInDefaultLibrary(view)) {
+      return toast(`函数库 ${view?.category || ''} 为手动拆分文件，仅供查看；编辑请整理进默认 _function.yaml`, 'warn')
+    }
     scope.scriptMode.value = 'raw'
     try {
       await rawEditor.load(scope.kind === 'func' ? 'function' : 'script', id)
@@ -342,33 +359,64 @@ export function useConsoleScriptRunner({
     scope.scriptMode.value = 'run'
   }
 
-  // ---------- 新建函数（无弹窗）：直接进入编辑态，分类与函数名在编辑态顶部填写 ----------
-  function startNewTarget(scope) {
-    if (scope.kind !== 'func') return startNewScript()
-    if (!packageId.value) return toast('请先在右上选择配置', 'warn')
-    editFocusFn.value = 'func1'
-    funcScope.scriptMode.value = 'edit'
-    showYaml.value = false
-    // 空分类 + 预置空函数 func1：分类必填（保存时校验），函数名可在编辑态改名
-    scriptShell.newFunctionFile({ file: '', pkg: packageId.value, functionName: 'func1' })
+  // ---------- 新建函数（无弹窗、无分类概念）：直接进入默认函数库编辑态 ----------
+  // `_function.yaml` 不存在 → 新建空库（保存时落盘到固定资源路径）；已存在 →
+  // 载入后经命令栈追加一个新函数（可撤销），聚焦它继续编辑。
+  function uniqueFunctionName(base) {
+    const functions = scriptShell.model?.functions
+    if (!Array.isArray(functions)) return base
+    if (!functions.some(fn => fn.name === base)) return base
+    let i = 2
+    while (functions.some(fn => fn.name === `${base}${i}`)) i++
+    return `${base}${i}`
   }
 
-  /** 函数列表操作共用：按函数视图定位分类文件、修改模型并按版本更新，完成后刷新函数库快照。 */
+  async function startNewTarget(scope) {
+    if (scope.kind !== 'func') return startNewScript()
+    if (!packageId.value) return toast('请先在右上选择配置', 'warn')
+    funcScope.scriptMode.value = 'edit'
+    showYaml.value = false
+    const existing = fnLib.list.find(f => f.file === FUNCTION_LIBRARY_DEFAULT)
+    try {
+      if (existing) {
+        await scriptShell.loadFunctionFile(existing.id)
+      } else {
+        // 空默认函数库 + 预置空函数 func1：保存时落盘为 automations/_function.yaml
+        scriptShell.newFunctionFile({ file: FUNCTION_LIBRARY_DEFAULT, pkg: packageId.value, functionName: 'func1' })
+        editFocusFn.value = 'func1'
+        return
+      }
+      const name = uniqueFunctionName('func1')
+      if (scriptShell.stack?.apply({ type: 'insert_function', name }, '新建函数')) {
+        editFocusFn.value = name
+      }
+    } catch (e) {
+      scriptShell.reset()
+      funcScope.scriptMode.value = 'run'
+      toast('默认函数库加载失败：' + e.message, 'error')
+    }
+  }
+
+  /** 函数列表操作共用：定位默认函数库文件、修改模型并按版本更新，完成后刷新函数库快照。 */
   async function updateFunctionFile(view, mutator, successMessage) {
+    if (!isInDefaultLibrary(view)) {
+      toast(`函数 ${view?.name || ''} 在手动拆分的函数库中，仅供查看`, 'warn')
+      return false
+    }
     const f = fnLib.list.find(x => x.id === view?.fileId)
     if (!f) {
-      toast('函数所在分类不存在，请刷新列表', 'warn')
+      toast('函数所在函数库不存在，请刷新列表', 'warn')
       return false
     }
     let parsed
     try {
       parsed = fnLib.parseFunctionFile(f.content ?? '', f.file || '')
     } catch (e) {
-      toast('分类解析失败：' + e.message, 'error')
+      toast('函数库解析失败：' + e.message, 'error')
       return false
     }
     if (!parsed?.model || parsed.diagnostics?.length) {
-      toast('该分类当前内容无法修改，请先进编辑态修复诊断', 'error')
+      toast('该函数库当前内容无法修改，请先进编辑态修复诊断', 'error')
       return false
     }
     const changed = mutator(parsed.model)
@@ -407,18 +455,22 @@ export function useConsoleScriptRunner({
     return !!changed
   }
 
-  /** 函数摘要「删除」：按函数视图删除；其分类内只剩这一个函数时，确认后整个分类一并移除。 */
+  /** 函数摘要「删除」：仅默认函数库可删；默认库内只剩这一个函数时，确认后
+   *  整个 `_function.yaml` 一并移除（下次新建函数时自动重建）。 */
   async function deleteFunction(view) {
+    if (!isInDefaultLibrary(view)) {
+      return toast(`函数 ${view?.name || ''} 在手动拆分的函数库 ${view?.category || ''} 中，仅供查看`, 'warn')
+    }
     const f = fnLib.list.find(x => x.id === view?.fileId)
-    if (!f) return toast('函数所在分类不存在，请刷新列表', 'warn')
+    if (!f) return toast('函数所在函数库不存在，请刷新列表', 'warn')
     const isLast = Array.isArray(f.functions) && f.functions.length <= 1
     if (isLast) {
-      if (!window.confirm(`分类 ${f.file} 只剩这一个函数，删除后该分类将整个移除（引用它的 call 步骤将失效），继续？`)) return
+      if (!window.confirm(`默认函数库只剩这一个函数，删除后 _function.yaml 将整个移除（引用它的 call 步骤将失效），继续？`)) return
       try {
         await api.deleteFunction(f.id)
         await fnLib.refresh(packageId.value)
         fnParamsMemo.clear()
-        toast(`分类 ${f.file} 已删除`, 'success')
+        toast(`默认函数库 ${FUNCTION_LIBRARY_DEFAULT} 已删除`, 'success')
       } catch (e) {
         toast('删除失败：' + e.message, 'error')
       }
@@ -653,12 +705,9 @@ export function useConsoleScriptRunner({
 
   // ---------- 结构化跳转（V1：call = 函数名；跳到定义该函数的文件） ----------
 
-  /** 函数名 → 定义它的函数文件 id（原生函数无文件，返回 null）。 */
+  /** 函数名 → 定义它的函数库文件 id（原生函数无文件，返回 null）。 */
   function resolveCallTargetId(fnName) {
-    const name = String(fnName || '').trim()
-    if (!name) return null
-    const hit = fnLib.list.find(f => Array.isArray(f.functions) && f.functions.includes(name))
-    return hit?.id ?? null
+    return fnLib.findByName(fnName)?.id ?? null
   }
 
   function closeResourcePreview() {
@@ -777,27 +826,27 @@ export function useConsoleScriptRunner({
    *  顶部「运行」按钮不传 → 从头跑。守卫失败一律 toast 说明原因，不做静默 no-op；
    *  schema 加载失败（404 不存在 / 400 无法解析）由 flow 抛结构化错误经 handleRunStartError 提示 */
   /** 函数运行入口：按函数视图运行（摘要组「▶ 运行」/「从此运行」）。
-   *  opts = {fileId, fnName, startIndex}；经服务端 entrypoint schema API 取参数声明
-   *  （前端不解析 YAML）→ 有参数弹参数表单（400 诊断回填由 flow 消化）。 */
-  async function runFunction({ fileId, fnName, startIndex = 0 } = {}) {
+   *  经服务端 entrypoint schema API 取参数声明（前端不解析 YAML）→ 有参数弹
+   *  参数表单（400 诊断回填由 flow 消化）。寻址 = `<pkg>#<函数名>`（统一命名
+   *  空间按名解析，与定义文件无关）。 */
+  async function runFunction({ fnName, startIndex = 0 } = {}) {
     if (startPending.value || store.running) return
     if (!store.deviceId) return toast('请先在上方选择设备再运行', 'warn')
-    const f = fnLib.list.find(x => x.id === fileId)
-    if (!f) return toast('函数所在分类不存在，请刷新列表', 'warn')
+    if (!packageId.value) return toast('请先在右上选择配置包', 'warn')
     if (!fnName) return toast('缺少要运行的函数名', 'warn')
     try {
       await runArgsFlow.begin({
-        id: f.id,
-        name: `${f.file} · ${fnName}()`,
+        id: packageId.value,
+        name: `${fnName}()`,
         kind: 'function_library',
         fnName,
         runnerId: GAMER_YAML_RUNNER_ID,
-        entrypoint: `${f.id}#${fnName}`, // 与 runYamlFunction 的 entrypoint 拼装同形态
+        entrypoint: `${packageId.value}#${fnName}`,
         startIndex,
         templates: templateNames.value,
         title: '函数参数',
         submitLabel: '▶ 运行',
-        desc: `运行函数 ${fnName}（分类 ${f.file}）${startIndex ? `（从第 ${startIndex + 1} 步）` : ''}`,
+        desc: `运行函数 ${fnName}${startIndex ? `（从第 ${startIndex + 1} 步）` : ''}`,
       })
     } catch (e) {
       handleRunStartError(e)

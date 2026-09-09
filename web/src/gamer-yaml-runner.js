@@ -30,13 +30,18 @@ export function runYamlScript(id, deviceId, startIndex = 0, args) {
 }
 
 /**
- * 函数测试运行：entrypoint = "<pkg>/<文件短路径>.yaml[#函数名]"（function
- * 缺省 = 文件第一个函数）；payload 语义与 runYamlScript 相同。
+ * 函数测试运行：entrypoint = "<pkg>#<函数名>"（简化计划 Phase 1：统一命名
+ * 空间按名寻址，函数从当前 Package 全部 `_function*.yaml` 组合出的注册表
+ * 解析）；payload 语义与 runYamlScript 相同。
  */
-export function runYamlFunction(id, deviceId, opts = {}) {
+export function runYamlFunction(pkg, deviceId, opts = {}) {
+  const fnName = String(opts.function || '').trim()
+  if (!fnName) {
+    return Promise.reject(new Error('函数运行缺少函数名'))
+  }
   return api.run({
     runner_id: GAMER_YAML_RUNNER_ID,
-    entrypoint: opts.function ? `${id}#${opts.function}` : id,
+    entrypoint: `${pkg}#${fnName}`,
     device_id: deviceId,
     payload: {
       ...(opts.start_index !== undefined ? { start_index: opts.start_index } : {}),
