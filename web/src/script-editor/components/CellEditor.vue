@@ -33,7 +33,7 @@
     <template v-else>
       <!-- tmpl：模板短名（自定义下拉，悬停行内预览缩略图；候选由页面外壳注入）
            + 框选（宿主注入 seCellTools 时可用：投屏框选生成新模板，保存后自动填入） -->
-      <template v-if="type === 'tmpl'">
+      <template v-if="controlType === 'tmpl'">
         <span class="tmpl-wrap">
           <input
             class="cell-input"
@@ -81,7 +81,7 @@
       </template>
 
       <!-- coord：X/Y 双数字 + 投屏选点（宿主注入 seCellTools 时可用） -->
-      <template v-else-if="type === 'coord'">
+      <template v-else-if="controlType === 'coord'">
         <label class="cell-mini">X
           <input
             class="cell-input num" type="number" step="0.01" min="0" max="1"
@@ -105,7 +105,7 @@
       </template>
 
       <!-- time：数值 + 单位（默认 ms；v3 亦接受裸毫秒数字） -->
-      <template v-else-if="type === 'time'">
+      <template v-else-if="controlType === 'time'">
         <input
           class="cell-input num" type="number" min="0" step="any"
           :value="timeParts[0]" :aria-label="`${label}数值`"
@@ -117,23 +117,27 @@
       </template>
 
       <!-- number：数值输入（loop.times 等） -->
-      <template v-else-if="type === 'number'">
+      <template v-else-if="controlType === 'number'">
         <input
-          class="cell-input num" type="number" step="any"
+          class="cell-input num" type="number" :step="isIntegerType ? 1 : 'any'"
           :value="numLit" :aria-label="label"
           @input.stop="onNum($event)"
         />
       </template>
 
       <!-- key：枚举下拉 -->
-      <template v-else-if="type === 'key'">
-        <select class="cell-select" :value="litString" :aria-label="label" @change.stop="emitLit(($event.target as HTMLSelectElement).value)">
-          <option v-for="k in KEY_ENUM" :key="k" :value="k">{{ k }}</option>
-        </select>
+      <template v-else-if="controlType === 'key'">
+        <input
+          class="cell-input" :value="litString" :list="keyListId" :aria-label="label"
+          placeholder="按键名或数字 keycode" @input.stop="onText($event, (v) => emitLit(v))"
+        />
+        <datalist :id="keyListId">
+          <option v-for="k in KEY_ENUM" :key="k" :value="k" />
+        </datalist>
       </template>
 
       <!-- bool：下拉 真/假 -->
-      <template v-else-if="type === 'bool'">
+      <template v-else-if="controlType === 'bool'">
         <select
           class="cell-select" :value="cell.lit === true ? 'true' : 'false'" :aria-label="label"
           @change.stop="emitLit(($event.target as HTMLSelectElement).value === 'true')"
@@ -144,12 +148,21 @@
       </template>
 
       <!-- expr：通用表达式字面量（true/false/数字自动识别，其余按字符串） -->
-      <template v-else-if="type === 'expr'">
+      <template v-else-if="controlType === 'expr'">
         <input
           class="cell-input mono" :value="litString" :list="listId"
           :placeholder="placeholder || '字面量或 $引用'" :aria-label="label"
           spellcheck="false" autocomplete="off"
           @input.stop="onText($event, (v) => emitLit(parseExprText(v)))"
+        />
+      </template>
+
+      <!-- list/object：JSON 文本编辑，提交时保持数组/对象真实类型 -->
+      <template v-else-if="controlType === 'json'">
+        <textarea
+          class="cell-input area json-input" rows="3" :value="jsonString"
+          :placeholder="placeholder || (type === 'list' ? '[...]' : '{...}')" :aria-label="label"
+          spellcheck="false" @input.stop="onJsonInput"
         />
       </template>
 
@@ -192,7 +205,7 @@ import { computed, inject, ref } from 'vue'
 import type { PropType } from 'vue'
 import { pinyin } from 'pinyin-pro'
 import { isRefCell, type Cell, type ParamDecl } from '../model'
-import { checkLiteral, isRefPath, KEY_ENUM, TIME_UNITS } from '../schema'
+import { checkLiteral, isRefPath, isCoordObject, KEY_ENUM, paramControlType, normalizeParamType, TIME_UNITS, type ParamControlType, type ParamType } from '../schema'
 
 const props = defineProps({
   cell: { type: Object as PropType<Cell>, required: true },
@@ -214,6 +227,21 @@ const emit = defineEmits(['change'])
 
 /** datalist id 每实例唯一，避免多实例互相覆盖联想列表。 */
 const listId = `se-params-${nextListId()}`
+const keyListId = `se-keys-${nextListId()}`
+
+/** 正式 V1 类型统一在 CellEditor 入口适配；旧控件别名仅为已有编辑态兼容。 */
+function controlTypeFor(raw: string): ParamControlType {
+  switch (raw.trim().toLowerCase()) {
+    case 'expr': case 'text': case 'number': case 'bool': case 'time':
+    case 'coord': case 'tmpl': case 'key': case 'json':
+      return raw.trim().toLowerCase() as ParamControlType
+    default:
+      return paramControlType(raw as ParamType)
+  }
+}
+const controlType = computed(() => controlTypeFor(props.type))
+const normalizedType = computed(() => normalizeParamType(props.type))
+const isIntegerType = computed(() => normalizedType.value === 'integer')
 
 /**
  * 投屏取值工具（Console 编辑态 provide('seCellTools')）：选点/框选生成模板/匹配预览。
@@ -270,7 +298,7 @@ const selfError = computed(() => {
   if (isRef.value) {
     return isRefPath(props.cell.ref) ? '' : `引用 $${props.cell.ref} 不是合法属性路径`
   }
-  return checkLiteral(props.type, props.cell.lit)?.message ?? ''
+  return checkLiteral(normalizedType.value, props.cell.lit)?.message ?? ''
 })
 
 // ---- tmpl 自定义下拉（悬停行内预览缩略图，缩略图 URL 由页面外壳 provide('tplPreviewUrl') 注入） ----
@@ -326,7 +354,7 @@ const coordLit = computed<[number, number]>(() => {
 const timeParts = computed<[string, string]>(() => {
   const raw = litString.value.trim()
   if (typeof props.cell.lit === 'number') return [String(props.cell.lit), 'ms']
-  const m = /^([0-9]+(?:\.[0-9]+)?)(ms|s|m|h)$/.exec(raw)
+  const m = /^([0-9]+(?:\.[0-9]+)?)(ms|s|m|h|d)$/.exec(raw)
   // 解析失败/空值回退 1ms（默认单位 ms）
   return m ? [m[1], m[2]] : ['1', 'ms']
 })
@@ -335,7 +363,16 @@ const numLit = computed<string>(() => {
   return typeof v === 'number' ? String(v) : (typeof v === 'string' && v !== '' ? v : '0')
 })
 
-function defaultLiteral(type: CellType): unknown {
+const jsonString = computed(() => {
+  try {
+    const encoded = JSON.stringify(props.cell.lit, null, 2)
+    return encoded === undefined ? '' : encoded
+  } catch {
+    return ''
+  }
+})
+
+function defaultLiteral(type: ParamControlType): unknown {
   switch (type) {
     case 'coord': return [0.5, 0.5]
     case 'bool': return true
@@ -345,6 +382,7 @@ function defaultLiteral(type: CellType): unknown {
     case 'key': return 'BACK'
     case 'tmpl': return ''
     case 'text': return ''
+    case 'json': return normalizedType.value === 'list' ? [] : {}
   }
 }
 
@@ -364,9 +402,23 @@ function emitRef(name: string): void {
   emit('change', { ref: name } satisfies Cell)
 }
 
+function onJsonInput(e: Event): void {
+  const raw = (e.target as HTMLTextAreaElement).value.trim()
+  if (!raw) return
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    return
+  }
+  if (normalizedType.value === 'list' && !Array.isArray(value)) return
+  if (normalizedType.value === 'object' && (value === null || Array.isArray(value) || typeof value !== 'object')) return
+  emitLit(value)
+}
+
 function switchToLit(): void {
   if (!isRef.value) return
-  emitLit(defaultLiteral(props.type))
+  emitLit(defaultLiteral(controlType.value))
 }
 function switchToRef(): void {
   if (isRef.value) return
@@ -389,7 +441,7 @@ function onCoord(axis: 0 | 1, e: Event): void {
   if (!Number.isFinite(n)) return
   const next: [number, number] = [coordLit.value[0], coordLit.value[1]]
   next[axis] = n
-  emitLit(next)
+  emitLit(isCoordObject(props.cell.lit) ? { x: next[0], y: next[1] } : next)
 }
 function onTimeNum(e: Event): void {
   const raw = (e.target as HTMLInputElement).value

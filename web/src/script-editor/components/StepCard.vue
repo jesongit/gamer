@@ -112,6 +112,7 @@
               @click.stop="toMapArg"
             >命名参数</button>
           </div>
+          <span v-if="conversionNotice" class="field-hint args-conversion-notice" role="status">{{ conversionNotice }}</span>
         </div>
         <div class="field-row">
           <label class="field-check" title="把函数返回值存入变量（无返回值函数存 null）">
@@ -196,6 +197,7 @@ import type { Diagnostic } from '../diagnostics'
 import { joinStepPath } from '../diagnostics'
 import { childContainerPath } from '../selection'
 import type { Cell, CallArgs, ParamDecl, Step } from '../model'
+import { initializeArgsFromSchema } from '../factories'
 import {
   postRemovalIndex,
   clearActiveStepDrag,
@@ -321,7 +323,10 @@ function fieldError(field: string): string {
 
 // ---------- 命令提交 ----------
 
+const conversionNotice = ref('')
+
 function updateStep(fields: Record<string, unknown>): boolean {
+  conversionNotice.value = ''
   return props.stack.apply({ type: 'update_step', path: [...props.containerPath, props.index], fields }, `编辑 ${meta.value.label}`)
 }
 
@@ -371,36 +376,56 @@ const selectedHint = computed(() => allTargets.value.find((o) => o.target === pr
  * 下发函数名；宿主注入了解析器时一并按 Schema 重生成实参（默认值预填），
  * 单条 update_step = 一次撤销。await 期间函数若又被改动则放弃（由最新一次变更接管）。
  */
+let fnRequestSeq = 0
+
 async function applyFn(next: string): Promise<void> {
+  const requestSeq = ++fnRequestSeq
   if (!next) {
     updateStep({ fn: '', args: { kind: 'none' } })
     return
   }
+  // 立即记录当前选择；异步 Schema 只允许补齐最后一次选择的参数。
+  if (String(props.step.fn ?? '') !== next) {
+    try {
+      updateStep({ fn: next })
+    } catch {
+      return
+    }
+  }
   if (!targetOptions) {
-    updateStep({ fn: next })
     return
   }
-  const prev = String(props.step.fn ?? '')
   let decls: ParamDecl[] | null = null
   try {
     decls = await targetOptions.resolveParams(next)
   } catch {
     decls = null // 解析失败不阻塞改函数：实参保持原样（校验层兜底）
   }
-  if (String(props.step.fn ?? '') !== prev) return
+  if (requestSeq !== fnRequestSeq || props.step.kind !== 'call' || props.step.fn !== next) return
+  if (!decls) return
   try {
-    updateStep(decls ? { fn: next, args: argsFromDecls(decls) } : { fn: next })
+    updateStep({ args: mergeArgsWithSchema(props.step.args, decls) })
   } catch {
     // await 期间步骤已被删除（resolveStep 抛错）——放弃本次下发
   }
 }
 
-/** 按函数 Schema 生成实参：有默认值填默认值；必填且无默认的参数留待用户补。 */
-function argsFromDecls(decls: ParamDecl[]): CallArgs {
-  const entries: Record<string, Cell> = {}
-  for (const d of decls) {
-    if (d.default !== null && d.default !== undefined) entries[d.name] = { lit: d.default }
+/** Schema 初始化后保留当前函数中仍有对应声明的已编辑值。 */
+function mergeArgsWithSchema(current: CallArgs, decls: ParamDecl[]): CallArgs {
+  const initialized = initializeArgsFromSchema(decls)
+  const entries: Record<string, Cell> = initialized.kind === 'map' ? { ...initialized.entries } : {}
+  const declared = new Set(decls.map((d) => d.name))
+
+  if (current.kind === 'value') {
+    if (decls.length === 1) return { kind: 'value', cell: current.cell }
+    const first = decls[0]
+    if (first) entries[first.name] = current.cell
+  } else if (current.kind === 'map') {
+    for (const [name, cell] of Object.entries(current.entries)) {
+      if (declared.has(name)) entries[name] = cell
+    }
   }
+
   return Object.keys(entries).length > 0 ? { kind: 'map', entries } : { kind: 'none' }
 }
 
@@ -456,10 +481,26 @@ function clearArgs(): void {
   updateStep({ args: { kind: 'none' } })
 }
 function toValueArg(): void {
+  if (props.step.kind !== 'call' || props.step.args.kind === 'value') return
+  if (props.step.args.kind === 'map') {
+    const names = Object.keys(props.step.args.entries)
+    if (names.length > 1) {
+      conversionNotice.value = '多个命名参数不能无损转换为单值，未修改当前参数。'
+      return
+    }
+    const name = names[0]
+    updateStep({ args: { kind: 'value', cell: name ? props.step.args.entries[name]! : { lit: '' } } })
+    return
+  }
   updateStep({ args: { kind: 'value', cell: { lit: '' } } })
 }
 function toMapArg(): void {
-  updateStep({ args: { kind: 'map', entries: {} } })
+  if (props.step.kind !== 'call' || props.step.args.kind === 'map') return
+  const decls = targetOptions?.resolveParamsSync?.(props.step.fn) ?? []
+  const name = decls[0]?.name || 'value'
+  const cell = props.step.args.kind === 'value' ? props.step.args.cell : { lit: '' }
+  updateStep({ args: { kind: 'map', entries: { [name]: cell } } })
+  if (!decls.length) conversionNotice.value = '当前函数 Schema 未加载，暂以 value 保留该单值。'
 }
 function emptyLitFor(type: string): unknown {
   switch (type) {

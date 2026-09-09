@@ -29,6 +29,8 @@
       :src="stage.mediaSrc"
       preload="auto"
       playsinline
+      tabindex="-1"
+      aria-readonly="true"
       class="video-stream media-stream"
       @mousedown="props.onMouseDown"
       @mousemove="props.onMouseMove"
@@ -40,20 +42,32 @@
 
     <!-- 视频来源顶部条：素材切换 + 返回实时（来源切换属各自 viewer 状态） -->
     <div v-if="stage && stage.kind === 'media'" class="media-topbar" data-keyboard-ignore="true">
-      <span class="media-mode-badge">🎞 视频来源</span>
+      <span class="media-mode-badge">🎞 视频来源 · 只读</span>
       <select class="media-pick mono" :value="stage.mediaId" aria-label="选择素材" @change="stage.onMediaPick($event.target.value)">
         <option value="" disabled>{{ stage.mediaOptions.length ? '选择素材…' : '媒体库为空' }}</option>
         <option v-for="m in stage.mediaOptions" :key="m.id" :value="m.id">{{ m.name }}</option>
       </select>
       <span v-if="stage.mediaName" class="media-meta mono" :title="stage.mediaName + (stage.mediaSizeLabel ? ' · ' + stage.mediaSizeLabel : '')">{{ stage.mediaName }}<template v-if="stage.mediaSizeLabel"> · {{ stage.mediaSizeLabel }}</template></span>
-      <button class="media-live-btn" @click="stage.backToLive()">⏻ 返回实时</button>
+      <button class="media-live-btn" type="button" @click="stage.backToLive()">⏻ 返回实时</button>
     </div>
 
-    <!-- 视频来源控制条：播放/暂停 · 逐帧± · 倍速 · 时间（只读展示，不连设备不触 ADB） -->
+    <!-- 视频来源控制条：播放/暂停 · seek · 逐帧± · 倍速 · 时间（只读展示，
+         所有动作仅操作当前 Stage 媒体元素，不连设备不触 ADB） -->
     <div v-if="stage && stage.kind === 'media' && stage.mediaSrc" class="media-controls" data-keyboard-ignore="true">
-      <button class="mc-btn" :title="stage.playing ? '暂停' : '播放'" @click="stage.togglePlay()">{{ stage.playing ? '⏸' : '▶' }}</button>
-      <button class="mc-btn" title="上一帧" @click="stage.stepFrames(-1)">⏮</button>
-      <button class="mc-btn" title="下一帧" @click="stage.stepFrames(1)">⏭</button>
+      <button class="mc-btn" type="button" :title="stage.playing ? '暂停' : '播放'" @click="stage.togglePlay()">{{ stage.playing ? '⏸' : '▶' }}</button>
+      <input
+        class="mc-seek"
+        type="range"
+        min="0"
+        :max="stage.duration || 0"
+        step="0.001"
+        :value="stage.currentTime || 0"
+        :disabled="!stage.stageReady"
+        aria-label="视频播放位置"
+        @input="stage.seek($event.target.value)"
+      />
+      <button class="mc-btn" type="button" title="上一帧" @click="stage.stepFrames(-1)">⏮</button>
+      <button class="mc-btn" type="button" title="下一帧" @click="stage.stepFrames(1)">⏭</button>
       <select class="mc-rate mono" :value="stage.rate" title="倍速" aria-label="播放倍速" @change="stage.setRate($event.target.value)">
         <option v-for="r in stage.rateOptions" :key="r" :value="r">{{ r }}×</option>
       </select>
@@ -161,7 +175,8 @@ const props = defineProps({
   currentName: { type: String, default: '' },
   audioMuted: { type: Boolean, default: true },
   // 统一舞台来源（useConsoleStage view）：kind/mediaId/mediaSrc/mediaOptions/
-  // playing/timeText/... 与动作（togglePlay/stepFrames/setRate/onMediaPick/backToLive）
+  // playing/currentTime/duration/timeText/... 与动作（togglePlay/seek/stepFrames/
+  // setRate/onMediaPick/backToLive）均来自同一个 Stage 控制器。
   stage: { type: Object, default: null },
   fps: { type: [Number, String], default: 0 },
   delay: { type: [Number, String], default: 0 },
@@ -199,7 +214,7 @@ const mediaVideoElement = ref(null)
 
 // 媒体 <video> 元素交给壳（useConsoleStage 挂播放监听/驱动控制条）：
 // v-if 挂载与 :key 换素材重建都会触发本 watcher（卸载时上抛 null 解绑）
-watch(mediaVideoElement, el => { emit('media-video-mounted', el) })
+watch(mediaVideoElement, el => { emit('media-video-mounted', el) }, { flush: 'sync' })
 
 onMounted(() => {
   emit('video-mounted', videoElement.value)
@@ -250,6 +265,8 @@ onMounted(() => {
   background: rgba(8,10,16,.78); backdrop-filter: blur(2px);
   border: 1px solid rgba(255,255,255,.1); border-radius: 20px;
 }
+.mc-seek { width: clamp(100px, 18vw, 240px); accent-color: var(--accent); cursor: pointer; }
+.mc-seek:disabled { cursor: not-allowed; opacity: .5; }
 .mc-btn {
   width: 28px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
   background: none; border: none; color: var(--text-1); font-size: 13px; cursor: pointer; border-radius: 6px;

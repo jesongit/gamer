@@ -360,14 +360,16 @@ export const videoApi = {
   /**
    * 媒体引用全量替换（Phase 8 契约 §2.1，项目保存/素材移除时同步）：
    * POST /api/media/:id/refs，body `{refs:[{package_id, plugin_id, kind}]}`。
+   * Workbench 与本模块之间也使用这组 REST 字段，避免跨层再定义一套引用模型；
+   * camelCase 仅作为独立调用方的输入归一化，不改变线上字段契约。
    */
   setMediaRefs: async (id, refs) => request(
     'POST',
     `/api/media/${encodeURIComponent(requireId(id, 'media_id'))}/refs`,
     { refs: (Array.isArray(refs) ? refs : []).map(entry => ({
-      package_id: requireId(entry.packageId, 'package_id'),
-      plugin_id: requireId(entry.pluginId, 'plugin_id'),
-      kind: requireId(entry.kind, 'kind'),
+      package_id: requireId(entry?.package_id ?? entry?.packageId, 'package_id'),
+      plugin_id: requireId(entry?.plugin_id ?? entry?.pluginId, 'plugin_id'),
+      kind: requireId(entry?.kind, 'kind'),
     })) },
   ),
 }

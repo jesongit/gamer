@@ -23,6 +23,8 @@ export const PROJECT_SCHEMA_VERSION = 1
 export const PROJECT_DIR = 'projects'
 /** 标记上限（与服务端 MAX_MARKERS 同值）。 */
 export const MAX_MARKERS = 500
+/** 素材引用上限（与服务端 MAX_ASSETS 同值）。 */
+export const MAX_ASSETS = 16
 
 const SCOPE_ID_RE = /^[a-z0-9][a-z0-9._-]*$/
 
@@ -124,7 +126,7 @@ export function validateProject(project) {
   // assets
   const assets = Array.isArray(project.assets) ? project.assets : []
   if (!assets.length) out.push({ code: 'asset.required', message: '项目至少引用一个媒体素材' })
-  if (assets.length > 16) out.push({ code: 'asset.too_many', message: '素材引用超过上限 16' })
+  if (assets.length > MAX_ASSETS) out.push({ code: 'asset.too_many', message: `素材引用超过上限 ${MAX_ASSETS}` })
   let primaries = 0
   const assetIds = new Set()
   assets.forEach((asset, index) => {
@@ -251,6 +253,210 @@ export function projectMediaIds(project) {
   return [...new Set((Array.isArray(project?.assets) ? project.assets : [])
     .map(asset => String(asset?.media_id || ''))
     .filter(Boolean))]
+}
+
+/**
+ * 媒体库条目转为项目允许保存的快照字段。
+ *
+ * 媒体显示名只属于媒体库 UI，不写进 Video Project schema；项目资源 id
+ * 也不借用显示名。这样重命名媒体不会悄悄改变项目引用身份。
+ */
+export function projectAssetSnapshot(media, role = 'reference') {
+  const mediaId = String(media?.id || '').trim()
+  if (!mediaId) {
+    throw projectError([{ code: 'asset.media_id', message: '素材 media_id 不能为空' }])
+  }
+  const duration = Number(media?.duration_us)
+  const frameCount = Number(media?.frame_count)
+  return {
+    media_id: mediaId,
+    role: role === 'primary' ? 'primary' : 'reference',
+    sha256: String(media?.sha256 || ''),
+    duration_us: Number.isFinite(duration) && media?.duration_us !== null
+      ? Math.max(0, Math.round(duration))
+      : null,
+    frame_count: Number.isFinite(frameCount) && media?.frame_count !== null
+      ? Math.max(0, Math.round(frameCount))
+      : null,
+  }
+}
+
+function assetIndex(project, mediaId) {
+  return (Array.isArray(project?.assets) ? project.assets : [])
+    .findIndex(asset => String(asset?.media_id || '') === String(mediaId || ''))
+}
+
+function assertAssetChange(project, mediaId, operation) {
+  const index = assetIndex(project, mediaId)
+  if (index < 0) {
+    throw projectError([{
+      code: 'asset.not_found',
+      message: `项目素材不存在，无法${operation}: ${mediaId}`,
+      path: 'assets',
+    }])
+  }
+  return index
+}
+
+function cloneProject(project) {
+  return JSON.parse(JSON.stringify(project))
+}
+
+function mediaDimensions(media) {
+  const width = Math.max(1, Math.round(Number(media?.width) || 1))
+  const height = Math.max(1, Math.round(Number(media?.height) || 1))
+  return { width, height }
+}
+
+function invalidatedAfterMediaChange(project, assets, { primaryChanged, media } = {}) {
+  const next = {
+    ...cloneProject(project),
+    assets,
+    // Do not carry frame/event meaning across a different video. The user can
+    // deliberately rebuild these artifacts after the replacement.
+    markers: [],
+    recording: null,
+    progress: { stage: 'needs_validation', updated_at: nowIso() },
+  }
+  if (primaryChanged && media) {
+    next.calibration = identityCalibration(orientedSize(mediaDimensions(media), 0))
+  }
+  return touch(next)
+}
+
+/**
+ * 添加附加素材（V1 role=reference）。只产生本地项目副本，由宿主复用既有
+ * expected_version PUT + media refs 安全保存路径；本函数不触碰网络。
+ */
+export function withProjectAsset(project, media) {
+  const assets = Array.isArray(project?.assets) ? project.assets : []
+  const mediaId = String(media?.id || '').trim()
+  if (!mediaId) throw projectError([{ code: 'asset.media_id', message: '素材 media_id 不能为空' }])
+  if (assetIndex(project, mediaId) >= 0) {
+    throw projectError([{ code: 'asset.duplicate', message: `素材已在项目中: ${mediaId}`, path: 'assets' }])
+  }
+  if (assets.length >= MAX_ASSETS) {
+    throw projectError([{ code: 'asset.too_many', message: `素材引用超过上限 ${MAX_ASSETS}`, path: 'assets' }])
+  }
+  return touch({
+    ...cloneProject(project),
+    assets: [...assets.map(asset => ({ ...asset })), projectAssetSnapshot(media, 'reference')],
+    progress: { stage: 'assets', updated_at: nowIso() },
+  })
+}
+
+/** 删除附加素材；主素材必须先设置其它主素材或执行替换，不能制造非法项目。 */
+export function withoutProjectAsset(project, mediaId) {
+  const index = assertAssetChange(project, mediaId, '移除素材')
+  const asset = project.assets[index]
+  if (asset.role === 'primary') {
+    throw projectError([{
+      code: 'asset.primary_required',
+      message: '不能直接移除主素材，请先设置其它素材为主素材或替换主素材',
+      path: `assets[${index}]`,
+    }])
+  }
+  return touch({
+    ...cloneProject(project),
+    assets: project.assets.filter((_, assetIndexValue) => assetIndexValue !== index),
+    progress: { stage: 'assets', updated_at: nowIso() },
+  })
+}
+
+/**
+ * 设置已有项目素材为主素材。切换到不同视频会清空标记/录制事件并进入
+ * needs_validation；有媒体元数据时同时把校准重置为新视频的恒等校准。
+ */
+export function withPrimaryProjectAsset(project, mediaId, { media } = {}) {
+  const index = assertAssetChange(project, mediaId, '设置主素材')
+  const target = project.assets[index]
+  const current = project.assets.find(asset => asset.role === 'primary')
+  if (target.role === 'primary') return cloneProject(project)
+  const assets = project.assets.map(asset => ({
+    ...asset,
+    role: asset.media_id === mediaId ? 'primary' : (asset.role === 'primary' ? 'reference' : asset.role),
+  }))
+  return invalidatedAfterMediaChange(project, assets, {
+    primaryChanged: current?.media_id !== target.media_id,
+    media,
+  })
+}
+
+/** 媒体快照身份检查：只有两侧都有 sha256 且完全一致才算可安全重关联。 */
+export function assetIdentityStatus(asset, media) {
+  const oldSha = String(asset?.sha256 || '').trim().toLowerCase()
+  const newSha = String(media?.sha256 || '').trim().toLowerCase()
+  if (oldSha && newSha) return oldSha === newSha ? 'match' : 'mismatch'
+  return 'unknown'
+}
+
+/**
+ * 明确重关联缺失素材。它与 replaceProjectAsset 有意分开：未知或不匹配的
+ * sha256 一律拒绝，避免把另一段视频静默当成原素材；换视频必须走 replace。
+ * 成功重关联会同步改写标记中的 media_id，但不改变帧/校准/事件含义。
+ */
+export function relinkProjectAsset(project, missingMediaId, media) {
+  const index = assertAssetChange(project, missingMediaId, '重新关联素材')
+  const oldAsset = project.assets[index]
+  if (assetIdentityStatus(oldAsset, media) !== 'match') {
+    const status = assetIdentityStatus(oldAsset, media)
+    throw projectError([{
+      code: status === 'mismatch' ? 'asset.identity_mismatch' : 'asset.identity_unknown',
+      message: status === 'mismatch'
+        ? '新素材 sha256 与缺失素材快照不一致，请使用“替换素材”并重新验证制作信息'
+        : '缺少可验证的 sha256，不能确认这是同一素材；请使用“替换素材”并重新验证制作信息',
+      path: `assets[${index}]`,
+    }])
+  }
+  const nextMediaId = String(media?.id || '').trim()
+  if (!nextMediaId) throw projectError([{ code: 'asset.media_id', message: '重关联目标素材 id 不能为空' }])
+  if (nextMediaId !== oldAsset.media_id && assetIndex(project, nextMediaId) >= 0) {
+    throw projectError([{ code: 'asset.duplicate', message: `素材已在项目中: ${nextMediaId}`, path: 'assets' }])
+  }
+  const assets = project.assets.map((asset, assetIndexValue) => (
+    assetIndexValue === index ? projectAssetSnapshot(media, asset.role) : { ...asset }
+  ))
+  const next = {
+    ...cloneProject(project),
+    assets,
+    markers: (project.markers || []).map(marker => ({
+      ...marker,
+      frame: marker.frame?.media_id === oldAsset.media_id
+        ? { ...marker.frame, media_id: nextMediaId }
+        : { ...marker.frame },
+    })),
+    progress: { stage: 'assets', updated_at: nowIso() },
+  }
+  return touch(next)
+}
+
+/**
+ * 替换项目素材。无论替换主素材还是被标记引用的附加素材，都清除可能带有
+ * 旧视频语义的标记与录制事件；主素材替换还重置校准。不会静默保留旧含义。
+ */
+export function replaceProjectAsset(project, mediaId, media) {
+  const index = assertAssetChange(project, mediaId, '替换素材')
+  const oldAsset = project.assets[index]
+  const nextMediaId = String(media?.id || '').trim()
+  if (!nextMediaId) throw projectError([{ code: 'asset.media_id', message: '替换目标素材 id 不能为空' }])
+  if (nextMediaId === oldAsset.media_id) {
+    return touch({
+      ...cloneProject(project),
+      assets: project.assets.map((asset, assetIndexValue) => (
+        assetIndexValue === index ? projectAssetSnapshot(media, asset.role) : { ...asset }
+      )),
+    })
+  }
+  if (assetIndex(project, nextMediaId) >= 0) {
+    throw projectError([{ code: 'asset.duplicate', message: `素材已在项目中: ${nextMediaId}`, path: 'assets' }])
+  }
+  const assets = project.assets.map((asset, assetIndexValue) => (
+    assetIndexValue === index ? projectAssetSnapshot(media, asset.role) : { ...asset }
+  ))
+  return invalidatedAfterMediaChange(project, assets, {
+    primaryChanged: oldAsset.role === 'primary',
+    media,
+  })
 }
 
 /**

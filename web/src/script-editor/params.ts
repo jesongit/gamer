@@ -10,7 +10,7 @@
  *   仅作显式覆盖建议预填，绝不遮蔽当前声明默认值。
  */
 import type { ParamDecl } from './model'
-import { checkLiteral } from './schema'
+import { checkLiteral, cloneSchemaValue, defaultLiteralForType, hasParamDefault } from './schema'
 
 // ---------- 展示 ----------
 
@@ -28,15 +28,19 @@ export function fmtLiteral(v: unknown | null | undefined): string {
   return String(v)
 }
 
-/** 表单值深拷贝（args 值均为 JSON 安全形态：字符串/数字/布尔/[x,y]）。 */
+/** 表单值深拷贝（args 值为 JSON 安全标量、列表、对象或 null）。 */
 export function cloneArg<T>(v: T): T {
-  return JSON.parse(JSON.stringify(v ?? null))
+  return cloneSchemaValue(v === undefined ? null : v)
 }
 
 /** 必填参数（无默认值）进入覆盖态时的控件初始字面量（与 CellEditor defaultLiteral 同口径）。 */
 export const ARG_DEFAULT_LITERALS: Record<string, unknown> = {
-  any: '', string: '', number: 0, integer: 0, boolean: true,
-  list: [], object: {}, duration: '1s', point: [0.5, 0.5], template: '', key: 'BACK',
+  any: defaultLiteralForType('any'), string: defaultLiteralForType('string'),
+  number: defaultLiteralForType('number'), integer: defaultLiteralForType('integer'),
+  boolean: defaultLiteralForType('boolean'), list: defaultLiteralForType('list'),
+  object: defaultLiteralForType('object'), duration: defaultLiteralForType('duration'),
+  point: defaultLiteralForType('point'), template: defaultLiteralForType('template'),
+  key: defaultLiteralForType('key'),
 }
 
 // ---------- 服务端 400 invalid_args 诊断映射 ----------
@@ -102,7 +106,7 @@ export function describeResolvedArgs(
       : overridden
         ? (args as Record<string, unknown>)[p.name]
         : p.default
-    const source = overridden ? '覆盖' : p.default !== null ? '默认' : '必填'
+    const source = overridden ? '覆盖' : hasParamDefault(p) ? '默认' : p.required ? '必填' : '未提供'
     return `${p.name}=${fmtLiteral(value)}（${source}）`
   })
   let text = `运行参数：${parts.join('；')}`
@@ -164,7 +168,7 @@ export interface ArgFieldError {
 }
 
 /**
- * 稀疏 args → 按声明校验：缺必填（default === null 且未提供）→ missing；
+ * 稀疏 args → 按声明校验：缺 required 且无默认值 → missing；
  * 提供值类型不合规 → checkLiteral 的错误码/文案。未知参数名此处不查（表单只产已知名）。
  */
 export function validateArgsAgainstParams(
@@ -175,7 +179,7 @@ export function validateArgsAgainstParams(
   for (const p of params) {
     const provided = !!args && Object.prototype.hasOwnProperty.call(args, p.name)
     if (!provided) {
-      if (p.default === null) errs.push({ name: p.name, message: `必填参数 $${p.name} 缺失` })
+      if (p.required && !hasParamDefault(p)) errs.push({ name: p.name, message: `必填参数 $${p.name} 缺失` })
       continue
     }
     const err = checkLiteral(p.type, (args as Record<string, unknown>)[p.name])

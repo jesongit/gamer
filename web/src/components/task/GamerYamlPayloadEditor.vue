@@ -65,13 +65,15 @@ const loadFailed = ref(false)
 const loadError = ref('')
 // 已采用的执行目标：仅在该目标上把 payload.args 带入表单一次；此后 entrypoint 变化即清空
 const adoptedEntrypoint = ref('')
+const adoptedPackageId = ref('')
 const initialArgs = ref<Record<string, unknown>>({})
 let loadSeq = 0
 
 /** 当前 entrypoint 的脚本分区 → 模板短名候选（tmpl 控件下拉）。 */
 const templateNames = computed<string[]>(() => {
+  const currentPackageId = String(props.ctx?.packageId || '').trim()
   const pkg = scriptPackageOf(props.entrypoint)
-  if (!pkg) return []
+  if (!currentPackageId || !pkg || pkg !== currentPackageId) return []
   return templatesData.value
     .filter((t) => t.pkg === pkg)
     .map((t) => templateShortName(t.name))
@@ -79,14 +81,21 @@ const templateNames = computed<string[]>(() => {
 
 async function loadScript(entrypoint: string): Promise<void> {
   const seq = ++loadSeq
+  const requestedPackageId = String(props.ctx?.packageId || '').trim()
   paramsLoaded.value = false
   loadFailed.value = false
   loadError.value = ''
   params.value = []
   if (!entrypoint) return
+  if (!requestedPackageId || scriptPackageOf(entrypoint) !== requestedPackageId) {
+    paramsLoaded.value = true
+    loadFailed.value = true
+    loadError.value = '执行目标不属于当前 Package'
+    return
+  }
   try {
     const descriptor = await api.getEntrypointParams(GAMER_YAML_RUNNER_ID, entrypoint)
-    if (seq !== loadSeq) return // 迟到响应：执行目标已再切换，丢弃
+    if (seq !== loadSeq || requestedPackageId !== String(props.ctx?.packageId || '').trim()) return
     params.value = schemaToParamDecls(descriptor?.schema)
     paramsLoaded.value = true
     if (!params.value.length) {
@@ -94,7 +103,7 @@ async function loadScript(entrypoint: string): Promise<void> {
       emit('update:payload', { args: {} })
     }
   } catch (e) {
-    if (seq !== loadSeq) return
+    if (seq !== loadSeq || requestedPackageId !== String(props.ctx?.packageId || '').trim()) return
     paramsLoaded.value = true
     loadFailed.value = true
     // 结构化错误优先（404 不存在 / 400 invalid_script 诊断首条），其余退回原始消息
@@ -109,10 +118,12 @@ async function loadScript(entrypoint: string): Promise<void> {
   }
 }
 
-watch(() => props.entrypoint, (ep) => {
-  if (ep === adoptedEntrypoint.value) return
+watch([() => props.entrypoint, () => props.ctx?.packageId], ([ep, packageId]) => {
+  const nextPackageId = String(packageId || '').trim()
+  if (ep === adoptedEntrypoint.value && nextPackageId === adoptedPackageId.value) return
   // 切换执行目标：原 payload.args 不再适用，清空带入并整体替换 payload
   adoptedEntrypoint.value = ep
+  adoptedPackageId.value = nextPackageId
   initialArgs.value = {}
   emit('update:payload', { args: {} })
   loadScript(ep)
@@ -132,6 +143,7 @@ defineExpose({ validate })
 
 onMounted(() => {
   adoptedEntrypoint.value = props.entrypoint
+  adoptedPackageId.value = String(props.ctx?.packageId || '').trim()
   // 编辑既有任务：payload.args 整体带入覆盖态（resolve 语义：本次采用=payload 值）
   const adopted = props.payload?.args
   initialArgs.value = adopted && typeof adopted === 'object' ? cloneArg(adopted) : {}

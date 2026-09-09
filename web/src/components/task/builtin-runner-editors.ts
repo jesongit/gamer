@@ -13,10 +13,20 @@ import { GAMER_YAML_RUNNER_ID } from '../../gamer-yaml-runner'
 
 export { GAMER_YAML_RUNNER_ID }
 
-/** gamer.yaml 的 app 包名约定：entrypoint = "<android_package>/<脚本文件名>"。 */
-export function resolveGamerYamlAppPackages(entrypoint: string): RunnerAppPackages {
-  const pkg = String(entrypoint || '').split('/')[0] || ''
-  return { android_package: pkg, content_package: pkg || null }
+/**
+ * gamer.yaml 的任务上下文适配：
+ * - android_package 来自所选设备的配置；
+ * - content_package 来自工作区当前 Package；
+ * - entrypoint 只是 runner 私有资源寻址，不能作为 Android 包名来源。
+ */
+export function resolveGamerYamlAppPackages(
+  _entrypoint: string,
+  context?: RunnerEditorContext,
+): RunnerAppPackages {
+  return {
+    android_package: String(context?.androidPackageName || '').trim(),
+    content_package: String(context?.packageId || '').trim() || null,
+  }
 }
 
 /**
@@ -41,7 +51,8 @@ export function registerGamerYamlRunnerEditor(): () => void {
       autoPick: false,
     }),
     payloadEditor: GamerYamlPayloadEditor,
-    resolveAppPackages: (entrypoint: string) => resolveGamerYamlAppPackages(entrypoint),
+    resolveAppPackages: (entrypoint: string, _payload: Record<string, unknown>, context: RunnerEditorContext) =>
+      resolveGamerYamlAppPackages(entrypoint, context),
   })
 }
 

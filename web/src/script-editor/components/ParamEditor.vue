@@ -2,7 +2,7 @@
   <div class="param-editor" data-testid="param-editor" @click.stop>
     <div class="pe-head">
       <span class="pe-title">{{ functionPath ? '函数参数' : '脚本参数' }}</span>
-      <span class="pe-sub">{{ rows.length }} 个参数 · {{ rows.filter((p) => p.default !== null).length }} 个有默认值</span>
+      <span class="pe-sub">{{ rows.length }} 个参数 · {{ rows.filter(hasParamDefault).length }} 个有默认值</span>
       <span v-if="!expanded && errorCount" class="pe-err-badge" title="存在参数问题，展开查看">{{ errorCount }} 处问题</span>
       <button v-if="showAddButton" type="button" class="mini-btn add" @click="addParam">+ 添加参数</button>
       <button type="button" class="mini-btn" :title="expanded ? '收起参数列表' : '展开参数列表'" @click="expanded = !expanded">
@@ -40,7 +40,7 @@
           </label>
           <label class="field-check" title="开启后调用/运行可省略此参数">
             <input
-              type="checkbox" :checked="decl.default !== null"
+              type="checkbox" :checked="hasParamDefault(decl)"
               @change="toggleDefault(i, ($event.target as HTMLInputElement).checked)"
             />
             有默认值
@@ -51,9 +51,24 @@
             <button type="button" class="mini-btn danger" title="删除参数" @click="removeParam(i)">✕</button>
           </span>
         </div>
-        <div v-if="decl.default !== null" class="row-default">
+        <div v-if="hasParamDefault(decl)" class="row-default">
           <span class="field-label">默认值</span>
+          <template v-if="usesJsonEditor(decl.type)">
+            <textarea
+              class="cell-input json-input" rows="2" spellcheck="false"
+              :value="jsonDefaultText(decl, i)" :aria-label="`${decl.name} 默认值`"
+              @input="onJsonDefault(i, decl, ($event.target as HTMLTextAreaElement).value)"
+            ></textarea>
+          </template>
+          <template v-else-if="decl.type === 'number' || decl.type === 'integer'">
+            <input
+              class="cell-input num" type="number" :step="decl.type === 'integer' ? '1' : 'any'"
+              :value="numberDefaultText(decl)" :aria-label="`${decl.name} 默认值`"
+              @input="onNumberDefault(i, decl, $event)"
+            />
+          </template>
           <CellEditor
+            v-else
             :cell="lit(decl.default)" :type="cellTypeOf(decl)" :allow-ref="false"
             :templates="templates"
             :label="`${decl.name} 默认值`" :error="defaultError(decl)"
@@ -78,11 +93,13 @@
  * 传 functionPath（['functions', 函数名, 'params']）时编辑函数级 params；
  * 缺省 = 脚本文件级。
  */
-import { computed, ref, type PropType } from 'vue'
+import { computed, reactive, ref, type PropType } from 'vue'
 import type { EditorModel, Path } from '../commands'
 import type { Diagnostic } from '../diagnostics'
 import { lit, PARAM_TYPES, type ParamDecl, type ParamType, type Program } from '../model'
-import { checkLiteral, isIdentifier } from '../schema'
+import {
+  checkLiteral, defaultLiteralForType, hasParamDefault, isIdentifier, paramControlType,
+} from '../schema'
 import CellEditor from './CellEditor.vue'
 
 const props = defineProps({
@@ -103,25 +120,89 @@ const TYPE_LABELS: Record<ParamType, string> = {
   list: '列表', object: '对象', duration: '时长', point: '坐标', template: '模板', key: '按键',
 }
 
-const DEFAULT_LITERALS: Record<ParamType, unknown> = {
-  any: '', boolean: true, integer: 0, number: 0, string: '',
-  list: [], object: {}, duration: '1s', point: [0.5, 0.5], template: '', key: 'BACK',
-}
-
 const isFunctionLibrary = computed(() => 'functions' in props.model)
 
 /** 参数类型 → 默认值编辑用的 Cell 类型（映射到 CellEditor 控件口径）。 */
 function cellTypeOf(decl: ParamDecl): string {
-  switch (decl.type) {
-    case 'number': case 'integer': return 'number'
-    case 'boolean': return 'bool'
-    case 'string': case 'any': return 'text'
-    case 'duration': return 'time'
-    case 'point': return 'coord'
-    case 'key': return 'key'
-    case 'template': return 'tmpl'
-    default: return 'text' // list/object 暂按文本 JSON 编辑
+  return paramControlType(decl.type)
+}
+
+/** list/object/any 必须走 JSON 值编辑，避免 String(array/object) 丢失类型。 */
+function usesJsonEditor(type: ParamType | string): boolean {
+  return type === 'list' || type === 'object' || type === 'any'
+}
+
+const jsonDrafts = reactive<Record<string, string>>({})
+const jsonDefaultErrors = reactive<Record<string, string>>({})
+
+function jsonKey(decl: ParamDecl, index: number): string {
+  return `${index}:${decl.name}`
+}
+
+function jsonText(value: unknown): string {
+  try {
+    const text = JSON.stringify(value, null, 2)
+    return text === undefined ? 'null' : text
+  } catch {
+    return 'null'
   }
+}
+
+function jsonDefaultText(decl: ParamDecl, index: number): string {
+  const key = jsonKey(decl, index)
+  return Object.prototype.hasOwnProperty.call(jsonDrafts, key)
+    ? jsonDrafts[key]!
+    : jsonText(decl.default)
+}
+
+function numberDefaultText(decl: ParamDecl): string {
+  return typeof decl.default === 'number' && Number.isFinite(decl.default)
+    ? String(decl.default)
+    : ''
+}
+
+function jsonShapeError(type: ParamType, value: unknown): string {
+  if (type === 'list' && !Array.isArray(value)) return '默认值必须是 JSON 数组'
+  if (type === 'object' && (value === null || typeof value !== 'object' || Array.isArray(value))) {
+    return '默认值必须是 JSON 对象'
+  }
+  return ''
+}
+
+function onJsonDefault(index: number, decl: ParamDecl, raw: string): void {
+  const key = jsonKey(decl, index)
+  jsonDrafts[key] = raw
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    jsonDefaultErrors[key] = '默认值必须是合法 JSON'
+    return
+  }
+  const shapeError = jsonShapeError(decl.type, value)
+  if (shapeError) {
+    jsonDefaultErrors[key] = shapeError
+    return
+  }
+  const next = withDefault(decl, value)
+  if (updateParam(index, next)) {
+    delete jsonDrafts[key]
+    delete jsonDefaultErrors[key]
+  }
+}
+
+function onNumberDefault(index: number, decl: ParamDecl, event: Event): void {
+  const raw = (event.target as HTMLInputElement).value
+  const value = raw.trim() === '' ? null : Number(raw)
+  if (value !== null && !Number.isFinite(value)) return
+  updateParam(index, withDefault(decl, value))
+}
+
+function withDefault(decl: ParamDecl, value: unknown, present = true): ParamDecl {
+  const next = { ...decl, default: value }
+  if (present) next.hasDefault = true
+  else if ('hasDefault' in next) next.hasDefault = false
+  return next
 }
 
 /** 参数列表默认收起（头部摘要常驻），展开/收起由头部按钮切换。 */
@@ -171,17 +252,18 @@ function setDesc(i: number, raw: string): void {
 function setType(i: number, type: ParamType): void {
   if (type === rows.value[i]!.type) return
   // 类型切换：默认值按新类型不再合法，重置为无默认值
-  updateParam(i, { ...rows.value[i]!, type, default: null })
+  updateParam(i, { ...rows.value[i]!, type, default: null, hasDefault: false })
 }
 function setRequired(i: number, on: boolean): void {
   updateParam(i, { ...rows.value[i]!, required: on })
 }
 function toggleDefault(i: number, on: boolean): void {
   const decl = rows.value[i]!
-  updateParam(i, { ...decl, default: on ? DEFAULT_LITERALS[decl.type] : null, required: on ? false : decl.required })
+  const value = on ? defaultLiteralForType(decl.type) : null
+  updateParam(i, { ...withDefault(decl, value, on), required: on ? false : decl.required })
 }
 function setDefault(i: number, cell: { lit?: unknown; ref?: string }): void {
-  updateParam(i, { ...rows.value[i]!, default: cell.lit ?? null })
+  updateParam(i, withDefault(rows.value[i]!, cell.lit ?? null))
 }
 
 // ---------- 即时校验提示 ----------
@@ -202,6 +284,8 @@ function rowErrors(decl: ParamDecl, i: number): string[] {
   }
   const de = defaultError(decl)
   if (de) errs.push(de)
+  const jsonError = jsonDefaultErrors[jsonKey(decl, i)]
+  if (jsonError) errs.push(jsonError)
   return errs
 }
 
@@ -247,6 +331,8 @@ defineExpose({ addParam })
   border: 1px solid var(--border); border-radius: var(--radius-sm);
   padding: 3px 6px; font-size: 12px; min-width: 60px;
 }
+.json-input { min-width: 220px; min-height: 42px; resize: vertical; font-family: var(--mono); }
+.cell-input.num { width: 74px; }
 .cell-input:focus { outline: none; border-color: var(--accent); }
 .cell-input.grow { flex: 1; min-width: 120px; }
 .mini-btn {

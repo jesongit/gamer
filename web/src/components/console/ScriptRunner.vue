@@ -83,6 +83,7 @@
       v-if="!ctx.raw.loading"
       v-model="ctx.raw.content"
       class="raw-editor mono"
+      :disabled="ctx.raw.saving"
       spellcheck="false"
       autofocus
       aria-label="YAML 原文编辑区"

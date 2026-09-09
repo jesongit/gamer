@@ -241,7 +241,17 @@ const unregisterEditors = registerBuiltinRunnerEditors()
 
 const currentContrib = computed(() => getRunnerEditor(form.runnerId))
 const runnerKnownToServer = computed(() => runners.value.some((r) => r.runner_id === form.runnerId))
-const editorCtx = computed(() => ({ packageId: props.packageId ?? null, deviceId: form.device_id }))
+/**
+ * Runner 编辑器需要的 App 上下文只从所选设备记录读取。这里刻意不使用
+ * entrypoint 的 Package 前缀，避免 Android 包名与内容 Package 串域。
+ */
+const editorCtx = computed(() => ({
+  packageId: props.packageId ?? null,
+  deviceId: form.device_id,
+  androidPackageName: String(
+    devices.value.find((device) => device.id === form.device_id)?.pkg || '',
+  ).trim() || null,
+}))
 const entrypointEditorProps = computed(() => currentContrib.value?.entrypointEditorProps?.(editorCtx.value) ?? {})
 
 const payloadEditorEl = ref(null)

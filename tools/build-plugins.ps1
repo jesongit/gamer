@@ -111,6 +111,18 @@ function Write-TextFileNoBom {
     [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($false))
 }
 
+function Get-RelativeReleasePath {
+    param([string]$BaseDir, [string]$TargetPath)
+    # Keep the checksum manifest portable across PowerShell 5.1 and newer runtimes.
+    $base = [System.IO.Path]::GetFullPath($BaseDir)
+    if (-not $base.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+        $base += [System.IO.Path]::DirectorySeparatorChar
+    }
+    $target = [System.IO.Path]::GetFullPath($TargetPath)
+    $relative = [System.Uri]::new($base).MakeRelativeUri([System.Uri]::new($target)).ToString()
+    [System.Uri]::UnescapeDataString($relative).Replace('\', '/')
+}
+
 foreach ($tool in @('cargo')) {
     if ($null -eq (Get-Command $tool -ErrorAction SilentlyContinue)) {
         Write-Host "[precheck] 缺少工具：$tool" -ForegroundColor Red
@@ -301,12 +313,18 @@ try {
         } catch { $commit = $null }
         $lines = @(
             '# gamer 官方插件发行产物完整性清单（sha256sum -c 兼容）',
-            '# 路径相对发行根目录（registry.json 与 *.gplugin 同级）',
+            '# 路径相对清单所在发行根目录（通常为 registry.json 与 plugins/ 的父目录）',
             ("# generated_at: " + (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))
         )
         if ($commit) { $lines += "# source_commit: $commit" }
-        foreach ($p in $packages) { $lines += ("{0}  {1}" -f $p.Sha256, $p.Name) }
-        $lines += ("{0}  registry.json" -f (Get-FileSha256 $RegistryFile))
+        $checksumRoot = Split-Path -Parent ([System.IO.Path]::GetFullPath($ChecksumsFile))
+        foreach ($p in $packages) {
+            $artifactPath = Join-Path $OutputDir $p.Name
+            $relativeArtifactPath = Get-RelativeReleasePath $checksumRoot $artifactPath
+            $lines += ("{0}  {1}" -f $p.Sha256, $relativeArtifactPath)
+        }
+        $relativeRegistryPath = Get-RelativeReleasePath $checksumRoot $RegistryFile
+        $lines += ("{0}  {1}" -f (Get-FileSha256 $RegistryFile), $relativeRegistryPath)
         Write-TextFileNoBom -Path $ChecksumsFile -Text (($lines -join "`n") + "`n")
         Write-Host "  完整性清单已生成: $ChecksumsFile"
     }

@@ -43,8 +43,9 @@ const ACTIVE_POLL_MS = 5000
 
 /** 需要在媒体模式下统一拒绝的设备输入消息类型（sendControl 词表 + 键盘 key） */
 const DEVICE_INPUT_TYPES = new Set([
-  'touch', 'swipe', 'scroll', 'text', 'press', 'key', 'input_event',
-  'start_app', 'stop_app', 'rotate', 'clipboard',
+  'tap', 'touch', 'swipe', 'scroll', 'text', 'press', 'key', 'input_event',
+  'key_down', 'key_up', 'keydown', 'keyup', 'keymap', 'mapping',
+  'start_app', 'stop_app', 'rotate', 'clipboard', 'gamepad',
 ])
 
 /** 秒 → "mm:ss.d" 展示（媒体控制条时间显示；负/非法值归 0） */
@@ -62,6 +63,13 @@ function defaultLoadImage(url) {
     img.onerror = () => reject(new Error('frame image load failed'))
     img.src = url
   })
+}
+
+function normalizeStageFrame(value) {
+  const index = Number(value?.index ?? value?.frame_index)
+  const ptsUs = Number(value?.pts_us ?? value?.ptsUs)
+  if (!Number.isInteger(index) || index < 0 || !Number.isFinite(ptsUs) || ptsUs < 0) return null
+  return { index, pts_us: Math.round(ptsUs) }
 }
 
 export function useConsoleStage({
@@ -92,7 +100,7 @@ export function useConsoleStage({
   const frameReady = ref(false)
   /** 当前锁定帧身份 {index, pts_us}（服务端展示帧表；null = 按预览时间解析） */
   const stageFrame = ref(null)
-  /** programmaticSeek：stepFrames 引发的 seek 不清帧身份（用户手动 seek 才清） */
+  /** programmaticSeek：记录受控 seek 的元素/来源；用户手动 seek 才清帧身份。 */
   let programmaticSeek = false
 
   // ---------- 录制按钮态（activeRecording 轮询驱动；start/stop 经 REST） ----------
@@ -102,6 +110,9 @@ export function useConsoleStage({
   let mediaBinding = null
   let pollTimer = null
   let inputWarned = false
+  let mediaLoadSeq = 0
+  let frameOperationSeq = 0
+  let disposed = false
 
   const devId = () => {
     const v = typeof deviceId === 'function' ? deviceId() : deviceId?.value
@@ -146,7 +157,8 @@ export function useConsoleStage({
   /** 统一输入路由门禁：媒体模式拒绝一切舞台产生的设备输入（warn 一次）。 */
   function guardDeviceInput(obj) {
     if (canDeviceInput.value) return true
-    if (obj && DEVICE_INPUT_TYPES.has(String(obj?.type))) {
+    const type = typeof obj === 'string' ? obj : obj?.type
+    if (DEVICE_INPUT_TYPES.has(String(type || '').toLowerCase())) {
       if (!inputWarned) {
         inputWarned = true
         toast?.('视频来源模式为只读，不向设备发送输入', 'warn')
@@ -158,10 +170,14 @@ export function useConsoleStage({
 
   // ---------- 媒体库 ----------
   async function refreshMedia() {
+    const request = ++mediaLoadSeq
     try {
-      mediaList.value = await api.listMedia()
+      const list = await api.listMedia()
+      if (disposed || request !== mediaLoadSeq) return false
+      mediaList.value = list
       return true
     } catch (e) {
+      if (disposed || request !== mediaLoadSeq) return false
       toast?.('读取媒体库失败：' + e.message, 'error')
       return false
     }
@@ -170,28 +186,53 @@ export function useConsoleStage({
   async function loadMedia(id) {
     const wanted = String(id || '')
     if (!wanted) return false
+    const request = ++mediaLoadSeq
+    // Enter media mode before the lookup resolves. This makes a user action
+    // that returns to live during the lookup observable and lets setKind('live')
+    // invalidate this request instead of allowing a late response to resurrect
+    // the media source.
+    if (kind.value !== 'media') {
+      kind.value = 'media'
+      generation.value += 1
+    }
+    // The selection itself starts a new source generation. Invalidate old
+    // captures immediately, before the metadata request has resolved.
+    generation.value += 1
+    pauseMedia()
+    frameOperationSeq += 1
+    programmaticSeek = false
+    stageFrame.value = null
+    frameReady.value = false
+    playing.value = false
+    if (mediaMeta.value?.id !== wanted) {
+      mediaMeta.value = null
+      sourceId.value = ''
+    }
     const meta = mediaList.value.find(m => m.id === wanted)
       || await api.getMedia(wanted).catch(e => {
+        if (disposed || request !== mediaLoadSeq) return null
         toast?.('读取素材失败：' + e.message, 'error')
         return null
       })
-    if (!meta) return false
-    if (kind.value !== 'media') toMediaKind()
+    if (!meta || disposed || request !== mediaLoadSeq || kind.value !== 'media') return false
+    pauseMedia()
+    frameOperationSeq += 1
     mediaMeta.value = meta
     sourceId.value = meta.id
-    // 媒体切换同属来源切换：generation 递增（旧来源的异步帧/裁切结果过期）
-    generation.value += 1
     playing.value = false
     currentTimeSec.value = 0
     durationSec.value = Number(meta.duration_us || 0) / 1e6
-    frameReady.value = (mediaVideoEl.value?.videoWidth || 0) > 0
+    frameReady.value = false
     stageFrame.value = null
+    programmaticSeek = false
+    inputWarned = false
     return true
   }
 
   /** 进入媒体模式且尚无选中素材：默认选最新一条（列表创建时间倒序首位） */
   async function ensureMediaSelected() {
-    await refreshMedia()
+    const refreshed = await refreshMedia()
+    if (disposed || kind.value !== 'media' || !refreshed) return false
     const current = mediaMeta.value?.id
     if (current && mediaList.value.some(m => m.id === current)) return
     const first = mediaList.value[0]
@@ -199,21 +240,23 @@ export function useConsoleStage({
     else {
       mediaMeta.value = null
       sourceId.value = ''
+      frameReady.value = false
+      stageFrame.value = null
       toast?.('媒体库为空：请先在视频工作台导入素材或完成一次录制', 'warn')
     }
-  }
-
-  function toMediaKind() {
-    if (kind.value === 'media') return
-    kind.value = 'media'
-    generation.value += 1
   }
 
   function setKind(next) {
     const target = next === 'media' ? 'media' : 'live'
     if (target === kind.value) return
+    mediaLoadSeq += 1
+    frameOperationSeq += 1
     kind.value = target
     generation.value += 1
+    programmaticSeek = false
+    stageFrame.value = null
+    playing.value = false
+    inputWarned = false
     if (target === 'live') pauseMedia()
     else if (!mediaMeta.value) void ensureMediaSelected()
     else void refreshMedia()
@@ -224,33 +267,42 @@ export function useConsoleStage({
     detachMediaVideo()
     mediaVideoEl.value = el || null
     if (!el) return
-    const syncTime = () => { currentTimeSec.value = Math.max(0, Number(el.currentTime) || 0) }
+    const isCurrent = () => !disposed && mediaVideoEl.value === el
+    const syncTime = () => {
+      if (isCurrent()) currentTimeSec.value = Math.max(0, Number(el.currentTime) || 0)
+    }
     const syncMeta = () => {
+      if (!isCurrent()) return
       if (Number.isFinite(el.duration)) durationSec.value = el.duration
       frameReady.value = (el.videoWidth || 0) > 0
     }
-    const syncPlay = () => { playing.value = true }
-    const syncPause = () => { playing.value = false }
-    const syncRate = () => { playbackRate.value = el.playbackRate || 1 }
+    const syncPlay = () => { if (isCurrent() && kind.value === 'media') playing.value = true }
+    const syncPause = () => { if (isCurrent()) playing.value = false }
+    const syncRate = () => { if (isCurrent()) playbackRate.value = el.playbackRate || 1 }
     // seeked：stepFrames 的程序性 seek 保持帧身份；用户手动 seek 使其失效
     const syncSeeked = () => {
+      if (!isCurrent()) return
       syncTime()
-      if (programmaticSeek) {
+      if (programmaticSeek && programmaticSeek.el === el
+        && programmaticSeek.generation === generation.value
+        && programmaticSeek.mediaId === mediaMeta.value?.id) {
         programmaticSeek = false
         return
       }
+      frameOperationSeq += 1
       stageFrame.value = null
     }
     const onError = () => {
+      if (!isCurrent()) return
       frameReady.value = false
       playing.value = false
       toast?.('视频加载失败：素材可能暂不受支持', 'error')
     }
     const pairs = [
       ['timeupdate', syncTime], ['seeked', syncSeeked],
-      ['loadedmetadata', syncMeta], ['resize', syncMeta],
+      ['loadedmetadata', syncMeta], ['durationchange', syncMeta], ['resize', syncMeta],
       ['play', syncPlay], ['pause', syncPause], ['ratechange', syncRate],
-      ['error', onError],
+      ['ended', syncPause], ['error', onError],
     ]
     for (const [name, fn] of pairs) el.addEventListener(name, fn)
     mediaBinding = { el, pairs }
@@ -260,11 +312,15 @@ export function useConsoleStage({
 
   function detachMediaVideo() {
     if (mediaBinding) {
+      try { mediaBinding.el.pause?.() } catch { /* 元素可能已被浏览器销毁 */ }
       for (const [name, fn] of mediaBinding.pairs) mediaBinding.el.removeEventListener(name, fn)
       mediaBinding = null
     }
+    frameOperationSeq += 1
+    programmaticSeek = false
     mediaVideoEl.value = null
     frameReady.value = false
+    playing.value = false
   }
 
   function pauseMedia() {
@@ -276,10 +332,59 @@ export function useConsoleStage({
     const el = mediaVideoEl.value
     if (kind.value !== 'media' || !el) return
     if (el.paused) {
-      el.play?.().catch(() => {})
+      try {
+        const pending = el.play?.()
+        pending?.catch?.(() => {})
+      } catch { /* 浏览器策略或元素未就绪 */ }
     } else {
       el.pause?.()
     }
+  }
+
+  /** 手动 seek：清除旧的确定帧身份；媒体来源不触发任何设备操作。 */
+  function seek(seconds) {
+    const el = mediaVideoEl.value
+    if (kind.value !== 'media' || !el) return false
+    const raw = Number(seconds)
+    if (!Number.isFinite(raw)) return false
+    const max = Number.isFinite(durationSec.value) && durationSec.value > 0 ? durationSec.value : raw
+    const target = Math.max(0, Math.min(max, raw))
+    frameOperationSeq += 1
+    programmaticSeek = false
+    stageFrame.value = null
+    try { el.currentTime = target } catch { return false }
+    currentTimeSec.value = target
+    return true
+  }
+
+  /** 跳到已知确定帧（用于标记/事件桥）；要求携带当前媒体身份。 */
+  function jumpToFrame(frame) {
+    const el = mediaVideoEl.value
+    const mediaId = mediaMeta.value?.id
+    const index = Number(frame?.index ?? frame?.frame_index)
+    const ptsUs = Number(frame?.ptsUs ?? frame?.pts_us)
+    if (kind.value !== 'media' || !el || !mediaId
+      || String(frame?.mediaId ?? frame?.media_id ?? mediaId) !== mediaId
+      || !Number.isInteger(index) || index < 0 || !Number.isFinite(ptsUs) || ptsUs < 0) return false
+    frameOperationSeq += 1
+    stageFrame.value = { index, pts_us: Math.round(ptsUs) }
+    programmaticSeek = { el, generation: generation.value, mediaId }
+    try { el.currentTime = ptsUs / 1e6 } catch {
+      programmaticSeek = false
+      stageFrame.value = null
+      return false
+    }
+    if (!el.paused) pauseMedia()
+    currentTimeSec.value = ptsUs / 1e6
+    return true
+  }
+
+  function jumpToMarker(marker) {
+    return jumpToFrame({
+      mediaId: marker?.frame?.media_id,
+      index: marker?.frame?.frame_index,
+      ptsUs: marker?.frame?.pts_us,
+    })
   }
 
   /** 逐帧 ±n（Phase 5）：服务端真实展示帧表相邻定位（prev/next），无固定步长
@@ -292,26 +397,38 @@ export function useConsoleStage({
     if (!count) return
     const dir = count > 0 ? 1 : -1
     const id = mediaMeta.value.id
+    const operation = ++frameOperationSeq
+    const expectedGeneration = generation.value
+    const isCurrentOperation = () => !disposed
+      && operation === frameOperationSeq
+      && expectedGeneration === generation.value
+      && kind.value === 'media'
+      && mediaMeta.value?.id === id
+      && mediaVideoEl.value === el
     try {
       let position = stageFrame.value
       if (!position) {
         const meta = await videoApi.mediaFrames(id, {
           ptsUs: Math.max(0, Math.round(currentTimeSec.value * 1e6)),
         })
-        position = meta?.current || null
+        position = normalizeStageFrame(meta?.current)
       }
+      if (!isCurrentOperation()) return
       if (!position) return // 空素材（0 帧）
       let target = position
       for (let i = 0; i < Math.abs(count); i++) {
         const neighbors = await videoApi.mediaFrameNeighbors(id, target.index)
-        const nextTarget = dir < 0 ? neighbors?.prev : neighbors?.next
+        if (!isCurrentOperation()) return
+        const rawTarget = dir < 0 ? neighbors?.prev : neighbors?.next
+        if (rawTarget && !normalizeStageFrame(rawTarget)) throw new Error('帧表响应无效')
+        const nextTarget = normalizeStageFrame(rawTarget)
         if (!nextTarget) break // 首/末帧边界
         target = nextTarget
       }
-      if (target === position) return
-      stageFrame.value = target
+      if (!isCurrentOperation() || target === position) return
+      stageFrame.value = { index: target.index, pts_us: target.pts_us }
       if (!el.paused) el.pause?.()
-      programmaticSeek = true
+      programmaticSeek = { el, generation: expectedGeneration, mediaId: id }
       try { el.currentTime = target.pts_us / 1e6 } catch { /* 元数据未就绪时静默 */ }
       currentTimeSec.value = target.pts_us / 1e6
     } catch (e) {
@@ -346,6 +463,9 @@ export function useConsoleStage({
     const frame = frameAt.value
     const meta = mediaMeta.value
     if (!frame || !meta) return null
+    const expectedGeneration = generation.value
+    const expectedMediaId = meta.id
+    const expectedFrame = { ...frame }
     // 帧身份已知（stageFrame 锁定）→ 按展示序索引寻址（字节级可重复）；
     // 未锁定 → 按预览 pts 粗定位（服务端解析为首个 pts ≥ 目标的展示帧）
     const url = frame.index !== null && frame.index !== undefined
@@ -353,7 +473,13 @@ export function useConsoleStage({
       : api.mediaFrameUrl(meta.id, { ptsUs: frame.ptsUs })
     let img = null
     try { img = await loadImage(url) } catch { img = null }
-    if (!img || !img.naturalWidth) return null
+    const currentFrame = frameAt.value
+    if (!img || !img.naturalWidth || disposed
+      || expectedGeneration !== generation.value
+      || expectedMediaId !== mediaMeta.value?.id
+      || currentFrame?.mediaId !== expectedFrame.mediaId
+      || currentFrame?.index !== expectedFrame.index
+      || currentFrame?.ptsUs !== expectedFrame.ptsUs) return null
     return {
       source: img,
       width: img.naturalWidth,
@@ -456,7 +582,11 @@ export function useConsoleStage({
   startPolling()
 
   onUnmounted(() => {
+    disposed = true
+    mediaLoadSeq += 1
+    frameOperationSeq += 1
     stopPolling()
+    pauseMedia()
     detachMediaVideo()
   })
 
@@ -479,8 +609,11 @@ export function useConsoleStage({
     mediaOptions: computed(() => mediaList.value.map(m => ({ id: m.id, name: m.name }))),
     mediaSrc,
     playing,
+    currentTime: currentTimeSec,
+    duration: durationSec,
     timeText: computed(() => formatStageClock(currentTimeSec.value)),
     durationText: computed(() => formatStageClock(durationSec.value)),
+    frameAt: computed(() => frameAt.value),
     rate: playbackRate,
     rateOptions: STAGE_RATE_OPTIONS,
     // 录制按钮态
@@ -492,6 +625,9 @@ export function useConsoleStage({
     backToLive: () => setKind('live'),
     onMediaPick: id => loadMedia(id),
     togglePlay,
+    seek,
+    jumpToFrame,
+    jumpToMarker,
     stepFrames,
     setRate,
     toggleRecording,
@@ -508,6 +644,9 @@ export function useConsoleStage({
     displaySize: () => ({ ...displaySize.value }),
     captureFrame,
     togglePlay,
+    seek,
+    jumpToFrame,
+    jumpToMarker,
     stepFrames,
     setRate,
     pollActiveSession,

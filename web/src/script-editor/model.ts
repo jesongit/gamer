@@ -28,8 +28,16 @@ export interface ParamDecl {
   name: string
   type: ParamType
   required: boolean
-  /** default === null 表示未声明默认值（配合 required 表达必填）。 */
+  /**
+   * 默认值。未声明默认值时为 null；显式 YAML `default: null` 由
+   * `hasDefault: true` 区分。旧模型没有该可选标记时，null 仍按未声明处理。
+   */
   default: unknown | null
+  /**
+   * 是否显式声明了 default。仅在值为 null 时必须携带；非 null 值可由
+   * schema helper 从 default 值推断，保持既有模型快照的稳定形状。
+   */
+  hasDefault?: boolean
   desc: string
 }
 
@@ -68,11 +76,23 @@ export type CoordLit = [number, number]
  * 字段级取值：lit 的具体形态由所属字段类型约束；ref 为变量路径
  * （`$` 后原文，如 'home.center'；仅点号段，段为小写标识符）。
  */
-export type Cell = { lit: unknown; ref?: undefined } | { ref: string; lit?: undefined }
+export type Cell =
+  | { lit: unknown; ref?: undefined; missing?: boolean }
+  | { ref: string; lit?: undefined; missing?: boolean }
 
 export function lit(value: unknown): Cell {
   return { lit: value }
 }
+
+/** 编辑器占位 Cell：不参与 YAML 语义，保存前必须由用户填成真实值。 */
+export function missingLit(value: unknown = null): Cell {
+  return { lit: value, missing: true }
+}
+
+export function isMissingCell(cell: Cell | null | undefined): boolean {
+  return cell?.missing === true
+}
+
 export function ref(name: string): Cell {
   return { ref: name }
 }

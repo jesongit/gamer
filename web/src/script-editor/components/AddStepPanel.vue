@@ -54,7 +54,7 @@
  */
 import { computed, inject, ref, type PropType } from 'vue'
 import type { Path } from '../commands'
-import { createCall, createControl } from '../factories'
+import { createCall, createCallFromSchema, createControl } from '../factories'
 import type { Step } from '../model'
 import { KIND_META } from './kinds'
 import { SE_TARGET_OPTIONS } from '../targets'
@@ -113,8 +113,15 @@ function insertControl(kind: 'if' | 'repeat' | 'return'): void {
   insert(createControl(kind), KIND_META[kind].label)
 }
 
-function insertCall(fn: string): void {
-  insert(createCall(fn), `调用 ${fn}`)
+async function insertCall(fn: string): Promise<void> {
+  let step = createCall(fn)
+  try {
+    const decls = await targetOptions?.resolveParams(fn)
+    if (decls) step = createCallFromSchema(fn, decls)
+  } catch {
+    // Schema 获取失败时仍允许插入函数；保存/校验阶段会给出正式诊断。
+  }
+  insert(step, `调用 ${fn}`)
 }
 </script>
 

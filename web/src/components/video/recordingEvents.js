@@ -19,6 +19,69 @@ const SOURCE_LABELS = {
   plugin: '插件',
 }
 
+const STATUS_LABELS = {
+  accepted: '已记录',
+  rejected: '已拒绝',
+}
+
+/**
+ * 将服务端事件归一为 UI 可安全消费的最小模型。
+ * 不推断 recording id、时间轴或事件负载；缺失字段保持可诊断的默认值。
+ */
+export function normalizeRecordingEvent(event, index = 0) {
+  const source = String(event?.source || 'unknown')
+  const kind = String(event?.kind || 'unknown')
+  const status = String(event?.status || 'accepted')
+  const timelineUs = Number(event?.timeline_us)
+  return {
+    event,
+    eventId: String(event?.event_id || event?.id || `event-${index + 1}`),
+    source,
+    sourceLabel: eventSourceLabel(source),
+    kind,
+    summary: eventSummary(event),
+    status,
+    statusLabel: recordingEventStatusLabel(status),
+    timelineUs: Number.isFinite(timelineUs) && timelineUs >= 0 ? Math.round(timelineUs) : null,
+    timelineLabel: formatRecordingEventTime(timelineUs),
+  }
+}
+
+/** 录制事件状态展示名。未知状态原样展示，不伪造服务端语义。 */
+export function recordingEventStatusLabel(status) {
+  return STATUS_LABELS[status] || String(status || '未知状态')
+}
+
+/** 会话微秒时间轴的短展示；无效输入返回可诊断占位符。 */
+export function formatRecordingEventTime(timelineUs) {
+  const us = Number(timelineUs)
+  if (!Number.isFinite(us) || us < 0) return '时间未知'
+  const totalSeconds = us / 1e6
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds - minutes * 60
+  return `${minutes}:${seconds.toFixed(3).padStart(6, '0')}`
+}
+
+/**
+ * 录制事件筛选：用于历史/当前会话入口。输入仍是服务端原始事件，输出为归一模型。
+ * filters: `{search, source, kind, status}`；空值表示不筛选。
+ */
+export function filterRecordingEvents(events, filters = {}) {
+  const search = String(filters.search || '').trim().toLowerCase()
+  const source = String(filters.source || '')
+  const kind = String(filters.kind || '')
+  const status = String(filters.status || '')
+  return (Array.isArray(events) ? events : [])
+    .map((event, index) => normalizeRecordingEvent(event, index))
+    .filter(item => {
+      if (source && item.source !== source) return false
+      if (kind && item.kind !== kind) return false
+      if (status && item.status !== status) return false
+      if (!search) return true
+      return `${item.eventId} ${item.sourceLabel} ${item.kind} ${item.summary}`.toLowerCase().includes(search)
+    })
+}
+
 /** timeline_us（会话单调钟）→ 所在段；不存在（间隙/越界）返回 null。 */
 export function segmentForTimeline(segments, timelineUs) {
   if (!Array.isArray(segments) || !segments.length) return null

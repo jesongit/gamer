@@ -8,6 +8,7 @@ import {
   selectionToDeviceRect,
   toDeviceCoord as mapToDeviceCoord,
 } from '../../console/geometry'
+import { composeTemplateName, putTemplateBytes, resolveTemplateVersion } from '../../console/template-resource'
 
 /**
  * 模板面板（console.templates 扩展面板实现）：模板列表/模糊搜索、框选与二次裁切、
@@ -478,7 +479,7 @@ export function useConsoleTemplates({
   }
 
   function showCropConflict(shortName, existing) {
-    crop.conflict = { name: existing.name, shortName }
+    crop.conflict = { name: existing.name, shortName, version: existing.version || null }
   }
 
   function backToCrop() {
@@ -522,7 +523,8 @@ export function useConsoleTemplates({
     }
     saving.value = true
     try {
-      const rep = await api.createTemplate(payload.shortName, payload.dataB64, payload.pkg, payload.region, payload.preserveColor)
+      const name = composeTemplateName(payload.shortName, payload.region, payload.preserveColor)
+      const rep = await putTemplateBytes(name, payload.dataB64, payload.pkg)
       await finishCropSave(rep, payload.shortName)
     } catch (e) {
       // 列表可能在本页打开后被其他页面更新；把服务端 409 也转成同一对比态。
@@ -544,32 +546,38 @@ export function useConsoleTemplates({
     const payload = cropUploadPayload()
     if (!payload) return
     saving.value = true
-    let deleted = false
     try {
       // 覆盖确认可能停留较久，先拿最新列表，避免第一次操作后仍持有已删除的旧文件名。
       const refreshed = await refreshTemplatesData()
       const existing = refreshed ? findCropConflict(payload.shortName) : crop.conflict
-      // 旧模板已被其他页面删除时，覆盖动作退化为普通新建，保证重复点击可恢复。
+      // 旧模板已被其他页面删除时，退化为普通新建；创建 PUT 不带 force，
+      // 若并发页面刚好抢先创建，服务端会拒绝而不会覆盖其内容。
       if (!existing) {
-        const rep = await api.createTemplate(payload.shortName, payload.dataB64, payload.pkg, payload.region, payload.preserveColor)
+        const name = composeTemplateName(payload.shortName, payload.region, payload.preserveColor)
+        const rep = await putTemplateBytes(name, payload.dataB64, payload.pkg)
         await finishCropSave(rep, payload.shortName)
         return
       }
-      await api.deleteTemplate(existing.name, payload.pkg)
-      deleted = true
-      const rep = await api.createTemplate(payload.shortName, payload.dataB64, payload.pkg, payload.region, payload.preserveColor)
+      const targetName = composeTemplateName(payload.shortName, payload.region, payload.preserveColor)
+      if (targetName !== existing.name) {
+        // 文件名承载搜索区域/颜色标记；直接写到旧路径会让新选区与资源元数据
+        // 分离。此场景必须先返回修改，或走明确的新建/重命名流程，不能静默覆盖。
+        toast('框选区域或颜色标记已变化，请返回修改后以新模板名保存', 'warn')
+        return
+      }
+      const expectedVersion = await resolveTemplateVersion(existing.name, payload.pkg, existing.version)
+      // 覆盖是对同一资源路径的单次条件 PUT。这样模板名、区域和颜色标记
+      // 等关联元数据保持不变；需要改变元数据时先走明确的重命名/新建流程。
+      const rep = await putTemplateBytes(existing.name, payload.dataB64, payload.pkg, expectedVersion)
       await finishCropSave(rep, payload.shortName)
     } catch (e) {
-      if (deleted) {
-        // 删除成功但新图保存失败时，旧模板已经不存在；退出冲突态，避免下一次继续删除同一文件。
+      if (e?.status === 409) {
+        // 条件 PUT 拒绝说明其他页面已经改变了目标；更新冲突态中的完整
+        // 文件名/版本，让下一次确认覆盖重新基于最新资源提交。
         const refreshed = await refreshTemplatesData()
         const current = refreshed && findCropConflict(payload.shortName)
-        if (refreshed && !current) {
-          crop.conflict = null
-          toast('旧模板已删除，但新模板保存失败，请返回裁切界面后再次点击保存', 'error')
-          return
-        }
         if (current) showCropConflict(payload.shortName, current)
+        else if (refreshed) crop.conflict = null
       }
       toast('覆盖失败：' + e.message, 'error')
     } finally {
@@ -918,7 +926,9 @@ export function useConsoleTemplates({
     const failed = []
     for (const item of imports) {
       try {
-        await api.importTemplateBytes(item.name, item.bytes, packageId.value)
+        // 批量导入也是创建路径：不使用兼容封装的 force=true，避免并发
+        // 页面在本地快照过期时静默覆盖同名模板。
+        await putTemplateBytes(item.name, item.bytes, packageId.value)
         // 逐张入库后立刻登记，后续同批同名冲突判定与列表展示即时可见
         templatesData.value = templatesData.value.concat({
           name: item.name, pkg: packageId.value, version: null, updated_at: '', size: item.bytes.length,
@@ -946,7 +956,9 @@ export function useConsoleTemplates({
     if (!t || !file) return
     try {
       const b64 = await fileToBase64(file)
-      await api.replaceTemplateImage(t.name, b64, t.pkg || packageId.value)
+      const pkg = t.pkg || packageId.value
+      const expectedVersion = await resolveTemplateVersion(t.name, pkg, t.version)
+      await putTemplateBytes(t.name, b64, pkg, expectedVersion)
       templatesData.value = await api.listTemplates(packageId.value)
       toast(`模板 ${t.name} 图片已替换`, 'success')
     } catch (err) {

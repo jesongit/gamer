@@ -26,7 +26,7 @@ import {
   type Program,
   type Step,
 } from './model'
-import { checkLiteral, isRefPath } from './schema'
+import { checkLiteral, hasParamDefault, isRefPath } from './schema'
 
 // ---------- 校验上下文 ----------
 
@@ -113,7 +113,7 @@ export function validateSource(
 
 function validateParamDecls(decls: ParamDecl[], basePath: string, diags: Diagnostic[]): void {
   decls.forEach((decl, i) => {
-    if (decl.default !== null && decl.default !== undefined) {
+    if (hasParamDefault(decl)) {
       const problem = checkLiteral(decl.type, decl.default)
       if (problem) {
         diags.push(diag(

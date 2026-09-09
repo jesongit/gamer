@@ -18,13 +18,25 @@
 
         <div class="plugin-center-body">
           <div v-if="error" class="plugin-alert error" role="alert">{{ error }}</div>
-          <div v-if="notice" class="plugin-alert info" role="status">{{ notice }}</div>
+          <div v-if="operationResult" class="plugin-result" role="status" aria-live="polite">
+            <div class="plugin-result-operation">{{ operationResult.operation.text }}</div>
+            <div v-if="operationResult.detail" class="plugin-result-detail" :class="`result-${typeof operationResult.detail === 'object' ? operationResult.detail.tone : 'info'}`">
+              {{ typeof operationResult.detail === 'object' ? operationResult.detail.text : operationResult.detail }}
+            </div>
+            <div v-if="operationResult.refreshError" class="plugin-result-detail result-warning">
+              刷新插件状态失败：{{ operationResult.refreshError }}；变更本身已完成，可稍后手动刷新。
+            </div>
+          </div>
+          <div v-else-if="notice" class="plugin-alert info" role="status">{{ notice }}</div>
+          <div v-if="busy" class="plugin-operation-loading" role="status" aria-live="polite">
+            正在{{ operationLabel(activeOperation) }}，请稍候…
+          </div>
           <div v-if="loading" class="plugin-center-loading">正在读取插件信息…</div>
 
           <template v-else-if="tab === 'market'">
             <div class="section-head">
               <div><strong>市场</strong><span class="muted">固定版本 · SHA-256 校验 · 本地安装</span></div>
-              <button class="btn btn-sm" type="button" :disabled="busy" @click="loadRegistry">刷新</button>
+              <button class="btn btn-sm" type="button" :disabled="busy || loading" @click="refresh">刷新</button>
             </div>
             <div v-if="!market.length" class="plugin-empty">市场暂无可用插件，或 registry.json 尚未配置。</div>
             <article v-for="entry in market" :key="`${entry.id}@${entry.version}`" class="plugin-card">
@@ -34,6 +46,10 @@
                   <span class="tag info">{{ entry.version }}</span>
                   <span class="tag" :class="entry.execution?.kind === 'builtin' ? 'warn' : ''">{{ executionLabel(entry.execution) }}</span>
                   <span v-if="installedVersion(entry.id)" class="tag ok">已安装 v{{ installedVersion(entry.id) }}</span>
+                  <span v-if="marketRelation(entry).kind === 'update'" class="tag info">有可用更新</span>
+                  <span v-else-if="marketRelation(entry).kind === 'latest'" class="tag ok">已是最新</span>
+                  <span v-else-if="marketRelation(entry).kind === 'newer_installed'" class="tag warn">已安装更高版本</span>
+                  <span v-else-if="marketRelation(entry).kind === 'incompatible'" class="tag warn">版本不兼容</span>
                 </div>
                 <div class="plugin-meta"><code>{{ entry.id }}</code><span>{{ entry.publisher || '发布者未声明' }}</span></div>
                 <p class="plugin-description">{{ entry.description || '暂无描述。' }}</p>
@@ -48,10 +64,11 @@
                 </div>
               </div>
               <div class="plugin-card-actions">
-                <button class="btn btn-sm btn-primary" type="button" :disabled="busy || !canInstallMarket(entry)" @click="installMarket(entry)">
-                  {{ installedVersion(entry.id) ? '更新' : '安装' }}
+                <button class="btn btn-sm btn-primary" type="button" :disabled="busy || !marketActionAllowed(entry)" @click="installMarket(entry)">
+                  {{ marketActionLabel(entry) }}
                 </button>
                 <span v-if="!canInstallMarket(entry)" class="action-hint">缺少固定 SHA-256，无法安全下载</span>
+                <span v-else-if="marketRelation(entry).kind === 'incompatible'" class="action-hint">{{ marketRelation(entry).reason }}</span>
               </div>
             </article>
           </template>
@@ -104,6 +121,9 @@
                 <button v-if="plugin.state !== 'running'" class="btn btn-sm" type="button" :disabled="busy" @click="runAction('enable', plugin)">启用</button>
                 <button v-if="plugin.state === 'running'" class="btn btn-sm" type="button" :disabled="busy" @click="runAction('disable', plugin)">停用</button>
                 <button v-if="marketUpdate(plugin)" class="btn btn-sm btn-primary" type="button" :disabled="busy || !canInstallMarket(marketUpdate(plugin))" @click="installMarket(marketUpdate(plugin), plugin)">更新到 {{ marketUpdate(plugin).version }}</button>
+                <span v-else-if="installedMarketRelation(plugin)?.kind === 'latest'" class="tag ok">已是最新</span>
+                <span v-else-if="installedMarketRelation(plugin)?.kind === 'newer_installed'" class="tag warn">已安装更高版本</span>
+                <span v-else-if="installedMarketRelation(plugin)?.kind === 'incompatible'" class="tag warn">版本不兼容</span>
                 <button class="btn btn-sm btn-danger" type="button" :disabled="busy" @click="uninstall(plugin, false)">卸载</button>
                 <button class="btn btn-sm btn-danger" type="button" :disabled="busy" @click="uninstall(plugin, true)">删除数据并卸载</button>
               </div>
@@ -142,7 +162,7 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api'
-import { compareVersions, downloadDirectUrl, downloadFixedVersion, fetchRegistry, findRegistryPlugin } from './registry-client'
+import { downloadDirectUrl, downloadFixedVersion, fetchRegistry, findRegistryPlugin } from './registry-client'
 import {
   activateVersionErrorText,
   activateVersionPrompt,
@@ -155,7 +175,10 @@ import {
   installPolicy,
   installSummary,
   lifecyclePrompt,
+  describeExtensionMutation,
   mergeManagementResponse,
+  marketVersionLabel,
+  marketVersionRelation,
   normalizeExecution,
   readPluginSourceMetadata,
   rememberPluginSource,
@@ -181,8 +204,10 @@ const registry = ref({ schema_version: 1, plugins: [] })
 const installed = ref([])
 const loading = ref(false)
 const busy = ref(false)
+const activeOperation = ref('')
 const error = ref('')
 const notice = ref('')
+const operationResult = ref(null)
 const sourceMetadata = ref(readPluginSourceMetadata())
 const url = ref('')
 const localFileName = ref('')
@@ -190,42 +215,73 @@ const fileInput = ref(null)
 
 const market = computed(() => registry.value.plugins || [])
 
-function close() { emit('close') }
-function clearMessages() { error.value = ''; notice.value = '' }
+function close() { clearMessages(); emit('close') }
+function clearMessages() { error.value = ''; notice.value = ''; operationResult.value = null }
 function messageFor(errorValue) { return String(errorValue?.message || errorValue || '操作失败') }
 
-async function loadRegistry() {
-  try {
-    registry.value = await fetchRegistry(globalThis.fetch, props.registryUrl)
-  } catch (errorValue) {
-    error.value = messageFor(errorValue)
-    registry.value = { schema_version: 1, plugins: [] }
+function beginOperation(key) {
+  if (busy.value) return false
+  busy.value = true
+  activeOperation.value = key
+  return true
+}
+
+function endOperation(key) {
+  if (activeOperation.value === key) {
+    activeOperation.value = ''
+    busy.value = false
   }
+}
+
+function operationLabel(key) {
+  if (String(key).startsWith('market:')) return '更新插件'
+  if (String(key).startsWith('uninstall:')) return '卸载插件'
+  if (String(key).startsWith('enable:')) return '启用插件'
+  if (String(key).startsWith('disable:')) return '停用插件'
+  if (key === 'local-import') return '导入插件'
+  if (key === 'url-import') return '导入插件'
+  return '处理插件'
+}
+
+function showMutationResult(description, refreshResult) {
+  operationResult.value = {
+    ...description,
+    refreshError: refreshResult?.ok ? '' : (refreshResult?.error || '未知错误'),
+  }
+  notice.value = ''
 }
 
 async function loadInstalled() {
   const client = props.apiClient
-  let response
-  try {
-    response = await client.getExtensionManagement()
-  } catch (errorValue) {
-    // Older Phase 6 servers still provide the base list; management fields are
-    // additive and must not make the center unusable during rollout.
-    response = await client.listExtensions()
-  }
+  // The management endpoint is the current contract: its outer dependencies
+  // map describes dependents, while each extension entry is the authoritative
+  // lifecycle snapshot. Do not silently downgrade to the base list response.
+  const response = await client.getExtensionManagement()
   installed.value = mergeManagementResponse(response, market.value, sourceMetadata.value)
 }
 
+let refreshSerial = 0
 async function refresh() {
-  if (!props.open) return
+  if (!props.open) return { ok: false, error: '插件中心未打开' }
+  const serial = ++refreshSerial
   loading.value = true
-  clearMessages()
+  error.value = ''
+  const failures = []
   try {
-    await loadRegistry()
+    registry.value = await fetchRegistry(globalThis.fetch, props.registryUrl)
+  } catch (errorValue) {
+    failures.push(messageFor(errorValue))
+  }
+  if (serial !== refreshSerial) return { ok: false, stale: true, error: '刷新请求已过期' }
+  try {
     await loadInstalled()
   } catch (errorValue) {
-    error.value = messageFor(errorValue)
-  } finally { loading.value = false }
+    failures.push(messageFor(errorValue))
+  }
+  if (serial !== refreshSerial) return { ok: false, stale: true, error: '刷新请求已过期' }
+  if (failures.length) error.value = failures.join('\n')
+  loading.value = false
+  return failures.length ? { ok: false, error: failures.join('\n') } : { ok: true }
 }
 
 watch(() => props.open, value => { if (value) void refresh() })
@@ -233,10 +289,19 @@ onMounted(() => { if (props.open) void refresh() })
 
 function installedPlugin(id) { return installed.value.find(item => item.id === id) }
 function installedVersion(id) { return installedPlugin(id)?.active_version || installedPlugin(id)?.version || '' }
+function marketRelation(entry) { return marketVersionRelation(entry, installedPlugin(entry.id)) }
+function installedMarketRelation(plugin) {
+  const entry = findRegistryPlugin(registry.value, plugin.id)
+  return entry ? marketVersionRelation(entry, plugin) : null
+}
+function marketActionLabel(entry) { return marketVersionLabel(marketRelation(entry)) }
+function marketActionAllowed(entry) {
+  const relation = marketRelation(entry)
+  return ['install', 'update'].includes(relation.kind) && canInstallMarket(entry)
+}
 function marketUpdate(plugin) {
   const entry = findRegistryPlugin(registry.value, plugin.id)
-  if (!entry || compareVersions(entry.version, installedVersion(plugin.id)) <= 0) return null
-  return entry
+  return entry && installedMarketRelation(plugin)?.kind === 'update' ? entry : null
 }
 function canInstallMarket(entry) {
   // 官方固定版本下载强制 SHA-256（registry-client downloadFixedVersion 门禁）；
@@ -332,68 +397,86 @@ async function installArchive(file, source, current) {
   const operation = existing
     ? props.apiClient.updateExtension(existing.id, file, confirmedOptions)
     : props.apiClient.installExtension(file, confirmedOptions)
-  const snapshot = await operation
+  let snapshot = await operation
   sourceMetadata.value = rememberPluginSource(sourceMetadata.value, result.inspection.id, result.inspection.version, source)
   if (!existing || existing.state !== 'disabled') {
-    if (snapshot?.state === 'installed') await props.apiClient.enableExtension(snapshot.id || result.inspection.id)
+    if (snapshot?.state === 'installed') snapshot = await props.apiClient.enableExtension(snapshot.id || result.inspection.id)
   }
   emit('changed')
-  await refresh()
-  // notice 放在 refresh 之后：refresh 内部 clearMessages 会清掉先行的提示（同 activateVersion）
-  notice.value = `${result.inspection.name || result.inspection.id}@${result.inspection.version} 已${existing ? '更新' : '安装'}。`
+  const refreshResult = await refresh()
+  showMutationResult(
+    describeExtensionMutation(existing ? 'update' : 'install', snapshot, { plugin: existing }),
+    refreshResult,
+  )
   return true
 }
 
 async function installMarket(entry, current = installedPlugin(entry.id)) {
+  const relation = marketVersionRelation(entry, current)
+  if (!['install', 'update'].includes(relation.kind)) {
+    error.value = relation.kind === 'latest'
+      ? '该插件已是最新版本，无需重复更新。'
+      : relation.kind === 'newer_installed'
+        ? '当前已安装更高版本，无需降级。'
+        : relation.reason || '该市场版本与当前安装状态不兼容，已阻止更新。'
+    return
+  }
   if (!canInstallMarket(entry)) {
     error.value = '该市场条目缺少固定版本 SHA-256，无法校验完整性，已阻止下载。'
     return
   }
-  busy.value = true
+  const operationKey = `market:${entry.id}@${entry.version}`
+  if (!beginOperation(operationKey)) return
   clearMessages()
   try {
     const downloaded = await downloadFixedVersion(entry)
     await installArchive(downloaded.file, {
       kind: 'official', label: '官方市场', publisher: entry.publisher, execution: entry.execution, registryEntry: entry,
     }, current)
-  } catch (errorValue) { error.value = installErrorText(errorValue) } finally { busy.value = false }
+  } catch (errorValue) { error.value = installErrorText(errorValue) } finally { endOperation(operationKey) }
 }
 
 async function onLocalFile(event) {
   const file = event.target.files?.[0]
   if (!file) return
   localFileName.value = file.name
-  busy.value = true
+  const operationKey = 'local-import'
+  if (!beginOperation(operationKey)) return
   clearMessages()
   try {
     await installArchive(file, { kind: 'local', label: '本地文件' }, installedPlugin(''))
   } catch (errorValue) { error.value = installErrorText(errorValue) } finally {
-    busy.value = false
+    endOperation(operationKey)
     event.target.value = ''
   }
 }
 
 async function onUrlImport() {
-  busy.value = true
+  const operationKey = 'url-import'
+  if (!beginOperation(operationKey)) return
   clearMessages()
   try {
     const downloaded = await downloadDirectUrl(url.value)
     await installArchive(downloaded.file, { kind: 'url', label: url.value }, undefined)
     url.value = ''
-  } catch (errorValue) { error.value = installErrorText(errorValue) } finally { busy.value = false }
+  } catch (errorValue) { error.value = installErrorText(errorValue) } finally { endOperation(operationKey) }
 }
 
 async function runAction(action, plugin) {
   if (!globalThis.confirm(lifecyclePrompt(action, plugin))) return
-  busy.value = true
+  const operationKey = `${action}:${plugin.id}`
+  if (!beginOperation(operationKey)) return
   clearMessages()
   try {
     const method = { enable: 'enableExtension', disable: 'disableExtension' }[action]
     await props.apiClient[method](plugin.id)
-    notice.value = `${plugin.name || plugin.id}：${action === 'enable' ? '已启用' : '已停用'}。`
     emit('changed')
-    await refresh()
-  } catch (errorValue) { error.value = messageFor(errorValue) } finally { busy.value = false }
+    const refreshResult = await refresh()
+    notice.value = `${plugin.name || plugin.id}：${action === 'enable' ? '已启用' : '已停用'}。`
+    if (!refreshResult.ok && !refreshResult.stale) {
+      error.value = `刷新插件状态失败：${refreshResult.error}；操作本身已完成，可稍后手动刷新。`
+    }
+  } catch (errorValue) { error.value = messageFor(errorValue) } finally { endOperation(operationKey) }
 }
 
 /** 可切换（含回滚）的历史版本：已安装列表里排除当前活动版本。 */
@@ -404,14 +487,15 @@ function switchableVersions(plugin) {
 
 async function uninstall(plugin, deleteData) {
   if (!globalThis.confirm(uninstallPrompt(plugin, deleteData))) return
-  busy.value = true
+  const operationKey = `uninstall:${plugin.id}`
+  if (!beginOperation(operationKey)) return
   clearMessages()
   try {
-    await props.apiClient.uninstallExtension(plugin.id, plugin.active_version || plugin.version, { deleteData })
-    notice.value = deleteData ? '插件及其用户数据已删除。' : '插件已卸载，用户数据已保留。'
+    const response = await props.apiClient.uninstallExtension(plugin.id, plugin.active_version || plugin.version, { deleteData })
     emit('changed')
-    await refresh()
-  } catch (errorValue) { error.value = messageFor(errorValue) } finally { busy.value = false }
+    const refreshResult = await refresh()
+    showMutationResult(describeExtensionMutation('uninstall', response, { plugin, deleteData }), refreshResult)
+  } catch (errorValue) { error.value = messageFor(errorValue) } finally { endOperation(operationKey) }
 }
 </script>
 
@@ -461,6 +545,14 @@ async function uninstall(plugin, deleteData) {
 .plugin-alert { margin-bottom:12px; padding:9px 11px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:12px; line-height:1.5; white-space:pre-line; }
 .plugin-alert.error { color:var(--danger); border-color:rgba(248,113,113,.45); background:rgba(248,113,113,.08); }
 .plugin-alert.info { color:var(--accent-2); border-color:rgba(56,189,248,.35); background:rgba(56,189,248,.08); }
+.plugin-result { margin-bottom:12px; padding:9px 11px; border:1px solid rgba(74,222,128,.35); border-radius:var(--radius-sm); background:rgba(74,222,128,.08); font-size:12px; line-height:1.5; }
+.plugin-result-operation { color:var(--ok); font-weight:600; }
+.plugin-result-detail { margin-top:3px; }
+.plugin-result-detail.result-success { color:var(--ok); }
+.plugin-result-detail.result-info { color:var(--accent-2); }
+.plugin-result-detail.result-warning { color:var(--warn); }
+.plugin-result-detail.result-danger { color:var(--danger); }
+.plugin-operation-loading { margin-bottom:12px; color:var(--text-2); font-size:12px; }
 .plugin-alert.warning { margin-top:16px; color:var(--warn); border-color:rgba(251,191,36,.35); background:rgba(251,191,36,.08); }
 @media (max-width: 700px) {
   .plugin-center-mask { padding:8px; }

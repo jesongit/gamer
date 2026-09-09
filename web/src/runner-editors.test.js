@@ -71,15 +71,20 @@ describe('gamer.yaml 内置贡献', () => {
     expect(getRunnerEditor(GAMER_YAML_RUNNER_ID)).toBeUndefined()
   })
 
-  it('resolveAppPackages 按 entrypoint 分区前缀推导 app 包名', () => {
+  it('resolveAppPackages 不从 entrypoint 推导；显式 ctx 分离 Android 包名与 Package ID', () => {
     const unregister = registerGamerYamlRunnerEditor()
     const contrib = getRunnerEditor(GAMER_YAML_RUNNER_ID)
-    expect(contrib.resolveAppPackages('com.demo/main.yml', {}, {}))
-      .toEqual({ android_package: 'com.demo', content_package: 'com.demo' })
-    expect(contrib.resolveAppPackages('bare', {}, {}))
-      .toEqual({ android_package: 'bare', content_package: 'bare' })
-    expect(contrib.resolveAppPackages('', {}, {}))
+    // entrypoint 只是 Package 内资源寻址；缺少显式 ctx 时不能从它的首段推导任何包名。
+    expect(contrib.resolveAppPackages('com.demo/main.yml', {}))
       .toEqual({ android_package: '', content_package: null })
+
+    // Android 运行目标来自设备 Context，内容 Package 来自 Package Context，二者严格分离。
+    expect(contrib.resolveAppPackages('com.demo/main.yml', {}, {
+      packageId: 'content.daily',
+      deviceId: 'device-1',
+      androidPackageName: 'com.android.game',
+    }))
+      .toEqual({ android_package: 'com.android.game', content_package: 'content.daily' })
     unregister()
   })
 

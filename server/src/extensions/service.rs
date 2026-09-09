@@ -76,9 +76,13 @@ pub(crate) struct PluginCallContext {
     app_context: Option<crate::core::AppContext>,
 }
 
+#[derive(Clone)]
 struct ProcessRunning {
     token: Uuid,
     app_context: Option<crate::core::AppContext>,
+    /// keymap 的 profile 原文属于一次 start handshake 的运行上下文。
+    /// 管理操作停止后再恢复 Running 时必须复用它，不能静默退回默认映射。
+    keymap_profile: Option<String>,
 }
 
 /// Capability proving that the service has already completed its lifecycle,
@@ -311,7 +315,12 @@ impl ExtensionService {
             .contains_key(id)
     }
 
-    fn mark_process_running(&self, id: &ExtensionId, app_context: Option<crate::core::AppContext>) {
+    fn mark_process_running(
+        &self,
+        id: &ExtensionId,
+        app_context: Option<crate::core::AppContext>,
+        keymap_profile: Option<String>,
+    ) {
         self.process_running
             .lock()
             .expect("process running set poisoned")
@@ -320,8 +329,20 @@ impl ExtensionService {
                 ProcessRunning {
                     token: Uuid::new_v4(),
                     app_context,
+                    keymap_profile,
                 },
             );
+    }
+
+    fn process_start_context(
+        &self,
+        id: &ExtensionId,
+    ) -> Option<(Option<crate::core::AppContext>, Option<String>)> {
+        self.process_running
+            .lock()
+            .expect("process running set poisoned")
+            .get(id)
+            .map(|running| (running.app_context.clone(), running.keymap_profile.clone()))
     }
 
     fn clear_process_running(&self, id: &ExtensionId) {
@@ -1013,7 +1034,11 @@ impl ExtensionService {
     }
 
     /// Update means install a new immutable version and select it as active.
-    /// A running extension must be stopped explicitly before it can update.
+    /// Management owns the full transition: all validation happens before the
+    /// running instance is stopped, then the original lifecycle state is
+    /// restored. A failed install leaves the previous active version running;
+    /// a failed start of the new version rolls the active pointer back before
+    /// attempting to restore the old implementation.
     pub(crate) async fn update(&self, archive: &[u8]) -> ExtensionResult<ExtensionSnapshot> {
         self.update_with_context(
             archive,
@@ -1030,39 +1055,167 @@ impl ExtensionService {
         archive: &[u8],
         context: &ExtensionInstallContext,
     ) -> ExtensionResult<ExtensionSnapshot> {
-        let manifest = self.inspect_compatible(archive)?;
-        let call_gate = self.call_gate(manifest.id());
+        let incoming_manifest = self.inspect_compatible(archive)?;
+        let call_gate = self.call_gate(incoming_manifest.id());
         let _call_gate = call_gate.write().await;
-        let _guard = self.operation_lock.lock().await;
-        let inspection = self.inspect_with_context(archive, context)?;
-        ensure_permission_confirmation(&inspection, context)?;
-        let manifest = inspection.manifest().clone();
-        let mut states = self.store.read_state()?;
-        let versions = self.versions_for(manifest.id())?;
-        if versions.is_empty() {
-            return Err(ExtensionError::NotInstalled {
-                id: manifest.id().to_string(),
-            });
-        }
-        let mut record =
-            state_for_versions(manifest.id(), &versions, states.get(manifest.id()).cloned())?;
-        if record.state.is_running() {
-            return Err(invalid_transition(manifest.id(), "update", record.state));
-        }
-        self.ensure_version_satisfies_running_dependents(manifest.id(), manifest.version())?;
-        self.store.install_archive(archive)?;
-        record.active_version = Some(manifest.version().clone());
-        record.state = match record.state {
-            ExtensionState::Enabled | ExtensionState::Disabled => record.state,
-            ExtensionState::Installed | ExtensionState::Failed | ExtensionState::Running => {
-                ExtensionState::Installed
+
+        let (was_running, restore_context, old_active_version, install_error) = {
+            let _guard = self.operation_lock.lock().await;
+            let inspection = self.inspect_with_context(archive, context)?;
+            ensure_permission_confirmation(&inspection, context)?;
+            let manifest = inspection.manifest().clone();
+            let mut states = self.store.read_state()?;
+            let versions = self.versions_for(manifest.id())?;
+            if versions.is_empty() {
+                return Err(ExtensionError::NotInstalled {
+                    id: manifest.id().to_string(),
+                });
             }
+            let mut record =
+                state_for_versions(manifest.id(), &versions, states.get(manifest.id()).cloned())?;
+            let original_state = record.state;
+            let old_active_version = record.active_version.clone();
+            let was_running = original_state == ExtensionState::Running;
+            let mut restore_context = None;
+            let mut install_error = None;
+
+            // Do not stop a live extension for an operation that is guaranteed
+            // to conflict with an already-installed immutable version.
+            if versions
+                .iter()
+                .any(|candidate| candidate.manifest().version() == manifest.version())
+            {
+                return Err(ExtensionError::AlreadyInstalled {
+                    id: manifest.id().to_string(),
+                    version: manifest.version().to_string(),
+                });
+            }
+
+            // Dependency and host/permission checks deliberately precede this
+            // destructive boundary. A rejected update leaves the old live
+            // instance untouched.
+            self.ensure_version_satisfies_running_dependents(manifest.id(), manifest.version())?;
+
+            if was_running {
+                restore_context = Some(self.process_start_context(manifest.id()).ok_or(
+                    ExtensionError::RuntimeUnavailable("当前进程没有该插件的运行上下文"),
+                )?);
+                self.stop_running_instance(manifest.id()).await?;
+                if let Err(error) = self.unregister_extension_runners(manifest.id()).await {
+                    // The instance is already stopped. Never leave a durable
+                    // Running record pointing at an unavailable process.
+                    record.state = ExtensionState::Enabled;
+                    record.last_error = Some(error.to_string());
+                    states.insert(manifest.id().clone(), record);
+                    self.store.write_state(&states)?;
+                    if let Err(refresh_error) = self.refresh_ui_registry() {
+                        tracing::warn!(
+                            extension = %manifest.id(),
+                            %refresh_error,
+                            "update stop failure: UI registry refresh failed"
+                        );
+                    }
+                    return Err(error);
+                }
+                // Persist the safe intermediate state before touching the
+                // version store. This also makes a process interruption during
+                // update recover as Enabled rather than stale Running.
+                record.state = ExtensionState::Enabled;
+                record.last_error = None;
+                states.insert(manifest.id().clone(), record.clone());
+                self.store.write_state(&states)?;
+                self.refresh_ui_registry()?;
+            }
+
+            match self.store.install_archive(archive) {
+                Ok(_) => {
+                    record.active_version = Some(manifest.version().clone());
+                    record.state = match original_state {
+                        ExtensionState::Enabled | ExtensionState::Disabled => original_state,
+                        ExtensionState::Installed
+                        | ExtensionState::Failed
+                        | ExtensionState::Running => ExtensionState::Installed,
+                    };
+                    if was_running {
+                        // start_with_context_locked below will publish Running
+                        // only after the new runner/instance is ready.
+                        record.state = ExtensionState::Enabled;
+                    }
+                    record.last_error = None;
+                    states.insert(manifest.id().clone(), record);
+                    self.store.write_state(&states)?;
+                    self.refresh_ui_registry()?;
+                }
+                Err(error) => {
+                    install_error = Some(error);
+                }
+            }
+            (
+                was_running,
+                restore_context,
+                old_active_version,
+                install_error,
+            )
         };
-        record.last_error = None;
-        states.insert(manifest.id().clone(), record);
-        self.store.write_state(&states)?;
-        self.refresh_ui_registry()?;
-        self.snapshot_for(manifest.id())
+
+        if let Some(error) = install_error {
+            if was_running {
+                let (app_context, keymap_profile) =
+                    restore_context.expect("running update must retain its start context");
+                return Err(self
+                    .restore_running_after_management_failure(
+                        &incoming_manifest.id().clone(),
+                        app_context,
+                        keymap_profile,
+                        error,
+                    )
+                    .await);
+            }
+            return Err(error);
+        }
+
+        if !was_running {
+            return self.snapshot_for(incoming_manifest.id());
+        }
+
+        let (app_context, keymap_profile) =
+            restore_context.expect("running update must retain its start context");
+        match self
+            .start_with_context_locked(
+                incoming_manifest.id(),
+                app_context.clone(),
+                keymap_profile.clone(),
+            )
+            .await
+        {
+            Ok(snapshot) => Ok(snapshot),
+            Err(start_error) => {
+                let old_version =
+                    old_active_version.expect("validated extension record has an active version");
+                if let Err(rollback_error) = self
+                    .rollback_active_version(incoming_manifest.id(), &old_version, &start_error)
+                    .await
+                {
+                    return Err(ExtensionError::Runtime(format!(
+                        "插件更新到 {} 后恢复启动失败，且回滚旧版本 {} 的状态失败：新版本错误={start_error}；回滚错误={rollback_error}",
+                        incoming_manifest.version(), old_version
+                    )));
+                }
+                let failure = ExtensionError::Runtime(format!(
+                    "插件更新到 {} 未完成：新版本恢复启动失败，已保留旧版本 {}：{start_error}",
+                    incoming_manifest.version(),
+                    old_version
+                ));
+                Err(self
+                    .restore_running_after_management_failure(
+                        incoming_manifest.id(),
+                        app_context,
+                        keymap_profile,
+                        failure,
+                    )
+                    .await)
+            }
+        }
     }
 
     /// 切换 active_version 指针（版本回滚/前滚）。不复制、不删除任何版本
@@ -1265,6 +1418,7 @@ impl ExtensionService {
             Err(error) => return self.mark_start_failed(id, states, record, error).await,
         };
         let process_app_context = app_context.clone();
+        let process_keymap_profile = keymap_profile.clone();
         let wasm = if self.instance_free(id) {
             None
         } else {
@@ -1356,7 +1510,7 @@ impl ExtensionService {
         // Publish process ownership before the durable write. This closes the
         // tiny window where a concurrent startup reconcile could observe the
         // newly persisted Running record but not yet know this process owns it.
-        self.mark_process_running(id, process_app_context);
+        self.mark_process_running(id, process_app_context, process_keymap_profile);
         let mut running_record = record.clone();
         running_record.state = ExtensionState::Running;
         running_record.last_error = None;
@@ -1582,78 +1736,138 @@ impl ExtensionService {
     ) -> ExtensionResult<bool> {
         let call_gate = self.call_gate(id);
         let _call_gate = call_gate.write().await;
-        let _guard = self.operation_lock.lock().await;
-        let mut states = self.store.read_state()?;
-        let versions = self.versions_for(id)?;
-        let record = state_for_versions(id, &versions, states.get(id).cloned())?;
-        let is_active = record.active_version.as_ref() == Some(version);
-        if !versions
-            .iter()
-            .any(|candidate| candidate.manifest().version() == version)
-        {
-            return Err(ExtensionError::VersionNotInstalled {
-                id: id.to_string(),
-                version: version.to_string(),
-            });
-        }
-        if is_active && record.state.is_running() {
-            // Report a dependency violation before the local lifecycle error
-            // so the caller gets the concrete running dependents it must stop.
-            // The replacement version is considered below; this avoids
-            // rejecting a compatible active-version replacement merely because
-            // a required dependent is currently Running.
-            let next_active = versions
+
+        let (was_running, restore_context, removal_error, removed) = {
+            let _guard = self.operation_lock.lock().await;
+            let mut states = self.store.read_state()?;
+            let versions = self.versions_for(id)?;
+            let mut record = state_for_versions(id, &versions, states.get(id).cloned())?;
+            let is_active = record.active_version.as_ref() == Some(version);
+            if !versions
                 .iter()
-                .filter(|candidate| candidate.manifest().version() != version)
-                .map(|candidate| candidate.manifest().version())
-                .max();
-            self.ensure_provider_transition(id, next_active)?;
-            return Err(invalid_transition(id, "uninstall", record.state));
-        }
-        // Removing an inactive immutable version cannot affect callers using
-        // the active version. Removing the active version is a provider
-        // transition: either no provider remains or the replacement active
-        // version must satisfy every running required dependent.
-        let next_active = if is_active {
-            versions
-                .iter()
-                .filter(|candidate| candidate.manifest().version() != version)
-                .map(|candidate| candidate.manifest().version())
-                .max()
-        } else {
-            None
-        };
-        if is_active {
-            self.ensure_provider_transition(id, next_active)?;
-        }
-        // ADR-13 卸载清场：Running 已被上方守卫拒绝，正常路径 owner 名下本就
-        // 无 runner（stop/disable 已注销）；此处兜底摘除，幂等 no-op。
-        if is_active {
-            self.unregister_extension_runners(id).await?;
-            self.clear_process_running(id);
-        }
-        if !self.store.remove_version(id, version)? {
-            return Ok(false);
-        }
-        let remaining = self.versions_for(id)?;
-        if remaining.is_empty() {
-            states.remove(id);
-        } else {
-            let mut next_record = record;
-            if next_record.active_version.as_ref() == Some(version) {
-                next_record.active_version = Some(
-                    remaining
-                        .iter()
-                        .map(|extension| extension.manifest().version().clone())
-                        .max()
-                        .expect("remaining versions is non-empty"),
-                );
+                .any(|candidate| candidate.manifest().version() == version)
+            {
+                return Err(ExtensionError::VersionNotInstalled {
+                    id: id.to_string(),
+                    version: version.to_string(),
+                });
             }
-            states.insert(id.clone(), next_record);
+
+            // Removing an inactive immutable version cannot affect callers
+            // using the active version. Removing the active version is a
+            // provider transition: either no provider remains or the
+            // replacement active version must satisfy every running required
+            // dependent. Keep this guard before the stop boundary.
+            let next_active = if is_active {
+                versions
+                    .iter()
+                    .filter(|candidate| candidate.manifest().version() != version)
+                    .map(|candidate| candidate.manifest().version())
+                    .max()
+            } else {
+                None
+            };
+            if is_active {
+                self.ensure_provider_transition(id, next_active)?;
+            }
+
+            let was_running = is_active && record.state.is_running();
+            let mut restore_context = None;
+            let mut removal_error = None;
+            let mut removed = false;
+            if was_running {
+                restore_context = Some(self.process_start_context(id).ok_or(
+                    ExtensionError::RuntimeUnavailable("当前进程没有该插件的运行上下文"),
+                )?);
+                self.stop_running_instance(id).await?;
+                if let Err(error) = self.unregister_extension_runners(id).await {
+                    // The instance is already stopped. Persist the safe state
+                    // and leave the version/data untouched for a retry.
+                    record.state = ExtensionState::Enabled;
+                    record.last_error = Some(error.to_string());
+                    states.insert(id.clone(), record);
+                    self.store.write_state(&states)?;
+                    if let Err(refresh_error) = self.refresh_ui_registry() {
+                        tracing::warn!(
+                            extension = %id,
+                            %refresh_error,
+                            "uninstall stop failure: UI registry refresh failed"
+                        );
+                    }
+                    return Err(error);
+                }
+                // The active version is still present until remove_version
+                // succeeds, so a failure below can restore the old Running
+                // implementation without touching user data.
+                record.state = ExtensionState::Enabled;
+                record.last_error = None;
+                states.insert(id.clone(), record.clone());
+                self.store.write_state(&states)?;
+                self.refresh_ui_registry()?;
+            }
+
+            match self.store.remove_version(id, version) {
+                Ok(true) => {
+                    removed = true;
+                    let remaining = self.versions_for(id)?;
+                    if remaining.is_empty() {
+                        states.remove(id);
+                    } else {
+                        if record.active_version.as_ref() == Some(version) {
+                            record.active_version = Some(
+                                remaining
+                                    .iter()
+                                    .map(|extension| extension.manifest().version().clone())
+                                    .max()
+                                    .expect("remaining versions is non-empty"),
+                            );
+                        }
+                        // Running is republished only after the replacement
+                        // instance/runner starts successfully below.
+                        states.insert(id.clone(), record);
+                    }
+                    self.store.write_state(&states)?;
+                    self.refresh_ui_registry()?;
+                }
+                Ok(false) => return Ok(false),
+                Err(error) => removal_error = Some(error),
+            }
+            (was_running, restore_context, removal_error, removed)
+        };
+
+        if let Some(error) = removal_error {
+            if was_running {
+                let (app_context, keymap_profile) =
+                    restore_context.expect("running uninstall must retain its start context");
+                return Err(self
+                    .restore_running_after_management_failure(
+                        id,
+                        app_context,
+                        keymap_profile,
+                        error,
+                    )
+                    .await);
+            }
+            return Err(error);
         }
-        self.store.write_state(&states)?;
-        self.refresh_ui_registry()?;
-        Ok(true)
+
+        // Removing the last installed version is a complete uninstall. There
+        // is no replacement implementation to restore, so do not turn a
+        // successful removal into a spurious "restore failed" error.
+        if removed && was_running && !self.versions_for(id)?.is_empty() {
+            let (app_context, keymap_profile) =
+                restore_context.expect("running uninstall must retain its start context");
+            if let Err(start_error) = self
+                .start_with_context_locked(id, app_context, keymap_profile)
+                .await
+            {
+                return Err(ExtensionError::Runtime(format!(
+                    "插件版本 {} 已卸载，但替代版本恢复启动失败，插件已安全保留为不可运行状态：{start_error}",
+                    version
+                )));
+            }
+        }
+        Ok(removed)
     }
 
     fn inspect_compatible(&self, archive: &[u8]) -> ExtensionResult<ExtensionManifest> {
@@ -1770,6 +1984,62 @@ impl ExtensionService {
         self.store.write_state(&states)?;
         self.refresh_ui_registry()?;
         self.snapshot_for(id)
+    }
+
+    /// Restore the previous active implementation after a management
+    /// operation failed after its stop boundary. The caller still holds the
+    /// per-extension write gate, but not the global operation lock.
+    async fn restore_running_after_management_failure(
+        &self,
+        id: &ExtensionId,
+        app_context: Option<crate::core::AppContext>,
+        keymap_profile: Option<String>,
+        failure: ExtensionError,
+    ) -> ExtensionError {
+        match self
+            .start_with_context_locked(id, app_context, keymap_profile)
+            .await
+        {
+            Ok(_) => failure,
+            Err(restore_error) => ExtensionError::Runtime(format!(
+                "管理操作失败：{failure}；原 Running 插件恢复启动失败：{restore_error}"
+            )),
+        }
+    }
+
+    /// Keep the old immutable version available when a newly installed
+    /// version cannot be started. The new directory remains side-by-side for
+    /// explicit inspection/activation, but it is never left as the active
+    /// implementation after this rollback.
+    async fn rollback_active_version(
+        &self,
+        id: &ExtensionId,
+        old_version: &ExtensionVersion,
+        error: &ExtensionError,
+    ) -> ExtensionResult<()> {
+        let _guard = self.operation_lock.lock().await;
+        let mut states = self.store.read_state()?;
+        let versions = self.versions_for(id)?;
+        if !versions
+            .iter()
+            .any(|candidate| candidate.manifest().version() == old_version)
+        {
+            return Err(ExtensionError::VersionNotInstalled {
+                id: id.to_string(),
+                version: old_version.to_string(),
+            });
+        }
+        let mut record = state_for_versions(id, &versions, states.get(id).cloned())?;
+        record.active_version = Some(old_version.clone());
+        record.state = ExtensionState::Enabled;
+        record.last_error = Some(format!(
+            "新版本启动失败，已回滚旧版本 {}：{error}",
+            old_version
+        ));
+        states.insert(id.clone(), record);
+        self.store.write_state(&states)?;
+        self.refresh_ui_registry()?;
+        Ok(())
     }
 
     async fn rollback_started_instance(&self, id: &ExtensionId, handle: Option<RunningHandle>) {
@@ -2109,6 +2379,9 @@ fn declarative_actions(manifest: &ExtensionManifest) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[path = "../../service_m01_tests.rs"]
+    mod m01_tests;
+
     use super::*;
     use std::io::Write as _;
 

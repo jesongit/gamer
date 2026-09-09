@@ -22,6 +22,16 @@ export function createPinyinInitials() {
   }
 }
 
+/** 函数库文件短名：允许 API 返回 file 或相对 path 两种列表形态。 */
+export function functionFileCategory(file) {
+  const raw = String(file || '').split('/').pop() || ''
+  return raw.replace(/\.yaml$/i, '')
+}
+
+export function isDefaultFunctionFile(file) {
+  return functionFileCategory(file) === '_function'
+}
+
 /**
  * 函数库文件列表 → 全部函数视图列表 [{fileId, category, name, model}]。
  * category = 文件短名（去 .yaml 后缀；默认库 = `_function`，手动拆分文件如
@@ -37,14 +47,20 @@ export function buildFunctionViews(files, parseFunctionFile) {
     } catch {
       continue
     }
-    const functions = parsed?.model?.functions
-    if (!Array.isArray(functions)) continue
-    const category = String(file.file || '').replace(/\.yaml$/i, '')
-    for (const fn of functions) {
+    const parsedFunctions = Array.isArray(parsed?.model?.functions) ? parsed.model.functions : []
+    // 列表接口通常带 content；若某个后端响应只带 annotate 的函数名，仍让
+    // 补全/只读列表可见，后续参数 Schema 再按需读取完整文件。
+    const names = parsedFunctions.length
+      ? parsedFunctions.map(fn => fn.name)
+      : (Array.isArray(file.functions) ? file.functions.filter(Boolean) : [])
+    if (!names.length) continue
+    const category = functionFileCategory(file.file || file.path || '')
+    for (const name of names) {
+      const fn = parsedFunctions.find(item => item.name === name) || { name, params: [], run: [] }
       views.push({
         fileId: file.id,
         category,
-        name: fn.name,
+        name,
         model: { params: fn.params || [], run: fn.run || [] },
       })
     }

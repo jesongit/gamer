@@ -546,13 +546,20 @@ watch(remoteKeymapRunning, running => {
 const workspaceContext = createWorkspaceContext({
   device: current,
   deviceId: computed(() => store.deviceId),
-  activePackage: currentPackageId,
+  androidPackageName: computed(() => currentApplication.value?.pkg || ''),
+  currentPackageId,
+  activePluginId: computed(() => {
+    const key = String(activePanelKey.value || '')
+    if (!key || key === 'market' || key === 'plugins' || key.startsWith('gamer.core:')) return ''
+    return key.split(':', 1)[0] || ''
+  }),
   connected,
   stage: {
     selectRegion: selectRegionForBridge,
     pickPoint: () => beginCellPick('coord'),
     overlay: { show: showBridgeOverlay, clear: clearBridgeOverlay },
   },
+  stageContext: stageCtl.view,
   openPanel,
   toast,
   dialogConfirm: message => window.confirm(message),

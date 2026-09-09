@@ -213,17 +213,48 @@ mod tests {
         bytes
     }
 
-    #[derive(Default)]
     struct CountingRuntime {
         starts: Mutex<usize>,
         stops: Mutex<usize>,
+        expected_versions: Vec<String>,
+    }
+
+    impl Default for CountingRuntime {
+        fn default() -> Self {
+            Self {
+                starts: Mutex::new(0),
+                stops: Mutex::new(0),
+                expected_versions: vec!["1.0.0".to_string()],
+            }
+        }
+    }
+
+    impl CountingRuntime {
+        fn accepting_versions<I, S>(versions: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<String>,
+        {
+            Self {
+                starts: Mutex::new(0),
+                stops: Mutex::new(0),
+                expected_versions: versions.into_iter().map(Into::into).collect(),
+            }
+        }
     }
 
     #[async_trait]
     impl WasmRuntime for CountingRuntime {
         async fn start(&self, request: WasmStartRequest) -> ExtensionResult<WasmInstanceHandle> {
             assert_eq!(request.id.as_str(), "com.example.extension");
-            assert_eq!(request.version.as_str(), "1.0.0");
+            assert!(
+                self.expected_versions
+                    .iter()
+                    .any(|version| version == request.version.as_str()),
+                "unexpected test runtime version: {} (expected one of {:?})",
+                request.version,
+                self.expected_versions
+            );
             assert!(request.host.api_version(HostApiDomain::Device).is_some());
             *self.starts.lock().unwrap() += 1;
             Ok(WasmInstanceHandle::new())
@@ -531,11 +562,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn running_extension_cannot_be_updated_or_uninstalled() {
+    async fn running_extension_update_and_active_uninstall_restore_previous_version() {
         let temp = TempDir::new().unwrap();
+        let runtime = Arc::new(CountingRuntime::accepting_versions(["1.0.0", "1.1.0"]));
         let service = ExtensionService::new(
             ExtensionStore::new(temp.path()),
-            Arc::new(CountingRuntime::default()),
+            runtime.clone(),
             CapabilityRegistry::default(),
         );
         let first = archive(
@@ -549,16 +581,21 @@ mod tests {
             &manifest("com.example.extension", "1.1.0", &[], "^1.0"),
             VALID_WASM,
         );
-        assert!(matches!(
-            service.update(&second).await,
-            Err(ExtensionError::InvalidTransition { .. })
-        ));
-        assert!(matches!(
-            service
-                .uninstall(installed.id(), &ExtensionVersion::parse("1.0.0").unwrap())
-                .await,
-            Err(ExtensionError::InvalidTransition { .. })
-        ));
+        let updated = service.update(&second).await.unwrap();
+        assert_eq!(updated.active_version().as_str(), "1.1.0");
+        assert_eq!(updated.state(), ExtensionState::Running);
+        assert_eq!(*runtime.starts.lock().unwrap(), 2);
+        assert_eq!(*runtime.stops.lock().unwrap(), 1);
+        assert!(service
+            .uninstall(installed.id(), &ExtensionVersion::parse("1.1.0").unwrap())
+            .await
+            .unwrap());
+        let restored = service.snapshot_for(installed.id()).unwrap();
+        assert_eq!(restored.active_version().as_str(), "1.0.0");
+        assert_eq!(restored.state(), ExtensionState::Running);
+        assert_eq!(restored.installed_versions().len(), 1);
+        assert_eq!(*runtime.starts.lock().unwrap(), 3);
+        assert_eq!(*runtime.stops.lock().unwrap(), 2);
     }
 
     /// UI 贡献只在 Running 可见（Phase 1 语义收紧）：Enabled 不再出现面板、

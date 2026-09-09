@@ -28,6 +28,7 @@ import { CODES, diag, type Diagnostic } from './diagnostics'
 import {
   isIdentifier,
   isRefPath,
+  hasParamDefault,
   normalizeParamType,
   PARAM_TYPES,
   parseTimeMs,
@@ -132,6 +133,11 @@ function fallbackScalar(v: unknown): string {
 function cellInline(cell: Cell | null | undefined): string {
   if (cell === null || cell === undefined) return 'null'
   if (isRefCell(cell)) return `$${cell.ref}`
+  // V1 中以 `$` 开头的字面量必须再加一层 `$`，否则下一次解析会被
+  // exprCell 误判为变量引用（例如模型字面量 `$literal` → YAML `$$literal`）。
+  if (typeof cell.lit === 'string' && cell.lit.startsWith('$')) {
+    return plainScalar(`$${cell.lit}`)
+  }
   return fallbackScalar(cell.lit)
 }
 
@@ -191,7 +197,7 @@ function emitParamDecls(decls: ParamDecl[], col: number, lines: string[]): void 
     lines.push(`${' '.repeat(col)}${plainScalar(decl.name)}:`)
     lines.push(`${' '.repeat(col + 2)}type: ${plainScalar(decl.type)}`)
     if (decl.required) lines.push(`${' '.repeat(col + 2)}required: true`)
-    if (decl.default !== null && decl.default !== undefined) {
+    if (hasParamDefault(decl)) {
       lines.push(`${' '.repeat(col + 2)}default: ${fallbackScalar(decl.default)}`)
     }
     if (decl.desc !== '') {
@@ -501,7 +507,8 @@ export function parseParamDecls(node: unknown, basePath: string, diags: Diagnost
           else diags.push(diag(CODES.paramsType, `${basePath}.${name}.required`, 'required', `参数 ${name} 的 required 必须是布尔值`))
           break
         case 'default':
-          defaultValue = map.default ?? null
+          // 不使用 ??：false、0、空字符串和显式 null 都是 YAML 的真实值。
+          defaultValue = map.default
           hasDefault = true
           break
         case 'desc':
@@ -513,10 +520,11 @@ export function parseParamDecls(node: unknown, basePath: string, diags: Diagnost
       diags.push(diag(CODES.paramsType, `${basePath}.${name}.type`, 'type', `参数 ${name} 缺少 type`))
       continue
     }
-    if (hasDefault && defaultValue !== null) {
-      // 默认值类型校验归校验层（checkLiteral），这里原样保留
-    }
-    decls.push({ name, type, required, default: defaultValue, desc })
+    // 有默认值时 required 在编辑模型中统一降为 false；显式 null 额外
+    // 标记存在性，以免与未声明 default 混淆。
+    const decl: ParamDecl = { name, type, required: required && !hasDefault, default: defaultValue, desc }
+    if (hasDefault && defaultValue === null) decl.hasDefault = true
+    decls.push(decl)
   }
   return decls
 }

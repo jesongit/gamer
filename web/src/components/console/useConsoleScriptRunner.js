@@ -29,10 +29,6 @@ import { buildFunctionViews, filterFunctionViews, createPinyinInitials } from '.
  * 运行轮询是同一设备的同一份机制，保持单例共享。
  */
 
-// 脚本列表加载（gamer.yaml 面板实现自持，Console 壳不再预拉业务资源）：
-// inflight 去重 + 共享 store（与任务表单贡献的懒加载互通——store 非空即跳过）。
-let scriptsInflight = null
-
 export function useConsoleScriptRunner({
   toast,
   packageId,
@@ -41,6 +37,11 @@ export function useConsoleScriptRunner({
   tplShortName,
   loadData,
 }) {
+  // 资源请求属于当前 hook 实例；Package 切换时递增序号，旧响应不能回写全局候选。
+  let scriptsInflight = null
+  let scriptsInflightPackage = ''
+  let scriptsRequestSeq = 0
+
   // 面板作用域：每个面板锁定自己的资源类型与编辑模式
   function createPanelScope(kind) {
     return {
@@ -53,12 +54,33 @@ export function useConsoleScriptRunner({
   const funcScope = createPanelScope('func')
 
   async function refreshScripts() {
-    if (!scriptsInflight) {
-      scriptsInflight = api.listScripts(packageId.value)
-        .then(list => { scriptsData.value = Array.isArray(list) ? list : [] })
-        .finally(() => { scriptsInflight = null })
+    const requestedPackage = String(packageId.value || '').trim()
+    if (!requestedPackage) {
+      scriptsRequestSeq += 1
+      scriptsInflight = null
+      scriptsInflightPackage = ''
+      scriptsData.value = []
+      return []
     }
-    return scriptsInflight
+    if (scriptsInflight && scriptsInflightPackage === requestedPackage) return scriptsInflight
+
+    const requestSeq = ++scriptsRequestSeq
+    scriptsInflightPackage = requestedPackage
+    const request = api.listScripts(requestedPackage)
+      .then(list => {
+        if (requestSeq === scriptsRequestSeq && String(packageId.value || '').trim() === requestedPackage) {
+          scriptsData.value = Array.isArray(list) ? list : []
+        }
+        return list
+      })
+      .finally(() => {
+        if (requestSeq === scriptsRequestSeq) {
+          scriptsInflight = null
+          scriptsInflightPackage = ''
+        }
+      })
+    scriptsInflight = request
+    return request
   }
   refreshScripts().catch(() => { /* 拉取失败：面板内提示「（无脚本）」等空态 */ })
 
@@ -66,8 +88,11 @@ export function useConsoleScriptRunner({
   // 模型/命令栈/dirty/保存/409 冲突/校验/跳转全部收敛在 useScriptEditorShell，
   // 两个面板的编辑态共用同一外壳（任一时刻只有一个面板可见）。
   // resolvers 提供模板存在性校验（call/func 资源与 args 绑定检查需要目标参数表，客户端暂缺、由服务端权威校验）
+  // codec.serialize 已是函数库与脚本共用的唯一 V1 序列化入口；函数库保存
+  // 直接使用外壳传入的规范文本，不能在此重复转义 `$` 字面量。
+  const editorShellApi = createEditorShellApi(api)
   const scriptShell = useScriptEditorShell({
-    api: createEditorShellApi(api),
+    api: editorShellApi,
     getContext: () => ({
       resolveTemplate: (n) => {
         const list = templatesData.value.filter(t => t.pkg === packageId.value)
@@ -76,6 +101,13 @@ export function useConsoleScriptRunner({
     }),
   })
   const rawEditor = useRawYamlEditor({ api })
+  // 原文编辑器是两个面板共享的单实例。请求排队保证快速切换时迟到的旧
+  // GET 不会覆盖最后一次选择；独立快照用于弥补 raw composable 在请求期间
+  // 文本发生变化时无法区分“已保存快照”和“新编辑”的限制。
+  let rawLoadSeq = 0
+  let rawLoadTail = Promise.resolve()
+  let rawSavedSnapshot = ''
+  let rawSaveInflight = null
   // 函数库列表与 func 目标解析（func 步骤「打开函数定义」跳转用）
   const fnLib = useFunctionLibrary({ api })
   /** 各面板目标选择（面板独立）。函数面板无「选中文件」态：函数以个体为单位
@@ -150,14 +182,31 @@ export function useConsoleScriptRunner({
       group: 'plugin',
       hint: f.description || '',
     }))
-    const live = scriptShell.kind === 'function_library' && scriptShell.hasModel && Array.isArray(scriptShell.model.functions)
-      ? scriptShell.model.functions.map(f => f.name)
-      : null
-    const fnOpts = fnLib.list.flatMap(f => {
-      const names = live && f.id === scriptShell.resourceId ? live : (Array.isArray(f.functions) ? f.functions : [])
-      return names.map(n => ({ target: n, label: n, group: 'package' }))
-    })
-    // 同名冲突不静默：Package 函数与原生函数同名时服务端拒绝运行，此处去重提示
+    const liveFunctions = scriptShell.kind === 'function_library' && scriptShell.hasModel && Array.isArray(scriptShell.model.functions)
+      ? scriptShell.model.functions
+      : []
+    const liveByName = new Map(liveFunctions.map(f => [f.name, f]))
+    const fnOpts = []
+    const packageNames = new Set()
+    for (const file of fnLib.list) {
+      const names = file.id === scriptShell.resourceId && liveFunctions.length
+        ? liveFunctions.map(f => f.name)
+        : fnLib.namesFor(file)
+      for (const name of names) {
+        if (!name || packageNames.has(name)) continue
+        packageNames.add(name)
+        fnOpts.push({ target: name, label: name, group: 'package' })
+      }
+    }
+    // 新建尚未落盘的默认函数库没有列表条目，也必须立即进入补全。
+    for (const name of liveByName.keys()) {
+      if (!packageNames.has(name)) {
+        packageNames.add(name)
+        fnOpts.push({ target: name, label: name, group: 'package' })
+      }
+    }
+    // 同名冲突不静默：Package 函数与原生函数同名时服务端拒绝运行，此处只保留
+    // 一个稳定候选，避免下拉出现两个无法区分的同名项。
     const seen = new Set(nativeOpts.map(o => o.target))
     return [...nativeOpts, ...fnOpts.filter(o => (seen.has(o.target) ? false : true))]
   })
@@ -170,16 +219,24 @@ export function useConsoleScriptRunner({
     if (!name) return null
     const native = nativeFunctions.value.find(f => f.name === name)
     if (native) return native.params || []
+    // 当前可视化编辑中的函数优先于已加载快照；这覆盖新建函数和未保存参数。
+    if (scriptShell.kind === 'function_library' && scriptShell.hasModel) {
+      const live = scriptShell.model.functions?.find(f => f.name === name)
+      if (live) return live.params || []
+    }
     for (const entry of fnLib.list) {
-      if (!entry.content) continue
-      const byName = fnParamsByName(entry)
-      if (byName.has(name)) return byName.get(name)
+      if (fnLib.namesFor(entry).includes(name)) {
+        if (typeof entry.content !== 'string' || !entry.content) continue
+        const byName = fnParamsByName(entry)
+        if (byName.has(name)) return byName.get(name)
+      }
     }
     return null
   }
 
   function fnParamsByName(entry) {
-    const memoKey = `${entry.file}@${entry.version || (entry.content || '').length}`
+    // 没有 version 的测试/旧列表也不能用内容长度作缓存键；同长度改稿必须失效。
+    const memoKey = `${entry.id || entry.file || ''}@${entry.version || ''}@${entry.content || ''}`
     let byName = fnParamsMemo.get(memoKey)
     if (!byName) {
       const parsed = parseFunctionLibrary(entry.content ?? '', { file: entry.file || '' })
@@ -195,7 +252,14 @@ export function useConsoleScriptRunner({
   }
 
   async function resolveTargetParams(target) {
-    return resolveTargetParamsSync(target)
+    const cached = resolveTargetParamsSync(target)
+    if (cached) return cached
+    const entry = fnLib.findByName(target)
+    if (!entry) return null
+    const loaded = await fnLib.loadFile(entry.id)
+    if (!loaded || typeof loaded.content !== 'string') return null
+    const byName = fnParamsByName({ ...entry, ...loaded })
+    return byName.get(String(target || '')) || null
   }
 
   function clearCallParamsCache() {
@@ -314,6 +378,19 @@ export function useConsoleScriptRunner({
     return editCurrentScript()
   }
 
+  function loadRawSession(kind, id) {
+    const seq = ++rawLoadSeq
+    const request = rawLoadTail.catch(() => {}).then(async () => {
+      // 若请求尚未开始时已经有更新选择，直接跳过旧目标；正在进行的请求
+      // 会自然完成，随后队列中的最后目标再成为编辑器内容。
+      if (seq !== rawLoadSeq) return null
+      const data = await rawEditor.load(kind, id)
+      return seq === rawLoadSeq ? data : null
+    })
+    rawLoadTail = request.catch(() => {})
+    return request
+  }
+
   /** 进入原文编辑态：直接读取资源原文，不经过前端 YAML codec，保存仍由服务端校验。
    *  函数面板仅默认函数库可原文编辑；脚本面板编辑当前脚本。 */
   async function editRawCurrentTarget(scope, view = null) {
@@ -323,27 +400,57 @@ export function useConsoleScriptRunner({
       return toast(`函数库 ${view?.category || ''} 为手动拆分文件，仅供查看；编辑请整理进默认 _function.yaml`, 'warn')
     }
     scope.scriptMode.value = 'raw'
+    const loadSeqAtStart = rawLoadSeq + 1
     try {
-      await rawEditor.load(scope.kind === 'func' ? 'function' : 'script', id)
+      const data = await loadRawSession(scope.kind === 'func' ? 'function' : 'script', id)
+      if (!data) return
+      rawSavedSnapshot = data.content ?? ''
     } catch (e) {
-      rawEditor.reset()
-      scope.scriptMode.value = 'run'
-      toast('原文加载失败：' + e.message, 'error')
+      if (rawLoadSeq === loadSeqAtStart) {
+        rawEditor.reset()
+        rawSavedSnapshot = ''
+        scope.scriptMode.value = 'run'
+        toast('原文加载失败：' + e.message, 'error')
+      }
     }
   }
 
   /** 原文保存成功后刷新对应资源列表，避免摘要、函数候选和参数缓存继续使用旧内容。 */
   async function saveRawScript(scope) {
-    if (rawEditor.loading.value || rawEditor.saving.value) return
-    const r = await rawEditor.save()
+    if (rawSaveInflight || rawEditor.loading.value || rawEditor.saving.value) return rawSaveInflight
+    const contentAtStart = rawEditor.content.value
+    const sessionAtStart = {
+      kind: rawEditor.kind.value,
+      id: rawEditor.resourceId.value,
+    }
+    const pending = rawEditor.save().then(r => ({
+      ...r,
+      _contentAtStart: contentAtStart,
+      _sessionAtStart: sessionAtStart,
+    }))
+    rawSaveInflight = pending
+    pending.finally(() => {
+      if (rawSaveInflight === pending) rawSaveInflight = null
+    }).catch(() => {})
+    const r = await pending
+    if (r._sessionAtStart.id !== rawEditor.resourceId.value || r._sessionAtStart.kind !== rawEditor.kind.value) return r
     if (r.ok) {
       clearCallParamsCache()
       fnParamsMemo.clear()
+      const changedDuringSave = rawEditor.content.value !== r._contentAtStart
       if (rawEditor.kind.value === 'function') await fnLib.refresh(packageId.value)
       else await refreshScripts()
-      rawEditor.reset()
-      scope.scriptMode.value = 'run'
-      toast('原文已保存', 'success')
+      rawSavedSnapshot = changedDuringSave ? rawSavedSnapshot : r._contentAtStart
+      if (!changedDuringSave) {
+        rawEditor.reset()
+        rawSavedSnapshot = ''
+        scope.scriptMode.value = 'run'
+        toast('原文已保存', 'success')
+      } else {
+        // 服务端已保存请求开始时的快照，期间的新文本仍留在编辑器内，
+        // 用户可以继续保存，不把新编辑误报为已完成。
+        toast('已保存先前原文；当前新修改仍未保存', 'warn')
+      }
     } else if (r.reason === 'invalid') {
       toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
     } else if (r.reason === 'conflict') {
@@ -355,7 +462,9 @@ export function useConsoleScriptRunner({
 
   /** 取消原文编辑：有修改时确认丢弃，回到资源运行视图。 */
   function cancelRawScript(scope) {
+    rawLoadSeq += 1
     rawEditor.reset()
+    rawSavedSnapshot = ''
     scope.scriptMode.value = 'run'
   }
 
@@ -397,6 +506,18 @@ export function useConsoleScriptRunner({
     }
   }
 
+  const functionMutationInflight = new Map()
+  function withFunctionMutation(id, work) {
+    const key = String(id || '')
+    if (functionMutationInflight.has(key)) return functionMutationInflight.get(key)
+    const pending = Promise.resolve().then(work)
+    functionMutationInflight.set(key, pending)
+    pending.finally(() => {
+      if (functionMutationInflight.get(key) === pending) functionMutationInflight.delete(key)
+    }).catch(() => {})
+    return pending
+  }
+
   /** 函数列表操作共用：定位默认函数库文件、修改模型并按版本更新，完成后刷新函数库快照。 */
   async function updateFunctionFile(view, mutator, successMessage) {
     if (!isInDefaultLibrary(view)) {
@@ -408,33 +529,35 @@ export function useConsoleScriptRunner({
       toast('函数所在函数库不存在，请刷新列表', 'warn')
       return false
     }
-    let parsed
-    try {
-      parsed = fnLib.parseFunctionFile(f.content ?? '', f.file || '')
-    } catch (e) {
-      toast('函数库解析失败：' + e.message, 'error')
-      return false
-    }
-    if (!parsed?.model || parsed.diagnostics?.length) {
-      toast('该函数库当前内容无法修改，请先进编辑态修复诊断', 'error')
-      return false
-    }
-    const changed = mutator(parsed.model)
-    if (!changed) return false
-    try {
-      await api.updateFunction(f.id, {
-        content: serialize(parsed.model),
-        expected_version: f.version,
-      })
-      await fnLib.refresh(packageId.value)
-      fnParamsMemo.clear()
-      clearCallParamsCache()
-      toast(successMessage, 'success')
-      return true
-    } catch (e) {
-      toast('函数更新失败：' + e.message, 'error')
-      return false
-    }
+    return withFunctionMutation(f.id, async () => {
+      let parsed
+      try {
+        parsed = fnLib.parseFunctionFile(f.content ?? '', f.file || '')
+      } catch (e) {
+        toast('函数库解析失败：' + e.message, 'error')
+        return false
+      }
+      if (!parsed?.model || parsed.diagnostics?.length) {
+        toast('该函数库当前内容无法修改，请先进编辑态修复诊断', 'error')
+        return false
+      }
+      const changed = mutator(parsed.model)
+      if (!changed) return false
+      try {
+        await api.updateFunction(f.id, {
+          content: serialize(parsed.model),
+          expected_version: f.version,
+        })
+        await fnLib.refresh(packageId.value)
+        fnParamsMemo.clear()
+        clearCallParamsCache()
+        toast(successMessage, 'success')
+        return true
+      } catch (e) {
+        toast('函数更新失败：' + e.message, 'error')
+        return false
+      }
+    })
   }
 
   /** 函数编辑态名称输入框的唯一改名入口：写入命令栈，失焦后由编辑外壳自动保存。 */
@@ -463,17 +586,19 @@ export function useConsoleScriptRunner({
     }
     const f = fnLib.list.find(x => x.id === view?.fileId)
     if (!f) return toast('函数所在函数库不存在，请刷新列表', 'warn')
-    const isLast = Array.isArray(f.functions) && f.functions.length <= 1
+    const isLast = fnLib.namesFor(f).length <= 1
     if (isLast) {
       if (!window.confirm(`默认函数库只剩这一个函数，删除后 _function.yaml 将整个移除（引用它的 call 步骤将失效），继续？`)) return
-      try {
-        await api.deleteFunction(f.id)
-        await fnLib.refresh(packageId.value)
-        fnParamsMemo.clear()
-        toast(`默认函数库 ${FUNCTION_LIBRARY_DEFAULT} 已删除`, 'success')
-      } catch (e) {
-        toast('删除失败：' + e.message, 'error')
-      }
+      await withFunctionMutation(f.id, async () => {
+        try {
+          await api.deleteFunction(f.id)
+          await fnLib.refresh(packageId.value)
+          fnParamsMemo.clear()
+          toast(`默认函数库 ${FUNCTION_LIBRARY_DEFAULT} 已删除`, 'success')
+        } catch (e) {
+          toast('删除失败：' + e.message, 'error')
+        }
+      })
       return
     }
     await updateFunctionFile(view, model => {
@@ -545,6 +670,34 @@ export function useConsoleScriptRunner({
 
   /** 脚本校验（结构化字段级）由 useScriptEditorShell.diagnostics 提供（validateScript + 解析期诊断） */
 
+  // 结构化编辑保存只有一个共享 shell。手动保存、失焦自动保存和冲突覆盖
+  // 可能在同一事件循环内同时触发；复用同一个 Promise，避免重复 PUT 或
+  // 让后发请求带着已经过期的 expected_version 覆盖前一个请求。
+  let shellSaveInflight = null
+  function saveShell(opts = {}) {
+    if (shellSaveInflight) return shellSaveInflight
+    let savedSnapshot = null
+    try {
+      savedSnapshot = scriptShell.hasModel ? serialize(scriptShell.model) : null
+    } catch {
+      savedSnapshot = null
+    }
+    const pending = Promise.resolve()
+      .then(() => scriptShell.save(opts))
+      .then(result => ({ ...result, _savedSnapshot: savedSnapshot }))
+    shellSaveInflight = pending
+    pending.finally(() => {
+      if (shellSaveInflight === pending) shellSaveInflight = null
+    }).catch(() => {})
+    return pending
+  }
+
+  async function finishShellSave(scope, result) {
+    if (!result?.ok || result._postProcessed) return
+    result._postProcessed = true
+    await afterScriptSaved(scope, result.result, result._savedSnapshot)
+  }
+
   /** 保存编辑中的脚本：shell.save() 序列化模型并携带 expected_version；
    *  校验失败 → 提示前 3 条诊断；409 version_conflict → shell.conflict 置位，SaveConflictModal 弹出。 */
   async function saveEditScript(scope) {
@@ -556,10 +709,10 @@ export function useConsoleScriptRunner({
       return toast('请填写脚本名称', 'error')
     }
     if (!scriptShell.pkg && !packageId.value) return toast('请先在右上选择配置', 'warn')
-    const r = await scriptShell.save()
+    const r = await saveShell()
     if (r.ok) {
       clearCallParamsCache()
-      await afterScriptSaved(scope, r.result)
+      await finishShellSave(scope, r)
     } else if (r.reason === 'invalid') {
       toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
     } else if (r.reason === 'conflict') {
@@ -581,7 +734,7 @@ export function useConsoleScriptRunner({
     autoSaveTimer = null
     if (scope.scriptMode.value !== 'edit' || !scriptShell.hasModel || !scriptShell.dirty || scriptShell.saving) return
     const wasNew = !scriptShell.resourceId
-    const r = await scriptShell.save({ suppressConflict: true })
+    const r = await saveShell({ suppressConflict: true })
     if (r.ok) {
       clearCallParamsCache()
       // 函数库落盘后刷新分类清单（函数列表与 call 目标候选共用）；
@@ -599,7 +752,7 @@ export function useConsoleScriptRunner({
   }
 
   /** 保存成功后置：刷新列表、选中保存后的资源（按外壳实际类型归位到对应面板的选择）、退出编辑回到运行视图 */
-  async function afterScriptSaved(scope, rep) {
+  async function afterScriptSaved(scope, rep, savedSnapshot = null) {
     await refreshScripts()
     if (rep?.id) {
       if (scriptShell.kind === 'function_library') {
@@ -607,6 +760,20 @@ export function useConsoleScriptRunner({
       } else {
         selScript.value = rep.id
       }
+    }
+    let changedAfterSave = false
+    if (savedSnapshot !== null && scriptShell.hasModel) {
+      try {
+        changedAfterSave = serialize(scriptShell.model) !== savedSnapshot
+      } catch {
+        changedAfterSave = true
+      }
+    }
+    if (changedAfterSave) {
+      // PUT 已保存请求开始时的快照；请求期间产生的新编辑必须留在当前
+      // 画布，不能被 reset 静默丢掉，也不能退出编辑态伪装成全部完成。
+      toast('已保存先前修改；当前新修改仍未保存', 'warn')
+      return
     }
     scriptShell.reset()
     scope.scriptMode.value = 'run'
@@ -626,10 +793,10 @@ export function useConsoleScriptRunner({
 
   /** 409 冲突弹窗：强制覆盖（不带 expected_version 重存），成功后同保存收尾 */
   async function onConflictOverwrite() {
-    const r = await scriptShell.overwrite()
+    const r = await saveShell({ force: true })
     if (r.ok) {
       clearCallParamsCache()
-      await afterScriptSaved(scriptShell.kind === 'function_library' ? funcScope : scriptScope, r.result)
+      await finishShellSave(scriptShell.kind === 'function_library' ? funcScope : scriptScope, r)
     }
     else if (r.reason === 'error') toast('覆盖失败：' + (r.error?.message || r.error), 'error')
   }
@@ -932,7 +1099,10 @@ export function useConsoleScriptRunner({
   /** 关页保护：有未保存修改时浏览器弹出确认（任一面板的编辑/原文态都算） */
   function onBeforeUnload(e) {
     const editing = (scope) => (scope.scriptMode.value === 'edit' && scriptShell.hasModel && scriptShell.dirty)
-      || (scope.scriptMode.value === 'raw' && rawEditor.dirty.value)
+      || (scope.scriptMode.value === 'raw' && (
+        rawEditor.dirty.value
+        || (rawEditor.resourceId.value && rawEditor.content.value !== rawSavedSnapshot)
+      ))
     if (editing(scriptScope) || editing(funcScope)) {
       e.preventDefault()
       e.returnValue = ''

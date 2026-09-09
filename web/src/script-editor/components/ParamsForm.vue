@@ -15,11 +15,11 @@
         <span class="pf-spacer"></span>
         <!-- 三态之一「使用默认值」：始终显示当前声明默认值（缓存建议不遮蔽），不进 args -->
         <span
-          v-if="decl.default !== null && !isActive(decl.name)"
+          v-if="hasParamDefault(decl) && !isActive(decl.name)"
           class="pf-default mono"
           :title="'使用脚本默认值（提交时省略）'"
-        >默认: {{ fmtLiteral(decl.default) }}</span>
-        <label v-if="decl.default !== null" class="pf-toggle" title="切换为显式覆盖（该值将随请求发送）">
+        >默认: {{ displayLiteral(decl.default) }}</span>
+        <label v-if="hasParamDefault(decl)" class="pf-toggle" title="切换为显式覆盖（该值将随请求发送）">
           <input
             type="checkbox"
             :checked="isActive(decl.name)"
@@ -32,7 +32,20 @@
       </div>
 
       <div v-if="isActive(decl.name)" class="pf-editor">
+        <textarea
+          v-if="usesJsonEditor(decl.type)"
+          class="cell-input json-input" rows="2" spellcheck="false"
+          :value="jsonTextFor(decl.name, values[decl.name])" :aria-label="decl.name"
+          @input="onJsonEdit(decl, ($event.target as HTMLTextAreaElement).value)"
+        ></textarea>
+        <input
+          v-else-if="decl.type === 'number' || decl.type === 'integer'"
+          class="cell-input num" type="number" :step="decl.type === 'integer' ? '1' : 'any'"
+          :value="numberText(values[decl.name])" :aria-label="decl.name"
+          @input="onNumberEdit(decl, $event)"
+        />
         <CellEditor
+          v-else
           :cell="{ lit: values[decl.name] }"
           :type="cellType(decl.type)"
           :allow-ref="false"
@@ -41,6 +54,11 @@
           :error="rowErrors(decl.name)[0] || ''"
           @change="(c) => onEdit(decl.name, c)"
         />
+        <template v-if="usesJsonEditor(decl.type) || decl.type === 'number' || decl.type === 'integer'">
+          <div v-for="(message, index) in rowErrors(decl.name)" :key="`editor-error-${index}`" class="pf-err-msg">
+            {{ message }}
+          </div>
+        </template>
       </div>
       <!-- 非覆盖态没有编辑器行内错误位：错误（如服务端 400 回填）直接列在行下 -->
       <template v-if="!isActive(decl.name)">
@@ -66,25 +84,99 @@
  */
 import { reactive, watch, type PropType } from 'vue'
 import type { ParamDecl } from '../model'
-import { checkLiteral } from '../schema'
 import {
-  ARG_DEFAULT_LITERALS, ARG_TYPE_LABELS, cloneArg, fmtLiteral,
+  checkLiteral, hasParamDefault, missingLiteralForType, paramControlType,
+} from '../schema'
+import {
+  ARG_TYPE_LABELS, cloneArg, fmtLiteral,
   type ArgFieldError,
 } from '../params'
 import CellEditor from './CellEditor.vue'
 
 /** V1 参数类型 → CellEditor 控件类型。 */
 function cellType(type: string): string {
-  switch (type) {
-    case 'number': case 'integer': return 'number'
-    case 'boolean': return 'bool'
-    case 'template': return 'tmpl'
-    case 'key': return 'key'
-    case 'point': return 'coord'
-    case 'duration': return 'time'
-    case 'list': case 'object': return 'expr'
-    default: return 'text' // string/any
+  return paramControlType(type)
+}
+
+/** list/object/any 使用 JSON 值编辑；提交前不会把 JSON 文本写入 args。 */
+function usesJsonEditor(type: string): boolean {
+  return type === 'list' || type === 'object' || type === 'any'
+}
+
+const jsonDrafts = reactive<Record<string, string>>({})
+const jsonErrors = reactive<Record<string, string>>({})
+
+function jsonText(value: unknown): string {
+  try {
+    const text = JSON.stringify(value, null, 2)
+    return text === undefined ? 'null' : text
+  } catch {
+    return 'null'
   }
+}
+
+function jsonTextFor(name: string, value: unknown): string {
+  return Object.prototype.hasOwnProperty.call(jsonDrafts, name) ? jsonDrafts[name]! : jsonText(value)
+}
+
+function jsonShapeError(type: string, value: unknown): string {
+  if (type === 'list' && !Array.isArray(value)) return '值必须是 JSON 数组'
+  if (type === 'object' && (value === null || typeof value !== 'object' || Array.isArray(value))) {
+    return '值必须是 JSON 对象'
+  }
+  return ''
+}
+
+function onJsonEdit(decl: ParamDecl, raw: string): void {
+  jsonDrafts[decl.name] = raw
+  let value: unknown
+  try {
+    value = raw.trim() === '' && decl.type === 'any' ? null : JSON.parse(raw)
+  } catch {
+    jsonErrors[decl.name] = '值必须是合法 JSON'
+    return
+  }
+  const shapeError = jsonShapeError(decl.type, value)
+  if (shapeError) {
+    jsonErrors[decl.name] = shapeError
+    return
+  }
+  values[decl.name] = value
+  delete jsonDrafts[decl.name]
+  delete jsonErrors[decl.name]
+  delete clientErrors[decl.name]
+  emitChange()
+}
+
+function numberText(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value) ? String(value) : ''
+}
+
+function onNumberEdit(decl: ParamDecl, event: Event): void {
+  const raw = (event.target as HTMLInputElement).value
+  const value = raw.trim() === '' ? null : Number(raw)
+  if (value !== null && !Number.isFinite(value)) return
+  values[decl.name] = value
+  delete clientErrors[decl.name]
+  emitChange()
+}
+
+function displayLiteral(value: unknown): string {
+  return value === null ? 'null' : fmtLiteral(value)
+}
+
+function missingValue(decl: ParamDecl): unknown {
+  // 保持现有文本参数空输入的交互；数字/结构化/布尔等类型使用真正的空值。
+  return decl.type === 'string' ? '' : missingLiteralForType(decl.type)
+}
+
+function hasOwn(source: Record<string, unknown> | null | undefined, name: string): boolean {
+  return !!source && Object.prototype.hasOwnProperty.call(source, name)
+}
+
+function suggestedValue(decl: ParamDecl): unknown {
+  if (hasOwn(props.suggestions, decl.name)) return cloneArg(props.suggestions[decl.name])
+  return hasParamDefault(decl) ? cloneArg(decl.default) : cloneArg(missingValue(decl))
 }
 
 const props = defineProps({
@@ -112,7 +204,11 @@ function isActive(name: string): boolean {
 }
 
 function rowErrors(name: string): string[] {
-  return [...(clientErrors[name] || []), ...(props.serverErrors[name] || [])]
+  return [
+    ...(clientErrors[name] || []),
+    ...(jsonErrors[name] ? [jsonErrors[name]!] : []),
+    ...(props.serverErrors[name] || []),
+  ]
 }
 
 /** 声明列表/初始覆盖变化 → 重建表单态（覆盖建议只影响初始预填，不反向写回 prop）。 */
@@ -120,13 +216,15 @@ function rebuild(): void {
   for (const k of Object.keys(active)) delete active[k]
   for (const k of Object.keys(values)) delete values[k]
   for (const k of Object.keys(clientErrors)) delete clientErrors[k]
+  for (const k of Object.keys(jsonDrafts)) delete jsonDrafts[k]
+  for (const k of Object.keys(jsonErrors)) delete jsonErrors[k]
   for (const decl of props.params) {
     const init = props.initialArgs?.[decl.name]
-    if (decl.default === null || init !== undefined) {
+    if (!hasParamDefault(decl) || init !== undefined) {
       active[decl.name] = true
       values[decl.name] = init !== undefined
         ? cloneArg(init)
-        : cloneArg(props.suggestions?.[decl.name] ?? ARG_DEFAULT_LITERALS[decl.type] ?? '')
+        : suggestedValue(decl)
     }
   }
   emitChange()
@@ -137,12 +235,14 @@ watch(() => [props.params, props.initialArgs], rebuild, { immediate: true })
 function toggleOverride(decl: ParamDecl, on: boolean): void {
   if (on) {
     // 覆盖态初始值优先级：已有编辑 > 覆盖建议 > 当前声明默认值
-    values[decl.name] = cloneArg(props.suggestions?.[decl.name] ?? decl.default)
+    values[decl.name] = suggestedValue(decl)
     active[decl.name] = true
   } else {
     delete values[decl.name]
     active[decl.name] = false
   }
+  delete jsonDrafts[decl.name]
+  delete jsonErrors[decl.name]
   delete clientErrors[decl.name]
   emitChange()
 }
@@ -233,6 +333,14 @@ defineExpose({ getArgs, validate, effectiveArgs })
   border-radius: 4px; padding: 0 5px; flex: none;
 }
 .pf-editor { padding-left: 2px; }
+.cell-input {
+  background: var(--bg-2); color: var(--text-0);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 3px 6px; font-size: 12px; min-width: 60px;
+}
+.cell-input:focus { outline: none; border-color: var(--accent); }
+.cell-input.num { width: 74px; }
+.json-input { width: min(100%, 420px); min-height: 42px; resize: vertical; font-family: var(--mono); }
 .pf-err-msg { font-size: 11px; color: var(--danger); }
 .mono { font-family: var(--mono); }
 </style>

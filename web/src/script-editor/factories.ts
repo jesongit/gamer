@@ -6,7 +6,8 @@
  */
 
 import type { Cell, CallArgs, Step } from './model'
-import { lit, newStepUuid } from './model'
+import { lit, missingLit, newStepUuid } from './model'
+import { cloneSchemaValue, hasParamDefault, missingLiteralForType } from './schema'
 
 /** 创建函数调用步骤：fn + 预填实参 + 可选 as。 */
 export function createCall(fn: string, args: CallArgs = { kind: 'none' }, as: string | null = null): Step {
@@ -25,17 +26,38 @@ export function createControl(kind: 'if' | 'repeat' | 'return'): Step {
   }
 }
 
-/** 按函数参数 Schema 预填命名实参（有默认值的参数预填默认值；无默认必填参数留字面量空串）。 */
+/** 按函数参数 Schema 预填命名实参（兼容模式只预填默认值）。 */
 export function argsFromSchema(
   params: { name: string; type: string; required: boolean; default: unknown }[],
+  options: { includeRequired?: boolean } = {},
 ): CallArgs {
   const entries: Record<string, Cell> = {}
   for (const param of params) {
-    if (param.default !== null && param.default !== undefined) {
-      entries[param.name] = lit(param.default)
+    if (hasParamDefault(param)) {
+      entries[param.name] = lit(cloneSchemaValue(param.default))
+    } else if (options.includeRequired && param.required) {
+      // 必填字段必须在模型中占位，才能由后续类型化编辑器显示并提示填写。
+      // 占位是 null，不伪造 0 坐标、空模板等合法值；仅在提交前被替换。
+      entries[param.name] = missingLit(missingLiteralForType(param.type))
     }
   }
   return Object.keys(entries).length > 0 ? { kind: 'map', entries } : { kind: 'none' }
+}
+
+/** 新增/切换函数的统一初始化：默认值保留真实类型，必填无默认值可见。 */
+export function initializeArgsFromSchema(
+  params: { name: string; type: string; required: boolean; default: unknown }[],
+): CallArgs {
+  return argsFromSchema(params, { includeRequired: true })
+}
+
+/** 按 Schema 创建调用步骤；旧 makeCall/createCall 保留无 Schema 兼容形态。 */
+export function createCallFromSchema(
+  fn: string,
+  params: { name: string; type: string; required: boolean; default: unknown }[],
+  as: string | null = null,
+): Step {
+  return createCall(fn, initializeArgsFromSchema(params), as)
 }
 
 // ---------- 添加面板分组 ----------

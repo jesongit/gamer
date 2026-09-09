@@ -197,7 +197,9 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleImpl).not.toContain('toggleRunStart')
     expect(consoleImpl).not.toContain('runStartUuid')
     // 保存走 shell（expected_version + 409 冲突回调）
-    expect(consoleImpl).toContain('scriptShell.save()')
+    expect(consoleImpl).toContain('function saveShell(opts = {})')
+    expect(consoleImpl).toContain('scriptShell.save(opts)')
+    expect(consoleImpl).not.toContain('scriptShell.save()')
     expect(consoleImpl).toContain('function onConflictReload(')
     expect(consoleImpl).toContain('function onConflictOverwrite(')
     // alt 模式已整体移除（2026-08-31 用户决策：投屏 Alt 点击/滑动生成步骤、二次裁切
@@ -249,12 +251,16 @@ describe('Console 视觉组件拆分静态回归', () => {
 
   it('按键映射面板仍接入当前应用分区，但顶部不再暴露方案选择器', () => {
     const keymap = read('./components/console/KeymapPanel.vue')
+    const keymapLogic = read('./components/console/useConsoleKeymap.js')
     // 映射面板经 console.keymaps 组件键解析，不再有壳内 keymap 页签模板分支
     expect(read('./workspace/core-component-registry.ts')).toContain('console.keymaps')
     expect(template).not.toContain('v-model="activeKeymapName"')
     expect(template).not.toContain('keymap-select')
-    expect(consoleImpl).toContain('loadKeymaps(packageId.value)')
-    expect(consoleImpl).toContain('api.getKeymap(activeKeymapName.value, packageId.value)')
+    expect(consoleSource).toContain('loadKeymaps(pkg)')
+    expect(consoleSource).not.toContain('loadKeymaps(packageId.value)')
+    expect(keymapLogic).toContain('const requestedPkg = currentPackageId()')
+    expect(keymapLogic).toContain('api.getKeymap(requestedName, requestedPkg)')
+    expect(keymapLogic).not.toContain('api.getKeymap(activeKeymapName.value, packageId.value)')
     expect(consoleImpl).toContain("onRequestPoint: () => pickCoord()")
     expect(consoleImpl).toContain("pickCoord: () => beginCellPick('coord')")
     expect(keymap).toContain('expected_version')
@@ -383,7 +389,8 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(layout).toContain('api.cancelRun(rid)')
     expect(consoleImpl).toContain('api.getRun(rid)')
     expect(taskBoard).toContain('api.runTaskNow(')
-    expect(consoleImpl).toContain('api.replaceTemplateImage(')
+    expect(consoleImpl).toContain('putTemplateBytes(t.name, b64, pkg, expectedVersion)')
+    expect(consoleImpl).not.toContain('api.replaceTemplateImage(')
     expect(capture).toContain('ctx.replaceTemplateImage(target, file)')
   })
 

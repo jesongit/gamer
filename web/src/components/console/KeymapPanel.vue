@@ -8,7 +8,7 @@
         </div>
       </div>
       <div class="head-actions">
-        <button v-if="hasCallback('onRefresh')" class="btn btn-sm" type="button" :disabled="loading" @click="invoke('onRefresh')">↻ 刷新</button>
+        <button v-if="hasCallback('onRefresh')" class="btn btn-sm" type="button" :disabled="loading || saving" @click="invoke('onRefresh')">↻ 刷新</button>
         <button class="btn btn-sm btn-primary" type="button" :disabled="!pkg || loading || editing" @click="startNew">＋ 新增映射</button>
       </div>
     </div>
@@ -68,7 +68,7 @@
           </div>
           <div class="binding-list" data-testid="keymap-binding-list">
             <div v-if="!draft.bindings.length" class="list-empty">暂无绑定，点击「添加绑定」开始配置</div>
-            <div v-for="(binding, index) in draft.bindings" :key="index" class="binding-card" data-testid="keymap-binding">
+            <div v-for="(binding, index) in draft.bindings" :key="bindingId(binding)" class="binding-card" data-testid="keymap-binding">
               <div class="binding-head">
                 <span class="binding-index mono">{{ index + 1 }}</span>
                 <input
@@ -135,7 +135,7 @@
         </div>
         <div class="editor-foot">
           <button class="btn btn-sm" type="button" @click="cancelEdit">取消</button>
-          <button class="btn btn-sm btn-primary" type="button" :disabled="saving" @click="saveDraft">{{ saving ? '保存中…' : '💾 保存方案' }}</button>
+          <button class="btn btn-sm btn-primary" type="button" :disabled="saveDisabled" @click="saveDraft">{{ saveDisabled ? '保存中…' : '💾 保存方案' }}</button>
         </div>
       </div>
 
@@ -192,6 +192,20 @@ const captureIndex = ref(-1)
 const keyInputEls = ref([])
 const deleteName = ref('')
 const note = ref('')
+const saveInFlight = ref(false)
+let editSerial = 0
+let bindingIdSerial = 0
+
+function bindingId(binding) {
+  if (!binding || typeof binding !== 'object') return ''
+  if (!binding.__keymapBindingId) binding.__keymapBindingId = `binding-${++bindingIdSerial}`
+  return binding.__keymapBindingId
+}
+
+function ensureBindingIds(model) {
+  if (model && Array.isArray(model.bindings)) model.bindings.forEach(bindingId)
+  return model
+}
 
 function read(name, fallback) {
   const value = ctx[name]
@@ -247,11 +261,11 @@ function sourceModel(item) {
   if (!source && contextModel && typeof contextModel === 'object'
     && (!item || !contextModel.name || contextModel.name === itemName(item))) source = contextModel
   if (!source || typeof source !== 'object' || Array.isArray(source)) source = emptyModel(itemName(item))
-  return {
+  return ensureBindingIds({
     version: Number.isInteger(source.version) ? source.version : 1,
     name: String(source.name || itemName(item) || '未命名方案'),
     bindings: Array.isArray(source.bindings) ? clone(source.bindings) : [],
-  }
+  })
 }
 
 function publicModel(value) {
@@ -272,6 +286,7 @@ const keymaps = computed(() => {
 })
 const loading = computed(() => !!read('loading', false))
 const saving = computed(() => !!read('saving', false))
+const saveDisabled = computed(() => saving.value || saveInFlight.value)
 const error = computed(() => String(read('error', '') || ''))
 const usedName = computed(() => String(read('usedName', read('selectedName', '')) || ''))
 const selectedItem = computed(() => keymaps.value.find(item => itemName(item) === selectedName.value) || null)
@@ -307,6 +322,7 @@ function newDraft(name) {
 }
 
 function startNew() {
+  editSerial += 1
   selectedName.value = ''
   newDraft('新建方案')
   isNew.value = true
@@ -317,6 +333,7 @@ function startNew() {
 }
 
 function startEdit(item) {
+  editSerial += 1
   selectedName.value = itemName(item)
   draft.value = sourceModel(item)
   rawYaml.value = dump(publicModel(draft.value), { lineWidth: -1 })
@@ -331,6 +348,7 @@ function startEdit(item) {
 }
 
 function startCopy(item) {
+  editSerial += 1
   selectedName.value = ''
   draft.value = sourceModel(item)
   draft.value.name = draft.value.name + ' 副本'
@@ -362,10 +380,12 @@ function requestDelete(item) {
 }
 
 function addBinding() {
-  draft.value.bindings.push({
+  const binding = {
     key: '',
     action: { type: 'hold', at: [0.5, 0.5] },
-  })
+  }
+  bindingId(binding)
+  draft.value.bindings.push(binding)
 }
 
 function removeBinding(index) {
@@ -382,11 +402,17 @@ function changeAction(binding) {
 
 async function requestPoint(index, field) {
   note.value = '请在投屏画面中点击要绑定的位置'
+  const initialBinding = draft.value.bindings[index]
+  const requestedBindingId = bindingId(initialBinding)
   let point = invoke('onRequestPoint', { pkg: pkg.value, index, field })
   if (point && typeof point.then === 'function') point = await point
-  if (!point || !draft.value.bindings[index]) return
+  if (!point) return
 
-  const action = draft.value.bindings[index].action
+  // 选点期间允许删除/重排绑定；回填必须按稳定 ID 找目标，不能继续使用
+  // 请求发起时的数组下标，否则会把坐标写入另一条绑定。
+  const binding = draft.value.bindings.find(candidate => bindingId(candidate) === requestedBindingId)
+  if (!binding) return
+  const action = binding.action
   const value = [Number(point.x), Number(point.y)]
   if (!Number.isFinite(value[0]) || !Number.isFinite(value[1])) return
   if (field === 'at' && (action.type === 'tap' || action.type === 'hold')) action.at = value
@@ -426,11 +452,11 @@ function parseRaw() {
   try {
     const parsed = load(rawYaml.value)
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('YAML 根节点必须是对象')
-    draft.value = {
+    draft.value = ensureBindingIds({
       version: parsed.version,
       name: parsed.name,
       bindings: Array.isArray(parsed.bindings) ? clone(parsed.bindings) : [],
-    }
+    })
     draftErrors.value = []
     return true
   } catch (parseError) {
@@ -451,6 +477,7 @@ function switchMode(nextMode) {
 }
 
 async function saveDraft() {
+  if (saveDisabled.value) return
   if (editMode.value === 'raw' && !parseRaw()) return
   const value = publicModel(draft.value)
   const validation = validateKeymap(value)
@@ -458,7 +485,15 @@ async function saveDraft() {
   if (!validation.valid) return
   const model = normalizeKeymap(value)
   const source = isNew.value ? null : selectedItem.value
+  const requestEditSerial = editSerial
+  const requestPkg = pkg.value
+  const isCurrentDraft = () => (
+    editing.value
+    && editSerial === requestEditSerial
+    && pkg.value === requestPkg
+  )
   let result
+  saveInFlight.value = true
   try {
     result = invoke('onSave', {
       pkg: pkg.value,
@@ -470,21 +505,26 @@ async function saveDraft() {
     })
     if (result && typeof result.then === 'function') result = await result
   } catch (saveError) {
-    note.value = '保存失败：' + (saveError.message || saveError)
+    if (isCurrentDraft()) note.value = '保存失败：' + (saveError.message || saveError)
     return
+  } finally {
+    // 仅释放本地防重入锁；草稿是否关闭由同一编辑代次的结果分支决定。
+    saveInFlight.value = false
   }
   // onSave 在服务端请求完成且成功后必须明确返回 true，避免把“已发起请求”误报成成功。
   if (result === true) {
+    if (!isCurrentDraft()) return
     editing.value = false
     isNew.value = false
     captureIndex.value = -1
     note.value = '保存成功（服务端已确认）'
     return
   }
-  note.value = '保存失败：服务端未确认，请重试'
+  if (isCurrentDraft()) note.value = '保存失败：服务端未确认，请重试'
 }
 
 function cancelEdit() {
+  editSerial += 1
   invoke('onCancel', { pkg: pkg.value, name: selectedName.value, source: selectedItem.value })
   editing.value = false
   isNew.value = false

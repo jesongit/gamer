@@ -8,6 +8,7 @@ import type {
   PluginSource,
   RegistryPluginVersion,
 } from './types'
+import { compareVersions } from './registry-client'
 
 const SOURCE_METADATA_KEY = 'gamer.plugin-center.source.v1'
 type PluginSourceMetadata = Record<string, {
@@ -153,6 +154,124 @@ function versionMatches(actual: unknown, requirement: unknown) {
   return current === requested
 }
 
+const COMPARABLE_VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+
+function pluginVersion(plugin: InstalledPluginSnapshot | null | undefined): string {
+  return String(plugin?.active_version || plugin?.version || '').trim()
+}
+
+/**
+ * Market 与已安装快照的唯一版本关系判断。
+ *
+ * registry-client 已经拒绝非法市场版本，但已安装目录可能来自较早的
+ * 存量数据；无法可靠比较时必须显示为不兼容并阻止更新，不能猜测一次
+ * 更新方向。宿主 builtin → WASM 也与服务端的执行形态门禁一致，归为
+ * 不兼容；WASM → builtin 仍交给服务端确认/校验。
+ */
+export function marketVersionRelation(
+  entry: Pick<RegistryPluginVersion, 'id' | 'version' | 'execution'> | null | undefined,
+  installed: InstalledPluginSnapshot | null | undefined,
+) {
+  if (!installed) {
+    return { kind: 'install', installedVersion: '', marketVersion: String(entry?.version || '') }
+  }
+
+  const installedVersion = pluginVersion(installed)
+  const marketVersion = String(entry?.version || '').trim()
+  if (
+    !entry
+    || entry.id !== installed.id
+    || !COMPARABLE_VERSION_RE.test(installedVersion)
+    || !COMPARABLE_VERSION_RE.test(marketVersion)
+  ) {
+    return {
+      kind: 'incompatible',
+      installedVersion,
+      marketVersion,
+      reason: '无法安全比较市场版本与已安装版本',
+    }
+  }
+
+  const installedKind = installed.execution?.kind
+  const marketKind = entry.execution?.kind
+  if (installedKind === 'builtin' && marketKind === 'wasm') {
+    return {
+      kind: 'incompatible',
+      installedVersion,
+      marketVersion,
+      reason: '宿主预置插件不能替换为 WASM 包',
+    }
+  }
+
+  const order = compareVersions(marketVersion, installedVersion)
+  if (order > 0) return { kind: 'update', installedVersion, marketVersion }
+  if (order === 0) return { kind: 'latest', installedVersion, marketVersion }
+  return { kind: 'newer_installed', installedVersion, marketVersion }
+}
+
+export function marketVersionLabel(relation: ReturnType<typeof marketVersionRelation>): string {
+  switch (relation.kind) {
+    case 'install': return '安装'
+    case 'update': return `更新到 ${relation.marketVersion}`
+    case 'latest': return '已是最新'
+    case 'newer_installed': return '已安装更高版本'
+    case 'incompatible': return '版本不兼容'
+    default: return '不可用'
+  }
+}
+
+function snapshotResponse(value: unknown): InstalledPluginSnapshot | null {
+  return value && typeof value === 'object' && typeof (value as { id?: unknown }).id === 'string'
+    ? value as InstalledPluginSnapshot
+    : null
+}
+
+function runtimeResult(snapshot: InstalledPluginSnapshot | null) {
+  const state = String(snapshot?.state || '').trim()
+  const labels: Record<string, { tone: string; text: string }> = {
+    running: { tone: 'success', text: '运行状态：运行中，已恢复。' },
+    enabled: { tone: 'info', text: '运行状态：已启用，等待运行。' },
+    disabled: { tone: 'warning', text: '运行状态：已停用，保持原状态。' },
+    installed: { tone: 'warning', text: '运行状态：已安装，未启用。' },
+    failed: { tone: 'danger', text: '运行状态：启动失败，请查看失败诊断后重试。' },
+  }
+  return labels[state] || {
+    tone: 'warning',
+    text: state ? `运行状态：${state}。` : '运行状态：服务端未返回状态。',
+  }
+}
+
+/**
+ * 将后端真实的更新快照 / 卸载 204 归一为两层结果：变更结果与运行态
+ * 结果。更新不能只显示“成功”，卸载也不能要求 204 携带 JSON 快照。
+ */
+export function describeExtensionMutation(
+  action: 'install' | 'update' | 'uninstall',
+  response: unknown,
+  options: { plugin?: InstalledPluginSnapshot | null; deleteData?: boolean } = {},
+) {
+  const plugin = options.plugin || null
+  const snapshot = snapshotResponse(response)
+  const name = snapshot?.name || plugin?.name || snapshot?.id || plugin?.id || '插件'
+  if (action === 'uninstall') {
+    return {
+      operation: { tone: 'success', text: `${name} 已卸载。` },
+      detail: options.deleteData ? '数据结果：插件用户数据已删除。' : '数据结果：插件用户数据已保留。',
+      snapshot: null,
+    }
+  }
+
+  const version = snapshot?.active_version || snapshot?.version || '未知版本'
+  return {
+    operation: {
+      tone: 'success',
+      text: `${name} 已${action === 'update' ? '更新到' : '安装'} v${version}。`,
+    },
+    detail: runtimeResult(snapshot),
+    snapshot,
+  }
+}
+
 export function mergeManagementResponse(
   response: ExtensionManagementResponse | null | undefined,
   registry: RegistryPluginVersion[] = [],
@@ -169,7 +288,9 @@ export function mergeManagementResponse(
       source: item.source && item.source !== 'unknown' ? item.source : remembered.kind || market?.source || 'unknown',
       publisher: item.publisher || remembered.publisher || market?.publisher,
       execution: item.execution || market?.execution,
-      dependencies: item.dependencies?.length ? item.dependencies : dependencyRefsFor(market),
+      // Management API 的 outer `dependencies` 字段是 dependents 映射；
+      // 插件自身依赖若由 snapshot 明确返回，即使是空数组也必须保留。
+      dependencies: Array.isArray(item.dependencies) ? item.dependencies : dependencyRefsFor(market),
       dependent,
     }
   })

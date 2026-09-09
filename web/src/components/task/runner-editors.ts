@@ -26,6 +26,8 @@ export interface RunnerEditorContext {
   packageId: string | null
   /** 表单当前设备 id（可能为空串） */
   deviceId: string
+  /** Android 运行目标；由设备记录提供，不能由 packageId/entrypoint 推导。 */
+  androidPackageName?: string | null
 }
 
 /** 执行目标候选项：value = entrypoint 原文（保存进 task.runner.entrypoint）。 */
@@ -40,7 +42,7 @@ export interface RunnerEditorIssue {
   message: string
 }
 
-/** 由 entrypoint/payload 推导任务 app 包名（gamer.yaml：分区前缀约定）。 */
+/** 由 runner 贡献显式提供任务 App/Package 上下文；不得从 entrypoint 推导。 */
 export interface RunnerAppPackages {
   android_package: string
   content_package: string | null

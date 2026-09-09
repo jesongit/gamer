@@ -15,6 +15,8 @@
         controls
         preload="metadata"
         data-testid="video-preview"
+        @play="onPlay"
+        @seeking="onSeeking"
         @timeupdate="onTimeUpdate"
         @seeked="onSeeked"
       ></video>
@@ -29,7 +31,7 @@
             type="button"
             data-testid="frame-prev"
             title="上一展示帧（服务端真实帧表定位）"
-            :disabled="!framesMeta || stepBusy"
+            :disabled="!hasFrames || stepBusy || frameBusy"
             @click="stepFrame(-1)"
           >− 帧</button>
           <button
@@ -37,13 +39,35 @@
             type="button"
             data-testid="frame-next"
             title="下一展示帧（服务端真实帧表定位）"
-            :disabled="!framesMeta || stepBusy"
+            :disabled="!hasFrames || stepBusy || frameBusy"
             @click="stepFrame(1)"
           >+ 帧</button>
+          <label class="frame-index-control">
+            <span class="mono">#</span>
+            <input
+              v-model="requestedFrameIndex"
+              class="input frame-index-input"
+              type="number"
+              min="0"
+              step="1"
+              placeholder="帧索引"
+              aria-label="指定展示帧索引"
+              data-testid="frame-index-input"
+              :disabled="!hasFrames || stepBusy || frameBusy"
+              @keyup.enter="goToFrameByIndex"
+            />
+            <button
+              class="mini-btn"
+              type="button"
+              data-testid="frame-index-go"
+              :disabled="!hasFrames || stepBusy || frameBusy"
+              @click="goToFrameByIndex"
+            >定位</button>
+          </label>
           <button
             class="mini-btn"
             type="button"
-            :disabled="frameBusy"
+            :disabled="!hasFrames || frameBusy || stepBusy"
             data-testid="frame-exact"
             @click="grabExactFrame()"
           >{{ frameBusy ? '取帧中…' : '◎ 精确帧' }}</button>
@@ -51,10 +75,15 @@
       </div>
 
       <div v-if="frameError" class="zone-error" role="alert" data-testid="frame-error">{{ frameError }}</div>
+      <div v-if="emptyFrameTable" class="zone-note" role="status" data-testid="frame-empty">
+        当前素材没有可用的展示帧，逐帧、指定帧和模板制作均不可用。
+      </div>
 
       <div v-if="frameUrl" class="frame-box" data-testid="frame-box">
         <img
+          :key="frameRequest?.requestGeneration || frameUrl"
           :src="frameUrl"
+          :data-frame-request="frameRequest?.requestGeneration || ''"
           class="frame-shot"
           alt="服务端精确帧"
           data-testid="frame-image"
@@ -65,8 +94,8 @@
           <button
             class="mini-btn"
             type="button"
-            :disabled="!yamlReady"
-            :title="yamlReady ? '在当前确定帧上框选创建模板并离线测试' : '需要「自动化」插件（gamer.yaml）处于运行状态'"
+            :disabled="!yamlReady || !frameReady"
+            :title="!yamlReady ? '需要「自动化」插件（gamer.yaml）处于运行状态' : (frameReady ? '在当前确定帧上框选创建模板并离线测试' : '等待当前确定帧图加载完成')"
             data-testid="frame-to-template"
             @click="emitCreateTemplate"
           >✂️ 帧上做模板</button>
@@ -192,7 +221,7 @@
 // - 自录事件：会话分段 base_pts_us 整数映射到媒体 PTS（recordingEvents.js），
 //   外部素材无 recordingId 时不渲染事件区（不伪造操作日志）
 import { computed, reactive, ref, watch } from 'vue'
-import { describeCalibration } from './calibration'
+import { calibrationDiagnostics, describeCalibration } from './calibration'
 import { alignEvents, eventSummary } from './recordingEvents'
 import { ptsFromTime, videoApi } from './videoApi'
 
@@ -218,11 +247,24 @@ const frameBusy = ref(false)
 const frameError = ref('')
 // 真实展示帧表元信息（帧总数；加载失败 → 逐帧按钮禁用，不做时间近似降级）
 const framesMeta = ref(null)
-// 当前锁定帧身份 {index, pts_us}（null = 未锁定，按预览时间重新解析）
+// 当前制作帧身份。它与浏览器预览时间分离，且附带内部上下文用于防止旧响应串入。
 const currentFrame = ref(null)
+// 当前精确帧 PNG 请求：requestGeneration 用于丢弃旧 <img> 的 load/error 回调。
+const frameRequest = ref(null)
 const stepBusy = ref(false)
 const markerBusy = ref(false)
 const newMarkerLabel = ref('')
+const requestedFrameIndex = ref('')
+
+// 帧上下文代次：素材/校准/用户预览移动都会使旧制作帧失效；
+// mediaGeneration 另行保留给帧表加载，预览移动不应让同一素材的帧表失效。
+let mediaGeneration = 0
+let frameContextGeneration = 0
+let frameRequestGeneration = 0
+let frameResolveGeneration = 0
+let frameMetaRequestGeneration = 0
+let frameResolutionInFlight = 0
+let pendingProgrammaticSeek = null
 
 // ---- 事件叠加状态 ----
 const eventsBusy = ref(false)
@@ -238,7 +280,10 @@ const totalSeconds = computed(() => {
   return Number.isFinite(us) && us > 0 ? us / 1e6 : 0
 })
 
-const markersAvailable = computed(() => !!props.media && !!framesMeta.value)
+const hasFrames = computed(() => Number(framesMeta.value?.frame_count) > 0)
+const emptyFrameTable = computed(() => !!framesMeta.value && Number(framesMeta.value.frame_count) === 0)
+const markersAvailable = computed(() => !!props.media && hasFrames.value)
+const frameReady = computed(() => !!validLockedFrame({ requireImage: true }))
 const staleCount = computed(() => (props.calibration
   ? props.markers.filter(marker => Number(marker.frame?.calibration_version) !== Number(props.calibration.version)).length
   : 0))
@@ -249,10 +294,11 @@ const calibrationText = computed(() => {
 })
 
 watch(() => props.media?.id, () => {
+  mediaGeneration += 1
   currentTime.value = 0
-  clearFrame()
+  invalidateProductionFrame()
   framesMeta.value = null
-  currentFrame.value = null
+  requestedFrameIndex.value = ''
   stepBusy.value = false
   markerBusy.value = false
   eventsView.value = []
@@ -266,6 +312,11 @@ watch(() => props.recordingId, () => {
   eventsView.value = []
   eventsLoaded.value = false
   eventsError.value = ''
+})
+
+watch(() => props.calibration?.version, (version, previous) => {
+  // 校准版本是制作坐标的身份组成部分；同一帧图不能被新校准静默复用。
+  if (previous !== undefined && version !== previous) invalidateProductionFrame()
 })
 
 // ---- 校准表单（本地草稿；应用时才上抛并递增版本） ----
@@ -292,129 +343,399 @@ function syncCalForm() {
 
 function applyCalibration() {
   calibrationError.value = ''
-  const rectGiven = calForm.rectW !== '' && calForm.rectH !== ''
-  const refW = Math.round(Number(calForm.refW))
-  const refH = Math.round(Number(calForm.refH))
-  // 显式范围校验（不做 max(1,·) 静默钳制——0/负数是输入错误，必须报给用户）
-  if (!(refW >= 1) || !(refH >= 1)) {
-    calibrationError.value = '参考分辨率宽高必须 ≥ 1'
+  const parseInteger = (raw, label, minimum) => {
+    const text = String(raw ?? '').trim()
+    const value = Number(text)
+    if (!text || !Number.isSafeInteger(value) || value < minimum) {
+      if (!calibrationError.value) calibrationError.value = `${label}必须是 ≥ ${minimum} 的整数`
+      return null
+    }
+    return value
+  }
+  const rotation = parseInteger(calForm.rotation, '旋转', 0)
+  const paNum = parseInteger(calForm.paNum, '像素比例分子', 1)
+  const paDen = parseInteger(calForm.paDen, '像素比例分母', 1)
+  const refW = parseInteger(calForm.refW, '参考分辨率宽度', 1)
+  const refH = parseInteger(calForm.refH, '参考分辨率高度', 1)
+  if ([rotation, paNum, paDen, refW, refH].some(value => value === null)) return
+  if (![0, 90, 180, 270].includes(rotation)) {
+    calibrationError.value = '旋转只支持 0°、90°、180°、270°'
     return
   }
+  const rectValues = [calForm.rectX, calForm.rectY, calForm.rectW, calForm.rectH]
+  const rectGiven = rectValues.some(value => String(value ?? '').trim() !== '')
+  let contentRect = null
+  if (rectGiven) {
+    const rectX = parseInteger(calForm.rectX, '有效区域 x', 0)
+    const rectY = parseInteger(calForm.rectY, '有效区域 y', 0)
+    const rectW = parseInteger(calForm.rectW, '有效区域宽度', 1)
+    const rectH = parseInteger(calForm.rectH, '有效区域高度', 1)
+    if ([rectX, rectY, rectW, rectH].some(value => value === null)) return
+    contentRect = { x: rectX, y: rectY, w: rectW, h: rectH }
+  }
   const next = {
-    rotation: Number(calForm.rotation) || 0,
+    rotation,
     pixel_aspect: {
-      num: Math.max(1, Math.round(Number(calForm.paNum) || 1)),
-      den: Math.max(1, Math.round(Number(calForm.paDen) || 1)),
+      num: paNum,
+      den: paDen,
     },
     reference_size: { width: refW, height: refH },
-    content_rect: rectGiven
-      ? {
-        x: Math.max(0, Math.round(Number(calForm.rectX) || 0)),
-        y: Math.max(0, Math.round(Number(calForm.rectY) || 0)),
-        w: Math.max(1, Math.round(Number(calForm.rectW) || 0)),
-        h: Math.max(1, Math.round(Number(calForm.rectH) || 0)),
-      }
-      : null,
+    content_rect: contentRect,
+  }
+  const diagnostics = calibrationDiagnostics({ version: calibrationVersion(), ...next })
+  if (diagnostics.length) {
+    calibrationError.value = diagnostics[0].message
+    return
   }
   emit('save-calibration', next)
 }
 
 async function loadFramesMeta() {
-  const id = props.media?.id
+  const id = String(props.media?.id || '')
   if (!id) return
+  const generation = mediaGeneration
+  const requestGeneration = ++frameMetaRequestGeneration
   try {
-    framesMeta.value = await videoApi.mediaFrames(id)
+    const meta = await videoApi.mediaFrames(id)
+    if (generation !== mediaGeneration || requestGeneration !== frameMetaRequestGeneration || String(props.media?.id || '') !== id) return
+    if (!responseMatchesMedia(meta, id)) throw new Error('帧表响应与当前素材不一致')
+    framesMeta.value = meta
+    if (Number(meta?.frame_count) === 0) {
+      invalidateProductionFrame()
+      frameError.value = ''
+    }
   } catch (e) {
+    if (generation !== mediaGeneration || requestGeneration !== frameMetaRequestGeneration || String(props.media?.id || '') !== id) return
     framesMeta.value = null
     frameError.value = '展示帧表加载失败：逐帧步进不可用（' + (e?.message || e) + '）'
   }
 }
 
-function clearFrame() {
+function calibrationVersion() {
+  const value = Number(props.calibration?.version)
+  return Number.isFinite(value) ? value : 1
+}
+
+function captureFrameContext() {
+  return {
+    mediaId: String(props.media?.id || ''),
+    mediaGeneration,
+    frameContextGeneration,
+    calibrationVersion: calibrationVersion(),
+  }
+}
+
+function isCurrentFrameContext(context) {
+  return !!context
+    && context.mediaId !== ''
+    && context.mediaId === String(props.media?.id || '')
+    && context.mediaGeneration === mediaGeneration
+    && context.frameContextGeneration === frameContextGeneration
+    && context.calibrationVersion === calibrationVersion()
+}
+
+function responseMatchesMedia(response, mediaId) {
+  const responseId = response?.media_id ?? response?.mediaId
+  return responseId === undefined || responseId === null || String(responseId) === String(mediaId)
+}
+
+function normalizeFramePosition(position, mediaId) {
+  if (!position || !responseMatchesMedia(position, mediaId)) return null
+  const index = Number(position.index)
+  const ptsUs = Number(position.pts_us ?? position.ptsUs)
+  if (!Number.isSafeInteger(index) || index < 0 || !Number.isSafeInteger(ptsUs) || ptsUs < 0) return null
+  return { index, pts_us: ptsUs }
+}
+
+function staleFrameResponse() {
+  const error = new Error('stale frame response')
+  error.code = 'stale_frame_response'
+  return error
+}
+
+function isStaleFrameResponse(error) {
+  return error?.code === 'stale_frame_response'
+}
+
+function assertFrameRequestCurrent(context, requestGeneration) {
+  if (!isCurrentFrameContext(context) || requestGeneration !== frameResolveGeneration) throw staleFrameResponse()
+}
+
+/** 使制作帧、PNG 请求和所有未完成的帧解析失效；预览时钟本身不清零。 */
+function invalidateProductionFrame() {
+  frameContextGeneration += 1
+  frameResolveGeneration += 1
+  pendingProgrammaticSeek = null
+  currentFrame.value = null
+  frameRequest.value = null
   frameUrl.value = ''
   frameCaption.value = ''
   frameError.value = ''
   frameBusy.value = false
 }
 
+function invalidateFromPreview() {
+  if (currentFrame.value || frameRequest.value || pendingProgrammaticSeek || frameResolutionInFlight > 0) {
+    invalidateProductionFrame()
+  }
+}
+
 function onTimeUpdate() {
   const t = Number(videoEl.value?.currentTime)
   if (Number.isFinite(t)) currentTime.value = t
+  if (Number.isFinite(t) && isProgrammaticSeekPosition(t)) return
+  invalidateFromPreview()
 }
 
-// frameBusy 由 <img> 的 load/error 事件驱动复位（请求本身是 URL 赋值，无 await 点）；
-// 切换素材时 clearFrame 兜底复位，避免按钮卡在禁用态。
-function onFrameLoad() {
+// frameBusy 由 <img> 的 load/error 事件驱动复位；事件必须绑定到当前请求代次。
+function frameRequestFromEvent(event) {
+  const target = event?.currentTarget || event?.target
+  const requestGeneration = target?.dataset?.frameRequest
+  const request = frameRequest.value
+  if (!request || !requestGeneration || String(request.requestGeneration) !== String(requestGeneration)) return null
+  return request
+}
+
+function isCurrentFrameRequest(request) {
+  return !!request
+    && isCurrentFrameContext(request)
+    && frameRequest.value?.requestGeneration === request.requestGeneration
+    && currentFrame.value?.requestGeneration === request.requestGeneration
+}
+
+function onFrameLoad(event) {
+  const request = frameRequestFromEvent(event)
+  if (!isCurrentFrameRequest(request)) return
+  request.status = 'ready'
   frameBusy.value = false
 }
 
-function onFrameError() {
+function onFrameError(event) {
+  const request = frameRequestFromEvent(event)
+  if (!isCurrentFrameRequest(request)) return
+  invalidateProductionFrame()
   frameBusy.value = false
   frameError.value = '精确帧获取失败：素材文件缺失或帧参数越界'
 }
 
+function onPlay() {
+  invalidateFromPreview()
+}
+
+function isProgrammaticSeekPosition(time) {
+  const pending = pendingProgrammaticSeek
+  if (!pending) return false
+  if (!isCurrentFrameRequest(pending)) {
+    pendingProgrammaticSeek = null
+    return false
+  }
+  return Math.abs(time - pending.pts_us / 1e6) <= 0.01
+}
+
+function onSeeking() {
+  const t = Number(videoEl.value?.currentTime)
+  if (Number.isFinite(t) && isProgrammaticSeekPosition(t)) return
+  invalidateFromPreview()
+}
+
 function onSeeked() {
   const t = Number(videoEl.value?.currentTime)
-  if (Number.isFinite(t)) currentTime.value = t
+  if (!Number.isFinite(t)) return
+  currentTime.value = t
+  if (isProgrammaticSeekPosition(t)) {
+    // 保留哨兵到后续 timeupdate：浏览器在不同实现中可能在 seeked 后再补一次回显。
+    pendingProgrammaticSeek = { ...pendingProgrammaticSeek, settled: true }
+    return
+  }
+  invalidateFromPreview()
+}
+
+function validLockedFrame({ requireImage = false } = {}) {
+  const frame = currentFrame.value
+  const request = frameRequest.value
+  const mediaId = String(props.media?.id || '')
+  if (!frame || !request || !mediaId) return null
+  if (!isCurrentFrameRequest(request)
+      || frame.media_id !== mediaId
+      || frame.calibration_version !== calibrationVersion()
+      || frame.index !== request.index
+      || frame.pts_us !== request.pts_us) return null
+  if (requireImage && request.status !== 'ready') return null
+  return { index: frame.index, pts_us: frame.pts_us }
+}
+
+/** 按预览位置让服务端解析展示帧；不做本地帧率/时间步长估算。 */
+async function resolveFrameAtTime(context, ptsUs) {
+  const requestGeneration = ++frameResolveGeneration
+  frameResolutionInFlight += 1
+  try {
+    const meta = await videoApi.mediaFrames(context.mediaId, { ptsUs })
+    assertFrameRequestCurrent(context, requestGeneration)
+    if (!responseMatchesMedia(meta, context.mediaId)) throw new Error('帧响应与当前素材不一致')
+    framesMeta.value = meta || framesMeta.value
+    const position = normalizeFramePosition(meta?.current, context.mediaId)
+    if (!position) return null
+    return position
+  } finally {
+    frameResolutionInFlight -= 1
+  }
+}
+
+function beginFrameRequest(context) {
+  const requestGeneration = ++frameResolveGeneration
+  frameResolutionInFlight += 1
+  return { context, requestGeneration }
+}
+
+async function getFrameNeighbors(context, position) {
+  const operation = beginFrameRequest(context)
+  try {
+    const response = await videoApi.mediaFrameNeighbors(context.mediaId, position.index)
+    assertFrameRequestCurrent(context, operation.requestGeneration)
+    if (!responseMatchesMedia(response, context.mediaId)) throw new Error('相邻帧响应与当前素材不一致')
+    if (Number(response?.index) !== position.index) throw new Error('相邻帧响应与请求索引不一致')
+    return response
+  } finally {
+    frameResolutionInFlight -= 1
+  }
+}
+
+/** 按用户指定的展示序索引定位；PTS 必须取邻帧端点返回值，不能由前端估算。 */
+async function resolveFrameByIndex(context, index) {
+  const response = await getFrameNeighbors(context, { index, pts_us: 0 })
+  const position = normalizeFramePosition(response, context.mediaId)
+  if (!position) throw new Error('指定帧响应缺少有效的 index/pts_us')
+  return position
 }
 
 /** 把帧身份渲染到精确帧区：按展示序索引寻址（同一请求逐字节可重复），
  *  并把预览 <video> seek 到该帧时刻保持两者同步。 */
-function showFrameByIndex(position) {
-  if (!props.media) return
-  const nextUrl = videoApi.mediaFrameUrl(props.media.id, { index: position.index, maxWidth: 640 })
+function showFrameByIndex(position, context = captureFrameContext()) {
+  const mediaId = String(props.media?.id || '')
+  const normalized = normalizeFramePosition(position, mediaId)
+  if (!normalized || !isCurrentFrameContext(context)) return null
+  const nextUrl = videoApi.mediaFrameUrl(mediaId, { index: normalized.index, maxWidth: 640 })
   frameError.value = ''
-  currentFrame.value = position
-  if (nextUrl === frameUrl.value) return
+  const existing = frameRequest.value
+  if (existing && existing.url === nextUrl && isCurrentFrameRequest(existing)) {
+    currentFrame.value = {
+      ...normalized,
+      media_id: mediaId,
+      calibration_version: context.calibrationVersion,
+      requestGeneration: existing.requestGeneration,
+    }
+    return existing
+  }
+  const request = {
+    ...context,
+    index: normalized.index,
+    pts_us: normalized.pts_us,
+    url: nextUrl,
+    requestGeneration: ++frameRequestGeneration,
+    status: 'loading',
+  }
+  currentFrame.value = {
+    ...normalized,
+    media_id: mediaId,
+    calibration_version: context.calibrationVersion,
+    requestGeneration: request.requestGeneration,
+  }
+  frameRequest.value = request
   frameBusy.value = true
   frameUrl.value = nextUrl
-  frameCaption.value = `帧 ${position.index} · pts_us=${position.pts_us}（t=${(position.pts_us / 1e6).toFixed(3)}s）`
+  frameCaption.value = `帧 ${normalized.index} · pts_us=${normalized.pts_us}（t=${(normalized.pts_us / 1e6).toFixed(3)}s）`
+  pendingProgrammaticSeek = { ...request }
   const el = videoEl.value
   if (el) {
-    try { el.currentTime = position.pts_us / 1e6 } catch { /* 元数据未就绪时静默 */ }
+    try { el.currentTime = normalized.pts_us / 1e6 } catch { /* 元数据未就绪时静默 */ }
   }
+  return request
 }
 
 /** 取当前预览时间的精确帧；ptsUs 传入时直接按该值请求（同一请求逐字节可重复）。
  *  时间寻址的帧身份由服务端解析（首个 pts ≥ 目标的展示帧），本地不估算。 */
-function grabExactFrame(ptsUs) {
+async function grabExactFrame(ptsUs) {
   if (!props.media || frameBusy.value) return
   const pts = Number.isFinite(Number(ptsUs)) ? Math.max(0, Math.round(Number(ptsUs))) : ptsFromTime(currentTime.value)
-  // 面板宽度有限，取 640px 上限；加载态由 img load/error 收口
-  const nextUrl = videoApi.mediaFrameUrl(props.media.id, { ptsUs: pts, maxWidth: 640 })
-  // 同一帧重复请求：src 不变则 img 不会再触发 load，busy 会卡死 → 直接 no-op（画面已在）
-  if (nextUrl === frameUrl.value) return
+  // 先由服务端按真实帧表解析身份，再以 index 取图；制作区永远不保留“只有时间、没有身份”的锁帧。
+  invalidateProductionFrame()
+  const context = captureFrameContext()
   frameError.value = ''
   frameBusy.value = true
-  frameUrl.value = nextUrl
-  frameCaption.value = `pts_us=${pts}（t=${(pts / 1e6).toFixed(3)}s）`
-  // 时间寻址结果的身份（解析后帧）未知：清锁，下一次逐帧按当前时间重新解析
-  currentFrame.value = null
+  let shown = false
+  try {
+    const position = await resolveFrameAtTime(context, pts)
+    if (!position || !isCurrentFrameContext(context)) {
+      if (isCurrentFrameContext(context)) frameError.value = '当前没有可用于制作的展示帧'
+      return
+    }
+    shown = !!showFrameByIndex(position, context)
+  } catch (e) {
+    if (isCurrentFrameContext(context) && !isStaleFrameResponse(e)) {
+      frameError.value = '精确帧解析失败：' + (e?.message || e)
+    }
+  } finally {
+    if (!shown && isCurrentFrameContext(context)) frameBusy.value = false
+  }
 }
 
 /** 逐帧 ±：服务端真实展示帧表相邻定位（prev/next），不按固定时长估算。
  *  首步先按预览时间解析当前帧，之后沿相邻帧链走；边界（首/末帧）为 no-op。 */
 async function stepFrame(direction) {
   if (!props.media || !framesMeta.value || stepBusy.value) return
-  const id = props.media.id
+  const context = captureFrameContext()
   stepBusy.value = true
   try {
-    let position = currentFrame.value
+    let position = validLockedFrame()
     if (!position) {
-      const meta = await videoApi.mediaFrames(id, { ptsUs: ptsFromTime(currentTime.value) })
-      position = meta?.current || null
-      framesMeta.value = meta || framesMeta.value
+      position = await resolveFrameAtTime(context, ptsFromTime(currentTime.value))
     }
     if (!position) {
       // 空素材（0 帧）：无相邻可言
       return
     }
-    const neighbors = await videoApi.mediaFrameNeighbors(id, position.index)
-    const target = direction < 0 ? neighbors?.prev : neighbors?.next
-    if (!target) return // 首/末帧边界：不动
-    showFrameByIndex(target)
+    if (!isCurrentFrameContext(context)) return
+    const neighbors = await getFrameNeighbors(context, position)
+    const rawTarget = direction < 0 ? neighbors?.prev : neighbors?.next
+    if (!rawTarget) return // 首/末帧边界：不动
+    const target = normalizeFramePosition(rawTarget, context.mediaId)
+    if (!target) throw new Error('相邻帧响应与当前素材不一致')
+    if (!isCurrentFrameContext(context)) return
+    showFrameByIndex(target, context)
   } catch (e) {
-    frameError.value = '逐帧定位失败：' + (e?.message || e)
+    if (isCurrentFrameContext(context) && !isStaleFrameResponse(e)) {
+      frameError.value = '逐帧定位失败：' + (e?.message || e)
+    }
+  } finally {
+    stepBusy.value = false
+  }
+}
+
+/** 指定展示帧入口：索引只用于服务端查表，实际 PTS 由服务端返回。 */
+async function goToFrameByIndex() {
+  if (!props.media || !hasFrames.value || stepBusy.value || frameBusy.value) return
+  const raw = String(requestedFrameIndex.value ?? '').trim()
+  const index = Number(raw)
+  if (!raw || !Number.isSafeInteger(index) || index < 0) {
+    frameError.value = '指定帧索引必须是非负整数'
+    return
+  }
+  const count = Number(framesMeta.value?.frame_count)
+  if (Number.isSafeInteger(count) && index >= count) {
+    frameError.value = `指定帧索引越界：有效范围为 0–${Math.max(0, count - 1)}`
+    return
+  }
+  const context = captureFrameContext()
+  stepBusy.value = true
+  frameError.value = ''
+  try {
+    const position = await resolveFrameByIndex(context, index)
+    if (!isCurrentFrameContext(context)) return
+    showFrameByIndex(position, context)
+  } catch (e) {
+    if (isCurrentFrameContext(context) && !isStaleFrameResponse(e)) {
+      frameError.value = '指定帧定位失败：' + (e?.message || e)
+    }
   } finally {
     stepBusy.value = false
   }
@@ -426,31 +747,33 @@ async function stepFrame(direction) {
  *  帧身份（frame_index+pts_us+当前校准版本）——绝不存浏览器浮点秒。 */
 async function addMarkerAtCurrentFrame() {
   if (!props.media || !framesMeta.value || markerBusy.value) return
+  const context = captureFrameContext()
   markerBusy.value = true
   try {
-    let position = currentFrame.value
+    let position = validLockedFrame()
     if (!position) {
-      const meta = await videoApi.mediaFrames(props.media.id, { ptsUs: ptsFromTime(currentTime.value) })
-      position = meta?.current || null
-      framesMeta.value = meta || framesMeta.value
+      position = await resolveFrameAtTime(context, ptsFromTime(currentTime.value))
     }
     if (!position) {
       frameError.value = '当前没有可标记的展示帧'
       return
     }
-    showFrameByIndex(position)
+    if (!isCurrentFrameContext(context)) return
+    if (!showFrameByIndex(position, context)) return
     emit('add-marker', {
       label: newMarkerLabel.value.trim(),
       frame: {
-        media_id: props.media.id,
+        media_id: context.mediaId,
         frame_index: position.index,
         pts_us: position.pts_us,
-        calibration_version: Number(props.calibration?.version) || 1,
+        calibration_version: context.calibrationVersion,
       },
     })
     newMarkerLabel.value = ''
   } catch (e) {
-    frameError.value = '标记定位失败：' + (e?.message || e)
+    if (isCurrentFrameContext(context) && !isStaleFrameResponse(e)) {
+      frameError.value = '标记定位失败：' + (e?.message || e)
+    }
   } finally {
     markerBusy.value = false
   }
@@ -460,23 +783,30 @@ async function addMarkerAtCurrentFrame() {
  *  解析；解析失败提示，不猜测帧身份）。 */
 async function emitCreateTemplate() {
   if (!props.media) return
-  let position = currentFrame.value
+  const context = captureFrameContext()
+  let position = validLockedFrame({ requireImage: true })
   if (!position) {
     try {
-      const meta = await videoApi.mediaFrames(props.media.id, { ptsUs: ptsFromTime(currentTime.value) })
-      position = meta?.current || null
-      framesMeta.value = meta || framesMeta.value
+      position = await resolveFrameAtTime(context, ptsFromTime(currentTime.value))
     } catch (e) {
-      frameError.value = '帧解析失败：' + (e?.message || e)
+      if (isCurrentFrameContext(context) && !isStaleFrameResponse(e)) {
+        frameError.value = '帧解析失败：' + (e?.message || e)
+      }
       return
     }
   }
   if (!position) {
-    frameError.value = '当前没有可用于制作模板的展示帧'
+    if (isCurrentFrameContext(context)) frameError.value = '当前没有可用于制作模板的展示帧'
     return
   }
-  showFrameByIndex(position)
-  emit('create-template', { mediaId: props.media.id, frameIndex: position.index, ptsUs: position.pts_us })
+  if (!isCurrentFrameContext(context)) return
+  const locked = showFrameByIndex(position, context)
+  // showFrameByIndex 新建 PNG 请求后仍在 loading 时，不允许把新身份伪装成已就绪的制作帧。
+  if (!locked || frameRequest.value?.status !== 'ready' || !validLockedFrame({ requireImage: true })) {
+    if (isCurrentFrameContext(context)) frameError.value = '确定帧图尚未就绪，暂不能制作模板'
+    return
+  }
+  emit('create-template', { mediaId: context.mediaId, frameIndex: position.index, ptsUs: position.pts_us })
 }
 
 function isStale(marker) {
@@ -484,11 +814,23 @@ function isStale(marker) {
 }
 
 async function jumpToMarker(marker) {
-  if (!props.media || marker.frame.media_id !== props.media.id) {
-    frameError.value = `该标记在其他素材上（${marker.frame.media_id}），请先在素材库切换`
+  const frame = marker?.frame
+  if (!frame) {
+    frameError.value = '该标记缺少确定帧身份，无法跳转'
     return
   }
-  showFrameByIndex({ index: marker.frame.frame_index, pts_us: marker.frame.pts_us })
+  if (!props.media || String(frame.media_id) !== String(props.media.id)) {
+    frameError.value = `该标记在其他素材上（${frame.media_id || '未知'}），请先在素材库切换`
+    return
+  }
+  const index = Number(frame.frame_index)
+  const ptsUs = Number(frame.pts_us)
+  if (!Number.isSafeInteger(index) || index < 0 || !Number.isSafeInteger(ptsUs) || ptsUs < 0) {
+    frameError.value = '该标记的帧身份无效，无法跳转'
+    return
+  }
+  // 标记本身已经保存服务端确认过的 index + PTS；按 index 取图，禁止退回到浮点时间。
+  showFrameByIndex({ index, pts_us: ptsUs })
 }
 
 // ---- 操作事件叠加 ----
@@ -524,14 +866,17 @@ async function jumpToEvent(view) {
     frameError.value = `该事件在其他分段素材上（${view.mediaId}），请先在素材库切换`
     return
   }
+  const context = captureFrameContext()
   try {
     // 事件 PTS → 展示帧身份（服务端解析首个 pts ≥ 目标的展示帧）
-    const meta = await videoApi.mediaFrames(props.media.id, { ptsUs: view.ptsUs })
-    const position = meta?.current || null
+    const position = await resolveFrameAtTime(context, view.ptsUs)
     if (!position) return
-    showFrameByIndex(position)
+    if (!isCurrentFrameContext(context)) return
+    showFrameByIndex(position, context)
   } catch (e) {
-    frameError.value = '事件跳转失败：' + (e?.message || e)
+    if (isCurrentFrameContext(context) && !isStaleFrameResponse(e)) {
+      frameError.value = '事件跳转失败：' + (e?.message || e)
+    }
   }
 }
 
@@ -551,7 +896,9 @@ function fmtUs(us) {
 .time-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .time-readout { color: var(--accent-2); font-size: 12px; }
 .time-total { color: var(--text-2); font-size: 11px; }
-.time-actions { display: flex; gap: 5px; margin-left: auto; }
+.time-actions { display: flex; gap: 5px; margin-left: auto; align-items: center; flex-wrap: wrap; }
+.frame-index-control { display: inline-flex; align-items: center; gap: 3px; }
+.frame-index-input { width: 72px; padding: 3px 5px; font: 11px var(--mono); }
 .mini-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 11px; padding: 3px 7px; }
 .mini-btn:hover { border-color: var(--accent); color: var(--accent); }
 .mini-btn:disabled { opacity: .45; cursor: not-allowed; }

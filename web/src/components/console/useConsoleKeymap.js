@@ -44,6 +44,35 @@ export function useConsoleKeymap({
   const remoteKeymapRunning = ref(false)
   const keymapOptions = computed(() => Array.isArray(keymaps.value) ? keymaps.value : [])
   let keymapLoadSerial = 0
+  let keymapDetailSerial = 0
+  let keymapSaveSerial = 0
+  let keymapPackageId = null
+  let activeKeymapPackageId = ''
+  let keymapListLoading = false
+  let keymapDetailLoading = false
+  const keymapSaving = ref(false)
+
+  function refValue(value) {
+    return value && typeof value === 'object' && 'value' in value ? value.value : value
+  }
+
+  function currentPackageId() {
+    return String(refValue(packageId) || '')
+  }
+
+  function keymapItemId(item) {
+    return String(item && (item.id || item.file || item.name) || '')
+  }
+
+  function syncKeymapLoading() {
+    keymapLoading.value = keymapListLoading || keymapDetailLoading
+  }
+
+  function invalidateKeymapDetail() {
+    keymapDetailSerial += 1
+    keymapDetailLoading = false
+    syncKeymapLoading()
+  }
 
   /**
    * keymap GET 返回通用资源条目 JSON（content 原文 + 注记 name/binding_count/valid，
@@ -71,57 +100,109 @@ export function useConsoleKeymap({
     }
   }
 
-  function resetKeymapSelection() {
+  function clearKeymapSelection({ invalidate = true } = {}) {
+    if (invalidate) invalidateKeymapDetail()
     activeKeymapName.value = ''
     activeKeymapDisplayName.value = ''
+    activeKeymapPackageId = ''
     activeKeymapModel.value = null
     keymapError.value = ''
     keymapPressed.clear()
   }
 
+  function resetKeymapSelection() {
+    clearKeymapSelection()
+  }
+
   async function loadKeymaps(pkg) {
+    const requestedPkg = String(pkg || '')
     const serial = ++keymapLoadSerial
-    resetKeymapSelection()
-    keymaps.value = []
-    if (!pkg) return
-    keymapLoading.value = true
+    const scopeChanged = keymapPackageId !== requestedPkg
+    keymapPackageId = requestedPkg
+    if (scopeChanged) {
+      clearKeymapSelection()
+      keymaps.value = []
+    }
+    if (!requestedPkg) {
+      keymapListLoading = false
+      syncKeymapLoading()
+      return
+    }
+    keymapListLoading = true
+    syncKeymapLoading()
     try {
-      const list = await api.listKeymaps(pkg)
+      const list = await api.listKeymaps(requestedPkg)
       if (serial !== keymapLoadSerial) return
-      keymaps.value = Array.isArray(list) ? list : (Array.isArray(list?.keymaps) ? list.keymaps : [])
+      const nextKeymaps = Array.isArray(list)
+        ? list
+        : (Array.isArray(list?.keymaps) ? list.keymaps : [])
+      keymaps.value = nextKeymaps
+
+      // 同一 Package 刷新只替换列表，不清除当前已应用方案；但如果方案已经
+      // 被删除/重命名，则必须停用旧模型，避免列表与实际输入状态不一致。
+      if (activeKeymapName.value && activeKeymapPackageId === requestedPkg) {
+        const selected = nextKeymaps.find(item => keymapItemId(item) === activeKeymapName.value)
+        if (!selected) clearKeymapSelection()
+        else activeKeymapDisplayName.value = selected.name || selected.file || activeKeymapDisplayName.value
+      }
     } catch (e) {
       if (serial === keymapLoadSerial) keymapError.value = `读取映射失败：${e.message}`
     } finally {
-      if (serial === keymapLoadSerial) keymapLoading.value = false
+      if (serial === keymapLoadSerial) {
+        keymapListLoading = false
+        syncKeymapLoading()
+      }
     }
   }
 
   async function onKeymapChange(item = null) {
+    const requestSerial = ++keymapDetailSerial
+    const requestedPkg = currentPackageId()
     keymap.releaseAll()
     activeKeymapModel.value = null
     keymapError.value = ''
     if (item && typeof item === 'object') {
-      activeKeymapName.value = item.id || item.file || item.name || ''
+      activeKeymapName.value = keymapItemId(item)
       activeKeymapDisplayName.value = item.name || item.file || item.id || ''
     } else {
       const selected = keymapOptions.value.find(candidate =>
         (candidate.id || candidate.file || candidate.name) === activeKeymapName.value)
       activeKeymapDisplayName.value = selected?.name || selected?.file || activeKeymapName.value || ''
     }
-    if (!activeKeymapName.value || !packageId.value) return
-    keymapLoading.value = true
+    activeKeymapPackageId = requestedPkg
+    const requestedName = activeKeymapName.value
+    if (!requestedName || !requestedPkg) {
+      keymapDetailLoading = false
+      syncKeymapLoading()
+      return
+    }
+    keymapDetailLoading = true
+    syncKeymapLoading()
+    const isCurrentRequest = () => (
+      requestSerial === keymapDetailSerial
+      && requestedPkg === currentPackageId()
+      && requestedName === activeKeymapName.value
+      && activeKeymapPackageId === requestedPkg
+    )
     try {
-      const rep = await api.getKeymap(activeKeymapName.value, packageId.value)
+      const rep = await api.getKeymap(requestedName, requestedPkg)
+      if (!isCurrentRequest()) return
       const model = keymapModelFromResponse(rep)
       if (!model) throw new Error('服务端返回的映射结构无效')
       activeKeymapModel.value = model
       activeKeymapDisplayName.value = model.name || activeKeymapDisplayName.value
     } catch (e) {
-      activeKeymapName.value = ''
+      if (!isCurrentRequest()) return
+      clearKeymapSelection({ invalidate: false })
       keymapError.value = `加载映射失败：${e.message}`
+      keymapDetailLoading = false
+      syncKeymapLoading()
       toast(keymapError.value, 'error')
     } finally {
-      keymapLoading.value = false
+      if (isCurrentRequest()) {
+        keymapDetailLoading = false
+        syncKeymapLoading()
+      }
     }
   }
 
@@ -135,7 +216,7 @@ export function useConsoleKeymap({
       const type = String(action.type || 'raw_key')
       const label = String(binding?.key || `键 ${index + 1}`)
       const active = keymapPressed.has(binding?.key)
-      if (type === 'swipe' || type === 'hold') {
+      if (type === 'swipe') {
         const from = normalizedPoint(action.from)
         const to = normalizedPoint(action.to)
         if (!from || !to) return null
@@ -156,7 +237,7 @@ export function useConsoleKeymap({
       }
       const at = normalizedPoint(action.at)
       if (at) {
-        return { id: `${label}-${index}`, type: 'tap', label, active, style: deviceRectStyle(at.x * vw, at.y * vh) }
+        return { id: `${label}-${index}`, type: type === 'hold' ? 'hold' : 'tap', label, active, style: deviceRectStyle(at.x * vw, at.y * vh) }
       }
       return { id: `${label}-${index}`, type: 'raw_key', label, active, style: { left: '12px', top: `${52 + index * 24}px`, transform: 'none' } }
     }).filter(Boolean)
@@ -173,39 +254,46 @@ export function useConsoleKeymap({
   }
 
   async function onKeymapSave(payload = {}) {
-    if (!payload.pkg || !payload.model || !payload.yaml) return
-    keymapLoading.value = true
+    if (keymapSaving.value || !payload.pkg || !payload.model || !payload.yaml) return false
+    const saveSerial = ++keymapSaveSerial
+    const savePkg = String(payload.pkg)
+    keymapSaving.value = true
     keymapError.value = ''
     try {
       const source = payload.source
-      const rep = source?.id
-        ? await api.updateKeymap(source.id, payload.pkg, {
+      if (source?.id) {
+        await api.updateKeymap(source.id, savePkg, {
           content: payload.yaml,
           expected_version: payload.expected_version,
         })
-        : await api.createKeymap({ pkg: payload.pkg, name: keymapFileName(payload.name), content: payload.yaml })
-      await loadKeymaps(payload.pkg)
-      activeKeymapName.value = rep?.id || source?.id || ''
-      activeKeymapDisplayName.value = rep?.name || payload.name || ''
-      await onKeymapChange()
+      } else {
+        await api.createKeymap({ pkg: savePkg, name: keymapFileName(payload.name), content: payload.yaml })
+      }
+      // 保存只负责持久化和刷新列表，不隐式把编辑结果应用到输入控制器。
+      // Package 已切换或已有更新请求时，不把旧请求的结果写回当前上下文。
+      if (saveSerial !== keymapSaveSerial || savePkg !== currentPackageId()) return true
+      await loadKeymaps(savePkg)
       toast(source ? '映射方案已保存' : '映射方案已创建', 'success')
       return true
     } catch (e) {
-      keymapError.value = `保存映射失败：${e.message}`
-      toast(keymapError.value, 'error')
+      if (savePkg === currentPackageId()) {
+        keymapError.value = `保存映射失败：${e.message}`
+        toast(keymapError.value, 'error')
+      }
       return false
     } finally {
-      keymapLoading.value = false
+      keymapSaving.value = false
     }
   }
 
   async function onKeymapDelete(payload = {}) {
     const id = payload.source?.id || payload.id || payload.name
-    if (!id || !payload.pkg) return
+    const requestedPkg = String(payload.pkg || '')
+    if (!id || !requestedPkg) return
     try {
-      await api.deleteKeymap(id, payload.pkg)
+      await api.deleteKeymap(id, requestedPkg)
       if (id === activeKeymapName.value || payload.name === activeKeymapDisplayName.value) resetKeymapSelection()
-      await loadKeymaps(payload.pkg)
+      await loadKeymaps(requestedPkg)
       toast('映射方案已删除', 'success')
     } catch (e) {
       toast(`删除映射失败：${e.message}`, 'error')
@@ -226,34 +314,29 @@ export function useConsoleKeymap({
     activeKeymapModel,
     loading: keymapLoading,
     keymapLoading,
+    saving: keymapSaving,
+    keymapSaving,
     error: keymapError,
     keymapError,
-    refresh: () => loadKeymaps(packageId.value),
-    onRefresh: () => loadKeymaps(packageId.value),
+    refresh: () => loadKeymaps(currentPackageId()),
+    onRefresh: () => loadKeymaps(currentPackageId()),
     select: onKeymapChange,
     onSelect: onKeymapChange,
     onSave: onKeymapSave,
     onRequestPoint: () => pickCoord(),
     onDelete: onKeymapDelete,
-    onSaved: async (item) => {
-      await loadKeymaps(packageId.value)
-      const name = item?.name || item?.keymap?.name
-      if (name) {
-        activeKeymapName.value = name
-        await onKeymapChange()
-      }
-    },
+    onSaved: () => loadKeymaps(currentPackageId()),
     onDeleted: (name) => {
       if (!name || name === activeKeymapName.value) resetKeymapSelection()
-      return loadKeymaps(packageId.value)
+      return loadKeymaps(currentPackageId())
     },
   }
 
   return {
     keymaps, keymapOptions, activeKeymapName, activeKeymapDisplayName,
-    activeKeymapModel, keymapLoading, keymapError, remoteKeymapRunning,
+    activeKeymapModel, keymapLoading, keymapSaving, keymapError, remoteKeymapRunning,
     keymapOverlay, keymapStatus,
-    loadKeymaps, onKeymapChange, resetKeymapSelection,
+    loadKeymaps, onKeymapChange, onKeymapSave, resetKeymapSelection,
     keymapPanelContext,
   }
 }

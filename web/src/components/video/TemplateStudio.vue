@@ -19,7 +19,9 @@
           <img
             v-if="frameUrl"
             ref="frameImg"
+            :key="frameRequestKey"
             :src="frameUrl"
+            :data-frame-key="frameRequestKey"
             class="frame-img"
             :class="{ picking }"
             alt="服务端确定帧"
@@ -65,7 +67,7 @@
             <button
               class="btn btn-sm btn-primary"
               type="button"
-              :disabled="!yamlReady || !selection || saving || frameError"
+              :disabled="!yamlReady || !selectionRegion || !frameReady || saving || !!frameError"
               data-testid="studio-save"
               @click="saveTemplate"
             >{{ saving ? '保存中…' : '💾 保存模板到当前 Package' }}</button>
@@ -85,7 +87,7 @@
             <button
               class="btn btn-sm"
               type="button"
-              :disabled="!yamlReady || frameError || testing"
+              :disabled="!yamlReady || !frameReady || !!frameError || testing"
               data-testid="studio-test"
               @click="runTest"
             >{{ testing ? '匹配中…' : '🎯 测试匹配' }}</button>
@@ -106,9 +108,10 @@
 // - 模板存储空间 = oriented 帧像素空间（与 live 模板一致，见 templateStudio.js 注释）。
 import { computed, ref, watch } from 'vue'
 import { api } from '../../api'
+import { composeTemplateName, putTemplateBytes, resolveTemplateVersion, templateShortName } from '../../console/template-resource'
 import { videoApi } from './videoApi'
 import {
-  describeFrameIdentity, eventToImagePoint, orientedToReference,
+  describeFrameIdentity, eventToImagePoint, frameIdentityKey, normalizeFrameIdentity, orientedToReference,
   pixelRectToStyle, regionFromRect, regionToPixelRect,
 } from './templateStudio'
 
@@ -137,6 +140,8 @@ const overwrite = ref(false)
 const nameConflict = ref('')
 const saving = ref(false)
 const error = ref('')
+const templateEntries = ref([])
+const overwriteTarget = ref(null)
 // 离线测试状态
 const templateOptions = ref([])
 const testName = ref('')
@@ -147,26 +152,59 @@ const hitRect = ref(null)
 const missRect = ref(null)
 const resultText = ref('')
 const savedShortName = ref('')
+// 制作会话在打开瞬间冻结：后续素材/项目/Package 变化不能让当前裁剪读取另一帧。
+const frozenSession = ref(null)
+const frameLoaded = ref(false)
+let sessionGeneration = 0
+let templateListGeneration = 0
+let saveGeneration = 0
+let testGeneration = 0
+
+const activeMedia = computed(() => frozenSession.value?.media || null)
+const activeFrame = computed(() => frozenSession.value?.frame || null)
+const activeCalibration = computed(() => frozenSession.value?.calibration || null)
+const activePackageId = computed(() => frozenSession.value?.packageId || '')
+const frameRequestKey = computed(() => {
+  const session = frozenSession.value
+  return session ? `${session.generation}:${frameIdentityKey(session.frame)}` : ''
+})
+const frameReady = computed(() => !!frameLoaded.value && !!frameUrl.value && !frameError.value)
 
 const frameUrl = computed(() => {
-  if (!props.open || !props.media?.id || !props.frame) return ''
-  if (props.frame.frameIndex !== undefined && props.frame.frameIndex !== null) {
-    return videoApi.mediaFrameUrl(props.media.id, { index: props.frame.frameIndex })
+  const session = frozenSession.value
+  if (!props.open || !session?.frame?.mediaId) return ''
+  if (session.frame.frameIndex !== null) {
+    return videoApi.mediaFrameUrl(session.frame.mediaId, { index: session.frame.frameIndex })
   }
-  return videoApi.mediaFrameUrl(props.media.id, { ptsUs: props.frame.ptsUs ?? 0 })
+  return session.frame.ptsUs === null
+    ? ''
+    : videoApi.mediaFrameUrl(session.frame.mediaId, { ptsUs: session.frame.ptsUs })
 })
 
 const frameLabel = computed(() => describeFrameIdentity({
-  mediaId: props.media?.id,
-  frameIndex: props.frame?.frameIndex,
-  ptsUs: props.frame?.ptsUs,
+  mediaId: activeFrame.value?.mediaId,
+  frameIndex: activeFrame.value?.frameIndex,
+  ptsUs: activeFrame.value?.ptsUs,
 }))
 
-function onFrameLoad() {
+function currentFrameKeyFromEvent(event) {
+  const target = event?.currentTarget || event?.target
+  const key = target?.dataset?.frameKey
+  // happy-dom/部分浏览器在异步事件回调中会清空 currentTarget；没有可比对
+  // 的 dataset 时仍以当前 ref 为准，真正的旧元素由 target/ref 检查拦截。
+  if (target && frameImg.value && target !== frameImg.value) return ''
+  return !key || key === frameRequestKey.value ? (key || frameRequestKey.value) : ''
+}
+
+function onFrameLoad(event) {
+  if (!currentFrameKeyFromEvent(event)) return
+  frameLoaded.value = true
   frameError.value = ''
 }
 
-function onFrameError() {
+function onFrameError(event) {
+  if (!currentFrameKeyFromEvent(event)) return
+  frameLoaded.value = false
   frameError.value = '确定帧加载失败：素材可能已缺失或帧参数越界'
 }
 
@@ -181,7 +219,7 @@ function naturalSize() {
 // ---- 框选（帧像素空间） ----
 
 function onMouseDown(event) {
-  if (event.button !== 0) return
+  if (event.button !== 0 || !frameReady.value) return
   const rect = imageRect()
   if (!rect) return
   picking.value = true
@@ -231,53 +269,129 @@ const selectionInfo = computed(() => {
   const region = selectionRegion.value
   const refPt = orientedToReference(
     { x: (region[0] + region[2]) / 2 * width, y: (region[1] + region[3]) / 2 * height },
-    props.calibration,
-    { width: props.media?.width || width, height: props.media?.height || height },
+    activeCalibration.value,
+    { width: activeMedia.value?.width || width, height: activeMedia.value?.height || height },
   )
-  const cal = props.calibration?.version ? ` · 校准 v${props.calibration.version}` : ''
+  const cal = activeCalibration.value?.version ? ` · 校准 v${activeCalibration.value.version}` : ''
   return `选框 ${Math.round(selection.value.w)}×${Math.round(selection.value.h)}px（帧空间）`
     + ` · 参考 (${refPt.x.toFixed(0)}, ${refPt.y.toFixed(0)})${cal}`
 })
 
+function cloneSnapshot(value) {
+  if (value === null || value === undefined) return value
+  try { return JSON.parse(JSON.stringify(value)) } catch { return { ...value } }
+}
+
+/** 打开时固定本次制作的所有身份；保存/测试只消费这个快照。 */
+function captureFrozenSession() {
+  sessionGeneration += 1
+  const frame = normalizeFrameIdentity(props.frame, props.media?.id)
+  frozenSession.value = {
+    generation: sessionGeneration,
+    media: cloneSnapshot(props.media),
+    frame,
+    calibration: cloneSnapshot(props.calibration),
+    packageId: String(props.packageId || '').trim(),
+  }
+  frameLoaded.value = false
+  frameError.value = frame ? '' : '缺少确定帧身份（media_id + frame_index/pts_us），无法制作模板'
+}
+
+function isCurrentSession(session) {
+  return !!session && props.open && frozenSession.value?.generation === session.generation
+}
+
 // ---- 保存模板（经动作清单缝） ----
 
 async function saveTemplate() {
-  if (saving.value || !selectionRegion.value) return
+  const session = frozenSession.value
+  if (saving.value || !selectionRegion.value || !frameReady.value || !isCurrentSession(session)) return
+  const operation = ++saveGeneration
   saving.value = true
   error.value = ''
   nameConflict.value = ''
+  let attemptedName = ''
   try {
     const { width, height } = naturalSize()
     const pngBase64 = await cropSelectionToBase64()
+    if (operation !== saveGeneration || !isCurrentSession(session)) return
     const name = templateName.value || defaultTemplateName(selectionRegion.value)
-    const result = await videoApi.createTemplateFromFrame({
-      packageId: props.packageId,
-      name,
-      pngBase64,
-      region: selectionRegion.value,
-      preserveColor: preserveColor.value,
-      overwrite: overwrite.value,
-      frame: {
-        media_id: props.media.id,
-        frame_index: props.frame?.frameIndex ?? null,
-        pts_us: props.frame?.ptsUs ?? null,
-      },
-      calibration: {
-        version: Number(props.calibration?.version) || 1,
-        reference_size: props.calibration?.reference_size
-          ? [props.calibration.reference_size.width, props.calibration.reference_size.height]
-          : null,
-        rotation: props.calibration?.rotation ?? null,
-      },
-    })
+    attemptedName = name
+    const frame = {
+      media_id: session.frame.mediaId,
+      frame_index: session.frame.frameIndex,
+      pts_us: session.frame.ptsUs,
+    }
+    const calibration = {
+      version: Number(session.calibration?.version) || 1,
+      reference_size: session.calibration?.reference_size
+        ? [session.calibration.reference_size.width, session.calibration.reference_size.height]
+        : null,
+      rotation: session.calibration?.rotation ?? null,
+    }
+    let result
+    if (overwrite.value) {
+      // 覆盖必须针对冲突时看到的同一资源路径，并使用最新列表中的完整版本；
+      // 不再把视频制作入口的 overwrite=true 交给会绕过版本门禁的动作。
+      let target = overwriteTarget.value
+      if (!target || normalizedTemplateShortName(target.name) !== normalizedTemplateShortName(name)) {
+        await refreshTemplateOptions(session)
+        target = findTemplateByShortName(name)
+      }
+      if (!target) throw new Error('无法确认待覆盖模板，请重新保存以刷新模板列表')
+      const targetName = composeTemplateName(name, selectionRegion.value, preserveColor.value)
+      if (targetName !== target.name) {
+        throw new Error('框选区域或颜色标记已变化，请返回修改后以新模板名保存')
+      }
+      const expectedVersion = await resolveTemplateVersion(target.name, session.packageId, target.version)
+      const saved = await putTemplateBytes(target.name, pngBase64, session.packageId, expectedVersion)
+      result = {
+        ...saved,
+        name: target.name,
+        short_name: templateShortName(target.name),
+        region: selectionRegion.value,
+        frame,
+        calibration,
+      }
+    } else {
+      result = await videoApi.createTemplateFromFrame({
+        packageId: session.packageId,
+        name,
+        pngBase64,
+        region: selectionRegion.value,
+        preserveColor: preserveColor.value,
+        // 新建仍经 gamer.yaml 动作清单；服务端先校验/归一化，再以非 force
+        // 语义创建，短名冲突由动作返回给用户确认。
+        overwrite: false,
+        frame,
+        calibration,
+      })
+    }
+    if (operation !== saveGeneration || !isCurrentSession(session)) return
     savedShortName.value = String(result?.short_name || '')
     resultText.value = `模板已保存：${result?.name}（${Math.round(width)}×${Math.round(height)} 帧空间，灰度 ${result?.size}B）`
     emit('saved', result)
-    await refreshTemplateOptions()
+    await refreshTemplateOptions(session)
     if (!testName.value) testName.value = savedShortName.value
+    nameConflict.value = ''
+    overwrite.value = false
+    overwriteTarget.value = null
   } catch (e) {
-    if (String(e?.message || '').includes('短名冲突')) {
-      nameConflict.value = parseConflictName(e?.message)
+    if (operation !== saveGeneration || !isCurrentSession(session)) return
+    if (e?.status === 409 && overwrite.value) {
+      const list = await refreshTemplateOptions(session)
+      const current = findTemplateByShortName(attemptedName, list)
+      if (current) {
+        overwriteTarget.value = current
+        nameConflict.value = current.name
+      }
+      error.value = `模板版本冲突${current ? `：${current.name}` : ''}，请确认覆盖后重试`
+    } else if (String(e?.message || '').includes('短名冲突')) {
+      const conflictName = parseConflictName(e?.message)
+      nameConflict.value = conflictName
+      const list = await refreshTemplateOptions(session)
+      overwriteTarget.value = findTemplateByShortName(conflictName, list)
+      if (overwriteTarget.value) nameConflict.value = overwriteTarget.value.name
       error.value = `模板短名冲突：${nameConflict.value}。勾选「覆盖」后重试，或换个名字。`
     } else {
       error.value = `保存失败：${e?.message || e}`
@@ -321,24 +435,50 @@ function parseConflictName(message) {
   return match ? match[1] : ''
 }
 
+function findTemplateByShortName(name, list = templateEntries.value) {
+  const wanted = normalizedTemplateShortName(name)
+  return (Array.isArray(list) ? list : []).find(item =>
+    normalizedTemplateShortName(item?.name) === wanted,
+  ) || null
+}
+
+function normalizedTemplateShortName(name) {
+  const short = templateShortName(name).toLowerCase()
+  return short.endsWith('.png') ? short : `${short}.png`
+}
+
 // ---- 离线测试（vision REST 复用；media 帧身份寻址） ----
 
-async function refreshTemplateOptions() {
-  if (!props.packageId) return
+async function refreshTemplateOptions(session = frozenSession.value) {
+  const packageId = session?.packageId || ''
+  const generation = ++templateListGeneration
+  if (!packageId) {
+    templateEntries.value = []
+    templateOptions.value = []
+    return []
+  }
   try {
-    const list = await api.listTemplates(props.packageId)
+    const list = await api.listTemplates(packageId)
+    if (!isCurrentSession(session) || generation !== templateListGeneration) return templateEntries.value
+    templateEntries.value = Array.isArray(list) ? list : []
     const names = new Set(list.map(item => String(item.name || '')))
     templateOptions.value = [...names]
       .map(name => name.replace(/#[^#./\\]+(\.png)$/i, '$1').replace(/\.png$/i, ''))
     // 短名去重
     templateOptions.value = [...new Set(templateOptions.value)]
+    return templateEntries.value
   } catch {
+    if (!isCurrentSession(session) || generation !== templateListGeneration) return templateEntries.value
+    templateEntries.value = []
     templateOptions.value = []
+    return []
   }
 }
 
 async function runTest() {
-  if (testing.value || frameError.value) return
+  const session = frozenSession.value
+  if (testing.value || frameError.value || !frameReady.value || !isCurrentSession(session)) return
+  const operation = ++testGeneration
   testing.value = true
   error.value = ''
   hitRect.value = null
@@ -352,23 +492,24 @@ async function runTest() {
       ? regionToPixelRect(selectionRegion.value, width, height)
       : null
     const result = await videoApi.visionTestTemplate({
-      packageId: props.packageId,
+      packageId: session.packageId,
       name: shortName,
       threshold: threshold.value,
       region,
       frame: {
-        mediaId: props.media.id,
-        frameIndex: props.frame?.frameIndex ?? null,
-        ptsUs: props.frame?.ptsUs ?? null,
+        mediaId: session.frame.mediaId,
+        frameIndex: session.frame.frameIndex,
+        ptsUs: session.frame.ptsUs,
       },
     })
+    if (operation !== testGeneration || !isCurrentSession(session)) return
     const identity = result?.frame ? `帧 #${result.frame.frame_index} · pts_us=${result.frame.pts_us}` : ''
     if (result?.hit) {
       hitRect.value = { x: result.x, y: result.y, w: result.width, h: result.height }
       const center = orientedToReference(
         { x: result.x + result.width / 2, y: result.y + result.height / 2 },
-        props.calibration,
-        { width: props.media?.width || width, height: props.media?.height || height },
+        session.calibration,
+        { width: session.media?.width || width, height: session.media?.height || height },
       )
       resultText.value = `命中：${shortName} 置信度 ${Number(result.score).toFixed(3)}`
         + ` · 帧空间 (${Math.round(result.x + result.width / 2)}, ${Math.round(result.y + result.height / 2)})`
@@ -380,9 +521,10 @@ async function runTest() {
       resultText.value = `未命中：${shortName}（红框 = 本次搜索区域）${identity ? ` · ${identity}` : ''}`
     }
   } catch (e) {
+    if (operation !== testGeneration || !isCurrentSession(session)) return
     error.value = `测试失败：${e?.message || e}`
   } finally {
-    testing.value = false
+    if (operation === testGeneration) testing.value = false
   }
 }
 
@@ -399,12 +541,25 @@ const missStyle = computed(() => {
 })
 
 function close() {
+  testGeneration += 1
+  saveGeneration += 1
+  templateListGeneration += 1
+  frozenSession.value = null
+  frameLoaded.value = false
   emit('close')
 }
 
-// 打开时重置交互态 + 拉模板候选；素材/帧变化时清选框
+// 打开时冻结交互上下文 + 拉模板候选；关闭会使所有旧异步结果失效。
 watch(() => props.open, open => {
-  if (!open) return
+  if (!open) {
+    testGeneration += 1
+    saveGeneration += 1
+    templateListGeneration += 1
+    frozenSession.value = null
+    frameLoaded.value = false
+    return
+  }
+  captureFrozenSession()
   selection.value = null
   hitRect.value = null
   missRect.value = null
@@ -412,16 +567,9 @@ watch(() => props.open, open => {
   error.value = ''
   nameConflict.value = ''
   overwrite.value = false
-  frameError.value = ''
-  void refreshTemplateOptions()
-})
-watch(() => [props.media?.id, props.frame?.frameIndex, props.frame?.ptsUs], () => {
-  selection.value = null
-  hitRect.value = null
-  missRect.value = null
-  resultText.value = ''
-  frameError.value = ''
-})
+  overwriteTarget.value = null
+  void refreshTemplateOptions(frozenSession.value)
+}, { immediate: true })
 </script>
 
 <style scoped>

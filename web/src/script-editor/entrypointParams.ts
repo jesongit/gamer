@@ -5,7 +5,7 @@
  * 类型别名归一与形态收窄（前端不为取参数而解析 YAML）。旧 psig1 signature 字段已删除。
  */
 import type { ParamDecl } from './model'
-import { normalizeParamType, PARAM_TYPES } from './schema'
+import { normalizeParamDecl } from './schema'
 
 /** descriptor.schema 内单个参数声明（服务端 decls_schema_json 形态）。 */
 export interface SchemaParamDecl {
@@ -29,16 +29,16 @@ export function schemaToParamDecls(schema: SchemaParamDecl[] | null | undefined)
   const decls: ParamDecl[] = []
   for (const item of schema) {
     if (!item || typeof item !== 'object' || typeof item.name !== 'string' || item.name === '') continue
-    const rawType = typeof item.type === 'string' ? normalizeParamType(item.type.trim()) : 'string'
-    const type = (PARAM_TYPES as readonly string[]).includes(rawType) ? rawType : 'string'
-    const hasDefault = item.default !== null && item.default !== undefined
-    decls.push({
+    // 服务端 descriptor 用 null 表示 Option<Value>::None；因此这里显式
+    // 把 null 归为“未声明默认值”，而 false/0/'' 必须保留为真实默认值。
+    decls.push(normalizeParamDecl({
       name: item.name,
-      type,
-      required: item.required === true && !hasDefault,
-      default: hasDefault ? item.default : null,
-      desc: typeof item.desc === 'string' ? item.desc : '',
-    })
+      type: item.type,
+      required: item.required,
+      default: item.default,
+      hasDefault: item.default !== null && item.default !== undefined,
+      desc: item.desc,
+    }))
   }
   return decls
 }

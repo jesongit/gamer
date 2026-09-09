@@ -16,36 +16,59 @@ export function templateShortName(name: string): string {
     .replace(/#[^#./\\]+(\.(png|jpe?g))$/i, '$1')
 }
 
-let scriptsInflight: Promise<void> | null = null
-async function ensureScripts(packageId: string): Promise<void> {
-  if (scriptsData.value.length) return
-  if (!scriptsInflight) {
-    scriptsInflight = api
-      .listScripts(packageId)
-      .then((list) => { scriptsData.value = Array.isArray(list) ? list : [] })
-      .catch(() => { /* 拉取失败：ScriptPicker 显示「（无脚本）」，任务保存被必填校验阻断 */ })
-      .finally(() => { scriptsInflight = null })
-  }
-  await scriptsInflight
+const scriptsInflight = new Map<string, Promise<void>>()
+const templatesInflight = new Map<string, Promise<void>>()
+let activeResourcePackage = ''
+
+function resourcePackageOf(item: { package?: unknown; pkg?: unknown; id?: unknown }): string {
+  const explicit = String(item?.package ?? item?.pkg ?? '').trim()
+  if (explicit) return explicit
+  return String(item?.id || '').split('/')[0] || ''
 }
 
-let templatesInflight: Promise<void> | null = null
-async function ensureTemplates(packageId: string): Promise<void> {
-  if (templatesData.value.length) return
-  if (!templatesInflight) {
-    templatesInflight = api
-      .listTemplates(packageId)
-      .then((list) => { templatesData.value = Array.isArray(list) ? list : [] })
-      .catch(() => { /* 拉取失败：tmpl 参数无候选（可手输短名），不阻断保存 */ })
-      .finally(() => { templatesInflight = null })
+async function ensureScripts(packageId: string): Promise<void> {
+  if (scriptsData.value.length && scriptsData.value.every((item) => resourcePackageOf(item) === packageId)) return
+  let request = scriptsInflight.get(packageId)
+  if (!request) {
+    request = api
+      .listScripts(packageId)
+      .then((list) => {
+        // 旧 Package 的迟到结果不能污染当前候选 store。
+        if (activeResourcePackage === packageId) scriptsData.value = Array.isArray(list) ? list : []
+      })
+      .catch(() => { /* 拉取失败：ScriptPicker 显示「（无脚本）」 */ })
+      .finally(() => { scriptsInflight.delete(packageId) })
+    scriptsInflight.set(packageId, request)
   }
-  await templatesInflight
+  await request
+}
+
+async function ensureTemplates(packageId: string): Promise<void> {
+  if (templatesData.value.length && templatesData.value.every((item) => resourcePackageOf(item) === packageId)) return
+  let request = templatesInflight.get(packageId)
+  if (!request) {
+    request = api
+      .listTemplates(packageId)
+      .then((list) => {
+        if (activeResourcePackage === packageId) templatesData.value = Array.isArray(list) ? list : []
+      })
+      .catch(() => { /* 拉取失败：tmpl 参数无候选（可手输短名），不阻断保存 */ })
+      .finally(() => { templatesInflight.delete(packageId) })
+    templatesInflight.set(packageId, request)
+  }
+  await request
 }
 
 /** 幂等保障脚本 + 模板候选进 store（payload 编辑器挂载与 entrypoints 枚举共用；
  * 数据上下文 = 调用方传入的当前 Package id，plan §39）。 */
 export function ensureGamerYamlResources(packageId: string | null | undefined): Promise<void> {
   const pkg = String(packageId || '')
+  activeResourcePackage = pkg
+  if (!pkg) {
+    scriptsData.value = []
+    templatesData.value = []
+    return Promise.resolve()
+  }
   return Promise.all([ensureScripts(pkg), ensureTemplates(pkg)]).then(() => undefined)
 }
 
@@ -60,7 +83,11 @@ export function scriptPackageIdOf(entrypoint: string): string {
   return scriptPackageOf(entrypoint)
 }
 
-/** 执行目标候选 = 当前 store 快照（调用前应 ensureGamerYamlResources）。 */
-export function gamerYamlEntrypointOptions(_ctx: RunnerEditorContext): RunnerEntrypointOption[] {
-  return scriptsData.value.map((s) => ({ value: s.id, label: String(s.name || s.id) }))
+/** 执行目标候选 = 当前 Package 的 store 快照（调用前应 ensureGamerYamlResources）。 */
+export function gamerYamlEntrypointOptions(ctx: RunnerEditorContext): RunnerEntrypointOption[] {
+  const packageId = String(ctx?.packageId || '').trim()
+  if (!packageId) return []
+  return scriptsData.value
+    .filter((script) => resourcePackageOf(script) === packageId)
+    .map((s) => ({ value: s.id, label: String(s.name || s.id) }))
 }
