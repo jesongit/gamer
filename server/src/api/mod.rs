@@ -435,6 +435,10 @@ pub(crate) fn build_router_with_extensions(
             post(extensions::api_call_extension),
         )
         .route(
+            "/api/extensions/:id/capabilities",
+            get(extensions::api_extension_capabilities),
+        )
+        .route(
             "/api/extensions/:id/:version",
             delete(extensions::api_uninstall_extension),
         )

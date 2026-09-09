@@ -72,7 +72,34 @@ pub(crate) struct ExtensionManifest {
     /// （等价 `*`）；`*` = 全部应用；其余按 Android 包名精确匹配。仅作运行
     /// 目标声明，宿主不做硬门禁（前端按当前设备应用过滤插件入口）。
     targets: Vec<String>,
+    /// 插件依赖声明（`[[dependencies]]`，简化计划 Phase 3）：只表达插件关系
+    /// （必需 = 启动门禁；可选 = 能力降级提示），不做自动下载/自动启用，
+    /// 也不授予任何权限（依赖 ≠ 权限）。与 Package 依赖（package.toml
+    /// `[plugins]`）是两个不同层面的概念。
+    dependencies: Vec<ExtensionDependency>,
     ui: Vec<UiContribution>,
+}
+
+/// 一条插件依赖声明：目标插件 id + 兼容版本要求 + 必需/可选。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExtensionDependency {
+    id: ExtensionId,
+    version_req: VersionReq,
+    required: bool,
+}
+
+impl ExtensionDependency {
+    pub(crate) fn id(&self) -> &ExtensionId {
+        &self.id
+    }
+
+    pub(crate) fn version_req(&self) -> &VersionReq {
+        &self.version_req
+    }
+
+    pub(crate) fn required(&self) -> bool {
+        self.required
+    }
 }
 
 impl ExtensionManifest {
@@ -115,6 +142,11 @@ impl ExtensionManifest {
     /// Android 应用支持声明（`targets.android.packages`，缺省/空 = 通用）。
     pub(crate) fn android_targets(&self) -> &[String] {
         &self.targets
+    }
+
+    /// 插件依赖声明（`[[dependencies]]`；空 = 无依赖）。
+    pub(crate) fn dependencies(&self) -> &[ExtensionDependency] {
+        &self.dependencies
     }
 
     pub(crate) fn ui(&self) -> &[UiContribution] {
@@ -411,6 +443,11 @@ struct RawManifest {
     /// `[targets.android]` 一致。
     #[serde(default)]
     targets: Option<RawTargets>,
+    /// 插件依赖声明（可缺省 = 无依赖）：`[[dependencies]]`
+    /// `{id, version?, required?}`（version 缺省 = 任意版本，required 缺省 =
+    /// true——依赖缺省从紧，可选依赖必须显式声明）。
+    #[serde(default)]
+    dependencies: Vec<RawDependency>,
     #[serde(default)]
     ui: RawUi,
 }
@@ -420,6 +457,18 @@ struct RawManifest {
 struct RawTargets {
     #[serde(default)]
     android: Option<RawAndroidTargets>,
+}
+
+/// `[[dependencies]]` 原始形态（简化计划 Phase 3）：只有 id / version / required
+/// 三个字段，不做 lockfile/下载地址/feature graph。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDependency {
+    id: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    required: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -618,6 +667,7 @@ fn parse_manifest_with_versions(
             .map(|android| android.packages)
             .unwrap_or_default(),
     )?;
+    let dependencies = parse_dependencies(&raw.id, raw.dependencies)?;
     let ui = raw
         .ui
         .contributions
@@ -636,8 +686,48 @@ fn parse_manifest_with_versions(
         host_api,
         permissions,
         targets,
+        dependencies,
         ui,
     })
+}
+
+/// `[[dependencies]]` 解析：id 合法且不指向自身；version 为合法 semver 要求
+///（缺省 `*`）；同 id 重复声明拒绝（避免同 id 必需/可选两种意图）。依赖声明
+/// 不授予任何权限。
+fn parse_dependencies(
+    own_id: &str,
+    raw: Vec<RawDependency>,
+) -> ExtensionResult<Vec<ExtensionDependency>> {
+    let mut out: Vec<ExtensionDependency> = Vec::new();
+    for entry in raw {
+        let id = ExtensionId::parse(entry.id.trim())?;
+        if id.as_str() == own_id {
+            return Err(ExtensionError::InvalidManifest(format!(
+                "dependencies 不能声明自身: {own_id}"
+            )));
+        }
+        if out.iter().any(|existing| existing.id() == &id) {
+            return Err(ExtensionError::InvalidManifest(format!(
+                "dependencies 重复声明同一插件: {id}"
+            )));
+        }
+        let version_text = entry
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("*");
+        let version_req = VersionReq::parse(version_text).map_err(|error| {
+            ExtensionError::InvalidManifest(format!("dependencies.version 无效（{id}）: {error}"))
+        })?;
+        out.push(ExtensionDependency {
+            id,
+            version_req,
+            // 缺省从紧：未显式标 false 视为必需依赖。
+            required: entry.required.unwrap_or(true),
+        });
+    }
+    Ok(out)
 }
 
 /// `[targets.android].packages` 归一化：trim + 轻校验（复用 Package 侧规则，

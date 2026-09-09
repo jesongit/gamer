@@ -16,6 +16,7 @@ use super::error::{ExtensionError, ExtensionResult};
 use super::host_api::{HostApi, HostApiCatalog};
 use super::manifest::ExtensionManifest;
 use super::model::{ExtensionId, ExtensionRecord, ExtensionState, ExtensionVersion};
+use super::native_public_actions;
 use super::store::{ExtensionStore, InstalledExtension};
 use super::ui::{RegisteredUiContribution, UiContributionRegistry};
 use super::wasm::{WasmInstanceHandle, WasmRuntime, WasmStartRequest};
@@ -59,6 +60,21 @@ pub(crate) struct ExtensionSnapshot {
     installed_versions: Vec<ExtensionVersion>,
     state: ExtensionState,
     last_error: Option<String>,
+}
+
+/// 单条依赖的实时状态（快照/插件中心提示用，简化计划 Phase 3）：
+/// `satisfied` = 已安装 + 版本兼容 + 目标 Running（可被调用/可作为启动前提）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct DependencyStatus {
+    pub(crate) id: String,
+    pub(crate) version_req: String,
+    pub(crate) required: bool,
+    pub(crate) installed: bool,
+    pub(crate) version: Option<String>,
+    pub(crate) state: Option<ExtensionState>,
+    pub(crate) satisfied: bool,
+    /// 可选依赖缺失时给 UI 的降级提示（必需依赖缺失走启动错误）。
+    pub(crate) note: Option<String>,
 }
 
 /// Management-only result for the pre-install inspection step. Keeping this
@@ -359,6 +375,194 @@ impl ExtensionService {
         &self.store
     }
 
+    // -----------------------------------------------------------------------
+    // 插件依赖（简化计划 Phase 3）：最小必需/可选依赖。不做自动下载、自动
+    // 启用或复杂依赖图——必需依赖是启动门禁，可选依赖只产生降级提示。
+    // -----------------------------------------------------------------------
+
+    /// 单条依赖的实时状态：已安装？版本兼容？目标 Running？
+    fn dependency_status(&self, dep: &super::manifest::ExtensionDependency) -> DependencyStatus {
+        let installed = self.list().ok().and_then(|all| {
+            all.into_iter()
+                .find(|snapshot| snapshot.id().as_str() == dep.id().as_str())
+        });
+        let (version, state) = match &installed {
+            Some(snapshot) => (
+                Some(snapshot.active_version().to_string()),
+                Some(snapshot.state()),
+            ),
+            None => (None, None),
+        };
+        let version_ok = installed.as_ref().is_some_and(|snapshot| {
+            dep.version_req()
+                .matches(snapshot.active_version().semver())
+        });
+        let running = state.is_some_and(ExtensionState::is_running);
+        let satisfied = version_ok && running;
+        let note = (!satisfied).then(|| {
+            if installed.is_none() {
+                "依赖未安装".to_string()
+            } else if !version_ok {
+                "依赖版本不兼容".to_string()
+            } else {
+                "依赖未启用".to_string()
+            }
+        });
+        DependencyStatus {
+            id: dep.id().to_string(),
+            version_req: dep.version_req().to_string(),
+            required: dep.required(),
+            installed: installed.is_some(),
+            version,
+            state,
+            satisfied,
+            note,
+        }
+    }
+
+    /// 依赖状态报告（快照附带；插件中心/面板据此做缺依赖提示与可选能力降级）。
+    pub(crate) fn dependency_report(&self, manifest: &ExtensionManifest) -> Vec<DependencyStatus> {
+        manifest
+            .dependencies()
+            .iter()
+            .map(|dep| self.dependency_status(dep))
+            .collect()
+    }
+
+    /// 启动门禁：必需依赖必须已安装、版本兼容且处于 Running；可选依赖缺失
+    /// 不阻止启动（基础功能照常，能力由调用方按 `dependency_report` 降级）。
+    /// 不自动下载、不自动启用其他插件。
+    fn check_required_dependencies(
+        &self,
+        id: &ExtensionId,
+        manifest: &ExtensionManifest,
+    ) -> ExtensionResult<()> {
+        for dep in manifest.dependencies().iter().filter(|dep| dep.required()) {
+            let status = self.dependency_status(dep);
+            if status.satisfied {
+                continue;
+            }
+            let reason = if !status.installed {
+                format!("必需依赖 {} 未安装（请在插件中心安装并启用）", dep.id())
+            } else if status.version.as_deref().is_none_or(|text| {
+                ExtensionVersion::parse(text)
+                    .map(|version| !dep.version_req().matches(version.semver()))
+                    .unwrap_or(true)
+            }) {
+                format!(
+                    "必需依赖 {} 版本不兼容：已装 {}，要求 {}",
+                    dep.id(),
+                    status.version.as_deref().unwrap_or("?"),
+                    dep.version_req()
+                )
+            } else {
+                format!("必需依赖 {} 未启用（请在插件中心启用）", dep.id())
+            };
+            return Err(ExtensionError::DependencyUnsatisfied {
+                id: id.to_string(),
+                reason,
+            });
+        }
+        Ok(())
+    }
+
+    /// 必需依赖循环检测：从本插件出发沿「必需依赖」边走已安装插件图，回到
+    /// 自身即拒绝启动（否则双方互等，永远无法启动且报因难寻）。可选依赖
+    /// 不参与（它从不阻塞启动）。
+    fn check_dependency_cycles(
+        &self,
+        id: &ExtensionId,
+        manifest: &ExtensionManifest,
+    ) -> ExtensionResult<()> {
+        let mut stack: Vec<String> = manifest
+            .dependencies()
+            .iter()
+            .filter(|dep| dep.required())
+            .map(|dep| dep.id().to_string())
+            .collect();
+        let mut visited: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        while let Some(current) = stack.pop() {
+            if current == id.as_str() {
+                return Err(ExtensionError::DependencyUnsatisfied {
+                    id: id.to_string(),
+                    reason: "必需依赖形成循环（A→B→A），请调整 [[dependencies]] 声明".into(),
+                });
+            }
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            if let Ok(snapshots) = self.list() {
+                if let Some(snapshot) = snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.id().as_str() == current)
+                {
+                    stack.extend(
+                        snapshot
+                            .manifest()
+                            .dependencies()
+                            .iter()
+                            .filter(|dep| dep.required())
+                            .map(|dep| dep.id().to_string()),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 停用/卸载守卫：目标被「运行中」插件的必需依赖引用时拒绝，提示先停用
+    /// 依赖方（不做意外的自动级联停用；可选依赖引用不阻塞——其消费方本就
+    /// 必须容忍缺失）。
+    fn ensure_not_required_by_running(&self, id: &ExtensionId) -> ExtensionResult<()> {
+        let snapshots = self.list()?;
+        for snapshot in &snapshots {
+            if snapshot.id() == id || !snapshot.state().is_running() {
+                continue;
+            }
+            let blocks = snapshot.manifest().dependencies().iter().any(|dep| {
+                dep.required()
+                    && dep.id() == id
+                    && dep
+                        .version_req()
+                        .matches(snapshot.active_version().semver())
+            });
+            if blocks {
+                return Err(ExtensionError::DependencyOfRunningExtension {
+                    id: id.to_string(),
+                    dependent: snapshot.id().to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// 能力发现（简化计划 Phase 4）：目标插件对外公开的动作集合 = declarative
+    /// UI 按钮集合 ∪ 原生公开动作清单（gamer.yaml actions）。调用方（其他
+    /// 插件/前端）据此决定功能入口是否可用——动作存在 ≠ 可调用，调用时仍须
+    /// 目标 Running + 权限/上下文门禁（`call_extension` 统一执行）。
+    pub(crate) fn capability_actions(
+        &self,
+        manifest: &ExtensionManifest,
+    ) -> Vec<serde_json::Value> {
+        let mut actions: Vec<serde_json::Value> = native_public_actions(manifest.id());
+        for action in declarative_actions(manifest) {
+            // native 目录与 declarative 集合概念互斥（native 动作不经按钮集合）；
+            // 去重防御，保持清单语义单源。
+            if actions
+                .iter()
+                .any(|entry| entry["action"] == action.as_str())
+            {
+                continue;
+            }
+            actions.push(serde_json::json!({
+                "action": action,
+                "surface": "declarative",
+                "summary": serde_json::Value::Null,
+            }));
+        }
+        actions
+    }
+
     /// Validate an archive without staging it. The management UI uses this
     /// as the confirmation boundary for source, integrity, and permissions.
     /// Phase 1 免签名：官方与本地安装统一无签名，来源只作展示标注；
@@ -628,9 +832,11 @@ impl ExtensionService {
     /// Disable an extension.  A Running instance is stopped first (ADR-13
     /// disable semantics: the WASM entrypoint ends and every runner the
     /// extension owns is unregistered) instead of the old behaviour of
-    /// rejecting disable-while-running.
+    /// rejecting disable-while-running. 简化计划 Phase 3：目标被运行中插件的
+    /// 必需依赖引用时拒绝（提示先停用依赖方，不做自动级联停用）。
     pub(crate) async fn disable(&self, id: &ExtensionId) -> ExtensionResult<ExtensionSnapshot> {
         let _guard = self.operation_lock.lock().await;
+        self.ensure_not_required_by_running(id)?;
         let mut states = self.store.read_state()?;
         let versions = self.versions_for(id)?;
         let mut record = state_for_versions(id, &versions, states.get(id).cloned())?;
@@ -674,6 +880,21 @@ impl ExtensionService {
             return Err(invalid_transition(id, "start", record.state));
         }
         let active = active_version(&versions, &record)?;
+        // 依赖门禁（简化计划 Phase 3）：必需依赖缺失/版本不兼容/未启用或形成
+        // 循环 → 结构化拒绝启动。依赖缺失 ≠ 插件损坏：状态保留 Enabled 并记录
+        // last_error（区别于运行时错误的 Failed），可从插件中心处置后重试。
+        // 可选依赖不检查（缺失不阻止启动）。
+        let dependency_error = self
+            .check_dependency_cycles(id, active.manifest())
+            .err()
+            .or_else(|| {
+                self.check_required_dependencies(id, active.manifest())
+                    .err()
+            });
+        if let Some(error) = dependency_error {
+            let _ = self.force_state(id, ExtensionState::Enabled, Some(error.to_string()));
+            return Err(error);
+        }
         let host = HostApi::for_manifest(
             self.capabilities.clone(),
             self.host_api.clone(),
@@ -834,6 +1055,8 @@ impl ExtensionService {
         version: &ExtensionVersion,
     ) -> ExtensionResult<bool> {
         let _guard = self.operation_lock.lock().await;
+        // 简化计划 Phase 3：被运行中插件的必需依赖引用 → 拒绝卸载（先停用依赖方）。
+        self.ensure_not_required_by_running(id)?;
         let mut states = self.store.read_state()?;
         let versions = self.versions_for(id)?;
         let record = state_for_versions(id, &versions, states.get(id).cloned())?;
@@ -1686,5 +1909,265 @@ entry = "plugin.wasm"
         assert_eq!(rolled.active_version().as_str(), "1.0.0");
         assert_eq!(rolled.state(), ExtensionState::Enabled);
         assert_eq!(rolled.installed_versions().len(), 2, "两个版本都保留");
+    }
+
+    // ---------- 简化计划 Phase 3：最小插件依赖 ----------
+
+    /// 假 registrar：任意扩展都按「无实例执行模型」处理——`start` 不读 guest
+    /// 字节，依赖门禁/守卫可在无 WASM 运行时的环境下验证。
+    struct InstanceFreeRegistrar;
+
+    #[async_trait]
+    impl TimerRunnerRegistrar for InstanceFreeRegistrar {
+        async fn extension_started(&self, _extension_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn extension_stopped(&self, _extension_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn executes_without_instance(&self, _extension_id: &str) -> bool {
+            true
+        }
+    }
+
+    fn dependency_service(dir: &std::path::Path) -> ExtensionService {
+        ExtensionService::for_data_root(dir, crate::capabilities::CapabilityRegistry::default())
+            .with_runner_registrar(Arc::new(InstanceFreeRegistrar))
+    }
+
+    /// 带 `[[dependencies]]` 的 wasm 安装包（deps = 原始 TOML 片段）。
+    fn wasm_archive_with_deps(id: &str, version: &str, deps: &str) -> Vec<u8> {
+        let manifest = format!(
+            "manifest_version = 2\nid = \"{id}\"\nversion = \"{version}\"\nname = \"D\"\nentry = \"plugin.wasm\"\n{deps}"
+        )
+        .into_bytes();
+        zip_of(&[
+            ("manifest.toml", manifest),
+            ("plugin.wasm", VALID_WASM.to_vec()),
+        ])
+    }
+
+    fn builtin_video_archive() -> Vec<u8> {
+        zip_of(&[(
+            "manifest.toml",
+            builtin_manifest_bytes(
+                super::super::video::VIDEO_EXTENSION_ID,
+                "1.0.0",
+                "gamer.video",
+            ),
+        )])
+    }
+
+    /// 必需依赖缺失 → 启动被拒（安装自动启动降级 Enabled + last_error）；
+    /// 依赖安装并启用 → 启动通过；停用被运行中依赖方必需依赖的插件 → 拒绝。
+    #[tokio::test]
+    async fn required_dependency_gates_start_and_disable_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = dependency_service(temp.path());
+        let consumer = ExtensionId::parse("com.example.consumer").unwrap();
+        let provider = ExtensionId::parse(super::super::video::VIDEO_EXTENSION_ID).unwrap();
+
+        // 安装消费方（必需依赖 gamer.video 未安装）：enable 落 Enabled，start
+        // 被依赖门禁拒绝 → Failed + last_error（保留启用意图，可重试）。
+        service
+            .install(&wasm_archive_with_deps(
+                "com.example.consumer",
+                "1.0.0",
+                "# 必需依赖\n[[dependencies]]\nid = \"gamer.video\"\nversion = \"^1.0.0\"\n",
+            ))
+            .await
+            .unwrap();
+        service.enable(&consumer).await.unwrap();
+        let error = service.start(&consumer).await.unwrap_err();
+        assert!(error.to_string().contains("必需依赖"), "{error}");
+        // 依赖缺失 ≠ 插件损坏：状态保留 Enabled（启用意图），错误经响应与
+        // 快照可见；区别于运行时错误的 Failed 语义。
+        assert_eq!(snapshot_state(&service, &consumer), ExtensionState::Enabled);
+        let snapshot = service.snapshot_for(&consumer).unwrap();
+        let error = snapshot
+            .last_error()
+            .expect("必须记录依赖缺失原因")
+            .to_string();
+        assert!(error.contains("必需依赖"), "{error}");
+        assert!(error.contains("gamer.video"), "{error}");
+
+        // 依赖状态报告：未安装/未满足/带降级提示。
+        let manifest = service.snapshot_for(&consumer).unwrap().manifest().clone();
+        let report = service.dependency_report(&manifest);
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].id, "gamer.video");
+        assert!(report[0].required, "缺省 required 从紧 = true");
+        assert!(!report[0].installed);
+        assert!(!report[0].satisfied);
+        assert_eq!(report[0].note.as_deref(), Some("依赖未安装"));
+
+        // 安装 provider（builtin）：安装后落 Installed，显式 enable → start 即
+        // Running（无实例执行模型）→ 消费方启动通过。
+        service.install(&builtin_video_archive()).await.unwrap();
+        service.enable(&provider).await.unwrap();
+        service.start(&provider).await.unwrap();
+        assert_eq!(snapshot_state(&service, &provider), ExtensionState::Running);
+        let started = service.start(&consumer).await.unwrap();
+        assert_eq!(started.state(), ExtensionState::Running, "依赖满足后可启动");
+
+        // 停用被运行中消费方必需依赖的 provider → 拒绝（提示先停用依赖方）。
+        let error = service.disable(&provider).await.unwrap_err();
+        assert!(
+            error.to_string().contains("com.example.consumer"),
+            "{error}"
+        );
+        // 卸载同样被拒。
+        let error = service
+            .uninstall(&provider, &ExtensionVersion::parse("1.0.0").unwrap())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("com.example.consumer"),
+            "{error}"
+        );
+
+        // 停用消费方后 → provider 可停用。
+        service.disable(&consumer).await.unwrap();
+        service.disable(&provider).await.unwrap();
+        assert_eq!(
+            snapshot_state(&service, &provider),
+            ExtensionState::Disabled
+        );
+    }
+
+    /// 可选依赖缺失不阻止启动；依赖恢复后报告转为满足。
+    #[tokio::test]
+    async fn optional_dependency_does_not_block_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = dependency_service(temp.path());
+        let id = ExtensionId::parse("com.example.optconsumer").unwrap();
+
+        service
+            .install(&wasm_archive_with_deps(
+                "com.example.optconsumer",
+                "1.0.0",
+                "[[dependencies]]\nid = \"gamer.yaml\"\nversion = \"*\"\nrequired = false\n",
+            ))
+            .await
+            .unwrap();
+        service.enable(&id).await.unwrap();
+        let snapshot = service.start(&id).await.unwrap();
+        assert_eq!(
+            snapshot.state(),
+            ExtensionState::Running,
+            "可选依赖缺失不阻止启动"
+        );
+        assert!(snapshot.last_error().is_none());
+
+        let manifest = snapshot.manifest().clone();
+        let report = service.dependency_report(&manifest);
+        assert!(!report[0].required);
+        assert!(!report[0].satisfied);
+        assert_eq!(report[0].note.as_deref(), Some("依赖未安装"));
+    }
+
+    /// 必需依赖循环（A→B→A）→ 启动拒绝并给出清晰错误（不互等死锁）。
+    #[tokio::test]
+    async fn required_dependency_cycle_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = dependency_service(temp.path());
+        let a = ExtensionId::parse("com.example.cyclea").unwrap();
+
+        service
+            .install(&wasm_archive_with_deps(
+                "com.example.cyclea",
+                "1.0.0",
+                "[[dependencies]]\nid = \"com.example.cycleb\"\n",
+            ))
+            .await
+            .unwrap();
+        service
+            .install(&wasm_archive_with_deps(
+                "com.example.cycleb",
+                "1.0.0",
+                "[[dependencies]]\nid = \"com.example.cyclea\"\n",
+            ))
+            .await
+            .unwrap();
+        service.enable(&a).await.unwrap();
+
+        let error = service.start(&a).await.unwrap_err();
+        assert!(error.to_string().contains("循环"), "{error}");
+        assert_eq!(snapshot_state(&service, &a), ExtensionState::Enabled);
+    }
+
+    /// manifest 依赖声明解析：缺省 required = true、version 缺省 `*`、
+    /// 重复 id / 自引用 / 非法版本 → InvalidManifest。
+    #[test]
+    fn manifest_dependency_declaration_parsing() {
+        let ok = crate::extensions::parse_manifest(
+            br#"manifest_version = 2
+id = "com.example.deps"
+version = "1.0.0"
+name = "D"
+entry = "plugin.wasm"
+[[dependencies]]
+id = "gamer.video"
+[[dependencies]]
+id = "gamer.yaml"
+version = "^3.0"
+required = false
+"#,
+        )
+        .unwrap();
+        let deps = ok.dependencies();
+        assert_eq!(deps.len(), 2);
+        assert!(deps[0].required(), "缺省 required = true");
+        assert_eq!(deps[0].version_req().to_string(), "*");
+        assert!(!deps[1].required());
+        assert_eq!(deps[1].version_req().to_string(), "^3.0");
+
+        // 自引用
+        let err = crate::extensions::parse_manifest(
+            br#"manifest_version = 2
+id = "com.example.deps"
+version = "1.0.0"
+name = "D"
+entry = "plugin.wasm"
+[[dependencies]]
+id = "com.example.deps"
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("自身"), "{err}");
+
+        // 重复 id
+        let err = crate::extensions::parse_manifest(
+            br#"manifest_version = 2
+id = "com.example.deps"
+version = "1.0.0"
+name = "D"
+entry = "plugin.wasm"
+[[dependencies]]
+id = "gamer.video"
+[[dependencies]]
+id = "gamer.video"
+required = false
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("重复"), "{err}");
+
+        // 非法版本要求
+        let err = crate::extensions::parse_manifest(
+            br#"manifest_version = 2
+id = "com.example.deps"
+version = "1.0.0"
+name = "D"
+entry = "plugin.wasm"
+[[dependencies]]
+id = "gamer.video"
+version = "not-a-req"
+"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("version 无效"), "{err}");
     }
 }

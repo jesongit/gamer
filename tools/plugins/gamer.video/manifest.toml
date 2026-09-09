@@ -10,6 +10,15 @@ permissions = ["media.read", "media.import", "media.record", "media.write", "med
 [targets.android]
 packages = ["*"]
 
+# 可选依赖（简化计划 Phase 3）：gamer.yaml 提供「创建模板 / 生成 YAML 草稿 /
+# 打开 YAML 编辑器」能力。缺失时视频工作台基础功能（导入/录制/播放/逐帧/
+# 标记）不受影响，仅 YAML 相关入口降级隐藏（前端按能力发现接口判定）。
+# 依赖声明不授予权限、不触发自动安装/启用。
+[[dependencies]]
+id = "gamer.yaml"
+version = "*"
+required = false
+
 # builtin（宿主预置）执行类型：无 guest 字节、无常驻实例；执行体在宿主
 # extensions/builtin.rs 注册表内（builtin_id 必须已注册才能安装）。
 [execution]

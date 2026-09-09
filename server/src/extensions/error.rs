@@ -46,6 +46,10 @@ pub(crate) enum ExtensionError {
         operation: &'static str,
         state: super::model::ExtensionState,
     },
+    #[error("必需依赖不满足，插件 {id} 无法启动: {reason}")]
+    DependencyUnsatisfied { id: String, reason: String },
+    #[error("插件 {dependent} 正在运行且必需依赖 {id}，请先停用 {dependent}")]
+    DependencyOfRunningExtension { id: String, dependent: String },
     #[error("插件 {id} 要求 Host API {domain} {required}，当前支持 {supported}")]
     UnsupportedHostApi {
         id: String,

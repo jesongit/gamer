@@ -56,16 +56,17 @@ pub(crate) use keymap::{
 pub(crate) use keymap::{parse_keymap_content, serialize_keymap};
 
 pub(crate) use manifest::{
-    parse_manifest, parse_manifest_installed, ExecutionKind, ExecutionSpec, ExtensionManifest,
-    HostApiRequirements, UiContribution, UiRuntime, MANIFEST_FILE_NAME, MANIFEST_VERSION,
+    parse_manifest, parse_manifest_installed, ExecutionKind, ExecutionSpec, ExtensionDependency,
+    ExtensionManifest, HostApiRequirements, UiContribution, UiRuntime, MANIFEST_FILE_NAME,
+    MANIFEST_VERSION,
 };
 pub(crate) use model::{
     ExtensionId, ExtensionPath, ExtensionRecord, ExtensionState, ExtensionVersion,
 };
 pub(crate) use permissions::{Permission, PermissionSet};
 pub(crate) use service::{
-    ExtensionInspection, ExtensionInstallContext, ExtensionService, ExtensionSnapshot,
-    PermissionDiff, TimerRunnerRegistrar,
+    DependencyStatus, ExtensionInspection, ExtensionInstallContext, ExtensionService,
+    ExtensionSnapshot, PermissionDiff, TimerRunnerRegistrar,
 };
 pub(crate) use store::{ExtensionStore, InstalledExtension};
 pub(crate) use ui::{RegisteredUiContribution, UiContributionRegistry};
@@ -87,6 +88,14 @@ pub(crate) fn native_call_action(
     data_dir: &std::path::Path,
 ) -> Option<ExtensionResult<serde_json::Value>> {
     gamer_yaml::native_call_action(id.as_str(), action, values, data_dir)
+}
+
+/// 公开动作目录（能力发现读端，简化计划 Phase 4）：目标插件原生声明的版本化
+/// 动作清单；非原生动作型插件（无清单）返回空表——通用 declarative 按钮
+/// 集合由 `service.rs::declarative_actions` 从 manifest 读出，两条目录在
+/// `service.capability_actions` 合并。
+pub(crate) fn native_public_actions(id: &ExtensionId) -> Vec<serde_json::Value> {
+    gamer_yaml::public_action_catalog(id.as_str())
 }
 
 #[cfg(feature = "wasm-runtime")]

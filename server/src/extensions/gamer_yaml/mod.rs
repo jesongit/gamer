@@ -37,6 +37,29 @@ pub(crate) mod yaml_extension;
 /// native_call_action 缝的分发入口在 [`actions`]（版本化公开动作清单：
 /// 草稿生成/保存、模板帧上创建；清单 ↔ 实现由测试双向锁死）。
 pub(crate) use actions::native_call_action;
+
+/// 公开动作目录（简化计划 Phase 4 能力发现读端）：gamer.yaml 声明的全部
+/// 版本化动作（含 Native/Rest/Frontend surface）；非 gamer.yaml 返回空表。
+pub(crate) fn public_action_catalog(extension_id: &str) -> Vec<serde_json::Value> {
+    if extension_id != YAML_EXTENSION_ID {
+        return Vec::new();
+    }
+    actions::PUBLIC_ACTIONS
+        .iter()
+        .map(|action| {
+            serde_json::json!({
+                "action": action.name,
+                "version": action.version,
+                "surface": match action.surface {
+                    actions::ActionSurface::Native => "native",
+                    actions::ActionSurface::Rest => "rest",
+                    actions::ActionSurface::Frontend => "frontend",
+                },
+                "summary": action.summary,
+            })
+        })
+        .collect()
+}
 pub(crate) use resources::register_resource_handlers;
 pub(crate) use runner_adapter::{yaml_start_request, EngineExecutor};
 pub(crate) use timer_yaml::{YamlTimerRunner, YamlTimerRunnerRegistrar};

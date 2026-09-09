@@ -26,7 +26,10 @@ pub(super) async fn api_list_extensions(State(st): State<AppState>) -> Response 
             };
             Json(serde_json::json!({
                 "runtime_available": st.extensions.runtime_available(),
-                "extensions": extensions.iter().map(snapshot_json).collect::<Vec<_>>(),
+                "extensions": extensions
+                    .iter()
+                    .map(|snapshot| snapshot_json(&st.extensions, snapshot))
+                    .collect::<Vec<_>>(),
                 "ui_contributions": ui,
             }))
             .into_response()
@@ -57,7 +60,11 @@ pub(super) async fn api_install_extension(
     match st.extensions.install_with_context(&body, &context).await {
         Ok(snapshot) => {
             let snapshot = auto_start_installed(&st.extensions, snapshot).await;
-            (StatusCode::CREATED, Json(snapshot_json(&snapshot))).into_response()
+            (
+                StatusCode::CREATED,
+                Json(snapshot_json(&st.extensions, &snapshot)),
+            )
+                .into_response()
         }
         Err(error) => extension_error(error),
     }
@@ -76,7 +83,7 @@ pub(super) async fn api_update_extension(
         Err(response) => return response,
     };
     match st.extensions.update_with_context(&body, &context).await {
-        Ok(snapshot) => Json(snapshot_json(&snapshot)).into_response(),
+        Ok(snapshot) => Json(snapshot_json(&st.extensions, &snapshot)).into_response(),
         Err(error) => extension_error(error),
     }
 }
@@ -163,6 +170,33 @@ pub(super) async fn api_call_extension(
         Ok(result) => Json(result).into_response(),
         Err(error) => extension_error(error),
     }
+}
+
+/// 能力发现（简化计划 Phase 4）：列出目标插件对外公开的动作（declarative
+/// 按钮集合 ∪ 原生公开动作清单）与运行状态。其他插件/前端在调用前据此查询，
+/// 目标未安装/停用时按 `running:false` + 缺失原因降级功能入口，不再为每一组
+/// 插件写专用 ID 分支。动作存在 ≠ 可调用：真正分发仍走 `POST /call`
+/// （目标必须 Running、动作必须在公开集合内、权限/上下文门禁照常）。
+pub(super) async fn api_extension_capabilities(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let extension_id = match ExtensionId::parse(&id) {
+        Ok(id) => id,
+        Err(error) => return extension_error(error),
+    };
+    let snapshot = match st.extensions.snapshot_for(&extension_id) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return extension_error(error),
+    };
+    let running = snapshot.state() == crate::extensions::ExtensionState::Running;
+    Json(serde_json::json!({
+        "id": snapshot.id(),
+        "state": snapshot.state(),
+        "running": running,
+        "actions": st.extensions.capability_actions(snapshot.manifest()),
+    }))
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,7 +316,7 @@ async fn lifecycle(service: &ExtensionService, raw_id: &str, operation: Lifecycl
         Lifecycle::Disable => service.disable(&id).await,
     };
     match result {
-        Ok(snapshot) => Json(snapshot_json(&snapshot)).into_response(),
+        Ok(snapshot) => Json(snapshot_json(service, &snapshot)).into_response(),
         Err(error) => extension_error(error),
     }
 }
@@ -322,13 +356,16 @@ async fn auto_start_installed(
     }
 }
 
-fn snapshot_json(snapshot: &ExtensionSnapshot) -> serde_json::Value {
+fn snapshot_json(service: &ExtensionService, snapshot: &ExtensionSnapshot) -> serde_json::Value {
     let manifest = snapshot.manifest();
     let host_api = manifest
         .host_api()
         .iter()
         .map(|(domain, requirement)| (domain.to_string(), requirement.to_string()))
         .collect::<std::collections::BTreeMap<_, _>>();
+    // 依赖实时状态（简化计划 Phase 3）：必需依赖缺失 → 启动会失败的原因；
+    // 可选依赖缺失 → 前端据此降级相关功能入口。
+    let dependencies = service.dependency_report(manifest);
     serde_json::json!({
         "id": snapshot.id(),
         "version": manifest.version(),
@@ -344,6 +381,7 @@ fn snapshot_json(snapshot: &ExtensionSnapshot) -> serde_json::Value {
         "last_error": snapshot.last_error(),
         "host_api": host_api,
         "permissions": manifest.permissions().names(),
+        "dependencies": dependencies,
         "ui": manifest.ui().iter().map(ui_json).collect::<Vec<_>>(),
     })
 }
@@ -405,6 +443,10 @@ fn extension_error(error: ExtensionError) -> Response {
         }
         ExtensionError::PermissionConfirmationRequired(_)
         | ExtensionError::HostFeatureUnavailable(_) => ApiError::conflict(error.to_string()),
+        ExtensionError::DependencyUnsatisfied { .. }
+        | ExtensionError::DependencyOfRunningExtension { .. } => {
+            ApiError::conflict(error.to_string())
+        }
         ExtensionError::ArchiveSha256Mismatch { .. } => ApiError::bad_request(error.to_string()),
         ExtensionError::RuntimeUnavailable(_) => ApiError::service_unavailable(error.to_string()),
         ExtensionError::CallRejected(_) => ApiError::bad_request(error.to_string()),
