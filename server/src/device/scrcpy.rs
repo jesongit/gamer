@@ -841,7 +841,96 @@ async fn accept_with_timeout(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_stat_cpu_ticks;
+    use super::*;
+    use crate::core::ActivityKind;
+    use crate::store::{Device, ScreenMode, Store};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn online_test_manager(
+        mode: ScreenMode,
+    ) -> (
+        Arc<crate::device::DeviceManager>,
+        Arc<ScrcpySession>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().expect("创建设备生命周期测试目录");
+        let cfg = crate::config::Config {
+            data_dir: dir.path().to_path_buf(),
+            // 让测试不触及真机或本机 adb；涉及 adb 的分支应快速失败。
+            adb_path: "\0".into(),
+            decode_frames: false,
+            idle_power_secs: 1,
+            ..Default::default()
+        };
+        let device = Device {
+            id: format!("device-test-{}", uuid::Uuid::new_v4().simple()),
+            name: "lifecycle-test".into(),
+            kind: "wifi".into(),
+            addr: "test-serial".into(),
+            screen_mode: mode,
+            vd_res: Some("1920x1080".into()),
+            vd_dpi: Some(320),
+            pkg: None,
+            fps: Some(30),
+            created_at: "test".into(),
+        };
+        let session = Arc::new(ScrcpySession {
+            device: device.clone(),
+            adb: Adb::new(&cfg),
+            meta: parking_lot::Mutex::new(None),
+            control: tokio::sync::Mutex::new(None),
+            width: parking_lot::Mutex::new(1920),
+            height: parking_lot::Mutex::new(1080),
+            connected: Arc::new(AtomicBool::new(true)),
+            last_frame_at: AtomicU64::new(0),
+            app_started: AtomicBool::new(false),
+        });
+        let frames = tokio::sync::broadcast::channel(8).0;
+        let audio_frames = tokio::sync::broadcast::channel(8).0;
+        let db = Arc::new(Store::open(&cfg).expect("创建生命周期测试数据库"));
+        let manager = Arc::new(crate::device::DeviceManager::new(db, cfg.clone()));
+        manager.devices.write().insert(
+            device.id.clone(),
+            crate::device::DeviceRuntime {
+                device,
+                status: crate::device::DeviceStatus::Online,
+                session: Some(session.clone()),
+                frames: Some(frames),
+                audio_frames: Some(audio_frames),
+                frame_cache: None,
+                connecting: Arc::new(tokio::sync::Mutex::new(false)),
+                error: None,
+            },
+        );
+        (manager, session, dir)
+    }
+
+    fn mark_old_idle(manager: &Arc<crate::device::DeviceManager>, device_id: &str) {
+        let mut idle = manager.idle.lock().unwrap();
+        idle.insert(
+            device_id.to_string(),
+            super::super::IdleState {
+                idle_since: Some(Instant::now() - Duration::from_secs(2)),
+                slept: false,
+                last_wake: Instant::now(),
+            },
+        );
+    }
+
+    async fn eventually(mut condition: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(2), async move {
+            loop {
+                if condition() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("生命周期测试状态未在预期时间内到达");
+    }
 
     #[test]
     fn touch_packet_preserves_pointer_id_and_fields() {
@@ -871,5 +960,186 @@ mod tests {
         // 垃圾/截断输入 → None
         assert_eq!(parse_stat_cpu_ticks("no parens"), None);
         assert_eq!(parse_stat_cpu_ticks("1 (x) R 1 2"), None);
+    }
+
+    /// stop_app 只发送应用级 force-stop，不应把 scrcpy 会话或 Runner 活跃槽
+    /// 误判为断开。测试使用非法 adb 路径，确保不触及真实设备；参数边界仍走
+    /// 与生产相同的校验路径。
+    #[tokio::test]
+    async fn stop_app_is_separate_from_scrcpy_and_runner_lifecycle() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Virtual);
+        let device_id = session.device.id.clone();
+        session.app_started.store(true, Ordering::Relaxed);
+
+        let error = session.stop_app("com.example.game").await.unwrap_err();
+        assert!(!error.to_string().is_empty());
+        assert!(session.connected.load(Ordering::SeqCst));
+        assert!(session.app_started());
+        assert_eq!(
+            manager.snapshot(&device_id).unwrap().1,
+            crate::device::DeviceStatus::Online
+        );
+        assert!(manager.session(&device_id).is_some());
+
+        for invalid in ["+com.example.game", "?Example Game", "com.example.game;id"] {
+            assert!(
+                session.stop_app(invalid).await.is_err(),
+                "非法 stop_app 未拒绝: {invalid}"
+            );
+            assert!(session.connected.load(Ordering::SeqCst));
+        }
+    }
+
+    /// viewer/Runner 断开只释放各自的 RAII 活跃租约；scrcpy 会话由设备功耗策略
+    /// 或显式 disconnect 管理，不能因为消费者离开就被租约析构直接拆掉。
+    #[tokio::test]
+    async fn viewer_and_runner_leases_release_without_ending_scrcpy() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let device_id = session.device.id.clone();
+        let viewer = manager.acquire_activity(&device_id, ActivityKind::Viewer);
+        let runner = manager.acquire_activity(&device_id, ActivityKind::Run);
+        assert!(manager.has_active_consumers(&device_id));
+        assert!(manager
+            .activity()
+            .has_kind(&device_id, ActivityKind::Viewer));
+        assert!(manager.activity().has_kind(&device_id, ActivityKind::Run));
+
+        drop(viewer);
+        assert!(
+            manager.has_active_consumers(&device_id),
+            "Runner 仍活跃时不能视为空闲"
+        );
+        assert!(session.connected.load(Ordering::SeqCst));
+
+        drop(runner);
+        assert!(
+            !manager.has_active_consumers(&device_id),
+            "viewer 与 Runner 都断开后应释放槽"
+        );
+        assert!(session.connected.load(Ordering::SeqCst));
+        assert_eq!(
+            manager.snapshot(&device_id).unwrap().1,
+            crate::device::DeviceStatus::Online
+        );
+    }
+
+    /// 非 force 显式断开同时受 Runner 租约与录制独占保护；两者释放后才允许
+    /// 管理动作清理会话。录制从内存态 session/帧广播启动，不需要真机。
+    #[tokio::test]
+    async fn managed_disconnect_is_protected_by_runner_and_recording_activity() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Virtual);
+        let device_id = session.device.id.clone();
+
+        let runner = manager.acquire_activity(&device_id, ActivityKind::Run);
+        manager.disconnect_device(&device_id, false).await;
+        assert_eq!(
+            manager.snapshot(&device_id).unwrap().1,
+            crate::device::DeviceStatus::Online
+        );
+        assert!(manager.session(&device_id).is_some());
+        drop(runner);
+
+        let recording = crate::recording::service(&manager.cfg);
+        let meta = recording
+            .start(
+                &manager,
+                &crate::recording::RecordingStartReq {
+                    device_id: device_id.clone(),
+                },
+            )
+            .expect("内存态视频会话应可启动录制");
+        assert!(recording.active_for_device(&device_id).is_some());
+
+        manager.disconnect_device(&device_id, false).await;
+        assert_eq!(
+            manager.snapshot(&device_id).unwrap().1,
+            crate::device::DeviceStatus::Online
+        );
+        assert!(session.connected.load(Ordering::SeqCst));
+
+        let ended = recording.cancel(&meta.id).expect("录制取消应释放设备独占");
+        assert_eq!(ended.state, crate::recording::RecordingState::Cancelled);
+        assert!(recording.active_for_device(&device_id).is_none());
+        manager.disconnect_device(&device_id, false).await;
+        assert_eq!(
+            manager.snapshot(&device_id).unwrap().1,
+            crate::device::DeviceStatus::Offline
+        );
+    }
+
+    /// 虚拟屏空闲回收拆 scrcpy，但 adb/设备注册仍保留；这是无 viewer、无 Runner
+    /// 时唯一允许的自动会话回收路径。
+    #[tokio::test]
+    async fn idle_virtual_mode_disconnects_scrcpy_session() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Virtual);
+        let device_id = session.device.id.clone();
+        mark_old_idle(&manager, &device_id);
+        let loop_task = tokio::spawn(manager.clone().idle_power_loop());
+
+        eventually(|| {
+            manager
+                .snapshot(&device_id)
+                .is_some_and(|(_, status, _)| status == crate::device::DeviceStatus::Offline)
+        })
+        .await;
+        loop_task.abort();
+        let _ = loop_task.await;
+        assert!(!session.connected.load(Ordering::SeqCst));
+        assert!(manager.session(&device_id).is_none());
+    }
+
+    /// 镜像模式空闲只关物理屏、保持 scrcpy 在线；消费者回来通过 notify_activity
+    /// 清除 slept 状态并走唤醒通道，不触发重连/拆会话。
+    #[tokio::test]
+    async fn idle_mirror_mode_keeps_session_and_viewer_wakes_screen() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Mirror);
+        let device_id = session.device.id.clone();
+        mark_old_idle(&manager, &device_id);
+        let loop_task = tokio::spawn(manager.clone().idle_power_loop());
+
+        eventually(|| {
+            manager
+                .idle
+                .lock()
+                .unwrap()
+                .get(&device_id)
+                .is_some_and(|s| s.slept)
+        })
+        .await;
+        assert_eq!(
+            manager.snapshot(&device_id).unwrap().1,
+            crate::device::DeviceStatus::Online
+        );
+        assert!(manager.session(&device_id).is_some());
+        assert!(session.connected.load(Ordering::SeqCst));
+
+        let viewer = manager.acquire_activity(&device_id, ActivityKind::Viewer);
+        assert!(!manager.idle.lock().unwrap().get(&device_id).unwrap().slept);
+        assert!(manager.has_active_consumers(&device_id));
+        drop(viewer);
+        assert!(!manager.has_active_consumers(&device_id));
+
+        loop_task.abort();
+        let _ = loop_task.await;
+    }
+
+    /// force disconnect 是显式清理边界：清状态、广播端、会话连接标志，且不因
+    /// 当前没有 viewer 而留下 Online 假象。
+    #[tokio::test]
+    async fn forced_disconnect_clears_session_and_device_runtime() {
+        let (manager, session, _dir) = online_test_manager(ScreenMode::Virtual);
+        let device_id = session.device.id.clone();
+        manager.disconnect_device(&device_id, true).await;
+
+        assert!(!session.connected.load(Ordering::SeqCst));
+        assert!(manager.session(&device_id).is_none());
+        assert!(manager.frames_tx(&device_id).is_none());
+        assert!(manager.audio_frames_tx(&device_id).is_none());
+        assert!(manager.frame_cache(&device_id).is_none());
+        assert!(manager.online_sessions().is_empty());
+        assert_eq!(
+            manager.snapshot(&device_id).unwrap().1,
+            crate::device::DeviceStatus::Offline
+        );
     }
 }

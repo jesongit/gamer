@@ -12,9 +12,9 @@
 //!   写明端点映射关系；调用方直接打 REST，不走本缝）；
 //! - [`ActionSurface::Frontend`]：纯前端导航/装配契约（无服务端往返）。
 //!
-//! 调用方上下文要求（`caller` / `context`）是**声明性契约**：REST 通路经用户
-//! 会话鉴权，进程内没有可验证的调用方身份，因此 `caller` 记录本动作的预期
-//! 调用方（预留未来缝上加 caller 校验的形状），`context` 列出调用必须携带的
+//! `caller` / `context` 是动作契约：REST 通路由用户会话鉴权；插件互调走
+//! `ExtensionService::call_extension_from_plugin`，由宿主从运行实例取得 caller
+//! 并校验。本模块不从请求 JSON 推导调用方身份，`context` 列出调用必须携带的
 //! 上下文字段（Package Context / 帧身份 / 校准元数据），缺失即结构化拒绝。
 
 use std::collections::BTreeMap;
@@ -24,14 +24,14 @@ use serde_json::{json, Value};
 
 use super::video_draft::{self, AUTOMATION_CREATE_DRAFT};
 use super::yaml_extension::YAML_EXTENSION_ID;
-use crate::extensions::{ExtensionError, ExtensionResult};
+use crate::extensions::{ExtensionError, ExtensionResult, Permission};
 use crate::resources::{PackageStore, SaveBinaryValidation, SaveValidation};
 
 /// 模板创建动作（§10.2）：从视频确定帧裁出的 PNG + 相对搜索区域 → 存为
 /// 当前 Package 的 gamer.yaml 模板（灰度归一化经资源字节钩子自动生效）。
 pub(crate) const TEMPLATE_CREATE_FROM_FRAME: &str = "template.create_from_frame";
-/// 草稿保存动作（§10.3）：v3 草稿文本 → 存为当前 Package 的 automations 脚本
-///（保存经 v3 校验钩子，非法源结构化拒绝）。
+/// 草稿保存动作（§10.3）：V1 草稿文本 → 存为当前 Package 的 automations 脚本
+///（保存经 V1 校验钩子，非法源结构化拒绝）。
 pub(crate) const AUTOMATION_SAVE_DRAFT: &str = "automation.save_draft";
 /// 模板离线测试：与 `POST /api/capabilities/vision/test`（media_id+pts_us/frame_index
 /// 离线寻址）同能力 —— **复用 REST 不重复实现**；清单内只登记映射关系。
@@ -60,8 +60,13 @@ pub(crate) struct PublicAction {
     pub surface: ActionSurface,
     /// 一句话语义。
     pub summary: &'static str,
-    /// 预期调用方插件 id（声明性；见模块注释）。
+    /// 预期调用方插件 id（插件互调由宿主校验；见模块注释）。
     pub caller: &'static str,
+    /// Target-extension permissions required before a native handler runs.
+    pub required_permissions: &'static [Permission],
+    /// Permissions required from a trusted plugin caller. User REST calls
+    /// are authenticated management calls and do not impersonate a plugin.
+    pub caller_permissions: &'static [Permission],
     /// 调用必须携带的上下文字段名（values 内）。
     pub context: &'static [&'static str],
     /// values 参数名（不含 context）。
@@ -78,6 +83,8 @@ pub(crate) const PUBLIC_ACTIONS: &[PublicAction] = &[
         surface: ActionSurface::Native,
         summary: "从视频确定帧裁剪 PNG 创建模板（服务端灰度归一化 + 短名/区域命名规则）",
         caller: "gamer.video",
+        required_permissions: &[Permission::ResourceRead],
+        caller_permissions: &[],
         context: &["package_id", "frame", "calibration"],
         params: &[
             "name",
@@ -95,6 +102,8 @@ pub(crate) const PUBLIC_ACTIONS: &[PublicAction] = &[
         summary:
             "模板匹配测试（在线 device_id / 离线 media_id+pts_us|frame_index 互斥），响应附帧身份",
         caller: "gamer.video",
+        required_permissions: &[],
+        caller_permissions: &[],
         context: &["pkg", "plugin", "name"],
         params: &[
             "device_id|media_id",
@@ -109,8 +118,10 @@ pub(crate) const PUBLIC_ACTIONS: &[PublicAction] = &[
         name: AUTOMATION_CREATE_DRAFT,
         version: 1,
         surface: ActionSurface::Native,
-        summary: "录制操作事件 → YAML v3 草稿文本（不落盘不执行；不可映射事件进诊断）",
+        summary: "录制操作事件 → YAML V1 草稿文本（不落盘不执行；不可映射事件进诊断）",
         caller: "gamer.video",
+        required_permissions: &[],
+        caller_permissions: &[Permission::MediaEventsRead],
         context: &["recording_id"],
         params: &["event_ids?", "comments?"],
         mapping: "",
@@ -119,8 +130,10 @@ pub(crate) const PUBLIC_ACTIONS: &[PublicAction] = &[
         name: AUTOMATION_SAVE_DRAFT,
         version: 1,
         surface: ActionSurface::Native,
-        summary: "v3 草稿文本保存为当前 Package 的 automations 脚本（保存边界 v3 校验）",
+        summary: "V1 草稿文本保存为当前 Package 的 automations 脚本（保存边界 V1 校验）",
         caller: "gamer.video",
+        required_permissions: &[Permission::ResourceRead],
+        caller_permissions: &[],
         context: &["package_id"],
         params: &["name", "yaml", "overwrite?"],
         mapping: "",
@@ -131,6 +144,8 @@ pub(crate) const PUBLIC_ACTIONS: &[PublicAction] = &[
         surface: ActionSurface::Frontend,
         summary: "打开/定位 YAML 编辑器到刚保存的脚本（自动化面板 + 载入编辑态）",
         caller: "gamer.video",
+        required_permissions: &[],
+        caller_permissions: &[],
         context: &["package_id", "script_id"],
         params: &[],
         mapping:
@@ -156,6 +171,75 @@ pub(crate) fn native_call_action(
         _ => return None,
     };
     Some(result)
+}
+
+/// Return whether `action` is a native action explicitly exposed by this
+/// extension.  This lookup is deliberately side-effect free: lifecycle code
+/// must be able to authorize an action before dispatching its implementation.
+pub(crate) fn is_public_native_action(extension_id: &str, action: &str) -> bool {
+    extension_id == YAML_EXTENSION_ID
+        && PUBLIC_ACTIONS
+            .iter()
+            .any(|candidate| candidate.surface == ActionSurface::Native && candidate.name == action)
+}
+
+/// The caller contract for a native action, kept beside the public action
+/// catalog so a future plugin-originated call cannot trust request JSON for
+/// its identity.
+pub(crate) fn native_action_expected_caller(
+    extension_id: &str,
+    action: &str,
+) -> Option<&'static str> {
+    if extension_id != YAML_EXTENSION_ID {
+        return None;
+    }
+    PUBLIC_ACTIONS
+        .iter()
+        .find(|candidate| candidate.surface == ActionSurface::Native && candidate.name == action)
+        .map(|candidate| candidate.caller)
+}
+
+pub(crate) fn native_action_requires_package_context(extension_id: &str, action: &str) -> bool {
+    if extension_id != YAML_EXTENSION_ID {
+        return false;
+    }
+    PUBLIC_ACTIONS.iter().any(|candidate| {
+        candidate.surface == ActionSurface::Native
+            && candidate.name == action
+            && candidate.context.contains(&"package_id")
+    })
+}
+
+/// Permissions required by the target extension before a native action may
+/// reach its handler. Kept beside the public action catalog so a new native
+/// branch cannot silently bypass the permission gate.
+pub(crate) fn native_action_required_permissions(
+    extension_id: &str,
+    action: &str,
+) -> Option<&'static [Permission]> {
+    if extension_id != YAML_EXTENSION_ID {
+        return None;
+    }
+    PUBLIC_ACTIONS
+        .iter()
+        .find(|candidate| candidate.surface == ActionSurface::Native && candidate.name == action)
+        .map(|candidate| candidate.required_permissions)
+}
+
+/// Permissions required from the trusted plugin that invokes a native
+/// action. This is intentionally separate from the target's permissions: a
+/// cross-plugin call must not borrow the target's Host API authority.
+pub(crate) fn native_action_caller_permissions(
+    extension_id: &str,
+    action: &str,
+) -> Option<&'static [Permission]> {
+    if extension_id != YAML_EXTENSION_ID {
+        return None;
+    }
+    PUBLIC_ACTIONS
+        .iter()
+        .find(|candidate| candidate.surface == ActionSurface::Native && candidate.name == action)
+        .map(|candidate| candidate.caller_permissions)
 }
 
 // ---------------------------------------------------------------------------

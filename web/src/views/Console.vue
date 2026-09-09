@@ -14,7 +14,7 @@
       @keyup="onStageKeyUp"
       @click="onStageClick"
     >
-      <!-- 顶部工具条：设备管理 + 应用控制两组；次要动作收进「更多 / 功能」下拉 -->
+      <!-- 顶部工具条：设备管理 + 应用控制两组；输入模式与通用动作保留在工具条 -->
       <div ref="toolbarEl" class="toolbar" data-keyboard-ignore="true" @click="onToolbarClick">
         <div class="tb-row">
           <select v-model="store.deviceId" class="select mono tb-dev-select" aria-label="设备列表" @change="onDeviceSelect">
@@ -58,16 +58,6 @@
             :title="keyboardMode === 'text' ? '当前为文本模式，字母和空格按文本发送' : '当前为游戏模式，保留按下/释放按键语义'"
             @click="toggleKeyboardMode"
           >{{ keyboardMode === 'text' ? '⌨ 文本模式' : '🎮 游戏模式' }}</button>
-          <select
-            v-model="activeKeymapName"
-            class="select mono keymap-select"
-            :disabled="!currentPackageId || keymapLoading"
-            title="游戏模式下选择当前按键映射；文本模式保留选择但不生效"
-            @change="onKeymapChange"
-          >
-            <option value="">无映射</option>
-            <option v-for="item in keymapOptions" :key="item.id || item.file || item.name" :value="item.id || item.file || item.name">{{ item.name || item.file || item.id }}</option>
-          </select>
           <div class="tb-more-wrap">
             <button
               class="btn btn-sm"
@@ -78,23 +68,6 @@
               @click.stop="toggleToolbarMenu('actions', $event)"
             >功能 ▾</button>
           </div>
-          <div class="tb-sep tb-stage-sep"></div>
-          <!-- 统一舞台来源（视频工作台 V1）：实时/视频切换 + 设备画面录制按钮态
-               （activeRecording 轮询驱动，录制服务端执行）；视频来源为只读，
-               舞台产生的设备输入在输入路由处统一拒绝 -->
-          <button
-            class="btn btn-sm stage-source-btn"
-            :class="{ active: stageView.kind === 'media' }"
-            :title="stageView.kind === 'media' ? '当前为视频来源（只读），点击返回实时投屏' : '切换到视频来源（离线查看媒体库素材，不连接设备）'"
-            @click="toggleStageKind"
-          >{{ stageView.kind === 'media' ? '🎞 视频中' : '🎬 视频' }}</button>
-          <button
-            class="btn btn-sm stage-record-btn"
-            :class="{ recording: stageView.recordingActive }"
-            :disabled="stageView.recordingBusy"
-            :title="stageView.recordingActive ? '停止并保存当前录制（服务端执行）' : '录制当前设备画面与操作事件（服务端执行，浏览器可关闭）'"
-            @click="toggleStageRecording"
-          >{{ stageView.recordingActive ? '⏹ 停止录制' : '⏺ 录制' }}</button>
         </div>
       </div>
 
@@ -409,16 +382,7 @@ const stageCtl = useConsoleStage({
   connected,
   liveVideoEl: () => videoElement.value,
 })
-const stageView = stageCtl.view
 watch(() => store.deviceId, () => stageCtl.onDeviceChanged())
-
-/** 工具条舞台按钮：来源切换 + 录制开始/停止（按钮态经 activeRecording 轮询驱动） */
-function toggleStageKind() {
-  stageView.toggleKind()
-}
-function toggleStageRecording() {
-  stageView.toggleRecording()
-}
 /** 媒体 <video> 元素挂载/更换（含卸载传 null）：交给舞台组合式挂播放监听 */
 function onStageMediaVideoMounted(el) {
   stageCtl.attachMediaVideo(el)
@@ -485,9 +449,8 @@ const {
 
 // ---------- 按键映射面板（方案选择/保存/导入导出 + 映射可视化） ----------
 const {
-  keymapOptions, activeKeymapName, activeKeymapDisplayName, activeKeymapModel,
-  keymapLoading, keymapError, keymapOverlay, keymapStatus,
-  loadKeymaps, onKeymapChange,
+  activeKeymapModel, keymapOverlay, keymapStatus,
+  loadKeymaps,
   keymapPanelContext,
 } = useConsoleKeymap({
   api,
@@ -1247,7 +1210,6 @@ onUnmounted(() => {
 .tb-row > .btn, .tb-row > .select, .tb-more-wrap, .tb-sep { flex-shrink: 0; }
 .tb-sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
 .tb-more-wrap { position: relative; display: inline-flex; }
-.keymap-select { flex: 0 1 150px; min-width: 104px; max-width: 180px; padding: 4px 6px; font-size: 12px; }
 .keyboard-mode-btn.active { color: var(--accent-2); }
 /* 工具条应用下拉（Android 运行目标）：选中即保存为设备配置包名 */
 .tb-app-select { flex: 0 1 auto; min-width: 150px; max-width: 240px; padding: 4px 6px; font-size: 12px; }
@@ -1269,9 +1231,6 @@ onUnmounted(() => {
 .tb-more-item-danger:hover { color: var(--danger); }
 .tb-more-sep { height: 1px; margin: 3px 6px; background: var(--border); }
 .btn.active { border-color: var(--accent-2); color: var(--accent-2); }
-/* 舞台工具条按钮：录制进行中红色高亮 */
-.stage-record-btn.recording { color: var(--danger); border-color: var(--danger); }
-
 /* ===== 左右分区与右侧面板 ===== */
 .console.is-panel-resizing,
 .console.is-panel-resizing * { cursor: col-resize !important; user-select: none !important; }

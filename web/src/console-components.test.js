@@ -44,18 +44,20 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(template).not.toContain('class="dev-pick"')
     expect(template).not.toContain('class="script-tpl"')
     expect(template).not.toContain('class="script-run"')
-    // 统一舞台来源（视频工作台 V1，Phase 3）：实时/视频切换与设备画面录制按钮态
-    // 属舞台域接线（收敛在 useConsoleStage / ConsoleVideoStage）；设备管理域
-    // （useConsoleDeviceManager）不得携带媒体/录制逻辑
+    // 统一舞台来源（视频工作台 V1，Phase 3）仍由舞台域接线；Video 专属入口不再
+    // 出现在顶部工具条，设备管理域（useConsoleDeviceManager）不得携带媒体/录制逻辑
     expect(consoleSource).toContain('useConsoleStage({')
-    expect(consoleSource).toContain('toggleStageRecording')
+    expect(consoleSource).not.toContain('toggleStageKind')
+    expect(consoleSource).not.toContain('toggleStageRecording')
+    expect(template).toContain(':stage="stageCtl.view"')
+    expect(template).toContain('@media-video-mounted="onStageMediaVideoMounted"')
     const deviceManager = read('./components/console/useConsoleDeviceManager.js')
     expect(deviceManager).not.toContain('录制')
     expect(deviceManager).not.toContain('recording')
   })
 
-  it('工具条两组布局：设备区（连接/刷新/更多）| 应用区（应用/读取/启动/游戏模式/功能）', () => {
-    const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('ConsoleVideoStage'))
+  it('顶部工具条只保留设备/应用/输入模式/通用功能，插件专属入口不残留', () => {
+    const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('<DeviceStage'))
     expect(toolbar).toContain('v-model="store.deviceId"')
     expect(toolbar).toContain('flushAndConnect')
     expect(toolbar).toContain('refreshDevices')
@@ -64,6 +66,12 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar).toContain("toggleToolbarMenu('device'")
     expect(toolbar).toContain("toggleToolbarMenu('actions'")
     expect((toolbar.match(/class="tb-row/g) || [])).toHaveLength(1)
+    expect(toolbar).not.toContain('activeKeymapName')
+    expect(toolbar).not.toContain('keymap-select')
+    expect(toolbar).not.toContain('stage-source-btn')
+    expect(toolbar).not.toContain('stage-record-btn')
+    expect(toolbar).not.toContain('视频')
+    expect(toolbar).not.toContain('录制')
     // 设备「更多」下拉：新增/设置/安装应用（本地 APK）/删除；投屏「功能」下拉：按键与画面辅助动作
     const teleport = toolbar.slice(toolbar.indexOf('<Teleport'))
     const deviceMenu = teleport.slice(teleport.indexOf(`v-if="toolbarMenuOpen === 'device'"`), teleport.indexOf(`v-if="toolbarMenuOpen === 'actions'"`))
@@ -239,12 +247,12 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).not.toContain('isResPanelTab')
   })
 
-  it('按键映射页签与工具条选择器接入当前应用分区', () => {
+  it('按键映射面板仍接入当前应用分区，但顶部不再暴露方案选择器', () => {
     const keymap = read('./components/console/KeymapPanel.vue')
     // 映射面板经 console.keymaps 组件键解析，不再有壳内 keymap 页签模板分支
     expect(read('./workspace/core-component-registry.ts')).toContain('console.keymaps')
-    expect(template).toContain('v-model="activeKeymapName"')
-    expect(template).toContain('无映射')
+    expect(template).not.toContain('v-model="activeKeymapName"')
+    expect(template).not.toContain('keymap-select')
     expect(consoleImpl).toContain('loadKeymaps(packageId.value)')
     expect(consoleImpl).toContain('api.getKeymap(activeKeymapName.value, packageId.value)')
     expect(consoleImpl).toContain("onRequestPoint: () => pickCoord()")

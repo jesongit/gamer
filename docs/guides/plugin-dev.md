@@ -1,17 +1,9 @@
 # Gamer 插件开发指南（从零到安装运行）
 
-> 适用基线：2026-09-07（免签名安装 + manifest v2；HEAD `eae786c` 工作树）。
+> 适用基线：2026-09-09（当前工作树；免签名安装 + manifest v2）。
 > 本文所有字段、端点、错误文案均与当前实现逐条核对；配套 API 参考见
 > [docs/reference/PLUGIN_API.md](../reference/PLUGIN_API.md)，可运行的完整示例在
 > [sdk/examples/](../../sdk/examples/)（`echo-minimal` / `hello` / `vision-probe`）。
->
-> ⚠️ **当前基线的宿主缺陷（2026-09-07）**：通用 extension-host 运行时以
-> async 形态链接 Host API import、以同步入口调用 guest。任何**声明了 import**
-> 的插件（即任何调用 Host API 的插件）在 start 时触发 trap 并使宿主进程
-> abort，重启后还会形成启动循环崩溃。这是宿主侧缺陷，guest 侧写法（本文
-> 所教）即宿主修复后的正确写法、无需改动；复现记录见
-> [docs/evidence/phase3_sdk_examples.md](../evidence/phase3_sdk_examples.md)。
-> 缺陷修复前，可完整运行的最小模板是 `sdk/examples/echo-minimal`（零 import）。
 
 ## 1. 你需要什么
 
@@ -23,8 +15,10 @@
 
 不需要：签名密钥、GitHub 仓库、市场登记、修改 Gamer 源码。
 
-一个插件 = 一个 `.gplugin`（zip）= `manifest.toml` + `plugin.wasm`
-（WASM Component，真实 guest 字节）+ 可选 UI 资产。
+一个插件 = 一个 `.gplugin`（zip）。`kind="wasm"` 时包含
+`manifest.toml` + `entry` 指向的 WASM Component（真实 guest 字节）+ 可选 UI
+资产；`kind="builtin"` 时由宿主静态注册的 `builtin_id` 提供实现，不携带
+guest 字节。当前官方 `gamer.video` 是 builtin；第三方插件使用 WASM 执行类型。
 
 ## 2. 五分钟走通最小插件
 
@@ -111,10 +105,12 @@ impl Guest for MyPlugin {
 export!(MyPlugin);
 ```
 
-生命周期模型：`start` 时宿主实例化组件并调用一次 `run`；`run` 返回后实例
-驻留（专用线程 + 命令循环），每个 `POST /api/extensions/:id/call` 派发一次
-`call(action, values-json)`；`stop` 优雅收尾实例。**调用模型是同步
-canonical ABI**，`log::write` 这类 import 直接调用即可。
+生命周期模型：内部 `start` 时宿主实例化 WASM 组件并调用一次 `run`；`run`
+返回后实例驻留（专用线程 + 命令循环），每个
+`POST /api/extensions/:id/call` 派发一次 `call(action, values-json)`；内部
+`stop` 优雅收尾实例。用户 REST 只使用 `enable`/`disable`，其中 `enable`
+直接启动。WIT surface 仍是 canonical ABI；宿主的 Wasmtime import/export
+桥接按异步调用模型实现，guest 契约无需自行模拟。
 
 ## 4. manifest v2 全字段参考
 
@@ -124,13 +120,13 @@ canonical ABI**，`log::write` 这类 import 直接调用即可。
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `manifest_version` | u32 | ✅ | 必须 `= 2`（v1 安装/更新已拒绝；存量读端容忍） |
-| `id` | string | ✅ | 插件 id：ASCII 字母数字 + `.``_``-`，不以 `.` 开头/结尾，≤128B；建议反域名（`com.example.myplugin`）。**禁用大写** |
+| `id` | string | ✅ | 插件 id：ASCII 字母数字 + `.``_``-`，不以 `.` 开头/结尾，≤128B；大小写均按 ASCII 规则校验，建议统一使用小写反域名（`com.example.myplugin`）。 |
 | `version` | string | ✅ | SemVer，禁 build metadata（`+`），如 `1.0.0` |
 | `name` | string | ✅ | 显示名，非空 ≤256B、无控制字符 |
 | `description` | string | — | 可选说明 |
 | `entry` | string | wasm ✅ | 包内 `.wasm` 路径（惯例 `plugin.wasm`）；安装时校验存在 + `\0asm` magic。**builtin 执行类型必须缺省** |
 | `permissions` | [string] | — | 权限闭集 19 项（见 §5）；缺省 = 无权限。写 `filesystem.*`/`network`/`shell`/`process`/`device.shell` 直接拒绝 |
-| `[host_api]` | table | — | 声明用到的 Host API 域版本要求：`device`/`vision`/`input`/`touch`/`resource`/`run`/`runtime`/`log`/`media`，值是 SemVer range（如 `"^1.0"`）；宿主当前全域 `1.0.0`，不满足 → 安装期结构化报错 |
+| `[host_api]` | table | — | 声明用到的 Host API 域版本要求：`device`/`vision`/`input`/`touch`/`resource`/`run`/`runtime`/`log`/`media`，值是 SemVer range（如 `"^1.0"`）；宿主当前全域 `1.0.0`，不满足 → 安装期结构化报错。`media` 是 Core Media/Recording 保留域，当前不在公开 third-party `extension-host` world 中；`gamer.video` 由 builtin 宿主实现 |
 | `[targets.android].packages` | [string] | — | 支持的 Android 应用包名列表；`*` = 通用（全部应用），**缺省/空声明等价 `*`**。仅作运行目标声明，宿主不做硬门禁：Console 壳按当前设备应用过滤插件入口（`*` 恒显示，具体包名需命中）。与 package.toml 的 `[targets.android]` 同形 |
 | `[[dependencies]]` | array | — | 插件依赖声明（简化计划 Phase 3）：`id`（目标插件 id，禁自引用/重复）+ `version`（SemVer range，缺省 `*`）+ `required`（缺省 `true`，可选依赖必须显式 `false`）。**必需依赖 = 启动门禁**（缺失/版本不兼容/未启用 → enable 拒绝启动并保留错误；必需依赖循环拒绝启动）；**可选依赖 = 能力降级提示**（缺失不阻止启动，你的基础功能必须可独立工作）。不自动下载/自动启用；依赖声明不授予任何权限。与 package.toml `[plugins]`（Package 依赖）是两个概念。调用其他插件能力走 `GET /api/extensions/:id/capabilities` 能力发现 + `POST /api/extensions/:id/call`（参考 gamer.video 对 gamer.yaml 的可选依赖：缺 YAML 时视频基础功能不受影响，仅模板创建/草稿生成入口降级） |
 | `[[ui.contributions]]` | array | — | 面板贡献，见下 |
@@ -205,11 +201,11 @@ capability 边界收到 `kind=denied`。
 | `run.control` | `run.cancel` / `status` | 稳定 |
 | `runtime.sleep` | `runtime.sleep`（上限 1h/次，随取消位中断） | 稳定 |
 | `log.write` | `log.write`（级别：trace/debug/info/warn/error） | 稳定 |
-| `media.read` | media 域查询 | 实验（WIT media interface 已契约化、未挂 world——guest 尚不可消费） |
-| `media.import` | media 导入 | 实验（同上） |
-| `media.record` | 录制 start/stop/cancel | 实验（同上） |
-| `media.write` | media 写侧 | 实验（同上） |
-| `media.events.read` | 录制事件读取 | 实验（同上） |
+| `media.read` | Core media 域查询 | Core 保留域；当前不在公开 third-party `extension-host` world 中，普通 WASM guest 不可直接消费 |
+| `media.import` | Core media 导入 | Core 保留域；由宿主侧 builtin 工作台使用 |
+| `media.record` | Core 录制 start/stop/cancel | Core 保留域；录制服务由 Core 提供 |
+| `media.write` | Core media 写侧 | Core 保留域；由宿主侧 builtin 工作台使用 |
+| `media.events.read` | Core 录制事件读取 | Core 保留域；普通 WASM guest 当前不可直接消费 |
 
 安装/更新时的权限**增量**必须经 `x-gamer-permission-confirm: true` 请求头
 确认，否则安装返回 409「插件权限变更需要用户确认: 新增权限: …」。
@@ -236,12 +232,23 @@ capability 边界收到 `kind=denied`。
   `content_package` 就是可用的 namespace。
 - 目录内部结构归插件自己解释；插件卸载**不删除**其 Package 数据。
 
+### 6.1 公开动作与跨插件调用
+
+能力发现 `GET /api/extensions/:id/capabilities` 返回动作目录，但“动作在目录中”不代表当前一定可调用；目标插件必须处于 `Running`，实际调用仍会经过公开动作和生命周期门禁。
+
+- 浏览器/管理员使用 `POST /api/extensions/:id/call`。该入口属于已认证的用户管理面，调用方身份是当前用户会话，不把请求 JSON 中的 `caller` 字段当作插件身份。
+- 插件互调使用宿主内部的受控 `ExtensionService::call_extension_from_plugin` seam，而不是伪造 REST 请求。宿主从真实运行实例取得调用方插件 ID，调用方和目标插件都必须 `Running`，且动作清单中的 `caller` 必须匹配。
+- 带 Package 写入的公开动作还必须把 `values.package_id` 与宿主传入的 `content_package` 完全匹配；缺少上下文、跨 Package 或跨插件资源路径均结构化拒绝，且在执行前无副作用。
+- 当前只有带明确 caller 契约的原生动作支持插件互调；没有契约的 declarative 按钮不会因为知道 action 字符串就自动开放。新增互调能力必须先扩展动作清单、上下文和权限测试。
+
 ## 7. 更新与版本语义
 
 - 已安装版本目录不可变；`update` = 装新版本 + 切 `active_version`，
-  **Running 状态拒绝更新**（先 `POST /api/extensions/:id/stop`）。
-- `POST /api/extensions/:id/activate` `{version}` 切换激活版本（不复制不删除）。
-- 卸载：`DELETE /api/extensions/:id/:version`；Running 拒绝（409）；
+  **Running 状态拒绝更新**（先 `POST /api/extensions/:id/disable`，由用户生命周期入口完成停用）。
+- 用户 REST 不提供独立的 `start` / `stop` / `activate` 端点；内部版本切换仍受运行中依赖守卫保护，
+  需要回退时卸载后重装旧归档。
+- 卸载：`DELETE /api/extensions/:id/:version`；active 版本 Running 时拒绝（409）；
+  非 active 的旧版本可直接删除，不中断当前 active 实例；
   删掉最后一个版本才清状态记录。非激活的旧版本可直接删。
 - 本地导入不会自动获得更新来源；来源与可更新来源是两回事。
 
@@ -264,12 +271,11 @@ capability 边界收到 `kind=denied`。
 | `host_feature_unavailable` | manifest 声明 `kind="builtin"` 但 `builtin_id` 不在服务端注册表 | 第三方插件用 `kind="wasm"`；builtin 是宿主预置实现专用，不可伪装 |
 | `插件 … 已安装`（409） | 同 id 同版本重复安装 | bump version（更新语义见 §7） |
 | `插件调用被拒绝: action 不在插件 declarative UI 声明的按钮集合内: …`（400） | call 的 action 没在 manifest 声明 | 按钮动作全部写进 `[[ui.contributions.fields]]`（type=button） |
-| `插件 … 的生命周期不允许执行 call/uninstall: 当前状态为 …`（409） | 插件不在 Running | call 需 Running；卸载需先 stop |
+| `插件 … 的生命周期不允许执行 call/uninstall: 当前状态为 …`（409） | 插件不在 Running | call 需 Running；卸载 active 版本需先 disable；非 active 旧版本可直接删除 |
 | `插件 call 返回值不是 JSON` / `插件 call trap: …` | guest 返回值不是 JSON 字符串 / guest 执行 trap | 成功与失败分支都返回 JSON；查 guest 日志与服务端日志 |
 | guest 侧 `denied`（`HostError.kind`） | 调用未在 manifest 声明权限 | 补声明 + 重装（新权限需确认） |
 | guest 侧 `not-found` | 设备 id 不存在 / 资源不存在 | 核对 `context.get()` 与设备列表；资源先经 REST 写入 |
 | `组件实例化失败: …`（start 失败，列表 `last_error` 可见） | guest 与 world 契约不匹配（如缺 `call` 导出、WIT 版本不符） | 用随示例的 wit 快照与 wit-bindgen 版本重编 |
-| **`store configuration requires that *_async functions are used instead` + 宿主进程 abort** | 当前基线宿主缺陷（§开头警告）：任何 import 型插件 start 即触发 | 待宿主修复；修复前 guest 无需改动，先不要安装 import 型插件 |
 
 结构化诊断是产品设计：所有安装/调用失败都返回带语义的中文错误（HTTP 4xx
 为主），不是笼统的「插件运行失败」。guest 的 `log::write` 会落进 Core 日志
@@ -285,7 +291,8 @@ Host API 演进（新域/新函数 + 权限闭集扩充），而不是给单个�
 
 ## 10. 分享与分发
 
-`.gplugin` 是自包含的（manifest + guest + UI 资产），直接把文件发给其他
+`.gplugin` 自包含清单与其执行所需内容：WASM 插件包含 guest，builtin 插件只
+包含 manifest/UI 资产并引用宿主已注册的 `builtin_id`。直接把文件发给其他
 用户即可在插件中心本地导入使用；不需要密钥、仓库或市场。若要发布到官方
 市场（`web/public/registry.json` 体系），使用 `tools/build-plugins.ps1` 的
 registry v2 流程（sha256 完整性清单；哈希只证明文件一致，不代表发布者身份）。

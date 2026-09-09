@@ -63,6 +63,13 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       expect(wrapper.text()).toContain('📖 读取')
       expect(wrapper.text()).toContain('🚀 启动')
       expect(wrapper.text()).toContain('功能 ▾')
+      const toolbar = wrapper.find('.toolbar')
+      expect(toolbar.find('.keymap-select').exists()).toBe(false)
+      expect(toolbar.find('.stage-source-btn').exists()).toBe(false)
+      expect(toolbar.find('.stage-record-btn').exists()).toBe(false)
+      expect(toolbar.text()).not.toContain('视频')
+      expect(toolbar.text()).not.toContain('录制')
+      expect(toolbar.text()).not.toContain('映射')
       // DeviceStage 绑定来自各拆分模块：渲染后必须拿到结构化值（而非 undefined）
       const stage = wrapper.findComponent(ConsoleVideoStage)
       expect(stage.exists()).toBe(true)

@@ -1,7 +1,7 @@
 # YAML 脚本语法（V1 唯一正式方案）
 
 GameBot 自动化脚本只支持 **YAML V1**（Gamer V1 简化计划 Phase 1；无 `version`
-字段——出现 `version:` 直接报 `yaml.version.removed` 迁移诊断，旧 v3/v2 脚本
+字段——出现 `version:` 直接报 `yaml.version.removed` 拒绝诊断，旧 v3/v2 脚本
 **无兼容分支、无 fallback、无迁移工具**）。
 
 核心原则：**YAML 只描述流程，所有实际操作都是函数调用**。解释器只认识

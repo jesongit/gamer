@@ -50,6 +50,13 @@ pub(crate) enum ExtensionError {
     DependencyUnsatisfied { id: String, reason: String },
     #[error("插件 {dependent} 正在运行且必需依赖 {id}，请先停用 {dependent}")]
     DependencyOfRunningExtension { id: String, dependent: String },
+    #[error("插件 {dependent} 正在运行且必需依赖 {id} {requirement}，不能切换到版本 {version}")]
+    IncompatibleDependencyVersion {
+        id: String,
+        dependent: String,
+        requirement: String,
+        version: String,
+    },
     #[error("插件 {id} 要求 Host API {domain} {required}，当前支持 {supported}")]
     UnsupportedHostApi {
         id: String,

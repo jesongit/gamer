@@ -1,10 +1,5 @@
 # vision-probe — 设备/视觉能力示例插件
 
-> ⚠️ **当前宿主基线限制（2026-09-07）**：与 `../hello` 相同——任何声明了
-> import 的插件在当前服务端上 start 会触发宿主进程 abort（宿主侧缺陷，
-> guest 侧写法即宿主修复后的正确写法，无需改动），修复前请勿在长期运行的
-> 服务上安装本示例。详见 `docs/evidence/phase3_sdk_examples.md`。
-
 与 `hello` 同一条 `gamer:host/extension@1.0.0` 契约，差别只在 **manifest 声明**：
 申请 `device.read` / `vision.match` / `vision.color` / `input.tap` 四项权限后，
 guest 对受控 Host API 的调用才能穿过宿主 capability 边界真实执行。

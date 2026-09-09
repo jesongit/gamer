@@ -12,8 +12,8 @@
 - 🔍 **模板匹配**：Rust NCC 引擎（截图优先从 H.264 GOP 帧环按需调用 ffmpeg 解码最新帧；无 ffmpeg 时 fallback adb screencap）；固定夹具 benchmark 脚本已兼容 Windows PowerShell 5.1（parser=0），正式跨平台 p50/p95 报告仍在计划中
 - 📜 **YAML 自动化**：**YAML V1** 唯一脚本方案（Gamer V1 简化收敛；旧 v3/v2 语法一律诊断报错，无兼容分支）——**YAML 只描述流程，一切操作皆函数调用**：步骤只有函数调用 / `if` / `repeat` / `return` 四类，表达式只有字面量与 `$name.field` 引用；函数只有两种来源（插件原生函数 + 当前 Package `automations/_function*.yaml` 函数库，默认只有 `_function.yaml` 一个文件，统一命名空间调用名 = 函数名，同名冲突即拒绝），首版原生函数 tap/swipe/key/input_text/launch/stop_app/sleep/log/find/wait_find/tap_template/wait_disappear/eq…le（`find` 单次匹配，等待轮询用 `wait_find`）；执行预算（步数 100k / 调用深度 32）防脚本失控，运行事件（步骤高亮 / 命中标记）实时回传投屏页面（语法见 [docs/reference/YAML.md](docs/reference/YAML.md)），由官方 `gamer.yaml` 扩展承载（唯一权威解释器 `yaml-interp` 与 WASM guest 同源）
 - ⏰ **定时任务**：Task = 任意 ScheduleProvider + 任意 Runner，内置 `cron` 调度 provider + `gamer.yaml` 执行 runner；服务端 Docker 内 7×24 运行，浏览器关闭不影响
-- 🧩 **插件化架构**：Core 只含设备/任务/资源/扩展机制等稳定能力，YAML 自动化、按键映射与视频工作台由可安装扩展（`.gplugin`，**免签名安装**——来源标注 + 权限确认 + 官方 sha256 完整性校验）提供，面板随扩展启动/停止出现消失；内置插件市场（官方 registry + 本地/URL 导入），用户可用 [sdk/](sdk/README.md) 开发自己的 WASM 插件；配置资产走 Package（`.gamerpkg`）导入导出
-- 🎬 **视频工作台**：录制或导入视频 → 素材库 → Video Project（标记/校准）→ 精确逐帧（ffprobe 展示序帧表，VFR/B 帧归一）→ 定帧框选建模板 + 离线匹配 → 操作事件生成 YAML V1 草稿保存到自动化（全程不触达设备，由官方 `gamer.video` 扩展承载）
+- 🧩 **插件化架构**：Core 只含设备/任务/资源/扩展机制等稳定能力，YAML 自动化、按键映射与视频工作台由可安装扩展（`.gplugin`，**免签名安装**——来源标注 + 权限确认 + 官方 sha256 完整性校验）提供，面板随扩展进入/离开 Running 状态出现消失；`gamer.yaml` 与 `gamer.keymap` 是 WASM 扩展，`gamer.video` 是无 guest 的 builtin 扩展。内置插件市场（官方 registry + 本地/URL 导入），用户可用 [sdk/](sdk/README.md) 开发自己的 WASM 插件；配置资产走 Package（`.gamerpkg`）导入导出
+- 🎬 **视频工作台**：录制或导入视频 → 素材库 → Video Project（标记/校准）→ 精确逐帧（ffprobe 展示序帧表，VFR/B 帧归一）→ 定帧框选建模板 + 离线匹配 → 操作事件生成 YAML V1 草稿保存到自动化。媒体库与录制由 Core 提供，`gamer.video` builtin 承载工作台/项目；离线定帧与匹配不触达设备
 - 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
 
 > 当前仓库提供 Windows x64 完整包的 launcher 入口（`doctor` / `status` / `repair` / `start` / `upgrade`）和 launcher 托管更新 API。本文只记录仓库中已有的入口；不把 GitHub Release、生产升级/回滚或真实设备 E2E 当作已完成的外部结果。Docker/直跑模式的更新仍由外部部署管理。
@@ -26,7 +26,7 @@
 │ (Vue3 精简) │       WebSocket 信令 + HTTP REST API       │ (axum+webrtc-rs) │                        │ redroid/真机  │
 └────────────┘                                            └──────────────────┘                        └──────────────┘
                                                                     │
-                                                                    ├─ 扩展机制：WASM/Native Extension + 能力位 SDK（YAML 自动化、按键映射、视频工作台由官方扩展提供）
+                                                                    ├─ 扩展机制：WASM/builtin Extension + 能力位 SDK（YAML 自动化、按键映射、视频工作台由官方扩展提供）
                                                                     ├─ 定时任务：Task = ScheduleProvider + Runner（内置 cron provider）
                                                                     ├─ 模板匹配：NCC + H.264 GOP 帧环（按需 ffmpeg 解码）
                                                                     ├─ 资源系统：Package 三元组寻址（packages/<package-id>/plugins/<plugin-id>/）+ 媒体库
@@ -38,7 +38,7 @@
   客户端角色驱动：`adb push` → `adb reverse` 隧道 → `app_process` 启动 → 读视频 socket（H.264 帧 + PTS 头）/
   控制 socket（触控/按键/文本/剪贴板/启动应用）
 - **虚拟屏**：启动参数 `new_display=1920x1080/420`，scrcpy server 在设备上创建虚拟显示器；
-  连接不会自动启动应用，由 Console 启动按钮或脚本 `app.start` 显式启动到虚拟屏，**无需自己探测 display id**
+  连接不会自动启动应用，由 Console 启动按钮或 YAML V1 函数 `launch` 显式启动到虚拟屏，**无需自己探测 display id**
 
 ## 目录结构
 
@@ -58,7 +58,7 @@ gamer/
 │   │   ├── capabilities/       # Core 能力位 SDK（device/vision/input/...）
 │   │   ├── extensions/         # 扩展生命周期 + gamer_yaml / keymap / video 业务扩展
 │   │   └── store.rs            # SQLite 持久化（schema v3）
-│   ├── guests/                 # 官方 WASM guest（yaml-guest / keymap-guest）
+│   ├── guests/                 # 官方 WASM guest（yaml-guest / keymap-guest；gamer.video 为 builtin、无 guest）
 │   ├── data/                   # packages/<package-id>/ 运行数据（package.toml + shared/ + plugins/<plugin>/），gitignore
 │   ├── assets/scrcpy-server.jar   # 官方 v3.3.3（仓库自带）
 │   └── Dockerfile              # 仅后端镜像（无前端页；一体化镜像用根 Dockerfile）
@@ -250,7 +250,7 @@ VITE_PROXY_TARGET=http://localhost:8443 pnpm dev
 **屏幕模式**：
 - `镜像主屏`：投物理屏幕，各设备分辨率不同
 - `虚拟屏`：统一分辨率（预设 1920x1080 / 1080x1920 / 1280x720，可自定义宽高+DPI），
-  需 Android 10+；连接只建立投屏会话，应用由 Console 启动按钮或脚本 `app.start` 显式启动
+  需 Android 10+；连接只建立投屏会话，应用由 Console 启动按钮或 YAML V1 函数 `launch` 显式启动
 
 **WebRTC 网络**：服务端不内置 STUN/TURN，默认使用 host candidate 直连，适合同机或局域网。
 Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`、
@@ -299,16 +299,16 @@ YAML 自动化脚本为 **V1 唯一版本**（无 `version` 字段，旧 v3/v2 �
 | GET/POST | /api/media[/:id] | 媒体库：导入/列表/详情/删除（被 Package 引用时 409）/引用登记 |
 | GET | /api/media/:id/frames[/:index] | 展示序帧表与按帧索引取帧（`X-Frame-Index`/`X-Frame-Pts-Us` 帧身份头） |
 | POST | /api/recording/start&#124;stop&#124;cancel | 设备录制（服务端权威，浏览器断开不中断；stop/cancel 幂等） |
-| GET | /api/extensions | 已装扩展列表（含 UI 贡献与执行类型 wasm/builtin） |
+| GET | /api/extensions | 已装扩展列表（含 UI 贡献与执行类型 wasm/builtin；`gamer.video` 为 builtin、无 guest） |
 | POST | /api/extensions/inspect | 安装前检视（来源标注/权限增量/执行形态；可选 `x-expected-sha256`） |
 | POST | /api/extensions | 安装扩展（免签名；官方来源仅标注，权限确认头必需；安装即启用启动） |
-| POST | /api/extensions/:id/enable&#124;disable&#124;start&#124;stop&#124;activate&#124;update | 扩展生命周期操作（`DELETE /api/extensions/:id/:version` 卸载） |
+| POST | /api/extensions/:id/enable&#124;disable&#124;update | 扩展生命周期操作（`enable` 直接启动，`disable` 自动停止；`DELETE /api/extensions/:id/:version` 卸载） |
 | POST | /api/extensions/:id/call | 调用扩展动作（declarative 按钮 / plugin.call / native 动作） |
 | GET/DELETE | /api/logs | 运行日志 / 清空 |
 | WS | /ws/device/:id | WebRTC 信令（offer → answer） |
 
 执行以 `run_id` 标识一次运行实例。统一执行入口（`POST /api/runs`）、函数测试或“立即运行任务”采用异步返回：
-接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同 runner 并发控制同一设备。脚本/函数保存、运行和任务保存共用 V1 校验（由 `gamer.yaml` 扩展承载），失败返回结构化诊断；旧 `version: 3` 源一律报 `yaml.version.removed` 迁移诊断，无旧版 fallback。
+接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同 runner 并发控制同一设备。脚本/函数保存、运行和任务保存共用 V1 校验（由 `gamer.yaml` 扩展承载），失败返回结构化诊断；旧 `version: 3` 源一律报 `yaml.version.removed` 拒绝诊断，不执行迁移，也无旧版 fallback。
 
 ## 技术要点
 
@@ -344,7 +344,7 @@ YAML 自动化脚本为 **V1 唯一版本**（无 `version` 字段，旧 v3/v2 �
 - ✅ 控制注入：tap / swipe / 文本 / HOME / BACK / 音量按键
 - ✅ `start_app` 启动星穹铁道（com.miHoYo.hkrpg）成功
 - ✅ 模板匹配：真实游戏画面命中（置信度 0.98 / 0.85）
-- ✅ YAML 脚本：until（模板出现并点击）→ wait → tap 全链路执行并输出日志
+- ✅ YAML 脚本：`wait_find`（模板出现）→ `tap` → `sleep` → `tap` 全链路执行并输出日志
 - ✅ 定时任务：cron 触发 + 立即执行 + 触发点防重复
 
 ### 虚拟屏模式（new_display=1920x1080/420）✅ 重点验证

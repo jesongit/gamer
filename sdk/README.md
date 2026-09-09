@@ -4,20 +4,18 @@
 随示例走的 WIT 契约快照。**写一个 Gamer 插件不需要修改 Gamer 源码、
 不需要签名密钥、不需要加入任何市场。**
 
-> 状态（2026-09-07，对应服务端基线 `eae786c` 工作树）：三个示例的
-> 构建/打包/inspect/install 均已实测通过；**但携带 Host API import 的插件
-> （hello / vision-probe）在当前服务端基线上 start 会触发宿主进程 abort
-> （宿主侧缺陷，非示例问题），修复前请先阅读
-> [docs/evidence/phase3_sdk_examples.md](../docs/evidence/phase3_sdk_examples.md)
-> 的「能力缺口」一节**；`echo-minimal`（零 import）可完整运行。
+> 状态（2026-09-09，当前工作树）：三个示例的构建、打包、inspect、install、
+> enable 与 call 均按当前服务端契约验证通过；`hello` / `vision-probe` 的
+> Host API import 可正常链接并调用。没有真机时，`vision-probe` 的设备探针
+> 返回结构化 not-found 属于预期结果。
 
 ## 示例清单
 
 | 示例 | 演示内容 | 权限 | 当前基线可完整运行 |
 | --- | --- | --- | --- |
 | [`echo-minimal`](examples/echo-minimal/) | 零 import 最小插件：declarative 面板 + `call` 回显/计算、全生命周期 | 无 | ✅ |
-| [`hello`](examples/hello/) | manifest v2 + declarative UI + call 命令 + Package 私有数据 + 插件日志 + 运行上下文 + 权限闭集自检 | `resource.read` `log.write` | ❌ 宿主缺陷，待修复 |
-| [`vision-probe`](examples/vision-probe/) | device/vision/input 权限声明 + 受控 Host API 真实调用（capture/sample-color 只读探针、tap dry-run） | `device.read` `vision.match` `vision.color` `input.tap` | ❌ 宿主缺陷，待修复 |
+| [`hello`](examples/hello/) | manifest v2 + declarative UI + call 命令 + Package 私有数据 + 插件日志 + 运行上下文 + 权限闭集自检 | `resource.read` `log.write` | ✅ |
+| [`vision-probe`](examples/vision-probe/) | device/vision/input 权限声明 + 受控 Host API 真实调用（capture/sample-color 只读探针、tap dry-run） | `device.read` `vision.match` `vision.color` `input.tap` | ✅ |
 
 三个示例工程结构完全同构，学会一个就会全部：
 

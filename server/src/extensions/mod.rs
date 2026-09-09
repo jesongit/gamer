@@ -66,7 +66,7 @@ pub(crate) use model::{
 pub(crate) use permissions::{Permission, PermissionSet};
 pub(crate) use service::{
     DependencyStatus, ExtensionInspection, ExtensionInstallContext, ExtensionService,
-    ExtensionSnapshot, PermissionDiff, TimerRunnerRegistrar,
+    ExtensionSnapshot, PermissionDiff, PluginCallContext, TimerRunnerRegistrar,
 };
 pub(crate) use store::{ExtensionStore, InstalledExtension};
 pub(crate) use ui::{RegisteredUiContribution, UiContributionRegistry};
@@ -80,14 +80,48 @@ pub(crate) use wasm::{NoWasmRuntime, WasmInstanceHandle, WasmRuntime, WasmStartR
 ///
 /// `data_dir` = 应用数据目录（与组合根 `for_data_root` 同源），供原生动作
 /// 装配进程级 Core 服务单例（如 `crate::recording::service`）。状态校验
-/// （必须 Running）由调用方（`service.rs::call_extension`）统一执行。
+/// （必须 Running + 当前进程 live surface + 权限）由调用方
+///（`service.rs::call_extension`）统一执行；不可伪造的 permit 进一步把本
+/// 缝限制在 service 生命周期边界内。
 pub(crate) fn native_call_action(
+    _permit: &service::NativeDispatchPermit,
     id: &ExtensionId,
     action: &str,
     values: &serde_json::Value,
     data_dir: &std::path::Path,
 ) -> Option<ExtensionResult<serde_json::Value>> {
     gamer_yaml::native_call_action(id.as_str(), action, values, data_dir)
+}
+
+/// Side-effect-free native action lookup used by the lifecycle gate before
+/// invoking `native_call_action`.
+pub(crate) fn is_public_native_action(id: &ExtensionId, action: &str) -> bool {
+    gamer_yaml::is_public_native_action(id.as_str(), action)
+}
+
+pub(crate) fn native_action_expected_caller(
+    id: &ExtensionId,
+    action: &str,
+) -> Option<&'static str> {
+    gamer_yaml::native_action_expected_caller(id.as_str(), action)
+}
+
+pub(crate) fn native_action_requires_package_context(id: &ExtensionId, action: &str) -> bool {
+    gamer_yaml::native_action_requires_package_context(id.as_str(), action)
+}
+
+pub(crate) fn native_action_required_permissions(
+    id: &ExtensionId,
+    action: &str,
+) -> Option<&'static [Permission]> {
+    gamer_yaml::native_action_required_permissions(id.as_str(), action)
+}
+
+pub(crate) fn native_action_caller_permissions(
+    id: &ExtensionId,
+    action: &str,
+) -> Option<&'static [Permission]> {
+    gamer_yaml::native_action_caller_permissions(id.as_str(), action)
 }
 
 /// 公开动作目录（能力发现读端，简化计划 Phase 4）：目标插件原生声明的版本化
@@ -634,14 +668,15 @@ mod tests {
         assert_eq!(registrar.started.lock().unwrap().len(), 2);
     }
 
-    /// registrar 回调失败不得影响生命周期本身：start 仍进入 Running（缺
-    /// runner 的后果由任务侧 DependencyMissing 语义兜底），stop 仍回到 Enabled。
+    /// Runner 注册是进入 Running 的必要条件：回调失败必须回滚实例，且不能
+    /// 发布一个没有可执行 Runner 的 Running 状态。
     #[tokio::test]
-    async fn failing_registrar_does_not_break_lifecycle_transitions() {
+    async fn failing_registrar_does_not_claim_running() {
         let temp = TempDir::new().unwrap();
+        let runtime = Arc::new(CountingRuntime::default());
         let service = ExtensionService::new(
             ExtensionStore::new(temp.path()),
-            Arc::new(CountingRuntime::default()),
+            runtime.clone(),
             CapabilityRegistry::default(),
         )
         .with_runner_registrar(Arc::new(FailingRegistrar));
@@ -653,10 +688,16 @@ mod tests {
             .await
             .unwrap();
         service.enable(installed.id()).await.unwrap();
-        let running = service.start(installed.id()).await.unwrap();
-        assert_eq!(running.state(), ExtensionState::Running);
-        let stopped = service.stop(installed.id()).await.unwrap();
-        assert_eq!(stopped.state(), ExtensionState::Enabled);
+        let error = service.start(installed.id()).await.unwrap_err();
+        assert!(error.to_string().contains("Runner/UI 注册失败"), "{error}");
+        let snapshot = service.snapshot_for(installed.id()).unwrap();
+        assert_eq!(snapshot.state(), ExtensionState::Failed);
+        assert!(snapshot
+            .last_error()
+            .unwrap()
+            .contains("Runner/UI 注册失败"));
+        assert_eq!(*runtime.starts.lock().unwrap(), 1);
+        assert_eq!(*runtime.stops.lock().unwrap(), 1);
     }
 
     #[test]

@@ -36,7 +36,10 @@ pub(crate) mod yaml_extension;
 
 /// native_call_action 缝的分发入口在 [`actions`]（版本化公开动作清单：
 /// 草稿生成/保存、模板帧上创建；清单 ↔ 实现由测试双向锁死）。
-pub(crate) use actions::native_call_action;
+pub(crate) use actions::{
+    is_public_native_action, native_action_caller_permissions, native_action_expected_caller,
+    native_action_required_permissions, native_action_requires_package_context, native_call_action,
+};
 
 /// 公开动作目录（简化计划 Phase 4 能力发现读端）：gamer.yaml 声明的全部
 /// 版本化动作（含 Native/Rest/Frontend surface）；非 gamer.yaml 返回空表。
@@ -56,6 +59,12 @@ pub(crate) fn public_action_catalog(extension_id: &str) -> Vec<serde_json::Value
                     actions::ActionSurface::Frontend => "frontend",
                 },
                 "summary": action.summary,
+                "caller": action.caller,
+                "permissions": action
+                    .required_permissions
+                    .iter()
+                    .map(|permission| permission.as_str())
+                    .collect::<Vec<_>>(),
             })
         })
         .collect()
@@ -98,19 +107,22 @@ pub(crate) async fn run_yaml_program(
 ) -> Result<serde_json::Value, crate::extensions::ExtensionError> {
     use crate::extensions::ExtensionId;
     let id = ExtensionId::parse(YAML_EXTENSION_ID).expect("built-in YAML extension id is valid");
-    let (wasm, host) = service.guest_for_run(&id).await?;
-    yaml_runtime()
-        .run(yaml_extension::YamlWasmRunRequest {
-            wasm,
-            program,
-            host,
-            context,
-            stop,
-            sink,
+    service
+        .with_guest_for_run(&id, move |wasm, host| async move {
+            yaml_runtime()
+                .run(yaml_extension::YamlWasmRunRequest {
+                    wasm,
+                    program,
+                    host,
+                    context,
+                    stop,
+                    sink,
+                })
+                .await
+                .map(|result| result.value)
+                .map_err(|error| crate::extensions::ExtensionError::Runtime(error.to_string()))
         })
         .await
-        .map(|result| result.value)
-        .map_err(|error| crate::extensions::ExtensionError::Runtime(error.to_string()))
 }
 
 #[cfg(feature = "wasm-runtime")]

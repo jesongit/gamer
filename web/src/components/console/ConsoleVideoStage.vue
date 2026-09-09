@@ -131,7 +131,7 @@
     <div class="v-overlay" v-if="stage && stage.kind === 'media' && !stage.mediaSrc">
       <div>
         <div class="v-empty-icon">🎞</div>
-        <div class="v-empty-text">媒体库为空：可在右侧视频工作台导入素材，或连接设备后点击工具条「⏺ 录制」</div>
+        <div class="v-empty-text">媒体库为空：可在右侧视频工作台导入素材，或先连接设备再从视频工作台录制</div>
       </div>
     </div>
 

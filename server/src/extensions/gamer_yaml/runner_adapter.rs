@@ -618,4 +618,137 @@ mod tests {
         assert_eq!(a.len(), 1);
         assert!(b.is_empty(), "b 包看不到 a 包函数");
     }
+
+    /// 函数目标只由 `<package>#<name>` 标识；定义文件改名后，组合表与目标
+    /// 展示标签不变，避免把文件路径泄漏为运行寻址的一部分。
+    #[test]
+    fn function_target_is_stable_when_library_file_is_renamed() {
+        let data = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config {
+            data_dir: data.path().to_path_buf(),
+            ..Default::default()
+        };
+        let store = crate::resources::PackageStore::open(&cfg).unwrap();
+        store
+            .create_package(crate::resources::PackageInput {
+                id: "com.stable".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        store
+            .write_text(
+                "com.stable",
+                YAML_EXTENSION_ID,
+                "automations/_function_daily.yaml",
+                "functions:\n  claim:\n    run:\n      - return: true\n",
+                None,
+                false,
+            )
+            .unwrap();
+
+        let target = RunTarget::Function {
+            pkg: "com.stable".into(),
+            function: "claim".into(),
+            start_index: 0,
+        };
+        let before = compose_function_library(&store, "com.stable").unwrap();
+        assert_eq!(target.label(), "com.stable#claim");
+        assert_eq!(
+            before
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["claim"]
+        );
+
+        store
+            .rename_resource(
+                "com.stable",
+                YAML_EXTENSION_ID,
+                "automations/_function_daily.yaml",
+                "automations/_function_rewards.yaml",
+            )
+            .unwrap();
+        let after = compose_function_library(&store, "com.stable").unwrap();
+        assert_eq!(target.label(), "com.stable#claim");
+        assert_eq!(
+            after
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["claim"]
+        );
+        assert!(store
+            .read_text(
+                "com.stable",
+                YAML_EXTENSION_ID,
+                "automations/_function_rewards.yaml"
+            )
+            .unwrap()
+            .is_some());
+    }
+
+    /// Package 导出/导入保留函数库与普通自动化的同一资源空间；导入后函数仍
+    /// 按名称组合，不能因归档往返退化为按文件路径寻址。
+    #[test]
+    fn package_archive_roundtrip_preserves_function_library_and_automation() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_cfg = crate::config::Config {
+            data_dir: source_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let source = crate::resources::PackageStore::open(&source_cfg).unwrap();
+        source
+            .create_package(crate::resources::PackageInput {
+                id: "com.archive".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        source
+            .write_text(
+                "com.archive",
+                YAML_EXTENSION_ID,
+                "automations/_function.yaml",
+                "functions:\n  claim:\n    run:\n      - return: true\n",
+                None,
+                false,
+            )
+            .unwrap();
+        source
+            .write_text(
+                "com.archive",
+                YAML_EXTENSION_ID,
+                "automations/daily.yaml",
+                "run:\n  - claim: {}\n",
+                None,
+                false,
+            )
+            .unwrap();
+
+        let built =
+            crate::package_archive::export_package(&source, "com.archive", None, false).unwrap();
+        let restored_dir = tempfile::tempdir().unwrap();
+        let restored_cfg = crate::config::Config {
+            data_dir: restored_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let restored = crate::resources::PackageStore::open(&restored_cfg).unwrap();
+        let staging = restored.staging_root().join("archive-roundtrip");
+        crate::package_archive::extract_archive(&built.archive, &staging).unwrap();
+        let target_dir = restored.package_dir("com.archive").unwrap();
+        std::fs::rename(staging, target_dir).unwrap();
+
+        let functions = compose_function_library(&restored, "com.archive").unwrap();
+        assert_eq!(
+            functions
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["claim"]
+        );
+        assert!(restored
+            .read_text("com.archive", YAML_EXTENSION_ID, "automations/daily.yaml")
+            .unwrap()
+            .is_some());
+    }
 }

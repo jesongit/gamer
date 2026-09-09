@@ -1366,6 +1366,50 @@ log = "^1.0"
         assert_eq!(disappeared, Value::Bool(true));
     }
 
+    /// find 只执行一次；wait_find 才轮询，并在 timeout 到达后返回 null。
+    #[test]
+    fn wait_find_polls_until_match_and_times_out_without_match() {
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        stub.push_outcome(MatchOutcome::NotFound);
+        stub.push_outcome(stub_outcome());
+        let host = vision_host(
+            trace,
+            &stub,
+            LogTrace::new(),
+            &["vision.match", "resource.read"],
+        );
+        let matched = call(
+            "wait_find",
+            json!({"template": "home", "timeout": "100ms", "interval": "1ms"}),
+            &host,
+        )
+        .unwrap();
+        assert_eq!(matched["center"]["x"], 0.11);
+        assert_eq!(stub.match_calls.load(Ordering::Relaxed), 2);
+
+        let trace = Arc::new(Trace::default());
+        let stub = VisionStub::new(FrameSize::new(1000, 1000));
+        let host = vision_host(
+            trace,
+            &stub,
+            LogTrace::new(),
+            &["vision.match", "resource.read"],
+        );
+        let result = call(
+            "wait_find",
+            json!({"template": "home", "timeout": "0ms", "interval": "1ms"}),
+            &host,
+        )
+        .unwrap();
+        assert_eq!(result, Value::Null, "超时未命中必须返回 null");
+        assert_eq!(
+            stub.match_calls.load(Ordering::Relaxed),
+            1,
+            "timeout=0 仍只尝试一次"
+        );
+    }
+
     #[test]
     fn log_function_writes_and_stringifies_non_text() {
         let trace = Arc::new(Trace::default());
@@ -1404,12 +1448,32 @@ mod wasm_tests {
     use crate::extensions::gamer_yaml::syntax::{
         build_program, parse_function_library, parse_script,
     };
+    use async_trait::async_trait;
     use std::fs;
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
     use std::sync::OnceLock;
     use zip::write::SimpleFileOptions;
+
+    /// The YAML production registrar supplies the same execution-model
+    /// declaration, but this focused guest test does not need a Scheduler.
+    struct InstanceFreeRegistrar;
+
+    #[async_trait]
+    impl crate::extensions::TimerRunnerRegistrar for InstanceFreeRegistrar {
+        async fn extension_started(&self, _extension_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn extension_stopped(&self, _extension_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn executes_without_instance(&self, _extension_id: &str) -> bool {
+            true
+        }
+    }
 
     fn guest_source_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1777,7 +1841,8 @@ runtime = "^1.0"
             )
             .with_log_service(logs.clone() as Arc<dyn crate::capabilities::LogService>)
             .build();
-        let service = crate::extensions::ExtensionService::for_data_root(temp.path(), registry);
+        let service = crate::extensions::ExtensionService::for_data_root(temp.path(), registry)
+            .with_runner_registrar(Arc::new(InstanceFreeRegistrar));
 
         let mut archive = Vec::new();
         {
@@ -1794,6 +1859,7 @@ runtime = "^1.0"
         let installed = service.install(&archive).await.unwrap();
         let id = crate::extensions::ExtensionId::parse(YAML_EXTENSION_ID).unwrap();
         service.enable(&id).await.unwrap();
+        service.start(&id).await.unwrap();
 
         let value = super::super::run_yaml_program(
             &service,

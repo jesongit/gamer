@@ -333,24 +333,25 @@ async fn auto_start_installed(
         return snapshot;
     }
     let id = snapshot.id().clone();
-    if let Err(error) = service.enable(&id).await {
-        tracing::warn!(extension = %id, %error, "install auto-start: enable failed");
-        return snapshot;
-    }
-    match service.start(&id).await {
+    match service.enable_and_start(&id, None, None).await {
         Ok(started) => started,
         Err(error) => {
             // 降级为 Enabled（保留错误）而非 Failed：安装结果不被启动失败
             // 推翻，扩展可从插件中心手动 start 重试（如缺依赖的瞬态失败）。
             tracing::warn!(extension = %id, %error, "install auto-start: start failed");
-            let _ = service.force_state(
-                &id,
-                crate::extensions::ExtensionState::Enabled,
-                Some(error.to_string()),
-            );
-            match service.snapshot_for(&id) {
+            match service.degrade_start_failure(&id, &error).await {
                 Ok(degraded) => degraded,
-                Err(_) => snapshot,
+                Err(degrade_error) => {
+                    tracing::warn!(
+                        extension = %id,
+                        %degrade_error,
+                        "install auto-start: controlled failure write skipped"
+                    );
+                    match service.snapshot_for(&id) {
+                        Ok(current) => current,
+                        Err(_) => snapshot,
+                    }
+                }
             }
         }
     }

@@ -1,7 +1,7 @@
 # echo-minimal — 零 import 最小可运行插件
 
 三个示例里唯一**零 import、零权限**的一个，也是当前服务端基线上可以
-完整走通「安装 → 启动 → 调用 → 更新 → 卸载」全生命周期的最小模板。
+完整走通「安装 → enable → 调用 → 更新 → 卸载」全生命周期的最小模板。
 它证明写一个 Gamer 插件的最小成本：一个 manifest v2 + 一个导出
 `run`/`call` 的 WASM Component（本例 guest 源码 60 余行）。
 
@@ -56,8 +56,8 @@ curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.echo/call" \
   -H 'Content-Type: application/json' -d '{"action":"evil","values":{}}'
 # → 400 插件调用被拒绝
 
-# 卸载（Running 先 stop）
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.echo/stop"
+# 卸载（Running 先 disable）
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.echo/disable"
 curl -s -b cookies.txt -X DELETE "$BASE/api/extensions/com.example.echo/1.0.0"
 ```
 

@@ -2,7 +2,7 @@
 
 > 权威实现：`server/wit/gamer/host.wit`（WIT 契约原件）、
 > `server/src/extensions/{manifest,permissions,host_api,wasm}.rs`。
-> 本文为面向插件开发者的快照（2026-09-07，契约版本 `gamer:host@1.0.0`，
+> 本文为面向插件开发者的快照（2026-09-09，契约版本 `gamer:host@1.0.0`，
 > 宿主 `HOST_API_VERSION = 1.0.0`）。教程见
 > [docs/guides/plugin-dev.md](../guides/plugin-dev.md)。
 
@@ -31,8 +31,10 @@ manifest `[host_api]` 键与权限名仍叫 `resource` / `resource.read`。
 
 另有三个独立契约不归第三方使用：`world yaml-extension-host`（gamer.yaml
 专用，request/response 形态）、`server/wit/keymap/keymap.wit`（gamer.keymap
-专用 world）、`interface media`（已契约化、**未挂进 world extension-host**，
-guest 尚不可消费，权威是宿主内 Rust `MediaDomain` facade）。
+专用 world）、`interface media`。其中 `media` 是 Core Media/Recording 机制
+的内部契约，**未挂进 public `world extension-host`**，普通 WASM guest 当前不
+可直接消费；`gamer.video` 是无 guest 的 builtin，由宿主侧工作台使用 Core
+的 MediaDomain/Recording 服务。
 
 ### 1.1 共享类型
 
@@ -80,7 +82,8 @@ interface extension {
 `call` 约束：宿主在派发前校验（1）插件 Running（2）`action` 在 manifest
 declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 值都必须是
 **JSON 字符串**（宿主把成功值 parse 成 JSON 对象返回给调用方；`Err` 原样进入
-错误信息）。
+错误信息）。WASM 插件由 guest 实现 `call`；builtin 插件由宿主预置实现，
+没有 guest 实例。
 
 ## 2. manifest v2 字段与校验
 
@@ -96,9 +99,11 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
   `[targets.android]` 同形，仅作运行目标声明、宿主不做硬门禁——Console
   壳按当前设备应用过滤插件入口（不命中不显示，`*` 恒显示），快照与
   inspect 响应把空声明归一为 `["*"]` 透传。
-- `entry`：`.wasm` 后缀、不得指向 `manifest.toml`；zip 内必须存在且 ≥4 字节、
-  `\0asm` magic。builtin（`[execution] kind="builtin"` + `builtin_id`）必须
+- `entry`：仅 `kind="wasm"` 使用；`.wasm` 后缀、不得指向 `manifest.toml`；zip
+  内必须存在且 ≥4 字节、`\0asm` magic。builtin（`[execution] kind="builtin"` + `builtin_id`）必须
   **没有** `entry`，且包内不得携带 `plugin.wasm`（防伪装执行类型）。
+- 当前服务端静态注册的 builtin id 为 `gamer.video`；下载的 `.gplugin` 不能新增
+  builtin 实现。它是无 guest 的宿主扩展，Media/Recording 机制由 Core 提供。
 - `[host_api]` 九域：`device/vision/input/touch/resource/run/runtime/log/media`，
   值为 SemVer range；宿主当前全域 1.0.0；不满足在安装期返回
   `unsupported_host_api`（required/supported 结构化字段）。
@@ -126,8 +131,13 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
   （gamer.yaml 的 `template.create_from_frame` 等，surface `native/rest/
   frontend`）。其他插件/前端在调用前据此查询——**动作存在 ≠ 可调用**，
   分发时仍须目标 Running + 公开集合门禁 + 权限/上下文校验。
-- 跨插件调用统一走 `POST /api/extensions/:id/call`（目标必须 Running），
-  不为每一组插件增加专用 ID 分支；不做分布式 RPC/服务发现/消息总线。
+- 浏览器/管理员调用 `POST /api/extensions/:id/call` 时，调用方是已认证的
+  用户会话；目标必须 Running，且请求不会通过 JSON `caller` 字段获得插件身份。
+- 插件互调走宿主内部的受控 `ExtensionService::call_extension_from_plugin` seam：
+  caller 从真实运行实例取得，caller/target 都必须 Running，动作清单的
+  `caller` 必须匹配；带 Package 写入的动作必须让 `package_id` 与宿主传入的
+  `content_package` 完全一致。当前没有明确 caller 契约的 declarative 动作不
+  自动开放。不为此增加分布式 RPC、服务发现或消息总线。
 
 ## 3. 权限闭集（19 项，默认拒绝）
 
@@ -138,8 +148,10 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 - 14 项稳定：`device.read` `device.app` `vision.match` `vision.color`
   `input.tap` `input.swipe` `input.key` `input.text` `touch` `resource.read`
   `run.submit` `run.control` `runtime.sleep` `log.write`；
-- 5 项实验（media.*，WIT 未挂 world，guest 当前不可消费）：`media.read`
-  `media.import` `media.record` `media.write` `media.events.read`；
+- 5 项 `media.*` 是 Core Media/Recording 机制域的保留权限目录，由 builtin
+  `gamer.video` manifest 声明；public `extension-host` 不导入 `media`，普通
+  third-party WASM guest 当前不能直接消费：`media.read` `media.import`
+  `media.record` `media.write` `media.events.read`；
 - 显式禁区（声明即拒，不可授予）：`filesystem*` `network*` `shell*`
   `process*` `device.shell*`。
 
@@ -155,9 +167,9 @@ declarative 按钮集合内（否则 400 `CallRejected`）。成功值与 `Err` 
 | `POST /api/extensions` | 安装（zip 字节）；自动 enable→start（启动失败降级 Enabled + last_error）；权限增量需确认头 |
 | `POST /api/extensions/:id/update` | 装新版本并激活（Running 拒绝）；版本回退 = 卸载后重装旧归档（历史版本仅展示） |
 | `POST /api/extensions/:id/enable|disable` | 用户生命周期（V1 收敛：enable = 启用意图 + 直接启动，幂等；可带 `{app_context}`，keymap 另支持 `profile`；disable 运行中自动 stop；`/start` `/stop` `/activate` 细粒度端点已删除，内部保留原语） |
-| `POST /api/extensions/:id/call` | `{action, values}` → 公开动作集合门禁（declarative 按钮白名单 ∪ 原生动作清单）→ 常驻实例 `call` / 原生实现；返回 JSON |
+| `POST /api/extensions/:id/call` | `{action, values}` → 公开动作集合门禁（declarative 按钮白名单 ∪ 原生动作清单）→ WASM 常驻实例 `call` / builtin 宿主实现；返回 JSON |
 | `GET /api/extensions/:id/capabilities` | 能力发现：`{id, state, running, actions}` 公开动作清单（跨插件调用前查询，简化计划 Phase 4） |
-| `DELETE /api/extensions/:id/:version` | 卸载（Running 拒绝；被运行中插件必需依赖引用时拒绝；最后一版才清状态；不删 Package 数据） |
+| `DELETE /api/extensions/:id/:version` | 卸载（active 版本 Running 时拒绝；被运行中插件必需依赖引用时拒绝；非 active 旧版本可直接删除；最后一版才清状态；不删 Package 数据） |
 | `GET /api/extensions` | 列表 + `runtime_available` + UI 贡献注册表 + 各插件 `targets.android`（空声明归一 `["*"]`）+ 依赖实时状态 `dependencies[{id,version_req,required,installed,version,state,satisfied,note}]` |
 | `GET /api/extensions/management` | 管理视图（执行形态/权限/宿主 API/依赖任务） |
 | `GET /api/extensions/ui` 、`GET /api/extensions/:id/ui/*path` | UI 贡献注册表 / iframe 资产 |

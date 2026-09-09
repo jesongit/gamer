@@ -1,14 +1,5 @@
 # hello — 最小 Gamer 第三方插件示例
 
-> ⚠️ **当前宿主基线限制（2026-09-07）**：服务端通用 extension-host 运行时
-> 以 async 链接 import、以同步入口调用 guest，任何**声明了 import** 的插件
-> （即任何调用 Host API 的插件）在 start 时会触发 trap 并使宿主进程 abort，
-> 重启后 reconcile 还会再次 start 形成**启动循环崩溃**，需手工清数据目录。
-> 这是宿主侧缺陷（guest 侧契约用法正确，宿主修复后本示例无需改动即可运行），
-> 详情与复现记录见 `docs/evidence/phase3_sdk_examples.md`。在该缺陷修复前，
-> 请不要在长期运行的服务上安装本示例；完整可运行的零 import 模板见
-> `../echo-minimal`。
-
 一个能真实安装、运行、调用的完整插件，全部源码只有三个你关心的文件：
 `manifest.toml`（插件清单）+ `src/lib.rs`（WASM guest，约 180 行）+
 `src/bin/componentize.rs`（打包后处理，可直接照抄）。另有一份随示例走的
@@ -83,9 +74,9 @@ curl -s -b cookies.txt -X POST "$BASE/api/extensions" \
   -H 'x-gamer-permission-confirm: true' \
   --data-binary @dist/com.example.hello-1.0.0.gplugin
 
-# 停止 → 带 app_context 重启（把数据上下文指向一个 Package）
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/stop"
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/start" \
+# 禁用 → 带 app_context 启用（enable 会直接启动，把数据上下文指向一个 Package）
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/disable"
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/enable" \
   -H 'Content-Type: application/json' \
   -d '{"app_context":{"device_id":"selftest","android_package":"com.example.app","content_package":"hello-data"}}'
 
@@ -114,10 +105,10 @@ curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/call" \
 # 插件日志可在 Core 日志面板 / GET /api/logs 看到（source 为插件日志）
 ```
 
-卸载（Running 先 stop；插件 Package 私有数据默认保留）：
+卸载（Running 先 disable；插件 Package 私有数据默认保留）：
 
 ```sh
-curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/stop"
+curl -s -b cookies.txt -X POST "$BASE/api/extensions/com.example.hello/disable"
 curl -s -b cookies.txt -X DELETE "$BASE/api/extensions/com.example.hello/1.0.0"
 ```
 
