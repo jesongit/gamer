@@ -45,7 +45,6 @@ const BUILTIN_KEYS: &[&str] = &["KeyW", "KeyA", "Space", "KeyE"];
 
 #[derive(Default)]
 struct GuestState {
-    mouse_left: bool,
     gamepad_axis: bool,
     /// profile 解析结果：key selector → 规则。None = 未提供 profile。
     rules: Option<std::collections::HashMap<String, Rule>>,
@@ -333,7 +332,6 @@ impl Guest for KeymapGuest {
             .lock()
             .map_err(|_| "guest state poisoned".to_string())?;
         *guest_state = GuestState {
-            mouse_left: false,
             gamepad_axis: false,
             rules: match profile.as_deref() {
                 Some(content) if content.trim().is_empty() => None,
@@ -364,35 +362,10 @@ impl Guest for KeymapGuest {
                     None => builtin_actions(&event),
                 }
             }
-            // 鼠标拖动 / 手柄保持内置默认行为。
-            EventKind::MouseDown => {
-                if event.button == 0 {
-                    guest_state.mouse_left = true;
-                    vec![DeviceAction::TouchBegin(
-                        exports::gamer::keymap::keymap::TouchBegin {
-                            slot: 3,
-                            point: exports::gamer::keymap::keymap::Point {
-                                x: 0.25,
-                                y: 0.50,
-                            },
-                        },
-                    )]
-                } else {
-                    Vec::new()
-                }
-            }
-            EventKind::MouseMove if guest_state.mouse_left => {
-                vec![DeviceAction::TouchMove(
-                    exports::gamer::keymap::keymap::TouchMove {
-                        slot: 3,
-                        point: exports::gamer::keymap::keymap::Point { x: 0.50, y: 0.50 },
-                    },
-                )]
-            }
-            EventKind::MouseUp if event.button == 0 && guest_state.mouse_left => {
-                guest_state.mouse_left = false;
-                vec![DeviceAction::TouchEnd(3)]
-            }
+            // 当前 keymap profile 只声明键盘映射；鼠标坐标由宿主按原始
+            // InputEvent 直通 scrcpy。这里不能生成固定坐标的触控动作，
+            // 否则任意点击都会被改写到错误位置，拖动也会跳到屏幕中心。
+            EventKind::MouseDown | EventKind::MouseMove | EventKind::MouseUp => Vec::new(),
             EventKind::GamepadButton if event.index == 0 => {
                 vec![DeviceAction::Key(KeyAction {
                     code: 62,

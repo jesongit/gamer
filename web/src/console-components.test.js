@@ -98,9 +98,9 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar.lastIndexOf('class="tb-sep"')).toBe(sep)
   })
 
-  it('§27 Android 应用控制收在左侧设备工具条：应用下拉选目标（选中即存配置），启动走设备包名', () => {
-    // 启动应用：设备配置的应用包名（launchGame），与 Package 数据上下文无关
-    expect(consoleImpl).toContain("sendControl({ type: 'start_app', app: androidPkg })")
+  it('§27 Android 应用控制收在左侧设备工具条：应用下拉选目标（选中即存配置），启动重启设备包名应用', () => {
+    // 工具栏启动：+ 前缀要求先 force-stop，再冷启动已运行的应用。
+    expect(consoleImpl).toContain("sendControl({ type: 'start_app', app: `+${androidPkg}` })")
     // 停止应用：DataChannel webrtc/mod.rs 与 REST parse_ctl 均已暴露 stop_app
     //（am force-stop，仅无前缀安全包名），收进「功能」下拉，与启动同为设备区操作
     expect(consoleImpl).toContain("sendControl({ type: 'stop_app', app: androidPkg })")

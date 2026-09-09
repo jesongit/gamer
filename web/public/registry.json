@@ -10,8 +10,8 @@
                         "description":  "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
                         "publisher":  "gamer.dev",
                         "download_url":  "/plugins/gamer.keymap-1.0.1.gplugin",
-                        "sha256":  "b11511e3c3f64e4388ae6ed68b18c3421aa3f19984671aadaa38214370e6650e",
-                        "size":  99328,
+                        "sha256":  "589ba60fe830470b91fd78dd513f4e2567d8c5bbb7cc7d49993bd73bf07122f3",
+                        "size":  99183,
                         "permissions":  [
                                             "input.tap",
                                             "input.swipe",

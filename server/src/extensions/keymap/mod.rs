@@ -2104,11 +2104,23 @@ mod wasm_component_tests {
             InputEvent::key_down("Space"),
             InputEvent::key_down("KeyE"),
         ] {
+            let mouse_event = matches!(
+                &event,
+                InputEvent::MouseDown { .. }
+                    | InputEvent::MouseMove { .. }
+                    | InputEvent::MouseUp { .. }
+            );
             let result = service
                 .dispatch_keymap_input(device.clone(), screen, event, None)
                 .await
                 .unwrap();
-            assert!(result.consume, "fixture action should consume input");
+            assert_eq!(
+                result.consume, !mouse_event,
+                "mouse input must pass through"
+            );
+            if mouse_event {
+                assert!(result.actions.is_empty());
+            }
         }
         let passed = service
             .dispatch_keymap_input(
@@ -2141,7 +2153,7 @@ mod wasm_component_tests {
                 .iter()
                 .filter(|event| event.starts_with("touch.begin:"))
                 .count(),
-            4
+            3
         );
         assert!(events.iter().any(|event| event.starts_with("touch.move:")));
         assert_eq!(
@@ -2149,7 +2161,7 @@ mod wasm_component_tests {
                 .iter()
                 .filter(|event| event == &&"touch.end".to_string())
                 .count(),
-            4
+            3
         );
 
         // Stop must clean a live WASM-owned contact before the component task
@@ -2171,7 +2183,7 @@ mod wasm_component_tests {
                 .iter()
                 .filter(|event| *event == "touch.end")
                 .count()
-                >= 5
+                >= 4
         );
 
         assert!(service

@@ -21,7 +21,7 @@
     <!-- 录制入口：设备下拉 + 3s 轮询活动会话驱动 开始/停止/取消 -->
     <div class="record-box">
       <div class="record-row">
-        <select v-model.number="deviceId" class="select record-device" data-testid="record-device" :disabled="!devices.length">
+        <select v-model="deviceId" class="select record-device" data-testid="record-device" :disabled="!devices.length">
           <option v-if="!devices.length" :value="0">暂无设备（先在投屏页添加）</option>
           <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name || d.id }}</option>
         </select>
@@ -92,7 +92,9 @@ const props = defineProps({
 const emit = defineEmits(['select', 'refresh', 'changed', 'recording-finished'])
 
 const devices = devicesData
-const deviceId = ref(0)
+// 设备 id 是 UUID 字符串；不能使用 v-model.number，否则以数字开头的 UUID
+// 会被 Vue 的 parseFloat 截断（例如 "831d..." → 831）。
+const deviceId = ref('')
 const fileInput = ref(null)
 const importing = ref(false)
 const importingName = ref('')

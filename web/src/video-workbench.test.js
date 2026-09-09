@@ -683,6 +683,21 @@ describe('MediaLibrary 素材库区', () => {
     expect(w.emitted('changed')).toHaveLength(1)
     w.unmount()
   })
+
+  it('录制设备 UUID 以数字开头时仍按完整字符串提交', async () => {
+    const deviceId = '831d44c0e68e44b9b55f47b4c541b51e'
+    devicesData.value = [{ id: deviceId, name: '设备' }]
+    videoApi.recordingStart.mockResolvedValue({ id: 'rec-uuid', device_id: deviceId, state: 'recording' })
+
+    const w = mount(MediaLibrary, { props: { mediaList: MEDIA } })
+    await w.find('[data-testid="record-device"]').setValue(deviceId)
+    await flushPromises()
+    await w.find('[data-testid="record-start"]').trigger('click')
+    await flushPromises()
+
+    expect(videoApi.recordingStart).toHaveBeenCalledWith(deviceId)
+    w.unmount()
+  })
 })
 
 // ---------------------------------------------------------------------------

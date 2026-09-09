@@ -493,10 +493,12 @@ export function useConsoleDeviceManager({
     // 与 Package 数据上下文无关）
     const androidPkg = (current.value?.pkg || '').trim()
     if (!androidPkg) return toast('未配置应用，请先在工具条「应用」下拉选择', 'warn')
-    sendControl({ type: 'start_app', app: androidPkg })
+    // 工具栏「启动」定义为重启：+ 前缀让 scrcpy 先 force-stop 再冷启动，
+    // 避免应用已在运行时只切回前台而不重置状态。
+    sendControl({ type: 'start_app', app: `+${androidPkg}` })
     if (store.deviceId) appStartedDevices.add(store.deviceId)
     appHintDismissed.value = true
-    toast(`正在启动 ${androidPkg}…`, 'info')
+    toast(`正在重启 ${androidPkg}…`, 'info')
   }
 
   /** 停止应用（plan §27）：am force-stop 设备配置的 Android 包名 */
