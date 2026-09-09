@@ -5,8 +5,9 @@
 //! Schema（名称/描述/参数/返回/权限）是执行校验、entrypoint 提示与前端
 //! 参数表单的共同来源；新增函数只改本表 + 一个 handler，不动解释器。
 //!
-//! Package 函数（`functions/<分类>.yaml`）是另一种来源，由 YAML 写成、
-//! 解释器本地执行；两种来源调用语法一致，同名即冲突（组合期拒绝）。
+//! Package 函数（`automations/_function*.yaml`，简化计划 Phase 1 前缀识别）
+//! 是另一种来源，由 YAML 写成、解释器本地执行；两种来源调用语法一致，
+//! 同名即冲突（组合期拒绝）。
 
 use serde_json::{json, Value};
 
@@ -166,7 +167,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "find",
-                description: "查找模板；未找到返回 null（timeout>0 时轮询）",
+                description: "单次模板匹配；未找到返回 null（等待轮询用 wait_find）",
                 params: vec![
                     p("template", ParamType::Template, true, None, "模板短名"),
                     p(
@@ -175,20 +176,6 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
                         false,
                         Some(json!(0.8)),
                         "匹配阈值 0..1",
-                    ),
-                    p(
-                        "timeout",
-                        ParamType::Duration,
-                        false,
-                        Some(json!("0ms")),
-                        "轮询上限；0 = 只试一次",
-                    ),
-                    p(
-                        "interval",
-                        ParamType::Duration,
-                        false,
-                        Some(json!("100ms")),
-                        "轮询间隔",
                     ),
                     p(
                         "region",

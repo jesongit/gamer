@@ -3,22 +3,26 @@
 //! Core [`crate::resources::PackageStore`] 只懂 PackageResource 三元组 +
 //! 字节/文本 + 内容版本短码 + 原子写；本模块把 YAML 内容语义挂回通用层
 //! （gamer.yaml 的插件数据根 = `packages/<pkg>/plugins/gamer.yaml/`，内部
-//! 子目录布局 automations/ functions/ templates/ 归插件定义）：
+//! 子目录布局 automations/ templates/ 归插件定义）：
 //!
 //! - [`YamlResourceHandler`]（按 plugin-id 注册）：保存/更新前的 V1 结构校验
-//!   （`automations/` → `syntax::parse_script`；`functions/` →
-//!   `syntax::parse_function_library`；`templates/` → 字节侧 8-bit 灰度 PNG
+//!   （`automations/` → 文件名 `_function` 前缀 = `syntax::parse_function_library`，
+//!   其余 = `syntax::parse_script`；`templates/` → 字节侧 8-bit 灰度 PNG
 //!   归一化）+ 函数名清单注记 + 模板重命名前的引用同步改写（AST 改写，
 //!   失败整体回滚；不可解析的存量源跳过不阻塞重命名）。
 //!
+//! 函数库与自动化共用 automations/ 资源空间（简化计划 Phase 1）：文件名以
+//! `_function` 开头且以 `.yaml` 结尾 = 函数库（[`is_function_library_path`]），
+//! 其余 `.yaml` = 自动化。旧 `functions/` 专属目录已删除，保存钩子显式拒绝。
+//!
 //! 保存边界只做**结构**校验；函数存在性/参数匹配在运行前的注册表组合期
-//! 校验（计划 Phase 3.4：执行前明确提示）。
+//! 校验（runner_adapter::compose_function_library：执行前明确提示）。
 //!
 //! 组合根引导期调用 [`register_resource_handlers`]；未注册时 Core 保存不做
 //! 内容校验（裸 Core 语义）。
 //!
 //! 资源 id 形态（全扩展统一）：`<package-id>/<名>`（首段 = Package id，目录
-//! 由本模块按资源类别补全——自动化脚本/函数寻址不含目录段，模板显式带
+//! 由本模块按资源类别补全——自动化脚本/函数库寻址不含目录段，模板显式带
 //! `templates/`）；REST 侧资源路径 = 插件目录内相对路径（含目录段）。
 
 use std::borrow::Cow;
@@ -32,13 +36,26 @@ use crate::resources::{
     PackageStore, ResourceEntry, ResourceHandler, SaveBinaryValidation, SaveValidation,
 };
 
+/// 函数库文件识别（简化计划 Phase 1 §3.2）：文件名（basename）以小写
+/// `_function` 开头且以 `.yaml` 结尾 → 函数库；其余 `.yaml` → 自动化。
+/// 只用于资源发现，不新增 `kind` 字段、不区分大小写别名、不接受 `.yml`。
+pub(crate) fn is_function_library_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.starts_with("_function") && name.ends_with(".yaml")
+}
+
+/// 旧 `functions/` 专属目录已随 Phase 1 删除；写路径显式拒绝（无兼容层）。
+pub(crate) fn is_removed_functions_dir(path: &str) -> bool {
+    path == "functions" || path.starts_with("functions/")
+}
+
 /// 注册 gamer.yaml 的资源内容钩子（组合根引导期调用）。
 pub fn register_resource_handlers(store: &PackageStore) {
     store.register_handler(YAML_EXTENSION_ID, Arc::new(YamlResourceHandler));
 }
 
 // ---------------------------------------------------------------------------
-// 读取助手：`<pkg>/<rel>` 资源 id → automations/ / functions/ 插件路径
+// 读取助手：`<pkg>/<rel>` 资源 id → automations/ 插件路径
 //（runner_adapter / task_params / entrypoint_descriptor / timer_yaml 共用）
 // ---------------------------------------------------------------------------
 
@@ -48,24 +65,13 @@ fn split_resource_id(id: &str) -> Option<(String, String)> {
     Some((pkg.trim().to_string(), rel.trim().to_string()))
 }
 
-/// 自动化脚本资源读取（`automations/<rel>`）。
+/// 自动化脚本/函数库资源读取（`automations/<rel>`；两类文件共用同一空间）。
 pub(crate) fn script_entry(
     store: &PackageStore,
     id: &str,
 ) -> anyhow::Result<Option<ResourceEntry>> {
     match split_resource_id(id) {
         Some((pkg, rel)) => store.read_text(&pkg, YAML_EXTENSION_ID, &format!("automations/{rel}")),
-        None => Ok(None),
-    }
-}
-
-/// 函数库文件读取（`functions/<rel>`）。
-pub(crate) fn function_entry(
-    store: &PackageStore,
-    id: &str,
-) -> anyhow::Result<Option<ResourceEntry>> {
-    match split_resource_id(id) {
-        Some((pkg, rel)) => store.read_text(&pkg, YAML_EXTENSION_ID, &format!("functions/{rel}")),
         None => Ok(None),
     }
 }
@@ -99,11 +105,24 @@ struct YamlResourceHandler;
 
 impl ResourceHandler for YamlResourceHandler {
     fn validate_save(&self, req: SaveValidation<'_>) -> Result<(), serde_json::Value> {
-        if let Some(_rel) = req.path.strip_prefix("automations/") {
-            return validate_v1_script(req.content);
+        if let Some(rel) = req.path.strip_prefix("automations/") {
+            // 前缀识别（Phase 1）：`_function*.yaml` = 函数库（functions: 包装），
+            // 其余 = 自动化脚本。识别只看文件名，无 kind 字段。
+            return if is_function_library_path(rel) {
+                validate_function_library_file(req.store, req.package, req.path, req.content)
+            } else {
+                validate_v1_script(req.content)
+            };
         }
-        if let Some(_rel) = req.path.strip_prefix("functions/") {
-            return validate_function_library_file(req.store, req.package, req.path, req.content);
+        if is_removed_functions_dir(req.path) {
+            // 旧专属目录已删除：显式结构化拒绝（无静默兼容、无自动迁移）。
+            return Err(json!([
+                {
+                    "code": "yaml.functions.dir.removed",
+                    "path": req.path,
+                    "message": "functions/ 专属目录已删除：函数库请保存为 automations/_function.yaml（或 _function*.yaml 手动拆分）",
+                }
+            ]));
         }
         // templates/ 等其余路径不做文本内容校验（字节内容由下方二进制钩子归一化）
         Ok(())
@@ -132,12 +151,15 @@ impl ResourceHandler for YamlResourceHandler {
     }
 
     fn annotate(&self, entries: &[(String, String)]) -> serde_json::Map<String, serde_json::Value> {
-        // 只注记函数库文件（函数名清单 + 文件短路径）
+        // 只注记 automations/ 内的函数库文件（函数名清单 + 文件短路径）
         let mut out = serde_json::Map::new();
         for (path, content) in entries {
-            let Some(rel) = path.strip_prefix("functions/") else {
+            let Some(rel) = path.strip_prefix("automations/") else {
                 continue;
             };
+            if !is_function_library_path(rel) {
+                continue;
+            }
             let short = rel
                 .trim()
                 .trim_end_matches(".yaml")
@@ -168,9 +190,9 @@ impl ResourceHandler for YamlResourceHandler {
         old_path: &str,
         new_path: &str,
     ) -> anyhow::Result<()> {
-        // 模板重命名 → 仅同步改写当前包 automations/ 与 functions/ 中的模板引用；
-        // 模板文件本身的移动由 PackageStore::rename_resource 在钩子之后原子执行。
-        // 非模板路径不处理。
+        // 模板重命名 → 仅同步改写当前包 automations/（脚本 + 函数库）中的模板
+        // 引用；模板文件本身的移动由 PackageStore::rename_resource 在钩子之后
+        // 原子执行。非模板路径不处理。
         let _ = plugin;
         if let (Some(old_name), Some(new_name)) = (
             old_path.strip_prefix("templates/"),
@@ -219,8 +241,9 @@ pub(crate) fn template_short_name(name: &str) -> String {
     }
 }
 
-/// 重命名模板前，同步改写当前包 automations/ 与 functions/ 中的模板引用（仅引用，
-/// 模板文件本身由调用方 [`PackageStore::rename_resource`] 移动）。
+/// 重命名模板前，同步改写当前包 automations/（脚本 + `_function*.yaml` 函数库）
+/// 中的模板引用（仅引用，模板文件本身由调用方 [`PackageStore::rename_resource`]
+/// 移动）。
 ///
 /// 引用迁移走 V1 AST 改写（`syntax::rename_template_source` /
 /// `syntax::rename_template_in_function_library`），不做全局文本替换，
@@ -238,41 +261,29 @@ fn rewrite_template_references(
     // (path, 原内容, 新内容)
     let mut rewrites: Vec<(String, String, String)> = Vec::new();
 
-    for script in store.list(package, YAML_EXTENSION_ID, "automations")? {
-        let Some(content) = script.content.as_deref() else {
+    for entry in store.list(package, YAML_EXTENSION_ID, "automations")? {
+        let Some(content) = entry.content.as_deref() else {
             continue; // 非 UTF-8 附件不参与引用改写
         };
-        // 不可解析的存量源（旧 v3/坏语法）跳过——它们本就无法运行，不阻塞重命名
-        let Ok(rewritten) =
+        let rel = entry
+            .path
+            .strip_prefix("automations/")
+            .unwrap_or(&entry.path);
+        let rewritten = if is_function_library_path(rel) {
+            // 不可解析的存量函数库解析失败 → 跳过（与脚本侧 skip 语义一致）
+            syntax::rename_template_in_function_library(
+                content, old_name, &old_short, new_name, &new_short,
+            )
+            .ok()
+            .flatten()
+        } else {
+            // 不可解析的存量源（旧 v3/坏语法）跳过——它们本就无法运行，不阻塞重命名
             syntax::rename_template_source(content, old_name, &old_short, new_name, &new_short)
-        else {
-            continue;
+                .ok()
+                .flatten()
         };
         if let Some((content, _changed)) = rewritten {
-            rewrites.push((
-                script.path.clone(),
-                script.content.clone().unwrap(),
-                content,
-            ));
-        }
-    }
-
-    for function in store.list(package, YAML_EXTENSION_ID, "functions")? {
-        let Some(content) = function.content.as_deref() else {
-            continue;
-        };
-        // 不可解析的存量函数库解析失败 → 跳过（与脚本侧 skip 语义一致）
-        let rewritten = syntax::rename_template_in_function_library(
-            content, old_name, &old_short, new_name, &new_short,
-        )
-        .ok()
-        .flatten();
-        if let Some((content, _changed)) = rewritten {
-            rewrites.push((
-                function.path.clone(),
-                function.content.clone().unwrap(),
-                content,
-            ));
+            rewrites.push((entry.path.clone(), entry.content.clone().unwrap(), content));
         }
     }
 
@@ -346,7 +357,7 @@ mod rename_tests {
             .write_text(
                 "com.test.app",
                 YAML_EXTENSION_ID,
-                "functions/common.yaml",
+                "automations/_function.yaml",
                 "functions:\n  login:\n    run:\n      - wait_find:\n          template: old.png\n",
                 None,
                 false,
@@ -371,7 +382,7 @@ mod rename_tests {
         assert!(script.contains("template: new"), "脚本引用改写为短名");
         assert!(script.contains("old.png 文本不应改"));
         let function =
-            std::fs::read_to_string(plugin_root(&dir).join("functions/common.yaml")).unwrap();
+            std::fs::read_to_string(plugin_root(&dir).join("automations/_function.yaml")).unwrap();
         assert!(function.contains("template: new"));
     }
 
@@ -403,8 +414,9 @@ mod rename_tests {
         assert!(legacy.contains("old.png"), "不可解析的存量源保持原样");
     }
 
-    /// 保存边界：V1 直存；旧 v3 源报 yaml.version.removed；函数文件必须带
-    /// functions: 包装。
+    /// 保存边界：V1 直存；旧 v3 源报 yaml.version.removed；automations/ 内
+    /// `_function*.yaml` 按函数库（functions: 包装）校验；旧 functions/ 目录
+    /// 显式拒绝。
     #[test]
     fn saves_are_v1_only() {
         let (store, _dir) = temp_store("save");
@@ -427,33 +439,73 @@ mod rename_tests {
             })
             .unwrap_err();
         assert_eq!(err[0]["code"], "yaml.version.removed");
+
+        // _function 前缀 → 函数库校验（必须有 functions: 包装）
+        let err = store
+            .validate_save(crate::resources::SaveValidation {
+                package: "com.test.app",
+                plugin: YAML_EXTENSION_ID,
+                path: "automations/_function.yaml",
+                content: "greet:\n  run: []\n",
+                store: &store,
+            })
+            .unwrap_err();
+        assert_eq!(err[0]["code"], "yaml.functions.missing", "{err}");
+
+        // 旧 functions/ 专属目录 → 显式拒绝（已删除，无兼容层）
         let err = store
             .validate_save(crate::resources::SaveValidation {
                 package: "com.test.app",
                 plugin: YAML_EXTENSION_ID,
                 path: "functions/lib.yaml",
-                content: "greet:\n  run: []\n",
+                content: "functions:\n  greet:\n    run: []\n",
                 store: &store,
             })
             .unwrap_err();
-        assert_eq!(err[0]["code"], "yaml.functions.missing");
+        assert_eq!(err[0]["code"], "yaml.functions.dir.removed", "{err}");
 
-        // 函数名清单注记
+        // 函数名清单注记（automations/ 内的函数库文件）
         store
             .write_text(
                 "com.test.app",
                 YAML_EXTENSION_ID,
-                "functions/lib.yaml",
+                "automations/_function.yaml",
                 "functions:\n  greet:\n    run:\n      - return: true\n",
                 None,
                 false,
             )
             .unwrap();
         let list = store
-            .list("com.test.app", YAML_EXTENSION_ID, "functions")
+            .list("com.test.app", YAML_EXTENSION_ID, "automations")
             .unwrap();
-        assert_eq!(list[0].meta["functions"][0], "greet");
-        assert_eq!(list[0].meta["file"], "lib");
+        let library = list
+            .iter()
+            .find(|e| e.path.ends_with("_function.yaml"))
+            .unwrap();
+        assert_eq!(library.meta["functions"][0], "greet");
+        assert_eq!(library.meta["file"], "_function");
+        // 普通脚本不注记函数清单
+        store
+            .write_text(
+                "com.test.app",
+                YAML_EXTENSION_ID,
+                "automations/daily.yaml",
+                "run:\n  - log: ok\n",
+                None,
+                false,
+            )
+            .unwrap();
+        let list = store
+            .list("com.test.app", YAML_EXTENSION_ID, "automations")
+            .unwrap();
+        let script = list
+            .iter()
+            .find(|e| e.path.ends_with("daily.yaml"))
+            .unwrap();
+        assert!(
+            script.meta.get("functions").is_none(),
+            "自动化不注记函数清单"
+        );
     }
 
     /// 字节钩子：templates/ 上传彩色 PNG → 落盘 8-bit 灰度归一化；

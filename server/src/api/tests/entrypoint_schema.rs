@@ -145,11 +145,11 @@ async fn entrypoint_schema_endpoint_serves_v1_and_rejects_legacy_sources() {
         "params:\n  secret:\n    type: string\n    required: true\nrun:\n  - log: $secret\n",
     )
     .await;
-    // V1 函数库直写分区
+    // V1 函数库直写分区（Phase 1：函数库存 automations/ 内的 _function*.yaml）
     write_partition_file(
         &t,
-        "functions",
-        "lib.yaml",
+        "automations",
+        "_function.yaml",
         "functions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
     );
 
@@ -184,8 +184,8 @@ async fn entrypoint_schema_endpoint_serves_v1_and_rejects_legacy_sources() {
     assert_eq!(status, StatusCode::OK, "{v1req}");
     assert_eq!(v1req["schema"][0]["required"], serde_json::json!(true));
 
-    // V1 函数库 entrypoint（functions: 包装）
-    let (status, greet) = describe_entrypoint(&t, &sid, "com.test.app/lib.yaml#greet").await;
+    // V1 函数库 entrypoint（<pkg>#<函数名>，统一命名空间按名寻址）
+    let (status, greet) = describe_entrypoint(&t, &sid, "com.test.app#greet").await;
     assert_eq!(status, StatusCode::OK, "{greet}");
     assert_eq!(greet["kind"], "function");
     assert_eq!(greet["schema"][1]["type"], "integer");
@@ -246,8 +246,8 @@ async fn v1_manual_runs_flow_through_param_binding() {
     // V1 函数库直写分区（函数运行参数从目标函数声明解析）
     write_partition_file(
         &t,
-        "functions",
-        "lib.yaml",
+        "automations",
+        "_function.yaml",
         "functions:\n  greet:\n    params:\n      who:\n        type: string\n        default: \"玩家\"\n      times:\n        type: integer\n        default: 2\n    run:\n      - log: $who\n",
     );
 
@@ -342,9 +342,9 @@ async fn v1_manual_runs_flow_through_param_binding() {
         &sid,
         "/api/runs",
         dispatch_body_for(
-            "com.test.app/lib.yaml#greet",
+            "com.test.app#greet",
             "d6",
-            serde_json::json!({"function": "greet", "args": {"who": "函数"}}),
+            serde_json::json!({"args": {"who": "函数"}}),
         ),
     )
     .await;

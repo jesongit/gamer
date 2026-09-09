@@ -76,9 +76,9 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     seed_device(&t, "d1", "com.example.game").await;
     let sid = first_cookie_pair(&cookie_of(&login(&t.app).await));
 
-    // 建函数库（V1 functions: 包装 + 参数声明）
+    // 建函数库（V1 functions: 包装 + 参数声明；Phase 1 起函数库存 automations/_function.yaml）
     let body = serde_json::json!({
-        "name": "common",
+        "name": "_function.yaml",
         "content": "functions:
   login:
     params:
@@ -94,19 +94,30 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     });
     let name = body["name"].as_str().unwrap().to_string();
     let content = body["content"].as_str().unwrap().to_string();
-    let resp = put_package_text(&t, &sid, "com.test.app", "gamer.yaml", &format!("functions/{name}.yaml"), &content).await;
+    let resp = put_package_text(&t, &sid, "com.test.app", "gamer.yaml", &format!("automations/{name}"), &content).await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
 
-    // 未知函数文件 → 结构化 not_found（runner 边界判定，400 透传）
+    // 未知函数 → 结构化 not_found（组合注册表按名寻址，runner 边界判定，400 透传）
     let resp = post_json(
         &t,
         &sid,
         "/api/runs",
-        dispatch_body("com.test.app/nope.yaml#login", serde_json::json!({})),
+        dispatch_body("com.test.app#nope", serde_json::json!({})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert_eq!(json_body(resp).await["error"], "not_found");
+
+    // 带路径段的函数 entrypoint → 非法形态 400
+    let resp = post_json(
+        &t,
+        &sid,
+        "/api/runs",
+        dispatch_body("com.test.app/common.yaml#login", serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(resp).await["error"], "invalid_payload");
 
     // args 类型不符 → 400 + 结构化诊断
     let resp = post_json(
@@ -114,7 +125,7 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
         &sid,
         "/api/runs",
         dispatch_body(
-            "com.test.app/common.yaml#login",
+            "com.test.app#login",
             serde_json::json!({"args": {"fast": "不是布尔"}}),
         ),
     )
@@ -134,8 +145,8 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
         &sid,
         "/api/runs",
         dispatch_body(
-            "com.test.app/common.yaml#login",
-            serde_json::json!({"function": "login", "args": {"who": "路由"}}),
+            "com.test.app#login",
+            serde_json::json!({"args": {"who": "路由"}}),
         ),
     )
     .await;
@@ -178,13 +189,13 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
         &t,
         &sid,
         "/api/runs",
-        dispatch_body("com.test.app/common.yaml#login", serde_json::json!({})),
+        dispatch_body("com.test.app#login", serde_json::json!({})),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
     let j = json_body(resp).await;
     assert_eq!(j["error"], "device_busy");
-    assert_eq!(j["script_id"], "com.test.app/common.yaml#login");
+    assert_eq!(j["script_id"], "com.test.app#login");
 
     // 取消 → 202；终态 cancelled 可查询；活动期重复取消保持 202 幂等。
     let resp = post_json(

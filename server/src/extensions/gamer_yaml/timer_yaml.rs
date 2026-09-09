@@ -11,8 +11,9 @@
 //! 参数签名门禁已随 V1 简化删除。
 //!
 //! P11.6（POST /api/runs 统一执行入口）：手动/函数测试运行经同一 runner。
-//! `task_id` 为空 = 手动 ad-hoc 运行：`entrypoint` = `<pkg>/<脚本>.yaml` 或
-//! `<pkg>/<文件短路径>.yaml#<函数名>`，payload = `{args?, start_index?}`。
+//! `task_id` 为空 = 手动 ad-hoc 运行：`entrypoint` = `<pkg>/<脚本>.yaml`（脚本）
+//! 或 `<pkg>#<函数名>`（函数，简化计划 Phase 1 统一命名空间按名寻址），
+//! payload = `{args?, start_index?}`。
 //!
 //! P11.2（ADR-13）：runner 注册由扩展生命周期驱动（[`YamlTimerRunnerRegistrar`]）。
 
@@ -22,7 +23,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::core::RunRequest;
-use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
+use crate::extensions::gamer_yaml::resources::{is_function_library_path, script_entry};
 use crate::extensions::gamer_yaml::YAML_EXTENSION_ID;
 use crate::resources::PackageStore;
 use crate::run_manager::{FinishHook, RunManager, RunOutcome, RunSource, StartError};
@@ -98,10 +99,12 @@ fn script_exists(scripts: &PackageStore, script_id: &str) -> Result<bool, String
         .map_err(|error| error.to_string())
 }
 
-fn function_file_exists(scripts: &PackageStore, target: &str) -> Result<bool, String> {
-    function_entry(scripts, target)
-        .map(|entry| entry.is_some())
-        .map_err(|error| error.to_string())
+/// 脚本资源 id 中的文件相对路径段（`<pkg>/<rel>` → `<rel>`；无 `/` 时为原值）。
+fn entrypoint_rel(script_id: &str) -> &str {
+    script_id
+        .split_once('/')
+        .map(|(_, rel)| rel)
+        .unwrap_or(script_id)
 }
 
 #[async_trait]
@@ -121,10 +124,16 @@ impl TimerRunner for YamlTimerRunner {
             return self.submit_manual(request, on_complete).await;
         }
         let payload = payload_from_request(&request).map_err(TimerRunnerError::Invalid)?;
-        // 存在性先行：脚本缺失 → 依赖缺失（任务保留 enabled 原意）。
+        // 存在性先行：脚本缺失 → 依赖缺失（任务保留 enabled 原意）；函数库文件
+        // 不是合法任务目标（统一命名空间下函数无独立入口，定时任务只跑自动化）。
         // 参数按当前 Schema 宽松重绑（计划 Phase 4.2）：存活值保留、新增参数
         // 取默认值、被删参数丢弃、必填缺失/类型不符结构化报错（psig1 签名
         // 门禁已随 V1 删除）。
+        if is_function_library_path(entrypoint_rel(&payload.script_id)) {
+            return Err(TimerRunnerError::Invalid(
+                "函数库文件（automations/_function*.yaml）不能作为定时任务执行目标".into(),
+            ));
+        }
         match script_exists(&self.scripts, &payload.script_id) {
             Ok(true) => {}
             Ok(false) => {
@@ -224,7 +233,7 @@ impl TimerRunner for YamlTimerRunner {
     }
 }
 
-/// 手动运行 payload 视图：`{args?, start_index?, function?}`。
+/// 手动运行 payload 视图：`{args?, start_index?}`。
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 struct ManualPayload {
@@ -232,8 +241,6 @@ struct ManualPayload {
     args: Option<serde_json::Map<String, Value>>,
     #[serde(default)]
     start_index: Option<usize>,
-    #[serde(default)]
-    function: Option<String>,
 }
 
 fn invalid_detail(message: impl Into<String>, detail: serde_json::Value) -> TimerRunnerError {
@@ -275,28 +282,31 @@ impl YamlTimerRunner {
         let app = request.app.clone();
         let args: serde_json::Map<String, Value> = payload.args.clone().unwrap_or_default();
         let target = if let Some((base, func)) = entrypoint.clone().rsplit_once('#') {
-            let (pkg, file) = base.split_once('/').ok_or_else(|| {
-                invalid_detail(
-                    "非法函数目标 entrypoint",
+            // 函数目标（简化计划 Phase 1）：`<pkg>#<函数名>`——统一命名空间按名
+            // 寻址，定义文件可拆分/移动；base 不得再带路径段。
+            if base.contains('/') || func.trim().is_empty() {
+                return Err(invalid_detail(
+                    "函数 entrypoint 必须是 <pkg>#<函数名> 形态",
                     serde_json::json!({
                         "error": "invalid_payload", "entrypoint": entrypoint,
                     }),
-                )
-            })?;
-            let file = file
-                .trim()
-                .trim_end_matches(".yaml")
-                .trim_end_matches(".yml")
-                .to_string();
+                ));
+            }
             crate::extensions::gamer_yaml::run_target::RunTarget::Function {
-                pkg: pkg.to_string(),
-                file,
-                function: Some(payload.function.clone().unwrap_or_else(|| func.to_string())),
+                pkg: base.trim().to_string(),
+                function: func.trim().to_string(),
                 start_index: payload.start_index.unwrap_or(0),
             }
         } else {
+            let script_id = entrypoint.clone();
+            if is_function_library_path(entrypoint_rel(&script_id)) {
+                return Err(invalid_detail(
+                    "函数库文件（automations/_function*.yaml）不能作为脚本运行；函数请以 <pkg>#<函数名> 寻址",
+                    serde_json::json!({ "error": "invalid_payload", "entrypoint": entrypoint }),
+                ));
+            }
             crate::extensions::gamer_yaml::run_target::RunTarget::Script {
-                script_id: entrypoint.clone(),
+                script_id,
                 start_index: payload.start_index.unwrap_or(0),
             }
         };
@@ -325,40 +335,23 @@ impl YamlTimerRunner {
                     .map(|bound| bound.resolved)
                     .map_err(EarlyBindError::Bind)
                 }
-                T::Function {
-                    pkg,
-                    file,
-                    function,
-                    ..
-                } => {
-                    let target_id = format!("{pkg}/{file}.yaml");
-                    let content = function_entry(&scripts, &target_id)
-                        .map_err(|error| EarlyBindError::NotFound(error.to_string()))?
-                        .ok_or_else(|| EarlyBindError::NotFound("函数文件不存在".into()))?
-                        .content;
+                T::Function { pkg, function, .. } => {
                     let library =
-                        crate::extensions::gamer_yaml::syntax::parse_function_library(&content)
-                            .map_err(EarlyBindError::Parse)?;
-                    let name = match function {
-                        Some(name) => name.clone(),
-                        None => library
-                            .first()
-                            .map(|(name, _)| name.clone())
-                            .ok_or_else(|| {
-                                EarlyBindError::NotFound(format!(
-                                    "函数文件 {target_id} 未定义任何函数"
-                                ))
-                            })?,
-                    };
+                        crate::extensions::gamer_yaml::runner_adapter::compose_function_library(
+                            &scripts, pkg,
+                        )
+                        .map_err(|error| EarlyBindError::NotFound(error.to_string()))?;
                     let def = library
                         .iter()
-                        .find(|(entry, _)| entry == &name)
+                        .find(|(name, _)| name == function)
                         .map(|(_, def)| def)
                         .ok_or_else(|| {
-                            EarlyBindError::NotFound(format!("函数 {name} 不在文件 {target_id} 中"))
+                            EarlyBindError::NotFound(format!(
+                                "函数 {function} 不在当前 Package（{pkg}）函数库中"
+                            ))
                         })?;
                     crate::extensions::gamer_yaml::task_params::bind_entry_args(
-                        &format!("{target_id}#{name}"),
+                        &format!("{pkg}#{function}"),
                         &def.params,
                         &args_owned,
                         true,

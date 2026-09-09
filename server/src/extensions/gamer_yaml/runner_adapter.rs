@@ -208,24 +208,30 @@ impl Entry {
     fn resource(&self) -> String {
         match self {
             Self::Script { script_id, .. } => script_id.clone(),
-            Self::Function {
-                target_id, name, ..
-            } => format!("{target_id}#{name}"),
+            Self::Function { target_id, .. } => target_id.clone(),
         }
     }
 }
 
-/// 组合运行期函数注册表：原生插件函数 + 当前 Package 全部函数文件
-/// （计划 Phase 3.4：运行开始时冻结；同名冲突一律拒绝，不跨包查找）。
+/// 组合运行期函数注册表：原生插件函数 + 当前 Package 全部 `_function*.yaml`
+/// 函数库文件（简化计划 Phase 1：函数库与自动化共用 automations/ 空间，文件名
+/// 前缀识别；运行开始时冻结；同名冲突一律拒绝，不跨包查找，文件顺序不决定
+/// 胜者——冲突即失败）。
 pub(crate) fn compose_function_library(
     store: &crate::resources::PackageStore,
     package: &str,
 ) -> anyhow::Result<FunctionLibrary> {
     let native = native_names();
-    let files = store.list(package, YAML_EXTENSION_ID, "functions")?;
+    let files = store.list(package, YAML_EXTENSION_ID, "automations")?;
     let mut registry: FunctionLibrary = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for file in files {
+        let Some(rel) = file.path.strip_prefix("automations/") else {
+            continue;
+        };
+        if !resources::is_function_library_path(rel) {
+            continue;
+        }
         let Some(content) = file.content.as_deref() else {
             continue;
         };
@@ -294,6 +300,11 @@ impl YamlRunAdapter {
                 let library = compose_function_library(&scripts, target.pkg())?;
                 let entry = match &target {
                     RunTarget::Script { script_id, .. } => {
+                        let rel = script_id.split_once('/').map(|(_, rel)| rel).unwrap_or("");
+                        anyhow::ensure!(
+                            !resources::is_function_library_path(rel),
+                            "函数库文件不能作为自动化脚本运行: {script_id}（函数请以 <pkg>#<函数名> 寻址）"
+                        );
                         let content = resources::script_entry(&scripts, script_id)?
                             .ok_or_else(|| anyhow::anyhow!("脚本不存在: {script_id}"))?
                             .content;
@@ -305,38 +316,28 @@ impl YamlRunAdapter {
                             script,
                         }
                     }
-                    RunTarget::Function {
-                        pkg,
-                        file,
-                        function,
-                        ..
-                    } => {
-                        let target_id = format!("{pkg}/{file}.yaml");
-                        let content = resources::function_entry(&scripts, &target_id)?
-                            .ok_or_else(|| anyhow::anyhow!("函数文件不存在: {target_id}"))?
-                            .content;
-                        let file_library =
-                            parse_function_library(&content).map_err(|diagnostics| {
-                                anyhow::anyhow!("函数文件无效: {}", diagnostics_text(&diagnostics))
-                            })?;
-                        let name = match function {
-                            Some(name) => name.clone(),
-                            None => file_library
-                                .first()
-                                .map(|(name, _)| name.clone())
-                                .ok_or_else(|| {
-                                    anyhow::anyhow!("函数文件 {target_id} 未定义任何函数")
-                                })?,
-                        };
-                        let (_, def) = file_library
+                    RunTarget::Function { pkg, function, .. } => {
+                        let (_, def) = library
                             .iter()
-                            .find(|(entry, _)| entry == &name)
+                            .find(|(name, _)| name == function)
                             .ok_or_else(|| {
-                                anyhow::anyhow!("函数 {name:?} 不在文件 {target_id} 中")
+                                let available = library
+                                    .iter()
+                                    .map(|(name, _)| name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                anyhow::anyhow!(
+                                    "{FUNCTION_NOT_FOUND}: 函数 {function:?} 不在当前 Package（{pkg}）函数库中{}",
+                                    if available.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!("（可用：{available}）")
+                                    }
+                                )
                             })?;
                         Entry::Function {
-                            target_id,
-                            name,
+                            target_id: format!("{pkg}#{function}"),
+                            name: function.clone(),
                             def: def.clone(),
                         }
                     }
@@ -477,7 +478,7 @@ mod tests {
             .write_text(
                 "com.test.app",
                 YAML_EXTENSION_ID,
-                "functions/common.yaml",
+                "automations/_function.yaml",
                 "functions:\n  greet:\n    run:\n      - log: hi\n",
                 None,
                 false,
@@ -487,14 +488,25 @@ mod tests {
             .write_text(
                 "com.test.app",
                 YAML_EXTENSION_ID,
-                "functions/daily.yaml",
+                "automations/_function_battle.yaml",
                 "functions:\n  claim:\n    run:\n      - greet: {}\n",
                 None,
                 false,
             )
             .unwrap();
+        // 同目录普通脚本不参与函数表
+        store
+            .write_text(
+                "com.test.app",
+                YAML_EXTENSION_ID,
+                "automations/daily.yaml",
+                "run:\n  - log: daily\n",
+                None,
+                false,
+            )
+            .unwrap();
         let library = compose_function_library(&store, "com.test.app").unwrap();
-        assert_eq!(library.len(), 2);
+        assert_eq!(library.len(), 2, "两个 _function*.yaml 共 2 个函数");
         let calls = library
             .iter()
             .find(|(name, _)| name == "claim")
@@ -507,7 +519,7 @@ mod tests {
             .write_text(
                 "com.test.app",
                 YAML_EXTENSION_ID,
-                "functions/bad.yaml",
+                "automations/_function_bad.yaml",
                 "functions:\n  tap:\n    run: []\n",
                 None,
                 false,
@@ -519,12 +531,12 @@ mod tests {
             "同名必须报冲突: {error}"
         );
 
-        // 跨文件同名 → 冲突拒绝
+        // 跨文件同名 → 冲突拒绝（文件顺序不决定胜者）
         store
             .write_text(
                 "com.test.app",
                 YAML_EXTENSION_ID,
-                "functions/bad.yaml",
+                "automations/_function_bad.yaml",
                 "functions:\n  greet:\n    run: []\n",
                 None,
                 true,
@@ -538,14 +550,40 @@ mod tests {
             .write_text(
                 "com.test.app",
                 YAML_EXTENSION_ID,
-                "functions/bad.yaml",
+                "automations/_function_bad.yaml",
                 "functions:\n  if:\n    run: []\n",
                 None,
                 true,
             )
             .unwrap();
         let error = compose_function_library(&store, "com.test.app").unwrap_err();
-        assert!(error.to_string().contains("bad.yaml"), "{error}");
+        assert!(error.to_string().contains("_function_bad.yaml"), "{error}");
+    }
+
+    /// 前缀识别边界：`_function2.yaml` 也是函数库；普通脚本/模板不受影响。
+    #[test]
+    fn function_library_path_prefix_rule() {
+        use crate::extensions::gamer_yaml::resources::is_function_library_path;
+        assert!(is_function_library_path("_function.yaml"));
+        assert!(is_function_library_path("_function_common.yaml"));
+        assert!(is_function_library_path("_function2.yaml"));
+        assert!(
+            is_function_library_path("sub/_function.yaml"),
+            "允许子目录拆分"
+        );
+        assert!(!is_function_library_path("daily.yaml"));
+        assert!(
+            !is_function_library_path("_function.yml"),
+            "第一版不接受 .yml"
+        );
+        assert!(
+            !is_function_library_path("functions.yaml"),
+            "必须以 _function 开头"
+        );
+        assert!(
+            !is_function_library_path("_FUNCTION.yaml"),
+            "只识别小写前缀"
+        );
     }
 
     /// Package 隔离：函数表只组合当前 Package 的函数（不跨包隐式查找）。
@@ -569,7 +607,7 @@ mod tests {
             .write_text(
                 "com.a",
                 YAML_EXTENSION_ID,
-                "functions/only_a.yaml",
+                "automations/_function.yaml",
                 "functions:\n  a_fn:\n    run: []\n",
                 None,
                 false,

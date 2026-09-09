@@ -273,7 +273,7 @@ pub struct Script {
     pub run: Vec<SurfaceStep>,
 }
 
-/// 函数定义（`functions/<分类>.yaml` 内单个函数）。
+/// 函数定义（`automations/_function*.yaml` 函数库内单个函数，简化计划 Phase 1）。
 #[derive(Clone, Debug)]
 pub struct FunctionDef {
     pub description: Option<String>,

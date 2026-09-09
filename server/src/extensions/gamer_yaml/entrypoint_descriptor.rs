@@ -1,8 +1,9 @@
 //! Entrypoint 参数 schema 描述（V1，契约 §7 形态保留）。
 //!
 //! `GET /api/runners/:runner_id/entrypoint` 的 gamer.yaml 数据源：
-//! entrypoint = `<pkg>/<脚本>.yaml`（脚本）或
-//! `<pkg>/<文件短路径>.yaml#<函数名>`（函数，缺省函数名 = 文件第一个）。
+//! entrypoint = `<pkg>/<脚本>.yaml`（脚本）或 `<pkg>#<函数名>`（函数，
+//! 简化计划 Phase 1：统一命名空间按名寻址，函数从当前 Package 全部
+//! `_function*.yaml` 组合出的注册表解析——定义文件可拆分/移动）。
 //! 内层载荷 `{kind, format:"yaml-params-v1", schema}`——schema 即 V1
 //! `params` 声明（名称/类型/必填/默认值/说明），前端据此渲染参数表单，
 //! 不解析 YAML。旧 v3 的 psig1 签名字段已删除。
@@ -11,8 +12,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::extensions::gamer_yaml::resources::{function_entry, script_entry};
-use crate::extensions::gamer_yaml::syntax::{parse_function_library, parse_script};
+use crate::extensions::gamer_yaml::resources::{is_function_library_path, script_entry};
+use crate::extensions::gamer_yaml::runner_adapter::compose_function_library;
+use crate::extensions::gamer_yaml::syntax::parse_script;
 use crate::extensions::gamer_yaml::task_params::decls_schema_json;
 use crate::resources::PackageStore;
 
@@ -67,9 +69,9 @@ impl crate::scheduler::EntrypointDescriber for StoreEntrypointDescriber {
     }
 }
 
-/// 描述一个 entrypoint：`<pkg>/<脚本>.yaml`（脚本）或
-/// `<pkg>/<文件>.yaml#<函数名>`（函数库内函数）。返回契约 §7 内层载荷
-/// `{kind, format, schema}`（API 层补 runner_id/entrypoint 外壳）。
+/// 描述一个 entrypoint：`<pkg>/<脚本>.yaml`（脚本）或 `<pkg>#<函数名>`
+/// （函数）。返回契约 §7 内层载荷 `{kind, format, schema}`（API 层补
+/// runner_id/entrypoint 外壳）。
 pub(crate) fn describe_entrypoint(
     scripts: &PackageStore,
     entrypoint: &str,
@@ -83,6 +85,16 @@ pub(crate) fn describe_entrypoint(
 }
 
 fn describe_script(scripts: &PackageStore, entrypoint: &str) -> Result<Value, DescribeError> {
+    let rel = entrypoint
+        .split_once('/')
+        .map(|(_, rel)| rel)
+        .unwrap_or(entrypoint);
+    if is_function_library_path(rel) {
+        return Err(DescribeError::invalid_diagnostic(
+            "yaml.function_library.not_script",
+            "函数库文件（automations/_function*.yaml）不能作为脚本描述；函数请以 <pkg>#<函数名> 寻址",
+        ));
+    }
     let content = match script_entry(scripts, entrypoint) {
         Ok(Some(entry)) => entry.content,
         Ok(None) => {
@@ -103,68 +115,37 @@ fn describe_script(scripts: &PackageStore, entrypoint: &str) -> Result<Value, De
     Ok(schema_payload("script", &decls_schema_json(&script.params)))
 }
 
+/// `<pkg>#<函数名>`：从当前 Package 全部 `_function*.yaml` 组合出的注册表按名
+/// 解析函数（定义文件可拆分/移动，不影响寻址）。空函数名 → NotFound 提示。
 fn describe_function(
     scripts: &PackageStore,
     base: &str,
     func: &str,
     entrypoint: &str,
 ) -> Result<Value, DescribeError> {
-    let target = normalize_file_target(base);
-    let content = match function_entry(scripts, &target) {
-        Ok(Some(entry)) => entry.content,
-        Ok(None) => {
-            return Err(DescribeError::NotFound {
-                resource: target.clone(),
-            })
-        }
-        Err(error) => {
-            return Err(DescribeError::invalid_diagnostic(
-                "yaml.read_failed",
-                format!("读取函数文件失败: {error:#}"),
-            ))
-        }
-    };
-    let library =
-        parse_function_library(&content).map_err(|diagnostics| DescribeError::Invalid {
-            diagnostics: serde_json::to_value(&diagnostics).unwrap_or_default(),
-        })?;
-    let name = if func.is_empty() {
-        library
-            .first()
-            .map(|(name, _)| name.clone())
-            .ok_or_else(|| {
-                DescribeError::invalid_diagnostic(
-                    "resource.func.not_found",
-                    format!("函数文件 {target} 未定义任何函数"),
-                )
-            })?
-    } else {
-        func.to_string()
-    };
+    if func.is_empty() {
+        return Err(DescribeError::invalid_diagnostic(
+            "resource.func.not_found",
+            "函数 entrypoint 缺少函数名（<pkg>#<函数名>）",
+        ));
+    }
+    let library = compose_function_library(scripts, base).map_err(|error| {
+        DescribeError::invalid_diagnostic("yaml.library.invalid", error.to_string())
+    })?;
     let decls = library
         .iter()
-        .find(|(entry, _)| entry == &name)
+        .find(|(name, _)| name == func)
         .map(|(_, def)| decls_schema_json(&def.params))
         .ok_or_else(|| {
             DescribeError::from_script_errors(&[
                 crate::extensions::gamer_yaml::error::ScriptError::new(
                     "resource.func.not_found",
-                    format!("函数 {name} 不在文件 {target} 中"),
+                    format!("函数 {func} 不在当前 Package（{base}）函数库中"),
                     entrypoint,
                 ),
             ])
         })?;
     Ok(schema_payload("function", &decls))
-}
-
-/// `<pkg>/<文件>.yaml[.yml]` 短路径归一（后缀可省略）。
-fn normalize_file_target(base: &str) -> String {
-    let lower = base.to_ascii_lowercase();
-    if lower.ends_with(".yaml") || lower.ends_with(".yml") {
-        base.to_string()
-    } else {
-        format!("{base}.yaml")
-    }
 }
 
 fn schema_payload(kind: &str, schema: &Value) -> Value {
@@ -258,24 +239,45 @@ mod tests {
         let (cfg, _dir) = store_dir("func");
         write(
             &cfg,
-            "functions",
-            "common.yaml",
+            "automations",
+            "_function.yaml",
             "functions:\n  claim:\n    params:\n      timeout:\n        type: duration\n        default: 5s\n    run:\n      - log: hi\n",
         );
         let store = PackageStore::open(&cfg).unwrap();
-        let payload = describe_entrypoint(&store, "com.test.app/common.yaml#claim").unwrap();
+        let payload = describe_entrypoint(&store, "com.test.app#claim").unwrap();
         assert_eq!(payload["kind"], "function");
         assert_eq!(payload["schema"][0]["type"], "duration");
 
-        // 缺省函数名 = 文件第一个
-        let payload = describe_entrypoint(&store, "com.test.app/common.yaml#").unwrap();
+        // 手动拆分文件中的函数同样按名可寻（文件名不影响调用名）
+        write(
+            &cfg,
+            "automations",
+            "_function_battle.yaml",
+            "functions:\n  attack:\n    run:\n      - return: true\n",
+        );
+        let payload = describe_entrypoint(&store, "com.test.app#attack").unwrap();
         assert_eq!(payload["kind"], "function");
 
         // 目标函数不存在
-        let error = describe_entrypoint(&store, "com.test.app/common.yaml#missing").unwrap_err();
+        let error = describe_entrypoint(&store, "com.test.app#missing").unwrap_err();
         assert!(matches!(error, DescribeError::Invalid { .. }));
-        // 文件不存在
-        let error = describe_entrypoint(&store, "com.test.app/none.yaml#a").unwrap_err();
-        assert!(matches!(error, DescribeError::NotFound { .. }));
+        // 空函数名
+        let error = describe_entrypoint(&store, "com.test.app#").unwrap_err();
+        assert!(matches!(error, DescribeError::Invalid { .. }));
+        // 包不存在
+        let error = describe_entrypoint(&store, "com.none#a").unwrap_err();
+        assert!(matches!(error, DescribeError::Invalid { .. }));
+
+        // 函数库文件不能按脚本描述
+        let error = describe_entrypoint(&store, "com.test.app/_function.yaml").unwrap_err();
+        match error {
+            DescribeError::Invalid { diagnostics } => assert!(
+                diagnostics
+                    .to_string()
+                    .contains("yaml.function_library.not_script"),
+                "{diagnostics}"
+            ),
+            other => panic!("期望 Invalid，得到 {other:?}"),
+        }
     }
 }

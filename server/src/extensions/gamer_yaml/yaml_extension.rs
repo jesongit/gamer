@@ -546,13 +546,20 @@ impl NativeYamlHost {
         Ok(Value::Null)
     }
 
-    /// find：timeout=0 单次尝试；>0 轮询到命中或超时（未命中返回 null）。
+    /// find：单次模板匹配（简化计划 Phase 4.2：不再承担轮询语义）；未找到
+    /// 返回 null。等待轮询请用 wait_find。每次尝试发 vision/hit/miss 事件
+    /// （与 wait_find 同口径）。
     async fn find(&self, args: &BoundArgs) -> Result<Value> {
-        let timeout = args.duration_ms("timeout")?;
-        Ok(self
-            .poll_match(args, timeout, "find")
-            .await?
-            .unwrap_or(Value::Null))
+        let template_name = args.string("template")?;
+        let (outcome, effective_px) = self.match_once(args).await?;
+        let region =
+            Self::relative_region_echo(effective_px, self.screen().width, self.screen().height);
+        self.emit_vision_outcome(&template_name, outcome, effective_px)
+            .await;
+        Ok(match outcome {
+            MatchOutcome::Found(_) => Self::match_value(outcome, region, self.screen()),
+            MatchOutcome::NotFound => Value::Null,
+        })
     }
 
     async fn wait_find(&self, args: &BoundArgs) -> Result<Value> {
@@ -596,7 +603,7 @@ impl NativeYamlHost {
         let interval = args.duration_ms("interval")?.max(MIN_POLL_INTERVAL_MS);
         let started = Instant::now();
         loop {
-            let outcome = self.match_once(args).await?;
+            let (outcome, _) = self.match_once(args).await?;
             let found = matches!(outcome, MatchOutcome::Found(_));
             if !found {
                 return Ok(Value::Bool(true));
@@ -635,8 +642,8 @@ impl NativeYamlHost {
 
     // -- 视觉轮询 -----------------------------------------------------------
 
-    /// 单次截图匹配（不发事件）。
-    async fn match_once(&self, args: &BoundArgs) -> Result<MatchOutcome> {
+    /// 单次截图匹配（不发事件）；返回结果与本次生效的像素搜索区域。
+    async fn match_once(&self, args: &BoundArgs) -> Result<(MatchOutcome, Option<[u32; 4]>)> {
         let template_name = args.string("template")?;
         let template = self.template(&template_name).await?;
         let threshold = args.number("threshold")?;
@@ -665,11 +672,12 @@ impl NativeYamlHost {
             .await
             .map_err(anyhow::Error::new)?;
         let _ = template_name;
-        Ok(outcome)
+        Ok((outcome, effective_px))
     }
 
-    /// find/wait_find/tap_template 共用轮询：每次尝试发 vision/hit/miss
-    /// 事件（与旧 v3 find 逐次尝试同口径）；未命中返回 None。
+    /// wait_find/tap_template 共用轮询：每次尝试经 [`Self::match_once`]
+    /// （同一套匹配逻辑，find/wait_find/tap_template 不可能分叉）并发
+    /// vision/hit/miss 事件；未命中返回 None。
     async fn poll_match(
         &self,
         args: &BoundArgs,
@@ -678,34 +686,9 @@ impl NativeYamlHost {
     ) -> Result<Option<Value>> {
         let interval = args.duration_ms("interval")?.max(MIN_POLL_INTERVAL_MS);
         let template_name = args.string("template")?;
-        let threshold = args.number("threshold")?;
-        let explicit_px = args
-            .region("region")?
-            .map(|region| self.pixel_region(region));
         let started = Instant::now();
         loop {
-            let template = self.template(&template_name).await?;
-            let template_file = self.template_file_name(&template).await;
-            let frame = self.capture().await?;
-            let effective_px = crate::matcher::effective_search_region(
-                explicit_px,
-                template_file.as_deref(),
-                self.screen().width,
-                self.screen().height,
-            );
-            let options = MatchOptions {
-                threshold: threshold.map(|value| value as f32),
-                region: effective_px
-                    .map(|[x, y, width, height]| SearchRegion::new(x, y, width, height)),
-                color_check: false,
-            };
-            let outcome = self
-                .registry
-                .vision()
-                .ok_or_else(|| anyhow!("vision capability 未注册"))?
-                .match_template(frame, TemplateQuery::new(template, options))
-                .await
-                .map_err(anyhow::Error::new)?;
+            let (outcome, effective_px) = self.match_once(args).await?;
             let region =
                 Self::relative_region_echo(effective_px, self.screen().width, self.screen().height);
             self.emit_vision_outcome(&template_name, outcome, effective_px)
@@ -1346,7 +1329,7 @@ log = "^1.0"
             LogTrace::new(),
             &["vision.match", "resource.read", "input.tap"],
         );
-        let matched = call("find", json!({"template": "home", "timeout": "0ms"}), &host).unwrap();
+        let matched = call("find", json!({"template": "home"}), &host).unwrap();
         assert_eq!(matched["center"]["x"], 0.11, "中心 = (10+100)/1000");
         assert_eq!(matched["center"]["y"], 0.07, "中心 = (20+50)/1000");
         assert!(
@@ -1355,8 +1338,12 @@ log = "^1.0"
             matched["score"]
         );
 
-        let miss = call("find", json!({"template": "home", "timeout": "0ms"}), &host).unwrap();
+        let miss = call("find", json!({"template": "home"}), &host).unwrap();
         assert_eq!(miss, Value::Null);
+
+        // find 是单次匹配：timeout/interval 已从 Schema 删除（等待轮询用 wait_find）
+        let error = call("find", json!({"template": "home", "timeout": "1s"}), &host).unwrap_err();
+        assert!(error.to_string().contains("未知参数 timeout"), "{error}");
 
         stub.push_outcome(stub_outcome());
         let matched = call(

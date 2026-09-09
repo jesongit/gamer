@@ -19,18 +19,18 @@ use crate::core::RunContext;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunTarget {
-    /// 可执行脚本（automations/）。`start_index` = 顶层步骤序号（0=从头）。
+    /// 可执行脚本（automations/，`_function*.yaml` 函数库不可作此目标）。
+    /// `start_index` = 顶层步骤序号（0=从头）。
     Script {
         script_id: String,
         start_index: usize,
     },
-    /// 函数测试（functions/）。`file` = 文件短路径；`function` = 函数名
-    /// （None = 文件第一个函数，由入口/API 解析）；`start_index` = 函数体内
-    /// 顶层步骤序号。函数不伪装成脚本 ID 进入选择器。
+    /// 函数测试（简化计划 Phase 1：统一命名空间，纯函数名寻址）。函数从当前
+    /// Package 全部 `_function*.yaml` 组合出的注册表按名解析——定义文件可移动/
+    /// 拆分，不影响寻址；`start_index` = 函数体内顶层步骤序号。
     Function {
         pkg: String,
-        file: String,
-        function: Option<String>,
+        function: String,
         start_index: usize,
     },
 }
@@ -59,15 +59,7 @@ impl RunTarget {
     pub fn label(&self) -> String {
         match self {
             RunTarget::Script { script_id, .. } => script_id.clone(),
-            RunTarget::Function {
-                pkg,
-                file,
-                function,
-                ..
-            } => match function {
-                Some(f) => format!("{pkg}/{file}.yaml#{f}"),
-                None => format!("{pkg}/{file}.yaml"),
-            },
+            RunTarget::Function { pkg, function, .. } => format!("{pkg}#{function}"),
         }
     }
 }
@@ -89,14 +81,12 @@ impl Serialize for RunTarget {
             }
             RunTarget::Function {
                 pkg,
-                file,
                 function,
                 start_index,
             } => {
-                let mut s = serializer.serialize_struct("RunTarget", 5)?;
+                let mut s = serializer.serialize_struct("RunTarget", 4)?;
                 s.serialize_field("type", "function")?;
                 s.serialize_field("pkg", pkg)?;
-                s.serialize_field("file", file)?;
                 s.serialize_field("function", function)?;
                 s.serialize_field("start_index", start_index)?;
                 s.end()
@@ -136,15 +126,15 @@ mod tests {
 
         let function = RunTarget::Function {
             pkg: "com.a".into(),
-            file: "lib".into(),
-            function: Some("greet".into()),
+            function: "greet".into(),
             start_index: 0,
         };
         let json = serde_json::to_value(&function).unwrap();
         assert_eq!(json["type"], "function");
         assert_eq!(json["function"], "greet");
+        assert!(json.get("file").is_none(), "函数目标不携带定义文件段");
         assert_eq!(serde_json::from_value::<RunTarget>(json).unwrap(), function);
-        assert_eq!(function.label(), "com.a/lib.yaml#greet");
+        assert_eq!(function.label(), "com.a#greet");
         assert_eq!(function.start_index(), 0);
         assert_eq!(script.label(), "com.a/daily.yaml");
     }
