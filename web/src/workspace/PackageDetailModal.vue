@@ -182,12 +182,15 @@ function stateLabel(state) {
 </script>
 
 <style scoped>
-.modal-wide { width: min(560px, 94vw); }
+.modal-wide { width: min(560px, 94vw); padding:12px 16px; display:flex; flex-direction:column; gap:10px; }
+.modal-wide h3 {font-size:15px;font-weight:600;overflow-wrap:anywhere}
+.modal-wide .field {display:flex;flex-direction:column;gap:4px;font-size:12px}
+.modal-wide .modal-actions {display:flex;justify-content:flex-end;gap:6px;padding-top:8px;border-top:1px solid var(--border)}
 .detail-hint { margin: 0; font-size: 12px; color: var(--text-2); }
 .section-label { font-size: 12px; color: var(--text-2); }
 .detail-section { display: flex; flex-direction: column; gap: 6px; }
 
-.state-badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid; }
+.state-badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid; }
 .state-badge.st-available { color: var(--ok, #34d399); border-color: rgba(52, 211, 153, 0.35); background: rgba(52, 211, 153, 0.08); }
 .state-badge.st-disabled { color: var(--warn, #fbbf24); border-color: rgba(251, 191, 36, 0.35); background: rgba(251, 191, 36, 0.08); }
 .state-badge.st-missing-required { color: var(--danger, #f87171); border-color: rgba(248, 113, 113, 0.35); background: rgba(248, 113, 113, 0.08); }
@@ -196,7 +199,7 @@ function stateLabel(state) {
 
 .plugin-state-row { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
 .plugin-state-row .plugin-id { word-break: break-all; }
-.req-tag { font-size: 11px; color: var(--text-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+.req-tag { font-size: 12px; color: var(--text-2); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
 .miss-hint { font-size: 12px; color: var(--danger, #f87171); }
 
 .detail-edit { display: flex; flex-direction: column; gap: 10px; }
@@ -221,4 +224,5 @@ function stateLabel(state) {
 .summary dt { color: var(--text-2); }
 .summary dd { margin: 0; word-break: break-all; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.state-badge{border-radius:3px;font-size:12px;padding:1px 5px}.detail-edit{gap:8px}.detail-section{gap:5px}.modal-wide{max-height:88vh}.modal-body{gap:9px}
 </style>

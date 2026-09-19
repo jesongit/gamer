@@ -1,6 +1,6 @@
 <template>
-  <div class="func-pkg-row package-context-bar">
-    <span class="pkg-bar-label" title="配置：数据上下文（plan §28）">📦 配置</span>
+  <div class="func-pkg-row package-context-bar" :class="{ compact, management }">
+    <span class="pkg-bar-label" title="脚本、模板等插件资源的数据上下文">{{ management ? '当前配置' : '配置包' }}</span>
     <select
       :value="ctx.currentId || ''"
       class="select mono func-pkg"
@@ -10,16 +10,19 @@
       <option v-if="!ctx.pkgOptions.length" value="">（暂无配置）</option>
       <option v-for="id in ctx.pkgOptions" :key="id" :value="id">{{ ctx.optionLabel(id) }}</option>
     </select>
-    <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="查看配置详情 / 依赖状态 / 编辑元数据（plan §18/§37）" @click="ctx.openDetail()">ℹ️ 详情</button>
+    <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="配置包详情" aria-label="配置包详情" @click="ctx.openDetail()"><UiIcon name="info" /></button>
+    <component :is="management ? 'div' : 'details'" class="pkg-more"><summary v-if="!management" class="btn btn-sm" title="配置包操作" aria-label="配置包操作"><UiIcon name="more" /></summary><div class="pkg-menu">
     <button class="btn btn-sm" :disabled="ctx.busy" title="导入 .gamerpkg 为本地配置" @click="ctx.pickImportFile(fileInput)">导入</button>
     <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="导出当前配置为 .gamerpkg" @click="ctx.exportPackage">导出</button>
-    <button class="btn btn-sm" :disabled="ctx.busy" title="新建空配置" @click="ctx.openCreate">新建</button>
+    <button class="btn btn-sm" :disabled="ctx.busy" title="新建空配置" :class="{ 'btn-primary': management }" @click="ctx.openCreate">新建</button>
     <button class="btn btn-sm" :disabled="!ctx.currentId || ctx.busy" title="复制当前配置为新配置（保留自己的修改）" @click="ctx.openDuplicate">复制</button>
-    <button class="btn btn-sm btn-danger" :disabled="!ctx.currentId || ctx.busy" title="删除当前配置（数据不可恢复）" @click="ctx.openDelete">🗑</button>
+    <button class="btn btn-sm btn-danger" :disabled="!ctx.currentId || ctx.busy" title="删除当前配置（数据不可恢复）" @click="ctx.openDelete" aria-label="删除配置">{{ management ? '删除' : '🗑' }}</button>
+    </div></component>
     <!-- .gamerpkg 归档选择：change 后清空 value 支持重选同文件 -->
     <input ref="fileInput" class="pkg-import-input" type="file" accept=".gamerpkg,.zip" @change="ctx.onImportPicked" />
   </div>
 
+  <Teleport v-if="dialogs" to="body">
   <!-- 新建 / 复制弹窗（共用表单） -->
   <div v-if="ctx.formModal.open" class="modal-mask" @click.self="ctx.closeForm">
     <div class="modal">
@@ -129,6 +132,7 @@
     :context="ctx"
     :android-candidates="androidCandidates"
   />
+  </Teleport>
 </template>
 
 <script setup>
@@ -141,9 +145,10 @@
 import { computed, reactive, ref } from 'vue'
 import { useToast, devicesData } from '../store'
 import { usePackageContext, formatBytes } from '../composables/usePackageContext'
+import UiIcon from '../components/ui/UiIcon.vue'
 import PackageDetailModal from './PackageDetailModal.vue'
 
-const props = defineProps({ context: { type: Object, default: null } })
+const props = defineProps({ context: { type: Object, default: null }, compact: Boolean, management: Boolean, dialogs: { type: Boolean, default: true } })
 const toast = useToast()
 const fileInput = ref(null)
 // context 由 Console 装配（注入 refreshAll 全量刷新）；缺省自建（测试/独立使用）。
@@ -180,10 +185,16 @@ const androidCandidates = computed(() => {
 .media-name { word-break:break-all; }
 .media-meta { color:var(--text-2); white-space:nowrap; }
 .media-total { margin:0; font-size:12px; }
-.privacy-note { margin:0; font-size:12px; line-height:1.5; color:var(--warn, #fbbf24); border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); border-radius:6px; padding:8px 10px; }
+.privacy-note { margin:0; font-size:12px; line-height:1.5; color:var(--warn, #fbbf24); border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); border-radius: var(--radius-sm); padding:8px 10px; }
 .include-media { display:flex; align-items:center; gap:6px; font-size:13px; }
-.missing-required-warning { margin:0; font-size:12px; line-height:1.5; color:var(--warn, #fbbf24); border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); border-radius:6px; padding:8px 10px; }
+.missing-required-warning { margin:0; font-size:12px; line-height:1.5; color:var(--warn, #fbbf24); border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08); border-radius: var(--radius-sm); padding:8px 10px; }
 .summary { margin:0; display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:12px; }
 .summary dt { color:var(--text-2); }
 .summary dd { margin:0; word-break:break-all; }
+.compact{max-width:285px;min-width:180px}.compact .pkg-bar-label{font-size:12px}.pkg-more{position:relative}.pkg-more summary{list-style:none}.pkg-more summary::-webkit-details-marker{display:none}.pkg-menu{position:absolute;top:32px;right:0;z-index:35;display:flex;flex-direction:column;gap:3px;min-width:130px;background:var(--bg-2);padding:5px;border:1px solid var(--border);box-shadow:var(--shadow)}.pkg-menu .btn{justify-content:flex-start;background:transparent;border-color:transparent}
+.management { flex-wrap:wrap; gap:8px; padding-bottom:16px; border-bottom:1px solid var(--border); }
+.management .func-pkg { flex:0 1 280px; }.management .pkg-more { margin-left:auto; }
+.management .pkg-menu { position:static; display:flex; flex-direction:row; flex-wrap:wrap; gap:6px; padding:0; background:transparent; border:0; box-shadow:none; min-width:0; }
+.management .pkg-menu .btn:not(.btn-primary) { background:transparent; border-color:var(--border); }.management .pkg-menu .btn-danger { color:var(--text-1); }.management .pkg-menu .btn-danger:hover { color:var(--danger); border-color:var(--danger); }
+.management .pkg-menu .btn-primary { background:var(--accent); border-color:var(--accent); color:#202015; }
 </style>

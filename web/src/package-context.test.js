@@ -65,12 +65,28 @@ describe('Package id 规整（服务端 validate_scope_id 前置口径）', () =
 })
 
 describe('usePackageContext（plan §28：导入/导出/新建/复制/删除）', () => {
-  it('下拉选择即切换 Core Store 的 currentPackageId', () => {
+  it('等待异步草稿确认时不切换配置，取消还原选择且阻止重复切换', async () => {
+    let answer
+    const beforePackageChange = vi.fn(() => new Promise(resolve => { answer = resolve }))
+    const ctx = usePackageContext({ ...setup(), beforePackageChange })
+    const target = { value: 'user.other' }
+    const pending = ctx.onPackageChange({ target })
+    expect(packageStore.currentPackageId).toBe('com.demo')
+    expect(target.value).toBe('com.demo')
+    await ctx.onPackageChange({ target: { value: '' } })
+    expect(beforePackageChange).toHaveBeenCalledTimes(1)
+    answer(false); await pending
+    expect(packageStore.currentPackageId).toBe('com.demo')
+    const accepted = ctx.onPackageChange({ target: { value: 'user.other' } })
+    answer(true); await accepted
+    expect(packageStore.currentPackageId).toBe('user.other')
+  })
+  it('下拉选择即切换 Core Store 的 currentPackageId', async () => {
     const { api, toast } = setup()
     const ctx = usePackageContext({ api, toast })
-    ctx.onPackageChange({ target: { value: 'user.other' } })
+    await ctx.onPackageChange({ target: { value: 'user.other' } })
     expect(packageStore.currentPackageId).toBe('user.other')
-    ctx.onPackageChange({ target: { value: '' } })
+    await ctx.onPackageChange({ target: { value: '' } })
     expect(packageStore.currentPackageId).toBeNull()
   })
 

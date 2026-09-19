@@ -101,7 +101,7 @@ describe('P3-SCHEMA：正式类型、默认值与初始化契约', () => {
     expect(reparsed.model.params).toEqual(parsed.model.params)
   })
 
-  it('新增/切换初始化显示必填字段，默认值按真实类型复制且不共享引用', () => {
+  it('新增/切换初始化只保留无默认值必填字段', () => {
     const params = [
       { name: 'template', type: 'template', required: true, default: null },
       { name: 'flag', type: 'boolean', required: false, default: false },
@@ -114,17 +114,8 @@ describe('P3-SCHEMA：正式类型、默认值与初始化契约', () => {
       kind: 'map',
       entries: {
         template: { lit: null, missing: true },
-        flag: { lit: false },
-        count: { lit: 0 },
-        tags: { lit: ['one'] },
-        options: { lit: { enabled: true } },
       },
     })
-    if (args.kind !== 'map') throw new Error('expected named args')
-    args.entries.tags.lit.push('two')
-    args.entries.options.lit.enabled = false
-    expect(params[3].default).toEqual(['one'])
-    expect(params[4].default).toEqual({ enabled: true })
   })
 
   it('类型别名大小写归一，合法 null/false/0/空字符串不靠 truthy 判断', () => {

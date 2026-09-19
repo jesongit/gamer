@@ -27,6 +27,7 @@ import {
 import { CODES, diag, type Diagnostic } from './diagnostics'
 import {
   isIdentifier,
+  isFunctionName,
   isRefPath,
   hasParamDefault,
   normalizeParamType,
@@ -394,8 +395,8 @@ function parseFunctionRoot(root: Record<string, unknown> | { __seq: true }, file
   }
   const seen = new Set<string>()
   for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (!isIdentifier(name)) {
-      diags.push(diag(CODES.nameInvalid, `functions.${name}`, name, `函数名 ${JSON.stringify(name)} 非法——只允许小写字母、数字、下划线（如 claim_daily）`))
+    if (!isFunctionName(name)) {
+      diags.push(diag(CODES.nameInvalid, `functions.${name}`, name, `函数名 ${JSON.stringify(name)} 非法——允许中文、小写字母、数字、下划线，不能以数字开头（如 每日任务跳转、claim_daily）`))
       continue
     }
     if ((RESERVED_WORDS as readonly string[]).includes(name)) {
@@ -645,9 +646,6 @@ function parseStepNode(item: unknown, path: string, diags: Diagnostic[]): Step |
     }
     switch (keyword) {
       case 'if': {
-        if (keywordValue === null || keywordValue === undefined) {
-          diags.push(diag(CODES.exprInvalid, `${path}.if`, 'if', 'if 条件不能为空'))
-        }
         const thenNode = map.then
         if (thenNode === undefined) {
           diags.push(diag(CODES.ifThenMissing, path, 'then', 'if 步骤缺少 then 分支'))
@@ -692,8 +690,8 @@ function parseStepNode(item: unknown, path: string, diags: Diagnostic[]): Step |
   }
 
   if (action !== null) {
-    if (!isIdentifier(action)) {
-      diags.push(diag(CODES.nameInvalid, path, action, `函数名 ${JSON.stringify(action)} 非法——只允许小写字母、数字、下划线（如 tap、wait_find）`))
+    if (!isFunctionName(action)) {
+      diags.push(diag(CODES.nameInvalid, path, action, `函数名 ${JSON.stringify(action)} 非法——允许中文、小写字母、数字、下划线，不能以数字开头（如 tap、wait_find）`))
       return null
     }
     return {

@@ -1,10 +1,11 @@
 <template>
-  <div ref="consoleEl" class="console" :class="{ 'is-panel-resizing': panelResizing }">
+  <div ref="consoleEl" class="console" :class="{ 'is-panel-resizing': panelResizing, 'global-page': isGlobalPage }">
+    <div class="console-body">
     <!-- 左：工具条与投屏画面共用一个键盘焦点区域 -->
     <div
       ref="stageFocusEl"
+      v-show="!isGlobalPage"
       class="stage"
-      :class="{ 'keyboard-active': keyboardFocused }"
       tabindex="0"
       role="region"
       aria-label="投屏控制区，可接收键盘控制"
@@ -17,22 +18,22 @@
       <!-- 顶部工具条：设备管理 + 应用控制两组；输入模式与通用动作保留在工具条 -->
       <div ref="toolbarEl" class="toolbar" data-keyboard-ignore="true" @click="onToolbarClick">
         <div class="tb-row">
-          <select v-model="store.deviceId" class="select mono tb-dev-select" aria-label="设备列表" @change="onDeviceSelect">
-            <option value="">选择设备…</option>
+          <select v-model="store.deviceId" class="select mono tb-dev-select" :disabled="forceReconnecting" aria-label="设备列表" @change="onDeviceSelect">
+            <option :value="null">选择设备…</option>
             <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }} · {{ d.status === 'online' ? '在线' : '离线' }}</option>
           </select>
-          <button v-if="!connected" class="btn btn-sm btn-primary" :disabled="!store.deviceId || connecting" @click="flushAndConnect">{{ connecting ? '连接中…' : '🔌 连接' }}</button>
-          <button v-else class="btn btn-sm" @click="disconnect">⏹ 断开</button>
-          <button class="btn btn-sm" :disabled="scanning" @click="refreshDevices">🔄 刷新</button>
+          <button v-if="!connected" class="btn btn-sm btn-primary" :disabled="!store.deviceId || connecting || forceReconnecting" @click="flushAndConnect">{{ forceReconnecting ? '强制重连中…' : connecting ? '连接中…' : '连接' }}</button>
+          <button v-else class="btn btn-sm" @click="disconnect">断开</button>
+          <button class="btn btn-sm" :disabled="scanning || forceReconnecting" @click="refreshDevices" title="刷新设备" aria-label="刷新设备"><UiIcon name="refresh" /></button>
           <div class="tb-more-wrap">
             <button
               class="btn btn-sm"
               :class="{ active: toolbarMenuOpen === 'device' }"
               aria-haspopup="menu"
               :aria-expanded="toolbarMenuOpen === 'device'"
-              title="新增 / 设置 / 安装应用 / 删除设备"
+              title="新增 / 设置 / 安装应用 / 强制重连 / 删除设备"
               @click.stop="toggleToolbarMenu('device', $event)"
-            >更多 ▾</button>
+            ><UiIcon name="more" /></button>
           </div>
           <div class="tb-sep"></div>
           <!-- 应用下拉（Android 运行目标）：选中即保存为设备配置包名，启动/脚本共用；
@@ -48,8 +49,14 @@
             <option value="" :disabled="pkgOptions.length > 0">未选择应用</option>
             <option v-for="p in pkgOptions" :key="p" :value="p">{{ packageOptionLabel(p) }}</option>
           </select>
-          <button class="btn btn-sm" :disabled="!store.deviceId || appLoading" :title="appLoading ? '正在读取已安装应用…' : '读取设备已安装应用列表（填充应用下拉，强制刷新缓存）'" @click="loadApps({ force: true })">{{ appLoading ? '读取中…' : '📖 读取' }}</button>
-          <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '未选择应用')">🚀 启动</button>
+          <button class="btn btn-sm" :disabled="!store.deviceId || appLoading" :title="appLoading ? '正在读取已安装应用…' : '读取设备已安装应用列表（填充应用下拉，强制刷新缓存）'" @click="loadApps({ force: true })">{{ appLoading ? '读取中…' : '读取' }}</button>
+          <button class="btn btn-sm" @click="launchGame" :title="'启动到虚拟屏：' + (current?.pkg || '未选择应用')">启动</button>
+          <PackageContextBar :context="packageContext" compact class="stage-package" />
+        </div>
+        <div class="tb-row tb-operation-row">
+          <button class="btn btn-sm btn-icon" title="截图" aria-label="截图" :disabled="!connected" @click="shot"><UiIcon name="image" /></button>
+          <button class="btn btn-sm btn-icon" title="返回" aria-label="返回" :disabled="!connected" @click="key('BACK')"><UiIcon name="back" /></button>
+          <button class="btn btn-sm btn-icon" title="全屏" aria-label="全屏" @click="fullscreen"><UiIcon name="expand" /></button>
           <!-- plan §27 停止应用收进「功能」菜单：与启动同为设备区 Android 运行目标操作，
                DataChannel/REST 均走设备配置 pkg（am force-stop） -->
           <button
@@ -57,7 +64,7 @@
             :class="{ active: keyboardMode === 'text' }"
             :title="keyboardMode === 'text' ? '当前为文本模式，字母和空格按文本发送' : '当前为游戏模式，保留按下/释放按键语义'"
             @click="toggleKeyboardMode"
-          >{{ keyboardMode === 'text' ? '⌨ 文本模式' : '🎮 游戏模式' }}</button>
+          >{{ keyboardMode === 'text' ? '文本模式' : '游戏模式' }}</button>
           <div class="tb-more-wrap">
             <button
               class="btn btn-sm"
@@ -75,10 +82,11 @@
       <Teleport to="body">
         <span v-if="toolbarMenuOpen" class="tb-more-mask" @click.stop="closeToolbarMenu"></span>
         <div v-if="toolbarMenuOpen === 'device'" class="tb-more-dropdown tb-more-dropdown-sm tb-more-dropdown-fixed" :style="toolbarMenuStyle" role="menu">
-          <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); startAdd()">＋ 新增设备</button>
-          <button class="tb-more-item" role="menuitem" :disabled="!current" @click="closeToolbarMenu(); openSettings()">⚙️ 设备设置</button>
-          <button class="tb-more-item" role="menuitem" :disabled="!current || apkInstalling" :title="apkInstalling ? '正在上传并安装 APK…' : '选择本地 .apk 安装包安装到当前设备'" @click="closeToolbarMenu(); installApk()">📦 安装应用</button>
-          <button class="tb-more-item tb-more-item-danger" role="menuitem" :disabled="!current" @click="closeToolbarMenu(); removeDevice()">🗑 删除设备</button>
+          <button class="tb-more-item" role="menuitem" :disabled="forceReconnecting" @click="closeToolbarMenu(); startAdd()">＋ 新增设备</button>
+          <button class="tb-more-item" role="menuitem" :disabled="!current || forceReconnecting" @click="closeToolbarMenu(); openSettings()">⚙️ 设备设置</button>
+          <button class="tb-more-item" role="menuitem" :disabled="!current || apkInstalling || forceReconnecting" :title="apkInstalling ? '正在上传并安装 APK…' : '选择本地 .apk 安装包安装到当前设备'" @click="closeToolbarMenu(); installApk()">📦 安装应用</button>
+          <button class="tb-more-item" role="menuitem" :disabled="!current || connecting || forceReconnecting || apkInstalling" title="重启电脑端 ADB 服务并重新连接，会中断所有设备的投屏" @click="closeToolbarMenu(); forceReconnect()">🔌 {{ forceReconnecting ? '强制重连中…' : '强制重连' }}</button>
+          <button class="tb-more-item tb-more-item-danger" role="menuitem" :disabled="!current || forceReconnecting" @click="closeToolbarMenu(); removeDevice()">🗑 删除设备</button>
         </div>
         <div v-if="toolbarMenuOpen === 'actions'" class="tb-more-dropdown tb-more-dropdown-fixed" :style="toolbarMenuStyle" role="menu">
           <button class="tb-more-item" role="menuitem" @click="closeToolbarMenu(); clipboard()">📋 粘贴</button>
@@ -102,10 +110,6 @@
         :error-msg="errorMsg"
         :current-name="currentName"
         :audio-muted="audioMuted"
-        :fps="fps"
-        :delay="delay"
-        :res="res"
-        :bitrate="bitrate"
         :show-hit="showHit"
         :hit-miss="hitMiss"
         :hit-style="hitStyle"
@@ -114,7 +118,6 @@
         :sel-style="selStyle"
         :script-fx="scriptFx"
         :keymap-overlay="keymapOverlay"
-        :keymap-status="keymapStatus"
         :bridge-overlays="bridgeOverlayView"
         :fx-tap-style="fxTapStyle"
         :fx-swipe-style="fxSwipeStyle"
@@ -126,7 +129,6 @@
         :on-mouse-up="onMouseUp"
         :on-wheel="onWheel"
         :on-video-mouse-leave="onVideoMouseLeave"
-        :keyboard-focused="keyboardFocused"
         :flush-and-connect="flushAndConnect"
         :fullscreen="fullscreen"
         @video-mounted="onVideoMounted"
@@ -144,6 +146,7 @@
 
     <!-- 左右分区拖拽条：拖动可手动调整画面区与功能区宽度 -->
     <div
+      v-show="!isGlobalPage"
       class="panel-resizer"
       :class="{ active: panelResizing }"
       role="separator"
@@ -161,9 +164,10 @@
       @keydown="onPanelResizeKeydown"
     ></div>
     <!-- 右：动态 Extension Workspace；二次裁切弹窗仍挂在面板层级，任何页签可见。 -->
-    <aside class="panel" :style="{ width: `${panelWidth}px` }">
-      <PackageContextBar :context="packageContext" />
+    <aside class="panel" :style="{ width: isGlobalPage ? '100%' : `${panelWidth}px` }">
       <PluginWorkspace
+        :navigation-target="navigationReady ? '#gamer-main-navigation' : ''"
+        :package-context="packageContext"
         :registry="panelRegistry"
         :active-panel="activePanelKey"
         :plugin-names="pluginNames"
@@ -183,6 +187,8 @@
       <!-- 二次裁切弹窗：挂面板层级（不在模板页签 v-show 内），从脚本编辑发起框选时不切页签 -->
       <TemplateCropModal :context="templateCaptureContext" :on-crop-mounted="onCropMounted" />
     </aside>
+    </div>
+    <OperationStatusBar :core="operationFeedback.state.core" :core-statuses="coreStatuses" :plugin="activeOperationFeedback" />
     <!-- 设备设置 / 新增设备弹窗 -->
     <DeviceSettingsModal :context="deviceSettingsContext" />
 
@@ -209,6 +215,13 @@
 </template>
 
 <script setup>
+const confirmDialog = useConfirmDialog()
+import { useConfirmDialog } from '../components/ui/useConfirmDialog'
+import { STAGE_MEDIA_CONTROLLER_KEY } from '../workspace/context'
+import UiIcon from '../components/ui/UiIcon.vue'
+import OperationStatusBar from '../workspace/OperationStatusBar.vue'
+import { createOperationFeedback, OPERATION_FEEDBACK_KEY } from '../workspace/operation-feedback'
+
 // Console 壳：模板装配 + 各拆分模块接线。逻辑按域拆分至 components/console/ 下的
 // composables（设备管理 / 模板裁切 / bridge overlay / 脚本运行 / 按键映射 /
 // 传输统计 / workspace 面板接线），本文件保留投屏连接、输入控制与跨模块 glue。
@@ -231,7 +244,7 @@ import RunParamsModal from '../components/RunParamsModal.vue'
 import { useConsoleRuntime } from '../composables/useConsoleRuntime'
 import { useWebRtcLifecycle } from '../composables/useWebRtcLifecycle'
 import { usePackageContext } from '../composables/usePackageContext'
-import { loadPackages, currentPackageId } from '../package-store'
+import { loadPackages, currentPackageId, selectPackage } from '../package-store'
 import { createKeyboardController, shouldIgnoreKeyboardTarget } from '../keyboard-control'
 import { buildTouchPhase, createKeymapController } from '../keymap-control'
 import { useConsolePanelResize } from '../components/console/useConsolePanelResize'
@@ -247,6 +260,9 @@ import { useConsoleWorkspacePanels } from '../components/console/useConsoleWorks
 import { createPluginCallAdapter } from '../components/console/current-api-adapters'
 
 const toast = useToast()
+const navigationReady = ref(false)
+const operationFeedback = createOperationFeedback()
+provide(OPERATION_FEEDBACK_KEY, operationFeedback)
 const route = useRoute()
 const router = useRouter()
 
@@ -304,7 +320,7 @@ watch(() => store.running, (running) => {
 const {
   panelWidth, panelResizing, PANEL_MIN_WIDTH, PANEL_MAX_WIDTH,
   startPanelResize, onPanelResize, stopPanelResize, onPanelResizeKeydown,
-} = useConsolePanelResize({ consoleEl })
+} = useConsolePanelResize({ consoleEl, videoWrap })
 
 // ---------- 运行时数据加载/重连编排 ----------
 // 壳只拉设备；脚本/模板等业务资源由各自面板实现自加载（ADR-11 知识边界）
@@ -325,6 +341,7 @@ const {
   kindInfo, screenSummary, formDirty,
   startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
   saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
+  forceReconnecting, forceReconnect,
   appSelectSaving, onAppSelect, appLoading, pkgOptions, packageOptionLabel,
   key, toolbarMenuOpen, toolbarMenuStyle,
   closeToolbarMenu, toggleToolbarMenu, shot, rotate, clipboard, launchGame, stopGame,
@@ -332,6 +349,7 @@ const {
   deviceSettingsContext,
 } = useConsoleDeviceManager({
   toast,
+  feedback: operationFeedback,
   store,
   devicesData,
   scriptsData,
@@ -382,7 +400,21 @@ const stageCtl = useConsoleStage({
   connected,
   liveVideoEl: () => videoElement.value,
 })
-watch(() => store.deviceId, () => stageCtl.onDeviceChanged())
+provide(STAGE_MEDIA_CONTROLLER_KEY, stageCtl.view)
+const coreStatuses = computed(() => {
+  const stage = stageCtl.view
+  const statuses = []
+  if (stage.kind === 'media' && stage.mediaId) {
+    statuses.push(`视频 · ${stage.mediaSizeLabel || '读取尺寸…'} · ${stage.playing ? '播放中' : '已暂停'} · ${stage.timeText} / ${stage.durationText}`)
+  } else if (connected.value) {
+    if (keyboardFocused.value && stage.canDeviceInput && !picking.value && !cellPick.mode) statuses.push('键盘控制已启用')
+    statuses.push(`${res.value} · ${fps.value} fps · ${delay.value} ms · ${bitrate.value}`)
+  }
+  if (picking.value || cellPick.mode) statuses.unshift(cellPick.mode === 'color' ? '点击取色 · Esc 取消' : cellPick.mode === 'coord' ? '点击取点 · Esc 取消' : '框选中 · Esc 取消')
+  return statuses
+})
+watch(() => store.deviceId, () => { stageCtl.onDeviceChanged(); operationFeedback.setCore(null) })
+watch(() => stageCtl.view.sourceId, () => { operationFeedback.setCore(null) })
 /** 媒体 <video> 元素挂载/更换（含卸载传 null）：交给舞台组合式挂播放监听 */
 function onStageMediaVideoMounted(el) {
   stageCtl.attachMediaVideo(el)
@@ -406,6 +438,7 @@ const {
   refreshTemplatesData, templateCaptureContext,
 } = useConsoleTemplates({
   toast,
+  feedback: operationFeedback,
   store,
   templatesData,
   packageId: currentPackageId,
@@ -437,10 +470,11 @@ const {
   clearCallParamsCache, editorMatchThreshold,
   startRunStatusPoll, restoreRunState, onBeforeUnload,
   refreshScripts,
-  scriptPanel, functionsPanel,
+  scriptPanel, functionsPanel, beforePackageChange,
 } = useConsoleScriptRunner({
   toast,
   packageId: currentPackageId,
+  restorePackage: selectPackage,
   consoleRuntime,
   templateNames,
   tplShortName,
@@ -449,7 +483,7 @@ const {
 
 // ---------- 按键映射面板（方案选择/保存/导入导出 + 映射可视化） ----------
 const {
-  activeKeymapModel, keymapOverlay, keymapStatus,
+  activeKeymapModel, keymapOverlay,
   loadKeymaps,
   keymapPanelContext,
 } = useConsoleKeymap({
@@ -468,12 +502,14 @@ const {
 watch(currentPackageId, pkg => {
   fnLib.refresh(pkg)
   loadKeymaps(pkg)
-})
+}, { immediate: true })
 
 // ---------- Package 上下文条（§28 导入/导出/新建/复制/删除） ----------
 // 包切换/导入会整体替换资源现场，经 refreshAll 全量重拉（脚本/模板/函数库/映射）
 const packageContext = usePackageContext({
   toast,
+  feedback: operationFeedback,
+  beforePackageChange,
   currentApp: currentApplication,
   loadCurrentApps: () => loadApps({ silent: true }),
   refreshAll: async () => {
@@ -511,7 +547,18 @@ const workspaceLifecycle = createWorkspaceLifecycle()
 const panelRegistry = createPanelRegistry({ defaultPanelKey: DEFAULT_PANEL_KEY })
 // Workspace 以稳定的 pluginId:panelId 作为 URL key；实际导航由
 // activePanelKey + PanelRegistry 负责。
-const activePanelKey = ref(DEFAULT_PANEL_KEY)
+const activePanelKey = ref('workbench')
+const isGlobalPage = computed(() => activePanelKey.value.startsWith('gamer.core:') || ['plugins', 'packages'].includes(activePanelKey.value))
+const activeOperationFeedback = computed(() => {
+  void panelRegistry.getPanels()
+  return operationFeedback.state.plugins[panelRegistry.resolve(activePanelKey.value)?.pluginId] || null
+})
+watch(activePanelKey, (key, previous) => {
+  for (const owner of Object.keys(operationFeedback.state.plugins)) operationFeedback.clearPlugin(owner)
+  const global = value => value?.startsWith('gamer.core:') || ['plugins', 'packages'].includes(value)
+  if (global(key) || global(previous)) operationFeedback.setCore(null)
+}, { flush: 'sync' })
+watch(currentPackageId, () => { for (const owner of Object.keys(operationFeedback.state.plugins)) operationFeedback.clearPlugin(owner) })
 // 插件显示名（pluginId → name，来自扩展快照）：插件下拉菜单展示插件名而非面板清单
 const pluginNames = ref({})
 // 插件 Android Targets（pluginId → packages，来自扩展快照；空声明服务端归一 ['*']）：
@@ -550,7 +597,7 @@ const workspaceContext = createWorkspaceContext({
   currentPackageId,
   activePluginId: computed(() => {
     const key = String(activePanelKey.value || '')
-    if (!key || key === 'market' || key === 'plugins' || key.startsWith('gamer.core:')) return ''
+    if (!key || ['plugins', 'packages', 'workbench'].includes(key) || key.startsWith('gamer.core:')) return ''
     return key.split(':', 1)[0] || ''
   }),
   connected,
@@ -562,10 +609,18 @@ const workspaceContext = createWorkspaceContext({
   stageContext: stageCtl.view,
   openPanel,
   toast,
-  dialogConfirm: message => window.confirm(message),
+  dialogConfirm: message => confirmDialog(message, { title: '插件请求确认' }),
   // iframe 面板 plugin.call → UI Bridge → 这里转发到 REST /api/extensions/:id/call
   //（declarative 面板不经 bridge，已直连 callExtension）
   pluginCall: createPluginCallAdapter(api),
+  operationStatus: (payload, meta) => {
+    // Identity comes from the host-owned contribution, never from the payload.
+    const active = panelRegistry.resolve(activePanelKey.value)
+    if (active?.pluginId !== meta.pluginId || active?.panelId !== meta.panelId) return false
+    if (!payload) operationFeedback.clearPlugin(meta.pluginId)
+    else operationFeedback.setPlugin(meta.pluginId, { ...payload, actions: (payload.actions || []).map(action => ({ ...action, run: typeof action.panel === 'string' && panelRegistry.resolve(action.panel) ? () => openPanel(action.panel) : undefined })) })
+    return true
+  },
   core: {
     templateCapture: templateCaptureContext,
     // YAML 自动化扩展的两个面板各自绑定一份作用域上下文（编辑模式/选择互不串台）
@@ -635,7 +690,7 @@ const webrtcLifecycle = useWebRtcLifecycle({
     appHintDismissed.value = store.running
       || (store.deviceId ? appStartedDevices.has(store.deviceId) : false)
     sendControl({ type: 'audio', on: !audioMuted.value })
-    toast('WebRTC 连接建立', 'success')
+    operationFeedback.setCore({ text: '投屏已连接', tone: 'success' })
   },
   onChannelClose() {
     keymap.releaseAll()
@@ -830,7 +885,7 @@ function toggleKeyboardMode() {
 function toggleAudio() {
   audioMuted.value = !audioMuted.value
   sendControl({ type: 'audio', on: !audioMuted.value })
-  toast(audioMuted.value ? '已静音' : '已取消静音', 'info')
+  operationFeedback.setCore({ text: audioMuted.value ? '已静音' : '已取消静音' })
 }
 
 watch(keyboardMode, mode => {
@@ -963,6 +1018,7 @@ const fxHitStyle = computed(() => (scriptFx.hit.show
 
 // 触控状态
 const touchState = reactive({ active: false, lastX: 0, lastY: 0 })
+let gestureOrigin = null
 
 // 拖动 move 事件合并：鼠标高频事件（数百 Hz）逐条发送会打爆 DataChannel/服务端日志，
 // 这里按 rAF（约 60Hz）合并发送，拖拽手感不受影响，但延迟和负载大幅下降。
@@ -1008,6 +1064,7 @@ function onMouseDown(e) {
     keymap.handleInputEvent({ type: 'mousedown', button: e.button, x, y }, 'down', e)
     return
   }
+  gestureOrigin = { x, y }
   touchState.active = true
   touchState.lastX = x; touchState.lastY = y
   // 按下：发 DOWN（拖动时后续 move 事件组成轨迹，up 时收尾）
@@ -1051,6 +1108,7 @@ function onMouseUp(e) {
     picking.value = false
     hideLoupe()
     const rect = selToDeviceRect()
+    if (rect.w >= 8 && rect.h >= 8) operationFeedback.setCore({ text: '已框选', actions: [{ label: `(${rect.x}, ${rect.y}, ${rect.w}, ${rect.h})`, copy: `[${rect.x}, ${rect.y}, ${rect.w}, ${rect.h}]` }] })
     if (bridgeRegionSelected()) {
       finishBridgeRegionSelect(rect)
       return
@@ -1068,6 +1126,11 @@ function onMouseUp(e) {
   touchState.active = false
   const { x, y } = toDeviceCoord(e.clientX, e.clientY)
   sendTouchPhase('up', 0, x, y)
+  const w = videoElement.value?.videoWidth, h = videoElement.value?.videoHeight
+  operationFeedback.setCore({ text: gestureOrigin && Math.hypot(x - gestureOrigin.x, y - gestureOrigin.y) > 6 ? '滑动至' : '点击了', actions: [
+    { label: `(${x}, ${y})`, copy: `[${x}, ${y}]` },
+    ...(w && h ? [{ label: `(${(x / w).toFixed(4)}, ${(y / h).toFixed(4)})`, copy: `[${(x / w).toFixed(4)}, ${(y / h).toFixed(4)}]` }] : []),
+  ] })
 }
 
 /** 鼠标离开投屏区域时隐藏取点/框选辅助层。 */
@@ -1116,6 +1179,7 @@ function onVideoWrapMounted(el) { videoWrap.value = el }
 // ---------- 生命周期 ----------
 
 onMounted(async () => {
+  navigationReady.value = !!document.getElementById('gamer-main-navigation')
   // SPA 内跳转（store 存活）→ 自动重连恢复画面；页面刷新 → localStorage 恢复设备选择；
   // 首次进入仅选中第一台设备，等待用户点连接（不主动建会话，尊重空闲低功耗）
   const spaPreselected = !!store.deviceId
@@ -1175,11 +1239,10 @@ onUnmounted(() => {
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-1);
   outline: none;
 }
-.stage.keyboard-active { outline: 2px solid var(--accent); outline-offset: -2px; }
 .app-hint {
   position: absolute; top: 54px; left: 50%; transform: translateX(-50%); z-index: 6;
   display: flex; align-items: center; gap: 8px; padding: 5px 10px; white-space: nowrap;
-  background: rgba(4, 6, 10, .85); border: 1px solid var(--border); border-radius: 8px;
+  background: rgba(4, 6, 10, .85); border: 1px solid var(--border); border-radius: var(--radius-sm);
   font-size: 12px; color: var(--text-1); backdrop-filter: blur(2px);
 }
 
@@ -1194,7 +1257,7 @@ onUnmounted(() => {
   border-radius: var(--radius-sm);
   cursor: crosshair; background: #000; touch-action: none;
 }
-.crop-hint { font-size: 10px; color: var(--text-2); align-self: flex-start; }
+.crop-hint { font-size: 12px; color: var(--text-2); align-self: flex-start; }
 .crop-panel {
   display: flex; flex-direction: column; gap: 10px;
   border-top: 1px solid var(--border); padding-top: 12px;
@@ -1265,7 +1328,7 @@ onUnmounted(() => {
   border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 10px;
   flex-shrink: 0;
 }
-.mono { font-family: var(--mono); font-size: 11px; color: var(--text-1); }
+.mono { font-family: var(--mono); font-size: 12px; color: var(--text-1); }
 
 .auto-run { display: flex; flex-wrap: wrap; gap: 8px; }
 .auto-run .spicker { flex: 1 1 auto; }
@@ -1304,20 +1367,20 @@ onUnmounted(() => {
 }
 .func-tabs button + button { border-left: 1px solid var(--border); }
 .func-tabs button.active {
-  color: var(--accent); background: rgba(34, 211, 165, .14); font-weight: 600;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); font-weight: 600;
 }
 /* 包名下拉：模板/脚本两页签共用，数据随当前包名切换 */
 .script-tpl { flex: 4; min-height: 0; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
 .tpl-top { display: flex; align-items: center; gap: 8px; }
 /* 阈值输入 : 区域下拉 : 搜索框 : 框选按钮 : 上传按钮 = 2:4:5:3:3 */
 .tpl-top .input { flex: 2 1 0%; min-width: 0; }
-.tpl-top .tpl-region { flex: 4 1 0%; min-width: 0; padding: 4px 6px; font-size: 11px; }
-.tpl-top .tpl-search { flex: 5 1 0%; min-width: 0; font-size: 11px; }
+.tpl-top .tpl-region { flex: 4 1 0%; min-width: 0; padding: 4px 6px; font-size: 12px; }
+.tpl-top .tpl-search { flex: 5 1 0%; min-width: 0; font-size: 12px; }
 .tpl-top .btn { flex: 3 1 0%; min-width: 0; }
 .tpl-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .script-run { flex: 6; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
 .script-logs { flex: 1; min-height: 120px; max-height: none; }
-.run-hint { font-size: 11px; color: var(--text-2); flex-shrink: 0; }
+.run-hint { font-size: 12px; color: var(--text-2); flex-shrink: 0; }
 .script-view-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
 .script-view {
   flex: 1; min-height: 0; overflow: auto; background: var(--bg-0);
@@ -1329,7 +1392,7 @@ onUnmounted(() => {
 .sv-line.selectable { cursor: pointer; }
 .sv-line.selectable:hover { background: var(--bg-3); }
 .sv-line.sel {
-  background: rgba(34,211,165,.12); color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent);
   box-shadow: inset 2px 0 0 var(--accent);
 }
 /* call 子脚本名链接：悬停下划线，点击弹窗预览（脚本视图 user-select:none，需单独放开） */
@@ -1353,7 +1416,7 @@ onUnmounted(() => {
 .edit-name-row .input { flex: 1; min-width: 0; width: 100%; }
 .edit-actions { display: flex; gap: 8px; }
 .edit-actions .btn { flex: 1; justify-content: center; }
-.edit-actions .btn.active { border-color: var(--accent-2); color: var(--accent-2); background: rgba(56,189,248,.08); }
+.edit-actions .btn.active { border-color: var(--accent-2); color: var(--accent-2); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .script-editor {
   flex: 1; min-height: 160px; resize: none; background: var(--bg-0);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -1367,7 +1430,7 @@ onUnmounted(() => {
 .rp-pct { color: var(--text-1); }
 .rp-bar { height: 5px; background: var(--bg-3); border-radius: 3px; overflow: hidden; }
 .rp-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); border-radius: 3px; transition: width .4s; }
-.rp-step { font-size: 11px; color: var(--text-1); }
+.rp-step { font-size: 12px; color: var(--text-1); }
 
 .live-logs {
   max-height: 180px; overflow: auto; background: var(--bg-0);
@@ -1375,7 +1438,7 @@ onUnmounted(() => {
   padding: 8px; display: flex; flex-direction: column; gap: 3px;
 }
 .live-logs.script-logs { max-height: none; }
-.ll { display: flex; gap: 8px; font-size: 11px; line-height: 1.5; }
+.ll { display: flex; gap: 8px; font-size: 12px; line-height: 1.5; }
 .ll-time { color: var(--text-2); flex-shrink: 0; }
 .ll.info .ll-msg { color: var(--text-1); }
 .ll.success .ll-msg { color: var(--ok); }
@@ -1385,7 +1448,7 @@ onUnmounted(() => {
 /* 模板文件列表 */
 .tpl-list-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 4px; }
 .tpl-list-head, .tpl-row { display: flex; align-items: center; gap: 8px; padding: 3px 8px; }
-.tpl-list-head { font-size: 11px; color: var(--text-2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tpl-list-head { font-size: 12px; color: var(--text-2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .tpl-list { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 2px; min-height: 0; }
 .tpl-row {
   cursor: pointer; border-radius: var(--radius-sm); border: 1px solid transparent;
@@ -1393,18 +1456,18 @@ onUnmounted(() => {
 }
 .tpl-row:hover { background: var(--bg-3); }
 .tpl-row.del-confirm { background: rgba(248,113,113,.08); border-color: rgba(248,113,113,.35); }
-.tpl-row.renaming { background: rgba(56,189,248,.08); border-color: rgba(56,189,248,.35); }
-.tpl-empty { padding: 16px 8px; text-align: center; font-size: 11px; color: var(--text-2); }
+.tpl-row.renaming { background: color-mix(in srgb, var(--accent) 8%, transparent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.tpl-empty { padding: 16px 8px; text-align: center; font-size: 12px; color: var(--text-2); }
 .tpl-cell.thumb { width: 40px; flex-shrink: 0; display: flex; align-items: center; }
 .tpl-list-head .tpl-cell.thumb { white-space: nowrap; }
 .tpl-cell.name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--text-0); }
 .tpl-cell.ops { display: flex; gap: 6px; flex-shrink: 0; }
-.tpl-cell.ops .btn { padding: 2px 8px; font-size: 11px; }
+.tpl-cell.ops .btn { padding: 2px 8px; font-size: 12px; }
 .rename-input { width: 100%; min-width: 0; padding: 2px 6px; font-size: 12px; }
 .tpl-region-badge {
   display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 4px;
   background: var(--bg-3); border: 1px solid var(--border);
-  color: var(--accent); font-size: 10px; line-height: 16px; vertical-align: 1px;
+  color: var(--accent); font-size: 12px; line-height: 16px; vertical-align: 1px;
   cursor: help; user-select: none;
 }
 .tpl-thumb { display: inline-flex; }
@@ -1442,4 +1505,7 @@ onUnmounted(() => {
 /* 二次裁切占满整个模板区域 */
 .crop-panel-full { flex: 1; min-height: 0; border-top: none; padding-top: 0; }
 .crop-panel-full .crop-stage { flex: 1; min-height: 0; min-width: 0; }
+.console{flex-direction:column;padding:0;gap:0;background:var(--bg-0)}.console-body{flex:1;min-height:0;display:flex;gap:0}.stage{border:0;border-radius:0;background:var(--bg-0)}.toolbar{display:flex;flex-direction:column;align-items:stretch;padding:0;background:var(--bg-1)}.tb-row{overflow:visible;min-height:39px;padding:5px 10px;gap:5px}.tb-row+.tb-row{border-top:1px solid var(--border)}.tb-row .btn{height:28px;min-width:28px;justify-content:center;padding:3px 7px}.tb-dev-select{width:148px;min-width:90px;flex:1 1 148px!important}.tb-app-select{min-width:110px;width:150px;max-width:190px;flex:1 1 150px!important}.stage-package{margin-left:auto;flex:1 1 240px;min-width:160px}.tb-operation-row{justify-content:flex-start}.panel{padding:0;border:0;border-radius:0;min-width:0;max-width:none;background:var(--bg-2);display:flex;flex-direction:column;gap:0;flex:none}.panel-resizer{flex:0 0 6px;width:6px;margin:0;border:0;border-left:1px solid var(--border);border-right:1px solid var(--border);border-radius:0;background:var(--chrome)}.panel-resizer:hover,.panel-resizer.active{background:var(--accent)}.app-hint{top:90px}.global-page .console-body{overflow:hidden}
+@media(max-width:1100px){.tb-row{flex-wrap:wrap}.stage-package{max-width:none}.tb-operation-row{flex-wrap:nowrap}}
+@media(max-width:800px){.console-body{flex-direction:column;overflow:auto}.stage{flex:none;height:48vh;min-height:300px}.panel{width:100%!important;min-height:55vh;flex:1}.panel-resizer{display:none}.global-page .panel{min-height:0}.global-page .console-body{overflow:hidden}}
 </style>

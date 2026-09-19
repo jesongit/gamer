@@ -15,7 +15,7 @@ export function useFunctionLibrary({ api } = {}) {
   const fileLoads = new Map()
 
   /** 拉取函数库文件列表（pkg 必填；失败置空不抛出，页面按无函数库处理）。 */
-  async function refresh(pkg) {
+  async function refresh(pkg, { throwOnError = false } = {}) {
     const requestSeq = ++refreshSeq
     const requestedPackage = String(pkg || '').trim()
     if (requestedPackage !== activePackage) {
@@ -33,8 +33,10 @@ export function useFunctionLibrary({ api } = {}) {
       const next = (await api.listFunctions(requestedPackage)) || []
       // Package 切换后，旧函数库响应不得覆盖当前候选。
       if (requestSeq === refreshSeq) list.value = next
-    } catch {
+      return next
+    } catch (error) {
       if (requestSeq === refreshSeq) list.value = []
+      if (throwOnError) throw error
     } finally {
       if (requestSeq === refreshSeq) loading.value = false
     }

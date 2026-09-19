@@ -3,9 +3,9 @@
     <div class="zone-head">
       <span class="zone-title">素材库</span>
       <span class="zone-actions">
-        <button class="btn btn-sm" type="button" :disabled="loading" data-testid="media-refresh" @click="$emit('refresh')">↻ 刷新</button>
+        <button class="btn btn-sm" type="button" :disabled="loading" data-testid="media-refresh" @click="$emit('refresh')"><UiIcon name="refresh" /> 刷新</button>
         <button class="btn btn-sm btn-primary" type="button" :disabled="importing" data-testid="media-import" @click="pickFile">
-          {{ importing ? '上传中…' : '⬆ 导入视频' }}
+          <UiIcon name="upload" />{{ importing ? '上传中…' : '导入视频' }}
         </button>
         <input
           ref="fileInput"
@@ -34,9 +34,9 @@
           :disabled="!deviceId || busy"
           data-testid="record-start"
           @click="start"
-        >● 开始录制</button>
+        ><UiIcon name="record" /> 开始录制</button>
         <template v-else>
-          <button class="btn btn-sm btn-primary" type="button" :disabled="busy" data-testid="record-stop" @click="stop">■ 停止并保存</button>
+          <button class="btn btn-sm btn-primary" type="button" :disabled="busy" data-testid="record-stop" @click="stop"><UiIcon name="stop" /> 停止并保存</button>
           <button class="btn btn-sm btn-danger" type="button" :disabled="busy" data-testid="record-cancel" @click="cancel">取消</button>
         </template>
         <span v-if="session" class="record-state" data-testid="record-state">
@@ -85,11 +85,9 @@
     <section class="history-box" data-testid="recording-history">
       <div class="history-head">
         <span class="zone-title">录制历史</span>
-        <span class="history-source-note">按素材库中真实录制元数据展示</span>
+        <span class="history-source-note">真实会话 · 含中断与未生成素材的记录</span>
       </div>
-      <div class="history-not-verified" role="note" data-testid="recording-history-not-verified">
-        NOT_VERIFIED：后端暂未提供录制会话历史列表；当前仅展示 /api/media 返回的录制素材，未返回的会话 ID、设备和分段关系不会被推断。
-      </div>
+      <button class="btn btn-sm" :disabled="historyLoading" @click="loadHistory">刷新记录</button>
       <div class="history-filters" aria-label="录制历史筛选">
         <input v-model="historySearch" class="input" type="search" placeholder="名称" data-testid="recording-history-search" />
         <input v-model="historyDate" class="input" type="date" aria-label="时间" data-testid="recording-history-date" />
@@ -111,13 +109,13 @@
       </div>
 
       <div v-if="historyLoading" class="list-empty" data-testid="recording-history-loading">读取录制历史…</div>
-      <div v-else-if="loadError" class="list-empty" data-testid="recording-history-failed">录制历史读取失败，请点击“重试”</div>
+      <div v-else-if="historyError" class="list-empty" data-testid="recording-history-failed">{{ historyError }}</div>
       <div v-else-if="!recordingHistory.length" class="list-empty" data-testid="recording-history-empty">暂无录制历史</div>
       <div v-else-if="!filteredRecordingHistory.length" class="list-empty" data-testid="recording-history-no-match">没有符合条件的录制记录</div>
       <div v-else class="history-list">
         <div
           v-for="record in filteredRecordingHistory"
-          :key="record.media.id"
+          :key="record.sessionId"
           class="history-row"
           :class="{ selected: record.media.id === selectedId }"
           data-testid="recording-history-row"
@@ -129,6 +127,7 @@
           <span class="mono">{{ fmtDuration(record.durationUs) }}</span>
           <span class="tag" :class="stateTagClass(record.state)">{{ stateLabel(record.state) }}</span>
           <button class="mini-btn" type="button" data-testid="recording-history-select" @click.stop="selectHistory(record)">查看</button>
+          <details class="history-segments" @click.stop><summary>分段 {{ record.session.segments.length }} · 事件 {{ record.session.event_count }}<template v-if="record.session.missing_media?.length"> · 素材缺失 {{ record.session.missing_media.length }}</template></summary><p v-if="record.session.error">{{ record.session.error }}</p><div v-for="segment in record.session.segments" :key="segment.media_id"><span>{{ segment.media_id }} · {{ segment.reason }} · {{ fmtDuration(segment.duration_us) }}</span><button class="mini-btn" :disabled="record.session.missing_media?.includes(segment.media_id)" @click="$emit('select', segment.media_id)">预览</button></div></details>
         </div>
       </div>
     </section>
@@ -164,7 +163,9 @@
 // 素材库区：列表（listMedia 数据由宿主注入）/导入（1GiB 内字节直传）/删除（409 = 被引用）/
 // 录制入口（设备下拉复用全局 devicesData，activeRecording 3s 轮询驱动按钮态）。
 // 本组件不解释素材内容语义；预览与精确帧在时间轴区。
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import UiIcon from '../ui/UiIcon.vue'
+import { useOperationStatus } from '../ui/useOperationStatus'
 import { devicesData } from '../../store'
 import { videoApi } from './videoApi'
 import { filterRecordingEvents } from './recordingEvents'
@@ -186,44 +187,40 @@ const fileInput = ref(null)
 const importing = ref(false)
 const importingName = ref('')
 const error = ref('')
+const operationNote = ref('')
 const armedId = ref('')
 const historySearch = ref('')
 const historyDate = ref('')
 const historyDevice = ref('')
 const historyDuration = ref('')
 const historyStatus = ref('')
-const historyLoading = computed(() => props.loading && !props.mediaList.length)
+const historyLoading = ref(false), historyError = ref(''), historySessions = ref([])
+let historySeq = 0, eventsSeq = 0
+async function loadHistory() {
+  const seq = ++historySeq
+  historyLoading.value = true; historyError.value = ''
+  try { const rows = await videoApi.recordingHistory(); if (seq === historySeq) historySessions.value = rows }
+  catch (e) { if (seq === historySeq) historyError.value = describe(e, '读取录制历史失败') }
+  finally { if (seq === historySeq) historyLoading.value = false }
+}
+onMounted(loadHistory)
+watch(() => props.mediaList, loadHistory)
+onBeforeUnmount(() => { historySeq++; eventsSeq++ })
 const currentRecording = ref(null)
 const eventRows = ref([])
 const eventLoading = ref(false)
 const eventError = ref('')
 const eventsLoaded = ref(false)
 
-const historyStates = ['recording', 'finalizing', 'completed', 'interrupted', 'failed', 'cancelled', 'ready', 'missing']
+const historyStates = ['recording', 'finalizing', 'completed', 'interrupted', 'failed', 'cancelled']
 
-function recordingInfo(media) {
-  const recording = media?.recording && typeof media.recording === 'object' ? media.recording : {}
-  const durationUs = media?.duration_us ?? recording.duration_us
-  const state = String(recording.state || media?.state || '—')
-  const deviceId = recording.device_id ?? media?.device_id ?? media?.deviceId ?? ''
-  const sessionId = recording.id ?? media?.recording_id ?? media?.recordingId ?? ''
-  const date = recording.started_at || media?.created_at || recording.created_at || ''
-  return {
-    media,
-    name: String(media?.name || media?.id || '未命名录制'),
-    date,
-    dateLabel: formatDate(date),
-    deviceId: String(deviceId || ''),
-    deviceLabel: deviceId ? String(deviceId) : '未返回',
-    durationUs,
-    state,
-    sessionId: sessionId ? String(sessionId) : '',
-  }
-}
-
-const recordingHistory = computed(() => (Array.isArray(props.mediaList) ? props.mediaList : [])
-  .filter(media => String(media?.source || '').toLowerCase() === 'recording')
-  .map(recordingInfo))
+const recordingHistory = computed(() => historySessions.value.map(session => {
+  const media = props.mediaList.find(item => session.segments.some(segment => segment.media_id === item.id)) || { id: '' }
+  const date = session.started_at
+  return { media, session, sessionId: session.id, name: media.name || `录制 ${session.id}`, date,
+    dateLabel: formatDate(date), deviceId: session.device_id, deviceLabel: session.device_id,
+    durationUs: session.segments.reduce((sum, segment) => sum + segment.duration_us, 0), state: session.state }
+}))
 
 const historyDevices = computed(() => [...new Set(recordingHistory.value.map(item => item.deviceId).filter(Boolean))])
 
@@ -243,6 +240,12 @@ const filteredRecordingHistory = computed(() => recordingHistory.value.filter(re
 // ---- 录制会话轮询（3s；无选中设备不轮询）----
 const session = ref(null)
 const busy = ref(false)
+useOperationStatus(() => {
+  const failure = error.value || eventError.value || historyError.value || props.loadError
+  const current = session.value
+  const text = failure || (importing.value ? `导入视频中 · ${importingName.value}` : busy.value ? '处理录制…' : current ? `${stateLabel(current.state)} · 事件 ${current.event_count || 0}` : operationNote.value)
+  return { text, tone: failure ? 'error' : '', actions: failure ? [{ label: '详情', detail: failure }, { label: '复制', copy: failure }] : current ? [{ label: '详情', detail: `录制 ${current.id}\n设备 ${current.device_id}\n${stateLabel(current.state)}` }] : [] }
+})
 let pollTimer = null
 let pollSeq = 0
 
@@ -313,8 +316,10 @@ async function stop() {
     const finished = await videoApi.recordingStop(current.id)
     session.value = null
     currentRecording.value = finished || current
+    operationNote.value = '录制已结束'
     emit('recording-finished', finished)
     emit('changed')
+    void loadHistory()
     void loadEvents(currentRecording.value)
   } catch (e) {
     error.value = describe(e, '停止录制失败')
@@ -333,7 +338,9 @@ async function cancel() {
     const cancelled = await videoApi.recordingCancel(current.id)
     session.value = null
     currentRecording.value = cancelled || current
-    emit('changed') // 已落盘部分保留为 interrupted 素材，媒体列表可能变化
+    operationNote.value = '录制已取消'
+    emit('changed')
+    void loadHistory() // 已落盘部分保留为 interrupted 素材，媒体列表可能变化
     void loadEvents(currentRecording.value)
   } catch (e) {
     error.value = describe(e, '取消录制失败')
@@ -360,7 +367,9 @@ async function onFileChosen(event) {
   try {
     const bytes = new Uint8Array(await file.arrayBuffer())
     await videoApi.importMedia(bytes, file.name)
+    operationNote.value = `视频已导入 · ${file.name}`
     emit('changed')
+    void loadHistory()
   } catch (e) {
     error.value = describe(e, '导入失败')
   } finally {
@@ -379,7 +388,9 @@ async function remove(media) {
   error.value = ''
   try {
     await videoApi.deleteMedia(media.id)
+    operationNote.value = `素材已删除 · ${media.name || media.id}`
     emit('changed')
+    void loadHistory()
   } catch (e) {
     error.value = e?.status === 409 || e?.code === 'media_referenced'
       ? referenceReason(media, e)
@@ -396,10 +407,11 @@ function referenceReason(media, e) {
 }
 
 function selectHistory(record) {
-  emit('select', record.media.id)
+  if (record.media.id) emit('select', record.media.id)
+  currentRecording.value = record.session
   if (record.sessionId) {
-    emit('recording-selected', { ...record, id: record.sessionId })
-    void loadEvents({ id: record.sessionId, state: record.state, device_id: record.deviceId })
+    emit('recording-selected', record.session)
+    void loadEvents(record.session)
   }
 }
 
@@ -411,17 +423,19 @@ async function loadEvents(recording) {
     eventError.value = ''
     return
   }
+  const seq = ++eventsSeq
   eventLoading.value = true
   eventError.value = ''
   eventsLoaded.value = false
   try {
     const events = await videoApi.recordingEvents(id)
+    if (seq !== eventsSeq) return
     eventRows.value = filterRecordingEvents(events)
     eventsLoaded.value = true
   } catch (e) {
-    eventError.value = describe(e, '读取录制事件失败')
+    if (seq === eventsSeq) eventError.value = describe(e, '读取录制事件失败')
   } finally {
-    eventLoading.value = false
+    if (seq === eventsSeq) eventLoading.value = false
   }
 }
 
@@ -482,42 +496,44 @@ function stateTagClass(state) {
 .record-box { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-0); }
 .record-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .record-device { min-width: 0; flex: 1; padding: 5px 8px; font-size: 12px; }
-.record-state { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-size: 11px; white-space: nowrap; }
-.zone-note { color: var(--accent-2); font-size: 11px; }
-.zone-error { padding: 5px 7px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); background: rgba(248,113,113,.08); color: var(--danger); font-size: 11px; line-height: 1.5; word-break: break-all; }
+.record-state { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-size: 12px; white-space: nowrap; }
+.zone-note { color: var(--accent-2); font-size: 12px; }
+.zone-error { padding: 5px 7px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); background: rgba(248,113,113,.08); color: var(--danger); font-size: 12px; line-height: 1.5; word-break: break-all; }
 .media-list { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden auto; max-height: 240px; flex-shrink: 0; }
-.list-head, .media-row { display: grid; grid-template-columns: minmax(0, 1fr) 56px 62px 38px 44px auto; align-items: center; gap: 6px; padding: 5px 8px; font-size: 11px; }
+.list-head, .media-row { display: grid; grid-template-columns: minmax(0, 1fr) 56px 62px 38px 44px auto; align-items: center; gap: 6px; padding: 5px 8px; font-size: 12px; }
 .list-head { color: var(--text-2); border-bottom: 1px solid var(--border); background: var(--bg-2); }
-.media-row { min-height: 28px; color: var(--text-1); border-bottom: 1px solid rgba(80,92,119,.25); cursor: pointer; }
+.media-row { min-height: 28px; color: var(--text-1); border-bottom: 1px solid color-mix(in srgb, var(--border) 25%, transparent); cursor: pointer; }
 .media-row:last-child { border-bottom: 0; }
 .media-row:hover, .media-row.selected { background: var(--bg-3); }
 .media-row.selected { box-shadow: inset 2px 0 var(--accent); }
 .media-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-0); }
 .list-empty { padding: 16px 10px; text-align: center; color: var(--text-2); font-size: 12px; }
 .row-actions { display: flex; gap: 4px; }
-.mini-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 11px; padding: 2px 6px; }
+.mini-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 12px; padding: 2px 6px; }
 .mini-btn:hover { border-color: var(--accent); color: var(--accent); }
 .mini-btn.danger:hover, .mini-btn.danger.armed { border-color: var(--danger); color: var(--danger); }
-.mono { font-family: var(--mono); font-size: 10px; }
+.mono { font-family: var(--mono); font-size: 12px; }
 .history-box, .recording-detail { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-0); }
 .history-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.history-source-note { color: var(--text-2); font-size: 10px; }
-.history-not-verified { color: var(--text-2); font-size: 10px; line-height: 1.45; }
+.history-source-note { color: var(--text-2); font-size: 12px; }
+.history-not-verified { color: var(--text-2); font-size: 12px; line-height: 1.45; }
 .history-filters { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(100px, 1fr) minmax(100px, 1fr); gap: 5px; }
-.history-filters .input, .history-filters .select { min-width: 0; padding: 4px 6px; font-size: 11px; }
+.history-filters .input, .history-filters .select { min-width: 0; padding: 4px 6px; font-size: 12px; }
 .history-list { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden auto; max-height: 190px; }
-.history-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(90px, 1fr) minmax(70px, .8fr) 58px 48px auto; align-items: center; gap: 5px; min-height: 28px; padding: 5px 7px; border-bottom: 1px solid rgba(80,92,119,.25); color: var(--text-1); font-size: 10px; cursor: pointer; }
+.history-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(90px, 1fr) minmax(70px, .8fr) 58px 48px auto; align-items: center; gap: 5px; min-height: 28px; padding: 5px 7px; border-bottom: 1px solid color-mix(in srgb, var(--border) 25%, transparent); color: var(--text-1); font-size: 12px; cursor: pointer; }
 .history-row:last-child { border-bottom: 0; }
 .history-row:hover, .history-row.selected { background: var(--bg-3); }
 .history-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-0); }
-.recording-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--text-2); font-size: 10px; }
-.history-event-error { padding: 5px 7px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); color: var(--danger); font-size: 11px; line-height: 1.4; }
+.recording-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--text-2); font-size: 12px; }
+.history-event-error { padding: 5px 7px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); color: var(--danger); font-size: 12px; line-height: 1.4; }
 .event-list { display: flex; flex-direction: column; gap: 3px; max-height: 150px; overflow: auto; }
-.event-row { display: grid; grid-template-columns: 52px 42px minmax(0, 1fr) auto; align-items: center; gap: 5px; color: var(--text-1); font-size: 10px; }
+.event-row { display: grid; grid-template-columns: 52px 42px minmax(0, 1fr) auto; align-items: center; gap: 5px; color: var(--text-1); font-size: 12px; }
 @media (max-width: 600px) {
   .history-filters { grid-template-columns: 1fr 1fr; }
   .history-filters .input:first-child { grid-column: 1 / -1; }
   .history-row { grid-template-columns: minmax(0, 1fr) 68px auto; }
   .history-row > :nth-child(2), .history-row > :nth-child(3), .history-row > :nth-child(4) { display: none; }
 }
+.mini-btn{min-height:28px;padding:3px 7px;font-size:13px}.zone-head,.sub-head{gap:6px}.preview{max-height:200px;object-fit:contain;background:var(--bg-0)}.frame-shot{max-height:180px;object-fit:contain}.zone-title,.sub-title{font-size:13px}.input,.select{min-height:28px;font-size:13px}.cal-grid{gap:7px}.marker-row,.event-row{min-height:32px}
+.history-segments{grid-column:1/-1;font-size:12px;color:var(--text-1)}.history-segments summary{cursor:pointer}.history-segments>div{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:3px 0}
 </style>

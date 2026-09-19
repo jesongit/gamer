@@ -52,6 +52,7 @@ describe('runYamlScript / runYamlFunction 请求体（gamer.yaml 经 api.run 统
       body: {
         runner_id: 'gamer.yaml',
         entrypoint: 'com.demo/main.yaml',
+        content_package: 'com.demo',
         device_id: 'dev1',
         payload: { start_index: 2, args: { timeout: '10s', pos: [0.1, 0.2] } },
       },
@@ -70,12 +71,20 @@ describe('runYamlScript / runYamlFunction 请求体（gamer.yaml 经 api.run 统
     expect(calls[0].body).toEqual({
       runner_id: 'gamer.yaml',
       entrypoint: 'com.demo#login',
+      content_package: 'com.demo',
       device_id: 'dev1',
       payload: { start_index: 1, args: { account: 'a.png' } },
     })
     // 缺函数名 → 客户端直接拒（统一命名空间按名寻址，无「文件第一个函数」缺省）
     await expect(runYamlFunction('com.demo', 'dev2', {})).rejects.toThrow('函数名')
     expect(calls[1]).toBeUndefined()
+  })
+
+  it('api.run 透传显式资源上下文，不从运行目标或入口覆盖它', async () => {
+    const calls = stubFetch([{ method: 'POST', url: '/api/runs', body: { run_id: 'r3', state: 'starting' } }])
+    await api.run({ runner_id: 'another.runner', entrypoint: 'entry#action', device_id: 'dev1', content_package: 'assets.pkg' })
+    expect(calls[0].body.content_package).toBe('assets.pkg')
+    expect(calls[0].body.entrypoint).toBe('entry#action')
   })
 
   it('api.run 对 runner 无知；缺 runner_id/entrypoint 客户端即拒', async () => {

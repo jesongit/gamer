@@ -34,8 +34,11 @@
  *   从此运行按钮已覆盖该场景）；嵌套分支不展开、不提供运行入口；
  * - call/func 卡片提供「打开子脚本/打开函数定义」结构化跳转入口（emit open-target）。
  */
-import { computed } from 'vue'
+import { computed, inject } from 'vue'
 import { KIND_META, stepSummary } from '../../script-editor/components/kinds'
+import { SE_TARGET_OPTIONS } from '../../script-editor/targets'
+
+const targetOptions = inject(SE_TARGET_OPTIONS, null)
 
 const props = defineProps({
   model: { type: Object, default: null }, // ScriptModel（已分配 uuid；解析失败时可能为空壳）
@@ -58,7 +61,7 @@ const topSteps = computed(() => {
     uuid: step.uuid,
     kind: step.kind,
     meta: KIND_META[step.kind] || { icon: '?', label: step.kind, hint: '' },
-    summary: stepSummary(step),
+    summary: stepSummary(step, targetOptions?.resolveParamsSync?.(step.fn)?.find(p => p.name === 'name')?.default),
     target: step.kind === 'call' ? step.fn : '',
   }))
 })
@@ -77,7 +80,7 @@ const headLabel = computed(() => {
 
 <style scoped>
 .script-summary { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 6px; }
-.sum-head { font-size: 11px; color: var(--text-2); flex-shrink: 0; }
+.sum-head { font-size: 12px; color: var(--text-2); flex-shrink: 0; }
 .sum-empty {
   flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--text-2); font-size: 12px; background: var(--bg-0);
@@ -89,27 +92,28 @@ const headLabel = computed(() => {
   background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm);
   padding: 4px 8px;
 }
-.sum-row.row-active { border-color: var(--accent); background: rgba(56, 189, 248, .08); }
+.sum-row.row-active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .sum-row.row-error { border-color: var(--danger); background: rgba(248, 113, 113, .08); }
-.run-dot { flex: none; color: var(--accent); font-size: 11px; }
+.run-dot { flex: none; color: var(--accent); font-size: 12px; }
 .run-dot.fail { color: var(--danger); }
 .idx { color: var(--text-2); width: 18px; text-align: right; flex: none; }
 .icon {
   display: inline-flex; align-items: center; justify-content: center;
   width: 18px; height: 18px; border-radius: 4px; flex: none;
-  background: var(--bg-3); color: var(--accent); font-size: 11px;
+  background: var(--bg-3); color: var(--accent); font-size: 12px;
 }
 .label { font-size: 12px; color: var(--text-0); flex: none; }
-.summary { flex: 1; min-width: 0; font-size: 11px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.summary { flex: 1; min-width: 0; font-size: 12px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-ops { flex: none; }
 .mini-btn {
   border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
-  border-radius: 4px; font-size: 11px; padding: 2px 7px; cursor: pointer; flex: none;
+  border-radius: 4px; font-size: 12px; padding: 2px 7px; cursor: pointer; flex: none;
 }
 .mini-btn.link { color: var(--accent-2); }
 .mini-btn.link:hover { border-color: var(--accent-2); color: var(--accent-2); }
 .mini-btn.run { color: var(--accent); }
-.mini-btn.run:hover { background: var(--accent); color: #06251c; }
-.run-hint { font-size: 11px; color: var(--text-2); flex-shrink: 0; }
-.mono { font-family: var(--mono); font-size: 11px; }
+.mini-btn.run:hover { background: var(--accent); color: #202015; }
+.run-hint { font-size: 12px; color: var(--text-2); flex-shrink: 0; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.mini-btn{min-height:26px;font-size:13px}.sum-row{min-height:37px;padding:5px 7px}.summary{font-size:13px}.run-hint{display:none}
 </style>

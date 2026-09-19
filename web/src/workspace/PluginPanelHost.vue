@@ -73,7 +73,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import iframePocUrl from './iframe-poc.html?url'
 import {
   BRIDGE_CONNECT_TYPE,
@@ -135,8 +135,10 @@ async function runAction(field) {
   try {
     const result = await api.callExtension(props.contribution.pluginId, field.action, { ...values })
     if (result !== null && result !== undefined) actionResult.value = result
+    props.bridge.dispatch?.('status.set', { text: `${field.label} · 已完成`, actions: actionResultText.value ? [{ label: '复制结果', copy: actionResultText.value }] : [] }, props.contribution)
   } catch (error) {
     bridgeError.value = error?.message || String(error)
+    props.bridge.dispatch?.('status.set', { text: bridgeError.value, tone: 'error', actions: [{ label: '复制', copy: bridgeError.value }] }, props.contribution)
   } finally {
     callingAction.value = false
   }
@@ -194,6 +196,7 @@ function connect() {
 }
 
 watch(() => props.contribution?.key, () => { if (iframeEl.value) connect() })
+onUnmounted(disconnect)
 </script>
 
 <style scoped>
@@ -201,12 +204,12 @@ watch(() => props.contribution?.key, () => { if (iframeEl.value) connect() })
 .plugin-panel-frame { width:100%; height:100%; flex:1; min-height:0; border:0; background:var(--bg-1); }
 .declarative-panel-placeholder { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; color:var(--text-2); font-size:12px; }
 .workspace-empty-title { color:var(--text-0); font-weight:600; }
-.plugin-bridge-error { position:absolute; left:10px; right:10px; bottom:10px; padding:6px 8px; border:1px solid var(--danger); border-radius:var(--radius-sm); background:rgba(8,10,16,.92); color:var(--danger); font-size:11px; }
-.plugin-action-result { position:absolute; left:10px; right:10px; bottom:10px; padding:6px 8px; border:1px solid var(--border); border-radius:var(--radius-sm); background:rgba(8,10,16,.92); color:var(--text-1); font-size:11px; word-break:break-all; max-height:30%; overflow:auto; }
+.plugin-bridge-error { position:absolute; left:10px; right:10px; bottom:10px; padding:6px 8px; border:1px solid var(--danger); border-radius:var(--radius-sm); background:rgba(8,10,16,.92); color:var(--danger); font-size: 12px; }
+.plugin-action-result { position:absolute; left:10px; right:10px; bottom:10px; padding:6px 8px; border:1px solid var(--border); border-radius:var(--radius-sm); background:rgba(8,10,16,.92); color:var(--text-1); font-size: 12px; word-break:break-all; max-height:30%; overflow:auto; }
 
 /* declarative 表单：紧凑单列布局，适配右侧面板宽度 */
 .declarative-form { flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column; gap:10px; padding-right:2px; }
-.declarative-description { margin:0; color:var(--text-2); font-size:11px; line-height:1.5; }
+.declarative-description { margin:0; color:var(--text-2); font-size: 12px; line-height:1.5; }
 .declarative-field { display:flex; flex-direction:column; gap:4px; font-size:12px; min-width:0; }
 .declarative-field.is-button { flex-direction:row; align-items:center; gap:8px; flex-wrap:wrap; }
 .declarative-field.is-boolean { flex-direction:row; align-items:center; gap:8px; }
@@ -214,6 +217,7 @@ watch(() => props.contribution?.key, () => { if (iframeEl.value) connect() })
 .declarative-field .input,
 .declarative-field .select { width:100%; min-width:0; box-sizing:border-box; }
 .declarative-checkbox { width:15px; height:15px; margin:0; }
-.declarative-field-desc { color:var(--text-2); font-size:10px; line-height:1.4; }
+.declarative-field-desc { color:var(--text-2); font-size: 12px; line-height:1.4; }
 .declarative-button { flex:0 0 auto; }
+.plugin-panel-host{padding:10px;background:var(--bg-2)}.declarative-description,.declarative-field-desc{font-size:12px}.declarative-form{gap:9px}.declarative-field{display:grid;grid-template-columns:minmax(90px,140px) minmax(0,1fr);gap:6px 12px;align-items:center}.declarative-field-desc{grid-column:2}.declarative-field.is-button{display:flex}.plugin-action-result,.plugin-bridge-error{font-size:12px;background:var(--bg-1)}
 </style>

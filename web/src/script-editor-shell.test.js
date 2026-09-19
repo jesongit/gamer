@@ -147,6 +147,23 @@ describe('useScriptEditorShell：保存 409 冲突（SaveConflictModal 契约）
 })
 
 describe('useScriptEditorShell：函数库编辑（文件 → FunctionLibraryModel → 往返）', () => {
+  it('函数中调用 wait_find 后可自动保存，不把当前库当成完整函数目录', async () => {
+    const { api, calls } = makeApi()
+    const shell = useScriptEditorShell({ api })
+    await shell.loadFunctionFile('com.demo/_function.yaml')
+    shell.stack.apply({
+      type: 'insert_step', path: ['functions', 'login', 'run'], index: 0,
+      step: createCall('wait_find', { kind: 'value', cell: { lit: 'home' } }, 'hit'),
+    })
+    expect(shell.dirty).toBe(true)
+    const result = await shell.save({ suppressConflict: true })
+    expect(result.ok).toBe(true)
+    expect(calls.updateFunction).toHaveLength(1)
+    expect(calls.updateFunction[0].payload.content).toContain('wait_find: home')
+    expect(calls.updateFunction[0].payload.expected_version).toBe('f1')
+    expect(shell.dirty).toBe(false)
+  })
+
   it('函数级 params（functionParams 容器）+ 函数体插步 → serialize → parse ≡ 当前模型', async () => {
     const { api } = makeApi()
     const shell = useScriptEditorShell({ api })

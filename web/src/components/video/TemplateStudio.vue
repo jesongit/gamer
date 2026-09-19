@@ -577,29 +577,30 @@ watch(() => props.open, open => {
 .studio { width: min(980px, 96vw); max-height: 92vh; display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
 .studio-head { display: flex; align-items: center; gap: 10px; }
 .studio-title { font-size: 14px; font-weight: 700; color: var(--text-0); margin-right: auto; }
-.studio-frame { color: var(--text-2); font-size: 11px; }
-.studio-dep { padding: 6px 9px; border: 1px solid rgba(251,191,36,.4); border-radius: var(--radius-sm); background: rgba(251,191,36,.08); color: var(--warn); font-size: 11px; line-height: 1.5; }
-.studio-error { padding: 5px 8px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); background: rgba(248,113,113,.08); color: var(--danger); font-size: 11px; line-height: 1.5; word-break: break-all; }
+.studio-frame { color: var(--text-2); font-size: 12px; }
+.studio-dep { padding: 6px 9px; border: 1px solid rgba(251,191,36,.4); border-radius: var(--radius-sm); background: rgba(251,191,36,.08); color: var(--warn); font-size: 12px; line-height: 1.5; }
+.studio-error { padding: 5px 8px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); background: rgba(248,113,113,.08); color: var(--danger); font-size: 12px; line-height: 1.5; word-break: break-all; }
 .studio-body { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 12px; min-height: 0; flex: 1; }
 .stage-box { position: relative; min-height: 220px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #000; display: flex; }
 .frame-img { display: block; margin: auto; max-width: 100%; max-height: 62vh; object-fit: contain; user-select: none; }
 .frame-img.picking { cursor: crosshair; }
 .frame-error { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--danger); font-size: 12px; padding: 16px; text-align: center; }
-.overlay-select { position: absolute; border: 1.5px solid rgba(34,211,165,.95); background: rgba(34,211,165,.12); pointer-events: none; }
+.overlay-select { position: absolute; border: 1.5px solid color-mix(in srgb, var(--accent) 95%, transparent); background: color-mix(in srgb, var(--accent) 12%, transparent); pointer-events: none; }
 .overlay-hit { position: absolute; border: 1.5px solid rgba(74,222,128,.95); box-shadow: 0 0 0 1px rgba(0,0,0,.6); pointer-events: none; }
 .overlay-miss { position: absolute; border: 1.5px dashed rgba(248,113,113,.9); pointer-events: none; }
-.result-line { position: absolute; left: 0; right: 0; bottom: 0; padding: 5px 8px; background: rgba(8,10,16,.82); color: var(--text-0); font-size: 11px; line-height: 1.5; word-break: break-all; }
+.result-line { position: absolute; left: 0; right: 0; bottom: 0; padding: 5px 8px; background: rgba(8,10,16,.82); color: var(--text-0); font-size: 12px; line-height: 1.5; word-break: break-all; }
 .studio-side { display: flex; flex-direction: column; gap: 10px; min-height: 0; overflow: auto; }
 .side-block { display: flex; flex-direction: column; gap: 6px; padding: 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-1); }
 .side-title { font-size: 12px; font-weight: 700; color: var(--text-0); }
-.side-hint { color: var(--text-2); font-size: 10px; line-height: 1.5; }
-.side-block .input { width: 100%; padding: 4px 7px; font-size: 11px; }
+.side-hint { color: var(--text-2); font-size: 12px; line-height: 1.5; }
+.side-block .input { width: 100%; padding: 4px 7px; font-size: 12px; }
 .input.num { width: 56px; }
-.check-row { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--text-1); user-select: none; }
+.check-row { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-1); user-select: none; }
 .check-row.num { margin-left: auto; }
 .test-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap; }
-.mini-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 11px; padding: 2px 7px; }
+.mini-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 12px; padding: 2px 7px; }
 .mini-btn:hover { border-color: var(--accent); color: var(--accent); }
 .mono { font-family: var(--mono); }
 @media (max-width: 860px) { .studio-body { grid-template-columns: 1fr; } }
+.mini-btn{min-height:28px;padding:3px 7px;font-size:13px}.zone-head,.sub-head{gap:6px}.preview{max-height:200px;object-fit:contain;background:var(--bg-0)}.frame-shot{max-height:180px;object-fit:contain}.zone-title,.sub-title{font-size:13px}.input,.select{min-height:28px;font-size:13px}.cal-grid{gap:7px}.marker-row,.event-row{min-height:32px}
 </style>

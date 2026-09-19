@@ -26,13 +26,14 @@ import {
   type Program,
   type Step,
 } from './model'
-import { checkLiteral, hasParamDefault, isRefPath } from './schema'
+import { checkLiteral, hasParamDefault, isRefPath, isFunctionName } from './schema'
 
 // ---------- 校验上下文 ----------
 
 export interface ValidationContext {
   /** 当前可用函数名全集（原生插件函数 + 当前 Package 函数 + 编辑中文件自身）；缺省跳过存在性校验。 */
   knownFunctions?: Set<string>
+  resolveParams?: (name: string) => ParamDecl[] | null
   /** 模板短名在当前分区是否存在。 */
   resolveTemplate?: (name: string) => boolean
   /** 步骤嵌套深度上限（默认 32，与运行时 MAX_CALL_DEPTH 一致）。 */
@@ -73,24 +74,24 @@ export function validateFunctionLibrary(
 ): Diagnostic[] {
   const diags: Diagnostic[] = []
   const names = new Set<string>(model.functions.map((f) => f.name))
+  // 未提供完整目录时与脚本校验一致，跳过函数存在性检查。
+  // 本文件的函数名只是局部信息，不能据此拒绝原生函数或其他文件中的函数。
+  const knownFunctions = ctx.knownFunctions
+    ? new Set([...ctx.knownFunctions, ...names])
+    : undefined
   for (const fn of model.functions) {
     validateParamDecls(fn.params, `functions.${fn.name}.params`, diags)
     const asNames = new Set<string>()
     for (const step of fn.run) collectAsNames(step, asNames)
     const declaredVars = new Set<string>([
+      'name',
       ...fn.params.map((p) => p.name),
       ...Object.keys(fn.vars),
       ...asNames,
     ])
-    validateStepList(fn.run, `functions.${fn.name}.run`, declaredVars, { ...ctx, knownFunctions: union(ctx.knownFunctions, names) }, diags, 1)
+    validateStepList(fn.run, `functions.${fn.name}.run`, declaredVars, { ...ctx, knownFunctions }, diags, 1)
   }
   return diags
-}
-
-function union(a: Set<string> | undefined, b: Set<string>): Set<string> {
-  const out = new Set<string>(a ?? [])
-  for (const v of b) out.add(v)
-  return out
 }
 
 /** 解析 + 校验一步到位（编辑器保存前 / 测试使用）。 */
@@ -161,13 +162,28 @@ function validateStep(
 ): void {
   switch (step.kind) {
     case 'call': {
-      if (!isIdentifierSafe(step.fn)) {
-        diags.push(diag(CODES.nameInvalid, path, step.fn, `函数名 ${JSON.stringify(step.fn)} 非法——只允许小写字母、数字、下划线`))
+      if (!isFunctionName(step.fn)) {
+        diags.push(diag(CODES.nameInvalid, path, step.fn, `函数名 ${JSON.stringify(step.fn)} 非法——允许中文、小写字母、数字、下划线，不能以数字开头`))
       }
       if (ctx.knownFunctions && !ctx.knownFunctions.has(step.fn)) {
         diags.push(diag(CODES.fnNotFound, path, step.fn, `函数 ${step.fn} 不存在（可用：原生插件函数 + 当前 Package 函数）`))
       }
       validateArgs(step.args, path, declaredVars, ctx, diags)
+      const displayName = step.args.kind === 'map' ? step.args.entries.name : null
+      if (displayName && !isRefCell(displayName) && typeof displayName.lit !== 'string') {
+        diags.push(diag('yaml.args.type', path, 'name', 'name 必须是字符串或变量引用'))
+      }
+      const schema = ctx.resolveParams?.(step.fn)
+      const templateParams = schema?.filter(p => p.type === 'template').map(p => p.name)
+        ?? (['find', 'wait_find', 'tap_template', 'wait_disappear'].includes(step.fn) ? ['template'] : [])
+      for (const name of templateParams) {
+        const isFirstParam = schema ? schema[0]?.name === name : name === 'template'
+        const cell = step.args.kind === 'map' ? step.args.entries[name]
+          : step.args.kind === 'value' && isFirstParam ? step.args.cell : null
+        if (cell && !isRefCell(cell) && typeof cell.lit === 'string' && cell.lit.trim() && ctx.resolveTemplate && !ctx.resolveTemplate(cell.lit)) {
+          diags.push(diag('yaml.resource.tmpl_not_found', path, name, `模板 ${cell.lit} 在当前 Package 不存在`))
+        }
+      }
       if (step.as !== null && !isIdentifierSafe(step.as)) {
         diags.push(diag(CODES.asInvalid, path, 'as', `as 变量名 ${JSON.stringify(step.as)} 非法——只允许小写字母、数字、下划线`))
       }
@@ -175,9 +191,6 @@ function validateStep(
     }
     case 'if': {
       validateCell(step.cond, path, 'if', declaredVars, ctx, diags)
-      if (step.then.length === 0 && step.else.length === 0) {
-        diags.push(diag(CODES.ifThenMissing, path, 'then', 'if 步骤的 then/else 分支均为空'))
-      }
       break
     }
     case 'repeat': {
@@ -233,20 +246,17 @@ function validateCell(
     validateRef(cell.ref, path, field, declaredVars, diags)
     return
   }
-  // 字面量：模板名可达性（find/wait_find/tap_template/wait_disappear 的 template 实参）
-  const template = templateNameOf(cell.lit)
-  if (template !== null && ctx.resolveTemplate && !ctx.resolveTemplate(template)) {
-    diags.push(diag('yaml.resource.tmpl_not_found', path, field, `模板 ${template} 在当前 Package 不存在`))
+  // 容器中的字符串保留 YAML 表达式原文，递归检查引用，$$ 是字面量转义。
+  function visit(value: unknown): void {
+    if (typeof value === 'string' && value.startsWith('$') && !value.startsWith('$$') && value !== '$') {
+      validateRef(value.slice(1), path, field, declaredVars, diags)
+    } else if (Array.isArray(value)) {
+      value.forEach(visit)
+    } else if (value && typeof value === 'object') {
+      Object.values(value).forEach(visit)
+    }
   }
-}
-
-function templateNameOf(value: unknown): string | null {
-  if (typeof value === 'string' && value.trim() !== '') return value
-  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-    const t = (value as Record<string, unknown>).template
-    if (typeof t === 'string' && t.trim() !== '') return t
-  }
-  return null
+  if (cell.lit && typeof cell.lit === 'object') visit(cell.lit)
 }
 
 function validateRef(

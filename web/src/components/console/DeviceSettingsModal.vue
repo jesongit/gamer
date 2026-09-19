@@ -44,19 +44,19 @@ const ctx = reactive(props.context)
 </script>
 <style scoped>
 .dev-modal { width: 460px; }
-.head-sub { flex: 1; text-align: right; margin-right: 10px; font-size: 11px; color: var(--warn); }
-.cfg-hint { font-size: 11px; color: var(--text-2); line-height: 1.5; }
+.head-sub { flex: 1; text-align: right; margin-right: 10px; font-size: 12px; color: var(--warn); }
+.cfg-hint { font-size: 12px; color: var(--text-2); line-height: 1.5; }
 .muted { color: var(--text-2); font-weight: 400; }
 .type-picker { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-.type-opt { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 10px 4px; border-radius: var(--radius-sm); border: 1px solid var(--border); cursor: pointer; font-size: 11px; color: var(--text-1); transition: all .15s; text-align: center; }
+.type-opt { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 10px 4px; border-radius: var(--radius-sm); border: 1px solid var(--border); cursor: pointer; font-size: 12px; color: var(--text-1); transition: all .15s; text-align: center; }
 .type-opt:hover { border-color: #33405e; }
-.type-opt.sel { border-color: var(--accent); color: var(--accent); background: rgba(34,211,165,.06); }
+.type-opt.sel { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .type-icon { font-size: 18px; }
 .mode-picker { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .mode-opt { padding: 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); cursor: pointer; transition: all .15s; display: flex; flex-direction: column; gap: 3px; }
 .mode-opt:hover { border-color: #33405e; }
-.mode-opt.sel { border-color: var(--accent); background: rgba(34,211,165,.06); }
+.mode-opt.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, transparent); }
 .mode-title { font-size: 12px; font-weight: 600; }
-.mode-desc { font-size: 10px; color: var(--text-2); }
-.mono { font-family: var(--mono); font-size: 11px; color: var(--text-1); }
+.mode-desc { font-size: 12px; color: var(--text-2); }
+.mono { font-family: var(--mono); font-size: 12px; color: var(--text-1); }
 </style>

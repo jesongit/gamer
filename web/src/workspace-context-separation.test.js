@@ -58,6 +58,7 @@ describe('P3-CONTEXT：Device/App/Package/Plugin/Stage 分离', () => {
       currentPackageId: 'content.daily',
       plugin: { id: 'gamer.yaml' },
       activePluginId: 'gamer.yaml',
+      theme: expect.objectContaining({ name: 'gamer-dark', controlHeight: 28 }),
       connected: true,
       stage: {
         kind: 'media',

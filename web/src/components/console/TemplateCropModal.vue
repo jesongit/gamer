@@ -68,15 +68,15 @@ watch(() => !!ctx.crop.conflict, value => { if (value) resetCompareZoom(); else 
 .crop-stage{flex:1;min-height:0;display:flex;overflow:auto;border:1px solid var(--border);border-radius:var(--radius-sm);background:#000}
 .crop-stage .crop-canvas{margin:auto}
 .crop-canvas{border-radius:var(--radius-sm);cursor:crosshair;background:#000;touch-action:none}
-.crop-hint{font-size:10px;color:var(--text-2)}
-.crop-color-option{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-1);user-select:none}
+.crop-hint{font-size: 12px;color:var(--text-2)}
+.crop-color-option{display:flex;align-items:center;gap:6px;font-size: 12px;color:var(--text-1);user-select:none}
 .crop-conflict-body{gap:12px}
 .crop-conflict-message{padding:8px 10px;border:1px solid rgba(250,204,21,.4);border-radius:var(--radius-sm);background:rgba(250,204,21,.08);color:var(--text-0);font-size:12px}
-.crop-conflict-hint{font-size:10px;color:var(--text-2)}
+.crop-conflict-hint{font-size: 12px;color:var(--text-2)}
 .crop-compare{flex:1;min-height:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .crop-compare-card{min-width:0;min-height:0;display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-1)}
-.crop-compare-label{font-size:11px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.crop-compare-label .mono{float:right;color:var(--text-2)}
+.crop-compare-label{font-size: 12px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.crop-compare-label .mono{float:right;color:var(--text-2)}
 .crop-compare-image{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:auto;border-radius:var(--radius-sm);background:#000}
 .crop-compare-image img{display:block;max-width:100%;max-height:100%;object-fit:contain;transform-origin:center;transition:transform .12s ease}
-.mono{font-family:var(--mono);font-size:11px;color:var(--text-1)}
+.mono{font-family:var(--mono);font-size: 12px;color:var(--text-1)}
 </style>

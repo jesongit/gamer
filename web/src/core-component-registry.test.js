@@ -12,9 +12,9 @@ import {
 import { unknownCorePanel } from './workspace/contribution-manager'
 
 describe('Console core panel component registry', () => {
-  it('maps manifest component keys to host console components with context extraction', () => {
+  it('maps manifest component keys to host console components with context extraction', async () => {
     const scripts = resolveCoreComponent(CORE_PANEL_COMPONENTS.scripts)
-    expect(scripts?.component).toBe(ScriptRunner)
+    expect(await scripts?.component.__asyncLoader()).toBe(ScriptRunner)
     expect(scripts?.panelClass).toBe('script-tab')
     expect(scripts?.aliases).toContain('script')
     expect(scripts?.getProps?.({ scriptRunner: { scripts: { kind: 'script-panel' } } })).toEqual({
@@ -22,24 +22,24 @@ describe('Console core panel component registry', () => {
     })
 
     const templates = resolveCoreComponent('console.templates')
-    expect(templates?.component).toBe(TemplateCapture)
+    expect(await templates?.component.__asyncLoader()).toBe(TemplateCapture)
     expect(templates?.getProps?.({ templateCapture: { kind: 'capture' } })).toEqual({
       context: { kind: 'capture' },
     })
 
     const keymaps = resolveCoreComponent('console.keymaps')
-    expect(keymaps?.component).toBe(KeymapPanel)
+    expect(await keymaps?.component.__asyncLoader()).toBe(KeymapPanel)
     expect(keymaps?.aliases).toContain('keymap')
     expect(keymaps?.getProps?.({ keymap: { kind: 'keymap' } })).toEqual({
       context: { kind: 'keymap' },
     })
   })
 
-  it('functions panel binds its own runner scope (no shared runKind mutation)', () => {
+  it('functions panel binds its own runner scope (no shared runKind mutation)', async () => {
     const scripts = resolveCoreComponent(CORE_PANEL_COMPONENTS.scripts)
     const functions = resolveCoreComponent(CORE_PANEL_COMPONENTS.functions)
     // 两个面板是同一宿主组件 + 各自作用域上下文；不存在「挂载即改写共享 runKind」的副作用
-    expect(functions?.component).toBe(ScriptRunner)
+    expect(await functions?.component.__asyncLoader()).toBe(ScriptRunner)
     expect(functions?.getProps?.({ scriptRunner: { functions: { kind: 'func-panel' } } })).toEqual({
       context: { kind: 'func-panel' },
     })
@@ -48,11 +48,11 @@ describe('Console core panel component registry', () => {
       .toEqual({ context: undefined })
   })
 
-  it('maps gamer.video manifest component key VideoWorkbench (self-contained, no context injection)', () => {
+  it('maps gamer.video manifest component key VideoWorkbench (self-contained, no context injection)', async () => {
     // 合同 §5：gamer.video manifest `component = "VideoWorkbench"`（宿主组件名字面量）
     expect(CORE_PANEL_COMPONENTS.video).toBe('VideoWorkbench')
     const video = resolveCoreComponent('VideoWorkbench')
-    expect(video?.component).toBe(VideoWorkbench)
+    expect(await video?.component.__asyncLoader()).toBe(VideoWorkbench)
     expect(video?.panelClass).toBe('video-tab')
     // 面板自取数据（videoApi 直调媒体/录制 REST），不需要宿主 context 提取
     expect(video?.getProps).toBeUndefined()

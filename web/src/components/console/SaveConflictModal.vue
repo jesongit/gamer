@@ -35,7 +35,7 @@ const emit = defineEmits(['reload', 'overwrite', 'close'])
 <style scoped>
 .conflict-modal { min-width: 420px; }
 .conflict-msg { margin: 0 0 6px; font-size: 13px; color: var(--text-0); }
-.conflict-resource { margin: 0 0 10px; font-size: 11px; color: var(--accent-2); }
+.conflict-resource { margin: 0 0 10px; font-size: 12px; color: var(--accent-2); }
 .conflict-hint { margin: 0 0 12px; font-size: 12px; color: var(--text-2); }
 .conflict-actions { display: flex; gap: 10px; justify-content: flex-end; }
 </style>

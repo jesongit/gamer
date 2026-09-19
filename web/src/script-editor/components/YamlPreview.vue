@@ -84,7 +84,7 @@ function downloadYaml(): void {
 .preview-actions { display: inline-flex; gap: 6px; }
 .mini-btn {
   border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
-  border-radius: 4px; font-size: 11px; padding: 3px 8px; cursor: pointer;
+  border-radius: 4px; font-size: 12px; padding: 3px 8px; cursor: pointer;
 }
 .mini-btn:hover { color: var(--accent); border-color: var(--accent); }
 .yaml-pre {

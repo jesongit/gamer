@@ -310,6 +310,7 @@ export function useConsoleKeymap({
     selectedName: activeKeymapDisplayName,
     activeKeymapName,
     usedName: activeKeymapDisplayName,
+    keymapStatus,
     model: activeKeymapModel,
     activeKeymapModel,
     loading: keymapLoading,

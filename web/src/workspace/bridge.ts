@@ -4,7 +4,7 @@ export const BRIDGE_REQUEST_TYPE = 'gamer-ui:request'
 export const BRIDGE_RESPONSE_TYPE = 'gamer-ui:response'
 
 export const UI_BRIDGE_METHODS = Object.freeze([
-  'context.get', 'plugin.call', 'toast.show', 'dialog.confirm', 'workspace.openPanel',
+  'context.get', 'status.set', 'status.clear', 'plugin.call', 'toast.show', 'dialog.confirm', 'workspace.openPanel',
   'video.selectRegion', 'video.pickPoint', 'video.showOverlay', 'video.clearOverlay',
   'overlay.show', 'overlay.clear', 'storage.get', 'storage.set',
 ])
@@ -40,6 +40,7 @@ export function createMemoryStorage() {
 
 export interface UiBridgeOptions {
   getContext?: () => unknown
+  operationStatus?: (payload: unknown, meta: { pluginId: string; panelId: string }) => unknown | Promise<unknown>
   pluginCall?: (payload: unknown, meta: { pluginId: string; panelId: string }) => unknown | Promise<unknown>
   selectRegion?: (options?: unknown) => unknown | Promise<unknown>
   pickPoint?: (options?: unknown) => unknown | Promise<unknown>
@@ -62,6 +63,17 @@ export function createUiBridge(options: UiBridgeOptions = {}) {
     const scope = { pluginId: String(meta.pluginId || 'anonymous'), panelId: String(meta.panelId || '') }
     switch (name) {
       case 'context.get': return options.getContext?.() || {}
+      case 'status.set': {
+        if (!meta.pluginId || !meta.panelId) throw new UiBridgeError('scope_required', 'Status requires a host-owned panel identity')
+        const item = payload as { text?: unknown; tone?: unknown; actions?: unknown } | null
+        if (!item || typeof item.text !== 'string' || item.text.length > 1000) throw new UiBridgeError('invalid_request', 'Status requires text of at most 1000 characters')
+        const actions = Array.isArray(item.actions) ? item.actions.slice(0, 4).map((action: { label?: unknown; copy?: unknown; detail?: unknown; panel?: unknown }) => ({ label: String(action?.label || '').slice(0, 80), ...(typeof action?.copy === 'string' ? { copy: action.copy.slice(0, 10000) } : {}), ...(typeof action?.detail === 'string' ? { detail: action.detail.slice(0, 10000) } : {}), ...(typeof action?.panel === 'string' ? { panel: action.panel.slice(0, 200) } : {}) })) : []
+        return options.operationStatus?.({ text: item.text, tone: item.tone, actions }, scope) ?? false
+      }
+      case 'status.clear': {
+        if (!meta.pluginId || !meta.panelId) throw new UiBridgeError('scope_required', 'Status requires a host-owned panel identity')
+        return options.operationStatus?.(null, scope) ?? false
+      }
       case 'plugin.call':
         if (!options.pluginCall) throw new UiBridgeError('plugin_call_unavailable', 'Plugin backend is not available')
         return options.pluginCall(payload, scope)

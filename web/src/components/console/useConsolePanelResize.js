@@ -1,46 +1,27 @@
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 // 右侧功能区宽度：五个页签共用同一宽度，避免切换页签时布局突然跳变；拖拽条支持手动调整。
-const PANEL_STORAGE_KEY = 'gb_console_panel_width'
-const PANEL_DEFAULT_WIDTH = 340
-const PANEL_MIN_WIDTH = 280
-const PANEL_MAX_WIDTH = 560
-const MIN_STAGE_WIDTH = 360
+const PANEL_STORAGE_KEY = 'gamer.console.panel-ratio'
 
-/** 左右分区拖拽：Console 右侧面板宽度状态与拖拽/键盘调整（自 Console.vue 原样拆出）。 */
-export function useConsolePanelResize({ consoleEl }) {
-  const panelWidth = ref(readPanelWidth())
+export function useConsolePanelResize({ consoleEl, videoWrap }) {
+  const totalWidth = ref(1200)
+  const stageHeight = ref(0)
+  const ratio = ref(0.46)
+  try { const saved = Number(localStorage.getItem(PANEL_STORAGE_KEY)); if (saved > 0 && saved <= .5) ratio.value = saved } catch {}
+  const PANEL_MAX_WIDTH = computed(() => Math.round(totalWidth.value * .5))
+  // 画面宽度达到可用高度 × 16/9 后继续右拖只会增加左右留白。
+  // 保留右侧编辑器至少 320px；左侧原有至少一半的约束优先。
+  const PANEL_MIN_WIDTH = computed(() => Math.min(PANEL_MAX_WIDTH.value, Math.max(320,
+    stageHeight.value > 0 ? Math.ceil(totalWidth.value - stageHeight.value * 16 / 9) : Math.round(totalWidth.value * .35))))
+  const panelWidth = computed({ get: () => clampPanelWidth(totalWidth.value * ratio.value), set: width => { ratio.value = clampPanelWidth(width) / totalWidth.value } })
   const panelResizing = ref(false)
   let panelResizeState = null
-
-  function readPanelWidth() {
-    try {
-      const saved = Number(localStorage.getItem(PANEL_STORAGE_KEY))
-      return Number.isFinite(saved) && saved > 0
-        ? Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, Math.round(saved)))
-        : PANEL_DEFAULT_WIDTH
-    } catch {
-      return PANEL_DEFAULT_WIDTH
-    }
-  }
-
-  function panelMaxWidth() {
-    const total = consoleEl.value?.clientWidth || window.innerWidth || 0
-    if (!total) return PANEL_MAX_WIDTH
-    // 保留最小画面区，并扣除 Console 的左右内边距、间距和拖拽条占位。
-    return Math.max(PANEL_MIN_WIDTH, Math.min(PANEL_MAX_WIDTH, total - MIN_STAGE_WIDTH - 50))
-  }
-
-  function clampPanelWidth(value) {
-    return Math.round(Math.max(PANEL_MIN_WIDTH, Math.min(panelMaxWidth(), Number(value) || PANEL_DEFAULT_WIDTH)))
-  }
-
-  function savePanelWidth() {
-    try { localStorage.setItem(PANEL_STORAGE_KEY, String(panelWidth.value)) } catch { /* 忽略不可用的存储 */ }
-  }
+  function clampPanelWidth(value) { return Math.round(Math.max(PANEL_MIN_WIDTH.value, Math.min(PANEL_MAX_WIDTH.value, value))) }
+  function savePanelWidth() { try { localStorage.setItem(PANEL_STORAGE_KEY, String(ratio.value)) } catch {} }
 
   function startPanelResize(e) {
     if (e.button !== undefined && e.button !== 0) return
+    e.currentTarget?.focus?.()
     panelResizing.value = true
     panelResizeState = { startX: e.clientX, startWidth: panelWidth.value, pointerId: e.pointerId }
     e.currentTarget?.setPointerCapture?.(e.pointerId)
@@ -76,20 +57,29 @@ export function useConsolePanelResize({ consoleEl }) {
   }
 
   function clampPanelToViewport() {
-    const next = clampPanelWidth(panelWidth.value)
-    if (next === panelWidth.value) return
-    panelWidth.value = next
-    savePanelWidth()
+    totalWidth.value = Math.max(1, (consoleEl.value?.clientWidth || window.innerWidth) - 6)
+    // 隐藏的工作台和全屏画面不能覆盖正常布局的高度；退出时重新测量。
+    const height = videoWrap?.value?.clientHeight || 0
+    if (height > 0 && !document.fullscreenElement) stageHeight.value = height
   }
+  let observer
 
   onMounted(() => {
     clampPanelToViewport()
+    if (typeof ResizeObserver !== 'undefined' && consoleEl.value) {
+      observer = new ResizeObserver(clampPanelToViewport)
+      observer.observe(consoleEl.value)
+      if (videoWrap?.value) observer.observe(videoWrap.value)
+    }
     window.addEventListener('resize', clampPanelToViewport)
+    document.addEventListener('fullscreenchange', clampPanelToViewport)
   })
 
   onUnmounted(() => {
     stopPanelResize()
+    observer?.disconnect()
     window.removeEventListener('resize', clampPanelToViewport)
+    document.removeEventListener('fullscreenchange', clampPanelToViewport)
   })
 
   return {

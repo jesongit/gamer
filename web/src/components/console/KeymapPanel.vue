@@ -4,18 +4,18 @@
       <div>
         <div class="keymap-title">按键映射</div>
         <div class="keymap-sub mono">
-          {{ pkg ? '分区：' + pkg + ' · ' + keymaps.length + ' 个方案' : '请先选择应用分区' }}
+          {{ pkg ? '分区：' + pkg + ' · ' + keymaps.length + ' 个方案' : '请先选择配置包' }}
         </div>
       </div>
       <div class="head-actions">
-        <button v-if="hasCallback('onRefresh')" class="btn btn-sm" type="button" :disabled="loading || saving" @click="invoke('onRefresh')">↻ 刷新</button>
-        <button class="btn btn-sm btn-primary" type="button" :disabled="!pkg || loading || editing" @click="startNew">＋ 新增映射</button>
+        <button v-if="hasCallback('onRefresh')" class="btn btn-sm" type="button" :disabled="loading || saving" @click="invoke('onRefresh')"><UiIcon name="refresh" />刷新</button>
+        <button class="btn btn-sm btn-primary" type="button" :disabled="!pkg || loading || editing" @click="startNew"><UiIcon name="plus" />新增映射</button>
       </div>
     </div>
 
     <div v-if="error" class="keymap-error" role="alert" data-testid="keymap-error">{{ error }}</div>
     <div v-if="note" class="keymap-note" role="status" data-testid="keymap-note">{{ note }}</div>
-    <div v-if="!pkg" class="keymap-empty" data-testid="keymap-no-package">暂无应用分区：请先在右侧包名下拉中选择包名</div>
+    <div v-if="!pkg" class="keymap-empty" data-testid="keymap-no-package">暂无配置包：请先在投屏上方选择或新建配置包</div>
 
     <template v-else>
       <div class="scheme-list" data-testid="keymap-scheme-list">
@@ -64,7 +64,7 @@
           </label>
           <div class="binding-toolbar">
             <span class="section-title">绑定列表（{{ draft.bindings.length }}）</span>
-            <button class="btn btn-sm" type="button" @click="addBinding">＋ 添加绑定</button>
+            <button class="btn btn-sm" type="button" @click="addBinding"><UiIcon name="plus" />添加绑定</button>
           </div>
           <div class="binding-list" data-testid="keymap-binding-list">
             <div v-if="!draft.bindings.length" class="list-empty">暂无绑定，点击「添加绑定」开始配置</div>
@@ -81,7 +81,7 @@
                 <button class="btn btn-sm" type="button" :class="{ active: captureIndex === index }" @click="toggleCapture(index, $event)">
                   {{ captureIndex === index ? '按任意键…' : '录入按键' }}
                 </button>
-                <button class="icon-btn danger" type="button" title="删除绑定" @click="removeBinding(index)">✕</button>
+                <button class="icon-btn danger" type="button" title="删除绑定" @click="removeBinding(index)" aria-label="删除绑定"><UiIcon name="close" /></button>
               </div>
               <div class="action-row">
                 <label class="action-type">
@@ -162,6 +162,8 @@
 </template>
 
 <script setup>
+import UiIcon from '../ui/UiIcon.vue'
+import { useOperationStatus } from '../ui/useOperationStatus'
 import { computed, nextTick, ref, watch } from 'vue'
 import { dump, load } from 'js-yaml'
 import { normalizeKeymap, validateKeymap } from '../../keymap-control'
@@ -288,6 +290,12 @@ const loading = computed(() => !!read('loading', false))
 const saving = computed(() => !!read('saving', false))
 const saveDisabled = computed(() => saving.value || saveInFlight.value)
 const error = computed(() => String(read('error', '') || ''))
+useOperationStatus(() => {
+  const failure = error.value || (note.value.startsWith('保存失败') ? note.value : '')
+  const mapping = read('keymapStatus', {})
+  const selected = mapping.name ? `映射 · ${mapping.name}${mapping.inactive ? ' · 文本模式下未生效' : ''}` : ''
+  return { text: failure || (saveInFlight.value ? '保存中…' : note.value || (editing.value ? '正在编辑映射' : selected)), tone: failure ? 'error' : '', actions: failure ? [{ label: '详情', detail: failure }, { label: '复制', copy: failure }] : [] }
+})
 const usedName = computed(() => String(read('usedName', read('selectedName', '')) || ''))
 const selectedItem = computed(() => keymaps.value.find(item => itemName(item) === selectedName.value) || null)
 const selectedModel = computed(() => selectedItem.value ? sourceModel(selectedItem.value) : emptyModel(''))
@@ -541,21 +549,21 @@ function cancelEdit() {
 .keymap-sub { margin-top: 3px; color: var(--text-2); }
 .head-actions { display: flex; gap: 6px; }
 .keymap-empty, .list-empty { padding: 20px 10px; text-align: center; color: var(--text-2); font-size: 12px; }
-.keymap-error, .keymap-note, .diagnostic-list { padding: 6px 8px; border-radius: var(--radius-sm); font-size: 11px; line-height: 1.5; }
+.keymap-error, .keymap-note, .diagnostic-list { padding: 6px 8px; border-radius: var(--radius-sm); font-size: 12px; line-height: 1.5; }
 .keymap-error, .diagnostic-list { color: var(--danger, #ef6b73); border: 1px solid rgba(239, 107, 115, .35); background: rgba(239, 107, 115, .08); }
-.keymap-note { color: var(--accent-2); border: 1px solid rgba(56, 189, 248, .3); background: rgba(56, 189, 248, .07); }
+.keymap-note { color: var(--accent-2); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .scheme-list { flex: none; min-height: 80px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
-.list-head, .scheme-row { display: grid; grid-template-columns: minmax(0, 1fr) 40px 38px auto; align-items: center; gap: 7px; padding: 6px 8px; font-size: 11px; }
+.list-head, .scheme-row { display: grid; grid-template-columns: minmax(0, 1fr) 40px 38px auto; align-items: center; gap: 7px; padding: 6px 8px; font-size: 12px; }
 .list-head { color: var(--text-2); border-bottom: 1px solid var(--border); background: var(--bg-2); }
-.scheme-row { min-height: 34px; color: var(--text-1); border-bottom: 1px solid rgba(80, 92, 119, .25); cursor: pointer; }
+.scheme-row { min-height: 34px; color: var(--text-1); border-bottom: 1px solid color-mix(in srgb, var(--border) 25%, transparent); cursor: pointer; }
 .scheme-row:last-child { border-bottom: 0; }
 .scheme-row:hover, .scheme-row.selected { background: var(--bg-3); }
 .scheme-row.selected { box-shadow: inset 2px 0 var(--accent); }
 .scheme-name { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .scheme-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-0); }
-.using-tag, .editor-badge { flex: none; padding: 1px 5px; border: 1px solid rgba(34, 211, 165, .4); border-radius: 4px; color: var(--accent); background: rgba(34, 211, 165, .08); font-size: 10px; }
+.using-tag, .editor-badge { flex: none; padding: 1px 5px; border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); border-radius: 4px; color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); font-size: 12px; }
 .row-actions { display: flex; gap: 4px; }
-.mini-btn, .mode-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 11px; padding: 3px 6px; }
+.mini-btn, .mode-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 12px; padding: 3px 6px; }
 .mini-btn:hover, .mode-btn:hover { border-color: var(--accent); color: var(--accent); }
 .mini-btn.danger:hover, .mini-btn.danger.armed { border-color: var(--danger); color: var(--danger); }
 .keymap-editor, .keymap-preview { display: flex; flex: 1; min-height: 260px; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-0); overflow: hidden; }
@@ -563,8 +571,8 @@ function cancelEdit() {
 .editor-mode { display: flex; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
 .mode-btn { border: 0; border-radius: 0; }
 .mode-btn + .mode-btn { border-left: 1px solid var(--border); }
-.mode-btn.active { color: var(--accent); background: rgba(34, 211, 165, .12); }
-.name-field { display: flex; align-items: center; gap: 8px; color: var(--text-1); font-size: 11px; }
+.mode-btn.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.name-field { display: flex; align-items: center; gap: 8px; color: var(--text-1); font-size: 12px; }
 .name-field .input { flex: 1; min-width: 0; }
 .section-title { color: var(--text-0); font-size: 12px; font-weight: 600; }
 .binding-list, .preview-bindings { display: flex; flex: 1; min-height: 80px; flex-direction: column; gap: 6px; overflow: auto; }
@@ -574,20 +582,21 @@ function cancelEdit() {
 .key-input { flex: 1 1 130px; min-width: 0; }
 .icon-btn { width: 25px; height: 25px; padding: 0; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; }
 .icon-btn:hover { color: var(--danger); border-color: var(--danger); }
-.action-row { color: var(--text-2); font-size: 10px; }
+.action-row { color: var(--text-2); font-size: 12px; }
 .action-hint { color: var(--text-2); }
 .action-type, .coord, .duration, .raw-field { display: inline-flex; align-items: center; gap: 5px; }
-.action-type .select { min-width: 130px; padding: 4px 6px; font-size: 11px; }
+.action-type .select { min-width: 130px; padding: 4px 6px; font-size: 12px; }
 .coord-label { margin-left: 3px; }
 .coord .input { width: 56px; padding: 3px 5px; }
 .duration .input, .raw-field .input { width: 70px; padding: 3px 5px; }
 .or-label { color: var(--text-2); }
 .raw-yaml { flex: 1; min-height: 180px; width: 100%; resize: vertical; box-sizing: border-box; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-1); color: var(--text-0); font: 12px/1.55 var(--mono); }
-.raw-hint, .preview-sub { color: var(--text-2); font-size: 10px; }
+.raw-hint, .preview-sub { color: var(--text-2); font-size: 12px; }
 .diagnostic-list { max-height: 84px; overflow: auto; }
 .preview-card { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 8px; }
-.preview-binding { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-1); font-size: 11px; }
+.preview-binding { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-1); font-size: 12px; }
 .key-chip { min-width: 62px; padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--accent); background: var(--bg-2); text-align: center; }
 .preview-edit { align-self: flex-start; margin-top: auto; }
-.mono { font-family: var(--mono); font-size: 11px; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.keymap-title{display:none}.keymap-panel{gap:8px}.keymap-sub{margin:0;font-size:12px}.keymap-editor,.keymap-preview{padding:8px;min-height:220px;background:var(--bg-2)}.binding-card{padding:7px;background:var(--bg-3);gap:6px}.list-head,.scheme-row{padding:5px 8px;font-size:13px;min-height:35px}.scheme-list{max-height:28%;overflow:auto;min-height:75px}.mini-btn,.mode-btn,.icon-btn{min-height:28px;font-size:13px}.action-row{font-size:12px}.action-hint{font-size:12px;flex-basis:100%}.coord .input{width:64px}.action-type .select{font-size:13px;padding:3px 6px}.editor-foot .btn{height:28px;min-width:60px;justify-content:center}
 </style>

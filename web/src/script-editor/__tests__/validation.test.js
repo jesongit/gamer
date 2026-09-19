@@ -59,11 +59,30 @@ describe('V1 script validation', () => {
 })
 
 describe('V1 function library validation', () => {
+  it('without a complete catalog, native and other-file calls are not reported missing', () => {
+    const { diagnostics } = validateSource(
+      'functions:\n  login:\n    run:\n      - wait_find: home\n        as: hit\n      - if: $hit\n        then:\n          - tap: $hit.center\n          - claim_daily: {}\n',
+      'function_library',
+    )
+    expect(diagnostics).toEqual([])
+  })
+
+  it('without a catalog, invalid variables and missing templates still fail validation', () => {
+    const { diagnostics } = validateSource(
+      'functions:\n  login:\n    run:\n      - wait_find: missing_template\n      - tap: $unknown.center\n',
+      'function_library',
+      { resolveTemplate: () => false },
+    )
+    expect(diagnostics.map(d => d.code)).toEqual([
+      'yaml.resource.tmpl_not_found', 'yaml.var.undefined',
+    ])
+  })
+
   it('calls inside functions see sibling functions and natives', () => {
     const { model } = parseFunctionLibrary(
       'functions:\n  outer:\n    run:\n      - inner: {}\n      - tap: [0.5, 0.5]\n  inner:\n    run:\n      - log: hi\n',
     )
-    const known = new Set(['tap', 'log', ...model.functions.map((f) => f.name)])
+    const known = new Set(['tap', 'log'])
     expect(validateFunctionLibrary(model, { knownFunctions: known })).toEqual([])
   })
 

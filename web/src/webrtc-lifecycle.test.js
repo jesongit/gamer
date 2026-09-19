@@ -1,4 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
+const { dialogDecision } = vi.hoisted(() => ({ dialogDecision: vi.fn() }))
+vi.mock('./components/ui/useConfirmDialog', () => ({ useConfirmDialog: () => Object.assign(dialogDecision, { cancel: vi.fn() }) }))
 import { ref } from 'vue'
 import { useWebRtcLifecycle } from './composables/useWebRtcLifecycle'
 
@@ -109,7 +111,7 @@ describe('useWebRtcLifecycle', () => {
     global.RTCPeerConnection = FakePeer
     global.RTCSessionDescription = function RTCSessionDescription(desc) { return desc }
     vi.stubGlobal('location', { protocol: 'http:', host: 'example.test' })
-    vi.stubGlobal('confirm', vi.fn(() => false))
+    dialogDecision.mockResolvedValue(false)
   })
 
   afterEach(() => {
@@ -155,9 +157,9 @@ describe('useWebRtcLifecycle', () => {
   it('propagates conflict on manual takeover and closes stale peer before retry', async () => {
     const lifecycle = makeLifecycle()
     FakeSocket.mode = 'conflict'
-    global.confirm = vi.fn(() => true)
+    dialogDecision.mockResolvedValue(true)
     await lifecycle.connect(true)
-    expect(global.confirm).toHaveBeenCalled()
+    expect(dialogDecision).toHaveBeenCalled()
     expect(FakeSocket.instances.some(sock => sock.sent.some(s => JSON.parse(s).force === true))).toBe(true)
   })
 

@@ -1,5 +1,4 @@
-import { onUnmounted, watch } from 'vue'
-import { DEFAULT_PANEL_KEY } from '../../workspace/registry'
+import { onUnmounted, ref, watch } from 'vue'
 import { isRemoteKeymapRunning } from '../../gamer-keymap-extension'
 
 /**
@@ -24,6 +23,7 @@ export function useConsoleWorkspacePanels({
   // 服务端把空声明归一为 ['*']），喂给导航下拉按当前应用过滤
   pluginTargets,
 }) {
+  const extensionsReady = ref(false)
   let extensionUiPollTimer = null
   let gamepadPollTimer = null
   const gamepadSnapshot = new Map()
@@ -31,6 +31,8 @@ export function useConsoleWorkspacePanels({
   async function refreshServerExtensions() {
     try {
       const response = await serverUiAdapter.refresh()
+      extensionsReady.value = true
+      syncPanelFromRoute()
       remoteKeymapRunning.value = isRemoteKeymapRunning(response?.extensions)
       if (pluginNames) {
         const next = {}
@@ -97,8 +99,8 @@ export function useConsoleWorkspacePanels({
     serverUiAdapter.dispose()
   })
 
-  // 主导航虚拟视图（plan §29/§30：市场 / 插件），不经 PanelRegistry
-  const VIRTUAL_PANEL_KEYS = new Set(['market', 'plugins'])
+  // 主导航虚拟页面不经 PanelRegistry；首次进入或无效路径统一回工作台。
+  const VIRTUAL_PANEL_KEYS = new Set(['plugins', 'packages', 'workbench'])
 
   function isVirtualPanelKey(value) {
     return VIRTUAL_PANEL_KEYS.has(String(value || '').trim())
@@ -114,8 +116,9 @@ export function useConsoleWorkspacePanels({
       activePanelKey.value = requested
       return
     }
-    const selected = panelRegistry.resolve(requested) || panelRegistry.defaultPanel()
-    const key = selected?.key || DEFAULT_PANEL_KEY
+    if (requested && !requested.startsWith('gamer.core:') && !extensionsReady.value) { activePanelKey.value = requested; return }
+    const selected = panelRegistry.resolve(requested)
+    const key = selected?.key || 'workbench'
     activePanelKey.value = key
     if (replaceInvalid && requested !== key) {
       router.replace({ path: route.path, query: { ...route.query, panel: key } })
@@ -130,8 +133,8 @@ export function useConsoleWorkspacePanels({
       const query = { ...route.query, panel: requested }
       return router[replace ? 'replace' : 'push']({ path: route.path, query }).then(() => requested)
     }
-    const selected = panelRegistry.resolve(requested) || panelRegistry.defaultPanel()
-    if (!selected) return null
+    const selected = panelRegistry.resolve(requested)
+    if (!selected) return openPanel('workbench', { replace })
     if (activePanelKey.value === selected.key && String(routePanelValue() || '') === selected.key) return selected.key
     activePanelKey.value = selected.key
     const query = { ...route.query, panel: selected.key }
@@ -139,7 +142,8 @@ export function useConsoleWorkspacePanels({
   }
 
   function fallbackPanel(key) {
-    if (panelRegistry.resolve(key)) openPanel(key, { replace: true })
+    if (!extensionsReady.value && activePanelKey.value && !activePanelKey.value.startsWith('gamer.core:')) return
+    if (isVirtualPanelKey(key) || panelRegistry.resolve(key)) openPanel(key, { replace: true })
     else syncPanelFromRoute()
   }
 
@@ -147,6 +151,7 @@ export function useConsoleWorkspacePanels({
   watch(() => route.query.panel, () => syncPanelFromRoute(), { immediate: true })
 
   return {
+    extensionsReady,
     refreshServerExtensions,
     startExtensionPolling,
     syncPanelFromRoute,

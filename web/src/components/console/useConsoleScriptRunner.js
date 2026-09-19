@@ -1,3 +1,5 @@
+import { useConfirmDialog } from '../ui/useConfirmDialog'
+import { functionCallParams } from '../../script-editor/call-names'
 import { computed, nextTick, onUnmounted, provide, reactive, ref, watch } from 'vue'
 import { api } from '../../api'
 import { GAMER_YAML_RUNNER_ID, runYamlFunction, runYamlScript } from '../../gamer-yaml-runner'
@@ -32,11 +34,13 @@ import { buildFunctionViews, filterFunctionViews, createPinyinInitials } from '.
 export function useConsoleScriptRunner({
   toast,
   packageId,
+  restorePackage = previous => { packageId.value = previous },
   consoleRuntime,
   templateNames,
   tplShortName,
   loadData,
 }) {
+  const confirmDialog = useConfirmDialog()
   // 资源请求属于当前 hook 实例；Package 切换时递增序号，旧响应不能回写全局候选。
   let scriptsInflight = null
   let scriptsInflightPackage = ''
@@ -82,7 +86,9 @@ export function useConsoleScriptRunner({
     scriptsInflight = request
     return request
   }
-  refreshScripts().catch(() => { /* 拉取失败：面板内提示「（无脚本）」等空态 */ })
+  watch(packageId, () => {
+    refreshScripts().catch(() => { /* 拉取失败：面板内提示「（无脚本）」等空态 */ })
+  }, { immediate: true })
 
   // ---------- 共享脚本编辑器外壳（阶段 4） ----------
   // 模型/命令栈/dirty/保存/409 冲突/校验/跳转全部收敛在 useScriptEditorShell，
@@ -94,6 +100,7 @@ export function useConsoleScriptRunner({
   const scriptShell = useScriptEditorShell({
     api: editorShellApi,
     getContext: () => ({
+      resolveParams: funcParamsFor,
       resolveTemplate: (n) => {
         const list = templatesData.value.filter(t => t.pkg === packageId.value)
         return list.some(t => t.name === n || tplShortName(t.name) === n)
@@ -111,8 +118,7 @@ export function useConsoleScriptRunner({
   // 函数库列表与 func 目标解析（func 步骤「打开函数定义」跳转用）
   const fnLib = useFunctionLibrary({ api })
   /** 各面板目标选择（面板独立）。函数面板无「选中文件」态：函数以个体为单位
-   *  平铺展示（buildFunctionViews），运行按 `<pkg>#<名>` 寻址，编辑只对默认
-   *  函数库 `_function.yaml` 开放（手动拆分文件只读展示）。 */
+   *  平铺展示（buildFunctionViews），运行按 `<pkg>#<名>` 寻址，所有函数库均按所属文件编辑。 */
   const selScript = ref('')
   const scriptDeleteConfirmId = ref('')
   /** 运行按钮可用性：脚本面板看脚本选择 */
@@ -120,19 +126,12 @@ export function useConsoleScriptRunner({
   /** 运行区当前选择 id（脚本 id）：编辑、删除按钮与摘要区共用 */
   const selTargetIdScript = computed(() => selScript.value)
   watch([selScript, packageId], () => { scriptDeleteConfirmId.value = '' })
-  /** 默认函数库文件 id（`<pkg>/_function.yaml`）。 */
-  const defaultFnFileId = computed(() =>
-    packageId.value ? `${packageId.value}/${FUNCTION_LIBRARY_DEFAULT}` : '')
-  /** 函数是否属于默认函数库（只有默认库可编辑）。 */
-  function isInDefaultLibrary(view) {
-    return !!view?.fileId && view.fileId === defaultFnFileId.value
-  }
   /**
    * 函数面板：全部函数以个体为单位平铺（跨文件，每个函数一个视图）。
    * 每个视图 = {fileId, category, name, model(params+steps)}，摘要区逐函数
    * 渲染一组（签名 + 步骤卡片 + 运行/编辑/删除）；fnSearch 模糊过滤
    * （名称/来源文件/拼音首字母，function-list.js）。手动拆分的
-   * `_function*.yaml` 同样加载展示，但只读（编辑入口仅默认库）。
+   * `_function*.yaml` 使用相同编辑画布与版本保存。
    */
   const funcFnViews = computed(() => buildFunctionViews(fnLib.list, (content, file) => {
     const parsed = fnLib.parseFunctionFile(content, file)
@@ -162,18 +161,22 @@ export function useConsoleScriptRunner({
 
   const nativeFunctions = ref([]) // [{name, description, source, params, returns}]
   const nativeFunctionsLoaded = ref(false)
+  let nativeFunctionsRequest = null
 
-  async function loadNativeFunctions() {
+  function loadNativeFunctions() {
     if (nativeFunctionsLoaded.value) return
-    nativeFunctionsLoaded.value = true
-    try {
-      const rep = await api.getRunnerFunctions(GAMER_YAML_RUNNER_ID)
+    if (nativeFunctionsRequest) return nativeFunctionsRequest
+    nativeFunctionsRequest = api.getRunnerFunctions(GAMER_YAML_RUNNER_ID).then(rep => {
       nativeFunctions.value = Array.isArray(rep?.functions) ? rep.functions : []
-    } catch {
-      nativeFunctions.value = [] // 目录不可用（runner 未注册等）时退化为仅 Package 函数
-    }
+      nativeFunctionsLoaded.value = true
+    }).catch(() => {
+      nativeFunctions.value = []
+    }).finally(() => { nativeFunctionsRequest = null })
+    return nativeFunctionsRequest
   }
   void loadNativeFunctions()
+  // 首次加载时插件可能尚未启用；进入编辑和切换 Package 时允许重试。
+  watch([packageId, scriptScope.scriptMode, funcScope.scriptMode], () => { void loadNativeFunctions() })
 
   const callTargets = computed(() => {
     const nativeOpts = nativeFunctions.value.map(f => ({
@@ -222,7 +225,7 @@ export function useConsoleScriptRunner({
     // 当前可视化编辑中的函数优先于已加载快照；这覆盖新建函数和未保存参数。
     if (scriptShell.kind === 'function_library' && scriptShell.hasModel) {
       const live = scriptShell.model.functions?.find(f => f.name === name)
-      if (live) return live.params || []
+      if (live) return functionCallParams(live)
     }
     for (const entry of fnLib.list) {
       if (fnLib.namesFor(entry).includes(name)) {
@@ -240,7 +243,7 @@ export function useConsoleScriptRunner({
     let byName = fnParamsMemo.get(memoKey)
     if (!byName) {
       const parsed = parseFunctionLibrary(entry.content ?? '', { file: entry.file || '' })
-      byName = new Map((parsed.model?.functions || []).map(f => [f.name, f.params || []]))
+      byName = new Map((parsed.model?.functions || []).map(f => [f.name, functionCallParams(f)]))
       fnParamsMemo.set(memoKey, byName)
     }
     return byName
@@ -333,7 +336,7 @@ export function useConsoleScriptRunner({
   /** 退出编辑（脏模型需确认丢弃）；若处于跳转栈中先返回上一资源。
    *  注意 shell 是 reactive 包装：ref/computed 属性访问即解包，不能再取 .value */
   async function cancelEditScript(scope) {
-    if (scriptShell.hasModel && scriptShell.dirty && !window.confirm('有未保存修改，确认放弃？')) return
+    if (scriptShell.hasModel && scriptShell.dirty && !await confirmDialog('有未保存修改，放弃后无法恢复。', { title: '放弃修改', confirmText: '放弃修改', danger: true })) return
     if (scriptShell.canJumpBack) {
       await jumpBack()
       return
@@ -351,13 +354,10 @@ export function useConsoleScriptRunner({
     scriptShell.newScript({ name: '新脚本.yml', pkg: packageId.value })
   }
 
-  /** 编辑某个函数（摘要组「编辑」直达）：载入默认函数库并聚焦该函数。
+  /** 编辑某个函数（摘要组「编辑」直达）：载入所属函数库并聚焦该函数。
    *  view = 函数视图（function-list.js），编辑态画布锁定单函数。
-   *  手动拆分的 `_function*.yaml` 只读——不提供编辑入口（Phase 1 §3.3）。 */
+   *  默认与拆分函数库共用入口。 */
   async function editFunction(view) {
-    if (!isInDefaultLibrary(view)) {
-      return toast(`函数 ${view.name} 在手动拆分的函数库 ${view.category || ''} 中，仅供查看；编辑请整理进默认 _function.yaml`, 'warn')
-    }
     const f = fnLib.list.find(x => x.id === view?.fileId)
     if (!f) return toast('函数所在函数库不存在，请刷新列表', 'error')
     editFocusFn.value = view.name || ''
@@ -392,13 +392,10 @@ export function useConsoleScriptRunner({
   }
 
   /** 进入原文编辑态：直接读取资源原文，不经过前端 YAML codec，保存仍由服务端校验。
-   *  函数面板仅默认函数库可原文编辑；脚本面板编辑当前脚本。 */
+   *  函数面板编辑当前所属函数库；脚本面板编辑当前脚本。 */
   async function editRawCurrentTarget(scope, view = null) {
     const id = scope.kind === 'func' ? view?.fileId : selScript.value
     if (!id) return toast(scope.kind === 'func' ? '请先选择函数' : '请先选择脚本', 'error')
-    if (scope.kind === 'func' && !isInDefaultLibrary(view)) {
-      return toast(`函数库 ${view?.category || ''} 为手动拆分文件，仅供查看；编辑请整理进默认 _function.yaml`, 'warn')
-    }
     scope.scriptMode.value = 'raw'
     const loadSeqAtStart = rawLoadSeq + 1
     try {
@@ -472,11 +469,10 @@ export function useConsoleScriptRunner({
   // `_function.yaml` 不存在 → 新建空库（保存时落盘到固定资源路径）；已存在 →
   // 载入后经命令栈追加一个新函数（可撤销），聚焦它继续编辑。
   function uniqueFunctionName(base) {
-    const functions = scriptShell.model?.functions
-    if (!Array.isArray(functions)) return base
-    if (!functions.some(fn => fn.name === base)) return base
+    const names = new Set([...fnLib.list.flatMap(file => fnLib.namesFor(file)), ...(scriptShell.model?.functions || []).map(fn => fn.name)])
+    if (!names.has(base)) return base
     let i = 2
-    while (functions.some(fn => fn.name === `${base}${i}`)) i++
+    while (names.has(`${base}${i}`)) i++
     return `${base}${i}`
   }
 
@@ -485,14 +481,18 @@ export function useConsoleScriptRunner({
     if (!packageId.value) return toast('请先在右上选择配置', 'warn')
     funcScope.scriptMode.value = 'edit'
     showYaml.value = false
-    const existing = fnLib.list.find(f => f.file === FUNCTION_LIBRARY_DEFAULT)
+    const requestedPackage = packageId.value
     try {
+      const files = await fnLib.refresh(requestedPackage, { throwOnError: true })
+      if (requestedPackage !== packageId.value) return
+      const existing = (files || []).find(f => f.file === FUNCTION_LIBRARY_DEFAULT)
       if (existing) {
         await scriptShell.loadFunctionFile(existing.id)
       } else {
         // 空默认函数库 + 预置空函数 func1：保存时落盘为 automations/_function.yaml
-        scriptShell.newFunctionFile({ file: FUNCTION_LIBRARY_DEFAULT, pkg: packageId.value, functionName: 'func1' })
-        editFocusFn.value = 'func1'
+        const name = uniqueFunctionName('func1')
+        scriptShell.newFunctionFile({ file: FUNCTION_LIBRARY_DEFAULT, pkg: packageId.value, functionName: name })
+        editFocusFn.value = name
         return
       }
       const name = uniqueFunctionName('func1')
@@ -518,12 +518,8 @@ export function useConsoleScriptRunner({
     return pending
   }
 
-  /** 函数列表操作共用：定位默认函数库文件、修改模型并按版本更新，完成后刷新函数库快照。 */
+  /** 函数列表操作共用：定位所属函数库文件、修改模型并按版本更新，完成后刷新函数库快照。 */
   async function updateFunctionFile(view, mutator, successMessage) {
-    if (!isInDefaultLibrary(view)) {
-      toast(`函数 ${view?.name || ''} 在手动拆分的函数库中，仅供查看`, 'warn')
-      return false
-    }
     const f = fnLib.list.find(x => x.id === view?.fileId)
     if (!f) {
       toast('函数所在函数库不存在，请刷新列表', 'warn')
@@ -532,6 +528,8 @@ export function useConsoleScriptRunner({
     return withFunctionMutation(f.id, async () => {
       let parsed
       try {
+        const latest = await api.getFunction(f.id)
+        Object.assign(f, latest)
         parsed = fnLib.parseFunctionFile(f.content ?? '', f.file || '')
       } catch (e) {
         toast('函数库解析失败：' + e.message, 'error')
@@ -560,13 +558,13 @@ export function useConsoleScriptRunner({
     })
   }
 
-  /** 函数编辑态名称输入框的唯一改名入口：写入命令栈，失焦后由编辑外壳自动保存。 */
+  /** 函数改名写入命令栈，显式保存时由服务端检查名称与引用。 */
   function renameEditingFunction(fromName, toName) {
     const current = String(fromName || '').trim()
     const next = String(toName || '').trim()
     const functions = scriptShell.model?.functions
     if (!current || !next || next === current || !Array.isArray(functions)) return false
-    if (functions.some(fn => fn.name === next)) {
+    if (functions.some(fn => fn.name === next) || fnLib.list.some(file => file.id !== scriptShell.resourceId && fnLib.namesFor(file).includes(next))) {
       toast(`已存在同名函数：${next}`, 'warn')
       return false
     }
@@ -578,30 +576,12 @@ export function useConsoleScriptRunner({
     return !!changed
   }
 
-  /** 函数摘要「删除」：仅默认函数库可删；默认库内只剩这一个函数时，确认后
-   *  整个 `_function.yaml` 一并移除（下次新建函数时自动重建）。 */
+  /** 删除函数按版本写回所属文件；最后一个函数删除后保留空库。 */
   async function deleteFunction(view) {
-    if (!isInDefaultLibrary(view)) {
-      return toast(`函数 ${view?.name || ''} 在手动拆分的函数库 ${view?.category || ''} 中，仅供查看`, 'warn')
-    }
     const f = fnLib.list.find(x => x.id === view?.fileId)
     if (!f) return toast('函数所在函数库不存在，请刷新列表', 'warn')
-    const isLast = fnLib.namesFor(f).length <= 1
-    if (isLast) {
-      if (!window.confirm(`默认函数库只剩这一个函数，删除后 _function.yaml 将整个移除（引用它的 call 步骤将失效），继续？`)) return
-      await withFunctionMutation(f.id, async () => {
-        try {
-          await api.deleteFunction(f.id)
-          await fnLib.refresh(packageId.value)
-          fnParamsMemo.clear()
-          toast(`默认函数库 ${FUNCTION_LIBRARY_DEFAULT} 已删除`, 'success')
-        } catch (e) {
-          toast('删除失败：' + e.message, 'error')
-        }
-      })
-      return
-    }
-    await updateFunctionFile(view, model => {
+    // 最后一个函数也按版本保存为空库，避免无版本 DELETE 删除并发新增内容。
+    return updateFunctionFile(view, model => {
       const i = model.functions.findIndex(fn => fn.name === view.name)
       if (i < 0) {
         toast(`函数不存在：${view.name}`, 'warn')
@@ -662,9 +642,11 @@ export function useConsoleScriptRunner({
       if (selScript.value === s.id) selScript.value = ''
       scriptDeleteConfirmId.value = ''
       toast('脚本已删除', 'success')
+      return true
     } catch (e) {
       scriptDeleteConfirmId.value = ''
       toast('删除失败：' + e.message, 'error')
+      return false
     }
   }
 
@@ -695,12 +677,12 @@ export function useConsoleScriptRunner({
   async function finishShellSave(scope, result) {
     if (!result?.ok || result._postProcessed) return
     result._postProcessed = true
-    await afterScriptSaved(scope, result.result, result._savedSnapshot)
+    await afterScriptSaved(scope, result.result, result._savedSnapshot, result._keepOpen)
   }
 
   /** 保存编辑中的脚本：shell.save() 序列化模型并携带 expected_version；
    *  校验失败 → 提示前 3 条诊断；409 version_conflict → shell.conflict 置位，SaveConflictModal 弹出。 */
-  async function saveEditScript(scope) {
+  async function saveEditScript(scope, { keepOpen = false } = {}) {
     if (!scriptShell.hasModel) return
     if (scriptShell.kind === 'function_library') {
       // 分类名 = 存储文件名（<分类>.yaml），落盘前必填
@@ -712,6 +694,7 @@ export function useConsoleScriptRunner({
     const r = await saveShell()
     if (r.ok) {
       clearCallParamsCache()
+      if (keepOpen) r._keepOpen = true
       await finishShellSave(scope, r)
     } else if (r.reason === 'invalid') {
       toast('校验未通过：' + r.diagnostics.slice(0, 3).map(d => d.message).join('；'), 'error')
@@ -720,6 +703,7 @@ export function useConsoleScriptRunner({
     } else {
       toast('保存失败：' + (r.error?.message || r.error), 'error')
     }
+    return r
   }
 
   // ---------- 自动保存（编辑区失焦即存）：600ms 防抖合并连续失焦；成功静默，
@@ -734,14 +718,15 @@ export function useConsoleScriptRunner({
     autoSaveTimer = null
     if (scope.scriptMode.value !== 'edit' || !scriptShell.hasModel || !scriptShell.dirty || scriptShell.saving) return
     const wasNew = !scriptShell.resourceId
+    const previousId = scriptShell.resourceId
     const r = await saveShell({ suppressConflict: true })
     if (r.ok) {
       clearCallParamsCache()
       // 函数库落盘后刷新分类清单（函数列表与 call 目标候选共用）；
       // 新建脚本落盘后刷新脚本列表（call 目标下拉候选）
       if (scriptShell.kind === 'function_library') await fnLib.refresh(packageId.value)
-      else if (wasNew) await refreshScripts()
-      if (wasNew) selScript.value = scriptShell.resourceId // 首次落盘：运行区选择跟随
+      else if (wasNew || previousId !== scriptShell.resourceId) await refreshScripts()
+      if (wasNew || previousId !== scriptShell.resourceId) selScript.value = scriptShell.resourceId
     } else if (r.reason === 'invalid') {
       toast('自动保存未通过：' + (r.diagnostics?.[0]?.message || '存在校验问题'), 'warn')
     } else if (r.reason === 'conflict') {
@@ -752,7 +737,7 @@ export function useConsoleScriptRunner({
   }
 
   /** 保存成功后置：刷新列表、选中保存后的资源（按外壳实际类型归位到对应面板的选择）、退出编辑回到运行视图 */
-  async function afterScriptSaved(scope, rep, savedSnapshot = null) {
+  async function afterScriptSaved(scope, rep, savedSnapshot = null, keepOpen = false) {
     await refreshScripts()
     if (rep?.id) {
       if (scriptShell.kind === 'function_library') {
@@ -775,9 +760,7 @@ export function useConsoleScriptRunner({
       toast('已保存先前修改；当前新修改仍未保存', 'warn')
       return
     }
-    scriptShell.reset()
-    scope.scriptMode.value = 'run'
-    showYaml.value = false
+    if (!keepOpen) { scriptShell.reset(); scope.scriptMode.value = 'run'; showYaml.value = false }
     toast('已保存', 'success')
   }
 
@@ -1029,7 +1012,7 @@ export function useConsoleScriptRunner({
     if (!selScript.value || !scripts.value.find(x => x.id === selScript.value)) return toast('请先选择脚本', 'warn')
     const s = scripts.value.find(x => x.id === selScript.value)
     // 运行起点：从此运行 → 顶层 steps 序号（找不到回退 0 从头跑）；顶部运行 → 从头
-    const startIndex = opts.fromUuid && summaryModel.value
+    const startIndex = Number.isInteger(opts.startIndex) && opts.startIndex >= 0 ? opts.startIndex : opts.fromUuid && summaryModel.value
       ? (startIndexOf(summaryModel.value, opts.fromUuid) ?? 0)
       : 0
     try {
@@ -1114,6 +1097,39 @@ export function useConsoleScriptRunner({
     stopRunStatusPoll()
   })
 
+  async function beforePackageChange(next) {
+    const previous = packageId.value
+    if (next === packageId.value) return true
+    if (scriptShell.saving || rawEditor.saving.value) { toast('正在保存，请稍后切换配置包', 'warn'); return false }
+    if ((scriptShell.dirty || rawEditor.dirty.value) && !await confirmDialog('当前编辑有未保存修改，放弃后将切换配置包。', { title: '切换配置包', confirmText: '放弃并切换', danger: true })) return false
+    if (packageId.value !== previous || scriptShell.saving || rawEditor.saving.value) return false
+    scriptShell.reset()
+    rawEditor.reset()
+    scriptScope.scriptMode.value = 'run'
+    funcScope.scriptMode.value = 'run'
+    return true
+  }
+
+  // 初始化、导入和其他面板也能修改 Package；不能让旧画布在新上下文下运行。
+  // 正常用户切换已由 beforePackageChange 确认，外部切换不能静默丢弃草稿。
+  let restoringPackage = false
+  watch(packageId, (next, previous) => {
+    if (restoringPackage || next === previous) return
+    if (scriptShell.dirty || rawEditor.dirty.value || scriptShell.saving || rawEditor.saving.value) {
+      restoringPackage = true
+      restorePackage(previous)
+      restoringPackage = false
+      toast('请先保存或放弃当前编辑，再切换配置包', 'warn')
+      return
+    }
+    scriptShell.reset()
+    rawEditor.reset()
+    selScript.value = ''
+    editFocusFn.value = ''
+    scriptScope.scriptMode.value = 'run'
+    funcScope.scriptMode.value = 'run'
+  }, { flush: 'sync' })
+
   /** 面板作用域上下文：同一套共享机制 + 面板锁定的资源类型/编辑模式/选择。
    *  经 workspace context 注入（core.scriptRunner.scripts / .functions），两个
    *  扩展面板各自绑定一份，互不串台。 */
@@ -1148,7 +1164,7 @@ export function useConsoleScriptRunner({
       runArgsFlow, onRunArgsSubmit,
       // 编辑视图：共享编辑器外壳 + 保存/取消/409 冲突回调
       shell: scriptShell, raw: rawEditor,
-      saveEditScript: () => saveEditScript(scope),
+      saveEditScript: options => saveEditScript(scope, options),
       cancelEditScript: () => cancelEditScript(scope),
       saveRawScript: () => saveRawScript(scope),
       cancelRawScript: () => cancelRawScript(scope),
@@ -1165,7 +1181,7 @@ export function useConsoleScriptRunner({
 
   return {
     // 共享机制（Console 壳接线：弹窗/轮询/钩子）
-    scriptShell, rawEditor, fnLib,
+    scriptShell, rawEditor, fnLib, beforePackageChange,
     liveLogs, startPending, runStopping, runArgsFlow, onRunArgsSubmit,
     startLogPolling, stopLogPolling, pushLog,
     clearCallParamsCache, editorMatchThreshold,

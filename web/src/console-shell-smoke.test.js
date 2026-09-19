@@ -54,14 +54,14 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       await vi.advanceTimersByTimeAsync(2100)
       expect(wrapper.exists()).toBe(true)
       expect(wrapper.text()).toContain('选择设备…')
-      expect(wrapper.text()).toContain('🔌 连接')
+      expect(wrapper.text()).toContain('连接')
       // 工具条两组布局：应用区 = 应用下拉（未配置时占位「未选择应用」）+ 读取 + 启动；
       // 停止应用/粘贴/按键等收进「更多 / 功能」下拉（Teleport 在此已 stub，
       // 菜单内容不渲染，只断言两个触发按钮），菜单结构由 console-components 静态回归锁定
-      expect(wrapper.text()).toContain('更多 ▾')
+      expect(wrapper.find('button[title^="新增 / 设置"]').exists()).toBe(true)
       expect(wrapper.text()).toContain('未选择应用')
-      expect(wrapper.text()).toContain('📖 读取')
-      expect(wrapper.text()).toContain('🚀 启动')
+      expect(wrapper.text()).toContain('读取')
+      expect(wrapper.text()).toContain('启动')
       expect(wrapper.text()).toContain('功能 ▾')
       const toolbar = wrapper.find('.toolbar')
       expect(toolbar.find('.keymap-select').exists()).toBe(false)
@@ -74,7 +74,7 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       const stage = wrapper.findComponent(ConsoleVideoStage)
       expect(stage.exists()).toBe(true)
       expect(stage.props('loupe')).toEqual({ show: false, x: 0, y: 0, zoom: 2.5 })
-      expect(stage.props('keymapStatus')).toEqual({ name: '', inactive: false })
+      expect(stage.find('.keymap-status').exists()).toBe(false)
       expect(stage.props('bridgeOverlays')).toEqual([])
       expect(stage.props('scriptFx')).toEqual({
         tap: { show: false, x: 0, y: 0 },
@@ -90,15 +90,10 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
       for (const gone of ['模板', '脚本', '映射']) {
         expect(tabTexts.some(text => text.includes(gone))).toBe(false)
       }
-      // 主导航「市场」为下拉二级菜单：点页签弹菜单（插件市场/配置市场），
-      // 裸 Core 无业务插件，「插件」退化为普通页签不弹菜单
-      const marketTab = wrapper.findAll('.workspace-tab').find(tab => tab.text().includes('市场'))
-      await marketTab.trigger('click')
-      const menuTexts = wrapper.findAll('.workspace-dd-item').map(item => item.text())
-      expect(menuTexts.some(text => text.includes('插件市场'))).toBe(true)
-      expect(menuTexts.some(text => text.includes('配置市场'))).toBe(true)
-      // 默认面板 = gamer.core:tasks（裸 Core 兜底）
-      expect(wrapper.text()).toContain('新建任务')
+      expect(wrapper.findAll('.workspace-tab').map(tab => tab.text())).toEqual(['工作台', '任务', '日志', '配置包', '插件', '设置'])
+      expect(wrapper.find('.workspace-tab.active').text()).toBe('工作台')
+      expect(wrapper.find('.workspace-dd').exists()).toBe(false)
+      expect(wrapper.text()).toContain('启用插件后')
     } finally {
       warn.mockRestore()
       vi.useRealTimers()
@@ -111,37 +106,6 @@ describe('Console 壳挂载冒烟（拆分后装配接线）', () => {
 })
 
 describe('Market 页挂载冒烟（T5b：分区渲染 插件市场/配置市场 + Package 远端源）', () => {
-  it('插件市场分区（默认）：已装插件清单空态 + 插件中心入口', async () => {
-    const { default: MarketView } = await import('./workspace/MarketView.vue')
-    const { flushPromises } = await import('@vue/test-utils')
-    // stub 静态 registry.json：现网形态只有 plugins 段、无 packages 段
-    const originalFetch = globalThis.fetch
-    globalThis.fetch = async (url) => {
-      if (String(url).includes('registry.json')) {
-        return {
-          ok: true,
-          status: 200,
-          headers: { get: () => 'application/json' },
-          json: async () => ({ schema_version: 1, plugins: [] }),
-        }
-      }
-      return originalFetch(url)
-    }
-    const wrapper = mount(MarketView)
-    try {
-      await flushPromises()
-      expect(wrapper.text()).toContain('插件市场')
-      expect(wrapper.text()).toContain('打开插件市场')
-      // api stub 返回空集：已装插件为空态提示
-      expect(wrapper.text()).toContain('尚未安装任何插件')
-      // 下拉二级菜单分区渲染：默认只出插件市场，不渲染配置市场区块
-      expect(wrapper.text()).not.toContain('配置市场')
-    } finally {
-      globalThis.fetch = originalFetch
-      wrapper.unmount()
-    }
-  })
-
   it('配置市场分区：registry.json 无 packages 段（现网形态）显示空态不抛错', async () => {
     const { default: MarketView } = await import('./workspace/MarketView.vue')
     const { flushPromises } = await import('@vue/test-utils')
@@ -157,14 +121,14 @@ describe('Market 页挂载冒烟（T5b：分区渲染 插件市场/配置市场 
       }
       return originalFetch(url)
     }
-    const wrapper = mount(MarketView, { props: { section: 'package' } })
+    const wrapper = mount(MarketView)
     try {
       await flushPromises()
-      expect(wrapper.text()).toContain('配置市场')
+      expect(wrapper.text()).toContain('发现配置')
       // api stub 返回空集：已装配置为空态提示
-      expect(wrapper.text()).toContain('尚未安装任何配置')
+      expect(wrapper.text()).not.toContain('本地已装')
       // registry.json 无 packages 段 = 「远端源暂无配置」，不抛错不阻塞页面
-      expect(wrapper.text()).toContain('远端源暂无配置')
+      expect(wrapper.text()).toContain('市场暂无可用配置包')
     } finally {
       globalThis.fetch = originalFetch
       wrapper.unmount()
@@ -198,7 +162,7 @@ describe('Market 页挂载冒烟（T5b：分区渲染 插件市场/配置市场 
       }
       return originalFetch(url)
     }
-    const wrapper = mount(MarketView, { props: { section: 'package' } })
+    const wrapper = mount(MarketView)
     try {
       await flushPromises()
       expect(wrapper.text()).toContain('星铁日常包')

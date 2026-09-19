@@ -215,6 +215,7 @@ export function useConsoleStage({
         return null
       })
     if (!meta || disposed || request !== mediaLoadSeq || kind.value !== 'media') return false
+    if (!mediaList.value.some(item => item.id === meta.id)) mediaList.value = [...mediaList.value, meta]
     pauseMedia()
     frameOperationSeq += 1
     mediaMeta.value = meta

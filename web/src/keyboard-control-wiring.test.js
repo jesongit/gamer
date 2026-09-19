@@ -20,8 +20,12 @@ describe('投屏键盘控制接线', () => {
     expect(consoleSource).toContain('@focusout="onStageFocusOut"')
     expect(consoleSource).toContain('@click="onStageClick"')
     expect(consoleSource).toContain('data-keyboard-ignore="true"')
-    expect(stageSource).toContain("'keyboard-active': props.keyboardFocused")
-    expect(stageSource).toContain('键盘控制已启用')
+    expect(consoleSource).toContain(':core-statuses="coreStatuses"')
+    expect(consoleSource).toContain("keyboardFocused.value && stage.canDeviceInput && !picking.value && !cellPick.mode")
+    expect(consoleSource).toContain("statuses.push('键盘控制已启用')")
+    expect(consoleSource).not.toContain('keyboard-active')
+    expect(stageSource).not.toContain('keyboard-focus-badge')
+    expect(stageSource).not.toContain('v-stats')
   })
 
   it('父层只用 DataChannel 发送键盘，并在焦点/页面生命周期变化时释放', () => {

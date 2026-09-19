@@ -1,21 +1,17 @@
 <template>
-  <Teleport to="body">
-    <div v-if="open" class="plugin-center-mask" @click.self="close">
-      <section class="plugin-center" role="dialog" aria-modal="true" aria-labelledby="plugin-center-title">
-        <header class="plugin-center-head">
-          <div>
-            <h2 id="plugin-center-title">插件中心</h2>
-            <p>插件会先下载到本地并校验，再由 Gamer 的本地扩展服务加载。</p>
-          </div>
-          <button class="btn btn-ghost" type="button" aria-label="关闭插件中心" @click="close">✕</button>
-        </header>
-
-        <nav class="plugin-center-tabs" aria-label="插件中心分类">
-          <button v-for="item in tabs" :key="item.key" type="button" :class="{ active: tab === item.key }" @click="tab = item.key">
-            {{ item.label }}<span v-if="item.key === 'installed'" class="tab-count">{{ installed.length }}</span>
-          </button>
-        </nav>
-
+  <section class="plugin-center" aria-label="插件">
+    <div class="plugin-toolbar">
+      <input v-model="query" class="input plugin-search" type="search" aria-label="搜索插件" placeholder="搜索插件名称、ID 或描述" />
+      <span class="muted plugin-count">{{ filteredPlugins.length }} 个插件</span>
+      <button class="btn btn-sm" :disabled="busy || loading" @click="refresh">刷新</button>
+      <button class="btn btn-sm" :disabled="busy" @click="fileInput?.click()">本地导入</button>
+      <button class="btn btn-sm" :aria-expanded="urlOpen" @click="urlOpen = !urlOpen">URL 导入</button>
+      <input ref="fileInput" type="file" accept=".gplugin,.zip,application/zip" hidden @change="onLocalFile" />
+    </div>
+    <div v-if="urlOpen" class="url-import">
+      <div class="url-row"><input v-model.trim="url" class="input" type="url" aria-label="插件归档地址" placeholder="https://example.com/plugin.gplugin" @keyup.enter="onUrlImport" /><button class="btn" :disabled="busy || !url" @click="onUrlImport">下载并安装</button></div>
+      <p class="muted">下载后核对来源与权限。</p>
+    </div>
         <div class="plugin-center-body">
           <div v-if="error" class="plugin-alert error" role="alert">{{ error }}</div>
           <div v-if="operationResult" class="plugin-result" role="status" aria-live="polite">
@@ -33,139 +29,71 @@
           </div>
           <div v-if="loading" class="plugin-center-loading">正在读取插件信息…</div>
 
-          <template v-else-if="tab === 'market'">
-            <div class="section-head">
-              <div><strong>市场</strong><span class="muted">固定版本 · SHA-256 校验 · 本地安装</span></div>
-              <button class="btn btn-sm" type="button" :disabled="busy || loading" @click="refresh">刷新</button>
-            </div>
-            <div v-if="!market.length" class="plugin-empty">市场暂无可用插件，或 registry.json 尚未配置。</div>
-            <article v-for="entry in market" :key="`${entry.id}@${entry.version}`" class="plugin-card">
-              <div class="plugin-card-main">
-                <div class="plugin-title-row">
-                  <h3>{{ entry.name }}</h3>
-                  <span class="tag info">{{ entry.version }}</span>
-                  <span class="tag" :class="entry.execution?.kind === 'builtin' ? 'warn' : ''">{{ executionLabel(entry.execution) }}</span>
-                  <span v-if="installedVersion(entry.id)" class="tag ok">已安装 v{{ installedVersion(entry.id) }}</span>
-                  <span v-if="marketRelation(entry).kind === 'update'" class="tag info">有可用更新</span>
-                  <span v-else-if="marketRelation(entry).kind === 'latest'" class="tag ok">已是最新</span>
-                  <span v-else-if="marketRelation(entry).kind === 'newer_installed'" class="tag warn">已安装更高版本</span>
-                  <span v-else-if="marketRelation(entry).kind === 'incompatible'" class="tag warn">版本不兼容</span>
-                </div>
-                <div class="plugin-meta"><code>{{ entry.id }}</code><span>{{ entry.publisher || '发布者未声明' }}</span></div>
-                <p class="plugin-description">{{ entry.description || '暂无描述。' }}</p>
-                <div class="plugin-facts">
-                  <span>来源：官方市场</span>
-                  <span v-if="hostVersionLabel(entry.execution)">宿主版本要求：{{ hostVersionLabel(entry.execution) }}</span>
-                  <span>权限：{{ (entry.permissions || []).length ? entry.permissions.join('、') : '无' }}</span>
-                  <span>UI：{{ uiType(entry) }}</span>
-                </div>
-                <div v-if="entry.dependencies?.length || entry.required_extensions?.length || entry.app_packages?.length" class="dependency-line">
-                  依赖：{{ dependencyNames(entry).join('、') }}
-                </div>
-              </div>
-              <div class="plugin-card-actions">
-                <button class="btn btn-sm btn-primary" type="button" :disabled="busy || !marketActionAllowed(entry)" @click="installMarket(entry)">
-                  {{ marketActionLabel(entry) }}
-                </button>
-                <span v-if="!canInstallMarket(entry)" class="action-hint">缺少固定 SHA-256，无法安全下载</span>
-                <span v-else-if="marketRelation(entry).kind === 'incompatible'" class="action-hint">{{ marketRelation(entry).reason }}</span>
-              </div>
-            </article>
-          </template>
-
-          <template v-else-if="tab === 'installed'">
-            <div class="section-head">
-              <div><strong>已安装</strong><span class="muted">运行状态与依赖影响来自服务端管理契约</span></div>
-              <button class="btn btn-sm" type="button" :disabled="busy" @click="refresh">刷新</button>
-            </div>
-            <div v-if="!installed.length" class="plugin-empty">还没有安装插件。</div>
-            <article v-for="plugin in installed" :key="plugin.id" class="plugin-card installed-card">
-              <div class="plugin-card-main">
-                <div class="plugin-title-row">
-                  <h3>{{ plugin.name || plugin.id }}</h3>
-                  <span class="tag">{{ plugin.active_version || plugin.version || '未知版本' }}</span>
-                  <span class="tag" :class="stateClass(plugin.state)">{{ stateLabel(plugin.state) }}</span>
-                </div>
-                <div class="plugin-meta"><code>{{ plugin.id }}</code><span>来源：{{ sourceLabel(plugin.source) }}</span><span>{{ plugin.publisher || '发布者未知' }}</span></div>
-                <div class="plugin-facts">
-                  <span>执行形态：{{ executionLabel(plugin.execution) }}</span>
-                  <span>权限：{{ (plugin.permissions || []).length ? plugin.permissions.join('、') : '无' }}</span>
-                  <span>已保留版本：{{ (plugin.installed_versions || []).join('、') || '无' }}</span>
-                </div>
-                <!-- V1 生命周期收敛：历史版本仅展示（回退 = 卸载后重装旧版本归档） -->
-                <div v-if="switchableVersions(plugin).length" class="version-switch-line">
-                  <span class="version-switch-label">历史版本：</span>
-                  <span v-for="version in switchableVersions(plugin)" :key="version" class="version-switch-item">
-                    <code>{{ version }}</code>
-                  </span>
-                </div>
-                <div v-if="plugin.last_error" class="dependency-line danger-text">失败：{{ plugin.last_error }}</div>
-                <div v-if="dependencyItems(plugin).length" class="dependency-line">
-                  依赖：{{ dependencyItems(plugin).map(item => item.name || item.id).join('、') }}
-                </div>
-                <div v-if="dependencyState(plugin).missing.length" class="dependency-line danger-text">
-                  缺少必需依赖：{{ dependencyState(plugin).missing.map(item => item.id).join('、') }}（请在插件中心安装并启用后重试）
-                </div>
-                <div v-if="dependencyState(plugin).disabled.length" class="dependency-line warn-text">
-                  必需依赖未启用：{{ dependencyState(plugin).disabled.map(item => item.id + '（' + item.state + '）').join('、') }}
-                </div>
-                <div v-for="dep in optionalDependencyNotes(plugin)" :key="`opt-${dep.id}`" class="dependency-line warn-text">
-                  可选依赖 {{ dep.id }}{{ dep.note ? `（${dep.note}）` : '' }}：相关功能入口已降级
-                </div>
-                <div v-if="dependentItems(plugin).length" class="dependency-line warn-text">
-                  正被使用：{{ dependentItems(plugin).map(item => `${item.name || item.id}${item.state ? `（${item.state}）` : ''}`).join('、') }}
-                </div>
-              </div>
-              <div class="plugin-card-actions installed-actions">
-                <!-- V1 用户操作收敛：安装（自动启用）/ 启用 / 停用 / 更新 / 卸载 -->
-                <button v-if="plugin.state !== 'running'" class="btn btn-sm" type="button" :disabled="busy" @click="runAction('enable', plugin)">启用</button>
-                <button v-if="plugin.state === 'running'" class="btn btn-sm" type="button" :disabled="busy" @click="runAction('disable', plugin)">停用</button>
-                <button v-if="marketUpdate(plugin)" class="btn btn-sm btn-primary" type="button" :disabled="busy || !canInstallMarket(marketUpdate(plugin))" @click="installMarket(marketUpdate(plugin), plugin)">更新到 {{ marketUpdate(plugin).version }}</button>
-                <span v-else-if="installedMarketRelation(plugin)?.kind === 'latest'" class="tag ok">已是最新</span>
-                <span v-else-if="installedMarketRelation(plugin)?.kind === 'newer_installed'" class="tag warn">已安装更高版本</span>
-                <span v-else-if="installedMarketRelation(plugin)?.kind === 'incompatible'" class="tag warn">版本不兼容</span>
-                <button class="btn btn-sm btn-danger" type="button" :disabled="busy" @click="uninstall(plugin, false)">卸载</button>
-                <button class="btn btn-sm btn-danger" type="button" :disabled="busy" @click="uninstall(plugin, true)">删除数据并卸载</button>
-              </div>
-            </article>
-          </template>
-
-          <template v-else-if="tab === 'local'">
-            <div class="import-pane">
-              <h3>本地导入</h3>
-              <p>选择 <code>.gplugin</code> 文件。本地导入不要求签名；安装前会展示插件 ID、执行形态、权限与来源供确认。</p>
-              <label class="file-picker btn btn-primary">
-                选择 .gplugin
-                <input ref="fileInput" type="file" accept=".gplugin,.zip,application/zip" @change="onLocalFile" />
-              </label>
-              <div v-if="localFileName" class="selected-file">已选择：{{ localFileName }}</div>
-            </div>
-          </template>
-
           <template v-else>
-            <div class="import-pane">
-              <h3>URL 导入</h3>
-              <p>仅下载固定归档到本地安装；远程地址永远不会被用作生产 iframe。</p>
-              <div class="url-row">
-                <input v-model.trim="url" class="input" type="url" placeholder="https://example.com/plugin.gplugin" @keyup.enter="onUrlImport" />
-                <button class="btn btn-primary" type="button" :disabled="busy || !url" @click="onUrlImport">下载并安装</button>
-              </div>
-              <div class="plugin-alert warning">URL 导入来源不属于官方市场，请在确认框中核对发布者、权限与来源。</div>
+            <div v-if="!filteredPlugins.length" class="plugin-empty">{{ query ? '没有匹配的插件，请调整搜索。' : '暂无可用插件，可通过本地或 URL 导入。' }}</div>
+            <div class="plugin-list-head" aria-hidden="true"><span>插件 / 说明</span><span>状态 / 版本</span><span>操作</span></div>
+            <div class="plugin-grid" aria-label="插件列表">
+              <article v-for="item in filteredPlugins" :key="item.id" class="plugin-card" :class="{ 'installed-card': item.installed }" :data-plugin-id="item.id">
+                <div class="plugin-card-main">
+                  <div class="plugin-identity"><div class="plugin-title-row">
+                    <h3>{{ item.info.name || item.id }}</h3>
+                    <span class="plugin-version mono">{{ item.info.active_version || item.info.version || '未知版本' }}</span>
+                  </div>
+                  <div class="plugin-meta"><code>{{ item.id }}</code><span>来源：{{ item.installed ? sourceLabel(item.installed.source) : '官方市场' }}</span><span>{{ item.info.publisher || item.entry?.publisher || '发布者未声明' }}</span></div>
+                  </div>
+                  <p v-if="item.info.description || item.entry?.description" class="plugin-description">{{ item.info.description || item.entry.description }}</p>
+                  <template v-if="item.installed">
+                    <div v-if="item.installed.last_error" class="dependency-line danger-text">失败：{{ item.installed.last_error }}</div>
+                    <div v-if="dependencyState(item.installed).missing.length" class="dependency-line danger-text">缺少必需依赖：{{ dependencyState(item.installed).missing.map(dep => dep.id).join('、') }}（请搜索并安装对应插件）</div>
+                    <div v-if="dependencyState(item.installed).disabled.length" class="dependency-line warn-text">必需依赖未启用：{{ dependencyState(item.installed).disabled.map(dep => dep.id + '（' + dep.state + '）').join('、') }}</div>
+                    <div v-for="dep in optionalDependencyNotes(item.installed)" :key="dep.id" class="dependency-line warn-text">可选依赖 {{ dep.id }}{{ dep.note ? `（${dep.note}）` : '' }}：相关功能入口已降级</div>
+                    <div v-if="dependentItems(item.installed).length" class="dependency-line warn-text">正被使用：{{ dependentItems(item.installed).map(dep => `${dep.name || dep.id}${dep.state ? `（${dep.state}）` : ''}`).join('、') }}</div>
+                  </template>
+                  <div v-else-if="dependencyNames(item.entry).length" class="dependency-line">依赖：{{ dependencyNames(item.entry).join('、') }}</div>
+                  <div v-if="item.relation?.kind === 'incompatible'" class="dependency-line warn-text">{{ item.relation.reason }}</div>
+                  <div v-if="item.entry && ['install','update'].includes(item.relation?.kind) && !canInstallMarket(item.entry)" class="dependency-line warn-text">缺少固定 SHA-256，无法安全下载</div>
+                  <details class="plugin-details"><summary>详情 <UiIcon name="down" /></summary>
+                  <div class="plugin-facts">
+                    <span>执行形态：{{ executionLabel(item.info.execution) }}</span>
+                    <span>权限：{{ item.info.permissions?.length ? item.info.permissions.join('、') : '无' }}</span>
+                    <span v-if="hostVersionLabel(item.info.execution)">宿主版本要求：{{ hostVersionLabel(item.info.execution) }}</span>
+                    <span v-if="item.installed && !item.entry">未收录于市场</span>
+                  </div>
+                    <template v-if="item.installed">
+                    <div v-if="switchableVersions(item.installed).length" class="version-switch-line">历史版本：{{ switchableVersions(item.installed).join('、') }}</div>
+                    <div v-if="dependencyItems(item.installed).length" class="dependency-line">依赖：{{ dependencyItems(item.installed).map(dep => dep.name || dep.id).join('、') }}</div>
+                      <div class="plugin-remove-actions"><button class="btn btn-sm btn-ghost" :disabled="busy || !installedKnown" @click="uninstall(item.installed, false)"><UiIcon name="trash" />卸载</button><button class="btn btn-sm btn-ghost danger-text" :disabled="busy || !installedKnown" @click="uninstall(item.installed, true)">删除数据并卸载</button></div>
+                    </template>
+                  </details>
+                </div>
+                <div class="plugin-status">
+                    <span class="tag" :class="installedKnown && item.installed ? stateClass(item.installed.state) : ''">{{ !installedKnown ? '状态未确认' : item.installed ? stateLabel(item.installed.state) : '未安装' }}</span>
+                    <span v-if="item.relation?.kind === 'update'" class="tag info">有更新 · {{ item.entry.version }}</span>
+                    <span v-else-if="item.relation?.kind === 'latest'" class="tag ok">已是最新</span>
+                    <span v-else-if="item.relation?.kind === 'newer_installed'" class="tag warn">已安装更高版本</span>
+                    <span v-else-if="item.relation?.kind === 'incompatible'" class="tag warn">版本不兼容</span>
+                </div>
+                <div class="plugin-card-actions">
+                  <template v-if="item.installed">
+                    <button class="btn btn-sm" :disabled="busy || !installedKnown" @click="runAction(item.installed.state === 'running' ? 'disable' : 'enable', item.installed)">{{ item.installed.state === 'running' ? '停用' : '启用' }}</button>
+                    <button v-if="item.relation?.kind === 'update'" class="btn btn-sm btn-primary" :disabled="busy || !installedKnown || !canInstallMarket(item.entry)" @click="installMarket(item.entry, item.installed)">更新到 {{ item.entry.version }}</button>
+                  </template>
+                  <button v-else class="btn btn-sm btn-primary" :disabled="busy || !installedKnown || !marketActionAllowed(item.entry)" @click="installMarket(item.entry)">安装</button>
+                </div>
+              </article>
             </div>
           </template>
         </div>
       </section>
-    </div>
-  </Teleport>
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../../api'
+import UiIcon from '../../components/ui/UiIcon.vue'
+import { useConfirmDialog } from '../../components/ui/useConfirmDialog'
 import { downloadDirectUrl, downloadFixedVersion, fetchRegistry, findRegistryPlugin } from './registry-client'
 import {
-  activateVersionErrorText,
-  activateVersionPrompt,
   dependencyRefsFor,
   dependencyStatus,
   executionChangeDetail,
@@ -177,7 +105,6 @@ import {
   lifecyclePrompt,
   describeExtensionMutation,
   mergeManagementResponse,
-  marketVersionLabel,
   marketVersionRelation,
   normalizeExecution,
   readPluginSourceMetadata,
@@ -187,21 +114,17 @@ import {
 } from './plugin-service'
 
 const props = defineProps({
-  open: { type: Boolean, default: false },
   apiClient: { type: Object, default: () => api },
   registryUrl: { type: String, default: '/registry.json' },
 })
-const emit = defineEmits(['close', 'changed'])
+const emit = defineEmits(['changed'])
+const confirmDialog = useConfirmDialog()
 
-const tabs = [
-  { key: 'market', label: '市场' },
-  { key: 'installed', label: '已安装' },
-  { key: 'local', label: '本地导入' },
-  { key: 'url', label: 'URL 导入' },
-]
-const tab = ref('market')
+const query = ref('')
+const urlOpen = ref(false)
 const registry = ref({ schema_version: 1, plugins: [] })
 const installed = ref([])
+const installedKnown = ref(false)
 const loading = ref(false)
 const busy = ref(false)
 const activeOperation = ref('')
@@ -210,12 +133,23 @@ const notice = ref('')
 const operationResult = ref(null)
 const sourceMetadata = ref(readPluginSourceMetadata())
 const url = ref('')
-const localFileName = ref('')
 const fileInput = ref(null)
 
 const market = computed(() => registry.value.plugins || [])
+// ID 是唯一身份；市场有多个版本时只呈现最新条目，运行状态与权限以已安装快照为准。
+const plugins = computed(() => {
+  const ids = [...new Set([...installed.value.map(item => item.id), ...market.value.map(item => item.id)])]
+  return ids.map(id => {
+    const current = installedPlugin(id)
+    const entry = findRegistryPlugin(registry.value, id)
+    return { id, installed: current, entry, info: current || entry, relation: entry ? marketVersionRelation(entry, current) : null }
+  })
+})
+const filteredPlugins = computed(() => {
+  const needle = query.value.trim().toLowerCase()
+  return plugins.value.filter(item => [item.id, item.info.name, item.info.description, item.entry?.name, item.entry?.description].some(value => String(value || '').toLowerCase().includes(needle)))
+})
 
-function close() { clearMessages(); emit('close') }
 function clearMessages() { error.value = ''; notice.value = ''; operationResult.value = null }
 function messageFor(errorValue) { return String(errorValue?.message || errorValue || '操作失败') }
 
@@ -258,12 +192,13 @@ async function loadInstalled() {
   // lifecycle snapshot. Do not silently downgrade to the base list response.
   const response = await client.getExtensionManagement()
   installed.value = mergeManagementResponse(response, market.value, sourceMetadata.value)
+  installedKnown.value = true
 }
 
 let refreshSerial = 0
 async function refresh() {
-  if (!props.open) return { ok: false, error: '插件中心未打开' }
   const serial = ++refreshSerial
+  installedKnown.value = false
   loading.value = true
   error.value = ''
   const failures = []
@@ -284,37 +219,18 @@ async function refresh() {
   return failures.length ? { ok: false, error: failures.join('\n') } : { ok: true }
 }
 
-watch(() => props.open, value => { if (value) void refresh() })
-onMounted(() => { if (props.open) void refresh() })
+onMounted(() => { void refresh() })
 
 function installedPlugin(id) { return installed.value.find(item => item.id === id) }
-function installedVersion(id) { return installedPlugin(id)?.active_version || installedPlugin(id)?.version || '' }
 function marketRelation(entry) { return marketVersionRelation(entry, installedPlugin(entry.id)) }
-function installedMarketRelation(plugin) {
-  const entry = findRegistryPlugin(registry.value, plugin.id)
-  return entry ? marketVersionRelation(entry, plugin) : null
-}
-function marketActionLabel(entry) { return marketVersionLabel(marketRelation(entry)) }
 function marketActionAllowed(entry) {
   const relation = marketRelation(entry)
   return ['install', 'update'].includes(relation.kind) && canInstallMarket(entry)
-}
-function marketUpdate(plugin) {
-  const entry = findRegistryPlugin(registry.value, plugin.id)
-  return entry && installedMarketRelation(plugin)?.kind === 'update' ? entry : null
 }
 function canInstallMarket(entry) {
   // 官方固定版本下载强制 SHA-256（registry-client downloadFixedVersion 门禁）；
   // 签名/proof 不再参与安装决策，builtin 包同样走下载校验 + 服务端宿主注册表门禁。
   return !!entry?.sha256
-}
-function uiType(entry) {
-  const contributions = entry.ui?.contributions
-  if (!Array.isArray(contributions) || !contributions.length) return 'none'
-  // runtime 三档如实展示（core=宿主预置组件）；未知值退化为 declarative
-  if (contributions.some(item => item && item.runtime === 'core')) return 'core（宿主组件）'
-  if (contributions.some(item => item && item.runtime === 'iframe')) return 'iframe'
-  return 'declarative'
 }
 function dependencyNames(entry) { return dependencyRefsFor(entry).map(item => item.name || item.id) }
 function dependencyItems(plugin) { return dependencyRefsFor(plugin) }
@@ -339,7 +255,7 @@ function dependentItems(plugin) {
   const dependent = plugin.dependent || {}
   return [...(dependent.app_packages || []), ...(dependent.tasks || []), ...(dependent.workflows || [])]
 }
-function stateClass(state) { return state === 'running' ? 'run' : state === 'enabled' ? 'ok' : state === 'failed' ? 'err' : 'warn' }
+function stateClass(state) { return state === 'running' ? 'run' : state === 'enabled' ? 'ok' : state === 'failed' ? 'err' : 'idle' }
 function stateLabel(state) { return ({ installed: '已安装', enabled: '已启用', running: '运行中', disabled: '已停用', failed: '失败' })[state] || state || '未知' }
 function sourceLabel(source) { return sourceText(source || 'unknown') }
 
@@ -368,21 +284,23 @@ async function inspectAndConfirm(file, source, current, providedInspection = nul
   // 文案唯一实现在 plugin-service.executionChangeDetail（可单测）。
   const executionChangeLine = executionChangeDetail(inspection.execution_change)
   const title = current ? '确认更新插件' : '确认安装插件'
-  const details = [
-    `${title}：${inspection.name || inspection.id}`,
-    `ID：${inspection.id}`,
-    `版本：${inspection.version}`,
-    `来源：${sourceLabel(source.kind)}${source.publisher ? `；发布者：${source.publisher}` : ''}`,
-    `执行形态：${executionLabel(execution)}`,
-    ...(executionChangeLine ? [executionChangeLine] : []),
-    ...(hostVersion ? [`宿主版本要求：${hostVersion}`] : []),
-    `权限：${requestedPermissions.length ? requestedPermissions.join('、') : '无'}`,
-    formatPermissionDiff(summary.diff),
-  ]
-  if (policy.requiresWarning || summary.diff.added.length) {
-    details.push('请确认来源与权限后继续。')
-  }
-  if (!globalThis.confirm(details.join('\n'))) return null
+  const accepted = await confirmDialog(inspection.name || inspection.id, {
+    title, confirmText: current ? '确认更新' : '确认安装',
+    fields: [
+      { label: '插件 ID', value: inspection.id },
+      { label: '版本', value: current ? `${current.active_version || current.version} → ${inspection.version}` : inspection.version },
+      { label: '来源', value: `${sourceLabel(source.kind)}${source.publisher ? ` · ${source.publisher}` : ''}` },
+      { label: '执行方式', value: executionLabel(execution) },
+      ...(hostVersion ? [{ label: '宿主要求', value: hostVersion }] : []),
+    ],
+    sections: [
+      { title: '请求权限', text: requestedPermissions.length ? requestedPermissions.join('、') : '无' },
+      ...(current ? [{ title: '权限变化', text: formatPermissionDiff(summary.diff), tone: summary.diff.added.length ? 'warn' : '' }] : []),
+      ...(executionChangeLine ? [{ title: '执行方式变化', text: executionChangeLine, tone: 'warn' }] : []),
+    ],
+    warning: policy.requiresWarning || summary.diff.added.length ? '请确认来源与权限后继续。' : '',
+  })
+  if (!accepted) return null
   return { inspection, summary }
 }
 
@@ -439,7 +357,6 @@ async function installMarket(entry, current = installedPlugin(entry.id)) {
 async function onLocalFile(event) {
   const file = event.target.files?.[0]
   if (!file) return
-  localFileName.value = file.name
   const operationKey = 'local-import'
   if (!beginOperation(operationKey)) return
   clearMessages()
@@ -463,7 +380,7 @@ async function onUrlImport() {
 }
 
 async function runAction(action, plugin) {
-  if (!globalThis.confirm(lifecyclePrompt(action, plugin))) return
+  if (!await confirmDialog(lifecyclePrompt(action, plugin), { title: action === 'enable' ? '启用插件' : '停用插件', confirmText: action === 'enable' ? '启用' : '停用' })) return
   const operationKey = `${action}:${plugin.id}`
   if (!beginOperation(operationKey)) return
   clearMessages()
@@ -486,7 +403,7 @@ function switchableVersions(plugin) {
 }
 
 async function uninstall(plugin, deleteData) {
-  if (!globalThis.confirm(uninstallPrompt(plugin, deleteData))) return
+  if (!await confirmDialog(uninstallPrompt(plugin, deleteData), { title: '卸载插件', confirmText: deleteData ? '删除数据并卸载' : '卸载', danger: true })) return
   const operationKey = `uninstall:${plugin.id}`
   if (!beginOperation(operationKey)) return
   clearMessages()
@@ -500,64 +417,27 @@ async function uninstall(plugin, deleteData) {
 </script>
 
 <style scoped>
-.plugin-center-mask { position:fixed; inset:0; z-index:210; display:flex; align-items:center; justify-content:center; padding:24px; background:rgba(4,6,10,.76); backdrop-filter:blur(4px); }
-.plugin-center { width:min(900px, 96vw); max-height:90vh; display:flex; flex-direction:column; overflow:hidden; background:var(--bg-2); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); }
-.plugin-center-head { display:flex; justify-content:space-between; gap:20px; padding:18px 22px; border-bottom:1px solid var(--border); }
-.plugin-center-head h2 { font-size:18px; }
-.plugin-center-head p { margin-top:5px; color:var(--text-2); font-size:12px; }
-.plugin-center-tabs { display:flex; gap:4px; padding:10px 20px 0; border-bottom:1px solid var(--border); }
-.plugin-center-tabs button { padding:8px 12px 10px; border:0; border-bottom:2px solid transparent; background:transparent; color:var(--text-1); cursor:pointer; font-size:13px; }
-.plugin-center-tabs button:hover { color:var(--text-0); }
-.plugin-center-tabs button.active { border-color:var(--accent); color:var(--accent); font-weight:600; }
-.tab-count { margin-left:5px; color:var(--text-2); }
-.plugin-center-body { min-height:300px; overflow:auto; padding:18px 20px 22px; }
-.plugin-center-loading, .plugin-empty { display:flex; justify-content:center; align-items:center; min-height:220px; color:var(--text-2); }
-.section-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
-.section-head > div { display:flex; align-items:baseline; gap:10px; }
-.muted { color:var(--text-2); font-size:12px; }
-.plugin-card { display:flex; justify-content:space-between; gap:18px; margin-bottom:10px; padding:14px; background:var(--bg-1); border:1px solid var(--border); border-radius:var(--radius); }
-.plugin-card-main { min-width:0; flex:1; }
-.plugin-title-row { display:flex; align-items:center; flex-wrap:wrap; gap:7px; }
-.plugin-title-row h3 { font-size:14px; }
-.plugin-meta, .plugin-facts { display:flex; flex-wrap:wrap; gap:5px 14px; margin-top:7px; color:var(--text-2); font-size:11px; }
-.plugin-meta code, .selected-file code, .import-pane code { color:var(--accent-2); font-family:var(--mono); }
-.plugin-description { margin-top:9px; color:var(--text-1); font-size:12px; line-height:1.5; }
-.dependency-line { margin-top:8px; color:var(--text-1); font-size:11px; line-height:1.45; }
-.version-switch-line { display:flex; align-items:center; flex-wrap:wrap; gap:6px 10px; margin-top:8px; font-size:11px; }
-.version-switch-label { color:var(--text-2); }
-.version-switch-item { display:inline-flex; align-items:center; gap:6px; }
-.danger-text { color:var(--danger); }
-.warn-text { color:var(--warn); }
-.plugin-card-actions { display:flex; flex-direction:column; align-items:flex-end; justify-content:flex-start; gap:7px; flex-shrink:0; }
-.installed-actions { max-width:260px; flex-direction:row; flex-wrap:wrap; align-content:flex-start; justify-content:flex-end; }
-.action-hint { color:var(--warn); font-size:10px; white-space:nowrap; }
-.tag.ok { color:var(--ok); }
-.tag.err { color:var(--danger); }
-.tag.warn { color:var(--warn); }
-.import-pane { max-width:680px; margin:25px auto; padding:24px; background:var(--bg-1); border:1px solid var(--border); border-radius:var(--radius); }
-.import-pane h3 { font-size:15px; }
-.import-pane p { margin:10px 0 16px; color:var(--text-1); font-size:12px; line-height:1.6; }
-.file-picker { position:relative; overflow:hidden; }
-.file-picker input { position:absolute; inset:0; width:100%; height:100%; cursor:pointer; opacity:0; }
-.selected-file { margin-top:12px; color:var(--text-1); font-size:12px; }
-.url-row { display:flex; gap:8px; }
-.url-row .input { flex:1; }
-.plugin-alert { margin-bottom:12px; padding:9px 11px; border:1px solid var(--border); border-radius:var(--radius-sm); font-size:12px; line-height:1.5; white-space:pre-line; }
-.plugin-alert.error { color:var(--danger); border-color:rgba(248,113,113,.45); background:rgba(248,113,113,.08); }
-.plugin-alert.info { color:var(--accent-2); border-color:rgba(56,189,248,.35); background:rgba(56,189,248,.08); }
-.plugin-result { margin-bottom:12px; padding:9px 11px; border:1px solid rgba(74,222,128,.35); border-radius:var(--radius-sm); background:rgba(74,222,128,.08); font-size:12px; line-height:1.5; }
-.plugin-result-operation { color:var(--ok); font-weight:600; }
-.plugin-result-detail { margin-top:3px; }
-.plugin-result-detail.result-success { color:var(--ok); }
-.plugin-result-detail.result-info { color:var(--accent-2); }
-.plugin-result-detail.result-warning { color:var(--warn); }
-.plugin-result-detail.result-danger { color:var(--danger); }
-.plugin-operation-loading { margin-bottom:12px; color:var(--text-2); font-size:12px; }
-.plugin-alert.warning { margin-top:16px; color:var(--warn); border-color:rgba(251,191,36,.35); background:rgba(251,191,36,.08); }
-@media (max-width: 700px) {
-  .plugin-center-mask { padding:8px; }
-  .plugin-card { flex-direction:column; }
-  .plugin-card-actions, .installed-actions { align-items:flex-start; justify-content:flex-start; max-width:none; }
-  .url-row { flex-direction:column; }
-}
+.plugin-center { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; padding:18px 24px; background:var(--bg-0); container-type:inline-size; }
+.plugin-toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding-bottom:16px; flex-shrink:0; }
+.plugin-search { width:320px; max-width:100%; }.plugin-count { margin-left:auto; white-space:nowrap; }
+.url-import { padding:12px; margin-bottom:14px; background:var(--bg-1); border:1px solid var(--border); flex-shrink:0; }.url-import p { margin-top:6px; }.url-row { display:flex; gap:8px; }.url-row .input { flex:1; min-width:0; }
+.plugin-center-body { min-height:0; overflow:auto; }
+.plugin-list-head,.plugin-card { display:grid; grid-template-columns:minmax(0,1fr) 180px 260px; gap:24px; }
+.plugin-list-head { padding:9px 16px; background:var(--bg-1); border:1px solid var(--border); color:var(--text-2); font-size:12px; border-radius:3px 3px 0 0; }
+.plugin-list-head span:last-child { text-align:right; }.plugin-grid { border:1px solid var(--border); border-top:0; border-radius:0 0 3px 3px; background:var(--bg-1); }
+.plugin-card { padding:16px; border-bottom:1px solid color-mix(in srgb,var(--border) 65%,transparent); align-items:start; }.plugin-card:last-child { border-bottom:0; }.plugin-card:hover { background:color-mix(in srgb,var(--bg-2) 45%,var(--bg-1)); }
+.plugin-card-main { min-width:0; overflow-wrap:anywhere; display:grid; grid-template-columns:minmax(180px,.8fr) minmax(0,1fr); gap:0 24px; }.plugin-card-main>.dependency-line,.plugin-details { grid-column:1/-1; }.plugin-title-row { display:flex; align-items:baseline; flex-wrap:wrap; gap:10px; }.plugin-title-row h3 { font-size:14px; font-weight:600; }.plugin-version { font-size:12px; color:var(--text-2); }
+.plugin-meta { display:flex; flex-wrap:wrap; gap:5px 12px; margin-top:5px; color:var(--text-2); font-size:12px; }.plugin-meta code { color:var(--text-2); font-family:var(--mono); }
+.plugin-description { margin-top:0; align-self:center; color:var(--text-1); font-size:13px; line-height:1.6; }
+.plugin-status { display:flex; flex-direction:column; align-items:flex-start; gap:7px; padding-top:2px; }.plugin-status .tag { padding:0; background:none; border:0; font-size:12px; color:var(--text-1); }.plugin-status .tag:first-child::before { content:''; display:inline-block; width:5px; height:5px; margin-right:7px; border-radius:50%; background:currentColor; }.plugin-status .ok,.plugin-status .run { color:var(--ok); }.plugin-status .info,.plugin-status .warn { color:var(--warn); }.plugin-status .err { color:var(--danger); }
+.plugin-card-actions { display:flex; gap:6px; justify-content:flex-end; flex-wrap:wrap; }.plugin-card-actions .btn { min-width:66px; justify-content:center; }
+.plugin-details { margin-top:8px; font-size:12px; }.plugin-details summary { display:inline-flex; gap:4px; align-items:center; cursor:pointer; list-style:none; color:var(--text-2); }.plugin-details summary:hover { color:var(--text-0); }.plugin-details summary::-webkit-details-marker { display:none; }.plugin-details summary .ui-icon { width:12px; height:12px; }.plugin-details[open] summary .ui-icon { transform:rotate(180deg); }
+.plugin-facts { display:flex; flex-direction:column; gap:5px; margin-top:10px; color:var(--text-1); font-size:12px; line-height:1.6; }.version-switch-line { margin-top:7px; color:var(--text-2); }.plugin-remove-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; border-top:1px solid var(--border); padding-top:8px; }
+.dependency-line { margin-top:7px; font-size:12px; color:var(--text-1); line-height:1.6; }.danger-text { color:var(--danger); }.warn-text { color:var(--warn); }.muted { color:var(--text-2); font-size:12px; }
+.plugin-center-loading,.plugin-empty { padding:48px 16px; text-align:center; color:var(--text-2); font-size:13px; }
+.plugin-alert,.plugin-result { margin-bottom:12px; padding:10px 12px; border-left:2px solid var(--border); background:var(--bg-1); font-size:12px; line-height:1.6; white-space:pre-line; }.plugin-alert.error { color:var(--danger); border-color:var(--danger); }.plugin-alert.info,.plugin-result-operation { color:var(--ok); }.plugin-result { border-color:var(--ok); }.result-warning { color:var(--warn); }.result-danger { color:var(--danger); }.plugin-operation-loading { margin-bottom:12px; font-size:12px; color:var(--text-1); }
+@container (max-width:1150px) { .plugin-card-main { display:block; }.plugin-description { margin-top:7px; } }
+@container (max-width:900px) { .plugin-list-head,.plugin-card { grid-template-columns:minmax(0,1fr) 130px 180px; gap:16px; } }
+@container (max-width:650px) { .plugin-list-head { display:none; }.plugin-grid { border-top:1px solid var(--border); }.plugin-card { grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:14px; }.plugin-card-main { grid-column:1/-1; }.plugin-status { flex-direction:row; flex-wrap:wrap; }.plugin-card-actions { align-self:end; }.plugin-search { flex:1; min-width:160px; }.url-row { flex-wrap:wrap; }.plugin-count { margin-left:0; } }
+@media (max-width:700px) { .plugin-center { padding:12px; } }
 </style>

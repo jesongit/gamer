@@ -39,6 +39,15 @@ function composeTemplateName(shortName, region, preserveColor) {
 
 const BASE = ''
 
+// Package REST 返回通用资源；在 YAML 业务边界补齐编辑器使用的寻址字段。
+function scriptResource(entry, pkg, file) {
+  return { ...entry, id: `${pkg}/${file}`, package: pkg, name: file }
+}
+
+function functionResource(entry, pkg, file) {
+  return { ...entry, id: `${pkg}/${file}`, pkg, file, functions: entry.functions || [] }
+}
+
 /** 所有 API 失败的稳定错误形态，供视图只按 code/status/data 判断。 */
 export class ApiError extends Error {
   constructor({ status = 0, code = 'unknown_error', message = '请求失败', data = null, details = null, cause } = {}) {
@@ -265,6 +274,7 @@ export const api = {
   updateDevice: (id, d) => req('PUT', `/api/devices/${id}`, d),
   deleteDevice: (id) => req('DELETE', `/api/devices/${id}`),
   connectDevice: (id) => req('POST', `/api/devices/${id}/connect`),
+  forceReconnectDevice: (id) => req('POST', `/api/devices/${id}/force-reconnect`),
   disconnectDevice: (id) => req('POST', `/api/devices/${id}/disconnect`),
   screenshot: async (id) => {
     const r = await req('POST', `/api/devices/${id}/screenshot`)
@@ -513,6 +523,7 @@ export const api = {
         id: `${r.package}/${r.path.slice(AUTOMATION_DIR.length + 1)}`,
         package: r.package,
         name: r.path.slice(AUTOMATION_DIR.length + 1),
+        content: r.content,
         version: r.version,
         updated_at: r.updated_at,
         size: r.size,
@@ -520,16 +531,26 @@ export const api = {
       .filter(s => !isFunctionLibraryFile(s.name))
   },
   // 单脚本读取（含内容版本短码 version：编辑器 expected_version 冲突检测依据）
-  getScript: (id) => {
+  getScript: async (id) => {
     const [pkg, file] = splitResourceId(id)
-    return api.getPluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file))
+    return scriptResource(await api.getPluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file)), pkg, file)
   },
   // PUT 创建或更新（创建冲突 409；更新缺版本时在客户端拒绝，force 必须显式为 true）
-  createScript: ({ name, content, pkg } = {}) =>
-    req('PUT', pkgResUrl(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, requireId(name, 'name'))), createBody(content)),
+  createScript: async ({ name, content, pkg } = {}) =>
+    scriptResource(await req('PUT', pkgResUrl(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, requireId(name, 'name'))), createBody(content)), pkg, name),
   updateScript: async (id, payload = {}) => {
     const [pkg, file] = splitResourceId(id)
-    return api.putPluginResourceText(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file), payload)
+    const saved = scriptResource(await api.putPluginResourceText(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file), payload), pkg, file)
+    const nextName = payload.name === undefined ? file : requireId(payload.name, 'name').trim()
+    if (nextName === file) return saved
+    try {
+      await api.renamePluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file), pluginPath(AUTOMATION_DIR, nextName))
+    } catch (error) {
+      // 内容已经保存，改名失败仍停留原路径；调用方需要新版本才能继续保存。
+      error.savedResource = saved
+      throw error
+    }
+    return scriptResource(saved, pkg, nextName)
   },
   deleteScript: (id) => {
     const [pkg, file] = splitResourceId(id)
@@ -547,22 +568,22 @@ export const api = {
         const file = r.path.slice(AUTOMATION_DIR.length + 1)
         return {
           id: `${r.package}/${file}`, pkg: r.package, file,
-          content: r.content, version: r.version, functions: r.meta?.functions || [],
+          content: r.content, version: r.version, functions: r.functions || [],
           updated_at: r.updated_at,
         }
       })
       .filter(f => isFunctionLibraryFile(f.file))
   },
-  getFunction: (id) => {
+  getFunction: async (id) => {
     const [pkg, file] = splitResourceId(id)
-    return api.getPluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file))
+    return functionResource(await api.getPluginResource(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file)), pkg, file)
   },
   // PUT 创建或更新，更新缺版本时在客户端拒绝。
-  createFunction: ({ pkg, name, content } = {}) =>
-    req('PUT', pkgResUrl(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, requireId(name, 'name'))), createBody(content)),
+  createFunction: async ({ pkg, name, content } = {}) =>
+    functionResource(await req('PUT', pkgResUrl(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, requireId(name, 'name'))), createBody(content)), pkg, name),
   updateFunction: async (id, payload = {}) => {
     const [pkg, file] = splitResourceId(id)
-    return api.putPluginResourceText(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file), payload)
+    return functionResource(await api.putPluginResourceText(pkg, GAMER_YAML_PLUGIN_ID, pluginPath(AUTOMATION_DIR, file), payload), pkg, file)
   },
   deleteFunction: (id) => {
     const [pkg, file] = splitResourceId(id)
@@ -576,11 +597,12 @@ export const api = {
   // 成功 202 {run_id, state, resolved_args}；参数诊断 400 {error:"invalid_args",
   // diagnostics:[...]}；设备占用 409 {error:"device_busy", ...}；运行依赖缺失
   //（runner 未注册）424 {code:"dependency_unavailable"}
-  run: async ({ runner_id, entrypoint, device_id, payload } = {}) =>
+  run: async ({ runner_id, entrypoint, device_id, content_package, payload } = {}) =>
     requireRunResponse(await req('POST', '/api/runs', {
       runner_id: requireId(runner_id, 'runner_id'),
       entrypoint: requireId(entrypoint, 'entrypoint'),
       device_id: device_id,
+      ...(content_package !== undefined ? { content_package } : {}),
       payload: payload && typeof payload === 'object' ? payload : {},
     })),
   // 统一运行实例（run_id 主键）：单次查询 RunRecord / 按次取消（终态以查询为准）

@@ -6,7 +6,7 @@
         <div class="sp-sub">系统信息、软件更新与更新策略；数据与操作均对接服务端真实 API（/api/system/*，更新策略持久化在服务端数据目录）</div>
       </div>
       <button class="btn btn-primary" :disabled="st.loading" @click="ctl.refresh()">
-        {{ st.loading ? '读取中…' : '↻ 刷新' }}
+        <UiIcon name="refresh" />{{ st.loading ? '读取中…' : '刷新' }}
       </button>
     </div>
 
@@ -101,7 +101,9 @@
  * - 策略编辑：off/notify/auto + 维护窗口 + 冻结窗口，PUT /api/system/update/policy 整对象替换；
  *   轮询不会回填覆盖编辑中的表单（仅首次与保存回显时同步服务端值）。
  */
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, inject, reactive, ref, watch } from 'vue'
+import { OPERATION_FEEDBACK_KEY, operationReporter } from '../workspace/operation-feedback'
+import UiIcon from './ui/UiIcon.vue'
 import SystemInfoCard from './SystemInfoCard.vue'
 import UpdateStatusCard from './UpdateStatusCard.vue'
 import UpdateConfirmModal from './UpdateConfirmModal.vue'
@@ -112,6 +114,7 @@ import { useSystemStatus } from '../system/useSystemStatus'
 import { createUpdateFlow } from '../system/useUpdateFlow'
 
 const toast = useToast()
+const beginReport = operationReporter(inject(OPERATION_FEEDBACK_KEY, null), '', toast)
 
 // ---- 系统信息 + 更新状态：页签级轮询（活跃更新高频 / 驻留低频，卸载自动停止） ----
 const ctl = useSystemStatus()
@@ -127,6 +130,7 @@ function errHint(e) {
 }
 
 async function onCheck() {
+  const toast = beginReport()
   try {
     await systemApi.checkUpdate()
     toast('已受理检查更新', 'info')
@@ -137,6 +141,7 @@ async function onCheck() {
 }
 
 async function onDownload() {
+  const toast = beginReport()
   try {
     await systemApi.downloadUpdate()
     toast('已受理后台下载', 'info')
@@ -174,14 +179,14 @@ const confirmOpen = ref(false)
 const confirmMode = ref('install')
 
 function requestInstall() {
-  if (!canAct.value.install) { toast('当前没有可安装的更新候选，请先检查更新', 'error'); return }
+  if (!canAct.value.install) { beginReport()('当前没有可安装的更新候选，请先检查更新', 'error'); return }
   confirmMode.value = 'install'
   flowCtl.reset()
   confirmOpen.value = true
 }
 
 function requestRollback() {
-  if (!canAct.value.rollback) { toast('当前没有可用的自动回滚点', 'error'); return }
+  if (!canAct.value.rollback) { beginReport()('当前没有可用的自动回滚点', 'error'); return }
   confirmMode.value = 'rollback'
   flowCtl.reset()
   confirmOpen.value = true
@@ -193,6 +198,7 @@ function closeConfirm() {
 }
 
 async function onConfirm() {
+  const toast = beginReport()
   const info = st.info
   const r = confirmMode.value === 'rollback'
     ? await flowCtl.submitRollback(info)
@@ -253,6 +259,7 @@ function onPolicyEdit() {
 }
 
 async function savePolicy() {
+  const report = beginReport()
   policyNote.value = ''
   policyError.value = ''
   const { strategy, start, end } = policyForm
@@ -277,7 +284,7 @@ async function savePolicy() {
       freeze_window_minutes: freeze,
     })
     if (echo && typeof echo === 'object') applyPolicy(echo) // 保存回显（200 body = 保存后的策略）
-    policyNote.value = '已保存'
+    report('更新策略已保存', 'success')
     ctl.refresh()
   } catch (e) {
     policyError.value = errHint(e)
@@ -309,12 +316,12 @@ async function savePolicy() {
   padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
 }
 .strategy-row b { font-size: 13px; }
-.strategy-row small { display: block; color: var(--text-2); font-size: 11px; margin-top: 2px; line-height: 1.5; }
+.strategy-row small { display: block; color: var(--text-2); font-size: 12px; margin-top: 2px; line-height: 1.5; }
 .window-fields { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-1); }
 .window-fields.dim { opacity: .55; }
 .window-fields input[type='time'],
 .window-fields input[type='number'] {
-  background: var(--bg-3); border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg-3); border: 1px solid var(--border); border-radius: var(--radius-sm);
   color: var(--text-0); padding: 4px 6px; font-size: 12px;
 }
 .window-fields input[type='number'] { width: 72px; }

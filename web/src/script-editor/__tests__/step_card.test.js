@@ -21,7 +21,7 @@ const YAML_BY_KIND = {
 }
 
 const SUMMARY_BY_KIND = {
-  call: '调用 tap 0.5, 0.5',
+  call: '点击',
   if: '如果 $flag',
   repeat: '重复 3 次',
   return: '返回 ?',
@@ -59,7 +59,7 @@ describe('StepCard：收起态摘要（V1 四类）', () => {
 })
 
 describe('StepCard：V1 交互', () => {
-  it('call 卡：函数名输入 + as 开关经命令栈生效', async () => {
+  it('call 卡：函数名输入 + 返回值折叠项经命令栈生效', async () => {
     const created = setupScript('run:\n  - tap: [0.5, 0.5]\n')
     const wrapper = mount(StepCard, {
       props: {
@@ -71,10 +71,14 @@ describe('StepCard：V1 交互', () => {
     const fnInput = wrapper.find('input[aria-label="函数名"]')
     await fnInput.setValue('wait_find')
     expect(created.model.run[0].fn).toBe('wait_find')
-    // 开启 as
-    const asToggle = wrapper.findAll('input[type="checkbox"]')[0]
-    await asToggle.setValue(true)
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false)
+    expect(wrapper.find('.return-value-options').attributes('open')).toBeUndefined()
     await wrapper.find('input[aria-label="返回值变量名"]').setValue('hit')
+    expect(created.model.run[0].as).toBe('hit')
+    expect(wrapper.get('.return-value-options summary').text()).toContain('hit')
+    await wrapper.get('[aria-label="清除返回值变量"]').trigger('click')
+    expect(created.model.run[0].as).toBeNull()
+    created.stack.undo()
     expect(created.model.run[0].as).toBe('hit')
     wrapper.unmount()
   })
@@ -101,12 +105,13 @@ describe('StepCard：V1 交互', () => {
       },
     })
     await expandCard(wrapper, created.model.run[0].uuid)
-    // + 参数按钮优先补「必填且无默认」的 template
-    const addBtn = wrapper.findAll('button').find((b) => b.text() === '+ 参数')
-    await addBtn.trigger('click')
+    expect(wrapper.get('[data-arg-name="template"]').find('[aria-label="必填"]').exists()).toBe(true)
+    expect(wrapper.find('button[data-param="template"]').exists()).toBe(false)
+    expect(wrapper.find('input[aria-label="参数 timeout数值"]').exists()).toBe(false)
+    await wrapper.get('input[aria-label="参数 template"]').setValue('button.png')
     expect(created.model.run[0].args).toEqual({
       kind: 'map',
-      entries: { template: { lit: '' } },
+      entries: { template: { lit: 'button.png' } },
     })
     wrapper.unmount()
   })

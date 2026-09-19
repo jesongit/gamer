@@ -314,22 +314,22 @@ defineExpose({ getArgs, validate, effectiveArgs })
 .pf-row-error { border-color: var(--danger); }
 .pf-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .pf-type {
-  font-size: 11px; color: var(--accent-2); background: var(--bg-3);
+  font-size: 12px; color: var(--accent-2); background: var(--bg-3);
   border-radius: 4px; padding: 1px 6px; flex: none;
 }
 .pf-name { font-size: 12px; color: var(--text-0); flex: none; }
 .pf-remark {
-  font-size: 11px; color: var(--text-2); overflow: hidden;
+  font-size: 12px; color: var(--text-2); overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; min-width: 0;
 }
 .pf-spacer { flex: 1; }
-.pf-default { font-size: 11px; color: var(--text-2); flex: none; }
+.pf-default { font-size: 12px; color: var(--text-2); flex: none; }
 .pf-toggle {
   display: inline-flex; align-items: center; gap: 3px;
-  font-size: 11px; color: var(--text-1); cursor: pointer; flex: none;
+  font-size: 12px; color: var(--text-1); cursor: pointer; flex: none;
 }
 .pf-required {
-  font-size: 11px; color: var(--warn); border: 1px solid var(--warn);
+  font-size: 12px; color: var(--warn); border: 1px solid var(--warn);
   border-radius: 4px; padding: 0 5px; flex: none;
 }
 .pf-editor { padding-left: 2px; }
@@ -341,6 +341,6 @@ defineExpose({ getArgs, validate, effectiveArgs })
 .cell-input:focus { outline: none; border-color: var(--accent); }
 .cell-input.num { width: 74px; }
 .json-input { width: min(100%, 420px); min-height: 42px; resize: vertical; font-family: var(--mono); }
-.pf-err-msg { font-size: 11px; color: var(--danger); }
+.pf-err-msg { font-size: 12px; color: var(--danger); }
 .mono { font-family: var(--mono); }
 </style>

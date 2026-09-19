@@ -161,9 +161,9 @@ async function insertCall(fn: string): Promise<void> {
 }
 .step-group { min-width: 0; }
 .step-group-label {
-  padding: 2px 6px 4px; color: var(--text-2); font-size: 11px;
+  padding: 2px 6px 4px; color: var(--text-2); font-size: 12px;
 }
-.step-group-empty { padding: 2px 6px 4px; color: var(--text-2); font-size: 11px; font-style: italic; }
+.step-group-empty { padding: 2px 6px 4px; color: var(--text-2); font-size: 12px; font-style: italic; }
 .step-menu-item {
   display: block; width: 100%; padding: 6px 8px; border: none;
   border-radius: var(--radius-sm); background: transparent; color: var(--text-0);
@@ -174,12 +174,12 @@ async function insertCall(fn: string): Promise<void> {
 }
 .fn-item .fn-name { display: block; }
 .fn-item .fn-hint {
-  display: block; color: var(--text-2); font-size: 11px;
+  display: block; color: var(--text-2); font-size: 12px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px;
 }
 .mini-btn {
   border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
-  border-radius: 4px; font-size: 11px; padding: 2px 6px; cursor: pointer;
+  border-radius: 4px; font-size: 12px; padding: 2px 6px; cursor: pointer;
 }
 .mini-btn:hover { color: var(--danger); border-color: var(--danger); }
 </style>

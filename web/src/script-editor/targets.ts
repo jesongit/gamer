@@ -28,7 +28,7 @@ export interface SeTargetOptions {
   targets: SeTargetOption[]
   /**
    * 解析函数参数声明（async，宿主内部缓存）；未知/加载失败返回 null。
-   * StepCard 在函数切换后用它重生成实参（默认值预填）。
+   * StepCard 用它显示参数按钮，函数切换时仅初始化无默认值必填项。
    */
   resolveParams(target: string): Promise<ParamDecl[] | null>
   /** 同步缓存命中形态（未缓存返回 null）：已有实参的类型回显，不触发加载。 */

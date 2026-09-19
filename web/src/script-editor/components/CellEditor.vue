@@ -217,6 +217,8 @@ const props = defineProps({
   /** 字段错误消息（红框 + 提示）。 */
   error: { type: String, default: '' },
   label: { type: String, default: '值' },
+  /** 未填写的可选参数只展示空控件，不把占位值当作显式 null 校验。 */
+  optional: { type: Boolean, default: false },
   placeholder: { type: String, default: '' },
   multiline: { type: Boolean, default: false },
   /** tmpl 字段的可选模板短名候选。 */
@@ -295,6 +297,7 @@ const isRef = computed(() => props.allowRef && isRefCell(props.cell))
 
 /** 即时自校验：字面量按类型规则当场校验；引用态只提示路径语法。 */
 const selfError = computed(() => {
+  if ('missing' in props.cell && props.cell.missing) return props.optional ? '' : '请填写此参数'
   if (isRef.value) {
     return isRefPath(props.cell.ref) ? '' : `引用 $${props.cell.ref} 不是合法属性路径`
   }
@@ -364,6 +367,7 @@ const numLit = computed<string>(() => {
 })
 
 const jsonString = computed(() => {
+  if ('missing' in props.cell && props.cell.missing) return ''
   try {
     const encoded = JSON.stringify(props.cell.lit, null, 2)
     return encoded === undefined ? '' : encoded
@@ -472,9 +476,9 @@ function onNum(e: Event): void {
 .cell-mode { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
 .mode-btn {
   border: none; background: var(--bg-2); color: var(--text-2);
-  font-size: 11px; padding: 2px 8px; cursor: pointer;
+  font-size: 12px; padding: 2px 8px; cursor: pointer;
 }
-.mode-btn.active { background: var(--accent); color: #06251c; font-weight: 600; }
+.mode-btn.active { background: var(--accent); color: #202015; font-weight: 600; }
 .cell-input, .cell-select {
   background: var(--bg-2); color: var(--text-0);
   border: 1px solid var(--border); border-radius: var(--radius-sm);
@@ -485,14 +489,14 @@ function onNum(e: Event): void {
 .cell-input.ref-input { width: 150px; }
 .cell-input.area { min-width: 180px; resize: vertical; }
 .cell-select.unit { width: 64px; }
-.cell-tool { font-size: 11px; padding: 2px 8px; border-radius: var(--radius-sm); border: 1px dashed var(--border); background: transparent; color: var(--text-2); cursor: not-allowed; }
+.cell-tool { font-size: 12px; padding: 2px 8px; border-radius: var(--radius-sm); border: 1px dashed var(--border); background: transparent; color: var(--text-2); cursor: not-allowed; }
 .cell-tool.live { cursor: pointer; border-style: solid; }
 .cell-tool.live:hover:not(.active) { color: var(--accent); border-color: var(--accent); }
 /* 取点/框选进行中的激活态：按钮保持"被按下"样式，填入数据后自动恢复 */
-.cell-tool.live.active { background: var(--accent); color: #06251c; border-color: var(--accent); font-weight: 600; }
-.cell-mini { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; color: var(--text-2); }
+.cell-tool.live.active { background: var(--accent); color: #202015; border-color: var(--accent); font-weight: 600; }
+.cell-mini { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: var(--text-2); }
 .tmpl-wrap { display: inline-flex; align-items: center; gap: 4px; position: relative; }
-.tpl-toggle { cursor: pointer; border: 1px solid var(--border); background: var(--bg-2); color: var(--text-2); border-radius: var(--radius-sm); padding: 2px 7px; font-size: 10px; }
+.tpl-toggle { cursor: pointer; border: 1px solid var(--border); background: var(--bg-2); color: var(--text-2); border-radius: var(--radius-sm); padding: 2px 7px; font-size: 12px; }
 .tpl-toggle.active { border-color: var(--accent); color: var(--accent); }
 .tpl-drop {
   position: absolute; top: calc(100% + 4px); left: 0; z-index: 60;
@@ -507,8 +511,9 @@ function onNum(e: Event): void {
   background: var(--bg-0); border: 1px solid var(--border); border-radius: 4px; overflow: hidden;
 }
 .tpl-drop-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
-.tpl-drop-name { font-size: 11px; color: var(--text-0); word-break: break-all; }
-.tpl-drop-empty { padding: 10px; font-size: 11px; color: var(--text-2); text-align: center; }
-.cell-err-msg { font-size: 11px; color: var(--danger); }
+.tpl-drop-name { font-size: 12px; color: var(--text-0); word-break: break-all; }
+.tpl-drop-empty { padding: 10px; font-size: 12px; color: var(--text-2); text-align: center; }
+.cell-err-msg { font-size: 12px; color: var(--danger); }
 .mono { font-family: var(--mono); }
+.cell-input{min-height:28px;padding:3px 7px;font-size:13px;border-color:var(--control-border);background:var(--field)}.cell-tool,.mode-btn{height:26px;min-width:26px;font-size:12px;padding:3px 6px}.cell-editor{gap:5px}.cell-mode{flex:none}.tmpl-wrap{flex:1;min-width:110px}.tmpl-wrap .cell-input{width:100%}
 </style>

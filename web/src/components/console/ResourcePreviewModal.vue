@@ -118,6 +118,6 @@ function functionModel(fn) {
 }
 .mono {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 12px;
 }
 </style>

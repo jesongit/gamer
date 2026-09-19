@@ -10,24 +10,17 @@
       </div>
       <header class="topbar">
         <div class="tb-left">
-          <router-link to="/console" class="tb-device" :class="{ on: store.deviceId }">
-            <span class="dot" :class="store.deviceId ? 'ok' : 'off'"></span>
-            {{ store.deviceId ? currentDeviceName : '未选择设备' }}
-          </router-link>
-          <div class="tb-sys" :title="`${systemStateText} · ${systemVersion}`">
-            <span class="dot" :class="systemStateClass"></span>
-            <span class="tb-sys-text">{{ systemStateText }}</span>
-            <span class="tb-sys-ver mono">{{ systemVersion }}</span>
-          </div>
+          <router-link to="/console" class="gamer-brand" aria-label="Gamer 首页"><span class="gamer-mark">G</span><span>amer</span></router-link>
         </div>
+        <div id="gamer-main-navigation" class="tb-navigation"></div>
         <div class="tb-right">
-          <div v-if="store.running" class="run-chip">
+          <div v-if="store.running && globalView" class="run-chip">
             <span class="dot run"></span>
             <span>{{ store.runScript }}</span>
             <span class="run-step">{{ store.runStep }}</span>
             <button class="run-stop" title="停止脚本" @click="stopRunning">■</button>
           </div>
-          <span v-if="session.username" class="tb-user" :title="`当前登录：${session.username}`">👤 {{ session.username }}</span>
+          <span v-if="session.username" class="tb-user" :title="`当前登录：${session.username}`">{{ session.username }}</span>
           <button class="btn btn-sm btn-ghost" @click="onLogout">退出登录</button>
         </div>
       </header>
@@ -41,23 +34,19 @@
 
 <script setup>
 import { computed, ref, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { store, devicesData, tasksData, beginCancel, useToast } from '../store'
 import { session, doLogout } from '../auth'
 import { api } from '../api'
 const toast = useToast()
+const route = useRoute()
+const globalView = computed(() => { const key = String(route.query.panel || ''); return !key || key.startsWith('gamer.core:') || ['packages', 'market', 'plugins'].includes(key) })
 
 const systemInfo = ref(null)
 const systemVersion = computed(() => {
   const version = systemInfo.value?.app?.version
   return version === undefined || version === null || version === '' ? 'dev/unknown' : String(version)
 })
-const systemStateText = computed(() => {
-  if (!systemInfo.value) return '服务状态未知'
-  return systemInfo.value.readiness?.status === 'ready' ? '服务运行中' : '服务未就绪'
-})
-const systemStateClass = computed(() => (
-  systemInfo.value?.readiness?.status === 'ready' ? 'ok' : 'off'
-))
 
 // 混包告警（WEB-006）：webVersion 来自构建期注入（web/package.json，CI 保证与 Cargo 同源）；
 // 服务端版本以 /api/system/info 的 app.version 为准。-dev 后缀视为同版本线不算不一致。
@@ -75,21 +64,13 @@ async function loadSystemInfo() {
     const body = await response.json()
     if (body && typeof body === 'object') systemInfo.value = body
   } catch {
-    // 系统状态仅用于展示；请求失败时保留 dev/unknown 降级文案。
+    // 无法获取服务端版本时不显示混包告警。
   }
 }
 
-const onlineCount = computed(() => devicesData.value.filter(d => d.status === 'online').length)
-const taskCount = computed(() => tasksData.value.length)
-
-const currentDeviceName = computed(() => {
-  const d = devicesData.value.find(x => x.id === store.deviceId)
-  return d ? d.name : ''
-})
-
 onMounted(() => {
   loadSystemInfo()
-  // 顶栏状态：在线设备数 / 定时任务数（任务数用于 title 提示）
+  // 初始化共享设备与任务数据。
   api.listDevices().then(d => { devicesData.value = d }).catch(() => {})
   api.listTasks().then(t => { tasksData.value = t }).catch(() => {})
 })
@@ -122,24 +103,23 @@ function stopRunning() {
 .mb-icon { flex-shrink: 0; }
 
 .topbar {
-  height: 52px; flex-shrink: 0; background: var(--bg-1);
+  height: 48px; flex-shrink: 0; background: var(--chrome);
   border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; justify-content: space-between; padding: 0 16px;
+  display: flex; align-items: center; padding: 0 18px;
   gap: 12px;
 }
-.tb-left { display: flex; align-items: center; min-width: 0; }
-.tb-device { display: flex; align-items: center; gap: 8px; color: var(--text-1); text-decoration: none; font-size: 13px; white-space: nowrap; }
-.tb-device.on { color: var(--text-0); font-weight: 600; }
-.tb-sys { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-1); min-width: 0; }
-.tb-sys-text { white-space: nowrap; }
-.tb-sys-ver { color: var(--text-2); font-size: 11px; }
-.tb-right { display: flex; align-items: center; gap: 10px; }
+.tb-left { display: flex; align-items: center; flex: 0 0 auto; }
+.tb-navigation { flex: 1; min-width: 0; align-self: stretch; }
+.tb-navigation :deep(.workspace-tabs) { height: 100%; padding: 0; border: 0; gap: 4px; }
+.tb-navigation :deep(.workspace-tab-add) { margin-left: 0; }
+.tb-right { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; white-space: nowrap; }
+.tb-right .btn { height: 28px; }
 .tb-user { color: var(--text-2); font-size: 12px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .run-chip {
   display: flex; align-items: center; gap: 8px; padding: 5px 12px;
   border-radius: 20px; font-size: 12px; color: var(--accent);
-  background: rgba(34,211,165,.08); border: 1px solid rgba(34,211,165,.3);
+  background: color-mix(in srgb, var(--accent) 8%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
 }
 .run-step { color: var(--text-1); }
 .run-stop {
@@ -149,9 +129,16 @@ function stopRunning() {
 }
 .run-stop:hover { background: rgba(255, 80, 80, .3); }
 
-.content { flex: 1; overflow: hidden; }
+.content { flex: 1; min-height: 0; overflow: hidden; }
 
-@media (max-width: 900px) {
-  .tb-sys { display: none; }
+@media (max-width: 1100px) {
+  .topbar { padding: 0 10px; gap: 8px; }
+  .tb-navigation :deep(.workspace-tabs) { gap: 0; }
+  .tb-navigation :deep(.workspace-tab) { min-width: 0; padding-inline: 9px; font-size: 12px; }
+  .tb-right { gap: 6px; }
+  .tb-user { max-width: 80px; }
+  .run-chip { gap: 4px; padding-inline: 6px; }
+  .run-chip > span:not(.dot) { max-width: 60px; overflow: hidden; text-overflow: ellipsis; }
 }
+.gamer-brand{display:flex;align-items:center;text-decoration:none;color:var(--text-0);font-size:22px;font-weight:750;letter-spacing:-1px}.gamer-mark{display:grid;place-items:center;width:27px;height:27px;margin-right:2px;background:var(--text-0);color:var(--chrome);clip-path:polygon(0 0,100% 0,100% 72%,72% 100%,0 100%);font-size:22px}
 </style>

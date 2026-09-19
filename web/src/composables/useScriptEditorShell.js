@@ -40,17 +40,29 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
   const jumpStack = ref([])
   const parseDiags = ref([]) // 加载时冻结的解析期诊断
   const savedYaml = ref('') // 最近加载/保存的规范 YAML 快照
+  const savedName = ref('')
   const historyTick = ref(0) // 命令栈变更计数（驱动 undo/redo 可用性重算）
 
   let offChange = null
+  let loadGeneration = 0
 
   // ---- 派生 ----
   const hasModel = computed(() => !!model.value && !!stack.value)
 
+  // 名称框隐藏后缀；资源寻址和保存仍使用完整文件名，改名保留原后缀。
+  const scriptDisplayName = computed({
+    get: () => name.value.replace(YAML_EXT_RE, ''),
+    set: (value) => {
+      const base = String(value || '').replace(YAML_EXT_RE, '')
+      const ext = name.value.match(YAML_EXT_RE)?.[0] || resourceId.value?.match(YAML_EXT_RE)?.[0] || '.yml'
+      name.value = base.trim() ? `${base}${ext}` : ''
+    },
+  })
+
   const dirty = computed(() => {
     if (!hasModel.value) return false
     try {
-      return serialize(model.value) !== savedYaml.value
+      return !resourceId.value || name.value !== savedName.value || serialize(model.value) !== savedYaml.value
     } catch {
       return true // 序列化异常一律按有未保存修改处理（防静默丢失）
     }
@@ -118,15 +130,18 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     selectedUuid.value = null
     conflict.value = null
     savedYaml.value = serialize(model.value)
+    savedName.value = name.value
     historyTick.value++
   }
 
   // ---- 加载 / 新建 ----
 
   async function loadScript(id) {
+    const generation = ++loadGeneration
     loading.value = true
     try {
       const s = await api.getScript(id)
+      if (generation !== loadGeneration) return null
       const parsed = parseScript(s.content ?? '')
       mountModel('script', parsed, {
         resourceId: s.id,
@@ -136,30 +151,35 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
       })
       return parsed
     } finally {
-      loading.value = false
+      if (generation === loadGeneration) loading.value = false
     }
   }
 
   async function loadFunctionFile(id) {
+    const generation = ++loadGeneration
     loading.value = true
     try {
       const f = await api.getFunction(id)
-      const short = f.file || String(id).split('/').slice(1).join('/').replace(/\.yaml$/i, '')
+      if (generation !== loadGeneration) return null
+      const file = f.file || String(id).split('/').slice(1).join('/')
+      const short = file.replace(/\.yaml$/i, '')
       const parsed = parseFunctionLibrary(f.content ?? '', { file: short })
       mountModel('function_library', parsed, {
         resourceId: f.id,
         pkg: f.pkg || String(id).split('/')[0] || '',
-        name: short,
+        name: file,
         version: f.version ?? null,
       })
       return parsed
     } finally {
-      loading.value = false
+      if (generation === loadGeneration) loading.value = false
     }
   }
 
   /** 新建脚本：V1 最小模型（空 run，name/params/vars 缺省）。 */
   function newScript({ name: n = '新脚本.yml', pkg: p = '' } = {}) {
+    ++loadGeneration
+    loading.value = false
     mountModel('script', { model: { name: null, params: [], vars: {}, run: [] }, diagnostics: [] }, {
       pkg: p,
       name: ensureYamlExt(n),
@@ -169,6 +189,8 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
   /** 新建函数库（分类）：预置一个空函数（functions: 包装），画布切换/编辑后保存。
    *  functionName 指定首函数名（「新建函数」弹窗带入，缺省 func1）。 */
   function newFunctionFile({ file, pkg: p = '', functionName = '' } = {}) {
+    ++loadGeneration
+    loading.value = false
     const short = String(file || '').replace(/\.yaml$/i, '')
     mountModel('function_library', {
       model: {
@@ -176,7 +198,7 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
         functions: [{ name: functionName || 'func1', description: '', params: [], vars: {}, returns: null, run: [] }],
       },
       diagnostics: [],
-    }, { pkg: p, name: short })
+    }, { pkg: p, name: `${short}.yaml` })
   }
 
   // ---- 保存 / 冲突 / 重载 ----
@@ -187,6 +209,7 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     const diags = diagnostics.value
     if (diags.length) return { ok: false, reason: 'invalid', diagnostics: diags }
     const yaml = serialize(m)
+    const submittedName = name.value
     saving.value = true
     try {
       const expected = opts.force || !version.value ? undefined : version.value
@@ -202,7 +225,7 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
         rep = await api.saveScript(payload)
         resourceId.value = rep.id ?? resourceId.value
         pkg.value = rep.package ?? pkg.value
-        name.value = rep.name ?? name.value
+        if (name.value === submittedName) name.value = rep.name ?? name.value
         version.value = rep.version ?? null
       } else {
         // 新建未落盘且分类为空 → 保存无意义（落盘名 = <分类>.yaml），按 empty 静默跳过
@@ -212,13 +235,20 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
           ? await api.updateFunction(resourceId.value, { content: yaml, ...(expected ? { expected_version: expected } : {}) })
           : await api.saveFunction({ pkg: pkg.value, name: name.value, content: yaml })
         resourceId.value = rep.id ?? resourceId.value
-        if (rep.file) name.value = rep.file
+        if (rep.file && name.value === submittedName) name.value = rep.file
         version.value = rep.version ?? null
       }
       savedYaml.value = yaml
+      savedName.value = rep.name ?? rep.file ?? submittedName
       conflict.value = null
       return { ok: true, result: rep }
     } catch (e) {
+      if (e?.savedResource) {
+        resourceId.value = e.savedResource.id
+        version.value = e.savedResource.version
+        savedYaml.value = yaml
+        savedName.value = e.savedResource.name
+      }
       if (e && e.status === 409 && e.data && e.data.code === 'version_conflict') {
         // suppressConflict（自动保存）：不置 conflict 态（不弹重载/覆盖窗），由调用方提示
         if (!opts.suppressConflict) {
@@ -267,6 +297,8 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
   // ---- 会话复位 ----
 
   function reset() {
+    ++loadGeneration
+    loading.value = false
     if (offChange) {
       offChange()
       offChange = null
@@ -282,6 +314,7 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
     conflict.value = null
     jumpStack.value = []
     savedYaml.value = ''
+    savedName.value = ''
     historyTick.value++
   }
 
@@ -339,7 +372,7 @@ export function useScriptEditorShell({ api, getContext = null } = {}) {
   }
 
   return reactive({
-    kind, resourceId, pkg, name, model, stack, version, loading, saving,
+    kind, resourceId, pkg, name, scriptDisplayName, model, stack, version, loading, saving,
     selectedUuid, conflict, jumpStack, parseDiags, savedYaml,
     hasModel, dirty, editorContext, diagnostics, canUndo, canRedo,
     canJumpBack, jumpBackLabel,

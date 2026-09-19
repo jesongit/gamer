@@ -15,6 +15,7 @@ vi.mock('./components/video/videoApi', async (importOriginal) => {
     videoApi: {
       ...actual.videoApi,
       listMedia: vi.fn(),
+      recordingHistory: vi.fn(async () => []),
       activeRecording: vi.fn(),
       listProjectEntries: vi.fn(),
       getProject: vi.fn(),

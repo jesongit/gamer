@@ -1,7 +1,8 @@
-import KeymapPanel from '../components/console/KeymapPanel.vue'
-import ScriptRunner from '../components/console/ScriptRunner.vue'
-import TemplateCapture from '../components/console/TemplateCapture.vue'
-import VideoWorkbench from '../components/video/VideoWorkbench.vue'
+import { defineAsyncComponent } from 'vue'
+const KeymapPanel = defineAsyncComponent(() => import('../components/console/KeymapPanel.vue'))
+const ScriptRunner = defineAsyncComponent(() => import('../components/console/ScriptRunner.vue'))
+const TemplateCapture = defineAsyncComponent(() => import('../components/console/TemplateCapture.vue'))
+const VideoWorkbench = defineAsyncComponent(() => import('../components/video/VideoWorkbench.vue'))
 import type { CorePanelDescriptor } from './contribution-manager'
 
 /**

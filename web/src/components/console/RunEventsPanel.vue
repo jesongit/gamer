@@ -72,9 +72,9 @@ watch(() => events.list.length, () => {
 <style scoped>
 .run-events{flex:none;max-height:150px;min-height:0;display:flex;flex-direction:column;background:var(--bg-0);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 8px}
 .re-list{flex:1;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:2px}
-.re{display:flex;gap:8px;font-size:11px;line-height:1.5;align-items:baseline}
+.re{display:flex;gap:8px;font-size: 12px;line-height:1.5;align-items:baseline}
 .re-time{color:var(--text-2);flex-shrink:0}
-.re-tag{flex-shrink:0;color:var(--text-2);border:1px solid var(--border);border-radius:3px;padding:0 4px;font-size:10px;line-height:1.4}
+.re-tag{flex-shrink:0;color:var(--text-2);border:1px solid var(--border);border-radius:3px;padding:0 4px;font-size: 12px;line-height:1.4}
 .re-msg{flex:1;min-width:0;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .re.warn .re-msg,.re.warn .re-tag{color:var(--warn);border-color:var(--warn)}
 .re.error .re-msg,.re.error .re-tag{color:var(--danger);border-color:var(--danger)}

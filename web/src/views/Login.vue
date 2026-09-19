@@ -2,7 +2,7 @@
   <div class="login-wrap">
     <div class="login-card">
       <div class="login-logo">🎮</div>
-      <h1>GameBot</h1>
+      <h1>Gamer</h1>
       <p class="login-sub">游戏自动化助手 · Web 控制台</p>
 
       <form class="login-form" @submit.prevent="onLogin">
@@ -27,7 +27,7 @@
       <div v-if="setupMode" class="login-hint setup-hint">首次使用，请先设置本机管理员密码；密码只保存为不可逆哈希。</div>
       <div v-else class="login-hint">请使用当前部署配置的管理员凭据；登录后由服务端会话维持认证状态。</div>
     </div>
-    <div class="login-foot">GameBot · 基于 scrcpy + WebRTC 的游戏自动化方案</div>
+    <div class="login-foot">Gamer · 基于 scrcpy + WebRTC 的游戏自动化方案</div>
   </div>
 </template>
 
@@ -157,6 +157,6 @@ onBeforeUnmount(stopCountdown)
 .login-btn { justify-content: center; padding: 10px; font-size: 14px; margin-top: 6px; }
 .login-btn:disabled { opacity: .55; cursor: not-allowed; }
 .login-err { color: #ff6b6b; font-size: 12px; text-align: center; margin-top: 2px; }
-.login-hint { color: var(--text-2); font-size: 11px; margin-top: 14px; }
+.login-hint { color: var(--text-2); font-size: 12px; margin-top: 14px; }
 .login-foot { color: var(--text-2); font-size: 12px; }
 </style>

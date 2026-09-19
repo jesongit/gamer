@@ -132,7 +132,8 @@ describe('Settings：三卡片挂载（WEB-005）', () => {
       freeze_window_minutes: 45,
     })
     expect(lastPut.headers['Content-Type']).toBe('application/json')
-    expect(w.get('[data-testid="policy-note"]').text()).toBe('已保存')
+    expect(w.find('[data-testid="policy-note"]').exists()).toBe(false)
+    expect(document.querySelector('.toast-wrap').textContent).toContain('更新策略已保存')
 
     // 允许跨午夜窗口（契约 §6：23:00–05:00 合法），二次保存整对象替换
     await w.get('[data-testid="window-start"]').setValue('23:00')

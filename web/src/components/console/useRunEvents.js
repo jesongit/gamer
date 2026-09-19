@@ -34,6 +34,8 @@ const state = reactive({
   errorPath: '',
   /** 是否有运行在进行（run_start → run_end）。 */
   running: false,
+  runId: '',
+  errorEvent: null,
 })
 
 function timestamp() {
@@ -46,7 +48,7 @@ function timestamp() {
  * 无法解析（空 / 非法形态）返回 null。
  */
 export function runEventTopIndex(path) {
-  const m = /^steps\[(\d+)\]/.exec(String(path || ''))
+  const m = /^(?:run|steps)\[(\d+)\]/.exec(String(path || ''))
   return m ? Number(m[1]) : null
 }
 
@@ -63,6 +65,8 @@ export function useRunEvents() {
 export function pushRunEvent(msg) {
   if (!msg || msg.type !== 'se' || !RUN_EVENT_KINDS.has(msg.ev)) return false
   const entry = { ev: msg.ev, time: timestamp() }
+  if (msg.trace?.run_id && msg.ev !== 'run_start' && state.runId && state.runId !== msg.trace.run_id) return true
+  if (msg.trace) entry.trace = msg.trace
   if (msg.path !== undefined) entry.path = msg.path
   if (msg.desc !== undefined) entry.desc = msg.desc
   if (msg.ok !== undefined) entry.ok = !!msg.ok
@@ -79,6 +83,8 @@ export function pushRunEvent(msg) {
       state.list = []
       state.activePath = ''
       state.errorPath = ''
+      state.errorEvent = null
+      state.runId = msg.trace?.run_id || ''
       state.running = true
       break
     case 'step_start':
@@ -88,7 +94,8 @@ export function pushRunEvent(msg) {
     case 'step_end':
       // ok = 恢复；失败 = 标红 errorPath 并退出 active（该步已终止）
       state.activePath = ''
-      if (!msg.ok) state.errorPath = msg.path || ''
+      // 首个失败是最内层原因；随后父调用退栈不得覆盖定位。
+      if (!msg.ok && !state.errorEvent) { state.errorPath = msg.path || ''; state.errorEvent = entry }
       break
     case 'run_end':
       state.running = false

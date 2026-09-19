@@ -61,11 +61,11 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(toolbar).toContain('v-model="store.deviceId"')
     expect(toolbar).toContain('flushAndConnect')
     expect(toolbar).toContain('refreshDevices')
-    expect(toolbar).toContain('更多 ▾')
+    expect(toolbar).toContain('<UiIcon name="more" />')
     expect(toolbar).toContain('功能 ▾')
     expect(toolbar).toContain("toggleToolbarMenu('device'")
     expect(toolbar).toContain("toggleToolbarMenu('actions'")
-    expect((toolbar.match(/class="tb-row/g) || [])).toHaveLength(1)
+    expect((toolbar.match(/class="tb-row/g) || [])).toHaveLength(2)
     expect(toolbar).not.toContain('activeKeymapName')
     expect(toolbar).not.toContain('keymap-select')
     expect(toolbar).not.toContain('stage-source-btn')
@@ -93,9 +93,9 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(actionsMenu).toContain('toggleAudio()')
     // 两组之间有唯一分割线：设备「更多」之后、应用区（应用下拉）之前
     const sep = toolbar.indexOf('class="tb-sep"')
-    expect(sep).toBeGreaterThan(toolbar.indexOf('更多 ▾'))
+    expect(sep).toBeGreaterThan(toolbar.indexOf('<UiIcon name="more" />'))
     expect(sep).toBeLessThan(toolbar.indexOf('tb-app-select'))
-    expect(toolbar.lastIndexOf('class="tb-sep"')).toBe(sep)
+    expect(toolbar).toContain('tb-operation-row')
   })
 
   it('§27 Android 应用控制收在左侧设备工具条：应用下拉选目标（选中即存配置），启动重启设备包名应用', () => {
@@ -108,13 +108,13 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleImpl).toContain('async function loadApps({ silent = false, force = false } = {})')
     expect(consoleImpl).toContain('api.installApk(d.id, file)')
     const toolbar = template.slice(template.indexOf('class="toolbar"'), template.indexOf('ConsoleVideoStage'))
-    const launchIdx = toolbar.indexOf('🚀 启动')
+    const launchIdx = toolbar.indexOf('>启动</button>')
     const stopIdx = toolbar.indexOf('⏹ 停止应用')
     expect(launchIdx).toBeGreaterThan(-1)
     expect(stopIdx).toBeGreaterThan(launchIdx)
     // 应用下拉 = Android 运行目标唯一配置入口（设备设置弹窗不再编辑 pkg）：
     // 选中即 PUT 保存为设备配置包名（服务端不拆会话），启动/脚本共用
-    const appSelect = toolbar.slice(toolbar.indexOf('tb-app-select'), toolbar.indexOf('📖 读取'))
+    const appSelect = toolbar.slice(toolbar.indexOf('tb-app-select'), toolbar.indexOf('loadApps({ force: true })'))
     expect(appSelect).toContain(`:value="current?.pkg || ''"`)
     expect(appSelect).toContain('@change="onAppSelect"')
     expect(consoleImpl).toContain('async function onAppSelect')
@@ -238,14 +238,14 @@ describe('Console 视觉组件拆分静态回归', () => {
     // 默认面板 = 裸 Core 的任务页签；旧六页签 panelTab 兼容字段已删除，
     // 面板导航只由 activePanelKey + PanelRegistry（URL panel query）驱动
     expect(read('./workspace/registry.ts')).toContain("DEFAULT_PANEL_KEY = 'gamer.core:tasks'")
-    expect(consoleSource).toContain('const activePanelKey = ref(DEFAULT_PANEL_KEY)')
+    expect(consoleSource).toContain("const activePanelKey = ref('workbench')")
     expect(consoleSource).not.toContain('panelTab')
     expect(consoleImpl).not.toContain('panelTab')
     // 分区下拉挂在工具条（func-pkg-row 仅存样式），面板挂载全部走 PluginWorkspace
     expect(template).not.toContain('<div class="func-pkg-row">')
     expect(consoleSource).toContain('class="panel-resizer"')
     expect(consoleSource).toContain('startPanelResize')
-    expect(consoleSource).toContain(':style="{ width: `${panelWidth}px` }"')
+    expect(consoleSource).toContain("width: isGlobalPage ? '100%' : `${panelWidth}px`")
     expect(consoleSource).not.toContain('isResPanelTab')
   })
 
@@ -323,40 +323,39 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(captureFn.slice(0, captureFn.indexOf('\n  },'))).not.toContain('panelTab')
     // 函数模式：无总「编辑」按钮，摘要区逐函数「编辑」直达 + 分类徽标 + 签名展示；编辑态画布锁函数切换
     const runner = read('./components/console/ScriptRunner.vue')
-    expect(runner).toContain(`v-if="ctx.runKind === 'script'"`)
-    expect(runner).toContain('ctx.editFunction(view)')
-    expect(runner).toContain('function fnSignature(')
+    expect(runner).toContain(`ctx.runKind === 'script'`)
+    expect(runner).toContain('ctx.editFunction(selectedFunction.value)')
+    expect(runner).toContain('aria-label="选择函数"')
     expect(runner).toContain(':initial-fn="ctx.editFocusFn"')
     expect(runner).toContain(`:lock-fn="ctx.shell.kind === 'function_library'"`)
-    expect(runner).toContain('class="fn-delete-btn"')
-    expect(runner).toContain('class="fn-cat"')
+    expect(runner).toContain('@click="removeTarget"')
+    expect(runner).toContain('view.category')
     expect(runner).not.toContain('fn-more')
   })
 
   it('函数面板函数个体化：列表平铺全部函数 + 模糊搜索；新建直进默认 _function.yaml 编辑态', () => {
     const runner = read('./components/console/ScriptRunner.vue')
     // 顶部无分类下拉/弹窗：模糊搜索框（名称/来源/拼音首字母）过滤函数列表
-    expect(runner).toContain('v-model="ctx.fnSearch"')
+    expect(runner).toContain('aria-label="选择函数"')
     expect(runner).not.toContain('选择分类')
     expect(runner).not.toContain('NewFunctionDialog')
     expect(runner).not.toContain('新建文件')
     expect(runner).not.toContain('删除文件')
     expect(runner).not.toContain('addFunctionToCurrentFile')
     // 摘要区跨文件平铺全部函数（每个函数一组，带来源徽标 + 运行/编辑/原文/删除；
-    // 编辑类操作仅默认函数库开放，手动拆分 _function*.yaml 只读）
+    // 所有函数库共用画布，按实际定义文件保存）
     expect(runner).toContain('ctx.filteredFnViews')
-    expect(runner).toContain('ctx.runFunction({ fnName: view.name })')
-    expect(runner).toContain('ctx.editFunction(view)')
-    expect(runner).toContain('ctx.runFromFunctionStep(view, uuid)')
+    expect(runner).toContain('ctx.runFunction({ fnName: functionName, startIndex })')
+    expect(runner).toContain('ctx.editFunction(selectedFunction.value)')
+    expect(runner).toContain('@test-from="runFrom"')
     expect(runner).toContain('function fnIsDefault(')
     // 编辑态固定默认函数库：无分类输入框，文件名只读展示 + 函数名输入框
     expect(runner).not.toContain('function-edit-category')
-    expect(runner).toContain('function-edit-file')
-    const toolbar = runner.slice(runner.indexOf('class="function-edit-toolbar"'))
-    expect(toolbar.indexOf('＋ 添加参数')).toBeLessThan(toolbar.indexOf('＋ 添加步骤'))
-    expect(runner).toContain(':show-add-button="ctx.shell.editorContext !== \'function\'"')
+    expect(runner).toContain('重命名')
+    expect(runner).toContain('compact-toolbar')
+    expect(runner).toContain(':function-path="ctx.shell.editorContext')
     // useConsoleScriptRunner：新建函数 = 固定默认库文件 + 按名运行（<pkg>#<函数名>）
-    expect(consoleImpl).toContain("scriptShell.newFunctionFile({ file: FUNCTION_LIBRARY_DEFAULT, pkg: packageId.value, functionName: 'func1' })")
+    expect(consoleImpl).toContain("scriptShell.newFunctionFile({ file: FUNCTION_LIBRARY_DEFAULT, pkg: packageId.value, functionName: name })")
     expect(consoleImpl).toContain("type: 'insert_function', name")
     expect(consoleImpl).toContain('entrypoint: `${packageId.value}#${fnName}`')
   })
@@ -426,6 +425,6 @@ describe('Console 视觉组件拆分静态回归', () => {
     expect(consoleSource).toContain('refreshTemplatesData?.()')
     expect(consoleSource).toContain('loadKeymaps(pkg)')
     expect(consoleSource).toContain("import { usePackageContext } from '../composables/usePackageContext'")
-    expect(consoleSource).toContain("import { loadPackages, currentPackageId } from '../package-store'")
+    expect(consoleSource).toContain("import { loadPackages, currentPackageId, selectPackage } from '../package-store'")
   })
 })

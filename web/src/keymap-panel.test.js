@@ -33,7 +33,7 @@ function button(wrapper, text) {
 describe('KeymapPanel', () => {
   it('uses the single context prop and shows the no-package state', () => {
     const wrapper = mount(KeymapPanel, { props: { context: { pkg: '', keymaps: [] } } })
-    expect(wrapper.get('[data-testid="keymap-no-package"]').text()).toContain('选择包名')
+    expect(wrapper.get('[data-testid="keymap-no-package"]').text()).toContain('选择或新建配置包')
     expect(wrapper.find('[data-testid="keymap-editor"]').exists()).toBe(false)
   })
 
@@ -56,9 +56,9 @@ describe('KeymapPanel', () => {
       attachTo: document.body,
     })
 
-    await button(wrapper, '＋ 新增映射').trigger('click')
+    await button(wrapper, '新增映射').trigger('click')
     expect(onNew).toHaveBeenCalled()
-    await button(wrapper, '＋ 添加绑定').trigger('click')
+    await button(wrapper, '添加绑定').trigger('click')
     const binding = wrapper.get('[data-testid="keymap-binding"]')
     expect(binding.get('select').element.value).toBe('hold')
     expect(binding.text()).toContain('屏幕触控按住')

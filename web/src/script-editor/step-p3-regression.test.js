@@ -42,7 +42,7 @@ async function settle() {
 }
 
 describe('P3-STEP：Schema 初始化、类型控件、参数形态和请求代次', () => {
-  it('A01：函数切换自动显示必填无默认参数，并保留 false 默认值', async () => {
+  it('A01：函数切换只初始化必填项，false 默认值留在按钮中', async () => {
     const created = setup('run:\n  - old: {}\n')
     const wrapper = mountCard(created, {
       targets: [{ target: 'demo', group: 'plugin' }],
@@ -58,7 +58,6 @@ describe('P3-STEP：Schema 初始化、类型控件、参数形态和请求代�
       kind: 'map',
       entries: {
         template: { lit: null, missing: true },
-        enabled: { lit: false },
       },
     })
     expect(wrapper.find('.arg-row').exists()).toBe(true)
@@ -104,29 +103,24 @@ describe('P3-STEP：Schema 初始化、类型控件、参数形态和请求代�
     wrapper.unmount()
   })
 
-  it('A04：单值与命名参数切换保留唯一已有值，多值转换被阻止并提示', async () => {
-    const created = setup('run:\n  - wait_find:\n      template: login.png\n')
-    const schema = [{ name: 'template', type: 'template', required: true, default: null, desc: '' }]
+  it('A04：单值参数按名称显示，添加默认参数时保留其已有值', async () => {
+    const created = setup('run:\n  - wait_find: login.png\n')
+    const schema = [
+      { name: 'template', type: 'template', required: true, default: null },
+      { name: 'timeout', type: 'duration', required: false, default: '30s' },
+    ]
     const wrapper = mountCard(created, {
       targets: [{ target: 'wait_find', group: 'plugin' }],
-      resolveParams: async () => schema,
-      resolveParamsSync: () => schema,
+      resolveParams: async () => schema, resolveParamsSync: () => schema,
     })
     await expandCard(wrapper, created.model.run[0].uuid)
-
-    await wrapper.find('button[title="切换单值形态（单参数函数简写）"]').trigger('click')
-    expect(created.model.run[0].args).toEqual({ kind: 'value', cell: { lit: 'login.png' } })
-    await wrapper.find('button[title="切换命名参数形态"]').trigger('click')
-    expect(created.model.run[0].args).toEqual({ kind: 'map', entries: { template: { lit: 'login.png' } } })
-
-    created.stack.apply({
-      type: 'update_step',
-      path: ['run', 0],
-      fields: { args: { kind: 'map', entries: { template: { lit: 'a' }, timeout: { lit: '1s' } } } },
-    })
-    await wrapper.find('button[title="切换单值形态（单参数函数简写）"]').trigger('click')
-    expect(created.model.run[0].args.kind).toBe('map')
-    expect(wrapper.text()).toContain('不能无损转换')
+    expect(wrapper.get('input[aria-label="参数 template"]').element.value).toBe('login.png')
+    await wrapper.get('button[data-param="timeout"]').trigger('click')
+    expect(created.model.run[0].args).toEqual({ kind: 'map', entries: {
+      template: { lit: 'login.png' }, timeout: { lit: '30s' },
+    } })
+    await wrapper.get('button[aria-label="恢复 timeout 默认值"]').trigger('click')
+    expect(created.model.run[0].args.entries).toEqual({ template: { lit: 'login.png' } })
     wrapper.unmount()
   })
 

@@ -15,5 +15,5 @@ onMounted(emitRef)
 </script>
 
 <style scoped>
-.live-logs{max-height:180px;overflow:auto;background:var(--bg-0);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;display:flex;flex-direction:column;gap:3px}.live-logs.script-logs{max-height:none;flex:1;min-height:120px}.ll{display:flex;gap:8px;font-size:11px;line-height:1.5}.ll-time{color:var(--text-2);flex-shrink:0}.ll.info .ll-msg{color:var(--text-1)}.ll.success .ll-msg{color:var(--ok)}.ll.warn .ll-msg{color:var(--warn)}.ll.error .ll-msg{color:var(--danger)}.mono{font-family:var(--mono);font-size:11px;color:var(--text-1)}
+.live-logs{max-height:180px;overflow:auto;background:var(--bg-0);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px;display:flex;flex-direction:column;gap:3px}.live-logs.script-logs{max-height:none;flex:1;min-height:120px}.ll{display:flex;gap:8px;font-size: 12px;line-height:1.5}.ll-time{color:var(--text-2);flex-shrink:0}.ll.info .ll-msg{color:var(--text-1)}.ll.success .ll-msg{color:var(--ok)}.ll.warn .ll-msg{color:var(--warn)}.ll.error .ll-msg{color:var(--danger)}.mono{font-family:var(--mono);font-size: 12px;color:var(--text-1)}
 </style>

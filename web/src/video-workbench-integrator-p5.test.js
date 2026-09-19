@@ -35,6 +35,7 @@ vi.mock('./components/video/videoApi', async importOriginal => {
       getMedia: vi.fn(),
       setMediaRefs: vi.fn(),
       recordingEvents: vi.fn(),
+      recordingHistory: vi.fn(),
       gamerYamlCapabilities: vi.fn(),
       createVideoDraft: vi.fn(),
       saveDraft: vi.fn(),
@@ -87,6 +88,7 @@ function installDefaults() {
   devicesData.value = [{ id: 'device-a', name: '设备 A', pkg: 'com.example.game' }]
   packageStore.packages = [{ id: 'pkg-a' }, { id: 'pkg-b' }]
   packageStore.currentPackageId = 'pkg-a'
+  videoApi.recordingHistory.mockResolvedValue([{ id: 'recording-a', device_id: 'device-a', state: 'completed', event_count: 1, segments: [{ media_id: 'media-a', duration_us: 2e6, reason: 'normal' }], missing_media: [] }])
   videoApi.listMedia.mockResolvedValue([MEDIA_A, MEDIA_B])
   videoApi.listProjectEntries.mockResolvedValue([])
   videoApi.getProject.mockResolvedValue(entry())

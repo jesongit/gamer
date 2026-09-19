@@ -60,7 +60,7 @@ describe('api 层统一 401 拦截', () => {
   it('登录成功路径不受影响：GET 包插件资源列表照常解析 JSON', async () => {
     fetch.mockResolvedValueOnce(res(200, { resources: [{ package: 'a', path: 'automations/b.yaml', content: '' }] }))
     await expect(api.listScripts('a')).resolves.toEqual([
-      { id: 'a/b.yaml', package: 'a', name: 'b.yaml', version: undefined, updated_at: undefined, size: undefined },
+      { id: 'a/b.yaml', package: 'a', name: 'b.yaml', content: '', version: undefined, updated_at: undefined, size: undefined },
     ])
     expect(location.hash).toBe('#/console')
   })

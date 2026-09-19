@@ -1,3 +1,4 @@
+import { operationReporter } from '../workspace/operation-feedback'
 // Package 上下文条（右侧顶部，plan §28）的逻辑收敛：当前 Package 下拉 +
 // 导入/导出/新建/复制/删除。动作全部作用于 PackageStore（§38：Current Package
 // 由 Core Store 统一管理）；资源面板经注入的刷新回调在包切换/导入后全量重拉。
@@ -22,7 +23,7 @@ export function isValidPackageId(value) {
 }
 
 /**
- * 依赖注入：toast / confirmDialog(message)→boolean / refreshAll()（包切换或
+ * 依赖注入：toast / refreshAll()（包切换或
  * 导入后重拉资源面板）/ download(blob, filename) / api。均可替换以便测试。
  * currentApp 提供当前设备的 Android 应用包名与显示名；loadCurrentApps 用于在
  * 显示名尚未读取时补读应用列表。
@@ -30,12 +31,14 @@ export function isValidPackageId(value) {
 export function usePackageContext({
   api = defaultApi,
   toast,
-  confirmDialog = message => window.confirm(message),
+  feedback,
   refreshAll,
+  beforePackageChange,
   download,
   currentApp,
   loadCurrentApps,
 } = {}) {
+  const beginReport = operationReporter(feedback, '', toast)
   const busy = ref(false)
 
   const currentId = currentPackageId
@@ -47,8 +50,17 @@ export function usePackageContext({
     return p?.name && p.name !== p.id ? `${p.name} · ${p.id}` : p?.id || id
   }
 
-  function onPackageChange(e) {
-    selectPackage(e?.target?.value || null)
+  let changingPackage = false
+  async function onPackageChange(e) {
+    const next = e?.target?.value || null
+    if (e?.target) e.target.value = currentId.value || ''
+    if (changingPackage) return
+    changingPackage = true
+    try {
+      if (await beforePackageChange?.(next) === false) return
+    } finally { changingPackage = false }
+    feedback?.setCore(null)
+    selectPackage(next)
     Promise.resolve(refreshAll?.()).catch(() => {})
   }
 
@@ -124,6 +136,7 @@ export function usePackageContext({
   }
 
   async function confirmOverwrite() {
+    const toast = beginReport()
     if (overwriteModal.submitting) return
     overwriteModal.submitting = true
     overwriteModal.error = ''
@@ -144,6 +157,7 @@ export function usePackageContext({
   }
 
   async function importPackage(file) {
+    const toast = beginReport()
     if (!file || busy.value) return
     busy.value = true
     try {
@@ -193,6 +207,7 @@ export function usePackageContext({
   })
 
   async function doExport(id, includeMedia) {
+    const toast = beginReport()
     const { blob, filename, sha256 } = await api.exportPackageArchive(id, { includeMedia })
     const name = filename || `${id}.gamerpkg`
     saveBlob(blob, name)
@@ -202,6 +217,7 @@ export function usePackageContext({
 
   /** 导出入口：先查媒体引用——无素材直接导出；有素材弹确认框。 */
   async function exportPackage() {
+    const toast = beginReport()
     const id = currentId.value
     if (!id || busy.value) return
     busy.value = true
@@ -335,6 +351,7 @@ export function usePackageContext({
   }
 
   async function submitForm() {
+    const toast = beginReport()
     if (formModal.submitting) return
     const id = normalizePackageId(formModal.form.id)
     const version = formModal.form.version.trim() || '0.1.0'
@@ -386,6 +403,7 @@ export function usePackageContext({
   }
 
   async function confirmDelete() {
+    const toast = beginReport()
     if (deleteModal.submitting) return
     deleteModal.submitting = true
     deleteModal.error = ''
@@ -512,6 +530,7 @@ export function usePackageContext({
 
   /** 保存元数据（§37）；条件更新 expected_revision，409 冲突后可重试或 force。 */
   async function saveEdit({ force = false } = {}) {
+    const toast = beginReport()
     if (detailModal.saving || !detailModal.detail?.package) return
     const body = {
       targets: { android: { packages: parseAndroidPackages(detailModal.form.androidPackagesText) } },

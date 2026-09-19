@@ -94,12 +94,15 @@ describe('YamlPreview', () => {
     const objUrl = 'blob:mock'
     const createObjectURL = vi.fn(() => objUrl)
     const revokeObjectURL = vi.fn()
-    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(createObjectURL)
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(revokeObjectURL)
+    const download = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
     const wrapper = mount(YamlPreview, { props: { model: created.model, filename: 'out.yaml' } })
     await wrapper.findAll('button')[1].trigger('click')
     expect(createObjectURL).toHaveBeenCalledTimes(1)
     expect(revokeObjectURL).toHaveBeenCalledWith(objUrl)
-    vi.unstubAllGlobals()
+    expect(download).toHaveBeenCalledOnce()
+    vi.restoreAllMocks()
   })
 
   it('关闭按钮 emit close', async () => {

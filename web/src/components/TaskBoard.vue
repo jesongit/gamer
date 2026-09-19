@@ -1,7 +1,7 @@
 <template>
   <div class="task-board">
     <div class="board-head">
-      <button class="btn btn-primary" @click="openAdd">＋ 新建任务</button>
+      <button class="btn btn-primary" @click="openAdd"><UiIcon name="plus" />新建任务</button>
       <!-- 服务端时区标识：契约禁止 /api/system/info 携带 timezone。P11.1 后任务
            时间戳均为 RFC3339 UTC 串（不携带服务端本地偏移），无法可靠推导 →
            常显兜底文案 -->
@@ -10,7 +10,7 @@
       </div>
     </div>
 
-    <div class="card" style="padding: 0; overflow: auto;">
+    <div class="card task-list">
       <table class="table">
         <thead>
           <tr>
@@ -37,12 +37,12 @@
             </td>
             <td>
               <div class="row-actions">
-                <button class="btn btn-sm btn-ghost" :disabled="triggeringId === t.id" title="马上运行一次（使用任务保存的 runner payload）" @click="runNow(t)">{{ triggeringId === t.id ? '触发中…' : '▶ 测试' }}</button>
-                <button class="btn btn-sm btn-ghost" title="编辑任务" @click="editTask(t)">✎</button>
-                <button v-if="t.state === 'active'" class="btn btn-sm btn-ghost" title="挂起调度（任务保留，可恢复）" @click="suspendRow(t)">⏸</button>
-                <button v-if="t.state === 'suspended' || t.state === 'dependency_missing'" class="btn btn-sm btn-ghost" title="恢复调度（重算唤醒时间）" @click="resumeRow(t)">↻</button>
-                <button v-if="t.state !== 'cancelled'" class="btn btn-sm btn-ghost" title="取消调度（终态，不再排程；任务记录保留）" @click="cancelRow(t)">✕</button>
-                <button class="btn btn-sm btn-ghost danger" title="删除任务" @click="removeTask(t)">🗑</button>
+                <button class="btn btn-sm btn-ghost" :disabled="triggeringId === t.id" title="马上运行一次（使用任务保存的 runner payload）" @click="runNow(t)"><UiIcon name="play" />{{ triggeringId === t.id ? '触发中…' : '测试' }}</button>
+                <button class="btn btn-sm btn-ghost" title="编辑任务" @click="editTask(t)" aria-label="编辑任务"><UiIcon name="edit" /></button>
+                <button v-if="t.state === 'active'" class="btn btn-sm btn-ghost" title="挂起调度（任务保留，可恢复）" @click="suspendRow(t)" aria-label="挂起调度"><UiIcon name="pause" /></button>
+                <button v-if="t.state === 'suspended' || t.state === 'dependency_missing'" class="btn btn-sm btn-ghost" title="恢复调度（重算唤醒时间）" @click="resumeRow(t)" aria-label="恢复调度"><UiIcon name="refresh" /></button>
+                <button v-if="t.state !== 'cancelled'" class="btn btn-sm btn-ghost" title="取消调度（终态，不再排程；任务记录保留）" @click="cancelRow(t)" aria-label="取消调度"><UiIcon name="close" /></button>
+                <button class="btn btn-sm btn-ghost danger" title="删除任务" @click="removeTask(t)" aria-label="删除任务"><UiIcon name="trash" /></button>
               </div>
             </td>
           </tr>
@@ -58,7 +58,7 @@
       <div class="modal">
         <div class="modal-head">
           <span class="title">{{ form.id ? '编辑任务' : '新建任务' }}</span>
-          <button class="btn btn-ghost btn-sm" @click="showAdd = false">✕</button>
+          <button class="btn btn-ghost btn-sm" @click="showAdd = false" aria-label="关闭"><UiIcon name="close" /></button>
         </div>
         <div class="modal-body">
           <div class="form-item">
@@ -174,6 +174,9 @@
 </template>
 
 <script setup>
+const confirmDialog = useConfirmDialog()
+import { useConfirmDialog } from './ui/useConfirmDialog'
+import UiIcon from './ui/UiIcon.vue'
 /**
  * Console 右侧任务页签：ADR-12 通用任务表单（P11.1 §6.6/§6.7 产品级重写）。
  *
@@ -190,7 +193,8 @@
  *   显示 missing_dependency 提示与「恢复」动作；run/suspend/resume/cancel/
  *   enable/disable/delete 动作齐全。
  */
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, inject } from 'vue'
+import { OPERATION_FEEDBACK_KEY, operationReporter } from '../workspace/operation-feedback'
 import { tasksData, devicesData, useToast, pushRunConflict } from '../store'
 import { api } from '../api'
 import RunConflictModal from './RunConflictModal.vue'
@@ -209,6 +213,7 @@ const CRON_PROVIDER_ID = 'cron'
 const MANUAL_PROVIDER = '__manual__'
 
 const toast = useToast()
+const beginReport = operationReporter(inject(OPERATION_FEEDBACK_KEY, null), '', toast)
 const tasks = tasksData
 const devices = devicesData
 const providers = ref([])
@@ -478,6 +483,7 @@ async function saveTask() {
       return toast('执行器参数校验未通过：' + issues.map((i) => (i.name ? `$${i.name} ${i.message}` : i.message)).join('；'), 'error')
     }
   }
+  const report = beginReport()
   savingTask.value = true
   try {
     const existed = !!form.id
@@ -485,7 +491,7 @@ async function saveTask() {
     if (existed) await api.updateTask(form.id, body)
     else await api.saveTask(body)
     showAdd.value = false
-    toast(existed ? '任务已保存' : '任务已创建', 'success')
+    report(existed ? '任务已保存' : '任务已创建', 'success')
     loadTasks()
   } catch (e) {
     toast('保存失败：' + e.message, 'error')
@@ -496,6 +502,7 @@ async function saveTask() {
 
 // ---- 行内动作 ----
 async function toggle(t, e) {
+  const toast = beginReport()
   try {
     // 启停走显式状态迁移端点：任务参数（runner payload）保持不变
     if (e.target.checked) await api.enableTask(t.id)
@@ -510,6 +517,7 @@ async function toggle(t, e) {
 
 /** ▶ 测试（立即运行）：202 {run_id} 触发即返回并恢复按钮可用。 */
 async function runNow(t) {
+  const toast = beginReport()
   if (triggeringId.value) return
   triggeringId.value = t.id
   try {
@@ -528,6 +536,7 @@ async function runNow(t) {
 }
 
 async function suspendRow(t) {
+  const toast = beginReport()
   try {
     await api.suspendTask(t.id, 'suspended')
     toast(`${t.name} 已挂起`, 'info')
@@ -538,6 +547,7 @@ async function suspendRow(t) {
 }
 
 async function resumeRow(t) {
+  const toast = beginReport()
   try {
     await api.resumeTask(t.id)
     toast(`${t.name} 已恢复调度`, 'success')
@@ -548,7 +558,8 @@ async function resumeRow(t) {
 }
 
 async function cancelRow(t) {
-  if (!confirm(`取消任务 ${t.name} 的调度？（终态，不再排程；任务记录保留）`)) return
+  const toast = beginReport()
+  if (!await confirmDialog(`取消任务 ${t.name} 的调度？（终态，不再排程；任务记录保留）`, { title: '取消任务调度', confirmText: '取消调度', danger: true })) return
   try {
     await api.cancelTask(t.id)
     toast(`${t.name} 已取消调度`, 'info')
@@ -559,7 +570,8 @@ async function cancelRow(t) {
 }
 
 async function removeTask(t) {
-  if (!confirm(`删除任务 ${t.name}？`)) return
+  const toast = beginReport()
+  if (!await confirmDialog(`删除任务 ${t.name}？`, { title: '删除任务', confirmText: '删除', danger: true })) return
   try {
     await api.deleteTask(t.id)
     tasks.value = tasks.value.filter((x) => x.id !== t.id)
@@ -595,6 +607,9 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.task-board { display:flex; flex-direction:column; flex:1; min-height:0; gap:10px; }
+.task-list { min-height:0; overflow:auto; padding:0; }
+.board-head { flex-shrink:0; }
 .board-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 /* 服务端时区标识（契约禁止 system/info 带 timezone；P11.1 后时间戳均为 UTC 串） */
 .tz-hint {
@@ -602,9 +617,9 @@ onMounted(() => {
   font-size: 12px; color: var(--text-2);
 }
 .task-name { font-weight: 600; }
-.dep-hint { font-size: 11px; color: var(--warn); margin-top: 2px; font-weight: 400; }
+.dep-hint { font-size: 12px; color: var(--warn); margin-top: 2px; font-weight: 400; }
 .mono { font-family: var(--mono); }
-.sub-label { font-size: 11px; color: var(--text-2); margin-top: 6px; }
+.sub-label { font-size: 12px; color: var(--text-2); margin-top: 6px; }
 .row-actions { display: flex; gap: 4px; align-items: center; }
 .row-actions .danger:hover { color: var(--danger); border-color: var(--danger); }
 tr.disabled { opacity: .45; }
@@ -618,13 +633,13 @@ tr.disabled { opacity: .45; }
 }
 .runner-json {
   margin: 6px 0 0; padding: 6px 8px;
-  font-family: var(--mono); font-size: 11px; color: var(--text-2);
+  font-family: var(--mono); font-size: 12px; color: var(--text-2);
   background: var(--bg-0); border: 1px solid var(--border); border-radius: var(--radius-sm);
   max-height: 140px; overflow: auto; white-space: pre-wrap; word-break: break-all;
 }
 
 /* cron 预设（点一下填入表达式） */
 .cron-presets { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-.cp-item { font-size: 11px; padding: 3px 10px; }
+.cp-item { font-size: 12px; padding: 3px 10px; }
 .form-switch { flex-direction: row; align-items: center; gap: 10px; }
 </style>

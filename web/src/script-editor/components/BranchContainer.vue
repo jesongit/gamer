@@ -150,11 +150,11 @@ function onEmptyDrop(event: DragEvent): void {
   font-size: 12px; font-weight: 600; color: var(--accent-2);
   background: var(--bg-3); border-radius: 4px; padding: 1px 8px;
 }
-.branch-count { font-size: 11px; color: var(--text-2); }
+.branch-count { font-size: 12px; color: var(--text-2); }
 .branch-actions { margin-left: auto; display: inline-flex; gap: 4px; }
 .mini-btn {
   border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
-  border-radius: 4px; font-size: 11px; padding: 2px 6px; cursor: pointer;
+  border-radius: 4px; font-size: 12px; padding: 2px 6px; cursor: pointer;
 }
 .mini-btn:hover { color: var(--accent); border-color: var(--accent); }
 .mini-btn.add { color: var(--accent-2); }
@@ -164,6 +164,6 @@ function onEmptyDrop(event: DragEvent): void {
   font-size: 12px; color: var(--text-2); padding: 6px 2px 2px 10px;
   border-radius: var(--radius-sm);
 }
-.branch-empty.drop-active { background: rgba(56, 189, 248, .12); outline: 1px dashed var(--accent); }
+.branch-empty.drop-active { background: color-mix(in srgb, var(--accent) 12%, transparent); outline: 1px dashed var(--accent); }
 .branch-collapsed-hint { font-size: 12px; color: var(--text-2); padding: 2px 2px 2px 10px; }
 </style>

@@ -337,7 +337,7 @@ describe('导入覆盖弹窗 Required Plugin 缺失提示（plan §36）', () =>
     }))
     // setup() 默认 listExtensions 返回空扩展表 → other.plugin 必然缺失
     const ctx = usePackageContext({ api, toast })
-    const wrapper = mount(PackageContextBar, { props: { context: ctx } })
+    const wrapper = mount(PackageContextBar, { props: { context: ctx }, global: { stubs: { teleport: true } } })
     await ctx.importPackage(fileLike(bytes))
     await flushPromises()
 
@@ -352,9 +352,9 @@ describe('导入覆盖弹窗 Required Plugin 缺失提示（plan §36）', () =>
   it('顶栏「详情」按钮打开 PackageDetailModal（当前包为空时禁用）', async () => {
     const { api } = setup()
     const ctx = usePackageContext({ api, toast: vi.fn() })
-    const wrapper = mount(PackageContextBar, { props: { context: ctx } })
+    const wrapper = mount(PackageContextBar, { props: { context: ctx }, global: { stubs: { teleport: true } } })
 
-    const detailBtn = () => wrapper.findAll('button').find(b => b.text().includes('详情'))
+    const detailBtn = () => wrapper.find('[aria-label="配置包详情"]')
     expect(detailBtn().attributes('disabled')).toBeUndefined() // 有当前包 → 可点
 
     await detailBtn().trigger('click')

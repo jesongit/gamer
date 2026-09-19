@@ -68,7 +68,7 @@ describe('Core 通用模块', () => {
       expect(source).not.toContain(banned)
     }
     expect(source).not.toContain('runScript')
-    expect(source).toContain('run: async ({ runner_id, entrypoint, device_id, payload }')
+    expect(source).toContain('run: async ({ runner_id, entrypoint, device_id, content_package, payload }')
   })
 
   it('useConsoleRuntime 不预取脚本/模板（业务资源由面板实现自加载）', () => {

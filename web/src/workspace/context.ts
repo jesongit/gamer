@@ -3,6 +3,7 @@ import { createDeviceStageBridge, type DeviceStageBridge } from './stage-bridge'
 
 export const WORKSPACE_CONTEXT_KEY = Symbol('gamer.workspace.context')
 export const PANEL_REGISTRY_KEY = Symbol('gamer.workspace.panel-registry')
+export const STAGE_MEDIA_CONTROLLER_KEY = Symbol('gamer.stage.media-controller')
 export const DEVICE_STAGE_BRIDGE_KEY = Symbol('gamer.device-stage.bridge')
 
 function readValue<T>(value: T | { value?: T } | (() => T)): T {
@@ -75,6 +76,7 @@ export interface WorkspaceContextOptions {
   toast?: (message: string, type?: string) => unknown | Promise<unknown>
   dialogConfirm?: (message: string, options?: unknown) => unknown | Promise<unknown>
   pluginCall?: (payload: unknown, meta: { pluginId: string; panelId: string }) => unknown | Promise<unknown>
+  operationStatus?: UiBridgeOptions['operationStatus']
   storage?: UiBridgeOptions['storage']
   core?: Record<string, unknown>
 }
@@ -102,6 +104,7 @@ export function createWorkspaceContext(options: WorkspaceContextOptions = {}) {
       currentPackageId,
       plugin: { id: activePluginId },
       activePluginId,
+      theme: { name: 'gamer-dark', background: '#282b2d', field: '#181b1c', text: '#edf0ee', secondaryText: '#c5cbc8', border: '#454b4e', accent: '#e4c956', controlHeight: 28, radius: 3 },
       connected: !!readValue(options.connected as never),
       stage: stageSnapshot(options.stageContext),
     }
@@ -109,7 +112,7 @@ export function createWorkspaceContext(options: WorkspaceContextOptions = {}) {
   const stage = createDeviceStageBridge(options.stage || {})
   const uiBridge = createUiBridge({
     getContext: getSnapshot, openPanel: options.openPanel, toast: options.toast,
-    dialogConfirm: options.dialogConfirm, pluginCall: options.pluginCall,
+    dialogConfirm: options.dialogConfirm, pluginCall: options.pluginCall, operationStatus: options.operationStatus,
     selectRegion: stage.selectRegion, pickPoint: stage.pickPoint,
     showOverlay: stage.overlay.show, clearOverlay: stage.overlay.clear, storage: options.storage,
   })

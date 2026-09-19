@@ -2,7 +2,7 @@
  * 卡片层共享元数据与定位辅助（YAML V1）。
  *
  * - KIND_META：4 类步骤（call/if/repeat/return）的中文名 + 单字图标；
- * - stepSummary：卡片收起态自然语言摘要（call 摘要 = 函数名 + 实参）；
+ * - stepSummary：卡片收起态自然语言摘要（call 摘要 = name 参数或默认中文名）；
  * - breadcrumbForContainer / basePathOfContainer：容器路径 → 面包屑节点 / step_path 字符串基；
  * - parseStepPath / locateDiagnostic：诊断 step_path（如 run[0].then[1]、login.run[2]）
  *   → 命令路径 → 目标卡片 uuid 与祖先链（ErrorSummary 点击定位用）。
@@ -13,6 +13,7 @@ import { resolveStep } from '../commands'
 import type { Diagnostic } from '../diagnostics'
 import { isRefCell, type Cell, type Step } from '../model'
 import { containerLabel, type BreadcrumbNode } from '../selection'
+import { NATIVE_CALL_NAMES } from '../call-names'
 
 // ---------- 动作元数据 ----------
 
@@ -39,29 +40,19 @@ export const KIND_META: Record<Step['kind'], KindMeta> = {
 export function cellShort(cell: Cell | null | undefined): string {
   if (!cell) return ''
   if (isRefCell(cell)) return `$${cell.ref}`
-  if (Array.isArray(cell.lit)) return `${cell.lit[0]}, ${cell.lit[1]}`
+  if (Array.isArray(cell.lit) && cell.lit.length === 2 && cell.lit.every(v => typeof v === 'number')) return `${cell.lit[0]}, ${cell.lit[1]}`
+  if (cell.lit !== null && typeof cell.lit === 'object') return JSON.stringify(cell.lit)
   if (cell.lit === true) return 'true'
   if (cell.lit === false) return 'false'
   return String(cell.lit ?? '')
 }
 
 /** 卡片收起态摘要；空占位字段按新建未完成态显示基础文案。 */
-export function stepSummary(step: Step): string {
+export function stepSummary(step: Step, defaultName?: string): string {
   switch (step.kind) {
     case 'call': {
-      const name = step.fn || '（未填函数）'
-      if (step.args.kind === 'none') {
-        return step.as ? `调用 ${name} → ${step.as}` : `调用 ${name}`
-      }
-      if (step.args.kind === 'value') {
-        const v = cellShort(step.args.cell) || '?'
-        return step.as ? `调用 ${name} ${v} → ${step.as}` : `调用 ${name} ${v}`
-      }
-      const pairs = Object.entries(step.args.entries)
-        .map(([key, cell]) => `${key}: ${cellShort(cell) || '?'}`)
-        .join(', ')
-      const tail = step.as ? ` → ${step.as}` : ''
-      return pairs ? `调用 ${name} ${pairs}${tail}` : `调用 ${name}${tail}`
+      if (step.args.kind === 'map' && step.args.entries.name) return cellShort(step.args.entries.name)
+      return defaultName ?? NATIVE_CALL_NAMES[step.fn] ?? (step.fn || '（未填函数）')
     }
     case 'if': {
       const c = step.cond
@@ -137,8 +128,10 @@ export function breadcrumbForContainer(model: Parameters<typeof resolveStep>[0],
  */
 export function parseStepPath(stepPath: string): Path | null {
   if (!stepPath) return null
-  const toks = stepPath.split('.').map((t) => {
-    const m = /^(\w+)(?:\[(\d+)\])?$/.exec(t)
+  const segments = stepPath.split('.')
+  if (segments[0] === 'functions' && segments[2]?.startsWith('run[')) segments.shift()
+  const toks = segments.map((t) => {
+    const m = /^([\p{L}\p{N}_]+)(?:\[(\d+)\])?$/u.exec(t)
     return m ? { name: m[1], idx: m[2] === undefined ? null : Number(m[2]) } : null
   })
   if (toks.length === 0 || toks.some((t) => t === null)) return null

@@ -1,3 +1,4 @@
+import { useConfirmDialog } from '../components/ui/useConfirmDialog'
 import { ref } from 'vue'
 
 function makeNoop() {}
@@ -31,6 +32,7 @@ export function useWebRtcLifecycle({
   onSignalOpen = makeNoop,
   onSignalClose = makeNoop,
 } = {}) {
+  const confirmDialog = useConfirmDialog()
   const reconnectTimer = ref(null)
   const reconnectAttempts = ref(0)
 
@@ -93,6 +95,7 @@ export function useWebRtcLifecycle({
   }
 
   function cleanup(manual = false) {
+    confirmDialog.cancel()
     closedByCleanup = true
     cancelReconnect()
     reconnectAttempts.value = 0
@@ -267,7 +270,9 @@ export function useWebRtcLifecycle({
     } catch (e) {
       if (e && e.conflict) {
         if (manual) {
-          const confirmed = confirm(`设备 ${deviceIdRef.value} 正在其他页面投屏。\n\n确认接管连接？对方页面将断开且不会自动重连。`)
+          const targetDevice = deviceIdRef.value
+          const confirmed = await confirmDialog(`设备 ${deviceIdRef.value} 正在其他页面投屏。\n\n确认接管连接？对方页面将断开且不会自动重连。`, { title: '接管投屏连接', confirmText: '接管连接' })
+          if (targetDevice !== deviceIdRef.value) return
           if (confirmed) {
             forceTakeover = true
             try {

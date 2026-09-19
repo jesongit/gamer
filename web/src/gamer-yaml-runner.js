@@ -21,6 +21,7 @@ export function runYamlScript(id, deviceId, startIndex = 0, args) {
   return api.run({
     runner_id: GAMER_YAML_RUNNER_ID,
     entrypoint: id,
+    content_package: String(id).split('/')[0],
     device_id: deviceId,
     payload: {
       ...(startIndex ? { start_index: startIndex } : {}),
@@ -42,6 +43,7 @@ export function runYamlFunction(pkg, deviceId, opts = {}) {
   return api.run({
     runner_id: GAMER_YAML_RUNNER_ID,
     entrypoint: `${pkg}#${fnName}`,
+    content_package: pkg,
     device_id: deviceId,
     payload: {
       ...(opts.start_index !== undefined ? { start_index: opts.start_index } : {}),

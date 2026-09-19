@@ -2,11 +2,12 @@
   <div class="logs-panel">
     <div class="lp-head">
       <div class="filters">
-        <select v-model="fDevice" class="select select-sm" @change="load">
+        <input v-model="search" class="input log-search" type="search" aria-label="搜索日志" placeholder="搜索当前记录…" />
+        <select v-model="fDevice" aria-label="日志设备" class="select select-sm" @change="load">
           <option value="">全部设备</option>
           <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }}</option>
         </select>
-        <select v-model="fLevel" class="select select-sm" @change="load">
+        <select v-model="fLevel" aria-label="日志级别" class="select select-sm" @change="load">
           <option value="">全部级别</option>
           <option value="info">INFO</option>
           <option value="success">SUCCESS</option>
@@ -15,21 +16,21 @@
         </select>
       </div>
       <div class="lp-actions">
-        <span v-if="autoRefresh" class="refresh-hint">每 5 秒自动刷新</span>
-        <button class="btn btn-sm" @click="load">刷新</button>
-        <button class="btn btn-sm" @click="clear">清空</button>
+        <button class="btn btn-ghost refresh-toggle" :aria-pressed="autoRefresh" @click="autoRefresh = !autoRefresh"><span class="live-dot" :class="{ paused: !autoRefresh }"></span>{{ autoRefresh ? '自动刷新' : '已暂停刷新' }}</button>
+        <button class="btn btn-icon btn-ghost" title="刷新日志" aria-label="刷新日志" :disabled="loading" @click="load"><UiIcon name="refresh" /></button>
+        <button class="btn btn-ghost" @click="clear"><UiIcon name="trash" />清空</button>
       </div>
     </div>
 
-    <div class="card log-card">
-      <div ref="streamEl" class="log-stream mono" @scroll="onScroll">
+    <div v-if="loadError" class="log-load-error" role="alert">{{ loadError }}</div>
+    <div class="log-card">
+      <div class="log-columns"><span>时间</span><span>级别</span><span>事件内容</span></div>
+      <div ref="streamEl" class="log-stream" @scroll="onScroll">
         <template v-for="(g, gi) in groups" :key="gi">
           <!-- 分组头：连续同一「设备+运行目标」的日志段共用一条分割线，区分不同运行 -->
           <div class="run-divider">
             <span class="rd-script">{{ g.target }}</span>
             <span class="rd-dev">{{ g.deviceLabel }}</span>
-            <span class="rd-time mono">{{ g.time }}</span>
-            <span class="rd-line"></span>
           </div>
           <div v-for="(l, i) in g.entries" :key="l.id || gi + '-' + i" class="log-line" :class="l.level">
             <span class="lg-time">{{ l.time }}</span>
@@ -37,13 +38,10 @@
             <span class="lg-msg">{{ l.msg }}</span>
           </div>
         </template>
-        <div v-if="!logs.length" class="empty">
-          <span class="icon">📭</span>
-          <span>没有日志记录</span>
-        </div>
+        <div v-if="!visibleLogs.length" class="log-empty"><UiIcon name="info" /><span>{{ loading ? '正在读取日志…' : search ? '没有匹配的记录' : '暂无日志记录' }}</span></div>
       </div>
       <div class="log-foot">
-        <span>共 {{ logs.length }} 条（按时间正序，最近在最下）</span>
+        <span>{{ visibleLogs.length }} / {{ logs.length }} 条 · 最近 200 条记录</span><span>时间正序 <span class="foot-dot">·</span> {{ autoRefresh ? '每 5 秒刷新' : '自动刷新已暂停' }}</span>
       </div>
     </div>
   </div>
@@ -53,19 +51,26 @@
 /**
  * Console 右侧日志页签内容（gamer.core:logs，Core 自有 UI）：
  * - 服务端 ORDER BY id DESC 返回，这里反转为时间正序展示，最新日志沉底；
- * - 运行分组：按「设备 + 运行目标」连续段归组，段首渲染分割线（目标 id + 设备 +
- *   起始时间）。运行目标是 runner 私有寻址（entrypoint；日志行沿用服务端
+ * - 运行分组：按「设备 + 运行目标」连续段归组，段首显示目标 id 与设备。
+ *   运行目标是 runner 私有寻址（entrypoint；日志行沿用服务端
  *   script_id 字段透传，Core 不解释其业务语义），交替/并行运行产生的交叉段落
  *   各自带组头，仍可一眼区分来源；
  * - 用户上翻查看历史时自动刷新不强制滚底（贴近底部才跟随）。
  */
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, inject } from 'vue'
+import { OPERATION_FEEDBACK_KEY, operationReporter } from '../workspace/operation-feedback'
 import { devicesData, useToast } from '../store'
 import { api } from '../api'
+import UiIcon from './ui/UiIcon.vue'
 
 const toast = useToast()
+const beginReport = operationReporter(inject(OPERATION_FEEDBACK_KEY, null), '', toast)
 const devices = devicesData
 const logs = ref([])
+const search = ref('')
+const loading = ref(false), loadError = ref('')
+let requestId = 0
+const visibleLogs = computed(() => { const needle = search.value.trim().toLowerCase(); return logs.value.filter(log => [log.msg, log.time, log.level, runTarget(log), deviceName(log.device_id)].some(value => String(value || '').toLowerCase().includes(needle))) })
 const fDevice = ref('')
 const fLevel = ref('')
 const autoRefresh = ref(true)
@@ -80,7 +85,7 @@ function runTarget(l) { return l.entrypoint || l.script_id || '—' }
 
 /** 时间正序 + 连续「设备+运行目标」分段。 */
 const groups = computed(() => {
-  const asc = [...logs.value].reverse()
+  const asc = [...visibleLogs.value].reverse()
   const out = []
   for (const l of asc) {
     const target = runTarget(l)
@@ -101,24 +106,30 @@ const groups = computed(() => {
 })
 
 async function load() {
+  const request = ++requestId
+  loading.value = true
   try {
-    logs.value = await api.listLogs(fDevice.value || null, fLevel.value || null, 200)
-    scrollBottomIfFollowing()
-  } catch (e) {}
+    const result = await api.listLogs(fDevice.value || null, fLevel.value || null, 200)
+    if (request !== requestId) return
+    logs.value = Array.isArray(result) ? result : []
+    loadError.value = ''
+    await nextTick()
+    if (following && streamEl.value) streamEl.value.scrollTop = streamEl.value.scrollHeight
+  } catch (error) { if (request === requestId) loadError.value = `日志读取失败：${error.message || '请重试'}` }
+  finally { if (request === requestId) loading.value = false }
 }
 
-/** 贴近底部（或首次加载）时刷新后滚到最新；用户上翻历史则不打扰。 */
-function scrollBottomIfFollowing() {
+let following = true
+function onScroll() {
   const el = streamEl.value
-  if (!el) return
-  const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 60
-  if (nearBottom) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight })
+  if (el) following = el.scrollTop + el.clientHeight >= el.scrollHeight - 60
 }
-function onScroll() { scrollBottomIfFollowing() }
 
 async function clear() {
+  const toast = beginReport()
   try {
     await api.clearLogs()
+    ++requestId; loading.value = false; loadError.value = ''
     logs.value = []
     toast('日志已清空', 'success')
   } catch (e) {
@@ -134,41 +145,27 @@ onMounted(() => {
   loadDevices(); load()
   timer = setInterval(() => { if (autoRefresh.value) load() }, 5000)
 })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+onUnmounted(() => { ++requestId; if (timer) clearInterval(timer) })
 </script>
 
 <style scoped>
-.logs-panel { display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
-.lp-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
-.filters { display: flex; gap: 8px; }
-.select-sm { width: 140px; padding: 6px 10px; font-size: 12px; }
-.lp-actions { display: flex; gap: 8px; align-items: center; }
-.refresh-hint { color: var(--text-2); font-size: 11px; }
-
-.log-card { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0; overflow: hidden; }
-.log-stream { flex: 1; overflow: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
-.log-line { display: flex; gap: 12px; padding: 2px 0 2px 14px; line-height: 1.6; align-items: baseline; white-space: nowrap; }
-.log-line:hover { background: rgba(30,36,52,.4); }
-.lg-time { color: var(--text-2); flex-shrink: 0; }
-.lg-level { width: 36px; flex-shrink: 0; font-weight: 700; }
-.log-line.info .lg-level { color: var(--text-2); }
-.log-line.success .lg-level { color: var(--ok); }
-.log-line.warn .lg-level { color: var(--warn); }
-.log-line.error .lg-level { color: var(--danger); }
-.log-line.error .lg-msg { color: var(--danger); }
-.log-line.success .lg-msg { color: var(--ok); }
-.lg-msg { color: var(--text-1); }
-
-/* 运行分组分割线：目标 id + 设备 + 起始时间 + 延伸线 */
-.run-divider {
-  display: flex; align-items: center; gap: 8px;
-  margin: 10px 0 4px; font-size: 12px;
-}
-.run-divider:first-child { margin-top: 2px; }
-.rd-script { color: var(--accent-2); font-weight: 600; }
-.rd-dev { color: var(--text-1); font-size: 11px; }
-.rd-time { color: var(--text-2); font-size: 11px; }
-.rd-line { flex: 1; height: 1px; background: var(--border); }
-
-.log-foot { border-top: 1px solid var(--border); padding: 8px 14px; display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-2); }
+.logs-panel { flex:1; min-height:0; display:flex; flex-direction:column; gap:12px; container-type:inline-size; }
+.lp-head,.filters,.lp-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.lp-head { justify-content:space-between; flex-shrink:0; }
+.filters { flex:1; }.log-search { width:280px; max-width:100%; }.select-sm { width:132px; }
+.lp-actions { margin-left:auto; }.refresh-toggle { font-size:12px; }.live-dot { width:5px; height:5px; border-radius:50%; background:var(--ok); }.live-dot.paused { background:var(--text-2); }
+.log-card { flex:1; min-height:0; display:flex; flex-direction:column; border:1px solid var(--border); background:var(--bg-0); border-radius:var(--radius); overflow:hidden; }
+.log-columns,.log-line { display:grid; grid-template-columns:190px 64px minmax(0,1fr); gap:14px; padding:7px 16px; }
+.log-columns { flex-shrink:0; background:var(--bg-1); border-bottom:1px solid var(--border); color:var(--text-2); font-size:12px; }
+.log-stream { flex:1; min-height:0; overflow:auto; }
+.log-line { font-size:13px; line-height:1.65; align-items:baseline; border-bottom:1px solid color-mix(in srgb,var(--border) 22%,transparent); }
+.log-line:hover { background:var(--bg-1); }.lg-time { font-family:var(--mono); font-size:12px; color:var(--text-2); overflow-wrap:anywhere; font-variant-numeric:tabular-nums; }
+.lg-level { font:11px/1.8 var(--mono); font-weight:600; letter-spacing:.03em; color:var(--text-1); }
+.log-line.success .lg-level { color:var(--ok); }.log-line.warn .lg-level { color:var(--warn); }.log-line.error .lg-level { color:var(--danger); }
+.log-line.error { background:color-mix(in srgb,var(--danger) 4%,var(--bg-0)); }.lg-msg { min-width:0; color:var(--text-0); white-space:pre-wrap; overflow-wrap:anywhere; }
+.run-divider { display:flex; align-items:center; gap:12px; padding:7px 16px; background:var(--bg-1); border-bottom:1px solid color-mix(in srgb,var(--border) 60%,transparent); font-size:12px; }
+.run-divider:not(:first-child) { margin-top:12px; border-top:1px solid var(--border); }.rd-script { color:var(--text-1); overflow-wrap:anywhere; }.rd-dev { color:var(--text-2); margin-left:auto; flex-shrink:0; }
+.log-foot { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; flex-shrink:0; padding:8px 16px; background:var(--bg-1); border-top:1px solid var(--border); color:var(--text-2); font-size:12px; }.foot-dot { padding:0 5px; }
+.log-empty { padding:50px 16px; display:flex; gap:8px; align-items:center; justify-content:center; color:var(--text-2); font-size:13px; }.log-load-error { font-size:12px; color:var(--danger); }
+@container (max-width:680px) { .log-columns,.log-line { grid-template-columns:125px 44px minmax(0,1fr); gap:8px; padding:7px 10px; }.log-search { flex:1; min-width:180px; }.filters { flex-wrap:wrap; }.rd-dev { max-width:35%; overflow-wrap:anywhere; }.log-foot { padding:7px 10px; } }
 </style>

@@ -139,6 +139,11 @@ export function normalizeParamDecls(inputs: readonly ParamDeclInput[] | null | u
 /** V1 标识符：小写字母/下划线开头，仅小写字母、数字、下划线（函数/参数/变量名共用）。 */
 export const IDENTIFIER_RE = /^[a-z_][a-z0-9_]*$/
 
+/** 函数名支持汉字；参数、变量和引用仍使用 isIdentifier。与宿主规则保持一致。 */
+export function isFunctionName(v: string): boolean {
+  return /^[a-z_\u3400-\u4dbf\u4e00-\u9fff][a-z0-9_\u3400-\u4dbf\u4e00-\u9fff]*$/.test(v)
+}
+
 export function isIdentifier(v: string): boolean {
   return IDENTIFIER_RE.test(v)
 }

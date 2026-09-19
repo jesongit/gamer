@@ -2,7 +2,7 @@
   <div ref="rootEl" class="se-canvas" @click.self="deselect">
     <!-- 函数编辑的紧凑外壳把函数名/添加步骤放在参数区上方；这里仅保留嵌套流程导航。 -->
     <div v-if="!hideFunctionToolbar || !atRoot" class="canvas-toolbar">
-      <template v-if="isFunction && !hideFunctionToolbar">
+      <template v-if="isFunction && !hideFunctionToolbar && !compactToolbar">
         <!-- 重命名态：下拉变输入框 + 确认按钮（Enter 确认 / Esc 取消） -->
         <input
           v-if="renaming" v-model="renameDraft"
@@ -52,7 +52,7 @@
         :class="{ active: panelOpen }" title="添加步骤（选择后插入到当前锚点）"
         @click.stop="openAdd($event.currentTarget)"
       >+ 步骤</button>
-      <template v-if="isFunction && !hideFunctionToolbar">
+      <template v-if="isFunction && !hideFunctionToolbar && !compactToolbar">
         <button
           type="button"
           class="fn-btn fn-add"
@@ -135,6 +135,7 @@
 </template>
 
 <script setup lang="ts">
+const confirmDialog = useConfirmDialog()
 /**
  * 步骤画布（plan §8.3 中央区 / §8.4）：
  * - 卡片列表渲染（经 BranchContainer，depth 0）+ 点击选中 + 添加步骤入口；
@@ -145,6 +146,7 @@
  *   接受外部诊断（服务端错误回填与客户端校验同构）。
  * 选中与展开状态由画布持有（selectedUuid prop 传入则受控于页面）。
  */
+import { useConfirmDialog } from '../../components/ui/useConfirmDialog'
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch, type PropType } from 'vue'
 import type { EditorModel, Path } from '../commands'
 import { resolveStepList } from '../commands'
@@ -158,6 +160,7 @@ import AddStepPanel from './AddStepPanel.vue'
 import ErrorSummary from './ErrorSummary.vue'
 
 const props = defineProps({
+  compactToolbar: { type: Boolean, default: false },
   model: { type: Object as PropType<EditorModel>, required: true },
   stack: { type: Object as PropType<{ apply: (c: unknown, n?: string) => boolean }>, required: true },
   diagnostics: { type: Array as PropType<Diagnostic[]>, default: () => [] },
@@ -253,8 +256,8 @@ const activeContainer = computed<Path>(() => sanitize(focusPath.value ?? current
 const activeFnName = computed(() => (isFunction.value ? String(activeContainer.value[1] ?? '') : ''))
 // 测试入口仅出现在函数体根容器（专注视图进入深层分支后隐藏——start_index 只映射函数体顶层）
 const testFromActive = computed(() =>
-  props.testFrom && isFunction.value
-  && activeContainer.value.length === 3 && activeContainer.value[2] === 'run')
+  props.testFrom && ((!isFunction.value && activeContainer.value.length === 1)
+  || (isFunction.value && activeContainer.value.length === 3 && activeContainer.value[2] === 'run')))
 const activeLabel = computed(() => {
   const nodes = breadcrumbForContainer(props.model, activeContainer.value)
   return nodes.length ? nodes[nodes.length - 1]!.label : '主流程'
@@ -371,10 +374,10 @@ function addFunction(): void {
 }
 
 /** 删除当前函数（至少保留一个，命令栈可撤销）；画布回退到首个函数。 */
-function removeActiveFn(): void {
+async function removeActiveFn(): Promise<void> {
   if (!isFunction.value || fnNames.value.length <= 1) return
   const name = activeFnName.value
-  if (!name || !window.confirm(`删除函数 ${name}？（其 params 与 run 一并移除，可撤销）`)) return
+  if (!name || !await confirmDialog(`删除函数 ${name}？（参数与步骤一并移除，可撤销）`, { title: '删除函数', confirmText: '删除', danger: true })) return
   if (props.stack.apply({ type: 'remove_function', name }, `删除函数 ${name}`)) {
     focusPath.value = null
     focusHistory.value = []
@@ -728,8 +731,9 @@ defineExpose({ locate, activeFnName, openAdd })
   border: 1px solid var(--accent); background: transparent; color: var(--accent);
   border-radius: var(--radius-sm); font-size: 12px; padding: 4px 10px; cursor: pointer;
 }
-.add-btn:hover { background: var(--accent); color: #06251c; }
+.add-btn:hover { background: var(--accent); color: #202015; }
 .anchor-hint { font-size: 12px; color: var(--text-2); padding: 4px 2px; }
 .add-dropdown-wrap { position: static; min-height: 0; margin: 0; }
 .back-btn { color: var(--accent-2); }
+.se-canvas{border:0;padding:0;background:transparent;gap:7px}.canvas-toolbar{padding:0;background:transparent;border:0;min-height:28px}.anchor-hint{font-size:12px;padding:0 2px}.add-btn,.fn-btn{min-height:28px;font-size:13px;padding:3px 9px}
 </style>

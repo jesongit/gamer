@@ -1,4 +1,6 @@
-import { computed, nextTick, onUnmounted, provide, reactive, ref } from 'vue'
+import { operationReporter } from '../../workspace/operation-feedback'
+import { GAMER_YAML_PLUGIN_ID } from '../../gamer-plugin-ids'
+import { computed, nextTick, onUnmounted, provide, reactive, ref, watch } from 'vue'
 import { pinyin } from 'pinyin-pro'
 import { api } from '../../api'
 import { collectTemplateEntries, planTemplateImports } from '../../console/template-upload'
@@ -17,6 +19,7 @@ import { composeTemplateName, putTemplateBytes, resolveTemplateVersion } from '.
  */
 export function useConsoleTemplates({
   toast,
+  feedback,
   store,
   templatesData,
   packageId,
@@ -35,6 +38,7 @@ export function useConsoleTemplates({
   refreshScripts,
   refreshFnLib,
 }) {
+  const beginReport = operationReporter(feedback, GAMER_YAML_PLUGIN_ID, toast)
   const picking = ref(false)
   let bridgeRegionResolve = null
   const testThreshold = ref(0.8)
@@ -490,18 +494,27 @@ export function useConsoleTemplates({
     })
   }
 
+  let templateRequestSeq = 0
   async function refreshTemplatesData() {
+    const requestSeq = ++templateRequestSeq
+    const requestedPackage = String(packageId.value || '').trim()
+    if (!requestedPackage) {
+      templatesData.value = []
+      return true
+    }
     try {
-      templatesData.value = await api.listTemplates(packageId.value)
+      const list = await api.listTemplates(requestedPackage)
+      if (requestSeq !== templateRequestSeq || requestedPackage !== String(packageId.value || '').trim()) return false
+      templatesData.value = Array.isArray(list) ? list : []
       return true
     } catch {
       return false
     }
   }
-  // 模板列表由本面板实现自加载（Console 壳不再预拉业务资源，ADR-11 知识边界）
-  refreshTemplatesData()
+  // Package 在页面挂载后异步恢复，初始为空时不能把一次空请求当作已加载。
+  watch(packageId, () => { void refreshTemplatesData() }, { immediate: true })
 
-  async function finishCropSave(rep, shortName) {
+  async function finishCropSave(rep, shortName, toast) {
     const refreshed = await refreshTemplatesData()
     crop.conflict = null
     crop.active = false
@@ -513,6 +526,7 @@ export function useConsoleTemplates({
   }
 
   async function saveTemplate() {
+    const toast = beginReport()
     if (saving.value) return
     const payload = cropUploadPayload()
     if (!payload) return
@@ -525,7 +539,7 @@ export function useConsoleTemplates({
     try {
       const name = composeTemplateName(payload.shortName, payload.region, payload.preserveColor)
       const rep = await putTemplateBytes(name, payload.dataB64, payload.pkg)
-      await finishCropSave(rep, payload.shortName)
+      await finishCropSave(rep, payload.shortName, toast)
     } catch (e) {
       // 列表可能在本页打开后被其他页面更新；把服务端 409 也转成同一对比态。
       if (e?.status === 409) {
@@ -542,6 +556,7 @@ export function useConsoleTemplates({
   }
 
   async function overwriteTemplate() {
+    const toast = beginReport()
     if (saving.value || !crop.conflict) return
     const payload = cropUploadPayload()
     if (!payload) return
@@ -555,7 +570,7 @@ export function useConsoleTemplates({
       if (!existing) {
         const name = composeTemplateName(payload.shortName, payload.region, payload.preserveColor)
         const rep = await putTemplateBytes(name, payload.dataB64, payload.pkg)
-        await finishCropSave(rep, payload.shortName)
+        await finishCropSave(rep, payload.shortName, toast)
         return
       }
       const targetName = composeTemplateName(payload.shortName, payload.region, payload.preserveColor)
@@ -569,7 +584,7 @@ export function useConsoleTemplates({
       // 覆盖是对同一资源路径的单次条件 PUT。这样模板名、区域和颜色标记
       // 等关联元数据保持不变；需要改变元数据时先走明确的重命名/新建流程。
       const rep = await putTemplateBytes(existing.name, payload.dataB64, payload.pkg, expectedVersion)
-      await finishCropSave(rep, payload.shortName)
+      await finishCropSave(rep, payload.shortName, toast)
     } catch (e) {
       if (e?.status === 409) {
         // 条件 PUT 拒绝说明其他页面已经改变了目标；更新冲突态中的完整
@@ -723,7 +738,7 @@ export function useConsoleTemplates({
     return new Promise((resolve) => {
       cellPick.mode = mode
       cellPick.resolve = resolve
-      toast(mode === 'color' ? '在画面上点击取色（Esc 取消）' : '在画面上点击选点（Esc 取消）', 'info')
+      if (!feedback) toast(mode === 'color' ? '在画面上点击取色（Esc 取消）' : '在画面上点击选点（Esc 取消）', 'info')
     })
   }
 
@@ -764,10 +779,17 @@ export function useConsoleTemplates({
       return
     }
     if (mode === 'coord') {
+      feedback?.setCore({ text: '已取点', actions: [
+        { label: `(${pt.x}, ${pt.y})`, copy: `[${pt.x}, ${pt.y}]` },
+        { label: `(${(pt.x / v.videoWidth).toFixed(4)}, ${(pt.y / v.videoHeight).toFixed(4)})`, copy: `[${(pt.x / v.videoWidth).toFixed(4)}, ${(pt.y / v.videoHeight).toFixed(4)}]` },
+      ] })
       resolve?.({ x: Number((pt.x / v.videoWidth).toFixed(4)), y: Number((pt.y / v.videoHeight).toFixed(4)) })
     } else if (mode === 'color') {
       const hex = samplePixelHex(pt.x, pt.y)
-      if (hex) resolve?.({ hex, x: pt.x, y: pt.y })
+      if (hex) {
+        feedback?.setCore({ text: '已取色', actions: [{ label: hex, copy: hex }, { label: `(${pt.x}, ${pt.y})`, copy: `[${pt.x}, ${pt.y}]` }] })
+        resolve?.({ hex, x: pt.x, y: pt.y })
+      }
       else { resolve?.(null); toast('取色失败：画面不可用', 'warn') }
     }
   }
@@ -795,6 +817,7 @@ export function useConsoleTemplates({
 
   /** 模板列表文件名点击：复制当前分区可用的模板短名 */
   async function onTplNameClick(e, t) {
+    const toast = beginReport()
     if (renaming.value === t.name) return
     confirmDelTpl.value = null
     const shortName = tplShortName(t.name)
@@ -854,6 +877,7 @@ export function useConsoleTemplates({
 
   /** 确认重命名：名称去空格、自动补 .png 后缀、重名校验，成功后刷新列表 */
   async function confirmRename(t) {
+    const toast = beginReport()
     const raw = renameVal.value.trim()
     if (!raw) return toast('名称不能为空', 'warn')
     const newName = /\.(png|jpe?g)$/i.test(raw) ? raw : raw + '.png'
@@ -881,6 +905,7 @@ export function useConsoleTemplates({
 
   /** 模板列表：更多菜单直接删除，不再二次确认 */
   async function onTplDeleteClick(t) {
+    const toast = beginReport()
     confirmDelTpl.value = null
     try {
       await api.deleteTemplate(t.name, packageId.value)
@@ -904,18 +929,21 @@ export function useConsoleTemplates({
    * 结束汇总：导入 N / 跳过 M / 失败 K。
    */
   async function onTplUpload(e) {
+    const toast = beginReport()
     confirmDelTpl.value = null
     const files = [...(e.target.files || [])]
     e.target.value = ''
     if (!files.length) return
     if (!packageId.value) { toast('请先在右上选择配置', 'warn'); return }
+    const requestedPackage = packageId.value
+    const existingNames = templatesData.value.filter(t => t.pkg === requestedPackage).map(t => t.name)
     let planned = []
     try {
       let entries = []
       for (const file of files) {
         entries = entries.concat(await collectTemplateEntries(file))
       }
-      planned = planTemplateImports(entries, templatesData.value.filter(t => t.pkg === packageId.value).map(t => t.name))
+      planned = planTemplateImports(entries, existingNames)
     } catch (err) {
       toast('导入失败：' + err.message, 'error')
       return
@@ -928,17 +956,17 @@ export function useConsoleTemplates({
       try {
         // 批量导入也是创建路径：不使用兼容封装的 force=true，避免并发
         // 页面在本地快照过期时静默覆盖同名模板。
-        await putTemplateBytes(item.name, item.bytes, packageId.value)
+        await putTemplateBytes(item.name, item.bytes, requestedPackage)
         // 逐张入库后立刻登记，后续同批同名冲突判定与列表展示即时可见
-        templatesData.value = templatesData.value.concat({
-          name: item.name, pkg: packageId.value, version: null, updated_at: '', size: item.bytes.length,
+        if (packageId.value === requestedPackage) templatesData.value = templatesData.value.concat({
+          name: item.name, pkg: requestedPackage, version: null, updated_at: '', size: item.bytes.length,
         })
         ok++
       } catch (err) {
         failed.push(`${item.source}：${err.message}`)
       }
     }
-    if (ok) {
+    if (ok && packageId.value === requestedPackage) {
       const refreshed = await refreshTemplatesData()
       if (!refreshed) toast('模板列表刷新失败，请手动刷新', 'warn')
     }
@@ -947,19 +975,19 @@ export function useConsoleTemplates({
     if (skipped.length) parts.push(`跳过 ${skipped.length} 张（已存在同名）`)
     if (failed.length) parts.push(`失败 ${failed.length} 张`)
     const level = failed.length ? 'warn' : 'success'
-    toast(parts.join('，') || '没有可导入的文件', level)
-    for (const line of failed.slice(0, 3)) toast(line, 'error')
+    toast([parts.join('，') || '没有可导入的文件', ...failed.slice(0, 3)].join('；'), failed.length ? 'error' : level)
   }
 
   /** 替换已有模板图片：名称/分区来自当前模板，图片替换使用独立当前端点。 */
   async function replaceTemplateImage(t, file) {
+    const toast = beginReport()
     if (!t || !file) return
+    const pkg = t.pkg || packageId.value
     try {
       const b64 = await fileToBase64(file)
-      const pkg = t.pkg || packageId.value
       const expectedVersion = await resolveTemplateVersion(t.name, pkg, t.version)
       await putTemplateBytes(t.name, b64, pkg, expectedVersion)
-      templatesData.value = await api.listTemplates(packageId.value)
+      if (packageId.value === pkg) await refreshTemplatesData()
       toast(`模板 ${t.name} 图片已替换`, 'success')
     } catch (err) {
       toast('替换失败：' + err.message, 'error')
@@ -1058,7 +1086,11 @@ export function useConsoleTemplates({
     return null
   }
 
+  let matchRequestSeq = 0
+  watch([packageId, () => store.deviceId], () => { matchRequestSeq++; showHit.value = false })
   async function testMatch(name, { stepSemantics = false } = {}) {
+    const requestSeq = ++matchRequestSeq
+    const toast = beginReport()
     if (!connected.value) return toast('请先连接设备', 'error')
     if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
     showHit.value = false
@@ -1068,6 +1100,7 @@ export function useConsoleTemplates({
       const region = stepSemantics ? undefined : templateRegionPixels(name)
       const threshold = stepSemantics ? editorMatchThreshold() : (Number(testThreshold.value) || 0.8)
       const r = await api.testTemplate(name, store.deviceId, threshold, region, packageId.value)
+      if (requestSeq !== matchRequestSeq) return
       if (r.hit) {
         hit.x = r.x; hit.y = r.y; hit.w = r.width; hit.h = r.height
         hitLabel.value = `${name} ${r.score.toFixed(2)}`
@@ -1108,6 +1141,7 @@ export function useConsoleTemplates({
 
   // 卸载清理：测试匹配命中框定时器、进行中的 bridge 框选/单元格回填请求按取消收尾
   onUnmounted(() => {
+    templateRequestSeq += 1
     if (hitTimer) { clearTimeout(hitTimer); hitTimer = null }
     if (bridgeRegionResolve) { bridgeRegionResolve(null); bridgeRegionResolve = null }
     if (cellCaptureResolve) { cellCaptureResolve(null); cellCaptureResolve = null }

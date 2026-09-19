@@ -75,7 +75,7 @@ describe('LogsPanel 运行分组', () => {
     api.listLogs.mockResolvedValue([])
     const w = mount(LogsPanel)
     await flushPromises()
-    expect(w.text()).toContain('没有日志记录')
+    expect(w.text()).toContain('暂无日志记录')
     expect(w.findAll('.run-divider')).toHaveLength(0)
   })
 })

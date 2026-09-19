@@ -58,9 +58,9 @@ const emit = defineEmits(['locate'])
 .err-row:last-child { border-bottom: none; }
 .err-row:hover { background: var(--bg-3); }
 .err-code {
-  font-family: var(--mono); font-size: 11px; color: var(--danger);
+  font-family: var(--mono); font-size: 12px; color: var(--danger);
   background: rgba(248, 113, 113, .12); border-radius: 4px; padding: 1px 6px; flex: none;
 }
-.err-path { font-family: var(--mono); font-size: 11px; color: var(--accent-2); flex: none; }
+.err-path { font-family: var(--mono); font-size: 12px; color: var(--accent-2); flex: none; }
 .err-msg { color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

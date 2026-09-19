@@ -8,6 +8,7 @@
     <div v-if="!media" class="zone-empty">在素材库中选择一个素材进行预览</div>
     <template v-else>
       <video
+        v-if="!sharedStage"
         :key="media.id"
         ref="videoEl"
         class="preview"
@@ -21,6 +22,10 @@
         @seeked="onSeeked"
       ></video>
 
+      <div v-if="sharedStage" class="shared-timeline">
+        <button class="mini-btn" :disabled="!stageMatches" :title="sharedStage.playing ? '暂停预览' : '播放预览'" @click="sharedStage.togglePlay()">{{ sharedStage.playing ? 'Ⅱ' : '▷' }}</button>
+        <input class="range" type="range" min="0" :max="totalSeconds || 1" step="0.001" :value="currentTime" :disabled="!stageMatches" aria-label="视频时间轴" @input="seekPreview($event.target.value)" />
+      </div>
       <div class="time-row">
         <span class="mono time-readout" data-testid="video-time">{{ currentTime.toFixed(3) }}s</span>
         <span class="mono time-total">/ {{ totalSeconds.toFixed(3) }}s</span>
@@ -220,10 +225,14 @@
 // - 校准：旋转/像素比例/有效画面区域/参考分辨率，应用后由宿主递增版本
 // - 自录事件：会话分段 base_pts_us 整数映射到媒体 PTS（recordingEvents.js），
 //   外部素材无 recordingId 时不渲染事件区（不伪造操作日志）
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, inject, onUnmounted, reactive, ref, watch } from 'vue'
+import { STAGE_MEDIA_CONTROLLER_KEY } from '../../workspace/context'
 import { calibrationDiagnostics, describeCalibration } from './calibration'
 import { alignEvents, eventSummary } from './recordingEvents'
 import { ptsFromTime, videoApi } from './videoApi'
+
+const sharedStage = inject(STAGE_MEDIA_CONTROLLER_KEY, null)
+const timelineOwner = Symbol('video-timeline')
 
 const props = defineProps({
   media: { type: Object, default: null },
@@ -480,6 +489,24 @@ function invalidateFromPreview() {
   }
 }
 
+const stageMatches = computed(() => sharedStage?.kind === 'media' && sharedStage.mediaId === props.media?.id)
+watch(stageMatches, matches => {
+  if (matches) sharedStage.timelineOwner = timelineOwner
+  else if (sharedStage?.timelineOwner === timelineOwner) sharedStage.timelineOwner = null
+}, { immediate: true })
+watch(() => sharedStage?.currentTime, time => {
+  if (!stageMatches.value || !Number.isFinite(Number(time))) return
+  currentTime.value = Number(time)
+  if (!isProgrammaticSeekPosition(currentTime.value)) invalidateFromPreview()
+})
+watch(() => sharedStage?.playing, playing => { if (playing && stageMatches.value) invalidateFromPreview() })
+function seekPreview(value) {
+  if (!stageMatches.value) return
+  invalidateFromPreview()
+  sharedStage.seek(Number(value))
+}
+onUnmounted(() => { if (sharedStage?.timelineOwner === timelineOwner) sharedStage.timelineOwner = null })
+
 function onTimeUpdate() {
   const t = Number(videoEl.value?.currentTime)
   if (Number.isFinite(t)) currentTime.value = t
@@ -645,6 +672,7 @@ function showFrameByIndex(position, context = captureFrameContext()) {
   frameUrl.value = nextUrl
   frameCaption.value = `帧 ${normalized.index} · pts_us=${normalized.pts_us}（t=${(normalized.pts_us / 1e6).toFixed(3)}s）`
   pendingProgrammaticSeek = { ...request }
+  if (stageMatches.value) sharedStage.seek(normalized.pts_us / 1e6)
   const el = videoEl.value
   if (el) {
     try { el.currentTime = normalized.pts_us / 1e6 } catch { /* 元数据未就绪时静默 */ }
@@ -890,59 +918,61 @@ function fmtUs(us) {
 .video-timeline { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
 .zone-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-shrink: 0; }
 .zone-title { color: var(--text-0); font-size: 13px; font-weight: 700; }
-.zone-sub { color: var(--text-2); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zone-sub { color: var(--text-2); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .zone-empty { padding: 18px 10px; text-align: center; color: var(--text-2); font-size: 12px; }
 .preview { width: 100%; max-height: 220px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #000; }
 .time-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .time-readout { color: var(--accent-2); font-size: 12px; }
-.time-total { color: var(--text-2); font-size: 11px; }
+.time-total { color: var(--text-2); font-size: 12px; }
 .time-actions { display: flex; gap: 5px; margin-left: auto; align-items: center; flex-wrap: wrap; }
 .frame-index-control { display: inline-flex; align-items: center; gap: 3px; }
 .frame-index-input { width: 72px; padding: 3px 5px; font: 11px var(--mono); }
-.mini-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 11px; padding: 3px 7px; }
+.mini-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 12px; padding: 3px 7px; }
 .mini-btn:hover { border-color: var(--accent); color: var(--accent); }
 .mini-btn:disabled { opacity: .45; cursor: not-allowed; }
 .mini-btn.danger:hover { border-color: var(--danger); color: var(--danger); }
 .frame-box { display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-0); }
 .frame-shot { max-width: 100%; max-height: 200px; object-fit: contain; align-self: center; image-rendering: pixelated; }
 .frame-actions { display: flex; align-items: center; gap: 6px; justify-content: center; }
-.frame-dep-hint { color: var(--warn); font-size: 10px; }
-.frame-caption { color: var(--text-2); font-size: 10px; text-align: center; }
-.frame-hint { color: var(--text-2); font-size: 10px; line-height: 1.5; }
-.zone-error { padding: 5px 7px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); background: rgba(248,113,113,.08); color: var(--danger); font-size: 11px; line-height: 1.5; }
-.zone-note { padding: 5px 7px; border-radius: var(--radius-sm); font-size: 11px; line-height: 1.5; }
+.frame-dep-hint { color: var(--warn); font-size: 12px; }
+.frame-caption { color: var(--text-2); font-size: 12px; text-align: center; }
+.frame-hint { color: var(--text-2); font-size: 12px; line-height: 1.5; }
+.zone-error { padding: 5px 7px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); background: rgba(248,113,113,.08); color: var(--danger); font-size: 12px; line-height: 1.5; }
+.zone-note { padding: 5px 7px; border-radius: var(--radius-sm); font-size: 12px; line-height: 1.5; }
 .zone-note.warn { border: 1px solid rgba(245,180,80,.4); background: rgba(245,180,80,.08); color: var(--warning, #d9a13c); }
 .markers-box, .calibration-box, .events-box { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-0); }
 .sub-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .sub-title { color: var(--text-0); font-size: 12px; font-weight: 700; cursor: default; }
 summary.sub-title { cursor: pointer; }
 .marker-add { display: flex; gap: 5px; align-items: center; }
-.input { padding: 3px 6px; font-size: 11px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); min-width: 0; }
+.input { padding: 3px 6px; font-size: 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); min-width: 0; }
 .input.num { width: 52px; }
 .marker-label-input { width: 110px; }
 .marker-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 4px; align-items: center; }
 .marker-row.stale { opacity: .7; }
 .marker-row .marker-note { grid-column: 1 / -1; }
-.marker-name { font-size: 11px; }
-.marker-note { font-size: 10px; color: var(--text-2); }
-.tag { display: inline-block; padding: 1px 5px; border-radius: 8px; font-size: 10px; background: var(--bg-3); color: var(--text-2); }
+.marker-name { font-size: 12px; }
+.marker-note { font-size: 12px; color: var(--text-2); }
+.tag { display: inline-block; padding: 1px 5px; border-radius: var(--radius-sm); font-size: 12px; background: var(--bg-3); color: var(--text-2); }
 .tag.err { background: rgba(248,113,113,.12); color: var(--danger); }
 .tag.src-manual { background: rgba(96,165,250,.12); color: var(--accent-2, #60a5fa); }
 .tag.src-keymap { background: rgba(52,211,153,.12); color: #34d399; }
 .tag.src-runner { background: rgba(192,132,252,.12); color: #c084fc; }
 .tag.src-plugin { background: rgba(251,191,36,.12); color: #fbbf24; }
-.cal-version { color: var(--accent); font-size: 10px; margin-left: 4px; }
-.cal-desc { color: var(--text-2); font-size: 10px; font-weight: 400; margin-left: 6px; }
+.cal-version { color: var(--accent); font-size: 12px; margin-left: 4px; }
+.cal-desc { color: var(--text-2); font-size: 12px; font-weight: 400; margin-left: 6px; }
 .cal-grid { display: flex; flex-direction: column; gap: 6px; }
-.form-row { display: flex; align-items: center; gap: 4px; font-size: 11px; }
+.form-row { display: flex; align-items: center; gap: 4px; font-size: 12px; }
 .form-label { color: var(--text-2); white-space: nowrap; min-width: 88px; }
 .form-actions { display: flex; gap: 6px; }
-.event-row { display: flex; align-items: center; gap: 6px; font-size: 11px; padding: 2px 0; cursor: pointer; min-width: 0; }
+.event-row { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 0; cursor: pointer; min-width: 0; }
 .event-row:hover { color: var(--accent); }
 .event-time { color: var(--text-2); flex-shrink: 0; }
 .event-kind { color: var(--text-1); flex-shrink: 0; }
 .event-summary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); min-width: 0; flex: 1; }
-.list-empty { padding: 8px 6px; text-align: center; color: var(--text-2); font-size: 11px; }
+.list-empty { padding: 8px 6px; text-align: center; color: var(--text-2); font-size: 12px; }
 .mono { font-family: var(--mono); }
-.frame-count { color: var(--text-2); font-size: 11px; }
+.frame-count { color: var(--text-2); font-size: 12px; }
+.mini-btn{min-height:28px;padding:3px 7px;font-size:13px}.zone-head,.sub-head{gap:6px}.preview{max-height:200px;object-fit:contain;background:var(--bg-0)}.frame-shot{max-height:180px;object-fit:contain}.zone-title,.sub-title{font-size:13px}.input,.select{min-height:28px;font-size:13px}.cal-grid{gap:7px}.marker-row,.event-row{min-height:32px}
+.shared-timeline{display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:1px solid var(--border)}.shared-timeline .range{flex:1;min-width:0}
 </style>

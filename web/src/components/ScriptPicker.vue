@@ -1,10 +1,10 @@
 <template>
   <div class="spicker">
-    <select v-if="!locked" v-model="innerPkg" class="select mono sp-pkg" title="应用分区包名">
+    <select :disabled="disabled" v-if="!locked" v-model="innerPkg" class="select mono sp-pkg" title="应用分区包名">
       <option v-if="!packages.length" value="">（无脚本）</option>
       <option v-for="p in packages" :key="p" :value="p">{{ p }}</option>
     </select>
-    <select v-model="sel" class="select mono sp-name" title="运行脚本">
+    <select :disabled="disabled" v-model="sel" class="select mono sp-name" title="运行脚本">
       <option value="">选择脚本…</option>
       <option v-for="s in pkgScripts" :key="s.id" :value="s.id">{{ s.name }}</option>
     </select>
@@ -16,6 +16,7 @@ import { ref, computed, watch } from 'vue'
 import { scriptsData } from '../store'
 
 const props = defineProps({
+  disabled: Boolean,
   modelValue: { type: String, default: '' },
   // 传入则锁定该分区并隐藏包名下拉（Console 脚本页签：分区由页签顶部下拉统一控制）
   package: { type: String, default: '' },

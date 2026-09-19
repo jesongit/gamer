@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+const { dialogDecision } = vi.hoisted(() => ({ dialogDecision: vi.fn() }))
+vi.mock('./components/ui/useConfirmDialog', () => ({ useConfirmDialog: () => Object.assign(dialogDecision, { cancel: vi.fn() }) }))
 import { flushPromises, mount } from '@vue/test-utils'
 import PluginCenter from './workspace/plugin-center/PluginCenter.vue'
 import {
@@ -74,7 +76,7 @@ async function mountCenter(plugins, extensions) {
   vi.stubGlobal('fetch', registryFetch(plugins))
   const { client } = makeClient(extensions)
   const wrapper = mount(PluginCenter, {
-    props: { open: true, apiClient: client },
+    props: { apiClient: client },
     global: { stubs: { Teleport: { template: '<div><slot /></div>' } } },
   })
   await flushPromises()
@@ -83,7 +85,7 @@ async function mountCenter(plugins, extensions) {
 
 describe('P2-UI M02/M03 插件中心回归', () => {
   beforeEach(() => {
-    vi.stubGlobal('confirm', vi.fn(() => true))
+    dialogDecision.mockResolvedValue(true)
   })
 
   afterEach(() => {
@@ -119,14 +121,14 @@ describe('P2-UI M02/M03 插件中心回归', () => {
     try {
       const cards = wrapper.findAll('.plugin-card')
       expect(cards[0].text()).toContain('已是最新')
-      expect(cards[0].find('button').attributes('disabled')).toBeDefined()
+      expect(cards[0].findAll('button').some(button => button.text().includes('更新到'))).toBe(false)
       expect(cards[1].text()).toContain('已安装更高版本')
       expect(cards[1].text()).not.toContain('更新到')
       expect(cards[2].text()).toContain('更新到 1.0.0')
       expect(cards[2].find('button').attributes('disabled')).toBeUndefined()
       expect(cards[3].text()).toContain('版本不兼容')
       expect(cards[3].text()).toContain('宿主预置插件不能替换为 WASM 包')
-      expect(cards[3].find('button').attributes('disabled')).toBeDefined()
+      expect(cards[3].findAll('button').some(button => button.text().includes('更新到'))).toBe(false)
     } finally {
       wrapper.unmount()
     }
@@ -140,7 +142,6 @@ describe('P2-UI M02/M03 插件中心回归', () => {
     )
     client.enableExtension.mockImplementationOnce(() => new Promise(resolve => { deferred.resolve = resolve }))
     try {
-      await wrapper.get('.plugin-center-tabs button:nth-child(2)').trigger('click')
       // The installed tab has one lifecycle button; the first click starts the
       // request and the second click must be ignored while it is pending.
       const action = wrapper.findAll('button').find(button => button.text() === '启用')
@@ -155,12 +156,55 @@ describe('P2-UI M02/M03 插件中心回归', () => {
       await flushPromises()
       expect(wrapper.text()).toContain('demo.action：已启用')
 
-      await wrapper.find('.section-head button').trigger('click')
+      await wrapper.find('.plugin-toolbar button').trigger('click')
       await flushPromises()
       expect(wrapper.text()).toContain('demo.action：已启用')
     } finally {
       wrapper.unmount()
     }
+  })
+
+  it('同 ID 只显示一张卡片并选择最新市场版本，本地独有插件仍可管理', async () => {
+    const { wrapper } = await mountCenter([entry('demo.alpha', '1.0.0'), entry('demo.alpha', '2.0.0'), entry('demo.beta', '1.0.0')], [installed('demo.alpha', '1.0.0'), installed('demo.local', '1.0.0')])
+    try {
+      expect(wrapper.findAll('.plugin-card')).toHaveLength(3)
+      expect(wrapper.findAll('.installed-card')).toHaveLength(2)
+      expect(wrapper.get('[data-plugin-id="demo.alpha"]').text()).toContain('更新到 2.0.0')
+      expect(wrapper.get('[data-plugin-id="demo.local"]').text()).toContain('未收录于市场')
+      expect(wrapper.get('[data-plugin-id="demo.beta"]').text()).toContain('未安装')
+      expect(wrapper.find('.plugin-section').exists()).toBe(false)
+      await wrapper.get('[aria-label="搜索插件"]').setValue('alpha')
+      expect(wrapper.findAll('.plugin-card')).toHaveLength(1)
+      await wrapper.findAll('button').find(button => button.text() === 'URL 导入').trigger('click')
+      expect(wrapper.find('input[type="url"]').exists()).toBe(true)
+      expect(wrapper.findAll('.plugin-card')).toHaveLength(1)
+      await wrapper.get('[aria-label="搜索插件"]').setValue('')
+      expect(wrapper.findAll('.plugin-card')).toHaveLength(3)
+    } finally { wrapper.unmount() }
+  })
+
+  it('卸载市场插件后原卡片变为未安装，数量不重复也不丢失', async () => {
+    const { wrapper, client } = await mountCenter([entry('demo.alpha', '1.0.0')], [installed('demo.alpha', '1.0.0')])
+    try {
+      await wrapper.findAll('button').find(button => button.text() === '卸载').trigger('click')
+      await flushPromises()
+      expect(client.uninstallExtension).toHaveBeenCalledTimes(1)
+      expect(wrapper.findAll('.plugin-card')).toHaveLength(1)
+      expect(wrapper.get('.plugin-card').text()).toContain('未安装')
+      expect(wrapper.get('.plugin-card button').text()).toBe('安装')
+    } finally { wrapper.unmount() }
+  })
+
+  it('管理状态读取失败时不把市场条目误报为未安装，也不提供安装操作', async () => {
+    const { wrapper, client } = await mountCenter([entry('demo.alpha', '1.0.0')], [])
+    try {
+      client.getExtensionManagement.mockRejectedValueOnce(new Error('管理状态读取失败'))
+      await wrapper.find('.plugin-toolbar button').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.plugin-card').text()).toContain('状态未确认')
+      expect(wrapper.get('.plugin-card').text()).not.toContain('未安装')
+      expect(wrapper.get('.plugin-card button').attributes('disabled')).toBeDefined()
+    } finally { wrapper.unmount() }
   })
 
   it('更新快照与卸载 204 分别展示运行态和数据结果', () => {

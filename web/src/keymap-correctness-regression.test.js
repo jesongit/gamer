@@ -228,7 +228,7 @@ describe('Keymap K01-K04 correctness regressions', () => {
 
     await wrapper.get('[data-testid="keymap-scheme-row"]').get('button').trigger('click')
     const saveButton = wrapper.get('.editor-foot button.btn-primary')
-    const refreshButton = wrapper.findAll('button').find(button => button.text() === '↻ 刷新')
+    const refreshButton = wrapper.findAll('button').find(button => button.text() === '刷新')
     expect(saveButton.attributes('disabled')).toBeDefined()
     expect(refreshButton.attributes('disabled')).toBeDefined()
   })

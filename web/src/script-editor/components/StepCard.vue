@@ -21,7 +21,7 @@
       >⋮⋮</span>
       <span class="kind-icon" :title="meta.hint">{{ meta.icon }}</span>
       <span class="kind-name">{{ meta.label }}</span>
-      <span class="step-no">#{{ index + 1 }}</span>
+      <span class="step-no">{{ String(index + 1).padStart(2, '0') }}</span>
       <span class="summary" :title="summary">{{ summary }}</span>
       <span v-if="ownErrors.length" class="err-badge" :title="ownErrors.map((d) => d.message).join('\n')">
         {{ ownErrors.length }}
@@ -30,18 +30,18 @@
         <!-- 函数测试入口：仅宿主开启 testFrom 时显示（函数库页签的函数体顶层卡片） -->
         <button
           v-if="testFrom" type="button" class="mini-btn test-from"
-          title="从此步骤测试函数"
+          title="从此步骤运行"
           @click.stop="emit('test-from', step.uuid)"
-        >▶测试</button>
+         aria-label="从此步骤运行"><UiIcon name="play" /></button>
         <button
           type="button" class="mini-btn expand-btn"
           :title="expanded ? '收起' : '展开编辑'"
           @click.stop="onToggleExpand"
         >{{ expanded ? '▾' : '▸' }}</button>
-        <button type="button" class="mini-btn" title="上移" :disabled="index === 0" @click.stop="moveBy(-1)">↑</button>
-        <button type="button" class="mini-btn" title="下移" :disabled="index >= listLength - 1" @click.stop="moveBy(1)">↓</button>
-        <button type="button" class="mini-btn" title="复制步骤" @click.stop="duplicate">⧉</button>
-        <button type="button" class="mini-btn danger" title="删除步骤" @click.stop="remove">✕</button>
+        <button type="button" class="mini-btn" title="上移" :disabled="index === 0" @click.stop="moveBy(-1)" aria-label="上移步骤"><UiIcon name="up" /></button>
+        <button type="button" class="mini-btn" title="下移" :disabled="index >= listLength - 1" @click.stop="moveBy(1)" aria-label="下移步骤"><UiIcon name="down" /></button>
+        <button type="button" class="mini-btn" title="复制步骤" @click.stop="duplicate" aria-label="复制步骤"><UiIcon name="copy" /></button>
+        <button type="button" class="mini-btn danger" title="删除步骤" aria-label="删除步骤" @click.stop="remove"><UiIcon name="trash" /></button>
       </span>
     </div>
 
@@ -53,7 +53,7 @@
           <span class="field-label">函数</span>
           <template v-if="targetOptions">
             <select
-              class="cell-input target-select" :value="step.fn" aria-label="函数"
+              class="cell-input target-select" :value="step.fn" :title="selectedHint" aria-label="函数"
               @change="applyFn(($event.target as HTMLSelectElement).value)"
             >
               <option value="">（选择函数）</option>
@@ -71,17 +71,36 @@
             @change="applyFn(($event.target as HTMLInputElement).value)"
           />
           <span v-if="fieldError('fn')" class="cell-err-msg">{{ fieldError('fn') }}</span>
-          <span v-if="selectedHint" class="field-hint">{{ selectedHint }}</span>
+
         </div>
         <div class="field-row col">
-          <span class="field-label">参数</span>
-          <span v-if="targetOptions" class="field-hint">选定函数后按其 Schema 自动生成（默认值已预填，必填项需补齐）；位置值可直接填单值</span>
+
           <span v-if="fieldError('args')" class="cell-err-msg">{{ fieldError('args') }}</span>
+          <template v-if="paramSchema">
+            <div v-for="name in requiredArgNames" :key="name" class="arg-row" :data-arg-name="name">
+              <span class="arg-name mono" :title="paramSchema.find(p => p.name === name)?.desc">{{ name }} <span class="required-dot" aria-label="必填"></span></span>
+              <CellEditor :cell="schemaArgCell(name)" :type="argType(name)" :params="params" :templates="templates" :label="`参数 ${name}`" @change="(c) => updateSchemaArg(name, c)" />
+              <button v-if="canRemoveSchemaArg(name)" type="button" class="mini-btn" :title="hasDefaultFor(name) ? '恢复默认值' : '删除实参'" :aria-label="hasDefaultFor(name) ? `恢复 ${name} 默认值` : `删除参数 ${name}`" @click.stop="removeArg(name)">✕</button>
+            </div>
+            <span v-if="!requiredArgNames.length" class="field-hint">无必填参数</span>
+            <details class="optional-params">
+              <summary>更多参数 · 已设置 {{ configuredOptionalCount }} 项</summary>
+              <div class="param-buttons" role="group" aria-label="函数参数">
+                <button v-for="param in paramSchema.filter(p => !p.required)" :key="param.name" type="button" class="param-button" :class="{ active: paramActive(param) }" :data-param="param.name" :aria-pressed="paramActive(param)" :title="paramButtonTitle(param)" @click.stop="toggleParam(param, $event)"><span class="mono">{{ param.name }}</span><span class="param-default">{{ paramDefaultLabel(param) }}</span></button>
+              </div>
+              <div v-for="name in optionalArgNames" :key="name" class="arg-row" :data-arg-name="name">
+                <span class="arg-name mono">{{ name }}</span>
+                <CellEditor :cell="schemaArgCell(name)" :type="argType(name)" :params="params" :templates="templates" :label="`参数 ${name}`" :optional="isUnfilledOptional(name)" @change="(c) => updateSchemaArg(name, c)" /><span v-if="isUnfilledOptional(name)" class="field-hint">可选，留空不传</span>
+                <button v-if="canRemoveSchemaArg(name)" type="button" class="mini-btn" :title="hasDefaultFor(name) ? '恢复默认值' : '删除实参'" :aria-label="hasDefaultFor(name) ? `恢复 ${name} 默认值` : `删除参数 ${name}`" @click.stop="removeArg(name)">✕</button>
+              </div>
+            </details>
+          </template>
+          <template v-else>
           <!-- 位置值形态 -->
           <div v-if="step.args.kind === 'value'" class="arg-row">
             <span class="field-label">值</span>
             <CellEditor
-              :cell="step.args.cell" type="expr" :params="params" :templates="templates"
+              :cell="step.args.cell" :type="firstParam?.type || 'expr'" :params="params" :templates="templates"
               label="参数值" @change="(c) => updateValueArg(c)"
             />
             <button type="button" class="mini-btn" title="删除实参" @click.stop="clearArgs">✕</button>
@@ -89,7 +108,8 @@
           <!-- 命名参数形态 -->
           <template v-else-if="step.args.kind === 'map'">
             <div v-for="name in argNames" :key="name" class="arg-row">
-              <input
+              <span v-if="isPluginFunction" class="arg-name mono" :title="`参数 ${name}`">{{ name }}</span>
+              <input v-else
                 class="cell-input" :value="name" aria-label="参数名" placeholder="参数名"
                 @change="renameArg(name, ($event.target as HTMLInputElement).value)"
               />
@@ -102,7 +122,7 @@
             </div>
           </template>
           <div class="arg-actions">
-            <button type="button" class="mini-btn add" title="添加命名参数" @click.stop="addArg">+ 参数</button>
+            <button type="button" class="mini-btn add" title="添加命名参数" :disabled="isPluginFunction && !missingPluginParam" @click.stop="addArg">+ 参数</button>
             <button
               v-if="step.args.kind !== 'value'" type="button" class="mini-btn add" title="切换单值形态（单参数函数简写）"
               @click.stop="toValueArg"
@@ -112,18 +132,19 @@
               @click.stop="toMapArg"
             >命名参数</button>
           </div>
+          </template>
           <span v-if="conversionNotice" class="field-hint args-conversion-notice" role="status">{{ conversionNotice }}</span>
         </div>
-        <div class="field-row">
-          <label class="field-check" title="把函数返回值存入变量（无返回值函数存 null）">
-            <input type="checkbox" :checked="step.as !== null" @change="toggleAs" />
-            接收返回值
-          </label>
-          <input
-            v-if="step.as !== null" class="cell-input" :value="step.as ?? ''" placeholder="变量名，如 home"
-            aria-label="返回值变量名" @change="setAs(($event.target as HTMLInputElement).value)"
-          />
-        </div>
+        <details class="optional-params return-value-options">
+          <summary>接收返回值 · {{ step.as === null ? '未设置' : step.as || '待填写' }}</summary>
+          <div class="arg-row">
+            <span class="field-label">变量名</span>
+            <input class="cell-input" :value="step.as ?? ''" placeholder="留空不接收，如 hit"
+              aria-label="返回值变量名" :aria-invalid="!!fieldError('as')" @change="setAs(($event.target as HTMLInputElement).value)" />
+            <button v-if="step.as !== null" type="button" class="mini-btn" title="清除返回值变量" aria-label="清除返回值变量" @click="setAs('')"><UiIcon name="close" /></button>
+          </div>
+          <span v-if="fieldError('as')" class="cell-err-msg">{{ fieldError('as') }}</span>
+        </details>
       </template>
 
       <!-- if -->
@@ -190,7 +211,8 @@
  * - if/repeat 的分支子流程内嵌 BranchContainer（一层内嵌、更深专注）。
  * 纯受控组件：所有写操作构造 Command 提交 stack，自身不改模型。
  */
-import { computed, inject, ref, type PropType } from 'vue'
+import UiIcon from '../../components/ui/UiIcon.vue'
+import { computed, inject, ref, watch, type PropType } from 'vue'
 import type { Path } from '../commands'
 import { resolveStepList } from '../commands'
 import type { Diagnostic } from '../diagnostics'
@@ -198,6 +220,8 @@ import { joinStepPath } from '../diagnostics'
 import { childContainerPath } from '../selection'
 import type { Cell, CallArgs, ParamDecl, Step } from '../model'
 import { initializeArgsFromSchema } from '../factories'
+import { cloneSchemaValue, hasParamDefault } from '../schema'
+import { missingLit } from '../model'
 import {
   postRemovalIndex,
   clearActiveStepDrag,
@@ -237,7 +261,8 @@ const props = defineProps({
 const emit = defineEmits(['select', 'toggle-expand', 'focus', 'add-here', 'test-from'])
 
 const meta = computed(() => KIND_META[props.step.kind])
-const summary = computed(() => stepSummary(props.step))
+const summary = computed(() => stepSummary(props.step, props.step.kind === 'call'
+  ? paramSchema.value?.find(p => p.name === 'name')?.default as string | undefined : undefined))
 const stepPath = computed(() => joinStepPath(props.basePath, props.index))
 const selected = computed(() => props.selectedUuid === props.step.uuid)
 const highlighted = computed(() => props.highlightUuid === props.step.uuid)
@@ -370,10 +395,88 @@ const targetGroups = computed(() => {
     { id: 'package', label: '配置包函数', options: pkg },
   ].filter((g) => g.options.length > 0)
 })
-const selectedHint = computed(() => allTargets.value.find((o) => o.target === props.step.fn)?.hint ?? '')
+const selectedTarget = computed(() => allTargets.value.find((o) => o.target === props.step.fn))
+const selectedHint = computed(() => selectedTarget.value?.hint ?? '')
+const isPluginFunction = computed(() => selectedTarget.value?.group === 'plugin')
+const resolvedSchema = ref<{ fn: string; params: ParamDecl[] } | null>(null)
+const paramSchema = computed(() => targetOptions?.resolveParamsSync?.(props.step.fn)
+  ?? (resolvedSchema.value && resolvedSchema.value.fn === props.step.fn ? resolvedSchema.value.params : null))
+const firstParam = computed(() => paramSchema.value?.[0])
+// 打开已有步骤时只加载参数声明，不改写已经保存的值。
+watch(expanded, async open => {
+  const fn = props.step.fn
+  if (!open || !fn || !targetOptions || paramSchema.value) return
+  try {
+    const params = await targetOptions.resolveParams(fn)
+    if (params && props.step.fn === fn) resolvedSchema.value = { fn, params }
+  } catch { /* 保留已有实参，等待宿主目录恢复。 */ }
+}, { immediate: true })
+const openedOptionalParams = ref(new Set<string>())
+watch(() => [props.step.uuid, props.step.fn], () => { openedOptionalParams.value = new Set() })
+const schemaArgNames = computed(() => {
+  const current = argsRecord()
+  const declared = paramSchema.value ?? []
+  return [...declared.filter(paramActive).map(p => p.name),
+    ...Object.keys(current).filter(name => !declared.some(p => p.name === name))]
+})
+const requiredArgNames = computed(() => (paramSchema.value ?? []).filter(p => p.required).map(p => p.name))
+const optionalArgNames = computed(() => schemaArgNames.value.filter(name => !requiredArgNames.value.includes(name)))
+const configuredOptionalCount = computed(() => Object.keys(argsRecord()).filter(name => !requiredArgNames.value.includes(name)).length)
+function paramActive(param: ParamDecl): boolean {
+  return (param.required && !hasParamDefault(param)) || param.name in argsRecord() || openedOptionalParams.value.has(param.name)
+}
+function paramDefaultLabel(param: ParamDecl): string {
+  return hasParamDefault(param) ? `= ${JSON.stringify(param.default)}` : (param.required ? '必填' : '可选')
+}
+function paramButtonTitle(param: ParamDecl): string {
+  const action = hasParamDefault(param)
+    ? (paramActive(param) ? '恢复默认值' : '点击自定义')
+    : (param.required ? '无默认值，请填写' : (paramActive(param) ? '点击收起，不传此参数' : '可选，无默认值，点击填写'))
+  return [param.name, param.desc, paramDefaultLabel(param), action].filter(Boolean).join(' · ')
+}
+function toggleParam(param: ParamDecl, event: Event): void {
+  if (!param.required && !hasParamDefault(param)) {
+    if (paramActive(param)) removeArg(param.name)
+    else openedOptionalParams.value = new Set([...openedOptionalParams.value, param.name])
+    return
+  }
+  if (!hasParamDefault(param)) {
+    const container = (event.currentTarget as HTMLElement).closest('.field-row')
+    const row = Array.from(container?.querySelectorAll<HTMLElement>('[data-arg-name]') ?? [])
+      .find(el => el.dataset.argName === param.name)
+    row?.querySelector<HTMLElement>('input, select, textarea')?.focus()
+    return
+  }
+  if (param.name in argsRecord()) removeArg(param.name)
+  else updateArgValue(param.name, { lit: cloneSchemaValue(param.default) })
+}
+function schemaArgCell(name: string): Cell {
+  const param = paramSchema.value?.find(p => p.name === name)
+  return argsRecord()[name] ?? (param && hasParamDefault(param) ? { lit: cloneSchemaValue(param.default) } : missingLit(null))
+}
+function hasDefaultFor(name: string): boolean {
+  const param = paramSchema.value?.find(p => p.name === name)
+  return !!param && hasParamDefault(param)
+}
+function isUnfilledOptional(name: string): boolean {
+  const param = paramSchema.value?.find(p => p.name === name)
+  return !!param && !param.required && !hasParamDefault(param) && !(name in argsRecord())
+}
+function canRemoveSchemaArg(name: string): boolean {
+  const param = paramSchema.value?.find(p => p.name === name)
+  return (name in argsRecord() || openedOptionalParams.value.has(name)) && (!param || !param.required || hasParamDefault(param))
+}
+function updateSchemaArg(name: string, cell: Cell): void {
+  if (props.step.kind === 'call' && props.step.args.kind === 'value' && firstParam.value?.name === name) updateValueArg(cell)
+  else updateArgValue(name, cell)
+}
+const missingPluginParam = computed(() => {
+  const current = argsRecord()
+  return targetOptions?.resolveParamsSync?.(props.step.fn)?.find((d) => !(d.name in current))
+})
 
 /**
- * 下发函数名；宿主注入了解析器时一并按 Schema 重生成实参（默认值预填），
+ * 下发函数名；按声明展开无默认值字段，已有自定义值按同名参数保留，
  * 单条 update_step = 一次撤销。await 期间函数若又被改动则放弃（由最新一次变更接管）。
  */
 let fnRequestSeq = 0
@@ -403,6 +506,7 @@ async function applyFn(next: string): Promise<void> {
   }
   if (requestSeq !== fnRequestSeq || props.step.kind !== 'call' || props.step.fn !== next) return
   if (!decls) return
+  resolvedSchema.value = { fn: next, params: decls }
   try {
     updateStep({ args: mergeArgsWithSchema(props.step.args, decls) })
   } catch {
@@ -434,11 +538,13 @@ const argNames = computed<string[]>(() =>
 )
 
 function argType(name: string): string {
-  if (!targetOptions?.resolveParamsSync) return 'text'
-  const decls = targetOptions.resolveParamsSync(props.step.fn)
+  const decls = paramSchema.value
   return decls?.find((d) => d.name === name)?.type ?? 'text'
 }
 function argsRecord(): Record<string, Cell> {
+  if (props.step.kind === 'call' && props.step.args.kind === 'value' && firstParam.value) {
+    return { [firstParam.value.name]: props.step.args.cell }
+  }
   return props.step.kind === 'call' && props.step.args.kind === 'map' ? { ...props.step.args.entries } : {}
 }
 function updateArgs(entries: Record<string, Cell>): void {
@@ -451,11 +557,16 @@ function updateArgValue(name: string, cell: Cell): void {
   updateArgs({ ...argsRecord(), [name]: cell })
 }
 function removeArg(name: string): void {
+  const opened = new Set(openedOptionalParams.value)
+  opened.delete(name)
+  openedOptionalParams.value = opened
   const next = argsRecord()
+  if (!(name in next)) return
   delete next[name]
   updateArgs(next)
 }
 function renameArg(oldName: string, raw: string): void {
+  if (isPluginFunction.value) return
   const name = raw.trim()
   if (!name || name === oldName) return
   const current = argsRecord()
@@ -466,6 +577,11 @@ function renameArg(oldName: string, raw: string): void {
 }
 function addArg(): void {
   const current = argsRecord()
+  if (isPluginFunction.value) {
+    const param = missingPluginParam.value
+    if (param) updateArgs({ ...current, [param.name]: { lit: param.default ?? emptyLitFor(param.type) } })
+    return
+  }
   const decls = targetOptions?.resolveParamsSync?.(props.step.fn)
   // 优先补 Schema 中尚未填写的参数；否则用 paramN 占位
   const missing = decls?.find((d) => !(d.name in current) && d.default === null)
@@ -489,6 +605,10 @@ function toValueArg(): void {
       return
     }
     const name = names[0]
+    if (name && firstParam.value && name !== firstParam.value.name) {
+      conversionNotice.value = `单值对应第一个参数 ${firstParam.value.name}，当前参数 ${name} 不能转换。`
+      return
+    }
     updateStep({ args: { kind: 'value', cell: name ? props.step.args.entries[name]! : { lit: '' } } })
     return
   }
@@ -508,9 +628,6 @@ function emptyLitFor(type: string): unknown {
     case 'integer': case 'number': return 0
     default: return ''
   }
-}
-function toggleAs(e: Event): void {
-  updateStep({ as: (e.target as HTMLInputElement).checked ? '' : null })
 }
 function setAs(v: string): void {
   updateStep({ as: v.trim() ? v.trim() : null })
@@ -556,7 +673,7 @@ function setAs(v: string): void {
 }
 .card-head:hover { background: var(--bg-3); }
 .drag-handle {
-  color: var(--text-2); cursor: grab; font-size: 11px; letter-spacing: -2px;
+  color: var(--text-2); cursor: grab; font-size: 12px; letter-spacing: -2px;
   user-select: none; touch-action: none;
 }
 .drag-handle:active { cursor: grabbing; }
@@ -566,26 +683,26 @@ function setAs(v: string): void {
   background: var(--bg-3); color: var(--accent); font-size: 12px; flex: none;
 }
 .kind-name { font-weight: 600; font-size: 13px; white-space: nowrap; }
-.step-no { color: var(--text-2); font-size: 11px; font-family: var(--mono); white-space: nowrap; }
+.step-no { color: var(--text-2); font-size: 12px; font-family: var(--mono); white-space: nowrap; }
 .summary {
   color: var(--text-1); font-size: 12px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
 }
 .err-badge {
-  background: var(--danger); color: #fff; font-size: 10px; line-height: 1;
-  border-radius: 8px; padding: 3px 6px; flex: none; cursor: help;
+  background: var(--danger); color: #fff; font-size: 12px; line-height: 1;
+  border-radius: var(--radius-sm); padding: 3px 6px; flex: none; cursor: help;
 }
 .head-actions { display: inline-flex; gap: 3px; flex: none; }
 .mini-btn {
   border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
-  border-radius: 4px; font-size: 11px; padding: 2px 6px; cursor: pointer; line-height: 1.3;
+  border-radius: 4px; font-size: 12px; padding: 2px 6px; cursor: pointer; line-height: 1.3;
 }
 .mini-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 .mini-btn:disabled { opacity: .35; cursor: not-allowed; }
 .mini-btn.danger:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
 .mini-btn.add { color: var(--accent-2); }
 .mini-btn.test-from { color: var(--accent); }
-.mini-btn.test-from:hover { background: var(--accent); color: #06251c; }
+.mini-btn.test-from:hover { background: var(--accent); color: #202015; }
 
 .card-body { padding: 4px 10px 10px 32px; display: flex; flex-direction: column; gap: 4px; }
 .field-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -594,8 +711,17 @@ function setAs(v: string): void {
 .field-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-1); cursor: pointer; }
 .field-hint { font-size: 12px; color: var(--text-2); }
 .field-hint.warn { color: var(--warn); }
-.cell-err-msg { font-size: 11px; color: var(--danger); }
-.arg-row { display: flex; align-items: center; gap: 6px; }
+.cell-err-msg { font-size: 12px; color: var(--danger); }
+.arg-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; max-width: 100%; }
+.arg-row :deep(.cell-editor) { flex-wrap: wrap; max-width: 100%; }
+.arg-row :deep(.cell-mode), .arg-row :deep(.cell-tool) { flex-shrink: 0; white-space: nowrap; }
+.param-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 8px; max-width: 100%; }
+.param-button { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-2); color: var(--text-2); font-size: 12px; cursor: pointer; }
+.param-button:hover, .param-button:focus-visible { border-color: var(--accent); color: var(--text-0); }
+.param-button.active { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg-1)); }
+.param-button.needs-value { color: var(--warn); border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--bg-1)); }
+.param-default { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; font-size: 12px; }
+.arg-name { min-width: 72px; color: var(--text-1); font-size: 12px; }
 .arg-actions { display: flex; gap: 6px; }
 .cell-input.num { width: 74px; }
 .target-select {
@@ -606,4 +732,5 @@ function setAs(v: string): void {
 .target-select:focus { outline: none; border-color: var(--accent); }
 .target-select option { background: var(--bg-1); color: var(--text-0); }
 .mono { font-family: var(--mono); }
+.step-card{border:1px solid var(--border);border-left:1px solid var(--border);border-radius:3px;background:var(--bg-2);overflow:visible}.step-card.expanded{background:var(--bg-3)}.card-head{background:transparent;min-height:39px;padding:5px 7px;gap:7px;align-items:center}.step-no{order:-1;display:grid;place-items:center;width:23px;height:23px;flex:0 0 23px;position:static;border:1px solid var(--control-border);border-radius:2px;font-size:12px;color:var(--text-0);align-self:center;margin:0}.kind-icon{display:none}.kind-name,.summary{font-size:13px}.head-actions{gap:2px}.head-actions .mini-btn{width:25px;height:25px;min-width:25px;padding:3px;display:inline-flex;align-items:center;justify-content:center;border-color:transparent;background:transparent}.head-actions .mini-btn:hover{border-color:var(--control-border);background:var(--bg-2)}.card-body{background:transparent;border:0;padding:4px 10px 10px 37px;gap:8px}.field-row{gap:6px}.field-label{min-width:42px}.field-row.col{align-items:stretch}.arg-row{width:100%;margin:3px 0;gap:5px}.arg-row :deep(.cell-editor){flex:1;min-width:0}.arg-name{min-width:65px;font-size:12px}.required-dot::after{content:"*";color:var(--accent)}.optional-params{width:100%;padding-top:5px;font-size:12px}.optional-params summary{color:var(--text-1);cursor:pointer;padding:4px 0}.param-buttons{gap:4px;margin:4px 0}.param-button{border-radius:3px;padding:3px 6px}.cell-input,.target-select{min-height:28px;font-size:13px;background:var(--field);border-color:var(--control-border)}.target-select{max-width:280px}.field-hint{font-size:12px}.field-row>.field-hint{flex-basis:100%;padding-left:48px}
 </style>

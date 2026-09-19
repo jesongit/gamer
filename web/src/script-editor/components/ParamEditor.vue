@@ -312,7 +312,7 @@ defineExpose({ addParam })
 .pe-hint { font-size: 12px; color: var(--text-2); padding: 4px 0; }
 .pe-hint.warn { color: var(--warn); }
 .pe-err-badge {
-  flex: none; font-size: 11px; color: var(--danger);
+  flex: none; font-size: 12px; color: var(--danger);
   border: 1px solid var(--danger); border-radius: 4px; padding: 0 5px;
 }
 .param-row {
@@ -323,7 +323,7 @@ defineExpose({ addParam })
 .row-main { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .row-default { display: flex; align-items: center; gap: 6px; padding-left: 4px; }
 .row-actions { display: inline-flex; gap: 3px; margin-left: auto; }
-.row-err-msg { font-size: 11px; color: var(--danger); }
+.row-err-msg { font-size: 12px; color: var(--danger); }
 .field-label { font-size: 12px; color: var(--text-2); min-width: 44px; }
 .field-check { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-1); cursor: pointer; }
 .cell-input {
@@ -337,7 +337,7 @@ defineExpose({ addParam })
 .cell-input.grow { flex: 1; min-width: 120px; }
 .mini-btn {
   border: 1px solid var(--border); background: var(--bg-2); color: var(--text-1);
-  border-radius: 4px; font-size: 11px; padding: 2px 6px; cursor: pointer;
+  border-radius: 4px; font-size: 12px; padding: 2px 6px; cursor: pointer;
 }
 .mini-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
 .mini-btn:disabled { opacity: .35; cursor: not-allowed; }

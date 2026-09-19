@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest'
+const { dialogDecision } = vi.hoisted(() => ({ dialogDecision: vi.fn() }))
+vi.mock('./components/ui/useConfirmDialog', () => ({ useConfirmDialog: () => Object.assign(dialogDecision, { cancel: vi.fn() }) }))
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -144,7 +146,7 @@ async function mountView(routes) {
 
 async function openEdit(wrapper, rowIndex = 0) {
   const row = wrapper.findAll('tbody tr')[rowIndex]
-  await row.findAll('button').find(b => b.text().includes('✎')).trigger('click')
+  await row.findAll('button').find(b => b.attributes('aria-label') === '编辑任务').trigger('click')
   await flushPromises()
 }
 
@@ -221,13 +223,13 @@ describe('行内动作：挂起 / 取消调度 / 删除 / 启停 / 测试', () =
     const routes = baseRoutes()
     routes.push({ method: 'POST', url: '/api/tasks/t1/cancel', body: TASKS[0] })
     const { wrapper, calls } = await mountView(routes)
-    vi.stubGlobal('confirm', () => true)
+    dialogDecision.mockResolvedValue(true)
     const row = wrapper.findAll('tbody tr')[0]
     await row.findAll('button').find(b => b.attributes('title')?.includes('取消调度')).trigger('click')
     await flushPromises()
     expect(calls.some(c => c.method === 'POST' && c.url === '/api/tasks/t1/cancel')).toBe(true)
 
-    vi.stubGlobal('confirm', () => false)
+    dialogDecision.mockResolvedValue(false)
     await row.findAll('button').find(b => b.attributes('title')?.includes('取消调度')).trigger('click')
     await flushPromises()
     expect(calls.filter(c => c.method === 'POST' && c.url === '/api/tasks/t1/cancel')).toHaveLength(1)
@@ -237,14 +239,14 @@ describe('行内动作：挂起 / 取消调度 / 删除 / 启停 / 测试', () =
     const routes = baseRoutes()
     routes.push({ method: 'DELETE', url: '/api/tasks/t1', body: {} })
     const { wrapper, calls } = await mountView(routes)
-    vi.stubGlobal('confirm', () => true)
+    dialogDecision.mockResolvedValue(true)
     const row = wrapper.findAll('tbody tr')[0]
     await row.findAll('button').find(b => b.attributes('title')?.includes('删除任务')).trigger('click')
     await flushPromises()
     expect(calls.some(c => c.method === 'DELETE' && c.url === '/api/tasks/t1')).toBe(true)
     expect(wrapper.findAll('tbody tr')[0].text()).toContain('挂机')
 
-    vi.stubGlobal('confirm', () => false)
+    dialogDecision.mockResolvedValue(false)
     await row.findAll('button').find(b => b.attributes('title')?.includes('删除任务')).trigger('click')
     await flushPromises()
     expect(calls.filter(c => c.method === 'DELETE')).toHaveLength(1)

@@ -1,47 +1,13 @@
 <template>
   <div class="market-view">
-    <!-- 插件市场（plan §20）：搜索/安装/升级/卸载/能力查看全部由插件中心承载，
-         本页保留入口与已装插件清单（只读概览，管理动作不在此重复）。
-         主导航「市场」为下拉二级菜单，section 决定渲染哪个分区。 -->
-    <section v-if="section === 'plugin'" class="market-section">
+    <section class="market-section" aria-label="配置市场">
       <div class="market-section-head">
-        <div>
-          <h3>插件市场</h3>
-          <p>搜索、安装、升级、卸载插件与查看插件能力，统一在插件中心完成。</p>
-        </div>
-        <div class="market-head-actions">
-          <button class="btn btn-sm" :disabled="extensionsLoading" @click="loadExtensions">刷新清单</button>
-          <button type="button" class="btn btn-primary" @click="centerOpen = true">打开插件市场</button>
-        </div>
+        <h3>发现配置 <span class="market-hint">{{ remotePackages.length }} 个</span></h3>
+        <div class="market-head-actions"><button class="btn btn-sm" :disabled="remoteLoading" @click="loadRemoteRegistry">刷新</button></div>
       </div>
-      <p v-if="extensionsError" class="market-error">已装插件读取失败：{{ extensionsError }}</p>
-      <div v-else-if="extensions.length" class="market-ext-list">
-        <div v-for="ext in extensions" :key="ext.id" class="market-ext-item">
-          <span class="market-ext-name">{{ ext.name || ext.id }}</span>
-          <span class="mono">{{ ext.id }}</span>
-          <span class="mono">v{{ ext.active_version || ext.version || '?' }}</span>
-          <span class="market-state" :class="ext.execution?.kind === 'builtin' ? 'warn' : ''">{{ extExecutionLabel(ext) }}</span>
-          <span class="market-state" :class="extStateClass(ext.state)">{{ extStateLabel(ext.state) }}</span>
-        </div>
-      </div>
-      <p v-else class="market-hint">尚未安装任何插件。</p>
-    </section>
-
-    <!-- Package 市场（plan §21）：远端源（registry.json packages 段）+ 本地已装清单；
-         本地文件导入仍走右侧 Package 栏「导入」 -->
-    <section v-else-if="section === 'package'" class="market-section">
-      <div class="market-section-head">
-        <div>
-          <h3>配置市场</h3>
-          <p>远端源来自静态 registry.json 的 packages 段；安装 = 下载归档并导入本地配置。</p>
-        </div>
-        <button class="btn btn-sm" :disabled="remoteLoading" @click="loadRemoteRegistry">刷新远端源</button>
-      </div>
-
-      <div class="market-subhead">远端源</div>
       <p v-if="remoteLoading" class="market-hint">正在读取远端源…</p>
-      <p v-else-if="remoteError" class="market-error">远端源读取失败：{{ remoteError }}</p>
-      <p v-else-if="!remotePackages.length" class="market-hint">远端源暂无配置。</p>
+      <p v-else-if="remoteError" class="market-error">配置市场读取失败：{{ remoteError }}</p>
+      <p v-else-if="!remotePackages.length" class="market-hint">市场暂无可用配置包。</p>
       <div v-else class="market-remote-list">
         <article v-for="entry in remotePackages" :key="entry.id" class="market-remote-card">
           <div class="market-remote-main">
@@ -52,10 +18,10 @@
             </div>
             <div class="mono market-remote-id">{{ entry.id }}</div>
             <div class="market-remote-facts">
-              <span>Android Targets：{{ formatList(entry.android_targets) }}</span>
-              <span>Required Plugins：{{ formatList(entry.required_plugins) }}</span>
-              <span v-if="hasList(entry.optional_plugins)">Optional Plugins：{{ formatList(entry.optional_plugins) }}</span>
-              <span>Author：{{ entry.author || entry.publisher || '未声明' }}</span>
+              <span>适用应用：{{ formatList(entry.android_targets) }}</span>
+              <span>必需插件：{{ formatList(entry.required_plugins) }}</span>
+              <span v-if="hasList(entry.optional_plugins)">可选插件：{{ formatList(entry.optional_plugins) }}</span>
+              <span>作者：{{ entry.author || entry.publisher || '未声明' }}</span>
             </div>
           </div>
           <div class="market-remote-actions">
@@ -69,76 +35,23 @@
         </article>
       </div>
 
-      <div class="market-subhead">本地已装</div>
-      <div v-if="packages.length" class="market-pkg-list">
-        <div v-for="p in packages" :key="p.id" class="market-pkg-item">
-          <span class="mono">{{ p.id }}</span>
-          <span class="market-pkg-name">{{ p.name || '' }}</span>
-          <span class="market-pkg-ver mono">v{{ p.version }}</span>
-        </div>
-      </div>
-      <p v-else class="market-hint">尚未安装任何配置。</p>
     </section>
-    <PluginCenter :open="centerOpen" @close="centerOpen = false" @changed="emit('extensions-changed')" />
   </div>
 </template>
 
 <script setup>
-// 市场导航（plan §19/§30）：插件市场复用 PluginCenter（安装/升级/卸载/能力查看）；
-// Package 市场展示本地已装包清单 + 远端源（web/public/registry.json 的 packages
-// 段，静态文件相对路径裸 fetch，404/缺段 = 无远端源）。远端包安装 = fetch
-// download_url 字节 → api.importPackageArchive（X-Expected-Sha256 校验），409 =
-// 已存在 → confirm 覆盖后 overwrite 重试（与 usePackageContext 覆盖语义一致）。
-import { computed, onMounted, ref } from 'vue'
-import PluginCenter from './plugin-center/PluginCenter.vue'
+const confirmDialog = useConfirmDialog()
+// 两类市场直接展示可安装内容；本地管理由各自主导航页面承载。
+import { useConfirmDialog } from '../components/ui/useConfirmDialog'
+import { computed, onMounted, ref, inject } from 'vue'
+import { OPERATION_FEEDBACK_KEY, operationReporter } from './operation-feedback'
 import { api } from '../api'
 import { useToast } from '../store'
 import { loadPackages, packageStore, refreshPackages } from '../package-store'
 
-const emit = defineEmits(['extensions-changed'])
-// section：'plugin' = 插件市场 / 'package' = 配置市场（主导航「市场」下拉二级菜单选定）
-defineProps({
-  section: { type: String, default: 'plugin' },
-})
 const toast = useToast()
-const centerOpen = ref(false)
+const beginReport = operationReporter(inject(OPERATION_FEEDBACK_KEY, null), '', toast)
 const packages = computed(() => packageStore.packages)
-
-// ---------- 已装插件清单（GET /api/extensions；启停/卸载等动作归 PluginCenter） ----------
-const extensions = ref([])
-const extensionsLoading = ref(false)
-const extensionsError = ref('')
-
-async function loadExtensions() {
-  if (extensionsLoading.value) return
-  extensionsLoading.value = true
-  extensionsError.value = ''
-  try {
-    const rep = await api.listExtensions()
-    extensions.value = Array.isArray(rep?.extensions) ? rep.extensions : []
-  } catch (e) {
-    extensionsError.value = e?.message || '请重试'
-  } finally {
-    extensionsLoading.value = false
-  }
-}
-
-const EXT_STATES = {
-  installed: { label: '已安装', cls: '' },
-  enabled: { label: '已启用', cls: 'ok' },
-  running: { label: '运行中', cls: 'run' },
-  disabled: { label: '已停用', cls: 'warn' },
-  failed: { label: '失败', cls: 'err' },
-}
-function extStateLabel(state) { return EXT_STATES[state]?.label || state || '未知' }
-function extStateClass(state) { return EXT_STATES[state]?.cls || '' }
-// 执行形态（Phase 1 契约）：服务端 snapshot 带 execution 时如实展示（builtin =
-// 宿主预置，需要 Gamer 宿主支持）；缺失（旧快照）按 WASM 展示，不阻塞列表。
-function extExecutionLabel(ext) {
-  return ext.execution?.kind === 'builtin'
-    ? (ext.execution?.host_version ? `宿主预置 · ${ext.execution.host_version}` : '宿主预置')
-    : 'WASM 插件'
-}
 
 // ---------- 远端 Package 源（registry.json 相对路径裸 fetch；禁改 registry.json 本身） ----------
 const REMOTE_REGISTRY_URL = 'registry.json'
@@ -196,6 +109,7 @@ function resolveRemoteUrl(u) {
 }
 
 async function installRemotePackage(entry) {
+  const toast = beginReport()
   if (installBusyId.value || !entry?.download_url) return
   installBusyId.value = entry.id
   try {
@@ -210,7 +124,7 @@ async function installRemotePackage(entry) {
       if (e?.status !== 409) throw e
       const existing = e?.data?.existing
       const detail = existing?.version ? `（当前 v${existing.version}）` : ''
-      if (!window.confirm(`配置 ${entry.id} 已存在${detail}，覆盖安装将替换该配置全部数据（含本地修改），继续？`)) return
+      if (!await confirmDialog(`配置 ${entry.id} 已存在${detail}，覆盖安装将替换该配置全部数据（含本地修改）。`, { title: '覆盖配置包', confirmText: '覆盖安装', danger: true })) return
       await api.importPackageArchive(bytes, { expectedSha256, overwrite: true })
     }
     toast(`配置已安装：${entry.id}@${entry.version || '?'}`, 'success')
@@ -222,53 +136,18 @@ async function installRemotePackage(entry) {
   }
 }
 
-onMounted(() => {
-  loadPackages()
-  loadExtensions()
-  loadRemoteRegistry()
-})
+onMounted(() => { loadPackages(); loadRemoteRegistry() })
 </script>
 
 <style scoped>
-.market-view { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:12px; padding:4px; }
-.market-section { border:1px solid var(--border); border-radius:var(--radius); background:var(--bg-2); padding:14px; display:flex; flex-direction:column; gap:8px; }
-.market-section-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
-.market-section-head h3 { margin:0; font-size:14px; }
-.market-section-head p { margin:2px 0 0; font-size:12px; color:var(--text-2); }
-.market-head-actions { display:flex; gap:8px; flex-shrink:0; }
-.market-hint { margin:0; font-size:12px; color:var(--text-2); }
-.market-error { margin:0; font-size:12px; color:var(--danger); }
-.market-subhead { margin-top:4px; font-size:11px; color:var(--text-2); letter-spacing:.04em; border-bottom:1px dashed var(--border); padding-bottom:4px; }
-
-/* 已装插件清单 */
-.market-ext-list { display:flex; flex-direction:column; gap:4px; }
-.market-ext-item { display:flex; gap:10px; align-items:baseline; font-size:12px; border-top:1px solid var(--border); padding-top:4px; }
-.market-ext-item .mono { font-size:11px; color:var(--text-2); }
-.market-ext-name { font-size:12px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-
-/* 状态徽章（插件 state / 已装包标记共用） */
-.market-state { font-size:10px; line-height:16px; padding:0 6px; border:1px solid var(--border); border-radius:8px; color:var(--text-2); flex-shrink:0; }
-.market-state.ok { color:var(--ok); border-color:rgba(34,197,94,.4); }
-.market-state.run { color:var(--accent-2); border-color:rgba(56,189,248,.4); }
-.market-state.warn { color:var(--warn); border-color:rgba(251,191,36,.4); }
-.market-state.err { color:var(--danger); border-color:rgba(248,113,113,.4); }
-
-/* 远端 Package 卡片（plan §21：Name/ID/Version/Android Targets/Required Plugins/Author） */
-.market-remote-list { display:flex; flex-direction:column; gap:8px; }
-.market-remote-card { display:flex; justify-content:space-between; gap:12px; padding:10px 12px; background:var(--bg-1); border:1px solid var(--border); border-radius:var(--radius-sm); }
-.market-remote-main { min-width:0; flex:1; display:flex; flex-direction:column; gap:4px; }
-.market-remote-title { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; }
-.market-remote-title strong { font-size:13px; }
-.market-remote-title .mono { font-size:11px; color:var(--text-2); }
-.market-remote-id { font-size:11px; color:var(--accent-2); word-break:break-all; }
-.market-remote-facts { display:flex; flex-wrap:wrap; gap:2px 14px; font-size:11px; color:var(--text-2); }
-.market-remote-actions { display:flex; align-items:center; flex-shrink:0; }
-
-/* 本地已装清单 */
-.market-pkg-list { display:flex; flex-direction:column; gap:4px; }
-.market-pkg-item { display:flex; gap:10px; align-items:baseline; font-size:12px; border-top:1px solid var(--border); padding-top:4px; }
-.market-pkg-name { color:var(--text-2); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-@media (max-width: 640px) {
-  .market-remote-card { flex-direction:column; }
-}
+.market-section { display:flex; flex-direction:column; gap:10px; }
+.market-section-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.market-section-head h3 { margin:0; font-size:13px; font-weight:600; }.market-section-head h3 span { margin-left:10px; font-weight:400; }.market-head-actions { display:flex; gap:6px; }
+.market-hint { font-size:12px; color:var(--text-2); }.market-error { font-size:12px; color:var(--danger); }
+.market-remote-list { border:1px solid var(--border); border-radius:3px; overflow:hidden; }
+.market-remote-card { display:flex; justify-content:space-between; align-items:center; gap:24px; padding:14px 16px; background:var(--bg-1); border-bottom:1px solid color-mix(in srgb,var(--border) 65%,transparent); }.market-remote-card:last-child { border-bottom:0; }.market-remote-card:hover { background:color-mix(in srgb,var(--bg-2) 45%,var(--bg-1)); }
+.market-remote-main { min-width:0; flex:1; }.market-remote-title { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }.market-remote-title strong { font-size:14px; font-weight:600; }.market-remote-title .mono,.market-remote-id { font-size:12px; color:var(--text-2); overflow-wrap:anywhere; }.market-remote-id { margin-top:5px; }.market-state { font-size:12px; color:var(--ok); }
+.market-remote-facts { display:flex; flex-wrap:wrap; gap:4px 18px; font-size:12px; line-height:1.6; color:var(--text-1); overflow-wrap:anywhere; margin-top:8px; }
+.market-remote-actions { flex-shrink:0; }.market-remote-actions .btn { min-width:80px; justify-content:center; }
+@container (max-width:600px) { .market-remote-card { flex-wrap:wrap; gap:12px; }.market-remote-main { flex-basis:100%; }.market-remote-actions { margin-left:auto; } }
 </style>

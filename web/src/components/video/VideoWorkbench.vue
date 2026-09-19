@@ -14,7 +14,7 @@
     </nav>
 
     <div v-if="!packageId" class="zone-error" role="alert" data-testid="package-missing-banner">
-      没有当前 Package：制作项目保存在 Package 数据上下文中，请先在顶部 Package 条选择或新建一个 Package
+      请先在投屏上方选择或新建配置包，以保存视频项目
     </div>
 
     <template v-if="activeTab === 'library'">
@@ -164,6 +164,7 @@
 </template>
 
 <script setup>
+import { useOperationStatus } from '../ui/useOperationStatus'
 // 视频工作台宿主（gamer.video core 面板，Phase 6 重组）：
 // - 子导航「素材库 | 项目 | 草稿」——按真实职责拆分，不新增 Core 永久页签；
 // - 项目 = Package 资源（projects/<id>.json），乐观并发保存；损坏项目可诊断；
@@ -247,6 +248,11 @@ const pendingMediaRefSync = ref(null)
 const projectEditRevision = ref(0)
 const pendingProjectSwitch = ref(null)
 const pendingPackageSwitch = ref(null)
+useOperationStatus(() => {
+  if (activeTab.value !== 'projects') return undefined
+  const error = staleSaveError.value || mediaRefSyncError.value
+  return { text: error || (saving.value ? '保存项目中…' : projectDirty.value ? '项目未保存' : mediaRefSyncing.value ? '项目已保存 · 引用同步中…' : projectSaveState.value === 'saved' ? '项目已保存' : ''), tone: error ? 'error' : '', actions: error ? [{ label: '详情', detail: error }, { label: '复制', copy: error }] : [] }
+})
 let projectContextRevision = 0
 let projectRequestSeq = 0
 let lastAssetEvent = null
@@ -308,6 +314,7 @@ async function refresh() {
 
 function onSelect(id) {
   selectedId.value = id
+  requestStageMedia(id)
 }
 
 function onRecordingFinished(meta) {
@@ -905,24 +912,27 @@ function normalizeId(value) {
 
 <style scoped>
 .video-workbench { display: flex; flex: 1; min-height: 0; flex-direction: column; gap: 12px; overflow: auto; }
+.video-workbench > * { flex-shrink: 0; }
 .workbench-tabs { display: flex; gap: 4px; flex-shrink: 0; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
-.tab-btn { border: 1px solid transparent; background: transparent; color: var(--text-2); font-size: 12px; padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+.tab-btn { border: 1px solid transparent; background: transparent; color: var(--text-2); font-size: 12px; padding: 4px 10px; border-radius: var(--radius-sm); cursor: pointer; }
 .tab-btn:hover { color: var(--text-0); }
 .tab-btn.active { border-color: var(--border); background: var(--bg-2); color: var(--text-0); font-weight: 700; }
-.zone-error { padding: 6px 8px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); background: rgba(248,113,113,.08); color: var(--danger); font-size: 11px; line-height: 1.6; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.zone-note { color: var(--accent-2); font-size: 11px; }
+.zone-error { padding: 6px 8px; border: 1px solid rgba(248,113,113,.35); border-radius: var(--radius-sm); background: rgba(248,113,113,.08); color: var(--danger); font-size: 12px; line-height: 1.6; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.zone-note { color: var(--accent-2); font-size: 12px; }
 .zone-empty { padding: 14px 10px; text-align: center; color: var(--text-2); font-size: 12px; }
 .project-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .project-title { color: var(--text-0); font-size: 13px; font-weight: 700; }
-.project-state { color: var(--text-2); font-size: 10px; }
+.project-state { color: var(--text-2); font-size: 12px; }
 .project-state.dirty { color: var(--warning, #d9a13c); }
-.project-ref-state { color: var(--accent-2); font-size: 10px; }
+.project-ref-state { color: var(--accent-2); font-size: 12px; }
 .switch-protect { padding: 7px 8px; border: 1px solid rgba(251,191,36,.45); border-radius: var(--radius-sm); background: rgba(251,191,36,.08); }
-.switch-protect-title { color: var(--warn); font-size: 11px; font-weight: 700; }
-.switch-protect-text { margin-top: 3px; color: var(--text-1); font-size: 10px; line-height: 1.45; }
+.switch-protect-title { color: var(--warn); font-size: 12px; font-weight: 700; }
+.switch-protect-text { margin-top: 3px; color: var(--text-1); font-size: 12px; line-height: 1.45; }
 .switch-protect-actions { display: flex; justify-content: flex-end; gap: 4px; margin-top: 6px; }
 .danger-btn { border-color: rgba(248,113,113,.45); color: var(--danger); }
-.mini-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 11px; padding: 2px 6px; }
+.mini-btn { border: 1px solid var(--border); border-radius: 4px; background: var(--bg-2); color: var(--text-1); cursor: pointer; font-size: 12px; padding: 2px 6px; }
 .mini-btn:hover { border-color: var(--accent); color: var(--accent); }
 .mono { font-family: var(--mono); }
+.video-workbench{gap:8px}.workbench-tabs{gap:4px;padding-bottom:6px;border-bottom:1px solid var(--border)}.tab-btn{height:28px;padding:3px 10px;font-size:13px;border-radius:3px}.mini-btn{min-height:28px;font-size:13px}.project-state,.project-ref-state{font-size:12px}
+.mini-btn{min-height:28px;padding:3px 7px;font-size:13px}.zone-head,.sub-head{gap:6px}.preview{max-height:200px;object-fit:contain;background:var(--bg-0)}.frame-shot{max-height:180px;object-fit:contain}.zone-title,.sub-title{font-size:13px}.input,.select{min-height:28px;font-size:13px}.cal-grid{gap:7px}.marker-row,.event-row{min-height:32px}
 </style>

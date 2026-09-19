@@ -1,7 +1,9 @@
+import { useConfirmDialog } from '../ui/useConfirmDialog'
 import { computed, reactive, ref, watch } from 'vue'
 import { api } from '../../api'
 import { appStartedDevices } from '../../store'
 import { formatScreenSummary } from '../../console/device-summary'
+import { operationReporter } from '../../workspace/operation-feedback'
 
 // 应用列表缓存：设备 id -> { list, ts }，应用列表不常变，避免每次重复读取
 const appCache = new Map()
@@ -15,6 +17,7 @@ const APP_CACHE_TTL = 5 * 60 * 1000
  */
 export function useConsoleDeviceManager({
   toast,
+  feedback,
   store,
   devicesData,
   consoleRuntime,
@@ -27,6 +30,8 @@ export function useConsoleDeviceManager({
   /** 控制消息发送（Console 的 DataChannel 链路，函数声明提升后传入） */
   sendControl,
 }) {
+  const confirmDialog = useConfirmDialog()
+  const beginReport = operationReporter(feedback, '', toast)
   // 设备设置弹窗开关（新增/编辑共用一个弹窗，由 mode 区分）
   const settingsOpen = ref(false)
 
@@ -52,6 +57,7 @@ export function useConsoleDeviceManager({
   const scanning = consoleRuntime.scanning
   // 配置保存进行中标志：防止重复提交
   const configApplying = ref(false)
+  const forceReconnecting = ref(false)
 
   // 已安装应用列表：读取后合并到右侧包名下拉；选择包名本身不触发任何启动动作。
   const appList = ref([])
@@ -198,6 +204,7 @@ export function useConsoleDeviceManager({
 
   /** 刷新：扫描 adb 自动入库新设备，再拉列表 */
   async function refreshDevices() {
+    const toast = beginReport()
     if (scanning.value) return
     const previousDeviceId = store.deviceId
     scanning.value = true
@@ -265,13 +272,14 @@ export function useConsoleDeviceManager({
     const wasConnected = connected.value
     const castingChanged = castingParamsChanged(d, payload)
     configApplying.value = true
+    const report = beginReport()
     try {
       await api.updateDevice(d.id, payload)
       await loadData()
       const nd = devices.value.find(x => x.id === d.id)
       if (nd) loadForm(nd)
       settingsOpen.value = false
-      toast(wasConnected && castingChanged ? '配置已保存，投屏参数变更，自动重连中…' : '配置已保存', 'success')
+      report(wasConnected && castingChanged ? '配置已保存，投屏参数变更，自动重连中…' : '配置已保存', 'success')
     } catch (e) {
       toast('保存失败：' + e.message, 'error')
     } finally {
@@ -281,9 +289,35 @@ export function useConsoleDeviceManager({
 
   /** 建立连接（配置统一在设置弹窗内显式保存，连接时无待保存修改） */
   async function flushAndConnect() {
+    if (forceReconnecting.value) return
     if (mode.value === 'add') return toast('请先完成或取消「新增设备」', 'warn')
     if (!store.deviceId) return
     connect(true)
+  }
+
+  async function forceReconnect() {
+    const toast = beginReport()
+    const d = current.value
+    if (!d || forceReconnecting.value) return
+    if (mode.value === 'add') return toast('请先完成或取消「新增设备」', 'warn')
+    if (!await confirmDialog(`强制重连「${d.name}」？将重启电脑端 ADB 服务，中断所有设备的投屏连接；虚拟屏上的应用可能退出。其他设备需重新连接。`, { title: '强制重连设备', confirmText: '强制重连', danger: true })) return
+    if (store.deviceId !== d.id) return
+    forceReconnecting.value = true
+    consoleRuntime.cancelReconnect()
+    cleanup(true)
+    errorMsg.value = ''
+    toast('正在重启 ADB 并重新连接设备…', 'info')
+    try {
+      await api.forceReconnectDevice(d.id)
+      await refreshDeviceStatus()
+      if (store.deviceId === d.id) await connect(true)
+    } catch (e) {
+      const message = '强制重连失败：' + e.message
+      if (store.deviceId === d.id) errorMsg.value = message
+      toast(message, 'error')
+    } finally {
+      forceReconnecting.value = false
+    }
   }
 
   /** 手动新增设备（POST 返回 id，创建后自动选中） */
@@ -311,7 +345,8 @@ export function useConsoleDeviceManager({
   async function removeDevice() {
     const d = current.value
     if (!d) return
-    if (!confirm(`确定删除设备 ${d.name}？`)) return
+    if (!await confirmDialog(`确定删除设备 ${d.name}？`, { title: '删除设备', confirmText: '删除', danger: true })) return
+    if (store.deviceId !== d.id) return
     try {
       await api.deleteDevice(d.id)
       if (connected.value || consoleRuntime.reconnectTimer.value) {
@@ -337,6 +372,7 @@ export function useConsoleDeviceManager({
    *  设备会话由服务端空闲低功耗统一管理：无 viewer 无脚本 5 分钟后
    *  虚拟屏拆会话/镜像关屏） */
   function disconnect() {
+    const toast = beginReport()
     if (!store.deviceId) return
     consoleRuntime.cancelReconnect()
     cleanup(true)
@@ -348,8 +384,9 @@ export function useConsoleDeviceManager({
    *  失败静默不打扰投屏主流程。force=true 供手动「读取」绕过 5 分钟缓存强制重读。 */
   async function loadApps({ silent = false, force = false } = {}) {
     if (appLoading.value) return
+    const report = silent ? () => {} : beginReport()
     if (!store.deviceId) {
-      if (!silent) toast('请先选择设备', 'warn')
+      report('请先选择设备', 'warn')
       return
     }
     const key = appCacheKey()
@@ -357,7 +394,7 @@ export function useConsoleDeviceManager({
     // 5 分钟内直接用缓存，应用列表不是经常变（手动读取可强制刷新）
     if (cached && Date.now() - cached.ts < APP_CACHE_TTL) {
       appList.value = cached.list
-      if (force) toast('应用列表已是最新', 'info')
+      if (force) report('应用列表已是最新', 'info')
       return
     }
     appLoading.value = true
@@ -365,9 +402,10 @@ export function useConsoleDeviceManager({
       const list = await api.listApps(store.deviceId)
       appList.value = list || []
       appCache.set(key, { list: appList.value, ts: Date.now() })
+      if (!silent) report(`已读取 ${appList.value.length} 个应用`, 'success')
     } catch (e) {
       appList.value = []
-      if (!silent) toast('读取应用失败：' + e.message, 'error')
+      report('读取应用失败：' + e.message, 'error')
     } finally {
       appLoading.value = false
     }
@@ -382,6 +420,7 @@ export function useConsoleDeviceManager({
    *  脚本/定时任务共用水/devices 同一 pkg。pkg 不属投屏会话参数，服务端保持
    *  会话不断线（api_update_device 仅投屏参数变更才踢 viewer 拆会话）。 */
   async function onAppSelect(e) {
+    const toast = beginReport()
     const pkg = (e?.target?.value || '').trim()
     const d = current.value
     if (!d || !pkg || pkg === (d.pkg || '').trim() || appSelectSaving.value) return
@@ -436,6 +475,7 @@ export function useConsoleDeviceManager({
   }
 
   function shot() {
+    const toast = beginReport()
     if (!connected.value) return toast('请先连接设备', 'error')
     api.screenshot(store.deviceId).then(dataUrl => {
       const a = document.createElement('a')
@@ -468,6 +508,7 @@ export function useConsoleDeviceManager({
   }
 
   async function clipboard() {
+    const toast = beginReport()
     if (!connected.value) return toast('请先连接设备', 'error')
     if (!navigator.clipboard?.readText) {
       return toast('当前浏览器不允许读取系统剪贴板，请使用 HTTPS 或 localhost', 'warn')
@@ -488,6 +529,7 @@ export function useConsoleDeviceManager({
   }
 
   function launchGame() {
+    const toast = beginReport()
     if (!connected.value) return toast('请先连接设备', 'error')
     // Android 运行目标 = 设备配置的应用包名（plan §27：启动应用属设备/投屏区域，
     // 与 Package 数据上下文无关）
@@ -503,6 +545,7 @@ export function useConsoleDeviceManager({
 
   /** 停止应用（plan §27）：am force-stop 设备配置的 Android 包名 */
   function stopGame() {
+    const toast = beginReport()
     if (!connected.value) return toast('请先连接设备', 'error')
     const androidPkg = (current.value?.pkg || '').trim()
     if (!androidPkg) return toast('未配置应用，请先在工具条「应用」下拉选择', 'warn')
@@ -518,6 +561,7 @@ export function useConsoleDeviceManager({
    *  大包上传 + 安装耗时较长，期间 apkInstalling 置位防重复；安装会改变应用列表，
    *  成功后失效该设备的应用列表缓存（下次「读取」强制重拉）。 */
   function installApk() {
+    const toast = beginReport()
     const d = current.value
     if (!d) return toast('请先选择设备', 'warn')
     if (apkInstalling.value) return
@@ -562,6 +606,7 @@ export function useConsoleDeviceManager({
     loadForm,
     startAdd, openSettings, cancelSettings, onDeviceSelect, refreshDeviceStatus, refreshDevices,
     saveSettings, flushAndConnect, addDevice, removeDevice, disconnect, loadApps,
+    forceReconnecting, forceReconnect,
     appSelectSaving, onAppSelect,
     // 工具条快捷动作与下拉菜单（更多/功能）
     key, toolbarMenuOpen, toolbarMenuStyle,
