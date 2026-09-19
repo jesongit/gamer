@@ -127,3 +127,6 @@ pub(crate) async fn run_yaml_program(
 
 #[cfg(feature = "wasm-runtime")]
 pub(crate) mod wasm_host;
+
+#[cfg(test)]
+mod resource_completion_tests;

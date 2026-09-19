@@ -42,68 +42,7 @@ pub(crate) const FN_CAPABILITY: &str = "__fn";
 /// 仅测试引用：与 tools/plugins/gamer.yaml/manifest.toml 的同步护栏 +
 /// 安装/卸载面板测试以此为打包 manifest 源。
 #[allow(dead_code)]
-pub(crate) const YAML_EXTENSION_MANIFEST_TOML: &str = r#"manifest_version = 2
-id = "gamer.yaml"
-version = "3.1.1"
-name = "自动化"
-description = "自动化：YAML V1 脚本、函数库与模板的制作与运行"
-entry = "plugin.wasm"
-permissions = ["device.read", "device.app", "input.tap", "input.swipe", "input.key", "input.text", "vision.match", "vision.color", "resource.read", "runtime.sleep", "log.write"]
-
-# 支持的 Android 应用（`*` = 通用；缺省/空同 `*`）。宿主不做硬门禁，
-# Console 壳按当前设备应用过滤插件入口。
-[targets.android]
-packages = ["*"]
-
-[host_api]
-device = "^1.0"
-vision = "^1.0"
-input = "^1.0"
-resource = "^1.0"
-runtime = "^1.0"
-log = "^1.0"
-
-# 独立 WASM guest：真实 plugin.wasm，按调用惰性实例化（无实例执行模型）。
-[execution]
-kind = "wasm"
-
-# runtime = "core"：面板由宿主 Vue 组件渲染，component 键由前端
-# core-component-registry 解释（console.scripts = 自动化编辑器、
-# console.functions = 函数库模式、console.templates = 模板框选）。
-
-[[ui.contributions]]
-panel_id = "automation"
-title = "自动化"
-icon = "⚙️"
-order = 25
-location = "console.right"
-runtime = "core"
-requires_device = true
-preferred_width = 440
-component = "console.scripts"
-
-[[ui.contributions]]
-panel_id = "functions"
-title = "函数"
-icon = "ƒ"
-order = 30
-location = "console.right"
-runtime = "core"
-requires_device = false
-preferred_width = 440
-component = "console.functions"
-
-[[ui.contributions]]
-panel_id = "templates"
-title = "模板"
-icon = "🖼️"
-order = 35
-location = "console.right"
-runtime = "core"
-requires_device = true
-preferred_width = 440
-component = "console.templates"
-"#;
+pub(crate) const YAML_EXTENSION_MANIFEST_TOML: &str = include_str!("../../../../tools/plugins/gamer.yaml/manifest.toml");
 
 /// 官方市场打包源（tools/plugins/gamer.yaml/manifest.toml）与本常量锁同步：
 /// build-plugins.ps1 以文件为准打包，漂移会导致线上包与运行时语义不一致。
@@ -393,16 +332,13 @@ impl NativeYamlHost {
                 let Some(param) = schema.first() else {
                     bail!("函数参数必须是命名参数对象，得到 {other}");
                 };
-                check_schema_type(param, &other)?;
-                let mut values = JsonMap::new();
-                values.insert(param.name.to_string(), other);
-                return Ok(BoundArgs { values });
+                JsonMap::from_iter([(param.name.to_string(), other)])
             }
         };
         let mut values = JsonMap::new();
         for param in schema {
             match args.get(param.name) {
-                Some(Value::Null) | None => {
+                None => {
                     if let Some(default) = &param.default {
                         values.insert(param.name.to_string(), default.clone());
                     } else if param.required {
@@ -988,6 +924,9 @@ pub(crate) mod tests {
     pub(crate) struct Trace {
         pub(crate) text: Mutex<Vec<String>>,
         pub(crate) taps: Mutex<Vec<[u32; 2]>>,
+        pub(crate) apps: Mutex<Vec<(String, String)>>,
+        pub(crate) swipes: Mutex<Vec<SwipeGesture>>,
+        pub(crate) keys: Mutex<Vec<KeyInput>>,
     }
 
     #[async_trait]
@@ -999,11 +938,19 @@ pub(crate) mod tests {
             Ok(DeviceHandle::new(id.clone()))
         }
 
-        async fn start_app(&self, _: &DeviceHandle, _: &AppId) -> CapabilityResult<()> {
+        async fn start_app(&self, _: &DeviceHandle, app: &AppId) -> CapabilityResult<()> {
+            self.apps
+                .lock()
+                .unwrap()
+                .push(("launch".into(), app.as_str().into()));
             Ok(())
         }
 
-        async fn stop_app(&self, _: &DeviceHandle, _: &AppId) -> CapabilityResult<()> {
+        async fn stop_app(&self, _: &DeviceHandle, app: &AppId) -> CapabilityResult<()> {
+            self.apps
+                .lock()
+                .unwrap()
+                .push(("stop_app".into(), app.as_str().into()));
             Ok(())
         }
     }
@@ -1015,11 +962,13 @@ pub(crate) mod tests {
             Ok(())
         }
 
-        async fn swipe(&self, _: &DeviceHandle, _: SwipeGesture) -> CapabilityResult<()> {
+        async fn swipe(&self, _: &DeviceHandle, gesture: SwipeGesture) -> CapabilityResult<()> {
+            self.swipes.lock().unwrap().push(gesture);
             Ok(())
         }
 
-        async fn key(&self, _: &DeviceHandle, _: KeyInput) -> CapabilityResult<()> {
+        async fn key(&self, _: &DeviceHandle, key: KeyInput) -> CapabilityResult<()> {
+            self.keys.lock().unwrap().push(key);
             Ok(())
         }
 
@@ -1096,7 +1045,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn stub_outcome() -> MatchOutcome {
+    pub(super) fn stub_outcome() -> MatchOutcome {
         MatchOutcome::Found(crate::capabilities::MatchBox {
             x: 10,
             y: 20,
@@ -1193,13 +1142,14 @@ pub(crate) mod tests {
             &self,
             event: crate::core::events::RuntimeEvent,
         ) -> futures_util::future::BoxFuture<'_, anyhow::Result<()>> {
-            let payload = serde_json::to_value(event.kind).unwrap_or(Value::Null);
+            let mut payload = serde_json::to_value(event.kind).unwrap_or(Value::Null);
+            if let Some(trace) = event.trace { payload["trace"] = trace; }
             self.events.lock().unwrap().push(payload);
             Box::pin(std::future::ready(Ok(())))
         }
     }
 
-    fn vision_host(
+    pub(super) fn vision_host(
         trace: Arc<Trace>,
         stub: &Arc<VisionStub>,
         logs: Arc<LogTrace>,
@@ -1455,6 +1405,8 @@ mod wasm_tests {
     use std::process::{Command, Output};
     use std::sync::OnceLock;
     use zip::write::SimpleFileOptions;
+
+    include!("acceptance_tests.rs");
 
     /// The YAML production registrar supplies the same execution-model
     /// declaration, but this focused guest test does not need a Scheduler.
@@ -1759,8 +1711,9 @@ runtime = "^1.0"
         let runtime = LazyYamlWasmtimeRuntime::new();
         let sink = tests::EventCollect::new();
         let trace = Arc::new(tests::Trace::default());
-        let program =
+        let mut program =
             wire("run:\n  - input_text: one\n  - repeat: 2\n    do:\n      - input_text: tick\n");
+        program["trace"] = json!({"run_id":"trace-qa", "entry":{"package_id":"qa","plugin_id":"gamer.yaml","path":"automations/main.yaml","version":"v1"}, "functions":{}});
         let _ = runtime
             .run(run_request(
                 program,
@@ -1775,6 +1728,11 @@ runtime = "^1.0"
             .iter()
             .filter_map(|event| event["path"].as_str().map(str::to_string))
             .collect();
+        for event in sink.of("step_start") {
+            assert_eq!(event["trace"]["run_id"], "trace-qa");
+            assert_eq!(event["trace"]["source"]["version"], "v1");
+            assert_eq!(event["trace"]["frame_id"], 0);
+        }
         assert_eq!(
             paths,
             vec!["run[0]", "run[1]", "run[1].do[0]", "run[1].do[0]"]

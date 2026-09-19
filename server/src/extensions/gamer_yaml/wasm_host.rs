@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -185,7 +185,10 @@ impl YamlHostState {
             let Ok(kind) = serde_json::from_str::<RuntimeEventKind>(&args_json) else {
                 return Ok("null".to_string());
             };
-            sink.emit(RuntimeEvent::new(context.device_id.clone(), kind))
+            let mut event = RuntimeEvent::new(context.device_id.clone(), kind);
+            event.trace = serde_json::from_str::<serde_json::Value>(&args_json).ok()
+                .and_then(|value| value.get("trace").filter(|trace| trace.is_object()).cloned());
+            sink.emit(event)
                 .await?;
             Ok("null".to_string())
         };
@@ -328,10 +331,13 @@ impl YamlWasmRuntime for LazyYamlWasmtimeRuntime {
             if let Some(component) = components.get(&digest).cloned() {
                 component
             } else {
+                let started = Instant::now();
+                tracing::info!("YAML 首次运行：正在编译解释器组件");
                 let component = Arc::new(
                     Component::new(self.engine(), &request.wasm)
                         .map_err(|error| anyhow::anyhow!("YAML 组件编译失败: {error}"))?,
                 );
+                tracing::info!(elapsed_ms = started.elapsed().as_millis() as u64, "YAML 解释器组件编译完成（后续运行复用缓存）");
                 components.insert(digest, component.clone());
                 component
             }

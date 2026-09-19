@@ -196,6 +196,7 @@ enum Entry {
     Script {
         script_id: String,
         script: Script,
+        source: Value,
     },
     Function {
         target_id: String,
@@ -221,9 +222,17 @@ pub(crate) fn compose_function_library(
     store: &crate::resources::PackageStore,
     package: &str,
 ) -> anyhow::Result<FunctionLibrary> {
+    compose_function_snapshot(store, package).map(|(library, _)| library)
+}
+
+fn compose_function_snapshot(
+    store: &crate::resources::PackageStore,
+    package: &str,
+) -> anyhow::Result<(FunctionLibrary, JsonMap<String, Value>)> {
     let native = native_names();
     let files = store.list(package, YAML_EXTENSION_ID, "automations")?;
     let mut registry: FunctionLibrary = Vec::new();
+    let mut sources = JsonMap::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for file in files {
         let Some(rel) = file.path.strip_prefix("automations/") else {
@@ -255,10 +264,12 @@ pub(crate) fn compose_function_library(
                     file.path
                 ));
             }
+            sources.insert(name.clone(), json!({ "package_id": package, "plugin_id": YAML_EXTENSION_ID,
+                "path": file.path, "version": file.version, "function": name }));
             registry.push((name, def));
         }
     }
-    Ok(registry)
+    Ok((registry, sources))
 }
 
 fn diagnostics_text(diagnostics: &[crate::extensions::gamer_yaml::syntax::Diagnostic]) -> String {
@@ -295,9 +306,9 @@ impl YamlRunAdapter {
     ) -> anyhow::Result<Vec<(String, String)>> {
         let scripts = self.scripts.clone();
         let target = spec.target.clone();
-        let (entry, library) =
-            tokio::task::spawn_blocking(move || -> anyhow::Result<(Entry, FunctionLibrary)> {
-                let library = compose_function_library(&scripts, target.pkg())?;
+        let (entry, library, sources) =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<(Entry, FunctionLibrary, JsonMap<String, Value>)> {
+                let (library, sources) = compose_function_snapshot(&scripts, target.pkg())?;
                 let entry = match &target {
                     RunTarget::Script { script_id, .. } => {
                         let rel = script_id.split_once('/').map(|(_, rel)| rel).unwrap_or("");
@@ -305,15 +316,18 @@ impl YamlRunAdapter {
                             !resources::is_function_library_path(rel),
                             "函数库文件不能作为自动化脚本运行: {script_id}（函数请以 <pkg>#<函数名> 寻址）"
                         );
-                        let content = resources::script_entry(&scripts, script_id)?
-                            .ok_or_else(|| anyhow::anyhow!("脚本不存在: {script_id}"))?
-                            .content;
+                        let resource = resources::script_entry(&scripts, script_id)?
+                            .ok_or_else(|| anyhow::anyhow!("脚本不存在: {script_id}"))?;
+                        let source = json!({ "package_id": target.pkg(), "plugin_id": YAML_EXTENSION_ID,
+                            "path": format!("automations/{rel}"), "version": resource.version() });
+                        let content = resource.content;
                         let script = parse_script(&content).map_err(|diagnostics| {
                             anyhow::anyhow!("脚本无效: {}", diagnostics_text(&diagnostics))
                         })?;
                         Entry::Script {
                             script_id: script_id.clone(),
                             script,
+                            source,
                         }
                     }
                     RunTarget::Function { pkg, function, .. } => {
@@ -342,7 +356,7 @@ impl YamlRunAdapter {
                         }
                     }
                 };
-                Ok((entry, library))
+                Ok((entry, library, sources))
             })
             .await
             .map_err(|error| anyhow::anyhow!("读取 YAML 资源失败: {error}"))??;
@@ -386,8 +400,8 @@ impl YamlRunAdapter {
             .upgrade()
             .ok_or_else(|| anyhow::anyhow!("YAML 扩展服务已关闭"))?;
 
-        let program = match &entry {
-            Entry::Script { script_id, script } => {
+        let mut program = match &entry {
+            Entry::Script { script_id, script, .. } => {
                 let bound =
                     bind_entry_args(script_id, &script.params, &spec.args, spec.strict_args)
                         .map_err(|diagnostics| {
@@ -400,11 +414,15 @@ impl YamlRunAdapter {
                 build_program(script, &library, initial, spec.target.start_index())
             }
             Entry::Function { name, def, .. } => {
-                let bound =
-                    bind_entry_args(&entry.resource(), &def.params, &spec.args, spec.strict_args)
-                        .map_err(|diagnostics| {
-                        anyhow::anyhow!("参数绑定失败: {}", script_errors_text(&diagnostics))
-                    })?;
+                let bound = bind_entry_args(
+                    &entry.resource(),
+                    &def.call_params(name),
+                    &spec.args,
+                    spec.strict_args,
+                )
+                .map_err(|diagnostics| {
+                    anyhow::anyhow!("参数绑定失败: {}", script_errors_text(&diagnostics))
+                })?;
                 let mut initial: JsonMap<String, Value> = def.vars.iter().cloned().collect();
                 for (name, value) in bound.resolved {
                     initial.insert(name, value);
@@ -412,6 +430,11 @@ impl YamlRunAdapter {
                 build_function_program(name, def, &library, initial, spec.target.start_index())
             }
         };
+        let source = match &entry {
+            Entry::Script { source, .. } => source.clone(),
+            Entry::Function { name, .. } => sources.get(name).cloned().unwrap_or(Value::Null),
+        };
+        program["trace"] = json!({ "run_id": spec.context.run_id.as_str(), "entry": source, "functions": sources });
         run_yaml_program(
             &extensions,
             program,

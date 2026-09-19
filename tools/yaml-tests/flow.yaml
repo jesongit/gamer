@@ -1,0 +1,49 @@
+name: YAML 流程与全部参数类型验收
+params:
+  anything: {type: any, default: null}
+  enabled: {type: boolean, default: false}
+  count: {type: integer, default: 2}
+  ratio: {type: number, default: 0.5}
+  text: {type: string, default: hello}
+  items: {type: list, default: [1, two, false]}
+  options: {type: object, default: {mode: safe, count: 0}}
+  delay: {type: duration, default: 0ms}
+  point: {type: point, default: [0.25, 0.75]}
+  image: {type: template, default: button.png}
+  button: {type: key, default: HOME}
+vars:
+  local_only: caller
+run:
+  - repeat: $count
+    do:
+      - log: cycle
+  - repeat: 0
+    do:
+      - log: unreachable
+  - if: $enabled
+    then:
+      - log: unreachable
+    else:
+      - log: disabled
+  - if: 0
+    then:
+      - log: zero-is-truthy
+  - if: null
+    then:
+      - log: unreachable
+  - nested_echo:
+      value: $options
+    as: echoed
+  - early_return: {}
+    as: early
+  - echo_value:
+      value:
+        point: $point
+        items: [$text, $enabled, $anything]
+        escaped: $$price
+    as: composite
+  - return:
+      echoed: $echoed
+      early: $early
+      composite: $composite
+      scope: $local_only

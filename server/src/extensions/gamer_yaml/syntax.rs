@@ -283,6 +283,30 @@ pub struct FunctionDef {
     pub run: Vec<SurfaceStep>,
 }
 
+impl FunctionDef {
+    /// 通用显示参数只在调用面补齐，不改写函数库声明或位置参数顺序。
+    pub fn call_params(&self, name: &str) -> Vec<ParamDecl> {
+        let mut params = self.params.clone();
+        if !params.iter().any(|param| param.name == "name") {
+            params.push(ParamDecl {
+                name: "name".into(),
+                ty: ParamType::String,
+                required: false,
+                default: Some(Value::String(self.display_name(name).to_string())),
+                desc: Some("可视化显示名称".into()),
+            });
+        }
+        params
+    }
+
+    fn display_name<'a>(&'a self, name: &'a str) -> &'a str {
+        self.description
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(name)
+    }
+}
+
 /// 函数库文件解析结果（保持文件内声明顺序；「第一个函数」缺省语义依赖它）。
 pub type FunctionLibrary = Vec<(String, FunctionDef)>;
 
@@ -331,8 +355,7 @@ fn yaml_to_diagnostic(error: serde_yaml::Error) -> Vec<Diagnostic> {
     )]
 }
 
-/// 标识符规则：小写字母/下划线开头，仅小写字母、数字、下划线（函数名、
-/// 参数名、变量名共用；禁点号保证 step path 无歧义）。
+/// 参数名、变量名：小写字母/下划线开头，仅小写字母、数字、下划线。
 pub fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -340,6 +363,18 @@ pub fn is_identifier(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// 函数名支持汉字（CJK 基本区、扩展 A）；禁止分隔符，保持入口和步骤路径无歧义。
+pub fn is_function_name(name: &str) -> bool {
+    let is_start = |c: char| {
+        c.is_ascii_lowercase()
+            || c == '_'
+            || matches!(c, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}')
+    };
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if is_start(c))
+        && chars.all(|c| is_start(c) || c.is_ascii_digit())
 }
 
 /// 控制流关键字，不能作为函数名。
@@ -652,12 +687,12 @@ fn parse_step(step: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnosti
             )),
         },
         (None, Some((name, value))) => {
-            if !is_identifier(&name) {
+            if !is_function_name(&name) {
                 return Err(one_diagnostic(
                     "yaml.name.invalid",
                     path,
                     format!(
-                        "函数名 {name:?} 非法——只允许小写字母、数字、下划线（如 tap、wait_find）"
+                        "函数名 {name:?} 非法——允许中文、小写字母、数字、下划线，不能以数字开头（如 tap、wait_find）"
                     ),
                 ));
             }
@@ -665,6 +700,20 @@ fn parse_step(step: &YamlValue, path: &str) -> Result<SurfaceStep, Vec<Diagnosti
                 YamlValue::Null => SurfaceExpr::Map(Vec::new()),
                 other => expr_from_yaml(other, &format!("{path}.{name}"))?,
             };
+            if let SurfaceExpr::Map(entries) = &args {
+                if let Some((_, value)) = entries.iter().find(|(key, _)| key == "name") {
+                    if !matches!(
+                        value,
+                        SurfaceExpr::Lit(Value::String(_)) | SurfaceExpr::Ref(_)
+                    ) {
+                        return Err(one_diagnostic(
+                            "yaml.args.type",
+                            path,
+                            "name 必须是字符串或变量引用",
+                        ));
+                    }
+                }
+            }
             Ok(SurfaceStep::Call {
                 name,
                 args,
@@ -954,11 +1003,11 @@ pub fn parse_function_library(source: &str) -> Result<FunctionLibrary, Vec<Diagn
                 "函数名必须是字符串",
             ));
         };
-        if !is_identifier(name) {
+        if !is_function_name(name) {
             return Err(one_diagnostic(
                 "yaml.name.invalid",
                 "functions",
-                format!("函数名 {name:?} 非法——只允许小写字母、数字、下划线（如 claim_daily）"),
+                format!("函数名 {name:?} 非法——允许中文、小写字母、数字、下划线，不能以数字开头（如 每日任务跳转、claim_daily）"),
             ));
         }
         if is_reserved(name) {
@@ -1146,17 +1195,60 @@ fn compact_json(value: &Value) -> String {
     }
 }
 
-fn step_desc(step: &SurfaceStep) -> String {
+fn step_desc(step: &SurfaceStep, functions: &FunctionLibrary) -> String {
     match step {
-        SurfaceStep::Call { name, args, .. } => format!("{name} {}", args.describe()),
+        SurfaceStep::Call { name, args, .. } => {
+            if let SurfaceExpr::Map(entries) = args {
+                if let Some((_, value)) = entries.iter().find(|(key, _)| key == "name") {
+                    return match value {
+                        SurfaceExpr::Lit(Value::String(text)) => text.clone(),
+                        other => other.describe(),
+                    };
+                }
+            }
+            functions
+                .iter()
+                .find(|(entry, _)| entry == name)
+                .map(|(_, def)| {
+                    def.call_params(name)
+                        .into_iter()
+                        .find(|p| p.name == "name")
+                        .and_then(|p| p.default)
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| def.display_name(name).to_string())
+                })
+                .or_else(|| {
+                    super::native_funcs::native_function(name).map(|f| f.display_name.to_string())
+                })
+                .unwrap_or_else(|| name.clone())
+        }
         SurfaceStep::If { cond, .. } => format!("如果 {}", cond.describe()),
         SurfaceStep::Repeat { times, .. } => format!("重复 {} 次", times.describe()),
         SurfaceStep::Return { value } => format!("返回 {}", value.describe()),
     }
 }
 
-fn wire_step(step: &SurfaceStep, path: &str) -> Value {
-    let desc = step_desc(step);
+fn wire_call_args(name: &str, args: &SurfaceExpr, functions: &FunctionLibrary) -> Value {
+    // 在求值之前区分命名参数与位置简写，否则 $hit.center 等对象引用会被误当成参数表。
+    if matches!(args, SurfaceExpr::Map(_) | SurfaceExpr::Lit(Value::Null)) {
+        return args.to_wire();
+    }
+    let first = functions
+        .iter()
+        .find(|(entry, _)| entry == name)
+        .and_then(|(_, def)| def.params.first().map(|param| param.name.as_str()))
+        .or_else(|| {
+            super::native_funcs::native_function(name)
+                .and_then(|function| function.params.first().map(|param| param.name))
+        });
+    match first {
+        Some(first) => json!({"expr": "map", "value": {first: args.to_wire()}}),
+        None => args.to_wire(),
+    }
+}
+
+fn wire_step(step: &SurfaceStep, path: &str, functions: &FunctionLibrary) -> Value {
+    let desc = step_desc(step, functions);
     let mut wire = serde_json::Map::new();
     wire.insert("path".into(), Value::String(path.to_string()));
     wire.insert("desc".into(), Value::String(desc));
@@ -1168,7 +1260,7 @@ fn wire_step(step: &SurfaceStep, path: &str) -> Value {
         } => {
             wire.insert("op".into(), Value::String("fn".into()));
             wire.insert("fn".into(), Value::String(name.clone()));
-            wire.insert("args".into(), args.to_wire());
+            wire.insert("args".into(), wire_call_args(name, args, functions));
             if let Some(save_as) = save_as {
                 wire.insert("as".into(), Value::String(save_as.clone()));
             }
@@ -1182,12 +1274,12 @@ fn wire_step(step: &SurfaceStep, path: &str) -> Value {
             wire.insert("cond".into(), cond.to_wire());
             wire.insert(
                 "then".into(),
-                Value::Array(wire_steps(then_steps, &format!("{path}.then"))),
+                Value::Array(wire_steps(then_steps, &format!("{path}.then"), functions)),
             );
             if !else_steps.is_empty() {
                 wire.insert(
                     "else".into(),
-                    Value::Array(wire_steps(else_steps, &format!("{path}.else"))),
+                    Value::Array(wire_steps(else_steps, &format!("{path}.else"), functions)),
                 );
             }
         }
@@ -1196,7 +1288,7 @@ fn wire_step(step: &SurfaceStep, path: &str) -> Value {
             wire.insert("times".into(), times.to_wire());
             wire.insert(
                 "do".into(),
-                Value::Array(wire_steps(body, &format!("{path}.do"))),
+                Value::Array(wire_steps(body, &format!("{path}.do"), functions)),
             );
         }
         SurfaceStep::Return { value } => {
@@ -1207,11 +1299,11 @@ fn wire_step(step: &SurfaceStep, path: &str) -> Value {
     Value::Object(wire)
 }
 
-fn wire_steps(steps: &[SurfaceStep], prefix: &str) -> Vec<Value> {
+fn wire_steps(steps: &[SurfaceStep], prefix: &str, functions: &FunctionLibrary) -> Vec<Value> {
     steps
         .iter()
         .enumerate()
-        .map(|(index, step)| wire_step(step, &format!("{prefix}[{index}]")))
+        .map(|(index, step)| wire_step(step, &format!("{prefix}[{index}]"), functions))
         .collect()
 }
 
@@ -1252,16 +1344,16 @@ pub fn build_program(
             (
                 name.clone(),
                 json!({
-                    "params": param_decls_wire(&def.params),
+                    "params": param_decls_wire(&def.call_params(name)),
                     "vars": vars_wire(&def.vars),
-                    "run": wire_steps(&def.run, &format!("{name}.run")),
+                    "run": wire_steps(&def.run, &format!("{name}.run"), functions),
                 }),
             )
         })
         .collect();
     json!({
         "vars": Value::Object(initial_vars),
-        "run": wire_steps(&script.run, "run"),
+        "run": wire_steps(&script.run, "run", functions),
         "functions": Value::Object(functions_wire),
         "start_index": start_index,
     })
@@ -1282,9 +1374,9 @@ pub fn build_function_program(
             (
                 entry_name.clone(),
                 json!({
-                    "params": param_decls_wire(&entry_def.params),
+                    "params": param_decls_wire(&entry_def.call_params(entry_name)),
                     "vars": vars_wire(&entry_def.vars),
-                    "run": wire_steps(&entry_def.run, &format!("{entry_name}.run")),
+                    "run": wire_steps(&entry_def.run, &format!("{entry_name}.run"), functions),
                 }),
             )
         })
@@ -1292,14 +1384,14 @@ pub fn build_function_program(
     functions_wire.insert(
         name.to_string(),
         json!({
-            "params": param_decls_wire(&def.params),
+            "params": param_decls_wire(&def.call_params(name)),
             "vars": vars_wire(&def.vars),
-            "run": wire_steps(&def.run, &format!("{name}.run")),
+            "run": wire_steps(&def.run, &format!("{name}.run"), functions),
         }),
     );
     json!({
         "vars": Value::Object(initial_vars),
-        "run": wire_steps(&def.run, &format!("{name}.run")),
+        "run": wire_steps(&def.run, &format!("{name}.run"), functions),
         "functions": Value::Object(functions_wire),
         "start_index": start_index,
     })
@@ -1320,21 +1412,23 @@ fn rewrite_args_template(
     new_short: &str,
     changed: &mut bool,
 ) {
-    if let SurfaceExpr::Map(entries) = args {
-        for (key, value) in entries.iter_mut() {
-            if key == "template" {
-                if let SurfaceExpr::Lit(Value::String(text)) = value {
-                    let matches_old = text == old_short
-                        || text == old_name
-                        || std::path::Path::new(text)
-                            .file_name()
-                            .is_some_and(|file| file.to_string_lossy() == old_name);
-                    if matches_old {
-                        *value = SurfaceExpr::Lit(Value::String(new_short.to_string()));
-                        *changed = true;
-                    }
-                }
-            }
+    let value = match args {
+        SurfaceExpr::Map(entries) => entries
+            .iter_mut()
+            .find(|(key, _)| key == "template")
+            .map(|(_, value)| value),
+        // 简写实参也属于 template 参数（例如 wait_find: button.png）。
+        value => Some(value),
+    };
+    if let Some(SurfaceExpr::Lit(Value::String(text))) = value {
+        if text == old_short
+            || text == old_name
+            || std::path::Path::new(text)
+                .file_name()
+                .is_some_and(|file| file.to_string_lossy() == old_name)
+        {
+            *text = new_short.to_string();
+            *changed = true;
         }
     }
 }
@@ -1701,6 +1795,39 @@ mod tests {
     }
 
     #[test]
+    fn call_names_roundtrip_and_package_defaults_execute() {
+        let library = parse_function_library("functions:\n  claim:\n    description: 领取奖励\n    params:\n      value: {type: string}\n    run:\n      - return: $name\n").unwrap();
+        assert_eq!(library[0].1.params.len(), 1, "通用参数不污染源码声明");
+        let source = "run:\n  - tap: {name: 点击登录, position: [0.5, 0.8]}\n  - sleep: 1s\n  - claim: {name: 每日领奖}\n    as: custom\n  - claim: 简写实参\n    as: default_name\n  - return: [$custom, $default_name]\n";
+        let script = parse_script(source).unwrap();
+        let serialized = serialize_script(&script);
+        assert!(serialized.contains("name: 点击登录"));
+        let wire = build_program(
+            &parse_script(&serialized).unwrap(),
+            &library,
+            Default::default(),
+            0,
+        );
+        assert_eq!(wire["run"][0]["desc"], "点击登录");
+        assert_eq!(wire["run"][1]["desc"], "等待");
+        assert_eq!(wire["run"][2]["desc"], "每日领奖");
+        assert_eq!(wire["run"][3]["desc"], "领取奖励");
+        assert_eq!(
+            wire["run"][3]["args"]["value"]["value"]["value"],
+            "简写实参"
+        );
+        let program: yaml_interp::Program = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            yaml_interp::run(&program, &NullHost, None).unwrap(),
+            json!(["每日领奖", "领取奖励"])
+        );
+        assert_eq!(
+            parse_script("run:\n  - log: {message: hi, name: 123}\n").unwrap_err()[0].code,
+            "yaml.args.type"
+        );
+    }
+
+    #[test]
     fn parses_plan_example_script() {
         let source = r#"
 name: 每日签到
@@ -1770,14 +1897,24 @@ run:
         let wire = build_program(&script, &Vec::new(), Default::default(), 0);
         assert_eq!(wire["run"][0]["op"], "fn");
         assert_eq!(wire["run"][0]["fn"], "tap");
-        assert_eq!(wire["run"][0]["args"]["expr"], "list");
-        assert_eq!(wire["run"][0]["args"]["value"][0]["value"], 0.5);
+        assert_eq!(wire["run"][0]["args"]["expr"], "map");
+        assert_eq!(wire["run"][0]["args"]["value"]["position"]["expr"], "list");
+        assert_eq!(
+            wire["run"][0]["args"]["value"]["position"]["value"][0]["value"],
+            0.5
+        );
         assert_eq!(wire["run"][0]["path"], "run[0]");
         assert_eq!(wire["run"][2]["as"], "button");
-        assert_eq!(wire["run"][3]["args"]["expr"], "ref");
-        assert_eq!(wire["run"][3]["args"]["path"], "button.center");
+        assert_eq!(wire["run"][3]["args"]["value"]["position"]["expr"], "ref");
+        assert_eq!(
+            wire["run"][3]["args"]["value"]["position"]["path"],
+            "button.center"
+        );
         // $$ 转义 → 字面量 $price
-        assert_eq!(wire["run"][4]["args"]["value"], "$price");
+        assert_eq!(
+            wire["run"][4]["args"]["value"]["message"]["value"],
+            "$price"
+        );
     }
 
     #[test]

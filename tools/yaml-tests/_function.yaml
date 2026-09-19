@@ -1,0 +1,37 @@
+functions:
+  每日任务跳转:
+    params:
+      value:
+        type: any
+        required: true
+    run:
+      - echo_value: $value
+        as: result
+      - return: $result
+  echo_value:
+    description: 传入任意值并返回，验证独立作用域和复合值
+    params:
+      value:
+        type: any
+        required: true
+    vars:
+      local_only: private
+    run:
+      - return: $value
+  nested_echo:
+    params:
+      value:
+        type: object
+        required: true
+    run:
+      - echo_value: $value
+        as: result
+      - return: $result
+  early_return:
+    run:
+      - repeat: 3
+        do:
+          - if: true
+            then:
+              - return: done
+      - log: unreachable

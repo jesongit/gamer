@@ -1,0 +1,566 @@
+[
+  {
+    "description": "点击相对坐标（0..1；可传 match 的 center）",
+    "name": "tap",
+    "params": [
+      {
+        "default": null,
+        "desc": "目标点 [x, y] 或 {x, y}",
+        "name": "position",
+        "required": true,
+        "type": "point"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "点击",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "从起点滑动到终点",
+    "name": "swipe",
+    "params": [
+      {
+        "default": null,
+        "desc": "起点",
+        "name": "from",
+        "required": true,
+        "type": "point"
+      },
+      {
+        "default": null,
+        "desc": "终点",
+        "name": "to",
+        "required": true,
+        "type": "point"
+      },
+      {
+        "default": "300ms",
+        "desc": "滑动时长",
+        "name": "duration",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "滑动",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "发送按键（HOME/BACK/…或数字 keycode）",
+    "name": "key",
+    "params": [
+      {
+        "default": null,
+        "desc": "按键名或 keycode",
+        "name": "key",
+        "required": true,
+        "type": "key"
+      },
+      {
+        "default": "press",
+        "desc": "press/down/up",
+        "name": "action",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "按键",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "向设备输入文本",
+    "name": "input_text",
+    "params": [
+      {
+        "default": null,
+        "desc": "文本内容",
+        "name": "text",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "输入文本",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "冷启动应用（缺省为设备配置的应用）",
+    "name": "launch",
+    "params": [
+      {
+        "default": null,
+        "desc": "Android 包名，缺省用设备配置",
+        "name": "package",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "启动应用",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "停止应用（缺省为设备配置的应用）",
+    "name": "stop_app",
+    "params": [
+      {
+        "default": null,
+        "desc": "Android 包名，缺省用设备配置",
+        "name": "package",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "停止应用",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "等待指定时长（取消可达）",
+    "name": "sleep",
+    "params": [
+      {
+        "default": null,
+        "desc": "如 500ms / 1.5s / 2min",
+        "name": "duration",
+        "required": true,
+        "type": "duration"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "等待",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "写运行日志（非字符串值自动转 JSON 文本）",
+    "name": "log",
+    "params": [
+      {
+        "default": null,
+        "desc": "日志内容",
+        "name": "message",
+        "required": true,
+        "type": "any"
+      },
+      {
+        "default": "info",
+        "desc": "info/debug/warn/error",
+        "name": "level",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "日志",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "null",
+    "source": "plugin"
+  },
+  {
+    "description": "单次模板匹配；未找到返回 null（等待轮询用 wait_find）",
+    "name": "find",
+    "params": [
+      {
+        "default": null,
+        "desc": "模板短名",
+        "name": "template",
+        "required": true,
+        "type": "template"
+      },
+      {
+        "default": 0.8,
+        "desc": "匹配阈值 0..1",
+        "name": "threshold",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "default": null,
+        "desc": "搜索区域 [x, y, w, h]（相对坐标）",
+        "name": "region",
+        "required": false,
+        "type": "list"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "查找模板",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "match?",
+    "source": "plugin"
+  },
+  {
+    "description": "等待模板出现；超时返回 null",
+    "name": "wait_find",
+    "params": [
+      {
+        "default": null,
+        "desc": "模板短名",
+        "name": "template",
+        "required": true,
+        "type": "template"
+      },
+      {
+        "default": 0.8,
+        "desc": "匹配阈值 0..1",
+        "name": "threshold",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "default": "3s",
+        "desc": "等待上限",
+        "name": "timeout",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": "250ms",
+        "desc": "轮询间隔",
+        "name": "interval",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": null,
+        "desc": "搜索区域 [x, y, w, h]（相对坐标）",
+        "name": "region",
+        "required": false,
+        "type": "list"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "等待模板出现",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "match?",
+    "source": "plugin"
+  },
+  {
+    "description": "查找模板并点击其中心（未找到不点击，返回 null）",
+    "name": "tap_template",
+    "params": [
+      {
+        "default": null,
+        "desc": "模板短名",
+        "name": "template",
+        "required": true,
+        "type": "template"
+      },
+      {
+        "default": 0.8,
+        "desc": "匹配阈值 0..1",
+        "name": "threshold",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "default": "3s",
+        "desc": "轮询上限；0 = 只试一次",
+        "name": "timeout",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": "100ms",
+        "desc": "轮询间隔",
+        "name": "interval",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": null,
+        "desc": "搜索区域 [x, y, w, h]（相对坐标）",
+        "name": "region",
+        "required": false,
+        "type": "list"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "点击模板",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "match?",
+    "source": "plugin"
+  },
+  {
+    "description": "等待模板消失；超时仍存在返回 false",
+    "name": "wait_disappear",
+    "params": [
+      {
+        "default": null,
+        "desc": "模板短名",
+        "name": "template",
+        "required": true,
+        "type": "template"
+      },
+      {
+        "default": 0.8,
+        "desc": "匹配阈值 0..1",
+        "name": "threshold",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "default": "3s",
+        "desc": "等待上限",
+        "name": "timeout",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": "250ms",
+        "desc": "轮询间隔",
+        "name": "interval",
+        "required": false,
+        "type": "duration"
+      },
+      {
+        "default": null,
+        "desc": "搜索区域 [x, y, w, h]（相对坐标）",
+        "name": "region",
+        "required": false,
+        "type": "list"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "等待模板消失",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "boolean",
+    "source": "plugin"
+  },
+  {
+    "description": "相等比较（数字跨整型/浮点，其余按值）",
+    "name": "eq",
+    "params": [
+      {
+        "default": null,
+        "desc": "左值",
+        "name": "a",
+        "required": true,
+        "type": "any"
+      },
+      {
+        "default": null,
+        "desc": "右值",
+        "name": "b",
+        "required": true,
+        "type": "any"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "等于",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "boolean",
+    "source": "plugin"
+  },
+  {
+    "description": "不等比较",
+    "name": "ne",
+    "params": [
+      {
+        "default": null,
+        "desc": "左值",
+        "name": "a",
+        "required": true,
+        "type": "any"
+      },
+      {
+        "default": null,
+        "desc": "右值",
+        "name": "b",
+        "required": true,
+        "type": "any"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "不等于",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "boolean",
+    "source": "plugin"
+  },
+  {
+    "description": "大于（仅数字）",
+    "name": "gt",
+    "params": [
+      {
+        "default": null,
+        "desc": "左值",
+        "name": "a",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "default": null,
+        "desc": "右值",
+        "name": "b",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "大于",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "boolean",
+    "source": "plugin"
+  },
+  {
+    "description": "大于等于（仅数字）",
+    "name": "ge",
+    "params": [
+      {
+        "default": null,
+        "desc": "左值",
+        "name": "a",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "default": null,
+        "desc": "右值",
+        "name": "b",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "大于等于",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "boolean",
+    "source": "plugin"
+  },
+  {
+    "description": "小于（仅数字）",
+    "name": "lt",
+    "params": [
+      {
+        "default": null,
+        "desc": "左值",
+        "name": "a",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "default": null,
+        "desc": "右值",
+        "name": "b",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "小于",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "boolean",
+    "source": "plugin"
+  },
+  {
+    "description": "小于等于（仅数字）",
+    "name": "le",
+    "params": [
+      {
+        "default": null,
+        "desc": "左值",
+        "name": "a",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "default": null,
+        "desc": "右值",
+        "name": "b",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": false,
+        "default": "小于等于",
+        "desc": "可视化显示名称"
+      }
+    ],
+    "returns": "boolean",
+    "source": "plugin"
+  }
+]

@@ -1,0 +1,49 @@
+name: YAML 全部 18 个内置函数验收（仅限测试设备）
+run:
+  - launch: {}
+  - tap: [0.25, 0.75]
+  - swipe:
+      from: [0.1, 0.9]
+      to: [0.9, 0.1]
+      duration: 1ms
+  - key: HOME
+  - input_text: yaml-acceptance
+  - sleep: 0ms
+  - log:
+      message: {status: ready, literal: $$price}
+      level: info
+  - find: button.png
+    as: first
+  - tap: $first.center
+  - wait_find:
+      template: button.png
+      timeout: 2s
+      interval: 50ms
+      region: [0, 0, 1, 1]
+    as: appeared
+  - tap_template: button.png
+    as: clicked
+  - wait_disappear:
+      template: button.png
+      timeout: 2s
+      interval: 50ms
+    as: gone
+  - eq: {a: 1, b: 1.0}
+    as: equal
+  - ne: {a: false, b: null}
+    as: unequal
+  - gt: {a: 3, b: 2}
+    as: greater
+  - ge: {a: 2, b: 2}
+    as: greater_equal
+  - lt: {a: 1, b: 2}
+    as: less
+  - le: {a: 2, b: 2}
+    as: less_equal
+  - stop_app: {}
+  - return:
+      center: $first.center
+      appeared: $appeared.center
+      clicked: $clicked.center
+      gone: $gone
+      comparisons: [$equal, $unequal, $greater, $greater_equal, $less, $less_equal]

@@ -352,7 +352,7 @@ impl YamlTimerRunner {
                         })?;
                     crate::extensions::gamer_yaml::task_params::bind_entry_args(
                         &format!("{pkg}#{function}"),
-                        &def.params,
+                        &def.call_params(function),
                         &args_owned,
                         true,
                     )

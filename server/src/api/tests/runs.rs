@@ -8,6 +8,7 @@ use super::*;
 /// 挂起到取消的假执行器（真实 RunManager 语义下测 router 行为）。
 struct HangExecutor {
     release: Arc<tokio::sync::Notify>,
+    contexts: Arc<std::sync::Mutex<Vec<crate::core::AppContext>>>,
 }
 
 impl HangExecutor {
@@ -16,6 +17,7 @@ impl HangExecutor {
         (
             Self {
                 release: release.clone(),
+                contexts: Default::default(),
             },
             release,
         )
@@ -25,9 +27,10 @@ impl HangExecutor {
 impl crate::run_manager::RunExecutor for HangExecutor {
     fn prepare<'a>(
         &'a self,
-        _: &'a crate::core::RunContext,
+        context: &'a crate::core::RunContext,
         _: &'a crate::core::RunRequest,
     ) -> futures_util::future::BoxFuture<'a, anyhow::Result<()>> {
+        self.contexts.lock().unwrap().push(context.app.clone());
         Box::pin(async { Ok(()) })
     }
     fn execute<'a>(
@@ -66,6 +69,7 @@ fn dispatch_body(entrypoint: &str, payload: serde_json::Value) -> serde_json::Va
 async fn function_run_endpoint_conflict_args_and_cancel() {
     let (executor, release) = HangExecutor::new();
     let executor = Arc::new(executor);
+    let contexts = executor.contexts.clone();
     let t = build_app_with_executor(
         "fnrun",
         test_credential("admin123"),
@@ -96,6 +100,15 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
     let content = body["content"].as_str().unwrap().to_string();
     let resp = put_package_text(&t, &sid, "com.test.app", "gamer.yaml", &format!("automations/{name}"), &content).await;
     assert_eq!(resp.status(), StatusCode::OK, "{:?}", json_body(resp).await);
+
+    // 错误的显式资源上下文必须在提交时拒绝，不能等到 WASM 编译后读取模板才报错。
+    for package in ["com.test.app#login", "com.Test.app", "../outside", ""] {
+        let mut body = dispatch_body("com.test.app#login", serde_json::json!({}));
+        body["content_package"] = serde_json::json!(package);
+        let resp = post_json(&t, &sid, "/api/runs", body).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{package}");
+        assert!(json_body(resp).await["error"].as_str().unwrap().contains("配置 id"));
+    }
 
     // 未知函数 → 结构化 not_found（组合注册表按名寻址，runner 边界判定，400 透传）
     let resp = post_json(
@@ -183,6 +196,13 @@ async fn function_run_endpoint_conflict_args_and_cancel() {
         running,
         "run must reach running before cancellation assertions"
     );
+    let context = contexts.lock().unwrap()[0].clone();
+    assert_eq!(context.content_package.as_ref().unwrap().as_str(), "com.test.app");
+    assert_eq!(context.android_package.as_str(), "com.example.game");
+    // 执行阶段模板寻址必须能构造合法的资源三元组，不能把 #函数名带进 Package。
+    crate::core::ResourceId::new(
+        context.content_package.unwrap().as_str(), "gamer.yaml", "templates/指南.png"
+    ).unwrap();
 
     // 设备互斥：同设备第二个函数运行 → 409，busy 摘要携带展示标签
     let resp = post_json(

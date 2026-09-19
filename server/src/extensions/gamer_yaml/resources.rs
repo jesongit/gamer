@@ -90,14 +90,52 @@ fn validate_v1_script(source: &str) -> Result<(), serde_json::Value> {
 
 /// 函数库文件校验（V1 `functions:` 包装结构；保存边界与 preflight 共用）。
 pub(crate) fn validate_function_library_file(
-    _store: &PackageStore,
-    _package: &str,
-    _path: &str,
+    store: &PackageStore,
+    package: &str,
+    path: &str,
     content: &str,
 ) -> Result<(), serde_json::Value> {
-    syntax::parse_function_library(content)
-        .map(|_| ())
-        .map_err(|diagnostics| serde_json::to_value(diagnostics).unwrap_or_default())
+    let library = syntax::parse_function_library(content)
+        .map_err(|diagnostics| serde_json::to_value(diagnostics).unwrap_or_default())?;
+    let names: std::collections::BTreeSet<_> = library.iter().map(|(name, _)| name.clone()).collect();
+    let failure = |code: &str, message: String| json!([{ "code": code, "path": path, "message": message }]);
+    if let Some(name) = names.intersection(&super::native_funcs::native_names()).next() {
+        return Err(failure("yaml.fn.duplicate", format!("函数 {name} 与原生函数同名")));
+    }
+    let files = store.list(package, YAML_EXTENSION_ID, "automations")
+        .map_err(|e| failure("yaml.functions.read", e.to_string()))?;
+    let old = files.iter().find(|file| file.path == path)
+        .and_then(|file| syntax::parse_function_library(file.content.as_deref()?).ok()).unwrap_or_default();
+    let removed: std::collections::BTreeSet<_> = old.iter().map(|(name, _)| name.clone()).filter(|name| !names.contains(name)).collect();
+    let mut referenced = Vec::new();
+    for file in &files {
+        let source = if file.path == path { content } else { file.content.as_deref().unwrap_or("") };
+        let calls = if is_function_library_path(&file.path) {
+            match syntax::parse_function_library(source) {
+                Ok(defs) => {
+                    if file.path != path {
+                        for (name, _) in &defs {
+                            if names.contains(name) { return Err(failure("yaml.fn.duplicate", format!("函数 {name} 已定义于 {}", file.path))); }
+                        }
+                    }
+                    defs.iter().flat_map(|(_, def)| def.called_functions()).collect::<std::collections::BTreeSet<_>>()
+                }
+                Err(_) if !removed.is_empty() => return Err(failure("yaml.functions.references_unknown", format!("{} 无法解析，修复后才能安全删除或重命名函数", file.path))),
+                Err(_) => continue,
+            }
+        } else {
+            match syntax::parse_script(source) {
+                Ok(script) => script.called_functions(),
+                Err(_) if !removed.is_empty() => return Err(failure("yaml.functions.references_unknown", format!("{} 无法解析，修复后才能检查函数引用", file.path))),
+                Err(_) => continue,
+            }
+        };
+        for name in calls.intersection(&removed) { referenced.push(format!("{name} ← {}", file.path)); }
+    }
+    if !referenced.is_empty() {
+        return Err(failure("yaml.functions.referenced", format!("函数仍被引用，请先修改调用再删除或重命名：{}", referenced.join("；"))));
+    }
+    Ok(())
 }
 
 /// gamer.yaml 插件资源的统一内容钩子：按路径前缀分发到 V1 校验器。
@@ -358,7 +396,7 @@ mod rename_tests {
                 "com.test.app",
                 YAML_EXTENSION_ID,
                 "automations/_function.yaml",
-                "functions:\n  login:\n    run:\n      - wait_find:\n          template: old.png\n",
+                "functions:\n  login:\n    run:\n      - wait_find: old.png\n",
                 None,
                 false,
             )
@@ -383,7 +421,7 @@ mod rename_tests {
         assert!(script.contains("old.png 文本不应改"));
         let function =
             std::fs::read_to_string(plugin_root(&dir).join("automations/_function.yaml")).unwrap();
-        assert!(function.contains("template: new"));
+        assert!(function.contains("wait_find: new.png"));
     }
 
     /// 不可解析的存量源 → 跳过（不阻塞重命名）。

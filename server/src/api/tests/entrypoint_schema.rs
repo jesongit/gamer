@@ -108,7 +108,7 @@ async fn runner_functions_endpoint_serves_native_catalog() {
     assert_eq!(tap["params"][0]["name"], "position");
     assert_eq!(tap["params"][0]["type"], "point");
     let wait_find = functions.iter().find(|f| f["name"] == "wait_find").unwrap();
-    assert_eq!(wait_find["params"][2]["default"], "30s");
+    assert_eq!(wait_find["params"][2]["default"], "3s");
 
     let resp = get_json(&t, &sid, "/api/runners/no.such/functions").await;
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);

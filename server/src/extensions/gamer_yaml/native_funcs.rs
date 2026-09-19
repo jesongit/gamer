@@ -27,6 +27,7 @@ pub struct ParamSchema {
 /// 原生函数声明。
 pub struct NativeFunction {
     pub name: &'static str,
+    pub display_name: &'static str,
     pub description: &'static str,
     pub params: Vec<ParamSchema>,
     pub returns: &'static str,
@@ -56,9 +57,10 @@ const RETURN_BOOL: &str = "boolean";
 
 pub(crate) fn native_functions() -> &'static [NativeFunction] {
     static FUNCTIONS: std::sync::LazyLock<Vec<NativeFunction>> = std::sync::LazyLock::new(|| {
-        vec![
+        let mut functions = vec![
             NativeFunction {
                 name: "tap",
+                display_name: "点击",
                 description: "点击相对坐标（0..1；可传 match 的 center）",
                 params: vec![p(
                     "position",
@@ -72,6 +74,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "swipe",
+                display_name: "滑动",
                 description: "从起点滑动到终点",
                 params: vec![
                     p("from", ParamType::Point, true, None, "起点"),
@@ -89,6 +92,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "key",
+                display_name: "按键",
                 description: "发送按键（HOME/BACK/…或数字 keycode）",
                 params: vec![
                     p("key", ParamType::Key, true, None, "按键名或 keycode"),
@@ -105,6 +109,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "input_text",
+                display_name: "输入文本",
                 description: "向设备输入文本",
                 params: vec![p("text", ParamType::String, true, None, "文本内容")],
                 returns: RETURN_NULL,
@@ -112,6 +117,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "launch",
+                display_name: "启动应用",
                 description: "冷启动应用（缺省为设备配置的应用）",
                 params: vec![p(
                     "package",
@@ -125,6 +131,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "stop_app",
+                display_name: "停止应用",
                 description: "停止应用（缺省为设备配置的应用）",
                 params: vec![p(
                     "package",
@@ -138,6 +145,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "sleep",
+                display_name: "等待",
                 description: "等待指定时长（取消可达）",
                 params: vec![p(
                     "duration",
@@ -151,6 +159,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "log",
+                display_name: "日志",
                 description: "写运行日志（非字符串值自动转 JSON 文本）",
                 params: vec![
                     p("message", ParamType::Any, true, None, "日志内容"),
@@ -167,6 +176,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "find",
+                display_name: "查找模板",
                 description: "单次模板匹配；未找到返回 null（等待轮询用 wait_find）",
                 params: vec![
                     p("template", ParamType::Template, true, None, "模板短名"),
@@ -190,6 +200,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "wait_find",
+                display_name: "等待模板出现",
                 description: "等待模板出现；超时返回 null",
                 params: vec![
                     p("template", ParamType::Template, true, None, "模板短名"),
@@ -204,7 +215,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
                         "timeout",
                         ParamType::Duration,
                         false,
-                        Some(json!("30s")),
+                        Some(json!("3s")),
                         "等待上限",
                     ),
                     p(
@@ -227,6 +238,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "tap_template",
+                display_name: "点击模板",
                 description: "查找模板并点击其中心（未找到不点击，返回 null）",
                 params: vec![
                     p("template", ParamType::Template, true, None, "模板短名"),
@@ -241,7 +253,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
                         "timeout",
                         ParamType::Duration,
                         false,
-                        Some(json!("0ms")),
+                        Some(json!("3s")),
                         "轮询上限；0 = 只试一次",
                     ),
                     p(
@@ -268,6 +280,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "wait_disappear",
+                display_name: "等待模板消失",
                 description: "等待模板消失；超时仍存在返回 false",
                 params: vec![
                     p("template", ParamType::Template, true, None, "模板短名"),
@@ -282,7 +295,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
                         "timeout",
                         ParamType::Duration,
                         false,
-                        Some(json!("30s")),
+                        Some(json!("3s")),
                         "等待上限",
                     ),
                     p(
@@ -305,6 +318,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "eq",
+                display_name: "等于",
                 description: "相等比较（数字跨整型/浮点，其余按值）",
                 params: vec![
                     p("a", ParamType::Any, true, None, "左值"),
@@ -315,6 +329,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "ne",
+                display_name: "不等于",
                 description: "不等比较",
                 params: vec![
                     p("a", ParamType::Any, true, None, "左值"),
@@ -325,6 +340,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "gt",
+                display_name: "大于",
                 description: "大于（仅数字）",
                 params: vec![
                     p("a", ParamType::Number, true, None, "左值"),
@@ -335,6 +351,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "ge",
+                display_name: "大于等于",
                 description: "大于等于（仅数字）",
                 params: vec![
                     p("a", ParamType::Number, true, None, "左值"),
@@ -345,6 +362,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "lt",
+                display_name: "小于",
                 description: "小于（仅数字）",
                 params: vec![
                     p("a", ParamType::Number, true, None, "左值"),
@@ -355,6 +373,7 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
             },
             NativeFunction {
                 name: "le",
+                display_name: "小于等于",
                 description: "小于等于（仅数字）",
                 params: vec![
                     p("a", ParamType::Number, true, None, "左值"),
@@ -363,7 +382,17 @@ pub(crate) fn native_functions() -> &'static [NativeFunction] {
                 returns: RETURN_BOOL,
                 permissions: &[],
             },
-        ]
+        ];
+        for func in &mut functions {
+            func.params.push(p(
+                "name",
+                ParamType::String,
+                false,
+                Some(json!(func.display_name)),
+                "可视化显示名称",
+            ));
+        }
+        functions
     });
     &FUNCTIONS
 }
@@ -397,4 +426,31 @@ pub fn native_schema_json(func: &NativeFunction) -> Value {
         })).collect::<Vec<_>>(),
         "returns": func.returns,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_functions_have_display_names_and_three_second_timeouts() {
+        let mut timeouts = 0;
+        for function in native_functions() {
+            let names: Vec<_> = function
+                .params
+                .iter()
+                .filter(|p| p.name == "name")
+                .collect();
+            assert_eq!(names.len(), 1, "{}", function.name);
+            assert_eq!(names[0].default, Some(json!(function.display_name)));
+            assert_eq!(names[0].ty, ParamType::String);
+            assert!(!names[0].required);
+            assert_ne!(function.params[0].name, "name", "位置简写不能变");
+            for param in function.params.iter().filter(|p| p.name == "timeout") {
+                assert_eq!(param.default, Some(json!("3s")), "{}", function.name);
+                timeouts += 1;
+            }
+        }
+        assert_eq!(timeouts, 3);
+    }
 }

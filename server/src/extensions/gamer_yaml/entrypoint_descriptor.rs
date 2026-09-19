@@ -135,7 +135,7 @@ fn describe_function(
     let decls = library
         .iter()
         .find(|(name, _)| name == func)
-        .map(|(_, def)| decls_schema_json(&def.params))
+        .map(|(name, def)| decls_schema_json(&def.call_params(name)))
         .ok_or_else(|| {
             DescribeError::from_script_errors(&[
                 crate::extensions::gamer_yaml::error::ScriptError::new(

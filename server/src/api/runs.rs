@@ -34,7 +34,7 @@ pub(super) struct DispatchRunReq {
     pub(super) device_id: String,
     #[serde(default)]
     pub(super) payload: Option<serde_json::Value>,
-    /// 资源解析域 Package id；缺省取 entrypoint 首段（`<package-id>/<名>`
+    /// 资源解析域 Package id；缺省取 entrypoint 首段（`<package-id>/<名>` 或 `<package-id>#<名>`
     /// 约定）。与 Android 包名是两个命名空间，不互相推导。
     #[serde(default)]
     pub(super) content_package: Option<String>,
@@ -65,11 +65,14 @@ pub(super) async fn api_dispatch_run(
         Some(pkg) => pkg.clone(),
         None => req
             .entrypoint
-            .split('/')
+            .split(['/', '#'])
             .next()
             .unwrap_or_default()
             .to_string(),
     };
+    if let Err(error) = crate::resources::validate_scope_id("配置 id", &content_package) {
+        return ApiError::bad_request(error.to_string()).into_response();
+    }
     let Ok(content) = AppPackageId::new(&content_package) else {
         return ApiError::bad_request(format!(
             "配置 id 非法（只允许字母数字 . _ -）: {content_package}"

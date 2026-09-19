@@ -119,6 +119,8 @@ pub trait EventSink: Send + Sync {
 
 #[derive(Debug, Deserialize)]
 pub struct Program {
+    #[serde(default)]
+    pub trace: Value,
     /// 入口帧初始值（已绑定参数 + vars 字面量，宿主绑定产出）。
     #[serde(default)]
     pub vars: serde_json::Map<String, Value>,
@@ -253,6 +255,11 @@ pub fn run(
         functions,
         steps: 0,
         call_depth: 0,
+        trace: program.trace.clone(),
+        frame_id: 0,
+        next_frame_id: 0,
+        parent_frame_id: None,
+        function: None,
     };
     interp.run(program)
 }
@@ -263,6 +270,11 @@ struct Interpreter<'a> {
     functions: BTreeMap<String, FunctionDef>,
     steps: u64,
     call_depth: u32,
+    trace: Value,
+    frame_id: u64,
+    next_frame_id: u64,
+    parent_frame_id: Option<u64>,
+    function: Option<String>,
 }
 
 impl<'a> Interpreter<'a> {
@@ -295,15 +307,31 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn emit(&self, event: Value) {
+    fn emit(&self, mut event: Value) {
+        if self.trace.is_object() {
+            let source = self.function.as_ref().and_then(|name| self.trace.get("functions")?.get(name))
+                .or_else(|| self.trace.get("entry"));
+            event["trace"] = serde_json::json!({ "run_id": self.trace["run_id"], "source": source,
+                "frame_id": self.frame_id, "parent_frame_id": self.parent_frame_id });
+        }
         if let Some(sink) = self.events {
             sink.emit(event);
         }
     }
 
-    fn emit_step_start(&self, step: &Step) {
+    fn emit_step_start(&self, step: &Step, values: &serde_json::Map<String, Value>) {
+        let display_name = match &step.kind {
+            StepKind::Fn {
+                args: Some(Expr::Map { value }),
+                ..
+            } => value
+                .get("name")
+                .and_then(|expr| self.eval(Some(expr), values).ok())
+                .and_then(|value| value.as_str().map(str::to_owned)),
+            _ => None,
+        };
         self.emit(serde_json::json!({
-            "ev": "step_start", "path": step.path, "desc": step.desc,
+            "ev": "step_start", "path": step.path, "desc": display_name.as_deref().unwrap_or(&step.desc),
         }));
     }
 
@@ -339,7 +367,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Flow, String> {
         for step in steps {
             self.begin_step()?;
-            self.emit_step_start(step);
+            self.emit_step_start(step, values);
             let outcome = self.run_step(step, values);
             match &outcome {
                 Ok(_) => self.emit_step_end(step, true, None),
@@ -365,6 +393,9 @@ impl<'a> Interpreter<'a> {
                 save_as,
             } => {
                 let args = self.eval(args.as_ref(), values)?;
+                if args.get("name").is_some_and(|value| !value.is_string()) {
+                    return Err("name 必须是字符串".to_string());
+                }
                 if self.functions.contains_key(name) {
                     self.call_package_function(name, args, save_as, values)
                 } else {
@@ -441,10 +472,14 @@ impl<'a> Interpreter<'a> {
                 self.call_depth
             ));
         }
-        self.emit(serde_json::json!({
-            "ev": "call_start", "target": name, "depth": self.call_depth,
-        }));
+        let previous = (self.frame_id, self.parent_frame_id, self.function.clone());
+        self.next_frame_id += 1;
+        self.parent_frame_id = Some(self.frame_id);
+        self.frame_id = self.next_frame_id;
+        self.function = Some(name.to_string());
+        self.emit(serde_json::json!({ "ev": "call_start", "target": name, "depth": self.call_depth }));
         let outcome = self.run_package_function(name, args, save_as, values);
+        (self.frame_id, self.parent_frame_id, self.function) = previous;
         self.call_depth -= 1;
         outcome
     }
@@ -607,11 +642,53 @@ mod tests {
 
     fn program(run: Vec<Step>) -> Program {
         Program {
+            trace: Value::Null,
             vars: Default::default(),
             run,
             functions: Default::default(),
             start_index: 0,
         }
+    }
+
+    #[test]
+    fn nested_error_events_keep_source_version_and_call_frame() {
+        let program: Program = serde_json::from_value(serde_json::json!({
+            "trace": { "run_id": "r1", "entry": {"path":"automations/main.yaml","version":"a"},
+                "functions": {"失败函数":{"path":"automations/_function_extra.yaml","version":"b","function":"失败函数"}} },
+            "run": [{"op":"fn","fn":"失败函数","path":"run[0]"}],
+            "functions": {"失败函数":{"run":[{"op":"return","value":{"expr":"ref","path":"missing"},"path":"失败函数.run[0]"}]}}
+        })).unwrap();
+        let events = Collect::default();
+        assert!(run(&program, &FakeHost::default(), Some(&events)).is_err());
+        let events = events.events.lock().unwrap();
+        let failures: Vec<_> = events.iter().filter(|event| event["ev"] == "step_end" && event["ok"] == false).collect();
+        assert_eq!(failures[0]["trace"]["source"]["version"], "b");
+        assert_eq!(failures[0]["trace"]["frame_id"], 1);
+        assert_eq!(failures[0]["trace"]["parent_frame_id"], 0);
+        assert_eq!(failures[1]["trace"]["source"]["path"], "automations/main.yaml");
+        assert_eq!(failures[1]["trace"]["frame_id"], 0);
+    }
+
+    #[test]
+    fn call_name_reference_is_used_in_events_and_checked_at_runtime() {
+        let mut program: Program = serde_json::from_value(serde_json::json!({
+            "vars": {"label": "点击登录"},
+            "run": [{"op":"fn", "fn":"tap", "path":"run[0]", "desc":"点击",
+                "args":{"expr":"map", "value":{
+                    "name":{"expr":"ref", "path":"label"},
+                    "position":{"expr":"lit", "value":[0.5,0.8]}
+                }}}]
+        }))
+        .unwrap();
+        let events = Collect::default();
+        let host = FakeHost::default();
+        run(&program, &host, Some(&events)).unwrap();
+        assert_eq!(events.events.lock().unwrap()[1]["desc"], "点击登录");
+        assert_eq!(host.calls.lock().unwrap()[0].0, "tap");
+        program.vars.insert("label".into(), Value::Bool(false));
+        assert!(run(&program, &host, None)
+            .unwrap_err()
+            .contains("name 必须是字符串"));
     }
 
     #[test]
@@ -669,6 +746,7 @@ mod tests {
     fn if_takes_bool_and_null_only() {
         let host = FakeHost::default();
         let program = Program {
+            trace: Value::Null,
             vars: serde_json::Map::from_iter([
                 ("flag".into(), Value::Bool(true)),
                 ("miss".into(), Value::Null),
@@ -790,6 +868,7 @@ mod tests {
             }),
         );
         let program = Program {
+            trace: Value::Null,
             vars: Default::default(),
             run: vec![
                 fn_step(
@@ -832,6 +911,7 @@ mod tests {
             }),
         );
         let program = Program {
+            trace: Value::Null,
             vars: Default::default(),
             run: vec![fn_step(
                 "need",
@@ -859,6 +939,7 @@ mod tests {
             }),
         );
         let program = Program {
+            trace: Value::Null,
             vars: Default::default(),
             run: vec![fn_step("loop", None, None, "run[0]")],
             functions,

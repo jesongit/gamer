@@ -85,11 +85,13 @@ pub enum RuntimeEventKind {
 pub struct RuntimeEvent {
     pub device_id: DeviceId,
     pub kind: RuntimeEventKind,
+    /// Optional producer-owned execution identity; Core transports without interpreting it.
+    pub trace: Option<serde_json::Value>,
 }
 
 impl RuntimeEvent {
     pub fn new(device_id: DeviceId, kind: RuntimeEventKind) -> Self {
-        Self { device_id, kind }
+        Self { device_id, kind, trace: None }
     }
 }
 
