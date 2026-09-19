@@ -1,5 +1,9 @@
 # 插件 API 参考（gamer:host / manifest v2 / 权限闭集）
 
+2026-09-19 UI 补充：可选主题与 `gamer-ui@1` 客户端见 [SDK UI](../../sdk/ui/README.md)，沿用专属 MessagePort、宿主提供的面板身份、`context.get` 和 `status.set/clear`；不扩大沙盒或权限。构建后的单文件示例带 CSP 哈希，原生按钮使用 click 而非被沙盒禁用的表单提交。
+
+Core 录制历史查询新增 `GET /api/recording`（需登录），返回 `{sessions:[...]}`。每项沿用会话元数据：`id/device_id/state/started_at/ended_at/segments/event_count/error`，另含 `missing_media` 分段素材 ID 列表，按开始时间倒序。活动记录优先，磁盘遗留活动态恢复为 interrupted。历史登记独立于素材保存；删除素材不删新登记，但输入事件仍随原媒体目录存储，丢失时 `/api/recording/:id/events` 返回 `recording_events_missing`。没有新增批量清理或分页 API；客户端不能从素材文件名构造录制 ID。
+
 > 权威实现：`server/wit/gamer/host.wit`（WIT 契约原件）、
 > `server/src/extensions/{manifest,permissions,host_api,wasm}.rs`。
 > 本文为面向插件开发者的快照（2026-09-09，契约版本 `gamer:host@1.0.0`，

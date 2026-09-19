@@ -1,5 +1,11 @@
 # YAML 脚本语法（V1 唯一正式方案）
 
+2026-09-19 编辑/诊断补齐：所有 `_function*.yaml` 使用同一画布编辑并按所属文件的 `expected_version` 保存。保存函数库时拒绝原生/包内同名函数；删除或改名仍被引用的函数返回 `yaml.functions.referenced`（列出调用资源），其他文件无法解析且无法确认引用时返回 `yaml.functions.references_unknown`。这不是跨文件自动重构；修复引用后再提交。删除最后一个函数可保存 `functions: {}`。
+
+gamer.yaml 3.1.2 的运行事件可携带 `trace`：`run_id`、`frame_id`、`parent_frame_id`、`source{package_id,plugin_id,path,version,function?}`。定义来源来自执行冻结资源；递归调用有独立帧 ID，`path` 为该调用中的步骤路径。Core 仅转发可选数据，YAML 插件解释语义。不含完整历史源码，当前文件版本已变时 UI 显示身份/差异而不错误高亮。此字段属于运行事件，不是 YAML 新关键字。
+
+从界面建脚本、找图点击、参数到函数复用和定时运行，见 [YAML 自动化教程](../guides/yaml-tutorial.md)（2026-09-14 核对）。
+
 GameBot 自动化脚本只支持 **YAML V1**（Gamer V1 简化计划 Phase 1；无 `version`
 字段——出现 `version:` 直接报 `yaml.version.removed` 拒绝诊断，旧 v3/v2 脚本
 **无兼容分支、无 fallback、无迁移工具**）。
@@ -57,6 +63,7 @@ automations/ 内其他 .yaml                            → 自动化脚本
 拒绝，文件顺序不决定胜者；不跨 Package 查找；运行开始时冻结全部函数定义。
 **统一命名空间：调用名 = 函数名**，移动/重命名函数库文件不改变调用名。
 函数目标寻址 = `<package-id>#<函数名>`（函数测试运行、参数 schema 查询）。
+通过 `POST /api/runs` 运行时，`content_package` 只填写配置包 ID（例如 `com.mihoyo.hkrpg`），不能包含 `#函数名` 或 Android 应用名；前端显式传递此字段，服务端缺省按入口第一个 `/` 或 `#` 之前的配置包 ID 解析。
 首版原生函数清单：
 
 ```text
@@ -89,7 +96,7 @@ vars:                     # 可选：字面量表（不做引用解析）
 run:                      # 必有（可为空列表）：执行入口
   - launch: com.example.game
   - wait_find:
-      template: home
+      template: home.png
       timeout: $timeout
     as: home
   - if: $home
@@ -112,7 +119,7 @@ duration / point / template / key`（别名 bool/int/float/text 解析期归一�
 ```yaml
 run:
   - tap: [0.5, 0.8]              # 位置值简写（标量/数组 → 第一个参数）
-  - find: login_button           # 同上
+  - find: login_button.png       # 同上
     as: button                   # as = 返回值赋给变量
   - tap: $button.center          # $name.field 引用（仅点号字段，无索引）
   - swipe:
@@ -134,17 +141,27 @@ run:
   - return: $button              # 返回值（脚本顶层返回即运行结果）
 ```
 
-- 无参函数允许 `{}`、空映射或 `sleep:`（null）；
-- `if` 条件：`false`/`null` 为假，非空结果为真（无数字/字符串隐式转换；
+- 所有函数支持可选字符串参数 `name`（也可用变量引用），写在函数参数映射中，
+  如 `tap: {name: 点击登录, position: [0.5, 0.8]}`。可视化卡片直接展示该值，
+  不再拼接函数名或参数。未填写时，原生函数默认使用中文名（如「点击」「等待」），
+  配置包函数默认使用 `description`，未写说明则使用函数名；显式声明的 `name` 参数默认值优先。
+  `name` 不改变调用目标，位置值简写仍对应原来的第一个参数。
+- 无参或全部参数可省略的函数允许 `{}` 或 null（如 `launch: {}` / `launch:`）；
+  `sleep` 的 duration 必填，不能用 `sleep:` 省略；
+- `if` 条件：只有 `false`/`null` 为假，其余值均为真（包括 `0`、空字符串、空数组、空对象；
   比较用 `eq/gt` 等函数）；
 - 函数调用独立局部作用域：参数显式传入，`as` 接收返回值；
 - `find`/`wait_find` 未命中返回 `null`（不是错误）。`find` 是**单次模板匹配**
-  （无 timeout/interval 参数）；等待轮询用 `wait_find`（timeout 缺省 30s，
-  interval 缺省 100ms，轮询直到命中或超时）；`tap_template` = 轮询找到后点击
-  命中中心并固结 300ms；`wait_disappear` 轮询直到模板消失（超时返回 false）。
+  （无 timeout/interval 参数）；等待轮询用 `wait_find`（timeout 缺省 3s，
+  interval 缺省 250ms，轮询直到命中或超时）；`tap_template` 的 timeout 缺省 3s
+  （显式传 0ms 只尝试一次）、interval 缺省 100ms，找到后点击命中中心并等待 300ms；
+  `wait_disappear` 的 timeout 缺省 3s、interval 缺省 250ms，轮询直到模板消失
+  （消失返回 true，超时返回 false）。轮询间隔最低 50ms。
 
 **表达式只有两种**：字面量、`$name.field` 引用。字符串以 `$` 开头是引用；
 字面量 `$` 用 `$$` 转义。无算术、无插值、无 eval、无动态索引。
+步骤表达式中的数组和对象会递归解析引用，如 `tap: {position: [$x, $y]}`；
+`vars` 与参数默认值仍是字面量，不做引用解析。
 
 诊断码命名空间 `yaml.*`（解析/结构）与 `param.args.*`（绑定）；旧 v3 源在
 解析层直接报 `yaml.version.removed`，其余旧形态报 `yaml.top.unknown`——
@@ -164,14 +181,14 @@ functions:                        # 顶层必须有 functions: 包装
     params:
       timeout:
         type: duration
-        default: 5s
+        default: 3s
     vars:                         # 可选：函数内字面量
       tag: local
     returns:                      # 可选：仅文档/提示，不做运行时校验
       type: boolean
     run:                          # 必有
       - tap_template:
-          template: daily_button
+          template: daily_button.png
           timeout: $timeout
       - return: true
 ```
@@ -185,7 +202,7 @@ run:
     as: success
 ```
 
-- 函数名 = 小写标识符 `[a-z_][a-z0-9_]*`，保留字 `if/repeat/return` 不可用；
+- 函数名允许中文汉字（CJK 基本区与扩展 A）、小写英文字母、数字、下划线，不能以数字开头，例如 `每日任务跳转`、`领取_daily2`；空格、点号、斜杠等分隔符不可用，保留字 `if/repeat/return` 不可用；参数名、变量名仍使用 `[a-z_][a-z0-9_]*`；
 - **统一命名空间**：文件名与目录只是存储组织，不进入调用名（`_function_battle.yaml`
   里的 `attack` 调用仍写 `attack`）；同一文件内函数名唯一，跨文件/与原生函数
   同名直接报冲突（`yaml.fn.conflict`），文件顺序不决定胜者；

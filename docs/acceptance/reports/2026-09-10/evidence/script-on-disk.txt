@@ -1,0 +1,6 @@
+params:
+  message:
+    type: string
+    default: hello acceptance
+    desc: 验收日志内容
+run: []

@@ -1,0 +1,11 @@
+{
+  "content": "params:\n  message:\n    type: string\n    default: hello acceptance\n    desc: 验收日志内容\nrun: []\n",
+  "mtime": 1789038160,
+  "package": "qa-invalid",
+  "path": "automations/qa-flow.yaml",
+  "plugin": "gamer.yaml",
+  "size": 103,
+  "text": true,
+  "updated_at": "2026-09-10 19:02:40",
+  "version": "dae2b782b5c1"
+}

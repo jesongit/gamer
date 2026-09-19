@@ -1,5 +1,7 @@
 # Gamer 插件开发指南（从零到安装运行）
 
+插件界面请同时阅读 [界面设计规范](../design/gamer-ui-spec.md) 与 [可选 iframe UI 接入包](../../sdk/ui/README.md)：28px 控件、必填字段直接展示、可选字段折叠、当前操作轻反馈。后者包含可直接打包的严格 CSP 沙盒示例及构建命令。
+
 > 适用基线：2026-09-09（当前工作树；免签名安装 + manifest v2）。
 > 本文所有字段、端点、错误文案均与当前实现逐条核对；配套 API 参考见
 > [docs/reference/PLUGIN_API.md](../reference/PLUGIN_API.md)，可运行的完整示例在

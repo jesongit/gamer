@@ -1,0 +1,15 @@
+{
+  "id": "dd0aae00626446759cb5e04d96635749",
+  "name": "QA 离线设备",
+  "kind": "redroid",
+  "addr": "127.0.0.1:1",
+  "screen_mode": "virtual",
+  "vd_res": "1920x1080",
+  "vd_dpi": 0,
+  "pkg": null,
+  "fps": 30,
+  "status": "offline",
+  "error": null,
+  "width": null,
+  "height": null
+}

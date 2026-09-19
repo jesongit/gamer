@@ -18,6 +18,11 @@
 
 > 当前仓库提供 Windows x64 完整包的 launcher 入口（`doctor` / `status` / `repair` / `start` / `upgrade`）和 launcher 托管更新 API。本文只记录仓库中已有的入口；不把 GitHub Release、生产升级/回滚或真实设备 E2E 当作已完成的外部结果。Docker/直跑模式的更新仍由外部部署管理。
 
+## 界面设计与插件 UI
+
+- [Gamer 界面设计规范](docs/design/gamer-ui-spec.md)：布局、颜色、控件、编辑交互及插件状态条接入。
+- [前端重写工作报告](docs/reports/gamer-ui-rewrite-report.md)：实际改动、设计偏差、验证结果和剩余限制。
+
 ## 架构
 
 ```
@@ -259,6 +264,7 @@ Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`�
 ## YAML 脚本语法
 
 YAML 自动化脚本为 **V1 唯一版本**（无 `version` 字段，旧 v3/v2 语法无兼容与迁移工具），完整语法与示例见 **[docs/reference/YAML.md](docs/reference/YAML.md)**。
+从零上手见 **[YAML 自动化教程](docs/guides/yaml-tutorial.md)**（2026-09-14 更新，含界面操作、找图点击、参数、函数复用与定时任务）。
 核心模型：步骤 = 函数调用 / `if` / `repeat` / `return`；表达式 = 字面量 / `$name.field`；函数 = 插件原生函数 + 当前 Package `automations/_function*.yaml` 函数库（两种来源同名即冲突；统一命名空间，调用名 = 函数名）；执行预算与取消机制保留。
 可执行脚本、函数库和模板按 Package 存放在 `data/packages/<package-id>/plugins/gamer.yaml/{automations,templates}/`（函数库与自动化共用 `automations/`，文件名 `_function` 前缀 + `.yaml` 后缀 = 函数库，默认库 `_function.yaml`；REST 走通用 Package 资源 API `/api/packages/:pkg/plugins/gamer.yaml/resources[/*path]`；Console 的模板/自动化面板由 `gamer.yaml` 扩展提供，框选/上传模板即用；原生函数目录见 `GET /api/runners/gamer.yaml/functions`）。
 

@@ -1,0 +1,48 @@
+{
+  "app": {
+    "built_at": "unknown",
+    "channel": "dev",
+    "commit": "602f00a6811e2fcf58e6760ce82af202624739e5",
+    "target": "x86_64-pc-windows-gnu",
+    "version": "0.1.1"
+  },
+  "capabilities": {
+    "check": false,
+    "download": false,
+    "install": false,
+    "rollback": false
+  },
+  "dependencies": {
+    "adb": {
+      "binding": "external",
+      "source": "custom",
+      "status": "missing",
+      "version": null
+    },
+    "ffmpeg": {
+      "binding": "external",
+      "source": "system",
+      "status": "ready",
+      "version": "9.0.1-full_build-www.gyan.dev"
+    },
+    "scrcpy": {
+      "binding": "application",
+      "source": "custom",
+      "status": "ready",
+      "version": "3.3.3"
+    }
+  },
+  "deployment": {
+    "mode": "direct",
+    "update_strategy": "unsupported"
+  },
+  "schema": {
+    "db": 3,
+    "file": 1,
+    "rollback_floor": 1
+  },
+  "startup": {
+    "boot_id": "53c97813-dde5-484f-8cbf-326d31ad2175",
+    "stage": "ready"
+  }
+}

@@ -1,0 +1,271 @@
+{
+  "extensions": [
+    {
+      "active_version": "1.0.1",
+      "dependencies": [],
+      "description": "按键映射：键盘、鼠标、手柄动作映射为设备触控与按键",
+      "entry": "plugin.wasm",
+      "execution": {
+        "kind": "wasm"
+      },
+      "host_api": {
+        "input": "^1.0",
+        "touch": "^1.0"
+      },
+      "id": "gamer.keymap",
+      "installed_versions": [
+        "1.0.1"
+      ],
+      "last_error": null,
+      "name": "键盘映射",
+      "permissions": [
+        "input.tap",
+        "input.swipe",
+        "input.key",
+        "touch"
+      ],
+      "state": "running",
+      "targets": {
+        "android": {
+          "packages": [
+            "*"
+          ]
+        }
+      },
+      "ui": [
+        {
+          "component": "console.keymaps",
+          "entry": null,
+          "icon": "⌨",
+          "location": "console.right",
+          "order": 30,
+          "panel_id": "keymaps",
+          "preferred_width": 360,
+          "requires_device": true,
+          "runtime": "core",
+          "title": "映射"
+        }
+      ],
+      "version": "1.0.1"
+    },
+    {
+      "active_version": "1.0.0",
+      "dependencies": [
+        {
+          "id": "gamer.yaml",
+          "installed": true,
+          "note": null,
+          "required": false,
+          "satisfied": true,
+          "state": "running",
+          "version": "3.1.1",
+          "version_req": "*"
+        }
+      ],
+      "description": "视频工作台：媒体素材库、设备录制与操作草稿生成",
+      "entry": null,
+      "execution": {
+        "builtin_id": "gamer.video",
+        "kind": "builtin"
+      },
+      "host_api": {},
+      "id": "gamer.video",
+      "installed_versions": [
+        "1.0.0"
+      ],
+      "last_error": null,
+      "name": "视频工作台",
+      "permissions": [
+        "media.read",
+        "media.import",
+        "media.record",
+        "media.write",
+        "media.events.read"
+      ],
+      "state": "running",
+      "targets": {
+        "android": {
+          "packages": [
+            "*"
+          ]
+        }
+      },
+      "ui": [
+        {
+          "component": "VideoWorkbench",
+          "entry": null,
+          "icon": "🎬",
+          "location": "console.right",
+          "order": 28,
+          "panel_id": "video",
+          "preferred_width": 440,
+          "requires_device": false,
+          "runtime": "core",
+          "title": "视频"
+        }
+      ],
+      "version": "1.0.0"
+    },
+    {
+      "active_version": "3.1.1",
+      "dependencies": [],
+      "description": "自动化：YAML V1 脚本、函数库与模板的制作与运行",
+      "entry": "plugin.wasm",
+      "execution": {
+        "kind": "wasm"
+      },
+      "host_api": {
+        "device": "^1.0",
+        "input": "^1.0",
+        "log": "^1.0",
+        "resource": "^1.0",
+        "runtime": "^1.0",
+        "vision": "^1.0"
+      },
+      "id": "gamer.yaml",
+      "installed_versions": [
+        "3.1.1"
+      ],
+      "last_error": null,
+      "name": "自动化",
+      "permissions": [
+        "device.read",
+        "device.app",
+        "vision.match",
+        "vision.color",
+        "input.tap",
+        "input.swipe",
+        "input.key",
+        "input.text",
+        "resource.read",
+        "runtime.sleep",
+        "log.write"
+      ],
+      "state": "running",
+      "targets": {
+        "android": {
+          "packages": [
+            "*"
+          ]
+        }
+      },
+      "ui": [
+        {
+          "component": "console.scripts",
+          "entry": null,
+          "icon": "⚙️",
+          "location": "console.right",
+          "order": 25,
+          "panel_id": "automation",
+          "preferred_width": 440,
+          "requires_device": true,
+          "runtime": "core",
+          "title": "自动化"
+        },
+        {
+          "component": "console.functions",
+          "entry": null,
+          "icon": "ƒ",
+          "location": "console.right",
+          "order": 30,
+          "panel_id": "functions",
+          "preferred_width": 440,
+          "requires_device": false,
+          "runtime": "core",
+          "title": "函数"
+        },
+        {
+          "component": "console.templates",
+          "entry": null,
+          "icon": "🖼️",
+          "location": "console.right",
+          "order": 35,
+          "panel_id": "templates",
+          "preferred_width": 440,
+          "requires_device": true,
+          "runtime": "core",
+          "title": "模板"
+        }
+      ],
+      "version": "3.1.1"
+    }
+  ],
+  "runtime_available": true,
+  "ui_contributions": [
+    {
+      "component": "console.keymaps",
+      "entry": null,
+      "icon": "⌨",
+      "location": "console.right",
+      "order": 30,
+      "panel_id": "keymaps",
+      "plugin_id": "gamer.keymap",
+      "preferred_width": 360,
+      "requires_device": true,
+      "runtime": "core",
+      "schema": null,
+      "title": "映射",
+      "version": "1.0.1"
+    },
+    {
+      "component": "VideoWorkbench",
+      "entry": null,
+      "icon": "🎬",
+      "location": "console.right",
+      "order": 28,
+      "panel_id": "video",
+      "plugin_id": "gamer.video",
+      "preferred_width": 440,
+      "requires_device": false,
+      "runtime": "core",
+      "schema": null,
+      "title": "视频",
+      "version": "1.0.0"
+    },
+    {
+      "component": "console.scripts",
+      "entry": null,
+      "icon": "⚙️",
+      "location": "console.right",
+      "order": 25,
+      "panel_id": "automation",
+      "plugin_id": "gamer.yaml",
+      "preferred_width": 440,
+      "requires_device": true,
+      "runtime": "core",
+      "schema": null,
+      "title": "自动化",
+      "version": "3.1.1"
+    },
+    {
+      "component": "console.functions",
+      "entry": null,
+      "icon": "ƒ",
+      "location": "console.right",
+      "order": 30,
+      "panel_id": "functions",
+      "plugin_id": "gamer.yaml",
+      "preferred_width": 440,
+      "requires_device": false,
+      "runtime": "core",
+      "schema": null,
+      "title": "函数",
+      "version": "3.1.1"
+    },
+    {
+      "component": "console.templates",
+      "entry": null,
+      "icon": "🖼️",
+      "location": "console.right",
+      "order": 35,
+      "panel_id": "templates",
+      "plugin_id": "gamer.yaml",
+      "preferred_width": 440,
+      "requires_device": true,
+      "runtime": "core",
+      "schema": null,
+      "title": "模板",
+      "version": "3.1.1"
+    }
+  ]
+}

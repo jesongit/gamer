@@ -1,0 +1,14 @@
+{
+  "binding_count": 1,
+  "content": "version: 1\nname: qa-keymap\nbindings:\n  - key: KeyQ\n    action:\n      type: hold\n      at:\n        - 0.5\n        - 0.5\n",
+  "mtime": 1789038272,
+  "name": "qa-keymap",
+  "package": "qa-invalid",
+  "path": "mappings/qa-keymap",
+  "plugin": "gamer.keymap",
+  "size": 118,
+  "text": true,
+  "updated_at": "2026-09-10 19:04:32",
+  "valid": true,
+  "version": "41d9e8aa83d6"
+}

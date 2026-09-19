@@ -1,0 +1,14 @@
+[
+  {
+    "level": "warn",
+    "message": "[Vue warn]: Unhandled error during execution of mounted hook \n  at <Console onVnodeUnmounted=fn<onVnodeUnmounted> ref=Ref< Proxy(Object) > > \n  at <RouterView> \n  at <MainLayout onVnodeUnmounted=fn<onVnodeUnmounted> ref=Ref< Proxy(Object) > > \n  at <RouterView> \n  at <App>",
+    "timestamp": "2026-09-10T11:15:28.913Z",
+    "url": "http://127.0.0.1:15173/node_modules/.vite/deps/chunk-ETN652L7.js?v=db505167"
+  },
+  {
+    "level": "error",
+    "message": "ReferenceError: loadForm is not defined\n    at http://127.0.0.1:15173/src/views/Console.vue:926:10",
+    "timestamp": "2026-09-10T11:15:28.913Z",
+    "url": "http://127.0.0.1:15173/src/views/Console.vue"
+  }
+]
