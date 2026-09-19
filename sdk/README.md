@@ -52,6 +52,8 @@ pwsh ./build.ps1 -Signer <gamer 仓库>/tools/plugin-signer/target/release/gamer
 
 ## 文档
 
+- 可选 iframe 主题、紧凑控件与通信示例：[ui/README.md](ui/README.md)。
+
 - 插件开发指南（从零到安装运行、manifest 全字段、权限闭集、调试与错误对照）：
   [docs/guides/plugin-dev.md](../docs/guides/plugin-dev.md)
 - 插件 API 参考（WIT world、Host API 域与版本、19 项权限闭集、UI contribution schema）：
