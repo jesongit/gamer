@@ -29,6 +29,8 @@ server/data/packages/
 server/data/_migration_backup/
 # 运行时安装的扩展产物与状态注册表（/api/extensions/install 落盘，本机数据）
 server/data/extensions/
+# 本机导入视频、录制及会话历史，不随仓库分发
+server/data/media/
 
 # ===== Docker 并存部署（docker-compose.local.yml，宿主 8444）=====
 # 独立数据目录（volume 挂载，本机运行数据不随仓库分发）：需要种子分区时
@@ -51,6 +53,7 @@ Thumbs.db
 desktop.ini
 
 # ===== 本地调试产物 =====
+.tmp-browser-acceptance-*/
 .chrome-test-profile/
 .zcode/
 tools/mcp-client/node_modules/
