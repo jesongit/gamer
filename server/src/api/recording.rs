@@ -25,12 +25,22 @@ use crate::recording::{service, FailureKind, RecordingFailure, RecordingId, Reco
 /// - `GET  /api/recording/:id/events`（{schema_version, events:[...]}）
 pub(super) fn router() -> Router<AppState> {
     Router::new()
+        .route("/api/recording", get(api_history))
         .route("/api/recording/start", post(api_start))
         .route("/api/recording/active", get(api_active))
         .route("/api/recording/:id/stop", post(api_stop))
         .route("/api/recording/:id/cancel", post(api_cancel))
         .route("/api/recording/:id", get(api_status))
         .route("/api/recording/:id/events", get(api_events))
+}
+
+async fn api_history(State(st): State<AppState>) -> Response {
+    let service = service(&st.cfg);
+    match tokio::task::spawn_blocking(move || service.history()).await {
+        Ok(Ok(sessions)) => Json(json!({ "sessions": sessions })).into_response(),
+        Ok(Err(error)) => map_failure(error),
+        Err(error) => ApiError::internal(error.to_string()).into_response(),
+    }
 }
 
 /// 服务错误 → HTTP：结构化 [`RecordingFailure`] 按 kind 映射状态码

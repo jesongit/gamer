@@ -84,12 +84,20 @@ fn replace_file(temp: &Path, path: &Path) -> std::io::Result<()> {
     let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
     let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH
-    let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) };
-    if ok == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
+    for attempt in 0..8 {
+        let ok = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) };
+        if ok != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // Windows readers / indexers may briefly hold the old target. Never
+        // delete it first: failed replacement must preserve its complete bytes.
+        if attempt == 7 || !matches!(error.raw_os_error(), Some(5 | 32 | 33)) {
+            return Err(error);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5 * (attempt + 1)));
     }
+    unreachable!()
 }
 
 #[cfg(unix)]

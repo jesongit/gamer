@@ -246,6 +246,8 @@ pub struct DeviceManager {
     pub cfg: Config,
     pub adb: Adb,
     pub devices: RwLock<HashMap<String, DeviceRuntime>>,
+    /// 普通连接共享读锁；显式重置 ADB 独占写锁，避免重置期间创建新会话。
+    pub(crate) connection_gate: tokio::sync::RwLock<()>,
     /// Active consumer registry used by power policy; concrete consumers own
     /// their leases and are not stored in DeviceManager.
     activity: Arc<DeviceActivity>,
@@ -263,6 +265,7 @@ impl DeviceManager {
             activity: Arc::new(DeviceActivity::default()),
             idle: std::sync::Mutex::new(HashMap::new()),
             devices: RwLock::new(HashMap::new()),
+            connection_gate: tokio::sync::RwLock::new(()),
         }
     }
 
@@ -388,6 +391,12 @@ impl DeviceManager {
 
     /// 连接设备（建立 scrcpy 会话 + 帧分发）
     pub async fn connect_device(&self, id: &str) -> anyhow::Result<()> {
+        let _gate = self.connection_gate.read().await;
+        self.connect_device_under_gate(id).await
+    }
+
+    /// 调用方必须持有 connection_gate（强制重连持有写锁）。
+    pub(crate) async fn connect_device_under_gate(&self, id: &str) -> anyhow::Result<()> {
         let (device, busy) = {
             let map = self.devices.read();
             let rt = map

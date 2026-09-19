@@ -196,6 +196,10 @@ pub(crate) fn build_router_with_extensions(
             post(devices::api_connect_device),
         )
         .route(
+            "/api/devices/:id/force-reconnect",
+            post(devices::api_force_reconnect_device),
+        )
+        .route(
             "/api/devices/:id/disconnect",
             post(devices::api_disconnect_device),
         )

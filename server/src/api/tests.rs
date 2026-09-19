@@ -125,6 +125,14 @@ mod sec_tests {
             data_dir: dir.clone(),
             ..Default::default()
         };
+        build_app_with_config(cfg, credential, auth_cfg)
+    }
+
+    fn build_app_with_config(
+        cfg: Config,
+        credential: auth::Credential,
+        auth_cfg: crate::config::AuthConfig,
+    ) -> TestApp {
         let db: Db = Arc::new(crate::store::Store::open(&cfg).unwrap());
         let scripts = Arc::new(PackageStore::open(&cfg).unwrap());
         let viewers: crate::webrtc::ViewerMap =
@@ -437,6 +445,9 @@ mod sec_tests {
 
     mod auth_tests {
         include!("tests/auth.rs");
+    }
+    mod device_reconnect_tests {
+        include!("tests/device_reconnect.rs");
     }
     mod keymaps_tests {
         include!("tests/keymaps.rs");

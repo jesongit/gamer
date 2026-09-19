@@ -528,6 +528,78 @@ pub(super) async fn api_connect_device(
     }
 }
 
+/// 强制重连会重置共享 ADB 服务；先清理所有旧会话，避免 Online 快路径复用死连接。
+pub(super) async fn api_force_reconnect_device(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if st.devices.snapshot(&id).is_none() {
+        return err_response(StatusCode::NOT_FOUND, "设备不存在");
+    }
+    let Ok(_gate) = st.devices.connection_gate.try_write() else {
+        return err_response(StatusCode::CONFLICT, "设备正在连接或强制重连，请稍后重试");
+    };
+    let snapshot = st.devices.list_snapshot();
+    for (device, _, _) in &snapshot {
+        if st.runs.active_for_device(&device.id).is_some()
+            || [
+                ActivityKind::Run,
+                ActivityKind::Capture,
+                ActivityKind::Extension,
+            ]
+            .into_iter()
+            .any(|kind| st.devices.activity().has_kind(&device.id, kind))
+            || crate::recording::service(&st.cfg)
+                .active_for_device(&device.id)
+                .is_some()
+        {
+            return err_response(
+                StatusCode::CONFLICT,
+                &format!(
+                    "设备「{}」正在执行任务、采集或录制，请先停止后再强制重连",
+                    device.name
+                ),
+            );
+        }
+    }
+    for (device, status, _) in &snapshot {
+        remove_and_teardown_viewer(
+            &st.viewers,
+            &device.id,
+            ViewerDisconnectReason::DeviceDisconnected,
+        )
+        .await;
+        if *status != crate::device::DeviceStatus::Offline
+            || st.devices.session(&device.id).is_some()
+        {
+            st.devices.disconnect_device(&device.id, true).await;
+        }
+    }
+    st.devices.adb.reset_server().await;
+    if let Err(e) = st
+        .devices
+        .adb
+        .run(&["start-server"], Duration::from_secs(10))
+        .await
+    {
+        return err_response(StatusCode::BAD_GATEWAY, &format!("重启 ADB 失败: {}", e));
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    match st.devices.connect_device_under_gate(&id).await {
+        Ok(()) => {
+            st.metrics.scrcpy_connect(true);
+            Json(serde_json::json!({"ok": true})).into_response()
+        }
+        Err(e) => {
+            st.metrics.scrcpy_connect(false);
+            err_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("ADB 已重启，设备重连失败: {}", e),
+            )
+        }
+    }
+}
+
 /// 强制断开（管理动作，绕过运行守卫）：拆 scrcpy 会话。注意前端"断开连接"
 /// 按钮已不再调用此接口（只断本地 WebRTC，会话交给空闲低功耗管理）
 pub(super) async fn api_disconnect_device(

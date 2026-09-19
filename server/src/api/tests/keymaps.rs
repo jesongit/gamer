@@ -81,7 +81,9 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
-    assert!(json_body(resp).await["error"]
+    let conflict = json_body(resp).await;
+    assert_eq!(conflict["code"], "version_required");
+    assert!(conflict["error"]
         .as_str()
         .unwrap()
         .contains("version_required"));
@@ -105,7 +107,9 @@ async fn keymaps_crud_is_plugin_scoped_and_version_guarded() {
     )
     .await;
     assert_eq!(resp.status(), StatusCode::CONFLICT);
-    assert!(json_body(resp).await["error"]
+    let conflict = json_body(resp).await;
+    assert_eq!(conflict["code"], "version_conflict");
+    assert!(conflict["error"]
         .as_str()
         .unwrap()
         .contains("version_conflict"));

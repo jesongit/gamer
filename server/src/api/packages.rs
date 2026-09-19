@@ -1260,8 +1260,10 @@ fn archive_error(e: ArchiveError) -> ApiError {
 #[allow(clippy::result_large_err)]
 fn write_error(e: anyhow::Error) -> ApiError {
     let message = e.to_string();
-    if message.contains("version_conflict") || message.contains("version_required") {
-        ApiError::conflict(message)
+    if message.contains("version_conflict") {
+        ApiError::conflict(message).with_code("version_conflict")
+    } else if message.contains("version_required") {
+        ApiError::conflict(message).with_code("version_required")
     } else if message.contains("不存在") {
         ApiError::not_found(message)
     } else if message.contains("已存在") {
