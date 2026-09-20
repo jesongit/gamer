@@ -1,0 +1,13 @@
+{
+  "name": "gamer-docs",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.23.0",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "dev": "vitepress dev --host 127.0.0.1 --port 5174",
+    "build": "vitepress build",
+    "preview": "vitepress preview --host 127.0.0.1 --port 4174"
+  },
+  "devDependencies": { "vitepress": "1.6.4" }
+}

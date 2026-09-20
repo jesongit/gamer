@@ -1,380 +1,290 @@
-# GameBot 游戏自动化助手
+# Gamer
 
-基于 ScrcpyOverWebRTC 方案的轻量自研游戏自动化系统：
-**官方开源 scrcpy-server** 采集与控制 + **自研 Rust 服务端** + **WebRTC 低延迟投屏** + **模板匹配 / YAML 自动化 / 定时任务**。
+Gamer 是一个通过浏览器操作 Android 设备的游戏自动化工具。它将实时投屏、鼠标键盘控制、图像模板匹配、可视化脚本编辑和定时任务放在同一个工作台中，支持从录制视频生成自动化草稿。
 
-## 特性
+设备统一通过 ADB 接入，画面由 scrcpy 采集，经 WebRTC 传输到浏览器。服务端使用 Rust，前端使用 Vue 3；自动化、按键映射和视频工作台分别由插件提供。
 
-- 🖥️ **统一分辨率虚拟屏**（scrcpy new-display）：所有设备可用相同分辨率（如 1920x1080）游玩，
-  一套模板通吃所有设备，彻底解决模板匹配兼容性问题；也支持镜像主屏模式
-- ⚡ **低延迟控制**：浏览器 → WebRTC DataChannel → 服务端 → scrcpy 控制 socket → 设备，局域网低延迟
-- 🎞️ **流畅画面**：H.264 视频轨经 WebRTC 转推浏览器，不转码零画质损失
-- 🔍 **模板匹配**：Rust NCC 引擎（截图优先从 H.264 GOP 帧环按需调用 ffmpeg 解码最新帧；无 ffmpeg 时 fallback adb screencap）；固定夹具 benchmark 脚本已兼容 Windows PowerShell 5.1（parser=0），正式跨平台 p50/p95 报告仍在计划中
-- 📜 **YAML 自动化**：**YAML V1** 唯一脚本方案（Gamer V1 简化收敛；旧 v3/v2 语法一律诊断报错，无兼容分支）——**YAML 只描述流程，一切操作皆函数调用**：步骤只有函数调用 / `if` / `repeat` / `return` 四类，表达式只有字面量与 `$name.field` 引用；函数只有两种来源（插件原生函数 + 当前 Package `automations/_function*.yaml` 函数库，默认只有 `_function.yaml` 一个文件，统一命名空间调用名 = 函数名，同名冲突即拒绝），首版原生函数 tap/swipe/key/input_text/launch/stop_app/sleep/log/find/wait_find/tap_template/wait_disappear/eq…le（`find` 单次匹配，等待轮询用 `wait_find`）；执行预算（步数 100k / 调用深度 32）防脚本失控，运行事件（步骤高亮 / 命中标记）实时回传投屏页面（语法见 [docs/reference/YAML.md](docs/reference/YAML.md)），由官方 `gamer.yaml` 扩展承载（唯一权威解释器 `yaml-interp` 与 WASM guest 同源）
-- ⏰ **定时任务**：Task = 任意 ScheduleProvider + 任意 Runner，内置 `cron` 调度 provider + `gamer.yaml` 执行 runner；服务端 Docker 内 7×24 运行，浏览器关闭不影响
-- 🧩 **插件化架构**：Core 只含设备/任务/资源/扩展机制等稳定能力，YAML 自动化、按键映射与视频工作台由可安装扩展（`.gplugin`，**免签名安装**——来源标注 + 权限确认 + 官方 sha256 完整性校验）提供，面板随扩展进入/离开 Running 状态出现消失；`gamer.yaml` 与 `gamer.keymap` 是 WASM 扩展，`gamer.video` 是无 guest 的 builtin 扩展。内置插件市场（官方 registry + 本地/URL 导入），用户可用 [sdk/](sdk/README.md) 开发自己的 WASM 插件；配置资产走 Package（`.gamerpkg`）导入导出
-- 🎬 **视频工作台**：录制或导入视频 → 素材库 → Video Project（标记/校准）→ 精确逐帧（ffprobe 展示序帧表，VFR/B 帧归一）→ 定帧框选建模板 + 离线匹配 → 操作事件生成 YAML V1 草稿保存到自动化。媒体库与录制由 Core 提供，`gamer.video` builtin 承载工作台/项目；离线定帧与匹配不触达设备
-- 📱 **多设备接入**：redroid 容器 / USB 直连 / 无线 adb / Windows 模拟器
+**[官方文档网站](https://jesongit.github.io/gamer/)** · [文档源码](docs/site/) · [本地预览与维护](docs/site/development/documentation.md)
 
-> 当前仓库提供 Windows x64 完整包的 launcher 入口（`doctor` / `status` / `repair` / `start` / `upgrade`）和 launcher 托管更新 API。本文只记录仓库中已有的入口；不把 GitHub Release、生产升级/回滚或真实设备 E2E 当作已完成的外部结果。Docker/直跑模式的更新仍由外部部署管理。
+## 可以做什么
 
-## 界面设计与插件 UI
-
-- [Gamer 界面设计规范](docs/design/gamer-ui-spec.md)：布局、颜色、控件、编辑交互及插件状态条接入。
-- [前端重写工作报告](docs/reports/gamer-ui-rewrite-report.md)：实际改动、设计偏差、验证结果和剩余限制。
-
-## 架构
-
-```
-┌────────────┐  WebRTC (H.264 视频轨 + DataChannel 控制)   ┌──────────────────┐  adb / scrcpy socket   ┌──────────────┐
-│   浏览器    │ ◄────────────────────────────────────────► │  Rust 服务端      │ ◄────────────────────► │ Android 设备  │
-│ (Vue3 精简) │       WebSocket 信令 + HTTP REST API       │ (axum+webrtc-rs) │                        │ redroid/真机  │
-└────────────┘                                            └──────────────────┘                        └──────────────┘
-                                                                    │
-                                                                    ├─ 扩展机制：WASM/builtin Extension + 能力位 SDK（YAML 自动化、按键映射、视频工作台由官方扩展提供）
-                                                                    ├─ 定时任务：Task = ScheduleProvider + Runner（内置 cron provider）
-                                                                    ├─ 模板匹配：NCC + H.264 GOP 帧环（按需 ffmpeg 解码）
-                                                                    ├─ 资源系统：Package 三元组寻址（packages/<package-id>/plugins/<plugin-id>/）+ 媒体库
-                                                                    ├─ 设备管理：adb 直连
-                                                                    └─ 持久化：SQLite + Package 文件存储
-```
-
-- **scrcpy-server**：官方开源 jar（锁定 v3.3.3，`server/assets/scrcpy-server.jar`），服务端以 scrcpy
-  客户端角色驱动：`adb push` → `adb reverse` 隧道 → `app_process` 启动 → 读视频 socket（H.264 帧 + PTS 头）/
-  控制 socket（触控/按键/文本/剪贴板/启动应用）
-- **虚拟屏**：启动参数 `new_display=1920x1080/420`，scrcpy server 在设备上创建虚拟显示器；
-  连接不会自动启动应用，由 Console 启动按钮或 YAML V1 函数 `launch` 显式启动到虚拟屏，**无需自己探测 display id**
-
-## 目录结构
-
-```
-gamer/
-├── server/                     # Rust 服务端
-│   ├── src/
-│   │   ├── main.rs             # 入口（组合根：装配 Core 与扩展）
-│   │   ├── config.rs           # 配置（port / data_dir / adb / scrcpy-server / 阈值）
-│   │   ├── api/                # HTTP REST + WebSocket 信令
-│   │   ├── device/             # adb 封装 + scrcpy 会话 + ffmpeg 帧缓存
-│   │   ├── webrtc/             # WebRTC peer（H.264 推流 + DataChannel 控制）
-│   │   ├── timer_core.rs       # Timer Core：Task = ScheduleProvider + Runner
-│   │   ├── resources.rs        # PackageStore：内容无关 Package 三元组资源寻址
-│   │   ├── media/              # Core 媒体库（导入/探测/精确帧/播放/引用保护）
-│   │   ├── recording/          # Core 录制（scrcpy 帧订阅 + 输入事件 + MP4 封装）
-│   │   ├── capabilities/       # Core 能力位 SDK（device/vision/input/...）
-│   │   ├── extensions/         # 扩展生命周期 + gamer_yaml / keymap / video 业务扩展
-│   │   └── store.rs            # SQLite 持久化（schema v3）
-│   ├── guests/                 # 官方 WASM guest（yaml-guest / keymap-guest；gamer.video 为 builtin、无 guest）
-│   ├── data/                   # packages/<package-id>/ 运行数据（package.toml + shared/ + plugins/<plugin>/），gitignore
-│   ├── assets/scrcpy-server.jar   # 官方 v3.3.3（仓库自带）
-│   └── Dockerfile              # 仅后端镜像（无前端页；一体化镜像用根 Dockerfile）
-├── web/                        # Vue3 + Vite 前端（Core 壳 + 插件面板）
-├── launcher/                   # Windows 完整包 launcher
-├── sdk/                        # 第三方插件 SDK 与示例（免签名开发→打包→安装）
-├── release/packaging/          # 依赖获取、构包、manifest 与签名脚本
-├── Dockerfile                  # 推荐：一体化多阶段镜像（pnpm 前端 + Rust 服务端）
-├── docker-compose.yml          # server + redroid 一键拉起
-└── docs/                       # reference（语法/契约/ADR）/ guides / plans / evidence
-```
-
-## 依赖清单（Windows / scoop 安装示例）
-
-| 依赖 | 用途 | scoop 安装 |
-|---|---|---|
-| Rust 工具链（stable） | 编译 Rust 服务端 | `scoop install rustup`，或免 VS 的 GNU 工具链 `scoop install rust` |
-| Android platform-tools（adb） | 设备发现 / 连接 / 推送 scrcpy-server | `scoop install adb` |
-| ffmpeg | 视频软解码帧缓存（截图 / 模板匹配 / WebRTC 初始 GOP 重放） | `scoop install ffmpeg` |
-| Node.js ≥ 20（自带 Corepack） | 前端 Vite dev / 构建（pnpm，`package.json#packageManager` 固定版本） | `scoop install nodejs-lts` |
-| scrcpy-server.jar | 设备端采集端（v3.3.3，**仓库已自带** `server/assets/`） | 无需安装 |
-
-一键安装示例（PowerShell）：
-
-```powershell
-scoop install git rustup adb ffmpeg nodejs-lts   # 或 scoop install rust 替代 rustup
-rustup default stable                            # MSVC 工具链需先装 VS Build Tools（C++ 生成工具）
-```
-
-> scoop 安装的 `adb` / `ffmpeg` 会自动加入 PATH，`server/config.toml` 的 `adb_path` / `ffmpeg_path`
-> 保持默认值 `"adb"` / `"ffmpeg"` 即可；也可写绝对路径。
-> ⚠️ ffmpeg 路径失效会直接导致**连接控制后无画面**（帧缓存启动失败 → WebRTC 无法重放
-> SPS/PPS + GOP → 浏览器 H.264 解码器无法初始化），详见下方「已知坑」。
-
-以上是从源码构建或本地开发所需的依赖。Windows x64 完整包会把 launcher、应用、ADB、FFmpeg、
-scrcpy server、配置模板、签名 manifest、许可证和离线 seeds 一起打包；完整包用户不需要预装
-Rust、Node.js、系统 ADB 或系统 FFmpeg，`repair` 会按 `seeds/` → `cache/artifacts/` →
-manifest artifact URL 的顺序取依赖，并校验大小与 SHA-256。
+- **查看与控制设备**：实时投屏、触控、按键、文本输入、应用启停和截图；连接多个设备并切换操作目标。
+- **使用独立虚拟屏**：在支持的 Android 设备上指定分辨率与 DPI，例如 1920×1080；也可以镜像设备主屏。
+- **编写自动化**：可视化编辑步骤、参数、分支、循环和函数，使用模板匹配完成找图与点击，也可编辑 YAML 原文。
+- **安排任务**：设置执行入口、运行参数、设备与调度时间。任务在服务端执行，关闭浏览器后仍可继续。
+- **分析录制视频**：录制设备画面及操作事件，导入视频、逐帧查看、标记时间轴、提取模板和生成脚本草稿。
+- **复用配置与能力**：通过配置包组织和分发脚本、模板、映射与视频项目，通过插件扩展编辑和执行能力。
 
 ## 快速开始
 
-### 方式一：Windows x64 完整包（launcher 托管）
+### 从源码启动
 
-解压完整包后，把下面的 `<version>` 替换为包内 manifest 的版本；全局参数必须放在子命令之前。
+以下命令在 Windows PowerShell 中、仓库根目录执行。先安装这些依赖并加入 `PATH`：
+
+| 依赖 | 用途 |
+| --- | --- |
+| Rust stable 与对应平台的链接工具链 | 构建服务端、插件 WASM 和打包工具；Windows MSVC 工具链需要 C++ Build Tools |
+| Node.js | 前端与插件 UI 构建；当前 CI 使用 Node.js 24，项目声明最低 Node.js 20 |
+| pnpm | 版本以 [web/package.json](web/package.json) 的 `packageManager` 为准，当前为 `11.23.0` |
+| Android platform-tools / `adb` | 发现、连接和控制 Android 设备 |
+| FFmpeg 与 `ffprobe` | 截图解码、模板匹配、视频探测和逐帧分析 |
+
+仓库已包含配套的 `server/assets/scrcpy-server.jar`。设备端协议与该文件绑定，使用仓库提供的版本。
 
 ```powershell
-Set-Location -LiteralPath 'D:\GameBot'
-$version = '<version>'
+# 安装 pnpm；已有匹配版本时可跳过
+npm install --global pnpm@11.23.0
 
-# 未安装时只做目录检查；带 manifest 的检查会验证签名、平台和版本。
+# WASM 插件构建所需目标
+rustup target add wasm32-unknown-unknown
+
+# 首次准备本机配置，已有配置时保留
+if (-not (Test-Path .\server\config.toml)) {
+    Copy-Item .\server\config.example.toml .\server\config.toml
+}
+
+pnpm --dir web install --frozen-lockfile
+
+# 构建三个官方插件及本地市场索引
+.\tools\build-plugins.ps1
+
+# 启动服务端与前端开发服务；首次会编译服务端
+.\gamer.ps1 start
+```
+
+打开 [http://localhost:5173](http://localhost:5173)。默认服务端地址为 [http://localhost:8443](http://localhost:8443)，前端将 API 和 WebSocket 请求代理到服务端。
+
+默认开发模式下，如果尚未配置密码，首次在本机打开页面会进入管理员密码设置。账号为 `admin`，密码由你设置，成功后自动登录；配置文件只保存 Argon2id 哈希。首次设置仅接受服务端回环来源，请先在运行服务的电脑上完成。
+
+开发或自动化环境也可在启动前设置 `GAMER_ADMIN_PASSWORD`。它在开发模式下优先于配置密码，只在进程内转换为哈希，不写回文件。项目没有预设密码；生产模式使用 `[auth].password_hash`，不接受该明文环境变量。
+
+### 使用 Windows 完整包
+
+已有 Windows x64 完整包时，解压后双击 `gamer-launcher.exe` 即可进入启动流程；也可在解压目录执行：
+
+```powershell
+.\gamer-launcher.exe start
+```
+
+完整包携带运行依赖和前端产物，使用时无需安装 Rust、Node.js 或 pnpm。依赖检查、修复和状态查询入口为：
+
+```powershell
 .\gamer-launcher.exe doctor
-.\gamer-launcher.exe doctor --manifest ".\manifests\$version.json" --expect-current-version $version --expect-channel stable
-
-# 离线 seeds、缓存或 manifest artifact 可用于依赖修复与首次安装。
-.\gamer-launcher.exe repair --manifest ".\manifests\$version.json" --probe
-
-# 没有默认账号/密码；必须在启动 launcher 的同一环境中提供管理员口令。
-$env:GAMER_ADMIN_PASSWORD = '<首次登录口令>'
-.\gamer-launcher.exe start
-```
-
-`start` 会前台托管服务进程，浏览器按配置访问 `8443` 端口。`GAMER_ADMIN_PASSWORD` 只在进程
-内生成 Argon2id PHC，不写回配置；也可以在 `server/config.toml` 中配置合法的 Argon2id PHC。
-仓库没有默认账号/密码，也没有单独的 launcher stop 子命令。
-
-若不在安装根目录执行：
-
-```powershell
-.\gamer-launcher.exe --install-root 'D:\GameBot' repair --probe
-```
-
-#### 完整包依赖修复
-
-```powershell
 .\gamer-launcher.exe repair --probe
-.\gamer-launcher.exe doctor --manifest ".\manifests\$version.json" --deep --probe
-```
-
-不带 `--manifest` 时，`repair` 从安装根目录已有 manifest 中选择当前版本或最高 SemVer 版本；
-显式 manifest 可固定目标版本。每个依赖先查 `seeds/`，再查 `cache/artifacts/`，最后才按
-manifest 的 URL 下载；大小、SHA-256 和原子落盘校验失败不会污染运行目录。`--probe` 会额外
-探测 ADB/FFmpeg；`doctor --deep --probe` 用显式 manifest 做完整清点。
-
-#### 升级与回滚入口
-
-launcher CLI 的升级入口是：
-
-```powershell
 .\gamer-launcher.exe status
-.\gamer-launcher.exe upgrade ".\manifests\<new-version>.json"
-# 或：.\gamer-launcher.exe upgrade 'https://<发布源>/<new-version>.json'
 ```
 
-本地 manifest 默认要求同目录同名 `.sig`；URL manifest 要求签名位于 manifest URL 后追加 `.sig`。
-升级会校验签名、版本、schema、磁盘空间和依赖完整性，并在提交前候选启动或就绪失败时自动回到
-旧版本；退出码 `0` 表示提交完成，`1` 表示失败但旧版本仍可用，`2` 表示进入
-`manual_recovery_required`。CLI 没有独立的 rollback 子命令。
+安装细节以包内 `INSTALL.md` 为准。构包、发布及升级说明见 [发布手册](docs/guides/RELEASE.md) 和 [更新指南](docs/guides/UPDATE.md)。
 
-完整包启动时若要启用 Web 设置页的托管更新，需要在同一环境配置 launcher 的 manifest 来源：
+## 第一次使用
+
+1. **安装插件**：进入「插件」页，从本地市场安装所需官方插件，或导入 `.gplugin`。安装前查看权限，安装成功后会自动启用；新安装或更新 UI 后刷新页面。
+2. **连接设备**：先用 `adb devices -l` 确认设备已授权且可用，再在工作台扫描设备或填写 ADB 地址。选择屏幕模式，建立投屏连接。
+3. **选择应用**：在工作台工具栏选择设备上要操作的 Android 应用，再启动应用。建立投屏连接本身不会自动启动应用。
+4. **选择配置**：使用首次启动创建的空白默认配置，或在「配置包」页新建、导入自己的配置包。
+5. **开始编排**：在工作台的自动化、函数、模板、映射或视频面板中编辑内容。需要定时执行时，再到「任务」页创建任务。
+
+首次安装没有预置游戏脚本、模板或映射。工作台功能取决于已启用插件及其声明的应用适用范围；没有业务插件时显示空态。
+
+| 页面 | 用途 |
+| --- | --- |
+| 工作台 | 投屏、设备与应用操作、当前配置选择、插件功能面板和轻状态条；默认首页 |
+| 任务 | 创建调度、设置执行目标和参数、手动运行及管理任务状态 |
+| 日志 | 查看与筛选运行日志，定位执行问题 |
+| 配置包 | 同屏管理本地配置包与配置市场，进行导入、导出和元数据编辑 |
+| 插件 | 在统一列表中查看已安装与市场插件，管理安装、启用、更新和卸载 |
+| 设置 | 查看服务信息、运行依赖与当前部署支持的更新功能 |
+
+## 设备与屏幕
+
+Gamer 使用 **ADB 地址**识别设备。USB 真机、无线设备和模拟器使用同一套连接流程，设备名称仅作显示。
+
+| 地址形式 | 连接方式 |
+| --- | --- |
+| USB serial、`emulator-5554` | 使用 `adb devices -l` 中完整且一致的 serial |
+| `127.0.0.1:7555`、`192.168.1.20:5555` | 服务端通过 `adb connect` 建立网络连接 |
+| 无线调试 mDNS serial | 先用 ADB 完成配对与发现，再扫描接入 |
+
+设备扫描在**运行 Gamer 服务端的电脑**上执行。USB 设备需要授权这台电脑；无线调试需要在 Android 侧开启并完成配对。详细步骤见 [ADB 设备接入](docs/reference/DEVICE_ACCESS.md)。
+
+屏幕模式与 ADB 连接方式分别设置：
+
+- **镜像主屏**：显示并控制设备的物理屏幕。
+- **虚拟屏**：使用独立的虚拟显示，可配置宽高、DPI 和帧率。是否可用取决于 Android 系统和应用；不支持时会明确报错，不自动切换屏幕或坐标系。
+
+相同虚拟分辨率可以减少模板适配工作，实际画面仍可能受游戏布局、方向和缩放影响。
+
+默认 WebRTC 使用 host candidate 直连，适合同机或局域网，没有内置 STUN/TURN。跨 NAT 访问需配置 `rtc_external_ip`、`rtc_udp_port`、`rtc_external_port`，并保证浏览器能访问对应 UDP 地址；仅能打开网页不代表视频链路已经可达。
+
+## 配置包与自动化
+
+| 概念 | 含义 | 示例 |
+| --- | --- | --- |
+| Device / 设备 | 运行与控制的目标 | 一个 ADB serial |
+| Android App / 应用 | 设备上要启动的 Android 应用 | `com.example.game` |
+| Package / 配置包 | 脚本、模板、映射和项目的数据集合 | `daily-config` |
+| Plugin / 插件 | 提供编辑界面或执行能力 | `gamer-yaml` |
+| Task / 任务 | 将执行入口、参数、设备与调度组合起来 | 每天执行一次签到脚本 |
+
+应用选择和配置选择独立：一个配置包可以声明适用于多个应用，配置包 ID 也不必与 Android 包名相同。包内数据按插件隔离，未安装插件的数据仍会保留。
+
+官方自动化插件使用 YAML V1。步骤由函数调用、`if`、`repeat`、`return` 组成；可视化编辑器与 YAML 原文编辑使用同一格式。例如：
+
+```yaml
+name: 启动并点击
+run:
+  - launch: {}
+  - sleep: 2s
+  - tap: [0.5, 0.8]
+  - log: 操作完成
+```
+
+此例启动设备当前选择的应用，等待后点击相对坐标位置。需要适应画面变化时，可结合模板和 `wait_find` 等函数判断状态。脚本没有 `version` 字段；函数库使用 `automations/_function*.yaml`，默认文件为 `_function.yaml`。
+
+入门操作见 [YAML 自动化教程](docs/guides/yaml-tutorial.md)，完整语法与函数说明见 [YAML 参考](docs/reference/YAML.md)。
+
+### 数据存放与导出
+
+源码启动默认将数据放在 `server/data/`：
+
+```text
+server/data/
+├── gamer.db                    # 设备、任务、预设、运行与日志
+├── extensions/                 # 已安装插件与生命周期状态
+├── media/                      # 视频、录制与媒体元数据
+└── packages/<package-id>/
+    ├── package.toml            # 配置包信息、目标应用、插件依赖
+    ├── shared/                # 包内共享保留区
+    └── plugins/
+        ├── gamer-yaml/         # automations/、templates/
+        ├── gamer-keymap/       # mappings/
+        └── gamer-video/        # projects/
+```
+
+配置包通过 `.gamerpkg` 导入导出，插件通过 `.gplugin` 分发。配置包导出默认登记媒体引用；需要把视频一起带走时，在导出中选择包含媒体。配置包导出不包含全局设备、任务或插件安装状态；完整备份需在停机后保存数据目录和本机配置。
+
+旧 `gamer.*` 插件身份的一次性转换工具见 [convert-plugin-ids.py](tools/convert-plugin-ids.py)，适用范围见 [ADB 与插件拆分报告](docs/reports/gamer-adb-plugin-split-report.md)。新安装无需执行转换。
+
+## 开发与构建
+
+### 仓库结构
+
+```text
+gamer/
+├── server/                     # Rust Core：设备、WebRTC、资源、媒体、运行、任务和插件机制
+├── web/                        # Vue 3 主界面与插件 UI 宿主
+├── plugins/
+│   ├── gamer-yaml/             # 自动化、函数、模板、WASM 解释器
+│   ├── gamer-keymap/           # 按键映射 UI 与 WASM 输入规则
+│   └── gamer-video/            # 视频工作台与项目，使用 Core 媒体和录制能力
+├── sdk/                        # 插件接口、UI SDK 与独立示例
+├── launcher/                   # Windows 安装启动与更新管理
+├── tools/                      # 插件构建、质量检查与开发工具
+├── release/                    # 依赖锁、发布契约与打包脚本
+├── docs/                       # 使用指南、接口参考、设计规范与报告
+└── gamer.ps1                   # 本地前后端进程管理
+```
+
+### 日常命令
+
+在仓库根目录执行：
 
 ```powershell
-$env:GAMER_LAUNCHER_RELEASE_MANIFEST = '<manifest 文件路径或 URL>'
-$env:GAMER_ADMIN_PASSWORD = '<首次登录口令>'
-.\gamer-launcher.exe start
+.\gamer.ps1 status                 # 查看状态和最近日志
+.\gamer.ps1 stop                   # 停止前后端
+.\gamer.ps1 restart                # 使用现有构建重启
+.\gamer.ps1 restart -Build         # 重新构建服务端后重启
+.\gamer.ps1 rebuild                # 构建前后端并重启
+.\gamer.ps1 start -BackendOnly     # 只启动服务端
+.\gamer.ps1 start -FrontendOnly    # 只启动前端开发服务
 ```
 
-服务端提供受保护的 `GET /api/system/info`、`GET /api/system/update`、
-`POST /api/system/update/check`、`POST /api/system/update/download`、
-`POST /api/system/update/install`、`POST /api/system/update/rollback` 和
-`PUT /api/system/update/policy`。检查、下载、安装、回滚均为异步协调入口，安装后重启导致连接
-短暂断开属于正常流程；轮询 update 状态，并用 `system/info` 的 `app.version` 与 `boot_id`
-判断新进程是否已生效。未配置 manifest 来源时检查会返回无可用更新；直跑服务或 Docker 模式
-未由 launcher 管理时，更新动作返回 `update_not_managed`。
-
-### 方式二：Docker 一键部署（开发或自建镜像）
-
-```bash
-# 1. 构建一体化镜像（必须在仓库根执行：stage1 pnpm 构建前端 → stage2 cargo 编译服务端 →
-#    运行时层内置 adb / ffmpeg / scrcpy jar / 前端静态页，无需宿主机先装 Node）
-docker build -t gamer .
-
-# 2. 启动服务端。redroid 声明了 profile：默认 up 只启动 gamer 服务端，
-#    需要 redroid 云手机时必须带 --profile redroid（会连同 gamer 一起拉起）
-docker compose up -d                    # 仅 gamer 服务端
-docker compose --profile redroid up -d  # gamer + redroid 云手机
-
-# USB 直连物理设备（Linux 宿主机）时叠加直通 override：
-docker compose -f docker-compose.yml -f docker-compose.usb.yml up -d
-```
-
-- 访问 `http://<服务器IP>:8443`，使用管理员账号登录。认证凭据只有配置的 Argon2id PHC `[auth].password_hash`，或开发时由 `GAMER_ADMIN_PASSWORD` 在进程内生成；没有凭据时 fail closed，不存在默认账号或默认密码。登录成功后服务端通过 `HttpOnly; SameSite=Strict` Cookie 维护会话，生产部署请通过 HTTPS 反向代理暴露。
-- `gamer` 容器默认**不带特权**运行；网络类设备（redroid / WiFi adb / 模拟器）
-  无需宿主机特权，USB 直通所需的 device 映射由 `docker-compose.usb.yml` 承载
-- **运行数据目录**（唯一口径 = 仓库的 `server/data/`，容器内 `/app/data`）：
-
-  | 内容 | 性质 | 来源 |
-  |---|---|---|
-  | `packages/<package-id>/{package.toml,shared/,plugins/<plugin-id>/}` | 业务分区资源与 Package 元数据（插件目录语义归插件：automations（含 `_function*.yaml` 函数库）/templates/mappings/projects） | 使用中自动创建（gitignore，零业务资源随仓库分发） |
-  | `media/` `extensions/` | 媒体素材库与已装插件 | 导入/录制与插件安装时生成（gitignore） |
-  | `gamer.db` | 运行期持久化 | 首次启动自动生成（gitignore） |
-  | 其他临时文件 | 运行期产物 | 自动创建（gitignore） |
-
-  镜像不含业务数据、不声明 VOLUME 匿名卷，compose 的绑定挂载不会遮蔽种子分区；
-  自定义服务端配置时把本地 `config.toml` 挂到容器 `/app/config.toml`
-  （镜像未内置配置文件，缺省走程序默认值）。本机 `cargo run` 与容器不要同时
-  使用同一数据目录——同一 SQLite 库被两套进程并行打开有损坏风险。
-- redroid 容器启动后，在「设备列表」添加设备：类型 redroid、地址 `redroid:5555`、
-  屏幕模式虚拟屏 `1920x1080`、游戏包名填你的游戏
-
-发布镜像使用仓库现有的 release compose，不在主机上构建完整包：
+需要在终端直接调试时，可分别运行：
 
 ```powershell
-$env:GAMER_IMAGE = 'ghcr.io/<owner>/gamebot:<version>'
-docker compose -f docker-compose.release.yml up -d
-
-# 也可固定到摘要，便于可审计地回滚。
-$env:GAMER_IMAGE = 'ghcr.io/<owner>/gamebot@sha256:<digest>'
-docker compose -f docker-compose.release.yml up -d
-```
-
-`docker-compose.release.yml` 不包含 launcher；Docker 更新由主机/镜像部署系统替换 image，回滚
-就是重新部署已知可用的旧 digest，并保留 `gamer-data` 卷。Docker 模式不能使用
-`/api/system/update/*` 的 launcher 托管安装/回滚。
-
-### 方式三：本地开发
-
-```bash
-# 服务端
-cd server
+# 终端一，从仓库根目录进入 server，确保资产相对路径正确
+Set-Location server
 cargo run
 
-# 前端（开发热更新，代理到 8443）
-cd web
-corepack enable pnpm    # 首次使用执行一次；Corepack 按 packageManager 字段自动用对 pnpm 版本
-pnpm install
-VITE_PROXY_TARGET=http://localhost:8443 pnpm dev
-# 打开 http://localhost:5173
+# 终端二，从仓库根目录启动前端
+pnpm --dir web dev
 ```
 
-## 设备接入
+已有进程时先停掉对应服务，避免端口冲突。`pnpm --dir web build` 会先构建插件 UI，再将主前端输出至 `server/web-dist/`，由服务端在 8443 端口托管。
 
-| 方式 | 设备配置 | 说明 |
-|---|---|---|
-| redroid 容器 | 类型 `redroid`，地址 `redroid:5555` | Docker 内 Android，与服务端同网 |
-| USB 直连 | 类型 `usb`，地址留空 | 容器场景需叠加 `docker-compose.usb.yml` 直通 `/dev/bus/usb` |
-| 无线 adb | 类型 `wifi`，地址 `192.168.x.x:5555` | 手机开启无线调试 |
-| 模拟器 | 类型 `emu`，地址 `127.0.0.1:7555` | MuMu/雷电等 adb 端口 |
+### 官方插件开发
 
-**屏幕模式**：
-- `镜像主屏`：投物理屏幕，各设备分辨率不同
-- `虚拟屏`：统一分辨率（预设 1920x1080 / 1080x1920 / 1280x720，可自定义宽高+DPI），
-  需 Android 10+；连接只建立投屏会话，应用由 Console 启动按钮或 YAML V1 函数 `launch` 显式启动
+| 插件 | 功能 | 开发说明 |
+| --- | --- | --- |
+| `gamer-yaml` | 自动化、函数、模板与 YAML 解释器 | [README](plugins/gamer-yaml/README.md) |
+| `gamer-keymap` | 按键映射编辑与输入规则 | [README](plugins/gamer-keymap/README.md) |
+| `gamer-video` | 素材、录制、时间轴与视频项目 | [README](plugins/gamer-video/README.md) |
 
-**WebRTC 网络**：服务端不内置 STUN/TURN，默认使用 host candidate 直连，适合同机或局域网。
-Docker bridge / NAT 场景需在 `server/config.toml` 配置 `rtc_external_ip`、
-`rtc_udp_port`、`rtc_external_port` 并发布对应 UDP 端口；跨公网部署需自行提供可达网络路径。
+每个插件目录包含自己的 `manifest.toml`、README、构建入口和 UI 工程。YAML、按键映射插件另有 WASM guest；视频插件使用 builtin 执行类型。
 
-## YAML 脚本语法
+```powershell
+# 单独构建一个插件，保留其他插件的发行条目
+.\plugins\gamer-yaml\build.ps1
+.\plugins\gamer-keymap\build.ps1
+.\plugins\gamer-video\build.ps1
 
-YAML 自动化脚本为 **V1 唯一版本**（无 `version` 字段，旧 v3/v2 语法无兼容与迁移工具），完整语法与示例见 **[docs/reference/YAML.md](docs/reference/YAML.md)**。
-从零上手见 **[YAML 自动化教程](docs/guides/yaml-tutorial.md)**（2026-09-14 更新，含界面操作、找图点击、参数、函数复用与定时任务）。
-核心模型：步骤 = 函数调用 / `if` / `repeat` / `return`；表达式 = 字面量 / `$name.field`；函数 = 插件原生函数 + 当前 Package `automations/_function*.yaml` 函数库（两种来源同名即冲突；统一命名空间，调用名 = 函数名）；执行预算与取消机制保留。
-可执行脚本、函数库和模板按 Package 存放在 `data/packages/<package-id>/plugins/gamer.yaml/{automations,templates}/`（函数库与自动化共用 `automations/`，文件名 `_function` 前缀 + `.yaml` 后缀 = 函数库，默认库 `_function.yaml`；REST 走通用 Package 资源 API `/api/packages/:pkg/plugins/gamer.yaml/resources[/*path]`；Console 的模板/自动化面板由 `gamer.yaml` 扩展提供，框选/上传模板即用；原生函数目录见 `GET /api/runners/gamer.yaml/functions`）。
+# 仅构建并同步某个插件的本地静态 UI
+node sdk/ui/build-modules.mjs gamer-yaml
+```
 
-## API 一览
+插件产物写入 `web/public/plugins/`，市场索引为 `web/public/registry.json`。在「插件」页导入或更新对应归档，保存编辑内容后刷新，即可加载新 UI。已安装插件的 UI 来自安装归档；仅同步本地静态 UI 不会替换已安装的归档。
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | /health/ready | 就绪探针，公开 |
-| POST | /api/login | 登录 |
-| POST | /api/logout | 退出并立即使当前 Cookie 会话失效 |
-| GET | /api/system/info | 系统/应用版本与运行信息，需认证 |
-| GET | /api/system/update | 更新状态，需认证 |
-| POST | /api/system/update/check | 检查更新，需认证；launcher 托管模式为异步入口 |
-| POST | /api/system/update/download | 下载更新，需认证；launcher 托管模式为异步入口 |
-| POST | /api/system/update/install | 安装更新，需认证；可能触发服务重启 |
-| POST | /api/system/update/rollback | 提交前的受支持回滚入口，需认证 |
-| PUT | /api/system/update/policy | 更新策略，需认证 |
-| GET/POST | /api/devices | 设备列表 / 创建 |
-| POST | /api/devices/scan | 扫描 `adb devices -l` 并自动注册新设备（前端"刷新"时调用） |
-| PUT/DELETE | /api/devices/:id | 更新配置（变更后自动重连）/ 删除 |
-| POST | /api/devices/:id/connect | 连接设备 |
-| POST | /api/devices/:id/screenshot | 截图（PNG） |
-| POST | /api/devices/:id/control | 手动控制（tap/swipe/text/press/home/back/recents/start_app/rotate/clipboard） |
-| POST | /api/runs | 统一执行入口：`{runner_id, entrypoint, payload, device_id}`（异步 202 + run_id） |
-| GET | /api/runs/:run_id | 查询运行 |
-| POST | /api/runs/:run_id/cancel | 取消运行 |
-| GET | /api/runners | 已注册 Runner 列表（含所属扩展） |
-| GET | /api/schedule-providers | 已注册调度 provider 列表（内置 `cron`） |
-| GET/POST | /api/tasks | 定时任务列表 / 保存（`schedule{provider_id,config}` + `runner{runner_id,entrypoint,payload}`） |
-| POST | /api/tasks/:id/run | 立即执行 |
-| POST | /api/tasks/:id/suspend&#124;resume&#124;cancel&#124;enable&#124;disable | 任务状态操作 |
-| GET/POST | /api/task-presets | 任务预设（Package 内 `plugins/*/presets/` 导入时自动发布，一键实例化） |
-| GET/POST/PUT/DELETE | /api/packages[/:pkg] | Package（配置数据上下文）列表/创建/详情/更新/复制/删除/兼容性 |
-| POST | /api/packages/import | 导入 .gamerpkg/zip（可选 `X-Expected-Sha256` 校验头；已存在 409，`?overwrite=true` 原子替换） |
-| POST | /api/packages/:pkg/export | 导出 .gamerpkg（默认仅媒体引用登记，`?include_media=true` 附素材字节） |
-| GET/POST/PUT/DELETE | /api/packages/:pkg/plugins/:plugin/resources[/*path] | 插件资源三元组 CRUD（文本 JSON / templates PNG 字节；`expected_version` 乐观并发；插件隔离在自己目录内） |
-| POST | /api/capabilities/vision/test | 模板匹配测试（设备截图或 `media_id+pts_us/frame_index` 离线帧，二者互斥） |
-| GET/POST | /api/media[/:id] | 媒体库：导入/列表/详情/删除（被 Package 引用时 409）/引用登记 |
-| GET | /api/media/:id/frames[/:index] | 展示序帧表与按帧索引取帧（`X-Frame-Index`/`X-Frame-Pts-Us` 帧身份头） |
-| POST | /api/recording/start&#124;stop&#124;cancel | 设备录制（服务端权威，浏览器断开不中断；stop/cancel 幂等） |
-| GET | /api/extensions | 已装扩展列表（含 UI 贡献与执行类型 wasm/builtin；`gamer.video` 为 builtin、无 guest） |
-| POST | /api/extensions/inspect | 安装前检视（来源标注/权限增量/执行形态；可选 `x-expected-sha256`） |
-| POST | /api/extensions | 安装扩展（免签名；官方来源仅标注，权限确认头必需；安装即启用启动） |
-| POST | /api/extensions/:id/enable&#124;disable&#124;update | 扩展生命周期操作（`enable` 直接启动，`disable` 自动停止；`DELETE /api/extensions/:id/:version` 卸载） |
-| POST | /api/extensions/:id/call | 调用扩展动作（declarative 按钮 / plugin.call / native 动作） |
-| GET/DELETE | /api/logs | 运行日志 / 清空 |
-| WS | /ws/device/:id | WebRTC 信令（offer → answer） |
+**独立更新范围**：在现有 SDK/ABI 内，插件 UI 和 WASM 可以独立构建、安装、更新。`host/` 中的 Rust 适配代码仍随服务端编译；修改原生能力、资源校验或 WIT 接口时，需要同步更新服务端。
 
-执行以 `run_id` 标识一次运行实例。统一执行入口（`POST /api/runs`）、函数测试或“立即运行任务”采用异步返回：
-接受后返回 HTTP `202` 和 `run_id/resolved_args`，前端按 `run_id` 查询或取消；同一设备已有活动运行时返回 `409`，并附带当前运行信息，避免不同 runner 并发控制同一设备。脚本/函数保存、运行和任务保存共用 V1 校验（由 `gamer.yaml` 扩展承载），失败返回结构化诊断；旧 `version: 3` 源一律报 `yaml.version.removed` 拒绝诊断，不执行迁移，也无旧版 fallback。
+插件界面支持声明式表单、沙盒 iframe 和宿主 UI 模块。宿主模块需显式声明 `ui.host` 权限，与主页面共享执行环境；安装时应核对权限和来源。第三方插件可从 [SDK 示例](sdk/README.md) 开始，接口与界面要求见 [插件开发指南](docs/guides/plugin-dev.md) 和 [UI 设计规范](docs/design/gamer-ui-spec.md)。
 
-## 技术要点
+### 验证改动
 
-- **scrcpy 协议**（对齐 v3.3.3）：视频 socket 先 64B 设备名 + 12B codec meta
-  （codec_id+width+height），随后 12B 帧头（pts_and_flags u64 + size u32）+ 负载；
-  控制消息类型 0~22（keycode/text/touch/scroll/clipboard/start_app 等），大端序
-- **WebRTC**：webrtc-rs 服务端 peer，H.264 Annex-B 帧经 H264Payloader 打包 RTP 推流
-  （SPS/PPS 自动 STAP-A），DataChannel `control` 接收浏览器指令
-- **WebRTC 快速出画面（关键帧策略）**：
-  - scrcpy 启动参数 `video_codec_options=i-frame-interval=2` 强制编码器每 ~2s 产 IDR
-  - 服务端帧缓存维护**最近完整 GOP**（自最近 IDR 起的所有帧），
-    新 viewer 连接时 pusher **先重放 GOP**（config+IDR+P 帧，RTP 时间戳与实时流同一时间轴），
-    浏览器无需等待下一个 IDR 即可开始解码——静态画面下也能立即出画面
-- **帧缓存**：内存保留 SPS/PPS 与最近完整 GOP；截图/模板匹配时按精确帧序号临时调用 ffmpeg 解码，同设备同一帧的并发请求共享一次解码；延迟以固定夹具基准为准，无 ffmpeg 时自动降级 `adb exec-out screencap -p`
-- **设备自动发现**：前端"刷新"会调用 `/api/devices/scan`（`adb devices -l`），
-  自动注册未入库的设备（USB/无线/模拟器自动识别类型与型号，默认镜像模式），
-  已注册设备跳过；注册后可在设备列表 ✏️ 编辑为虚拟屏等配置
-- **已知坑**：
-  - tokio `TcpStream::into_split()` 的写半在 drop 时会发送 FIN（`shutdown_on_drop`），
-    会导致 scrcpy server 关闭连接——视频 socket 必须保留整个 TcpStream
-  - `max_fps=0` / `max_size=0` 等 0 值参数不要传给 scrcpy server（与官方客户端行为一致）
-  - 模板匹配引擎会把截图与模板等比缩放到最长边 540px 加速，命中坐标会映射回原图
-  - **ffmpeg 路径失效 → 连接控制黑屏**：`config.toml` 的 `ffmpeg_path` 指向不存在的
-    可执行文件时，帧缓存（FrameCache）启动失败，WebRTC 新 viewer 的初始推流帧
-    （SPS/PPS + 最近 GOP）为 None；scrcpy 只在会话开始时发一次 SPS/PPS，后连接的
-    浏览器永远收不到参数集，H.264 解码器无法初始化 → 即使 RTP 帧在流也一直黑屏。
-    排查：服务端日志出现 `frame cache unavailable` 且无 `pusher replayed initial GOP`。
+```powershell
+# 前端主界面与各插件 UI 测试
+pnpm --dir web test:run
 
-## 真机联调记录（2026-08-16，红米 25079RPDCC / Android 16）
+# 服务端测试和静态检查
+cargo test --manifest-path server/Cargo.toml
+cargo clippy --manifest-path server/Cargo.toml --all-targets -- -D warnings
 
-### 镜像模式（display_id=0）
-- ✅ 无线 adb（mDNS serial）设备接入 + scrcpy 会话建立，H.264 视频流持续稳定（60fps）
-- ✅ 控制注入：tap / swipe / 文本 / HOME / BACK / 音量按键
-- ✅ `start_app` 启动星穹铁道（com.miHoYo.hkrpg）成功
-- ✅ 模板匹配：真实游戏画面命中（置信度 0.98 / 0.85）
-- ✅ YAML 脚本：`wait_find`（模板出现）→ `tap` → `sleep` → `tap` 全链路执行并输出日志
-- ✅ 定时任务：cron 触发 + 立即执行 + 触发点防重复
+# 本地完整质量检查，包含构建
+.\tools\ci-local.ps1
+```
 
-### 虚拟屏模式（new_display=1920x1080/420）✅ 重点验证
-- ✅ scrcpy-server 以 `new_display=1920x1080/420` 启动，设备端创建虚拟显示器（id=91，FLAG_PRESENTATION）
-- ✅ 视频流 meta 为 **1920x1080**（虚拟屏分辨率，非物理屏 3008x1880）
-- ✅ 已验证 `start_app` 把星穹铁道启动到虚拟屏（`on display 91`）；当前版本由 Console 或脚本显式触发
-- ✅ 截图（ffmpeg 帧缓存软解视频流）返回 **1920x1080** 虚拟屏画面
-- ✅ 模板匹配在虚拟屏分辨率下工作：命中 (757,401) 置信度 **0.97**
-- ✅ 触控注入作用于虚拟屏坐标系（1920x1080 归一化）
+Rust 测试中的 WASM 场景会构建 guest，需要预先安装 `wasm32-unknown-unknown`。默认服务端包含 WASM 运行时；`--no-default-features` 用于验证无 WASM 构建路径，该构建不提供 WASM 插件执行能力。
 
-> 注意：`adb screencap -d` **无法截取 scrcpy 创建的虚拟屏**（返回 "Display Id not valid"），
-> 虚拟屏模式截图必须依赖帧缓存（ffmpeg 软解视频流）。Docker 镜像已内置 ffmpeg。
+## 配置与排查
 
-### WebRTC 画面（2026-08-16）✅ 信令/协商/出画面链路已验证
-- ✅ WS 信令：浏览器 `ws://host/ws/device/:id` → 发 `{type:'offer', sdp:{type,sdp}}` → 收 answer
-- ✅ H264 协商：`negotiated video: payload_type=96 ssrc=...`（动态协商，非硬编码）；
-  answer 含 `m=video 9` + `a=sendonly` + host/srflx 候选 + BUNDLE（端口非 0）
-- ✅ 修复"连接后黑屏"：根因是 scrcpy 会话长连接下静态画面长时间无 IDR，浏览器无帧可解码。
-  方案：`i-frame-interval=2` 强制周期 IDR + 帧缓存维护最近 GOP、pusher 启动时重放
-  （实测日志 `pusher replayed initial GOP: 1 frames, 67096 bytes`，浏览器立即出画面）
-- ✅ 前端已接入真实 API + WebRTC：设备列表/控制台画面/触控 DataChannel/模板测试/脚本/任务/日志
-- ✅ 设备列表"刷新"自动扫描 adb 设备入库（`POST /api/devices/scan`），设备卡片支持 ✏️ 编辑
+完整配置说明以 [server/config.example.toml](server/config.example.toml) 为入口，本机修改保存在不提交版本控制的 `server/config.toml`。
 
-## 开源协议
+| 配置项 | 用途 |
+| --- | --- |
+| `port`、`data_dir` | 服务端端口与数据目录 |
+| `adb_path` | `adb` 命令名或可执行文件路径 |
+| `ffmpeg_path` | FFmpeg 路径；视频功能还需要对应的 `ffprobe` |
+| `scrcpy_server` | 与宿主协议匹配的 scrcpy server 资产路径 |
+| `fps`、`bitrate_mbps` | 默认帧率和视频码率 |
+| `idle_power_secs` | 无观看者、无脚本运行时的空闲低功耗等待时间 |
+| `rtc_external_ip`、`rtc_udp_port`、`rtc_external_port` | WebRTC 外部可达地址与端口 |
+| `[auth]` | 密码哈希、会话时限和登录限流 |
 
-- 本项目：MIT
-- scrcpy：Apache-2.0（仅使用其开源 scrcpy-server）
+常见问题：
+
+- **设备找不到**：在服务端电脑执行 `adb devices -l`，检查授权、在线状态和完整 serial；模拟器的 ADB 端口以其实际配置为准。
+- **网页正常但投屏黑屏**：检查 ADB、FFmpeg、scrcpy 路径，以及浏览器到服务端的 WebRTC UDP 连通性。
+- **工作台没有功能面板**：检查插件是否安装并启用、是否有启动错误，以及当前应用是否符合插件的目标应用声明。
+- **修改代码后没有变化**：Rust 修改后重新构建服务端；已安装插件 UI 修改后重新打包、更新并刷新页面。
+- **查看运行问题**：先看「日志」「设置」及 `gamer.ps1 status`，开发服务的文件日志位于 `server/`。更多记录见 [已知问题与排查](docs/PITFALLS.md)。
+
+## 文档入口
+
+| 主题 | 文档 |
+| --- | --- |
+| 设备连接 | [ADB 设备接入](docs/reference/DEVICE_ACCESS.md) |
+| 自动化入门与语法 | [教程](docs/guides/yaml-tutorial.md) · [YAML 参考](docs/reference/YAML.md) |
+| 插件开发 | [开发指南](docs/guides/plugin-dev.md) · [Host API](docs/reference/PLUGIN_API.md) · [SDK](sdk/README.md) |
+| 界面与交互 | [UI 设计规范](docs/design/gamer-ui-spec.md) · [iframe UI SDK](sdk/ui/README.md) |
+| 发布与更新 | [发布手册](docs/guides/RELEASE.md) · [更新指南](docs/guides/UPDATE.md) |
+| 架构约定 | [开发约定](AGENTS.md) · [架构决策](docs/reference/adr/) |
+| 第三方组件 | [NOTICE](licenses/NOTICE.md) · [依赖版本与来源](release/dependencies.lock.toml) |
