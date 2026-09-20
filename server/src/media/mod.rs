@@ -2017,7 +2017,23 @@ mod tests {
     #[test]
     fn ffprobe_path_derives_from_ffmpeg() {
         assert_eq!(derive_ffprobe_path("ffmpeg"), "ffprobe");
-        // Path 组件比较（Windows 分隔符差异不影响断言）
+        assert_eq!(derive_ffprobe_path("ffmpeg.exe"), "ffprobe.exe");
+        // 按当前平台构造路径；Unix 不把反斜杠识别为目录分隔符。
+        let directory = Path::new("tools").join("bin");
+        for (source, expected) in [
+            ("ffmpeg", "ffprobe"),
+            ("ffmpeg.exe", "ffprobe.exe"),
+            ("avconv", "ffprobe"),
+            ("avconv.exe", "ffprobe"),
+        ] {
+            assert_eq!(
+                PathBuf::from(derive_ffprobe_path(
+                    directory.join(source).to_str().unwrap()
+                )),
+                directory.join(expected)
+            );
+        }
+        #[cfg(windows)]
         assert_eq!(
             PathBuf::from(derive_ffprobe_path("C:\\tools\\ffmpeg.exe")),
             Path::new("C:\\tools").join("ffprobe.exe")
@@ -2025,11 +2041,6 @@ mod tests {
         assert_eq!(
             PathBuf::from(derive_ffprobe_path("/usr/local/bin/ffmpeg")),
             Path::new("/usr/local/bin").join("ffprobe")
-        );
-        // 非 ffmpeg 前缀 → 同目录 ffprobe
-        assert_eq!(
-            PathBuf::from(derive_ffprobe_path("C:\\tools\\avconv.exe")),
-            Path::new("C:\\tools").join("ffprobe")
         );
     }
 

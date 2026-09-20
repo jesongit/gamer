@@ -323,10 +323,11 @@ mod tests {
             .arg(&clip)
             .output()
             .expect("生成测试视频失败（本机需 ffmpeg）");
-        if !gen.status.success() {
-            eprintln!("跳过：本机无 ffmpeg");
-            return;
-        }
+        assert!(
+            gen.status.success(),
+            "生成测试视频失败: {}",
+            String::from_utf8_lossy(&gen.stderr)
+        );
         let bytes = std::fs::read(&clip).unwrap();
         let root = tempfile::tempdir().unwrap();
         let media = MediaService::open(root.path().to_path_buf(), "ffmpeg".into()).unwrap();

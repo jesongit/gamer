@@ -41,6 +41,14 @@ foreach ($tool in @('cargo', 'node')) {
         exit 1
     }
 }
+if (-not $SkipRust) {
+    foreach ($tool in @('ffmpeg', 'ffprobe')) {
+        if ($null -eq (Get-Command $tool -ErrorAction SilentlyContinue)) {
+            Write-Host "[precheck] 媒体与离线视觉测试缺少工具：$tool（请安装并确保在 PATH 中）" -ForegroundColor Red
+            exit 1
+        }
+    }
+}
 if ($null -eq (Get-Command pnpm -ErrorAction SilentlyContinue)) {
     # 与 CI 的 Corepack 方案对齐：版本由 web/package.json packageManager 字段固定
     Write-Host '[precheck] 未找到 pnpm，尝试 corepack enable ...' -ForegroundColor Yellow

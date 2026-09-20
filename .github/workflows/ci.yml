@@ -41,9 +41,7 @@ jobs:
         run: ./tools/check-version.ps1
 
   # ---------- Rust 服务端门禁 ----------
-  # 单测已验证不依赖 adb/ffmpeg/Android 设备与真实 server/config.toml：
-  # #[cfg(test)] 区段对 adb|ffmpeg|scrcpy|config::load 的引用为 0，
-  # config::load() 仅由 main 启动路径调用，cargo test/build 均不会触达。
+  # 媒体与离线视觉测试需要 ffmpeg/ffprobe，不依赖 Android 设备或本机配置。
   rust:
     name: rust (fmt / clippy / test / build-release)
     runs-on: ubuntu-latest
@@ -56,6 +54,13 @@ jobs:
       GAMER_PROFILE: dev
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install media test dependencies (ffmpeg / ffprobe)
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
+          ffmpeg -version
+          ffprobe -version
 
       - name: Install stable Rust toolchain (rustfmt + clippy)
         uses: dtolnay/rust-toolchain@stable

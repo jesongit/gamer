@@ -388,3 +388,4 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - **Linux Rust 测试模块路径**：内联模块中的 path 属性经不存在的目录再使用 ../ 回退，在 Windows 可解析而 Linux 会 ENOENT；将子测试放到实际的 service/tests/ 目录并使用普通 mod 声明。
 - **前端版本检查**：配置包默认版本不等于产品版本；仅允许具名 PACKAGE_INITIAL_VERSION/PACKAGE_EMPTY_VERSION 常量声明，其他同文件产品版本字面量仍须拒绝。
 - **平台条件编译**：Windows 检查不会解析 Unix 分支中的类型；目录同步使用 fs::File 全限定路径，避免仅在 Linux CI 出现未导入 File，平台专用改动须核对对应平台构建。
+- **媒体测试 CI 依赖**：干净 Ubuntu runner 未必自带 FFmpeg；CI 显式安装并检查 ffmpeg/ffprobe，本地门禁提前检查 PATH。路径派生测试用当前平台的 Path 组件构造输入，Windows 盘符与反斜杠断言仅在 Windows 执行，生成测试视频失败必须报错而非当作通过。
