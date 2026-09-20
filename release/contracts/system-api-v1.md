@@ -56,7 +56,7 @@
 
 ## 2. `GET /api/system/info`
 
-成功 `200`，响应字段冻结如下（fixture：`system-info.success.json`、`system-info.degraded-docker.json`）：
+成功 `200`，响应字段冻结如下（fixture：`system-info.success.json`、`system-info.degraded-direct.json`）：
 
 ```json
 {
@@ -88,16 +88,16 @@
 | `app.built_at` | string | RFC3339 UTC 时间戳；无注入时 `unknown` |
 | `app.channel` | string | 枚举 `stable` \| `beta` \| `dev` \| `unknown` |
 | `app.target` | string | Rust target triple（如 `x86_64-pc-windows-msvc`）；`x86_64`+OS 兜底形式（如 `x86_64-windows`）允许 |
-| `deployment.mode` | string | 枚举 `launcher`（便携托管）\| `direct`（直跑）\| `docker`（容器） |
-| `deployment.update_strategy` | string | 枚举 `managed` \| `external` \| `unsupported`；与 mode 的映射冻结为 `launcher→managed`、`docker→external`、`direct→unsupported` |
+| `deployment.mode` | string | 枚举 `launcher`（便携托管）\| `direct`（直跑） |
+| `deployment.update_strategy` | string | 枚举 `managed` \| `unsupported`；与 mode 的映射冻结为 `launcher→managed`、`direct→unsupported` |
 | `schema.db` | number | 当前 SQLite schema 版本（当前基线 = 1） |
 | `schema.file` | number | 当前文件布局 schema 版本（当前基线 = `data/<pkg>/{yaml,func,tmpl}` = 1） |
 | `schema.rollback_floor` | number | 可自动回滚的最低兼容 schema（对应 manifest `rollback_floor`，语义由 ARC-004 的 `schema-policy.md` 冻结） |
 | `dependencies.<id>.status` | string | 枚举 `ready` \| `missing` \| `broken`（存在但校验/探针失败）；`unknown` 仅允许在探针尚未完成时出现 |
 | `dependencies.<id>.version` | string \| null | 探测到的真实版本；不可得时 `null` |
-| `dependencies.<id>.source` | string | 枚举 `managed`（launcher/部署物锁定提供）\| `system`（系统 PATH）\| `custom`（用户显式保存路径）；Docker 模式恒为 `managed`（随镜像提供并锁定） |
-| `dependencies.<id>.binding` | string | 枚举 `runtime`（launcher 管理的 `runtime/<id>/<version>/` 独立组件目录）\| `application`（随应用版本目录 `versions/<semver>/assets` 分发）\| `external`（不由部署内组件目录绑定：system/custom 来源、Docker 镜像内置的 adb/ffmpeg）；`scrcpy` 恒为 `application`（与应用版本强绑定，禁止独立升级） |
-| `capabilities.*` | boolean | `check` / `download` / `install` / `rollback` 四布尔；仅由 `deployment` 决定：`launcher` 模式且 IPC 通道建立 → 全 true，`docker`/`direct` → 全 false。**策略 `off` 只关闭自动行为，不改变 capability** |
+| `dependencies.<id>.source` | string | 枚举 `managed`（launcher/部署物锁定提供）\| `system`（系统 PATH）\| `custom`（用户显式保存路径） |
+| `dependencies.<id>.binding` | string | 枚举 `runtime`（launcher 管理的 `runtime/<id>/<version>/` 独立组件目录）\| `application`（随应用版本目录 `versions/<semver>/assets` 分发）\| `external`（不由部署内组件目录绑定：system/custom 来源）；`scrcpy` 恒为 `application`（与应用版本强绑定，禁止独立升级） |
+| `capabilities.*` | boolean | `check` / `download` / `install` / `rollback` 四布尔；仅由 `deployment` 决定：`launcher` 模式且 IPC 通道建立 → 全 true，`direct` → 全 false。**策略 `off` 只关闭自动行为，不改变 capability** |
 | `startup.stage` | string | 枚举 `starting` \| `maintenance_gate` \| `ready`；对齐计划 §6.8 activation gate——候选进程在闸内（仅探针/健康/激活可达）时报 `maintenance_gate`，业务路由打开后报 `ready` |
 | `startup.boot_id` | string | 进程每次启动生成的 UUID v4；重启必变（前端据此判定「服务确实重启过」） |
 
@@ -139,7 +139,7 @@
 | `update_id` | string \| null | 当前/最近一次升级事务 id（journal 的 update id）；无事务时 `null`。格式建议 `upd-<yyyymmdd>-<8hex>`（建议值） |
 | `candidate` | object \| null | 已知的新版本候选（来自已验签 manifest `release` 块）；无候选时 `null`。`size_bytes` = 应用组件包大小 |
 | `progress` | object \| null | 仅 `downloading` 态非空：`bytes_done` / `bytes_total`；其他态恒为 `null` |
-| `policy` | object | §6 定义的当前生效策略（`docker`/`direct` 模式同样返回） |
+| `policy` | object | §6 定义的当前生效策略（`direct` 模式同样返回） |
 | `last_error` | object \| null | 最近一次失败的 `{ "code": <§7 错误码>, "message": <无泄露描述> }`；无失败时 `null` |
 | `updated_at` | string | 状态最后变更时间（RFC3339 UTC） |
 
@@ -149,7 +149,7 @@
 
 - **202 = 已受理，进入后台协调器**；body 冻结为 `{ "update_id": "...", "state": "<11 态之一>" }`。浏览器**不能也不需要**等一个长 HTTP 请求（计划 §6.4），后续以轮询 `GET /api/system/update` 获取进展。
 - `install` 尤其如此：受理后协调器走「空闲门禁 → 停机 drain → 快照 → 迁移 → 切换 → 候选启动（activation gate）→ 提交/回滚」，期间 **HTTP 服务会重启、连接会断开**。前端断连**不得**显示「安装失败」；重连后以 `GET /api/system/info` 的 `app.version` / `startup.boot_id` 变化 + `GET /api/system/update` 判定结果（计划 §11.6，WEB-004）。
-- 每个动作端点可能同步失败（受理前即拒绝），状态码与错误码见 §7；`docker`/`direct` 模式下四个动作端点一律 `409 update_not_managed`。
+- 每个动作端点可能同步失败（受理前即拒绝），状态码与错误码见 §7；`direct` 模式下四个动作端点一律 `409 update_not_managed`。
 
 ### 4.2 状态 × 动作受理矩阵（冻结）
 
@@ -250,14 +250,14 @@
 | `freeze_window_minutes` | 整数，cron 冻结窗口分钟数（安装门禁要求距下一次启用 cron 触发 **大于** 该值）；范围 0~1440，**建议默认 30** |
 
 - 校验失败 → `400 { "code": "invalid_argument", "message": "...", "details": { "field": "<字段名>" } }`。
-- `docker`/`direct` 模式允许保存策略（capability 全 false 时策略不产生任何自动行为），不返回 `update_not_managed`。
+- `direct` 模式允许保存策略（capability 全 false 时策略不产生任何自动行为），不返回 `update_not_managed`。
 - 产品默认值（`notify` / `02:00-06:00` / 30 分钟）为**建议值**，可由配置文件覆盖；字段结构或枚举变更需 bump contract 版本。
 
 ## 7. 统一错误码（11 个，冻结）
 
 | 错误码 | 触发条件 | HTTP 状态码 | 可重试 | `details` 冻结键 |
 |---|---|---|---|---|
-| `update_not_managed` | `docker`/`direct` 模式（`update_strategy != managed`）调用 check/download/install/rollback | 409 | 否（部署模式不变则恒定；UI 应隐藏/禁用对应按钮） | 无 |
+| `update_not_managed` | `direct` 模式（`update_strategy != managed`）调用 check/download/install/rollback | 409 | 否（部署模式不变则恒定；UI 应隐藏/禁用对应按钮） | 无 |
 | `update_busy` | 已有升级/回滚事务进行中，或对非幂等动作（install/rollback）的并发第二个请求（计划 §11.4：两个 install 只有一个取得事务） | 409 | 是（轮询 `GET /api/system/update` 至事务结束后重试） | 无 |
 | `update_not_available` | 无已验签候选时请求 download/install（未检查、检查无新版本、候选已清理） | 409 | 条件性（出现新候选后可重试；同参数立即重试无意义） | 无 |
 | `update_not_ready` | install 门禁未满足（§4.3 六项之一） | 409 | 是（`details.blocking` 中的门禁满足后重试） | `blocking`: 数组，枚举见 §4.3 |
@@ -297,7 +297,7 @@
 | fixture | 场景 |
 |---|---|
 | `system-info.success.json` | launcher 模式 200 全量 |
-| `system-info.degraded-docker.json` | docker 模式 200（capability 全 false、external strategy） |
+| `system-info.degraded-direct.json` | direct 模式 200（capability 全 false、unsupported strategy） |
 | `system-info.unauthorized.json` | 未登录 401 |
 | `system-update.success.json` | GET 200，`state=staged` |
 | `system-update.failed-signature-invalid.json` | GET 200，`failed` + `signature_invalid` |

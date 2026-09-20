@@ -1,5 +1,6 @@
-# GameBot DB/文件 Schema 兼容与回滚承诺契约（ARC-004）
+# Gamer DB/文件 Schema 兼容与回滚承诺契约（ARC-004）
 
+> 当前代码（2026-09-20）：min=1 / max=4 / target=4；v3→v4 移除 devices.kind，地址及投屏设置保留。旧 binary 不能直接读取 v4，回退需恢复完整升级前快照。下方 v1/v2 示意表仅作历史契约示例。
 > 状态：**冻结**（批次 0 契约；变更须按 §8 与 DATA 轨代码、manifest 字段同步提交）
 > 编制日期：2026-08-31
 > 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §6.6/§6.7/§6.8/§11.3/§15/§17.2（ARC-004 两个 checklist 项）；目录属主见 `docs/guides/UPDATE_CONTRACT.md` §1，本文即其 §6 文件地图登记的 `release/contracts/schema-policy.md`
@@ -46,7 +47,9 @@
 |---|---|---|---|---|
 | v0.1.0 | 1 | 1 | 1 | v1 唯一基线：=1 校验后开放；=0 / >1 拒绝 |
 | v0.2.0（假设示例） | 1 | 2 | 2 | 引入迁移 1→2；可从 v1 库升级；DB=2 正常打开；DB≥3 拒绝 |
-| v0.1.1+（schema v3 收口，当前代码） | 1 | 3 | 3 | 1→2 Timer Core 数据迁移（旧 tasks 表数据并入 timer_tasks，runner_id=gamer.yaml）；2→3 Task 模型收口（legacy tasks 表删除、schedule_json 改写 provider/config 形态）；可从 v1/v2 库逐级升级；DB≥4 拒绝 |
+| v0.1.1+（schema v3 历史基线） | 1 | 3 | 3 | 1→2 Timer Core 数据迁移（旧 tasks 表数据并入 timer_tasks，runner_id=gamer-yaml）；2→3 Task 模型收口（legacy tasks 表删除、schedule_json 改写 provider/config 形态）；可从 v1/v2 库逐级升级；DB≥4 拒绝 |
+
+| 当前 schema v4 | 1 | 4 | 4 | 逐级迁移至 v4；3→4 删除 devices.kind，统一 ADB 身份；DB≥5 拒绝 |
 
 manifest 对应：`release.data_schema` = `target_schema`；`release.rollback_floor` 语义见 §6。
 
@@ -93,7 +96,7 @@ manifest 对应：`release.data_schema` = `target_schema`；`release.rollback_fl
 
 - DB 版本在旧 binary 兼容范围内（`user_version ≤ 旧binary.max_read_schema` 且 ≥ 其 `min_read_schema`）：允许直接切回旧 binary（current.json 指回），数据无损。
 - 超出兼容范围：不存在降级 migration（schema 只前进）；唯一途径是**恢复升级前快照**，且**必须明确提示将丢失 committed 之后产生的全部业务数据**；升级后数据无自动保留承诺。
-- 兼容判断一律用 §7 `inspect` 的输出，不做人工推算。Docker/直跑模式无 launcher、无自动回滚执行者：升级=换镜像 digest，回滚=切回旧 digest，同样受本兼容表与"too_new 拒绝启动"硬规则约束。
+- 兼容判断一律用 §7 `inspect` 的输出，不做人工推算。直跑模式无 launcher、无自动回滚执行者：升级=换镜像 digest，回滚=切回旧 digest，同样受本兼容表与"too_new 拒绝启动"硬规则约束。
 
 ### 6.3 rollback_floor 语义
 

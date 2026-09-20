@@ -184,7 +184,7 @@
 
 ## 7. 降级：UnsupportedUpdateController（冻结）
 
-- **直跑 server / Docker 模式无 launcher**：不注入 `GAMER_LAUNCHER_PIPE`/`GAMER_LAUNCHER_IPC_TOKEN`，server 以 `UnsupportedUpdateController`（Docker 为 external strategy 适配器）降级——**从不创建 IPC 连接**，所有更新动作 API 返回 `update_not_managed`（HTTP 409），capability 全 false（UPDATE_CONTRACT §3.3、计划 §6.4）。
+- **直跑 server 模式无 launcher**：不注入 `GAMER_LAUNCHER_PIPE`/`GAMER_LAUNCHER_IPC_TOKEN`，server 以 `UnsupportedUpdateController`降级——**从不创建 IPC 连接**，所有更新动作 API 返回 `update_not_managed`（HTTP 409），capability 全 false（UPDATE_CONTRACT §3.3、计划 §6.4）。
 - launcher 模式下 launcher 进程死亡/pipe 消失：server 的 UpdateController 降级为「不可达」态——更新动作返回 `launcher_unreachable`（502），`/api/system/info` 的 capability 按 IPC 通道实际健康置 false；**server 不因 launcher 不在而启动失败、不退出、不自动拉起 launcher**。
 
 ## 8. fixture 索引（`release/contracts/fixtures/ipc/`）

@@ -46,14 +46,14 @@
 
 该脚本验证 current/next fixture 公钥均可验签，并验证未签名、单字节篡改、移除 current
 公钥、错误公钥四种负例被拒。fixture key id 不是生产 key id，fixture PASS 不能勾选真实
-GitHub/GHCR 轮换验收。
+GitHub 轮换验收。
 
 ## 泄露应急
 
 1. 立即生成全新递增的 `prod-ed25519-N+1`，不复用预备钥；优先提交新公钥，并尽快更新
    `release-sign` 两个 secrets。
 2. 按 [ATTESTATION.md](ATTESTATION.md) 重新下载并核对受影响 Release 的 SHA256、manifest
-   签名和 GHCR digest/attestation；发现篡改时按组织应急流程下架受影响 Release/镜像并公告。
+   签名与资产摘要；发现篡改时按组织应急流程下架受影响 Release并公告。
 3. 用新 key 发布修复版本；full 包会携带新公钥。历史公钥不要从仓库删除，否则旧版本无法
    验签；撤销的是签发能力，不是历史验证材料。
 4. 在台账记录泄露时间、影响版本、处置人、新 key id 和旧 key 退役时间；不要记录私钥内容。

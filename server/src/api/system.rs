@@ -79,7 +79,7 @@ pub(super) fn system_info_body(mode: Mode, deps: &Snapshot, boot_id: &str) -> se
 }
 
 /// capability 仅由 deployment 决定（契约 §2.1 冻结）：launcher 托管且 IPC
-/// 通道建立（以 GAMER_LAUNCHER_IPC_TOKEN 注入为准）→ 全 true；docker/direct
+/// 通道建立（以 GAMER_LAUNCHER_IPC_TOKEN 注入为准）→ 全 true；direct
 /// → 全 false。策略 off 只关自动行为，不影响此处。
 fn capabilities(mode: Mode) -> serde_json::Value {
     let managed = mode.managed_ipc_provisioned(|key| std::env::var(key).ok());
@@ -745,11 +745,11 @@ mod contract_tests {
     }
 
     /// 全部 ready 的探测快照（fixture 同款版本形态；测试不真跑外部探针）。
-    /// adb/ffmpeg 的 binding 随模式由探针装配给出：launcher=runtime、docker=external。
+    /// adb/ffmpeg 的 binding 随模式由探针装配给出：launcher=runtime、direct=external。
     fn ready_snapshot(mode: Mode) -> Snapshot {
         let binding = match mode {
             Mode::Launcher => "runtime",
-            Mode::Docker | Mode::Direct => "external",
+            Mode::Direct => "external",
         };
         let dep = |version: &str, binding: &'static str| Dependency {
             status: "ready",
@@ -778,20 +778,20 @@ mod contract_tests {
     }
 
     #[test]
-    fn info_body_matches_degraded_docker_fixture_field_set() {
+    fn info_body_matches_degraded_direct_fixture_field_set() {
         let body = system_info_body(
-            Mode::Docker,
-            &ready_snapshot(Mode::Docker),
+            Mode::Direct,
+            &ready_snapshot(Mode::Direct),
             "8a41d0c2-93b7-4f5e-b6d8-2c7f0a9e31b5",
         );
         assert_same_field_sets(
-            &fixture_body("system-info.degraded-docker.json"),
+            &fixture_body("system-info.degraded-direct.json"),
             &body,
             "$",
         );
         // 降级语义：external 策略、能力全 false、镜像内置依赖 binding=external
-        assert_eq!(body["deployment"]["mode"], "docker");
-        assert_eq!(body["deployment"]["update_strategy"], "external");
+        assert_eq!(body["deployment"]["mode"], "direct");
+        assert_eq!(body["deployment"]["update_strategy"], "unsupported");
         assert_eq!(body["capabilities"]["check"], false);
         assert_eq!(body["capabilities"]["rollback"], false);
         assert_eq!(body["dependencies"]["adb"]["binding"], "external");
@@ -845,8 +845,8 @@ mod contract_tests {
 
     #[test]
     fn capabilities_false_unless_managed_ipc_provisioned() {
-        // direct / docker：全 false（值不依赖真实环境变量——装配函数不含环境读取）
-        for mode in [Mode::Direct, Mode::Docker] {
+        // direct：全 false（值不依赖真实环境变量——装配函数不含环境读取）
+        for mode in [Mode::Direct] {
             let body = system_info_body(mode, &ready_snapshot(mode), boot_id());
             for cap in ["check", "download", "install", "rollback"] {
                 assert_eq!(

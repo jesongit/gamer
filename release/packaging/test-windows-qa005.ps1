@@ -161,7 +161,7 @@ function Invoke-E2ECase {
 function Copy-E2EAssets {
     Ensure-Dir -Path $RunDir
     $required = @(
-        'dist-m1\GameBot-0.1.0-windows-x64-full.zip',
+        'dist-m1\Gamer-0.1.0-windows-x64-full.zip',
         'dist-m2\gamer-app-0.2.0-windows-x64.zip',
         'dist-m2\gamer-app-0.2.0-broken-windows-x64.zip',
         'manifests\0.1.0.json', 'manifests\0.1.0.sig',
@@ -246,7 +246,7 @@ function Remove-ExplicitDirectory {
 
 function New-LongInstallRoot {
     $cn = [string][char]0x957F + [string][char]0x8DEF + [string][char]0x5F84
-    $path = 'C:\qa005-windows-long\run-' + $runId + '\GameBot ' + $cn
+    $path = 'C:\qa005-windows-long\run-' + $runId + '\Gamer ' + $cn
     $i = 1
     while ($path.Length -lt 245) {
         $path = Join-Path $path ("segment_{0}_{1}" -f $i, ('x' * 12))
@@ -258,7 +258,7 @@ function New-LongInstallRoot {
 function Get-E2ERoot {
     param([string]$Suffix)
     $cn = [string][char]0x5347 + [string][char]0x7EA7 + [string][char]0x9A8C + [string][char]0x8BC1
-    return Join-Path $RunDir ("GameBot E2E $cn`_$Suffix")
+    return Join-Path $RunDir ("Gamer E2E $cn`_$Suffix")
 }
 
 function Get-Journal {
@@ -466,7 +466,7 @@ try {
 
     if ($Phase -eq 'all' -or $Phase -eq 'cross-drive') {
         $cn = [string][char]0x8DE8 + [string][char]0x76D8
-        $crossRoot = 'C:\qa005-windows-cross\GameBot ' + $cn + ' QA'
+        $crossRoot = 'C:\qa005-windows-cross\Gamer ' + $cn + ' QA'
         $crossData = Join-Path $RunDir 'cross-drive-data-physical'
         Remove-ExplicitDirectory -Path $crossData
         Invoke-E2ECase -Tag 'qa005-cross-drive-e2e' -Scenario 'upgrade' -HttpPort ($PortSeed + 2) -PortA ($PortSeed - 178) `

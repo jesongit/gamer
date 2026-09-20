@@ -253,7 +253,7 @@ mod contract_tests {
         assert_eq!(err.code.http_status(), 409);
     }
 
-    /// 409 update_not_managed（docker/direct 固定拒绝）
+    /// 409 update_not_managed（direct 固定拒绝）
     #[test]
     fn not_managed_body_matches_fixture_field_set() {
         let err = crate::update::ipc::UpdateError::new(
@@ -561,9 +561,9 @@ mod contract_tests {
         assert_eq!(json_of(resp).await["error"], "forbidden_origin");
     }
 
-    /// Docker external 模式保留状态查询；四个动作一律 409 update_not_managed。
+    /// 直跑 unsupported 模式保留状态查询；四个动作一律 409 update_not_managed。
     #[tokio::test]
-    async fn docker_external_mode_exposes_status_query_and_rejects_actions_with_409() {
+    async fn direct_mode_exposes_status_query_and_rejects_actions_with_409() {
         let dir = std::env::temp_dir().join(format!(
             "gamer-update-api-unmanaged-{}",
             uuid::Uuid::new_v4().simple()
@@ -601,7 +601,7 @@ mod contract_tests {
         let policy_store = PolicyStore::load_blocking(&cfg.data_dir, UpdatePolicy::default());
         let workload: WorkloadProvider = Arc::new(Workload::default);
         let update = Arc::new(UpdateService::new(
-            Arc::new(crate::update::controller::DockerController),
+            Arc::new(crate::update::controller::UnsupportedController),
             policy_store,
             Arc::new(UpdateTxn::default()),
             workload,

@@ -7,8 +7,6 @@
 //!   **受理即回**，进展以 `status` 轮询（建议值：活跃 1s / 空闲 5s，由协调器驱动）。
 //! - [`UnsupportedController`]：直跑（unsupported）。从不创建 IPC 连接，全部
 //!   动作 `update_not_managed`（HTTP 409），capability 全 false。
-//! - [`DockerController`]：容器（external strategy 适配器）。行为同
-//!   unsupported——Docker 升级 = 宿主机换镜像，不经升级器。
 //!
 //! launcher 进程死亡 / pipe 消失：LauncherController 的动作与 status 返回
 //! `launcher_unreachable`（502），server 不退出、不自动拉起 launcher（契约 §7）。
@@ -199,52 +197,10 @@ impl UpdateController for UnsupportedController {
     }
 }
 
-/// Docker external 适配器（ipc-v1 §7）：行为同 unsupported，strategy 枚举不同。
-/// Docker 升级 = 宿主机更换镜像；server 不发起任何升级事务。
-pub struct DockerController;
-
-#[async_trait]
-impl UpdateController for DockerController {
-    fn strategy(&self) -> &'static str {
-        "external"
-    }
-
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::NONE
-    }
-
-    async fn status(&self) -> Result<LauncherUpdateStatus, UpdateError> {
-        Ok(LauncherUpdateStatus::default())
-    }
-
-    async fn check(&self) -> Result<Acceptance, UpdateError> {
-        Err(not_managed())
-    }
-
-    async fn download(&self) -> Result<Acceptance, UpdateError> {
-        Err(not_managed())
-    }
-
-    async fn prepare_install(&self) -> Result<Acceptance, UpdateError> {
-        Err(not_managed())
-    }
-
-    async fn rollback(&self) -> Result<Acceptance, UpdateError> {
-        Err(not_managed())
-    }
-
-    async fn repair_dependency(
-        &self,
-        _dependency: DependencyKind,
-    ) -> Result<Acceptance, UpdateError> {
-        Err(not_managed())
-    }
-}
-
 fn not_managed() -> UpdateError {
     UpdateError::new(
         UpdateErrorCode::UpdateNotManaged,
-        "当前部署模式不受升级器托管（Docker 升级请在宿主机更换镜像，直跑模式请手动替换程序）",
+        "当前部署模式不受升级器托管（直跑模式请手动替换程序）",
     )
 }
 
@@ -259,7 +215,6 @@ pub fn build_for_mode(mode: crate::deps_probe::Mode) -> std::sync::Arc<dyn Updat
                 );
                 std::sync::Arc::new(UnsupportedController)
             }),
-        crate::deps_probe::Mode::Docker => std::sync::Arc::new(DockerController),
         crate::deps_probe::Mode::Direct => std::sync::Arc::new(UnsupportedController),
     }
 }
@@ -408,10 +363,6 @@ mod tests {
         let unsupported = UnsupportedController;
         assert_eq!(unsupported.strategy(), "unsupported");
         assert_eq!(unsupported.capabilities(), Capabilities::NONE);
-
-        let docker = DockerController;
-        assert_eq!(docker.strategy(), "external");
-        assert_eq!(docker.capabilities(), Capabilities::NONE);
     }
 
     /// 降级实现：status = 空状态（idle 语义）；四动作一律 update_not_managed 409
@@ -419,8 +370,7 @@ mod tests {
     async fn degraded_controllers_return_not_managed_for_every_action() {
         let unsupported: std::sync::Arc<dyn UpdateController> =
             std::sync::Arc::new(UnsupportedController);
-        let docker: std::sync::Arc<dyn UpdateController> = std::sync::Arc::new(DockerController);
-        for controller in [&unsupported, &docker] {
+        for controller in [&unsupported] {
             let status = controller.status().await.unwrap();
             assert_eq!(status.state, None, "空状态由 service 合成为 idle");
             for err in [
@@ -501,14 +451,11 @@ mod tests {
         serve.await.unwrap();
     }
 
-    /// SYS-003：生产模式选择器将 direct/docker 映射到各自降级 adapter；这些
+    /// SYS-003：生产模式选择器将 direct 映射到各自降级 adapter；这些
     /// 模式不应意外创建 launcher IPC 连接。
     #[tokio::test]
     async fn build_for_mode_selects_non_launcher_adapters_without_ipc() {
-        for (mode, expected) in [
-            (crate::deps_probe::Mode::Direct, "unsupported"),
-            (crate::deps_probe::Mode::Docker, "external"),
-        ] {
+        for (mode, expected) in [(crate::deps_probe::Mode::Direct, "unsupported")] {
             let controller = build_for_mode(mode);
             assert_eq!(controller.strategy(), expected);
             assert_eq!(controller.capabilities(), Capabilities::NONE);

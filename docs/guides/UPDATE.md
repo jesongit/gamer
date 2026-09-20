@@ -1,4 +1,4 @@
-# GameBot 安装、依赖修复与升级指南
+# Gamer 安装、依赖修复与升级指南
 
 > 面向最终用户与维护者的 Windows x64 便携版（full 包）安装 / 修复 / 升级手册。
 > 事实依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md`（计划）、`docs/guides/UPDATE_CONTRACT.md`（目录契约）、
@@ -20,18 +20,17 @@
 | launcher 托管启动 server（`start`） | 规划中（批次 2） | LCH-008 |
 | `/api/system/info` 系统信息 API | 规划中（批次 2） | SYS-001，契约已冻结（`release/contracts/system-api-v1.md`） |
 | 自动升级（检查/下载/空闲安装）、快照与自动回滚 | 规划中（批次 3） | LCH-009~012、SYS-003~006 |
-| Docker 镜像升级与 digest 回滚 | 规划中（批次 4） | DKR-001~004 |
 
 ## 2. 完整包安装（Windows x64）
 
 > 本节流程的载体（full ZIP 与 `start`/`repair`）属**规划中（批次 2）**；落地前请使用
-> README 的 Docker 或本地开发方式运行。以下为目标流程，供维护者评审与提前准备环境。
+> README 的本地开发方式运行。以下为目标流程，供维护者评审与提前准备环境。
 
 ### 2.1 下载与解压
 
-1. 从 GitHub Release 下载 `GameBot-<版本>-windows-x64-full.zip`（资产清单含
+1. 从 GitHub Release 下载 `Gamer-<版本>-windows-x64-full.zip`（资产清单含
    manifest、分离签名 `.sig`、`SHA256SUMS`——发布与验签自动化**规划中（批次 2/3）**，落地前任何 ZIP 都应视为不可信）。
-2. 解压到一个**建议纯 ASCII、不含空格的路径**（如 `D:\GameBot`）。这不是硬性要求——
+2. 解压到一个**建议纯 ASCII、不含空格的路径**（如 `D:\Gamer`）。这不是硬性要求——
    目录契约明确支持中文、空格与长路径（批次 5 QA-005 有专项验收）——但首次安装建议从简，
    减少第三方杀毒/同步盘/旧解压工具引入的变量。
 3. 解压后的顶层布局见 §2.6；`versions/`、`runtime/`、`manifests/`、`seeds/`、`quarantine/`
@@ -40,7 +39,7 @@
 ### 2.2 首次自检：`gamer-launcher doctor`
 
 ```powershell
-cd D:\GameBot
+cd D:\Gamer
 .\gamer-launcher.exe doctor          # 安装库存检查
 .\gamer-launcher.exe doctor --manifest manifests\<版本>.json   # 校验 release manifest（验签）
 ```
@@ -65,7 +64,7 @@ cd D:\GameBot
   环境变量 `GAMER_ADMIN_PASSWORD` 在进程内生成。**没有默认账号/默认密码**，无凭据时拒绝启动（fail closed）。
 - 常用项：`adb_path` / `ffmpeg_path`（managed 模式下由 launcher 注入绝对路径覆盖）、
   `scrcpy_server`、监听端口（默认 **8443**）、WebRTC 直连相关
-  （`rtc_external_ip` / `rtc_udp_port` / `rtc_external_port`，NAT/Docker 场景必配）。
+  （`rtc_external_ip` / `rtc_udp_port` / `rtc_external_port`，NAT 场景必配）。
 - `config/`、`data/`、`logs/`、`state/` 属用户数据/可写区，升级会被保留或纳入快照。
 
 ### 2.5 启动与访问
@@ -80,7 +79,7 @@ cd D:\GameBot
 ### 2.6 目录速览（哪些不能删）
 
 ```text
-GameBot/
+Gamer/
 ├─ gamer-launcher.exe        # 启动器本体，位于版本目录之外
 ├─ config/  data/  logs/     # 用户配置 / 业务数据（SQLite + 脚本/模板）/ 日志 —— 升级会保留
 ├─ state/                    # current.json（版本指针）、update-journal.json、launcher.lock
@@ -186,17 +185,6 @@ idle → checking（检查新版本）→ available（发现候选）→ downloa
   只有显式的人工清理动作才能处置其中内容。
 - `versions/`、`runtime/`、`manifests/` 同理：升级证据与版本目录交由 launcher 管理，
   手动删除可能导致无法回滚或修复。
-
-## 5. Docker 用户注意事项
-
-- **容器内没有安装/升级能力**：镜像在构建阶段已内置 Linux adb/ffmpeg/scrcpy jar，
-  容器内不存在 launcher，`/api/system/info` 的更新策略恒为 `external`，
-  一切 check/download/install/rollback 请求都会返回 `409 update_not_managed`——这是设计行为，不是故障。
-- **升级由宿主负责**：拉取新镜像、重建容器即可；数据通过绑定挂载的 `data/` 目录保留。
-  按 digest 固定与「新镜像不健康自动回旧 digest」的宿主升级脚本**规划中（批次 4，DKR-002）**，
-  落地前请自行记录当前镜像 digest 以便回退。
-- 不要在容器内尝试自更新、也不要给容器额外特权来「装依赖」；需要换依赖版本时换镜像。
-- 容器停止/升级必须走 `docker stop`（SIGTERM），服务端会优雅停机并清理 scrcpy/adb 会话。
 
 ## 6. 相关文档
 

@@ -80,7 +80,7 @@
  * 更新状态卡片（WEB-003，fixture 驱动）：
  * 渲染契约 §5 的 11 个展示状态（状态文案 + 描述/进度 + 可用动作）；动作按钮可用性严格按
  * §4.2 状态×动作受理矩阵（states.allowedActions），叠加部署能力门禁（info.capabilities，
- * Docker/direct 全 false 时全部禁用并显示 update_not_managed 说明）。
+ * direct 全 false 时全部禁用并显示 update_not_managed 说明）。
  * - status prop 提供时纯展示（fixture/页面受控模式）；
  * - autoPoll 时自持轮询（useSystemStatus：活跃态高频 / idle 低频，卸载自动停止）；
  * - 动作点击只 emit('action', name)，由宿主经 API 提交（安装/回滚确认走 UpdateConfirmModal）。

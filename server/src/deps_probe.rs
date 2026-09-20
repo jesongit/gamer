@@ -14,7 +14,7 @@
 //! - **缓存**：结果按「部署模式 + 三个解析后路径」为键缓存 60s，路径变更
 //!   或过期自动重探（生产路径配置不变即稳态零开销）。
 //!
-//! `source`/`binding` 取值（契约 §2.1）：launcher/Docker 模式由部署物锁定
+//! `source`/`binding` 取值（契约 §2.1）：launcher 模式由部署物锁定
 //! 提供（managed）；direct 模式裸命令名走 PATH 查找（system）、显式路径为
 //! 用户配置（custom）。`binding` 中 scrcpy 恒为 `application`（与应用版本
 //! 强绑定，禁止独立升级），adb/ffmpeg 在 direct 下不经部署内组件目录（external）。
@@ -39,8 +39,6 @@ pub const CACHE_TTL: Duration = Duration::from_secs(60);
 pub enum Mode {
     /// 直跑（本机手动启动）
     Direct,
-    /// 容器（镜像整体换版，external 更新策略）
-    Docker,
     /// launcher 便携托管（managed 更新策略）
     Launcher,
 }
@@ -49,42 +47,36 @@ impl Mode {
     pub fn as_str(self) -> &'static str {
         match self {
             Mode::Direct => "direct",
-            Mode::Docker => "docker",
             Mode::Launcher => "launcher",
         }
     }
 
-    /// 更新策略（契约 §2.1 冻结映射：launcher→managed、docker→external、
+    /// 更新策略（契约 §2.1 冻结映射：launcher→managed、
     /// direct→unsupported）
     pub fn update_strategy(self) -> &'static str {
         match self {
             Mode::Launcher => "managed",
-            Mode::Docker => "external",
             Mode::Direct => "unsupported",
         }
     }
 
     /// 进程环境探测（生产入口）
     pub fn detect() -> Self {
-        Self::detect_from(
-            |key| std::env::var(key).ok(),
-            Path::new("/.dockerenv").is_file(),
-        )
+        Self::detect_from(|key| std::env::var(key).ok())
     }
 
-    /// 纯函数探测（测试可注入环境取值与容器特征，不动进程级环境变量）。
+    /// 纯函数探测（测试可注入环境取值，不动进程级环境变量）。
     /// 优先级：GAMER_DEPLOYMENT_MODE 显式覆盖 > launcher IPC 注入变量 >
-    /// GAMER_DOCKER / /.dockerenv 容器特征 > direct。
-    pub fn detect_from(getenv: impl Fn(&str) -> Option<String>, dockerenv_exists: bool) -> Self {
+    /// 缺省 direct。
+    pub fn detect_from(getenv: impl Fn(&str) -> Option<String>) -> Self {
         let non_empty = |v: Option<String>| -> Option<String> {
             v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
         };
-        // 显式覆盖（既有原型行为保留：容器编排可手动指定模式）
+        // 显式覆盖（既有原型行为保留：可手动指定模式）
         match non_empty(getenv("GAMER_DEPLOYMENT_MODE"))
             .map(|v| v.to_ascii_lowercase())
             .as_deref()
         {
-            Some("docker") => return Mode::Docker,
             Some("launcher") => return Mode::Launcher,
             Some("direct") => return Mode::Direct,
             _ => {}
@@ -94,10 +86,6 @@ impl Mode {
             || non_empty(getenv("GAMER_LAUNCHER_IPC_TOKEN")).is_some()
         {
             return Mode::Launcher;
-        }
-        // GAMER_DOCKER 显式声明，或容器特征文件 /.dockerenv 存在
-        if non_empty(getenv("GAMER_DOCKER")).is_some() || dockerenv_exists {
-            return Mode::Docker;
         }
         Mode::Direct
     }
@@ -224,13 +212,6 @@ fn classify(component: Component, mode: Mode, configured: &str) -> (&'static str
             Component::Scrcpy => ("managed", "application"),
             // launcher 管理的 runtime/<id>/<version>/ 独立组件目录
             _ => ("managed", "runtime"),
-        },
-        Mode::Docker => match component {
-            // scrcpy 恒 application（契约冻结），即使随镜像内置
-            Component::Scrcpy => ("managed", "application"),
-            // Docker 模式恒 managed（随镜像提供并锁定）；镜像内置组件不经
-            // 部署内 runtime 目录绑定 → external
-            _ => ("managed", "external"),
         },
         Mode::Direct => {
             let binding = match component {
@@ -361,52 +342,28 @@ mod tests {
 
     #[test]
     fn mode_detection_follows_injection_precedence() {
-        // 缺省直跑
-        assert_eq!(Mode::detect_from(getenv(&[]), false), Mode::Direct);
-        // launcher IPC 注入变量（任一）
+        assert_eq!(Mode::detect_from(getenv(&[])), Mode::Direct);
         assert_eq!(
-            Mode::detect_from(
-                getenv(&[("GAMER_LAUNCHER_PIPE", r"\\.\pipe\gamebot")]),
-                false
-            ),
+            Mode::detect_from(getenv(&[("GAMER_LAUNCHER_PIPE", "pipe")])),
             Mode::Launcher
         );
         assert_eq!(
-            Mode::detect_from(
-                getenv(&[("GAMER_LAUNCHER_IPC_TOKEN", "secret-token")]),
-                false
-            ),
+            Mode::detect_from(getenv(&[("GAMER_LAUNCHER_IPC_TOKEN", "token")])),
             Mode::Launcher
         );
-        // GAMER_DOCKER 显式声明 / /.dockerenv 容器特征
         assert_eq!(
-            Mode::detect_from(getenv(&[("GAMER_DOCKER", "1")]), false),
-            Mode::Docker
-        );
-        assert_eq!(Mode::detect_from(getenv(&[]), true), Mode::Docker);
-        // 空白值视同未设置
-        assert_eq!(
-            Mode::detect_from(getenv(&[("GAMER_LAUNCHER_PIPE", "   ")]), false),
+            Mode::detect_from(getenv(&[("GAMER_LAUNCHER_PIPE", "   ")])),
             Mode::Direct
         );
-        // launcher 与容器特征同时命中：launcher 注入优先
         assert_eq!(
-            Mode::detect_from(
-                getenv(&[("GAMER_LAUNCHER_PIPE", "x"), ("GAMER_DOCKER", "1")]),
-                true
-            ),
-            Mode::Launcher
-        );
-        // GAMER_DEPLOYMENT_MODE 显式覆盖一切
-        assert_eq!(
-            Mode::detect_from(getenv(&[("GAMER_DEPLOYMENT_MODE", "docker")]), false),
-            Mode::Docker
+            Mode::detect_from(getenv(&[
+                ("GAMER_DEPLOYMENT_MODE", "direct"),
+                ("GAMER_LAUNCHER_PIPE", "pipe")
+            ])),
+            Mode::Direct
         );
         assert_eq!(
-            Mode::detect_from(
-                getenv(&[("GAMER_DEPLOYMENT_MODE", "Launcher"), ("GAMER_DOCKER", "1")]),
-                true
-            ),
+            Mode::detect_from(getenv(&[("GAMER_DEPLOYMENT_MODE", "Launcher")])),
             Mode::Launcher
         );
     }
@@ -414,10 +371,8 @@ mod tests {
     #[test]
     fn mode_strategy_mapping_is_frozen() {
         assert_eq!(Mode::Launcher.as_str(), "launcher");
-        assert_eq!(Mode::Docker.as_str(), "docker");
         assert_eq!(Mode::Direct.as_str(), "direct");
         assert_eq!(Mode::Launcher.update_strategy(), "managed");
-        assert_eq!(Mode::Docker.update_strategy(), "external");
         assert_eq!(Mode::Direct.update_strategy(), "unsupported");
     }
 
@@ -427,7 +382,7 @@ mod tests {
             Mode::Launcher.managed_ipc_provisioned(getenv(&[("GAMER_LAUNCHER_IPC_TOKEN", "t")]))
         );
         // 非 launcher 模式（即使 token 在）不构成 managed
-        assert!(!Mode::Docker.managed_ipc_provisioned(getenv(&[("GAMER_LAUNCHER_IPC_TOKEN", "t")])));
+        assert!(!Mode::Direct.managed_ipc_provisioned(getenv(&[("GAMER_LAUNCHER_IPC_TOKEN", "t")])));
         assert!(!Mode::Launcher.managed_ipc_provisioned(getenv(&[])));
         assert!(
             !Mode::Launcher.managed_ipc_provisioned(getenv(&[("GAMER_LAUNCHER_IPC_TOKEN", "  ")]))
@@ -454,19 +409,6 @@ mod tests {
                 Component::Scrcpy,
                 Mode::Launcher,
                 "/app/versions/0.2.0/assets/scrcpy-server.jar"
-            ),
-            ("managed", "application")
-        );
-        // docker：恒 managed；镜像内置 adb/ffmpeg → external；scrcpy 恒 application
-        assert_eq!(
-            classify(Component::Adb, Mode::Docker, "/usr/bin/adb"),
-            ("managed", "external")
-        );
-        assert_eq!(
-            classify(
-                Component::Scrcpy,
-                Mode::Docker,
-                "/opt/server/assets/scrcpy-server.jar"
             ),
             ("managed", "application")
         );

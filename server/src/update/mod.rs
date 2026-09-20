@@ -5,8 +5,7 @@
 //! - [`ipc`]：launcher IPC 客户端帧协议（u32 LE 前缀 JSON、1 MiB 上限、6 操作、
 //!   受理/错误帧解析——ipc-v1 冻结契约）；
 //! - [`pipe`]：Windows named pipe 客户端传输（连接 5s / 交换 30s 有界超时）；
-//! - [`controller`]：UpdateController 三实现（launcher 托管 / 直跑 unsupported /
-//!   Docker external）；
+//! - [`controller`]：UpdateController 两种实现（launcher 托管 / 直跑 unsupported）；
 //! - [`policy`]：更新策略对象 + state/ JSON 持久化（PUT policy 热生效）；
 //! - [`workload`]：业务空闲摘要（OPS-005；install 门禁 + auto 协调器输入）；
 //! - [`service`]：HTTP API 与协调器的共享状态层（状态聚合/动作受理/审计）；

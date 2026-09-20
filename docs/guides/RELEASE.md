@@ -1,11 +1,11 @@
-# GameBot 发布与人工恢复手册（维护者向）
+# Gamer 发布与人工恢复手册（维护者向）
 
 > 面向维护者的发布 runbook：draft 发布流程、签名密钥轮换、`manual_recovery` 人工恢复、
 > 首次真实 tag 演练 checklist。
 > 事实依据：`.github/workflows/release.yml`（发布 workflow）、`docs/guides/UPDATE_CONTRACT.md`（安装目录契约）、
 > `release/contracts/`（manifest / system-api / IPC 契约）、`launcher/` 与 `release/packaging/`（当前实现）。
 > 计划文档仅作背景，不作为“已完成”依据；最终用户以完整包内生成的 `INSTALL.md` 和 launcher CLI 为准。
-> 本手册不代表当前已经有成功的 GitHub Release、GHCR 推送或生产演练结果。
+> 本手册不代表当前已经有成功的 GitHub Release 发布或生产演练结果。
 
 ## 1. 版本单一来源与发布链路总览
 
@@ -24,7 +24,6 @@ vite 注入 `__APP_VERSION__`（取自 `web/package.json`），与服务端不�
 push tag v*
   → verify（win）        版本门禁 + scrcpy 三方绑定 + tag 指向触发 commit
   → build-windows（win） 构建 + 打包 + manifest 生产钥签名 + full 包 + SBOM
-  → docker（ubuntu）     GHCR 镜像 + provenance/SBOM attestation（与 build-windows 并行）
   → draft-release        创建 draft Release 并上传资产（同名资产 hash 门禁）
   → smoke（win）         environment: release 人工批准；从 Release 重新下载全量资产核验
   → publish              draft → 正式；纯 semver 才标 latest
@@ -81,16 +80,9 @@ $sbom = Get-ChildItem .\release\sbom\*.cdx.json | Select-Object -First 1
 --key-id <key_id>`，随后用仓库 `release/keys/` 中的公钥验证 manifest。`gen-manifest.ps1` 的
 默认 URL 是示例值，真实发布必须像 workflow 一样显式传入下载与 release notes URL。
 
-### 2.3 docker：镜像发布（REL-005）
-
-- 推送 `ghcr.io/<repo>:<版本>`；纯 `X.Y.Z`（无预发布后缀）才追加滚动 tag `:stable`。
-- OCI labels 写入 version / revision，push 后回读核对；容器启动日志必须出现
-  `GameBot server v<版本> starting`（镜像与 ZIP 版本同源核验）。
-- 附 provenance（mode=max）与 SBOM attestation，digest 不可变。
-
 ### 2.4 draft-release：draft 与资产上传
 
-- 幂等创建 draft Release（说明含安装三步、资产核验、镜像拉取方式）。
+- 幂等创建 draft Release（说明含安装三步、资产核验）。
 - 资产上传带 **hash 门禁**：同名资产已存在时重新下载比对，hash 一致跳过、不一致直接
   失败——同一 tag 绝不静默覆盖不同内容。
 - 最后生成 `SHA256SUMS.txt`（8 个内容资产：full zip、app zip、adb zip、ffmpeg zip、licenses
@@ -142,7 +134,7 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 未签名（`unsigned-manifest`）、manifest 篡改 1 字节（`signature-invalid`）、
 撤销 current key——信任库移除其公钥后签名必拒（`unknown-key-id`）、
 错误 key——用另一把公钥验签名（`signature-invalid`）。它只消费 fixture 公钥与签名，
-不证明生产 secret、GitHub Release 或 GHCR 已经轮换成功。泄露应急
+不证明生产 secret、GitHub Release 已经轮换成功。泄露应急
 仍按 `release/docs/KEY_ROTATION.md` 的新 key → 公钥 PR → 检查已发布资产 → 发布修复版本顺序
 处理，不删除历史公钥。
 
@@ -235,10 +227,10 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 验证时使用实际 launcher 入口（在另一个终端执行 `status`，因为 `start` 会前台托管服务）：
 
 ```powershell
-.\gamer-launcher.exe --install-root 'D:\GameBot' doctor --manifest .\manifests\<version>.json --deep --probe
-.\gamer-launcher.exe --install-root 'D:\GameBot' start
+.\gamer-launcher.exe --install-root 'D:\Gamer' doctor --manifest .\manifests\<version>.json --deep --probe
+.\gamer-launcher.exe --install-root 'D:\Gamer' start
 # 另一个维护终端：
-.\gamer-launcher.exe --install-root 'D:\GameBot' status
+.\gamer-launcher.exe --install-root 'D:\Gamer' status
 ```
 
 ### 4.4 回滚边界与纪律
@@ -249,15 +241,13 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
   `repair` 入口；这不会恢复升级后的数据，也不绕过 schema/版本校验：
 
   ```powershell
-  .\gamer-launcher.exe --install-root 'D:\GameBot' repair --manifest .\manifests\<previous-version>.json --probe
+  .\gamer-launcher.exe --install-root 'D:\Gamer' repair --manifest .\manifests\<previous-version>.json --probe
   ```
 
   执行前必须先完成数据兼容性与备份决策；需要恢复数据时，按 backup manifest 和业务策略处理，
   不要把旧版本运行时修复误当作数据回滚。
 - `backups/` 清理只能依赖系统按数量/年龄/磁盘上限的保留策略，且永不删除 current、
   previous 与唯一有效回滚点；`versions/`、`runtime/`、`manifests/` 同理交由 launcher 管理。
-- Docker 模式无 launcher：不存在 manual_recovery 状态机，升级=宿主机换镜像 digest，
-  数据在绑定挂载的 `gamer-data` 卷中；回退即重新部署旧 digest。不要把 Docker 数据目录
   当作 Windows 完整包的 `state/` 结构处理。
 
 ## 5. 首次真实 tag 演练 checklist
@@ -277,7 +267,6 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
       scrcpy 绑定、tag 指向触发 commit）；
 - [ ] build-windows 产物齐全：full zip / app zip / adb zip / ffmpeg zip / licenses zip /
       manifest `.json`+`.sig` / SBOM，manifest 由生产 key 签名且 validate 全量校验通过；
-- [ ] docker job 推送 `ghcr.io/<repo>:<版本>`，label 与启动日志核验通过，attestation 在；
 - [ ] draft-release 创建 draft 且 8 个内容资产 + SHA256SUMS.txt 上传齐全；人为重跑一次确认
       同名同 hash 跳过（幂等），不同 hash 拒绝覆盖；
 - [ ] 批准 release environment，smoke 七步全过（§2.5）；
@@ -288,7 +277,7 @@ smoke 全过后自动 `gh release edit --draft=false`；纯 `X.Y.Z` 追加 `--la
 - [ ] 任一干净 Windows 环境（或干净目录）按 full 包内 `INSTALL.md`：解压 full 包 →
       `gamer-launcher doctor --manifest` 验签 → `repair` → `start` → 浏览器登录；
 - [ ] 设置页显示版本与 `/api/system/info` 一致、无混包警告条；更新能力按部署模式正确
-      降级（Docker/直跑显示 update_not_managed）；
+      降级（直跑显示 update_not_managed）；
 - [ ] 双里程碑升级证据（计划 §14）：先安装 N-1 基线版本，再经基线 launcher 自动升级到
       本 tag 版本，验证快照/切换/回滚与 journal 记录；
 - [ ] key rotation 演练一遍（REL-006：生成 `prod-ed25519-2` → 公钥 PR → 切 secrets →

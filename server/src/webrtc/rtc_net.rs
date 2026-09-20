@@ -1,6 +1,6 @@
 //! WebRTC 媒体链路的 ICE 候选外部宣告（容器 / NAT 1-to-1 部署适配）。
 //!
-//! 背景：Docker bridge 部署时服务端 host candidate 是容器内网 IP（172.x），
+//! 背景：NAT 部署时服务端 host candidate 是容器内网 IP（172.x），
 //! 宿主浏览器无法路由 → 信令（WS）正常但媒体（RTP/UDP）协商不出候选对 →
 //! 投屏黑屏。经典 NAT 1-to-1 场景用 config.toml 三个键宣告「宿主可达的
 //! 外部地址」：
@@ -10,16 +10,16 @@
 //! - `rtc_udp_port`：媒体 UDP 换单 socket UDPMux 固定绑该端口（容器端口映射
 //!   的前提；0 = 既有行为：每会话临时端口）。**必须与 rtc_external_ip 成对
 //!   配置**（config 启动校验强制）；
-//! - `rtc_external_port`：候选宣告该端口（docker -p 的宿主侧端口）。0 = 宣告
+//! - `rtc_external_port`：候选宣告该端口（UDP 端口映射 的宿主侧端口）。0 = 宣告
 //!   rtc_udp_port 本身（容器内外同端口号映射 -p A:A/udp）。
 //!
-//! 容器配法示例（docker -p B:A/udp，宿主 B → 容器 A）：
+//! 容器配法示例（UDP 端口映射 B:A/udp，宿主 B → 容器 A）：
 //!
 //! ```toml
 //! rtc_external_ip = "192.168.1.10"   # 浏览器可达的宿主 IP
 //! rtc_udp_port = 3478                # 容器内绑定端口 A
 //! rtc_external_port = 50000          # 宿主对外端口 B（B == A 时配 0）
-//! # docker run ... -p 50000:3478/udp
+//! # 将外网 50000/udp 映射到服务端 3478/udp
 //! ```
 //!
 //! 实现注记（webrtc-rs 0.13 / webrtc-ice 0.13）：`set_nat_1to1_ips` 只重写
@@ -27,7 +27,7 @@
 //! （UDPMuxDefault::create_muxed_conn 缓存，muxed gather 直接消费）。「绑 A
 //! 宣 B」因此经自定义 [`AdvertisedAddrConn`] 实现：tokio UdpSocket 包一层、
 //! `local_addr()` 汇报 `external_ip:advertised_port`；收发包全部委托真实
-//! socket，STUN 应答回源地址，docker DNAT 对链路透明。nat1to1 对已是
+//! socket，STUN 应答回源地址，DNAT 对链路透明。nat1to1 对已是
 //! external_ip 的候选地址替换幂等（external_ip → external_ip）。
 //!
 //! **回归注记（2026-08-29 容器实测）**：早期实现汇报 `0.0.0.0:<port>`——

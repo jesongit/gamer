@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * GameBot Release Manifest v1 校验器（ARC-002）
+ * Gamer Release Manifest v1 校验器（ARC-002）
  *
  * 纯 Node 实现（仅 node:crypto / node:fs / node:path / node:url），禁止第三方依赖。
  * 规则来源：docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md §6.2 / §11.1，

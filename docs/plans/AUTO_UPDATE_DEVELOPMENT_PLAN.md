@@ -1,4 +1,4 @@
-# GameBot 运行依赖与自动升级开发计划
+# Gamer 运行依赖与自动升级开发计划
 
 > 状态：**实施中（批次 0～4 已完成；批次 5 本机可执行项完成——剩余集中在真实 GitHub Release/GHCR/生产签名、Windows clean VM 与发布签核，2026-09-01）**；未完成项与阻塞原因统一见 [docs/REMAINING_BLOCKERS.md](../REMAINING_BLOCKERS.md)  
 > 编制日期：2026-08-31  
@@ -10,7 +10,7 @@
 本计划同时实现两项能力：
 
 1. Windows 完整发行包内置经过锁定和验证的 `adb`、`ffmpeg`、`scrcpy-server.jar`，用户首次运行不需要安装 Rust、Node、adb 或 ffmpeg，也不依赖 PATH。
-2. 安装基线版本后，GameBot 能检查、下载、安装后续版本；升级失败时在没有接收新业务写入的前提下自动恢复旧程序和升级前数据。
+2. 安装基线版本后，Gamer 能检查、下载、安装后续版本；升级失败时在没有接收新业务写入的前提下自动恢复旧程序和升级前数据。
 
 最终用户路径应为：下载完整 ZIP → 解压 → 启动 `gamer-launcher.exe` → 首次安装内置组件 → 启动服务 → 在设置页查看版本和依赖 → 后续自动检查和后台下载 → 空闲窗口安装 → 健康检查 → 成功提交或自动回滚。
 
@@ -72,7 +72,7 @@ GitHub Release / GHCR
         ├─ gamer-app-<version>-windows-x64.zip
         ├─ gamer-adb-<version>-windows-x64.zip
         ├─ gamer-ffmpeg-<version>-windows-x64.zip
-        └─ GameBot-<version>-windows-x64-full.zip
+        └─ Gamer-<version>-windows-x64-full.zip
         │
         ▼
 gamer-launcher.exe
@@ -96,7 +96,7 @@ Vue Settings
 ### 5.1 安装后目录
 
 ```text
-GameBot/
+Gamer/
 ├─ gamer-launcher.exe
 ├─ config/
 │  └─ config.toml

@@ -7,7 +7,7 @@
 
     <template v-if="info">
       <div class="app-row">
-        <span class="ver">GameBot {{ info.app.version }}</span>
+        <span class="ver">Gamer {{ info.app.version }}</span>
         <span class="tag info">{{ channelLabel }}</span>
         <span v-if="devBuild" class="tag warn">开发构建</span>
         <span class="spacer"></span>
@@ -51,7 +51,7 @@
         <button class="btn btn-sm" :disabled="!canInstall" @click="emit('install')">安装更新</button>
       </div>
       <p v-if="capsOff" class="caps-note">
-        当前部署不受升级器托管（update_not_managed）：Docker 模式请在宿主机更换镜像，直跑模式请手动替换程序；更新操作按钮已禁用。
+        当前部署不受升级器托管（update_not_managed）：直跑模式请手动替换程序；更新操作按钮已禁用。
       </p>
     </template>
 
@@ -67,7 +67,7 @@
  * 系统与依赖状态卡片（WEB-002，fixture 驱动）：
  * 展示 /api/system/info 契约字段——app 版本/commit/built_at/channel/target、部署模式与
  * 升级策略、DB/file schema 与回滚下限、启动阶段/boot id，以及 adb/ffmpeg/scrcpy 依赖三行
- *（状态/版本/来源/绑定）。依赖缺失/损坏、Docker 降级（能力全 false）均有明确视觉态；
+ *（状态/版本/来源/绑定）。依赖缺失/损坏、直跑降级（能力全 false）均有明确视觉态；
  * dev/unknown 构建信息以「开发构建」标记如实显示，不伪装正式版（契约 §2.1）。
  * 纯展示组件：info 为 null 时显示空态/错误；「检查更新/安装更新」按钮按 capabilities
  * 禁用并向宿主 emit('check'|'install')。

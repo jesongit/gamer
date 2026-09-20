@@ -1,4 +1,4 @@
-# GameBot 服务端配置示例（复制为 server/config.toml 后按需修改）
+# Gamer 服务端配置示例（复制为 server/config.toml 后按需修改）
 #
 # 注意：`server/config.toml` 是本机文件（含真实路径/凭据），已加入 .gitignore 不再入库；
 # 团队分发/评审一律以本示例文件为准。

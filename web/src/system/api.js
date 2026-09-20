@@ -24,7 +24,7 @@ import { isUpdateState } from './states'
  * UI 依据 retryable=false 的码（如 update_not_managed）隐藏/禁用对应按钮而非反复重试。
  */
 export const SYSTEM_ERRORS = Object.freeze({
-  update_not_managed:       { status: 409, retryable: false, hint: '当前部署模式不受升级器托管：Docker 请在宿主机更换镜像，直跑请手动替换程序' },
+  update_not_managed:       { status: 409, retryable: false, hint: '当前部署模式不受升级器托管：直跑请手动替换程序' },
   update_busy:              { status: 409, retryable: true,  hint: '已有升级/回滚事务进行中，请等待其结束后再试' },
   update_not_available:     { status: 409, retryable: false, hint: '当前没有已验签的更新候选，请先执行检查更新' },
   update_not_ready:         { status: 409, retryable: true,  hint: '安装条件未满足（详见 blocking 门禁列表），满足后可重试' },

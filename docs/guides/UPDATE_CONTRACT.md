@@ -2,7 +2,7 @@
 
 > 状态：**冻结**（批次 0 契约；后续轨道只能以版本化契约变更，不得口头改字段）。
 > 依据：`docs/plans/AUTO_UPDATE_DEVELOPMENT_PLAN.md` §2/§5.1/§6.3/§8.1；与该计划冲突时以计划评审结论为准。
-> 范围：Windows x86_64 便携发行版的安装目录、组件边界、稳定路径、原子切换边界。Docker/直跑模式的差异仅在 §3 标注。
+> 范围：Windows x86_64 便携发行版的安装目录、组件边界、稳定路径、原子切换边界。直跑模式的差异仅在 §3 标注。
 
 ## 1. 便携安装目录契约
 
@@ -61,7 +61,7 @@
 - server **永不**替换、移动、删除任何程序文件（`versions/`、`runtime/`、`gamer-launcher.exe`）；程序文件写操作只属于 launcher。
 - server **永不**接受浏览器传入的下载 URL、镜像地址、验签开关；信任只来自签名、公钥与内容 hash。
 - 用户数据（`config/ data/ logs/` 及 `state/` 中业务侧内容）**不得**位于 `versions/<semver>/` 内；删除任一版本目录不得影响用户数据。
-- 直跑 server / Docker 模式无 launcher：server 以 `UnsupportedUpdateController` / external strategy 降级（Docker 升级=宿主机换镜像 digest），安装类 API 返回 `update_not_managed`，不得因此启动失败。
+- 直跑 server 模式无 launcher：server 以 `UnsupportedUpdateController` / external strategy 降级，安装类 API 返回 `update_not_managed`，不得因此启动失败。
 
 ## 4. 稳定路径契约（计划 §6.3）
 

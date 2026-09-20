@@ -75,9 +75,8 @@ type SharedCache = Arc<Mutex<StatusCache>>;
 /// workload 快照提供者（生产 = [`workload::WorkloadSource`]；测试注入合成值）
 pub type WorkloadProvider = Arc<dyn Fn() -> Workload + Send + Sync>;
 
-/// docker/direct 模式的固定拒绝文案（契约 §7 update_not_managed）
-pub const NOT_MANAGED_MESSAGE: &str =
-    "当前部署模式不受升级器托管（Docker 升级请在宿主机更换镜像，直跑模式请手动替换程序）";
+/// direct 模式的固定拒绝文案（契约 §7 update_not_managed）
+pub const NOT_MANAGED_MESSAGE: &str = "当前部署模式不受升级器托管（直跑模式请手动替换程序）";
 
 pub struct UpdateService {
     controller: Arc<dyn UpdateController>,
@@ -107,7 +106,7 @@ impl UpdateService {
         }
     }
 
-    /// 是否受升级器托管（launcher 模式）；docker/direct 下动作端点一律
+    /// 是否受升级器托管（launcher 模式）；direct 下动作端点一律
     /// 409 `update_not_managed`（契约 §4.1）
     pub fn managed(&self) -> bool {
         self.controller.capabilities() != Capabilities::NONE

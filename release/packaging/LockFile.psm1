@@ -1,4 +1,4 @@
-﻿# GameBot 打包共享工具：dependencies.lock.toml 解析、下载校验、哈希。
+﻿# Gamer 打包共享工具：dependencies.lock.toml 解析、下载校验、哈希。
 # 兼容 Windows PowerShell 5.1 与 pwsh；供 fetch-adb.ps1 / fetch-ffmpeg.ps1 等脚本复用。
 
 $script:TLS12 = 0

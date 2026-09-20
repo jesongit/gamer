@@ -60,11 +60,11 @@ describe('GET /api/system/info 与 /api/system/update：字段与契约 fixture 
     expect(global.fetch).toHaveBeenCalledWith('/api/system/info', expect.objectContaining({ method: 'GET' }))
   })
 
-  it('docker 降级 info：capability 全 false / strategy external 原样透传', async () => {
-    mockByPath({ '/api/system/info': fixtureRes('system-info.degraded-docker.json') })
+  it('直跑降级 info：capability 全 false / strategy unsupported 原样透传', async () => {
+    mockByPath({ '/api/system/info': fixtureRes('system-info.degraded-direct.json') })
     const info = await apiMod.systemApi.getSystemInfo()
     expect(info.capabilities).toEqual({ check: false, download: false, install: false, rollback: false })
-    expect(info.deployment).toEqual({ mode: 'docker', update_strategy: 'external' })
+    expect(info.deployment).toEqual({ mode: 'direct', update_strategy: 'unsupported' })
   })
 
   it('update status：staged / failed(signature_invalid) / failed(artifact_invalid) / manual_recovery 全部原样透传', async () => {

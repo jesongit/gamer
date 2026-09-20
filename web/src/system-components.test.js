@@ -30,7 +30,7 @@ const res = (status, body) => ({
 })
 
 const INFO = fix('system-info.success.json').body
-const INFO_DOCKER = fix('system-info.degraded-docker.json').body
+const INFO_DOCKER = fix('system-info.degraded-direct.json').body
 const UPD_STAGED = fix('system-update.success.json').body
 const UPD_FAILED = fix('system-update.failed-signature-invalid.json').body
 const UPD_MANUAL = fix('system-update.manual-recovery.json').body
@@ -111,11 +111,11 @@ describe('SystemInfoCard（WEB-002）', () => {
     expect(w.findAll('.dep-table tbody tr')).toHaveLength(3)
   })
 
-  it('Docker 降级态（degraded-docker fixture）：能力全禁用 + update_not_managed 说明 + external 策略', async () => {
+  it('直跑降级态（degraded-direct fixture）：能力全禁用 + update_not_managed 说明 + unsupported 策略', async () => {
     const w = mount(SystemInfoCard, { props: { info: INFO_DOCKER } })
     const t = w.text()
-    expect(t).toContain('容器（Docker）')
-    expect(t).toContain('外部管理')
+    expect(t).toContain('直跑')
+    expect(t).toContain('不支持自动更新')
     expect(t).toContain('update_not_managed')
     // 检查/安装按钮禁用
     const buttons = w.findAll('button').map((b) => ({ text: b.text(), disabled: b.attributes('disabled') !== undefined }))
@@ -238,7 +238,7 @@ describe('UpdateStatusCard：11 状态全覆盖（WEB-003）', () => {
     expect(w.find('a').attributes('href')).toBe('https://example.invalid/releases/v0.3.0')
   })
 
-  it('能力门禁：capabilities.install=false（Docker/direct）时按钮全禁用 + update_not_managed 说明；动作点击上抛', () => {
+  it('能力门禁：capabilities.install=false（direct）时按钮全禁用 + update_not_managed 说明；动作点击上抛', () => {
     const w = mountStatus(UPD_STAGED, { info: INFO_DOCKER })
     for (const a of ACTIONS) {
       expect(w.find(`[data-action="${a}"]`).attributes('disabled') !== undefined).toBe(true)

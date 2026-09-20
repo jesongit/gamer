@@ -202,7 +202,7 @@ try {
 
         # 归档 BUILD-CONFIG.txt（LGPL: “解释如何编译”）
         $buildConfig = @(
-            "# GameBot ffmpeg BUILD-CONFIG（由 release/packaging/fetch-ffmpeg.ps1 自动归档）",
+            "# Gamer ffmpeg BUILD-CONFIG（由 release/packaging/fetch-ffmpeg.ps1 自动归档）",
             "# 锁定日期: $([string]$c['locked_at'])",
             "# 版本串: $version",
             "# 来源: $url",

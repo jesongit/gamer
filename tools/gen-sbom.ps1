@@ -128,7 +128,7 @@ $json = New-Object System.Text.StringBuilder
 [void]$json.AppendLine('    ],')
 [void]$json.AppendLine('    "component": {')
 [void]$json.AppendLine(('      "type": "application", "bom-ref": "pkg:gamebot/gamebot@{0}", "name": "gamebot", "version": "{0}",' -f $productVersion))
-[void]$json.AppendLine('      "description": "GameBot 游戏自动化助手（server + launcher + web 前端）"')
+[void]$json.AppendLine('      "description": "Gamer 游戏自动化助手（server + launcher + web 前端）"')
 [void]$json.AppendLine('    }')
 [void]$json.AppendLine('  },')
 [void]$json.AppendLine('  "components": [')

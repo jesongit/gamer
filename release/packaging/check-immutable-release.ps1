@@ -1,20 +1,12 @@
-﻿# REL-005：Release tag / GHCR version tag 不覆盖门禁。
-#
-# Snapshot 模式完全离线，用于 fixture 和本地回归；GitHub 模式检查远端 tag 与
-# draft/published Release；Registry 模式在 push 前检查 GHCR semver tag。任何已存在的
-# immutable version tag 都必须显式带入相同 digest 才能继续，默认路径 fail closed，绝不覆盖。
-# `:stable` 是 workflow 明确声明的滚动别名，不应传给本脚本的 immutable preflight。
-
+﻿# Release tag 与正式资产不可覆盖。
 [CmdletBinding()]
 param(
-    [ValidateSet('Snapshot', 'GitHub', 'Registry')]
+    [ValidateSet('Snapshot', 'GitHub')]
     [string]$Mode = 'Snapshot',
     [string]$Tag = '',
     [string]$CommitSha = '',
     [string]$Repository = '',
-    [string]$Image = '',
-    [string]$SnapshotPath = '',
-    [string]$ExpectedDigest = ''
+    [string]$SnapshotPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -36,7 +28,6 @@ function Require-Command {
 function Assert-Tag {
     param([string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { Fail 'tag 不能为空' }
-    # OCI/Docker tag 不允许 SemVer build metadata 的 `+`，发布 tag 必须能一一映射为 GHCR tag；
     # 同时严格拒绝 SemVer 禁止的数字前导零，避免两个产品版本映射到同一 OCI 语义。
     $identifier = '(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
     $semver = '(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-' + $identifier + '(?:\.' + $identifier + ')*)?'
@@ -52,24 +43,13 @@ function Assert-CommitSha {
     }
 }
 
-function Assert-Digest {
-    param([string]$Value, [string]$Label)
-    if ($Value -notmatch '^sha256:[0-9a-fA-F]{64}$') {
-        Fail "$Label 不是 sha256:<64 hex>: $Value"
-    }
-}
-
 function Test-SnapshotState {
     param(
         [Parameter(Mandatory = $true)][object]$State,
         [Parameter(Mandatory = $true)][string]$ExpectedTag,
-        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
-        [string]$AllowedDigest = ''
+        [Parameter(Mandatory = $true)][string]$ExpectedCommit
     )
 
-    if (-not [string]::IsNullOrWhiteSpace($AllowedDigest)) {
-        Assert-Digest -Value $AllowedDigest -Label 'expected digest'
-    }
     if ([int]$State.schemaVersion -ne 1) { Fail "snapshot schemaVersion 不是 1" }
     if ([string]$State.tag -cne $ExpectedTag) {
         Fail "snapshot tag=$($State.tag) 与触发 tag=$ExpectedTag 不一致"
@@ -92,37 +72,7 @@ function Test-SnapshotState {
         Write-Host "[immutable-release] existing Release: none"
     }
 
-    $imageExists = [bool]$State.image.exists
-    $imageDigest = [string]$State.image.digest
-    if ($imageExists) {
-        Assert-Digest -Value $imageDigest -Label 'existing image digest'
-        if ([string]::IsNullOrWhiteSpace($AllowedDigest)) {
-            Fail "GHCR version tag 已存在并指向 $imageDigest；未提供同 digest，拒绝重复 push/覆盖"
-        }
-        if ($imageDigest.ToLowerInvariant() -ne $AllowedDigest.ToLowerInvariant()) {
-            Fail "existing image digest=$imageDigest 与 expected digest=$AllowedDigest 不一致"
-        }
-        Write-Host "[immutable-release] existing image digest 与显式 expected digest 一致：允许只读复用，不 push 覆盖"
-    } elseif (-not [string]::IsNullOrWhiteSpace($imageDigest)) {
-        Fail "snapshot image.exists=false 但仍带 digest=$imageDigest"
-    } elseif (-not [string]::IsNullOrWhiteSpace($AllowedDigest)) {
-        Fail "GHCR version tag 不存在，不能复用 expected digest=$AllowedDigest"
-    } else {
-        Write-Host "[immutable-release] existing GHCR version tag: none"
-    }
-
     Write-Host "[immutable-release] PASS: $ExpectedTag -> $ExpectedCommit"
-}
-
-function Assert-VersionImageReference {
-    param([string]$ImageRef, [string]$ReleaseTag)
-    if ($ImageRef -match '@') { Fail "Registry preflight 只接受 version tag 引用，不接受 digest 引用: $ImageRef" }
-    $expectedImageTag = $ReleaseTag.Substring(1)
-    $match = [regex]::Match($ImageRef, ':(?<tag>[^/:@]+)$')
-    if (-not $match.Success) { Fail "Registry image 引用缺少末尾 tag: $ImageRef" }
-    if ($match.Groups['tag'].Value -cne $expectedImageTag) {
-        Fail "Registry image tag=$($match.Groups['tag'].Value) 与 release tag=$ReleaseTag 的 semver=$expectedImageTag 不一致"
-    }
 }
 
 function Get-GitTagCommit {
@@ -169,7 +119,7 @@ if ($Mode -eq 'Snapshot') {
     Assert-CommitSha -Value $CommitSha -Label 'snapshot expected commit'
     try { $state = Get-Content -LiteralPath $SnapshotPath -Raw | ConvertFrom-Json }
     catch { Fail "snapshot 不是合法 JSON: $($_.Exception.Message)" }
-    Test-SnapshotState -State $state -ExpectedTag $Tag -ExpectedCommit $CommitSha -AllowedDigest $ExpectedDigest
+    Test-SnapshotState -State $state -ExpectedTag $Tag -ExpectedCommit $CommitSha
     exit 0
 }
 
@@ -207,31 +157,3 @@ if ($Mode -eq 'GitHub') {
     Write-Host "[immutable-release] PASS: GitHub tag/release preflight"
     exit 0
 }
-
-# Registry：docker/buildx 必须在 push 前完成登录；不存在的 manifest 才是允许状态，
-# 认证失败、网络失败和其他错误一律拒绝，避免把“查不到”误判成“没有”。
-if ([string]::IsNullOrWhiteSpace($Image)) { Fail 'Registry 模式需要 -Image' }
-Assert-VersionImageReference -ImageRef $Image -ReleaseTag $Tag
-Assert-CommitSha -Value $CommitSha -Label 'Registry expected commit'
-Require-Command -Name 'docker'
-$inspect = (& docker buildx imagetools inspect $Image 2>&1 | Out-String)
-$inspectCode = $LASTEXITCODE
-if ($inspectCode -eq 0) {
-    $match = [regex]::Match($inspect, '(?im)^\s*Digest:\s*(sha256:[0-9a-fA-F]{64})\s*$')
-    if (-not $match.Success) { Fail "已存在镜像 tag，但 inspect 输出没有可验证 digest: $($inspect.Trim())" }
-    $state = [pscustomobject]@{
-        schemaVersion = 1
-        tag = $Tag
-        tagCommit = $CommitSha
-        release = [pscustomobject]@{ exists = $false; isDraft = $false }
-        image = [pscustomobject]@{ exists = $true; digest = $match.Groups[1].Value }
-    }
-    Test-SnapshotState -State $state -ExpectedTag $Tag -ExpectedCommit $CommitSha -AllowedDigest $ExpectedDigest
-    exit 0
-}
-if ($inspect -notmatch '(?i)(manifest unknown|no such manifest|not found|404)') {
-    Fail "GHCR version tag 查询失败且不是明确的 manifest-not-found（fail closed）: $($inspect.Trim())"
-}
-Write-Host "[immutable-release] GHCR version tag 不存在：允许首次 push"
-Write-Host "[immutable-release] PASS: registry preflight"
-exit 0

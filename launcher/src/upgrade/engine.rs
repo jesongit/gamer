@@ -2494,7 +2494,7 @@ mod tests {
             child: Some(ChildInfo {
                 pid: 4242,
                 created_at_unix_ms: Some(123),
-                exe: "C:\\GameBot\\versions\\2.0.0\\gamer-server.exe".to_string(),
+                exe: "C:\\Gamer\\versions\\2.0.0\\gamer-server.exe".to_string(),
             }),
             ..UpdateJournal::default()
         };

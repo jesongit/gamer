@@ -100,12 +100,10 @@ export function formatBytes(n) {
 export const DEPLOYMENT_LABELS = Object.freeze({
   launcher: '便携托管（launcher）',
   direct: '直跑',
-  docker: '容器（Docker）',
 })
 
 export const STRATEGY_LABELS = Object.freeze({
   managed: '升级器托管',
-  external: '外部管理',
   unsupported: '不支持自动更新',
 })
 

@@ -90,7 +90,7 @@ describe('Settings：三卡片挂载（WEB-005）', () => {
     })
 
     // SystemInfoCard：版本与部署模式来自 /api/system/info
-    expect(w.text()).toContain('GameBot 0.2.0')
+    expect(w.text()).toContain('Gamer 0.2.0')
     expect(w.text()).toContain('便携托管（launcher）')
     // UpdateStatusCard：staged 状态标签
     expect(w.get('[data-testid="state-tag"]').text()).toBe('已就绪待安装')
@@ -180,7 +180,7 @@ describe('Settings：三卡片挂载（WEB-005）', () => {
       'GET /api/system/update': () => res(404, { error: 'not_found' }),
     })
 
-    expect(w.text()).toContain('GameBot 0.2.0') // info 卡不受影响
+    expect(w.text()).toContain('Gamer 0.2.0') // info 卡不受影响
     expect(w.text()).toContain('暂无更新状态')
     expect(w.get('[data-testid="policy-card"]').text()).toContain('暂不可用')
     expect(w.get('[data-testid="policy-card"]').text()).toContain('not_found')
@@ -206,7 +206,7 @@ describe('Settings：能力降级与动作流', () => {
       expect(w.find(`[data-action="${a}"]`).attributes('disabled')).toBeDefined()
     }
     expect(w.text()).toContain('update_not_managed')
-    // 策略保存不受能力降级影响（契约 §6：docker/direct 允许保存策略）
+    // 策略保存不受能力降级影响（契约 §6：direct 允许保存策略）
     expect(w.get('[data-testid="policy-save"]').attributes('disabled')).toBeUndefined()
     await w.get('[data-testid="policy-save"]').trigger('click')
     await flushPromises()

@@ -1,14 +1,13 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
-    Release preflight checks: compose config, PowerShell parser, Cargo metadata, and dependency audit.
+    Release preflight checks: PowerShell parser, Cargo metadata, and dependency audit.
 
 .DESCRIPTION
     This script only performs checks that can be reproduced inside this repo.
     It does not build images or run a real deployment.
     It verifies:
       1. PowerShell syntax for tools/*.ps1;
-      2. docker compose config for development, USB, and release overlays;
       3. cargo metadata --locked --no-deps;
       4. strict cargo audit (warnings denied) for the server and launcher
          lockfiles; missing cargo-audit is a hard failure.
@@ -54,41 +53,6 @@ function Test-Tool {
     return $null
 }
 
-function Invoke-ComposeConfig {
-    param(
-        [Parameter(Mandatory = $true)][string[]]$Files,
-        [hashtable]$Environment = @{}
-    )
-
-    foreach ($file in $Files) {
-        if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $file) -PathType Leaf)) {
-            throw "compose file not found: $file"
-        }
-    }
-
-    $previousEnvironment = @{}
-    foreach ($key in $Environment.Keys) {
-        $previousEnvironment[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
-        [Environment]::SetEnvironmentVariable($key, [string]$Environment[$key], 'Process')
-    }
-
-    try {
-        $composeArgs = @('compose')
-        foreach ($file in $Files) {
-            $composeArgs += @('-f', (Join-Path $RepoRoot $file))
-        }
-        $composeArgs += @('config', '--quiet')
-        & $docker @composeArgs
-        if ($LASTEXITCODE -ne 0) {
-            throw "docker compose config failed (files=$($Files -join ', '), exit=$LASTEXITCODE)"
-        }
-    } finally {
-        foreach ($key in $Environment.Keys) {
-            [Environment]::SetEnvironmentVariable($key, $previousEnvironment[$key], 'Process')
-        }
-    }
-}
-
 Write-Step 'PowerShell parser dry-run for tools/*.ps1'
 $parseFailures = @()
 Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'tools') -Filter '*.ps1' -File | Sort-Object Name | ForEach-Object {
@@ -111,23 +75,6 @@ if ($parseFailures.Count -gt 0) {
         Write-Host ("[parser] {0}:{1}:{2} {3}" -f $_.File, $_.Line, $_.Column, $_.Message) -ForegroundColor Red
     }
     throw "PowerShell parse failed with $($parseFailures.Count) error(s)"
-}
-
-Write-Step 'docker compose config'
-$docker = Test-Tool @('docker')
-if ($null -eq $docker) {
-    Write-Host '[compose] docker not found; skipping compose config check' -ForegroundColor Yellow
-} else {
-    Invoke-ComposeConfig -Files @('docker-compose.yml')
-    Invoke-ComposeConfig -Files @('docker-compose.yml', 'docker-compose.usb.yml')
-    Invoke-ComposeConfig -Files @('docker-compose.release.yml') -Environment @{
-        GAMER_IMAGE = 'ghcr.io/example/gamebot:release-preflight'
-    }
-    Invoke-ComposeConfig -Files @('docker-compose.release.yml', 'docker-compose.release.override.example.yml') -Environment @{
-        GAMER_IMAGE = 'ghcr.io/example/gamebot:release-preflight'
-        GAMER_ADMIN_PASSWORD = 'release-preflight-placeholder'
-    }
-    Write-Host '[compose] development, USB, release, and release override config checks passed' -ForegroundColor Green
 }
 
 Write-Step 'cargo metadata --locked --no-deps (server + launcher)'

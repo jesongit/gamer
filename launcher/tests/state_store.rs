@@ -38,13 +38,13 @@ fn sample_journal() -> UpdateJournal {
         child: Some(ChildInfo {
             pid: 4242,
             created_at_unix_ms: Some(1_788_000_000_000),
-            exe: "C:\\GameBot\\versions\\0.2.0\\gamer-server.exe".to_string(),
+            exe: "C:\\Gamer\\versions\\0.2.0\\gamer-server.exe".to_string(),
         }),
         current_version: Some("0.1.0".to_string()),
         previous_version: None,
         snapshot: Some(SnapshotInfo {
             id: "upd-20260831-0001".to_string(),
-            path: "C:\\GameBot\\backups\\upd-20260831-0001".to_string(),
+            path: "C:\\Gamer\\backups\\upd-20260831-0001".to_string(),
             file_count: 3,
             total_bytes: 128,
         }),

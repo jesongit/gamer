@@ -6,7 +6,7 @@
 //! 小睡重试至连接超时）——launcher 不在场时快速失败，不做重连风暴。
 //!
 //! named pipe 是 Windows 专属传输：非 Windows 目标（Linux 容器镜像）编译
-//! 本模块的桩实现，交换一律返回 `Unavailable`（Docker 部署本就是 external
+//! 本模块的桩实现，交换一律返回 `Unavailable`（非 Windows 直跑不由 launcher 托管
 //! 更新策略，launcher 不在场，该桩只为让 `LauncherController` 类型在
 //! 全平台可装配）。
 //!

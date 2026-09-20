@@ -254,14 +254,14 @@ pub struct Config {
     #[serde(default)]
     pub rtc_external_ip: String,
     /// WebRTC 媒体 UDP 固定绑定端口（0 = 既有行为：每会话临时端口）。
-    /// 容器端口映射场景必配（docker -p <宿主端口>:<本值>/udp）；**必须与
+    /// 容器端口映射场景必配（UDP 端口映射 <宿主端口>:<本值>/udp）；**必须与
     /// rtc_external_ip 成对配置**（校验强制）：固定端口下候选地址/端口取自
     /// mux conn 的 local_addr()，无具体 IP 宣告则 muxed gather 产出零候选
     /// （2026-08-29 容器实测回归）。单 socket UDPMux 进程级共享，按 ICE
     /// ufrag 复用，启动后变更需重启生效。
     #[serde(default)]
     pub rtc_udp_port: u16,
-    /// ICE 候选宣告的对外 UDP 端口（docker -p 的宿主侧端口 B）。
+    /// ICE 候选宣告的对外 UDP 端口（UDP 端口映射 的宿主侧端口 B）。
     /// 0 = 宣告 rtc_udp_port 本身（容器内外同端口号映射 -p A:A/udp）。
     /// 仅 rtc_udp_port 非 0 时有意义（校验强制成对配置）。
     #[serde(default)]
@@ -613,7 +613,7 @@ impl Config {
         if self.rtc_external_port != 0 && self.rtc_udp_port == 0 {
             errs.push(format!(
                 "rtc_external_port = {} 依赖 rtc_udp_port：宣告端口仅用于固定端口映射 \
-                 （docker -p），请同时配置 rtc_udp_port（0 = 每会话临时端口，无固定宣告）",
+                 （UDP 端口映射），请同时配置 rtc_udp_port（0 = 每会话临时端口，无固定宣告）",
                 self.rtc_external_port
             ));
         }

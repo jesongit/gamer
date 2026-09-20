@@ -1,4 +1,4 @@
-﻿# REL-002: 组装 Full bootstrap 包 GameBot-<version>-windows-x64-full.zip。
+﻿# REL-002: 组装 Full bootstrap 包 Gamer-<version>-windows-x64-full.zip。
 #
 # 布局（解压即安装根，launcher 按此消费）:
 #   gamer-launcher.exe                  cargo build --release（launcher crate 独立工作区）
@@ -79,9 +79,9 @@ function New-ZipFromDirectory {
 function Get-ConfigTemplate {
     $s = @'
 # =============================================================================
-# GameBot 配置模板（launcher 托管模式 / REL-002 Full 包）
+# Gamer 配置模板（launcher 托管模式 / REL-002 Full 包）
 # =============================================================================
-# 本文件由 GameBot 便携包携带，运行时由 gamer-launcher.exe 管理：
+# 本文件由 Gamer 便携包携带，运行时由 gamer-launcher.exe 管理：
 # GAMER_APP_DIR / GAMER_DATA_DIR / GAMER_ADB_PATH / GAMER_FFMPEG_PATH /
 # GAMER_SCRCPY_SERVER 等绝对路径由 launcher 启动 server 时注入环境变量，
 # 优先级高于本文件同名字段——标注「launcher 注入」的条目留空即可，无需手改。
@@ -149,19 +149,19 @@ password_hash = ""         # Argon2id PHC（launcher 托管模式：首次启动
 
 function Get-InstallTemplate {
     $s = @'
-# GameBot 安装与首次使用（Windows x64 便携包 v__VERSION__）
+# Gamer 安装与首次使用（Windows x64 便携包 v__VERSION__）
 
 ## 第 1 步：解压
 
-把 `GameBot-__VERSION__-windows-x64-full.zip` 解压到本地目录（建议路径不含中文与
-空格，例如 `D:\GameBot`）。**必须保持解压出的相对布局**：`gamer-launcher.exe`
+把 `Gamer-__VERSION__-windows-x64-full.zip` 解压到本地目录（建议路径不含中文与
+空格，例如 `D:\Gamer`）。**必须保持解压出的相对布局**：`gamer-launcher.exe`
 与 `config\`、`data\`、`manifests\`、`keys\`、`seeds\`、`licenses\`、`SHA256SUMS.txt` 在
 同一目录，不要单独把 exe 拖出去运行。
 
 ## 第 2 步：双击启动
 
 双击解压目录中的 `gamer-launcher.exe` 即可。启动器会自动从包内 `seeds\` 安装
-或修复 adb、ffmpeg、scrcpy-server 和 GameBot 本体，首次运行不需要打开命令行，
+或修复 adb、ffmpeg、scrcpy-server 和 Gamer 本体，首次运行不需要打开命令行，
 也不需要手动执行 `repair` 或 `start`；依赖已经完整时会自动跳过。
 
 启动成功后浏览器会打开（或手动打开）`http://127.0.0.1:8443`。
@@ -302,7 +302,7 @@ try {
     [System.IO.File]::WriteAllLines((Join-Path $stage 'SHA256SUMS.txt'), $sumsLines, (New-Object System.Text.UTF8Encoding($false)))
 
     # ---------- 打 zip ----------
-    $zipPath = Join-Path $DistDir ('GameBot-{0}-windows-x64-full.zip' -f $Version)
+    $zipPath = Join-Path $DistDir ('Gamer-{0}-windows-x64-full.zip' -f $Version)
     if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
     Write-Host "[package-full] 压缩: $zipPath"
     New-ZipFromDirectory -SourceDir $stage -DestFile $zipPath

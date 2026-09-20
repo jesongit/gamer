@@ -1,41 +1,13 @@
-#requires -Version 5.1
-<#
-.SYNOPSIS
-    Re-download and verify a real GitHub Release and, optionally, its GHCR image.
-
-.DESCRIPTION
-    This is an online smoke check. It must be pointed at a real Release and, for
-    the full QA-008 check, a real GHCR image digest plus the tag commit SHA.
-    Missing tools, authentication, assets, signatures, labels, or digests fail
-    the command. No missing external source is treated as a pass.
-
-    The Release half verifies SHA256SUMS, the full-package sums, manifest byte
-    identity, both manifest trust anchors, the app artifact binding, the SBOM,
-    and the two launcher doctor invocations. The GHCR half re-pulls both the
-    version tag and immutable digest, then checks digest identity and OCI labels.
-    Unless explicitly skipped, it also calls the existing attestation verifier.
-
-.EXAMPLE
-    .\tools\verify-external-release.ps1 -Repository OWNER/REPO -Tag v0.2.0 `
-        -CommitSha <40-hex-commit> -Image ghcr.io/owner/repo `
-        -Digest sha256:<64-hex-digest> -DownloadDir .\qa-008\v0.2.0
-
-.EXAMPLE
-    .\tools\verify-external-release.ps1 -Repository OWNER/REPO -Tag v0.2.0 `
-        -DownloadDir .\qa-008\v0.2.0
-#>
+﻿#requires -Version 5.1
+# Verify downloaded Release hashes, signatures, SBOM and launcher.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true)][string]$Tag,
     [string]$Version = '',
     [ValidateSet('stable', 'beta')][string]$Channel = 'stable',
-    [string]$CommitSha = '',
-    [string]$Image = '',
-    [string]$Digest = '',
     [string]$DownloadDir = '',
-    [switch]$SkipLauncherDoctor,
-    [switch]$SkipAttestations
+    [switch]$SkipLauncherDoctor
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,7 +16,6 @@ Set-StrictMode -Version 2.0
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $validator = Join-Path $repoRoot 'release\contracts\validate-manifest.mjs'
 $sbomVerifier = Join-Path $repoRoot 'release\packaging\verify-sbom.ps1'
-$attestationVerifier = Join-Path $repoRoot 'release\packaging\verify-image-attestations.ps1'
 $keysDir = Join-Path $repoRoot 'release\keys'
 $temporaryRoot = $null
 $partial = $false
@@ -87,7 +58,7 @@ function Invoke-Native {
     try {
         # PowerShell 5.1 can turn native stderr into ErrorRecord objects while
         # the process is otherwise healthy. Capture both streams and judge only
-        # the exit code so a noisy docker/gh command is not misclassified.
+        # the exit code so a noisy gh command is not misclassified.
         $ErrorActionPreference = 'Continue'
         $output = (& $FilePath @Arguments 2>&1 | Out-String)
         $exitCode = $LASTEXITCODE
@@ -247,72 +218,6 @@ function Test-PackageSums {
     Write-Host "[release] $Label SHA256SUMS passed ($($sums.Count) files)" -ForegroundColor Green
 }
 
-function Get-DockerInspect {
-    param(
-        [Parameter(Mandatory = $true)][string]$Docker,
-        [Parameter(Mandatory = $true)][string]$Reference
-    )
-    $result = Invoke-NativeChecked -FilePath $Docker -Arguments @('image', 'inspect', $Reference) -Label "docker image inspect $Reference"
-    try {
-        $items = @($result.Output | ConvertFrom-Json)
-    } catch {
-        Fail "docker image inspect returned invalid JSON for ${Reference}: $($_.Exception.Message)"
-    }
-    if ($items.Count -ne 1) { Fail "docker image inspect returned $($items.Count) records for $Reference" }
-    return $items[0]
-}
-
-function Get-OciLabel {
-    param(
-        [Parameter(Mandatory = $true)][object]$Inspect,
-        [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][string]$Reference
-    )
-    $labels = $Inspect.Config.Labels
-    if ($null -eq $labels) { Fail "OCI labels are missing for ${Reference}" }
-    $property = $labels.PSObject.Properties[$Name]
-    if ($null -eq $property) { Fail "OCI label $Name is missing for $Reference" }
-    return [string]$property.Value
-}
-
-function Assert-ImageLabels {
-    param(
-        [Parameter(Mandatory = $true)][object]$Inspect,
-        [Parameter(Mandatory = $true)][string]$Reference,
-        [Parameter(Mandatory = $true)][string]$ExpectedVersion,
-        [Parameter(Mandatory = $true)][string]$ExpectedCommit,
-        [Parameter(Mandatory = $true)][string]$ExpectedSource
-    )
-    $versionLabel = Get-OciLabel -Inspect $Inspect -Name 'org.opencontainers.image.version' -Reference $Reference
-    $revisionLabel = Get-OciLabel -Inspect $Inspect -Name 'org.opencontainers.image.revision' -Reference $Reference
-    $sourceLabel = Get-OciLabel -Inspect $Inspect -Name 'org.opencontainers.image.source' -Reference $Reference
-    if ($versionLabel -cne $ExpectedVersion) {
-        Fail "OCI version label=$versionLabel for $Reference, expected $ExpectedVersion"
-    }
-    if ($revisionLabel -ine $ExpectedCommit) {
-        Fail "OCI revision label=$revisionLabel for $Reference, expected $ExpectedCommit"
-    }
-    if ($sourceLabel.TrimEnd('/') -ine $ExpectedSource.TrimEnd('/')) {
-        Fail "OCI source label=$sourceLabel for $Reference, expected $ExpectedSource"
-    }
-    Write-Host "[ghcr] labels passed: version=$versionLabel revision=$revisionLabel" -ForegroundColor Green
-}
-
-function Assert-RepoDigest {
-    param(
-        [Parameter(Mandatory = $true)][object]$Inspect,
-        [Parameter(Mandatory = $true)][string]$Reference,
-        [Parameter(Mandatory = $true)][string]$ExpectedDigest
-    )
-    $repoDigests = @($Inspect.RepoDigests | ForEach-Object { [string]$_ })
-    foreach ($repoDigest in $repoDigests) {
-        $match = [regex]::Match($repoDigest, '@(?<digest>sha256:[0-9a-fA-F]{64})$')
-        if ($match.Success -and $match.Groups['digest'].Value.ToLowerInvariant() -ceq $ExpectedDigest) {
-            return
-        }
-    }
-    Fail "${Reference} does not resolve to expected digest $ExpectedDigest; RepoDigests=$($repoDigests -join ', ')"
-}
 
 try {
     if ($Repository -notmatch '^[^/\s]+/[^/\s]+$') {
@@ -327,20 +232,6 @@ try {
     $semverPattern = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?(\+([0-9A-Za-z-]+)(\.[0-9A-Za-z-]+)*)?$'
     if ($Version -notmatch $semverPattern) { Fail "Version is not SemVer: $Version" }
 
-    if ($Image) {
-        if (-not $CommitSha) { Fail 'GHCR verification requires -CommitSha' }
-        if (-not $Digest) { Fail 'GHCR verification requires -Digest from the published image' }
-        if ($Image -notmatch '^ghcr\.io/[^:@\s]+(?:/[^:@\s]+)*$') {
-            Fail "Image must be an untagged GHCR repository reference: $Image"
-        }
-        if ($CommitSha -notmatch '^[0-9a-fA-F]{40,64}$') { Fail "CommitSha is not a 40/64-hex SHA: $CommitSha" }
-        if ($Digest -notmatch '^sha256:[0-9a-fA-F]{64}$') { Fail "Digest is not sha256:<64 hex>: $Digest" }
-        $CommitSha = $CommitSha.ToLowerInvariant()
-        $Digest = $Digest.ToLowerInvariant()
-    } elseif ($CommitSha -or $Digest) {
-        Fail '-CommitSha and -Digest are only valid together with -Image'
-    }
-
     Require-File -Path $validator -Label 'manifest validator'
     Require-File -Path $sbomVerifier -Label 'SBOM verifier'
     Require-Directory -Path $keysDir -Label 'repository trust anchor directory'
@@ -350,11 +241,6 @@ try {
     if (-not $node) { Fail 'node not found; manifest verification cannot run' }
     $powerShell = Resolve-Tool @('pwsh', 'powershell')
     if (-not $powerShell) { Fail 'pwsh or powershell not found; helper verification cannot run' }
-    if ($Image) {
-        $docker = Resolve-Tool @('docker')
-        if (-not $docker) { Fail 'docker not found; GHCR verification cannot run' }
-    }
-
     if ([string]::IsNullOrWhiteSpace($DownloadDir)) {
         $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('gamer-external-release-' + [guid]::NewGuid().ToString('N'))
         $DownloadDir = Join-Path $temporaryRoot 'assets'
@@ -408,9 +294,9 @@ try {
     if ($components.Count -eq 0) { Fail 'manifest has no components' }
 
     $expectedAssets = @(
-        "GameBot-$Version-windows-x64-full.zip",
+        "Gamer-$Version-windows-x64-full.zip",
         $appName,
-        "GameBot-$Version-licenses.zip",
+        "Gamer-$Version-licenses.zip",
         "$Version.json",
         "$Version.sig",
         "gamer-sbom-$Version-windows-x64.cdx.json"
@@ -430,7 +316,7 @@ try {
     }
     Write-Host "[release] manifest app artifact binding passed: $appName" -ForegroundColor Green
 
-    $fullName = "GameBot-$Version-windows-x64-full.zip"
+    $fullName = "Gamer-$Version-windows-x64-full.zip"
     $fullPath = Join-Path $DownloadDir $fullName
     if ($null -eq $temporaryRoot) {
         $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('gamer-external-release-work-' + [guid]::NewGuid().ToString('N'))
@@ -487,48 +373,10 @@ try {
         Write-Host '[release] launcher doctor inventory + manifest smoke passed' -ForegroundColor Green
     }
 
-    if ($Image) {
-        $tagReference = "$Image`:$Version"
-        $digestReference = "$Image@$Digest"
-        $expectedSource = "https://github.com/$Repository"
-
-        Invoke-NativeChecked -FilePath $docker -Arguments @('pull', $tagReference) -Label "GHCR version-tag pull $tagReference" | Out-Null
-        $tagInspect = Get-DockerInspect -Docker $docker -Reference $tagReference
-        Assert-ImageLabels -Inspect $tagInspect -Reference $tagReference `
-            -ExpectedVersion $Version -ExpectedCommit $CommitSha -ExpectedSource $expectedSource
-
-        Assert-RepoDigest -Inspect $tagInspect -Reference $tagReference -ExpectedDigest $Digest
-
-        Invoke-NativeChecked -FilePath $docker -Arguments @('pull', $digestReference) -Label "GHCR immutable digest pull $digestReference" | Out-Null
-        $digestInspect = Get-DockerInspect -Docker $docker -Reference $digestReference
-        Assert-ImageLabels -Inspect $digestInspect -Reference $digestReference `
-            -ExpectedVersion $Version -ExpectedCommit $CommitSha -ExpectedSource $expectedSource
-        Assert-RepoDigest -Inspect $digestInspect -Reference $digestReference -ExpectedDigest $Digest
-        if ([string]$tagInspect.Id -ine [string]$digestInspect.Id) {
-            Fail "version tag and digest reference resolved to different image IDs"
-        }
-        Write-Host "[ghcr] version tag -> digest -> labels identity passed: $Image $Version $Digest" -ForegroundColor Green
-
-        if ($SkipAttestations) {
-            $partial = $true
-            Write-Host '[ghcr] attestation verification skipped by explicit -SkipAttestations' -ForegroundColor Yellow
-        } else {
-            Require-File -Path $attestationVerifier -Label 'image attestation verifier'
-            Invoke-NativeChecked -FilePath $powerShell -Arguments @(
-                '-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $attestationVerifier,
-                '-Image', $digestReference, '-ExpectedDigest', $Digest
-            ) -Label 'GHCR provenance/SBOM attestation verification' | Out-Null
-            Write-Host '[ghcr] provenance + SBOM attestation verification passed' -ForegroundColor Green
-        }
-    } else {
-        $partial = $true
-        Write-Host '[ghcr] not run: no -Image/-Digest/-CommitSha supplied (release-only result)' -ForegroundColor Yellow
-    }
-
     if ($partial) {
-        Write-Host '[external-release] PASS (partial smoke; explicit skips or GHCR omission remain)' -ForegroundColor Yellow
+        Write-Host '[external-release] PASS (partial smoke; explicit skips remain)' -ForegroundColor Yellow
     } else {
-        Write-Host '[external-release] PASS: full QA-008 external release + GHCR smoke completed' -ForegroundColor Green
+        Write-Host '[external-release] PASS: full QA-008 external release smoke completed' -ForegroundColor Green
     }
     exit 0
 } catch {

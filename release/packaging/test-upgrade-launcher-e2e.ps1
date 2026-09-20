@@ -395,7 +395,7 @@ function Invoke-Scenario {
 
     $tag = if ($CandidateMustFail) { 'B-rollback' } else { 'A-upgrade' }
     $port = if ($CandidateMustFail) { $PortB } else { $PortA }
-    $rootName = if ($CandidateMustFail) { 'GameBot E2E 升级验证_B' } else { 'GameBot E2E 升级验证_A' }
+    $rootName = if ($CandidateMustFail) { 'Gamer E2E 升级验证_B' } else { 'Gamer E2E 升级验证_A' }
     $rootOverride = if ($CandidateMustFail) { $InstallRootB } else { $InstallRootA }
     $root = if ([string]::IsNullOrWhiteSpace($rootOverride)) {
         Join-Path $WorkDir $rootName
@@ -447,7 +447,7 @@ function Invoke-Scenario {
         }
     }
     if (-not $removed -and (Test-Path -LiteralPath $rootFs)) { throw "安装根删除失败（仍有进程占用）: $root" }
-    Expand-InstallZip -ZipPath (Join-Path $WorkDir "dist-m1\GameBot-$BaselineVersion-windows-x64-full.zip") -DestinationPath $root
+    Expand-InstallZip -ZipPath (Join-Path $WorkDir "dist-m1\Gamer-$BaselineVersion-windows-x64-full.zip") -DestinationPath $root
     Write-Ok "解压完成: $root"
 
     if ($longRootMode) {
@@ -682,7 +682,7 @@ function Invoke-IdentityScenario {
     # committed，本场景必然失败。
     $tag = 'C-identity'
     $port = $PortC
-    $root = Join-Path $WorkDir 'GameBot E2E 升级验证_C'
+    $root = Join-Path $WorkDir 'Gamer E2E 升级验证_C'
     $script:Roots.Add($root) | Out-Null
     $rootFs = $root
     $launcherExe = Join-Path $rootFs 'gamer-launcher.exe'
@@ -690,7 +690,7 @@ function Invoke-IdentityScenario {
     $adminPass = 'e2e-admin-pass'
 
     foreach ($required in @(
-            (Join-Path $WorkDir "dist-m1\GameBot-$BaselineVersion-windows-x64-full.zip"),
+            (Join-Path $WorkDir "dist-m1\Gamer-$BaselineVersion-windows-x64-full.zip"),
             (Join-Path $WorkDir "dist-m2\gamer-app-$CandidateVersion-windows-x64.zip"),
             (Join-Path $WorkDir "manifests\$CandidateVersion.json"),
             (Join-Path $WorkDir 'keys\dev-ed25519-1.private.pem'))) {
@@ -720,7 +720,7 @@ function Invoke-IdentityScenario {
             Start-Sleep -Seconds 2
         }
     }
-    Expand-InstallZip -ZipPath (Join-Path $WorkDir "dist-m1\GameBot-$BaselineVersion-windows-x64-full.zip") -DestinationPath $root
+    Expand-InstallZip -ZipPath (Join-Path $WorkDir "dist-m1\Gamer-$BaselineVersion-windows-x64-full.zip") -DestinationPath $root
     Write-Ok "解压完成: $root"
 
     $cfgPath = Join-Path $rootFs 'config\config.toml'
@@ -1008,7 +1008,7 @@ function Invoke-BuildAndPackage {
 # ===========================================================================
 # 主流程
 # ===========================================================================
-Write-Host "=== GameBot M2 升级/回滚 E2E（批次 3 合流门） ===" -ForegroundColor White
+Write-Host "=== Gamer M2 升级/回滚 E2E（批次 3 合流门） ===" -ForegroundColor White
 Write-Host "RepoRoot=$RepoRoot"; Write-Host "WorkDir =$WorkDir"
 Write-Host "Scenario=$Scenario SkipBuild=$SkipBuild HttpPort=$HttpPort PortA=$PortA PortB=$PortB"
 Write-Host "InstallRootA=$InstallRootA InstallRootB=$InstallRootB DataRootA=$DataRootA DataRootB=$DataRootB"

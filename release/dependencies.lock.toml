@@ -1,5 +1,5 @@
 # =============================================================================
-# GameBot 运行依赖锁文件（release/dependencies.lock.toml）
+# Gamer 运行依赖锁文件（release/dependencies.lock.toml）
 # =============================================================================
 # 任务: AUTO_UPDATE_DEVELOPMENT_PLAN §7.4 DEP-001（依赖与发布轨）
 # 决策: release/contracts/dependency-licensing.md（ARC-005，已评审基线）

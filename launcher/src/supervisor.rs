@@ -527,7 +527,7 @@ mod tests {
     fn child_env_passes_through_admin_password_and_keeps_explicit_mode() {
         let getenv = |key: &str| match key {
             "GAMER_ADMIN_PASSWORD" => Some("e2e-admin-pass".to_string()),
-            "GAMER_DEPLOYMENT_MODE" => Some("docker".to_string()),
+            "GAMER_DEPLOYMENT_MODE" => Some("direct".to_string()),
             _ => None,
         };
         let env = build_child_env_from(&plan(), getenv);
@@ -538,7 +538,7 @@ mod tests {
         );
         assert_eq!(
             env.get("GAMER_DEPLOYMENT_MODE").map(String::as_str),
-            Some("docker"),
+            Some("direct"),
             "用户显式设置的部署模式不得被覆盖"
         );
     }

@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "gamer-launcher",
     version,
-    about = "GameBot 便携安装启动器/升级器（单实例锁 / 原子 state / manifest 验签 / 依赖修复 / server 监管）"
+    about = "Gamer 便携安装启动器/升级器（单实例锁 / 原子 state / manifest 验签 / 依赖修复 / server 监管）"
 )]
 pub struct Cli {
     /// 安装根目录；缺省取本 exe 所在目录

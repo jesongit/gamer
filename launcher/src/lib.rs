@@ -1,4 +1,4 @@
-//! gamer-launcher：GameBot 便携安装启动器/升级器。
+//! gamer-launcher：Gamer 便携安装启动器/升级器。
 //!
 //! 批次 1（LCH-001/002/003 + QA-001）：CLI、安装根单实例锁、`state/` 原子读写、
 //! release manifest v1 验签/语义/路径安全校验。
