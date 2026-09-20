@@ -387,3 +387,4 @@ Gamer 开发/运行中踩过的坑记录（环境、构建、部署、已知限�
 - **Git 遗留锁**：长时间不变的空 index.lock 会阻止暂存；先核对 Git 进程与文件时间并确认可独占打开，再仅删除已确认失效的锁，不能直接清理活跃锁。
 - **Linux Rust 测试模块路径**：内联模块中的 path 属性经不存在的目录再使用 ../ 回退，在 Windows 可解析而 Linux 会 ENOENT；将子测试放到实际的 service/tests/ 目录并使用普通 mod 声明。
 - **前端版本检查**：配置包默认版本不等于产品版本；仅允许具名 PACKAGE_INITIAL_VERSION/PACKAGE_EMPTY_VERSION 常量声明，其他同文件产品版本字面量仍须拒绝。
+- **平台条件编译**：Windows 检查不会解析 Unix 分支中的类型；目录同步使用 fs::File 全限定路径，避免仅在 Linux CI 出现未导入 File，平台专用改动须核对对应平台构建。

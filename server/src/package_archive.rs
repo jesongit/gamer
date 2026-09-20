@@ -507,7 +507,7 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, ArchiveError> {
 fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        File::open(path)?.sync_all()
+        fs::File::open(path)?.sync_all()
     }
     #[cfg(not(unix))]
     {
